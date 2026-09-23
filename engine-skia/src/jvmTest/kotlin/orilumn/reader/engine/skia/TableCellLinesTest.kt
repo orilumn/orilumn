@@ -109,6 +109,35 @@ class TableCellLinesTest {
     }
 
     @Test
+    fun `cell image emits PageImage`() {
+        // Rust 简介 Ferris 表回归：td 内独占 img（shape 文本仅 U+FFFC 占位）必须进 PageImage。
+        val img = MarkupElement("img", mapOf("src" to "Images/a.png"))
+        val td = MarkupElement("td", emptyMap(), listOf(img))
+        val shape = StubShape("￼", listOf(0..0), listOf(40))
+        val table = TableRowLayout(
+            intArrayOf(0), intArrayOf(300),
+            listOf(TableCellLayout(td, 0, 1, 10, 300, 44, false, shape)),
+        )
+        val loader = orilumn.reader.engine.ImageBoundsReader { _, _ -> 120 to 80 }
+        val win = TableCellLines.expand(
+            table, 100, 44, 0, { style }, style, 0f,
+            imageLoader = loader, chapterHref = "Text/00.xhtml",
+        )
+        assertEquals(1, win.images.size)
+        val im = win.images[0]
+        assertEquals("Images/a.png", im.src)
+        assertEquals("Text/00.xhtml", im.chapterHref)
+        assertEquals(120, im.widthPx)
+        assertEquals(80, im.heightPx)
+        assertEquals(10, im.xLeft)
+        assertEquals(100, im.yTop)
+        assertEquals(180, im.yBottom)
+        // 无 loader/href 时不产出（旧调用口径不变）。
+        val bare = TableCellLines.expand(table, 100, 44, 0, { style }, style, 0f)
+        assertTrue(bare.images.isEmpty())
+    }
+
+    @Test
     fun `rowspan border spans covered rows`() {
         // 表1·1 形：首行 4 格 rowspan=2 + 1 普通格，次行 1 格；跨行格边框直画到末行底。
         val span = StubShape("項目", listOf(0..1), listOf(15))

@@ -1927,6 +1927,7 @@ private fun finishCanonicalBackground(
     /** Locates the first content page of (or after) [index], skipping blank/cover chapters.
  *  Used by the TOC panel to jump to an arbitrary chapter. */
     suspend fun openChapterStart(index: Int): Pair<Int, PageSlice>? {
+        if (chapters.isEmpty()) return null
         var ch = index.coerceIn(0, chapters.size - 1)
         while (ch < chapters.size) {
             val unit = ensureChapterLayout(ch)

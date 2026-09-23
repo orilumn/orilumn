@@ -1,5 +1,6 @@
 package orilumn.reader.engine.skia
 
+import orilumn.reader.engine.ImageBoundsReader
 import orilumn.reader.engine.css.ComputedStyle
 import orilumn.reader.engine.css.WhiteSpaceNormalize
 import orilumn.reader.engine.css.cssHexToArgb
@@ -61,14 +62,17 @@ object TableCellLines {
         fallback: ComputedStyle,
         letterSpacingEm: Float,
         inkColor: Int = 0xFF000000.toInt(),
+        imageLoader: ImageBoundsReader? = null,
+        chapterHref: String = "",
     ): CellWindow {
         val lines = ArrayList<DrawLine>()
         val borders = ArrayList<PageBackground>()
+        val images = ArrayList<PageImage>()
         var acc = 0
         for (cell in table.cells) {
-            acc = emitCell(cell, rowTop, rowTop + rowHeight.coerceAtLeast(1), rowCharBase + acc, table.emptyCellsHide, styleOf, fallback, letterSpacingEm, inkColor, lines, borders, acc)
+            acc = emitCell(cell, rowTop, rowTop + rowHeight.coerceAtLeast(1), rowCharBase + acc, table.emptyCellsHide, styleOf, fallback, letterSpacingEm, inkColor, lines, borders, images, imageLoader, chapterHref, acc)
         }
-        return CellWindow(lines, borders)
+        return CellWindow(lines, borders, images)
     }
 
     /**
@@ -81,9 +85,12 @@ object TableCellLines {
         styleOf: (MarkupElement) -> ComputedStyle?,
         letterSpacingEm: Float,
         inkColor: Int = 0xFF000000.toInt(),
+        imageLoader: ImageBoundsReader? = null,
+        chapterHref: String = "",
     ): TableWindow {
         val byLine = HashMap<Int, List<DrawLine>>()
         val borders = ArrayList<PageBackground>()
+        val imagesByLine = HashMap<Int, List<PageImage>>()
         var i = 0
         while (i < frames.size) {
             var j = i
@@ -92,17 +99,19 @@ object TableCellLines {
             for (k in i..j) {
                 val f = frames[k]
                 val lines = ArrayList<DrawLine>()
+                val frameImages = ArrayList<PageImage>()
                 var acc = 0
                 for (cell in f.table.cells) {
                     val spanLast = (k + cell.rowSpan.coerceAtLeast(1) - 1).coerceAtMost(j)
                     val spanBottom = frames[spanLast].rowTop + frames[spanLast].rowHeight.coerceAtLeast(1)
-                    acc = emitCell(cell, f.rowTop, spanBottom, f.rowCharBase + acc, f.table.emptyCellsHide, styleOf, f.fallbackStyle, letterSpacingEm, inkColor, lines, borders, acc)
+                    acc = emitCell(cell, f.rowTop, spanBottom, f.rowCharBase + acc, f.table.emptyCellsHide, styleOf, f.fallbackStyle, letterSpacingEm, inkColor, lines, borders, frameImages, imageLoader, chapterHref, acc)
                 }
                 if (lines.isNotEmpty()) byLine[f.lineIdx] = lines
+                if (frameImages.isNotEmpty()) imagesByLine[f.lineIdx] = frameImages
             }
             i = j + 1
         }
-        return TableWindow(byLine, borders)
+        return TableWindow(byLine, borders, imagesByLine)
     }
 
     /** 一表行的展开输入（调用方按文档序供给；`tableEl` 为所属 `<table>`，分组防跨表）。 */
@@ -116,10 +125,11 @@ object TableCellLines {
         val tableEl: MarkupElement?,
     )
 
-    /** 多行展开结果：行下标 → 单元格文本行；边框矩形（均章节绝对 Y）。 */
+    /** 多行展开结果：行下标 → 单元格文本行；行下标 → 单元格图片；边框矩形（均章节绝对 Y）。 */
     data class TableWindow(
         val lines: Map<Int, List<DrawLine>>,
         val borders: List<PageBackground>,
+        val images: Map<Int, List<PageImage>> = emptyMap(),
     )
 
     /** 所属 `<table>`（逐级上找；无即 null，调用方分组用）。 */
@@ -145,6 +155,9 @@ object TableCellLines {
         inkColor: Int,
         lines: MutableList<DrawLine>,
         borders: MutableList<PageBackground>,
+        images: MutableList<PageImage>,
+        imageLoader: ImageBoundsReader?,
+        chapterHref: String,
         acc: Int,
     ): Int {
         val shape = cell.shape ?: return acc
@@ -207,12 +220,76 @@ object TableCellLines {
                 strokeWidthPx = 1f,
             ),
         )
+        emitCellImages(cell, text, shape, cs, styleOf, rowTop, insetTop, xLeft, imageLoader, chapterHref, images)
         return acc + text.length
     }
 
-    /** 一行的展开结果：单元格文本行 + 单元格边框矩形（均章节绝对 Y）。 */
+    /**
+     * 单元格内图片进 [PageImage]（表格图缺口的补齐）：shape 文本内 U+FFFC 占位按文档序
+     * 配对单元格内 `img` 后代；x 取格内容左（与正文行窗叶级近似同级），y/h 取占位所在行，
+     * 宽高经 [NormalFlowLayout.replacedUsedSize] 与正文图同口径。无 loader/href 时不产出。
+     */
+    private fun emitCellImages(
+        cell: TableCellLayout,
+        text: String,
+        shape: ParagraphShapeRef,
+        cs: ComputedStyle,
+        styleOf: (MarkupElement) -> ComputedStyle?,
+        rowTop: Int,
+        insetTop: Int,
+        xLeft: Int,
+        imageLoader: ImageBoundsReader?,
+        chapterHref: String,
+        images: MutableList<PageImage>,
+    ) {
+        if (imageLoader == null || chapterHref.isBlank()) return
+        val imgEls = ArrayList<MarkupElement>()
+        fun walk(n: MarkupElement) {
+            for (c in n.children) {
+                if (c.tag == "img") imgEls.add(c)
+                walk(c)
+            }
+        }
+        walk(cell.el)
+        if (imgEls.isEmpty()) return
+        var imgIdx = 0
+        for (k in 0 until shape.shapeLineCount) {
+            val s = shape.shapeLineStart(k)
+            val e = shape.shapeLineEnd(k)
+            if (s < 0 || e <= s || e > text.length) continue
+            for (j in s until e) {
+                if (imgIdx >= imgEls.size) return
+                if (text[j] != '￼') continue
+                val imgEl = imgEls[imgIdx++]
+                val src = imgEl.attrs["src"] ?: continue
+                val imgStyle = styleOf(imgEl) ?: cs
+                val used = NormalFlowLayout.replacedUsedSize(
+                    imgEl, imgStyle,
+                    NormalFlowLayout.innerBreakWidth(imgStyle, cell.width),
+                    imageLoader, chapterHref,
+                )
+                val w = used.first.coerceAtLeast(1)
+                val h = used.second.coerceAtLeast(1)
+                val yTop = rowTop + insetTop + shape.shapeLineTop(k)
+                images.add(
+                    PageImage(
+                        src = src,
+                        chapterHref = chapterHref,
+                        xLeft = xLeft,
+                        yTop = yTop,
+                        yBottom = yTop + h,
+                        widthPx = w,
+                        heightPx = h,
+                    ),
+                )
+            }
+        }
+    }
+
+    /** 一行的展开结果：单元格文本行 + 单元格边框矩形 + 单元格图片（均章节绝对 Y）。 */
     data class CellWindow(
         val lines: List<DrawLine>,
         val borders: List<PageBackground>,
+        val images: List<PageImage> = emptyList(),
     )
 }

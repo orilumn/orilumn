@@ -31,6 +31,8 @@ class BoxDrawableLayout(
     protected override val skiaLines: Map<Int, orilumn.reader.engine.skia.DrawLine>? = null,
     /** 表格行展开（行下标 → 单元格文本行；Compose 阅读面随行窗绘制，见基类）。 */
     protected override val tableCells: Map<Int, List<orilumn.reader.engine.skia.DrawLine>> = emptyMap(),
+    /** 表格图（行下标 → 单元格图片；随 pageImages 同窗，见基类）。 */
+    protected override val tableCellImages: Map<Int, List<orilumn.reader.engine.skia.PageImage>> = emptyMap(),
     /** 表格单元格边框（章节绝对 Y；随背景绘制）。 */
     protected override val tableBorders: List<orilumn.reader.engine.skia.PageBackground> = emptyList(),
 ) : WindowedBookLayout() {

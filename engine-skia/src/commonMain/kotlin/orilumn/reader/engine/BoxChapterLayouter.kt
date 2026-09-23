@@ -561,11 +561,12 @@ class BoxChapterLayouter(
             }
             val tableWin = orilumn.reader.engine.skia.TableCellLines.expandTable(
                 frames, { prepare.styleMap[it] }, profile.letterSpacingEm, profile.fgColor,
+                imageLoader, chapterHref,
             )
             BoxDrawableLayout(
                 BoxLayoutResult(lines, prepare.structure.boxes), shapes,
                 imageLoader, chapterHref, skiaLines = skiaLines,
-                tableCells = tableWin.lines, tableBorders = tableWin.borders,
+                tableCells = tableWin.lines, tableCellImages = tableWin.images, tableBorders = tableWin.borders,
             )
         }
         val rawSlices = Paginator.paginate(drawable, contentH)
@@ -808,6 +809,7 @@ class BoxChapterLayouter(
         }
         val incrWin = orilumn.reader.engine.skia.TableCellLines.expandTable(
             incrFrames, prepare::resolveStyle, profile.letterSpacingEm, profile.fgColor,
+            imageLoader, chapterHref,
         )
         val drawable = PartialDrawableLayout(
             lines = localLines,
@@ -821,6 +823,7 @@ class BoxChapterLayouter(
             avoidOwnerMap = prepare.avoidOwnerMap,
             skiaLinesSource = skiaLines,
             tableCellsSource = incrWin.lines,
+            tableCellImagesSource = incrWin.images,
             tableBordersSource = incrWin.borders,
         )
 
@@ -1604,6 +1607,7 @@ class BoxChapterLayouter(
         }
         val tempWin = orilumn.reader.engine.skia.TableCellLines.expandTable(
             tempFrames, prepare::resolveStyle, prepare.profile.letterSpacingEm, prepare.profile.fgColor,
+            imageLoader, chapterHref,
         )
         val layout = PartialDrawableLayout(
             lines = lines,
@@ -1615,6 +1619,7 @@ class BoxChapterLayouter(
             href = chapterHref,
             skiaLinesSource = skiaLines,
             tableCellsSource = tempWin.lines,
+            tableCellImagesSource = tempWin.images,
             tableBordersSource = tempWin.borders,
         )
         var lastLine = if (lines.isEmpty()) 0 else lines.size
@@ -1946,6 +1951,7 @@ private class PartialDrawableLayout(
     private val avoidOwnerMap: Map<MarkupElement, MarkupElement> = emptyMap(),
     private val skiaLinesSource: Map<Int, orilumn.reader.engine.skia.DrawLine>? = null,
     private val tableCellsSource: Map<Int, List<orilumn.reader.engine.skia.DrawLine>> = emptyMap(),
+    private val tableCellImagesSource: Map<Int, List<orilumn.reader.engine.skia.PageImage>> = emptyMap(),
     private val tableBordersSource: List<orilumn.reader.engine.skia.PageBackground> = emptyList(),
 ) : orilumn.reader.engine.skia.WindowedBookLayout() {
 
@@ -1969,6 +1975,7 @@ private class PartialDrawableLayout(
     protected override val skiaLines: Map<Int, orilumn.reader.engine.skia.DrawLine>? get() = skiaLinesSource
     // 表格行展开随窗口预填（与 canonical 同源 helper；Compose 面随行窗绘制）。
     protected override val tableCells: Map<Int, List<orilumn.reader.engine.skia.DrawLine>> get() = tableCellsSource
+    protected override val tableCellImages: Map<Int, List<orilumn.reader.engine.skia.PageImage>> get() = tableCellImagesSource
     protected override val tableBorders: List<orilumn.reader.engine.skia.PageBackground> get() = tableBordersSource
 
     override val lineCount: Int get() = lines.size

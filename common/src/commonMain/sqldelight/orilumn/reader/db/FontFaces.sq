@@ -1,0 +1,70 @@
+-- S34b 字体池表（schema v4；迁移见 3.sqm；对齐 Room font_faces 终态 v6：
+-- familyName/displayName/subfamily NOT NULL/source/path/lang + 唯一索引
+-- (familyName, subfamily, source)，同权重重导覆盖）。
+-- F 系列 schema v5：加 hidden（用户隐藏，系统/导入通用；迁移见 4.sqm）。
+CREATE TABLE font_faces(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  familyName TEXT NOT NULL,
+  displayName TEXT NOT NULL,
+  subfamily TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL,
+  path TEXT,
+  lang TEXT NOT NULL,
+  hidden INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX index_font_faces_familyName_subfamily_source
+ON font_faces(familyName, subfamily, source);
+
+-- Room `@Insert(REPLACE)` 对等语义：(familyName, subfamily, source) 冲突即整行替换
+-- （新 rowid；调用方按 family 分组展示，不依赖 id 稳定）。
+upsertFont:
+INSERT OR REPLACE INTO font_faces(familyName, displayName, subfamily, source, path, lang, hidden)
+VALUES (?, ?, ?, ?, ?, ?, ?);
+
+-- Room/SQLDelight 导入用：显式 id（/fonts/{id} 虚域引用，id 尽量延续）。
+importFont:
+INSERT OR REPLACE INTO font_faces(id, familyName, displayName, subfamily, source, path, lang, hidden)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+
+allFonts:
+SELECT * FROM font_faces;
+
+fontById:
+SELECT * FROM font_faces
+WHERE id = ?;
+
+deleteFont:
+DELETE FROM font_faces WHERE id = ?;
+
+deleteByFamily:
+DELETE FROM font_faces WHERE familyName = ?;
+
+-- F 系列：用户隐藏/取消隐藏（系统/导入通用；隐藏后不进选择器候选）。
+setHidden:
+UPDATE font_faces SET hidden = ? WHERE id = ?;
+
+-- F 系列：系统字形落行（INSERT OR IGNORE 保 hidden；displayName 由下方 UPDATE 刷新——
+-- F5 中文名方案A：桌面 mac 经 CoreText 拿到真·本地化中文名后既有行也要升级，
+-- 非 mac 平台 localizedNames 为空即写回族名，展示层字典兜底）；
+-- subfamily 为平台枚举的字重名，空 = 该族无细分字重；
+-- hidden 由调用方按族继承（族已隐藏则新字重行同hidden，防止隐藏族复活）。
+syncSystemFont:
+INSERT OR IGNORE INTO font_faces(familyName, displayName, subfamily, source, path, lang, hidden)
+VALUES (?, ?, ?, 'system', NULL, '', ?);
+
+-- 既有系统行刷新本地化 displayName（只动 displayName，hidden/id 保留）。
+updateSystemDisplayName:
+UPDATE font_faces SET displayName = ?
+WHERE familyName = ? AND subfamily = ? AND source = 'system';
+
+-- 旧世代残留系统行清理：字重枚举（F 系列）之前的世代每族只落一行 subfamily=''、
+-- displayName=族名；新世代按 (族, 字重) 多行共存后，该族已枚举出字重行即判定
+-- 「"」行过期并清除（否则面板合并行首成员仍是残留行，本地化 displayName 显示不出来）。
+deleteStaleSystemRows:
+DELETE FROM font_faces
+WHERE familyName IN ? AND source = 'system' AND subfamily = '';
+
+-- F 系列：族内是否存在已被用户隐藏的系统行（同步新字重行时继承族隐藏态）。
+anyHiddenSystemRow:
+SELECT COUNT(*) FROM font_faces
+WHERE familyName = ? AND source = 'system' AND hidden = 1;

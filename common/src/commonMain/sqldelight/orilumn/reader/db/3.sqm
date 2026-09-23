@@ -1,0 +1,13 @@
+-- S34b 迁移 3→4：新增字体池表（对齐 Room font_faces 终态 v6：subfamily NOT NULL
+-- DEFAULT '' + 唯一索引 (familyName, subfamily, source)，同权重重导覆盖）。
+CREATE TABLE font_faces(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  familyName TEXT NOT NULL,
+  displayName TEXT NOT NULL,
+  subfamily TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL,
+  path TEXT,
+  lang TEXT NOT NULL
+);
+CREATE UNIQUE INDEX index_font_faces_familyName_subfamily_source
+ON font_faces(familyName, subfamily, source);

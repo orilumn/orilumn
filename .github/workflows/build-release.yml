@@ -1,0 +1,77 @@
+name: Build signed release APK
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 强制 tag 版本与代码 versionName 一致：APK 名由 versionName 生成（orilumn-<version>.apk），
+      # 若打 tag 时代码已提前提升到下个版本（如 tag v0.3.5 时 versionName 已是 0.3.6），
+      # 会发布出与 Release 版本不符的 APK。这里不一致直接失败，强制先对齐再发版。
+      - name: Verify tag matches versionName
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          CODE_VER="$(sed -n 's/.*versionName *= *"\([^"]*\)".*/\1/p' app/build.gradle.kts | head -1)"
+          if [ "$TAG_VER" != "$CODE_VER" ]; then
+            echo "::error::Tag v${TAG_VER} 与 app/build.gradle.kts 的 versionName \"${CODE_VER}\" 不一致。"
+            echo "::error::请先把 tagged 提交的 versionName 改为 \"${TAG_VER}\"（versionCode 同步递增）后再打/重打 tag。"
+            exit 1
+          fi
+          echo "OK: tag v${TAG_VER} matches versionName \"${CODE_VER}\""
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Grant gradlew execute permission
+        run: chmod +x gradlew
+
+      # 运行时从 Secrets 读出 base64 字符串，在云端内存中解码还原出临时 jks（不透写仓库，跑完即销毁）。
+      - name: Materialize keystore from secret
+        run: |
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/keystore.jks"
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+
+      - name: Build signed release APK
+        run: ./gradlew :app:assembleRelease --no-daemon
+        env:
+          # 4 个机密在 GitHub 后台保存，不会出现在代码仓库，也不会被 git 提交。
+          KEYSTORE_FILE: ${{ runner.temp }}/keystore.jks
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+
+      - name: Upload APK as workflow artifact (all runs)
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-release
+          path: app/build/outputs/apk/release/orilumn-*.apk
+          if-no-files-found: error
+
+      # 仅打 tag 时把签名 APK 挂到对应 GitHub Release。
+      - name: Attach signed APK to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          body: 自动构建的签名 APK（由 GitHub Actions 云端编译、tested/签名后发布）。
+          files: app/build/outputs/apk/release/orilumn-*.apk

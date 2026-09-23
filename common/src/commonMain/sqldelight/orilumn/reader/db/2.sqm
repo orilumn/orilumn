@@ -1,0 +1,9 @@
+-- S34a 迁移 2→3：新增阅读进度表（对齐 Room reading_states 终态：locator 精确恢复 + whole-book progress）。
+CREATE TABLE reading_states(
+  bookId INTEGER PRIMARY KEY,
+  chapter INTEGER NOT NULL,
+  target TEXT,
+  progress REAL NOT NULL,
+  locator TEXT,
+  updatedAt INTEGER NOT NULL
+);

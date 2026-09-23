@@ -1,0 +1,21 @@
+-- S34a 阅读进度表（schema v3；迁移见 2.sqm）。
+CREATE TABLE reading_states(
+  bookId INTEGER PRIMARY KEY,
+  chapter INTEGER NOT NULL,
+  target TEXT,
+  progress REAL NOT NULL,
+  locator TEXT,
+  updatedAt INTEGER NOT NULL
+);
+
+-- Room `@Upsert` 对等语义（存在即整行替换）。
+saveReadingState:
+INSERT OR REPLACE INTO reading_states(bookId, chapter, target, progress, locator, updatedAt)
+VALUES (?, ?, ?, ?, ?, ?);
+
+readingState:
+SELECT * FROM reading_states
+WHERE bookId = ?;
+
+clearReadingState:
+DELETE FROM reading_states WHERE bookId = ?;

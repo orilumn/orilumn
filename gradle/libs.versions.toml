@@ -1,0 +1,118 @@
+# Orilumn 依赖版本目录
+[versions]
+agp = "9.0.1"
+kotlin = "2.4.10"
+serialization = "1.11.0"
+coreKtx = "1.18.0"
+lifecycleRuntimeKtx = "2.10.0"
+lifecycleRuntimeCompose = "2.10.0"
+activityCompose = "1.12.0"
+fragmentKtx = "1.8.9"
+composeBom = "2026.06.01"
+room = "2.6.1"
+webkit = "1.14.0"
+junit = "4.13.2"
+robolectric = "4.15.1"
+ksoup = "0.2.6"
+okio = "3.18.2"
+# Skiko（JetBrains）：与 CMP 1.11.1 同一 Skia 列车（0.144.x/m144）；
+# CMP 1.12 要求 compileSdk 37（本机无 SDK37，AGP 9.0.1 最高推荐 36），故列车定在 1.11 系；
+# skiko-android（S8）只发 compose-dev，不在 MavenCentral
+skiko = "0.144.6"
+# Compose Multiplatform（JetBrains）：shared-ui 模块的 CMP 依赖绑定
+composeMultiplatform = "1.11.1"
+coroutines = "1.11.0"
+# FileKit（vinceglb）：老坐标 filekit-compose 止于 0.8.8；新坐标 filekit-dialogs-compose，
+# 0.15.0 对 Kotlin 2.4.10 + CMP 1.12 系（0.16.0 要 Kotlin 2.4.20/compileSdk37，别贪）
+mpfilepicker = "0.15.0"
+# SQLDelight（Cash App）：2.4.0（AGP variant 新解析，Gradle≥8.2.1）
+sqldelight = "2.4.0"
+# Ktor：3.6.0（新 Auth 要 Kotlin context-parameters，不用即不触发）
+ktor = "3.6.0"
+# JNA：桌面 macOS CoreText 桥（F5 中文名方案A，本地化族名）；仅 desktopApp 引用
+jna = "5.19.1"
+
+[libraries]
+androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
+androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycleRuntimeKtx" }
+androidx-lifecycle-runtime-compose = { group = "androidx.lifecycle", name = "lifecycle-runtime-compose", version.ref = "lifecycleRuntimeCompose" }
+androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
+androidx-fragment-ktx = { group = "androidx.fragment", name = "fragment-ktx", version.ref = "fragmentKtx" }
+
+# Jetpack Compose
+androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
+androidx-compose-ui = { group = "androidx.compose.ui", name = "ui" }
+androidx-compose-ui-graphics = { group = "androidx.compose.ui", name = "ui-graphics" }
+androidx-compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
+androidx-compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
+androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
+# Material 矢量图标核心集（书架底部工具栏用，替代依赖设备字体的 Unicode 字符）
+androidx-compose-material-icons-core = { group = "androidx.compose.material", name = "material-icons-core" }
+
+# Room（本地数据库）
+androidx-room-runtime = { group = "androidx.room", name = "room-runtime", version.ref = "room" }
+androidx-room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "room" }
+androidx-room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
+
+# WebView（本地资源经 https 虚拟域服务 ES Module）
+androidx-webkit = { group = "androidx.webkit", name = "webkit", version.ref = "webkit" }
+
+# 单元测试
+junit = { group = "junit", name = "junit", version.ref = "junit" }
+# Robolectric：在 JVM 上跑真实 android.text.StaticLayout，验证段间距/行距是否泄漏到段内每行
+robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }
+# Ksoup（fleeksoft）：jsoup 的 KMP 移植，API 兼容、含完整 DOM，engine/html 的 HTML 容错解析器
+ksoup = { group = "com.fleeksoft.ksoup", name = "ksoup", version.ref = "ksoup" }
+# Okio（Square KMP I/O）：FileSystem.SYSTEM + openZip 提供跨平台只读 zip 文件系统，
+# 替代 java.util.zip（S15 起供 data/epub 的 EPUB 包读取，JVM/Android 均含 zip 实现）
+okio = { group = "com.squareup.okio", name = "okio", version.ref = "okio" }
+# kotlinx.serialization：KMP 跨平台 JSON 序列化，替代 org.json（S17 settings 迁移）
+kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "serialization" }
+# Skiko：Skia 的 Kotlin 绑定；engine-skia 唯一排版/绘制底座（G 阶段起使用）
+skiko = { group = "org.jetbrains.skiko", name = "skiko", version.ref = "skiko" }
+# Skiko JVM 原生库（macOS，x64+arm64 dylib 同包）：S23 起 jvmTest 加载 Skia native 所需
+skiko-awt-runtime-macos = { group = "org.jetbrains.skiko", name = "skiko-awt-runtime-macos-x64", version.ref = "skiko" }
+# Skiko Android 原生库（compose-dev 独发，AAR 不含 .so）：app 经 jniLibs 解压随 APK 打包；
+# skiko 只发 arm64/x64（无 32 位），与 ndk.abiFilters 对齐
+skiko-android-runtime-arm64 = { group = "org.jetbrains.skiko", name = "skiko-android-runtime-arm64", version.ref = "skiko" }
+skiko-android-runtime-x64 = { group = "org.jetbrains.skiko", name = "skiko-android-runtime-x64", version.ref = "skiko" }
+# Compose Multiplatform 运行时（shared-ui，H 阶段）：由 org.jetbrains.compose 插件提供依赖坐标
+compose-runtime = { group = "org.jetbrains.compose.runtime", name = "runtime", version.ref = "composeMultiplatform" }
+compose-foundation = { group = "org.jetbrains.compose.foundation", name = "foundation", version.ref = "composeMultiplatform" }
+compose-material3 = { group = "org.jetbrains.compose.material3", name = "material3", version.ref = "composeMultiplatform" }
+compose-material = { group = "org.jetbrains.compose.material", name = "material", version.ref = "composeMultiplatform" }
+compose-ui = { group = "org.jetbrains.compose.ui", name = "ui", version.ref = "composeMultiplatform" }
+compose-ui-graphics = { group = "org.jetbrains.compose.ui", name = "ui-graphics", version.ref = "composeMultiplatform" }
+compose-components-resources = { group = "org.jetbrains.compose.components", name = "components-resources", version.ref = "composeMultiplatform" }
+compose-ui-tooling-preview = { group = "org.jetbrains.compose.ui", name = "ui-tooling-preview", version.ref = "composeMultiplatform" }
+# Material 矢量图标核心集（CMP 版本）：JetBrains 自 1.7.3 后不再单独发 icons-core，
+# 故 pin 在最后可用版（纯矢量资源，与 CMP 1.12 运行时兼容）；书架底部工具栏图标用
+compose-material-icons-core = { group = "org.jetbrains.compose.material", name = "material-icons-core", version = "1.7.3" }
+# kotlinx.coroutines：shared-ui 书架数据流（Flow/StateFlow）与导入编排（S27）
+kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "coroutines" }
+# kotlinx-coroutines-test：P6 JumpGate 探针的虚拟时钟调度（test-only，不随 app 打包）
+kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "coroutines" }
+# mpfilepicker（FileKit 新坐标）：CMP 跨平台文件选择（Android=SAF / iOS=UIDocumentPicker / Desktop=原生）
+mpfilepicker = { group = "io.github.vinceglb", name = "filekit-dialogs-compose", version.ref = "mpfilepicker" }
+# SQLDelight（阶段 J）：common 跨平台 schema + 查询；android-driver 供 :app，
+# sqlite-driver（JVM，内含 sqlite-jdbc）供 :desktopApp 与 :common jvmTest。
+sqldelight-runtime = { group = "app.cash.sqldelight", name = "runtime", version.ref = "sqldelight" }
+sqldelight-coroutines = { group = "app.cash.sqldelight", name = "coroutines-extensions", version.ref = "sqldelight" }
+sqldelight-android-driver = { group = "app.cash.sqldelight", name = "android-driver", version.ref = "sqldelight" }
+sqldelight-sqlite-driver = { group = "app.cash.sqldelight", name = "sqlite-driver", version.ref = "sqldelight" }
+# Ktor server（S35）：common/net 的字体上传服务（core 路由 + CIO 传输引擎，KMP artifact，
+# commonMain 消费，android/jvm 双目标 + 未来 iOS 复用）。
+ktor-server-core = { group = "io.ktor", name = "ktor-server-core", version.ref = "ktor" }
+ktor-server-cio = { group = "io.ktor", name = "ktor-server-cio", version.ref = "ktor" }
+# JNA：桌面 macOS CoreText 桥（F5 中文名方案A）；只 desktopApp JVM 引用，KMP 模块不引
+jna = { group = "net.java.dev.jna", name = "jna", version.ref = "jna" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+android-kmp-library = { id = "com.android.kotlin.multiplatform.library", version.ref = "agp" }
+    kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+    kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+    kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+    kotlin-multiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
+compose-multiplatform = { id = "org.jetbrains.compose", version.ref = "composeMultiplatform" }
+sqldelight = { id = "app.cash.sqldelight", version.ref = "sqldelight" }

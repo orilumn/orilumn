@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- 通过 SAF 访问用户选择的 EPUB，无需存储读写权限 -->
+    <!-- <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" /> -->
+
+    <!-- 亮度调节：写系统亮度(Settings.System.SCREEN_BRIGHTNESS)控制物理背光，可越过系统当前值调亮；
+         vivo 安装时会一次性出现在权限列表供勾选，属特殊权限，运行期若未授予则回退窗口级亮度。 -->
+    <uses-permission android:name="android.permission.WRITE_SETTINGS" />
+
+    <!-- WIFI 字体导入：在本机起 HTTP 服务器，供局域网电脑浏览器上传；监听 socket 需要 INTERNET。 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+        android:allowBackup="true"
+        android:supportsRtl="true"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.Orilumn"
+        tools:targetApi="35">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".ui.reader.ReaderActivity"
+            android:exported="false"
+            android:screenOrientation="unspecified" />
+    </application>
+
+</manifest>

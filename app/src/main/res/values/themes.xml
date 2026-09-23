@@ -1,0 +1,3 @@
+<resources>
+    <style name="Theme.Orilumn" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>

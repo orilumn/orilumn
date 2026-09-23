@@ -1,0 +1,63 @@
+-- Orilumn 跨平台库（阶段 J：Room → SQLDelight）。
+--
+-- 版本链（构建期由 .sqm 自动校验可达终态）：
+--   v1 books 基表（id/title/author/filePath/addedAt）
+--   v2 books += coverPath/readTime（S33，镜像 Room 7→8 的书架增强列）
+--   v3 reading_states（S34a）
+--   v4 font_faces（S34b）
+--
+-- 本文件恒为最新终态；老库经 .sqm 逐级迁移，新库由 Schema.create() 一次建全。
+
+CREATE TABLE books(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL,
+  author TEXT,
+  filePath TEXT NOT NULL,
+  addedAt INTEGER NOT NULL,
+  coverPath TEXT,
+  readTime INTEGER
+);
+
+insertBook:
+INSERT INTO books(title, author, filePath, addedAt)
+VALUES (?, ?, ?, ?);
+
+-- Room 导入用：显式 id（阅读进度按 bookId 关联，id 必须延续；S34a 进度导入依赖此）。
+importBook:
+INSERT INTO books(id, title, author, filePath, addedAt, coverPath, readTime)
+VALUES (?, ?, ?, ?, ?, ?, ?);
+
+upsertBook:
+INSERT OR REPLACE INTO books(id, title, author, filePath, addedAt, coverPath, readTime)
+VALUES (?, ?, ?, ?, ?, ?, ?);
+
+observeBooks:
+SELECT * FROM books
+ORDER BY addedAt DESC;
+
+observeBooksByReadTime:
+SELECT * FROM books
+ORDER BY readTime DESC;
+
+observeBooksByName:
+SELECT * FROM books
+ORDER BY title COLLATE NOCASE ASC;
+
+bookById:
+SELECT * FROM books
+WHERE id = ?;
+
+allBooks:
+SELECT * FROM books;
+
+updateReadTime:
+UPDATE books SET readTime = ? WHERE id = ?;
+
+deleteBook:
+DELETE FROM books WHERE id = ?;
+
+-- 新增行的 id：max(id) 全局可读、连接作用域无关（Jdbc 驱动按语句取连接，
+-- last_insert_rowid() 跨连接恒 0；且 sqlite_sequence 对编译器不可见。
+-- AUTOINCREMENT + 串行导入保证 insert 后 max 即新行）。
+lastInsertId:
+SELECT max(id) FROM books;

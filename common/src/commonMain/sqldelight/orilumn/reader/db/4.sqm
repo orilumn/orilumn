@@ -1,0 +1,3 @@
+-- F 系列迁移 4→5：字体表加 hidden（用户隐藏，系统/导入通用；
+-- 旧库默认全可见，行为不变）。
+ALTER TABLE font_faces ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;

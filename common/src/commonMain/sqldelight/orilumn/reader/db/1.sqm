@@ -1,0 +1,3 @@
+-- S33 迁移 1→2：书架增强列（镜像 Room 7→8：coverPath 封面缓存 + readTime 最近阅读）。
+ALTER TABLE books ADD COLUMN coverPath TEXT;
+ALTER TABLE books ADD COLUMN readTime INTEGER;

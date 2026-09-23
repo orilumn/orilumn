@@ -1,0 +1,88 @@
+/* ==========================================================================
+ * Orilumn UA (user-agent) 默认样式 — 引擎的最底层级样式 (universal baseline)
+ * --------------------------------------------------------------------------
+ * 用途: 给“书里没写 CSS”的标签一个浏览器风格的兜底基线。
+ * 层级: Cascade UA=10 < author=20 < inline=30 < theme=42 < settings=43 < UI=44,
+ *       书里自己写的任何规则都能覆盖这里; 阅读器设置（行距/段间距/疏密等）在最上层。
+ * 改这里 = 改所有书的基础排版基线。唯一的变量 token 是 __LINK_COLOR__（主题感知
+ *       链接色，由 CssLayouter.uaSheetFromProfile 在加载时替换）。
+ * 资产路径: common/src/commonMain/resources/css/ua.css（勿写进 Kotlin 常量，便于日后直接改 CSS）。
+ * ========================================================================== */
+
+body { margin: 0; }
+
+/* ---- 链接（超链接补丁来源）-------------------------------------------------- */
+a { text-decoration: underline; color: __LINK_COLOR__; }
+
+/* ---- 标题: 保留阅读器原先自定义的字号 / 外边距 -------------------------------- */
+h1 { font-size: 2.0em; font-weight: bold; margin: 1em 0 0.6em; }
+h2 { font-size: 1.8em; font-weight: bold; margin: 0.9em 0 0.55em; }
+h3 { font-size: 1.6em; font-weight: bold; margin: 0.8em 0 0.5em; }
+h4 { font-size: 1.45em; font-weight: bold; margin: 0.7em 0 0.45em; }
+h5 { font-size: 1.3em; font-weight: bold; margin: 0.6em 0 0.4em; }
+h6 { font-size: 1.2em; font-weight: bold; margin: 0.5em 0 0.35em; }
+
+/* ---- 段落 / 引用 / 代码块: 浏览器风格垂直外边距 ---------------------------------
+ * 书不写样式时的底线. p 的垂直间距由 UI 段间距 (替换语义) 恒盖; blockquote/pre 等
+ * 非正文块的垂直 margin 由 UI 疏密 (调节语义) 按比例缩放 —— 作者/UA 值都被保留.
+ * blockquote 的 2.5em 左缩进与 dd 的 2em 左缩进属水平方向, 疏密不缩放、也不压平. */
+p { margin: 1em 0; }
+blockquote { margin: 1em 2.5em; }
+pre { margin: 1em 0; }
+/* `s` 与 `del` 同为删除线（EPUB2/3 语义重复标签各取浏览器默认）。 */
+s, del { text-decoration: line-through; }
+ins { text-decoration: underline; }
+u { text-decoration: underline; }
+
+/* ---- 列表!! 悬挂 bullet / 编号的命门（Kotlin in Action 修复）---------------------
+ * 浏览器 UA 默认给 ul/ol 约 40px 左内边距，list-style-position:outside 的圆点就挂
+ * 在这个沟槽里。本引擎是分页裁切（页面 clip 从 contentLeft=0 开始）: 沟槽
+ * <= markerW+gap（≈1.15em）时圆点会被裁没、列表也毫无缩进。这里固定 2em 左内边距
+ * （嵌套列表每层 +2em，跟随浏览器），书自己写 padding-left/margin-left 的仍按书走。 */
+ul, ol { padding-left: 2em; }
+ul { list-style-type: disc; }
+ol { list-style-type: decimal; }
+li { list-style-position: outside; }
+
+/* ---- 定义列表（浏览器默认 dd 缩进; 水平缩进疏密不缩放、不压平）-------------------- */
+dd { margin-left: 2em; }
+
+/* ---- 强调 / 代码: 浏览器 UA 默认（此前缺失: strong/b 不加粗、em/i 不斜体、code 不变宽）-- */
+strong, b { font-weight: bold; }
+em, i { font-style: italic; }
+/* 引用/变量类标签: 浏览器默认斜体。 */
+dfn, cite, var { font-style: italic; }
+/* <mark> 高亮: 行内背景绘制属 P3 视觉层缺口, 先落 UA 规则占位（未达前不影响排版）； */
+mark { background-color: #fff176; }
+/* pre 一并纳入等宽兜底: 本引擎把块的 inline/text 后代吸收进叶子, 叶子只用自身族名绘制,
+ * `<pre><code>` 里 code 的 UA 规则会被吞掉; pre 自身声明 font-family 才能让代码块恒等宽
+ * （书里为 pre/code 显式写字体的仍按书走, UA 只是兜底）。 */
+code, kbd, samp, tt, pre { font-family: monospace; }
+
+/* ---- 引用：`q` 生成引号（P3-c 生成内容；作者 `quotes`/`content` 可覆盖）----------- */
+q::before { content: open-quote; }
+q::after { content: close-quote; }
+
+/* ---- 上下标 / 小号 / 大号: 浏览器默认字号缩放 + 基线偏移 ---------------------------
+ * 子/上标的字号缩放（0.7em）与基线位移（sub/super）都走级联：字号进 FontRun 整形，
+ * 位移进 BaselineShift 绘制偏移（P1-2 行内基线消费）。 */
+sub { font-size: 0.7em; vertical-align: sub; }
+sup { font-size: 0.7em; vertical-align: super; }
+small { font-size: 0.8em; }
+big { font-size: 1.2em; }
+
+/* ---- 注音（ruby）: P6-b 叠排（`rt` 居中压在基字上方，行高预留注音高）-------------------
+ * `ruby/rbc/rtc/rb` 透明行内容器（子文本顺排，叠排配对见 RubyRuns）；`rt` 字号仍 0.6em
+ * （行高增量＋叠排绘制字号同源），`vertical-align: super` 保留为无叠排绘制时的降级
+ * （旧路径行内上标）；`rp` 恒隐藏。字符流不变（rt 文本仍 inline 进叶文本）。 */
+rp { display: none; }
+rt { font-size: 0.6em; vertical-align: super; }
+rbc, rtc, rb, ruby { display: inline; }
+
+/* ---- 图片: 分页阅读器的 UA 扩展（非浏览器默认行为）----------------------------------
+ * 标准浏览器对 `width:auto;height:auto` 的 img 取 intrinsic 尺寸，超宽即溢出（CSS 2.1
+ * §10.3.2/§10.6.2，无 max-width 时不收缩）。分页阅读器没有横向滚动条，溢出会被页面裁掉，
+ * 因此 UA 层加一道 `max-width:100%`：超宽 intrinsic 按 §10.4 约束表等比缩到版心，
+ * 未超宽的保持 intrinsic 不变。层级最低（UA=10），书里任何 `max-width`/`width` 规则
+ * （含内联样式）都能覆盖它；`height:auto` 由约束表的等比缩放保证，无需另写。 */
+img { max-width: 100%; }

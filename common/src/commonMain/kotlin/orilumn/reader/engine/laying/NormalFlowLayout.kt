@@ -1462,7 +1462,10 @@ object NormalFlowLayout {
         fontRuns: List<FontRun>,
     ): TableGridModel.CellPref {
         val edges = style.padding.horizontal + style.border.horizontal
-        if (text.isEmpty()) return TableGridModel.cellPref(col, colSpan, 0f, 0f, edges)
+        // 指定宽下限（`th width=100px` 等表示型属性经级联已进 widthPx，content 口径，
+        // 故加边距成 border-box；百分比在度量期无容器可解，暂略）。
+        val specified = ((style.widthPx ?: 0f).coerceAtLeast(0f) + edges).takeIf { style.widthPx != null && style.widthPx > 0f } ?: 0f
+        if (text.isEmpty()) return TableGridModel.cellPref(col, colSpan, 0f, 0f, edges, specified)
         val mono = style.monospace || tag == "pre"
         val maxContent = breaker.preferredWidth(text, style.fontSizePx, style.fontFamilies, style.fontWeight, style.italic, mono, fontRuns)
         val minContent = if (WhiteSpaceNormalize.wraps(style.whiteSpace)) {
@@ -1470,7 +1473,7 @@ object NormalFlowLayout {
         } else {
             maxContent
         }
-        return TableGridModel.cellPref(col, colSpan, maxContent, minContent, edges)
+        return TableGridModel.cellPref(col, colSpan, maxContent, minContent, edges, specified)
     }
 
     /**

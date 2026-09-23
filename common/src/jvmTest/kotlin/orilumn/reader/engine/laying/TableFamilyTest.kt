@@ -196,4 +196,16 @@ class TableFamilyTest {
             0.05,
         )
     }
+
+    @Test
+    fun `auto 指定宽为列下限`() {
+        // `th width=100px`（表示型属性经级联进 widthPx）：列 min/pref 不低于指定宽。
+        val cells = listOf(
+            TableGridModel.CellPref(0, 1, 42f, 42f, 100f),
+            TableGridModel.CellPref(1, 1, 221f, 60f, 0f),
+        )
+        val (_, ws) = TableGridModel.autoColumnLayout(700, 2, 0f, 0, cells)
+        assertEquals(100, ws[0])
+        assertEquals(221, ws[1])
+    }
 }

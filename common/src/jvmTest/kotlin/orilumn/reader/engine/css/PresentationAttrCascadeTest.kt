@@ -98,4 +98,13 @@ class PresentationAttrCascadeTest {
         val out = compute(body)
         assertEquals(40f, out[td]?.widthPx!!, 1e-3f)
     }
+
+    @Test
+    fun `width 实务杂质容错进级联`() {
+        // 本书 `th width="100px;"`（px 后缀＋引号内分号）：取前导数字，浏览器同式宽容。
+        val (_, _, td) = cellTree(mapOf("width" to "100px;"))
+        val body = node("body", children = listOf(td.parent!!.parent!!)); td.parent!!.parent!!.parent = body
+        val out = compute(body)
+        assertEquals(100f, out[td]?.widthPx!!, 1e-3f)
+    }
 }

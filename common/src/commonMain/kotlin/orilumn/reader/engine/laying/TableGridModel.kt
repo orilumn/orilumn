@@ -46,8 +46,8 @@ class TableGridModel(
         val isHeader: Boolean get() = el.tag == "th"
     }
 
-    /** auto 布局的单元格内容需求（列锚＋跨度＋首选/最小 px，均 ≥0）。 */
-    class CellPref(val col: Int, val colSpan: Int, val pref: Float, val min: Float)
+    /** auto 布局的单元格内容需求（列锚＋跨度＋首选/最小 px，均 ≥0；specified 为指定宽下限）。 */
+    class CellPref(val col: Int, val colSpan: Int, val pref: Float, val min: Float, val specified: Float = 0f)
 
     /** 单元格对行高的贡献：纵向跨度＋单元格自身外高（内容＋padding＋border，含 `border-spacing` 前）。 */
     class CellHeight(val rowSpan: Int, val heightPx: Int)
@@ -207,11 +207,13 @@ class TableGridModel(
             val avail = (contentW - (count + 1) * gap).toFloat()
             val pref = FloatArray(count)
             val min = FloatArray(count)
+            val spec = FloatArray(count)
             for (c in cells) {
                 if (c.colSpan <= 1) {
                     val col = c.col.coerceIn(0, count - 1)
                     if (c.pref > pref[col]) pref[col] = c.pref
                     if (c.min > min[col]) min[col] = c.min
+                    if (c.specified > spec[col]) spec[col] = c.specified
                 }
             }
             for (c in cells) {
@@ -228,7 +230,17 @@ class TableGridModel(
                         val add = (c.min - curMin) / span.size
                         for (i in span) min[i] += add
                     }
+                    val curSpec = span.sumOf { spec[it].toDouble() }.toFloat()
+                    if (c.specified > curSpec) {
+                        val add = (c.specified - curSpec) / span.size
+                        for (i in span) spec[i] += add
+                    }
                 }
+            }
+            // 指定宽是列 min/pref 的下限（`th width=100px` 等表示型属性经级联已进 style）。
+            for (i in 0 until count) {
+                if (spec[i] > min[i]) min[i] = spec[i]
+                if (spec[i] > pref[i]) pref[i] = spec[i]
             }
             val totalMax = pref.sum()
             val totalMin = min.sum()
@@ -270,10 +282,10 @@ class TableGridModel(
          *
          * @param edgeHPx 单元格横向 padding + border 之和（`cs.padding.horizontal + cs.border.horizontal`）。
          */
-        fun cellPref(col: Int, colSpan: Int, maxContentPx: Float, minContentPx: Float, edgeHPx: Float): CellPref {
+        fun cellPref(col: Int, colSpan: Int, maxContentPx: Float, minContentPx: Float, edgeHPx: Float, specifiedW: Float = 0f): CellPref {
             val edges = edgeHPx.coerceAtLeast(0f)
             val pref = maxContentPx.coerceAtLeast(0f)
-            return CellPref(col, colSpan, pref + edges, minContentPx.coerceIn(0f, pref) + edges)
+            return CellPref(col, colSpan, pref + edges, minContentPx.coerceIn(0f, pref) + edges, specifiedW.coerceAtLeast(0f))
         }
     }
 }

@@ -140,7 +140,8 @@ object TableCellLines {
     }
 
     /**
-     * 单格发射：文本行进 [lines]（首行带内顶端对齐，并含 border+padding 顶/左内缩），边框
+     * 单格发射：文本行进 [lines]（默认首行带内顶端对齐；`vertical-align: middle/bottom`
+     * 在行带内整体下移，并含 border+padding 顶/左内缩），边框
      * `[rowTop, spanBottom)` 进 [borders]；返回推进后的累计字符偏移（供下一格 `charBase`）。
      */
     private fun emitCell(
@@ -164,6 +165,8 @@ object TableCellLines {
         val text = shape.shapeText
         if (hideEmpty && text.isEmpty()) return acc
         val cs = styleOf(cell.el) ?: fallback
+        val lineStart = lines.size
+        val imgStart = images.size
         val baseSize = shape.shapeFontSizePx.takeIf { it > 0f } ?: cs.fontSizePx
         // 单元格内容框相对行带顶/左的内缩 = 边框 + 内边距（与行高预算 padding.vertical +
         // border.vertical 对称；缺此则文本贴顶、内边距全堆在行带底部）。
@@ -222,6 +225,30 @@ object TableCellLines {
                 strokeWidthPx = 1f,
             ),
         )
+        // 单元格垂直对齐（`vertical-align: middle/bottom`；默认顶端）：内容整体在
+        // [行顶+内缩, spanBottom) 内下移；跨行格 spanBottom 已是所跨末行底。
+        val align = cs.verticalAlign
+        if ((align == orilumn.reader.engine.css.VerticalAlign.MIDDLE || align == orilumn.reader.engine.css.VerticalAlign.BOTTOM) && spanBottom > rowTop + insetTop) {
+            var contentBottom = rowTop + insetTop
+            for (i in lineStart until lines.size) contentBottom = maxOf(contentBottom, lines[i].yBottom)
+            for (i in imgStart until images.size) contentBottom = maxOf(contentBottom, images[i].yBottom)
+            val avail = spanBottom - (rowTop + insetTop)
+            val off = if (align == orilumn.reader.engine.css.VerticalAlign.MIDDLE) {
+                (avail - (contentBottom - (rowTop + insetTop))) / 2
+            } else {
+                avail - (contentBottom - (rowTop + insetTop))
+            }
+            if (off > 0) {
+                for (i in lineStart until lines.size) {
+                    val l = lines[i]
+                    lines[i] = l.copy(yTop = l.yTop + off, yBottom = l.yBottom + off)
+                }
+                for (i in imgStart until images.size) {
+                    val im = images[i]
+                    images[i] = im.copy(yTop = im.yTop + off, yBottom = im.yBottom + off)
+                }
+            }
+        }
         return acc + text.length
     }
 

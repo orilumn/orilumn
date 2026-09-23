@@ -140,6 +140,20 @@ class TableCellLinesTest {
     }
 
     @Test
+    fun `vertical-align middle 下移内容`() {
+        // 本书第二列 `vertical-align: middle`：15px 行在 100px 行带内居中，下移 (100-15)/2=42。
+        val s = StubShape("x", listOf(0..0), listOf(15))
+        val middle = ComputedStyle(10f, 1.5f, verticalAlign = orilumn.reader.engine.css.VerticalAlign.MIDDLE)
+        val table = TableRowLayout(intArrayOf(0), intArrayOf(300), listOf(cell("td", "x", 0, 300, s)))
+        val win = TableCellLines.expand(table, 100, 100, 0, { middle }, middle, 0f)
+        assertEquals(142, win.lines[0].yTop)
+        assertEquals(157, win.lines[0].yBottom)
+        // 默认顶端对齐不动。
+        val top = TableCellLines.expand(table, 100, 100, 0, { style }, style, 0f)
+        assertEquals(100, top.lines[0].yTop)
+    }
+
+    @Test
     fun `rowspan border spans covered rows`() {
         // 表1·1 形：首行 4 格 rowspan=2 + 1 普通格，次行 1 格；跨行格边框直画到末行底。
         val span = StubShape("項目", listOf(0..1), listOf(15))

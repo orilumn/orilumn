@@ -353,6 +353,10 @@ class ComputedStyle(
     /** Whether this element paints anything in the box background/border slab (P3 compositing reads it). */
     fun hasPaintedSlab(): Boolean = backgroundColorHex != null || backgroundImageUrl != null || hasBorderEdges()
 
+    /** 渲染层：纯背景填充（颜色或背景图）。只带边框、不带背景的块不得劫持祖先的背景属主，
+     *  否则轻量路径下其行区画不出容器的底色（边框另按叶盒单画）。 */
+    fun hasBackground(): Boolean = backgroundColorHex != null || backgroundImageUrl != null
+
     override fun toString(): String =
         "fs=${fontSizePx}px lh=${lineHeightRatio}" +
             if (colorHex != null) " color=$colorHex" else "" +

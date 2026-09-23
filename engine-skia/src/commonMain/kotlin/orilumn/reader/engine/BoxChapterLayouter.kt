@@ -349,7 +349,10 @@ class BoxChapterLayouter(
             leaves.map { orilumn.reader.engine.laying.NormalFlowLayout.styledCharAdvance(it, { e -> engine.resolve(e, styleCache) }, classify, hidden, liteGenOf) },
         )
         // Compute the typography-invariant leaf->background-owner map once (reuses this same cascade, so
-        // window rendering never re-walks ancestor styles).
+        // window rendering never re-walks ancestor styles). Background-only attribution (color/image):
+        // border-only leaves keep showing their ancestor container's fill; their own borders are
+        // emitted as per-leaf border boxes by buildBackgroundDrawBoxes (mirroring the heavy path,
+        // where every leaf box draws its own borders over the ancestor background).
         val ownerMap = HashMap<MarkupElement, MarkupElement>(leaves.size)
         for (el in leaves) {
             backgroundOwnerElement(el) { e -> engine.resolve(e, styleCache) }?.let { ownerMap[el] = it }
@@ -367,7 +370,9 @@ class BoxChapterLayouter(
         return structure
     }
 
-    /** Nearest background/border-bearing element for [el] (itself first, then block ancestors), or null. */
+    /** 内核层：[el] 自身起最近的背景承载盒（背景色/背景图，自身优先，否则块级祖先），无则 null。
+     *  只带边框、不带背景的元素（如带 `border-bottom` 的 `h2`）不算属主——其行区仍透出祖先
+     *  容器的底（如 `blockquote`），边框由轻量路径的叶边框盒另行绘制（重路径整树绘制天然如此）。 */
     private fun backgroundOwnerElement(
         el: MarkupElement,
         resolve: (MarkupElement) -> orilumn.reader.engine.css.ComputedStyle,
@@ -375,7 +380,7 @@ class BoxChapterLayouter(
         var cur: MarkupElement? = el
         while (cur != null && cur.tag != "body") {
             val s = resolve(cur)
-            if (s.hasPaintedSlab()) return cur
+            if (s.hasBackground()) return cur
             cur = cur.parent
         }
         return null
@@ -1861,9 +1866,13 @@ class BoxChapterLayouter(
      * Builds the background/border boxes for an incremental page window, so block-level container
      * backgrounds (e.g. `blockquote`) survive the light path — which otherwise composites only leaf
      * text and would drop the container's fill. Mirrors the full path's box-tree backgrounds: every
-     * window leaf is attributed to the nearest background/border-bearing box (itself for `pre`, or an
+     * window leaf is attributed to its nearest background-bearing box (itself for `pre`, or an
      * ancestor container), and one box spans that owner's leaves' real vertical extent. So backgrounds
      * stay correct within the shaped window with no extra shaping.
+     *
+     * 内核层：背景归属只看背景色/背景图；只带边框的叶（如 `blockquote > h2` 的下边框）另出
+     * 叶边框盒（无背景填充，只画自身边框），且一律排在背景盒之后绘制——与重路径“先祖先背景、
+     * 后子孙边框”同序，否则容器底会盖掉标题下边框。
      */
     private fun buildBackgroundDrawBoxes(
         prepare: LightPrepare,
@@ -1916,6 +1925,33 @@ class BoxChapterLayouter(
             box.firstLineIndex = ownerFirst[owner] ?: -1
             box.lastLineExclusive = ownerLast[owner] ?: -1
             if (box.contentBottom > box.contentTop) out.add(box)
+        }
+        // Border-only leaves (e.g. a bordered `h2` inside a `blockquote`): their background comes
+        // from the ancestor owner box above, but their own borders still need a carrier — the leaf
+        // border box draws no fill (BoxDrawer skips fill-less backgrounds) and only its border edges.
+        // Appended after all background boxes so the fill never overpaints these borders. Leaves that
+        // already own a background box (self-owned, e.g. `pre` with its own fill) are skipped: that
+        // box already draws their borders.
+        for (i in leafList.indices) {
+            val leaf = leafList[i]
+            val el = leaf.el ?: continue
+            if (!leaf.style.hasBorderEdges()) continue
+            if (aggTop.containsKey(el)) continue
+            val lo = firstByBlock[i].coerceAtLeast(0)
+            val hi = lastByBlock[i]
+            if (lo >= lines.size || hi <= lo) continue
+            val top = lines[lo].yTop - (leaf.style.border.top + leaf.style.padding.top).roundToInt()
+            val bottom = lines[minOf(hi, lines.size) - 1].yBottom + (leaf.style.border.bottom + leaf.style.padding.bottom).roundToInt()
+            if (bottom <= top) continue
+            val borderBox = LayoutBox(
+                el = el, style = leaf.style, contentLeft = leaf.contentLeft, contentWidth = leaf.contentWidth,
+                ranges = emptyList(), textLength = 0, lineHeights = emptyList(), childBoxes = emptyList(),
+            )
+            borderBox.contentTop = top
+            borderBox.contentBottom = bottom
+            borderBox.firstLineIndex = lo
+            borderBox.lastLineExclusive = hi
+            out.add(borderBox)
         }
         return out
     }

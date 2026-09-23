@@ -171,6 +171,7 @@ object TableCellLines {
         val xLeft = cell.x + (cs.border.left + cs.padding.left).roundToInt()
         val lineW = NormalFlowLayout.innerBreakWidth(cs, cell.width)
         val nowrap = !WhiteSpaceNormalize.wraps(cs.whiteSpace)
+        val hidden = emitCellImages(cell, text, shape, cs, styleOf, rowTop, insetTop, xLeft, lineW, imageLoader, chapterHref, images)
         for (k in 0 until shape.shapeLineCount) {
             val s = shape.shapeLineStart(k)
             val e = shape.shapeLineEnd(k)
@@ -206,6 +207,7 @@ object TableCellLines {
                     charBase = cellBase,
                     rubyRuns = shape.shapeRubyRuns,
                     underlineRuns = shape.shapeUnderlineRuns,
+                    imgHidden = hidden[k] ?: emptyList(),
                 ),
             )
         }
@@ -220,7 +222,6 @@ object TableCellLines {
                 strokeWidthPx = 1f,
             ),
         )
-        emitCellImages(cell, text, shape, cs, styleOf, rowTop, insetTop, xLeft, imageLoader, chapterHref, images)
         return acc + text.length
     }
 
@@ -238,11 +239,13 @@ object TableCellLines {
         rowTop: Int,
         insetTop: Int,
         xLeft: Int,
+        lineW: Int,
         imageLoader: ImageBoundsReader?,
         chapterHref: String,
         images: MutableList<PageImage>,
-    ) {
-        if (imageLoader == null || chapterHref.isBlank()) return
+    ): Map<Int, List<IntRange>> {
+        val hidden = HashMap<Int, MutableList<IntRange>>()
+        if (imageLoader == null || chapterHref.isBlank()) return hidden
         val imgEls = ArrayList<MarkupElement>()
         fun walk(n: MarkupElement) {
             for (c in n.children) {
@@ -251,14 +254,14 @@ object TableCellLines {
             }
         }
         walk(cell.el)
-        if (imgEls.isEmpty()) return
+        if (imgEls.isEmpty()) return hidden
         var imgIdx = 0
         for (k in 0 until shape.shapeLineCount) {
             val s = shape.shapeLineStart(k)
             val e = shape.shapeLineEnd(k)
             if (s < 0 || e <= s || e > text.length) continue
             for (j in s until e) {
-                if (imgIdx >= imgEls.size) return
+                if (imgIdx >= imgEls.size) return hidden
                 if (text[j] != '￼') continue
                 val imgEl = imgEls[imgIdx++]
                 val src = imgEl.attrs["src"] ?: continue
@@ -270,20 +273,25 @@ object TableCellLines {
                 )
                 val w = used.first.coerceAtLeast(1)
                 val h = used.second.coerceAtLeast(1)
+                // x 按占位行内比例推进（独占图 fraction=0 即格左；与叶级近似同级）。
+                // y/h 取占位所在行。
+                val x = xLeft + ((j - s).toFloat() / (e - s).coerceAtLeast(1) * lineW).roundToInt()
                 val yTop = rowTop + insetTop + shape.shapeLineTop(k)
                 images.add(
                     PageImage(
                         src = src,
                         chapterHref = chapterHref,
-                        xLeft = xLeft,
+                        xLeft = x,
                         yTop = yTop,
                         yBottom = yTop + h,
                         widthPx = w,
                         heightPx = h,
                     ),
                 )
+                hidden.getOrPut(k) { ArrayList() }.add(j..j)
             }
         }
+        return hidden
     }
 
     /** 一行的展开结果：单元格文本行 + 单元格边框矩形 + 单元格图片（均章节绝对 Y）。 */

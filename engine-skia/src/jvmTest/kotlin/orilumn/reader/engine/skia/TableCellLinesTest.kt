@@ -132,6 +132,8 @@ class TableCellLinesTest {
         assertEquals(10, im.xLeft)
         assertEquals(100, im.yTop)
         assertEquals(180, im.yBottom)
+        // 占位隐藏区间：shape 文本唯一的 U+FFFC（0..0）随行记录。
+        assertEquals(listOf(0..0), win.lines[0].imgHidden)
         // 无 loader/href 时不产出（旧调用口径不变）。
         val bare = TableCellLines.expand(table, 100, 44, 0, { style }, style, 0f)
         assertTrue(bare.images.isEmpty())

@@ -99,6 +99,12 @@ data class DrawLine(
      * Skia 端随段挂原生下划线装饰（量画同源，不改 advances）。
      */
     val underlineRuns: List<orilumn.reader.engine.laying.UnderlineRun> = emptyList(),
+    /**
+     * 表格图占位隐藏区间（[text] 全文本坐标系，空 = 无表图旧路径）：
+     * [TableCellLines] 为已进 [PageImage] 的 U+FFFC 占位记录本区间；绘制以透明墨隐藏
+     *（占宽保留，与 P6-b 注音源文同法），字符流/断行/点按坐标不变。
+     */
+    val imgHidden: List<IntRange> = emptyList(),
 )
 
 /**
@@ -201,8 +207,18 @@ class LineWindowDrawer(
             val e = run.rtEndExclusive.coerceIn(start, endExcl)
             if (e > s && run.rtStart >= 0) s until e else null
         }
-        fun isRtHidden(from: Int, to: Int): Boolean {
-            for (r in rtHidden) if (from >= r.first && to <= r.last) return true
+        // 表格图占位隐藏（与注音源文同法：透明墨，占宽保留；字符流/断行不变）。
+        val imgHidden = line.imgHidden.mapNotNull { r ->
+            val s = r.first.coerceIn(start, endExcl)
+            val e = (r.last + 1).coerceIn(start, endExcl)
+            if (e > s) s until e else null
+        }
+        val hiddenRuns = rtHidden + imgHidden
+        // 子段 [from,to) 被隐藏 ⟺ 其末字符 to-1 落在区间内；区间按 `until` 存
+        //（last = 排外末端-1），故判 `to <= last + 1`。旧 `to <= last` 差一，
+        // 恰好覆盖的段永不隐藏（表图占位 tofu 残留即此；注音尾字同病）。
+        fun isHidden(from: Int, to: Int): Boolean {
+            for (r in hiddenRuns) if (from >= r.first && to <= r.last + 1) return true
             return false
         }
         val lineExtra = rubyHits.maxOfOrNull { it.extraHeightPx() } ?: 0
@@ -217,7 +233,7 @@ class LineWindowDrawer(
             return false
         }
         val builder = ParagraphBuilder(style, collection)
-        val hasRuns = line.colorRuns.isNotEmpty() || line.fontRuns.isNotEmpty() || line.baselineShifts.isNotEmpty() || rtHidden.isNotEmpty() || ulHits.isNotEmpty()
+        val hasRuns = line.colorRuns.isNotEmpty() || line.fontRuns.isNotEmpty() || line.baselineShifts.isNotEmpty() || hiddenRuns.isNotEmpty() || ulHits.isNotEmpty()
         if (!hasRuns) {
             builder.addText(line.text.substring(start, endExcl) + if (appendTrailingNewline) "\n" else "")
         } else {
@@ -257,12 +273,12 @@ class LineWindowDrawer(
             }
             fun paintSegment(from: Int, to: Int, argb: Int?, run: orilumn.reader.engine.css.FontRun?, shiftEm: Float, underlined: Boolean) {
                 if (to <= from) return
-                // P6-b: 内联 rt 源文透明（占宽保留）：按 rt 区间切分，rt 段走透明墨。
+                // P6-b: 内联 rt 源文透明（占宽保留）：按隐藏区间切分，隐藏段走透明墨。
                 var c = from
-                // 收集本段内的 rt 边界，切成透明/可见子段。
+                // 收集本段内的隐藏边界，切成透明/可见子段。
                 val cuts = ArrayList<Int>(4)
                 cuts.add(c)
-                for (r in rtHidden) {
+                for (r in hiddenRuns) {
                     if (r.first > c && r.first < to) cuts.add(r.first)
                     if (r.last > c && r.last < to) cuts.add(r.last)
                 }
@@ -272,7 +288,7 @@ class LineWindowDrawer(
                     val s = sorted[k]
                     val e = sorted[k + 1]
                     if (e <= s) continue
-                    val hidden = isRtHidden(s, e)
+                    val hidden = isHidden(s, e)
                     if (!hidden && argb == null && run == null && shiftEm == 0f && !underlined) {
                         builder.addText(line.text.substring(s, e))
                     } else {

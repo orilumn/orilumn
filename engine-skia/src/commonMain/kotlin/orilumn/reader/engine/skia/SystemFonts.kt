@@ -15,8 +15,11 @@ import org.jetbrains.skia.FontStyle
  *
  * 平台字体度量差异是能力边界（§3 说明）：同一 CSS、同一引擎，断行差只源自系统字体集合，
  * 不属工程分叉，不在共享范围内强制像素级。
+ *
+ * Q1-7 收敛：android/jvm 两份 actual 经核逐字节同义（`checkNotNull(FontMgr.default)`），
+ * `FontMgr` 在 commonMain 可用，收为普通 common 函数，不再走 expect/actual。
  */
-expect fun systemFonts(): FontMgr
+fun systemFonts(): FontMgr = checkNotNull(FontMgr.default) { "FontMgr.default unavailable" }
 
 /**
  * F1: 平台已装字体族名枚举（字体管理统一列表的系统侧来源；导入侧见

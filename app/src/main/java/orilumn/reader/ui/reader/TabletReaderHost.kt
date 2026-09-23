@@ -193,16 +193,6 @@ class TabletReaderHost(
         }
     }.getOrNull()
 
-    /** 目录扁平化（与桌面同一语义：焦点下标即扁平序）。 */
-    private fun flatToc(): List<TocItem> {
-        val out = ArrayList<TocItem>()
-        fun walk(items: List<TocItem>) {
-            for (t in items) {
-                out.add(t)
-                walk(t.children)
-            }
-        }
-        walk(controller.toc())
-        return out
-    }
+    /** 目录扁平化（与桌面同一语义：焦点下标即扁平序，见共享 [flattenTocItems]）。 */
+    private fun flatToc(): List<TocItem> = flattenTocItems(controller.toc())
 }

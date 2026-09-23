@@ -1,6 +1,7 @@
 package orilumn.reader.ui.reader
 
 import androidx.compose.ui.graphics.ImageBitmap
+import orilumn.reader.data.epub.TocItem
 import orilumn.reader.engine.LinkTarget
 import orilumn.reader.engine.paging.PageSlice
 import orilumn.reader.engine.skia.DecodedImage
@@ -97,4 +98,21 @@ interface ReaderHost {
 
     /** 定位已变化，保存阅读进度（防抖由阅读面负责）。 */
     fun onSaveProgress(pos: ReaderPos)
+}
+
+/**
+ * 目录扁平化（Q1-2 收敛：原平板 `TabletReaderHost.flatToc` 与桌面
+ * `DesktopReaderHost.flatten` 同义实现，合入 shared-ui）。
+ * 焦点下标即扁平序，调用方用下标对章。
+ */
+fun flattenTocItems(toc: List<TocItem>): List<TocItem> {
+    val out = ArrayList<TocItem>()
+    fun walk(items: List<TocItem>) {
+        for (t in items) {
+            out.add(t)
+            walk(t.children)
+        }
+    }
+    walk(toc)
+    return out
 }

@@ -15,6 +15,7 @@ import orilumn.reader.engine.skia.PageImage
 import orilumn.reader.engine.text.TypographicProfile
 import orilumn.reader.ui.reader.ReaderHost
 import orilumn.reader.ui.reader.ReaderPos
+import orilumn.reader.ui.reader.flattenTocItems
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import kotlinx.coroutines.CoroutineScope
@@ -255,17 +256,5 @@ class DesktopReaderHost(
             topUpSkiaFonts(orilumn.reader.engine.css.FontDemand.EMPTY)
         }
 
-    private fun flatToc(): List<TocItem> = flatten(toc)
-
-    private fun flatten(toc: List<TocItem>): List<TocItem> {
-        val out = ArrayList<TocItem>()
-        fun walk(items: List<TocItem>) {
-            for (t in items) {
-                out.add(t)
-                walk(t.children)
-            }
-        }
-        walk(toc)
-        return out
-    }
+    private fun flatToc(): List<TocItem> = flattenTocItems(toc)
 }

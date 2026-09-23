@@ -237,7 +237,4 @@ object ParagraphShapes {
         base.whiteSpace,
         genOf,
     )
-
-    /** Code-like tags share [orilumn.reader.engine.text.FontPool]'s pairing rule (see its CODE_TAGS). */
-    private val CODE_TAGS = setOf("pre", "code", "kbd", "samp")
 }

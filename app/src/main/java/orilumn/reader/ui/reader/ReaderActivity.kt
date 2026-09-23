@@ -783,26 +783,3 @@ class ReaderActivity : ComponentActivity() {
 const val EXTRA_BOOK_PATH = "book_file_path"
 /** Primary key of the book passed when launching the reader from the bookshelf (progress is stored/loaded only when >=0). */
 const val EXTRA_BOOK_ID = "book_id"
-
-/**
- * 定位回抛装饰器：把宿主返回的每个 [ReaderPos] 同步给活动状态（目录高亮/重排锚点/退出保存），
- * 其余全部透传。[onSaveProgress] 同样携带定位一并回抛。
- */
-private class SnapshotReaderHost(
-    private val delegate: ReaderHost,
-    private val onPos: (ReaderPos) -> Unit,
-) : ReaderHost by delegate {
-    override suspend fun open(): ReaderPos? = delegate.open()?.also(onPos)
-    override suspend fun adjacent(pos: ReaderPos, direction: Int): ReaderPos? =
-        delegate.adjacent(pos, direction)?.also(onPos)
-    override suspend fun neighborChapterStart(chapter: Int, direction: Int): ReaderPos? =
-        delegate.neighborChapterStart(chapter, direction)?.also(onPos)
-    override suspend fun pageAtFraction(fraction: Double): ReaderPos? =
-        delegate.pageAtFraction(fraction)?.also(onPos)
-    override suspend fun chapterStart(index: Int): ReaderPos? =
-        delegate.chapterStart(index)?.also(onPos)
-    override fun onSaveProgress(pos: ReaderPos) {
-        onPos(pos)
-        delegate.onSaveProgress(pos)
-    }
-}

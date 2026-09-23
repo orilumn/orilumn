@@ -1,5 +1,6 @@
 package orilumn.reader.ui.reader
 
+import orilumn.reader.engine.html.CODE_TAGS
 import orilumn.reader.engine.skia.DrawLine
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -39,9 +40,6 @@ object ReaderMath {
 
     /** 亮度取值范围顶部（100 = 跟随系统）。 */
     const val MAX_BRIGHTNESS = 100
-
-    /** code-like 标签集合，与 engine-skia 的 CODE_TAGS 一致。 */
-    val CODE_TAGS = setOf("pre", "code", "kbd", "samp")
 
     /** 护眼暖色（对应旧 `BrightnessOverlayView` 的 `Color.rgb(255, 178, 125)`）。 */
     const val ReaderWarmColor = 0xFFFFB27DL

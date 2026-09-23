@@ -169,7 +169,11 @@ fun ReaderSettingsPanel(
         // 与目录同一套 PanelNav：activeIdx 共享高亮，kbHold 仲裁悬停，有效行 = 非 disabled。
         val listState = remember(current) { LazyListState() }
         val nav = remember(current) { PanelNav().apply { activeIdx = 0 } }
-        LaunchedEffect(mounted, current) { if (mounted) drawerFr.requestFocus() }
+        LaunchedEffect(mounted, current, visible) {
+            // 取焦点只在面板可见时：退出（visible=false）即便因子页栈重置导致 current 变化，
+            // 也不得抢回焦点——否则正好压住阅读面的夺回（二级面板遮罩退出后方向键失灵即此）。
+            if (visible) drawerFr.requestFocus()
+        }
         fun onEscape() {
             if (stack.size > 1) stack.removeAt(stack.lastIndex) else onDismiss()
         }

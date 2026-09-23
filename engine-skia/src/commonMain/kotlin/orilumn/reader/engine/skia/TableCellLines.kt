@@ -18,8 +18,8 @@ import kotlin.math.roundToInt
  * 背景：Compose 阅读面（shared-ui `ReaderPageCanvas`）只消费行窗 + 背景 + 插图，
  * 表行从不产出 [DrawLine]（替换叶），故此前表体零像素（仅 caption 块可见）。
  * 本展开让单元格文本走与正文完全同一的量画路径（`LineWindowDrawer` + `LineHitTest`），
- * 同 helper 双路一致；边框色跟随书内 CSS `border-color`（未声明回退 `currentColor`，
- * 见 [borderArgbOf]；遗留 Android `drawTableRow` 仍为固定 `#ff999999`）。
+ * 同 helper 双路一致；边框逐边绘制（只画有宽且 style 非 NONE 的边，色跟随书内 CSS
+ * `border-color`，未声明回退 `currentColor`；遗留 Android `drawTableRow` 仍为固定 `#ff999999`）。
  *
  * - 断行几何不动：行宽/对齐/字号与塑形侧（`ParagraphShapes.shapeOf` 的 cell 宽）同源，
  *   此处只投影、不重排；
@@ -30,21 +30,10 @@ object TableCellLines {
 
     /**
      * 单元格边框色的**未声明回退**（`BoxPageRenderer.tableBorderPaint` 同值）。
-     * 书内 CSS 声明了 `border-color` 时一律以 CSS 为准（见 [borderArgbOf]）；此值仅用于
-     * 书未声明颜色、而引擎仍合成 1px 实线框的格（遗留绘制同式）。
+     * 书内 CSS 声明了 `border-color` 时一律以 CSS 为准（见 [emitCellBorders]）；此值仅用于
+     * 书未声明颜色、而有宽度的边（遗留绘制同式）。
      */
     const val BORDER_ARGB: Int = 0xFF999999.toInt()
-
-    /**
-     * 单元格边框色：跟随 CSS `border-color`（任一侧声明即可；四侧不同时取 top，与遗留单框同式）。
-     * 未声明 → `currentColor`（本元素文字色）。单框无法表达四侧异色，属已知近似。
-     */
-    private fun borderArgbOf(cs: ComputedStyle): Int {
-        val c = cs.borderColors
-        val declared = c?.top ?: c?.right ?: c?.bottom ?: c?.left
-        val hex = declared ?: cs.colorHex
-        return hex?.let { cssHexToArgb(it) } ?: BORDER_ARGB
-    }
 
     /**
      * @param rowTop 行顶的章节绝对 Y（行 FlowedLine.yTop）。
@@ -214,17 +203,7 @@ object TableCellLines {
                 ),
             )
         }
-        borders.add(
-            PageBackground(
-                left = cell.x,
-                yTop = rowTop,
-                yBottom = spanBottom.coerceAtLeast(rowTop + 1),
-                right = cell.x + cell.width.coerceAtLeast(1),
-                argb = borderArgbOf(cs),
-                border = true,
-                strokeWidthPx = 1f,
-            ),
-        )
+        emitCellBorders(cell, rowTop, spanBottom, cs, borders)
         // 单元格垂直对齐（`vertical-align: middle/bottom`；默认顶端）：内容整体在
         // [行顶+内缩, spanBottom) 内下移；跨行格 spanBottom 已是所跨末行底。
         val align = cs.verticalAlign
@@ -319,6 +298,48 @@ object TableCellLines {
             }
         }
         return hidden
+    }
+
+    /**
+     * 单元格逐边框（与 [BoxDrawer.emitEdge] 同口径）：只画有宽且 style 非 NONE 的边，
+     * 每边一条细填充带（色取该边声明色，无则 currentColor，再无则中性灰）。
+     * 旧整框矩形会把只声明 `border-top` 的格画成四面（Rust 简介表 regression）。
+     */
+    private fun emitCellBorders(
+        cell: TableCellLayout,
+        rowTop: Int,
+        spanBottom: Int,
+        cs: ComputedStyle,
+        borders: MutableList<PageBackground>,
+    ) {
+        val bw = cs.border
+        val bc = cs.borderColors
+        val bs = cs.borderStyles
+        val cur = cs.colorHex
+        fun argbOf(c: String?): Int = c?.let { cssHexToArgb(it) }
+            ?: cur?.let { cssHexToArgb(it) } ?: BORDER_ARGB
+        // 缺 style 声明按 SOLID（与 BoxDrawer.emitEdge 同口径）。
+        fun solid(s: orilumn.reader.engine.css.BorderStyle?) =
+            (s ?: orilumn.reader.engine.css.BorderStyle.SOLID) != orilumn.reader.engine.css.BorderStyle.NONE
+        val l = cell.x
+        val r = cell.x + cell.width.coerceAtLeast(1)
+        val b = spanBottom.coerceAtLeast(rowTop + 1)
+        val tw = bw.top.roundToInt()
+        if (tw > 0 && solid(bs?.top)) {
+            borders.add(PageBackground(left = l, yTop = rowTop, yBottom = rowTop + tw, right = r, argb = argbOf(bc?.top), border = true))
+        }
+        val bw2 = bw.bottom.roundToInt()
+        if (bw2 > 0 && solid(bs?.bottom)) {
+            borders.add(PageBackground(left = l, yTop = b - bw2, yBottom = b, right = r, argb = argbOf(bc?.bottom), border = true))
+        }
+        val lw = bw.left.roundToInt()
+        if (lw > 0 && solid(bs?.left)) {
+            borders.add(PageBackground(left = l, yTop = rowTop, yBottom = b, right = l + lw, argb = argbOf(bc?.left), border = true))
+        }
+        val rw = bw.right.roundToInt()
+        if (rw > 0 && solid(bs?.right)) {
+            borders.add(PageBackground(left = r - rw, yTop = rowTop, yBottom = b, right = r, argb = argbOf(bc?.right), border = true))
+        }
     }
 
     /** 一行的展开结果：单元格文本行 + 单元格边框矩形 + 单元格图片（均章节绝对 Y）。 */

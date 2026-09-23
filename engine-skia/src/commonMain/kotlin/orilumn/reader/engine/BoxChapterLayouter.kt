@@ -1890,6 +1890,7 @@ class BoxChapterLayouter(
         val ownerBottom = HashMap<MarkupElement, Int>()
         val ownerFirst = HashMap<MarkupElement, Int>()
         val ownerLast = HashMap<MarkupElement, Int>()
+        val ownerLeaf = HashMap<MarkupElement, MarkupElement>()
         val selfOwned = HashSet<MarkupElement>()
         for (i in leafList.indices) {
             val leaf = leafList[i]
@@ -1900,9 +1901,14 @@ class BoxChapterLayouter(
             // padding/border (counted once, already including the top inset rebuildLocalLines applies).
             val top = lines[lo].yTop - (leaf.style.border.top + leaf.style.padding.top).roundToInt()
             val bottom = lines[minOf(hi, lines.size) - 1].yBottom + (leaf.style.border.bottom + leaf.style.padding.bottom).roundToInt()
-            val owner = leaf.el?.let { prepare.backgroundOwnerMap[it] } ?: continue
-            if (owner === leaf.el) selfOwned.add(owner)
-            aggTop[owner] = minOf(aggTop[owner] ?: top, top)
+            val el = leaf.el ?: continue
+            val owner = prepare.backgroundOwnerMap[el] ?: continue
+            if (owner === el) selfOwned.add(owner)
+            val prevTop = aggTop[owner]
+            if (prevTop == null || top < prevTop) {
+                aggTop[owner] = top
+                ownerLeaf[owner] = el
+            }
             ownerBottom[owner] = maxOf(ownerBottom[owner] ?: bottom, bottom)
             ownerFirst[owner] = minOf(ownerFirst[owner] ?: lo, lo)
             ownerLast[owner] = maxOf(ownerLast[owner] ?: hi, hi)
@@ -1911,8 +1917,12 @@ class BoxChapterLayouter(
         for ((owner, top) in aggTop) {
             val box = ownerBackgroundBox(owner, prepare)
             val s = box.style
+            // 首叶 margin-top 段本就画容器底：按首子链补到容器真顶（自属/窗半截即 0，保持旧行为）。
+            val descent = ownerLeaf[owner]?.let {
+                NormalFlowLayout.firstChildDescentTop(owner, it, prepare::resolveStyle)
+            } ?: 0
             val (bandTop, bandBottom) = NormalFlowLayout.backgroundBandExtent(
-                ownerTop = top,
+                ownerTop = top - descent,
                 ownerBottom = ownerBottom[owner] ?: top,
                 ownerEdgesTop = (s.border.top + s.padding.top).roundToInt(),
                 ownerEdgesBottom = (s.border.bottom + s.padding.bottom).roundToInt(),

@@ -1245,6 +1245,64 @@ object NormalFlowLayout {
     }
 
     /**
+     * 渲染层：[owner] 内容顶到其首叶 [firstLeaf] 边框顶的距离（首子链逐层 margin＋edge，
+     * 与 [consecutiveLeafAdvance] B 侧同门：edge-free 段折叠一次、遇 edge 即结算、
+     * 每次结算单次 round）。轻量路径凭它把背景带向上补到容器内容顶，再由
+     * [backgroundBandExtent] 去自身 edge 即容器真顶（首叶 margin-top 段本就画容器底，
+     * 如 `blockquote > h2` 的 2rem；owner 自身 margin/edge 碰都不碰，更不进底）。
+     * [firstLeaf] 不在首子链上（窗口半截、首叶在窗外）即 null，调用方保持旧行为（页带裁剪兜底）。
+     * 自属（owner === firstLeaf）即 0。
+     */
+    fun firstChildDescentTop(
+        owner: MarkupElement,
+        firstLeaf: MarkupElement,
+        styleOf: (MarkupElement) -> ComputedStyle,
+    ): Int? {
+        if (owner === firstLeaf) return 0
+        // 上行收链：leaf→owner，中途断开即非后代（理论上不会发生，防呆）。
+        val up = ArrayList<MarkupElement>()
+        var n: MarkupElement? = firstLeaf
+        while (n != null && n !== owner) {
+            up.add(n)
+            n = n.parent
+        }
+        if (n !== owner) return null
+        // 注意：只算内容顶以下的链（owner 自身 edge 由 backgroundBandExtent 去，
+        // 在这里重复计入会把带子顶进 owner 自身 margin，吃掉与上段的间隙）。
+        var dist = 0
+        var merged = 0f
+        for (i in up.size - 1 downTo 0) {
+            val el = up[i]
+            val parent = if (i + 1 < up.size) up[i + 1] else owner
+            if (!isFirstSignificantChild(parent, el)) return null
+            if (i > 0) {
+                val s = styleOf(el)
+                merged = collapseMargins(merged, s.margin.top)
+                val topEdges = (s.border.top + s.padding.top).roundToInt()
+                if (topEdges > 0) {
+                    dist += merged.roundToInt()
+                    dist += topEdges
+                    merged = 0f
+                }
+            } else {
+                merged = collapseMargins(merged, styleOf(el).margin.top)
+                dist += merged.roundToInt()
+            }
+        }
+        return dist
+    }
+
+    /** 首个有效子（跳过纯空白 #text；与 Selector 相邻语义同口径，保守：行内元素也算阻挡）。 */
+    private fun isFirstSignificantChild(parent: MarkupElement, el: MarkupElement): Boolean {
+        for (c in parent.children) {
+            if (c === el) return true
+            if (c.tag == "#text" && c.text.isBlank()) continue
+            return false
+        }
+        return false
+    }
+
+    /**
      * Default block classification: an element is a block iff its tag is a known default block tag.
      * `<img>` is NOT a default block — CSS defaults to inline-block (inline-level replaceable), so it
      * lives inside its container's text flow. Only explicit `display:block` on the img promotes it to

@@ -18,6 +18,7 @@ import orilumn.reader.engine.html.MarkupElement
 import orilumn.reader.engine.layout.ListMarkers
 import orilumn.reader.engine.laying.ParagraphShapeRef
 import orilumn.reader.engine.laying.ShapedGeometry
+import orilumn.reader.engine.laying.adjustLineHeightsForInlineImages
 import orilumn.reader.engine.skia.shapeGeometry
 import orilumn.reader.io.Logger
 import orilumn.reader.engine.laying.BoxLayoutResult
@@ -466,7 +467,7 @@ class BoxChapterLayouter(
             // P4-a3: 环绕前导随叶下发（与盒流断行同宽，否则 canonical 形状与结构行漂移）。
             shapeLeaf(leaf, prepare.styleMap, profile,
                 listMarkerFor(leaf.el, prepare.styleMap::get, carriers), genOf = prepare.genOf,
-                floatLead = leaf.floatLead)
+                floatLead = leaf.floatLead, classify = prepare.classify, hidden = prepare.hidden)
         }
         return completeFullLayout(prepare, shapes, contentH, profile)
     }
@@ -514,7 +515,7 @@ class BoxChapterLayouter(
                         checkpoint()
                         shapeLeaf(leaves[bi], prepare.styleMap, profile,
                             listMarkerFor(leaves[bi].el, prepare.styleMap::get, carriers), genOf = prepare.genOf,
-                            floatLead = leaves[bi].floatLead)
+                            floatLead = leaves[bi].floatLead, classify = prepare.classify, hidden = prepare.hidden)
                     }
                 }
             }.awaitAll().flatten()
@@ -1445,6 +1446,8 @@ class BoxChapterLayouter(
         ) {
             prepare.floatWidths[i]?.let { NormalFlowLayout.innerBreakWidth(leaf.style, it) }
         } else null,
+        classify = prepare.lightClassify(),
+        hidden = prepare.hidden,
     )
 
     /**
@@ -1464,6 +1467,8 @@ class BoxChapterLayouter(
         profile: TypographicProfile,
         ancestorStyleOf: ((MarkupElement) -> orilumn.reader.engine.css.ComputedStyle?)? = null,
         genOf: orilumn.reader.engine.laying.GenOf = orilumn.reader.engine.laying.EmptyGen,
+        classify: orilumn.reader.engine.laying.BlockClassify? = null,
+        hidden: orilumn.reader.engine.laying.HiddenCheck = orilumn.reader.engine.laying.HIDDEN_NONE,
     ): Int {
         // 行高只取本行「rowspan==1」格的最大外高：跨行格的高度由其跨越的各行**分摊**
         // （[TableGridModel.resolveRowHeights]，浏览器实测口径），故此处不把跨行格整体压进
@@ -1473,7 +1478,7 @@ class BoxChapterLayouter(
         for (cell in t.cells) {
             val cs = styles[cell.el] ?: leaf.style
             val cw = NormalFlowLayout.innerBreakWidth(cs, cell.width)
-            val cs_ = shapeGeometry(cell.el, cs, styles, profile, cw, imageLoader = imageLoader, chapterHref = chapterHref, ancestorStyleOf = ancestorStyleOf, genOf = genOf) { it.tag in BLOCK_TAGS }
+            val cs_ = shapeGeometry(cell.el, cs, styles, profile, cw, imageLoader = imageLoader, chapterHref = chapterHref, ancestorStyleOf = ancestorStyleOf, genOf = genOf, classify = classify, hidden = hidden, isBlock = { it.tag in BLOCK_TAGS })
             cell.shape = cs_
             val cellH = if (cs_.lineCount > 0) (cs_.lineBottom(cs_.lineCount - 1) - cs_.lineTop(0)) else 0
             cell.height = (cellH + (cs.padding.vertical + cs.border.vertical).roundToInt()).coerceAtLeast(1)
@@ -1499,18 +1504,21 @@ class BoxChapterLayouter(
         floatLead: orilumn.reader.engine.laying.FloatLead? = null,
         /** P6-a2 文本悬浮断行宽（null = 常规 border-box 宽）。 */
         breakWidthOverride: Int? = null,
+        /** 行内图行高配对用分类/隐藏判定（与盒流同口径；塑形层透传）。 */
+        classify: orilumn.reader.engine.laying.BlockClassify? = null,
+        hidden: orilumn.reader.engine.laying.HiddenCheck = orilumn.reader.engine.laying.HIDDEN_NONE,
     ): ParagraphShapeRef {
         val t = leaf.table
         if (t != null) {
-            val rowH = fillTableRowCells(t = t, leaf = leaf, styles = styles, profile = profile, ancestorStyleOf = ancestorStyleOf, genOf = genOf)
+            val rowH = fillTableRowCells(t = t, leaf = leaf, styles = styles, profile = profile, ancestorStyleOf = ancestorStyleOf, genOf = genOf, classify = classify, hidden = hidden)
             return ShapedGeometry(isReplaceable = true, replaceableBottom = rowH.coerceAtLeast(1), replaceableCharEnd = leaf.textLength.coerceAtLeast(1))
         }
         return shapeGeometry(
             leaf.el ?: orilumn.reader.engine.html.MarkupElement("body"), leaf.style, styles,
             profile, breakWidthOverride ?: breakWidthPx(leaf), listMarker,
             imageLoader = imageLoader, chapterHref = chapterHref, ancestorStyleOf = ancestorStyleOf, genOf = genOf,
-            floatLead = floatLead,
-        ) { it.tag in BLOCK_TAGS }
+            floatLead = floatLead, classify = classify, hidden = hidden, isBlock = { it.tag in BLOCK_TAGS },
+        )
     }
 
     /**
@@ -1547,7 +1555,7 @@ class BoxChapterLayouter(
             val leaf = prepare.block(i)
             val t = leaf.table
             if (t != null) {
-                fillTableRowCells(t = t, leaf = leaf, styles = prepare.inlineStyles(i), profile = profile, ancestorStyleOf = prepare::resolveStyle, genOf = prepare.genOf)
+                fillTableRowCells(t = t, leaf = leaf, styles = prepare.inlineStyles(i), profile = profile, ancestorStyleOf = prepare::resolveStyle, genOf = prepare.genOf, classify = prepare.lightClassify(), hidden = prepare.hidden)
             }
             return hit
         }
@@ -2046,7 +2054,7 @@ class LightPrepare(
     private val markupLeaves: List<MarkupElement>,
     val globalCharStarts: LongArray,
     /** display:none check, shared with the heavy path's styleMap-derived hidden-ness. */
-    private val hidden: orilumn.reader.engine.laying.HiddenCheck = orilumn.reader.engine.laying.HIDDEN_NONE,
+    internal val hidden: orilumn.reader.engine.laying.HiddenCheck = orilumn.reader.engine.laying.HIDDEN_NONE,
     private val imageLoader: ImageLoader? = null,
     private val chapterHref: String = "",
     internal val backgroundOwnerMap: Map<MarkupElement, MarkupElement> = emptyMap(),
@@ -2074,7 +2082,7 @@ class LightPrepare(
     val totalChars: Int get() = markupLeaves.sumOf { NormalFlowLayout.styledCharAdvance(it, { e -> styleComputer().resolve(e, styleCache) }, lightClassify(), hidden, genOf).toInt() }
 
     /** 轻路径块判定：与 computeStructure 同门（有 display 声明才读 display:block）。 */
-    private fun lightClassify(): orilumn.reader.engine.laying.BlockClassify =
+    internal fun lightClassify(): orilumn.reader.engine.laying.BlockClassify =
         if (styleComputer().hasDisplayDeclaration()) {
             val displayCache = identityMap<MarkupElement, Boolean>()
             orilumn.reader.engine.laying.BlockClassify { el -> NormalFlowLayout.defaultBlock(el) || styleComputer().resolveDisplayOnly(el, displayCache) }
@@ -2200,7 +2208,7 @@ class LightPrepare(
                     style.textIndentPx.coerceAtLeast(0f),
                     NormalFlowLayout.leafBaselineShifts(el, sub, classify, hidden, genOf),
                 )
-                val baseH = NormalFlowLayout.adjustLineHeightsForInlineImages(
+                val baseH = adjustLineHeightsForInlineImages(
                     text, shaped, el, sub, classify, hidden, breakWf, imageLoader, chapterHref,
                 )
                 // P6-b: 叠排注音行增高（与重路径同式；无注音零回归）。
@@ -2223,7 +2231,7 @@ class LightPrepare(
                 style.textIndentPx.coerceAtLeast(0f),
                 NormalFlowLayout.leafBaselineShifts(el, sub, classify, hidden, genOf),
             )
-            val baseH = NormalFlowLayout.adjustLineHeightsForInlineImages(
+            val baseH = adjustLineHeightsForInlineImages(
                 text, shaped, el, sub, classify, hidden, NormalFlowLayout.innerBreakWidth(style, cw), imageLoader, chapterHref,
             )
             // P6-b: 叠排注音行增高（与重路径同式；无注音零回归）。

@@ -1602,78 +1602,6 @@ object NormalFlowLayout {
         return null
     }
 
-    /**
-     * Inline `<img>` elements under [root] in the exact document order [absorbedText] emits
-     * their U+FFFC slots, so the k-th U+FFFC in the absorbed text is the k-th element here.
-     */
-    private fun inlineImageEls(
-        root: MarkupElement,
-        classify: BlockClassify,
-        hidden: HiddenCheck = HIDDEN_NONE,
-    ): List<MarkupElement> {
-        val out = ArrayList<MarkupElement>()
-        fun walk(node: MarkupElement) {
-            for (c in node.children) {
-                when {
-                    hidden.isHidden(c) -> Unit
-                    c.isText || c.tag == "br" -> Unit
-                    classify.isBlock(c) -> Unit
-                    isReplaceable(c) -> out.add(c)
-                    else -> walk(c)
-                }
-            }
-        }
-        walk(root)
-        return out
-    }
-
-    /**
-     * Raises breaker line heights for lines holding inline `<img>` slots (U+FFFC) to the images'
-     * used heights (CSS 2.1 §10.8 line-box rule). Returns per-line heights aligned with [broken].
-     *
-     * The [BrokenLine.range]s index into [text]; U+FFFC occurrence order matches
-     * [inlineImageEls] order, so images are consumed in line order. A line with several images
-     * takes the tallest. Image-free lines keep the breaker height untouched.
-     */
-    /** P6-a2: 行内图抬升行高（盒子流单源；pure，供轻路径 eager 复刻）。 */
-    fun adjustLineHeightsForInlineImages(
-        text: String,
-        broken: List<BrokenLine>,
-        root: MarkupElement,
-        styles: Map<MarkupElement, ComputedStyle>,
-        classify: BlockClassify,
-        hidden: HiddenCheck,
-        breakW: Int,
-        imageLoader: ImageBoundsReader?,
-        chapterHref: String,
-    ): List<Int> {
-        if (broken.isEmpty() || text.indexOf('\uFFFC') < 0) return broken.map { it.heightPx }
-        // Queue of images in U+FFFC order; consumed as their slots appear line by line.
-        val imgs = ArrayDeque(inlineImageEls(root, classify, hidden))
-        if (imgs.isEmpty()) return broken.map { it.heightPx }
-        // Index of the k-th U+FFFC in [text] → image lookup without re-scanning per line.
-        val fffcAt = ArrayList<Int>()
-        var p = text.indexOf('\uFFFC')
-        while (p >= 0) { fffcAt.add(p); p = text.indexOf('\uFFFC', p + 1) }
-        var cursor = 0 // consumed count into fffcAt/imgs
-        return broken.map { line ->
-            var tallest = 0
-            // BrokenLine.range is an inclusive IntRange (see emit(): r.first..r.last).
-            val lo = line.range.first.coerceAtLeast(0)
-            val hi = line.range.last.coerceAtMost(text.length - 1)
-            while (cursor < fffcAt.size && fffcAt[cursor] < lo) cursor++
-            var scan = cursor
-            while (scan < fffcAt.size && fffcAt[scan] <= hi) {
-                val img = imgs.getOrNull(scan) ?: break
-                val imgStyle = styles[img] ?: styles[root] ?: DEFAULT_STYLE
-                val usedH = replacedUsedSize(img, imgStyle, breakW, imageLoader, chapterHref).second
-                if (usedH > tallest) tallest = usedH
-                scan++
-            }
-            cursor = scan
-            if (tallest > 0) maxOf(line.heightPx, tallest) else line.heightPx
-        }
-    }
 
     private val BOX_BLOCK_TAGS = setOf(
         "p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre", "section",
@@ -1682,5 +1610,5 @@ object NormalFlowLayout {
         "main", "hgroup", "details", "summary",
     )
 
-    private val DEFAULT_STYLE = ComputedStyle(fontSizePx = 16f, lineHeightRatio = 1.5f)
+    internal val DEFAULT_STYLE = ComputedStyle(fontSizePx = 16f, lineHeightRatio = 1.5f)
 }

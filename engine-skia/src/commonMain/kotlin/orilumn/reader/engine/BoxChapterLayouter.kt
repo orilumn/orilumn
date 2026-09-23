@@ -1871,10 +1871,12 @@ class BoxChapterLayouter(
      * stay correct within the shaped window with no extra shaping.
      *
      * 内核层：背景归属只看背景色/背景图；只带边框的叶（如 `blockquote > h2` 的下边框）另出
-     * 叶边框盒（无背景填充，只画自身边框），且一律排在背景盒之后绘制——与重路径“先祖先背景、
+     * 叶边框盒，只带边框的容器（如只有 `border-bottom` 的 `table`）另出容器边框盒
+     * （聚合其窗内后代叶范围，首子链下沉同式；已有背景盒的自身边框由背景盒画，不重复）。
+     * 边框盒均无背景填充，只画自身边框，且一律排在背景盒之后绘制——与重路径“先祖先背景、
      * 后子孙边框”同序，否则容器底会盖掉标题下边框。
      */
-    private fun buildBackgroundDrawBoxes(
+    internal fun buildBackgroundDrawBoxes(
         prepare: LightPrepare,
         leafList: List<LayoutBox>,
         lines: List<FlowedLine>,
@@ -1934,6 +1936,61 @@ class BoxChapterLayouter(
             // page-ownership gate can exclude backgrounds that belong to another page.
             box.firstLineIndex = ownerFirst[owner] ?: -1
             box.lastLineExclusive = ownerLast[owner] ?: -1
+            if (box.contentBottom > box.contentTop) out.add(box)
+        }
+        // Border-only containers (e.g. a `table` carrying only `border-bottom`, no fill):
+        // background attribution skips them by design (hasBackground-only), but their own borders
+        // still need a carrier on the light path — the heavy path draws every container box.
+        // Aggregate each such ancestor over its in-window descendant leaves (same band math as
+        // background owners, first-child descent included); ancestors that already own a background
+        // box are skipped (that box draws their borders). Fill-less like leaf border boxes below,
+        // so emission order among them is irrelevant.
+        val cTop = HashMap<MarkupElement, Int>()
+        val cBottom = HashMap<MarkupElement, Int>()
+        val cFirst = HashMap<MarkupElement, Int>()
+        val cLast = HashMap<MarkupElement, Int>()
+        val cLeaf = HashMap<MarkupElement, MarkupElement>()
+        for (i in leafList.indices) {
+            val leaf = leafList[i]
+            val el = leaf.el ?: continue
+            val lo = firstByBlock[i].coerceAtLeast(0)
+            val hi = lastByBlock[i]
+            if (lo >= lines.size || hi <= lo) continue
+            val top = lines[lo].yTop - (leaf.style.border.top + leaf.style.padding.top).roundToInt()
+            val bottom = lines[minOf(hi, lines.size) - 1].yBottom + (leaf.style.border.bottom + leaf.style.padding.bottom).roundToInt()
+            var a = el.parent
+            while (a != null && a.tag != "body") {
+                val s = prepare.resolveStyle(a)
+                if (!s.hasBackground() && s.hasBorderEdges() && !aggTop.containsKey(a)) {
+                    val prev = cTop[a]
+                    if (prev == null || top < prev) {
+                        cTop[a] = top
+                        cLeaf[a] = el
+                    }
+                    cBottom[a] = maxOf(cBottom[a] ?: bottom, bottom)
+                    cFirst[a] = minOf(cFirst[a] ?: lo, lo)
+                    cLast[a] = maxOf(cLast[a] ?: hi, hi)
+                }
+                a = a.parent
+            }
+        }
+        for ((container, top) in cTop) {
+            val box = ownerBackgroundBox(container, prepare)
+            val s = box.style
+            val descent = cLeaf[container]?.let {
+                NormalFlowLayout.firstChildDescentTop(container, it, prepare::resolveStyle)
+            } ?: 0
+            val (bandTop, bandBottom) = NormalFlowLayout.backgroundBandExtent(
+                ownerTop = top - descent,
+                ownerBottom = cBottom[container] ?: top,
+                ownerEdgesTop = (s.border.top + s.padding.top).roundToInt(),
+                ownerEdgesBottom = (s.border.bottom + s.padding.bottom).roundToInt(),
+                selfOwned = false,
+            )
+            box.contentTop = bandTop
+            box.contentBottom = bandBottom
+            box.firstLineIndex = cFirst[container] ?: -1
+            box.lastLineExclusive = cLast[container] ?: -1
             if (box.contentBottom > box.contentTop) out.add(box)
         }
         // Border-only leaves (e.g. a bordered `h2` inside a `blockquote`): their background comes

@@ -46,7 +46,6 @@ import orilumn.reader.engine.BookFileResolver
 import orilumn.reader.engine.text.LayoutParamKey
 import orilumn.reader.engine.text.SystemCjkSerif
 import orilumn.reader.engine.text.TypographicProfile
-import orilumn.reader.engine.render.DebugDraw
 import orilumn.reader.engine.skia.SkiaFontPool
 import orilumn.reader.ui.theme.OrilumnTheme
 import orilumn.reader.io.AppRoot
@@ -122,8 +121,6 @@ class ReaderActivity : ComponentActivity() {
 
     /** 顶/底栏显隐（[ReaderScreen] 经 onBarsVisibleChanged 回抛，驱动系统栏 chrome）。 */
     private var barsVisible by mutableStateOf(false)
-
-    private var debugOverlayOn by mutableStateOf(DebugDraw.enabled)
 
     /** 版式重排任务状态（固定周期节流）。 */
     private var relayoutPending = false
@@ -280,18 +277,12 @@ class ReaderActivity : ComponentActivity() {
                     host = snapshot,
                     settings = effective,
                     statusBarInset = with(LocalDensity.current) { (statusInsetTopPx.intValue / density).dp },
-                    debugActive = debugOverlayOn,
                     onBack = { finish() },
                     onNight = {
                         commitSettings(effective.copy(scheme = if (effective.scheme == "night") "day" else "night"), typographyChanged = true)
                     },
                     onSettings = { openSettingsPanel() },
                     onToc = { openTocPanel() },
-                    onDebug = {
-                        DebugDraw.enabled = !DebugDraw.enabled
-                        debugOverlayOn = DebugDraw.enabled
-                        Logger.d(TAG, if (DebugDraw.enabled) "调试线框：显示" else "调试线框：关闭")
-                    },
                     onLightChange = { applyPhysicalBrightness(it) },
                     onLightCommit = { commitBrightness(it) },
                     onBarsVisibleChanged = { barsVisible = it; applySystemBars() },

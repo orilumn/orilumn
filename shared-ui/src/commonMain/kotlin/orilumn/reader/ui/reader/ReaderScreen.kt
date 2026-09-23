@@ -68,14 +68,12 @@ fun ReaderScreen(
     host: ReaderHost,
     settings: ReaderSettings,
     statusBarInset: Dp = 0.dp,
-    debugActive: Boolean = false,
     onBack: () -> Unit = {},
     onNight: () -> Unit = {},
     onSettings: () -> Unit = {},
     onToc: () -> Unit = {},
     onBookmark: (() -> Unit)? = null,
     onNote: (() -> Unit)? = null,
-    onDebug: () -> Unit = {},
     onLightChange: (ReaderSettings) -> Unit = {},
     onLightCommit: (ReaderSettings) -> Unit = {},
     /** Q1-b：顶/底栏显隐同步（Android 宿主据此显隐系统栏 chrome；桌面/其它平台可忽略）。 */
@@ -121,7 +119,6 @@ fun ReaderScreen(
     val currentOnToc by rememberUpdatedState(onToc)
     val currentOnBookmark by rememberUpdatedState(onBookmark)
     val currentOnNote by rememberUpdatedState(onNote)
-    val currentOnDebug by rememberUpdatedState(onDebug)
     val currentOnLightChange by rememberUpdatedState(onLightChange)
     val currentOnLightCommit by rememberUpdatedState(onLightCommit)
     val currentOnBarsVisibleChanged by rememberUpdatedState(onBarsVisibleChanged)
@@ -449,8 +446,6 @@ fun ReaderScreen(
                 onToc = { hideBarsThen { currentOnToc() } },
                 onBookmark = { currentOnBookmark?.invoke() ?: snackbar.show("书签（规划中）") },
                 onNote = { currentOnNote?.invoke() ?: snackbar.show("笔记（规划中）") },
-                onDebug = currentOnDebug,
-                debugActive = debugActive,
                 onTopBarSize = { topBarH = it.height },
                 onBottomBarSize = { botBarH = it.height },
             )

@@ -1,5 +1,6 @@
 package orilumn.reader.engine.css
 
+import orilumn.reader.engine.css.WhiteSpace
 import orilumn.reader.engine.html.MarkupElement
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -89,6 +90,21 @@ class PresentationAttrCascadeTest {
         val out = compute(body, author = "td { text-align: right; background-color: #000000 }")
         assertEquals(TextAlign.RIGHT, out[td]?.textAlign)
         assertEquals("#ff000000", out[td]?.backgroundColorHex)
+    }
+
+    @Test
+    fun `非法 white-space 值丢弃走继承`() {
+        // 本书 `pre code { white-space: nowarp }`（拼错）：非法声明丢弃，code 继承 pre 的值，
+        // 而不是回落 NORMAL（否则多行代码挤成一行）。
+        val code = node("code")
+        val pre = node("pre", children = listOf(code)); code.parent = pre
+        val body = node("body", children = listOf(pre)); pre.parent = body
+        val out = compute(
+            body,
+            ua = "pre { white-space: pre-wrap; }",
+            author = "pre code { white-space: nowarp; }",
+        )
+        assertEquals(WhiteSpace.PRE_WRAP, out[code]?.whiteSpace)
     }
 
     @Test

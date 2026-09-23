@@ -979,12 +979,14 @@ class StyleComputer(
         return ""
     }
 
-    private fun parseWhiteSpace(value: String): WhiteSpace = when (value.trim().lowercase()) {
+    /** 非法值回 null（声明丢弃、走继承；如书里拼错的 `white-space: nowarp`）。 */
+    private fun parseWhiteSpace(value: String): WhiteSpace? = when (value.trim().lowercase()) {
+        "normal" -> WhiteSpace.NORMAL
         "pre" -> WhiteSpace.PRE
         "nowrap" -> WhiteSpace.NOWRAP
         "pre-wrap" -> WhiteSpace.PRE_WRAP
         "pre-line" -> WhiteSpace.PRE_LINE
-        else -> WhiteSpace.NORMAL
+        else -> null
     }
 
     /** `letter-spacing`/`word-spacing`: normal → 0; lengths resolve against own font-size. */

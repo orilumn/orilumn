@@ -5,7 +5,7 @@
 # 实际 DMG 挂载后显示的是默认 Java Duke 图标。这里把宗卷根的
 # .VolumeIcon.icns 替换为我们的 icon.icns 并置自定义图标位。
 #
-# 用法：stamp-dmg-icon.sh <Orilumn-1.1.dmg> <icons/icon.icns>
+# 用法：stamp-dmg-icon.sh <Orilumn-1.0.dmg> <icons/icon.icns>
 # 仅 macOS（依赖 hdiutil / SetFile，Xcode CLT 自带）。
 set -euo pipefail
 

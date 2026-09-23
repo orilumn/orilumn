@@ -55,7 +55,7 @@ compose.desktop {
         mainClass = "orilumn.reader.desktop.MainKt"
         nativeDistributions {
             packageName = "Orilumn"
-            packageVersion = "0.1.1"
+            packageVersion = "0.1.0"
             description = "Orilumn"
             vendor = "Orilumn"
             targetFormats(TargetFormat.Dmg)
@@ -64,9 +64,9 @@ compose.desktop {
             macOS {
                 bundleID = "orilumn.reader"
                 iconFile.set(project.file("icons/icon.icns"))
-                // macOS 打包插件要求版本号 MAJOR > 0（"0.1.1" 非法），此处单独覆写；
-                // 与 Android versionName 0.1.1 对应，待发 1.x 后可删掉该覆写。
-                packageVersion = "1.1"
+                // macOS 打包插件要求版本号 MAJOR > 0（"0.1.0" 非法），此处单独覆写；
+                // 与 Android versionName 0.1.0 对应，待发 1.x 后可删掉该覆写。
+                packageVersion = "1.0"
             }
             linux {
                 iconFile.set(project.file("src/main/resources/icon.png"))
@@ -94,7 +94,7 @@ tasks.register<Exec>("stampDmgVolumeIcon") {
     dependsOn("packageDistributionForCurrentOS")
     onlyIf { org.gradle.internal.os.OperatingSystem.current().isMacOsX }
     outputs.upToDateWhen { false }
-    val dmg = layout.buildDirectory.file("compose/binaries/main/dmg/Orilumn-1.1.dmg")
+    val dmg = layout.buildDirectory.file("compose/binaries/main/dmg/Orilumn-1.0.dmg")
     inputs.file(project.file("icons/icon.icns"))
     commandLine(
         "sh",

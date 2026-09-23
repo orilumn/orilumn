@@ -15,7 +15,7 @@ android {
         minSdk = 24
         targetSdk = 36
         versionCode = 16
-        versionName = "0.1.1"
+        versionName = "0.1.0"
 
         // skiko 只发 arm64/x64 .so（无 32 位）：过滤后 32 位设备不再安装，避免运行时缺库崩溃
         ndk {
@@ -90,7 +90,7 @@ android {
     // Release 变体产物统一命名为 orilumn-<version>-<buildType>.apk（AGP 9 已删旧 applicationVariants API，
     // 改由 Gradle base.archivesName 控制；CI 用 orilumn-*.apk 通配，供本地构建、artifact、Release 附件三处一致使用）。
     base {
-        archivesName.set("orilumn-0.1.1")
+        archivesName.set("orilumn-0.1.0")
     }
 }
 

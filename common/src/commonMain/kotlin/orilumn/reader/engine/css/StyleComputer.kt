@@ -175,6 +175,8 @@ class StyleComputer(
             underline = w["text-decoration"]?.let { parseUnderline(it) } ?: false,
             textIndentPx = w["text-indent"]?.let { v -> parseLength(v)?.resolve(fontSize, parent.fontSizePx, rootFontPx) } ?: 0f,
             margin = margin,
+            marginLeftAuto = isMarginAuto(w, left = true),
+            marginRightAuto = isMarginAuto(w, left = false),
             padding = parseEdges(w, "padding", "padding-top", "padding-right", "padding-bottom", "padding-left", fontSize, parent.fontSizePx),
             border = parseBorderEdges(w, fontSize, parent.fontSizePx),
             backgroundColorHex = w["background-color"]?.let { parseCssColor(it) }
@@ -892,6 +894,24 @@ class StyleComputer(
      * shorthand's matching slot. `margin: auto` is treated as 0 (block horizontal auto-centering is
      * a later refinement). Does not inherit (initial values are 0).
      */
+    /**
+     * 横向 margin auto 判定（表/块居中）：显式 `margin-left/right: auto` 优先；
+     * 否则看 `margin` 简写的对应槽（top right bottom left；2 值取左右槽，3 值取中槽）。
+     */
+    private fun isMarginAuto(w: Map<String, String>, left: Boolean): Boolean {
+        val side = if (left) "margin-left" else "margin-right"
+        w[side]?.trim()?.lowercase()?.let { return it == "auto" }
+        val sh = w["margin"]?.trim()?.split(Regex("\\s+"))?.filter { it.isNotEmpty() } ?: return false
+        if (sh.isEmpty()) return false
+        // TRBL 槽位：left 取 1（2/3 值）或 3（4 值）；right 取 1（2/3 值）或 1（4 值→[1]）。
+        val slot = when (sh.size) {
+            1 -> 0
+            2, 3 -> 1
+            else -> if (left) 3 else 1
+        }
+        return sh.getOrNull(slot)?.lowercase() == "auto"
+    }
+
     private fun parseEdges(
         w: Map<String, String>,
         shorthand: String,

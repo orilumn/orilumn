@@ -2305,14 +2305,19 @@ class LightPrepare(
         val tstyle = styleComputer().resolve(table, styleCache)
         val spH = if (tstyle.borderCollapse) 0f else tstyle.borderSpacingH
         val gapH = spH.coerceAtLeast(0f).roundToInt()
-        val tableW = contentWidth.coerceAtLeast(1)
         // The row's border-box left (accumulated block edges) so cell x matches the heavy path's
         // column layout (both absolutely positioned in content coordinates).
-        val rowLeft = NormalFlowLayout.descendContentLeft(trEl, 0,
+        val rowLeftBase = NormalFlowLayout.descendContentLeft(trEl, 0,
             leftEdgesOf = { e -> val s = styleComputer().resolve(e, styleCache); (s.border.left + s.padding.left).roundToInt() },
             marginLeftOf = { e -> val s = styleComputer().resolve(e, styleCache); s.margin.left.roundToInt() },
         )
         // 同表各行列宽一致：按表缓存（同 prepare 内同表同宽；宽/位变化即重算）。
+        // P1-2 表外盒：与重路径同单源 [TableGridModel.tableOuterGeometry]（指定宽/margin auto）；
+        // light 的 contentWidth 即表内容宽（旧全宽口径），反推容器域后与重路径同算。
+        val tableInsets = (tstyle.border.horizontal + tstyle.padding.horizontal).roundToInt()
+        val g = TableGridModel.tableOuterGeometry(contentWidth + tableInsets, rowLeftBase - tableInsets, tstyle)
+        val tableW = g.contentW
+        val rowLeft = g.tableLeft + tableInsets
         val cached = tableColCache[table]
         val (xs, ws) = if (cached != null && cached.tableW == tableW && cached.rowLeft == rowLeft) {
             cached.xs to cached.ws

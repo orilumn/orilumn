@@ -208,4 +208,26 @@ class TableFamilyTest {
         assertEquals(100, ws[0])
         assertEquals(221, ws[1])
     }
+
+    @Test
+    fun `tableOuterGeometry 指定宽与auto居中`() {
+        val plain = ComputedStyle(10f, 1.5f)
+        // 无指定：占满。
+        val full = TableGridModel.tableOuterGeometry(660, 0, plain)
+        assertEquals(660, full.outerW)
+        assertEquals(0, full.tableLeft)
+        // width:90% + margin auto：594 宽，偏移 33 居中。
+        val centered = TableGridModel.tableOuterGeometry(
+            660, 0, ComputedStyle(10f, 1.5f, widthPct = 90f, marginLeftAuto = true, marginRightAuto = true),
+        )
+        assertEquals(594, centered.outerW)
+        assertEquals(33, centered.tableLeft)
+        assertEquals(594, centered.contentW)
+        // 仅左 auto：顶右边。
+        val right = TableGridModel.tableOuterGeometry(
+            660, 0, ComputedStyle(10f, 1.5f, widthPx = 600f, marginLeftAuto = true),
+        )
+        assertEquals(600, right.outerW)
+        assertEquals(60, right.tableLeft)
+    }
 }

@@ -475,16 +475,18 @@ object NormalFlowLayout {
             // un-splittable line of the row's height, drawn as a 2D grid). Rows, not cells, are the
             // pagination/char leaves, so a page can split the table between rows only.
             // P1-2: caption 展开为自己的盒（递归分解；`caption-side: bottom` 时沉底）。
-            val innerW = innerBreakWidth(style, widthPx)
+            // 表外盒几何（指定宽/margin auto）走重轻单源 [TableGridModel.tableOuterGeometry]。
+            val g = TableGridModel.tableOuterGeometry(widthPx, left, style)
+            val innerW = g.contentW
             // The table's own border-box left is its children's baseline; rows start after its left edge.
-            val rowLeft = left + (style.border.left + style.padding.left).roundToInt()
+            val rowLeft = g.tableLeft + (style.border.left + style.padding.left).roundToInt()
             val rows = buildTableRows(el, styles, breaker, innerW, rowLeft, classify, hidden, imageLoader, chapterHref, genOf)
             val cap = TableGridModel.build(el).caption
             val capBoxes = if (cap != null && !hidden.isHidden(cap)) {
                 buildBoxTree(cap, styles, breaker, innerW, rowLeft, classify, hidden, imageLoader, chapterHref, genOf, pending)
             } else emptyList()
             val children = if (capBoxes.isNotEmpty() && captionIsBottom(el) { styles[it] }) rows + capBoxes else capBoxes + rows
-            listOf(LayoutBox(el, style, left, widthPx, emptyList(), 0, emptyList(), children))
+            listOf(LayoutBox(el, style, g.tableLeft, g.outerW, emptyList(), 0, emptyList(), children))
         } else if (blockChildren.isEmpty() && isReplaceable(el)) {
             // Replaceable leaf (img): no text, fixed pixel height, one char slot. Never broken by a
             // shaper — the box flow emits it as a single un-splittable line.

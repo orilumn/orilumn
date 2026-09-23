@@ -1,5 +1,6 @@
 package orilumn.reader.engine.laying
 
+import orilumn.reader.engine.css.ComputedStyle
 import orilumn.reader.engine.html.MarkupElement
 import kotlin.math.roundToInt
 
@@ -46,6 +47,9 @@ class TableGridModel(
         val isHeader: Boolean get() = el.tag == "th"
     }
 
+    /** 表外盒几何：border-box 宽/左缘/内容宽（重/轻两路单源，见 [tableOuterGeometry]）。 */
+    class TableOuterGeometry(val outerW: Int, val tableLeft: Int, val contentW: Int)
+
     /** auto 布局的单元格内容需求（列锚＋跨度＋首选/最小 px，均 ≥0；specified 为指定宽下限）。 */
     class CellPref(val col: Int, val colSpan: Int, val pref: Float, val min: Float, val specified: Float = 0f)
 
@@ -53,6 +57,30 @@ class TableGridModel(
     class CellHeight(val rowSpan: Int, val heightPx: Int)
 
     companion object {
+        /**
+         * 表外盒几何单源（重/轻两路共用）：指定宽（`%` 解容器/`px`）否则占满容器；
+         * `margin auto` 定横向偏移（左右皆 auto 居中，单侧 auto 顶另一边；非 auto 边距照常生效）。
+         *
+         * @param innerW 容器内容宽（表 margin 盒的安置域）；@param left 容器内容左缘。
+         */
+        fun tableOuterGeometry(innerW: Int, left: Int, style: ComputedStyle): TableOuterGeometry {
+            val outerW = (style.widthPct?.let { innerW * it / 100f } ?: style.widthPx ?: innerW.toFloat())
+                .roundToInt().coerceAtLeast(1)
+            // 注意：调用方传进的 left 已含非 auto margin-left（容器流通用规则），此处只补 auto 份；
+            // auto 值在级联已按 0 计入 margin，故 usedML/MR 只用于剩余空间计算。
+            val usedML = if (style.marginLeftAuto) 0f else style.margin.left
+            val usedMR = if (style.marginRightAuto) 0f else style.margin.right
+            val remaining = innerW - usedML - usedMR - outerW
+            val extra = when {
+                style.marginLeftAuto && style.marginRightAuto -> remaining.coerceAtLeast(0f) / 2f
+                style.marginLeftAuto -> remaining
+                else -> 0f
+            }
+            val tableLeft = left + extra.roundToInt()
+            val contentW = (outerW - (style.border.horizontal + style.padding.horizontal).roundToInt()).coerceAtLeast(1)
+            return TableOuterGeometry(outerW, tableLeft, contentW)
+        }
+
         /**
          * Builds the model for a `table` [MarkupElement]. Rows are the `tr` descendants (one level of
          * `thead`/`tbody`/`tfoot` unwrapped); cells are the `td`/`th` children of each row, assigned to

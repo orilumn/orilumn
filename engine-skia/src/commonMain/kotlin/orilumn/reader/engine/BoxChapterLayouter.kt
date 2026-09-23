@@ -36,7 +36,10 @@ import orilumn.reader.engine.paging.Paginator
 import orilumn.reader.engine.text.BoxDrawableLayout
 import orilumn.reader.engine.text.TypographicProfile
 import kotlin.math.roundToInt
-import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.runBlocking
 
 /**
  * How a chapter's pages are cut, and — critically — **which pagination table the result feeds**.
@@ -60,23 +63,15 @@ import kotlinx.coroutines.CancellationException
 enum class PaginationMode { LINE_DISK, BLOCK_TEMP }
 
 /** P13 (U6k): default worker count for chunk-parallel canonical shaping — at least 2, never more
- *  than 4, never stealing the last core (the foreground flip / UI stays on its own core). */
+ *  than 4, never stealing the last core (the foreground flip / UI stays on its own core).
+ *  R6: CPU 计数经 [platformCpuCount] expect/actual（commonMain 不可见 `Runtime`）。 */
 private val DEFAULT_CHUNK_PARALLELISM: Int = maxOf(
     2,
-    minOf(4, maxOf(1, Runtime.getRuntime().availableProcessors() - 1)),
+    minOf(4, maxOf(1, platformCpuCount() - 1)),
 )
 
-/** P13 (U6k): the shared chunk worker pool — fixed-size, daemon threads at MIN_PRIORITY (below the
- *  foreground so anchor/flip shaping is never robbed), lazily created and reused for the process.
- *  Chunk tasks are pure-CPU skia shapes over DISJOINT leaves (no shared state, so no lock). */
-private val CHUNK_POOL: java.util.concurrent.ExecutorService by lazy {
-    java.util.concurrent.Executors.newFixedThreadPool(DEFAULT_CHUNK_PARALLELISM) { r ->
-        Thread(r, "u6k-chunk").apply {
-            isDaemon = true
-            priority = Thread.MIN_PRIORITY
-        }
-    }
-}
+/** R6: 平台 CPU 核数（仅 chunk 并行度启发式用；iOS actual 后续补）。 */
+internal expect fun platformCpuCount(): Int
 
 /**
  * Result of the "fast prepare" phase of chapter layout — everything that can be done for the
@@ -486,9 +481,9 @@ class BoxChapterLayouter(
      * [checkpoint] (re-invoked per block in every chunk, like the sequential path) lets a background
      * cancel abandon with ~chunk granularity, ≤1 chapter as required by P2/P7.
      *
-     * Threading: chunks run on a shared low-priority work pool (daemon threads, below foreground so
-     * anchor/flip shaping is never robbed on small devices). Worker count degrades naturally on
-     * fewer cores; parallelism=1 runs in-order on the caller thread (test/debug). [prepare] is
+     * Threading: chunks run as coroutines on `Dispatchers.Default` capped to k-way
+     * parallelism (R6, ex daemon-thread pool; no priority API in common). Worker count degrades
+     * naturally on fewer cores; parallelism=1 runs in-order on the caller thread (test/debug). [prepare] is
      * read-only across workers (disjoint leaves), so no lock is needed.
      */
     fun fullLayoutChunked(
@@ -508,29 +503,21 @@ class BoxChapterLayouter(
         val ranges = ArrayList<IntRange>(k)
         for (s in 0 until total step chunkSize) ranges.add(s until minOf(s + chunkSize, total))
         val carriers = firstCarrierLeaves(leaves)
-        val futures = ranges.map { rng ->
-            CHUNK_POOL.submit(java.util.concurrent.Callable {
-                rng.map { bi ->
-                    checkpoint()
-                    shapeLeaf(leaves[bi], prepare.styleMap, profile,
-                        listMarkerFor(leaves[bi].el, prepare.styleMap::get, carriers), genOf = prepare.genOf,
-                        floatLead = leaves[bi].floatLead)
+        // R6: 结构化并发替代 Executor/Future——异常（含 checkpoint 的 CancellationException）
+        // 经 awaitAll 原样抛出并取消同批兄弟协程，无需 Future 解包；调用线程阻塞等齐
+        //（语义同旧 futures.get）。线程优先级 nicety 在 common 无 API，chunk 仍限 k 路，
+        // 不与前台抢跑的性质由 limitedParallelism 保持。
+        val shapes = runBlocking(Dispatchers.Default.limitedParallelism(k)) {
+            ranges.map { rng ->
+                async {
+                    rng.map { bi ->
+                        checkpoint()
+                        shapeLeaf(leaves[bi], prepare.styleMap, profile,
+                            listMarkerFor(leaves[bi].el, prepare.styleMap::get, carriers), genOf = prepare.genOf,
+                            floatLead = leaves[bi].floatLead)
+                    }
                 }
-            })
-        }
-        val shapes = try {
-            futures.map { it.get() }.flatten()
-        } catch (e: java.util.concurrent.ExecutionException) {
-            futures.forEach { it.cancel(true) }
-            // Unwrap the background worker's original exception (e.g. CancellationException from a
-            // checkpoint) so the caller sees the real failure, not the Future-wrapping ExecutionException.
-            throw (e.cause ?: e) as Exception
-        } catch (e: CancellationException) {
-            futures.forEach { it.cancel(true) }
-            throw e
-        } catch (e: Exception) {
-            futures.forEach { it.cancel(true) }
-            throw e
+            }.awaitAll().flatten()
         }
         return completeFullLayout(prepare, shapes, contentH, profile)
     }

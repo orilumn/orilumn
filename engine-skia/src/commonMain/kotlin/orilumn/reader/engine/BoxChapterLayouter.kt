@@ -1923,6 +1923,17 @@ class BoxChapterLayouter(
             leftEdgesOf = { e -> val s = prepare.resolveStyle(e); (s.border.left + s.padding.left).roundToInt() },
             marginLeftOf = { e -> val s = prepare.resolveStyle(e); s.margin.left.roundToInt() },
         )
+        // 表容器与重路径同式（指定宽/margin auto），否则增量/临时页的表边框画满容器宽，
+        // 与正典页（33..627）反复横跳。descend 值是旧全宽口径：宽含表自身边距，左缘已含 margin。
+        if (el.tag == "table") {
+            val insets = (style.border.horizontal + style.padding.horizontal).roundToInt()
+            val mL = if (style.marginLeftAuto) 0f else style.margin.left
+            val g = orilumn.reader.engine.laying.TableGridModel.tableOuterGeometry(contentWidth + insets, contentLeft - mL.roundToInt(), style)
+            return LayoutBox(
+                el = el, style = style, contentLeft = g.tableLeft, contentWidth = g.outerW,
+                ranges = emptyList(), textLength = 0, lineHeights = emptyList(), childBoxes = emptyList(),
+            )
+        }
         return LayoutBox(
             el = el, style = style, contentLeft = contentLeft, contentWidth = contentWidth,
             ranges = emptyList(), textLength = 0, lineHeights = emptyList(), childBoxes = emptyList(),

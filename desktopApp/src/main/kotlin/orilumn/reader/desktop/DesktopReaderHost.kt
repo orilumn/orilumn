@@ -17,7 +17,6 @@ import orilumn.reader.ui.reader.ReaderHost
 import orilumn.reader.ui.reader.ReaderPos
 import orilumn.reader.ui.reader.flattenTocItems
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.toComposeImageBitmap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -110,7 +109,7 @@ class DesktopReaderHost(
                 BookReadingState(
                     bookId = bookId,
                     chapter = loc.chapter,
-                    locator = "{\"v\":1,\"chapter\":${loc.chapter},\"char\":${loc.char}}",
+                    locator = orilumn.reader.data.read.ReadingLocatorCodec.encode(loc.chapter, loc.char),
                 )
             }
             if (!controller.open(bookId, saved)) return@withContext null
@@ -177,12 +176,10 @@ class DesktopReaderHost(
         controller.pageBackgrounds(pos.chapter, pos.slice)
 
     override suspend fun loadPageImage(img: PageImage): ImageBitmap? = withContext(Dispatchers.IO) {
-        // 取字节走控制器单源（常驻 reader；与平板 `loadPageImageRaw` 同一管线），解码是平台接缝：
-        // 与书架封面同一 Skia 解码栈，失败回 null（阅读面画灰色占位）。
+        // 取字节走控制器单源（常驻 reader；与平板 `loadPageImageRaw` 同一管线），解码走共享接缝：
+        // 与书架封面同一解码口径，失败回 null（阅读面画灰色占位）。
         val bytes = controller.loadPageImageRaw(img) ?: return@withContext null
-        runCatching {
-            org.jetbrains.skia.Image.makeFromEncoded(bytes).toComposeImageBitmap()
-        }.getOrNull()
+        orilumn.reader.ui.imageBitmapOf(bytes)
     }
 
     // P3-b: 背景图按需直解（取字节+解码全走控制器，与平板同一管线；失败回 null，該幅只留底色）。
@@ -221,24 +218,20 @@ class DesktopReaderHost(
      */
     private suspend fun topUpSkiaFonts(demand: orilumn.reader.engine.css.FontDemand): Boolean =
         withContext(Dispatchers.IO) {
-            val faces = runCatching { fontLibrary.reconcileOrphanFiles() }.getOrNull()
-                ?: runCatching { fontLibrary.list() }.getOrNull()
-                ?: return@withContext false
-            val slotFams = setOf(profile.fontBody, profile.fontTitle, profile.fontCode)
-                .map { it.trim() }.filter { it.isNotEmpty() }.toSet()
-            val sel = orilumn.reader.engine.skia.FontPoolSync.select(
-                faces, slotFams, demand, bookFontEntries,
-            ) { p -> java.io.File(p).takeIf { it.isFile }?.length() }
-            if (sel.sig == lastPoolFaceSig) return@withContext false
-            val asm = orilumn.reader.engine.skia.FontPoolSync.assemble(
-                sel.selected, { id -> fontLibrary.fontBytes(id) }, bookFontEntries,
+            val (changed, sig) = orilumn.reader.engine.skia.FontPoolSync.syncPool(
+                profile = profile,
+                demand = demand,
+                bookEntries = bookFontEntries,
+                lastSig = lastPoolFaceSig,
+                loadFaces = {
+                    runCatching { fontLibrary.reconcileOrphanFiles() }.getOrNull()
+                        ?: runCatching { fontLibrary.list() }.getOrNull()
+                },
+                fileSize = { p -> java.io.File(p).takeIf { it.isFile }?.length() },
+                fontBytes = { id -> fontLibrary.fontBytes(id) },
+                logTag = "Orilumn.Desktop",
             )
-            val changed = orilumn.reader.engine.skia.SkiaFontPool.setEmbedded(asm.embedded)
-            if (asm.failed == 0) lastPoolFaceSig = sel.sig
-            if (changed || asm.failed > 0) {
-                val mb = asm.embedded.sumOf { it.bytes.size } / 1048576
-                orilumn.reader.io.Logger.w("Orilumn.Desktop", "skia fonts refreshed families=${asm.embedded.size} mb=$mb failed=${asm.failed}")
-            }
+            lastPoolFaceSig = sig
             changed
         }
 
@@ -247,11 +240,8 @@ class DesktopReaderHost(
      */
     private suspend fun syncBookFonts(fonts: List<orilumn.reader.engine.css.BookFont>): Boolean =
         withContext(Dispatchers.IO) {
-            val entries = fonts.map { orilumn.reader.engine.skia.SkiaFontPool.EmbeddedFont(it.family, it.bytes) }
-            val sigOf: (List<orilumn.reader.engine.skia.SkiaFontPool.EmbeddedFont>) -> List<Pair<String, Int>> =
-                { list -> list.map { it.familyName to it.bytes.size }.sortedBy { it.first } }
-            if (sigOf(entries) == sigOf(bookFontEntries)) return@withContext false
-            bookFontEntries = entries
+            bookFontEntries = orilumn.reader.engine.skia.FontPoolSync.mergeBookFonts(bookFontEntries, fonts)
+                ?: return@withContext false
             // 走统一合并装载（签名含书内部分，零变化即池不动）。
             topUpSkiaFonts(orilumn.reader.engine.css.FontDemand.EMPTY)
         }

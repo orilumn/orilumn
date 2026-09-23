@@ -665,29 +665,24 @@ class ReaderActivity : ComponentActivity() {
      * 系统衬线（[SystemCjkSerif]）经 `systemSerif` 参数并入）。
      */
     private suspend fun syncSkiaPool(extra: orilumn.reader.engine.css.FontDemand): Boolean = withContext(Dispatchers.IO) {
-        // 孤儿文件先自愈（有字节无记录：选它永远落空），再按需装载。
-        val faces = runCatching { fontRepository.reconcileOrphanFiles() }.getOrNull()
-            ?: runCatching { fontRepository.list() }.getOrNull()
-            ?: return@withContext false
-        val slotFams = setOf(profile.fontBody, profile.fontTitle, profile.fontCode)
-            .map { it.trim() }.filter { it.isNotEmpty() }.toSet()
         // 系统宋体补装：把设备自带的中文衬线（NotoSerifCJK.ttc 的 SC 面）以引擎保留别名装进共用池，
-        // 让传统模式/书内 `serif` 的中文落到宋体而非默认黑体（见 SystemCjkSerif）。进程内只读一次，
-        // 未装该字体（其他平台/桌面）时 null 跳过、行为不变。
-        val systemSerif = SystemCjkSerif.entry()
-        val sel = orilumn.reader.engine.skia.FontPoolSync.select(
-            faces, slotFams, extra, bookFontEntries,
-        ) { p -> java.io.File(p).takeIf { it.isFile }?.length() }
-        if (sel.sig == lastPoolFaceSig) return@withContext false
-        val asm = orilumn.reader.engine.skia.FontPoolSync.assemble(
-            sel.selected, { id -> fontRepository.fontBytes(id) }, bookFontEntries, systemSerif,
+        // 让传统模式/书内 `serif` 的中文落到宋体而非默认黑体（见 SystemCjkSerif）。进程内只读一次。
+        val (changed, sig) = orilumn.reader.engine.skia.FontPoolSync.syncPool(
+            profile = profile,
+            demand = extra,
+            bookEntries = bookFontEntries,
+            lastSig = lastPoolFaceSig,
+            loadFaces = {
+                // 孤儿文件先自愈（有字节无记录：选它永远落空），再按需装载。
+                runCatching { fontRepository.reconcileOrphanFiles() }.getOrNull()
+                    ?: runCatching { fontRepository.list() }.getOrNull()
+            },
+            fileSize = { p -> java.io.File(p).takeIf { it.isFile }?.length() },
+            fontBytes = { id -> fontRepository.fontBytes(id) },
+            systemSerif = SystemCjkSerif.entry(),
+            logTag = TAG,
         )
-        val changed = SkiaFontPool.setEmbedded(asm.embedded)
-        if (asm.failed == 0) lastPoolFaceSig = sel.sig
-        if (changed || asm.failed > 0) {
-            val mb = asm.embedded.sumOf { it.bytes.size } / 1048576
-            Logger.w(TAG, "skia fonts refreshed families=${asm.embedded.size} mb=$mb needed=$slotFams failed=${asm.failed}")
-        }
+        lastPoolFaceSig = sig
         changed
     }
 
@@ -698,11 +693,8 @@ class ReaderActivity : ComponentActivity() {
     private var bookFontEntries: List<SkiaFontPool.EmbeddedFont> = emptyList()
 
     private suspend fun syncBookFonts(fonts: List<orilumn.reader.engine.css.BookFont>): Boolean = withContext(Dispatchers.IO) {
-        val entries = fonts.map { SkiaFontPool.EmbeddedFont(it.family, it.bytes) }
-        val sigOf: (List<SkiaFontPool.EmbeddedFont>) -> List<Pair<String, Int>> =
-            { list -> list.map { it.familyName to it.bytes.size }.sortedBy { it.first } }
-        if (sigOf(entries) == sigOf(bookFontEntries)) return@withContext false
-        bookFontEntries = entries
+        bookFontEntries = orilumn.reader.engine.skia.FontPoolSync.mergeBookFonts(bookFontEntries, fonts)
+            ?: return@withContext false
         // 走统一合并装载（签名含书内部分，零变化即池不动）。
         syncSkiaPool(orilumn.reader.engine.css.FontDemand.EMPTY)
     }

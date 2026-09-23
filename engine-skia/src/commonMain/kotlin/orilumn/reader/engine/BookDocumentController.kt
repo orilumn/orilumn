@@ -331,20 +331,11 @@ class BookDocumentController(
     }
 
     /**
-     * foliate lastLocation JSON (`{"chapter":N,"char":M}`) → (chapter, char).
-     * C2-P1: hand-rolled Regex instead of `org.json` (JVM-only; Regex runs in commonMain
-     * without new deps). Unparseable → null (no restore, same as the old `getOrNull()`);
-     * a valid object missing a key defaults that slot to 0 (same as the old `optInt`).
+     * 定位串解码单源见 [orilumn.reader.data.read.ReadingLocatorCodec]（写 `chapter:char`，
+     * 读兼容 foliate JSON 旧行与 `chapter:char`）。
      */
-    private fun parseLocator(locator: String?): Pair<Int, Int>? {
-        val s = locator?.takeIf { it.isNotBlank() } ?: return null
-        fun num(key: String) =
-            Regex(""""$key"\s*:\s*(-?\d+)""").find(s)?.groupValues?.getOrNull(1)?.toIntOrNull()
-        val ch = num("chapter")
-        val c = num("char")
-        if (ch == null && c == null) return null
-        return (ch ?: 0) to (c ?: 0)
-    }
+    private fun parseLocator(locator: String?): Pair<Int, Int>? =
+        orilumn.reader.data.read.ReadingLocatorCodec.decode(locator)
 
     /** Start location after loading (null when there is no book/no chapter).
  *   Returns (chapter, page): starting from [startChapter], skips chapters with no laid-out

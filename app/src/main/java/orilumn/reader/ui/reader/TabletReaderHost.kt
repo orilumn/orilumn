@@ -6,7 +6,8 @@ import orilumn.reader.data.epub.TocItem
 import orilumn.reader.engine.BookDocumentController
 import orilumn.reader.engine.skia.DecodedImage
 import orilumn.reader.engine.skia.DrawLine
-import androidx.compose.ui.graphics.asImageBitmap
+import orilumn.reader.ui.imageBitmapOf
+import orilumn.reader.ui.sampledImageBitmapOf
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -22,14 +23,14 @@ import kotlinx.coroutines.withContext
  *  - 开书/定位前，调用方须先构建好 controller 并 [BookDocumentController.setViewport] 设置视口，
  *    宿主 [open] 只做「打开 → prewarm → locateStart」的收口（保证 `pageLines` 的窗口与当前视口
  *    同参数）；
- *  - [pageLines] 从 chapter-drawable 的 [orilumn.reader.engine.text.BoxPageRenderer.skiaLineWindow] 按
- *    slice 行区间切片（章节绝对 Y，[orilumn.reader.ui.reader.ReaderPageCanvas] 平移到页坐标系）；
+ *  - [pageLines] 从 controller 的 skia 行窗按 slice 行区间切片（章节绝对 Y，
+ *    [orilumn.reader.ui.reader.ReaderPageCanvas] 平移到页坐标系）；
  *  - 增量/临时（大章锚点）页同样投影 skia 窗口（engine `buildPartialSkiaWindow`），三条路径
  *    （canonical/增量/临时）全绘，不再有空白页；
  *  - 跳转类操作（neighborChapterStart/pageAtFraction/chapterStart/openTocItem）跳前先
  *    finalizeOnLeave（复刻 legacy `jumpGate` 语义：离开→废除临时表、启用磁盘分页表 S5）；
- *  - 进度持久化 = controller 的 finalizeOnLeave + Room readingState（复刻 legacy `saveReadingStateNow`
- *    的 locator JSON 格式）。
+ *  - 进度持久化 = controller 的 finalizeOnLeave + readingState（locator 串格式见
+ *    共享 [orilumn.reader.data.read.ReadingLocatorCodec]）。
  */
 class TabletReaderHost(
     private val controller: BookDocumentController,
@@ -124,18 +125,13 @@ class TabletReaderHost(
 
     override suspend fun loadPageImage(img: orilumn.reader.engine.skia.PageImage): androidx.compose.ui.graphics.ImageBitmap? =
         withContext(Dispatchers.IO) {
-            // 直解原字节（BitmapFactory 采样）：skia decodeScaled→PNG→BitmapFactory 的往返
-            // 对摄影类大 JPEG 既慢又易失败（encode 回 null / 大 PNG 解码 null），灰块主因。
-            // 这里按 targetWidth 粗采样 + 精缩放，一次到位；失败才回退旧 PNG 桥。
+            // 解码走共享接缝（Q1-6）：原字节按宽采样，失败回退 PNG 字节直解。
             val raw = controller.loadPageImageRaw(img)
             if (raw != null) {
-                decodeSampled(raw, img.widthPx.coerceAtLeast(1))?.let { return@withContext it }
+                sampledImageBitmapOf(raw, img.widthPx.coerceAtLeast(1))?.let { return@withContext it }
             }
             val png = controller.loadPageImageBytes(img) ?: return@withContext null
-            runCatching {
-                android.graphics.BitmapFactory.decodeByteArray(png, 0, png.size)
-                    ?.asImageBitmap()
-            }.getOrNull()
+            imageBitmapOf(png)
         }
 
     override fun onSaveProgress(pos: ReaderPos) {
@@ -146,7 +142,7 @@ class TabletReaderHost(
             controller.finalizeOnLeave(pos.chapter)
             if (bookId < 0) return@launch
             val progress = controller.pageProgress(pos.chapter, pos.slice)
-            val locator = "{\"v\":1,\"chapter\":${pos.chapter},\"char\":${pos.slice.charStart}}"
+            val locator = orilumn.reader.data.read.ReadingLocatorCodec.encode(pos.chapter, pos.slice.charStart)
             repository.saveReadingState(
                 BookReadingState(
                     bookId = bookId,
@@ -158,40 +154,6 @@ class TabletReaderHost(
         }
     }
 
-    /**
-     * 按目标宽直解 [bytes]：先只读头取尺寸算 2 的幂采样率粗解，再精缩到目标宽
-     * （与退役 BitmapFactory 管线同语义）。失败回 null，调用方回退旧桥。
-     */
-    private fun decodeSampled(
-        bytes: ByteArray,
-        targetWidth: Int,
-    ): androidx.compose.ui.graphics.ImageBitmap? = runCatching {
-        val bounds = android.graphics.BitmapFactory.Options().also { it.inJustDecodeBounds = true }
-        android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-        val rawW = bounds.outWidth
-        val rawH = bounds.outHeight
-        if (rawW <= 0 || rawH <= 0) return@runCatching null
-        var sample = 1
-        if (targetWidth > 0) {
-            while (rawW / (sample * 2) >= targetWidth) sample *= 2
-        }
-        val opts = android.graphics.BitmapFactory.Options().also {
-            it.inSampleSize = sample
-            it.inPreferredConfig = android.graphics.Bitmap.Config.ARGB_8888
-        }
-        val bmp = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
-            ?: return@runCatching null
-        val tw = targetWidth.coerceAtLeast(1)
-        // 粗采样后仍宽于目标（或窄于目标）→ 精缩到目标宽等比高；已吻合则直接用。
-        if (bmp.width != tw) {
-            val th = ((bmp.height * tw.toFloat() / bmp.width).toInt()).coerceAtLeast(1)
-            val scaled = android.graphics.Bitmap.createScaledBitmap(bmp, tw, th, true)
-            if (scaled !== bmp) runCatching { bmp.recycle() }
-            scaled.asImageBitmap()
-        } else {
-            bmp.asImageBitmap()
-        }
-    }.getOrNull()
 
     /** 目录扁平化（与桌面同一语义：焦点下标即扁平序，见共享 [flattenTocItems]）。 */
     private fun flatToc(): List<TocItem> = flattenTocItems(controller.toc())

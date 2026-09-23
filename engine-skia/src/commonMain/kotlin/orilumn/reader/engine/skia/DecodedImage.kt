@@ -12,8 +12,8 @@ import kotlin.math.roundToInt
 
 /**
  * 统一图片载体（E1）。平板原先的 BitmapFactory/BitmapHolder 解码路径与桌面 skia 解码在此合并为
- * 「skia 解码结果」单一类型，shared-ui 与各壳共用；Q1 后 SharedWindow 绘制直接消费 [image]，
- * 旧 Android 绘制接缝经 [orilumn.reader.engine.skiaImageToAndroidBitmap] 像素桥（待退役）转换。
+ * 「skia 解码结果」单一类型，shared-ui 与各壳共用；Compose 位图经共享
+ * [orilumn.reader.ui.imageBitmapOf] 接缝产出（旧 PNG 单跳桥 R3 已删）。
  */
 class DecodedImage(val image: Image) {
     val width: Int get() = image.width

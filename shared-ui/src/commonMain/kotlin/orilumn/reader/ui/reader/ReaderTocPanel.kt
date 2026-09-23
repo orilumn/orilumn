@@ -229,8 +229,11 @@ fun ReaderTocPanel(
     }
 }
 
-/** One flattened TOC row in document order. */
-internal data class TocRowData(
+/** One flattened TOC row in document order.
+ *
+ * Q1 收敛后公开：平板 `AndroidReaderTocPanel` 的同构私有实现已删，统一用此。
+ */
+data class TocRowData(
     val item: TocItem,
     val depth: Int,
     val idx: Int,
@@ -238,7 +241,7 @@ internal data class TocRowData(
 )
 
 /** Flattens the TOC tree into document-order rows, recording each row's flattened parent index. */
-internal fun flattenToc(toc: List<TocItem>): List<TocRowData> {
+fun flattenToc(toc: List<TocItem>): List<TocRowData> {
     val rows = ArrayList<TocRowData>()
     fun walk(items: List<TocItem>, depth: Int, parentIdx: Int) {
         for (it in items) {

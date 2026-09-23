@@ -219,14 +219,14 @@ class DesktopShelfStore(root: File) : ShelfRepository {
     }
 
     suspend fun saveProgress(id: Long, locator: ReadingLocator) {
-        // S34a：定位落 `reading_states` 表；locator 串为桌面恢复格式 `chapter:char`
-        //（与 Android foliate JSON 同列不同生产者，各端只读写己方行，互不解析）。
+        // S34a：定位落 `reading_states` 表；locator 串格式见共享编解码
+        // [orilumn.reader.data.read.ReadingLocatorCodec]（写 `chapter:char`）。
         requireDb().saveReadingState(
             BookReadingState(
                 bookId = id,
                 chapter = locator.chapter,
                 progress = 0.0,
-                locator = "${locator.chapter}:${locator.char}",
+                locator = orilumn.reader.data.read.ReadingLocatorCodec.encode(locator.chapter, locator.char),
                 updatedAt = System.currentTimeMillis(),
             ),
         )
@@ -234,9 +234,8 @@ class DesktopShelfStore(root: File) : ShelfRepository {
 
     suspend fun loadProgress(id: Long): ReadingLocator? {
         val state = requireDb().readingState(id) ?: return null
-        val parts = state.locator?.split(':')
-        val chapter = parts?.getOrNull(0)?.toIntOrNull() ?: state.chapter
-        val char = parts?.getOrNull(1)?.toIntOrNull() ?: 0
+        val (chapter, char) = orilumn.reader.data.read.ReadingLocatorCodec.decode(state.locator)
+            ?: return ReadingLocator(state.chapter, 0)
         return ReadingLocator(chapter, char)
     }
 
@@ -256,7 +255,7 @@ class DesktopShelfStore(root: File) : ShelfRepository {
                     bookId = id,
                     chapter = locator.chapter,
                     progress = 0.0,
-                    locator = "${locator.chapter}:${locator.char}",
+                    locator = orilumn.reader.data.read.ReadingLocatorCodec.encode(locator.chapter, locator.char),
                     updatedAt = System.currentTimeMillis(),
                 ),
             )

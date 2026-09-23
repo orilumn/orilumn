@@ -3,11 +3,14 @@ package orilumn.reader.engine
 import orilumn.reader.collections.SyncLock
 import orilumn.reader.collections.withLock
 import orilumn.reader.data.book.BookReadingState
+import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.time.platformNowMs
 import orilumn.reader.data.epub.EpubResourceReader
 import orilumn.reader.data.epub.EpubParser
+import orilumn.reader.engine.css.BookStyleProbe
 import orilumn.reader.engine.css.CssBundle
 import orilumn.reader.engine.css.LightCssParser
+import orilumn.reader.engine.css.StyleComputer
 import orilumn.reader.engine.css.StyleSheet
 import orilumn.reader.engine.html.ChapterPreprocessor
 import orilumn.reader.engine.html.HtmlTreeConverter
@@ -331,19 +334,30 @@ class BookDocumentController(
     }
 
     /**
-     * foliate lastLocation JSON (`{"chapter":N,"char":M}`) → (chapter, char).
-     * C2-P1: hand-rolled Regex instead of `org.json` (JVM-only; Regex runs in commonMain
-     * without new deps). Unparseable → null (no restore, same as the old `getOrNull()`);
-     * a valid object missing a key defaults that slot to 0 (same as the old `optInt`).
+     * 定位串解码单源见 [orilumn.reader.data.read.ReadingLocatorCodec]（写 `chapter:char`，
+     * 读兼容 foliate JSON 旧行与 `chapter:char`）。
      */
-    private fun parseLocator(locator: String?): Pair<Int, Int>? {
-        val s = locator?.takeIf { it.isNotBlank() } ?: return null
-        fun num(key: String) =
-            Regex(""""$key"\s*:\s*(-?\d+)""").find(s)?.groupValues?.getOrNull(1)?.toIntOrNull()
-        val ch = num("chapter")
-        val c = num("char")
-        if (ch == null && c == null) return null
-        return (ch ?: 0) to (c ?: 0)
+    private fun parseLocator(locator: String?): Pair<Int, Int>? =
+        orilumn.reader.data.read.ReadingLocatorCodec.decode(locator)
+
+    /**
+     * 原书设置快照（Q2 下沉：原 `ReaderActivity.withBookStyle`）：切到原书设置时，
+     * 把当前章节的真实排版（首行缩进/段间距/行距）快照进设置值。探测失败原样返回。
+     */
+    fun snapshotBookStyle(chapter: Int, bodyPx: Float, base: ReaderSettings): ReaderSettings {
+        if (base.layoutTheme != "original") return base
+        val snap = runCatching {
+            val unit = unitAt(chapter) ?: return@runCatching null
+            val markup = unit.markup ?: return@runCatching null
+            val sheets = (unit.cssBundle?.cssTexts ?: emptyList()).map { LightCssParser().parse(it) }
+            val styles = StyleComputer(bodyPx, StyleSheet(emptyList()), sheets).compute(markup)
+            BookStyleProbe.snapshot(styles)
+        }.getOrNull() ?: return base
+        return base.copy(
+            firstLineIndent = snap.firstLineIndent,
+            paragraphSpacing = snap.paragraphSpacing,
+            lineSpacing = snap.lineSpacing,
+        )
     }
 
     /** Start location after loading (null when there is no book/no chapter).
@@ -1762,6 +1776,30 @@ private fun finishCanonicalBackground(
         val page: PageSlice,
     )
 
+    /**
+     * Q2/R5：锚点落位查询下沉（原桌面 `landAnchor`）：章内字符所在页；无内容回 null
+     *（调用方退回 locateStart）。切片查找纯函数见 common [pageSliceAtChar]。
+     */
+    suspend fun pageAtChar(chapter: Int, char: Int): PageSlice? {
+        val unit = ensureChapterLayout(chapter, char) ?: return null
+        return orilumn.reader.engine.paging.pageSliceAtChar(unit.pageSlices, char)
+    }
+
+    /**
+     * Q2/R5：版式绑定下沉（原壳 `applyReflowResult` 的引擎半）：unit 变更收归控制器，
+     * 壳不再触碰 [ChapterUnit]。true = 调用方应刷版本号并落位；false = unit 缺失直接返回。
+     *
+     * 唯一语义差：unit 存在但无产品版式（大章锚点保留旧版式）时，原壳会空刷一次版本号
+     *（内容无变化，仅强制重取同一窗口），此处不再空刷——像素与定位完全一致。
+     */
+    fun bindReflow(r: ReflowResult): Boolean {
+        val unit = unitAt(r.chapter) ?: return false
+        if (unit.inProgress != null) return true
+        val layout = r.layout ?: return false
+        unit.bind(layout, r.slices)
+        return true
+    }
+
     fun pageProgress(chapter: Int, slice: PageSlice): Double {
         // After lazy loading the whole-book character total is unknown, so progress is converted
         // with "equal chapter weights": chapter start 0, chapter end 1, whole book = cumulative/chapters.
@@ -1889,6 +1927,7 @@ private fun finishCanonicalBackground(
     /** Locates the first content page of (or after) [index], skipping blank/cover chapters.
  *  Used by the TOC panel to jump to an arbitrary chapter. */
     suspend fun openChapterStart(index: Int): Pair<Int, PageSlice>? {
+        if (chapters.isEmpty()) return null
         var ch = index.coerceIn(0, chapters.size - 1)
         while (ch < chapters.size) {
             val unit = ensureChapterLayout(ch)

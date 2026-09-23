@@ -1,5 +1,6 @@
 package orilumn.reader.engine.css
 
+import orilumn.reader.engine.css.WhiteSpace
 import orilumn.reader.engine.html.MarkupElement
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -92,10 +93,34 @@ class PresentationAttrCascadeTest {
     }
 
     @Test
+    fun `非法 white-space 值丢弃走继承`() {
+        // 本书 `pre code { white-space: nowarp }`（拼错）：非法声明丢弃，code 继承 pre 的值，
+        // 而不是回落 NORMAL（否则多行代码挤成一行）。
+        val code = node("code")
+        val pre = node("pre", children = listOf(code)); code.parent = pre
+        val body = node("body", children = listOf(pre)); pre.parent = body
+        val out = compute(
+            body,
+            ua = "pre { white-space: pre-wrap; }",
+            author = "pre code { white-space: nowarp; }",
+        )
+        assertEquals(WhiteSpace.PRE_WRAP, out[code]?.whiteSpace)
+    }
+
+    @Test
     fun `width height 表示型属性照旧进级联`() {
         val (table, _, td) = cellTree(mapOf("width" to "40"))
         val body = node("body", children = listOf(table)); table.parent = body
         val out = compute(body)
         assertEquals(40f, out[td]?.widthPx!!, 1e-3f)
+    }
+
+    @Test
+    fun `width 实务杂质容错进级联`() {
+        // 本书 `th width="100px;"`（px 后缀＋引号内分号）：取前导数字，浏览器同式宽容。
+        val (_, _, td) = cellTree(mapOf("width" to "100px;"))
+        val body = node("body", children = listOf(td.parent!!.parent!!)); td.parent!!.parent!!.parent = body
+        val out = compute(body)
+        assertEquals(100f, out[td]?.widthPx!!, 1e-3f)
     }
 }

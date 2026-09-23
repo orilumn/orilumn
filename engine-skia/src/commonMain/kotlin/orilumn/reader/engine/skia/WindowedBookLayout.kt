@@ -40,6 +40,7 @@ abstract class WindowedBookLayout : PagedLayout, BreakAwareBookLayout {
     protected abstract val chapterHref: String
     protected abstract val skiaLines: Map<Int, DrawLine>?
     protected abstract val tableCells: Map<Int, List<DrawLine>>
+    protected abstract val tableCellImages: Map<Int, List<PageImage>>
     protected abstract val tableBorders: List<PageBackground>
 
     override fun skiaLineWindow(): Map<Int, DrawLine>? = skiaLines
@@ -132,6 +133,10 @@ abstract class WindowedBookLayout : PagedLayout, BreakAwareBookLayout {
                     heightPx = h,
                 ),
             )
+        }
+        // 表格图（与表行文本同窗；行下标键与 tableCells 一致）。
+        for ((idx, imgs) in tableCellImages.entries) {
+            if (idx in firstLine until pageEnd) out.addAll(imgs)
         }
         return out
     }

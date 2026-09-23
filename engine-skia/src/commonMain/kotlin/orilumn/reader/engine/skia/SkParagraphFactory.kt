@@ -1,6 +1,7 @@
 package orilumn.reader.engine.skia
 
 import orilumn.reader.engine.css.TextAlign
+import orilumn.reader.engine.html.CODE_TAGS
 import org.jetbrains.skia.Data
 import org.jetbrains.skia.FontMgr
 import org.jetbrains.skia.FontStyle
@@ -258,7 +259,6 @@ object SkParagraphFactory {
 
     private const val DEFAULT_FAMILY = "sans-serif"
     private const val MONO_FAMILY = "monospace"
-    private val CODE_TAGS = setOf("pre", "code", "kbd", "samp")
     private val GENERIC_CANDIDATES = mapOf(
         // 拉丁实族打头（浏览器顺序，Windows/macOS 的拉丁渲染与此前完全一致），随后是各平台
         // CJK 同类候选：Android Noto CJK（TC 优先照顾繁体）、Windows 明/黑体系（PMingLiU/

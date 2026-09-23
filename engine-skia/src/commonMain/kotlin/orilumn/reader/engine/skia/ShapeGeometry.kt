@@ -7,9 +7,13 @@ import orilumn.reader.engine.css.WhiteSpace
 import orilumn.reader.engine.css.cssHexToArgb
 import orilumn.reader.engine.html.MarkupElement
 import orilumn.reader.engine.laying.BaselineShift
+import orilumn.reader.engine.laying.BlockClassify
 import orilumn.reader.engine.laying.EmptyGen
 import orilumn.reader.engine.laying.FloatLead
 import orilumn.reader.engine.laying.GenOf
+import orilumn.reader.engine.laying.HiddenCheck
+import orilumn.reader.engine.laying.HIDDEN_NONE
+import orilumn.reader.engine.laying.adjustLineHeightsForInlineImages
 import orilumn.reader.engine.laying.NormalFlowLayout
 import orilumn.reader.engine.laying.RubyRun
 import orilumn.reader.engine.laying.ShapeFontRequest
@@ -52,6 +56,9 @@ fun shapeGeometry(
     ancestorStyleOf: ((MarkupElement) -> ComputedStyle?)? = null,
     genOf: GenOf = EmptyGen,
     floatLead: FloatLead? = null,
+    /** 行内图行高：classify/hidden 喂全即与盒流同口径配对 U+FFFC；缺省只用 isBlock＋不过滤。 */
+    classify: BlockClassify? = null,
+    hidden: HiddenCheck = HIDDEN_NONE,
     isBlock: (MarkupElement) -> Boolean,
 ): ShapedGeometry {
     // Replaceable (img) leaf: no text to shape — a synthetic single line whose height is the
@@ -96,12 +103,22 @@ fun shapeGeometry(
     // P6-b: 叠排注音 runs（与 text 同构遍历；无注音回空表零回归）＋行高增量（与重路径同式）。
     val rubyRuns = rubyRunsOf(el, styles, rootStyle, genOf, isBlock)
     val grownHeights = adjustLineHeightsForRuby(broken, broken.map { it.heightPx }, rubyRuns)
+    // 行内图行高（渲染内核单源 laying/ImageLineHeights）：shape 自带终高，行窗/分页/格高同源。
+    // 注音增量先合入 broken 副本再算图高，两者取高（与盒流 breakLeafLines 同口径）。
+    val imageHeights = adjustLineHeightsForInlineImages(
+        text,
+        broken.mapIndexed { i, b ->
+            orilumn.reader.engine.laying.BrokenLine(b.range, grownHeights.getOrElse(i) { b.heightPx })
+        },
+        el, styles, classify ?: BlockClassify(isBlock), hidden,
+        widthPx, imageLoader, chapterHref,
+    )
     // Whole-paragraph single-style break (canonical semantics): code-like blocks resolve mono
     // exactly like the skia font stack ([SkParagraphFactory] CODE_TAGS rule).
     return ShapedGeometry(
         text = text,
         lineRanges = broken.map { it.range },
-        lineHeights = grownHeights,
+        lineHeights = imageHeights,
         listMarker = listMarker,
         alignment = rootStyle.textAlign,
         fontSizePx = rootStyle.fontSizePx.coerceAtLeast(1f),

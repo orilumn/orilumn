@@ -166,8 +166,14 @@ class Cascade(
         private val EMPTY_TAGS = emptySet<String>()
 
         private fun numericPxAttr(raw: String): String? {
-            val num = raw.toIntOrNull() ?: raw.toFloatOrNull() ?: return null
-            return "${num}px"
+            // HTML4 数值属性本为纯数字/百分比，但实务常带杂质（本书 `width="100px"` 的 px 后缀、
+            // `width="100px;"` 的引号内分号），浏览器取前导数字照收；百分比另行处理，此处略过。
+            val t = raw.trim()
+            if (t.endsWith("%")) return null
+            val n = t.takeWhile { it.isDigit() || it == '.' || it == '-' || it == '+' }.toFloatOrNull()
+                ?: return null
+            val s = if (n == n.toInt().toFloat()) n.toInt().toString() else n.toString()
+            return "${s}px"
         }
 
         private val PRESENTATION_ATTRS = listOf(

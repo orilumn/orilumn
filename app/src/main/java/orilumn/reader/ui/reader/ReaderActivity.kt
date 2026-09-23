@@ -43,10 +43,6 @@ import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.data.settings.ReaderSettingsStore
 import orilumn.reader.engine.BookDocumentController
 import orilumn.reader.engine.BookFileResolver
-import orilumn.reader.engine.css.BookStyleProbe
-import orilumn.reader.engine.css.LightCssParser
-import orilumn.reader.engine.css.StyleComputer
-import orilumn.reader.engine.css.StyleSheet
 import orilumn.reader.engine.text.LayoutParamKey
 import orilumn.reader.engine.text.SystemCjkSerif
 import orilumn.reader.engine.text.TypographicProfile
@@ -208,11 +204,16 @@ class ReaderActivity : ComponentActivity() {
                 orilumn.reader.engine.EngineDiag.enabled = orilumn.reader.BuildConfig.DEBUG
                 // 用户字库先进共用 skia 集合（整形与绘制同一实例；否则首排按系统字体断行，
                 // 绘制切内嵌字体即全书错位）。IO 内同步等，不与首排抢跑。
-                // P2-b: 新书清掉旧书内字体条目（池刷新只含本书）＋缓存文件后继重建。
+                // P2-b: 新书清掉旧书内字体条目（池刷新只含本书）。
                 bookFontEntries = emptyList()
-                bookFontFileCache.clear()
                 // F4c: 系统族落行（INSERT OR IGNORE，开屏一次；面板开页再同步一次）。
-                runCatching { fontRepository.syncSystemFaces(orilumn.reader.engine.skia.systemFontFaces()) }
+                // 中文名链（桌面同式方案B）：name 表直读优先，无本地化名的族展示层回退族名本身。
+                runCatching {
+                    fontRepository.syncSystemFaces(
+                        orilumn.reader.engine.skia.systemFontFaces(),
+                        fontRepository.systemFontLocalizedNames(),
+                    )
+                }
                 refreshSkiaFonts()
                 val file = BookFileResolver(this@ReaderActivity).resolve(bookPath ?: return@runCatching null)
                     ?: return@runCatching null
@@ -507,23 +508,13 @@ class ReaderActivity : ComponentActivity() {
         }
     }
 
-    /** 绑定重排结果并落位（大章锚点路径保留旧版式当后缓冲，不绑 null 产品版式）。 */
+    /** 绑定重排结果并落位（版式变更收归控制器 [BookDocumentController.bindReflow]，此处只刷版本号与定位）。 */
     private fun applyReflowResult(c: BookDocumentController, r: BookDocumentController.ReflowResult) {
-        val unit = c.unitAt(r.chapter) ?: return
+        if (!c.bindReflow(r)) return
         // 先 bump 版式号：行/图/背景缓存键随之失效（pos 相等时也强制重取）。
         layoutRevision++
-        if (unit.inProgress != null) {
-            // Anchor 临时路径：临时渲染版式已 live，保留旧章版式为后缓冲 —— 不绑 null 产品版式。
-            currentPos = ReaderPos(r.chapter, r.page)
-            externalPos = ReaderPos(r.chapter, r.page)
-        } else {
-            val layout = r.layout
-            if (layout != null) {
-                unit.bind(layout, r.slices)
-                currentPos = ReaderPos(r.chapter, r.page)
-                externalPos = ReaderPos(r.chapter, r.page)
-            }
-        }
+        currentPos = ReaderPos(r.chapter, r.page)
+        externalPos = ReaderPos(r.chapter, r.page)
     }
 
     // ---- Brightness (physical backlight; overlay drawn by ReaderScreen's ReaderLightMask) ----
@@ -665,29 +656,24 @@ class ReaderActivity : ComponentActivity() {
      * 系统衬线（[SystemCjkSerif]）经 `systemSerif` 参数并入）。
      */
     private suspend fun syncSkiaPool(extra: orilumn.reader.engine.css.FontDemand): Boolean = withContext(Dispatchers.IO) {
-        // 孤儿文件先自愈（有字节无记录：选它永远落空），再按需装载。
-        val faces = runCatching { fontRepository.reconcileOrphanFiles() }.getOrNull()
-            ?: runCatching { fontRepository.list() }.getOrNull()
-            ?: return@withContext false
-        val slotFams = setOf(profile.fontBody, profile.fontTitle, profile.fontCode)
-            .map { it.trim() }.filter { it.isNotEmpty() }.toSet()
         // 系统宋体补装：把设备自带的中文衬线（NotoSerifCJK.ttc 的 SC 面）以引擎保留别名装进共用池，
-        // 让传统模式/书内 `serif` 的中文落到宋体而非默认黑体（见 SystemCjkSerif）。进程内只读一次，
-        // 未装该字体（其他平台/桌面）时 null 跳过、行为不变。
-        val systemSerif = SystemCjkSerif.entry()
-        val sel = orilumn.reader.engine.skia.FontPoolSync.select(
-            faces, slotFams, extra, bookFontEntries,
-        ) { p -> java.io.File(p).takeIf { it.isFile }?.length() }
-        if (sel.sig == lastPoolFaceSig) return@withContext false
-        val asm = orilumn.reader.engine.skia.FontPoolSync.assemble(
-            sel.selected, { id -> fontRepository.fontBytes(id) }, bookFontEntries, systemSerif,
+        // 让传统模式/书内 `serif` 的中文落到宋体而非默认黑体（见 SystemCjkSerif）。进程内只读一次。
+        val (changed, sig) = orilumn.reader.engine.skia.FontPoolSync.syncPool(
+            profile = profile,
+            demand = extra,
+            bookEntries = bookFontEntries,
+            lastSig = lastPoolFaceSig,
+            loadFaces = {
+                // 孤儿文件先自愈（有字节无记录：选它永远落空），再按需装载。
+                runCatching { fontRepository.reconcileOrphanFiles() }.getOrNull()
+                    ?: runCatching { fontRepository.list() }.getOrNull()
+            },
+            fileSize = { p -> java.io.File(p).takeIf { it.isFile }?.length() },
+            fontBytes = { id -> fontRepository.fontBytes(id) },
+            systemSerif = SystemCjkSerif.entry(),
+            logTag = TAG,
         )
-        val changed = SkiaFontPool.setEmbedded(asm.embedded)
-        if (asm.failed == 0) lastPoolFaceSig = sel.sig
-        if (changed || asm.failed > 0) {
-            val mb = asm.embedded.sumOf { it.bytes.size } / 1048576
-            Logger.w(TAG, "skia fonts refreshed families=${asm.embedded.size} mb=$mb needed=$slotFams failed=${asm.failed}")
-        }
+        lastPoolFaceSig = sig
         changed
     }
 
@@ -698,56 +684,12 @@ class ReaderActivity : ComponentActivity() {
     private var bookFontEntries: List<SkiaFontPool.EmbeddedFont> = emptyList()
 
     private suspend fun syncBookFonts(fonts: List<orilumn.reader.engine.css.BookFont>): Boolean = withContext(Dispatchers.IO) {
-        val entries = fonts.map { SkiaFontPool.EmbeddedFont(it.family, it.bytes) }
-        val sigOf: (List<SkiaFontPool.EmbeddedFont>) -> List<Pair<String, Int>> =
-            { list -> list.map { it.familyName to it.bytes.size }.sortedBy { it.first } }
-        if (sigOf(entries) == sigOf(bookFontEntries)) return@withContext false
-        bookFontEntries = entries
+        bookFontEntries = orilumn.reader.engine.skia.FontPoolSync.mergeBookFonts(bookFontEntries, fonts)
+            ?: return@withContext false
         // 走统一合并装载（签名含书内部分，零变化即池不动）。
         syncSkiaPool(orilumn.reader.engine.css.FontDemand.EMPTY)
     }
 
-    /**
-     * 阅读面字体池（canvas 兜底绘制专用：表格/符号）：用户导入字体按名登记，
-     * 槽位路由已由级联 UI 层写进 families，这里只做名 → 文件投影。
-     * P2-b: 书内字体经缓存文件同口径投影（主文本走 skia 窗口，本桥只管兜底）。
-     */
-    private fun fontPool(): orilumn.reader.engine.text.FontPool {
-        val faces = runCatching { kotlinx.coroutines.runBlocking { fontRepository.list() } }.getOrNull() ?: emptyList()
-        val byName = HashMap<String, MutableList<orilumn.reader.data.font.FontFace>>()
-        for (f in faces) {
-            byName.computeIfAbsent(f.familyName) { ArrayList() }.add(f)
-            if (f.displayName != f.familyName) byName.computeIfAbsent(f.displayName) { ArrayList() }.add(f)
-        }
-        for (e in bookFontEntries) {
-            val f = bookFontCacheFile(e) ?: continue
-            val rec = orilumn.reader.data.font.FontFace(
-                id = -e.familyName.hashCode().toLong(),
-                familyName = e.familyName,
-                displayName = e.familyName,
-                path = f.absolutePath,
-                lang = "",
-            )
-            byName.computeIfAbsent(e.familyName) { ArrayList() }.add(rec)
-        }
-        return orilumn.reader.engine.text.FontPool(imported = byName)
-    }
-
-    /** 书内字体缓存文件（族名＋字节量键；一次写入复用；失败记 null 下次重试）。 */
-    private val bookFontFileCache = HashMap<String, java.io.File?>()
-
-    private fun bookFontCacheFile(e: SkiaFontPool.EmbeddedFont): java.io.File? {
-        val key = "${e.familyName}:${e.bytes.size}"
-        if (!bookFontFileCache.containsKey(key)) {
-            val dir = java.io.File(cacheDir, "book-fonts/$bookId").apply { mkdirs() }
-            val safe = e.familyName.replace(Regex("[^A-Za-z0-9_-]"), "_").take(40).ifEmpty { "font" }
-            val f = java.io.File(dir, "$safe-${e.bytes.size}.ttf")
-            val ok = (f.isFile && f.length() == e.bytes.size.toLong()) ||
-                runCatching { f.writeBytes(e.bytes); true }.getOrDefault(false)
-            bookFontFileCache[key] = if (ok) f else null
-        }
-        return bookFontFileCache[key]
-    }
 
     /**
      * 切到原书设置时，把当前章节的真实排版（首行缩进/段间距/行距）快照进预设的滑块值
@@ -755,20 +697,9 @@ class ReaderActivity : ComponentActivity() {
      */
     private fun ReaderSettings.withBookStyle(): ReaderSettings {
         if (layoutTheme != "original") return this
-        val snap = runCatching {
-            val c = engine ?: return@runCatching null
-            val p = currentPos ?: return@runCatching null
-            val unit = c.unitAt(p.chapter) ?: return@runCatching null
-            val markup = unit.markup ?: return@runCatching null
-            val sheets = (unit.cssBundle?.cssTexts ?: emptyList()).map { LightCssParser().parse(it) }
-            val styles = StyleComputer(profile.bodyPx, StyleSheet(emptyList()), sheets).compute(markup)
-            BookStyleProbe.snapshot(styles)
-        }.getOrNull() ?: return this
-        return copy(
-            firstLineIndent = snap.firstLineIndent,
-            paragraphSpacing = snap.paragraphSpacing,
-            lineSpacing = snap.lineSpacing,
-        )
+        val c = engine ?: return this
+        val p = currentPos ?: return this
+        return c.snapshotBookStyle(p.chapter, profile.bodyPx, this)
     }
 
     companion object {
@@ -783,26 +714,3 @@ class ReaderActivity : ComponentActivity() {
 const val EXTRA_BOOK_PATH = "book_file_path"
 /** Primary key of the book passed when launching the reader from the bookshelf (progress is stored/loaded only when >=0). */
 const val EXTRA_BOOK_ID = "book_id"
-
-/**
- * 定位回抛装饰器：把宿主返回的每个 [ReaderPos] 同步给活动状态（目录高亮/重排锚点/退出保存），
- * 其余全部透传。[onSaveProgress] 同样携带定位一并回抛。
- */
-private class SnapshotReaderHost(
-    private val delegate: ReaderHost,
-    private val onPos: (ReaderPos) -> Unit,
-) : ReaderHost by delegate {
-    override suspend fun open(): ReaderPos? = delegate.open()?.also(onPos)
-    override suspend fun adjacent(pos: ReaderPos, direction: Int): ReaderPos? =
-        delegate.adjacent(pos, direction)?.also(onPos)
-    override suspend fun neighborChapterStart(chapter: Int, direction: Int): ReaderPos? =
-        delegate.neighborChapterStart(chapter, direction)?.also(onPos)
-    override suspend fun pageAtFraction(fraction: Double): ReaderPos? =
-        delegate.pageAtFraction(fraction)?.also(onPos)
-    override suspend fun chapterStart(index: Int): ReaderPos? =
-        delegate.chapterStart(index)?.also(onPos)
-    override fun onSaveProgress(pos: ReaderPos) {
-        onPos(pos)
-        delegate.onSaveProgress(pos)
-    }
-}

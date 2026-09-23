@@ -475,16 +475,18 @@ object NormalFlowLayout {
             // un-splittable line of the row's height, drawn as a 2D grid). Rows, not cells, are the
             // pagination/char leaves, so a page can split the table between rows only.
             // P1-2: caption 展开为自己的盒（递归分解；`caption-side: bottom` 时沉底）。
-            val innerW = innerBreakWidth(style, widthPx)
+            // 表外盒几何（指定宽/margin auto）走重轻单源 [TableGridModel.tableOuterGeometry]。
+            val g = TableGridModel.tableOuterGeometry(widthPx, left, style)
+            val innerW = g.contentW
             // The table's own border-box left is its children's baseline; rows start after its left edge.
-            val rowLeft = left + (style.border.left + style.padding.left).roundToInt()
+            val rowLeft = g.tableLeft + (style.border.left + style.padding.left).roundToInt()
             val rows = buildTableRows(el, styles, breaker, innerW, rowLeft, classify, hidden, imageLoader, chapterHref, genOf)
             val cap = TableGridModel.build(el).caption
             val capBoxes = if (cap != null && !hidden.isHidden(cap)) {
                 buildBoxTree(cap, styles, breaker, innerW, rowLeft, classify, hidden, imageLoader, chapterHref, genOf, pending)
             } else emptyList()
             val children = if (capBoxes.isNotEmpty() && captionIsBottom(el) { styles[it] }) rows + capBoxes else capBoxes + rows
-            listOf(LayoutBox(el, style, left, widthPx, emptyList(), 0, emptyList(), children))
+            listOf(LayoutBox(el, style, g.tableLeft, g.outerW, emptyList(), 0, emptyList(), children))
         } else if (blockChildren.isEmpty() && isReplaceable(el)) {
             // Replaceable leaf (img): no text, fixed pixel height, one char slot. Never broken by a
             // shaper — the box flow emits it as a single un-splittable line.
@@ -747,7 +749,12 @@ object NormalFlowLayout {
         val (colXs, colWs) = if (tableStyle.tableLayoutFixed) {
             TableGridModel.columnLayout(tableContentW, model.columnCount, spH, left)
         } else {
-            TableGridModel.autoColumnLayout(tableContentW, model.columnCount, spH, left, prefs)
+            // 指定表宽拉伸下限：表有指定宽时列填满表内容宽，否则保持三段式不拉伸。
+            val tSpecified = styles[el]?.let { it.widthPct != null || it.widthPx != null } ?: false
+            TableGridModel.autoColumnLayout(
+                tableContentW, model.columnCount, spH, left, prefs,
+                minTableW = if (tSpecified) tableContentW else 0,
+            )
         }
         fun cellOuter(col: Int, colSpan: Int): Int {
             var w = 0
@@ -1238,6 +1245,64 @@ object NormalFlowLayout {
     }
 
     /**
+     * 渲染层：[owner] 内容顶到其首叶 [firstLeaf] 边框顶的距离（首子链逐层 margin＋edge，
+     * 与 [consecutiveLeafAdvance] B 侧同门：edge-free 段折叠一次、遇 edge 即结算、
+     * 每次结算单次 round）。轻量路径凭它把背景带向上补到容器内容顶，再由
+     * [backgroundBandExtent] 去自身 edge 即容器真顶（首叶 margin-top 段本就画容器底，
+     * 如 `blockquote > h2` 的 2rem；owner 自身 margin/edge 碰都不碰，更不进底）。
+     * [firstLeaf] 不在首子链上（窗口半截、首叶在窗外）即 null，调用方保持旧行为（页带裁剪兜底）。
+     * 自属（owner === firstLeaf）即 0。
+     */
+    fun firstChildDescentTop(
+        owner: MarkupElement,
+        firstLeaf: MarkupElement,
+        styleOf: (MarkupElement) -> ComputedStyle,
+    ): Int? {
+        if (owner === firstLeaf) return 0
+        // 上行收链：leaf→owner，中途断开即非后代（理论上不会发生，防呆）。
+        val up = ArrayList<MarkupElement>()
+        var n: MarkupElement? = firstLeaf
+        while (n != null && n !== owner) {
+            up.add(n)
+            n = n.parent
+        }
+        if (n !== owner) return null
+        // 注意：只算内容顶以下的链（owner 自身 edge 由 backgroundBandExtent 去，
+        // 在这里重复计入会把带子顶进 owner 自身 margin，吃掉与上段的间隙）。
+        var dist = 0
+        var merged = 0f
+        for (i in up.size - 1 downTo 0) {
+            val el = up[i]
+            val parent = if (i + 1 < up.size) up[i + 1] else owner
+            if (!isFirstSignificantChild(parent, el)) return null
+            if (i > 0) {
+                val s = styleOf(el)
+                merged = collapseMargins(merged, s.margin.top)
+                val topEdges = (s.border.top + s.padding.top).roundToInt()
+                if (topEdges > 0) {
+                    dist += merged.roundToInt()
+                    dist += topEdges
+                    merged = 0f
+                }
+            } else {
+                merged = collapseMargins(merged, styleOf(el).margin.top)
+                dist += merged.roundToInt()
+            }
+        }
+        return dist
+    }
+
+    /** 首个有效子（跳过纯空白 #text；与 Selector 相邻语义同口径，保守：行内元素也算阻挡）。 */
+    private fun isFirstSignificantChild(parent: MarkupElement, el: MarkupElement): Boolean {
+        for (c in parent.children) {
+            if (c === el) return true
+            if (c.tag == "#text" && c.text.isBlank()) continue
+            return false
+        }
+        return false
+    }
+
+    /**
      * Default block classification: an element is a block iff its tag is a known default block tag.
      * `<img>` is NOT a default block — CSS defaults to inline-block (inline-level replaceable), so it
      * lives inside its container's text flow. Only explicit `display:block` on the img promotes it to
@@ -1462,7 +1527,10 @@ object NormalFlowLayout {
         fontRuns: List<FontRun>,
     ): TableGridModel.CellPref {
         val edges = style.padding.horizontal + style.border.horizontal
-        if (text.isEmpty()) return TableGridModel.cellPref(col, colSpan, 0f, 0f, edges)
+        // 指定宽下限（`th width=100px` 等表示型属性经级联已进 widthPx，content 口径，
+        // 故加边距成 border-box；百分比在度量期无容器可解，暂略）。
+        val specified = ((style.widthPx ?: 0f).coerceAtLeast(0f) + edges).takeIf { style.widthPx != null && style.widthPx > 0f } ?: 0f
+        if (text.isEmpty()) return TableGridModel.cellPref(col, colSpan, 0f, 0f, edges, specified)
         val mono = style.monospace || tag == "pre"
         val maxContent = breaker.preferredWidth(text, style.fontSizePx, style.fontFamilies, style.fontWeight, style.italic, mono, fontRuns)
         val minContent = if (WhiteSpaceNormalize.wraps(style.whiteSpace)) {
@@ -1470,7 +1538,7 @@ object NormalFlowLayout {
         } else {
             maxContent
         }
-        return TableGridModel.cellPref(col, colSpan, maxContent, minContent, edges)
+        return TableGridModel.cellPref(col, colSpan, maxContent, minContent, edges, specified)
     }
 
     /**
@@ -1592,78 +1660,6 @@ object NormalFlowLayout {
         return null
     }
 
-    /**
-     * Inline `<img>` elements under [root] in the exact document order [absorbedText] emits
-     * their U+FFFC slots, so the k-th U+FFFC in the absorbed text is the k-th element here.
-     */
-    private fun inlineImageEls(
-        root: MarkupElement,
-        classify: BlockClassify,
-        hidden: HiddenCheck = HIDDEN_NONE,
-    ): List<MarkupElement> {
-        val out = ArrayList<MarkupElement>()
-        fun walk(node: MarkupElement) {
-            for (c in node.children) {
-                when {
-                    hidden.isHidden(c) -> Unit
-                    c.isText || c.tag == "br" -> Unit
-                    classify.isBlock(c) -> Unit
-                    isReplaceable(c) -> out.add(c)
-                    else -> walk(c)
-                }
-            }
-        }
-        walk(root)
-        return out
-    }
-
-    /**
-     * Raises breaker line heights for lines holding inline `<img>` slots (U+FFFC) to the images'
-     * used heights (CSS 2.1 §10.8 line-box rule). Returns per-line heights aligned with [broken].
-     *
-     * The [BrokenLine.range]s index into [text]; U+FFFC occurrence order matches
-     * [inlineImageEls] order, so images are consumed in line order. A line with several images
-     * takes the tallest. Image-free lines keep the breaker height untouched.
-     */
-    /** P6-a2: 行内图抬升行高（盒子流单源；pure，供轻路径 eager 复刻）。 */
-    fun adjustLineHeightsForInlineImages(
-        text: String,
-        broken: List<BrokenLine>,
-        root: MarkupElement,
-        styles: Map<MarkupElement, ComputedStyle>,
-        classify: BlockClassify,
-        hidden: HiddenCheck,
-        breakW: Int,
-        imageLoader: ImageBoundsReader?,
-        chapterHref: String,
-    ): List<Int> {
-        if (broken.isEmpty() || text.indexOf('\uFFFC') < 0) return broken.map { it.heightPx }
-        // Queue of images in U+FFFC order; consumed as their slots appear line by line.
-        val imgs = ArrayDeque(inlineImageEls(root, classify, hidden))
-        if (imgs.isEmpty()) return broken.map { it.heightPx }
-        // Index of the k-th U+FFFC in [text] → image lookup without re-scanning per line.
-        val fffcAt = ArrayList<Int>()
-        var p = text.indexOf('\uFFFC')
-        while (p >= 0) { fffcAt.add(p); p = text.indexOf('\uFFFC', p + 1) }
-        var cursor = 0 // consumed count into fffcAt/imgs
-        return broken.map { line ->
-            var tallest = 0
-            // BrokenLine.range is an inclusive IntRange (see emit(): r.first..r.last).
-            val lo = line.range.first.coerceAtLeast(0)
-            val hi = line.range.last.coerceAtMost(text.length - 1)
-            while (cursor < fffcAt.size && fffcAt[cursor] < lo) cursor++
-            var scan = cursor
-            while (scan < fffcAt.size && fffcAt[scan] <= hi) {
-                val img = imgs.getOrNull(scan) ?: break
-                val imgStyle = styles[img] ?: styles[root] ?: DEFAULT_STYLE
-                val usedH = replacedUsedSize(img, imgStyle, breakW, imageLoader, chapterHref).second
-                if (usedH > tallest) tallest = usedH
-                scan++
-            }
-            cursor = scan
-            if (tallest > 0) maxOf(line.heightPx, tallest) else line.heightPx
-        }
-    }
 
     private val BOX_BLOCK_TAGS = setOf(
         "p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre", "section",
@@ -1672,5 +1668,5 @@ object NormalFlowLayout {
         "main", "hgroup", "details", "summary",
     )
 
-    private val DEFAULT_STYLE = ComputedStyle(fontSizePx = 16f, lineHeightRatio = 1.5f)
+    internal val DEFAULT_STYLE = ComputedStyle(fontSizePx = 16f, lineHeightRatio = 1.5f)
 }

@@ -21,9 +21,8 @@ import orilumn.reader.engine.skia.ImageCodec
  *     coarse sample + createScaledBitmap precise scale). The result is cached so subsequent draws
  *     of the same image at the same target width return immediately.
  *
- * E1: the decode path is now skia-only; the `android.graphics.Bitmap` it used to hand out lives
- * only at the Android canvas draw seam via [skiaImageToAndroidBitmap] (C1-0: shaping no longer
- * consumes bitmaps — inline `<img>` is a U+FFFC geometry placeholder).
+ * E1: the decode path is now skia-only; Compose 位图经共享 [orilumn.reader.ui.imageBitmapOf]
+ * 接缝产出 (C1-0: shaping no longer consumes bitmaps — inline `<img>` is a U+FFFC geometry placeholder).
  *
  * All methods are **thread-safe** (guarded by an internal lock).
  */

@@ -24,7 +24,7 @@ import orilumn.reader.engine.html.MarkupElement
  * @param ui the reader-app stylesheet (above settings; carries line-height / paragraph spacing).
  * @param gapScale 疏密 (paragraphGapScale): scales the computed top/bottom margin of every block
  *   except `p`/`li` — 作者 css / UA 默认值都被保留, 只被比例调节 (1.0 = 原书排版, 不做改动).
- *   `p`/`li` 的垂直间距由 UI 层的 段间距 完全接管 (替换语义), 不参与缩放.
+ *   `p`/`li` 的纵边距由 UI 层的 段间距 接管 (替换语义 + 仅 p/li 相邻对，见 [ReaderUiSheet]), 不参与缩放.
  */
 class StyleComputer(
     private val rootFontPx: Float,
@@ -44,7 +44,7 @@ class StyleComputer(
         /** `display` values treated as block-level for box classification (matches the roadmap). */
         val DISPLAY_BLOCK_VALUES = setOf("block", "list-item", "flex", "grid", "inline-table")
 
-        /** p/li 的垂直间距归 段间距 (UI 层替换语义) 所有, 疏密 (gapScale) 缩放豁免. */
+        /** p/li 纵边距归 段间距 (UI 层替换语义，仅 p/li 相邻对) 所有, 疏密 (gapScale) 缩放豁免. */
         val GAP_SCALE_EXEMPT = setOf("p", "li")
     }
 
@@ -153,7 +153,7 @@ class StyleComputer(
 
         val rawMargin = parseEdges(w, "margin", "margin-top", "margin-right", "margin-bottom", "margin-left", fontSize, parent.fontSizePx)
         // 疏密 (gapScale): 调节语义 —— 在 cascade 结果之上按比例缩放 (作者 css / UA 默认值保留, 不替换).
-        // 只动垂直 (top/bottom); p/li 豁免 (其垂直间距归 段间距 的替换语义).
+        // 只动垂直 (top/bottom); p/li 豁免 (其纵边距归 段间距 的替换语义，仅 p/li 相邻对).
         val margin = if (gapScale != 1f && tag.lowercase() !in GAP_SCALE_EXEMPT) {
             rawMargin.copy(top = rawMargin.top * gapScale, bottom = rawMargin.bottom * gapScale)
         } else rawMargin
@@ -175,6 +175,8 @@ class StyleComputer(
             underline = w["text-decoration"]?.let { parseUnderline(it) } ?: false,
             textIndentPx = w["text-indent"]?.let { v -> parseLength(v)?.resolve(fontSize, parent.fontSizePx, rootFontPx) } ?: 0f,
             margin = margin,
+            marginLeftAuto = isMarginAuto(w, left = true),
+            marginRightAuto = isMarginAuto(w, left = false),
             padding = parseEdges(w, "padding", "padding-top", "padding-right", "padding-bottom", "padding-left", fontSize, parent.fontSizePx),
             border = parseBorderEdges(w, fontSize, parent.fontSizePx),
             backgroundColorHex = w["background-color"]?.let { parseCssColor(it) }
@@ -892,6 +894,24 @@ class StyleComputer(
      * shorthand's matching slot. `margin: auto` is treated as 0 (block horizontal auto-centering is
      * a later refinement). Does not inherit (initial values are 0).
      */
+    /**
+     * 横向 margin auto 判定（表/块居中）：显式 `margin-left/right: auto` 优先；
+     * 否则看 `margin` 简写的对应槽（top right bottom left；2 值取左右槽，3 值取中槽）。
+     */
+    private fun isMarginAuto(w: Map<String, String>, left: Boolean): Boolean {
+        val side = if (left) "margin-left" else "margin-right"
+        w[side]?.trim()?.lowercase()?.let { return it == "auto" }
+        val sh = w["margin"]?.trim()?.split(Regex("\\s+"))?.filter { it.isNotEmpty() } ?: return false
+        if (sh.isEmpty()) return false
+        // TRBL 槽位：left 取 1（2/3 值）或 3（4 值）；right 取 1（2/3 值）或 1（4 值→[1]）。
+        val slot = when (sh.size) {
+            1 -> 0
+            2, 3 -> 1
+            else -> if (left) 3 else 1
+        }
+        return sh.getOrNull(slot)?.lowercase() == "auto"
+    }
+
     private fun parseEdges(
         w: Map<String, String>,
         shorthand: String,
@@ -959,12 +979,14 @@ class StyleComputer(
         return ""
     }
 
-    private fun parseWhiteSpace(value: String): WhiteSpace = when (value.trim().lowercase()) {
+    /** 非法值回 null（声明丢弃、走继承；如书里拼错的 `white-space: nowarp`）。 */
+    private fun parseWhiteSpace(value: String): WhiteSpace? = when (value.trim().lowercase()) {
+        "normal" -> WhiteSpace.NORMAL
         "pre" -> WhiteSpace.PRE
         "nowrap" -> WhiteSpace.NOWRAP
         "pre-wrap" -> WhiteSpace.PRE_WRAP
         "pre-line" -> WhiteSpace.PRE_LINE
-        else -> WhiteSpace.NORMAL
+        else -> null
     }
 
     /** `letter-spacing`/`word-spacing`: normal → 0; lengths resolve against own font-size. */

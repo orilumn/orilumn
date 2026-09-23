@@ -196,4 +196,52 @@ class TableFamilyTest {
             0.05,
         )
     }
+
+    @Test
+    fun `auto 指定宽为列下限`() {
+        // `th width=100px`（表示型属性经级联进 widthPx）：列 min/pref 不低于指定宽。
+        val cells = listOf(
+            TableGridModel.CellPref(0, 1, 42f, 42f, 100f),
+            TableGridModel.CellPref(1, 1, 221f, 60f, 0f),
+        )
+        val (_, ws) = TableGridModel.autoColumnLayout(700, 2, 0f, 0, cells)
+        assertEquals(100, ws[0])
+        assertEquals(221, ws[1])
+    }
+
+    @Test
+    fun `tableOuterGeometry 指定宽与auto居中`() {
+        val plain = ComputedStyle(10f, 1.5f)
+        // 无指定：占满。
+        val full = TableGridModel.tableOuterGeometry(660, 0, plain)
+        assertEquals(660, full.outerW)
+        assertEquals(0, full.tableLeft)
+        // width:90% + margin auto：594 宽，偏移 33 居中。
+        val centered = TableGridModel.tableOuterGeometry(
+            660, 0, ComputedStyle(10f, 1.5f, widthPct = 90f, marginLeftAuto = true, marginRightAuto = true),
+        )
+        assertEquals(594, centered.outerW)
+        assertEquals(33, centered.tableLeft)
+        assertEquals(594, centered.contentW)
+        // 仅左 auto：顶右边。
+        val right = TableGridModel.tableOuterGeometry(
+            660, 0, ComputedStyle(10f, 1.5f, widthPx = 600f, marginLeftAuto = true),
+        )
+        assertEquals(600, right.outerW)
+        assertEquals(60, right.tableLeft)
+    }
+
+    @Test
+    fun `auto 指定表宽拉伸列`() {
+        // 表 width:90%（594）而列 MAX 仅 321：多余按 pref 比例分列填满。
+        val cells = listOf(
+            TableGridModel.CellPref(0, 1, 100f, 100f),
+            TableGridModel.CellPref(1, 1, 221f, 60f),
+        )
+        val (_, ws) = TableGridModel.autoColumnLayout(660, 2, 0f, 0, cells, minTableW = 594)
+        assertEquals(594, ws.sum())
+        // 无指定不断行为（三段式不拉伸）。
+        val (_, ws0) = TableGridModel.autoColumnLayout(660, 2, 0f, 0, cells)
+        assertEquals(321, ws0.sum())
+    }
 }

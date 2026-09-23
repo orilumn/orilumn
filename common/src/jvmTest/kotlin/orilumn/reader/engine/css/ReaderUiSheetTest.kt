@@ -55,22 +55,85 @@ class ReaderUiSheetTest {
     }
 
     @Test
-    fun `p rule carries per-side paragraph gap and first-line indent in em`() {
-        // paragraphSpacingPx 13 / bodyPx 18 = 0.7222…em; firstLineIndentEm 2 → 整数去尾.
+    fun `p base rule zeroes vertical margins but keeps first-line indent`() {
+        // 基线：p 纵边距恒 0（替换原书 margin），段间距只在相邻对规则里给后者。
         val p = profile(paragraphSpacingPx = 13, firstLineIndentEm = 2f, bodyPx = 18f)
         val d = declarations(p, "p")
-        assertEquals("0.72em", d["margin-top"])
-        assertEquals("0.72em", d["margin-bottom"])
+        assertEquals("0em", d["margin-top"])
+        assertEquals("0em", d["margin-bottom"])
         assertEquals("2em", d["text-indent"])
     }
 
     @Test
-    fun `li rule carries paragraph gap but never the first-line indent`() {
+    fun `li base rule zeroes vertical margins and never carries first-line indent`() {
         val p = profile(firstLineIndentEm = 2f)
         val d = declarations(p, "li")
-        assertEquals("0.72em", d["margin-top"])
-        assertEquals("0.72em", d["margin-bottom"])
+        assertEquals("0em", d["margin-top"])
+        assertEquals("0em", d["margin-bottom"])
         assertFalse("li 绝不套用首行缩进", d.containsKey("text-indent"))
+    }
+
+    @Test
+    fun `pair rule carries the paragraph gap on margin-top only`() {
+        // paragraphSpacingPx 13 / bodyPx 18 = 0.7222…em → 0.72em；只写 top，后者单侧即缝隙。
+        val p = profile(paragraphSpacingPx = 13, firstLineIndentEm = 2f, bodyPx = 18f)
+        val pair = ReaderUiSheet.build(p).rules
+            .single { it.selectors.size == 4 && "p + p" in it.selectors }
+            .declarations.associate { it.property to it.value }
+        assertEquals(setOf("p + p", "p + li", "li + p", "li + li"), ReaderUiSheet.build(p).rules
+            .single { it.selectors.size == 4 }.selectors.toSet())
+        assertEquals("0.72em", pair["margin-top"])
+        assertFalse("相邻对规则只写 top（bottom 恒 0，缝隙单侧即足）", pair.containsKey("margin-bottom"))
+    }
+
+    @Test
+    fun `pair rule wins over the base rule inside the same UI tier`() {
+        // 同 tier 内特异度 (0,0,2) > (0,0,1)：相邻对的后者恒取段间距，与声明顺序无关。
+        val p = profile(paragraphSpacingPx = 13, bodyPx = 18f)
+        val sheet = ReaderUiSheet.build(p)
+        val root = orilumn.reader.engine.html.HtmlTreeConverter()
+            .convert("<html><body><p>a</p><p>b</p></body></html>")!!
+        val engine = StyleComputer(18f, LightCssParser().parse(""), emptyList(), null, null, sheet)
+        val map = engine.compute(root)
+        fun nth(tag: String, n: Int): orilumn.reader.engine.html.MarkupElement {
+            val acc = ArrayList<orilumn.reader.engine.html.MarkupElement>()
+            fun walk(node: orilumn.reader.engine.html.MarkupElement) {
+                if (node.tag == tag) acc.add(node)
+                node.children.forEach(::walk)
+            }
+            walk(root)
+            return acc[n]
+        }
+        assertEquals(0f, map[nth("p", 0)]?.margin?.top)
+        assertEquals(13f, map[nth("p", 1)]?.margin?.top ?: -1f, 0.5f)
+    }
+
+    @Test
+    fun `paragraph gap applies only between p-li pairs`() {
+        // 口径锁：hn+p / p+ul / ul+p / 首项 li 取基线 0；p+p / li+li 后者取段间距。
+        val p = profile(paragraphSpacingPx = 13, firstLineIndentEm = 0f, bodyPx = 18f)
+        val sheet = ReaderUiSheet.build(p)
+        val root = orilumn.reader.engine.html.HtmlTreeConverter().convert(
+            "<html><body><h2>t</h2><p>a</p><p>b</p>" +
+                "<ul><li>x</li><li>y</li></ul><p>c</p></body></html>",
+        )!!
+        val engine = StyleComputer(18f, LightCssParser().parse(""), emptyList(), null, null, sheet)
+        val map = engine.compute(root)
+        fun nth(tag: String, n: Int): orilumn.reader.engine.html.MarkupElement {
+            val acc = ArrayList<orilumn.reader.engine.html.MarkupElement>()
+            fun walk(node: orilumn.reader.engine.html.MarkupElement) {
+                if (node.tag == tag) acc.add(node)
+                node.children.forEach(::walk)
+            }
+            walk(root)
+            return acc[n]
+        }
+        assertEquals("hn 后的 p 取基线 0", 0f, map[nth("p", 0)]?.margin?.top)
+        assertEquals("p+p 后者取段间距", 13f, map[nth("p", 1)]?.margin?.top ?: -1f, 0.5f)
+        assertEquals("首项 li 取基线 0", 0f, map[nth("li", 0)]?.margin?.top)
+        assertEquals("li+li 后者取段间距", 13f, map[nth("li", 1)]?.margin?.top ?: -1f, 0.5f)
+        assertEquals("ul 后的 p 取基线 0", 0f, map[nth("p", 2)]?.margin?.top)
+        assertEquals("p 纵 bottom 恒 0（缝隙单侧）", 0f, map[nth("p", 1)]?.margin?.bottom)
     }
 
     @Test

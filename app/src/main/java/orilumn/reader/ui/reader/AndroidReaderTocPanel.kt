@@ -173,37 +173,13 @@ fun AndroidReaderTocPanel(
     }
 }
 
-/** One flattened TOC row in document order. */
-private class TocRow(
-    val item: TocItem,
-    val depth: Int,
-    val idx: Int,
-) {
-    /** Flat index of the parent row; -1 for a top-level row. */
-    var parentIndex: Int = -1
-}
-
-/** Flattens the TOC tree into document-order rows, recording each row's flattened parent index. */
-private fun flattenToc(toc: List<TocItem>): List<TocRow> {
-    val rows = ArrayList<TocRow>()
-    fun walk(items: List<TocItem>, depth: Int, parentIdx: Int) {
-        for (it in items) {
-            val idx = rows.size
-            rows.add(TocRow(it, depth, idx).apply { parentIndex = parentIdx })
-            if (it.children.isNotEmpty()) walk(it.children, depth + 1, idx)
-        }
-    }
-    walk(toc, 0, -1)
-    return rows
-}
-
 /** Panel slide and mask dim/lighten share this duration so they stay synchronized. */
 private const val TocAnimMs = 280
 
 /** Draws one TOC row: indent by depth, label, expand/toggle caret, current-chapter highlight. */
 @Composable
 private fun TocRow(
-    row: TocRow,
+    row: TocRowData,
     current: Boolean,
     palette: AndroidPalette,
     hasChildren: Boolean,

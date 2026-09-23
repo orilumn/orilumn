@@ -3,8 +3,8 @@ package orilumn.reader.data.book
 import android.content.Context
 import android.net.Uri
 import orilumn.reader.data.epub.EpubFormatException
-import orilumn.reader.data.epub.EpubParser
-import orilumn.reader.data.epub.ZipEpubResourceReader
+import orilumn.reader.data.epub.parseEpubBytes
+import orilumn.reader.data.epub.readEpubEntry
 import orilumn.reader.engine.skia.ImageCodec
 import java.io.File
 import kotlin.math.roundToInt
@@ -32,20 +32,10 @@ class BookImporter(
      * Used to detect duplicates against books already in the library. Returns null on parse failure.
      */
     suspend fun scan(uri: Uri): ScannedBook? = withContext(Dispatchers.IO) {
-        runCatching {
-            val tmp = File(context.cacheDir, "scan_${System.currentTimeMillis()}.epub")
-            try {
-                context.contentResolver.openInputStream(uri).use { input ->
-                    input ?: throw IllegalStateException("无法打开所选文件")
-                    input.copyTo(tmp.outputStream())
-                }
-                val parsed = ZipEpubResourceReader(tmp.path).use { EpubParser().parse(it) }
-                if (parsed.isEmpty) throw EpubFormatException("书中没有可读正文章节")
-                ScannedBook(parsed.title, parsed.author)
-            } finally {
-                runCatching { tmp.delete() }
-            }
-        }.getOrNull()
+        val bytes = runCatching {
+            context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        }.getOrNull() ?: return@withContext null
+        scanBytes(bytes)
     }
 
     /**
@@ -54,36 +44,10 @@ class BookImporter(
      * @param uri the content:// uri returned by SAF selection (valid only for this session, used for one-shot read + copy).
      */
     suspend fun import(uri: Uri): Result<Long> = withContext(Dispatchers.IO) {
-        runCatching {
-            // Source SRC → temp cache copy (for zip parsing), then write the same byte series into the private library directory.
-            val tmp = File(context.cacheDir, "book_${System.currentTimeMillis()}.epub")
-            try {
-                context.contentResolver.openInputStream(uri).use { input ->
-                    input ?: throw IllegalStateException("无法打开所选文件")
-                    input.copyTo(tmp.outputStream())
-                }
-                val parsed = ZipEpubResourceReader(tmp.path).use { EpubParser().parse(it) }
-                if (parsed.isEmpty) throw EpubFormatException("书中没有可读正文章节")
-                val name = "book_${System.currentTimeMillis()}.epub"
-                val target = copyToPrivate(name, tmp.readBytes())
-                    ?: throw IllegalStateException("无法写入书库目录")
-                val id = repository.addBook(parsed.title, parsed.author, target)
-                // Extract the cover: decode the cover bytes → downscale → store in private covers/ → write back coverPath (shelf gets the cover right at import)
-                val coverPath = parsed.cover?.let { href ->
-                    val bytes = ZipEpubResourceReader(tmp.path).use { it.readBytes(href) }
-                        ?: return@let null
-                    saveCover(bytes, id)
-                }
-                if (coverPath != null) {
-                    repository.getBook(id)?.let { repository.updateBook(it.copy(coverPath = coverPath)) }
-                }
-                id
-            } catch (e: Throwable) {
-                throw e
-            } finally {
-                runCatching { tmp.delete() }
-            }
-        }
+        val bytes = runCatching {
+            context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        }.getOrNull() ?: return@withContext Result.failure(IllegalStateException("无法打开所选文件"))
+        importBytes(bytes)
     }
 
     /**
@@ -95,15 +59,9 @@ class BookImporter(
      */
     suspend fun scanBytes(bytes: ByteArray): ScannedBook? = withContext(Dispatchers.IO) {
         runCatching {
-            val tmp = File(context.cacheDir, "scan_${System.currentTimeMillis()}.epub")
-            try {
-                tmp.writeBytes(bytes)
-                val parsed = ZipEpubResourceReader(tmp.path).use { EpubParser().parse(it) }
-                if (parsed.isEmpty) throw EpubFormatException("书中没有可读正文章节")
-                ScannedBook(parsed.title, parsed.author)
-            } finally {
-                runCatching { tmp.delete() }
-            }
+            val parsed = parseEpubBytes(bytes, context.cacheDir.absolutePath)
+                ?: throw EpubFormatException("书中没有可读正文章节")
+            ScannedBook(parsed.title, parsed.author)
         }.getOrNull()
     }
 
@@ -113,29 +71,21 @@ class BookImporter(
      */
     suspend fun importBytes(bytes: ByteArray): Result<Long> = withContext(Dispatchers.IO) {
         runCatching {
-            val tmp = File(context.cacheDir, "book_${System.currentTimeMillis()}.epub")
-            try {
-                tmp.writeBytes(bytes)
-                val parsed = ZipEpubResourceReader(tmp.path).use { EpubParser().parse(it) }
-                if (parsed.isEmpty) throw EpubFormatException("书中没有可读正文章节")
-                val name = "book_${System.currentTimeMillis()}.epub"
-                val target = copyToPrivate(name, tmp.readBytes())
-                    ?: throw IllegalStateException("无法写入书库目录")
-                val id = repository.addBook(parsed.title, parsed.author, target)
-                val coverPath = parsed.cover?.let { href ->
-                    val coverBytes = ZipEpubResourceReader(tmp.path).use { it.readBytes(href) }
-                        ?: return@let null
-                    saveCover(coverBytes, id)
-                }
-                if (coverPath != null) {
-                    repository.getBook(id)?.let { repository.updateBook(it.copy(coverPath = coverPath)) }
-                }
-                id
-            } catch (e: Throwable) {
-                throw e
-            } finally {
-                runCatching { tmp.delete() }
+            val parsed = parseEpubBytes(bytes, context.cacheDir.absolutePath)
+                ?: throw EpubFormatException("书中没有可读正文章节")
+            val name = "book_${System.currentTimeMillis()}.epub"
+            val target = copyToPrivate(name, bytes)
+                ?: throw IllegalStateException("无法写入书库目录")
+            val id = repository.addBook(parsed.title, parsed.author, target)
+            val coverPath = parsed.cover?.let { href ->
+                val coverBytes = readEpubEntry(bytes, context.cacheDir.absolutePath, href)
+                    ?: return@let null
+                saveCover(coverBytes, id)
             }
+            if (coverPath != null) {
+                repository.getBook(id)?.let { repository.updateBook(it.copy(coverPath = coverPath)) }
+            }
+            id
         }
     }
     /** Write the book bytes into the private `filesDir/books/`, returning the absolute path; null when the write fails. */

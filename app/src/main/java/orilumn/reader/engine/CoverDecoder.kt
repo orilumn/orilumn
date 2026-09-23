@@ -6,8 +6,7 @@ import orilumn.reader.engine.skia.ImageCodec
 
 /**
  * Cover decoding: reads the cover bytes from the book's resource by `EpubBook.cover` href →
- * [DecodedImage] (E1: skia decode; the Android Bitmap is bridged at the View paint seam by
- * [BookDocumentController] via [skiaImageToAndroidBitmap]).
+ * [DecodedImage] (E1: skia decode; Compose 位图经共享 [orilumn.reader.ui.imageBitmapOf] 接缝产出）。
  *
  * Lazily decoded and cached by [BookDocumentController]; images may be large, so decoding limits
  * the size as needed.

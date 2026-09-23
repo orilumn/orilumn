@@ -4,8 +4,8 @@
  * 流行的现代中文排版:
  *   - 正文用无衬线字体 (body → sans-serif, 继承到所有文字);
  *   - 无首行缩进 (p text-indent 清零, 段落靠段间距分离);
- *   - 段间距分隔段落: UI 层 (uiSheetFromProfile, tier 44) 恒按 段间距 设置给 p/li
- *     打上前/后垂直外边距 (默认 1em), 本节不重复写死 margin, 保持随阅读器调节。
+ *   - 段间距分隔段落: UI 层 (uiSheetFromProfile, tier 44) 按 段间距 只给 p/li 相邻对的后者
+ *     打 margin-top (默认 1em), 其余邻边归零, 本节不重复写死 margin, 保持随阅读器调节。
  * 层级: theme=42 < settings=43 < UI=44。优先级恒为 UI > 主题 > 原书 css;
  * 切到本主题时把主题预设同步写入 UI 设置 (TypographicProfile.withLayoutTheme):
  *   - 无首行缩进 → firstLineIndent = 0, 段间距 → 默认值, 正文通用字族 → fontBody = sans-serif;

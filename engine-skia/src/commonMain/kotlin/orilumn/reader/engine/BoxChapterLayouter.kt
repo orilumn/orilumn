@@ -18,6 +18,7 @@ import orilumn.reader.engine.html.MarkupElement
 import orilumn.reader.engine.layout.ListMarkers
 import orilumn.reader.engine.laying.ParagraphShapeRef
 import orilumn.reader.engine.laying.ShapedGeometry
+import orilumn.reader.engine.laying.adjustLineHeightsForInlineImages
 import orilumn.reader.engine.skia.shapeGeometry
 import orilumn.reader.io.Logger
 import orilumn.reader.engine.laying.BoxLayoutResult
@@ -36,7 +37,10 @@ import orilumn.reader.engine.paging.Paginator
 import orilumn.reader.engine.text.BoxDrawableLayout
 import orilumn.reader.engine.text.TypographicProfile
 import kotlin.math.roundToInt
-import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.runBlocking
 
 /**
  * How a chapter's pages are cut, and — critically — **which pagination table the result feeds**.
@@ -60,23 +64,15 @@ import kotlinx.coroutines.CancellationException
 enum class PaginationMode { LINE_DISK, BLOCK_TEMP }
 
 /** P13 (U6k): default worker count for chunk-parallel canonical shaping — at least 2, never more
- *  than 4, never stealing the last core (the foreground flip / UI stays on its own core). */
+ *  than 4, never stealing the last core (the foreground flip / UI stays on its own core).
+ *  R6: CPU 计数经 [platformCpuCount] expect/actual（commonMain 不可见 `Runtime`）。 */
 private val DEFAULT_CHUNK_PARALLELISM: Int = maxOf(
     2,
-    minOf(4, maxOf(1, Runtime.getRuntime().availableProcessors() - 1)),
+    minOf(4, maxOf(1, platformCpuCount() - 1)),
 )
 
-/** P13 (U6k): the shared chunk worker pool — fixed-size, daemon threads at MIN_PRIORITY (below the
- *  foreground so anchor/flip shaping is never robbed), lazily created and reused for the process.
- *  Chunk tasks are pure-CPU skia shapes over DISJOINT leaves (no shared state, so no lock). */
-private val CHUNK_POOL: java.util.concurrent.ExecutorService by lazy {
-    java.util.concurrent.Executors.newFixedThreadPool(DEFAULT_CHUNK_PARALLELISM) { r ->
-        Thread(r, "u6k-chunk").apply {
-            isDaemon = true
-            priority = Thread.MIN_PRIORITY
-        }
-    }
-}
+/** R6: 平台 CPU 核数（仅 chunk 并行度启发式用；iOS actual 后续补）。 */
+internal expect fun platformCpuCount(): Int
 
 /**
  * Result of the "fast prepare" phase of chapter layout — everything that can be done for the
@@ -353,7 +349,10 @@ class BoxChapterLayouter(
             leaves.map { orilumn.reader.engine.laying.NormalFlowLayout.styledCharAdvance(it, { e -> engine.resolve(e, styleCache) }, classify, hidden, liteGenOf) },
         )
         // Compute the typography-invariant leaf->background-owner map once (reuses this same cascade, so
-        // window rendering never re-walks ancestor styles).
+        // window rendering never re-walks ancestor styles). Background-only attribution (color/image):
+        // border-only leaves keep showing their ancestor container's fill; their own borders are
+        // emitted as per-leaf border boxes by buildBackgroundDrawBoxes (mirroring the heavy path,
+        // where every leaf box draws its own borders over the ancestor background).
         val ownerMap = HashMap<MarkupElement, MarkupElement>(leaves.size)
         for (el in leaves) {
             backgroundOwnerElement(el) { e -> engine.resolve(e, styleCache) }?.let { ownerMap[el] = it }
@@ -371,7 +370,9 @@ class BoxChapterLayouter(
         return structure
     }
 
-    /** Nearest background/border-bearing element for [el] (itself first, then block ancestors), or null. */
+    /** 内核层：[el] 自身起最近的背景承载盒（背景色/背景图，自身优先，否则块级祖先），无则 null。
+     *  只带边框、不带背景的元素（如带 `border-bottom` 的 `h2`）不算属主——其行区仍透出祖先
+     *  容器的底（如 `blockquote`），边框由轻量路径的叶边框盒另行绘制（重路径整树绘制天然如此）。 */
     private fun backgroundOwnerElement(
         el: MarkupElement,
         resolve: (MarkupElement) -> orilumn.reader.engine.css.ComputedStyle,
@@ -379,7 +380,7 @@ class BoxChapterLayouter(
         var cur: MarkupElement? = el
         while (cur != null && cur.tag != "body") {
             val s = resolve(cur)
-            if (s.hasPaintedSlab()) return cur
+            if (s.hasBackground()) return cur
             cur = cur.parent
         }
         return null
@@ -471,7 +472,7 @@ class BoxChapterLayouter(
             // P4-a3: 环绕前导随叶下发（与盒流断行同宽，否则 canonical 形状与结构行漂移）。
             shapeLeaf(leaf, prepare.styleMap, profile,
                 listMarkerFor(leaf.el, prepare.styleMap::get, carriers), genOf = prepare.genOf,
-                floatLead = leaf.floatLead)
+                floatLead = leaf.floatLead, classify = prepare.classify, hidden = prepare.hidden)
         }
         return completeFullLayout(prepare, shapes, contentH, profile)
     }
@@ -486,9 +487,9 @@ class BoxChapterLayouter(
      * [checkpoint] (re-invoked per block in every chunk, like the sequential path) lets a background
      * cancel abandon with ~chunk granularity, ≤1 chapter as required by P2/P7.
      *
-     * Threading: chunks run on a shared low-priority work pool (daemon threads, below foreground so
-     * anchor/flip shaping is never robbed on small devices). Worker count degrades naturally on
-     * fewer cores; parallelism=1 runs in-order on the caller thread (test/debug). [prepare] is
+     * Threading: chunks run as coroutines on `Dispatchers.Default` capped to k-way
+     * parallelism (R6, ex daemon-thread pool; no priority API in common). Worker count degrades
+     * naturally on fewer cores; parallelism=1 runs in-order on the caller thread (test/debug). [prepare] is
      * read-only across workers (disjoint leaves), so no lock is needed.
      */
     fun fullLayoutChunked(
@@ -508,29 +509,21 @@ class BoxChapterLayouter(
         val ranges = ArrayList<IntRange>(k)
         for (s in 0 until total step chunkSize) ranges.add(s until minOf(s + chunkSize, total))
         val carriers = firstCarrierLeaves(leaves)
-        val futures = ranges.map { rng ->
-            CHUNK_POOL.submit(java.util.concurrent.Callable {
-                rng.map { bi ->
-                    checkpoint()
-                    shapeLeaf(leaves[bi], prepare.styleMap, profile,
-                        listMarkerFor(leaves[bi].el, prepare.styleMap::get, carriers), genOf = prepare.genOf,
-                        floatLead = leaves[bi].floatLead)
+        // R6: 结构化并发替代 Executor/Future——异常（含 checkpoint 的 CancellationException）
+        // 经 awaitAll 原样抛出并取消同批兄弟协程，无需 Future 解包；调用线程阻塞等齐
+        //（语义同旧 futures.get）。线程优先级 nicety 在 common 无 API，chunk 仍限 k 路，
+        // 不与前台抢跑的性质由 limitedParallelism 保持。
+        val shapes = runBlocking(Dispatchers.Default.limitedParallelism(k)) {
+            ranges.map { rng ->
+                async {
+                    rng.map { bi ->
+                        checkpoint()
+                        shapeLeaf(leaves[bi], prepare.styleMap, profile,
+                            listMarkerFor(leaves[bi].el, prepare.styleMap::get, carriers), genOf = prepare.genOf,
+                            floatLead = leaves[bi].floatLead, classify = prepare.classify, hidden = prepare.hidden)
+                    }
                 }
-            })
-        }
-        val shapes = try {
-            futures.map { it.get() }.flatten()
-        } catch (e: java.util.concurrent.ExecutionException) {
-            futures.forEach { it.cancel(true) }
-            // Unwrap the background worker's original exception (e.g. CancellationException from a
-            // checkpoint) so the caller sees the real failure, not the Future-wrapping ExecutionException.
-            throw (e.cause ?: e) as Exception
-        } catch (e: CancellationException) {
-            futures.forEach { it.cancel(true) }
-            throw e
-        } catch (e: Exception) {
-            futures.forEach { it.cancel(true) }
-            throw e
+            }.awaitAll().flatten()
         }
         return completeFullLayout(prepare, shapes, contentH, profile)
     }
@@ -574,11 +567,12 @@ class BoxChapterLayouter(
             }
             val tableWin = orilumn.reader.engine.skia.TableCellLines.expandTable(
                 frames, { prepare.styleMap[it] }, profile.letterSpacingEm, profile.fgColor,
+                imageLoader, chapterHref,
             )
             BoxDrawableLayout(
                 BoxLayoutResult(lines, prepare.structure.boxes), shapes,
                 imageLoader, chapterHref, skiaLines = skiaLines,
-                tableCells = tableWin.lines, tableBorders = tableWin.borders,
+                tableCells = tableWin.lines, tableCellImages = tableWin.images, tableBorders = tableWin.borders,
             )
         }
         val rawSlices = Paginator.paginate(drawable, contentH)
@@ -821,6 +815,7 @@ class BoxChapterLayouter(
         }
         val incrWin = orilumn.reader.engine.skia.TableCellLines.expandTable(
             incrFrames, prepare::resolveStyle, profile.letterSpacingEm, profile.fgColor,
+            imageLoader, chapterHref,
         )
         val drawable = PartialDrawableLayout(
             lines = localLines,
@@ -834,6 +829,7 @@ class BoxChapterLayouter(
             avoidOwnerMap = prepare.avoidOwnerMap,
             skiaLinesSource = skiaLines,
             tableCellsSource = incrWin.lines,
+            tableCellImagesSource = incrWin.images,
             tableBordersSource = incrWin.borders,
         )
 
@@ -1455,6 +1451,8 @@ class BoxChapterLayouter(
         ) {
             prepare.floatWidths[i]?.let { NormalFlowLayout.innerBreakWidth(leaf.style, it) }
         } else null,
+        classify = prepare.lightClassify(),
+        hidden = prepare.hidden,
     )
 
     /**
@@ -1474,6 +1472,8 @@ class BoxChapterLayouter(
         profile: TypographicProfile,
         ancestorStyleOf: ((MarkupElement) -> orilumn.reader.engine.css.ComputedStyle?)? = null,
         genOf: orilumn.reader.engine.laying.GenOf = orilumn.reader.engine.laying.EmptyGen,
+        classify: orilumn.reader.engine.laying.BlockClassify? = null,
+        hidden: orilumn.reader.engine.laying.HiddenCheck = orilumn.reader.engine.laying.HIDDEN_NONE,
     ): Int {
         // 行高只取本行「rowspan==1」格的最大外高：跨行格的高度由其跨越的各行**分摊**
         // （[TableGridModel.resolveRowHeights]，浏览器实测口径），故此处不把跨行格整体压进
@@ -1483,7 +1483,7 @@ class BoxChapterLayouter(
         for (cell in t.cells) {
             val cs = styles[cell.el] ?: leaf.style
             val cw = NormalFlowLayout.innerBreakWidth(cs, cell.width)
-            val cs_ = shapeGeometry(cell.el, cs, styles, profile, cw, imageLoader = imageLoader, chapterHref = chapterHref, ancestorStyleOf = ancestorStyleOf, genOf = genOf) { it.tag in BLOCK_TAGS }
+            val cs_ = shapeGeometry(cell.el, cs, styles, profile, cw, imageLoader = imageLoader, chapterHref = chapterHref, ancestorStyleOf = ancestorStyleOf, genOf = genOf, classify = classify, hidden = hidden, isBlock = { it.tag in BLOCK_TAGS })
             cell.shape = cs_
             val cellH = if (cs_.lineCount > 0) (cs_.lineBottom(cs_.lineCount - 1) - cs_.lineTop(0)) else 0
             cell.height = (cellH + (cs.padding.vertical + cs.border.vertical).roundToInt()).coerceAtLeast(1)
@@ -1495,7 +1495,7 @@ class BoxChapterLayouter(
     /**
      * Shapes one leaf into a [ParagraphShape]. A table-row leaf fills its cells' shapes (each shaped
      * within its column width) and returns a synthetic single-line shape of the row's height; every other
-     * leaf falls through to [ParagraphShapes.shapeOf].
+     * leaf falls through to skia shapeGeometry.
      */
     private fun shapeLeaf(
         leaf: LayoutBox,
@@ -1509,18 +1509,21 @@ class BoxChapterLayouter(
         floatLead: orilumn.reader.engine.laying.FloatLead? = null,
         /** P6-a2 文本悬浮断行宽（null = 常规 border-box 宽）。 */
         breakWidthOverride: Int? = null,
+        /** 行内图行高配对用分类/隐藏判定（与盒流同口径；塑形层透传）。 */
+        classify: orilumn.reader.engine.laying.BlockClassify? = null,
+        hidden: orilumn.reader.engine.laying.HiddenCheck = orilumn.reader.engine.laying.HIDDEN_NONE,
     ): ParagraphShapeRef {
         val t = leaf.table
         if (t != null) {
-            val rowH = fillTableRowCells(t = t, leaf = leaf, styles = styles, profile = profile, ancestorStyleOf = ancestorStyleOf, genOf = genOf)
+            val rowH = fillTableRowCells(t = t, leaf = leaf, styles = styles, profile = profile, ancestorStyleOf = ancestorStyleOf, genOf = genOf, classify = classify, hidden = hidden)
             return ShapedGeometry(isReplaceable = true, replaceableBottom = rowH.coerceAtLeast(1), replaceableCharEnd = leaf.textLength.coerceAtLeast(1))
         }
         return shapeGeometry(
             leaf.el ?: orilumn.reader.engine.html.MarkupElement("body"), leaf.style, styles,
             profile, breakWidthOverride ?: breakWidthPx(leaf), listMarker,
             imageLoader = imageLoader, chapterHref = chapterHref, ancestorStyleOf = ancestorStyleOf, genOf = genOf,
-            floatLead = floatLead,
-        ) { it.tag in BLOCK_TAGS }
+            floatLead = floatLead, classify = classify, hidden = hidden, isBlock = { it.tag in BLOCK_TAGS },
+        )
     }
 
     /**
@@ -1557,7 +1560,7 @@ class BoxChapterLayouter(
             val leaf = prepare.block(i)
             val t = leaf.table
             if (t != null) {
-                fillTableRowCells(t = t, leaf = leaf, styles = prepare.inlineStyles(i), profile = profile, ancestorStyleOf = prepare::resolveStyle, genOf = prepare.genOf)
+                fillTableRowCells(t = t, leaf = leaf, styles = prepare.inlineStyles(i), profile = profile, ancestorStyleOf = prepare::resolveStyle, genOf = prepare.genOf, classify = prepare.lightClassify(), hidden = prepare.hidden)
             }
             return hit
         }
@@ -1617,6 +1620,7 @@ class BoxChapterLayouter(
         }
         val tempWin = orilumn.reader.engine.skia.TableCellLines.expandTable(
             tempFrames, prepare::resolveStyle, prepare.profile.letterSpacingEm, prepare.profile.fgColor,
+            imageLoader, chapterHref,
         )
         val layout = PartialDrawableLayout(
             lines = lines,
@@ -1628,6 +1632,7 @@ class BoxChapterLayouter(
             href = chapterHref,
             skiaLinesSource = skiaLines,
             tableCellsSource = tempWin.lines,
+            tableCellImagesSource = tempWin.images,
             tableBordersSource = tempWin.borders,
         )
         var lastLine = if (lines.isEmpty()) 0 else lines.size
@@ -1861,9 +1866,13 @@ class BoxChapterLayouter(
      * Builds the background/border boxes for an incremental page window, so block-level container
      * backgrounds (e.g. `blockquote`) survive the light path — which otherwise composites only leaf
      * text and would drop the container's fill. Mirrors the full path's box-tree backgrounds: every
-     * window leaf is attributed to the nearest background/border-bearing box (itself for `pre`, or an
+     * window leaf is attributed to its nearest background-bearing box (itself for `pre`, or an
      * ancestor container), and one box spans that owner's leaves' real vertical extent. So backgrounds
      * stay correct within the shaped window with no extra shaping.
+     *
+     * 内核层：背景归属只看背景色/背景图；只带边框的叶（如 `blockquote > h2` 的下边框）另出
+     * 叶边框盒（无背景填充，只画自身边框），且一律排在背景盒之后绘制——与重路径“先祖先背景、
+     * 后子孙边框”同序，否则容器底会盖掉标题下边框。
      */
     private fun buildBackgroundDrawBoxes(
         prepare: LightPrepare,
@@ -1881,6 +1890,7 @@ class BoxChapterLayouter(
         val ownerBottom = HashMap<MarkupElement, Int>()
         val ownerFirst = HashMap<MarkupElement, Int>()
         val ownerLast = HashMap<MarkupElement, Int>()
+        val ownerLeaf = HashMap<MarkupElement, MarkupElement>()
         val selfOwned = HashSet<MarkupElement>()
         for (i in leafList.indices) {
             val leaf = leafList[i]
@@ -1891,9 +1901,14 @@ class BoxChapterLayouter(
             // padding/border (counted once, already including the top inset rebuildLocalLines applies).
             val top = lines[lo].yTop - (leaf.style.border.top + leaf.style.padding.top).roundToInt()
             val bottom = lines[minOf(hi, lines.size) - 1].yBottom + (leaf.style.border.bottom + leaf.style.padding.bottom).roundToInt()
-            val owner = leaf.el?.let { prepare.backgroundOwnerMap[it] } ?: continue
-            if (owner === leaf.el) selfOwned.add(owner)
-            aggTop[owner] = minOf(aggTop[owner] ?: top, top)
+            val el = leaf.el ?: continue
+            val owner = prepare.backgroundOwnerMap[el] ?: continue
+            if (owner === el) selfOwned.add(owner)
+            val prevTop = aggTop[owner]
+            if (prevTop == null || top < prevTop) {
+                aggTop[owner] = top
+                ownerLeaf[owner] = el
+            }
             ownerBottom[owner] = maxOf(ownerBottom[owner] ?: bottom, bottom)
             ownerFirst[owner] = minOf(ownerFirst[owner] ?: lo, lo)
             ownerLast[owner] = maxOf(ownerLast[owner] ?: hi, hi)
@@ -1902,8 +1917,12 @@ class BoxChapterLayouter(
         for ((owner, top) in aggTop) {
             val box = ownerBackgroundBox(owner, prepare)
             val s = box.style
+            // 首叶 margin-top 段本就画容器底：按首子链补到容器真顶（自属/窗半截即 0，保持旧行为）。
+            val descent = ownerLeaf[owner]?.let {
+                NormalFlowLayout.firstChildDescentTop(owner, it, prepare::resolveStyle)
+            } ?: 0
             val (bandTop, bandBottom) = NormalFlowLayout.backgroundBandExtent(
-                ownerTop = top,
+                ownerTop = top - descent,
                 ownerBottom = ownerBottom[owner] ?: top,
                 ownerEdgesTop = (s.border.top + s.padding.top).roundToInt(),
                 ownerEdgesBottom = (s.border.bottom + s.padding.bottom).roundToInt(),
@@ -1916,6 +1935,33 @@ class BoxChapterLayouter(
             box.firstLineIndex = ownerFirst[owner] ?: -1
             box.lastLineExclusive = ownerLast[owner] ?: -1
             if (box.contentBottom > box.contentTop) out.add(box)
+        }
+        // Border-only leaves (e.g. a bordered `h2` inside a `blockquote`): their background comes
+        // from the ancestor owner box above, but their own borders still need a carrier — the leaf
+        // border box draws no fill (BoxDrawer skips fill-less backgrounds) and only its border edges.
+        // Appended after all background boxes so the fill never overpaints these borders. Leaves that
+        // already own a background box (self-owned, e.g. `pre` with its own fill) are skipped: that
+        // box already draws their borders.
+        for (i in leafList.indices) {
+            val leaf = leafList[i]
+            val el = leaf.el ?: continue
+            if (!leaf.style.hasBorderEdges()) continue
+            if (aggTop.containsKey(el)) continue
+            val lo = firstByBlock[i].coerceAtLeast(0)
+            val hi = lastByBlock[i]
+            if (lo >= lines.size || hi <= lo) continue
+            val top = lines[lo].yTop - (leaf.style.border.top + leaf.style.padding.top).roundToInt()
+            val bottom = lines[minOf(hi, lines.size) - 1].yBottom + (leaf.style.border.bottom + leaf.style.padding.bottom).roundToInt()
+            if (bottom <= top) continue
+            val borderBox = LayoutBox(
+                el = el, style = leaf.style, contentLeft = leaf.contentLeft, contentWidth = leaf.contentWidth,
+                ranges = emptyList(), textLength = 0, lineHeights = emptyList(), childBoxes = emptyList(),
+            )
+            borderBox.contentTop = top
+            borderBox.contentBottom = bottom
+            borderBox.firstLineIndex = lo
+            borderBox.lastLineExclusive = hi
+            out.add(borderBox)
         }
         return out
     }
@@ -1931,6 +1977,17 @@ class BoxChapterLayouter(
             leftEdgesOf = { e -> val s = prepare.resolveStyle(e); (s.border.left + s.padding.left).roundToInt() },
             marginLeftOf = { e -> val s = prepare.resolveStyle(e); s.margin.left.roundToInt() },
         )
+        // 表容器与重路径同式（指定宽/margin auto），否则增量/临时页的表边框画满容器宽，
+        // 与正典页（33..627）反复横跳。descend 值是旧全宽口径：宽含表自身边距，左缘已含 margin。
+        if (el.tag == "table") {
+            val insets = (style.border.horizontal + style.padding.horizontal).roundToInt()
+            val mL = if (style.marginLeftAuto) 0f else style.margin.left
+            val g = orilumn.reader.engine.laying.TableGridModel.tableOuterGeometry(contentWidth + insets, contentLeft - mL.roundToInt(), style)
+            return LayoutBox(
+                el = el, style = style, contentLeft = g.tableLeft, contentWidth = g.outerW,
+                ranges = emptyList(), textLength = 0, lineHeights = emptyList(), childBoxes = emptyList(),
+            )
+        }
         return LayoutBox(
             el = el, style = style, contentLeft = contentLeft, contentWidth = contentWidth,
             ranges = emptyList(), textLength = 0, lineHeights = emptyList(), childBoxes = emptyList(),
@@ -1959,6 +2016,7 @@ private class PartialDrawableLayout(
     private val avoidOwnerMap: Map<MarkupElement, MarkupElement> = emptyMap(),
     private val skiaLinesSource: Map<Int, orilumn.reader.engine.skia.DrawLine>? = null,
     private val tableCellsSource: Map<Int, List<orilumn.reader.engine.skia.DrawLine>> = emptyMap(),
+    private val tableCellImagesSource: Map<Int, List<orilumn.reader.engine.skia.PageImage>> = emptyMap(),
     private val tableBordersSource: List<orilumn.reader.engine.skia.PageBackground> = emptyList(),
 ) : orilumn.reader.engine.skia.WindowedBookLayout() {
 
@@ -1982,6 +2040,7 @@ private class PartialDrawableLayout(
     protected override val skiaLines: Map<Int, orilumn.reader.engine.skia.DrawLine>? get() = skiaLinesSource
     // 表格行展开随窗口预填（与 canonical 同源 helper；Compose 面随行窗绘制）。
     protected override val tableCells: Map<Int, List<orilumn.reader.engine.skia.DrawLine>> get() = tableCellsSource
+    protected override val tableCellImages: Map<Int, List<orilumn.reader.engine.skia.PageImage>> get() = tableCellImagesSource
     protected override val tableBorders: List<orilumn.reader.engine.skia.PageBackground> get() = tableBordersSource
 
     override val lineCount: Int get() = lines.size
@@ -2041,7 +2100,7 @@ class LightPrepare(
     private val markupLeaves: List<MarkupElement>,
     val globalCharStarts: LongArray,
     /** display:none check, shared with the heavy path's styleMap-derived hidden-ness. */
-    private val hidden: orilumn.reader.engine.laying.HiddenCheck = orilumn.reader.engine.laying.HIDDEN_NONE,
+    internal val hidden: orilumn.reader.engine.laying.HiddenCheck = orilumn.reader.engine.laying.HIDDEN_NONE,
     private val imageLoader: ImageLoader? = null,
     private val chapterHref: String = "",
     internal val backgroundOwnerMap: Map<MarkupElement, MarkupElement> = emptyMap(),
@@ -2069,7 +2128,7 @@ class LightPrepare(
     val totalChars: Int get() = markupLeaves.sumOf { NormalFlowLayout.styledCharAdvance(it, { e -> styleComputer().resolve(e, styleCache) }, lightClassify(), hidden, genOf).toInt() }
 
     /** 轻路径块判定：与 computeStructure 同门（有 display 声明才读 display:block）。 */
-    private fun lightClassify(): orilumn.reader.engine.laying.BlockClassify =
+    internal fun lightClassify(): orilumn.reader.engine.laying.BlockClassify =
         if (styleComputer().hasDisplayDeclaration()) {
             val displayCache = identityMap<MarkupElement, Boolean>()
             orilumn.reader.engine.laying.BlockClassify { el -> NormalFlowLayout.defaultBlock(el) || styleComputer().resolveDisplayOnly(el, displayCache) }
@@ -2195,7 +2254,7 @@ class LightPrepare(
                     style.textIndentPx.coerceAtLeast(0f),
                     NormalFlowLayout.leafBaselineShifts(el, sub, classify, hidden, genOf),
                 )
-                val baseH = NormalFlowLayout.adjustLineHeightsForInlineImages(
+                val baseH = adjustLineHeightsForInlineImages(
                     text, shaped, el, sub, classify, hidden, breakWf, imageLoader, chapterHref,
                 )
                 // P6-b: 叠排注音行增高（与重路径同式；无注音零回归）。
@@ -2218,7 +2277,7 @@ class LightPrepare(
                 style.textIndentPx.coerceAtLeast(0f),
                 NormalFlowLayout.leafBaselineShifts(el, sub, classify, hidden, genOf),
             )
-            val baseH = NormalFlowLayout.adjustLineHeightsForInlineImages(
+            val baseH = adjustLineHeightsForInlineImages(
                 text, shaped, el, sub, classify, hidden, NormalFlowLayout.innerBreakWidth(style, cw), imageLoader, chapterHref,
             )
             // P6-b: 叠排注音行增高（与重路径同式；无注音零回归）。
@@ -2311,14 +2370,19 @@ class LightPrepare(
         val tstyle = styleComputer().resolve(table, styleCache)
         val spH = if (tstyle.borderCollapse) 0f else tstyle.borderSpacingH
         val gapH = spH.coerceAtLeast(0f).roundToInt()
-        val tableW = contentWidth.coerceAtLeast(1)
         // The row's border-box left (accumulated block edges) so cell x matches the heavy path's
         // column layout (both absolutely positioned in content coordinates).
-        val rowLeft = NormalFlowLayout.descendContentLeft(trEl, 0,
+        val rowLeftBase = NormalFlowLayout.descendContentLeft(trEl, 0,
             leftEdgesOf = { e -> val s = styleComputer().resolve(e, styleCache); (s.border.left + s.padding.left).roundToInt() },
             marginLeftOf = { e -> val s = styleComputer().resolve(e, styleCache); s.margin.left.roundToInt() },
         )
         // 同表各行列宽一致：按表缓存（同 prepare 内同表同宽；宽/位变化即重算）。
+        // P1-2 表外盒：与重路径同单源 [TableGridModel.tableOuterGeometry]（指定宽/margin auto）；
+        // light 的 contentWidth 即表内容宽（旧全宽口径），反推容器域后与重路径同算。
+        val tableInsets = (tstyle.border.horizontal + tstyle.padding.horizontal).roundToInt()
+        val g = TableGridModel.tableOuterGeometry(contentWidth + tableInsets, rowLeftBase - tableInsets, tstyle)
+        val tableW = g.contentW
+        val rowLeft = g.tableLeft + tableInsets
         val cached = tableColCache[table]
         val (xs, ws) = if (cached != null && cached.tableW == tableW && cached.rowLeft == rowLeft) {
             cached.xs to cached.ws
@@ -2336,7 +2400,11 @@ class LightPrepare(
                         ),
                     )
                 }
-                TableGridModel.autoColumnLayout(tableW, model.columnCount, spH, rowLeft, prefs)
+                val tSpecified = tstyle.widthPct != null || tstyle.widthPx != null
+                TableGridModel.autoColumnLayout(
+                    tableW, model.columnCount, spH, rowLeft, prefs,
+                    minTableW = if (tSpecified) tableW else 0,
+                )
             }
             tableColCache[table] = CachedTableCols(tableW, rowLeft, laid.first, laid.second)
             laid

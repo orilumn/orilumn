@@ -220,10 +220,9 @@ class ChapterStructureCache {
      *  output). Reused so [BoxChapterLayouter.styleComputerFor] never re-tokenizes the same CSS. */
     var parsedAuthorSheets: List<orilumn.reader.engine.css.StyleSheet>? = null
 
-    /** For each leaf element, the nearest box that carries its background/border (itself for `pre`,
-     *  an ancestor container otherwise). Typography-invariant (bg/border presence doesn't change with
-     *  font size / spacing), so it is computed once and reused so window rendering never re-walks the
-     *  ancestor cascade. */
+    /** 内核层：每叶的最近背景承载盒（自身带背景色/背景图则为自身，否则为祖先容器）。
+     *  只带边框的元素不算属主（其行区仍透出祖先底色，自身边框由窗口叶边框盒另画）。
+     *  Typography-invariant（背景有无不随字号/间距变化），一次算出供窗口绘制复用，不再逐窗走祖先级联。 */
     var leafToBackgroundOwner: Map<orilumn.reader.engine.html.MarkupElement, orilumn.reader.engine.html.MarkupElement> = emptyMap()
 
     /** For each leaf element, the nearest ancestor whose resolved style is `break-inside: avoid`

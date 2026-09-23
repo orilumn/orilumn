@@ -2,7 +2,6 @@ package orilumn.reader.host
 
 import android.content.Context
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.asImageBitmap
 import orilumn.reader.data.book.BookImporter
 import orilumn.reader.data.book.BookRepository
 import orilumn.reader.ui.shelf.ScannedShelfBook
@@ -96,11 +95,11 @@ class AndroidShelfHost(
     override suspend fun loadCover(coverRef: String?): ImageBitmap? {
         if (coverRef == null) return null
         return withContext(Dispatchers.IO) {
+            // Q1-6：封面字节直解走共享接缝（旧 PNG 单跳桥随退役管线删除）。
             runCatching {
-                val decoded = orilumn.reader.engine.skia.ImageCodec.decode(java.io.File(coverRef).readBytes())
-                    ?: return@withContext null
-                decoded.image
-                    .let { orilumn.reader.engine.skiaImageToAndroidBitmap(it)?.asImageBitmap() }
+                val bytes = java.io.File(coverRef).takeIf { it.isFile }?.readBytes()
+                    ?: return@runCatching null
+                orilumn.reader.ui.imageBitmapOf(bytes)
             }.getOrNull()
         }
     }

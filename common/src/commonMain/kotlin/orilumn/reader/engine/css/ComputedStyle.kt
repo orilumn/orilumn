@@ -204,6 +204,9 @@ class ComputedStyle(
     val textIndentPx: Float = 0f,
     /** Outer separation from surrounding boxes; adjacent vertical margins collapse to the larger. */
     val margin: Edges = Edges(),
+    /** `margin-left/right: auto` 标记（表/块水平居中用；auto 值本身按 0 计入 [margin]）。 */
+    val marginLeftAuto: Boolean = false,
+    val marginRightAuto: Boolean = false,
     /** Inner padding between the border and the content box. */
     val padding: Edges = Edges(),
     /** Border widths; colors via [borderColors] / currentColor, styles via [borderStyles]. */
@@ -349,6 +352,10 @@ class ComputedStyle(
 
     /** Whether this element paints anything in the box background/border slab (P3 compositing reads it). */
     fun hasPaintedSlab(): Boolean = backgroundColorHex != null || backgroundImageUrl != null || hasBorderEdges()
+
+    /** 渲染层：纯背景填充（颜色或背景图）。只带边框、不带背景的块不得劫持祖先的背景属主，
+     *  否则轻量路径下其行区画不出容器的底色（边框另按叶盒单画）。 */
+    fun hasBackground(): Boolean = backgroundColorHex != null || backgroundImageUrl != null
 
     override fun toString(): String =
         "fs=${fontSizePx}px lh=${lineHeightRatio}" +

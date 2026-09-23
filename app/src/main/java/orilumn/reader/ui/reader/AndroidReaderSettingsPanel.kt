@@ -227,13 +227,13 @@ private enum class Sub(val title: String) {
 private fun HomePage(s: ReaderSettings, open: (Sub) -> Unit, commit: (ReaderSettings) -> Unit, p: AndroidPalette) {
     val ctx = LocalContext.current
     LazyColumn(modifier = Modifier.fillMaxSize()) {
-        item { SetRow("排版主题", themeLabel(s.layoutTheme), { open(Sub.Theme) }, p) }
+        item { SetRow("排版主题", ReaderThemeMath.layoutThemeLabel(s.layoutTheme), { open(Sub.Theme) }, p) }
         item { SetRow("间距", onTap = { open(Sub.Spacing) }, p = p) }
         item { SetRow("文字", onTap = { open(Sub.Text) }, p = p) }
-        item { SetRow("阅读主题", themeName(s, ctx), { open(Sub.ReadingTheme) }, p) }
+        item { SetRow("阅读主题", ReaderThemeMath.themeName(s, loadThemes(ctx)), { open(Sub.ReadingTheme) }, p) }
         item { SetRow("亮度", if (s.brightnessFollowSystem) "跟随系统" else "自定义", { open(Sub.Brightness) }, p) }
         item { SetSwitch("翻页动画", s.pageAnim, { commit(s.copy(pageAnim = it)) }, p) }
-        item { SetRow("翻页动画模式", modeLabel(s.pageAnimationMode), { open(Sub.AnimMode) }, p) }
+        item { SetRow("翻页动画模式", ReaderThemeMath.pageAnimationModeLabel(s.pageAnimationMode), { open(Sub.AnimMode) }, p) }
         item { SetSwitch("封面等比例缩放", s.coverProportional, { commit(s.copy(coverProportional = it)) }, p) }
         item { SetSwitch("启动时继续阅读", s.autoContinue, { commit(s.copy(autoContinue = it)) }, p) }
         item { SetSwitch("显示页码", s.pageNum, { commit(s.copy(pageNum = it)) }, p) }
@@ -241,16 +241,7 @@ private fun HomePage(s: ReaderSettings, open: (Sub) -> Unit, commit: (ReaderSett
     }
 }
 
-/** Reading-theme row label: current preset name if bg/fg match a built-in or saved custom theme, else "Custom". */
-private fun themeName(s: ReaderSettings, ctx: Context): String =
-    (BuiltinThemes + loadThemes(ctx)).firstOrNull { it.bg == s.bgOverride && it.fg == s.fgOverride }?.label ?: "自定义"
-
-private fun themeLabel(v: String) = when (v) { "modern" -> "现代模式"; "traditional" -> "传统模式"; else -> "原书设置" }
-private fun modeLabel(v: String) = if (v == "curl") "卷曲" else "平滑"
-
-/** Body font-size px → internal fontScale step (keeps 0.1px precision). */
-private fun pxToScale(px: Double): Double =
-    ReaderSettings.ratioToFontScale(px / ReaderSettings.BASE_BODY_PX)
+/** Body font-size helpers 单源见共享 [ReaderThemeMath]（`pxToScale` 等）。 */
 
 // ================= Text page (fonts + text size + letter spacing + character scale) =================
 
@@ -271,8 +262,8 @@ private fun TextPage(
         // "Font size" slider: placed below the font rows.
         item { UiSliderRow("字号", 9.0, 36.0, 0.1, s.fontSize * ReaderSettings.fontScaleToRatio(s.fontScale),
             { String.format("%.1f", it) },
-            { px -> preview(s.copy(fontScale = pxToScale(px))) },
-            { px -> commit(s.copy(fontScale = pxToScale(px))) }, p, labelWidth = labelW) }
+            { px -> preview(s.copy(fontScale = ReaderThemeMath.pxToScale(px))) },
+            { px -> commit(s.copy(fontScale = ReaderThemeMath.pxToScale(px))) }, p, labelWidth = labelW) }
         // Letter spacing: UI value range -100..100 (step 1), internally mapped to -0.2em..0.2em.
         item { UiSliderRow("字间距", -100.0, 100.0, 1.0, s.letterSpacing, { it.roundToInt().toString() },
             { preview(s.copy(letterSpacing = it)) }, { commit(s.copy(letterSpacing = it)) }, p, labelWidth = labelW) }
@@ -454,9 +445,9 @@ private fun ReadingThemePage(
     // (kept first) already covers it. Dropping it also removes legacy duplicates that only differed
     // by the old foreground colour, which is why two "缃色" used to appear.
     val allThemes = remember(customs) {
-        val builtinBgs = BuiltinThemes.map { it.bg }.toSet()
+        val builtinBgs = ReaderThemeMath.BUILTIN_THEMES.map { it.bg }.toSet()
         val kept = customs.filterNot { it.bg in builtinBgs }
-        (BuiltinThemes + kept).distinctBy { it.bg to it.fg }
+        (ReaderThemeMath.BUILTIN_THEMES + kept).distinctBy { it.bg to it.fg }
     }
     LazyColumn(modifier = Modifier.fillMaxSize()) {
         item {
@@ -469,9 +460,9 @@ private fun ReadingThemePage(
                     val night = s.scheme == "night"
                     // In night mode show each card as its auto-generated night counterpart so the
                     // swatches preview how the background/text will actually look while reading.
-                    val dayBg = parseHex(t.bg.ifBlank { DEFAULT_BG })
+                    val dayBg = ReaderThemeMath.parseHex(t.bg.ifBlank { ReaderThemeMath.DEFAULT_BG })
                     val cellBg = if (night) TypographicProfile.nightBackgroundOf(dayBg) else dayBg
-                    val dayFg = parseHex(t.fg.ifBlank { DEFAULT_FG })
+                    val dayFg = ReaderThemeMath.parseHex(t.fg.ifBlank { ReaderThemeMath.DEFAULT_FG })
                     val cellFg = if (night) TypographicProfile.nightForegroundOf(dayFg) else dayFg
                     PresetCell(
                         label = t.label, bg = Color(0xFF000000.toInt() or cellBg),
@@ -505,21 +496,21 @@ private fun ReadingThemePage(
 private fun ThemePresetManagerPage(s: ReaderSettings, preview: (ReaderSettings) -> Unit, commit: (ReaderSettings) -> Unit, p: AndroidPalette) {
     val ctx = LocalContext.current
     var customs by remember { mutableStateOf(loadThemes(ctx)) }
-    val bgHex = if (s.bgOverride.isNullOrBlank()) DEFAULT_BG else s.bgOverride
-    val fgHex = if (s.fgOverride.isNullOrBlank()) DEFAULT_FG else s.fgOverride
-    val bg = parseHex(bgHex)
-    val fg = parseHex(fgHex)
+    val bgHex = if (s.bgOverride.isNullOrBlank()) ReaderThemeMath.DEFAULT_BG else s.bgOverride
+    val fgHex = if (s.fgOverride.isNullOrBlank()) ReaderThemeMath.DEFAULT_FG else s.fgOverride
+    val bg = ReaderThemeMath.parseHex(bgHex)
+    val fg = ReaderThemeMath.parseHex(fgHex)
     val labelW = sliderLabelWidth(listOf("红", "绿", "蓝", "灰度"), p)
 
     LazyColumn(modifier = Modifier.fillMaxSize()) {
-        item { UiSliderRow("红", 0.0, 255.0, 1.0, RtoDouble(bg).toDouble(), { it.roundToInt().toString() },
-            { v -> preview(applyBg(s, bg, fg, 0, v)) }, { v -> commit(applyBg(s, bg, fg, 0, v)) }, p, labelWidth = labelW) }
-        item { UiSliderRow("绿", 0.0, 255.0, 1.0, GtoDouble(bg).toDouble(), { it.roundToInt().toString() },
-            { v -> preview(applyBg(s, bg, fg, 1, v)) }, { v -> commit(applyBg(s, bg, fg, 1, v)) }, p, labelWidth = labelW) }
-        item { UiSliderRow("蓝", 0.0, 255.0, 1.0, BtoDouble(bg).toDouble(), { it.roundToInt().toString() },
-            { v -> preview(applyBg(s, bg, fg, 2, v)) }, { v -> commit(applyBg(s, bg, fg, 2, v)) }, p, labelWidth = labelW) }
-        item { UiSliderRow("灰度", 0.0, 255.0, 1.0, GrayOf(fg).toDouble(), { it.roundToInt().toString() },
-            { v -> preview(applyFg(s, fg, v)) }, { v -> commit(applyFg(s, fg, v)) }, p, labelWidth = labelW) }
+        item { UiSliderRow("红", 0.0, 255.0, 1.0, ReaderThemeMath.r(bg).toDouble(), { it.roundToInt().toString() },
+            { v -> preview(ReaderThemeMath.applyBg(s, bg, fg, 0, v)) }, { v -> commit(ReaderThemeMath.applyBg(s, bg, fg, 0, v)) }, p, labelWidth = labelW) }
+        item { UiSliderRow("绿", 0.0, 255.0, 1.0, ReaderThemeMath.g(bg).toDouble(), { it.roundToInt().toString() },
+            { v -> preview(ReaderThemeMath.applyBg(s, bg, fg, 1, v)) }, { v -> commit(ReaderThemeMath.applyBg(s, bg, fg, 1, v)) }, p, labelWidth = labelW) }
+        item { UiSliderRow("蓝", 0.0, 255.0, 1.0, ReaderThemeMath.b(bg).toDouble(), { it.roundToInt().toString() },
+            { v -> preview(ReaderThemeMath.applyBg(s, bg, fg, 2, v)) }, { v -> commit(ReaderThemeMath.applyBg(s, bg, fg, 2, v)) }, p, labelWidth = labelW) }
+        item { UiSliderRow("灰度", 0.0, 255.0, 1.0, ReaderThemeMath.grayOf(fg).toDouble(), { it.roundToInt().toString() },
+            { v -> preview(ReaderThemeMath.applyFg(s, fg, v)) }, { v -> commit(ReaderThemeMath.applyFg(s, fg, v)) }, p, labelWidth = labelW) }
         item {
             Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 PingButton("保存", p, modifier = Modifier.weight(1f), onClick = { customs = doSave(ctx, customs, bgHex, fgHex) })
@@ -530,16 +521,7 @@ private fun ThemePresetManagerPage(s: ReaderSettings, preview: (ReaderSettings) 
     }
 }
 
-private val BuiltinThemes = listOf(
-    ThemePreset("原书设置", "", ""), ThemePreset("精白", "#ffffff", "#222222"), ThemePreset("象牙白", "#fffbf0", "#222222"),
-    ThemePreset("霜色", "#eaecee", "#222222"), ThemePreset("缃色", "#f2ecde", "#222222"),
-    ThemePreset("鸭卵青", "#e0eee8", "#222222"), ThemePreset("月白", "#d6ecf0", "#222222"),
-    ThemePreset("粉白", "#fbeff2", "#222222"), ThemePreset("丁香", "#e8e0f0", "#222222"),
-)
-private const val DEFAULT_BG = "#f4f2ec"
-private const val DEFAULT_FG = "#262626"
 
-private data class ThemePreset(val label: String, val bg: String, val fg: String)
 
 @Composable
 private fun PresetCell(label: String, bg: Color, fg: Color, selected: Boolean, p: AndroidPalette, onClick: () -> Unit) {
@@ -571,29 +553,6 @@ private fun PingButton(label: String, p: AndroidPalette, modifier: Modifier = Mo
     )
 }
 
-private fun applyBg(s: ReaderSettings, bg: Int, fg: Int, ch: Int, v: Double): ReaderSettings {
-    val c = setChannel(bg, ch, v.roundToInt())
-    return s.copy(bgOverride = hexOf(c), fgOverride = if (s.fgOverride.isNullOrBlank()) hexOf(fg) else s.fgOverride)
-}
-private fun applyFg(s: ReaderSettings, fg: Int, v: Double): ReaderSettings {
-    val g = v.roundToInt().coerceIn(0, 255)
-    return s.copy(fgOverride = hexOf(0xFF000000.toInt() or (g shl 16) or (g shl 8) or g))
-}
-private fun setChannel(c: Int, ch: Int, v: Int): Int {
-    val r = if (ch == 0) v.coerceIn(0, 255) else RtoInt(c)
-    val g = if (ch == 1) v.coerceIn(0, 255) else GtoInt(c)
-    val b = if (ch == 2) v.coerceIn(0, 255) else BtoInt(c)
-    return 0xFF000000.toInt() or (r shl 16) or (g shl 8) or b
-}
-private fun hexOf(c: Int): String = "#" + ((c and 0x00FFFFFF)).toString(16).padStart(6, '0')
-private fun parseHex(hex: String): Int = runCatching { android.graphics.Color.parseColor(hex) }.getOrDefault(0xFFF4F2EC.toInt())
-private fun RtoInt(c: Int) = (c shr 16) and 0xFF
-private fun GtoInt(c: Int) = (c shr 8) and 0xFF
-private fun BtoInt(c: Int) = c and 0xFF
-private fun RtoDouble(c: Int) = RtoInt(c).toDouble()
-private fun GtoDouble(c: Int) = GtoInt(c).toDouble()
-private fun BtoDouble(c: Int) = BtoInt(c).toDouble()
-private fun GrayOf(c: Int) = (RtoInt(c) + GtoInt(c) + BtoInt(c)) / 3.0
 
 private fun loadThemes(ctx: Context): List<ThemePreset> = runCatching {
     val prefs = ctx.getSharedPreferences("reader_settings_ui", Context.MODE_PRIVATE)
@@ -604,27 +563,15 @@ private fun doSave(ctx: Context, customs: List<ThemePreset>, bg: String, fg: Str
     if (bg.isBlank()) return customs
     // Skip an exact duplicate (same bg+fg) to avoid label collisions in the preset grid.
     if (customs.any { it.bg == bg && it.fg == fg }) return customs
-    val next = customs + ThemePreset(labelFor(bg, fg), bg, fg)
+    val next = ReaderThemeMath.saveTheme(customs, bg, fg)
     persistThemes(ctx, next)
     return next
 }
 private fun doDelete(ctx: Context, customs: List<ThemePreset>, bg: String, fg: String, p: AndroidPalette): List<ThemePreset> {
-    val next = customs.filterNot { it.bg == bg && it.fg == fg }
+    val next = ReaderThemeMath.deleteTheme(customs, bg, fg)
     persistThemes(ctx, next)
     return next
 }
-private fun labelFor(bg: String, fg: String): String {
-    val name = buildString {
-        when (bg.uppercase()) {
-            "#FFFFFF" -> append("精白"); "#FFFBF0" -> append("象牙白"); "#F2ECDE" -> append("缃色")
-            "#E0EEE8" -> append("鸭卵青"); "#EAECEE" -> append("霜色"); "#D6ECF0" -> append("月白")
-            "#E8E0F0" -> append("丁香"); "#FBEFF2" -> append("粉白")
-            else -> append("自定义")
-        }
-    }
-    return name + (customsSuffix(bg, fg))
-}
-private fun customsSuffix(bg: String, fg: String) = ""
 private fun persistThemes(ctx: Context, list: List<ThemePreset>) {
     val arr = JSONArray()
     list.forEach { arr.put(JSONObject().put("label", it.label).put("bg", it.bg).put("fg", it.fg)) }

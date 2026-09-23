@@ -223,4 +223,24 @@ class P1StyleComputationTest {
         assertEquals(2f, child.letterSpacingPx, 1e-3f)
         assertEquals(TextTransform.LOWERCASE, child.textTransform)
     }
+
+    @Test
+    fun `blockquote margin 归疏密与段间距无关`() {
+        // 口径：blockquote 等非正文块纵边距只跟 gapScale（疏密），p/li 才吃段间距替换。
+        fun styleOf(tag: String, gap: Float): ComputedStyle {
+            val el = MarkupElement(tag, emptyMap(), listOf(MarkupElement("#text", text = "x")))
+            val body = MarkupElement("body", emptyMap(), listOf(el))
+            el.parent = body
+            el.children.forEach { it.parent = el }
+            return StyleComputer(16f, ua, emptyList(), gapScale = gap).compute(body)[el]!!
+        }
+        val bq1 = styleOf("blockquote", 1f)
+        val bq2 = styleOf("blockquote", 2f)
+        assertEquals(bq1.margin.top * 2, bq2.margin.top, 1e-3f)
+        assertEquals(bq1.margin.bottom * 2, bq2.margin.bottom, 1e-3f)
+        // p 豁免疏密（段间距替换，由 UI 表负责，此处不断言具体值，只验缩放不动它）。
+        val p1 = styleOf("p", 1f)
+        val p2 = styleOf("p", 2f)
+        assertEquals(p1.margin.top, p2.margin.top, 1e-3f)
+    }
 }

@@ -1,7 +1,10 @@
 package orilumn.reader.engine.skia
 
 import orilumn.reader.engine.css.BorderColorEdges
+import orilumn.reader.engine.css.BorderStyle
+import orilumn.reader.engine.css.BorderStyleEdges
 import orilumn.reader.engine.css.ComputedStyle
+import orilumn.reader.engine.css.Edges
 import orilumn.reader.engine.css.TextAlign
 import orilumn.reader.engine.html.MarkupElement
 import orilumn.reader.engine.laying.ParagraphShapeRef
@@ -71,11 +74,8 @@ class TableCellLinesTest {
         assertEquals(1008, win.lines[2].charBase)
         assertEquals(0..3, win.lines[0].range)
         assertEquals(4..7, win.lines[1].range)
-        // 边框：两格 × 行带。
-        assertEquals(2, win.borders.size)
-        assertEquals(100, win.borders[0].yTop)
-        assertEquals(130, win.borders[0].yBottom)
-        assertTrue(win.borders.all { it.border && it.strokeWidthPx == 1f })
+        // 边框：无声明边框宽度即无边框（旧整框矩形已删）。
+        assertTrue(win.borders.isEmpty())
     }
 
     @Test
@@ -95,17 +95,106 @@ class TableCellLinesTest {
     }
 
     @Test
+    fun `cell borders emit declared sides only`() {
+        // 只声明 border-top 的格只出顶带（Rust 简介表 regression：旧整框画成四面）。
+        val s = StubShape("x", listOf(0..0), listOf(15))
+        val topOnly = ComputedStyle(
+            10f, 1.5f, border = Edges(top = 1f),
+            borderColors = BorderColorEdges(top = "#ff000000", right = null, bottom = null, left = null),
+            borderStyles = BorderStyleEdges.uniform(BorderStyle.SOLID),
+        )
+        val table = TableRowLayout(intArrayOf(0), intArrayOf(300), listOf(cell("td", "x", 0, 300, s)))
+        val win = TableCellLines.expand(table, 100, 15, 0, { topOnly }, topOnly, 0f)
+        assertEquals(1, win.borders.size)
+        val top = win.borders[0]
+        assertEquals(0, top.left)
+        assertEquals(100, top.yTop)
+        assertEquals(300, top.right)
+        assertEquals(101, top.yBottom)
+        assertEquals(0xFF000000.toInt(), top.argb)
+        // 四边全声明即四带。
+        val all = ComputedStyle(
+            10f, 1.5f, border = Edges(top = 1f, right = 1f, bottom = 1f, left = 1f),
+            borderStyles = BorderStyleEdges.uniform(BorderStyle.SOLID),
+        )
+        val win4 = TableCellLines.expand(table, 100, 15, 0, { all }, all, 0f)
+        assertEquals(4, win4.borders.size)
+        // style NONE 即使有宽也不画。
+        val none = ComputedStyle(
+            10f, 1.5f, border = Edges(top = 1f),
+            borderStyles = BorderStyleEdges.uniform(BorderStyle.NONE),
+        )
+        assertTrue(TableCellLines.expand(table, 100, 15, 0, { none }, none, 0f).borders.isEmpty())
+    }
+
+    @Test
     fun `cell border follows css border-color`() {
         val s = StubShape("x", listOf(0..0), listOf(15))
         val table = TableRowLayout(intArrayOf(0), intArrayOf(300), listOf(cell("td", "x", 0, 300, s)))
         // 声明了 border-color → 用 CSS 色（internallinks 的 #c0c0c0 场景）。
-        val declared = ComputedStyle(10f, 1.5f, colorHex = "#ff111111", borderColors = BorderColorEdges("#ffc0c0c0"))
+        val declared = ComputedStyle(
+            10f, 1.5f, colorHex = "#ff111111",
+            border = Edges(top = 1f), borderColors = BorderColorEdges("#ffc0c0c0"),
+            borderStyles = BorderStyleEdges.uniform(BorderStyle.SOLID),
+        )
         assertEquals(0xFFC0C0C0.toInt(), TableCellLines.expand(table, 0, 15, 0, { declared }, declared, 0f).borders[0].argb)
         // 未声明 → currentColor（本元素文字色，CSS 默认）。
-        val current = ComputedStyle(10f, 1.5f, colorHex = "#ff222222")
+        val current = ComputedStyle(
+            10f, 1.5f, colorHex = "#ff222222",
+            border = Edges(top = 1f), borderStyles = BorderStyleEdges.uniform(BorderStyle.SOLID),
+        )
         assertEquals(0xFF222222.toInt(), TableCellLines.expand(table, 0, 15, 0, { current }, current, 0f).borders[0].argb)
         // 连文字色都没有 → 回退遗留中性灰。
-        assertEquals(TableCellLines.BORDER_ARGB, TableCellLines.expand(table, 0, 15, 0, { style }, style, 0f).borders[0].argb)
+        val bare = ComputedStyle(
+            10f, 1.5f, border = Edges(top = 1f),
+            borderStyles = BorderStyleEdges.uniform(BorderStyle.SOLID),
+        )
+        assertEquals(TableCellLines.BORDER_ARGB, TableCellLines.expand(table, 0, 15, 0, { bare }, bare, 0f).borders[0].argb)
+    }
+
+    @Test
+    fun `cell image emits PageImage`() {
+        // Rust 简介 Ferris 表回归：td 内独占 img（shape 文本仅 U+FFFC 占位）必须进 PageImage。
+        val img = MarkupElement("img", mapOf("src" to "Images/a.png"))
+        val td = MarkupElement("td", emptyMap(), listOf(img))
+        val shape = StubShape("￼", listOf(0..0), listOf(40))
+        val table = TableRowLayout(
+            intArrayOf(0), intArrayOf(300),
+            listOf(TableCellLayout(td, 0, 1, 10, 300, 44, false, shape)),
+        )
+        val loader = orilumn.reader.engine.ImageBoundsReader { _, _ -> 120 to 80 }
+        val win = TableCellLines.expand(
+            table, 100, 44, 0, { style }, style, 0f,
+            imageLoader = loader, chapterHref = "Text/00.xhtml",
+        )
+        assertEquals(1, win.images.size)
+        val im = win.images[0]
+        assertEquals("Images/a.png", im.src)
+        assertEquals("Text/00.xhtml", im.chapterHref)
+        assertEquals(120, im.widthPx)
+        assertEquals(80, im.heightPx)
+        assertEquals(10, im.xLeft)
+        assertEquals(100, im.yTop)
+        assertEquals(180, im.yBottom)
+        // 占位隐藏区间：shape 文本唯一的 U+FFFC（0..0）随行记录。
+        assertEquals(listOf(0..0), win.lines[0].imgHidden)
+        // 无 loader/href 时不产出（旧调用口径不变）。
+        val bare = TableCellLines.expand(table, 100, 44, 0, { style }, style, 0f)
+        assertTrue(bare.images.isEmpty())
+    }
+
+    @Test
+    fun `vertical-align middle 下移内容`() {
+        // 本书第二列 `vertical-align: middle`：15px 行在 100px 行带内居中，下移 (100-15)/2=42。
+        val s = StubShape("x", listOf(0..0), listOf(15))
+        val middle = ComputedStyle(10f, 1.5f, verticalAlign = orilumn.reader.engine.css.VerticalAlign.MIDDLE)
+        val table = TableRowLayout(intArrayOf(0), intArrayOf(300), listOf(cell("td", "x", 0, 300, s)))
+        val win = TableCellLines.expand(table, 100, 100, 0, { middle }, middle, 0f)
+        assertEquals(142, win.lines[0].yTop)
+        assertEquals(157, win.lines[0].yBottom)
+        // 默认顶端对齐不动。
+        val top = TableCellLines.expand(table, 100, 100, 0, { style }, style, 0f)
+        assertEquals(100, top.lines[0].yTop)
     }
 
     @Test
@@ -129,11 +218,19 @@ class TableCellLinesTest {
         // 文本：首行两格 + 次行一格，基址连续。
         assertEquals(2, win.lines[0]!!.size)
         assertEquals(1, win.lines[1]!!.size)
-        // 边框：跨行格 0..30，普通格各守本行带。
-        val spanned = win.borders.first { it.left == 0 }
-        assertEquals(0, spanned.yTop)
-        assertEquals(30, spanned.yBottom)
-        val single = win.borders.first { it.left == 150 && it.yTop == 0 }
-        assertEquals(15, single.yBottom)
+        // 边框：跨行格顶带在首行顶，普通格顶带各守本行带（逐边带，只画声明边）。
+        val topBordered = ComputedStyle(
+            10f, 1.5f, border = Edges(top = 1f),
+            borderStyles = BorderStyleEdges.uniform(BorderStyle.SOLID),
+        )
+        val winB = TableCellLines.expandTable(
+            listOf(
+                TableCellLines.RowFrame(row0, 0, 0, 15, 0, topBordered, tableEl),
+                TableCellLines.RowFrame(row1, 1, 15, 15, 2, topBordered, tableEl),
+            ),
+            { topBordered }, 0f,
+        )
+        val tops = winB.borders.filter { it.yBottom - it.yTop == 1 }
+        assertEquals(listOf(0, 0, 15), tops.map { it.yTop }.sorted())
     }
 }

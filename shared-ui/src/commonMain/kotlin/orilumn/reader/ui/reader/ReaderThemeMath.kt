@@ -5,7 +5,8 @@ import kotlin.math.roundToInt
 
 /**
  * S29 阅读主题纯逻辑：内置阅读主题、十六进制色解析/合成、自定义预设的增删与命名，
- * 与 UI 无关，可在 commonMain 直接跑 jvmTest 验证。平移自 Android `ReaderSettingsPanel`
+ * 与 UI 无关，可在 commonMain 直接跑 jvmTest 验证。
+ * Q1-4 收敛后平板 `AndroidReaderSettingsPanel` 亦委托本单源，故公开。平移自 Android `ReaderSettingsPanel`
  * 的私有辅助函数（把 `android.graphics.Color.parseColor` / SharedPreferences 等平台设施
  * 换成了纯 Kotlin）。
  */
@@ -15,7 +16,7 @@ public data class ThemePreset(
     val fg: String,
 )
 
-internal object ReaderThemeMath {
+object ReaderThemeMath {
     const val DEFAULT_BG = "#f4f2ec"
     const val DEFAULT_FG = "#262626"
 
@@ -43,9 +44,9 @@ internal object ReaderThemeMath {
 
     fun hexOf(c: Int): String = "#" + (c and 0x00FFFFFF).toString(16).padStart(6, '0')
 
-    internal fun r(c: Int) = (c shr 16) and 0xFF
-    internal fun g(c: Int) = (c shr 8) and 0xFF
-    internal fun b(c: Int) = c and 0xFF
+    fun r(c: Int) = (c shr 16) and 0xFF
+    fun g(c: Int) = (c shr 8) and 0xFF
+    fun b(c: Int) = c and 0xFF
 
     private fun setChannel(c: Int, ch: Int, v: Int): Int {
         val r = if (ch == 0) v.coerceIn(0, 255) else r(c)

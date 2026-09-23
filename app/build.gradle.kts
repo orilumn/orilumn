@@ -173,7 +173,3 @@ dependencies {
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation("androidx.test:core:1.6.1")
 }
-
-// 说明：foliate-js 已高度定制（三窗口跨章、翻页吸附、四向独立页边距、分页切分等），
-// 已纳入本仓库版本管理（app/src/main/assets/foliate-js/），不再从官方 npm 下载/覆盖。
-// 升级 foliate-js 时，直接替换目录内文件并提交即可。

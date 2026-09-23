@@ -170,7 +170,7 @@ class HtmlTreeConverter {
      *  valign）+ 无障碍（scope/headers）。`nowrap` 是布尔属性（原始值为 ""），仿 [olAttrs] 特判保留。 */
     private fun cellAttrs(el: Element): Map<String, String> {
         val out = HashMap(
-            attribs(el, "style", "align", "class", "id", "colspan", "rowspan", "bgcolor", "background", "valign", "scope", "headers"),
+            attribs(el, "style", "align", "class", "id", "colspan", "rowspan", "bgcolor", "background", "valign", "scope", "headers", "width", "height"),
         )
         if (el.hasAttr("nowrap")) out["nowrap"] = "true"
         return out

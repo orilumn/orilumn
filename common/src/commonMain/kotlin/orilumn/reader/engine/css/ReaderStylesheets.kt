@@ -20,7 +20,7 @@ object ReaderStylesheets {
 
     /**
      * 排版主题样式文本；原书设置（original）/未知主题返回 null（无主题样式表）。
-     * 键值对照平板 `ThemeCss.assetPath`：traditional / modern 有样式表。
+     * traditional / modern 有样式表。
      */
     fun theme(layoutTheme: String): String? = when (layoutTheme) {
         "traditional" -> readRequired("traditional.css")

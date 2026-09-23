@@ -48,7 +48,13 @@ class TableGridModel(
     }
 
     /** 表外盒几何：border-box 宽/左缘/内容宽（重/轻两路单源，见 [tableOuterGeometry]）。 */
-    class TableOuterGeometry(val outerW: Int, val tableLeft: Int, val contentW: Int)
+    class TableOuterGeometry(
+        val outerW: Int,
+        val tableLeft: Int,
+        val contentW: Int,
+        /** 表宽是否来自指定（width %/px）；是则列需拉伸填满（auto 布局第 4 步）。 */
+        val specified: Boolean,
+    )
 
     /** auto 布局的单元格内容需求（列锚＋跨度＋首选/最小 px，均 ≥0；specified 为指定宽下限）。 */
     class CellPref(val col: Int, val colSpan: Int, val pref: Float, val min: Float, val specified: Float = 0f)
@@ -64,8 +70,8 @@ class TableGridModel(
          * @param innerW 容器内容宽（表 margin 盒的安置域）；@param left 容器内容左缘。
          */
         fun tableOuterGeometry(innerW: Int, left: Int, style: ComputedStyle): TableOuterGeometry {
-            val outerW = (style.widthPct?.let { innerW * it / 100f } ?: style.widthPx ?: innerW.toFloat())
-                .roundToInt().coerceAtLeast(1)
+            val specW = style.widthPct?.let { innerW * it / 100f } ?: style.widthPx
+            val outerW = (specW ?: innerW.toFloat()).roundToInt().coerceAtLeast(1)
             // 注意：调用方传进的 left 已含非 auto margin-left（容器流通用规则），此处只补 auto 份；
             // auto 值在级联已按 0 计入 margin，故 usedML/MR 只用于剩余空间计算。
             val usedML = if (style.marginLeftAuto) 0f else style.margin.left
@@ -78,7 +84,7 @@ class TableGridModel(
             }
             val tableLeft = left + extra.roundToInt()
             val contentW = (outerW - (style.border.horizontal + style.padding.horizontal).roundToInt()).coerceAtLeast(1)
-            return TableOuterGeometry(outerW, tableLeft, contentW)
+            return TableOuterGeometry(outerW, tableLeft, contentW, specW != null)
         }
 
         /**
@@ -229,6 +235,8 @@ class TableGridModel(
             spacingH: Float,
             left: Int,
             cells: List<CellPref>,
+            /** 表指定宽时的列总宽下限（表内容宽；0 = 无指定，保持三段式不拉伸）。 */
+            minTableW: Int = 0,
         ): Pair<IntArray, IntArray> {
             if (count <= 0) return IntArray(0) to IntArray(0)
             val gap = spacingH.coerceAtLeast(0f).roundToInt()
@@ -287,9 +295,20 @@ class TableGridModel(
                     else -> pref[i]
                 }
             }
+            // 指定表宽拉伸（auto 第 4 步）：超出三段式目标的多余按 pref 比例分列
+            //（totalMax=0 的全空表均分），使列填满表用宽，表边框与内容同宽。
+            val wantF = maxOf(target, minTableW.toFloat())
+            if (wantF > w.sum() && count > 0) {
+                val excess = wantF - w.sum()
+                if (totalMax > 0f) {
+                    for (i in 0 until count) w[i] += excess * pref[i] / totalMax
+                } else {
+                    for (i in 0 until count) w[i] += excess / count
+                }
+            }
             val ws = IntArray(count) { w[it].roundToInt().coerceAtLeast(1) }
             // 总和锁到表用宽（末列吸收舍入漂移；每列 ≥1）。
-            val want = target.roundToInt().coerceAtLeast(count)
+            val want = wantF.roundToInt().coerceAtLeast(count)
             ws[count - 1] = (ws[count - 1] + (want - ws.sum())).coerceAtLeast(1)
             val xs = IntArray(count)
             var x = left + gap

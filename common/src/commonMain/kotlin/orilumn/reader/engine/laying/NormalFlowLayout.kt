@@ -749,7 +749,12 @@ object NormalFlowLayout {
         val (colXs, colWs) = if (tableStyle.tableLayoutFixed) {
             TableGridModel.columnLayout(tableContentW, model.columnCount, spH, left)
         } else {
-            TableGridModel.autoColumnLayout(tableContentW, model.columnCount, spH, left, prefs)
+            // 指定表宽拉伸下限：表有指定宽时列填满表内容宽，否则保持三段式不拉伸。
+            val tSpecified = styles[el]?.let { it.widthPct != null || it.widthPx != null } ?: false
+            TableGridModel.autoColumnLayout(
+                tableContentW, model.columnCount, spH, left, prefs,
+                minTableW = if (tSpecified) tableContentW else 0,
+            )
         }
         fun cellOuter(col: Int, colSpan: Int): Int {
             var w = 0

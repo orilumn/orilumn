@@ -230,4 +230,18 @@ class TableFamilyTest {
         assertEquals(600, right.outerW)
         assertEquals(60, right.tableLeft)
     }
+
+    @Test
+    fun `auto 指定表宽拉伸列`() {
+        // 表 width:90%（594）而列 MAX 仅 321：多余按 pref 比例分列填满。
+        val cells = listOf(
+            TableGridModel.CellPref(0, 1, 100f, 100f),
+            TableGridModel.CellPref(1, 1, 221f, 60f),
+        )
+        val (_, ws) = TableGridModel.autoColumnLayout(660, 2, 0f, 0, cells, minTableW = 594)
+        assertEquals(594, ws.sum())
+        // 无指定不断行为（三段式不拉伸）。
+        val (_, ws0) = TableGridModel.autoColumnLayout(660, 2, 0f, 0, cells)
+        assertEquals(321, ws0.sum())
+    }
 }

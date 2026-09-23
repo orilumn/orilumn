@@ -2335,7 +2335,11 @@ class LightPrepare(
                         ),
                     )
                 }
-                TableGridModel.autoColumnLayout(tableW, model.columnCount, spH, rowLeft, prefs)
+                val tSpecified = tstyle.widthPct != null || tstyle.widthPx != null
+                TableGridModel.autoColumnLayout(
+                    tableW, model.columnCount, spH, rowLeft, prefs,
+                    minTableW = if (tSpecified) tableW else 0,
+                )
             }
             tableColCache[table] = CachedTableCols(tableW, rowLeft, laid.first, laid.second)
             laid

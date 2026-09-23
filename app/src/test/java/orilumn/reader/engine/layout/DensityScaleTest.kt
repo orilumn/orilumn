@@ -33,12 +33,22 @@ class DensityScaleTest {
     private val layouter = BoxChapterLayouter()
 
     /** Computes [tag]'s computed margin under [settings] — UI sheet (段间距/行距) + gapScale (疏密) exactly
-     *  as [orilumn.reader.engine.BoxChapterLayouter.styleComputerFor] wires them in production. */
+     *  as [orilumn.reader.engine.BoxChapterLayouter.styleComputerFor] wires them in production.
+     *  p/li 测相邻对的后者（段间距口径：只在 p/li 相邻对之间生效，单块基线恒 0）。 */
     private fun margin(settings: ReaderSettings, tag: String, authorCss: String = "", uaCss: String = ""): Edges {
         val profile = TypographicProfile.build(settings)
         val ui = layouter.uiSheetFromProfile(profile)
-        val el = MarkupElement(tag, children = listOf(MarkupElement("#text", text = "t")))
-        val root = MarkupElement("body", children = listOf(el))
+        val text = listOf(MarkupElement("#text", text = "t"))
+        val el = MarkupElement(tag, children = text)
+        val root = if (tag == "p" || tag == "li")
+            MarkupElement("body", children = listOf(MarkupElement(tag, children = text), el))
+        else
+            MarkupElement("body", children = listOf(el))
+        // 相邻兄弟选择器走 parent 指针：手工树需像 HtmlTreeConverter 一样回链。
+        fun relink(n: MarkupElement) {
+            n.children.forEach { it.parent = n; relink(it) }
+        }
+        relink(root)
         val author = if (authorCss.isBlank()) emptyList() else listOf(LightCssParser().parse(authorCss))
         val map = StyleComputer(
             16f,

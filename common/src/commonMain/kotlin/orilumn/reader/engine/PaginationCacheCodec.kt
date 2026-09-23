@@ -31,7 +31,7 @@ object PaginationCacheCodec {
     /** Engine-geometry version. Bump on ANY change to line geometry computation so stale tables are
      *  invalidated at the single [decode] choke-point. Kept separate from [VERSION]: schema changes may
      *  leave geometry untouched and vice-versa. */
-    const val LAYOUT_VERSION = 25 // 25: 根 body class/id 保留进级联（body.xxx 选择器生效，标题几何变），旧表作废
+    const val LAYOUT_VERSION = 26 // 26: 段间距仅 p/li 相邻对生效（UI 层相邻兄弟规则），p 纵边距几何变，旧表作废
 
     /** Per-book cap on persisted table files. Old-parameter-hash tables are orphaned when the layout
      *  key changes and are never deleted today; keep the most recently used and evict the rest

@@ -24,7 +24,7 @@ import orilumn.reader.engine.html.MarkupElement
  * @param ui the reader-app stylesheet (above settings; carries line-height / paragraph spacing).
  * @param gapScale 疏密 (paragraphGapScale): scales the computed top/bottom margin of every block
  *   except `p`/`li` — 作者 css / UA 默认值都被保留, 只被比例调节 (1.0 = 原书排版, 不做改动).
- *   `p`/`li` 的垂直间距由 UI 层的 段间距 完全接管 (替换语义), 不参与缩放.
+ *   `p`/`li` 的纵边距由 UI 层的 段间距 接管 (替换语义 + 仅 p/li 相邻对，见 [ReaderUiSheet]), 不参与缩放.
  */
 class StyleComputer(
     private val rootFontPx: Float,
@@ -44,7 +44,7 @@ class StyleComputer(
         /** `display` values treated as block-level for box classification (matches the roadmap). */
         val DISPLAY_BLOCK_VALUES = setOf("block", "list-item", "flex", "grid", "inline-table")
 
-        /** p/li 的垂直间距归 段间距 (UI 层替换语义) 所有, 疏密 (gapScale) 缩放豁免. */
+        /** p/li 纵边距归 段间距 (UI 层替换语义，仅 p/li 相邻对) 所有, 疏密 (gapScale) 缩放豁免. */
         val GAP_SCALE_EXEMPT = setOf("p", "li")
     }
 
@@ -153,7 +153,7 @@ class StyleComputer(
 
         val rawMargin = parseEdges(w, "margin", "margin-top", "margin-right", "margin-bottom", "margin-left", fontSize, parent.fontSizePx)
         // 疏密 (gapScale): 调节语义 —— 在 cascade 结果之上按比例缩放 (作者 css / UA 默认值保留, 不替换).
-        // 只动垂直 (top/bottom); p/li 豁免 (其垂直间距归 段间距 的替换语义).
+        // 只动垂直 (top/bottom); p/li 豁免 (其纵边距归 段间距 的替换语义，仅 p/li 相邻对).
         val margin = if (gapScale != 1f && tag.lowercase() !in GAP_SCALE_EXEMPT) {
             rawMargin.copy(top = rawMargin.top * gapScale, bottom = rawMargin.bottom * gapScale)
         } else rawMargin

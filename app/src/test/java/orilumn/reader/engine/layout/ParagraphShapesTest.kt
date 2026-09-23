@@ -157,12 +157,22 @@ class ParagraphShapesTest {
         val ui = BoxChapterLayouter().uiSheetFromProfile(profile)
         val ua = CssLayouter(profile).uaSheetFromProfile()
         val author = LightCssParser().parse(authorCss)
-        val root = converter.convert("<html><body><p>正文段落</p></body></html>")!!
+        // 段间距口径：只在 p/li 相邻对之间生效 —— 双段验证后者取段间距（还原书的段间 0.3rem）。
+        val root = converter.convert("<html><body><p>正文段落一</p><p>正文段落二</p></body></html>")!!
         val styles = StyleComputer(profile.bodyPx, ua, listOf(author), ui = ui).compute(root)
-        val st = styles[findTag(root, "p")]!!
-        assertEquals(2 * st.fontSizePx, st.textIndentPx, st.fontSizePx * 0.05f)
-        assertEquals((0.3 * st.fontSizePx).toFloat(), st.margin.bottom, st.fontSizePx * 0.05f)
-        assertEquals(1.3f, st.lineHeightRatio, 0.01f)
+        val paras = ArrayList<orilumn.reader.engine.html.MarkupElement>()
+        fun walk(n: orilumn.reader.engine.html.MarkupElement) {
+            if (n.tag == "p") paras.add(n)
+            n.children.forEach(::walk)
+        }
+        walk(root)
+        val first = styles[paras[0]]!!
+        val second = styles[paras[1]]!!
+        assertEquals(2 * second.fontSizePx, second.textIndentPx, second.fontSizePx * 0.05f)
+        assertEquals(0f, first.margin.top, 0.001f)
+        assertEquals((0.3 * second.fontSizePx).toFloat(), second.margin.top, second.fontSizePx * 0.05f)
+        assertEquals(0f, second.margin.bottom, 0.001f)
+        assertEquals(1.3f, second.lineHeightRatio, 0.01f)
     }
 
     @Test

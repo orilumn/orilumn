@@ -68,6 +68,27 @@ class FontRepository(
     suspend fun setHidden(id: Long, hidden: Boolean) = library.setHidden(id, hidden)
 
     /** F 系列：系统字形落行 + 返回全量表（调用方喂平台枚举，族 + 字重名）. */
-    suspend fun syncSystemFaces(faces: List<SystemFontFace>): List<FontFace> =
-        library.syncSystemFaces(faces)
+    suspend fun syncSystemFaces(
+        faces: List<SystemFontFace>,
+        localizedNames: Map<String, String> = emptyMap(),
+    ): List<FontFace> = library.syncSystemFaces(faces, localizedNames)
+
+    /**
+     * F 系列中文名链（方案B，桌面 `NameTableChineseNames` 同式，不含 CoreText 步）：
+     * 扫 `/system/fonts`，用 name 表变体语言记录建「拉丁族名 → 中文族名」映射；
+     * 解析失败的文件跳过（调用方回退族名本身）。
+     */
+    fun systemFontLocalizedNames(): Map<String, String> {
+        val dir = java.io.File("/system/fonts")
+        val files = runCatching { dir.listFiles { f -> f.isFile } }.getOrNull() ?: return emptyMap()
+        val parser = FontParser()
+        val out = LinkedHashMap<String, String>()
+        for (f in files) {
+            val names = runCatching { parser.familyNamesOf(f.readBytes()) }.getOrNull() ?: continue
+            val latin = names.latin ?: continue
+            val chinese = names.chinese ?: continue
+            out.putIfAbsent(latin, chinese)
+        }
+        return out
+    }
 }

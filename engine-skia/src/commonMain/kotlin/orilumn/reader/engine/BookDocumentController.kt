@@ -3,11 +3,14 @@ package orilumn.reader.engine
 import orilumn.reader.collections.SyncLock
 import orilumn.reader.collections.withLock
 import orilumn.reader.data.book.BookReadingState
+import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.time.platformNowMs
 import orilumn.reader.data.epub.EpubResourceReader
 import orilumn.reader.data.epub.EpubParser
+import orilumn.reader.engine.css.BookStyleProbe
 import orilumn.reader.engine.css.CssBundle
 import orilumn.reader.engine.css.LightCssParser
+import orilumn.reader.engine.css.StyleComputer
 import orilumn.reader.engine.css.StyleSheet
 import orilumn.reader.engine.html.ChapterPreprocessor
 import orilumn.reader.engine.html.HtmlTreeConverter
@@ -336,6 +339,26 @@ class BookDocumentController(
      */
     private fun parseLocator(locator: String?): Pair<Int, Int>? =
         orilumn.reader.data.read.ReadingLocatorCodec.decode(locator)
+
+    /**
+     * 原书设置快照（Q2 下沉：原 `ReaderActivity.withBookStyle`）：切到原书设置时，
+     * 把当前章节的真实排版（首行缩进/段间距/行距）快照进设置值。探测失败原样返回。
+     */
+    fun snapshotBookStyle(chapter: Int, bodyPx: Float, base: ReaderSettings): ReaderSettings {
+        if (base.layoutTheme != "original") return base
+        val snap = runCatching {
+            val unit = unitAt(chapter) ?: return@runCatching null
+            val markup = unit.markup ?: return@runCatching null
+            val sheets = (unit.cssBundle?.cssTexts ?: emptyList()).map { LightCssParser().parse(it) }
+            val styles = StyleComputer(bodyPx, StyleSheet(emptyList()), sheets).compute(markup)
+            BookStyleProbe.snapshot(styles)
+        }.getOrNull() ?: return base
+        return base.copy(
+            firstLineIndent = snap.firstLineIndent,
+            paragraphSpacing = snap.paragraphSpacing,
+            lineSpacing = snap.lineSpacing,
+        )
+    }
 
     /** Start location after loading (null when there is no book/no chapter).
  *   Returns (chapter, page): starting from [startChapter], skips chapters with no laid-out

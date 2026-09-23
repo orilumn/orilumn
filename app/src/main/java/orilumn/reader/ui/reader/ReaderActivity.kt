@@ -43,10 +43,6 @@ import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.data.settings.ReaderSettingsStore
 import orilumn.reader.engine.BookDocumentController
 import orilumn.reader.engine.BookFileResolver
-import orilumn.reader.engine.css.BookStyleProbe
-import orilumn.reader.engine.css.LightCssParser
-import orilumn.reader.engine.css.StyleComputer
-import orilumn.reader.engine.css.StyleSheet
 import orilumn.reader.engine.text.LayoutParamKey
 import orilumn.reader.engine.text.SystemCjkSerif
 import orilumn.reader.engine.text.TypographicProfile
@@ -208,11 +204,16 @@ class ReaderActivity : ComponentActivity() {
                 orilumn.reader.engine.EngineDiag.enabled = orilumn.reader.BuildConfig.DEBUG
                 // 用户字库先进共用 skia 集合（整形与绘制同一实例；否则首排按系统字体断行，
                 // 绘制切内嵌字体即全书错位）。IO 内同步等，不与首排抢跑。
-                // P2-b: 新书清掉旧书内字体条目（池刷新只含本书）＋缓存文件后继重建。
+                // P2-b: 新书清掉旧书内字体条目（池刷新只含本书）。
                 bookFontEntries = emptyList()
-                bookFontFileCache.clear()
                 // F4c: 系统族落行（INSERT OR IGNORE，开屏一次；面板开页再同步一次）。
-                runCatching { fontRepository.syncSystemFaces(orilumn.reader.engine.skia.systemFontFaces()) }
+                // 中文名链（桌面同式方案B）：name 表直读优先，无本地化名的族展示层回退族名本身。
+                runCatching {
+                    fontRepository.syncSystemFaces(
+                        orilumn.reader.engine.skia.systemFontFaces(),
+                        fontRepository.systemFontLocalizedNames(),
+                    )
+                }
                 refreshSkiaFonts()
                 val file = BookFileResolver(this@ReaderActivity).resolve(bookPath ?: return@runCatching null)
                     ?: return@runCatching null
@@ -699,47 +700,6 @@ class ReaderActivity : ComponentActivity() {
         syncSkiaPool(orilumn.reader.engine.css.FontDemand.EMPTY)
     }
 
-    /**
-     * 阅读面字体池（canvas 兜底绘制专用：表格/符号）：用户导入字体按名登记，
-     * 槽位路由已由级联 UI 层写进 families，这里只做名 → 文件投影。
-     * P2-b: 书内字体经缓存文件同口径投影（主文本走 skia 窗口，本桥只管兜底）。
-     */
-    private fun fontPool(): orilumn.reader.engine.text.FontPool {
-        val faces = runCatching { kotlinx.coroutines.runBlocking { fontRepository.list() } }.getOrNull() ?: emptyList()
-        val byName = HashMap<String, MutableList<orilumn.reader.data.font.FontFace>>()
-        for (f in faces) {
-            byName.computeIfAbsent(f.familyName) { ArrayList() }.add(f)
-            if (f.displayName != f.familyName) byName.computeIfAbsent(f.displayName) { ArrayList() }.add(f)
-        }
-        for (e in bookFontEntries) {
-            val f = bookFontCacheFile(e) ?: continue
-            val rec = orilumn.reader.data.font.FontFace(
-                id = -e.familyName.hashCode().toLong(),
-                familyName = e.familyName,
-                displayName = e.familyName,
-                path = f.absolutePath,
-                lang = "",
-            )
-            byName.computeIfAbsent(e.familyName) { ArrayList() }.add(rec)
-        }
-        return orilumn.reader.engine.text.FontPool(imported = byName)
-    }
-
-    /** 书内字体缓存文件（族名＋字节量键；一次写入复用；失败记 null 下次重试）。 */
-    private val bookFontFileCache = HashMap<String, java.io.File?>()
-
-    private fun bookFontCacheFile(e: SkiaFontPool.EmbeddedFont): java.io.File? {
-        val key = "${e.familyName}:${e.bytes.size}"
-        if (!bookFontFileCache.containsKey(key)) {
-            val dir = java.io.File(cacheDir, "book-fonts/$bookId").apply { mkdirs() }
-            val safe = e.familyName.replace(Regex("[^A-Za-z0-9_-]"), "_").take(40).ifEmpty { "font" }
-            val f = java.io.File(dir, "$safe-${e.bytes.size}.ttf")
-            val ok = (f.isFile && f.length() == e.bytes.size.toLong()) ||
-                runCatching { f.writeBytes(e.bytes); true }.getOrDefault(false)
-            bookFontFileCache[key] = if (ok) f else null
-        }
-        return bookFontFileCache[key]
-    }
 
     /**
      * 切到原书设置时，把当前章节的真实排版（首行缩进/段间距/行距）快照进预设的滑块值
@@ -747,20 +707,9 @@ class ReaderActivity : ComponentActivity() {
      */
     private fun ReaderSettings.withBookStyle(): ReaderSettings {
         if (layoutTheme != "original") return this
-        val snap = runCatching {
-            val c = engine ?: return@runCatching null
-            val p = currentPos ?: return@runCatching null
-            val unit = c.unitAt(p.chapter) ?: return@runCatching null
-            val markup = unit.markup ?: return@runCatching null
-            val sheets = (unit.cssBundle?.cssTexts ?: emptyList()).map { LightCssParser().parse(it) }
-            val styles = StyleComputer(profile.bodyPx, StyleSheet(emptyList()), sheets).compute(markup)
-            BookStyleProbe.snapshot(styles)
-        }.getOrNull() ?: return this
-        return copy(
-            firstLineIndent = snap.firstLineIndent,
-            paragraphSpacing = snap.paragraphSpacing,
-            lineSpacing = snap.lineSpacing,
-        )
+        val c = engine ?: return this
+        val p = currentPos ?: return this
+        return c.snapshotBookStyle(p.chapter, profile.bodyPx, this)
     }
 
     companion object {

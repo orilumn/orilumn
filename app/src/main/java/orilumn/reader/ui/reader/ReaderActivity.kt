@@ -508,23 +508,13 @@ class ReaderActivity : ComponentActivity() {
         }
     }
 
-    /** 绑定重排结果并落位（大章锚点路径保留旧版式当后缓冲，不绑 null 产品版式）。 */
+    /** 绑定重排结果并落位（版式变更收归控制器 [BookDocumentController.bindReflow]，此处只刷版本号与定位）。 */
     private fun applyReflowResult(c: BookDocumentController, r: BookDocumentController.ReflowResult) {
-        val unit = c.unitAt(r.chapter) ?: return
+        if (!c.bindReflow(r)) return
         // 先 bump 版式号：行/图/背景缓存键随之失效（pos 相等时也强制重取）。
         layoutRevision++
-        if (unit.inProgress != null) {
-            // Anchor 临时路径：临时渲染版式已 live，保留旧章版式为后缓冲 —— 不绑 null 产品版式。
-            currentPos = ReaderPos(r.chapter, r.page)
-            externalPos = ReaderPos(r.chapter, r.page)
-        } else {
-            val layout = r.layout
-            if (layout != null) {
-                unit.bind(layout, r.slices)
-                currentPos = ReaderPos(r.chapter, r.page)
-                externalPos = ReaderPos(r.chapter, r.page)
-            }
-        }
+        currentPos = ReaderPos(r.chapter, r.page)
+        externalPos = ReaderPos(r.chapter, r.page)
     }
 
     // ---- Brightness (physical backlight; overlay drawn by ReaderScreen's ReaderLightMask) ----

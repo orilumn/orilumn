@@ -205,12 +205,8 @@ class DesktopReaderHost(
     // ---- 平台接缝 ----
 
     /** 锚点落位（目录跳转/设置重建）：章内字符所在页；无内容回 null（调用方退回 locateStart）。 */
-    private suspend fun landAnchor(chapter: Int, char: Int): ReaderPos? {
-        val unit = controller.ensureChapterLayout(chapter, char) ?: return null
-        val slice = unit.pageSlices.firstOrNull { char >= it.charStart && char < it.charEnd }
-            ?: unit.pageSlices.lastOrNull() ?: return null
-        return ReaderPos(chapter, slice)
-    }
+    private suspend fun landAnchor(chapter: Int, char: Int): ReaderPos? =
+        controller.pageAtChar(chapter, char)?.let { ReaderPos(chapter, it) }
 
     /**
      * F4b 用户字库追装（与平板 `topUpSkiaFonts` 同式，经共享 [FontPoolSync]）：

@@ -1776,6 +1776,30 @@ private fun finishCanonicalBackground(
         val page: PageSlice,
     )
 
+    /**
+     * Q2/R5：锚点落位查询下沉（原桌面 `landAnchor`）：章内字符所在页；无内容回 null
+     *（调用方退回 locateStart）。切片查找纯函数见 common [pageSliceAtChar]。
+     */
+    suspend fun pageAtChar(chapter: Int, char: Int): PageSlice? {
+        val unit = ensureChapterLayout(chapter, char) ?: return null
+        return orilumn.reader.engine.paging.pageSliceAtChar(unit.pageSlices, char)
+    }
+
+    /**
+     * Q2/R5：版式绑定下沉（原壳 `applyReflowResult` 的引擎半）：unit 变更收归控制器，
+     * 壳不再触碰 [ChapterUnit]。true = 调用方应刷版本号并落位；false = unit 缺失直接返回。
+     *
+     * 唯一语义差：unit 存在但无产品版式（大章锚点保留旧版式）时，原壳会空刷一次版本号
+     *（内容无变化，仅强制重取同一窗口），此处不再空刷——像素与定位完全一致。
+     */
+    fun bindReflow(r: ReflowResult): Boolean {
+        val unit = unitAt(r.chapter) ?: return false
+        if (unit.inProgress != null) return true
+        val layout = r.layout ?: return false
+        unit.bind(layout, r.slices)
+        return true
+    }
+
     fun pageProgress(chapter: Int, slice: PageSlice): Double {
         // After lazy loading the whole-book character total is unknown, so progress is converted
         // with "equal chapter weights": chapter start 0, chapter end 1, whole book = cumulative/chapters.

@@ -341,7 +341,13 @@ fun ReaderScreen(
                 .onKeyEvent { event ->
                     if (!currentKeysEnabled) return@onKeyEvent false
                     if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
-                    when (ReaderMath.keyAction(event.key)) {
+                    val action = ReaderMath.keyAction(event.key)
+                    // TODO: 状态栏打开时左右键在栏按键之间切换焦点（未实现）。
+                    // 在此之前状态栏打开即禁用左右翻页，不消费（冒泡给系统/后续焦点逻辑）。
+                    if (currentBarsVisible &&
+                        (action == ReaderMath.ReaderKeyAction.Prev || action == ReaderMath.ReaderKeyAction.Next)
+                    ) return@onKeyEvent false
+                    when (action) {
                         ReaderMath.ReaderKeyAction.Prev -> { flip(-1); true }
                         ReaderMath.ReaderKeyAction.Next -> { flip(1); true }
                         ReaderMath.ReaderKeyAction.MiddleTap -> { onTap(pxWidth / 2f, pxHeight / 2f, pxWidth); true }

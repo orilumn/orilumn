@@ -18,3 +18,11 @@
 ## 校验规则
 
 任何代码修改、方案设计，若违反上面两条架构约束，禁止直接生成实现代码，先指出架构冲突点，并给出合规调整思路。
+
+## 平板日志（无线 adb，vivo PA2353）
+
+- 详见 `docs/调试日志与分页跟踪.md`；下面是每次必走的摘要。
+- 连接：端口每次会变，从平板无线调试界面抄，`adb connect 172.16.0.203:<端口>`；双条目时命令一律带 `-s`。
+- 定论只看落盘：`adb -s <addr> shell run-as orilumn.reader cat files/logs/日志_YYYYMMDD.txt`，配 `grep -E "Orilumn.FLIP|PGAP|PGL|DISK-HIT"`。logcat 会被 OEM 限流丢行，只做实时 tail。
+- 先看文件时间戳：无新日志 = 新包没跑起来，先 `am force-stop orilumn.reader` 再 `am start -n orilumn.reader/.MainActivity`。
+- `Orilumn.DBGPAGE` / `Orilumn.View` 已退役（R1 后零调用）；当页区间看 `FLIP` 的 `slice`。

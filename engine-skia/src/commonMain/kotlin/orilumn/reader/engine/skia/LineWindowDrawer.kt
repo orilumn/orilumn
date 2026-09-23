@@ -157,19 +157,32 @@ class LineWindowDrawer(
                 var textX = contentLeft + line.xLeft
                 val marker = line.listMarker
                 if (marker != null) {
-                    val markerString = ListMarkers.markerText(marker.kind, marker.order)
-                    val markerW = measureMarkerWidth(style, markerString, collection)
-                    when (marker.position) {
-                        // OUTSIDE：marker 在沟槽悬垂（文本左缘左侧 markerW+gap），文本位置不变.
-                        ListMarkers.Position.OUTSIDE -> {
-                            val gap = ListMarkers.markerGapPx(line.fontSizePx)
-                            paintText(canvas, style, markerString, textX - markerW - gap, line, collection)
-                        }
-                        // INSIDE：marker 行首内嵌，文本向右让 markerW+gap（近似平板 LeadingMarginSpan）.
-                        ListMarkers.Position.INSIDE -> {
-                            val gap = ListMarkers.markerGapPx(line.fontSizePx)
-                            paintText(canvas, style, markerString, textX, line, collection)
-                            textX += markerW + gap
+                    val gap = ListMarkers.markerGapPx(line.fontSizePx)
+                    if (marker.isShapeKind) {
+                        // 矢量圆点/圈/方块：不随字体字形走（老 StaticLayout 管线 drawShapeMarker 同口径，
+                        // C1-0 重构搬运；字形 "•/○" 在 CJK 字库下一大一小即此回归）。
+                        val markerW = ListMarkers.shapeMarkerWidthPx(line.fontSizePx)
+                        val x = if (marker.position == ListMarkers.Position.INSIDE) textX
+                        else textX - markerW - gap
+                        drawShapeMarker(
+                            canvas, marker.kind, x, (line.yTop + line.yBottom) / 2f,
+                            line.fontSizePx * ListMarkers.SHAPE_MARKER_EM,
+                            withAlpha(line.inkColor, line.alpha),
+                        )
+                        if (marker.position == ListMarkers.Position.INSIDE) textX += markerW + gap
+                    } else {
+                        val markerString = ListMarkers.markerText(marker.kind, marker.order)
+                        val markerW = measureMarkerWidth(style, markerString, collection)
+                        when (marker.position) {
+                            // OUTSIDE：marker 在沟槽悬垂（文本左缘左侧 markerW+gap），文本位置不变.
+                            ListMarkers.Position.OUTSIDE -> {
+                                paintText(canvas, style, markerString, textX - markerW - gap, line, collection)
+                            }
+                            // INSIDE：marker 行首内嵌，文本向右让 markerW+gap（近似平板 LeadingMarginSpan）.
+                            ListMarkers.Position.INSIDE -> {
+                                paintText(canvas, style, markerString, textX, line, collection)
+                                textX += markerW + gap
+                            }
                         }
                     }
                 }
@@ -542,6 +555,34 @@ class LineWindowDrawer(
             paragraph.paint(canvas, textX, line.yTop.toFloat())
         } finally {
             paragraph.close()
+        }
+    }
+
+    /**
+     * 矢量 marker 绘制（disc 实心圆 / circle 空心圈 / square 实心方），行中线居中，
+     * 尺寸恒相对行字号（不随字体字形走）。[x] 为形状左缘，[midY] 为行中线。
+     */
+    private fun drawShapeMarker(canvas: Canvas, kind: ListMarkers.Kind, x: Float, midY: Float, size: Float, ink: Int) {
+        if (size <= 0f) return
+        val half = size / 2f
+        when (kind) {
+            ListMarkers.Kind.SQUARE -> {
+                val paint = Paint().apply { color = ink }
+                canvas.drawRect(Rect.makeLTRB(x, midY - half, x + size, midY + half), paint)
+            }
+            ListMarkers.Kind.CIRCLE -> {
+                val stroke = (size / 7f).coerceAtLeast(1f)
+                val paint = Paint().apply {
+                    color = ink
+                    mode = org.jetbrains.skia.PaintMode.STROKE
+                    strokeWidth = stroke
+                }
+                canvas.drawCircle(x + half, midY, half - stroke / 2f, paint)
+            }
+            else -> { // DISC
+                val paint = Paint().apply { color = ink }
+                canvas.drawCircle(x + half, midY, half, paint)
+            }
         }
     }
 

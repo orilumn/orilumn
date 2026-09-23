@@ -1495,7 +1495,7 @@ class BoxChapterLayouter(
     /**
      * Shapes one leaf into a [ParagraphShape]. A table-row leaf fills its cells' shapes (each shaped
      * within its column width) and returns a synthetic single-line shape of the row's height; every other
-     * leaf falls through to [ParagraphShapes.shapeOf].
+     * leaf falls through to skia shapeGeometry.
      */
     private fun shapeLeaf(
         leaf: LayoutBox,

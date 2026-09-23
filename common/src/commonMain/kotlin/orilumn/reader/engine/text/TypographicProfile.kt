@@ -173,7 +173,7 @@ data class TypographicProfile(
         /**
          * 排版主题预设的正文通用字体族: 传统 → serif, 现代 → sans-serif, 原书设置 → null (不接管字体).
          * 切换主题时由 [withLayoutTheme] 把它同步写入「正文」字体槽 (一个普通 UI 设置), 而非由主题层
-         * 在渲染时压过用户设置. 与 assets/css/traditional.css / modern.css 的 body 规则保持一致.
+         * 在渲染时压过用户设置. 与 common resources css/traditional.css / modern.css 的 body 规则保持一致.
          */
         @JvmStatic
         fun layoutThemeFontFamily(theme: String): String? = when (theme) {

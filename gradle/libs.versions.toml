@@ -9,7 +9,6 @@ lifecycleRuntimeCompose = "2.10.0"
 activityCompose = "1.12.0"
 fragmentKtx = "1.8.9"
 composeBom = "2026.06.01"
-room = "2.6.1"
 webkit = "1.14.0"
 junit = "4.13.2"
 robolectric = "4.15.1"
@@ -48,11 +47,6 @@ androidx-compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "u
 androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
 # Material 矢量图标核心集（书架底部工具栏用，替代依赖设备字体的 Unicode 字符）
 androidx-compose-material-icons-core = { group = "androidx.compose.material", name = "material-icons-core" }
-
-# Room（本地数据库）
-androidx-room-runtime = { group = "androidx.room", name = "room-runtime", version.ref = "room" }
-androidx-room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "room" }
-androidx-room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
 
 # WebView（本地资源经 https 虚拟域服务 ES Module）
 androidx-webkit = { group = "androidx.webkit", name = "webkit", version.ref = "webkit" }

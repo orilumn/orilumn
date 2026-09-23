@@ -37,8 +37,12 @@ object BoxDrawer {
      *
      * This is the single source of page-aware background/border painting: a box whose
      * [LayoutBox.firstLineIndex] is entirely outside the page is skipped (a block pushed to the
-     * next page or belonging to a previous page), and every remaining rect is clamped to the band
-     * so that torn blocks do not overpaint the whitespace at the page bottom.
+     * next page or belonging to a previous page). Clipping is per-box, not one-size:
+     * a box that *starts/ends inside* the page keeps its full border-box (padding included,
+     * margin never painted) even past the line band — otherwise a chapter-ending block would
+     * lose its bottom padding despite empty page space below; only torn continuations
+     * (starting before / ending after the page) are cut at the band so they never leak strips
+     * across page boundaries.
      *
      * @param pageStartLine first line index of the page (inclusive).
      * @param pageEndLine exclusive last line index of the page.
@@ -73,10 +77,18 @@ object BoxDrawer {
             (box.lastLineExclusive <= pageStartLine || box.firstLineIndex >= pageEndLine)
         ) return
 
+        // 渲染层：页带裁剪只约束撕裂块。在本页内开始/结束的箱子，其 border-box（含 padding，
+        // 不含 margin）归属本页可见区，不得一刀切——否则章末块底 padding 明明有页空间却被裁掉。
+        // 撕裂延续（起于页前/止于页后）仍按页带裁剪，不向邻页漏底。
+        val top = if (box.firstLineIndex >= pageStartLine) minOf(bandTop, box.contentTop) else bandTop
+        val bottom =
+            if (box.lastLineExclusive in (pageStartLine + 1)..pageEndLine) maxOf(bandBottom, box.contentBottom)
+            else bandBottom
+
         // P3-a: 祖先链 opacity 连乘（本盒叠乘后传给后代；1 即旧路径）。
         val alpha = (parentAlpha * box.style.opacity.coerceIn(0f, 1f)).coerceIn(0f, 1f)
-        emitBackground(box, out, bandTop, bandBottom, alpha)
-        emitBorders(box, out, bandTop, bandBottom, alpha)
+        emitBackground(box, out, top, bottom, alpha)
+        emitBorders(box, out, top, bottom, alpha)
         for (child in box.childBoxes) emit(child, out, pageStartLine, pageEndLine, bandTop, bandBottom, alpha)
     }
 

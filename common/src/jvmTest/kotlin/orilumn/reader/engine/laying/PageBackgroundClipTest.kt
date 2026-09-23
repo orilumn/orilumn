@@ -69,10 +69,11 @@ class PageBackgroundClipTest {
     fun `torn block background is clipped to band bottom`() {
         // Block lines [2,7): torn at page boundary; page lines [2,5). band = [line2Top=100, line4Bot=240].
         // Block contentBottom=400 extends well past bandBottom.
+        // 块起于本页：顶 padding（90..100）归属本页保留；底撕裂延续，仍裁到行带。
         val b = box(bg = "#ffaaaaaa", contentTop = 90, contentBottom = 400, firstLine = 2, lastLineExcl = 7)
         val rects = draw(listOf(b), pageStart = 2, pageEnd = 5, bandTop = 100, bandBottom = 240)
         assertEquals(1, rects.size)
-        assertEquals(100, rects[0].top)
+        assertEquals(90, rects[0].top)
         assertEquals(240, rects[0].bottom)
         assertEquals("#ffaaaaaa", rects[0].colorHex)
     }
@@ -80,11 +81,12 @@ class PageBackgroundClipTest {
     @Test
     fun `torn block top is clipped to band top when block starts above page`() {
         // Block from previous page: contentTop=50, lines [0,6); page band [3,6)= [150,300].
+        // 块止于本页末：底 padding（300..350）归属本页保留；顶上页延续，仍裁到行带。
         val b = box(bg = "#ffeeeeee", contentTop = 50, contentBottom = 350, firstLine = 0, lastLineExcl = 6)
         val rects = draw(listOf(b), pageStart = 3, pageEnd = 6, bandTop = 150, bandBottom = 300)
         assertEquals(1, rects.size)
         assertEquals(150, rects[0].top)
-        assertEquals(300, rects[0].bottom)
+        assertEquals(350, rects[0].bottom)
     }
 
     // ------------------------------------------------------------------ pushed block

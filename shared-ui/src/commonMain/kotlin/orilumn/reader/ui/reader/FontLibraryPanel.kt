@@ -220,10 +220,10 @@ fun FontLibraryPanel(
     LazyColumn(state = listState, modifier = modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
         items(rows.size) { i ->
             when (val row = rows[i]) {
-                // 首行开关：显示态按钮名"隐藏"，隐藏态按钮名"显示"。
+                // 首行开关（书架同口径：标当前态——列出中标"显示"，未列出标"隐藏"）。
                 is FontPanelRow.Toggle ->
                     FontToggleRow(
-                        label = if (showHidden) "隐藏" else "显示",
+                        label = if (showHidden) "显示" else "隐藏",
                         nav = nav, index = i, p = p, onTap = { openKey = null; onToggleHidden() },
                     )
                 is FontPanelRow.FollowOriginal ->
@@ -519,7 +519,7 @@ private fun FontImportPair(
     onLocal: () -> Unit,
     showWifi: Boolean,
     onWifi: () -> Unit,
-    /** 显示/隐藏开关态：true=隐藏字体已列出（按钮显"隐藏"），false=未列出（按钮显"显示"）。 */
+    /** 显示/隐藏开关态（书架同口径：标当前态）：true=隐藏字体已列出（按钮显"显示"），false=未列出（按钮显"隐藏"）。 */
     hiddenShown: Boolean,
     onToggleHidden: () -> Unit,
     nav: PanelNav,
@@ -538,7 +538,7 @@ private fun FontImportPair(
         ) {
             if (showLocal) FontImportAction(Icons.Default.Add, "本地导入", p, onClick = onLocal)
             if (showWifi) FontImportAction(WifiIcon, "WIFI 导入", p, onClick = onWifi)
-            FontImportAction(EyeIcon, if (hiddenShown) "隐藏" else "显示", p, onClick = onToggleHidden)
+            FontImportAction(EyeIcon, if (hiddenShown) "显示" else "隐藏", p, onClick = onToggleHidden)
         }
         Box(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).height(1.dp).background(p.borderSoft))
     }

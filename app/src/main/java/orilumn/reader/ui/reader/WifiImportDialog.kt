@@ -45,6 +45,20 @@ internal val FONT_MIMES = arrayOf(
 internal val DeleteRed = Color(0xFFD9534F)
 
 /**
+ * 对话框调色板（壳侧小副本）：值与共享 [Palette]（`paletteFor`）逐项一致，
+ * 共享侧 `paletteFor` 为 internal、壳够不到，这里按 scheme 直给同一 16 色。
+ * 若后续壳侧还有 UI 要用色，再考虑把共享调色板公开。
+ */
+internal fun wifiDialogPalette(scheme: String): Palette = when (scheme) {
+    "night" -> Palette(Color(0xFF1C1C1E), Color(0xFFE8E8E8), Color(0xFF2C2C2E), Color(0xFF2A2A2C),
+        Color(0xFF262628), Color(0xFF232326), Color(0xFF343438), Color(0xFF8A8A8A), Color(0xFF909090), Color(0xFF666666),
+        Color(0xFF4A4A4E), Color(0xFF3A3A3E), Color(0xFF2C2C2E), Color(0xFF2A2018), Color(0xFFD9A94F), Color(0xFF8A5F1F))
+    else -> Palette(Color(0xFFFAF8F4), Color(0xFF2B2B2B), Color(0xFFECE9E2), Color(0xFFF0EDE6),
+        Color(0xFFEFECE4), Color(0xFFFFFFFF), Color(0xFFE3DFD5), Color(0xFF999999), Color(0xFF888888), Color(0xFFBBBBBB),
+        Color(0xFFC9C4BA), Color(0xFFE7E3D9), Color(0xFFF0EDE6), Color(0xFFFAF3E6), Color(0xFF8A5F1F), Color(0xFFC8A15A))
+}
+
+/**
  * WIFI font import dialog (F4c: moved verbatim from retired `FontManagerPanel`):
  * while open, starts a temporary HTTP server on the device (LAN address);
  * opening that address in a computer browser lets you choose font files to upload.
@@ -54,7 +68,7 @@ internal val DeleteRed = Color(0xFFD9534F)
 @Composable
 internal fun WifiImportDialog(
     fontRepository: FontRepository,
-    p: AndroidPalette,
+    p: Palette,
     onDismiss: () -> Unit,
     onImported: () -> Unit,
 ) {

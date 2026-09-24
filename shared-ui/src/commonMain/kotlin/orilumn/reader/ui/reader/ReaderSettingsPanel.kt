@@ -132,6 +132,8 @@ fun ReaderSettingsPanel(
     val p = paletteFor(settings.scheme)
     val stack = remember { mutableStateListOf<Sub>(Sub.Home) }
     val current = stack.last()
+    // 首行开关态：隐藏字体列出与否（面板内局部态，关面板即复位）。
+    var showHiddenFonts by remember { mutableStateOf(false) }
     // Which typography slot (body/heading/code) the current font sub-panel selects for.
     var pickSlot by remember { mutableStateOf<String?>(null) }
     // 自定义主题预设（内存态）：Seed 自宿主列表；保存/删除经 onSaveTheme/onDeleteTheme 上报宿主。
@@ -143,6 +145,7 @@ fun ReaderSettingsPanel(
             stack.clear()
             stack.add(Sub.Home)
             pickSlot = null
+            showHiddenFonts = false
         }
     }
 
@@ -198,8 +201,8 @@ fun ReaderSettingsPanel(
         val commitBook = onCommitBookPrivate ?: onCommitTypography
         // F4a 字体行模型（键与渲染共用同一份，1:1 对齐 activeIdx）。
         val slotKey: String = pickSlot ?: "fontBody"
-        val fontRows: List<FontPanelRow> = remember(current, fontEntries, s, pickSlot, canFontImport, canFontWifiImport, showImportedSection) {
-            if (current == Sub.TextFont) buildFontRows(fontEntries, fieldOf(s, slotKey), canFontImport, showImportedSection, canFontWifiImport)
+        val fontRows: List<FontPanelRow> = remember(current, fontEntries, s, pickSlot, canFontImport, canFontWifiImport, showImportedSection, showHiddenFonts) {
+            if (current == Sub.TextFont) buildFontRows(fontEntries, fieldOf(s, slotKey), canFontImport, showImportedSection, canFontWifiImport, showHiddenFonts)
             else emptyList()
         }
         // 无线下钻页可用性：能力位开且壳给了暂存目录。
@@ -246,13 +249,13 @@ fun ReaderSettingsPanel(
             }
             Sub.TextFont -> fontRows.map { row ->
                 when (row) {
+                    is FontPanelRow.Toggle ->
+                        ItemKey(onEnter = { showHiddenFonts = !showHiddenFonts })
                     is FontPanelRow.FollowOriginal ->
                         ItemKey(onEnter = { onCommitTypography(setField(s, slotKey, "")) })
                     is FontPanelRow.Import ->
                         // 双按钮同行：回车走主动作（本地导入优先；单开无线时进无线下钻页）。
                         ItemKey(onEnter = { if (canFontImport) onFontImport() else stack.add(Sub.WifiImport) })
-                    is FontPanelRow.Header, is FontPanelRow.EmptyHint ->
-                        ItemKey(enabled = false)
                     is FontPanelRow.Entry ->
                         ItemKey(onEnter = { onCommitTypography(setField(s, slotKey, row.family)) })
                 }
@@ -494,6 +497,8 @@ fun ReaderSettingsPanel(
                                 onImportWifi = { stack.add(Sub.WifiImport) },
                                 showLocalButton = canFontImport,
                                 showWifiButton = wifiReady,
+                                showHidden = showHiddenFonts,
+                                onToggleHidden = { showHiddenFonts = !showHiddenFonts },
                                 onMouseMove = onMove,
                                 listState = listState,
                             )

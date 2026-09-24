@@ -7,7 +7,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * F4a 字体行模型单测：分区（跟随原书/已导入/系统字体/已隐藏）+ 隐藏下沉 + 选择标记。
+ * F4a 字体行模型单测：单扁平列表（开关 → 导入区 → 跟随原书 → 全部字体按展示名排序）+ 选择标记。
  * （排序口径由 [familyNameComparator] 保证，JVM 与 Android 同为拼音 Collator。）
  */
 class FontPanelRowsTest {
@@ -20,33 +20,47 @@ class FontPanelRowsTest {
         FontEntry.System(family, family.hashCode().toLong() + subfamily.hashCode().toLong(), subfamily, hidden, displayName)
 
     @Test
-    fun sectionsAndSelection() {
+    fun flatListImportFollowOriginalThenSortedEntries() {
         val rows = buildFontRows(
             listOf(imported("B"), system("A"), imported("C")),
             selectedFamily = "A",
             canImport = true,
         )
-        // 导入区（一行双按钮）置顶 + 跟随原书领着字体列表 + 2 分区头 + 3 行。
+        // 导入区 + 跟随原书 + 3 字体行（无分区标题，按展示名排序；有导入区时开关并进导入行）。
         assertTrue(rows[0] is FontPanelRow.Import)
         assertTrue(rows[1] is FontPanelRow.FollowOriginal)
         assertEquals(false, (rows[1] as FontPanelRow.FollowOriginal).selected)
-        val headers = rows.filterIsInstance<FontPanelRow.Header>().map { it.title }
-        assertEquals(listOf("已导入", "系统字体"), headers)
-        val selected = rows.filterIsInstance<FontPanelRow.Entry>().single { it.selected }
+        val entries = rows.filterIsInstance<FontPanelRow.Entry>()
+        assertEquals(listOf("A", "B", "C"), entries.map { it.family })
+        val selected = entries.single { it.selected }
         assertEquals("A", selected.family)
     }
 
     @Test
-    fun subtitleGapScalesWithGlyphHeightAndClamps() {
-        // 行盒已是真墨迹高度（栅格真值）后名/重不会重叠，气口只微量按比例加（0.08），
-        // 并钳 [min,max]（常规行 2dp 贴紧，高字形行封顶 5dp）。
-        assertEquals(2f, subtitleGapPx(10, 2f, 5f))   // 10*0.08=0.8 → 兜底 2
-        assertEquals(2.4f, subtitleGapPx(30, 2f, 5f), 0.001f) // 2.4（钳制区内）
-        assertEquals(4f, subtitleGapPx(50, 2f, 5f), 0.001f) // 4.0（0.08 比率浮点折损）
-        assertEquals(4.8f, subtitleGapPx(60, 2f, 5f), 0.001f) // 4.8（钳制区内）
-        assertEquals(5f, subtitleGapPx(80, 2f, 5f))   // 6.4 → 封顶 5
-        // 单调：字形越高间隙越大（钳制区内）。
-        assertTrue(subtitleGapPx(53, 2f, 5f) > subtitleGapPx(41, 2f, 5f))
+    fun toggleStandaloneWithoutImportRow() {
+        // 无导入区（桌面）时开关独立成首行。
+        val rows = buildFontRows(
+            listOf(system("A")),
+            selectedFamily = "",
+            canImport = false,
+            canWifiImport = false,
+        )
+        assertTrue(rows[0] is FontPanelRow.Toggle)
+        assertTrue(rows[1] is FontPanelRow.FollowOriginal)
+    }
+
+    @Test
+    fun hiddenExcludedUnlessIncluded() {
+        val all = listOf(imported("B", hidden = true), system("A"), system("H", hidden = true))
+        // 关：隐藏字体不列出（无已隐藏区）。
+        var rows = buildFontRows(all, selectedFamily = "", canImport = false, canWifiImport = false, includeHidden = false)
+        assertEquals(listOf("A"), rows.filterIsInstance<FontPanelRow.Entry>().map { it.family })
+        // 开：隐藏字体与其他行同列。
+        rows = buildFontRows(all, selectedFamily = "", canImport = false, canWifiImport = false, includeHidden = true)
+        assertEquals(listOf("A", "B", "H"), rows.filterIsInstance<FontPanelRow.Entry>().map { it.family })
+        // 隐藏行永不标记选中。
+        assertTrue(rows.filterIsInstance<FontPanelRow.Entry>().none { it.members.all { m -> m.hidden } && it.selected })
+        assertTrue(rows.filterIsInstance<FontPanelRow.FollowOriginal>().single().selected)
     }
 
     @Test
@@ -121,42 +135,22 @@ class FontPanelRowsTest {
     }
 
     @Test
-    fun importRowNeedsAnyCapability() {
-        // 一行双按钮：任一能力位开即出行（具体按钮显隐在渲染层 showLocal/showWifi），双关不出行。
-        fun has(canImport: Boolean, canWifi: Boolean) = buildFontRows(
-            listOf(system("A")), selectedFamily = "",
-            canImport = canImport, canWifiImport = canWifi,
-        ).any { it is FontPanelRow.Import }
-        assertTrue(has(canImport = true, canWifi = false))
-        assertTrue(has(canImport = false, canWifi = true))
-        assertEquals(false, has(canImport = false, canWifi = false))
-    }
-
-    @Test
-    fun hiddenSinksToHiddenSection() {
+    fun crossSourceSameDisplayKeepsSeparateRows() {
+        // 跨来源同名（导入 Sarasa vs 系统 Sarasa）各占一行：来源标记单一，删除/隐藏不串味。
         val rows = buildFontRows(
-            listOf(imported("B", hidden = true), system("A"), system("H", hidden = true)),
+            listOf(
+                imported("Sarasa Term SC", subfamily = "Bold"),
+                system("Sarasa Term SC", "Bold"),
+            ),
             selectedFamily = "",
             canImport = false,
             canWifiImport = false,
         )
-        // 无导入入口（双能力位皆关）；隐藏区只在有隐藏项时出现。
-        assertTrue(rows.none { it is FontPanelRow.Import })
-        val headers = rows.filterIsInstance<FontPanelRow.Header>().map { it.title }
-        assertEquals(listOf("已导入", "系统字体", "已隐藏"), headers)
-        val hiddenRows = rows.filterIsInstance<FontPanelRow.Entry>()
-            .filter { it.members.all { m -> m.hidden } }.map { it.family }.sorted()
-        assertEquals(listOf("B", "H"), hiddenRows)
-        // 隐藏行永不标记选中。
-        assertTrue(rows.filterIsInstance<FontPanelRow.Entry>().none { it.members.all { m -> m.hidden } && it.selected })
-        assertTrue((rows[0] as FontPanelRow.FollowOriginal).selected)
-    }
-
-    @Test
-    fun emptyImportedHints() {
-        val rows = buildFontRows(listOf(system("A")), selectedFamily = "", canImport = false)
-        val hint = rows.filterIsInstance<FontPanelRow.EmptyHint>().single()
-        assertEquals("暂无导入字体", hint.text)
+        val entries = rows.filterIsInstance<FontPanelRow.Entry>()
+            .filter { it.family == "Sarasa Term SC" }
+        assertEquals(2, entries.size)
+        assertTrue(entries.any { it.members.all { m -> m is FontEntry.Imported } })
+        assertTrue(entries.any { it.members.all { m -> m is FontEntry.System } })
     }
 
     @Test
@@ -175,7 +169,6 @@ class FontPanelRowsTest {
             canImport = false,
             canWifiImport = false,
         )
-        assertTrue(rows.none { it is FontPanelRow.Import })
         val songti = rows.filterIsInstance<FontPanelRow.Entry>().single { it.family == "Songti SC" }
         assertEquals(3, songti.members.size)
         assertTrue(songti.selected)
@@ -186,18 +179,34 @@ class FontPanelRowsTest {
 
     @Test
     fun desktopHidesImportedSection() {
-        // 桌面口径：仅系统字体，无导入入口/已导入区，隐藏区也只收系统行。
+        // 桌面口径：仅系统字体，无导入入口/已导入行。
         val rows = buildFontRows(
             listOf(imported("B"), system("A"), imported("H", hidden = true), system("S", hidden = true)),
             selectedFamily = "",
             canImport = false,
             showImported = false,
+            includeHidden = true,
         )
         assertTrue(rows.none { it is FontPanelRow.Import })
-        val headers = rows.filterIsInstance<FontPanelRow.Header>().map { it.title }
-        assertEquals(listOf("系统字体", "已隐藏"), headers)
         val fams = rows.filterIsInstance<FontPanelRow.Entry>().map { it.family }.sorted()
         assertEquals(listOf("A", "S"), fams)
+    }
+
+    @Test
+    fun chineseNamesBeforeLatin() {
+        // 中文展示名在前（组内拼音序），英文沉后。
+        val rows = buildFontRows(
+            listOf(
+                system("Helvetica"),
+                system("Songti SC", displayName = "宋体-简"),
+                imported("Arial"),
+                imported("霞鹜文楷"),
+            ),
+            selectedFamily = "",
+            canImport = true,
+        )
+        val names = rows.filterIsInstance<FontPanelRow.Entry>().map { it.members.first().display }
+        assertEquals(listOf("宋体-简", "霞鹜文楷", "Arial", "Helvetica"), names)
     }
 
     @Test
@@ -217,5 +226,18 @@ class FontPanelRowsTest {
         assertEquals("常规", (cn.previewMember() as FontEntry.Imported).face.subfamily)
         val lower = listOf(system("H", "bold"), system("H", "regular"))
         assertEquals("regular", (lower.previewMember() as FontEntry.System).subfamily)
+    }
+
+    @Test
+    fun subtitleGapScalesWithGlyphHeightAndClamps() {
+        // 行盒已是真墨迹高度（栅格真值）后名/重不会重叠，气口只微量按比例加（0.08），
+        // 并钳 [min,max]（常规行 2dp 贴紧，高字形行封顶 5dp）。
+        assertEquals(2f, subtitleGapPx(10, 2f, 5f))   // 10*0.08=0.8 → 兜底 2
+        assertEquals(2.4f, subtitleGapPx(30, 2f, 5f), 0.001f) // 2.4（钳制区内）
+        assertEquals(4f, subtitleGapPx(50, 2f, 5f), 0.001f) // 4.0（0.08 比率浮点折损）
+        assertEquals(4.8f, subtitleGapPx(60, 2f, 5f), 0.001f) // 4.8（钳制区内）
+        assertEquals(5f, subtitleGapPx(80, 2f, 5f))   // 6.4 → 封顶 5
+        // 单调：字形越高间隙越大（钳制区内）。
+        assertTrue(subtitleGapPx(53, 2f, 5f) > subtitleGapPx(41, 2f, 5f))
     }
 }

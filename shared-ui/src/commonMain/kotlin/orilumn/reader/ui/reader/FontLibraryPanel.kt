@@ -78,18 +78,18 @@ import kotlin.math.roundToInt
  * 删除/隐藏正被槽位引用时由调用方回退"跟随原书"（沿旧平板口径）。
  */
 
-/** 扁平行（渲染与键盘键 1:1；Header/Hint 不可操作）。 */
+/** 扁平行（渲染与键盘键 1:1，全行可操作）。 */
 sealed interface FontPanelRow {
-    data class FollowOriginal(val selected: Boolean) : FontPanelRow
-    /** 导入区（一行双按钮：本地导入 + 无线导入，沿旧 `FontManagerPanel` 样式；平板独占）。 */
+    /** 首行开关（无导入区时独立成行；有导入区时并进导入行第三钮，不重复）。 */
+    data object Toggle : FontPanelRow
+    /** 导入区（一行三按钮：本地导入 + 无线导入 + 显示/隐藏，沿旧 `FontManagerPanel` 样式；平板独占）。 */
     data object Import : FontPanelRow
-    data class Header(val title: String) : FontPanelRow
-    /** 同家族合并行（导入多字重 / 系统单行 / 隐藏组统一形状）。 */
+    data class FollowOriginal(val selected: Boolean) : FontPanelRow
+    /** 同展示名合并行（成员同来源：导入行左滑删除，系统行左滑隐藏/取消隐藏）。 */
     data class Entry(val family: String, val members: List<FontEntry>, val selected: Boolean) : FontPanelRow
-    data class EmptyHint(val text: String) : FontPanelRow
 }
 
-/** 纯行模型：分区 + 按家族合并 + 排序 + 隐藏下沉（调用方只管喂全量表 + 当前槽位值）。 */
+/** 纯行模型：开关 + 导入区 + 跟随原书 + 单列字体（调用方只管喂全量表 + 当前槽位值）。 */
 fun buildFontRows(
     entries: List<FontEntry>,
     selectedFamily: String,
@@ -98,8 +98,10 @@ fun buildFontRows(
     showImported: Boolean = true,
     /** 无线导入入口（平板=true；与本地导入独立的能力位）。 */
     canWifiImport: Boolean = true,
+    /** true 即把隐藏字体与其他行同列（首行开关态）；false 即不列出（无已隐藏区）。 */
+    includeHidden: Boolean = false,
 ): List<FontPanelRow> {
-    val cmp = familyNameComparator()
+    val cmp = chineseFirstComparator(familyNameComparator())
     // 同展示名合族：同一字体的不同包装（Source Han Sans/Serif VF + 区域静态版 →
     // 「思源黑体/宋体」）在列表只占一行，避免同名两行让人以为字体重复。
     // **真不同字体**靠展示名自然拆开（Hei→Hei vs Heiti SC→黑体-简、Kai→Kai vs
@@ -125,41 +127,30 @@ fun buildFontRows(
                 ),
             )
             canonical to ordered
-        }.sortedWith { a, b -> cmp.compare(a.first, b.first) }
+        }.sortedWith { a, b -> cmp.compare(a.second.first().display, b.second.first().display) }
     val imported = mergeByName(entries.filterIsInstance<FontEntry.Imported>()
-        .filter { !it.hidden }.groupBy { it.family })
+        .filter { showImported && (includeHidden || !it.hidden) }.groupBy { it.family })
     val system = mergeByName(entries.filterIsInstance<FontEntry.System>()
-        .filter { !it.hidden }.groupBy { it.family })
-    val hiddenSource = if (showImported) entries else entries.filterIsInstance<FontEntry.System>()
-    val hidden = mergeByName(hiddenSource.filter { it.hidden }.groupBy { it.family })
+        .filter { includeHidden || !it.hidden }.groupBy { it.family })
     return buildList {
-        // 导入区置顶（平板双按钮；桌面无此行）——字体列表（含跟随原书首行）列其下，
-        // 跟随原书不当悬空标签，实打实领着字体行。
-        if (showImported && (canImport || canWifiImport)) add(FontPanelRow.Import)
+        // 导入区（平板三按钮，含显示/隐藏开关；桌面无此行，开关独立成行兜底）。
+        val hasImport = showImported && (canImport || canWifiImport)
+        if (!hasImport) add(FontPanelRow.Toggle)
+        if (hasImport) add(FontPanelRow.Import)
         add(FontPanelRow.FollowOriginal(selectedFamily.isEmpty()))
-        if (showImported) {
-            add(FontPanelRow.Header("已导入"))
-            if (imported.isEmpty()) {
-                add(FontPanelRow.EmptyHint(if (canImport) "点上方导入添加字体" else "暂无导入字体"))
-            } else {
-                imported.forEach { (family, members) ->
-                    add(FontPanelRow.Entry(family, members, members.any { it.family == selectedFamily }))
-                }
-            }
-        }
-        add(FontPanelRow.Header("系统字体"))
-        if (system.isEmpty()) {
-            add(FontPanelRow.EmptyHint("无可用系统字体"))
-        } else {
-            system.forEach { (family, members) ->
-                add(FontPanelRow.Entry(family, members, members.any { it.family == selectedFamily }))
-            }
-        }
-        if (hidden.isNotEmpty()) {
-            add(FontPanelRow.Header("已隐藏"))
-            hidden.forEach { (family, members) ->
-                add(FontPanelRow.Entry(family, members, false))
-            }
+        // 单列：导入行与系统行按展示名归并排序（两组各自有序；跨来源同名各占一行，
+        // 来源标记天然单一，删除/隐藏不串味）。
+        val ia = imported.iterator()
+        val sa = system.iterator()
+        var i = if (ia.hasNext()) ia.next() else null
+        var s = if (sa.hasNext()) sa.next() else null
+        while (i != null || s != null) {
+            // mergeByName 内部已按规范族排序，这里按展示名（组内首成员 display）归并。
+            val takeI = i != null && (s == null ||
+                cmp.compare(i.second.first().display, s.second.first().display) <= 0)
+            val (family, members) = if (takeI) i!!.also { i = if (ia.hasNext()) ia.next() else null }
+            else s!!.also { s = if (sa.hasNext()) sa.next() else null }
+            add(FontPanelRow.Entry(family, members, members.any { it.family == selectedFamily }))
         }
     }
 }
@@ -196,6 +187,10 @@ fun FontLibraryPanel(
     showWifiButton: Boolean = true,
     /** 无线导入（平板 WiFi 上传；默认空即与本地同一入口语义，调用方按需覆盖）。 */
     onImportWifi: () -> Unit = onImport,
+    /** 首行开关态：true 即隐藏字体已列出（按钮显"隐藏"），false 即未列出（按钮显"显示"）。 */
+    showHidden: Boolean = false,
+    /** 首行开关点按（键鼠共用同一回调）。 */
+    onToggleHidden: () -> Unit = {},
 ) {
     // 同时只展开一行的滑动操作：新展开即收起旧行。
     var openKey by remember { mutableStateOf<String?>(null) }
@@ -212,6 +207,7 @@ fun FontLibraryPanel(
             if (vis.isEmpty() || vis.any { it.index == a }) return@collect
             val target = vis.firstOrNull {
                 when (currentRows.getOrNull(it.index)) {
+                    is FontPanelRow.Toggle,
                     is FontPanelRow.FollowOriginal,
                     is FontPanelRow.Import,
                     is FontPanelRow.Entry -> true
@@ -224,23 +220,26 @@ fun FontLibraryPanel(
     LazyColumn(state = listState, modifier = modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
         items(rows.size) { i ->
             when (val row = rows[i]) {
+                // 首行开关：显示态按钮名"隐藏"，隐藏态按钮名"显示"。
+                is FontPanelRow.Toggle ->
+                    FontToggleRow(
+                        label = if (showHidden) "隐藏" else "显示",
+                        nav = nav, index = i, p = p, onTap = { openKey = null; onToggleHidden() },
+                    )
                 is FontPanelRow.FollowOriginal ->
                     // 跟随原书（用户层）：当作一个字体行——与 Entry 同规格（名字行 + 副标题 +
-                    // 选中金点），稳坐列表首行，不因无字形预览而塌成裸标签。
+                    // 选中金点），稳坐导入区之下；不是字体，无左滑。
                     FontManageRow("跟随原书", null, row.selected, null, null, nav, i, p,
-                        subtitle = "使用原书字体",
+                        subtitle = "使用原书字体", swipeEnabled = false, sourceLabel = null,
                         onTap = { openKey = null; onSelect("") }, openKey = openKey,
                         onOpenChange = { openKey = it })
                 is FontPanelRow.Import ->
                     FontImportPair(
                         showLocal = showLocalButton, onLocal = onImport,
                         showWifi = showWifiButton, onWifi = onImportWifi,
+                        hiddenShown = showHidden, onToggleHidden = onToggleHidden,
                         nav = nav, index = i, p = p,
                     )
-                is FontPanelRow.Header ->
-                    FontSectionHeader(row.title, p)
-                is FontPanelRow.EmptyHint ->
-                    FontEmptyHint(row.text, p)
                 is FontPanelRow.Entry -> {
                     val hidden = row.members.all { it.hidden }
                     val ids = row.members.mapNotNull {
@@ -253,19 +252,28 @@ fun FontLibraryPanel(
                     val subtitle = rowSubtitle(row.members)
                     // 预览成员：有 Regular 字重用它（同族多字重时名行字形稳定），没有用第一个。
                     val preview = row.members.previewMember()
+                    // 来源标记：隐藏行标"隐藏"，其余按来源（同展示名跨来源各占一行，行内来源天然单一）。
+                    val sourceLabel = when {
+                        hidden -> "隐藏"
+                        isSystem -> "系统"
+                        else -> "导入"
+                    }
                     when {
                         hidden -> FontManageRow(row.family, preview, false,
-                            "取消隐藏", SwipeActionTone.Restore, nav, i, p, subtitle,
+                            "显示", SwipeActionTone.Restore, nav, i, p, subtitle,
+                            sourceLabel = sourceLabel,
                             onTap = { openKey = null; onUnhide(ids) },
                             onAction = { onUnhide(ids) },
                             openKey = openKey, onOpenChange = { openKey = it })
                         isSystem -> FontManageRow(row.family, preview, row.selected,
                             "隐藏", SwipeActionTone.Hide, nav, i, p, subtitle,
+                            sourceLabel = sourceLabel,
                             onTap = { openKey = null; onSelect(row.family) },
                             onAction = { onHide(ids) },
                             openKey = openKey, onOpenChange = { openKey = it })
                         else -> FontManageRow(row.family, preview, row.selected,
                             "删除", SwipeActionTone.Delete, nav, i, p, subtitle,
+                            sourceLabel = sourceLabel,
                             onTap = { openKey = null; onSelect(row.family) },
                             onAction = { onDelete(row.family) },
                             openKey = openKey, onOpenChange = { openKey = it })
@@ -274,6 +282,18 @@ fun FontLibraryPanel(
             }
         }
     }
+}
+
+/**
+ * 中文名在前、英文名在后（组内仍走拼音序）：读音归一做不到（穷举不尽），只按"是否含中日韩
+ * 表意/假名"分两档——中文展示名天然聚前，英文专有名词（Helvetica 这类本就没有中文名的）
+ * 沉后。纯函数（行模型同一文件可测）。
+ */
+internal fun chineseFirstComparator(cmp: Comparator<String>): Comparator<String> = Comparator { a, b ->
+    val ac = a.any { it.code in 0x4E00..0x9FFF || it.code in 0x3040..0x30FF || it.code in 0xFF65..0xFF9D }
+    val bc = b.any { it.code in 0x4E00..0x9FFF || it.code in 0x3040..0x30FF || it.code in 0xFF65..0xFF9D }
+    if (ac != bc) return@Comparator if (ac) -1 else 1
+    cmp.compare(a, b)
 }
 
 /** 副标题统一口径：语种 · 字重表（系统/导入同形；无字重名即"无字重名"）。 */
@@ -317,7 +337,7 @@ fun subtitleGapPx(nameHeightPx: Int, minPx: Float, maxPx: Float): Float =
 private enum class SwipeActionTone(val color: Color) {
     Delete(Color(0xFFD9534F)),
     Hide(Color(0xFFE67E22)),
-    Restore(Color(0xFF1A7F37)),
+    Restore(Color(0xFF9C27B0)),
 }
 
 /**
@@ -341,6 +361,10 @@ private fun FontManageRow(
     onAction: (() -> Unit)? = null,
     openKey: String?,
     onOpenChange: (String?) -> Unit,
+    /** 跟随原书不是字体：false 即无左滑（点选保留）。 */
+    swipeEnabled: Boolean = true,
+    /** 行首来源竖标（"系统"/"导入"，逐字竖排，占满名+副标题高度）；null 即无标。 */
+    sourceLabel: String? = null,
 ) {
     val rowKey = "font:$family:${actionLabel ?: "pick"}"
     // 按钮宽 = 文本左滑行程（旧口径 88dp）；右滑橡皮筋 72dp，左超限橡皮筋 56dp。
@@ -373,42 +397,43 @@ private fun FontManageRow(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .offset { IntOffset(offsetX.value.roundToInt(), 0) }
-                .pointerInput(yPx, rightPx, leftPx) {
-                    detectHorizontalDragGestures(
-                        onDragStart = {
-                            dragDir.value = 0f
-                            dragAccum.value = offsetX.value
-                            // 触碰即认领：其他展开行立刻开始收（不 lingering 第二个按钮）。
-                            onOpenChange(rowKey)
-                        },
-                        onDragEnd = {
-                            scope.launch {
-                                val target = if (offsetX.value < 0f) {
-                                    if (dragDir.value < 0f) -yPx else 0f
-                                } else 0f
-                                offsetX.animateTo(target, spring(stiffness = Spring.StiffnessMediumLow, dampingRatio = 0.5f))
-                                overBest.animateTo(0f, spring())
-                                // 落位展开即认领，其他行收起。
-                                if (target < 0f) onOpenChange(rowKey)
+                .then(if (swipeEnabled) Modifier
+                    .offset { IntOffset(offsetX.value.roundToInt(), 0) }
+                    .pointerInput(yPx, rightPx, leftPx) {
+                        detectHorizontalDragGestures(
+                            onDragStart = {
+                                dragDir.value = 0f
+                                dragAccum.value = offsetX.value
+                                // 触碰即认领：其他展开行立刻开始收（不 lingering 第二个按钮）。
+                                onOpenChange(rowKey)
+                            },
+                            onDragEnd = {
+                                scope.launch {
+                                    val target = if (offsetX.value < 0f) {
+                                        if (dragDir.value < 0f) -yPx else 0f
+                                    } else 0f
+                                    offsetX.animateTo(target, spring(stiffness = Spring.StiffnessMediumLow, dampingRatio = 0.5f))
+                                    overBest.animateTo(0f, spring())
+                                    // 落位展开即认领，其他行收起。
+                                    if (target < 0f) onOpenChange(rowKey)
+                                }
+                            },
+                            onDragCancel = { scope.launch { offsetX.snapTo(0f); overBest.snapTo(0f) } },
+                        ) { change, dragAmount ->
+                            change.consume()
+                            if (dragAmount != 0f) dragDir.value = if (dragAmount > 0f) 1f else -1f
+                            dragAccum.value += dragAmount
+                            val d = dragAccum.value
+                            if (d < -yPx) {
+                                val over = -d - yPx
+                                val best = leftPx * (1f - exp(-over / leftPx))
+                                scope.launch { overBest.snapTo(best); offsetX.snapTo(-yPx - overBest.value) }
+                            } else {
+                                val shown = if (d <= 0f) d else rightPx * (1f - exp(-d / rightPx))
+                                scope.launch { offsetX.snapTo(shown); overBest.snapTo(0f) }
                             }
-                        },
-                        onDragCancel = { scope.launch { offsetX.snapTo(0f); overBest.snapTo(0f) } },
-                    ) { change, dragAmount ->
-                        change.consume()
-                        if (dragAmount != 0f) dragDir.value = if (dragAmount > 0f) 1f else -1f
-                        dragAccum.value += dragAmount
-                        val d = dragAccum.value
-                        if (d < -yPx) {
-                            val over = -d - yPx
-                            val best = leftPx * (1f - exp(-over / leftPx))
-                            scope.launch { overBest.snapTo(best); offsetX.snapTo(-yPx - overBest.value) }
-                        } else {
-                            val shown = if (d <= 0f) d else rightPx * (1f - exp(-d / rightPx))
-                            scope.launch { offsetX.snapTo(shown); overBest.snapTo(0f) }
                         }
-                    }
-                }
+                    } else Modifier)
                 // 点行体选择（无水平拖拽的点按才落到这里）。
                 .clickable(onClick = onTap, interactionSource = clickSrc, indication = null)
                 .kbRing()
@@ -416,6 +441,18 @@ private fun FontManageRow(
                 .padding(vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            if (sourceLabel != null) {
+                // 来源竖标：逐字竖排，撑满名 + 副标题整列高度。
+                Column(
+                    modifier = Modifier.fillMaxHeight().padding(end = 8.dp),
+                    verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    sourceLabel.forEach { ch ->
+                        Text(ch.toString(), color = p.muted, fontSize = 9.sp, lineHeight = 11.sp)
+                    }
+                }
+            }
             Column(modifier = Modifier.weight(1f)) {
                 if (entry != null) {
                     // 名字行 = 真墨迹预览（Canvas 高度 = max(度量行高, 栅格真墨底)，墨不溢出）。
@@ -446,7 +483,7 @@ private fun FontManageRow(
             if (selected) Text("●", color = PanelGold, fontSize = 12.sp,
                 modifier = Modifier.padding(start = 8.dp))
         }
-        if (actionLabel != null && tone != null) {
+        if (swipeEnabled && actionLabel != null && tone != null) {
             val overDp = with(LocalDensity.current) { overBest.value.toDp() }
             Box(
                 modifier = Modifier
@@ -472,8 +509,8 @@ private fun FontManageRow(
 }
 
 /**
- * 导入区：沿旧 `FontManagerPanel` 原样——图标上、文字下双按钮（本地导入 + WIFI 导入），
- * 按下衬底高亮；下方 16dp 内缩分隔线。单开能力位时只显示对应按钮；
+ * 导入区：沿旧 `FontManagerPanel` 原样——图标上、文字下三按钮（本地导入 + WIFI 导入 +
+ * 显示/隐藏开关），按下衬底高亮；下方 16dp 内缩分隔线。单开能力位时只显示对应按钮；
  * 键盘 active 高亮走行级 rowActive（与其他行同源），悬停认领同 [panelHover]。
  */
 @Composable
@@ -482,6 +519,9 @@ private fun FontImportPair(
     onLocal: () -> Unit,
     showWifi: Boolean,
     onWifi: () -> Unit,
+    /** 显示/隐藏开关态：true=隐藏字体已列出（按钮显"隐藏"），false=未列出（按钮显"显示"）。 */
+    hiddenShown: Boolean,
+    onToggleHidden: () -> Unit,
     nav: PanelNav,
     index: Int,
     p: Palette,
@@ -498,6 +538,7 @@ private fun FontImportPair(
         ) {
             if (showLocal) FontImportAction(Icons.Default.Add, "本地导入", p, onClick = onLocal)
             if (showWifi) FontImportAction(WifiIcon, "WIFI 导入", p, onClick = onWifi)
+            FontImportAction(EyeIcon, if (hiddenShown) "隐藏" else "显示", p, onClick = onToggleHidden)
         }
         Box(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).height(1.dp).background(p.borderSoft))
     }
@@ -506,6 +547,19 @@ private fun FontImportPair(
 /**
  * 导入按钮：沿旧 `FontManagerPanel.FontImportAction` 原样——图标上文字下圆角块，按下高亮。
  */
+/** 眼睛图标：icons-core 无 Visibility（58 个无眼），按 Material 眼睛 path 手描（与 WifiIcon 同例）。 */
+private val EyeIcon: ImageVector = ImageVector.Builder(
+    name = "Eye", defaultWidth = 24.dp, defaultHeight = 24.dp,
+    viewportWidth = 24f, viewportHeight = 24f,
+).addPath(
+    pathData = PathParser().parsePathString(
+        "M12,4.5C7,4.5 2.73,7.61 1,12c1.73,4.39 6,7.5 11,7.5s9.27,-3.11 11,-7.5c-1.73,-4.39 -6,-7.5 -11,-7.5z" +
+            "M12,17c-2.76,0 -5,-2.24 -5,-5s2.24,-5 5,-5 5,2.24 5,5 -2.24,5 -5,5z" +
+            "M12,9c-1.66,0 -3,1.34 -3,3s1.34,3 3,3 3,-1.34 3,-3 -1.34,-3 -3,-3z",
+    ).toNodes(),
+    fill = SolidColor(Color.Black),
+).build()
+
 /** 无线导入图标：旧 `ic_wifi` 矢量同型（icons-core 无 Wifi，按原 path 手描，不引 extended）。 */
 private val WifiIcon: ImageVector = ImageVector.Builder(
     name = "Wifi", defaultWidth = 24.dp, defaultHeight = 24.dp,
@@ -540,15 +594,27 @@ private fun FontImportAction(icon: ImageVector, label: String, p: Palette, onCli
     }
 }
 
+/**
+ * 首行开关：整行点按，键鼠共用同一回调；键盘 active 高亮走行级 rowActive（与其他行同源）。
+ */
 @Composable
-private fun FontSectionHeader(title: String, p: Palette) {
-    Text(title, color = p.muted, fontSize = 13.sp,
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp))
-}
-
-@Composable
-private fun FontEmptyHint(text: String, p: Palette) {
-    Box(modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp), contentAlignment = Alignment.Center) {
-        Text(text, color = p.muted, fontSize = 14.sp)
+private fun FontToggleRow(
+    label: String,
+    nav: PanelNav,
+    index: Int,
+    p: Palette,
+    onTap: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(if (nav.activeIdx == index) p.rowActive else Color.Transparent)
+            .panelHover(nav, index)
+            .clickable(onClick = onTap, interactionSource = remember { MutableInteractionSource() }, indication = null)
+            .kbRing()
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(label, color = p.text, fontSize = 14.sp)
     }
 }

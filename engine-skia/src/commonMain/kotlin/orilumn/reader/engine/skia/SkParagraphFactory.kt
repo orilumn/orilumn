@@ -41,6 +41,25 @@ import org.jetbrains.skia.paragraph.TypefaceFontProvider
  */
 object SkParagraphFactory {
 
+    /**
+     * 按族字重锚点（族名 → CSS 字重，渲染层·进程级状态，与 [SkiaFontPool] 同模式）：
+     * 宿主随 profile 下发（`FontPoolSync.syncPool` + 两壳 profile 应用点），度量/绘制
+     * 经同一 factory 消费，量画一致。语义沿 `ReaderSettings.fontWeightAnchors`：
+     * 该族正体（400 upright）请求改用锚点字重，粗斜体自然匹配。
+     */
+    @Volatile
+    var weightAnchors: Map<String, Int> = emptyMap()
+
+    /** 锚点改写（纯函数）：正体 400 且族命中锚点即改用，否则原样。 */
+    fun anchoredWeight(families: List<String>, weight: Int, italic: Boolean): Int {
+        if (italic || weight != 400) return weight
+        for (f in families) {
+            val a = weightAnchors[f.trim()].takeIf { it in 100..900 } ?: continue
+            return a
+        }
+        return weight
+    }
+
     /** 平台默认字体管理器：即 [systemFonts] 接缝（母文档 §3 系统字体集合边界）。 */
     fun defaultFontMgr(): FontMgr = systemFonts()
 
@@ -117,8 +136,12 @@ object SkParagraphFactory {
          */
         forceStrut: Boolean = false,
     ): ParagraphStyle {
+        val effWeight = anchoredWeight(families, weight, italic)
         val style = FontStyle(
-            if (weight >= FontWeight.SEMI_BOLD) FontWeight.BOLD else FontWeight.NORMAL,
+            // 字重全粒度透传（SkFontStyle 任意 100..900，系统面经 matchFamilyStyle 就近命中；
+            // 旧二值 NORMAL/BOLD 会吞掉 300/500/600/800/900 与用户锚点，已退役）。
+            // 用户锚点：该族正体 400 改按锚点字重要求选面（系统/导入同效），粗斜体自然匹配。
+            effWeight,
             FontWidth.NORMAL,
             if (italic) FontSlant.ITALIC else FontSlant.UPRIGHT,
         )

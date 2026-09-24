@@ -548,6 +548,7 @@ class ReaderActivity : ComponentActivity() {
         panelSettings = next
         effective = next
         profile = TypographicProfile.build(next, dpDensity)
+        orilumn.reader.engine.skia.SkParagraphFactory.weightAnchors = profile.fontWeightAnchors
         engine?.profile = profile
     }
 

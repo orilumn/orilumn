@@ -52,7 +52,8 @@ class DesktopReaderHost(
     private val fontLibrary: orilumn.reader.data.font.FontLibrary,
 ) : ReaderHost {
 
-    private val profile: TypographicProfile = TypographicProfile.build(settings, density)
+    private var profile: TypographicProfile = TypographicProfile.build(settings, density)
+        .also { orilumn.reader.engine.skia.SkParagraphFactory.weightAnchors = it.fontWeightAnchors }
     private val scopeJob = SupervisorJob()
     private val hostScope = CoroutineScope(scopeJob + Dispatchers.Default)
     private val ioScope = CoroutineScope(scopeJob + Dispatchers.IO)
@@ -211,6 +212,46 @@ class DesktopReaderHost(
     /** 锚点落位（目录跳转/设置重建）：章内字符所在页；无内容回 null（调用方退回 locateStart）。 */
     private suspend fun landAnchor(chapter: Int, char: Int): ReaderPos? =
         controller.pageAtChar(chapter, char)?.let { ReaderPos(chapter, it) }
+
+    /**
+     * R4 面板字库装载（用户层·壳，与平板 `ReaderActivity.loadPanelFonts` 同位）：
+     * 系统枚举 + 中文名链（方案B name 表 → 方案A CoreText，macOS 独有，保留）+ 落库，
+     * 返回统一全量表。原 `ReaderView` 视图层直写，归位到此。
+     */
+    suspend fun syncPanelFonts(): List<orilumn.reader.data.font.FontEntry> = withContext(Dispatchers.IO) {
+        val sys = runCatching { orilumn.reader.engine.skia.systemFontFaces() }.getOrDefault(emptyList())
+        val faces = runCatching {
+            val localized = withContext(Dispatchers.Default) {
+                val nameTable = NameTableChineseNames.namesFor(sys.map { it.family })
+                val coreText = MacFamilyNames.localizedFamilyNames(sys.map { it.family })
+                coreText + nameTable // 同键以右侧（name 表）为准
+            }
+            fontLibrary.syncSystemFaces(sys, localizedNames = localized)
+        }.getOrElse { runCatching { fontLibrary.list() }.getOrDefault(emptyList()) }
+        fontLibrary.allEntries(faces)
+    }
+
+    /**
+     * R5 设置原位重排（用户层·壳，与平板 `scheduleRelayout+applyReflowResult` 同序）：
+     * 换 profile → 追装字库池 → `prepareRelayout(anchorChar)` 行锚重算 → `bindReflow` 绑定，
+     * 同一字符在新分页表合位，不重建宿主、不丢内存位。视口/换书仍走重建（`initialAnchor` 路径）。
+     */
+    suspend fun relayoutToSettings(next: ReaderSettings, chapter: Int, anchorChar: Int): ReaderPos? =
+        withContext(Dispatchers.Default) {
+            profile = TypographicProfile.build(next, density)
+            orilumn.reader.engine.skia.SkParagraphFactory.weightAnchors = profile.fontWeightAnchors
+            controller.profile = profile
+            topUpSkiaFonts(orilumn.reader.engine.css.FontDemand.EMPTY)
+            orilumn.reader.io.Logger.w("Orilumn.Desktop",
+                "relayoutToSettings body=${next.fontBody} anchors=${profile.fontWeightAnchors} ch=$chapter anchorChar=$anchorChar")
+            val r = controller.prepareRelayout(chapter, anchorChar) ?: run {
+                orilumn.reader.io.Logger.w("Orilumn.Desktop", "relayoutToSettings NULL (stale/empty) ch=$chapter")
+                return@withContext null
+            }
+            controller.bindReflow(r)
+            controller.requestWholeBookRelayout()
+            ReaderPos(r.chapter, r.page)
+        }
 
     /**
      * F4b 用户字库追装（与平板 `topUpSkiaFonts` 同式，经共享 [FontPoolSync]）：

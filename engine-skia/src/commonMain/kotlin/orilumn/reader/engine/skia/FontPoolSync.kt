@@ -121,6 +121,8 @@ object FontPoolSync {
         systemSerif: SkiaFontPool.EmbeddedFont? = null,
         logTag: String = "Orilumn.Font",
     ): PoolSyncResult {
+        // 渲染字重锚点随 profile 下发（池外系统面靠 factory 改写请求字重命中，见 SkParagraphFactory）。
+        SkParagraphFactory.weightAnchors = profile.fontWeightAnchors
         val faces = loadFaces() ?: return PoolSyncResult(false, lastSig)
         val slotFams = setOf(profile.fontBody, profile.fontTitle, profile.fontCode)
             .map { it.trim() }.filter { it.isNotEmpty() }.toSet()

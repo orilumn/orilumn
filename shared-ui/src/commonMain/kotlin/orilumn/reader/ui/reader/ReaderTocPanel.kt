@@ -49,7 +49,6 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -336,12 +335,16 @@ private fun TocRow(
     // 键盘一套米黄），唯一高亮只走 activeIdx（悬停认领/键盘共用）。
     val clickSrc = remember { MutableInteractionSource() }
     Column(modifier = Modifier.fillMaxWidth()) {
+        // 行内容顶对齐：折叠三角对准标题首行（长标题换行时三角不再被居中到行中部）。
         Row(
-            verticalAlignment = Alignment.CenterVertically,
+            verticalAlignment = Alignment.Top,
             modifier = Modifier
+                // 段落式等距：内容上下 padding 恒定 14dp（单行总高 14+20+14=48dp），
+                // 折行只增加 20sp 行高，段间距不随折行变化。background 必须在 padding
+                // 之前——底色铺满整行带（含 padding 区），焦点背景框才和原来一样宽。
                 .fillMaxWidth()
-                .height(46.dp)
                 .background(if (active) palette.rowActive else Color.Transparent)
+                .padding(vertical = 14.dp)
                 .clickable(
                     interactionSource = clickSrc, indication = null,
                     onClick = onSelect,
@@ -350,31 +353,38 @@ private fun TocRow(
                 .padding(horizontal = 12.dp),
         ) {
             Spacer(Modifier.width(8.dp + (row.depth * 14).dp))
+            // 目录三角按钮（用户层）：按钮高 == 标题单行高（标题 lineHeight 20.sp 转 dp，
+            // 随系统字号缩放，保证任意 fontScale 下等高）；三角行框同高 + Box Center，
+            // 即三角形相对按钮几何垂直居中。Row 顶对齐保证多行标题时按钮仍对准首行。
+            val titleLine = 20.sp
+            val toggleH = with(LocalDensity.current) { titleLine.toDp() }
             if (hasChildren) {
-                // 目录三角（用户层）：正文色保证对比度（chevron 日间 #BBBBBB 太浅，且调色板
-                // 与设置面板共用、不动它）；16sp/36dp 点击区，字形居中。
                 Box(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier
-                        .size(36.dp)
+                        .width(36.dp)
+                        .height(toggleH)
                         .clip(RoundedCornerShape(4.dp))
                         .clickable(onClick = onToggle),
                 ) {
                     Text(
                         text = if (expanded) "▾" else "▸",
                         color = palette.text, fontSize = 16.sp,
+                        lineHeight = titleLine,
                         textAlign = TextAlign.Center,
                     )
                 }
             } else {
-                Spacer(Modifier.size(36.dp))
+                Spacer(Modifier.width(36.dp))
             }
             Text(
                 text = row.item.label,
                 color = if (current) gold else palette.text,
                 fontSize = 14.sp,
                 fontWeight = if (current) FontWeight.SemiBold else FontWeight.Normal,
-                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                // 长标题自动换行（不限行数）；行距定死 titleLine，不跟字体默认行高走。
+                lineHeight = titleLine,
+                softWrap = true,
                 modifier = Modifier.padding(start = 6.dp).weight(1f),
             )
         }

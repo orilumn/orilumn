@@ -286,22 +286,16 @@ fun ReaderSettingsPanel(
                 }
             }
             Sub.WeightPicker -> {
-                // 字重档：首行自动（清锚点）+ 各字重面；点即写入槽位 + 锚点并停留本页。
+                // 字重档（无自动行：点即写入槽位 + 锚点并停留本页；键与渲染同序，首档即键 0）。
                 val fam = weightPickFamily
                 if (fam == null) {
                     listOf(ItemKey())
                 } else {
-                    val anchor = s.fontWeightAnchors[fam]
                     val opts = fontEntries.filter { it.family == fam }.weightChoices()
-                    buildList {
-                        add(ItemKey(onEnter = {
-                            onCommitTypography(setField(s, slotKey, fam).copy(fontWeightAnchors = s.fontWeightAnchors - fam))
-                        }))
-                        opts.forEach { (w, _) ->
-                            add(ItemKey(onEnter = {
-                                onCommitTypography(setField(s, slotKey, fam).copy(fontWeightAnchors = s.fontWeightAnchors + (fam to w)))
-                            }))
-                        }
+                    opts.map { (w, _) ->
+                        ItemKey(onEnter = {
+                            onCommitTypography(setField(s, slotKey, fam).copy(fontWeightAnchors = s.fontWeightAnchors + (fam to w)))
+                        })
                     }
                 }
             }
@@ -673,19 +667,13 @@ fun ReaderSettingsPanel(
                                 val fam = weightPickFamily
                                 if (fam != null) {
                                     val opts = fontEntries.filter { it.family == fam }.weightChoices()
-                                    val anchor = s.fontWeightAnchors[fam]
-                                    val anchorName = opts.firstOrNull { it.first == anchor }?.second
+                                    // 非本槽位当前字体只留键盘/悬停高亮，不标金色选中。
+                                    val isCurrent = fieldOf(s, slotKey) == fam
                                     WeightPickerPage(
-                                        title = fontDisplayByFamily[fam] ?: genericFamilyLabel(fam),
-                                        subtitle = "当前：" + (anchorName ?: "自动"),
-                                        autoSelected = anchor == null,
                                         options = opts,
-                                        selectedWeight = anchor,
+                                        selectedWeight = if (isCurrent) s.fontWeightAnchors[fam] else null,
                                         nav = nav,
                                         p = p,
-                                        onPickAuto = {
-                                            onCommitTypography(setField(s, slotKey, fam).copy(fontWeightAnchors = s.fontWeightAnchors - fam))
-                                        },
                                         onPickWeight = { w ->
                                             onCommitTypography(setField(s, slotKey, fam).copy(fontWeightAnchors = s.fontWeightAnchors + (fam to w)))
                                         },

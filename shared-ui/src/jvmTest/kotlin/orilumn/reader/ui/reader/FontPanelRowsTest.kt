@@ -210,10 +210,11 @@ class FontPanelRowsTest {
     }
 
     @Test
-    fun weightChoicesDedupeByNumericWeight() {
-        // 同数值去重（首个保留）、按数值排序；空白字重名展示为默认。
+    fun weightChoicesExcludesItalicAndKeepsCanonicalName() {
+        // 斜体面不进字重列表；同数值多名只留最常用一名、按数值排序；空白字重名展示为默认。
         val members = listOf(
             imported("F", subfamily = "Bold"),
+            imported("F", subfamily = "Bold Italic"),
             imported("F", subfamily = "粗体"),
             imported("F", subfamily = "Regular"),
             imported("F", subfamily = ""),
@@ -223,6 +224,37 @@ class FontPanelRowsTest {
             members.weightChoices(),
         )
         assertEquals(listOf(400 to "默认"), listOf(imported("G")).weightChoices())
+    }
+
+    @Test
+    fun weightChoicesPrefersRegularOverWidthVariants() {
+        // 寒蝉端黑宋式同字重多名（Regular / Soft / Compact Regular / Condensed Regular）只留 Regular。
+        val members = listOf(
+            imported("H", subfamily = "Soft"),
+            imported("H", subfamily = "Compact Regular"),
+            imported("H", subfamily = "Condensed Regular"),
+            imported("H", subfamily = "Regular"),
+        )
+        assertEquals(listOf(400 to "Regular"), members.weightChoices())
+    }
+
+    @Test
+    fun rowSubtitleDropsGenericKeepsItalicAndCanonical() {
+        // generic 语种不展示；同数值 upright 只留最常用一名；斜体组保留在字体列表。
+        val members = listOf(
+            imported("H", subfamily = "Regular"),
+            imported("H", subfamily = "Soft"),
+            imported("H", subfamily = "Bold Italic"),
+            imported("H", subfamily = "Bold"),
+        )
+        assertEquals("cjk · Regular / Bold / Bold Italic", rowSubtitle(members))
+        // cjk/latin 语种保留。
+        val latin = listOf(
+            FontEntry.Imported(
+                FontFace(id = 1L, familyName = "L", displayName = "L", subfamily = "Regular", path = "/f.ttf", lang = "latin"),
+            ),
+        )
+        assertEquals("latin · Regular", rowSubtitle(latin))
     }
 
     @Test

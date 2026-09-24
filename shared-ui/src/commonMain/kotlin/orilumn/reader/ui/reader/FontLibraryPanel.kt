@@ -330,53 +330,31 @@ internal fun chineseFirstComparator(cmp: Comparator<String>): Comparator<String>
 }
 
 /**
- * 字重下钻页（一族的字重档列表）：首行自动（清锚点，系统默认匹配），其后各字重面；
- * 点即提交（族写入槽位 + 锚点落库）并停留本页，‹/Esc 返回字体列表。
- * 行复用无左滑 [FontManageRow]（名字行 + 选中金点）；键盘键由调用方按同一顺序配。
+ * 字重下钻页（一族的字重档列表，用户层）：同数值合档只留最常用一名（见 [weightChoices]），
+ * 斜体面不进列表（渲染按数值就近选面、斜体自然匹配，另见
+ * `SkParagraphFactory.anchoredWeight`；斜体只在字体列表副标题出现）；点即提交
+ * （族写入槽位 + 锚点落库）并停留本页，‹/Esc 返回字体列表。行复用无左滑 [FontManageRow]
+ * （名字行 + 选中金点）；键盘键由调用方按同一顺序配（首档即键 0）。
+ * 选中金色仅由调用方按"该族是否为本槽位当前字体"决定（非当前族传 null，即只留高亮）。
  */
 @Composable
 internal fun WeightPickerPage(
-    title: String,
-    subtitle: String?,
-    autoSelected: Boolean,
     options: List<Pair<Int, String>>,
     selectedWeight: Int?,
     nav: PanelNav,
     p: Palette,
-    onPickAuto: () -> Unit,
     onPickWeight: (Int) -> Unit,
     onMouseMove: () -> Unit,
     listState: LazyListState,
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier.fillMaxSize()) {
-        Text(
-            text = title,
-            color = p.text, fontSize = 16.sp,
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-        )
-        if (subtitle != null) {
-            Text(
-                text = subtitle,
-                color = p.muted, fontSize = 12.sp,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 4.dp),
-            )
-        }
         LazyColumn(state = listState, modifier = Modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
-            item {
-                FontManageRow(
-                    family = "自动", entry = null, selected = autoSelected,
-                    actionLabel = null, tone = null, nav = nav, index = 0, p = p,
-                    subtitle = "系统默认匹配",
-                    swipeEnabled = false, sourceLabel = null,
-                    onTap = onPickAuto, openKey = null, onOpenChange = {},
-                )
-            }
             items(options.size) { i ->
                 val (w, name) = options[i]
                 FontManageRow(
                     family = name, entry = null, selected = selectedWeight == w,
-                    actionLabel = null, tone = null, nav = nav, index = i + 1, p = p,
+                    actionLabel = null, tone = null, nav = nav, index = i, p = p,
                     subtitle = w.toString(),
                     swipeEnabled = false, sourceLabel = null,
                     onTap = { onPickWeight(w) }, openKey = null, onOpenChange = {},
@@ -386,18 +364,28 @@ internal fun WeightPickerPage(
     }
 }
 
-/** 副标题统一口径：语种 · 字重表（系统/导入同形；无字重名即"无字重名"）。 */
-private fun rowSubtitle(members: List<FontEntry>): String? {
+/** 副标题统一口径（用户层）：语种 · 字重表（系统/导入同形；无字重名即"无字重名"）。 */
+internal fun rowSubtitle(members: List<FontEntry>): String? {
     val imported = members.filterIsInstance<FontEntry.Imported>()
-    val lang = imported.firstOrNull()?.face?.lang?.trim()?.takeIf { it.isNotEmpty() }
+    // generic 只是"中西文兼备"的兜底分类，无信息量，不展示（cjk/latin 保留）。
+    val lang = imported.firstOrNull()?.face?.lang?.trim()
+        ?.takeIf { it.isNotEmpty() && !it.equals("generic", ignoreCase = true) }
     // 字重名展示原值：入库即按简体>繁体>日文>英文归一（导入 `parse` + 系统 `systemFontFaces`
     // 同一 `FontParser.localizedName` 口径），展示层不翻译；旧英文残留由 `syncSystemFonts` 对账清。
-    val subs = members.mapNotNull {
+    // 同一（数值，是否斜体）只留最常用一名（见 [canonicalSubfamilyName]）；斜体组保留，
+    // upright 组在前、同数值内斜体排后，仍按数值升序。
+    val rawSubs = members.mapNotNull {
         when (it) {
             is FontEntry.Imported -> it.face.subfamily.trim().ifBlank { null }
             is FontEntry.System -> it.subfamily.trim().ifBlank { null }
         }
-    }.distinct().joinToString(" / ")
+    }.distinct()
+    val subs = rawSubs.groupBy {
+        orilumn.reader.data.font.SubfamilyMetric.weight(it) to
+            orilumn.reader.data.font.SubfamilyMetric.italic(it)
+    }.entries.sortedWith(compareBy({ it.key.first }, { if (it.key.second) 1 else 0 }))
+        .map { (_, names) -> canonicalSubfamilyName(names) }
+        .joinToString(" / ")
     return listOfNotNull(lang, subs.ifBlank { null }).joinToString(" · ").ifEmpty { "无字重名" }
 }
 
@@ -415,18 +403,59 @@ internal fun List<FontEntry>.previewMember(): FontEntry =
     } ?: first()
 
 /**
- * 一族的字重档（数值 → 展示名）：成员字重经 SubfamilyMetric 归一化后按数值去重排序；
- * 空白字重名展示为"默认"。点按分流（多档下钻字重页）与字重页共用同一口径。
- * 纯函数（行模型同一文件可测）。
+ * 同数值内最常用的字重名（用户层纯函数）：候选名按 [CanonicalSubfamilyTokens] 首命中
+ * 词排名（越前越常用），再按短名优先、字典序兜底。同档多名（如 Regular / Soft /
+ * Compact Regular / Condensed Regular）只留一名，宽体/厂商后缀变体自然沉底。
+ */
+internal fun canonicalSubfamilyName(names: List<String>): String {
+    require(names.isNotEmpty())
+    return names.distinct().minWithOrNull(
+        compareBy(
+            { n -> CanonicalSubfamilyTokens.indexOfFirst { t -> n.contains(t, ignoreCase = true) }
+                .takeIf { it >= 0 } ?: Int.MAX_VALUE },
+            { n -> n.length },
+            { n -> n },
+        ),
+    ) ?: names.first()
+}
+
+/** 常用度排序的匹配词（先长词后短词：semibold/extrabold/ultralight 含短词子串，先命中才分得开）。 */
+private val CanonicalSubfamilyTokens = listOf(
+    "regular", "常规", "normal", "book", "roman",
+    "medium", "中等", "中黑",
+    "semibold", "demibold", "半粗", "中粗",
+    "extrabold", "ultrabold", "特粗", "超粗",
+    "bold", "粗",
+    "black", "黑",
+    "extralight", "ultralight", "特细", "超细", "极细",
+    "light", "细",
+    "thin", "纤细",
+    "heavy", "默认",
+)
+
+/**
+ * 一族的字重档（用户层纯函数，数值 → 该档最常用一名，见 [canonicalSubfamilyName]）：
+ * 成员字重经 SubfamilyMetric 归一化后按数值合档排序；空白字重名展示为"默认"。
+ * 斜体面不进列表——锚点本就是数值粒度（见 SkParagraphFactory.anchoredWeight），
+ * 分开展示会误导（选了斜体面也不会让正文变斜）；斜体只在字体列表副标题出现。
+ * 点按分流（多档下钻字重页）与字重页共用同一口径。纯函数（行模型同一文件可测）。
  */
 internal fun List<FontEntry>.weightChoices(): List<Pair<Int, String>> =
-    map { e ->
+    filter { e ->
+        val raw = when (e) {
+            is FontEntry.Imported -> e.face.subfamily
+            is FontEntry.System -> e.subfamily
+        }.trim()
+        !orilumn.reader.data.font.SubfamilyMetric.italic(raw)
+    }.map { e ->
         val raw = when (e) {
             is FontEntry.Imported -> e.face.subfamily
             is FontEntry.System -> e.subfamily
         }.trim()
         orilumn.reader.data.font.SubfamilyMetric.weight(raw) to raw.ifBlank { "默认" }
-    }.distinctBy { it.first }.sortedBy { it.first }
+    }.groupBy({ it.first }, { it.second })
+        .map { (w, names) -> w to canonicalSubfamilyName(names) }
+        .sortedBy { it.first }
 
 /**
  * 名字行与字重副标题的间隙：行盒已是真字形墨迹高度（栅格真值），字形越高只微量加气口

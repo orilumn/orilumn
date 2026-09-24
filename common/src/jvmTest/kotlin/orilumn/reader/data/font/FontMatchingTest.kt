@@ -38,6 +38,25 @@ class FontMatchingTest {
     }
 
     @Test
+    fun `中文字重名映射到 CSS 字重`() {
+        // Sarasa/苹方中文记录口径（与 FontParser.localizedName 同源）。
+        assertEquals(400, SubfamilyMetric.weight("常规体"))
+        assertEquals(700, SubfamilyMetric.weight("粗体"))
+        assertEquals(600, SubfamilyMetric.weight("中粗体"))
+        assertEquals(500, SubfamilyMetric.weight("中等"))
+        assertEquals(500, SubfamilyMetric.weight("中黑体"))
+        assertEquals(300, SubfamilyMetric.weight("细体"))
+        assertEquals(200, SubfamilyMetric.weight("特细体"))
+        assertEquals(100, SubfamilyMetric.weight("纤细体"))
+        assertEquals(200, SubfamilyMetric.weight("极细体"))
+        assertEquals(800, SubfamilyMetric.weight("特粗体"))
+        assertEquals(900, SubfamilyMetric.weight("黑体"))
+        assertTrue(SubfamilyMetric.italic("斜体"))
+        assertTrue(SubfamilyMetric.italic("粗斜体"))
+        assertFalse(SubfamilyMetric.italic("粗体"))
+    }
+
+    @Test
     fun `数字前缀不盖过样式词`() {
         // 阿里巴巴普惠体 3.0：35..115 非 CSS 字重，样式词说了算；否则正文 400 会选中 Black。
         assertEquals(100, SubfamilyMetric.weight("35 Thin"))

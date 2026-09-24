@@ -60,8 +60,7 @@ class FontPoolSyncTest {
     }
 
     @Test
-    fun missingFileRetries() {
-        val face = importedFace(File("/nonexistent/x.ttf"))
+    fun missingFileRetries() {        val face = importedFace(File("/nonexistent/x.ttf"))
         val sel = FontPoolSync.select(listOf(face), setOf("PoolSyncFam"), FontDemand.EMPTY, emptyList()) { null }
         assertTrue(sel.selected.isEmpty())
         // 缺文件不进签名：文件出现即签名变化（与有文件时的签名不同）。
@@ -70,5 +69,37 @@ class FontPoolSyncTest {
             listOf(face.copy(path = file.absolutePath)), setOf("PoolSyncFam"), FontDemand.EMPTY, emptyList(),
         ) { p -> File(p).takeIf { it.isFile }?.length() }
         assertEquals(1, sel2.selected.size)
+    }
+
+    @Test
+    fun mixedBucketPrefersFaceWithFile() {
+        // 实机回归：导入 Sarasa 行（族中文名）与系统 Sarasa 行（displayName 中文向上）
+        // 同桶时，旧逻辑按 DB 顺序选到无文件的系统面 → size 探空 → 整桶落空 families=0；
+        // 有文件的导入面优先，槽位切换才装得进池。
+        val file = ttf ?: return
+        val system = FontFace(
+            id = 1,
+            familyName = "Sarasa Term SC Nerd",
+            displayName = "更纱终端书呆黑体-简",
+            subfamily = "粗体",
+            source = FontFace.SOURCE_SYSTEM,
+            path = null,
+            lang = "cjk",
+        )
+        val imported = FontFace(
+            id = 2,
+            familyName = "更纱终端书呆黑体-简",
+            displayName = "更纱终端书呆黑体-简-粗体",
+            subfamily = "粗体",
+            source = FontFace.SOURCE_IMPORTED,
+            path = file.absolutePath,
+            lang = "cjk",
+        )
+        val sizes: (String) -> Long? = { p -> File(p).takeIf { it.isFile }?.length() }
+        // 系统行在前（DB 旧行优先）也必须选中导入面。
+        val sel = FontPoolSync.select(
+            listOf(system, imported), setOf("更纱终端书呆黑体-简"), FontDemand.EMPTY, emptyList(), sizes,
+        )
+        assertEquals(listOf(2L), sel.selected.map { it.id })
     }
 }

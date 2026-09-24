@@ -13,6 +13,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -97,6 +98,9 @@ fun ReaderScreen(
 
     var openPos by remember { mutableStateOf<ReaderPos?>(null) }
     var openFailed by remember { mutableStateOf(false) }
+    // 宿主代际：open() 落定即 +1，行/图/背景 remember 键随之刷新——同 pos 也重取，
+    // 换字体不断行时不滞留旧字、不白屏（open 落定前行数据恒有旧值可显）。
+    var hostRevision by remember { mutableIntStateOf(0) }
     var barsVisible by remember { mutableStateOf(false) }
     // 上下栏实测高度（px）：栏区落点的手势归栏，不进翻页层（点栏按钮漂移误翻页的门控）。
     var topBarH by remember { mutableStateOf(0) }
@@ -127,11 +131,12 @@ fun ReaderScreen(
     val currentTopBarH by rememberUpdatedState(topBarH)
     val currentBotBarH by rememberUpdatedState(botBarH)
 
-    // 打开书籍并定位起始页（自动续读/首页）。
+    // 打开书籍并定位起始页（自动续读/首页）。落定即推代际：同 pos 也刷新行数据。
     LaunchedEffect(currentHost) {
         val p = currentHost.open()
         openFailed = p == null
         openPos = p
+        hostRevision++
     }
 
     // 落位统一入口：更新当前定位并防抖保存（复刻 Android scheduleSave 500ms）。
@@ -358,18 +363,18 @@ fun ReaderScreen(
                 currentHost.pageProgress(pos).toFloat().coerceIn(0f, 1f)
             }
             val chapterTitle = remember(pos) { currentHost.unitTitle(pos.chapter) }
-            val lines = remember(pos, contentRevision) { currentHost.pageLines(pos) }
+            val lines = remember(pos, contentRevision, hostRevision) { currentHost.pageLines(pos) }
             // 盒背景/边框：与行同一切片口径，画布内画在文字之下（翻页即随 pos 刷新）。
-            val pageBackgrounds = remember(pos, contentRevision) {
+            val pageBackgrounds = remember(pos, contentRevision, hostRevision) {
                 runCatching { currentHost.pageBackgrounds(pos) }.getOrNull()
             }
             // 插图几何与位图：几何同步取（廉价），位图异步解码后按图缓存；
             // 翻页（新 pos）即清空旧图，避免旧页图片闪留。
-            val pageImages = remember(pos, contentRevision) {
+            val pageImages = remember(pos, contentRevision, hostRevision) {
                 runCatching { currentHost.pageImages(pos) }.getOrNull()
             }
-            var imageBitmaps by remember(pos, contentRevision) { mutableStateOf<Map<orilumn.reader.engine.skia.PageImage, ImageBitmap>>(emptyMap()) }
-            LaunchedEffect(pos, contentRevision, pageImages) {
+            var imageBitmaps by remember(pos, contentRevision, hostRevision) { mutableStateOf<Map<orilumn.reader.engine.skia.PageImage, ImageBitmap>>(emptyMap()) }
+            LaunchedEffect(pos, contentRevision, hostRevision, pageImages) {
                 val imgs = pageImages?.takeIf { it.isNotEmpty() } ?: run {
                     imageBitmaps = emptyMap()
                     return@LaunchedEffect
@@ -388,8 +393,8 @@ fun ReaderScreen(
             }
             // P3-b 背景图：按 bgKey 去重（同图多盒只解一次），异步解码后按 url 缓存；
             // 翻页（新 pos）即清空，避免旧页底图闪留。失败项直接缺席（該幅只留底色）。
-            var bgImages by remember(pos, contentRevision) { mutableStateOf<Map<String, orilumn.reader.engine.skia.DecodedImage>>(emptyMap()) }
-            LaunchedEffect(pos, contentRevision, pageBackgrounds) {
+            var bgImages by remember(pos, contentRevision, hostRevision) { mutableStateOf<Map<String, orilumn.reader.engine.skia.DecodedImage>>(emptyMap()) }
+            LaunchedEffect(pos, contentRevision, hostRevision, pageBackgrounds) {
                 val refs = pageBackgrounds?.mapNotNull { bg ->
                     bg.bgSrc?.takeIf { it.isNotBlank() }?.let { bg.bgChapterHref to it }
                 }?.distinct().orEmpty()

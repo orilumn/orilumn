@@ -44,6 +44,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -435,6 +436,9 @@ private fun FontManageRow(
                         }
                     } else Modifier)
                 // 点行体选择（无水平拖拽的点按才落到这里）。
+                // 行不抢焦点（面板按键走 activeIdx 状态机，与焦点遍历无关）：
+                // 点过的行若留着焦点，回车会被行当"再点一次"吃掉，抽屉导航就再也收不到回车。
+                .focusProperties { canFocus = false }
                 .clickable(onClick = onTap, interactionSource = clickSrc, indication = null)
                 .kbRing()
                 .padding(horizontal = 16.dp)
@@ -581,6 +585,8 @@ private fun FontImportAction(icon: ImageVector, label: String, p: Palette, onCli
         modifier = Modifier
             .clip(RoundedCornerShape(10.dp))
             .background(if (pressed) Color(0x12000000) else Color.Transparent)
+            // 按钮不抢焦点（同管理行：回车留给抽屉导航，不被按钮当"再点一次"吃掉）。
+            .focusProperties { canFocus = false }
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .kbRing()
             .padding(horizontal = 20.dp, vertical = 10.dp),
@@ -610,6 +616,8 @@ private fun FontToggleRow(
             .fillMaxWidth()
             .background(if (nav.activeIdx == index) p.rowActive else Color.Transparent)
             .panelHover(nav, index)
+            // 开关不抢焦点（同管理行：焦点永远留在抽屉容器，回车才到得了导航）。
+            .focusProperties { canFocus = false }
             .clickable(onClick = onTap, interactionSource = remember { MutableInteractionSource() }, indication = null)
             .kbRing()
             .padding(horizontal = 16.dp, vertical = 10.dp),

@@ -20,16 +20,16 @@ object SubfamilyMetric {
         val s = (subfamily ?: "").trim().lowercase()
         if (s.isEmpty()) return 400
         return when {
-            s.contains("thin") -> 100
-            s.contains("extralight") || s.contains("ultralight") -> 200
-            s.contains("light") -> 300
-            s.contains("regular") || s.contains("roman") || s.contains("normal") || s.contains("book") -> 400
-            s.contains("medium") -> 500
-            s.contains("semibold") || s.contains("demibold") -> 600
-            // NB: "extrabold"/"ultrabold" must be matched before generic "bold".
-            s.contains("extrabold") || s.contains("ultrabold") -> 800
-            s.contains("bold") || s.contains("heavy") -> 700
-            s.contains("black") || s.contains("ultra") -> 900
+            s.contains("thin") || s.contains("纤细") -> 100
+            s.contains("extralight") || s.contains("ultralight") || s.contains("特细") || s.contains("超细") || s.contains("极细") -> 200
+            s.contains("light") || s.contains("细") -> 300
+            s.contains("regular") || s.contains("roman") || s.contains("normal") || s.contains("book") || s.contains("常规") -> 400
+            s.contains("medium") || s.contains("中等") || s.contains("中黑") -> 500
+            s.contains("semibold") || s.contains("demibold") || s.contains("半粗") || s.contains("中粗") -> 600
+            // NB: "extrabold"/"ultrabold" must be matched before generic "bold" (特粗/超粗同理在粗之前).
+            s.contains("extrabold") || s.contains("ultrabold") || s.contains("特粗") || s.contains("超粗") -> 800
+            s.contains("bold") || s.contains("heavy") || s.contains("粗") -> 700
+            s.contains("black") || s.contains("ultra") || s.contains("黑") -> 900
             else -> {
                 // Numeric style code embedded in the name, e.g. "509R" → 509. Only plausible weights.
                 s.filter { it.isDigit() }.toIntOrNull()?.takeIf { it in 1..1000 } ?: 400
@@ -37,9 +37,9 @@ object SubfamilyMetric {
         }
     }
 
-    /** Whether the subfamily denotes an italic/oblique variant. */
+    /** Whether the subfamily denotes an italic/oblique variant (英文斜体词 + 中文"斜"). */
     fun italic(subfamily: String?): Boolean {
         val s = (subfamily ?: "").trim().lowercase()
-        return s.contains("italic") || s.contains("oblique") || s.contains("kursiv")
+        return s.contains("italic") || s.contains("oblique") || s.contains("kursiv") || s.contains("斜")
     }
 }

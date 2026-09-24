@@ -12,8 +12,8 @@ import org.junit.Test
  */
 class FontPanelRowsTest {
 
-    private fun imported(family: String, hidden: Boolean = false) = FontEntry.Imported(
-        FontFace(id = family.hashCode().toLong(), familyName = family, displayName = family, path = "/f.ttf", lang = "cjk", hidden = hidden),
+    private fun imported(family: String, hidden: Boolean = false, subfamily: String = "") = FontEntry.Imported(
+        FontFace(id = (family + subfamily).hashCode().toLong(), familyName = family, displayName = family, subfamily = subfamily, path = "/f.ttf", lang = "cjk", hidden = hidden),
     )
 
     private fun system(family: String, subfamily: String = "", hidden: Boolean = false, displayName: String = "") =
@@ -38,16 +38,15 @@ class FontPanelRowsTest {
 
     @Test
     fun subtitleGapScalesWithGlyphHeightAndClamps() {
-        // 行盒已是真墨迹高度（栅格真值）后名/重不会重叠，气口只微量按比例加（0.15），
-        // 并钳 [min,max]（常规行恒 6dp 兜底，高字形行封顶 8dp——不再有 12dp 的离身感）。
-        assertEquals(6f, subtitleGapPx(10, 6f, 8f))   // 10*0.15=1.5 → 兜底 6
-        assertEquals(6f, subtitleGapPx(30, 6f, 8f))   // 4.5 → 兜底 6
-        assertEquals(6f, subtitleGapPx(40, 6f, 8f))   // 6（整好 == 下限）
-        assertEquals(7.5f, subtitleGapPx(50, 6f, 8f), 0.001f) // 7.5（0.15 比率浮点折损）
-        assertEquals(8f, subtitleGapPx(60, 6f, 8f))   // 9 → 封顶 8
-        assertEquals(8f, subtitleGapPx(80, 6f, 8f))   // 12 → 封顶 8
+        // 行盒已是真墨迹高度（栅格真值）后名/重不会重叠，气口只微量按比例加（0.08），
+        // 并钳 [min,max]（常规行 2dp 贴紧，高字形行封顶 5dp）。
+        assertEquals(2f, subtitleGapPx(10, 2f, 5f))   // 10*0.08=0.8 → 兜底 2
+        assertEquals(2.4f, subtitleGapPx(30, 2f, 5f), 0.001f) // 2.4（钳制区内）
+        assertEquals(4f, subtitleGapPx(50, 2f, 5f), 0.001f) // 4.0（0.08 比率浮点折损）
+        assertEquals(4.8f, subtitleGapPx(60, 2f, 5f), 0.001f) // 4.8（钳制区内）
+        assertEquals(5f, subtitleGapPx(80, 2f, 5f))   // 6.4 → 封顶 5
         // 单调：字形越高间隙越大（钳制区内）。
-        assertTrue(subtitleGapPx(53, 6f, 8f) > subtitleGapPx(41, 6f, 8f))
+        assertTrue(subtitleGapPx(53, 2f, 5f) > subtitleGapPx(41, 2f, 5f))
     }
 
     @Test
@@ -199,5 +198,24 @@ class FontPanelRowsTest {
         assertEquals(listOf("系统字体", "已隐藏"), headers)
         val fams = rows.filterIsInstance<FontPanelRow.Entry>().map { it.family }.sorted()
         assertEquals(listOf("A", "S"), fams)
+    }
+
+    @Test
+    fun previewMemberPrefersRegular() {
+        // 同行多字重：有 Regular 用它（大小写不敏感 + 中文"常规"），无则用第一个。
+        val members = listOf(
+            imported("F", subfamily = "Bold"),
+            imported("F", subfamily = "Regular"),
+            imported("F", subfamily = "Italic"),
+        )
+        assertEquals("Regular", (members.previewMember() as FontEntry.Imported).face.subfamily)
+        assertEquals(
+            "Bold",
+            (listOf(members[0], members[2]).previewMember() as FontEntry.Imported).face.subfamily,
+        )
+        val cn = listOf(imported("G", subfamily = "粗体"), imported("G", subfamily = "常规"))
+        assertEquals("常规", (cn.previewMember() as FontEntry.Imported).face.subfamily)
+        val lower = listOf(system("H", "bold"), system("H", "regular"))
+        assertEquals("regular", (lower.previewMember() as FontEntry.System).subfamily)
     }
 }

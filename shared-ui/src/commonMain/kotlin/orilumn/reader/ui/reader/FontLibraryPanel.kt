@@ -251,18 +251,20 @@ fun FontLibraryPanel(
                     }
                     val isSystem = row.members.all { it is FontEntry.System }
                     val subtitle = rowSubtitle(row.members)
+                    // 预览成员：有 Regular 字重用它（同族多字重时名行字形稳定），没有用第一个。
+                    val preview = row.members.previewMember()
                     when {
-                        hidden -> FontManageRow(row.family, row.members.first(), false,
+                        hidden -> FontManageRow(row.family, preview, false,
                             "取消隐藏", SwipeActionTone.Restore, nav, i, p, subtitle,
                             onTap = { openKey = null; onUnhide(ids) },
                             onAction = { onUnhide(ids) },
                             openKey = openKey, onOpenChange = { openKey = it })
-                        isSystem -> FontManageRow(row.family, row.members.first(), row.selected,
+                        isSystem -> FontManageRow(row.family, preview, row.selected,
                             "隐藏", SwipeActionTone.Hide, nav, i, p, subtitle,
                             onTap = { openKey = null; onSelect(row.family) },
                             onAction = { onHide(ids) },
                             openKey = openKey, onOpenChange = { openKey = it })
-                        else -> FontManageRow(row.family, row.members.first(), row.selected,
+                        else -> FontManageRow(row.family, preview, row.selected,
                             "删除", SwipeActionTone.Delete, nav, i, p, subtitle,
                             onTap = { openKey = null; onSelect(row.family) },
                             onAction = { onDelete(row.family) },
@@ -288,13 +290,26 @@ private fun rowSubtitle(members: List<FontEntry>): String? {
 }
 
 /**
+ * 预览成员：同行多字重时优先 Regular（名行字形稳定，不随排序飘到 Bold/Italic），
+ * 无 Regular 用第一个。纯函数（行模型同一文件可测）。
+ */
+internal fun List<FontEntry>.previewMember(): FontEntry =
+    firstOrNull {
+        val sub = when (it) {
+            is FontEntry.Imported -> it.face.subfamily
+            is FontEntry.System -> it.subfamily
+        }.trim()
+        sub.equals("Regular", ignoreCase = true) || sub == "常规"
+    } ?: first()
+
+/**
  * 名字行与字重副标题的间隙：行盒已是真字形墨迹高度（栅格真值），字形越高只微量加气口
- * （0.15 比率），并钳到 [minPx, maxPx]（最小呼吸 + 不喧宾夺主——高字形行不再图 12dp
- * 大间距，名/重聚拢成一体）。
+ * （0.08 比率），并钳到 [minPx, maxPx]（最小呼吸 + 不喧宾夺主——高字形行不再图大间距，
+ * 名/重聚拢成一体）。
  * 纯函数（行模型同一文件可测）。
  */
 fun subtitleGapPx(nameHeightPx: Int, minPx: Float, maxPx: Float): Float =
-    (nameHeightPx * 0.15f).coerceIn(minPx, maxPx)
+    (nameHeightPx * 0.08f).coerceIn(minPx, maxPx)
 
 /** 左滑操作配色（删除红沿旧口径；隐藏/恢复另取 hues）。 */
 private enum class SwipeActionTone(val color: Color) {
@@ -402,15 +417,15 @@ private fun FontManageRow(
             Column(modifier = Modifier.weight(1f)) {
                 if (entry != null) {
                     // 名字行 = 真墨迹预览（Canvas 高度 = max(度量行高, 栅格真墨底)，墨不溢出）。
-                    // 名/重间隙 = 行高*0.15 钳 [6,8]dp：常规行恒 6dp 兜底，字形越高的行
-                    // 只微量加气口（高字形整行已大，间距不再按比例放大，聚拢成一体）。
+                    // 名/重间隙 = 行高*0.08 钳 [2,5]dp：Canvas 已含真墨下缘，间隙纯粹是气口，
+                    // 常规行 2dp 贴紧，高字形行最多 5dp，名/重聚拢成一体。
                     var nameH by remember { mutableIntStateOf(0) }
                     Box(modifier = Modifier.fillMaxWidth().onSizeChanged { nameH = it.height }) {
                         FontPreviewText(entry, if (selected) PanelGold else p.text, 15.sp, Modifier.fillMaxWidth())
                     }
                     if (subtitle != null) {
                         val density = LocalDensity.current
-                        val gapPx = subtitleGapPx(nameH, with(density) { 6.dp.toPx() }, with(density) { 8.dp.toPx() })
+                        val gapPx = subtitleGapPx(nameH, with(density) { 2.dp.toPx() }, with(density) { 5.dp.toPx() })
                         Spacer(Modifier.height(with(density) { gapPx.toDp() }))
                         // 副标题（语种 · 字重表）可折行（长族名/多字重不再单行裁切），行高与字号匹配。
                         Text(subtitle, color = p.muted, fontSize = 12.sp, lineHeight = 16.sp)
@@ -419,9 +434,9 @@ private fun FontManageRow(
                     Text(family, color = if (selected) PanelGold else p.text, fontSize = 15.sp,
                         fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
                     // 无字形条目（如跟随原书）同样走副标题行，与 Entry 行同规格；
-                    // 间隙取 6dp（与字形行 subtitleGapPx 下限一致）。
+                    // 间隙取 2dp（与字形行 subtitleGapPx 下限一致）。
                     if (subtitle != null) {
-                        Spacer(Modifier.height(6.dp))
+                        Spacer(Modifier.height(2.dp))
                         Text(subtitle, color = p.muted, fontSize = 12.sp, lineHeight = 16.sp)
                     }
                 }

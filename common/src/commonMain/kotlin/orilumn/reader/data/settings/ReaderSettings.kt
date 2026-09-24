@@ -86,6 +86,8 @@ data class ReaderSettings(
     val brightnessGestureLeft: Boolean = false,
     val brightnessGestureRight: Boolean = false,
     val brightnessGestureTwo: Boolean = false,
+    /** 字体管理隐藏字体列出开关（纯全局，默认隐藏；永不进按书 overlay，见 [PerBookSettings]）。 */
+    val showHiddenFonts: Boolean = false,
 ) {
 
     /** Serialize to a JSON string; `indentFactor > 0` produces indented output. */
@@ -284,6 +286,7 @@ data class ReaderSettings(
                     brightnessGestureLeft = SettingsJson.optBoolean(o, "brightnessGestureLeft", d.brightnessGestureLeft),
                     brightnessGestureRight = SettingsJson.optBoolean(o, "brightnessGestureRight", d.brightnessGestureRight),
                     brightnessGestureTwo = SettingsJson.optBoolean(o, "brightnessGestureTwo", d.brightnessGestureTwo),
+                    showHiddenFonts = SettingsJson.optBoolean(o, "showHiddenFonts", d.showHiddenFonts),
                 )
             } catch (_: Exception) {
                 DEFAULT

@@ -5,8 +5,8 @@ package orilumn.reader.data.settings
  *
  * 两类划分（用户层契约）：
  * - 纯全局：亮度族（brightness/brightnessFollowSystem/brightnessOffset/eyeProtectionLevel/
- *   brightnessGestureLeft/Right/Two）、夜间 `scheme`、打开书自动阅读 `autoContinue`——
- *   不出 overlay，直写全局；
+ *   brightnessGestureLeft/Right/Two）、夜间 `scheme`、打开书自动阅读 `autoContinue`、
+ *   字体管理隐藏字体开关 `showHiddenFonts`——不出 overlay，直写全局；
  * - 其余（排版/字体/阅读主题覆盖等）按书私有：本书一动，全量快照进本书 overlay，
  *   修改项同时直写全局（传染给没有此项的书）。
  *
@@ -50,6 +50,7 @@ class PerBookSettings(
                 brightnessGestureRight = next.brightnessGestureRight,
                 brightnessGestureTwo = next.brightnessGestureTwo,
                 autoContinue = next.autoContinue,
+                showHiddenFonts = next.showHiddenFonts,
             )
         }
         globalStore.save(global)

@@ -7,7 +7,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.sp
 import orilumn.reader.data.font.FontEntry
@@ -39,8 +38,6 @@ actual fun FontPreviewText(
         color = color,
         fontSize = fontSize,
         fontFamily = typeface?.let { FontFamily(it) },
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
         modifier = modifier,
     )
 }

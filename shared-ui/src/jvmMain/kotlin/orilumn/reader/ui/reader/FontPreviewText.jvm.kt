@@ -1,14 +1,20 @@
 package orilumn.reader.ui.reader
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
@@ -51,39 +57,46 @@ actual fun FontPreviewText(
     // 预览不依赖共用池状态——池里只有槽位族 + 整形按需族，未选入槽位的导入族走池必 miss
     // 而回退系统字形（方正等中文名全挤成同一系统字形即此）；读不到/解析失败回退共用池。
     val collection = remember(entry) { previewCollection(entry) }
-    val paragraph = remember(entry.family, display, px, ink, collection) {
-        val style = SkParagraphFactory.paragraphStyle(
-            alignment = orilumn.reader.engine.css.TextAlign.LEFT,
-            fontSizePx = px,
-            // 自然行高（0 = 跟字体度量）：Adobe 宋体 Std 这类 3em 度量的空隙
-            // 由下方真墨盒裁掉，真高的字形（Zapfino 类溢墨）墨有多高行多高。
-            lineHeightRatio = 0f,
-            tag = "p",
-            families = listOf(entry.family),
-            weight = 400,
-            italic = false,
-            monospace = false,
-            letterSpacingEm = 0f,
-            inkColor = ink,
-        )
-        ParagraphBuilder(style, collection).addText(display).build()
-            .also { it.layout(Float.MAX_VALUE) }
-    }
-    DisposableEffect(paragraph) {
-        onDispose { paragraph.close() }
-    }
-    // 行高 = 真墨盒高度（裁掉字体度量的上下空隙）：Adobe 宋体 Std 的 3em 行盒里
-    // 墨只占中段，裁后名行与其余行同高；真溢墨（Zapfino 类）墨盒本就含溢出部分，
-    // 行照样撑高——画布按墨顶偏移，保证各行墨顶对齐。
-    val inkBox = remember(entry.family, display, px, ink, collection) {
-        // key 拼集合身份：同族重导新文件（collection 换实例）即重算，不吃过期墨盒。
-        // 存紧墨盒（见 inkTightBoxOfParagraph）：行即墨包络，度量空隙不撑行。
-        val key = "tight\u0001${entry.family}\u0001$display\u0001${px.toInt()}\u0001${System.identityHashCode(collection)}"
-        inkCache.computeIfAbsent(key) { inkTightBoxOfParagraph(paragraph, paragraph.height) }
-    }
-    val h = with(density) { (inkBox.bottom - inkBox.top).toDp() }.coerceAtLeast(1.dp)
-    Canvas(modifier.height(h)) {
-        paragraph.paint(drawContext.canvas.nativeCanvas as org.jetbrains.skia.Canvas, 0f, -inkBox.top)
+    // 一行放不下即折行：实宽经 onSizeChanged 回填再布局（BoxWithConstraints 是
+    // SubcomposeLayout，与外层 IntrinsicSize.Min 的 intrinsic 测量不兼容，会崩）。
+    // 首帧宽未知先按无限宽单行，测到宽即重组折行。
+    var wPx by remember { mutableFloatStateOf(0f) }
+    Box(modifier.onSizeChanged { wPx = it.width.toFloat() }) {
+        val layoutW = if (wPx > 0f) wPx else Float.MAX_VALUE
+        val paragraph = remember(entry.family, display, px, ink, collection, layoutW) {
+            val style = SkParagraphFactory.paragraphStyle(
+                alignment = orilumn.reader.engine.css.TextAlign.LEFT,
+                fontSizePx = px,
+                // 自然行高（0 = 跟字体度量）：Adobe 宋体 Std 这类 3em 度量的空隙
+                // 由下方真墨盒裁掉，真高的字形（Zapfino 类溢墨）墨有多高行多高。
+                lineHeightRatio = 0f,
+                tag = "p",
+                families = listOf(entry.family),
+                weight = 400,
+                italic = false,
+                monospace = false,
+                letterSpacingEm = 0f,
+                inkColor = ink,
+            )
+            ParagraphBuilder(style, collection).addText(display).build()
+                .also { it.layout(layoutW) }
+        }
+        DisposableEffect(paragraph) {
+            onDispose { paragraph.close() }
+        }
+        // 行高 = 真墨盒高度（裁掉字体度量的上下空隙）：Adobe 宋体 Std 的 3em 行盒里
+        // 墨只占中段，裁后名行与其余行同高；真溢墨（Zapfino 类）墨盒本就含溢出部分，
+        // 行照样撑高——画布按墨顶偏移，保证各行墨顶对齐。
+        val inkBox = remember(entry.family, display, px, ink, collection, layoutW) {
+            // key 拼集合身份：同族重导新文件（collection 换实例）即重算，不吃过期墨盒。
+            // 存紧墨盒（见 inkTightBoxOfParagraph）：行即墨包络，度量空隙不撑行。
+            val key = "tight\u0001${entry.family}\u0001$display\u0001${px.toInt()}\u0001${layoutW.toInt()}\u0001${System.identityHashCode(collection)}"
+            inkCache.computeIfAbsent(key) { inkTightBoxOfParagraph(paragraph, paragraph.height) }
+        }
+        val h = with(density) { (inkBox.bottom - inkBox.top).toDp() }.coerceAtLeast(1.dp)
+        Canvas(Modifier.fillMaxWidth().height(h)) {
+            paragraph.paint(drawContext.canvas.nativeCanvas as org.jetbrains.skia.Canvas, 0f, -inkBox.top)
+        }
     }
 }
 

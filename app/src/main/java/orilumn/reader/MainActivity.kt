@@ -43,7 +43,7 @@ import java.io.File
  * 保留项说明（S31-cleanup 已收敛）：
  * - 日志统一走 common `Logger`：`util/FileLogger` 已删除，阅读面/engine/字体池均经 common
  *   `Logger` 落盘 `<filesDir>/logs/`（直启阅读页时 `ReaderActivity` 补 `AppRoot.init` 兜底）；
- * - `WRITE_SETTINGS`/亮度物理背光、`curl` 卷曲、`WifiImportDialog` 的 SAF 字体导入均在
+ * - `WRITE_SETTINGS`/亮度物理背光、`curl` 卷曲、SAF 字体导入均在
  *   `ReaderActivity` 壳内（目标结构「留 androidApp」项），本书架壳不碰。
  */
 class MainActivity : ComponentActivity() {

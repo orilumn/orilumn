@@ -32,8 +32,10 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -68,6 +70,7 @@ import androidx.compose.ui.unit.sp
 import orilumn.reader.data.font.FontEntry
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.engine.text.TypographicProfile
+import orilumn.reader.net.FontUploadServer
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
@@ -112,12 +115,17 @@ fun ReaderSettingsPanel(
     onFontHide: (List<Long>) -> Unit = {},
     onFontUnhide: (List<Long>) -> Unit = {},
     onFontDelete: (String) -> Unit = {},
-    /** 本地导入按钮（平板独占；桌面隐藏；与无线导入独立，单开只显对应按钮）。 */
+    /** 本地导入按钮（桌面 FileKit / 平板 SAF，经 [onFontImport] 交壳；与无线导入独立）。 */
     canFontImport: Boolean = false,
     onFontImport: () -> Unit = {},
-    /** 无线导入按钮（平板独占；桌面隐藏；与本地导入独立，默认开、随导入区）。 */
+    /**
+     * 无线导入下钻页（双端同页）：服务走共享 [FontUploadServer]，页面进出即启停；
+     * 壳只给暂存目录 + 落盘入库回调（`onWifiUpload(path)` 内导入并刷新，线程自理）。
+     * 为空即不展示无线入口。
+     */
     canFontWifiImport: Boolean = true,
-    onFontImportWifi: () -> Unit = {},
+    wifiUploadDir: String = "",
+    onWifiUpload: (String) -> Unit = {},
     /** 已导入区是否显示（平板=true；桌面=false，仅系统字体）。 */
     showImportedSection: Boolean = true,
 ) {
@@ -194,6 +202,8 @@ fun ReaderSettingsPanel(
             if (current == Sub.TextFont) buildFontRows(fontEntries, fieldOf(s, slotKey), canFontImport, showImportedSection, canFontWifiImport)
             else emptyList()
         }
+        // 无线下钻页可用性：能力位开且壳给了暂存目录。
+        val wifiReady = canFontWifiImport && wifiUploadDir.isNotEmpty()
         // 入口行（正文/标题/代码）展示名：族 → 本地化展示名（系统/导入同表）；
         // 缺席（如已删族仍被槽位引用）回退族名本身 + CSS 通用族标签（不裸奔英文原族名）。
         val fontDisplayByFamily = remember(fontEntries) { fontEntries.associate { it.family to it.display } }
@@ -239,14 +249,16 @@ fun ReaderSettingsPanel(
                     is FontPanelRow.FollowOriginal ->
                         ItemKey(onEnter = { onCommitTypography(setField(s, slotKey, "")) })
                     is FontPanelRow.Import ->
-                        // 双按钮同行：回车走主动作（本地导入优先；单开无线时走无线；桌面不渲染此行）。
-                        ItemKey(onEnter = { if (canFontImport) onFontImport() else onFontImportWifi() })
+                        // 双按钮同行：回车走主动作（本地导入优先；单开无线时进无线下钻页）。
+                        ItemKey(onEnter = { if (canFontImport) onFontImport() else stack.add(Sub.WifiImport) })
                     is FontPanelRow.Header, is FontPanelRow.EmptyHint ->
                         ItemKey(enabled = false)
                     is FontPanelRow.Entry ->
                         ItemKey(onEnter = { onCommitTypography(setField(s, slotKey, row.family)) })
                 }
             }
+            // 无线下钻页是纯展示页（地址 + 说明）：键盘占一位空键，只保焦点计数不崩。
+            Sub.WifiImport -> listOf(ItemKey())
             Sub.Spacing -> listOf(
                 sliderKey(s.firstLineIndent, 0.0, 10.0, 1.0,
                     apply = { v -> onPreview(s.copy(firstLineIndent = v)); onCommitTypography(s.copy(firstLineIndent = v)) },
@@ -478,11 +490,17 @@ fun ReaderSettingsPanel(
                                 onUnhide = onFontUnhide,
                                 onDelete = onFontDelete,
                                 onImport = onFontImport,
-                                onImportWifi = onFontImportWifi,
+                                // 无线走面板内下钻（返回‹/Esc 即回字体列表），不经壳弹框。
+                                onImportWifi = { stack.add(Sub.WifiImport) },
                                 showLocalButton = canFontImport,
-                                showWifiButton = canFontWifiImport,
+                                showWifiButton = wifiReady,
                                 onMouseMove = onMove,
                                 listState = listState,
+                            )
+                            Sub.WifiImport -> WifiImportPage(
+                                uploadDirPath = wifiUploadDir,
+                                onUploadFile = onWifiUpload,
+                                p = p,
                             )
                             Sub.Spacing -> SpacingPage(s, keys, nav, onMove, listState, p, onPreview, onCommitTypography)
                             Sub.Theme -> ThemePage(s, keys, nav, onMove, listState, onCommitTypography, commitBook, p)
@@ -502,8 +520,65 @@ fun ReaderSettingsPanel(
     }
 }
 
+/**
+ * WIFI 导入下钻页（双端同页）：服务走共享 [FontUploadServer]（与旧两端对话框同一实现、
+ * 同一端口约定），进页启动、离页停止（暂存清理沿服务 `stop` 语义）。
+ * 壳只给暂存目录 + 落盘入库回调（线程自理）；返回‹/Esc 即回字体列表（栈导航自带）。
+ */
+@Composable
+private fun WifiImportPage(
+    uploadDirPath: String,
+    onUploadFile: (String) -> Unit,
+    p: Palette,
+) {
+    val scope = rememberCoroutineScope()
+    var addr by remember { mutableStateOf<String?>(null) }
+    var startFailed by remember { mutableStateOf(false) }
+    val server = remember(uploadDirPath) {
+        FontUploadServer(uploadDirPath) { _, path ->
+            scope.launch { onUploadFile(path) }
+        }
+    }
+    DisposableEffect(server) {
+        val a = server.start()
+        if (a == null) startFailed = true else addr = a
+        onDispose { server.stop() }
+    }
+    Column(modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 10.dp)) {
+        when {
+            startFailed -> Text(
+                text = "启动服务失败：请确认设备已连接到 Wi-Fi，然后重试。",
+                color = p.text, fontSize = 14.sp,
+            )
+            addr == null -> Text("正在启动服务器…", color = p.muted, fontSize = 14.sp)
+            else -> {
+                Text(
+                    text = "导入设备与当前设备必须在同一个局域网内。在导入设备浏览器中打开以下地址：",
+                    color = p.text, fontSize = 14.sp,
+                )
+                Spacer(Modifier.height(10.dp))
+                Box(
+                    modifier = Modifier.fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(p.borderSoft)
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                ) {
+                    SelectionContainer {
+                        Text(addr ?: "", color = p.text, fontSize = 16.sp)
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                Text("支持 .ttf / .otf / .ttc 格式字体文件，可多选。", color = p.muted, fontSize = 12.sp)
+                Spacer(Modifier.height(4.dp))
+                Text("本机会自动剔除重复导入，并合并不同字重的字体。", color = p.muted, fontSize = 12.sp)
+            }
+        }
+        Spacer(Modifier.height(24.dp))
+    }
+}
+
 private enum class Sub(val title: String) {
-    Home("设置"), Text("文字"), TextFont("字体管理"), Spacing("间距"),
+    Home("设置"), Text("文字"), TextFont("字体管理"), WifiImport("WIFI 导入"), Spacing("间距"),
     Theme("排版主题"), ReadingTheme("阅读主题"), ThemePresetMgr("预设管理"),
     Brightness("亮度"), AnimMode("翻页动画模式"),
 }

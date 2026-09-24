@@ -126,8 +126,6 @@ class ReaderActivity : ComponentActivity() {
     private var fontEntries by mutableStateOf<List<FontEntry>>(emptyList())
     /** 自定义阅读主题预设（SharedPreferences 持久化，喂共享面板）。 */
     private var customThemes by mutableStateOf<List<ThemePreset>>(emptyList())
-    /** WiFi 导入对话框（Android-only Dialog，由壳盖在面板上层渲染）。 */
-    private var showWifiImport by mutableStateOf(false)
     private lateinit var fontImportLauncher: ActivityResultLauncher<Array<String>>
 
     /** 面板打开时的排版指纹；关闭时变化 → 全书 canonical 重排。 */
@@ -140,6 +138,9 @@ class ReaderActivity : ComponentActivity() {
     private var relayoutPending = false
     private var relayoutScheduled = false
     private var relayoutJob: Job? = null
+
+    /** WiFi 批量上传防抖刷新（多文件连续到达只刷一次，见 scheduleWifiBatchRefresh）。 */
+    private var wifiBatchJob: Job? = null
 
     /** 当前系统状态栏顶 inset（物理 px，随显隐动画逐帧更新）。 */
     private val statusInsetTopPx = mutableIntStateOf(0)
@@ -389,20 +390,16 @@ class ReaderActivity : ComponentActivity() {
                 canFontImport = true,
                 onFontImport = { fontImportLauncher.launch(FONT_MIMES) },
                 canFontWifiImport = true,
-                onFontImportWifi = { showWifiImport = true },
+                wifiUploadDir = File(cacheDir, "wifi_fonts").absolutePath,
+                onWifiUpload = { path ->
+                    // 批量上传只入库 + 防抖刷一次（旧逻辑每文件都走系统字体重枚举 + 全书重排）。
+                    lifecycleScope.launch(Dispatchers.IO) {
+                        runCatching { fontRepository.importFile(File(path)) }
+                        withContext(Dispatchers.Main) { scheduleWifiBatchRefresh() }
+                    }
+                },
                 showImportedSection = true,
             )
-            if (showWifiImport) {
-                WifiImportDialog(
-                    fontRepository = fontRepository,
-                    p = wifiDialogPalette(panelSettings.scheme),
-                    onDismiss = { showWifiImport = false },
-                    onImported = {
-                        loadPanelFonts()
-                        refreshFontsAndRelayout()
-                    },
-                )
-            }
         }
     }
 
@@ -451,10 +448,25 @@ class ReaderActivity : ComponentActivity() {
     // ---- Settings panel font/theme platform seams (shell-owned) ----
 
     /** 面板字库重载（开面板/增删改后）：同步系统族落行 + 取统一全量表。 */
-    private fun loadPanelFonts() {
+    private fun loadPanelFonts(resyncSystem: Boolean = true) {
         lifecycleScope.launch {
-            runCatching { fontRepository.syncSystemFaces(orilumn.reader.engine.skia.systemFontFaces()) }
+            if (resyncSystem) runCatching { fontRepository.syncSystemFaces(orilumn.reader.engine.skia.systemFontFaces()) }
             fontEntries = runCatching { fontRepository.entries() }.getOrDefault(emptyList())
+        }
+    }
+
+    /**
+     * WiFi 批量防抖刷新：连续到达的文件只在静默 [WIFI_BATCH_DELAY_MS] 后刷一次。
+     * 系统字体在 WiFi 流程中不变故不重枚举；面板开时跳过重排（deferCanonical 期后台
+     * canonical 被抑制，关面板走 finalizeRelayoutAll 一次），只同步 Skia 池。
+     */
+    private fun scheduleWifiBatchRefresh() {
+        wifiBatchJob?.cancel()
+        wifiBatchJob = lifecycleScope.launch {
+            delay(WIFI_BATCH_DELAY_MS)
+            loadPanelFonts(resyncSystem = false)
+            if (settingsOpen) withContext(Dispatchers.Default) { refreshSkiaFonts() }
+            else refreshFontsAndRelayout()
         }
     }
 
@@ -553,40 +565,17 @@ class ReaderActivity : ComponentActivity() {
     }
 
     /**
-     * 持久化（每书隔离，fork-on-first-customization）：
-     *  - 本书 overlay = 改变后全部每书字段的快照，一旦触碰即不再跟随后续全局变更；
-     *  - 全局内存只收本次实际改动字段（相对本书基线的 diff），一本书的私有值不泄漏进共享默认；
-     *  - [bookOnly]（原书设置）：只写本书私有 overlay，永不合并进全局；
-     *  - 系统/全局字段（亮度/护眼/亮度手势/夜间）不入任何每书 overlay，直写全局内存。
+     * 持久化：双层语义收归共享 [orilumn.reader.data.settings.PerBookSettings]
+     * （平板为基准：全量快照 + 修改直写全局 + bookOnly 隔离 + 纯全局直写）。
      */
+    private val settingsPersist by lazy {
+        orilumn.reader.data.settings.PerBookSettings(settingsStore, bookSettingsStore)
+    }
+
     private fun persistSettings(next: ReaderSettings, bookOnly: Boolean = false) {
         lifecycleScope.launch(Dispatchers.IO) {
-            val storedGlobal = settingsStore.load()
-            val storedOverlay = if (bookId >= 0) bookSettingsStore.load(bookId) else BookSettings.EMPTY
-            val baseline = storedGlobal.applyOverlay(storedOverlay)
-            val changed = BookSettings.changedFrom(next, baseline)
-            val global = if (bookOnly) {
-                storedGlobal
-            } else {
-                storedGlobal.mergeFrom(changed)
-                    .copy(
-                        scheme = next.scheme,
-                        brightness = next.brightness,
-                        brightnessFollowSystem = next.brightnessFollowSystem,
-                        brightnessOffset = next.brightnessOffset,
-                        eyeProtectionLevel = next.eyeProtectionLevel,
-                        brightnessGestureLeft = next.brightnessGestureLeft,
-                        brightnessGestureRight = next.brightnessGestureRight,
-                        brightnessGestureTwo = next.brightnessGestureTwo,
-                    )
-            }
-            settingsStore.save(global)
-            val overlay = if (bookId >= 0) {
-                val o = if (changed.isEmpty) storedOverlay else BookSettings.fromReaderSettings(next)
-                bookSettingsStore.save(bookId, o)
-                o
-            } else BookSettings.EMPTY
-            Logger.d(TAG, "persist settings: changed empty=${changed.isEmpty} overlay empty=${overlay.isEmpty}")
+            settingsPersist.persist(if (bookId >= 0) bookId else null, next, bookOnly)
+            Logger.d(TAG, "persist settings bookOnly=$bookOnly")
         }
     }
 
@@ -816,11 +805,21 @@ class ReaderActivity : ComponentActivity() {
     companion object {
         private const val TAG = "Orilumn.Reader"
 
+        /** SAF 可选字体 MIME（各 ROM 写法不一，兼容并集）。 */
+        private val FONT_MIMES = arrayOf(
+            "font/ttf", "font/otf", "font/woff", "font/woff2",
+            "application/x-font-ttf", "application/vnd.ms-opentype",
+            "application/octet-stream",
+        )
+
         /** 自定义阅读主题预设的 SharedPreferences 键（与旧面板同一存储，升级不断档）。 */
         private const val KEY_THEMES = "theme_presets"
 
         /** 重排间隔（ms）：近实时，至多每帧一次；拖拽期间只要还有 pending 就一直重排。 */
         private const val RELAYOUT_INTERVAL_MS = 16L
+
+        /** WiFi 批量防抖窗口（ms）：连续上传只在静默该时长后刷新一次。 */
+        private const val WIFI_BATCH_DELAY_MS = 800L
     }
 }
 

@@ -26,10 +26,10 @@ class FontPanelRowsTest {
             selectedFamily = "A",
             canImport = true,
         )
-        // 跟随原书 + 导入区（一行双按钮） + 2 分区头 + 3 行。
-        assertTrue(rows[0] is FontPanelRow.FollowOriginal)
-        assertEquals(false, (rows[0] as FontPanelRow.FollowOriginal).selected)
-        assertTrue(rows[1] is FontPanelRow.Import)
+        // 导入区（一行双按钮）置顶 + 跟随原书领着字体列表 + 2 分区头 + 3 行。
+        assertTrue(rows[0] is FontPanelRow.Import)
+        assertTrue(rows[1] is FontPanelRow.FollowOriginal)
+        assertEquals(false, (rows[1] as FontPanelRow.FollowOriginal).selected)
         val headers = rows.filterIsInstance<FontPanelRow.Header>().map { it.title }
         assertEquals(listOf("已导入", "系统字体"), headers)
         val selected = rows.filterIsInstance<FontPanelRow.Entry>().single { it.selected }

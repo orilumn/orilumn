@@ -126,7 +126,6 @@ data class ReaderSettings(
         pageAnim = overlay.pageAnim ?: pageAnim,
         pageAnimationMode = overlay.pageAnimationMode ?: pageAnimationMode,
         coverProportional = overlay.coverProportional ?: coverProportional,
-        autoContinue = overlay.autoContinue ?: autoContinue,
         pageNum = overlay.pageNum ?: pageNum,
     )
 
@@ -158,8 +157,23 @@ data class ReaderSettings(
         pageAnim = overlay.pageAnim ?: pageAnim,
         pageAnimationMode = overlay.pageAnimationMode ?: pageAnimationMode,
         coverProportional = overlay.coverProportional ?: coverProportional,
-        autoContinue = overlay.autoContinue ?: autoContinue,
         pageNum = overlay.pageNum ?: pageNum,
+    )
+
+    /**
+     * 亮度族剥离（双端同规则）：纯亮度变化不进版式管线——调用方比对
+     * `withoutLight()` 是否变化，决定是否向排版/宿主传播。
+     * 亮度族 = brightness/brightnessFollowSystem/brightnessOffset/eyeProtectionLevel/
+     * brightnessGestureLeft/Right/Two（纯全局，不出 overlay）。
+     */
+    fun withoutLight(): ReaderSettings = copy(
+        brightness = 0,
+        brightnessFollowSystem = false,
+        brightnessOffset = 0,
+        eyeProtectionLevel = 0,
+        brightnessGestureLeft = false,
+        brightnessGestureRight = false,
+        brightnessGestureTwo = false,
     )
 
     companion object {

@@ -21,8 +21,16 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
+import io.github.vinceglb.filekit.PlatformFile
+import io.github.vinceglb.filekit.dialogs.FileKitDialogSettings
+import io.github.vinceglb.filekit.dialogs.FileKitMode
+import io.github.vinceglb.filekit.dialogs.FileKitType
+import io.github.vinceglb.filekit.dialogs.compose.rememberFilePickerLauncher
+import io.github.vinceglb.filekit.name
+import io.github.vinceglb.filekit.readBytes
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import okio.Path.Companion.toPath
 
 /**
  * S32 桌面阅读视图：窗口级组装（`ReaderScreen` + 设置抽屉 + 目录抽屉）。
@@ -43,6 +51,8 @@ fun ReaderView(
     customs: List<ThemePreset>,
     onBack: () -> Unit,
     onSettingsChange: (ReaderSettings) -> Unit,
+    /** 原书设置专用提交（只写本书 overlay，共享持久化语义；与平板同口径）。 */
+    onCommitBookPrivate: (ReaderSettings) -> Unit,
     onSaveTheme: (ThemePreset) -> Unit,
     onDeleteTheme: (ThemePreset) -> Unit,
     modifier: Modifier = Modifier,
@@ -56,9 +66,14 @@ fun ReaderView(
     var settingsOpen by remember(book) { mutableStateOf(false) }
     var tocOpen by remember(book) { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    fun commit(next: ReaderSettings) = onSettingsChange(next)
 
-    // F4b 桌面仅系统字体：系统枚举经 fontconfig 含用户字体（~/.fonts 等）只读展示，
-    // 可隐藏；不展示导入入口/已导入区（平板独占本地+WiFi 导入与删除）。
+    // 桌面字库（用户层·壳自持发现，内容与平板同口径）：
+    // - 发现链保留桌面特殊性：macOS 目录扫描 + 中文名链（方案B name 表 → 方案A CoreText），
+    //   落库 displayName；与平板 systemFontFaces 同源（skia 系统枚举），只是本地化名来源不同；
+    // - 列表不再只留系统行：导入/隐藏/删除与平板同一 `buildFontRows`（导入区 + 已导入区全开，
+    //   本地导入经 FileKit 原生对话框、无线导入经桌面独写对话框，同走共享服务；SAF/Android Dialog
+    //   是平板 UI，不进共享）。
     val fontLibrary = remember(store) { store.fontLibrary() }
     var fontEntries by remember(book) { mutableStateOf<List<FontEntry>>(emptyList()) }
     LaunchedEffect(book) {
@@ -78,17 +93,48 @@ fun ReaderView(
             }
             fontLibrary.syncSystemFaces(sys, localizedNames = localized)
         }.getOrElse { runCatching { fontLibrary.list() }.getOrDefault(emptyList()) }
-        fontEntries = fontLibrary.allEntries(faces).filterIsInstance<FontEntry.System>()
+        fontEntries = fontLibrary.allEntries(faces)
     }
     fun refreshFonts() = scope.launch(kotlinx.coroutines.Dispatchers.IO) {
-        fontEntries = fontLibrary.allEntries(fontLibrary.list()).filterIsInstance<FontEntry.System>()
+        fontEntries = fontLibrary.allEntries(fontLibrary.list())
     }
+    // 本地导入（桌面 UI）：FileKit 原生多选对话框 → 字节入库（与平板 SAF 同一 `importBytes`）。
+    val fontPicker = rememberFilePickerLauncher(
+        type = FileKitType.File(extensions = listOf("ttf", "otf", "ttc", "woff", "woff2")),
+        mode = FileKitMode.Multiple(),
+        dialogSettings = FileKitDialogSettings.createDefault(),
+    ) { files: List<PlatformFile>? ->
+        val picked = files.orEmpty()
+        if (picked.isEmpty()) return@rememberFilePickerLauncher
+        scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            picked.forEach { f ->
+                runCatching { fontLibrary.importBytes(f.readBytes(), f.name) }
+            }
+            refreshFonts().join()
+        }
+    }
+    /** 隐藏/删除的族若正被槽位引用 → 回退跟随原书（系统/导入同查，与平板同口径）。 */
+    fun fallBackFontSlots(family: String, s: ReaderSettings) {
+        if (family != s.fontBody && family != s.fontTitle && family != s.fontCode) return
+        commit(s.copy(
+            fontBody = s.fontBody.takeUnless { it == family } ?: "",
+            fontTitle = s.fontTitle.takeUnless { it == family } ?: "",
+            fontCode = s.fontCode.takeUnless { it == family } ?: "",
+        ))
+    }
+    fun familyOfFontIds(ids: List<Long>): String? =
+        fontEntries.firstOrNull { e ->
+            val id = (e as? FontEntry.System)?.id ?: (e as? FontEntry.Imported)?.face?.id
+            id != null && id in ids
+        }?.family
 
     // 版式键防抖：面板拖拽时画布 Profile 即时跟手，宿主重排最多 ~7 次/秒。
+    // 亮度分叉（与平板同规则，共享 `withoutLight`）：纯亮度变化不进版式管线，
+    // 宿主不再因拖亮度条重建（TypographicProfile 本来就不消费亮度字段）。
     var layoutSettings by remember(book) { mutableStateOf(settings) }
     LaunchedEffect(settings) {
         delay(150)
-        layoutSettings = settings
+        if (settings.withoutLight() != layoutSettings.withoutLight()) layoutSettings = settings
     }
 
     BoxWithConstraints(modifier = modifier) {
@@ -120,8 +166,6 @@ fun ReaderView(
         }
         val desktopHost = snapshot.delegate as? DesktopReaderHost
 
-        fun commit(next: ReaderSettings) = onSettingsChange(next)
-
         ReaderScreen(
             host = snapshot,
             settings = settings,
@@ -142,24 +186,32 @@ fun ReaderView(
         ReaderSettingsPanel(
             visible = settingsOpen,
             settings = settings,
-            // 桌面仅系统字体（无导入入口/已导入区；系统行左滑隐藏）。
+            // 内容与平板同口径：导入区 + 已导入区全开；
+            // 导入经 FileKit（桌面 UI），WiFi 经桌面独写对话框（服务共享），发现链见上（macOS 独有，保留）。
             fontEntries = fontEntries,
-            showImportedSection = false,
+            showImportedSection = true,
+            canFontImport = true,
+            onFontImport = { fontPicker.launch() },
+            canFontWifiImport = true,
+            // 无线走面板内下钻（与平板同页）：壳只给暂存目录 + 落盘入库。
+            wifiUploadDir = java.io.File(DesktopPaths.cacheDir, "wifi_fonts").absolutePath,
+            onWifiUpload = { path ->
+                scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                    runCatching { fontLibrary.importFile(path.toPath()) }
+                    refreshFonts().join()
+                }
+            },
             onFontHide = { ids ->
                 scope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                    val family = fontEntries.firstOrNull { e ->
-                        val id = (e as? FontEntry.System)?.id
-                        id != null && id in ids
-                    }?.family
+                    val family = familyOfFontIds(ids)
                     ids.forEach { fontLibrary.setHidden(it, true) }
                     refreshFonts().join()
                     // 隐藏正被槽位引用 → 回退跟随原书（沿删除口径），宿主重建经 onDemandFonts 追装。
-                    if (family != null && family in setOf(settings.fontBody, settings.fontTitle, settings.fontCode)) {
-                        commit(settings.copy(
-                            fontBody = settings.fontBody.takeUnless { it == family } ?: "",
-                            fontTitle = settings.fontTitle.takeUnless { it == family } ?: "",
-                            fontCode = settings.fontCode.takeUnless { it == family } ?: "",
-                        ))
+                    if (family != null) {
+                        val s = settings
+                        if (family in setOf(s.fontBody, s.fontTitle, s.fontCode)) {
+                            fallBackFontSlots(family, s)
+                        }
                     }
                 }
             },
@@ -169,6 +221,14 @@ fun ReaderView(
                     refreshFonts().join()
                 }
             },
+            onFontDelete = { family ->
+                scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                    fontLibrary.deleteFamily(family)
+                    refreshFonts().join()
+                    fallBackFontSlots(family, settings)
+                }
+            },
+            onCommitBookPrivate = onCommitBookPrivate,
             onDismiss = { settingsOpen = false },
             onPreview = { onSettingsChange(it) },
             onCommitTypography = { commit(it) },

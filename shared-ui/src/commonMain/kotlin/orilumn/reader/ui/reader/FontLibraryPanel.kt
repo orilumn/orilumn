@@ -133,8 +133,10 @@ fun buildFontRows(
     val hiddenSource = if (showImported) entries else entries.filterIsInstance<FontEntry.System>()
     val hidden = mergeByName(hiddenSource.filter { it.hidden }.groupBy { it.family })
     return buildList {
-        add(FontPanelRow.FollowOriginal(selectedFamily.isEmpty()))
+        // 导入区置顶（平板双按钮；桌面无此行）——字体列表（含跟随原书首行）列其下，
+        // 跟随原书不当悬空标签，实打实领着字体行。
         if (showImported && (canImport || canWifiImport)) add(FontPanelRow.Import)
+        add(FontPanelRow.FollowOriginal(selectedFamily.isEmpty()))
         if (showImported) {
             add(FontPanelRow.Header("已导入"))
             if (imported.isEmpty()) {
@@ -223,7 +225,10 @@ fun FontLibraryPanel(
         items(rows.size) { i ->
             when (val row = rows[i]) {
                 is FontPanelRow.FollowOriginal ->
+                    // 跟随原书（用户层）：当作一个字体行——与 Entry 同规格（名字行 + 副标题 +
+                    // 选中金点），稳坐列表首行，不因无字形预览而塌成裸标签。
                     FontManageRow("跟随原书", null, row.selected, null, null, nav, i, p,
+                        subtitle = "使用原书字体",
                         onTap = { openKey = null; onSelect("") }, openKey = openKey,
                         onOpenChange = { openKey = it })
                 is FontPanelRow.Import ->
@@ -413,6 +418,12 @@ private fun FontManageRow(
                 } else {
                     Text(family, color = if (selected) PanelGold else p.text, fontSize = 15.sp,
                         fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
+                    // 无字形条目（如跟随原书）同样走副标题行，与 Entry 行同规格；
+                    // 间隙取 6dp（与字形行 subtitleGapPx 下限一致）。
+                    if (subtitle != null) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(subtitle, color = p.muted, fontSize = 12.sp, lineHeight = 16.sp)
+                    }
                 }
             }
             if (selected) Text("●", color = PanelGold, fontSize = 12.sp,

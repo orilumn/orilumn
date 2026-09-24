@@ -280,6 +280,8 @@ fun FontLibraryPanel(
 private fun rowSubtitle(members: List<FontEntry>): String? {
     val imported = members.filterIsInstance<FontEntry.Imported>()
     val lang = imported.firstOrNull()?.face?.lang?.trim()?.takeIf { it.isNotEmpty() }
+    // 字重名展示原值：入库即按简体>繁体>日文>英文归一（导入 `parse` + 系统 `systemFontFaces`
+    // 同一 `FontParser.localizedName` 口径），展示层不翻译；旧英文残留由 `syncSystemFonts` 对账清。
     val subs = members.mapNotNull {
         when (it) {
             is FontEntry.Imported -> it.face.subfamily.trim().ifBlank { null }

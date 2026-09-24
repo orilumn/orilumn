@@ -208,6 +208,15 @@ class LibraryDb(db: OrilumnDb) {
         if (familiesWithWeights.isNotEmpty()) {
             fonts.deleteStaleSystemRows(familiesWithWeights.toList())
         }
+        // 字重改名残留：按族全量对账，不在本次枚举集合里的系统行删除
+        // （英文→中文改名后旧英文行不再被命中，不清即一行双语）。
+        // 空枚举（平台失败）不清库；只碰本次枚举到的族。
+        // 注意顺序：新行 hidden 已在上面按族继承（旧行还在），先插后删。
+        if (rows.isNotEmpty()) {
+            rows.groupBy({ it.first }, { it.second }).forEach { (f, subs) ->
+                fonts.deleteRenamedSystemRows(f, subs.distinct().ifEmpty { listOf("") })
+            }
+        }
     }
 
     private fun orilumn.reader.db.Books.toBook(): Book = Book(

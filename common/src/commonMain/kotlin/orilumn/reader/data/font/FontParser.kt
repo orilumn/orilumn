@@ -87,8 +87,8 @@ class FontParser {
         val nameRec = findTable(bytes, base, numTables, "name")
         if (cmapRec == null) return Result.INVALID // without cmap, even glyph coverage cannot be decided
 
-        val familyName = nameRec?.let { readName(bytes, it, ID_FAMILY) }
-        val subfamily = nameRec?.let { readName(bytes, it, ID_SUBFAMILY) }
+        val familyName = nameRec?.let { readPriorityName(bytes, it, listOf(ID_TYPOGRAPHIC_FAMILY, ID_FAMILY)) }
+        val subfamily = nameRec?.let { readPriorityName(bytes, it, listOf(ID_TYPOGRAPHIC_SUBFAMILY, ID_SUBFAMILY)) }
         val cjk = CjkCollector("cjk", cjkLo, cjkHi)
         val latin = CjkCollector("latin", latinLo, latinHi)
         var anySubtable = false
@@ -170,6 +170,12 @@ class FontParser {
 
         /** Windows platform languageID for Chinese MO (zh-MO)。 */
         private const val LANG_ZH_MO = 0x1404
+
+        /** Windows platform languageID for Japanese。 */
+        private const val LANG_JA = 0x0411
+
+        /** Windows 繁体档（含港澳）：简体之后、日文之前。 */
+        private val ZH_TC_LANGS = setOf(LANG_ZH_TW, LANG_ZH_HK, LANG_ZH_MO)
 
         private class CjkCollector(private val name: String, private val lo: Int, private val hi: Int) {
             var total = 0
@@ -292,12 +298,80 @@ class FontParser {
             }
             return null
         }
-        private fun collectNames(bytes: ByteArray, info: TableInfo, nameId: Int, winLang: Int? = null): List<Pair<String, Int>> {
+
+        /**
+         * 简体 > 繁体(含港澳) > 日文 > 英文（族名 + 字重统一口径）：
+         * 导入入库（[parse]）与系统字重（Skija 按 style 取表）共用，展示层不再翻译。
+         * Windows 按 languageID 分档；Mac 的 languageID 不可信，按内容分档
+         * （含假名=日文，含 CJK=中文）；族名显示链的变体感知（Kaiti TC 优先 zh-TW）
+         * 不在此，仍走 [readChinesePreferredName]。
+         */
+        private data class NameRec(val text: String, val platform: Int, val lang: Int, val nameId: Int)
+
+        private fun pickByPriority(recs: List<NameRec>, nameIds: List<Int>, latinFallback: Boolean): String? {
+            if (recs.isEmpty()) return null
+            // 同档内 nameID 顺序优先（17/16 真名优先于 2/1 兼容名，与旧 readName 先 16/17 一致），
+            // 分数只做同 nameID 内决胜。
+            fun idRank(r: NameRec): Int = -nameIds.indexOf(r.nameId)
+            recs.filter { it.platform == 3 && it.lang == LANG_ZH_CN }
+                .maxWithOrNull(compareBy(::idRank, { cjkCount(it.text) }))?.let { return it.text }
+            recs.filter { it.platform == 3 && it.lang in ZH_TC_LANGS }
+                .maxWithOrNull(compareBy(::idRank, { cjkCount(it.text) }))?.let { return it.text }
+            recs.filter { it.platform == 3 && it.lang == LANG_JA }
+                .maxWithOrNull(compareBy(::idRank, { cjkCount(it.text) + kanaCount(it.text) }))?.let { return it.text }
+            // 无语言档的 CJK 记录（Mac/Unicode 平台、Windows 混合记录如 TypeLand 康熙字典體）：
+            // 有 CJK 即按中文用，取 CJK 字最多者。
+            recs.filter { cjkCount(it.text) > 0 }
+                .maxWithOrNull(compareBy(::idRank, { cjkCount(it.text) }))?.let { return it.text }
+            // 假名记录（日文 nameID17「ボールド」等多为纯假名，CJK 计数为 0，单列一档）。
+            recs.filter { kanaCount(it.text) > 0 }
+                .maxWithOrNull(compareBy(::idRank, { cjkCount(it.text) + kanaCount(it.text) }))?.let { return it.text }
+            if (!latinFallback) return null
+            // 英文：无 CJK 且无假名、ASCII 可读性最高（与 readLatinName 同口径）。
+            return recs.filter { cjkCount(it.text) == 0 && kanaCount(it.text) == 0 }
+                .maxWithOrNull(compareBy(::idRank, { asciiRatio(it.text) }))?.text
+        }
+
+        /** 整字体按分级取指定 nameID（族名传 [16,1]，字重传 [17,2]）。 */
+        private fun readPriorityName(bytes: ByteArray, info: TableInfo, nameIds: List<Int>): String? =
+            pickByPriority(collectAll(bytes, info, nameIds), nameIds, latinFallback = true)
+
+        /**
+         * 裸 name 表按分级取指定 nameID（Skija `getTableData("name")` 逐 style 取表用；
+         * 整字体走 [parse]）。裸表头 6 字节 + 12 字节记录，解码与 [collectNames] 同口径。
+         */
+        fun localizedName(nameTable: ByteArray, nameIds: List<Int>): String? = runCatching {
+            require(nameTable.size >= 6)
+            val count = u16(nameTable, 2)
+            if (count == 0 || count > 200) return@runCatching null
+            val stringOff = u16(nameTable, 4)
+            val recs = mutableListOf<NameRec>()
+            for (i in 0 until count) {
+                val rec = 6 + i * 12
+                if (rec + 12 > nameTable.size) continue
+                val pf = u16(nameTable, rec)
+                val enc = u16(nameTable, rec + 2)
+                val lang = u16(nameTable, rec + 4)
+                val id = u16(nameTable, rec + 6)
+                val len = u16(nameTable, rec + 8)
+                val strOff = u16(nameTable, rec + 10)
+                if (id !in nameIds || len == 0) continue
+                val start = stringOff + strOff
+                decodeRecord(nameTable, start, start + len, pf, enc)?.let { recs.add(NameRec(it, pf, lang, id)) }
+            }
+            pickByPriority(recs, nameIds, latinFallback = true)
+        }.getOrNull()
+        private fun collectNames(bytes: ByteArray, info: TableInfo, nameId: Int, winLang: Int? = null): List<Pair<String, Int>> =
+            collectAll(bytes, info, listOf(nameId), winLang)
+                .map { it.text to cjkCount(it.text) }
+
+        /** 全记录收集（含平台/语言，供分级挑选；[collectNames] 为其单 nameID 投影，语义不变）。 */
+        private fun collectAll(bytes: ByteArray, info: TableInfo, nameIds: List<Int>, winLang: Int? = null): List<NameRec> {
             val off = info.offset
             val count = u16(bytes, off + 2)
             val stringOff = u16(bytes, off + 4)
             if (count == 0 || count > 200) return emptyList()
-            val out = mutableListOf<Pair<String, Int>>()
+            val out = mutableListOf<NameRec>()
             for (i in 0 until count) {
                 val rec = off + 6 + i * 12
                 if (rec + 12 > bytes.size) continue
@@ -307,7 +381,7 @@ class FontParser {
                 val id = u16(bytes, rec + 6)
                 val len = u16(bytes, rec + 8)
                 val strOff = u16(bytes, rec + 10)
-                if (id != nameId || len == 0) continue
+                if (id !in nameIds || len == 0) continue
                 if (pf == 3 && enc != 1 && enc != 10) continue   // Windows: Unicode only
                 if (winLang != null && !(pf == 3 && lang == winLang)) continue
                 val start = off + stringOff + strOff
@@ -318,16 +392,19 @@ class FontParser {
                 // ALWAYS UTF-16BE — decoding them by heuristic misreads mixed Latin+CJK names
                 // ("TypeLand 康熙字典體" just under the ASCII threshold flips to LE garbage).
                 // Residual encodings (old MBCS etc.) keep the adaptive fallback below.
-                val name = when {
-                    pf == 1 -> decodeMacRoman(bytes, start, end)
-                    (pf == 3 && enc == 1) || pf == 0 -> decodeUtf16Be(bytes, start, end)
-                    else -> decodeUtf16PreferCjk(bytes, start, end)
-                }
-                if (name != null && name.isNotBlank()) {
-                    out.add(name to cjkCount(name))
-                }
+                decodeRecord(bytes, start, end, pf, enc)?.let { out.add(NameRec(it, pf, lang, id)) }
             }
             return out
+        }
+
+        /** 单条记录解码（平台定字节序，语义与旧内联版一致，供整表/裸表两路复用）。 */
+        private fun decodeRecord(bytes: ByteArray, start: Int, end: Int, pf: Int, enc: Int): String? {
+            if (start < 0 || end > bytes.size || start >= end) return null
+            return when {
+                pf == 1 -> decodeMacRoman(bytes, start, end)
+                (pf == 3 && enc == 1) || pf == 0 -> decodeUtf16Be(bytes, start, end)
+                else -> decodeUtf16PreferCjk(bytes, start, end)
+            }?.takeIf { it.isNotBlank() }
         }
 
         /**
@@ -382,6 +459,16 @@ class FontParser {
         private fun cjkCount(s: String): Int {
             var n = 0
             for (c in s) if (c.code in 0x4E00..0x9FFF) n++
+            return n
+        }
+
+        /** 假名计数（平假名/片假名/半角片假名）：日文记录多为纯假名（如字重「ボールド」），CJK 计数为 0，单列统计。 */
+        private fun kanaCount(s: String): Int {
+            var n = 0
+            for (c in s) {
+                val v = c.code
+                if (v in 0x3040..0x30FF || v in 0xFF65..0xFF9D) n++
+            }
             return n
         }
 

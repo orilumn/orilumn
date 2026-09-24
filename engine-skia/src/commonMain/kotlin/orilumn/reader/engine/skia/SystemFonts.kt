@@ -56,15 +56,41 @@ fun systemFontFaces(): List<SystemFontFace> {
 }
 
 /** 单族的字重名列表；解析不出回空（调用方落到"无字重名"单行）。 */
-private fun styleNamesOfFamily(mgr: FontMgr, family: String): List<String> = runCatching {
-    val set = mgr.matchFamily(family) ?: return@runCatching emptyList()
-    (0 until set.count().coerceAtLeast(0)).mapNotNull { j ->
-        runCatching {
-            set.getStyleName(j)?.trim().orEmpty().ifBlank { styleNameOf(set.getStyle(j)) }
-                .takeIf { it.isNotEmpty() }
-        }.getOrNull()
-    }.distinct()
-}.getOrDefault(emptyList())
+private fun styleNamesOfFamily(mgr: FontMgr, family: String): List<String> =
+    styleNameCache(family) ?: runCatching {
+        val set = mgr.matchFamily(family) ?: return@runCatching emptyList()
+        set.use { s ->
+            (0 until s.count().coerceAtLeast(0)).mapNotNull { j ->
+                runCatching {
+                    // 字重名同样简体>繁体>日文>英文：逐 style 取 name 表用字体自带记录
+                    // （与导入侧同一 [FontParser.localizedName] 口径），无表/无记录回退平台风格名。
+                    styleNameZh(s, j)
+                        ?: s.getStyleName(j)?.trim().orEmpty().ifBlank { styleNameOf(s.getStyle(j)) }
+                            .takeIf { it.isNotEmpty() }
+                }.getOrNull()
+            }.distinct()
+        }
+    }.getOrDefault(emptyList()).also { cacheStyleNames(family, it) }
+
+/** 进程内字重名缓存：系统字体运行时不变，逐 style 读表只付一次。 */
+private val styleNameCacheMap = HashMap<String, List<String>>()
+
+private fun styleNameCache(family: String): List<String>? =
+    synchronized(styleNameCacheMap) { styleNameCacheMap[family] }
+
+private fun cacheStyleNames(family: String, names: List<String>) =
+    synchronized(styleNameCacheMap) { styleNameCacheMap[family] = names }
+
+/** 某 style 的中文字重名（nameID 17/2，[FontParser.localizedName] 分级）；无表/失败回 null。 */
+private fun styleNameZh(set: org.jetbrains.skia.FontStyleSet, index: Int): String? = runCatching {
+    set.getTypeface(index)?.use { tf ->
+        tf.getTableData("name")?.use { data ->
+            val bytes = data.bytes
+            if (bytes.isEmpty()) return@runCatching null
+            orilumn.reader.data.font.FontParser.localizedName(bytes, listOf(17, 2))
+        }
+    }
+}.getOrNull()
 
 /** 数字字重 + 倾斜 -> 展示名（`getStyleName` 缺名的回退路径）。 */
 private fun styleNameOf(s: FontStyle): String = buildString {

@@ -299,4 +299,34 @@ class LibraryDbTest {
         assertTrue(cols.containsAll(listOf("familyName", "source", "lang")))
         assertTrue(!cols.contains("hidden"))
     }
+
+    @Test
+    fun syncSystemFontsReconcilesRenamedWeights() = runBlocking {
+        // 字重改名（英文 Regular → 中文 常规体）：旧英文行不再被命中即删，
+        // 不留一行双语；族隐藏态由新行继承。
+        val db = freshDb()
+        val sys = { sub: String ->
+            orilumn.reader.data.font.SystemFontFace("F", sub)
+        }
+        db.syncSystemFonts(listOf(sys("Regular"), sys("Bold")))
+        assertEquals(
+            listOf("Bold", "Regular"),
+            db.allFonts().map { it.subfamily }.sorted(),
+        )
+        db.setFontHidden(db.allFonts().single { it.subfamily == "Bold" }.id, true)
+        db.syncSystemFonts(listOf(sys("常规体"), sys("粗体")))
+        val subs = db.allFonts().map { it.subfamily }.sorted()
+        assertEquals(listOf("常规体", "粗体"), subs)
+        // 旧英文行已清；隐藏按族继承到新行。
+        assertTrue(db.allFonts().all { it.hidden })
+    }
+
+    @Test
+    fun syncSystemFontsEmptyKeepsLibrary() = runBlocking {
+        // 空枚举（平台失败）不清库。
+        val db = freshDb()
+        db.syncSystemFonts(listOf(orilumn.reader.data.font.SystemFontFace("F", "Regular")))
+        db.syncSystemFonts(emptyList())
+        assertEquals(listOf("Regular"), db.allFonts().map { it.subfamily })
+    }
 }

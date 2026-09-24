@@ -163,21 +163,6 @@ class ReaderLogicTest {
         assertEquals(50, ReaderMath.progressPercent(0.5f))
     }
 
-    // ---- 字体切换路由 ----
-
-    @Test
-    fun fontSlotFor_routesBodyTitleAndCode() {
-        assertEquals("body", ReaderMath.fontSlotFor("p", monospace = false, body = "body", title = "title", code = "code"))
-        assertEquals("title", ReaderMath.fontSlotFor("h2", monospace = false, body = "body", title = "title", code = "code"))
-        assertEquals("title", ReaderMath.fontSlotFor("h6", monospace = false, body = "body", title = "title", code = "code"))
-        assertEquals("code", ReaderMath.fontSlotFor("pre", monospace = false, body = "body", title = "title", code = "code"))
-        assertEquals("code", ReaderMath.fontSlotFor("div", monospace = true, body = "body", title = "title", code = "code"))
-        assertEquals("code", ReaderMath.fontSlotFor(null, monospace = true, body = "body", title = "title", code = "code"))
-        assertEquals("body", ReaderMath.fontSlotFor(null, monospace = false, body = "body", title = "title", code = "code"))
-        // 非 h 标签（如 hsts）不误判为标题
-        assertEquals("body", ReaderMath.fontSlotFor("hsts", monospace = false, body = "body", title = "title", code = "code"))
-    }
-
     // ---- 画布行窗口平移 ----
 
     @Test

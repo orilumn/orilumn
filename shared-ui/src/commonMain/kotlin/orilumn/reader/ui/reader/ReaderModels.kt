@@ -1,6 +1,5 @@
 package orilumn.reader.ui.reader
 
-import orilumn.reader.engine.html.CODE_TAGS
 import orilumn.reader.engine.skia.DrawLine
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -16,9 +15,8 @@ import kotlin.math.roundToInt
  *  - [dimAlphaOf] / [warmAlphaOf] / [ReaderWarmColor]：`ReaderActivity.applyLightOverlay` 与
  *    `BrightnessOverlayView` 的遮罩 alpha 换算（纯绘制，不碰系统背光）；
  *  - [progressPercent]：底栏进度百分比（`ReaderBars`）。
- *  - [fontSlotFor]：`ReaderActivity.fontPairing` 的字体槽位路由（正文/标题/代码三槽），对齐
- *    engine-skia `SkParagraphFactory.resolveFamily` 的 CODE_TAGS 口径；
  *  - [shiftToPageFrame]：[ReaderPageCanvas] 把宿主给出的章节内**绝对 Y** 行窗口平移进页面坐标系。
+ *  （字体三槽路由已归位 `orilumn.reader.engine.text.FontSlots`，UI 层不再持有。）
  */
 object ReaderMath {
 
@@ -131,21 +129,6 @@ object ReaderMath {
 
     /** 底栏百分比显示（0..100 整数），复刻 `ReaderBars` 的 `(fraction*100).toInt()`。 */
     fun progressPercent(fraction: Float): Int = (fraction.coerceIn(0f, 1f) * 100).toInt()
-
-    /**
-     * 字体切换的槽位路由（复刻 `ReaderActivity.fontPairing`）：code-like（monospace 或 pre/code）→ 代码槽，
-     * h1..h6 标题 → 标题槽，其余 → 正文槽；返回的即 `ReaderSettings.fontBody/fontTitle/fontCode` 的别名
-     * （空串 = 该类型跟随原书）。宿主把该别名解析进 Skia FontCollection。
-     */
-    fun fontSlotFor(tag: String?, monospace: Boolean, body: String, title: String, code: String): String {
-        val codeLike = monospace || tag in CODE_TAGS
-        val heading = tag != null && tag.length == 2 && tag[0] == 'h' && tag[1].digitToIntOrNull() != null
-        return when {
-            codeLike -> code
-            heading -> title
-            else -> body
-        }
-    }
 
     /**
      * 把章节内**绝对 Y** 的行窗口平移进页面坐标系：每行 yTop/yBottom 减去 [shift]。

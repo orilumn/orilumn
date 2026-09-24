@@ -36,12 +36,14 @@ import okio.Path.Companion.toPath
  * S32 桌面阅读视图：窗口级组装（`ReaderScreen` + 设置抽屉 + 目录抽屉）。
  *
  * 状态机（最小壳口径）：
- * - 视口/版式变化 → 重建 [DesktopReaderHost]（`remember` 键），`ReaderScreen` 经
+ * - 视口/换书/session 变化 → 重建 [DesktopReaderHost]（`remember` 键），`ReaderScreen` 经
  *   `LaunchedEffect(host)` 重新 `open()` 并落到锚点（存档定位 / 目录跳转目标）；
- * - 设置面板拖拽是高频 `onPreview`：版式键走 150ms 防抖（`layoutSettings`），避免逐帧
- *   重排（对齐 Android `scheduleRelayout` 节流语义）；
+ * - 排版设置变化 → 宿主 `relayoutToSettings` 原位重排（行锚合位），经 `externalPos` +
+ *   `contentRevision` 推送阅读面（对齐平板 `scheduleRelayout+applyReflowResult` 口径）；
+ * - 设置面板拖拽是高频 `onPreview`：150ms 防抖后才进原位重排，避免逐帧重排
+ *   （对齐 Android `scheduleRelayout` 节流语义）；纯亮度变化不进版式管线；
  * - 目录跳转：先经现 host `chapterStart` 塑形校验，再以锚点重建 host 落位；
- * - 当前定位经 [SnapshotReaderHost] 回抛，供目录高亮与重建锚点。
+ * - 当前定位经 [SnapshotReaderHost] 回抛，供目录高亮与重排锚点。
  */
 @Composable
 fun ReaderView(
@@ -68,33 +70,14 @@ fun ReaderView(
     val scope = rememberCoroutineScope()
     fun commit(next: ReaderSettings) = onSettingsChange(next)
 
-    // 桌面字库（用户层·壳自持发现，内容与平板同口径）：
-    // - 发现链保留桌面特殊性：macOS 目录扫描 + 中文名链（方案B name 表 → 方案A CoreText），
+    // 桌面字库（用户层·壳自持，内容与平板同口径）：
+    // - 发现链在宿主 `syncPanelFonts`：macOS 目录扫描 + 中文名链（方案B name 表 → 方案A CoreText），
     //   落库 displayName；与平板 systemFontFaces 同源（skia 系统枚举），只是本地化名来源不同；
     // - 列表不再只留系统行：导入/隐藏/删除与平板同一 `buildFontRows`（导入区 + 已导入区全开，
     //   本地导入经 FileKit 原生对话框、无线导入经桌面独写对话框，同走共享服务；SAF/Android Dialog
     //   是平板 UI，不进共享）。
     val fontLibrary = remember(store) { store.fontLibrary() }
     var fontEntries by remember(book) { mutableStateOf<List<FontEntry>>(emptyList()) }
-    LaunchedEffect(book) {
-        val sys = runCatching { orilumn.reader.engine.skia.systemFontFaces() }.getOrDefault(emptyList())
-        val faces = runCatching {
-            // F 系列中文名链（方案B → 方案A）：
-            // 1) name 表直读优先——不依赖 CoreText/系统语言的 OpenType 变体语言记录（TC→zh-TW、
-            //    HK→zh-HK、MO→zh-MO、其余→zh-CN，是名不筛简繁），扫系统/用户字体目录建
-            //    「拉丁族名 → 中文族名」映射，进程内缓存；
-            // 2) CoreText 只补 name 表未覆盖的族（含 CJK 结果）；
-            // 3) 落库 displayName；无本地化名的族展示层回退族名本身。都是后台线程
-            //    （几十次原生调用 + 一次性扫描）。
-            val localized = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
-                val nameTable = NameTableChineseNames.namesFor(sys.map { it.family })
-                val coreText = MacFamilyNames.localizedFamilyNames(sys.map { it.family })
-                coreText + nameTable // map 合并：同键以右侧（name 表）为准
-            }
-            fontLibrary.syncSystemFaces(sys, localizedNames = localized)
-        }.getOrElse { runCatching { fontLibrary.list() }.getOrDefault(emptyList()) }
-        fontEntries = fontLibrary.allEntries(faces)
-    }
     fun refreshFonts() = scope.launch(kotlinx.coroutines.Dispatchers.IO) {
         fontEntries = fontLibrary.allEntries(fontLibrary.list())
     }
@@ -128,14 +111,14 @@ fun ReaderView(
             id != null && id in ids
         }?.family
 
-    // 版式键防抖：面板拖拽时画布 Profile 即时跟手，宿主重排最多 ~7 次/秒。
-    // 亮度分叉（与平板同规则，共享 `withoutLight`）：纯亮度变化不进版式管线，
-    // 宿主不再因拖亮度条重建（TypographicProfile 本来就不消费亮度字段）。
-    var layoutSettings by remember(book) { mutableStateOf(settings) }
-    LaunchedEffect(settings) {
-        delay(150)
-        if (settings.withoutLight() != layoutSettings.withoutLight()) layoutSettings = settings
-    }
+    // 版式防抖 + 原位重排（R5，与平板 `scheduleRelayout` 同语义）：
+    // 亮度分叉（与平板同规则，共享 `withoutLight`）：纯亮度变化不进版式管线；
+    // 排版变化走宿主 `relayoutToSettings` 行锚合位，经 externalPos 推送阅读面，
+    // 不再重建宿主（旧 `remember(layoutSettings)` 整宿主重建丢内存位是跳章首页根因）。
+    // 视口/换书/session 仍走下方的宿主重建（存档定位）。
+    var appliedLayout by remember(book) { mutableStateOf(settings) }
+    var externalPos by remember(book) { mutableStateOf<ReaderPos?>(null) }
+    var contentRevision by remember(book) { mutableStateOf(0) }
 
     BoxWithConstraints(modifier = modifier) {
         val density = LocalDensity.current.density
@@ -145,12 +128,12 @@ fun ReaderView(
         val viewportW = with(densityScope) { maxWidth.toPx() }.toInt().coerceAtLeast(16)
         val viewportH = with(densityScope) { maxHeight.toPx() }.toInt().coerceAtLeast(16)
 
-        val snapshot = remember(book, layoutSettings, viewportW, viewportH, session) {
+        val snapshot = remember(book, viewportW, viewportH, session) {
             val delegate = DesktopReaderHost(
                 bookFile = book.filePath,
                 bookId = book.id,
                 store = store,
-                settings = layoutSettings,
+                settings = appliedLayout,
                 density = density,
                 viewportW = viewportW,
                 viewportH = viewportH,
@@ -165,6 +148,29 @@ fun ReaderView(
             onDispose { (snapshot.delegate as? DesktopReaderHost)?.close() }
         }
         val desktopHost = snapshot.delegate as? DesktopReaderHost
+        // 面板字库经宿主装载（R4：枚举+中文名链已下沉 `syncPanelFonts`，视图只收表；
+        // 键只跟书，视口 resize 重建宿主不重枚举）。
+        LaunchedEffect(book) {
+            fontEntries = desktopHost?.syncPanelFonts() ?: fontLibrary.allEntries(fontLibrary.list())
+        }
+        // 设置驱动的原位重排：防抖150ms，排版变化才进；落位经 externalPos+contentRevision
+        // 推送（与平板 applyReflowResult 同口径：刷版本号 + 定位到含锚字符的新页）。
+        LaunchedEffect(settings) {
+            delay(150)
+            if (settings.withoutLight() == appliedLayout.withoutLight()) return@LaunchedEffect
+            val host = desktopHost ?: return@LaunchedEffect
+            val anchor = currentPos
+            val landing = host.relayoutToSettings(
+                settings, anchor?.chapter ?: 0, anchor?.slice?.charStart ?: 0)
+            appliedLayout = settings
+            if (landing != null) {
+                currentPos = landing
+                externalPos = landing
+                contentRevision++
+                orilumn.reader.io.Logger.w("Orilumn.Desktop",
+                    "push ch=${landing.chapter} slice=${landing.slice} rev=$contentRevision")
+            }
+        }
 
         ReaderScreen(
             host = snapshot,
@@ -177,6 +183,8 @@ fun ReaderView(
             onToc = { tocOpen = true },
             onLightChange = { onSettingsChange(it) },
             onLightCommit = { commit(it) },
+            externalPos = externalPos,
+            contentRevision = contentRevision,
             // 面板打开时按键留给面板，阅读面不翻页；面板关闭回阅读面即重夺焦点。
             keysEnabled = !settingsOpen && !tocOpen,
         )
@@ -206,7 +214,7 @@ fun ReaderView(
                     val family = familyOfFontIds(ids)
                     ids.forEach { fontLibrary.setHidden(it, true) }
                     refreshFonts().join()
-                    // 隐藏正被槽位引用 → 回退跟随原书（沿删除口径），宿主重建经 onDemandFonts 追装。
+                    // 隐藏正被槽位引用 → 回退跟随原书（沿删除口径），回退经设置提交走原位重排追装。
                     if (family != null) {
                         val s = settings
                         if (family in setOf(s.fontBody, s.fontTitle, s.fontCode)) {

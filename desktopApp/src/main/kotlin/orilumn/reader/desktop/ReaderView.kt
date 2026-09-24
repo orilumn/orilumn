@@ -30,6 +30,8 @@ import io.github.vinceglb.filekit.name
 import io.github.vinceglb.filekit.readBytes
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.NonCancellable
 import okio.Path.Companion.toPath
 
 /**
@@ -155,6 +157,8 @@ fun ReaderView(
         }
         // 设置驱动的原位重排：防抖150ms，排版变化才进；落位经 externalPos+contentRevision
         // 推送（与平板 applyReflowResult 同口径：刷版本号 + 定位到含锚字符的新页）。
+        // 修复：relayoutToSettings 完成后的推送必须在 NonCancellable 中执行，
+        // 避免 LaunchedEffect 重启取消导致已完成的引擎重排被丢弃（contentRevision 不增 → 画布不重绘）。
         LaunchedEffect(settings) {
             delay(150)
             if (settings.withoutLight() == appliedLayout.withoutLight()) return@LaunchedEffect
@@ -164,11 +168,14 @@ fun ReaderView(
                 settings, anchor?.chapter ?: 0, anchor?.slice?.charStart ?: 0)
             appliedLayout = settings
             if (landing != null) {
-                currentPos = landing
-                externalPos = landing
-                contentRevision++
-                orilumn.reader.io.Logger.w("Orilumn.Desktop",
-                    "push ch=${landing.chapter} slice=${landing.slice} rev=$contentRevision")
+                // 已完成的引擎侧重排结果必须落地：用 NonCancellable 保证推送不被外层取消吞掉
+                withContext(NonCancellable) {
+                    currentPos = landing
+                    externalPos = landing
+                    contentRevision++
+                    orilumn.reader.io.Logger.w("Orilumn.Desktop",
+                        "push ch=${landing.chapter} slice=${landing.slice} rev=$contentRevision")
+                }
             }
         }
 

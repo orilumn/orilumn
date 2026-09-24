@@ -430,6 +430,8 @@ fun ReaderScreen(
                 imageBitmaps = imageBitmaps,
                 pageBackgrounds = pageBackgrounds,
                 bgImages = bgImages,
+                // 字重这类纯字形变更行数据完全相等，靠修订号强制重画（见 ReaderPageCanvas）。
+                contentRevision = contentRevision,
             )
             // 亮度/护眼遮罩：纯绘制于画布之上、栏之下。
             ReaderLightMask(light = light, modifier = Modifier.fillMaxSize())

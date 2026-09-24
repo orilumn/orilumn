@@ -39,6 +39,7 @@ private class AndroidReaderPageRenderer : ReaderPageRenderer {
     private var cachedBg: Int = 0
     private var cachedBgs: List<PageBackground>? = null
     private var cachedBgImgKeys: Set<String>? = null
+    private var cachedRevision: Int = -1
     private var cachedPage: android.graphics.Bitmap? = null
 
     override fun drawLines(
@@ -52,6 +53,7 @@ private class AndroidReaderPageRenderer : ReaderPageRenderer {
         pageBg: Int,
         backgrounds: List<PageBackground>,
         bgImages: Map<String, DecodedImage>,
+        contentRevision: Int,
     ) {
         val w = (contentRectRight - contentRectLeft).toInt().coerceAtLeast(1)
         val h = (contentRectBottom - contentRectTop).toInt().coerceAtLeast(1)
@@ -64,11 +66,12 @@ private class AndroidReaderPageRenderer : ReaderPageRenderer {
             cachedPage?.recycle()
             cachedPage = null
         }
-        // 同页命中：行、底色、背景矩形都相等才复用（背景画进成品位图，不比对即串页）。
+        // 同页命中：行、底色、背景矩形、修订号都相等才复用（背景画进成品位图，不比对即串页；
+        // 字重这类纯字形变更行数据完全相等，必须经修订号失效，否则成品位图永不刷新）。
         // shiftToPageFrame 每次 map 出新 List，=== 永不命中；data class == 按值比对是微秒级。
         // 内容不变的重组零栅格化。P3-b 背景图只比键集（DecodedImage 无值相等，按实例比恒 miss）。
         val bgKeys = backgrounds.mapNotNullTo(HashSet()) { it.bgKey()?.takeIf { bgImages.containsKey(it) } }
-        val hit = cachedPage?.takeIf { pageBg == cachedBg && backgrounds == cachedBgs && lines == cachedLines && bgKeys == cachedBgImgKeys }
+        val hit = cachedPage?.takeIf { pageBg == cachedBg && backgrounds == cachedBgs && lines == cachedLines && bgKeys == cachedBgImgKeys && contentRevision == cachedRevision }
         if (hit != null) {
             (canvas.nativeCanvas as AndroidCanvas).drawBitmap(
                 hit,
@@ -133,6 +136,7 @@ private class AndroidReaderPageRenderer : ReaderPageRenderer {
         cachedBg = pageBg
         cachedBgs = backgrounds
         cachedBgImgKeys = bgKeys
+        cachedRevision = contentRevision
         cachedPage?.recycle()
         cachedPage = bmp
         (canvas.nativeCanvas as AndroidCanvas).drawBitmap(

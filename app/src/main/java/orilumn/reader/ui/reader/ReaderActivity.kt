@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.provider.Settings
 import android.view.View
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -66,8 +67,8 @@ import java.io.File
  *
  *  - 宿主：[TabletReaderHost] + [SnapshotReaderHost]（定位回抛）接入 [ReaderScreen]，画布/手势/亮度
  *    遮罩/上下栏全走 shared-ui（引擎三路 skia 行窗口同源，见 TabletReaderHost.doc）；
- *  - 覆盖层：保留 Android 侧 [AndroidReaderSettingsPanel]/[AndroidReaderTocPanel]（抽屉 + 目录，
- *    亮度/护眼/夜间/排版主题等回调语义与 legacy 一致）；
+ *  - 覆盖层：Android 侧仅保留 [AndroidReaderSettingsPanel]（抽屉，亮度/护眼/夜间/排版主题等
+ *    回调语义与 legacy 一致）；目录抽屉已收敛为共享 [ReaderTocPanel]（R3），返回键由本壳承载。
  *  - 环境：保留系统栏沉浸（show/hide chrome + WindowInsetsAnimationCompat 逐帧 statusInset）、
  *    Room 设置持久化（fork-on-first-customization + withBookStyle）、版式重排节流
  *    （deferCanonical / prepareRelayout 循环 / 关面板后 finalizeRelayoutAll 全书重排）；
@@ -294,8 +295,10 @@ class ReaderActivity : ComponentActivity() {
                 Box(Modifier.fillMaxSize().background(ComposeColor(bgTone)))
             }
 
+            // R3 收敛：目录抽屉用共享实现；返回键由壳承载（S31，不进面板）。
+            BackHandler(enabled = tocOpen) { closeTocPanel() }
             currentPos?.let { p ->
-                AndroidReaderTocPanel(
+                ReaderTocPanel(
                     visible = tocOpen,
                     toc = engine?.toc() ?: emptyList(),
                     currentChapter = p.chapter,
@@ -306,7 +309,7 @@ class ReaderActivity : ComponentActivity() {
                     onSelect = { item -> tocJump(item) },
                     onDismiss = { closeTocPanel() },
                 )
-            } ?: AndroidReaderTocPanel(
+            } ?: ReaderTocPanel(
                 visible = tocOpen,
                 toc = engine?.toc() ?: emptyList(),
                 currentChapter = 0,

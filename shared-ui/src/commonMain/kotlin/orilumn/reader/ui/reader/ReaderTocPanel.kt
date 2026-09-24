@@ -59,8 +59,9 @@ import kotlin.math.roundToInt
 
 /**
  * S29 阅读目录抽屉：**左停靠**面板，镜像设置抽屉的 slide + mask 交互（共用同一调色板），
- * 列出书本层级（缩进/当前章高亮/逐节点折叠展开），选中经 [onSelect] 跳转。
- * 平移自 Android `ReaderTocPanel`；Android 返回键同样不在 commonMain 承载（壳 S31 负责）。
+ * 列出书本层级（缩进/当前项金字/逐节点折叠展开），选中经 [onSelect] 跳转。
+ * R3 收敛后双端共用此实现（原 Android `AndroidReaderTocPanel` 已删）；返回键不在
+ * commonMain 承载（各壳 S31 负责：桌面无返回键，平板由 `ReaderActivity` 接）。
  */
 @Composable
 fun ReaderTocPanel(

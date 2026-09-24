@@ -6,7 +6,9 @@ import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -192,6 +194,10 @@ fun FontLibraryPanel(
     showHidden: Boolean = false,
     /** 首行开关点按（键鼠共用同一回调）。 */
     onToggleHidden: () -> Unit = {},
+    /** 导入行内聚焦按钮键（"local"/"wifi"/"toggle"，Tab 环驱动；null 即无聚焦）。 */
+    importFocusedKey: String? = null,
+    /** 独立开关行聚焦态（无导入区时，Tab 环驱动）。 */
+    toggleFocused: Boolean = false,
 ) {
     // 同时只展开一行的滑动操作：新展开即收起旧行。
     var openKey by remember { mutableStateOf<String?>(null) }
@@ -200,48 +206,62 @@ fun FontLibraryPanel(
     // 只在滚动静止后评估——键盘 ensureListVisible 自滚的落点行恒可见，不会误改；
     // 安卓无键盘，activeIdx 恒 null，本效应不动作。
     val currentRows by rememberUpdatedState(rows)
+    // 懒索引 = 行号 - fixedCount（按钮区在列表外固定）：跟随/可见换算加回。
+    val fixedCount = rows.takeWhile { it is FontPanelRow.Toggle || it is FontPanelRow.Import }.size
     LaunchedEffect(listState, nav) {
         snapshotFlow { listState.isScrollInProgress }.collect { inProgress ->
             if (inProgress) return@collect
             val vis = listState.layoutInfo.visibleItemsInfo
             val a = nav.activeIdx ?: return@collect
-            if (vis.isEmpty() || vis.any { it.index == a }) return@collect
+            if (vis.isEmpty() || vis.any { it.index + fixedCount == a }) return@collect
             val target = vis.firstOrNull {
-                when (currentRows.getOrNull(it.index)) {
-                    is FontPanelRow.Toggle,
+                when (currentRows.getOrNull(it.index + fixedCount)) {
                     is FontPanelRow.FollowOriginal,
-                    is FontPanelRow.Import,
                     is FontPanelRow.Entry -> true
                     else -> false
                 }
-            }?.index ?: return@collect
+            }?.index?.plus(fixedCount) ?: return@collect
             nav.hoverAt(target)
         }
     }
-    LazyColumn(state = listState, modifier = modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
-        items(rows.size) { i ->
-            when (val row = rows[i]) {
+    // 按钮区（导入行/独立开关）固定在列表上方，不进滚动区：翻页/滚动只走字体行。
+    // LazyColumn 只装字体行；懒索引 = 行号 - fixedCount，两处换算（本文件跟随效应 +
+    // 调用方 listPosOf）各自加减，键盘 activeIdx 仍用行号。
+    Column(modifier = modifier.fillMaxSize()) {
+        rows.take(fixedCount).forEachIndexed { i, row ->
+            when (row) {
                 // 首行开关（书架同口径：标当前态——列出中标"显示"，未列出标"隐藏"）。
                 is FontPanelRow.Toggle ->
                     FontToggleRow(
                         label = if (showHidden) "显示" else "隐藏",
                         nav = nav, index = i, p = p, onTap = { openKey = null; onToggleHidden() },
+                        focused = toggleFocused,
                     )
-                is FontPanelRow.FollowOriginal ->
-                    // 跟随原书（用户层）：当作一个字体行——与 Entry 同规格（名字行 + 副标题 +
-                    // 选中金点），稳坐导入区之下；不是字体，无左滑。
-                    FontManageRow("跟随原书", null, row.selected, null, null, nav, i, p,
-                        subtitle = "使用原书字体", swipeEnabled = false, sourceLabel = null,
-                        onTap = { openKey = null; onSelect("") }, openKey = openKey,
-                        onOpenChange = { openKey = it })
                 is FontPanelRow.Import ->
                     FontImportPair(
                         showLocal = showLocalButton, onLocal = onImport,
                         showWifi = showWifiButton, onWifi = onImportWifi,
                         hiddenShown = showHidden, onToggleHidden = onToggleHidden,
+                        focusedKey = importFocusedKey,
                         nav = nav, index = i, p = p,
                     )
-                is FontPanelRow.Entry -> {
+                else -> Unit
+            }
+        }
+        LazyColumn(state = listState, modifier = Modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
+            items(rows.size - fixedCount) { i ->
+                val rowIndex = i + fixedCount
+                when (val row = rows[rowIndex]) {
+                        is FontPanelRow.Toggle -> Unit
+                        is FontPanelRow.Import -> Unit
+                        is FontPanelRow.FollowOriginal ->
+                            // 跟随原书（用户层）：当作一个字体行——与 Entry 同规格（名字行 + 副标题 +
+                            // 选中金点），稳坐导入区之下；不是字体，无左滑。
+                            FontManageRow("跟随原书", null, row.selected, null, null, nav, rowIndex, p,
+                                subtitle = "使用原书字体", swipeEnabled = false, sourceLabel = null,
+                                onTap = { openKey = null; onSelect("") }, openKey = openKey,
+                                onOpenChange = { openKey = it })
+                        is FontPanelRow.Entry -> {
                     val hidden = row.members.all { it.hidden }
                     val ids = row.members.mapNotNull {
                         when (it) {
@@ -261,23 +281,24 @@ fun FontLibraryPanel(
                     }
                     when {
                         hidden -> FontManageRow(row.family, preview, false,
-                            "显示", SwipeActionTone.Restore, nav, i, p, subtitle,
+                            "显示", SwipeActionTone.Restore, nav, rowIndex, p, subtitle,
                             sourceLabel = sourceLabel,
                             onTap = { openKey = null; onUnhide(ids) },
                             onAction = { onUnhide(ids) },
                             openKey = openKey, onOpenChange = { openKey = it })
                         isSystem -> FontManageRow(row.family, preview, row.selected,
-                            "隐藏", SwipeActionTone.Hide, nav, i, p, subtitle,
+                            "隐藏", SwipeActionTone.Hide, nav, rowIndex, p, subtitle,
                             sourceLabel = sourceLabel,
                             onTap = { openKey = null; onSelect(row.family) },
                             onAction = { onHide(ids) },
                             openKey = openKey, onOpenChange = { openKey = it })
                         else -> FontManageRow(row.family, preview, row.selected,
-                            "删除", SwipeActionTone.Delete, nav, i, p, subtitle,
+                            "删除", SwipeActionTone.Delete, nav, rowIndex, p, subtitle,
                             sourceLabel = sourceLabel,
                             onTap = { openKey = null; onSelect(row.family) },
                             onAction = { onDelete(row.family) },
                             openKey = openKey, onOpenChange = { openKey = it })
+                    }
                     }
                 }
             }
@@ -526,23 +547,22 @@ private fun FontImportPair(
     /** 显示/隐藏开关态（书架同口径：标当前态）：true=隐藏字体已列出（按钮显"显示"），false=未列出（按钮显"隐藏"）。 */
     hiddenShown: Boolean,
     onToggleHidden: () -> Unit,
+    /** Tab 环聚焦按钮键（"local"/"wifi"/"toggle"；null 即无聚焦）。 */
+    focusedKey: String? = null,
     nav: PanelNav,
     index: Int,
     p: Palette,
 ) {
     Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(if (nav.activeIdx == index) p.rowActive else Color.Transparent)
-            .panelHover(nav, index),
+        modifier = Modifier.fillMaxWidth(),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            if (showLocal) FontImportAction(Icons.Default.Add, "本地导入", p, onClick = onLocal)
-            if (showWifi) FontImportAction(WifiIcon, "WIFI 导入", p, onClick = onWifi)
-            FontImportAction(EyeIcon, if (hiddenShown) "显示" else "隐藏", p, onClick = onToggleHidden)
+            if (showLocal) FontImportAction(Icons.Default.Add, "本地导入", p, onClick = onLocal, focused = focusedKey == "local")
+            if (showWifi) FontImportAction(WifiIcon, "WIFI 导入", p, onClick = onWifi, focused = focusedKey == "wifi")
+            FontImportAction(EyeIcon, if (hiddenShown) "显示" else "隐藏", p, onClick = onToggleHidden, focused = focusedKey == "toggle")
         }
         Box(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).height(1.dp).background(p.borderSoft))
     }
@@ -578,13 +598,16 @@ private val WifiIcon: ImageVector = ImageVector.Builder(
 ).build()
 
 @Composable
-private fun FontImportAction(icon: ImageVector, label: String, p: Palette, onClick: () -> Unit) {
+private fun FontImportAction(icon: ImageVector, label: String, p: Palette, onClick: () -> Unit, focused: Boolean = false) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
+    val hovered by interaction.collectIsHoveredAsState()
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(10.dp))
-            .background(if (pressed) Color(0x12000000) else Color.Transparent)
+            // 高亮只到按钮：悬停/Tab 聚焦亮本钮，不整行背底。
+            .background(if (focused || hovered) p.rowActive else if (pressed) Color(0x12000000) else Color.Transparent)
+            .hoverable(interaction)
             // 按钮不抢焦点（同管理行：回车留给抽屉导航，不被按钮当"再点一次"吃掉）。
             .focusProperties { canFocus = false }
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
@@ -610,11 +633,13 @@ private fun FontToggleRow(
     index: Int,
     p: Palette,
     onTap: () -> Unit,
+    /** Tab 环聚焦态（与行级高亮同底）。 */
+    focused: Boolean = false,
 ) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .background(if (nav.activeIdx == index) p.rowActive else Color.Transparent)
+            .background(if (focused || nav.activeIdx == index) p.rowActive else Color.Transparent)
             .panelHover(nav, index)
             // 开关不抢焦点（同管理行：焦点永远留在抽屉容器，回车才到得了导航）。
             .focusProperties { canFocus = false }

@@ -50,6 +50,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusTarget
 import androidx.compose.ui.focus.onFocusChanged
@@ -177,6 +178,10 @@ fun ReaderSettingsPanel(
         // 与目录同一套 PanelNav：activeIdx 共享高亮，kbHold 仲裁悬停，有效行 = 非 disabled。
         val listState = remember(current) { LazyListState() }
         val nav = remember(current) { PanelNav().apply { activeIdx = 0 } }
+        // 字体页按钮环焦点（null=字体区，activeIdx 生效；否则为环下标，上下箭头够不着按钮）：
+        // 环 = ‹返回/X/导入钮…，Tab 循环，按钮区左右切换，进字体页即复位。
+        var fontButtonFocus by remember { mutableStateOf<Int?>(null) }
+        LaunchedEffect(current) { fontButtonFocus = null }
         LaunchedEffect(mounted, current, visible) {
             // 取焦点只在面板可见时：退出（visible=false）即便因子页栈重置导致 current 变化，
             // 也不得抢回焦点——否则正好压住阅读面的夺回（二级面板遮罩退出后方向键失灵即此）。
@@ -204,12 +209,18 @@ fun ReaderSettingsPanel(
         }
         // 无线下钻页可用性：能力位开且壳给了暂存目录。
         val wifiReady = canFontWifiImport && wifiUploadDir.isNotEmpty()
+        // 字体行号换算：按钮区固定在列表外，懒索引 = 行号 - fixedCount；
+        // 上下箭头 lo 钳到首字体行（按钮够不着）。
+        val fontFixedCount = fontRows.takeWhile { it is FontPanelRow.Toggle || it is FontPanelRow.Import }.size
+        val fontStartIdx = fontRows.indexOfFirst { it is FontPanelRow.FollowOriginal }
+            .takeIf { it >= 0 } ?: 0
         // 入口行（正文/标题/代码）展示名：族 → 本地化展示名（系统/导入同表）；
         // 缺席（如已删族仍被槽位引用）回退族名本身 + CSS 通用族标签（不裸奔英文原族名）。
         val fontDisplayByFamily = remember(fontEntries) { fontEntries.associate { it.family to it.display } }
-        // flat idx → LazyColumn 位置（阅读主题网格每 3 格并一行；亮度页手势开关同行）。
+        // flat idx → LazyColumn 位置（阅读主题网格每 3 格并一行；亮度页手势开关同行；
+        // 字体页按钮区在列表外，懒索引 = 行号 - fixedCount）。
         val listPosOf: (Int) -> Int = when (current) {
-            Sub.ReadingTheme -> { idx ->
+            Sub.TextFont -> { idx -> idx - fontFixedCount }            Sub.ReadingTheme -> { idx ->
                 val n = allThemes.size
                 val chunks = (n + GridCols - 1) / GridCols
                 if (idx < n) idx / GridCols else chunks + (idx - n)
@@ -378,17 +389,102 @@ fun ReaderSettingsPanel(
         }
         // itemCount 变化（字体/预设增删）时钳制 active。
         LaunchedEffect(keys.size) { if (keys.isNotEmpty()) nav.activeIdx = (nav.activeIdx ?: 0).coerceIn(keys.indices) }
+        // 进字体页首落首字体行（按钮行不进上下序列；切回本页同样归位）。
+        LaunchedEffect(current, fontStartIdx) {
+            if (current == Sub.TextFont && keys.isNotEmpty()) nav.activeIdx = fontStartIdx.coerceIn(keys.indices)
+        }
         fun isEnabled(i: Int) = keys.getOrNull(i)?.enabled == true
         fun visible(i: Int, dir: Int) = scope.ensureListVisible(listState, listPosOf(i), dir)
-        fun moveActive(dir: Int) = nav.move(dir, 1, keys.size, ::isEnabled) { visible(it, dir) }
+        // ---- 字体页焦点区（仅 TextFont 页）：按钮环(null=字体区) ----
+        // 按钮不是字体：上下箭头够不着（首行下标见上），Tab 在环内循环，环内左右切换。
+        // 环顺序：‹返回/X/[本地/无线/开关…]；下标即 Tab 顺序，null=字体区。
+        val fontButtonRing: List<Pair<String, () -> Unit>> =
+            if (current == Sub.TextFont) buildList {
+                add("back" to ::onEscape)
+                add("close" to onDismiss)
+                if (fontRows.any { it is FontPanelRow.Import }) {
+                    if (canFontImport) add("local" to onFontImport)
+                    if (wifiReady) add("wifi" to { stack.add(Sub.WifiImport) })
+                    add("toggle" to { onCommitLight(s.copy(showHiddenFonts = !s.showHiddenFonts)) })
+                } else if (fontRows.any { it is FontPanelRow.Toggle }) {
+                    add("toggle" to { onCommitLight(s.copy(showHiddenFonts = !s.showHiddenFonts)) })
+                }
+            } else emptyList()
+        /** 在按钮区：true（上下/回车/左右走环，不碰字体行）。 */
+        fun inFontButtons() = current == Sub.TextFont && fontButtonFocus != null
+        /** 落字体行：清按钮焦点 + 高亮持有 + 跟随滚动（单步移动用，只越界才滚）。 */
+        fun landFont(idx: Int, dir: Int) {
+            fontButtonFocus = null
+            nav.land(idx)
+            visible(idx, dir)
+        }
+        /**
+         * 跳转滚动（PgUp/PgDn/Home/End 用）：直达目标并垫掉吸顶按钮高度，
+         * 焦点行恒在按钮之下可见。焦点与滚到顶的不是同一行时（如 PgUp 取新底端）分开传。
+         */
+        fun jumpFontTo(focus: Int, top: Int) {
+            if (current != Sub.TextFont || keys.isEmpty()) return
+            val last = keys.lastIndex
+            if (fontStartIdx > last) return
+            val f = focus.coerceIn(fontStartIdx, last)
+            val t = top.coerceIn(fontStartIdx, last)
+            fontButtonFocus = null
+            nav.land(f)
+            scope.launch {
+                runCatching {
+                    // 吸顶按钮已搬出列表，此处恒 0；防御性保留（懒索引 < fixed 即按钮区）。
+                    val sh = listState.layoutInfo.visibleItemsInfo
+                        .filter { it.index < fontFixedCount }.sumOf { it.size }
+                    listState.scrollToItem(listPosOf(t), sh)
+                }
+            }
+        }
+        /** 整页翻：落到新顶端行（下翻）/新底端行（上翻），焦点跟去；可视行剔掉吸顶按钮。 */
+        fun pageFonts(dir: Int) {
+            if (current != Sub.TextFont || keys.isEmpty()) return
+            // 懒索引换算回行号（按钮区在列表外）。
+            val vis = listState.layoutInfo.visibleItemsInfo.map { it.index + fontFixedCount }.filter { it >= fontStartIdx }
+            if (dir > 0) {
+                val target = (vis.maxOrNull()?.plus(1)) ?: fontStartIdx
+                jumpFontTo(target, target)
+            } else {
+                // 整页上翻：新底端 = 旧顶端上一行，新顶端再往上翻一页。
+                val page = vis.size.coerceAtLeast(1)
+                val bottom = (vis.minOrNull() ?: (fontStartIdx + 1)) - 1
+                jumpFontTo(bottom, bottom - page + 1)
+            }
+        }
+        fun moveActive(dir: Int) = if (current == Sub.TextFont)
+            nav.move(dir, 1, keys.size, ::isEnabled, lo = fontStartIdx) { visible(it, dir) }
+        else nav.move(dir, 1, keys.size, ::isEnabled) { visible(it, dir) }
         fun onEnterActive() {
+            if (inFontButtons()) {
+                fontButtonFocus?.let { fontButtonRing.getOrNull(it)?.second?.invoke() }
+                return
+            }
             nav.activeIdx?.let { keys.getOrNull(it)?.takeIf { k -> k.enabled }?.onEnter?.invoke() }
         }
         fun onLeftActive() {
+            if (inFontButtons()) {
+                val n = fontButtonRing.size
+                if (n > 0) fontButtonFocus = (((fontButtonFocus ?: 0) - 1 + n) % n)
+                return
+            }
             nav.activeIdx?.let { keys.getOrNull(it)?.takeIf { k -> k.enabled }?.onLeft?.invoke() }
         }
         fun onRightActive() {
+            if (inFontButtons()) {
+                val n = fontButtonRing.size
+                if (n > 0) fontButtonFocus = (((fontButtonFocus ?: 0) + 1) % n)
+                return
+            }
             nav.activeIdx?.let { keys.getOrNull(it)?.takeIf { k -> k.enabled }?.onRight?.invoke() }
+        }
+        /** Tab：按钮环循环（一轮末回字体区）；非字体页不管。 */
+        fun onTabActive() {
+            if (current != Sub.TextFont || fontButtonRing.isEmpty()) return
+            val cur = fontButtonFocus
+            fontButtonFocus = if (cur == null) 0 else if (cur + 1 < fontButtonRing.size) cur + 1 else null
         }
         fun onUpActive() {
             val a = nav.activeIdx ?: return
@@ -440,12 +536,31 @@ fun ReaderSettingsPanel(
                         .focusRequester(drawerFr)
                         .focusTarget()
                         .panelKeyEvents(
-                            onUp = ::onUpActive,
-                            onDown = ::onDownActive,
+                            onUp = {
+                                if (inFontButtons()) jumpFontTo(keys.lastIndex, keys.lastIndex)
+                                else onUpActive()
+                            },
+                            onDown = {
+                                if (inFontButtons()) jumpFontTo(fontStartIdx, fontStartIdx)
+                                else onDownActive()
+                            },
                             onEnter = ::onEnterActive,
                             onEscape = ::onEscape,
                             onLeft = ::onLeftActive,
                             onRight = ::onRightActive,
+                            onTab = ::onTabActive,
+                            onPgUp = { pageFonts(-1) },
+                            onPgDn = { pageFonts(1) },
+                            onHome = {
+                                if (current == Sub.TextFont && keys.isNotEmpty()) {
+                                    jumpFontTo(fontStartIdx, fontStartIdx)
+                                }
+                            },
+                            onEnd = {
+                                if (current == Sub.TextFont && keys.isNotEmpty()) {
+                                    jumpFontTo(keys.lastIndex, keys.lastIndex)
+                                }
+                            },
                         )
                         // 点按消费（不抢焦点）：杂散点按不穿透到遮罩关闭层。
                         .pointerInput(Unit) { detectTapGestures(onTap = {}) },
@@ -459,11 +574,16 @@ fun ReaderSettingsPanel(
                     ) {
                         if (stack.size > 1) {
                             // Larger tap target so the back tap is never missed and doesn't fall through to the close layer.
+                            // 字体页 Tab 环焦点态同行级高亮；按钮不抢焦点（回车留给导航）。
+                            val backFocused = current == Sub.TextFont &&
+                                fontButtonFocus?.let { fontButtonRing.getOrNull(it)?.first } == "back"
                             Box(
                                 modifier = Modifier
                                     .align(Alignment.CenterStart)
                                     .size(46.dp)
                                     .clip(RoundedCornerShape(6.dp))
+                                    .background(if (backFocused) p.rowActive else Color.Transparent)
+                                    .focusProperties { canFocus = false }
                                     .clickable { stack.removeAt(stack.lastIndex) },
                                 contentAlignment = Alignment.Center,
                             ) {
@@ -472,9 +592,14 @@ fun ReaderSettingsPanel(
                         }
                         Text(current.title, color = p.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
                             modifier = Modifier.align(Alignment.Center))
+                        val closeFocused = current == Sub.TextFont &&
+                            fontButtonFocus?.let { fontButtonRing.getOrNull(it)?.first } == "close"
                         Text("✕", color = p.text, fontSize = 18.sp, modifier = Modifier
                             .align(Alignment.CenterEnd).padding(10.dp)
-                            .clip(RoundedCornerShape(6.dp)).clickable(onClick = onDismiss))
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(if (closeFocused) p.rowActive else Color.Transparent)
+                            .focusProperties { canFocus = false }
+                            .clickable(onClick = onDismiss))
                     }
                     HLine(p, modifier = Modifier.fillMaxWidth())
                     Box(modifier = Modifier.weight(1f)) {
@@ -497,6 +622,9 @@ fun ReaderSettingsPanel(
                                 showWifiButton = wifiReady,
                                 showHidden = s.showHiddenFonts,
                                 onToggleHidden = { onCommitLight(s.copy(showHiddenFonts = !s.showHiddenFonts)) },
+                                importFocusedKey = fontButtonFocus?.let { fontButtonRing.getOrNull(it)?.first }
+                                    ?.takeIf { it == "local" || it == "wifi" || it == "toggle" },
+                                toggleFocused = fontButtonFocus?.let { fontButtonRing.getOrNull(it)?.first } == "toggle",
                                 onMouseMove = onMove,
                                 listState = listState,
                             )

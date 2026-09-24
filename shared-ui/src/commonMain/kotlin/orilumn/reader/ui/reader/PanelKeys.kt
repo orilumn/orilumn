@@ -22,6 +22,11 @@ fun Modifier.panelKeyEvents(
     onEscape: () -> Unit,
     onLeft: () -> Unit = {},
     onRight: () -> Unit = {},
+    onTab: () -> Unit = {},
+    onPgUp: () -> Unit = {},
+    onPgDn: () -> Unit = {},
+    onHome: () -> Unit = {},
+    onEnd: () -> Unit = {},
 ): Modifier = this.onKeyEvent { event ->
     if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
     when (event.key) {
@@ -31,6 +36,11 @@ fun Modifier.panelKeyEvents(
         Key.DirectionLeft -> { onLeft(); true }
         Key.DirectionRight -> { onRight(); true }
         Key.Enter, Key.NumPadEnter -> { onEnter(); true }
+        Key.Tab -> { onTab(); true }
+        Key.PageUp -> { onPgUp(); true }
+        Key.PageDown -> { onPgDn(); true }
+        Key.MoveHome -> { onHome(); true }
+        Key.MoveEnd -> { onEnd(); true }
         else -> false
     }
 }

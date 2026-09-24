@@ -25,6 +25,8 @@ data class LayoutParamKey(
     val fontBody: String,
     val fontTitle: String,
     val fontCode: String,
+    /** 按族字重锚点（影响取面 → 影响度量，必须进缓存键）。 */
+    val fontWeightAnchors: Map<String, Int> = emptyMap(),
     val useOriginalStyle: Boolean,
     val contentW: Int,
     val contentH: Int,
@@ -43,6 +45,11 @@ data class LayoutParamKey(
         crc = Crc32.updateString(crc, fontBody)
         crc = Crc32.updateString(crc, fontTitle)
         crc = Crc32.updateString(crc, fontCode)
+        // 锚点按族名排序喂入（顺序无关，拼进总签名）。
+        for ((fam, w) in fontWeightAnchors.toSortedMap()) {
+            crc = Crc32.updateString(crc, fam)
+            crc = Crc32.update4(crc, w.bits())
+        }
         crc = Crc32.update4(crc, if (useOriginalStyle) 1L else 0L)
         crc = Crc32.update4(crc, contentW.bits())
         crc = Crc32.update4(crc, contentH.bits())
@@ -68,6 +75,7 @@ data class LayoutParamKey(
             fontBody = profile.fontBody,
             fontTitle = profile.fontTitle,
             fontCode = profile.fontCode,
+            fontWeightAnchors = profile.fontWeightAnchors,
             useOriginalStyle = profile.useOriginalStyle,
             contentW = contentW,
             contentH = contentH,

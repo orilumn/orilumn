@@ -190,6 +190,8 @@ fun FontLibraryPanel(
     showWifiButton: Boolean = true,
     /** 无线导入（平板 WiFi 上传；默认空即与本地同一入口语义，调用方按需覆盖）。 */
     onImportWifi: () -> Unit = onImport,
+    /** 多字重行点按：下钻字重页（调用方压栈）；单字重行走 onSelect。 */
+    onPickWeight: (String) -> Unit = {},
     /** 首行开关态：true 即隐藏字体已列出（按钮显"隐藏"），false 即未列出（按钮显"显示"）。 */
     showHidden: Boolean = false,
     /** 首行开关点按（键鼠共用同一回调）。 */
@@ -289,13 +291,22 @@ fun FontLibraryPanel(
                         isSystem -> FontManageRow(row.family, preview, row.selected,
                             "隐藏", SwipeActionTone.Hide, nav, rowIndex, p, subtitle,
                             sourceLabel = sourceLabel,
-                            onTap = { openKey = null; onSelect(row.family) },
+                            onTap = {
+                                openKey = null
+                                if (row.members.weightChoices().size > 1) onPickWeight(row.family)
+                                else onSelect(row.family)
+                            },
                             onAction = { onHide(ids) },
                             openKey = openKey, onOpenChange = { openKey = it })
                         else -> FontManageRow(row.family, preview, row.selected,
                             "删除", SwipeActionTone.Delete, nav, rowIndex, p, subtitle,
                             sourceLabel = sourceLabel,
-                            onTap = { openKey = null; onSelect(row.family) },
+                            onTap = {
+                                openKey = null
+                                // 多字重下钻字重页，单一下钻直接选中。
+                                if (row.members.weightChoices().size > 1) onPickWeight(row.family)
+                                else onSelect(row.family)
+                            },
                             onAction = { onDelete(row.family) },
                             openKey = openKey, onOpenChange = { openKey = it })
                     }
@@ -316,6 +327,63 @@ internal fun chineseFirstComparator(cmp: Comparator<String>): Comparator<String>
     val bc = b.any { it.code in 0x4E00..0x9FFF || it.code in 0x3040..0x30FF || it.code in 0xFF65..0xFF9D }
     if (ac != bc) return@Comparator if (ac) -1 else 1
     cmp.compare(a, b)
+}
+
+/**
+ * 字重下钻页（一族的字重档列表）：首行自动（清锚点，系统默认匹配），其后各字重面；
+ * 点即提交（族写入槽位 + 锚点落库）并停留本页，‹/Esc 返回字体列表。
+ * 行复用无左滑 [FontManageRow]（名字行 + 选中金点）；键盘键由调用方按同一顺序配。
+ */
+@Composable
+internal fun WeightPickerPage(
+    title: String,
+    subtitle: String?,
+    autoSelected: Boolean,
+    options: List<Pair<Int, String>>,
+    selectedWeight: Int?,
+    nav: PanelNav,
+    p: Palette,
+    onPickAuto: () -> Unit,
+    onPickWeight: (Int) -> Unit,
+    onMouseMove: () -> Unit,
+    listState: LazyListState,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier = modifier.fillMaxSize()) {
+        Text(
+            text = title,
+            color = p.text, fontSize = 16.sp,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+        )
+        if (subtitle != null) {
+            Text(
+                text = subtitle,
+                color = p.muted, fontSize = 12.sp,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 4.dp),
+            )
+        }
+        LazyColumn(state = listState, modifier = Modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
+            item {
+                FontManageRow(
+                    family = "自动", entry = null, selected = autoSelected,
+                    actionLabel = null, tone = null, nav = nav, index = 0, p = p,
+                    subtitle = "系统默认匹配",
+                    swipeEnabled = false, sourceLabel = null,
+                    onTap = onPickAuto, openKey = null, onOpenChange = {},
+                )
+            }
+            items(options.size) { i ->
+                val (w, name) = options[i]
+                FontManageRow(
+                    family = name, entry = null, selected = selectedWeight == w,
+                    actionLabel = null, tone = null, nav = nav, index = i + 1, p = p,
+                    subtitle = w.toString(),
+                    swipeEnabled = false, sourceLabel = null,
+                    onTap = { onPickWeight(w) }, openKey = null, onOpenChange = {},
+                )
+            }
+        }
+    }
 }
 
 /** 副标题统一口径：语种 · 字重表（系统/导入同形；无字重名即"无字重名"）。 */
@@ -345,6 +413,20 @@ internal fun List<FontEntry>.previewMember(): FontEntry =
         }.trim()
         sub.equals("Regular", ignoreCase = true) || sub == "常规"
     } ?: first()
+
+/**
+ * 一族的字重档（数值 → 展示名）：成员字重经 SubfamilyMetric 归一化后按数值去重排序；
+ * 空白字重名展示为"默认"。点按分流（多档下钻字重页）与字重页共用同一口径。
+ * 纯函数（行模型同一文件可测）。
+ */
+internal fun List<FontEntry>.weightChoices(): List<Pair<Int, String>> =
+    map { e ->
+        val raw = when (e) {
+            is FontEntry.Imported -> e.face.subfamily
+            is FontEntry.System -> e.subfamily
+        }.trim()
+        orilumn.reader.data.font.SubfamilyMetric.weight(raw) to raw.ifBlank { "默认" }
+    }.distinctBy { it.first }.sortedBy { it.first }
 
 /**
  * 名字行与字重副标题的间隙：行盒已是真字形墨迹高度（栅格真值），字形越高只微量加气口

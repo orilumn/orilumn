@@ -88,6 +88,11 @@ data class ReaderSettings(
     val brightnessGestureTwo: Boolean = false,
     /** 字体管理隐藏字体列出开关（纯全局，默认隐藏；永不进按书 overlay，见 [PerBookSettings]）。 */
     val showHiddenFonts: Boolean = false,
+    /**
+     * 按族字重锚点（族名 → CSS 字重 100..900）：该族正体（400 upright）请求改用此字重的面，
+     * 粗斜体仍自然匹配。纯全局（同 showHiddenFonts待遇）；空 = 全族自动匹配。
+     */
+    val fontWeightAnchors: Map<String, Int> = emptyMap(),
 ) {
 
     /** Serialize to a JSON string; `indentFactor > 0` produces indented output. */
@@ -287,6 +292,7 @@ data class ReaderSettings(
                     brightnessGestureRight = SettingsJson.optBoolean(o, "brightnessGestureRight", d.brightnessGestureRight),
                     brightnessGestureTwo = SettingsJson.optBoolean(o, "brightnessGestureTwo", d.brightnessGestureTwo),
                     showHiddenFonts = SettingsJson.optBoolean(o, "showHiddenFonts", d.showHiddenFonts),
+                    fontWeightAnchors = SettingsJson.optWeightAnchors(o, "fontWeightAnchors"),
                 )
             } catch (_: Exception) {
                 DEFAULT

@@ -181,7 +181,13 @@ fun ReaderSettingsPanel(
         // 字体页按钮环焦点（null=字体区，activeIdx 生效；否则为环下标，上下箭头够不着按钮）：
         // 环 = ‹返回/X/导入钮…，Tab 循环，按钮区左右切换，进字体页即复位。
         var fontButtonFocus by remember { mutableStateOf<Int?>(null) }
-        LaunchedEffect(current) { fontButtonFocus = null }
+        /** 字重下钻目标族（null=不在字重页；切子页即清）。 */
+        var weightPickFamily by remember { mutableStateOf<String?>(null) }
+        LaunchedEffect(current) {
+            fontButtonFocus = null
+            // 字重页进入时目标族保留（先设值后压栈，同一次重组；离页才清）。
+            if (current != Sub.WeightPicker) weightPickFamily = null
+        }
         LaunchedEffect(mounted, current, visible) {
             // 取焦点只在面板可见时：退出（visible=false）即便因子页栈重置导致 current 变化，
             // 也不得抢回焦点——否则正好压住阅读面的夺回（二级面板遮罩退出后方向键失灵即此）。
@@ -206,6 +212,16 @@ fun ReaderSettingsPanel(
         val fontRows: List<FontPanelRow> = remember(current, fontEntries, s, pickSlot, canFontImport, canFontWifiImport, showImportedSection) {
             if (current == Sub.TextFont) buildFontRows(fontEntries, fieldOf(s, slotKey), canFontImport, showImportedSection, canFontWifiImport, s.showHiddenFonts)
             else emptyList()
+        }
+        /** 字体行进入：多字重档下钻字重页，单一下钻直接写入槽位（渲染点按与键盘共用）。 */
+        fun enterFontRow(family: String) {
+            val multi = fontEntries.filter { it.family == family }.weightChoices().size > 1
+            if (multi) {
+                weightPickFamily = family
+                stack.add(Sub.WeightPicker)
+            } else {
+                onCommitTypography(setField(s, slotKey, family))
+            }
         }
         // 无线下钻页可用性：能力位开且壳给了暂存目录。
         val wifiReady = canFontWifiImport && wifiUploadDir.isNotEmpty()
@@ -266,7 +282,27 @@ fun ReaderSettingsPanel(
                         // 双按钮同行：回车走主动作（本地导入优先；单开无线时进无线下钻页）。
                         ItemKey(onEnter = { if (canFontImport) onFontImport() else stack.add(Sub.WifiImport) })
                     is FontPanelRow.Entry ->
-                        ItemKey(onEnter = { onCommitTypography(setField(s, slotKey, row.family)) })
+                        ItemKey(onEnter = { enterFontRow(row.family) })
+                }
+            }
+            Sub.WeightPicker -> {
+                // 字重档：首行自动（清锚点）+ 各字重面；点即写入槽位 + 锚点并停留本页。
+                val fam = weightPickFamily
+                if (fam == null) {
+                    listOf(ItemKey())
+                } else {
+                    val anchor = s.fontWeightAnchors[fam]
+                    val opts = fontEntries.filter { it.family == fam }.weightChoices()
+                    buildList {
+                        add(ItemKey(onEnter = {
+                            onCommitTypography(setField(s, slotKey, fam).copy(fontWeightAnchors = s.fontWeightAnchors - fam))
+                        }))
+                        opts.forEach { (w, _) ->
+                            add(ItemKey(onEnter = {
+                                onCommitTypography(setField(s, slotKey, fam).copy(fontWeightAnchors = s.fontWeightAnchors + (fam to w)))
+                            }))
+                        }
+                    }
                 }
             }
             // 无线下钻页是纯展示页（地址 + 说明）：键盘占一位空键，只保焦点计数不崩。
@@ -618,6 +654,11 @@ fun ReaderSettingsPanel(
                                 onImport = onFontImport,
                                 // 无线走面板内下钻（返回‹/Esc 即回字体列表），不经壳弹框。
                                 onImportWifi = { stack.add(Sub.WifiImport) },
+                                // 多字重行点按下钻字重页（与键盘共用 enterFontRow 口径）。
+                                onPickWeight = { family ->
+                                    weightPickFamily = family
+                                    stack.add(Sub.WeightPicker)
+                                },
                                 showLocalButton = canFontImport,
                                 showWifiButton = wifiReady,
                                 showHidden = s.showHiddenFonts,
@@ -628,6 +669,31 @@ fun ReaderSettingsPanel(
                                 onMouseMove = onMove,
                                 listState = listState,
                             )
+                            Sub.WeightPicker -> {
+                                val fam = weightPickFamily
+                                if (fam != null) {
+                                    val opts = fontEntries.filter { it.family == fam }.weightChoices()
+                                    val anchor = s.fontWeightAnchors[fam]
+                                    val anchorName = opts.firstOrNull { it.first == anchor }?.second
+                                    WeightPickerPage(
+                                        title = fontDisplayByFamily[fam] ?: genericFamilyLabel(fam),
+                                        subtitle = "当前：" + (anchorName ?: "自动"),
+                                        autoSelected = anchor == null,
+                                        options = opts,
+                                        selectedWeight = anchor,
+                                        nav = nav,
+                                        p = p,
+                                        onPickAuto = {
+                                            onCommitTypography(setField(s, slotKey, fam).copy(fontWeightAnchors = s.fontWeightAnchors - fam))
+                                        },
+                                        onPickWeight = { w ->
+                                            onCommitTypography(setField(s, slotKey, fam).copy(fontWeightAnchors = s.fontWeightAnchors + (fam to w)))
+                                        },
+                                        onMouseMove = onMove,
+                                        listState = listState,
+                                    )
+                                }
+                            }
                             Sub.WifiImport -> WifiImportPage(
                                 uploadDirPath = wifiUploadDir,
                                 onUploadFile = onWifiUpload,
@@ -709,7 +775,7 @@ private fun WifiImportPage(
 }
 
 private enum class Sub(val title: String) {
-    Home("设置"), Text("文字"), TextFont("字体管理"), WifiImport("WIFI 导入"), Spacing("间距"),
+    Home("设置"), Text("文字"), TextFont("字体管理"), WeightPicker("字重"), WifiImport("WIFI 导入"), Spacing("间距"),
     Theme("排版主题"), ReadingTheme("阅读主题"), ThemePresetMgr("预设管理"),
     Brightness("亮度"), AnimMode("翻页动画模式"),
 }

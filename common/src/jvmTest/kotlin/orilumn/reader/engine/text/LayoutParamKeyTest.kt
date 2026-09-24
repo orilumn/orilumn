@@ -36,6 +36,15 @@ class LayoutParamKeyTest {
     }
 
     @Test
+    fun `weight anchor changes the param hash`() {
+        val a = hash(ReaderSettings.DEFAULT)
+        val b = hash(ReaderSettings.DEFAULT.copy(fontWeightAnchors = mapOf("F" to 700)))
+        assertNotEquals(a, b)
+        val c = hash(ReaderSettings.DEFAULT.copy(fontWeightAnchors = mapOf("F" to 700)))
+        assertEquals(b, c)
+    }
+
+    @Test
     fun `portable crc32 is byte-identical to java util zip crc32`() {
         val base = LayoutParamKey(
             bodyPx = 18.5f, lineSpacing = 1.5f, firstLineIndentEm = 2f, letterSpacingEm = 0f,
@@ -83,6 +92,7 @@ class LayoutParamKeyTest {
         k.letterSpacingEm.feed4(); k.paragraphSpacingPx.feed4()
         k.paragraphGapScale.feed4()
         k.fontBody.feed(); k.fontTitle.feed(); k.fontCode.feed()
+        k.fontWeightAnchors.toSortedMap().forEach { (fam, w) -> fam.feed(); w.feed4() }
         (if (k.useOriginalStyle) 1L else 0L).let { v ->
             j.update(((v shr 24) and 0xFF).toInt())
             j.update(((v shr 16) and 0xFF).toInt())

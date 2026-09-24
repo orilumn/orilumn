@@ -52,7 +52,7 @@ class FontPoolSyncTest {
     @Test
     fun emptyDemandKeepsBookEntries() {
         val book = SkiaFontPool.EmbeddedFont("BookFam", byteArrayOf(1, 2, 3))
-        val sel = FontPoolSync.select(emptyList(), emptySet(), FontDemand.EMPTY, listOf(book)) { null }
+        val sel = FontPoolSync.select(emptyList(), emptySet(), FontDemand.EMPTY, listOf(book), fileSize = { null })
         assertTrue(sel.selected.isEmpty())
         val asm = FontPoolSync.assemble(sel.selected, { null }, listOf(book))
         assertEquals(listOf(book), asm.embedded)
@@ -60,14 +60,16 @@ class FontPoolSyncTest {
     }
 
     @Test
-    fun missingFileRetries() {        val face = importedFace(File("/nonexistent/x.ttf"))
-        val sel = FontPoolSync.select(listOf(face), setOf("PoolSyncFam"), FontDemand.EMPTY, emptyList()) { null }
+    fun missingFileRetries() {
+        val face = importedFace(File("/nonexistent/x.ttf"))
+        val sel = FontPoolSync.select(listOf(face), setOf("PoolSyncFam"), FontDemand.EMPTY, emptyList(), fileSize = { null })
         assertTrue(sel.selected.isEmpty())
         // 缺文件不进签名：文件出现即签名变化（与有文件时的签名不同）。
         val file = ttf ?: return
         val sel2 = FontPoolSync.select(
             listOf(face.copy(path = file.absolutePath)), setOf("PoolSyncFam"), FontDemand.EMPTY, emptyList(),
-        ) { p -> File(p).takeIf { it.isFile }?.length() }
+            fileSize = { p -> File(p).takeIf { it.isFile }?.length() },
+        )
         assertEquals(1, sel2.selected.size)
     }
 
@@ -101,5 +103,24 @@ class FontPoolSyncTest {
             listOf(system, imported), setOf("更纱终端书呆黑体-简"), FontDemand.EMPTY, emptyList(), sizes,
         )
         assertEquals(listOf(2L), sel.selected.map { it.id })
+    }
+
+    @Test
+    fun anchorReplacesBucketWithAnchorWeightFaces() {
+        // 字重锚点：该族只装锚点字重的面（Skia 按内禀字重选面，池里多档并存锚点无效）。
+        val file = ttf ?: return
+        val regular = importedFace(file).copy(id = 11, subfamily = "Regular")
+        val bold = importedFace(file).copy(id = 12, subfamily = "Bold")
+        val sizes: (String) -> Long? = { q -> File(q).takeIf { it.isFile }?.length() }
+        val sel = FontPoolSync.select(
+            listOf(regular, bold), setOf("PoolSyncFam"), FontDemand.EMPTY, emptyList(), sizes,
+            anchors = mapOf("PoolSyncFam" to 700),
+        )
+        assertEquals(listOf(12L), sel.selected.map { it.id })
+        // 无锚点：正体 400 仍选中 Regular。
+        val sel2 = FontPoolSync.select(
+            listOf(regular, bold), setOf("PoolSyncFam"), FontDemand.EMPTY, emptyList(), sizes,
+        )
+        assertTrue(sel2.selected.map { it.id }.contains(11L))
     }
 }

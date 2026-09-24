@@ -61,4 +61,10 @@ internal object SettingsJson {
     /** org.json.optBoolean(key, default) equivalent. */
     fun optBoolean(o: JsonObject, key: String, default: Boolean): Boolean =
         (o[key] as? JsonPrimitive)?.booleanOrNull ?: default
+
+    /** 族→字重表：键下非对象回空表；值非 100..900 整数即丢弃该条。 */
+    fun optWeightAnchors(o: JsonObject, key: String): Map<String, Int> =
+        (o[key] as? JsonObject)?.entries?.mapNotNull { (k, v) ->
+            (v as? JsonPrimitive)?.intOrNull?.takeIf { it in 100..900 }?.let { k to it }
+        }?.toMap().orEmpty()
 }

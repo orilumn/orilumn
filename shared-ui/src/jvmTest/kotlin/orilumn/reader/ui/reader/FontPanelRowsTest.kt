@@ -210,6 +210,22 @@ class FontPanelRowsTest {
     }
 
     @Test
+    fun weightChoicesDedupeByNumericWeight() {
+        // 同数值去重（首个保留）、按数值排序；空白字重名展示为默认。
+        val members = listOf(
+            imported("F", subfamily = "Bold"),
+            imported("F", subfamily = "粗体"),
+            imported("F", subfamily = "Regular"),
+            imported("F", subfamily = ""),
+        )
+        assertEquals(
+            listOf(400 to "Regular", 700 to "Bold"),
+            members.weightChoices(),
+        )
+        assertEquals(listOf(400 to "默认"), listOf(imported("G")).weightChoices())
+    }
+
+    @Test
     fun previewMemberPrefersRegular() {
         // 同行多字重：有 Regular 用它（大小写不敏感 + 中文"常规"），无则用第一个。
         val members = listOf(

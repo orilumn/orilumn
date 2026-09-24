@@ -183,6 +183,10 @@ fun ReaderView(
             toc = desktopHost?.toc ?: emptyList(),
             currentChapter = currentPos?.chapter ?: 0,
             scheme = settings.scheme,
+            // 目录项1（用户层）：桌面此前没传当页标题 id，一直只能定位到章首；现与平板同口径。
+            currentFragments = currentPos?.let { pos ->
+                desktopHost?.currentPageFragmentIds(pos.chapter, pos.slice.charStart, pos.slice.charEnd)
+            } ?: emptySet(),
             onSelect = { item ->
                 val idx = item.index ?: return@ReaderTocPanel
                 tocOpen = false

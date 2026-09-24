@@ -84,7 +84,10 @@ fun ReaderTocPanel(
         }
         return true
     }
-    val currentIndex = remember(rows, currentChapter) { rows.indexOfFirst { it.item.index == currentChapter } }
+    // 目录项1（用户层）：打开定位到当前阅读位置对应的目录项（章内优先最末命中的子标题）。
+    val targetRow = remember(rows, currentChapter, currentFragments) {
+        resolveTocCurrentRow(rows, currentChapter, currentFragments)
+    }
 
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -112,21 +115,22 @@ fun ReaderTocPanel(
     val maskAlpha by animateFloatAsState(if (maskOn) 1f else 0f,
         tween(TocAnimMs, easing = FastOutSlowInEasing), label = "tocMask")
 
-    LaunchedEffect(visible, currentIndex) {
+    LaunchedEffect(visible) {
         if (visible) {
             mounted = true
             slide.snapTo(1f)
             // Flip the mask and the slide target at the same instant so both animate together.
             maskOn = true
             slide.animateTo(0f, tween(TocAnimMs, easing = FastOutSlowInEasing))
-            val vi = rows.indexOfFirst { it.item.index == currentChapter }
-            if (vi >= 0) {
-                try { listState.scrollToItem((vi - 2).coerceAtLeast(0)) } catch (_: Exception) {}
+            // 目录项2（用户层）：每次打开重置为"仅当前章展开"，不沿用上次手风琴状态。
+            collapsed = initialTocCollapsed(rows, targetRow)
+            if (targetRow >= 0) {
+                try { listState.scrollToItem((targetRow - 2).coerceAtLeast(0)) } catch (_: Exception) {}
             }
             // 共享高亮起点：静置鼠标所在行优先认领（行 hover effect 在动画期间认领），
-            // 无鼠标才落当前章/首行——键盘从鼠标行接着走，不是从顶部重来。
+            // 无鼠标才落当前项/首行——键盘从鼠标行或当前项接着走，不是从顶部重来。
             if (nav.activeIdx == null) {
-                nav.activeIdx = (if (vi >= 0 && isVisible(vi)) vi else null)
+                nav.activeIdx = (if (targetRow >= 0 && isVisible(targetRow)) targetRow else null)
                     ?: rows.indices.firstOrNull(::isVisible)
             }
             nav.releaseHold()
@@ -203,17 +207,17 @@ fun ReaderTocPanel(
                             items(rows.size, key = { i -> i }) { rowIndex ->
                                 if (!isVisible(rowIndex)) return@items
                                 val row = rows[rowIndex]
-                                val onCurrentPage = row.item.index == currentChapter &&
-                                    row.item.fragment != null && row.item.fragment in currentFragments
                                 TocRow(
+                                    // 当前项 = 打开时定位到的那一行（章内优先当页子标题，
+                                    // 无命中回退章首——比逐行 fragment 比对覆盖更全）。
                                     row = row,
-                                    current = onCurrentPage,
+                                    current = rowIndex == targetRow,
                                     palette = p,
                                     hasChildren = row.item.children.isNotEmpty(),
                                     expanded = row.idx !in collapsed,
                                     onToggle = {
-                                        collapsed = if (row.idx in collapsed) collapsed - row.idx
-                                            else collapsed + row.idx
+                                        // 目录项2（用户层）：顶层展开手风琴式折叠其余章。
+                                        collapsed = toggleTocCollapsed(collapsed, rows, row.idx)
                                         clampActive()
                                     },
                                     onSelect = { onSelect(row.item) },
@@ -254,6 +258,59 @@ fun flattenToc(toc: List<TocItem>): List<TocRowData> {
     return rows
 }
 
+/**
+ * 目录项1（用户层·共享）：当前阅读位置对应的扁平行。
+ *
+ * 同一章内可能有多行（章标题 + 章内子标题）：当页标题 id 命中时取文档序最末命中
+ * （最深/最贴近阅读位置的子标题），无命中回退章首行，无章匹配返回 -1。
+ */
+fun resolveTocCurrentRow(
+    rows: List<TocRowData>,
+    currentChapter: Int,
+    currentFragments: Set<String>,
+): Int {
+    if (rows.isEmpty()) return -1
+    val inChapter = rows.indices.filter { rows[it].item.index == currentChapter }
+    if (inChapter.isEmpty()) return -1
+    if (currentFragments.isNotEmpty()) {
+        inChapter.lastOrNull { rows[it].item.fragment != null && rows[it].item.fragment in currentFragments }
+            ?.let { return it }
+    }
+    return inChapter.first()
+}
+
+/**
+ * 目录项2a（用户层·共享）：打开时的初始折叠集合——默认全折叠，仅保留当前行所在
+ * 顶层子树展开（"章" = depth 0 顶层节点；其嵌套子节点默认全展开）。
+ */
+fun initialTocCollapsed(rows: List<TocRowData>, currentRow: Int): Set<Int> {
+    var root = -1
+    if (currentRow in rows.indices) {
+        var a = currentRow
+        while (rows[a].parentIndex >= 0) a = rows[a].parentIndex
+        root = a
+    }
+    return rows.indices.filter { i ->
+        rows[i].depth == 0 && rows[i].item.children.isNotEmpty() && i != root
+    }.toSet()
+}
+
+/**
+ * 目录项2b（用户层·共享）：折叠切换——展开顶层节点时手风琴式折叠其余顶层节点；
+ * 嵌套节点与折叠方向只管自己，不波及其他。
+ */
+fun toggleTocCollapsed(collapsed: Set<Int>, rows: List<TocRowData>, toggledIdx: Int): Set<Int> {
+    if (toggledIdx !in rows.indices) return collapsed
+    if (toggledIdx in collapsed) {
+        if (rows[toggledIdx].depth != 0) return collapsed - toggledIdx
+        val others = rows.indices.filter { i ->
+            i != toggledIdx && rows[i].depth == 0 && rows[i].item.children.isNotEmpty()
+        }.toSet()
+        return (collapsed - toggledIdx) + others
+    }
+    return collapsed + toggledIdx
+}
+
 /** Panel slide and mask dim/lighten share this duration so they stay synchronized. */
 private const val TocAnimMs = 280
 
@@ -271,8 +328,8 @@ private fun TocRow(
     index: Int,
 ) {
     val gold = Color(0xFFC8A15A)
-    // 共享高亮即当前章标记语言：active（悬停/键盘）与 current 共用 rowActive 底，
-    // 当前章另有金字；键盘焦点不另起视觉，鼠标不动。
+    // 当前项只标前景（金字）：背景是焦点（悬停/键盘 activeIdx）的，两者各行其是、
+    // 互不冒充——焦点行才有底色，当前行只有金字。
     val active = nav.activeIdx == index
     // 行点按禁默认 ripple：框架自带悬停灰会和 active 高亮各行其是（鼠标一套灰、
     // 键盘一套米黄），唯一高亮只走 activeIdx（悬停认领/键盘共用）。
@@ -283,7 +340,7 @@ private fun TocRow(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(46.dp)
-                .background(if (active || current) palette.rowActive else Color.Transparent)
+                .background(if (active) palette.rowActive else Color.Transparent)
                 .clickable(
                     interactionSource = clickSrc, indication = null,
                     onClick = onSelect,
@@ -293,17 +350,23 @@ private fun TocRow(
         ) {
             Spacer(Modifier.width(8.dp + (row.depth * 14).dp))
             if (hasChildren) {
-                Text(
-                    text = if (expanded) "▾" else "▸",
-                    color = palette.chevron, fontSize = 11.sp,
+                // 目录三角（用户层）：正文色保证对比度（chevron 日间 #BBBBBB 太浅，且调色板
+                // 与设置面板共用、不动它）；16sp/36dp 点击区，字形居中。
+                Box(
+                    contentAlignment = Alignment.Center,
                     modifier = Modifier
-                        .size(22.dp)
+                        .size(36.dp)
                         .clip(RoundedCornerShape(4.dp))
                         .clickable(onClick = onToggle),
-                    textAlign = TextAlign.Center,
-                )
+                ) {
+                    Text(
+                        text = if (expanded) "▾" else "▸",
+                        color = palette.text, fontSize = 16.sp,
+                        textAlign = TextAlign.Center,
+                    )
+                }
             } else {
-                Spacer(Modifier.size(22.dp))
+                Spacer(Modifier.size(36.dp))
             }
             Text(
                 text = row.item.label,

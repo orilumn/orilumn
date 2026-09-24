@@ -75,7 +75,10 @@ fun AndroidReaderTocPanel(
         return true
     }
     val visibleRows = remember(rows, collapsed) { rows.filterIndexed { i, _ -> isVisible(i) } }
-    val currentIndex = remember(rows, currentChapter) { rows.indexOfFirst { it.item.index == currentChapter } }
+    // 目录项1（用户层）：打开定位到当前阅读位置对应的目录项（章内优先最末命中的子标题）。
+    val targetRow = remember(rows, currentChapter, currentFragments) {
+        resolveTocCurrentRow(rows, currentChapter, currentFragments)
+    }
 
     val listState = rememberLazyListState()
 
@@ -88,16 +91,17 @@ fun AndroidReaderTocPanel(
     var maskOn by remember { mutableStateOf(false) }
     val maskAlpha by animateFloatAsState(if (maskOn) 1f else 0f,
         tween(TocAnimMs, easing = FastOutSlowInEasing), label = "tocMask")
-    LaunchedEffect(visible, currentIndex) {
+    LaunchedEffect(visible) {
         if (visible) {
             mounted = true
             slide.snapTo(1f)
             // Flip the mask and the slide target at the same instant so both animate together.
             maskOn = true
             slide.animateTo(0f, tween(TocAnimMs, easing = FastOutSlowInEasing))
-            val vi = rows.indexOfFirst { it.item.index == currentChapter }
-            if (vi >= 0) {
-                try { listState.scrollToItem((vi - 2).coerceAtLeast(0)) } catch (_: Exception) {}
+            // 目录项2（用户层）：每次打开重置为"仅当前章展开"，不沿用上次手风琴状态。
+            collapsed = initialTocCollapsed(rows, targetRow)
+            if (targetRow >= 0) {
+                try { listState.scrollToItem((targetRow - 2).coerceAtLeast(0)) } catch (_: Exception) {}
             }
         } else {
             maskOn = false
@@ -151,17 +155,17 @@ fun AndroidReaderTocPanel(
                         items(rows.size, key = { i -> i }) { rowIndex ->
                             if (!isVisible(rowIndex)) return@items
                             val row = rows[rowIndex]
-                            val onCurrentPage = row.item.index == currentChapter &&
-                                row.item.fragment != null && row.item.fragment in currentFragments
                             TocRow(
+                                // 当前项 = 打开时定位到的那一行（无 fragment 命中回退章首，
+                                // 章首行 fragment 为空、旧逐行比对永远点不亮它）。
                                 row = row,
-                                current = onCurrentPage,
+                                current = rowIndex == targetRow,
                                 palette = p,
                                 hasChildren = row.item.children.isNotEmpty(),
                                 expanded = row.idx !in collapsed,
                                 onToggle = {
-                                    collapsed = if (row.idx in collapsed) collapsed - row.idx
-                                        else collapsed + row.idx
+                                    // 目录项2（用户层）：顶层展开手风琴式折叠其余章。
+                                    collapsed = toggleTocCollapsed(collapsed, rows, row.idx)
                                 },
                                 onSelect = { onSelect(row.item) },
                             )
@@ -188,29 +192,35 @@ private fun TocRow(
     onSelect: () -> Unit,
 ) {
     val gold = Color(0xFFC8A15A)
+    // 当前项只标前景（金字），不铺背景——与桌面"金字即当前"同口径。
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
                 .fillMaxWidth()
                 .height(46.dp)
-                .background(if (current) palette.rowActive else Color.Transparent)
+                .background(Color.Transparent)
                 .clickable(onClick = onSelect)
                 .padding(horizontal = 12.dp),
         ) {
             Spacer(Modifier.width(8.dp + (row.depth * 14).dp))
             if (hasChildren) {
-                Text(
-                    text = if (expanded) "▾" else "▸",
-                    color = palette.chevron, fontSize = 11.sp,
+                // 目录三角（用户层）：正文色保证对比度；16sp/36dp 点击区，字形居中。
+                Box(
+                    contentAlignment = Alignment.Center,
                     modifier = Modifier
-                        .size(22.dp)
+                        .size(36.dp)
                         .clip(RoundedCornerShape(4.dp))
                         .clickable(onClick = onToggle),
-                    textAlign = TextAlign.Center,
-                )
+                ) {
+                    Text(
+                        text = if (expanded) "▾" else "▸",
+                        color = palette.text, fontSize = 16.sp,
+                        textAlign = TextAlign.Center,
+                    )
+                }
             } else {
-                Spacer(Modifier.size(22.dp))
+                Spacer(Modifier.size(36.dp))
             }
             Text(
                 text = row.item.label,

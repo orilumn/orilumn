@@ -103,6 +103,10 @@ class DesktopReaderHost(
         return chapter
     }
 
+    /** 当页标题 id 集合（目录抽屉定位当前项用；只读透传，与平板直调控制器同口径，用户层）。 */
+    fun currentPageFragmentIds(chapter: Int, charStart: Int, charEnd: Int): Set<String> =
+        controller.currentPageFragmentIds(chapter, charStart, charEnd)
+
     override suspend fun open(): ReaderPos? = withContext(Dispatchers.Default) {
         if (!opened) {
             val saved = store.loadProgress(bookId)?.let { loc ->

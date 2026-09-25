@@ -32,6 +32,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
@@ -76,10 +77,9 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
  *    never waits on background work and is never preempted by it;
  *  - **A adjacent prefill** ([tempPrefillJob] on [backgroundDispatcher]): cancellable, deduped per
  *    cursor, yields to F by construction (short one-page shapes under [tempStateLock]);
- *  - **B1 chapter-head canonical** ([canonicalDispatcher], single thread): the authoritative
- *    full-chapter table; per-chapter FIFO slots that a same-chapter re-dispatch cancels, but never
- *    kill another chapter's in-flight persist (P3 queue-not-kill);
- *  - **B2 whole-book scan** ([wholeBookJob], same [canonicalDispatcher] FIFO): skips the active
+ *  - **B1 chapter-head canonical** (P0 spike: [TaskScheduler] prio 20): the authoritative
+ *    full-chapter table; same-key submit replaces the twin (was: per-chapter FIFO slots);
+ *  - **B2 whole-book scan** (P0 spike: [TaskScheduler] prio 30): skips the active
  *    chapter (B1 owns it), ordered by [readingDirection];
  *  - **P neighbor preflight** ([preflightJobs] on [backgroundDispatcher], lowest): markup + light
  *    cascade only, no shaping, idempotent per paramHash.
@@ -96,11 +96,6 @@ class BookDocumentController(
      *  main thread / foreground page-flip. */
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     private val backgroundDispatcher: kotlinx.coroutines.CoroutineDispatcher = Dispatchers.Default,
-    /** Injected B1/B2 canonical dispatcher (tests/desktop); null = a private single-thread
-     *  dispatcher off the shared pool (default production behavior — full-chapter shapes never
-     *  compete with the foreground flip).
-     *  (C2-P0: was `Executors.newSingleThreadExecutor`, JVM-only.) */
-    injectedCanonicalDispatcher: kotlinx.coroutines.CoroutineDispatcher? = null,
     /** Optional EPUB image loader for `<img>` rendering; null = images fall back to placeholders. */
     private val imageLoader: ImageLoader? = null,
 ) {
@@ -195,16 +190,8 @@ class BookDocumentController(
     private var viewW = 0
     private var viewH = 0
 
-    /** Per-chapter canonical (B1, chapter-head full-chapter layout → LINE_DISK) slots (P3/R3, contract
-     *  #6). ONE SLOT PER CHAPTER, keyed by chapterIndex. A dispatch cancels ONLY ITS OWN chapter's
-     *  previous in-flight slot (same chapter re-shaped with newer params — genuinely stale); any OTHER
-     *  chapter's B1 is left running on the single canonical thread's FIFO queue and finishes its
-     *  persist. The cross-chapter flip never kills the just-tuned chapter's canonical (old design's
-     *  single global `anchorBackfillJob` did), so returning to it is a disk hit, not a re-temp.
-     *  Bounded by chapter count. Written ONLY on the dispatch thread (no lock — matches the plan's
-     *  "plain concurrent container" risk note); a completed slot stays until the same chapter is next
-     *  dispatched, where [kotlinx.coroutines.Job.cancel] on it is a no-op. */
-    private val canonicalJobs: MutableMap<Int, kotlinx.coroutines.Job?> = HashMap()
+    /** P0 spike: retired per-chapter B1 slots — same-key scheduler submit (`b1:<chapter>`)
+     *  replaces twins, preserving the one-slot-per-chapter dedup semantic. */
 
     /** True while the settings panel is open: the heavy background canonical full-chapter relayout is
      *  suppressed so it never contends with the foreground real-time temp shaping (they share CPU).
@@ -241,7 +228,9 @@ class BookDocumentController(
     /** The in-flight background whole-book remaining-chapter scan (B2, was `otherChaptersJob`).
      *  Re-dispatched with the latest params after the params-settled point; a newer dispatch cancels
      *  it (abandon within ≤1 chapter via per-chapter checkpoints). */
-    private var wholeBookJob: kotlinx.coroutines.Job? = null
+    /** P0 spike: priority pool for background layout work (B2 chapters in spike scope). */
+    private val scheduler = TaskScheduler(scope)
+    private var spikePhasesArmed = false
 
     /** P4 (track P): per-chapter background preflight slots — [index] → in-flight job. Each prelinks
      *  one neighbor chapter's markup + light cascade off the flip thread (no shaping, no table), so an
@@ -253,14 +242,6 @@ class BookDocumentController(
      *  were prepped under. A later change of the (paramHash-determining) typography throws it out; the
      *  light tree itself is structure-keyed (cssBundle + useOriginalStyle) so it survives. */
     private val preflightReadiness: MutableMap<Int, Long> = HashMap()
-
-    /** Independent single-thread dispatcher reserved for heavy canonical / full-chapter relayout. Kept
-     *  off [backgroundDispatcher]/[Dispatchers.Default] so a full-chapter (or whole-book) shape never
-     *  competes with the foreground page-flip / real-time shaping on the same thread pool.
-     *  (C2-P0: multiplatform default; was `Executors.newSingleThreadExecutor`, JVM-only.) */
-    private val canonicalDispatcher: kotlinx.coroutines.CoroutineDispatcher by lazy {
-        injectedCanonicalDispatcher ?: Dispatchers.Default.limitedParallelism(1)
-    }
 
     /** Serializes access to the anchor-temp pagination state ([InProgressPagination] lists + the shared
      *  block shape cache) between the foreground flip thread and the background temp-prefill coroutine
@@ -838,21 +819,22 @@ private fun startAnchorStream(
         // canonical thread's FIFO queue and finishes its persist. Until today a cross-chapter flip
         // cancelled the just-tuned chapter's canonical wholesale (`anchorBackfillJob?.cancel()`), so
         // returning to it re-temp'd instead of hitting its fresh disk table. Now it lands a disk hit.
-        canonicalJobs.remove(unit.chapterIndex)?.cancel()
-        // R7: the new chapter's B1 preempts an in-flight B2 (default on): cancel B2 and relaunch it
-        // behind this B1. The relaunched pass re-skips fresh chapters (cheap) and still skips the
-        // temp-live new chapter; order center (activeChapter) moves only on relayout, unchanged here.
-        // No-op when B2 is idle.
-        val preemptB2 = wholeBookJob?.isActive == true
-        if (preemptB2) wholeBookJob?.cancel()
-        canonicalJobs[unit.chapterIndex] = scope.launch(canonicalDispatcher) {
+        // P0 spike (+R7 intent): B1 preempts scheduled B2 work through the pool, then runs ahead
+        // of it by priority (was: cancel wholeBookJob + relaunch behind on the single canonical
+        // thread). Same-key submit replaces a stale twin (was: per-chapter FIFO slot cancel).
+        orilumn.reader.io.Logger.w(logTag, "spike-preempt b1 ch=${unit.chapterIndex}")
+        scheduler.cancelLowerThan(TaskScheduler.PRIO_B1_CHAPTER)
+        scheduler.submit(TaskScheduler.Task(
+            key = "b1:${unit.chapterIndex}",
+            priority = TaskScheduler.PRIO_B1_CHAPTER,
+            block = b1@{
             if (epoch != layoutEpoch) {
                 Logger.w(logTag, "canonical superseded (epoch $epoch != $layoutEpoch) ch=${unit.chapterIndex}")
-                return@launch
+                return@b1
             }
-            // P7: capture the launching coroutine's context so the between-blocks checkpoint can
-            // observe this job's cancellation even inside the nested runCatching/inner lambdas.
-            val ctx = coroutineContext
+            // P7: capture the task coroutine's context so the between-blocks checkpoint can
+            // observe this task's cancellation even inside the nested runCatching/inner lambdas.
+            val ctx = currentCoroutineContext()
             runCatching {
                 val heavy = unit.markup?.let { bc.prepare(it, unit.cssBundle, profile, contentW, contentH) }
                 // P13 (U6k): large chapters shape their canonical pass on the parallel chunk workers
@@ -871,8 +853,11 @@ private fun startAnchorStream(
                 // not a failure. Never report it as FAIL (the per-chapter slot was re-used by design).
                 if (e !is CancellationException) Logger.e(logTag, "canonical layout FAIL ch=${unit.chapterIndex} ${e.message}")
             }
-        }
-        if (preemptB2) requestWholeBookRelayout(force = true)
+            },
+        ))
+        // Relaunch the whole-book pass behind this B1 (skip-fresh repositions cheaply; temp-live and
+        // fresh chapters no-op). Unconditional: same-key dedup + skip-fresh bound the cost.
+        requestWholeBookRelayout(force = true)
     } else {
         Logger.w(logTag, "canonical deferred (panel open) ch=${unit.chapterIndex}")
     }
@@ -1148,17 +1133,6 @@ private var lastWindowPrefillKey: Long = Long.MIN_VALUE
 @Volatile
 private var lastFlipMs: Long = 0L
 
-/**
- * R18b: set when a flip start cancels an in-flight B2 (see findAdjacentPage). The prefill worker
- * completion doubles as the quiet detector — it only completes when no flip arrived mid-run —
- * and resumes B2 from there. Without this, a cancelled B2 would never resume during continuous
- * reading (epoch dedup blocks re-dispatch), and without the cancel, B2's multi-second chapters
- * wedge into every inter-flip gap (the 3s quiet gate alone can't help: a chapter outlasts it).
- */
-@Volatile
-private var b2YieldedForFlip = false
-
-
 /** R18: B2 postpones chapters while flips keep arriving (background must not contend with
  *  the flip thread for cores — the fast baseline had no background grinding at all).
  *  30s, not 3s: a chapter outlasts any short gap, so a short gate only wedges B2 INTO gaps
@@ -1308,20 +1282,6 @@ private fun scheduleWindowPrefill(unit: ChapterUnit, targetPage: Int, dir: Int) 
             }
         }
         if (stored) Logger.w(logTag, "win-prefill ch=$chapterIdx page=$first cached")
-        // R18b: park after completion — completion alone only proves no flip arrived mid-run, but
-        // the run itself outlasts short thresholds on heavy chapters. Resume the flip-yielded B2
-        // only if quiet PERSISTS past b2QuietMs (genuine pause; cancelled outright by next landing).
-        if (b2YieldedForFlip) {
-            while (b2YieldedForFlip) {
-                ensureActive()
-                if (platformNowMs() - lastFlipMs >= b2QuietMs) {
-                    b2YieldedForFlip = false
-                    requestWholeBookRelayout(force = true)
-                    break
-                }
-                kotlinx.coroutines.delay(2000)
-            }
-        }
     }
 }
 
@@ -1935,8 +1895,8 @@ private fun finishCanonicalBackground(
     /** B2 trigger (P2): re-run the whole-book remaining-chapter scan with the CURRENT params. No-op when
      *  nothing changed since the last dispatch (epochs equal — no churn during a slider drag), when the
      *  canonical pass is deferred ([deferCanonical], settings panel open), or without a box layouter.
-     *  Runs on the dedicated [canonicalDispatcher] single thread; a newer dispatch cancels the in-flight
-     *  one (checkpoint per chapter), so abandoning exits within ≤1 chapter granularity.
+     *  P0 spike: the pass is a set of per-chapter pool tasks (was: one coroutine looping chapters on the
+     *  single canonical thread); same-key submit replaces twins, order preserved FIFO within priority.
      *  R7: [force] bypasses the epoch dedup (B1-preempt relaunch); the dedup stamp is still refreshed. */
     fun requestWholeBookRelayout(force: Boolean = false) {
         val epoch = layoutEpoch
@@ -1947,51 +1907,51 @@ private fun finishCanonicalBackground(
         val contentHeight = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
         val paramHash = LayoutParamKey.fromProfile(profile, contentWidth, contentHeight).hash()
         lastWholeBookEpoch = epoch
-        wholeBookJob?.cancel()
-        wholeBookJob = scope.launch(canonicalDispatcher) {
-            val current = activeChapter
-            // R7: B2 scans strict absolute-distance interleave from the active chapter, so a
-            // flip-out-of-bounds into a nearby chapter lands on an already-laid-out one. Pure
-            // function; correctness never depends on it (every non-current chapter still completes
-            // its full pass + persist).
-            val order = remainingScanOrder(current)
-            // P7: capture the launching coroutine's context so the per-block checkpoint passed down to
-            // fullLayout can observe this scan's cancellation from inside the nested runCatching.
-            val ctx = coroutineContext
-            Logger.w(logTag, "whole-book B2 start epoch=$epoch paramHash=$paramHash skipCh=$current order=${order.take(8)}…")
-            var skippedFresh = 0
-            runCatching {
-                for (i in order) {
-                    if (i == current) continue // B1 owns the active chapter's canonical pass
-                    val u = chapters[i]
-                    if (u.inProgress != null) continue // a live temp session owns that chapter
-                    // R7: the disk table itself is the done-registry — a fresh table means this
-                    // chapter already completed under these params (open dispatch, preempt relaunch,
-                    // or a previous pass); shaping it again is pure waste.
-                    if (u.paginationTable?.paramHash == paramHash) { skippedFresh++; continue }
-                    // R18: background yields to active reading — postpone while flips keep arriving.
-                    // Starvation-safe: flips always have the incremental path; B2 catches up in pauses
-                    // (and skip-fresh makes the catch-up cheap).
-                    while (platformNowMs() - lastFlipMs < b2QuietMs) {
-                        if (!isActive) return@launch
-                        kotlinx.coroutines.delay(500)
-                    }
-                    // R7: bodies parse lazily — an unparsed chapter has no markup to shape (this made
-                    // the open-dispatch pass swing through empty). Parse here on the background thread.
-                    if (u.markup == null) ensureMarkup(i)
-                    if (!isActive) {
-                        Logger.w(logTag, "whole-book B2 cancelled at ch=$i (≤1 chapter abandon)")
-                        return@launch
-                    }
-                    runCatching { fullLayoutAndPersist(u, bc, contentWidth, contentHeight, paramHash) { ctx.ensureActive() } }
-                        .onFailure { e ->
-                            // P7: a between-blocks cancel is a timely abandon, not a FAIL.
-                            if (e !is CancellationException) Logger.e(logTag, "whole-book ch=${u.chapterIndex} FAIL ${e.message}")
-                        }
-                }
-            }
-            Logger.w(logTag, "whole-book B2 done epoch=$epoch skippedFresh=$skippedFresh")
+        val current = activeChapter
+        // R7: B2 scans strict absolute-distance interleave from the active chapter, so a
+        // flip-out-of-bounds into a nearby chapter lands on an already-laid-out one. Pure
+        // function; correctness never depends on it (every non-current chapter still completes
+        // its full pass + persist).
+        val order = remainingScanOrder(current)
+        Logger.w(logTag, "whole-book B2 start epoch=$epoch paramHash=$paramHash skipCh=$current order=${order.take(8)}…")
+        if (!spikePhasesArmed) {
+            spikePhasesArmed = true
+            scheduler.startSpikeAutoPhase()
         }
+        for (i in order) {
+            if (i == current) continue // B1 owns the active chapter's canonical pass
+            scheduler.submit(TaskScheduler.Task(
+                key = "b2:$i",
+                priority = TaskScheduler.PRIO_B2_CHAPTER,
+                block = { b2ChapterTask(i, bc, contentWidth, contentHeight, paramHash) },
+            ))
+        }
+    }
+
+    /** P0 spike: one B2 chapter pass (was: one loop iteration inside the whole-book coroutine).
+     *  Skip checks re-run at execution (state moves between dispatch and run); the quiet gate is
+     *  intentionally absent in spike scope (raw contention is what's measured — preemption, not
+     *  waiting, yields to flips). */
+    private suspend fun b2ChapterTask(
+        index: Int,
+        bc: BoxChapterLayouter,
+        contentW: Int,
+        contentH: Int,
+        paramHash: Long,
+    ) {
+        val u = unitAt(index) ?: return
+        if (u.inProgress != null) return // a live temp session owns that chapter
+        // R7: the disk table itself is the done-registry — a fresh table means this chapter
+        // already completed under these params; shaping it again is pure waste.
+        if (u.paginationTable?.paramHash == paramHash) return
+        // R7: bodies parse lazily — an unparsed chapter has no markup to shape. Parse here.
+        if (u.markup == null) ensureMarkup(index)
+        val ctx = currentCoroutineContext()
+        runCatching { fullLayoutAndPersist(u, bc, contentW, contentH, paramHash) { ctx.ensureActive() } }
+            .onFailure { e ->
+                // P7: a between-blocks cancel is a timely abandon, not a FAIL.
+                if (e !is CancellationException) Logger.e(logTag, "whole-book ch=${u.chapterIndex} FAIL ${e.message}")
+            }
     }
 
     /** P4: once a flip lands in [chapter], pre-warm BOTH neighbors (the chapters a next out-of-bounds
@@ -2533,10 +2493,9 @@ private fun finishCanonicalBackground(
         // via the prefill worker-end park-and-resume — epoch dedup alone would never restart it.
         lastFlipMs = platformNowMs()
         windowPrefillJob?.cancel()
-        if (wholeBookJob?.isActive == true) {
-            wholeBookJob?.cancel()
-            b2YieldedForFlip = true
-        }
+        // P0 spike: pool tasks (B2/B1) are intentionally NOT cancelled here — sustained contention
+        // is what's measured; preemption is exercised via B1-preempt + unit tests. (P1 wires the
+        // flip hook to cancelLowerThan once the verdict lands.)
         // P4: a flip that lands in [chapter] prewarms both neighbors (the chapters a next out-of-bounds
         // flip can enter) on the background P track — so the crossing's parse leaves the flip thread.
         return navigateAdjacentPage(chapter, slice, direction)?.also { (ch, _) ->

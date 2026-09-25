@@ -29,6 +29,9 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
@@ -1230,19 +1233,35 @@ private fun scheduleWindowPrefill(unit: ChapterUnit, targetPage: Int, dir: Int) 
         val pages = order.filter { it in 0 until total }
         if (pages.isEmpty()) return@launch
         val t0 = platformNowMs()
-        val prep = bc.prepareLight(markup, css, profileSnap, cw, u.structureCache, chh)
-        val local = HashMap<Int, ParagraphShapeRef>()
-        for (p in pages) {
-            ensureActive()
-            val rec = table.pages[p]
-            val lo = rec.blockStart.coerceAtLeast(0)
-            if (rec.blockEndExclusive <= lo) continue
-            for (b in lo until rec.blockEndExclusive) {
-                ensureActive()
-                if (b < 0 || b >= prep.totalBlocks) continue
-                if (!local.containsKey(b)) local[b] = bc.tempShape(local, prep, b, profileSnap)
+        // R3b: pages warm in PARALLEL (one worker per page; next/prev are independent block sets).
+        // Each worker builds its OWN prepareLight (cheap, ~20ms; shared structureCache is SyncLock
+        // guarded by design) and its OWN map, so no mutable state is ever shared mid-flight —
+        // parallel shaping scales on this SoC (B2 chunk precedent) and thermals are confirmed fine.
+        // Merged sequentially below; assembly then reuses the merged shapes as L1.
+        // Structured concurrency: a flip cancels the whole scope (single slot) outright.
+        val warmed: List<Pair<Int, Map<Int, ParagraphShapeRef>>> = try {
+            coroutineScope {
+                pages.map { p ->
+                    async {
+                        val rec = table.pages[p]
+                        val lo = rec.blockStart.coerceAtLeast(0)
+                        if (rec.blockEndExclusive <= lo) return@async (p to emptyMap<Int, ParagraphShapeRef>())
+                        val lp = bc.prepareLight(markup, css, profileSnap, cw, u.structureCache, chh)
+                        val m = HashMap<Int, ParagraphShapeRef>()
+                        for (b in lo until rec.blockEndExclusive) {
+                            ensureActive()
+                            if (b < 0 || b >= lp.totalBlocks) continue
+                            if (!m.containsKey(b)) m[b] = bc.tempShape(m, lp, b, profileSnap)
+                        }
+                        p to m
+                    }
+                }.awaitAll()
             }
+        } catch (e: CancellationException) {
+            return@launch // superseded — expected
         }
+        val local = HashMap<Int, ParagraphShapeRef>()
+        warmed.forEach { local.putAll(it.second) }
         if (local.isNotEmpty()) {
             windowPrefillL2 = WindowPrefillShapes(chapterIdx, hash, local)
             Logger.w(logTag, "win-prefill ch=$chapterIdx pages=$pages blocks=${local.size} t=${platformNowMs() - t0}ms")
@@ -1254,6 +1273,9 @@ private fun scheduleWindowPrefill(unit: ChapterUnit, targetPage: Int, dir: Int) 
         val first = pages.firstOrNull() ?: return@launch
         ensureActive()
         val prod = try {
+            // Assembly needs its own prepare (workers' instances stay thread-confined);
+            // structureCache memo makes this cheap.
+            val prep = bc.prepareLight(markup, css, profileSnap, cw, u.structureCache, chh)
             bc.incrementalLayoutForPage(
                 prepare = prep,
                 profile = profileSnap,

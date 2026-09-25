@@ -62,6 +62,9 @@ class TabletReaderHost(
         if (!opened) {
             if (!controller.open(bookId, repository.readingState(bookId))) return@withContext null
             controller.prewarmForOpen()
+            // R7: open-book B2 dispatch (epoch-deduped; defer-gated inside) — far chapters get laid
+            // without waiting for a settings change. Host-owned orchestration; prewarm stays single-chapter.
+            controller.requestWholeBookRelayout()
             opened = true
         }
         controller.locateStart()?.let { ReaderPos(it.first, it.second) }

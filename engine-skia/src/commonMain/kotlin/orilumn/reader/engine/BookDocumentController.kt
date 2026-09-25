@@ -1834,6 +1834,9 @@ private fun finishCanonicalBackground(
                     // chapter already completed under these params (open dispatch, preempt relaunch,
                     // or a previous pass); shaping it again is pure waste.
                     if (u.paginationTable?.paramHash == paramHash) { skippedFresh++; continue }
+                    // R7: bodies parse lazily — an unparsed chapter has no markup to shape (this made
+                    // the open-dispatch pass swing through empty). Parse here on the background thread.
+                    if (u.markup == null) ensureMarkup(i)
                     if (!isActive) {
                         Logger.w(logTag, "whole-book B2 cancelled at ch=$i (≤1 chapter abandon)")
                         return@launch
@@ -1961,9 +1964,6 @@ private fun finishCanonicalBackground(
                 Logger.e(logTag, "prewarm FAIL ch=$index ${e.message}")
             }
         }
-        // R7: open-book B2 dispatch (epoch-deduped no-op if one already runs; defer-gated inside).
-        // Far chapters get laid without waiting for a settings change (S7: navigation never cancels it).
-        requestWholeBookRelayout()
     }
 
     /** Full line-level canonical pre-layout of a non-current chapter: shape the whole chapter, bind its

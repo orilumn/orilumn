@@ -121,6 +121,8 @@ class DesktopReaderHost(
             // 后台 canonical/整书预排（与平板同一分发器划分；落位不等它）。
             // 书内字体不预装：整形前 `onBookFonts` 回调给字节（与平板同式，首绘即对）。
             controller.prewarmForOpen()
+            // R7: open-book B2 dispatch（epoch 去重；defer 门控在内）——远章不等改参即排（与平板同序）。
+            controller.requestWholeBookRelayout()
             opened = true
         }
         val anchor = initialAnchor

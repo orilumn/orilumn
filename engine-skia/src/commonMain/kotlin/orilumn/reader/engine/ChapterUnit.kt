@@ -103,6 +103,17 @@ class ChapterUnit(
      *  [invalidateLayout]. Null until the first block is shaped. */
     var blockShapeCache: MutableMap<Int, orilumn.reader.engine.laying.ParagraphShapeRef>? = null
 
+    /** R17: per-page assembled products on the disk path (page → layout + slices + table hash).
+     *  A flip to a cached page binds with zero shaping/assembly. Trimmed to the pointer
+     *  neighborhood on every store; entries carry their table hash so stale params never hit.
+     *  Cleared on [invalidateLayout]. Live binding still goes through [bind]/[bindFull] only. */
+    val pageCache = HashMap<Int, PageProduct>()
+    data class PageProduct(
+        val layout: BookLayout,
+        val slices: List<PageSlice>,
+        val paramHash: Long,
+    )
+
     /** Memoized typography-independent block structure (leaf set + global char starts), see
      *  [ChapterStructureCache]. Survives typography changes (not cleared by [invalidateLayout]) so a
      *  slider drag reuses it; its internal [ChapterStructureCache.key] self-validates against
@@ -188,6 +199,7 @@ class ChapterUnit(
         inProgress = null
         tempRenderLayout = null
         blockShapeCache = null
+        pageCache.clear()
         shapedPageFrom = -1
         shapedPageTo = -1
         laidOut = false

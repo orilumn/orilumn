@@ -515,6 +515,19 @@ class BookDocumentController(
             if (cur != null && cur.firstLine >= 0 && cur.lastLineExclusive > cur.firstLine) return
         }
 
+        // R17: page-product cache hit — bind with zero shaping/assembly. The product is
+        // deterministic given table + params (same edge-snap argument as the seam canary below),
+        // so binding it equals a fresh shape; the hash check rejects stale param cycles.
+        val tEnter = platformNowMs()
+        val cachedHit = unit.pageCache[targetPage]
+        if (cachedHit != null && cachedHit.paramHash == table.paramHash) {
+            unit.bind(cachedHit.layout, cachedHit.slices)
+            unit.shapedPageFrom = targetPage
+            unit.shapedPageTo = (targetPage + 1).coerceAtMost(table.pages.size)
+            Logger.w(logTag, "ensurePageRangeShaped ${ctx(unit)} page=$targetPage pagecache-hit t=${platformNowMs() - tEnter}ms")
+            return
+        }
+
         // Capture the old window's edges (they get replaced below) for the seam canary.
         val oldFrom = unit.shapedPageFrom
         val oldTo = unit.shapedPageTo
@@ -541,6 +554,13 @@ class BookDocumentController(
         unit.bind(newProduct.layout, newProduct.slices)
         unit.shapedPageFrom = targetPage
         unit.shapedPageTo = (targetPage + pagesToShape).coerceAtMost(table.pages.size)
+        // R17: store the assembled product + trim to the pointer neighborhood (bounded memory).
+        unit.pageCache[targetPage] =
+            ChapterUnit.PageProduct(newProduct.layout, newProduct.slices, table.paramHash)
+        unit.pageCache.keys.toList().forEach { p ->
+            val stale = unit.pageCache[p]?.paramHash != table.paramHash
+            if (stale || p < targetPage - 2 || p > targetPage + 2) unit.pageCache.remove(p)
+        }
         Logger.w(logTag, "ensurePageRangeShaped ${ctx(unit)} page=$targetPage t=${platformNowMs() - t0}ms")
 
         // Step 2 seam canary: when the new window directly abuts the old one, the shared boundary must
@@ -1129,6 +1149,10 @@ private data class WindowPrefillShapes(
  *  reader lingers past this delay. */
 private val windowPrefillStartDelayMs = 120L
 
+/** R17 probe hook (C2-P2b-4 pattern): cached page indexes for [chapter]. */
+fun pageCacheKeysForTest(chapter: Int): Set<Int> =
+    unitAt(chapter)?.pageCache?.keys?.toSet() ?: emptySet()
+
 /** R3 probe hook (C2-P2b-4 pattern): last published window-prefill snapshot, if any. */
 fun windowPrefillSnapshotForTest(): Triple<Int, Long, Set<Int>>? =
     windowPrefillL2?.let { Triple(it.chapterIndex, it.paramHash, it.shapes.keys.toSet()) }
@@ -1149,6 +1173,10 @@ private fun scheduleWindowPrefill(unit: ChapterUnit, targetPage: Int, dir: Int) 
     windowPrefillJob?.cancel()
     val chapterIdx = unit.chapterIndex
     val profileSnap = profile
+    // R17: live-object identity baseline — assembly products are stored only if no flip rebound
+    // meanwhile (flip-thread reads, benignly racy; the worker revalidates under lock).
+    val liveLayout = unit.layout
+    val liveSlices = unit.pageSlices
     // Neighbor order follows the flip direction; out-of-range sides are dropped below
     // (a previous page outside this chapter is skipped per S7 step 3).
     val order = if (dir >= 0) intArrayOf(targetPage + 1, targetPage - 1)
@@ -1189,6 +1217,47 @@ private fun scheduleWindowPrefill(unit: ChapterUnit, targetPage: Int, dir: Int) 
         if (local.isNotEmpty()) {
             windowPrefillL2 = WindowPrefillShapes(chapterIdx, hash, local)
             Logger.w(logTag, "win-prefill ch=$chapterIdx pages=$pages blocks=${local.size} t=${platformNowMs() - t0}ms")
+        }
+        // R17: assemble full neighbor products into the page cache. Assembly shares the same
+        // concurrency posture as existing background shaping (B1/B2/flip already shape
+        // concurrently; prepare is a fresh instance, image/table machinery likewise shared).
+        // Nothing live is touched — products land in pageCache under a short lock only.
+        for (p in pages) {
+            ensureActive()
+            val prod = try {
+                bc.incrementalLayoutForPage(
+                    prepare = prep,
+                    profile = profileSnap,
+                    contentW = cw,
+                    contentH = chh,
+                    table = table,
+                    targetPage = p,
+                    pagesToShape = 1,
+                    cache = HashMap(),
+                    prefillL2 = null,
+                )
+            } catch (e: CancellationException) {
+                return@launch // superseded — expected, stop burning CPU
+            } catch (e: Exception) {
+                Logger.e(logTag, "win-prefill assemble ch=$chapterIdx page=$p FAIL ${e.message}")
+                continue
+            }
+            val stored = layoutMutex.withLock {
+                val u2 = unitAt(chapterIdx)
+                if (u2 == null || u2.inProgress != null || u2.paginationTable !== table ||
+                    u2.paramHash != hash || u2.layout !== liveLayout || u2.pageSlices !== liveSlices
+                ) {
+                    false
+                } else {
+                    u2.pageCache[p] = ChapterUnit.PageProduct(prod.layout, prod.slices, hash)
+                    u2.pageCache.keys.toList().forEach { k ->
+                        if (k < targetPage - 2 || k > targetPage + 2) u2.pageCache.remove(k)
+                    }
+                    true
+                }
+            }
+            if (!stored) return@launch
+            Logger.w(logTag, "win-prefill ch=$chapterIdx page=$p cached")
         }
     }
 }

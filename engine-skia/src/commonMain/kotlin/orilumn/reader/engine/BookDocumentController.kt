@@ -542,6 +542,7 @@ class BookDocumentController(
         val contentHeight = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
         val t0 = platformNowMs()
         val prepare = boxLayouter.prepareLight(unit.markup!!, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight)
+        val tPrep = platformNowMs()
         val pagesToShape = 1
         val newProduct = boxLayouter.incrementalLayoutForPage(
             prepare = prepare,
@@ -564,7 +565,7 @@ class BookDocumentController(
             val stale = unit.pageCache[p]?.paramHash != table.paramHash
             if (stale || p < targetPage - 2 || p > targetPage + 2) unit.pageCache.remove(p)
         }
-        Logger.w(logTag, "ensurePageRangeShaped ${ctx(unit)} page=$targetPage t=${platformNowMs() - t0}ms")
+        Logger.w(logTag, "ensurePageRangeShaped ${ctx(unit)} page=$targetPage t=${platformNowMs() - t0}ms prep=${tPrep - t0}ms shape=${platformNowMs() - tPrep}ms")
 
         // Step 2 seam canary: when the new window directly abuts the old one, the shared boundary must
         // agree exactly (a gap/overlap between windows is the "missing lines" symptom). Both sides are

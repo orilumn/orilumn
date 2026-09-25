@@ -736,6 +736,9 @@ class BoxChapterLayouter(
      *   offsets / leaf ordering).
      * @param table cached pagination table for this chapter + param hash.
      * @param targetPage 0-based page index to shape and render.
+     * @param prefillL2 R3: immutable published neighbor shapes (controller window prefill), consulted
+     *   between [cache] and fresh shaping. Read-only — never written through (callers may run off
+     *   the flip lock, e.g. prewarm).
      * @return [ChapterLayouter.ChapterLayoutProduct] containing:
      *   - A partial [DrawableBookLayout] that can draw just [targetPage].
      *   - A **complete** [List<PageSlice>] built straight from [table] (all pages, block ranges +
@@ -750,6 +753,7 @@ class BoxChapterLayouter(
         targetPage: Int,
         pagesToShape: Int = 4,
         cache: MutableMap<Int, ParagraphShapeRef>? = null,
+        prefillL2: Map<Int, ParagraphShapeRef>? = null,
     ): ChapterLayouter.ChapterLayoutProduct {
         val totalPages = table.pages.size
         val startIdx = targetPage.coerceAtLeast(0)
@@ -782,11 +786,11 @@ class BoxChapterLayouter(
         blockHi = blockHi.coerceAtMost(prepare.totalBlocks)
 
         // 3. Shape all blocks in that range (reusing already-shaped blocks from [cache]).
-        val localShapes = (blockLo until blockHi).map { tempShape(cache, prepare, it, profile) }
+        val localShapes = (blockLo until blockHi).map { tempShape(cache, prepare, it, profile, prefillL2) }
 
         // 4. Build merged local FlowedLine stream covering all shaped blocks (P6-a2 R6 前视 carry-in).
         val localLines = rebuildLocalLines(prepare, blockLo, blockHi, localShapes) {
-            tempShape(cache, prepare, it, profile)
+            tempShape(cache, prepare, it, profile, prefillL2)
         }
 
         // 5. Build the drawable covering all shaped pages. It is a BookLayout, so pagination below can
@@ -1546,13 +1550,19 @@ class BoxChapterLayouter(
 
     /** Shapes block [i], reusing a previously-shaped result from [cache] (may be null). Keyed by leaf
      *  index so the same block is shaped at most once per layout-parameter cycle. */
-    private fun tempShape(
+    /**
+     * R3: [l2] is an immutable published neighbor-shape snapshot (controller window prefill):
+     * consulted between the live [cache] and fresh shaping, with the same per-instance table-cell
+     * refill as a cache hit. Read-only — never written through (callers may run off the flip lock).
+     */
+    internal fun tempShape(
         cache: MutableMap<Int, ParagraphShapeRef>?,
         prepare: LightPrepare,
         i: Int,
         profile: TypographicProfile,
+        l2: Map<Int, ParagraphShapeRef>? = null,
     ): ParagraphShapeRef {
-        val hit = cache?.get(i)
+        val hit = cache?.get(i) ?: l2?.get(i)
         if (hit != null) {
             // 表格行命中塑形缓存也必须回填当前实例的格 shape：格 shape 只活在叶实例上
             // （[fillTableRowCells]），而 `prepareLight` 每次重建都产出新叶实例；只复用行

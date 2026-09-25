@@ -22,11 +22,13 @@ import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.engine.skia.LayoutReadback
 import orilumn.reader.engine.text.LayoutParamKey
 import orilumn.reader.engine.text.TypographicProfile
+import orilumn.reader.engine.laying.ParagraphShapeRef
 import orilumn.reader.io.Logger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
@@ -469,6 +471,14 @@ class BookDocumentController(
                 }
             }
         }
+        // R3 (S7): disk-path landing warms neighbor blocks in the background (temp path owns
+        // its own prefill; direction follows the last flip, defaulting forward).
+        if (viewW > 0 && viewH > 0 && unit.inProgress == null) {
+            val t = unit.paginationTable
+            if (t != null && unit.laidOut) {
+                scheduleWindowPrefill(unit, pageIndexForChar(t.pages, targetChar), readingDirection)
+            }
+        }
         return unit
     }
 
@@ -519,6 +529,7 @@ class BookDocumentController(
             targetPage = targetPage,
             pagesToShape = pagesToShape,
             cache = unitShapeCache(unit),
+            prefillL2 = windowPrefillShapesFor(unit, table),
         )
         unit.bind(newProduct.layout, newProduct.slices)
         unit.shapedPageFrom = targetPage
@@ -582,6 +593,7 @@ class BookDocumentController(
                         targetPage = startPage,
                         pagesToShape = 1,
                         cache = unitShapeCache(unit),
+                        prefillL2 = windowPrefillShapesFor(unit, cached),
                     )
                     Logger.w(logTag, "DISK-HIT shape t=${platformNowMs() - sp}ms shapedPages=${product.slices.count { it.firstLine >= 0 }} blocks=[${product.slices[startPage].blockStart},${product.slices[startPage].blockEndExclusive}) target=$startPage")
                     unit.bind(product.layout, product.slices)
@@ -1082,6 +1094,95 @@ data class TempWindowSnapshot(
  *  cross-chapter navigation). */
 /** R2: last tempNav null-branch reason (diagnostic only; flip thread writes, flip thread reads). */
 private var lastTempNavNull: String? = null
+
+/** R3 (S7 steps 2–3): disk-path neighbor block-shape prefill slot (latest landing wins). */
+private var windowPrefillJob: Job? = null
+private var lastWindowPrefillKey: Long = Long.MIN_VALUE
+
+/** R3: immutable published neighbor shapes (chapter + paramHash keyed). Read-only after
+ *  publication — safe to consult from any thread; stale entries are ignored by key check. */
+@Volatile
+private var windowPrefillL2: WindowPrefillShapes? = null
+
+private data class WindowPrefillShapes(
+    val chapterIndex: Int,
+    val paramHash: Long,
+    val shapes: Map<Int, ParagraphShapeRef>,
+)
+
+/** R3: flip bursts must not fund shaping that gets cancelled — shaping starts only if the
+ *  reader lingers past this delay. */
+private val windowPrefillStartDelayMs = 120L
+
+/** R3 probe hook (C2-P2b-4 pattern): last published window-prefill snapshot, if any. */
+fun windowPrefillSnapshotForTest(): Triple<Int, Long, Set<Int>>? =
+    windowPrefillL2?.let { Triple(it.chapterIndex, it.paramHash, it.shapes.keys.toSet()) }
+
+/** R3 (S7 steps 2–3): disk-path neighbor prefill after a landing. No-op on the temp path
+ *  (its own prefill owns it) and without a table. Latest landing wins; direction steers order. */
+private fun scheduleWindowPrefill(unit: ChapterUnit, targetPage: Int, dir: Int) {
+    val table = unit.paginationTable ?: return
+    if (unit.inProgress != null) return
+    val total = table.pages.size
+    if (total <= 0) return
+    val hash = table.paramHash
+    val key = (unit.chapterIndex.toLong() shl 48) xor
+        ((targetPage.toLong() and 0xFFFFFF) shl 24) xor
+        ((dir.toLong() and 0xFF) shl 16) xor (hash and 0xFFFF)
+    if (key == lastWindowPrefillKey && windowPrefillJob?.isActive == true) return
+    lastWindowPrefillKey = key
+    windowPrefillJob?.cancel()
+    val chapterIdx = unit.chapterIndex
+    val profileSnap = profile
+    // Neighbor order follows the flip direction; out-of-range sides are dropped below
+    // (a previous page outside this chapter is skipped per S7 step 3).
+    val order = if (dir >= 0) intArrayOf(targetPage + 1, targetPage - 1)
+    else intArrayOf(targetPage - 1, targetPage + 1)
+    windowPrefillJob = scope.launch(backgroundDispatcher) {
+        // Let flip bursts pass first: shaping starts only if the reader lingers.
+        kotlinx.coroutines.delay(windowPrefillStartDelayMs)
+        val u = unitAt(chapterIdx) ?: return@launch
+        val markup = u.markup ?: return@launch
+        val bc = layouter as? BoxChapterLayouter ?: return@launch
+        // Snapshot guards + dims under a short lock; shaping itself runs lock-free into a
+        // private map (the shared cache is never touched — no live object is disturbed).
+        val snap = layoutMutex.withLock {
+            if (u.inProgress != null || u.paginationTable !== table || u.paramHash != hash) null
+            else Triple(
+                u.cssBundle,
+                (viewW - profileSnap.marginLeft - profileSnap.marginRight).coerceAtLeast(16),
+                (viewH - profileSnap.marginTop - profileSnap.marginBottom).coerceAtLeast(16),
+            )
+        } ?: return@launch
+        val (css, cw, chh) = snap
+        val pages = order.filter { it in 0 until total }
+        if (pages.isEmpty()) return@launch
+        val prep = bc.prepareLight(markup, css, profileSnap, cw, u.structureCache, chh)
+        val local = HashMap<Int, ParagraphShapeRef>()
+        for (p in pages) {
+            ensureActive()
+            val rec = table.pages[p]
+            val lo = rec.blockStart.coerceAtLeast(0)
+            if (rec.blockEndExclusive <= lo) continue
+            for (b in lo until rec.blockEndExclusive) {
+                ensureActive()
+                if (b < 0 || b >= prep.totalBlocks) continue
+                if (!local.containsKey(b)) local[b] = bc.tempShape(local, prep, b, profileSnap)
+            }
+        }
+        if (local.isNotEmpty()) {
+            windowPrefillL2 = WindowPrefillShapes(chapterIdx, hash, local)
+            Logger.w(logTag, "win-prefill ch=$chapterIdx pages=$pages blocks=${local.size}")
+        }
+    }
+}
+
+/** R3: read-only L2 lookup for the incremental path — keyed by chapter + table hash. */
+private fun windowPrefillShapesFor(unit: ChapterUnit, table: ChapterPaginationTable): Map<Int, ParagraphShapeRef>? {
+    val s = windowPrefillL2 ?: return null
+    if (s.chapterIndex != unit.chapterIndex || s.paramHash != table.paramHash) return null
+    return s.shapes
+}
 
 /** R2: one-line temp pointer + window snapshot for cross-chapter diagnosis. */
 private fun tempWindowDiag(ip: InProgressPagination): String {
@@ -1777,6 +1878,7 @@ private fun finishCanonicalBackground(
                         targetPage = startPage,
                         pagesToShape = 1,
                         cache = unitShapeCache(unit),
+                        prefillL2 = windowPrefillShapesFor(unit, cached),
                     )
                     unit.bind(product.layout, product.slices)
                     unit.shapedPageFrom = startPage

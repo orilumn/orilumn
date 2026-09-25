@@ -63,15 +63,7 @@ import kotlinx.coroutines.runBlocking
  */
 enum class PaginationMode { LINE_DISK, BLOCK_TEMP }
 
-/** P13 (U6k): default worker count for chunk-parallel canonical shaping — at least 2, never more
- *  than 4, never stealing the last core (the foreground flip / UI stays on its own core).
- *  R6: CPU 计数经 [platformCpuCount] expect/actual（commonMain 不可见 `Runtime`）。 */
-private val DEFAULT_CHUNK_PARALLELISM: Int = maxOf(
-    2,
-    minOf(4, maxOf(1, platformCpuCount() - 1)),
-)
-
-/** R6: 平台 CPU 核数（仅 chunk 并行度启发式用；iOS actual 后续补）。 */
+/** R6: 平台 CPU 核数（调度塑形槽预算用；iOS actual 后续补）。 */
 internal expect fun platformCpuCount(): Int
 
 /**
@@ -477,59 +469,9 @@ class BoxChapterLayouter(
         return completeFullLayout(prepare, shapes, contentH, profile)
     }
 
-    /**
-     * U6k (P13): shape the whole chapter's blocks across parallel chunk workers, then stitch and
-     * paginate exactly like [fullLayout]. The parallel work is ONLY the expensive per-block
-     * skia shaping — [prepare] (the heavy whole-chapter cascade) already computed the box
-     * geometry once, and [completeFullLayout] rebuilds the continuous line flow from that same
-     * structure, so the produced slices are **bit-identical to sequential canonical**: the chunk
-     * boundary only re-orders WHERE the shaping happens, never the geometry. The single check
-     * [checkpoint] (re-invoked per block in every chunk, like the sequential path) lets a background
-     * cancel abandon with ~chunk granularity, ≤1 chapter as required by P2/P7.
-     *
-     * Threading: chunks run as coroutines on `Dispatchers.Default` capped to k-way
-     * parallelism (R6, ex daemon-thread pool; no priority API in common). Worker count degrades
-     * naturally on fewer cores; parallelism=1 runs in-order on the caller thread (test/debug). [prepare] is
-     * read-only across workers (disjoint leaves), so no lock is needed.
-     */
-    fun fullLayoutChunked(
-        prepare: ChapterPrepareResult,
-        profile: TypographicProfile,
-        contentW: Int,
-        contentH: Int,
-        parallelism: Int = DEFAULT_CHUNK_PARALLELISM,
-        checkpoint: () -> Unit = {},
-    ): ChapterLayouter.ChapterLayoutProduct {
-        val leaves = prepare.leaves
-        val total = leaves.size
-        if (total == 0) return fullLayout(prepare, profile, contentW, contentH, checkpoint)
-        val k = parallelism.coerceIn(1, total)
-        if (k == 1) return fullLayout(prepare, profile, contentW, contentH, checkpoint)
-        val chunkSize = (total + k - 1) / k
-        val ranges = ArrayList<IntRange>(k)
-        for (s in 0 until total step chunkSize) ranges.add(s until minOf(s + chunkSize, total))
-        val carriers = firstCarrierLeaves(leaves)
-        // R6: 结构化并发替代 Executor/Future——异常（含 checkpoint 的 CancellationException）
-        // 经 awaitAll 原样抛出并取消同批兄弟协程，无需 Future 解包；调用线程阻塞等齐
-        //（语义同旧 futures.get）。线程优先级 nicety 在 common 无 API，chunk 仍限 k 路，
-        // 不与前台抢跑的性质由 limitedParallelism 保持。
-        val shapes = runBlocking(Dispatchers.Default.limitedParallelism(k)) {
-            ranges.map { rng ->
-                async {
-                    rng.map { bi ->
-                        checkpoint()
-                        shapeLeaf(leaves[bi], prepare.styleMap, profile,
-                            listMarkerFor(leaves[bi].el, prepare.styleMap::get, carriers), genOf = prepare.genOf,
-                            floatLead = leaves[bi].floatLead, classify = prepare.classify, hidden = prepare.hidden)
-                    }
-                }
-            }.awaitAll().flatten()
-        }
-        return completeFullLayout(prepare, shapes, contentH, profile)
-    }
-
-    /** Shared completion of [fullLayout]/[fullLayoutChunked]: line rebuild, drawable, pagination,
-     *  block-range backfill — the parts that must stay identical regardless of shaping order. */
+    /** Shared completion of [fullLayout]: line rebuild, drawable, pagination,
+     *  block-range backfill. (P1: the parallel-chunk variant is deleted — the scheduler pool,
+     *  not intra-task fan-out, owns all parallelism now.) */
     private fun completeFullLayout(
         prepare: ChapterPrepareResult,
         shapes: List<ParagraphShapeRef>,

@@ -77,6 +77,14 @@ class ChapterUnit(
     var shapedPageFrom: Int = -1
     var shapedPageTo: Int = -1
 
+    /** R8 (S3/D4): current pagination path marker. Written only by bind sites (never guessed):
+     *  [bindInProgress] → TEMP, [bind] (partial window) → WIN, [bindFull] → FULL,
+     *  [bindSafeEmpty]/[invalidateLayout] → null. [clearInProgress] intentionally leaves it —
+     *  it always follows a [bindFull] (finalize handoff). */
+    enum class PathKind { TEMP, FULL, WIN }
+    var pathMarker: PathKind? = null
+        private set
+
     /** The first page of the chapter (null when not laid out ahead). */
     fun firstPage(): PageSlice? = pageSlices.firstOrNull()
 
@@ -113,6 +121,7 @@ class ChapterUnit(
     /** Sets the active temp pagination. Called by the controller when anchor streaming starts. */
     fun bindInProgress(p: InProgressPagination) {
         this.inProgress = p
+        this.pathMarker = PathKind.TEMP
     }
 
     /** Points [tempRenderLayout] at the current temp page's layout so [PageRenderer] draws it. */
@@ -144,6 +153,7 @@ class ChapterUnit(
         this.layout = layout
         this.pageSlices = pageSlices
         this.laidOut = true
+        this.pathMarker = PathKind.WIN
     }
 
     /** Binds a FULL-chapter layout result (R1): [bind] plus records the shaped window as the full
@@ -153,6 +163,7 @@ class ChapterUnit(
         bind(layout, pageSlices)
         shapedPageFrom = 0
         shapedPageTo = pageSlices.size
+        pathMarker = PathKind.FULL
     }
 
     /** Binds the prepare result. [hash] is the layout-param hash that produced it (for later
@@ -181,6 +192,7 @@ class ChapterUnit(
         shapedPageTo = -1
         laidOut = false
         paramHash = -1L
+        pathMarker = null
         // Unblock any flip waiting on an in-flight birth (the session it referred to is gone).
         tempBirth?.let { it.complete(Unit) }
         tempBirth = null
@@ -198,6 +210,7 @@ class ChapterUnit(
         this.layout = null
         this.pageSlices = emptyList()
         this.laidOut = true
+        this.pathMarker = null
     }
 }
 

@@ -384,6 +384,7 @@ class BookDocumentController(
                     if (page != null) {
                         val p = pageKind(page)
                         Logger.w(logTag, "locateStart: FOUND ch=$ch ${ctx(unit)} page=$p total=${unit.pageSlices.size}")
+                        logJumpLanding("open", ch)
                         return ch to page
                     }
                 }
@@ -1543,9 +1544,13 @@ private fun finishCanonicalBackground(
         // Anchor temp streaming: return the anchor page directly.
         unit.inProgress?.let { ip ->
             val p = ip.currentSlice
-            if (p != null) return chapter to p
+            if (p != null) {
+                logJumpLanding("jump", chapter)
+                return chapter to p
+            }
         }
         val page = pageForChar(unit, anchorChar) ?: unit.firstPage() ?: return null
+        logJumpLanding("jump", chapter)
         return chapter to page
     }
 
@@ -2144,7 +2149,11 @@ private fun finishCanonicalBackground(
             if (c >= n) break
             val u = ensureChapterLayout(c) ?: continue
             val m = u.markup ?: continue
-            if (m.hasSignificantText()) return c to (u.firstPage() ?: continue)
+            if (m.hasSignificantText()) {
+                val p = u.firstPage() ?: continue
+                logJumpLanding("seek", c)
+                return c to p
+            }
         }
         return null
     }
@@ -2160,8 +2169,21 @@ private fun finishCanonicalBackground(
             if (c !in 0 until chapters.size) return null
             val u = ensureChapterLayout(c) ?: continue
             val m = u.markup ?: continue
-            if (m.hasSignificantText()) return c to (u.firstPage() ?: continue)
+            if (m.hasSignificantText()) {
+                val p = u.firstPage() ?: continue
+                logJumpLanding("neighbor", c)
+                return c to p
+            }
         }
+    }
+
+    /** R8 (S3/D4): jump-landing one-liner — PATH marker + current-params table hit. */
+    private fun logJumpLanding(where: String, chapter: Int) {
+        val u = unitAt(chapter) ?: return
+        val cw = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
+        val chh = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
+        val hit = u.paginationTable?.paramHash == LayoutParamKey.fromProfile(profile, cw, chh).hash()
+        Logger.w(logTag, "jump: $where -> ch=$chapter path=${u.pathMarker} tableHit=$hit temp=${u.inProgress != null}")
     }
 
     /** Locates the first content page of (or after) [index], skipping blank/cover chapters.
@@ -2174,7 +2196,10 @@ private fun finishCanonicalBackground(
             val m = unit?.markup
             if (unit != null && m != null && m.hasSignificantText()) {
                 val page = unit.inProgress?.currentSlice ?: unit.firstPage()
-                if (page != null) return ch to page
+                if (page != null) {
+                    logJumpLanding("toc", ch)
+                    return ch to page
+                }
             }
             ch++
         }
@@ -2325,7 +2350,7 @@ private fun finishCanonicalBackground(
             "|diskTable=${pt != null}${pt?.let{"pages=${pt.pages.size}"} ?: ""} " +
             "|layoutLC=$layoutLc tempLC=$tempLc " +
             "|pageSlices=${ps.size}${ps0?.let{" f[${it.charStart},${it.charEnd})"} ?: ""}${psN?.let{" l[${it.charStart},${it.charEnd})"} ?: ""} " +
-            "|laidOut=${unit.laidOut} paramHash=${unit.paramHash}")
+            "|laidOut=${unit.laidOut} paramHash=${unit.paramHash} path=${unit.pathMarker}")
         // Anchor temp streaming: navigate the whole-block temp pages instead of pageSlices indices.
         val inProgress = unit.inProgress
         val tempExhausted = inProgress != null

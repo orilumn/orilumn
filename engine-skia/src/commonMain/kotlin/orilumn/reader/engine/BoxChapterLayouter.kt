@@ -788,18 +788,20 @@ class BoxChapterLayouter(
         // 3. Shape all blocks in that range (reusing already-shaped blocks from [cache]).
         // R3: l2hits counts published-neighbor hits (diagnostic for prefill effectiveness).
         var l2hits = 0
+        val tShape0 = orilumn.reader.time.platformNowMs()
         val localShapes = (blockLo until blockHi).map {
             if (cache?.get(it) == null && prefillL2?.get(it) != null) l2hits++
             tempShape(cache, prepare, it, profile, prefillL2)
         }
-        if (prefillL2 != null) {
-            Logger.w("Orilumn.Engine", "win-l2 ch=${table.chapterIndex} page=$targetPage l2hits=$l2hits/${blockHi - blockLo}")
-        }
+        val tShape1 = orilumn.reader.time.platformNowMs()
+        // (l2hits counted above; reported in the asm breakdown below.)
 
         // 4. Build merged local FlowedLine stream covering all shaped blocks (P6-a2 R6 前视 carry-in).
+        val tLines0 = orilumn.reader.time.platformNowMs()
         val localLines = rebuildLocalLines(prepare, blockLo, blockHi, localShapes) {
             tempShape(cache, prepare, it, profile, prefillL2)
         }
+        val tLines1 = orilumn.reader.time.platformNowMs()
 
         // 5. Build the drawable covering all shaped pages. It is a BookLayout, so pagination below can
         // use the SAME whole-line fill rule (Paginator.fillWholeLines) the canonical path uses.
@@ -807,7 +809,9 @@ class BoxChapterLayouter(
         val (localFirst, localLast) = localLineRanges(localShapes)
         // Q1-b：本窗口已塑形块投影成 skia DrawLine（局部行序），TextReader 合流——
         // 增量页不再回落旧 StaticLayout 画法。
+        val tSkia0 = orilumn.reader.time.platformNowMs()
         val skiaLines = buildPartialSkiaWindow(prepare, leavesForDraw, localFirst, localShapes, localLines, profile.letterSpacingEm, profile.fgColor)
+        val tSkia1 = orilumn.reader.time.platformNowMs()
         // 表格行展开进窗口（与 canonical/临时页同源 helper；行顶/行首取本窗 FlowedLine，char 章内；
         // 相邻同表行成组，rowspan 格边框跨行）。
         val incrFrames = ArrayList<orilumn.reader.engine.skia.TableCellLines.RowFrame>()
@@ -825,17 +829,22 @@ class BoxChapterLayouter(
                 ),
             )
         }
+        val tTbl0 = orilumn.reader.time.platformNowMs()
         val incrWin = orilumn.reader.engine.skia.TableCellLines.expandTable(
             incrFrames, prepare::resolveStyle, profile.letterSpacingEm, profile.fgColor,
             imageLoader, chapterHref,
         )
+        val tTbl1 = orilumn.reader.time.platformNowMs()
+        val tBox0 = orilumn.reader.time.platformNowMs()
+        val boxes = buildBackgroundDrawBoxes(prepare, leavesForDraw, localLines, localFirst, localLast)
+        val tBox1 = orilumn.reader.time.platformNowMs()
         val drawable = PartialDrawableLayout(
             lines = localLines,
             leafList = leavesForDraw,
             shapeList = localShapes,
             localFirst = localFirst,
             localLast = localLast,
-            boxes = buildBackgroundDrawBoxes(prepare, leavesForDraw, localLines, localFirst, localLast),
+            boxes = boxes,
             loader = imageLoader,
             href = chapterHref,
             avoidOwnerMap = prepare.avoidOwnerMap,
@@ -859,6 +868,7 @@ class BoxChapterLayouter(
         // continuously from its predecessor's last line. With matching geometry this reproduces the
         // canonical page boundaries exactly — the shared fill rule makes drift a no-op instead of a bug.
         val slicesWithLine = allSlices.toMutableList()
+        val tPg0 = orilumn.reader.time.platformNowMs()
         if (localLines.isNotEmpty() && startIdx < endIdx) {
             // Anchor the window's first page at the disk table's EXACT first line (the line whose
             // charStart == the table's authoritative charStart), NOT the merely-containing line —
@@ -896,6 +906,11 @@ class BoxChapterLayouter(
         // authoritative char→block mapping the canonical path used, so the two paths' block ranges can
         // never drift and disk-hit incremental shaping always knows which blocks each page needs.
         val withBlocks = backfillBlockRanges(slicesWithLine, prepare.globalCharStarts, prepare.totalBlocks, prepare.totalChars)
+        val tPg1 = orilumn.reader.time.platformNowMs()
+        // R19: assembly segment breakdown (permanent diagnostic) — shape/lines/skia/tbl/box/pg.
+        Logger.w("Orilumn.Engine", "asm ch=${table.chapterIndex} page=$targetPage " +
+            "shape=${tShape1 - tShape0}ms lines=${tLines1 - tLines0}ms skia=${tSkia1 - tSkia0}ms " +
+            "tbl=${tTbl1 - tTbl0}ms box=${tBox1 - tBox0}ms pg=${tPg1 - tPg0}ms l2hits=$l2hits/${blockHi - blockLo}")
 
         // Debug: reconcile every shaped (incremental) page's vertical extent with the content capacity,
         // and flag any page whose boundary drifted from the disk table (the page-boundary-source probe).

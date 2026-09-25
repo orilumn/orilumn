@@ -449,6 +449,14 @@ class BookDocumentController(
         layoutMutex.withLock {
             if (viewW <= 0 || viewH <= 0) return unit
             if (unit.markup != null) {
+                // R6: never consume a table bound under different params (a viewport change
+                // pre-R5 is the only path that can leave one behind). Live temp sessions own
+                // their lifecycle via profileSnapshot and are never killed here.
+                if (unit.inProgress == null) {
+                    val cw = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
+                    val chh = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
+                    unit.invalidateForParam(LayoutParamKey.fromProfile(profile, cw, chh).hash())
+                }
                 if (unit.laidOut && unit.inProgress != null) {
                     // Anchor temp streaming active — the current temp page is rendered from its own
                     // whole-block layout; further shaping happens on flip via [findAdjacentPage].
@@ -468,6 +476,13 @@ class BookDocumentController(
      *  in the current incremental layout. If not, re-runs [BoxChapterLayouter.incrementalLayoutForPage]
      *  starting from the closest page index. */
     private fun ensurePageRangeShaped(unit: ChapterUnit, targetChar: Int) {
+        // R6: same guard for direct callers (cross-chapter stub reshape). A mismatch invalidates
+        // first, so the `?: return` below trips on the nulled table instead of shaping from it.
+        if (unit.inProgress == null) {
+            val cw = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
+            val chh = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
+            unit.invalidateForParam(LayoutParamKey.fromProfile(profile, cw, chh).hash())
+        }
         val table = unit.paginationTable ?: return
         val boxLayouter = layouter as? BoxChapterLayouter ?: return
         val slices = unit.pageSlices
@@ -1338,10 +1353,16 @@ private suspend fun crossChapterLanding(fromChapter: Int, direction: Int): Pair<
     var next = fromChapter + direction
     // R2/D3: legit empty-chapter skips ride along so they are distinguishable from spurious cross jumps.
     val skipped = ArrayList<Int>()
+    // R6: current layout params — stale tables are dropped before the anchor reads them
+    // (backwardEntryAnchorChar below runs before ensureChapterLayout). Never kills live temp.
+    val contentW = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
+    val contentH = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
+    val currentHash = LayoutParamKey.fromProfile(profile, contentW, contentH).hash()
     while (next in 0 until chapters.size) {
         val unit = unitAt(next)
         val markup = if (unit != null) ensureMarkup(next) else null
         if (unit == null || markup == null) { skipped.add(next); next += direction; continue }
+        if (unit.inProgress == null) unit.invalidateForParam(currentHash)
         if (!markup.hasSignificantText()) { skipped.add(next); next += direction; continue }
         val anchorChar = if (direction > 0) 0 else backwardEntryAnchorChar(unit, markup)
         ensureChapterLayout(next, anchorChar)

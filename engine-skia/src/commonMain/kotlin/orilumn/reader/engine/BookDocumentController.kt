@@ -229,7 +229,12 @@ class BookDocumentController(
      *  Re-dispatched with the latest params after the params-settled point; a newer dispatch cancels
      *  it (abandon within ≤1 chapter via per-chapter checkpoints). */
     /** P0 spike: priority pool for background layout work (B2 chapters in spike scope). */
-    private val scheduler = TaskScheduler(scope)
+    private val scheduler = TaskScheduler(
+        scope,
+        // P1: adaptive budget — at most 2 shaping slots (P0 knee), at least 1; small devices
+        // degrade to serial background shaping. The flip thread never queues (bypass by design).
+        maxSlots = maxOf(1, minOf(2, platformCpuCount() - 1)),
+    )
 
     /** P4 (track P): per-chapter background preflight slots — [index] → in-flight job. Each prelinks
      *  one neighbor chapter's markup + light cascade off the flip thread (no shaping, no table), so an
@@ -686,11 +691,6 @@ class BookDocumentController(
  *  cleaner pagination than block-cut). Larger chapters use anchor-based incremental streaming. */
 private val SMALL_CHAPTER_BLOCKS = 120
 
-/** P13 (U6k): chapters strictly larger than [SMALL_CHAPTER_BLOCKS] shape their canonical pass on the
- *  parallel chunk workers (U6k) so the background canonical and the foreground track never serialize;
- *  small chapters keep the single-block sequential shape (chunking buys nothing below ~2 chunks). */
-private val CHUNK_CANONICAL_MIN_BLOCKS = SMALL_CHAPTER_BLOCKS + 1
-
 /**
  * Header-lift threshold. When a large chapter's anchor block lies within the first
  * [HEAD_START_BLOCK_LIMIT] blocks (~5 pages at ~20 blocks/page), the anchor is *lifted to the
@@ -836,15 +836,11 @@ private fun startAnchorStream(
             val ctx = currentCoroutineContext()
             runCatching {
                 val heavy = unit.markup?.let { bc.prepare(it, unit.cssBundle, profile, contentW, contentH) }
-                // P13 (U6k): large chapters shape their canonical pass on the parallel chunk workers
-                // (identical slices by construction; see BoxChapterLayouter.fullLayoutChunked) so the
-                // single canonical thread never serializes the whole chapter's StaticLayout shaping.
+                // P1: chunk workers deleted (P13) — background canonical shapes sequentially;
+                // per-block P7 checkpoints keep abandonment at block granularity, and the
+                // scheduler pool (not intra-task fan-out) owns all parallelism now.
                 val prod = heavy?.let {
-                    if (it.totalBlocks >= CHUNK_CANONICAL_MIN_BLOCKS) {
-                        bc.fullLayoutChunked(it, profile, contentW, contentH) { ctx.ensureActive() }
-                    } else {
-                        bc.fullLayout(it, profile, contentW, contentH) { ctx.ensureActive() }
-                    }
+                    bc.fullLayout(it, profile, contentW, contentH) { ctx.ensureActive() }
                 }
                 if (prod != null) finishCanonicalBackground(unit, ip, prod, paramHash)
             }.onFailure { e ->
@@ -2082,12 +2078,8 @@ private fun finishCanonicalBackground(
     private fun fullLayoutAndPersist(unit: ChapterUnit, bc: BoxChapterLayouter, contentW: Int, contentH: Int, paramHash: Long, checkpoint: () -> Unit = {}) {
         val markup = unit.markup ?: return
         val prep = prepareFor(unit, bc, markup, contentW, contentH, paramHash)
-        // P13 (U6k): large chapters shape on the parallel chunk workers, small ones sequentially.
-        val product = if (prep.totalBlocks >= CHUNK_CANONICAL_MIN_BLOCKS) {
-            bc.fullLayoutChunked(prep, profile, contentW, contentH, checkpoint = checkpoint)
-        } else {
-            bc.fullLayout(prep, profile, contentW, contentH, checkpoint) ?: return
-        }
+        // P1: chunk workers deleted (P13) — sequential canonical for all sizes.
+        val product = bc.fullLayout(prep, profile, contentW, contentH, checkpoint) ?: return
         val slices = product.slices
         val cache = cacheStore()
         val cacheFile = if (cache != null && bookId >= 0) {

@@ -335,6 +335,9 @@ class BookDocumentController(
             startChar = char.coerceAtLeast(0)
             Logger.w(logTag, "open: restore -> startCh=$startChapter char=$startChar ${ctx(startChapter)}")
         }
+        // R18: opening counts as activity — the open-dispatched B2 must not hammer cores while the
+        // reader reads the first pages (it yields below until flips/opening settle).
+        lastFlipMs = platformNowMs()
         return true
     }
 
@@ -1134,6 +1137,18 @@ private var lastTempNavNull: String? = null
 private var windowPrefillJob: Job? = null
 private var lastWindowPrefillKey: Long = Long.MIN_VALUE
 
+/**
+ * R18: last-flip timestamp (any flip entry). Background tracks (B2, prefill) yield while the
+ * reader is actively flipping; prefill is additionally cancelled outright on flip start
+ * (published products survive cancellation — only in-flight unpublished work is lost).
+ */
+@Volatile
+private var lastFlipMs: Long = 0L
+
+/** R18: B2 postpones chapters while flips keep arriving (background must not contend with
+ *  the flip thread for cores — the fast baseline had no background grinding at all). */
+private val b2QuietMs = 3000L
+
 /** R3: immutable published neighbor shapes (chapter + paramHash keyed). Read-only after
  *  publication — safe to consult from any thread; stale entries are ignored by key check. */
 @Volatile
@@ -1906,6 +1921,13 @@ private fun finishCanonicalBackground(
                     // chapter already completed under these params (open dispatch, preempt relaunch,
                     // or a previous pass); shaping it again is pure waste.
                     if (u.paginationTable?.paramHash == paramHash) { skippedFresh++; continue }
+                    // R18: background yields to active reading — postpone while flips keep arriving.
+                    // Starvation-safe: flips always have the incremental path; B2 catches up in pauses
+                    // (and skip-fresh makes the catch-up cheap).
+                    while (platformNowMs() - lastFlipMs < b2QuietMs) {
+                        if (!isActive) return@launch
+                        kotlinx.coroutines.delay(500)
+                    }
                     // R7: bodies parse lazily — an unparsed chapter has no markup to shape (this made
                     // the open-dispatch pass swing through empty). Parse here on the background thread.
                     if (u.markup == null) ensureMarkup(i)
@@ -2457,6 +2479,11 @@ private fun finishCanonicalBackground(
         // in-chapter (temp/canonical) and out-of-bounds cross-chapter alike, so the whole-book scan
         // follows the reading direction even when the active chapter is a live temp session.
         readingDirection = direction
+        // R18: mark flip start (B2 yields on this) + kill the previous landing's prefill outright —
+        // its published products survive; only in-flight unpublished work is dropped, and the flip
+        // thread never contends with it for cores.
+        lastFlipMs = platformNowMs()
+        windowPrefillJob?.cancel()
         // P4: a flip that lands in [chapter] prewarms both neighbors (the chapters a next out-of-bounds
         // flip can enter) on the background P track — so the crossing's parse leaves the flip thread.
         return navigateAdjacentPage(chapter, slice, direction)?.also { (ch, _) ->

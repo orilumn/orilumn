@@ -1546,7 +1546,50 @@ private fun finishCanonicalBackground(
      * afterwards).
      * @return (chapter, relaid-out page); null when the chapter doesn't exist.
      */
+    /** R12: same-chapter fast relocate — the target char already lives in a shaped-valid window
+     *  page (live temp session or disk window with real line indexes): move the pointer there and
+     *  return it, skipping the [invalidateAllLayouts] nuke. Anything else (unshaped stub, stale
+     *  params, no session/table) returns null for the full path. Pointer moves run under
+     *  [tempStateLock] (temp branch) / [layoutMutex] (disk read) so a concurrent flip can't tear them. */
+    private suspend fun fastRelocate(chapter: Int, anchorChar: Int): Pair<Int, PageSlice>? {
+        val unit = unitAt(chapter) ?: return null
+        if (unit.markup == null) return null
+        val cw = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
+        val chh = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
+        val currentHash = LayoutParamKey.fromProfile(profile, cw, chh).hash()
+        // Live temp: find the window page containing the anchor and swing the pointer onto it.
+        unit.inProgress?.let { ip ->
+            if (ip.paramHash != currentHash) return@let
+            val hit = (ip.forwardPages + ip.backwardPages)
+                .firstOrNull { p -> p.slice.charStart <= anchorChar && anchorChar < p.slice.charEnd }
+                ?: return@let
+            return tempStateLock.withLock {
+                if (unit.inProgress !== ip) return@withLock null // session replaced meanwhile
+                locateTempPosition(ip, hit.slice)
+                setCurrentTempPage(unit, ip, hit)
+                logJumpLanding("jump", chapter)
+                chapter to hit.slice
+            }
+        }
+        // Disk path: a shaped-valid window page (stubs carry firstLine = -1). Temp-live chapters
+        // never fall through here (anchor outside the temp window means a clean-slate rebuild,
+        // not a mixed-path landing).
+        if (unit.inProgress != null) return null
+        val t = unit.paginationTable
+        if (t == null || t.paramHash != currentHash) return null
+        return layoutMutex.withLock {
+            val page = pageForChar(unit, anchorChar)
+            if (page != null && page.firstLine >= 0 && page.lastLineExclusive > page.firstLine) {
+                logJumpLanding("jump", chapter)
+                chapter to page
+            } else null
+        }
+    }
+
     suspend fun relayoutTo(chapter: Int, anchorChar: Int): Pair<Int, PageSlice>? {
+        // R12: fast path — target inside an already-shaped valid window: just move the pointer,
+        // no nuke. Structural misses fall through to the full path below.
+        fastRelocate(chapter, anchorChar)?.let { return it }
         invalidateAllLayouts()
         val unit = ensureChapterLayout(chapter, anchorChar, headLift = false) ?: return null
         // Anchor temp streaming: return the anchor page directly.

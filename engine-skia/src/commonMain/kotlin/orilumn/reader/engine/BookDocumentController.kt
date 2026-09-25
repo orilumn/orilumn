@@ -374,7 +374,10 @@ class BookDocumentController(
         var ch = startChapter.coerceIn(0, chapters.size - 1)
         var char = startChar
         while (ch < chapters.size) {
-            val unit = ensureChapterLayout(ch, char)
+            // R5/S3: open restores the SAVED position — never head-lift a mid-chapter anchor
+            // (rotation → new viewport → disk miss used to rebase block≤100 anchors to 0 and the
+            // head page got persisted as progress, losing the position permanently).
+            val unit = ensureChapterLayout(ch, char, headLift = false)
             val markup = unit?.markup
             if (unit != null && markup != null) {
                 val hasContent = markup.hasSignificantText()
@@ -2092,7 +2095,8 @@ private fun finishCanonicalBackground(
      *（调用方退回 locateStart）。切片查找纯函数见 common [pageSliceAtChar]。
      */
     suspend fun pageAtChar(chapter: Int, char: Int): PageSlice? {
-        val unit = ensureChapterLayout(chapter, char) ?: return null
+        // R5/S3: same no-lift rule as locateStart — a desktop landing anchor is positional.
+        val unit = ensureChapterLayout(chapter, char, headLift = false) ?: return null
         return orilumn.reader.engine.paging.pageSliceAtChar(unit.pageSlices, char)
     }
 
@@ -2495,7 +2499,8 @@ private fun finishCanonicalBackground(
             val i = unit.pageSlices.indexOf(inChapter)
             Logger.w(logTag, "flip: 章内 dir=$direction -> ${ctx(unit)} page=$i/${unit.pageSlices.size}")
             // Ensure the target page is shaped (disk-hit incremental path may have skipped it).
-            ensureChapterLayout(chapter, inChapter.charStart)
+            // R5/S3: a flip-time rebuild must never head-lift (post-invalidate edge on pages 2–5).
+            ensureChapterLayout(chapter, inChapter.charStart, headLift = false)
             return chapter to unit.pageSlices.getOrElse(i) { inChapter }
         }
         Logger.w(logTag, "flip: 无章内页，开始跨章 dir=$direction from ch=$chapter srcIdx=$srcIdx/${unit.pageSlices.size}")

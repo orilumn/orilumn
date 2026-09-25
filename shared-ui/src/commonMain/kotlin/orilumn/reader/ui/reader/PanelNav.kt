@@ -119,9 +119,29 @@ fun Modifier.panelHover(nav: PanelNav, index: Int): Modifier {
  *（实测它不是"距视口顶偏移"，见目录面板记录）。
  */
 fun CoroutineScope.ensureListVisible(listState: LazyListState, pos: Int, dir: Int) {
-    val vis = listState.layoutInfo.visibleItemsInfo
-    if (vis.any { it.index == pos }) return
-    val first = if (dir > 0) (pos - vis.size + 1).coerceAtLeast(0) else pos
+    // 用户层对称性修正：向下必须保证目标行在底部完整可见（与向上落顶部完整行对称）。
+    // 旧实现按"含半可见即不滚 + 落点=pos-size+1"，均匀行下目标恒为底部半行，
+    // 按住下箭头高亮逐渐滑出可视区。现按完整可见判定，向下多留一行缓冲。
+    val info = listState.layoutInfo
+    val vis = info.visibleItemsInfo
+    if (vis.isEmpty()) {
+        launch { runCatching { listState.scrollToItem(pos) } }
+        return
+    }
+    val item = vis.firstOrNull { it.index == pos }
+    if (item != null) {
+        val fullyVisible = item.offset >= info.viewportStartOffset &&
+            item.offset + item.size <= info.viewportEndOffset
+        if (fullyVisible) return
+        if (dir > 0) {
+            val first = vis.first().index + 1
+            launch { runCatching { listState.scrollToItem(first) } }
+        } else {
+            launch { runCatching { listState.scrollToItem(pos) } }
+        }
+        return
+    }
+    val first = if (dir > 0) (pos - vis.size + 2).coerceIn(0, pos) else pos
     launch { runCatching { listState.scrollToItem(first) } }
 }
 

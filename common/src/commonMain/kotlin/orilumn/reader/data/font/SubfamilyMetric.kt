@@ -7,6 +7,9 @@ package orilumn.reader.data.font
  */
 object SubfamilyMetric {
 
+    /** 单数字字重档（可选 W 前缀）：Hiragino Sans/明朝的 W0–W9（W3→300）。 */
+    private val SingleDigitWeight = Regex("^[w]?([0-9])$")
+
     /**
      * Deduce a CSS numeric weight (100–900, or an inline weight-class code such as `509`) from a
      * subfamily name. Empty / unknown names default to 400 (Regular).
@@ -31,6 +34,11 @@ object SubfamilyMetric {
             s.contains("bold") || s.contains("heavy") || s.contains("粗") -> 700
             s.contains("black") || s.contains("ultra") || s.contains("黑") -> 900
             else -> {
+                // Hiragino W0–W9 这类单数字档（可选 W 前缀）：档位×100（W3→300…W9→900，
+                // W0 钳到 100）；多位数字沿旧口径（509R→509 这类厂商内码）。
+                // 注意 Alibaba 的 55 Regular… 走上面的关键词分支，进不到这里。
+                val single = SingleDigitWeight.matchEntire(s)?.groupValues?.get(1)?.toIntOrNull()
+                if (single != null) return (single * 100).coerceIn(100, 900)
                 // Numeric style code embedded in the name, e.g. "509R" → 509. Only plausible weights.
                 s.filter { it.isDigit() }.toIntOrNull()?.takeIf { it in 1..1000 } ?: 400
             }

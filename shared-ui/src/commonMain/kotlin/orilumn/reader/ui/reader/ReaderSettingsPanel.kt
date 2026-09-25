@@ -76,6 +76,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
+import kotlin.time.TimeMark
+import kotlin.time.TimeSource
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * S29 阅读设置抽屉：右停靠面板，复刻旧 `reader.html` 设置抽屉在控件与层级上的排布
@@ -449,8 +452,11 @@ fun ReaderSettingsPanel(
             visible(idx, dir)
         }
         /**
-         * 跳转滚动（PgUp/PgDn/Home/End 用）：直达目标并垫掉吸顶按钮高度，
-         * 焦点行恒在按钮之下可见。焦点与滚到顶的不是同一行时（如 PgUp 取新底端）分开传。
+         * 跳转滚动（PgUp/PgDn/Home/End 用，用户层）：直达目标，焦点行恒可见。
+         * 焦点与滚到顶的不是同一行时（如 PgUp 取新底端）分开传。
+         * 注意：按钮区已搬出列表，LazyColumn 里全是字体行，不需要任何像素垫付——
+         * 传 scrollOffset 会把目标行顶出视口之外（此前按"垫掉吸顶按钮高度"传了一行
+         * 高度，PgDn 恒多翻约两行，即此 bug）。
          */
         fun jumpFontTo(focus: Int, top: Int) {
             if (current != Sub.TextFont || keys.isEmpty()) return
@@ -462,16 +468,19 @@ fun ReaderSettingsPanel(
             nav.land(f)
             scope.launch {
                 runCatching {
-                    // 吸顶按钮已搬出列表，此处恒 0；防御性保留（懒索引 < fixed 即按钮区）。
-                    val sh = listState.layoutInfo.visibleItemsInfo
-                        .filter { it.index < fontFixedCount }.sumOf { it.size }
-                    listState.scrollToItem(listPosOf(t), sh)
+                    listState.scrollToItem(listPosOf(t))
                 }
             }
         }
         /** 整页翻：落到新顶端行（下翻）/新底端行（上翻），焦点跟去；可视行剔掉吸顶按钮。 */
+        // 连发节流（用户层）：桌面按住 PgDn/PgUp 会连发 KeyDown（Compose 原样透传、
+        // 无 repeat 标记可区分），一次稍长的按压翻掉多页；300ms 内只认第一次，
+        // 有意连打仍以约 3 页/秒推进。
+        var lastPageAt by remember { mutableStateOf<TimeMark?>(null) }
         fun pageFonts(dir: Int) {
             if (current != Sub.TextFont || keys.isEmpty()) return
+            if ((lastPageAt?.elapsedNow() ?: PageThrottleMs.milliseconds) < PageThrottleMs.milliseconds) return
+            lastPageAt = TimeSource.Monotonic.markNow()
             // 懒索引换算回行号（按钮区在列表外）。
             val vis = listState.layoutInfo.visibleItemsInfo.map { it.index + fontFixedCount }.filter { it >= fontStartIdx }
             if (dir > 0) {
@@ -1479,5 +1488,8 @@ private const val PanelMaskAlpha = 0.4f
 
 /** Panel slide and mask dim/lighten share this duration so they stay synchronized. */
 private const val PanelAnimMs = 280
+
+/** 字体列表整页翻连发节流窗口（桌面 PgDn/PgUp 按住连发，一次按压只认一次）。 */
+private const val PageThrottleMs = 300
 
 private val CancelRed = Color(0xFFD9534F)

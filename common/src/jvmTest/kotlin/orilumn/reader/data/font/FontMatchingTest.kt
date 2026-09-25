@@ -57,6 +57,18 @@ class FontMatchingTest {
     }
 
     @Test
+    fun `Hiragino W 档映射到 CSS 字重`() {
+        // Hiragino Sans W0–W9 / 明朝 W3·W6：单数字档（可选 W 前缀）×100，
+        // 否则 W3→3 这类非法锚点选了也永远生效不了。
+        assertEquals(100, SubfamilyMetric.weight("W0"))
+        assertEquals(300, SubfamilyMetric.weight("W3"))
+        assertEquals(600, SubfamilyMetric.weight("W6"))
+        assertEquals(900, SubfamilyMetric.weight("W9"))
+        // 多位数字仍沿厂商内码口径，不进档位规则。
+        assertEquals(509, SubfamilyMetric.weight("509R"))
+    }
+
+    @Test
     fun `数字前缀不盖过样式词`() {
         // 阿里巴巴普惠体 3.0：35..115 非 CSS 字重，样式词说了算；否则正文 400 会选中 Black。
         assertEquals(100, SubfamilyMetric.weight("35 Thin"))

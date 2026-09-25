@@ -335,9 +335,8 @@ class BookDocumentController(
             startChar = char.coerceAtLeast(0)
             Logger.w(logTag, "open: restore -> startCh=$startChapter char=$startChar ${ctx(startChapter)}")
         }
-        // R18: opening counts as activity — the open-dispatched B2 must not hammer cores while the
-        // reader reads the first pages (it yields below until flips/opening settle).
-        lastFlipMs = platformNowMs()
+        // R18: open does NOT stamp lastFlipMs — the open-dispatched B2 must start promptly;
+        // the first flip cancels it outright if the reader reads immediately (abandon ≤1 block).
         return true
     }
 
@@ -1158,8 +1157,11 @@ private var b2YieldedForFlip = false
 
 
 /** R18: B2 postpones chapters while flips keep arriving (background must not contend with
- *  the flip thread for cores — the fast baseline had no background grinding at all). */
-private val b2QuietMs = 3000L
+ *  the flip thread for cores — the fast baseline had no background grinding at all).
+ *  30s, not 3s: a chapter outlasts any short gap, so a short gate only wedges B2 INTO gaps
+ *  (measured: flips contended through every gap). Parked waiting costs zero CPU; the catch-up
+ *  is cheap via skip-fresh. Tunable. */
+private val b2QuietMs = 30000L
 
 /** R3: immutable published neighbor shapes (chapter + paramHash keyed). Read-only after
  *  publication — safe to consult from any thread; stale entries are ignored by key check. */
@@ -1285,14 +1287,17 @@ private fun scheduleWindowPrefill(unit: ChapterUnit, targetPage: Int, dir: Int) 
         }
         if (stored) Logger.w(logTag, "win-prefill ch=$chapterIdx page=$first cached")
         // R18b: park after completion — completion alone only proves no flip arrived mid-run, but
-        // the run itself outlasts the quiet threshold on heavy chapters. Resume the flip-yielded B2
-        // only if quiet PERSISTS 2s more. Cancelled outright by the next landing (single slot).
+        // the run itself outlasts short thresholds on heavy chapters. Resume the flip-yielded B2
+        // only if quiet PERSISTS past b2QuietMs (genuine pause; cancelled outright by next landing).
         if (b2YieldedForFlip) {
-            kotlinx.coroutines.delay(2000)
-            ensureActive()
-            if (b2YieldedForFlip && platformNowMs() - lastFlipMs >= 2000L) {
-                b2YieldedForFlip = false
-                requestWholeBookRelayout(force = true)
+            while (b2YieldedForFlip) {
+                ensureActive()
+                if (platformNowMs() - lastFlipMs >= b2QuietMs) {
+                    b2YieldedForFlip = false
+                    requestWholeBookRelayout(force = true)
+                    break
+                }
+                kotlinx.coroutines.delay(2000)
             }
         }
     }

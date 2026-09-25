@@ -581,8 +581,9 @@ class ReaderActivity : ComponentActivity() {
     }
 
     /**
-     * 排版敏感设置变更 → 固定周期节流全书重排（保位）。拖拽期间只要仍有 pending 标记就每隔
-     * [RELAYOUT_INTERVAL_MS] 用最新 profile 重排一次，保证滑块跟手；不做逐帧取消+重启。
+     * 排版敏感设置变更 → 固定周期节流本章轻刷新（保位，R4/S1：只动当前章，不废他章、不 bump 代际）。
+     * 拖拽期间只要仍有 pending 标记就每隔 [RELAYOUT_INTERVAL_MS] 用最新 profile 刷一次，保证滑块跟手；
+     * 不做逐帧取消+重启。整书覆盖在循环结束 + 关面板全套（S2）时补。
      */
     private fun scheduleRelayout() {
         relayoutPending = true
@@ -596,7 +597,7 @@ class ReaderActivity : ComponentActivity() {
                 val chapter = p?.chapter ?: 0
                 val anchorChar = p?.slice?.charStart ?: 0
                 // 后台算新版式（保留当前章旧版式不闪），主线程原子替换。
-                val r = c.prepareRelayout(chapter, anchorChar)
+                val r = c.prepareRelayoutLight(chapter, anchorChar)
                 withContext(Dispatchers.Main) {
                     if (r != null) applyReflowResult(c, r)
                 }

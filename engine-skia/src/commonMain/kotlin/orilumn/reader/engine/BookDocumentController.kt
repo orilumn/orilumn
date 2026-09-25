@@ -1458,6 +1458,58 @@ private fun finishCanonicalBackground(
     // ---- Progress / positioning ----
 
     /**
+     * R4 (S1): preview-period light relayout — current chapter only. Same product as
+     *  [prepareRelayout] for the anchor chapter, but touches nothing else: no epoch bump, no
+     *  preflight void, no other-chapter invalidation, no B2. The panel-close / commit-settle path
+     *  still goes through [prepareRelayout] + whole-book scan (S2). B1 dispatch inside
+     *  [startAnchorStream] is unchanged (defer-gated as before). Callers are sequential
+     *  (throttled loops), so no P7 stale check is needed — session supersede via tempBirth covers overlap.
+     */
+    suspend fun prepareRelayoutLight(chapter: Int, anchorChar: Int): ReflowResult? {
+        val unit = unitAt(chapter) ?: return null
+        val markup = unit.markup ?: return null
+        activeChapter = chapter
+        // 整形前先备字体（同 prepareRelayout；新字体预览依赖池跟进）。
+        (layouter as? BoxChapterLayouter)?.let { bc ->
+            onDemandFonts(bc.fontDemandFor(unit.cssBundle))
+            onBookFonts(bookFontsFor(chapter))
+        }
+        val contentWidth = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
+        val contentHeight = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
+        val t0 = platformNowMs()
+        Logger.w(logTag, "relayout-light ch=$chapter anchorChar=$anchorChar start")
+        return runCatching {
+            val bc = layouter as? BoxChapterLayouter
+            if (bc != null) {
+                val paramHash = LayoutParamKey.fromProfile(profile, contentWidth, contentHeight).hash()
+                val light = bc.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight)
+                val tLight = platformNowMs()
+                if (light.totalBlocks > SMALL_CHAPTER_BLOCKS) {
+                    startAnchorStream(unit, anchorChar, light, bc, paramHash, contentWidth, contentHeight, headLift = false)
+                    val tAnchor = platformNowMs()
+                    val page = unit.inProgress?.currentSlice ?: return@runCatching null
+                    Logger.w(logTag, "relayout-light ch=$chapter LARGE-ANCHOR prepareLight=${tLight - t0}ms anchorShape=${tAnchor - tLight}ms total=${platformNowMs() - t0}ms blocks=${light.totalBlocks}")
+                    ReflowResult(chapter, null, emptyList(), page)
+                } else {
+                    val prep = prepareFor(unit, bc, markup, contentWidth, contentHeight, paramHash)
+                    val product = bc.fullLayout(prep, profile, contentWidth, contentHeight)
+                        ?: return@runCatching null
+                    val slice = lineAnchoredPage(product.layout, anchorChar, contentHeight)
+                        ?: product.slices.firstOrNull() ?: return@runCatching null
+                    Logger.w(logTag, "relayout-light ch=$chapter SMALL-FULL prepareLight=${tLight - t0}ms fullLayout=${platformNowMs() - tLight}ms total=${platformNowMs() - t0}ms blocks=${light.totalBlocks}")
+                    ReflowResult(chapter, product.layout, product.slices, slice)
+                }
+            } else {
+                val product = layouter.layout(markup, unit.cssBundle, profile, contentWidth, contentHeight)
+                    ?: return@runCatching null
+                val slice = lineAnchoredPage(product.layout, anchorChar, contentHeight)
+                    ?: product.slices.firstOrNull() ?: return@runCatching null
+                ReflowResult(chapter, product.layout, product.slices, slice)
+            }
+        }.getOrNull()
+    }
+
+    /**
      * Relayout after a settings change, keeping the position (a **no-flicker** variant):
      *  - clears layout caches only for **other** chapters, keeping the current chapter's old
      *    layout -> the page being shown stays drawable during relayout, no blank screen;
@@ -1746,6 +1798,10 @@ private fun finishCanonicalBackground(
             unit.bindPaginationTable(table)
             Logger.w(logTag, "layout ${ctx(unit)} FULL-PRELIM pages=${table.totalPages} blocks=${slices.maxOf { it.blockEndExclusive }}")
         }
+        // R4: the heavy path never populates the shared per-block shape cache (it shapes via
+        // shapeLeaf into locals), so any entries here predate this param cycle — or, if same-cycle,
+        // are pure memo. Dropping is always safe; keeping risks stale-metric reuse on later flips.
+        unit.blockShapeCache = null
         unit.bindFull(product.layout, slices)
     }
 

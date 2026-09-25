@@ -233,7 +233,7 @@ class DesktopReaderHost(
 
     /**
      * R5 设置原位重排（用户层·壳，与平板 `scheduleRelayout+applyReflowResult` 同序）：
-     * 换 profile → 追装字库池 → `prepareRelayout(anchorChar)` 行锚重算 → `bindReflow` 绑定，
+     * 换 profile → 追装字库池 → `prepareRelayoutLight(anchorChar)` 行锚重算 → `bindReflow` 绑定，
      * 同一字符在新分页表合位，不重建宿主、不丢内存位。视口/换书仍走重建（`initialAnchor` 路径）。
      */
     suspend fun relayoutToSettings(next: ReaderSettings, chapter: Int, anchorChar: Int): ReaderPos? =
@@ -244,7 +244,7 @@ class DesktopReaderHost(
             topUpSkiaFonts(orilumn.reader.engine.css.FontDemand.EMPTY)
             orilumn.reader.io.Logger.w("Orilumn.Desktop",
                 "relayoutToSettings body=${next.fontBody} anchors=${profile.fontWeightAnchors} ch=$chapter anchorChar=$anchorChar")
-            val r = controller.prepareRelayout(chapter, anchorChar) ?: run {
+            val r = controller.prepareRelayoutLight(chapter, anchorChar) ?: run {
                 orilumn.reader.io.Logger.w("Orilumn.Desktop", "relayoutToSettings NULL (stale/empty) ch=$chapter")
                 return@withContext null
             }

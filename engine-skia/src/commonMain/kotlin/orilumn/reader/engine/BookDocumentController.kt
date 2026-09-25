@@ -599,7 +599,8 @@ class BookDocumentController(
                     Logger.w(logTag, "DISK-HIT shape t=${platformNowMs() - sp}ms shapedPages=${product.slices.count { it.firstLine >= 0 }} blocks=[${product.slices[startPage].blockStart},${product.slices[startPage].blockEndExclusive}) target=$startPage")
                     unit.bind(product.layout, product.slices)
                     unit.shapedPageFrom = startPage
-                    unit.shapedPageTo = (startPage + 4).coerceAtMost(cached.pages.size)
+                    // R9: honest window — only 1 page is shaped here (pagesToShape=1 above).
+                    unit.shapedPageTo = (startPage + 1).coerceAtMost(cached.pages.size)
                     Logger.w(logTag, "layout ${ctx(unit)} DISK-HIT+INCREMENTAL page=$startPage t=${platformNowMs() - t0}ms")
                 } else {
                     // Legacy layouter: still full layout.

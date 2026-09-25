@@ -1156,13 +1156,6 @@ private var lastFlipMs: Long = 0L
 @Volatile
 private var b2YieldedForFlip = false
 
-/** R18: posts a B2 resume when a prefill run completes into quiet. */
-private fun maybeResumeWholeBook() {
-    if (!b2YieldedForFlip) return
-    if (platformNowMs() - lastFlipMs < 1500L) return
-    b2YieldedForFlip = false
-    requestWholeBookRelayout(force = true)
-}
 
 /** R18: B2 postpones chapters while flips keep arriving (background must not contend with
  *  the flip thread for cores — the fast baseline had no background grinding at all). */
@@ -1291,8 +1284,17 @@ private fun scheduleWindowPrefill(unit: ChapterUnit, targetPage: Int, dir: Int) 
             }
         }
         if (stored) Logger.w(logTag, "win-prefill ch=$chapterIdx page=$first cached")
-        // R18b: a completed prefill run is itself the quiet signal — resume a flip-yielded B2.
-        maybeResumeWholeBook()
+        // R18b: park after completion — completion alone only proves no flip arrived mid-run, but
+        // the run itself outlasts the quiet threshold on heavy chapters. Resume the flip-yielded B2
+        // only if quiet PERSISTS 2s more. Cancelled outright by the next landing (single slot).
+        if (b2YieldedForFlip) {
+            kotlinx.coroutines.delay(2000)
+            ensureActive()
+            if (b2YieldedForFlip && platformNowMs() - lastFlipMs >= 2000L) {
+                b2YieldedForFlip = false
+                requestWholeBookRelayout(force = true)
+            }
+        }
     }
 }
 
@@ -2501,7 +2503,7 @@ private fun finishCanonicalBackground(
         // R18: mark flip start (B2 yields on this) + kill the previous landing's prefill outright —
         // its published products survive; only in-flight unpublished work is dropped, and the flip
         // thread never contends with it for cores. An in-flight B2 is cancelled too (R18b) and resumes
-        // via prefill completion (maybeResumeWholeBook) — epoch dedup alone would never restart it.
+        // via the prefill worker-end park-and-resume — epoch dedup alone would never restart it.
         lastFlipMs = platformNowMs()
         windowPrefillJob?.cancel()
         if (wholeBookJob?.isActive == true) {

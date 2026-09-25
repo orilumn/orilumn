@@ -1945,7 +1945,10 @@ private fun finishCanonicalBackground(
         // already completed under these params; shaping it again is pure waste.
         if (u.paginationTable?.paramHash == paramHash) return
         // R7: bodies parse lazily — an unparsed chapter has no markup to shape. Parse here.
+        // (Parse itself carries no checkpoint: a task cancelled mid-parse drains it, then the
+        // suspend checkpoint below aborts before shaping a whole chapter for nothing.)
         if (u.markup == null) ensureMarkup(index)
+        currentCoroutineContext().ensureActive()
         val ctx = currentCoroutineContext()
         runCatching { fullLayoutAndPersist(u, bc, contentW, contentH, paramHash) { ctx.ensureActive() } }
             .onFailure { e ->

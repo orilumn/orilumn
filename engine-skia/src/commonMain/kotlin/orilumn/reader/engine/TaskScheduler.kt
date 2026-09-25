@@ -62,8 +62,11 @@ class TaskScheduler(
         scope.launch {
             mutex.withLock {
                 queue.removeAll { it.key == task.key }
-                running.remove(task.key)?.cancel()
-                runningPrio.remove(task.key)
+                // P0 fix: cancel in place WITHOUT removing the map entry — the entry is the
+                // liveness record and only the task's own finally-block may remove it (on actual
+                // death). Removing-then-cancelling leaks the slot: pump sees an empty slot while
+                // the cancelled twin is still draining, and starts a second shaper on top of it.
+                running[task.key]?.cancel()
                 var at = queue.size
                 for (i in queue.indices) {
                     if (queue[i].priority > task.priority) {
@@ -81,23 +84,23 @@ class TaskScheduler(
         scope.launch {
             mutex.withLock {
                 queue.removeAll { it.key == key }
-                running.remove(key)?.cancel()
-                runningPrio.remove(key)
+                running[key]?.cancel()
             }
         }
     }
 
-    /** Preempt everything less urgent than [threshold] (greater number = less urgent). */
+    /** Preempt everything less urgent than [threshold] (greater number = less urgent).
+     *  P0 fix: jobs are cancelled in place; map entries (the liveness record) are removed only
+     *  by their own finally-block on actual death, so slot accounting never diverges from reality.
+     *  A preempting task therefore waits for the drain (abandon latency, P7 checkpoints) — that
+     *  wait IS the measured preemption cost. */
     fun cancelLowerThan(threshold: Int) {
         scope.launch {
             mutex.withLock {
                 queue.removeAll { it.priority > threshold }
-                val it = runningPrio.entries.iterator()
-                while (it.hasNext()) {
-                    val e = it.next()
-                    if (e.value > threshold) {
-                        running.remove(e.key)?.cancel()
-                        it.remove()
+                for ((key, prio) in runningPrio.toMap()) {
+                    if (prio > threshold) {
+                        running[key]?.cancel()
                     }
                 }
             }

@@ -2211,9 +2211,9 @@ private fun finishCanonicalBackground(
         val n = chapters.size
         if (n <= 0) return null
         val target = (fraction.coerceIn(0.0, 1.0) * n).toInt().coerceIn(0, n - 1)
-        for (delta in 0 until n) {
-            val c = target + delta
-            if (c >= n) break
+        // R14: nearest-content in BOTH directions (|distance| interleave, ties follow the reading
+        // direction) — the old forward-only sweep could skip past the intended chapter.
+        for (c in listOf(target) + orderRemainingChapters(n, target, readingDirection)) {
             val u = ensureChapterLayout(c) ?: continue
             val m = u.markup ?: continue
             if (m.hasSignificantText()) {

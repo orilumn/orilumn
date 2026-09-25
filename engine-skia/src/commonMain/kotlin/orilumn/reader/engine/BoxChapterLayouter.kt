@@ -786,7 +786,15 @@ class BoxChapterLayouter(
         blockHi = blockHi.coerceAtMost(prepare.totalBlocks)
 
         // 3. Shape all blocks in that range (reusing already-shaped blocks from [cache]).
-        val localShapes = (blockLo until blockHi).map { tempShape(cache, prepare, it, profile, prefillL2) }
+        // R3: l2hits counts published-neighbor hits (diagnostic for prefill effectiveness).
+        var l2hits = 0
+        val localShapes = (blockLo until blockHi).map {
+            if (cache?.get(it) == null && prefillL2?.get(it) != null) l2hits++
+            tempShape(cache, prepare, it, profile, prefillL2)
+        }
+        if (prefillL2 != null) {
+            Logger.w("Orilumn.Engine", "win-l2 ch=${table.chapterIndex} page=$targetPage l2hits=$l2hits/${blockHi - blockLo}")
+        }
 
         // 4. Build merged local FlowedLine stream covering all shaped blocks (P6-a2 R6 前视 carry-in).
         val localLines = rebuildLocalLines(prepare, blockLo, blockHi, localShapes) {

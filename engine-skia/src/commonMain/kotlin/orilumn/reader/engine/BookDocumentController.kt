@@ -1169,6 +1169,7 @@ private fun scheduleWindowPrefill(unit: ChapterUnit, targetPage: Int, dir: Int) 
         val (css, cw, chh) = snap
         val pages = order.filter { it in 0 until total }
         if (pages.isEmpty()) return@launch
+        val t0 = platformNowMs()
         val prep = bc.prepareLight(markup, css, profileSnap, cw, u.structureCache, chh)
         val local = HashMap<Int, ParagraphShapeRef>()
         for (p in pages) {
@@ -1184,7 +1185,7 @@ private fun scheduleWindowPrefill(unit: ChapterUnit, targetPage: Int, dir: Int) 
         }
         if (local.isNotEmpty()) {
             windowPrefillL2 = WindowPrefillShapes(chapterIdx, hash, local)
-            Logger.w(logTag, "win-prefill ch=$chapterIdx pages=$pages blocks=${local.size}")
+            Logger.w(logTag, "win-prefill ch=$chapterIdx pages=$pages blocks=${local.size} t=${platformNowMs() - t0}ms")
         }
     }
 }

@@ -34,7 +34,8 @@
         <activity
             android:name=".ui.reader.ReaderActivity"
             android:exported="false"
-            android:screenOrientation="unspecified" />
+            android:screenOrientation="unspecified"
+            android:configChanges="keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|density|layoutDirection" />
     </application>
 
 </manifest>

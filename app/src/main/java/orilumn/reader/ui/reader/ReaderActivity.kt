@@ -287,6 +287,9 @@ class ReaderActivity : ComponentActivity() {
                 if (c == null && !openFailed) openBookEngine(pxW, pxH)
                 else if (c != null && c.setViewport(pxW, pxH)) {
                     Logger.w(TAG, "viewport changed -> whole-book relayout ${pxW}x${pxH}")
+                    // 重建已由 configChanges 接管，不走这里；但系统栏高度可能随横竖变化，
+                    // 静态 inset 在此刷新（与 create/resume 同口径），否则内容偏移沿用旧值。
+                    syncStatusInset()
                     relayoutPending = false
                     val liveLoop = relayoutJob
                     val p = currentPos

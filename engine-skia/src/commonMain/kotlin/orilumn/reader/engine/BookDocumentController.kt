@@ -230,7 +230,6 @@ class BookDocumentController(
      *  it (abandon within ≤1 chapter via per-chapter checkpoints). */
     /** P0 spike: priority pool for background layout work (B2 chapters in spike scope). */
     private val scheduler = TaskScheduler(scope)
-    private var spikePhasesArmed = false
 
     /** P4 (track P): per-chapter background preflight slots — [index] → in-flight job. Each prelinks
      *  one neighbor chapter's markup + light cascade off the flip thread (no shaping, no table), so an
@@ -1914,10 +1913,7 @@ private fun finishCanonicalBackground(
         // its full pass + persist).
         val order = remainingScanOrder(current)
         Logger.w(logTag, "whole-book B2 start epoch=$epoch paramHash=$paramHash skipCh=$current order=${order.take(8)}…")
-        if (!spikePhasesArmed) {
-            spikePhasesArmed = true
-            scheduler.startSpikeAutoPhase()
-        }
+        var submitted = 0
         for (i in order) {
             if (i == current) continue // B1 owns the active chapter's canonical pass
             scheduler.submit(TaskScheduler.Task(
@@ -1925,6 +1921,15 @@ private fun finishCanonicalBackground(
                 priority = TaskScheduler.PRIO_B2_CHAPTER,
                 block = { b2ChapterTask(i, bc, contentWidth, contentHeight, paramHash) },
             ))
+            submitted++
+        }
+        // P1a: pass-completion visibility (the producer rewrite dropped the old done-log).
+        // Best-effort: a newer dispatch superseding this pass silences it.
+        scope.launch {
+            scheduler.awaitIdle()
+            if (layoutEpoch == epoch) {
+                Logger.w(logTag, "whole-book B2 pass drained epoch=$epoch submitted=$submitted")
+            }
         }
     }
 

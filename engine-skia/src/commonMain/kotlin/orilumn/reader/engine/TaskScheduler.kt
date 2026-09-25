@@ -6,7 +6,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -22,8 +21,8 @@ import orilumn.reader.io.Logger
  * pending/running twin (dedup); [cancelLowerThan] preempts everything less urgent than a
  * threshold. Lower priority number = more urgent.
  *
- * SPIKE instrumentation (remove or keep per P0 verdict): [startSpikeAutoPhase] cycles
- * [maxSlots] with `spike-phase` logs; task start/done/cancel log `spike-task`.
+ * SPIKE instrumentation: task start/done/cancel log `spike-task` (kept as permanent
+ * lightweight diagnostics for queue behavior).
  */
 class TaskScheduler(
     private val scope: CoroutineScope,
@@ -49,14 +48,10 @@ class TaskScheduler(
     private val running = HashMap<String, Job>()
     private val runningPrio = HashMap<String, Int>()
 
-    /** Worker slot budget (P0: driven by auto-phase; P1: fixed from measured knee). */
+    /** Worker slot budget (P1: fixed at 2 from the P0 knee — light pages flat, heavy
+     *  content-bound; tunable at runtime for future measurement). */
     @Volatile
     var maxSlots: Int = maxSlots
-
-    /** P0 spike: cycle slots automatically for the contention curve (ONE install, phases in log). */
-    var spikePhases: List<Int> = listOf(1, 2, 4)
-    var spikePhaseMs: Long = 60_000L
-    private var spikeJob: Job? = null
 
     fun submit(task: Task) {
         scope.launch {
@@ -110,21 +105,14 @@ class TaskScheduler(
     suspend fun pendingCount(): Int = mutex.withLock { queue.size }
     suspend fun runningCount(): Int = mutex.withLock { running.size }
 
-    fun startSpikeAutoPhase() {
-        spikeJob?.cancel()
-        spikeJob = scope.launch {
-            for (n in spikePhases) {
-                maxSlots = n
-                Logger.w("Orilumn.SPIKE", "spike-phase slots=$n")
-                delay(spikePhaseMs)
-                ensureActive()
-            }
-            Logger.w("Orilumn.SPIKE", "spike-phase done")
+    /** P1a: diagnostic-grade idle wait (polling). Resolves when no task is queued or running.
+     *  Callers must re-validate whatever they were waiting for (new submits may land after). */
+    suspend fun awaitIdle() {
+        while (true) {
+            val busy = mutex.withLock { queue.isNotEmpty() || running.isNotEmpty() }
+            if (!busy) return
+            delay(200)
         }
-    }
-
-    fun stopSpikeAutoPhase() {
-        spikeJob?.cancel()
     }
 
     private fun pumpLocked() {

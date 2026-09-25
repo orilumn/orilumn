@@ -301,6 +301,9 @@ class BookDocumentController(
      * Parses the whole book and restores the start position from saved progress
      * (lays out the target chapter).
      * Cover is NOT decoded here (C2-P1: host concern, see [coverHref]).
+     * R13 invariant: ONE controller instance per book — [open] appends chapter skeletons and never
+     * clears (no `close()` by design; both hosts construct a fresh controller per book). Reusing an
+     * instance for a second book accumulates stale chapters/sessions. Do not call twice.
      * @param bookId Primary key of the book (<0 means don't read progress, start from beginning).
      * @param saved Saved progress record (common [BookReadingState]); null = start from beginning.
      */

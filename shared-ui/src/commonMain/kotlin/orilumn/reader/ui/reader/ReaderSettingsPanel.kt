@@ -10,6 +10,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -457,6 +458,9 @@ fun ReaderSettingsPanel(
          * 注意：按钮区已搬出列表，LazyColumn 里全是字体行，不需要任何像素垫付——
          * 传 scrollOffset 会把目标行顶出视口之外（此前按"垫掉吸顶按钮高度"传了一行
          * 高度，PgDn 恒多翻约两行，即此 bug）。
+         * PgUp 额外保证（用户层）：焦点行恒为可见区最后一行且底部完整可见（与下箭头
+         * 的完整可见保证同口径）——只 scrollToItem(top) 会把焦点行落在半裁剪的底边，
+         * 故按溢出像素再 scrollBy 一小段，把焦点行底对齐视口底（焦点仍是最后一行）。
          */
         fun jumpFontTo(focus: Int, top: Int) {
             if (current != Sub.TextFont || keys.isEmpty()) return
@@ -469,6 +473,17 @@ fun ReaderSettingsPanel(
             scope.launch {
                 runCatching {
                     listState.scrollToItem(listPosOf(t))
+                    if (f != t) {
+                        val fLazy = listPosOf(f)
+                        val info = listState.layoutInfo
+                        val item = info.visibleItemsInfo.firstOrNull { it.index == fLazy }
+                        if (item != null) {
+                            val overflow = item.offset + item.size - info.viewportEndOffset
+                            if (overflow > 0) listState.scrollBy(overflow.toFloat())
+                        } else {
+                            listState.scrollToItem(fLazy)
+                        }
+                    }
                 }
             }
         }

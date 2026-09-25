@@ -40,8 +40,8 @@ import okio.Path.Companion.toPath
  * 状态机（最小壳口径）：
  * - 视口/换书/session 变化 → 重建 [DesktopReaderHost]（`remember` 键），`ReaderScreen` 经
  *   `LaunchedEffect(host)` 重新 `open()` 并落到锚点（存档定位 / 目录跳转目标）；
- * - 排版设置变化 → 宿主 `relayoutToSettings` 原位重排（行锚合位），经 `externalPos` +
- *   `contentRevision` 推送阅读面（对齐平板 `scheduleRelayout+applyReflowResult` 口径）；
+ * - 排版设置变化 → 宿主两段式原位重排（R15：150ms 防抖轻刷新 + 800ms 静默全套），经 `externalPos` +
+ *   `contentRevision` 推送阅读面（对齐平板 tick 轻刷新 + 关面板全套口径）；
  * - 设置面板拖拽是高频 `onPreview`：150ms 防抖后才进原位重排，避免逐帧重排
  *   （对齐 Android `scheduleRelayout` 节流语义）；纯亮度变化不进版式管线；
  * - 目录跳转：先经现 host `chapterStart` 塑形校验，再以锚点重建 host 落位；
@@ -113,9 +113,9 @@ fun ReaderView(
             id != null && id in ids
         }?.family
 
-    // 版式防抖 + 原位重排（R5，与平板 `scheduleRelayout` 同语义）：
+    // 版式防抖 + 原位重排（R5/R15，与平板 tick 轻刷新 + 关面板全套同序）：
     // 亮度分叉（与平板同规则，共享 `withoutLight`）：纯亮度变化不进版式管线；
-    // 排版变化走宿主 `relayoutToSettings` 行锚合位，经 externalPos 推送阅读面，
+    // 排版变化走宿主两段式（previewToSettings 行锚合位 + commitRelayout 全套），经 externalPos 推送阅读面，
     // 不再重建宿主（旧 `remember(layoutSettings)` 整宿主重建丢内存位是跳章首页根因）。
     // 视口/换书/session 仍走下方的宿主重建（存档定位）。
     var appliedLayout by remember(book) { mutableStateOf(settings) }
@@ -155,19 +155,16 @@ fun ReaderView(
         LaunchedEffect(book) {
             fontEntries = desktopHost?.syncPanelFonts() ?: fontLibrary.allEntries(fontLibrary.list())
         }
-        // 设置驱动的原位重排：防抖150ms，排版变化才进；落位经 externalPos+contentRevision
+        // 设置驱动的原位重排（R15 两段式，与平板“tick 轻刷新 + 关面板全套”同序）：
+        // 第一段 150ms 防抖落位即调（本章轻刷新）；第二段静默 800ms 后全套一次（bump 代际 + B2）。
+        // 新设置到达即重启本 effect，未执行的第二段自动取消。落位经 externalPos+contentRevision
         // 推送（与平板 applyReflowResult 同口径：刷版本号 + 定位到含锚字符的新页）。
-        // 修复：relayoutToSettings 完成后的推送必须在 NonCancellable 中执行，
-        // 避免 LaunchedEffect 重启取消导致已完成的引擎重排被丢弃（contentRevision 不增 → 画布不重绘）。
-        LaunchedEffect(settings) {
+        // 修复：推送必须在 NonCancellable 中执行，避免 LaunchedEffect 重启取消导致已完成的引擎重排被丢弃。
+        LaunchedEffect(book, settings) {
             delay(150)
             if (settings.withoutLight() == appliedLayout.withoutLight()) return@LaunchedEffect
             val host = desktopHost ?: return@LaunchedEffect
-            val anchor = currentPos
-            val landing = host.relayoutToSettings(
-                settings, anchor?.chapter ?: 0, anchor?.slice?.charStart ?: 0)
-            appliedLayout = settings
-            if (landing != null) {
+            suspend fun pushLanding(landing: ReaderPos) {
                 // 已完成的引擎侧重排结果必须落地：用 NonCancellable 保证推送不被外层取消吞掉
                 withContext(NonCancellable) {
                     currentPos = landing
@@ -177,6 +174,16 @@ fun ReaderView(
                         "push ch=${landing.chapter} slice=${landing.slice} rev=$contentRevision")
                 }
             }
+            val anchor = currentPos
+            val landing = host.previewToSettings(
+                settings, anchor?.chapter ?: 0, anchor?.slice?.charStart ?: 0)
+            appliedLayout = settings
+            if (landing != null) pushLanding(landing)
+            // 第二段：设置静默 800ms 后全套（与平板关面板同序；新设置到达则本 effect 重启，此段取消）。
+            delay(800)
+            val anchor2 = currentPos
+            val landed2 = host.commitRelayout(anchor2?.chapter ?: 0, anchor2?.slice?.charStart ?: 0)
+            if (landed2 != null) pushLanding(landed2)
         }
 
         ReaderScreen(

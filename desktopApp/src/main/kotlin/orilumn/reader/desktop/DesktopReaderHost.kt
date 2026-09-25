@@ -232,26 +232,45 @@ class DesktopReaderHost(
     }
 
     /**
-     * R5 设置原位重排（用户层·壳，与平板 `scheduleRelayout+applyReflowResult` 同序）：
-     * 换 profile → 追装字库池 → `prepareRelayoutLight(anchorChar)` 行锚重算 → `bindReflow` 绑定，
+     * R15 设置两段式·第一段（用户层·壳，150ms 防抖落位即调）：本章轻刷新。换 profile → 追装字库池 →
+     * `prepareRelayoutLight(anchorChar)` 行锚重算 → `bindReflow` 绑定，不碰他章、不跑 B2；
      * 同一字符在新分页表合位，不重建宿主、不丢内存位。视口/换书仍走重建（`initialAnchor` 路径）。
      */
-    suspend fun relayoutToSettings(next: ReaderSettings, chapter: Int, anchorChar: Int): ReaderPos? =
+    suspend fun previewToSettings(next: ReaderSettings, chapter: Int, anchorChar: Int): ReaderPos? =
         withContext(Dispatchers.Default) {
-            profile = TypographicProfile.build(next, density)
-            orilumn.reader.engine.skia.SkParagraphFactory.weightAnchors = profile.fontWeightAnchors
-            controller.profile = profile
-            topUpSkiaFonts(orilumn.reader.engine.css.FontDemand.EMPTY)
+            applyProfile(next)
             orilumn.reader.io.Logger.w("Orilumn.Desktop",
-                "relayoutToSettings body=${next.fontBody} anchors=${profile.fontWeightAnchors} ch=$chapter anchorChar=$anchorChar")
+                "previewToSettings body=${next.fontBody} anchors=${profile.fontWeightAnchors} ch=$chapter anchorChar=$anchorChar")
             val r = controller.prepareRelayoutLight(chapter, anchorChar) ?: run {
-                orilumn.reader.io.Logger.w("Orilumn.Desktop", "relayoutToSettings NULL (stale/empty) ch=$chapter")
+                orilumn.reader.io.Logger.w("Orilumn.Desktop", "previewToSettings NULL (stale/empty) ch=$chapter")
+                return@withContext null
+            }
+            controller.bindReflow(r)
+            ReaderPos(r.chapter, r.page)
+        }
+
+    /**
+     * R15 设置两段式·第二段（用户层·壳，设置静默约 800ms 后调一次）：全套。`prepareRelayout`
+     *（bump 代际废他章，B2 的 epoch 去重靠这一次续命）→ `bindReflow` → B2，与平板关面板全套同序。
+     */
+    suspend fun commitRelayout(chapter: Int, anchorChar: Int): ReaderPos? =
+        withContext(Dispatchers.Default) {
+            val r = controller.prepareRelayout(chapter, anchorChar) ?: run {
+                orilumn.reader.io.Logger.w("Orilumn.Desktop", "commitRelayout NULL (stale/empty) ch=$chapter")
                 return@withContext null
             }
             controller.bindReflow(r)
             controller.requestWholeBookRelayout()
             ReaderPos(r.chapter, r.page)
         }
+
+    /** 换 profile 三件套（两段共用）：重建 profile → 字重锚点 → 控制器持有 → 追装字库池。 */
+    private suspend fun applyProfile(next: ReaderSettings) {
+        profile = TypographicProfile.build(next, density)
+        orilumn.reader.engine.skia.SkParagraphFactory.weightAnchors = profile.fontWeightAnchors
+        controller.profile = profile
+        topUpSkiaFonts(orilumn.reader.engine.css.FontDemand.EMPTY)
+    }
 
     /**
      * F4b 用户字库追装（与平板 `topUpSkiaFonts` 同式，经共享 [FontPoolSync]）：

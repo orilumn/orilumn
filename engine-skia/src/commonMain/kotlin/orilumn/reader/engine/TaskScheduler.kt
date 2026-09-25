@@ -31,6 +31,9 @@ class TaskScheduler(
 ) {
     companion object {
         const val PRIO_PREFILL_PAGE = 10
+        /** P2.1: prev-chapter full bump (second priority is unconditional — between neighbor
+         *  pages and current-chapter canonical). Shares B1 keying for mutual exclusion. */
+        const val PRIO_PREV_CHAPTER = 15
         const val PRIO_B1_CHAPTER = 20
         const val PRIO_B2_CHAPTER = 30
         const val PRIO_PREWARM = 40

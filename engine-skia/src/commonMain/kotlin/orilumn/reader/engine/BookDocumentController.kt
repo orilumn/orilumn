@@ -29,10 +29,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.ensureActive
@@ -1122,10 +1119,6 @@ data class TempWindowSnapshot(
 /** R2: last tempNav null-branch reason (diagnostic only; flip thread writes, flip thread reads). */
 private var lastTempNavNull: String? = null
 
-/** R3 (S7 steps 2–3): disk-path neighbor block-shape prefill slot (latest landing wins). */
-private var windowPrefillJob: Job? = null
-private var lastWindowPrefillKey: Long = Long.MIN_VALUE
-
 /**
  * R18: last-flip timestamp (any flip entry). Retained for future adaptive scheduling;
  * preemption no longer polls it (cancel-on-flip is unconditional, resume via resubmit).
@@ -1133,11 +1126,11 @@ private var lastWindowPrefillKey: Long = Long.MIN_VALUE
 @Volatile
 private var lastFlipMs: Long = 0L
 
-/** P1d: the single flip hook. Cancels the landing prefill outright (published products survive)
- *  and preempts all pool work below flip priority; resubmits reposition via skip-fresh. */
+/** P1d: the single flip hook. Preempts all pool work below flip priority (page prefill
+ *  tasks included — same-key resubmits reposition on the next landing); resubmits reposition
+ *  via skip-fresh. */
 private fun notifyFlip() {
     lastFlipMs = platformNowMs()
-    windowPrefillJob?.cancel()
     scheduler.cancelLowerThan(TaskScheduler.PRIO_FLIP)
 }
 
@@ -1152,10 +1145,6 @@ private data class WindowPrefillShapes(
     val shapes: Map<Int, ParagraphShapeRef>,
 )
 
-/** R3: flip bursts must not fund shaping that gets cancelled — shaping starts only if the
- *  reader lingers past this delay. */
-private val windowPrefillStartDelayMs = 120L
-
 /** R17 probe hook (C2-P2b-4 pattern): cached page indexes for [chapter]. */
 fun pageCacheKeysForTest(chapter: Int): Set<Int> =
     unitAt(chapter)?.pageCache?.keys?.toSet() ?: emptySet()
@@ -1164,126 +1153,141 @@ fun pageCacheKeysForTest(chapter: Int): Set<Int> =
 fun windowPrefillSnapshotForTest(): Triple<Int, Long, Set<Int>>? =
     windowPrefillL2?.let { Triple(it.chapterIndex, it.paramHash, it.shapes.keys.toSet()) }
 
-/** R3 (S7 steps 2–3): disk-path neighbor prefill after a landing. No-op on the temp path
- *  (its own prefill owns it) and without a table. Latest landing wins; direction steers order. */
+/** P2.1: disk-path neighbor prefill after a landing (scheduler edition). No-op on the temp
+ *  path (its own prefill owns it) and without a table. Submits one PAGE task per in-range
+ *  neighbor in flip-direction order; same-key submit replaces stale twins (latest landing wins).
+ *  Prev page outside this chapter ⇒ bump the prev chapter's FULL layout to second priority
+ *  (S7 skip retired per ratified spec — the pages nearest the reader stay ready).
+ *  No start delay (R18 doctrine: cancel promptly instead of waiting out bursts). */
 private fun scheduleWindowPrefill(unit: ChapterUnit, targetPage: Int, dir: Int) {
     val table = unit.paginationTable ?: return
     if (unit.inProgress != null) return
     val total = table.pages.size
     if (total <= 0) return
-    val hash = table.paramHash
-    val key = (unit.chapterIndex.toLong() shl 48) xor
-        ((targetPage.toLong() and 0xFFFFFF) shl 24) xor
-        ((dir.toLong() and 0xFF) shl 16) xor (hash and 0xFFFF)
-    if (key == lastWindowPrefillKey && windowPrefillJob?.isActive == true) return
-    lastWindowPrefillKey = key
-    windowPrefillJob?.cancel()
     val chapterIdx = unit.chapterIndex
-    val profileSnap = profile
-    // R17: live-object identity baseline — assembly products are stored only if no flip rebound
-    // meanwhile (flip-thread reads, benignly racy; the worker revalidates under lock).
-    val liveLayout = unit.layout
-    val liveSlices = unit.pageSlices
-    // Neighbor order follows the flip direction; out-of-range sides are dropped below
-    // (a previous page outside this chapter is skipped per S7 step 3).
     val order = if (dir >= 0) intArrayOf(targetPage + 1, targetPage - 1)
     else intArrayOf(targetPage - 1, targetPage + 1)
-    windowPrefillJob = bgScope.launch(backgroundDispatcher) {
-        // Let flip bursts pass first: shaping starts only if the reader lingers.
-        kotlinx.coroutines.delay(windowPrefillStartDelayMs)
-        val u = unitAt(chapterIdx) ?: return@launch
-        val markup = u.markup ?: return@launch
-        val bc = layouter as? BoxChapterLayouter ?: return@launch
-        // Snapshot guards + dims under a short lock; shaping itself runs lock-free into a
-        // private map (the shared cache is never touched — no live object is disturbed).
-        val snap = layoutMutex.withLock {
-            if (u.inProgress != null || u.paginationTable !== table || u.paramHash != hash) null
-            else Triple(
-                u.cssBundle,
-                (viewW - profileSnap.marginLeft - profileSnap.marginRight).coerceAtLeast(16),
-                (viewH - profileSnap.marginTop - profileSnap.marginBottom).coerceAtLeast(16),
-            )
-        } ?: return@launch
-        val (css, cw, chh) = snap
-        val pages = order.filter { it in 0 until total }
-        if (pages.isEmpty()) return@launch
-        val t0 = platformNowMs()
-        // R3b: pages warm in PARALLEL (one worker per page; next/prev are independent block sets).
-        // Each worker builds its OWN prepareLight (cheap, ~20ms; shared structureCache is SyncLock
-        // guarded by design) and its OWN map, so no mutable state is ever shared mid-flight —
-        // parallel shaping scales on this SoC (B2 chunk precedent) and thermals are confirmed fine.
-        // Merged sequentially below; assembly then reuses the merged shapes as L1.
-        // Structured concurrency: a flip cancels the whole scope (single slot) outright.
-        val warmed: List<Pair<Int, Map<Int, ParagraphShapeRef>>> = try {
-            coroutineScope {
-                pages.map { p ->
-                    async {
-                        val rec = table.pages[p]
-                        val lo = rec.blockStart.coerceAtLeast(0)
-                        if (rec.blockEndExclusive <= lo) return@async (p to emptyMap<Int, ParagraphShapeRef>())
-                        val lp = bc.prepareLight(markup, css, profileSnap, cw, u.structureCache, chh)
-                        val m = HashMap<Int, ParagraphShapeRef>()
-                        for (b in lo until rec.blockEndExclusive) {
-                            ensureActive()
-                            if (b < 0 || b >= lp.totalBlocks) continue
-                            if (!m.containsKey(b)) m[b] = bc.tempShape(m, lp, b, profileSnap)
-                        }
-                        p to m
-                    }
-                }.awaitAll()
-            }
-        } catch (e: CancellationException) {
-            return@launch // superseded — expected
+    for (p in order) {
+        if (p in 0 until total) {
+            // R17-proven shape: only the priority side assembles (fits flip cadence); the other
+            // side stays L2-warmed. Doubling assembly per landing cost more than it covered.
+            val prioritySide = (p == order.firstOrNull())
+            scheduler.submit(TaskScheduler.Task(
+                key = "pg:$chapterIdx:$p",
+                priority = TaskScheduler.PRIO_PREFILL_PAGE,
+                block = { prefillPageTask(chapterIdx, p, targetPage, prioritySide) },
+            ))
+        } else if (p < 0 && chapterIdx > 0) {
+            // Second priority is unconditional: the previous chapter's full pass jumps the queue.
+            // Submitted under B2's OWN key ("b2:<prev>") so it dedups with the whole-book pass
+            // (same work, earlier) instead of double-shaping the chapter.
+            unitAt(chapterIdx - 1) ?: continue
+            val bc = layouter as? BoxChapterLayouter ?: continue
+            val contentW = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
+            val contentH = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
+            val hash = LayoutParamKey.fromProfile(profile, contentW, contentH).hash()
+            scheduler.submit(TaskScheduler.Task(
+                key = "b2:${chapterIdx - 1}",
+                priority = TaskScheduler.PRIO_PREV_CHAPTER,
+                block = { b2ChapterTask(chapterIdx - 1, bc, contentW, contentH, hash) },
+            ))
+            Unit
         }
-        val local = HashMap<Int, ParagraphShapeRef>()
-        warmed.forEach { local.putAll(it.second) }
-        if (local.isNotEmpty()) {
-            windowPrefillL2 = WindowPrefillShapes(chapterIdx, hash, local)
-            Logger.w(logTag, "win-prefill ch=$chapterIdx pages=$pages blocks=${local.size} t=${platformNowMs() - t0}ms")
-        }
-        // R17: assemble the priority-side page into the page cache (ONE page only: under a
-        // ~1s flip cadence a two-page assembly never finishes before the next landing cancels it).
-        // Reuses the just-warmed shapes as L1 (same params, deterministic) so assembly is pure
-        // assembly cost. The other side stays L2-warmed (shaping covered, assembly on demand).
-        val first = pages.firstOrNull() ?: return@launch
-        ensureActive()
-        val prod = try {
-            // Assembly needs its own prepare (workers' instances stay thread-confined);
-            // structureCache memo makes this cheap.
-            val prep = bc.prepareLight(markup, css, profileSnap, cw, u.structureCache, chh)
-            bc.incrementalLayoutForPage(
-                prepare = prep,
-                profile = profileSnap,
-                contentW = cw,
-                contentH = chh,
-                table = table,
-                targetPage = first,
-                pagesToShape = 1,
-                cache = local,
-                prefillL2 = null,
-            )
-        } catch (e: CancellationException) {
-            return@launch // superseded — expected, stop burning CPU
-        } catch (e: Exception) {
-            Logger.e(logTag, "win-prefill assemble ch=$chapterIdx page=$first FAIL ${e.message}")
-            return@launch
-        }
-        val stored = layoutMutex.withLock {
-            val u2 = unitAt(chapterIdx)
-            if (u2 == null || u2.inProgress != null || u2.paginationTable !== table ||
-                u2.paramHash != hash || u2.layout !== liveLayout || u2.pageSlices !== liveSlices
-            ) {
-                false
-            } else {
-                u2.pageCache[first] = ChapterUnit.PageProduct(prod.layout, prod.slices, hash)
-                u2.pageCache.keys.toList().forEach { k ->
-                    if (k < targetPage - 2 || k > targetPage + 2) u2.pageCache.remove(k)
-                }
-                true
-            }
-        }
-        if (stored) Logger.w(logTag, "win-prefill ch=$chapterIdx page=$first cached")
     }
+}
+
+/** P2.1: one neighbor page — warm its blocks, merge-publish L2, and (priority side only)
+ *  assemble + store the product. Skips (no-op) on temp-live / missing table / out-of-range:
+ *  the S7 step-3 scope, checked live (state moves between dispatch and run). */
+private suspend fun prefillPageTask(chapterIdx: Int, page: Int, anchor: Int, assemble: Boolean) {
+    val u0 = unitAt(chapterIdx) ?: return
+    val table = u0.paginationTable ?: return
+    if (u0.inProgress != null) return
+    if (page !in 0 until table.pages.size) return
+    val hash = table.paramHash
+    val profileSnap = profile
+    val markup = u0.markup ?: return
+    val bc = layouter as? BoxChapterLayouter ?: return
+    val ctx = currentCoroutineContext()
+    // Snapshot guards + dims under a short lock; shaping runs lock-free into a private map.
+    val snap = layoutMutex.withLock {
+        if (u0.inProgress != null || u0.paginationTable !== table || u0.paramHash != hash) null
+        else Triple(
+            u0.cssBundle,
+            (viewW - profileSnap.marginLeft - profileSnap.marginRight).coerceAtLeast(16),
+            (viewH - profileSnap.marginTop - profileSnap.marginBottom).coerceAtLeast(16),
+        )
+    } ?: return
+    val (css, cw, chh) = snap
+    val rec = table.pages[page]
+    val lo = rec.blockStart.coerceAtLeast(0)
+    if (rec.blockEndExclusive <= lo) return
+    val lp = bc.prepareLight(markup, css, profileSnap, cw, u0.structureCache, chh)
+    val local = HashMap<Int, ParagraphShapeRef>()
+    for (b in lo until rec.blockEndExclusive) {
+        ctx.ensureActive()
+        if (b < 0 || b >= lp.totalBlocks) continue
+        if (!local.containsKey(b)) local[b] = bc.tempShape(local, lp, b, profileSnap)
+    }
+    if (local.isEmpty()) return
+    publishPrefillShapes(chapterIdx, hash, local)
+    // Non-priority side stays L2-warmed (shaping covered); assembly is priority-side only —
+    // doubling it per landing cost more (device-measured) than the backward-hit rate covers.
+    if (!assemble) return
+    // Assemble with the just-warmed shapes as L1 (same params, deterministic) so assembly is
+    // pure assembly cost.
+    val prep = bc.prepareLight(markup, css, profileSnap, cw, u0.structureCache, chh)
+    val prod = try {
+        bc.incrementalLayoutForPage(
+            prepare = prep,
+            profile = profileSnap,
+            contentW = cw,
+            contentH = chh,
+            table = table,
+            targetPage = page,
+            pagesToShape = 1,
+            cache = local,
+            prefillL2 = null,
+        )
+    } catch (e: CancellationException) {
+        return // superseded — expected, stop burning CPU
+    } catch (e: Exception) {
+        Logger.e(logTag, "win-prefill assemble ch=$chapterIdx page=$page FAIL ${e.message}")
+        return
+    }
+    // Live-object identity baseline — store only if no flip rebound meanwhile.
+    val liveLayout = u0.layout
+    val liveSlices = u0.pageSlices
+    val stored = layoutMutex.withLock {
+        val u2 = unitAt(chapterIdx)
+        if (u2 == null || u2.inProgress != null || u2.paginationTable !== table ||
+            u2.paramHash != hash || u2.layout !== liveLayout || u2.pageSlices !== liveSlices
+        ) {
+            false
+        } else {
+            u2.pageCache[page] = ChapterUnit.PageProduct(prod.layout, prod.slices, hash)
+            u2.pageCache.keys.toList().forEach { k ->
+                if (k < anchor - 2 || k > anchor + 2) u2.pageCache.remove(k)
+            }
+            true
+        }
+    }
+    if (stored) Logger.w(logTag, "win-prefill ch=$chapterIdx page=$page cached")
+}
+
+/** P2.1: merge warmed blocks into the published L2 snapshot (copy-on-write replace). */
+private val prefillPublishMutex = Mutex()
+
+private suspend fun publishPrefillShapes(chapterIdx: Int, hash: Long, extra: Map<Int, ParagraphShapeRef>) {
+    if (extra.isEmpty()) return
+    prefillPublishMutex.withLock {
+        val cur = windowPrefillL2
+        val merged = if (cur != null && cur.chapterIndex == chapterIdx && cur.paramHash == hash) {
+            HashMap(cur.shapes).also { it.putAll(extra) }
+        } else HashMap(extra)
+        windowPrefillL2 = WindowPrefillShapes(chapterIdx, hash, merged)
+    }
+    Logger.w(logTag, "win-prefill ch=$chapterIdx +${extra.size} blocks")
 }
 
 /** R3: read-only L2 lookup for the incremental path — keyed by chapter + table hash. */

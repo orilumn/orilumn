@@ -577,7 +577,7 @@ class BookDocumentController(
                     // Legacy layouter: still full layout.
                     val product = layouter.layout(markup, unit.cssBundle, profile, contentWidth, contentHeight)
                         ?: error("layout failed")
-                    unit.bind(product.layout, product.slices)
+                    unit.bindFull(product.layout, product.slices)
                     Logger.w(logTag, "layout ${ctx(unit)} DISK-HIT+LEGACY pages=${cached.totalPages} t=${platformNowMs() - t0}ms")
                 }
             } else {
@@ -611,7 +611,7 @@ class BookDocumentController(
                     ?: error("layout failed")
                 val layout = product.layout
                 val slices = product.slices
-                unit.bind(layout, slices)
+                unit.bindFull(layout, slices)
 
                 // Persist pagination table (with block ranges backfilled by BoxChapterLayouter).
                 if (cache != null && cacheFile != null && slices.isNotEmpty() && slices[0].blockStart >= 0) {
@@ -1245,7 +1245,7 @@ private fun resolveHeadArrival(unit: ChapterUnit, ip: InProgressPagination): Pai
  *  re-rendered in place while the temp session is active. */
 private fun finalizeTempOnLeave(unit: ChapterUnit, ip: InProgressPagination) {
     if (ip.canonicalLayout != null) {
-        unit.bind(ip.canonicalLayout!!, ip.canonicalSlices)
+        unit.bindFull(ip.canonicalLayout!!, ip.canonicalSlices)
         unit.clearInProgress()
         Logger.w(logTag, "temp 作废→磁盘 ${ctx(unit)} pages=${ip.canonicalSlices.size}")
         // Step 2 (temp→canonical handoff continuity): the handoff must never skip content the temp
@@ -1689,7 +1689,7 @@ private fun finishCanonicalBackground(
             unit.bindPaginationTable(table)
             Logger.w(logTag, "layout ${ctx(unit)} FULL-PRELIM pages=${table.totalPages} blocks=${slices.maxOf { it.blockEndExclusive }}")
         }
-        unit.bind(product.layout, slices)
+        unit.bindFull(product.layout, slices)
     }
 
     /**
@@ -1796,7 +1796,9 @@ private fun finishCanonicalBackground(
         val unit = unitAt(r.chapter) ?: return false
         if (unit.inProgress != null) return true
         val layout = r.layout ?: return false
-        unit.bind(layout, r.slices)
+        // r.layout is non-null only for full-chapter products (small-chapter/legacy relayout;
+        // large chapters carry null and keep the anchor stream), so this is always a full bind.
+        unit.bindFull(layout, r.slices)
         return true
     }
 

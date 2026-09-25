@@ -146,6 +146,15 @@ class ChapterUnit(
         this.laidOut = true
     }
 
+    /** Binds a FULL-chapter layout result (R1): [bind] plus records the shaped window as the full
+     *  page range, so on-demand re-windowing sees every page as already shaped instead of discarding
+     *  the full result on the next flip. Partial-window binds keep using [bind] + explicit window. */
+    fun bindFull(layout: BookLayout, pageSlices: List<PageSlice>) {
+        bind(layout, pageSlices)
+        shapedPageFrom = 0
+        shapedPageTo = pageSlices.size
+    }
+
     /** Binds the prepare result. [hash] is the layout-param hash that produced it (for later
      *  change detection). */
     fun bindPrepare(prepare: ChapterPrepareResult, hash: Long) {

@@ -1233,47 +1233,45 @@ private fun scheduleWindowPrefill(unit: ChapterUnit, targetPage: Int, dir: Int) 
             windowPrefillL2 = WindowPrefillShapes(chapterIdx, hash, local)
             Logger.w(logTag, "win-prefill ch=$chapterIdx pages=$pages blocks=${local.size} t=${platformNowMs() - t0}ms")
         }
-        // R17: assemble full neighbor products into the page cache. Assembly shares the same
-        // concurrency posture as existing background shaping (B1/B2/flip already shape
-        // concurrently; prepare is a fresh instance, image/table machinery likewise shared).
-        // Nothing live is touched — products land in pageCache under a short lock only.
-        for (p in pages) {
-            ensureActive()
-            val prod = try {
-                bc.incrementalLayoutForPage(
-                    prepare = prep,
-                    profile = profileSnap,
-                    contentW = cw,
-                    contentH = chh,
-                    table = table,
-                    targetPage = p,
-                    pagesToShape = 1,
-                    cache = HashMap(),
-                    prefillL2 = null,
-                )
-            } catch (e: CancellationException) {
-                return@launch // superseded — expected, stop burning CPU
-            } catch (e: Exception) {
-                Logger.e(logTag, "win-prefill assemble ch=$chapterIdx page=$p FAIL ${e.message}")
-                continue
-            }
-            val stored = layoutMutex.withLock {
-                val u2 = unitAt(chapterIdx)
-                if (u2 == null || u2.inProgress != null || u2.paginationTable !== table ||
-                    u2.paramHash != hash || u2.layout !== liveLayout || u2.pageSlices !== liveSlices
-                ) {
-                    false
-                } else {
-                    u2.pageCache[p] = ChapterUnit.PageProduct(prod.layout, prod.slices, hash)
-                    u2.pageCache.keys.toList().forEach { k ->
-                        if (k < targetPage - 2 || k > targetPage + 2) u2.pageCache.remove(k)
-                    }
-                    true
-                }
-            }
-            if (!stored) return@launch
-            Logger.w(logTag, "win-prefill ch=$chapterIdx page=$p cached")
+        // R17: assemble the priority-side page into the page cache (ONE page only: under a
+        // ~1s flip cadence a two-page assembly never finishes before the next landing cancels it).
+        // Reuses the just-warmed shapes as L1 (same params, deterministic) so assembly is pure
+        // assembly cost. The other side stays L2-warmed (shaping covered, assembly on demand).
+        val first = pages.firstOrNull() ?: return@launch
+        ensureActive()
+        val prod = try {
+            bc.incrementalLayoutForPage(
+                prepare = prep,
+                profile = profileSnap,
+                contentW = cw,
+                contentH = chh,
+                table = table,
+                targetPage = first,
+                pagesToShape = 1,
+                cache = local,
+                prefillL2 = null,
+            )
+        } catch (e: CancellationException) {
+            return@launch // superseded — expected, stop burning CPU
+        } catch (e: Exception) {
+            Logger.e(logTag, "win-prefill assemble ch=$chapterIdx page=$first FAIL ${e.message}")
+            return@launch
         }
+        val stored = layoutMutex.withLock {
+            val u2 = unitAt(chapterIdx)
+            if (u2 == null || u2.inProgress != null || u2.paginationTable !== table ||
+                u2.paramHash != hash || u2.layout !== liveLayout || u2.pageSlices !== liveSlices
+            ) {
+                false
+            } else {
+                u2.pageCache[first] = ChapterUnit.PageProduct(prod.layout, prod.slices, hash)
+                u2.pageCache.keys.toList().forEach { k ->
+                    if (k < targetPage - 2 || k > targetPage + 2) u2.pageCache.remove(k)
+                }
+                true
+            }
+        }
+        if (stored) Logger.w(logTag, "win-prefill ch=$chapterIdx page=$first cached")
     }
 }
 

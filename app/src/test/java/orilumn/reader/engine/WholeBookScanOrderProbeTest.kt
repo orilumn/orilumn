@@ -16,19 +16,19 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /**
- * Probe T5 (P12 half): whole-book B2 scan order = reading direction × distance.
+ * Probe T5 (P12 half, R7 order): whole-book B2 scan order = strict absolute-distance interleave.
  *
  * P12 gives a pure ordering function, [orderRemainingChapters], used by the whole-book B2 scan
  * ([BookDocumentController.requestWholeBookRelayout] → [BookDocumentController.remainingScanOrder]):
- * the direction group the reader is heading toward (ahead on forward, behind on backward) comes first,
- * nearest-distance-first inside each group, so a flip-out-of-bounds into a nearby chapter lands on an
- * already-laid-out chapter. Correctness never depends on the order — every non-current chapter still
- * completes its full pass + persist, and the per-chapter checkpoints (P7) keep abandonment ≤1 chapter.
+ * 1-away both sides, then 2-away, and so on; ties at the same distance are broken by the reading
+ * direction (the side the reader is heading toward first), so a flip-out-of-bounds into a nearby
+ * chapter lands on an already-laid-out chapter. Correctness never depends on the order — every
+ * non-current chapter still completes its full pass + persist, and the per-chapter checkpoints (P7)
+ * keep abandonment ≤1 chapter.
  *
  * Locked in here:
- *  1. **Unit.** The pure function across direction/current/boundaries: direction group first,
- *     nearest-first within group, every chapter exactly once, edge chapters when current is at either
- *     end of the book.
+ *  1. **Unit.** The pure function across direction/current/boundaries: interleave order,
+ *     every chapter exactly once, edge chapters when current is at either end of the book.
  *  2. **Integration.** The tracked reading direction is driven by the REAL flip entries
  *     ([BookDocumentController.findAdjacentPage] — the single reader-facing page-turn, covering
  *     in-chapter temp/canonical and out-of-bounds cross-chapter flips — and the direct
@@ -63,15 +63,15 @@ class WholeBookScanOrderProbeTest {
     // ───────────────────────────────────────────────────────────────
 
     @Test
-    fun `forward scans ahead first nearest-first then behind`() {
-        // total=8, current=3, forward: ahead = {4,5,6,7}, then behind = {2,1,0}.
-        assertEquals(listOf(4, 5, 6, 7, 2, 1, 0), orderRemainingChapters(total = 8, current = 3, direction = 1))
+    fun `forward interleaves by absolute distance, forward side first on ties`() {
+        // total=8, current=3, forward: 1-away {4, 2}, 2-away {5, 1}, 3-away {6, 0}, 4-away {7}.
+        assertEquals(listOf(4, 2, 5, 1, 6, 0, 7), orderRemainingChapters(total = 8, current = 3, direction = 1))
     }
 
     @Test
-    fun `backward scans behind first nearest-first then ahead`() {
-        // total=8, current=3, backward: behind = {2,1,0}, then ahead = {4,5,6,7}.
-        assertEquals(listOf(2, 1, 0, 4, 5, 6, 7), orderRemainingChapters(total = 8, current = 3, direction = -1))
+    fun `backward interleaves by absolute distance, backward side first on ties`() {
+        // total=8, current=3, backward: 1-away {2, 4}, 2-away {1, 5}, 3-away {0, 6}, 4-away {7}.
+        assertEquals(listOf(2, 4, 1, 5, 0, 6, 7), orderRemainingChapters(total = 8, current = 3, direction = -1))
     }
 
     @Test

@@ -35,8 +35,10 @@ object PaginationCacheCodec {
 
     /** Per-book cap on persisted table files. Old-parameter-hash tables are orphaned when the layout
      *  key changes and are never deleted today; keep the most recently used and evict the rest
-     *  (each file ≤ ~32 KB ⇒ ≤ ~1 MB per book at the cap). */
-    const val MAX_TABLES_PER_BOOK = 32
+     *  (each file ≤ ~32 KB ⇒ ≤ ~8 MB per book at the cap). R7 raised this from 32: a whole-book B2
+     *  pass must be able to record every chapter (the in-memory skip-fresh registry keys off these
+     *  files' presence), and 256 chapters covers virtually all books. */
+    const val MAX_TABLES_PER_BOOK = 256
 
     /** Filename convention: `<chapterIndex>_<paramHash>.bin`. */
     fun filename(chapterIndex: Int, paramHash: Long): String =

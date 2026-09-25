@@ -806,6 +806,12 @@ private fun startAnchorStream(
         // cancelled the just-tuned chapter's canonical wholesale (`anchorBackfillJob?.cancel()`), so
         // returning to it re-temp'd instead of hitting its fresh disk table. Now it lands a disk hit.
         canonicalJobs.remove(unit.chapterIndex)?.cancel()
+        // R7: the new chapter's B1 preempts an in-flight B2 (default on): cancel B2 and relaunch it
+        // behind this B1. The relaunched pass re-skips fresh chapters (cheap) and still skips the
+        // temp-live new chapter; order center (activeChapter) moves only on relayout, unchanged here.
+        // No-op when B2 is idle.
+        val preemptB2 = wholeBookJob?.isActive == true
+        if (preemptB2) wholeBookJob?.cancel()
         canonicalJobs[unit.chapterIndex] = scope.launch(canonicalDispatcher) {
             if (epoch != layoutEpoch) {
                 Logger.w(logTag, "canonical superseded (epoch $epoch != $layoutEpoch) ch=${unit.chapterIndex}")
@@ -833,6 +839,7 @@ private fun startAnchorStream(
                 if (e !is CancellationException) Logger.e(logTag, "canonical layout FAIL ch=${unit.chapterIndex} ${e.message}")
             }
         }
+        if (preemptB2) requestWholeBookRelayout(force = true)
     } else {
         Logger.w(logTag, "canonical deferred (panel open) ch=${unit.chapterIndex}")
     }
@@ -1567,8 +1574,12 @@ private fun finishCanonicalBackground(
      * R5: rebinds a fresh in-memory pagination table from a small-chapter full product.
      * No disk write (writes belong to background canonical per S5 §3.5); only fixes the
      * table + paramHash so the R6 reuse guard passes on subsequent flips.
+     * Also drops the per-block shape cache: shapes are keyed by leaf without a param dimension
+     * and fullLayout never populates this cache, so any entries predate this param cycle and would
+     * poison later flips once the rebound hash lets the R6 guard pass. Pure memo loss.
      */
     private fun rebindSmallTable(unit: ChapterUnit, slices: List<PageSlice>, paramHash: Long) {
+        unit.blockShapeCache = null
         if (slices.isEmpty() || slices[0].blockStart < 0) return
         unit.bindPaginationTable(ChapterPaginationTable.fromSlices(
             chapterIndex = unit.chapterIndex,
@@ -1742,10 +1753,11 @@ private fun finishCanonicalBackground(
      *  nothing changed since the last dispatch (epochs equal — no churn during a slider drag), when the
      *  canonical pass is deferred ([deferCanonical], settings panel open), or without a box layouter.
      *  Runs on the dedicated [canonicalDispatcher] single thread; a newer dispatch cancels the in-flight
-     *  one (checkpoint per chapter), so abandoning exits within ≤1 chapter granularity. */
-    fun requestWholeBookRelayout() {
+     *  one (checkpoint per chapter), so abandoning exits within ≤1 chapter granularity.
+     *  R7: [force] bypasses the epoch dedup (B1-preempt relaunch); the dedup stamp is still refreshed. */
+    fun requestWholeBookRelayout(force: Boolean = false) {
         val epoch = layoutEpoch
-        if (epoch <= lastWholeBookEpoch) return
+        if (!force && epoch <= lastWholeBookEpoch) return
         if (deferCanonical) return
         val bc = layouter as? BoxChapterLayouter ?: return
         val contentWidth = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
@@ -1755,20 +1767,25 @@ private fun finishCanonicalBackground(
         wholeBookJob?.cancel()
         wholeBookJob = scope.launch(canonicalDispatcher) {
             val current = activeChapter
-            // P12: B2 scans in reading order — chapters the reader is heading toward first (direction
-            // group), nearest-distance first within each group, so a flip-out-of-bounds into a nearby
-            // chapter lands on an already-laid-out one. Pure function; correctness never depends on it
-            // (every non-current chapter still completes its full pass + persist).
+            // R7: B2 scans strict absolute-distance interleave from the active chapter, so a
+            // flip-out-of-bounds into a nearby chapter lands on an already-laid-out one. Pure
+            // function; correctness never depends on it (every non-current chapter still completes
+            // its full pass + persist).
             val order = remainingScanOrder(current)
             // P7: capture the launching coroutine's context so the per-block checkpoint passed down to
             // fullLayout can observe this scan's cancellation from inside the nested runCatching.
             val ctx = coroutineContext
             Logger.w(logTag, "whole-book B2 start epoch=$epoch paramHash=$paramHash skipCh=$current order=${order.take(8)}…")
+            var skippedFresh = 0
             runCatching {
                 for (i in order) {
                     if (i == current) continue // B1 owns the active chapter's canonical pass
                     val u = chapters[i]
                     if (u.inProgress != null) continue // a live temp session owns that chapter
+                    // R7: the disk table itself is the done-registry — a fresh table means this
+                    // chapter already completed under these params (open dispatch, preempt relaunch,
+                    // or a previous pass); shaping it again is pure waste.
+                    if (u.paginationTable?.paramHash == paramHash) { skippedFresh++; continue }
                     if (!isActive) {
                         Logger.w(logTag, "whole-book B2 cancelled at ch=$i (≤1 chapter abandon)")
                         return@launch
@@ -1780,7 +1797,7 @@ private fun finishCanonicalBackground(
                         }
                 }
             }
-            Logger.w(logTag, "whole-book B2 done epoch=$epoch")
+            Logger.w(logTag, "whole-book B2 done epoch=$epoch skippedFresh=$skippedFresh")
         }
     }
 
@@ -1896,6 +1913,9 @@ private fun finishCanonicalBackground(
                 Logger.e(logTag, "prewarm FAIL ch=$index ${e.message}")
             }
         }
+        // R7: open-book B2 dispatch (epoch-deduped no-op if one already runs; defer-gated inside).
+        // Far chapters get laid without waiting for a settings change (S7: navigation never cancels it).
+        requestWholeBookRelayout()
     }
 
     /** Full line-level canonical pre-layout of a non-current chapter: shape the whole chapter, bind its
@@ -2318,7 +2338,12 @@ private fun finishCanonicalBackground(
         readingDirection = direction
         // P4: a flip that lands in [chapter] prewarms both neighbors (the chapters a next out-of-bounds
         // flip can enter) on the background P track — so the crossing's parse leaves the flip thread.
-        return navigateAdjacentPage(chapter, slice, direction)?.also { (ch, _) -> preflightNeighbors(ch) }
+        return navigateAdjacentPage(chapter, slice, direction)?.also { (ch, _) ->
+            preflightNeighbors(ch)
+            // R7: belt-and-braces B2 dispatch (epoch-deduped no-op unless nothing dispatched yet,
+            // e.g. open-prewarm still in flight) — navigation never cancels in-flight work (S7).
+            requestWholeBookRelayout()
+        }
     }
 
     /** The actual adjacent-page navigation (direction already tracked by [findAdjacentPage] — see P12). */
@@ -2557,22 +2582,34 @@ private fun finishCanonicalBackground(
 /** Page anchor (stable handle for locating a relayout). */
 data class PageAnchor(val chapter: Int, val char: Int)
 
-/** Orders the non-current chapters for the whole-book B2 scan (P12): the reader's reading-direction
- *  group first (chapters the reader is heading toward — the ones a flip-out-of-bounds will land in),
- *  then nearest-distance-first inside each group (flip-out-of-bounds targets are always near, and far
- *  chapters still all complete + persist). Pure — correctness never depends on the visit order; a
- *  cancel still exits within ≤1 chapter granularity via the per-chapter checkpoints (P7/P13).
+/** Orders the non-current chapters for the whole-book B2 scan (R7): strict absolute-distance
+ *  interleave from [current] (1-away both sides, then 2-away, …); ties at the same distance are
+ *  broken by [direction] (the side the reader is heading toward first). A flip-out-of-bounds
+ *  always lands near, so the nearest chapters complete first regardless of travel direction.
+ *  Pure — correctness never depends on the visit order; a cancel still exits within ≤1 chapter
+ *  granularity via the per-chapter checkpoints (P7/P13).
  *
  *  @param total     chapter count
  *  @param current   the active chapter (skipped by the caller regardless — B1 owns its pass)
- *  @param direction the reader's movement: >= 0 = toward the tail (forward group first),
- *                   < 0 = toward the head (backward group first)
+ *  @param direction the reader's movement: >= 0 = forward side first on ties, < 0 = backward first
  */
 /** C2-P2b-4: public probe hook (was `internal`; `:app` probe tests live across the module seam). */
 fun orderRemainingChapters(total: Int, current: Int, direction: Int): List<Int> {
-    val ahead = (current + 1 until total).toList()
-    val behind = (current - 1 downTo 0).toList()
-    return if (direction >= 0) ahead + behind else behind + ahead
+    val out = ArrayList<Int>(maxOf(0, total - 1))
+    var d = 1
+    while (out.size < total - 1) {
+        val fwd = current + d
+        val bwd = current - d
+        if (direction >= 0) {
+            if (fwd < total) out.add(fwd)
+            if (bwd >= 0) out.add(bwd)
+        } else {
+            if (bwd >= 0) out.add(bwd)
+            if (fwd < total) out.add(fwd)
+        }
+        d++
+    }
+    return out
 }
 
 /** The visible-char stream of [el]'s subtree in document order, sliced to `[from, to)`. This is the

@@ -31,6 +31,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.SupervisorJob
@@ -225,12 +226,21 @@ class BookDocumentController(
     @Volatile
     private var readingDirection: Int = 1
 
-    /** The in-flight background whole-book remaining-chapter scan (B2, was `otherChaptersJob`).
-     *  Re-dispatched with the latest params after the params-settled point; a newer dispatch cancels
-     *  it (abandon within ≤1 chapter via per-chapter checkpoints). */
+    /** P1f/R13: controller-owned background scope (child of the injected [scope]'s Job).
+     *  ALL background launches (prefill/B1/B2/prewarm/watchers, scheduler internals) run here so
+     *  [close] cancels exactly this controller's background work — never the host's scope.
+     *  Hosts call [close] on destroy; tests call it in teardown (leaked shapers otherwise pile up
+     *  in the shared worker JVM and starve later timing-sensitive tests — observed flake). */
+    private val bgScope = CoroutineScope(SupervisorJob(scope.coroutineContext[Job]) + backgroundDispatcher)
+
+    /** Cancels all background work owned by this controller. Idempotent; safe to call twice. */
+    fun close() {
+        bgScope.cancel()
+    }
+
     /** P0 spike: priority pool for background layout work (B2 chapters in spike scope). */
     private val scheduler = TaskScheduler(
-        scope,
+        bgScope,
         // P1: adaptive budget — at most 2 shaping slots (P0 knee), at least 1; small devices
         // degrade to serial background shaping. The flip thread never queues (bypass by design).
         maxSlots = maxOf(1, minOf(2, platformCpuCount() - 1)),
@@ -452,9 +462,7 @@ class BookDocumentController(
                 // pre-R5 is the only path that can leave one behind). Live temp sessions own
                 // their lifecycle via profileSnapshot and are never killed here.
                 if (unit.inProgress == null) {
-                    val cw = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
-                    val chh = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
-                    unit.invalidateForParam(LayoutParamKey.fromProfile(profile, cw, chh).hash())
+                    unit.invalidateForParam(currentParamHash())
                 }
                 if (unit.laidOut && unit.inProgress != null) {
                     // Anchor temp streaming active — the current temp page is rendered from its own
@@ -486,9 +494,7 @@ class BookDocumentController(
         // R6: same guard for direct callers (cross-chapter stub reshape). A mismatch invalidates
         // first, so the `?: return` below trips on the nulled table instead of shaping from it.
         if (unit.inProgress == null) {
-            val cw = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
-            val chh = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
-            unit.invalidateForParam(LayoutParamKey.fromProfile(profile, cw, chh).hash())
+            unit.invalidateForParam(currentParamHash())
         }
         val table = unit.paginationTable ?: return
         val boxLayouter = layouter as? BoxChapterLayouter ?: return
@@ -952,7 +958,7 @@ private fun scheduleTempPrefill(unit: ChapterUnit, ip: InProgressPagination, las
     if (cursor == lastPrefillCursor && tempPrefillJob?.isActive == true) return
     lastPrefillCursor = cursor
     tempPrefillJob?.cancel()
-    tempPrefillJob = scope.launch(backgroundDispatcher) {
+    tempPrefillJob = bgScope.launch(backgroundDispatcher) {
         try {
             var guard = 0
             while (stepTempPrefill(ip, lastDir) && guard++ < TEMP_WINDOW_DEPTH * 16) kotlinx.coroutines.delay(4)
@@ -1182,7 +1188,7 @@ private fun scheduleWindowPrefill(unit: ChapterUnit, targetPage: Int, dir: Int) 
     // (a previous page outside this chapter is skipped per S7 step 3).
     val order = if (dir >= 0) intArrayOf(targetPage + 1, targetPage - 1)
     else intArrayOf(targetPage - 1, targetPage + 1)
-    windowPrefillJob = scope.launch(backgroundDispatcher) {
+    windowPrefillJob = bgScope.launch(backgroundDispatcher) {
         // Let flip bursts pass first: shaping starts only if the reader lingers.
         kotlinx.coroutines.delay(windowPrefillStartDelayMs)
         val u = unitAt(chapterIdx) ?: return@launch
@@ -1596,6 +1602,37 @@ private suspend fun crossChapterLanding(fromChapter: Int, direction: Int): Pair<
  *  canonical (correct line-level) table is only activated when the reader reaches the chapter head /
  *  crosses chapters, via [finalizeTempOnLeave]. The current page is never re-rendered mid-chapter, so
  *  the temp↔canonical boundary cannot produce an in-place redraw or flash. */
+    /** P1f: single source for freshness checks (R6 guards + completion gates below). */
+    private fun currentParamHash(): Long {
+        val cw = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
+        val chh = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
+        return LayoutParamKey.fromProfile(profile, cw, chh).hash()
+    }
+
+    /** P1f: chapter status view (computed, not stored — single source of truth, no sync bugs).
+     *  FULL ⟺ bound table matches current params; SHAPING ⟺ the pool runs a task for it;
+     *  UNLAID ⟺ otherwise. P2 jump/dispatch decisions consume this. */
+    internal enum class ChapterStatus { UNLAID, SHAPING, FULL }
+
+    internal fun chapterStatus(unit: ChapterUnit): ChapterStatus {
+        if (unit.paginationTable?.paramHash == currentParamHash() && unit.laidOut) return ChapterStatus.FULL
+        val keys = scheduler.runningKeys
+        if (keys.any { it == "b1:${unit.chapterIndex}" || it == "b2:${unit.chapterIndex}" }) return ChapterStatus.SHAPING
+        return ChapterStatus.UNLAID
+    }
+
+    /** P1f: page status view (computed). DONE ⟺ pageCache hit under current params;
+     *  SHAPING ⟺ the pool runs a page task for it (`pg:<chapter>:<page>` keys, reserved for the
+     *  P2 prefill migration — never matches today, correctly); else UNLAID. Temp path excluded (§3). */
+    internal enum class PageState { UNLAID, SHAPING, DONE }
+
+    internal fun pageStatus(unit: ChapterUnit, page: Int): PageState {
+        val hit = unit.pageCache[page]
+        if (hit != null && hit.paramHash == currentParamHash()) return PageState.DONE
+        if (scheduler.runningKeys.any { it == "pg:${unit.chapterIndex}:$page" }) return PageState.SHAPING
+        return PageState.UNLAID
+    }
+
 private fun finishCanonicalBackground(
     unit: ChapterUnit,
     ip: InProgressPagination,
@@ -1604,6 +1641,12 @@ private fun finishCanonicalBackground(
 ) {
     val layout = product.layout
     val slices = product.slices
+    // P1f: completion gate — a task outliving its param cycle must not bind stale results
+    // (mid-shape param change; the fresh cycle re-queues via dirtyGen). Drop + log, no write.
+    if (paramHash != currentParamHash()) {
+        Logger.w(logTag, "layout ${ctx(unit)} CANONICAL-STALE-DROP ch=${unit.chapterIndex}")
+        return
+    }
     val cache = cacheStore()
     val cacheFile = if (cache != null && bookId >= 0) {
         cache.file("book_$bookId", unit.chapterIndex, paramHash)
@@ -1921,7 +1964,7 @@ private fun finishCanonicalBackground(
         }
         // P1a: pass-completion visibility (the producer rewrite dropped the old done-log).
         // Best-effort: a newer dispatch superseding this pass silences it.
-        scope.launch {
+        bgScope.launch {
             scheduler.awaitIdle()
             if (layoutEpoch == epoch) {
                 Logger.w(logTag, "whole-book B2 pass drained epoch=$epoch submitted=$submitted")
@@ -1977,7 +2020,7 @@ private fun finishCanonicalBackground(
         val paramHash = LayoutParamKey.fromProfile(profile, contentWidth, contentHeight).hash()
         if (preflightReadiness[index] == paramHash) return // already prepped under these params
         if (preflightJobs[index]?.isActive == true) return // dedup the same in-flight target
-        preflightJobs[index] = scope.launch(backgroundDispatcher) {
+        preflightJobs[index] = bgScope.launch(backgroundDispatcher) {
             try {
                 ensureMarkup(index)
                 val bc = layouter as? BoxChapterLayouter
@@ -2024,7 +2067,7 @@ private fun finishCanonicalBackground(
         val unit = unitAt(index) ?: return
         if (index == activeChapter) return // B1/anchor owns the active chapter's passes
         openPreflightJob?.cancel()
-        openPreflightJob = scope.launch(backgroundDispatcher) {
+        openPreflightJob = bgScope.launch(backgroundDispatcher) {
             try {
                 ensureMarkup(index)
                 val bc = layouter as? BoxChapterLayouter ?: return@launch
@@ -2081,6 +2124,11 @@ private fun finishCanonicalBackground(
         // P1: chunk workers deleted (P13) — sequential canonical for all sizes.
         val product = bc.fullLayout(prep, profile, contentW, contentH, checkpoint) ?: return
         val slices = product.slices
+        // P1f: completion gate (same as canonical-background above) — stale product dropped.
+        if (paramHash != currentParamHash()) {
+            Logger.w(logTag, "layout ${ctx(unit)} FULL-PRELIM-STALE-DROP ch=${unit.chapterIndex}")
+            return
+        }
         val cache = cacheStore()
         val cacheFile = if (cache != null && bookId >= 0) {
             cache.file("book_$bookId", unit.chapterIndex, paramHash)

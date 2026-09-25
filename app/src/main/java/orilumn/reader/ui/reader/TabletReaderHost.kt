@@ -45,6 +45,11 @@ class TabletReaderHost(
 
     // ---- ReaderHost ----
 
+    /** R13: 停掉 controller 名下所有后台塑形（落盘不受影响，调用方保证先落盘）。 */
+    fun closeController() {
+        controller.close()
+    }
+
     override fun title(): String = controller.title()
 
     override fun unitTitle(chapter: Int): String {

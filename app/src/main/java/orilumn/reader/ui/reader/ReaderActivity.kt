@@ -751,6 +751,8 @@ class ReaderActivity : ComponentActivity() {
         val host = tabletHost
         val p = currentPos
         if (host != null && p != null) host.onSaveProgress(p)
+        // R13: 先落盘再杀后台（close 只停塑形，不管落盘）。
+        host?.closeController()
         super.onDestroy()
     }
 

@@ -206,6 +206,8 @@ class DesktopReaderHost(
 
     fun close() {
         scopeJob.cancel()
+        // R13: 先停 controller 后台塑形（落盘由调用方保证在前）。
+        runCatching { controller.close() }
         runCatching { reader.close() }
     }
 

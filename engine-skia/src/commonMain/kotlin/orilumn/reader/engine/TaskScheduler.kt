@@ -48,6 +48,12 @@ class TaskScheduler(
     private val running = HashMap<String, Job>()
     private val runningPrio = HashMap<String, Int>()
 
+    /** P1f: lock-free snapshot of running keys (refreshed under mutex on every mutation).
+     *  Status views read this without suspending; benignly stale by microseconds. */
+    @Volatile
+    var runningKeys: Set<String> = emptySet()
+        private set
+
     /** Worker slot budget (P1: fixed at 2 from the P0 knee — light pages flat, heavy
      *  content-bound; tunable at runtime for future measurement). */
     @Volatile
@@ -80,6 +86,7 @@ class TaskScheduler(
             mutex.withLock {
                 queue.removeAll { it.key == key }
                 running[key]?.cancel()
+                syncKeysLocked()
             }
         }
     }
@@ -98,6 +105,7 @@ class TaskScheduler(
                         running[key]?.cancel()
                     }
                 }
+                syncKeysLocked()
             }
         }
     }
@@ -140,6 +148,12 @@ class TaskScheduler(
             holder[0] = job
             running[task.key] = job
             runningPrio[task.key] = task.priority
+            syncKeysLocked()
         }
+    }
+
+    /** Refresh [runningKeys]. Call only with [mutex] held. */
+    private fun syncKeysLocked() {
+        runningKeys = running.keys.toSet()
     }
 }

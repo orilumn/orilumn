@@ -1146,6 +1146,24 @@ private var lastWindowPrefillKey: Long = Long.MIN_VALUE
 @Volatile
 private var lastFlipMs: Long = 0L
 
+/**
+ * R18b: set when a flip start cancels an in-flight B2 (see findAdjacentPage). The prefill worker
+ * completion doubles as the quiet detector — it only completes when no flip arrived mid-run —
+ * and resumes B2 from there. Without this, a cancelled B2 would never resume during continuous
+ * reading (epoch dedup blocks re-dispatch), and without the cancel, B2's multi-second chapters
+ * wedge into every inter-flip gap (the 3s quiet gate alone can't help: a chapter outlasts it).
+ */
+@Volatile
+private var b2YieldedForFlip = false
+
+/** R18: posts a B2 resume when a prefill run completes into quiet. */
+private fun maybeResumeWholeBook() {
+    if (!b2YieldedForFlip) return
+    if (platformNowMs() - lastFlipMs < 1500L) return
+    b2YieldedForFlip = false
+    requestWholeBookRelayout(force = true)
+}
+
 /** R18: B2 postpones chapters while flips keep arriving (background must not contend with
  *  the flip thread for cores — the fast baseline had no background grinding at all). */
 private val b2QuietMs = 3000L
@@ -1273,6 +1291,8 @@ private fun scheduleWindowPrefill(unit: ChapterUnit, targetPage: Int, dir: Int) 
             }
         }
         if (stored) Logger.w(logTag, "win-prefill ch=$chapterIdx page=$first cached")
+        // R18b: a completed prefill run is itself the quiet signal — resume a flip-yielded B2.
+        maybeResumeWholeBook()
     }
 }
 
@@ -2480,9 +2500,14 @@ private fun finishCanonicalBackground(
         readingDirection = direction
         // R18: mark flip start (B2 yields on this) + kill the previous landing's prefill outright —
         // its published products survive; only in-flight unpublished work is dropped, and the flip
-        // thread never contends with it for cores.
+        // thread never contends with it for cores. An in-flight B2 is cancelled too (R18b) and resumes
+        // via prefill completion (maybeResumeWholeBook) — epoch dedup alone would never restart it.
         lastFlipMs = platformNowMs()
         windowPrefillJob?.cancel()
+        if (wholeBookJob?.isActive == true) {
+            wholeBookJob?.cancel()
+            b2YieldedForFlip = true
+        }
         // P4: a flip that lands in [chapter] prewarms both neighbors (the chapters a next out-of-bounds
         // flip can enter) on the background P track — so the crossing's parse leaves the flip thread.
         return navigateAdjacentPage(chapter, slice, direction)?.also { (ch, _) ->

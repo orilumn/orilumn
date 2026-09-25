@@ -162,7 +162,6 @@ class WholeBookCancellationProbeTest {
         // Load markup + a default-hash table for every chapter.
         for (ch in 0 until CHAPTERS) assertNotNull(controller.ensureChapterLayout(ch, 0))
 
-        val defaultHash = paramHash(ReaderSettings.DEFAULT)
         val startEpoch = controller.layoutEpoch
 
         // Three rapid param cycles; the first two scans get cancelled mid-flight as the next lands.
@@ -181,9 +180,12 @@ class WholeBookCancellationProbeTest {
             assertComplete(ch, hC)
         }
 
-        // The active chapter is owned by B1/anchoring — its DEFAULT table is untouched by B2.
+        // The active chapter is small (foreground full reflow, no B1/anchor): its table carries the
+        // LAST hash, bound in-memory by prepareRelayout-small (R5 rebind, step-4 foreground completion).
+        // B2 still skips it structurally — asserted via disk absence below.
         val active = controller.unitAt(ACTIVE) ?: error("no active unit")
-        assertEquals("B2 must skip the active chapter", defaultHash, active.paginationTable?.paramHash)
+        assertEquals("active chapter must carry the last hash", hC, active.paginationTable?.paramHash)
+        assertComplete(ACTIVE, hC)
 
             // The last hash is also persisted on disk for every non-active chapter.
             // (C1-2: probed through the shared okio store — the same bytes the controller wrote.)
@@ -193,6 +195,10 @@ class WholeBookCancellationProbeTest {
                 val f = disk.file("book_$bookId", ch, hC)
                 assertTrue("ch$ch must be persisted on disk with the last hash", FileSystem.SYSTEM.exists(f))
             }
+            // B2 skips the active chapter: no background pass writes its disk file under the last
+            // hash (its in-memory table above comes from the foreground rebind only, which never writes).
+            val fa = disk.file("book_$bookId", ACTIVE, hC)
+            assertTrue("B2 must not persist the active chapter", !FileSystem.SYSTEM.exists(fa))
     }
 
     // ───────────────────────────────────────────────────────────────

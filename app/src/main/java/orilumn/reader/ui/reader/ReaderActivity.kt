@@ -280,8 +280,26 @@ class ReaderActivity : ComponentActivity() {
             val bgTone = remember(effective, density) { TypographicProfile.build(effective, density).bgColor }
 
             // 打开书籍并构建引擎（一次；视口就绪后触发）。
+            // R5/S6：视口变化 ≡ 改参。setViewport 返回 true 即真变：新尺寸先进视口，
+            // 再走关面板同款全套（diff 必变，无需比对；面板开着时 defer 照旧抑制 B1，关闭再补）。
             LaunchedEffect(pxW, pxH) {
-                if (engine == null && !openFailed) openBookEngine(pxW, pxH)
+                val c = engine
+                if (c == null && !openFailed) openBookEngine(pxW, pxH)
+                else if (c != null && c.setViewport(pxW, pxH)) {
+                    Logger.w(TAG, "viewport changed -> whole-book relayout ${pxW}x${pxH}")
+                    relayoutPending = false
+                    val liveLoop = relayoutJob
+                    val p = currentPos
+                    val ch = p?.chapter ?: 0
+                    val anchor = p?.slice?.charStart ?: 0
+                    lifecycleScope.launch(Dispatchers.Default) {
+                        liveLoop?.join()
+                        val r = c.finalizeRelayoutAll(ch, anchor)
+                        withContext(Dispatchers.Main) {
+                            if (r != null) applyReflowResult(c, r)
+                        }
+                    }
+                }
             }
 
             if (openFailed) {

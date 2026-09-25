@@ -1458,6 +1458,22 @@ private fun finishCanonicalBackground(
     // ---- Progress / positioning ----
 
     /**
+     * R5: rebinds a fresh in-memory pagination table from a small-chapter full product.
+     * No disk write (writes belong to background canonical per S5 §3.5); only fixes the
+     * table + paramHash so the R6 reuse guard passes on subsequent flips.
+     */
+    private fun rebindSmallTable(unit: ChapterUnit, slices: List<PageSlice>, paramHash: Long) {
+        if (slices.isEmpty() || slices[0].blockStart < 0) return
+        unit.bindPaginationTable(ChapterPaginationTable.fromSlices(
+            chapterIndex = unit.chapterIndex,
+            paramHash = paramHash,
+            slices = slices,
+            totalBlocks = slices.maxOf { it.blockEndExclusive },
+            totalChars = slices.last().charEnd,
+        ))
+    }
+
+    /**
      * R4 (S1): preview-period light relayout — current chapter only. Same product as
      *  [prepareRelayout] for the anchor chapter, but touches nothing else: no epoch bump, no
      *  preflight void, no other-chapter invalidation, no B2. The panel-close / commit-settle path
@@ -1497,6 +1513,11 @@ private fun finishCanonicalBackground(
                     val slice = lineAnchoredPage(product.layout, anchorChar, contentHeight)
                         ?: product.slices.firstOrNull() ?: return@runCatching null
                     Logger.w(logTag, "relayout-light ch=$chapter SMALL-FULL prepareLight=${tLight - t0}ms fullLayout=${platformNowMs() - tLight}ms total=${platformNowMs() - t0}ms blocks=${light.totalBlocks}")
+                    // R5: small chapters never enter the temp path, so rebind a fresh in-memory
+                    // table here (writes still belong to background canonical). Otherwise the stale
+                    // table + stale paramHash trip the R6 guard on the next flip and the fresh
+                    // layout is discarded for a redundant rebuild.
+                    rebindSmallTable(unit, product.slices, paramHash)
                     ReflowResult(chapter, product.layout, product.slices, slice)
                 }
             } else {
@@ -1572,6 +1593,8 @@ private fun finishCanonicalBackground(
                     val slice = lineAnchoredPage(product.layout, anchorChar, contentHeight)
                         ?: product.slices.firstOrNull() ?: return@runCatching null
                     Logger.w(logTag, "relayout ch=$chapter SMALL-FULL prepareLight=${tLight - t0}ms fullLayout=${platformNowMs() - tLight}ms total=${platformNowMs() - t0}ms blocks=${light.totalBlocks}")
+                    // R5: same in-memory table rebind as the light path (see above).
+                    rebindSmallTable(unit, product.slices, paramHash)
                     ReflowResult(chapter, product.layout, product.slices, slice)
                 }
             } else {

@@ -1065,16 +1065,33 @@ data class TempWindowSnapshot(
 
 /** One step of temp navigation. Returns null at a chapter boundary (caller falls through to
  *  cross-chapter navigation). */
+/** R2: last tempNav null-branch reason (diagnostic only; flip thread writes, flip thread reads). */
+private var lastTempNavNull: String? = null
+
+/** R2: one-line temp pointer + window snapshot for cross-chapter diagnosis. */
+private fun tempWindowDiag(ip: InProgressPagination): String {
+    fun span(pages: List<TempPage>) =
+        if (pages.isEmpty()) "-" else pages.joinToString(",") {
+            "b${it.blockStart}[${it.slice.charStart},${it.slice.charEnd})"
+        }
+    return "reason=${lastTempNavNull ?: "?"} " +
+        "ptr=${if (ip.curIsForward) "F" else "B"}${ip.curIndex} " +
+        "headLanded=${ip.headLanded} headReached=${ip.headReached} " +
+        "anchorBlk=${ip.anchorBlockStart} shapedFwdTo=${ip.shapedForwardTo} " +
+        "fwd[${span(ip.forwardPages)}] bwd[${span(ip.backwardPages)}]"
+}
+
 private fun tempNav(unit: ChapterUnit, ip: InProgressPagination, slice: PageSlice, dir: Int): Pair<Int, PageSlice>? {
+    lastTempNavNull = null
     // C2-P2b-3: `withLock` 非内联，块里裸 `return` 全改 `return@withLock`，外层 `return` 接住表达式值。
     return tempStateLock.withLock {
     // Serialize with the background temp-prefill so list mutations + the shared shape cache are safe.
-    val bc = layouter as? BoxChapterLayouter ?: return@withLock null
+    val bc = layouter as? BoxChapterLayouter ?: run { lastTempNavNull = "no-box"; return@withLock null }
     // P12 race hardening: [navigateAdjacentPage] snapshots [ip] WITHOUT this lock, so a relayout / leave
     // can bind a NEW session between that snapshot and this lock. Navigating the detached old session
     // would return a page that is no longer on the live session — 页面缺失/混乱. Relocate the displayed
     // slice in the LIVE session and navigate that one instead.
-    val live = unit.inProgress ?: return@withLock null
+    val live = unit.inProgress ?: run { lastTempNavNull = "no-session"; return@withLock null }
     if (live !== ip) locateTempPosition(live, slice)
     val ip = live
     // NOTE: there is deliberately NO `headReached && dir<0` shortcut here. headReached remembers that a
@@ -1090,8 +1107,9 @@ private fun tempNav(unit: ChapterUnit, ip: InProgressPagination, slice: PageSlic
             if (next < ip.forwardPages.size) {
                 ip.curIndex = next
             } else {
-                if (ip.shapedForwardTo >= prep.totalBlocks) { Logger.w(logTag, "tempNav forward tail → null ch=${ip.chapterIndex}"); return@withLock null }
-                val fwd = bc.shapeTempPageForward(prep, ip.profileSnapshot, ip.contentW, ip.contentH, ip.shapedForwardTo, ip.shapes, ip.forwardFromLine) ?: return@withLock null
+                if (ip.shapedForwardTo >= prep.totalBlocks) { lastTempNavNull = "fwd-tail"; Logger.w(logTag, "tempNav forward tail → null ch=${ip.chapterIndex}"); return@withLock null }
+                val fwd = bc.shapeTempPageForward(prep, ip.profileSnapshot, ip.contentW, ip.contentH, ip.shapedForwardTo, ip.shapes, ip.forwardFromLine)
+                    ?: run { lastTempNavNull = "fwd-shape-fail"; return@withLock null }
                 ip.forwardPages.add(fwd.page)
                 ip.shapedForwardTo = fwd.nextBlock
                 ip.forwardFromLine = fwd.nextLine
@@ -1108,9 +1126,10 @@ private fun tempNav(unit: ChapterUnit, ip: InProgressPagination, slice: PageSlic
                 // side is non-empty whenever the nearest backward page is line-cut.)
                 if (ip.forwardPages.isEmpty()) {
                     val startBlock = ip.backwardPages.firstOrNull()?.blockEndExclusive ?: ip.shapedForwardTo
-                    if (startBlock >= prep.totalBlocks) { Logger.w(logTag, "tempNav forward tail → null ch=${ip.chapterIndex}"); return@withLock null }
+                    if (startBlock >= prep.totalBlocks) { lastTempNavNull = "reroot-tail"; Logger.w(logTag, "tempNav forward tail → null ch=${ip.chapterIndex}"); return@withLock null }
                     Logger.w(logTag, "tempNav RE-ROOT fwd ch=${ip.chapterIndex} startBlock=$startBlock startLine=0 (块边界重启)")
-                    val fwd = bc.shapeTempPageForward(prep, ip.profileSnapshot, ip.contentW, ip.contentH, startBlock, ip.shapes, 0) ?: return@withLock null
+                    val fwd = bc.shapeTempPageForward(prep, ip.profileSnapshot, ip.contentW, ip.contentH, startBlock, ip.shapes, 0)
+                        ?: run { lastTempNavNull = "reroot-shape-fail"; return@withLock null }
                     // Re-root the absolute forward front to this new head edge; subsequent flips append
                     // from here instead of the (deep, evicted) old front.
                     ip.shapedForwardTo = fwd.nextBlock
@@ -1145,12 +1164,17 @@ private fun tempNav(unit: ChapterUnit, ip: InProgressPagination, slice: PageSlic
                 // page, not by the packing front (which already reached 0 ∈ backwardPages).
                 if (!step.curIsForward) {
                     val target = ip.backwardPages.getOrNull(step.curIndex)
-                    if (target != null && target.blockStart == 0) return@withLock (resolveHeadArrival(unit, ip) ?: return@withLock null)
+                    if (target != null && target.blockStart == 0) {
+                        val landing = resolveHeadArrival(unit, ip)
+                        if (landing == null) lastTempNavNull = "head-move-null"
+                        return@withLock landing
+                    }
                 }
             }
             is TempNavBackwardStep.Shape -> {
                 val p = bc.shapeTempPageBackward(prep, ip.profileSnapshot, ip.contentW, ip.contentH, step.endExclusive, step.lineCut, ip.shapes)
                     ?: run {
+                        lastTempNavNull = "bwd-shape-fail"
                         Logger.w(logTag, "tempNav backward shapeTempPageBackward → null ch=${ip.chapterIndex} endExclusive=${step.endExclusive} lineCut=${step.lineCut}")
                         return@withLock null
                     }
@@ -1162,7 +1186,11 @@ private fun tempNav(unit: ChapterUnit, ip: InProgressPagination, slice: PageSlic
                 // 现象2: the whole-block packing descending to block 0 produces the SPARSE head page
                 // (head blocks under-fill contentH). Never show it — resolve the head arrival on THIS flip
                 // (canonical first page, or re-root temp at char 0 = a full head page per shapeAnchorPageForward).
-                if (p.blockStart == 0) return@withLock (resolveHeadArrival(unit, ip) ?: return@withLock null)
+                if (p.blockStart == 0) {
+                    val landing = resolveHeadArrival(unit, ip)
+                    if (landing == null) lastTempNavNull = "head-shape-null"
+                    return@withLock landing
+                }
             }
             TempNavBackwardStep.Boundary -> {
                 // Step 3 (现象3): the TRUE chapter-head boundary. Block-0 arrivals are already resolved
@@ -1180,10 +1208,13 @@ private fun tempNav(unit: ChapterUnit, ip: InProgressPagination, slice: PageSlic
                 //     headLanded so the NEXT boundary (reader already on the full head) crosses straight
                 //     to the previous chapter instead of re-landing the identical page (a wasted flip).
                 if (ip.headLanded) {
+                    lastTempNavNull = "head-landed"
                     Logger.w(logTag, "tempNav boundary head-landed → cross-chapter ch=${ip.chapterIndex}")
                     return@withLock null
                 }
-                return@withLock resolveHeadArrival(unit, ip)
+                val landing = resolveHeadArrival(unit, ip)
+                if (landing == null) lastTempNavNull = "head-arrival-null"
+                return@withLock landing
             }
         }
     }
@@ -1192,7 +1223,9 @@ private fun tempNav(unit: ChapterUnit, ip: InProgressPagination, slice: PageSlic
     // never a torn pair), so the session stays bounded at ~±TEMP_WINDOW_DEPTH pages.
     enforceTempWindow(ip)
     currentTempPage(ip)?.let { setCurrentTempPage(unit, ip, it) }
-    return@withLock (ip.currentSlice?.let { unit.chapterIndex to it } ?: return@withLock null)
+    val cur = ip.currentSlice?.let { unit.chapterIndex to it }
+    if (cur == null) lastTempNavNull = "no-current"
+    return@withLock cur
     }
     // Unreachable: every path above returns inside the lock. Kept to satisfy the compiler's
     // control-flow analysis (non-inline `withLock` still needs the function-level tail).
@@ -1303,11 +1336,13 @@ fun finalizeOnLeave(chapter: Int) {
  *  ahead of building (no more head-anchored first build). */
 private suspend fun crossChapterLanding(fromChapter: Int, direction: Int): Pair<Int, PageSlice>? {
     var next = fromChapter + direction
+    // R2/D3: legit empty-chapter skips ride along so they are distinguishable from spurious cross jumps.
+    val skipped = ArrayList<Int>()
     while (next in 0 until chapters.size) {
         val unit = unitAt(next)
         val markup = if (unit != null) ensureMarkup(next) else null
-        if (unit == null || markup == null) { next += direction; continue }
-        if (!markup.hasSignificantText()) { next += direction; continue }
+        if (unit == null || markup == null) { skipped.add(next); next += direction; continue }
+        if (!markup.hasSignificantText()) { skipped.add(next); next += direction; continue }
         val anchorChar = if (direction > 0) 0 else backwardEntryAnchorChar(unit, markup)
         ensureChapterLayout(next, anchorChar)
         var page = if (direction > 0) unit.pageSlices.firstOrNull() ?: unit.inProgress?.currentSlice
@@ -1321,6 +1356,7 @@ private suspend fun crossChapterLanding(fromChapter: Int, direction: Int): Pair<
             page = if (direction > 0) unit.pageSlices.firstOrNull() else unit.pageSlices.lastOrNull()
         }
         if (page != null) {
+            if (skipped.isNotEmpty()) Logger.w(logTag, "flip: 跨章跳过空章 dir=$direction from ch=$fromChapter skipped=$skipped")
             Logger.w(logTag, "flip: 跨章落位 dir=$direction -> ${ctx(unit)} page=${pageKind(page)} isTemp=${unit.inProgress != null}")
             return next to page
         }
@@ -2108,7 +2144,8 @@ private fun finishCanonicalBackground(
             // head/tail-boundary flip during an active temp session goes straight to cross-chapter
             // (S5: 离开→废除临时表、启用磁盘分页表) instead of mis-identifying the current slice in
             // stale pageSlices and wandering onto wrong pages.
-            Logger.w(logTag, "tempNav null → skip pageSlices fallthrough ch=${unit.chapterIndex} dir=$direction")
+            // R2: reason + pointer + window ride along so a one-page-becomes-one-chapter flip names its branch.
+            Logger.w(logTag, "tempNav null → skip pageSlices fallthrough ch=${unit.chapterIndex} dir=$direction " + tempWindowDiag(ip))
         }
         if (tempExhausted) {
             // Short-circuit straight to cross-chapter, bypassing both line-continuous and pageSlices
@@ -2161,7 +2198,7 @@ private fun finishCanonicalBackground(
             ensureChapterLayout(chapter, inChapter.charStart)
             return chapter to unit.pageSlices.getOrElse(i) { inChapter }
         }
-        Logger.w(logTag, "flip: 无章内页，开始跨章 dir=$direction from ch=$chapter")
+        Logger.w(logTag, "flip: 无章内页，开始跨章 dir=$direction from ch=$chapter srcIdx=$srcIdx/${unit.pageSlices.size}")
         // Leaving the chapter abandons its temp pagination and enables the disk (canonical) table per S5
         // ("离开→废除临时表、启用磁盘分页表"). Binding on leave (never mid-chapter) avoids re-rendering the
         // page in place / flashing while the temp session is still the live pagination.

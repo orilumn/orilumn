@@ -1121,19 +1121,19 @@ private var windowPrefillJob: Job? = null
 private var lastWindowPrefillKey: Long = Long.MIN_VALUE
 
 /**
- * R18: last-flip timestamp (any flip entry). Background tracks (B2, prefill) yield while the
- * reader is actively flipping; prefill is additionally cancelled outright on flip start
- * (published products survive cancellation — only in-flight unpublished work is lost).
+ * R18: last-flip timestamp (any flip entry). Retained for future adaptive scheduling;
+ * preemption no longer polls it (cancel-on-flip is unconditional, resume via resubmit).
  */
 @Volatile
 private var lastFlipMs: Long = 0L
 
-/** R18: B2 postpones chapters while flips keep arriving (background must not contend with
- *  the flip thread for cores — the fast baseline had no background grinding at all).
- *  30s, not 3s: a chapter outlasts any short gap, so a short gate only wedges B2 INTO gaps
- *  (measured: flips contended through every gap). Parked waiting costs zero CPU; the catch-up
- *  is cheap via skip-fresh. Tunable. */
-private val b2QuietMs = 30000L
+/** P1d: the single flip hook. Cancels the landing prefill outright (published products survive)
+ *  and preempts all pool work below flip priority; resubmits reposition via skip-fresh. */
+private fun notifyFlip() {
+    lastFlipMs = platformNowMs()
+    windowPrefillJob?.cancel()
+    scheduler.cancelLowerThan(TaskScheduler.PRIO_FLIP)
+}
 
 /** R3: immutable published neighbor shapes (chapter + paramHash keyed). Read-only after
  *  publication — safe to consult from any thread; stale entries are ignored by key check. */
@@ -2487,15 +2487,10 @@ private fun finishCanonicalBackground(
         // in-chapter (temp/canonical) and out-of-bounds cross-chapter alike, so the whole-book scan
         // follows the reading direction even when the active chapter is a live temp session.
         readingDirection = direction
-        // R18: mark flip start (B2 yields on this) + kill the previous landing's prefill outright —
-        // its published products survive; only in-flight unpublished work is dropped, and the flip
-        // thread never contends with it for cores. An in-flight B2 is cancelled too (R18b) and resumes
-        // via the prefill worker-end park-and-resume — epoch dedup alone would never restart it.
-        lastFlipMs = platformNowMs()
-        windowPrefillJob?.cancel()
-        // P0 spike: pool tasks (B2/B1) are intentionally NOT cancelled here — sustained contention
-        // is what's measured; preemption is exercised via B1-preempt + unit tests. (P1 wires the
-        // flip hook to cancelLowerThan once the verdict lands.)
+        // P1d: single flip hook — preempts all background shaping below flip priority through
+        // the pool (was: scattered R18 cancels). Published products survive; in-flight work
+        // abandons at checkpoints and resubmits naturally via skip-fresh positioning.
+        notifyFlip()
         // P4: a flip that lands in [chapter] prewarms both neighbors (the chapters a next out-of-bounds
         // flip can enter) on the background P track — so the crossing's parse leaves the flip thread.
         return navigateAdjacentPage(chapter, slice, direction)?.also { (ch, _) ->

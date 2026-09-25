@@ -136,7 +136,10 @@ class WholeBookCancellationProbeTest {
 
     private suspend fun awaitParamHash(chapter: Int, want: Long) {
         val unit = controller.unitAt(chapter) ?: error("no unit $chapter")
-        withTimeout(30_000) {
+        // 60s envelope (not a perf assertion): three rapid full cycles × sequential slots under
+        // Robolectric software rendering need headroom on loaded dev machines; observed worst case
+        // ~35-60s, quiet-machine typical <10s. Properties under test are timeless.
+        withTimeout(60_000) {
             while (unit.paginationTable?.paramHash != want) delay(20)
         }
     }

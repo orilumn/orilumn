@@ -14,17 +14,28 @@ import orilumn.reader.collections.withLock
 import orilumn.reader.io.Logger
 
 /**
- * P0 spike scheduler: priority task pool for background layout work. Flips never enter the
- * queue (synchronous highest priority, direct call); the pool serves prefill/B1/B2/prewarm
- * bodies and yields to flips via cancellation.
+ * Priority task pool for background layout work (排版层（上）; the single parallelism source —
+ * 原则文档 §4/§5: worker slots are the only concurrency knob, flips never enqueue).
+ *
+ * Flips are the synchronous highest priority and stay OFF the queue (caller thread shapes
+ * directly); the pool serves page prefill / prev-chapter bump / B1 / B2 / parse-prewarm bodies
+ * and yields to flips by cancellation.
  *
  * Public API is non-suspending (maintenance hops through an internal mutex); task bodies run
  * as child coroutines on [workerDispatcher] bounded by [maxSlots]. Same-key submit replaces the
  * pending/running twin (dedup); [cancelLowerThan] preempts everything less urgent than a
  * threshold. Lower priority number = more urgent.
  *
- * SPIKE instrumentation: task start/done/cancel log `spike-task` (kept as permanent
- * lightweight diagnostics for queue behavior).
+ * Two invariants the semantics unit tests lock (`app/src/test/.../TaskSchedulerTest.kt`):
+ *  - slot accounting = the liveness map, so it can never diverge from reality: cancellation kills
+ *    the job IN PLACE and only the job's own `finally` removes its map entry (P0 fix);
+ *  - ordering is decided by [Task.seq] (assigned at CALL time), never by arrival order — the
+ *    maintenance hops below are async, so a same-key resubmit can be enqueued out of order and
+ *    the newer twin must still win (P2.6 fix).
+ *
+ * Instrumentation: task start/done/cancel log under `Orilumn.SPIKE` / `spike-task`. The tag and
+ * prefix are kept verbatim from P0 so P3 device measurements stay comparable with the P0 verdict
+ * run; they are permanent queue diagnostics, not spike leftovers.
  */
 class TaskScheduler(
     private val scope: CoroutineScope,

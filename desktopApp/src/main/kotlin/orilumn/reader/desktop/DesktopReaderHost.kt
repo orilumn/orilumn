@@ -32,8 +32,9 @@ import java.io.File
  * 增量编排/进度/存档全走共享 [BookDocumentController]（单编排宿主），本文件只剩
  * 平台接缝：zip 常驻打开、视口/分发器装配、书内字体预装、存档 map、图片解码。
  * 旧 584 行自研简化管线（单章整塑形 + 本地分页表复刻）已删除；后台 canonical/整书
- * 预排按同一 F>A>B1>B2>P 契约启用（`prewarmForOpen`；F 由 `findAdjacentPage` 调用线程
- * 同步塑形闭环，与平板同一语义）。
+ * 预排按同一优先级契约启用（F > 第一邻页 > 第二上页 > B1 > B2 > temp 预填 > P，
+ * 全部由共享 `TaskScheduler` 排定；F 由 `findAdjacentPage` 调用线程同步塑形闭环，
+ * 与平板同一语义）。
  */
 class DesktopReaderHost(
     private val bookFile: String,

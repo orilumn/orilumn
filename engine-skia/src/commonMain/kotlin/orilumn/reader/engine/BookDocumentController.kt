@@ -70,17 +70,22 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
  * serialized sideways with [Mutex] to avoid building the same chapter concurrently; the UI thread
  * only reads already-laid-out results.
  *
- * Priority contract (C1-2; shared with every host — same F>A>B1>B2>P order as the desktop host):
- *  - **F foreground flip** (highest): runs on the caller thread — synchronous temp shaping that
- *    never waits on background work and is never preempted by it;
- *  - **A adjacent prefill** ([tempPrefillJob] on [backgroundDispatcher]): cancellable, deduped per
- *    cursor, yields to F by construction (short one-page shapes under [tempStateLock]);
- *  - **B1 chapter-head canonical** (P0 spike: [TaskScheduler] prio 20): the authoritative
- *    full-chapter table; same-key submit replaces the twin (was: per-chapter FIFO slots);
- *  - **B2 whole-book scan** (P0 spike: [TaskScheduler] prio 30): skips the active
- *    chapter (B1 owns it), ordered by [readingDirection];
- *  - **P neighbor preflight** ([preflightJobs] on [backgroundDispatcher], lowest): markup + light
- *    cascade only, no shaping, idempotent per paramHash.
+ * Priority contract (C1-2 定序；P2 全部收进 [TaskScheduler]，与桌面宿主同一顺序）：
+ *  - **F foreground flip**（最高，PRIO_FLIP=0 仅为参考值）：跑在调用方线程上——同步塑形，
+ *    既不等后台也永不被后台抢；翻页入口 [notifyFlip] 统杀所有低于 F 的池任务（唯一钩子）；
+ *  - **第一邻页**（PRIO_PREFILL_PAGE=10，落点即时派发）：磁盘表路径的单页预塑+组装，
+ *    同键 `pg:<章>:<页>` 提交去重，优先侧才组装（见 [scheduleWindowPrefill]）；
+ *  - **第二上页**（PRIO_PREV_CHAPTER=15，无条件）：上页跨章时把前章整章提到第二优先级，
+ *    借 B2 的键 `b2:<章>` 提交，与整书扫描天然互斥、只塑一次；
+ *  - **B1 chapter-head canonical**（PRIO_B1_CHAPTER=20）：本章权威整章表；同键 `b1:<章>`
+ *    提交替换孪生（原按章 FIFO 槽），派发时抢占所有更低优任务；
+ *  - **B2 whole-book scan**（PRIO_B2_CHAPTER=30）：逐章任务，跳过当前章（B1 拥有），
+ *    按 [readingDirection] 的 |章距| 交错序；
+ *  - **A temp adjacent prefill**（[tempPrefillJob] on [backgroundDispatcher]）：temp 独立通道，
+ *    按决议**不进池**（原则文档 §3/§6：temp 表与增量表不合），按游标去重、短单页塑形，
+ *    天然让 F；
+ *  - **P 解析预热**（PRIO_PREWARM=40，最低）：邻章/开书的 markup + 轻结构，无塑形，
+ *    按 paramHash 幂等，同键 `pre:<章>` 去重。
  */
 class BookDocumentController(
     private val reader: EpubResourceReader,
@@ -235,7 +240,8 @@ class BookDocumentController(
         bgScope.cancel()
     }
 
-    /** P0 spike: priority pool for background layout work (B2 chapters in spike scope). */
+    /** Priority pool for ALL background layout work (P2.1/P2.4: page prefill, prev-chapter bump,
+     *  B1, B2, parse prewarm). P0 spike measurements decided the shape; it is production since P1. */
     private val scheduler = TaskScheduler(
         bgScope,
         // P1: adaptive budget — at most 2 shaping slots (P0 knee), at least 1; small devices
@@ -324,8 +330,10 @@ class BookDocumentController(
             startChar = char.coerceAtLeast(0)
             Logger.w(logTag, "open: restore -> startCh=$startChapter char=$startChar ${ctx(startChapter)}")
         }
-        // R18: open does NOT stamp lastFlipMs — the open-dispatched B2 must start promptly;
-        // the first flip cancels it outright if the reader reads immediately (abandon ≤1 block).
+        // R18: open dispatches B2 with no quiet gate — the open-dispatched pass must start
+        // promptly; the first flip cancels it outright if the reader reads immediately
+        // (abandon ≤1 block). P2.6: there is no `lastFlipMs` to skip-stamp (notifyFlip cancels
+        // unconditionally), so this needs no special case.
         return true
     }
 
@@ -1113,18 +1121,13 @@ data class TempWindowSnapshot(
 /** R2: last tempNav null-branch reason (diagnostic only; flip thread writes, flip thread reads). */
 private var lastTempNavNull: String? = null
 
-/**
- * R18: last-flip timestamp (any flip entry). Retained for future adaptive scheduling;
- * preemption no longer polls it (cancel-on-flip is unconditional, resume via resubmit).
- */
-@Volatile
-private var lastFlipMs: Long = 0L
-
 /** P1d: the single flip hook. Preempts all pool work below flip priority (page prefill
  *  tasks included — same-key resubmits reposition on the next landing); resubmits reposition
- *  via skip-fresh. */
+ *  via skip-fresh.
+ *  P2.6: R18's `lastFlipMs` stamp is GONE — preemption never polls a clock (cancel-on-flip is
+ *  unconditional, resume by resubmit), so the timestamp had no reader. R18 doctrine: cancel
+ *  promptly, don't wait out bursts. */
 private fun notifyFlip() {
-    lastFlipMs = platformNowMs()
     scheduler.cancelLowerThan(TaskScheduler.PRIO_FLIP)
 }
 
@@ -1185,7 +1188,6 @@ private fun scheduleWindowPrefill(unit: ChapterUnit, targetPage: Int, dir: Int) 
                 priority = TaskScheduler.PRIO_PREV_CHAPTER,
                 block = { b2ChapterTask(chapterIdx - 1, bc, contentW, contentH, hash) },
             ))
-            Unit
         }
     }
 }
@@ -1607,30 +1609,17 @@ private suspend fun crossChapterLanding(fromChapter: Int, direction: Int): Pair<
         return LayoutParamKey.fromProfile(profile, cw, chh).hash()
     }
 
-    /** P1f: chapter status view (computed, not stored — single source of truth, no sync bugs).
-     *  FULL ⟺ bound table matches current params; SHAPING ⟺ the pool runs a task for it;
-     *  UNLAID ⟺ otherwise. P2 jump/dispatch decisions consume this. */
-    internal enum class ChapterStatus { UNLAID, SHAPING, FULL }
-
-    internal fun chapterStatus(unit: ChapterUnit): ChapterStatus {
-        if (unit.paginationTable?.paramHash == currentParamHash() && unit.laidOut) return ChapterStatus.FULL
-        val keys = scheduler.runningKeys
-        if (keys.any { it == "b1:${unit.chapterIndex}" || it == "b2:${unit.chapterIndex}" }) return ChapterStatus.SHAPING
-        return ChapterStatus.UNLAID
-    }
-
-    /** P1f: page status view (computed). DONE ⟺ pageCache hit under current params;
-     *  SHAPING ⟺ the pool runs a page task for it (`pg:<chapter>:<page>` keys, reserved for the
-     *  P2 prefill migration — never matches today, correctly); else UNLAID. Temp path excluded (§3). */
-    internal enum class PageState { UNLAID, SHAPING, DONE }
-
-    internal fun pageStatus(unit: ChapterUnit, page: Int): PageState {
-        val hit = unit.pageCache[page]
-        if (hit != null && hit.paramHash == currentParamHash()) return PageState.DONE
-        if (scheduler.runningKeys.any { it == "pg:${unit.chapterIndex}:$page" }) return PageState.SHAPING
-        return PageState.UNLAID
-    }
-
+/**
+ * P2.6 状态表落点决议（替代 P1f 的计算式状态视图）：`ChapterStatus`/`PageState` 视图对已删——
+ * 它们零消费者，只是三处派发守卫各自判据的第四份拷贝。三处守卫即状态表：
+ * [scheduleWindowPrefill] 的有表门、[b2ChapterTask] 的 skip-fresh、[ensurePageRangeShaped] 的
+ * pageCache fast-path。表本体留在 unit 上（`paginationTable`/`pageCache`，各自带 paramHash），
+ * 调度池只管队列 + 在途键，不存第二份，故无同步 bug。改接线而不删视图，会在翻页热路径上
+ * 每次调用重算 [currentParamHash]，而三处守卫本来就已持有该 hash。
+ *
+ * 原则依据：`线程调度原则.md` §4「状态表不集中另存……派发守卫各自就地判据，**不得**再写一份
+ * 计算式状态视图——那是第四份拷贝，且会把它要避免的 paramHash 重算塞进翻页热路径」。
+ */
 private fun finishCanonicalBackground(
     unit: ChapterUnit,
     ip: InProgressPagination,
@@ -1970,10 +1959,11 @@ private fun finishCanonicalBackground(
         }
     }
 
-    /** P0 spike: one B2 chapter pass (was: one loop iteration inside the whole-book coroutine).
-     *  Skip checks re-run at execution (state moves between dispatch and run); the quiet gate is
-     *  intentionally absent in spike scope (raw contention is what's measured — preemption, not
-     *  waiting, yields to flips). */
+    /** One B2 chapter pass (P0: was one loop iteration inside the whole-book coroutine; P2.1: also
+     *  the body the prev-chapter second-priority bump reuses under B2's own key).
+     *  Skip checks re-run at execution (state moves between dispatch and run). No quiet gate —
+     *  R18 doctrine as ratified: a flip PREEMPTS this work ([notifyFlip]) rather than waiting it
+     *  out, so the gate would only add latency (原则文档 §6: quiet 门删除，抢占代替等待). */
     private suspend fun b2ChapterTask(
         index: Int,
         bc: BoxChapterLayouter,

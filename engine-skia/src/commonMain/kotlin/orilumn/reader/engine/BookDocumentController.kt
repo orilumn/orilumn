@@ -917,10 +917,12 @@ private fun startAnchorStream(
     if (!deferCanonical) {
         // 原则 §3.4：档位由「目标页距章首 d」决定。birth 这一刻通常还判不出（锚点页的前驱页
         // 尚未成形）→ 第 6 档；等 fillBackward 塑出前驱页后由 maybeBoostB1ForHeadProximity 升档。
-        dispatchB1(unit, ip, epoch, bc, contentW, contentH, paramHash, tempHeadDistancePages(ip))
+        // B1 没派（表已新鲜）则不重扫整书——否则每次落位都把收敛中的 B2 打散重来，
+        // B2 永不 drain，前台翻页长期与满槽后台抢 CPU。
+        val b1Launched = dispatchB1(unit, ip, epoch, bc, contentW, contentH, paramHash, tempHeadDistancePages(ip))
         // Relaunch the whole-book pass behind this B1 (skip-fresh repositions cheaply; temp-live and
         // fresh chapters no-op). Unconditional: same-key dedup + skip-fresh bound the cost.
-        requestWholeBookRelayout(force = true)
+        if (b1Launched) requestWholeBookRelayout(force = true)
     } else {
         Logger.w(logTag, "canonical deferred (panel open) ch=${unit.chapterIndex}")
     }
@@ -946,7 +948,14 @@ private fun dispatchB1(
     contentH: Int,
     paramHash: Long,
     headDistancePages: Int?,
-) {
+): Boolean {
+    // 派发层 skip-fresh（与 b2ChapterTask 执行层 skip-fresh 分工，D6 同理）：
+    // 表已新鲜时整趟 B1 是纯浪费——更糟的是它连带 cancelLowerThan 杀在途 B2 +
+    // 外层 force 整书重扫，把一个已收敛的 B2 又打散。直接不派。
+    if (unit.paginationTable?.paramHash == paramHash) {
+        Logger.w(logTag, "b1 skip-fresh ch=${unit.chapterIndex} (table already fresh)")
+        return false
+    }
     val priority = b1PriorityFor(headDistancePages)
     Logger.w(
         logTag,
@@ -959,6 +968,12 @@ private fun dispatchB1(
         block = b1@{
         if (epoch != layoutEpoch) {
             Logger.w(logTag, "canonical superseded (epoch $epoch != $layoutEpoch) ch=${unit.chapterIndex}")
+            return@b1
+        }
+        // 执行层 skip-fresh（与 b2ChapterTask 同式）：派发后、开工前表已新鲜
+        // （B2 先落盘）则整趟白做，直接让出槽位。
+        if (unit.paginationTable?.paramHash == paramHash) {
+            Logger.w(logTag, "b1 skip-fresh at execution ch=${unit.chapterIndex}")
             return@b1
         }
         // P7: capture the task coroutine's context so the between-blocks checkpoint can
@@ -980,6 +995,7 @@ private fun dispatchB1(
         }
         },
     ))
+    return true
 }
 
 /** 原则 §3.4 的**再评估**钩子：临时表侧的前驱页塑出之后，才知道锚点页是不是第 2 页。
@@ -1543,6 +1559,14 @@ private fun scheduleTempEdgePrefill(unit: ChapterUnit, ip: InProgressPagination)
 /** P2.1: one neighbor page — warm its blocks, merge-publish L2, and (priority side only)
  *  assemble + store the product. Skips (no-op) on temp-live / missing table / out-of-range:
  *  the S7 step-3 scope, checked live (state moves between dispatch and run). */
+/** 落位级共享 light prepare：同一落位派发的几十个 `pg:` 任务曾各跑一次全章 light
+ *  cascade（去 16 截断后放量，池槽会被 cascade 淹没）。同（章，表 hash，profile）
+ *  inputs 相同 → 首个任务计算并发布，后续复用。last-writer-wins + 不可变结果，
+ *  竞态 benign；参数/视口一变 key 即失配，回落重算（正确性仍由各任务既有守卫兜底）。 */
+private data class WindowPrepKey(val chapter: Int, val hash: Long, val profile: TypographicProfile)
+@Volatile
+private var windowPrepCache: Pair<WindowPrepKey, LightPrepare>? = null
+
 private suspend fun prefillPageTask(chapterIdx: Int, page: Int, anchor: Int, assemble: Boolean) {
     val u0 = unitAt(chapterIdx) ?: return
     val table = u0.paginationTable ?: return
@@ -1566,7 +1590,12 @@ private suspend fun prefillPageTask(chapterIdx: Int, page: Int, anchor: Int, ass
     val rec = table.pages[page]
     val lo = rec.blockStart.coerceAtLeast(0)
     if (rec.blockEndExclusive <= lo) return
-    val lp = bc.prepareLight(markup, css, profileSnap, cw, u0.structureCache, chh)
+    // 同一落位的任务共享 light prepare（见 windowPrepCache）：各跑一次 cascade 是纯浪费。
+    // 组装用的第二次 prepareLight 与此处同参，一并复用（原代码重复计算）。
+    val prepKey = WindowPrepKey(chapterIdx, hash, profileSnap)
+    val lp = windowPrepCache?.takeIf { it.first == prepKey }?.second
+        ?: bc.prepareLight(markup, css, profileSnap, cw, u0.structureCache, chh)
+            .also { windowPrepCache = prepKey to it }
     val local = HashMap<Int, ParagraphShapeRef>()
     for (b in lo until rec.blockEndExclusive) {
         ctx.ensureActive()
@@ -1579,11 +1608,10 @@ private suspend fun prefillPageTask(chapterIdx: Int, page: Int, anchor: Int, ass
     // doubling it per landing cost more (device-measured) than the backward-hit rate covers.
     if (!assemble) return
     // Assemble with the just-warmed shapes as L1 (same params, deterministic) so assembly is
-    // pure assembly cost.
-    val prep = bc.prepareLight(markup, css, profileSnap, cw, u0.structureCache, chh)
+    // pure assembly cost. Reuses the shared landing prepare (same args as above, no second cascade).
     val prod = try {
         bc.incrementalLayoutForPage(
-            prepare = prep,
+            prepare = lp,
             profile = profileSnap,
             contentW = cw,
             contentH = chh,

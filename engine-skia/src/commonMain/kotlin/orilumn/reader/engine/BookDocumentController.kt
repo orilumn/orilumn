@@ -1163,11 +1163,57 @@ fun pageCacheKeysForTest(chapter: Int): Set<Int> =
 fun windowPrefillSnapshotForTest(): Triple<Int, Long, Set<Int>>? =
     windowPrefillL2?.let { Triple(it.chapterIndex, it.paramHash, it.shapes.keys.toSet()) }
 
+/** d=1 章外兜底任务的键（原则 §3.3）。**与整书章扫描的 [scanKey] 刻意分域**——
+ * 两者是同一份工作（整章全量）但紧急度不同：兜底是"读者下一步就要翻过去"（第 2/3 档），
+ * 章扫描是纯章距投机（第 7 档）。共用键时同键去重按"后来者胜"处理，章扫描那趟若后到就会把
+ * 兜底降级回第 7 档，兜底随即被埋进章距序列——这正是"跨章跳过"旧规则想避开的困境，
+ * 换个键才是真正的解法。 */
+fun edgeKey(chapter: Int) = "edge:$chapter"
+
+/** 整书章扫描（B2，第 7 档）的键。与 [edgeKey] 必须分域，见该函数 KDoc。 */
+fun scanKey(chapter: Int) = "b2:$chapter"
+
+/** 原则 §3.3：**d=1 邻页越出本章 → 加急整章排邻章**。纯判定，无副作用、无提交，probe 直接验证
+ *  同一份判据（生产与测试不各写一份）。
+ *
+ *  升档取**越界那一侧自己的 d=1 档**，与翻页方向无关：
+ *  - 缺下一页（`p >= totalPages`）→ **下一章** @ [TaskScheduler.PRIO_EDGE_FORWARD]（第 2 档）
+ *  - 缺上一页（`p < 0`）→ **上一章** @ [TaskScheduler.PRIO_EDGE_BACKWARD]（第 3 档）
+ *
+ *  读者在首页**向前**翻时同样会补上"上一章"——章首页是增量→全量的交接点，下一次往回翻就要用。
+ *  单页章两侧都缺，两个都发。**d≥2 不做此升级**：越界意味着至少还剩两页，隔两页仍不翻就不值得
+ *  为它动整章。
+ *
+ *  @return `(邻章号, 优先级)` 列表，按 d=1 方向侧优先的次序。 */
+fun edgeEscalations(
+    chapterIdx: Int,
+    totalPages: Int,
+    targetPage: Int,
+    dir: Int,
+    lastChapter: Int,
+): List<Pair<Int, Int>> {
+    if (totalPages <= 0) return emptyList()
+    val order = if (dir >= 0) intArrayOf(targetPage + 1, targetPage - 1)
+    else intArrayOf(targetPage - 1, targetPage + 1)
+    val out = ArrayList<Pair<Int, Int>>(2)
+    for (p in order) {
+        if (p in 0 until totalPages) continue
+        val missingForward = p >= totalPages
+        val beyond = if (missingForward) chapterIdx + 1 else chapterIdx - 1
+        if (beyond !in 0..lastChapter) continue
+        out.add(
+            beyond to if (missingForward) TaskScheduler.PRIO_EDGE_FORWARD
+            else TaskScheduler.PRIO_EDGE_BACKWARD
+        )
+    }
+    return out
+}
+
 /** P2.1: disk-path neighbor prefill after a landing (scheduler edition). No-op on the temp
  *  path (its own prefill owns it) and without a table. Submits one PAGE task per in-range
  *  neighbor in flip-direction order; same-key submit replaces stale twins (latest landing wins).
- *  Prev page outside this chapter ⇒ bump the prev chapter's FULL layout to second priority
- *  (S7 skip retired per ratified spec — the pages nearest the reader stay ready).
+ *  A d=1 neighbor falling OUTSIDE this chapter ⇒ full-layout the adjacent chapter at the d=1
+ *  priority (原则 §3.3, unconditional — both the tail→next and head→prev directions).
  *  No start delay (R18 doctrine: cancel promptly instead of waiting out bursts). */
 private fun scheduleWindowPrefill(unit: ChapterUnit, targetPage: Int, dir: Int) {
     val table = unit.paginationTable ?: return
@@ -1175,6 +1221,7 @@ private fun scheduleWindowPrefill(unit: ChapterUnit, targetPage: Int, dir: Int) 
     val total = table.pages.size
     if (total <= 0) return
     val chapterIdx = unit.chapterIndex
+    val lastChapter = chapters.size - 1
     val order = if (dir >= 0) intArrayOf(targetPage + 1, targetPage - 1)
     else intArrayOf(targetPage - 1, targetPage + 1)
     for (p in order) {
@@ -1187,21 +1234,58 @@ private fun scheduleWindowPrefill(unit: ChapterUnit, targetPage: Int, dir: Int) 
                 priority = TaskScheduler.PRIO_PREFILL_PAGE,
                 block = { prefillPageTask(chapterIdx, p, targetPage, prioritySide) },
             ))
-        } else if (p < 0 && chapterIdx > 0) {
-            // Second priority is unconditional: the previous chapter's full pass jumps the queue.
-            // Submitted under B2's OWN key ("b2:<prev>") so it dedups with the whole-book pass
-            // (same work, earlier) instead of double-shaping the chapter.
-            unitAt(chapterIdx - 1) ?: continue
-            val bc = layouter as? BoxChapterLayouter ?: continue
-            val contentW = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
-            val contentH = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
-            val hash = LayoutParamKey.fromProfile(profile, contentW, contentH).hash()
-            scheduler.submit(TaskScheduler.Task(
-                key = "b2:${chapterIdx - 1}",
-                priority = TaskScheduler.PRIO_PREV_CHAPTER,
-                block = { b2ChapterTask(chapterIdx - 1, bc, contentW, contentH, hash) },
-            ))
+        } else {
+            continue // handled by the edgeEscalations pass below — keeps the d=1 rule in ONE place
         }
+    }
+    // 原则 §3.3：d=1 邻页越出本章 → 加急整章排邻章（键域与 b2 扫描分开，见 [edgeKey]）。
+    for ((beyond, prio) in edgeEscalations(chapterIdx, total, targetPage, dir, lastChapter)) {
+        if (unitAt(beyond) == null) continue
+        val bc = layouter as? BoxChapterLayouter ?: continue
+        val contentW = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
+        val contentH = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
+        val hash = LayoutParamKey.fromProfile(profile, contentW, contentH).hash()
+        scheduler.submit(TaskScheduler.Task(
+            key = edgeKey(beyond),
+            priority = prio,
+            block = { b2ChapterTask(beyond, bc, contentW, contentH, hash) },
+        ))
+    }
+}
+
+/** d=1 章外兜底，**临时表侧**（原则 §3.3）。与 [scheduleWindowPrefill] 的磁盘表侧同一套规则，
+ *  只是判据来自 temp 会话而非分页表：
+ *  - **缺上一页**：当前页 `blockStart == 0`，本章内没有更靠前的页 → 加急整章排上一章（第 3 档）。
+ *  - **缺下一页**：块水位已到本章末尾且当前页已抵末尾 → 加急整章排下一章（第 2 档）。
+ *
+ *  两处都用**会话冻结的参数快照**（[InProgressPagination.profileSnapshot]，P9）算 hash——
+ *  与 temp 页自身同参数，兜底排出来的表才能被后续落位复用；用会变的 `profile` 会算出
+ *  另一个 hash，白排一遍。 */
+private fun scheduleTempEdgePrefill(unit: ChapterUnit, ip: InProgressPagination) {
+    val bc = layouter as? BoxChapterLayouter ?: return
+    val chapterIdx = unit.chapterIndex
+    val lastChapter = chapters.size - 1
+    val totalBlocks = ip.prepare.totalBlocks
+    val contentW = ip.contentW
+    val contentH = ip.contentH
+    val hash = LayoutParamKey.fromProfile(ip.profileSnapshot, contentW, contentH).hash()
+    val (curBlockStart, curBlockEnd, atTail) = tempStateLock.withLock {
+        val cur = currentTempPage(ip) ?: return@withLock Triple(-1, -1, false)
+        Triple(cur.blockStart, cur.blockEndExclusive, ip.shapedForwardTo >= totalBlocks)
+    }
+    if (curBlockStart < 0) return
+    fun submitEdge(beyond: Int, prio: Int) {
+        if (beyond !in 0..lastChapter) return
+        if (unitAt(beyond) == null) return
+        scheduler.submit(TaskScheduler.Task(
+            key = edgeKey(beyond),
+            priority = prio,
+            block = { b2ChapterTask(beyond, bc, contentW, contentH, hash) },
+        ))
+    }
+    if (curBlockStart == 0) submitEdge(chapterIdx - 1, TaskScheduler.PRIO_EDGE_BACKWARD)
+    if (atTail && curBlockEnd >= totalBlocks) {
+        submitEdge(chapterIdx + 1, TaskScheduler.PRIO_EDGE_FORWARD)
     }
 }
 
@@ -1959,7 +2043,7 @@ private fun finishCanonicalBackground(
         for (i in order) {
             if (i == current) continue // B1 owns the active chapter's canonical pass
             scheduler.submit(TaskScheduler.Task(
-                key = "b2:$i",
+                key = scanKey(i),
                 priority = TaskScheduler.PRIO_B2_CHAPTER,
                 block = { b2ChapterTask(i, bc, contentWidth, contentHeight, paramHash) },
             ))
@@ -2608,7 +2692,11 @@ private fun finishCanonicalBackground(
                 // ahead window so the next flip stays pre-shaped (整改 E), steering the fill toward the
                 // reader's direction of travel. Skip once the temp session handed off to canonical
                 // (clearInProgress), where there is nothing left to prefill.
-                if (unit.inProgress === ip) scheduleTempPrefill(unit, ip, direction)
+                if (unit.inProgress === ip) {
+                    scheduleTempPrefill(unit, ip, direction)
+                    // 原则 §3.3：d=1 邻页越出本章则加急整章排邻章（临时表侧）。
+                    scheduleTempEdgePrefill(unit, ip)
+                }
                 return it
             }
             // tempNav returned null — the temp stream reached its boundary (headReached or tail).

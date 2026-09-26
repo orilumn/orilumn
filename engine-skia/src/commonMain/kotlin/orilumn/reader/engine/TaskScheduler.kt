@@ -44,9 +44,13 @@ class TaskScheduler(
 ) {
     companion object {
         const val PRIO_PREFILL_PAGE = 10
-        /** P2.1: prev-chapter full bump (second priority is unconditional — between neighbor
-         *  pages and current-chapter canonical). Shares B1 keying for mutual exclusion. */
-        const val PRIO_PREV_CHAPTER = 15
+        /** 原则 §3.3 的 **d=1 章外兜底**：目标页是本章末页 → 全量预排**下一章**，留在第 2 档
+         *  （与「下一页」同档——末页时该档没有页任务，正好让位给它）。
+         *  D3 会把第 2/3 档拆成互不相邻的号，届时本常量与 [PRIO_PREFILL_PAGE] 分离。 */
+        const val PRIO_EDGE_FORWARD = 10
+        /** 原则 §3.3 的 **d=1 章外兜底**：目标页是本章首页 → 全量预排**上一章**，留在第 3 档。
+         *  紧急度高于「本章全量」（第 6 档）——邻章是读者下一步就要读的内容。 */
+        const val PRIO_EDGE_BACKWARD = 15
         const val PRIO_B1_CHAPTER = 20
         const val PRIO_B2_CHAPTER = 30
         const val PRIO_PREWARM = 40

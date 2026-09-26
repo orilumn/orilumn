@@ -755,10 +755,19 @@ internal val HEAD_START_BLOCK_LIMIT = 100
  *  Window depth symmetric ⇒ forward/backward flip latency risk symmetric. */
 private val TEMP_WINDOW_DEPTH = 1
 
+/** 第 4 档在临时表侧的执行体：块水位前推预算（步数≈页数）。原则 §3.5「第三及之后是空闲 drain」。
+ *
+ *  D4(a) 显式化：d≥2 的准备在临时表侧没有"页位"（窗口只留 ±1 页对象，见 [enforceTempWindow]），
+ *  其实体是 [stepTempPrefill] 循环把块水位向前推——页对象被淘汰，但暖块留在 shapes 里，
+ *  翻页时从暖块重建很快。它不是可抢占的独立池任务（D3b 未做），而是水位深度参数；
+ *  与 [PAGE_DRAIN_WINDOW] 同一把尺子（读者会连着翻的页数），两处同取 16。
+ *  **待设备标定**（整改方案 D7）：直接决定"连翻时后台铺多远"与"占槽多久"的取舍。 */
+private val TEMP_PREFILL_BUDGET = 16
+
 /** 第 4 档「本章其余页」的 drain 深度（页数）。原则 §3.5「第三及之后是空闲 drain」的窗口大小。
  *
  *  命名而非魔法数：先前它藏在临时表预排的 `TEMP_WINDOW_DEPTH * 16` 里，不可观测也不可调。
- *  取 16 与临时表侧的块水位前推深度一致（同一把尺子：读者会连着翻的页数）。
+ *  与临时表侧的块水位预算 [TEMP_PREFILL_BUDGET] 同一把尺子（读者会连着翻的页数），两处同取 16。
  *  **待设备标定**（整改方案 D4/D7）：这个值直接决定"连翻时后台铺多远"与"占槽多久"的取舍。 */
 private val PAGE_DRAIN_WINDOW = 16
 
@@ -1055,7 +1064,10 @@ private fun scheduleTempPrefill(unit: ChapterUnit, ip: InProgressPagination, las
     tempPrefillJob = bgScope.launch(backgroundDispatcher) {
         try {
             var guard = 0
-            while (stepTempPrefill(unit, ip, lastDir) && guard++ < TEMP_WINDOW_DEPTH * 16) kotlinx.coroutines.delay(4)
+            while (stepTempPrefill(unit, ip, lastDir) && guard++ < TEMP_PREFILL_BUDGET) kotlinx.coroutines.delay(4)
+            // D4(a)：报块水位深度，否则第 4 档在临时表侧的推进幅度设备上不可见。
+            val (fwd, total) = tempStateLock.withLock { ip.shapedForwardTo to ip.prepare.totalBlocks }
+            Logger.d(logTag, "temp prefill done ch=${unit.chapterIndex} steps=$guard shapedFwdTo=$fwd/$total")
         } catch (_: kotlinx.coroutines.CancellationException) {
             // superseded by a newer prefill or a new anchor stream — expected
         } catch (e: Exception) {

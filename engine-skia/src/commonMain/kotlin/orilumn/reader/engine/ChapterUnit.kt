@@ -151,9 +151,11 @@ class ChapterUnit(
         this.laidOut = true
     }
 
-    /** Fills the semantic tree, called by the controller (runs once; ignored if already set). */
+    /** Fills the semantic tree, called by the controller (runs once; ignored if already set).
+     *  二次绑定不同树即上游重复解析 bug：以往静默丢弃，标题/样式停留旧树。现在抛
+     *  （调用方双重判空保证只进一次，见控制器 ensureMarkup）。 */
     fun ensureMarkup(tree: MarkupElement, treeTitle: String) {
-        if (markup != null) return
+        check(markup == null) { "ensureMarkup twice ch=$chapterIndex" }
         markup = tree
         title = treeTitle
     }
@@ -214,15 +216,6 @@ class ChapterUnit(
      *  currently-bound hash. Purely structural fields (markup, cssBundle) survive. */
     fun invalidateForParam(newHash: Long) {
         if (newHash != paramHash) invalidateLayout()
-    }
-
-    /** Degraded fallback on layout failure: binds an empty layout to guarantee no crash and safe
-     * pagination (no lines). */
-    fun bindSafeEmpty() {
-        this.layout = null
-        this.pageSlices = emptyList()
-        this.laidOut = true
-        this.pathMarker = null
     }
 }
 

@@ -63,10 +63,11 @@ data class ChapterPaginationTable(
             totalBlocks: Int,
             totalChars: Int,
         ): ChapterPaginationTable {
-            // 写盘前校验只记 e 不抛（抛/改返回见决策单）：坏表落盘比崩更难查，先让它出声。
-            if (slices.isEmpty()) Logger.e("Orilumn.DISK", "fromSlices empty slices ch=$chapterIndex")
-            if (totalBlocks < 0 || totalChars < 0) Logger.e("Orilumn.DISK", "fromSlices negative ch=$chapterIndex blocks=$totalBlocks chars=$totalChars")
-            if (slices.zipWithNext().any { (a, b) -> b.charStart < a.charStart }) Logger.e("Orilumn.DISK", "fromSlices non-monotonic ch=$chapterIndex")
+            // 写盘前契约（fail-fast）：调用方四处全部前查 isNotEmpty，空表/负数/非单调
+            // 进来即上游 bug。以往照写坏表落盘，现在出生即炸。
+            require(slices.isNotEmpty()) { "fromSlices empty slices ch=$chapterIndex" }
+            require(totalBlocks >= 0 && totalChars >= 0) { "fromSlices negative ch=$chapterIndex blocks=$totalBlocks chars=$totalChars" }
+            require(slices.zipWithNext().none { (a, b) -> b.charStart < a.charStart }) { "fromSlices non-monotonic ch=$chapterIndex" }
             val pages = slices.map { s ->
                 PageRecord(
                     charStart = s.charStart,

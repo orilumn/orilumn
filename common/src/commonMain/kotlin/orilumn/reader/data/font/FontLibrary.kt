@@ -62,8 +62,10 @@ class FontLibrary(
     /** 全量字体行（持久化；含隐藏）。 */
     suspend fun list(): List<FontFace> = db.allFonts()
 
-    /** 按 id 取字节（key = [FontFace.id]）；缺文件只报空不断行，残留行由管理页显式删除，阅读侧永不写库。 */
-    fun fontBytes(id: Long): ByteArray? = runCatching {
+    /** 按 id 取字节（key = [FontFace.id]）；缺文件只报空不断行，残留行由管理页显式删除，阅读侧永不写库。
+     *  DB 层异常直接抛（SQLDelight 缺行回 null 已在内层处理；外层再包会把 DB 故障伪装成
+     *  "字体缺失"）；文件 IO 异常仍容错回 null（内层）。 */
+    fun fontBytes(id: Long): ByteArray? {
         val face = db.fontByIdBlocking(id) ?: return null
         val path = face.path ?: return null
         val bytes = runCatching { fs.read(path.toPath()) { readByteArray() } }.getOrNull()
@@ -71,11 +73,8 @@ class FontLibrary(
             Logger.w(logTag, "font file unreadable id=$id family=${face.familyName} path=$path")
             return null
         }
-        bytes
-        // DB 层异常（应 fail-fast）此前被外层吞成"字体缺失"：记 e 区分，返回仍为 null
-        // （去外层 runCatching 是否改抛，见决策单——需先确认 DB 层不抛契约）。
-    }.onFailure { Logger.e(logTag, "fontBytes DB FAIL id=$id ${it.message}") }
-        .getOrNull()
+        return bytes
+    }
 
     /**
      * 导入核心：读失败回全量表；空/不可解析/不可用语种字节驳回。

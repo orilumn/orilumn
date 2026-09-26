@@ -734,7 +734,9 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
         }.onFailure {
             Logger.e(logTag, "layout FAIL ch=${unit.chapterIndex} ${ctx(unit)} ${it.message}", it)
             Logger.e(logTag, "layout FAIL ch=${unit.chapterIndex} ${it.message}", it)
-            unit.bindSafeEmpty()
+            // 失败不再伪装空章节（bindSafeEmpty 已删）：抛，让调用链按失败处理。
+            // 翻页线程上即崩（开发期暴露）；重排路径各自 runCatching 记 e 后丢弃本轮。
+            throw it
         }
     }
 
@@ -1062,15 +1064,14 @@ private fun stepTempPrefill(unit: ChapterUnit, ip: InProgressPagination, lastDir
     val backwardMissing = if (!ip.curIsForward) ip.curIndex + 1 >= b.size else ip.curIndex == 0 && b.isEmpty()
 
     // Both sides are filled by the rule pair below: 0 = not applicable (already present / out of
-    // range), 1 = a page was shaped, 2 = a required shape failed (abort the whole prefill).
+    // range), 1 = a page was shaped. Shaping failure throws (fail-fast) instead of the old
+    // code-2 abort — a poisoned prefill must not silently stall the watermark.
     fun fillForward(): Int {
         if (!forwardMissing || ip.shapedForwardTo >= prep.totalBlocks) return 0
         // 塑形失败编码 2 中止整轮：后台水位停推，前台下次翻页按需塑——延迟归因在此记 e。
+        // 开发期 fail-fast：记 e 后抛（后台 SupervisorJob 收容，不连累前台；栈留痕）。
         val fwd = bc.shapeTempPageForward(prep, ip.profileSnapshot, ip.contentW, ip.contentH, ip.shapedForwardTo, ip.shapes, ip.forwardFromLine)
-            ?: run {
-                Logger.e(logTag, "stepTempPrefill fillForward FAIL ch=${unit.chapterIndex} shapedFwdTo=${ip.shapedForwardTo}")
-                return 2
-            }
+            ?: error("stepTempPrefill fillForward FAIL ch=${unit.chapterIndex} shapedFwdTo=${ip.shapedForwardTo}")
         f.add(fwd.page)
         ip.shapedForwardTo = fwd.nextBlock
         ip.forwardFromLine = fwd.nextLine
@@ -1079,10 +1080,8 @@ private fun stepTempPrefill(unit: ChapterUnit, ip: InProgressPagination, lastDir
     }
     fun fillBackward(): Int {
         if (!backwardMissing) return 0
-        val p = shapeNextBackward(ip, bc) ?: run {
-            Logger.e(logTag, "stepTempPrefill fillBackward FAIL ch=${unit.chapterIndex}")
-            return 2
-        }
+        val p = shapeNextBackward(ip, bc)
+            ?: error("stepTempPrefill fillBackward FAIL ch=${unit.chapterIndex}")
         b.add(p)
         if (p.blockStart == 0) ip.headReached = true
         enforceTempWindow(ip)
@@ -1706,8 +1705,9 @@ private fun tempNav(unit: ChapterUnit, ip: InProgressPagination, slice: PageSlic
                 ip.curIndex = next
             } else {
                 if (ip.shapedForwardTo >= prep.totalBlocks) { lastTempNavNull = "fwd-tail"; Logger.w(logTag, "tempNav forward tail → null ch=${ip.chapterIndex}"); return@withLock null }
+                // 边界已前查：此处的 null 只可能是塑形器回归。抛，不当越界吞（丢内容翻页）。
                 val fwd = bc.shapeTempPageForward(prep, ip.profileSnapshot, ip.contentW, ip.contentH, ip.shapedForwardTo, ip.shapes, ip.forwardFromLine)
-                    ?: run { lastTempNavNull = "fwd-shape-fail"; return@withLock null }
+                    ?: error("tempNav fwd-shape-fail ch=${ip.chapterIndex} shapedFwdTo=${ip.shapedForwardTo} total=${prep.totalBlocks}")
                 ip.forwardPages.add(fwd.page)
                 ip.shapedForwardTo = fwd.nextBlock
                 ip.forwardFromLine = fwd.nextLine
@@ -1726,8 +1726,9 @@ private fun tempNav(unit: ChapterUnit, ip: InProgressPagination, slice: PageSlic
                     val startBlock = ip.backwardPages.firstOrNull()?.blockEndExclusive ?: ip.shapedForwardTo
                     if (startBlock >= prep.totalBlocks) { lastTempNavNull = "reroot-tail"; Logger.w(logTag, "tempNav forward tail → null ch=${ip.chapterIndex}"); return@withLock null }
                     Logger.w(logTag, "tempNav RE-ROOT fwd ch=${ip.chapterIndex} startBlock=$startBlock startLine=0 (块边界重启)")
+                    // 范围已前查（reroot-tail）：null 即回归，抛。
                     val fwd = bc.shapeTempPageForward(prep, ip.profileSnapshot, ip.contentW, ip.contentH, startBlock, ip.shapes, 0)
-                        ?: run { lastTempNavNull = "reroot-shape-fail"; return@withLock null }
+                        ?: error("tempNav reroot-shape-fail ch=${ip.chapterIndex} startBlock=$startBlock")
                     // Re-root the absolute forward front to this new head edge; subsequent flips append
                     // from here instead of the (deep, evicted) old front.
                     ip.shapedForwardTo = fwd.nextBlock
@@ -1770,12 +1771,9 @@ private fun tempNav(unit: ChapterUnit, ip: InProgressPagination, slice: PageSlic
                 }
             }
             is TempNavBackwardStep.Shape -> {
+                // 纯判据已保证 endExclusive>0 且不超全章：null 即回归，抛，不当边界吞。
                 val p = bc.shapeTempPageBackward(prep, ip.profileSnapshot, ip.contentW, ip.contentH, step.endExclusive, step.lineCut, ip.shapes)
-                    ?: run {
-                        lastTempNavNull = "bwd-shape-fail"
-                        Logger.w(logTag, "tempNav backward shapeTempPageBackward → null ch=${ip.chapterIndex} endExclusive=${step.endExclusive} lineCut=${step.lineCut}")
-                        return@withLock null
-                    }
+                    ?: error("tempNav bwd-shape-fail ch=${ip.chapterIndex} endExclusive=${step.endExclusive} lineCut=${step.lineCut}")
                 ip.backwardPages.add(p)
                 if (p.blockStart == 0) ip.headReached = true
                 ip.curIsForward = false
@@ -2572,9 +2570,9 @@ private fun finishCanonicalBackground(
         if (end == start) end = start + 1
         val charStart = layout.getLineStart(start)
         val charEnd = if (end < n) layout.getLineStart(end) else layout.length
-        // 布局器产出倒挂（charEnd<charStart）此前钳成空页：调用方当正常页翻，记 e。
-        if (charEnd < charStart) Logger.e(logTag, "lineAnchoredPage inverted anchor=$anchorChar charStart=$charStart charEnd=$charEnd lines=$n")
-        return PageSlice(charStart, charEnd.coerceAtLeast(charStart), start, end, PageSlice.Kind.TEXT, -1, -1)
+        // 布局器产出倒挂（charEnd<charStart）是布局 bug：抛，不钳成空页藏。
+        check(charEnd >= charStart) { "lineAnchoredPage inverted anchor=$anchorChar charStart=$charStart charEnd=$charEnd lines=$n" }
+        return PageSlice(charStart, charEnd, start, end, PageSlice.Kind.TEXT, -1, -1)
     }
 
     /**
@@ -2590,8 +2588,8 @@ private fun finishCanonicalBackground(
         if (end == startLine) end = startLine + 1
         val cs = layout.getLineStart(startLine)
         val ce = if (end < n) layout.getLineStart(end) else layout.length
-        if (ce < cs) Logger.e(logTag, "forwardPageFrom inverted startLine=$startLine cs=$cs ce=$ce lines=$n")
-        return PageSlice(cs, ce.coerceAtLeast(cs), startLine, end, PageSlice.Kind.TEXT, -1, -1)
+        check(ce >= cs) { "forwardPageFrom inverted startLine=$startLine cs=$cs ce=$ce lines=$n" }
+        return PageSlice(cs, ce, startLine, end, PageSlice.Kind.TEXT, -1, -1)
     }
 
     /**
@@ -3077,7 +3075,10 @@ private fun finishCanonicalBackground(
             // Ensure the target page is shaped (disk-hit incremental path may have skipped it).
             // R5/S3: a flip-time rebuild must never head-lift (post-invalidate edge on pages 2–5).
             ensureChapterLayout(chapter, inChapter.charStart, headLift = false)
-            return chapter to unit.pageSlices.getOrElse(i) { inChapter }
+            // ensure 后重取：i 越界即锁间隙竞态（表被替换），此前静默用旧页，记 w 可见。
+            val fresh = unit.pageSlices.getOrNull(i)
+            if (fresh == null) Logger.w(logTag, "flip:章内重取越界 ch=$chapter i=$i/${unit.pageSlices.size} → fallback stale page")
+            return chapter to (fresh ?: inChapter)
         }
         Logger.w(logTag, "flip: 无章内页，开始跨章 dir=$direction from ch=$chapter srcIdx=$srcIdx/${unit.pageSlices.size}")
         // Leaving the chapter abandons its temp pagination and enables the disk (canonical) table per S5

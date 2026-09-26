@@ -28,10 +28,13 @@ object ProgressMapper {
 
         val totalChars: Long get() = lengths.sum()
 
-        /** Cumulative char count of all chapters before [chapter]. */
+        /** Cumulative char count of all chapters before [chapter].
+         *  内部叶函数：调用方三处（bookProgress/chapterChar 内）传的都是已钳位下标，
+         *  进来越界即上游 bug。抛（chapter==size 求全书和是合法语义，保留）。 */
         fun precedingChars(chapter: Int): Long {
+            require(chapter in 0..lengths.size) { "precedingChars chapter=$chapter size=${lengths.size}" }
             var s = 0L
-            for (i in 0 until chapter.coerceIn(0, lengths.size)) s += lengths[i]
+            for (i in 0 until chapter) s += lengths[i]
             return s
         }
 

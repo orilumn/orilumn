@@ -542,7 +542,9 @@ class BoxChapterLayouter(
         totalBlocks: Int,
         totalChars: Int,
     ): List<PageSlice> {
-        if (globalCharStarts.isEmpty()) return slices
+        // 未 prepare 的章直接透传无块范围 slices——以往静默，上游错块且不可查。
+        // 调用方两处恒传已 prepare 的 globals，进来空即调用方 bug。抛。
+        require(globalCharStarts.isNotEmpty()) { "backfillBlockRanges without prepare" }
         // Leaf index whose range contains [c]; clamped to 0..last (mirrors blockIndexForChar).
         fun blockOf(char: Int): Int {
             var lo = 0; var hi = globalCharStarts.lastIndex
@@ -618,7 +620,9 @@ class BoxChapterLayouter(
                 val fl = lines.getOrNull(lineIdx) ?: continue
                 val s = shape.lineStart(k)
                 val e = shape.lineEnd(k)
-                if (s < 0 || e < s || e > text.length) continue
+                // 断行器不变式（fail-fast）：行起止非法只可能是 breaker 坏了——以往当"画少一行"
+                // 跳过，页少字而不报错。现在炸。
+                require(s >= 0 && e >= s && e <= text.length) { "buildPartialSkiaWindow bad range s=$s e=$e len=${text.length}" }
                 val intruded = lead != null && k < lead.lines
                 out[lineIdx] = orilumn.reader.engine.skia.DrawLine(
                     text = text,
@@ -722,8 +726,11 @@ class BoxChapterLayouter(
             if (rec.blockStart >= 0) blockLo = minOf(blockLo, rec.blockStart)
             if (rec.blockEndExclusive > 0) blockHi = maxOf(blockHi, rec.blockEndExclusive)
         }
-        if (blockLo == Int.MAX_VALUE) blockLo = 0
-        if (blockHi == Int.MIN_VALUE) blockHi = 0
+        // 哨兵即脏表/空窗（所选页全无有效块范围）：以往静默归零产出 NOSHAPE 整窗，
+        // 调用方当完整 slices 用，翻页后续才崩。现在出生即炸。
+        if (blockLo == Int.MAX_VALUE || blockHi == Int.MIN_VALUE) {
+            error("incrementalLayoutForPage empty block range pages=[$startIdx,$endIdx)/${table.pages.size}")
+        }
         blockLo = blockLo.coerceAtLeast(0)
         blockHi = blockHi.coerceAtMost(prepare.totalBlocks)
 
@@ -1154,6 +1161,9 @@ class BoxChapterLayouter(
         cache: MutableMap<Int, ParagraphShapeRef>?,
     ): ForwardedPage {
         val total = prepare.totalBlocks
+        // 空章进锚点流是调用方 bug（跨章已跳过无正文章）：以往 coerce 到块 0 后偶然越界，
+        // 信息为零。现在出生即炸。
+        require(total > 0) { "shapeAnchorPageForward empty chapter blocks=0" }
         val anchorBlock = prepare.blockIndexForChar(anchorChar.coerceAtLeast(0)).coerceIn(0, (total - 1).coerceAtLeast(0))
 
         // Find the line within the anchor block that contains anchorChar.
@@ -1293,7 +1303,6 @@ class BoxChapterLayouter(
         val page = assembleTempPage(prepare, startBlock, endBlockExclusive, shapes, pageFirstLine = startLine.coerceAtLeast(0), endLineCharStart = ecs, contentH = contentH) {
             tempShape(cache, prepare, it, profile)
         }
-            ?: return null
         diagPage(contentH, page, "fwd")
         val nb = if (cutLine >= 0) cutBlock else endBlockExclusive
         val nl = if (cutLine >= 0) cutLine else 0
@@ -1562,6 +1571,12 @@ class BoxChapterLayouter(
         /** P6-a2 R6: 前视塑形（carry-in 状态预热；null = 无前视）。 */
         shapeLookback: ((Int) -> ParagraphShapeRef)? = null,
     ): TempPage {
+        // 入口契约（fail-fast）：调用方三处（anchor-forward/temp-forward/temp-backward）传的
+        // shapes 与块区间必须对齐——错位会拼出残次页。以往静默拼，现在出生即炸。
+        require(blockStart in 0..blockEndExclusive) { "assembleTempPage inverted range [$blockStart,$blockEndExclusive)" }
+        require(blockEndExclusive <= prepare.totalBlocks) { "assembleTempPage range over total [$blockStart,$blockEndExclusive) total=${prepare.totalBlocks}" }
+        require(shapes.size == blockEndExclusive - blockStart) { "assembleTempPage shapes/blocks misaligned shapes=${shapes.size} range=[$blockStart,$blockEndExclusive)" }
+        require(contentH > 0) { "assembleTempPage contentH=$contentH" }
         val total = prepare.totalBlocks
         val rawLines = rebuildLocalLines(prepare, blockStart, blockEndExclusive, shapes, shapeLookback)
         // Normalize the temp page's line y coordinates to start at the page's first line = 0. This
@@ -1657,9 +1672,11 @@ class BoxChapterLayouter(
         val prepare = prepare(markup, cssBundle, profile, contentW, contentH)
         fullLayout(prepare, profile, contentW, contentH)
     }.onFailure {
-        // 内部异常归因：调用方只见 null（bindSafeEmpty 伪装空章节），栈在此留痕。
-        // 保持返回 null（调用方已有 error/预览丢弃处理），只补日志，不断行为。
+        // 内部异常归因：记 e 后重抛（fail-fast）——调用方原先见 null 走 bindSafeEmpty
+        // 伪装空章节；现同一结局（buildLayout catch 记 ERROR + 安全空），
+        // 但栈归因到源头。行为结局不变，哑巴路点亮。
         Logger.e("Orilumn.Engine", "BoxChapterLayouter.layout FAIL ${it.message}")
+        throw it
     }.getOrNull()
 
     // ─────────────────────────────────────────────────────────────────

@@ -243,12 +243,6 @@ class BookDocumentController(
         maxSlots = maxOf(1, minOf(2, platformCpuCount() - 1)),
     )
 
-    /** P4 (track P): per-chapter background preflight slots — [index] → in-flight job. Each prelinks
-     *  one neighbor chapter's markup + light cascade off the flip thread (no shaping, no table), so an
-     *  out-of-bounds flip's parse leaves the critical path. Keyed and idempotent: a param change
-     *  ([prepareRelayout]) cancels all slots and voids the readiness record. */
-    private val preflightJobs: MutableMap<Int, kotlinx.coroutines.Job> = HashMap()
-
     /** P4: chapters whose markup + light structure were already prepped, chapter → the paramHash they
      *  were prepped under. A later change of the (paramHash-determining) typography throws it out; the
      *  light tree itself is structure-keyed (cssBundle + useOriginalStyle) so it survives. */
@@ -2023,36 +2017,36 @@ private fun finishCanonicalBackground(
         val contentHeight = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
         val paramHash = LayoutParamKey.fromProfile(profile, contentWidth, contentHeight).hash()
         if (preflightReadiness[index] == paramHash) return // already prepped under these params
-        if (preflightJobs[index]?.isActive == true) return // dedup the same in-flight target
-        preflightJobs[index] = bgScope.launch(backgroundDispatcher) {
-            try {
-                ensureMarkup(index)
-                val bc = layouter as? BoxChapterLayouter
-                if (bc != null && unit.markup != null) {
-                    bc.prepareLight(unit.markup!!, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight)
+        if (scheduler.runningKeys.contains("pre:$index")) return // same target in flight
+        // P2.4: pool task (same-key replace dedups in-flight twins — was per-index job slot).
+        scheduler.submit(TaskScheduler.Task(
+            key = "pre:$index",
+            priority = TaskScheduler.PRIO_PREWARM,
+            block = {
+                try {
+                    ensureMarkup(index)
+                    val bc = layouter as? BoxChapterLayouter
+                    if (bc != null && unit.markup != null) {
+                        bc.prepareLight(unit.markup!!, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight)
+                    }
+                    preflightReadiness[index] = paramHash
+                } catch (_: CancellationException) {
+                    // superseded by a param change (voidPreflight) — expected, never a FAIL
+                } catch (e: Exception) {
+                    Logger.e(logTag, "preflight FAIL ch=$index ${e.message}")
                 }
-                preflightReadiness[index] = paramHash
-            } catch (_: kotlinx.coroutines.CancellationException) {
-                // superseded by a param change (voidPreflight) — expected, never a FAIL
-            } catch (e: Exception) {
-                Logger.e(logTag, "preflight FAIL ch=$index ${e.message}")
-            }
-        }
+            },
+        ))
     }
 
     /** P4 abandon/re-deploy: a new params cycle voids every preflight readiness record and cancels the
-     *  in-flight slots (the light tree is structure-keyed so the next re-preflight re-uses it cheaply). */
+     *  in-flight slots (the light tree is structure-keyed so the next re-preflight re-uses it cheaply).
+     *  P2.4: pool tasks at/below prewarm priority go through the scheduler (prewarm only — B2 at 30
+     *  survives by priority). */
     private fun voidPreflight() {
         preflightReadiness.clear()
-        preflightJobs.values.forEach { it.cancel() }
-        preflightJobs.clear()
-        openPreflightJob?.cancel()
+        scheduler.cancelLowerThan(TaskScheduler.PRIO_B2_CHAPTER)
     }
-
-    /** P5: single-slot open-book prewarm (was `preflightJobs[chapter]`; per-book, one in flight). A new
-     *  prewarm dispatch (book switch / new target / param change via [voidPreflight]) cancels the old;
-     *  idempotent and safe to drop mid-flight (only markup/light/disk-table-shape warming). */
-    private var openPreflightJob: kotlinx.coroutines.Job? = null
 
     /** P5 (track P): prewarm a book open so the reader's FIRST screen only pays window/anchor shaping.
      *  Parses [chapter]'s markup + light structure (idempotent; records [preflightReadiness] like P4)
@@ -2062,23 +2056,34 @@ private fun finishCanonicalBackground(
      *
      *  The bookshelf layer taps a book and calls this before the reader opens; switching books abandons
      *  the old book's prewarm because each book owns its controller (single per-book slot). Later
-     *  params (font/行距/尺寸) invalidate the readiness and the shape via [prepareRelayout]'s void. */
+     *  params (font/行距/尺寸) invalidate the readiness and the shape via [prepareRelayout]'s void.
+     *  P2.4: pool task under the shared `pre:<index>` key (dedups with neighbor preflights for the
+     *  same chapter — the richer open body wins the replace). */
     fun prewarmForOpen(chapter: Int = -1, targetChar: Int = -1) {
         val books = chapters.size
         val index = (if (chapter >= 0) chapter else startChapter).coerceIn(0, books - 1)
-        var char = if (targetChar >= 0) targetChar else startChar
+        val char = if (targetChar >= 0) targetChar else startChar
         if (books == 0) return
         val unit = unitAt(index) ?: return
         if (index == activeChapter) return // B1/anchor owns the active chapter's passes
-        openPreflightJob?.cancel()
-        openPreflightJob = bgScope.launch(backgroundDispatcher) {
-            try {
-                ensureMarkup(index)
-                val bc = layouter as? BoxChapterLayouter ?: return@launch
-                if (unit.markup == null) return@launch
+        scheduler.submit(TaskScheduler.Task(
+            key = "pre:$index",
+            priority = TaskScheduler.PRIO_PREWARM,
+            block = { prewarmChapterBody(index, char) },
+        ))
+    }
+
+    /** P2.4: open-prewarm body (extracted: early returns don't survive inline task lambdas). */
+    private suspend fun prewarmChapterBody(index: Int, char: Int) {
+        val unit = unitAt(index) ?: return
+        var c = char
+        try {
+            ensureMarkup(index)
+            val bc = layouter as? BoxChapterLayouter ?: return
+            if (unit.markup == null) return
                 val contentWidth = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
                 val contentHeight = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
-                if (contentHeight <= 16) return@launch // viewport not laid out yet — nothing meaningful to warm
+                if (contentHeight <= 16) return // viewport not laid out yet — nothing meaningful to warm
                 val paramHash = LayoutParamKey.fromProfile(profile, contentWidth, contentHeight).hash()
                 val prepLight = bc.prepareLight(unit.markup!!, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight)
                 preflightReadiness[index] = paramHash
@@ -2093,8 +2098,8 @@ private fun finishCanonicalBackground(
                 val cached = if (cache != null) cacheFile?.let { cache.read(it) } else null
                 if (cached != null && unit.paginationTable == null) {
                     unit.bindPaginationTable(cached)
-                    char = char.coerceIn(0, (cached.totalChars - 1).coerceAtLeast(0))
-                    val startPage = pageIndexForChar(cached.pages, char)
+                    c = c.coerceIn(0, (cached.totalChars - 1).coerceAtLeast(0))
+                    val startPage = pageIndexForChar(cached.pages, c)
                     val product = bc.incrementalLayoutForPage(
                         prepare = prepLight,
                         profile = profile,
@@ -2112,11 +2117,11 @@ private fun finishCanonicalBackground(
                     Logger.w(logTag, "prewarm ch=$index DISK-HIT pre-shaped pages=${product.slices.size} targetPage=$startPage")
                 }
             } catch (_: kotlinx.coroutines.CancellationException) {
-                // superseded by a book switch / newer prewarm / param change — expected, never a FAIL
+                // superseded by a newer prewarm / param change — expected, never a FAIL
+                // (scheduler surfaces it as `spike-task cancel`).
             } catch (e: Exception) {
                 Logger.e(logTag, "prewarm FAIL ch=$index ${e.message}")
             }
-        }
     }
 
     /** Full line-level canonical pre-layout of a non-current chapter: shape the whole chapter, bind its

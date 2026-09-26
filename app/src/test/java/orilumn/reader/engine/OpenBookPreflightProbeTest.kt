@@ -14,6 +14,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
+import org.junit.After
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
@@ -53,6 +54,15 @@ class OpenBookPreflightProbeTest {
         cacheDir = temp.newFolder("cache")
     }
 
+    private val ownedControllers = mutableListOf<BookDocumentController>()
+
+    @After
+    fun tearDown() {
+        // R13: reclaim background shaping so worker-JVM neighbors run clean.
+        ownedControllers.forEach { runCatching { it.close() } }
+        ownedControllers.clear()
+    }
+
     private fun newController(): BookDocumentController {
         val c = BookDocumentController(
             reader = FakeEpubResourceReader(epubFiles()),
@@ -60,6 +70,7 @@ class OpenBookPreflightProbeTest {
             profile = TypographicProfile.build(ReaderSettings.DEFAULT),
         )
         c.cacheRoot = cacheDir.absolutePath.toPath()
+        ownedControllers.add(c)
         return c
     }
 

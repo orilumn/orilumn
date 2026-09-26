@@ -273,10 +273,16 @@ class ChapterStructureCache {
  * @property slice page descriptor; [PageSlice.firstLine]=0 and [PageSlice.lastLineExclusive] is this
  *   page's own line count (indices into [layout]).
  * @property layout the drawable layout that backs exactly this page's whole blocks.
+ * @property resumeBlock/resumeLine shaping origin of the page AFTER this one, i.e. the
+ *   [ForwardedPage.nextBlock]/[nextLine] output that built the successor (排版层-上/增量分页：
+ *   水位失配修复——窗口尾裁剪后水位必须倒回新尾的后继原点，否则按需/预填从陈旧水位塑形即跳页；
+ *   后向页不使用，恒为 -1）。
  */
 data class TempPage(
     val slice: PageSlice,
     val layout: BookLayout,
+    val resumeBlock: Int = -1,
+    val resumeLine: Int = 0,
 ) {
     val blockStart: Int get() = slice.blockStart
     val blockEndExclusive: Int get() = slice.blockEndExclusive

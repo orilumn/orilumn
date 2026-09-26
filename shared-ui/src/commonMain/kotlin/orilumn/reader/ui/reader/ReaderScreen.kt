@@ -118,10 +118,11 @@ fun ReaderScreen(
     LaunchedEffect(settings) { light = settings }
     var brightnessUi by remember { mutableStateOf<BrightnessGestureUi?>(null) }
     var saveJob by remember { mutableStateOf<Job?>(null) }
-    // 上次链接点按命中的抬起时刻（uptimeMillis；三区防抖用，见 onTap）。
-    var lastLinkTapMs by remember { mutableStateOf(0L) }
 
     val scope = rememberCoroutineScope()
+    // 锚页事件串行漏斗：显示状态的唯一写入通道（见 AnchorFunnel）。所有改锚页位置的动作
+    // （翻页/跳转/开书/外部落位/开链接）走它串行，后到按落定后的最新位置重取源，不再各算各的。
+    val anchorFunnel = remember { AnchorFunnel() }
     val currentHost by rememberUpdatedState(host)
     val currentOnBack by rememberUpdatedState(onBack)
     val currentOnNight by rememberUpdatedState(onNight)
@@ -138,11 +139,14 @@ fun ReaderScreen(
     val currentBotBarH by rememberUpdatedState(botBarH)
 
     // 打开书籍并定位起始页（自动续读/首页）。落定即推代际：同 pos 也刷新行数据。
+    // 经锚页漏斗：与在途导航互斥，首帧后放行。
     LaunchedEffect(currentHost) {
-        val p = currentHost.open()
-        openFailed = p == null
-        openPos = p
-        hostRevision++
+        anchorFunnel.push("open", { openPos = it }) {
+            val p = currentHost.open()
+            openFailed = p == null
+            hostRevision++
+            p
+        }
     }
 
     // 落位统一入口：更新当前定位并防抖保存（复刻 Android scheduleSave 500ms）。
@@ -157,10 +161,12 @@ fun ReaderScreen(
     }
 
     // Q1-b：外部推送落位（键 = externalPos，值变化即认领；重排绑定/TOC 落地后 activity 推送）。
+    // 经锚页漏斗：与在途导航互斥，值在锁内重取（取落定后的最新推送）。
     LaunchedEffect(externalPos) {
-        val p = externalPos ?: return@LaunchedEffect
-        openFailed = false
-        markPositionChanged(p)
+        anchorFunnel.push("external", ::markPositionChanged) {
+            openFailed = false
+            externalPos
+        }
     }
 
     // ---- 定位动作（host 为 suspend，统一挂到本组件作用域） ----
@@ -175,27 +181,38 @@ fun ReaderScreen(
         return null
     }
     fun flip(direction: Int) {
-        val p = resolveNavPos("tap-flip") ?: return
-        Logger.d("Orilumn.TAP", "tap-flip dispatch dir=$direction from ch=${p.chapter} char=${p.slice?.charStart}")
         scope.launch {
-            val landed = currentHost.adjacent(p, direction)
-            // 引擎侧无声吞翻页时（返回 null），这里是唯一目击者——与 Orilumn.FLIP 对账。
-            Logger.d("Orilumn.TAP", "tap-flip result dir=$direction " + (landed?.let { "landed ch=${it.chapter} char=${it.slice?.charStart}" } ?: "NULL (engine returned null)"))
-            landed?.let { markPositionChanged(it) }
+            anchorFunnel.navigate(
+                action = "tap-flip",
+                read = { resolveNavPos("tap-flip") },
+                commit = ::markPositionChanged,
+            ) { p ->
+                Logger.d("Orilumn.TAP", "tap-flip dispatch dir=$direction from ch=${p.chapter} char=${p.slice?.charStart}")
+                val landed = currentHost.adjacent(p, direction)
+                // 引擎侧无声吞翻页时（返回 null），这里是唯一目击者——与 Orilumn.FLIP 对账。
+                Logger.d("Orilumn.TAP", "tap-flip result dir=$direction " + (landed?.let { "landed ch=${it.chapter} char=${it.slice?.charStart}" } ?: "NULL (engine returned null)"))
+                landed
+            }
         }
     }
 
     fun jumpChapter(direction: Int) {
-        val p = resolveNavPos("jump-chapter") ?: return
         scope.launch {
-            currentHost.neighborChapterStart(p.chapter, direction)?.let { markPositionChanged(it) }
+            anchorFunnel.navigate(
+                action = "jump-chapter",
+                read = { resolveNavPos("jump-chapter") },
+                commit = ::markPositionChanged,
+            ) { p -> currentHost.neighborChapterStart(p.chapter, direction) }
         }
     }
 
     fun seek(fraction: Float) {
-        val p = resolveNavPos("seek") ?: return
         scope.launch {
-            currentHost.pageAtFraction(fraction.toDouble())?.let { markPositionChanged(it) }
+            anchorFunnel.navigate(
+                action = "seek",
+                read = { resolveNavPos("seek") },
+                commit = ::markPositionChanged,
+            ) { currentHost.pageAtFraction(fraction.toDouble()) }
         }
     }
 
@@ -232,21 +249,22 @@ fun ReaderScreen(
             ReaderMath.tapLineAt(lines, shift, xPx - contentLeft, yPx) ?: return false
         val offset = orilumn.reader.engine.skia.LineHitTest.hit(line, xInParagraph, yInLine) ?: return false
         val target = currentHost.linkTargetAt(p.chapter, line.charBase + offset) ?: return false
-        scope.launch { currentHost.openLink(target)?.let { markPositionChanged(it) } }
+        scope.launch {
+            anchorFunnel.navigate(
+                action = "open-link",
+                read = { resolveNavPos("open-link") },
+                commit = ::markPositionChanged,
+            ) { currentHost.openLink(target) }
+        }
         return true
     }
 
-    fun onTap(xPx: Float, yPx: Float, widthPx: Float, atMs: Long = 0L) {
+    fun onTap(xPx: Float, yPx: Float, widthPx: Float) {
         // P4-c2u: 链接优先——点中链接字形即导航，未中才走三区（翻页/栏显隐）。
+        // 无时间防抖：链接跳转本身走锚页漏斗（在途导航中后到的点按 BUSY-DROP），锁即防抖，
+        // 不再另设时间窗（误吞正常点按的"点了没反应"即此类）。
         if (tryOpenLinkAt(xPx, yPx)) {
             Logger.d("Orilumn.TAP", "tap x=${xPx.roundToInt()} y=${yPx.roundToInt()} → link")
-            lastLinkTapMs = atMs
-            return
-        }
-        // 手抖防抖：刚跳过链接，短窗内的三区点按吞掉（否则第二下常把新页翻走）。
-        // 被吞掉的点按在此落盘——"点了没反应"先查这条。
-        if (ReaderMath.linkTapDebounced(atMs, lastLinkTapMs)) {
-            Logger.d("Orilumn.TAP", "tap x=${xPx.roundToInt()} y=${yPx.roundToInt()} SWALLOWED by link-debounce")
             return
         }
         val zone = ReaderMath.tapZone(xPx, widthPx)
@@ -324,7 +342,7 @@ fun ReaderScreen(
                             if (brightnessActive) endBrightnessGesture()
                             else if (dragDir != 0) flip(dragDir)
                             else if (upTime - downTime < ReaderMath.TAP_MAX_MS) {
-                                onTap(downX, downY, size.width.toFloat(), upTime)
+                                onTap(downX, downY, size.width.toFloat())
                             }
                             break
                         }

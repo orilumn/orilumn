@@ -26,13 +26,6 @@ object ReaderMath {
     /** 无位移即举起判为点按的最长间隔（ms），对应旧 `FlipGestureDetector` 的 400ms。 */
     const val TAP_MAX_MS = 400L
 
-    /**
-     * 链接点按后的三区误触防抖窗（ms）：一次链接跳转成功后，此窗口内的三区点按
-     * （翻页/栏显隐）直接吞掉——手抖的第二下常落在新页空白处，否则会被判成翻页，
-     * 表现为"点链接跳走又立刻被翻回来"。链接本身不受影响（仍优先命中）。
-     */
-    const val LINK_TAP_DEBOUNCE_MS = 500L
-
     /** 亮度取值范围底部（-50：系统最暗 + 遮罩继续压暗到 0.8 alpha）。 */
     const val MIN_BRIGHTNESS = -50
 
@@ -49,15 +42,6 @@ object ReaderMath {
         x < width / 3f -> -1
         x > width * 2f / 3f -> 1
         else -> 0
-    }
-
-    /**
-     * 链接防抖：上次链接点按发生在 [LINK_TAP_DEBOUNCE_MS] 内时，三区动作应吞掉。
-     * 纯函数，时钟由调用方喂手势抬起时间（`uptimeMillis` 单调递增，无需平台时钟）。
-     */
-    fun linkTapDebounced(nowMs: Long, lastLinkMs: Long): Boolean {
-        val dt = nowMs - lastLinkMs
-        return lastLinkMs > 0L && dt >= 0L && dt < LINK_TAP_DEBOUNCE_MS
     }
 
     /**

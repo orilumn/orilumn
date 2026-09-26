@@ -213,7 +213,16 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
     /** Epoch the most recently dispatched whole-book (B2) job was launched under; used to suppress
      *  re-dispatch of the same settled params (no churn while dragging). */
     @Volatile
-    private var lastWholeBookEpoch: Long = -1L
+    /** 派发层去重戳（D6）：挡滑块拖拽期的**重复派发**。
+     *
+     *  为什么留着（原则 §8 映射表末行曾把它列为待删散装变量，此处更正）：
+     *  池的同键去重替代不了它。拖拽期每次改参都派一趟 B2，每趟 paramHash 都更新，
+     *  于是同键孪生永远是「新的赢」，每一趟都会真的起跑；真正兜住的是任务体内的
+     *  [b2ChapterTask] skip-fresh，但那已经在执行之后了。本戳在**派发之前**挡住，
+     *  比任务体内的 no-op 便宜一个量级。P0 实测拖拽期约 37 次/分钟。
+     *
+     *  与 skip-fresh 的分工：一个挡派发、一个挡执行。两者都要。 */
+    private var lastDispatchEpoch: Long = -1L
 
     /** The chapter most recently prepared by [prepareRelayout]; the B2 scan skips it (B1 owns its
      *  canonical pass). */
@@ -242,7 +251,20 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         flipDir = 0
     }
 
-    /** P1f/R13: controller-owned background scope (child of the injected [scope]'s Job).
+    /** 排版槽数（原则 §5）：`max(1, min(2, cpuCount - 2))`。
+ *
+ *  - `cpuCount - 2`：给 UI / 目标页 / 系统各留一份核。
+ *  - **上限 2**：P0 真机实测的拐点（平板：轻页在 0/1/2 并发下耗时持平、无 Skia 锁式崩塌；
+ *    重页由内容主导、与槽数无关）。既然加槽买不到速度，就只给 2。
+ *  - 下限 1：小核设备退化为串行后台塑形。
+ *
+ *  抽成纯函数（而非内联在构造器里）是为了能测：3 核一类设备上「减 1」与「减 2」的差别
+ *  只有这一个函数能表达清楚，而开发机通常测不出（核数多时被上限夹住）。
+ *
+ *  @param cpuCount 逻辑核数（[platformCpuCount] 的取值）。 */
+fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
+
+/** P1f/R13: controller-owned background scope (child of the injected [scope]'s Job).
      *  ALL background launches (prefill/B1/B2/prewarm/watchers, scheduler internals) run here so
      *  [close] cancels exactly this controller's background work — never the host's scope.
      *  Hosts call [close] on destroy; tests call it in teardown (leaked shapers otherwise pile up
@@ -258,9 +280,14 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
      *  B1, B2, parse prewarm). P0 spike measurements decided the shape; it is production since P1. */
     private val scheduler = TaskScheduler(
         bgScope,
-        // P1: adaptive budget — at most 2 shaping slots (P0 knee), at least 1; small devices
-        // degrade to serial background shaping. The flip thread never queues (bypass by design).
-        maxSlots = maxOf(1, minOf(2, platformCpuCount() - 1)),
+        // 原则 §5：`max(1, cpuCount() - 2)` —— 给 UI / 目标页 / 系统各留一份。**上限 2** 是 P0 真机
+        // 实测的拐点（平板：轻页在 0/1/2 并发下耗持平，重页由内容主导、与槽数无关），既然加槽
+        // 买不到速度就不必给更多核去抢。
+        // 过去这里是 `cpuCount() - 1`，比原则少留一份核，且无任何记录（疑手误）——本机 12 核时被
+        // 上限夹住测不出差别，只有 3 核一类的小核设备才暴露（原则给 1 槽、旧代码给 2 槽），
+        // 而那恰恰是最该保守的一档。D5 已改回 -2。
+        // 翻页永不占槽（调用方线程同步跑），槽数只管后台活。
+        maxSlots = shapingSlotsFor(platformCpuCount()),
     )
 
     /** P4: chapters whose markup + light structure were already prepped, chapter → the paramHash they
@@ -2157,13 +2184,13 @@ private fun finishCanonicalBackground(
      *  R7: [force] bypasses the epoch dedup (B1-preempt relaunch); the dedup stamp is still refreshed. */
     fun requestWholeBookRelayout(force: Boolean = false) {
         val epoch = layoutEpoch
-        if (!force && epoch <= lastWholeBookEpoch) return
+        if (!force && epoch <= lastDispatchEpoch) return
         if (deferCanonical) return
         val bc = layouter as? BoxChapterLayouter ?: return
         val contentWidth = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
         val contentHeight = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
         val paramHash = LayoutParamKey.fromProfile(profile, contentWidth, contentHeight).hash()
-        lastWholeBookEpoch = epoch
+        lastDispatchEpoch = epoch
         val current = activeChapter
         // R7: B2 scans strict absolute-distance interleave from the active chapter, so a
         // flip-out-of-bounds into a nearby chapter lands on an already-laid-out one. Pure

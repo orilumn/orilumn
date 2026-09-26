@@ -830,50 +830,86 @@ private fun startAnchorStream(
     // with a full-chapter shape. Runs on the dedicated canonicalDispatcher (single thread) so it never
     // competes with the foreground flip thread.
     if (!deferCanonical) {
-        // P3 queue-not-kill (R3, contract #6): canonical jobs are keyed ONE SLOT PER CHAPTER. A new
-        // dispatch cancels only ITS OWN chapter's previous B1 (same chapter re-shaped with newer
-        // params — genuinely stale); ANY OTHER chapter's in-flight B1 is left running on the single
-        // canonical thread's FIFO queue and finishes its persist. Until today a cross-chapter flip
-        // cancelled the just-tuned chapter's canonical wholesale (`anchorBackfillJob?.cancel()`), so
-        // returning to it re-temp'd instead of hitting its fresh disk table. Now it lands a disk hit.
-        // P0 spike (+R7 intent): B1 preempts scheduled B2 work through the pool, then runs ahead
-        // of it by priority (was: cancel wholeBookJob + relaunch behind on the single canonical
-        // thread). Same-key submit replaces a stale twin (was: per-chapter FIFO slot cancel).
-        orilumn.reader.io.Logger.w(logTag, "spike-preempt b1 ch=${unit.chapterIndex}")
-        scheduler.cancelLowerThan(TaskScheduler.PRIO_B1_CHAPTER)
-        scheduler.submit(TaskScheduler.Task(
-            key = "b1:${unit.chapterIndex}",
-            priority = TaskScheduler.PRIO_B1_CHAPTER,
-            block = b1@{
-            if (epoch != layoutEpoch) {
-                Logger.w(logTag, "canonical superseded (epoch $epoch != $layoutEpoch) ch=${unit.chapterIndex}")
-                return@b1
-            }
-            // P7: capture the task coroutine's context so the between-blocks checkpoint can
-            // observe this task's cancellation even inside the nested runCatching/inner lambdas.
-            val ctx = currentCoroutineContext()
-            runCatching {
-                val heavy = unit.markup?.let { bc.prepare(it, unit.cssBundle, profile, contentW, contentH) }
-                // P1: chunk workers deleted (P13) — background canonical shapes sequentially;
-                // per-block P7 checkpoints keep abandonment at block granularity, and the
-                // scheduler pool (not intra-task fan-out) owns all parallelism now.
-                val prod = heavy?.let {
-                    bc.fullLayout(it, profile, contentW, contentH) { ctx.ensureActive() }
-                }
-                if (prod != null) finishCanonicalBackground(unit, ip, prod, paramHash)
-            }.onFailure { e ->
-                // P7: a between-blocks cancel throws CancellationException — that is a TIMELY ABANDON,
-                // not a failure. Never report it as FAIL (the per-chapter slot was re-used by design).
-                if (e !is CancellationException) Logger.e(logTag, "canonical layout FAIL ch=${unit.chapterIndex} ${e.message}")
-            }
-            },
-        ))
+        // 原则 §3.4：档位由「目标页距章首 d」决定。birth 这一刻通常还判不出（锚点页的前驱页
+        // 尚未成形）→ 第 6 档；等 fillBackward 塑出前驱页后由 maybeBoostB1ForHeadProximity 升档。
+        dispatchB1(unit, ip, epoch, bc, contentW, contentH, paramHash, tempHeadDistancePages(ip))
         // Relaunch the whole-book pass behind this B1 (skip-fresh repositions cheaply; temp-live and
         // fresh chapters no-op). Unconditional: same-key dedup + skip-fresh bound the cost.
         requestWholeBookRelayout(force = true)
     } else {
         Logger.w(logTag, "canonical deferred (panel open) ch=${unit.chapterIndex}")
     }
+}
+
+/** 本章权威整章表（B1）的派发。档位由 [headDistancePages] 经 [b1PriorityFor] 定（原则 §3.4），
+ *  并把「档位 + d」打进落盘日志——否则设备上无法核对升档是否真的发生了。
+ *
+ *  P3 queue-not-kill (R3, contract #6): keyed ONE SLOT PER CHAPTER. A new dispatch cancels only
+ *  ITS OWN chapter's previous B1 (same chapter re-shaped with newer params — genuinely stale);
+ *  ANY OTHER chapter's in-flight B1 is left running and finishes its persist. Until today a
+ *  cross-chapter flip cancelled the just-tuned chapter's canonical wholesale, so returning to it
+ *  re-temp'd instead of hitting its fresh disk table. Now it lands a disk hit.
+ *
+ *  抢占范围按**实际档位**给（`cancelLowerThan(priority)`）——加急档只砍比它更低的活，
+ *  不误伤同为第 2/3 档的邻页与 d=1 跨章兜底。 */
+private fun dispatchB1(
+    unit: ChapterUnit,
+    ip: InProgressPagination,
+    epoch: Long,
+    bc: BoxChapterLayouter,
+    contentW: Int,
+    contentH: Int,
+    paramHash: Long,
+    headDistancePages: Int?,
+) {
+    val priority = b1PriorityFor(headDistancePages)
+    Logger.w(
+        logTag,
+        "b1 dispatch ch=${unit.chapterIndex} prio=$priority headDist=${headDistancePages ?: "?"}"
+    )
+    scheduler.cancelLowerThan(priority)
+    scheduler.submit(TaskScheduler.Task(
+        key = "b1:${unit.chapterIndex}",
+        priority = priority,
+        block = b1@{
+        if (epoch != layoutEpoch) {
+            Logger.w(logTag, "canonical superseded (epoch $epoch != $layoutEpoch) ch=${unit.chapterIndex}")
+            return@b1
+        }
+        // P7: capture the task coroutine's context so the between-blocks checkpoint can
+        // observe this task's cancellation even inside the nested runCatching/inner lambdas.
+        val ctx = currentCoroutineContext()
+        runCatching {
+            val heavy = unit.markup?.let { bc.prepare(it, unit.cssBundle, profile, contentW, contentH) }
+            // P1: chunk workers deleted (P13) — background canonical shapes sequentially;
+            // per-block P7 checkpoints keep abandonment at block granularity, and the
+            // scheduler pool (not intra-task fan-out) owns all parallelism now.
+            val prod = heavy?.let {
+                bc.fullLayout(it, profile, contentW, contentH) { ctx.ensureActive() }
+            }
+            if (prod != null) finishCanonicalBackground(unit, ip, prod, paramHash)
+        }.onFailure { e ->
+            // P7: a between-blocks cancel throws CancellationException — that is a TIMELY ABANDON,
+            // not a failure. Never report it as FAIL (the per-chapter slot was re-used by design).
+            if (e !is CancellationException) Logger.e(logTag, "canonical layout FAIL ch=${unit.chapterIndex} ${e.message}")
+        }
+        },
+    ))
+}
+
+/** 原则 §3.4 的**再评估**钩子：临时表侧的前驱页塑出之后，才知道锚点页是不是第 2 页。
+ *  若是，把本章全量按加急档重派一次（同键 `b1:<章>`，池按调用序让新的孪生胜出）。
+ *
+ *  重派会取消在途的第 6 档 B1 重来——这是有意的取舍：交接点就剩一次翻页，此时后台那趟
+ *  大概率还没排完，等它排完等于交接时手上没有表。只在 d 判定为 1 时才派；d 为 0（已在
+ *  交接点，同步承接）/ 2（更深）/ null（判不出）一律不动。 */
+private fun maybeBoostB1ForHeadProximity(unit: ChapterUnit, ip: InProgressPagination) {
+    if (deferCanonical) return
+    val d = tempHeadDistancePages(ip) ?: return
+    if (d != 1) return
+    val bc = layouter as? BoxChapterLayouter ?: return
+    Logger.w(logTag, "b1 BOOST ch=${unit.chapterIndex} headDist=1 → 加急档（交接点临近）")
+    dispatchB1(unit, ip, layoutEpoch, bc, ip.contentW, ip.contentH, ip.paramHash, d)
 }
 
 /** The shared per-block shape cache for [unit]'s current layout-parameter cycle (lazily created). */
@@ -915,7 +951,7 @@ private fun headEdgePage(ip: InProgressPagination): TempPage? = ip.forwardPages.
  *  again), and every append runs [enforceTempWindow] so the window stays within its ±[TEMP_WINDOW_DEPTH]
  *  bound even mid-prefill. Returns whether any shaping happened (the caller loops until false, yielding
  *  between steps). Runs under [tempStateLock] so it is thread-safe with foreground tempNav. */
-private fun stepTempPrefill(ip: InProgressPagination, lastDir: Int): Boolean = tempStateLock.withLock {
+private fun stepTempPrefill(unit: ChapterUnit, ip: InProgressPagination, lastDir: Int): Boolean = tempStateLock.withLock {
     val bc = layouter as? BoxChapterLayouter ?: return@withLock false
     val prep = ip.prepare
     val f = ip.forwardPages
@@ -943,6 +979,15 @@ private fun stepTempPrefill(ip: InProgressPagination, lastDir: Int): Boolean = t
         b.add(p)
         if (p.blockStart == 0) ip.headReached = true
         enforceTempWindow(ip)
+        // 原则 §3.4：前驱页刚成形，才知道指针页是不是第 2 页（其前驱从 block 0 起）。
+        // 是则把本章全量升到加急档——交接点就剩一次翻页。d 判不出/更深时本函数静默返回。
+        //
+        // 承重前提：本函数已在 [tempStateLock] 内，而 [maybeBoostB1ForHeadProximity] 会再取一次
+        // 同一把锁。这依赖 SyncLock 在各平台 actual 上**可重入**（JVM/Android/Desktop 是
+        // `synchronized`，JVM 监视器可重入）。iOS actual 尚未落地，若将来不可重入则必须把本调用
+        // 移到锁外（stepTempPrefill 返回后在调用方循环里判）。所幸链路上不做阻塞动作
+        //（dispatchB1 只 submit，不等待），即便锁不可重入也只是自锁而非死锁——但仍须显式修。
+        maybeBoostB1ForHeadProximity(unit, ip)
         return 1
     }
     // Direction-prioritized: the reader's NEXT page (the one in the direction of the last flip) is
@@ -973,7 +1018,7 @@ private fun scheduleTempPrefill(unit: ChapterUnit, ip: InProgressPagination, las
     tempPrefillJob = bgScope.launch(backgroundDispatcher) {
         try {
             var guard = 0
-            while (stepTempPrefill(ip, lastDir) && guard++ < TEMP_WINDOW_DEPTH * 16) kotlinx.coroutines.delay(4)
+            while (stepTempPrefill(unit, ip, lastDir) && guard++ < TEMP_WINDOW_DEPTH * 16) kotlinx.coroutines.delay(4)
         } catch (_: kotlinx.coroutines.CancellationException) {
             // superseded by a newer prefill or a new anchor stream — expected
         } catch (e: Exception) {
@@ -1172,6 +1217,41 @@ fun edgeKey(chapter: Int) = "edge:$chapter"
 
 /** 整书章扫描（B2，第 7 档）的键。与 [edgeKey] 必须分域，见该函数 KDoc。 */
 fun scanKey(chapter: Int) = "b2:$chapter"
+
+/** 原则 §3.4：目标页距章首的页数 d，决定本章全量的档位。**纯判定，无副作用。**
+ *
+ *  - `d == 0`（目标页就是章首页）→ 已在交接点，全量表走**同步承接**，不升档；
+ *  - `d == 1`（目标页是第 2 页）→ **加急档**：交接点就剩一次翻页，而增量侧此刻还要逐页往后推
+ *    （每页边界依赖前页尾部），全量一趟给出整章全部边界；
+ *  - `d >= 2` 或 `null`（判不出）→ 第 6 档。d≥2 不升级，与 §3.3 同一把尺子：隔两页仍不翻，
+ *    就不值得为它动整章。
+ *
+ *  @param headDistancePages d；`null` = 前驱页尚未成形、判不出（临时表侧刚birth时的常态）。 */
+fun b1PriorityFor(headDistancePages: Int?): Int =
+    if (headDistancePages == 1) TaskScheduler.PRIO_B1_URGENT else TaskScheduler.PRIO_B1_CHAPTER
+
+/** 临时表侧的目标页距章首页数，**仅在可判定时**返回（原则 §3.4 只要 d==1 那一档）。
+ *
+ *  - `0` = 当前页从 block 0 起，即章首页；
+ *  - `1` = 当前页的前驱页从 block 0 起，即当前页是第 2 页；
+ *  - `null` = 前驱页还没塑出来，判不出（新锚流 birth 时就是这种——`stepTempPrefill` 的
+ *    `fillBackward` 跑完之后才会变成 1 或"更深"）。
+ *
+ *  已判定为更深时返回 2（与 `null` 同档，调用方只需区分 ==1）。
+ */
+private fun tempHeadDistancePages(ip: InProgressPagination): Int? = tempStateLock.withLock {
+    val cur = currentTempPage(ip) ?: return@withLock null
+    if (cur.blockStart == 0) return@withLock 0
+    val prev = previousTempPage(ip) ?: return@withLock null
+    if (prev.blockStart == 0) 1 else 2
+}
+
+/** 指针页在阅读顺序上的前驱页（窗口内）。null = 指针在头边或前驱已被淘汰出窗口。 */
+private fun previousTempPage(ip: InProgressPagination): TempPage? {
+    val prevIdx = ip.curIndex - 1
+    return if (ip.curIsForward) ip.forwardPages.getOrNull(prevIdx)
+    else ip.backwardPages.getOrNull(prevIdx)
+}
 
 /** 原则 §3.3：**d=1 邻页越出本章 → 加急整章排邻章**。纯判定，无副作用、无提交，probe 直接验证
  *  同一份判据（生产与测试不各写一份）。

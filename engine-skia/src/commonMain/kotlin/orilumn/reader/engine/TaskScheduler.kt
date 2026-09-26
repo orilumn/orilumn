@@ -52,6 +52,10 @@ class TaskScheduler(
          *  紧急度高于「本章全量」（第 6 档）——邻章是读者下一步就要读的内容。 */
         const val PRIO_EDGE_BACKWARD = 15
         const val PRIO_B1_CHAPTER = 20
+        /** 原则 §3.4：目标页距章首 d=1（落在第 2 页）时**本章全量**的加急档。取第 2 档而非第 3 档——
+         *  全量表**包含**第 2/3 档那些邻页，把一页的增量排在包含它的一趟之前说不通。
+         *  D3 会把第 2/3 档拆成互不相邻的号，届时本常量与 [PRIO_EDGE_FORWARD] 分离。 */
+        const val PRIO_B1_URGENT = 10
         const val PRIO_B2_CHAPTER = 30
         const val PRIO_PREWARM = 40
         const val PRIO_FLIP = 0 // reference only — flips never enqueue

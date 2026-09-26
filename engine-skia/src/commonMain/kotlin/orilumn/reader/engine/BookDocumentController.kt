@@ -837,13 +837,28 @@ private fun startAnchorStream(
         // Build the line-anchored anchor page first (locals, still outside any lock — the flip thread
         // is blocked on the birth signal, so this window can no longer be raced into).
         val anchor = bc.shapeAnchorPageForward(prepare, snapshot, contentW, contentH, anchorCharAt, cache)
+        // 尾锚倒包：前向灌撞到章末（无后继块）时，锚点页改由 shapeTempPageBackward 从文末
+        // 倒包一整页——与 -1/-2/-3… 链同函数、同页界制式（backward-packed island）。
+        // 前向灌只在"灌满整页"这一种情况下与正向尾余页同源，而撞顶不满是常态（锚在文末
+        // 最后一行时恒为 1 行）；无磁盘表时本就没有 canonical 可兼容，倒包恒为满屏，
+        // 且后向链从此页起向后铺（shapeNextBackward 以 Fwd(0) 为头缘），全链统一。
+        // shapeTempPageBackward 失败则回退前向锚（原行为）。
         // C2-P2b-3: `withLock` 非内联，块里不能裸 `return` —— 超期标记外置，语义不变。
+        val tailPage = if (anchor.nextBlock >= prepare.totalBlocks) {
+            bc.shapeTempPageBackward(prepare, snapshot, contentW, contentH, prepare.totalBlocks, -1, cache)
+                ?.also { Logger.w(logTag, "anchor TAIL-BACKWARD ch=${unit.chapterIndex} blocks=[${it.slice.blockStart},${it.slice.blockEndExclusive}) chars=[${it.slice.charStart},${it.slice.charEnd})") }
+        } else null
+        val anchorPage = tailPage ?: anchor.page
+        val shapedFwdTo = if (tailPage != null) prepare.totalBlocks else anchor.nextBlock
+        val fwdFromLine = if (tailPage != null) 0 else anchor.nextLine
+        val anchorBlockStart = anchorPage.slice.blockStart
+        val anchorLineChar = anchorPage.slice.charStart
         val superseded = tempStateLock.withLock {
             if (unit.tempBirth !== birth) true else {
-                ip.forwardPages.add(anchor.page)
-                ip.shapedForwardTo = anchor.nextBlock
-                ip.forwardFromLine = anchor.nextLine
-                ip.anchorLineCharStart = anchor.page.slice.charStart
+                ip.forwardPages.add(anchorPage)
+                ip.shapedForwardTo = shapedFwdTo
+                ip.forwardFromLine = fwdFromLine
+                ip.anchorLineCharStart = anchorLineChar
                 // 出生即在章首（anchorBlock==0）：锚点页就是 shapeAnchorPageForward 灌满的完整首页，
                 // "到达章首"在出生那一刻已经发生——首翻回翻直达 Boundary 时即跨章，不再 waste 一下
                 // re-root 到同一页（此前缺这行，在首页回翻形同翻不动）。 mid-章出生的会话不受影响，

@@ -71,23 +71,25 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
  * only reads already-laid-out results.
  *
  * Priority contract (C1-2 定序；P2 全部收进 [TaskScheduler]，与桌面宿主同一顺序）：
- *  - **F foreground flip**（最高，PRIO_FLIP=0 仅为参考值）：跑在调用方线程上——同步塑形，
- *    既不等后台也永不被后台抢；翻页入口 [notifyFlip] 统杀所有低于 F 的池任务（唯一钩子）；
- *  - **第一邻页**（PRIO_PREFILL_PAGE=10，落点即时派发）：磁盘表路径的单页预塑+组装，
- *    同键 `pg:<章>:<页>` 提交去重，优先侧才组装（见 [scheduleWindowPrefill]）；
- *  - **第二上页**（PRIO_PREV_CHAPTER=15，无条件）：上页跨章时把前章整章提到第二优先级，
- *    借 B2 的键 `b2:<章>` 提交，与整书扫描天然互斥、只塑一次；
- *  - **B1 chapter-head canonical**（PRIO_B1_CHAPTER=20）：本章权威整章表；同键 `b1:<章>`
- *    提交替换孪生（原按章 FIFO 槽），派发时抢占所有更低优任务；
- *  - **B2 whole-book scan**（PRIO_B2_CHAPTER=30）：逐章任务，跳过当前章（B1 拥有），
- *    按 [flipDir] 的 |章距| 交错序；
- *  - **A temp adjacent prefill**（[tempPrefillJob] on [backgroundDispatcher]）：temp 独立通道，
- *    按决议**不进池**（原则文档 §3/§6：temp 表与增量表不合），按游标去重、短单页塑形，
- *    天然让 F；
- *  - **P 解析预热**（PRIO_PREWARM=40，最低）：邻章/开书的 markup + 轻结构，无塑形，
+ *  - **F 目标页**（最高，`PRIO_FLIP`=0 仅为参考值）：跑在调用方线程上——同步塑形并呈现，
+ *    既不等后台也永不被后台抢；**不进队列**。翻页入口 [notifyFlip] 统杀其下全部池任务（唯一钩子）。
+ *  - **第 2/3/4 档 = 邻页序列**（`PRIO_PAGE_NEXT`=10 / `PRIO_PAGE_PREV`=20 / `PRIO_PAGE_REST`=30）：
+ *    序列由 [neighborSequence] 统一生成（原则 §3.1 的 `+1·dir, −1·dir, +2·dir, −2·dir, …`），
+ *    d=1 两侧各占一档、d≥2 合为第三档；磁盘表路径用同键 `pg:<章>:<页>` 去重，只有第 2 档那侧
+ *    才组装（见 [scheduleWindowPrefill]）。
+ *  - **d=1 章外兜底**（`PRIO_EDGE_FORWARD`=第2档 / `PRIO_EDGE_BACKWARD`=第3档，原则 §3.3）：
+ *    d=1 邻页越出本章时，加急整章排邻章。键 `edge:<章>` **与 B2 扫描的 `b2:<章>` 分域**——
+ *    同一份工作、两种紧急度，共用键会被同键去重把加急件降级（见 [edgeKey]）。
+ *  - **B1 本章全量**（`PRIO_B1_CHAPTER`=40，原则 §3.4 动态档）：同键 `b1:<章>` 提交替换孪生；
+ *    目标页距章首 d=1 时升到 `PRIO_B1_URGENT`（=第2档），见 [b1PriorityFor] / [dispatchB1]。
+ *  - **B2 其他章全量**（`PRIO_B2_CHAPTER`=50）：逐章任务，跳过当前章（B1 拥有），
+ *    键 `b2:<章>`，按 [flipDir] 的 |章距| 交错序。
+ *  - **A temp 邻页预排**（[tempPrefillJob] on [backgroundDispatcher]）：临时表侧邻页塑形。
+ *    **D3 待改**：原则 §3 规定第 2/3/4 档按定义跑在临时表上，而本通道现在仍在池外，
+ *    这三档对最延迟敏感的活等于没有执行体——见整改方案 D3b。
+ *  - **P 解析预热**（`PRIO_PREWARM`=60，最低）：邻章/开书的 markup + 轻结构，无塑形，
  *    按 paramHash 幂等，同键 `pre:<章>` 去重。
- */
-class BookDocumentController(
+ */class BookDocumentController(
     private val reader: EpubResourceReader,
     private val layouter: ChapterLayouter,
     var profile: TypographicProfile,
@@ -726,6 +728,14 @@ internal val HEAD_START_BLOCK_LIMIT = 100
  *  Window depth symmetric ⇒ forward/backward flip latency risk symmetric. */
 private val TEMP_WINDOW_DEPTH = 1
 
+/** 第 4 档「本章其余页」的 drain 深度（页数）。原则 §3.5「第三及之后是空闲 drain」的窗口大小。
+ *
+ *  命名而非魔法数：先前它藏在临时表预排的 `TEMP_WINDOW_DEPTH * 16` 里，不可观测也不可调。
+ *  取 16 与临时表侧的块水位前推深度一致（同一把尺子：读者会连着翻的页数）。
+ *  **待设备标定**（整改方案 D4/D7）：这个值直接决定"连翻时后台铺多远"与"占槽多久"的取舍。 */
+private val PAGE_DRAIN_WINDOW = 16
+
+
 // ─────────────────────────────────────────────────────────────────
 // Anchor-based incremental layout (large-chapter, disk-miss)
 // ─────────────────────────────────────────────────────────────────
@@ -1215,6 +1225,77 @@ fun windowPrefillSnapshotForTest(): Triple<Int, Long, Set<Int>>? =
  * 换个键才是真正的解法。 */
 fun edgeKey(chapter: Int) = "edge:$chapter"
 
+/** 邻页序列的一项（原则 §3.1）。序列本身是**有序**的，出队次序即优先级次序。 */
+sealed class NeighborItem {
+    /** 章内第 [index] 页（[tier] = 10/20/30，见 [TaskScheduler.PRIO_PAGE_*]）。 */
+    data class Page(val index: Int, val tier: Int) : NeighborItem()
+
+    /** d=1 越出本章 → 加急整章排邻章（[chapter] = 邻章号，[tier] 同上）。§3.3。 */
+    data class EdgeChapter(val chapter: Int, val tier: Int) : NeighborItem()
+}
+
+/** 原则 §3.1 的**邻页序列**：从目标页出发，按距离 d = 1, 2, 3, … 逐层展开，每层先方向侧、
+ *  后另一侧：`+1·dir, −1·dir, +2·dir, −2·dir, …`
+ *
+ *  档位分配：
+ *  - **d = 1 顺方向侧** → 第 2 档（原则的「下一页」）
+ *  - **d = 1 反方向侧** → 第 3 档（原则的「上一页」）
+ *  - **d ≥ 2** → 第 4 档（本章其余页）
+ *
+ *  章边界（§3.3）：**只有 d=1 越界才升级**成 [NeighborItem.EdgeChapter]（加急整章排邻章）；
+ *  d≥2 越界说明本章至少还剩两页，隔两页仍不翻就不值得为它动整章——该项直接丢弃。
+ *
+ *  第 4 档的深度由 [drainWindow] 限定（默认 [PAGE_DRAIN_WINDOW]）。这不是偷懒，是 §3.5
+ *  「第三及之后是**空闲 drain**」的字面要求：drain 是**按需推进**的，不是每次落位把整章灌进队列。
+ *  指针前移一格，窗口就跟着前移一格——读者持续读，drain 就持续推进；读者停下，队列里也就只留
+ *  有界的那几格。
+ *
+ *  纯函数、无副作用：生产派发与 probe 验的是同一份判据。 */
+fun neighborSequence(
+    targetPage: Int,
+    totalPages: Int,
+    dir: Int,
+    chapterIdx: Int,
+    lastChapter: Int,
+    drainWindow: Int = PAGE_DRAIN_WINDOW,
+): List<NeighborItem> {
+    if (totalPages <= 0) return emptyList()
+    val out = ArrayList<NeighborItem>()
+    for (d in 1..(totalPages + 1)) {
+        val dirSide = targetPage + d * if (dir >= 0) 1 else -1
+        val otherSide = targetPage - d * if (dir >= 0) 1 else -1
+        for ((page, isDirSide) in listOf(dirSide to true, otherSide to false)) {
+            val tier = when {
+                d > 1 -> TaskScheduler.PRIO_PAGE_REST
+                isDirSide -> TaskScheduler.PRIO_PAGE_NEXT
+                else -> TaskScheduler.PRIO_PAGE_PREV
+            }
+            if (page in 0 until totalPages) {
+                // 第4档是**有界 drain**，不是整章全派（原则 §3.5「第三及之后是空闲 drain」）：
+                // 指针每动一次就把整章剩余页重派一遍，会用比整章任务更急的页任务灌满队列与两个槽
+                // （实测：WholeBookCancellationProbeTest 由 1.2s 劣化到 60s 超时——第7档的章扫描
+                // 永远排不上），且同键替换让每次落位都重启在途的页任务，churn 大过进展。
+                // 有界窗口随落位前移：每次落位把 drain 窗口再推一格，读者持续读下去就持续推进。
+                if (d > drainWindow) continue
+                out.add(NeighborItem.Page(page, tier))
+            } else if (d == 1) {
+                val beyond = if (page >= totalPages) chapterIdx + 1 else chapterIdx - 1
+                if (beyond in 0..lastChapter) {
+                    out.add(NeighborItem.EdgeChapter(beyond, if (isDirSide) {
+                        TaskScheduler.PRIO_EDGE_FORWARD
+                    } else {
+                        TaskScheduler.PRIO_EDGE_BACKWARD
+                    }))
+                }
+            }
+            // d >= 2 越界：丢弃（§3.3）
+        }
+        // 序列已覆盖全章 + 两侧各一次越界，无需再远。
+        if (d > totalPages) break
+    }
+    return out
+}
+
 /** 整书章扫描（B2，第 7 档）的键。与 [edgeKey] 必须分域，见该函数 KDoc。 */
 fun scanKey(chapter: Int) = "b2:$chapter"
 
@@ -1253,47 +1334,13 @@ private fun previousTempPage(ip: InProgressPagination): TempPage? {
     else ip.backwardPages.getOrNull(prevIdx)
 }
 
-/** 原则 §3.3：**d=1 邻页越出本章 → 加急整章排邻章**。纯判定，无副作用、无提交，probe 直接验证
- *  同一份判据（生产与测试不各写一份）。
- *
- *  升档取**越界那一侧自己的 d=1 档**，与翻页方向无关：
- *  - 缺下一页（`p >= totalPages`）→ **下一章** @ [TaskScheduler.PRIO_EDGE_FORWARD]（第 2 档）
- *  - 缺上一页（`p < 0`）→ **上一章** @ [TaskScheduler.PRIO_EDGE_BACKWARD]（第 3 档）
- *
- *  读者在首页**向前**翻时同样会补上"上一章"——章首页是增量→全量的交接点，下一次往回翻就要用。
- *  单页章两侧都缺，两个都发。**d≥2 不做此升级**：越界意味着至少还剩两页，隔两页仍不翻就不值得
- *  为它动整章。
- *
- *  @return `(邻章号, 优先级)` 列表，按 d=1 方向侧优先的次序。 */
-fun edgeEscalations(
-    chapterIdx: Int,
-    totalPages: Int,
-    targetPage: Int,
-    dir: Int,
-    lastChapter: Int,
-): List<Pair<Int, Int>> {
-    if (totalPages <= 0) return emptyList()
-    val order = if (dir >= 0) intArrayOf(targetPage + 1, targetPage - 1)
-    else intArrayOf(targetPage - 1, targetPage + 1)
-    val out = ArrayList<Pair<Int, Int>>(2)
-    for (p in order) {
-        if (p in 0 until totalPages) continue
-        val missingForward = p >= totalPages
-        val beyond = if (missingForward) chapterIdx + 1 else chapterIdx - 1
-        if (beyond !in 0..lastChapter) continue
-        out.add(
-            beyond to if (missingForward) TaskScheduler.PRIO_EDGE_FORWARD
-            else TaskScheduler.PRIO_EDGE_BACKWARD
-        )
-    }
-    return out
-}
 
 /** P2.1: disk-path neighbor prefill after a landing (scheduler edition). No-op on the temp
  *  path (its own prefill owns it) and without a table. Submits one PAGE task per in-range
  *  neighbor in flip-direction order; same-key submit replaces stale twins (latest landing wins).
- *  A d=1 neighbor falling OUTSIDE this chapter ⇒ full-layout the adjacent chapter at the d=1
- *  priority (原则 §3.3, unconditional — both the tail→next and head→prev directions).
+ *  The whole neighbor SEQUENCE comes from [neighborSequence] (原则 §3.1): d=1 direction side at
+ *  第2档, d=1 other side at 第3档, d≥2 at 第4档, and a d=1 neighbor falling OUTSIDE this chapter
+ *  becomes a full-layout of the adjacent chapter at that side's tier (原则 §3.3).
  *  No start delay (R18 doctrine: cancel promptly instead of waiting out bursts). */
 private fun scheduleWindowPrefill(unit: ChapterUnit, targetPage: Int, dir: Int) {
     val table = unit.paginationTable ?: return
@@ -1302,34 +1349,39 @@ private fun scheduleWindowPrefill(unit: ChapterUnit, targetPage: Int, dir: Int) 
     if (total <= 0) return
     val chapterIdx = unit.chapterIndex
     val lastChapter = chapters.size - 1
-    val order = if (dir >= 0) intArrayOf(targetPage + 1, targetPage - 1)
-    else intArrayOf(targetPage - 1, targetPage + 1)
-    for (p in order) {
-        if (p in 0 until total) {
-            // R17-proven shape: only the priority side assembles (fits flip cadence); the other
-            // side stays L2-warmed. Doubling assembly per landing cost more than it covered.
-            val prioritySide = (p == order.firstOrNull())
-            scheduler.submit(TaskScheduler.Task(
-                key = "pg:$chapterIdx:$p",
-                priority = TaskScheduler.PRIO_PREFILL_PAGE,
-                block = { prefillPageTask(chapterIdx, p, targetPage, prioritySide) },
+    val bc = layouter as? BoxChapterLayouter
+    val contentW = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
+    val contentH = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
+    val hash = LayoutParamKey.fromProfile(profile, contentW, contentH).hash()
+    // 原则 §3.1：一次派发整段邻页序列。出队次序 = 优先级次序（第2/3/4档，d=1 越界处为跨章兜底）。
+    for (item in neighborSequence(targetPage, total, dir, chapterIdx, lastChapter)) {
+        when (item) {
+            is NeighborItem.Page -> scheduler.submit(TaskScheduler.Task(
+                key = "pg:$chapterIdx:${item.index}",
+                priority = item.tier,
+                // R17-proven shape: only the 第2档 side assembles (fits the flip cadence); the
+                // other sides stay L2-warmed. Doubling assembly per landing cost more than it covered.
+                block = {
+                    prefillPageTask(
+                        chapterIdx, item.index, targetPage,
+                        assemble = item.tier == TaskScheduler.PRIO_PAGE_NEXT,
+                    )
+                },
             ))
-        } else {
-            continue // handled by the edgeEscalations pass below — keeps the d=1 rule in ONE place
+            is NeighborItem.EdgeChapter -> {
+                if (bc == null || unitAt(item.chapter) == null) continue
+                // 在途就不重派（同 [preflightChapter] 的 `pre:<章>` 口径）。**长任务不能靠同键替换
+                // 保鲜**：池在同键新孪生到来时会取消在跑的旧孪生（`TaskScheduler.kt:128`），对单页
+                // 塑形是对的（指针动了旧的就没意义），对整章全量则是灾难——每次落位都重启一遍几秒的
+                // 整章活，两个槽被长期占死，第 7 档的章扫描永远排不上。紧急度已由在途那个满足了。
+                if (scheduler.runningKeys.contains(edgeKey(item.chapter))) continue
+                scheduler.submit(TaskScheduler.Task(
+                    key = edgeKey(item.chapter),
+                    priority = item.tier,
+                    block = { b2ChapterTask(item.chapter, bc, contentW, contentH, hash) },
+                ))
+            }
         }
-    }
-    // 原则 §3.3：d=1 邻页越出本章 → 加急整章排邻章（键域与 b2 扫描分开，见 [edgeKey]）。
-    for ((beyond, prio) in edgeEscalations(chapterIdx, total, targetPage, dir, lastChapter)) {
-        if (unitAt(beyond) == null) continue
-        val bc = layouter as? BoxChapterLayouter ?: continue
-        val contentW = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
-        val contentH = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
-        val hash = LayoutParamKey.fromProfile(profile, contentW, contentH).hash()
-        scheduler.submit(TaskScheduler.Task(
-            key = edgeKey(beyond),
-            priority = prio,
-            block = { b2ChapterTask(beyond, bc, contentW, contentH, hash) },
-        ))
     }
 }
 

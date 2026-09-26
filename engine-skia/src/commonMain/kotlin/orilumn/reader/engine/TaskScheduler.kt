@@ -43,21 +43,42 @@ class TaskScheduler(
     maxSlots: Int = 2,
 ) {
     companion object {
-        const val PRIO_PREFILL_PAGE = 10
-        /** 原则 §3.3 的 **d=1 章外兜底**：目标页是本章末页 → 全量预排**下一章**，留在第 2 档
-         *  （与「下一页」同档——末页时该档没有页任务，正好让位给它）。
-         *  D3 会把第 2/3 档拆成互不相邻的号，届时本常量与 [PRIO_PREFILL_PAGE] 分离。 */
-        const val PRIO_EDGE_FORWARD = 10
-        /** 原则 §3.3 的 **d=1 章外兜底**：目标页是本章首页 → 全量预排**上一章**，留在第 3 档。
-         *  紧急度高于「本章全量」（第 6 档）——邻章是读者下一步就要读的内容。 */
-        const val PRIO_EDGE_BACKWARD = 15
-        const val PRIO_B1_CHAPTER = 20
-        /** 原则 §3.4：目标页距章首 d=1（落在第 2 页）时**本章全量**的加急档。取第 2 档而非第 3 档——
-         *  全量表**包含**第 2/3 档那些邻页，把一页的增量排在包含它的一趟之前说不通。
-         *  D3 会把第 2/3 档拆成互不相邻的号，届时本常量与 [PRIO_EDGE_FORWARD] 分离。 */
-        const val PRIO_B1_URGENT = 10
-        const val PRIO_B2_CHAPTER = 30
-        const val PRIO_PREWARM = 40
+        // ── 优先级阶梯（原则 §3）。号刻意留间隔（10/20/30/…），日后插档不必重编。
+        //    号小 = 更急。翻页（PRIO_FLIP）永远不在此表里——它不进队列。 ──
+
+        /** **第 2 档** = 邻页序列的 d=1 **顺方向**那页（原则称之为「下一页」）。
+         *  「下一页」是相对**翻页方向**定义的：向前翻即页码+1，向后翻即页码−1。
+         *  同档还有：d=1 章外兜底的顺向侧（[PRIO_EDGE_FORWARD]）、本章全量的加急档
+         *  （[PRIO_B1_URGENT]）——它们都是"读者下一步就要用"，且都**包含**本档的邻页。 */
+        const val PRIO_PAGE_NEXT = 10
+
+        /** **第 3 档** = 邻页序列的 d=1 **反方向**那页（原则称之为「上一页」）。
+         *  同档还有：d=1 章外兜底的反向侧（[PRIO_EDGE_BACKWARD]）。 */
+        const val PRIO_PAGE_PREV = 20
+
+        /** **第 4 档** = 本章其余页（d≥2，按 \|距离\| 交错）。 */
+        const val PRIO_PAGE_REST = 30
+
+        /** **第 6 档** = 本章全量（B1）。动态档：目标页距章首 d=1 时升到 [PRIO_B1_URGENT]（§3.4）。 */
+        const val PRIO_B1_CHAPTER = 40
+
+        /** **第 7 档** = 其他章全量（章距投机，懒）。 */
+        const val PRIO_B2_CHAPTER = 50
+
+        /** 解析预热（markup + 轻结构，无塑形）。排在一切排版活之后：用户不需要它出字，
+         *  只需要它别挡路（原则 §7）。 */
+        const val PRIO_PREWARM = 60
+
+        /** §3.3 的 d=1 章外兜底，顺向侧（缺下一页 → 全量预排下一章）。与第 2 档同级。 */
+        const val PRIO_EDGE_FORWARD = PRIO_PAGE_NEXT
+
+        /** §3.3 的 d=1 章外兜底，反向侧（缺上一页 → 全量预排上一章）。与第 3 档同级。 */
+        const val PRIO_EDGE_BACKWARD = PRIO_PAGE_PREV
+
+        /** §3.4 本章全量的加急档（目标页距章首 d=1）。取第 2 档而非第 3 档——全量表**包含**
+         *  第 2/3 档那些邻页，把一页的增量排在包含它的一趟之前说不通。 */
+        const val PRIO_B1_URGENT = PRIO_PAGE_NEXT
+
         const val PRIO_FLIP = 0 // reference only — flips never enqueue
     }
 

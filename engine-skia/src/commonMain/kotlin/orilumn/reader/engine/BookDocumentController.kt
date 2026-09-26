@@ -839,7 +839,12 @@ private fun startAnchorStream(
         // 尾锚直达倒包：锚落在末块时前向灌注定撞顶（至多覆盖末块余行），跳过前向试探，
         // 直接倒包——省一次整块塑形+组装（旧路径先前向后倒包，白做一次）。
         // 非末块锚仍先前向灌：撞顶不满才倒包；灌满则保留前向页（与正向尾余页同源）。
-        // 倒包失败一律回退前向锚（原行为），出生永不因此落空。
+        // 失败一律可观测 + 回退前向锚（原行为），出生永不因此落空：
+        //   - total<=0 畸形章（跨章已跳过无正文章，理论不可达）：记 w 跳过；
+        //   - 倒包返回 null：记 w 回退；
+        //   - 倒包抛异常（tempShape/rebuildLocalLines 遇畸形内容）：记 e 回退——
+        //     不包的话异常穿透 birth 直达 buildLayout 的 catch（ERROR + 空白章），
+        //     回退接不住真正的失败模式。
         val tailAnchored = anchorBlock >= prepare.totalBlocks - 1
         val anchorFwd = if (!tailAnchored) {
             bc.shapeAnchorPageForward(prepare, snapshot, contentW, contentH, anchorCharAt, cache)
@@ -851,9 +856,21 @@ private fun startAnchorStream(
         // 且后向链从此页起向后铺（shapeNextBackward 以 Fwd(0) 为头缘），全链统一。
         // shapeTempPageBackward 失败则回退前向锚（原行为）。
         // C2-P2b-3: `withLock` 非内联，块里不能裸 `return` —— 超期标记外置，语义不变。
-        val tailPage = if (tailAnchored || (anchorFwd != null && anchorFwd.nextBlock >= prepare.totalBlocks)) {
-            bc.shapeTempPageBackward(prepare, snapshot, contentW, contentH, prepare.totalBlocks, -1, cache)
-                ?.also { Logger.w(logTag, "anchor TAIL-BACKWARD ch=${unit.chapterIndex} blocks=[${it.slice.blockStart},${it.slice.blockEndExclusive}) chars=[${it.slice.charStart},${it.slice.charEnd})") }
+        val tailPage: TempPage? = if (tailAnchored || (anchorFwd != null && anchorFwd.nextBlock >= prepare.totalBlocks)) {
+            if (prepare.totalBlocks <= 0) {
+                Logger.w(logTag, "anchor TAIL-BACKWARD skip ch=${unit.chapterIndex} totalBlocks=${prepare.totalBlocks} → fallback forward")
+                null
+            } else try {
+                bc.shapeTempPageBackward(prepare, snapshot, contentW, contentH, prepare.totalBlocks, -1, cache)
+                    ?.also { page -> Logger.w(logTag, "anchor TAIL-BACKWARD ch=${unit.chapterIndex} blocks=[${page.slice.blockStart},${page.slice.blockEndExclusive}) chars=[${page.slice.charStart},${page.slice.charEnd})") }
+                    ?: run {
+                        Logger.w(logTag, "anchor TAIL-BACKWARD null ch=${unit.chapterIndex} anchorChar=$anchorCharAt → fallback forward")
+                        null
+                    }
+            } catch (e: Exception) {
+                Logger.e(logTag, "anchor TAIL-BACKWARD FAIL ch=${unit.chapterIndex} anchorChar=$anchorCharAt ${e.message} → fallback forward")
+                null
+            }
         } else null
         // 惰性：倒包成功不再碰前向；倒包失败（或非尾锚未撞顶本无倒包）才以前向页出生。
         // anchorFwd 为 null 仅发生在尾锚直达且倒包失败时，此时现塑前向（原行为）。

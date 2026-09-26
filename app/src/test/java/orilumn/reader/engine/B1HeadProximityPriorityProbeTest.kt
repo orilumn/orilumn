@@ -17,7 +17,7 @@ import org.junit.Test
  *
  * | 目标页            | 本章全量档位 |
  * |-------------------|--------------|
- * | 第 1 页（章首页） | 同步承接，不走后台档 |
+ * | 第 1 页（章首页） | 同步承接，不走加急档（后台仍以第 6 档补表） |
  * | **第 2 页**       | **第 2/3 档（加急）** |
  * | 第 3 页及以后     | 第 6 档 |
  *
@@ -62,7 +62,7 @@ class B1HeadProximityPriorityProbeTest {
     @Test
     fun `d=0 (chapter head) does not boost - the handoff is synchronous there`() {
         assertEquals(
-            "on the chapter head the full table is bound synchronously, no background tier",
+            "on the chapter head the display is covered synchronously: no urgent tier (background still completes the table at the base tier)",
             TaskScheduler.PRIO_B1_CHAPTER,
             prio(0),
         )

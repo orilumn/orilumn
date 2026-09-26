@@ -1364,6 +1364,11 @@ private fun tempHeadDistancePages(ip: InProgressPagination): Int? = tempStateLoc
     headDistanceFrom(cur.blockStart, previousTempPage(ip)?.blockStart)
 }
 
+/** Probe 缝（D7-4）：[chapter] 的 temp 块水位，无活会话时为 null。
+ *  第 4 档在临时表侧唯一的执行体就是这个水位的推进（`TEMP_PREFILL_BUDGET`），读它即观测该档。 */
+fun tempWatermarkForProbe(chapter: Int): Int? =
+    tempStateLock.withLock { unitAt(chapter)?.inProgress?.shapedForwardTo }
+
 /** 原则 §3.4 的判据表（纯函数）：由「当前页起始块」与「前驱页起始块」定出目标页距章首的页数 d。
  *
  *  - `curBlockStart == 0` → `0`：当前页就是章首页，已在交接点，同步承接，不升档。

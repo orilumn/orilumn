@@ -8,6 +8,7 @@ import orilumn.reader.engine.text.FontPool
 import orilumn.reader.engine.text.LayoutParamKey
 import orilumn.reader.engine.text.TypographicProfile
 import java.util.concurrent.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -184,10 +185,22 @@ class WholeBookCancellationProbeTest {
         assertTrue("hashes must differ", hA != hB && hB != hC)
 
         // Every non-active chapter must end on the LAST hash, with a COMPLETE table (no truncation).
-        for (ch in 0 until CHAPTERS) {
-            if (ch == ACTIVE) continue
-            awaitParamHash(ch, hC)
-            assertComplete(ch, hC)
+        try {
+            for (ch in 0 until CHAPTERS) {
+                if (ch == ACTIVE) continue
+                awaitParamHash(ch, hC)
+                assertComplete(ch, hC)
+            }
+        } catch (e: TimeoutCancellationException) {
+            // Quarantine 自白（D3a：此用例间歇性卡死，非变慢——ch 表 280s 全程 null）。
+            // 下一次超时直接打印"哪几章写了、哪几章是 null"，区分整趟没跑 vs 单章卡住，
+            // 免得再花一次 280s 探针。证据口径，不碰生产代码。
+            val states = (0 until CHAPTERS).joinToString(" ") { ch ->
+                val t = controller.unitAt(ch)?.paginationTable
+                "ch$ch=" + (t?.let { "pages=${it.pages.size},lastHash=${it.paramHash == hC}" } ?: "null")
+            }
+            println("QUARANTINE-WITNESS epoch=${controller.layoutEpoch} $states")
+            throw e
         }
 
         // The active chapter is small (foreground full reflow, no B1/anchor): its table carries the

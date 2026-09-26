@@ -195,10 +195,9 @@ class DesktopReaderHost(
     }
 
     override fun onSaveProgress(pos: ReaderPos) {
-        // fire-and-forget：阅读面已防抖 500ms，这里只做 leave 收口 + 落盘（存档顺序契约：
-        // 先 finalizeOnLeave 再读 displayed slice，持久化的 char 恒 canonical 权威）。
+        // fire-and-forget：阅读面已防抖 500ms，这里只落盘。存档读显示位本身（与平板同口径，
+        // 见 TabletReaderHost.onSaveProgress），不 finalize（存档不是离开，杀 temp 会话锁死大章）。
         ioScope.launch {
-            controller.finalizeOnLeave(pos.chapter)
             if (bookId < 0) return@launch
             store.saveProgress(bookId, ReadingLocator(pos.chapter, pos.slice.charStart))
         }

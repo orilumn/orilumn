@@ -38,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.engine.text.TypographicProfile
+import orilumn.reader.io.Logger
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -82,6 +83,11 @@ fun ReaderScreen(
     /** Q1-b：外部推送的落位（版式重排绑定 / 目录跳转落地后同步）。非空即采用为当前定位并防抖
      *  保存；null 不动作（重排以同一目标字符合位，字符仍在新分页表里即可连续阅读）。 */
     externalPos: ReaderPos? = null,
+    /** openPos 丢失时的回退定位（activity 侧 currentPos，每次落位更新）。
+     *  Screen 重进 composition 会清空 remember，而 host 稳定时 LaunchedEffect 不重跑 open()，
+     *  openPos 将永久为 null——此前 flip/jump/seek 静默吞动作（"点了没反应"）。
+     *  有回退即用（引擎侧 locateTempPosition 可重定位陈旧 slice），都没有才丢弃并落盘。 */
+    fallbackPos: ReaderPos? = null,
     /**
      * 版式版本号（宿主每次重排绑定+1）：行/图/背景的 `remember` 键随之刷新。字体等只换字形
      * 不断行的变更分页不变、新旧 pos 相等，不带本号行数据永远是旧的（重启才生效的根因）。
@@ -158,22 +164,36 @@ fun ReaderScreen(
     }
 
     // ---- 定位动作（host 为 suspend，统一挂到本组件作用域） ----
+    /** openPos 优先，回退 fallbackPos（activity currentPos），都没有才丢弃——永不静默。 */
+    fun resolveNavPos(action: String): ReaderPos? {
+        openPos?.let { return it }
+        fallbackPos?.let {
+            Logger.d("Orilumn.TAP", "$action openPos null → fallback ch=${it.chapter} char=${it.slice?.charStart}")
+            return it
+        }
+        Logger.d("Orilumn.TAP", "$action DROPPED (openPos null, no fallback)")
+        return null
+    }
     fun flip(direction: Int) {
-        val p = openPos ?: return
+        val p = resolveNavPos("tap-flip") ?: return
+        Logger.d("Orilumn.TAP", "tap-flip dispatch dir=$direction from ch=${p.chapter} char=${p.slice?.charStart}")
         scope.launch {
-            currentHost.adjacent(p, direction)?.let { markPositionChanged(it) }
+            val landed = currentHost.adjacent(p, direction)
+            // 引擎侧无声吞翻页时（返回 null），这里是唯一目击者——与 Orilumn.FLIP 对账。
+            Logger.d("Orilumn.TAP", "tap-flip result dir=$direction " + (landed?.let { "landed ch=${it.chapter} char=${it.slice?.charStart}" } ?: "NULL (engine returned null)"))
+            landed?.let { markPositionChanged(it) }
         }
     }
 
     fun jumpChapter(direction: Int) {
-        val p = openPos ?: return
+        val p = resolveNavPos("jump-chapter") ?: return
         scope.launch {
             currentHost.neighborChapterStart(p.chapter, direction)?.let { markPositionChanged(it) }
         }
     }
 
     fun seek(fraction: Float) {
-        val p = openPos ?: return
+        val p = resolveNavPos("seek") ?: return
         scope.launch {
             currentHost.pageAtFraction(fraction.toDouble())?.let { markPositionChanged(it) }
         }
@@ -219,12 +239,19 @@ fun ReaderScreen(
     fun onTap(xPx: Float, yPx: Float, widthPx: Float, atMs: Long = 0L) {
         // P4-c2u: 链接优先——点中链接字形即导航，未中才走三区（翻页/栏显隐）。
         if (tryOpenLinkAt(xPx, yPx)) {
+            Logger.d("Orilumn.TAP", "tap x=${xPx.roundToInt()} y=${yPx.roundToInt()} → link")
             lastLinkTapMs = atMs
             return
         }
         // 手抖防抖：刚跳过链接，短窗内的三区点按吞掉（否则第二下常把新页翻走）。
-        if (ReaderMath.linkTapDebounced(atMs, lastLinkTapMs)) return
-        when (ReaderMath.tapZone(xPx, widthPx)) {
+        // 被吞掉的点按在此落盘——"点了没反应"先查这条。
+        if (ReaderMath.linkTapDebounced(atMs, lastLinkTapMs)) {
+            Logger.d("Orilumn.TAP", "tap x=${xPx.roundToInt()} y=${yPx.roundToInt()} SWALLOWED by link-debounce")
+            return
+        }
+        val zone = ReaderMath.tapZone(xPx, widthPx)
+        Logger.d("Orilumn.TAP", "tap x=${xPx.roundToInt()} y=${yPx.roundToInt()} w=${widthPx.roundToInt()} zone=$zone bars=${currentBarsVisible}")
+        when (zone) {
             -1 -> flip(-1)
             1 -> flip(1)
             else -> barsVisible = !barsVisible
@@ -279,7 +306,12 @@ fun ReaderScreen(
                         val event = awaitPointerEvent()
                         val change = event.changes.firstOrNull { it.id == down.id } ?: break
                         if (barsOwned) {
-                            if (!change.pressed) break
+                            if (!change.pressed) {
+                                // 栏区点按被栏消费——此前静默，"点了没反应"先查这条。
+                                // 附栏实测几何：若 downY 在栏条之外仍被吞，即 downInBars 误判/高度过期。
+                                Logger.d("Orilumn.TAP", "tap x=${downX.roundToInt()} y=${downY.roundToInt()} SWALLOWED by bars (viewH=${size.height} topH=${currentTopBarH} botH=${currentBotBarH})")
+                                break
+                            }
                             continue
                         }
                         // 覆盖层（上下栏按钮等）已消费的事件交给它们；被消费的抬起也不再触发点按/翻页。

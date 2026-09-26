@@ -333,6 +333,7 @@ class ReaderActivity : ComponentActivity() {
                     onLightCommit = { commitBrightness(it) },
                     onBarsVisibleChanged = { barsVisible = it; applySystemBars() },
                     externalPos = externalPos,
+                    fallbackPos = currentPos,
                     contentRevision = layoutRevision,
                 )
             } else {
@@ -444,7 +445,14 @@ class ReaderActivity : ComponentActivity() {
         applySystemBars()
         val c = engine
         c?.deferCanonical = false
-        if (c != null && typographHash() != panelBaseHash) {
+        val before = panelBaseHash
+        val after = typographHash()
+        // 关面板事件无条件落盘（变与不变都记）——"改参关面板没反应"先查这条再查引擎。
+        Logger.w(TAG, "close settings panel typographHash $before -> $after changed=${before != after}")
+        // 消费本次 diff：遮罩连点/返回键竞态会导致 onDismiss 重入；不消费则第二次关闭
+        // 看到同样的 diff 而再跑一遍整书重排（20:36 双关即此）。
+        panelBaseHash = after
+        if (c != null && after != before) {
             Logger.w(TAG, "close settings panel -> typography changed, whole-book relayout")
             // 先停掉实时节流循环并等其当前迭代落位，避免两趟后台塑形并发作用于同一章。
             relayoutPending = false

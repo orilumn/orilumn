@@ -72,6 +72,7 @@ import androidx.compose.ui.unit.sp
 import orilumn.reader.data.font.FontEntry
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.engine.text.TypographicProfile
+import orilumn.reader.io.Logger
 import orilumn.reader.net.FontUploadServer
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -570,6 +571,9 @@ fun ReaderSettingsPanel(
             val drawerPx = remember(drawerWidth, density) { with(density) { drawerWidth.toPx() } }
             Box(modifier = Modifier.fillMaxSize()) {
                 // Dark mask over the area left of the panel; shown only after docking, faded before sliding out.
+                // 退场动画中（mounted 但 !visible）遮罩立即停止拦截：否则关闭后 300ms 内的点按
+                // 被退场中的遮罩吃掉（"关面板后点左侧没反应"），还顺带触发第二次全书重排。
+                // 诊断：遮罩点按落盘，与 Orilumn.TAP 对账。
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -577,7 +581,11 @@ fun ReaderSettingsPanel(
                         .background(Color.Black.copy(alpha = PanelMaskAlpha))
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() }, indication = null,
-                            onClick = onDismiss,
+                            enabled = visible,
+                            onClick = {
+                                Logger.d("Orilumn.TAP", "panel-mask tap → dismiss")
+                                onDismiss()
+                            },
                         ),
                 )
                 Column(
@@ -617,7 +625,8 @@ fun ReaderSettingsPanel(
                             },
                         )
                         // 点按消费（不抢焦点）：杂散点按不穿透到遮罩关闭层。
-                        .pointerInput(Unit) { detectTapGestures(onTap = {}) },
+                        // 仅面板可见时消费——退场动画中已滑出屏幕，不再占右侧触摸。
+                        .pointerInput(visible) { if (visible) detectTapGestures(onTap = {}) },
                 ) {
                     Box(
                         modifier = Modifier

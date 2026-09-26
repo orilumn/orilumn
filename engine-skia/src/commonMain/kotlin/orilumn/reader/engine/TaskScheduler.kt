@@ -9,6 +9,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import orilumn.reader.collections.SyncLock
+import orilumn.reader.collections.withLock
 import orilumn.reader.io.Logger
 
 /**
@@ -43,6 +45,9 @@ class TaskScheduler(
     data class Task(
         val key: String,
         val priority: Int,
+        /** Submission sequence, assigned by [submit] at call time (call order is deterministic
+         *  even when the async maintenance hops land out of order). Default 0 = unset. */
+        val seq: Long = 0L,
         val block: suspend () -> Unit,
     )
 
@@ -50,6 +55,10 @@ class TaskScheduler(
     private val queue = ArrayList<Task>()
     private val running = HashMap<String, Job>()
     private val runningPrio = HashMap<String, Int>()
+    private val runningSeq = HashMap<String, Long>()
+    private val latestSeq = HashMap<String, Long>()
+    private val seqLock = SyncLock()
+    private var submitSeq = 0L
 
     /** P1f: lock-free snapshot of running keys (refreshed under mutex on every mutation).
      *  Status views read this without suspending; benignly stale by microseconds. */
@@ -63,22 +72,28 @@ class TaskScheduler(
     var maxSlots: Int = maxSlots
 
     fun submit(task: Task) {
+        // Sequence at CALL time (synchronous): later calls always outrank earlier ones no matter
+        // how the async maintenance hops below interleave.
+        val mySeq = seqLock.withLock {
+            ++submitSeq
+            latestSeq[task.key] = submitSeq
+            submitSeq
+        }
+        val stamped = task.copy(seq = mySeq)
         scope.launch {
             mutex.withLock {
-                queue.removeAll { it.key == task.key }
-                // P0 fix: cancel in place WITHOUT removing the map entry — the entry is the
-                // liveness record and only the task's own finally-block may remove it (on actual
-                // death). Removing-then-cancelling leaks the slot: pump sees an empty slot while
-                // the cancelled twin is still draining, and starts a second shaper on top of it.
-                running[task.key]?.cancel()
+                // Drop only OLDER twins; cancel only an older running twin. A newer twin already
+                // queued/running (maintenance reordered) is left alone — seq decides at pump time.
+                queue.removeAll { it.key == stamped.key && it.seq < mySeq }
+                if ((runningSeq[stamped.key] ?: -1L) < mySeq) running[stamped.key]?.cancel()
                 var at = queue.size
                 for (i in queue.indices) {
-                    if (queue[i].priority > task.priority) {
+                    if (queue[i].priority > stamped.priority) {
                         at = i
                         break
                     }
                 }
-                queue.add(at, task)
+                queue.add(at, stamped)
                 pumpLocked()
             }
         }
@@ -128,6 +143,11 @@ class TaskScheduler(
 
     private fun pumpLocked() {
         while (running.size < maxSlots && queue.isNotEmpty()) {
+            // Stale twin? A newer submit for the same key outranks, however maintenance landed.
+            if (queue[0].seq != latestSeq[queue[0].key]) {
+                queue.removeAt(0)
+                continue
+            }
             val task = queue.removeAt(0)
             Logger.w("Orilumn.SPIKE", "spike-task start key=${task.key} prio=${task.priority}")
             val holder = arrayOfNulls<Job>(1)
@@ -143,6 +163,7 @@ class TaskScheduler(
                         if (running[task.key] === holder[0]) {
                             running.remove(task.key)
                             runningPrio.remove(task.key)
+                            runningSeq.remove(task.key)
                         }
                         pumpLocked()
                     }
@@ -151,6 +172,7 @@ class TaskScheduler(
             holder[0] = job
             running[task.key] = job
             runningPrio[task.key] = task.priority
+            runningSeq[task.key] = task.seq
             syncKeysLocked()
         }
     }

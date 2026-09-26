@@ -198,6 +198,11 @@ class TaskScheduler(
                 } catch (e: CancellationException) {
                     Logger.w("Orilumn.SPIKE", "spike-task cancel key=${task.key}")
                     throw e
+                } catch (e: Throwable) {
+                    // 非取消异常：后台排版 bug 在此唯一留痕。记 e 后重抛（fail-fast 不变），
+                    // 否则 release 只剩"预排没来"而无栈。
+                    Logger.e("Orilumn.SPIKE", "spike-task FAIL key=${task.key} ${e.message}")
+                    throw e
                 } finally {
                     mutex.withLock {
                         if (running[task.key] === holder[0]) {

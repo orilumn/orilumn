@@ -1,5 +1,6 @@
 package orilumn.reader.data.epub
 
+import orilumn.reader.io.Logger
 import orilumn.reader.xml.XmlDocument
 import orilumn.reader.xml.XmlElement
 
@@ -144,8 +145,14 @@ class EpubParser {
      */
     private fun parseObfuscation(reader: EpubResourceReader, opfDir: String): Set<String> {
         val xml = reader.readText("META-INF/encryption.xml") ?: return emptySet()
-        val root = runCatching { parseXml(xml).documentElement }.getOrNull() ?: return emptySet()
-        val entries = runCatching { reader.entries().toSet() }.getOrNull() ?: emptySet()
+        // 脏 encryption.xml（应跳过混淆）vs 解析器 bug（应炸）无法在此区分：回退保留，
+        // 但 IO 级与 XML 损坏分开落盘，字体去混淆跳过时有迹可查。
+        val root = runCatching { parseXml(xml).documentElement }
+            .onFailure { Logger.w("Orilumn.EPUB", "parseObfuscation XML FAIL ${it.message} → skip font deobfuscation") }
+            .getOrNull() ?: return emptySet()
+        val entries = runCatching { reader.entries().toSet() }
+            .onFailure { Logger.w("Orilumn.EPUB", "parseObfuscation entries FAIL ${it.message}") }
+            .getOrNull() ?: emptySet()
         val out = LinkedHashSet<String>()
         fun walk(el: XmlElement) {
             // 本地名 EncryptedData（前缀容忍经 localName）。

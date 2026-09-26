@@ -1656,6 +1656,10 @@ class BoxChapterLayouter(
     ): ChapterLayouter.ChapterLayoutProduct? = runCatching {
         val prepare = prepare(markup, cssBundle, profile, contentW, contentH)
         fullLayout(prepare, profile, contentW, contentH)
+    }.onFailure {
+        // 内部异常归因：调用方只见 null（bindSafeEmpty 伪装空章节），栈在此留痕。
+        // 保持返回 null（调用方已有 error/预览丢弃处理），只补日志，不断行为。
+        Logger.e("Orilumn.Engine", "BoxChapterLayouter.layout FAIL ${it.message}")
     }.getOrNull()
 
     // ─────────────────────────────────────────────────────────────────

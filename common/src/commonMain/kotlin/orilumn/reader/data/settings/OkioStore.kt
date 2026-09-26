@@ -6,6 +6,7 @@ import okio.Path
 import okio.Path.Companion.toPath
 import okio.buffer
 import okio.use
+import orilumn.reader.io.Logger
 import kotlin.random.Random
 
 /**
@@ -17,7 +18,12 @@ internal fun FileSystem.writeTextAtomic(path: Path, text: String) {
     // 重试 3 次仍失败则降级直写。函数整体不抛异常——设置落盘是 best-effort，
     // load() 本来就有 DEFAULT 兜底，绝不能为一次落盘炸掉调用方协程。
     val tmp = "$path.${Random.nextLong().toString(16)}.tmp".toPath()
-    runCatching { sink(tmp).buffer().use { it.writeUtf8(text) } }.getOrElse { return }
+    // 全程 best-effort 不抛（注释承认的设计），但失败本身此前零记录——设置静默丢失查不出，
+    // 记 w（一行，落盘失败才触发，非高频）。
+    runCatching { sink(tmp).buffer().use { it.writeUtf8(text) } }.getOrElse {
+        Logger.w("Orilumn.SET", "settings atomic-write tmp FAIL $path ${it.message}")
+        return
+    }
     repeat(3) {
         runCatching {
             try {

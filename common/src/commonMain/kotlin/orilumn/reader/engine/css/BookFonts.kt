@@ -1,6 +1,7 @@
 package orilumn.reader.engine.css
 
 import okio.Buffer
+import orilumn.reader.io.Logger
 
 /**
  * P2-b: 书内字体管线纯逻辑（JVM 可测，无 IO）。
@@ -117,7 +118,10 @@ fun resolveCssImports(
     val out = ArrayList<Pair<String, String>>()
     val visited = LinkedHashSet<String>()
     fun resolveOne(base: String, text: String, depth: Int) {
-        val sheet = runCatching { LightCssParser().parse(text) }.getOrNull()
+        // 脏书 CSS 解析失败：回退原文（容错保留），但记 w——否则作者样式失效无迹可查。
+        val sheet = runCatching { LightCssParser().parse(text) }
+            .onFailure { Logger.w("Orilumn.CSS", "collectCss parse FAIL $base ${it.message} → keep raw") }
+            .getOrNull()
         if (sheet == null) {
             out.add(base to text)
             return

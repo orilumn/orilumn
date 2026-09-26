@@ -6,6 +6,7 @@ import okio.Path.Companion.toPath
 import okio.buffer
 import okio.source
 import okio.use
+import orilumn.reader.io.Logger
 
 /**
  * Reading configuration user-set read/write: `settingsDir/reader.json`.
@@ -25,11 +26,14 @@ class ReaderSettingsStore(settingsDir: String) {
     private val file: Path = settingsDir.toPath() / FILE_NAME
     private val tmp: Path = settingsDir.toPath() / "$FILE_NAME.tmp"
 
-    /** Read the currently effective settings (user set; default set when absent). */
+    /** Read the currently effective settings (user set; default set when absent).
+     *  损坏回退保留（设置 best-effort），但损坏本身记 w——否则用户手改坏一行，
+     *  静默丢全部设置且无迹可查。 */
     fun load(): ReaderSettings = runCatching {
         val text = if (fs.exists(file)) fs.source(file).buffer().use { it.readUtf8() } else null
         if (text != null) ReaderSettings.fromJson(text) else ReaderSettings.DEFAULT
-    }.getOrDefault(ReaderSettings.DEFAULT)
+    }.onFailure { Logger.w("Orilumn.SET", "settings load corrupt, fallback DEFAULT ${it.message}") }
+        .getOrDefault(ReaderSettings.DEFAULT)
 
     /** Persist the user set. */
     fun save(settings: ReaderSettings) {

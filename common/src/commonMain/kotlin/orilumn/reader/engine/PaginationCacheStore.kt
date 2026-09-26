@@ -2,6 +2,7 @@ package orilumn.reader.engine
 
 import okio.FileSystem
 import okio.Path
+import orilumn.reader.io.Logger
 
 /**
  * Shared pagination-table disk store (C1-1): [ChapterPaginationTable] persistence over an
@@ -36,9 +37,15 @@ class PaginationCacheStore(
      *  idempotent, and keeps the LRU eviction semantics byte-for-byte with the old shell). */
     fun read(f: Path): ChapterPaginationTable? {
         if (fs.metadataOrNull(f)?.isRegularFile != true) return null
-        val bytes = runCatching { fs.read(f) { readByteArray() } }.getOrNull() ?: return null
+        // IO 异常（权限/磁盘满/并发删）此前静默——读失败即重建是对的，但原因要留痕。
+        val bytes = runCatching { fs.read(f) { readByteArray() } }
+            .onFailure { Logger.w("Orilumn.DISK", "pagination read IO FAIL $f ${it.message}") }
+            .getOrNull() ?: return null
+        // decode==null 的原因由 codec 逐条落盘，此处透传。
         val table = PaginationCacheCodec.decode(bytes) ?: return null
+        // LRU-touch 重写的失败此前静默——evict 语义漂移查不出，记 w。
         runCatching { fs.write(f) { write(bytes) } }
+            .onFailure { Logger.w("Orilumn.DISK", "pagination LRU-touch FAIL $f ${it.message}") }
         return table
     }
 

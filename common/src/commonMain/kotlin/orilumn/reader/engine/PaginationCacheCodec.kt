@@ -1,6 +1,7 @@
 package orilumn.reader.engine
 
 import okio.Buffer
+import orilumn.reader.io.Logger
 
 /**
  * Binary codec for [ChapterPaginationTable] — the single source of the on-disk cache format
@@ -65,20 +66,22 @@ object PaginationCacheCodec {
     }
 
     /** Deserializes on-disk bytes. Returns null on miss, schema/geometry-version mismatch, or
-     *  corruption — the single authority for whether a cached table is still usable. */
+     *  corruption — the single authority for whether a cached table is still usable.
+     *  Null 原因逐条落盘：版本不匹配（预期失效）/损坏/解析异常三者不可再压成同一个哑 null，
+     *  否则 DISK-HIT 跟踪无法区分 miss、损坏与 codec 自身 bug。 */
     fun decode(bytes: ByteArray): ChapterPaginationTable? {
         if (bytes.isEmpty()) return null
-        return runCatching {
+        return try {
             val buf = Buffer().write(bytes)
-            if (buf.readInt() != MAGIC) return null
-            if (buf.readInt() != VERSION) return null
-            if (buf.readInt() != LAYOUT_VERSION) return null
+            if (buf.readInt() != MAGIC) return decodeNull("magic")
+            if (buf.readInt() != VERSION) return decodeNull("version")
+            if (buf.readInt() != LAYOUT_VERSION) return decodeNull("layout-version")
             val chapterIndex = buf.readInt()
             val paramHash = buf.readLong()
             val totalBlocks = buf.readInt()
             val totalChars = buf.readInt()
             val pageCount = buf.readInt()
-            if (pageCount < 0) return null
+            if (pageCount < 0) return decodeNull("pageCount=$pageCount")
             val pages = ArrayList<ChapterPaginationTable.PageRecord>(pageCount)
             repeat(pageCount) {
                 pages.add(
@@ -97,6 +100,13 @@ object PaginationCacheCodec {
                 totalChars = totalChars,
                 pages = pages,
             )
-        }.getOrNull()
+        } catch (e: Exception) {
+            decodeNull("exception ${e.message}")
+        }
+    }
+
+    private fun decodeNull(reason: String): ChapterPaginationTable? {
+        Logger.w("Orilumn.DISK", "pagination decode null ($reason)")
+        return null
     }
 }

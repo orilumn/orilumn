@@ -856,24 +856,17 @@ private fun startAnchorStream(
         // 且后向链从此页起向后铺（shapeNextBackward 以 Fwd(0) 为头缘），全链统一。
         // shapeTempPageBackward 失败则回退前向锚（原行为）。
         // C2-P2b-3: `withLock` 非内联，块里不能裸 `return` —— 超期标记外置，语义不变。
+        // 开发期 fail-fast：倒包按构造必成（与前向同函数、同批块，只是遍历方向反了；
+        // 前向能塑的块倒包必能塑，没有倒包特有的失败理由）——一旦失败必是底层回归，
+        // 必须抛出来，不许静默回退藏掉。total<=0、返回 null、抛异常三条路都不吞：
+        // null 在此抛，异常自然上抛（buildLayout 记 ERROR）。
         val tailPage: TempPage? = if (tailAnchored || (anchorFwd != null && anchorFwd.nextBlock >= prepare.totalBlocks)) {
-            if (prepare.totalBlocks <= 0) {
-                Logger.w(logTag, "anchor TAIL-BACKWARD skip ch=${unit.chapterIndex} totalBlocks=${prepare.totalBlocks} → fallback forward")
-                null
-            } else try {
-                bc.shapeTempPageBackward(prepare, snapshot, contentW, contentH, prepare.totalBlocks, -1, cache)
-                    ?.also { page -> Logger.w(logTag, "anchor TAIL-BACKWARD ch=${unit.chapterIndex} blocks=[${page.slice.blockStart},${page.slice.blockEndExclusive}) chars=[${page.slice.charStart},${page.slice.charEnd})") }
-                    ?: run {
-                        Logger.w(logTag, "anchor TAIL-BACKWARD null ch=${unit.chapterIndex} anchorChar=$anchorCharAt → fallback forward")
-                        null
-                    }
-            } catch (e: Exception) {
-                Logger.e(logTag, "anchor TAIL-BACKWARD FAIL ch=${unit.chapterIndex} anchorChar=$anchorCharAt ${e.message} → fallback forward")
-                null
-            }
+            bc.shapeTempPageBackward(prepare, snapshot, contentW, contentH, prepare.totalBlocks, -1, cache)
+                ?.also { page -> Logger.w(logTag, "anchor TAIL-BACKWARD ch=${unit.chapterIndex} blocks=[${page.slice.blockStart},${page.slice.blockEndExclusive}) chars=[${page.slice.charStart},${page.slice.charEnd})") }
+                ?: error("anchor TAIL-BACKWARD null ch=${unit.chapterIndex} totalBlocks=${prepare.totalBlocks} anchorChar=$anchorCharAt")
         } else null
-        // 惰性：倒包成功不再碰前向；倒包失败（或非尾锚未撞顶本无倒包）才以前向页出生。
-        // anchorFwd 为 null 仅发生在尾锚直达且倒包失败时，此时现塑前向（原行为）。
+        // 尾包成功不再碰前向；非尾锚未撞顶走前向页。anchorFwd 为 null 只可能与 tailPage
+        // 并存（尾锚直达必走上一分支）——到这里为 null 即状态矛盾，直接抛，不补塑遮掩。
         val anchorPage: TempPage
         val shapedFwdTo: Int
         val fwdFromLine: Int
@@ -882,8 +875,7 @@ private fun startAnchorStream(
             shapedFwdTo = prepare.totalBlocks
             fwdFromLine = 0
         } else {
-            val fwd = anchorFwd
-                ?: bc.shapeAnchorPageForward(prepare, snapshot, contentW, contentH, anchorCharAt, cache)
+            val fwd = checkNotNull(anchorFwd) { "anchorFwd null without tailPage ch=${unit.chapterIndex}" }
             anchorPage = fwd.page
             shapedFwdTo = fwd.nextBlock
             fwdFromLine = fwd.nextLine

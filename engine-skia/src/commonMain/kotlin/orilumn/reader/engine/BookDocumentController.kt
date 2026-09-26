@@ -80,7 +80,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
  *  - **B1 chapter-head canonical**（PRIO_B1_CHAPTER=20）：本章权威整章表；同键 `b1:<章>`
  *    提交替换孪生（原按章 FIFO 槽），派发时抢占所有更低优任务；
  *  - **B2 whole-book scan**（PRIO_B2_CHAPTER=30）：逐章任务，跳过当前章（B1 拥有），
- *    按 [readingDirection] 的 |章距| 交错序；
+ *    按 [flipDir] 的 |章距| 交错序；
  *  - **A temp adjacent prefill**（[tempPrefillJob] on [backgroundDispatcher]）：temp 独立通道，
  *    按决议**不进池**（原则文档 §3/§6：temp 表与增量表不合），按游标去重、短单页塑形，
  *    天然让 F；
@@ -218,15 +218,27 @@ class BookDocumentController(
     @Volatile
     private var activeChapter: Int = -1
 
-    /** The direction the reader is moving (P12): +1 = toward the book tail, -1 = toward the head.
-     *  Updated at the single reader-facing flip entry ([findAdjacentPage] — reached by every page turn,
-     *  in-chapter temp/canonical and out-of-bounds cross-chapter) and by the direct
-     *  [nextPageInChapter]/[prevPageInChapter] entries (curl-adjacent pre-render). Used to order the
-     *  whole-book B2 scan so chapters the reader is heading toward are pre-laid-out first — a
-     *  flip-out-of-bounds into a nearby chapter lands on an already-laid-out one. Defaults forward
-     *  (the dominant reading direction). */
+    /** **翻页方向记录**（原则 §3.2）：`+1` 上次向前翻页、`−1` 上次向后翻页、`0` **无记录**。
+     *
+     *  写入：
+     *  - 翻页入口 [findAdjacentPage] 记当次 `direction`；[nextPageInChapter] / [prevPageInChapter]
+     *    是真实的翻页动作，各自记 `+1` / `−1`（curl 邻页预渲染也走这两条）。
+     *  - **开书（字段初值）、跳转、参数重排一律清 `0`**，见 [clearFlipDir]。
+     *
+     *  消费（三处，全按「非负即前向」判定，故 `0` 无需特判、自动归前向）：
+     *  第 2/3 档邻页选择（[scheduleWindowPrefill]）、第 4 档本章排序、第 7 档章距排序
+     *  （[orderRemainingChapters]）。清零后"下一页"回到 页码+1。
+     *
+     *  清零的理由：开书/跳转/调参这三个动作**本身不携带方向含义**，不该继承上一个动作的猜测。 */
     @Volatile
-    private var readingDirection: Int = 1
+    private var flipDir: Int = 0
+
+    /** 清除翻页方向记录（原则 §3.2）。落位型入口在**开始**时调用——落位完成后紧接着的那次翻页
+     *  才是排序信号的来源，若在落位后写就等于用"跳转前"的猜测指导"跳转后"的首翻。 */
+    private fun clearFlipDir(reason: String) {
+        if (flipDir != 0) Logger.w(logTag, "flipDir cleared by $reason (was $flipDir)")
+        flipDir = 0
+    }
 
     /** P1f/R13: controller-owned background scope (child of the injected [scope]'s Job).
      *  ALL background launches (prefill/B1/B2/prewarm/watchers, scheduler internals) run here so
@@ -303,6 +315,7 @@ class BookDocumentController(
      * @param saved Saved progress record (common [BookReadingState]); null = start from beginning.
      */
     suspend fun open(bookId: Long, saved: orilumn.reader.data.book.BookReadingState?): Boolean {
+        clearFlipDir("open-book")
         this.bookId = bookId
         val t0 = platformNowMs()
         val parsedBook = runCatching { parser.parse(reader) }.getOrNull() ?: return false
@@ -480,7 +493,7 @@ class BookDocumentController(
         if (viewW > 0 && viewH > 0 && unit.inProgress == null) {
             val t = unit.paginationTable
             if (t != null && unit.laidOut) {
-                scheduleWindowPrefill(unit, pageIndexForChar(t.pages, targetChar), readingDirection)
+                scheduleWindowPrefill(unit, pageIndexForChar(t.pages, targetChar), flipDir)
             }
         }
         return unit
@@ -950,7 +963,7 @@ private fun stepTempPrefill(ip: InProgressPagination, lastDir: Int): Boolean = t
  *  (direction-prioritized, see [stepTempPrefill]) — but a re-dispatch for the SAME in-flight target
  *  (pointer unchanged, e.g. a locate re-sync) is deduped. Cancels any previous prefill before
  *  launching. Runs on [backgroundDispatcher] so it never blocks the foreground flip thread. */
-private fun scheduleTempPrefill(unit: ChapterUnit, ip: InProgressPagination, lastDir: Int = 1) {
+private fun scheduleTempPrefill(unit: ChapterUnit, ip: InProgressPagination, lastDir: Int = 0) {
     val cursor = (ip.sessionId shl 32) or
         ((if (ip.curIsForward) 1L else 0L) shl 20) or
         ((lastDir and 0x3).toLong() shl 16) or ip.curIndex.toLong()
@@ -1711,6 +1724,7 @@ private fun finishCanonicalBackground(
     }
 
     suspend fun relayoutTo(chapter: Int, anchorChar: Int): Pair<Int, PageSlice>? {
+        clearFlipDir("mid-jump")
         // R12: fast path — target inside an already-shaped valid window: just move the pointer,
         // no nuke. Structural misses fall through to the full path below.
         fastRelocate(chapter, anchorChar)?.let { return it }
@@ -1767,6 +1781,7 @@ private fun finishCanonicalBackground(
      *  (throttled loops), so no P7 stale check is needed — session supersede via tempBirth covers overlap.
      */
     suspend fun prepareRelayoutLight(chapter: Int, anchorChar: Int): ReflowResult? {
+        clearFlipDir("param-preview")
         val unit = unitAt(chapter) ?: return null
         val markup = unit.markup ?: return null
         activeChapter = chapter
@@ -1825,6 +1840,7 @@ private fun finishCanonicalBackground(
      *    so the old page stays visible until the new page is ready.
      */
     suspend fun prepareRelayout(chapter: Int, anchorChar: Int): ReflowResult? {
+        clearFlipDir("param-change")
         layoutEpoch++
         val myEpoch = layoutEpoch
         activeChapter = chapter
@@ -2359,12 +2375,13 @@ private fun finishCanonicalBackground(
      * @param fraction 0..1.
      */
     suspend fun pageAtFraction(fraction: Double): Pair<Int, PageSlice>? {
+        clearFlipDir("seek")
         val n = chapters.size
         if (n <= 0) return null
         val target = (fraction.coerceIn(0.0, 1.0) * n).toInt().coerceIn(0, n - 1)
         // R14: nearest-content in BOTH directions (|distance| interleave, ties follow the reading
         // direction) — the old forward-only sweep could skip past the intended chapter.
-        for (c in listOf(target) + orderRemainingChapters(n, target, readingDirection)) {
+        for (c in listOf(target) + orderRemainingChapters(n, target, flipDir)) {
             val u = ensureChapterLayout(c) ?: continue
             val m = u.markup ?: continue
             if (m.hasSignificantText()) {
@@ -2407,6 +2424,7 @@ private fun finishCanonicalBackground(
     /** Locates the first content page of (or after) [index], skipping blank/cover chapters.
  *  Used by the TOC panel to jump to an arbitrary chapter. */
     suspend fun openChapterStart(index: Int): Pair<Int, PageSlice>? {
+        clearFlipDir("chapter-start")
         if (chapters.isEmpty()) return null
         var ch = index.coerceIn(0, chapters.size - 1)
         while (ch < chapters.size) {
@@ -2432,6 +2450,7 @@ private fun finishCanonicalBackground(
      * [relayoutTo], which covers both the disk-table and the live-temp paths.
      */
     suspend fun openTocItem(index: Int, fragment: String?): Pair<Int, PageSlice>? {
+        clearFlipDir("toc-item")
         if (fragment.isNullOrBlank() || index !in chapters.indices) return openChapterStart(index)
         val m = ensureMarkup(index) ?: return openChapterStart(index)
         val charStart = contentFragmentIdCharStart(m, fragment) ?: return openChapterStart(index)
@@ -2468,6 +2487,7 @@ private fun finishCanonicalBackground(
      * (falling back to the head when unresolvable). Mirrors [openTocItem]'s fallback chain.
      */
     suspend fun openLinkTarget(target: LinkTarget): Pair<Int, PageSlice>? {
+        clearFlipDir("link-target")
         if (target.chapterIndex !in chapters.indices) return null
         val fragment = target.fragment
         if (fragment.isNullOrBlank()) return openChapterStart(target.chapterIndex)
@@ -2514,7 +2534,7 @@ private fun finishCanonicalBackground(
     /** One page forward within a chapter. A line-anchored slice (not a canonical page) snaps to the
  *  canonical page after the one containing its char, avoiding content skips. */
     fun nextPageInChapter(unit: ChapterUnit, slice: PageSlice): PageSlice? {
-        readingDirection = 1
+        flipDir = 1
         val slices = unit.pageSlices
         val idx = slices.indexOf(slice)
         if (idx >= 0) return slices.getOrNull(idx + 1)
@@ -2533,7 +2553,7 @@ private fun finishCanonicalBackground(
         // P12: every real page turn reports its movement direction to the B2 scan-order tracker —
         // in-chapter (temp/canonical) and out-of-bounds cross-chapter alike, so the whole-book scan
         // follows the reading direction even when the active chapter is a live temp session.
-        readingDirection = direction
+        flipDir = direction
         // P1d: single flip hook — preempts all background shaping below flip priority through
         // the pool (was: scattered R18 cancels). Published products survive; in-flight work
         // abandons at checkpoints and resubmits naturally via skip-fresh positioning.
@@ -2666,7 +2686,7 @@ private fun finishCanonicalBackground(
     /** One page backward within a chapter. A line-anchored slice (not a canonical page) snaps to the
  *  canonical page CONTAINING its char (showing the content above it, no skip); normal pages go -1. */
     fun prevPageInChapter(unit: ChapterUnit, slice: PageSlice): PageSlice? {
-        readingDirection = -1
+        flipDir = -1
         val slices = unit.pageSlices
         val idx = slices.indexOf(slice)
         if (idx > 0) return slices.getOrNull(idx - 1)
@@ -2772,9 +2792,9 @@ private fun finishCanonicalBackground(
      *  by the real flip entries.
      *  C2-P2b-4: public (was `internal`; `:app` probe tests live across the module seam). */
     fun remainingScanOrder(current: Int): List<Int> =
-        orderRemainingChapters(chapters.size, current, readingDirection)
+        orderRemainingChapters(chapters.size, current, flipDir)
 
-    fun currentReadingDirection(): Int = readingDirection
+    fun currentFlipDir(): Int = flipDir
 
     /** P4 probe accessor: whether [chapter]'s markup + light structure were prepped under the current
      *  param cycle on the background P track (preflightReadiness holds a key). */
@@ -2797,6 +2817,9 @@ data class PageAnchor(val chapter: Int, val char: Int)
  *  @param direction the reader's movement: >= 0 = forward side first on ties, < 0 = backward first
  */
 /** C2-P2b-4: public probe hook (was `internal`; `:app` probe tests live across the module seam). */
+/** Chapter scan order for the whole-book B2 pass: strict |chapter distance| interleave from
+ *  [current], the direction side first at each distance ([direction] >= 0 = tailward, so the
+ *  no-record state 0 orders exactly as +1 does — see [flipDir]). */
 fun orderRemainingChapters(total: Int, current: Int, direction: Int): List<Int> {
     val out = ArrayList<Int>(maxOf(0, total - 1))
     var d = 1

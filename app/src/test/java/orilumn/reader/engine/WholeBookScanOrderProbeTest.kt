@@ -133,8 +133,14 @@ class WholeBookScanOrderProbeTest {
         // Lay out all chapters so ch1 has page slices to flip from.
         for (ch in 0..2) assertNotNull(controller.ensureChapterLayout(ch, 0))
 
-        // Default is forward (the dominant reading direction).
-        assertEquals("default reading direction is forward", 1, controller.currentReadingDirection())
+        // D1 / principle 3.2: opening a book leaves NO flip record (0), not "forward" (1). Every
+        // consumer tests `>= 0`, so 0 must order identically to +1.
+        assertEquals("book open must leave no flip record", 0, controller.currentFlipDir())
+        assertEquals(
+            "the no-record state must order exactly as forward",
+            listOf(2, 0),
+            controller.remainingScanOrder(1),
+        )
 
         val ch1 = controller.unitAt(1) ?: error("no ch1")
         val page = ch1.pageSlices.firstOrNull() ?: error("ch1 has no pages")
@@ -142,21 +148,58 @@ class WholeBookScanOrderProbeTest {
 
         // A backward page turn (the reader-facing flip entry) tracks -1 and biases B2 backward-first.
         val back = controller.findAdjacentPage(1, page, -1)
-        assertEquals("backward flip must set the reading direction", -1, controller.currentReadingDirection())
+        assertEquals("backward flip must set the flip direction", -1, controller.currentFlipDir())
         assertEquals("B2 order follows backward: behind, then ahead", listOf(0, 2), controller.remainingScanOrder(1))
         assertNotNull("backward flip must land somewhere", back)
 
         // A forward page turn tracks +1 and biases B2 forward-first.
         val fwd = controller.findAdjacentPage(1, page, 1)
-        assertEquals("forward flip must set the reading direction", 1, controller.currentReadingDirection())
+        assertEquals("forward flip must set the flip direction", 1, controller.currentFlipDir())
         assertEquals("B2 order follows forward: ahead, then behind", listOf(2, 0), controller.remainingScanOrder(1))
         assertNotNull("forward flip must land somewhere", fwd)
 
         // The direct curl-adjacent entries set the direction too.
         controller.nextPageInChapter(ch1, page)
-        assertEquals(1, controller.currentReadingDirection())
+        assertEquals(1, controller.currentFlipDir())
         controller.prevPageInChapter(ch1, page)
-        assertEquals(-1, controller.currentReadingDirection())
+        assertEquals(-1, controller.currentFlipDir())
+    }
+
+    /** D1 / principle 3.2: every landing that is NOT a page turn must clear the flip record, so the
+     *  first flip after it reads "no record" (next page = page+1) instead of a stale guess. */
+    @Test
+    fun `jump and param-change landings clear the flip record`() = runBlocking {
+        val bookId = 10L
+        assertTrue(controller.open(bookId, saved = null))
+        controller.setViewport(viewW, viewH)
+        for (ch in 0..2) assertNotNull(controller.ensureChapterLayout(ch, 0))
+        val ch1 = controller.unitAt(1) ?: error("no ch1")
+        val page = ch1.pageSlices.firstOrNull() ?: error("ch1 has no pages")
+
+        suspend fun seedBackward() {
+            controller.findAdjacentPage(1, page, -1)
+            assertEquals("precondition: a backward record exists", -1, controller.currentFlipDir())
+        }
+
+        seedBackward()
+        assertNotNull(controller.pageAtFraction(0.5))
+        assertEquals("progress seek must clear the record", 0, controller.currentFlipDir())
+
+        seedBackward()
+        assertNotNull(controller.openChapterStart(2))
+        assertEquals("chapter-start landing must clear the record", 0, controller.currentFlipDir())
+
+        seedBackward()
+        assertNotNull(controller.relayoutTo(1, page.charStart))
+        assertEquals("mid-jump must clear the record", 0, controller.currentFlipDir())
+
+        seedBackward()
+        assertNotNull(controller.prepareRelayout(1, anchorChar = 0))
+        assertEquals("param change must clear the record", 0, controller.currentFlipDir())
+
+        seedBackward()
+        assertNotNull(controller.prepareRelayoutLight(1, anchorChar = 0))
+        assertEquals("param preview must clear the record", 0, controller.currentFlipDir())
     }
 
     // ───────────────────────────────────────────────────────────────

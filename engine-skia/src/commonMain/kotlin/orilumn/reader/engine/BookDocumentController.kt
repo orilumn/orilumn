@@ -761,22 +761,6 @@ internal val HEAD_START_BLOCK_LIMIT = 100
  *  Window depth symmetric ⇒ forward/backward flip latency risk symmetric. */
 private val TEMP_WINDOW_DEPTH = 1
 
-/** 第 4 档在临时表侧的执行体：块水位前推预算（步数≈页数）。原则 §3.5「第三及之后是空闲 drain」。
- *
- *  D4(a) 显式化：d≥2 的准备在临时表侧没有"页位"（窗口只留 ±1 页对象，见 [enforceTempWindow]），
- *  其实体是 [stepTempPrefill] 循环把块水位向前推——页对象被淘汰，但暖块留在 shapes 里，
- *  翻页时从暖块重建很快。它不是可抢占的独立池任务（D3b 未做），而是水位深度参数；
- *  与 [PAGE_DRAIN_WINDOW] 同一把尺子（读者会连着翻的页数），两处同取 16。
- *  **待设备标定**（整改方案 D7）：直接决定"连翻时后台铺多远"与"占槽多久"的取舍。 */
-private val TEMP_PREFILL_BUDGET = 16
-
-/** 第 4 档「本章其余页」的 drain 深度（页数）。原则 §3.5「第三及之后是空闲 drain」的窗口大小。
- *
- *  命名而非魔法数：先前它藏在临时表预排的 `TEMP_WINDOW_DEPTH * 16` 里，不可观测也不可调。
- *  与临时表侧的块水位预算 [TEMP_PREFILL_BUDGET] 同一把尺子（读者会连着翻的页数），两处同取 16。
- *  **待设备标定**（整改方案 D4/D7）：这个值直接决定"连翻时后台铺多远"与"占槽多久"的取舍。 */
-private val PAGE_DRAIN_WINDOW = 16
-
 
 // ─────────────────────────────────────────────────────────────────
 // Anchor-based incremental layout (large-chapter, disk-miss)
@@ -1123,9 +1107,11 @@ private fun scheduleTempPrefill(unit: ChapterUnit, ip: InProgressPagination, las
     tempPrefillJob?.cancel()
     tempPrefillJob = bgScope.launch(backgroundDispatcher) {
         try {
+            // 无步数截断：循环在窗口补满（stepTempPrefill 回 false）时自然结束；
+            // 每步只塑一页且前后邻均有界（章尾/章首），无死循环空间。
             var guard = 0
-            while (stepTempPrefill(unit, ip, lastDir) && guard++ < TEMP_PREFILL_BUDGET) kotlinx.coroutines.delay(4)
-            // D4(a)：报块水位深度，否则第 4 档在临时表侧的推进幅度设备上不可见。
+            while (stepTempPrefill(unit, ip, lastDir)) { guard++; kotlinx.coroutines.delay(4) }
+            // 报块水位深度，否则第 4 档在临时表侧的推进幅度设备上不可见。
             val (fwd, total) = tempStateLock.withLock { ip.shapedForwardTo to ip.prepare.totalBlocks }
             Logger.d(logTag, "temp prefill done ch=${unit.chapterIndex} steps=$guard shapedFwdTo=$fwd/$total")
         } catch (_: kotlinx.coroutines.CancellationException) {
@@ -1349,10 +1335,8 @@ sealed class NeighborItem {
  *  章边界（§3.3）：**只有 d=1 越界才升级**成 [NeighborItem.EdgeChapter]（加急整章排邻章）；
  *  d≥2 越界说明本章至少还剩两页，隔两页仍不翻就不值得为它动整章——该项直接丢弃。
  *
- *  第 4 档的深度由 [drainWindow] 限定（默认 [PAGE_DRAIN_WINDOW]）。这不是偷懒，是 §3.5
- *  「第三及之后是**空闲 drain**」的字面要求：drain 是**按需推进**的，不是每次落位把整章灌进队列。
- *  指针前移一格，窗口就跟着前移一格——读者持续读，drain 就持续推进；读者停下，队列里也就只留
- *  有界的那几格。
+ *  第 4 档排到章尾，不设深度截断：总则要求按偏离度串行排全章（有界 drain 窗口已废）。
+ *  指针前移一格，整段序列按新指针重派（同键替换），读者持续读，drain 就持续推进。
  *
  *  纯函数、无副作用：生产派发与 probe 验的是同一份判据。 */
 fun neighborSequence(
@@ -1361,7 +1345,6 @@ fun neighborSequence(
     dir: Int,
     chapterIdx: Int,
     lastChapter: Int,
-    drainWindow: Int = PAGE_DRAIN_WINDOW,
 ): List<NeighborItem> {
     if (totalPages <= 0) return emptyList()
     val out = ArrayList<NeighborItem>()
@@ -1375,12 +1358,6 @@ fun neighborSequence(
                 else -> TaskScheduler.PRIO_PAGE_PREV
             }
             if (page in 0 until totalPages) {
-                // 第4档是**有界 drain**，不是整章全派（原则 §3.5「第三及之后是空闲 drain」）：
-                // 指针每动一次就把整章剩余页重派一遍，会用比整章任务更急的页任务灌满队列与两个槽
-                // （实测：WholeBookCancellationProbeTest 由 1.2s 劣化到 60s 超时——第7档的章扫描
-                // 永远排不上），且同键替换让每次落位都重启在途的页任务，churn 大过进展。
-                // 有界窗口随落位前移：每次落位把 drain 窗口再推一格，读者持续读下去就持续推进。
-                if (d > drainWindow) continue
                 out.add(NeighborItem.Page(page, tier))
             } else if (d == 1) {
                 val beyond = if (page >= totalPages) chapterIdx + 1 else chapterIdx - 1
@@ -1435,7 +1412,7 @@ private fun tempHeadDistancePages(ip: InProgressPagination): Int? = tempStateLoc
 }
 
 /** Probe 缝（D7-4）：[chapter] 的 temp 块水位，无活会话时为 null。
- *  第 4 档在临时表侧唯一的执行体就是这个水位的推进（`TEMP_PREFILL_BUDGET`），读它即观测该档。 */
+ *  第 4 档在临时表侧唯一的执行体就是这个水位的推进，读它即观测该档。 */
 fun tempWatermarkForProbe(chapter: Int): Int? =
     tempStateLock.withLock { unitAt(chapter)?.inProgress?.shapedForwardTo }
 

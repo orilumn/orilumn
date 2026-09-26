@@ -175,6 +175,16 @@ class NeighborSequenceProbeTest {
     }
 
     @Test
+    fun `the sequence drains to the chapter end with no depth cap`() {
+        // 总则：按偏离度串行排全章。有界 drain 窗口（16）已废——40 页章必须 39 页全出。
+        val total = 40
+        val got = pages(target = 5, total = total, dir = 1)
+        assertEquals("all pages except the target, no dupes", (0 until total).filter { it != 5 }, got.sorted())
+        assertEquals("tail reaches the far end", 39, got.max())
+        assertEquals("head reaches the chapter start", 0, got.min())
+    }
+
+    @Test
     fun `an empty chapter yields an empty sequence`() {
         assertTrue(seq(target = 0, total = 0, dir = 1).isEmpty())
     }

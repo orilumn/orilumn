@@ -72,7 +72,10 @@ class FontLibrary(
             return null
         }
         bytes
-    }.getOrNull()
+        // DB 层异常（应 fail-fast）此前被外层吞成"字体缺失"：记 e 区分，返回仍为 null
+        // （去外层 runCatching 是否改抛，见决策单——需先确认 DB 层不抛契约）。
+    }.onFailure { Logger.e(logTag, "fontBytes DB FAIL id=$id ${it.message}") }
+        .getOrNull()
 
     /**
      * 导入核心：读失败回全量表；空/不可解析/不可用语种字节驳回。

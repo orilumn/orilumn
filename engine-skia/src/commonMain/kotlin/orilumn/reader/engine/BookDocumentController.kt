@@ -2572,6 +2572,8 @@ private fun finishCanonicalBackground(
         if (end == start) end = start + 1
         val charStart = layout.getLineStart(start)
         val charEnd = if (end < n) layout.getLineStart(end) else layout.length
+        // 布局器产出倒挂（charEnd<charStart）此前钳成空页：调用方当正常页翻，记 e。
+        if (charEnd < charStart) Logger.e(logTag, "lineAnchoredPage inverted anchor=$anchorChar charStart=$charStart charEnd=$charEnd lines=$n")
         return PageSlice(charStart, charEnd.coerceAtLeast(charStart), start, end, PageSlice.Kind.TEXT, -1, -1)
     }
 
@@ -2588,6 +2590,7 @@ private fun finishCanonicalBackground(
         if (end == startLine) end = startLine + 1
         val cs = layout.getLineStart(startLine)
         val ce = if (end < n) layout.getLineStart(end) else layout.length
+        if (ce < cs) Logger.e(logTag, "forwardPageFrom inverted startLine=$startLine cs=$cs ce=$ce lines=$n")
         return PageSlice(cs, ce.coerceAtLeast(cs), startLine, end, PageSlice.Kind.TEXT, -1, -1)
     }
 

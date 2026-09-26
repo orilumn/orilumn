@@ -1,6 +1,7 @@
 package orilumn.reader.engine
 
 import orilumn.reader.engine.paging.PageSlice
+import orilumn.reader.io.Logger
 
 /**
  * Persisted pagination table for a single chapter under a single layout parameter combination.
@@ -62,6 +63,10 @@ data class ChapterPaginationTable(
             totalBlocks: Int,
             totalChars: Int,
         ): ChapterPaginationTable {
+            // 写盘前校验只记 e 不抛（抛/改返回见决策单）：坏表落盘比崩更难查，先让它出声。
+            if (slices.isEmpty()) Logger.e("Orilumn.DISK", "fromSlices empty slices ch=$chapterIndex")
+            if (totalBlocks < 0 || totalChars < 0) Logger.e("Orilumn.DISK", "fromSlices negative ch=$chapterIndex blocks=$totalBlocks chars=$totalChars")
+            if (slices.zipWithNext().any { (a, b) -> b.charStart < a.charStart }) Logger.e("Orilumn.DISK", "fromSlices non-monotonic ch=$chapterIndex")
             val pages = slices.map { s ->
                 PageRecord(
                     charStart = s.charStart,

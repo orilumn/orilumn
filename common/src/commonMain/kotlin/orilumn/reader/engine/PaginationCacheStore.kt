@@ -24,7 +24,11 @@ class PaginationCacheStore(
 
     /** Resolves the directory path for a book's pagination tables (creates if missing). */
     fun dirFor(bookId: String): Path =
-        rootDir.resolve("pagination/$bookId").also { runCatching { fs.createDirectories(it) } }
+        // root 不可写（内部配置错）此前藏到首次 write 才炸：记 w 让现场前移（返回保留）。
+        rootDir.resolve("pagination/$bookId").also {
+            runCatching { fs.createDirectories(it) }
+                .onFailure { Logger.w("Orilumn.DISK", "pagination dirFor FAIL $it ${it.message}") }
+        }
 
     /** Full cache file path. */
     fun file(bookId: String, chapterIndex: Int, paramHash: Long): Path =
@@ -61,7 +65,9 @@ class PaginationCacheStore(
      *  least-recently-used (lowest last-modified) tables beyond the cap — idempotent, and safe to run
      *  on any thread since it only touches filename/lastModified metadata and never table contents. */
     private fun trim(dir: Path) {
+        // list 失败此前静默跳过修剪→孤儿 .bin 无限堆积（cap 失效）：记 w。
         val files = runCatching { fs.list(dir) }
+            .onFailure { Logger.w("Orilumn.DISK", "pagination trim list FAIL $dir ${it.message}") }
             .getOrNull()
             ?.filter { it.name.endsWith(".bin") && fs.metadataOrNull(it)?.isRegularFile == true }
             ?.sortedByDescending { fs.metadataOrNull(it)?.lastModifiedAtMillis ?: 0L }

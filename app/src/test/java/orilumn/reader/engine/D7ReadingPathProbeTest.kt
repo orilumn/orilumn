@@ -93,12 +93,26 @@ class D7ReadingPathProbeTest {
     }
 
     @Test
+    fun `first flip back from birth-head crosses immediately instead of re-landing`() = runBlocking {
+        assertTrue(controller.open(25L, saved = null))
+        controller.setViewport(viewW, viewH)
+
+        // 大章无表 → 锚点流出生在章首（anchorBlock==0），首页已是灌满的完整页：
+        // "到达章首"在出生时已发生，首翻回翻必须直接越章。
+        // 回归：此前 headLanded 出生为 false，首翻 re-root 落回同一页，形同翻不动。
+        val (_, head) = controller.openChapterStart(1) ?: error("no ch1 head")
+        val (ch, tail) = controller.findAdjacentPage(1, head, -1) ?: error("first back flip stuck")
+        assertEquals("born-at-head session must cross on the first boundary flip", 0, ch)
+        assertNotNull(tail)
+    }
+
+    @Test
     fun `flip back from chapter head lands previous chapter whole table`() = runBlocking {
         assertTrue(controller.open(22L, saved = null))
         controller.setViewport(viewW, viewH)
 
-        // ch1 首页（temp 路径）。注意 torn-pair：锚点页 Fwd(0) 的前驱是同章后向列，
-        // 所以第 1 次回翻仍在章内——连翻直到越出本章（有界，避免死循环）。
+        // ch1 首页（temp 路径，出生即在章首）。出生章首首翻即跨章（headLanded 出生置位）；
+        // 循环仅作保险（若锚点因 head-lift 细节未落在块 0，多翻一两次同样越出）。有界，避免死循环。
         var ch = 1
         var slice = (controller.openChapterStart(1) ?: error("no ch1 head")).second
         repeat(8) {

@@ -844,6 +844,11 @@ private fun startAnchorStream(
                 ip.shapedForwardTo = anchor.nextBlock
                 ip.forwardFromLine = anchor.nextLine
                 ip.anchorLineCharStart = anchor.page.slice.charStart
+                // 出生即在章首（anchorBlock==0）：锚点页就是 shapeAnchorPageForward 灌满的完整首页，
+                // "到达章首"在出生那一刻已经发生——首翻回翻直达 Boundary 时即跨章，不再 waste 一下
+                // re-root 到同一页（此前缺这行，在首页回翻形同翻不动）。 mid-章出生的会话不受影响，
+                // 真正的回翻到达仍走 resolveHeadArrival（现象2）。
+                if (anchorBlock == 0) ip.headLanded = true
                 unit.bindInProgress(ip)
                 unit.markLaidOut()
                 // Forward whole-block pages are NOT shaped here synchronously — shaping them on the caller
@@ -1716,10 +1721,12 @@ private fun tempNav(unit: ChapterUnit, ip: InProgressPagination, slice: PageSlic
             TempNavBackwardStep.Boundary -> {
                 // Step 3 (现象3): the TRUE chapter-head boundary. Block-0 arrivals are already resolved
                 // on the arrival flip (Move/Shape above); this branch covers the remaining boundary
-                // sources — the anchor itself sits AT the head (no backward page can precede it), or the
-                // reader is ON the (already re-rooted) full head page. Either way the reader stays
-                // in-chapter ON the chapter-head page; crossing to the previous chapter happens only on
-                // the NEXT backward flip.
+                // sources — the anchor itself sits AT the head (no backward page can precede it and the
+                // arrival already happened at birth: headLanded is set in startAnchorStream), or the
+                // reader is ON the (already re-rooted) full head page. A born-at-head session therefore
+                // crosses on the FIRST boundary flip (headLanded=true from birth); a genuine arrival
+                // re-roots first (headLanded set by resolveHeadArrival) and crosses on the next one —
+                // never re-landing the identical page as a wasted flip.
                 //   - canonical ready: finalize the temp session in place (bind the disk/full table) and
                 //     land on the canonical page containing the current char — at the head that is the
                 //     FULL canonical first page (char0..contentH), never a sparse head.

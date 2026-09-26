@@ -1349,16 +1349,39 @@ fun b1PriorityFor(headDistancePages: Int?): Int =
  */
 private fun tempHeadDistancePages(ip: InProgressPagination): Int? = tempStateLock.withLock {
     val cur = currentTempPage(ip) ?: return@withLock null
-    if (cur.blockStart == 0) return@withLock 0
-    val prev = previousTempPage(ip) ?: return@withLock null
-    if (prev.blockStart == 0) 1 else 2
+    headDistanceFrom(cur.blockStart, previousTempPage(ip)?.blockStart)
+}
+
+/** 原则 §3.4 的判据表（纯函数）：由「当前页起始块」与「前驱页起始块」定出目标页距章首的页数 d。
+ *
+ *  - `curBlockStart == 0` → `0`：当前页就是章首页，已在交接点，同步承接，不升档。
+ *  - `prevBlockStart == null` → `null`：前驱页尚未塑出/不在窗口，**判不出**，不升档
+ *    （宁可落到基档，也不猜——猜错会把整章活提到第 2 档去挤占翻页）。
+ *  - `prevBlockStart == 0` → `1`：前驱页是章首页，当前页正是第 2 页 → 交接点临近，加急档。
+ *  - 其余 → `2`：已判定为更深，与 `null` 同档。
+ *
+ *  抽成纯函数是为了能测：判据表本身极易写错（平板实测已错过一次，见 [previousTempPage]）。 */
+fun headDistanceFrom(curBlockStart: Int, prevBlockStart: Int?): Int? = when {
+    curBlockStart == 0 -> 0
+    prevBlockStart == null -> null
+    prevBlockStart == 0 -> 1
+    else -> 2
 }
 
 /** 指针页在阅读顺序上的前驱页（窗口内）。null = 指针在头边或前驱已被淘汰出窗口。 */
 private fun previousTempPage(ip: InProgressPagination): TempPage? {
     val prevIdx = ip.curIndex - 1
-    return if (ip.curIsForward) ip.forwardPages.getOrNull(prevIdx)
-    else ip.backwardPages.getOrNull(prevIdx)
+    return if (ip.curIsForward) {
+        if (prevIdx >= 0) ip.forwardPages.getOrNull(prevIdx)
+        // 跨列表边界：阅读顺序是 `Bwd(末) … Bwd(0), [Pair], Fwd(0), Fwd(1) …`（见 [enforceTempWindow]），
+        // 所以 Fwd(0) 的前驱在**后向列表的末尾**，不在 forwardPages[-1]。
+        // 这个边界正是章首页场景：目标页 = Fwd(0)（锚点页），其前驱 = 章首页（Bwd 末，blockStart 0）。
+        // 漏掉它会让 [tempHeadDistancePages] 在最该升档的时候返回 null —— 实测平板上
+        // 「跳到章第 2 页」BOOST 一次都不触发，就是这里。
+        else ip.backwardPages.lastOrNull()
+    } else {
+        ip.backwardPages.getOrNull(prevIdx)
+    }
 }
 
 
@@ -2855,6 +2878,12 @@ private fun finishCanonicalBackground(
                     scheduleTempPrefill(unit, ip, direction)
                     // 原则 §3.3：d=1 邻页越出本章则加急整章排邻章（临时表侧）。
                     scheduleTempEdgePrefill(unit, ip)
+                    // 原则 §3.4：**指针每移动一次**都要重算「目标页距章首 d」——这才是 BOOST 的
+                    // 主触发点。锚点页出生时 d=0（在章首页，不升档），读者前翻一次落到第 2 页，
+                    // 此时 d 才变成 1。此前钩子只挂在 [stepTempPrefill] 的 fillBackward 上，
+                    // 而前翻时章首页**已经在窗口里**（backwardMissing 为 false），fillBackward 压根
+                    // 不执行，钩子永远不跑 —— 实测平板 BOOST 一次都不触发，就是这里。
+                    maybeBoostB1ForHeadProximity(unit, ip)
                 }
                 return it
             }

@@ -176,9 +176,22 @@ class Cascade(
             return "${s}px"
         }
 
+        private fun sizePctAwareAttr(raw: String): String? {
+            // `width`/`height` 表示属性支持百分比（浏览器照收，如本书 `width="50%"`）；
+            // `border` 等数值属性仍走纯 px 口径（百分比无意义）。
+            val t = raw.trim()
+            if (t.endsWith("%")) {
+                val n = t.dropLast(1).trim().takeWhile { it.isDigit() || it == '.' || it == '-' || it == '+' }.toFloatOrNull()
+                    ?: return null
+                val s = if (n == n.toInt().toFloat()) n.toInt().toString() else n.toString()
+                return "${s}%"
+            }
+            return numericPxAttr(raw)
+        }
+
         private val PRESENTATION_ATTRS = listOf(
-            PresentationAttr("width", "width", HTML_SIZE_TAGS, ::numericPxAttr),
-            PresentationAttr("height", "height", HTML_SIZE_TAGS, ::numericPxAttr),
+            PresentationAttr("width", "width", HTML_SIZE_TAGS, ::sizePctAwareAttr),
+            PresentationAttr("height", "height", HTML_SIZE_TAGS, ::sizePctAwareAttr),
             PresentationAttr("border", "border", HTML_SIZE_TAGS, ::numericPxAttr),
             PresentationAttr("cellpadding", "padding", setOf("table"), ::numericPxAttr),
             PresentationAttr("cellspacing", "border-spacing", setOf("table"), ::numericPxAttr),

@@ -177,7 +177,7 @@ class BoxChapterLayouter(
         val hidden = orilumn.reader.engine.laying.HiddenCheck { styleMap[it]?.displayNone == true }
         // P3-c: 生成内容 phase-1（ gating 命中才整树求值；伪样式按需缓存，重轻同输入同输出）。
         val genOf = genOfFor(markup, authorSheets, { styleMap[it] }, engine, hidden)
-        val structure = boxLayouter.layoutBoxes(markup, contentW, styleMap, classify, genOf = genOf)
+        val structure = boxLayouter.layoutBoxes(markup, contentW, styleMap, classify, imageLoader, chapterHref, genOf = genOf)
         val leaves = collectLeaves(structure.boxes)
         return buildPrepareResult(markup, styleMap, structure, leaves, classify, hidden, genOf)
     }

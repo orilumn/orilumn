@@ -114,11 +114,22 @@ abstract class WindowedBookLayout : PagedLayout, BreakAwareBookLayout {
             if (gearIndex < firstLine || gearIndex >= pageEnd) continue
             val src = el.attrs["src"] ?: continue
             if (chapterHref.isBlank()) continue
-            val xOff = (leaf.contentLeft + (leaf.style.border.left + leaf.style.padding.left)).roundToInt()
+            val baseX = (leaf.contentLeft + (leaf.style.border.left + leaf.style.padding.left)).roundToInt()
             val leafBreakW = NormalFlowLayout.innerBreakWidth(leaf.style, leaf.contentWidth)
             val usedW = NormalFlowLayout.replacedUsedSize(
                 el, leaf.style, leafBreakW, imageLoader, chapterHref,
             ).first.coerceAtLeast(1)
+            // 块级替换元 `margin-left/right: auto` 水平居中（CSS 2.1 §10.3.3：剩余空间进 auto 边）；
+            // 悬浮图不参与（左右对齐另有归属）。
+            val spare = leafBreakW - usedW
+            val centerOff = if (spare > 0 && leaf.style.floatSide == orilumn.reader.engine.css.FloatSide.NONE) {
+                when {
+                    leaf.style.marginLeftAuto && leaf.style.marginRightAuto -> spare / 2
+                    leaf.style.marginLeftAuto -> spare
+                    else -> 0
+                }
+            } else 0
+            val xOff = baseX + centerOff
             // `originTop()` 恒 0（见 `ParagraphShape.originTop`），直接取行顶。
             val yTop = getLineTop(gearIndex)
             val h = shape.shapeLineBottom(0).coerceAtLeast(1)

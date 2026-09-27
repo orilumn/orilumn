@@ -77,7 +77,15 @@ jobs:
           files: app/build/outputs/apk/release/orilumn-*.apk
 
   build-macos:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            arch: arm64
+          - os: macos-15-intel
+            arch: x64
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -97,10 +105,18 @@ jobs:
       - name: Build DMG (unsigned)
         run: ./gradlew :desktopApp:packageDmg --no-daemon
 
+      # DMG 文件名里的 jpackage 版本（macOS 强制 MAJOR>0，如 2.0）与发版版本（0.2.0）不一致：
+      # 按 app versionName + 架构重命名后再上传（如 Orilumn-0.2.0-macos-arm64.dmg）。
+      - name: Rename DMG with version and arch
+        run: |
+          VER="$(sed -n 's/.*versionName *= *"\([^"]*\)".*/\1/p' app/build.gradle.kts | head -1)"
+          mv desktopApp/build/compose/binaries/main/dmg/*.dmg "desktopApp/build/compose/binaries/main/dmg/Orilumn-${VER}-macos-${{ matrix.arch }}.dmg"
+          ls desktopApp/build/compose/binaries/main/dmg/
+
       - name: Upload DMG as workflow artifact (all runs)
         uses: actions/upload-artifact@v4
         with:
-          name: dmg-macos
+          name: dmg-macos-${{ matrix.arch }}
           path: desktopApp/build/compose/binaries/main/dmg/*.dmg
           if-no-files-found: error
 

@@ -1,17 +1,8 @@
 # 未尽事宜 / Open Issues
 
-- **项目更名 orilumn → orilumn（全局重命名，待立项）**：GitHub 已有 `orilumn` 用户、
-  `orilumn.com` 域名已被注册，拟改项目名为 **orilumn**。同步波及面（改名清单）：
-  - 包名：`orilumn.reader` → `orilumn.readern`——`app`（Android namespace/applicationId `orilumn.reader`）、
-    `common`（namespace `orilumn.reader.common`；SQLDelight 包 `orilumn.reader.db` 见各 `.sq` 文件头
-    `package` 与 `common/build.gradle.kts` 的 `packageName`）、`desktopApp`
-    （mainClass `orilumn.reader.desktop.MainKt`、macOS bundleID `orilumn.reader`），以及
-    shared-ui/engine-skia 各模块 Kotlin 包路径与测试包名；
-  - 数据根目录：桌面 `~/.orilumn/`（`DesktopPaths`：`orilumn.db`、books/covers/progress/
-    settings/fonts）与 Android `filesDir`——改名后是否迁老数据或保留旧目录兼容读取，首版可
-    不搬数据只声明新名用途，并出「老库数据兼容」验证；
-  - 新建 GitHub 同名组织与仓库并入（历史保留方式待定：新建仓库移植 or 转移）；
-  - 立项后先出「改名验收清单」：全局 grep `orilumn` 归零 + 双端跑起 + 老数据兼容验证，再动手。
+- **桌面真背光后续（2026-09-27，macOS 先行落地）**：macOS DDC/CI 已通（`desktopApp …/brightness/`：`DisplayBrightness` 接口 + `DdcPackets` + `MacDisplayBrightness` JNA，真机读写闭环；>0 下发硬件150ms防抖、≤0 纯遮罩、跟随系统不碰硬件；滑块按探测切量程 -50~100 / -50~0）。**Win/Linux 空实现位**：Windows 接 Dxva2（`GetPhysicalMonitors`→`SetMonitorBrightness`，JNA）、Linux 接 ddcutil（/dev/i2c，需 i2c 组权限），同接口各自实现；显示器插拔重探（当前启动探一次）后续补。
+
+- **项目更名 orilumn → orilumn（✅ 已办，2026-09-27）**：包名 `orilumn.reader` 全量、数据根 `~/.orilumn/`，条目退役（原改名清单删除）。
 
 - **目录面板标题高亮定位**：目标是"仅高亮当前页内的标题、不在页内的不亮"（高亮下边框已去掉）。当前页内标题 id 集合逻辑已正确（有单测），但具体书籍上章内子标题仍常高亮不到——疑似 TOC 条目的 fragment 与正文标题元素 id 不一致，无法建立"目录项 ↔ 页内 char"的命中。**推迟到排版稳定后再处理**。
 
@@ -35,10 +26,7 @@
   （step 2/4）尚未实现；`table-layout: fixed` 现为各列均分，而规范是按首行单元格定列宽
   （§17.5.2.1）。
 
-- **表格单元格边框仍是合成 1px 单框**：`TableCellLines.emitCell` 无条件画 1px 实线框，**颜色已随
-  CSS `border-color`**（未声明回退 `currentColor`，见 `borderArgbOf`），但仍未按 CSS
-  `border-width`/`border-style` 门控，也表达不了四侧异宽/异色/虚线。浏览器在 `border-width:0`
-  或 `border-style:none` 时完全不画——此差异待后续处理。
+- **表格单元格边框（✅ 已办，2026-09-27）**：`TableCellLines.emitCellBorders` 已按边画——有宽且 style 非 NONE 才画，四侧异宽/异色支持（缺 style 按 SOLID，与 `BoxDrawer.emitEdge` 同口径）。
 
 - OpenGL 翻页动画
 
@@ -155,20 +143,20 @@
      顶层展开手风琴、嵌套切换只管自己；"章"= depth 0 顶层节点。）
   3. ✅ 目录折叠三角形太小。（点击区 22dp→32dp、字号 11sp→14sp，字形 Box 居中；双端同改。）
   4. ✅ 平板侧「跟随原书」已随设置面板收敛闭环（单共享实现，首行恒为跟随原书；待真机复验）。
-  5. 字体列表中的「导入字体」「系统字体」分区字样删除，改为在每个字体左侧添加系统/导入标记。
-  6. 所有字体按最终显示的名字排序，而不是按英文名排序。
-  7. 字体应添加字重滑块，否则多字重缺乏应用场景；但控制范围待定（所有字体，还是仅正文/标题）。
+  5. ✅ 分区字样已删，改为行首来源竖标（2026-09-27）：导入/系统行按展示名归并单列，行首竖标“系统/导入/隐藏”；跨来源同名各占一行。
+  6. ✅ 按最终显示的名字排序（2026-09-27）：展示名归并排序（两组各自有序归并）。
+  7. ✅ 字重选择已落地（2026-09-27）：`WeightPicker` 按族选档（多字重行首入口进档位页）；连续滑块未做，如需再立项。
   8. 阅读主题中的缃色改掉：与象牙白接近，且不是真正的缃色 #F0C239（该色不适合阅读）。
-  9. 桌面侧亮度滑块只能调暗，不能调亮。
+  9. ✅ macOS 真背光已通（2026-09-27）：DDC/CI 下发，滑块 -50~100（>0 硬件，≤0 遮罩）；无 DDC 显示器钳 -50~0。
   10. 预设管理面板未完整实现。
-   14. 桌面系统亮度可调性验证：桌面亮度现为纯遮罩（只能压暗，见 9；跟随=不动作）。调研 macOS 是否可调真背光（IOKit/CGDisplay 原生桥 + expect/actual），可行则立项，否则维持遮罩口径并把调亮段置灰。
+   14. ✅ 已验证可行并落地（2026-09-27，见 9）：macOS 经 IOKit I2C 发 DDC/CI；Win（Dxva2）/Linux（ddcutil）空实现位见文首“桌面真背光后续”。
   11. 封面等比例缩放改为封面拉伸全屏。
   12. 两页内容不连续、翻页乱跳等问题。
   - 章内 TEMP 连翻跳页（2026-09-27 修，待合）：前向塑形从水位改以后继原点为准（`tempResumeAfter`），
     追加前相接校验（`tempPagesTile` ±3），失配按需修复收敛（`repairTempForwardGap`），窗口裁剪后水位
     倒回新尾。真机验证（`日志_20260927.txt` 02:32，`TempBurstFlipProbeTest`+全套 206 绿）：30 页连翻
     单调无跳，全文件零 `fwd-gap`/`fwd-repair`/`origin-drift`。
-  - 跨章来回跳（2026-09-27 真机确认；**UI 侧已修（未提交），引擎侧待修**）：显示状态就是
+  - 跨章来回跳（✅ 已办，2026-09-27）：UI 侧 `AnchorFunnel` 已合入，引擎侧 in-flight 同目标去重已合入；显示状态就是
     `ReaderScreen.openPos` 一个变量，原先每次点按起独立协程调 `host.adjacent`，回来**不分新旧无条件
     覆盖**（旧 `ReaderScreen.kt:177`），谁后完成谁赢。边界处连点 → N 个跨章落地并发（各 ~1s）按完成
     顺序贴 UI，旧目标覆盖新位置。
@@ -177,17 +165,13 @@
     10 次点按全从同一页出发（全落同一页），不是 10→11→…→20。
     立规矩：`openPos` 只接受锚页事件（翻页/跳转/开书/改参/旋转/外部落位/开链接），过期结果是已死的
     锚页事件，无权覆盖。
-    已落地（2026-09-27，未提交）：`AnchorFunnel`（shared-ui 用户层）——6 个写入点收口为唯一通道，
+    落地情况：`AnchorFunnel`（shared-ui 用户层）——6 个写入点收口为唯一通道，
     规矩只有一条：try-lock，锁占用期间后到的点按直接放弃（`BUSY-DROP` 落盘可查），不排队、不等帧、
     不计时——这次实测锁占了约 1s（落地构建实际耗时），没有任何时间阈值；
     解锁后的新动作按最新位置重取源，10 次连点即 10→11→…→20 的链式推进。代价写在明处：锁占用期间
     的点按按了白按。`AnchorFunnelTest` 6 绿、shared-ui 全套 76 绿、app 编译过。
-    剩余：controller 内同目标落地共享在途任务（去重，治重复构建；现在重复构建仍在，只是结果
-    不再互相覆盖）。
+    引擎侧同目标在途去重已合入（重复构建不再互相覆盖）。
   - 存档 500ms 批处理（2026-09-27 记，**待复核**）：`markPositionChanged` 每次提交取消旧 `saveJob`、
     500ms 后写一次 Room（复刻 legacy scheduleSave）。连翻只存落定页，显示层零影响；漏斗落地后存的
     必是显示过的位置。复核点：500ms 值是否合适、杀进程丢进度窗口、与跳转/旋转等重排路径的竞态。
-  - 边界闪白页（2026-09-27 真机确认，12 秒 15 次，**待修**）：跨章那一下先 `finalize` 废掉旧 drawable
-    （`invalidateLayout` 清 `tempRenderLayout`，canonical 未就绪分支），新章 ~1s 才落地，期间渲染旧页
-    即 `non-Readback … blank content`。修法：drawable 延迟作废（新页就绪前旧页保持可画）。
-  13. 目录跳转不准确，而且经常点击目录项无响应。
+  13. 目录跳转偏差已修（2026-09-27：桌面透传 fragment + 引擎排版字符流锚点）；点击无响应（失败静默吞）待办。

@@ -111,6 +111,8 @@ fun ReaderScreen(
     // 本代（宿主/排版）内用户是否已显式离开首位：离开后落回首位不再自动弹封面
     //（回翻专用通道仍可进）；换代即重置。
     var coverDismissed by remember { mutableStateOf(false) }
+    // 换代结算中：首字符页先画底色占位，不抢画正文——否则正文闪一帧再被封面盖。
+    var coverResolving by remember { mutableStateOf(false) }
     // 宿主代际：open() 落定即 +1，行/图/背景 remember 键随之刷新——同 pos 也重取，
     // 换字体不断行时不滞留旧字、不白屏（open 落定前行数据恒有旧值可显）。
     var hostRevision by remember { mutableIntStateOf(0) }
@@ -176,21 +178,25 @@ fun ReaderScreen(
         return p.chapter == coverStartChapter && p.slice.charStart == 0
     }
     LaunchedEffect(openPos, hostRevision, contentRevision, currentHost) {
-        // 换代（宿主重建/排版变化）：缓存作废、显式离开标记重置；旧切片在新布局下取不到行，
-        // 不作废就是翻页白页（窗口拉伸复现）。bookStart 只取首章号（章节号不漂移），
-        // 顺带把每翻页一次 bookStart 查询的噪声也省了。
-        val fresh = currentHost !== coverHost || contentRevision != coverRev
-        if (fresh) {
+        // 只有宿主换代才重解（新控制器新布局）：排版变化（contentRevision）只重判，
+        // 封面字节与首章号都不漂移，不重解——重排不再闪。
+        // 注意 openPos 变化（翻页）不进这里，白白重解。
+        val hostChanged = currentHost !== coverHost
+        if (hostChanged) {
             coverHost = currentHost
             coverRev = contentRevision
             coverBmp = null
             coverStartChapter = null
             coverVisible = false
             coverDismissed = false
+            coverResolving = true
             coverBmp = runCatching { currentHost.coverImage() }.getOrNull()
             if (coverBmp != null) {
                 coverStartChapter = runCatching { currentHost.bookStart()?.chapter }.getOrNull()
             }
+            coverResolving = false
+        } else if (contentRevision != coverRev) {
+            coverRev = contentRevision
         }
         // 自动展示：落在首位且本代未显式离开。换代时 open 先落位、effect 后结算，
         // 落位与首位对上即弹回封面（窗口拉伸不再丢封面）；目录回首位同样弹，
@@ -491,7 +497,11 @@ fun ReaderScreen(
         ) {
         val pos = openPos
         val cover = if (coverVisible) coverBmp else null
-        if (cover != null) {
+        // 换代结算中且落在首字符页：画底色占位，不抢画正文——否则正文闪一帧再被封面盖。
+        val holdingForCover = cover == null && coverResolving && pos?.slice?.charStart == 0
+        if (holdingForCover) {
+            Box(modifier = Modifier.fillMaxSize().background(Color(profile.bgColor)))
+        } else if (cover != null) {
             // 封面页：拉伸全屏（默认）/等比居中（coverProportional 开），之上同样压遮罩；
             // 栏与提示与正文同制（标题取书名、进度 0），避免封面页无处进目录/设置。
             ReaderCoverPage(

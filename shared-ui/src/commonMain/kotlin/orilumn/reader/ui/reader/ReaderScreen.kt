@@ -180,6 +180,8 @@ fun ReaderScreen(
     LaunchedEffect(openPos, hostRevision, contentRevision, currentHost) {
         // 只有宿主换代才清缓存（新控制器新布局）：排版变化（contentRevision）不清，
         // 封面字节与首章号都不漂移；翻页（openPos 变化）更不清。
+        // 但显式离开标记随排版换代重置：不换宿主时调参/拉伸只换版本号，
+        // 不重置则一次离开后封面永不再弹（拉伸必跳第二页根因）。
         if (currentHost !== coverHost) {
             coverHost = currentHost
             coverRev = contentRevision
@@ -189,6 +191,7 @@ fun ReaderScreen(
             coverDismissed = false
         } else if (contentRevision != coverRev) {
             coverRev = contentRevision
+            coverDismissed = false
         }
         // open 落位前不查：与开书解析并发必撞锁/竞态（首章 check），查也白查。
         val p = openPos ?: return@LaunchedEffect

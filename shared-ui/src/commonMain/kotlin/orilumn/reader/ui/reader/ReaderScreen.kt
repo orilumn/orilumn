@@ -206,6 +206,8 @@ fun ReaderScreen(
         // 自动展示：落在首位且本代未显式离开。换代时 open 先落位、effect 后结算，
         // 落位与首位对上即弹回封面（窗口拉伸不再丢封面）；目录回首位同样弹，
         // 与"章节从封面开始"一致；其余落位（翻页/跳转/重排）不自动弹。
+        orilumn.reader.io.Logger.d("Orilumn.COVER",
+            "decide bmp=${coverBmp != null} startCh=$coverStartChapter pos=${openPos?.chapter}:${openPos?.slice?.charStart} dismissed=$coverDismissed")
         if (isBookStart(openPos) && !coverDismissed) coverVisible = true
     }
 

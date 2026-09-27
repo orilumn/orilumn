@@ -178,25 +178,30 @@ fun ReaderScreen(
         return p.chapter == coverStartChapter && p.slice.charStart == 0
     }
     LaunchedEffect(openPos, hostRevision, contentRevision, currentHost) {
-        // 只有宿主换代才重解（新控制器新布局）：排版变化（contentRevision）只重判，
-        // 封面字节与首章号都不漂移，不重解——重排不再闪。
-        // 注意 openPos 变化（翻页）不进这里，白白重解。
-        val hostChanged = currentHost !== coverHost
-        if (hostChanged) {
+        // 只有宿主换代才清缓存（新控制器新布局）：排版变化（contentRevision）不清，
+        // 封面字节与首章号都不漂移；翻页（openPos 变化）更不清。
+        if (currentHost !== coverHost) {
             coverHost = currentHost
             coverRev = contentRevision
             coverBmp = null
             coverStartChapter = null
             coverVisible = false
             coverDismissed = false
-            coverResolving = true
-            coverBmp = runCatching { currentHost.coverImage() }.getOrNull()
-            if (coverBmp != null) {
-                coverStartChapter = runCatching { currentHost.bookStart()?.chapter }.getOrNull()
-            }
-            coverResolving = false
         } else if (contentRevision != coverRev) {
             coverRev = contentRevision
+        }
+        // 位图缺失即补（换代首解；中途取消导致 finally 落旗，下次运行继续补，
+        // 不会卡死在"永远不再解"）。
+        if (coverBmp == null) {
+            coverResolving = true
+            try {
+                coverBmp = runCatching { currentHost.coverImage() }.getOrNull()
+                if (coverBmp != null && coverStartChapter == null) {
+                    coverStartChapter = runCatching { currentHost.bookStart()?.chapter }.getOrNull()
+                }
+            } finally {
+                coverResolving = false
+            }
         }
         // 自动展示：落在首位且本代未显式离开。换代时 open 先落位、effect 后结算，
         // 落位与首位对上即弹回封面（窗口拉伸不再丢封面）；目录回首位同样弹，

@@ -188,7 +188,9 @@ fun ReaderView(
                     "push ch=${landing.chapter} slice=${landing.slice} rev=$contentRevision")
             }
         }
-        // 视口变化不断连重排：宿主只在换书/会话时重建，拉伸窗口只换视口走全套重排，
+        // 视口变化不断连重排：宿主只在换书/会话时重建，拉伸窗口只换视口，
+        // 与调参完全同序（轻刷新即时落位 + 全套沉淀），锚点取当页首字符
+        //（slice.charStart 即页内首字符；封面/纯图页同样是字符定位，无字符页不存在）。
         // 旧页保持可画到新页落定（重建宿主的青黄不接即闪屏根因）。首帧跳过（构造已用该视口）。
         var appliedViewport by remember(book, session) { mutableStateOf<Pair<Int, Int>?>(null) }
         LaunchedEffect(book, session, settledViewport) {
@@ -196,12 +198,15 @@ fun ReaderView(
             appliedViewport = settledViewport
             if (prev == null || prev == settledViewport) return@LaunchedEffect
             val host = desktopHost ?: return@LaunchedEffect
+            if (!host.applyViewportSize(settledViewport.first, settledViewport.second)) return@LaunchedEffect
+            // 第一段：轻刷新即时落位（与 previewToSettings 同）。
             val anchor = currentPos
-            val landing = host.resizeViewport(
-                settledViewport.first, settledViewport.second,
-                anchor?.chapter ?: 0, anchor?.slice?.charStart ?: 0,
-            ) ?: return@LaunchedEffect
-            pushLanding(landing)
+            host.previewToSettings(
+                settings, anchor?.chapter ?: 0, anchor?.slice?.charStart ?: 0,
+            )?.let { pushLanding(it) }
+            // 第二段：全套沉淀（与 commitRelayout 同）。
+            val anchor2 = currentPos
+            host.commitRelayout(anchor2?.chapter ?: 0, anchor2?.slice?.charStart ?: 0)?.let { pushLanding(it) }
         }
         // 面板字库经宿主装载（R4：枚举+中文名链已下沉 `syncPanelFonts`，视图只收表；
         // 键只跟书，视口 resize 重建宿主不重枚举）。

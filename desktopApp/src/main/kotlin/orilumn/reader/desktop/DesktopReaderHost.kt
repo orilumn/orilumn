@@ -291,19 +291,12 @@ class DesktopReaderHost(
         }
 
     /**
-     * 视口变化不断连重排（窗口拉伸）：只换视口走同一全套（旧页保持可画到新页就绪，
-     * 不重建宿主、不重解析）；尺寸未变回 null（调用方无动作）。
+     * 视口尺寸应用（窗口拉伸）：只换视口，返回是否变化。
+     * 调用方按调参与两段式推进（轻刷新即时落位 + 全套沉淀），与改参同序。
      */
-    suspend fun resizeViewport(viewW: Int, viewH: Int, chapter: Int, anchorChar: Int): ReaderPos? =
+    suspend fun applyViewportSize(viewW: Int, viewH: Int): Boolean =
         withContext(Dispatchers.Default) {
-            if (!controller.setViewport(viewW.coerceAtLeast(16), viewH.coerceAtLeast(16))) return@withContext null
-            val r = controller.prepareRelayout(chapter, anchorChar) ?: run {
-                orilumn.reader.io.Logger.w("Orilumn.Desktop", "resizeViewport NULL (stale/empty) ch=$chapter")
-                return@withContext null
-            }
-            controller.bindReflow(r)
-            controller.requestWholeBookRelayout()
-            ReaderPos(r.chapter, r.page)
+            controller.setViewport(viewW.coerceAtLeast(16), viewH.coerceAtLeast(16))
         }
 
     /** 换 profile 三件套（两段共用）：重建 profile → 字重锚点 → 控制器持有 → 追装字库池。 */

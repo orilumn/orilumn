@@ -62,8 +62,8 @@ data class TypographicProfile(
     /** 排版主题 key ("original" | "modern" | "traditional"); drives the theme layer stylesheet
      *  (tier 42) and, via [build], the effective 首行缩进/段间距 for the UI layer. */
     val layoutTheme: String,
-    /** Cover proportional-scaling switch. */
-    val coverProportional: Boolean,
+    /** Cover stretch switch (true = stretch fullscreen). */
+    val coverStretch: Boolean,
     /** Density: vertical outer-margin scale factor for structural blocks (heading/quote/code)
      * (1.0 = default, 0..4). */
     val paragraphGapScale: Float,
@@ -121,7 +121,7 @@ data class TypographicProfile(
                 fontWeightAnchors = s.fontWeightAnchors,
                 useOriginalStyle = original,
                 layoutTheme = s.layoutTheme,
-                coverProportional = s.coverProportional,
+                coverStretch = s.coverStretch,
                 // 疏密/字距: 同样原样透传, 用户可随时调整.
                 paragraphGapScale = (s.paragraphGap / 100f).toFloat(),
                 letterSpacingEm = Math.round(s.letterSpacing.coerceIn(-100.0, 100.0)) / 500f,

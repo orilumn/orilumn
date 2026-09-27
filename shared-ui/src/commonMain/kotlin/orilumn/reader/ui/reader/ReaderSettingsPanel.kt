@@ -263,7 +263,7 @@ fun ReaderSettingsPanel(
                 ItemKey(onEnter = { stack.add(Sub.Brightness) }),
                 ItemKey(onEnter = { onCommitTypography(s.copy(pageAnim = !s.pageAnim)) }),
                 ItemKey(onEnter = { stack.add(Sub.AnimMode) }),
-                ItemKey(onEnter = { onCommitTypography(s.copy(coverProportional = !s.coverProportional)) }),
+                ItemKey(onEnter = { onCommitTypography(s.copy(coverStretch = !s.coverStretch)) }),
                 ItemKey(onEnter = { onCommitTypography(s.copy(autoContinue = !s.autoContinue)) }),
                 ItemKey(onEnter = { onCommitTypography(s.copy(pageNum = !s.pageNum)) }),
             )
@@ -860,7 +860,7 @@ private fun HomePage(
         item { SetRow("亮度", if (s.brightnessFollowSystem) "跟随系统" else "自定义", keys[4].onEnter, p, nav = nav, index = 4) }
         item { SetSwitch("翻页动画", s.pageAnim, { commit(s.copy(pageAnim = it)) }, p, nav = nav, index = 5) }
         item { SetRow("翻页动画模式", ReaderThemeMath.pageAnimationModeLabel(s.pageAnimationMode), keys[6].onEnter, p, nav = nav, index = 6) }
-        item { SetSwitch("封面等比例缩放", s.coverProportional, { commit(s.copy(coverProportional = it)) }, p, nav = nav, index = 7) }
+        item { SetSwitch("封面拉伸全屏", s.coverStretch, { commit(s.copy(coverStretch = it)) }, p, nav = nav, index = 7) }
         item { SetSwitch("启动时继续阅读", s.autoContinue, { commit(s.copy(autoContinue = it)) }, p, nav = nav, index = 8) }
         item { SetSwitch("显示页码", s.pageNum, { commit(s.copy(pageNum = it)) }, p, nav = nav, index = 9) }
         item { Spacer(modifier = Modifier.height(24.dp)) }

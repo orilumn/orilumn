@@ -149,16 +149,23 @@ fun ReaderView(
         val densityScope = LocalDensity.current
         val viewportW = with(densityScope) { maxWidth.toPx() }.toInt().coerceAtLeast(16)
         val viewportH = with(densityScope) { maxHeight.toPx() }.toInt().coerceAtLeast(16)
+        // 窗口拉伸防抖：拖动中每像素都重组，宿主重建（重解析+重排）配漏斗互斥即自杀式
+        // BUSY-DROP 风暴——旧宿主落位、新宿主画布=白屏。静置 400ms 后再用稳定值重建。
+        var settledViewport by remember(book) { mutableStateOf(viewportW to viewportH) }
+        LaunchedEffect(book, viewportW, viewportH) {
+            kotlinx.coroutines.delay(400)
+            settledViewport = viewportW to viewportH
+        }
 
-        val snapshot = remember(book, viewportW, viewportH, session) {
+        val snapshot = remember(book, session) {
             val delegate = DesktopReaderHost(
                 bookFile = book.filePath,
                 bookId = book.id,
                 store = store,
                 settings = appliedLayout,
                 density = density,
-                viewportW = viewportW,
-                viewportH = viewportH,
+                viewportW = settledViewport.first,
+                viewportH = settledViewport.second,
                 initialAnchor = anchorOverride,
                 // C1-3：桌面分页表写穿 `cache/`（与平板同一共享 Store/参数键/失效语义）。
                 cacheRoot = DesktopPaths.cacheDir,
@@ -170,6 +177,37 @@ fun ReaderView(
             onDispose { (snapshot.delegate as? DesktopReaderHost)?.close() }
         }
         val desktopHost = snapshot.delegate as? DesktopReaderHost
+        // 引擎重排落位推送（设置两段式与视口重排共用）：刷版本号 + 定位到含锚字符的新页，
+        // NonCancellable 保证已完成的重排不被 effect 重启吞掉。
+        suspend fun pushLanding(landing: ReaderPos) {
+            withContext(NonCancellable) {
+                currentPos = landing
+                externalPos = landing
+                contentRevision++
+                orilumn.reader.io.Logger.w("Orilumn.Desktop",
+                    "push ch=${landing.chapter} slice=${landing.slice} rev=$contentRevision")
+            }
+        }
+        // 视口变化不断连重排：宿主只在换书/会话时重建，拉伸窗口只换视口，
+        // 与调参完全同序（轻刷新即时落位 + 全套沉淀），锚点取当页首字符
+        //（slice.charStart 即页内首字符；封面/纯图页同样是字符定位，无字符页不存在）。
+        // 旧页保持可画到新页落定（重建宿主的青黄不接即闪屏根因）。首帧跳过（构造已用该视口）。
+        var appliedViewport by remember(book, session) { mutableStateOf<Pair<Int, Int>?>(null) }
+        LaunchedEffect(book, session, settledViewport) {
+            val prev = appliedViewport
+            appliedViewport = settledViewport
+            if (prev == null || prev == settledViewport) return@LaunchedEffect
+            val host = desktopHost ?: return@LaunchedEffect
+            if (!host.applyViewportSize(settledViewport.first, settledViewport.second)) return@LaunchedEffect
+            // 第一段：轻刷新即时落位（与 previewToSettings 同）。
+            val anchor = currentPos
+            host.previewToSettings(
+                settings, anchor?.chapter ?: 0, anchor?.slice?.charStart ?: 0,
+            )?.let { pushLanding(it) }
+            // 第二段：全套沉淀（与 commitRelayout 同）。
+            val anchor2 = currentPos
+            host.commitRelayout(anchor2?.chapter ?: 0, anchor2?.slice?.charStart ?: 0)?.let { pushLanding(it) }
+        }
         // 面板字库经宿主装载（R4：枚举+中文名链已下沉 `syncPanelFonts`，视图只收表；
         // 键只跟书，视口 resize 重建宿主不重枚举）。
         LaunchedEffect(book) {
@@ -184,16 +222,6 @@ fun ReaderView(
             delay(150)
             if (settings.withoutLight() == appliedLayout.withoutLight()) return@LaunchedEffect
             val host = desktopHost ?: return@LaunchedEffect
-            suspend fun pushLanding(landing: ReaderPos) {
-                // 已完成的引擎侧重排结果必须落地：用 NonCancellable 保证推送不被外层取消吞掉
-                withContext(NonCancellable) {
-                    currentPos = landing
-                    externalPos = landing
-                    contentRevision++
-                    orilumn.reader.io.Logger.w("Orilumn.Desktop",
-                        "push ch=${landing.chapter} slice=${landing.slice} rev=$contentRevision")
-                }
-            }
             val anchor = currentPos
             val landing = host.previewToSettings(
                 settings, anchor?.chapter ?: 0, anchor?.slice?.charStart ?: 0)

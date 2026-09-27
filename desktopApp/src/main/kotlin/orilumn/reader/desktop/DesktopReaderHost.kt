@@ -15,6 +15,7 @@ import orilumn.reader.engine.skia.PageImage
 import orilumn.reader.engine.text.TypographicProfile
 import orilumn.reader.ui.reader.ReaderHost
 import orilumn.reader.ui.reader.ReaderPos
+import orilumn.reader.ui.imageBitmapOf
 import orilumn.reader.ui.reader.flattenTocItems
 import androidx.compose.ui.graphics.ImageBitmap
 import kotlinx.coroutines.CoroutineScope
@@ -182,6 +183,20 @@ class DesktopReaderHost(
 
     override fun pageProgress(pos: ReaderPos): Double = controller.pageProgress(pos.chapter, pos.slice)
 
+    /** 全书封面（ covers/ 私有缓存；无/失败回 null）。 */
+    override suspend fun coverImage(): ImageBitmap? = withContext(Dispatchers.IO) {
+        runCatching {
+            val ref = store.getEntry(bookId)?.coverPath ?: return@runCatching null
+            val bytes = File(ref).takeIf { it.isFile }?.readBytes() ?: return@runCatching null
+            orilumn.reader.ui.imageBitmapOf(bytes)
+        }.getOrNull()
+    }
+
+    /** 全书第一内容页（只读，不 finalize 临时表）。 */
+    override suspend fun bookStart(): ReaderPos? = withContext(Dispatchers.Default) {
+        controller.openChapterStart(0)?.let { ReaderPos(it.first, it.second) }
+    }
+
     override fun pageLines(pos: ReaderPos): List<DrawLine>? = controller.pageLines(pos.chapter, pos.slice)
 
     override fun pageImages(pos: ReaderPos): List<PageImage>? =
@@ -273,6 +288,15 @@ class DesktopReaderHost(
             controller.bindReflow(r)
             controller.requestWholeBookRelayout()
             ReaderPos(r.chapter, r.page)
+        }
+
+    /**
+     * 视口尺寸应用（窗口拉伸）：只换视口，返回是否变化。
+     * 调用方按调参与两段式推进（轻刷新即时落位 + 全套沉淀），与改参同序。
+     */
+    suspend fun applyViewportSize(viewW: Int, viewH: Int): Boolean =
+        withContext(Dispatchers.Default) {
+            controller.setViewport(viewW.coerceAtLeast(16), viewH.coerceAtLeast(16))
         }
 
     /** 换 profile 三件套（两段共用）：重建 profile → 字重锚点 → 控制器持有 → 追装字库池。 */

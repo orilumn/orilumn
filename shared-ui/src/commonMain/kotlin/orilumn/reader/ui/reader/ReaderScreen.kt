@@ -104,6 +104,15 @@ fun ReaderScreen(
 
     var openPos by remember { mutableStateOf<ReaderPos?>(null) }
     var openFailed by remember { mutableStateOf(false) }
+    // 封面页（用户层前置页，只读不存档）：coverVisible 时画封面盖住正文页，
+    // openPos 仍为书里位置，供目录/跳转/存档照常工作。
+    var coverVisible by remember { mutableStateOf(false) }
+    var coverBmp by remember { mutableStateOf<ImageBitmap?>(null) }
+    // 本代（宿主/排版）内用户是否已显式离开首位：离开后落回首位不再自动弹封面
+    //（回翻专用通道仍可进）；换代即重置。
+    var coverDismissed by remember { mutableStateOf(false) }
+    // 换代结算中：首字符页先画底色占位，不抢画正文——否则正文闪一帧再被封面盖。
+    var coverResolving by remember { mutableStateOf(false) }
     // 宿主代际：open() 落定即 +1，行/图/背景 remember 键随之刷新——同 pos 也重取，
     // 换字体不断行时不滞留旧字、不白屏（open 落定前行数据恒有旧值可显）。
     var hostRevision by remember { mutableIntStateOf(0) }
@@ -139,19 +148,96 @@ fun ReaderScreen(
     val currentBotBarH by rememberUpdatedState(botBarH)
 
     // 打开书籍并定位起始页（自动续读/首页）。落定即推代际：同 pos 也刷新行数据。
-    // 经锚页漏斗：与在途导航互斥，首帧后放行。
+    // 经锚页漏斗：与在途导航互斥，首帧后放行。漏斗 BUSY-DROP 时补一次重试，
+    // 否则 open 是一次性事件——被吞即永久空白，无下一次点按来救。
     LaunchedEffect(currentHost) {
-        anchorFunnel.push("open", { openPos = it }) {
-            val p = currentHost.open()
-            openFailed = p == null
-            hostRevision++
-            p
+        suspend fun doOpen(): ReaderPos? {
+            return anchorFunnel.push("open", { openPos = it }) {
+                val p = currentHost.open()
+                openFailed = p == null
+                hostRevision++
+                p
+            }
+        }
+        if (doOpen() == null && openPos == null) {
+            kotlinx.coroutines.delay(300)
+            doOpen()
         }
     }
 
+    // 封面页装配：开书/重排后落在全书第一内容页且有封面 → 先展示封面（只读，不存档）。
+    // 首位判定只看（首章 + 首字符），不比较整页切片：重排落位是行锚页（blockStart=-1），
+    // 内存表拒绝回填旧表，`bookStart()` 切片恒旧——对象比较永不等（窗口拉伸丢封面根因）。
+    var coverStartChapter by remember { mutableStateOf<Int?>(null) }
+    var coverHost by remember { mutableStateOf<ReaderHost?>(null) }
+    var coverRev by remember { mutableIntStateOf(-1) }
+    // 首位判定（本函数三处同式）：有封面 + 章节是首章 + 切片首字符为 0。
+    // 不比较整页切片对象（见上）。
+    fun isBookStart(p: ReaderPos?): Boolean {
+        if (p == null || coverBmp == null || coverStartChapter == null) return false
+        return p.chapter == coverStartChapter && p.slice.charStart == 0
+    }
+    LaunchedEffect(openPos, hostRevision, contentRevision, currentHost) {
+        // 只有宿主换代才清缓存（新控制器新布局）：排版变化（contentRevision）不清，
+        // 封面字节与首章号都不漂移；翻页（openPos 变化）更不清。
+        // 但显式离开标记随排版换代重置：不换宿主时调参/拉伸只换版本号，
+        // 不重置则一次离开后封面永不再弹（拉伸必跳第二页根因）。
+        if (currentHost !== coverHost) {
+            coverHost = currentHost
+            coverRev = contentRevision
+            coverBmp = null
+            coverStartChapter = null
+            coverVisible = false
+            coverDismissed = false
+        } else if (contentRevision != coverRev) {
+            coverRev = contentRevision
+            coverDismissed = false
+        }
+        // open 落位前不查：与开书解析并发必撞锁/竞态（首章 check），查也白查。
+        val p = openPos ?: return@LaunchedEffect
+        // 结算中首字符页画底色占位，不抢画正文。finally 落旗：取消即重算，不卡死。
+        coverResolving = true
+        try {
+            // 取消异常重抛（`runCatching` 会吞取消，effect 重启即卡死）；
+            // 其余异常回 null。
+            if (coverBmp == null) {
+                coverBmp = try {
+                    currentHost.coverImage()
+                } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                    null
+                }
+            }
+            // 首章号查不到退避重试（open 并发期布局未就绪是常态，最多约 1.2s）。
+            if (coverBmp != null && coverStartChapter == null) {
+                repeat(6) {
+                    coverStartChapter = try {
+                        currentHost.bookStart()?.chapter
+                    } catch (e: Exception) {
+                        if (e is kotlinx.coroutines.CancellationException) throw e
+                        null
+                    }
+                    if (coverStartChapter != null) return@repeat
+                    delay(200)
+                }
+            }
+        } finally {
+            coverResolving = false
+        }
+        if (coverBmp == null) return@LaunchedEffect
+        // 显隐全权在此赋值：首位 && 未离开即展示，否则隐藏。
+        // 落位处不清（清了再弹就是一帧闪）；离开封面的唯一出口是前进翻页显式关闭。
+        orilumn.reader.io.Logger.d("Orilumn.COVER",
+            "decide bmp=${coverBmp != null} startCh=$coverStartChapter pos=${p.chapter}:${p.slice.charStart} dismissed=$coverDismissed")
+        coverVisible = isBookStart(p) && !coverDismissed
+    }
+
     // 落位统一入口：更新当前定位并防抖保存（复刻 Android scheduleSave 500ms）。
+    // 只记 dismissed，不碰 coverVisible（显隐全权归下面 effect 按"首位 && 未离开"赋值；
+    // 落位处先关再弹就是那一帧正文闪）。
     fun markPositionChanged(next: ReaderPos) {
         openPos = next
+        if (!isBookStart(next)) coverDismissed = true
         saveJob?.cancel()
         saveJob = scope.launch {
             delay(500)
@@ -181,6 +267,30 @@ fun ReaderScreen(
         return null
     }
     fun flip(direction: Int) {
+        // 封面页内翻页：前进回正文第一页（现查 fresh 落位，走漏斗，可存档），
+        // 落定即记显式离开（否则推送带来的 effect 重算又弹回去）；封面已是第一页，后退无操作。
+        if (coverVisible) {
+            if (direction > 0 && coverBmp != null) {
+                scope.launch {
+                    val target = runCatching { currentHost.bookStart() }.getOrNull() ?: return@launch
+                    val landed = anchorFunnel.navigate(
+                        action = "cover-forward",
+                        read = { target },
+                        commit = ::markPositionChanged,
+                    ) { target }
+                    if (landed != null) {
+                        coverDismissed = true
+                        coverVisible = false
+                    }
+                }
+            }
+            return
+        }
+        // 正文第一页回翻且有封面 → 进封面（只读，不经过引擎翻页/存档）。
+        if (direction < 0 && isBookStart(openPos)) {
+            coverVisible = true
+            return
+        }
         scope.launch {
             anchorFunnel.navigate(
                 action = "tap-flip",
@@ -260,6 +370,15 @@ fun ReaderScreen(
     }
 
     fun onTap(xPx: Float, yPx: Float, widthPx: Float) {
+        // 封面页点按：无链接命中，前进区回正文、中部切栏，后退区无操作（封面已是第一页；
+        // 退出走顶栏返回键）。
+        if (coverVisible) {
+            when (ReaderMath.tapZone(xPx, widthPx)) {
+                1 -> flip(1)
+                else -> barsVisible = !barsVisible
+            }
+            return
+        }
         // P4-c2u: 链接优先——点中链接字形即导航，未中才走三区（翻页/栏显隐）。
         // 无时间防抖：链接跳转本身走锚页漏斗（在途导航中后到的点按 BUSY-DROP），锁即防抖，
         // 不再另设时间窗（误吞正常点按的"点了没反应"即此类）。
@@ -408,7 +527,46 @@ fun ReaderScreen(
                 },
         ) {
         val pos = openPos
-        if (pos != null) {
+        val cover = if (coverVisible) coverBmp else null
+        // 换代结算中且落在首字符页：画底色占位，不抢画正文——否则正文闪一帧再被封面盖。
+        val holdingForCover = cover == null && coverResolving && pos?.slice?.charStart == 0
+        if (holdingForCover) {
+            Box(modifier = Modifier.fillMaxSize().background(Color(profile.bgColor)))
+        } else if (cover != null) {
+            // 封面页：拉伸全屏（默认开）/等比居中（关），之上同样压遮罩；
+            // 栏与提示与正文同制（标题取书名、进度 0），避免封面页无处进目录/设置。
+            ReaderCoverPage(
+                cover = cover,
+                proportional = !light.coverStretch,
+                bgColor = Color(profile.bgColor),
+                modifier = Modifier.fillMaxSize(),
+            )
+            ReaderLightMask(light = light, modifier = Modifier.fillMaxSize())
+            ReaderBars(
+                visible = barsVisible,
+                statusBarInset = statusBarInset,
+                bookTitle = currentHost.title(),
+                chapterTitle = "",
+                fraction = 0f,
+                onTapOutside = { barsVisible = false },
+                onBack = currentOnBack,
+                onPrev = { jumpChapter(-1) },
+                onNext = { jumpChapter(1) },
+                onSeek = ::seek,
+                onNight = currentOnNight,
+                onSettings = { hideBarsThen { currentOnSettings() } },
+                onToc = { hideBarsThen { currentOnToc() } },
+                onBookmark = { currentOnBookmark?.invoke() ?: snackbar.show("书签（规划中）") },
+                onNote = { currentOnNote?.invoke() ?: snackbar.show("笔记（规划中）") },
+                onTopBarSize = { topBarH = it.height },
+                onBottomBarSize = { botBarH = it.height },
+            )
+            BrightnessGestureIndicator(ui = brightnessUi, modifier = Modifier.align(Alignment.BottomCenter))
+            SnackbarHost(
+                hostState = snackbar.hostState,
+                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 56.dp),
+            )
+        } else if (pos != null) {
             val fraction = remember(pos) {
                 currentHost.pageProgress(pos).toFloat().coerceIn(0f, 1f)
             }

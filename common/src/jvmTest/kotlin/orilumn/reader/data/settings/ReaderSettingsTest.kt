@@ -37,7 +37,7 @@ class ReaderSettingsTest {
             pageAnim = false,
             autoContinue = false,
             pageNum = true,
-            coverProportional = false,
+            coverStretch = true,
         )
         assertEquals(custom, ReaderSettings.fromJson(custom.toJson()))
     }
@@ -147,11 +147,19 @@ class ReaderSettingsTest {
             "theme", "fontSize", "lineSpacing",
             "marginTop", "marginBottom", "marginLeft", "marginRight",
             "fontBody", "fontTitle", "fontCode",
-            "useOriginalStyle", "useUserScripts", "pageAnim", "autoContinue", "pageNum", "coverProportional",
+            "useOriginalStyle", "useUserScripts", "pageAnim", "autoContinue", "pageNum", "coverStretch",
             "fontScale", "scheme", "bgOverride", "fgOverride", "layoutTheme",
         ).forEach { assertTrue("missing key $it", obj.containsKey(it)) }
         assertNotNull(obj.keys)
         assertFalse(ReaderSettings.DEFAULT.useOriginalStyle)
+    }
+
+    @Test
+    fun `old coverProportional migrates inverted to coverStretch`() {
+        assertEquals(true, ReaderSettings.fromJson("{\"coverProportional\":false}").coverStretch)
+        assertEquals(false, ReaderSettings.fromJson("{\"coverProportional\":true}").coverStretch)
+        assertEquals(true, ReaderSettings.fromJson("{\"coverStretch\":true}").coverStretch)
+        assertEquals(true, ReaderSettings.DEFAULT.coverStretch)
     }
 
     // ── Style system · font-size relative step mapping ─────────────────────────

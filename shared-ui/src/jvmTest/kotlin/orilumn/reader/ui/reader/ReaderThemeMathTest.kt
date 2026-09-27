@@ -138,4 +138,68 @@ class ReaderTocMathTest {
     fun flattenEmpty() {
         assertTrue(flattenToc(emptyList()).isEmpty())
     }
+
+    // ---- 目录项1-2（用户层·共享纯函数） ----
+
+    private fun frag(label: String, index: Int, fragment: String) =
+        TocItem(label = label, index = index, fragment = fragment)
+
+    private fun chapterToc() = listOf(
+        node("c1", 0, children = listOf(frag("c1.1", 0, "s1"), frag("c1.2", 0, "s2"))),
+        node("c2", 1, children = listOf(frag("c2.1", 1, "t1"))),
+        node("c3", 2),
+    )
+
+    @Test
+    fun resolvePrefersDeepestFragmentHit() {
+        val rows = flattenToc(chapterToc())
+        // 当页同时含 s1/s2 → 取文档序最末（最贴近阅读位置的子标题）。
+        assertEquals(2, resolveTocCurrentRow(rows, 0, setOf("s1", "s2")))
+        assertEquals(1, resolveTocCurrentRow(rows, 0, setOf("s1")))
+    }
+
+    @Test
+    fun resolveFallsBackToChapterHead() {
+        val rows = flattenToc(chapterToc())
+        assertEquals(0, resolveTocCurrentRow(rows, 0, emptySet()))
+        // 无命中的 fragment 同样回退章首。
+        assertEquals(0, resolveTocCurrentRow(rows, 0, setOf("nope")))
+        // 无子标题的章 → 章行本身。
+        assertEquals(5, resolveTocCurrentRow(rows, 2, setOf("s1")))
+        assertEquals(-1, resolveTocCurrentRow(rows, 9, setOf("s1")))
+        assertEquals(-1, resolveTocCurrentRow(emptyList(), 0, emptySet()))
+    }
+
+    @Test
+    fun initialCollapsedKeepsOnlyCurrentRootExpanded() {
+        val rows = flattenToc(chapterToc())
+        // 当前在 c1 子树 → 只折叠 c2（c3 无子节点不可折叠，不在集合）。
+        assertEquals(setOf(3), initialTocCollapsed(rows, 2))
+        // 当前在无子节点的 c3 → 顶层可折叠节点全折。
+        assertEquals(setOf(0, 3), initialTocCollapsed(rows, 5))
+        // 无当前行 → 全折。
+        assertEquals(setOf(0, 3), initialTocCollapsed(rows, -1))
+        // 扁平目录无可折叠节点 → 空集合。
+        val flat = flattenToc(listOf(node("a", 0), node("b", 1)))
+        assertTrue(initialTocCollapsed(flat, 0).isEmpty())
+    }
+
+    @Test
+    fun toggleAccordionOnTopLevel() {
+        val rows = flattenToc(chapterToc())
+        var collapsed = initialTocCollapsed(rows, 2) // {3}
+        // 展开 c2 → c1 同步折叠（手风琴）。
+        collapsed = toggleTocCollapsed(collapsed, rows, 3)
+        assertEquals(setOf(0), collapsed)
+        // 折叠 c2 → 简单加回，不波及其他。
+        collapsed = toggleTocCollapsed(collapsed, rows, 3)
+        assertEquals(setOf(0, 3), collapsed)
+        // 嵌套节点切换只管自己。
+        collapsed = toggleTocCollapsed(collapsed, rows, 1)
+        assertEquals(setOf(0, 3, 1), collapsed)
+        collapsed = toggleTocCollapsed(collapsed, rows, 1)
+        assertEquals(setOf(0, 3), collapsed)
+        // 越界下标无操作。
+        assertEquals(collapsed, toggleTocCollapsed(collapsed, rows, 99))
+    }
 }

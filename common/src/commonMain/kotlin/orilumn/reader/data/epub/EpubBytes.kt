@@ -2,6 +2,7 @@ package orilumn.reader.data.epub
 
 import okio.FileSystem
 import okio.Path.Companion.toPath
+import orilumn.reader.io.Logger
 import orilumn.reader.time.platformNowMs
 
 /**
@@ -12,7 +13,9 @@ import orilumn.reader.time.platformNowMs
  * 是同一模板（写 tmp→解析门控→删 tmp），收敛至此。调用方只给平台缓存目录与字节，
  * IO 调度（withContext）与落库仍归调用方。
  */
-/** 解析字节为书目（门控：无可读正文章节回 null；异常回 null，tmp 必删）。 */
+/** 解析字节为书目（门控：无可读正文章节回 null；异常回 null，tmp 必删）。
+ *  脏包/加密/截断（预期）与解析器内部 bug（应 fail-fast）在 catch 处只以异常类区分落盘，
+ *  不改变回 null 语义——"书打不开"不再靠猜。 */
 fun parseEpubBytes(bytes: ByteArray, tmpDirPath: String): EpubBook? {
     val fs = FileSystem.SYSTEM
     val tmp = tmpDirPath.toPath() / "scan_${platformNowMs()}.epub"
@@ -20,7 +23,8 @@ fun parseEpubBytes(bytes: ByteArray, tmpDirPath: String): EpubBook? {
         fs.createDirectories(tmpDirPath.toPath())
         fs.write(tmp) { write(bytes) }
         ZipEpubResourceReader(tmp.toString()).use { EpubParser().parse(it) }.takeUnless { it.isEmpty }
-    } catch (_: Exception) {
+    } catch (e: Exception) {
+        Logger.w("Orilumn.EPUB", "parseEpubBytes FAIL ${e::class.simpleName} ${e.message}")
         null
     } finally {
         runCatching { fs.delete(tmp) }
@@ -35,7 +39,8 @@ fun readEpubEntry(bytes: ByteArray, tmpDirPath: String, href: String): ByteArray
         fs.createDirectories(tmpDirPath.toPath())
         fs.write(tmp) { write(bytes) }
         ZipEpubResourceReader(tmp.toString()).use { it.readBytes(href) }
-    } catch (_: Exception) {
+    } catch (e: Exception) {
+        Logger.w("Orilumn.EPUB", "readEpubEntry FAIL $href ${e::class.simpleName} ${e.message}")
         null
     } finally {
         runCatching { fs.delete(tmp) }

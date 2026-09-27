@@ -14,9 +14,7 @@ import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.routing
 import io.ktor.utils.io.ByteReadChannel
-import io.ktor.utils.io.core.isEmpty
-import io.ktor.utils.io.core.readBytes
-import io.ktor.utils.io.readRemaining
+import io.ktor.utils.io.readAvailable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import okio.FileSystem
@@ -124,16 +122,17 @@ class FontUploadServer(
         }
     }
 
-    /** 通道流式落盘（字体 TTC 可达 tens of MB，不全量进内存）；返回写入字节数，失败 -1。 */
+    /** 通道流式落盘（单 1MB 复用缓冲，零逐包分配；TTC tens of MB 不全量进内存）；返回写入字节数，失败 -1。 */
     private suspend fun streamToFile(channel: ByteReadChannel, absolutePath: String): Long {
         var size = 0L
+        val buf = ByteArray(STREAM_BUF)
         FileSystem.SYSTEM.sink(absolutePath.toPath()).buffer().use { sink ->
-            while (!channel.isClosedForRead) {
-                val packet = channel.readRemaining(8192)
-                if (packet.isEmpty) break
-                val bytes = packet.readBytes()
-                sink.write(bytes)
-                size += bytes.size
+            while (true) {
+                val n = channel.readAvailable(buf)
+                if (n < 0) break
+                if (n == 0) continue
+                sink.write(buf, 0, n)
+                size += n
             }
         }
         return size
@@ -159,6 +158,8 @@ class FontUploadServer(
     companion object {
         /** 固定上传端口：同一局域网内每次打开地址不变，电脑侧无需重新输入（沿旧版约定）。 */
         const val PORT = 8080
+        /** 落盘复用缓冲（1MB 单数组逐轮复用；文件再大也不全量进内存，循环次数较 8KB 降两个量级）。 */
+        private const val STREAM_BUF = 1024 * 1024
 
         /**
          * 文件名清洗（纯函数，单测覆盖）：只留字母数字/`-_."，截断 64，
@@ -194,18 +195,25 @@ class FontUploadServer(
             const drop=document.getElementById('drop'),file=document.getElementById('file'),list=document.getElementById('list');
             drop.onclick=()=>file.click();
             file.onchange=async()=>{
-              const files=[...file.files];
-              for(const f of files){
+              const files=[...file.files];file.value='';
+              if(!files.length)return;
+              const labels=files.map(f=>{
                 const row=document.createElement('div');row.className='item';
-                row.innerHTML='<span>'+f.name+'</span><span class="ok">上传中…</span>';list.appendChild(row);
-                const label=row.lastChild;
-                try{
-                  const r=await fetch('/upload?name='+encodeURIComponent(f.name),{method:'POST',body:f});
-                  if(!r.ok) throw new Error('HTTP '+r.status);
-                  label.className='ok';label.textContent='成功';
-                }catch(e){label.className='err';label.textContent=('失败');}
-              }
-              file.value='';
+                row.innerHTML='<span>'+f.name+'</span><span class="ok">排队…</span>';list.appendChild(row);
+                return [f,row.lastChild];
+              });
+              let i=0;
+              const worker=async()=>{
+                while(i<labels.length){
+                  const [f,label]=labels[i++];label.textContent='上传中…';
+                  try{
+                    const r=await fetch('/upload?name='+encodeURIComponent(f.name),{method:'POST',body:f});
+                    if(!r.ok) throw new Error('HTTP '+r.status);
+                    label.className='ok';label.textContent='成功';
+                  }catch(e){label.className='err';label.textContent='失败';}
+                }
+              };
+              await Promise.all(labels.slice(0,4).map(worker));
             };
             </script></body></html>
         """.trimIndent()

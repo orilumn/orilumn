@@ -1,22 +1,13 @@
 # 未尽事宜 / Open Issues
 
-- **项目更名 orilumn → orilumn（全局重命名，待立项）**：GitHub 已有 `orilumn` 用户、
-  `orilumn.com` 域名已被注册，拟改项目名为 **orilumn**。同步波及面（改名清单）：
-  - 包名：`orilumn.reader` → `orilumn.readern`——`app`（Android namespace/applicationId `orilumn.reader`）、
-    `common`（namespace `orilumn.reader.common`；SQLDelight 包 `orilumn.reader.db` 见各 `.sq` 文件头
-    `package` 与 `common/build.gradle.kts` 的 `packageName`）、`desktopApp`
-    （mainClass `orilumn.reader.desktop.MainKt`、macOS bundleID `orilumn.reader`），以及
-    shared-ui/engine-skia 各模块 Kotlin 包路径与测试包名；
-  - 数据根目录：桌面 `~/.orilumn/`（`DesktopPaths`：`orilumn.db`、books/covers/progress/
-    settings/fonts）与 Android `filesDir`——改名后是否迁老数据或保留旧目录兼容读取，首版可
-    不搬数据只声明新名用途，并出「老库数据兼容」验证；
-  - 新建 GitHub 同名组织与仓库并入（历史保留方式待定：新建仓库移植 or 转移）；
-  - 立项后先出「改名验收清单」：全局 grep `orilumn` 归零 + 双端跑起 + 老数据兼容验证，再动手。
+- **桌面真背光后续（2026-09-27，macOS 先行落地）**：macOS DDC/CI 已通（`desktopApp …/brightness/`：`DisplayBrightness` 接口 + `DdcPackets` + `MacDisplayBrightness` JNA，真机读写闭环；>0 下发硬件150ms防抖、≤0 纯遮罩、跟随系统不碰硬件；滑块按探测切量程 -50~100 / -50~0）。**Win/Linux 空实现位**：Windows 接 Dxva2（`GetPhysicalMonitors`→`SetMonitorBrightness`，JNA）、Linux 接 ddcutil（/dev/i2c，需 i2c 组权限），同接口各自实现；显示器插拔重探（当前启动探一次）后续补。
+
+- **项目更名 orilumn → orilumn（✅ 已办，2026-09-27）**：包名 `orilumn.reader` 全量、数据根 `~/.orilumn/`，条目退役（原改名清单删除）。
 
 - **目录面板标题高亮定位**：目标是"仅高亮当前页内的标题、不在页内的不亮"（高亮下边框已去掉）。当前页内标题 id 集合逻辑已正确（有单测），但具体书籍上章内子标题仍常高亮不到——疑似 TOC 条目的 fragment 与正文标题元素 id 不一致，无法建立"目录项 ↔ 页内 char"的命中。**推迟到排版稳定后再处理**。
 
 - **阅读定位不稳定（整改 D）**：**根因已在 C1-2 收编，契约落码，仅剩设备实测确认**。原症状："未翻页重开"会位移（保存当前页 locator.charStart，重开定位同 char 可能落到不同页），两个根因：(1) 大章临时表 vs 磁盘表 char 定位不一致；(2) 临时转正 `onBackgroundCanonicalReady` 与 `scheduleSave` 竞态存下旧临时页 char。
-  - **已落地（2026-09-19，C1-2/C1-3）**：char 语义统一为 **canonical 磁盘表权威**——`onSaveProgress` 走存档顺序契约（先 `finalizeOnLeave` 临时表转正/作废，再读 displayed slice 落盘，见 [TabletReaderHost.kt:143](app/src/main/java/com/orilumn/ui/reader/TabletReaderHost.kt)）；`ensurePageRangeShaped` 的 seam 诊断转正为 canary（新窗口贴合旧窗口时共享边界必连续，[BookDocumentController.kt:494](app/src/main/java/com/orilumns/engine/BookDocumentController.kt)），temp→canonical 交接再加 handoff canary（`:1225`），回归会大声失败而非静默漂移。
+  - **已落地（2026-09-19，C1-2/C1-3）**：char 语义统一为 **canonical 磁盘表权威**——`onSaveProgress` 读 displayed slice 落盘（2026-09-26 修正：存档不再先 `finalizeOnLeave`，存档不是离开，杀活 temp 会话会锁死大章；finalize 只属于离开路径）；`ensurePageRangeShaped` 的 seam 诊断转正为 canary（新窗口贴合旧窗口时共享边界必连续，[BookDocumentController.kt:494](app/src/main/java/com/orilumns/engine/BookDocumentController.kt)），temp→canonical 交接再加 handoff canary（`:1225`），回归会大声失败而非静默漂移。
   - **剩余待办**：设备实测脚本（记保存 char → 重开 restore char 及落页）**未见留痕**，需跑一次确认位移消失；顺带核对"章内翻页是否真走全量路线"（此前怀疑全量路线从未实行）。
 
 - **增量分页的三条线程调度优先级（整改 F）**：**契约已落码（C1-2），不再是"缺契约"状态**。前台 temp shaping / 后台 `canonicalDispatcher` / 后台 `tempPrefillJob` 的 F>A>B1>B2>P 优先级契约已写入 [BookDocumentController.kt:66](app/src/main/java/com/orilumns/engine/BookDocumentController.kt) KDoc 并与桌面同契约（[DesktopReaderHost.kt:80](desktopApp/src/main/kotlin/com/orilumn/desktop/DesktopReaderHost.kt)）；dispatcher 可注入（`injectedCanonicalDispatcher`，默认私有单线程 executor，前台翻页永不与整章塑形争共享池）；canonical 阶段采样前台活动用既有 `ensureActive` checkpoint 让位。
@@ -109,9 +100,10 @@
   4. **安卓「跟随原书」放回列表首行**：`AndroidReaderSettingsPanel` 现把「跟随原书」做
      成独立选项行，与桌面版面不一致。待办：作为字体列表首行候选（选中态首行），
      数据源与桌面共用同一行形态。
-     ✅ **已办（核实为过时条目）**：F4c（`8f1fe1a`）已删旧 `FontManagerPanel` 并切共享
-     `FontLibraryPanel`；`buildFontRows` 两端同源，「跟随原书」本就是列表首行（选中态
-     首行），与桌面同一行形态。无代码改动。
+     ⚠️ **旧“已办”结论错误（2026-09-24 目验推翻）**：此前记为过时条目（称 F4c 后已是
+     列表首行），但平板上「跟随原书」仍被单独拎在面板顶部，不在字体列表内。待重查
+     安卓入口装配（`AndroidReaderSettingsPanel.TextPage` 自持列表 vs 桌面行形态）。
+     ✅ **已办（设置面板收敛，2026-09-24）**：`AndroidReaderSettingsPanel` 已删，平板改调共享 `ReaderSettingsPanel`，下钻与桌面同一 `buildFontRows`，首行恒为跟随原书；旧面板不复存在，无第二套列表可把跟随原书拎出。待真机复验一次确认。
   5. **桌面 PgDn/PgUp 翻页焦点不跟随（bug）**：字体列表翻页后焦点行原地不动，箭头
      导航仍从旧焦点行起步，与翻页所见错位。待办：翻页时同步重算焦点行（页首可见行/
      保持相对偏移），与 ScrollState 保持一致。
@@ -142,3 +134,47 @@
 - **标准化遗留 L1（待办：parsed-only 补消费）**：`visibility/overflow/position:relative/direction/unicode-bidi/font-stretch` 目前只落 `ComputedStyle` 计算值（`ComputedStyle.kt` / `StyleComputer.kt`），laying/draw 零消费。后续补祖先裁剪、相对偏移、RTL 流、字形压缩消费，双路一致 + bump `LAYOUT_VERSION`。
 - **标准化遗留 L2（待办：§0 例外收口）**：`flex/grid` 真实布局（现按 `block` 降级）、`list-style-image/@page/vertical writing/cursor`、脚本/表单/音视频/`canvas/iframe/object-embed`、固定版式（pre-paginated）。后续收口时先修范围定义与验收矩阵，按需逐项立项。
 - **标准化遗留 L3（待办：近似实现转精确）**：`background-size` 恒 1:1、`background-image` 只取首层、`counter-set`/非 `li` 的 `list-item` 生成内容不做、窄列悬浮退块式、latin 注音偏宽容差。后续按需逐项闭环。
+- **状态栏按键焦点导航（桌面键盘，待办）**：状态栏打开时左右键不再翻页（`ReaderScreen` 已放行不消费，见代码 TODO），后续补栏按键之间的焦点切换（左/右移焦、回车触发、Esc 回阅读面），与面板内 `PanelNav` 口径对齐。
+
+- **阅读目验问题清单（2026-09-24，待办；其中 1-3 已于 `fix/legacy-patches` 闭环）**：
+  1. ✅ 打开目录时，应定位到当前阅读位置对应的目录项，同时作为桌面侧键盘移动的起始位置。
+     （共享 `resolveTocCurrentRow`：当页标题 id 命中取文档序最末子标题、无命中回退章首；
+     打开滚动到该行 + 桌面 `nav.activeIdx` 落该行；桌面侧补 `currentFragments` 接线，
+     此前桌面一直空集只能定位章首。）
+  2. ✅ 目录默认折叠，仅自动展开当前章的目录；用户展开新章目录时，其余所有章目录折叠。
+     （共享 `initialTocCollapsed`/`toggleTocCollapsed`：每次打开重置为仅当前顶层子树展开，
+     顶层展开手风琴、嵌套切换只管自己；"章"= depth 0 顶层节点。）
+  3. ✅ 目录折叠三角形太小。（点击区 22dp→32dp、字号 11sp→14sp，字形 Box 居中；双端同改。）
+  4. ✅ 平板侧「跟随原书」已随设置面板收敛闭环（单共享实现，首行恒为跟随原书；待真机复验）。
+  5. ✅ 分区字样已删，改为行首来源竖标（2026-09-27）：导入/系统行按展示名归并单列，行首竖标“系统/导入/隐藏”；跨来源同名各占一行。
+  6. ✅ 按最终显示的名字排序（2026-09-27）：展示名归并排序（两组各自有序归并）。
+  7. ✅ 字重选择已落地（2026-09-27）：`WeightPicker` 按族选档（多字重行首入口进档位页）；连续滑块未做，如需再立项。
+  8. 阅读主题中的缃色改掉：与象牙白接近，且不是真正的缃色 #F0C239（该色不适合阅读）。
+  9. ✅ macOS 真背光已通（2026-09-27）：DDC/CI 下发，滑块 -50~100（>0 硬件，≤0 遮罩）；无 DDC 显示器钳 -50~0。
+  10. 预设管理面板未完整实现。
+   14. ✅ 已验证可行并落地（2026-09-27，见 9）：macOS 经 IOKit I2C 发 DDC/CI；Win（Dxva2）/Linux（ddcutil）空实现位见文首“桌面真背光后续”。
+  11. 封面等比例缩放改为封面拉伸全屏。
+  12. 两页内容不连续、翻页乱跳等问题。
+  - 章内 TEMP 连翻跳页（2026-09-27 修，待合）：前向塑形从水位改以后继原点为准（`tempResumeAfter`），
+    追加前相接校验（`tempPagesTile` ±3），失配按需修复收敛（`repairTempForwardGap`），窗口裁剪后水位
+    倒回新尾。真机验证（`日志_20260927.txt` 02:32，`TempBurstFlipProbeTest`+全套 206 绿）：30 页连翻
+    单调无跳，全文件零 `fwd-gap`/`fwd-repair`/`origin-drift`。
+  - 跨章来回跳（✅ 已办，2026-09-27）：UI 侧 `AnchorFunnel` 已合入，引擎侧 in-flight 同目标去重已合入；显示状态就是
+    `ReaderScreen.openPos` 一个变量，原先每次点按起独立协程调 `host.adjacent`，回来**不分新旧无条件
+    覆盖**（旧 `ReaderScreen.kt:177`），谁后完成谁赢。边界处连点 → N 个跨章落地并发（各 ~1s）按完成
+    顺序贴 UI，旧目标覆盖新位置。
+    证据：11.411 七个 `landed ch=16` 扎堆，11.809 三个过期 `landed ch=15` 把显示拽回，
+    11.968/12.209/12.937 无点按自动跳。附带真 bug：每次点按按发出瞬间的旧页算源，慢翻页时
+    10 次点按全从同一页出发（全落同一页），不是 10→11→…→20。
+    立规矩：`openPos` 只接受锚页事件（翻页/跳转/开书/改参/旋转/外部落位/开链接），过期结果是已死的
+    锚页事件，无权覆盖。
+    落地情况：`AnchorFunnel`（shared-ui 用户层）——6 个写入点收口为唯一通道，
+    规矩只有一条：try-lock，锁占用期间后到的点按直接放弃（`BUSY-DROP` 落盘可查），不排队、不等帧、
+    不计时——这次实测锁占了约 1s（落地构建实际耗时），没有任何时间阈值；
+    解锁后的新动作按最新位置重取源，10 次连点即 10→11→…→20 的链式推进。代价写在明处：锁占用期间
+    的点按按了白按。`AnchorFunnelTest` 6 绿、shared-ui 全套 76 绿、app 编译过。
+    引擎侧同目标在途去重已合入（重复构建不再互相覆盖）。
+  - 存档 500ms 批处理（2026-09-27 记，**待复核**）：`markPositionChanged` 每次提交取消旧 `saveJob`、
+    500ms 后写一次 Room（复刻 legacy scheduleSave）。连翻只存落定页，显示层零影响；漏斗落地后存的
+    必是显示过的位置。复核点：500ms 值是否合适、杀进程丢进度窗口、与跳转/旋转等重排路径的竞态。
+  13. 目录跳转偏差已修（2026-09-27：桌面透传 fragment + 引擎排版字符流锚点）；点击无响应（失败静默吞）待办。

@@ -38,6 +38,13 @@ interface ReaderPageRenderer {
         pageBg: Int,
         backgrounds: List<PageBackground> = emptyList(),
         bgImages: Map<String, DecodedImage> = emptyMap(),
+        /**
+         * 版式版本号（调用方 `ReaderScreen.contentRevision` 同源）：
+         * 字重这类"只换字形、不断行"的变更会产出与当前页结构完全相等的行数据，
+         * 相等即被跳过/缓存命中、零像素重画；版本号递增即强制重走绘制
+         * （绘制仍读 live 锚点，见 `SkParagraphFactory.anchoredWeight`）。
+         */
+        contentRevision: Int = 0,
     )
 }
 

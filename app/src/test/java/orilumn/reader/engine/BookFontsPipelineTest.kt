@@ -8,6 +8,7 @@ import okio.Path.Companion.toPath
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
+import org.junit.After
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
@@ -69,6 +70,15 @@ class BookFontsPipelineTest {
         return out
     }
 
+    private val ownedControllers = mutableListOf<BookDocumentController>()
+
+    @After
+    fun tearDown() {
+        // R13: reclaim background shaping so worker-JVM neighbors run clean.
+        ownedControllers.forEach { runCatching { it.close() } }
+        ownedControllers.clear()
+    }
+
     private fun controller(obfuscate: Boolean): BookDocumentController {
         val c = BookDocumentController(
             reader = FakeEpubResourceReader(files(obfuscate)),
@@ -76,6 +86,7 @@ class BookFontsPipelineTest {
             profile = TypographicProfile.build(ReaderSettings.DEFAULT),
         )
         c.cacheRoot = temp.newFolder().absolutePath.toPath()
+        ownedControllers.add(c)
         return c
     }
 

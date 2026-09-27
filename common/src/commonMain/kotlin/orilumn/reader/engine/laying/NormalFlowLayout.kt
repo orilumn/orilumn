@@ -6,6 +6,7 @@ import orilumn.reader.engine.css.ColorRun
 import orilumn.reader.engine.css.ComputedStyle
 import orilumn.reader.engine.css.FloatSide
 import orilumn.reader.engine.css.FontRun
+import orilumn.reader.io.Logger
 import orilumn.reader.engine.css.WhiteSpace
 import orilumn.reader.engine.css.WhiteSpaceNormalize
 import orilumn.reader.engine.css.cssHexToArgb
@@ -1651,7 +1652,11 @@ object NormalFlowLayout {
         if (imageLoader != null && chapterHref.isNotBlank()) {
             val src = el.attrs["src"]
             if (src != null) {
-                val bounds = runCatching { imageLoader.decodeBounds(chapterHref, src) }.getOrNull()
+                // 图片损坏/解码器 bug/loader 未注入全压成 null（无内在尺寸回退正确）；
+                // 与"本来就没有宽高属性"不可区分，记 d 供排查（低频：仅无属性时触发）。
+                val bounds = runCatching { imageLoader.decodeBounds(chapterHref, src) }
+                    .onFailure { Logger.d("Orilumn.IMG", "decodeBounds FAIL $src ${it.message}") }
+                    .getOrNull()
                 if (bounds != null && bounds.first > 0 && bounds.second > 0) {
                     return bounds.first to bounds.second
                 }

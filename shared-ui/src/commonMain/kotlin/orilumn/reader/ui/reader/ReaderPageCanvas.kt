@@ -2,6 +2,7 @@ package orilumn.reader.ui.reader
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.key
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -46,8 +47,18 @@ fun ReaderPageCanvas(
     pageBackgrounds: List<PageBackground>? = null,
     /** P3-b: 背景图解码结果（键为 [PageBackground.bgKey]）；缺失项該幅只留底色。 */
     bgImages: Map<String, DecodedImage> = emptyMap(),
+    /**
+     * 版式版本号（`ReaderScreen.contentRevision` 同源）：
+     * 字重这类"只换字形、不断行"的变更会产出与当前页结构完全相等的行数据，
+     * 强跳过下相等即整棵跳过、零像素重画；此处用版本号做 key，
+     * 推送即重建画布发射器、必重画（与数据是否相等无关）。
+     */
+    contentRevision: Int = 0,
 ) {
     val renderer = rememberReaderPageRenderer()
+    // 修订号版本化：只包画布发射器（渲染器实例保留在 key 之外，Android 离屏
+    // surface 不重建、其页缓存另经 contentRevision 显式失效，见各 actual）。
+    key(contentRevision) {
     Canvas(modifier = modifier) {
         val list = lines
         val imgs = pageImages?.takeIf { it.isNotEmpty() }
@@ -87,6 +98,7 @@ fun ReaderPageCanvas(
                 pageBg = pageBg,
                 backgrounds = bgs,
                 bgImages = bgImages,
+                contentRevision = contentRevision,
             )
         }
         // 插图：与文本同一 shift 平移后按盒流 used 尺寸贴图（Compose 层直画，
@@ -94,6 +106,7 @@ fun ReaderPageCanvas(
         imgs?.forEach { img ->
             drawPageImage(img, shift, contentLeft, imageBitmaps?.get(img))
         }
+    }
     }
 }
 

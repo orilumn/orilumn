@@ -49,7 +49,7 @@ import kotlin.math.abs
 /**
  * S28 阅读上下栏（平移自 Android `ReaderBars.kt`，行为/观感原样保留）：中部点按切换显示，
  * 深灰底 #303030，顶部 ‹书架 + 书名 + 章名，底部进度行（上一章/滑动条/百分比/下一章）+ 工具行
- * （☰目录 ☆书签 ✎笔记 ☾夜间 ⚙设置 ▦调试）。
+ * （☰目录 ☆书签 ✎笔记 ☾夜间 ⚙设置）。
  *
  * 平台差异收敛点：原 `statusBarInsetPx`（Android 物理 px）改为 **Dp** [statusBarInset]，由宿主把
  * 系统 insets 换算成 Dp 传入（桌面无状态栏则 0.dp）。其余为纯 CMP。
@@ -71,8 +71,6 @@ fun ReaderBars(
     onToc: () -> Unit,
     onBookmark: () -> Unit,
     onNote: () -> Unit,
-    onDebug: () -> Unit,
-    debugActive: Boolean,
     /** 顶/底栏实测高度回抛（px）：阅读面据此把栏区落点的手势让给栏，不进翻页层。默认空实现。 */
     onTopBarSize: (androidx.compose.ui.unit.IntSize) -> Unit = {},
     onBottomBarSize: (androidx.compose.ui.unit.IntSize) -> Unit = {},
@@ -163,7 +161,6 @@ fun ReaderBars(
                     BarTool("✎", "笔记", onNote)
                     BarTool("☾", "夜间", onNight)
                     BarTool("⚙", "设置", onSettings)
-                    BarTool("▦", "调试", onDebug, active = debugActive)
                 }
             }
         }

@@ -2,6 +2,7 @@ package orilumn.reader.engine
 
 import okio.FileSystem
 import okio.Path
+import orilumn.reader.io.Logger
 
 /**
  * Shared pagination-table disk store (C1-1): [ChapterPaginationTable] persistence over an
@@ -23,7 +24,11 @@ class PaginationCacheStore(
 
     /** Resolves the directory path for a book's pagination tables (creates if missing). */
     fun dirFor(bookId: String): Path =
-        rootDir.resolve("pagination/$bookId").also { runCatching { fs.createDirectories(it) } }
+        // root 不可写（内部配置错）此前藏到首次 write 才炸：记 w 让现场前移（返回保留）。
+        rootDir.resolve("pagination/$bookId").also {
+            runCatching { fs.createDirectories(it) }
+                .onFailure { Logger.w("Orilumn.DISK", "pagination dirFor FAIL $it ${it.message}") }
+        }
 
     /** Full cache file path. */
     fun file(bookId: String, chapterIndex: Int, paramHash: Long): Path =
@@ -36,9 +41,15 @@ class PaginationCacheStore(
      *  idempotent, and keeps the LRU eviction semantics byte-for-byte with the old shell). */
     fun read(f: Path): ChapterPaginationTable? {
         if (fs.metadataOrNull(f)?.isRegularFile != true) return null
-        val bytes = runCatching { fs.read(f) { readByteArray() } }.getOrNull() ?: return null
+        // IO 异常（权限/磁盘满/并发删）此前静默——读失败即重建是对的，但原因要留痕。
+        val bytes = runCatching { fs.read(f) { readByteArray() } }
+            .onFailure { Logger.w("Orilumn.DISK", "pagination read IO FAIL $f ${it.message}") }
+            .getOrNull() ?: return null
+        // decode==null 的原因由 codec 逐条落盘，此处透传。
         val table = PaginationCacheCodec.decode(bytes) ?: return null
+        // LRU-touch 重写的失败此前静默——evict 语义漂移查不出，记 w。
         runCatching { fs.write(f) { write(bytes) } }
+            .onFailure { Logger.w("Orilumn.DISK", "pagination LRU-touch FAIL $f ${it.message}") }
         return table
     }
 
@@ -54,7 +65,9 @@ class PaginationCacheStore(
      *  least-recently-used (lowest last-modified) tables beyond the cap — idempotent, and safe to run
      *  on any thread since it only touches filename/lastModified metadata and never table contents. */
     private fun trim(dir: Path) {
+        // list 失败此前静默跳过修剪→孤儿 .bin 无限堆积（cap 失效）：记 w。
         val files = runCatching { fs.list(dir) }
+            .onFailure { Logger.w("Orilumn.DISK", "pagination trim list FAIL $dir ${it.message}") }
             .getOrNull()
             ?.filter { it.name.endsWith(".bin") && fs.metadataOrNull(it)?.isRegularFile == true }
             ?.sortedByDescending { fs.metadataOrNull(it)?.lastModifiedAtMillis ?: 0L }

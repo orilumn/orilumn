@@ -7,6 +7,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.After
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -16,19 +17,19 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /**
- * Probe T5 (P12 half): whole-book B2 scan order = reading direction × distance.
+ * Probe T5 (P12 half, R7 order): whole-book B2 scan order = strict absolute-distance interleave.
  *
  * P12 gives a pure ordering function, [orderRemainingChapters], used by the whole-book B2 scan
  * ([BookDocumentController.requestWholeBookRelayout] → [BookDocumentController.remainingScanOrder]):
- * the direction group the reader is heading toward (ahead on forward, behind on backward) comes first,
- * nearest-distance-first inside each group, so a flip-out-of-bounds into a nearby chapter lands on an
- * already-laid-out chapter. Correctness never depends on the order — every non-current chapter still
- * completes its full pass + persist, and the per-chapter checkpoints (P7) keep abandonment ≤1 chapter.
+ * 1-away both sides, then 2-away, and so on; ties at the same distance are broken by the reading
+ * direction (the side the reader is heading toward first), so a flip-out-of-bounds into a nearby
+ * chapter lands on an already-laid-out chapter. Correctness never depends on the order — every
+ * non-current chapter still completes its full pass + persist, and the per-chapter checkpoints (P7)
+ * keep abandonment ≤1 chapter.
  *
  * Locked in here:
- *  1. **Unit.** The pure function across direction/current/boundaries: direction group first,
- *     nearest-first within group, every chapter exactly once, edge chapters when current is at either
- *     end of the book.
+ *  1. **Unit.** The pure function across direction/current/boundaries: interleave order,
+ *     every chapter exactly once, edge chapters when current is at either end of the book.
  *  2. **Integration.** The tracked reading direction is driven by the REAL flip entries
  *     ([BookDocumentController.findAdjacentPage] — the single reader-facing page-turn, covering
  *     in-chapter temp/canonical and out-of-bounds cross-chapter flips — and the direct
@@ -49,6 +50,12 @@ class WholeBookScanOrderProbeTest {
     private val viewW = 720
     private val viewH = 1280
 
+    @After
+    fun tearDown() {
+        // R13: reclaim background shaping so worker-JVM neighbors run clean.
+        if (::controller.isInitialized) controller.close()
+    }
+
     @Before
     fun setUp() {
         controller = BookDocumentController(
@@ -63,15 +70,15 @@ class WholeBookScanOrderProbeTest {
     // ───────────────────────────────────────────────────────────────
 
     @Test
-    fun `forward scans ahead first nearest-first then behind`() {
-        // total=8, current=3, forward: ahead = {4,5,6,7}, then behind = {2,1,0}.
-        assertEquals(listOf(4, 5, 6, 7, 2, 1, 0), orderRemainingChapters(total = 8, current = 3, direction = 1))
+    fun `forward interleaves by absolute distance, forward side first on ties`() {
+        // total=8, current=3, forward: 1-away {4, 2}, 2-away {5, 1}, 3-away {6, 0}, 4-away {7}.
+        assertEquals(listOf(4, 2, 5, 1, 6, 0, 7), orderRemainingChapters(total = 8, current = 3, direction = 1))
     }
 
     @Test
-    fun `backward scans behind first nearest-first then ahead`() {
-        // total=8, current=3, backward: behind = {2,1,0}, then ahead = {4,5,6,7}.
-        assertEquals(listOf(2, 1, 0, 4, 5, 6, 7), orderRemainingChapters(total = 8, current = 3, direction = -1))
+    fun `backward interleaves by absolute distance, backward side first on ties`() {
+        // total=8, current=3, backward: 1-away {2, 4}, 2-away {1, 5}, 3-away {0, 6}, 4-away {7}.
+        assertEquals(listOf(2, 4, 1, 5, 0, 6, 7), orderRemainingChapters(total = 8, current = 3, direction = -1))
     }
 
     @Test
@@ -126,8 +133,14 @@ class WholeBookScanOrderProbeTest {
         // Lay out all chapters so ch1 has page slices to flip from.
         for (ch in 0..2) assertNotNull(controller.ensureChapterLayout(ch, 0))
 
-        // Default is forward (the dominant reading direction).
-        assertEquals("default reading direction is forward", 1, controller.currentReadingDirection())
+        // D1 / principle 3.2: opening a book leaves NO flip record (0), not "forward" (1). Every
+        // consumer tests `>= 0`, so 0 must order identically to +1.
+        assertEquals("book open must leave no flip record", 0, controller.currentFlipDir())
+        assertEquals(
+            "the no-record state must order exactly as forward",
+            listOf(2, 0),
+            controller.remainingScanOrder(1),
+        )
 
         val ch1 = controller.unitAt(1) ?: error("no ch1")
         val page = ch1.pageSlices.firstOrNull() ?: error("ch1 has no pages")
@@ -135,21 +148,58 @@ class WholeBookScanOrderProbeTest {
 
         // A backward page turn (the reader-facing flip entry) tracks -1 and biases B2 backward-first.
         val back = controller.findAdjacentPage(1, page, -1)
-        assertEquals("backward flip must set the reading direction", -1, controller.currentReadingDirection())
+        assertEquals("backward flip must set the flip direction", -1, controller.currentFlipDir())
         assertEquals("B2 order follows backward: behind, then ahead", listOf(0, 2), controller.remainingScanOrder(1))
         assertNotNull("backward flip must land somewhere", back)
 
         // A forward page turn tracks +1 and biases B2 forward-first.
         val fwd = controller.findAdjacentPage(1, page, 1)
-        assertEquals("forward flip must set the reading direction", 1, controller.currentReadingDirection())
+        assertEquals("forward flip must set the flip direction", 1, controller.currentFlipDir())
         assertEquals("B2 order follows forward: ahead, then behind", listOf(2, 0), controller.remainingScanOrder(1))
         assertNotNull("forward flip must land somewhere", fwd)
 
         // The direct curl-adjacent entries set the direction too.
         controller.nextPageInChapter(ch1, page)
-        assertEquals(1, controller.currentReadingDirection())
+        assertEquals(1, controller.currentFlipDir())
         controller.prevPageInChapter(ch1, page)
-        assertEquals(-1, controller.currentReadingDirection())
+        assertEquals(-1, controller.currentFlipDir())
+    }
+
+    /** D1 / principle 3.2: every landing that is NOT a page turn must clear the flip record, so the
+     *  first flip after it reads "no record" (next page = page+1) instead of a stale guess. */
+    @Test
+    fun `jump and param-change landings clear the flip record`() = runBlocking {
+        val bookId = 10L
+        assertTrue(controller.open(bookId, saved = null))
+        controller.setViewport(viewW, viewH)
+        for (ch in 0..2) assertNotNull(controller.ensureChapterLayout(ch, 0))
+        val ch1 = controller.unitAt(1) ?: error("no ch1")
+        val page = ch1.pageSlices.firstOrNull() ?: error("ch1 has no pages")
+
+        suspend fun seedBackward() {
+            controller.findAdjacentPage(1, page, -1)
+            assertEquals("precondition: a backward record exists", -1, controller.currentFlipDir())
+        }
+
+        seedBackward()
+        assertNotNull(controller.pageAtFraction(0.5))
+        assertEquals("progress seek must clear the record", 0, controller.currentFlipDir())
+
+        seedBackward()
+        assertNotNull(controller.openChapterStart(2))
+        assertEquals("chapter-start landing must clear the record", 0, controller.currentFlipDir())
+
+        seedBackward()
+        assertNotNull(controller.relayoutTo(1, page.charStart))
+        assertEquals("mid-jump must clear the record", 0, controller.currentFlipDir())
+
+        seedBackward()
+        assertNotNull(controller.prepareRelayout(1, anchorChar = 0))
+        assertEquals("param change must clear the record", 0, controller.currentFlipDir())
+
+        seedBackward()
+        assertNotNull(controller.prepareRelayoutLight(1, anchorChar = 0))
+        assertEquals("param preview must clear the record", 0, controller.currentFlipDir())
     }
 
     // ───────────────────────────────────────────────────────────────

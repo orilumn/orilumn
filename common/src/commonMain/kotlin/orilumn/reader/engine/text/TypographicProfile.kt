@@ -1,6 +1,7 @@
 package orilumn.reader.engine.text
 
 import orilumn.reader.data.settings.ReaderSettings
+import orilumn.reader.io.Logger
 import kotlin.math.roundToInt
 
 /**
@@ -54,6 +55,8 @@ data class TypographicProfile(
     val fontBody: String,
     val fontTitle: String,
     val fontCode: String,
+    /** 按族字重锚点（族名 → CSS 字重）：该族正体请求改用此字重的面（见 FontPoolSync）。 */
+    val fontWeightAnchors: Map<String, Int> = emptyMap(),
     /** Master switch to follow the original book styles. */
     val useOriginalStyle: Boolean,
     /** 排版主题 key ("original" | "modern" | "traditional"); drives the theme layer stylesheet
@@ -115,6 +118,7 @@ data class TypographicProfile(
                 fontBody = s.fontBody,
                 fontTitle = s.fontTitle,
                 fontCode = s.fontCode,
+                fontWeightAnchors = s.fontWeightAnchors,
                 useOriginalStyle = original,
                 layoutTheme = s.layoutTheme,
                 coverProportional = s.coverProportional,
@@ -319,7 +323,10 @@ data class TypographicProfile(
                 8 -> argb(hexByte(h, 0), hexByte(h, 2), hexByte(h, 4), hexByte(h, 6))
                 else -> error("invalid hex length")
             }
-        }.getOrElse { 0xFF2B2B2B.toInt() }
+            // 脏书 CSS 颜色回退保留（渲染层不为一个颜色炸整章），但记 w——否则与书内声明
+            // 不一致且无迹可查。失败是按书稀有事件，非高频，可打。
+        }.onFailure { Logger.w("Orilumn.CSS", "parseColor fallback $hex ${it.message}") }
+            .getOrElse { 0xFF2B2B2B.toInt() }
 
         /** Expands a single hex digit into a full channel (`f` → `0xff`), per `Color.parseColor`'s `#rgb` rule. */
         private fun hexNibble(h: String, i: Int): Int {

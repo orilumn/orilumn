@@ -13,6 +13,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -37,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.engine.text.TypographicProfile
+import orilumn.reader.io.Logger
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -68,14 +70,12 @@ fun ReaderScreen(
     host: ReaderHost,
     settings: ReaderSettings,
     statusBarInset: Dp = 0.dp,
-    debugActive: Boolean = false,
     onBack: () -> Unit = {},
     onNight: () -> Unit = {},
     onSettings: () -> Unit = {},
     onToc: () -> Unit = {},
     onBookmark: (() -> Unit)? = null,
     onNote: (() -> Unit)? = null,
-    onDebug: () -> Unit = {},
     onLightChange: (ReaderSettings) -> Unit = {},
     onLightCommit: (ReaderSettings) -> Unit = {},
     /** Q1-b：顶/底栏显隐同步（Android 宿主据此显隐系统栏 chrome；桌面/其它平台可忽略）。 */
@@ -83,6 +83,11 @@ fun ReaderScreen(
     /** Q1-b：外部推送的落位（版式重排绑定 / 目录跳转落地后同步）。非空即采用为当前定位并防抖
      *  保存；null 不动作（重排以同一目标字符合位，字符仍在新分页表里即可连续阅读）。 */
     externalPos: ReaderPos? = null,
+    /** openPos 丢失时的回退定位（activity 侧 currentPos，每次落位更新）。
+     *  Screen 重进 composition 会清空 remember，而 host 稳定时 LaunchedEffect 不重跑 open()，
+     *  openPos 将永久为 null——此前 flip/jump/seek 静默吞动作（"点了没反应"）。
+     *  有回退即用（引擎侧 locateTempPosition 可重定位陈旧 slice），都没有才丢弃并落盘。 */
+    fallbackPos: ReaderPos? = null,
     /**
      * 版式版本号（宿主每次重排绑定+1）：行/图/背景的 `remember` 键随之刷新。字体等只换字形
      * 不断行的变更分页不变、新旧 pos 相等，不带本号行数据永远是旧的（重启才生效的根因）。
@@ -99,6 +104,9 @@ fun ReaderScreen(
 
     var openPos by remember { mutableStateOf<ReaderPos?>(null) }
     var openFailed by remember { mutableStateOf(false) }
+    // 宿主代际：open() 落定即 +1，行/图/背景 remember 键随之刷新——同 pos 也重取，
+    // 换字体不断行时不滞留旧字、不白屏（open 落定前行数据恒有旧值可显）。
+    var hostRevision by remember { mutableIntStateOf(0) }
     var barsVisible by remember { mutableStateOf(false) }
     // 上下栏实测高度（px）：栏区落点的手势归栏，不进翻页层（点栏按钮漂移误翻页的门控）。
     var topBarH by remember { mutableStateOf(0) }
@@ -110,10 +118,11 @@ fun ReaderScreen(
     LaunchedEffect(settings) { light = settings }
     var brightnessUi by remember { mutableStateOf<BrightnessGestureUi?>(null) }
     var saveJob by remember { mutableStateOf<Job?>(null) }
-    // 上次链接点按命中的抬起时刻（uptimeMillis；三区防抖用，见 onTap）。
-    var lastLinkTapMs by remember { mutableStateOf(0L) }
 
     val scope = rememberCoroutineScope()
+    // 锚页事件串行漏斗：显示状态的唯一写入通道（见 AnchorFunnel）。所有改锚页位置的动作
+    // （翻页/跳转/开书/外部落位/开链接）走它串行，后到按落定后的最新位置重取源，不再各算各的。
+    val anchorFunnel = remember { AnchorFunnel() }
     val currentHost by rememberUpdatedState(host)
     val currentOnBack by rememberUpdatedState(onBack)
     val currentOnNight by rememberUpdatedState(onNight)
@@ -121,7 +130,6 @@ fun ReaderScreen(
     val currentOnToc by rememberUpdatedState(onToc)
     val currentOnBookmark by rememberUpdatedState(onBookmark)
     val currentOnNote by rememberUpdatedState(onNote)
-    val currentOnDebug by rememberUpdatedState(onDebug)
     val currentOnLightChange by rememberUpdatedState(onLightChange)
     val currentOnLightCommit by rememberUpdatedState(onLightCommit)
     val currentOnBarsVisibleChanged by rememberUpdatedState(onBarsVisibleChanged)
@@ -130,11 +138,15 @@ fun ReaderScreen(
     val currentTopBarH by rememberUpdatedState(topBarH)
     val currentBotBarH by rememberUpdatedState(botBarH)
 
-    // 打开书籍并定位起始页（自动续读/首页）。
+    // 打开书籍并定位起始页（自动续读/首页）。落定即推代际：同 pos 也刷新行数据。
+    // 经锚页漏斗：与在途导航互斥，首帧后放行。
     LaunchedEffect(currentHost) {
-        val p = currentHost.open()
-        openFailed = p == null
-        openPos = p
+        anchorFunnel.push("open", { openPos = it }) {
+            val p = currentHost.open()
+            openFailed = p == null
+            hostRevision++
+            p
+        }
     }
 
     // 落位统一入口：更新当前定位并防抖保存（复刻 Android scheduleSave 500ms）。
@@ -149,31 +161,58 @@ fun ReaderScreen(
     }
 
     // Q1-b：外部推送落位（键 = externalPos，值变化即认领；重排绑定/TOC 落地后 activity 推送）。
+    // 经锚页漏斗：与在途导航互斥，值在锁内重取（取落定后的最新推送）。
     LaunchedEffect(externalPos) {
-        val p = externalPos ?: return@LaunchedEffect
-        openFailed = false
-        markPositionChanged(p)
+        anchorFunnel.push("external", ::markPositionChanged) {
+            openFailed = false
+            externalPos
+        }
     }
 
     // ---- 定位动作（host 为 suspend，统一挂到本组件作用域） ----
+    /** openPos 优先，回退 fallbackPos（activity currentPos），都没有才丢弃——永不静默。 */
+    fun resolveNavPos(action: String): ReaderPos? {
+        openPos?.let { return it }
+        fallbackPos?.let {
+            Logger.d("Orilumn.TAP", "$action openPos null → fallback ch=${it.chapter} char=${it.slice?.charStart}")
+            return it
+        }
+        Logger.d("Orilumn.TAP", "$action DROPPED (openPos null, no fallback)")
+        return null
+    }
     fun flip(direction: Int) {
-        val p = openPos ?: return
         scope.launch {
-            currentHost.adjacent(p, direction)?.let { markPositionChanged(it) }
+            anchorFunnel.navigate(
+                action = "tap-flip",
+                read = { resolveNavPos("tap-flip") },
+                commit = ::markPositionChanged,
+            ) { p ->
+                Logger.d("Orilumn.TAP", "tap-flip dispatch dir=$direction from ch=${p.chapter} char=${p.slice?.charStart}")
+                val landed = currentHost.adjacent(p, direction)
+                // 引擎侧无声吞翻页时（返回 null），这里是唯一目击者——与 Orilumn.FLIP 对账。
+                Logger.d("Orilumn.TAP", "tap-flip result dir=$direction " + (landed?.let { "landed ch=${it.chapter} char=${it.slice?.charStart}" } ?: "NULL (engine returned null)"))
+                landed
+            }
         }
     }
 
     fun jumpChapter(direction: Int) {
-        val p = openPos ?: return
         scope.launch {
-            currentHost.neighborChapterStart(p.chapter, direction)?.let { markPositionChanged(it) }
+            anchorFunnel.navigate(
+                action = "jump-chapter",
+                read = { resolveNavPos("jump-chapter") },
+                commit = ::markPositionChanged,
+            ) { p -> currentHost.neighborChapterStart(p.chapter, direction) }
         }
     }
 
     fun seek(fraction: Float) {
-        val p = openPos ?: return
         scope.launch {
-            currentHost.pageAtFraction(fraction.toDouble())?.let { markPositionChanged(it) }
+            anchorFunnel.navigate(
+                action = "seek",
+                read = { resolveNavPos("seek") },
+                commit = ::markPositionChanged,
+            ) { currentHost.pageAtFraction(fraction.toDouble()) }
         }
     }
 
@@ -210,19 +249,27 @@ fun ReaderScreen(
             ReaderMath.tapLineAt(lines, shift, xPx - contentLeft, yPx) ?: return false
         val offset = orilumn.reader.engine.skia.LineHitTest.hit(line, xInParagraph, yInLine) ?: return false
         val target = currentHost.linkTargetAt(p.chapter, line.charBase + offset) ?: return false
-        scope.launch { currentHost.openLink(target)?.let { markPositionChanged(it) } }
+        scope.launch {
+            anchorFunnel.navigate(
+                action = "open-link",
+                read = { resolveNavPos("open-link") },
+                commit = ::markPositionChanged,
+            ) { currentHost.openLink(target) }
+        }
         return true
     }
 
-    fun onTap(xPx: Float, yPx: Float, widthPx: Float, atMs: Long = 0L) {
+    fun onTap(xPx: Float, yPx: Float, widthPx: Float) {
         // P4-c2u: 链接优先——点中链接字形即导航，未中才走三区（翻页/栏显隐）。
+        // 无时间防抖：链接跳转本身走锚页漏斗（在途导航中后到的点按 BUSY-DROP），锁即防抖，
+        // 不再另设时间窗（误吞正常点按的"点了没反应"即此类）。
         if (tryOpenLinkAt(xPx, yPx)) {
-            lastLinkTapMs = atMs
+            Logger.d("Orilumn.TAP", "tap x=${xPx.roundToInt()} y=${yPx.roundToInt()} → link")
             return
         }
-        // 手抖防抖：刚跳过链接，短窗内的三区点按吞掉（否则第二下常把新页翻走）。
-        if (ReaderMath.linkTapDebounced(atMs, lastLinkTapMs)) return
-        when (ReaderMath.tapZone(xPx, widthPx)) {
+        val zone = ReaderMath.tapZone(xPx, widthPx)
+        Logger.d("Orilumn.TAP", "tap x=${xPx.roundToInt()} y=${yPx.roundToInt()} w=${widthPx.roundToInt()} zone=$zone bars=${currentBarsVisible}")
+        when (zone) {
             -1 -> flip(-1)
             1 -> flip(1)
             else -> barsVisible = !barsVisible
@@ -277,7 +324,12 @@ fun ReaderScreen(
                         val event = awaitPointerEvent()
                         val change = event.changes.firstOrNull { it.id == down.id } ?: break
                         if (barsOwned) {
-                            if (!change.pressed) break
+                            if (!change.pressed) {
+                                // 栏区点按被栏消费——此前静默，"点了没反应"先查这条。
+                                // 附栏实测几何：若 downY 在栏条之外仍被吞，即 downInBars 误判/高度过期。
+                                Logger.d("Orilumn.TAP", "tap x=${downX.roundToInt()} y=${downY.roundToInt()} SWALLOWED by bars (viewH=${size.height} topH=${currentTopBarH} botH=${currentBotBarH})")
+                                break
+                            }
                             continue
                         }
                         // 覆盖层（上下栏按钮等）已消费的事件交给它们；被消费的抬起也不再触发点按/翻页。
@@ -290,7 +342,7 @@ fun ReaderScreen(
                             if (brightnessActive) endBrightnessGesture()
                             else if (dragDir != 0) flip(dragDir)
                             else if (upTime - downTime < ReaderMath.TAP_MAX_MS) {
-                                onTap(downX, downY, size.width.toFloat(), upTime)
+                                onTap(downX, downY, size.width.toFloat())
                             }
                             break
                         }
@@ -341,7 +393,13 @@ fun ReaderScreen(
                 .onKeyEvent { event ->
                     if (!currentKeysEnabled) return@onKeyEvent false
                     if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
-                    when (ReaderMath.keyAction(event.key)) {
+                    val action = ReaderMath.keyAction(event.key)
+                    // TODO: 状态栏打开时左右键在栏按键之间切换焦点（未实现）。
+                    // 在此之前状态栏打开即禁用左右翻页，不消费（冒泡给系统/后续焦点逻辑）。
+                    if (currentBarsVisible &&
+                        (action == ReaderMath.ReaderKeyAction.Prev || action == ReaderMath.ReaderKeyAction.Next)
+                    ) return@onKeyEvent false
+                    when (action) {
                         ReaderMath.ReaderKeyAction.Prev -> { flip(-1); true }
                         ReaderMath.ReaderKeyAction.Next -> { flip(1); true }
                         ReaderMath.ReaderKeyAction.MiddleTap -> { onTap(pxWidth / 2f, pxHeight / 2f, pxWidth); true }
@@ -355,18 +413,18 @@ fun ReaderScreen(
                 currentHost.pageProgress(pos).toFloat().coerceIn(0f, 1f)
             }
             val chapterTitle = remember(pos) { currentHost.unitTitle(pos.chapter) }
-            val lines = remember(pos, contentRevision) { currentHost.pageLines(pos) }
+            val lines = remember(pos, contentRevision, hostRevision) { currentHost.pageLines(pos) }
             // 盒背景/边框：与行同一切片口径，画布内画在文字之下（翻页即随 pos 刷新）。
-            val pageBackgrounds = remember(pos, contentRevision) {
+            val pageBackgrounds = remember(pos, contentRevision, hostRevision) {
                 runCatching { currentHost.pageBackgrounds(pos) }.getOrNull()
             }
             // 插图几何与位图：几何同步取（廉价），位图异步解码后按图缓存；
             // 翻页（新 pos）即清空旧图，避免旧页图片闪留。
-            val pageImages = remember(pos, contentRevision) {
+            val pageImages = remember(pos, contentRevision, hostRevision) {
                 runCatching { currentHost.pageImages(pos) }.getOrNull()
             }
-            var imageBitmaps by remember(pos, contentRevision) { mutableStateOf<Map<orilumn.reader.engine.skia.PageImage, ImageBitmap>>(emptyMap()) }
-            LaunchedEffect(pos, contentRevision, pageImages) {
+            var imageBitmaps by remember(pos, contentRevision, hostRevision) { mutableStateOf<Map<orilumn.reader.engine.skia.PageImage, ImageBitmap>>(emptyMap()) }
+            LaunchedEffect(pos, contentRevision, hostRevision, pageImages) {
                 val imgs = pageImages?.takeIf { it.isNotEmpty() } ?: run {
                     imageBitmaps = emptyMap()
                     return@LaunchedEffect
@@ -385,8 +443,8 @@ fun ReaderScreen(
             }
             // P3-b 背景图：按 bgKey 去重（同图多盒只解一次），异步解码后按 url 缓存；
             // 翻页（新 pos）即清空，避免旧页底图闪留。失败项直接缺席（該幅只留底色）。
-            var bgImages by remember(pos, contentRevision) { mutableStateOf<Map<String, orilumn.reader.engine.skia.DecodedImage>>(emptyMap()) }
-            LaunchedEffect(pos, contentRevision, pageBackgrounds) {
+            var bgImages by remember(pos, contentRevision, hostRevision) { mutableStateOf<Map<String, orilumn.reader.engine.skia.DecodedImage>>(emptyMap()) }
+            LaunchedEffect(pos, contentRevision, hostRevision, pageBackgrounds) {
                 val refs = pageBackgrounds?.mapNotNull { bg ->
                     bg.bgSrc?.takeIf { it.isNotBlank() }?.let { bg.bgChapterHref to it }
                 }?.distinct().orEmpty()
@@ -422,6 +480,8 @@ fun ReaderScreen(
                 imageBitmaps = imageBitmaps,
                 pageBackgrounds = pageBackgrounds,
                 bgImages = bgImages,
+                // 字重这类纯字形变更行数据完全相等，靠修订号强制重画（见 ReaderPageCanvas）。
+                contentRevision = contentRevision,
             )
             // 亮度/护眼遮罩：纯绘制于画布之上、栏之下。
             ReaderLightMask(light = light, modifier = Modifier.fillMaxSize())
@@ -443,8 +503,6 @@ fun ReaderScreen(
                 onToc = { hideBarsThen { currentOnToc() } },
                 onBookmark = { currentOnBookmark?.invoke() ?: snackbar.show("书签（规划中）") },
                 onNote = { currentOnNote?.invoke() ?: snackbar.show("笔记（规划中）") },
-                onDebug = currentOnDebug,
-                debugActive = debugActive,
                 onTopBarSize = { topBarH = it.height },
                 onBottomBarSize = { botBarH = it.height },
             )

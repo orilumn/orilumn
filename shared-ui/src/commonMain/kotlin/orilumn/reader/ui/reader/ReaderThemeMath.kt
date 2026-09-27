@@ -6,7 +6,7 @@ import kotlin.math.roundToInt
 /**
  * S29 阅读主题纯逻辑：内置阅读主题、十六进制色解析/合成、自定义预设的增删与命名，
  * 与 UI 无关，可在 commonMain 直接跑 jvmTest 验证。
- * Q1-4 收敛后平板 `AndroidReaderSettingsPanel` 亦委托本单源，故公开。平移自 Android `ReaderSettingsPanel`
+ * Q1-4 收敛后平板设置面板亦委托本单源，故公开（设置面板 R3 收敛后双端共用共享实现）。平移自 Android `ReaderSettingsPanel`
  * 的私有辅助函数（把 `android.graphics.Color.parseColor` / SharedPreferences 等平台设施
  * 换成了纯 Kotlin）。
  */

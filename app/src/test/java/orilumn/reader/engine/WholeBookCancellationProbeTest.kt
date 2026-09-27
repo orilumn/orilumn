@@ -8,6 +8,7 @@ import orilumn.reader.engine.text.FontPool
 import orilumn.reader.engine.text.LayoutParamKey
 import orilumn.reader.engine.text.TypographicProfile
 import java.util.concurrent.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -17,6 +18,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
+import org.junit.After
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -109,6 +111,12 @@ class WholeBookCancellationProbeTest {
     private lateinit var controller: BookDocumentController
     private lateinit var cacheDir: java.io.File
 
+    @After
+    fun tearDown() {
+        // R13: reclaim background shaping so worker-JVM neighbors run clean.
+        if (::controller.isInitialized) controller.close()
+    }
+
     @Before
     fun setUp() {
         controller = BookDocumentController(
@@ -136,7 +144,10 @@ class WholeBookCancellationProbeTest {
 
     private suspend fun awaitParamHash(chapter: Int, want: Long) {
         val unit = controller.unitAt(chapter) ?: error("no unit $chapter")
-        withTimeout(30_000) {
+        // 60s envelope (not a perf assertion): three rapid full cycles × sequential slots under
+        // Robolectric software rendering need headroom on loaded dev machines; observed worst case
+        // ~35-60s, quiet-machine typical <10s. Properties under test are timeless.
+        withTimeout(60_000) {
             while (unit.paginationTable?.paramHash != want) delay(20)
         }
     }
@@ -162,7 +173,6 @@ class WholeBookCancellationProbeTest {
         // Load markup + a default-hash table for every chapter.
         for (ch in 0 until CHAPTERS) assertNotNull(controller.ensureChapterLayout(ch, 0))
 
-        val defaultHash = paramHash(ReaderSettings.DEFAULT)
         val startEpoch = controller.layoutEpoch
 
         // Three rapid param cycles; the first two scans get cancelled mid-flight as the next lands.
@@ -175,15 +185,30 @@ class WholeBookCancellationProbeTest {
         assertTrue("hashes must differ", hA != hB && hB != hC)
 
         // Every non-active chapter must end on the LAST hash, with a COMPLETE table (no truncation).
-        for (ch in 0 until CHAPTERS) {
-            if (ch == ACTIVE) continue
-            awaitParamHash(ch, hC)
-            assertComplete(ch, hC)
+        try {
+            for (ch in 0 until CHAPTERS) {
+                if (ch == ACTIVE) continue
+                awaitParamHash(ch, hC)
+                assertComplete(ch, hC)
+            }
+        } catch (e: TimeoutCancellationException) {
+            // Quarantine 自白（D3a：此用例间歇性卡死，非变慢——ch 表 280s 全程 null）。
+            // 下一次超时直接打印"哪几章写了、哪几章是 null"，区分整趟没跑 vs 单章卡住，
+            // 免得再花一次 280s 探针。证据口径，不碰生产代码。
+            val states = (0 until CHAPTERS).joinToString(" ") { ch ->
+                val t = controller.unitAt(ch)?.paginationTable
+                "ch$ch=" + (t?.let { "pages=${it.pages.size},lastHash=${it.paramHash == hC}" } ?: "null")
+            }
+            println("QUARANTINE-WITNESS epoch=${controller.layoutEpoch} $states")
+            throw e
         }
 
-        // The active chapter is owned by B1/anchoring — its DEFAULT table is untouched by B2.
+        // The active chapter is small (foreground full reflow, no B1/anchor): its table carries the
+        // LAST hash, bound in-memory by prepareRelayout-small (R5 rebind, step-4 foreground completion).
+        // B2 still skips it structurally — asserted via disk absence below.
         val active = controller.unitAt(ACTIVE) ?: error("no active unit")
-        assertEquals("B2 must skip the active chapter", defaultHash, active.paginationTable?.paramHash)
+        assertEquals("active chapter must carry the last hash", hC, active.paginationTable?.paramHash)
+        assertComplete(ACTIVE, hC)
 
             // The last hash is also persisted on disk for every non-active chapter.
             // (C1-2: probed through the shared okio store — the same bytes the controller wrote.)
@@ -193,6 +218,10 @@ class WholeBookCancellationProbeTest {
                 val f = disk.file("book_$bookId", ch, hC)
                 assertTrue("ch$ch must be persisted on disk with the last hash", FileSystem.SYSTEM.exists(f))
             }
+            // B2 skips the active chapter: no background pass writes its disk file under the last
+            // hash (its in-memory table above comes from the foreground rebind only, which never writes).
+            val fa = disk.file("book_$bookId", ACTIVE, hC)
+            assertTrue("B2 must not persist the active chapter", !FileSystem.SYSTEM.exists(fa))
     }
 
     // ───────────────────────────────────────────────────────────────

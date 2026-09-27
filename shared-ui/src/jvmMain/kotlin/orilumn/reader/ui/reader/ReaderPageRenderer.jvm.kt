@@ -32,6 +32,8 @@ private class JvmReaderPageRenderer : ReaderPageRenderer {
         pageBg: Int,
         backgrounds: List<PageBackground>,
         bgImages: Map<String, DecodedImage>,
+        // 桌面直画无页缓存：修订号只经外层 key() 生效，此处忽略（与 Android 同签名）。
+        contentRevision: Int,
     ) {
         val native = canvas.nativeCanvas
         // 盒背景/边框画在文字之下（与行同一坐标系：X 相对内容区左缘，Y 已是页坐标）。

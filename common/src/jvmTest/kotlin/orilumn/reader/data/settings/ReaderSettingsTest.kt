@@ -85,6 +85,62 @@ class ReaderSettingsTest {
     }
 
     @Test
+    fun `show hidden fonts defaults hidden and round-trips`() {
+        assertFalse(ReaderSettings.DEFAULT.showHiddenFonts)
+        // 旧 JSON 无此键 → 默认隐藏。
+        assertFalse(ReaderSettings.fromJson("""{"fontSize":20}""").showHiddenFonts)
+        val on = ReaderSettings.fromJson("""{"showHiddenFonts":true}""")
+        assertTrue(on.showHiddenFonts)
+        assertEquals(on, ReaderSettings.fromJson(on.toJson()))
+    }
+
+    @Test
+    fun `show hidden fonts persists global never overlay`() {
+        // 开关纯全局：persist 直写全局，永不进按书 overlay。
+        val dir = java.nio.file.Files.createTempDirectory("orilumn-settings").toFile()
+        try {
+            val persist = PerBookSettings(
+                ReaderSettingsStore(dir.absolutePath),
+                BookSettingsStore(dir.absolutePath),
+            )
+            persist.persist(7L, ReaderSettings.DEFAULT.copy(showHiddenFonts = true))
+            assertTrue(ReaderSettingsStore(dir.absolutePath).load().showHiddenFonts)
+            // 只动开关时 overlay 保持空白（开关永不进按书层）。
+            val overlay = BookSettingsStore(dir.absolutePath).load(7L)
+            assertEquals(BookSettings.EMPTY, overlay)
+            // 读回：本书生效值继承全局开关。
+            assertTrue(persist.effectiveFor(7L).showHiddenFonts)
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `weight anchors round-trip and persist global never overlay`() {
+        assertTrue(ReaderSettings.DEFAULT.fontWeightAnchors.isEmpty())
+        val parsed = ReaderSettings.fromJson(
+            """{"fontWeightAnchors":{"F":700,"G":"x","H":50}}""",
+        )
+        // 合法 700 留下，非整数与越界丢弃。
+        assertEquals(mapOf("F" to 700), parsed.fontWeightAnchors)
+        assertEquals(parsed, ReaderSettings.fromJson(parsed.toJson()))
+        // persist 直写全局，永不进按书 overlay。
+        val dir = java.nio.file.Files.createTempDirectory("orilumn-anchors").toFile()
+        try {
+            val persist = PerBookSettings(
+                ReaderSettingsStore(dir.absolutePath),
+                BookSettingsStore(dir.absolutePath),
+            )
+            persist.persist(7L, ReaderSettings.DEFAULT.copy(fontWeightAnchors = mapOf("F" to 700)))
+            assertEquals(mapOf("F" to 700), ReaderSettingsStore(dir.absolutePath).load().fontWeightAnchors)
+            assertEquals(BookSettings.EMPTY, BookSettingsStore(dir.absolutePath).load(7L))
+            assertEquals(mapOf("F" to 700), persist.effectiveFor(7L).fontWeightAnchors)
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
     fun `json output contains all keys`() {
         val obj = ReaderSettings.DEFAULT.toJsonObject()
         listOf(

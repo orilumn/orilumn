@@ -119,8 +119,10 @@ class PaginationCacheTest {
         val unreadMtime = FileSystem.SYSTEM.metadataOrNull(fUnread)?.lastModifiedAtMillis ?: 0L
         assertTrue("read must refresh last-used so old-but-used tables outrank unread ones", oldMtime > unreadMtime)
 
-        // Push past the cap: peak 2 + 31 = 33 files → one eviction down to the 32 cap.
-        repeat(31) { i ->
+        // Push past the cap: peak 2 + (MAX-1) = MAX+1 files → one eviction down to the cap.
+        // (Cap is read from the codec constant: R7 raised it 32→256 and this test kept a stale
+        // literal — literals rot, constants don't.)
+        repeat(PaginationCacheCodec.MAX_TABLES_PER_BOOK - 1) { i ->
             val ch = 10 + i
             s.write(
                 ChapterPaginationTable.fromSlices(ch, ch.toLong(), onePage, 2, 50),
@@ -129,7 +131,7 @@ class PaginationCacheTest {
         }
 
         val bins = FileSystem.SYSTEM.list(s.dirFor(ns)).filter { it.name.endsWith(".bin") }
-        assertEquals("orphaned-param-hash files stay bounded by the per-book cap", 32, bins.size)
+        assertEquals("orphaned-param-hash files stay bounded by the per-book cap", PaginationCacheCodec.MAX_TABLES_PER_BOOK, bins.size)
         assertFalse("the least-recently-USED file is evicted", FileSystem.SYSTEM.exists(fUnread))
         assertTrue("a recently-read file survives eviction", FileSystem.SYSTEM.exists(fOld))
     }

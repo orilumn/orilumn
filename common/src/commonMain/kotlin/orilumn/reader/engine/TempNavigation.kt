@@ -1,5 +1,7 @@
 package orilumn.reader.engine
 
+import orilumn.reader.io.Logger
+
 /**
  * Shared temp-pagination navigation strategy (C1-2): pure, platform-free decisions both the
  * Android orchestration shell and the desktop host resolve identically.
@@ -26,7 +28,15 @@ fun backwardEntryAnchor(
     textLength: Long,
 ): Int {
     val tailPageStart = tailPageCharStart ?: lastSliceCharStart
-    return tailPageStart ?: (textLength - 1).coerceAtLeast(0).toInt()
+    if (tailPageStart != null) return tailPageStart
+    // 无分页信息回文末：缺陷B定论（保留）。textLength<=0（空章）与 Long→Int 溢出此前无声：
+    // 空章上游已跳过，此处记 w；超 Int 钳制并记 w。
+    if (textLength <= 0) Logger.w("Orilumn.PAGE", "backwardEntryAnchor empty chapter textLength=$textLength")
+    if (textLength - 1 > Int.MAX_VALUE) {
+        Logger.w("Orilumn.PAGE", "backwardEntryAnchor overflow textLength=$textLength")
+        return Int.MAX_VALUE
+    }
+    return (textLength - 1).coerceAtLeast(0).toInt()
 }
 
 /** Page index containing [targetChar], clamped to the LAST page when the char lies past the table's
@@ -41,7 +51,14 @@ fun pageIndexForChar(
     pages: List<ChapterPaginationTable.PageRecord>,
     targetChar: Int,
 ): Int {
-    if (pages.isEmpty()) return 0
+    // 空表查询违反"已绑定表"前置：此前静默回 0（==回章首，错得离谱），记 w。
+    // 越界 clamp 到尾页是缺陷C定论（保留）；负数 target 仍属上游 bug，记 w 不抛
+    // （抛会改缺陷C行为，见决策单）。
+    if (pages.isEmpty()) {
+        Logger.w("Orilumn.PAGE", "pageIndexForChar on empty table target=$targetChar")
+        return 0
+    }
+    if (targetChar < 0) Logger.w("Orilumn.PAGE", "pageIndexForChar negative target=$targetChar")
     val idx = pages.indexOfFirst { it.charStart <= targetChar && it.charEnd > targetChar }
     return if (idx >= 0) idx else pages.lastIndex
 }

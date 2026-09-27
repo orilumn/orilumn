@@ -224,6 +224,71 @@ class FontParserTest {
         assertNull(parser.familyNamesOf(byteArrayOf(1, 2, 3)))
     }
 
+    // ── 简体 > 繁体 > 日文 > 英文（parse 入库 + 裸表两路） ──
+
+    private fun priFont(vararg recs: NameRec): ByteArray = sfntFont(
+        cmapTable(fmt4(arrayOf(intArrayOf(0x0020, 0x007A), intArrayOf(0x4E00, 0x9FFF))), 3, 1),
+        nameTable(*recs),
+    )
+
+    @Test
+    fun `parse family prefers sc over tc over en`() {
+        val res = parser.parse(priFont(
+            NameRec(lang = 0x0409, nameId = 1, text = "TestFam"),
+            NameRec(lang = 0x0404, nameId = 1, text = "測試繁"),
+            NameRec(lang = 0x0804, nameId = 1, text = "测试简"),
+        ))
+        assertTrue(res.valid)
+        assertEquals("测试简", res.familyName)
+    }
+
+    @Test
+    fun `parse subfamily prefers sc over en`() {
+        val res = parser.parse(priFont(
+            NameRec(lang = 0x0409, nameId = 1, text = "TestFam"),
+            NameRec(lang = 0x0409, nameId = 2, text = "Bold"),
+            NameRec(lang = 0x0804, nameId = 2, text = "粗体"),
+        ))
+        assertTrue(res.valid)
+        assertEquals("粗体", res.subfamily)
+    }
+
+    @Test
+    fun `parse subfamily falls back tc then jp then en`() {
+        // 繁体（无简体）→ 取繁体。
+        var res = parser.parse(priFont(
+            NameRec(lang = 0x0409, nameId = 1, text = "TestFam"),
+            NameRec(lang = 0x0409, nameId = 2, text = "Bold"),
+            NameRec(lang = 0x0404, nameId = 2, text = "粗體"),
+        ))
+        assertEquals("粗體", res.subfamily)
+        // 日文（无中文）→ 取假名记录（CJK 计数为 0，单列一档）。
+        res = parser.parse(priFont(
+            NameRec(lang = 0x0409, nameId = 1, text = "TestFam"),
+            NameRec(lang = 0x0409, nameId = 2, text = "Bold"),
+            NameRec(lang = 0x0411, nameId = 2, text = "ボールド"),
+        ))
+        assertEquals("ボールド", res.subfamily)
+        // 纯英文 → 英文。
+        res = parser.parse(priFont(
+            NameRec(lang = 0x0409, nameId = 1, text = "TestFam"),
+            NameRec(lang = 0x0409, nameId = 2, text = "Bold"),
+        ))
+        assertEquals("Bold", res.subfamily)
+    }
+
+    @Test
+    fun `localizedName reads raw name table with same priority`() {
+        // Skija 按 style 取出的裸 name 表：17 优先、2 回退，简体胜出。
+        val table = nameTable(
+            NameRec(lang = 0x0409, nameId = 17, text = "Bold"),
+            NameRec(lang = 0x0804, nameId = 17, text = "粗体"),
+            NameRec(lang = 0x0804, nameId = 2, text = "粗体旧"),
+        )
+        assertEquals("粗体", FontParser.localizedName(table, listOf(17, 2)))
+        assertNull(FontParser.localizedName(byteArrayOf(1, 2, 3), listOf(17, 2)))
+    }
+
     // ── Synthetic font construction ------------------------------------------------------------------
 
     /** sfnt header + table directory: holds one cmap and one name table. */

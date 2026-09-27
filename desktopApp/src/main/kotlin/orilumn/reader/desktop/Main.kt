@@ -2,6 +2,8 @@ package orilumn.reader.desktop
 
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.data.settings.ReaderSettingsStore
+import orilumn.reader.data.settings.BookSettingsStore
+import orilumn.reader.data.settings.PerBookSettings
 import orilumn.reader.ui.App
 import orilumn.reader.ui.reader.ThemePreset
 import orilumn.reader.ui.shelf.ShelfBook
@@ -29,6 +31,7 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withContext
 
 private const val PREF_SORT = "shelf_sort_name"
@@ -115,6 +118,10 @@ fun main() {
 @Composable
 private fun DesktopRoot(store: DesktopShelfStore) {
     val settingsStore = remember { ReaderSettingsStore(DesktopPaths.settingsDir.absolutePath) }
+    // 双层设置（与平板同规则，共享实现）：全局 + 每书 overlay。
+    val settingsPersist = remember {
+        PerBookSettings(settingsStore, BookSettingsStore(DesktopPaths.settingsDir.absolutePath))
+    }
     val scope = rememberCoroutineScope()
 
     var settings by remember { mutableStateOf(settingsStore.load()) }
@@ -138,9 +145,16 @@ private fun DesktopRoot(store: DesktopShelfStore) {
         return
     }
 
-    fun persistSettings(next: ReaderSettings) {
+    fun persistSettings(next: ReaderSettings, bookOnly: Boolean = false) {
         settings = next
-        scope.launch(Dispatchers.IO) { settingsStore.save(next) }
+        val bookId = openBook?.id
+        scope.launch(Dispatchers.IO) { settingsPersist.persist(bookId, next, bookOnly) }
+    }
+
+    // 开书即套本书 overlay（无私设即纯全局）；回书架回到全局。
+    LaunchedEffect(openBook) {
+        val b = openBook
+        settings = withContext(Dispatchers.IO) { settingsPersist.effectiveFor(b?.id) }
     }
 
     if (openBook == null) {
@@ -165,7 +179,8 @@ private fun DesktopRoot(store: DesktopShelfStore) {
             settings = settings,
             customs = customs,
             onBack = { openBook = null },
-            onSettingsChange = ::persistSettings,
+            onSettingsChange = { persistSettings(it) },
+            onCommitBookPrivate = { persistSettings(it, bookOnly = true) },
             onSaveTheme = { preset ->
                 scope.launch {
                     store.saveTheme(preset)

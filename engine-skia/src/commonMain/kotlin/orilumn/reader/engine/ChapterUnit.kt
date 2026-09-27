@@ -77,6 +77,14 @@ class ChapterUnit(
     var shapedPageFrom: Int = -1
     var shapedPageTo: Int = -1
 
+    /** R8 (S3/D4): current pagination path marker. Written only by bind sites (never guessed):
+     *  [bindInProgress] → TEMP, [bind] (partial window) → WIN, [bindFull] → FULL,
+     *  [bindSafeEmpty]/[invalidateLayout] → null. [clearInProgress] intentionally leaves it —
+     *  it always follows a [bindFull] (finalize handoff). */
+    enum class PathKind { TEMP, FULL, WIN }
+    var pathMarker: PathKind? = null
+        private set
+
     /** The first page of the chapter (null when not laid out ahead). */
     fun firstPage(): PageSlice? = pageSlices.firstOrNull()
 
@@ -94,6 +102,17 @@ class ChapterUnit(
      *  index). Reused across flips so a block is shaped at most once per params; cleared on
      *  [invalidateLayout]. Null until the first block is shaped. */
     var blockShapeCache: MutableMap<Int, orilumn.reader.engine.laying.ParagraphShapeRef>? = null
+
+    /** R17: per-page assembled products on the disk path (page → layout + slices + table hash).
+     *  A flip to a cached page binds with zero shaping/assembly. Trimmed to the pointer
+     *  neighborhood on every store; entries carry their table hash so stale params never hit.
+     *  Cleared on [invalidateLayout]. Live binding still goes through [bind]/[bindFull] only. */
+    val pageCache = HashMap<Int, PageProduct>()
+    data class PageProduct(
+        val layout: BookLayout,
+        val slices: List<PageSlice>,
+        val paramHash: Long,
+    )
 
     /** Memoized typography-independent block structure (leaf set + global char starts), see
      *  [ChapterStructureCache]. Survives typography changes (not cleared by [invalidateLayout]) so a
@@ -113,6 +132,7 @@ class ChapterUnit(
     /** Sets the active temp pagination. Called by the controller when anchor streaming starts. */
     fun bindInProgress(p: InProgressPagination) {
         this.inProgress = p
+        this.pathMarker = PathKind.TEMP
     }
 
     /** Points [tempRenderLayout] at the current temp page's layout so [PageRenderer] draws it. */
@@ -131,9 +151,11 @@ class ChapterUnit(
         this.laidOut = true
     }
 
-    /** Fills the semantic tree, called by the controller (runs once; ignored if already set). */
+    /** Fills the semantic tree, called by the controller (runs once; ignored if already set).
+     *  二次绑定不同树即上游重复解析 bug：以往静默丢弃，标题/样式停留旧树。现在抛
+     *  （调用方双重判空保证只进一次，见控制器 ensureMarkup）。 */
     fun ensureMarkup(tree: MarkupElement, treeTitle: String) {
-        if (markup != null) return
+        check(markup == null) { "ensureMarkup twice ch=$chapterIndex" }
         markup = tree
         title = treeTitle
     }
@@ -144,6 +166,17 @@ class ChapterUnit(
         this.layout = layout
         this.pageSlices = pageSlices
         this.laidOut = true
+        this.pathMarker = PathKind.WIN
+    }
+
+    /** Binds a FULL-chapter layout result (R1): [bind] plus records the shaped window as the full
+     *  page range, so on-demand re-windowing sees every page as already shaped instead of discarding
+     *  the full result on the next flip. Partial-window binds keep using [bind] + explicit window. */
+    fun bindFull(layout: BookLayout, pageSlices: List<PageSlice>) {
+        bind(layout, pageSlices)
+        shapedPageFrom = 0
+        shapedPageTo = pageSlices.size
+        pathMarker = PathKind.FULL
     }
 
     /** Binds the prepare result. [hash] is the layout-param hash that produced it (for later
@@ -168,10 +201,12 @@ class ChapterUnit(
         inProgress = null
         tempRenderLayout = null
         blockShapeCache = null
+        pageCache.clear()
         shapedPageFrom = -1
         shapedPageTo = -1
         laidOut = false
         paramHash = -1L
+        pathMarker = null
         // Unblock any flip waiting on an in-flight birth (the session it referred to is gone).
         tempBirth?.let { it.complete(Unit) }
         tempBirth = null
@@ -181,14 +216,6 @@ class ChapterUnit(
      *  currently-bound hash. Purely structural fields (markup, cssBundle) survive. */
     fun invalidateForParam(newHash: Long) {
         if (newHash != paramHash) invalidateLayout()
-    }
-
-    /** Degraded fallback on layout failure: binds an empty layout to guarantee no crash and safe
-     * pagination (no lines). */
-    fun bindSafeEmpty() {
-        this.layout = null
-        this.pageSlices = emptyList()
-        this.laidOut = true
     }
 }
 
@@ -246,10 +273,16 @@ class ChapterStructureCache {
  * @property slice page descriptor; [PageSlice.firstLine]=0 and [PageSlice.lastLineExclusive] is this
  *   page's own line count (indices into [layout]).
  * @property layout the drawable layout that backs exactly this page's whole blocks.
+ * @property resumeBlock/resumeLine shaping origin of the page AFTER this one, i.e. the
+ *   [ForwardedPage.nextBlock]/[nextLine] output that built the successor (排版层-上/增量分页：
+ *   水位失配修复——窗口尾裁剪后水位必须倒回新尾的后继原点，否则按需/预填从陈旧水位塑形即跳页；
+ *   后向页不使用，恒为 -1）。
  */
 data class TempPage(
     val slice: PageSlice,
     val layout: BookLayout,
+    val resumeBlock: Int = -1,
+    val resumeLine: Int = 0,
 ) {
     val blockStart: Int get() = slice.blockStart
     val blockEndExclusive: Int get() = slice.blockEndExclusive

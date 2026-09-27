@@ -284,42 +284,58 @@ class DesktopShelfStore(root: File) : ShelfRepository {
     }
 
     // ---- 自定义主题预设（设置面板 S29 的保存/删除，桌面持久化） ----
+    //
+    // 与平板同形：键值存储、key `theme_presets`、值 [{label,bg,fg}] JSON 数组
+    // （去重/合并逻辑在共享 `ReaderThemeMath`，此处只做读写）；旧
+    // `settings/custom_themes.json` 一次性迁入后删除。
 
     suspend fun loadThemes(): List<ThemePreset> = withContext(Dispatchers.IO) {
-        runCatching {
-            val f = File(progressDir.parentFile, "settings/custom_themes.json")
-            if (!f.isFile) return@runCatching emptyList()
-            json.decodeFromString(
-                kotlinx.serialization.builtins.ListSerializer(ThemePresetEntry.serializer()),
-                f.readText(),
-            ).map { it.toPreset() }
-        }.getOrDefault(emptyList())
+        migrateThemesIfNeeded()
+        decodeThemes(loadPref(KEY_THEMES, "[]"))
     }
 
     suspend fun saveTheme(preset: ThemePreset) {
         withContext(Dispatchers.IO) {
-            runCatching {
-                val cur = loadThemes().filterNot { it.bg == preset.bg && it.fg == preset.fg } + preset
-                writeThemes(cur)
-            }
+            val cur = decodeThemes(loadPref(KEY_THEMES, "[]"))
+                .filterNot { it.bg == preset.bg && it.fg == preset.fg } + preset
+            savePref(KEY_THEMES, encodeThemes(cur))
         }
     }
 
     suspend fun deleteTheme(preset: ThemePreset) {
         withContext(Dispatchers.IO) {
-            runCatching { writeThemes(loadThemes().filterNot { it.bg == preset.bg && it.fg == preset.fg }) }
+            savePref(
+                KEY_THEMES,
+                encodeThemes(decodeThemes(loadPref(KEY_THEMES, "[]"))
+                    .filterNot { it.bg == preset.bg && it.fg == preset.fg }),
+            )
         }
     }
 
-    private fun writeThemes(list: List<ThemePreset>) {
-        val f = File(progressDir.parentFile, "settings/custom_themes.json").also { it.parentFile.mkdirs() }
-        atomicWrite(
-            f,
-            json.encodeToString(
-                kotlinx.serialization.builtins.ListSerializer(ThemePresetEntry.serializer()),
-                list.map { ThemePresetEntry(it.label, it.bg, it.fg) },
-            ),
-        )
+    private fun decodeThemes(text: String): List<ThemePreset> = runCatching {
+        json.decodeFromString(
+            kotlinx.serialization.builtins.ListSerializer(ThemePresetEntry.serializer()),
+            text.ifBlank { "[]" },
+        ).map { it.toPreset() }
+    }.getOrDefault(emptyList())
+
+    private fun encodeThemes(list: List<ThemePreset>): String = json.encodeToString(
+        kotlinx.serialization.builtins.ListSerializer(ThemePresetEntry.serializer()),
+        list.map { ThemePresetEntry(it.label, it.bg, it.fg) },
+    )
+
+    private fun migrateThemesIfNeeded() {
+        if (loadPref(KEY_THEMES, "").isNotEmpty()) return
+        val f = File(progressDir.parentFile, "settings/custom_themes.json")
+        if (!f.isFile) return
+        val migrated = decodeThemes(runCatching { f.readText() }.getOrDefault("[]"))
+        if (migrated.isNotEmpty()) savePref(KEY_THEMES, encodeThemes(migrated))
+        runCatching { f.delete() }
+    }
+
+    private companion object {
+        /** 自定义主题预设的键值键（与平板 SharedPreferences 同 key、同 schema）。 */
+        const val KEY_THEMES = "theme_presets"
     }
 
     // ---- 内部 ----

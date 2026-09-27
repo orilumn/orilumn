@@ -45,6 +45,11 @@ class TabletReaderHost(
 
     // ---- ReaderHost ----
 
+    /** R13: 停掉 controller 名下所有后台塑形（落盘不受影响，调用方保证先落盘）。 */
+    fun closeController() {
+        controller.close()
+    }
+
     override fun title(): String = controller.title()
 
     override fun unitTitle(chapter: Int): String {
@@ -62,6 +67,9 @@ class TabletReaderHost(
         if (!opened) {
             if (!controller.open(bookId, repository.readingState(bookId))) return@withContext null
             controller.prewarmForOpen()
+            // R7: open-book B2 dispatch (epoch-deduped; defer-gated inside) — far chapters get laid
+            // without waiting for a settings change. Host-owned orchestration; prewarm stays single-chapter.
+            controller.requestWholeBookRelayout()
             opened = true
         }
         controller.locateStart()?.let { ReaderPos(it.first, it.second) }
@@ -135,11 +143,11 @@ class TabletReaderHost(
         }
 
     override fun onSaveProgress(pos: ReaderPos) {
-        // fire-and-forget：阅读面已防抖 500ms，这里只做 leave 收口 + 落盘（复刻 legacy scheduleSave）。
-        // C1-2 存档顺序契约：先 finalizeOnLeave（临时表转正/作废）再读 displayed slice 落盘，
-        // 持久化的 char 恒是 canonical 权威（磁盘表就绪时），见 finalizeOnLeave。
+        // fire-and-forget：阅读面已防抖 500ms，这里只落盘（复刻 legacy scheduleSave）。
+        // 存档读显示位本身（slice.charStart 即章内字符，temp 与 canonical 同一坐标系，无缝 canary 背书），
+        // 不 finalize：存档不是离开，finalize 会废掉活着的 temp 会话（canonical 未就绪时整表作废），
+        // 下一翻只能拿着 detached 切片跨章——大章（B1 跑不完）会被锁死在锚点页。finalize 只属于离开路径。
         ioScope.launch {
-            controller.finalizeOnLeave(pos.chapter)
             if (bookId < 0) return@launch
             val progress = controller.pageProgress(pos.chapter, pos.slice)
             val locator = orilumn.reader.data.read.ReadingLocatorCodec.encode(pos.chapter, pos.slice.charStart)

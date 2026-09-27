@@ -54,8 +54,6 @@ data class BookSettings(
     val pageAnimationMode: String? = null,
     /** Body first-screen cover proportional scaling: true=keep aspect ratio with margins, no stretch; false=stretch to fill the whole screen. */
     val coverProportional: Boolean? = null,
-    /** Auto-continue reading on open (resume at last position). */
-    val autoContinue: Boolean? = null,
     /** Show page numbers. */
     val pageNum: Boolean? = null,
 ) {
@@ -107,7 +105,6 @@ data class BookSettings(
                     pageAnim = if (o.containsKey("pageAnim")) SettingsJson.optBoolean(o, "pageAnim", false) else null,
                     pageAnimationMode = if (o.containsKey("pageAnimationMode")) SettingsJson.optString(o, "pageAnimationMode", "") else null,
                     coverProportional = if (o.containsKey("coverProportional")) SettingsJson.optBoolean(o, "coverProportional", false) else null,
-                    autoContinue = if (o.containsKey("autoContinue")) SettingsJson.optBoolean(o, "autoContinue", false) else null,
                     pageNum = if (o.containsKey("pageNum")) SettingsJson.optBoolean(o, "pageNum", false) else null,
                 )
             } catch (_: Exception) {
@@ -158,7 +155,6 @@ data class BookSettings(
             pageAnim = rs.pageAnim,
             pageAnimationMode = rs.pageAnimationMode,
             coverProportional = rs.coverProportional,
-            autoContinue = rs.autoContinue,
             pageNum = rs.pageNum,
         )
 
@@ -178,7 +174,7 @@ data class BookSettings(
                 fontBody = next.fontBody, fontTitle = next.fontTitle, fontCode = next.fontCode,
                 useOriginalStyle = next.useOriginalStyle, pageAnim = next.pageAnim,
                 pageAnimationMode = next.pageAnimationMode, coverProportional = next.coverProportional,
-                autoContinue = next.autoContinue, pageNum = next.pageNum,
+                pageNum = next.pageNum,
             )
             return o.copy(
                 layoutTheme = o.layoutTheme?.takeUnless { it == baseline.layoutTheme },
@@ -202,7 +198,6 @@ data class BookSettings(
                 pageAnim = o.pageAnim?.takeUnless { it == baseline.pageAnim },
                 pageAnimationMode = o.pageAnimationMode?.takeUnless { it == baseline.pageAnimationMode },
                 coverProportional = o.coverProportional?.takeUnless { it == baseline.coverProportional },
-                autoContinue = o.autoContinue?.takeUnless { it == baseline.autoContinue },
                 pageNum = o.pageNum?.takeUnless { it == baseline.pageNum },
             )
         }

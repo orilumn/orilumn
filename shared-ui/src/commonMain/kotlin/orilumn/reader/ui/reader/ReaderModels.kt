@@ -1,6 +1,5 @@
 package orilumn.reader.ui.reader
 
-import orilumn.reader.engine.html.CODE_TAGS
 import orilumn.reader.engine.skia.DrawLine
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -16,9 +15,8 @@ import kotlin.math.roundToInt
  *  - [dimAlphaOf] / [warmAlphaOf] / [ReaderWarmColor]：`ReaderActivity.applyLightOverlay` 与
  *    `BrightnessOverlayView` 的遮罩 alpha 换算（纯绘制，不碰系统背光）；
  *  - [progressPercent]：底栏进度百分比（`ReaderBars`）。
- *  - [fontSlotFor]：`ReaderActivity.fontPairing` 的字体槽位路由（正文/标题/代码三槽），对齐
- *    engine-skia `SkParagraphFactory.resolveFamily` 的 CODE_TAGS 口径；
  *  - [shiftToPageFrame]：[ReaderPageCanvas] 把宿主给出的章节内**绝对 Y** 行窗口平移进页面坐标系。
+ *  （字体三槽路由已归位 `orilumn.reader.engine.text.FontSlots`，UI 层不再持有。）
  */
 object ReaderMath {
 
@@ -27,13 +25,6 @@ object ReaderMath {
 
     /** 无位移即举起判为点按的最长间隔（ms），对应旧 `FlipGestureDetector` 的 400ms。 */
     const val TAP_MAX_MS = 400L
-
-    /**
-     * 链接点按后的三区误触防抖窗（ms）：一次链接跳转成功后，此窗口内的三区点按
-     * （翻页/栏显隐）直接吞掉——手抖的第二下常落在新页空白处，否则会被判成翻页，
-     * 表现为"点链接跳走又立刻被翻回来"。链接本身不受影响（仍优先命中）。
-     */
-    const val LINK_TAP_DEBOUNCE_MS = 500L
 
     /** 亮度取值范围底部（-50：系统最暗 + 遮罩继续压暗到 0.8 alpha）。 */
     const val MIN_BRIGHTNESS = -50
@@ -51,15 +42,6 @@ object ReaderMath {
         x < width / 3f -> -1
         x > width * 2f / 3f -> 1
         else -> 0
-    }
-
-    /**
-     * 链接防抖：上次链接点按发生在 [LINK_TAP_DEBOUNCE_MS] 内时，三区动作应吞掉。
-     * 纯函数，时钟由调用方喂手势抬起时间（`uptimeMillis` 单调递增，无需平台时钟）。
-     */
-    fun linkTapDebounced(nowMs: Long, lastLinkMs: Long): Boolean {
-        val dt = nowMs - lastLinkMs
-        return lastLinkMs > 0L && dt >= 0L && dt < LINK_TAP_DEBOUNCE_MS
     }
 
     /**
@@ -131,21 +113,6 @@ object ReaderMath {
 
     /** 底栏百分比显示（0..100 整数），复刻 `ReaderBars` 的 `(fraction*100).toInt()`。 */
     fun progressPercent(fraction: Float): Int = (fraction.coerceIn(0f, 1f) * 100).toInt()
-
-    /**
-     * 字体切换的槽位路由（复刻 `ReaderActivity.fontPairing`）：code-like（monospace 或 pre/code）→ 代码槽，
-     * h1..h6 标题 → 标题槽，其余 → 正文槽；返回的即 `ReaderSettings.fontBody/fontTitle/fontCode` 的别名
-     * （空串 = 该类型跟随原书）。宿主把该别名解析进 Skia FontCollection。
-     */
-    fun fontSlotFor(tag: String?, monospace: Boolean, body: String, title: String, code: String): String {
-        val codeLike = monospace || tag in CODE_TAGS
-        val heading = tag != null && tag.length == 2 && tag[0] == 'h' && tag[1].digitToIntOrNull() != null
-        return when {
-            codeLike -> code
-            heading -> title
-            else -> body
-        }
-    }
 
     /**
      * 把章节内**绝对 Y** 的行窗口平移进页面坐标系：每行 yTop/yBottom 减去 [shift]。

@@ -1,5 +1,7 @@
 package orilumn.reader.data.read
 
+import orilumn.reader.io.Logger
+
 /**
  * Q1-9 收敛：阅读定位串编解码单源。
  *
@@ -24,11 +26,19 @@ object ReadingLocatorCodec {
             val ch = num("chapter")
             val c = num("char")
             if (ch == null && c == null) return null
+            // 缺键按 0（与旧 optInt 同义，语义保留）：但脏串曾按合法头位置恢复，记 w 区分。
+            if (ch == null || c == null) Logger.w("Orilumn.OPEN", "locator partial JSON '$t' → chapter=${ch ?: 0} char=${c ?: 0}")
+            if ((ch ?: 0) < 0 || (c ?: 0) < 0) Logger.w("Orilumn.OPEN", "locator negative '$t'")
             return (ch ?: 0) to (c ?: 0)
         }
         val parts = t.split(':')
         val ch = parts.getOrNull(0)?.toIntOrNull() ?: return null
-        val c = parts.getOrNull(1)?.toIntOrNull() ?: 0
+        // 缺 char 按 0（语义保留）；脏串记 w。
+        val c = parts.getOrNull(1)?.toIntOrNull() ?: run {
+            Logger.w("Orilumn.OPEN", "locator bad char '$t' → char=0")
+            0
+        }
+        if (ch < 0 || c < 0) Logger.w("Orilumn.OPEN", "locator negative '$t'")
         return ch to c
     }
 }

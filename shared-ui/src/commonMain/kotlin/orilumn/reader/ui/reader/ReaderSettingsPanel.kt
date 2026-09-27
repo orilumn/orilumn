@@ -10,6 +10,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -32,8 +33,10 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -48,6 +51,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusTarget
 import androidx.compose.ui.focus.onFocusChanged
@@ -68,10 +72,15 @@ import androidx.compose.ui.unit.sp
 import orilumn.reader.data.font.FontEntry
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.engine.text.TypographicProfile
+import orilumn.reader.io.Logger
+import orilumn.reader.net.FontUploadServer
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
+import kotlin.time.TimeMark
+import kotlin.time.TimeSource
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * S29 阅读设置抽屉：右停靠面板，复刻旧 `reader.html` 设置抽屉在控件与层级上的排布
@@ -112,14 +121,24 @@ fun ReaderSettingsPanel(
     onFontHide: (List<Long>) -> Unit = {},
     onFontUnhide: (List<Long>) -> Unit = {},
     onFontDelete: (String) -> Unit = {},
-    /** 本地导入按钮（平板独占；桌面隐藏；与无线导入独立，单开只显对应按钮）。 */
+    /** 本地导入按钮（桌面 FileKit / 平板 SAF，经 [onFontImport] 交壳；与无线导入独立）。 */
     canFontImport: Boolean = false,
     onFontImport: () -> Unit = {},
-    /** 无线导入按钮（平板独占；桌面隐藏；与本地导入独立，默认开、随导入区）。 */
+    /**
+     * 无线导入下钻页（双端同页）：服务走共享 [FontUploadServer]，页面进出即启停；
+     * 壳只给暂存目录 + 落盘入库回调（`onWifiUpload(path)` 内导入并刷新，线程自理）。
+     * 为空即不展示无线入口。
+     */
     canFontWifiImport: Boolean = true,
-    onFontImportWifi: () -> Unit = {},
+    wifiUploadDir: String = "",
+    onWifiUpload: (String) -> Unit = {},
     /** 已导入区是否显示（平板=true；桌面=false，仅系统字体）。 */
     showImportedSection: Boolean = true,
+    /**
+     * 亮度滑块上限（真背光可用时 100；仅遮罩时壳传 0，上限钳到遮罩段 -50..0，
+     * 调亮物理不可达也不给滑。缺省 100，所有现调用方零改动）。
+     */
+    brightnessMax: Int = 100,
 ) {
     val p = paletteFor(settings.scheme)
     val stack = remember { mutableStateListOf<Sub>(Sub.Home) }
@@ -169,7 +188,21 @@ fun ReaderSettingsPanel(
         // 与目录同一套 PanelNav：activeIdx 共享高亮，kbHold 仲裁悬停，有效行 = 非 disabled。
         val listState = remember(current) { LazyListState() }
         val nav = remember(current) { PanelNav().apply { activeIdx = 0 } }
-        LaunchedEffect(mounted, current) { if (mounted) drawerFr.requestFocus() }
+        // 字体页按钮环焦点（null=字体区，activeIdx 生效；否则为环下标，上下箭头够不着按钮）：
+        // 环 = ‹返回/X/导入钮…，Tab 循环，按钮区左右切换，进字体页即复位。
+        var fontButtonFocus by remember { mutableStateOf<Int?>(null) }
+        /** 字重下钻目标族（null=不在字重页；切子页即清）。 */
+        var weightPickFamily by remember { mutableStateOf<String?>(null) }
+        LaunchedEffect(current) {
+            fontButtonFocus = null
+            // 字重页进入时目标族保留（先设值后压栈，同一次重组；离页才清）。
+            if (current != Sub.WeightPicker) weightPickFamily = null
+        }
+        LaunchedEffect(mounted, current, visible) {
+            // 取焦点只在面板可见时：退出（visible=false）即便因子页栈重置导致 current 变化，
+            // 也不得抢回焦点——否则正好压住阅读面的夺回（二级面板遮罩退出后方向键失灵即此）。
+            if (visible) drawerFr.requestFocus()
+        }
         fun onEscape() {
             if (stack.size > 1) stack.removeAt(stack.lastIndex) else onDismiss()
         }
@@ -187,15 +220,33 @@ fun ReaderSettingsPanel(
         // F4a 字体行模型（键与渲染共用同一份，1:1 对齐 activeIdx）。
         val slotKey: String = pickSlot ?: "fontBody"
         val fontRows: List<FontPanelRow> = remember(current, fontEntries, s, pickSlot, canFontImport, canFontWifiImport, showImportedSection) {
-            if (current == Sub.TextFont) buildFontRows(fontEntries, fieldOf(s, slotKey), canFontImport, showImportedSection, canFontWifiImport)
+            if (current == Sub.TextFont) buildFontRows(fontEntries, fieldOf(s, slotKey), canFontImport, showImportedSection, canFontWifiImport, s.showHiddenFonts)
             else emptyList()
         }
+        /** 字体行进入：多字重档下钻字重页，单一下钻直接写入槽位（渲染点按与键盘共用）。 */
+        fun enterFontRow(family: String) {
+            val multi = fontEntries.filter { it.family == family }.weightChoices().size > 1
+            if (multi) {
+                weightPickFamily = family
+                stack.add(Sub.WeightPicker)
+            } else {
+                onCommitTypography(setField(s, slotKey, family))
+            }
+        }
+        // 无线下钻页可用性：能力位开且壳给了暂存目录。
+        val wifiReady = canFontWifiImport && wifiUploadDir.isNotEmpty()
+        // 字体行号换算：按钮区固定在列表外，懒索引 = 行号 - fixedCount；
+        // 上下箭头 lo 钳到首字体行（按钮够不着）。
+        val fontFixedCount = fontRows.takeWhile { it is FontPanelRow.Toggle || it is FontPanelRow.Import }.size
+        val fontStartIdx = fontRows.indexOfFirst { it is FontPanelRow.FollowOriginal }
+            .takeIf { it >= 0 } ?: 0
         // 入口行（正文/标题/代码）展示名：族 → 本地化展示名（系统/导入同表）；
         // 缺席（如已删族仍被槽位引用）回退族名本身 + CSS 通用族标签（不裸奔英文原族名）。
         val fontDisplayByFamily = remember(fontEntries) { fontEntries.associate { it.family to it.display } }
-        // flat idx → LazyColumn 位置（阅读主题网格每 3 格并一行；亮度页手势开关同行）。
+        // flat idx → LazyColumn 位置（阅读主题网格每 3 格并一行；亮度页手势开关同行；
+        // 字体页按钮区在列表外，懒索引 = 行号 - fixedCount）。
         val listPosOf: (Int) -> Int = when (current) {
-            Sub.ReadingTheme -> { idx ->
+            Sub.TextFont -> { idx -> idx - fontFixedCount }            Sub.ReadingTheme -> { idx ->
                 val n = allThemes.size
                 val chunks = (n + GridCols - 1) / GridCols
                 if (idx < n) idx / GridCols else chunks + (idx - n)
@@ -232,17 +283,34 @@ fun ReaderSettingsPanel(
             }
             Sub.TextFont -> fontRows.map { row ->
                 when (row) {
+                    is FontPanelRow.Toggle ->
+                        // 开关走无重排提交（纯全局设置，直写全局 + 落盘；见 showHiddenFonts）。
+                        ItemKey(onEnter = { onCommitLight(s.copy(showHiddenFonts = !s.showHiddenFonts)) })
                     is FontPanelRow.FollowOriginal ->
                         ItemKey(onEnter = { onCommitTypography(setField(s, slotKey, "")) })
                     is FontPanelRow.Import ->
-                        // 双按钮同行：回车走主动作（本地导入优先；单开无线时走无线；桌面不渲染此行）。
-                        ItemKey(onEnter = { if (canFontImport) onFontImport() else onFontImportWifi() })
-                    is FontPanelRow.Header, is FontPanelRow.EmptyHint ->
-                        ItemKey(enabled = false)
+                        // 双按钮同行：回车走主动作（本地导入优先；单开无线时进无线下钻页）。
+                        ItemKey(onEnter = { if (canFontImport) onFontImport() else stack.add(Sub.WifiImport) })
                     is FontPanelRow.Entry ->
-                        ItemKey(onEnter = { onCommitTypography(setField(s, slotKey, row.family)) })
+                        ItemKey(onEnter = { enterFontRow(row.family) })
                 }
             }
+            Sub.WeightPicker -> {
+                // 字重档（无自动行：点即写入槽位 + 锚点并停留本页；键与渲染同序，首档即键 0）。
+                val fam = weightPickFamily
+                if (fam == null) {
+                    listOf(ItemKey())
+                } else {
+                    val opts = fontEntries.filter { it.family == fam }.weightChoices()
+                    opts.map { (w, _) ->
+                        ItemKey(onEnter = {
+                            onCommitTypography(setField(s, slotKey, fam).copy(fontWeightAnchors = s.fontWeightAnchors + (fam to w)))
+                        })
+                    }
+                }
+            }
+            // 无线下钻页是纯展示页（地址 + 说明）：键盘占一位空键，只保焦点计数不崩。
+            Sub.WifiImport -> listOf(ItemKey())
             Sub.Spacing -> listOf(
                 sliderKey(s.firstLineIndent, 0.0, 10.0, 1.0,
                     apply = { v -> onPreview(s.copy(firstLineIndent = v)); onCommitTypography(s.copy(firstLineIndent = v)) },
@@ -332,14 +400,14 @@ fun ReaderSettingsPanel(
                         else {
                             val sysPct = readSystemBrightness()
                             onCommitLight(s.copy(brightnessFollowSystem = false,
-                                brightness = (sysPct + s.brightnessOffset).coerceIn(-50, 100)))
+                                brightness = (sysPct + s.brightnessOffset).coerceIn(-50, brightnessMax)))
                         }
                     }),
                     sliderKey(s.brightnessOffset.toDouble(), -20.0, 20.0, 1.0,
                         apply = { v -> onCommitLight(s.copy(brightnessOffset = v.roundToInt())) },
                         fmt = { v -> if (v > 0) "+${v.roundToInt()}" else "${v.roundToInt()}" },
                         enabled = follow),
-                    sliderKey(s.brightness.toDouble(), -50.0, 100.0, 1.0,
+                    sliderKey(s.brightness.toDouble(), -50.0, brightnessMax.toDouble(), 1.0,
                         apply = { v -> onCommitLight(s.copy(brightness = v.roundToInt())) },
                         fmt = { "${it.roundToInt()}%" },
                         enabled = !follow),
@@ -361,17 +429,122 @@ fun ReaderSettingsPanel(
         }
         // itemCount 变化（字体/预设增删）时钳制 active。
         LaunchedEffect(keys.size) { if (keys.isNotEmpty()) nav.activeIdx = (nav.activeIdx ?: 0).coerceIn(keys.indices) }
+        // 进字体页首落首字体行（按钮行不进上下序列；切回本页同样归位）。
+        LaunchedEffect(current, fontStartIdx) {
+            if (current == Sub.TextFont && keys.isNotEmpty()) nav.activeIdx = fontStartIdx.coerceIn(keys.indices)
+        }
         fun isEnabled(i: Int) = keys.getOrNull(i)?.enabled == true
         fun visible(i: Int, dir: Int) = scope.ensureListVisible(listState, listPosOf(i), dir)
-        fun moveActive(dir: Int) = nav.move(dir, 1, keys.size, ::isEnabled) { visible(it, dir) }
+        // ---- 字体页焦点区（仅 TextFont 页）：按钮环(null=字体区) ----
+        // 按钮不是字体：上下箭头够不着（首行下标见上），Tab 在环内循环，环内左右切换。
+        // 环顺序：‹返回/X/[本地/无线/开关…]；下标即 Tab 顺序，null=字体区。
+        val fontButtonRing: List<Pair<String, () -> Unit>> =
+            if (current == Sub.TextFont) buildList {
+                add("back" to ::onEscape)
+                add("close" to onDismiss)
+                if (fontRows.any { it is FontPanelRow.Import }) {
+                    if (canFontImport) add("local" to onFontImport)
+                    if (wifiReady) add("wifi" to { stack.add(Sub.WifiImport) })
+                    add("toggle" to { onCommitLight(s.copy(showHiddenFonts = !s.showHiddenFonts)) })
+                } else if (fontRows.any { it is FontPanelRow.Toggle }) {
+                    add("toggle" to { onCommitLight(s.copy(showHiddenFonts = !s.showHiddenFonts)) })
+                }
+            } else emptyList()
+        /** 在按钮区：true（上下/回车/左右走环，不碰字体行）。 */
+        fun inFontButtons() = current == Sub.TextFont && fontButtonFocus != null
+        /** 落字体行：清按钮焦点 + 高亮持有 + 跟随滚动（单步移动用，只越界才滚）。 */
+        fun landFont(idx: Int, dir: Int) {
+            fontButtonFocus = null
+            nav.land(idx)
+            visible(idx, dir)
+        }
+        /**
+         * 跳转滚动（PgUp/PgDn/Home/End 用，用户层）：直达目标，焦点行恒可见。
+         * 焦点与滚到顶的不是同一行时（如 PgUp 取新底端）分开传。
+         * 注意：按钮区已搬出列表，LazyColumn 里全是字体行，不需要任何像素垫付——
+         * 传 scrollOffset 会把目标行顶出视口之外（此前按"垫掉吸顶按钮高度"传了一行
+         * 高度，PgDn 恒多翻约两行，即此 bug）。
+         * PgUp 额外保证（用户层）：焦点行恒为可见区最后一行且底部完整可见（与下箭头
+         * 的完整可见保证同口径）——只 scrollToItem(top) 会把焦点行落在半裁剪的底边，
+         * 故按溢出像素再 scrollBy 一小段，把焦点行底对齐视口底（焦点仍是最后一行）。
+         */
+        fun jumpFontTo(focus: Int, top: Int) {
+            if (current != Sub.TextFont || keys.isEmpty()) return
+            val last = keys.lastIndex
+            if (fontStartIdx > last) return
+            val f = focus.coerceIn(fontStartIdx, last)
+            val t = top.coerceIn(fontStartIdx, last)
+            fontButtonFocus = null
+            nav.land(f)
+            scope.launch {
+                runCatching {
+                    listState.scrollToItem(listPosOf(t))
+                    if (f != t) {
+                        val fLazy = listPosOf(f)
+                        val info = listState.layoutInfo
+                        val item = info.visibleItemsInfo.firstOrNull { it.index == fLazy }
+                        if (item != null) {
+                            val overflow = item.offset + item.size - info.viewportEndOffset
+                            if (overflow > 0) listState.scrollBy(overflow.toFloat())
+                        } else {
+                            listState.scrollToItem(fLazy)
+                        }
+                    }
+                }
+            }
+        }
+        /** 整页翻：落到新顶端行（下翻）/新底端行（上翻），焦点跟去；可视行剔掉吸顶按钮。 */
+        // 连发节流（用户层）：桌面按住 PgDn/PgUp 会连发 KeyDown（Compose 原样透传、
+        // 无 repeat 标记可区分），一次稍长的按压翻掉多页；300ms 内只认第一次，
+        // 有意连打仍以约 3 页/秒推进。
+        var lastPageAt by remember { mutableStateOf<TimeMark?>(null) }
+        fun pageFonts(dir: Int) {
+            if (current != Sub.TextFont || keys.isEmpty()) return
+            if ((lastPageAt?.elapsedNow() ?: PageThrottleMs.milliseconds) < PageThrottleMs.milliseconds) return
+            lastPageAt = TimeSource.Monotonic.markNow()
+            // 懒索引换算回行号（按钮区在列表外）。
+            val vis = listState.layoutInfo.visibleItemsInfo.map { it.index + fontFixedCount }.filter { it >= fontStartIdx }
+            if (dir > 0) {
+                val target = (vis.maxOrNull()?.plus(1)) ?: fontStartIdx
+                jumpFontTo(target, target)
+            } else {
+                // 整页上翻：新底端 = 旧顶端上一行，新顶端再往上翻一页。
+                val page = vis.size.coerceAtLeast(1)
+                val bottom = (vis.minOrNull() ?: (fontStartIdx + 1)) - 1
+                jumpFontTo(bottom, bottom - page + 1)
+            }
+        }
+        fun moveActive(dir: Int) = if (current == Sub.TextFont)
+            nav.move(dir, 1, keys.size, ::isEnabled, lo = fontStartIdx) { visible(it, dir) }
+        else nav.move(dir, 1, keys.size, ::isEnabled) { visible(it, dir) }
         fun onEnterActive() {
+            if (inFontButtons()) {
+                fontButtonFocus?.let { fontButtonRing.getOrNull(it)?.second?.invoke() }
+                return
+            }
             nav.activeIdx?.let { keys.getOrNull(it)?.takeIf { k -> k.enabled }?.onEnter?.invoke() }
         }
         fun onLeftActive() {
+            if (inFontButtons()) {
+                val n = fontButtonRing.size
+                if (n > 0) fontButtonFocus = (((fontButtonFocus ?: 0) - 1 + n) % n)
+                return
+            }
             nav.activeIdx?.let { keys.getOrNull(it)?.takeIf { k -> k.enabled }?.onLeft?.invoke() }
         }
         fun onRightActive() {
+            if (inFontButtons()) {
+                val n = fontButtonRing.size
+                if (n > 0) fontButtonFocus = (((fontButtonFocus ?: 0) + 1) % n)
+                return
+            }
             nav.activeIdx?.let { keys.getOrNull(it)?.takeIf { k -> k.enabled }?.onRight?.invoke() }
+        }
+        /** Tab：按钮环循环（一轮末回字体区）；非字体页不管。 */
+        fun onTabActive() {
+            if (current != Sub.TextFont || fontButtonRing.isEmpty()) return
+            val cur = fontButtonFocus
+            fontButtonFocus = if (cur == null) 0 else if (cur + 1 < fontButtonRing.size) cur + 1 else null
         }
         fun onUpActive() {
             val a = nav.activeIdx ?: return
@@ -403,6 +576,9 @@ fun ReaderSettingsPanel(
             val drawerPx = remember(drawerWidth, density) { with(density) { drawerWidth.toPx() } }
             Box(modifier = Modifier.fillMaxSize()) {
                 // Dark mask over the area left of the panel; shown only after docking, faded before sliding out.
+                // 退场动画中（mounted 但 !visible）遮罩立即停止拦截：否则关闭后 300ms 内的点按
+                // 被退场中的遮罩吃掉（"关面板后点左侧没反应"），还顺带触发第二次全书重排。
+                // 诊断：遮罩点按落盘，与 Orilumn.TAP 对账。
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -410,7 +586,11 @@ fun ReaderSettingsPanel(
                         .background(Color.Black.copy(alpha = PanelMaskAlpha))
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() }, indication = null,
-                            onClick = onDismiss,
+                            enabled = visible,
+                            onClick = {
+                                Logger.d("Orilumn.TAP", "panel-mask tap → dismiss")
+                                onDismiss()
+                            },
                         ),
                 )
                 Column(
@@ -423,15 +603,35 @@ fun ReaderSettingsPanel(
                         .focusRequester(drawerFr)
                         .focusTarget()
                         .panelKeyEvents(
-                            onUp = ::onUpActive,
-                            onDown = ::onDownActive,
+                            onUp = {
+                                if (inFontButtons()) jumpFontTo(keys.lastIndex, keys.lastIndex)
+                                else onUpActive()
+                            },
+                            onDown = {
+                                if (inFontButtons()) jumpFontTo(fontStartIdx, fontStartIdx)
+                                else onDownActive()
+                            },
                             onEnter = ::onEnterActive,
                             onEscape = ::onEscape,
                             onLeft = ::onLeftActive,
                             onRight = ::onRightActive,
+                            onTab = ::onTabActive,
+                            onPgUp = { pageFonts(-1) },
+                            onPgDn = { pageFonts(1) },
+                            onHome = {
+                                if (current == Sub.TextFont && keys.isNotEmpty()) {
+                                    jumpFontTo(fontStartIdx, fontStartIdx)
+                                }
+                            },
+                            onEnd = {
+                                if (current == Sub.TextFont && keys.isNotEmpty()) {
+                                    jumpFontTo(keys.lastIndex, keys.lastIndex)
+                                }
+                            },
                         )
                         // 点按消费（不抢焦点）：杂散点按不穿透到遮罩关闭层。
-                        .pointerInput(Unit) { detectTapGestures(onTap = {}) },
+                        // 仅面板可见时消费——退场动画中已滑出屏幕，不再占右侧触摸。
+                        .pointerInput(visible) { if (visible) detectTapGestures(onTap = {}) },
                 ) {
                     Box(
                         modifier = Modifier
@@ -442,11 +642,16 @@ fun ReaderSettingsPanel(
                     ) {
                         if (stack.size > 1) {
                             // Larger tap target so the back tap is never missed and doesn't fall through to the close layer.
+                            // 字体页 Tab 环焦点态同行级高亮；按钮不抢焦点（回车留给导航）。
+                            val backFocused = current == Sub.TextFont &&
+                                fontButtonFocus?.let { fontButtonRing.getOrNull(it)?.first } == "back"
                             Box(
                                 modifier = Modifier
                                     .align(Alignment.CenterStart)
                                     .size(46.dp)
                                     .clip(RoundedCornerShape(6.dp))
+                                    .background(if (backFocused) p.rowActive else Color.Transparent)
+                                    .focusProperties { canFocus = false }
                                     .clickable { stack.removeAt(stack.lastIndex) },
                                 contentAlignment = Alignment.Center,
                             ) {
@@ -455,9 +660,14 @@ fun ReaderSettingsPanel(
                         }
                         Text(current.title, color = p.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
                             modifier = Modifier.align(Alignment.Center))
+                        val closeFocused = current == Sub.TextFont &&
+                            fontButtonFocus?.let { fontButtonRing.getOrNull(it)?.first } == "close"
                         Text("✕", color = p.text, fontSize = 18.sp, modifier = Modifier
                             .align(Alignment.CenterEnd).padding(10.dp)
-                            .clip(RoundedCornerShape(6.dp)).clickable(onClick = onDismiss))
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(if (closeFocused) p.rowActive else Color.Transparent)
+                            .focusProperties { canFocus = false }
+                            .clickable(onClick = onDismiss))
                     }
                     HLine(p, modifier = Modifier.fillMaxWidth())
                     Box(modifier = Modifier.weight(1f)) {
@@ -474,11 +684,46 @@ fun ReaderSettingsPanel(
                                 onUnhide = onFontUnhide,
                                 onDelete = onFontDelete,
                                 onImport = onFontImport,
-                                onImportWifi = onFontImportWifi,
+                                // 无线走面板内下钻（返回‹/Esc 即回字体列表），不经壳弹框。
+                                onImportWifi = { stack.add(Sub.WifiImport) },
+                                // 多字重行点按下钻字重页（与键盘共用 enterFontRow 口径）。
+                                onPickWeight = { family ->
+                                    weightPickFamily = family
+                                    stack.add(Sub.WeightPicker)
+                                },
                                 showLocalButton = canFontImport,
-                                showWifiButton = canFontWifiImport,
+                                showWifiButton = wifiReady,
+                                showHidden = s.showHiddenFonts,
+                                onToggleHidden = { onCommitLight(s.copy(showHiddenFonts = !s.showHiddenFonts)) },
+                                importFocusedKey = fontButtonFocus?.let { fontButtonRing.getOrNull(it)?.first }
+                                    ?.takeIf { it == "local" || it == "wifi" || it == "toggle" },
+                                toggleFocused = fontButtonFocus?.let { fontButtonRing.getOrNull(it)?.first } == "toggle",
                                 onMouseMove = onMove,
                                 listState = listState,
+                            )
+                            Sub.WeightPicker -> {
+                                val fam = weightPickFamily
+                                if (fam != null) {
+                                    val opts = fontEntries.filter { it.family == fam }.weightChoices()
+                                    // 非本槽位当前字体只留键盘/悬停高亮，不标金色选中。
+                                    val isCurrent = fieldOf(s, slotKey) == fam
+                                    WeightPickerPage(
+                                        options = opts,
+                                        selectedWeight = if (isCurrent) s.fontWeightAnchors[fam] else null,
+                                        nav = nav,
+                                        p = p,
+                                        onPickWeight = { w ->
+                                            onCommitTypography(setField(s, slotKey, fam).copy(fontWeightAnchors = s.fontWeightAnchors + (fam to w)))
+                                        },
+                                        onMouseMove = onMove,
+                                        listState = listState,
+                                    )
+                                }
+                            }
+                            Sub.WifiImport -> WifiImportPage(
+                                uploadDirPath = wifiUploadDir,
+                                onUploadFile = onWifiUpload,
+                                p = p,
                             )
                             Sub.Spacing -> SpacingPage(s, keys, nav, onMove, listState, p, onPreview, onCommitTypography)
                             Sub.Theme -> ThemePage(s, keys, nav, onMove, listState, onCommitTypography, commitBook, p)
@@ -488,7 +733,7 @@ fun ReaderSettingsPanel(
                                 onSaveTheme = onSaveTheme,
                                 onDeleteTheme = onDeleteTheme,
                                 p)
-                            Sub.Brightness -> BrightnessPage(s, keys, nav, onMove, listState, onCommitLight, readSystemBrightness, p)
+                            Sub.Brightness -> BrightnessPage(s, keys, nav, onMove, listState, onCommitLight, readSystemBrightness, p, brightnessMax)
                             Sub.AnimMode -> AnimModePage(s, keys, nav, onMove, listState, onCommitLight, p)
                         }
                     }
@@ -498,8 +743,65 @@ fun ReaderSettingsPanel(
     }
 }
 
+/**
+ * WIFI 导入下钻页（双端同页）：服务走共享 [FontUploadServer]（与旧两端对话框同一实现、
+ * 同一端口约定），进页启动、离页停止（暂存清理沿服务 `stop` 语义）。
+ * 壳只给暂存目录 + 落盘入库回调（线程自理）；返回‹/Esc 即回字体列表（栈导航自带）。
+ */
+@Composable
+private fun WifiImportPage(
+    uploadDirPath: String,
+    onUploadFile: (String) -> Unit,
+    p: Palette,
+) {
+    val scope = rememberCoroutineScope()
+    var addr by remember { mutableStateOf<String?>(null) }
+    var startFailed by remember { mutableStateOf(false) }
+    val server = remember(uploadDirPath) {
+        FontUploadServer(uploadDirPath) { _, path ->
+            scope.launch { onUploadFile(path) }
+        }
+    }
+    DisposableEffect(server) {
+        val a = server.start()
+        if (a == null) startFailed = true else addr = a
+        onDispose { server.stop() }
+    }
+    Column(modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 10.dp)) {
+        when {
+            startFailed -> Text(
+                text = "启动服务失败：请确认设备已连接到 Wi-Fi，然后重试。",
+                color = p.text, fontSize = 14.sp,
+            )
+            addr == null -> Text("正在启动服务器…", color = p.muted, fontSize = 14.sp)
+            else -> {
+                Text(
+                    text = "导入设备与当前设备必须在同一个局域网内。在导入设备浏览器中打开以下地址：",
+                    color = p.text, fontSize = 14.sp,
+                )
+                Spacer(Modifier.height(10.dp))
+                Box(
+                    modifier = Modifier.fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(p.borderSoft)
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                ) {
+                    SelectionContainer {
+                        Text(addr ?: "", color = p.text, fontSize = 16.sp)
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                Text("支持 .ttf / .otf / .ttc 格式字体文件，可多选。", color = p.muted, fontSize = 12.sp)
+                Spacer(Modifier.height(4.dp))
+                Text("本机会自动剔除重复导入，并合并不同字重的字体。", color = p.muted, fontSize = 12.sp)
+            }
+        }
+        Spacer(Modifier.height(24.dp))
+    }
+}
+
 private enum class Sub(val title: String) {
-    Home("设置"), Text("文字"), TextFont("字体管理"), Spacing("间距"),
+    Home("设置"), Text("文字"), TextFont("字体管理"), WeightPicker("字重"), WifiImport("WIFI 导入"), Spacing("间距"),
     Theme("排版主题"), ReadingTheme("阅读主题"), ThemePresetMgr("预设管理"),
     Brightness("亮度"), AnimMode("翻页动画模式"),
 }
@@ -886,6 +1188,7 @@ private fun BrightnessPage(
     commit: (ReaderSettings) -> Unit,
     readSystemBrightness: () -> Int,
     p: Palette,
+    brightnessMax: Int = 100,
 ) {
     val follow = s.brightnessFollowSystem
     val labelW = sliderLabelWidth(listOf("亮度偏移", "亮度"), p)
@@ -899,7 +1202,7 @@ private fun BrightnessPage(
                         // When turning off follow-system, avoid a brightness jump: reset the main brightness slider with "current system brightness + brightness offset".
                         val sysPct = readSystemBrightness()
                         commit(s.copy(brightnessFollowSystem = false,
-                            brightness = (sysPct + s.brightnessOffset).coerceIn(-50, 100)))
+                            brightness = (sysPct + s.brightnessOffset).coerceIn(-50, brightnessMax)))
                     }
                 }, p, nav = nav, index = 0)
         }
@@ -909,7 +1212,7 @@ private fun BrightnessPage(
             nav = nav, index = 1) }
         // Main "brightness" slider: 0..100 writes system brightness as a percentage; -50..0 uses a black overlay to dim below the system minimum.
         // When follow-system is on, the main slider is greyed out; the "brightness offset" then adds/subtracts a percentage around system brightness.
-        item { UiSliderRow("亮度", -50.0, 100.0, 1.0, s.brightness.toDouble(), { "${it.roundToInt()}%" },
+        item { UiSliderRow("亮度", -50.0, brightnessMax.toDouble(), 1.0, s.brightness.toDouble(), { "${it.roundToInt()}%" },
             { commit(s.copy(brightness = it.roundToInt())) }, { commit(s.copy(brightness = it.roundToInt())) }, p, enabled = !follow, labelWidth = labelW,
             nav = nav, index = 2) }
         item {
@@ -1215,5 +1518,8 @@ private const val PanelMaskAlpha = 0.4f
 
 /** Panel slide and mask dim/lighten share this duration so they stay synchronized. */
 private const val PanelAnimMs = 280
+
+/** 字体列表整页翻连发节流窗口（桌面 PgDn/PgUp 按住连发，一次按压只认一次）。 */
+private const val PageThrottleMs = 300
 
 private val CancelRed = Color(0xFFD9534F)

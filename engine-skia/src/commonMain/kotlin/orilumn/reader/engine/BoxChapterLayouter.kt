@@ -63,15 +63,7 @@ import kotlinx.coroutines.runBlocking
  */
 enum class PaginationMode { LINE_DISK, BLOCK_TEMP }
 
-/** P13 (U6k): default worker count for chunk-parallel canonical shaping — at least 2, never more
- *  than 4, never stealing the last core (the foreground flip / UI stays on its own core).
- *  R6: CPU 计数经 [platformCpuCount] expect/actual（commonMain 不可见 `Runtime`）。 */
-private val DEFAULT_CHUNK_PARALLELISM: Int = maxOf(
-    2,
-    minOf(4, maxOf(1, platformCpuCount() - 1)),
-)
-
-/** R6: 平台 CPU 核数（仅 chunk 并行度启发式用；iOS actual 后续补）。 */
+/** R6: 平台 CPU 核数（调度塑形槽预算用；iOS actual 后续补）。 */
 internal expect fun platformCpuCount(): Int
 
 /**
@@ -185,7 +177,7 @@ class BoxChapterLayouter(
         val hidden = orilumn.reader.engine.laying.HiddenCheck { styleMap[it]?.displayNone == true }
         // P3-c: 生成内容 phase-1（ gating 命中才整树求值；伪样式按需缓存，重轻同输入同输出）。
         val genOf = genOfFor(markup, authorSheets, { styleMap[it] }, engine, hidden)
-        val structure = boxLayouter.layoutBoxes(markup, contentW, styleMap, classify, genOf = genOf)
+        val structure = boxLayouter.layoutBoxes(markup, contentW, styleMap, classify, imageLoader, chapterHref, genOf = genOf)
         val leaves = collectLeaves(structure.boxes)
         return buildPrepareResult(markup, styleMap, structure, leaves, classify, hidden, genOf)
     }
@@ -477,59 +469,9 @@ class BoxChapterLayouter(
         return completeFullLayout(prepare, shapes, contentH, profile)
     }
 
-    /**
-     * U6k (P13): shape the whole chapter's blocks across parallel chunk workers, then stitch and
-     * paginate exactly like [fullLayout]. The parallel work is ONLY the expensive per-block
-     * skia shaping — [prepare] (the heavy whole-chapter cascade) already computed the box
-     * geometry once, and [completeFullLayout] rebuilds the continuous line flow from that same
-     * structure, so the produced slices are **bit-identical to sequential canonical**: the chunk
-     * boundary only re-orders WHERE the shaping happens, never the geometry. The single check
-     * [checkpoint] (re-invoked per block in every chunk, like the sequential path) lets a background
-     * cancel abandon with ~chunk granularity, ≤1 chapter as required by P2/P7.
-     *
-     * Threading: chunks run as coroutines on `Dispatchers.Default` capped to k-way
-     * parallelism (R6, ex daemon-thread pool; no priority API in common). Worker count degrades
-     * naturally on fewer cores; parallelism=1 runs in-order on the caller thread (test/debug). [prepare] is
-     * read-only across workers (disjoint leaves), so no lock is needed.
-     */
-    fun fullLayoutChunked(
-        prepare: ChapterPrepareResult,
-        profile: TypographicProfile,
-        contentW: Int,
-        contentH: Int,
-        parallelism: Int = DEFAULT_CHUNK_PARALLELISM,
-        checkpoint: () -> Unit = {},
-    ): ChapterLayouter.ChapterLayoutProduct {
-        val leaves = prepare.leaves
-        val total = leaves.size
-        if (total == 0) return fullLayout(prepare, profile, contentW, contentH, checkpoint)
-        val k = parallelism.coerceIn(1, total)
-        if (k == 1) return fullLayout(prepare, profile, contentW, contentH, checkpoint)
-        val chunkSize = (total + k - 1) / k
-        val ranges = ArrayList<IntRange>(k)
-        for (s in 0 until total step chunkSize) ranges.add(s until minOf(s + chunkSize, total))
-        val carriers = firstCarrierLeaves(leaves)
-        // R6: 结构化并发替代 Executor/Future——异常（含 checkpoint 的 CancellationException）
-        // 经 awaitAll 原样抛出并取消同批兄弟协程，无需 Future 解包；调用线程阻塞等齐
-        //（语义同旧 futures.get）。线程优先级 nicety 在 common 无 API，chunk 仍限 k 路，
-        // 不与前台抢跑的性质由 limitedParallelism 保持。
-        val shapes = runBlocking(Dispatchers.Default.limitedParallelism(k)) {
-            ranges.map { rng ->
-                async {
-                    rng.map { bi ->
-                        checkpoint()
-                        shapeLeaf(leaves[bi], prepare.styleMap, profile,
-                            listMarkerFor(leaves[bi].el, prepare.styleMap::get, carriers), genOf = prepare.genOf,
-                            floatLead = leaves[bi].floatLead, classify = prepare.classify, hidden = prepare.hidden)
-                    }
-                }
-            }.awaitAll().flatten()
-        }
-        return completeFullLayout(prepare, shapes, contentH, profile)
-    }
-
-    /** Shared completion of [fullLayout]/[fullLayoutChunked]: line rebuild, drawable, pagination,
-     *  block-range backfill — the parts that must stay identical regardless of shaping order. */
+    /** Shared completion of [fullLayout]: line rebuild, drawable, pagination,
+     *  block-range backfill. (P1: the parallel-chunk variant is deleted — the scheduler pool,
+     *  not intra-task fan-out, owns all parallelism now.) */
     private fun completeFullLayout(
         prepare: ChapterPrepareResult,
         shapes: List<ParagraphShapeRef>,
@@ -600,7 +542,9 @@ class BoxChapterLayouter(
         totalBlocks: Int,
         totalChars: Int,
     ): List<PageSlice> {
-        if (globalCharStarts.isEmpty()) return slices
+        // 未 prepare 的章直接透传无块范围 slices——以往静默，上游错块且不可查。
+        // 调用方两处恒传已 prepare 的 globals，进来空即调用方 bug。抛。
+        require(globalCharStarts.isNotEmpty()) { "backfillBlockRanges without prepare" }
         // Leaf index whose range contains [c]; clamped to 0..last (mirrors blockIndexForChar).
         fun blockOf(char: Int): Int {
             var lo = 0; var hi = globalCharStarts.lastIndex
@@ -676,7 +620,9 @@ class BoxChapterLayouter(
                 val fl = lines.getOrNull(lineIdx) ?: continue
                 val s = shape.lineStart(k)
                 val e = shape.lineEnd(k)
-                if (s < 0 || e < s || e > text.length) continue
+                // 断行器不变式（fail-fast）：行起止非法只可能是 breaker 坏了——以往当"画少一行"
+                // 跳过，页少字而不报错。现在炸。
+                require(s >= 0 && e >= s && e <= text.length) { "buildPartialSkiaWindow bad range s=$s e=$e len=${text.length}" }
                 val intruded = lead != null && k < lead.lines
                 out[lineIdx] = orilumn.reader.engine.skia.DrawLine(
                     text = text,
@@ -736,6 +682,9 @@ class BoxChapterLayouter(
      *   offsets / leaf ordering).
      * @param table cached pagination table for this chapter + param hash.
      * @param targetPage 0-based page index to shape and render.
+     * @param prefillL2 R3: immutable published neighbor shapes (controller window prefill), consulted
+     *   between [cache] and fresh shaping. Read-only — never written through (callers may run off
+     *   the flip lock, e.g. prewarm).
      * @return [ChapterLayouter.ChapterLayoutProduct] containing:
      *   - A partial [DrawableBookLayout] that can draw just [targetPage].
      *   - A **complete** [List<PageSlice>] built straight from [table] (all pages, block ranges +
@@ -750,6 +699,7 @@ class BoxChapterLayouter(
         targetPage: Int,
         pagesToShape: Int = 4,
         cache: MutableMap<Int, ParagraphShapeRef>? = null,
+        prefillL2: Map<Int, ParagraphShapeRef>? = null,
     ): ChapterLayouter.ChapterLayoutProduct {
         val totalPages = table.pages.size
         val startIdx = targetPage.coerceAtLeast(0)
@@ -776,18 +726,31 @@ class BoxChapterLayouter(
             if (rec.blockStart >= 0) blockLo = minOf(blockLo, rec.blockStart)
             if (rec.blockEndExclusive > 0) blockHi = maxOf(blockHi, rec.blockEndExclusive)
         }
-        if (blockLo == Int.MAX_VALUE) blockLo = 0
-        if (blockHi == Int.MIN_VALUE) blockHi = 0
+        // 哨兵即脏表/空窗（所选页全无有效块范围）：以往静默归零产出 NOSHAPE 整窗，
+        // 调用方当完整 slices 用，翻页后续才崩。现在出生即炸。
+        if (blockLo == Int.MAX_VALUE || blockHi == Int.MIN_VALUE) {
+            error("incrementalLayoutForPage empty block range pages=[$startIdx,$endIdx)/${table.pages.size}")
+        }
         blockLo = blockLo.coerceAtLeast(0)
         blockHi = blockHi.coerceAtMost(prepare.totalBlocks)
 
         // 3. Shape all blocks in that range (reusing already-shaped blocks from [cache]).
-        val localShapes = (blockLo until blockHi).map { tempShape(cache, prepare, it, profile) }
+        // R3: l2hits counts published-neighbor hits (diagnostic for prefill effectiveness).
+        var l2hits = 0
+        val tShape0 = orilumn.reader.time.platformNowMs()
+        val localShapes = (blockLo until blockHi).map {
+            if (cache?.get(it) == null && prefillL2?.get(it) != null) l2hits++
+            tempShape(cache, prepare, it, profile, prefillL2)
+        }
+        val tShape1 = orilumn.reader.time.platformNowMs()
+        // (l2hits counted above; reported in the asm breakdown below.)
 
         // 4. Build merged local FlowedLine stream covering all shaped blocks (P6-a2 R6 前视 carry-in).
+        val tLines0 = orilumn.reader.time.platformNowMs()
         val localLines = rebuildLocalLines(prepare, blockLo, blockHi, localShapes) {
-            tempShape(cache, prepare, it, profile)
+            tempShape(cache, prepare, it, profile, prefillL2)
         }
+        val tLines1 = orilumn.reader.time.platformNowMs()
 
         // 5. Build the drawable covering all shaped pages. It is a BookLayout, so pagination below can
         // use the SAME whole-line fill rule (Paginator.fillWholeLines) the canonical path uses.
@@ -795,7 +758,9 @@ class BoxChapterLayouter(
         val (localFirst, localLast) = localLineRanges(localShapes)
         // Q1-b：本窗口已塑形块投影成 skia DrawLine（局部行序），TextReader 合流——
         // 增量页不再回落旧 StaticLayout 画法。
+        val tSkia0 = orilumn.reader.time.platformNowMs()
         val skiaLines = buildPartialSkiaWindow(prepare, leavesForDraw, localFirst, localShapes, localLines, profile.letterSpacingEm, profile.fgColor)
+        val tSkia1 = orilumn.reader.time.platformNowMs()
         // 表格行展开进窗口（与 canonical/临时页同源 helper；行顶/行首取本窗 FlowedLine，char 章内；
         // 相邻同表行成组，rowspan 格边框跨行）。
         val incrFrames = ArrayList<orilumn.reader.engine.skia.TableCellLines.RowFrame>()
@@ -813,17 +778,22 @@ class BoxChapterLayouter(
                 ),
             )
         }
+        val tTbl0 = orilumn.reader.time.platformNowMs()
         val incrWin = orilumn.reader.engine.skia.TableCellLines.expandTable(
             incrFrames, prepare::resolveStyle, profile.letterSpacingEm, profile.fgColor,
             imageLoader, chapterHref,
         )
+        val tTbl1 = orilumn.reader.time.platformNowMs()
+        val tBox0 = orilumn.reader.time.platformNowMs()
+        val boxes = buildBackgroundDrawBoxes(prepare, leavesForDraw, localLines, localFirst, localLast)
+        val tBox1 = orilumn.reader.time.platformNowMs()
         val drawable = PartialDrawableLayout(
             lines = localLines,
             leafList = leavesForDraw,
             shapeList = localShapes,
             localFirst = localFirst,
             localLast = localLast,
-            boxes = buildBackgroundDrawBoxes(prepare, leavesForDraw, localLines, localFirst, localLast),
+            boxes = boxes,
             loader = imageLoader,
             href = chapterHref,
             avoidOwnerMap = prepare.avoidOwnerMap,
@@ -847,6 +817,7 @@ class BoxChapterLayouter(
         // continuously from its predecessor's last line. With matching geometry this reproduces the
         // canonical page boundaries exactly — the shared fill rule makes drift a no-op instead of a bug.
         val slicesWithLine = allSlices.toMutableList()
+        val tPg0 = orilumn.reader.time.platformNowMs()
         if (localLines.isNotEmpty() && startIdx < endIdx) {
             // Anchor the window's first page at the disk table's EXACT first line (the line whose
             // charStart == the table's authoritative charStart), NOT the merely-containing line —
@@ -884,6 +855,11 @@ class BoxChapterLayouter(
         // authoritative char→block mapping the canonical path used, so the two paths' block ranges can
         // never drift and disk-hit incremental shaping always knows which blocks each page needs.
         val withBlocks = backfillBlockRanges(slicesWithLine, prepare.globalCharStarts, prepare.totalBlocks, prepare.totalChars)
+        val tPg1 = orilumn.reader.time.platformNowMs()
+        // R19: assembly segment breakdown (permanent diagnostic) — shape/lines/skia/tbl/box/pg.
+        Logger.w("Orilumn.Engine", "asm ch=${table.chapterIndex} page=$targetPage " +
+            "shape=${tShape1 - tShape0}ms lines=${tLines1 - tLines0}ms skia=${tSkia1 - tSkia0}ms " +
+            "tbl=${tTbl1 - tTbl0}ms box=${tBox1 - tBox0}ms pg=${tPg1 - tPg0}ms l2hits=$l2hits/${blockHi - blockLo}")
 
         // Debug: reconcile every shaped (incremental) page's vertical extent with the content capacity,
         // and flag any page whose boundary drifted from the disk table (the page-boundary-source probe).
@@ -1185,6 +1161,9 @@ class BoxChapterLayouter(
         cache: MutableMap<Int, ParagraphShapeRef>?,
     ): ForwardedPage {
         val total = prepare.totalBlocks
+        // 空章进锚点流是调用方 bug（跨章已跳过无正文章）：以往 coerce 到块 0 后偶然越界，
+        // 信息为零。现在出生即炸。
+        require(total > 0) { "shapeAnchorPageForward empty chapter blocks=0" }
         val anchorBlock = prepare.blockIndexForChar(anchorChar.coerceAtLeast(0)).coerceIn(0, (total - 1).coerceAtLeast(0))
 
         // Find the line within the anchor block that contains anchorChar.
@@ -1324,7 +1303,6 @@ class BoxChapterLayouter(
         val page = assembleTempPage(prepare, startBlock, endBlockExclusive, shapes, pageFirstLine = startLine.coerceAtLeast(0), endLineCharStart = ecs, contentH = contentH) {
             tempShape(cache, prepare, it, profile)
         }
-            ?: return null
         diagPage(contentH, page, "fwd")
         val nb = if (cutLine >= 0) cutBlock else endBlockExclusive
         val nl = if (cutLine >= 0) cutLine else 0
@@ -1546,13 +1524,19 @@ class BoxChapterLayouter(
 
     /** Shapes block [i], reusing a previously-shaped result from [cache] (may be null). Keyed by leaf
      *  index so the same block is shaped at most once per layout-parameter cycle. */
-    private fun tempShape(
+    /**
+     * R3: [l2] is an immutable published neighbor-shape snapshot (controller window prefill):
+     * consulted between the live [cache] and fresh shaping, with the same per-instance table-cell
+     * refill as a cache hit. Read-only — never written through (callers may run off the flip lock).
+     */
+    internal fun tempShape(
         cache: MutableMap<Int, ParagraphShapeRef>?,
         prepare: LightPrepare,
         i: Int,
         profile: TypographicProfile,
+        l2: Map<Int, ParagraphShapeRef>? = null,
     ): ParagraphShapeRef {
-        val hit = cache?.get(i)
+        val hit = cache?.get(i) ?: l2?.get(i)
         if (hit != null) {
             // 表格行命中塑形缓存也必须回填当前实例的格 shape：格 shape 只活在叶实例上
             // （[fillTableRowCells]），而 `prepareLight` 每次重建都产出新叶实例；只复用行
@@ -1587,6 +1571,12 @@ class BoxChapterLayouter(
         /** P6-a2 R6: 前视塑形（carry-in 状态预热；null = 无前视）。 */
         shapeLookback: ((Int) -> ParagraphShapeRef)? = null,
     ): TempPage {
+        // 入口契约（fail-fast）：调用方三处（anchor-forward/temp-forward/temp-backward）传的
+        // shapes 与块区间必须对齐——错位会拼出残次页。以往静默拼，现在出生即炸。
+        require(blockStart in 0..blockEndExclusive) { "assembleTempPage inverted range [$blockStart,$blockEndExclusive)" }
+        require(blockEndExclusive <= prepare.totalBlocks) { "assembleTempPage range over total [$blockStart,$blockEndExclusive) total=${prepare.totalBlocks}" }
+        require(shapes.size == blockEndExclusive - blockStart) { "assembleTempPage shapes/blocks misaligned shapes=${shapes.size} range=[$blockStart,$blockEndExclusive)" }
+        require(contentH > 0) { "assembleTempPage contentH=$contentH" }
         val total = prepare.totalBlocks
         val rawLines = rebuildLocalLines(prepare, blockStart, blockEndExclusive, shapes, shapeLookback)
         // Normalize the temp page's line y coordinates to start at the page's first line = 0. This
@@ -1681,6 +1671,12 @@ class BoxChapterLayouter(
     ): ChapterLayouter.ChapterLayoutProduct? = runCatching {
         val prepare = prepare(markup, cssBundle, profile, contentW, contentH)
         fullLayout(prepare, profile, contentW, contentH)
+    }.onFailure {
+        // 内部异常归因：记 e 后重抛（fail-fast）——调用方原先见 null 走 bindSafeEmpty
+        // 伪装空章节；现同一结局（buildLayout catch 记 ERROR + 安全空），
+        // 但栈归因到源头。行为结局不变，哑巴路点亮。
+        Logger.e("Orilumn.Engine", "BoxChapterLayouter.layout FAIL ${it.message}")
+        throw it
     }.getOrNull()
 
     // ─────────────────────────────────────────────────────────────────
@@ -1871,10 +1867,12 @@ class BoxChapterLayouter(
      * stay correct within the shaped window with no extra shaping.
      *
      * 内核层：背景归属只看背景色/背景图；只带边框的叶（如 `blockquote > h2` 的下边框）另出
-     * 叶边框盒（无背景填充，只画自身边框），且一律排在背景盒之后绘制——与重路径“先祖先背景、
+     * 叶边框盒，只带边框的容器（如只有 `border-bottom` 的 `table`）另出容器边框盒
+     * （聚合其窗内后代叶范围，首子链下沉同式；已有背景盒的自身边框由背景盒画，不重复）。
+     * 边框盒均无背景填充，只画自身边框，且一律排在背景盒之后绘制——与重路径“先祖先背景、
      * 后子孙边框”同序，否则容器底会盖掉标题下边框。
      */
-    private fun buildBackgroundDrawBoxes(
+    internal fun buildBackgroundDrawBoxes(
         prepare: LightPrepare,
         leafList: List<LayoutBox>,
         lines: List<FlowedLine>,
@@ -1934,6 +1932,61 @@ class BoxChapterLayouter(
             // page-ownership gate can exclude backgrounds that belong to another page.
             box.firstLineIndex = ownerFirst[owner] ?: -1
             box.lastLineExclusive = ownerLast[owner] ?: -1
+            if (box.contentBottom > box.contentTop) out.add(box)
+        }
+        // Border-only containers (e.g. a `table` carrying only `border-bottom`, no fill):
+        // background attribution skips them by design (hasBackground-only), but their own borders
+        // still need a carrier on the light path — the heavy path draws every container box.
+        // Aggregate each such ancestor over its in-window descendant leaves (same band math as
+        // background owners, first-child descent included); ancestors that already own a background
+        // box are skipped (that box draws their borders). Fill-less like leaf border boxes below,
+        // so emission order among them is irrelevant.
+        val cTop = HashMap<MarkupElement, Int>()
+        val cBottom = HashMap<MarkupElement, Int>()
+        val cFirst = HashMap<MarkupElement, Int>()
+        val cLast = HashMap<MarkupElement, Int>()
+        val cLeaf = HashMap<MarkupElement, MarkupElement>()
+        for (i in leafList.indices) {
+            val leaf = leafList[i]
+            val el = leaf.el ?: continue
+            val lo = firstByBlock[i].coerceAtLeast(0)
+            val hi = lastByBlock[i]
+            if (lo >= lines.size || hi <= lo) continue
+            val top = lines[lo].yTop - (leaf.style.border.top + leaf.style.padding.top).roundToInt()
+            val bottom = lines[minOf(hi, lines.size) - 1].yBottom + (leaf.style.border.bottom + leaf.style.padding.bottom).roundToInt()
+            var a = el.parent
+            while (a != null && a.tag != "body") {
+                val s = prepare.resolveStyle(a)
+                if (!s.hasBackground() && s.hasBorderEdges() && !aggTop.containsKey(a)) {
+                    val prev = cTop[a]
+                    if (prev == null || top < prev) {
+                        cTop[a] = top
+                        cLeaf[a] = el
+                    }
+                    cBottom[a] = maxOf(cBottom[a] ?: bottom, bottom)
+                    cFirst[a] = minOf(cFirst[a] ?: lo, lo)
+                    cLast[a] = maxOf(cLast[a] ?: hi, hi)
+                }
+                a = a.parent
+            }
+        }
+        for ((container, top) in cTop) {
+            val box = ownerBackgroundBox(container, prepare)
+            val s = box.style
+            val descent = cLeaf[container]?.let {
+                NormalFlowLayout.firstChildDescentTop(container, it, prepare::resolveStyle)
+            } ?: 0
+            val (bandTop, bandBottom) = NormalFlowLayout.backgroundBandExtent(
+                ownerTop = top - descent,
+                ownerBottom = cBottom[container] ?: top,
+                ownerEdgesTop = (s.border.top + s.padding.top).roundToInt(),
+                ownerEdgesBottom = (s.border.bottom + s.padding.bottom).roundToInt(),
+                selfOwned = false,
+            )
+            box.contentTop = bandTop
+            box.contentBottom = bandBottom
+            box.firstLineIndex = cFirst[container] ?: -1
+            box.lastLineExclusive = cLast[container] ?: -1
             if (box.contentBottom > box.contentTop) out.add(box)
         }
         // Border-only leaves (e.g. a bordered `h2` inside a `blockquote`): their background comes
@@ -2310,6 +2363,72 @@ class LightPrepare(
             genOf = genOf,
             styleOf = { resolveStyle(it) },
         )
+    }
+
+    /**
+     * P4-c2: [fragment] 锚点在排版字符流中的起始偏移（与 [globalCharStarts] 同空间）。
+     * 与塑形/分页/点按命中同源（[styledSegments] 同输入），裸文本 walk 的漂移
+     * （空白折叠、`display:none`、img 槽位）不再进入目录/链接跳转。
+     * 锚点元素即叶时偏移为叶起始；锚点在容器上时取其下文档序首叶起始。
+     * 无命中回 null（调用方走既有章首回退）。
+     */
+    internal fun anchorCharStart(fragment: String): Int? {
+        if (totalBlocks <= 0) return null
+        var target: MarkupElement? = null
+        fun find(el: MarkupElement) {
+            if (target != null) return
+            if (fragment in orilumn.reader.engine.anchorKeysOf(el)) { target = el; return }
+            for (c in el.children) find(c)
+        }
+        find(markup)
+        val ael = target ?: return null
+        // 叶表身份索引（MarkupElement 非值语义，恒用身份比较）。
+        val leafIdxByEl = identityMap<MarkupElement, Int>()
+        for (i in markupLeaves.indices) leafIdxByEl[markupLeaves[i]] = i
+        // 所属叶：锚点上行（含自身）命中叶表；容器锚点取其下文档序首叶。
+        var leafIdx = -1
+        var cur: MarkupElement? = ael
+        while (cur != null) {
+            leafIdxByEl[cur]?.let { leafIdx = it; break }
+            if (cur === markup) break
+            cur = cur.parent
+        }
+        if (leafIdx < 0) {
+            for (i in markupLeaves.indices) {
+                var p: MarkupElement? = markupLeaves[i]
+                while (p != null) {
+                    if (p === ael) { leafIdx = i; break }
+                    if (p === markup) break
+                    p = p.parent
+                }
+                if (leafIdx >= 0) break
+            }
+        }
+        if (leafIdx < 0) return null
+        val leafEl = markupLeaves[leafIdx]
+        if (leafEl === ael) return globalCharStarts[leafIdx].toInt()
+        val classify = lightClassify()
+        val segs = orilumn.reader.engine.laying.styledSegments(
+            leafEl,
+            wsOf = { resolveStyle(it).whiteSpace },
+            isExcluded = { hidden.isHidden(it) },
+            isBlock = { classify.isBlock(it) },
+            leafWs = resolveStyle(leafEl).whiteSpace,
+            genOf = genOf,
+            styleOf = { resolveStyle(it) },
+        ).segments
+        var cursor = 0
+        for (s in segs) {
+            // 锚点元素是段节点自身或其祖先（不越过所属叶）即命中：段首即锚点起始。
+            var n: MarkupElement? = s.node
+            while (n != null && n !== leafEl) {
+                if (n === ael) return globalCharStarts[leafIdx].toInt() + cursor
+                n = n.parent
+            }
+            cursor += s.text.length
+        }
+        // 锚点在容器上且叶是其首叶：段循环必已命中；保底回叶起始。
+        return globalCharStarts[leafIdx].toInt()
     }
 
     /** Materializes (and caches) index [i]'s [LayoutBox] — style via lazy cascade, content width via the

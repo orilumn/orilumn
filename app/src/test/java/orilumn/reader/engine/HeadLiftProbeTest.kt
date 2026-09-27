@@ -9,6 +9,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
+import org.junit.After
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
@@ -42,6 +43,15 @@ class HeadLiftProbeTest {
 
     private var cacheSeq = 0
 
+    private val ownedControllers = mutableListOf<BookDocumentController>()
+
+    @After
+    fun tearDown() {
+        // R13: reclaim background shaping so worker-JVM neighbors run clean.
+        ownedControllers.forEach { runCatching { it.close() } }
+        ownedControllers.clear()
+    }
+
     private fun newController(): BookDocumentController {
         val c = BookDocumentController(
             reader = FakeEpubResourceReader(epubFiles()),
@@ -49,6 +59,7 @@ class HeadLiftProbeTest {
             profile = TypographicProfile.build(ReaderSettings.DEFAULT),
         )
         c.cacheRoot = temp.newFolder("cache${cacheSeq++}").absolutePath.toPath()
+        ownedControllers.add(c)
         return c
     }
 

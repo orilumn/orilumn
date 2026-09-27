@@ -21,19 +21,31 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
+import io.github.vinceglb.filekit.PlatformFile
+import io.github.vinceglb.filekit.dialogs.FileKitDialogSettings
+import io.github.vinceglb.filekit.dialogs.FileKitMode
+import io.github.vinceglb.filekit.dialogs.FileKitType
+import io.github.vinceglb.filekit.dialogs.compose.rememberFilePickerLauncher
+import io.github.vinceglb.filekit.name
+import io.github.vinceglb.filekit.readBytes
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.NonCancellable
+import okio.Path.Companion.toPath
 
 /**
  * S32 桌面阅读视图：窗口级组装（`ReaderScreen` + 设置抽屉 + 目录抽屉）。
  *
  * 状态机（最小壳口径）：
- * - 视口/版式变化 → 重建 [DesktopReaderHost]（`remember` 键），`ReaderScreen` 经
+ * - 视口/换书/session 变化 → 重建 [DesktopReaderHost]（`remember` 键），`ReaderScreen` 经
  *   `LaunchedEffect(host)` 重新 `open()` 并落到锚点（存档定位 / 目录跳转目标）；
- * - 设置面板拖拽是高频 `onPreview`：版式键走 150ms 防抖（`layoutSettings`），避免逐帧
- *   重排（对齐 Android `scheduleRelayout` 节流语义）；
+ * - 排版设置变化 → 宿主两段式原位重排（R15：150ms 防抖轻刷新 + 800ms 静默全套），经 `externalPos` +
+ *   `contentRevision` 推送阅读面（对齐平板 tick 轻刷新 + 关面板全套口径）；
+ * - 设置面板拖拽是高频 `onPreview`：150ms 防抖后才进原位重排，避免逐帧重排
+ *   （对齐 Android `scheduleRelayout` 节流语义）；纯亮度变化不进版式管线；
  * - 目录跳转：先经现 host `chapterStart` 塑形校验，再以锚点重建 host 落位；
- * - 当前定位经 [SnapshotReaderHost] 回抛，供目录高亮与重建锚点。
+ * - 当前定位经 [SnapshotReaderHost] 回抛，供目录高亮与重排锚点。
  */
 @Composable
 fun ReaderView(
@@ -43,6 +55,8 @@ fun ReaderView(
     customs: List<ThemePreset>,
     onBack: () -> Unit,
     onSettingsChange: (ReaderSettings) -> Unit,
+    /** 原书设置专用提交（只写本书 overlay，共享持久化语义；与平板同口径）。 */
+    onCommitBookPrivate: (ReaderSettings) -> Unit,
     onSaveTheme: (ThemePreset) -> Unit,
     onDeleteTheme: (ThemePreset) -> Unit,
     modifier: Modifier = Modifier,
@@ -56,39 +70,76 @@ fun ReaderView(
     var settingsOpen by remember(book) { mutableStateOf(false) }
     var tocOpen by remember(book) { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    fun commit(next: ReaderSettings) = onSettingsChange(next)
 
-    // F4b 桌面仅系统字体：系统枚举经 fontconfig 含用户字体（~/.fonts 等）只读展示，
-    // 可隐藏；不展示导入入口/已导入区（平板独占本地+WiFi 导入与删除）。
+    // 桌面字库（用户层·壳自持，内容与平板同口径）：
+    // - 发现链在宿主 `syncPanelFonts`：macOS 目录扫描 + 中文名链（方案B name 表 → 方案A CoreText），
+    //   落库 displayName；与平板 systemFontFaces 同源（skia 系统枚举），只是本地化名来源不同；
+    // - 列表不再只留系统行：导入/隐藏/删除与平板同一 `buildFontRows`（导入区 + 已导入区全开，
+    //   本地导入经 FileKit 原生对话框、无线导入经桌面独写对话框，同走共享服务；SAF/Android Dialog
+    //   是平板 UI，不进共享）。
     val fontLibrary = remember(store) { store.fontLibrary() }
     var fontEntries by remember(book) { mutableStateOf<List<FontEntry>>(emptyList()) }
-    LaunchedEffect(book) {
-        val sys = runCatching { orilumn.reader.engine.skia.systemFontFaces() }.getOrDefault(emptyList())
-        val faces = runCatching {
-            // F 系列中文名链（方案B → 方案A）：
-            // 1) name 表直读优先——不依赖 CoreText/系统语言的 OpenType 变体语言记录（TC→zh-TW、
-            //    HK→zh-HK、MO→zh-MO、其余→zh-CN，是名不筛简繁），扫系统/用户字体目录建
-            //    「拉丁族名 → 中文族名」映射，进程内缓存；
-            // 2) CoreText 只补 name 表未覆盖的族（含 CJK 结果）；
-            // 3) 落库 displayName；无本地化名的族展示层回退族名本身。都是后台线程
-            //    （几十次原生调用 + 一次性扫描）。
-            val localized = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
-                val nameTable = NameTableChineseNames.namesFor(sys.map { it.family })
-                val coreText = MacFamilyNames.localizedFamilyNames(sys.map { it.family })
-                coreText + nameTable // map 合并：同键以右侧（name 表）为准
-            }
-            fontLibrary.syncSystemFaces(sys, localizedNames = localized)
-        }.getOrElse { runCatching { fontLibrary.list() }.getOrDefault(emptyList()) }
-        fontEntries = fontLibrary.allEntries(faces).filterIsInstance<FontEntry.System>()
-    }
     fun refreshFonts() = scope.launch(kotlinx.coroutines.Dispatchers.IO) {
-        fontEntries = fontLibrary.allEntries(fontLibrary.list()).filterIsInstance<FontEntry.System>()
+        fontEntries = fontLibrary.allEntries(fontLibrary.list())
     }
+    // 本地导入（桌面 UI）：FileKit 原生多选对话框 → 字节入库（与平板 SAF 同一 `importBytes`）。
+    val fontPicker = rememberFilePickerLauncher(
+        type = FileKitType.File(extensions = listOf("ttf", "otf", "ttc", "woff", "woff2")),
+        mode = FileKitMode.Multiple(),
+        dialogSettings = FileKitDialogSettings.createDefault(),
+    ) { files: List<PlatformFile>? ->
+        val picked = files.orEmpty()
+        if (picked.isEmpty()) return@rememberFilePickerLauncher
+        scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            picked.forEach { f ->
+                runCatching { fontLibrary.importBytes(f.readBytes(), f.name) }
+            }
+            refreshFonts().join()
+        }
+    }
+    /** 隐藏/删除的族若正被槽位引用 → 回退跟随原书（系统/导入同查，与平板同口径）。 */
+    fun fallBackFontSlots(family: String, s: ReaderSettings) {
+        if (family != s.fontBody && family != s.fontTitle && family != s.fontCode) return
+        commit(s.copy(
+            fontBody = s.fontBody.takeUnless { it == family } ?: "",
+            fontTitle = s.fontTitle.takeUnless { it == family } ?: "",
+            fontCode = s.fontCode.takeUnless { it == family } ?: "",
+        ))
+    }
+    fun familyOfFontIds(ids: List<Long>): String? =
+        fontEntries.firstOrNull { e ->
+            val id = (e as? FontEntry.System)?.id ?: (e as? FontEntry.Imported)?.face?.id
+            id != null && id in ids
+        }?.family
 
-    // 版式键防抖：面板拖拽时画布 Profile 即时跟手，宿主重排最多 ~7 次/秒。
-    var layoutSettings by remember(book) { mutableStateOf(settings) }
-    LaunchedEffect(settings) {
-        delay(150)
-        layoutSettings = settings
+    // 版式防抖 + 原位重排（R5/R15，与平板 tick 轻刷新 + 关面板全套同序）：
+    // 亮度分叉（与平板同规则，共享 `withoutLight`）：纯亮度变化不进版式管线；
+    // 排版变化走宿主两段式（previewToSettings 行锚合位 + commitRelayout 全套），经 externalPos 推送阅读面，
+    // 不再重建宿主（旧 `remember(layoutSettings)` 整宿主重建丢内存位是跳章首页根因）。
+    // 视口/换书/session 仍走下方的宿主重建（存档定位）。
+    var appliedLayout by remember(book) { mutableStateOf(settings) }
+    var externalPos by remember(book) { mutableStateOf<ReaderPos?>(null) }
+    var contentRevision by remember(book) { mutableStateOf(0) }
+    // 真背光（macOS DDC；scan 一次常驻）：支持时亮度滑块 -50..100（>0 下发硬件），
+    // 不支持时钳到 -50..0（纯遮罩，物理调亮不可达也不给滑）。
+    val displayBrightness = remember { orilumn.reader.desktop.brightness.MacDisplayBrightness() }
+    var ddcCapable by remember(book) { mutableStateOf<Boolean?>(null) }
+    LaunchedEffect(book) {
+        ddcCapable = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching { displayBrightness.ddcCapable() }.getOrDefault(false)
+        }
+    }
+    // 亮度 >0 下发真背光（150ms 防抖合流；≤0 只画遮罩，不碰硬件；跟随系统 onmacOS 不动作）。
+    LaunchedEffect(settings.brightness, settings.brightnessFollowSystem, ddcCapable) {
+        if (settings.brightnessFollowSystem) return@LaunchedEffect
+        if (ddcCapable != true) return@LaunchedEffect
+        val v = settings.brightness.coerceIn(1, 100)
+        if (settings.brightness <= 0) return@LaunchedEffect
+        kotlinx.coroutines.delay(150)
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching { displayBrightness.set(v) }
+        }
     }
 
     BoxWithConstraints(modifier = modifier) {
@@ -99,12 +150,12 @@ fun ReaderView(
         val viewportW = with(densityScope) { maxWidth.toPx() }.toInt().coerceAtLeast(16)
         val viewportH = with(densityScope) { maxHeight.toPx() }.toInt().coerceAtLeast(16)
 
-        val snapshot = remember(book, layoutSettings, viewportW, viewportH, session) {
+        val snapshot = remember(book, viewportW, viewportH, session) {
             val delegate = DesktopReaderHost(
                 bookFile = book.filePath,
                 bookId = book.id,
                 store = store,
-                settings = layoutSettings,
+                settings = appliedLayout,
                 density = density,
                 viewportW = viewportW,
                 viewportH = viewportH,
@@ -119,8 +170,41 @@ fun ReaderView(
             onDispose { (snapshot.delegate as? DesktopReaderHost)?.close() }
         }
         val desktopHost = snapshot.delegate as? DesktopReaderHost
-
-        fun commit(next: ReaderSettings) = onSettingsChange(next)
+        // 面板字库经宿主装载（R4：枚举+中文名链已下沉 `syncPanelFonts`，视图只收表；
+        // 键只跟书，视口 resize 重建宿主不重枚举）。
+        LaunchedEffect(book) {
+            fontEntries = desktopHost?.syncPanelFonts() ?: fontLibrary.allEntries(fontLibrary.list())
+        }
+        // 设置驱动的原位重排（R15 两段式，与平板“tick 轻刷新 + 关面板全套”同序）：
+        // 第一段 150ms 防抖落位即调（本章轻刷新）；第二段静默 800ms 后全套一次（bump 代际 + B2）。
+        // 新设置到达即重启本 effect，未执行的第二段自动取消。落位经 externalPos+contentRevision
+        // 推送（与平板 applyReflowResult 同口径：刷版本号 + 定位到含锚字符的新页）。
+        // 修复：推送必须在 NonCancellable 中执行，避免 LaunchedEffect 重启取消导致已完成的引擎重排被丢弃。
+        LaunchedEffect(book, settings) {
+            delay(150)
+            if (settings.withoutLight() == appliedLayout.withoutLight()) return@LaunchedEffect
+            val host = desktopHost ?: return@LaunchedEffect
+            suspend fun pushLanding(landing: ReaderPos) {
+                // 已完成的引擎侧重排结果必须落地：用 NonCancellable 保证推送不被外层取消吞掉
+                withContext(NonCancellable) {
+                    currentPos = landing
+                    externalPos = landing
+                    contentRevision++
+                    orilumn.reader.io.Logger.w("Orilumn.Desktop",
+                        "push ch=${landing.chapter} slice=${landing.slice} rev=$contentRevision")
+                }
+            }
+            val anchor = currentPos
+            val landing = host.previewToSettings(
+                settings, anchor?.chapter ?: 0, anchor?.slice?.charStart ?: 0)
+            appliedLayout = settings
+            if (landing != null) pushLanding(landing)
+            // 第二段：设置静默 800ms 后全套（与平板关面板同序；新设置到达则本 effect 重启，此段取消）。
+            delay(800)
+            val anchor2 = currentPos
+            val landed2 = host.commitRelayout(anchor2?.chapter ?: 0, anchor2?.slice?.charStart ?: 0)
+            if (landed2 != null) pushLanding(landed2)
+        }
 
         ReaderScreen(
             host = snapshot,
@@ -133,6 +217,8 @@ fun ReaderView(
             onToc = { tocOpen = true },
             onLightChange = { onSettingsChange(it) },
             onLightCommit = { commit(it) },
+            externalPos = externalPos,
+            contentRevision = contentRevision,
             // 面板打开时按键留给面板，阅读面不翻页；面板关闭回阅读面即重夺焦点。
             keysEnabled = !settingsOpen && !tocOpen,
         )
@@ -142,24 +228,32 @@ fun ReaderView(
         ReaderSettingsPanel(
             visible = settingsOpen,
             settings = settings,
-            // 桌面仅系统字体（无导入入口/已导入区；系统行左滑隐藏）。
+            // 内容与平板同口径：导入区 + 已导入区全开；
+            // 导入经 FileKit（桌面 UI），WiFi 经桌面独写对话框（服务共享），发现链见上（macOS 独有，保留）。
             fontEntries = fontEntries,
-            showImportedSection = false,
+            showImportedSection = true,
+            canFontImport = true,
+            onFontImport = { fontPicker.launch() },
+            canFontWifiImport = true,
+            // 无线走面板内下钻（与平板同页）：壳只给暂存目录 + 落盘入库。
+            wifiUploadDir = java.io.File(DesktopPaths.cacheDir, "wifi_fonts").absolutePath,
+            onWifiUpload = { path ->
+                scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                    runCatching { fontLibrary.importFile(path.toPath()) }
+                    refreshFonts().join()
+                }
+            },
             onFontHide = { ids ->
                 scope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                    val family = fontEntries.firstOrNull { e ->
-                        val id = (e as? FontEntry.System)?.id
-                        id != null && id in ids
-                    }?.family
+                    val family = familyOfFontIds(ids)
                     ids.forEach { fontLibrary.setHidden(it, true) }
                     refreshFonts().join()
-                    // 隐藏正被槽位引用 → 回退跟随原书（沿删除口径），宿主重建经 onDemandFonts 追装。
-                    if (family != null && family in setOf(settings.fontBody, settings.fontTitle, settings.fontCode)) {
-                        commit(settings.copy(
-                            fontBody = settings.fontBody.takeUnless { it == family } ?: "",
-                            fontTitle = settings.fontTitle.takeUnless { it == family } ?: "",
-                            fontCode = settings.fontCode.takeUnless { it == family } ?: "",
-                        ))
+                    // 隐藏正被槽位引用 → 回退跟随原书（沿删除口径），回退经设置提交走原位重排追装。
+                    if (family != null) {
+                        val s = settings
+                        if (family in setOf(s.fontBody, s.fontTitle, s.fontCode)) {
+                            fallBackFontSlots(family, s)
+                        }
                     }
                 }
             },
@@ -169,7 +263,16 @@ fun ReaderView(
                     refreshFonts().join()
                 }
             },
+            onFontDelete = { family ->
+                scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                    fontLibrary.deleteFamily(family)
+                    refreshFonts().join()
+                    fallBackFontSlots(family, settings)
+                }
+            },
+            onCommitBookPrivate = onCommitBookPrivate,
             onDismiss = { settingsOpen = false },
+            brightnessMax = if (ddcCapable == true) 100 else 0,
             onPreview = { onSettingsChange(it) },
             onCommitTypography = { commit(it) },
             onCommitLight = { commit(it) },
@@ -183,11 +286,16 @@ fun ReaderView(
             toc = desktopHost?.toc ?: emptyList(),
             currentChapter = currentPos?.chapter ?: 0,
             scheme = settings.scheme,
+            // 目录项1（用户层）：桌面此前没传当页标题 id，一直只能定位到章首；现与平板同口径。
+            currentFragments = currentPos?.let { pos ->
+                desktopHost?.currentPageFragmentIds(pos.chapter, pos.slice.charStart, pos.slice.charEnd)
+            } ?: emptySet(),
             onSelect = { item ->
                 val idx = item.index ?: return@ReaderTocPanel
                 tocOpen = false
                 scope.launch {
-                    val target = snapshot.chapterStart(idx) ?: return@launch
+                    val target = desktopHost?.tocItem(idx, item.fragment)
+                        ?: snapshot.chapterStart(idx) ?: return@launch
                     anchorOverride = target.chapter to target.slice.charStart
                     session++
                 }

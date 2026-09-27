@@ -64,6 +64,13 @@ deleteStaleSystemRows:
 DELETE FROM font_faces
 WHERE familyName IN ? AND source = 'system' AND subfamily = '';
 
+-- 字重改名残留清理：枚举口径变化（如英文 Regular → 中文 常规体）后旧字重名行
+-- 不再被 INSERT 命中；按族全量对账，不在本次枚举集合里的系统行删除
+-- （不清即一行双语 "Regular/常规体"）。调用方保证 keep 非空、空枚举不清库。
+deleteRenamedSystemRows:
+DELETE FROM font_faces
+WHERE familyName = ? AND source = 'system' AND subfamily NOT IN ?;
+
 -- F 系列：族内是否存在已被用户隐藏的系统行（同步新字重行时继承族隐藏态）。
 anyHiddenSystemRow:
 SELECT COUNT(*) FROM font_faces

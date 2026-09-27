@@ -390,8 +390,44 @@ class LineWindowDrawerTest {
     }
 
     @Test
-    fun outsideMarkerHangsInTheGutterLeftOfText() {
-        // P1：OUTSIDE marker 在沟槽悬垂（文本左缘左侧 markerW+gap），文本左缘位置不变。
+    fun shapeDiscMarkerIsVectorSizedNotGlyphSized() {
+        // 矢量圆点：墨迹宽度恒约 shapeMarkerWidthPx（16px 字 → 9px），不随字库 "•" 字形走。
+        val mk = ListMarkers.ListMarker(ListMarkers.Kind.DISC, "•", ListMarkers.Position.OUTSIDE, 1, 1)
+        val bmp = drawAndScan(listOf(sampleLine("alpha", TextAlign.LEFT).copy(listMarker = mk)))
+        val lo = minInkX(bmp, 2, 30, 0, contentLeft.toInt() - 1)
+        val hi = maxInkX(bmp, 2, 30, 0, contentLeft.toInt() - 1, 200)
+        assertTrue("沟槽应有墨", lo <= hi)
+        val w = hi - lo + 1
+        assertTrue("矢量圆点墨宽约 9px，实际 $w（字形 • 会宽得多）", w in 7..12)
+    }
+
+    @Test
+    fun shapeCircleMarkerIsHollow() {
+        // 矢量空心圈：环有墨、圆心留白——字形 "○" 做不到这个判据。
+        val mk = ListMarkers.ListMarker(ListMarkers.Kind.CIRCLE, "○", ListMarkers.Position.OUTSIDE, 1, 1)
+        val bmp = drawAndScan(listOf(sampleLine("alpha", TextAlign.LEFT).copy(listMarker = mk)))
+        val px = requireNotNull(bmp.peekPixels())
+        val markerW = ListMarkers.shapeMarkerWidthPx(16f)
+        val gap = ListMarkers.markerGapPx(16f)
+        val cx = (contentLeft + 0 - markerW - gap + markerW / 2f).toInt()
+        val cy = 16
+        assertTrue("圈环应有墨", bandHasInk(bmp, cy - 6, cy + 6, cx - 6, cx + 6))
+        assertEquals("圈心须留白（空心判据）", org.jetbrains.skia.Color.WHITE, px.getColor(cx, cy))
+    }
+
+    @Test
+    fun shapeSquareMarkerIsFilled() {
+        // 矢量方块：实心填满 markerW 见方。
+        val mk = ListMarkers.ListMarker(ListMarkers.Kind.SQUARE, "▪", ListMarkers.Position.OUTSIDE, 1, 1)
+        val bmp = drawAndScan(listOf(sampleLine("alpha", TextAlign.LEFT).copy(listMarker = mk)))
+        val markerW = ListMarkers.shapeMarkerWidthPx(16f)
+        val gap = ListMarkers.markerGapPx(16f)
+        val x0 = (contentLeft - markerW - gap).toInt()
+        assertTrue("方块应填满", bandHasInk(bmp, 16 - 4, 16 + 4, x0, x0 + markerW))
+    }
+
+    @Test
+    fun outsideMarkerHangsInTheGutterLeftOfText() {        // P1：OUTSIDE marker 在沟槽悬垂（文本左缘左侧 markerW+gap），文本左缘位置不变。
         val plain = drawAndScan(listOf(sampleLine("alpha", TextAlign.LEFT)))
         assertFalse("无 marker 时沟槽应空白", bandHasInk(plain, 2, 30, 0, contentLeft.toInt() - 1))
 

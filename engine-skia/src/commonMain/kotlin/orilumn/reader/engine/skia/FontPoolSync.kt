@@ -2,10 +2,13 @@ package orilumn.reader.engine.skia
 
 import orilumn.reader.data.font.FontFace
 import orilumn.reader.data.font.FontFaceMatcher
+import orilumn.reader.data.font.SubfamilyMetric
 import orilumn.reader.engine.css.BookFont
 import orilumn.reader.engine.css.FontDemand
 import orilumn.reader.engine.text.TypographicProfile
 import orilumn.reader.io.Logger
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * F4b 用户字库装池共享核（平板/桌面同调，语义逐字沿旧 `ReaderActivity.syncSkiaPool`）：
@@ -22,6 +25,10 @@ object FontPoolSync {
     /** [select] 结果：待装载面 + 预签名（含书内部分；调用方拼后与上次比对）。 */
     data class Selection(val selected: List<FontFace>, val sizes: Map<Long, Long>, val sig: String)
 
+    /** (族,字重,斜体) 笛卡尔（槽位默认档 + 按需档共用构造）。 */
+    fun triplesFor(families: Set<String>, weights: Set<Int>, italics: Set<Boolean>): Set<Triple<String, Int, Boolean>> =
+        families.flatMap { f -> weights.flatMap { w -> italics.map { i -> Triple(f, w, i) } } }.toSet()
+
     /** [assemble] 结果：进池集合 + 加载失败数（>0 则调用方不记名）。 */
     data class Assembled(val embedded: List<SkiaFontPool.EmbeddedFont>, val failed: Int)
 
@@ -31,16 +38,27 @@ object FontPoolSync {
         demand: FontDemand,
         bookEntries: List<SkiaFontPool.EmbeddedFont>,
         fileSize: (String) -> Long?,
+        /**
+         * 按族字重锚点（族名 → CSS 字重）：该族只装此字重的面（直斜各一），
+         * Skia 按内禀字重选面——池里多档并存时换 triple 也无用，必须整桶换掉。
+         * 无匹配面回退自然选择。
+         */
+        anchors: Map<String, Int> = emptyMap(),
     ): Selection {
-        fun triplesFor(families: Set<String>, weights: Set<Int>, italics: Set<Boolean>): Set<Triple<String, Int, Boolean>> =
-            families.flatMap { f -> weights.flatMap { w -> italics.map { i -> Triple(f, w, i) } } }.toSet()
         val triples = triplesFor(slotFamilies, setOf(400, 700), setOf(false, true)) +
             triplesFor(demand.families, demand.weights + setOf(400, 700), if (demand.italic) setOf(false, true) else setOf(false))
         if (triples.isEmpty()) return Selection(emptyList(), emptyMap(), "#" + bookSig(bookEntries))
         val selected = triples.flatMap { (fam, w, i) ->
             val family = faces.filter { it.familyName == fam || it.displayName == fam }
             if (family.isEmpty()) return@flatMap emptyList<FontFace>()
-            listOfNotNull(FontFaceMatcher.choose(family, w, i))
+            val bucket = anchors[fam]?.takeIf { it in 100..900 }?.let { a ->
+                family.filter { SubfamilyMetric.weight(it.subfamily) == a }.ifEmpty { null }
+            } ?: family
+            // 有文件的优先：系统行无 path，与导入行同桶（displayName 中文 upward）时先选导入面；
+            // 否则选到系统面后按 size 探不到文件，整桶落空（families=0，切换无效）。
+            // 纯系统槽无文件可挑，回退原语义（选后面 size 照样过滤，渲染走系统回退）。
+            val pathed = bucket.filter { it.path != null }
+            listOfNotNull(FontFaceMatcher.choose(pathed.ifEmpty { bucket }, w, i))
         }.distinctBy { it.id }
         val sizes = selected.mapNotNull { f ->
             val p = f.path ?: return@mapNotNull null
@@ -81,6 +99,14 @@ object FontPoolSync {
     data class PoolSyncResult(val changed: Boolean, val sig: String?)
 
     /**
+     * 跨宿主写互斥（公平锁）：桌面换字体重建宿主时，新旧控制器并发追装同一全局池；
+     * 无锁即后完成者赢——旧宿主的大文件读完得晚就会盖掉新字，切换时好时坏。
+     * 公平锁保证先发起者先落定（旧写完新覆盖），新宿主恒赢；等锁中被取消（旧宿主
+     * dispose）即直接掉队不写。单宿主/平板路径无竞争，快照比对后才进锁，零开销。
+     */
+    private val poolWriteMutex = Mutex()
+
+    /**
      * Q1-5 收敛：两壳装池编排单源（平板 `syncSkiaPool` 与桌面 `topUpSkiaFonts` 同义实现）。
      * 宿主只留 `lastSig`/`bookEntries` 状态与 IO 调度；孤儿自愈→选择→签名比对→装配→落池→日志全在此。
      */
@@ -95,19 +121,26 @@ object FontPoolSync {
         systemSerif: SkiaFontPool.EmbeddedFont? = null,
         logTag: String = "Orilumn.Font",
     ): PoolSyncResult {
+        // 渲染字重锚点随 profile 下发（池外系统面靠 factory 改写请求字重命中，见 SkParagraphFactory）。
+        SkParagraphFactory.weightAnchors = profile.fontWeightAnchors
         val faces = loadFaces() ?: return PoolSyncResult(false, lastSig)
         val slotFams = setOf(profile.fontBody, profile.fontTitle, profile.fontCode)
             .map { it.trim() }.filter { it.isNotEmpty() }.toSet()
-        val sel = select(faces, slotFams, demand, bookEntries, fileSize)
+        val sel = select(
+            faces, slotFams, demand, bookEntries, fileSize,
+            anchors = profile.fontWeightAnchors,
+        )
         if (sel.sig == lastSig) return PoolSyncResult(false, lastSig)
-        val asm = assemble(sel.selected, fontBytes, bookEntries, systemSerif)
-        val changed = SkiaFontPool.setEmbedded(asm.embedded)
-        val sig = if (asm.failed == 0) sel.sig else lastSig
-        if (changed || asm.failed > 0) {
-            val mb = asm.embedded.sumOf { it.bytes.size } / 1048576
-            Logger.w(logTag, "skia fonts refreshed families=${asm.embedded.size} mb=$mb needed=$slotFams failed=${asm.failed}")
+        return poolWriteMutex.withLock {
+            val asm = assemble(sel.selected, fontBytes, bookEntries, systemSerif)
+            val changed = SkiaFontPool.setEmbedded(asm.embedded)
+            val sig = if (asm.failed == 0) sel.sig else lastSig
+            if (changed || asm.failed > 0) {
+                val mb = asm.embedded.sumOf { it.bytes.size } / 1048576
+                Logger.w(logTag, "skia fonts refreshed families=${asm.embedded.size} mb=$mb needed=$slotFams failed=${asm.failed}")
+            }
+            PoolSyncResult(changed, sig)
         }
-        return PoolSyncResult(changed, sig)
     }
 
     /**

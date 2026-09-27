@@ -22,11 +22,15 @@ import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.engine.skia.LayoutReadback
 import orilumn.reader.engine.text.LayoutParamKey
 import orilumn.reader.engine.text.TypographicProfile
+import orilumn.reader.engine.laying.ParagraphShapeRef
 import orilumn.reader.io.Logger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
@@ -66,20 +70,26 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
  * serialized sideways with [Mutex] to avoid building the same chapter concurrently; the UI thread
  * only reads already-laid-out results.
  *
- * Priority contract (C1-2; shared with every host — same F>A>B1>B2>P order as the desktop host):
- *  - **F foreground flip** (highest): runs on the caller thread — synchronous temp shaping that
- *    never waits on background work and is never preempted by it;
- *  - **A adjacent prefill** ([tempPrefillJob] on [backgroundDispatcher]): cancellable, deduped per
- *    cursor, yields to F by construction (short one-page shapes under [tempStateLock]);
- *  - **B1 chapter-head canonical** ([canonicalDispatcher], single thread): the authoritative
- *    full-chapter table; per-chapter FIFO slots that a same-chapter re-dispatch cancels, but never
- *    kill another chapter's in-flight persist (P3 queue-not-kill);
- *  - **B2 whole-book scan** ([wholeBookJob], same [canonicalDispatcher] FIFO): skips the active
- *    chapter (B1 owns it), ordered by [readingDirection];
- *  - **P neighbor preflight** ([preflightJobs] on [backgroundDispatcher], lowest): markup + light
- *    cascade only, no shaping, idempotent per paramHash.
- */
-class BookDocumentController(
+ * Priority contract (C1-2 定序；P2 全部收进 [TaskScheduler]，与桌面宿主同一顺序）：
+ *  - **F 目标页**（最高，`PRIO_FLIP`=0 仅为参考值）：跑在调用方线程上——同步塑形并呈现，
+ *    既不等后台也永不被后台抢；**不进队列**。翻页入口 [notifyFlip] 统杀其下全部池任务（唯一钩子）。
+ *  - **第 2/3/4 档 = 邻页序列**（`PRIO_PAGE_NEXT`=10 / `PRIO_PAGE_PREV`=20 / `PRIO_PAGE_REST`=30）：
+ *    序列由 [neighborSequence] 统一生成（原则 §3.1 的 `+1·dir, −1·dir, +2·dir, −2·dir, …`），
+ *    d=1 两侧各占一档、d≥2 合为第三档；磁盘表路径用同键 `pg:<章>:<页>` 去重，只有第 2 档那侧
+ *    才组装（见 [scheduleWindowPrefill]）。
+ *  - **d=1 章外兜底**（`PRIO_EDGE_FORWARD`=第2档 / `PRIO_EDGE_BACKWARD`=第3档，原则 §3.3）：
+ *    d=1 邻页越出本章时，加急整章排邻章。键 `edge:<章>` **与 B2 扫描的 `b2:<章>` 分域**——
+ *    同一份工作、两种紧急度，共用键会被同键去重把加急件降级（见 [edgeKey]）。
+ *  - **B1 本章全量**（`PRIO_B1_CHAPTER`=40，原则 §3.4 动态档）：同键 `b1:<章>` 提交替换孪生；
+ *    目标页距章首 d=1 时升到 `PRIO_B1_URGENT`（=第2档），见 [b1PriorityFor] / [dispatchB1]。
+ *  - **B2 其他章全量**（`PRIO_B2_CHAPTER`=50）：逐章任务，跳过当前章（B1 拥有），
+ *    键 `b2:<章>`，按 [flipDir] 的 |章距| 交错序。
+ *  - **A temp 邻页预排**（[tempPrefillJob] on [backgroundDispatcher]）：临时表侧邻页塑形。
+ *    **D3 待改**：原则 §3 规定第 2/3/4 档按定义跑在临时表上，而本通道现在仍在池外，
+ *    这三档对最延迟敏感的活等于没有执行体——见整改方案 D3b。
+ *  - **P 解析预热**（`PRIO_PREWARM`=60，最低）：邻章/开书的 markup + 轻结构，无塑形，
+ *    按 paramHash 幂等，同键 `pre:<章>` 去重。
+ */class BookDocumentController(
     private val reader: EpubResourceReader,
     private val layouter: ChapterLayouter,
     var profile: TypographicProfile,
@@ -91,11 +101,6 @@ class BookDocumentController(
      *  main thread / foreground page-flip. */
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     private val backgroundDispatcher: kotlinx.coroutines.CoroutineDispatcher = Dispatchers.Default,
-    /** Injected B1/B2 canonical dispatcher (tests/desktop); null = a private single-thread
-     *  dispatcher off the shared pool (default production behavior — full-chapter shapes never
-     *  compete with the foreground flip).
-     *  (C2-P0: was `Executors.newSingleThreadExecutor`, JVM-only.) */
-    injectedCanonicalDispatcher: kotlinx.coroutines.CoroutineDispatcher? = null,
     /** Optional EPUB image loader for `<img>` rendering; null = images fall back to placeholders. */
     private val imageLoader: ImageLoader? = null,
 ) {
@@ -190,16 +195,8 @@ class BookDocumentController(
     private var viewW = 0
     private var viewH = 0
 
-    /** Per-chapter canonical (B1, chapter-head full-chapter layout → LINE_DISK) slots (P3/R3, contract
-     *  #6). ONE SLOT PER CHAPTER, keyed by chapterIndex. A dispatch cancels ONLY ITS OWN chapter's
-     *  previous in-flight slot (same chapter re-shaped with newer params — genuinely stale); any OTHER
-     *  chapter's B1 is left running on the single canonical thread's FIFO queue and finishes its
-     *  persist. The cross-chapter flip never kills the just-tuned chapter's canonical (old design's
-     *  single global `anchorBackfillJob` did), so returning to it is a disk hit, not a re-temp.
-     *  Bounded by chapter count. Written ONLY on the dispatch thread (no lock — matches the plan's
-     *  "plain concurrent container" risk note); a completed slot stays until the same chapter is next
-     *  dispatched, where [kotlinx.coroutines.Job.cancel] on it is a no-op. */
-    private val canonicalJobs: MutableMap<Int, kotlinx.coroutines.Job?> = HashMap()
+    /** P0 spike: retired per-chapter B1 slots — same-key scheduler submit (`b1:<chapter>`)
+     *  replaces twins, preserving the one-slot-per-chapter dedup semantic. */
 
     /** True while the settings panel is open: the heavy background canonical full-chapter relayout is
      *  suppressed so it never contends with the foreground real-time temp shaping (they share CPU).
@@ -216,46 +213,87 @@ class BookDocumentController(
     /** Epoch the most recently dispatched whole-book (B2) job was launched under; used to suppress
      *  re-dispatch of the same settled params (no churn while dragging). */
     @Volatile
-    private var lastWholeBookEpoch: Long = -1L
+    /** 派发层去重戳（D6）：挡滑块拖拽期的**重复派发**。
+     *
+     *  为什么留着（原则 §8 映射表末行曾把它列为待删散装变量，此处更正）：
+     *  池的同键去重替代不了它。拖拽期每次改参都派一趟 B2，每趟 paramHash 都更新，
+     *  于是同键孪生永远是「新的赢」，每一趟都会真的起跑；真正兜住的是任务体内的
+     *  [b2ChapterTask] skip-fresh，但那已经在执行之后了。本戳在**派发之前**挡住，
+     *  比任务体内的 no-op 便宜一个量级。P0 实测拖拽期约 37 次/分钟。
+     *
+     *  与 skip-fresh 的分工：一个挡派发、一个挡执行。两者都要。 */
+    private var lastDispatchEpoch: Long = -1L
 
     /** The chapter most recently prepared by [prepareRelayout]; the B2 scan skips it (B1 owns its
      *  canonical pass). */
     @Volatile
     private var activeChapter: Int = -1
 
-    /** The direction the reader is moving (P12): +1 = toward the book tail, -1 = toward the head.
-     *  Updated at the single reader-facing flip entry ([findAdjacentPage] — reached by every page turn,
-     *  in-chapter temp/canonical and out-of-bounds cross-chapter) and by the direct
-     *  [nextPageInChapter]/[prevPageInChapter] entries (curl-adjacent pre-render). Used to order the
-     *  whole-book B2 scan so chapters the reader is heading toward are pre-laid-out first — a
-     *  flip-out-of-bounds into a nearby chapter lands on an already-laid-out one. Defaults forward
-     *  (the dominant reading direction). */
+    /** **翻页方向记录**（原则 §3.2）：`+1` 上次向前翻页、`−1` 上次向后翻页、`0` **无记录**。
+     *
+     *  写入：
+     *  - 翻页入口 [findAdjacentPage] 记当次 `direction`；[nextPageInChapter] / [prevPageInChapter]
+     *    是真实的翻页动作，各自记 `+1` / `−1`（curl 邻页预渲染也走这两条）。
+     *  - **开书（字段初值）、跳转、参数重排一律清 `0`**，见 [clearFlipDir]。
+     *
+     *  消费（三处，全按「非负即前向」判定，故 `0` 无需特判、自动归前向）：
+     *  第 2/3 档邻页选择（[scheduleWindowPrefill]）、第 4 档本章排序、第 7 档章距排序
+     *  （[orderRemainingChapters]）。清零后"下一页"回到 页码+1。
+     *
+     *  清零的理由：开书/跳转/调参这三个动作**本身不携带方向含义**，不该继承上一个动作的猜测。 */
     @Volatile
-    private var readingDirection: Int = 1
+    private var flipDir: Int = 0
 
-    /** The in-flight background whole-book remaining-chapter scan (B2, was `otherChaptersJob`).
-     *  Re-dispatched with the latest params after the params-settled point; a newer dispatch cancels
-     *  it (abandon within ≤1 chapter via per-chapter checkpoints). */
-    private var wholeBookJob: kotlinx.coroutines.Job? = null
+    /** 清除翻页方向记录（原则 §3.2）。落位型入口在**开始**时调用——落位完成后紧接着的那次翻页
+     *  才是排序信号的来源，若在落位后写就等于用"跳转前"的猜测指导"跳转后"的首翻。 */
+    private fun clearFlipDir(reason: String) {
+        if (flipDir != 0) Logger.w(logTag, "flipDir cleared by $reason (was $flipDir)")
+        flipDir = 0
+    }
 
-    /** P4 (track P): per-chapter background preflight slots — [index] → in-flight job. Each prelinks
-     *  one neighbor chapter's markup + light cascade off the flip thread (no shaping, no table), so an
-     *  out-of-bounds flip's parse leaves the critical path. Keyed and idempotent: a param change
-     *  ([prepareRelayout]) cancels all slots and voids the readiness record. */
-    private val preflightJobs: MutableMap<Int, kotlinx.coroutines.Job> = HashMap()
+    /** 排版槽数（原则 §5）：`max(1, min(2, cpuCount - 2))`。
+ *
+ *  - `cpuCount - 2`：给 UI / 目标页 / 系统各留一份核。
+ *  - **上限 2**：P0 真机实测的拐点（平板：轻页在 0/1/2 并发下耗时持平、无 Skia 锁式崩塌；
+ *    重页由内容主导、与槽数无关）。既然加槽买不到速度，就只给 2。
+ *  - 下限 1：小核设备退化为串行后台塑形。
+ *
+ *  抽成纯函数（而非内联在构造器里）是为了能测：3 核一类设备上「减 1」与「减 2」的差别
+ *  只有这一个函数能表达清楚，而开发机通常测不出（核数多时被上限夹住）。
+ *
+ *  @param cpuCount 逻辑核数（[platformCpuCount] 的取值）。 */
+fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
+
+/** P1f/R13: controller-owned background scope (child of the injected [scope]'s Job).
+     *  ALL background launches (prefill/B1/B2/prewarm/watchers, scheduler internals) run here so
+     *  [close] cancels exactly this controller's background work — never the host's scope.
+     *  Hosts call [close] on destroy; tests call it in teardown (leaked shapers otherwise pile up
+     *  in the shared worker JVM and starve later timing-sensitive tests — observed flake). */
+    private val bgScope = CoroutineScope(SupervisorJob(scope.coroutineContext[Job]) + backgroundDispatcher)
+
+    /** Cancels all background work owned by this controller. Idempotent; safe to call twice. */
+    fun close() {
+        bgScope.cancel()
+    }
+
+    /** Priority pool for ALL background layout work (P2.1/P2.4: page prefill, prev-chapter bump,
+     *  B1, B2, parse prewarm). P0 spike measurements decided the shape; it is production since P1. */
+    private val scheduler = TaskScheduler(
+        bgScope,
+        // 原则 §5：`max(1, cpuCount() - 2)` —— 给 UI / 目标页 / 系统各留一份。**上限 2** 是 P0 真机
+        // 实测的拐点（平板：轻页在 0/1/2 并发下耗持平，重页由内容主导、与槽数无关），既然加槽
+        // 买不到速度就不必给更多核去抢。
+        // 过去这里是 `cpuCount() - 1`，比原则少留一份核，且无任何记录（疑手误）——本机 12 核时被
+        // 上限夹住测不出差别，只有 3 核一类的小核设备才暴露（原则给 1 槽、旧代码给 2 槽），
+        // 而那恰恰是最该保守的一档。D5 已改回 -2。
+        // 翻页永不占槽（调用方线程同步跑），槽数只管后台活。
+        maxSlots = shapingSlotsFor(platformCpuCount()),
+    )
 
     /** P4: chapters whose markup + light structure were already prepped, chapter → the paramHash they
      *  were prepped under. A later change of the (paramHash-determining) typography throws it out; the
      *  light tree itself is structure-keyed (cssBundle + useOriginalStyle) so it survives. */
     private val preflightReadiness: MutableMap<Int, Long> = HashMap()
-
-    /** Independent single-thread dispatcher reserved for heavy canonical / full-chapter relayout. Kept
-     *  off [backgroundDispatcher]/[Dispatchers.Default] so a full-chapter (or whole-book) shape never
-     *  competes with the foreground page-flip / real-time shaping on the same thread pool.
-     *  (C2-P0: multiplatform default; was `Executors.newSingleThreadExecutor`, JVM-only.) */
-    private val canonicalDispatcher: kotlinx.coroutines.CoroutineDispatcher by lazy {
-        injectedCanonicalDispatcher ?: Dispatchers.Default.limitedParallelism(1)
-    }
 
     /** Serializes access to the anchor-temp pagination state ([InProgressPagination] lists + the shared
      *  block shape cache) between the foreground flip thread and the background temp-prefill coroutine
@@ -299,13 +337,19 @@ class BookDocumentController(
      * Parses the whole book and restores the start position from saved progress
      * (lays out the target chapter).
      * Cover is NOT decoded here (C2-P1: host concern, see [coverHref]).
+     * R13 invariant: ONE controller instance per book — [open] appends chapter skeletons and never
+     * clears (no `close()` by design; both hosts construct a fresh controller per book). Reusing an
+     * instance for a second book accumulates stale chapters/sessions. Do not call twice.
      * @param bookId Primary key of the book (<0 means don't read progress, start from beginning).
      * @param saved Saved progress record (common [BookReadingState]); null = start from beginning.
      */
     suspend fun open(bookId: Long, saved: orilumn.reader.data.book.BookReadingState?): Boolean {
+        clearFlipDir("open-book")
         this.bookId = bookId
         val t0 = platformNowMs()
-        val parsedBook = runCatching { parser.parse(reader) }.getOrNull() ?: return false
+        val parsedBook = runCatching { parser.parse(reader) }
+            .onFailure { Logger.e(logTag, "open parse FAIL bookId=$bookId ${it.message}") }
+            .getOrNull() ?: return false
         val t1 = platformNowMs()
         if (parsedBook.isEmpty) return false
         book = parsedBook
@@ -330,6 +374,10 @@ class BookDocumentController(
             startChar = char.coerceAtLeast(0)
             Logger.w(logTag, "open: restore -> startCh=$startChapter char=$startChar ${ctx(startChapter)}")
         }
+        // R18: open dispatches B2 with no quiet gate — the open-dispatched pass must start
+        // promptly; the first flip cancels it outright if the reader reads immediately
+        // (abandon ≤1 block). P2.6: there is no `lastFlipMs` to skip-stamp (notifyFlip cancels
+        // unconditionally), so this needs no special case.
         return true
     }
 
@@ -352,7 +400,8 @@ class BookDocumentController(
             val sheets = (unit.cssBundle?.cssTexts ?: emptyList()).map { LightCssParser().parse(it) }
             val styles = StyleComputer(bodyPx, StyleSheet(emptyList()), sheets).compute(markup)
             BookStyleProbe.snapshot(styles)
-        }.getOrNull() ?: return base
+        }.onFailure { Logger.w(logTag, "snapshotBookStyle probe FAIL ch=$chapter ${it.message} → fallback base") }
+            .getOrNull() ?: return base
         return base.copy(
             firstLineIndent = snap.firstLineIndent,
             paragraphSpacing = snap.paragraphSpacing,
@@ -369,7 +418,10 @@ class BookDocumentController(
         var ch = startChapter.coerceIn(0, chapters.size - 1)
         var char = startChar
         while (ch < chapters.size) {
-            val unit = ensureChapterLayout(ch, char)
+            // R5/S3: open restores the SAVED position — never head-lift a mid-chapter anchor
+            // (rotation → new viewport → disk miss used to rebase block≤100 anchors to 0 and the
+            // head page got persisted as progress, losing the position permanently).
+            val unit = ensureChapterLayout(ch, char, headLift = false)
             val markup = unit?.markup
             if (unit != null && markup != null) {
                 val hasContent = markup.hasSignificantText()
@@ -382,6 +434,7 @@ class BookDocumentController(
                     if (page != null) {
                         val p = pageKind(page)
                         Logger.w(logTag, "locateStart: FOUND ch=$ch ${ctx(unit)} page=$p total=${unit.pageSlices.size}")
+                        logJumpLanding("open", ch)
                         return ch to page
                     }
                 }
@@ -449,6 +502,12 @@ class BookDocumentController(
         layoutMutex.withLock {
             if (viewW <= 0 || viewH <= 0) return unit
             if (unit.markup != null) {
+                // R6: never consume a table bound under different params (a viewport change
+                // pre-R5 is the only path that can leave one behind). Live temp sessions own
+                // their lifecycle via profileSnapshot and are never killed here.
+                if (unit.inProgress == null) {
+                    unit.invalidateForParam(currentParamHash())
+                }
                 if (unit.laidOut && unit.inProgress != null) {
                     // Anchor temp streaming active — the current temp page is rendered from its own
                     // whole-block layout; further shaping happens on flip via [findAdjacentPage].
@@ -461,6 +520,14 @@ class BookDocumentController(
                 }
             }
         }
+        // R3 (S7): disk-path landing warms neighbor blocks in the background (temp path owns
+        // its own prefill; direction follows the last flip, defaulting forward).
+        if (viewW > 0 && viewH > 0 && unit.inProgress == null) {
+            val t = unit.paginationTable
+            if (t != null && unit.laidOut) {
+                scheduleWindowPrefill(unit, pageIndexForChar(t.pages, targetChar), flipDir)
+            }
+        }
         return unit
     }
 
@@ -468,6 +535,11 @@ class BookDocumentController(
      *  in the current incremental layout. If not, re-runs [BoxChapterLayouter.incrementalLayoutForPage]
      *  starting from the closest page index. */
     private fun ensurePageRangeShaped(unit: ChapterUnit, targetChar: Int) {
+        // R6: same guard for direct callers (cross-chapter stub reshape). A mismatch invalidates
+        // first, so the `?: return` below trips on the nulled table instead of shaping from it.
+        if (unit.inProgress == null) {
+            unit.invalidateForParam(currentParamHash())
+        }
         val table = unit.paginationTable ?: return
         val boxLayouter = layouter as? BoxChapterLayouter ?: return
         val slices = unit.pageSlices
@@ -483,6 +555,19 @@ class BookDocumentController(
             if (cur != null && cur.firstLine >= 0 && cur.lastLineExclusive > cur.firstLine) return
         }
 
+        // R17: page-product cache hit — bind with zero shaping/assembly. The product is
+        // deterministic given table + params (same edge-snap argument as the seam canary below),
+        // so binding it equals a fresh shape; the hash check rejects stale param cycles.
+        val tEnter = platformNowMs()
+        val cachedHit = unit.pageCache[targetPage]
+        if (cachedHit != null && cachedHit.paramHash == table.paramHash) {
+            unit.bind(cachedHit.layout, cachedHit.slices)
+            unit.shapedPageFrom = targetPage
+            unit.shapedPageTo = (targetPage + 1).coerceAtMost(table.pages.size)
+            Logger.w(logTag, "ensurePageRangeShaped ${ctx(unit)} page=$targetPage pagecache-hit t=${platformNowMs() - tEnter}ms")
+            return
+        }
+
         // Capture the old window's edges (they get replaced below) for the seam canary.
         val oldFrom = unit.shapedPageFrom
         val oldTo = unit.shapedPageTo
@@ -494,6 +579,7 @@ class BookDocumentController(
         val contentHeight = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
         val t0 = platformNowMs()
         val prepare = boxLayouter.prepareLight(unit.markup!!, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight)
+        val tPrep = platformNowMs()
         val pagesToShape = 1
         val newProduct = boxLayouter.incrementalLayoutForPage(
             prepare = prepare,
@@ -504,11 +590,19 @@ class BookDocumentController(
             targetPage = targetPage,
             pagesToShape = pagesToShape,
             cache = unitShapeCache(unit),
+            prefillL2 = windowPrefillShapesFor(unit, table),
         )
         unit.bind(newProduct.layout, newProduct.slices)
         unit.shapedPageFrom = targetPage
         unit.shapedPageTo = (targetPage + pagesToShape).coerceAtMost(table.pages.size)
-        Logger.w(logTag, "ensurePageRangeShaped ${ctx(unit)} page=$targetPage t=${platformNowMs() - t0}ms")
+        // R17: store the assembled product + trim to the pointer neighborhood (bounded memory).
+        unit.pageCache[targetPage] =
+            ChapterUnit.PageProduct(newProduct.layout, newProduct.slices, table.paramHash)
+        unit.pageCache.keys.toList().forEach { p ->
+            val stale = unit.pageCache[p]?.paramHash != table.paramHash
+            if (stale || p < targetPage - 2 || p > targetPage + 2) unit.pageCache.remove(p)
+        }
+        Logger.w(logTag, "ensurePageRangeShaped ${ctx(unit)} page=$targetPage t=${platformNowMs() - t0}ms prep=${tPrep - t0}ms shape=${platformNowMs() - tPrep}ms")
 
         // Step 2 seam canary: when the new window directly abuts the old one, the shared boundary must
         // agree exactly (a gap/overlap between windows is the "missing lines" symptom). Both sides are
@@ -534,7 +628,8 @@ class BookDocumentController(
     }
 
     private fun buildLayout(unit: ChapterUnit, targetChar: Int = 0, headLift: Boolean = true) {
-        val markup = unit.markup ?: return
+        // ensureChapterLayout 已在锁外备好 markup；到这里为 null 即锁间隙状态矛盾，抛而不吞。
+        val markup = checkNotNull(unit.markup) { "buildLayout without markup ch=${unit.chapterIndex}" }
         val t0 = platformNowMs()
         runCatching {
             val contentWidth = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
@@ -567,17 +662,19 @@ class BookDocumentController(
                         targetPage = startPage,
                         pagesToShape = 1,
                         cache = unitShapeCache(unit),
+                        prefillL2 = windowPrefillShapesFor(unit, cached),
                     )
                     Logger.w(logTag, "DISK-HIT shape t=${platformNowMs() - sp}ms shapedPages=${product.slices.count { it.firstLine >= 0 }} blocks=[${product.slices[startPage].blockStart},${product.slices[startPage].blockEndExclusive}) target=$startPage")
                     unit.bind(product.layout, product.slices)
                     unit.shapedPageFrom = startPage
-                    unit.shapedPageTo = (startPage + 4).coerceAtMost(cached.pages.size)
+                    // R9: honest window — only 1 page is shaped here (pagesToShape=1 above).
+                    unit.shapedPageTo = (startPage + 1).coerceAtMost(cached.pages.size)
                     Logger.w(logTag, "layout ${ctx(unit)} DISK-HIT+INCREMENTAL page=$startPage t=${platformNowMs() - t0}ms")
                 } else {
                     // Legacy layouter: still full layout.
                     val product = layouter.layout(markup, unit.cssBundle, profile, contentWidth, contentHeight)
                         ?: error("layout failed")
-                    unit.bind(product.layout, product.slices)
+                    unit.bindFull(product.layout, product.slices)
                     Logger.w(logTag, "layout ${ctx(unit)} DISK-HIT+LEGACY pages=${cached.totalPages} t=${platformNowMs() - t0}ms")
                 }
             } else {
@@ -611,7 +708,7 @@ class BookDocumentController(
                     ?: error("layout failed")
                 val layout = product.layout
                 val slices = product.slices
-                unit.bind(layout, slices)
+                unit.bindFull(layout, slices)
 
                 // Persist pagination table (with block ranges backfilled by BoxChapterLayouter).
                 if (cache != null && cacheFile != null && slices.isNotEmpty() && slices[0].blockStart >= 0) {
@@ -637,18 +734,15 @@ class BookDocumentController(
         }.onFailure {
             Logger.e(logTag, "layout FAIL ch=${unit.chapterIndex} ${ctx(unit)} ${it.message}", it)
             Logger.e(logTag, "layout FAIL ch=${unit.chapterIndex} ${it.message}", it)
-            unit.bindSafeEmpty()
+            // 失败不再伪装空章节（bindSafeEmpty 已删）：抛，让调用链按失败处理。
+            // 翻页线程上即崩（开发期暴露）；重排路径各自 runCatching 记 e 后丢弃本轮。
+            throw it
         }
     }
 
     /** Chapters at or below this many blocks are laid out fully (small chapters are fast enough and a
  *  cleaner pagination than block-cut). Larger chapters use anchor-based incremental streaming. */
 private val SMALL_CHAPTER_BLOCKS = 120
-
-/** P13 (U6k): chapters strictly larger than [SMALL_CHAPTER_BLOCKS] shape their canonical pass on the
- *  parallel chunk workers (U6k) so the background canonical and the foreground track never serialize;
- *  small chapters keep the single-block sequential shape (chunking buys nothing below ~2 chunks). */
-private val CHUNK_CANONICAL_MIN_BLOCKS = SMALL_CHAPTER_BLOCKS + 1
 
 /**
  * Header-lift threshold. When a large chapter's anchor block lies within the first
@@ -666,6 +760,7 @@ internal val HEAD_START_BLOCK_LIMIT = 100
  *  landed, and the far end is evicted so the session never outgrows ~3 pages (+ the anchor torn pair).
  *  Window depth symmetric ⇒ forward/backward flip latency risk symmetric. */
 private val TEMP_WINDOW_DEPTH = 1
+
 
 // ─────────────────────────────────────────────────────────────────
 // Anchor-based incremental layout (large-chapter, disk-miss)
@@ -731,14 +826,63 @@ private fun startAnchorStream(
     try {
         // Build the line-anchored anchor page first (locals, still outside any lock — the flip thread
         // is blocked on the birth signal, so this window can no longer be raced into).
-        val anchor = bc.shapeAnchorPageForward(prepare, snapshot, contentW, contentH, anchorCharAt, cache)
+        // 尾锚直达倒包：锚落在末块时前向灌注定撞顶（至多覆盖末块余行），跳过前向试探，
+        // 直接倒包——省一次整块塑形+组装（旧路径先前向后倒包，白做一次）。
+        // 非末块锚仍先前向灌：撞顶不满才倒包；灌满则保留前向页（与正向尾余页同源）。
+        // 失败一律可观测 + 回退前向锚（原行为），出生永不因此落空：
+        //   - total<=0 畸形章（跨章已跳过无正文章，理论不可达）：记 w 跳过；
+        //   - 倒包返回 null：记 w 回退；
+        //   - 倒包抛异常（tempShape/rebuildLocalLines 遇畸形内容）：记 e 回退——
+        //     不包的话异常穿透 birth 直达 buildLayout 的 catch（ERROR + 空白章），
+        //     回退接不住真正的失败模式。
+        val tailAnchored = anchorBlock >= prepare.totalBlocks - 1
+        val anchorFwd = if (!tailAnchored) {
+            bc.shapeAnchorPageForward(prepare, snapshot, contentW, contentH, anchorCharAt, cache)
+        } else null
+        // 尾锚倒包：前向灌撞到章末（无后继块）时，锚点页改由 shapeTempPageBackward 从文末
+        // 倒包一整页——与 -1/-2/-3… 链同函数、同页界制式（backward-packed island）。
+        // 前向灌只在"灌满整页"这一种情况下与正向尾余页同源，而撞顶不满是常态（锚在文末
+        // 最后一行时恒为 1 行）；无磁盘表时本就没有 canonical 可兼容，倒包恒为满屏，
+        // 且后向链从此页起向后铺（shapeNextBackward 以 Fwd(0) 为头缘），全链统一。
+        // shapeTempPageBackward 失败则回退前向锚（原行为）。
         // C2-P2b-3: `withLock` 非内联，块里不能裸 `return` —— 超期标记外置，语义不变。
+        // 开发期 fail-fast：倒包按构造必成（与前向同函数、同批块，只是遍历方向反了；
+        // 前向能塑的块倒包必能塑，没有倒包特有的失败理由）——一旦失败必是底层回归，
+        // 必须抛出来，不许静默回退藏掉。total<=0、返回 null、抛异常三条路都不吞：
+        // null 在此抛，异常自然上抛（buildLayout 记 ERROR）。
+        val tailPage: TempPage? = if (tailAnchored || (anchorFwd != null && anchorFwd.nextBlock >= prepare.totalBlocks)) {
+            bc.shapeTempPageBackward(prepare, snapshot, contentW, contentH, prepare.totalBlocks, -1, cache)
+                ?.also { page -> Logger.w(logTag, "anchor TAIL-BACKWARD ch=${unit.chapterIndex} blocks=[${page.slice.blockStart},${page.slice.blockEndExclusive}) chars=[${page.slice.charStart},${page.slice.charEnd})") }
+                ?: error("anchor TAIL-BACKWARD null ch=${unit.chapterIndex} totalBlocks=${prepare.totalBlocks} anchorChar=$anchorCharAt")
+        } else null
+        // 尾包成功不再碰前向；非尾锚未撞顶走前向页。anchorFwd 为 null 只可能与 tailPage
+        // 并存（尾锚直达必走上一分支）——到这里为 null 即状态矛盾，直接抛，不补塑遮掩。
+        val anchorPage: TempPage
+        val shapedFwdTo: Int
+        val fwdFromLine: Int
+        if (tailPage != null) {
+            anchorPage = tailPage
+            shapedFwdTo = prepare.totalBlocks
+            fwdFromLine = 0
+        } else {
+            val fwd = checkNotNull(anchorFwd) { "anchorFwd null without tailPage ch=${unit.chapterIndex}" }
+            anchorPage = fwd.page
+            shapedFwdTo = fwd.nextBlock
+            fwdFromLine = fwd.nextLine
+        }
+        val anchorBlockStart = anchorPage.slice.blockStart
+        val anchorLineChar = anchorPage.slice.charStart
         val superseded = tempStateLock.withLock {
             if (unit.tempBirth !== birth) true else {
-                ip.forwardPages.add(anchor.page)
-                ip.shapedForwardTo = anchor.nextBlock
-                ip.forwardFromLine = anchor.nextLine
-                ip.anchorLineCharStart = anchor.page.slice.charStart
+                ip.forwardPages.add(anchorPage.copy(resumeBlock = shapedFwdTo, resumeLine = fwdFromLine))
+                ip.shapedForwardTo = shapedFwdTo
+                ip.forwardFromLine = fwdFromLine
+                ip.anchorLineCharStart = anchorLineChar
+                // 出生即在章首（anchorBlock==0）：锚点页就是 shapeAnchorPageForward 灌满的完整首页，
+                // "到达章首"在出生那一刻已经发生——首翻回翻直达 Boundary 时即跨章，不再 waste 一下
+                // re-root 到同一页（此前缺这行，在首页回翻形同翻不动）。 mid-章出生的会话不受影响，
+                // 真正的回翻到达仍走 resolveHeadArrival（现象2）。
+                if (anchorBlock == 0) ip.headLanded = true
                 unit.bindInProgress(ip)
                 unit.markLaidOut()
                 // Forward whole-block pages are NOT shaped here synchronously — shaping them on the caller
@@ -771,43 +915,102 @@ private fun startAnchorStream(
     // with a full-chapter shape. Runs on the dedicated canonicalDispatcher (single thread) so it never
     // competes with the foreground flip thread.
     if (!deferCanonical) {
-        // P3 queue-not-kill (R3, contract #6): canonical jobs are keyed ONE SLOT PER CHAPTER. A new
-        // dispatch cancels only ITS OWN chapter's previous B1 (same chapter re-shaped with newer
-        // params — genuinely stale); ANY OTHER chapter's in-flight B1 is left running on the single
-        // canonical thread's FIFO queue and finishes its persist. Until today a cross-chapter flip
-        // cancelled the just-tuned chapter's canonical wholesale (`anchorBackfillJob?.cancel()`), so
-        // returning to it re-temp'd instead of hitting its fresh disk table. Now it lands a disk hit.
-        canonicalJobs.remove(unit.chapterIndex)?.cancel()
-        canonicalJobs[unit.chapterIndex] = scope.launch(canonicalDispatcher) {
-            if (epoch != layoutEpoch) {
-                Logger.w(logTag, "canonical superseded (epoch $epoch != $layoutEpoch) ch=${unit.chapterIndex}")
-                return@launch
-            }
-            // P7: capture the launching coroutine's context so the between-blocks checkpoint can
-            // observe this job's cancellation even inside the nested runCatching/inner lambdas.
-            val ctx = coroutineContext
-            runCatching {
-                val heavy = unit.markup?.let { bc.prepare(it, unit.cssBundle, profile, contentW, contentH) }
-                // P13 (U6k): large chapters shape their canonical pass on the parallel chunk workers
-                // (identical slices by construction; see BoxChapterLayouter.fullLayoutChunked) so the
-                // single canonical thread never serializes the whole chapter's StaticLayout shaping.
-                val prod = heavy?.let {
-                    if (it.totalBlocks >= CHUNK_CANONICAL_MIN_BLOCKS) {
-                        bc.fullLayoutChunked(it, profile, contentW, contentH) { ctx.ensureActive() }
-                    } else {
-                        bc.fullLayout(it, profile, contentW, contentH) { ctx.ensureActive() }
-                    }
-                }
-                if (prod != null) finishCanonicalBackground(unit, ip, prod, paramHash)
-            }.onFailure { e ->
-                // P7: a between-blocks cancel throws CancellationException — that is a TIMELY ABANDON,
-                // not a failure. Never report it as FAIL (the per-chapter slot was re-used by design).
-                if (e !is CancellationException) Logger.e(logTag, "canonical layout FAIL ch=${unit.chapterIndex} ${e.message}")
-            }
-        }
+        // 原则 §3.4：档位由「目标页距章首 d」决定。birth 这一刻通常还判不出（锚点页的前驱页
+        // 尚未成形）→ 第 6 档；等 fillBackward 塑出前驱页后由 maybeBoostB1ForHeadProximity 升档。
+        // B1 没派（表已新鲜）则不重扫整书——否则每次落位都把收敛中的 B2 打散重来，
+        // B2 永不 drain，前台翻页长期与满槽后台抢 CPU。
+        val b1Launched = dispatchB1(unit, ip, epoch, bc, contentW, contentH, paramHash, tempHeadDistancePages(ip))
+        // Relaunch the whole-book pass behind this B1 (skip-fresh repositions cheaply; temp-live and
+        // fresh chapters no-op). Unconditional: same-key dedup + skip-fresh bound the cost.
+        if (b1Launched) requestWholeBookRelayout(force = true)
     } else {
         Logger.w(logTag, "canonical deferred (panel open) ch=${unit.chapterIndex}")
     }
+}
+
+/** 本章权威整章表（B1）的派发。档位由 [headDistancePages] 经 [b1PriorityFor] 定（原则 §3.4），
+ *  并把「档位 + d」打进落盘日志——否则设备上无法核对升档是否真的发生了。
+ *
+ *  P3 queue-not-kill (R3, contract #6): keyed ONE SLOT PER CHAPTER. A new dispatch cancels only
+ *  ITS OWN chapter's previous B1 (same chapter re-shaped with newer params — genuinely stale);
+ *  ANY OTHER chapter's in-flight B1 is left running and finishes its persist. Until today a
+ *  cross-chapter flip cancelled the just-tuned chapter's canonical wholesale, so returning to it
+ *  re-temp'd instead of hitting its fresh disk table. Now it lands a disk hit.
+ *
+ *  抢占范围按**实际档位**给（`cancelLowerThan(priority)`）——加急档只砍比它更低的活，
+ *  不误伤同为第 2/3 档的邻页与 d=1 跨章兜底。 */
+private fun dispatchB1(
+    unit: ChapterUnit,
+    ip: InProgressPagination,
+    epoch: Long,
+    bc: BoxChapterLayouter,
+    contentW: Int,
+    contentH: Int,
+    paramHash: Long,
+    headDistancePages: Int?,
+): Boolean {
+    // 派发层 skip-fresh（与 b2ChapterTask 执行层 skip-fresh 分工，D6 同理）：
+    // 表已新鲜时整趟 B1 是纯浪费——更糟的是它连带 cancelLowerThan 杀在途 B2 +
+    // 外层 force 整书重扫，把一个已收敛的 B2 又打散。直接不派。
+    if (unit.paginationTable?.paramHash == paramHash) {
+        Logger.w(logTag, "b1 skip-fresh ch=${unit.chapterIndex} (table already fresh)")
+        return false
+    }
+    val priority = b1PriorityFor(headDistancePages)
+    Logger.w(
+        logTag,
+        "b1 dispatch ch=${unit.chapterIndex} prio=$priority headDist=${headDistancePages ?: "?"}"
+    )
+    scheduler.cancelLowerThan(priority)
+    scheduler.submit(TaskScheduler.Task(
+        key = "b1:${unit.chapterIndex}",
+        priority = priority,
+        block = b1@{
+        if (epoch != layoutEpoch) {
+            Logger.w(logTag, "canonical superseded (epoch $epoch != $layoutEpoch) ch=${unit.chapterIndex}")
+            return@b1
+        }
+        // 执行层 skip-fresh（与 b2ChapterTask 同式）：派发后、开工前表已新鲜
+        // （B2 先落盘）则整趟白做，直接让出槽位。
+        if (unit.paginationTable?.paramHash == paramHash) {
+            Logger.w(logTag, "b1 skip-fresh at execution ch=${unit.chapterIndex}")
+            return@b1
+        }
+        // P7: capture the task coroutine's context so the between-blocks checkpoint can
+        // observe this task's cancellation even inside the nested runCatching/inner lambdas.
+        val ctx = currentCoroutineContext()
+        runCatching {
+            val heavy = unit.markup?.let { bc.prepare(it, unit.cssBundle, profile, contentW, contentH) }
+            // P1: chunk workers deleted (P13) — background canonical shapes sequentially;
+            // per-block P7 checkpoints keep abandonment at block granularity, and the
+            // scheduler pool (not intra-task fan-out) owns all parallelism now.
+            val prod = heavy?.let {
+                bc.fullLayout(it, profile, contentW, contentH) { ctx.ensureActive() }
+            }
+            if (prod != null) finishCanonicalBackground(unit, ip, prod, paramHash)
+        }.onFailure { e ->
+            // P7: a between-blocks cancel throws CancellationException — that is a TIMELY ABANDON,
+            // not a failure. Never report it as FAIL (the per-chapter slot was re-used by design).
+            if (e !is CancellationException) Logger.e(logTag, "canonical layout FAIL ch=${unit.chapterIndex} ${e.message}")
+        }
+        },
+    ))
+    return true
+}
+
+/** 原则 §3.4 的**再评估**钩子：临时表侧的前驱页塑出之后，才知道锚点页是不是第 2 页。
+ *  若是，把本章全量按加急档重派一次（同键 `b1:<章>`，池按调用序让新的孪生胜出）。
+ *
+ *  重派会取消在途的第 6 档 B1 重来——这是有意的取舍：交接点就剩一次翻页，此时后台那趟
+ *  大概率还没排完，等它排完等于交接时手上没有表。只在 d 判定为 1 时才派；d 为 0（已在
+ *  交接点，同步承接）/ 2（更深）/ null（判不出）一律不动。 */
+private fun maybeBoostB1ForHeadProximity(unit: ChapterUnit, ip: InProgressPagination) {
+    if (deferCanonical) return
+    val d = tempHeadDistancePages(ip) ?: return
+    if (d != 1) return
+    val bc = layouter as? BoxChapterLayouter ?: return
+    Logger.w(logTag, "b1 BOOST ch=${unit.chapterIndex} headDist=1 → 加急档（交接点临近）")
+    dispatchB1(unit, ip, layoutEpoch, bc, ip.contentW, ip.contentH, ip.paramHash, d)
 }
 
 /** The shared per-block shape cache for [unit]'s current layout-parameter cycle (lazily created). */
@@ -831,8 +1034,11 @@ private fun shapeNextBackward(ip: InProgressPagination, bc: BoxChapterLayouter):
     val prevBlockCharStart = prep.globalCharStarts[prevBlockStart].toInt()
     val lineCut = if (prevLineCharStart > prevBlockCharStart) prevLineCharStart else -1
     val endExcl = if (lineCut >= 0) prevBlockStart + 1 else prevBlockStart
+    // 章首不适用（非塑形失败）：fillBackward 据此返回 0，不中止 prefill 循环。
     if (endExcl <= 0) return null
+    // 塑形器回归：抛（fail-fast），不当越界吞。
     return bc.shapeTempPageBackward(prep, ip.profileSnapshot, ip.contentW, ip.contentH, endExcl, lineCut, ip.shapes)
+        ?: error("shapeNextBackward FAIL ch=${ip.chapterIndex} endExcl=$endExcl lineCut=$lineCut")
 }
 
 /** The window head-edge page: [InProgressPagination.forwardPages][0] (the anchor page until far-end
@@ -849,8 +1055,9 @@ private fun headEdgePage(ip: InProgressPagination): TempPage? = ip.forwardPages.
  *  again), and every append runs [enforceTempWindow] so the window stays within its ±[TEMP_WINDOW_DEPTH]
  *  bound even mid-prefill. Returns whether any shaping happened (the caller loops until false, yielding
  *  between steps). Runs under [tempStateLock] so it is thread-safe with foreground tempNav. */
-private fun stepTempPrefill(ip: InProgressPagination, lastDir: Int): Boolean = tempStateLock.withLock {
-    val bc = layouter as? BoxChapterLayouter ?: return@withLock false
+private fun stepTempPrefill(unit: ChapterUnit, ip: InProgressPagination, lastDir: Int): Boolean = tempStateLock.withLock {
+    // layouter 是构造期装配不变量；配错时整轮预填停——此前静默，症状只剩"偶发翻页慢"。抛。
+    val bc = checkNotNull(layouter as? BoxChapterLayouter) { "stepTempPrefill without BoxChapterLayouter" }
     val prep = ip.prepare
     val f = ip.forwardPages
     val b = ip.backwardPages
@@ -860,12 +1067,32 @@ private fun stepTempPrefill(ip: InProgressPagination, lastDir: Int): Boolean = t
     val backwardMissing = if (!ip.curIsForward) ip.curIndex + 1 >= b.size else ip.curIndex == 0 && b.isEmpty()
 
     // Both sides are filled by the rule pair below: 0 = not applicable (already present / out of
-    // range), 1 = a page was shaped, 2 = a required shape failed (abort the whole prefill).
+    // range), 1 = a page was shaped. Shaping failure throws (fail-fast) instead of the old
+    // code-2 abort — a poisoned prefill must not silently stall the watermark.
     fun fillForward(): Int {
         if (!forwardMissing || ip.shapedForwardTo >= prep.totalBlocks) return 0
-        val fwd = bc.shapeTempPageForward(prep, ip.profileSnapshot, ip.contentW, ip.contentH, ip.shapedForwardTo, ip.shapes, ip.forwardFromLine)
-            ?: return 2
-        f.add(fwd.page)
+        // 前向侧已空：无尾可续，水位必陈旧——禁从水位盲塑（必跳页）。B0→F 的重建归 tempNav RE-ROOT。
+        if (f.isEmpty()) return 0
+        val tail = f.last()
+        // 连续页以当前（尾）页分页点为原点（增量分页原则）；水位只做边界判定，不再是塑形依据。
+        // 推不出（尾页非法）即窗口腐败，不塑形；漂移记 w（canary：按理恒为零）。
+        val origin = tempResumeAfter(ip, bc, tail.slice) ?: run {
+            Logger.e(logTag, "prefill fwd-no-origin DROP ch=${unit.chapterIndex} tail=b${tail.blockStart}[${tail.slice.charStart},${tail.slice.charEnd})")
+            return 0
+        }
+        if (origin.first != ip.shapedForwardTo || origin.second != ip.forwardFromLine) {
+            Logger.w(logTag, "prefill origin-drift ch=${unit.chapterIndex} derived=(${origin.first},${origin.second}) waterline=(${ip.shapedForwardTo},${ip.forwardFromLine})")
+        }
+        // 塑形失败编码 2 中止整轮：后台水位停推，前台下次翻页按需塑——延迟归因在此记 e。
+        // 开发期 fail-fast：记 e 后抛（后台 SupervisorJob 收容，不连累前台；栈留痕）。
+        val fwd = bc.shapeTempPageForward(prep, ip.profileSnapshot, ip.contentW, ip.contentH, origin.first, ip.shapes, origin.second)
+            ?: error("stepTempPrefill fillForward FAIL ch=${unit.chapterIndex} origin=(${origin.first},${origin.second})")
+        // 失配即窗口/水位已分叉：追加即跳页。丢弃（不追加、不推水位，不变量 intact），记 e 待查。
+        if (!tempPagesTile(tail.slice, fwd.page.slice)) {
+            Logger.e(logTag, "prefill fwd-stale-window DROP ch=${unit.chapterIndex} tail=b${tail.blockStart}[${tail.slice.charStart},${tail.slice.charEnd}) shaped=b${fwd.page.blockStart}[${fwd.page.slice.charStart},${fwd.page.slice.charEnd})")
+            return 0
+        }
+        f.add(fwd.page.copy(resumeBlock = fwd.nextBlock, resumeLine = fwd.nextLine))
         ip.shapedForwardTo = fwd.nextBlock
         ip.forwardFromLine = fwd.nextLine
         enforceTempWindow(ip)
@@ -873,10 +1100,20 @@ private fun stepTempPrefill(ip: InProgressPagination, lastDir: Int): Boolean = t
     }
     fun fillBackward(): Int {
         if (!backwardMissing) return 0
-        val p = shapeNextBackward(ip, bc) ?: return 2
+        // null = 章首不适用（无塑可出），非塑形失败；塑形失败已在 shapeNextBackward 内抛。
+        val p = shapeNextBackward(ip, bc) ?: return 0
         b.add(p)
         if (p.blockStart == 0) ip.headReached = true
         enforceTempWindow(ip)
+        // 原则 §3.4：前驱页刚成形，才知道指针页是不是第 2 页（其前驱从 block 0 起）。
+        // 是则把本章全量升到加急档——交接点就剩一次翻页。d 判不出/更深时本函数静默返回。
+        //
+        // 承重前提：本函数已在 [tempStateLock] 内，而 [maybeBoostB1ForHeadProximity] 会再取一次
+        // 同一把锁。这依赖 SyncLock 在各平台 actual 上**可重入**（JVM/Android/Desktop 是
+        // `synchronized`，JVM 监视器可重入）。iOS actual 尚未落地，若将来不可重入则必须把本调用
+        // 移到锁外（stepTempPrefill 返回后在调用方循环里判）。所幸链路上不做阻塞动作
+        //（dispatchB1 只 submit，不等待），即便锁不可重入也只是自锁而非死锁——但仍须显式修。
+        maybeBoostB1ForHeadProximity(unit, ip)
         return 1
     }
     // Direction-prioritized: the reader's NEXT page (the one in the direction of the last flip) is
@@ -897,17 +1134,22 @@ private fun stepTempPrefill(ip: InProgressPagination, lastDir: Int): Boolean = t
  *  (direction-prioritized, see [stepTempPrefill]) — but a re-dispatch for the SAME in-flight target
  *  (pointer unchanged, e.g. a locate re-sync) is deduped. Cancels any previous prefill before
  *  launching. Runs on [backgroundDispatcher] so it never blocks the foreground flip thread. */
-private fun scheduleTempPrefill(unit: ChapterUnit, ip: InProgressPagination, lastDir: Int = 1) {
+private fun scheduleTempPrefill(unit: ChapterUnit, ip: InProgressPagination, lastDir: Int = 0) {
     val cursor = (ip.sessionId shl 32) or
         ((if (ip.curIsForward) 1L else 0L) shl 20) or
         ((lastDir and 0x3).toLong() shl 16) or ip.curIndex.toLong()
     if (cursor == lastPrefillCursor && tempPrefillJob?.isActive == true) return
     lastPrefillCursor = cursor
     tempPrefillJob?.cancel()
-    tempPrefillJob = scope.launch(backgroundDispatcher) {
+    tempPrefillJob = bgScope.launch(backgroundDispatcher) {
         try {
+            // 无步数截断：循环在窗口补满（stepTempPrefill 回 false）时自然结束；
+            // 每步只塑一页且前后邻均有界（章尾/章首），无死循环空间。
             var guard = 0
-            while (stepTempPrefill(ip, lastDir) && guard++ < TEMP_WINDOW_DEPTH * 16) kotlinx.coroutines.delay(4)
+            while (stepTempPrefill(unit, ip, lastDir)) { guard++; kotlinx.coroutines.delay(4) }
+            // 报块水位深度，否则第 4 档在临时表侧的推进幅度设备上不可见。
+            val (fwd, total) = tempStateLock.withLock { ip.shapedForwardTo to ip.prepare.totalBlocks }
+            Logger.d(logTag, "temp prefill done ch=${unit.chapterIndex} steps=$guard shapedFwdTo=$fwd/$total")
         } catch (_: kotlinx.coroutines.CancellationException) {
             // superseded by a newer prefill or a new anchor stream — expected
         } catch (e: Exception) {
@@ -932,10 +1174,15 @@ private fun prepareFor(
     return box.prepare(markup, unit.cssBundle, profile, contentWidth, contentHeight).also { unit.bindPrepare(it, paramHash) }
 }
 
-/** The current temp page the navigation pointer refers to. */
+/** The current temp page the navigation pointer refers to. Null = 指针越界（窗口腐败）或
+ *  会话无页——调用方把 null 当"判不出"处理，但越界本身记 e（见 tempHeadDistancePages）。 */
 private fun currentTempPage(ip: InProgressPagination): TempPage? =
     if (ip.curIsForward) ip.forwardPages.getOrNull(ip.curIndex)
     else ip.backwardPages.getOrNull(ip.curIndex)
+
+private fun tempPointerValid(ip: InProgressPagination): Boolean =
+    if (ip.curIsForward) ip.curIndex in ip.forwardPages.indices
+    else ip.curIndex in ip.backwardPages.indices
 
 private fun setCurrentTempPage(unit: ChapterUnit, ip: InProgressPagination, page: TempPage) {
     ip.setCurrent(page.slice)
@@ -959,6 +1206,126 @@ private fun locateTempPosition(ip: InProgressPagination, slice: PageSlice) {
         val b2 = ip.backwardPages.indexOfFirst { it.blockStart == bs }
         if (b2 >= 0) { ip.curIsForward = false; ip.curIndex = b2; return }
     }
+}
+
+/** 相接判据（排版层-上/增量分页）：两源页首尾相接即连续，块边界分隔符容忍 ±3 字（纯判据，不存状态）。 */
+private fun tempPagesTile(prev: PageSlice, next: PageSlice): Boolean {
+    if (prev.charStart == next.charStart && prev.charEnd == next.charEnd) return true
+    val fwd = next.charStart - prev.charEnd
+    val bwd = prev.charStart - next.charEnd
+    return fwd in -3..3 || bwd in -3..3
+}
+
+/** 源页后继原点（排版层-上/增量分页）：返回 Triple(块, 行, dev)，dev = 后继首字 − 源页末字。
+ *  行内取"首个起始不早于末字符的行"（行首/分隔符结尾的源页精确命中，dev≈0）；
+ *  落到行中（陈旧源页）则取该行行首，dev 为负=重叠。下一块/空块/非法一律 fail-open 返回 null。
+ *  纯判据，不存状态。 */
+private fun tempResumeAfter(ip: InProgressPagination, bc: BoxChapterLayouter, src: PageSlice): Triple<Int, Int, Int>? {
+    val prep = ip.prepare
+    val total = prep.totalBlocks
+    if (total <= 0 || src.blockEndExclusive <= 0) return null
+    val gcs = prep.globalCharStarts
+    if (gcs.size < total) return null
+    val bl = (src.blockEndExclusive - 1).coerceIn(0, total - 1)
+    val base = gcs[bl].toInt()
+    val rel = src.charEnd - base
+    if (rel < 0) return null
+    val nextStart = if (bl + 1 < total) gcs[bl + 1].toInt() else prep.totalChars
+    if (src.charEnd >= nextStart) {
+        // 源页止于块末或块外：后继从下一块首行起（dev≤0 为源页越界的重叠量）。
+        if (bl + 1 >= total) return null
+        return Triple(bl + 1, 0, nextStart - src.charEnd)
+    }
+    val shape = try { bc.tempShape(ip.shapes, prep, bl, ip.profileSnapshot) } catch (_: Exception) { return null }
+    if (shape.lineCount <= 0) return Triple(bl + 1, 0, nextStart - src.charEnd)
+    val l0 = try { shape.lineStart(0) } catch (_: Exception) { return null }
+    var gapK = -1
+    var lapK = -1
+    var i = 0
+    while (i < shape.lineCount) {
+        val ls = try { shape.lineStart(i) } catch (_: Exception) { return null } - l0
+        if (ls >= rel && gapK < 0) gapK = i
+        if (ls <= rel) lapK = i
+        i++
+    }
+    // 精确（行首/分隔符结尾）优先取 gap 侧；行中（陈旧）取重叠侧，由调用方按 dev 裁决。
+    if (gapK >= 0) {
+        val ls = try { shape.lineStart(gapK) } catch (_: Exception) { return null } - l0
+        if (ls - rel <= 3) return Triple(bl, gapK, (base + ls) - src.charEnd)
+    }
+    if (lapK >= 0) {
+        val ls = try { shape.lineStart(lapK) } catch (_: Exception) { return null } - l0
+        return Triple(bl, lapK, (base + ls) - src.charEnd)
+    }
+    return null
+}
+
+/** 前向失配修复（排版层-上/增量分页；S7 连续 miss 按需补塑，不废会话）：
+ *  以源页末端为原点当场补塑真正的下一页，替换错位落页，并把窗口收敛到"源页→补塑页"链上
+ *  （截掉错位页；水位=补塑页后继）。失败返回 null（调用方保留原落页 + 记 e）。全程持 tempStateLock。 */
+private fun repairTempForwardGap(
+    unit: ChapterUnit, ip: InProgressPagination, bc: BoxChapterLayouter, src: PageSlice, bad: PageSlice,
+): Pair<Int, PageSlice>? {
+    val prep = ip.prepare
+    val resume = tempResumeAfter(ip, bc, src) ?: run {
+        Logger.e(logTag, "tempNav fwd-repair-abort ch=${unit.chapterIndex} no-resume src=char[${src.charStart},${src.charEnd})")
+        return null
+    }
+    // dev = 后继首字 − 源页末字：±3 内静默精确修复；[-100,3) 为行级近似（w 可见）；
+    // 超出即两代分页口径分叉过大，不强行续接。
+    if (resume.third < -100 || resume.third > 3) {
+        Logger.e(logTag, "tempNav fwd-repair-abort ch=${unit.chapterIndex} dev-out-of-range src=char[${src.charStart},${src.charEnd}) resume=${resume.first},${resume.second} dev=${resume.third}")
+        return null
+    }
+    val fwd = try {
+        bc.shapeTempPageForward(prep, ip.profileSnapshot, ip.contentW, ip.contentH, resume.first, ip.shapes, resume.second)
+    } catch (e: Exception) {
+        Logger.e(logTag, "tempNav fwd-repair-abort ch=${unit.chapterIndex} shape-throw ${e.message}")
+        return null
+    } ?: run {
+        Logger.e(logTag, "tempNav fwd-repair-abort ch=${unit.chapterIndex} shape-null resume=$resume")
+        return null
+    }
+    val page = fwd.page.copy(resumeBlock = fwd.nextBlock, resumeLine = fwd.nextLine)
+    // 塑形必须复现推导原点（分隔符容忍 ±3），否则是塑形非确定性回归，不装窗。
+    val actual = page.slice.charStart - src.charEnd
+    if (actual < resume.third - 3 || actual > resume.third + 3) {
+        Logger.e(logTag, "tempNav fwd-repair-abort ch=${unit.chapterIndex} nondeterministic src=char[${src.charStart},${src.charEnd}) fixed=char[${page.slice.charStart},${page.slice.charEnd}) dev=${resume.third}")
+        return null
+    }
+    val f = ip.forwardPages
+    val b = ip.backwardPages
+    val fi = f.indexOfFirst { it.slice.charStart == src.charStart && it.blockStart == src.blockStart }
+    if (fi >= 0) {
+        // 源页在前向侧：其后全是错位页，截掉，补塑页接上。
+        while (f.size > fi + 1) f.removeAt(f.size - 1)
+        f.add(page)
+        ip.curIsForward = true
+        ip.curIndex = f.size - 1
+    } else {
+        val bi = b.indexOfFirst { it.slice.charStart == src.charStart && it.blockStart == src.blockStart }
+        if (bi >= 0) {
+            // 源页在后向侧：其后（b[0..bi) + 全前向）皆错位，截掉，补塑页重建前向。
+            repeat(bi) { b.removeAt(0) }
+            f.clear()
+            f.add(page)
+            ip.curIsForward = true
+            ip.curIndex = 0
+        } else {
+            // 源页已不在窗口（被裁）：窗口与显示分叉，前后皆不可信，重建（后向按需重塑）。
+            b.clear()
+            f.clear()
+            f.add(page)
+            ip.curIsForward = true
+            ip.curIndex = 0
+        }
+    }
+    ip.shapedForwardTo = fwd.nextBlock
+    ip.forwardFromLine = fwd.nextLine
+    enforceTempWindow(ip)
+    setCurrentTempPage(unit, ip, page)
+    Logger.w(logTag, "tempNav fwd-repair ch=${unit.chapterIndex} src=char[${src.charStart},${src.charEnd}) bad=char[${bad.charStart},${bad.charEnd}) fixed=char[${page.slice.charStart},${page.slice.charEnd}) dev=${resume.third}")
+    return unit.chapterIndex to page.slice
 }
 
 /** One unit of the temp window in reading order (headward → tailward). The anchor block's torn pair —
@@ -1020,6 +1387,21 @@ private fun enforceTempWindow(ip: InProgressPagination) {
     for (k in keepB) newB.add(b[k])
     f.clear(); f.addAll(newF)
     b.clear(); b.addAll(newB)
+    // 水位-窗口不变量（排版层-上/增量分页）：水位恒为前向尾的后继原点。尾裁剪若不断水位，
+    // 下一次前向塑形（按需/prefill）必从陈旧水位起塑 → 整页跳过。倒回新尾；前向侧清空则
+    // 水位失效（-1），前向重建只许走 RE-ROOT（fillForward 空窗守卫；按需侧见下）。
+    val newTail = f.lastOrNull()
+    if (newTail != null) {
+        if (newTail.resumeBlock >= 0) {
+            ip.shapedForwardTo = newTail.resumeBlock
+            ip.forwardFromLine = newTail.resumeLine
+        } else {
+            Logger.e(logTag, "tempWindow rewind-unknown ch=${ip.chapterIndex} tail=b${newTail.blockStart} — 水位保持旧值")
+        }
+    } else {
+        ip.shapedForwardTo = -1
+        ip.forwardFromLine = 0
+    }
     val fi = newF.indexOfFirst { it === curPage }
     val bi = newB.indexOfFirst { it === curPage }
     if (fi >= 0) { ip.curIsForward = true; ip.curIndex = fi }
@@ -1065,16 +1447,428 @@ data class TempWindowSnapshot(
 
 /** One step of temp navigation. Returns null at a chapter boundary (caller falls through to
  *  cross-chapter navigation). */
+/** R2: last tempNav null-branch reason (diagnostic only; flip thread writes, flip thread reads). */
+private var lastTempNavNull: String? = null
+
+/** P1d: the single flip hook. Preempts all pool work below flip priority (page prefill
+ *  tasks included — same-key resubmits reposition on the next landing); resubmits reposition
+ *  via skip-fresh.
+ *  P2.6: R18's `lastFlipMs` stamp is GONE — preemption never polls a clock (cancel-on-flip is
+ *  unconditional, resume by resubmit), so the timestamp had no reader. R18 doctrine: cancel
+ *  promptly, don't wait out bursts. */
+private fun notifyFlip() {
+    scheduler.cancelLowerThan(TaskScheduler.PRIO_FLIP)
+}
+
+/** R3: immutable published neighbor shapes (chapter + paramHash keyed). Read-only after
+ *  publication — safe to consult from any thread; stale entries are ignored by key check. */
+@Volatile
+private var windowPrefillL2: WindowPrefillShapes? = null
+
+private data class WindowPrefillShapes(
+    val chapterIndex: Int,
+    val paramHash: Long,
+    val shapes: Map<Int, ParagraphShapeRef>,
+)
+
+/** R17 probe hook (C2-P2b-4 pattern): cached page indexes for [chapter]. */
+fun pageCacheKeysForTest(chapter: Int): Set<Int> =
+    unitAt(chapter)?.pageCache?.keys?.toSet() ?: emptySet()
+
+/** R3 probe hook (C2-P2b-4 pattern): last published window-prefill snapshot, if any. */
+fun windowPrefillSnapshotForTest(): Triple<Int, Long, Set<Int>>? =
+    windowPrefillL2?.let { Triple(it.chapterIndex, it.paramHash, it.shapes.keys.toSet()) }
+
+/** d=1 章外兜底任务的键（原则 §3.3）。**与整书章扫描的 [scanKey] 刻意分域**——
+ * 两者是同一份工作（整章全量）但紧急度不同：兜底是"读者下一步就要翻过去"（第 2/3 档），
+ * 章扫描是纯章距投机（第 7 档）。共用键时同键去重按"后来者胜"处理，章扫描那趟若后到就会把
+ * 兜底降级回第 7 档，兜底随即被埋进章距序列——这正是"跨章跳过"旧规则想避开的困境，
+ * 换个键才是真正的解法。 */
+fun edgeKey(chapter: Int) = "edge:$chapter"
+
+/** 邻页序列的一项（原则 §3.1）。序列本身是**有序**的，出队次序即优先级次序。 */
+sealed class NeighborItem {
+    /** 章内第 [index] 页（[tier] = 10/20/30，见 [TaskScheduler.PRIO_PAGE_*]）。 */
+    data class Page(val index: Int, val tier: Int) : NeighborItem()
+
+    /** d=1 越出本章 → 加急整章排邻章（[chapter] = 邻章号，[tier] 同上）。§3.3。 */
+    data class EdgeChapter(val chapter: Int, val tier: Int) : NeighborItem()
+}
+
+/** 原则 §3.1 的**邻页序列**：从目标页出发，按距离 d = 1, 2, 3, … 逐层展开，每层先方向侧、
+ *  后另一侧：`+1·dir, −1·dir, +2·dir, −2·dir, …`
+ *
+ *  档位分配：
+ *  - **d = 1 顺方向侧** → 第 2 档（原则的「下一页」）
+ *  - **d = 1 反方向侧** → 第 3 档（原则的「上一页」）
+ *  - **d ≥ 2** → 第 4 档（本章其余页）
+ *
+ *  章边界（§3.3）：**只有 d=1 越界才升级**成 [NeighborItem.EdgeChapter]（加急整章排邻章）；
+ *  d≥2 越界说明本章至少还剩两页，隔两页仍不翻就不值得为它动整章——该项直接丢弃。
+ *
+ *  第 4 档排到章尾，不设深度截断：总则要求按偏离度串行排全章（有界 drain 窗口已废）。
+ *  指针前移一格，整段序列按新指针重派（同键替换），读者持续读，drain 就持续推进。
+ *
+ *  纯函数、无副作用：生产派发与 probe 验的是同一份判据。 */
+fun neighborSequence(
+    targetPage: Int,
+    totalPages: Int,
+    dir: Int,
+    chapterIdx: Int,
+    lastChapter: Int,
+): List<NeighborItem> {
+    if (totalPages <= 0) return emptyList()
+    val out = ArrayList<NeighborItem>()
+    for (d in 1..(totalPages + 1)) {
+        val dirSide = targetPage + d * if (dir >= 0) 1 else -1
+        val otherSide = targetPage - d * if (dir >= 0) 1 else -1
+        for ((page, isDirSide) in listOf(dirSide to true, otherSide to false)) {
+            val tier = when {
+                d > 1 -> TaskScheduler.PRIO_PAGE_REST
+                isDirSide -> TaskScheduler.PRIO_PAGE_NEXT
+                else -> TaskScheduler.PRIO_PAGE_PREV
+            }
+            if (page in 0 until totalPages) {
+                out.add(NeighborItem.Page(page, tier))
+            } else if (d == 1) {
+                val beyond = if (page >= totalPages) chapterIdx + 1 else chapterIdx - 1
+                if (beyond in 0..lastChapter) {
+                    out.add(NeighborItem.EdgeChapter(beyond, if (isDirSide) {
+                        TaskScheduler.PRIO_EDGE_FORWARD
+                    } else {
+                        TaskScheduler.PRIO_EDGE_BACKWARD
+                    }))
+                }
+            }
+            // d >= 2 越界：丢弃（§3.3）
+        }
+        // 序列已覆盖全章 + 两侧各一次越界，无需再远。
+        if (d > totalPages) break
+    }
+    return out
+}
+
+/** 整书章扫描（B2，第 7 档）的键。与 [edgeKey] 必须分域，见该函数 KDoc。 */
+fun scanKey(chapter: Int) = "b2:$chapter"
+
+/** 原则 §3.4：目标页距章首的页数 d，决定本章全量的档位。**纯判定，无副作用。**
+ *
+ *  - `d == 0`（目标页就是章首页）→ 已在交接点，全量表走**同步承接**，不升档；
+ *  - `d == 1`（目标页是第 2 页）→ **加急档**：交接点就剩一次翻页，而增量侧此刻还要逐页往后推
+ *    （每页边界依赖前页尾部），全量一趟给出整章全部边界；
+ *  - `d >= 2` 或 `null`（判不出）→ 第 6 档。d≥2 不升级，与 §3.3 同一把尺子：隔两页仍不翻，
+ *    就不值得为它动整章。
+ *
+ *  @param headDistancePages d；`null` = 前驱页尚未成形、判不出（临时表侧刚birth时的常态）。 */
+fun b1PriorityFor(headDistancePages: Int?): Int =
+    if (headDistancePages == 1) TaskScheduler.PRIO_B1_URGENT else TaskScheduler.PRIO_B1_CHAPTER
+
+/** 临时表侧的目标页距章首页数，**仅在可判定时**返回（原则 §3.4 只要 d==1 那一档）。
+ *
+ *  - `0` = 当前页从 block 0 起，即章首页；
+ *  - `1` = 当前页的前驱页从 block 0 起，即当前页是第 2 页；
+ *  - `null` = 前驱页还没塑出来，判不出（新锚流 birth 时就是这种——`stepTempPrefill` 的
+ *    `fillBackward` 跑完之后才会变成 1 或"更深"）。
+ *
+ *  已判定为更深时返回 2（与 `null` 同档，调用方只需区分 ==1）。
+ */
+private fun tempHeadDistancePages(ip: InProgressPagination): Int? = tempStateLock.withLock {
+    // 指针越界是窗口腐败（不是"判不出"）：记 e 后仍回 null（调用方按不升档处理，不断链）。
+    if (!tempPointerValid(ip)) {
+        Logger.e(logTag, "tempHeadDistance corrupt pointer ch=${ip.chapterIndex} fwd=${ip.curIsForward} idx=${ip.curIndex} f=${ip.forwardPages.size} b=${ip.backwardPages.size}")
+        return@withLock null
+    }
+    val cur = currentTempPage(ip) ?: return@withLock null
+    headDistanceFrom(cur.blockStart, previousTempPage(ip)?.blockStart)
+}
+
+/** Probe 缝（D7-4）：[chapter] 的 temp 块水位，无活会话时为 null。
+ *  第 4 档在临时表侧唯一的执行体就是这个水位的推进，读它即观测该档。 */
+fun tempWatermarkForProbe(chapter: Int): Int? =
+    tempStateLock.withLock { unitAt(chapter)?.inProgress?.shapedForwardTo }
+
+fun tempWindowStateForProbe(chapter: Int): String? =
+    tempStateLock.withLock { unitAt(chapter)?.inProgress?.let { "fwd=${it.curIsForward} idx=${it.curIndex} f=${it.forwardPages.size} b=${it.backwardPages.size} wl=${it.shapedForwardTo}" } }
+
+/** 原则 §3.4 的判据表（纯函数）：由「当前页起始块」与「前驱页起始块」定出目标页距章首的页数 d。
+ *
+ *  - `curBlockStart == 0` → `0`：当前页就是章首页，已在交接点，同步承接，不升档。
+ *  - `prevBlockStart == null` → `null`：前驱页尚未塑出/不在窗口，**判不出**，不升档
+ *    （宁可落到基档，也不猜——猜错会把整章活提到第 2 档去挤占翻页）。
+ *  - `prevBlockStart == 0` → `1`：前驱页是章首页，当前页正是第 2 页 → 交接点临近，加急档。
+ *  - 其余 → `2`：已判定为更深，与 `null` 同档。
+ *
+ *  抽成纯函数是为了能测：判据表本身极易写错（平板实测已错过一次，见 [previousTempPage]）。 */
+fun headDistanceFrom(curBlockStart: Int, prevBlockStart: Int?): Int? = when {
+    curBlockStart == 0 -> 0
+    prevBlockStart == null -> null
+    prevBlockStart == 0 -> 1
+    else -> 2
+}
+
+/** 指针页在阅读顺序上的前驱页（窗口内）。null = 指针在头边或前驱已被淘汰出窗口。 */
+private fun previousTempPage(ip: InProgressPagination): TempPage? {
+    val prevIdx = ip.curIndex - 1
+    return if (ip.curIsForward) {
+        if (prevIdx >= 0) ip.forwardPages.getOrNull(prevIdx)
+        // 跨列表边界：阅读顺序是 `Bwd(末) … Bwd(0), [Pair], Fwd(0), Fwd(1) …`（见 [enforceTempWindow]），
+        // 所以 Fwd(0) 的前驱在**后向列表的末尾**，不在 forwardPages[-1]。
+        // 这个边界正是章首页场景：目标页 = Fwd(0)（锚点页），其前驱 = 章首页（Bwd 末，blockStart 0）。
+        // 漏掉它会让 [tempHeadDistancePages] 在最该升档的时候返回 null —— 实测平板上
+        // 「跳到章第 2 页」BOOST 一次都不触发，就是这里。
+        else ip.backwardPages.lastOrNull()
+    } else {
+        ip.backwardPages.getOrNull(prevIdx)
+    }
+}
+
+
+/** P2.1: disk-path neighbor prefill after a landing (scheduler edition). No-op on the temp
+ *  path (its own prefill owns it) and without a table. Submits one PAGE task per in-range
+ *  neighbor in flip-direction order; same-key submit replaces stale twins (latest landing wins).
+ *  The whole neighbor SEQUENCE comes from [neighborSequence] (原则 §3.1): d=1 direction side at
+ *  第2档, d=1 other side at 第3档, d≥2 at 第4档, and a d=1 neighbor falling OUTSIDE this chapter
+ *  becomes a full-layout of the adjacent chapter at that side's tier (原则 §3.3).
+ *  No start delay (R18 doctrine: cancel promptly instead of waiting out bursts). */
+private fun scheduleWindowPrefill(unit: ChapterUnit, targetPage: Int, dir: Int) {
+    val table = unit.paginationTable ?: return
+    if (unit.inProgress != null) return
+    val total = table.pages.size
+    if (total <= 0) return
+    val chapterIdx = unit.chapterIndex
+    val lastChapter = chapters.size - 1
+    val bc = layouter as? BoxChapterLayouter
+    val contentW = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
+    val contentH = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
+    val hash = LayoutParamKey.fromProfile(profile, contentW, contentH).hash()
+    // 原则 §3.1：一次派发整段邻页序列。出队次序 = 优先级次序（第2/3/4档，d=1 越界处为跨章兜底）。
+    for (item in neighborSequence(targetPage, total, dir, chapterIdx, lastChapter)) {
+        when (item) {
+            is NeighborItem.Page -> scheduler.submit(TaskScheduler.Task(
+                key = "pg:$chapterIdx:${item.index}",
+                priority = item.tier,
+                // R17-proven shape: only the 第2档 side assembles (fits the flip cadence); the
+                // other sides stay L2-warmed. Doubling assembly per landing cost more than it covered.
+                block = {
+                    prefillPageTask(
+                        chapterIdx, item.index, targetPage,
+                        assemble = item.tier == TaskScheduler.PRIO_PAGE_NEXT,
+                    )
+                },
+            ))
+            is NeighborItem.EdgeChapter -> {
+                if (bc == null || unitAt(item.chapter) == null) continue
+                // 在途就不重派（同 [preflightChapter] 的 `pre:<章>` 口径）。**长任务不能靠同键替换
+                // 保鲜**：池在同键新孪生到来时会取消在跑的旧孪生（`TaskScheduler.kt:128`），对单页
+                // 塑形是对的（指针动了旧的就没意义），对整章全量则是灾难——每次落位都重启一遍几秒的
+                // 整章活，两个槽被长期占死，第 7 档的章扫描永远排不上。紧急度已由在途那个满足了。
+                if (scheduler.runningKeys.contains(edgeKey(item.chapter))) continue
+                scheduler.submit(TaskScheduler.Task(
+                    key = edgeKey(item.chapter),
+                    priority = item.tier,
+                    block = { b2ChapterTask(item.chapter, bc, contentW, contentH, hash) },
+                ))
+            }
+        }
+    }
+}
+
+/** d=1 章外兜底，**临时表侧**（原则 §3.3）。与 [scheduleWindowPrefill] 的磁盘表侧同一套规则，
+ *  只是判据来自 temp 会话而非分页表：
+ *  - **缺上一页**：当前页 `blockStart == 0`，本章内没有更靠前的页 → 加急整章排上一章（第 3 档）。
+ *  - **缺下一页**：块水位已到本章末尾且当前页已抵末尾 → 加急整章排下一章（第 2 档）。
+ *
+ *  两处都用**会话冻结的参数快照**（[InProgressPagination.profileSnapshot]，P9）算 hash——
+ *  与 temp 页自身同参数，兜底排出来的表才能被后续落位复用；用会变的 `profile` 会算出
+ *  另一个 hash，白排一遍。 */
+private fun scheduleTempEdgePrefill(unit: ChapterUnit, ip: InProgressPagination) {
+    val bc = layouter as? BoxChapterLayouter ?: return
+    val chapterIdx = unit.chapterIndex
+    val lastChapter = chapters.size - 1
+    val totalBlocks = ip.prepare.totalBlocks
+    val contentW = ip.contentW
+    val contentH = ip.contentH
+    val hash = LayoutParamKey.fromProfile(ip.profileSnapshot, contentW, contentH).hash()
+    val (curBlockStart, curBlockEnd, atTail) = tempStateLock.withLock {
+        // 坏指针直接不派邻章加急：判法同 tempHeadDistancePages（越界记 e，不断链）。
+        if (!tempPointerValid(ip)) {
+            Logger.e(logTag, "scheduleTempEdgePrefill corrupt pointer ch=${ip.chapterIndex} fwd=${ip.curIsForward} idx=${ip.curIndex}")
+            return@withLock Triple(-1, -1, false)
+        }
+        val cur = currentTempPage(ip) ?: return@withLock Triple(-1, -1, false)
+        Triple(cur.blockStart, cur.blockEndExclusive, ip.shapedForwardTo >= totalBlocks)
+    }
+    if (curBlockStart < 0) return
+    fun submitEdge(beyond: Int, prio: Int) {
+        if (beyond !in 0..lastChapter) return
+        if (unitAt(beyond) == null) return
+        scheduler.submit(TaskScheduler.Task(
+            key = edgeKey(beyond),
+            priority = prio,
+            block = { b2ChapterTask(beyond, bc, contentW, contentH, hash) },
+        ))
+    }
+    if (curBlockStart == 0) submitEdge(chapterIdx - 1, TaskScheduler.PRIO_EDGE_BACKWARD)
+    if (atTail && curBlockEnd >= totalBlocks) {
+        submitEdge(chapterIdx + 1, TaskScheduler.PRIO_EDGE_FORWARD)
+    }
+}
+
+/** P2.1: one neighbor page — warm its blocks, merge-publish L2, and (priority side only)
+ *  assemble + store the product. Skips (no-op) on temp-live / missing table / out-of-range:
+ *  the S7 step-3 scope, checked live (state moves between dispatch and run). */
+/** 落位级共享 light prepare：同一落位派发的几十个 `pg:` 任务曾各跑一次全章 light
+ *  cascade（去 16 截断后放量，池槽会被 cascade 淹没）。同（章，表 hash，profile）
+ *  inputs 相同 → 首个任务计算并发布，后续复用。last-writer-wins + 不可变结果，
+ *  竞态 benign；参数/视口一变 key 即失配，回落重算（正确性仍由各任务既有守卫兜底）。 */
+private data class WindowPrepKey(val chapter: Int, val hash: Long, val profile: TypographicProfile)
+@Volatile
+private var windowPrepCache: Pair<WindowPrepKey, LightPrepare>? = null
+
+private suspend fun prefillPageTask(chapterIdx: Int, page: Int, anchor: Int, assemble: Boolean) {
+    val u0 = unitAt(chapterIdx) ?: return
+    val table = u0.paginationTable ?: return
+    if (u0.inProgress != null) return
+    if (page !in 0 until table.pages.size) return
+    val hash = table.paramHash
+    val profileSnap = profile
+    val markup = u0.markup ?: return
+    val bc = layouter as? BoxChapterLayouter ?: return
+    val ctx = currentCoroutineContext()
+    // Snapshot guards + dims under a short lock; shaping runs lock-free into a private map.
+    val snap = layoutMutex.withLock {
+        if (u0.inProgress != null || u0.paginationTable !== table || u0.paramHash != hash) null
+        else Triple(
+            u0.cssBundle,
+            (viewW - profileSnap.marginLeft - profileSnap.marginRight).coerceAtLeast(16),
+            (viewH - profileSnap.marginTop - profileSnap.marginBottom).coerceAtLeast(16),
+        )
+    } ?: return
+    val (css, cw, chh) = snap
+    val rec = table.pages[page]
+    val lo = rec.blockStart.coerceAtLeast(0)
+    if (rec.blockEndExclusive <= lo) return
+    // 同一落位的任务共享 light prepare（见 windowPrepCache）：各跑一次 cascade 是纯浪费。
+    // 组装用的第二次 prepareLight 与此处同参，一并复用（原代码重复计算）。
+    val prepKey = WindowPrepKey(chapterIdx, hash, profileSnap)
+    val lp = windowPrepCache?.takeIf { it.first == prepKey }?.second
+        ?: bc.prepareLight(markup, css, profileSnap, cw, u0.structureCache, chh)
+            .also { windowPrepCache = prepKey to it }
+    val local = HashMap<Int, ParagraphShapeRef>()
+    for (b in lo until rec.blockEndExclusive) {
+        ctx.ensureActive()
+        if (b < 0 || b >= lp.totalBlocks) continue
+        if (!local.containsKey(b)) local[b] = bc.tempShape(local, lp, b, profileSnap)
+    }
+    if (local.isEmpty()) return
+    publishPrefillShapes(chapterIdx, hash, local)
+    // Non-priority side stays L2-warmed (shaping covered); assembly is priority-side only —
+    // doubling it per landing cost more (device-measured) than the backward-hit rate covers.
+    if (!assemble) return
+    // Assemble with the just-warmed shapes as L1 (same params, deterministic) so assembly is
+    // pure assembly cost. Reuses the shared landing prepare (same args as above, no second cascade).
+    val prod = try {
+        bc.incrementalLayoutForPage(
+            prepare = lp,
+            profile = profileSnap,
+            contentW = cw,
+            contentH = chh,
+            table = table,
+            targetPage = page,
+            pagesToShape = 1,
+            cache = local,
+            prefillL2 = null,
+        )
+    } catch (e: CancellationException) {
+        return // superseded — expected, stop burning CPU
+    } catch (e: Exception) {
+        Logger.e(logTag, "win-prefill assemble ch=$chapterIdx page=$page FAIL ${e.message}")
+        return
+    }
+    // Live-object identity baseline — store only if no flip rebound meanwhile.
+    val liveLayout = u0.layout
+    val liveSlices = u0.pageSlices
+    val stored = layoutMutex.withLock {
+        val u2 = unitAt(chapterIdx)
+        if (u2 == null || u2.inProgress != null || u2.paginationTable !== table ||
+            u2.paramHash != hash || u2.layout !== liveLayout || u2.pageSlices !== liveSlices
+        ) {
+            false
+        } else {
+            u2.pageCache[page] = ChapterUnit.PageProduct(prod.layout, prod.slices, hash)
+            u2.pageCache.keys.toList().forEach { k ->
+                if (k < anchor - 2 || k > anchor + 2) u2.pageCache.remove(k)
+            }
+            true
+        }
+    }
+    if (stored) Logger.w(logTag, "win-prefill ch=$chapterIdx page=$page cached")
+}
+
+/** P2.1: merge warmed blocks into the published L2 snapshot (copy-on-write replace). */
+private val prefillPublishMutex = Mutex()
+
+private suspend fun publishPrefillShapes(chapterIdx: Int, hash: Long, extra: Map<Int, ParagraphShapeRef>) {
+    if (extra.isEmpty()) return
+    prefillPublishMutex.withLock {
+        val cur = windowPrefillL2
+        val merged = if (cur != null && cur.chapterIndex == chapterIdx && cur.paramHash == hash) {
+            HashMap(cur.shapes).also { it.putAll(extra) }
+        } else HashMap(extra)
+        windowPrefillL2 = WindowPrefillShapes(chapterIdx, hash, merged)
+    }
+    Logger.w(logTag, "win-prefill ch=$chapterIdx +${extra.size} blocks")
+}
+
+/** R3: read-only L2 lookup for the incremental path — keyed by chapter + table hash. */
+private fun windowPrefillShapesFor(unit: ChapterUnit, table: ChapterPaginationTable): Map<Int, ParagraphShapeRef>? {
+    val s = windowPrefillL2 ?: return null
+    if (s.chapterIndex != unit.chapterIndex || s.paramHash != table.paramHash) return null
+    return s.shapes
+}
+
+/** Window page spans shared by [tempWindowDiag] and the FLIP diagnostic (single format). */
+private fun tempWinSpans(pages: List<TempPage>): String =
+    if (pages.isEmpty()) "-" else pages.joinToString(",") {
+        "b${it.blockStart}[${it.slice.charStart},${it.slice.charEnd})"
+    }
+
+/** R2: one-line temp pointer + window snapshot for cross-chapter diagnosis. */
+private fun tempWindowDiag(ip: InProgressPagination): String {
+    return "reason=${lastTempNavNull ?: "?"} " +
+        "ptr=${if (ip.curIsForward) "F" else "B"}${ip.curIndex} " +
+        "headLanded=${ip.headLanded} headReached=${ip.headReached} " +
+        "anchorBlk=${ip.anchorBlockStart} shapedFwdTo=${ip.shapedForwardTo} " +
+        "fwd[${tempWinSpans(ip.forwardPages)}] bwd[${tempWinSpans(ip.backwardPages)}]"
+}
+
+/** 前向塑形并接窗（排版层-上/增量分页）：从给定原点塑一页，记后继原点、推水位、追加到前向尾。
+ *  返回追加页。null 即塑形器回归，抛（既有 fail-fast，不当越界吞）。 */
+private fun shapeAndAppendForward(
+    ip: InProgressPagination, bc: BoxChapterLayouter, startBlock: Int, startLine: Int, failTag: String,
+): TempPage {
+    val prep = ip.prepare
+    val fwd = bc.shapeTempPageForward(prep, ip.profileSnapshot, ip.contentW, ip.contentH, startBlock, ip.shapes, startLine)
+        ?: error("$failTag ch=${ip.chapterIndex} start=($startBlock,$startLine) waterline=${ip.shapedForwardTo} total=${prep.totalBlocks}")
+    ip.shapedForwardTo = fwd.nextBlock
+    ip.forwardFromLine = fwd.nextLine
+    val page = fwd.page.copy(resumeBlock = fwd.nextBlock, resumeLine = fwd.nextLine)
+    ip.forwardPages.add(page)
+    return page
+}
+
 private fun tempNav(unit: ChapterUnit, ip: InProgressPagination, slice: PageSlice, dir: Int): Pair<Int, PageSlice>? {
+    lastTempNavNull = null
     // C2-P2b-3: `withLock` 非内联，块里裸 `return` 全改 `return@withLock`，外层 `return` 接住表达式值。
     return tempStateLock.withLock {
     // Serialize with the background temp-prefill so list mutations + the shared shape cache are safe.
-    val bc = layouter as? BoxChapterLayouter ?: return@withLock null
+    // layouter 是构造期装配不变量；翻页热路径上类型不符即抛，不降级成"越章"。
+    val bc = checkNotNull(layouter as? BoxChapterLayouter) { "tempNav without BoxChapterLayouter ch=${unit.chapterIndex}" }
     // P12 race hardening: [navigateAdjacentPage] snapshots [ip] WITHOUT this lock, so a relayout / leave
     // can bind a NEW session between that snapshot and this lock. Navigating the detached old session
     // would return a page that is no longer on the live session — 页面缺失/混乱. Relocate the displayed
     // slice in the LIVE session and navigate that one instead.
-    val live = unit.inProgress ?: return@withLock null
+    val live = unit.inProgress ?: run { lastTempNavNull = "no-session"; return@withLock null }
     if (live !== ip) locateTempPosition(live, slice)
     val ip = live
     // NOTE: there is deliberately NO `headReached && dir<0` shortcut here. headReached remembers that a
@@ -1090,32 +1884,57 @@ private fun tempNav(unit: ChapterUnit, ip: InProgressPagination, slice: PageSlic
             if (next < ip.forwardPages.size) {
                 ip.curIndex = next
             } else {
-                if (ip.shapedForwardTo >= prep.totalBlocks) { Logger.w(logTag, "tempNav forward tail → null ch=${ip.chapterIndex}"); return@withLock null }
-                val fwd = bc.shapeTempPageForward(prep, ip.profileSnapshot, ip.contentW, ip.contentH, ip.shapedForwardTo, ip.shapes, ip.forwardFromLine) ?: return@withLock null
-                ip.forwardPages.add(fwd.page)
-                ip.shapedForwardTo = fwd.nextBlock
-                ip.forwardFromLine = fwd.nextLine
-                ip.curIndex = ip.forwardPages.size - 1
+                if (ip.shapedForwardTo >= prep.totalBlocks) { lastTempNavNull = "fwd-tail"; Logger.w(logTag, "tempNav forward tail → null ch=${ip.chapterIndex}"); return@withLock null }
+                // 连续页以当前（源）页分页点为原点（增量分页原则）；推不出（源页非法）则回退
+                // 旧路（水位/void），落页校验 + 修复层兜底。漂移记 w（canary：按理恒为零）。
+                val origin = tempResumeAfter(ip, bc, slice)
+                if (origin != null) {
+                    if (origin.first != ip.shapedForwardTo || origin.second != ip.forwardFromLine) {
+                        Logger.w(logTag, "tempNav origin-drift ch=${ip.chapterIndex} derived=(${origin.first},${origin.second}) waterline=(${ip.shapedForwardTo},${ip.forwardFromLine})")
+                    }
+                    // 边界已前查：此处的 null 只可能是塑形器回归。抛，不当越界吞（丢内容翻页）。
+                    shapeAndAppendForward(ip, bc, origin.first, origin.second, "tempNav fwd-shape-fail")
+                    ip.curIndex = ip.forwardPages.size - 1
+                } else if (ip.shapedForwardTo < 0) {
+                    // 水位失效（前向侧曾被裁空）：无尾可续，从水位盲塑必崩（startBlock 越界）/必跳页。
+                    // 后向非空则走 RE-ROOT 同式重建（后继原点，行切亦可）；双空即结构性 miss（S7 废表重走）。
+                    val back0 = ip.backwardPages.firstOrNull()
+                        ?: run { lastTempNavNull = "fwd-void"; return@withLock null }
+                    val vorigin = tempResumeAfter(ip, bc, back0.slice)
+                    val startBlock = vorigin?.first ?: back0.blockEndExclusive
+                    val startLine = vorigin?.second ?: 0
+                    if (startBlock < 0 || startBlock >= prep.totalBlocks) { lastTempNavNull = "reroot-tail"; Logger.w(logTag, "tempNav forward tail → null ch=${ip.chapterIndex}"); return@withLock null }
+                    Logger.w(logTag, "tempNav RE-ROOT fwd (void-waterline) ch=${ip.chapterIndex} startBlock=$startBlock startLine=$startLine")
+                    shapeAndAppendForward(ip, bc, startBlock, startLine, "tempNav reroot-shape-fail")
+                    ip.curIndex = ip.forwardPages.size - 1
+                } else {
+                    // 边界已前查：此处的 null 只可能是塑形器回归。抛，不当越界吞（丢内容翻页）。
+                    shapeAndAppendForward(ip, bc, ip.shapedForwardTo, ip.forwardFromLine, "tempNav fwd-shape-fail")
+                    ip.curIndex = ip.forwardPages.size - 1
+                }
             }
         } else {
             if (ip.curIndex > 0) ip.curIndex -= 1
             else {
                 // Step past the last backward page into forwardPages[0]. That page may have been
                 // EVICTED (the bounded window dropped the whole forward side while the reader was deep
-                // backward) — re-root it on demand from the page at hand: the forward neighbor of the
-                // current backward page starts at its block boundary. (The anchor torn pair can never
-                // trigger this: pair atomicity keeps backward[0] + forward[0] together, so the forward
-                // side is non-empty whenever the nearest backward page is line-cut.)
+                // backward) — re-root it on demand from the page at hand: the forward neighbor resumes
+                // at the backward page's successor origin (block boundary, or mid-block line for a
+                // line-cut page). (The anchor torn pair can never trigger this: pair atomicity keeps
+                // backward[0] + forward[0] together, so the forward side is non-empty whenever the
+                // nearest backward page is line-cut.)
                 if (ip.forwardPages.isEmpty()) {
-                    val startBlock = ip.backwardPages.firstOrNull()?.blockEndExclusive ?: ip.shapedForwardTo
-                    if (startBlock >= prep.totalBlocks) { Logger.w(logTag, "tempNav forward tail → null ch=${ip.chapterIndex}"); return@withLock null }
-                    Logger.w(logTag, "tempNav RE-ROOT fwd ch=${ip.chapterIndex} startBlock=$startBlock startLine=0 (块边界重启)")
-                    val fwd = bc.shapeTempPageForward(prep, ip.profileSnapshot, ip.contentW, ip.contentH, startBlock, ip.shapes, 0) ?: return@withLock null
+                    // 后向首个页若行切（撕裂对/行尾），块边界重启会丢其尾行：以后继原点为准，
+                    // 推不出则回退旧式（落页校验 + 修复层兜底）。
+                    val back0 = ip.backwardPages.firstOrNull()
+                    val origin = back0?.let { tempResumeAfter(ip, bc, it.slice) }
+                    val startBlock = origin?.first ?: back0?.blockEndExclusive ?: ip.shapedForwardTo
+                    val startLine = origin?.second ?: 0
+                    if (startBlock < 0 || startBlock >= prep.totalBlocks) { lastTempNavNull = "reroot-tail"; Logger.w(logTag, "tempNav forward tail → null ch=${ip.chapterIndex}"); return@withLock null }
+                    Logger.w(logTag, "tempNav RE-ROOT fwd ch=${ip.chapterIndex} startBlock=$startBlock startLine=$startLine")
                     // Re-root the absolute forward front to this new head edge; subsequent flips append
                     // from here instead of the (deep, evicted) old front.
-                    ip.shapedForwardTo = fwd.nextBlock
-                    ip.forwardFromLine = fwd.nextLine
-                    ip.forwardPages.add(fwd.page)
+                    shapeAndAppendForward(ip, bc, startBlock, startLine, "tempNav reroot-shape-fail")
                 }
                 ip.curIsForward = true
                 ip.curIndex = 0
@@ -1145,15 +1964,17 @@ private fun tempNav(unit: ChapterUnit, ip: InProgressPagination, slice: PageSlic
                 // page, not by the packing front (which already reached 0 ∈ backwardPages).
                 if (!step.curIsForward) {
                     val target = ip.backwardPages.getOrNull(step.curIndex)
-                    if (target != null && target.blockStart == 0) return@withLock (resolveHeadArrival(unit, ip) ?: return@withLock null)
+                    if (target != null && target.blockStart == 0) {
+                        val landing = resolveHeadArrival(unit, ip)
+                        if (landing == null) lastTempNavNull = "head-move-null"
+                        return@withLock landing
+                    }
                 }
             }
             is TempNavBackwardStep.Shape -> {
+                // 纯判据已保证 endExclusive>0 且不超全章：null 即回归，抛，不当边界吞。
                 val p = bc.shapeTempPageBackward(prep, ip.profileSnapshot, ip.contentW, ip.contentH, step.endExclusive, step.lineCut, ip.shapes)
-                    ?: run {
-                        Logger.w(logTag, "tempNav backward shapeTempPageBackward → null ch=${ip.chapterIndex} endExclusive=${step.endExclusive} lineCut=${step.lineCut}")
-                        return@withLock null
-                    }
+                    ?: error("tempNav bwd-shape-fail ch=${ip.chapterIndex} endExclusive=${step.endExclusive} lineCut=${step.lineCut}")
                 ip.backwardPages.add(p)
                 if (p.blockStart == 0) ip.headReached = true
                 ip.curIsForward = false
@@ -1162,15 +1983,21 @@ private fun tempNav(unit: ChapterUnit, ip: InProgressPagination, slice: PageSlic
                 // 现象2: the whole-block packing descending to block 0 produces the SPARSE head page
                 // (head blocks under-fill contentH). Never show it — resolve the head arrival on THIS flip
                 // (canonical first page, or re-root temp at char 0 = a full head page per shapeAnchorPageForward).
-                if (p.blockStart == 0) return@withLock (resolveHeadArrival(unit, ip) ?: return@withLock null)
+                if (p.blockStart == 0) {
+                    val landing = resolveHeadArrival(unit, ip)
+                    if (landing == null) lastTempNavNull = "head-shape-null"
+                    return@withLock landing
+                }
             }
             TempNavBackwardStep.Boundary -> {
                 // Step 3 (现象3): the TRUE chapter-head boundary. Block-0 arrivals are already resolved
                 // on the arrival flip (Move/Shape above); this branch covers the remaining boundary
-                // sources — the anchor itself sits AT the head (no backward page can precede it), or the
-                // reader is ON the (already re-rooted) full head page. Either way the reader stays
-                // in-chapter ON the chapter-head page; crossing to the previous chapter happens only on
-                // the NEXT backward flip.
+                // sources — the anchor itself sits AT the head (no backward page can precede it and the
+                // arrival already happened at birth: headLanded is set in startAnchorStream), or the
+                // reader is ON the (already re-rooted) full head page. A born-at-head session therefore
+                // crosses on the FIRST boundary flip (headLanded=true from birth); a genuine arrival
+                // re-roots first (headLanded set by resolveHeadArrival) and crosses on the next one —
+                // never re-landing the identical page as a wasted flip.
                 //   - canonical ready: finalize the temp session in place (bind the disk/full table) and
                 //     land on the canonical page containing the current char — at the head that is the
                 //     FULL canonical first page (char0..contentH), never a sparse head.
@@ -1180,10 +2007,13 @@ private fun tempNav(unit: ChapterUnit, ip: InProgressPagination, slice: PageSlic
                 //     headLanded so the NEXT boundary (reader already on the full head) crosses straight
                 //     to the previous chapter instead of re-landing the identical page (a wasted flip).
                 if (ip.headLanded) {
+                    lastTempNavNull = "head-landed"
                     Logger.w(logTag, "tempNav boundary head-landed → cross-chapter ch=${ip.chapterIndex}")
                     return@withLock null
                 }
-                return@withLock resolveHeadArrival(unit, ip)
+                val landing = resolveHeadArrival(unit, ip)
+                if (landing == null) lastTempNavNull = "head-arrival-null"
+                return@withLock landing
             }
         }
     }
@@ -1192,7 +2022,15 @@ private fun tempNav(unit: ChapterUnit, ip: InProgressPagination, slice: PageSlic
     // never a torn pair), so the session stays bounded at ~±TEMP_WINDOW_DEPTH pages.
     enforceTempWindow(ip)
     currentTempPage(ip)?.let { setCurrentTempPage(unit, ip, it) }
-    return@withLock (ip.currentSlice?.let { unit.chapterIndex to it } ?: return@withLock null)
+    val cur = ip.currentSlice?.let { unit.chapterIndex to it }
+    if (cur == null) lastTempNavNull = "no-current"
+    // 前向落页必须与源页相接（排版层-上/增量分页）：失配即跳页，先按需补塑修复（S7 连续 miss，
+    // 不废会话）；修不好才记 e 保留原落页。
+    if (dir > 0 && cur != null && !tempPagesTile(slice, cur.second)) {
+        repairTempForwardGap(unit, ip, bc, slice, cur.second)?.let { return@withLock it }
+        Logger.e(logTag, "tempNav fwd-gap ch=${unit.chapterIndex} src=char[${slice.charStart},${slice.charEnd}) dst=char[${cur.second.charStart},${cur.second.charEnd}) fwd=[${tempWinSpans(ip.forwardPages)}] bwd=[${tempWinSpans(ip.backwardPages)}]")
+    }
+    return@withLock cur
     }
     // Unreachable: every path above returns inside the lock. Kept to satisfy the compiler's
     // control-flow analysis (non-inline `withLock` still needs the function-level tail).
@@ -1220,7 +2058,10 @@ private fun resolveHeadArrival(unit: ChapterUnit, ip: InProgressPagination): Pai
         val posChar = 0 // arriving AT the head: land on the canonical page containing char 0 (page 0)
         finalizeTempOnLeave(unit, ip)
         val landing = unit.pageSlices.firstOrNull { it.charStart <= posChar && it.charEnd > posChar }
-            ?: unit.pageSlices.firstOrNull()
+            ?: unit.pageSlices.firstOrNull()?.also {
+                // 正典表首页空洞（首包容失败）：鲁棒着陆保留，但记 e（表错位）。
+                Logger.e(logTag, "resolveHeadArrival canonical head hole ch=${ip.chapterIndex}, fallback first page")
+            }
         if (landing != null) {
             Logger.w(logTag, "tempNav head-arrival → canonical head page ch=${ip.chapterIndex}")
             return unit.chapterIndex to landing
@@ -1228,7 +2069,8 @@ private fun resolveHeadArrival(unit: ChapterUnit, ip: InProgressPagination): Pai
         return null
     }
     Logger.w(logTag, "tempNav head-arrival → re-root temp stream at chapter head ch=${ip.chapterIndex}")
-    val bc = layouter as? BoxChapterLayouter ?: return null
+    // layouter 装配不变量：头到达重根无处可降级（返回 null 会把读者丢到上一章），抛。
+    val bc = checkNotNull(layouter as? BoxChapterLayouter) { "resolveHeadArrival without BoxChapterLayouter ch=${ip.chapterIndex}" }
     startAnchorStream(unit, 0, ip.prepare, bc, ip.paramHash, ip.contentW, ip.contentH)
     unit.inProgress?.headLanded = true
     val head = unit.inProgress?.currentSlice ?: ip.forwardPages.firstOrNull()?.slice
@@ -1236,6 +2078,8 @@ private fun resolveHeadArrival(unit: ChapterUnit, ip: InProgressPagination): Pai
         Logger.w(logTag, "tempNav head-arrival → full head page ch=${ip.chapterIndex} char=[${head.charStart},${head.charEnd})")
         return unit.chapterIndex to head
     }
+    // 重根后仍无头页：startAnchorStream 出生失败。调用方当普通边界越章，不断链；记 e。
+    Logger.e(logTag, "resolveHeadArrival re-root headless ch=${ip.chapterIndex} → cross-chapter")
     return null
 }
 
@@ -1245,7 +2089,7 @@ private fun resolveHeadArrival(unit: ChapterUnit, ip: InProgressPagination): Pai
  *  re-rendered in place while the temp session is active. */
 private fun finalizeTempOnLeave(unit: ChapterUnit, ip: InProgressPagination) {
     if (ip.canonicalLayout != null) {
-        unit.bind(ip.canonicalLayout!!, ip.canonicalSlices)
+        unit.bindFull(ip.canonicalLayout!!, ip.canonicalSlices)
         unit.clearInProgress()
         Logger.w(logTag, "temp 作废→磁盘 ${ctx(unit)} pages=${ip.canonicalSlices.size}")
         // Step 2 (temp→canonical handoff continuity): the handoff must never skip content the temp
@@ -1303,11 +2147,19 @@ fun finalizeOnLeave(chapter: Int) {
  *  ahead of building (no more head-anchored first build). */
 private suspend fun crossChapterLanding(fromChapter: Int, direction: Int): Pair<Int, PageSlice>? {
     var next = fromChapter + direction
+    // R2/D3: legit empty-chapter skips ride along so they are distinguishable from spurious cross jumps.
+    val skipped = ArrayList<Int>()
+    // R6: current layout params — stale tables are dropped before the anchor reads them
+    // (backwardEntryAnchorChar below runs before ensureChapterLayout). Never kills live temp.
+    val contentW = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
+    val contentH = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
+    val currentHash = LayoutParamKey.fromProfile(profile, contentW, contentH).hash()
     while (next in 0 until chapters.size) {
         val unit = unitAt(next)
         val markup = if (unit != null) ensureMarkup(next) else null
-        if (unit == null || markup == null) { next += direction; continue }
-        if (!markup.hasSignificantText()) { next += direction; continue }
+        if (unit == null || markup == null) { skipped.add(next); next += direction; continue }
+        if (unit.inProgress == null) unit.invalidateForParam(currentHash)
+        if (!markup.hasSignificantText()) { skipped.add(next); next += direction; continue }
         val anchorChar = if (direction > 0) 0 else backwardEntryAnchorChar(unit, markup)
         ensureChapterLayout(next, anchorChar)
         var page = if (direction > 0) unit.pageSlices.firstOrNull() ?: unit.inProgress?.currentSlice
@@ -1321,6 +2173,7 @@ private suspend fun crossChapterLanding(fromChapter: Int, direction: Int): Pair<
             page = if (direction > 0) unit.pageSlices.firstOrNull() else unit.pageSlices.lastOrNull()
         }
         if (page != null) {
+            if (skipped.isNotEmpty()) Logger.w(logTag, "flip: 跨章跳过空章 dir=$direction from ch=$fromChapter skipped=$skipped")
             Logger.w(logTag, "flip: 跨章落位 dir=$direction -> ${ctx(unit)} page=${pageKind(page)} isTemp=${unit.inProgress != null}")
             return next to page
         }
@@ -1335,6 +2188,24 @@ private suspend fun crossChapterLanding(fromChapter: Int, direction: Int): Pair<
  *  canonical (correct line-level) table is only activated when the reader reaches the chapter head /
  *  crosses chapters, via [finalizeTempOnLeave]. The current page is never re-rendered mid-chapter, so
  *  the temp↔canonical boundary cannot produce an in-place redraw or flash. */
+    /** P1f: single source for freshness checks (R6 guards + completion gates below). */
+    private fun currentParamHash(): Long {
+        val cw = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
+        val chh = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
+        return LayoutParamKey.fromProfile(profile, cw, chh).hash()
+    }
+
+/**
+ * P2.6 状态表落点决议（替代 P1f 的计算式状态视图）：`ChapterStatus`/`PageState` 视图对已删——
+ * 它们零消费者，只是三处派发守卫各自判据的第四份拷贝。三处守卫即状态表：
+ * [scheduleWindowPrefill] 的有表门、[b2ChapterTask] 的 skip-fresh、[ensurePageRangeShaped] 的
+ * pageCache fast-path。表本体留在 unit 上（`paginationTable`/`pageCache`，各自带 paramHash），
+ * 调度池只管队列 + 在途键，不存第二份，故无同步 bug。改接线而不删视图，会在翻页热路径上
+ * 每次调用重算 [currentParamHash]，而三处守卫本来就已持有该 hash。
+ *
+ * 原则依据：`线程调度原则.md` §4「状态表不集中另存……派发守卫各自就地判据，**不得**再写一份
+ * 计算式状态视图——那是第四份拷贝，且会把它要避免的 paramHash 重算塞进翻页热路径」。
+ */
 private fun finishCanonicalBackground(
     unit: ChapterUnit,
     ip: InProgressPagination,
@@ -1343,6 +2214,12 @@ private fun finishCanonicalBackground(
 ) {
     val layout = product.layout
     val slices = product.slices
+    // P1f: completion gate — a task outliving its param cycle must not bind stale results
+    // (mid-shape param change; the fresh cycle re-queues via dirtyGen). Drop + log, no write.
+    if (paramHash != currentParamHash()) {
+        Logger.w(logTag, "layout ${ctx(unit)} CANONICAL-STALE-DROP ch=${unit.chapterIndex}")
+        return
+    }
     val cache = cacheStore()
     val cacheFile = if (cache != null && bookId >= 0) {
         cache.file("book_$bookId", unit.chapterIndex, paramHash)
@@ -1379,15 +2256,63 @@ private fun finishCanonicalBackground(
      * afterwards).
      * @return (chapter, relaid-out page); null when the chapter doesn't exist.
      */
+    /** R12: same-chapter fast relocate — the target char already lives in a shaped-valid window
+     *  page (live temp session or disk window with real line indexes): move the pointer there and
+     *  return it, skipping the [invalidateAllLayouts] nuke. Anything else (unshaped stub, stale
+     *  params, no session/table) returns null for the full path. Pointer moves run under
+     *  [tempStateLock] (temp branch) / [layoutMutex] (disk read) so a concurrent flip can't tear them. */
+    private suspend fun fastRelocate(chapter: Int, anchorChar: Int): Pair<Int, PageSlice>? {
+        val unit = unitAt(chapter) ?: return null
+        if (unit.markup == null) return null
+        val cw = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
+        val chh = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
+        val currentHash = LayoutParamKey.fromProfile(profile, cw, chh).hash()
+        // Live temp: find the window page containing the anchor and swing the pointer onto it.
+        unit.inProgress?.let { ip ->
+            if (ip.paramHash != currentHash) return@let
+            val hit = (ip.forwardPages + ip.backwardPages)
+                .firstOrNull { p -> p.slice.charStart <= anchorChar && anchorChar < p.slice.charEnd }
+                ?: return@let
+            return tempStateLock.withLock {
+                if (unit.inProgress !== ip) return@withLock null // session replaced meanwhile
+                locateTempPosition(ip, hit.slice)
+                setCurrentTempPage(unit, ip, hit)
+                logJumpLanding("jump", chapter)
+                chapter to hit.slice
+            }
+        }
+        // Disk path: a shaped-valid window page (stubs carry firstLine = -1). Temp-live chapters
+        // never fall through here (anchor outside the temp window means a clean-slate rebuild,
+        // not a mixed-path landing).
+        if (unit.inProgress != null) return null
+        val t = unit.paginationTable
+        if (t == null || t.paramHash != currentHash) return null
+        return layoutMutex.withLock {
+            val page = pageForChar(unit, anchorChar)
+            if (page != null && page.firstLine >= 0 && page.lastLineExclusive > page.firstLine) {
+                logJumpLanding("jump", chapter)
+                chapter to page
+            } else null
+        }
+    }
+
     suspend fun relayoutTo(chapter: Int, anchorChar: Int): Pair<Int, PageSlice>? {
+        clearFlipDir("mid-jump")
+        // R12: fast path — target inside an already-shaped valid window: just move the pointer,
+        // no nuke. Structural misses fall through to the full path below.
+        fastRelocate(chapter, anchorChar)?.let { return it }
         invalidateAllLayouts()
         val unit = ensureChapterLayout(chapter, anchorChar, headLift = false) ?: return null
         // Anchor temp streaming: return the anchor page directly.
         unit.inProgress?.let { ip ->
             val p = ip.currentSlice
-            if (p != null) return chapter to p
+            if (p != null) {
+                logJumpLanding("jump", chapter)
+                return chapter to p
+            }
         }
         val page = pageForChar(unit, anchorChar) ?: unit.firstPage() ?: return null
+        logJumpLanding("jump", chapter)
         return chapter to page
     }
 
@@ -1401,6 +2326,84 @@ private fun finishCanonicalBackground(
     // ---- Progress / positioning ----
 
     /**
+     * R5: rebinds a fresh in-memory pagination table from a small-chapter full product.
+     * No disk write (writes belong to background canonical per S5 §3.5); only fixes the
+     * table + paramHash so the R6 reuse guard passes on subsequent flips.
+     * Also drops the per-block shape cache: shapes are keyed by leaf without a param dimension
+     * and fullLayout never populates this cache, so any entries predate this param cycle and would
+     * poison later flips once the rebound hash lets the R6 guard pass. Pure memo loss.
+     */
+    private fun rebindSmallTable(unit: ChapterUnit, slices: List<PageSlice>, paramHash: Long) {
+        unit.blockShapeCache = null
+        if (slices.isEmpty() || slices[0].blockStart < 0) return
+        unit.bindPaginationTable(ChapterPaginationTable.fromSlices(
+            chapterIndex = unit.chapterIndex,
+            paramHash = paramHash,
+            slices = slices,
+            totalBlocks = slices.maxOf { it.blockEndExclusive },
+            totalChars = slices.last().charEnd,
+        ))
+    }
+
+    /**
+     * R4 (S1): preview-period light relayout — current chapter only. Same product as
+     *  [prepareRelayout] for the anchor chapter, but touches nothing else: no epoch bump, no
+     *  preflight void, no other-chapter invalidation, no B2. The panel-close / commit-settle path
+     *  still goes through [prepareRelayout] + whole-book scan (S2). B1 dispatch inside
+     *  [startAnchorStream] is unchanged (defer-gated as before). Callers are sequential
+     *  (throttled loops), so no P7 stale check is needed — session supersede via tempBirth covers overlap.
+     */
+    suspend fun prepareRelayoutLight(chapter: Int, anchorChar: Int): ReflowResult? {
+        clearFlipDir("param-preview")
+        val unit = unitAt(chapter) ?: return null
+        val markup = unit.markup ?: return null
+        activeChapter = chapter
+        // 整形前先备字体（同 prepareRelayout；新字体预览依赖池跟进）。
+        (layouter as? BoxChapterLayouter)?.let { bc ->
+            onDemandFonts(bc.fontDemandFor(unit.cssBundle))
+            onBookFonts(bookFontsFor(chapter))
+        }
+        val contentWidth = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
+        val contentHeight = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
+        val t0 = platformNowMs()
+        Logger.w(logTag, "relayout-light ch=$chapter anchorChar=$anchorChar start")
+        return runCatching {
+            val bc = layouter as? BoxChapterLayouter
+            if (bc != null) {
+                val paramHash = LayoutParamKey.fromProfile(profile, contentWidth, contentHeight).hash()
+                val light = bc.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight)
+                val tLight = platformNowMs()
+                if (light.totalBlocks > SMALL_CHAPTER_BLOCKS) {
+                    startAnchorStream(unit, anchorChar, light, bc, paramHash, contentWidth, contentHeight, headLift = false)
+                    val tAnchor = platformNowMs()
+                    val page = unit.inProgress?.currentSlice ?: return@runCatching null
+                    Logger.w(logTag, "relayout-light ch=$chapter LARGE-ANCHOR prepareLight=${tLight - t0}ms anchorShape=${tAnchor - tLight}ms total=${platformNowMs() - t0}ms blocks=${light.totalBlocks}")
+                    ReflowResult(chapter, null, emptyList(), page)
+                } else {
+                    val prep = prepareFor(unit, bc, markup, contentWidth, contentHeight, paramHash)
+                    val product = bc.fullLayout(prep, profile, contentWidth, contentHeight)
+                        ?: return@runCatching null
+                    val slice = lineAnchoredPage(product.layout, anchorChar, contentHeight)
+                        ?: product.slices.firstOrNull() ?: return@runCatching null
+                    Logger.w(logTag, "relayout-light ch=$chapter SMALL-FULL prepareLight=${tLight - t0}ms fullLayout=${platformNowMs() - tLight}ms total=${platformNowMs() - t0}ms blocks=${light.totalBlocks}")
+                    // R5: small chapters never enter the temp path, so rebind a fresh in-memory
+                    // table here (writes still belong to background canonical). Otherwise the stale
+                    // table + stale paramHash trip the R6 guard on the next flip and the fresh
+                    // layout is discarded for a redundant rebuild.
+                    rebindSmallTable(unit, product.slices, paramHash)
+                    ReflowResult(chapter, product.layout, product.slices, slice)
+                }
+            } else {
+                val product = layouter.layout(markup, unit.cssBundle, profile, contentWidth, contentHeight)
+                    ?: return@runCatching null
+                val slice = lineAnchoredPage(product.layout, anchorChar, contentHeight)
+                    ?: product.slices.firstOrNull() ?: return@runCatching null
+                ReflowResult(chapter, product.layout, product.slices, slice)
+            }
+        }.onFailure { Logger.e(logTag, "relayout-light FAIL ch=$chapter anchorChar=$anchorChar ${it.message}") }.getOrNull()
+    }
+
+    /**
      * Relayout after a settings change, keeping the position (a **no-flicker** variant):
      *  - clears layout caches only for **other** chapters, keeping the current chapter's old
      *    layout -> the page being shown stays drawable during relayout, no blank screen;
@@ -1410,6 +2413,7 @@ private fun finishCanonicalBackground(
      *    so the old page stays visible until the new page is ready.
      */
     suspend fun prepareRelayout(chapter: Int, anchorChar: Int): ReflowResult? {
+        clearFlipDir("param-change")
         layoutEpoch++
         val myEpoch = layoutEpoch
         activeChapter = chapter
@@ -1463,6 +2467,8 @@ private fun finishCanonicalBackground(
                     val slice = lineAnchoredPage(product.layout, anchorChar, contentHeight)
                         ?: product.slices.firstOrNull() ?: return@runCatching null
                     Logger.w(logTag, "relayout ch=$chapter SMALL-FULL prepareLight=${tLight - t0}ms fullLayout=${platformNowMs() - tLight}ms total=${platformNowMs() - t0}ms blocks=${light.totalBlocks}")
+                    // R5: same in-memory table rebind as the light path (see above).
+                    rebindSmallTable(unit, product.slices, paramHash)
                     ReflowResult(chapter, product.layout, product.slices, slice)
                 }
             } else {
@@ -1472,7 +2478,7 @@ private fun finishCanonicalBackground(
                     ?: product.slices.firstOrNull() ?: return@runCatching null
                 ReflowResult(chapter, product.layout, product.slices, slice)
             }
-        }.getOrNull()
+        }.onFailure { Logger.e(logTag, "relayout FAIL ch=$chapter anchorChar=$anchorChar epoch=$myEpoch ${it.message}") }.getOrNull()
     }
 
     /**
@@ -1503,47 +2509,73 @@ private fun finishCanonicalBackground(
     /** B2 trigger (P2): re-run the whole-book remaining-chapter scan with the CURRENT params. No-op when
      *  nothing changed since the last dispatch (epochs equal — no churn during a slider drag), when the
      *  canonical pass is deferred ([deferCanonical], settings panel open), or without a box layouter.
-     *  Runs on the dedicated [canonicalDispatcher] single thread; a newer dispatch cancels the in-flight
-     *  one (checkpoint per chapter), so abandoning exits within ≤1 chapter granularity. */
-    fun requestWholeBookRelayout() {
+     *  P0 spike: the pass is a set of per-chapter pool tasks (was: one coroutine looping chapters on the
+     *  single canonical thread); same-key submit replaces twins, order preserved FIFO within priority.
+     *  R7: [force] bypasses the epoch dedup (B1-preempt relaunch); the dedup stamp is still refreshed. */
+    fun requestWholeBookRelayout(force: Boolean = false) {
         val epoch = layoutEpoch
-        if (epoch <= lastWholeBookEpoch) return
+        if (!force && epoch <= lastDispatchEpoch) return
         if (deferCanonical) return
         val bc = layouter as? BoxChapterLayouter ?: return
         val contentWidth = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
         val contentHeight = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
         val paramHash = LayoutParamKey.fromProfile(profile, contentWidth, contentHeight).hash()
-        lastWholeBookEpoch = epoch
-        wholeBookJob?.cancel()
-        wholeBookJob = scope.launch(canonicalDispatcher) {
-            val current = activeChapter
-            // P12: B2 scans in reading order — chapters the reader is heading toward first (direction
-            // group), nearest-distance first within each group, so a flip-out-of-bounds into a nearby
-            // chapter lands on an already-laid-out one. Pure function; correctness never depends on it
-            // (every non-current chapter still completes its full pass + persist).
-            val order = remainingScanOrder(current)
-            // P7: capture the launching coroutine's context so the per-block checkpoint passed down to
-            // fullLayout can observe this scan's cancellation from inside the nested runCatching.
-            val ctx = coroutineContext
-            Logger.w(logTag, "whole-book B2 start epoch=$epoch paramHash=$paramHash skipCh=$current order=${order.take(8)}…")
-            runCatching {
-                for (i in order) {
-                    if (i == current) continue // B1 owns the active chapter's canonical pass
-                    val u = chapters[i]
-                    if (u.inProgress != null) continue // a live temp session owns that chapter
-                    if (!isActive) {
-                        Logger.w(logTag, "whole-book B2 cancelled at ch=$i (≤1 chapter abandon)")
-                        return@launch
-                    }
-                    runCatching { fullLayoutAndPersist(u, bc, contentWidth, contentHeight, paramHash) { ctx.ensureActive() } }
-                        .onFailure { e ->
-                            // P7: a between-blocks cancel is a timely abandon, not a FAIL.
-                            if (e !is CancellationException) Logger.e(logTag, "whole-book ch=${u.chapterIndex} FAIL ${e.message}")
-                        }
-                }
-            }
-            Logger.w(logTag, "whole-book B2 done epoch=$epoch")
+        lastDispatchEpoch = epoch
+        val current = activeChapter
+        // R7: B2 scans strict absolute-distance interleave from the active chapter, so a
+        // flip-out-of-bounds into a nearby chapter lands on an already-laid-out one. Pure
+        // function; correctness never depends on it (every non-current chapter still completes
+        // its full pass + persist).
+        val order = remainingScanOrder(current)
+        Logger.w(logTag, "whole-book B2 start epoch=$epoch paramHash=$paramHash skipCh=$current order=${order.take(8)}…")
+        var submitted = 0
+        for (i in order) {
+            if (i == current) continue // B1 owns the active chapter's canonical pass
+            scheduler.submit(TaskScheduler.Task(
+                key = scanKey(i),
+                priority = TaskScheduler.PRIO_B2_CHAPTER,
+                block = { b2ChapterTask(i, bc, contentWidth, contentHeight, paramHash) },
+            ))
+            submitted++
         }
+        // P1a: pass-completion visibility (the producer rewrite dropped the old done-log).
+        // Best-effort: a newer dispatch superseding this pass silences it.
+        bgScope.launch {
+            scheduler.awaitIdle()
+            if (layoutEpoch == epoch) {
+                Logger.w(logTag, "whole-book B2 pass drained epoch=$epoch submitted=$submitted")
+            }
+        }
+    }
+
+    /** One B2 chapter pass (P0: was one loop iteration inside the whole-book coroutine; P2.1: also
+     *  the body the prev-chapter second-priority bump reuses under B2's own key).
+     *  Skip checks re-run at execution (state moves between dispatch and run). No quiet gate —
+     *  R18 doctrine as ratified: a flip PREEMPTS this work ([notifyFlip]) rather than waiting it
+     *  out, so the gate would only add latency (原则文档 §6: quiet 门删除，抢占代替等待). */
+    private suspend fun b2ChapterTask(
+        index: Int,
+        bc: BoxChapterLayouter,
+        contentW: Int,
+        contentH: Int,
+        paramHash: Long,
+    ) {
+        val u = unitAt(index) ?: return
+        if (u.inProgress != null) return // a live temp session owns that chapter
+        // R7: the disk table itself is the done-registry — a fresh table means this chapter
+        // already completed under these params; shaping it again is pure waste.
+        if (u.paginationTable?.paramHash == paramHash) return
+        // R7: bodies parse lazily — an unparsed chapter has no markup to shape. Parse here.
+        // (Parse itself carries no checkpoint: a task cancelled mid-parse drains it, then the
+        // suspend checkpoint below aborts before shaping a whole chapter for nothing.)
+        if (u.markup == null) ensureMarkup(index)
+        currentCoroutineContext().ensureActive()
+        val ctx = currentCoroutineContext()
+        runCatching { fullLayoutAndPersist(u, bc, contentW, contentH, paramHash) { ctx.ensureActive() } }
+            .onFailure { e ->
+                // P7: a between-blocks cancel is a timely abandon, not a FAIL.
+                if (e !is CancellationException) Logger.e(logTag, "whole-book ch=${u.chapterIndex} FAIL ${e.message}")
+            }
     }
 
     /** P4: once a flip lands in [chapter], pre-warm BOTH neighbors (the chapters a next out-of-bounds
@@ -1564,36 +2596,36 @@ private fun finishCanonicalBackground(
         val contentHeight = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
         val paramHash = LayoutParamKey.fromProfile(profile, contentWidth, contentHeight).hash()
         if (preflightReadiness[index] == paramHash) return // already prepped under these params
-        if (preflightJobs[index]?.isActive == true) return // dedup the same in-flight target
-        preflightJobs[index] = scope.launch(backgroundDispatcher) {
-            try {
-                ensureMarkup(index)
-                val bc = layouter as? BoxChapterLayouter
-                if (bc != null && unit.markup != null) {
-                    bc.prepareLight(unit.markup!!, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight)
+        if (scheduler.runningKeys.contains("pre:$index")) return // same target in flight
+        // P2.4: pool task (same-key replace dedups in-flight twins — was per-index job slot).
+        scheduler.submit(TaskScheduler.Task(
+            key = "pre:$index",
+            priority = TaskScheduler.PRIO_PREWARM,
+            block = {
+                try {
+                    ensureMarkup(index)
+                    val bc = layouter as? BoxChapterLayouter
+                    if (bc != null && unit.markup != null) {
+                        bc.prepareLight(unit.markup!!, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight)
+                    }
+                    preflightReadiness[index] = paramHash
+                } catch (_: CancellationException) {
+                    // superseded by a param change (voidPreflight) — expected, never a FAIL
+                } catch (e: Exception) {
+                    Logger.e(logTag, "preflight FAIL ch=$index ${e.message}")
                 }
-                preflightReadiness[index] = paramHash
-            } catch (_: kotlinx.coroutines.CancellationException) {
-                // superseded by a param change (voidPreflight) — expected, never a FAIL
-            } catch (e: Exception) {
-                Logger.e(logTag, "preflight FAIL ch=$index ${e.message}")
-            }
-        }
+            },
+        ))
     }
 
     /** P4 abandon/re-deploy: a new params cycle voids every preflight readiness record and cancels the
-     *  in-flight slots (the light tree is structure-keyed so the next re-preflight re-uses it cheaply). */
+     *  in-flight slots (the light tree is structure-keyed so the next re-preflight re-uses it cheaply).
+     *  P2.4: pool tasks at/below prewarm priority go through the scheduler (prewarm only — B2 at 30
+     *  survives by priority). */
     private fun voidPreflight() {
         preflightReadiness.clear()
-        preflightJobs.values.forEach { it.cancel() }
-        preflightJobs.clear()
-        openPreflightJob?.cancel()
+        scheduler.cancelLowerThan(TaskScheduler.PRIO_B2_CHAPTER)
     }
-
-    /** P5: single-slot open-book prewarm (was `preflightJobs[chapter]`; per-book, one in flight). A new
-     *  prewarm dispatch (book switch / new target / param change via [voidPreflight]) cancels the old;
-     *  idempotent and safe to drop mid-flight (only markup/light/disk-table-shape warming). */
-    private var openPreflightJob: kotlinx.coroutines.Job? = null
 
     /** P5 (track P): prewarm a book open so the reader's FIRST screen only pays window/anchor shaping.
      *  Parses [chapter]'s markup + light structure (idempotent; records [preflightReadiness] like P4)
@@ -1603,23 +2635,34 @@ private fun finishCanonicalBackground(
      *
      *  The bookshelf layer taps a book and calls this before the reader opens; switching books abandons
      *  the old book's prewarm because each book owns its controller (single per-book slot). Later
-     *  params (font/行距/尺寸) invalidate the readiness and the shape via [prepareRelayout]'s void. */
+     *  params (font/行距/尺寸) invalidate the readiness and the shape via [prepareRelayout]'s void.
+     *  P2.4: pool task under the shared `pre:<index>` key (dedups with neighbor preflights for the
+     *  same chapter — the richer open body wins the replace). */
     fun prewarmForOpen(chapter: Int = -1, targetChar: Int = -1) {
         val books = chapters.size
         val index = (if (chapter >= 0) chapter else startChapter).coerceIn(0, books - 1)
-        var char = if (targetChar >= 0) targetChar else startChar
+        val char = if (targetChar >= 0) targetChar else startChar
         if (books == 0) return
         val unit = unitAt(index) ?: return
         if (index == activeChapter) return // B1/anchor owns the active chapter's passes
-        openPreflightJob?.cancel()
-        openPreflightJob = scope.launch(backgroundDispatcher) {
-            try {
-                ensureMarkup(index)
-                val bc = layouter as? BoxChapterLayouter ?: return@launch
-                if (unit.markup == null) return@launch
+        scheduler.submit(TaskScheduler.Task(
+            key = "pre:$index",
+            priority = TaskScheduler.PRIO_PREWARM,
+            block = { prewarmChapterBody(index, char) },
+        ))
+    }
+
+    /** P2.4: open-prewarm body (extracted: early returns don't survive inline task lambdas). */
+    private suspend fun prewarmChapterBody(index: Int, char: Int) {
+        val unit = unitAt(index) ?: return
+        var c = char
+        try {
+            ensureMarkup(index)
+            val bc = layouter as? BoxChapterLayouter ?: return
+            if (unit.markup == null) return
                 val contentWidth = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
                 val contentHeight = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
-                if (contentHeight <= 16) return@launch // viewport not laid out yet — nothing meaningful to warm
+                if (contentHeight <= 16) return // viewport not laid out yet — nothing meaningful to warm
                 val paramHash = LayoutParamKey.fromProfile(profile, contentWidth, contentHeight).hash()
                 val prepLight = bc.prepareLight(unit.markup!!, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight)
                 preflightReadiness[index] = paramHash
@@ -1634,8 +2677,8 @@ private fun finishCanonicalBackground(
                 val cached = if (cache != null) cacheFile?.let { cache.read(it) } else null
                 if (cached != null && unit.paginationTable == null) {
                     unit.bindPaginationTable(cached)
-                    char = char.coerceIn(0, (cached.totalChars - 1).coerceAtLeast(0))
-                    val startPage = pageIndexForChar(cached.pages, char)
+                    c = c.coerceIn(0, (cached.totalChars - 1).coerceAtLeast(0))
+                    val startPage = pageIndexForChar(cached.pages, c)
                     val product = bc.incrementalLayoutForPage(
                         prepare = prepLight,
                         profile = profile,
@@ -1645,6 +2688,7 @@ private fun finishCanonicalBackground(
                         targetPage = startPage,
                         pagesToShape = 1,
                         cache = unitShapeCache(unit),
+                        prefillL2 = windowPrefillShapesFor(unit, cached),
                     )
                     unit.bind(product.layout, product.slices)
                     unit.shapedPageFrom = startPage
@@ -1652,11 +2696,11 @@ private fun finishCanonicalBackground(
                     Logger.w(logTag, "prewarm ch=$index DISK-HIT pre-shaped pages=${product.slices.size} targetPage=$startPage")
                 }
             } catch (_: kotlinx.coroutines.CancellationException) {
-                // superseded by a book switch / newer prewarm / param change — expected, never a FAIL
+                // superseded by a newer prewarm / param change — expected, never a FAIL
+                // (scheduler surfaces it as `spike-task cancel`).
             } catch (e: Exception) {
                 Logger.e(logTag, "prewarm FAIL ch=$index ${e.message}")
             }
-        }
     }
 
     /** Full line-level canonical pre-layout of a non-current chapter: shape the whole chapter, bind its
@@ -1665,13 +2709,14 @@ private fun finishCanonicalBackground(
     private fun fullLayoutAndPersist(unit: ChapterUnit, bc: BoxChapterLayouter, contentW: Int, contentH: Int, paramHash: Long, checkpoint: () -> Unit = {}) {
         val markup = unit.markup ?: return
         val prep = prepareFor(unit, bc, markup, contentW, contentH, paramHash)
-        // P13 (U6k): large chapters shape on the parallel chunk workers, small ones sequentially.
-        val product = if (prep.totalBlocks >= CHUNK_CANONICAL_MIN_BLOCKS) {
-            bc.fullLayoutChunked(prep, profile, contentW, contentH, checkpoint = checkpoint)
-        } else {
-            bc.fullLayout(prep, profile, contentW, contentH, checkpoint) ?: return
-        }
+        // P1: chunk workers deleted (P13) — sequential canonical for all sizes.
+        val product = bc.fullLayout(prep, profile, contentW, contentH, checkpoint) ?: return
         val slices = product.slices
+        // P1f: completion gate (same as canonical-background above) — stale product dropped.
+        if (paramHash != currentParamHash()) {
+            Logger.w(logTag, "layout ${ctx(unit)} FULL-PRELIM-STALE-DROP ch=${unit.chapterIndex}")
+            return
+        }
         val cache = cacheStore()
         val cacheFile = if (cache != null && bookId >= 0) {
             cache.file("book_$bookId", unit.chapterIndex, paramHash)
@@ -1689,7 +2734,11 @@ private fun finishCanonicalBackground(
             unit.bindPaginationTable(table)
             Logger.w(logTag, "layout ${ctx(unit)} FULL-PRELIM pages=${table.totalPages} blocks=${slices.maxOf { it.blockEndExclusive }}")
         }
-        unit.bind(product.layout, slices)
+        // R4: the heavy path never populates the shared per-block shape cache (it shapes via
+        // shapeLeaf into locals), so any entries here predate this param cycle — or, if same-cycle,
+        // are pure memo. Dropping is always safe; keeping risks stale-metric reuse on later flips.
+        unit.blockShapeCache = null
+        unit.bindFull(product.layout, slices)
     }
 
     /**
@@ -1728,7 +2777,9 @@ private fun finishCanonicalBackground(
         if (end == start) end = start + 1
         val charStart = layout.getLineStart(start)
         val charEnd = if (end < n) layout.getLineStart(end) else layout.length
-        return PageSlice(charStart, charEnd.coerceAtLeast(charStart), start, end, PageSlice.Kind.TEXT, -1, -1)
+        // 布局器产出倒挂（charEnd<charStart）是布局 bug：抛，不钳成空页藏。
+        check(charEnd >= charStart) { "lineAnchoredPage inverted anchor=$anchorChar charStart=$charStart charEnd=$charEnd lines=$n" }
+        return PageSlice(charStart, charEnd, start, end, PageSlice.Kind.TEXT, -1, -1)
     }
 
     /**
@@ -1744,7 +2795,8 @@ private fun finishCanonicalBackground(
         if (end == startLine) end = startLine + 1
         val cs = layout.getLineStart(startLine)
         val ce = if (end < n) layout.getLineStart(end) else layout.length
-        return PageSlice(cs, ce.coerceAtLeast(cs), startLine, end, PageSlice.Kind.TEXT, -1, -1)
+        check(ce >= cs) { "forwardPageFrom inverted startLine=$startLine cs=$cs ce=$ce lines=$n" }
+        return PageSlice(cs, ce, startLine, end, PageSlice.Kind.TEXT, -1, -1)
     }
 
     /**
@@ -1781,7 +2833,8 @@ private fun finishCanonicalBackground(
      *（调用方退回 locateStart）。切片查找纯函数见 common [pageSliceAtChar]。
      */
     suspend fun pageAtChar(chapter: Int, char: Int): PageSlice? {
-        val unit = ensureChapterLayout(chapter, char) ?: return null
+        // R5/S3: same no-lift rule as locateStart — a desktop landing anchor is positional.
+        val unit = ensureChapterLayout(chapter, char, headLift = false) ?: return null
         return orilumn.reader.engine.paging.pageSliceAtChar(unit.pageSlices, char)
     }
 
@@ -1796,7 +2849,9 @@ private fun finishCanonicalBackground(
         val unit = unitAt(r.chapter) ?: return false
         if (unit.inProgress != null) return true
         val layout = r.layout ?: return false
-        unit.bind(layout, r.slices)
+        // r.layout is non-null only for full-chapter products (small-chapter/legacy relayout;
+        // large chapters carry null and keep the anchor stream), so this is always a full bind.
+        unit.bindFull(layout, r.slices)
         return true
     }
 
@@ -1822,7 +2877,11 @@ private fun finishCanonicalBackground(
     fun pageLines(chapter: Int, slice: PageSlice): List<DrawLine>? {
         val unit = unitAt(chapter) ?: return null
         if (slice.kind != PageSlice.Kind.TEXT || slice.firstLine < 0) return null
-        val layout = (unit.tempRenderLayout ?: unit.layout) as? LayoutReadback ?: return null
+        val layout = (unit.tempRenderLayout ?: unit.layout) as? LayoutReadback ?: run {
+            // 非 Readback 的 drawable（legacy/增量布局）静默空白：Q1-b interim 降级，记 w 可见。
+            Logger.w(logTag, "non-Readback layout ch=$chapter kind=${slice.kind}, blank content")
+            return null
+        }
         val window = layout.skiaLineWindow() ?: return null
         val out = ArrayList<DrawLine>(slice.lastLineExclusive - slice.firstLine)
         for (i in slice.firstLine until slice.lastLineExclusive) {
@@ -1843,7 +2902,11 @@ private fun finishCanonicalBackground(
     fun pageImages(chapter: Int, slice: PageSlice): List<orilumn.reader.engine.skia.PageImage>? {
         val unit = unitAt(chapter) ?: return null
         if (slice.kind != PageSlice.Kind.TEXT || slice.firstLine < 0) return null
-        val layout = (unit.tempRenderLayout ?: unit.layout) as? LayoutReadback ?: return null
+        val layout = (unit.tempRenderLayout ?: unit.layout) as? LayoutReadback ?: run {
+            // 非 Readback 的 drawable（legacy/增量布局）静默空白：Q1-b interim 降级，记 w 可见。
+            Logger.w(logTag, "non-Readback layout ch=$chapter kind=${slice.kind}, blank content")
+            return null
+        }
         return layout.pageImages(slice.firstLine, slice.lastLineExclusive).ifEmpty { null }
     }
 
@@ -1854,7 +2917,11 @@ private fun finishCanonicalBackground(
     fun pageBackgrounds(chapter: Int, slice: PageSlice): List<orilumn.reader.engine.skia.PageBackground>? {
         val unit = unitAt(chapter) ?: return null
         if (slice.kind != PageSlice.Kind.TEXT || slice.firstLine < 0) return null
-        val layout = (unit.tempRenderLayout ?: unit.layout) as? LayoutReadback ?: return null
+        val layout = (unit.tempRenderLayout ?: unit.layout) as? LayoutReadback ?: run {
+            // 非 Readback 的 drawable（legacy/增量布局）静默空白：Q1-b interim 降级，记 w 可见。
+            Logger.w(logTag, "non-Readback layout ch=$chapter kind=${slice.kind}, blank content")
+            return null
+        }
         return layout.pageBackgrounds(slice.firstLine, slice.lastLineExclusive).ifEmpty { null }
     }
 
@@ -1896,15 +2963,20 @@ private fun finishCanonicalBackground(
      * @param fraction 0..1.
      */
     suspend fun pageAtFraction(fraction: Double): Pair<Int, PageSlice>? {
+        clearFlipDir("seek")
         val n = chapters.size
         if (n <= 0) return null
         val target = (fraction.coerceIn(0.0, 1.0) * n).toInt().coerceIn(0, n - 1)
-        for (delta in 0 until n) {
-            val c = target + delta
-            if (c >= n) break
+        // R14: nearest-content in BOTH directions (|distance| interleave, ties follow the reading
+        // direction) — the old forward-only sweep could skip past the intended chapter.
+        for (c in listOf(target) + orderRemainingChapters(n, target, flipDir)) {
             val u = ensureChapterLayout(c) ?: continue
             val m = u.markup ?: continue
-            if (m.hasSignificantText()) return c to (u.firstPage() ?: continue)
+            if (m.hasSignificantText()) {
+                val p = u.firstPage() ?: continue
+                logJumpLanding("seek", c)
+                return c to p
+            }
         }
         return null
     }
@@ -1920,13 +2992,27 @@ private fun finishCanonicalBackground(
             if (c !in 0 until chapters.size) return null
             val u = ensureChapterLayout(c) ?: continue
             val m = u.markup ?: continue
-            if (m.hasSignificantText()) return c to (u.firstPage() ?: continue)
+            if (m.hasSignificantText()) {
+                val p = u.firstPage() ?: continue
+                logJumpLanding("neighbor", c)
+                return c to p
+            }
         }
+    }
+
+    /** R8 (S3/D4): jump-landing one-liner — PATH marker + current-params table hit. */
+    private fun logJumpLanding(where: String, chapter: Int) {
+        val u = unitAt(chapter) ?: return
+        val cw = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
+        val chh = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
+        val hit = u.paginationTable?.paramHash == LayoutParamKey.fromProfile(profile, cw, chh).hash()
+        Logger.w(logTag, "jump: $where -> ch=$chapter path=${u.pathMarker} tableHit=$hit temp=${u.inProgress != null}")
     }
 
     /** Locates the first content page of (or after) [index], skipping blank/cover chapters.
  *  Used by the TOC panel to jump to an arbitrary chapter. */
     suspend fun openChapterStart(index: Int): Pair<Int, PageSlice>? {
+        clearFlipDir("chapter-start")
         if (chapters.isEmpty()) return null
         var ch = index.coerceIn(0, chapters.size - 1)
         while (ch < chapters.size) {
@@ -1934,7 +3020,10 @@ private fun finishCanonicalBackground(
             val m = unit?.markup
             if (unit != null && m != null && m.hasSignificantText()) {
                 val page = unit.inProgress?.currentSlice ?: unit.firstPage()
-                if (page != null) return ch to page
+                if (page != null) {
+                    logJumpLanding("toc", ch)
+                    return ch to page
+                }
             }
             ch++
         }
@@ -1949,9 +3038,11 @@ private fun finishCanonicalBackground(
      * [relayoutTo], which covers both the disk-table and the live-temp paths.
      */
     suspend fun openTocItem(index: Int, fragment: String?): Pair<Int, PageSlice>? {
+        clearFlipDir("toc-item")
         if (fragment.isNullOrBlank() || index !in chapters.indices) return openChapterStart(index)
         val m = ensureMarkup(index) ?: return openChapterStart(index)
-        val charStart = contentFragmentIdCharStart(m, fragment) ?: return openChapterStart(index)
+        val charStart = styledAnchorChar(index, m, fragment)
+            ?: contentFragmentIdCharStart(m, fragment) ?: return openChapterStart(index)
         return relayoutTo(index, charStart) ?: openChapterStart(index)
     }
 
@@ -1971,7 +3062,12 @@ private fun finishCanonicalBackground(
         val prepare = bc.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight)
         if (prepare.totalBlocks <= 0) return null
         val idx = prepare.blockIndexForChar(charOffset.coerceAtLeast(0))
-        val leafStart = prepare.globalCharStarts.getOrNull(idx)?.toInt() ?: return null
+        // 同一 prepare 的块表自查：blockIndexForChar 给出的 idx 必在 globalCharStarts 内；
+        // 为 null 即内部表不一致，记 e（链接仍返回 null，不断整链）。
+        val leafStart = prepare.globalCharStarts.getOrNull(idx)?.toInt() ?: run {
+            Logger.e(logTag, "linkTargetAt inconsistent tables ch=$chapter idx=$idx blocks=${prepare.totalBlocks}")
+            return null
+        }
         val href = prepare.linkRangesAt(idx)
             .firstOrNull { charOffset - leafStart in it.start until it.endExclusive }?.href ?: return null
         val spineHref = book?.spine?.getOrNull(chapter)?.href ?: return null
@@ -1985,12 +3081,29 @@ private fun finishCanonicalBackground(
      * (falling back to the head when unresolvable). Mirrors [openTocItem]'s fallback chain.
      */
     suspend fun openLinkTarget(target: LinkTarget): Pair<Int, PageSlice>? {
+        clearFlipDir("link-target")
         if (target.chapterIndex !in chapters.indices) return null
         val fragment = target.fragment
         if (fragment.isNullOrBlank()) return openChapterStart(target.chapterIndex)
         val m = ensureMarkup(target.chapterIndex) ?: return openChapterStart(target.chapterIndex)
-        val charStart = contentFragmentIdCharStart(m, fragment) ?: return openChapterStart(target.chapterIndex)
+        val charStart = styledAnchorChar(target.chapterIndex, m, fragment)
+            ?: contentFragmentIdCharStart(m, fragment) ?: return openChapterStart(target.chapterIndex)
         return relayoutTo(target.chapterIndex, charStart) ?: openChapterStart(target.chapterIndex)
+    }
+
+    /**
+     * P4-c2: [fragment] 在排版字符流中的起始偏移（轻 prepare 同塑形输入；裸文本兜底在外）。
+     * 与 [linkTargetAt] 同一 prepare 口径（结构缓存复用，毫秒级），无命中回 null。
+     */
+    private fun styledAnchorChar(chapter: Int, markup: MarkupElement, fragment: String): Int? {
+        val unit = unitAt(chapter) ?: return null
+        val bc = layouter as? BoxChapterLayouter ?: return null
+        if (viewW <= 0 || viewH <= 0) return null
+        val contentWidth = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
+        val contentHeight = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
+        val prepare = bc.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight)
+        if (prepare.totalBlocks <= 0) return null
+        return prepare.anchorCharStart(fragment)
     }
 
     /** Normalized spine-href → chapter index (the [LinkTargets] lookup table for this book). */
@@ -2022,8 +3135,12 @@ private fun finishCanonicalBackground(
     fun pageForChar(unit: ChapterUnit, charOffset: Int): PageSlice? {
         val slices = unit.pageSlices
         if (slices.isEmpty()) return null
+        // 锚点落在表外钉到末页：锚点多为外部陈旧输入（保存位点/表漂移），钉住不断链；
+        // 但钉住即掩盖，记 w 让漂移可见。
         return slices.firstOrNull { it.charStart <= charOffset && it.charEnd > charOffset }
-            ?: slices.last()
+            ?: slices.last().also {
+                Logger.w(logTag, "pageForChar off-table anchor ch=${unit.chapterIndex} char=$charOffset pinned to last page")
+            }
     }
 
     fun unitAt(index: Int): ChapterUnit? = chapters.getOrNull(index)
@@ -2031,12 +3148,16 @@ private fun finishCanonicalBackground(
     /** One page forward within a chapter. A line-anchored slice (not a canonical page) snaps to the
  *  canonical page after the one containing its char, avoiding content skips. */
     fun nextPageInChapter(unit: ChapterUnit, slice: PageSlice): PageSlice? {
-        readingDirection = 1
+        flipDir = 1
         val slices = unit.pageSlices
         val idx = slices.indexOf(slice)
         if (idx >= 0) return slices.getOrNull(idx + 1)
+        // 切片身份丢失（relayout 后旧对象）：按 char 模糊续上，不断链；但调用方拿过期
+        // slice 翻页即掩盖，记 w。
         val c = slices.indexOfFirst { it.charStart <= slice.charStart && slice.charStart < it.charEnd }
-        return if (c >= 0) slices.getOrNull(c + 1) else null
+        if (c < 0) return null
+        Logger.w(logTag, "nextPageInChapter stale-slice fuzzy ch=${unit.chapterIndex} char=${slice.charStart} → page $c")
+        return slices.getOrNull(c + 1)
     }
 
     /**
@@ -2050,10 +3171,19 @@ private fun finishCanonicalBackground(
         // P12: every real page turn reports its movement direction to the B2 scan-order tracker —
         // in-chapter (temp/canonical) and out-of-bounds cross-chapter alike, so the whole-book scan
         // follows the reading direction even when the active chapter is a live temp session.
-        readingDirection = direction
+        flipDir = direction
+        // P1d: single flip hook — preempts all background shaping below flip priority through
+        // the pool (was: scattered R18 cancels). Published products survive; in-flight work
+        // abandons at checkpoints and resubmits naturally via skip-fresh positioning.
+        notifyFlip()
         // P4: a flip that lands in [chapter] prewarms both neighbors (the chapters a next out-of-bounds
         // flip can enter) on the background P track — so the crossing's parse leaves the flip thread.
-        return navigateAdjacentPage(chapter, slice, direction)?.also { (ch, _) -> preflightNeighbors(ch) }
+        return navigateAdjacentPage(chapter, slice, direction)?.also { (ch, _) ->
+            preflightNeighbors(ch)
+            // R7: belt-and-braces B2 dispatch (epoch-deduped no-op unless nothing dispatched yet,
+            // e.g. open-prewarm still in flight) — navigation never cancels in-flight work (S7).
+            requestWholeBookRelayout()
+        }
     }
 
     /** The actual adjacent-page navigation (direction already tracked by [findAdjacentPage] — see P12). */
@@ -2081,11 +3211,11 @@ private fun finishCanonicalBackground(
         val ip = unit.inProgress
         Logger.w(flipTag, "FLIP dir=$direction ch=$chapter title=${unit.title?.take(16) ?: "-"} " +
             "|slice[${slice.firstLine},${slice.lastLineExclusive})char[${slice.charStart},${slice.charEnd})blk[${slice.blockStart},${slice.blockEndExclusive})] " +
-            "|inProgress=${ip != null}${ip?.let{"anchorBlk=${it.anchorBlockStart} anchorLineCh=${it.anchorLineCharStart} curFwd=${it.curIsForward} curIdx=${it.curIndex} head=${it.headReached} fwdPages=${it.forwardPages.size} bwdPages=${it.backwardPages.size}"} ?: ""} " +
+            "|inProgress=${ip != null}${ip?.let{"anchorBlk=${it.anchorBlockStart} anchorLineCh=${it.anchorLineCharStart} curFwd=${it.curIsForward} curIdx=${it.curIndex} head=${it.headReached} fwdPages=${it.forwardPages.size} bwdPages=${it.backwardPages.size} shapedFwdTo=${it.shapedForwardTo} fwd=[${tempWinSpans(it.forwardPages)}] bwd=[${tempWinSpans(it.backwardPages)}]"} ?: ""} " +
             "|diskTable=${pt != null}${pt?.let{"pages=${pt.pages.size}"} ?: ""} " +
             "|layoutLC=$layoutLc tempLC=$tempLc " +
             "|pageSlices=${ps.size}${ps0?.let{" f[${it.charStart},${it.charEnd})"} ?: ""}${psN?.let{" l[${it.charStart},${it.charEnd})"} ?: ""} " +
-            "|laidOut=${unit.laidOut} paramHash=${unit.paramHash}")
+            "|laidOut=${unit.laidOut} paramHash=${unit.paramHash} path=${unit.pathMarker}")
         // Anchor temp streaming: navigate the whole-block temp pages instead of pageSlices indices.
         val inProgress = unit.inProgress
         val tempExhausted = inProgress != null
@@ -2096,7 +3226,17 @@ private fun finishCanonicalBackground(
                 // ahead window so the next flip stays pre-shaped (整改 E), steering the fill toward the
                 // reader's direction of travel. Skip once the temp session handed off to canonical
                 // (clearInProgress), where there is nothing left to prefill.
-                if (unit.inProgress === ip) scheduleTempPrefill(unit, ip, direction)
+                if (unit.inProgress === ip) {
+                    scheduleTempPrefill(unit, ip, direction)
+                    // 原则 §3.3：d=1 邻页越出本章则加急整章排邻章（临时表侧）。
+                    scheduleTempEdgePrefill(unit, ip)
+                    // 原则 §3.4：**指针每移动一次**都要重算「目标页距章首 d」——这才是 BOOST 的
+                    // 主触发点。锚点页出生时 d=0（在章首页，不升档），读者前翻一次落到第 2 页，
+                    // 此时 d 才变成 1。此前钩子只挂在 [stepTempPrefill] 的 fillBackward 上，
+                    // 而前翻时章首页**已经在窗口里**（backwardMissing 为 false），fillBackward 压根
+                    // 不执行，钩子永远不跑 —— 实测平板 BOOST 一次都不触发，就是这里。
+                    maybeBoostB1ForHeadProximity(unit, ip)
+                }
                 return it
             }
             // tempNav returned null — the temp stream reached its boundary (headReached or tail).
@@ -2106,7 +3246,8 @@ private fun finishCanonicalBackground(
             // head/tail-boundary flip during an active temp session goes straight to cross-chapter
             // (S5: 离开→废除临时表、启用磁盘分页表) instead of mis-identifying the current slice in
             // stale pageSlices and wandering onto wrong pages.
-            Logger.w(logTag, "tempNav null → skip pageSlices fallthrough ch=${unit.chapterIndex} dir=$direction")
+            // R2: reason + pointer + window ride along so a one-page-becomes-one-chapter flip names its branch.
+            Logger.w(logTag, "tempNav null → skip pageSlices fallthrough ch=${unit.chapterIndex} dir=$direction " + tempWindowDiag(ip))
         }
         if (tempExhausted) {
             // Short-circuit straight to cross-chapter, bypassing both line-continuous and pageSlices
@@ -2156,10 +3297,14 @@ private fun finishCanonicalBackground(
             val i = unit.pageSlices.indexOf(inChapter)
             Logger.w(logTag, "flip: 章内 dir=$direction -> ${ctx(unit)} page=$i/${unit.pageSlices.size}")
             // Ensure the target page is shaped (disk-hit incremental path may have skipped it).
-            ensureChapterLayout(chapter, inChapter.charStart)
-            return chapter to unit.pageSlices.getOrElse(i) { inChapter }
+            // R5/S3: a flip-time rebuild must never head-lift (post-invalidate edge on pages 2–5).
+            ensureChapterLayout(chapter, inChapter.charStart, headLift = false)
+            // ensure 后重取：i 越界即锁间隙竞态（表被替换），此前静默用旧页，记 w 可见。
+            val fresh = unit.pageSlices.getOrNull(i)
+            if (fresh == null) Logger.w(logTag, "flip:章内重取越界 ch=$chapter i=$i/${unit.pageSlices.size} → fallback stale page")
+            return chapter to (fresh ?: inChapter)
         }
-        Logger.w(logTag, "flip: 无章内页，开始跨章 dir=$direction from ch=$chapter")
+        Logger.w(logTag, "flip: 无章内页，开始跨章 dir=$direction from ch=$chapter srcIdx=$srcIdx/${unit.pageSlices.size}")
         // Leaving the chapter abandons its temp pagination and enables the disk (canonical) table per S5
         // ("离开→废除临时表、启用磁盘分页表"). Binding on leave (never mid-chapter) avoids re-rendering the
         // page in place / flashing while the temp session is still the live pagination.
@@ -2172,7 +3317,7 @@ private fun finishCanonicalBackground(
     /** One page backward within a chapter. A line-anchored slice (not a canonical page) snaps to the
  *  canonical page CONTAINING its char (showing the content above it, no skip); normal pages go -1. */
     fun prevPageInChapter(unit: ChapterUnit, slice: PageSlice): PageSlice? {
-        readingDirection = -1
+        flipDir = -1
         val slices = unit.pageSlices
         val idx = slices.indexOf(slice)
         if (idx > 0) return slices.getOrNull(idx - 1)
@@ -2278,9 +3423,9 @@ private fun finishCanonicalBackground(
      *  by the real flip entries.
      *  C2-P2b-4: public (was `internal`; `:app` probe tests live across the module seam). */
     fun remainingScanOrder(current: Int): List<Int> =
-        orderRemainingChapters(chapters.size, current, readingDirection)
+        orderRemainingChapters(chapters.size, current, flipDir)
 
-    fun currentReadingDirection(): Int = readingDirection
+    fun currentFlipDir(): Int = flipDir
 
     /** P4 probe accessor: whether [chapter]'s markup + light structure were prepped under the current
      *  param cycle on the background P track (preflightReadiness holds a key). */
@@ -2291,22 +3436,37 @@ private fun finishCanonicalBackground(
 /** Page anchor (stable handle for locating a relayout). */
 data class PageAnchor(val chapter: Int, val char: Int)
 
-/** Orders the non-current chapters for the whole-book B2 scan (P12): the reader's reading-direction
- *  group first (chapters the reader is heading toward — the ones a flip-out-of-bounds will land in),
- *  then nearest-distance-first inside each group (flip-out-of-bounds targets are always near, and far
- *  chapters still all complete + persist). Pure — correctness never depends on the visit order; a
- *  cancel still exits within ≤1 chapter granularity via the per-chapter checkpoints (P7/P13).
+/** Orders the non-current chapters for the whole-book B2 scan (R7): strict absolute-distance
+ *  interleave from [current] (1-away both sides, then 2-away, …); ties at the same distance are
+ *  broken by [direction] (the side the reader is heading toward first). A flip-out-of-bounds
+ *  always lands near, so the nearest chapters complete first regardless of travel direction.
+ *  Pure — correctness never depends on the visit order; a cancel still exits within ≤1 chapter
+ *  granularity via the per-chapter checkpoints (P7/P13).
  *
  *  @param total     chapter count
  *  @param current   the active chapter (skipped by the caller regardless — B1 owns its pass)
- *  @param direction the reader's movement: >= 0 = toward the tail (forward group first),
- *                   < 0 = toward the head (backward group first)
+ *  @param direction the reader's movement: >= 0 = forward side first on ties, < 0 = backward first
  */
 /** C2-P2b-4: public probe hook (was `internal`; `:app` probe tests live across the module seam). */
+/** Chapter scan order for the whole-book B2 pass: strict |chapter distance| interleave from
+ *  [current], the direction side first at each distance ([direction] >= 0 = tailward, so the
+ *  no-record state 0 orders exactly as +1 does — see [flipDir]). */
 fun orderRemainingChapters(total: Int, current: Int, direction: Int): List<Int> {
-    val ahead = (current + 1 until total).toList()
-    val behind = (current - 1 downTo 0).toList()
-    return if (direction >= 0) ahead + behind else behind + ahead
+    val out = ArrayList<Int>(maxOf(0, total - 1))
+    var d = 1
+    while (out.size < total - 1) {
+        val fwd = current + d
+        val bwd = current - d
+        if (direction >= 0) {
+            if (fwd < total) out.add(fwd)
+            if (bwd >= 0) out.add(bwd)
+        } else {
+            if (bwd >= 0) out.add(bwd)
+            if (fwd < total) out.add(fwd)
+        }
+        d++
+    }
+    return out
 }
 
 /** The visible-char stream of [el]'s subtree in document order, sliced to `[from, to)`. This is the

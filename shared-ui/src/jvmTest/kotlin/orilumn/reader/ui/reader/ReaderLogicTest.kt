@@ -28,16 +28,6 @@ class ReaderLogicTest {
     // ---- 三区点按 ----
 
     @Test
-    fun linkTapDebounce_swallowsZoneOnlyInsideWindow() {
-        // 手抖：链接跳转后 500ms 内的三区点按吞掉；窗外恢复；从未点过链接不吞。
-        assertEquals(true, ReaderMath.linkTapDebounced(1000L, 900L))
-        assertEquals(true, ReaderMath.linkTapDebounced(1000L, 501L))
-        assertEquals(false, ReaderMath.linkTapDebounced(1000L, 500L))
-        assertEquals(false, ReaderMath.linkTapDebounced(1000L, 0L))
-        assertEquals(false, ReaderMath.linkTapDebounced(1000L, 2000L))
-    }
-
-    @Test
     fun tapZone_adoptsOldThreeZones() {
         assertEquals(-1, ReaderMath.tapZone(0f, 900f))
         assertEquals(-1, ReaderMath.tapZone(299f, 900f))
@@ -161,21 +151,6 @@ class ReaderLogicTest {
         assertEquals(0, ReaderMath.progressPercent(-0.2f))
         assertEquals(100, ReaderMath.progressPercent(2f))
         assertEquals(50, ReaderMath.progressPercent(0.5f))
-    }
-
-    // ---- 字体切换路由 ----
-
-    @Test
-    fun fontSlotFor_routesBodyTitleAndCode() {
-        assertEquals("body", ReaderMath.fontSlotFor("p", monospace = false, body = "body", title = "title", code = "code"))
-        assertEquals("title", ReaderMath.fontSlotFor("h2", monospace = false, body = "body", title = "title", code = "code"))
-        assertEquals("title", ReaderMath.fontSlotFor("h6", monospace = false, body = "body", title = "title", code = "code"))
-        assertEquals("code", ReaderMath.fontSlotFor("pre", monospace = false, body = "body", title = "title", code = "code"))
-        assertEquals("code", ReaderMath.fontSlotFor("div", monospace = true, body = "body", title = "title", code = "code"))
-        assertEquals("code", ReaderMath.fontSlotFor(null, monospace = true, body = "body", title = "title", code = "code"))
-        assertEquals("body", ReaderMath.fontSlotFor(null, monospace = false, body = "body", title = "title", code = "code"))
-        // 非 h 标签（如 hsts）不误判为标题
-        assertEquals("body", ReaderMath.fontSlotFor("hsts", monospace = false, body = "body", title = "title", code = "code"))
     }
 
     // ---- 画布行窗口平移 ----

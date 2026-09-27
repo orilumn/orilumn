@@ -7,7 +7,10 @@ import android.os.Bundle
 import android.provider.Settings
 import android.view.View
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -35,6 +38,7 @@ import androidx.lifecycle.lifecycleScope
 import orilumn.reader.data.book.BookRepository
 import orilumn.reader.host.AndroidDb
 import orilumn.reader.data.font.FontRepository
+import orilumn.reader.data.font.FontEntry
 import orilumn.reader.data.epub.TocItem
 import orilumn.reader.data.epub.ZipEpubResourceReader
 import orilumn.reader.data.settings.BookSettings
@@ -46,7 +50,6 @@ import orilumn.reader.engine.BookFileResolver
 import orilumn.reader.engine.text.LayoutParamKey
 import orilumn.reader.engine.text.SystemCjkSerif
 import orilumn.reader.engine.text.TypographicProfile
-import orilumn.reader.engine.render.DebugDraw
 import orilumn.reader.engine.skia.SkiaFontPool
 import orilumn.reader.ui.theme.OrilumnTheme
 import orilumn.reader.io.AppRoot
@@ -60,6 +63,8 @@ import kotlinx.coroutines.withContext
 import okio.FileSystem
 import okio.Path.Companion.toPath
 import java.io.File
+import org.json.JSONArray
+import org.json.JSONObject
 
 /**
  * Q1-b：阅读窗口 Compose 薄壳 — 把 legacy `ReaderActivity`（BodyPageView + CurlView + FlipGestureDetector
@@ -67,8 +72,8 @@ import java.io.File
  *
  *  - 宿主：[TabletReaderHost] + [SnapshotReaderHost]（定位回抛）接入 [ReaderScreen]，画布/手势/亮度
  *    遮罩/上下栏全走 shared-ui（引擎三路 skia 行窗口同源，见 TabletReaderHost.doc）；
- *  - 覆盖层：保留 Android 侧 [AndroidReaderSettingsPanel]/[AndroidReaderTocPanel]（抽屉 + 目录，
- *    亮度/护眼/夜间/排版主题等回调语义与 legacy 一致）；
+ *  - 覆盖层：设置/目录抽屉共用 shared-ui（[ReaderSettingsPanel]/[ReaderTocPanel]，R3 收敛；
+ *    返回键/SAF 导入/WiFi 对话框/字库同步/系统亮度读值/主题预设持久化由本壳承载，不进面板）。
  *  - 环境：保留系统栏沉浸（show/hide chrome + WindowInsetsAnimationCompat 逐帧 statusInset）、
  *    Room 设置持久化（fork-on-first-customization + withBookStyle）、版式重排节流
  *    （deferCanonical / prepareRelayout 循环 / 关面板后 finalizeRelayoutAll 全书重排）；
@@ -117,18 +122,25 @@ class ReaderActivity : ComponentActivity() {
     private var tocOpen by mutableStateOf(false)
     private var panelSettings by mutableStateOf(ReaderSettings.DEFAULT)
 
+    /** 设置面板字库列表（壳自持：开面板同步系统族 + 取全量表；增删改后重载）。 */
+    private var fontEntries by mutableStateOf<List<FontEntry>>(emptyList())
+    /** 自定义阅读主题预设（SharedPreferences 持久化，喂共享面板）。 */
+    private var customThemes by mutableStateOf<List<ThemePreset>>(emptyList())
+    private lateinit var fontImportLauncher: ActivityResultLauncher<Array<String>>
+
     /** 面板打开时的排版指纹；关闭时变化 → 全书 canonical 重排。 */
     private var panelBaseHash = 0L
 
     /** 顶/底栏显隐（[ReaderScreen] 经 onBarsVisibleChanged 回抛，驱动系统栏 chrome）。 */
     private var barsVisible by mutableStateOf(false)
 
-    private var debugOverlayOn by mutableStateOf(DebugDraw.enabled)
-
     /** 版式重排任务状态（固定周期节流）。 */
     private var relayoutPending = false
     private var relayoutScheduled = false
     private var relayoutJob: Job? = null
+
+    /** WiFi 批量上传防抖刷新（多文件连续到达只刷一次，见 scheduleWifiBatchRefresh）。 */
+    private var wifiBatchJob: Job? = null
 
     /** 当前系统状态栏顶 inset（物理 px，随显隐动画逐帧更新）。 */
     private val statusInsetTopPx = mutableIntStateOf(0)
@@ -154,6 +166,16 @@ class ReaderActivity : ComponentActivity() {
         settingsStore = ReaderSettingsStore(File(filesDir, "settings").absolutePath)
         bookSettingsStore = BookSettingsStore(File(filesDir, "settings").absolutePath)
         fontRepository = FontRepository(this, AndroidDb.library(this))
+        customThemes = loadCustomThemes()
+        // 本地字体导入（SAF）：launcher 归壳持有，共享面板经 onFontImport 触发。
+        fontImportLauncher = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+            if (uris.isEmpty()) return@registerForActivityResult
+            lifecycleScope.launch {
+                uris.forEach { uri -> runCatching { fontRepository.import(uri) } }
+                loadPanelFonts()
+                refreshFontsAndRelayout()
+            }
+        }
 
         effective = settingsStore.load()
         if (bookId >= 0) {
@@ -258,8 +280,29 @@ class ReaderActivity : ComponentActivity() {
             val bgTone = remember(effective, density) { TypographicProfile.build(effective, density).bgColor }
 
             // 打开书籍并构建引擎（一次；视口就绪后触发）。
+            // R5/S6：视口变化 ≡ 改参。setViewport 返回 true 即真变：新尺寸先进视口，
+            // 再走关面板同款全套（diff 必变，无需比对；面板开着时 defer 照旧抑制 B1，关闭再补）。
             LaunchedEffect(pxW, pxH) {
-                if (engine == null && !openFailed) openBookEngine(pxW, pxH)
+                val c = engine
+                if (c == null && !openFailed) openBookEngine(pxW, pxH)
+                else if (c != null && c.setViewport(pxW, pxH)) {
+                    Logger.w(TAG, "viewport changed -> whole-book relayout ${pxW}x${pxH}")
+                    // 重建已由 configChanges 接管，不走这里；但系统栏高度可能随横竖变化，
+                    // 静态 inset 在此刷新（与 create/resume 同口径），否则内容偏移沿用旧值。
+                    syncStatusInset()
+                    relayoutPending = false
+                    val liveLoop = relayoutJob
+                    val p = currentPos
+                    val ch = p?.chapter ?: 0
+                    val anchor = p?.slice?.charStart ?: 0
+                    lifecycleScope.launch(Dispatchers.Default) {
+                        liveLoop?.join()
+                        val r = c.finalizeRelayoutAll(ch, anchor)
+                        withContext(Dispatchers.Main) {
+                            if (r != null) applyReflowResult(c, r)
+                        }
+                    }
+                }
             }
 
             if (openFailed) {
@@ -280,22 +323,17 @@ class ReaderActivity : ComponentActivity() {
                     host = snapshot,
                     settings = effective,
                     statusBarInset = with(LocalDensity.current) { (statusInsetTopPx.intValue / density).dp },
-                    debugActive = debugOverlayOn,
                     onBack = { finish() },
                     onNight = {
                         commitSettings(effective.copy(scheme = if (effective.scheme == "night") "day" else "night"), typographyChanged = true)
                     },
                     onSettings = { openSettingsPanel() },
                     onToc = { openTocPanel() },
-                    onDebug = {
-                        DebugDraw.enabled = !DebugDraw.enabled
-                        debugOverlayOn = DebugDraw.enabled
-                        Logger.d(TAG, if (DebugDraw.enabled) "调试线框：显示" else "调试线框：关闭")
-                    },
                     onLightChange = { applyPhysicalBrightness(it) },
                     onLightCommit = { commitBrightness(it) },
                     onBarsVisibleChanged = { barsVisible = it; applySystemBars() },
                     externalPos = externalPos,
+                    fallbackPos = currentPos,
                     contentRevision = layoutRevision,
                 )
             } else {
@@ -303,8 +341,10 @@ class ReaderActivity : ComponentActivity() {
                 Box(Modifier.fillMaxSize().background(ComposeColor(bgTone)))
             }
 
+            // R3 收敛：目录抽屉用共享实现；返回键由壳承载（S31，不进面板）。
+            BackHandler(enabled = tocOpen) { closeTocPanel() }
             currentPos?.let { p ->
-                AndroidReaderTocPanel(
+                ReaderTocPanel(
                     visible = tocOpen,
                     toc = engine?.toc() ?: emptyList(),
                     currentChapter = p.chapter,
@@ -315,7 +355,7 @@ class ReaderActivity : ComponentActivity() {
                     onSelect = { item -> tocJump(item) },
                     onDismiss = { closeTocPanel() },
                 )
-            } ?: AndroidReaderTocPanel(
+            } ?: ReaderTocPanel(
                 visible = tocOpen,
                 toc = engine?.toc() ?: emptyList(),
                 currentChapter = 0,
@@ -324,16 +364,63 @@ class ReaderActivity : ComponentActivity() {
                 onDismiss = { closeTocPanel() },
             )
 
-            AndroidReaderSettingsPanel(
+            // 设置抽屉用共享实现（R3 同口径）；返回键由壳承载，直接关面板。
+            BackHandler(enabled = settingsOpen) { closeSettingsPanel() }
+            ReaderSettingsPanel(
                 visible = settingsOpen,
                 settings = panelSettings,
-                fontRepository = fontRepository,
+                fontEntries = fontEntries,
                 onDismiss = { closeSettingsPanel() },
                 onPreview = { previewLive(it) },
                 onCommitTypography = { commitSettings(it, typographyChanged = true) },
                 onCommitBookPrivate = { commitSettings(it.withBookStyle(), typographyChanged = true, bookOnly = true) },
                 onCommitLight = { commitSettings(it, typographyChanged = false) },
-                onFontsChanged = { refreshFontsAndRelayout() },
+                customThemes = customThemes,
+                onSaveTheme = { preset ->
+                    val next = ReaderThemeMath.saveTheme(customThemes, preset.bg, preset.fg)
+                    if (next != customThemes) { persistCustomThemes(next); customThemes = next }
+                },
+                onDeleteTheme = { preset ->
+                    val next = ReaderThemeMath.deleteTheme(customThemes, preset.bg, preset.fg)
+                    if (next != customThemes) { persistCustomThemes(next); customThemes = next }
+                },
+                readSystemBrightness = { readSystemBrightnessPercent().roundToInt() },
+                onFontHide = { ids ->
+                    lifecycleScope.launch {
+                        val fam = familyOfFontIds(ids)
+                        ids.forEach { fontRepository.setHidden(it, true) }
+                        if (fam != null) fallBackFontSlots(fam)
+                        loadPanelFonts()
+                        refreshFontsAndRelayout()
+                    }
+                },
+                onFontUnhide = { ids ->
+                    lifecycleScope.launch {
+                        ids.forEach { fontRepository.setHidden(it, false) }
+                        loadPanelFonts()
+                        refreshFontsAndRelayout()
+                    }
+                },
+                onFontDelete = { family ->
+                    lifecycleScope.launch {
+                        fontRepository.deleteFamily(family)
+                        fallBackFontSlots(family)
+                        loadPanelFonts()
+                        refreshFontsAndRelayout()
+                    }
+                },
+                canFontImport = true,
+                onFontImport = { fontImportLauncher.launch(FONT_MIMES) },
+                canFontWifiImport = true,
+                wifiUploadDir = File(cacheDir, "wifi_fonts").absolutePath,
+                onWifiUpload = { path ->
+                    // 批量上传只入库 + 防抖刷一次（旧逻辑每文件都走系统字体重枚举 + 全书重排）。
+                    lifecycleScope.launch(Dispatchers.IO) {
+                        runCatching { fontRepository.importFile(File(path)) }
+                        withContext(Dispatchers.Main) { scheduleWifiBatchRefresh() }
+                    }
+                },
+                showImportedSection = true,
             )
         }
     }
@@ -344,6 +431,7 @@ class ReaderActivity : ComponentActivity() {
         tocOpen = false
         panelSettings = effective
         settingsOpen = true
+        loadPanelFonts()
         applySystemBars()
         // 面板开时抑制后台 canonical 全章重排（避免与前台实时 temp 塑形抢 CPU）；关闭时若排版真实
         // 变化再整书重跑（捕获指纹判定）。
@@ -357,7 +445,14 @@ class ReaderActivity : ComponentActivity() {
         applySystemBars()
         val c = engine
         c?.deferCanonical = false
-        if (c != null && typographHash() != panelBaseHash) {
+        val before = panelBaseHash
+        val after = typographHash()
+        // 关面板事件无条件落盘（变与不变都记）——"改参关面板没反应"先查这条再查引擎。
+        Logger.w(TAG, "close settings panel typographHash $before -> $after changed=${before != after}")
+        // 消费本次 diff：遮罩连点/返回键竞态会导致 onDismiss 重入；不消费则第二次关闭
+        // 看到同样的 diff 而再跑一遍整书重排（20:36 双关即此）。
+        panelBaseHash = after
+        if (c != null && after != before) {
             Logger.w(TAG, "close settings panel -> typography changed, whole-book relayout")
             // 先停掉实时节流循环并等其当前迭代落位，避免两趟后台塑形并发作用于同一章。
             relayoutPending = false
@@ -378,6 +473,63 @@ class ReaderActivity : ComponentActivity() {
     /** 排版敏感设置指纹（宽度/高度为固定输入，这里只看排版是否变化）。 */
     private fun typographHash(): Long =
         LayoutParamKey.fromProfile(engine?.profile ?: profile, 0, 0).hash()
+
+    // ---- Settings panel font/theme platform seams (shell-owned) ----
+
+    /** 面板字库重载（开面板/增删改后）：同步系统族落行 + 取统一全量表。 */
+    private fun loadPanelFonts(resyncSystem: Boolean = true) {
+        lifecycleScope.launch {
+            if (resyncSystem) runCatching { fontRepository.syncSystemFaces(orilumn.reader.engine.skia.systemFontFaces()) }
+            fontEntries = runCatching { fontRepository.entries() }.getOrDefault(emptyList())
+        }
+    }
+
+    /**
+     * WiFi 批量防抖刷新：连续到达的文件只在静默 [WIFI_BATCH_DELAY_MS] 后刷一次。
+     * 系统字体在 WiFi 流程中不变故不重枚举；面板开时跳过重排（deferCanonical 期后台
+     * canonical 被抑制，关面板走 finalizeRelayoutAll 一次），只同步 Skia 池。
+     */
+    private fun scheduleWifiBatchRefresh() {
+        wifiBatchJob?.cancel()
+        wifiBatchJob = lifecycleScope.launch {
+            delay(WIFI_BATCH_DELAY_MS)
+            loadPanelFonts(resyncSystem = false)
+            if (settingsOpen) withContext(Dispatchers.Default) { refreshSkiaFonts() }
+            else refreshFontsAndRelayout()
+        }
+    }
+
+    /** 隐藏/删除的族若正被槽位引用 → 回退跟随原书（沿旧 FontManagerPanel 口径）。 */
+    private fun fallBackFontSlots(family: String) {
+        val s = panelSettings
+        if (family != s.fontBody && family != s.fontTitle && family != s.fontCode) return
+        commitSettings(
+            s.copy(
+                fontBody = s.fontBody.takeUnless { it == family } ?: "",
+                fontTitle = s.fontTitle.takeUnless { it == family } ?: "",
+                fontCode = s.fontCode.takeUnless { it == family } ?: "",
+            ),
+            typographyChanged = true,
+        )
+    }
+
+    private fun familyOfFontIds(ids: List<Long>): String? =
+        fontEntries.firstOrNull { e ->
+            val id = (e as? FontEntry.System)?.id ?: (e as? FontEntry.Imported)?.face?.id
+            id != null && id in ids
+        }?.family
+
+    private fun loadCustomThemes(): List<ThemePreset> = runCatching {
+        val prefs = getSharedPreferences("reader_settings_ui", MODE_PRIVATE)
+        val arr = JSONArray(prefs.getString(KEY_THEMES, "[]"))
+        (0 until arr.length()).map { val o = arr.getJSONObject(it); ThemePreset(o.optString("label"), o.optString("bg"), o.optString("fg")) }
+    }.getOrDefault(emptyList())
+
+    private fun persistCustomThemes(list: List<ThemePreset>) {
+        val arr = JSONArray()
+        list.forEach { arr.put(JSONObject().put("label", it.label).put("bg", it.bg).put("fg", it.fg)) }
+        getSharedPreferences("reader_settings_ui", MODE_PRIVATE).edit().putString(KEY_THEMES, arr.toString()).apply()
+    }
 
     // ---- Table of contents ----
 
@@ -425,6 +577,7 @@ class ReaderActivity : ComponentActivity() {
         panelSettings = next
         effective = next
         profile = TypographicProfile.build(next, dpDensity)
+        orilumn.reader.engine.skia.SkParagraphFactory.weightAnchors = profile.fontWeightAnchors
         engine?.profile = profile
     }
 
@@ -442,46 +595,24 @@ class ReaderActivity : ComponentActivity() {
     }
 
     /**
-     * 持久化（每书隔离，fork-on-first-customization）：
-     *  - 本书 overlay = 改变后全部每书字段的快照，一旦触碰即不再跟随后续全局变更；
-     *  - 全局内存只收本次实际改动字段（相对本书基线的 diff），一本书的私有值不泄漏进共享默认；
-     *  - [bookOnly]（原书设置）：只写本书私有 overlay，永不合并进全局；
-     *  - 系统/全局字段（亮度/护眼/亮度手势/夜间）不入任何每书 overlay，直写全局内存。
+     * 持久化：双层语义收归共享 [orilumn.reader.data.settings.PerBookSettings]
+     * （平板为基准：全量快照 + 修改直写全局 + bookOnly 隔离 + 纯全局直写）。
      */
+    private val settingsPersist by lazy {
+        orilumn.reader.data.settings.PerBookSettings(settingsStore, bookSettingsStore)
+    }
+
     private fun persistSettings(next: ReaderSettings, bookOnly: Boolean = false) {
         lifecycleScope.launch(Dispatchers.IO) {
-            val storedGlobal = settingsStore.load()
-            val storedOverlay = if (bookId >= 0) bookSettingsStore.load(bookId) else BookSettings.EMPTY
-            val baseline = storedGlobal.applyOverlay(storedOverlay)
-            val changed = BookSettings.changedFrom(next, baseline)
-            val global = if (bookOnly) {
-                storedGlobal
-            } else {
-                storedGlobal.mergeFrom(changed)
-                    .copy(
-                        scheme = next.scheme,
-                        brightness = next.brightness,
-                        brightnessFollowSystem = next.brightnessFollowSystem,
-                        brightnessOffset = next.brightnessOffset,
-                        eyeProtectionLevel = next.eyeProtectionLevel,
-                        brightnessGestureLeft = next.brightnessGestureLeft,
-                        brightnessGestureRight = next.brightnessGestureRight,
-                        brightnessGestureTwo = next.brightnessGestureTwo,
-                    )
-            }
-            settingsStore.save(global)
-            val overlay = if (bookId >= 0) {
-                val o = if (changed.isEmpty) storedOverlay else BookSettings.fromReaderSettings(next)
-                bookSettingsStore.save(bookId, o)
-                o
-            } else BookSettings.EMPTY
-            Logger.d(TAG, "persist settings: changed empty=${changed.isEmpty} overlay empty=${overlay.isEmpty}")
+            settingsPersist.persist(if (bookId >= 0) bookId else null, next, bookOnly)
+            Logger.d(TAG, "persist settings bookOnly=$bookOnly")
         }
     }
 
     /**
-     * 排版敏感设置变更 → 固定周期节流全书重排（保位）。拖拽期间只要仍有 pending 标记就每隔
-     * [RELAYOUT_INTERVAL_MS] 用最新 profile 重排一次，保证滑块跟手；不做逐帧取消+重启。
+     * 排版敏感设置变更 → 固定周期节流本章轻刷新（保位，R4/S1：只动当前章，不废他章、不 bump 代际）。
+     * 拖拽期间只要仍有 pending 标记就每隔 [RELAYOUT_INTERVAL_MS] 用最新 profile 刷一次，保证滑块跟手；
+     * 不做逐帧取消+重启。整书覆盖在循环结束 + 关面板全套（S2）时补。
      */
     private fun scheduleRelayout() {
         relayoutPending = true
@@ -495,7 +626,7 @@ class ReaderActivity : ComponentActivity() {
                 val chapter = p?.chapter ?: 0
                 val anchorChar = p?.slice?.charStart ?: 0
                 // 后台算新版式（保留当前章旧版式不闪），主线程原子替换。
-                val r = c.prepareRelayout(chapter, anchorChar)
+                val r = c.prepareRelayoutLight(chapter, anchorChar)
                 withContext(Dispatchers.Main) {
                     if (r != null) applyReflowResult(c, r)
                 }
@@ -628,6 +759,8 @@ class ReaderActivity : ComponentActivity() {
         val host = tabletHost
         val p = currentPos
         if (host != null && p != null) host.onSaveProgress(p)
+        // R13: 先落盘再杀后台（close 只停塑形，不管落盘）。
+        host?.closeController()
         super.onDestroy()
     }
 
@@ -705,8 +838,21 @@ class ReaderActivity : ComponentActivity() {
     companion object {
         private const val TAG = "Orilumn.Reader"
 
+        /** SAF 可选字体 MIME（各 ROM 写法不一，兼容并集）。 */
+        private val FONT_MIMES = arrayOf(
+            "font/ttf", "font/otf", "font/woff", "font/woff2",
+            "application/x-font-ttf", "application/vnd.ms-opentype",
+            "application/octet-stream",
+        )
+
+        /** 自定义阅读主题预设的 SharedPreferences 键（与旧面板同一存储，升级不断档）。 */
+        private const val KEY_THEMES = "theme_presets"
+
         /** 重排间隔（ms）：近实时，至多每帧一次；拖拽期间只要还有 pending 就一直重排。 */
         private const val RELAYOUT_INTERVAL_MS = 16L
+
+        /** WiFi 批量防抖窗口（ms）：连续上传只在静默该时长后刷新一次。 */
+        private const val WIFI_BATCH_DELAY_MS = 800L
     }
 }
 

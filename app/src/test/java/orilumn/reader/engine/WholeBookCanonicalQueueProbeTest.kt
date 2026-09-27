@@ -13,6 +13,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.After
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -48,6 +49,12 @@ class WholeBookCanonicalQueueProbeTest {
     private lateinit var cacheDir: java.io.File
     private val viewW = 720
     private val viewH = 1280
+
+    @After
+    fun tearDown() {
+        // R13: reclaim background shaping so worker-JVM neighbors run clean.
+        if (::controller.isInitialized) controller.close()
+    }
 
     @Before
     fun setUp() {

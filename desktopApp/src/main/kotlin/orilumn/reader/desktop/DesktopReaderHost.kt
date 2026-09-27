@@ -32,8 +32,9 @@ import java.io.File
  * 增量编排/进度/存档全走共享 [BookDocumentController]（单编排宿主），本文件只剩
  * 平台接缝：zip 常驻打开、视口/分发器装配、书内字体预装、存档 map、图片解码。
  * 旧 584 行自研简化管线（单章整塑形 + 本地分页表复刻）已删除；后台 canonical/整书
- * 预排按同一 F>A>B1>B2>P 契约启用（`prewarmForOpen`；F 由 `findAdjacentPage` 调用线程
- * 同步塑形闭环，与平板同一语义）。
+ * 预排按同一优先级契约启用（F > 第一邻页 > 第二上页 > B1 > B2 > temp 预填 > P，
+ * 全部由共享 `TaskScheduler` 排定；F 由 `findAdjacentPage` 调用线程同步塑形闭环，
+ * 与平板同一语义）。
  */
 class DesktopReaderHost(
     private val bookFile: String,
@@ -52,7 +53,8 @@ class DesktopReaderHost(
     private val fontLibrary: orilumn.reader.data.font.FontLibrary,
 ) : ReaderHost {
 
-    private val profile: TypographicProfile = TypographicProfile.build(settings, density)
+    private var profile: TypographicProfile = TypographicProfile.build(settings, density)
+        .also { orilumn.reader.engine.skia.SkParagraphFactory.weightAnchors = it.fontWeightAnchors }
     private val scopeJob = SupervisorJob()
     private val hostScope = CoroutineScope(scopeJob + Dispatchers.Default)
     private val ioScope = CoroutineScope(scopeJob + Dispatchers.IO)
@@ -103,6 +105,10 @@ class DesktopReaderHost(
         return chapter
     }
 
+    /** 当页标题 id 集合（目录抽屉定位当前项用；只读透传，与平板直调控制器同口径，用户层）。 */
+    fun currentPageFragmentIds(chapter: Int, charStart: Int, charEnd: Int): Set<String> =
+        controller.currentPageFragmentIds(chapter, charStart, charEnd)
+
     override suspend fun open(): ReaderPos? = withContext(Dispatchers.Default) {
         if (!opened) {
             val saved = store.loadProgress(bookId)?.let { loc ->
@@ -116,6 +122,8 @@ class DesktopReaderHost(
             // 后台 canonical/整书预排（与平板同一分发器划分；落位不等它）。
             // 书内字体不预装：整形前 `onBookFonts` 回调给字节（与平板同式，首绘即对）。
             controller.prewarmForOpen()
+            // R7: open-book B2 dispatch（epoch 去重；defer 门控在内）——远章不等改参即排（与平板同序）。
+            controller.requestWholeBookRelayout()
             opened = true
         }
         val anchor = initialAnchor
@@ -154,6 +162,13 @@ class DesktopReaderHost(
         controller.openChapterStart(index)?.let { ReaderPos(it.first, it.second) }
     }
 
+    /** 目录跳转（含子章节 fragment；与平板 `jumpToToc` 同口径，经 engine `openTocItem` 落位）。 */
+    suspend fun tocItem(index: Int, fragment: String?): ReaderPos? = withContext(Dispatchers.Default) {
+        val from = controller.locateStart()?.first ?: 0
+        controller.finalizeOnLeave(from)
+        controller.openTocItem(index, fragment)?.let { ReaderPos(it.first, it.second) }
+    }
+
     /** P4-c2u: 点按命中的链接查表（控制器轻路径样式化区间，同步廉价）。 */
     override fun linkTargetAt(chapter: Int, charOffset: Int): LinkTarget? =
         controller.linkTargetAt(chapter, charOffset)
@@ -188,10 +203,9 @@ class DesktopReaderHost(
     }
 
     override fun onSaveProgress(pos: ReaderPos) {
-        // fire-and-forget：阅读面已防抖 500ms，这里只做 leave 收口 + 落盘（存档顺序契约：
-        // 先 finalizeOnLeave 再读 displayed slice，持久化的 char 恒 canonical 权威）。
+        // fire-and-forget：阅读面已防抖 500ms，这里只落盘。存档读显示位本身（与平板同口径，
+        // 见 TabletReaderHost.onSaveProgress），不 finalize（存档不是离开，杀 temp 会话锁死大章）。
         ioScope.launch {
-            controller.finalizeOnLeave(pos.chapter)
             if (bookId < 0) return@launch
             store.saveProgress(bookId, ReadingLocator(pos.chapter, pos.slice.charStart))
         }
@@ -199,6 +213,8 @@ class DesktopReaderHost(
 
     fun close() {
         scopeJob.cancel()
+        // R13: 先停 controller 后台塑形（落盘由调用方保证在前）。
+        runCatching { controller.close() }
         runCatching { reader.close() }
     }
 
@@ -207,6 +223,65 @@ class DesktopReaderHost(
     /** 锚点落位（目录跳转/设置重建）：章内字符所在页；无内容回 null（调用方退回 locateStart）。 */
     private suspend fun landAnchor(chapter: Int, char: Int): ReaderPos? =
         controller.pageAtChar(chapter, char)?.let { ReaderPos(chapter, it) }
+
+    /**
+     * R4 面板字库装载（用户层·壳，与平板 `ReaderActivity.loadPanelFonts` 同位）：
+     * 系统枚举 + 中文名链（方案B name 表 → 方案A CoreText，macOS 独有，保留）+ 落库，
+     * 返回统一全量表。原 `ReaderView` 视图层直写，归位到此。
+     */
+    suspend fun syncPanelFonts(): List<orilumn.reader.data.font.FontEntry> = withContext(Dispatchers.IO) {
+        val sys = runCatching { orilumn.reader.engine.skia.systemFontFaces() }.getOrDefault(emptyList())
+        val faces = runCatching {
+            val localized = withContext(Dispatchers.Default) {
+                val nameTable = NameTableChineseNames.namesFor(sys.map { it.family })
+                val coreText = MacFamilyNames.localizedFamilyNames(sys.map { it.family })
+                coreText + nameTable // 同键以右侧（name 表）为准
+            }
+            fontLibrary.syncSystemFaces(sys, localizedNames = localized)
+        }.getOrElse { runCatching { fontLibrary.list() }.getOrDefault(emptyList()) }
+        fontLibrary.allEntries(faces)
+    }
+
+    /**
+     * R15 设置两段式·第一段（用户层·壳，150ms 防抖落位即调）：本章轻刷新。换 profile → 追装字库池 →
+     * `prepareRelayoutLight(anchorChar)` 行锚重算 → `bindReflow` 绑定，不碰他章、不跑 B2；
+     * 同一字符在新分页表合位，不重建宿主、不丢内存位。视口/换书仍走重建（`initialAnchor` 路径）。
+     */
+    suspend fun previewToSettings(next: ReaderSettings, chapter: Int, anchorChar: Int): ReaderPos? =
+        withContext(Dispatchers.Default) {
+            applyProfile(next)
+            orilumn.reader.io.Logger.w("Orilumn.Desktop",
+                "previewToSettings body=${next.fontBody} anchors=${profile.fontWeightAnchors} ch=$chapter anchorChar=$anchorChar")
+            val r = controller.prepareRelayoutLight(chapter, anchorChar) ?: run {
+                orilumn.reader.io.Logger.w("Orilumn.Desktop", "previewToSettings NULL (stale/empty) ch=$chapter")
+                return@withContext null
+            }
+            controller.bindReflow(r)
+            ReaderPos(r.chapter, r.page)
+        }
+
+    /**
+     * R15 设置两段式·第二段（用户层·壳，设置静默约 800ms 后调一次）：全套。`prepareRelayout`
+     *（bump 代际废他章，B2 的 epoch 去重靠这一次续命）→ `bindReflow` → B2，与平板关面板全套同序。
+     */
+    suspend fun commitRelayout(chapter: Int, anchorChar: Int): ReaderPos? =
+        withContext(Dispatchers.Default) {
+            val r = controller.prepareRelayout(chapter, anchorChar) ?: run {
+                orilumn.reader.io.Logger.w("Orilumn.Desktop", "commitRelayout NULL (stale/empty) ch=$chapter")
+                return@withContext null
+            }
+            controller.bindReflow(r)
+            controller.requestWholeBookRelayout()
+            ReaderPos(r.chapter, r.page)
+        }
+
+    /** 换 profile 三件套（两段共用）：重建 profile → 字重锚点 → 控制器持有 → 追装字库池。 */
+    private suspend fun applyProfile(next: ReaderSettings) {
+        profile = TypographicProfile.build(next, density)
+        orilumn.reader.engine.skia.SkParagraphFactory.weightAnchors = profile.fontWeightAnchors
+        controller.profile = profile
+        topUpSkiaFonts(orilumn.reader.engine.css.FontDemand.EMPTY)
+    }
 
     /**
      * F4b 用户字库追装（与平板 `topUpSkiaFonts` 同式，经共享 [FontPoolSync]）：

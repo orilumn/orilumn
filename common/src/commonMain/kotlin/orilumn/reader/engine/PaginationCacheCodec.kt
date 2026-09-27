@@ -1,6 +1,7 @@
 package orilumn.reader.engine
 
 import okio.Buffer
+import orilumn.reader.io.Logger
 
 /**
  * Binary codec for [ChapterPaginationTable] — the single source of the on-disk cache format
@@ -31,12 +32,14 @@ object PaginationCacheCodec {
     /** Engine-geometry version. Bump on ANY change to line geometry computation so stale tables are
      *  invalidated at the single [decode] choke-point. Kept separate from [VERSION]: schema changes may
      *  leave geometry untouched and vice-versa. */
-    const val LAYOUT_VERSION = 26 // 26: 段间距仅 p/li 相邻对生效（UI 层相邻兄弟规则），p 纵边距几何变，旧表作废
+    const val LAYOUT_VERSION = 28 // 28: prepare 盒布局传入 imageLoader/chapterHref，叶高用真实内在比例（此前回退 w/2），旧表 Y 全错位作废
 
     /** Per-book cap on persisted table files. Old-parameter-hash tables are orphaned when the layout
      *  key changes and are never deleted today; keep the most recently used and evict the rest
-     *  (each file ≤ ~32 KB ⇒ ≤ ~1 MB per book at the cap). */
-    const val MAX_TABLES_PER_BOOK = 32
+     *  (each file ≤ ~32 KB ⇒ ≤ ~8 MB per book at the cap). R7 raised this from 32: a whole-book B2
+     *  pass must be able to record every chapter (the in-memory skip-fresh registry keys off these
+     *  files' presence), and 256 chapters covers virtually all books. */
+    const val MAX_TABLES_PER_BOOK = 256
 
     /** Filename convention: `<chapterIndex>_<paramHash>.bin`. */
     fun filename(chapterIndex: Int, paramHash: Long): String =
@@ -63,20 +66,22 @@ object PaginationCacheCodec {
     }
 
     /** Deserializes on-disk bytes. Returns null on miss, schema/geometry-version mismatch, or
-     *  corruption — the single authority for whether a cached table is still usable. */
+     *  corruption — the single authority for whether a cached table is still usable.
+     *  Null 原因逐条落盘：版本不匹配（预期失效）/损坏/解析异常三者不可再压成同一个哑 null，
+     *  否则 DISK-HIT 跟踪无法区分 miss、损坏与 codec 自身 bug。 */
     fun decode(bytes: ByteArray): ChapterPaginationTable? {
         if (bytes.isEmpty()) return null
-        return runCatching {
+        return try {
             val buf = Buffer().write(bytes)
-            if (buf.readInt() != MAGIC) return null
-            if (buf.readInt() != VERSION) return null
-            if (buf.readInt() != LAYOUT_VERSION) return null
+            if (buf.readInt() != MAGIC) return decodeNull("magic")
+            if (buf.readInt() != VERSION) return decodeNull("version")
+            if (buf.readInt() != LAYOUT_VERSION) return decodeNull("layout-version")
             val chapterIndex = buf.readInt()
             val paramHash = buf.readLong()
             val totalBlocks = buf.readInt()
             val totalChars = buf.readInt()
             val pageCount = buf.readInt()
-            if (pageCount < 0) return null
+            if (pageCount < 0) return decodeNull("pageCount=$pageCount")
             val pages = ArrayList<ChapterPaginationTable.PageRecord>(pageCount)
             repeat(pageCount) {
                 pages.add(
@@ -95,6 +100,13 @@ object PaginationCacheCodec {
                 totalChars = totalChars,
                 pages = pages,
             )
-        }.getOrNull()
+        } catch (e: Exception) {
+            decodeNull("exception ${e.message}")
+        }
+    }
+
+    private fun decodeNull(reason: String): ChapterPaginationTable? {
+        Logger.w("Orilumn.DISK", "pagination decode null ($reason)")
+        return null
     }
 }

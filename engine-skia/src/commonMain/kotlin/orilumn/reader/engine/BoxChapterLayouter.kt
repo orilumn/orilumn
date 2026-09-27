@@ -2365,6 +2365,72 @@ class LightPrepare(
         )
     }
 
+    /**
+     * P4-c2: [fragment] 锚点在排版字符流中的起始偏移（与 [globalCharStarts] 同空间）。
+     * 与塑形/分页/点按命中同源（[styledSegments] 同输入），裸文本 walk 的漂移
+     * （空白折叠、`display:none`、img 槽位）不再进入目录/链接跳转。
+     * 锚点元素即叶时偏移为叶起始；锚点在容器上时取其下文档序首叶起始。
+     * 无命中回 null（调用方走既有章首回退）。
+     */
+    internal fun anchorCharStart(fragment: String): Int? {
+        if (totalBlocks <= 0) return null
+        var target: MarkupElement? = null
+        fun find(el: MarkupElement) {
+            if (target != null) return
+            if (fragment in orilumn.reader.engine.anchorKeysOf(el)) { target = el; return }
+            for (c in el.children) find(c)
+        }
+        find(markup)
+        val ael = target ?: return null
+        // 叶表身份索引（MarkupElement 非值语义，恒用身份比较）。
+        val leafIdxByEl = identityMap<MarkupElement, Int>()
+        for (i in markupLeaves.indices) leafIdxByEl[markupLeaves[i]] = i
+        // 所属叶：锚点上行（含自身）命中叶表；容器锚点取其下文档序首叶。
+        var leafIdx = -1
+        var cur: MarkupElement? = ael
+        while (cur != null) {
+            leafIdxByEl[cur]?.let { leafIdx = it; break }
+            if (cur === markup) break
+            cur = cur.parent
+        }
+        if (leafIdx < 0) {
+            for (i in markupLeaves.indices) {
+                var p: MarkupElement? = markupLeaves[i]
+                while (p != null) {
+                    if (p === ael) { leafIdx = i; break }
+                    if (p === markup) break
+                    p = p.parent
+                }
+                if (leafIdx >= 0) break
+            }
+        }
+        if (leafIdx < 0) return null
+        val leafEl = markupLeaves[leafIdx]
+        if (leafEl === ael) return globalCharStarts[leafIdx].toInt()
+        val classify = lightClassify()
+        val segs = orilumn.reader.engine.laying.styledSegments(
+            leafEl,
+            wsOf = { resolveStyle(it).whiteSpace },
+            isExcluded = { hidden.isHidden(it) },
+            isBlock = { classify.isBlock(it) },
+            leafWs = resolveStyle(leafEl).whiteSpace,
+            genOf = genOf,
+            styleOf = { resolveStyle(it) },
+        ).segments
+        var cursor = 0
+        for (s in segs) {
+            // 锚点元素是段节点自身或其祖先（不越过所属叶）即命中：段首即锚点起始。
+            var n: MarkupElement? = s.node
+            while (n != null && n !== leafEl) {
+                if (n === ael) return globalCharStarts[leafIdx].toInt() + cursor
+                n = n.parent
+            }
+            cursor += s.text.length
+        }
+        // 锚点在容器上且叶是其首叶：段循环必已命中；保底回叶起始。
+        return globalCharStarts[leafIdx].toInt()
+    }
+
     /** Materializes (and caches) index [i]'s [LayoutBox] — style via lazy cascade, content width via the
      *  container chain — without ever cascading the whole chapter. */
     fun block(i: Int): LayoutBox {

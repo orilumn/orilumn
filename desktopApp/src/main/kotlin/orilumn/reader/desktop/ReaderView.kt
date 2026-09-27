@@ -273,7 +273,8 @@ fun ReaderView(
                 val idx = item.index ?: return@ReaderTocPanel
                 tocOpen = false
                 scope.launch {
-                    val target = snapshot.chapterStart(idx) ?: return@launch
+                    val target = desktopHost?.tocItem(idx, item.fragment)
+                        ?: snapshot.chapterStart(idx) ?: return@launch
                     anchorOverride = target.chapter to target.slice.charStart
                     session++
                 }

@@ -3041,7 +3041,8 @@ private fun finishCanonicalBackground(
         clearFlipDir("toc-item")
         if (fragment.isNullOrBlank() || index !in chapters.indices) return openChapterStart(index)
         val m = ensureMarkup(index) ?: return openChapterStart(index)
-        val charStart = contentFragmentIdCharStart(m, fragment) ?: return openChapterStart(index)
+        val charStart = styledAnchorChar(index, m, fragment)
+            ?: contentFragmentIdCharStart(m, fragment) ?: return openChapterStart(index)
         return relayoutTo(index, charStart) ?: openChapterStart(index)
     }
 
@@ -3085,8 +3086,24 @@ private fun finishCanonicalBackground(
         val fragment = target.fragment
         if (fragment.isNullOrBlank()) return openChapterStart(target.chapterIndex)
         val m = ensureMarkup(target.chapterIndex) ?: return openChapterStart(target.chapterIndex)
-        val charStart = contentFragmentIdCharStart(m, fragment) ?: return openChapterStart(target.chapterIndex)
+        val charStart = styledAnchorChar(target.chapterIndex, m, fragment)
+            ?: contentFragmentIdCharStart(m, fragment) ?: return openChapterStart(target.chapterIndex)
         return relayoutTo(target.chapterIndex, charStart) ?: openChapterStart(target.chapterIndex)
+    }
+
+    /**
+     * P4-c2: [fragment] 在排版字符流中的起始偏移（轻 prepare 同塑形输入；裸文本兜底在外）。
+     * 与 [linkTargetAt] 同一 prepare 口径（结构缓存复用，毫秒级），无命中回 null。
+     */
+    private fun styledAnchorChar(chapter: Int, markup: MarkupElement, fragment: String): Int? {
+        val unit = unitAt(chapter) ?: return null
+        val bc = layouter as? BoxChapterLayouter ?: return null
+        if (viewW <= 0 || viewH <= 0) return null
+        val contentWidth = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
+        val contentHeight = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
+        val prepare = bc.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight)
+        if (prepare.totalBlocks <= 0) return null
+        return prepare.anchorCharStart(fragment)
     }
 
     /** Normalized spine-href → chapter index (the [LinkTargets] lookup table for this book). */

@@ -162,6 +162,13 @@ class DesktopReaderHost(
         controller.openChapterStart(index)?.let { ReaderPos(it.first, it.second) }
     }
 
+    /** 目录跳转（含子章节 fragment；与平板 `jumpToToc` 同口径，经 engine `openTocItem` 落位）。 */
+    suspend fun tocItem(index: Int, fragment: String?): ReaderPos? = withContext(Dispatchers.Default) {
+        val from = controller.locateStart()?.first ?: 0
+        controller.finalizeOnLeave(from)
+        controller.openTocItem(index, fragment)?.let { ReaderPos(it.first, it.second) }
+    }
+
     /** P4-c2u: 点按命中的链接查表（控制器轻路径样式化区间，同步廉价）。 */
     override fun linkTargetAt(chapter: Int, charOffset: Int): LinkTarget? =
         controller.linkTargetAt(chapter, charOffset)

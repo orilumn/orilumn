@@ -190,25 +190,44 @@ fun ReaderScreen(
         } else if (contentRevision != coverRev) {
             coverRev = contentRevision
         }
-        // 位图缺失即补（换代首解；中途取消导致 finally 落旗，下次运行继续补，
-        // 不会卡死在"永远不再解"）。
-        if (coverBmp == null) {
-            coverResolving = true
-            try {
-                coverBmp = runCatching { currentHost.coverImage() }.getOrNull()
-                if (coverBmp != null && coverStartChapter == null) {
-                    coverStartChapter = runCatching { currentHost.bookStart()?.chapter }.getOrNull()
+        // open 落位前不查：与开书解析并发必撞锁/竞态（首章 check），查也白查。
+        val p = openPos ?: return@LaunchedEffect
+        // 结算中首字符页画底色占位，不抢画正文。finally 落旗：取消即重算，不卡死。
+        coverResolving = true
+        try {
+            // 取消异常重抛（`runCatching` 会吞取消，effect 重启即卡死）；
+            // 其余异常回 null。
+            if (coverBmp == null) {
+                coverBmp = try {
+                    currentHost.coverImage()
+                } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                    null
                 }
-            } finally {
-                coverResolving = false
             }
+            // 首章号查不到退避重试（open 并发期布局未就绪是常态，最多约 1.2s）。
+            if (coverBmp != null && coverStartChapter == null) {
+                repeat(6) {
+                    coverStartChapter = try {
+                        currentHost.bookStart()?.chapter
+                    } catch (e: Exception) {
+                        if (e is kotlinx.coroutines.CancellationException) throw e
+                        null
+                    }
+                    if (coverStartChapter != null) return@repeat
+                    delay(200)
+                }
+            }
+        } finally {
+            coverResolving = false
         }
+        if (coverBmp == null) return@LaunchedEffect
         // 自动展示：落在首位且本代未显式离开。换代时 open 先落位、effect 后结算，
         // 落位与首位对上即弹回封面（窗口拉伸不再丢封面）；目录回首位同样弹，
         // 与"章节从封面开始"一致；其余落位（翻页/跳转/重排）不自动弹。
         orilumn.reader.io.Logger.d("Orilumn.COVER",
-            "decide bmp=${coverBmp != null} startCh=$coverStartChapter pos=${openPos?.chapter}:${openPos?.slice?.charStart} dismissed=$coverDismissed")
-        if (isBookStart(openPos) && !coverDismissed) coverVisible = true
+            "decide bmp=${coverBmp != null} startCh=$coverStartChapter pos=${p.chapter}:${p.slice.charStart} dismissed=$coverDismissed")
+        if (isBookStart(p) && !coverDismissed) coverVisible = true
     }
 
     // 落位统一入口：更新当前定位并防抖保存（复刻 Android scheduleSave 500ms）。

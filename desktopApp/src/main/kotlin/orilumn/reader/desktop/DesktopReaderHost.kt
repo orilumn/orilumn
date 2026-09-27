@@ -290,6 +290,22 @@ class DesktopReaderHost(
             ReaderPos(r.chapter, r.page)
         }
 
+    /**
+     * 视口变化不断连重排（窗口拉伸）：只换视口走同一全套（旧页保持可画到新页就绪，
+     * 不重建宿主、不重解析）；尺寸未变回 null（调用方无动作）。
+     */
+    suspend fun resizeViewport(viewW: Int, viewH: Int, chapter: Int, anchorChar: Int): ReaderPos? =
+        withContext(Dispatchers.Default) {
+            if (!controller.setViewport(viewW.coerceAtLeast(16), viewH.coerceAtLeast(16))) return@withContext null
+            val r = controller.prepareRelayout(chapter, anchorChar) ?: run {
+                orilumn.reader.io.Logger.w("Orilumn.Desktop", "resizeViewport NULL (stale/empty) ch=$chapter")
+                return@withContext null
+            }
+            controller.bindReflow(r)
+            controller.requestWholeBookRelayout()
+            ReaderPos(r.chapter, r.page)
+        }
+
     /** 换 profile 三件套（两段共用）：重建 profile → 字重锚点 → 控制器持有 → 追装字库池。 */
     private suspend fun applyProfile(next: ReaderSettings) {
         profile = TypographicProfile.build(next, density)

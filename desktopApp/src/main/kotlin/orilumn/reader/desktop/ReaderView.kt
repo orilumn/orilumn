@@ -157,7 +157,7 @@ fun ReaderView(
             settledViewport = viewportW to viewportH
         }
 
-        val snapshot = remember(book, settledViewport, session) {
+        val snapshot = remember(book, session) {
             val delegate = DesktopReaderHost(
                 bookFile = book.filePath,
                 bookId = book.id,
@@ -177,6 +177,32 @@ fun ReaderView(
             onDispose { (snapshot.delegate as? DesktopReaderHost)?.close() }
         }
         val desktopHost = snapshot.delegate as? DesktopReaderHost
+        // 引擎重排落位推送（设置两段式与视口重排共用）：刷版本号 + 定位到含锚字符的新页，
+        // NonCancellable 保证已完成的重排不被 effect 重启吞掉。
+        suspend fun pushLanding(landing: ReaderPos) {
+            withContext(NonCancellable) {
+                currentPos = landing
+                externalPos = landing
+                contentRevision++
+                orilumn.reader.io.Logger.w("Orilumn.Desktop",
+                    "push ch=${landing.chapter} slice=${landing.slice} rev=$contentRevision")
+            }
+        }
+        // 视口变化不断连重排：宿主只在换书/会话时重建，拉伸窗口只换视口走全套重排，
+        // 旧页保持可画到新页落定（重建宿主的青黄不接即闪屏根因）。首帧跳过（构造已用该视口）。
+        var appliedViewport by remember(book, session) { mutableStateOf<Pair<Int, Int>?>(null) }
+        LaunchedEffect(book, session, settledViewport) {
+            val prev = appliedViewport
+            appliedViewport = settledViewport
+            if (prev == null || prev == settledViewport) return@LaunchedEffect
+            val host = desktopHost ?: return@LaunchedEffect
+            val anchor = currentPos
+            val landing = host.resizeViewport(
+                settledViewport.first, settledViewport.second,
+                anchor?.chapter ?: 0, anchor?.slice?.charStart ?: 0,
+            ) ?: return@LaunchedEffect
+            pushLanding(landing)
+        }
         // 面板字库经宿主装载（R4：枚举+中文名链已下沉 `syncPanelFonts`，视图只收表；
         // 键只跟书，视口 resize 重建宿主不重枚举）。
         LaunchedEffect(book) {
@@ -191,16 +217,6 @@ fun ReaderView(
             delay(150)
             if (settings.withoutLight() == appliedLayout.withoutLight()) return@LaunchedEffect
             val host = desktopHost ?: return@LaunchedEffect
-            suspend fun pushLanding(landing: ReaderPos) {
-                // 已完成的引擎侧重排结果必须落地：用 NonCancellable 保证推送不被外层取消吞掉
-                withContext(NonCancellable) {
-                    currentPos = landing
-                    externalPos = landing
-                    contentRevision++
-                    orilumn.reader.io.Logger.w("Orilumn.Desktop",
-                        "push ch=${landing.chapter} slice=${landing.slice} rev=$contentRevision")
-                }
-            }
             val anchor = currentPos
             val landing = host.previewToSettings(
                 settings, anchor?.chapter ?: 0, anchor?.slice?.charStart ?: 0)

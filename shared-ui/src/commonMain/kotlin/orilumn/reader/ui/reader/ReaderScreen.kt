@@ -156,15 +156,29 @@ fun ReaderScreen(
 
     // 封面页装配：开书/重排后落在全书第一内容页且有封面 → 先展示封面（只读，不存档）。
     // 封面位图按宿主缓存（同书同参不变）；bookStart 随重排刷新，保证回翻判定恒对。
-    LaunchedEffect(openPos, hostRevision, contentRevision) {
+    // 宿主重建（换书/视口/会话）或排版参数变化即作废缓存：旧切片在新布局下取不到行，
+    // 不作废就是翻页白页（窗口拉伸复现）。
+    var coverHost by remember { mutableStateOf<ReaderHost?>(null) }
+    var coverRev by remember { mutableIntStateOf(-1) }
+    LaunchedEffect(openPos, hostRevision, contentRevision, currentHost) {
+        // 自动展示仅限宿主/排版刚换代（开书/重建/重排）：翻页落到首位不自动弹封面
+        //（否则目录跳第一章每次都先盖封面，得多翻一次）。
+        val fresh = currentHost !== coverHost || contentRevision != coverRev
+        if (fresh) {
+            coverHost = currentHost
+            coverRev = contentRevision
+            coverBmp = null
+            bookStartPos = null
+            coverVisible = false
+        }
         val p = openPos ?: return@LaunchedEffect
         if (coverBmp == null) {
             coverBmp = runCatching { currentHost.coverImage() }.getOrNull()
         }
-        val bmp = coverBmp ?: return@LaunchedEffect
+        if (coverBmp == null) return@LaunchedEffect
         val start = runCatching { currentHost.bookStart() }.getOrNull()
         bookStartPos = start
-        if (start != null && p == start) coverVisible = true
+        if (fresh && start != null && p == start) coverVisible = true
     }
 
     // 落位统一入口：更新当前定位并防抖保存（复刻 Android scheduleSave 500ms）。

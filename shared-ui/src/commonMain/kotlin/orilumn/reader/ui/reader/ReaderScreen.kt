@@ -109,6 +109,9 @@ fun ReaderScreen(
     var coverVisible by remember { mutableStateOf(false) }
     var coverBmp by remember { mutableStateOf<ImageBitmap?>(null) }
     var bookStartPos by remember { mutableStateOf<ReaderPos?>(null) }
+    // 本代（宿主/排版）内用户是否已显式离开首位：离开后落回首位不再自动弹封面
+    //（回翻专用通道仍可进）；换代即重置。
+    var coverDismissed by remember { mutableStateOf(false) }
     // 宿主代际：open() 落定即 +1，行/图/背景 remember 键随之刷新——同 pos 也重取，
     // 换字体不断行时不滞留旧字、不白屏（open 落定前行数据恒有旧值可显）。
     var hostRevision by remember { mutableIntStateOf(0) }
@@ -161,8 +164,8 @@ fun ReaderScreen(
     var coverHost by remember { mutableStateOf<ReaderHost?>(null) }
     var coverRev by remember { mutableIntStateOf(-1) }
     LaunchedEffect(openPos, hostRevision, contentRevision, currentHost) {
-        // 自动展示仅限宿主/排版刚换代（开书/重建/重排）：翻页落到首位不自动弹封面
-        //（否则目录跳第一章每次都先盖封面，得多翻一次）。
+        // 换代（宿主重建/排版变化）：缓存作废、显式离开标记重置；旧切片在新布局下取不到行，
+        // 不作废就是翻页白页（窗口拉伸复现）。
         val fresh = currentHost !== coverHost || contentRevision != coverRev
         if (fresh) {
             coverHost = currentHost
@@ -170,6 +173,7 @@ fun ReaderScreen(
             coverBmp = null
             bookStartPos = null
             coverVisible = false
+            coverDismissed = false
         }
         val p = openPos ?: return@LaunchedEffect
         if (coverBmp == null) {
@@ -178,14 +182,19 @@ fun ReaderScreen(
         if (coverBmp == null) return@LaunchedEffect
         val start = runCatching { currentHost.bookStart() }.getOrNull()
         bookStartPos = start
-        if (fresh && start != null && p == start) coverVisible = true
+        // 自动展示：落在首位且本代未显式离开。换代时 open 先落位、effect 后结算，
+        // 落位与首位对上即弹回封面（窗口拉伸不再丢封面）；目录回首位同样弹，
+        // 与"章节从封面开始"一致；其余落位（翻页/跳转/重排）不自动弹。
+        if (start != null && p == start && !coverDismissed) coverVisible = true
     }
 
     // 落位统一入口：更新当前定位并防抖保存（复刻 Android scheduleSave 500ms）。
-    // 任一正文落位即离封面（封面只读，翻页/跳转/重排落位都回到正文）。
+    // 任一正文落位即离封面；只有真正离开首位才记 dismissed（从封面回首位的落位不算离开，
+    // 否则窗口重建/目录回首位后封面永不再弹）。
     fun markPositionChanged(next: ReaderPos) {
         openPos = next
         coverVisible = false
+        if (next != bookStartPos) coverDismissed = true
         saveJob?.cancel()
         saveJob = scope.launch {
             delay(500)

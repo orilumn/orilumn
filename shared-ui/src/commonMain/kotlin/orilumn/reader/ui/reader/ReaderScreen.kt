@@ -201,7 +201,7 @@ fun ReaderScreen(
         return null
     }
     fun flip(direction: Int) {
-        // 封面页内翻页：前进回正文第一页（走漏斗落位，可存档），后退即退出本书。
+        // 封面页内翻页：前进回正文第一页（走漏斗落位，可存档）；封面已是第一页，后退无操作。
         if (coverVisible) {
             if (direction > 0) {
                 val start = bookStartPos ?: return
@@ -212,8 +212,6 @@ fun ReaderScreen(
                         commit = ::markPositionChanged,
                     ) { start }
                 }
-            } else {
-                currentOnBack()
             }
             return
         }
@@ -301,10 +299,10 @@ fun ReaderScreen(
     }
 
     fun onTap(xPx: Float, yPx: Float, widthPx: Float) {
-        // 封面页点按：无链接命中，前进区回正文、后退区退出、中部切栏（与正文三区同制）。
+        // 封面页点按：无链接命中，前进区回正文、中部切栏，后退区无操作（封面已是第一页；
+        // 退出走顶栏返回键）。
         if (coverVisible) {
             when (ReaderMath.tapZone(xPx, widthPx)) {
-                -1 -> currentOnBack()
                 1 -> flip(1)
                 else -> barsVisible = !barsVisible
             }

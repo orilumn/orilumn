@@ -105,10 +105,9 @@ fun ReaderScreen(
     var openPos by remember { mutableStateOf<ReaderPos?>(null) }
     var openFailed by remember { mutableStateOf(false) }
     // 封面页（用户层前置页，只读不存档）：coverVisible 时画封面盖住正文页，
-    // openPos 仍如果书第一页，供目录/跳转/存档照常工作。
+    // openPos 仍为书里位置，供目录/跳转/存档照常工作。
     var coverVisible by remember { mutableStateOf(false) }
     var coverBmp by remember { mutableStateOf<ImageBitmap?>(null) }
-    var bookStartPos by remember { mutableStateOf<ReaderPos?>(null) }
     // 本代（宿主/排版）内用户是否已显式离开首位：离开后落回首位不再自动弹封面
     //（回翻专用通道仍可进）；换代即重置。
     var coverDismissed by remember { mutableStateOf(false) }
@@ -165,34 +164,38 @@ fun ReaderScreen(
     }
 
     // 封面页装配：开书/重排后落在全书第一内容页且有封面 → 先展示封面（只读，不存档）。
-    // 封面位图按宿主缓存（同书同参不变）；bookStart 随重排刷新，保证回翻判定恒对。
-    // 宿主重建（换书/视口/会话）或排版参数变化即作废缓存：旧切片在新布局下取不到行，
-    // 不作废就是翻页白页（窗口拉伸复现）。
+    // 首位判定只看（首章 + 首字符），不比较整页切片：重排落位是行锚页（blockStart=-1），
+    // 内存表拒绝回填旧表，`bookStart()` 切片恒旧——对象比较永不等（窗口拉伸丢封面根因）。
+    var coverStartChapter by remember { mutableStateOf<Int?>(null) }
     var coverHost by remember { mutableStateOf<ReaderHost?>(null) }
     var coverRev by remember { mutableIntStateOf(-1) }
+    // 首位判定（本函数三处同式）：有封面 + 章节是首章 + 切片首字符为 0。
+    // 不比较整页切片对象（见上）。
+    fun isBookStart(p: ReaderPos?): Boolean {
+        if (p == null || coverBmp == null || coverStartChapter == null) return false
+        return p.chapter == coverStartChapter && p.slice.charStart == 0
+    }
     LaunchedEffect(openPos, hostRevision, contentRevision, currentHost) {
         // 换代（宿主重建/排版变化）：缓存作废、显式离开标记重置；旧切片在新布局下取不到行，
-        // 不作废就是翻页白页（窗口拉伸复现）。
+        // 不作废就是翻页白页（窗口拉伸复现）。bookStart 只取首章号（章节号不漂移），
+        // 顺带把每翻页一次 bookStart 查询的噪声也省了。
         val fresh = currentHost !== coverHost || contentRevision != coverRev
         if (fresh) {
             coverHost = currentHost
             coverRev = contentRevision
             coverBmp = null
-            bookStartPos = null
+            coverStartChapter = null
             coverVisible = false
             coverDismissed = false
-        }
-        val p = openPos ?: return@LaunchedEffect
-        if (coverBmp == null) {
             coverBmp = runCatching { currentHost.coverImage() }.getOrNull()
+            if (coverBmp != null) {
+                coverStartChapter = runCatching { currentHost.bookStart()?.chapter }.getOrNull()
+            }
         }
-        if (coverBmp == null) return@LaunchedEffect
-        val start = runCatching { currentHost.bookStart() }.getOrNull()
-        bookStartPos = start
         // 自动展示：落在首位且本代未显式离开。换代时 open 先落位、effect 后结算，
         // 落位与首位对上即弹回封面（窗口拉伸不再丢封面）；目录回首位同样弹，
         // 与"章节从封面开始"一致；其余落位（翻页/跳转/重排）不自动弹。
-        if (start != null && p == start && !coverDismissed) coverVisible = true
+        if (isBookStart(openPos) && !coverDismissed) coverVisible = true
     }
 
     // 落位统一入口：更新当前定位并防抖保存（复刻 Android scheduleSave 500ms）。
@@ -201,7 +204,7 @@ fun ReaderScreen(
     fun markPositionChanged(next: ReaderPos) {
         openPos = next
         coverVisible = false
-        if (next != bookStartPos) coverDismissed = true
+        if (!isBookStart(next)) coverDismissed = true
         saveJob?.cancel()
         saveJob = scope.launch {
             delay(500)
@@ -231,22 +234,23 @@ fun ReaderScreen(
         return null
     }
     fun flip(direction: Int) {
-        // 封面页内翻页：前进回正文第一页（走漏斗落位，可存档）；封面已是第一页，后退无操作。
+        // 封面页内翻页：前进回正文第一页（现查 fresh 落位，走漏斗，可存档）；
+        // 封面已是第一页，后退无操作。
         if (coverVisible) {
-            if (direction > 0) {
-                val start = bookStartPos ?: return
+            if (direction > 0 && coverBmp != null) {
                 scope.launch {
+                    val target = runCatching { currentHost.bookStart() }.getOrNull() ?: return@launch
                     anchorFunnel.navigate(
                         action = "cover-forward",
-                        read = { start },
+                        read = { target },
                         commit = ::markPositionChanged,
-                    ) { start }
+                    ) { target }
                 }
             }
             return
         }
         // 正文第一页回翻且有封面 → 进封面（只读，不经过引擎翻页/存档）。
-        if (direction < 0 && coverBmp != null && bookStartPos != null && openPos == bookStartPos) {
+        if (direction < 0 && isBookStart(openPos)) {
             coverVisible = true
             return
         }

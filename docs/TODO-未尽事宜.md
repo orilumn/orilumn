@@ -26,7 +26,10 @@
   （step 2/4）尚未实现；`table-layout: fixed` 现为各列均分，而规范是按首行单元格定列宽
   （§17.5.2.1）。
 
-- **表格单元格边框（✅ 已办，2026-09-27）**：`TableCellLines.emitCellBorders` 已按边画——有宽且 style 非 NONE 才画，四侧异宽/异色支持（缺 style 按 SOLID，与 `BoxDrawer.emitEdge` 同口径）。
+- **表格单元格边框仍是合成 1px 单框**：`TableCellLines.emitCell` 无条件画 1px 实线框，**颜色已随
+  CSS `border-color`**（未声明回退 `currentColor`，见 `borderArgbOf`），但仍未按 CSS
+  `border-width`/`border-style` 门控，也表达不了四侧异宽/异色/虚线。浏览器在 `border-width:0`
+  或 `border-style:none` 时完全不画——此差异待后续处理。
 
 - OpenGL 翻页动画
 

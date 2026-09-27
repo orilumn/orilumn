@@ -225,20 +225,18 @@ fun ReaderScreen(
             coverResolving = false
         }
         if (coverBmp == null) return@LaunchedEffect
-        // 自动展示：落在首位且本代未显式离开。换代时 open 先落位、effect 后结算，
-        // 落位与首位对上即弹回封面（窗口拉伸不再丢封面）；目录回首位同样弹，
-        // 与"章节从封面开始"一致；其余落位（翻页/跳转/重排）不自动弹。
+        // 显隐全权在此赋值：首位 && 未离开即展示，否则隐藏。
+        // 落位处不清（清了再弹就是一帧闪）；离开封面的唯一出口是前进翻页显式关闭。
         orilumn.reader.io.Logger.d("Orilumn.COVER",
             "decide bmp=${coverBmp != null} startCh=$coverStartChapter pos=${p.chapter}:${p.slice.charStart} dismissed=$coverDismissed")
-        if (isBookStart(p) && !coverDismissed) coverVisible = true
+        coverVisible = isBookStart(p) && !coverDismissed
     }
 
     // 落位统一入口：更新当前定位并防抖保存（复刻 Android scheduleSave 500ms）。
-    // 任一正文落位即离封面；只有真正离开首位才记 dismissed（从封面回首位的落位不算离开，
-    // 否则窗口重建/目录回首位后封面永不再弹）。
+    // 只记 dismissed，不碰 coverVisible（显隐全权归下面 effect 按"首位 && 未离开"赋值；
+    // 落位处先关再弹就是那一帧正文闪）。
     fun markPositionChanged(next: ReaderPos) {
         openPos = next
-        coverVisible = false
         if (!isBookStart(next)) coverDismissed = true
         saveJob?.cancel()
         saveJob = scope.launch {
@@ -269,17 +267,21 @@ fun ReaderScreen(
         return null
     }
     fun flip(direction: Int) {
-        // 封面页内翻页：前进回正文第一页（现查 fresh 落位，走漏斗，可存档）；
-        // 封面已是第一页，后退无操作。
+        // 封面页内翻页：前进回正文第一页（现查 fresh 落位，走漏斗，可存档），
+        // 落定即记显式离开（否则推送带来的 effect 重算又弹回去）；封面已是第一页，后退无操作。
         if (coverVisible) {
             if (direction > 0 && coverBmp != null) {
                 scope.launch {
                     val target = runCatching { currentHost.bookStart() }.getOrNull() ?: return@launch
-                    anchorFunnel.navigate(
+                    val landed = anchorFunnel.navigate(
                         action = "cover-forward",
                         read = { target },
                         commit = ::markPositionChanged,
                     ) { target }
+                    if (landed != null) {
+                        coverDismissed = true
+                        coverVisible = false
+                    }
                 }
             }
             return

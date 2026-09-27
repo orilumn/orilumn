@@ -147,13 +147,20 @@ fun ReaderScreen(
     val currentBotBarH by rememberUpdatedState(botBarH)
 
     // 打开书籍并定位起始页（自动续读/首页）。落定即推代际：同 pos 也刷新行数据。
-    // 经锚页漏斗：与在途导航互斥，首帧后放行。
+    // 经锚页漏斗：与在途导航互斥，首帧后放行。漏斗 BUSY-DROP 时补一次重试，
+    // 否则 open 是一次性事件——被吞即永久空白，无下一次点按来救。
     LaunchedEffect(currentHost) {
-        anchorFunnel.push("open", { openPos = it }) {
-            val p = currentHost.open()
-            openFailed = p == null
-            hostRevision++
-            p
+        suspend fun doOpen(): ReaderPos? {
+            return anchorFunnel.push("open", { openPos = it }) {
+                val p = currentHost.open()
+                openFailed = p == null
+                hostRevision++
+                p
+            }
+        }
+        if (doOpen() == null && openPos == null) {
+            kotlinx.coroutines.delay(300)
+            doOpen()
         }
     }
 

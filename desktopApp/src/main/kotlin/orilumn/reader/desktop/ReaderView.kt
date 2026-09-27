@@ -149,16 +149,23 @@ fun ReaderView(
         val densityScope = LocalDensity.current
         val viewportW = with(densityScope) { maxWidth.toPx() }.toInt().coerceAtLeast(16)
         val viewportH = with(densityScope) { maxHeight.toPx() }.toInt().coerceAtLeast(16)
+        // 窗口拉伸防抖：拖动中每像素都重组，宿主重建（重解析+重排）配漏斗互斥即自杀式
+        // BUSY-DROP 风暴——旧宿主落位、新宿主画布=白屏。静置 400ms 后再用稳定值重建。
+        var settledViewport by remember(book) { mutableStateOf(viewportW to viewportH) }
+        LaunchedEffect(book, viewportW, viewportH) {
+            kotlinx.coroutines.delay(400)
+            settledViewport = viewportW to viewportH
+        }
 
-        val snapshot = remember(book, viewportW, viewportH, session) {
+        val snapshot = remember(book, settledViewport, session) {
             val delegate = DesktopReaderHost(
                 bookFile = book.filePath,
                 bookId = book.id,
                 store = store,
                 settings = appliedLayout,
                 density = density,
-                viewportW = viewportW,
-                viewportH = viewportH,
+                viewportW = settledViewport.first,
+                viewportH = settledViewport.second,
                 initialAnchor = anchorOverride,
                 // C1-3：桌面分页表写穿 `cache/`（与平板同一共享 Store/参数键/失效语义）。
                 cacheRoot = DesktopPaths.cacheDir,

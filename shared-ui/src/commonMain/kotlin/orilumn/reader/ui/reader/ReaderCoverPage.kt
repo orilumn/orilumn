@@ -13,9 +13,8 @@ import androidx.compose.ui.layout.ContentScale
 /**
  * 阅读器封面页（用户层前置页）：只读展示，不进分页/存档/目录。
  *
- * - 拉伸全屏（默认，`coverProportional=false`）：`FillBounds` 铺满内容区（可能变形，
- *   与旧 `PageRenderer.drawCover(proportional=false)` 同语义）；
- * - 等比（`coverProportional=true`）：`Fit` 居中，周围露底色（旧 `proportional=true` 同语义）。
+ * - 拉伸全屏（默认开）：`FillBounds` 铺满内容区（可能变形）；
+ * - 等比（关）：`Fit` 居中，周围露底色。
  */
 @Composable
 fun ReaderCoverPage(

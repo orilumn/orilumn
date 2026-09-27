@@ -52,8 +52,8 @@ data class BookSettings(
     val pageAnim: Boolean? = null,
     /** Page-turn animation mode: "slide" | "curl" */
     val pageAnimationMode: String? = null,
-    /** Body first-screen cover proportional scaling: true=keep aspect ratio with margins, no stretch; false=stretch to fill the whole screen. */
-    val coverProportional: Boolean? = null,
+    /** Body first-screen cover stretch: true=stretch to fill the whole screen; false=keep aspect ratio with margins, no stretch. */
+    val coverStretch: Boolean? = null,
     /** Show page numbers. */
     val pageNum: Boolean? = null,
 ) {
@@ -104,7 +104,8 @@ data class BookSettings(
                     useOriginalStyle = if (o.containsKey("useOriginalStyle")) SettingsJson.optBoolean(o, "useOriginalStyle", false) else null,
                     pageAnim = if (o.containsKey("pageAnim")) SettingsJson.optBoolean(o, "pageAnim", false) else null,
                     pageAnimationMode = if (o.containsKey("pageAnimationMode")) SettingsJson.optString(o, "pageAnimationMode", "") else null,
-                    coverProportional = if (o.containsKey("coverProportional")) SettingsJson.optBoolean(o, "coverProportional", false) else null,
+                    coverStretch = if (o.containsKey("coverStretch")) SettingsJson.optBoolean(o, "coverStretch", false)
+                    else if (o.containsKey("coverProportional")) !SettingsJson.optBoolean(o, "coverProportional", false) else null,
                     pageNum = if (o.containsKey("pageNum")) SettingsJson.optBoolean(o, "pageNum", false) else null,
                 )
             } catch (_: Exception) {
@@ -154,7 +155,7 @@ data class BookSettings(
             useOriginalStyle = rs.useOriginalStyle,
             pageAnim = rs.pageAnim,
             pageAnimationMode = rs.pageAnimationMode,
-            coverProportional = rs.coverProportional,
+            coverStretch = rs.coverStretch,
             pageNum = rs.pageNum,
         )
 
@@ -173,7 +174,7 @@ data class BookSettings(
                 bgOverride = next.bgOverride, fgOverride = next.fgOverride,
                 fontBody = next.fontBody, fontTitle = next.fontTitle, fontCode = next.fontCode,
                 useOriginalStyle = next.useOriginalStyle, pageAnim = next.pageAnim,
-                pageAnimationMode = next.pageAnimationMode, coverProportional = next.coverProportional,
+                pageAnimationMode = next.pageAnimationMode, coverStretch = next.coverStretch,
                 pageNum = next.pageNum,
             )
             return o.copy(
@@ -197,7 +198,7 @@ data class BookSettings(
                 useOriginalStyle = o.useOriginalStyle?.takeUnless { it == baseline.useOriginalStyle },
                 pageAnim = o.pageAnim?.takeUnless { it == baseline.pageAnim },
                 pageAnimationMode = o.pageAnimationMode?.takeUnless { it == baseline.pageAnimationMode },
-                coverProportional = o.coverProportional?.takeUnless { it == baseline.coverProportional },
+                coverStretch = o.coverStretch?.takeUnless { it == baseline.coverStretch },
                 pageNum = o.pageNum?.takeUnless { it == baseline.pageNum },
             )
         }

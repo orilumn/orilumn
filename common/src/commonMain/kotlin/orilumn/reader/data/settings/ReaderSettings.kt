@@ -60,8 +60,8 @@ data class ReaderSettings(
     val autoContinue: Boolean = true,
     /** Show page numbers. */
     val pageNum: Boolean = false,
-    /** Body first-screen cover proportional scaling switch: on = keep aspect ratio (no distortion, reading bg shown around); off = stretch to fill the whole screen (may distort). */
-    val coverProportional: Boolean = false,
+    /** Body first-screen cover stretch switch: on = stretch to fill the whole screen (may distort); off = keep aspect ratio (no distortion, reading bg shown around). */
+    val coverStretch: Boolean = true,
     /** [Style system] Font size relative to default: 0..100 slider, 50 = default 1.0 (see COMPANION mapping). */
     val fontScale: Double = DEFAULT_FONT_SCALE_PX18_5,
     /** [Style system] Day/night full color scheme: day | night. */
@@ -132,7 +132,7 @@ data class ReaderSettings(
         useOriginalStyle = overlay.useOriginalStyle ?: useOriginalStyle,
         pageAnim = overlay.pageAnim ?: pageAnim,
         pageAnimationMode = overlay.pageAnimationMode ?: pageAnimationMode,
-        coverProportional = overlay.coverProportional ?: coverProportional,
+        coverStretch = overlay.coverStretch ?: coverStretch,
         pageNum = overlay.pageNum ?: pageNum,
     )
 
@@ -163,7 +163,7 @@ data class ReaderSettings(
         useOriginalStyle = overlay.useOriginalStyle ?: useOriginalStyle,
         pageAnim = overlay.pageAnim ?: pageAnim,
         pageAnimationMode = overlay.pageAnimationMode ?: pageAnimationMode,
-        coverProportional = overlay.coverProportional ?: coverProportional,
+        coverStretch = overlay.coverStretch ?: coverStretch,
         pageNum = overlay.pageNum ?: pageNum,
     )
 
@@ -278,7 +278,14 @@ data class ReaderSettings(
                     pageAnimationMode = SettingsJson.optString(o, "pageAnimationMode", d.pageAnimationMode),
                     autoContinue = SettingsJson.optBoolean(o, "autoContinue", d.autoContinue),
                     pageNum = SettingsJson.optBoolean(o, "pageNum", d.pageNum),
-                    coverProportional = SettingsJson.optBoolean(o, "coverProportional", d.coverProportional),
+                    // Old-key migration: coverProportional(false=stretch) → coverStretch(true=stretch), inverted.
+                    coverStretch = if (o.containsKey("coverStretch")) {
+                        SettingsJson.optBoolean(o, "coverStretch", d.coverStretch)
+                    } else if (o.containsKey("coverProportional")) {
+                        !SettingsJson.optBoolean(o, "coverProportional", false)
+                    } else {
+                        d.coverStretch
+                    },
                     fontScale = fontScale,
                     scheme = scheme,
                     bgOverride = bgOverride,

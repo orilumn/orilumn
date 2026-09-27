@@ -533,11 +533,11 @@ fun ReaderScreen(
         if (holdingForCover) {
             Box(modifier = Modifier.fillMaxSize().background(Color(profile.bgColor)))
         } else if (cover != null) {
-            // 封面页：拉伸全屏（默认）/等比居中（coverProportional 开），之上同样压遮罩；
+            // 封面页：拉伸全屏（默认开）/等比居中（关），之上同样压遮罩；
             // 栏与提示与正文同制（标题取书名、进度 0），避免封面页无处进目录/设置。
             ReaderCoverPage(
                 cover = cover,
-                proportional = light.coverProportional,
+                proportional = !light.coverStretch,
                 bgColor = Color(profile.bgColor),
                 modifier = Modifier.fillMaxSize(),
             )

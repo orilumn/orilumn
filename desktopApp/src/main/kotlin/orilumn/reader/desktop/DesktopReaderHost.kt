@@ -15,6 +15,7 @@ import orilumn.reader.engine.skia.PageImage
 import orilumn.reader.engine.text.TypographicProfile
 import orilumn.reader.ui.reader.ReaderHost
 import orilumn.reader.ui.reader.ReaderPos
+import orilumn.reader.ui.imageBitmapOf
 import orilumn.reader.ui.reader.flattenTocItems
 import androidx.compose.ui.graphics.ImageBitmap
 import kotlinx.coroutines.CoroutineScope
@@ -181,6 +182,20 @@ class DesktopReaderHost(
     }
 
     override fun pageProgress(pos: ReaderPos): Double = controller.pageProgress(pos.chapter, pos.slice)
+
+    /** 全书封面（ covers/ 私有缓存；无/失败回 null）。 */
+    override suspend fun coverImage(): ImageBitmap? = withContext(Dispatchers.IO) {
+        runCatching {
+            val ref = store.getEntry(bookId)?.coverPath ?: return@runCatching null
+            val bytes = File(ref).takeIf { it.isFile }?.readBytes() ?: return@runCatching null
+            orilumn.reader.ui.imageBitmapOf(bytes)
+        }.getOrNull()
+    }
+
+    /** 全书第一内容页（只读，不 finalize 临时表）。 */
+    override suspend fun bookStart(): ReaderPos? = withContext(Dispatchers.Default) {
+        controller.openChapterStart(0)?.let { ReaderPos(it.first, it.second) }
+    }
 
     override fun pageLines(pos: ReaderPos): List<DrawLine>? = controller.pageLines(pos.chapter, pos.slice)
 

@@ -98,6 +98,18 @@ interface ReaderHost {
 
     /** 定位已变化，保存阅读进度（防抖由阅读面负责）。 */
     fun onSaveProgress(pos: ReaderPos)
+
+    /**
+     * 全书封面图（阅读器封面页用；无封面/失败回 null）。默认 null。
+     * 封面页是用户层前置页，不进分页/存档（只读不存）。
+     */
+    suspend fun coverImage(): ImageBitmap? = null
+
+    /**
+     * 全书第一内容页（封面页的后一页判定 + 前进落位用；失败回 null）。
+     * 只读查询，不碰临时表（与 chapterStart 的 finalize 语义不同）。默认 null。
+     */
+    suspend fun bookStart(): ReaderPos? = null
 }
 
 /**

@@ -119,6 +119,20 @@ class TabletReaderHost(
 
     override fun pageProgress(pos: ReaderPos): Double = controller.pageProgress(pos.chapter, pos.slice)
 
+    /** 全书封面（书库 coverPath 原字节直解；无/失败回 null）。 */
+    override suspend fun coverImage(): androidx.compose.ui.graphics.ImageBitmap? = withContext(Dispatchers.IO) {
+        runCatching {
+            val ref = repository.getBook(bookId)?.coverPath ?: return@runCatching null
+            val bytes = java.io.File(ref).takeIf { it.isFile }?.readBytes() ?: return@runCatching null
+            imageBitmapOf(bytes)
+        }.getOrNull()
+    }
+
+    /** 全书第一内容页（只读，不 finalize 临时表）。 */
+    override suspend fun bookStart(): ReaderPos? = withContext(Dispatchers.IO) {
+        controller.openChapterStart(0)?.let { ReaderPos(it.first, it.second) }
+    }
+
     override fun pageLines(pos: ReaderPos): List<DrawLine>? = controller.pageLines(pos.chapter, pos.slice)
 
     override fun pageImages(pos: ReaderPos): List<orilumn.reader.engine.skia.PageImage>? =

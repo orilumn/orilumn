@@ -134,6 +134,11 @@ fun ReaderSettingsPanel(
     onWifiUpload: (String) -> Unit = {},
     /** 已导入区是否显示（平板=true；桌面=false，仅系统字体）。 */
     showImportedSection: Boolean = true,
+    /**
+     * 亮度滑块上限（真背光可用时 100；仅遮罩时壳传 0，上限钳到遮罩段 -50..0，
+     * 调亮物理不可达也不给滑。缺省 100，所有现调用方零改动）。
+     */
+    brightnessMax: Int = 100,
 ) {
     val p = paletteFor(settings.scheme)
     val stack = remember { mutableStateListOf<Sub>(Sub.Home) }
@@ -395,14 +400,14 @@ fun ReaderSettingsPanel(
                         else {
                             val sysPct = readSystemBrightness()
                             onCommitLight(s.copy(brightnessFollowSystem = false,
-                                brightness = (sysPct + s.brightnessOffset).coerceIn(-50, 100)))
+                                brightness = (sysPct + s.brightnessOffset).coerceIn(-50, brightnessMax)))
                         }
                     }),
                     sliderKey(s.brightnessOffset.toDouble(), -20.0, 20.0, 1.0,
                         apply = { v -> onCommitLight(s.copy(brightnessOffset = v.roundToInt())) },
                         fmt = { v -> if (v > 0) "+${v.roundToInt()}" else "${v.roundToInt()}" },
                         enabled = follow),
-                    sliderKey(s.brightness.toDouble(), -50.0, 100.0, 1.0,
+                    sliderKey(s.brightness.toDouble(), -50.0, brightnessMax.toDouble(), 1.0,
                         apply = { v -> onCommitLight(s.copy(brightness = v.roundToInt())) },
                         fmt = { "${it.roundToInt()}%" },
                         enabled = !follow),
@@ -728,7 +733,7 @@ fun ReaderSettingsPanel(
                                 onSaveTheme = onSaveTheme,
                                 onDeleteTheme = onDeleteTheme,
                                 p)
-                            Sub.Brightness -> BrightnessPage(s, keys, nav, onMove, listState, onCommitLight, readSystemBrightness, p)
+                            Sub.Brightness -> BrightnessPage(s, keys, nav, onMove, listState, onCommitLight, readSystemBrightness, p, brightnessMax)
                             Sub.AnimMode -> AnimModePage(s, keys, nav, onMove, listState, onCommitLight, p)
                         }
                     }
@@ -1183,6 +1188,7 @@ private fun BrightnessPage(
     commit: (ReaderSettings) -> Unit,
     readSystemBrightness: () -> Int,
     p: Palette,
+    brightnessMax: Int = 100,
 ) {
     val follow = s.brightnessFollowSystem
     val labelW = sliderLabelWidth(listOf("亮度偏移", "亮度"), p)
@@ -1196,7 +1202,7 @@ private fun BrightnessPage(
                         // When turning off follow-system, avoid a brightness jump: reset the main brightness slider with "current system brightness + brightness offset".
                         val sysPct = readSystemBrightness()
                         commit(s.copy(brightnessFollowSystem = false,
-                            brightness = (sysPct + s.brightnessOffset).coerceIn(-50, 100)))
+                            brightness = (sysPct + s.brightnessOffset).coerceIn(-50, brightnessMax)))
                     }
                 }, p, nav = nav, index = 0)
         }
@@ -1206,7 +1212,7 @@ private fun BrightnessPage(
             nav = nav, index = 1) }
         // Main "brightness" slider: 0..100 writes system brightness as a percentage; -50..0 uses a black overlay to dim below the system minimum.
         // When follow-system is on, the main slider is greyed out; the "brightness offset" then adds/subtracts a percentage around system brightness.
-        item { UiSliderRow("亮度", -50.0, 100.0, 1.0, s.brightness.toDouble(), { "${it.roundToInt()}%" },
+        item { UiSliderRow("亮度", -50.0, brightnessMax.toDouble(), 1.0, s.brightness.toDouble(), { "${it.roundToInt()}%" },
             { commit(s.copy(brightness = it.roundToInt())) }, { commit(s.copy(brightness = it.roundToInt())) }, p, enabled = !follow, labelWidth = labelW,
             nav = nav, index = 2) }
         item {

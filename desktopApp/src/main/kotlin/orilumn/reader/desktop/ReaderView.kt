@@ -121,6 +121,26 @@ fun ReaderView(
     var appliedLayout by remember(book) { mutableStateOf(settings) }
     var externalPos by remember(book) { mutableStateOf<ReaderPos?>(null) }
     var contentRevision by remember(book) { mutableStateOf(0) }
+    // 真背光（macOS DDC；scan 一次常驻）：支持时亮度滑块 -50..100（>0 下发硬件），
+    // 不支持时钳到 -50..0（纯遮罩，物理调亮不可达也不给滑）。
+    val displayBrightness = remember { orilumn.reader.desktop.brightness.MacDisplayBrightness() }
+    var ddcCapable by remember(book) { mutableStateOf<Boolean?>(null) }
+    LaunchedEffect(book) {
+        ddcCapable = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching { displayBrightness.ddcCapable() }.getOrDefault(false)
+        }
+    }
+    // 亮度 >0 下发真背光（150ms 防抖合流；≤0 只画遮罩，不碰硬件；跟随系统 onmacOS 不动作）。
+    LaunchedEffect(settings.brightness, settings.brightnessFollowSystem, ddcCapable) {
+        if (settings.brightnessFollowSystem) return@LaunchedEffect
+        if (ddcCapable != true) return@LaunchedEffect
+        val v = settings.brightness.coerceIn(1, 100)
+        if (settings.brightness <= 0) return@LaunchedEffect
+        kotlinx.coroutines.delay(150)
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching { displayBrightness.set(v) }
+        }
+    }
 
     BoxWithConstraints(modifier = modifier) {
         val density = LocalDensity.current.density
@@ -252,6 +272,7 @@ fun ReaderView(
             },
             onCommitBookPrivate = onCommitBookPrivate,
             onDismiss = { settingsOpen = false },
+            brightnessMax = if (ddcCapable == true) 100 else 0,
             onPreview = { onSettingsChange(it) },
             onCommitTypography = { commit(it) },
             onCommitLight = { commit(it) },

@@ -15,7 +15,23 @@
   比例落在用户等待线上，再定做哪个；落盘口径见 `docs/调试日志与分页跟踪.md`（`relayout … SMALL-FULL`
   的 `fullLayout=` 分段）。
 
-- **轻重双路等价实现收敛（2026-09-29 记，排版稳定后处理）**：轻 `computeStructure` 与重 `prepare` 各自贴各自的数据表示（`MarkupElement` vs `LayoutBox`），三处“同义双实现”并存：`hidden` 判定（懒 `resolveHidden` vs 表查 `displayNone`）、叶枚举与 charStarts（`styledCharAdvance` vs 盒 `textLength`，P1-2 称同式，`IncrementalReplayEquivalenceProbeTest` 锁等价）、属主映射（轻 map vs 重盒 flag）。phase-1 生成内容已收敛到 `genPhase1` 单源（`fix/scheduling`）。彻底统一须先统一表示层（`ComputedStyle` 按属性血统拆分：作者/UA 侧烘焙 + reader 侧 overlay），动级联表示层，单列大项；收敛前任何改动必须双路同改 + 等价测试。
+- **轻重双路等价实现收敛（2026-09-29 记，排版稳定后处理）**：轻 `computeStructure` 与重 `prepare` 各自贴各自的数据表示（`MarkupElement` vs `LayoutBox`），三处“同义双实现”并存：`hidden` 判定（懒 `resolveHidden` vs 表查 `displayNone`）、叶枚举与 charStarts（`styledCharAdvance` vs 盒 `textLength`，P1-2 称同式，`IncrementalReplayEquivalenceProbeTest` 锁等价）、属主映射（轻 map vs 重盒 flag）。phase-1 生成内容已收敛到 `genPhase1` 单源（`fix/scheduling`）。彻底统一须先统一表示层（`ComputedStyle` 按属性血统拆分：作者/UA 侧烘焙 + reader 侧 overlay），动级联表示层，单列大项；收敛前任何改动必须双路同改 + 等价测试。**已撞出的具体实例见下条「容器 float 在轻路径不生效」**（轻 `computeFloatLeads` 只对叶注册 float、重路径递归能处理容器 float）。
+
+- **容器 float 在轻路径不生效（2026-09-29 记，R26 查 `anyFloat` 时撞出；既有缺口，非本轮引入）**：
+  `<div style="float:left"><p>文字</p></div>` 在轻路径（临时表/增量）上环绕不生效，要等磁盘表就绪才正确。
+  **取证**：新写 `LightFloatLeadTest`（6 例）时撞到；把 R26 的 `anyFloat` 改动（`07f6666` 之前）取回来重跑同一组测试，
+  **6 例中同样 5 例过、同样 1 例挂** —— 与本轮改动无关，是原本就有的缺口。
+  **根因**：`enumerateBlockLeaves` 只把**叶**放进 `leaves`，`<div>` 自己不是叶（它有块级子节点），
+  叶表里根本没有这个 float；`computeFloatLeads` 的前向透传只对叶注册 float，祖先链只 `preClear(clearSide)`、
+  不注册祖先自身的 float。重路径的递归能处理（`P6aFloatTest` 走的正是重路径），**故两路不一致**——
+  属文首「轻重双路等价实现收敛」的同类实例。
+  **与 `anyFloat` 无关**：标志的检测口径（`computeStructure` 里非 `#text` 叶取自身样式、`#text` 叶取父级）
+  与原 `blockStyleFor` 扫描在非 `#text` 叶上是**同一个表达式**、在 `#text` 叶上都取父级，两者等价；
+  它既没制造也没掩盖该缺口。改动前后 5 例同样通过，即 R26 对有 float 的书**行为中性**。
+  **当前状态**：`LightFloatLeadTest` 以 `KNOWN GAP` 命名**锁定现状**（断言两表全 null），
+  补上容器 float 时该测试会失败并提醒更新。
+  **待办**（**行为变更，不在性能这轮范围**）：让前向透传在祖先链上注册 float（而非只 `preClear`），
+  须同时确认与重路径递归同式 + 磁盘表/临时表两路等价，并 bump `LAYOUT_VERSION`。
 
 - **桌面真背光后续（2026-09-27，macOS 先行落地）**：macOS DDC/CI 已通（`desktopApp …/brightness/`：`DisplayBrightness` 接口 + `DdcPackets` + `MacDisplayBrightness` JNA，真机读写闭环；>0 下发硬件150ms防抖、≤0 纯遮罩、跟随系统不碰硬件；滑块按探测切量程 -50~100 / -50~0）。**Win/Linux 空实现位**：Windows 接 Dxva2（`GetPhysicalMonitors`→`SetMonitorBrightness`，JNA）、Linux 接 ddcutil（/dev/i2c，需 i2c 组权限），同接口各自实现；显示器插拔重探（当前启动探一次）后续补。
 

@@ -46,6 +46,8 @@ fun collectBaselineShifts(
     rootWs: WhiteSpace = WhiteSpace.NORMAL,
     /** P3-c 生成内容查找（空即无，旧路径）。 */
     genOf: GenOf = EmptyGen,
+    /** 预计算段表（同参复用，`shapeGeometry` 一次分段五家共享；null 即现算）。 */
+    precomputed: List<StyledSegment>? = null,
     /** P3-c 样式回退（变换/引号依据；默认读 [styles] 表）。 */
     styleOf: ((MarkupElement) -> ComputedStyle?)? = null,
 ): List<BaselineShift> {
@@ -55,7 +57,7 @@ fun collectBaselineShifts(
     val wsOf: (MarkupElement) -> WhiteSpace = { wsOfNode(it, styles, root, rootWs) }
     val leafWs = styles[root]?.whiteSpace ?: root.parent?.let { styles[it]?.whiteSpace } ?: rootWs
     if (root.isText) return emptyList() // 合成匿名叶无子树、无偏移
-    val segs = styledSegments(root, wsOf, isExcluded, isBlock, leafWs, genOf, styleOf ?: { styles[it] }).segments
+    val segs = precomputed ?: styledSegments(root, wsOf, isExcluded, isBlock, leafWs, genOf, styleOf ?: { styles[it] }).segments
     // 逐节点偏移一次算好（内层覆盖外层），段折叠时直接取用。
     val shiftByNode = HashMap<MarkupElement, Float?>()
     fun fill(node: MarkupElement, inherited: Float?) {

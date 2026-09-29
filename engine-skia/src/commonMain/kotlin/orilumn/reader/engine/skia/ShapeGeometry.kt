@@ -13,6 +13,7 @@ import orilumn.reader.engine.laying.FloatLead
 import orilumn.reader.engine.laying.GenOf
 import orilumn.reader.engine.laying.HiddenCheck
 import orilumn.reader.engine.laying.HIDDEN_NONE
+import orilumn.reader.engine.laying.StyledSegment
 import orilumn.reader.engine.laying.adjustLineHeightsForInlineImages
 import orilumn.reader.engine.laying.NormalFlowLayout
 import orilumn.reader.engine.laying.RubyRun
@@ -90,9 +91,22 @@ fun shapeGeometry(
         )
     }
     // 行内 face 段（`<code>`/`<strong>` 等）：与着色同构的同一遍历产出，断行与绘制按它整形。
-    val fontRuns = fontRunsOf(el, styles, rootStyle, genOf, isBlock)
+    // 五家收集器同根同参：段表算一次共享（`precomputed`），各家折叠不变；文本/表/img 根走各自
+    // 早退分支，共享表恒为 null 不浪费。
+    val sharedSegs: List<StyledSegment>? =
+        if (el.isText || el.tag == "table" || el.tag == "img") null
+        else styledSegments(
+            el,
+            { n -> wsOfNode(n, styles, el, rootStyle.whiteSpace) },
+            { styles[it]?.displayNone == true },
+            { isBlock(it) },
+            styles[el]?.whiteSpace ?: el.parent?.let { styles[it]?.whiteSpace } ?: rootStyle.whiteSpace,
+            genOf,
+            { styles[it] },
+        ).segments
+    val fontRuns = fontRunsOf(el, styles, rootStyle, genOf, isBlock, sharedSegs)
     // P1-2: 行内基线位移段（sub/sup 等）：不断行几何，随段整形使量画一致。
-    val baselineShifts = baselineShiftsOf(el, styles, rootStyle, genOf, isBlock)
+    val baselineShifts = baselineShiftsOf(el, styles, rootStyle, genOf, isBlock, sharedSegs)
     // P1-2: white-space 断行单源（NOWRAP/PRE 不换行；与盒流同式）。
     // Whole-paragraph single-style break (canonical semantics): code-like mono 解析走
     // 级联 monospace 标志（与盒流 `style.monospace || tag == "pre"` 同式）。
@@ -101,7 +115,7 @@ fun shapeGeometry(
         floatLead, pairTag, fontRuns, rootStyle.textIndentPx.coerceAtLeast(0f), baselineShifts,
     )
     // P6-b: 叠排注音 runs（与 text 同构遍历；无注音回空表零回归）＋行高增量（与重路径同式）。
-    val rubyRuns = rubyRunsOf(el, styles, rootStyle, genOf, isBlock)
+    val rubyRuns = rubyRunsOf(el, styles, rootStyle, genOf, isBlock, sharedSegs)
     val grownHeights = adjustLineHeightsForRuby(broken, broken.map { it.heightPx }, rubyRuns)
     // 行内图行高（渲染内核单源 laying/ImageLineHeights）：shape 自带终高，行窗/分页/格高同源。
     // 注音增量先合入 broken 副本再算图高，两者取高（与盒流 breakLeafLines 同口径）。
@@ -122,7 +136,7 @@ fun shapeGeometry(
         listMarker = listMarker,
         alignment = rootStyle.textAlign,
         fontSizePx = rootStyle.fontSizePx.coerceAtLeast(1f),
-        colorRuns = colorRunsOf(el, styles, rootStyle.colorHex?.let(::cssHexToArgb), rootStyle.whiteSpace, genOf, isBlock),
+        colorRuns = colorRunsOf(el, styles, rootStyle.colorHex?.let(::cssHexToArgb), rootStyle.whiteSpace, genOf, isBlock, sharedSegs),
         fontRuns = fontRuns,
         baselineShifts = baselineShifts,
         // P3-a: 行阴影（currentColor 按块墨色解）＋着重号＋祖先 opacity（回退绘制同式）。
@@ -138,7 +152,7 @@ fun shapeGeometry(
         alpha = effectiveOpacity(el) { styles[it] ?: ancestorStyleOf?.invoke(it) ?: rootStyle },
         rubyRuns = rubyRuns,
         // 下划线区间（与 text 同构遍历；无下划线回空表零回归）。
-        underlineRuns = underlineRunsOf(el, styles, rootStyle, genOf, isBlock),
+        underlineRuns = underlineRunsOf(el, styles, rootStyle, genOf, isBlock, sharedSegs),
         fontRequest = fontRequest,
     )
 }
@@ -177,6 +191,8 @@ fun colorRunsOf(
     rootWs: WhiteSpace = WhiteSpace.NORMAL,
     genOf: GenOf = EmptyGen,
     isBlock: (MarkupElement) -> Boolean,
+    /** 预计算段表（`shapeGeometry` 一次分段五家共享；null 即现算）。 */
+    segs: List<StyledSegment>? = null,
 ) = collectColorRuns(
     el,
     styles,
@@ -185,6 +201,7 @@ fun colorRunsOf(
     baseArgb,
     rootWs,
     genOf,
+    precomputed = segs,
 )
 
 /** 字体伴生（只发与块自身 face 不同的段）。 */
@@ -194,6 +211,8 @@ fun fontRunsOf(
     base: ComputedStyle,
     genOf: GenOf = EmptyGen,
     isBlock: (MarkupElement) -> Boolean,
+    /** 预计算段表（`shapeGeometry` 一次分段五家共享；null 即现算）。 */
+    segs: List<StyledSegment>? = null,
 ) = collectFontRuns(
     el,
     styles,
@@ -208,6 +227,7 @@ fun fontRunsOf(
     ),
     base.whiteSpace,
     genOf,
+    precomputed = segs,
 )
 
 /** 基线位移伴生（只发非基线段）。 */
@@ -217,6 +237,8 @@ fun baselineShiftsOf(
     base: ComputedStyle,
     genOf: GenOf = EmptyGen,
     isBlock: (MarkupElement) -> Boolean,
+    /** 预计算段表（`shapeGeometry` 一次分段五家共享；null 即现算）。 */
+    segs: List<StyledSegment>? = null,
 ): List<BaselineShift> = collectBaselineShifts(
     el,
     styles,
@@ -224,6 +246,7 @@ fun baselineShiftsOf(
     { isBlock(it) },
     base.whiteSpace,
     genOf,
+    precomputed = segs,
 )
 
 /** 叠排注音伴生（无注音回空表）。 */
@@ -233,6 +256,8 @@ fun rubyRunsOf(
     base: ComputedStyle,
     genOf: GenOf = EmptyGen,
     isBlock: (MarkupElement) -> Boolean,
+    /** 预计算段表（`shapeGeometry` 一次分段五家共享；null 即现算）。 */
+    segs: List<StyledSegment>? = null,
 ) = collectRubyRuns(
     el,
     styles,
@@ -240,6 +265,7 @@ fun rubyRunsOf(
     { isBlock(it) },
     base.whiteSpace,
     genOf,
+    precomputed = segs,
 )
 
 /** 下划线伴生（无下划线回空表）。 */
@@ -249,6 +275,8 @@ fun underlineRunsOf(
     base: ComputedStyle,
     genOf: GenOf = EmptyGen,
     isBlock: (MarkupElement) -> Boolean,
+    /** 预计算段表（`shapeGeometry` 一次分段五家共享；null 即现算）。 */
+    segs: List<StyledSegment>? = null,
 ) = collectUnderlineRuns(
     el,
     styles,
@@ -256,4 +284,5 @@ fun underlineRunsOf(
     { isBlock(it) },
     base.whiteSpace,
     genOf,
+    precomputed = segs,
 )

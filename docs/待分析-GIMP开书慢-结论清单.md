@@ -227,13 +227,80 @@ Rust 书 CSS 仅 1 个表、3 条 `font-family`，全是带名字的栈）、`cP
 6 例中同样 5 例过、同样 1 例挂——**证实我的改动对 float 书行为中性**，
 同时顺带暴露一个**既有缺口**（见 §3b.6）。
 
-### 3b.5 剩下的（下一刀）
+### 3b.5 `computeStyle` 内部：三层拆分，三条假设否证，一条命中（R29）
 
-锚页 `shape` 现已完全归因到叶子：`cBuild`（≈0.8ms/元素 × 元素数）+
-`cMatch` + `cParse` + `c2nd` = `sStyles`，加 `sSkia` + `sBlk` = `shape`。
-下一刀的真选项是 `computeStyle` 内部——72 个字段里很多共用同一批字符串，
-怀疑肉在**重复解析**。属渲染层自己的活，不跨层（层级表里"样式层叠"本就是渲染层职责）。
-另有 `DISK-HIT shape` 里约 170ms 在 `asm shape` 窗口之外（prepareLight/结构缓存/表载入），未拆。
+锚页 `shape` 的 `cBuild` 已拆到叶子并修掉一处。拆分过程本身比结论更值得记——
+**前两层的三条假设全被实测否证**，第三层才命中。
+
+```
+cBuild 50ms
+├─ cEdge  28ms   ← 命中在这里面
+│   ├─ eSty 10ms  ┐
+│   ├─ eCol  7ms  ┘ 61%：唯二无条件 listOf(4) + 4 次字符串拼接查表
+│   ├─ eWid  4ms
+│   ├─ eBox  3ms  （padding；margin 计入 cEdge 未单列）
+│   └─ eRad  1ms
+├─ cFont  1ms    ← 不值钱，不碰
+└─ 其余   21ms
+```
+
+**否证一：重复查表。** `w["..."]` 重复出现的 key 只有 14 处，
+按每元素算远不到 87ms。改完省不下钱。（顺带：12 处同一 `key` 的重复查表
+已经合并过，`font-family` 三连现在共用一次 `parseFontFamilyList`。）
+
+**否证二：`Pattern.compile` 现场编译。** 13 处 `split(Regex("\\s+"))` 每次
+现场 `new Regex` 走 `Pattern.compile`，同一模式被编译上千次——**代码长相上
+明摆着的浪费**。做 `AbSwitch.regexHoist` 臂直接量（预编译常量 vs 原样）：
+
+```
+              原样      预编译     差
+   cEdge      34ms      34ms      0        ← 零差别
+   cBuild     50ms      54ms      +4       ← 方向还偏反（噪声内）
+```
+
+**否证三：切分开销本身。** 既然预编译没收益，那就把 `Pattern.split` 整个
+换成手工字符扫描（按 CSS 空白集 `[ \t\n\r\f]`）。同装机交叉 8+8、锚点一致：
+
+```
+   cEdge    35.5ms（手工扫描） vs 28ms（Pattern.split）    ← 慢 8ms，8/8 全分离
+```
+
+手工扫描**更慢**，已删。所以 `cEdge` 那 34ms 根本不在切分上，在
+**边家族的实际解析工作**里——这才有第三层。
+
+**命中：`eCol + eSty`。** 这两个函数是边家族里唯二**无条件
+`listOf("top","right","bottom","left")` 新建列表、且 4 次
+`"border-$side-color"` 拼**新字符串**再查表**的（哈希现算、8 槽共 16 次），
+而绝大多数元素只声明了一两个边（实测 `eBrd=59/52` 元素有 border，
+但不是四边齐）。改显式四槽 + 4 侧 × 3 类 key 提为 companion 预建常量。
+
+**R39 实测**（单装机运行期交叉 8+8、锚点一致 12@21972、两臂
+`eBrd=59`/`sEls=52` 逐值相同）：
+
+| | 原样 | 改后 | 差 |
+|---|---|---|---|
+| `eCol` | 5.0ms | 1.0ms | −4.0ms |
+| `eSty` | 8.0ms | 5.0ms | −3.0ms |
+| **`cEdge`** | **37.5ms** | **28.0ms** | **−9.5ms（−25%）** |
+| `cBuild` | 57.5ms | 51.0ms | −6.5ms |
+| `openT` | 731ms | 708ms | −22ms（−3.1%） |
+
+固化后 4 跑复核 `cEdge` 24~28ms，落在改后区间。
+
+`regexHoist` 开关**保留**（默认关 = 原样行为）。它与上面结论不冲突：
+否证的是"预编译能省时间"，保留它是为了换书/换锚点时能再量一次
+（本书 CSS 简写少，不代表别的书少）。
+
+**教训**：`cEdge` 里 72 字段的"逐字段解析"这个描述**不足以指导改动**。
+必须拆到家族级才知道该动哪两个函数。而拆的代价是三次否证——
+**读代码看出的"明显浪费"在这台设备上已错三次**（级联深度 / 通用字体兜底 /
+重复查表），本轮又错两次（预编译 / 手工扫描）。
+
+### 3b.5.1 剩下的
+
+`DISK-HIT shape` 里约 170ms 在 `asm shape` 窗口之外
+（prepareLight / 结构缓存 / 表载入），未拆。
+`cBuild` 的"其余 21ms"未拆。
 
 ### 3b.6 顺带查出的既有缺口：容器 float 在轻路径不生效（非本轮引入）
 
@@ -308,13 +375,29 @@ Rust 书 CSS 仅 1 个表、3 条 `font-family`，全是带名字的栈）、`cP
 - **不要再拿 `pgBackfill` / `pg` 当代码耗时**——它量的是"求实参 + 函数本体"，实参里曾藏着
   全章重算（§2.1）。`bf copy=/calc=` 那对计时（0ms）是这条路径的护栏。
 - 每块塑形成本必须按块数归一后看，且**必须同书同章比**（§1.3 的订正）。
+- **`asm` 行的配对方向**：`asm` 出现在 `jump: open` **之前**（DISK-HIT → asm → 落位）。
+  解析时把 `asm` 归给**其后第一个**落位行；归给上一个会得出"某一臂全 0"的假象
+  （R29 踩过，纯配对错位，不是变体效应）。
+- **只取 `sBlocks>0` 的 `asm`**：DISK-HIT 命中后后台还会发一批 `sBlocks=0` 的
+  预排 `asm`，各字段全 0，混进来中位数就废了（R29 踩过）。
+- 家族级对比（`eBox`/`eWid`/`eCol`/`eSty`/`eRad`）用 `tools/ab_families.py`；
+  端到端与三段配对用 `tools/ab_probe.py` / `tools/ab_detail.py`。口径不同、校验不同，
+  别混进同一个脚本。
+- `AbSwitch` 具名开关的**期望自报值**要过 `ab_probe.py` 的 `expected_describe()`
+  归一化（`slowRegex=1` → `describe()` 报 `slowRegex`）。直接拿命令行参数去比
+  会把**已生效**的变体误判成"未生效"、白扔一批样本（R29 踩过）。
+- `ab=` 串里 `warm=N` 可以**缺席**（`describe()` 只在非 0 时列出；纯具名开关
+  就是这种形状）。解析时缺席即 0，别直接 `search(...).group(1)`（R29 踩过，直接崩）。
 
 ## 6. 改动落点与层级
 
 | 文件 | 改动 | 层级 |
 | --- | --- | --- |
 | `BookDocumentController.kt` | 开书闸门、滚动派发、`OPEN_WARMUP_BLOCKS` 暖机、`openT` 基线 | 排版层（上）分页调度 |
-| `BoxChapterLayouter.kt` | `LightPrepare.totalChars` 恒等式 + `by lazy`、`backfillBlockRanges` 的 `bf` 护栏、`ShapeProbe`（`sStyles`/`sSkia`/`sDepth`）、锚页暖机 | 排版层（下）分层引擎基础设施 |
-| `css/*` | **未改动**（§1.4 已否证） | — |
+| `BoxChapterLayouter.kt` | `LightPrepare.totalChars` 恒等式 + `by lazy`、`backfillBlockRanges` 的 `bf` 护栏、`ShapeProbe`（`sStyles`/`sSkia`/`sDepth` + R29 的 `cEdge`/`cFont`/`e*`）、锚页暖机 | 排版层（下）分层引擎基础设施 |
+| `css/StyleComputer.kt` | §1.4 曾判"不必改"（当时量的是级联深度）；R29 改的是 `parseBorderColors`/`parseBorderStyles` 的四槽 key 查表（§3b.5） | 渲染层 · 样式级联 |
+| `css/CascadeProbe.kt` | 诊断探针（`sink`/`splitSink`/`familySink`） | 渲染层 · 样式级联（给自己装仪表） |
+| `engine/AbSwitch.kt` | 运行期 A/B 开关（`warmupBlocks` + 具名 flags）+ `controlMs()` 控制量探针。R29 从 engine-skia 移到 common（包名不变）——`StyleComputer` 在 common，而 engine-skia 单向依赖 common，反向引用不成立 | 引擎层 · 测量设施 |
 
-未跨层。
+未跨层。`css/*` 的改动全在"样式级联"这一职责本体里（层级表里它本就属渲染层）；
+探针置位方在排版层（下），但置位方只负责在测量窗口内挂/卸 sink，不改排版行为。

@@ -827,8 +827,7 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
                         pagesToShape = 1,
                         cache = unitShapeCache(unit),
                         prefillL2 = windowPrefillShapesFor(unit, cached),
-                        // R20 开书路径专属：先在章首塑 OPEN_WARMUP_BLOCKS 块再塑锚页。
-                        // 是否真让锚页变快未证实（见 OPEN_WARMUP_BLOCKS 注释）；预排/换页路径不传（默认 0）。
+                        // 开书路径专属的锚页预热，实测净亏，常量已置 0（见 OPEN_WARMUP_BLOCKS 注释的 A/B 数据）。
                         warmupBlocks = OPEN_WARMUP_BLOCKS,
                     )
                     Logger.w(logTag, "DISK-HIT shape t=${platformNowMs() - sp}ms shapedPages=${product.slices.count { it.firstLine >= 0 }} blocks=[${product.slices[startPage].blockStart},${product.slices[startPage].blockEndExclusive}) target=$startPage")
@@ -3945,14 +3944,20 @@ private data class DbgLastPage(val chapter: Int, val charStart: Int, val charEnd
 private const val SEAM_ADJACENT_MAX = 300
 
 /**
- * R20 开书暖机块数：在章首先塑这么多块，再塑锚页。
+ * 开书锚页预热块数。**实测为净亏，保持 0，勿开。**
  *
- * 【未证实，勿当定论】曾推断这里付掉的是 class-load/JIT/字体段落初始化等一次性固定成本，已被数据否证：
- * 同一进程内相隔 0.7s 的两次开书，暖机代码路径与块数完全相同，耗时却差 11 倍
- * （Rust 书 ch4 warm(3 块)=346~419ms vs ch0 warm(3 块)=30~37ms）。那 350ms 是 ch4 前 3 块
- * （章标题 h1 + 首段）自身的真实排版开销。预热是否真的让锚页变快，尚未做过 warmB=0 的冷开书 A/B。
- * 设为 0 即完全关闭。
+ * A/B（Rust 书，同一锚页 ch7 page15 / blocks[125,130) / 5 块，各 3 次冷开书，R26 vs R27）：
+ *   warmB=0：openT 1297ms 均，锚页 shape 584ms 均，锚页真排版 sStyles+sSkia 85ms
+ *   warmB=3：openT 1347ms 均，锚页 shape 262ms 均 + warm 367ms = 629ms，真排版 45ms
+ * 预热确实暖到了东西——锚页 Skia 断行 85ms → 45ms——但代价是 3 块 367ms，
+ * 而锚页 5 块才 262ms。净 +45ms，端到端 +50ms。
+ *
+ * 曾把这笔当"class-load/JIT/字体初始化的一次性固定成本"，也已否证：同进程内同代码同块数，
+ * ch7 warm(3 块)=366ms 而 ch0 只 30~37ms，随内容变 11 倍，不是固定成本。
+ *
+ * 代码路径保留（默认 0 即完全短路），若日后要试"更便宜的暖机"（例如只暖 1 块，
+ * 或换更便宜的块）从这里下手，别直接开 3。
  */
-private const val OPEN_WARMUP_BLOCKS = 3
+private const val OPEN_WARMUP_BLOCKS = 0
 
 private var dbgLastPage: DbgLastPage = DbgLastPage(-1, -1, -1)

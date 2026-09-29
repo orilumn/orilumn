@@ -121,11 +121,15 @@ class OpenBookPreflightProbeTest {
         assertNull(b.unitAt(1)?.markup)
         assertEquals("ch1 has no table bound yet", null, b.unitAt(1)?.paginationTable)
 
-        // Default target with no progress → ch0; prewarm ch0 (explicit) warm the disk-hit path too.
-        // First: default path covers "saved position / fallback ch0".
+        // Default target with no progress → ch0, which open owns: prewarm MUST skip the landing
+        // chapter (open shapes it synchronously, exactly once — a background twin would be pure
+        // duplication + contention on the critical path). Prove the skip by fully preparing ch1
+        // explicitly first: if the default call had targeted ch0, its parse would have finished
+        // long before ch1's full prepare completes.
         b.prewarmForOpen()
-        awaitMarkup(b, 0)
-        assertNull("ch0 has no disk table → parse only", b.unitAt(0)?.paginationTable)
+        b.prewarmForOpen(chapter = 1, targetChar = 0)
+        awaitPrepared(b, 1)
+        assertNull("landing chapter ch0 must not be parsed by prewarm", b.unitAt(0)?.markup)
 
         // Now the disk-hit pre-shape: target the persisted chapter.
         b.prewarmForOpen(chapter = 1, targetChar = 0)

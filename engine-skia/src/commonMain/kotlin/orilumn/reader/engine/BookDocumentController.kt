@@ -390,6 +390,10 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
             startChar = char.coerceAtLeast(0)
             Logger.w(logTag, "open: restore -> startCh=$startChapter char=$startChar ${ctx(startChapter)}")
         }
+        // The landing chapter is owned by open (locateStart shapes it synchronously, exactly once):
+        // background passes (prewarm/B2/preflight) must not duplicate it. Setting this here (it was
+        // previously only set on relayout paths) arms their guards from the first screen on.
+        activeChapter = startChapter.coerceIn(0, (chapterCount - 1).coerceAtLeast(0))
         // R18: open dispatches B2 with no quiet gate — the open-dispatched pass must start
         // promptly; the first flip cancels it outright if the reader reads immediately
         // (abandon ≤1 block). P2.6: there is no `lastFlipMs` to skip-stamp (notifyFlip cancels
@@ -2702,11 +2706,17 @@ private fun finishCanonicalBackground(
         scheduler.cancelLowerThan(TaskScheduler.PRIO_B2_CHAPTER)
     }
 
-    /** P5 (track P): prewarm a book open so the reader's FIRST screen only pays window/anchor shaping.
+    /** P5 (track P): prewarm a book open with the NON-landing chapters, so early flips out of the
+     *  landing chapter find parsed markup + light structure waiting.
      *  Parses [chapter]'s markup + light structure (idempotent; records [preflightReadiness] like P4)
      *  and — when the disk table for the CURRENT params already exists — binds it and pre-shapes the
      *  page range around [targetChar], promoting the table directly. Never shapes without a table.
-     *  Defaults to the open point's saved position (`startChapter`/`startChar`; no progress → chapter 0).
+     *  Defaults to the open point's saved position (`startChapter`/`startChar`; no progress → chapter 0),
+     *  which [open] then skips (see below).
+     *
+     *  The LANDING chapter is always skipped ([activeChapter], set by [open]): open shapes it
+     *  synchronously exactly once, so any background twin would be pure duplication + CPU contention
+     *  on the critical path. Prewarm only ever serves non-landing chapters.
      *
      *  The bookshelf layer taps a book and calls this before the reader opens; switching books abandons
      *  the old book's prewarm because each book owns its controller (single per-book slot). Later

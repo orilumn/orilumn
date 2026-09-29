@@ -46,6 +46,7 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+            isDebuggable = true // TEMP-LOCAL, DO NOT COMMIT
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",

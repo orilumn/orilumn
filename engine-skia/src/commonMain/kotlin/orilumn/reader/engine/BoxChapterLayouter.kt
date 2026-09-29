@@ -184,20 +184,23 @@ class BoxChapterLayouter(
     }
 
     /**
-     * P3-c: 章节生成内容查找装配（重/轻/桌面同式）。
+     * P3-c: 章节生成内容 phase-1 单源（轻/重两路同式，勿各写一份）。
      *
      * gating（[GeneratedContent.needsPhase]）未命中即 [EmptyGen] 零开销；命中则文档序一遍
-     * 求字符串＋伪样式按需缓存。伪样式基址与祖先链两路同源（整表查表 / 懒级联），输出恒等。
+     * 求字符串＋伪样式按需缓存。伪样式基址两路同源（整表查表 / 懒级联，由 [styleOf] 注入），
+     * 输出恒等。字符串恒有效（轻路进结构缓存可持久化）；伪样式按新鲜级联懒解。
+     *
+     * @return (字符串表, 查找器)：轻路取全对，重启只取查找器。
      */
-    private fun genOfFor(
+    private fun genPhase1(
         markup: MarkupElement,
         sheets: List<orilumn.reader.engine.css.StyleSheet>,
-        styleOf: (MarkupElement) -> orilumn.reader.engine.css.ComputedStyle?,
-        engine: StyleComputer,
         hidden: orilumn.reader.engine.laying.HiddenCheck,
-    ): orilumn.reader.engine.laying.GenOf {
+        engine: StyleComputer,
+        styleOf: (MarkupElement) -> orilumn.reader.engine.css.ComputedStyle?,
+    ): Pair<Map<MarkupElement, Pair<String?, String?>>, orilumn.reader.engine.laying.GenOf> {
         if (!orilumn.reader.engine.laying.GeneratedContent.needsPhase(sheets)) {
-            return orilumn.reader.engine.laying.EmptyGen
+            return emptyMap<MarkupElement, Pair<String?, String?>>() to orilumn.reader.engine.laying.EmptyGen
         }
         val pseudoCache = HashMap<Pair<MarkupElement, String>, orilumn.reader.engine.css.ComputedStyle?>()
         val pseudoOf: (MarkupElement, String) -> orilumn.reader.engine.css.ComputedStyle? = { el, p ->
@@ -207,8 +210,20 @@ class BoxChapterLayouter(
             }
         }
         val strings = orilumn.reader.engine.laying.GeneratedContent.resolveStrings(markup, styleOf, pseudoOf, hidden::isHidden)
-        return orilumn.reader.engine.laying.GeneratedContent.genOf(strings, pseudoOf)
+        return strings to orilumn.reader.engine.laying.GeneratedContent.genOf(strings, pseudoOf)
     }
+
+    /**
+     * P3-c: 章节生成内容查找装配（重/轻/桌面同式，体现在 [genPhase1] 单源）。
+     */
+    private fun genOfFor(
+        markup: MarkupElement,
+        sheets: List<orilumn.reader.engine.css.StyleSheet>,
+        styleOf: (MarkupElement) -> orilumn.reader.engine.css.ComputedStyle?,
+        engine: StyleComputer,
+        hidden: orilumn.reader.engine.laying.HiddenCheck,
+    ): orilumn.reader.engine.laying.GenOf =
+        genPhase1(markup, sheets, hidden, engine, styleOf).second
 
     /**
      * Cheap ("light") full-chapter pass: cascade + box **tree** (leaf ordering / styles / width), but
@@ -356,24 +371,11 @@ class BoxChapterLayouter(
         )
         // P1-2: 字符起点按样式化归一长度累计（与重路径盒 textLength 同式）。
         // P3-c: 生成内容 phase-1（解析表门控命中才整树求值；字符串进结构缓存恒有效，
-        // 伪样式各 prepare 按新鲜级联懒解）。
-        val liteGenOf = if (orilumn.reader.engine.laying.GeneratedContent.needsPhase(structure.parsedAuthorSheets ?: emptyList())) {
-            val pseudoCache = HashMap<Pair<MarkupElement, String>, orilumn.reader.engine.css.ComputedStyle?>()
-            val litePseudoOf: (MarkupElement, String) -> orilumn.reader.engine.css.ComputedStyle? = { el, p ->
-                pseudoCache.getOrPut(el to p) {
-                    engine.pseudoStyle(el, orilumn.reader.engine.laying.ancestorsOf(el), engine.resolve(el, styleCache), p)
-                }
-            }
-            val liteStrings = orilumn.reader.engine.laying.GeneratedContent.resolveStrings(
-                markup, { e -> engine.resolve(e, styleCache) }, litePseudoOf,
-                hidden::isHidden,
-            )
-            structure.genStrings = liteStrings
-            orilumn.reader.engine.laying.GeneratedContent.genOf(liteStrings, litePseudoOf)
-        } else {
-            structure.genStrings = emptyMap()
-            orilumn.reader.engine.laying.EmptyGen
-        }
+        // 伪样式各 prepare 按新鲜级联懒解）。与重路径同式，见 [genPhase1] 单源。
+        val (liteStrings, liteGenOf) = genPhase1(
+            markup, structure.parsedAuthorSheets ?: emptyList(), hidden, engine,
+        ) { e -> engine.resolve(e, styleCache) }
+        structure.genStrings = liteStrings
         val starts = orilumn.reader.engine.laying.NormalFlowLayout.accumulateCharStarts(
             leaves.map { orilumn.reader.engine.laying.NormalFlowLayout.styledCharAdvance(it, { e -> engine.resolve(e, styleCache) }, classify, hidden, liteGenOf) },
         )

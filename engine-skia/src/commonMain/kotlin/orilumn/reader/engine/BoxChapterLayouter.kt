@@ -910,6 +910,16 @@ class BoxChapterLayouter(
             probe.leftMs += s2
             probe.textLenMs += s3
         }
+        // R26：同一窗口顺带装渲染层的级联探针，把 stylesMs 拆到选择器匹配/建样式那两笔里。
+        // 塑形全程在 layoutMutex 内单线程串行，挂在 common 的全局对象上这段时间内不会有旁路调用；
+        // 窗口结束立刻恢复原 sink，嵌套调用（rebuildLocalLines 的回看 lambda）自动记进同一笔。
+        val outerCascadeSink = orilumn.reader.engine.css.CascadeProbe.sink
+        orilumn.reader.engine.css.CascadeProbe.sink = { m, p, b, s, _ ->
+            probe.cascadeMatchMs += m
+            probe.inlineParseMs += p
+            probe.styleBuildMs += b
+            probe.secondPassMs += s
+        }
         val tShape0 = orilumn.reader.time.platformNowMs()
         val localShapes = (blockLo until blockHi).map {
             if (cache?.get(it) == null && prefillL2?.get(it) != null) l2hits++
@@ -920,6 +930,7 @@ class BoxChapterLayouter(
         probe.blockFirstMs = prepare.firstBlockMs
         prepare.blockTimingSink = outerSink
         prepare.firstBlockMs = outerFirst
+        orilumn.reader.engine.css.CascadeProbe.sink = outerCascadeSink
         // (l2hits counted above; reported in the asm breakdown below.)
 
         // 4. Build merged local FlowedLine stream covering all shaped blocks (P6-a2 R6 前视 carry-in).
@@ -1057,6 +1068,7 @@ class BoxChapterLayouter(
             "sStyles=${probe.stylesMs}ms sSkia=${probe.skiaMs}ms " +
             "sBlk=${probe.blockMs}ms sBlkF=${probe.blockFirstMs}ms sAdv=${probe.advanceMs}ms " +
             "sBsty=${probe.styleForMs}ms sBWid=${probe.widthMs}ms sBLft=${probe.leftMs}ms sBTxt=${probe.textLenMs}ms " +
+            "cMatch=${probe.cascadeMatchMs}ms cParse=${probe.inlineParseMs}ms cBuild=${probe.styleBuildMs}ms c2nd=${probe.secondPassMs}ms " +
             "sBlocks=${probe.blocks} sEls=${probe.elements} sDepth=${probe.maxDepth} " +
             "warm=${tWarm1 - tWarm0}ms warmB=$warmBlocks " +
             "linesN=${localLines.size} pagesN=${table.pages.size} " +
@@ -1637,6 +1649,13 @@ class BoxChapterLayouter(
         var blocks = 0
         var elements = 0
         var maxDepth = 0
+
+        // R26：把 `stylesMs` 拆到渲染层内部（选择器匹配 / 内联属性解析 / 建 ComputedStyle /
+        // 通用字体兜底的第二次级联）。数据来自 common 的 `CascadeProbe`，由本窗口装 sink 收集。
+        var cascadeMatchMs = 0L
+        var inlineParseMs = 0L
+        var styleBuildMs = 0L
+        var secondPassMs = 0L
     }
 
     private var shapeProbe: ShapeProbe? = null

@@ -179,12 +179,49 @@ Rust ch7 = 169 个叶子的级联，实测 **275ms**，`sBlkF≈sBlk` 证明只�
 故随 `leaves`/`globalCharStarts` 一起持久化（codec `VERSION` 2→3、`STRUCTURE_VERSION` 1→2，
 旧 bin 解码失败自动重算，日志里 17 条 `decode null (version)` 即一次性自愈）。
 
-### 3b.3 剩下的（下一刀）
+### 3b.3 `sStyles` 那 1.1ms/元素：不是选择器慢，是"建对象"慢
 
-锚页 `shape=260ms` 现已完全归因：`sStyles` 155ms（134 个元素的 CSS 级联，≈1.1ms/元素）+
-`sSkia` 84ms（Skia 断行）+ `sBlk` 22ms。**`sStyles` 已是最大一笔，且属渲染层样式级联**——
-按 AGENTS.md 的层级约束，动它要先说清跨层理由。另有 `DISK-HIT shape=431ms` 里约 170ms
-在 `asm shape` 窗口之外（prepareLight/结构缓存/表载入），未拆。
+把探针伸进渲染层（`common` 的 `CascadeProbe`，四笔：选择器匹配 / 内联属性解析 /
+建 `ComputedStyle` / 通用字体兜底的二次级联）。锚页 ch7 page14 / 10 块 / 108 元素，3 次：
+
+| | 值 | 占比 |
+| --- | --- | --- |
+| `sStyles`（级联总账） | 109 / 111 / 115ms | |
+| ├ `cBuild` 建 `ComputedStyle` | 78 / 93 / 89ms | **~75%** |
+| ├ `cMatch` 选择器匹配 | 44 / 39 / 41ms | ~35% |
+| ├ `cParse` 内联 `style=""` 解析 | 1 / 0 / 0ms | ~0 |
+| └ `c2nd` 字体兜底二次级联 | **0ms** | 0 |
+
+（`cMatch+cBuild` 略大于 `sStyles`：它覆盖整个 shape 窗口内**所有** `resolve`，
+含 `block(i)` 的 `blockStyleFor`（`sBsty=22ms`），不只 `inlineStyles` 一家。）
+
+**"1.1ms 花在选择器匹配"这个假设不成立。** 大头是 `computeStyle`：153 行代码，
+`ComputedStyle` 有 **72 个字段**，逐字段各自解析长度/颜色/字体栈/间距——
+87ms ÷ 108 元素 ≈ **0.8ms/元素**，就是构造一个 72 字段的值对象。
+书里只有 1 个样式表、几十条选择器，匹配本身只占约 1/3。
+
+顺带证实两件事：`c2nd=0` 说明"通用字体名兜底把级联重跑一遍"那条路径**完全不触发**
+（Rust 书 CSS 仅 1 个表、3 条 `font-family`，全是带名字的栈，无裸通用名）；
+`cParse≈0` 说明该书没有内联 `style` 属性。
+
+### 3b.4 两次错判的订正
+
+**① `openT` 964ms → 715ms 不是收益。** R32 只加探针、没改任何行为，理论上只会变慢；
+且那三次开书的续读位置自己漂了一页（page15 / 5 块 → page14 / 10 块，**工作量更大却更快**）。
+这 250ms 归因不了，大概率是设备状态与连续冷开次数的方差。**不得计入任何收益账。**
+可比的锚点数据只有 §3b 表格里的三项（`DISK-HIT shape` / 锚页 `shape` / `sBlk`）。
+
+**② 探针的保真度瑕疵（已知，未修）。** `CascadeProbe.sink` 是全局可变量，挂在 shape 窗口上。
+塑形全程在 `layoutMutex` 内单线程串行（既有代码的断言），但若真有第二个 layouter 实例
+同时 `resolve`，它的时间会**混进本笔账**——不崩，只是数不准。要长期使用需按线程隔离。
+
+### 3b.5 剩下的（下一刀）
+
+锚页 `shape` 现已完全归因到叶子：`cBuild`（≈0.8ms/元素 × 元素数）+
+`cMatch` + `cParse≈0` + `c2nd=0` = `sStyles`，加 `sSkia` + `sBlk` = `shape`。
+下一刀的真选项是 `computeStyle` 内部——72 个字段里很多共用同一批字符串，
+怀疑肉在**重复解析**。属渲染层自己的活，不跨层（层级表里"样式层叠"本就是渲染层职责）。
+另有 `DISK-HIT shape` 里约 170ms 在 `asm shape` 窗口之外（prepareLight/结构缓存/表载入），未拆。
 
 ## 4. 未决项
 

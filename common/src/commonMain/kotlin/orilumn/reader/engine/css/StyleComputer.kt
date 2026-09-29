@@ -110,9 +110,20 @@ class StyleComputer(
     }
 
     private fun computeOne(el: MarkupElement, ancestors: List<MarkupElement>, parent: ComputedStyle): ComputedStyle {
+        // R26 诊断：见 CascadeProbe。probe 非 null 时把本函数拆成
+        // 「内联属性解析 / 首次级联+建样式 / 通用字体兜底的第二次级联」三笔。
+        // 关闭时只多一次静态读。
+        val probe = CascadeProbe.sink
+        var parseMs = 0L
+        var buildMs = 0L
+        var secondPassMs = 0L
+        val tP = if (probe != null) orilumn.reader.time.platformNowMs() else 0L
         val inline = cascade.parseInline(el.attrs["style"])
+        if (probe != null) parseMs = orilumn.reader.time.platformNowMs() - tP
         val winners = cascade.winningDeclarations(el, ancestors, inline)
+        val tB = if (probe != null) orilumn.reader.time.platformNowMs() else 0L
         val style = computeStyle(winners, parent, el.tag)
+        if (probe != null) buildMs = orilumn.reader.time.platformNowMs() - tB
         // 读者层裸通用名兜底合并：主题预设（serif/sans-serif）只能缀在书栈后面做最终回退，
         // 不能替换——否则书里点名的导入字体（池中有）在主题模式下永远够不着（传统变黑体）。
         // 具名槽（用户显式选择）照旧全覆盖；书未声明时作者值为空，无事发生。合并后重算一次，
@@ -123,13 +134,20 @@ class StyleComputer(
                 ?.let { parseFontFamilyList(it) }.orEmpty()
                 .filter { it.isNotBlank() && !it.equals(fams[0], ignoreCase = true) }
             if (author.isNotEmpty()) {
-                return computeStyle(
+                val tS = if (probe != null) orilumn.reader.time.platformNowMs() else 0L
+                val merged = computeStyle(
                     winners + ("font-family" to (author + fams[0]).joinToString(",")),
                     parent,
                     el.tag,
                 )
+                if (probe != null) {
+                    secondPassMs = orilumn.reader.time.platformNowMs() - tS
+                    CascadeProbe.hit(0L, parseMs, buildMs, secondPassMs)
+                }
+                return merged
             }
         }
+        if (probe != null) CascadeProbe.hit(0L, parseMs, buildMs, secondPassMs)
         return style
     }
 

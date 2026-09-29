@@ -24,10 +24,10 @@ class ChapterStructurePersistenceTest {
     private fun sample() = PersistedChapterStructure(
         chapterIndex = 58,
         cssHash = 0xabcdefL,
-        leafPaths = listOf(intArrayOf(0, 1), intArrayOf(0, 3, 2), intArrayOf(2)),
+        leafRefs = listOf(LeafRef(intArrayOf(0, 1), null), LeafRef(intArrayOf(0, 3, 2), null), LeafRef(intArrayOf(2), null)),
         charStarts = longArrayOf(0L, 406L, 1167L),
-        bgOwners = mapOf(1 to intArrayOf(0)),
-        avoidOwners = mapOf(2 to intArrayOf(2, 0)),
+        bgOwners = mapOf(1 to LeafRef(intArrayOf(0), null)),
+        avoidOwners = mapOf(2 to LeafRef(intArrayOf(2, 0), null)),
         genStrings = mapOf(0 to ("«" to null), 2 to (null to "»")),
     )
 
@@ -38,11 +38,11 @@ class ChapterStructurePersistenceTest {
         val p = read!!
         assertEquals(58, p.chapterIndex)
         assertEquals(0xabcdefL, p.cssHash)
-        assertEquals(3, p.leafPaths.size)
-        assertArrayEquals(intArrayOf(0, 3, 2), p.leafPaths[1])
+        assertEquals(3, p.leafRefs.size)
+        assertArrayEquals(intArrayOf(0, 3, 2), p.leafRefs[1].path)
         assertArrayEquals(longArrayOf(0L, 406L, 1167L), p.charStarts)
-        assertArrayEquals(intArrayOf(0), p.bgOwners[1])
-        assertArrayEquals(intArrayOf(2, 0), p.avoidOwners[2])
+        assertArrayEquals(intArrayOf(0), p.bgOwners[1]!!.path)
+        assertArrayEquals(intArrayOf(2, 0), p.avoidOwners[2]!!.path)
         assertEquals("«" to null, p.genStrings[0])
         assertEquals(null to "»", p.genStrings[2])
     }
@@ -88,7 +88,7 @@ class ChapterStructurePersistenceTest {
         assertEquals(listOf(11L), read!!.sheetHashes)
         assertEquals(listOf("ch.html"), read.baseHrefs)
         assertEquals("hi", read.tree.children[0].children[0].text)
-        assertEquals(3, read.structure.leafPaths.size)
+        assertEquals(3, read.structure.leafRefs.size)
         // Same-name overwrite (stale content can never accumulate).
         s.writeChapter("book_33", file.copy(cssHash = 1L, structure = sample().copy(cssHash = 1L)))
         assertEquals(1L, s.readChapter("book_33", 58)!!.cssHash)

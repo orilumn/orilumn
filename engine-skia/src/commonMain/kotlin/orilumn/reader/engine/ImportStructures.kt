@@ -89,7 +89,7 @@ object ImportStructures {
         return CssBundle(flat.map { it.second }, flat.map { it.first })
     }
 
-    data class BuildStats(val chapters: Int, val persisted: Int, val skippedMedia: Int, val failed: Int)
+    data class BuildStats(val chapters: Int, val persisted: Int, val skippedMedia: Int, val failed: Int, val firstError: String? = null)
 
     /**
      * Persists one chapter's import/open artifact: post-process tree + deduped sheet refs +
@@ -142,6 +142,7 @@ object ImportStructures {
         var persisted = 0
         var skippedMedia = 0
         var failed = 0
+        var firstError: String? = null
         spineHrefs.forEachIndexed { index, href ->
             try {
                 onChapter?.invoke(index)
@@ -160,10 +161,11 @@ object ImportStructures {
                 layouter.prepareLight(tree, bundle, IMPORT_PROFILE, 1600, cache, 2400)
                 if (persistChapter(store, bookNamespace, index, tree, bundle, cache)) persisted++
                 else failed++
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                if (firstError == null) firstError = "ch=$index ${e::class.simpleName}: ${e.message}"
                 failed++
             }
         }
-        return BuildStats(spineHrefs.size, persisted, skippedMedia, failed)
+        return BuildStats(spineHrefs.size, persisted, skippedMedia, failed, firstError)
     }
 }

@@ -528,7 +528,7 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
         }
         unit.cssBundle = CssBundle(texts, file.baseHrefs)
         unit.ensureMarkup(file.tree, chapterTitle(file.tree))
-        Logger.w(logTag, "open: ch=${unit.chapterIndex} chapter loaded from persist leaves=${file.structure.leafPaths.size}")
+        Logger.w(logTag, "open: ch=${unit.chapterIndex} chapter loaded from persist leaves=${file.structure.leafRefs.size}")
         return file.tree
     }
 

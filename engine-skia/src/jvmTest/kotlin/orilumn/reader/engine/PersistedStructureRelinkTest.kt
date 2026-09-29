@@ -118,7 +118,7 @@ class PersistedStructureRelinkTest {
         val payload = ChapterStructurePersist.extract(7, cssHash, tree, cache) ?: error("extract")
         val out = ChapterStructureCache()
         assertFalse(ChapterStructurePersist.apply(tree, payload, cssHash + 1, out)) // css changed
-        val tampered = payload.copy(leafPaths = payload.leafPaths + intArrayOf(9999))
+        val tampered = payload.copy(leafRefs = payload.leafRefs + LeafRef(intArrayOf(9999), null))
         // Count mismatch vs starts → reject.
         assertFalse(ChapterStructurePersist.apply(tree, tampered, cssHash, ChapterStructureCache()))
     }
@@ -146,6 +146,41 @@ class PersistedStructureRelinkTest {
         assertEquals(a.totalBlocks, b.totalBlocks)
         assertEquals(a.totalChars, b.totalChars)
         assertArrayEquals(a.globalCharStarts, b.globalCharStarts)
+    }
+
+    @Test
+    fun `synthetic anonymous leaves round-trip through file`() {
+        // Mixed inline/block content forces flowChildren synthetics (detached by design):
+        // extract must reference them by owner+text, relink must recreate them verbatim.
+        // (The span must itself be block-level, as in real books' .chapter_num{display:block}.)
+        val html = """
+            <!DOCTYPE html><html><head><style>.chapter_num{display:block;}</style></head><body>
+            <h2><span class="chapter_num">第五十七章</span> 三分</h2>
+            <p>正文段落。</p>
+            </body></html>
+        """.trimIndent()
+        val parsed = converter.convertWithStyles(html) ?: error("parse failed")
+        val bundle = ImportStructures.collectChapterCssTexts(EmptyReader, "ch.html", parsed, null)
+        val tree = ChapterPreprocessor.preprocess(parsed.tree, emptyList())
+        val profile = profileOf(46f, "屏显臻宋", true)
+        val cache = ChapterStructureCache()
+        layouter.prepareLight(tree, bundle, profile, 1600, cache, 2400)
+        val cssHash = ChapterStructureCodec.cssHashOf(bundle.cssTexts)
+        val payload = ChapterStructurePersist.extract(3, cssHash, tree, cache) ?: error("extract")
+        assertTrue("mixed content must yield a synthetic leaf", payload.leafRefs.any { it.syntheticText != null })
+        val file = PersistedChapterFile(3, cssHash, emptyList(), emptyList(), tree, payload)
+        val read = ChapterStructureCodec.decodeFile(ChapterStructureCodec.encodeFile(file)) ?: error("file codec")
+        // Fresh re-parse (simulates open): relink must reproduce every leaf's text in order.
+        val parsed2 = converter.convertWithStyles(html) ?: error("re-parse failed")
+        val tree2 = ChapterPreprocessor.preprocess(parsed2.tree, emptyList())
+        val relinked = ChapterStructureCache()
+        assertTrue(ChapterStructurePersist.apply(tree2, read.structure, read.cssHash, relinked))
+        assertEquals(cache.leaves.size, relinked.leaves.size)
+        assertArrayEquals(cache.globalCharStarts, relinked.globalCharStarts)
+        cache.leaves.forEachIndexed { i, leaf ->
+            assertEquals(leaf.text, relinked.leaves[i].text)
+            assertEquals(leaf.tag, relinked.leaves[i].tag)
+        }
     }
 
     @Test

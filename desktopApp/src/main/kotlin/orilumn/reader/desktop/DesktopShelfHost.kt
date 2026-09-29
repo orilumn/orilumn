@@ -60,10 +60,13 @@ class DesktopShelfHost(
                     val s = ChapterStructureStore(
                         okio.FileSystem.SYSTEM, DesktopPaths.cacheDir.absolutePath.toPath(),
                     )
-                    ImportStructures.buildAllChapterStructures(
+                    val stats = ImportStructures.buildAllChapterStructures(
                         reader, scanned.spineHrefs, s, "book_${entry.id}",
                     )
+                    orilumn.reader.io.Logger.w("Orilumn.Import", "structure prebuilt book=${entry.id} $stats")
                 }
+            }.onFailure {
+                orilumn.reader.io.Logger.w("Orilumn.Import", "structure prebuild FAIL book=${entry.id} ${it.message}")
             }
         }
         // 封面：解码门控（确认字节可解）后原样缓存，失败不影响导入。

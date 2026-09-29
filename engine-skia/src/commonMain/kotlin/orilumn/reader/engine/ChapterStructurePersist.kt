@@ -113,23 +113,23 @@ object ChapterStructurePersist {
         structure: ChapterStructureCache,
     ): PersistedChapterStructure? {
         assignParents(root)
-        val leafPaths = ArrayList<IntArray>(structure.leaves.size)
+        val leafRefs = ArrayList<LeafRef>(structure.leaves.size)
         val leafIndex = HashMap<MarkupElement, Int>(structure.leaves.size * 2)
         structure.leaves.forEachIndexed { i, leaf ->
             leafIndex[leaf] = i
-            leafPaths.add(nodePath(root, leaf) ?: return null)
+            leafRefs.add(refOf(root, leaf) ?: return null)
         }
         if (structure.globalCharStarts.size != structure.leaves.size) return null
-        fun ownerPaths(src: Map<MarkupElement, MarkupElement>): Map<Int, IntArray>? {
-            val out = HashMap<Int, IntArray>(src.size)
+        fun ownerRefs(src: Map<MarkupElement, MarkupElement>): Map<Int, LeafRef>? {
+            val out = HashMap<Int, LeafRef>(src.size)
             for ((leaf, owner) in src) {
                 val i = leafIndex[leaf] ?: return null
-                out[i] = nodePath(root, owner) ?: return null
+                out[i] = refOf(root, owner) ?: return null
             }
             return out
         }
-        val bg = ownerPaths(structure.leafToBackgroundOwner) ?: return null
-        val avoid = ownerPaths(structure.leafToBreakInsideAvoidOwner) ?: return null
+        val bg = ownerRefs(structure.leafToBackgroundOwner) ?: return null
+        val avoid = ownerRefs(structure.leafToBreakInsideAvoidOwner) ?: return null
         val gen = HashMap<Int, Pair<String?, String?>>(structure.genStrings.size)
         for ((leaf, pair) in structure.genStrings) {
             val i = leafIndex[leaf] ?: return null
@@ -138,12 +138,32 @@ object ChapterStructurePersist {
         return PersistedChapterStructure(
             chapterIndex = chapterIndex,
             cssHash = cssHash,
-            leafPaths = leafPaths,
+            leafRefs = leafRefs,
             charStarts = structure.globalCharStarts.copyOf(),
             bgOwners = bg,
             avoidOwners = avoid,
             genStrings = gen,
         )
+    }
+
+    /**
+     * A leaf's persistable reference: tree members by path; `flowChildren` synthetic anonymous
+     * runs (detached by design — parented but absent from children) by owner path + verbatim text.
+     * Anything else (detached non-text) is unpersistable → null → the caller computes instead.
+     */
+    private fun refOf(root: MarkupElement, node: MarkupElement): LeafRef? {
+        nodePath(root, node)?.let { return LeafRef(it, null) }
+        if (node.tag != "#text") return null
+        val parent = node.parent ?: return null
+        val parentPath = nodePath(root, parent) ?: return null
+        return LeafRef(parentPath, node.text)
+    }
+
+    /** Resolves a [LeafRef] against a freshly parsed tree (synthetics recreated verbatim). */
+    private fun resolveRef(root: MarkupElement, ref: LeafRef): MarkupElement? {
+        val owner = resolvePath(root, ref.path) ?: return null
+        val text = ref.syntheticText ?: return owner
+        return MarkupElement("#text", text = text).also { it.parent = owner }
     }
 
     /**
@@ -158,17 +178,17 @@ object ChapterStructurePersist {
         out: ChapterStructureCache,
     ): Boolean {
         if (payload.cssHash != cssHash) return false
-        if (payload.leafPaths.size != payload.charStarts.size) return false
+        if (payload.leafRefs.size != payload.charStarts.size) return false
         assignParents(root)
-        val leaves = ArrayList<MarkupElement>(payload.leafPaths.size)
-        for (path in payload.leafPaths) {
-            leaves.add(resolvePath(root, path) ?: return false)
+        val leaves = ArrayList<MarkupElement>(payload.leafRefs.size)
+        for (ref in payload.leafRefs) {
+            leaves.add(resolveRef(root, ref) ?: return false)
         }
-        fun ownerMap(src: Map<Int, IntArray>): Map<MarkupElement, MarkupElement>? {
+        fun ownerMap(src: Map<Int, LeafRef>): Map<MarkupElement, MarkupElement>? {
             val result = HashMap<MarkupElement, MarkupElement>(src.size)
-            for ((leafIdx, path) in src) {
+            for ((leafIdx, ref) in src) {
                 if (leafIdx < 0 || leafIdx >= leaves.size) return null
-                result[leaves[leafIdx]] = resolvePath(root, path) ?: return null
+                result[leaves[leafIdx]] = resolveRef(root, ref) ?: return null
             }
             return result
         }

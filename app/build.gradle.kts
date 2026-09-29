@@ -46,6 +46,8 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+            // TEMP-LOCAL-DEBUG (do not commit): run-as/log inspection on the test tablet.
+            isDebuggable = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",

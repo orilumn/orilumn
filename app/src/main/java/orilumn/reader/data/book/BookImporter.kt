@@ -2,7 +2,6 @@ package orilumn.reader.data.book
 
 import android.content.Context
 import android.net.Uri
-import android.util.Log
 import okio.FileSystem
 import okio.Path.Companion.toPath
 import orilumn.reader.data.epub.EpubFormatException
@@ -12,6 +11,7 @@ import orilumn.reader.data.epub.readEpubEntry
 import orilumn.reader.engine.ChapterStructureStore
 import orilumn.reader.engine.ImportStructures
 import orilumn.reader.engine.skia.ImageCodec
+import orilumn.reader.io.Logger
 import java.io.File
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CoroutineScope
@@ -106,9 +106,9 @@ class BookImporter(
                         val stats = ImportStructures.buildAllChapterStructures(
                             reader, parsed.spine.map { it.href }, store, "book_$id",
                         )
-                        Log.w("Orilumn.Import", "structure prebuilt book=$id $stats")
+                        Logger.w("Orilumn.Import", "structure prebuilt book=$id $stats")
                     }
-                }.onFailure { Log.w("Orilumn.Import", "structure prebuild FAIL book=$id ${it.message}") }
+                }.onFailure { Logger.w("Orilumn.Import", "structure prebuild FAIL book=$id ${it.message}") }
             }
             id
         }

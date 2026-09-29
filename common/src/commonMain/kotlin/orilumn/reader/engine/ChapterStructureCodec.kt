@@ -35,7 +35,7 @@ object ChapterStructureCodec {
     private const val MAGIC = 0x43485354 // "CHST"
 
     /** File/layout version. Bump only when these bytes change shape. */
-    private const val VERSION = 1
+    private const val VERSION = 2 // 2: leaves gain synthetic refs (flowChildren anonymous runs)
 
     /**
      * Cascade-semantics version. Bump on ANY change to what the structure means: the converter
@@ -77,20 +77,20 @@ object ChapterStructureCodec {
         buf.writeInt(STRUCTURE_VERSION)
         buf.writeInt(p.chapterIndex)
         buf.writeLong(p.cssHash)
-        buf.writeInt(p.leafPaths.size)
-        for (i in p.leafPaths.indices) {
-            writeInts(buf, p.leafPaths[i])
+        buf.writeInt(p.leafRefs.size)
+        for (i in p.leafRefs.indices) {
+            writeLeafRef(buf, p.leafRefs[i])
             buf.writeLong(p.charStarts[i])
         }
         buf.writeInt(p.bgOwners.size)
-        for ((leafIdx, path) in p.bgOwners) {
+        for ((leafIdx, ref) in p.bgOwners) {
             buf.writeInt(leafIdx)
-            writeInts(buf, path)
+            writeLeafRef(buf, ref)
         }
         buf.writeInt(p.avoidOwners.size)
-        for ((leafIdx, path) in p.avoidOwners) {
+        for ((leafIdx, ref) in p.avoidOwners) {
             buf.writeInt(leafIdx)
-            writeInts(buf, path)
+            writeLeafRef(buf, ref)
         }
         buf.writeInt(p.genStrings.size)
         for ((leafIdx, pair) in p.genStrings) {
@@ -112,10 +112,10 @@ object ChapterStructureCodec {
             val cssHash = buf.readLong()
             val leafCount = buf.readInt()
             if (leafCount < 0 || leafCount > 100_000) return decodeNull("leafCount=$leafCount")
-            val leafPaths = ArrayList<IntArray>(leafCount)
+            val leafRefs = ArrayList<LeafRef>(leafCount)
             val charStarts = LongArray(leafCount)
             repeat(leafCount) { i ->
-                leafPaths.add(readInts(buf) ?: return decodeNull("leafPath"))
+                leafRefs.add(readLeafRef(buf) ?: return decodeNull("leafRef"))
                 charStarts[i] = buf.readLong()
             }
             val bgOwners = readOwnerMap(buf) ?: return decodeNull("bgOwners")
@@ -129,7 +129,7 @@ object ChapterStructureCodec {
                 genStrings[leafIdx] = readNullableString(buf) to readNullableString(buf)
             }
             if (!buf.exhausted()) return decodeNull("trailing-bytes")
-            PersistedChapterStructure(chapterIndex, cssHash, leafPaths, charStarts, bgOwners, avoidOwners, genStrings)
+            PersistedChapterStructure(chapterIndex, cssHash, leafRefs, charStarts, bgOwners, avoidOwners, genStrings)
         } catch (e: Exception) {
             decodeNull("exception ${e.message}")
         }
@@ -146,16 +146,43 @@ object ChapterStructureCodec {
         return IntArray(n) { buf.readInt() }
     }
 
-    private fun readOwnerMap(buf: Buffer): Map<Int, IntArray>? {
+    private fun readOwnerMap(buf: Buffer): Map<Int, LeafRef>? {
         val n = buf.readInt()
         if (n < 0 || n > 100_000) return null
-        val out = HashMap<Int, IntArray>(n)
+        val out = HashMap<Int, LeafRef>(n)
         repeat(n) {
             val leafIdx = buf.readInt()
-            val path = readInts(buf) ?: return null
-            out[leafIdx] = path
+            val ref = readLeafRef(buf) ?: return null
+            out[leafIdx] = ref
         }
         return out
+    }
+
+    /**
+     * A leaf reference: either a tree member ([syntheticText] null, resolved by [path]) or a
+     * `flowChildren` synthetic anonymous run (recreated from the owner [path] + [syntheticText];
+     * downstream only reads tag/text/parent, so recreation is exact).
+     */
+    private fun writeLeafRef(buf: Buffer, ref: LeafRef) {
+        if (ref.syntheticText == null) {
+            buf.writeInt(0)
+            writeInts(buf, ref.path)
+        } else {
+            buf.writeInt(1)
+            writeInts(buf, ref.path)
+            writeUtf(buf, ref.syntheticText, MAX_TEXT_LEN)
+        }
+    }
+
+    private fun readLeafRef(buf: Buffer): LeafRef? {
+        return when (buf.readInt()) {
+            0 -> LeafRef(readInts(buf) ?: return null, null)
+            1 -> {
+                val path = readInts(buf) ?: return null
+                LeafRef(path, readUtf(buf, MAX_TEXT_LEN) ?: return null)
+            }
+            else -> null
+        }
     }
 
     private fun writeNullableString(buf: Buffer, s: String?) {
@@ -339,18 +366,29 @@ object ChapterStructureCodec {
 }
 
 /**
- * Import-built, open-relinked block structure for one chapter. All node references are
- * child-index paths from the chapter root ([leafPaths]); [bgOwners]/[avoidOwners]/[genStrings]
- * key leaves by index into [leafPaths]. Parallel arrays: `charStarts[i]` belongs to `leafPaths[i]`.
+ * Import-built, open-relinked block structure for one chapter. Leaves are [LeafRef]s (tree members
+ * by path, or `flowChildren` synthetic anonymous runs by owner path + text); [bgOwners]/
+ * [avoidOwners]/[genStrings] key leaves by index into [leafRefs]. Parallel arrays:
+ * `charStarts[i]` belongs to `leafRefs[i]`.
  */
 data class PersistedChapterStructure(
     val chapterIndex: Int,
     val cssHash: Long,
-    val leafPaths: List<IntArray>,
+    val leafRefs: List<LeafRef>,
     val charStarts: LongArray,
-    val bgOwners: Map<Int, IntArray>,
-    val avoidOwners: Map<Int, IntArray>,
+    val bgOwners: Map<Int, LeafRef>,
+    val avoidOwners: Map<Int, LeafRef>,
     val genStrings: Map<Int, Pair<String?, String?>>,
+)
+
+/**
+ * Reference to one leaf: a tree member ([syntheticText] null → resolve [path] from the root),
+ * or a synthetic anonymous run produced by `flowChildren` for a container's own inline content
+ * ([path] addresses its owner, [syntheticText] recreates the run verbatim).
+ */
+data class LeafRef(
+    val path: IntArray,
+    val syntheticText: String?,
 )
 
 /**

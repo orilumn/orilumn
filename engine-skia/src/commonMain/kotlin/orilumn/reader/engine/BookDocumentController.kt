@@ -488,43 +488,62 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
         if (unit.markup != null) return unit.markup
         layoutMutex.withLock {
             if (unit.markup == null) {
-                val tree = readChapter(index)
-                if (tree != null) unit.ensureMarkup(tree, chapterTitle(tree))
+                // Import-built file first: tree + CSS + structure with zero epub text IO.
+                // Epub fallback (pre-persist path, media chapters): parse, bind, and let the first
+                // prepareLight converge the file via onStructureComputed.
+                if (loadPersistedChapter(unit) == null) readChapterInto(unit, index)
             }
         }
-        // Import-built structure backfill (open-time gap fill for pre-feature books): relink when
-        // the chapter is media-free and a valid payload exists; anything else computes lazily.
-        if (unit.markup != null) tryRelinkPersistedStructure(unit)
         return unit.markup
     }
 
-    /** Relinks an import-built (or previously saved) structure payload onto this chapter's freshly
-     *  parsed tree. Silent no-op unless everything validates — the cascade recompute is the fallback. */
-    private fun tryRelinkPersistedStructure(unit: ChapterUnit) {
-        if (bookId < 0) return
-        val store = structureStore() ?: return
-        val tree = unit.markup ?: return
-        val texts = unit.cssBundle?.cssTexts ?: return
-        if (ChapterStructurePersist.hasMediaRules(texts)) return
-        val cssHash = ChapterStructureCodec.cssHashOf(texts)
-        val payload = runCatching { store.read("book_$bookId", unit.chapterIndex) }.getOrNull() ?: return
-        if (ChapterStructurePersist.apply(tree, payload, cssHash, unit.structureCache)) {
-            Logger.w(logTag, "open: ch=${unit.chapterIndex} structure relinked leaves=${payload.leafPaths.size}")
-        }
+    /** Epub fallback for [ensureMarkup] (the pre-persist path, unchanged). */
+    private fun readChapterInto(unit: ChapterUnit, index: Int) {
+        val tree = readChapter(index)
+        if (tree != null) unit.ensureMarkup(tree, chapterTitle(tree))
     }
 
-    /** Persists a freshly computed media-free structure (import/open backfill converge here). */
+    /**
+     * Loads one chapter's import-built file: resolves sheet texts through the book's deduped map,
+     * rebuilds the identical `CssBundle`, takes the persisted post-process tree as-is (no XML
+     * re-parse, no preprocess), and relinks the structure onto it. Returns the tree on success,
+     * null when anything is missing or inconsistent (caller falls back to epub).
+     *
+     * Atomicity: `apply` fills `unit.structureCache` only on full success and never touches
+     * `markup`; `cssBundle`/`ensureMarkup` are assigned only after it succeeds — a null return
+     * always leaves the unit pristine for the epub fallback (which asserts first-bind).
+     */
+    private fun loadPersistedChapter(unit: ChapterUnit): MarkupElement? {
+        if (bookId < 0) return null
+        val store = structureStore() ?: return null
+        val ns = "book_$bookId"
+        val file = runCatching { store.readChapter(ns, unit.chapterIndex) }.getOrNull() ?: return null
+        val sheets = runCatching { store.readSheets(ns) }.getOrNull() ?: return null
+        val texts = file.sheetHashes.map { sheets[it] ?: return null }
+        if (texts.size != file.baseHrefs.size) return null
+        if (ChapterStructurePersist.hasMediaRules(texts)) return null
+        if (ChapterStructureCodec.cssHashOf(texts) != file.cssHash) return null
+        if (!ChapterStructurePersist.apply(file.tree, file.structure, file.cssHash, unit.structureCache)) {
+            return null
+        }
+        unit.cssBundle = CssBundle(texts, file.baseHrefs)
+        unit.ensureMarkup(file.tree, chapterTitle(file.tree))
+        Logger.w(logTag, "open: ch=${unit.chapterIndex} chapter loaded from persist leaves=${file.structure.leafPaths.size}")
+        return file.tree
+    }
+
+    /** Persists a freshly computed media-free chapter file (import/open backfill converge in
+     *  `ImportStructures.persistChapter`). Called with the cssHash of the just-computed cascade. */
     private fun saveUnitStructure(unit: ChapterUnit, cssHash: Long) {
         if (bookId < 0) return
         val store = structureStore() ?: return
         val tree = unit.markup ?: return
-        val texts = unit.cssBundle?.cssTexts ?: return
-        if (ChapterStructurePersist.hasMediaRules(texts)) return
-        if (ChapterStructureCodec.cssHashOf(texts) != cssHash) return
-        val payload = ChapterStructurePersist.extract(unit.chapterIndex, cssHash, tree, unit.structureCache)
-            ?: return
-        runCatching { store.write("book_$bookId", payload) }
-            .onFailure { Logger.w(logTag, "structure save FAIL ch=${unit.chapterIndex} ${it.message}") }
+        val bundle = unit.cssBundle ?: return
+        if (ChapterStructureCodec.cssHashOf(bundle.cssTexts) != cssHash) return
+        val ok = runCatching {
+            ImportStructures.persistChapter(store, "book_$bookId", unit.chapterIndex, tree, bundle, unit.structureCache)
+        }.getOrDefault(false)
+        if (!ok) Logger.w(logTag, "structure save SKIP ch=${unit.chapterIndex} (media or inconsistent)")
     }
 
     /** Ensures a chapter is laid out (lazy): on first need, parses the body (ensureMarkup) then

@@ -6,10 +6,12 @@ import orilumn.reader.engine.html.ChapterPreprocessor
 import orilumn.reader.engine.html.HtmlTreeConverter
 import orilumn.reader.engine.html.MarkupElement
 import orilumn.reader.engine.text.TypographicProfile
+import okio.Path.Companion.toPath
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -131,5 +133,65 @@ class PersistedStructureRelinkTest {
         assertTrue(ChapterStructurePersist.hasMediaRules(listOf("@import \"a.css\" screen;")))
         assertTrue(ChapterStructurePersist.hasMediaRules(listOf("@import url(a.css) (max-width:100px);")))
         assertTrue(ChapterStructurePersist.hasMediaRules(listOf("/* @media in comment */p{}")))
+    }
+
+    @Test
+    fun `persisted file loads tree and relinks without epub`() {
+        // Simulates import→open: prepareLight computes, persistChapter writes the full file,
+        // open loads tree + sheets from disk only and relinks — no XML re-parse.
+        val profile = profileOf(46f, "屏显臻宋", true)
+        val (tree0, bundle) = treeAndBundle()
+        val sheets = bundle.cssTexts.map { orilumn.reader.engine.css.LightCssParser().parse(it, null) }
+        val tree = ChapterPreprocessor.preprocess(tree0, sheets)
+        val cache = ChapterStructureCache()
+        layouter.prepareLight(tree, bundle, profile, 1600, cache, 2400)
+        val dir = java.nio.file.Files.createTempDirectory("struct-e2e").toString()
+        val store = ChapterStructureStore(okio.FileSystem.SYSTEM, dir.toPath())
+        assertTrue(ImportStructures.persistChapter(store, "book_9", 3, tree, bundle, cache))
+        // Open side: resolve sheets, rebuild bundle, relink onto the loaded tree.
+        val file = store.readChapter("book_9", 3) ?: error("no file")
+        val sheetMap = store.readSheets("book_9") ?: error("no sheets")
+        val texts = file.sheetHashes.map { sheetMap[it] ?: error("missing sheet") }
+        assertEquals(bundle.cssTexts, texts)
+        assertEquals(bundle.baseHrefs, file.baseHrefs)
+        val relinked = ChapterStructureCache()
+        assertTrue(ChapterStructurePersist.apply(file.tree, file.structure, file.cssHash, relinked))
+        assertEquals(cache.leaves.size, relinked.leaves.size)
+        assertArrayEquals(cache.globalCharStarts, relinked.globalCharStarts)
+        cache.leaves.forEachIndexed { i, leaf ->
+            assertEquals(leaf.text, relinked.leaves[i].text)
+        }
+    }
+
+    private class FakeReader(val chapters: Map<String, String>) : orilumn.reader.data.epub.EpubResourceReader {
+        override fun entries(): Sequence<String> = chapters.keys.asSequence()
+        override fun readText(path: String): String? = chapters[path]
+        override fun readBytes(path: String): ByteArray? = null
+    }
+
+    @Test
+    fun `import job persists media-free chapters and skips media ones`() {
+        val css = "p{color:#111;}"
+        val mediaCss = "@media (max-width:600px){p{color:red;}}"
+        fun ch(body: String, style: String) =
+            "<html><head><style>$style</style></head><body>$body</body></html>"
+        val reader = FakeReader(mapOf(
+            "a.html" to ch("<p>one</p>", css),
+            "b.html" to ch("<p>two</p>", mediaCss),
+            "c.html" to ch("<p>three</p>", css),
+        ))
+        val dir = java.nio.file.Files.createTempDirectory("struct-import").toString()
+        val store = ChapterStructureStore(okio.FileSystem.SYSTEM, dir.toPath())
+        val stats = ImportStructures.buildAllChapterStructures(
+            reader, listOf("a.html", "b.html", "c.html"), store, "book_1",
+        )
+        assertEquals(3, stats.chapters)
+        assertEquals(2, stats.persisted)
+        assertEquals(1, stats.skippedMedia)
+        assertEquals(0, stats.failed)
+        assertNotNull(store.readChapter("book_1", 0))
+        assertNull(store.readChapter("book_1", 1)) // media chapter: no file, runtime path at open
+        assertNotNull(store.readChapter("book_1", 2))
+        assertEquals(1, store.readSheets("book_1")!!.size) // one unique sheet across a/c
     }
 }

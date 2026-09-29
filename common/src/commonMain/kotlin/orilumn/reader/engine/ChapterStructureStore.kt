@@ -29,19 +29,44 @@ class ChapterStructureStore(
     fun file(bookId: String, chapterIndex: Int): Path =
         dirFor(bookId).resolve(ChapterStructureCodec.filename(chapterIndex))
 
-    /** Reads a chapter's persisted structure. Null on miss or any staleness/corruption. */
-    fun read(bookId: String, chapterIndex: Int): PersistedChapterStructure? {
+    fun sheetsFile(bookId: String): Path =
+        dirFor(bookId).resolve(ChapterStructureCodec.SHEETS_FILENAME)
+
+    /** Reads one chapter's import-built file (tree + sheets refs + structure). Null on miss or
+     *  any staleness/corruption (v1 structure-only files included — recomputed on demand). */
+    fun readChapter(bookId: String, chapterIndex: Int): PersistedChapterFile? {
         val f = file(bookId, chapterIndex)
         if (fs.metadataOrNull(f)?.isRegularFile != true) return null
         val bytes = runCatching { fs.read(f) { readByteArray() } }.getOrNull() ?: return null
-        val p = ChapterStructureCodec.decode(bytes) ?: return null
-        if (p.chapterIndex != chapterIndex) return null
-        return p
+        val file = ChapterStructureCodec.decodeFile(bytes) ?: return null
+        if (file.chapterIndex != chapterIndex) return null
+        return file
     }
 
-    fun write(bookId: String, payload: PersistedChapterStructure) {
-        val f = file(bookId, payload.chapterIndex)
+    fun writeChapter(bookId: String, file: PersistedChapterFile) {
+        val f = this.file(bookId, file.chapterIndex)
         runCatching { fs.createDirectories(f.parent ?: return) }
-        runCatching { fs.write(f) { write(ChapterStructureCodec.encode(payload)) } }
+        runCatching { fs.write(f) { write(ChapterStructureCodec.encodeFile(file)) } }
+    }
+
+    /** Reads the book's deduped sheets (hash → flat CSS text). Null on miss/corruption. */
+    fun readSheets(bookId: String): Map<Long, String>? {
+        val f = sheetsFile(bookId)
+        if (fs.metadataOrNull(f)?.isRegularFile != true) return null
+        val bytes = runCatching { fs.read(f) { readByteArray() } }.getOrNull() ?: return null
+        return ChapterStructureCodec.decodeSheets(bytes)
+    }
+
+    fun writeSheets(bookId: String, sheets: Map<Long, String>) {
+        val f = sheetsFile(bookId)
+        runCatching { fs.createDirectories(f.parent ?: return) }
+        runCatching { fs.write(f) { write(ChapterStructureCodec.encodeSheets(sheets)) } }
+    }
+
+    /** Merges sheets into the book's map (import backfill / open-time saves converge here).
+     *  Empty merges still write: the file's presence distinguishes "no sheets" from "never built". */
+    fun mergeSheets(bookId: String, sheets: Map<Long, String>) {
+        val merged = (readSheets(bookId) ?: emptyMap()) + sheets
+        writeSheets(bookId, merged)
     }
 }

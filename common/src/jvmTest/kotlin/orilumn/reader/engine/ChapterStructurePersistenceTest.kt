@@ -3,6 +3,7 @@ package orilumn.reader.engine
 import okio.Buffer
 import okio.FileSystem
 import okio.Path.Companion.toPath
+import orilumn.reader.engine.html.MarkupElement
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -74,18 +75,66 @@ class ChapterStructurePersistenceTest {
     }
 
     @Test
-    fun `store write read overwrite and chapter guard`() {
+    fun `store chapter file round-trips and overwrites in place`() {
         val s = ChapterStructureStore(FileSystem.SYSTEM, tmp.root.absolutePath.toPath())
-        assertNull(s.read("book_33", 58))
-        s.write("book_33", sample())
-        assertNotNull(s.read("book_33", 58))
+        val tree = MarkupElement("body", children = listOf(
+            MarkupElement("p", children = listOf(MarkupElement("#text", text = "hi"))),
+        ))
+        val file = PersistedChapterFile(58, 0xabcdefL, listOf(11L), listOf("ch.html"), tree, sample())
+        assertNull(s.readChapter("book_33", 58))
+        s.writeChapter("book_33", file)
+        val read = s.readChapter("book_33", 58)
+        assertNotNull(read)
+        assertEquals(listOf(11L), read!!.sheetHashes)
+        assertEquals(listOf("ch.html"), read.baseHrefs)
+        assertEquals("hi", read.tree.children[0].children[0].text)
+        assertEquals(3, read.structure.leafPaths.size)
         // Same-name overwrite (stale content can never accumulate).
-        val v2 = sample().copy(cssHash = 1L)
-        s.write("book_33", v2)
-        assertEquals(1L, s.read("book_33", 58)!!.cssHash)
+        s.writeChapter("book_33", file.copy(cssHash = 1L, structure = sample().copy(cssHash = 1L)))
+        assertEquals(1L, s.readChapter("book_33", 58)!!.cssHash)
         // Chapter-index guard: content smuggled under the wrong filename is rejected.
-        val smuggled = s.file("book_33", 59)
-        FileSystem.SYSTEM.write(smuggled) { write(ChapterStructureCodec.encode(sample())) }
-        assertNull(s.read("book_33", 59))
+        FileSystem.SYSTEM.write(s.file("book_33", 59)) {
+            write(ChapterStructureCodec.encodeFile(file))
+        }
+        assertNull(s.readChapter("book_33", 59))
+    }
+
+    @Test
+    fun `store sheets merge unions without loss`() {
+        val s = ChapterStructureStore(FileSystem.SYSTEM, tmp.root.absolutePath.toPath())
+        assertNull(s.readSheets("book_33"))
+        s.mergeSheets("book_33", mapOf(1L to "p{}"))
+        s.mergeSheets("book_33", mapOf(2L to "h1{}", 1L to "p{}"))
+        assertEquals(mapOf(1L to "p{}", 2L to "h1{}"), s.readSheets("book_33"))
+    }
+
+    @Test
+    fun `file codec round-trips tree with attrs and rejects v1 bytes`() {
+        val tree = MarkupElement(
+            "body", mapOf("class" to "calibre"), listOf(
+                MarkupElement("h2", children = listOf(MarkupElement("#text", text = "第五十七章"))),
+                MarkupElement("p", mapOf("class" to "calibre1", "style" to "color:red"), children = listOf(
+                    MarkupElement("#text", text = "正文 mixed text"),
+                    MarkupElement("br"),
+                    MarkupElement("span", children = listOf(MarkupElement("#text", text = "旁白"))),
+                )),
+            ),
+        )
+        val file = PersistedChapterFile(7, 42L, listOf(1L, 2L), listOf("a", "b"), tree, sample().copy(chapterIndex = 7, cssHash = 42L))
+        val read = ChapterStructureCodec.decodeFile(ChapterStructureCodec.encodeFile(file))
+        assertNotNull(read)
+        assertEquals(42L, read!!.cssHash)
+        assertEquals(listOf(1L, 2L), read.sheetHashes)
+        fun flat(n: MarkupElement, acc: MutableList<String>) {
+            acc.add("${n.tag}|${n.attrs}|${n.text}")
+            n.children.forEach { flat(it, acc) }
+        }
+        val want = ArrayList<String>()
+        val got = ArrayList<String>()
+        flat(tree, want)
+        flat(read.tree, got)
+        assertEquals(want, got)
+        // v1 structure-only bytes are rejected by the file gate (recomputed on demand).
+        assertNull(ChapterStructureCodec.decodeFile(ChapterStructureCodec.encode(sample())))
     }
 }

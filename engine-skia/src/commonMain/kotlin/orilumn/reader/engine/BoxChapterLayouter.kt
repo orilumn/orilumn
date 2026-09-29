@@ -887,7 +887,9 @@ class BoxChapterLayouter(
         // continuously from its predecessor's last line. With matching geometry this reproduces the
         // canonical page boundaries exactly — the shared fill rule makes drift a no-op instead of a bug.
         val slicesWithLine = allSlices.toMutableList()
-        val tPg0 = orilumn.reader.time.platformNowMs()
+        val tPgFind0 = orilumn.reader.time.platformNowMs()
+        var tPgPaginate0 = tPgFind0
+        var tPgPaginate1 = tPgFind0
         if (localLines.isNotEmpty() && startIdx < endIdx) {
             // Anchor the window's first page at the disk table's EXACT first line (the line whose
             // charStart == the table's authoritative charStart), NOT the merely-containing line —
@@ -898,7 +900,9 @@ class BoxChapterLayouter(
             var lo = localLines.indexOfFirst { it.charStart == anchorChar }
             if (lo < 0) lo = localLines.indexOfFirst { it.charStart < anchorChar + 1 && it.charEnd > anchorChar }
             if (lo < 0) lo = 0
+            tPgPaginate0 = orilumn.reader.time.platformNowMs()
             val rePages = Paginator.paginateFrom(drawable, lo, contentH)
+            tPgPaginate1 = orilumn.reader.time.platformNowMs()
             for (i in startIdx until endIdx) {
                 val k = i - startIdx
                 if (k >= rePages.size) break
@@ -929,7 +933,10 @@ class BoxChapterLayouter(
         // R19: assembly segment breakdown (permanent diagnostic) — shape/lines/skia/tbl/box/pg.
         Logger.w("Orilumn.Engine", "asm ch=${table.chapterIndex} page=$targetPage " +
             "shape=${tShape1 - tShape0}ms lines=${tLines1 - tLines0}ms skia=${tSkia1 - tSkia0}ms " +
-            "tbl=${tTbl1 - tTbl0}ms box=${tBox1 - tBox0}ms pg=${tPg1 - tPg0}ms l2hits=$l2hits/${blockHi - blockLo}")
+            "tbl=${tTbl1 - tTbl0}ms box=${tBox1 - tBox0}ms pg=${tPg1 - tPgFind0}ms " +
+            "pgFind=${tPgPaginate0 - tPgFind0}ms pgPaginate=${tPgPaginate1 - tPgPaginate0}ms " +
+            "pgBackfill=${tPg1 - tPgPaginate1}ms linesN=${localLines.size} " +
+            "l2hits=$l2hits/${blockHi - blockLo}")
 
         // Debug: reconcile every shaped (incremental) page's vertical extent with the content capacity,
         // and flag any page whose boundary drifted from the disk table (the page-boundary-source probe).

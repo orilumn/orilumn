@@ -1,0 +1,191 @@
+package orilumn.reader.engine
+
+import orilumn.reader.engine.css.CssBundle
+import orilumn.reader.engine.html.MarkupElement
+
+/**
+ * Import-built chapter structure: extract + relink (open-time), media gating.
+ *
+ * The cascade behind `computeStructure` consumes only author/UA sheets for the properties it
+ * needs (display, white-space, background, break-inside, visibility) — reader theme/UI sheets
+ * never set those — so its output is typography- and viewport-independent EXCEPT for `@media`
+ * (evaluated against the viewport at parse). [hasMediaRules] detects media-affected chapters;
+ * only media-free chapters are persisted (import) and relinked (open). Anything else falls back
+ * to computing at open, exactly as today.
+ *
+ * Node identity crosses the process boundary as child-index paths from the chapter root. Both
+ * sides must walk the same post-[ChapterPreprocessor] tree; every resolution is bounds-checked
+ * and any failure returns false → the caller computes instead. Trust nothing.
+ */
+object ChapterStructurePersist {
+
+    /**
+     * Whether this chapter's CSS can behave differently per viewport: a literal `@media` block,
+     * or an `@import` carrying media conditions. Over-approximates (comments may trip it) — a
+     * false positive only costs one runtime compute, never correctness.
+     */
+    fun hasMediaRules(cssTexts: List<String>): Boolean {
+        for (t in cssTexts) {
+            val low = t.lowercase()
+            if ("@media" in low) return true
+            var i = low.indexOf("@import")
+            while (i >= 0) {
+                if (importHasMedia(low, i + "@import".length)) return true
+                i = low.indexOf("@import", i + 1)
+            }
+        }
+        return false
+    }
+
+    /** After `@import`, a bare `;` following the target means unconditional; anything else is media. */
+    private fun importHasMedia(low: String, from: Int): Boolean {
+        var i = from
+        fun skipWsAndComments(): Boolean {
+            while (i < low.length) {
+                when {
+                    low[i].isWhitespace() -> i++
+                    low.startsWith("/*", i) -> {
+                        val end = low.indexOf("*/", i + 2)
+                        i = if (end < 0) return false else end + 2
+                    }
+                    else -> return true
+                }
+            }
+            return false
+        }
+        if (!skipWsAndComments()) return false
+        // Skip the target: url(...) or a quoted string.
+        if (low.startsWith("url(", i)) {
+            val end = low.indexOf(')', i + 4)
+            if (end < 0) return false
+            i = end + 1
+        } else if (i < low.length && (low[i] == '"' || low[i] == '\'')) {
+            val q = low[i]
+            val end = low.indexOf(q, i + 1)
+            if (end < 0) return false
+            i = end + 1
+        } else {
+            return false // malformed: fail closed (caller falls back to computing)
+        }
+        if (!skipWsAndComments()) return false
+        return i >= low.length || low[i] != ';'
+    }
+
+    /** Assigns parent pointers through the whole tree (idempotent; the converter may not set them). */
+    fun assignParents(root: MarkupElement) {
+        for (child in root.children) {
+            child.parent = root
+            assignParents(child)
+        }
+    }
+
+    /** Child-index path from [root] to [node], or null when [node] isn't under [root]. */
+    fun nodePath(root: MarkupElement, node: MarkupElement): IntArray? {
+        val rev = ArrayList<Int>()
+        var cur: MarkupElement? = node
+        while (cur != null && cur !== root) {
+            val p = cur.parent ?: return null
+            val idx = p.children.indexOf(cur)
+            if (idx < 0) return null
+            rev.add(idx)
+            cur = p
+        }
+        if (cur !== root) return null
+        rev.reverse()
+        return rev.toIntArray()
+    }
+
+    /** Walks [path] from [root]; null on any out-of-bounds step. */
+    fun resolvePath(root: MarkupElement, path: IntArray): MarkupElement? {
+        var cur = root
+        for (idx in path) {
+            if (idx < 0 || idx >= cur.children.size) return null
+            cur = cur.children[idx]
+        }
+        return cur
+    }
+
+    /** Extracts a persistable payload from a freshly computed [structure] (import or first touch). */
+    fun extract(
+        chapterIndex: Int,
+        cssHash: Long,
+        root: MarkupElement,
+        structure: ChapterStructureCache,
+    ): PersistedChapterStructure? {
+        assignParents(root)
+        val leafPaths = ArrayList<IntArray>(structure.leaves.size)
+        val leafIndex = HashMap<MarkupElement, Int>(structure.leaves.size * 2)
+        structure.leaves.forEachIndexed { i, leaf ->
+            leafIndex[leaf] = i
+            leafPaths.add(nodePath(root, leaf) ?: return null)
+        }
+        if (structure.globalCharStarts.size != structure.leaves.size) return null
+        fun ownerPaths(src: Map<MarkupElement, MarkupElement>): Map<Int, IntArray>? {
+            val out = HashMap<Int, IntArray>(src.size)
+            for ((leaf, owner) in src) {
+                val i = leafIndex[leaf] ?: return null
+                out[i] = nodePath(root, owner) ?: return null
+            }
+            return out
+        }
+        val bg = ownerPaths(structure.leafToBackgroundOwner) ?: return null
+        val avoid = ownerPaths(structure.leafToBreakInsideAvoidOwner) ?: return null
+        val gen = HashMap<Int, Pair<String?, String?>>(structure.genStrings.size)
+        for ((leaf, pair) in structure.genStrings) {
+            val i = leafIndex[leaf] ?: return null
+            gen[i] = pair
+        }
+        return PersistedChapterStructure(
+            chapterIndex = chapterIndex,
+            cssHash = cssHash,
+            leafPaths = leafPaths,
+            charStarts = structure.globalCharStarts.copyOf(),
+            bgOwners = bg,
+            avoidOwners = avoid,
+            genStrings = gen,
+        )
+    }
+
+    /**
+     * Relinks [payload] onto a freshly parsed+preprocessed [root], filling [out]. Returns false on
+     * ANY inconsistency (caller computes instead). Sets [ChapterStructureCache.boundMediaFree]
+     * so `prepareLight` skips the cascade while the CSS still matches.
+     */
+    fun apply(
+        root: MarkupElement,
+        payload: PersistedChapterStructure,
+        cssHash: Long,
+        out: ChapterStructureCache,
+    ): Boolean {
+        if (payload.cssHash != cssHash) return false
+        if (payload.leafPaths.size != payload.charStarts.size) return false
+        assignParents(root)
+        val leaves = ArrayList<MarkupElement>(payload.leafPaths.size)
+        for (path in payload.leafPaths) {
+            leaves.add(resolvePath(root, path) ?: return false)
+        }
+        fun ownerMap(src: Map<Int, IntArray>): Map<MarkupElement, MarkupElement>? {
+            val result = HashMap<MarkupElement, MarkupElement>(src.size)
+            for ((leafIdx, path) in src) {
+                if (leafIdx < 0 || leafIdx >= leaves.size) return null
+                result[leaves[leafIdx]] = resolvePath(root, path) ?: return null
+            }
+            return result
+        }
+        val bg = ownerMap(payload.bgOwners) ?: return false
+        val avoid = ownerMap(payload.avoidOwners) ?: return false
+        val gen = HashMap<MarkupElement, Pair<String?, String?>>(payload.genStrings.size)
+        for ((leafIdx, pair) in payload.genStrings) {
+            if (leafIdx < 0 || leafIdx >= leaves.size) return false
+            gen[leaves[leafIdx]] = pair
+        }
+        out.leaves = leaves
+        out.globalCharStarts = payload.charStarts.copyOf()
+        out.leafToBackgroundOwner = bg
+        out.leafToBreakInsideAvoidOwner = avoid
+        out.genStrings = gen
+        out.boundCssHash = cssHash
+        out.loadedMediaFree = true
+        return true
+    }
+}

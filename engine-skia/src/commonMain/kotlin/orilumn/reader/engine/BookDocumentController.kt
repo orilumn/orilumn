@@ -326,6 +326,11 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
     private fun cacheStore(): PaginationCacheStore? =
         cacheRoot?.let { PaginationCacheStore(okio.FileSystem.SYSTEM, it, diskCacheVersion) }
 
+    /** Shared okio chapter-structure store over [cacheRoot] (import-built, open-relinked).
+     *  Null = structure persistence disabled (compute every time, as before). */
+    private fun structureStore(): ChapterStructureStore? =
+        cacheRoot?.let { ChapterStructureStore(okio.FileSystem.SYSTEM, it) }
+
     /** Current book's id, used as the disk-cache namespace. Set by [open]. */
     var bookId: Long = -1L
         private set
@@ -487,7 +492,39 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
                 if (tree != null) unit.ensureMarkup(tree, chapterTitle(tree))
             }
         }
+        // Import-built structure backfill (open-time gap fill for pre-feature books): relink when
+        // the chapter is media-free and a valid payload exists; anything else computes lazily.
+        if (unit.markup != null) tryRelinkPersistedStructure(unit)
         return unit.markup
+    }
+
+    /** Relinks an import-built (or previously saved) structure payload onto this chapter's freshly
+     *  parsed tree. Silent no-op unless everything validates — the cascade recompute is the fallback. */
+    private fun tryRelinkPersistedStructure(unit: ChapterUnit) {
+        if (bookId < 0) return
+        val store = structureStore() ?: return
+        val tree = unit.markup ?: return
+        val texts = unit.cssBundle?.cssTexts ?: return
+        if (ChapterStructurePersist.hasMediaRules(texts)) return
+        val cssHash = ChapterStructureCodec.cssHashOf(texts)
+        val payload = runCatching { store.read("book_$bookId", unit.chapterIndex) }.getOrNull() ?: return
+        if (ChapterStructurePersist.apply(tree, payload, cssHash, unit.structureCache)) {
+            Logger.w(logTag, "open: ch=${unit.chapterIndex} structure relinked leaves=${payload.leafPaths.size}")
+        }
+    }
+
+    /** Persists a freshly computed media-free structure (import/open backfill converge here). */
+    private fun saveUnitStructure(unit: ChapterUnit, cssHash: Long) {
+        if (bookId < 0) return
+        val store = structureStore() ?: return
+        val tree = unit.markup ?: return
+        val texts = unit.cssBundle?.cssTexts ?: return
+        if (ChapterStructurePersist.hasMediaRules(texts)) return
+        if (ChapterStructureCodec.cssHashOf(texts) != cssHash) return
+        val payload = ChapterStructurePersist.extract(unit.chapterIndex, cssHash, tree, unit.structureCache)
+            ?: return
+        runCatching { store.write("book_$bookId", payload) }
+            .onFailure { Logger.w(logTag, "structure save FAIL ch=${unit.chapterIndex} ${it.message}") }
     }
 
     /** Ensures a chapter is laid out (lazy): on first need, parses the body (ensureMarkup) then
@@ -589,7 +626,7 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
         val contentWidth = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
         val contentHeight = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
         val t0 = platformNowMs()
-        val prepare = boxLayouter.prepareLight(unit.markup!!, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight)
+        val prepare = boxLayouter.prepareLight(unit.markup!!, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h -> saveUnitStructure(unit, h) })
         val tPrep = platformNowMs()
         val pagesToShape = 1
         val newProduct = boxLayouter.incrementalLayoutForPage(
@@ -662,7 +699,7 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
                 if (boxLayouter != null) {
                     // Light prepare only (box tree, no shaping) — the table tells us which blocks to shape.
                     val startPage = pageIndexForChar(cached.pages, targetChar)
-                    val prep = boxLayouter.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight)
+                    val prep = boxLayouter.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h -> saveUnitStructure(unit, h) })
                     val sp = platformNowMs()
                     val product = boxLayouter.incrementalLayoutForPage(
                         prepare = prep,
@@ -696,7 +733,7 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
                     // PaginationMode.BLOCK_TEMP: decide large/small via a cheap light prepare (no
                     // shaping). A large chapter's foreground threads only the current page's blocks
                     // through the temp table — never a full-chapter line-level layout.
-                    val light = bc.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight)
+                    val light = bc.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h -> saveUnitStructure(unit, h) })
                     if (light.totalBlocks > SMALL_CHAPTER_BLOCKS) {
                         // anchorChar stays at the user's actual position — startAnchorStream anchors the
                         // temp stream there. A head-proximity lift (anchor to block 0) is designed but
@@ -1763,7 +1800,7 @@ private suspend fun prefillPageTask(chapterIdx: Int, page: Int, anchor: Int, ass
     // 组装用的第二次 prepareLight 与此处同参，一并复用（原代码重复计算）。
     val prepKey = WindowPrepKey(chapterIdx, hash, profileSnap)
     val lp = windowPrepCache?.takeIf { it.first == prepKey }?.second
-        ?: bc.prepareLight(markup, css, profileSnap, cw, u0.structureCache, chh)
+        ?: bc.prepareLight(markup, css, profileSnap, cw, u0.structureCache, chh, onStructureComputed = { h -> saveUnitStructure(u0, h) })
             .also { windowPrepCache = prepKey to it }
     val local = HashMap<Int, ParagraphShapeRef>()
     for (b in lo until rec.blockEndExclusive) {
@@ -2382,7 +2419,7 @@ private fun finishCanonicalBackground(
             val bc = layouter as? BoxChapterLayouter
             if (bc != null) {
                 val paramHash = LayoutParamKey.fromProfile(profile, contentWidth, contentHeight).hash()
-                val light = bc.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight)
+                val light = bc.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h -> saveUnitStructure(unit, h) })
                 val tLight = platformNowMs()
                 if (light.totalBlocks > SMALL_CHAPTER_BLOCKS) {
                     startAnchorStream(unit, anchorChar, light, bc, paramHash, contentWidth, contentHeight, headLift = false)
@@ -2447,7 +2484,7 @@ private fun finishCanonicalBackground(
             val bc = layouter as? BoxChapterLayouter
             if (bc != null) {
                 val paramHash = LayoutParamKey.fromProfile(profile, contentWidth, contentHeight).hash()
-                val light = bc.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight)
+                val light = bc.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h -> saveUnitStructure(unit, h) })
                 val tLight = platformNowMs()
                 if (light.totalBlocks > SMALL_CHAPTER_BLOCKS) {
                     // Large chapter (or any chapter above the threshold): anchor-anchored immediate
@@ -2617,7 +2654,7 @@ private fun finishCanonicalBackground(
                     ensureMarkup(index)
                     val bc = layouter as? BoxChapterLayouter
                     if (bc != null && unit.markup != null) {
-                        bc.prepareLight(unit.markup!!, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight)
+                        bc.prepareLight(unit.markup!!, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h -> saveUnitStructure(unit, h) })
                     }
                     preflightReadiness[index] = paramHash
                 } catch (_: CancellationException) {
@@ -2675,7 +2712,7 @@ private fun finishCanonicalBackground(
                 val contentHeight = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
                 if (contentHeight <= 16) return // viewport not laid out yet — nothing meaningful to warm
                 val paramHash = LayoutParamKey.fromProfile(profile, contentWidth, contentHeight).hash()
-                val prepLight = bc.prepareLight(unit.markup!!, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight)
+                val prepLight = bc.prepareLight(unit.markup!!, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h -> saveUnitStructure(unit, h) })
                 preflightReadiness[index] = paramHash
                 // Disk table ready under the current params → bind + pre-shape the FIRST page window so
                 // the first screen is served without re-parsing/re-paginating (P10 "promote the full
@@ -3070,7 +3107,7 @@ private fun finishCanonicalBackground(
         if (viewW <= 0 || viewH <= 0) return null
         val contentWidth = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
         val contentHeight = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
-        val prepare = bc.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight)
+        val prepare = bc.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h -> saveUnitStructure(unit, h) })
         if (prepare.totalBlocks <= 0) return null
         val idx = prepare.blockIndexForChar(charOffset.coerceAtLeast(0))
         // 同一 prepare 的块表自查：blockIndexForChar 给出的 idx 必在 globalCharStarts 内；
@@ -3112,7 +3149,7 @@ private fun finishCanonicalBackground(
         if (viewW <= 0 || viewH <= 0) return null
         val contentWidth = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
         val contentHeight = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
-        val prepare = bc.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight)
+        val prepare = bc.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h -> saveUnitStructure(unit, h) })
         if (prepare.totalBlocks <= 0) return null
         return prepare.anchorCharStart(fragment)
     }
@@ -3376,26 +3413,11 @@ private fun finishCanonicalBackground(
      * P2: 每份源记录基准 href（嵌入＝章节，链接＝样式表）并递归内联 `@import`
      * （防环＋限深＋媒体条件按当前视口；视口未知即只内联无条件导入）。 */
     private fun buildCssBundle(spineHref: String, parsed: ParsedChapter): CssBundle {
-        val roots = ArrayList<Pair<String, String>>()
-        for (style in parsed.styles) roots.add(spineHref to style)
-        for (href in parsed.linkHrefs) {
-            val resolved = reader.resolveRelative(spineHref, href)
-            reader.readText(resolved)?.takeIf { it.isNotBlank() }?.let { roots.add(resolved to it) }
-        }
-        if (roots.isEmpty()) return CssBundle(emptyList())
         // P2: @import 媒体条件按内容区视口求值（与排版 parse 同值）。
         val contentW = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
         val contentH = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
         val viewport = orilumn.reader.engine.css.CssViewport(contentW, contentH)
-        val flat = orilumn.reader.engine.css.resolveCssImports(
-            roots.map { it.second },
-            roots.map { it.first },
-            spineHref,
-            reader::resolveRelative,
-            { h -> runCatching { reader.readText(h) }.getOrNull() },
-            viewport,
-        )
-        return CssBundle(flat.map { it.second }, flat.map { it.first })
+        return ImportStructures.collectChapterCssTexts(reader, spineHref, parsed, viewport)
     }
 
     private fun stripTags(html: String): String =

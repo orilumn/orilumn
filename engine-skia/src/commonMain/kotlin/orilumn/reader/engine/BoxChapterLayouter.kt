@@ -1,5 +1,6 @@
 package orilumn.reader.engine
 
+import orilumn.reader.collections.SyncLock
 import orilumn.reader.collections.identityMap
 import orilumn.reader.collections.withLock
 import orilumn.reader.engine.EngineDiag
@@ -226,6 +227,9 @@ class BoxChapterLayouter(
         structure: orilumn.reader.engine.ChapterStructureCache,
         /** P2: 版心高（与 contentW 共同组成 `@media` 求值视口；与重路径同值）。 */
         contentH: Int,
+        /** Fires only when the cascade actually ran (first touch per CSS): the caller persists the
+         *  media-free result for import/open reuse. Null = compute without persisting. */
+        onStructureComputed: ((cssHash: Long) -> Unit)? = null,
     ): LightPrepare = structure.lock.withLock {
         // prepareLight runs concurrently for the same chapter's cache: the open thread's DISK/ANCHOR
         // pass races prewarmForOpen (backgroundDispatcher) and the canonical pass. `key` and
@@ -233,9 +237,12 @@ class BoxChapterLayouter(
         // observe it already matching while `parsedAuthorSheets` is still null and crash on the
         // force-unwrap below. Guard on the payload too, and hold the per-chapter lock across the whole
         // check-build-read so no caller ever sees a half-assembled cache (double parse is benign).
+        val cssTexts = cssBundle?.cssTexts ?: emptyList()
+        val cssHash = ChapterStructureCodec.cssHashOf(cssTexts)
         val structureKey = structureKeyOf(cssBundle, profile.useOriginalStyle, contentW, contentH)
-        val rebuild = structure.key != structureKey || structure.parsedAuthorSheets == null
-        if (rebuild) {
+        val keyChanged = structure.key != structureKey
+        val needSheets = keyChanged || structure.parsedAuthorSheets == null
+        if (needSheets) {
             structure.key = structureKey
             // P2: 全视口 @media 求值（宽＋高；重轻两路同值，规则恒一致）。
             structure.parsedAuthorSheets = parseAuthorSheets(
@@ -243,11 +250,20 @@ class BoxChapterLayouter(
                 orilumn.reader.engine.css.CssViewport(contentW.coerceAtLeast(1), contentH.coerceAtLeast(1)),
             )
         }
+        // Media-free bound structure (import-built or previously computed) survives viewport and
+        // typography changes while the CSS matches: the cascade properties it encodes (display,
+        // white-space, background, break-inside, visibility) never come from reader sheets.
+        // Sheets above still re-parse when the viewport moves (the shaping cascade needs them);
+        // only the whole-tree walk is skipped.
+        val boundHit = structure.loadedMediaFree && structure.boundCssHash == cssHash
+        if (!boundHit && keyChanged) {
+            computeStructure(markup, styleComputerFor(cssBundle, profile, structure.parsedAuthorSheets!!), structure)
+            structure.boundCssHash = cssHash
+            structure.loadedMediaFree = !ChapterStructurePersist.hasMediaRules(cssTexts)
+            onStructureComputed?.invoke(cssHash)
+        }
         // styleComputerFor reuses the cached parsed author sheets on a hit, so no CSS re-tokenize.
         val engine = styleComputerFor(cssBundle, profile, structure.parsedAuthorSheets!!)
-        if (rebuild) {
-            computeStructure(markup, engine, structure)
-        }
         // `hidden` is a cheap closure; it is only exercised later, lazily, during per-block materialization
         // and its display decisions are typography-invariant, so the cached leaf set stays valid.
         val hidden = hiddenCheckFor(engine)
@@ -255,12 +271,33 @@ class BoxChapterLayouter(
     }
 
     /** Parses the chapter's author CSS once into [StyleSheet]s (cached in [ChapterStructureCache]).
-     *  P2: `@media` 按视口求值（排版点仅知版心宽，高度恒未知→高度查询丢弃，重轻两路同值）。 */
+     *  P2: `@media` 按视口求值（排版点仅知版心宽，高度恒未知→高度查询丢弃，重轻两路同值）。
+     *  同文本同视口全书只解一次（`sheetCache`，layouter 与 book 同寿，无 stale）：实测一书 1115 份
+     *  文本仅 3 种不同，去重后 tokenize 趋近于零。 */
+    private val sheetCache = HashMap<SheetKey, orilumn.reader.engine.css.StyleSheet>()
+
+    /** layouter 全局缓存的并发门（B2 池线程与翻页线程同时进出；无锁 HashMap 并发写会坏表）。 */
+    private val sheetLock = SyncLock()
+
+    private data class SheetKey(val textHash: Long, val viewportW: Int, val viewportH: Int)
+
     private fun parseAuthorSheets(
         cssBundle: CssBundle?,
         viewport: orilumn.reader.engine.css.CssViewport? = null,
     ): List<orilumn.reader.engine.css.StyleSheet> =
-        (cssBundle?.cssTexts ?: emptyList()).map { orilumn.reader.engine.css.LightCssParser().parse(it, viewport) }
+        (cssBundle?.cssTexts ?: emptyList()).map { text ->
+            val key = SheetKey(cssTextHash(text), viewport?.widthPx ?: -1, viewport?.heightPx ?: -1)
+            sheetLock.withLock {
+                sheetCache.getOrPut(key) { orilumn.reader.engine.css.LightCssParser().parse(text, viewport) }
+            }
+        }
+
+    /** 全量文本 hash：与 tokenize 同量级但每文本每视口只付一次；命中即复用，碰撞即错用，故不采样。 */
+    private fun cssTextHash(text: String): Long {
+        var h = 0L
+        for (i in text.indices) h = h * 31 + text[i].code
+        return h
+    }
 
     /** 本章字体需求缓存（CSS 文本指纹键）：整形前宿主凭它追装导入字库，无可见跳变。 */
     private val demandCache = HashMap<Long, FontDemand>()

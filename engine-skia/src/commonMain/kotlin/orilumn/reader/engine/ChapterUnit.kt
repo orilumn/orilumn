@@ -263,6 +263,14 @@ class ChapterStructureCache {
      * 伪元素样式不在此（跨参数过期），各 prepare 按新鲜级联懒解（`LightPrepare.genOf`）。
      */
     var genStrings: Map<orilumn.reader.engine.html.MarkupElement, Pair<String?, String?>> = emptyMap()
+
+    /** Author-CSS hash the bound leaves/starts/owners were built from (loaded or computed). */
+    var boundCssHash: Long? = null
+
+    /** True only for media-free content (no `@media`/media-`@import`): the bound structure stays
+     *  valid across viewport/typography changes while the CSS still matches. Never set for
+     *  media-affected chapters — those always recompute via [key]. */
+    var loadedMediaFree: Boolean = false
 }
 
 /**

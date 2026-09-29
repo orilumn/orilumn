@@ -3,12 +3,19 @@ package orilumn.reader.desktop
 import androidx.compose.ui.graphics.ImageBitmap
 import orilumn.reader.data.epub.parseEpubBytes
 import orilumn.reader.data.epub.readEpubEntry
+import orilumn.reader.data.epub.ZipEpubResourceReader
+import orilumn.reader.engine.ChapterStructureStore
+import orilumn.reader.engine.ImportStructures
 import orilumn.reader.ui.shelf.ScannedShelfBook
 import orilumn.reader.ui.shelf.ShelfBook
 import orilumn.reader.ui.shelf.ShelfHost
 import io.github.vinceglb.filekit.PlatformFile
 import io.github.vinceglb.filekit.readBytes
+import okio.Path.Companion.toPath
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.jetbrains.skia.Image
 import java.io.File
@@ -25,6 +32,9 @@ import java.io.File
 class DesktopShelfHost(
     private val store: DesktopShelfStore,
 ) : ShelfHost {
+
+    /** 导入后结构预建 scope（fire-and-forget，与平板 BookImporter 同式）。 */
+    private val buildScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override suspend fun scan(file: PlatformFile): ScannedShelfBook? = withContext(Dispatchers.IO) {
         val bytes = runCatching { file.readBytes() }.getOrNull() ?: return@withContext null
@@ -43,6 +53,19 @@ class DesktopShelfHost(
             .also { it.parentFile.mkdirs() }
         runCatching { target.writeBytes(bytes) }.getOrNull() ?: return@withContext false
         val entry = store.addBook(scanned.title, scanned.author, target.absolutePath, coverPath = null)
+        // 导入即建结构（与平板同式）：media-free 章节块级联一次算出持久化，open/翻页不再逐章级联。
+        buildScope.launch {
+            runCatching {
+                ZipEpubResourceReader(target.absolutePath).use { reader ->
+                    val s = ChapterStructureStore(
+                        okio.FileSystem.SYSTEM, DesktopPaths.cacheDir.absolutePath.toPath(),
+                    )
+                    ImportStructures.buildAllChapterStructures(
+                        reader, scanned.spineHrefs, s, "book_${entry.id}",
+                    )
+                }
+            }
+        }
         // 封面：解码门控（确认字节可解）后原样缓存，失败不影响导入。
         scanned.coverHref?.let { href ->
             val coverBytes = readInTmp(bytes, href)
@@ -72,11 +95,11 @@ class DesktopShelfHost(
 
     override fun openBook(book: ShelfBook) = Unit
 
-    private data class Scanned(val title: String, val author: String?, val coverHref: String?)
+    private data class Scanned(val title: String, val author: String?, val coverHref: String?, val spineHrefs: List<String>)
 
     private fun parseInTmp(bytes: ByteArray): Scanned? {
         val parsed = parseEpubBytes(bytes, DesktopPaths.cacheDir.absolutePath) ?: return null
-        return Scanned(parsed.title, parsed.author, parsed.cover)
+        return Scanned(parsed.title, parsed.author, parsed.cover, parsed.spine.map { it.href })
     }
 
     private fun readInTmp(epubBytes: ByteArray, href: String): ByteArray? =

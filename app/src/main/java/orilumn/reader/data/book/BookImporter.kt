@@ -2,13 +2,22 @@ package orilumn.reader.data.book
 
 import android.content.Context
 import android.net.Uri
+import android.util.Log
+import okio.FileSystem
+import okio.Path.Companion.toPath
 import orilumn.reader.data.epub.EpubFormatException
+import orilumn.reader.data.epub.ZipEpubResourceReader
 import orilumn.reader.data.epub.parseEpubBytes
 import orilumn.reader.data.epub.readEpubEntry
+import orilumn.reader.engine.ChapterStructureStore
+import orilumn.reader.engine.ImportStructures
 import orilumn.reader.engine.skia.ImageCodec
 import java.io.File
 import kotlin.math.roundToInt
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
@@ -26,6 +35,9 @@ class BookImporter(
     private val context: Context,
     private val repository: BookRepository,
 ) {
+
+    /** 导入后结构预建 scope（fire-and-forget：导入返回不等待，全书级联在后台一次算完）。 */
+    private val buildScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
      * Import pre-check: only parses the selected book's metadata (title/author), **copies no files, stores nothing**.
@@ -84,6 +96,19 @@ class BookImporter(
             }
             if (coverPath != null) {
                 repository.getBook(id)?.let { repository.updateBook(it.copy(coverPath = coverPath)) }
+            }
+            // 导入即建结构：全书 media-free 章节的块级联一次算出持久化（open/翻页/重排不再逐章级联）。
+            // 后台 fire-and-forget；老书缺失由 open 首次触达补算补存（ensureMarkup→prepareLight 回调）。
+            buildScope.launch {
+                runCatching {
+                    ZipEpubResourceReader(target).use { reader ->
+                        val store = ChapterStructureStore(FileSystem.SYSTEM, context.cacheDir.absolutePath.toPath())
+                        val stats = ImportStructures.buildAllChapterStructures(
+                            reader, parsed.spine.map { it.href }, store, "book_$id",
+                        )
+                        Log.w("Orilumn.Import", "structure prebuilt book=$id $stats")
+                    }
+                }.onFailure { Log.w("Orilumn.Import", "structure prebuild FAIL book=$id ${it.message}") }
             }
             id
         }

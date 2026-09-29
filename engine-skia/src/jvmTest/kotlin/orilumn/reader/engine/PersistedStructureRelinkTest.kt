@@ -124,6 +124,31 @@ class PersistedStructureRelinkTest {
     }
 
     @Test
+    fun `heavy prepare reuses bound gen strings identically`() {
+        val html = """
+            <!DOCTYPE html><html><head><style>li:before{content:"• ";} ul{margin:0;}</style></head><body>
+            <ul><li>第一项</li><li>第二项</li></ul>
+            <p>正文段落。</p>
+            </body></html>
+        """.trimIndent()
+        val parsed = converter.convertWithStyles(html) ?: error("parse failed")
+        val bundle = ImportStructures.collectChapterCssTexts(EmptyReader, "ch.html", parsed, null)
+        val sheets = bundle.cssTexts.map { orilumn.reader.engine.css.LightCssParser().parse(it, null) }
+        val tree = ChapterPreprocessor.preprocess(parsed.tree, sheets)
+        val profile = profileOf(46f, "屏显臻宋", true)
+        // Light path binds the strings (the persisted source in production).
+        val cache = ChapterStructureCache()
+        layouter.prepareLight(tree, bundle, profile, 1600, cache, 2400)
+        assertTrue("fixture must trigger the gen gate", cache.genStrings.isNotEmpty())
+        // Heavy without and with the bound strings must produce identical char streams.
+        val a = layouter.prepare(tree, bundle, profile, 1600, 2400)
+        val b = layouter.prepare(tree, bundle, profile, 1600, 2400, genStrings = cache.genStrings)
+        assertEquals(a.totalBlocks, b.totalBlocks)
+        assertEquals(a.totalChars, b.totalChars)
+        assertArrayEquals(a.globalCharStarts, b.globalCharStarts)
+    }
+
+    @Test
     fun `hasMediaRules detects media and conditional import`() {
         assertFalse(ChapterStructurePersist.hasMediaRules(listOf("p{color:red;}")))
         assertFalse(ChapterStructurePersist.hasMediaRules(listOf("@import \"a.css\";")))

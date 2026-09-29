@@ -1047,7 +1047,7 @@ private fun dispatchB1(
         // observe this task's cancellation even inside the nested runCatching/inner lambdas.
         val ctx = currentCoroutineContext()
         runCatching {
-            val heavy = unit.markup?.let { bc.prepare(it, unit.cssBundle, profile, contentW, contentH) }
+            val heavy = unit.markup?.let { bc.prepare(it, unit.cssBundle, profile, contentW, contentH, genStrings = boundGenStrings(unit)) }
             // P1: chunk workers deleted (P13) — background canonical shapes sequentially;
             // per-block P7 checkpoints keep abandonment at block granularity, and the
             // scheduler pool (not intra-task fan-out) owns all parallelism now.
@@ -1238,7 +1238,15 @@ private fun prepareFor(
     paramHash: Long,
 ): ChapterPrepareResult {
     unit.prepareResult?.let { if (unit.paramHash == paramHash) return it }
-    return box.prepare(markup, unit.cssBundle, profile, contentWidth, contentHeight).also { unit.bindPrepare(it, paramHash) }
+    return box.prepare(markup, unit.cssBundle, profile, contentWidth, contentHeight, genStrings = boundGenStrings(unit)).also { unit.bindPrepare(it, paramHash) }
+}
+
+/** P3: already-bound generated-content strings for heavy-prepare reuse. Valid only while the CSS
+ *  matches the bound content (same gate the light path uses); null → the heavy path computes. */
+private fun boundGenStrings(unit: ChapterUnit): Map<orilumn.reader.engine.html.MarkupElement, Pair<String?, String?>>? {
+    val texts = unit.cssBundle?.cssTexts ?: return null
+    if (unit.structureCache.boundCssHash != ChapterStructureCodec.cssHashOf(texts)) return null
+    return unit.structureCache.genStrings.takeIf { it.isNotEmpty() }
 }
 
 /** The current temp page the navigation pointer refers to. Null = 指针越界（窗口腐败）或

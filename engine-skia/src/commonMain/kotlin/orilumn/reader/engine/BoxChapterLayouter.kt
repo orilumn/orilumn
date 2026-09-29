@@ -158,6 +158,9 @@ class BoxChapterLayouter(
         contentW: Int,
         /** P2: 版心高（与 contentW 共同组成 `@media` 求值视口；与轻路径同值）。 */
         contentH: Int,
+        /** P3: 已绑定的生成内容字符串（结构缓存/持久化，同 CSS 下与现算恒等）：跳过整树求值，
+         *  只做门控复核 + 伪样式新鲜装配。Null = 现算（首触/含 media 章）。 */
+        genStrings: Map<MarkupElement, Pair<String?, String?>>? = null,
     ): ChapterPrepareResult {
         // P2: 与轻路径同视口的 @media 求值，重轻规则恒一致。
         val authorSheets = parseAuthorSheets(cssBundle, orilumn.reader.engine.css.CssViewport(contentW.coerceAtLeast(1), contentH.coerceAtLeast(1)))
@@ -177,7 +180,11 @@ class BoxChapterLayouter(
         val classify = NormalFlowLayout.heavyClassify(styleMap, engine.hasDisplayDeclaration())
         val hidden = orilumn.reader.engine.laying.HiddenCheck { styleMap[it]?.displayNone == true }
         // P3-c: 生成内容 phase-1（ gating 命中才整树求值；伪样式按需缓存，重轻同输入同输出）。
-        val genOf = genOfFor(markup, authorSheets, { styleMap[it] }, engine, hidden)
+        // 已绑定字符串直接复用（P3），否则现算。
+        val genOf = genStrings
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { genOfFromStrings(authorSheets, it, engine) { styleMap[it] } }
+            ?: genOfFor(markup, authorSheets, { styleMap[it] }, engine, hidden)
         val structure = boxLayouter.layoutBoxes(markup, contentW, styleMap, classify, imageLoader, chapterHref, genOf = genOf)
         val leaves = collectLeaves(structure.boxes)
         return buildPrepareResult(markup, styleMap, structure, leaves, classify, hidden, genOf)
@@ -202,15 +209,39 @@ class BoxChapterLayouter(
         if (!orilumn.reader.engine.laying.GeneratedContent.needsPhase(sheets)) {
             return emptyMap<MarkupElement, Pair<String?, String?>>() to orilumn.reader.engine.laying.EmptyGen
         }
+        val pseudoOf = pseudoOfFor(engine, styleOf)
+        val strings = orilumn.reader.engine.laying.GeneratedContent.resolveStrings(markup, styleOf, pseudoOf, hidden::isHidden)
+        return strings to orilumn.reader.engine.laying.GeneratedContent.genOf(strings, pseudoOf)
+    }
+
+    /**
+     * P3-c phase-1 后半：调用方已持有字符串表（结构缓存/持久化）时跳过 `resolveStrings` 整树求值，
+     * 只做门控复核 + 伪样式懒装配。字符串与 `resolveStrings` 同源（同 sheet 下恒等），伪样式恒按
+     * 新鲜级联解——复用字符串不复用样式，无 stale。
+     */
+    private fun genOfFromStrings(
+        sheets: List<orilumn.reader.engine.css.StyleSheet>,
+        strings: Map<MarkupElement, Pair<String?, String?>>,
+        engine: StyleComputer,
+        styleOf: (MarkupElement) -> orilumn.reader.engine.css.ComputedStyle?,
+    ): orilumn.reader.engine.laying.GenOf {
+        if (!orilumn.reader.engine.laying.GeneratedContent.needsPhase(sheets)) {
+            return orilumn.reader.engine.laying.EmptyGen
+        }
+        return orilumn.reader.engine.laying.GeneratedContent.genOf(strings, pseudoOfFor(engine, styleOf))
+    }
+
+    private fun pseudoOfFor(
+        engine: StyleComputer,
+        styleOf: (MarkupElement) -> orilumn.reader.engine.css.ComputedStyle?,
+    ): (MarkupElement, String) -> orilumn.reader.engine.css.ComputedStyle? {
         val pseudoCache = HashMap<Pair<MarkupElement, String>, orilumn.reader.engine.css.ComputedStyle?>()
-        val pseudoOf: (MarkupElement, String) -> orilumn.reader.engine.css.ComputedStyle? = { el, p ->
+        return { el, p ->
             pseudoCache.getOrPut(el to p) {
                 val base = styleOf(el) ?: return@getOrPut null
                 engine.pseudoStyle(el, orilumn.reader.engine.laying.ancestorsOf(el), base, p)
             }
         }
-        val strings = orilumn.reader.engine.laying.GeneratedContent.resolveStrings(markup, styleOf, pseudoOf, hidden::isHidden)
-        return strings to orilumn.reader.engine.laying.GeneratedContent.genOf(strings, pseudoOf)
     }
 
     /**

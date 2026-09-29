@@ -20,25 +20,53 @@ import orilumn.reader.engine.html.MarkupElement
 object ChapterStructurePersist {
 
     /**
-     * Whether this chapter's CSS can behave differently per viewport: a literal `@media` block,
-     * or an `@import` carrying media conditions. Over-approximates (comments may trip it) — a
-     * false positive only costs one runtime compute, never correctness.
+     * Whether this chapter's CSS can behave differently per viewport: an `@media` condition or an
+     * `@import` media query containing a parenthesized feature query (width/height in this engine —
+     * the only viewport-evaluated kind; bare `screen`/`all`/`print` types are viewport-invariant:
+     * always inline / always drop, at import and at every open alike).
+     *
+     * Over-approximates (comments may trip it) — a false positive only costs one runtime compute,
+     * never correctness. Chapters without variant media are persisted with a canonical viewport
+     * ([ImportStructures.IMPORT_VIEWPORT]) whose value is irrelevant precisely because no
+     * viewport-evaluated query can occur in them.
      */
     fun hasMediaRules(cssTexts: List<String>): Boolean {
         for (t in cssTexts) {
             val low = t.lowercase()
-            if ("@media" in low) return true
-            var i = low.indexOf("@import")
+            var i = low.indexOf("@media")
             while (i >= 0) {
-                if (importHasMedia(low, i + "@import".length)) return true
-                i = low.indexOf("@import", i + 1)
+                if (mediaConditionHasFeatures(low, i + "@media".length)) return true
+                i = low.indexOf("@media", i + 1)
+            }
+            var j = low.indexOf("@import")
+            while (j >= 0) {
+                if (importHasVariantMedia(low, j + "@import".length)) return true
+                j = low.indexOf("@import", j + 1)
             }
         }
         return false
     }
 
-    /** After `@import`, a bare `;` following the target means unconditional; anything else is media. */
-    private fun importHasMedia(low: String, from: Int): Boolean {
+    /** True when the `@media` condition (up to its opening brace) holds a feature query. */
+    private fun mediaConditionHasFeatures(low: String, from: Int): Boolean {
+        var i = from
+        // Skip whitespace/comments to the condition start; the condition ends at the first '{'
+        // (conditions never contain braces; strings inside are over-approxed as variant — safe).
+        while (i < low.length && low[i] != '{') {
+            if (low.startsWith("/*", i)) {
+                val end = low.indexOf("*/", i + 2)
+                if (end < 0) return true
+                i = end + 2
+            } else {
+                if (low[i] == '(') return true
+                i++
+            }
+        }
+        return false
+    }
+
+    /** True when the `@import` carries a feature-queried media condition (past its target). */
+    private fun importHasVariantMedia(low: String, from: Int): Boolean {
         var i = from
         fun skipWsAndComments(): Boolean {
             while (i < low.length) {
@@ -68,7 +96,14 @@ object ChapterStructurePersist {
             return false // malformed: fail closed (caller falls back to computing)
         }
         if (!skipWsAndComments()) return false
-        return i >= low.length || low[i] != ';'
+        if (i >= low.length || low[i] == ';') return false // unconditional
+        // Remainder is the media condition: variant only with a feature query.
+        var k = i
+        while (k < low.length && low[k] != ';' && low[k] != '{') {
+            if (low[k] == '(') return true
+            k++
+        }
+        return false
     }
 
     /** Assigns parent pointers through the whole tree (idempotent; the converter may not set them). */

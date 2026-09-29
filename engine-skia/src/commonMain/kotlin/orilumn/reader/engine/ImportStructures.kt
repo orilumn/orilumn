@@ -36,6 +36,14 @@ object ImportStructures {
     }
 
     /**
+     * Canonical viewport for the import CSS/media evaluation. Its value is irrelevant: chapters
+     * reaching evaluation carry no viewport-variant queries ([ChapterStructurePersist.hasMediaRules]
+     * gates those out), so bare-type media (`screen`→inline, `print`→drop) resolve identically
+     * under every real viewport.
+     */
+    val IMPORT_VIEWPORT = CssViewport(1600, 2400)
+
+    /**
      * Assembles a chapter's CSS sources: embedded `<style>` blocks first, then linked stylesheets
      * resolved relative to the chapter and read through the epub reader (missing/malformed ones are
      * skipped, so a bad author stylesheet never breaks layout).
@@ -148,14 +156,18 @@ object ImportStructures {
                 onChapter?.invoke(index)
                 val text = reader.readText(href) ?: run { failed++; return@forEachIndexed }
                 val parsed = converter.convertWithStyles(text) ?: run { failed++; return@forEachIndexed }
-                // Media gating on RAW sources: conditional @imports vanish from the flattened list.
-                val (rawTexts, _) = collectRawCssTexts(reader, href, parsed)
-                if (ChapterStructurePersist.hasMediaRules(rawTexts)) {
+                // Media gating on the FLATTENED list (nested @import content included — raw sources
+                // can't see it). Conditional-@import viewport divergence needs no gate: it changes the
+                // flat list itself, so cssHash mismatches and the payload is rejected.
+                // Canonical-viewport evaluation: identical to every open-time evaluation for
+                // variant-free chapters (the gate above), so the persisted sheets/tree/structure
+                // match what open would compute under any real viewport.
+                val bundle = collectChapterCssTexts(reader, href, parsed, IMPORT_VIEWPORT)
+                if (ChapterStructurePersist.hasMediaRules(bundle.cssTexts)) {
                     skippedMedia++
                     return@forEachIndexed
                 }
-                val bundle = collectChapterCssTexts(reader, href, parsed, null)
-                val sheets = bundle.cssTexts.map { LightCssParser().parse(it, null) }
+                val sheets = bundle.cssTexts.map { LightCssParser().parse(it, IMPORT_VIEWPORT) }
                 val tree = ChapterPreprocessor.preprocess(parsed.tree, sheets)
                 val cache = ChapterStructureCache()
                 layouter.prepareLight(tree, bundle, IMPORT_PROFILE, 1600, cache, 2400)

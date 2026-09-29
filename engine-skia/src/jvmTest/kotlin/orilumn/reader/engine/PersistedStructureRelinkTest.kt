@@ -184,15 +184,21 @@ class PersistedStructureRelinkTest {
     }
 
     @Test
-    fun `hasMediaRules detects media and conditional import`() {
+    fun `hasMediaRules detects only viewport-variant conditions`() {
         assertFalse(ChapterStructurePersist.hasMediaRules(listOf("p{color:red;}")))
         assertFalse(ChapterStructurePersist.hasMediaRules(listOf("@import \"a.css\";")))
         assertFalse(ChapterStructurePersist.hasMediaRules(listOf("@charset \"utf-8\";p{}")))
+        // Bare types are viewport-invariant (screen→always inline, print→always drop).
+        assertFalse(ChapterStructurePersist.hasMediaRules(listOf("@media screen{p{}}")))
+        assertFalse(ChapterStructurePersist.hasMediaRules(listOf("@MEDIA screen{p{}}")))
+        assertFalse(ChapterStructurePersist.hasMediaRules(listOf("@media print{p{}}")))
+        assertFalse(ChapterStructurePersist.hasMediaRules(listOf("@import \"a.css\" screen;")))
+        assertFalse(ChapterStructurePersist.hasMediaRules(listOf("/* @media in comment */p{}")))
+        // Feature queries are genuinely viewport-dependent.
         assertTrue(ChapterStructurePersist.hasMediaRules(listOf("@media (max-width:600px){p{}}")))
-        assertTrue(ChapterStructurePersist.hasMediaRules(listOf("@MEDIA screen{p{}}")))
-        assertTrue(ChapterStructurePersist.hasMediaRules(listOf("@import \"a.css\" screen;")))
+        assertTrue(ChapterStructurePersist.hasMediaRules(listOf("@media screen and (max-width:600px){p{}}")))
         assertTrue(ChapterStructurePersist.hasMediaRules(listOf("@import url(a.css) (max-width:100px);")))
-        assertTrue(ChapterStructurePersist.hasMediaRules(listOf("/* @media in comment */p{}")))
+        assertTrue(ChapterStructurePersist.hasMediaRules(listOf("@import \"a.css\" screen and (min-width:1px);")))
     }
 
     @Test
@@ -233,25 +239,28 @@ class PersistedStructureRelinkTest {
     fun `import job persists media-free chapters and skips media ones`() {
         val css = "p{color:#111;}"
         val mediaCss = "@media (max-width:600px){p{color:red;}}"
+        val bareScreenCss = "@media screen{p{color:red;}}"
         fun ch(body: String, style: String) =
             "<html><head><style>$style</style></head><body>$body</body></html>"
         val reader = FakeReader(mapOf(
             "a.html" to ch("<p>one</p>", css),
             "b.html" to ch("<p>two</p>", mediaCss),
             "c.html" to ch("<p>three</p>", css),
+            "d.html" to ch("<p>four</p>", bareScreenCss),
         ))
         val dir = java.nio.file.Files.createTempDirectory("struct-import").toString()
         val store = ChapterStructureStore(okio.FileSystem.SYSTEM, dir.toPath())
         val stats = ImportStructures.buildAllChapterStructures(
-            reader, listOf("a.html", "b.html", "c.html"), store, "book_1",
+            reader, listOf("a.html", "b.html", "c.html", "d.html"), store, "book_1",
         )
-        assertEquals(3, stats.chapters)
-        assertEquals(2, stats.persisted)
+        assertEquals(4, stats.chapters)
+        assertEquals(3, stats.persisted)
         assertEquals(1, stats.skippedMedia)
         assertEquals(0, stats.failed)
         assertNotNull(store.readChapter("book_1", 0))
-        assertNull(store.readChapter("book_1", 1)) // media chapter: no file, runtime path at open
+        assertNull(store.readChapter("book_1", 1)) // viewport-variant media: no file, runtime path at open
         assertNotNull(store.readChapter("book_1", 2))
-        assertEquals(1, store.readSheets("book_1")!!.size) // one unique sheet across a/c
+        assertNotNull(store.readChapter("book_1", 3)) // bare screen: viewport-invariant, persisted
+        assertEquals(2, store.readSheets("book_1")!!.size) // css + bare-screen sheet
     }
 }

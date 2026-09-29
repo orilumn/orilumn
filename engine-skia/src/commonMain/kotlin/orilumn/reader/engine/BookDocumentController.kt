@@ -255,6 +255,10 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
     @Volatile
     private var openT0: Long = 0L
 
+    /** R28：本次开书的续读锚点（`章@字符`），供 `jump: open ->` 自报，A/B 按它分组。 */
+    @Volatile
+    private var openAnchor: String = "-"
+
     /** 闸门期间被压下的「整书章扫描」请求（出闸时补派 B2）。 */
     @Volatile
     private var openGateWantsB2: Boolean = false
@@ -427,6 +431,11 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
             startChar = char.coerceAtLeast(0)
             Logger.w(logTag, "open: restore -> startCh=$startChapter char=$startChar ${ctx(startChapter)}")
         }
+        // R28：A/B 的可比性第一要件——把本次开书的锚点钉在日志里。
+        // 续读位置会因采样途中翻页而漂移，跨锚点的 openT 不可比（R31 自己就走过
+        // ch4@3242 → ch3@2075 → ch7@12982 → ch7@12091）。落位时随 `jump: open ->` 一起报，
+        // 由 tools/abrun.py 按此分组，不一致直接拒绝出结论。
+        openAnchor = "$startChapter@$startChar"
         // The landing chapter is owned by open (locateStart shapes it synchronously, exactly once):
         // background passes (prewarm/B2/preflight) must not duplicate it. Setting this here (it was
         // previously only set on relayout paths) arms their guards from the first screen on.
@@ -827,8 +836,10 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
                         pagesToShape = 1,
                         cache = unitShapeCache(unit),
                         prefillL2 = windowPrefillShapesFor(unit, cached),
-                        // 开书路径专属的锚页预热，实测净亏，常量已置 0（见 OPEN_WARMUP_BLOCKS 注释的 A/B 数据）。
-                        warmupBlocks = OPEN_WARMUP_BLOCKS,
+                        // 开书路径专属的锚页预热，实测净亏，默认 0（数据见 AbSwitch.warmupBlocks 的 KDoc）。
+                        // R28 搬到运行期开关：顺序装机 A/B 无法排除慢时段整段落在一侧，
+                        // 且本开关有**已知答案**（+50ms），正好用来先验证量法本身。
+                        warmupBlocks = AbSwitch.warmupBlocks,
                     )
                     Logger.w(logTag, "DISK-HIT shape t=${platformNowMs() - sp}ms shapedPages=${product.slices.count { it.firstLine >= 0 }} blocks=[${product.slices[startPage].blockStart},${product.slices[startPage].blockEndExclusive}) target=$startPage")
                     unit.bind(product.layout, product.slices)
@@ -3294,7 +3305,12 @@ private fun finishCanonicalBackground(
         val chh = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
         val hit = u.paginationTable?.paramHash == LayoutParamKey.fromProfile(profile, cw, chh).hash()
         // R20：`where == "open"` 时带上整段 open 的墙钟（`open:` 那行到落位）。
-        val tail = if (where == "open" && openT0 > 0L) " openT=${platformNowMs() - openT0}ms" else ""
+        // R28：开书行另带三项可比性要件——锚点（分组用）、A/B 变体（自解释）、控制量（离群标记）。
+        // 非 open 落位不测控制量：那是用户翻页的关键路径，不该塞任何测量负载。
+        val tail = if (where == "open" && openT0 > 0L) {
+            " openT=${platformNowMs() - openT0}ms anchor=$openAnchor" +
+                " ab=${AbSwitch.describe()} ctl=${"%.2f".format(AbSwitch.controlMs())}ms"
+        } else ""
         Logger.w(logTag, "jump: $where -> ch=$chapter path=${u.pathMarker} tableHit=$hit temp=${u.inProgress != null}$tail")
     }
 
@@ -3942,22 +3958,5 @@ private data class DbgLastPage(val chapter: Int, val charStart: Int, val charEnd
 /** A seam delta at or below this many chars is treated as an adjacent flip (gap/overlap); a larger
  *  jump is a page seek/locate and is not flagged as dropped content. */
 private const val SEAM_ADJACENT_MAX = 300
-
-/**
- * 开书锚页预热块数。**实测为净亏，保持 0，勿开。**
- *
- * A/B（Rust 书，同一锚页 ch7 page15 / blocks[125,130) / 5 块，各 3 次冷开书，R26 vs R27）：
- *   warmB=0：openT 1297ms 均，锚页 shape 584ms 均，锚页真排版 sStyles+sSkia 85ms
- *   warmB=3：openT 1347ms 均，锚页 shape 262ms 均 + warm 367ms = 629ms，真排版 45ms
- * 预热确实暖到了东西——锚页 Skia 断行 85ms → 45ms——但代价是 3 块 367ms，
- * 而锚页 5 块才 262ms。净 +45ms，端到端 +50ms。
- *
- * 曾把这笔当"class-load/JIT/字体初始化的一次性固定成本"，也已否证：同进程内同代码同块数，
- * ch7 warm(3 块)=366ms 而 ch0 只 30~37ms，随内容变 11 倍，不是固定成本。
- *
- * 代码路径保留（默认 0 即完全短路），若日后要试"更便宜的暖机"（例如只暖 1 块，
- * 或换更便宜的块）从这里下手，别直接开 3。
- */
-private const val OPEN_WARMUP_BLOCKS = 0
 
 private var dbgLastPage: DbgLastPage = DbgLastPage(-1, -1, -1)

@@ -45,6 +45,7 @@ import orilumn.reader.data.settings.BookSettings
 import orilumn.reader.data.settings.BookSettingsStore
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.data.settings.ReaderSettingsStore
+import orilumn.reader.engine.AbSwitch
 import orilumn.reader.engine.BookDocumentController
 import orilumn.reader.engine.BookFileResolver
 import orilumn.reader.engine.text.LayoutParamKey
@@ -154,6 +155,9 @@ class ReaderActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         // 日志根改由 AppRoot 注入（幂等、只首次生效；直启阅读页时 MainActivity 可能没跑过，此处兜底）。
         AppRoot.init(filesDir.absolutePath.toPath(), FileSystem.SYSTEM)
+        // R28：平台差异留在平台层——引擎侧只认 AbSwitch 的取值，不认识 intent。
+        // 必须在开书之前写；此处早于任何 layout 触发。格式见 AbSwitch.apply 的 KDoc。
+        AbSwitch.apply(intent?.getStringExtra(EXTRA_AB_SPEC))
         bookPath = intent?.getStringExtra(EXTRA_BOOK_PATH)
         bookId = intent?.getLongExtra(EXTRA_BOOK_ID, -1L) ?: -1L
         repository = AndroidDb.repository(this)
@@ -860,5 +864,11 @@ class ReaderActivity : ComponentActivity() {
 
 /** Absolute path of the book file passed in when launching the reader from the bookshelf. */
 const val EXTRA_BOOK_PATH = "book_file_path"
+
+/**
+ * R28：A/B 变体规格（`warm=3` 形式，逗号分隔多个），只被 [AbSwitch.apply] 消费。
+ * 仅测量用；不传即生产默认。
+ */
+const val EXTRA_AB_SPEC = "ab"
 /** Primary key of the book passed when launching the reader from the bookshelf (progress is stored/loaded only when >=0). */
 const val EXTRA_BOOK_ID = "book_id"

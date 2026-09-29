@@ -229,6 +229,36 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
     @Volatile
     private var activeChapter: Int = -1
 
+    // ── 开书闸门（总则 §第一优先级：目标页出画面之前不启动任何整章重排）──
+    //
+    // 病根：开书时 [requestWholeBookRelayout]（宿主在 `open()` 之后立刻派）和
+    // `startAnchorStream` 尾部的 `dispatchB1` + `requestWholeBookRelayout(force)` 都在锚页
+    // **排版期间**就把整章全量的活塞进池里。真机实测：GIMP 落位章 ch18（2579 块）被
+    // B2/B1 抢走两个槽，`layoutMutex` 上堵 15.9s，锚页 5.84s 才拿到锁，读者全程白屏。
+    //
+    // 闸门期间这些派发不执行，只**记账**（[openGateWantsB1] / [openGateWantsB2]）；锚页排完、
+    // `ensureChapterLayout` 末尾由 [releaseOpenGate] 统一补派。出闸次序 = 原则次序：第 2/3 档邻页
+    // （`scheduleWindowPrefill` / `scheduleTempPrefill`，在闸门内就已派）→ 本章全量 B1 → 其他章 B2。
+    @Volatile
+    private var openAnchorGate: Boolean = false
+
+    /** 闸门期间被压下的「锚页章需要整章表」请求（出闸时补派 B1）。 */
+    @Volatile
+    private var openGateWantsB1: Boolean = false
+
+    /**
+     * R20 开书基线（墙钟）：[open] 写、落位（`logJumpLanding("open", …)`）读。
+     * 0 = 本次没走过 [open]。**只放墙钟**：堆/CPU 采样探针的自身成本高于被测对象
+     * （`Runtime.freeMemory` 一次全量 GC；`Debug.threadCpuTimeNanos` 首次 ≈1.2s），
+     * 不能进开书热路径——教训记在 [BoxChapterLayouter.backfillBlockRanges] 的 R21 诊断注释里。
+     */
+    @Volatile
+    private var openT0: Long = 0L
+
+    /** 闸门期间被压下的「整书章扫描」请求（出闸时补派 B2）。 */
+    @Volatile
+    private var openGateWantsB2: Boolean = false
+
     /** **翻页方向记录**（原则 §3.2）：`+1` 上次向前翻页、`−1` 上次向后翻页、`0` **无记录**。
      *
      *  写入：
@@ -273,6 +303,11 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
 
     /** Cancels all background work owned by this controller. Idempotent; safe to call twice. */
     fun close() {
+        // 闸门随控制器一起作废：控制器没了，记着"待补派"也无处可派。
+        openAnchorGate = false
+        openGateWantsB1 = false
+        openGateWantsB2 = false
+        rollingLaneLock.withLock { rollingLanes.clear() }
         bgScope.cancel()
     }
 
@@ -378,6 +413,8 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
         coverHref = parsedBook.cover
         Logger.w(logTag, "open: chapters=${chapters.size} " +
             "parse=${t1 - t0}ms skeleton=${t2 - t1}ms spine0=${ctx(0)}")
+        // R20：开书墙钟基线，落位时随 `jump: open ->` 一起报，方便对齐开书总时长与其中排版那一段。
+        openT0 = platformNowMs()
         // Version-stale disk tables (older build) can never hit again — sweep them now on a
         // background scope so the first screen isn't blocked; the running build's tables stay.
         if (bookId >= 0) {
@@ -394,10 +431,11 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
         // background passes (prewarm/B2/preflight) must not duplicate it. Setting this here (it was
         // previously only set on relayout paths) arms their guards from the first screen on.
         activeChapter = startChapter.coerceIn(0, (chapterCount - 1).coerceAtLeast(0))
-        // R18: open dispatches B2 with no quiet gate — the open-dispatched pass must start
-        // promptly; the first flip cancels it outright if the reader reads immediately
-        // (abandon ≤1 block). P2.6: there is no `lastFlipMs` to skip-stamp (notifyFlip cancels
-        // unconditionally), so this needs no special case.
+        // 开书闸门上闩：见字段注释。宿主在 `open()` 之后紧跟的 `requestWholeBookRelayout()` 由此
+        // 变成记账而不是执行，直到 [ensureChapterLayout] 把锚页排完才补派。
+        openAnchorGate = true
+        openGateWantsB1 = false
+        openGateWantsB2 = false
         return true
     }
 
@@ -434,7 +472,23 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
  *   content (cover/empty chapters) going forward, and within the located chapter aligns to the
  *   page for [startChar]; when there is no progress, falls back to the chapter's first page. */
     suspend fun locateStart(): Pair<Int, PageSlice>? {
-        if (chapters.isEmpty()) return null
+        if (chapters.isEmpty()) {
+            // 无章可落位：闸门不许因此留着（后台预排会永久停摆）。
+            releaseOpenGate()
+            return null
+        }
+        try {
+            return locateStartLocked()
+        } finally {
+            // 兜底开闩。正常路径在 [ensureChapterLayout] 末尾已经开过了（那里才是"目标页成形"的
+            // 真实时刻）；这里覆盖的是 locateStart 一个章都没排成的路径（无内容/无 markup）。
+            // 闸门只该覆盖这一次锚页排版，卡住不释放等于后台预排永久停摆。
+            releaseOpenGate()
+        }
+    }
+
+    /** [locateStart] 的原体，闸门由外层 [locateStart] 统一开/关。 */
+    private suspend fun locateStartLocked(): Pair<Int, PageSlice>? {
         var ch = startChapter.coerceIn(0, chapters.size - 1)
         var char = startChar
         while (ch < chapters.size) {
@@ -464,6 +518,40 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
         }
         Logger.w(logTag, "locateStart: no start page found")
         return null
+    }
+
+    /** 开书闸门开闩：把闸门期间记下的整章重排请求按原则次序补派出去。
+     *
+     *  次序 = 第 2/3 档邻页（在闸门内已派，此刻通常已在池里跑或已跑完）→ 本章全量 B1 → 其他章 B2。
+     *  B1 必须在 B2 之前：整书扫描显式跳过锚页章（"B1 owns the active chapter"），闸门把 B1 压下
+     *  之后若只补 B2，落位章就永远拿不到自己的磁盘表。
+     *
+     *  幂等：闸门已开时直接返回，重复调用安全。 */
+    private fun releaseOpenGate() {
+        if (!openAnchorGate) return
+        openAnchorGate = false
+        val wantsB1 = openGateWantsB1
+        val wantsB2 = openGateWantsB2
+        openGateWantsB1 = false
+        openGateWantsB2 = false
+        if (!wantsB1 && !wantsB2) return
+        val bc = layouter as? BoxChapterLayouter
+        if (bc == null || viewW <= 0 || viewH <= 0) {
+            Logger.w(logTag, "open gate released but no layouter/viewport (b1=$wantsB1 b2=$wantsB2)")
+            return
+        }
+        val contentW = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
+        val contentH = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
+        val paramHash = LayoutParamKey.fromProfile(profile, contentW, contentH).hash()
+        Logger.w(logTag, "open gate released ch=$activeChapter b1=$wantsB1 b2=$wantsB2")
+        if (wantsB1) {
+            val unit = unitAt(activeChapter)
+            val ip = unit?.inProgress
+            if (unit != null && ip != null) {
+                dispatchB1(unit, ip, layoutEpoch, bc, contentW, contentH, paramHash, tempHeadDistancePages(ip))
+            }
+        }
+        if (wantsB2) requestWholeBookRelayout(force = true)
     }
 
     /** Chapter title text (kept local: only the title probe uses the joined string). */
@@ -599,6 +687,11 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
                 scheduleWindowPrefill(unit, pageIndexForChar(t.pages, targetChar), flipDir)
             }
         }
+        // 开书闸门开闩点：**一次前台落位排版完成** = 目标页已经成形、可以画了。此刻之前不许有整章
+        // 重排（见字段注释），此刻之后按原则次序补派。放在邻页派发**之后**，第 2/3 档就一定排在
+        // B1/B2 前面（总则：目标页 > 邻页 > 本章全量 > 其他章）。
+        // 幂等：非开书路径进来时闸门已开，这里什么也不做。
+        releaseOpenGate()
         return unit
     }
 
@@ -734,6 +827,9 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
                         pagesToShape = 1,
                         cache = unitShapeCache(unit),
                         prefillL2 = windowPrefillShapesFor(unit, cached),
+                        // R20 开书路径专属：先在章首塑 OPEN_WARMUP_BLOCKS 块再塑锚页。
+                        // 是否真让锚页变快未证实（见 OPEN_WARMUP_BLOCKS 注释）；预排/换页路径不传（默认 0）。
+                        warmupBlocks = OPEN_WARMUP_BLOCKS,
                     )
                     Logger.w(logTag, "DISK-HIT shape t=${platformNowMs() - sp}ms shapedPages=${product.slices.count { it.firstLine >= 0 }} blocks=[${product.slices[startPage].blockStart},${product.slices[startPage].blockEndExclusive}) target=$startPage")
                     unit.bind(product.layout, product.slices)
@@ -994,6 +1090,9 @@ private fun startAnchorStream(
         // Relaunch the whole-book pass behind this B1 (skip-fresh repositions cheaply; temp-live and
         // fresh chapters no-op). Unconditional: same-key dedup + skip-fresh bound the cost.
         if (b1Launched) requestWholeBookRelayout(force = true)
+        // 开书闸门：这里 dispatchB1 只记账不执行，于是 `b1Launched` 恒 false、B2 这一趟不会走到。
+        // 闸门压住 B1 的语义就是"B1 及其后面的 B2 一起延到锚页出画面"，所以在此显式记账。
+        if (openAnchorGate) openGateWantsB2 = true
     } else {
         Logger.w(logTag, "canonical deferred (panel open) ch=${unit.chapterIndex}")
     }
@@ -1025,6 +1124,13 @@ private fun dispatchB1(
     // 外层 force 整书重扫，把一个已收敛的 B2 又打散。直接不派。
     if (unit.paginationTable?.paramHash == paramHash) {
         Logger.w(logTag, "b1 skip-fresh ch=${unit.chapterIndex} (table already fresh)")
+        return false
+    }
+    // 开书闸门：锚页还没排完就不许整章全量占槽（总则 §第一优先级）。记账 + 返回 false，
+    // 让调用方知道这一趟没派出去——`requestWholeBookRelayout` 的 B2 压在这个返回上。
+    if (openAnchorGate) {
+        openGateWantsB1 = true
+        Logger.w(logTag, "b1 deferred by open gate ch=${unit.chapterIndex}")
         return false
     }
     val priority = b1PriorityFor(headDistancePages)
@@ -1702,12 +1808,87 @@ private fun previousTempPage(ip: InProgressPagination): TempPage? {
 }
 
 
-/** P2.1: disk-path neighbor prefill after a landing (scheduler edition). No-op on the temp
- *  path (its own prefill owns it) and without a table. Submits one PAGE task per in-range
- *  neighbor in flip-direction order; same-key submit replaces stale twins (latest landing wins).
+// ── 滚动派发（原则 §第二优先级「串行排全章」）──
+//
+// 为什么不是"一次性把整段序列 submit 出去，让池自己排队"：池只有 2 槽（`maxSlots`），但**队列
+// 深度**和 submit 次数是另一回事。151 页的章意味着一次落位 150 次 `scheduler.submit`，每次一个
+// `scope.launch` 去抢调度器 mutex + 一次按优先级线性插入 + 一次同键 `removeAll` 全队列扫描。
+// 落位频率是每次翻页都触发，于是纯调度开销按 O(序列长 × 落位频率) 涨，而真正在跑的永远只有 2 个。
+// 滚动派发把这个 O(序列长) 降到 O(窗口)：在途 2 个 + 队列 1 个，跑完一个补一个。
+//
+// 不改 [TaskScheduler]：补派发生在**任务体内**（`finally` 里），池自己的 `pumpLocked()` 随后会把
+// 队列里那一个启动起来，槽位记账、抢占、同键去重全部沿用既有语义。
+/** 同时在途的滚动任务上限。与池的 `maxSlots` 同为 2：并发由池封顶，滚动窗口只管"队列别太深"。 */
+private val ROLLING_WINDOW = 2
+
+/** 滚动序列里的一步。 */
+private class RollingStep(val key: String, val priority: Int, val body: suspend () -> Unit)
+
+/** 滚动序列：一次落位、整章全量预排的有序步骤表 + 已发出的游标。 */
+private class RollingLane(val chapter: Int, val steps: List<RollingStep>) {
+    @Volatile
+    var cursor: Int = 0
+}
+
+/** **按章分槽**的在滚链表（key = 章号）。**不能是单一全局槽**：多章会同时在滚——翻页落位章 A
+ *  的链还在跑，目录恢复 / 跨章落位又把章 B 派了一遍。单一槽下，任意一次 B 的新落位都会顶掉 A 的
+ *  链，A 剩余的整章预排被静默掐断（真机日志：目录恢复循环每 ~40ms 落位一次 ch0/ch1，
+ *  ch18 的 150 步链在第一步之后就再没补派过）。
+ *
+ *  分槽后回到改动前的语义：**不同章互不干涉**，同一次落位仍然只有一条链。 */
+private val rollingLanes = HashMap<Int, RollingLane>()
+private val rollingLaneLock = SyncLock()
+
+/** 换代：新落位装入**新对象**，旧链在跑完当前步后经 [nextRollingStep] 的身份判定自行断链——
+ *  不需要显式取消，也不会去 cancel 新链。 */
+private fun installRollingLane(lane: RollingLane) {
+    rollingLaneLock.withLock { rollingLanes[lane.chapter] = lane }
+}
+
+/** 原子地"取下一步"：换代判定 + 游标推进必须在同一个临界区，否则并发补派会各拿同一个游标、
+ *  重复发同一个键。[SyncLock.withLock] 非内联，所以用返回值表达，不用块内 `return`。 */
+private fun nextRollingStep(lane: RollingLane): RollingStep? =
+    rollingLaneLock.withLock {
+        if (rollingLanes[lane.chapter] !== lane) return@withLock null
+        val s = lane.steps.getOrNull(lane.cursor) ?: return@withLock null
+        lane.cursor = lane.cursor + 1
+        s
+    }
+
+/** 往池里放至多 [budget] 步。任务体的 `finally` 每次再调一次（budget=1），于是稳态是
+ *  「在途 2 + 队列 1」。已换代的链取不到步，自然停止补派。
+ *
+ *  被抢占（[notifyFlip] 的 `cancelLowerThan(PRIO_FLIP)`）时不补派：补派会在抢占刚发生完的
+ *  空池里立刻塞回一个第 4 档任务，抵消抢占。判据用协程自身的 `isActive`——任务被取消时为 false。 */
+private fun pumpRolling(lane: RollingLane, budget: Int) {
+    var issued = 0
+    while (issued < budget) {
+        val step = nextRollingStep(lane) ?: return
+        scheduler.submit(TaskScheduler.Task(
+            key = step.key,
+            priority = step.priority,
+            block = {
+                try {
+                    step.body()
+                } finally {
+                    if (currentCoroutineContext().isActive) pumpRolling(lane, budget = 1)
+                }
+            },
+        ))
+        issued++
+    }
+}
+
+/** P2.1: disk-path neighbor prefill after a landing (rolling-dispatch edition). No-op on the temp
+ *  path (its own prefill owns it) and without a table.
  *  The whole neighbor SEQUENCE comes from [neighborSequence] (原则 §3.1): d=1 direction side at
  *  第2档, d=1 other side at 第3档, d≥2 at 第4档, and a d=1 neighbor falling OUTSIDE this chapter
  *  becomes a full-layout of the adjacent chapter at that side's tier (原则 §3.3).
+ *  The sequence is **rolled** through [pumpRolling] — 原则 §第二优先级 says 「串行排全章」, and
+ *  the pool (2 slots) is the only concurrency source; what changed is that the rest of the sequence
+ *  is no longer *submitted* up front. A new landing in the SAME chapter installs a fresh lane and the
+ *  old chain stops at its next step (same-key submit still cancels the in-flight twin); a landing in a
+ *  DIFFERENT chapter gets its own lane and leaves this one alone.
  *  No start delay (R18 doctrine: cancel promptly instead of waiting out bursts). */
 private fun scheduleWindowPrefill(unit: ChapterUnit, targetPage: Int, dir: Int) {
     val table = unit.paginationTable ?: return
@@ -1720,15 +1901,21 @@ private fun scheduleWindowPrefill(unit: ChapterUnit, targetPage: Int, dir: Int) 
     val contentW = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
     val contentH = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
     val hash = LayoutParamKey.fromProfile(profile, contentW, contentH).hash()
-    // 原则 §3.1：一次派发整段邻页序列。出队次序 = 优先级次序（第2/3/4档，d=1 越界处为跨章兜底）。
+    // 原则 §3.1：整段邻页序列按 +1、−1、+2、−2…… 排到章尾。**滚动派发**，不再一次性全 submit
+    // （[pumpRolling]）：旧的写法把 151 页的章变成 150 个 `pg:` 任务同时躺在池队列里，代价有三——
+    //  ① 每次落位再来一次「全序列同键替换」= O(序列长) 的全队列扫描 + 同样多的协程启动去抢
+    //    调度器锁（`submit` 每次一个 `scope.launch`），真机日志里这是每次落位几百 ms 的纯开销；
+    //  ② 队列深度 = 序列长度，池只有 2 槽时后面 148 个任务是纯占位；
+    //  ③ 与总则「串行排全章」的字面要求相悖。
+    val steps = ArrayList<RollingStep>(total + 2)
     for (item in neighborSequence(targetPage, total, dir, chapterIdx, lastChapter)) {
         when (item) {
-            is NeighborItem.Page -> scheduler.submit(TaskScheduler.Task(
+            is NeighborItem.Page -> steps.add(RollingStep(
                 key = "pg:$chapterIdx:${item.index}",
                 priority = item.tier,
                 // R17-proven shape: only the 第2档 side assembles (fits the flip cadence); the
                 // other sides stay L2-warmed. Doubling assembly per landing cost more than it covered.
-                block = {
+                body = {
                     prefillPageTask(
                         chapterIdx, item.index, targetPage,
                         assemble = item.tier == TaskScheduler.PRIO_PAGE_NEXT,
@@ -1742,14 +1929,22 @@ private fun scheduleWindowPrefill(unit: ChapterUnit, targetPage: Int, dir: Int) 
                 // 塑形是对的（指针动了旧的就没意义），对整章全量则是灾难——每次落位都重启一遍几秒的
                 // 整章活，两个槽被长期占死，第 7 档的章扫描永远排不上。紧急度已由在途那个满足了。
                 if (scheduler.runningKeys.contains(edgeKey(item.chapter))) continue
-                scheduler.submit(TaskScheduler.Task(
+                steps.add(RollingStep(
                     key = edgeKey(item.chapter),
                     priority = item.tier,
-                    block = { b2ChapterTask(item.chapter, bc, contentW, contentH, hash) },
+                    body = { b2ChapterTask(item.chapter, bc, contentW, contentH, hash) },
                 ))
             }
         }
     }
+    if (steps.isEmpty()) return
+    val lane = RollingLane(chapterIdx, steps)
+    installRollingLane(lane)
+    Logger.w(
+        logTag,
+        "pg rolling ch=$chapterIdx page=$targetPage dir=$dir steps=${steps.size} window=$ROLLING_WINDOW",
+    )
+    pumpRolling(lane, budget = ROLLING_WINDOW)
 }
 
 /** d=1 章外兜底，**临时表侧**（原则 §3.3）。与 [scheduleWindowPrefill] 的磁盘表侧同一套规则，
@@ -2595,6 +2790,14 @@ private fun finishCanonicalBackground(
         val epoch = layoutEpoch
         if (!force && epoch <= lastDispatchEpoch) return
         if (deferCanonical) return
+        // 开书闸门：整书章扫描是最低档的投机活，绝不能和锚页抢 `layoutMutex`（总则 §第一优先级）。
+        // 记账后返回；[releaseOpenGate] 在锚页排完时补派。放在 deferCanonical 之后：面板开着
+        // 的时候本来就不扫整书，没必要记账。
+        if (openAnchorGate) {
+            openGateWantsB2 = true
+            Logger.w(logTag, "B2 deferred by open gate epoch=$epoch")
+            return
+        }
         val bc = layouter as? BoxChapterLayouter ?: return
         val contentWidth = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
         val contentHeight = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
@@ -3091,7 +3294,9 @@ private fun finishCanonicalBackground(
         val cw = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
         val chh = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
         val hit = u.paginationTable?.paramHash == LayoutParamKey.fromProfile(profile, cw, chh).hash()
-        Logger.w(logTag, "jump: $where -> ch=$chapter path=${u.pathMarker} tableHit=$hit temp=${u.inProgress != null}")
+        // R20：`where == "open"` 时带上整段 open 的墙钟（`open:` 那行到落位）。
+        val tail = if (where == "open" && openT0 > 0L) " openT=${platformNowMs() - openT0}ms" else ""
+        Logger.w(logTag, "jump: $where -> ch=$chapter path=${u.pathMarker} tableHit=$hit temp=${u.inProgress != null}$tail")
     }
 
     /** Locates the first content page of (or after) [index], skipping blank/cover chapters.
@@ -3738,5 +3943,16 @@ private data class DbgLastPage(val chapter: Int, val charStart: Int, val charEnd
 /** A seam delta at or below this many chars is treated as an adjacent flip (gap/overlap); a larger
  *  jump is a page seek/locate and is not flagged as dropped content. */
 private const val SEAM_ADJACENT_MAX = 300
+
+/**
+ * R20 开书暖机块数：在章首先塑这么多块，再塑锚页。
+ *
+ * 【未证实，勿当定论】曾推断这里付掉的是 class-load/JIT/字体段落初始化等一次性固定成本，已被数据否证：
+ * 同一进程内相隔 0.7s 的两次开书，暖机代码路径与块数完全相同，耗时却差 11 倍
+ * （Rust 书 ch4 warm(3 块)=346~419ms vs ch0 warm(3 块)=30~37ms）。那 350ms 是 ch4 前 3 块
+ * （章标题 h1 + 首段）自身的真实排版开销。预热是否真的让锚页变快，尚未做过 warmB=0 的冷开书 A/B。
+ * 设为 0 即完全关闭。
+ */
+private const val OPEN_WARMUP_BLOCKS = 3
 
 private var dbgLastPage: DbgLastPage = DbgLastPage(-1, -1, -1)

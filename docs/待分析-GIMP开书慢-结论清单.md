@@ -1,0 +1,193 @@
+# 待分析清单：开书 16–22s 的实证结论
+
+> 采集时间：2026-09-29。数据来源：平板落盘日志 `日志_20260929.txt` / `日志_20260929.1.txt`
+>（`run-as orilumn.reader cat files/logs/…`，设备 vivo PA2353）。
+> 本文件只**记录已查实的结论与未决项**，不做方案；方案另起。
+>
+> **本文件被订正过两次**（§2.1）。所有订正都用 ~~删除线~~ 保留原判，不静默改写——
+> 错判本身是有用的信息：两次都栽在"给热路径加探针"上。
+
+## 0. 样本
+
+| 项 | GIMP（主样本） | Rust（健康对照，22:11 起换用） |
+| --- | --- | --- |
+| 文件 | `book_1790674291641.epub`（51.8MB，29 章） | `Rust 程序设计语言 - Steve Klabnik Carol Nichols.epub`（1.9MB，25 章） |
+| 落位章 | ch18「第14章 工具」2579 块 / 66624 字 / 151 页 | ch3–ch4，10–13 块 / 48–165 元素 |
+| 结构 | `OEBPS/styles/style.css` 21768 B / 211 规则 | `OEBPS/Styles/stylesheet.css` 3896 B / 72 规则（13 后代） |
+| **最大嵌套深度** | **624** | **33**（实测被塑块深度 2–3） |
+| 设备 | vivo PA2353，8 核 / 7.7GB，`heapgrowthlimit=256m` | 同 |
+
+换书理由：GIMP ch18 是**病态样本**（624 层嵌套），拿它当基准会把"书本身病态"和"引擎慢"搅在一起。
+Rust 用来分辨这两者——它在同一套代码上快 4 倍，说明引擎不是均匀地慢，而是被某类输入拖垮。
+
+## 1. 已定论
+
+### 1.1 磁盘表命中路径曾是负优化
+
+`path=WIN` 比 `path=TEMP` 慢一个数量级（18.7–22.7s vs 3.8–11.0s）。表已在磁盘上，命中却比重排还慢，
+说明问题不在"要不要排"，而在"命中路径排了什么"：整章全量 2579 块 = 11.93s，而只塑形 21 块的
+下一开书 = 17.50s。排得少的反而更慢 → 命中路径里有与块数无关的开销（见 §2.1）。
+
+### 1.2 根因一：开书时 B2/B1 抢 `layoutMutex`
+
+`TabletReaderHost.open()` 里 `requestWholeBookRelayout()` 排在 `locateStart()` **之前**，29 章 B2
+全量活塞进池；`startAnchorStream` 尾部又 `dispatchB1` + `requestWholeBookRelayout(force = true)`
+一次。锚页排版期间两个槽都被整章活占住，而 `ensureMarkup`（解析）与 `ensureChapterLayout`（排版）
+共用同一个全局 `layoutMutex`。日志佐证：`b2:16` 堵 `layoutMutex` **15.9s**。
+
+违反总则第 1 条（目标页第一优先）。**已修**（开书闸门，`openAnchorGate` / `releaseOpenGate`）。
+
+### 1.3 根因二：轻路径逐块懒解析，`styleCache` 每次 `prepareLight` 重置
+
+- `styleCache` / `inlineMaps` 是 `LightPrepare` 私有（`BoxChapterLayouter.kt` 内），
+  `ensurePageRangeShaped` 每次冷翻页重建 `prepare` → 缓存全丢；只有 `unitShapeCache` 跨页保留。
+- 后台预排的形状命中率为 **0**：`l2hits=0/17`——预排塑出来的形状一个都没被复用。
+
+~~轻路径 278ms/块 vs 重路径 5.3–5.6ms/块（差 ~50×）~~ —— **这条已订正**：278ms/77ms/255ms 是
+**最坏页**的数，不是典型值。实测每块塑形成本分布（同书同章）：ch68 5ms/块、ch0 2ms/块、
+ch1 117ms/块、ch18 page7 77ms/块、ch18 page8 **255ms/块**，全样本中位 105ms/块。
+**同一本书同一章 page7 vs page8 差 3.3 倍**——所以不存在一个"轻路径每块成本"可优化。
+
+### 1.4 CSS 级联深度假设：已否证
+
+曾怀疑 `StyleComputer.resolve`（`css/StyleComputer.kt`）缓存命中也走 O(depth)、
+`Cascade.winningDeclarations` 遍历全部选择器、`Selector.matchesChain` 的 `DESCENDANT` 分支扫全量祖先，
+是 624 层嵌套的代价。**已否证**：R20 埋点把 `shape` 段拆成 CSS 级联与 Skia 断行后，Rust 锚页
+`sStyles=1–4ms` / `sSkia=24–28ms`（10 块 / 48 元素 / 深度 3），GIMP 锚页 `sStyles=32–43ms` /
+`sSkia=48–53ms`（13 块 / 165 元素）。CSS 级联在任何一本上都不是瓶颈，这条线索可以放下了。
+
+## 2. §2.1 原结论，两次订正
+
+### 2.1 `pgBackfill` 3.5–11.6s —— ~~**已定性：GC 停顿，不是这段代码慢**~~ **最终结论：是实参求值，真活**
+
+按代码看，`pgBackfill` 对应的 `backfillBlockRanges` 只是 1 次 `PageSlice` 拷贝 + 每页 2 次二分，
+亚毫秒级，但真机稳定测到 8.5–11.8s。**两次错判都栽在探针上**：
+
+**错判 ①（"GC 停顿"）**：在 `pgBackfill` 段前后各采一次 `Runtime` 堆，得
+`pgHeap=63->52MB free=1->20MB`，据此判"free 只在 GC 里被补满，所以 9s 是 ART 在回收"。
+**探针本身就是那次 GC**：ART 的 `Runtime_nativeFree` 实现是
+`CollectGarbage(clear_soft_references = true)` **之后**才返回可用字节数。单次 ≈660ms，
+两次 ≈1.3s——恰好等于它所在那一段的墙钟。堆信息真实，但"墙钟里有 GC"是探针自己加的。
+（`java.lang.management` 在 Android app classloader 里也不存在，实机 `NoClassDefFoundError`。）
+
+**错判 ②（"线程在算"）**：改用 `Debug.threadCpuTimeNanos()` 取线程 CPU 时间，得
+`pgCpu=1226ms` vs 墙钟 `pg=1232ms`，看着像真在算。**该调用同样比被测对象贵**：走 VMDebug 落
+`/proc/self/task/<tid>/stat`，vivo PA2353 实测**进程内首次 ≈1.2s、之后每次 ≈27ms**。
+
+**最终定位**：把边界再拆一层即见分晓。
+
+```
+pg-edge args=1251ms call1=0ms call2=0ms starts=172 blocks=172 chars=20016
+pg-edge args=17ms   call1=0ms call2=0ms starts=8   blocks=8   chars=587
+```
+
+函数本体 0ms（且是进程内首次调用，类加载/JIT 也在窗口内），**1251ms 全在"求实参"**，
+且随章规模线性（20016 字 → 1251ms；587 字 → 17ms，约 7.3ms/块）。
+
+**真凶**：`BoxChapterLayouter.kt` 的 `LightPrepare.totalChars` 写成了计算属性——
+
+```kotlin
+val totalChars: Int get() = markupLeaves.sumOf { NormalFlowLayout.styledCharAdvance(
+    it, { e -> styleComputer().resolve(e, styleCache) }, lightClassify(), hidden, genOf).toInt() }
+```
+
+即"对全章每个块重跑一遍 CSS 级联 + 文本前进宽度测量"。而它恰好是
+`incrementalLayoutForPage` 里 `backfillBlockRanges` 的**实参**，于是**每次开书重算一遍全章**。
+GIMP 的 `pgBackfill=9705ms` 就是这个（2579 块 × 3.8ms/块 ≈ 9.8s）。
+
+**已修**：`globalCharStarts` 本就是同一批 `styledCharAdvance` 的前缀和（`computeStructure` 与重路径
+`ChapterPrepareResult` 同一式），故 `sum == starts.last() + 末叶 advance`——172 次求和变 1 次，约 7ms。
+`by lazy` 顺带让重复访问免费；`starts.size != n` 时退回原口径兜底。
+
+> 方法论教训（已写进 `backfillBlockRanges` 注释）：**给热路径加探针前，先量探针自身**。
+> 本次两个探针的自身成本都高于被测对象一两个数量级，且都表现为"被测代码在变慢"。
+
+### 2.2 断点续（checkpoint resume）
+
+`TaskScheduler` 只有 `cancel()`，**没有 suspend/resume**。
+
+- `b2ChapterTask` 在**块间**有 checkpoint，放弃延迟 ≈5ms——够及时，但整趟 16–28s 进度全丢，
+  抢占后必须从块 0 重来。
+- `ensureMarkup` 在 `layoutMutex` 内**不可中断**（锁等待可取消，进了临界区就不能），
+  这是 §1.2 里 15.9s 堵锁的直接原因之一。
+
+待设计：`ChapterUnit` 增加 canonical 进度字段，`fullLayout` 现有的块间 checkpoint 从"仅 abandon"
+升级为"存进度 + 可续"。
+
+### 2.3 B2 同样是"一次性全部 submit"
+
+本次只把**邻页全章预排**（`scheduleWindowPrefill` 的 `pg:<章>:<页>` 序列）改成了滚动派发
+（同时最多 2 个，跑完一个补一个）。`requestWholeBookRelayout` 仍一次性把 29 章 B2 全部 submit
+（队列深度 29）。是否也改滚动，待邻页那版上机测过再定——两条队列优先级不同
+（邻页第 2/3/4 档 vs B2 第 7 档），共用滚动窗口可能把 B2 饿死。
+
+## 3. 修 `totalChars` 后的实测（2026-09-29 22:39，Rust 书，磁盘表命中）
+
+| 项 | 修 `totalChars` 前 | 修后 |
+| --- | --- | --- |
+| 开书总时长 | 2.70s | **1.07s**（1.06 / 1.07 / 1.08） |
+| 锚页 `pg` | 1252ms | **4–5ms** |
+| `DISK-HIT` 排版段 | 2161ms | **505–550ms** |
+| 锚页真实排版（`sStyles`+`sSkia`） | 88ms | **31ms** |
+| 锚页塑形段 | 304ms | **109–128ms** |
+| 暖机段 `warm` | 350ms | 323–419ms（ch0 同代码只要 30–37ms，见 §4.1） |
+
+`:engine-skia:jvmTest` 全绿。剩下的最大一笔是**暖机段 350ms**（开书路径专属，3 块），占开书 33%；
+但这笔的性质已被否证为"固定成本"，值不值待 A/B（§4.1）。
+
+## 4. 未决项
+
+### 4.1 暖机段 350ms：原定论已被否证，且是否赚未验证
+
+**先订正一条错判。** 曾断言这 350ms 是 class-load / JIT / 字体段落初始化这类**一次性固定成本**，
+依据是"ch4 锚页 8 块 1106ms vs 暖后 ch0 同 8 块 81ms"。这条**不成立**，两条反证：
+
+1. **同一进程内暖机耗时差 11 倍。** 一次开书里先落 ch4 再落 ch0，暖机代码路径、块数（都是 3 块）、
+   进程冷热都相同，耗时却是 ch4 `warm=346~419ms` 对 ch0 `warm=30~37ms`（R22–R25 逐次复现）。
+   固定成本不会随章节内容变 11 倍。
+2. **固定成本模型解出负单价。** 同一章同一调用内 `warm(3 块)=350ms`、`anchor(13 块)=304ms`。
+   设 `F+3p=350`、`F+13p=304`，解得 `p=-4.6ms/块`。模型与数据矛盾。
+
+所以那 350ms 是 **ch4 前 3 块（章标题 h1 + 首段）自身的真实排版开销**，不是"暖机"。
+ch0 前 3 块只花 30ms 正说明：这段开销随内容走，不随进程走。
+
+**仍未验证的是它值不值。** 预热是否真让锚页变快，没有做过 `OPEN_WARMUP_BLOCKS=0` 的冷开书 A/B
+（历史上 1106ms 那组同时还带着 `totalChars` bug 和开书闸门，不可比）。三种可能：
+锚页不变快（预热纯浪费，删掉可再省 350ms）、锚页快但没 350ms 那么多（净赚）、锚页确实快 350ms 以上（净赚）。
+**下一次装机做 `= 0` 对照即可定论，一次装机，不要再猜。**
+
+### 4.2 GIMP 未复测
+
+按 7.3ms/块 推，2579 块光 `totalChars` 一项就是 ~9.7s，GIMP 开书应能从 15.1s 掉到 5s 附近。
+**未实测**——换书是为了脱离病态样本，不是因为 GIMP 不该修。
+
+### 4.3 两次跨会话基线不可比
+
+早期记录的"21.4s → 14.2s"作废：21.4s 是跨会话基线。同会话真实对照为旧包
+19.4 / 22.5 / 12.8 / 22.1s vs 新包 15.0–16.0s（中位 15.1s），新包更快且方差小一个数量级
+（极差 1.0s vs 9.6s）。
+
+### 4.4 既有测试失败（非本次引入）
+
+`CrossChapterPreflightProbeTest > a flip landing prewarms both neighbors … FAILED`
+（`awaitPrepared(0)` 15s 超时）。在 `a86e8ee` 之前即失败。（最近一次 `:engine-skia:jvmTest`
+未复现，需确认该测试属于哪个模块。）
+
+## 5. 诊断口径约定
+
+- 端到端用 `tap-flip start → tap-flip done`、开书用 `open:` → `jump: open ->`。
+- 后台每页成本用 `win-prefill` / `asm` 的 `shape=`，但**必须配 `sStyles` / `sSkia` 一起看**：
+  `shape` 里含暖机、含 `listMarkerFor` / `floatLeadAt` 等未拆项，只有 `sStyles`+`sSkia` 是真排版。
+- **不要再拿 `pgBackfill` / `pg` 当代码耗时**——它量的是"求实参 + 函数本体"，实参里曾藏着
+  全章重算（§2.1）。`bf copy=/calc=` 那对计时（0ms）是这条路径的护栏。
+- 每块塑形成本必须按块数归一后看，且**必须同书同章比**（§1.3 的订正）。
+
+## 6. 改动落点与层级
+
+| 文件 | 改动 | 层级 |
+| --- | --- | --- |
+| `BookDocumentController.kt` | 开书闸门、滚动派发、`OPEN_WARMUP_BLOCKS` 暖机、`openT` 基线 | 排版层（上）分页调度 |
+| `BoxChapterLayouter.kt` | `LightPrepare.totalChars` 恒等式 + `by lazy`、`backfillBlockRanges` 的 `bf` 护栏、`ShapeProbe`（`sStyles`/`sSkia`/`sDepth`）、锚页暖机 | 排版层（下）分层引擎基础设施 |
+| `css/*` | **未改动**（§1.4 已否证） | — |
+
+未跨层。

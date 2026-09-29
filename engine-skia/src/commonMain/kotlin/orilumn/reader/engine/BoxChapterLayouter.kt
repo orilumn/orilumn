@@ -67,6 +67,8 @@ enum class PaginationMode { LINE_DISK, BLOCK_TEMP }
 /** R6: 平台 CPU 核数（调度塑形槽预算用；iOS actual 后续补）。 */
 internal expect fun platformCpuCount(): Int
 
+
+
 /**
  * Result of the "fast prepare" phase of chapter layout — everything that can be done for the
  * whole chapter without invoking any per-block text shaping (the expensive part).
@@ -605,12 +607,19 @@ class BoxChapterLayouter(
      * @param globalCharStarts leaf i's first global char offset (ascending).
      * @param totalBlocks total leaf count of the chapter.
      * @param totalChars total chapter character count.
+     * @param only range of indices to recompute. `null` = all (canonical path, where the input
+     *   carries no block ranges at all). The **incremental** path passes the shaped window only:
+     *   every other slice was copied straight off the disk table with its own persisted block
+     *   range (see [incrementalLayoutForPage] step 1), so recomputing those is pure waste — and it
+     *   is not a small waste: 151-page chapter × 2 binary searches × **every single page shape**,
+     *   on the foreground open path.
      */
     private fun backfillBlockRanges(
         slices: List<PageSlice>,
         globalCharStarts: LongArray,
         totalBlocks: Int,
         totalChars: Int,
+        only: IntRange? = null,
     ): List<PageSlice> {
         // 未 prepare 的章直接透传无块范围 slices——以往静默，上游错块且不可查。
         // 调用方两处恒传已 prepare 的 globals，进来空即调用方 bug。抛。
@@ -630,14 +639,50 @@ class BoxChapterLayouter(
             }
             return lo.coerceAtMost(totalBlocks - 1).coerceAtLeast(0)
         }
-        return slices.map { slice ->
+        fun withRange(slice: PageSlice): PageSlice {
             val blockStart = blockOf(slice.charStart.coerceAtLeast(0))
             val blockEnd = if (slice.charEnd >= totalChars) totalBlocks
             else (blockOf((slice.charEnd - 1).coerceAtLeast(0)) + 1).coerceAtMost(totalBlocks)
             val lo = blockStart.coerceAtLeast(0)
             val hi = blockEnd.coerceAtMost(totalBlocks).coerceAtLeast(lo + 1)
-            slice.copy(blockStart = lo, blockEndExclusive = hi.coerceAtMost(totalBlocks))
+            return slice.copy(blockStart = lo, blockEndExclusive = hi.coerceAtMost(totalBlocks))
         }
+        // R21 诊断：把本函数拆成「拷 list」与「算块范围」两笔墙钟，并打出三个入参规模。
+        // 本函数本体恒为 0ms（Rust 21 页/172 块实测），留这对计时当护栏：**哪天它自己不再是 0ms，
+        // 立刻能看出是 list 拷贝还是块范围计算出了事**，而不必再等外层 `pgBackfill` 报一个
+        // 归因不明的数字。
+        //
+        // 附：此函数曾两次被误判，教训记在这里免得重犯。
+        //  (1) 「是 GC 停顿」——错。同期试过在窗口内取 `Runtime.freeMemory()` 做堆采样，而 ART 的
+        //      实现是 `CollectGarbage(clear_soft_references=true)` **之后**才返回可用字节数，探针
+        //      自己就是一次全量阻塞 GC（单次 ≈660ms），把窗口量成了 1.3s。
+        //  (2) 「是线程在算」——也错。改用 `Debug.threadCpuTimeNanos()` 后 cpu≈wall，看着像真在算；
+        //      但该调用走 VMDebug 落 /proc，vivo PA2353 实测**进程内首次 ≈1.2s、之后每次 ≈27ms**，
+        //      同样是探针自己的钱。`java.lang.management` 在 app classloader 里干脆不存在。
+        // 真凶在**实参求值**上（[LightPrepare.totalChars] 每次全章重算），已修；本函数始终清白。
+        val dT0 = orilumn.reader.time.platformNowMs()
+        val out: List<PageSlice>
+        var dOnly = -1
+        if (only == null) {
+            out = slices.map(::withRange)
+        } else if (only.isEmpty()) {
+            out = slices
+        } else {
+            val copy = slices.toMutableList()
+            val dT1 = orilumn.reader.time.platformNowMs()
+            dOnly = only.count()
+            for (i in only) {
+                if (i in copy.indices) copy[i] = withRange(copy[i])
+            }
+            val dT2 = orilumn.reader.time.platformNowMs()
+            Logger.w("Orilumn.Engine", "bf copy=${dT1 - dT0}ms calc=${dT2 - dT1}ms " +
+                "slices=${slices.size} only=$dOnly blocks=$totalBlocks")
+            return copy
+        }
+        val dT1 = orilumn.reader.time.platformNowMs()
+        Logger.w("Orilumn.Engine", "bf copy=0ms calc=${dT1 - dT0}ms " +
+            "slices=${slices.size} only=$dOnly blocks=$totalBlocks full=1")
+        return out
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -770,6 +815,8 @@ class BoxChapterLayouter(
         pagesToShape: Int = 4,
         cache: MutableMap<Int, ParagraphShapeRef>? = null,
         prefillL2: Map<Int, ParagraphShapeRef>? = null,
+        /** R20：锚页前先塑章首这么多块做暖机（0 = 关）。开书路径显式传，别的调用点不动。 */
+        warmupBlocks: Int = 0,
     ): ChapterLayouter.ChapterLayoutProduct {
         val totalPages = table.pages.size
         val startIdx = targetPage.coerceAtLeast(0)
@@ -807,12 +854,43 @@ class BoxChapterLayouter(
         // 3. Shape all blocks in that range (reusing already-shaped blocks from [cache]).
         // R3: l2hits counts published-neighbor hits (diagnostic for prefill effectiveness).
         var l2hits = 0
+
+        // R20 预热：开书锚页是冷进程里的**第一次** shape，先在章首塑 [0, warmupBlocks) 一小块，
+        // 两笔分别计时，锚页净变快才算赚。warmupBlocks=0 即完全关闭（默认），由调用方显式开。
+        //
+        // 【未证实，勿当定论】原注释写"付掉 class-load / JIT / 字体段落初始化这些固定项"——已被数据否证：
+        // 同一进程内相隔 0.7s 的两次开书，warmup 代码路径与块数完全相同，耗时却是
+        // ch4 warm(3 块)=346~419ms 对 ch0 warm(3 块)=30~37ms，差 11 倍。
+        // 固定成本模型（warm=F+3p、anchor=F+np）解出 p<0，自身就不成立。
+        // 也就是说这 350ms 是 ch4 自身前 3 块（章标题 h1 + 首段）的真实排版开销，
+        // 不是"暖机"。它是否换来锚页变快尚未做过 warmB=0 的冷开书 A/B，
+        // 在那之前这段预热只能算对锚页有利的一种猜测，见 docs/待分析-GIMP开书慢-结论清单.md。
+        var tWarm0 = 0L
+        var tWarm1 = 0L
+        var warmBlocks = 0
+        if (warmupBlocks > 0) {
+            val warmHi = warmupBlocks.coerceAtMost(prepare.totalBlocks)
+            if (warmHi > 0) {
+                tWarm0 = orilumn.reader.time.platformNowMs()
+                for (i in 0 until warmHi) tempShape(cache, prepare, i, profile, prefillL2)
+                tWarm1 = orilumn.reader.time.platformNowMs()
+                warmBlocks = warmHi
+            }
+        }
+
+        val probe = ShapeProbe()
+        val outerProbe = shapeProbe
+        // 注意置位点在暖机**之后**：probe 只统计锚页自己那几块（sBlocks 等于 blocks 数），
+        // 暖机的 3 块不计入，故 warm 的 CSS/Skia 成分目前无数据。
+        // 要拆 warm 需把这两行上移到暖机之前并分成两个 probe，届时 sBlocks 会出现 3+n。
+        shapeProbe = probe
         val tShape0 = orilumn.reader.time.platformNowMs()
         val localShapes = (blockLo until blockHi).map {
             if (cache?.get(it) == null && prefillL2?.get(it) != null) l2hits++
             tempShape(cache, prepare, it, profile, prefillL2)
         }
         val tShape1 = orilumn.reader.time.platformNowMs()
+        shapeProbe = outerProbe
         // (l2hits counted above; reported in the asm breakdown below.)
 
         // 4. Build merged local FlowedLine stream covering all shaped blocks (P6-a2 R6 前视 carry-in).
@@ -928,14 +1006,28 @@ class BoxChapterLayouter(
         // Recompute the block ranges from the (possibly re-paginated) char ranges — the same
         // authoritative char→block mapping the canonical path used, so the two paths' block ranges can
         // never drift and disk-hit incremental shaping always knows which blocks each page needs.
-        val withBlocks = backfillBlockRanges(slicesWithLine, prepare.globalCharStarts, prepare.totalBlocks, prepare.totalChars)
+        // ONLY the re-paginated window: the other slices came off the disk table already carrying
+        // their persisted block range (step 1), so recomputing all N pages on every page shape was
+        // pure repeated work on the open path.
+        val tPgLoop1 = orilumn.reader.time.platformNowMs()
+        val withBlocks = backfillBlockRanges(
+            slicesWithLine, prepare.globalCharStarts, prepare.totalBlocks, prepare.totalChars,
+            only = startIdx until endIdx,
+        )
         val tPg1 = orilumn.reader.time.platformNowMs()
         // R19: assembly segment breakdown (permanent diagnostic) — shape/lines/skia/tbl/box/pg.
+        // R20 附加：sStyles/sSkia 把 shape 段拆成 CSS 级联与 Skia 断行，sDepth 记被塑块最大嵌套深度，
+        // warm 记锚页前那笔暖机。**不要**往这里加堆/CPU 采样——已实测两者探针自身比被测对象贵
+        // （见 [backfillBlockRanges] 里 R21 诊断注释），会把这一行自己变成瓶颈。
         Logger.w("Orilumn.Engine", "asm ch=${table.chapterIndex} page=$targetPage " +
             "shape=${tShape1 - tShape0}ms lines=${tLines1 - tLines0}ms skia=${tSkia1 - tSkia0}ms " +
             "tbl=${tTbl1 - tTbl0}ms box=${tBox1 - tBox0}ms pg=${tPg1 - tPgFind0}ms " +
             "pgFind=${tPgPaginate0 - tPgFind0}ms pgPaginate=${tPgPaginate1 - tPgPaginate0}ms " +
-            "pgBackfill=${tPg1 - tPgPaginate1}ms linesN=${localLines.size} " +
+            "pgLoop=${tPgLoop1 - tPgPaginate1}ms " +
+            "pgBackfill=${tPg1 - tPgLoop1}ms " +
+            "sStyles=${probe.stylesMs}ms sSkia=${probe.skiaMs}ms sBlocks=${probe.blocks} sEls=${probe.elements} sDepth=${probe.maxDepth} " +
+            "warm=${tWarm1 - tWarm0}ms warmB=$warmBlocks " +
+            "linesN=${localLines.size} pagesN=${table.pages.size} " +
             "l2hits=$l2hits/${blockHi - blockLo}")
 
         // Debug: reconcile every shaped (incremental) page's vertical extent with the content capacity,
@@ -1484,14 +1576,57 @@ class BoxChapterLayouter(
         return backPage
     }
 
+    /**
+     * R20 塑形成本探针（诊断用）。把 `shape` 段拆成两笔：**CSS 级联**（[LightPrepare.inlineStyles]
+     * 的 resolve 循环）与 **Skia 断行**（[shapeLeaf] 本体）。另记两块——被塑元素数与最大嵌套深度，
+     * 后者用来验证「深层嵌套把 resolve 拖成 O(depth)」这一假设。
+     *
+     * 挂在 layouter 实例上而非参数上：塑形全程在 layoutMutex 内单线程串行，[incrementalLayoutForPage]
+     * 进入时置位、形状段结束即清空，嵌套调用（rebuildLocalLines 的回看 lambda）自动记进同一笔。
+     */
+    private class ShapeProbe {
+        var stylesMs = 0L
+        var skiaMs = 0L
+        var blocks = 0
+        var elements = 0
+        var maxDepth = 0
+    }
+
+    private var shapeProbe: ShapeProbe? = null
+
     /** Shapes one block's [ParagraphShape] for the temp-page path. */
     private fun shapeBlock(
         prepare: LightPrepare,
         i: Int,
         leaf: LayoutBox,
         profile: TypographicProfile,
+    ): ParagraphShapeRef {
+        val probe = shapeProbe ?: return shapeBlockWith(prepare, i, leaf, profile, prepare.inlineStyles(i))
+        // 探针开启：CSS 级联与 Skia 断行分别计墙钟；深度只数一次（每块 O(depth)，相对两侧开销可忽略）。
+        val t0 = orilumn.reader.time.platformNowMs()
+        val styles = prepare.inlineStyles(i)
+        val t1 = orilumn.reader.time.platformNowMs()
+        val r = shapeBlockWith(prepare, i, leaf, profile, styles)
+        val t2 = orilumn.reader.time.platformNowMs()
+        probe.stylesMs += t1 - t0
+        probe.skiaMs += t2 - t1
+        probe.blocks++
+        probe.elements += styles.size
+        var d = 0
+        var n: MarkupElement? = leaf.el
+        while (n != null) { d++; n = n.parent }
+        if (d > probe.maxDepth) probe.maxDepth = d
+        return r
+    }
+
+    private fun shapeBlockWith(
+        prepare: LightPrepare,
+        i: Int,
+        leaf: LayoutBox,
+        profile: TypographicProfile,
+        styles: Map<MarkupElement, orilumn.reader.engine.css.ComputedStyle>,
     ): ParagraphShapeRef = shapeLeaf(
-        leaf, prepare.inlineStyles(i), profile,
+        leaf, styles, profile,
         listMarkerFor(leaf.el, prepare::resolveStyle, prepare.firstCarrierLeaves),
         // P3-a: 内联表只含子树，祖先 opacity 经懒级联回退（与重路径整表同值）。
         ancestorStyleOf = prepare::resolveStyle,
@@ -2255,7 +2390,37 @@ class LightPrepare(
         }
     }
     // P1-2: 与 computeStructure 的 globalCharStarts 同式（样式化归一长度）。
-    val totalChars: Int get() = markupLeaves.sumOf { NormalFlowLayout.styledCharAdvance(it, { e -> styleComputer().resolve(e, styleCache) }, lightClassify(), hidden, genOf).toInt() }
+    /**
+     * 全章字符总数 = 各叶 `styledCharAdvance` 之和。
+     *
+     * **不能**写成 `markupLeaves.sumOf { styledCharAdvance(...) }` 每次现算。那是全章一遍 CSS 级联
+     * ＋文本前进宽度测量：Rust 书 172 块实测 **1.25s**（≈7.3ms/块，锚页开书的一半时间就花在这
+     * 一个实参上），GIMP 2579 块实测 9.7s。而 [BoxChapterLayouter.incrementalLayoutForPage] 的
+     * `backfillBlockRanges` 实参每次开书都要它一次，等于每开一次书就重算一遍全章。
+     *
+     * 改走 `globalCharStarts` 的恒等式：[computeStructure] 与重路径 [ChapterPrepareResult] 都用
+     * `accumulateCharStarts(leaves.map { styledCharAdvance(同一式) })`，即 `starts` 就是同一批
+     * advance 的前缀和，于是 `sum == starts.last() + advance(末叶)`——只需**一次** advance，约 7ms。
+     * 该恒等式与 `blockOf` 的二分共用同一前提（`starts` 与活级联同步，见 [globalCharStarts]），
+     * 不引入新的不一致来源；`by lazy` 顺带让重复访问也免费。
+     */
+    val totalChars: Int by lazy {
+        val starts = globalCharStarts
+        val n = markupLeaves.size
+        if (starts.isEmpty() || n == 0 || starts.size != n) {
+            // 结构与叶集不同源（不该发生）。退回归原先的现算口径，行为与改动前逐字节一致。
+            markupLeaves.sumOf {
+                NormalFlowLayout.styledCharAdvance(
+                    it, { e -> styleComputer().resolve(e, styleCache) }, lightClassify(), hidden, genOf,
+                ).toInt()
+            }
+        } else {
+            starts.last().toInt() + NormalFlowLayout.styledCharAdvance(
+                markupLeaves[n - 1], { e -> styleComputer().resolve(e, styleCache) },
+                lightClassify(), hidden, genOf,
+            ).toInt()
+        }
+    }
 
     /** 轻路径块判定：与 computeStructure 同门（有 display 声明才读 display:block）。 */
     internal fun lightClassify(): orilumn.reader.engine.laying.BlockClassify =

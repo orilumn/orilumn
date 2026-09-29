@@ -3135,7 +3135,14 @@ private fun finishCanonicalBackground(
             Logger.e(logTag, "linkTargetAt inconsistent tables ch=$chapter idx=$idx blocks=${prepare.totalBlocks}")
             return null
         }
-        val href = prepare.linkRangesAt(idx)
+        // Link ranges depend only on params (fresh cascade); the tap only selects the block.
+        // Memo per chapter + param hash so repeat taps on one block skip the styled segmentation.
+        val rangeKey = currentParamHash()
+        if (unit.linkRangeKey != rangeKey) {
+            unit.linkRangeCache.clear()
+            unit.linkRangeKey = rangeKey
+        }
+        val href = unit.linkRangeCache.getOrPut(idx) { prepare.linkRangesAt(idx) }
             .firstOrNull { charOffset - leafStart in it.start until it.endExclusive }?.href ?: return null
         val spineHref = book?.spine?.getOrNull(chapter)?.href ?: return null
         val indexByHref = spineIndexByNormalizedHref() ?: return null

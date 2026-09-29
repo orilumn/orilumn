@@ -108,6 +108,12 @@ class ChapterUnit(
      *  neighborhood on every store; entries carry their table hash so stale params never hit.
      *  Cleared on [invalidateLayout]. Live binding still goes through [bind]/[bindFull] only. */
     val pageCache = HashMap<Int, PageProduct>()
+    /** Tap-driven link ranges per block (`linkTargetAt`): ranges depend only on params (fresh
+     *  cascade), the tap only selects the block. Keyed by [linkRangeKey]; cleared on
+     *  [invalidateLayout]. */
+    val linkRangeCache = HashMap<Int, List<orilumn.reader.engine.layout.LinkRange>>()
+    var linkRangeKey: Long? = null
+
     data class PageProduct(
         val layout: BookLayout,
         val slices: List<PageSlice>,
@@ -202,6 +208,8 @@ class ChapterUnit(
         tempRenderLayout = null
         blockShapeCache = null
         pageCache.clear()
+        linkRangeCache.clear()
+        linkRangeKey = null
         shapedPageFrom = -1
         shapedPageTo = -1
         laidOut = false

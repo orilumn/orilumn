@@ -43,7 +43,7 @@ class PaginationCacheTest {
 
     @Test
     fun `codec round-trips all fields`() {
-        val read = PaginationCacheCodec.decode(PaginationCacheCodec.encode(sampleTable()))
+        val read = PaginationCacheCodec.decode(PaginationCacheCodec.encode(sampleTable(), 18), 18)
         assertNotNull(read)
         val t = read!!
         assertEquals(7, t.chapterIndex)
@@ -66,14 +66,14 @@ class PaginationCacheTest {
 
     @Test
     fun `decode rejects empty-corrupted-and-wrong-version bytes`() {
-        assertNull(PaginationCacheCodec.decode(ByteArray(0)))
-        assertNull(PaginationCacheCodec.decode(ByteArray(8) { it.toByte() })) // invalid magic
+        assertNull(PaginationCacheCodec.decode(ByteArray(0), 18))
+        assertNull(PaginationCacheCodec.decode(ByteArray(8) { it.toByte() }, 18)) // invalid magic
         val wrongVersion = Buffer().apply {
             writeInt(0x43505442)
             writeInt(999) // schema VERSION mismatch
             writeInt(PaginationCacheCodec.LAYOUT_VERSION)
         }.readByteArray()
-        assertNull(PaginationCacheCodec.decode(wrongVersion))
+        assertNull(PaginationCacheCodec.decode(wrongVersion, 18))
     }
 
     @Test
@@ -82,10 +82,39 @@ class PaginationCacheTest {
         // differs from the current one must be rejected (treated as a miss → rebuilt uniformly).
         val stale = Buffer().apply {
             writeInt(0x43505442) // MAGIC
-            writeInt(2) // current schema VERSION
+            writeInt(3) // current schema VERSION
             writeInt(0) // layoutVersion 0 ≠ current → must be rejected
+            writeInt(18) // appVersion matches — rejection must come from the geometry gate
         }.readByteArray()
-        assertNull(PaginationCacheCodec.decode(stale))
+        assertNull(PaginationCacheCodec.decode(stale, 18))
+    }
+
+    @Test
+    fun `decode rejects a table stamped by another build`() {
+        // Build-number backstop: an upgrade with a new versionCode uniformly discards old tables,
+        // even when schema + geometry versions match.
+        val bytes = PaginationCacheCodec.encode(sampleTable(), 17)
+        assertNull(PaginationCacheCodec.decode(bytes, 18))
+        assertNotNull(PaginationCacheCodec.decode(bytes, 17))
+    }
+
+    @Test
+    fun `store isolates builds and sweepStale deletes only stale files`() {
+        val oldStore = PaginationCacheStore(FileSystem.SYSTEM, tmp.root.absolutePath.toPath(), 17)
+        val newStore = PaginationCacheStore(FileSystem.SYSTEM, tmp.root.absolutePath.toPath(), 18)
+        val ns = "book_sweep"
+        val fOld = oldStore.file(ns, 1, 111L)
+        oldStore.write(sampleTable(), fOld)
+        val fNew = newStore.file(ns, 2, 222L)
+        newStore.write(sampleTable(), fNew)
+        // The new build cannot read the old build's table (upgrade misses → reshapes).
+        assertNull(newStore.read(fOld))
+        assertNotNull(newStore.read(fNew))
+        assertEquals(1, newStore.sweepStale(ns))
+        assertFalse(FileSystem.SYSTEM.exists(fOld))
+        assertTrue(FileSystem.SYSTEM.exists(fNew))
+        // Sweep is idempotent: a second pass finds nothing stale.
+        assertEquals(0, newStore.sweepStale(ns))
     }
 
     @Test

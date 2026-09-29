@@ -50,6 +50,9 @@ class DesktopReaderHost(
     private val initialAnchor: Pair<Int, Int>? = null,
     /** 分页表磁盘缓存根（与平板同一共享 Store/参数键/失效语义；null = 禁用）。 */
     private val cacheRoot: File? = null,
+    /** 磁盘分页表构建号（与平板 versionCode 同职责：发版递增 → 旧构建的表统一失效；
+     *  桌面无 versionCode，手动维护此常量，随发版递增）。 */
+    private val diskCacheVersion: Int = DISK_CACHE_VERSION,
     /** F4b 共享字体库（用户字库 + 隐藏；`onDemandFonts` 追装与平板同式）。 */
     private val fontLibrary: orilumn.reader.data.font.FontLibrary,
 ) : ReaderHost {
@@ -71,6 +74,7 @@ class DesktopReaderHost(
         imageLoader = ImageLoader(reader),
     ).also {
         it.cacheRoot = cacheRoot?.absolutePath?.toPath()
+        it.diskCacheVersion = diskCacheVersion
         it.setViewport(viewportW.coerceAtLeast(16), viewportH.coerceAtLeast(16))
         // F4b：用户字库追装（与平板 `topUpSkiaFonts` 同式；桌面无系统衬线补装，
         // CoreText 经系统集合自行回退）；书内字体见 `onBookFonts`。
@@ -342,4 +346,9 @@ class DesktopReaderHost(
         }
 
     private fun flatToc(): List<TocItem> = flattenTocItems(toc)
+
+    companion object {
+        /** 磁盘分页表构建号：随桌面发版手动递增（职责同安卓 versionCode）。 */
+        const val DISK_CACHE_VERSION = 1
+    }
 }

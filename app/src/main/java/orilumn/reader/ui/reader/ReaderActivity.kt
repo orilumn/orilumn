@@ -250,6 +250,8 @@ class ReaderActivity : ComponentActivity() {
                     imageLoader = imageLoader,
                 )
                 c.cacheRoot = this@ReaderActivity.cacheDir.absolutePath.toPath()
+                // 磁盘分页表构建号：发版即 versionCode 递增 → 旧构建的表统一失效（见 PaginationCacheCodec）。
+                c.diskCacheVersion = orilumn.reader.BuildConfig.VERSION_CODE
                 c.setViewport(w, h)
                 // 章字体需求回调：整形前把本章命中的导入面追装进池（首绘即对，无跳变）。
                 c.onDemandFonts = { demand -> topUpSkiaFonts(demand) }

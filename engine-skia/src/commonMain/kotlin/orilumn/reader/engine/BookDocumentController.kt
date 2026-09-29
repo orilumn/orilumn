@@ -315,10 +315,16 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
      *  (C2-P0: okio Path, was `java.io.File`.) */
     var cacheRoot: Path? = null
 
+    /** Monotonic build number stamped into every persisted pagination table (Android
+     *  `versionCode`, desktop `DISK_CACHE_VERSION`; 0 = unset/legacy). Set by the host before
+     *  [open]. Tables from other builds miss on read (upgrade invalidates uniformly); stale files
+     *  are swept on open. */
+    var diskCacheVersion: Int = 0
+
     /** Shared okio pagination store over [cacheRoot] (C1-2: the retired `File` adapter's logic now
      *  lives in common [PaginationCacheStore]). Null = disk caching disabled. */
     private fun cacheStore(): PaginationCacheStore? =
-        cacheRoot?.let { PaginationCacheStore(okio.FileSystem.SYSTEM, it) }
+        cacheRoot?.let { PaginationCacheStore(okio.FileSystem.SYSTEM, it, diskCacheVersion) }
 
     /** Current book's id, used as the disk-cache namespace. Set by [open]. */
     var bookId: Long = -1L
@@ -367,6 +373,11 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
         coverHref = parsedBook.cover
         Logger.w(logTag, "open: chapters=${chapters.size} " +
             "parse=${t1 - t0}ms skeleton=${t2 - t1}ms spine0=${ctx(0)}")
+        // Version-stale disk tables (older build) can never hit again — sweep them now on a
+        // background scope so the first screen isn't blocked; the running build's tables stay.
+        if (bookId >= 0) {
+            bgScope.launch { runCatching { cacheStore()?.sweepStale("book_$bookId") } }
+        }
 
         // Restore progress (equal chapter weights)
         if (bookId >= 0 && saved != null) parseLocator(saved.locator)?.let { (ch, char) ->

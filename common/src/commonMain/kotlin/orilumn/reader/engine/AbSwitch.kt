@@ -80,6 +80,40 @@ object AbSwitch {
     fun isOn(name: String): Boolean = name in on
 
     /**
+     * R29 靶子：`regexHoist` 打开时 13 处空白切分用**预编译**的 companion 常量，
+     * 关闭时（= 生产默认）保持 R29 之前的原样——每次现场 `new Regex("\\s+")`。
+     *
+     * 起因（实测，非推断）：R28 量出 `computeStyle` 的 `cBuild` 占 `sStyles` 的 ~75%；
+     * R29 再拆发现「边」六兄弟独占 `cEdge=42ms / cBuild=58ms` 的 72%，
+     * 而这六兄弟里 13 处 `split(Regex("\\s+"))` 每次都现场 new 一个 Regex
+     * （`Pattern.compile`，同一模式被编译上千次）——代码长相上明摆着的浪费。
+     *
+     * **但第一版替代方案（手工扫描）实测更慢，已否证**（cEdge 35.5ms vs 28ms，8/8 分离）。
+     * 那批数据里两臂都已预编译，故"现场构造 `Pattern.compile` 到底多贵"至今**未测**——
+     * 这个开关就是为了直接量它。做法与 R26/R28 同一套：单一职责的运行期开关，
+     * 定论后把赢家固化、把这个开关删掉。
+     */
+    fun regexHoist(): Boolean = isOn("regexHoist")
+
+    /**
+     * R29 第三层靶子 `borderSides` **已定论并删除**（R39，详见
+     * `docs/待分析-GIMP开书慢-结论清单.md` §3b.7）。
+     *
+     * 实测（单装机交叉 8+8、锚点一致 12@21972、两臂 `eBrd=59`/`sEls=52` 逐值相同）：
+     * ```
+     *              原样      borderSides    差
+     *   eCol       5.0ms         1.0ms      -4.0ms
+     *   eSty       8.0ms         5.0ms      -3.0ms
+     *   cEdge     37.5ms        28.0ms      -9.5ms (-25%)
+     *   cBuild    57.5ms        51.0ms      -6.5ms
+     *   openT      731ms        708ms      -22ms (-3.1%)
+     * ```
+     * 改动本体已固化进 [orilumn.reader.engine.css.StyleComputer]：`parseBorderColors` /
+     * `parseBorderStyles` 走显式四槽 + 预建 key 常量，不再每次 `listOf(4)` 与
+     * `"border-$side-*"` 拼接查表。语义等价（同 key 同顺序同回退链）。
+     */
+
+    /**
      * 应用一串 `k=v` 形式的对（`warm=3`），解析失败或未识别的键**静默忽略**
      * ——测量设施不该有能力把 App 搞崩。
      */

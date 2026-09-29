@@ -920,6 +920,22 @@ class BoxChapterLayouter(
             probe.styleBuildMs += b
             probe.secondPassMs += s
         }
+        // R29：cBuild 的细分（边家族 / font-family 三连），与上面那笔独立置位。
+        val outerSplitSink = orilumn.reader.engine.css.CascadeProbe.splitSink
+        orilumn.reader.engine.css.CascadeProbe.splitSink = { e, f, _ ->
+            probe.cEdgeMs += e
+            probe.cFontMs += f
+        }
+        // R29 第三层：cEdge 内部按家族拆（box/width/color/style/radius + 声明了 border 的元素数）。
+        val outerFamilySink = orilumn.reader.engine.css.CascadeProbe.familySink
+        orilumn.reader.engine.css.CascadeProbe.familySink = { bx, wd, cl, st, rd, ab ->
+            probe.eBoxMs += bx
+            probe.eWidthMs += wd
+            probe.eColorMs += cl
+            probe.eStyleMs += st
+            probe.eRadiusMs += rd
+            probe.eAnyBorder += ab
+        }
         val tShape0 = orilumn.reader.time.platformNowMs()
         val localShapes = (blockLo until blockHi).map {
             if (cache?.get(it) == null && prefillL2?.get(it) != null) l2hits++
@@ -931,6 +947,8 @@ class BoxChapterLayouter(
         prepare.blockTimingSink = outerSink
         prepare.firstBlockMs = outerFirst
         orilumn.reader.engine.css.CascadeProbe.sink = outerCascadeSink
+        orilumn.reader.engine.css.CascadeProbe.splitSink = outerSplitSink
+        orilumn.reader.engine.css.CascadeProbe.familySink = outerFamilySink
         // (l2hits counted above; reported in the asm breakdown below.)
 
         // 4. Build merged local FlowedLine stream covering all shaped blocks (P6-a2 R6 前视 carry-in).
@@ -1069,6 +1087,9 @@ class BoxChapterLayouter(
             "sBlk=${probe.blockMs}ms sBlkF=${probe.blockFirstMs}ms sAdv=${probe.advanceMs}ms " +
             "sBsty=${probe.styleForMs}ms sBWid=${probe.widthMs}ms sBLft=${probe.leftMs}ms sBTxt=${probe.textLenMs}ms " +
             "cMatch=${probe.cascadeMatchMs}ms cParse=${probe.inlineParseMs}ms cBuild=${probe.styleBuildMs}ms c2nd=${probe.secondPassMs}ms " +
+            "cEdge=${probe.cEdgeMs}ms cFont=${probe.cFontMs}ms " +
+            "eBox=${probe.eBoxMs}ms eWid=${probe.eWidthMs}ms eCol=${probe.eColorMs}ms " +
+            "eSty=${probe.eStyleMs}ms eRad=${probe.eRadiusMs}ms eBrd=${probe.eAnyBorder} " +
             "sBlocks=${probe.blocks} sEls=${probe.elements} sDepth=${probe.maxDepth} " +
             "warm=${tWarm1 - tWarm0}ms warmB=$warmBlocks " +
             "linesN=${localLines.size} pagesN=${table.pages.size} " +
@@ -1656,6 +1677,30 @@ class BoxChapterLayouter(
         var inlineParseMs = 0L
         var styleBuildMs = 0L
         var secondPassMs = 0L
+
+        /** R29：`styleBuildMs` 的细分——「边家族」六兄弟（margin/padding/border-*）合计。 */
+        var cEdgeMs = 0L
+
+        /** R29：`styleBuildMs` 的细分——font-family 三连（同一字符串解析三次中的两次）。 */
+        var cFontMs = 0L
+
+        /** R29 三层：`cEdge` 按家族拆——padding（margin 计入 cEdge 总量，不在此分）。 */
+        var eBoxMs = 0L
+
+        /** R29 三层：`parseBorderEdges`。 */
+        var eWidthMs = 0L
+
+        /** R29 三层：`parseBorderColors`。 */
+        var eColorMs = 0L
+
+        /** R29 三层：`parseBorderStyles`。 */
+        var eStyleMs = 0L
+
+        /** R29 三层：`parseBorderRadius`。 */
+        var eRadiusMs = 0L
+
+        /** R29 三层：真声明了 `border*` 属性的元素数（= 空跑 vs 真解析的分界）。 */
+        var eAnyBorder = 0L
     }
 
     private var shapeProbe: ShapeProbe? = null

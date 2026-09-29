@@ -234,6 +234,37 @@ def mad(xs):
     return statistics.median([abs(x - m) for x in xs])
 
 
+def expected_describe(spec):
+    """把 `--spec-a/--spec-b` 归一化成 `AbSwitch.describe()` 应当自报的字样。
+
+    口径必须与引擎侧一致（`AbSwitch.apply` + `describe`），否则会把
+    **已经生效**的变体误判成"未生效"而白扔一批样本：
+      - 具名开关只记**名字**，不记 `=1`：`slowRegex=1` → `slowRegex`
+      - 具名开关**排序在前**，`warm=N` 追加在后：`warm=3,slowRegex=1` → `slowRegex,warm=3`
+      - `warm=0` 不列出 → `none`（生产默认）
+      - 未知键 / 值非 1|on 的键被引擎静默忽略，这里同样不列
+    """
+    if not spec or not spec.strip():
+        return "none"
+    flags, warm = [], 0
+    for part in re.split(r"[,; ]", spec):
+        if not part:
+            continue
+        kv = part.split("=", 1)
+        if len(kv) != 2:
+            continue
+        k, v = kv[0].strip(), kv[1].strip()
+        if k == "warm":
+            n = int(v) if v.lstrip("+-").isdigit() else 0
+            warm = max(0, min(64, n))
+        elif v in ("1", "on"):
+            flags.append(k)
+    parts = sorted(set(flags))
+    if warm:
+        parts.append(f"warm={warm}")
+    return ",".join(parts) if parts else "none"
+
+
 def verdict(recs, spec_a, spec_b):
     """按锚点分组；不可比就拒绝出结论。"""
     problems = []
@@ -265,7 +296,7 @@ def verdict(recs, spec_a, spec_b):
     for arm, spec in (("A", spec_a), ("B", spec_b)):
         if not spec:
             continue
-        want = "none" if spec in ("warm=0", "warm=0,") else spec
+        want = expected_describe(spec)
         got = reported.get(arm, set())
         if not got:
             problems.append(f"臂 {arm} 无样本")
@@ -350,8 +381,7 @@ def main():
         by_ab = {}
         for r in recs:
             by_ab.setdefault(r["ab"], []).append(r)
-        want = {"A": "none" if not a.spec_a else a.spec_a,
-                "B": "none" if not a.spec_b else a.spec_b}
+        want = {"A": expected_describe(a.spec_a), "B": expected_describe(a.spec_b)}
         if len(by_ab) > 2:
             print(f"日志里出现 {len(by_ab)} 种变体 {sorted(by_ab)}，"
                   f"无法归入 A/B 两臂；请收窄 --since 窗口", file=sys.stderr)

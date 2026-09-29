@@ -56,6 +56,11 @@ def main():
                 "warm": f(r" warm=(-?\d+)ms", line, int, 0),
                 "sStyles": f(r"sStyles=(\d+)ms", line, int, 0),
                 "sSkia": f(r"sSkia=(\d+)ms", line, int, 0),
+                # R29 细分：cBuild 里「边家族」与 font-family 三连各占多少。
+                "cBuild": f(r"cBuild=(\d+)ms", line, int, 0),
+                "cEdge": f(r"cEdge=(\d+)ms", line, int, 0),
+                "cFont": f(r"cFont=(\d+)ms", line, int, 0),
+                "cMatch": f(r"cMatch=(\d+)ms", line, int, 0),
                 "warmB": f(r"warmB=(\d+)", line, int, 0),
             }))
         elif "DISK-HIT shape" in line:
@@ -84,7 +89,10 @@ def main():
     #  预热行：warm>0 的那条（warm=0 时预热不发生，故只有锚页行）
     #  锚页行：sBlocks>0 且是该章开书落位的那条
     for r in recs:
-        want_b = 0 if r["ab"] == "none" else int(re.search(r"warm=(\d+)", r["ab"]).group(1))
+        # ab 自报串里 `warm=N` 可以**缺席**（`describe()` 只在非 0 时列出），
+        # 纯具名开关（`slowRegex`）就是这种形状——缺席即 0，不能直接 `search(...).group(1)`。
+        m = re.search(r"warm=(\d+)", r["ab"] or "")
+        want_b = int(m.group(1)) if m else 0
         pre = [x for x in r["asms"] if x["warmB"] == want_b and x["warm"] > 0]
         anch = [x for x in r["asms"] if x["warmB"] == want_b]
         r["warmB_asm"] = anch[0]["warmB"] if anch else None
@@ -93,22 +101,30 @@ def main():
         r["asm"] = base.get("asm")
         r["sStyles"] = base.get("sStyles")
         r["sSkia"] = base.get("sSkia")
+        r["cBuild"] = base.get("cBuild")
+        r["cEdge"] = base.get("cEdge")
+        r["cFont"] = base.get("cFont")
+        r["cMatch"] = base.get("cMatch")
 
     if not recs:
         print("无落位行", file=sys.stderr)
         return 1
 
     hdr = (f"{'时刻':<12}{'变体':<9}{'openT':>8}{'DISK':>8}"
-           f"{'anchorShape':>13}{'warm':>8}{'warmB':>7}{'sStyles':>9}{'sSkia':>7}")
+           f"{'anchorShape':>13}{'warm':>8}{'sStyles':>9}{'sSkia':>7}"
+           f"{'cMatch':>8}{'cBuild':>8}{'cEdge':>7}{'cFont':>7}")
     print(hdr)
     print("-" * len(hdr))
     for r in recs:
         print(f"{str(r['t']//1000 % 100000):>08}{'.%03d' % (r['t'] % 1000):<4}{r['ab']:<9}"
               f"{r['openT']:>6}ms{(r['disk'] or 0):>6}ms{(r['asm'] if r['asm'] is not None else -1):>11}ms"
               f"{(r['warm'] if r['warm'] is not None else -1):>6}ms"
-              f"{(r['warmB_asm'] if r['warmB_asm'] is not None else -1):>6}"
               f"{(r['sStyles'] if r['sStyles'] is not None else -1):>7}ms"
-              f"{(r['sSkia'] if r['sSkia'] is not None else -1):>5}ms")
+              f"{(r['sSkia'] if r['sSkia'] is not None else -1):>5}ms"
+              f"{(r['cMatch'] if r['cMatch'] is not None else -1):>6}ms"
+              f"{(r['cBuild'] if r['cBuild'] is not None else -1):>6}ms"
+              f"{(r['cEdge'] if r['cEdge'] is not None else -1):>5}ms"
+              f"{(r['cFont'] if r['cFont'] is not None else -1):>5}ms")
 
     arms = {}
     for r in recs:
@@ -122,7 +138,9 @@ def main():
         print(f"{ab:<9} n={n:<3} warmB={med('warmB_asm'):>3.0f}  openT {med('openT'):>6.0f}ms   "
               f"DISK-HIT {med('disk'):>5.0f}ms   anchorShape {med('asm'):>5.0f}ms   "
               f"warm {med('warm'):>4.0f}ms   sStyles {med('sStyles'):>4.0f}ms   "
-              f"sSkia {med('sSkia'):>4.0f}ms")
+              f"sSkia {med('sSkia'):>4.0f}ms   cMatch {med('cMatch'):>4.0f}ms   "
+              f"cBuild {med('cBuild'):>4.0f}ms   cEdge {med('cEdge'):>4.0f}ms   "
+              f"cFont {med('cFont'):>4.0f}ms")
     print("\n注：anchorShape/sStyles/sSkia 只取 sBlocks>0 的那条 asm（真塑形那次）。"
           "\n暖机的效果不在 openT 上体现，要看 DISK-HIT 与 anchorShape 两段："
           "\n多付的 warm 段要从这两段里省回来才算赚。")

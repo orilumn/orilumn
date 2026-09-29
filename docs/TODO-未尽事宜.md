@@ -1,5 +1,14 @@
 # 未尽事宜 / Open Issues
 
+- **重路径级联约 1s/书待优化（2026-09-29 记，JVM 实测；拿设备数据再定做不做）**：重 `prepare` 全书
+  ~8s 中级联（匹配+求值）占 ~1s（1.8ms/章），盒几何+塑形占 ~7s（归位正确，不动）。1s 不在翻页/跳转
+  热路径（那两条走轻路径），出现位置：(1) 小章前台（开书/目录跳转/关面板重排的 SMALL-FULL，
+  单章 100–300ms 含塑形）；(2) B2 整书后台（分摊，不阻塞）；(3) 同参数二次命中 `prepareResult`
+  缓存，零成本。候选：规则索引（匹配加速，不动语义）、作者侧烘焙（`ComputedStyle` 血统拆分，
+  大改，P4 已取消过一次）。**动工门槛**：先上设备量小章跳转/关面板两条真机耗时，1s 中有多大
+  比例落在用户等待线上，再定做哪个；落盘口径见 `docs/调试日志与分页跟踪.md`（`relayout … SMALL-FULL`
+  的 `fullLayout=` 分段）。
+
 - **轻重双路等价实现收敛（2026-09-29 记，排版稳定后处理）**：轻 `computeStructure` 与重 `prepare` 各自贴各自的数据表示（`MarkupElement` vs `LayoutBox`），三处“同义双实现”并存：`hidden` 判定（懒 `resolveHidden` vs 表查 `displayNone`）、叶枚举与 charStarts（`styledCharAdvance` vs 盒 `textLength`，P1-2 称同式，`IncrementalReplayEquivalenceProbeTest` 锁等价）、属主映射（轻 map vs 重盒 flag）。phase-1 生成内容已收敛到 `genPhase1` 单源（`fix/scheduling`）。彻底统一须先统一表示层（`ComputedStyle` 按属性血统拆分：作者/UA 侧烘焙 + reader 侧 overlay），动级联表示层，单列大项；收敛前任何改动必须双路同改 + 等价测试。
 
 - **桌面真背光后续（2026-09-27，macOS 先行落地）**：macOS DDC/CI 已通（`desktopApp …/brightness/`：`DisplayBrightness` 接口 + `DdcPackets` + `MacDisplayBrightness` JNA，真机读写闭环；>0 下发硬件150ms防抖、≤0 纯遮罩、跟随系统不碰硬件；滑块按探测切量程 -50~100 / -50~0）。**Win/Linux 空实现位**：Windows 接 Dxva2（`GetPhysicalMonitors`→`SetMonitorBrightness`，JNA）、Linux 接 ddcutil（/dev/i2c，需 i2c 组权限），同接口各自实现；显示器插拔重探（当前启动探一次）后续补。

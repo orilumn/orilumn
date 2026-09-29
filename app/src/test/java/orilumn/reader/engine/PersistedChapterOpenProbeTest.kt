@@ -13,6 +13,7 @@ import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import okio.Path.Companion.toPath
 import org.robolectric.RobolectricTestRunner
@@ -102,6 +103,16 @@ class PersistedChapterOpenProbeTest {
         val field = c.javaClass.getDeclaredMethod("unitAt", Int::class.java).apply { isAccessible = true }
         val unit = field.invoke(c, chapter) as ChapterUnit
         return unit.structureCache.loadedMediaFree && unit.structureCache.leaves.isNotEmpty()
+    }
+
+    @Test
+    fun `spine index map is built once per book`() = runBlocking {
+        controller = openWith(CountingReader(OpenAnchorProbeEpilog.epubFiles()))
+        assertTrue(controller.open(23L, saved = null))
+        val a = controller.spineIndexByNormalizedHref()
+        val b = controller.spineIndexByNormalizedHref()
+        assertNotNull(a)
+        assertSame("link/TOC jumps must reuse one spine map", a, b)
     }
 
     /** Shared epub fixture (single css-less chapter). */

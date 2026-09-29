@@ -3173,14 +3173,21 @@ private fun finishCanonicalBackground(
         return prepare.anchorCharStart(fragment)
     }
 
-    /** Normalized spine-href → chapter index (the [LinkTargets] lookup table for this book). */
-    private fun spineIndexByNormalizedHref(): Map<String, Int>? {
+    /** Normalized spine-href → chapter index (the [LinkTargets] lookup table for this book).
+     *  Built once: the spine is fixed after [open] (one controller per book, R13), so every
+     *  link/TOC jump reuses the same map instead of rebuilding it per call. */
+    private var spineIndexCache: Map<String, Int>? = null
+
+    /** Book-level spine lookup table (see [spineIndexCache]). */
+    fun spineIndexByNormalizedHref(): Map<String, Int>? {
+        spineIndexCache?.let { return it }
         val spine = book?.spine ?: return null
         val map = HashMap<String, Int>(spine.size)
         for (item in spine) {
             val (path, _) = LinkTargets.splitFragment(item.href)
             map[LinkTargets.normalizePath(path)] = item.index
         }
+        spineIndexCache = map
         return map
     }
 

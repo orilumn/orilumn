@@ -279,6 +279,19 @@ class ChapterStructureCache {
      *  valid across viewport/typography changes while the CSS still matches. Never set for
      *  media-affected chapters — those always recompute via [key]. */
     var loadedMediaFree: Boolean = false
+
+    /**
+     * R26：本章是否存在 `float`（块级，非 NONE）。由 [orilumn.reader.reader.engine.BoxChapterLayouter]
+     * 的 `computeStructure` 在已解析过每个叶子的那趟里顺带算出。
+     *
+     * 用来省掉 `LightPrepare.computeFloatLeads` 开头那次**全章** `blockStyleFor` 扫描
+     * （Rust 书 ch7 169 叶实测 275ms，且被第一次 `block(i)` 触发而落在开书关键路径上）。
+     *
+     * 有效性：`float` 与字号/行高无关（排版非变量），而结构持久化读写两侧都被
+     * [orilumn.reader.engine.ChapterStructurePersist.hasMediaRules] 门住，故不会被 `@media`
+     * 的视口查询翻转——与同批持久化的 [leaves] / [globalCharStarts] 同等安全。
+     */
+    var anyFloat: Boolean = true
 }
 
 /**

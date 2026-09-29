@@ -35,16 +35,16 @@ object ChapterStructureCodec {
     private const val MAGIC = 0x43485354 // "CHST"
 
     /** File/layout version. Bump only when these bytes change shape. */
-    private const val VERSION = 2 // 2: leaves gain synthetic refs (flowChildren anonymous runs)
+    private const val VERSION = 3 // 3: payload gains the anyFloat flag (was 2: synthetic leaf refs)
 
     /**
      * Cascade-semantics version. Bump on ANY change to what the structure means: the converter
      * (tree shape), [ChapterPreprocessor], the display/hidden/caption predicates, char-advance
      * normalization, background/avoid attribution, generated-content strings, or any UA/theme/UI
      * sheet rule touching a structure-consumed property (display/white-space/background/
-     * break-inside/visibility). Same manual discipline as `PaginationCacheCodec.LAYOUT_VERSION`.
+     * break-inside/visibility/float). Same manual discipline as `PaginationCacheCodec.LAYOUT_VERSION`.
      */
-    const val STRUCTURE_VERSION = 1
+    const val STRUCTURE_VERSION = 2
 
     /** Filename convention: `<chapterIndex>.bin` (keys live inside the content, not the name). */
     fun filename(chapterIndex: Int): String = "$chapterIndex.bin"
@@ -98,6 +98,7 @@ object ChapterStructureCodec {
             writeNullableString(buf, pair.first)
             writeNullableString(buf, pair.second)
         }
+        buf.writeInt(if (p.anyFloat) 1 else 0)
         return buf.readByteArray()
     }
 
@@ -128,8 +129,10 @@ object ChapterStructureCodec {
                 if (leafIdx < 0 || leafIdx >= leafCount) return decodeNull("genLeafIdx=$leafIdx")
                 genStrings[leafIdx] = readNullableString(buf) to readNullableString(buf)
             }
+            val anyFloatFlag = buf.readInt()
+            if (anyFloatFlag != 0 && anyFloatFlag != 1) return decodeNull("anyFloat=$anyFloatFlag")
             if (!buf.exhausted()) return decodeNull("trailing-bytes")
-            PersistedChapterStructure(chapterIndex, cssHash, leafRefs, charStarts, bgOwners, avoidOwners, genStrings)
+            PersistedChapterStructure(chapterIndex, cssHash, leafRefs, charStarts, bgOwners, avoidOwners, genStrings, anyFloatFlag == 1)
         } catch (e: Exception) {
             decodeNull("exception ${e.message}")
         }
@@ -379,6 +382,13 @@ data class PersistedChapterStructure(
     val bgOwners: Map<Int, LeafRef>,
     val avoidOwners: Map<Int, LeafRef>,
     val genStrings: Map<Int, Pair<String?, String?>>,
+    /**
+     * R26: does the chapter contain any block-level `float`? Persisted alongside the leaf set so
+     * the light path can skip a whole-chapter style scan that only answers this question
+     * (see `LightPrepare.computeFloatLeads`). Default `true` (i.e. "assume floats, run the
+     * scan") so a payload built without it keeps the old, always-correct behavior.
+     */
+    val anyFloat: Boolean = true,
 )
 
 /**

@@ -132,10 +132,59 @@ GIMP 的 `pgBackfill=9705ms` 就是这个（2579 块 × 3.8ms/块 ≈ 9.8s）。
 | 锚页塑形段 | 304ms | **109–128ms** |
 | 暖机段 `warm` | 350ms | **已关**（A/B 证明净亏，见 §4.1） |
 
-`:engine-skia:jvmTest` 全绿。关掉暖机后**开书剩余最大的一笔已经不是排版**：
-`openT=1297ms` 里，锚页 `shape=584ms` 而真排版（`sStyles+sSkia`）只有 85ms，
-另有 `DISK-HIT shape=775ms` 段。**shape 段有约 500ms 未归因**（不含 CSS 级联、不含 Skia 断行），
-这是下一刀该拆的地方。
+`:engine-skia:jvmTest` 全绿。
+
+## 3b. 拆开 `shape` 段：又是两条全章扫描（2026-09-29 23:2x，Rust 书，锚页 ch7 page15 / blocks[125,130) / 5 块）
+
+关掉暖机后 `openT=1297ms` 里锚页 `shape=584ms`，而真排版（`sStyles+sSkia`）只有 85ms，
+**约 500ms 未归因**。把探针伸进 `LightPrepare.block(i)` 之后全部归因完毕——
+`sBlk + sSkia + sStyles = shape`，一分不差。三轮（R28 定位 / R29 修 / R30 定位 / R31 修）：
+
+| | R26 基线 | R29 textLength 差分 | R31 +float 标志 |
+| --- | --- | --- | --- |
+| `openT` | 1297ms | 1178ms | **964ms** |
+| `DISK-HIT shape` | 775ms | 656ms | **431ms** |
+| 锚页 `shape` | 584ms | 529ms | **260ms** |
+| `sBlk`（`block(i)` 物化） | 522ms | 302ms | **22ms** |
+| `sAdv`（`textLength` 的 advance） | 227ms | 0ms | 0ms |
+| `sStyles` / `sSkia` | 3ms / 82ms | 140ms / 82ms | 155ms / 84ms |
+
+### 3b.1 第一条：`block(i)` 的 `textLength` 在白算一次 advance
+
+每物化一块就跑一次 `styledCharAdvance`（按块文本长度线性、每元素回调 `resolveStyle`），
+锚页 5 块 227ms——**与 `totalChars` 把整章重算 9.7s 的是同一个函数**。
+
+不能改成置 0：`rebuildLocalLines` 三处（`charEnd` / `runningChar` 累加 ×2）都读逐块 `textLength`，
+那是轻路径行流的字符记账，置 0 会让 `charStart`/`charEnd` 全错（且是静默的，只表现为目录跳错位）。
+改走 `globalCharStarts` 差分：`computeStructure` 用同一表达式逐叶求 advance 后交给
+`accumulateCharStarts`，后者是**精确整数前缀和**（`starts[i]=running; running+=lengths[i]`，无舍入），
+`styledCharAdvance` 返回 `Long`，故 `starts[i+1]-starts[i]` 与原 `.toInt()` **逐值精确相同**。
+末块无后继，用已按同式证明过的 `totalChars - starts[n-1]`。
+
+净省只有 78ms 而不是 227ms：原先 advance 里已顺手把级联缓存热了（`sStyles` 3→140ms 接住），
+真正省下的是非级联那部分文本测量。`BlockTextLengthIdentityTest` 6 例（纯段落 / img+br /
+表格 / 隐藏+三层嵌套 / 生成内容 / 单块章）逐块对照旧口径，全绿。
+
+### 3b.2 第二条：`computeFloatLeads` 开头那次全章扫描（275ms，大头）
+
+`block(i)` 里 `floatLeads[i]` 触发 `floatData` 的 `by lazy`，其第一件事是
+**遍历全章每个叶子的 `blockStyleFor`**，只为回答"这章有没有 float"（无则直接返回全 null 表）。
+Rust ch7 = 169 个叶子的级联，实测 **275ms**，`sBlkF≈sBlk` 证明只第一次付。
+与 `totalChars` 同一个病：全章扫描被懒初始化推进了开书关键路径。
+
+修法同 `totalChars`：`computeStructure` 那一趟**已经把每个叶子的样式都解析过了**，
+标志位几乎白送。口径必须与 `blockStyleFor` 一致（`#text` 叶取父级样式），
+否则"文本叶在 float 容器内"的章会被误判成无 float。`float` 与字号/行高无关，
+且结构持久化读写两侧都被 `!hasMediaRules` 门住（`@media` 翻不了它），
+故随 `leaves`/`globalCharStarts` 一起持久化（codec `VERSION` 2→3、`STRUCTURE_VERSION` 1→2，
+旧 bin 解码失败自动重算，日志里 17 条 `decode null (version)` 即一次性自愈）。
+
+### 3b.3 剩下的（下一刀）
+
+锚页 `shape=260ms` 现已完全归因：`sStyles` 155ms（134 个元素的 CSS 级联，≈1.1ms/元素）+
+`sSkia` 84ms（Skia 断行）+ `sBlk` 22ms。**`sStyles` 已是最大一笔，且属渲染层样式级联**——
+按 AGENTS.md 的层级约束，动它要先说清跨层理由。另有 `DISK-HIT shape=431ms` 里约 170ms
+在 `asm shape` 窗口之外（prepareLight/结构缓存/表载入），未拆。
 
 ## 4. 未决项
 

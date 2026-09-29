@@ -178,6 +178,7 @@ object ChapterStructurePersist {
             bgOwners = bg,
             avoidOwners = avoid,
             genStrings = gen,
+            anyFloat = structure.anyFloat,
         )
     }
 
@@ -239,6 +240,7 @@ object ChapterStructurePersist {
         out.leafToBackgroundOwner = bg
         out.leafToBreakInsideAvoidOwner = avoid
         out.genStrings = gen
+        out.anyFloat = payload.anyFloat
         out.boundCssHash = cssHash
         out.loadedMediaFree = true
         return true

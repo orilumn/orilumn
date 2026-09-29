@@ -315,7 +315,7 @@ class BoxChapterLayouter(
         // `hidden` is a cheap closure; it is only exercised later, lazily, during per-block materialization
         // and its display decisions are typography-invariant, so the cached leaf set stays valid.
         val hidden = hiddenCheckFor(engine)
-        LightPrepare(markup, profile, contentW, engine, structure.leaves, structure.globalCharStarts, hidden, imageLoader, chapterHref, structure.leafToBackgroundOwner, structure.leafToBreakInsideAvoidOwner, structure.genStrings)
+        LightPrepare(markup, profile, contentW, engine, structure.leaves, structure.globalCharStarts, hidden, imageLoader, chapterHref, structure.leafToBackgroundOwner, structure.leafToBreakInsideAvoidOwner, structure.genStrings, structure.anyFloat)
     }
 
     /** Parses the chapter's author CSS once into [StyleSheet]s (cached in [ChapterStructureCache]).
@@ -431,6 +431,19 @@ class BoxChapterLayouter(
         structure.globalCharStarts = starts
         structure.leafToBackgroundOwner = ownerMap
         structure.leafToBreakInsideAvoidOwner = avoidMap
+        // R26：本章有无 float。这里的级联缓存已经被上面几趟走热，逐叶读一个字段近乎免费。
+        // 口径必须与 `LightPrepare.blockStyleFor` 一致（`#text` 叶取父级样式），否则
+        // "文本叶在 float 容器内"这种章会被误判成无 float。`float` 与字号/行高无关，
+        // 且结构持久化两侧都被 `!hasMediaRules` 门住，故与 leaves/globalCharStarts 同等可复用。
+        var anyFloat = false
+        for (el in leaves) {
+            val owner = if (el.tag == "#text") (el.parent ?: el) else el
+            if (engine.resolve(owner, styleCache).floatSide != orilumn.reader.engine.css.FloatSide.NONE) {
+                anyFloat = true
+                break
+            }
+        }
+        structure.anyFloat = anyFloat
         return structure
     }
 
@@ -884,6 +897,19 @@ class BoxChapterLayouter(
         // 暖机的 3 块不计入，故 warm 的 CSS/Skia 成分目前无数据。
         // 要拆 warm 需把这两行上移到暖机之前并分成两个 probe，届时 sBlocks 会出现 3+n。
         shapeProbe = probe
+        // R26：block(i) 物化在 tempShape 里、在 shapeBlock 之外，原先两笔都盖不到它。
+        // 实测它就是那 ~500ms 未归因的大头嫌疑（textLength 的 styledCharAdvance 是子集）。
+        val outerSink = prepare.blockTimingSink
+        val outerFirst = prepare.firstBlockMs
+        prepare.firstBlockMs = -1L
+        prepare.blockTimingSink = { b, s0, s1, s2, s3 ->
+            probe.blockMs += b
+            probe.advanceMs += s3
+            probe.styleForMs += s0
+            probe.widthMs += s1
+            probe.leftMs += s2
+            probe.textLenMs += s3
+        }
         val tShape0 = orilumn.reader.time.platformNowMs()
         val localShapes = (blockLo until blockHi).map {
             if (cache?.get(it) == null && prefillL2?.get(it) != null) l2hits++
@@ -891,6 +917,9 @@ class BoxChapterLayouter(
         }
         val tShape1 = orilumn.reader.time.platformNowMs()
         shapeProbe = outerProbe
+        probe.blockFirstMs = prepare.firstBlockMs
+        prepare.blockTimingSink = outerSink
+        prepare.firstBlockMs = outerFirst
         // (l2hits counted above; reported in the asm breakdown below.)
 
         // 4. Build merged local FlowedLine stream covering all shaped blocks (P6-a2 R6 前视 carry-in).
@@ -1025,7 +1054,10 @@ class BoxChapterLayouter(
             "pgFind=${tPgPaginate0 - tPgFind0}ms pgPaginate=${tPgPaginate1 - tPgPaginate0}ms " +
             "pgLoop=${tPgLoop1 - tPgPaginate1}ms " +
             "pgBackfill=${tPg1 - tPgLoop1}ms " +
-            "sStyles=${probe.stylesMs}ms sSkia=${probe.skiaMs}ms sBlocks=${probe.blocks} sEls=${probe.elements} sDepth=${probe.maxDepth} " +
+            "sStyles=${probe.stylesMs}ms sSkia=${probe.skiaMs}ms " +
+            "sBlk=${probe.blockMs}ms sBlkF=${probe.blockFirstMs}ms sAdv=${probe.advanceMs}ms " +
+            "sBsty=${probe.styleForMs}ms sBWid=${probe.widthMs}ms sBLft=${probe.leftMs}ms sBTxt=${probe.textLenMs}ms " +
+            "sBlocks=${probe.blocks} sEls=${probe.elements} sDepth=${probe.maxDepth} " +
             "warm=${tWarm1 - tWarm0}ms warmB=$warmBlocks " +
             "linesN=${localLines.size} pagesN=${table.pages.size} " +
             "l2hits=$l2hits/${blockHi - blockLo}")
@@ -1587,6 +1619,21 @@ class BoxChapterLayouter(
     private class ShapeProbe {
         var stylesMs = 0L
         var skiaMs = 0L
+
+        /** [LightPrepare.block] 物化总耗时（子树外的部分：盒构造、容器链下降、textLength）。 */
+        var blockMs = 0L
+
+        /** `blockMs` 的子集：块内 `textLength` 的 styledCharAdvance。现恒为 0（改走差分），留作哨兵。 */
+        var advanceMs = 0L
+
+        /** `blockMs` 的四段拆分：块样式 / 内容宽下降 / 内容左下降 / textLength 差分。 */
+        var styleForMs = 0L
+        var widthMs = 0L
+        var leftMs = 0L
+        var textLenMs = 0L
+
+        /** 本窗口第一次 [LightPrepare.block] 物化的耗时；`sBlk ≈ sBlkFirst` 即一次性初始化而非逐块成本。 */
+        var blockFirstMs = 0L
         var blocks = 0
         var elements = 0
         var maxDepth = 0
@@ -2372,6 +2419,13 @@ class LightPrepare(
     internal val avoidOwnerMap: Map<MarkupElement, MarkupElement> = emptyMap(),
     /** P3-c 生成内容字符串（结构缓存恒有效；伪样式本 prepare 按新鲜级联懒解）。 */
     genStrings: Map<MarkupElement, Pair<String?, String?>> = emptyMap(),
+    /**
+     * R26：本章是否存在 `float`（=NONE）。由 [computeStructure] 在**已经解析过每个叶子的那次**
+     * 里顺带算出，替代 [computeFloatLeads] 开头那次全章 `blockStyleFor` 扫描。
+     *
+     * 默认 `true`（保守）：只有拿到确凿的"无 float"才走短路，走错方向最多退回原行为。
+     */
+    private val chapterHasFloat: Boolean = true,
 ) {
     val totalBlocks: Int get() = markupLeaves.size
     /**
@@ -2484,6 +2538,10 @@ class LightPrepare(
      */
     private fun computeFloatLeads(): Pair<List<orilumn.reader.engine.laying.FloatLead?>, List<Int?>> {
         val n = totalBlocks
+        // R26：结构层已经算过这个标志（有叶子时几乎白送），别再全章扫一遍只为回答同一个问题。
+        // 实测 Rust 书 ch7（169 叶）这第一次扫描要 275ms，且它被 `block(i)` 里的 `floatLeads[i]`
+        // 触发，直接落在开书关键路径上——与 totalChars 曾把整章重算 9.7s 同一个病。
+        if (!chapterHasFloat) return List(n) { null } to List(n) { null }
         var anyFloat = false
         for (i in 0 until n) {
             if (blockStyleFor(markupLeaves[i]).floatSide != orilumn.reader.engine.css.FloatSide.NONE) {
@@ -2677,19 +2735,44 @@ class LightPrepare(
      *  container chain — without ever cascading the whole chapter. */
     fun block(i: Int): LayoutBox {
         materialized[i]?.let { return it }
+        // R26 诊断：只有置位方（ShapeProbe）非 null 才计墙钟，热路径仅多一次 null 检查。
+        val sink = blockTimingSink
+        var m0 = 0L; var m1 = 0L; var m2 = 0L; var m3 = 0L
+        val tBlk0 = if (sink != null) orilumn.reader.time.platformNowMs() else 0L
         val el = markupLeaves[i]
         val style = blockStyleFor(el)
+        if (sink != null) m0 = orilumn.reader.time.platformNowMs() - tBlk0
         val contentWidth = NormalFlowLayout.descendContentWidth(el, contentW) { e ->
             val s = styleComputer().resolve(e, styleCache)
             (s.padding.horizontal + s.border.horizontal).roundToInt()
         }
         // Horizontal position = the accumulated block left edges (mirrors the heavy path's descent).
+        val tW = if (sink != null) orilumn.reader.time.platformNowMs() else 0L
         val contentLeft = NormalFlowLayout.descendContentLeft(el, 0,
             leftEdgesOf = { e -> val s = styleComputer().resolve(e, styleCache); (s.border.left + s.padding.left).roundToInt() },
             marginLeftOf = { e -> val s = styleComputer().resolve(e, styleCache); s.margin.left.roundToInt() },
         )
+        if (sink != null) { m1 = orilumn.reader.time.platformNowMs() - tW; m2 = m1 }
         val replaceable = NormalFlowLayout.isReplaceable(el)
         val isTr = el.tag == "tr"
+        // R26：`textLength` 不再现算，改走 `globalCharStarts` 的差分。
+        //
+        // 原本每物化一块就跑一次 `styledCharAdvance`（按块文本长度线性、每元素回调 resolveStyle）。
+        // 实测 Rust 书 ch7 锚页 5 块里这一项 211~236ms，占该页 shape 的 37%。与 totalChars
+        // 曾把整章重算 9.7s 的是同一个函数。
+        //
+        // 恒等式：[computeStructure] 用**同一表达式**（同 classify / hidden / genOf / 级联）逐叶
+        // `styledCharAdvance` 后交给 `accumulateCharStarts`，而后者是精确整数前缀和
+        // （`starts[i] = running; running += lengths[i]`，无舍入），`styledCharAdvance` 返回 `Long`，
+        // 故 `starts[i+1] - starts[i]` **精确等于**块 i 的 advance，与原 `.toInt()` 逐块同值。
+        // 末块没有后继，用已按同式证明过的 `totalChars - starts[n-1]`。
+        //
+        // 不能改成置 0：`rebuildLocalLines` 三处（charEnd / runningChar 累加 ×2）都读逐块
+        // textLength，那是轻路径行流的字符记账，置 0 会让 charStart/charEnd 全错。
+        // `sAdv=` 埋点留作回归哨兵：本项归零后它应恒为 0。
+        val tL = if (sink != null) orilumn.reader.time.platformNowMs() else 0L
+        val textLen = blockTextLengths[i]
+        if (sink != null) m3 = orilumn.reader.time.platformNowMs() - tL
         // P6-a2: 右悬浮右对齐（宽取 eager 表，与重路径同源，零重算）。
         var boxLeft = contentLeft
         if (el.tag != "#text" && style.floatSide == orilumn.reader.engine.css.FloatSide.RIGHT) {
@@ -2702,7 +2785,7 @@ class LightPrepare(
             contentWidth = contentWidth,
             ranges = emptyList(),
             // P1-2: 与重路径盒 textLength 同式（样式化归一长度）。
-            textLength = (if (replaceable) 1 else NormalFlowLayout.styledCharAdvance(el, { e -> styleComputer().resolve(e, styleCache) }, lightClassify(), hidden, genOf)).toInt(),
+            textLength = textLen,
             lineHeights = emptyList(),
             childBoxes = emptyList(),
             replaceableHeight = if (replaceable) {
@@ -2713,8 +2796,51 @@ class LightPrepare(
             floatLead = floatLeads[i],
         )
         materialized[i] = box
+        if (sink != null) {
+            val total = orilumn.reader.time.platformNowMs() - tBlk0
+            if (firstBlockMs < 0L) firstBlockMs = total
+            // m0=blockStyleFor / m1=descendContentWidth / m2=descendContentLeft / m3=textLength 差分
+            sink(total, m0, m1, m2, m3)
+        }
         return box
     }
+
+    /**
+     * R26：逐块 `textLength`，由 [globalCharStarts] 差分得来，供 [block] 的 `textLength` 实参用。
+     *
+     * 精确性依据见 [block] 里那段注释：`accumulateCharStarts` 是整数前缀和、无舍入，
+     * `styledCharAdvance` 返回 `Long`，故差分与逐块现算逐值相同。
+     * `starts.size != n`（结构与叶集不同源）时退回归原先的现算口径，行为与改动前一致。
+     */
+    private val blockTextLengths: IntArray by lazy {
+        val n = markupLeaves.size
+        val starts = globalCharStarts
+        if (starts.isEmpty() || n == 0 || starts.size != n) {
+            IntArray(n) {
+                NormalFlowLayout.styledCharAdvance(
+                    markupLeaves[it], { e -> styleComputer().resolve(e, styleCache) },
+                    lightClassify(), hidden, genOf,
+                ).toInt()
+            }
+        } else {
+            val last = totalChars - starts[n - 1]
+            IntArray(n) { i -> if (i + 1 < n) (starts[i + 1] - starts[i]).toInt() else last.toInt() }
+        }
+    }
+
+    /**
+     * R26 诊断：[block] 物化计时回调
+     * `(blockMs, styleForMs, widthMs, leftMs, textLenMs)`。`textLenMs` 曾是块内 `textLength`
+     * 的 styledCharAdvance 耗时，现已改走 [blockTextLengths] 差分、不再现算，故**恒为 0**；
+     * 保留参数位是为了让日志里 `sAdv=0` 本身成为"这条路没被走"的哨兵。
+     * `null` = 不计时（默认）。置位方是 `BoxChapterLayouter` 的 `ShapeProbe`，只在那一个
+     * shape 窗口内挂。
+     */
+    internal var blockTimingSink: ((Long, Long, Long, Long, Long) -> Unit)? = null
+
+    /** R26 诊断：本窗口内第一次 [block] 物化的耗时。与 [blockTimingSink] 的累计值对比即可区分
+     *  「一次性初始化」与「逐块成本」——`sBlk ≈ sBlkFirst` 即前者。 */
+    internal var firstBlockMs: Long = -1L
 
     /** The 2D grid layout for one table row (`tr`) given its content width — column x/widths + cells,
      *  cell heights unknown (filled & used at shaping time). Mirrors the heavy path's column

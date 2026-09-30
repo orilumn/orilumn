@@ -37,7 +37,7 @@ object PaginationCacheCodec {
     /** Engine-geometry version. Bump on ANY change to line geometry computation so stale tables are
      *  invalidated at the single [decode] choke-point. Kept separate from [VERSION]: schema changes may
      *  leave geometry untouched and vice-versa. */
-    const val LAYOUT_VERSION = 29 // 29: persist 路径补 bindChapterContext（此前仅 readChapter 绑定 chapterHref），冷进程持久化加载章不再空 href → 图盒不再回退 w/2 半高；28 的 4页表等错表作废
+    const val LAYOUT_VERSION = 30 // 30: 断行器 R1 补偿——SkParagraph「整段单行」快捷路径不扣 TextIndent，带 text-indent 的单行段在「版心 − 缩进 < 整段自然宽 ≤ 版心」内不折行却被绘制侧右移缩进，尾部 1~2 字被版心右缘裁掉；修后该窗口按首行真实可用宽重排（行数变化 → 旧表作废）；29 的单行超长段表作废
 
     /** Per-book cap on persisted table files. Old-parameter-hash tables are orphaned when the layout
      *  key changes; version-stale orphans (older build) are swept by [PaginationCacheStore.sweepStale]

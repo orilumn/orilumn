@@ -1,10 +1,38 @@
 # 未尽事宜 / Open Issues
 
-- **开书疑被调两次（2026-09-29 记，真机落盘实锤两次）**：`open ok chapters=0` 后 140ms–900ms 又一次
-  正常 `open: chapters=N`（两次落盘皆有：17:17:44、17:29:05、17:40:44）。首次解析出空书（0 章）
-  却走了 ok 路径。疑 `LaunchedEffect(pxW, pxH)` 重组致 `openBookEngine` 并发重入（每次其后紧跟
-  `external BUSY-DROP`），白白 parse 一次，且空控制器可能污染状态。查 `openBookEngine`
-  重入 guard（进行中标记/取消旧协程），修后看单次 open 落盘。
+- **`text-align: justify` 有实现但**静默失效**（2026-09-30 记，R1 排版时核出来的，独立于该 bug 已修）**：
+  绘制侧 `LineWindowDrawer.paintText:198` 有 `appendTrailingNewline = (alignment == JUSTIFY)`，
+  本意是行尾追加 `'\n'`、把本行伪造成「双行段的首行」以获得铺满间距。**但 Skia 的 `kJustify`
+  只对软断行产生的行拉伸**，追加硬 `'\n'` 后本行成了硬换行结尾的行 → 永远不被拉伸。
+  实测（真机字体栈 @44.4px）：中部行（自然宽 1509.60 / 版心 1600 与 1560）追加 `'\n'` 前后
+  首行宽**逐值相同 1509.60**，均不拉伸；只有「在绘制时自己又折了一次行」的才被拉伸（1820.40 → 1600.0），
+  而正常断行出来的行本不该在绘制时再折。故正常情况零效果，与真机截图一致（非首行右缘参差 1695–1725，
+  非齐平的 1720）。
+  **与 R1 无关**：追加 `'\n'` 前后首行宽相同，故 R1 那 88.4px 溢出**全部来自缩进右移**，
+  且 `FirstLineIndentSingleLineOverflowTest` 量的 `lineMetrics[0].width` 恰等于生产绘制侧真实宽度，测试有效。
+  **真要修**：Skia 无「让已放得下的行也拉伸」的开关，只能自算 `slack = 版心 − 自然宽` 并按断点分配
+  （CJK 逐字分摊 / Latin 优先给空格），属**渲染层**新特性；另需把「是否段末行」随 `BrokenLine`
+  下传（当前每条 `DrawLine` 各自整形，段内无末行信息）。**暂不做**。
+
+- ~~开书被调两次~~ **误判，非 bug（2026-09-29 记 → 2026-09-30 查清）**：原以为 `open ok chapters=0`
+  后 140ms–900ms 又一次 `open: chapters=N` 是 `openBookEngine` 并发重入。**查清：每次开书只调一次**，
+  那两行是同一次开书的两个阶段，且 `chapters=0` 恒为 0。
+  - **计数证据**（10 次开书会话，`日志_20260930.1.txt` + `日志_20260930.txt`）：`ReaderActivity onCreate`
+    10 次、`open ok` 10 行、`open: chapters=` 10 行，三者严格 1:1:1；`viewport changed` **0** 次。
+    真重入必然出现某会话两行 `open ok`，一次都没有。且 10 行 `chapters=` **全是 0**。
+  - **两行的真实来源**（都显示 `[Orilumn.Reader]`，因 `ReaderActivity.kt:250` 把自己的 `TAG` 当第 4 个
+    位置参数传进 `BookDocumentController`，覆盖了默认 `Orilumn.Engine`；两行又都以 "open" 开头，故像两次）：
+    ① `ReaderActivity.kt:271` `open ok` = 引擎容器建好；② `BookDocumentController.kt:418` `open: chapters=N`
+    = 书真正解析，走 `ReaderScreen.kt:155` `push("open")` → `TabletReaderHost.kt:68` → `controller.open()`。
+  - **`chapters=0` 不是"解析出空书"**：`chapterCount` 是 `book?.spine?.size ?: 0`（`BookDocumentController.kt:382`），
+    `book` 要到 `open()` 内部 :405 才赋值 → 记这行时书还没解析，**架构上恒为 0**。文案有误导性，代码无问题。
+  - **`external BUSY-DROP` 不是重入证据**：是 `LaunchedEffect(externalPos)`（`ReaderScreen.kt:251`）撞上
+    在途的 `push("open")`（.019 持锁到 .539 `open done`）——`AnchorFunnel` 设计内行为（不排队、记 BUSY-DROP），
+    `open` 侧另有 300ms 重试兜底；开书时 `externalPos` 本就是 null，丢了不丢东西。
+  - **重入口子理论存在、实测未开**：`LaunchedEffect(pxW, pxH)` 的 guard 读 `engine == null`，而 `engine` 是
+    `mutableStateOf`（`ReaderActivity.kt:102`）、赋值在 `withContext(IO)` 之后；IO 窗口最长 1.65s
+    （12:32:33.486 → 12:32:35.137）内 `engine` 确为 null，若 `pxW/pxH` 变化会重入。但 `viewport changed` 为 0、
+    `open ok` 数 = 会话数，**该窗口从未被触发**。若日后真要防，加 in-flight marker 即可（当前无证据支持改动）。
 
 - **重路径级联约 1s/书待优化（2026-09-29 记，JVM 实测；拿设备数据再定做不做）**：重 `prepare` 全书
   ~8s 中级联（匹配+求值）占 ~1s（1.8ms/章），盒几何+塑形占 ~7s（归位正确，不动）。1s 不在翻页/跳转

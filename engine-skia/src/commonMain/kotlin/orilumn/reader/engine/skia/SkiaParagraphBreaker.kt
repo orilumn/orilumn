@@ -75,6 +75,72 @@ class SkiaParagraphBreaker(
         }
         if (text.isEmpty()) return emptyList()
 
+        val first = layoutOnce(
+            text, fontSizePx, lineHeightRatio, widthPx, alignment, tag, families, weight, italic,
+            monospace, firstLineIndentPx, fontRuns, baselineShifts,
+        )
+        // R1 补偿（SkParagraph `TextIndent` 的「整段单行」快捷路径漏算缩进）。
+        //
+        // 实测（探针 + 真书全链路扫版心，见 [orilumn.reader.engine.skia.FirstLineIndentSingleLineOverflowTest]）：
+        // `TextIndent` 只在首行**真的折行**时扣减首行可用宽；「整段放得下一行」的快捷路径拿整段
+        // 自然宽 `nat` 直接比 layout 宽 `widthPx`，**不扣 indent**。真机字体栈（`STSong, serif`
+        // @44.4px，26 字段 `nat=1287.60`，`indent=88.80`）下「整段单行」区从 `ceil(nat)=1288`
+        // 起，**对 indent 三个取值（0 / 44.4 / 88.8）完全相同**——缩进一点没参与。
+        // 于是窗口 `widthPx - indent < nat ≤ widthPx` 内断行侧判「放得下」不换行，绘制侧
+        // （[LineWindowDrawer]：`paintX = textX + firstLineIndentPx`）仍把整行右移 indent，
+        // 右缘越出版心至多 indent（默认 `text-indent: 2em` = 2 字）→ 同行尾部被版心右缘裁掉
+        // （用户可见的「一段只有一行、版心只差一两个字却不换行、尾部被截断」）。真机实测：
+        // 版心 1288、右缘 1376.43，**溢出 88.4px = 2 个字**。只在一行时发作：一旦折行，
+        // Skia 自己就把首行按 `widthPx - indent` 排对了。
+        //
+        // 修法：命中该窗口时按首行真实可用宽整段重排，`firstLineIndentPx` 传 0 避免二次扣减。
+        // 修后单行区从 `ceil(nat + indent)` 起——正是 CSS 语义。
+        // 为何整段都用这个窄宽仍与 CSS 等价：命中窗口时整段自然宽 ≤ widthPx，贪心首行把
+        // `widthPx - indent` 填到「差一个字就溢出」，剩余尾巴宽 ≤ indent + 一字，远窄于
+        // `widthPx`，故第 2 行起在两种宽下的断点必然相同（不存在「尾行比 CSS 早断」）。
+        // 窄宽向下取整（`toInt`），只会让首行更保守，永不溢出。
+        // 唯一放不下的例外是「整段一个断点都没有」的不可断长串（如超长 URL）：重排后仍是
+        // 一行，与修复前逐值相同——CSS 对不可断长串本就是溢出可见语义，不是本条要治的病。
+        //
+        // 字体相关（回归必须钉真机字体栈，无族回退字体下该失配不复现，见测试类注释）：
+        // 判据用 `maxIntrinsicWidth`（与绘制侧同整形器量出的自然宽），不用 `lineMetrics.width`
+        // （后者会被对齐拉伸/去尾空白污染）。
+        if (firstLineIndentPx > 0f &&
+            first.lines.size == 1 &&
+            first.unwrappedWidthPx + firstLineIndentPx > widthPx
+        ) {
+            return layoutOnce(
+                text, fontSizePx, lineHeightRatio,
+                (widthPx - firstLineIndentPx).toInt().coerceAtLeast(1),
+                alignment, tag, families, weight, italic, monospace,
+                0f, fontRuns, baselineShifts,
+            ).lines
+        }
+        return first.lines
+    }
+
+    /** [breakLines] 单次整形的产物：断行区间 + 整段「不折行」自然宽（`maxIntrinsicWidth`，R1 补偿的判据）。 */
+    private class Once(val lines: List<BrokenLine>, val unwrappedWidthPx: Float)
+
+    /**
+     * 单次整形：按 [widthPx] 断行并归一化区间（[breakLines] 的实际实现，含行内 face 段与基线位移段）。
+     * 抽出来是为了让 R1 补偿能以「同配置、换版心宽」再排一次，两次配置严格同源。
+     */
+    private fun layoutOnce(
+        text: CharSequence,
+        fontSizePx: Float,
+        lineHeightRatio: Float,
+        widthPx: Int,
+        alignment: TextAlign,
+        tag: String?,
+        families: List<String>,
+        weight: Int,
+        italic: Boolean,
+        monospace: Boolean,
+        firstLineIndentPx: Float,
+        fontRuns: List<FontRun>,
+        baselineShifts: List<orilumn.reader.engine.laying.BaselineShift>,
+    ): Once {
         // 整条 CSS font-family 栈 (作者顺序) 交给 FontCollection 按字形回退 — 与浏览器一致, 且与
         // Android FontPairing.SYSTEM 的整栈语义对齐。只取首名会让首族未装的书籍 (如"思源宋体 VF")
         // 在渲染时退化成默认无衬线, 偏离原书/浏览器结果。
@@ -132,7 +198,7 @@ class SkiaParagraphBreaker(
                 if (e > s) out.add(BrokenLine(s until e, targetLh))
             }
             if (out.isEmpty()) out.add(BrokenLine(0 until text.length, targetLh))
-            return out
+            return Once(out, paragraph.maxIntrinsicWidth)
         } finally {
             paragraph.close()
         }

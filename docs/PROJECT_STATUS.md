@@ -3,6 +3,48 @@
 > Keeps a running log of significant milestones for the Orilumn reader engine. Supersedes
 > everything marked done; each section reflects a completed stage.
 
+## 2026-09-30 — 排版 R1：带 `text-indent` 的单行段「只差一两个字却不换行、尾部被裁」（LAYOUT_VERSION 30）
+
+**Issue.** 一段本来只有一行的文字，在「版心宽 − 边距」恰好比它的整段宽少 1~2 个字时，不折行也不掉字，
+而是尾部 1~2 个字被版心右缘切掉（读者看到「这段字被拦腰截断」）。真机参数 + 真书
+（《每天都离现形更近一步》ch1，正文 44.4px、`p { text-align: justify; text-indent: 2em }`）复现：
+版心 1288 时该段右缘 1376.43，**溢出 88.4px = 2 个字**。
+
+**根因（排版层-下，`SkiaParagraphBreaker`）。** 断行侧用 SkParagraph 的 `TextIndent` 承担首行缩进，
+而 `TextIndent` **只在首行真的折行时**扣减首行可用宽；「整段放得下一行」的快捷路径拿整段自然宽
+直接比 layout 宽，**不扣 indent**。真机字体栈（`STSong, serif` @44.4px，26 字段 `nat=1287.60`，
+`indent=88.80`）下「整段单行」区从 `ceil(nat)=1288` 起，对 indent 三个取值（0 / 44.4 / 88.8）
+**完全相同**。于是窗口 `版心 − indent < 整段自然宽 ≤ 版心` 内断行侧判「放得下」不换行，绘制侧
+（`LineWindowDrawer`，`paintX = textX + firstLineIndentPx`）仍把整行右移 indent → 右缘越出版心至多
+indent。只在一行时发作：一旦折行，Skia 自己就把首行按 `版心 − indent` 排对了。
+
+**修复。** `SkiaParagraphBreaker.breakLines` 抽出 `layoutOnce`（单次整形 + 区间归一化，配置同源），
+命中窗口（单行 && `nat + indent > 版心`）时按首行真实可用宽 `版心 − indent` **整段重排**、
+`firstLineIndentPx` 传 0 避免二次扣减。修后单行区从 `ceil(nat + indent)` 起——正是 CSS 语义。
+整段都用窄宽仍与 CSS 等价：命中窗口时整段自然宽 ≤ 版心，贪心首行把窄宽填到「差一个字就溢出」，
+剩余尾巴宽 ≤ indent + 一字，远窄于版心，故第 2 行起在两种宽下的断点必然相同。
+重轻两路共用这一个断行器，一处修好两条路；`LAYOUT_VERSION 29→30` 让旧表作废自愈。
+
+**机制证明（`FirstLineIndentSingleLineOverflowTest`，engine-skia jvmTest 6/6；修复前 2 条红）。**
+① 命中窗口多字号扫描必须折行且首行不越版心（真机 88.4px / fs=16 时 32px 两档都复现）；
+② 整段 + 缩进放得下时保持单行（不多折）；③ 无缩进路径逐值不变（不误伤）；
+④ Latin × LEFT/JUSTIFY/CENTER 不溢出；⑤ 真书重路径全链路扫版心 1280~1640 × 两个字号，
+用**绘制侧真实整形结果**（同配置同 `lineWidthPx`）断言「首行缩进 + 行宽 ≤ 版心」且不二次折行；
+⑥ 重轻两路断行区间逐项相同。度量用 Skia 自己的 `lineMetrics[0].width`（行尾空白不计）而非
+`maxIntrinsicWidth`（含行尾空格 advance，会虚报约一个空格宽的溢出）。
+
+**教训（两处把我带沟里的探针错误，留档）。** ① 扫描上界必须远大于阈值：`nat+2` 恰好落在单行区内，
+测出的「阈值 = nat」是扫描顶的假象；② 扫描起点必须向上取整：`nat.toInt()` 在自然宽为小数时落到
+阈值下方，扫到的全是已折行的版心，单行失效区被整段跳过。两者都让回归在修复前后都绿。
+
+**顺带排除一条伪 bug：开书「被调两次」是日志误读。** 10 次开书会话里 `onCreate` / `open ok` /
+`open: chapters=` 各 10 次（1:1:1），`viewport changed` 0 次——`openBookEngine` 每次只调一次。那两行是同一次
+开书的两个阶段（Activity 建容器 :271 → `push("open")` 触发 `controller.open()` :418），因
+`ReaderActivity.kt:250` 把自己的 `TAG` 传进控制器导致两行同 tag 同前缀；`chapters=0` 则是
+`chapterCount = book?.spine?.size ?: 0` 在 `book` 赋值前记的，**架构上恒为 0**。详见 TODO 对应条目。
+
+**Pending.** 无代码待办。下一个排队 bug：目录跳转点击无响应。
+
 ## 2026-09-30 — 图盒比例修复：persist 加载路径补 bindChapterFor（LAYOUT_VERSION 29），真机三态闭环
 
 **Issue.** 重开《摄影的艺术》ch44 persist 加载路径不调 `readChapter`（chapterHref 空），

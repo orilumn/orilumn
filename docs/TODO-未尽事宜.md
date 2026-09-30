@@ -113,6 +113,21 @@
     让 `advanceOf(i)` 返回 `adv(cp_i) + kern(cp_{i−1}, cp_i)`。连字仍无解。
   - 详见 `docs/自建断行引擎-实施方案.md` §2.2(d) 与 `docs/自建断行引擎-测试计划.md` §T8.4。
 
+- **Q6 — `min-content` 这条路径在宽版心下整条闲置，S3 收益不含表格（2026-10-01 记，待裁决）**：
+  auto 分列的 min 侧只有一个消费点（`NormalFlowLayout.tableCellPref` → `ParagraphBreaker.minContentWidth`）。
+  真机 A/B 查明：13 本语料 49 张表**全部**落在 `autoColumnWidths` 三段式的 `avail >= totalMax` 段，
+  该段 `w[i] = pref[i]`，**min-content 一次都没被读过**。故 T2d/T2e 的禁则补表在现实版心下不可观测。
+  - **量级**（实测，`docs/自建断行引擎-测试计划.md` §T2f）：格级 7 处变化 → 列级 **1** 列 → live **0 列**。
+    表要进插值段需版心 ≲ 0.8× 字号量级；即使挤进去，49 张表里也只有 1 列可观测。
+  - **对 S3 的影响**：自建断行器的 R1（长串兜底）价值**不来自 min-content 这条路**，
+    接线前需先决定是否要激活它（`table-layout: fixed` / 指定列宽 / 更多列 / 更窄版心），
+    否则表格这条线可以整条从 S3 验收判据里划掉。
+  - **顺带查清的两处缓存陷阱**（不是 bug，但会让人量到假结论）：
+    ① `LayoutParamKey` 不含禁则表身份 ⇒ 改断行规则不改 `paramHash`；
+    ② `app/build.gradle.kts:18` 的 `versionCode = 20` 是写死常量、非单调递增构建号，
+    故 `PaginationCacheCodec` KDoc 里「换构建号即全量作废」在本工程从未真正发生。
+    ⇒ **S3 接线时必须 bump `LAYOUT_VERSION`**，否则线上老用户会静默复用 Skia 断点算出的旧表。
+
 - ~~开书被调两次~~ **误判，非 bug（2026-09-29 记 → 2026-09-30 查清）**：原以为 `open ok chapters=0`
   后 140ms–900ms 又一次 `open: chapters=N` 是 `openBookEngine` 并发重入。**查清：每次开书只调一次**，
   那两行是同一次开书的两个阶段，且 `chapters=0` 恒为 0。

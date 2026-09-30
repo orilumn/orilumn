@@ -586,6 +586,7 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
      *  chapter should be built. Idempotent; no-op when already parsed. */
     private suspend fun ensureMarkup(index: Int): MarkupElement? {
         val unit = unitAt(index) ?: return null
+        bindChapterFor(unit)
         if (unit.markup != null) return unit.markup
         layoutMutex.withLock {
             if (unit.markup == null) {
@@ -633,6 +634,23 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
         return file.tree
     }
 
+    /** Binds the layouter's per-chapter href for [unit] before ANY layout/shape work that may touch
+     *  `<img>` blocks (see [BoxChapterLayouter.bindChapterContext]).
+     *
+     *  Why: [readChapter] (the epub-fallback path) was the only caller of `bindChapterContext`, so
+     *  a persist-loaded chapter on a cold process left `chapterHref` empty. `intrinsicSizeOf`
+     *  then skipped the binary-bounds probe (`chapterHref.isNotBlank()` guard), and full-width
+     *  images (`orilumn-fullwidth-image { width:100% }`) fell back to height=width/2 — 半高图盒 —
+     *  which changed the pagination table (修复见分支 fix/photo-relayout-height，实测 5页↔4页)。
+     *
+     *  层级：排版层·上 编排——把正在铺排的章（spine href）喂给 排版层·下 的分层引擎上下文，
+     *  不改形状/量测语义、不动用户层主题。廉价幂等（字符串赋值），热路径无感。
+     */
+    private fun bindChapterFor(unit: ChapterUnit) {
+        val href = book?.spine?.getOrNull(unit.chapterIndex)?.href ?: return
+        (layouter as? BoxChapterLayouter)?.bindChapterContext(href)
+    }
+
     /** Persists a freshly computed media-free chapter file (import/open backfill converge in
      *  `ImportStructures.persistChapter`). Called with the cssHash of the just-computed cascade. */
     private fun saveUnitStructure(unit: ChapterUnit, cssHash: Long) {
@@ -654,6 +672,7 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
      *   instead of shaping the entire chapter. */
     suspend fun ensureChapterLayout(index: Int, targetChar: Int = 0, headLift: Boolean = true): ChapterUnit? {
         val unit = unitAt(index) ?: return null
+        bindChapterFor(unit)
         if (unit.markup == null) ensureMarkup(index)
         // 整形前先备字体：本章需求命中的导入面进池（锁外 IO），池变则旧版式作废重排，
         // 首绘即对，开屏后不再跳变。
@@ -708,6 +727,7 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
      *  in the current incremental layout. If not, re-runs [BoxChapterLayouter.incrementalLayoutForPage]
      *  starting from the closest page index. */
     private fun ensurePageRangeShaped(unit: ChapterUnit, targetChar: Int) {
+        bindChapterFor(unit)
         // R6: same guard for direct callers (cross-chapter stub reshape). A mismatch invalidates
         // first, so the `?: return` below trips on the nulled table instead of shaping from it.
         if (unit.inProgress == null) {
@@ -964,6 +984,7 @@ private fun startAnchorStream(
      *  near-head anchor is lifted to the chapter head (P8/R2). */
     headLift: Boolean = true,
 ) {
+    bindChapterFor(unit)
     val last = (prepare.totalBlocks - 1).coerceAtLeast(0)
     val anchor = prepare.blockIndexForChar(anchorChar.coerceAtLeast(0)).coerceIn(0, last)
     // P8 (R2) head lift: the temp table is anchored at a LINE-CUT mid-chapter page by default, which
@@ -1129,6 +1150,7 @@ private fun dispatchB1(
     paramHash: Long,
     headDistancePages: Int?,
 ): Boolean {
+    bindChapterFor(unit)
     // 派发层 skip-fresh（与 b2ChapterTask 执行层 skip-fresh 分工，D6 同理）：
     // 表已新鲜时整趟 B1 是纯浪费——更糟的是它连带 cancelLowerThan 杀在途 B2 +
     // 外层 force 整书重扫，把一个已收敛的 B2 又打散。直接不派。
@@ -1322,6 +1344,7 @@ private fun stepTempPrefill(unit: ChapterUnit, ip: InProgressPagination, lastDir
  *  (pointer unchanged, e.g. a locate re-sync) is deduped. Cancels any previous prefill before
  *  launching. Runs on [backgroundDispatcher] so it never blocks the foreground flip thread. */
 private fun scheduleTempPrefill(unit: ChapterUnit, ip: InProgressPagination, lastDir: Int = 0) {
+    bindChapterFor(unit)
     val cursor = (ip.sessionId shl 32) or
         ((if (ip.curIsForward) 1L else 0L) shl 20) or
         ((lastDir and 0x3).toLong() shl 16) or ip.curIndex.toLong()
@@ -2011,6 +2034,7 @@ private var windowPrepCache: Pair<WindowPrepKey, LightPrepare>? = null
 
 private suspend fun prefillPageTask(chapterIdx: Int, page: Int, anchor: Int, assemble: Boolean) {
     val u0 = unitAt(chapterIdx) ?: return
+    bindChapterFor(u0)
     val table = u0.paginationTable ?: return
     if (u0.inProgress != null) return
     if (page !in 0 until table.pages.size) return
@@ -2142,6 +2166,7 @@ private fun shapeAndAppendForward(
 }
 
 private fun tempNav(unit: ChapterUnit, ip: InProgressPagination, slice: PageSlice, dir: Int): Pair<Int, PageSlice>? {
+    bindChapterFor(unit)
     lastTempNavNull = null
     // C2-P2b-3: `withLock` 非内联，块里裸 `return` 全改 `return@withLock`，外层 `return` 接住表达式值。
     return tempStateLock.withLock {
@@ -2640,6 +2665,7 @@ private fun finishCanonicalBackground(
     suspend fun prepareRelayoutLight(chapter: Int, anchorChar: Int): ReflowResult? {
         clearFlipDir("param-preview")
         val unit = unitAt(chapter) ?: return null
+        bindChapterFor(unit)
         val markup = unit.markup ?: return null
         activeChapter = chapter
         // 整形前先备字体（同 prepareRelayout；新字体预览依赖池跟进）。
@@ -2703,6 +2729,7 @@ private fun finishCanonicalBackground(
         activeChapter = chapter
         voidPreflight()
         val unit = unitAt(chapter) ?: return null
+        bindChapterFor(unit)
         val markup = unit.markup ?: return null
         // 整形前先备字体（同 ensureChapterLayout；本函数产物必重建，无需作废）。
         (layouter as? BoxChapterLayouter)?.let { bc ->
@@ -2884,6 +2911,7 @@ private fun finishCanonicalBackground(
     private fun preflightChapter(index: Int) {
         if (index == activeChapter) return // B1/anchor owns the active chapter's passes
         val unit = unitAt(index) ?: return
+        bindChapterFor(unit)
         val contentWidth = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
         val contentHeight = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
         val paramHash = LayoutParamKey.fromProfile(profile, contentWidth, contentHeight).hash()
@@ -2953,6 +2981,7 @@ private fun finishCanonicalBackground(
     /** P2.4: open-prewarm body (extracted: early returns don't survive inline task lambdas). */
     private suspend fun prewarmChapterBody(index: Int, char: Int) {
         val unit = unitAt(index) ?: return
+        bindChapterFor(unit)
         var c = char
         try {
             ensureMarkup(index)
@@ -3005,6 +3034,7 @@ private fun finishCanonicalBackground(
      *  [orilumn.reader.engine.layout.DrawableBookLayout], and persist the line-level pagination table to
      *  disk so the chapter is ready when opened. No anchor/temp state is created here. */
     private fun fullLayoutAndPersist(unit: ChapterUnit, bc: BoxChapterLayouter, contentW: Int, contentH: Int, paramHash: Long, checkpoint: () -> Unit = {}) {
+        bindChapterFor(unit)
         val markup = unit.markup ?: return
         val prep = prepareFor(unit, bc, markup, contentW, contentH, paramHash)
         // P1: chunk workers deleted (P13) — sequential canonical for all sizes.
@@ -3359,6 +3389,7 @@ private fun finishCanonicalBackground(
      */
     fun linkTargetAt(chapter: Int, charOffset: Int): LinkTarget? {
         val unit = unitAt(chapter) ?: return null
+        bindChapterFor(unit)
         val markup = unit.markup ?: return null
         val bc = layouter as? BoxChapterLayouter ?: return null
         if (viewW <= 0 || viewH <= 0) return null

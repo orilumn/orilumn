@@ -61,6 +61,36 @@
   Kotlin 侧 **0.0011ms/词**，相对 `build+layout` 0.32ms 可忽略。
   **落地前提已解除**（2026-09-30）：路线 B 已定为唯一解，本条不再是"被路线卡死"，
   而是 B 路实现里的一个待办子项（软连字符绘制 + 断点接入正文断行单源）。本轮只做 en-US。
+  步骤见 `docs/自建断行引擎-实施方案.md` S7。
+
+- **Q3 — R1 长串：F11（`LongStringBreaker`）/ F12（`overflow-wrap`·`word-break`）零消费（2026-09-30 记）**：
+  两处都已实现但**全项目零消费**（grep 只命中自身单测与 CSS 级联）：
+  - F11 `LongStringBreaker.breakOpportunities`（`common/text/preprocess/LongStringBreaker.kt:26`）
+  - F12 `ComputedStyle.overflowWrap` / `.wordBreak`（`ComputedStyle.kt:311/313`，由 `StyleComputer` 正常解析）
+
+  **决策：先不接线**，理由三条 ——
+  (1) R1 症状**用户无法复现**（见 Q1），为一个不可复现的症状扩 `ParagraphBreaker` 接缝不划算；
+  (2) CSS `overflow-wrap: normal` 的语义本就是「只有在否则会溢出时才在任意点断开」，
+      即 R1 core，与 `break-word` 的区别只在**是否影响 min-content 尺寸**——
+      而 `minContentWidth` 已独立走 `minContentSegments` 计算，不经过断行器；
+  (3) 接线要改 `breakLines` 3 个重载 × 2 个调用点，**接缝扩大后 S3 之后再改更贵**。
+
+  落地为「独立后续项」，与 S3 主链路解耦。详见 `docs/自建断行引擎-实施方案.md` §2.2(c)。
+
+- **Q4 — 多语言：其他语言的断词与禁则（2026-09-30 记，本轮不做）**：
+  本轮范围 = **中文实现 + 英文断词 + 中英文禁则**；其他语言**只留数据形状上的口子**，不实现、不扩接缝。
+  - **英文断词不需要 `lang` 参数**：适用范围按 **script 判定**（只对纯 ASCII 拉丁字母 token 跑 K-L），
+    中英混排的书里只有英文词被断，中文一个字不动 → `ParagraphBreaker.breakLines` **零扩张**。
+  - **已知局限（不修，写进锁）**：法/德/西也是拉丁 script，会误用 en-us 断在非音节处；
+    拉丁变音字母（`ß é è`）不在 ASCII 白名单内天然排除，损害面限于「无变音的西/德/法词」。
+  - **口子留在数据形状上（不是接缝上）**：① 禁则表收成 `KinsokuRules` 值对象；
+    ② 每语言的 `lefthyphenmin`/`righthyphenmin` 随词典走（en = 2/3，德法不是，**且这两个参数不在 pattern 数据里**）；
+    ③ `Hyphenator.hyphenate(text, lang)` 的 `lang` 是形参不是全局读；
+    ④ `BreakOpportunitySet` 收「断点增强器」入参，不硬编码调 en-us。
+  - **书级语言目前是零**：EPUB `dc:language` 未解析、`ComputedStyle` 无 `lang` 字段、`:lang()` 不支持
+    （`HtmlTreeConverter.kt:190-193` 把 `lang`/`xml:lang` 存进 attrs，但断在属性层）。
+    `font_faces.lang` 是**字体表**的一列（跟着 `FontFace` 走），**语义未查证**，但它**不是「书的语言」**。
+  - 详见 `docs/自建断行引擎-实施方案.md` §0.1 / §0.2 / S7。
 
 - ~~开书被调两次~~ **误判，非 bug（2026-09-29 记 → 2026-09-30 查清）**：原以为 `open ok chapters=0`
   后 140ms–900ms 又一次 `open: chapters=N` 是 `openBookEngine` 并发重入。**查清：每次开书只调一次**，

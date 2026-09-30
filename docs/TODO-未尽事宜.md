@@ -92,6 +92,27 @@
     `font_faces.lang` 是**字体表**的一列（跟着 `FontFace` 走），**语义未查证**，但它**不是「书的语言」**。
   - 详见 `docs/自建断行引擎-实施方案.md` §0.1 / §0.2 / S7。
 
+- **Q5 — 含拉丁字母的行失去 kerning 与 fi/fl 连字（2026-09-30 记，本轮有意接受）**：
+  路线 B 的管线是「逐码本量宽 → 逐字 `drawString` 落位」，`Font.getWidths(glyphs)` 是裸 cmap 查表、
+  **不整形**，而 skParagraph 走 HarfBuzz（带 `liga` 与 kern 表）。故两者在拉丁字母上不等宽。
+  - **量级（实测，T8.4）**：连字只在 CJK 面（`STSong` 的 `fi` **−9.00px** @100px、`Songti SC` −4.10、
+    `PingFang SC` −2.10）；kern 只在拉丁面成规模（Times New Roman **59 对**最大 **−3.52**、
+    Helvetica 56 对最大 −1.76、**Georgia 0 对**）。CJK 侧**完全干净**：兰亭序 84 字长串 Δ=+0.000000%。
+  - **暴露面（实测，`books/` 11 本 epub 正文）**：3 本中文网文 ≈ 0 处/万字符；
+    英文书 25–32 处/万字符（moby-dick 32.24、gutenberg-84 31.12、gutenberg-1342 25.52）。
+  - **为什么本轮不修**：① skiko `Paragraph` 无任何字形/簇级位置查询（`javap` 确认），
+    「整段整形一次 + 查每簇位置」这条路不存在；② kern 可以在 Aligner 里补
+    （`w_j = adv_j + kern(cp_{j−1}, cp_j)`，两侧同表即自洽），但**连字补不了**（它改变字形个数），
+    而连字恰是 CJK 面上更大的那个 —— 补一半要「每面 62×62=3844 次 Paragraph 测量建表」，
+    覆盖小偏差、放过大偏差，投入产出不成立；③ 要真补必须连绘制侧的 `Paragraph` 通路一起改，超出本轮范围。
+  - **为什么这是「自洽」而不是「缺陷」**：断行侧量 `Σ` 逐码本、S4 Aligner 的 `x_i = x_0 + Σ(w_j+delta_j)`
+    用同一个 `advanceOf`、S5 逐字绘制 —— 三者同源即量画一致。全部整形缺口**都是负的**
+    （15 个面 × 多组实测无一为正），所以任何「比量出的更窄」的绘制都不可能溢出版心。
+  - **补的话怎么做（留档）**：在 `SkiaRunMeasurer` 里加一层「per-face kern 表」，
+    按 (面, size) 懒建表（`para("ab") - adv(a) - adv(b)`，62×62 上界），
+    让 `advanceOf(i)` 返回 `adv(cp_i) + kern(cp_{i−1}, cp_i)`。连字仍无解。
+  - 详见 `docs/自建断行引擎-实施方案.md` §2.2(d) 与 `docs/自建断行引擎-测试计划.md` §T8.4。
+
 - ~~开书被调两次~~ **误判，非 bug（2026-09-29 记 → 2026-09-30 查清）**：原以为 `open ok chapters=0`
   后 140ms–900ms 又一次 `open: chapters=N` 是 `openBookEngine` 并发重入。**查清：每次开书只调一次**，
   那两行是同一次开书的两个阶段，且 `chapters=0` 恒为 0。

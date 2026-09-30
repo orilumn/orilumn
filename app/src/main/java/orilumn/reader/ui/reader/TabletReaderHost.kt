@@ -66,7 +66,7 @@ class TabletReaderHost(
     override suspend fun open(): ReaderPos? = withContext(Dispatchers.IO) {
         if (!opened) {
             if (!controller.open(bookId, repository.readingState(bookId))) return@withContext null
-            controller.prewarmForOpen()
+            // 注：open 后默认 prewarm 恒跳过落位章（open 同步塑形，一次为准），此处不再调用。
             // R7: open-book B2 dispatch (epoch-deduped; defer-gated inside) — far chapters get laid
             // without waiting for a settings change. Host-owned orchestration; prewarm stays single-chapter.
             controller.requestWholeBookRelayout()

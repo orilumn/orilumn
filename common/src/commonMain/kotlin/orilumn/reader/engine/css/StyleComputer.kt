@@ -1,5 +1,7 @@
 package orilumn.reader.engine.css
 
+import orilumn.reader.engine.AbSwitch
+
 import orilumn.reader.engine.html.MarkupElement
 
 /**
@@ -40,6 +42,68 @@ class StyleComputer(
     private companion object {
         /** Matches a CSS length token (or `auto`) anywhere inside a mixed shorthand value. */
         val LENGTH_TOKEN = Regex("(-?\\d+(?:\\.\\d+)?(?:px|em|rem|%))|auto")
+
+        /**
+         * R29：`splitWs` 的**预编译**空白切分正则（仅在 `regexHoist` 开关打开时用）。
+         *
+         * 原实现是 13 处 `split(Regex("\\s+"))`——每次调用**现场 new 一个 Regex**，
+         * 走 `Pattern.compile`。这看起来是明摆着的浪费（同一模式编译上千次），
+         * 故 R29 拿它当靶子。
+         *
+         * **实测否证（R29，见 `docs/待分析-GIMP开书慢-结论清单.md` §3b.7）**：
+         * 同装机交叉 8+8 跑、锚点一致（12@21972），手工扫描替代版比预编译 `Pattern.split`
+         * **慢 8ms**（cEdge 中位 35.5ms vs 28ms，8/8 全分离）。手工扫描已删。
+         * 那批数据里两臂**都已**预编译，所以"现场 `Pattern.compile` 到底多贵"**仍未测**——
+         * 那是 `regexHoist` 这一刀要量的，别再拿手工扫描去代理它。
+         */
+        private val WS_SPLIT = Regex("\\s+")
+
+        /** `border-radius` 的 `/` 或空白切分（同样只在 `regexHoist` 臂用）。 */
+        private val RADIUS_SPLIT = Regex("\\s*\\/\\s*|\\s+")
+
+        /**
+         * CSS 空白切分。默认 = **R29 之前的原样行为**（现场 `Regex` 构造）。
+         *
+         * `regexHoist=1` 时改用 companion 里预编译的同一个模式——**语义完全相同**
+         * （同一个 pattern、同一份 `split` 调用），唯一差别是不再每次重新构造 `Regex`。
+         * 这是本轮唯一保留的改动面：可摘除、可回退、无行为风险。
+         */
+        fun splitWs(v: String): List<String> =
+            if (AbSwitch.regexHoist()) v.split(WS_SPLIT) else v.split(Regex("\\s+"))
+
+        /** `splitWs` 的 `limit = 4` 变体（[parseEdges] 只需前 4 槽）。 */
+        fun splitWsLimit4(v: String): List<String> =
+            if (AbSwitch.regexHoist()) v.split(WS_SPLIT, limit = 4) else v.split(Regex("\\s+"), limit = 4)
+
+        /** `border-radius` 专用切分（模式是并集 `\s*\/\s*|\s+`，不能与空白切分共用）。 */
+        fun splitRadius(v: String): List<String> =
+            if (AbSwitch.regexHoist()) v.split(RADIUS_SPLIT) else v.split(Regex("\\s*\\/\\s*|\\s+"))
+
+        /**
+         * R29：`parseBorderColors` / `parseBorderStyles` 里的 4 侧 key 提为常量。
+         *
+         * 原实现每个元素都 `listOf("top","right","bottom","left")` 新建一个列表，
+         * 再 `"border-$side-color"` 拼 4 个**新字符串**去查表（哈希要现算、4 槽 8 次）。
+         * 锚页实测 `eCol+eSty=17ms / cEdge=28ms`（61%），这两个函数是边家族里唯二
+         * 无条件分配列表的——而绝大多数元素只声明了 `border-left` 之类一两个边。
+         *
+         * 改为显式四槽 + 常量 key：零分配，查表哈希由 JVM/ART 缓存。
+         * **语义完全不变**（同 key 同顺序同回退链）。
+         *
+         * R39 实测：eCol 5→1ms、eSty 8→5ms、cEdge 37.5→28ms（−25%）。
+         */
+        /** `border-{side}-color` 的 4 个 key（**预建**字符串，非拼接）。 */
+        val BORDER_SIDE_COLOR_KEYS = arrayOf(
+            "border-top-color", "border-right-color", "border-bottom-color", "border-left-color",
+        )
+
+        /** `border-{side}-style` 的 4 个 key。 */
+        val BORDER_SIDE_STYLE_KEYS = arrayOf(
+            "border-top-style", "border-right-style", "border-bottom-style", "border-left-style",
+        )
+
+        /** `border-{side}` 的 4 个 key（无后缀简写）。 */
+        val BORDER_SIDE_KEYS = arrayOf("border-top", "border-right", "border-bottom", "border-left")
 
         /** `display` values treated as block-level for box classification (matches the roadmap). */
         val DISPLAY_BLOCK_VALUES = setOf("block", "list-item", "flex", "grid", "inline-table")
@@ -110,9 +174,20 @@ class StyleComputer(
     }
 
     private fun computeOne(el: MarkupElement, ancestors: List<MarkupElement>, parent: ComputedStyle): ComputedStyle {
+        // R26 诊断：见 CascadeProbe。probe 非 null 时把本函数拆成
+        // 「内联属性解析 / 首次级联+建样式 / 通用字体兜底的第二次级联」三笔。
+        // 关闭时只多一次静态读。
+        val probe = CascadeProbe.sink
+        var parseMs = 0L
+        var buildMs = 0L
+        var secondPassMs = 0L
+        val tP = if (probe != null) orilumn.reader.time.platformNowMs() else 0L
         val inline = cascade.parseInline(el.attrs["style"])
+        if (probe != null) parseMs = orilumn.reader.time.platformNowMs() - tP
         val winners = cascade.winningDeclarations(el, ancestors, inline)
+        val tB = if (probe != null) orilumn.reader.time.platformNowMs() else 0L
         val style = computeStyle(winners, parent, el.tag)
+        if (probe != null) buildMs = orilumn.reader.time.platformNowMs() - tB
         // 读者层裸通用名兜底合并：主题预设（serif/sans-serif）只能缀在书栈后面做最终回退，
         // 不能替换——否则书里点名的导入字体（池中有）在主题模式下永远够不着（传统变黑体）。
         // 具名槽（用户显式选择）照旧全覆盖；书未声明时作者值为空，无事发生。合并后重算一次，
@@ -123,13 +198,20 @@ class StyleComputer(
                 ?.let { parseFontFamilyList(it) }.orEmpty()
                 .filter { it.isNotBlank() && !it.equals(fams[0], ignoreCase = true) }
             if (author.isNotEmpty()) {
-                return computeStyle(
+                val tS = if (probe != null) orilumn.reader.time.platformNowMs() else 0L
+                val merged = computeStyle(
                     winners + ("font-family" to (author + fams[0]).joinToString(",")),
                     parent,
                     el.tag,
                 )
+                if (probe != null) {
+                    secondPassMs = orilumn.reader.time.platformNowMs() - tS
+                    CascadeProbe.hit(0L, parseMs, buildMs, secondPassMs)
+                }
+                return merged
             }
         }
+        if (probe != null) CascadeProbe.hit(0L, parseMs, buildMs, secondPassMs)
         return style
     }
 
@@ -151,6 +233,10 @@ class StyleComputer(
             }
         }
 
+        // R29 诊断：把 buildMs 拆成「边家族 / font-family 三连 / 其余」。
+        // 见 CascadeProbe 的 KDoc——"153 行逐字段解析"不足以指导改动，得先量。
+        val split = CascadeProbe.splitSink
+        val tE = if (split != null) orilumn.reader.time.platformNowMs() else 0L
         val rawMargin = parseEdges(w, "margin", "margin-top", "margin-right", "margin-bottom", "margin-left", fontSize, parent.fontSizePx)
         // 疏密 (gapScale): 调节语义 —— 在 cascade 结果之上按比例缩放 (作者 css / UA 默认值保留, 不替换).
         // 只动垂直 (top/bottom); p/li 豁免 (其纵边距归 段间距 的替换语义，仅 p/li 相邻对).
@@ -161,10 +247,45 @@ class StyleComputer(
         val width = parseBoxSize(w["width"])
         val maxWidth = parseBoxSize(w["max-width"])
         val minWidth = parseBoxSize(w["min-width"])
-        // P3-a: border-radius px/% 一次解析（% 以 0..1 分数保留，draw 点解）。
-        val (radiusPx, radiusPct) = parseBorderRadius(w, fontSize, parent.fontSizePx)
         // P3-b: background 简写一次解析（单属性优先，缺失才回落简写层）。
         val bgShort = w["background"]?.let { parseBackgroundShorthand(it, fontSize, parent.fontSizePx) }
+        // R29：边家族六兄弟在这里一次性算完（原本散在构造参数里逐个现算），
+        // 这样"边"这一笔才量得全，也顺带去掉了构造参数里的求值。
+        // R29 第三层：family 探针把六个家族**各计一笔**——前两层已否证
+        // 「重复查表 / Pattern.compile / 切分开销」三个假设，剩下的必须定位到家族。
+        val fam = CascadeProbe.familySink
+        val t0b = if (fam != null) orilumn.reader.time.platformNowMs() else 0L
+        val padding = parseEdges(w, "padding", "padding-top", "padding-right", "padding-bottom", "padding-left", fontSize, parent.fontSizePx)
+        val eBox = if (fam != null) orilumn.reader.time.platformNowMs() - t0b else 0L
+        val t1b = if (fam != null) orilumn.reader.time.platformNowMs() else 0L
+        val borderEdges = parseBorderEdges(w, fontSize, parent.fontSizePx)
+        val eWidth = if (fam != null) orilumn.reader.time.platformNowMs() - t1b else 0L
+        val t2b = if (fam != null) orilumn.reader.time.platformNowMs() else 0L
+        val borderColors = parseBorderColors(w)
+        val eColor = if (fam != null) orilumn.reader.time.platformNowMs() - t2b else 0L
+        val t3b = if (fam != null) orilumn.reader.time.platformNowMs() else 0L
+        val borderStyles = parseBorderStyles(w)
+        val eStyle = if (fam != null) orilumn.reader.time.platformNowMs() - t3b else 0L
+        // eBox 起点不含 margin（它在 tE 之前就调了），把 margin 归到 eBox 里：
+        // 拆两笔太碎，用「margin 单独一笔」不如把六个家族的**相对大小**定下来。
+        val t4b = if (fam != null) orilumn.reader.time.platformNowMs() else 0L
+        val radiusProbe = parseBorderRadius(w, fontSize, parent.fontSizePx)
+        val eRadius = if (fam != null) orilumn.reader.time.platformNowMs() - t4b else 0L
+        val (radiusPx, radiusPct) = radiusProbe
+        // 该元素是否**真**声明了任何 border 相关属性。若绝大多数元素一个都没声明，
+        // 那 34ms 花在"空跑六个家族"上（每个家族都要 listOf(4) + 4 次字符串拼接查表）。
+        val anyBorder = if (w.keys.any { it.startsWith("border") }) 1L else 0L
+        if (fam != null) CascadeProbe.hitFamily(eBox, eWidth, eColor, eStyle, eRadius, anyBorder)
+        var edgeMs = 0L
+        var fontMs = 0L
+        if (split != null) edgeMs = orilumn.reader.time.platformNowMs() - tE
+        val tF = if (split != null) orilumn.reader.time.platformNowMs() else 0L
+        // font-family 三连：同一字符串被 parseFontFamily / parseFontFamilyList /
+        // isMonospaceFamily 各解析一次。先取出来，供下面三处共用。
+        val famRaw = w["font-family"]
+        val famList = famRaw?.let { parseFontFamilyList(it) }
+        if (split != null) fontMs = orilumn.reader.time.platformNowMs() - tF
+        if (split != null) CascadeProbe.hitSplit(edgeMs, fontMs)
 
         return ComputedStyle(
             fontSizePx = fontSize,
@@ -177,8 +298,8 @@ class StyleComputer(
             margin = margin,
             marginLeftAuto = isMarginAuto(w, left = true),
             marginRightAuto = isMarginAuto(w, left = false),
-            padding = parseEdges(w, "padding", "padding-top", "padding-right", "padding-bottom", "padding-left", fontSize, parent.fontSizePx),
-            border = parseBorderEdges(w, fontSize, parent.fontSizePx),
+            padding = padding,
+            border = borderEdges,
             backgroundColorHex = w["background-color"]?.let { parseCssColor(it) }
                 ?: w["background"]?.let { extractColorToken(it) },
             // ---- P3-b: background-image / repeat / position (non-inherited; null = none) ----
@@ -190,8 +311,8 @@ class StyleComputer(
             backgroundPosition = w["background-position"]?.let { parseBackgroundPosition(it, fontSize, parent.fontSizePx) }
                 ?: bgShort?.third
                 ?: BackgroundPosition(),
-            borderColors = parseBorderColors(w),
-            borderStyles = parseBorderStyles(w),
+            borderColors = borderColors,
+            borderStyles = borderStyles,
             borderRadius = radiusPx,
             borderRadiusPct = radiusPct,
             textAlign = w["text-align"]?.let { parseTextAlign(it) } ?: parent.textAlign,
@@ -200,10 +321,13 @@ class StyleComputer(
             breakBefore = parseBreakAny(w, "break-before", "page-break-before"),
             displayBlock = w["display"]?.let { isDisplayBlock(it.trim().lowercase()) } ?: false,
             displayNone = w["display"]?.trim()?.lowercase() == "none",
-            fontFamily = w["font-family"]?.let { parseFontFamily(it) } ?: parent.fontFamily,
-            fontFamilies = w["font-family"]?.let { parseFontFamilyList(it) } ?: parent.fontFamilies,
+            // R29：改用上面已取出的 famRaw/famList，不再各自 w["font-family"] 查一次表。
+            // 语义等价：原先三处都是 `w["font-family"]?.let { … } ?: parent.…`，
+            // 同一个 key、同一个字符串，parseFontFamilyList 提前算一次供 fontFamilies 用。
+            fontFamily = famRaw?.let { parseFontFamily(it) } ?: parent.fontFamily,
+            fontFamilies = famList ?: parent.fontFamilies,
             fontWeight = w["font-weight"]?.let { parseFontWeight(it) } ?: parent.fontWeight,
-            monospace = w["font-family"]?.let { isMonospaceFamily(it) } ?: parent.monospace,
+            monospace = famRaw?.let { isMonospaceFamily(it) } ?: parent.monospace,
             // List markers: non-inherited, read directly off the `ul/ol` element's own declaration;
             // the `list-style` shorthand splits into type/position when single props are absent.
             listStyleType = w["list-style-type"]?.trim()?.lowercase()
@@ -379,7 +503,7 @@ class StyleComputer(
         }
         // `border-width`: 1–4 slots like margin (thin/medium/thick allowed per slot).
         val widthSlots: Edges? = w["border-width"]?.let { v ->
-            val toks = v.trim().split(Regex("\\s+")).map { lenOf(it) ?: 0f }
+            val toks = splitWs(v.trim()).map { lenOf(it) ?: 0f }
             when (toks.size) {
                 1 -> Edges(toks[0], toks[0], toks[0], toks[0])
                 2 -> Edges(toks[0], toks[1], toks[0], toks[1])
@@ -484,7 +608,7 @@ class StyleComputer(
      * 其余非法回初值 `repeat`）。`repeat-x/y` 只在单值时合法，双值混用即回初值。
      */
     private fun parseBackgroundRepeat(value: String): BackgroundRepeat {
-        val toks = value.trim().lowercase().split(Regex("\\s+")).filter { it.isNotBlank() }
+        val toks = splitWs(value.trim().lowercase()).filter { it.isNotBlank() }
         if (toks.size == 1) return when (toks[0]) {
             "repeat-x" -> BackgroundRepeat.REPEAT_X
             "repeat-y" -> BackgroundRepeat.REPEAT_Y
@@ -740,7 +864,7 @@ class StyleComputer(
     private fun parseBorderColors(w: Map<String, String>): BorderColorEdges? {
         // `border-color` shorthand → 1–4 slots (top, right, bottom, left, margin-style).
         val globalSlots: List<String?>? = w["border-color"]?.let { v ->
-            val raw = v.split(Regex("\\s+")).map { it.ifBlank { null } }
+            val raw = splitWs(v).map { it.ifBlank { null } }
             when (raw.size) {
                 1 -> listOf(raw[0], raw[0], raw[0], raw[0])
                 2 -> listOf(raw[0], raw[1], raw[0], raw[1])
@@ -750,14 +874,17 @@ class StyleComputer(
         }
         val globalColor = w["border"]?.let { extractColorToken(it) }
         fun colorOf(raw: String?): String? = raw?.let { parseCssColor(it.trim()) }
-        val sides = listOf("top", "right", "bottom", "left")
-        val out = sides.mapIndexed { i, side ->
-            colorOf(w["border-$side-color"])
-                ?: w["border-$side"]?.let { extractColorToken(it) }
-                ?: colorOf(globalSlots?.get(i))
-                ?: globalColor
+        // R29：显式四槽替代 `listOf(4) + mapIndexed`，key 走 companion 常量（原为每次拼接）。
+        // `borderSides` 关闭时走原样臂，供 A/B 量这一刀的真实收益。
+        val out: Array<String?> = arrayOfNulls<String>(4).also { a ->
+            for (i in 0 until 4) {
+                a[i] = colorOf(w[BORDER_SIDE_COLOR_KEYS[i]])
+                    ?: w[BORDER_SIDE_KEYS[i]]?.let { extractColorToken(it) }
+                    ?: colorOf(globalSlots?.get(i))
+                    ?: globalColor
+            }
         }
-        if (out.all { it == null } && globalSlots == null) return null
+        if (out[0] == null && out[1] == null && out[2] == null && out[3] == null && globalSlots == null) return null
         return BorderColorEdges(out[0], out[1], out[2], out[3])
     }
 
@@ -766,7 +893,7 @@ class StyleComputer(
 
     /** First border-style keyword inside a mixed shorthand (`2px solid red` → "solid"). */
     private fun borderStyleWordIn(value: String): String? {
-        for (tok in value.split(Regex("\\s+"))) {
+        for (tok in splitWs(value)) {
             val t = tok.trim().lowercase()
             if (t in BORDER_STYLE_WORDS) return t
         }
@@ -786,7 +913,7 @@ class StyleComputer(
      */
     private fun parseBorderStyles(w: Map<String, String>): BorderStyleEdges? {
         val slotWords: List<String?>? = w["border-style"]?.let { v ->
-            val kws = v.split(Regex("\\s+")).map { it.trim().lowercase() }
+            val kws = splitWs(v).map { it.trim().lowercase() }
                 .filter { it in BORDER_STYLE_WORDS }
             if (kws.isEmpty()) return@let null
             when (kws.size) {
@@ -798,18 +925,20 @@ class StyleComputer(
         }
         val borderWord = w["border"]?.let { borderStyleWordIn(it) }
         var declared = false
-        val sides = listOf("top", "right", "bottom", "left")
-        val out = sides.mapIndexed { i, side ->
-            val word = w["border-$side-style"]?.trim()?.lowercase()?.takeIf { it in BORDER_STYLE_WORDS }
-                ?: w["border-$side"]?.let { borderStyleWordIn(it) }
+        // R29：同上，显式四槽 + 常量 key。
+        val out: Array<BorderStyle?> = arrayOfNulls(4)
+        for (i in 0 until 4) {
+            val word = w[BORDER_SIDE_STYLE_KEYS[i]]?.trim()?.lowercase()?.takeIf { it in BORDER_STYLE_WORDS }
+                ?: w[BORDER_SIDE_KEYS[i]]?.let { borderStyleWordIn(it) }
                 ?: slotWords?.get(i)
                 ?: borderWord
-            if (word == null) return@mapIndexed BorderStyle.NONE
+            if (word == null) continue
             declared = true
-            if (word == "solid") BorderStyle.SOLID else borderStyleOf(word)
+            out[i] = if (word == "solid") BorderStyle.SOLID else borderStyleOf(word)
         }
         if (!declared) return null
-        return BorderStyleEdges(out[0], out[1], out[2], out[3])
+        return BorderStyleEdges(out[0] ?: BorderStyle.NONE, out[1] ?: BorderStyle.NONE,
+            out[2] ?: BorderStyle.NONE, out[3] ?: BorderStyle.NONE)
     }
 
     /**
@@ -818,7 +947,7 @@ class StyleComputer(
      * 颜色只认 `#hex`（其余回 currentColor＝null，由绘制点按文本色解）。
      */
     private fun parseShadow(value: String, fontSize: Float, parentFontPx: Float, allowInset: Boolean): BoxShadowParts? {
-        val toks = value.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
+        val toks = splitWs(value.trim()).filter { it.isNotBlank() }
         if (toks.isEmpty()) return null
         if (toks.any { it.equals("inset", ignoreCase = true) }) return null
         if (toks.firstOrNull()?.equals("none", ignoreCase = true) == true) return null
@@ -865,13 +994,13 @@ class StyleComputer(
     private fun parseBorderRadius(w: Map<String, String>, fontSize: Float, parentFontPx: Float): Pair<CornerRadius, CornerRadius> {
         fun pxAndPct(v: String?): Pair<Float, Float> {
             if (v == null) return 0f to 0f
-            val first = v.trim().split(Regex("\\s*\\/\\s*|\\s+")).firstOrNull()?.lowercase() ?: return 0f to 0f
+            val first = splitRadius(v.trim()).firstOrNull()?.lowercase() ?: return 0f to 0f
             val len = parseLength(first) ?: return 0f to 0f
             // `%` kept as a 0..1 fraction (resolved+clamped against box dims at draw).
             if (len is Length.Percent) return 0f to (len.value / 100f).coerceIn(0f, 10f)
             return len.resolve(fontSize, parentFontPx, rootFontPx).coerceAtLeast(0f) to 0f
         }
-        val slots: List<String>? = w["border-radius"]?.split(Regex("\\s+"))?.filter { it.isNotBlank() }
+        val slots: List<String>? = w["border-radius"]?.let { splitWs(it) }?.filter { it.isNotBlank() }
         val quad = when {
             slots == null || slots.isEmpty() -> listOf(null, null, null, null)
             slots.size == 1 -> listOf(slots[0], slots[0], slots[0], slots[0])
@@ -901,7 +1030,7 @@ class StyleComputer(
     private fun isMarginAuto(w: Map<String, String>, left: Boolean): Boolean {
         val side = if (left) "margin-left" else "margin-right"
         w[side]?.trim()?.lowercase()?.let { return it == "auto" }
-        val sh = w["margin"]?.trim()?.split(Regex("\\s+"))?.filter { it.isNotEmpty() } ?: return false
+        val sh = w["margin"]?.trim()?.let { splitWs(it) }?.filter { it.isNotEmpty() } ?: return false
         if (sh.isEmpty()) return false
         // TRBL 槽位：left 取 1（2/3 值）或 3（4 值）；right 取 1（2/3 值）或 1（4 值→[1]）。
         val slot = when (sh.size) {
@@ -920,7 +1049,7 @@ class StyleComputer(
     ): Edges {
         val split = w[shorthand]
             ?.let { value ->
-                val slots = value.split(Regex("\\s+"), limit = 4).map { normalizeEdge(it, fontSize, parentFontPx) }
+                val slots = splitWsLimit4(value).map { normalizeEdge(it, fontSize, parentFontPx) }
                 when (slots.size) {
                     1 -> Edges(slots[0], slots[0], slots[0], slots[0])
                     2 -> Edges(slots[0], slots[1], slots[0], slots[1])
@@ -962,7 +1091,7 @@ class StyleComputer(
     /** Splits the `list-style` shorthand: first known type keyword, "" when none. */
     private fun extractListStyleType(shorthand: String?): String {
         if (shorthand == null) return ""
-        for (tok in shorthand.split(Regex("\\s+"))) {
+        for (tok in splitWs(shorthand)) {
             val t = tok.trim().lowercase()
             if (t in LIST_STYLE_TYPES) return t
         }
@@ -972,7 +1101,7 @@ class StyleComputer(
     /** Splits the `list-style` shorthand: inside/outside, "" when neither. */
     private fun extractListStylePosition(shorthand: String?): String {
         if (shorthand == null) return ""
-        for (tok in shorthand.split(Regex("\\s+"))) {
+        for (tok in splitWs(shorthand)) {
             val t = tok.trim().lowercase()
             if (t == "inside" || t == "outside") return t
         }
@@ -1076,7 +1205,7 @@ class StyleComputer(
             if (len is Length.Percent) return 0f
             return len.resolve(fontSize, fontSize, rootFontPx).coerceAtLeast(0f)
         }
-        val toks = raw.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
+        val toks = splitWs(raw.trim()).filter { it.isNotBlank() }
         return when (toks.size) {
             0 -> 0f to 0f
             1 -> { val v = pxOf(toks[0]); v to v }

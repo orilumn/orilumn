@@ -49,6 +49,8 @@ fun collectColorRuns(
     rootWs: WhiteSpace = WhiteSpace.NORMAL,
     /** P3-c 生成内容查找（空即无，旧路径）。 */
     genOf: GenOf = EmptyGen,
+    /** 预计算段表（同参复用，`shapeGeometry` 一次分段五家共享；null 即现算）。 */
+    precomputed: List<StyledSegment>? = null,
     /** P3-c 样式回退（变换/引号依据；默认读 [styles] 表）。 */
     styleOf: ((MarkupElement) -> ComputedStyle?)? = null,
 ): List<ColorRun> {
@@ -66,7 +68,7 @@ fun collectColorRuns(
         val t = normalizeAnonymousRun(root.text, leafWs)
         return if (t.isEmpty()) emptyList() else listOf(ColorRun(0, t.length, argb))
     }
-    val segs = styledSegments(root, wsOf, isExcluded, isBlock, leafWs, genOf, styleOf ?: { styles[it] }).segments
+    val segs = precomputed ?: styledSegments(root, wsOf, isExcluded, isBlock, leafWs, genOf, styleOf ?: { styles[it] }).segments
     val out = ArrayList<ColorRun>()
     var pos = 0
     fun emit(seg: StyledSegment, argb: Int?) {
@@ -133,6 +135,8 @@ fun collectFontRuns(
     rootWs: WhiteSpace = WhiteSpace.NORMAL,
     /** P3-c 生成内容查找（空即无，旧路径）。 */
     genOf: GenOf = EmptyGen,
+    /** 预计算段表（同参复用，`shapeGeometry` 一次分段五家共享；null 即现算）。 */
+    precomputed: List<StyledSegment>? = null,
     /** P3-c 样式回退（变换/引号依据；默认读 [styles] 表）。 */
     styleOf: ((MarkupElement) -> ComputedStyle?)? = null,
 ): List<FontRun> {
@@ -151,7 +155,7 @@ fun collectFontRuns(
         return if (t.isEmpty() || eff.fontEquals(base)) emptyList()
         else listOf(FontRun(0, t.length, eff.families, eff.tag, eff.weight, eff.italic, eff.monospace, eff.fontSizePx))
     }
-    val segs = styledSegments(root, wsOf, isExcluded, isBlock, leafWs, genOf, styleOf ?: { styles[it] }).segments
+    val segs = precomputed ?: styledSegments(root, wsOf, isExcluded, isBlock, leafWs, genOf, styleOf ?: { styles[it] }).segments
     // 逐节点 face 一次算好（与段构建同一跳过规则），段折叠时直接取用。
     val fontByNode = HashMap<MarkupElement, FontRun>()
     fun fill(node: MarkupElement, inherited: FontRun) {

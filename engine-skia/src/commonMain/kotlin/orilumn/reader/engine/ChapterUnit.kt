@@ -108,6 +108,12 @@ class ChapterUnit(
      *  neighborhood on every store; entries carry their table hash so stale params never hit.
      *  Cleared on [invalidateLayout]. Live binding still goes through [bind]/[bindFull] only. */
     val pageCache = HashMap<Int, PageProduct>()
+    /** Tap-driven link ranges per block (`linkTargetAt`): ranges depend only on params (fresh
+     *  cascade), the tap only selects the block. Keyed by [linkRangeKey]; cleared on
+     *  [invalidateLayout]. */
+    val linkRangeCache = HashMap<Int, List<orilumn.reader.engine.layout.LinkRange>>()
+    var linkRangeKey: Long? = null
+
     data class PageProduct(
         val layout: BookLayout,
         val slices: List<PageSlice>,
@@ -202,6 +208,8 @@ class ChapterUnit(
         tempRenderLayout = null
         blockShapeCache = null
         pageCache.clear()
+        linkRangeCache.clear()
+        linkRangeKey = null
         shapedPageFrom = -1
         shapedPageTo = -1
         laidOut = false
@@ -263,6 +271,27 @@ class ChapterStructureCache {
      * 伪元素样式不在此（跨参数过期），各 prepare 按新鲜级联懒解（`LightPrepare.genOf`）。
      */
     var genStrings: Map<orilumn.reader.engine.html.MarkupElement, Pair<String?, String?>> = emptyMap()
+
+    /** Author-CSS hash the bound leaves/starts/owners were built from (loaded or computed). */
+    var boundCssHash: Long? = null
+
+    /** True only for media-free content (no `@media`/media-`@import`): the bound structure stays
+     *  valid across viewport/typography changes while the CSS still matches. Never set for
+     *  media-affected chapters — those always recompute via [key]. */
+    var loadedMediaFree: Boolean = false
+
+    /**
+     * R26：本章是否存在 `float`（块级，非 NONE）。由 [orilumn.reader.reader.engine.BoxChapterLayouter]
+     * 的 `computeStructure` 在已解析过每个叶子的那趟里顺带算出。
+     *
+     * 用来省掉 `LightPrepare.computeFloatLeads` 开头那次**全章** `blockStyleFor` 扫描
+     * （Rust 书 ch7 169 叶实测 275ms，且被第一次 `block(i)` 触发而落在开书关键路径上）。
+     *
+     * 有效性：`float` 与字号/行高无关（排版非变量），而结构持久化读写两侧都被
+     * [orilumn.reader.engine.ChapterStructurePersist.hasMediaRules] 门住，故不会被 `@media`
+     * 的视口查询翻转——与同批持久化的 [leaves] / [globalCharStarts] 同等安全。
+     */
+    var anyFloat: Boolean = true
 }
 
 /**

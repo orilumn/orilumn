@@ -53,6 +53,8 @@ fun collectRubyRuns(
     rootWs: WhiteSpace = WhiteSpace.NORMAL,
     /** P3-c 生成内容查找（空即无，旧路径）。 */
     genOf: GenOf = EmptyGen,
+    /** 预计算段表（同参复用，`shapeGeometry` 一次分段五家共享；null 即现算）。 */
+    precomputed: List<StyledSegment>? = null,
     /** P3-c 样式回退（默认读 [styles] 表）。 */
     styleOf: ((MarkupElement) -> ComputedStyle?)? = null,
 ): List<RubyRun> {
@@ -61,7 +63,7 @@ fun collectRubyRuns(
     val resolve: (MarkupElement) -> ComputedStyle? = styleOf ?: { styles[it] }
     val wsOf: (MarkupElement) -> WhiteSpace = { wsOfNode(it, styles, root, rootWs) }
     val leafWs = styles[root]?.whiteSpace ?: root.parent?.let { styles[it]?.whiteSpace } ?: rootWs
-    val segs = styledSegments(root, wsOf, isExcluded, isBlock, leafWs, genOf, resolve).segments
+    val segs = precomputed ?: styledSegments(root, wsOf, isExcluded, isBlock, leafWs, genOf, resolve).segments
     val out = ArrayList<RubyRun>()
     var pos = 0
     var group: MarkupElement? = null

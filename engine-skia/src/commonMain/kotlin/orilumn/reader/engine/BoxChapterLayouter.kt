@@ -1,5 +1,6 @@
 package orilumn.reader.engine
 
+import orilumn.reader.collections.SyncLock
 import orilumn.reader.collections.identityMap
 import orilumn.reader.collections.withLock
 import orilumn.reader.engine.EngineDiag
@@ -65,6 +66,8 @@ enum class PaginationMode { LINE_DISK, BLOCK_TEMP }
 
 /** R6: 平台 CPU 核数（调度塑形槽预算用；iOS actual 后续补）。 */
 internal expect fun platformCpuCount(): Int
+
+
 
 /**
  * Result of the "fast prepare" phase of chapter layout — everything that can be done for the
@@ -157,6 +160,9 @@ class BoxChapterLayouter(
         contentW: Int,
         /** P2: 版心高（与 contentW 共同组成 `@media` 求值视口；与轻路径同值）。 */
         contentH: Int,
+        /** P3: 已绑定的生成内容字符串（结构缓存/持久化，同 CSS 下与现算恒等）：跳过整树求值，
+         *  只做门控复核 + 伪样式新鲜装配。Null = 现算（首触/含 media 章）。 */
+        genStrings: Map<MarkupElement, Pair<String?, String?>>? = null,
     ): ChapterPrepareResult {
         // P2: 与轻路径同视口的 @media 求值，重轻规则恒一致。
         val authorSheets = parseAuthorSheets(cssBundle, orilumn.reader.engine.css.CssViewport(contentW.coerceAtLeast(1), contentH.coerceAtLeast(1)))
@@ -176,17 +182,72 @@ class BoxChapterLayouter(
         val classify = NormalFlowLayout.heavyClassify(styleMap, engine.hasDisplayDeclaration())
         val hidden = orilumn.reader.engine.laying.HiddenCheck { styleMap[it]?.displayNone == true }
         // P3-c: 生成内容 phase-1（ gating 命中才整树求值；伪样式按需缓存，重轻同输入同输出）。
-        val genOf = genOfFor(markup, authorSheets, { styleMap[it] }, engine, hidden)
+        // 已绑定字符串直接复用（P3），否则现算。
+        val genOf = genStrings
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { genOfFromStrings(authorSheets, it, engine) { styleMap[it] } }
+            ?: genOfFor(markup, authorSheets, { styleMap[it] }, engine, hidden)
         val structure = boxLayouter.layoutBoxes(markup, contentW, styleMap, classify, imageLoader, chapterHref, genOf = genOf)
         val leaves = collectLeaves(structure.boxes)
         return buildPrepareResult(markup, styleMap, structure, leaves, classify, hidden, genOf)
     }
 
     /**
-     * P3-c: 章节生成内容查找装配（重/轻/桌面同式）。
+     * P3-c: 章节生成内容 phase-1 单源（轻/重两路同式，勿各写一份）。
      *
      * gating（[GeneratedContent.needsPhase]）未命中即 [EmptyGen] 零开销；命中则文档序一遍
-     * 求字符串＋伪样式按需缓存。伪样式基址与祖先链两路同源（整表查表 / 懒级联），输出恒等。
+     * 求字符串＋伪样式按需缓存。伪样式基址两路同源（整表查表 / 懒级联，由 [styleOf] 注入），
+     * 输出恒等。字符串恒有效（轻路进结构缓存可持久化）；伪样式按新鲜级联懒解。
+     *
+     * @return (字符串表, 查找器)：轻路取全对，重启只取查找器。
+     */
+    private fun genPhase1(
+        markup: MarkupElement,
+        sheets: List<orilumn.reader.engine.css.StyleSheet>,
+        hidden: orilumn.reader.engine.laying.HiddenCheck,
+        engine: StyleComputer,
+        styleOf: (MarkupElement) -> orilumn.reader.engine.css.ComputedStyle?,
+    ): Pair<Map<MarkupElement, Pair<String?, String?>>, orilumn.reader.engine.laying.GenOf> {
+        if (!orilumn.reader.engine.laying.GeneratedContent.needsPhase(sheets)) {
+            return emptyMap<MarkupElement, Pair<String?, String?>>() to orilumn.reader.engine.laying.EmptyGen
+        }
+        val pseudoOf = pseudoOfFor(engine, styleOf)
+        val strings = orilumn.reader.engine.laying.GeneratedContent.resolveStrings(markup, styleOf, pseudoOf, hidden::isHidden)
+        return strings to orilumn.reader.engine.laying.GeneratedContent.genOf(strings, pseudoOf)
+    }
+
+    /**
+     * P3-c phase-1 后半：调用方已持有字符串表（结构缓存/持久化）时跳过 `resolveStrings` 整树求值，
+     * 只做门控复核 + 伪样式懒装配。字符串与 `resolveStrings` 同源（同 sheet 下恒等），伪样式恒按
+     * 新鲜级联解——复用字符串不复用样式，无 stale。
+     */
+    private fun genOfFromStrings(
+        sheets: List<orilumn.reader.engine.css.StyleSheet>,
+        strings: Map<MarkupElement, Pair<String?, String?>>,
+        engine: StyleComputer,
+        styleOf: (MarkupElement) -> orilumn.reader.engine.css.ComputedStyle?,
+    ): orilumn.reader.engine.laying.GenOf {
+        if (!orilumn.reader.engine.laying.GeneratedContent.needsPhase(sheets)) {
+            return orilumn.reader.engine.laying.EmptyGen
+        }
+        return orilumn.reader.engine.laying.GeneratedContent.genOf(strings, pseudoOfFor(engine, styleOf))
+    }
+
+    private fun pseudoOfFor(
+        engine: StyleComputer,
+        styleOf: (MarkupElement) -> orilumn.reader.engine.css.ComputedStyle?,
+    ): (MarkupElement, String) -> orilumn.reader.engine.css.ComputedStyle? {
+        val pseudoCache = HashMap<Pair<MarkupElement, String>, orilumn.reader.engine.css.ComputedStyle?>()
+        return { el, p ->
+            pseudoCache.getOrPut(el to p) {
+                val base = styleOf(el) ?: return@getOrPut null
+                engine.pseudoStyle(el, orilumn.reader.engine.laying.ancestorsOf(el), base, p)
+            }
+        }
+    }
+
+    /**
+     * P3-c: 章节生成内容查找装配（重/轻/桌面同式，体现在 [genPhase1] 单源）。
      */
     private fun genOfFor(
         markup: MarkupElement,
@@ -194,20 +255,8 @@ class BoxChapterLayouter(
         styleOf: (MarkupElement) -> orilumn.reader.engine.css.ComputedStyle?,
         engine: StyleComputer,
         hidden: orilumn.reader.engine.laying.HiddenCheck,
-    ): orilumn.reader.engine.laying.GenOf {
-        if (!orilumn.reader.engine.laying.GeneratedContent.needsPhase(sheets)) {
-            return orilumn.reader.engine.laying.EmptyGen
-        }
-        val pseudoCache = HashMap<Pair<MarkupElement, String>, orilumn.reader.engine.css.ComputedStyle?>()
-        val pseudoOf: (MarkupElement, String) -> orilumn.reader.engine.css.ComputedStyle? = { el, p ->
-            pseudoCache.getOrPut(el to p) {
-                val base = styleOf(el) ?: return@getOrPut null
-                engine.pseudoStyle(el, orilumn.reader.engine.laying.ancestorsOf(el), base, p)
-            }
-        }
-        val strings = orilumn.reader.engine.laying.GeneratedContent.resolveStrings(markup, styleOf, pseudoOf, hidden::isHidden)
-        return orilumn.reader.engine.laying.GeneratedContent.genOf(strings, pseudoOf)
-    }
+    ): orilumn.reader.engine.laying.GenOf =
+        genPhase1(markup, sheets, hidden, engine, styleOf).second
 
     /**
      * Cheap ("light") full-chapter pass: cascade + box **tree** (leaf ordering / styles / width), but
@@ -226,6 +275,9 @@ class BoxChapterLayouter(
         structure: orilumn.reader.engine.ChapterStructureCache,
         /** P2: 版心高（与 contentW 共同组成 `@media` 求值视口；与重路径同值）。 */
         contentH: Int,
+        /** Fires only when the cascade actually ran (first touch per CSS): the caller persists the
+         *  media-free result for import/open reuse. Null = compute without persisting. */
+        onStructureComputed: ((cssHash: Long) -> Unit)? = null,
     ): LightPrepare = structure.lock.withLock {
         // prepareLight runs concurrently for the same chapter's cache: the open thread's DISK/ANCHOR
         // pass races prewarmForOpen (backgroundDispatcher) and the canonical pass. `key` and
@@ -233,9 +285,12 @@ class BoxChapterLayouter(
         // observe it already matching while `parsedAuthorSheets` is still null and crash on the
         // force-unwrap below. Guard on the payload too, and hold the per-chapter lock across the whole
         // check-build-read so no caller ever sees a half-assembled cache (double parse is benign).
+        val cssTexts = cssBundle?.cssTexts ?: emptyList()
+        val cssHash = ChapterStructureCodec.cssHashOf(cssTexts)
         val structureKey = structureKeyOf(cssBundle, profile.useOriginalStyle, contentW, contentH)
-        val rebuild = structure.key != structureKey || structure.parsedAuthorSheets == null
-        if (rebuild) {
+        val keyChanged = structure.key != structureKey
+        val needSheets = keyChanged || structure.parsedAuthorSheets == null
+        if (needSheets) {
             structure.key = structureKey
             // P2: 全视口 @media 求值（宽＋高；重轻两路同值，规则恒一致）。
             structure.parsedAuthorSheets = parseAuthorSheets(
@@ -243,24 +298,54 @@ class BoxChapterLayouter(
                 orilumn.reader.engine.css.CssViewport(contentW.coerceAtLeast(1), contentH.coerceAtLeast(1)),
             )
         }
+        // Media-free bound structure (import-built or previously computed) survives viewport and
+        // typography changes while the CSS matches: the cascade properties it encodes (display,
+        // white-space, background, break-inside, visibility) never come from reader sheets.
+        // Sheets above still re-parse when the viewport moves (the shaping cascade needs them);
+        // only the whole-tree walk is skipped.
+        val boundHit = structure.loadedMediaFree && structure.boundCssHash == cssHash
+        if (!boundHit && keyChanged) {
+            computeStructure(markup, styleComputerFor(cssBundle, profile, structure.parsedAuthorSheets!!), structure)
+            structure.boundCssHash = cssHash
+            structure.loadedMediaFree = !ChapterStructurePersist.hasMediaRules(cssTexts)
+            onStructureComputed?.invoke(cssHash)
+        }
         // styleComputerFor reuses the cached parsed author sheets on a hit, so no CSS re-tokenize.
         val engine = styleComputerFor(cssBundle, profile, structure.parsedAuthorSheets!!)
-        if (rebuild) {
-            computeStructure(markup, engine, structure)
-        }
         // `hidden` is a cheap closure; it is only exercised later, lazily, during per-block materialization
         // and its display decisions are typography-invariant, so the cached leaf set stays valid.
         val hidden = hiddenCheckFor(engine)
-        LightPrepare(markup, profile, contentW, engine, structure.leaves, structure.globalCharStarts, hidden, imageLoader, chapterHref, structure.leafToBackgroundOwner, structure.leafToBreakInsideAvoidOwner, structure.genStrings)
+        LightPrepare(markup, profile, contentW, engine, structure.leaves, structure.globalCharStarts, hidden, imageLoader, chapterHref, structure.leafToBackgroundOwner, structure.leafToBreakInsideAvoidOwner, structure.genStrings, structure.anyFloat)
     }
 
     /** Parses the chapter's author CSS once into [StyleSheet]s (cached in [ChapterStructureCache]).
-     *  P2: `@media` 按视口求值（排版点仅知版心宽，高度恒未知→高度查询丢弃，重轻两路同值）。 */
+     *  P2: `@media` 按视口求值（排版点仅知版心宽，高度恒未知→高度查询丢弃，重轻两路同值）。
+     *  同文本同视口全书只解一次（`sheetCache`，layouter 与 book 同寿，无 stale）：实测一书 1115 份
+     *  文本仅 3 种不同，去重后 tokenize 趋近于零。 */
+    private val sheetCache = HashMap<SheetKey, orilumn.reader.engine.css.StyleSheet>()
+
+    /** layouter 全局缓存的并发门（B2 池线程与翻页线程同时进出；无锁 HashMap 并发写会坏表）。 */
+    private val sheetLock = SyncLock()
+
+    private data class SheetKey(val textHash: Long, val viewportW: Int, val viewportH: Int)
+
     private fun parseAuthorSheets(
         cssBundle: CssBundle?,
         viewport: orilumn.reader.engine.css.CssViewport? = null,
     ): List<orilumn.reader.engine.css.StyleSheet> =
-        (cssBundle?.cssTexts ?: emptyList()).map { orilumn.reader.engine.css.LightCssParser().parse(it, viewport) }
+        (cssBundle?.cssTexts ?: emptyList()).map { text ->
+            val key = SheetKey(cssTextHash(text), viewport?.widthPx ?: -1, viewport?.heightPx ?: -1)
+            sheetLock.withLock {
+                sheetCache.getOrPut(key) { orilumn.reader.engine.css.LightCssParser().parse(text, viewport) }
+            }
+        }
+
+    /** 全量文本 hash：与 tokenize 同量级但每文本每视口只付一次；命中即复用，碰撞即错用，故不采样。 */
+    private fun cssTextHash(text: String): Long {
+        var h = 0L
+        for (i in text.indices) h = h * 31 + text[i].code
+        return h
+    }
 
     /** 本章字体需求缓存（CSS 文本指纹键）：整形前宿主凭它追装导入字库，无可见跳变。 */
     private val demandCache = HashMap<Long, FontDemand>()
@@ -319,24 +404,11 @@ class BoxChapterLayouter(
         )
         // P1-2: 字符起点按样式化归一长度累计（与重路径盒 textLength 同式）。
         // P3-c: 生成内容 phase-1（解析表门控命中才整树求值；字符串进结构缓存恒有效，
-        // 伪样式各 prepare 按新鲜级联懒解）。
-        val liteGenOf = if (orilumn.reader.engine.laying.GeneratedContent.needsPhase(structure.parsedAuthorSheets ?: emptyList())) {
-            val pseudoCache = HashMap<Pair<MarkupElement, String>, orilumn.reader.engine.css.ComputedStyle?>()
-            val litePseudoOf: (MarkupElement, String) -> orilumn.reader.engine.css.ComputedStyle? = { el, p ->
-                pseudoCache.getOrPut(el to p) {
-                    engine.pseudoStyle(el, orilumn.reader.engine.laying.ancestorsOf(el), engine.resolve(el, styleCache), p)
-                }
-            }
-            val liteStrings = orilumn.reader.engine.laying.GeneratedContent.resolveStrings(
-                markup, { e -> engine.resolve(e, styleCache) }, litePseudoOf,
-                hidden::isHidden,
-            )
-            structure.genStrings = liteStrings
-            orilumn.reader.engine.laying.GeneratedContent.genOf(liteStrings, litePseudoOf)
-        } else {
-            structure.genStrings = emptyMap()
-            orilumn.reader.engine.laying.EmptyGen
-        }
+        // 伪样式各 prepare 按新鲜级联懒解）。与重路径同式，见 [genPhase1] 单源。
+        val (liteStrings, liteGenOf) = genPhase1(
+            markup, structure.parsedAuthorSheets ?: emptyList(), hidden, engine,
+        ) { e -> engine.resolve(e, styleCache) }
+        structure.genStrings = liteStrings
         val starts = orilumn.reader.engine.laying.NormalFlowLayout.accumulateCharStarts(
             leaves.map { orilumn.reader.engine.laying.NormalFlowLayout.styledCharAdvance(it, { e -> engine.resolve(e, styleCache) }, classify, hidden, liteGenOf) },
         )
@@ -359,6 +431,19 @@ class BoxChapterLayouter(
         structure.globalCharStarts = starts
         structure.leafToBackgroundOwner = ownerMap
         structure.leafToBreakInsideAvoidOwner = avoidMap
+        // R26：本章有无 float。这里的级联缓存已经被上面几趟走热，逐叶读一个字段近乎免费。
+        // 口径必须与 `LightPrepare.blockStyleFor` 一致（`#text` 叶取父级样式），否则
+        // "文本叶在 float 容器内"这种章会被误判成无 float。`float` 与字号/行高无关，
+        // 且结构持久化两侧都被 `!hasMediaRules` 门住，故与 leaves/globalCharStarts 同等可复用。
+        var anyFloat = false
+        for (el in leaves) {
+            val owner = if (el.tag == "#text") (el.parent ?: el) else el
+            if (engine.resolve(owner, styleCache).floatSide != orilumn.reader.engine.css.FloatSide.NONE) {
+                anyFloat = true
+                break
+            }
+        }
+        structure.anyFloat = anyFloat
         return structure
     }
 
@@ -535,12 +620,19 @@ class BoxChapterLayouter(
      * @param globalCharStarts leaf i's first global char offset (ascending).
      * @param totalBlocks total leaf count of the chapter.
      * @param totalChars total chapter character count.
+     * @param only range of indices to recompute. `null` = all (canonical path, where the input
+     *   carries no block ranges at all). The **incremental** path passes the shaped window only:
+     *   every other slice was copied straight off the disk table with its own persisted block
+     *   range (see [incrementalLayoutForPage] step 1), so recomputing those is pure waste — and it
+     *   is not a small waste: 151-page chapter × 2 binary searches × **every single page shape**,
+     *   on the foreground open path.
      */
     private fun backfillBlockRanges(
         slices: List<PageSlice>,
         globalCharStarts: LongArray,
         totalBlocks: Int,
         totalChars: Int,
+        only: IntRange? = null,
     ): List<PageSlice> {
         // 未 prepare 的章直接透传无块范围 slices——以往静默，上游错块且不可查。
         // 调用方两处恒传已 prepare 的 globals，进来空即调用方 bug。抛。
@@ -560,14 +652,50 @@ class BoxChapterLayouter(
             }
             return lo.coerceAtMost(totalBlocks - 1).coerceAtLeast(0)
         }
-        return slices.map { slice ->
+        fun withRange(slice: PageSlice): PageSlice {
             val blockStart = blockOf(slice.charStart.coerceAtLeast(0))
             val blockEnd = if (slice.charEnd >= totalChars) totalBlocks
             else (blockOf((slice.charEnd - 1).coerceAtLeast(0)) + 1).coerceAtMost(totalBlocks)
             val lo = blockStart.coerceAtLeast(0)
             val hi = blockEnd.coerceAtMost(totalBlocks).coerceAtLeast(lo + 1)
-            slice.copy(blockStart = lo, blockEndExclusive = hi.coerceAtMost(totalBlocks))
+            return slice.copy(blockStart = lo, blockEndExclusive = hi.coerceAtMost(totalBlocks))
         }
+        // R21 诊断：把本函数拆成「拷 list」与「算块范围」两笔墙钟，并打出三个入参规模。
+        // 本函数本体恒为 0ms（Rust 21 页/172 块实测），留这对计时当护栏：**哪天它自己不再是 0ms，
+        // 立刻能看出是 list 拷贝还是块范围计算出了事**，而不必再等外层 `pgBackfill` 报一个
+        // 归因不明的数字。
+        //
+        // 附：此函数曾两次被误判，教训记在这里免得重犯。
+        //  (1) 「是 GC 停顿」——错。同期试过在窗口内取 `Runtime.freeMemory()` 做堆采样，而 ART 的
+        //      实现是 `CollectGarbage(clear_soft_references=true)` **之后**才返回可用字节数，探针
+        //      自己就是一次全量阻塞 GC（单次 ≈660ms），把窗口量成了 1.3s。
+        //  (2) 「是线程在算」——也错。改用 `Debug.threadCpuTimeNanos()` 后 cpu≈wall，看着像真在算；
+        //      但该调用走 VMDebug 落 /proc，vivo PA2353 实测**进程内首次 ≈1.2s、之后每次 ≈27ms**，
+        //      同样是探针自己的钱。`java.lang.management` 在 app classloader 里干脆不存在。
+        // 真凶在**实参求值**上（[LightPrepare.totalChars] 每次全章重算），已修；本函数始终清白。
+        val dT0 = orilumn.reader.time.platformNowMs()
+        val out: List<PageSlice>
+        var dOnly = -1
+        if (only == null) {
+            out = slices.map(::withRange)
+        } else if (only.isEmpty()) {
+            out = slices
+        } else {
+            val copy = slices.toMutableList()
+            val dT1 = orilumn.reader.time.platformNowMs()
+            dOnly = only.count()
+            for (i in only) {
+                if (i in copy.indices) copy[i] = withRange(copy[i])
+            }
+            val dT2 = orilumn.reader.time.platformNowMs()
+            Logger.w("Orilumn.Engine", "bf copy=${dT1 - dT0}ms calc=${dT2 - dT1}ms " +
+                "slices=${slices.size} only=$dOnly blocks=$totalBlocks")
+            return copy
+        }
+        val dT1 = orilumn.reader.time.platformNowMs()
+        Logger.w("Orilumn.Engine", "bf copy=0ms calc=${dT1 - dT0}ms " +
+            "slices=${slices.size} only=$dOnly blocks=$totalBlocks full=1")
+        return out
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -700,6 +828,8 @@ class BoxChapterLayouter(
         pagesToShape: Int = 4,
         cache: MutableMap<Int, ParagraphShapeRef>? = null,
         prefillL2: Map<Int, ParagraphShapeRef>? = null,
+        /** R20：锚页前先塑章首这么多块做暖机（0 = 关）。开书路径显式传，别的调用点不动。 */
+        warmupBlocks: Int = 0,
     ): ChapterLayouter.ChapterLayoutProduct {
         val totalPages = table.pages.size
         val startIdx = targetPage.coerceAtLeast(0)
@@ -737,12 +867,88 @@ class BoxChapterLayouter(
         // 3. Shape all blocks in that range (reusing already-shaped blocks from [cache]).
         // R3: l2hits counts published-neighbor hits (diagnostic for prefill effectiveness).
         var l2hits = 0
+
+        // R20 预热：开书锚页是冷进程里的**第一次** shape，先在章首塑 [0, warmupBlocks) 一小块，
+        // 两笔分别计时，锚页净变快才算赚。warmupBlocks=0 即完全关闭（默认），由调用方显式开。
+        //
+        // 【未证实，勿当定论】原注释写"付掉 class-load / JIT / 字体段落初始化这些固定项"——已被数据否证：
+        // 同一进程内相隔 0.7s 的两次开书，warmup 代码路径与块数完全相同，耗时却是
+        // ch4 warm(3 块)=346~419ms 对 ch0 warm(3 块)=30~37ms，差 11 倍。
+        // 固定成本模型（warm=F+3p、anchor=F+np）解出 p<0，自身就不成立。
+        // 也就是说这 350ms 是 ch4 自身前 3 块（章标题 h1 + 首段）的真实排版开销，
+        // 不是"暖机"。它是否换来锚页变快尚未做过 warmB=0 的冷开书 A/B，
+        // 在那之前这段预热只能算对锚页有利的一种猜测，见 docs/待分析-GIMP开书慢-结论清单.md。
+        var tWarm0 = 0L
+        var tWarm1 = 0L
+        var warmBlocks = 0
+        if (warmupBlocks > 0) {
+            val warmHi = warmupBlocks.coerceAtMost(prepare.totalBlocks)
+            if (warmHi > 0) {
+                tWarm0 = orilumn.reader.time.platformNowMs()
+                for (i in 0 until warmHi) tempShape(cache, prepare, i, profile, prefillL2)
+                tWarm1 = orilumn.reader.time.platformNowMs()
+                warmBlocks = warmHi
+            }
+        }
+
+        val probe = ShapeProbe()
+        val outerProbe = shapeProbe
+        // 注意置位点在暖机**之后**：probe 只统计锚页自己那几块（sBlocks 等于 blocks 数），
+        // 暖机的 3 块不计入，故 warm 的 CSS/Skia 成分目前无数据。
+        // 要拆 warm 需把这两行上移到暖机之前并分成两个 probe，届时 sBlocks 会出现 3+n。
+        shapeProbe = probe
+        // R26：block(i) 物化在 tempShape 里、在 shapeBlock 之外，原先两笔都盖不到它。
+        // 实测它就是那 ~500ms 未归因的大头嫌疑（textLength 的 styledCharAdvance 是子集）。
+        val outerSink = prepare.blockTimingSink
+        val outerFirst = prepare.firstBlockMs
+        prepare.firstBlockMs = -1L
+        prepare.blockTimingSink = { b, s0, s1, s2, s3 ->
+            probe.blockMs += b
+            probe.advanceMs += s3
+            probe.styleForMs += s0
+            probe.widthMs += s1
+            probe.leftMs += s2
+            probe.textLenMs += s3
+        }
+        // R26：同一窗口顺带装渲染层的级联探针，把 stylesMs 拆到选择器匹配/建样式那两笔里。
+        // 塑形全程在 layoutMutex 内单线程串行，挂在 common 的全局对象上这段时间内不会有旁路调用；
+        // 窗口结束立刻恢复原 sink，嵌套调用（rebuildLocalLines 的回看 lambda）自动记进同一笔。
+        val outerCascadeSink = orilumn.reader.engine.css.CascadeProbe.sink
+        orilumn.reader.engine.css.CascadeProbe.sink = { m, p, b, s, _ ->
+            probe.cascadeMatchMs += m
+            probe.inlineParseMs += p
+            probe.styleBuildMs += b
+            probe.secondPassMs += s
+        }
+        // R29：cBuild 的细分（边家族 / font-family 三连），与上面那笔独立置位。
+        val outerSplitSink = orilumn.reader.engine.css.CascadeProbe.splitSink
+        orilumn.reader.engine.css.CascadeProbe.splitSink = { e, f, _ ->
+            probe.cEdgeMs += e
+            probe.cFontMs += f
+        }
+        // R29 第三层：cEdge 内部按家族拆（box/width/color/style/radius + 声明了 border 的元素数）。
+        val outerFamilySink = orilumn.reader.engine.css.CascadeProbe.familySink
+        orilumn.reader.engine.css.CascadeProbe.familySink = { bx, wd, cl, st, rd, ab ->
+            probe.eBoxMs += bx
+            probe.eWidthMs += wd
+            probe.eColorMs += cl
+            probe.eStyleMs += st
+            probe.eRadiusMs += rd
+            probe.eAnyBorder += ab
+        }
         val tShape0 = orilumn.reader.time.platformNowMs()
         val localShapes = (blockLo until blockHi).map {
             if (cache?.get(it) == null && prefillL2?.get(it) != null) l2hits++
             tempShape(cache, prepare, it, profile, prefillL2)
         }
         val tShape1 = orilumn.reader.time.platformNowMs()
+        shapeProbe = outerProbe
+        probe.blockFirstMs = prepare.firstBlockMs
+        prepare.blockTimingSink = outerSink
+        prepare.firstBlockMs = outerFirst
+        orilumn.reader.engine.css.CascadeProbe.sink = outerCascadeSink
+        orilumn.reader.engine.css.CascadeProbe.splitSink = outerSplitSink
+        orilumn.reader.engine.css.CascadeProbe.familySink = outerFamilySink
         // (l2hits counted above; reported in the asm breakdown below.)
 
         // 4. Build merged local FlowedLine stream covering all shaped blocks (P6-a2 R6 前视 carry-in).
@@ -817,7 +1023,9 @@ class BoxChapterLayouter(
         // continuously from its predecessor's last line. With matching geometry this reproduces the
         // canonical page boundaries exactly — the shared fill rule makes drift a no-op instead of a bug.
         val slicesWithLine = allSlices.toMutableList()
-        val tPg0 = orilumn.reader.time.platformNowMs()
+        val tPgFind0 = orilumn.reader.time.platformNowMs()
+        var tPgPaginate0 = tPgFind0
+        var tPgPaginate1 = tPgFind0
         if (localLines.isNotEmpty() && startIdx < endIdx) {
             // Anchor the window's first page at the disk table's EXACT first line (the line whose
             // charStart == the table's authoritative charStart), NOT the merely-containing line —
@@ -828,7 +1036,9 @@ class BoxChapterLayouter(
             var lo = localLines.indexOfFirst { it.charStart == anchorChar }
             if (lo < 0) lo = localLines.indexOfFirst { it.charStart < anchorChar + 1 && it.charEnd > anchorChar }
             if (lo < 0) lo = 0
+            tPgPaginate0 = orilumn.reader.time.platformNowMs()
             val rePages = Paginator.paginateFrom(drawable, lo, contentH)
+            tPgPaginate1 = orilumn.reader.time.platformNowMs()
             for (i in startIdx until endIdx) {
                 val k = i - startIdx
                 if (k >= rePages.size) break
@@ -854,12 +1064,36 @@ class BoxChapterLayouter(
         // Recompute the block ranges from the (possibly re-paginated) char ranges — the same
         // authoritative char→block mapping the canonical path used, so the two paths' block ranges can
         // never drift and disk-hit incremental shaping always knows which blocks each page needs.
-        val withBlocks = backfillBlockRanges(slicesWithLine, prepare.globalCharStarts, prepare.totalBlocks, prepare.totalChars)
+        // ONLY the re-paginated window: the other slices came off the disk table already carrying
+        // their persisted block range (step 1), so recomputing all N pages on every page shape was
+        // pure repeated work on the open path.
+        val tPgLoop1 = orilumn.reader.time.platformNowMs()
+        val withBlocks = backfillBlockRanges(
+            slicesWithLine, prepare.globalCharStarts, prepare.totalBlocks, prepare.totalChars,
+            only = startIdx until endIdx,
+        )
         val tPg1 = orilumn.reader.time.platformNowMs()
         // R19: assembly segment breakdown (permanent diagnostic) — shape/lines/skia/tbl/box/pg.
+        // R20 附加：sStyles/sSkia 把 shape 段拆成 CSS 级联与 Skia 断行，sDepth 记被塑块最大嵌套深度，
+        // warm 记锚页前那笔暖机。**不要**往这里加堆/CPU 采样——已实测两者探针自身比被测对象贵
+        // （见 [backfillBlockRanges] 里 R21 诊断注释），会把这一行自己变成瓶颈。
         Logger.w("Orilumn.Engine", "asm ch=${table.chapterIndex} page=$targetPage " +
             "shape=${tShape1 - tShape0}ms lines=${tLines1 - tLines0}ms skia=${tSkia1 - tSkia0}ms " +
-            "tbl=${tTbl1 - tTbl0}ms box=${tBox1 - tBox0}ms pg=${tPg1 - tPg0}ms l2hits=$l2hits/${blockHi - blockLo}")
+            "tbl=${tTbl1 - tTbl0}ms box=${tBox1 - tBox0}ms pg=${tPg1 - tPgFind0}ms " +
+            "pgFind=${tPgPaginate0 - tPgFind0}ms pgPaginate=${tPgPaginate1 - tPgPaginate0}ms " +
+            "pgLoop=${tPgLoop1 - tPgPaginate1}ms " +
+            "pgBackfill=${tPg1 - tPgLoop1}ms " +
+            "sStyles=${probe.stylesMs}ms sSkia=${probe.skiaMs}ms " +
+            "sBlk=${probe.blockMs}ms sBlkF=${probe.blockFirstMs}ms sAdv=${probe.advanceMs}ms " +
+            "sBsty=${probe.styleForMs}ms sBWid=${probe.widthMs}ms sBLft=${probe.leftMs}ms sBTxt=${probe.textLenMs}ms " +
+            "cMatch=${probe.cascadeMatchMs}ms cParse=${probe.inlineParseMs}ms cBuild=${probe.styleBuildMs}ms c2nd=${probe.secondPassMs}ms " +
+            "cEdge=${probe.cEdgeMs}ms cFont=${probe.cFontMs}ms " +
+            "eBox=${probe.eBoxMs}ms eWid=${probe.eWidthMs}ms eCol=${probe.eColorMs}ms " +
+            "eSty=${probe.eStyleMs}ms eRad=${probe.eRadiusMs}ms eBrd=${probe.eAnyBorder} " +
+            "sBlocks=${probe.blocks} sEls=${probe.elements} sDepth=${probe.maxDepth} " +
+            "warm=${tWarm1 - tWarm0}ms warmB=$warmBlocks " +
+            "linesN=${localLines.size} pagesN=${table.pages.size} " +
+            "l2hits=$l2hits/${blockHi - blockLo}")
 
         // Debug: reconcile every shaped (incremental) page's vertical extent with the content capacity,
         // and flag any page whose boundary drifted from the disk table (the page-boundary-source probe).
@@ -1407,14 +1641,103 @@ class BoxChapterLayouter(
         return backPage
     }
 
+    /**
+     * R20 塑形成本探针（诊断用）。把 `shape` 段拆成两笔：**CSS 级联**（[LightPrepare.inlineStyles]
+     * 的 resolve 循环）与 **Skia 断行**（[shapeLeaf] 本体）。另记两块——被塑元素数与最大嵌套深度，
+     * 后者用来验证「深层嵌套把 resolve 拖成 O(depth)」这一假设。
+     *
+     * 挂在 layouter 实例上而非参数上：塑形全程在 layoutMutex 内单线程串行，[incrementalLayoutForPage]
+     * 进入时置位、形状段结束即清空，嵌套调用（rebuildLocalLines 的回看 lambda）自动记进同一笔。
+     */
+    private class ShapeProbe {
+        var stylesMs = 0L
+        var skiaMs = 0L
+
+        /** [LightPrepare.block] 物化总耗时（子树外的部分：盒构造、容器链下降、textLength）。 */
+        var blockMs = 0L
+
+        /** `blockMs` 的子集：块内 `textLength` 的 styledCharAdvance。现恒为 0（改走差分），留作哨兵。 */
+        var advanceMs = 0L
+
+        /** `blockMs` 的四段拆分：块样式 / 内容宽下降 / 内容左下降 / textLength 差分。 */
+        var styleForMs = 0L
+        var widthMs = 0L
+        var leftMs = 0L
+        var textLenMs = 0L
+
+        /** 本窗口第一次 [LightPrepare.block] 物化的耗时；`sBlk ≈ sBlkFirst` 即一次性初始化而非逐块成本。 */
+        var blockFirstMs = 0L
+        var blocks = 0
+        var elements = 0
+        var maxDepth = 0
+
+        // R26：把 `stylesMs` 拆到渲染层内部（选择器匹配 / 内联属性解析 / 建 ComputedStyle /
+        // 通用字体兜底的第二次级联）。数据来自 common 的 `CascadeProbe`，由本窗口装 sink 收集。
+        var cascadeMatchMs = 0L
+        var inlineParseMs = 0L
+        var styleBuildMs = 0L
+        var secondPassMs = 0L
+
+        /** R29：`styleBuildMs` 的细分——「边家族」六兄弟（margin/padding/border-*）合计。 */
+        var cEdgeMs = 0L
+
+        /** R29：`styleBuildMs` 的细分——font-family 三连（同一字符串解析三次中的两次）。 */
+        var cFontMs = 0L
+
+        /** R29 三层：`cEdge` 按家族拆——padding（margin 计入 cEdge 总量，不在此分）。 */
+        var eBoxMs = 0L
+
+        /** R29 三层：`parseBorderEdges`。 */
+        var eWidthMs = 0L
+
+        /** R29 三层：`parseBorderColors`。 */
+        var eColorMs = 0L
+
+        /** R29 三层：`parseBorderStyles`。 */
+        var eStyleMs = 0L
+
+        /** R29 三层：`parseBorderRadius`。 */
+        var eRadiusMs = 0L
+
+        /** R29 三层：真声明了 `border*` 属性的元素数（= 空跑 vs 真解析的分界）。 */
+        var eAnyBorder = 0L
+    }
+
+    private var shapeProbe: ShapeProbe? = null
+
     /** Shapes one block's [ParagraphShape] for the temp-page path. */
     private fun shapeBlock(
         prepare: LightPrepare,
         i: Int,
         leaf: LayoutBox,
         profile: TypographicProfile,
+    ): ParagraphShapeRef {
+        val probe = shapeProbe ?: return shapeBlockWith(prepare, i, leaf, profile, prepare.inlineStyles(i))
+        // 探针开启：CSS 级联与 Skia 断行分别计墙钟；深度只数一次（每块 O(depth)，相对两侧开销可忽略）。
+        val t0 = orilumn.reader.time.platformNowMs()
+        val styles = prepare.inlineStyles(i)
+        val t1 = orilumn.reader.time.platformNowMs()
+        val r = shapeBlockWith(prepare, i, leaf, profile, styles)
+        val t2 = orilumn.reader.time.platformNowMs()
+        probe.stylesMs += t1 - t0
+        probe.skiaMs += t2 - t1
+        probe.blocks++
+        probe.elements += styles.size
+        var d = 0
+        var n: MarkupElement? = leaf.el
+        while (n != null) { d++; n = n.parent }
+        if (d > probe.maxDepth) probe.maxDepth = d
+        return r
+    }
+
+    private fun shapeBlockWith(
+        prepare: LightPrepare,
+        i: Int,
+        leaf: LayoutBox,
+        profile: TypographicProfile,
+        styles: Map<MarkupElement, orilumn.reader.engine.css.ComputedStyle>,
     ): ParagraphShapeRef = shapeLeaf(
-        leaf, prepare.inlineStyles(i), profile,
+        leaf, styles, profile,
         listMarkerFor(leaf.el, prepare::resolveStyle, prepare.firstCarrierLeaves),
         // P3-a: 内联表只含子树，祖先 opacity 经懒级联回退（与重路径整表同值）。
         ancestorStyleOf = prepare::resolveStyle,
@@ -2160,6 +2483,13 @@ class LightPrepare(
     internal val avoidOwnerMap: Map<MarkupElement, MarkupElement> = emptyMap(),
     /** P3-c 生成内容字符串（结构缓存恒有效；伪样式本 prepare 按新鲜级联懒解）。 */
     genStrings: Map<MarkupElement, Pair<String?, String?>> = emptyMap(),
+    /**
+     * R26：本章是否存在 `float`（=NONE）。由 [computeStructure] 在**已经解析过每个叶子的那次**
+     * 里顺带算出，替代 [computeFloatLeads] 开头那次全章 `blockStyleFor` 扫描。
+     *
+     * 默认 `true`（保守）：只有拿到确凿的"无 float"才走短路，走错方向最多退回原行为。
+     */
+    private val chapterHasFloat: Boolean = true,
 ) {
     val totalBlocks: Int get() = markupLeaves.size
     /**
@@ -2178,7 +2508,37 @@ class LightPrepare(
         }
     }
     // P1-2: 与 computeStructure 的 globalCharStarts 同式（样式化归一长度）。
-    val totalChars: Int get() = markupLeaves.sumOf { NormalFlowLayout.styledCharAdvance(it, { e -> styleComputer().resolve(e, styleCache) }, lightClassify(), hidden, genOf).toInt() }
+    /**
+     * 全章字符总数 = 各叶 `styledCharAdvance` 之和。
+     *
+     * **不能**写成 `markupLeaves.sumOf { styledCharAdvance(...) }` 每次现算。那是全章一遍 CSS 级联
+     * ＋文本前进宽度测量：Rust 书 172 块实测 **1.25s**（≈7.3ms/块，锚页开书的一半时间就花在这
+     * 一个实参上），GIMP 2579 块实测 9.7s。而 [BoxChapterLayouter.incrementalLayoutForPage] 的
+     * `backfillBlockRanges` 实参每次开书都要它一次，等于每开一次书就重算一遍全章。
+     *
+     * 改走 `globalCharStarts` 的恒等式：[computeStructure] 与重路径 [ChapterPrepareResult] 都用
+     * `accumulateCharStarts(leaves.map { styledCharAdvance(同一式) })`，即 `starts` 就是同一批
+     * advance 的前缀和，于是 `sum == starts.last() + advance(末叶)`——只需**一次** advance，约 7ms。
+     * 该恒等式与 `blockOf` 的二分共用同一前提（`starts` 与活级联同步，见 [globalCharStarts]），
+     * 不引入新的不一致来源；`by lazy` 顺带让重复访问也免费。
+     */
+    val totalChars: Int by lazy {
+        val starts = globalCharStarts
+        val n = markupLeaves.size
+        if (starts.isEmpty() || n == 0 || starts.size != n) {
+            // 结构与叶集不同源（不该发生）。退回归原先的现算口径，行为与改动前逐字节一致。
+            markupLeaves.sumOf {
+                NormalFlowLayout.styledCharAdvance(
+                    it, { e -> styleComputer().resolve(e, styleCache) }, lightClassify(), hidden, genOf,
+                ).toInt()
+            }
+        } else {
+            starts.last().toInt() + NormalFlowLayout.styledCharAdvance(
+                markupLeaves[n - 1], { e -> styleComputer().resolve(e, styleCache) },
+                lightClassify(), hidden, genOf,
+            ).toInt()
+        }
+    }
 
     /** 轻路径块判定：与 computeStructure 同门（有 display 声明才读 display:block）。 */
     internal fun lightClassify(): orilumn.reader.engine.laying.BlockClassify =
@@ -2242,6 +2602,10 @@ class LightPrepare(
      */
     private fun computeFloatLeads(): Pair<List<orilumn.reader.engine.laying.FloatLead?>, List<Int?>> {
         val n = totalBlocks
+        // R26：结构层已经算过这个标志（有叶子时几乎白送），别再全章扫一遍只为回答同一个问题。
+        // 实测 Rust 书 ch7（169 叶）这第一次扫描要 275ms，且它被 `block(i)` 里的 `floatLeads[i]`
+        // 触发，直接落在开书关键路径上——与 totalChars 曾把整章重算 9.7s 同一个病。
+        if (!chapterHasFloat) return List(n) { null } to List(n) { null }
         var anyFloat = false
         for (i in 0 until n) {
             if (blockStyleFor(markupLeaves[i]).floatSide != orilumn.reader.engine.css.FloatSide.NONE) {
@@ -2435,19 +2799,44 @@ class LightPrepare(
      *  container chain — without ever cascading the whole chapter. */
     fun block(i: Int): LayoutBox {
         materialized[i]?.let { return it }
+        // R26 诊断：只有置位方（ShapeProbe）非 null 才计墙钟，热路径仅多一次 null 检查。
+        val sink = blockTimingSink
+        var m0 = 0L; var m1 = 0L; var m2 = 0L; var m3 = 0L
+        val tBlk0 = if (sink != null) orilumn.reader.time.platformNowMs() else 0L
         val el = markupLeaves[i]
         val style = blockStyleFor(el)
+        if (sink != null) m0 = orilumn.reader.time.platformNowMs() - tBlk0
         val contentWidth = NormalFlowLayout.descendContentWidth(el, contentW) { e ->
             val s = styleComputer().resolve(e, styleCache)
             (s.padding.horizontal + s.border.horizontal).roundToInt()
         }
         // Horizontal position = the accumulated block left edges (mirrors the heavy path's descent).
+        val tW = if (sink != null) orilumn.reader.time.platformNowMs() else 0L
         val contentLeft = NormalFlowLayout.descendContentLeft(el, 0,
             leftEdgesOf = { e -> val s = styleComputer().resolve(e, styleCache); (s.border.left + s.padding.left).roundToInt() },
             marginLeftOf = { e -> val s = styleComputer().resolve(e, styleCache); s.margin.left.roundToInt() },
         )
+        if (sink != null) { m1 = orilumn.reader.time.platformNowMs() - tW; m2 = m1 }
         val replaceable = NormalFlowLayout.isReplaceable(el)
         val isTr = el.tag == "tr"
+        // R26：`textLength` 不再现算，改走 `globalCharStarts` 的差分。
+        //
+        // 原本每物化一块就跑一次 `styledCharAdvance`（按块文本长度线性、每元素回调 resolveStyle）。
+        // 实测 Rust 书 ch7 锚页 5 块里这一项 211~236ms，占该页 shape 的 37%。与 totalChars
+        // 曾把整章重算 9.7s 的是同一个函数。
+        //
+        // 恒等式：[computeStructure] 用**同一表达式**（同 classify / hidden / genOf / 级联）逐叶
+        // `styledCharAdvance` 后交给 `accumulateCharStarts`，而后者是精确整数前缀和
+        // （`starts[i] = running; running += lengths[i]`，无舍入），`styledCharAdvance` 返回 `Long`，
+        // 故 `starts[i+1] - starts[i]` **精确等于**块 i 的 advance，与原 `.toInt()` 逐块同值。
+        // 末块没有后继，用已按同式证明过的 `totalChars - starts[n-1]`。
+        //
+        // 不能改成置 0：`rebuildLocalLines` 三处（charEnd / runningChar 累加 ×2）都读逐块
+        // textLength，那是轻路径行流的字符记账，置 0 会让 charStart/charEnd 全错。
+        // `sAdv=` 埋点留作回归哨兵：本项归零后它应恒为 0。
+        val tL = if (sink != null) orilumn.reader.time.platformNowMs() else 0L
+        val textLen = blockTextLengths[i]
+        if (sink != null) m3 = orilumn.reader.time.platformNowMs() - tL
         // P6-a2: 右悬浮右对齐（宽取 eager 表，与重路径同源，零重算）。
         var boxLeft = contentLeft
         if (el.tag != "#text" && style.floatSide == orilumn.reader.engine.css.FloatSide.RIGHT) {
@@ -2460,7 +2849,7 @@ class LightPrepare(
             contentWidth = contentWidth,
             ranges = emptyList(),
             // P1-2: 与重路径盒 textLength 同式（样式化归一长度）。
-            textLength = (if (replaceable) 1 else NormalFlowLayout.styledCharAdvance(el, { e -> styleComputer().resolve(e, styleCache) }, lightClassify(), hidden, genOf)).toInt(),
+            textLength = textLen,
             lineHeights = emptyList(),
             childBoxes = emptyList(),
             replaceableHeight = if (replaceable) {
@@ -2471,8 +2860,51 @@ class LightPrepare(
             floatLead = floatLeads[i],
         )
         materialized[i] = box
+        if (sink != null) {
+            val total = orilumn.reader.time.platformNowMs() - tBlk0
+            if (firstBlockMs < 0L) firstBlockMs = total
+            // m0=blockStyleFor / m1=descendContentWidth / m2=descendContentLeft / m3=textLength 差分
+            sink(total, m0, m1, m2, m3)
+        }
         return box
     }
+
+    /**
+     * R26：逐块 `textLength`，由 [globalCharStarts] 差分得来，供 [block] 的 `textLength` 实参用。
+     *
+     * 精确性依据见 [block] 里那段注释：`accumulateCharStarts` 是整数前缀和、无舍入，
+     * `styledCharAdvance` 返回 `Long`，故差分与逐块现算逐值相同。
+     * `starts.size != n`（结构与叶集不同源）时退回归原先的现算口径，行为与改动前一致。
+     */
+    private val blockTextLengths: IntArray by lazy {
+        val n = markupLeaves.size
+        val starts = globalCharStarts
+        if (starts.isEmpty() || n == 0 || starts.size != n) {
+            IntArray(n) {
+                NormalFlowLayout.styledCharAdvance(
+                    markupLeaves[it], { e -> styleComputer().resolve(e, styleCache) },
+                    lightClassify(), hidden, genOf,
+                ).toInt()
+            }
+        } else {
+            val last = totalChars - starts[n - 1]
+            IntArray(n) { i -> if (i + 1 < n) (starts[i + 1] - starts[i]).toInt() else last.toInt() }
+        }
+    }
+
+    /**
+     * R26 诊断：[block] 物化计时回调
+     * `(blockMs, styleForMs, widthMs, leftMs, textLenMs)`。`textLenMs` 曾是块内 `textLength`
+     * 的 styledCharAdvance 耗时，现已改走 [blockTextLengths] 差分、不再现算，故**恒为 0**；
+     * 保留参数位是为了让日志里 `sAdv=0` 本身成为"这条路没被走"的哨兵。
+     * `null` = 不计时（默认）。置位方是 `BoxChapterLayouter` 的 `ShapeProbe`，只在那一个
+     * shape 窗口内挂。
+     */
+    internal var blockTimingSink: ((Long, Long, Long, Long, Long) -> Unit)? = null
+
+    /** R26 诊断：本窗口内第一次 [block] 物化的耗时。与 [blockTimingSink] 的累计值对比即可区分
+     *  「一次性初始化」与「逐块成本」——`sBlk ≈ sBlkFirst` 即前者。 */
+    internal var firstBlockMs: Long = -1L
 
     /** The 2D grid layout for one table row (`tr`) given its content width — column x/widths + cells,
      *  cell heights unknown (filled & used at shaping time). Mirrors the heavy path's column

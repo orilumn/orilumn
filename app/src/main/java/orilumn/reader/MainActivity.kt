@@ -17,6 +17,7 @@ import orilumn.reader.io.AppRoot
 import orilumn.reader.io.Logger
 import orilumn.reader.ui.App
 import orilumn.reader.ui.reader.EXTRA_BOOK_ID
+import orilumn.reader.ui.reader.EXTRA_AB_SPEC
 import orilumn.reader.ui.reader.EXTRA_BOOK_PATH
 import orilumn.reader.ui.reader.ReaderActivity
 import orilumn.reader.ui.shelf.ShelfSort
@@ -108,11 +109,15 @@ class MainActivity : ComponentActivity() {
     private fun openReader(bookId: Long, filePath: String) {
         lifecycleScope.launch { repository.touchRead(bookId) }
         prefs.edit().putLong(KEY_LAST_BOOK_ID, bookId).apply()
-        startActivity(
-            Intent(this, ReaderActivity::class.java)
-                .putExtra(EXTRA_BOOK_PATH, filePath)
-                .putExtra(EXTRA_BOOK_ID, bookId),
-        )
+        val i = Intent(this, ReaderActivity::class.java)
+            .putExtra(EXTRA_BOOK_PATH, filePath)
+            .putExtra(EXTRA_BOOK_ID, bookId)
+        // R28：转推 A/B 规格。这里是**自动续读**的入口（`am start` 打到的是 MainActivity，
+        // 由 maybeContinueLastBook 转发），不转推的话 extra 到不了 ReaderActivity，
+        // AbSwitch 保持默认、变体静默不生效。R28 首次采样就栽在这里：
+        // 5 轮 10 跑日志里 ab 全是 none。
+        intent?.getStringExtra(EXTRA_AB_SPEC)?.let { i.putExtra(EXTRA_AB_SPEC, it) }
+        startActivity(i)
     }
 
     /** "Open and continue reading": when enabled and a last-read book is recorded → auto-enter its reader on app start. */

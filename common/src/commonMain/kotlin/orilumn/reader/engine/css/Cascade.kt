@@ -104,6 +104,9 @@ class Cascade(
      * （只看同名伪规则；内联样式与表示属性不进伪元素，浏览器同式）。
      */
     fun winningDeclarations(el: MarkupElement, ancestors: List<MarkupElement>, inlineDecls: List<Declaration>, pseudo: String? = null): Map<String, String> {
+        // R26 诊断：见 CascadeProbe。关闭时只多一次静态读。
+        val probe = CascadeProbe.sink
+        val t0 = if (probe != null) orilumn.reader.time.platformNowMs() else 0L
         val winners = HashMap<String, Winner>()
         for (m in matchers) {
             // Cheap tag prefilter: skip whole rules whose rightmost tags can't include this element.
@@ -134,7 +137,9 @@ class Cascade(
                 inlineOrder++
             }
         }
-        return winners.mapValues { it.value.value }
+        val out = winners.mapValues { it.value.value }
+        if (probe != null) CascadeProbe.hit(orilumn.reader.time.platformNowMs() - t0, 0L, 0L, 0L)
+        return out
     }
 
     /** Maps an HTML presentation attribute on [el] to a CSS value per [PRESENTATION_ATTRS]; returns

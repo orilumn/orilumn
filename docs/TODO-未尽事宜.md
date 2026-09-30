@@ -1,5 +1,38 @@
 # 未尽事宜 / Open Issues
 
+- **开书疑被调两次（2026-09-29 记，真机落盘实锤两次）**：`open ok chapters=0` 后 140ms–900ms 又一次
+  正常 `open: chapters=N`（两次落盘皆有：17:17:44、17:29:05、17:40:44）。首次解析出空书（0 章）
+  却走了 ok 路径。疑 `LaunchedEffect(pxW, pxH)` 重组致 `openBookEngine` 并发重入（每次其后紧跟
+  `external BUSY-DROP`），白白 parse 一次，且空控制器可能污染状态。查 `openBookEngine`
+  重入 guard（进行中标记/取消旧协程），修后看单次 open 落盘。
+
+- **重路径级联约 1s/书待优化（2026-09-29 记，JVM 实测；拿设备数据再定做不做）**：重 `prepare` 全书
+  ~8s 中级联（匹配+求值）占 ~1s（1.8ms/章），盒几何+塑形占 ~7s（归位正确，不动）。1s 不在翻页/跳转
+  热路径（那两条走轻路径），出现位置：(1) 小章前台（开书/目录跳转/关面板重排的 SMALL-FULL，
+  单章 100–300ms 含塑形）；(2) B2 整书后台（分摊，不阻塞）；(3) 同参数二次命中 `prepareResult`
+  缓存，零成本。候选：规则索引（匹配加速，不动语义）、作者侧烘焙（`ComputedStyle` 血统拆分，
+  大改，P4 已取消过一次）。**动工门槛**：先上设备量小章跳转/关面板两条真机耗时，1s 中有多大
+  比例落在用户等待线上，再定做哪个；落盘口径见 `docs/调试日志与分页跟踪.md`（`relayout … SMALL-FULL`
+  的 `fullLayout=` 分段）。
+
+- **轻重双路等价实现收敛（2026-09-29 记，排版稳定后处理）**：轻 `computeStructure` 与重 `prepare` 各自贴各自的数据表示（`MarkupElement` vs `LayoutBox`），三处“同义双实现”并存：`hidden` 判定（懒 `resolveHidden` vs 表查 `displayNone`）、叶枚举与 charStarts（`styledCharAdvance` vs 盒 `textLength`，P1-2 称同式，`IncrementalReplayEquivalenceProbeTest` 锁等价）、属主映射（轻 map vs 重盒 flag）。phase-1 生成内容已收敛到 `genPhase1` 单源（`fix/scheduling`）。彻底统一须先统一表示层（`ComputedStyle` 按属性血统拆分：作者/UA 侧烘焙 + reader 侧 overlay），动级联表示层，单列大项；收敛前任何改动必须双路同改 + 等价测试。**已撞出的具体实例见下条「容器 float 在轻路径不生效」**（轻 `computeFloatLeads` 只对叶注册 float、重路径递归能处理容器 float）。
+
+- **容器 float 在轻路径不生效（2026-09-29 记，R26 查 `anyFloat` 时撞出；既有缺口，非本轮引入）**：
+  `<div style="float:left"><p>文字</p></div>` 在轻路径（临时表/增量）上环绕不生效，要等磁盘表就绪才正确。
+  **取证**：新写 `LightFloatLeadTest`（6 例）时撞到；把 R26 的 `anyFloat` 改动（`07f6666` 之前）取回来重跑同一组测试，
+  **6 例中同样 5 例过、同样 1 例挂** —— 与本轮改动无关，是原本就有的缺口。
+  **根因**：`enumerateBlockLeaves` 只把**叶**放进 `leaves`，`<div>` 自己不是叶（它有块级子节点），
+  叶表里根本没有这个 float；`computeFloatLeads` 的前向透传只对叶注册 float，祖先链只 `preClear(clearSide)`、
+  不注册祖先自身的 float。重路径的递归能处理（`P6aFloatTest` 走的正是重路径），**故两路不一致**——
+  属文首「轻重双路等价实现收敛」的同类实例。
+  **与 `anyFloat` 无关**：标志的检测口径（`computeStructure` 里非 `#text` 叶取自身样式、`#text` 叶取父级）
+  与原 `blockStyleFor` 扫描在非 `#text` 叶上是**同一个表达式**、在 `#text` 叶上都取父级，两者等价；
+  它既没制造也没掩盖该缺口。改动前后 5 例同样通过，即 R26 对有 float 的书**行为中性**。
+  **当前状态**：`LightFloatLeadTest` 以 `KNOWN GAP` 命名**锁定现状**（断言两表全 null），
+  补上容器 float 时该测试会失败并提醒更新。
+  **待办**（**行为变更，不在性能这轮范围**）：让前向透传在祖先链上注册 float（而非只 `preClear`），
+  须同时确认与重路径递归同式 + 磁盘表/临时表两路等价，并 bump `LAYOUT_VERSION`。
+
 - **桌面真背光后续（2026-09-27，macOS 先行落地）**：macOS DDC/CI 已通（`desktopApp …/brightness/`：`DisplayBrightness` 接口 + `DdcPackets` + `MacDisplayBrightness` JNA，真机读写闭环；>0 下发硬件150ms防抖、≤0 纯遮罩、跟随系统不碰硬件；滑块按探测切量程 -50~100 / -50~0）。**Win/Linux 空实现位**：Windows 接 Dxva2（`GetPhysicalMonitors`→`SetMonitorBrightness`，JNA）、Linux 接 ddcutil（/dev/i2c，需 i2c 组权限），同接口各自实现；显示器插拔重探（当前启动探一次）后续补。
 
 - **项目更名 orilumn → orilumn（✅ 已办，2026-09-27）**：包名 `orilumn.reader` 全量、数据根 `~/.orilumn/`，条目退役（原改名清单删除）。

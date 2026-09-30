@@ -3,6 +3,85 @@
 > Keeps a running log of significant milestones for the Orilumn reader engine. Supersedes
 > everything marked done; each section reflects a completed stage.
 
+## 2026-09-30 — release v0.2.1 (versionCode 19)
+
+Merged `fix/scheduling` (27 commits) into `main` and shipped as **v0.2.1**: pagination persistence
+(P0–P3), scheduling fixes (open 落位章同步独占), media 门收窄, and the R26–R29 open-book performance
+work below. Version bumped `0.2.0 → 0.2.1` (android `versionCode 18 → 19`, `archivesName`
+`orilumn-0.2.1`, desktopApp `packageVersion` synced); annotated tag `v0.2.1` pushed.
+
+## 2026-09-29/30 — 开书性能实证整改（R26–R29）：totalChars 恒等式、两条全章扫描、暖机净亏关闭、cEdge −25%
+
+**Scope.** GIMP 开书慢（旧包中位 15.1s，曾误报 21.4s——那是跨会话基线，作废）的实证整改收口。
+四条定论全部来自平板落盘日志（口径见 `docs/调试日志与分页跟踪.md`），不靠读代码猜——此前累计
+五次"读代码看出的浪费"（级联深度 / 通用字体兜底 / 重复查表 / 预编译 / 手工扫描）全被实测否证。
+完整实证与原始表格：`docs/待分析-GIMP开书慢-结论清单.md` §3–§3b.5 / §4.1。
+
+- **`totalChars` 计算属性（开书 `pg` 1252 → 4ms）** —— 根因：`totalChars` 写成计算属性，
+  每次访问整章重算（真书 558 章量级 ≈ 9.7s）。改 `by lazy` 后开书总时长 2.70s → **1.07s**，
+  锚页 `pg` 4–5ms，`DISK-HIT` 排版段 2161 → 505–550ms。
+- **`block(i)` 的 `textLength` 白算一次 advance（227ms）** —— 每物化一块重跑
+  `styledCharAdvance`（与 `totalChars` 同一个函数）。改走 `globalCharStarts` 差分：精确整数前缀和，
+  与原口径逐值相同（`BlockTextLengthIdentityTest` 6 例锁死）。净省 78ms——省下的是非级联那部分
+  文本测量（级联缓存热度转移 `sStyles` 3 → 140ms 是记账搬家，不是新增开销）。
+- **`computeFloatLeads` 开头那次全章扫描（275ms）** —— `floatLeads` 的 `by lazy` 为回答
+  "这章有没有 float" 遍历全章每个叶子的级联（Rust ch7 = 169 叶）。改在 `computeStructure` 那一趟
+  顺手产 `anyFloat` 标志（口径与 `blockStyleFor` 逐值一致，含 `#text` 叶取父级），随叶表持久化
+  （codec `VERSION` 2→3、`STRUCTURE_VERSION` 1→2，旧 bin 解码失败自动重算自愈）。
+- **锚页 `shape` 584 → 260ms** —— 上面两条合计：`DISK-HIT shape` 775 → 431ms，
+  `sBlk` 522 → 22ms；`openT` 1297 → 964ms。锚页真排版仍只占 `sStyles+sSkia ≈ 240ms`，
+  其余在 `asm shape` 窗口外（prepareLight/结构缓存/表载入 ~170ms）未拆。
+- **开书暖机 A/B 定论：净亏，已关** —— 曾断言 350ms 暖机是一次性固定成本；两条反证推倒：
+  同进程内 ch4 vs ch0 暖机差 11 倍（346~419ms vs 30~37ms，R22–R25 逐次复现）、固定成本模型解出
+  负单价（`F+3p=350`、`F+13p=304` → `p=−4.6ms/块`）。A/B（同锚页 3×3 交叉）：预热把锚页
+  Skia 断行 85 → 45ms，但 3 块代价 367ms > 锚页 5 块本身 262ms，端到端 **+50ms**。
+  `OPEN_WARMUP_BLOCKS` 置 **0**；日后只试更便宜的组合（1 块/换块），别直接开 3。
+- **R28 · 测量基建（单装机运行期 A/B）** —— `AbSwitch` 从 engine-skia 移到 common（包名不变；
+  `StyleComputer` 在 common，engine-skia 单向依赖 common，反向引用不成立）；`expected_describe()`
+  归一化；`tools/ab_probe.py` / `ab_detail.py` / `ab_families.py`。修掉三个把数据带偏的坑：
+  asm 配对错位、DISK-HIT 后台预排全 0 行混入、`warm=` 缺席即 0。
+- **R29 · `cBuild` 三层拆分，`eCol`+`eSty` 命中（`cEdge` −25%）** —— `cBuild` → `cEdge`/`cFont`/
+  其余；`cEdge` → 边六家族（`eBox`/`eWid`/`eCol`/`eSty`/`eRad`/`eBrd`）。前两层三条假设全否证：
+  重复查表仅 14 处（8 槽 16 次哈希现算砍不下）、`Pattern.compile` 现场编译预编译臂零差（34/34ms）、
+  `Pattern.split` 换手工字符扫描反而慢 8ms（8/8 全分离，已删）。命中：`parseBorderColors`/
+  `parseBorderStyles` 是唯二无条件 `listOf(4)` + 4 次 `"border-$side-color"` 拼新字符串查表的函数，
+  且实测 `eBrd=59/52`——多数元素只声明一两边。改显式四槽 + 4 侧 × 3 类 key 提为 companion 预建常量。
+  **R39 交叉 8+8 实测**：`eCol` 5 → 1ms、`eSty` 8 → 5ms、`cEdge` 37.5 → 28ms（−25%）、
+  `cBuild` 57.5 → 51ms、`openT` 731 → 708ms（−3.1%）；固化后 4 跑复核 `cEdge` 24~28ms。
+  `regexHoist` 开关保留（默认关 = 原样，供换书/换锚点再量）。
+- **顺带暴露的既有缺口（非本轮引入）** —— 容器 `float` 在轻路径不生效（`<div style="float:left">`
+  的祖先 float 未注册、叶表里没有它）；`LightFloatLeadTest` 以 `KNOWN GAP` 命名锁定现状（断言全 null），
+  真修复（前向透传注册祖先 float）是行为变更，单独立项。`anyFloat` 标志与缺口无关（07f6666 回退对照证明）。
+
+**Verification.** 811 例 JVM 测试全绿（clean 后重跑）；0 崩溃；页数/区间无漂移（与基线逐值相同）；
+设备装 R40 复核 `cEdge` 24~28ms。GIMP 按 7.3ms/块推测 `totalChars` 一项即 ~9.7s → 开书应掉到 ~5s 附近，
+未实测（换书是为了脱离病态样本，不是 GIMP 不该修）。
+
+## 2026-09-29 — 分页持久化 P1–P3 与调度收口（磁盘表零文本 IO）
+
+**Scope.** `docs/分页计算集中化方案.md` 的 P0–P3 在 `fix/scheduling` 全部落地：磁盘分页表、章结构
+（树+sheets）与派生产物持久化到应用私有存储，重开书免 epub 文本 IO。真书 557/557 验收通过。
+
+- **磁盘分页表缀构建号 + 开书清旧表** —— 升级即失效（旧 `LAYOUT_VERSION` 之外的又一道守卫）。
+- **P1 整章文件持久化** —— `_sheets.bin`（全书去重）+ `<ch>.bin` 存后处理树 + sheet hash 表；
+  open 免 epub 文本。导入 `BuildStats(558/558/0/0)`；打开 45 章 `loaded from persist`、
+  `readChapter` 零次、翻页正常。半路修过真 bug：`flowChildren` 合成匿名叶游离（parent 挂了但不在
+  children 里）致整书 extract 全挂，现按"树成员走路径、合成节点走属主+文本重建"双轨（`LeafRef`）。
+- **P2 打开时小项** —— spine map book 级 memo（`spineIndexCache`）、`demandCache` 按 css 指纹 memo、
+  `linkRangeCache` 章级按 `paramHash` 归位；`anchorCharStart` 的 fragment 搜索与所查表同生同死、
+  hoist 即 unsound，保持 per-jump（P2 "不 memo 项的真实理由"已记）。
+- **P3 重路径吃现货** —— `prepare` 复用已持久化的 `genStrings`（绑定 gen 字符串，只在 CSS 无变化时
+  有效，`PersistedStructureRelinkTest` 锁）。
+- **`shapeGeometry` 一次分段五家共享** —— 6 遍子树分段 → 1，span 大书结构性受益。
+- **media 门收窄到真视口条件** —— 裸 `screen` 不再挡住持久化（GIMP 29/29）；`@media` 仍门住读写两侧。
+- **调度** —— open 落位章同步独占（prewarm/B2 跳过，删双端死调用）；`pg` 三段计时 + double-open TODO。
+- **P4 取消（2026-09-29 实测推翻前提）** —— 重 `prepare` 8s/书中 cascade 仅占 ~1s（1.8ms/章），
+  `layoutBoxes` 内含 skia 逐块断行占 ~7s，塑形归位正确不可移；bake 只省 10%，复杂度不值。
+  塑形成本转 P5（advance 共享）。轻路径 `floatLeads` 全章扫描残留的 `sStyles` 见上一条目。
+
+**Verification.** `:engine-skia:jvmTest` 全绿；真机 557/557 页无漂移。`genPhase1` 双路等价
+（heavy/light 同一来源）由 `PersistedStructureRelinkTest` 等锁定。
+
 ## 2026-09-15/19 — KMP+CMP migration (S01–S35) + C-series platform convergence: whole project closed
 
 **Scope.** The full Kotlin Multiplatform migration (`docs/KMP迁移-分步计划.md` S01–S35, atomic

@@ -71,10 +71,13 @@ class MinContentSegmentsTest {
         assertEquals(listOf("e-", "book", "reader"), segs("e-book reader"))
         // 连字符前不断（Chrome：「日本-語」的最长断片是「本-」）。
         assertEquals(listOf("日", "本-", "語"), segs("日本-語"))
-        // 数字/小数/逗号、路径都不在内部断（LB13 IS/SY）。
+        // 数字/小数/逗号都不在内部断（LB13 IS 类，且 `,` `.` 未进 breakAfter）。
         assertEquals(listOf("Readium", "0.5.3"), segs("Readium 0.5.3"))
         assertEquals(listOf("1,234.56"), segs("1,234.56"))
-        assertEquals(listOf("foo/bar"), segs("foo/bar"))
+        // T2d 改判：路径**会**在斜杠之后断。此前本行断言 `foo/bar` 整体不可断，那是旧表的行为。
+        // T2d 的 `P×N` 二维矩阵实测 Skia 放行斜杠后断（两侧都非宽字的 `|A`/`|1`/`|(`/`|[` 四格逐格实测），
+        // 故 min-content 的最长不可断单元从 `foo/bar` 缩成 `foo/` —— auto 分列的 min 侧随之变松。
+        assertEquals(listOf("foo/", "bar"), segs("foo/bar"))
     }
 
     @Test

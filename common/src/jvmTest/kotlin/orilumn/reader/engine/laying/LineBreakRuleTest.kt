@@ -161,6 +161,46 @@ class LineBreakRuleTest {
     }
 
     @Test
+    fun `break after slash right-quote and close-bracket when neither side is wide - T2d backfill`() {
+        // T2d 的核心新增（书库残差族Y 的唯一根因）。
+        //
+        // 此前 T2/T2b/T2c 只测过 `填 + X + 填`，即**两侧都含宽字**的格子；
+        // 而这三张表的放行条件是「两侧有宽字 **或** `breakAfter` 命中」，所以两侧都非宽的格子
+        // 只有 `breakAfter` 能放行 —— 那里漏了 `/`(SY) `”`(QU) `]`(CL) 三个字符。
+        //
+        // 证据：T2d 的 `P×N` 二维断点矩阵（14×14 = 196 格）逐格实测 Skia，三条独立路径
+        // （异填充串 / 异段中位置 / 尾部垫空格）复测 33/33 稳定。
+        for (c in listOf('/', '”', ']')) {
+            // 断**后**：两侧都非宽字，靠 breakAfter 放行（Skia 实测四格 `|A` `|1` `|(` `|[` 全部可断）
+            for (n in listOf('A', '1', '(', '[')) {
+                assertTrue("`$c|$n` 应可断（T2d 补表，靠 breakAfter）", canBreakIn("$c$n", 1))
+            }
+            // 断**前**：仍在 noBreakBefore，否决优先于 breakAfter
+            assertFalse("`a|$c` 仍禁断（noBreakBefore 优先于 breakAfter）", canBreakIn("a$c", 1))
+            assertFalse("`填|$c` 仍禁断", canBreakIn("填$c", 1))
+            // 同类相邻不拆：LB13 `× SY` / LB17 闭合类
+            assertFalse("`$c|$c` 禁断（同类相邻不拆）", canBreakIn("$c$c", 1))
+        }
+
+        // ⚠ 已登记的代价 ①：`]|字母` / `]|数字` 比 Skia 松。
+        // LB30 的 `CP × (AL | HL | NU)` 要求禁断，但那是 **pair 规则**，三表结构表达不了；
+        // 为清零族Y 的假阴性而优先接受。书库实测该签名 0 例（补表前后假阳性计数均为 4、未增加）。
+        assertTrue("`]|a` 放行 = **有意接受的假阳性**（三表结构表达不了 LB30 的 CP×AL）", canBreakIn("]a", 1))
+
+        // ⚠ 已登记的代价 ②：`X|%` 仍比 Skia 严。`%` 在 noBreakBefore 且否决优先，
+        // 要放行得同时把 `%` 移出 BEFORE，那会让 `填|%` 变松 —— 两侧取舍，实测语料零收益，故不动。
+        for (c in listOf('/', '”', ']', '-', '…')) {
+            assertFalse("`$c|%` 仍禁断（% 在 noBreakBefore，已登记差异）", canBreakIn("$c%", 1))
+        }
+
+        // 对照：确实不在任何表里的窄字符，两侧非宽时仍禁断（证明上面的放行来自 breakAfter 而非默认放行）
+        for (c in listOf('~', '@', '#', '^', '_')) {
+            assertFalse("`$c|A` 应禁断（不在任何表里）", canBreakIn("${c}A", 1))
+            assertFalse("`A|$c` 应禁断（不在任何表里）", canBreakIn("A$c", 1))
+        }
+    }
+
+    @Test
     fun `negative control - narrow char in no table does not break`() {
         // C 组的对照：证明上面的「可断」真的是 breakAfter 在起作用，而不是「窄字之间本来就可断」。
         for (c in listOf('~', '@', '#')) {
@@ -197,11 +237,27 @@ class LineBreakRuleTest {
     }
 
     @Test
-    fun `english - URL-like token stays whole`() {
-        // 斜杠/点/连字符在 noBreakBefore 或 breakAfter，两侧都不宽 → URL 内部整体不可断，
-        // 交给 R1 core（无可用断点且放不下时任意处断开）处置。
+    fun `english - URL-like token breaks only after slashes`() {
+        // T2d 改判：此前本测试断言「URL 内部逐位不可断」，那是**旧表的行为**，不是 Skia 的行为。
+        // T2d 的 `P×N` 二维矩阵实测：Skia 在两侧都非宽字时**放行斜杠之后**断
+        // （`|A`、`|1`、`|(`、`|[` 四格逐格实测），但仍禁断斜杠之前（`/` 在 noBreakBefore，LB13 `× SY`）。
+        // 故 URL 的合法断点 = 斜杠**之后**。
+        //
+        // 这同时是 R1 长串断行的收益：URL 内部第一次有了真实断点，
+        // 「窄栏里 URL 塞不下」从此有兜底断点，而不是只能靠紧急态逐字断。
         val url = "https://a.example.com/x"
-        for (i in 1 until url.length) assertFalse("URL 第 $i 位应不可断", canBreakIn(url, i))
+        val breaks = (1 until url.length).filter { canBreakIn(url, it) }
+        org.junit.Assert.assertEquals("URL 内合法断点应恰为两处斜杠之后", listOf(8, 22), breaks)
+        assertFalse("`i=6` 禁断（斜杠不落行首，LB13 × SY）", canBreakIn(url, 6))
+        assertFalse("`i=7` 禁断（连续斜杠之间不拆）", canBreakIn(url, 7))
+        assertTrue("`i=8` 可断（斜杠之后，即 T2d 新增断点）", canBreakIn(url, 8))
+        assertFalse("`i=10` 禁断（`.` 后无断点）", canBreakIn(url, 10))
+        assertFalse("`i=11` 禁断（词内）", canBreakIn(url, 11))
+        assertFalse("`i=13` 禁断（词内）", canBreakIn(url, 13))
+        assertTrue("`i=22` 可断（第二个斜杠之后）", canBreakIn(url, 22))
+        // 对照：不含斜杠的 token 仍整体不可断，交给 R1 core 处置
+        val token = "abcdef.example.com"
+        for (i in 1 until token.length) assertFalse("无斜杠 token 第 $i 位应不可断", canBreakIn(token, i))
     }
 
     // ---- E. 成串标点（T2b：省略号/破折号内部不可拆）----

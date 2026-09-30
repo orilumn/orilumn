@@ -3,6 +3,26 @@
 > Keeps a running log of significant milestones for the Orilumn reader engine. Supersedes
 > everything marked done; each section reflects a completed stage.
 
+## 2026-09-30 — 图盒比例修复：persist 加载路径补 bindChapterFor（LAYOUT_VERSION 29），真机三态闭环
+
+**Issue.** 重开《摄影的艺术》ch44 persist 加载路径不调 `readChapter`（chapterHref 空），
+`NormalFlowLayout.intrinsicSizeOf` 跳过图片二进制探测——传统/现代主题下 pos=100% 标签探不到内在比时
+图盒被打成 `width/2` 高（795），真实复现：重开位置漂移（图页只显示一半图）、ch44 图盒比例错误。
+
+**Fixes（排版层-上）。** `BookDocumentController` 15 处入口补 `bindChapterFor(unit)`（helper+绑点，
+persist 与 read 双路径对照 :600-:689）；`PaginationCacheCodec.LAYOUT_VERSION 28→29` 保证旧表作废自愈。
+
+**机制证明（引擎级回归，engine-skia jvmTest 6/6）。** 新增
+`PhotoPersistFullWidthRegressionTest.kt` 钉死三态：传统+href 绑定=1590×1920（=历史正确）；
+传统+空白 href=1590×795（=历史 bug 精确值）；原书设置=915×1105（设计行为，非 bug）。
+
+**真机实证（平板落盘日志，口径见 `docs/调试日志与分页跟踪.md`）。** 原书设置（bug 基线）
+PGAP `firstLineH=1105`；切传统模式触发 `whole-book relayout` paramHash 838300637→186714974；
+删表→冷启动→persist 重排 ch44（bug 原始路径）PGAP `firstLineH=1920` ✓；再 force-stop 冷启动
+persist 加载 ch44 仍 `1920` ✓（DISK-HIT 命中磁盘表）。1920 = 内容宽 1590 × 内在比 1.2077（915×1105）。
+
+**Pending / to verify on device.** 无（真机闭环）。分支 `fix/photo-relayout-height` 待合 main。
+
 ## 2026-09-30 — release v0.2.1 (versionCode 19)
 
 Merged `fix/scheduling` (27 commits) into `main` and shipped as **v0.2.1**: pagination persistence

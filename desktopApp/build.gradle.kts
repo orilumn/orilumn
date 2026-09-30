@@ -55,7 +55,7 @@ compose.desktop {
         mainClass = "orilumn.reader.desktop.MainKt"
         nativeDistributions {
             packageName = "Orilumn"
-            packageVersion = "0.2.0"
+            packageVersion = "0.2.1"
             description = "Orilumn"
             vendor = "Orilumn"
             targetFormats(TargetFormat.Dmg)
@@ -65,7 +65,7 @@ compose.desktop {
                 bundleID = "orilumn.reader"
                 iconFile.set(project.file("icons/icon.icns"))
                 // macOS 打包插件要求版本号 MAJOR > 0（"0.1.2" 非法），此处单独覆写；
-                // 与 Android versionName 0.2.0 对应，待发 1.x 后可删掉该覆写。
+                // 与 Android versionName 0.2.1 对应，待发 1.x 后可删掉该覆写。
                 packageVersion = "2.0"
             }
             linux {

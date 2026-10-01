@@ -171,6 +171,24 @@ class InhouseParagraphBreakerTest {
      * 最差单格比值 **1.500**。阈值按实测下浮留余量：parity 93.0、比值 0.98~1.02。
      * 下限比 S3 判据更宽，是因为**本集合是刻意构造的难例**（满载 `—`/书名号/URL/`]` 接缝）；
      * 真实书库的基线是 T1 实测的 96.81%，那个数由 T1 自己守。
+     *
+     * ## 【S7 更新】parity 基线 93.84% → 85.87%，**这是预期的正确变化**
+     *
+     * S7 给英文散文加了 [orilumn.reader.engine.laying.EnglishHyphenationSource]（K-L 音节断点），
+     * 而 **Skia 的 `Paragraph` 完全不做音节断词**（UAX#14 `AL × AL` 禁断，实测单个拉丁词零断点）。
+     * 所以我们多出来的断点逐格都与 Skia 不同 ⇒ parity 必然下降。
+     *
+     * **「parity 低」在这里不等于「变差」**：parity 衡量的是「与 Skia 一致」，而 K-L 正是
+     * **故意偏离 Skia 去补它的缺口**（R2 的需求本身）。真正该守的是**行数不失控**，见下。
+     *
+     * 实测（S7 后，552 格）：parity **85.87%**、总行数比值 **0.9924**、最差单格仍是已知的
+     * 破折号格 `«混合 mixed 内容 with 破折号——与空格…»`（1.500，与 S3 前同格，非 K-L 引起）。
+     *
+     * **行数比值 0.9924 才是这里的健康指标**：整部只少 0.76% 的行 ⇒ K-L 只在「确实放不下」
+     * 的词上生效，没有造成大面积重排；阈值 [0.98, 1.02] 不动。
+     *
+     * parity 阈值下调到 85.0：留 0.87 个点余量，且**这个数字被写进断言消息**，
+     * 下次再降会立刻看到（不让阈值无声下滑 —— 教训 ㉒）。
      */
     @Test
     fun `line count fairness holds on production configurations`() {
@@ -198,7 +216,13 @@ class InhouseParagraphBreakerTest {
         val parityRate = 100.0 * sameCells / cells
         val ratio = mineLines.toDouble() / skiaLines
         println("生产配置：cells=$cells parity=${"%.2f".format(parityRate)}% 行数比值=${"%.4f".format(ratio)} 最差单格=$worstKey")
-        assertTrue("逐格 parity 率不得低于基线 93.84%（实测 ${"%.2f".format(parityRate)}%）", parityRate >= 93.0)
+        assertTrue(
+            "逐格 parity 率不得低于 85.0%（实测 ${"%.2f".format(parityRate)}%）。" +
+                "S7 加 K-L 音节断点后基线由 93.84% 降到 85.87%：**这是预期的** ——" +
+                "Skia 不做音节断词，我们多出的断点逐格都与它不同。" +
+                "但**真该守的是行数比值**（${"%.4f".format(ratio)}，阈值 [0.98,1.02]），它才是「没乱重排」。",
+            parityRate >= 85.0,
+        )
         assertTrue("总行数比值须在 [0.98, 1.02]（实测 ${"%.4f".format(ratio)}）", ratio in 0.98..1.02)
         assertTrue(
             "单格行数比值不得失控（最差 ${"%.3f".format(worst)} @ $worstKey）",

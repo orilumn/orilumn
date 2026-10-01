@@ -6,6 +6,8 @@ import orilumn.reader.engine.laying.BaselineShift
 import orilumn.reader.engine.laying.BreakOpportunitySet
 import orilumn.reader.engine.laying.BrokenLine
 import orilumn.reader.engine.laying.BreakOpportunitySource
+import orilumn.reader.engine.laying.CodeIdentifierBreakSource
+import orilumn.reader.engine.laying.EnglishHyphenationSource
 import orilumn.reader.engine.laying.KinsokuBreakSource
 import orilumn.reader.engine.laying.ParagraphBreaker
 import orilumn.reader.engine.laying.isDocumentSpace
@@ -40,6 +42,26 @@ class InhouseParagraphBreaker(
     /** 断点增强器（顺序无关，S2(b) 冻结的形状）。本轮只接禁则表一个 source；S7 只加 source。 */
     private val breakSources: List<BreakOpportunitySource> = listOf(KinsokuBreakSource),
 ) : ParagraphBreaker {
+
+    /**
+     * S7：按 `tag` 分流额外的断点源。
+     *
+     * - **代码语境**（`pre`/`code`/`kbd`/`samp`/`var`/`tt`）→ [CodeIdentifierBreakSource]
+     *   （分隔符后 + 驼峰交界）。**不给**音节断词：代码标识符按音节断是错的（见该类 KDoc）。
+     * - **普通段落** → [EnglishHyphenationSource]（K-L 音节断点，R2 的落点）。
+     *
+     * 判定用 `tag`：`class="highlight"` 的代码块 tag 仍是 `p`，靠 tag 判不出来 ——
+     * 那是已知缺口（要读 `class`/`style`），登记在 docs 29g，不在本轮扩接缝。
+     */
+    private fun sourcesFor(tag: String?): List<BreakOpportunitySource> = when {
+        tag != null && tag in CODE_TAGS -> breakSources + CodeIdentifierBreakSource
+        else -> breakSources + EnglishHyphenationSource
+    }
+
+    private companion object {
+        /** 代码语境 tag（CSS UA 默认等宽的这些元素）。 */
+        val CODE_TAGS = setOf("pre", "code", "kbd", "samp", "var", "tt")
+    }
 
     override fun breakLines(
         text: CharSequence,
@@ -108,7 +130,7 @@ class InhouseParagraphBreaker(
             text, adv, n,
             headPx = headPx,
             restPx = widthPx.toFloat(),
-            opp = BreakOpportunitySet.of(text, breakSources),
+            opp = BreakOpportunitySet.of(text, sourcesFor(tag)),
             targetLh = lineHeightPx(fontSizePx, lineHeightRatio),
         )
     }

@@ -91,6 +91,22 @@
   - ⬜ **未结（有意接受）**：代码语境（`borrow_mut`/`worker.thread`）K-L 断词表不给断点，
     走 R1 硬切、不补连字符 —— 断标识符会产出 `parse_con-fig_file`，浏览器对代码同样用
     `overflow-wrap` 硬切。`docs` 侧未接 `lang` 通道（现按 `en` 兜底）也是既有设计。
+- **Q12 — 跨章预热探针 `CrossChapterPreflightProbeTest` 一直红（2026-10-02 记，**既有缺陷，非本轮引入**）**：
+  `./gradlew :app:testDebugUnitTest --tests "*CrossChapterPreflightProbeTest*"` 稳定失败（3/3，非 flaky），
+  卡在 `awaitPrepared(0)` —— `isChapterPreflightReady(0)` 15s 内一直 false。
+  同类的 `isChapterPreflightReady(2)` **是好的**（同文件另一条锁就靠它），所以不是「预热整体没跑」。
+  - **已在 HEAD（不带本轮改动）复现**，`git stash` 对照确认 ⇒ 与连字符修复、与
+    `LAYOUT_VERSION` 自动化都无关；之所以一直没暴露，是**平时只跑 `./gradlew jvmTest`，
+    它不包含 app 的 `testDebugUnitTest` / desktopApp 的 `test`**。
+  - 现状代码看着是「该跑的」：`preflightNeighbors` 确实 `preflightChapter(chapter - 1)` 和
+    `preflightChapter(chapter + 1)` 都派了（`BookDocumentController.kt:2906-2909`）。
+    **头号怀疑**：`preflightChapter` 的在途早退分支
+    「`if (scheduler.runningKeys.contains("pre:$index")) return`」**不重派**——
+    若章 0 的 `pre:0` 键被别的在途任务占着（`pre:<章>` 键空间是与邻居预热/其它后台 pass
+    共用的，见 `:1960` 与 `:2965` 的注释），这次早退后就再没人补派 ⇒ 永远 ready 不了。
+  - 待查：谁占着 `pre:0`、是否该改成「记在途、完成后按当前 paramHash 复查再派」。
+  - ⬜ 未结（本轮不碰：属跨章预热子系统，与分页缓存失效机制无交集）。
+
 - **Q1 — 长串（超长不可断单元）症状用户无法复现（2026-09-30 记）**：
   真机曾见长串行溢出/参差，但用户侧无法稳定复现，缺可复现样本。
   自建断行引擎**必须不比 Skia 差** —— T1 等价性（99.0038%）已隐含覆盖该场景，
@@ -188,6 +204,7 @@
     ② `app/build.gradle.kts:18` 的 `versionCode = 20` 是写死常量、非单调递增构建号，
     故 `PaginationCacheCodec` KDoc 里「换构建号即全量作废」在本工程从未真正发生。
     ⇒ ~~**S3 接线时必须 bump `LAYOUT_VERSION`**，否则线上老用户会静默复用 Skia 断点算出的旧表。~~
+    （2026-10-01 追加：整个「记得 bump」这条纪律本身已取消——`LAYOUT_VERSION` 改成引擎源码指纹自动导出。）
     **已消解（2026-10-01 S3 接线实测推翻）**：改为把断行器变体作为字段**进 `LayoutParamKey`**
     （`inhouseBreak`，默认读运行期开关），键即可精确区分两侧，`LAYOUT_VERSION` **不必 bump**。
     该字段用**变长喂入**（只在 true 时追加哨兵字节），于是 `inhouseBreak=false` 那一侧
@@ -266,7 +283,7 @@
   **当前状态**：`LightFloatLeadTest` 以 `KNOWN GAP` 命名**锁定现状**（断言两表全 null），
   补上容器 float 时该测试会失败并提醒更新。
   **待办**（**行为变更，不在性能这轮范围**）：让前向透传在祖先链上注册 float（而非只 `preClear`），
-  须同时确认与重路径递归同式 + 磁盘表/临时表两路等价，并 bump `LAYOUT_VERSION`。
+  须同时确认与重路径递归同式 + 磁盘表/临时表两路等价（`LAYOUT_VERSION` 自 2026-10-01 起随源码自动变，不必手改）。
 
 - **桌面真背光后续（2026-09-27，macOS 先行落地）**：macOS DDC/CI 已通（`desktopApp …/brightness/`：`DisplayBrightness` 接口 + `DdcPackets` + `MacDisplayBrightness` JNA，真机读写闭环；>0 下发硬件150ms防抖、≤0 纯遮罩、跟随系统不碰硬件；滑块按探测切量程 -50~100 / -50~0）。**Win/Linux 空实现位**：Windows 接 Dxva2（`GetPhysicalMonitors`→`SetMonitorBrightness`，JNA）、Linux 接 ddcutil（/dev/i2c，需 i2c 组权限），同接口各自实现；显示器插拔重探（当前启动探一次）后续补。
 

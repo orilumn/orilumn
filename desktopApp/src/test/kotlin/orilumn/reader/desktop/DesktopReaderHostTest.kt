@@ -167,7 +167,15 @@ class DesktopReaderHostTest {
             val firstCount = host1.pageCount(start!!.chapter)
             assertTrue("首章应有页", firstCount > 0)
 
-            val disk = PaginationCacheStore(FileSystem.SYSTEM, cacheRoot.absolutePath.toPath())
+            // appVersion 必须与宿主落盘时用的一致（DesktopReaderHost.DISK_CACHE_VERSION），
+            // 否则 decode 的「构建号」关卡会把刚写的表判成别的构建写的 ⇒ 读回必 null。
+            // （这条锁在 2026-10-01 之前一直是红的：宿主按 DISK_CACHE_VERSION=1 写，
+            //  这里用 PaginationCacheStore 的默认值 0 读，`jvmTest` 不覆盖 desktopApp:test 才没被发现。）
+            val disk = PaginationCacheStore(
+                FileSystem.SYSTEM,
+                cacheRoot.absolutePath.toPath(),
+                DesktopReaderHost.DISK_CACHE_VERSION,
+            )
             fun binsUnder(dir: okio.Path): List<okio.Path> =
                 runCatching { FileSystem.SYSTEM.list(dir) }.getOrDefault(emptyList())
                     .flatMap { p ->

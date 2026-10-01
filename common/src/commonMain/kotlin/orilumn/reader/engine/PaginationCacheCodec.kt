@@ -17,15 +17,16 @@ import orilumn.reader.io.Logger
  *
  * **Cache-invalidation contract.** There is exactly one authority for whether a persisted table is
  * still valid: [decode]. A table is rejected (returns null → the caller rebuilds) on magic/schema
- * mismatch, when the table's [LAYOUT_VERSION] differs from the current engine geometry version,
- * or when the table's [appVersion] differs from the running build. Bumping [LAYOUT_VERSION] is the
- * invalidation point after any change to how line geometry is computed (break width, margin
- * folding, line height, char offsets, …); [appVersion] (the platform's monotonic build number —
- * Android `versionCode`, desktop `DISK_CACHE_VERSION`) is the backstop for everything the geometry
- * version doesn't cover (shaping engine / Skia / system-font changes shipped in a release without
- * a geometry bump): an upgrade with a new build number uniformly discards old disk tables, with no
- * per-site clearing. Old files are never migrated — the first read after an upgrade misses and the
- * chapter is reshaped under the new build.
+ * mismatch, when the table's [LAYOUT_VERSION] differs from the current engine geometry version, or
+ * when the table's [appVersion] differs from the running build. **[LAYOUT_VERSION] is derived
+ * automatically from engine source content** (see its KDoc) — it is *not* a hand-maintained counter,
+ * so any change to how line geometry is computed (break width, margin folding, line height, char
+ * offsets, …) invalidates old tables with no human bookkeeping; [appVersion] (the platform's
+ * monotonic build number — Android `versionCode`, desktop `DISK_CACHE_VERSION`) remains the backstop
+ * for everything the source fingerprint cannot see (a different Skia / system-font set installed
+ * under an unchanged source tree, etc.): an upgrade with a new build number uniformly discards old
+ * disk tables, with no per-site clearing. Old files are never migrated — the first read after an
+ * upgrade misses and the chapter is reshaped under the new build.
  */
 object PaginationCacheCodec {
 
@@ -34,13 +35,37 @@ object PaginationCacheCodec {
     /** File/schema version. Bump only when the on-disk byte layout changes. */
     private const val VERSION = 3 // 3: header gains appVersion (build-number backstop; v2 files miss on read)
 
-    /** Engine-geometry version. Bump on ANY change to line geometry computation so stale tables are
-     *  invalidated at the single [decode] choke-point. Kept separate from [VERSION]: schema changes may
-     *  leave geometry untouched and vice-versa. */
-    // 31: 自建断行器 greedy 加「往回退」——「最近断点差一个连字符宽装不下」时改为退到上一个装得下的
-    //     断点（原先原地硬切且丢连字符）。行尾下标变化 ⇒ 页切点变化 ⇒ 旧表必须作废。
-    // 30: 断行器 R1 补偿——SkParagraph「整段单行」快捷路径不扣 TextIndent，带 text-indent 的单行段在「版心 − 缩进 < 整段自然宽 ≤ 版心」内不折行却被绘制侧右移缩进，尾部 1~2 字被版心右缘裁掉；修后该窗口按首行真实可用宽重排（行数变化 → 旧表作废）；29 的单行超长段表作废
-    const val LAYOUT_VERSION = 31
+    /**
+     * **行几何版本 = 引擎源码指纹**（[LayoutGeometryStamp]），**不靠人手动 bump**。
+     *
+     * ## 为什么不手动 bump
+     *
+     * 本值曾经是一个手写的 `const val`（历史 18…31），靠「改了断行/度量算法就记得 +1」维持。
+     * 这条纪律**必然漏**，而漏一次的后果是**静默**的：分页磁盘表的 key 是
+     * [orilumn.reader.engine.text.LayoutParamKey.hash()]，只含**版面参数**、不含算法版本 ⇒
+     * 漏 bump 时旧表继续命中，读者看到的是**上一版算法的分页结果**，日志里也只有
+     * 一条正常的 `loaded from persist`，**没有任何异常信号**。
+     * 2026-10-01 本轮就实况踩了一次：贪心加「往回退」改了行尾下标（页切点随之变），
+     * 真机却仍命中旧表，修复看起来完全没生效。
+     *
+     * 现成的 [appVersion] 兜底（Android `versionCode` / 桌面 `DISK_CACHE_VERSION`）**救不了**：
+     * 两者都是写死常量（`versionCode = 20` / `= 1`），同一 versionCode 下所有构建同值 ⇒
+     * 只在**发版升级**时兜底，开发期与 CI 完全不触发。
+     *
+     * ## 现在怎么来的
+     *
+     * 根 `build.gradle.kts` 的 `generateLayoutGeometryStamp` 任务对
+     * **引擎模块（`common` + `engine-skia`）的任一 `*Main` 文件内容**求 SHA-256，取前 4 字节
+     * 生成本常量（源码在 [LayoutGeometryStamp]）。于是：
+     *  - 引擎源码变了（断行、度量、样式层叠、盒模型…）⇒ 本值变 ⇒ 旧表在 [decode] 被拒 ⇒ 自动重排；
+     *  - 引擎源码没变 ⇒ 本值不变 ⇒ 缓存跨构建存活（不是「每次构建都作废」）。
+     *
+     * 指纹取**粗粒度**（整模块 `*Main`）是刻意的：方向是宁可多作废、不可少作废；
+     * 多作废在发版时本就要被 [appVersion] 全量作废一次，**生产额外成本为 0**。
+     *
+     * 仍与 [VERSION] 分开：schema（字节布局）变而几何不变时不必作废，反之亦然。
+     */
+    const val LAYOUT_VERSION = LayoutGeometryStamp.VALUE
 
     /** Per-book cap on persisted table files. Old-parameter-hash tables are orphaned when the layout
      *  key changes; version-stale orphans (older build) are swept by [PaginationCacheStore.sweepStale]
@@ -87,7 +112,10 @@ object PaginationCacheCodec {
             val buf = Buffer().write(bytes)
             if (buf.readInt() != MAGIC) return decodeNull("magic")
             if (buf.readInt() != VERSION) return decodeNull("version")
-            if (buf.readInt() != LAYOUT_VERSION) return decodeNull("layout-version")
+            // 带上指纹：miss 时能直接对上「当前源码状态」，不用再回头猜是漏 bump 还是参数变了。
+            if (buf.readInt() != LAYOUT_VERSION) {
+                return decodeNull("layout-version have=${LAYOUT_VERSION.toUInt().toString(16)}/${LayoutGeometryStamp.DIGEST_PREFIX}")
+            }
             if (buf.readInt() != expectedAppVersion) return decodeNull("app-version")
             val chapterIndex = buf.readInt()
             val paramHash = buf.readLong()

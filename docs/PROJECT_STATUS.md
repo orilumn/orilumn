@@ -3,6 +3,33 @@
 > Keeps a running log of significant milestones for the Orilumn reader engine. Supersedes
 > everything marked done; each section reflects a completed stage.
 
+## 2026-10-01 — 分页缓存失效自动化：`LAYOUT_VERSION` 改为引擎源码指纹，人不再需要记得 bump
+
+**Issue.** 分页磁盘表的 key 是 `LayoutParamKey.hash()`，只含**版面参数**、不含排版算法版本。
+所以「改了断行/度量算法但版面参数没变」时旧表继续命中，读者看到的是**上一版算法的分页结果**——
+本轮修好软连字符行尾不画 `-` 后，真机「看起来完全没生效」，就是因为忘了 bump `LAYOUT_VERSION`。
+现成的 `appVersion` 兜底也救不了：`BuildConfig.VERSION_CODE`（写死 `= 20`）与桌面
+`DISK_CACHE_VERSION`（`= 1`）都是**常量**，只在发版升级时触发，开发期一次都不触发。
+
+**Resolution.** `LAYOUT_VERSION` 从手写常量（历史 18…31）改为**引擎源码指纹自动导出**：
+根 `build.gradle.kts` 的 `generateLayoutGeometryStamp` 对已登记引擎模块（`common` + `engine-skia`）
+所有主源集文件内容求 SHA-256，取前 4 字节生成 `LayoutGeometryStamp.VALUE`。
+源码变 ⇒ 值变 ⇒ 旧表在唯一的 `decode` 关卡被拒 ⇒ 自动重排；源码没变 ⇒ 值不变 ⇒ 缓存跨构建存活。
+指纹故意取粗（宁可多作废不可少作废，多作废的生产成本为 0，因为发版本来就被 `appVersion` 全量覆盖）。
+另加 `:unregisteredEngineCode` 守卫：未登记模块里出现 `orilumn.reader.engine` 包下的 .kt 直接 **fail 构建**
+（把「新增引擎模块忘了登记」从注释提醒升级成硬检查）。`decode` 的 miss 原因带 `DIGEST_PREFIX` 便于诊断。
+
+**Locks (mutation-verified).** 内容改动 → 指纹变 / 还原 → 回到原值；未登记模块放引擎代码 → 守卫红；
+删掉生成物后 `:app:assembleDebug` 仍通过（`:common` 全任务 dependsOn 指纹任务）。
+顺带把 `PaginationCacheTest` 里写死 `layoutVersion = 0` 的几何关卡锁改成 `LAYOUT_VERSION + 1`
+（不依赖「指纹恰好非 0」）。全量 `jvmTest` + `test`：tests=1031 failures=0 errors=0。
+
+**Lessons.** ① Kotlin 块注释**可嵌套**——在 KDoc 里写 glob `src/*Main` 会让 `/*` 打开嵌套注释，
+把整份构建脚本剩余部分吞掉，**脚本照样编译通过、构建照样成功、连故意写错都不报错**，
+只表现为「任务找不到」。⇒ 构建脚本的说明一律用 `//` 行注释。
+② 任务依赖不要按任务名过滤：KMP-AGP 的 android 目标编译任务叫 `compileAndroidMain`，
+`startsWith("compile") && contains("Kotlin")` 会漏掉它。
+
 ## 2026-09-30 — 排版 R1：带 `text-indent` 的单行段「只差一两个字却不换行、尾部被裁」（LAYOUT_VERSION 30）
 
 **Issue.** 一段本来只有一行的文字，在「版心宽 − 边距」恰好比它的整段宽少 1~2 个字时，不折行也不掉字，

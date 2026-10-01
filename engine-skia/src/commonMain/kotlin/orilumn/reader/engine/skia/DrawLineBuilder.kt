@@ -116,9 +116,17 @@ object DrawLineBuilder {
                     fontRuns = fontRuns,
                     firstLineIndentPx = if (lineIdx == leaf.firstLineIndex) indent else 0f,
                     nowrap = nowrap,
-                    // 逐行索引对齐 leaf.hyphenAtEnd（与 ranges 同长同序）；短于 lineIdx 说明
-                    // 该叶没带这个位（老路径的裸 LayoutBox）⇒ 退到「无连字符」而不是崩。
-                    hyphenAtEnd = leaf.hyphenAtEnd.getOrElse(lineIdx) { false },
+                    // **下标必须是 `i`（叶内行序），不是 `lineIdx`（章内全局行序）**。
+                    //
+                    // `leaf.hyphenAtEnd` 与 `leaf.ranges` 同长同序 ⇒ 两者都从 0 起；
+                    // 而 `lineIdx = leaf.firstLineIndex + i`，`firstLineIndex` 是
+                    // **章内全局**首行号（`NormalFlowLayout` 里 `box.firstLineIndex = out.size`，
+                    // `out` 是全章 `FlowedLine` 表）。用 `lineIdx` 去索引一张长度 = 叶行数的表
+                    // ⇒ **只有首行号恰等于叶内行号的叶才对得上**，其余一律 `getOrElse` 落空 →
+                    // `hyphenAtEnd` 恒 false ⇒ 断词行**永远画不出 `-`**。
+                    // 实测（Rust 书 22 章、版心 1600）：正文拉丁词内断行 253 行，丢连字符 253 行（100%）。
+                    // 单段小探针（`firstLineIndex` 从 0 起）恰好对上，故旧锁全绿也没暴露。
+                    hyphenAtEnd = leaf.hyphenAtEnd.getOrElse(i) { false },
                     baselineShifts = shifts,
                     textShadow = shadow,
                     emphasis = style.emphasisStyle,

@@ -101,6 +101,15 @@ class InhouseParagraphBreaker(
          * 实测语料里 `code`+`pre` 已覆盖 28000+ 处代码块，剩下的漏网形态已登记 docs 29g。
          */
         val CODE_TAGS = setOf("pre", "code", "kbd", "samp", "tt")
+
+        /**
+         * 断点回退历史长度（[greedy] 一次最多往回看几个断点）。
+         *
+         * 理论下限是 **2**：连续 K-L 断点间距 ≥2 字符，而「最近断点装不下」的 `hang` 窗口宽度
+         * 只有一个连字符宽（≈1 字符），故连续失败至多 1 个。取 4 兜住字距 / 混合字体下的抖动。
+         * 退到底仍装不下 → R1 core（不溢出），**安全兜底不会退化**。
+         */
+        const val OPP_HISTORY = 4
     }
 
     override fun breakLines(
@@ -251,20 +260,49 @@ class InhouseParagraphBreaker(
      *
      *  - **判定宽 = `[s, j)` 扣掉行尾文档空白后的宽**（UAX#14 LB SP 的尾随空白悬挂）：
      *    换行判定因此可以把行尾空格放进行区间又不占版心。**中间行同样成立**，不只段末。
-     *  - **取「可达断点里最靠右的那个」**：能填多宽填多宽，溢出则退到最近断点。
+     *  - **取「可达断点里最靠右、且装得下的那个」**：能填多宽填多宽，溢出则**从最近的断点起往回退**，
+     *    退到第一个装得下的为止（**含它自己的连字符宽**），全都不装得下才落 R1 core。
+     *    「往回退」不是可选项 —— 见下面「为什么必须回退」那条。
      *  - 行尾空白只扣**紧贴行尾的那一段**，行内空白照算。反例锁死这条：
      *    `填充填   填充填` @350 断在 `[0,6)`（"填充填␣␣␣" 判定宽 300），若把行内 3 个空格也免掉则断在 `[0,7)`。
      *  - **`\n` 硬断**，行区间不含它；行首「预领」的 `\n` 跳过 → `a\n\nb` 得 2 行不是 3 行。
-     *  - **R1 core**：退不到任何断点即在此断开（贪心填满，不是溢出）。见类 KDoc 的行为规格。
+     *  - **R1 core**：所有断点（含连字符）都装不下才在此断开（贪心填满，不是溢出）。
+     *    见类 KDoc 的行为规格。
      *  - **断词断点的连字符宽只在「本行真断在那里」时计入**（[hyphenW]）：断点候选的判定宽
      *    是 `hang + hyphenW[brk-1]`，**不是**把连字符宽焊进 `adv`（第一版焊进 `adv` 导致
      *    一行里多个断词点被重复计宽、提前断行，实测最差单格比值 1.5→2.0，见 [hyphenWidths] KDoc）。
      *
+     * ## 为什么「最近断点装不下」必须**往回退**，不能原地硬切（本轮实测抓到的真缺陷）
+     *
+     * 单槽 `lastOpp` 的写法是：`lastOppWidth > avail` 就直接落 R1 core（`brk = i`）。但
+     * `hang <= avail` 恒成立（循环只在装得下时才 `hang = next`），故 `lastOppWidth > avail`
+     * **只可能是「差一个连字符宽」**。而此时 `i` 往往**恰好等于 `lastOpp`**（`i` 就是那个
+     * 装不下连字符的断点位置），于是产出一条 **「在断词点断开、却没有连字符」**的行 ——
+     * 词看起来被硬切，正是用户报的「软连字符没有加，`dependen-`/`cies`、`com-`/`piled`
+     * 两处都不加」。
+     *
+     * 实测（Rust 书 22 章、版心 1600）：`isHyphenAt(brk)=true` 却 `brkIsOpp=false` 共 **45 行**，
+     * 全部形如 `gap = avail − lastOppWidth ∈ [−23, −1]`（只差 1~23px），例如
+     * ```
+     *   '…它就会返回 Re|'   avail=1600  hang=1596.98  hyW=24.66  gap=−21.64
+     *   '…已定义 an|'       avail=1515.64  hang=1491.27  hyW=24.66  gap=−3.29
+     * ```
+     * ⇒ 字符本身装得下，只差一个连字符。**三个选项里只有「回退」是对的**：
+     *  - 原地断、不给连字符（现状）：词被无声切坏，读者分不清是断词还是原文如此。
+     *  - 原地断、给连字符：**超出版心 = 内容被裁**（分页阅读器硬错误，
+     *    `NoLineExceedsContentWidthTest` 钉住）。
+     *  - 往回退到上一个装得下的断点：CSS Text 3 §5.2 贪心的定义本身，浏览器亦如此。
+     *
+     * 回退深度 [OPP_HISTORY]：连续 K-L 断点间距 ≥2 个字符，而「装不下」的 `hang` 窗口宽度
+     * 只有一个连字符宽（≈1 字符），故**连续失败最多 1 个**，2 就够。取 [OPP_HISTORY] 兜住
+     * 字距/混合字体下的抖动；退到底仍装不下就是 R1 core（不溢出，安全兜底）。
+     *
      * 不变量（`s` 行首 / `i` 待消费）：
      *  [hang] = `[s, i)` 扣掉**紧贴行尾的那一段**空白后的宽（UAX#14 LB SP）；**不含**连字符宽；
      *  [trail] = 紧贴行尾的那一段空白的宽（`hang` 加下一个字符时若该字符非空白，这段要并回来）；
-     *  [lastOpp] = 已消费范围内最后一个断点（`-1` = 一个都没有）；[lastOppWidth] = 该断点处的
-     *  判定宽 `hang + hyphenW[lastOpp-1]`（断词断点的连字符**在这一行真的会出现**）。
+     *  [oppIdx]/[oppW] = 本行已消费范围内**最近 [OPP_HISTORY] 个断点**及其判定宽
+     *  （`hang + hyphenW[下标-1]`，断词断点的连字符**在这一行真的会出现**），按记录顺序；
+     *  取断点时从**最新**往回扫，取第一个 `下标 > s 且 判定宽 <= avail` 的。
      */
     private fun greedy(
         text: CharSequence,
@@ -277,6 +315,9 @@ class InhouseParagraphBreaker(
         targetLh: Int,
     ): List<BrokenLine> {
         val out = ArrayList<BrokenLine>(8)
+        // 断点历史缓冲（整趟共用，逐行只重置计数）。定长：回退深度需求见 KDoc（2 就够，取 4 留抖动余量）。
+        val oppIdx = IntArray(OPP_HISTORY)
+        val oppW = FloatArray(OPP_HISTORY)
         var s = 0
         var first = true
         while (s < n) {
@@ -290,10 +331,9 @@ class InhouseParagraphBreaker(
             var i = s
             var hang = 0f
             var trail = 0f
-            var lastOpp = -1
-            // 「最近断点处的判定宽」= 断点被记录那一刻的 hang（已扣行尾空白），随滚动增量维护，
-            // 供退出循环后判「该断点是否装得下」。O(1) 更新，不能用重算（那是 O(n) × 行数）。
-            var lastOppWidth = 0f
+            // 本行的断点历史（按下标升序，[oppN-1] 是最近的）。判定宽随滚动增量维护，
+            // 供退出循环后**从最近往回**扫「装得下的那个」。不能重算（那是 O(n) × 行数 × 历史长）。
+            var oppN = 0
             var brk = -1
             // 本行行尾**是不是我们主动选中的断点**（而非 R1 core 兜底 / 硬换行）。
             // 这是 `hyphenAtEnd` 的前提，见下面产出处的注释。
@@ -313,25 +353,44 @@ class InhouseParagraphBreaker(
                 trail = if (sp) trail + w else 0f
                 i++
                 // **含该断点自己的连字符宽**：断在这里 ⇒ 行尾真会多一个 `-` ⇒ 它占版心。
-                if (opp.opportunityAt(i)) { lastOpp = i; lastOppWidth = hang + hyphenW[i - 1] }
+                if (opp.opportunityAt(i)) {
+                    if (oppN < OPP_HISTORY) { oppIdx[oppN] = i; oppW[oppN] = hang + hyphenW[i - 1]; oppN++ }
+                    else {
+                        // 历史满：丢最旧的一个（整体左移一位）。
+                        // 只在「一行里断点多于 OPP_HISTORY」时触发（版心 1600 / 40px 字 ⇒ 一行 ~40 断点），
+                        // [OPP_HISTORY] 次移位，可接受。
+                        System.arraycopy(oppIdx, 1, oppIdx, 0, OPP_HISTORY - 1)
+                        System.arraycopy(oppW, 1, oppW, 0, OPP_HISTORY - 1)
+                        oppIdx[OPP_HISTORY - 1] = i; oppW[OPP_HISTORY - 1] = hang + hyphenW[i - 1]
+                    }
+                }
             }
             if (brk < 0) {
                 brk = when {
                     i >= n -> n                       // 整段装下（含「尾随空白悬到段末」）
-                    // 退到最近断点 —— 但**仅当它装得下**。
+                    // 退到断点 —— 但**必须逐个往回退到装得下的那个**。
                     //
-                    // ⚠ 原实现是 `lastOpp > s -> lastOpp` 无条件退回，于是「最近断点也放不下」
+                    // ⚠ 最早的写法是 `lastOpp > s -> lastOpp` 无条件退回，于是「最近断点也放不下」
                     // 时会产出一行**超出版心的内容**。实测 `Donaudampfschiff…`（无空格超长单词）
                     // 在版心 80 下溢出 **32.45px**、首行缩进 88% + 版心 120 溢出 **65.07px**
                     // （`NoLineExceedsContentWidthTest` 钉住）。**分页阅读器不能容忍溢出**：
                     // 浏览器能横向滚动所以能溢出，本项目页宽固定、超出部分被页面裁掉 = 内容丢失。
-                    // ⇒ 装不下时必须落到 R1 core（逐字断开、贪心填满版心），而不是溢出。
+                    //
+                    // ⚠ 第二版改成单槽 + `lastOppWidth <= avail` 门槛，溢出是消了，但**把
+                    // 「差一个连字符宽」当成了「退无可退」** → 原地硬切又不给连字符（词被无声
+                    // 切坏）。真值只有第三个：**往回退**。见上面「为什么必须往回退」。
                     //
                     // 注意「记账点在 `i++` 之后」：`hang > avail` 的那一刻循环已 `break`，
-                    // 故常规路径下 `lastOppWidth <= avail` 恒成立 —— 这条判定只在**版心窄到
-                    // 连断点都装不下**（版心 80 / 缩进吃掉版心）时才真正生效。
-                    lastOpp > s && lastOppWidth <= avail -> { brkIsOpp = true; lastOpp }
-                    else -> i                          // R1 core：退无可退（含「最近断点也装不下」）→ 填满即断
+                    // 故常规路径下 `oppW <= avail` 恒成立 —— 这里的判定真正生效的只有两种情形：
+                    // ① **差一个连字符宽**（最常见，实测 gap ∈ [−23, −1]px）；
+                    // ② 版心窄到连断点都装不下（版心 80 / 缩进吃掉版心）⇒ 退到底仍失败
+                    //    才是 R1 core（逐字断开、贪心填满版心），不是溢出。
+                    else -> {
+                        // 从最近的断点**往回退**，取第一个装得下的（贪心的定义，见 KDoc）。
+                        var k = oppN - 1
+                        while (k >= 0 && (oppIdx[k] <= s || oppW[k] > avail)) k--
+                        if (k >= 0) { brkIsOpp = true; oppIdx[k] } else i   // 退无可退 → R1 core：填满即断
+                    }
                 }
             }
             // 反自旋护栏（正常路径不可达：`brk > s` 由上面的 `i > s` 前置条件保证）。

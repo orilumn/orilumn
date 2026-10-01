@@ -184,8 +184,53 @@ class StyleComputer(
     fun pseudoStyle(el: MarkupElement, ancestors: List<MarkupElement>, base: ComputedStyle, pseudo: String): ComputedStyle {
         val winners = cascade.winningDeclarations(el, ancestors, emptyList(), pseudo)
         if (winners.isEmpty()) return base
-        return computeStyle(winners, base, el.tag, normalizeLang(el.attrs["lang"]))
+        return computeStyle(winners, base, el.tag, normalizeLang(el.attrs["lang"]), isPreformatted(el, ancestors))
     }
+
+    /**
+     * 是否处于**预格式化语境** = 本元素是 `pre`，或有 `pre` 祖先。
+     *
+     * 判据用标签本身（`pre` 是 HTML 里唯一语义上就是「格式敏感区」的标签），
+     * 不看 `white-space` 计算值 —— 计算值正是本函数下游要改的东西，拿它当判据会自证。
+     */
+    private fun isPreformatted(el: MarkupElement, ancestors: List<MarkupElement>): Boolean =
+        el.tag.equals("pre", ignoreCase = true) || ancestors.any { it.tag.equals("pre", ignoreCase = true) }
+
+    /**
+     * 预格式化语境下把「不可折行」的 `white-space`（[WhiteSpace.PRE] / [WhiteSpace.NOWRAP]）
+     * 降级成 [WhiteSpace.PRE_WRAP]。
+     *
+     * ## 为什么要在级联层改，而不是让书自己写对
+     *
+     * 浏览器里 `nowrap`/`pre` 的兜底是**横向滚动条**；本项目是**页宽固定的分页阅读器**，
+     * 没有横向滚动 ⇒ 不折行 = 超出页宽被页面裁掉 = **内容丢失**（分页阅读器的硬错误）。
+     * `nowrap` 还会按 CSS 规范把源码换行**折叠成空格**，代码的换行结构被彻底抹掉。
+     *
+     * 实测真书《Rust 程序设计语言》（`book_1790865097552.epub`，2026-10-01 导入）
+     * `OEBPS/Styles/stylesheet.css:144` 写的是：
+     *
+     * ```css
+     * pre code { font-size: 0.8em; white-space: nowrap; }
+     * ```
+     *
+     * 作者/转换器想表达的是「别把我的代码折得乱七八糟」，写出来的却是 CSS 里
+     * **唯一会直接吃掉内容**的值（合法的 `nowrap`，不是拼错的 `nowarp`，所以继承兜底救不了）。
+     * 真机表现：整个代码块连成一段、溢出页宽被裁。
+     *
+     * ## 为什么改在级联层而不是 ua.css
+     *
+     * UA 层是**最低优先级**，书的声明一定压过它 —— `ua.css:32` 早就写了
+     * `pre { white-space: pre-wrap; }`（[orilumn.reader.engine.skia.InhouseParagraphBreaker]
+     * 的 KDoc 记着这次有意偏离浏览器），但对本书完全无效。**要压过书，只能在级联结果上改。**
+     *
+     * ## 为什么只限 `pre` 子树
+     *
+     * `pre` 是作者显式声明的「格式敏感区」，在这里禁止折行与「保留格式」自相矛盾，
+     * 降级没有语义代价。子树之外（正文里的 `<span style="white-space:nowrap">` 之类短标签）
+     * 不折行是作者的正当意图、且照样装得下，**一律按浏览器语义放行**，行为逐值不变。
+     */
+    private fun resolveWhiteSpace(declared: WhiteSpace, inPreformatted: Boolean): WhiteSpace =
+        if (inPreformatted && !WhiteSpaceNormalize.wraps(declared)) WhiteSpace.PRE_WRAP else declared
 
     private fun computeOne(el: MarkupElement, ancestors: List<MarkupElement>, parent: ComputedStyle): ComputedStyle {
         // R26 诊断：见 CascadeProbe。probe 非 null 时把本函数拆成
@@ -200,7 +245,7 @@ class StyleComputer(
         if (probe != null) parseMs = orilumn.reader.time.platformNowMs() - tP
         val winners = cascade.winningDeclarations(el, ancestors, inline)
         val tB = if (probe != null) orilumn.reader.time.platformNowMs() else 0L
-        val style = computeStyle(winners, parent, el.tag, normalizeLang(el.attrs["lang"]))
+        val style = computeStyle(winners, parent, el.tag, normalizeLang(el.attrs["lang"]), isPreformatted(el, ancestors))
         if (probe != null) buildMs = orilumn.reader.time.platformNowMs() - tB
         // 读者层裸通用名兜底合并：主题预设（serif/sans-serif）只能缀在书栈后面做最终回退，
         // 不能替换——否则书里点名的导入字体（池中有）在主题模式下永远够不着（传统变黑体）。
@@ -218,6 +263,7 @@ class StyleComputer(
                     parent,
                     el.tag,
                     normalizeLang(el.attrs["lang"]),
+                    isPreformatted(el, ancestors),
                 )
                 if (probe != null) {
                     secondPassMs = orilumn.reader.time.platformNowMs() - tS
@@ -232,10 +278,18 @@ class StyleComputer(
 
     /**
      * @param lang 已规范化的主语言子标签（S7）。**单独传参而不让本函数自己读 `el`**：
-     *   本函数是**纯函数**（只吃 `w`/`parent`/`tag`，无节点访问），给它加 `el` 会破坏这个性质，
+     *   本函数是**纯函数**（只吃标量与 `w`/`parent`，无节点访问），给它加 `el` 会破坏这个性质，
      *   而 `lang` 是 HTML **属性**（不是 CSS 声明）本来就不在 `w` 里。三个调用点各自解析一次。
+     * @param inPreformatted 本元素是否处于预格式化语境（`pre` 自身或其子树），由调用点从
+     *   [el]/[ancestors] 判定好传进来，同样是为了不把节点访问塞进本函数。见 [resolveWhiteSpace]。
      */
-    private fun computeStyle(w: Map<String, String>, parent: ComputedStyle, tag: String, lang: String?): ComputedStyle {
+    private fun computeStyle(
+        w: Map<String, String>,
+        parent: ComputedStyle,
+        tag: String,
+        lang: String?,
+        inPreformatted: Boolean,
+    ): ComputedStyle {
         // 1) font-size first (em/% boxes resolve against this final value)
         val fontSize = resolveFontSize(w["font-size"], parent.fontSizePx)
 
@@ -357,7 +411,8 @@ class StyleComputer(
             listStylePosition = w["list-style-position"]?.trim()?.lowercase()
                 ?: extractListStylePosition(w["list-style"]),
             // ---- P1 T3: text/box computed layer (defaults = old behavior, §6 inv.3) ----
-            whiteSpace = w["white-space"]?.let { parseWhiteSpace(it) } ?: parent.whiteSpace,
+            // `pre` 子树内的「不可折行」在此降级为 pre-wrap（理由见 [resolveWhiteSpace] 的 KDoc）。
+            whiteSpace = resolveWhiteSpace(w["white-space"]?.let { parseWhiteSpace(it) } ?: parent.whiteSpace, inPreformatted),
             letterSpacingPx = w["letter-spacing"]?.let { parseSpacing(it, fontSize, parent.fontSizePx) }
                 ?: parent.letterSpacingPx,
             wordSpacingPx = w["word-spacing"]?.let { parseSpacing(it, fontSize, parent.fontSizePx) }

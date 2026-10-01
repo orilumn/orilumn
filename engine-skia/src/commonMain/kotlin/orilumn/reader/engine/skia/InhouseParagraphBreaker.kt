@@ -88,11 +88,18 @@ class InhouseParagraphBreaker(
          *
          * ## `pre` 的 white-space 是 `pre-wrap` 不是 `pre`（有意偏离浏览器）
          *
-         * ua.css:32 写的是 `pre { white-space: pre-wrap; }`。浏览器标准是 `pre`（长行不折、
-         * 靠横向滚动），本项目改成 `pre-wrap`（长行仍按版心折行）——分页阅读器没有横向滚动条，
-         * `pre` 语义是「保留格式」而非「禁止折行」，一行 200 字符的代码必须能折否则被裁掉。
-         * **⇒ `pre-wrap` 仍满足 `WhiteSpaceNormalize.wraps() == true` ⇒ `pre` 的断行器会被调用，
+         * 浏览器标准是 `pre`（长行不折、靠横向滚动），本项目要 `pre-wrap`（长行仍按版心折行）
+         * ——分页阅读器没有横向滚动条，`pre` 语义是「保留格式」而非「禁止折行」，
+         * 一行 200 字符的代码必须能折否则被裁掉。
+         * **⇒ `pre-wrap` 满足 `WhiteSpaceNormalize.wraps() == true` ⇒ `pre` 的断行器会被调用，
          * 本 source 对 `pre` 有效**（曾因误以为「本仓没有 UA 样式表」而给出同一结论，理由是错的）。
+         *
+         * ⚠ **不要再拿 `ua.css:32` 的 `pre { white-space: pre-wrap; }` 当依据**：
+         * UA 是最低优先级、书一声明就压过它。真书《Rust 程序设计语言》
+         * （`book_1790865097552.epub` / `OEBPS/Styles/stylesheet.css:144`）写的正是
+         * `pre code { white-space: nowrap; }` —— 合法值、照做、整个代码块连成一段并被裁。
+         * 真正保证 `pre` 子树拿到 `pre-wrap` 的是**级联层**的
+         * `StyleComputer.resolveWhiteSpace`（预格式化语境里把 `pre`/`nowrap` 降级成 `pre-wrap`）。
          *
          * ## 判据的另一面：`class` 通道不存在
          *

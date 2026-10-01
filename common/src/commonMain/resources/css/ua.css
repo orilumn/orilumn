@@ -29,6 +29,13 @@ h6 { font-size: 1.2em; font-weight: bold; margin: 0.5em 0 0.35em; }
  * blockquote 的 2.5em 左缩进与 dd 的 2em 左缩进属水平方向, 疏密不缩放、也不压平. */
 p { margin: 1em 0; }
 blockquote { margin: 1em 2.5em; }
+/* `pre-wrap` 而非浏览器标准的 `pre`（长行不折、靠横向滚动）: 本项目是页宽固定的分页
+ * 阅读器, 没有横向滚动条, 一行 200 字符的代码不折就是溢出页宽被裁 = 丢内容.
+ *
+ * ⚠ 但**这条规则本身挡不住书**: UA 是最低优先级, 书一声明就压过它. 真书《Rust 程序设计
+ * 语言》stylesheet.css:144 写的正是 `pre code { white-space: nowrap; }`（合法值, 照做,
+ * 整个代码块连成一段并被裁）. 真正生效的降级在 `StyleComputer.resolveWhiteSpace`
+ * —— 预格式化语境（pre 自身或其子树）里的 pre/nowrap 一律降级成 pre-wrap. */
 pre { margin: 1em 0; white-space: pre-wrap; }
 /* `s` 与 `del` 同为删除线（EPUB2/3 语义重复标签各取浏览器默认）。 */
 s, del { text-decoration: line-through; }

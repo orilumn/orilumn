@@ -107,6 +107,75 @@ class PresentationAttrCascadeTest {
         assertEquals(WhiteSpace.PRE_WRAP, out[code]?.whiteSpace)
     }
 
+    // ---- 预格式化语境的「不可折行」降级（见 StyleComputer.resolveWhiteSpace 的 KDoc）----
+
+    /** `<pre><code>` 骨架，`code` 上挂一条作者声明 [decl]。 */
+    private fun preCodeWith(decl: String): Pair<MarkupElement, MarkupElement> {
+        val code = node("code")
+        val pre = node("pre", children = listOf(code)); code.parent = pre
+        val body = node("body", children = listOf(pre)); pre.parent = body
+        return body to code
+    }
+
+    @Test
+    fun `pre 子树内合法的 nowrap 降级为 pre-wrap`() {
+        // 真书《Rust 程序设计语言》book_1790865097552.epub / OEBPS/Styles/stylesheet.css:144
+        //     pre code { font-size: 0.8em; white-space: nowrap; }
+        // `nowrap` 是**合法**值（不像上面那条拼错的 nowarp 会走继承兜底），所以声明真的生效。
+        // 浏览器靠横向滚动条兜底 ⇒ 本项目（页宽固定的分页阅读器）不折行就是溢出被裁 = 丢内容。
+        val (body, code) = preCodeWith("nowrap")
+        val out = compute(body, ua = "pre { white-space: pre-wrap; }", author = "pre code { white-space: nowrap; }")
+        assertEquals(WhiteSpace.PRE_WRAP, out[code]?.whiteSpace)
+    }
+
+    @Test
+    fun `pre 子树内的 pre 降级为 pre-wrap`() {
+        // 浏览器标准是 `pre`（长行不折、靠横向滚动）；本仓 ua.css 有意偏离成 pre-wrap。
+        // 但 ua.css 是最低优先级、压不过书 —— 降级必须做在级联结果上，见 resolveWhiteSpace。
+        val (body, code) = preCodeWith("pre")
+        val out = compute(body, ua = "pre { white-space: pre-wrap; }", author = "pre { white-space: pre; }")
+        assertEquals(WhiteSpace.PRE_WRAP, out[code]?.whiteSpace)
+    }
+
+    @Test
+    fun `pre 元素自身被声明 nowrap 时也降级`() {
+        // 判据是「元素在 pre 子树内」，与声明挂在哪一层无关。
+        // 这里**故意不给 UA 的 pre-wrap**：否则 `pre` 自己的 UA 声明压过继承，降级路径根本走不到
+        // （第一版就踩了这个坑 —— 锁是绿的，但把 resolveWhiteSpace 改坏它也不红，等于没锁）。
+        // 只让 body 的 nowrap 继承下来，pre 与 code 都必须靠降级拿到 pre-wrap。
+        val code = node("code")
+        val pre = node("pre", children = listOf(code)); code.parent = pre
+        val body = node("body", children = listOf(pre)); pre.parent = body
+        val out = compute(body, ua = "", author = "body { white-space: nowrap; }")
+        assertEquals(WhiteSpace.NOWRAP, out[body]?.whiteSpace) // 降级只限 pre 子树，body 自己不动
+        assertEquals(WhiteSpace.PRE_WRAP, out[pre]?.whiteSpace)
+        assertEquals(WhiteSpace.PRE_WRAP, out[code]?.whiteSpace)
+    }
+
+    @Test
+    fun `pre 子树之外的 nowrap 保持浏览器语义`() {
+        // 正文里的 nowrap 是作者的正当意图（短标签、表格单元），且照样装得下 ⇒ 一律不动。
+        // 这条钉住「降级只限 pre 子树」，防止日后被扩成全局改写。
+        val span = node("span")
+        val p = node("p", children = listOf(span)); span.parent = p
+        val body = node("body", children = listOf(p)); p.parent = body
+        val out = compute(body, ua = "p { white-space: pre-wrap; }", author = "span { white-space: nowrap; }")
+        assertEquals(WhiteSpace.NOWRAP, out[span]?.whiteSpace)
+    }
+
+    @Test
+    fun `lazy resolve 与 compute 在降级上一致`() {
+        // 两条级联通路（重算全章 compute / 只算祖先链的 resolve）必须给出同一个值，
+        // 否则「先 resolve 出 pre-wrap、后 compute 出 nowrap」会让同一页代码块时折时不折。
+        val (body, code) = preCodeWith("nowrap")
+        val css = "pre code { white-space: nowrap; }"
+        val eng = StyleComputer(16f, StyleSheet(emptyList()), listOf(LightCssParser().parse(css)))
+        val full = eng.compute(body)
+        val lazy = eng.resolve(code, HashMap())
+        assertEquals(WhiteSpace.PRE_WRAP, full[code]?.whiteSpace)
+        assertEquals(WhiteSpace.PRE_WRAP, lazy.whiteSpace)
+    }
+
     @Test
     fun `width height 表示型属性照旧进级联`() {
         val (table, _, td) = cellTree(mapOf("width" to "40"))

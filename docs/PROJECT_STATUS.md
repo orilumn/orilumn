@@ -3,6 +3,50 @@
 > Keeps a running log of significant milestones for the Orilumn reader engine. Supersedes
 > everything marked done; each section reflects a completed stage.
 
+## 2026-10-02 — `pre` 代码块在书声明 `white-space: nowrap` 时连成一段并被裁（级联层降级）
+
+**Issue.** 真机《Rust 程序设计语言》代码块全部连成一段、横向溢出页宽被裁。
+不是引擎回归，也不是断行算法问题——**是书的 CSS 写错了，而我们的级联如实照做了**：
+
+```css
+/* book_1790865097552.epub / OEBPS/Styles/stylesheet.css:144 */
+pre code { font-size: 0.8em; white-space: nowrap; }
+```
+
+`nowrap` 是**合法**值，所以声明真的生效。浏览器靠**横向滚动条**兜底不折行；
+本项目是**页宽固定的分页阅读器**，没有横向滚动 ⇒ 不折行 = 溢出被裁 = **丢内容**。
+且 `nowrap` 按 CSS 规范还会把源码换行**折叠成空格**，代码的换行结构被彻底抹掉。
+
+此前 `480809c` 修过同一个症状，但那时书里写的是**拼错的 `nowarp`**（非法值 → 丢弃 → 继承
+UA 的 `pre-wrap`）。2026-10-01 重新导入的书把笔误改成了合法的 `nowrap`，老修复就失效了。
+
+**Resolution.** 在**级联结果**上降级：`StyleComputer.resolveWhiteSpace` —— 元素处于预格式化
+语境（自身是 `pre`，或有 `pre` 祖先）时，把 `white-space` 的 `pre`/`nowrap` 降级成 `pre-wrap`。
+
+- **为什么必须改在级联层而不是 `ua.css`**：`ua.css:32` 早就有 `pre { white-space: pre-wrap; }`
+  （`InhouseParagraphBreaker` 的 KDoc 记着这次有意偏离浏览器），但 UA 是**最低优先级**、
+  一定压不过书 ⇒ 要压过书只能在级联结果上改。
+- **为什么只限 `pre` 子树**：`pre` 是作者显式声明的「格式敏感区」，在这里禁止折行与「保留格式」
+  自相矛盾，降级没有语义代价。子树之外（正文里的短标签 `nowrap`）一律按浏览器语义放行、行为逐值不变。
+- 一处改动即全链路生效：下游全部按 `WhiteSpace` 取值（`normalizeNode`/`finishLeaf`/`wraps`/
+  `DrawLineBuilder.nowrap`/`BoxChapterLayouter`/`NormalFlowLayout`），无需各自打补丁。
+
+**Locks (mutation-verified).** `PresentationAttrCascadeTest` 新增 4 把：`pre` 子树内合法
+`nowrap` 降级 / `pre` 降级 / 声明挂在祖先时 `pre` 自身也降级 / **lazy `resolve` 与 `compute` 一致**
+（两条级联通路必须同值，否则同一页代码块时折时不折）；另加 1 把负向锁钉住「`pre` 子树外不动」。
+把降级改坏 → 4 把全红。端到端用真书 CSS + 真书 14.xhtml 最长 pre 块（241 字符一行）度量：
+**13 行 / 换行保留**（改坏则 9 行 / 换行被折成空格）。
+既有 3 条断言 `pre` 元素上 `white-space: pre` 得到 `PRE` 的锁按新语义更新为 `PRE_WRAP`
+（其中 `T3 文本属性解析` 补了一条 `div` 上的对照断言，保证解析路径本身仍被覆盖）。
+全量 `jvmTest` + `test`：tests=1268 failures=1（唯一红是既有的 `CrossChapterPreflightProbeTest`，Q12）。
+
+**Side effect（正面）。** 本轮顺带**在真机上验证了上一轮的自动指纹**：
+只改了 `StyleComputer.kt` 一处，指纹自动从 `0x5cd01516` 变到 `0x4dc7c35a`（人没碰任何常量），
+落盘日志 `pagination decode null (layout-version have=4dc7c35a/sha256:4dc7c35a8a11)`
+⇒ 旧分页表被拒、全章重排，正是设计意图。
+
+**Pending / to verify on device.** 代码块恢复按版心折行、换行结构保留、不再横向溢出被裁。
+
 ## 2026-10-01 — 分页缓存失效自动化：`LAYOUT_VERSION` 改为引擎源码指纹，人不再需要记得 bump
 
 **Issue.** 分页磁盘表的 key 是 `LayoutParamKey.hash()`，只含**版面参数**、不含排版算法版本。

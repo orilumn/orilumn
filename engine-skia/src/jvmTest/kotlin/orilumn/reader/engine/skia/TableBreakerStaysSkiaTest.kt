@@ -105,7 +105,7 @@ class TableBreakerStaysSkiaTest {
     }
 
     @Test
-    fun `拨开正文开关后表格列宽仍等于 Skia 侧`() {
+    fun `回退到 Skia 与默认自建两侧，表格列宽都相同`() {
         // 真书形态：auto 分列表 + 长 Latin/URL 单元格（正是被放大 2 倍的那类内容）。
         val html = """
             <html><body><div class="tbl"><div><table>
@@ -117,15 +117,18 @@ class TableBreakerStaysSkiaTest {
         val ua = "table { table-layout: auto; border-collapse: collapse; border-spacing: 0; }" +
             ".tbl table td { padding: .5em; border: 1px solid #c0c0c0; }"
 
+        // 两侧都要显式写，不靠默认值 —— 默认已是自建，复位回的是 on 不是 Skia。
         AbSwitch.resetForTest()
+        AbSwitch.apply("inhouseBreak=0")
         val skiaCols = cellColumnWidths(html, ua)
         assertTrue("应至少有 1 列", skiaCols.isNotEmpty())
         AbSwitch.apply("inhouseBreak=1")
         try {
             val inhouseCols = cellColumnWidths(html, ua)
             assertEquals(
-                "正文开关打开后表格列宽必须与 Skia 侧完全相同：重路径经 `autoColumnMeasurePinnedToSkia` " +
-                    "已把 tableCellPref 的度量钉回 Skia，禁止把表格列宽也跟着变体走。",
+                "表格列宽必须与 Skia 侧完全相同：重路径经 `autoColumnMeasurePinnedToSkia` " +
+                    "已把 tableCellPref 的度量钉回 Skia，禁止把表格列宽也跟着变体走。" +
+                    "（变体默认已是自建，故本断言现在是「默认侧 vs 回退侧」而不是「开 vs 关」）",
                 skiaCols,
                 inhouseCols,
             )

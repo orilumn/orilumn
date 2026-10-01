@@ -26,12 +26,30 @@ import org.junit.Test
 class BodyParagraphBreakerWiringTest {
 
     @Test
-    fun `factory returns Skia by default`() {
+    fun `factory returns inhouse by default and skia when switched off`() {
         AbSwitch.resetForTest()
         try {
             assertEquals(
-                "默认（未传 ab extra）必须是 Skia —— 这是生产行为，也是回退阀的静止位",
+                "默认（未传 ab extra）必须是自建断行器 —— 2026-10-01 起它是生产主路径",
+                InhouseParagraphBreaker::class.java,
+                bodyParagraphBreaker(0f)::class.java,
+            )
+            // 回退阀：默认 on 之后，「关」必须真的关得掉。
+            // 这一条是本类存在的**全部**理由 —— 默认 off 时回退靠「什么都不做」，
+            // 默认 on 之后回退必须有一条显式通路（`inhouseBreak=0`）。
+            // 若 [orilumn.reader.engine.AbSwitch.apply] 只认 "1"/"on" 而不认 "0"/"off"，
+            // 这里会红，而红的就是「真机出问题后没有运行时手段退回」这个真实风险。
+            AbSwitch.apply("inhouseBreak=0")
+            assertEquals(
+                "ab=\"inhouseBreak=0\" 必须退回 Skia，否则回退阀在真机上不可用",
                 SkiaParagraphBreaker::class.java,
+                bodyParagraphBreaker(0f)::class.java,
+            )
+            // 再开回来，且必须压得住先前的「关」（三态表：显式开 > 显式关 > 默认开）。
+            AbSwitch.apply("inhouseBreak=1")
+            assertEquals(
+                "显式 1 必须能覆盖先前的显式 0（否则同一 intent 里重复写无法收敛）",
+                InhouseParagraphBreaker::class.java,
                 bodyParagraphBreaker(0f)::class.java,
             )
         } finally {

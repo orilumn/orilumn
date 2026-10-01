@@ -24,6 +24,15 @@ import orilumn.reader.engine.laying.ParagraphBreaker
  * 见 [AbSwitch.inhouseBreak] 与 [orilumn.reader.engine.text.LayoutParamKey.inhouseBreak]：
  * 变体必须进缓存键，否则拨开关会命中按另一侧断点算出的旧磁盘表。
  *
+ * ## 变体默认是自建（2026-10-01）
+ *
+ * 接线时默认 off（Skia 生产、自建仅供 `ab="inhouseBreak=1"` 量测）。现改为默认 on：
+ * 装包即跑自建断行器，Skia 侧降级为**回退阀**（真机 `--es ab "inhouseBreak=0"` 退回）。
+ * 本函数**不需要改动一行** —— 默认值在 [AbSwitch] 里，真值单一，
+ * 键（[orilumn.reader.engine.text.LayoutParamKey.fromProfile] 的默认形参）也读同一处，
+ * 于是「键按哪侧算」与「实际按哪侧断行」不可能漂移。
+ * 这正是当初把它收成单源工厂的原因：**换默认只改一个常量，不改三处接线。**
+ *
  * ## 表格不在此列（TODO Q6）—— 本函数只管「断行」
  *
  * 表格 auto 分列的**列宽度量**刻意留在 Skia：轻路径用恒 Skia 的

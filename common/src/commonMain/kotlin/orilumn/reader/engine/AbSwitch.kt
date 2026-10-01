@@ -74,18 +74,42 @@ object AbSwitch {
     @Volatile
     var warmupBlocks: Int = 0
 
-    /** 已启用的具名开关（供后续优化用；具名而非布尔，是为了日志能自解释）。 */
+    /**
+     * **显式**开启的具名开关（`ab="k=1"`）。具名而非布尔，是为了日志能自解释。
+     *
+     * 显式开集 / 显式关集 / 默认开集是**三张表**而非一张，原因见 [isOn]：默认开之后
+     * 「关」必须能压过「默认开」，单一 `on` 集合表达不了这个优先级。
+     */
     private val on = mutableSetOf<String>()
 
-    fun isOn(name: String): Boolean = synchronized(on) { name in on }
+    /** 显式关闭的具名开关（`ab="k=0"`）。优先级高于 [DEFAULT_ON_SWITCHES]。 */
+    private val off = mutableSetOf<String>()
 
     /**
-     * 清空具名开关与 [warmupBlocks]，回到生产默认。
+     * 该具名开关当前是否生效：**显式关 > 显式开 > 默认开**。
+     *
+     * 注意是「显式关」压过「默认开」而非反过来 —— 反了的话
+     * `ab="inhouseBreak=0"` 会被默认值翻回 on，回退阀就是个摆设。
+     */
+    fun isOn(name: String): Boolean = synchronized(on) {
+        when (name) {
+            in off -> false
+            in on -> true
+            else -> name in DEFAULT_ON_SWITCHES
+        }
+    }
+
+    /**
+     * 清空显式开/关集与 [warmupBlocks]，**回到各自默认值**（注意不是「全关」）。
      *
      * **只给测试用**，但不是可有可无的：具名开关此前**只有「加」没有「减」**，
      * 于是一旦某个用例 `apply("inhouseBreak=1")`，同 JVM 里后续**每一个**走
      * `LayoutParamKey.fromProfile` 默认值的用例都会被拖进自建变体 ——
      * 失败会以「与本次改动无关」的面貌出现在别的用例上，极难归因。
+     *
+     * 「回到默认值」而非「全关」是有意的：`inhouseBreak` 默认已是 on，若这里清成全关，
+     * 依赖 `resetForTest()` 的用例就会拿到与生产**不同**的静止位，
+     * 「复位后与生产一致」这个前提被破坏，测试就测了个别的世界。
      *
      * 生产路径**不要**调它：开关的语义是「进程启动时由 intent 决定、之后不变」，
      * 运行期改动会让已落盘的磁盘表与当前布局不同源（虽然变体进 `paramHash` 能兜住缓存，
@@ -93,7 +117,7 @@ object AbSwitch {
      */
     fun resetForTest() {
         warmupBlocks = 0
-        synchronized(on) { on.clear() }
+        synchronized(on) { on.clear(); off.clear() }
     }
 
     /**
@@ -115,14 +139,20 @@ object AbSwitch {
     /**
      * S3 接线开关：**自建断行器**（`engine-skia` 的 `InhouseParagraphBreaker`）接管正文断行。
      *
-     * ## 默认 off = 生产行为不变
+     * ## **默认 on = 生产行为就是自建断行器**（2026-10-01 改，见下）
      *
-     * off 时三处正文接线点全部取 `SkiaParagraphBreaker`，与接线前**逐字节同构**。
-     * 所以这个开关是纯回退阀：出问题关掉即可，无需回滚安装包。
+     * 原本默认 off（Skia 为生产行为，自建仅供 `ab="inhouseBreak=1"` 量测）。现在**默认 on**：
+     * 装上包跑的就是自建断行器，`[orilumn.reader.engine.skia.InhouseParagraphBreaker]`
+     * 从「只在开关内可达」变成生产主路径。Skia 侧保留为**回退阀**，
+     * 真机上一条命令退回：`adb shell am start ... --es ab "inhouseBreak=0"`。
      *
-     * ## 为什么它必须进 `LayoutParamKey`（接线时最容易漏的一步）
+     * 为什么改默认值时**必须同时**给 [apply] 补「关」的方向：默认 off 时
+     * 「关」等于默认、不写就够用；默认 on 之后不补，`ab="inhouseBreak=0"` 会被静默忽略，
+     * 回退阀当场变成单向门 —— 而它存在的全部理由就是「不用回滚安装包」。
      *
-     * 断行器换了 ⇒ 断点变了 ⇒ 页切点变了。但 [orilumn.reader.engine.text.LayoutParamKey] 的
+     * ## 变体仍必须进 `LayoutParamKey`
+     *
+     * 断行器换了 ⇒ 断点变了 ⇒ 页切点变了。而 [orilumn.reader.engine.text.LayoutParamKey] 的
      * `paramHash` 只由排版参数算出，**不含断行器身份**（同 T2f 查清的坑：`LayoutParamKey`
      * 也不含禁则表身份，改断行规则 `paramHash` 不变）。若开关不进键，真机上一拨开关就会
      * **命中按 Skia 断点算出的旧磁盘表**，量到「开关没生效」的假零差异。
@@ -130,8 +160,7 @@ object AbSwitch {
      * 18 个调用点零改动、单一读取点。
      *
      * 正因为变体进了 `paramHash`，**这次接线不需要 bump `LAYOUT_VERSION`** ——
-     * 键已能精确区分两侧；off 时复用旧表是正确的（输出逐字节相同），
-     * bump 反而白白作废全用户缓存。
+     * 键已能精确区分两侧，两侧各自独立缓存、回退时能各自命中自己那份。
      *
      * ## 表格侧不在本开关内（TODO Q6）—— 但**不只**因为 `tableBreaker` 恒为 Skia
      *
@@ -145,6 +174,12 @@ object AbSwitch {
      * （实测 Latin/URL 高估 2.0~2.6 倍），列宽经 `w[i]=pref[i]` 直通 ⇒ Latin 列宽翻倍。
      * 故接线必须额外用 `engine-skia` 的 `heavyPathBreaker` 把**度量方法**钉回 Skia，
      * 只让**断行**跟着开关走。见该函数 KDoc 与 `TableBreakerStaysSkiaTest`。
+     *
+     * ## 已知未验证项（默认 on 之后这些都进了生产面）
+     *
+     * 三道闸门（行数公平性 ≥95%、总行数比值 ∈[0.95,1.05]、章级 prepare ≤1.5x）
+     * 与真机 A/B **尚未实测**。当前判断「可上线」依据的是 1110 个单测全绿 +
+     * 默认侧逐值一致的锁，**不是**闸门数据。真机一旦量到闸门不达标，先 `inhouseBreak=0` 退回。
      */
     fun inhouseBreak(): Boolean = isOn("inhouseBreak")
 
@@ -169,6 +204,16 @@ object AbSwitch {
     /**
      * 应用一串 `k=v` 形式的对（`warm=3`），解析失败或未识别的键**静默忽略**
      * ——测量设施不该有能力把 App 搞崩。
+     *
+     * ## 具名开关两个方向都能写（`inhouseBreak` 默认 on 之后才补的）
+     *
+     * 原实现只有「加」：`ab="xxx=1"`。默认侧是 off 时这够用，因为关就是默认。
+     * 但 `inhouseBreak` 改成**默认 on** 之后，「关」必须可达，否则
+     * `ab="inhouseBreak=0"` 会被静默忽略 —— 真机上发现自建断行器有问题时，
+     * **没有运行时手段退回 Skia**，只能重装包。而这个开关存在的全部理由就是
+     * 「出问题关掉即可，无需回滚安装包」。单向门等于没有门。
+     *
+     * 语法：`=1` / `=on` 开，`=0` / `=off` 关，缺省值按 [DEFAULT_ON_SWITCHES]。
      */
     fun apply(spec: String?) {
         if (spec.isNullOrBlank()) return
@@ -178,14 +223,36 @@ object AbSwitch {
             val (k, v) = kv[0].trim() to kv[1].trim()
             when (k) {
                 "warm" -> warmupBlocks = v.toIntOrNull()?.coerceIn(0, 64) ?: 0
-                else -> if (v == "1" || v == "on") synchronized(on) { on += k }
+                else -> synchronized(on) {
+                    when (v) {
+                        "1", "on" -> { on += k; off -= k }
+                        "0", "off" -> { off += k; on -= k }
+                        // 其它值静默忽略：测量设施不该有能力把 App 搞崩。
+                    }
+                }
             }
         }
     }
 
-    /** 供日志自解释：当前变体描述，`none` 表示生产默认。 */
+    /**
+     * **默认开启**的具名开关（缺省即为 on，不传 extra 也生效）。
+     *
+     * 取的是 [isOn] 这一处的真值，而不是让各调用点各自硬编码一个 `true`：
+     * 真机上回退的唯一手段就是往 [apply] 写 `k=0`，若默认值在多处各写一份，
+     * 一旦漂移就会出现「缓存键按一侧算、实际断行按另一侧跑」的最坏组合 ——
+     * 那种错**不会报错**，只会安静地量出假结论（§T2f 查清的正是这类坑）。
+     */
+    private val DEFAULT_ON_SWITCHES = setOf("inhouseBreak")
+
+    /**
+     * 供日志自解释：当前**生效**的开关描述。
+     *
+     * 必须报「生效值」而不是「显式开集」——`inhouseBreak` 默认 on 且大多数时候
+     * 没人显式写过它，若只报显式开集，真机日志会显示 `ab=none` 而实际跑的是自建断行器，
+     * 正好在最需要归因的时候给出误导性的一行。
+     */
     fun describe(): String {
-        val flags = synchronized(on) { on.sorted() }
+        val flags = synchronized(on) { (DEFAULT_ON_SWITCHES + on).filter { isOn(it) }.sorted() }
         return (flags + if (warmupBlocks != 0) listOf("warm=$warmupBlocks") else emptyList())
             .takeIf { it.isNotEmpty() }?.joinToString(",") ?: "none"
     }

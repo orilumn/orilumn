@@ -13,21 +13,27 @@ import orilumn.reader.engine.laying.LayoutBox
 import orilumn.reader.engine.laying.NormalFlowLayout
 
 /**
- * S3 上线闸：**默认侧必须与接线前逐值一致**。
+ * S3 回退锁：**回退侧（Skia）必须与接线前逐值一致**。
  *
- * ## 这是唯一决定「能不能上线」的性质
+ * ## 默认变体改成 on 之后，这条锁守的是什么
  *
- * S3 的回退阀是运行期开关，默认 off ⇒ 自建断行器在默认配置下**不可达**。但这句话有个
- * 前提：默认侧走的确实还是 Skia 的行为。而 `heavyPathBreaker` 在**默认侧也生效** ——
- * 它把 Skia 断行器包成一个匿名对象转发（度量方法钉 Skia + 断行三重载转发）。
- * 这个包装一旦哪里没对上，「关掉开关回到原样」就不成立，出了事回退阀救不了。
+ * 接线时默认是 Skia，于是有「默认侧 = 生产 = 与接线前逐字节同构」这条性质可守。
+ * 现在（2026-10-01）默认改成自建断行器，**那条性质整体消失** ——
+ * 默认侧换引擎了，本来就不该与接线前一致。
+ *
+ * 换成守**回退侧**：`ab="inhouseBreak=0"` 时走的那条路，必须与接线前的裸
+ * `SkiaParagraphBreaker` 逐值相同。理由与之前一样、只是换了主语 ——
+ * 回退阀的全部价值在于「出事时关掉就回到已知状态」；若回退侧不是逐值等于
+ * 接线前，那么真机上一关开关就落到一个**从未被验证过的第三种行为**上，
+ * 「关掉即可」这句话是假的。
  *
  * ## 为什么必须是锁而不是论证
  *
- * 本仓已有两次同类教训，都是「绿灯来自错误原因」：量 `table` 盒宽（被流撑满、与列宽无关）、
- * 在测试里重写生产接线（改 `:177` 照样绿）。推理在这件事上不可信。
+ * 本仓已有三次同类教训，都是「绿灯来自错误原因」：量 `table` 盒宽（被流撑满、与列宽无关）、
+ * 在测试里重写生产接线（改 `:177` 照样绿）、语料用汉字换面段（advance 在任何字族都是 1em，
+ * 丢掉 `fontRuns` 测不出来）。推理在这件事上不可信。
  *
- * 判据：**同一份 HTML × 多个版心**，生产接线（`heavyPathBreaker`，开关关）
+ * 判据：**同一份 HTML × 多个版心**，回退接线（`heavyPathBreaker`，`inhouseBreak=0`）
  * 与接线前的裸 `SkiaParagraphBreaker` 产出的断行区间、绘制行、表格列宽**逐值相同**。
  */
 class DefaultSideIsUnchangedTest {
@@ -149,20 +155,28 @@ class DefaultSideIsUnchangedTest {
         }
 
     @Test
-    fun `默认侧：生产接线与接线前的裸 Skia 断行器逐值一致`() {
+    fun `回退侧：inhouseBreak=0 时与接线前的裸 Skia 断行器逐值一致`() {
         AbSwitch.resetForTest()
         try {
+            // 前提：默认变体必须是自建，否则「回退」这个词指的不是本测试想测的那条路。
             assertEquals(
-                "开关默认必须为 off（回退阀的静止位）；AbSwitch 状态与前提不符",
-                false, AbSwitch.inhouseBreak(),
+                "默认变体必须是自建（若已改回 Skia，本类应改名并改判据）",
+                InhouseParagraphBreaker::class.java,
+                bodyParagraphBreaker(0f)::class.java,
+            )
+            AbSwitch.apply("inhouseBreak=0")
+            assertEquals(
+                "回退侧不可达则本类测的是空气：inhouseBreak=0 必须真的切到 Skia",
+                SkiaParagraphBreaker::class.java,
+                bodyParagraphBreaker(0f)::class.java,
             )
             val before = SkiaParagraphBreaker(0f)
             val after = heavyPathBreaker(0f)
             for (html in listOf(bodyHtml, tableHtml)) {
                 for (w in intArrayOf(220, 320, 400, 560, 700, 900, 1200, 1600, 1740)) {
                     assertEquals(
-                        "版心=$w 默认侧必须与接线前逐值相同（断行区间/绘制行/表格列宽全等）。" +
-                            "不等则「关掉开关回到原样」不成立，回退阀失效，不能上线。",
+                        "版心=$w 回退侧必须与接线前逐值相同（断行区间/绘制行/表格列宽全等）。" +
+                            "不等则真机上一关开关就落到一个从未验证过的行为上，「关掉即可」不成立。",
                         fingerprint(html, w, before),
                         fingerprint(html, w, after),
                     )

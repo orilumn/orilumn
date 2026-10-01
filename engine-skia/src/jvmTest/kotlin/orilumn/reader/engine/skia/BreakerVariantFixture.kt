@@ -23,16 +23,22 @@ import orilumn.reader.engine.laying.ParagraphBreaker
  * 以及 `versionCode` 写死导致构建号作废防线从未真正发生（教训 28）。
  * 一个「两侧都跑」但**两侧其实同一个实现**的锁，比没有锁更坏 —— 它给出虚假的绿灯。
  * 故每次进块都断言实现类型与标称变体一致。
+ *
+ * ## 为什么两侧都写「显式值」而不靠默认值（默认改成 on 之后踩到的）
+ *
+ * 变体默认从 off 改成 on 之后，「skia 那一臂」不能只靠 `resetForTest()` 拿 ——
+ * reset 现在回的是**各自默认值**（= on），于是 skia 臂实际拿到的是自建，
+ * 整把 Parameterized 锁的 skia 臂全部退化成「自建跑两遍」，静默失去对照。
+ * 故 [applyBreakerVariant] 对两侧**都写显式值**：`inhouseBreak=1` / `inhouseBreak=0`。
+ * 这与「测试不依赖全局默认」是同一条纪律。
  */
 internal fun forEachBreakerVariant(block: (ParagraphBreaker, String) -> Unit) {
-    for ((label, on) in breakerVariants()) {
-        AbSwitch.resetForTest()
-        if (on) AbSwitch.apply("inhouseBreak=1")
+    for (label in breakerVariants().map { it.first }) {
         try {
-            guardVariant(label, on)
+            applyBreakerVariant(label)
             block(bodyParagraphBreaker(letterSpacingEm = 0f), label)
         } finally {
-            // 具名开关只有「加」没有「减」，不复位会污染同 JVM 里后续每个变体敏感的用例。
+            // 复位回默认（不是回 skia）：否则污染同 JVM 里后续每个变体敏感的用例。
             AbSwitch.resetForTest()
         }
     }
@@ -65,11 +71,15 @@ internal fun guardVariant(label: String, on: Boolean) {
  */
 internal fun breakerVariantParams(): List<Array<String>> = breakerVariants().map { arrayOf(it.first) }
 
-/** [breakerVariantParams] 的配套：把标称变体拨进运行期开关，并立刻验它生效。 */
+/**
+ * [breakerVariantParams] 的配套：把标称变体**显式**拨进运行期开关，并立刻验它生效。
+ *
+ * 两侧都写显式值，不依赖默认（默认已是 on，见类 KDoc 最后一节）。
+ */
 internal fun applyBreakerVariant(label: String) {
     AbSwitch.resetForTest()
     val on = breakerVariants().first { it.first == label }.second
-    if (on) AbSwitch.apply("inhouseBreak=1")
+    AbSwitch.apply(if (on) "inhouseBreak=1" else "inhouseBreak=0")
     guardVariant(label, on)
 }
 

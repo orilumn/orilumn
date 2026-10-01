@@ -68,34 +68,57 @@ class LayoutParamKeyTest {
     }
 
     /**
-     * 默认值必须**跟着运行期开关**走（`fromProfile` 的形参默认 = `AbSwitch.inhouseBreak()`），
-     * 否则 18 个调用点会各自钉死 `false`，真机拨 `ab="inhouseBreak=1"` 时
-     * 布局换了、缓存键没换 ⇒ 又一次假零差异。
-     */
-    @Test
+ * 默认值必须**跟着运行期开关**走（`fromProfile` 的形参默认 = `AbSwitch.inhouseBreak()`），
+ * 否则 18 个调用点会各自钉死一个常量，真机拨 `ab="inhouseBreak=0"` 时
+ * 布局换了、缓存键没换 ⇒ 又一次假零差异。
+ *
+ * 变体默认已是 on（2026-10-01），故「默认侧」= 自建侧；Skia 侧要用**显式关**去取。
+ */
+@Test
     fun `fromProfile default follows the runtime AbSwitch`() {
         val p = TypographicProfile.build(ReaderSettings.DEFAULT)
-        val offBefore = LayoutParamKey.fromProfile(p, 1920, 2400).hash()
+        orilumn.reader.engine.AbSwitch.resetForTest()
+        val defaultHash = LayoutParamKey.fromProfile(p, 1920, 2400).hash()
         val onExplicit = LayoutParamKey.fromProfile(p, 1920, 2400, inhouseBreak = true).hash()
+        val offExplicit = LayoutParamKey.fromProfile(p, 1920, 2400, inhouseBreak = false).hash()
         try {
-            orilumn.reader.engine.AbSwitch.apply("inhouseBreak=1")
-            assertTrue(orilumn.reader.engine.AbSwitch.inhouseBreak())
+            // 默认 = 自建（复位回的是各自默认值，不是全关）。
             assertEquals(
-                "开关打开时，无参调用必须产出与显式 true 相同的键",
+                "默认无参调用必须产出与显式 true 相同的键（默认变体为自建）",
+                onExplicit, defaultHash,
+            )
+            // 显式关：键必须跟着换，否则真机上一拨开关就命中另一侧的旧磁盘表。
+            orilumn.reader.engine.AbSwitch.apply("inhouseBreak=0")
+            assertTrue(
+                "ab=\"inhouseBreak=0\" 必须真的关得掉（回退阀的静态前提）",
+                !orilumn.reader.engine.AbSwitch.inhouseBreak(),
+            )
+            assertEquals(
+                "开关关闭时，无参调用必须产出与显式 false 相同的键",
+                offExplicit, LayoutParamKey.fromProfile(p, 1920, 2400).hash(),
+            )
+            // 显式开必须能覆盖先前的显式关（三态表优先级：显式开 > 显式关 > 默认开）。
+            orilumn.reader.engine.AbSwitch.apply("inhouseBreak=1")
+            assertEquals(
+                "显式 1 必须能覆盖显式 0，且键随之回到自建侧",
                 onExplicit, LayoutParamKey.fromProfile(p, 1920, 2400).hash(),
             )
         } finally {
-            // 必须复位：具名开关只有「加」没有「减」，不复位会污染同 JVM 里后续
-            // 每一个走 fromProfile 默认值的用例（失败面貌与本次改动无关）。
+            // 必须复位：不复位会污染同 JVM 里后续每一个走 fromProfile 默认值的用例
+            //（失败面貌与本次改动无关）。
             orilumn.reader.engine.AbSwitch.resetForTest()
         }
-        assertEquals("none", orilumn.reader.engine.AbSwitch.describe())
+        // 复位 = 回默认（= 自建），**不是**回全关 —— 后者会让测试拿到与生产不同的静止位。
+        assertEquals(
+            "复位后必须回到默认变体（自建），而不是全关",
+            "inhouseBreak", orilumn.reader.engine.AbSwitch.describe(),
+        )
         assertEquals(
             "复位后无参调用必须回到默认侧的键",
-            offBefore, LayoutParamKey.fromProfile(p, 1920, 2400).hash(),
+            defaultHash, LayoutParamKey.fromProfile(p, 1920, 2400).hash(),
         )
         // 显式 false 仍是权威（不依赖全局状态）。
-        assertEquals(offBefore, LayoutParamKey.fromProfile(p, 1920, 2400, inhouseBreak = false).hash())
+        assertEquals(offExplicit, LayoutParamKey.fromProfile(p, 1920, 2400, inhouseBreak = false).hash())
     }
 
     @Test
@@ -139,20 +162,27 @@ class LayoutParamKeyTest {
      * 导致每字多喂 4 个零字节。这个坑本身也说明「手写喂入序」的参考实现必须逐字节对照着写。）
      */
     @Test
-    fun `default side param hash is byte identical to the pre-S3 schema`() {
+    fun `回退侧（inhouseBreak=false）param hash 逐字节等于接线前 schema`() {
+        // **必须显式写 `inhouseBreak = false`**，不能靠字段默认值：
+        // 变体默认已改成 on（2026-10-01），靠默认值的话本锁会跟着一起漂，
+        // 于是「接线前历史值」这条金标准就变成了自建侧的值 —— 锁还在，但它守着的东西变了。
+        //
+        // 这条锁现在守的是**回退侧**（真机 `inhouseBreak=0` 那条路）：回退必须精确落回
+        // 接线前的字节流，否则用户从自建退回 Skia 时会拿到一份从未存在过的缓存键。
         val base = LayoutParamKey(
             bodyPx = 18.5f, lineSpacing = 1.5f, firstLineIndentEm = 2f, letterSpacingEm = 0f,
             paragraphSpacingPx = 28, paragraphGapScale = 1f,
             fontBody = "霞鹜文楷", fontTitle = "LXGW WenKai", fontCode = "",
             useOriginalStyle = false, contentW = 1080, contentH = 1920, userCssHash = 123456789,
+            inhouseBreak = false,
         )
         assertEquals(
-            "默认侧 paramHash 必须等于接线前历史值（908642712），否则老用户分页缓存全量作废",
+            "回退侧 paramHash 必须等于接线前历史值（908642712），否则回退会落到一份不存在的键上",
             908642712L,
             base.hash() and 0xFFFFFFFFL,
         )
         assertEquals(
-            "默认侧必须与显式 false 构造出的键逐字节相同",
+            "回退侧必须与显式 false 构造出的键逐字节相同",
             base.hash(),
             base.copy(inhouseBreak = false).hash(),
         )

@@ -32,16 +32,21 @@ data class LayoutParamKey(
     val contentH: Int,
     val userCssHash: Int,
     /**
-     * 断行器变体（`false` = Skia `Paragraph`，生产默认；`true` = 自建断行器，S3 接线开关）。
+     * 断行器变体（`true` = 自建断行器，**默认**；`false` = Skia `Paragraph`，回退阀）。
      *
      * **必须进键，否则开关在真机上量不出效果**：换断行器 ⇒ 换断点 ⇒ 换页切点，
      * 而键不含它就会命中按另一侧断点算出的旧磁盘表，读到「开关没生效」的假零差异
      * （与本键不含禁则表身份是同一类坑，见 `docs/自建断行引擎-测试计划.md` §T2f / 教训 28）。
      *
      * 它进键之后，`LAYOUT_VERSION` 就**不必**为 S3 接线而 bump：键已能精确区分两侧，
-     * 默认侧复用旧表是正确的（输出逐字节相同）。
+     * 两侧各自独立缓存，回退时能各自命中自己那份。
+     *
+     * 默认 `true`（2026-10-01，自建断行器成为生产主路径）。**注意这个默认值只作用于
+     * 直接构造本 data class 的调用点**；生产走 [fromProfile]，其默认形参读
+     * [orilumn.reader.engine.AbSwitch.inhouseBreak] —— 真值单一在开关那边。
+     * 两处默认值必须一致，否则会出现「键按一侧算、实际按另一侧跑」的静默错误。
      */
-    val inhouseBreak: Boolean = false,
+    val inhouseBreak: Boolean = true,
 ) {
     /** Deterministic 64-bit hash over all layout-affecting fields. */
     fun hash(): Long {

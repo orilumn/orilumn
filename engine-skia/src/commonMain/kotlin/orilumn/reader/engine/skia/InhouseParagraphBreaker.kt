@@ -46,7 +46,7 @@ class InhouseParagraphBreaker(
     /**
      * S7：按 `tag` 分流额外的断点源。
      *
-     * - **代码语境**（`pre`/`code`/`kbd`/`samp`/`var`/`tt`）→ [CodeIdentifierBreakSource]
+     * - **代码语境**（`pre`/`code`/`kbd`/`samp`/`tt`；判据见 CODE_TAGS 的逐条核对）→ [CodeIdentifierBreakSource]
      *   （分隔符后 + 驼峰交界）。**不给**音节断词：代码标识符按音节断是错的（见该类 KDoc）。
      * - **普通段落** → [EnglishHyphenationSource]（K-L 音节断点，R2 的落点）。
      *
@@ -63,27 +63,41 @@ class InhouseParagraphBreaker(
 
     private companion object {
         /**
-         * **代码/技术文本语境**的 HTML tag（CSS2.1 §16 与 HTML5 里 UA 默认 `font-family: monospace`
-         * 的那一组），命中则注入 [CodeIdentifierBreakSource] 而非音节断词。
+         * **代码/技术文本语境**的 HTML tag，命中则注入 [CodeIdentifierBreakSource] 而非音节断词。
+         *
+         * **判据 = 本仓 `ua.css` 实际给它 `font-family: monospace`**，逐条核对过：
+         * `code, kbd, samp, tt, pre { font-family: monospace; }`（ua.css:61）。
          *
          * - `code` 代码片段 —— 语料 **26229** 处（最常见）
          * - `pre` 预格式化块 —— 语料 **2021** 处
          * - `kbd` 键盘输入 —— 语料 14 处
-         * - `tt` 老式打字机文本（HTML2）、`samp` 程序输出、`var` 程序变量、`data` 机器可读数据
-         *   —— 本仓语料 0 处，但**书商转换器爱用老标签**，同样要进。
+         * - `tt` 老式打字机文本、`samp` 程序输出 —— 本仓语料 0 处，
+         *   但**书商转换器爱用老标签**，同样要进。
          *
-         * 判据是「**浏览器 UA 默认给它 monospace**」而不是「语料里出现得多」——
-         * 零出现的 `tt`/`samp`/`var` 同样要进，书商转换器爱用老标签。
+         * ## 刻意排除的（**第一版凭「浏览器也这么定」印象加错，逐条核对 ua.css 后删掉**）
          *
-         * **刻意排除** `acronym` / `abbr`：语料里 585 / 39 处，但它们是**术语缩写**而非
-         * 代码（浏览器也只给 `abbr` 加虚线下划线，不给 monospace）。把缩写当代码会
-         * 禁掉音节断词、且给 `HTTP` 这类词强加驼峰规则，属误判。
+         * - `var` —— ua.css:40 给的是 `dfn, cite, var { font-style: italic }`，
+         *   **斜体而非等宽**。它装的是数学变量名（`width`），按音节断词才对；
+         *   给它强加驼峰规则（`maxWidth` 当标识符）是误判。
+         * - `data` —— ua.css 里**没有**任何规则，凭想象加的。
+         * - `acronym` / `abbr` —— 语料 585 / 39 处，但是**术语缩写**而非代码
+         *   （浏览器也只给 `abbr` 加虚线下划线）。误判会给 `HTTP` 这类词禁掉音节断词。
          *
-         * **判据的另一面**：`class="language-*"` / `class="highlight"` 这类**类名**标记
-         * 判不出来（[ParagraphBreaker.breakLines] 签名被 S2 冻结，没有 class 通道）。
-         * 实测语料里 `code`+`pre` 已覆盖绝大部分代码块，剩下的漏网形态已登记 docs 29g。
+         * ## `pre` 的 white-space 是 `pre-wrap` 不是 `pre`（有意偏离浏览器）
+         *
+         * ua.css:32 写的是 `pre { white-space: pre-wrap; }`。浏览器标准是 `pre`（长行不折、
+         * 靠横向滚动），本项目改成 `pre-wrap`（长行仍按版心折行）——分页阅读器没有横向滚动条，
+         * `pre` 语义是「保留格式」而非「禁止折行」，一行 200 字符的代码必须能折否则被裁掉。
+         * **⇒ `pre-wrap` 仍满足 `WhiteSpaceNormalize.wraps() == true` ⇒ `pre` 的断行器会被调用，
+         * 本 source 对 `pre` 有效**（曾因误以为「本仓没有 UA 样式表」而给出同一结论，理由是错的）。
+         *
+         * ## 判据的另一面：`class` 通道不存在
+         *
+         * `class="language-*"` / `class="highlight"` 这类**类名**标记判不出来
+         * （[ParagraphBreaker.breakLines] 签名被 S2 冻结，没有 class 形参）。
+         * 实测语料里 `code`+`pre` 已覆盖 28000+ 处代码块，剩下的漏网形态已登记 docs 29g。
          */
-        val CODE_TAGS = setOf("pre", "code", "kbd", "samp", "var", "tt", "data")
+        val CODE_TAGS = setOf("pre", "code", "kbd", "samp", "tt")
     }
 
     override fun breakLines(

@@ -173,8 +173,10 @@ class BoxChapterLayouter(
         val styleMap = engine.compute(markup)
         val boxLayouter = BoxLayouter(
             profile.bodyPx,
-            // Q1-c：不再双引擎——重排断行统一走 engine-skia SkParagraph 实现。
-            orilumn.reader.engine.skia.SkiaParagraphBreaker(profile.letterSpacingEm),
+            // Q1-c：不再双引擎——重排断行统一走 engine-skia 实现。
+            // S3：变体由 `bodyParagraphBreaker` 单源决定（默认 Skia = 接线前逐字节同构，
+            // `ab="inhouseBreak=1"` 切自建断行器；变体进 paramHash 故拨开关即换缓存键）。
+            orilumn.reader.engine.skia.bodyParagraphBreaker(profile.letterSpacingEm),
         )
         // Heavy: full-chapter line shaping (real skia break per leaf). Only needed for line-level
         // pagination — small-chapter foreground and large-chapter background canonical. The display gate
@@ -2614,7 +2616,8 @@ class LightPrepare(
             }
         }
         if (!anyFloat) return List(n) { null } to List(n) { null }
-        val breaker = orilumn.reader.engine.skia.SkiaParagraphBreaker(profile.letterSpacingEm)
+        // S3：与重路径同一单源（浮动 lead 的宽度决定其宿主块宽，必须与正文同变体）。
+        val breaker = orilumn.reader.engine.skia.bodyParagraphBreaker(profile.letterSpacingEm)
         val pending = NormalFlowLayout.FloatPending()
         val out = ArrayList<orilumn.reader.engine.laying.FloatLead?>(n)
         val widths = ArrayList<Int?>(n)
@@ -2977,6 +2980,12 @@ class LightPrepare(
     /**
      * auto 分列表度量用断行器（与塑形/绘制同 profile：同 [TypographicProfile.letterSpacingEm]、
      * 同共用字库），首次用时构造；量画同理，绝不另起一套度量。
+     *
+     * **S3 刻意不接 `bodyParagraphBreaker`，恒为 Skia**（TODO Q6）：T2f 实测 13 本语料 49 张表
+     * 全落在 auto 分列三段式的 `avail>=totalMax` 段 —— 该段 `w[i] = pref[i]`，
+     * min-content 一次都没被读过，故表格这条线对断行器变体零响应。留在 Skia 有两个好处：
+     * A/B 只隔离正文变化、表格列宽在两侧完全相同，便于归因。
+     * 要激活见 TODO Q6（需 `table-layout: fixed` / 指定列宽 / 更多列 / 更窄版心之一）。
      */
     private val tableBreaker by lazy { orilumn.reader.engine.skia.SkiaParagraphBreaker(profile.letterSpacingEm) }
 

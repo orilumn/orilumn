@@ -77,7 +77,24 @@ object AbSwitch {
     /** 已启用的具名开关（供后续优化用；具名而非布尔，是为了日志能自解释）。 */
     private val on = mutableSetOf<String>()
 
-    fun isOn(name: String): Boolean = name in on
+    fun isOn(name: String): Boolean = synchronized(on) { name in on }
+
+    /**
+     * 清空具名开关与 [warmupBlocks]，回到生产默认。
+     *
+     * **只给测试用**，但不是可有可无的：具名开关此前**只有「加」没有「减」**，
+     * 于是一旦某个用例 `apply("inhouseBreak=1")`，同 JVM 里后续**每一个**走
+     * `LayoutParamKey.fromProfile` 默认值的用例都会被拖进自建变体 ——
+     * 失败会以「与本次改动无关」的面貌出现在别的用例上，极难归因。
+     *
+     * 生产路径**不要**调它：开关的语义是「进程启动时由 intent 决定、之后不变」，
+     * 运行期改动会让已落盘的磁盘表与当前布局不同源（虽然变体进 `paramHash` 能兜住缓存，
+     * 但同一本书前后两套布局混在一会话里仍不可取）。
+     */
+    fun resetForTest() {
+        warmupBlocks = 0
+        synchronized(on) { on.clear() }
+    }
 
     /**
      * R29 靶子：`regexHoist` 打开时 13 处空白切分用**预编译**的 companion 常量，
@@ -94,6 +111,35 @@ object AbSwitch {
      * 定论后把赢家固化、把这个开关删掉。
      */
     fun regexHoist(): Boolean = isOn("regexHoist")
+
+    /**
+     * S3 接线开关：**自建断行器**（`engine-skia` 的 `InhouseParagraphBreaker`）接管正文断行。
+     *
+     * ## 默认 off = 生产行为不变
+     *
+     * off 时三处正文接线点全部取 `SkiaParagraphBreaker`，与接线前**逐字节同构**。
+     * 所以这个开关是纯回退阀：出问题关掉即可，无需回滚安装包。
+     *
+     * ## 为什么它必须进 `LayoutParamKey`（接线时最容易漏的一步）
+     *
+     * 断行器换了 ⇒ 断点变了 ⇒ 页切点变了。但 [orilumn.reader.engine.text.LayoutParamKey] 的
+     * `paramHash` 只由排版参数算出，**不含断行器身份**（同 T2f 查清的坑：`LayoutParamKey`
+     * 也不含禁则表身份，改断行规则 `paramHash` 不变）。若开关不进键，真机上一拨开关就会
+     * **命中按 Skia 断点算出的旧磁盘表**，量到「开关没生效」的假零差异。
+     * 故 `LayoutParamKey.fromProfile` 的 `inhouseBreak` 形参默认就读本开关，
+     * 18 个调用点零改动、单一读取点。
+     *
+     * 正因为变体进了 `paramHash`，**这次接线不需要 bump `LAYOUT_VERSION`** ——
+     * 键已能精确区分两侧；off 时复用旧表是正确的（输出逐字节相同），
+     * bump 反而白白作废全用户缓存。
+     *
+     * ## 表格侧不在本开关内（TODO Q6）
+     *
+     * `BoxChapterLayouter.tableBreaker` 恒为 Skia：13 本语料 49 张表全落在 auto 分列三段式的
+     * `avail>=totalMax` 段，min-content 一次都没被读过（`docs/自建断行引擎-测试计划.md` §T2f），
+     * 故表格这条线对本开关**零响应**；留在 Skia 既让 A/B 只隔离正文变化，也避免动表格列宽。
+     */
+    fun inhouseBreak(): Boolean = isOn("inhouseBreak")
 
     /**
      * R29 第三层靶子 `borderSides` **已定论并删除**（R39，详见

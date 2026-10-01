@@ -126,7 +126,14 @@
     ① `LayoutParamKey` 不含禁则表身份 ⇒ 改断行规则不改 `paramHash`；
     ② `app/build.gradle.kts:18` 的 `versionCode = 20` 是写死常量、非单调递增构建号，
     故 `PaginationCacheCodec` KDoc 里「换构建号即全量作废」在本工程从未真正发生。
-    ⇒ **S3 接线时必须 bump `LAYOUT_VERSION`**，否则线上老用户会静默复用 Skia 断点算出的旧表。
+    ⇒ ~~**S3 接线时必须 bump `LAYOUT_VERSION`**，否则线上老用户会静默复用 Skia 断点算出的旧表。~~
+    **已消解（2026-10-01 S3 接线实测推翻）**：改为把断行器变体作为字段**进 `LayoutParamKey`**
+    （`inhouseBreak`，默认读运行期开关），键即可精确区分两侧，`LAYOUT_VERSION` **不必 bump**。
+    且该字段用**变长喂入**（只在 true 时追加哨兵字节），默认侧 `paramHash` 与接线前**逐字节相同**
+    （金标准 `908642712`，Python + Kotlin 参考实现 + 生产 `Crc32` 三方独立算出同值），
+    故老用户分页缓存**零作废**——比 bump `LAYOUT_VERSION` 严格更好。
+    原判断错在：以为「断行规则不属于排版参数」；实际上换断行器换断点换页切点，
+    它**就是**一个排版参数，只是此前没人把它当成参数看待。
 
 - ~~开书被调两次~~ **误判，非 bug（2026-09-29 记 → 2026-09-30 查清）**：原以为 `open ok chapters=0`
   后 140ms–900ms 又一次 `open: chapters=N` 是 `openBookEngine` 并发重入。**查清：每次开书只调一次**，

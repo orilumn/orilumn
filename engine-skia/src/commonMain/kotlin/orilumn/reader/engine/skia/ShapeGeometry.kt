@@ -111,7 +111,8 @@ fun shapeGeometry(
     // Whole-paragraph single-style break (canonical semantics): code-like mono 解析走
     // 级联 monospace 标志（与盒流 `style.monospace || tag == "pre"` 同式）。
     val broken = breakWrappedLines(
-        SkiaParagraphBreaker(profile.letterSpacingEm), text, rootStyle, widthPx.coerceAtLeast(1),
+        // S3：正文断行变体单源（与 BoxChapterLayouter 的两处接线同口，默认 Skia）。
+        bodyParagraphBreaker(profile.letterSpacingEm), text, rootStyle, widthPx.coerceAtLeast(1),
         floatLead, pairTag, fontRuns, rootStyle.textIndentPx.coerceAtLeast(0f), baselineShifts,
     )
     // P6-b: 叠排注音 runs（与 text 同构遍历；无注音回空表零回归）＋行高增量（与重路径同式）。

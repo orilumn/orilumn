@@ -3,6 +3,7 @@ package orilumn.reader.engine.text
 import orilumn.reader.data.settings.ReaderSettings
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -44,6 +45,59 @@ class LayoutParamKeyTest {
         assertEquals(b, c)
     }
 
+    /**
+     * S3 接线锁：断行器变体必须进 `paramHash`。
+     *
+     * 这条不是「顺手加的」——T2f 实测发现 `paramHash` 也不含禁则表身份，
+     * 于是真机 A/B 若不清 `cache/pagination` 就会命中按另一侧规则算出的旧表，
+     * 读到「改动没生效」的假零差异。断行器变体是同一类坑的第二例，
+     * 故在接线当刻就把这条钉死（教训 28）。
+     */
+    @Test
+    fun `line breaker variant changes the param hash`() {
+        val p = TypographicProfile.build(ReaderSettings.DEFAULT)
+        val skia = LayoutParamKey.fromProfile(p, 1920, 2400, inhouseBreak = false).hash()
+        val inhouse = LayoutParamKey.fromProfile(p, 1920, 2400, inhouseBreak = true).hash()
+        assertNotEquals(
+            "断行器变体换 ⇒ 断点换 ⇒ 页切点换；不进键则拨开关会命中按另一侧断点算出的旧磁盘表",
+            skia, inhouse,
+        )
+        // 同侧稳定：同一变体两次构造必须同键，否则缓存会无谓抖动。
+        assertEquals(skia, LayoutParamKey.fromProfile(p, 1920, 2400, inhouseBreak = false).hash())
+        assertEquals(inhouse, LayoutParamKey.fromProfile(p, 1920, 2400, inhouseBreak = true).hash())
+    }
+
+    /**
+     * 默认值必须**跟着运行期开关**走（`fromProfile` 的形参默认 = `AbSwitch.inhouseBreak()`），
+     * 否则 18 个调用点会各自钉死 `false`，真机拨 `ab="inhouseBreak=1"` 时
+     * 布局换了、缓存键没换 ⇒ 又一次假零差异。
+     */
+    @Test
+    fun `fromProfile default follows the runtime AbSwitch`() {
+        val p = TypographicProfile.build(ReaderSettings.DEFAULT)
+        val offBefore = LayoutParamKey.fromProfile(p, 1920, 2400).hash()
+        val onExplicit = LayoutParamKey.fromProfile(p, 1920, 2400, inhouseBreak = true).hash()
+        try {
+            orilumn.reader.engine.AbSwitch.apply("inhouseBreak=1")
+            assertTrue(orilumn.reader.engine.AbSwitch.inhouseBreak())
+            assertEquals(
+                "开关打开时，无参调用必须产出与显式 true 相同的键",
+                onExplicit, LayoutParamKey.fromProfile(p, 1920, 2400).hash(),
+            )
+        } finally {
+            // 必须复位：具名开关只有「加」没有「减」，不复位会污染同 JVM 里后续
+            // 每一个走 fromProfile 默认值的用例（失败面貌与本次改动无关）。
+            orilumn.reader.engine.AbSwitch.resetForTest()
+        }
+        assertEquals("none", orilumn.reader.engine.AbSwitch.describe())
+        assertEquals(
+            "复位后无参调用必须回到默认侧的键",
+            offBefore, LayoutParamKey.fromProfile(p, 1920, 2400).hash(),
+        )
+        // 显式 false 仍是权威（不依赖全局状态）。
+        assertEquals(offBefore, LayoutParamKey.fromProfile(p, 1920, 2400, inhouseBreak = false).hash())
+    }
+
     @Test
     fun `portable crc32 is byte-identical to java util zip crc32`() {
         val base = LayoutParamKey(
@@ -59,6 +113,54 @@ class LayoutParamKeyTest {
 
         val flipped = base.copy(useOriginalStyle = true, contentW = 0, userCssHash = 0)
         assertEquals(javaCrc32(flipped), flipped.hash())
+
+        // S3：两个变体都要过参考实现（否则这条锁只覆盖默认侧，新字段的喂入序无人看守）。
+        assertEquals(javaCrc32(base.copy(inhouseBreak = true)), base.copy(inhouseBreak = true).hash())
+    }
+
+    /**
+     * S3 接线锁（**向后兼容金标准**）：默认侧的 `paramHash` 必须**逐字节等于接线前的历史值**。
+     *
+     * ## 为什么单独钉一条金标准
+     *
+     * `paramHash` 是分页缓存的**文件名**。默认侧（`inhouseBreak=false`）的布局输出与接线前
+     * 逐字节相同，若键也变了，就是一次**纯浪费的全量作废** —— 每个老用户升级后所有章都要重排。
+     *
+     * 这里的实现选择是「变长喂入」：字段在喂入序最后，**只在 true 时追加 4 字节**，
+     * 于是 false 精确复现旧流。代价是 schema 不再定长，但该字段在末尾且两侧取值不同，
+     * 不存在歧义（若放在中间，变长喂入会真的产生歧义）。
+     *
+     * ## 数字怎么来的
+     *
+     * 由 Python 独立复刻旧喂入序算出（112 字节，`zlib.crc32` 与 `java.util.zip.CRC32` 同算法），
+     * 与本文件 `javaCrc32` 参考实现、以及生产 `Crc32` 三方独立算出同一个值，才敢当金标准。
+     *
+     * （第一次算成 `3740307646` 是 Python 复刻写错：把 4 字节字符串终止符写进了 per-char 循环里，
+     * 导致每字多喂 4 个零字节。这个坑本身也说明「手写喂入序」的参考实现必须逐字节对照着写。）
+     */
+    @Test
+    fun `default side param hash is byte identical to the pre-S3 schema`() {
+        val base = LayoutParamKey(
+            bodyPx = 18.5f, lineSpacing = 1.5f, firstLineIndentEm = 2f, letterSpacingEm = 0f,
+            paragraphSpacingPx = 28, paragraphGapScale = 1f,
+            fontBody = "霞鹜文楷", fontTitle = "LXGW WenKai", fontCode = "",
+            useOriginalStyle = false, contentW = 1080, contentH = 1920, userCssHash = 123456789,
+        )
+        assertEquals(
+            "默认侧 paramHash 必须等于接线前历史值（908642712），否则老用户分页缓存全量作废",
+            908642712L,
+            base.hash() and 0xFFFFFFFFL,
+        )
+        assertEquals(
+            "默认侧必须与显式 false 构造出的键逐字节相同",
+            base.hash(),
+            base.copy(inhouseBreak = false).hash(),
+        )
+        assertNotEquals(
+            "自建变体必须换键，否则拨开关会命中按 Skia 断点算出的旧表",
+            base.hash(),
+            base.copy(inhouseBreak = true).hash(),
+        )
     }
 
     /** Reference: feed the same byte stream through java.util.zip.CRC32 (the pre-S19 implementation). */
@@ -100,6 +202,12 @@ class LayoutParamKeyTest {
             j.update((v and 0xFF).toInt())
         }
         k.contentW.feed4(); k.contentH.feed4(); k.userCssHash.feed4()
+        // S3 追加字段：断行器变体。**变长喂入——只在 true 时追加**，与 `hash()` 同式。
+        // 参考实现必须逐字节跟着 schema 走：这条锁的全部意义就是「手写喂入序 == 生产喂入序」，
+        // 少喂一轮（或多喂一轮）它就名存实亡了。
+        if (k.inhouseBreak) {
+            j.update(0); j.update(0); j.update(0); j.update(1)
+        }
         return j.value
     }
 }

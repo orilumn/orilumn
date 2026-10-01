@@ -57,7 +57,12 @@ internal class LineAligner(
          * 反推会在末字（无后继）与含拉伸的区间上失真（教训：能用原始量就别用二次推算）。
          */
         val advs: FloatArray,
-        /** 本行可见右边界：**最后一个非文档空白字符**的右边缘。末行/全空白行为最后字符右边缘。 */
+        /**
+         * 本行**可见右边界** = 最后一个非文档空白字符的**右边缘**（含该字符本体的宽，
+         * **不含**它之后那个不可见的 `lsPx`）。末行/全空白行退到行首。
+         *
+         * 判据用途：行尾空区（`x > visibleRight` 不该吸附到行尾字形）、下划线/着重号的区间右界。
+         */
         val visibleRight: Float,
         /** 行末连续文档空白的 x 起点（= 尾随空白**之前**那个字符的右边缘；无尾空白则 = [visibleRight]）。 */
         val trailStartX: Float,
@@ -94,9 +99,19 @@ internal class LineAligner(
         }
 
         // 取宽与断行侧同一出口（`adv[i]` 已含该码本的 `lsPx`，见类 KDoc 第 1 条）。
+        //
+        // ⚠ **必须传本行的子串**，不能传整段 `text`：本方法后续一律用**行内局部下标**
+        // （`adv[k]`，k 从 0 起），而 [SkiaRunMeasurer.advances] 返回的数组与其 `text` 形参
+        // **同一坐标**——传全串就得到全串绝对下标，再拿局部下标去索引即**整段错位**。
+        // [sliceRuns] 把 run 坐标平移成局部，也正是配套「局部子串」的做法。
+        //
+        // 这个 bug 的暴露方式很隐蔽：**首行 `start == 0` 时恰好正确**，所以只测首行/
+        // 只测单行的用例全绿；一旦有第二行，该行的逐字宽就全取自别的字符 ——
+        // 实测超长单词在版心 80 下每个单字符行都量成 `30.46`（那是 `'D'` 的宽，`'f'` 实为 14.05），
+        // 于是凭空冒出 11~65px 的「溢出」（`NoLineExceedsContentWidthTest` 抓到）。
         val adv = measurer.advances(
-            text, fontSizePx, letterSpacingEm, tag, families, weight, italic, monospace,
-            sliceRuns(fontRuns, start, endExcl),
+            text.subSequence(start, endExcl), fontSizePx, letterSpacingEm, tag, families,
+            weight, italic, monospace, sliceRuns(fontRuns, start, endExcl),
         )
 
         // 尾随文档空白：计入 range、画（无墨无害）、但**不计入可见宽度**。
@@ -126,14 +141,30 @@ internal class LineAligner(
          * 那是排在末字**之后**的不可见附加量，计入就等于把行末的不可见宽度算进「可见右边界」，
          * 实测直接溢出版心（`907.248 > 900`）。同理行末尾随空白的起点就是这里。
          */
+        /**
+         * **可见行宽** = `Σ_{j<N-1} advance_j + w_{N-1}` = `Σ_{j<N} advance_j − ls_{N-1}`。
+         *
+         * 语义（本轮踩了三次才对齐，**三个量必须分清**）：
+         * - `Σ_{j<N-1} advance_j` = **末字左缘**：前 N−1 个字符各自的 `ls_j` 是它们**之后**确实
+         *   存在的间隙（字符 j 与 j+1 之间），**该计入**。
+         * - `w_{N-1}` = 末字的**纯字宽**：它的 `ls_{N-1}` 排在末字**之后**、无后继字符，
+         *   **不可见、不该计入**。
+         * - 故可见右缘 = 末字左缘 + 纯字宽，**不是** `+ adv[末字]`（那多算一个 `lsPx`）。
+         *
+         * 这是 JUSTIFY 的**拉伸基数**，也是 `visibleRight`。两处必须同源，否则
+         * 「拉伸后铺满版心」与「算出的可见右缘」会差一个身位（实测 907.248 / 944.4）。
+         */
+        val lastLs = if (letterSpacingEm == 0f) 0f
+            else letterSpacingEm * lastRunSizePx(text, start, visibleCount - 1, fontSizePx, fontRuns)
         var natural = x0Raw
-        for (k in 0 until visibleCount - 1) natural += adv[k]
+        for (k in 0 until visibleCount) natural += adv[k]
+        natural -= lastLs
 
-        // JUSTIFY 拉伸：均摊到**可见字符之间的 N-1 个间隙**；末行不拉伸（两端对齐的定义本身）。
+        // JUSTIFY 拉伸：均摊到**可见字符之间的 N−1 个间隙**；末行不拉伸（两端对齐的定义本身）。
         val doJustify = align == TextAlign.JUSTIFY && !isLastLine && visibleCount > 1
         val slack = lineWidthPx - natural
         val extra = if (doJustify && slack > 0f) slack / (visibleCount - 1) else 0f
-        // 最终可见宽 = natural + 所有拉伸（拉伸后才是「行有多宽」）。
+        // 拉伸后总宽恒等于 natural + extra×(N−1)，故 JUSTIFY 时正好铺满版心。
         val finalVisible = natural + extra * (visibleCount - 1)
         // CENTER/RIGHT 按**最终**可见宽定位（用拉伸前的 natural 会偏）。
         val x0 = when (align) {
@@ -151,9 +182,23 @@ internal class LineAligner(
             if (extra != 0f && k < visibleCount - 1) x += extra
         }
 
-        // 行末尾随空白紧贴末字右边缘（含对齐偏移 x0）；无尾随空白时 trailStartX 即可见右边界。
+                // 行末尾随空白紧贴**可见右缘**（含对齐偏移 x0）。
         val trailStartX = x0 + finalVisible
         return Placement(xs, adv.copyOf(n), trailStartX, trailStartX)
+    }
+
+    /**
+     * 末字所属 run 的**字号**（逐 run 查回，而非用全局值）。
+     *
+     * 行内换面 run 有各自字号（`fontRuns[].fontSizePx`），用全局 `fontSizePx` 会在换面行上
+     * 算错末字的 `lsPx` ⇒ 拉伸基数偏 ⇒ JUSTIFY 铺不满或溢出。
+     */
+    private fun lastRunSizePx(
+        text: CharSequence, start: Int, lastLocal: Int, fontSizePx: Float, fontRuns: List<FontRun>,
+    ): Float {
+        if (fontRuns.isEmpty()) return fontSizePx
+        val abs = start + lastLocal
+        return fontRuns.firstOrNull { it.start <= abs && abs < it.endExclusive }?.fontPxOr(fontSizePx) ?: fontSizePx
     }
 
     /** 行末圆整右边界（版心对齐判据用，避免 899.9997 判成未铺满）。 */

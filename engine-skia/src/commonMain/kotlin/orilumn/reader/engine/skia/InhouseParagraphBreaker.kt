@@ -215,6 +215,9 @@ class InhouseParagraphBreaker(
             var hang = 0f
             var trail = 0f
             var lastOpp = -1
+            // 「最近断点处的判定宽」= 断点被记录那一刻的 hang（已扣行尾空白），随滚动增量维护，
+            // 供退出循环后判「该断点是否装得下」。O(1) 更新，不能用重算（那是 O(n) × 行数）。
+            var lastOppWidth = 0f
             var brk = -1
             while (i < n) {
                 val c = text[i]
@@ -230,13 +233,25 @@ class InhouseParagraphBreaker(
                 hang = next
                 trail = if (sp) trail + w else 0f
                 i++
-                if (opp.opportunityAt(i)) lastOpp = i
+                if (opp.opportunityAt(i)) { lastOpp = i; lastOppWidth = hang }
             }
             if (brk < 0) {
                 brk = when {
                     i >= n -> n                       // 整段装下（含「尾随空白悬到段末」）
-                    lastOpp > s -> lastOpp           // 退到最近断点
-                    else -> i                        // R1 core：一个断点都没有 → 此处断开
+                    // 退到最近断点 —— 但**仅当它装得下**。
+                    //
+                    // ⚠ 原实现是 `lastOpp > s -> lastOpp` 无条件退回，于是「最近断点也放不下」
+                    // 时会产出一行**超出版心的内容**。实测 `Donaudampfschiff…`（无空格超长单词）
+                    // 在版心 80 下溢出 **32.45px**、首行缩进 88% + 版心 120 溢出 **65.07px**
+                    // （`NoLineExceedsContentWidthTest` 钉住）。**分页阅读器不能容忍溢出**：
+                    // 浏览器能横向滚动所以能溢出，本项目页宽固定、超出部分被页面裁掉 = 内容丢失。
+                    // ⇒ 装不下时必须落到 R1 core（逐字断开、贪心填满版心），而不是溢出。
+                    //
+                    // 注意「记账点在 `i++` 之后」：`hang > avail` 的那一刻循环已 `break`，
+                    // 故常规路径下 `lastOppWidth <= avail` 恒成立 —— 这条判定只在**版心窄到
+                    // 连断点都装不下**（版心 80 / 缩进吃掉版心）时才真正生效。
+                    lastOpp > s && lastOppWidth <= avail -> lastOpp
+                    else -> i                          // R1 core：退无可退（含「最近断点也装不下」）→ 填满即断
                 }
             }
             // 反自旋护栏（正常路径不可达：`brk > s` 由上面的 `i > s` 前置条件保证）。

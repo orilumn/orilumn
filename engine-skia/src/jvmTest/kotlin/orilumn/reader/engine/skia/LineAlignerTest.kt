@@ -40,11 +40,19 @@ import org.junit.Test
  */
 class LineAlignerTest {
 
-    /** 真书正文原句（`OEBPS/Text/22.xhtml:339`），含 `<code>` 行内换面。 */
+    /**
+     * 真书正文（`OEBPS/Text/22.xhtml:339`），含 `<code>` 行内换面。
+     *
+     * **必须够长**：锁 1 的守卫要求「至少有 2 行装得下的中部行」，而 interior 行数 = 总行数 − 1。
+     * 第一版只有 1 句，在版心 900/1600 下都只切出 3~4 行 ⇒ 扣掉末行与超宽行后参与判据的不足 2 行
+     * ⇒ 守卫判「假锁」。**加到 2 句**后 1600 档下自建侧有 3 行装得下（skia 侧 2 行，见守卫注释）。
+     */
     private val realPara =
         "<p>派生 <code>Clone</code> 实现了 <code>clone</code> 方法，当其为整个类型实现时，" +
             "会在类型的每一部分上调用 <code>clone</code> 方法。这意味着类型中所有字段或值" +
-            "也必须实现了 <code>Clone</code>，这样才能够派生 <code>Clone</code> 。</p>"
+            "也必须实现了 <code>Clone</code>，这样才能够派生 <code>Clone</code> 。</p>" +
+            "<p>除了 <code>Clone</code> 之外，标准库还提供了 <code>Copy</code> 与 " +
+            "<code>Default</code>，它们同样要求字段满足相应的约束，并且这些约束会由编译器检查。</p>"
 
     private val realCss =
         "html { font-size: 18px; } body { font-family: serif; font-size: 0.95rem; } " +
@@ -52,14 +60,26 @@ class LineAlignerTest {
 
     private fun aligner() = LineAligner()
 
+    /**
+     * **自造**语料（不来自真书 `DrawLine`）统一用的族栈 —— 由测试自选，显式写出来。
+     * 吃真实 `DrawLine` 的调用点必须传 `dl.families`，不许用它。
+     */
+    private val SYNTH_FAM = listOf("STSong", "serif")
+
     private fun align(
         text: CharSequence, range: IntRange, fs: Float, width: Float,
         lsEm: Float = 0f, align: TextAlign = TextAlign.JUSTIFY, isLast: Boolean = false,
-        fam: List<String> = listOf("STSong", "serif"),
+        // ⚠ **不给默认值**：调用方必须显式传 `dl.families`（绘制侧用的就是它）。
+        // 本文件第一版把默认值硬编码成 `["STSong","serif"]`，而本仓正文的 `families` 是 `[serif]`
+        // —— 拉丁字符在两个面栈下宽度不同（真书首行 28 字：907.248 vs 873.94775，差 33.3px），
+        // 于是「中部行装不下」的判定被喂了错数据，守卫从 3 行掉到 1 行。
+        // 同源要求见 [NoLineExceedsContentWidthTest] 的类 KDoc。
+        fam: List<String>,
         runs: List<orilumn.reader.engine.css.FontRun> = emptyList(),
         indent: Float = 0f,
+        tag: String? = "p",
     ) = aligner().align(
-        text, range, fs, width, lsEm, "p", fam, 400, false, false, runs, align, indent, isLast,
+        text, range, fs, width, lsEm, tag, fam, 400, false, false, runs, align, indent, isLast,
     )
 
     // ---- 锁 1： JUSTIFY 中部行必须铺满版心（这就是真机缺陷的判据）----
@@ -71,35 +91,50 @@ class LineAlignerTest {
             applyBreakerVariant(label)
             try {
                 val fs = 44.4f
-                val width = 900f
+                val width = 1600f
                 val root = HtmlTreeConverter().convert("<html><body>$realPara</body></html>")!!
                 val engine = StyleComputer(fs, LightCssParser().parse(realCss), emptyList())
                 val styles = engine.compute(root)
                 val classify = NormalFlowLayout.heavyClassify(styles, engine.hasDisplayDeclaration())
-                val result = BoxLayouter(fs, breaker).layoutBoxes(root, 900, styles, classify)
+                val result = BoxLayouter(fs, breaker).layoutBoxes(root, 1600, styles, classify)
                 val lines = DrawLineBuilder.build(result, styles, classify, HIDDEN_NONE, 0f).toList()
                 assertTrue("至少要有多行才能验中部行", lines.size >= 3)
 
                 val interior = lines.dropLast(1)
+                // **必须排除「装不下」的行**（第一版没排除，在这里连错五次）：
+                // 语料里那行 28 字 × ~44.4 = 1243px > 版心 900，断点是被贪心/R1 兜底塞进来的
+                // —— 它**本来就不该拉伸**（`slack < 0` ⇒ `extra = 0` ⇒ `visibleRight = natural = 907.248`）。
+                // 那个 907.248 是**正确的自然宽**，把它当「未铺满」等于要求一行超宽的字去填版心。
+                // 判据：只有 `natural <= 版心` 的行（即 slack ≥ 0、拉伸后能铺满的）才要求铺满。
                 var filled = 0
+                var checked = 0
                 for ((_, dl) in interior) {
                     val p = align(
                         dl.text, dl.range, fs, dl.lineWidthPx.toFloat(),
                         align = dl.alignment, isLast = false, runs = dl.fontRuns,
+                        fam = dl.families, tag = dl.tag,
                     )
-                    // 尾随文档空白的行正是真机缺陷的触发条件，必须单独报出来。
+                    // 自然宽（未拉伸）> 版心 ⇒ 装不下，本行不参与「铺满」判据。
+                    val naturalOnly = p.visibleRight
+                    if (naturalOnly > dl.lineWidthPx + 0.5f) continue
+                    checked++
                     val trailWs = dl.text.substring(dl.range).takeLastWhile { isDocumentSpace(it) }.length
-                    if (kotlin.math.abs(p.visibleRight - dl.lineWidthPx) > 0.5f) {
-                        assertTrue(
-                            "变体=$label 「${dl.text.substring(dl.range)}」尾空白=$trailWs " +
-                                "可见右边界=${p.visibleRight} 未铺满版心=${dl.lineWidthPx}。" +
-                                "尾随空白不得从拉伸基数的宽度里扣掉（行 KDoc 第 2 条）。",
-                            false,
-                        )
-                    }
+                    assertTrue(
+                        "变体=$label 「${dl.text.substring(dl.range)}」尾空白=$trailWs " +
+                            "可见右边界=${p.visibleRight} 未铺满版心=${dl.lineWidthPx}。" +
+                            "能装下的 JUSTIFY 中部行必须铺满；尾随空白不得从拉伸基数里扣掉。",
+                        kotlin.math.abs(p.visibleRight - dl.lineWidthPx) <= 0.5f,
+                    )
                     filled++
                 }
-                assertEquals("全部中部行都应铺满", interior.size, filled)
+                // 语料实测（版心 900）：3 个中部行里 **2 个装得下**、1 个超宽（首行 28 字 ≈1243px，
+                // 由贪心/R1 兜底塞入，本来就不该拉伸）。守卫阈值取 2 —— 实测值，不是拍的。
+                assertTrue(
+                    "本语料必须至少有 2 行「装得下」的中部行，否则这把锁在退化路径上也能过 = 假锁" +
+                        "（实测只有 $checked 行参与判据）",
+                    checked >= 2,
+                )
+                assertEquals("全部能装下的中部行都应铺满", checked, filled)
             } finally {
                 AbSwitch.resetForTest()
             }
@@ -122,7 +157,10 @@ class LineAlignerTest {
                 val lines = DrawLineBuilder.build(result, styles, classify, HIDDEN_NONE, 0f).toList()
                 for ((_, dl) in lines) {
                     val n = dl.range.last + 1 - dl.range.first
-                    val p = align(dl.text, dl.range, fs, dl.lineWidthPx.toFloat(), runs = dl.fontRuns)
+                    val p = align(
+                        dl.text, dl.range, fs, dl.lineWidthPx.toFloat(),
+                        runs = dl.fontRuns, fam = dl.families, tag = dl.tag,
+                    )
                     assertEquals(
                         "变体=$label xs 必须与 range 等长（区间无缝是硬约束）",
                         n, p.xs.size,
@@ -150,9 +188,9 @@ class LineAlignerTest {
         val text = "两端对齐需要测试行尾是否空白影响排版"
         val fs = 44.4f
         val width = 900f
-        val pJustify = align(text, text.indices, fs, width, align = TextAlign.JUSTIFY, isLast = false)
-        val pLast = align(text, text.indices, fs, width, align = TextAlign.JUSTIFY, isLast = true)
-        val pLeft = align(text, text.indices, fs, width, align = TextAlign.LEFT, isLast = false)
+        val pJustify = align(text, text.indices, fs, width, fam = SYNTH_FAM, align = TextAlign.JUSTIFY, isLast = false)
+        val pLast = align(text, text.indices, fs, width, fam = SYNTH_FAM, align = TextAlign.JUSTIFY, isLast = true)
+        val pLeft = align(text, text.indices, fs, width, fam = SYNTH_FAM, align = TextAlign.LEFT, isLast = false)
         assertEquals("JUSTIFY 中部行铺满", width, pJustify.visibleRight, 0.5f)
         assertTrue(
             "末行必须左对齐不拉伸：visibleRight=${pLast.visibleRight} 应 < $width",
@@ -178,8 +216,8 @@ class LineAlignerTest {
         val width = 900f
         val withTrail = "两端对齐测试文本尾部有空白 "
         val without = "两端对齐测试文本尾部有空白"
-        val pWith = align(withTrail, withTrail.indices, fs, width, align = TextAlign.JUSTIFY, isLast = false)
-        val pWithout = align(without, without.indices, fs, width, align = TextAlign.JUSTIFY, isLast = false)
+        val pWith = align(withTrail, withTrail.indices, fs, width, fam = SYNTH_FAM, align = TextAlign.JUSTIFY, isLast = false)
+        val pWithout = align(without, without.indices, fs, width, fam = SYNTH_FAM, align = TextAlign.JUSTIFY, isLast = false)
 
         // 尾空白不占位 ⇒ 可见部分的几何与「无尾空白」版逐字相同。
         for (k in without.indices) {
@@ -213,8 +251,8 @@ class LineAlignerTest {
         val runs = listOf(
             orilumn.reader.engine.css.FontRun(2, 8, listOf("monospace"), null, 400, false, true, 0f),
         )
-        val withRuns = align(text, text.indices, fs, width, runs = runs).visibleRight
-        val noRuns = align(text, text.indices, fs, width).visibleRight
+        val withRuns = align(text, text.indices, fs, width, fam = SYNTH_FAM, runs = runs).visibleRight
+        val noRuns = align(text, text.indices, fs, width, fam = SYNTH_FAM).visibleRight
         assertTrue(
             "语料必须对 fontRuns 敏感：带/不带换面 run 的可见右边界应不同。" +
                 "实测 with=$withRuns without=$noRuns（全相等说明语料里没有 Latin 换面段）。",
@@ -228,7 +266,7 @@ class LineAlignerTest {
     private fun alignerBuggyNoTrailHang() = object : LineAlignerLike {
         override fun visibleRight(text: CharSequence, range: IntRange, fs: Float, width: Float): Float {
             // 全行计入（含尾随空白）—— 正是真机缺陷的形态。
-            return align(text, range, fs, width).visibleRight - 0f
+            return align(text, range, fs, width, fam = SYNTH_FAM).visibleRight - 0f
         }
     }
 }

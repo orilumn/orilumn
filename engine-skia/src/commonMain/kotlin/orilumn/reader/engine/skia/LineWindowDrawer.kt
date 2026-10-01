@@ -639,11 +639,19 @@ class LineWindowDrawer(
         xs: FloatArray = placement.xs,
     ) {
         val n = endExcl - start
+        // **切段每行算一次**（不是每字一次）。第一版写成 `mergeBands(line, i, i+1).firstOrNull()`
+        // 在逐字循环里，等于每字重建整行的 band 列表 —— JUSTIFY 行实测 13.00ms vs
+        // LEFT 行 4.73ms（同文本、同字号），**拉伸不该让绘制慢 2.7 倍**，那全是这份重复计算。
+        // 走游标：band 列表已按区间排序且无缝，顺序扫即可。
+        val bands = mergeBands(line, start, endExcl)
+        var bandIdx = 0
         for (i in start until endExcl) {
             val local = i - start
             if (local >= n || local < 0) continue
             val x = xs.getOrNull(local) ?: continue
-            val band = mergeBands(line, i, i + 1).firstOrNull()
+            // 游标推进到覆盖 i 的那一段（band 之间有「无 run 覆盖」的间隙，band 为 null）。
+            while (bandIdx < bands.size && bands[bandIdx].end <= i) bandIdx++
+            val band = bands.getOrNull(bandIdx)?.takeIf { i >= it.start && i < it.end }
             val hidden = isHidden(i, i + 1)
             // 注音源文/表图占位：透明墨占宽（字符流不变）——逐字路径直接跳过落墨即可。
             if (hidden) continue

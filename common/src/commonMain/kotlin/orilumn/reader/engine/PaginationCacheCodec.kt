@@ -37,7 +37,10 @@ object PaginationCacheCodec {
     /** Engine-geometry version. Bump on ANY change to line geometry computation so stale tables are
      *  invalidated at the single [decode] choke-point. Kept separate from [VERSION]: schema changes may
      *  leave geometry untouched and vice-versa. */
-    const val LAYOUT_VERSION = 30 // 30: 断行器 R1 补偿——SkParagraph「整段单行」快捷路径不扣 TextIndent，带 text-indent 的单行段在「版心 − 缩进 < 整段自然宽 ≤ 版心」内不折行却被绘制侧右移缩进，尾部 1~2 字被版心右缘裁掉；修后该窗口按首行真实可用宽重排（行数变化 → 旧表作废）；29 的单行超长段表作废
+    // 31: 自建断行器 greedy 加「往回退」——「最近断点差一个连字符宽装不下」时改为退到上一个装得下的
+    //     断点（原先原地硬切且丢连字符）。行尾下标变化 ⇒ 页切点变化 ⇒ 旧表必须作废。
+    // 30: 断行器 R1 补偿——SkParagraph「整段单行」快捷路径不扣 TextIndent，带 text-indent 的单行段在「版心 − 缩进 < 整段自然宽 ≤ 版心」内不折行却被绘制侧右移缩进，尾部 1~2 字被版心右缘裁掉；修后该窗口按首行真实可用宽重排（行数变化 → 旧表作废）；29 的单行超长段表作废
+    const val LAYOUT_VERSION = 31
 
     /** Per-book cap on persisted table files. Old-parameter-hash tables are orphaned when the layout
      *  key changes; version-stale orphans (older build) are swept by [PaginationCacheStore.sweepStale]

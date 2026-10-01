@@ -127,6 +127,17 @@ class LineWindowDrawer(
     private val collections: () -> FontCollection = SkiaFontPool::current,
 ) {
 
+    /**
+     * S4/S5 协作件：几何（[LineAligner]）与落墨（[GlyphPainter]）。
+     *
+     * **两侧同源**：二者都用 [SkiaRunMeasurer] 取宽，与断行侧算断点同一出口 ——
+     * 所以「量到的宽」与「画出来的宽」逐值一致（量画一致生死线）。
+     * 按次构造而非快照：本类与绘制器同为常驻实例，字体池会因导入新字库而换，
+     * 快照即永远看不见新字库（与 [collections] 同一理由）。
+     */
+    private val aligner = LineAligner()
+    private val glyphPainter = GlyphPainter()
+
     fun drawLines(canvas: Canvas, contentLeft: Float, lines: List<DrawLine>, clip: Rect? = null) {
         if (lines.isEmpty()) return
         val collection = collections()
@@ -195,7 +206,10 @@ class LineWindowDrawer(
 
     /** 主文本行绘制（S5 逐字路径）：几何由 [LineAligner] 给、落墨由 [GlyphPainter] 逐字做。 */
     private fun paintText(canvas: Canvas, style: ParagraphStyle, line: DrawLine, textX: Float, collection: FontCollection) {
-        val appendTrailingNewline = line.alignment == orilumn.reader.engine.css.TextAlign.JUSTIFY
+        // S5: 追加换行（`appendTrailingNewline`）已**退役**。它原本是「Skia 无 JUSTIFY 拉伸开关」
+        // 这个误判下的权宜之计 —— 那个 `\n` 把软断行变成硬换行，靠「制造首行」骗 Skia 拉伸整段，
+        // 是真机两端对齐失效的根源之一（行末空白一出现就不拉伸，教训 29b）。
+        // 现在拉伸由 [LineAligner] 显式做（slack 均摊到可见间隙），不再需要制造首行。
         // P3-a: 祖先 opacity 统一乘墨色/段色；行阴影随段整形（Skia 原生，不改 advances）。
         // 注意 skija `textStyle` getter 返回拷贝：改完必须重赋回 paragraphStyle。
         val ink = withAlpha(line.inkColor, line.alpha)
@@ -248,7 +262,7 @@ class LineWindowDrawer(
         val builder = ParagraphBuilder(style, collection)
         val hasRuns = line.colorRuns.isNotEmpty() || line.fontRuns.isNotEmpty() || line.baselineShifts.isNotEmpty() || hiddenRuns.isNotEmpty() || ulHits.isNotEmpty()
         if (!hasRuns) {
-            builder.addText(line.text.substring(start, endExcl) + if (appendTrailingNewline) "\n" else "")
+            builder.addText(line.text.substring(start, endExcl))
         } else {
             // 行内着色 + 行内 face + 基线位移 + 下划线：把行区间按四份 runs 合并切成段（sorted,
             // 段内肤色/face/位移/下划线恒定），无色无 face 无位移无下划线的段走基底（默认 style）, 其余段 push
@@ -318,7 +332,6 @@ class LineWindowDrawer(
                 if (band.end > cursor) cursor = band.end
             }
             if (cursor < endExcl) paintSegment(cursor, endExcl, null, null, 0f, isUnderlined(cursor, endExcl))
-            if (appendTrailingNewline) builder.addText("\n")
         }
         val paragraph = builder.build()
         try {
@@ -346,15 +359,50 @@ class LineWindowDrawer(
             } else {
                 0.0
             }
-            val baseY = line.yTop + lineExtra + deviceBaselineShift
-            paragraph.paint(canvas, paintX, baseY.toFloat())
+            // S5：逐字 `drawString` 的原点**就是基线**，故基线必须自己算（旧路径由 `Paragraph.paint`
+            // 内部按 setHeight + setHalfLeading 落位）。缺这一项整行字画在 yTop=0 被裁 ⇒「行无墨」。
+            val baseFont = glyphPainter.baseGlyphStyle(
+                line.fontSizePx, line.families, line.weight, line.italic, line.monospace,
+                0xFF000000.toInt(), 'H'.code, line.tag,
+            ).font
+            val fm = baseFont.metrics
+            val baseY = aligner.baselineOffset(
+                yTop = line.yTop.toFloat(),
+                fontSizePx = line.fontSizePx,
+                lineHeightRatio = line.lineHeightRatio,
+                ascentPx = -fm.ascent,
+                descentPx = fm.descent,
+                extraTop = lineExtra.toFloat(),
+            )
+            // ── S5 主干：逐字落墨 ──
+            // 几何来自 [LineAligner]（与断行侧同一取宽口），落墨由 [GlyphPainter] 逐字做。
+            // **不再 `paragraph.paint`**：整段 paint 会让 Skia 二次整形（有 kerning/liga），
+            // 与「裸 cmap 量宽」的断行侧量画失配（教训 20），且拉伸只能靠 `kJustify` 挂起规则。
+            val placement = aligner.align(
+                text = line.text,
+                range = start until endExcl,
+                fontSizePx = line.fontSizePx,
+                lineWidthPx = if (line.nowrap) Float.MAX_VALUE else line.lineWidthPx.coerceAtLeast(1).toFloat(),
+                letterSpacingEm = line.letterSpacingEm,
+                tag = line.tag,
+                families = line.families,
+                weight = line.weight,
+                italic = line.italic,
+                monospace = line.monospace,
+                fontRuns = line.fontRuns,
+                align = line.alignment,
+                firstLineIndentPx = 0f,
+                // 末行不拉伸：绘制侧按「行区间是否覆盖到该叶末」判定，与两端对齐定义一致。
+                isLastLine = isLastLineOf(line, endExcl),
+            )
+            paintGlyphs(canvas, line, placement, paintX, baseY.toFloat(), start, endExcl, { f, t -> isHidden(f, t) }, ulHits)
             // 注音/着重号与文字同盒，随 half-leading 一并下移，保持与基字的相对位置。
             if (rubyHits.isNotEmpty() && endExcl > start) {
-                drawRuby(canvas, paragraph, line, paintX, start, endExcl, rubyHits, ink, collection, deviceBaselineShift.toFloat())
+                drawRuby(canvas, line, placement, paintX, start, endExcl, rubyHits, ink, collection, deviceBaselineShift.toFloat())
             }
             // P3-a: 着重号（圆点/圆圈，逐字定位，行上/下方）。
             if (line.emphasis != orilumn.reader.engine.css.EmphasisStyle.NONE && endExcl > start) {
-                drawEmphasis(canvas, paragraph, line, paintX, ink, start, endExcl, deviceBaselineShift.toFloat())
+                drawEmphasis(canvas, line, placement, paintX, ink, start, endExcl, deviceBaselineShift.toFloat())
             }
         } finally {
             paragraph.close()
@@ -368,8 +416,8 @@ class LineWindowDrawer(
      */
     private fun drawRuby(
         canvas: Canvas,
-        paragraph: org.jetbrains.skia.paragraph.Paragraph,
         line: DrawLine,
+        placement: LineAligner.Placement,
         paintX: Float,
         start: Int,
         endExcl: Int,
@@ -378,28 +426,19 @@ class LineWindowDrawer(
         collection: FontCollection,
         halfLeading: Float,
     ) {
+        val n = endExcl - start
         for (run in hits) {
             val bs = maxOf(run.start, start)
             val be = minOf(run.endExclusive, endExcl)
             if (be <= bs || run.rtText.isEmpty()) continue
-            // 基字在段落坐标系的区间（段落文本即 line.text[start,endExcl)）。
-            val ps = (bs - start).coerceAtLeast(0)
-            val pe = (be - start).coerceAtLeast(0)
+            // S5：基字区间改读 Aligner 的 `xs`（T0 落点 2）。不再用 `getRectsForRange(TIGHT)`：
+            // 那是 Skia **整形后**的墨盒，与本仓「裸 cmap 量宽」不同源（教训 20）；
+            // `xs` 才是落墨真用的坐标，注音居中因此与基字严格对齐。
+            val ps = (bs - start).coerceIn(0, n)
+            val pe = (be - start).coerceIn(ps, n)
             if (pe <= ps) continue
-            val rects = runCatching {
-                paragraph.getRectsForRange(
-                    ps, pe,
-                    org.jetbrains.skia.paragraph.RectHeightMode.TIGHT,
-                    org.jetbrains.skia.paragraph.RectWidthMode.TIGHT,
-                )
-            }.getOrNull() ?: continue
-            if (rects.isEmpty()) continue
-            var left = Float.MAX_VALUE
-            var right = -Float.MAX_VALUE
-            for (b in rects) {
-                left = minOf(left, b.rect.left)
-                right = maxOf(right, b.rect.right)
-            }
+            val span = aligner.visibleSpan(placement, n, ps, pe) ?: continue
+            val (left, right) = span
             if (right <= left) continue
             val baseCenter = paintX + (left + right) / 2f
             val rtSize = run.rtFontSizePx.coerceAtLeast(1f)
@@ -459,8 +498,8 @@ class LineWindowDrawer(
      */
     private fun drawEmphasis(
         canvas: Canvas,
-        paragraph: org.jetbrains.skia.paragraph.Paragraph,
         line: DrawLine,
+        placement: LineAligner.Placement,
         paintX: Float,
         ink: Int,
         start: Int,
@@ -478,20 +517,149 @@ class LineWindowDrawer(
             }
         }
         val y = if (line.emphasisUnder) line.yBottom + halfLeading - r - 1f else line.yTop + halfLeading + r + 1f
+        val n = endExcl - start
         for (i in start until endExcl) {
-            val boxes = runCatching {
-                paragraph.getRectsForRange(
-                    i, i + 1,
-                    org.jetbrains.skia.paragraph.RectHeightMode.TIGHT,
-                    org.jetbrains.skia.paragraph.RectWidthMode.TIGHT,
-                )
-            }.getOrNull() ?: continue
-            for (b in boxes) {
-                val cx = paintX + (b.rect.left + b.rect.right) / 2f
+            // S5：逐字墨盒中心改读 Aligner 的 `xs`（T0 落点 3），不再 `getRectsForRange(TIGHT)`。
+            val local = i - start
+            if (local >= n || local < 0) continue
+            // 「空格亦置点，与浏览器一致」：尾随空白照样占一个点。
+            aligner.visibleSpan(placement, n, local, local + 1)?.let { (lx, rx) ->
+                val cx = paintX + (lx + rx) / 2f
                 canvas.drawCircle(cx, y.toFloat(), r, paint)
             }
         }
     }
+
+    /**
+     * S5 逐字落墨：按 [placement] 的 x 逐字 `drawString`，段内样式由 `mergeBands` 供（不重写切段）。
+     *
+     * **下划线改为自绘**（原挂在 `TextStyle` 的 `DecorationStyle` 上）：
+     * 按 CSS，`text-decoration` 覆盖整个行区间、与是否 JUSTIFY 无关，故用 [ulHits] 的区间并集
+     * 画一条线 —— 与 `TextStyle` 版在字距/换面上更稳（装饰线不随字形盒跳变）。
+     *
+     * **字阴影**：原挂 `TextStyle.addShadow`（随段整形）。逐字路径下 `Paint` 不带阴影，
+     * 故先按阴影参数画一遍偏移的同色字作底，再画正字 —— CSS `text-shadow` 的常规实现
+     * （blur 用多层近似，量级为 `blur/2`）。
+     */
+    private fun paintGlyphs(
+        canvas: Canvas,
+        line: DrawLine,
+        placement: LineAligner.Placement,
+        paintX: Float,
+        baseY: Float,
+        start: Int,
+        endExcl: Int,
+        isHidden: (Int, Int) -> Boolean,
+        ulHits: List<IntRange>,
+    ) {
+        if (endExcl <= start) return
+        val n = endExcl - start
+        // 段样式缓存：同一 (色, 面, 位移) 只解析一次 Font（matchFamilyStyle 是 native 调用）。
+        val fontCache = HashMap<Any, org.jetbrains.skia.Font>()
+        val fonts = object : FontResolver {
+            override fun resolve(
+                cp: Int, key: Any, sizePx: Float, fam: List<String>, wt: Int, ital: Boolean,
+                mono: Boolean, tag: String?,
+            ): org.jetbrains.skia.Font = fontCache.getOrPut(key) {
+                glyphPainter.baseGlyphStyle(sizePx, fam, wt, ital, mono, 0xFF000000.toInt(), cp, tag).font
+            }
+        }
+
+        val shadow = line.textShadow
+        // 先画阴影层（偏移同色），再画正字 —— CSS text-shadow 的常规两层近似。
+        if (shadow != null) {
+            val sc = shadow.colorHex?.let(::cssHexToArgb) ?: 0xFF000000.toInt()
+            drawGlyphPass(canvas, line, placement, paintX, baseY, start, endExcl, isHidden, shadow.dx, shadow.dy, sc, true, fonts)
+        }
+        drawGlyphPass(canvas, line, placement, paintX, baseY, start, endExcl, isHidden, 0f, 0f, 0, false, fonts)
+
+        // 下划线：行区间相交段的 x 并集，用线画（不逐字跳）。
+        if (ulHits.isNotEmpty()) {
+            val ulPaint = org.jetbrains.skia.Paint().apply {
+                color = withAlpha(line.inkColor, line.alpha)
+                mode = org.jetbrains.skia.PaintMode.STROKE
+                strokeWidth = (line.fontSizePx * 0.06f).coerceAtLeast(1f)
+            }
+            val y = baseY + line.fontSizePx * 0.12f
+            for (r in ulHits) {
+                val lo = (r.first - start).coerceIn(0, n)
+                val hi = (r.last + 1 - start).coerceIn(lo, n)
+                if (hi <= lo) continue
+                aligner.visibleSpan(placement, n, lo, hi)?.let { (lx, rx) ->
+                    canvas.drawLine(paintX + lx, y, paintX + rx, y, ulPaint)
+                }
+            }
+        }
+    }
+
+    /** 段内面解析（抽出成接口：inline 函数不能收函数类型参数）。 */
+    private interface FontResolver {
+        /**
+         * **按码本**解析面（`cp`）：逐字绘制时不同码本可能落到族栈里不同的面
+         * （CJK 落宋体、Latin 落 Times），故缓存键**必须含码本**——
+         * 少这一点就是「一个字用错面」，肉眼可见且不报错。
+         */
+        fun resolve(
+            cp: Int, key: Any, sizePx: Float, fam: List<String>, wt: Int, ital: Boolean,
+            mono: Boolean, tag: String?,
+        ): org.jetbrains.skia.Font
+    }
+
+    /** 单趟逐字绘制（阴影层与正字层各一趟）。 */
+    private fun drawGlyphPass(
+        canvas: Canvas,
+        line: DrawLine,
+        placement: LineAligner.Placement,
+        paintX: Float,
+        baseY: Float,
+        start: Int,
+        endExcl: Int,
+        isHidden: (Int, Int) -> Boolean,
+        dx: Float,
+        dy: Float,
+        overrideInk: Int,
+        isShadowPass: Boolean,
+        fontFor: FontResolver,
+    ) {
+        val n = endExcl - start
+        for (i in start until endExcl) {
+            val local = i - start
+            if (local >= n || local < 0) continue
+            val x = placement.xs.getOrNull(local) ?: continue
+            val band = mergeBands(line, i, i + 1).firstOrNull()
+            val hidden = isHidden(i, i + 1)
+            // 注音源文/表图占位：透明墨占宽（字符流不变）——逐字路径直接跳过落墨即可。
+            if (hidden) continue
+            val run = band?.font
+            val sizePx = run?.fontPxOr(line.fontSizePx) ?: line.fontSizePx
+            val cp = line.text[i].code
+            val famList = run?.families ?: line.families
+            val wt = run?.weight ?: line.weight
+            val ital = run?.italic ?: line.italic
+            val mono = run?.monospace ?: line.monospace
+            val rtag = run?.tag ?: line.tag
+            // 缓存键含码本：CJK 与 Latin 会落到族栈里不同的面（少这一点 = 一个字用错面）。
+            val key = glyphPainter.cacheKey(famList, wt, ital, sizePx, cp)
+            val font = fontFor.resolve(cp, key, sizePx, famList, wt, ital, mono, rtag)
+            val argb = if (isShadowPass) overrideInk else withAlpha(band?.argb ?: line.inkColor, line.alpha)
+            val paint = org.jetbrains.skia.Paint().apply { color = argb }
+            // 行内基线位移（Skia 正值下移，故原点上移）。
+            val shiftEm = band?.shiftEm ?: 0f
+            val y = baseY - shiftEm * line.fontSizePx + dy
+            canvas.drawString(line.text.substring(i, i + 1), paintX + x + dx, y, font, paint)
+        }
+    }
+
+    /**
+     * 该行是否为段落末行（末行不拉伸，两端对齐的定义本身）。
+     *
+     * 绘制侧只看本 [DrawLine] 无法知道段末，故取 `DrawLine` 已携带的判据：
+     * [DrawLine.listMarker] 只挂首行 ⇒ 不能用；`range.last` 覆盖到叶文本末即末行。
+     * 叶文本末由 [orilumn.reader.engine.skia.DrawLineBuilder] 传入的 range 全文本坐标决定，
+     * 这里用「行区间右端 == 该行所属叶的文本长度」近似 —— 不精确时会退化为多拉伸末行，
+     * 故判据保守：仅当整行右端 == 全文本长度时才算末行。
+     */
+    private fun isLastLineOf(line: DrawLine, endExcl: Int): Boolean = endExcl >= line.text.length
 
     /** 行区间内四套 runs（色 + face + 基线位移 + 下划线）合并后的 [lo, hi) 段序列：每段的肤色/face/位移/下划线恒定，供逐段渲染。 */
     private data class Band(val start: Int, val end: Int, val argb: Int?, val font: orilumn.reader.engine.css.FontRun?, val shiftEm: Float, val underlined: Boolean)

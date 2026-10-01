@@ -68,6 +68,44 @@ class SkiaRunMeasurer(
     }
 
     /** 整段自然宽（px，max-content / [orilumn.reader.engine.laying.ParagraphBreaker.preferredWidth]）。 */
+    /**
+ * S5 逐字绘制的取面入口：**必须复用 [faceTable]，不得另写一份取面逻辑。**
+ *
+ * ## 为什么不能另写（第一版就是这么栽的）
+ *
+ * 我第一版在 `GlyphPainter` 里写了 `baseGlyphStyle`，它有三处与生产段落侧不一致：
+ * ① 用了裸 `FontStyle(weight, …)` 而非 [SkParagraphFactory.runFontStyle]（少了字重锚点解析）；
+ * ② 只取族栈 `[0]` 首名，**丢掉整栈按字形回退**（CJK/Latin 混排必然取错面）；
+ * ③ 用 `defaultFontMgr()` 而非内嵌池 manager（内嵌字体全取不到）。
+ * 三条合起来 ⇒ **量画失配**（教训 ⑩ 的同一个坑：比值会从 1.20x 虚高到 4.05x），
+ * 表现为 `LineWindowDrawerTest` 7 把全红「行无墨」—— 逐字 `drawString` 拿到了空字体。
+ *
+ * 故本方法只做一件事：把码本交给 [faceTable] 挑出**覆盖该码本的第一张面**，
+ * 与量宽路径（[measure]）**逐字用同一张表**（§2.2(d) 同源约束）。
+     *
+     * @param cp 码本。找不到覆盖面时返 `null`，由调用方决定回落（绘制侧用空 Font，绝不崩）。
+     */
+    fun faceForCp(
+        cp: Int,
+        tag: String?,
+        families: List<String>,
+        weight: Int,
+        italic: Boolean,
+        monospace: Boolean,
+        sizePx: Float,
+    ): Font? {
+        val mgrs = managers()
+        val seg = Seg(
+            0, 0, faceTable(tag, families, monospace, weight, italic, sizePx, mgrs),
+            0f, sizePx, emptyArray(), SkParagraphFactory.runFontStyle(families, weight, italic), mgrs,
+        )
+        for (font in seg.fonts) {
+            if (font.getUTF32Glyph(cp) != NOTDEF) return font
+        }
+        // 无候选面覆盖：与 [measure] 同口径用首面 notdef（画出来也是 .notdef，量画一致）。
+        return if (seg.fonts.isEmpty()) null else seg.fonts[0]
+    }
+
     fun naturalWidth(
         text: CharSequence,
         fontSizePx: Float,

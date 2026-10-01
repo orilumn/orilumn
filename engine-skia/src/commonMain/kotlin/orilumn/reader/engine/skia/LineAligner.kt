@@ -3,6 +3,7 @@ package orilumn.reader.engine.skia
 import orilumn.reader.engine.css.FontRun
 import orilumn.reader.engine.css.TextAlign
 import orilumn.reader.engine.laying.isDocumentSpace
+import orilumn.reader.engine.laying.lineHeightPx
 import kotlin.math.roundToInt
 
 /**
@@ -103,11 +104,19 @@ internal class LineAligner(
         while (visEnd > start && isDocumentSpace(text[visEnd - 1])) visEnd--
         val trailLen = endExcl - visEnd
         val visibleCount = visEnd - start
-        val x0 = firstLineIndentPx.coerceAtLeast(0f)
+        // **对齐的水平定位**（S5 第一版漏了，只做了 JUSTIFY ⇒ CENTER 行左缘起墨，`LineWindowDrawerTest`
+        // 1 把红）。四种语义在此**一次性**算清，绘制侧不再各自为政：
+        //  - LEFT   ：x0 = 缩进。
+        //  - JUSTIFY：x0 = 缩进，可见行末恰好贴版心右缘（slack 均摊，见下）。
+        //  - CENTER ：整体右移 (lineWidth - 可见宽)/2。
+        //  - RIGHT  ：整体右移 (lineWidth - 可见宽)。
+        // 可见宽在拉伸**之后**才是最终宽，故 CENTER/RIGHT 的偏移必须用拉伸后的值 ——
+        // 顺序上：先按 JUSTIFY 算 natural + extra 得「最终可见宽」，再据此定位。
+        val x0Raw = firstLineIndentPx.coerceAtLeast(0f)
 
         if (visibleCount == 0) {
             // 整行皆文档空白：无可见字符，placement 仍铺满区间（区间无缝），右边界退到行首。
-            return Placement(FloatArray(n) { x0 }, FloatArray(n), x0, x0)
+            return Placement(FloatArray(n) { x0Raw }, FloatArray(n), x0Raw, x0Raw)
         }
 
         /**
@@ -117,13 +126,21 @@ internal class LineAligner(
          * 那是排在末字**之后**的不可见附加量，计入就等于把行末的不可见宽度算进「可见右边界」，
          * 实测直接溢出版心（`907.248 > 900`）。同理行末尾随空白的起点就是这里。
          */
-        var natural = x0
+        var natural = x0Raw
         for (k in 0 until visibleCount - 1) natural += adv[k]
 
         // JUSTIFY 拉伸：均摊到**可见字符之间的 N-1 个间隙**；末行不拉伸（两端对齐的定义本身）。
         val doJustify = align == TextAlign.JUSTIFY && !isLastLine && visibleCount > 1
         val slack = lineWidthPx - natural
         val extra = if (doJustify && slack > 0f) slack / (visibleCount - 1) else 0f
+        // 最终可见宽 = natural + 所有拉伸（拉伸后才是「行有多宽」）。
+        val finalVisible = natural + extra * (visibleCount - 1)
+        // CENTER/RIGHT 按**最终**可见宽定位（用拉伸前的 natural 会偏）。
+        val x0 = when (align) {
+            TextAlign.CENTER -> x0Raw + (lineWidthPx - finalVisible).coerceAtLeast(0f) / 2f
+            TextAlign.RIGHT -> x0Raw + (lineWidthPx - finalVisible).coerceAtLeast(0f)
+            else -> x0Raw
+        }
 
         val xs = FloatArray(n)
         var x = x0
@@ -134,13 +151,43 @@ internal class LineAligner(
             if (extra != 0f && k < visibleCount - 1) x += extra
         }
 
-        // 行末尾随空白紧贴末字右边缘；无尾随空白时 trailStartX 即 natural。
-        val trailStartX = natural + extra * (visibleCount - 1)
+        // 行末尾随空白紧贴末字右边缘（含对齐偏移 x0）；无尾随空白时 trailStartX 即可见右边界。
+        val trailStartX = x0 + finalVisible
         return Placement(xs, adv.copyOf(n), trailStartX, trailStartX)
     }
 
     /** 行末圆整右边界（版心对齐判据用，避免 899.9997 判成未铺满）。 */
     fun visibleRightInt(p: Placement): Int = p.visibleRight.roundToInt()
+
+    /**
+     * S5 逐字绘制的**基线 y**（相对行顶 `yTop`）。
+     *
+     * CSS 2.2 §10.8.1 半行距居中：`baseline = halfLeading + ascent`，
+     * 其中 `halfLeading = (lineHeightPx - (ascent + descent)) / 2`（可负，负值即行盒装不下时的溢出）。
+     *
+     * ## 为什么必须自己算（第一版漏了它，7 把锁全红「行无墨」）
+     *
+     * 旧路径 `Paragraph.paint` **内部**按 `setHeight` + `setHalfLeading(true)` 落基线，
+     * 绘制侧只需给 `yTop`；逐字 `drawString` 画的原点**就是基线**，少加这两项就等于
+     * 把整行字画在 `yTop`（yTop=0 时画到画布顶边被裁），表现为「行没有墨」。
+     * 插桩打出来是 `y=0.0` 才定案的 —— 字体/颜色/整栈回退当时都是对的。
+     *
+     * @param ascentDescent `font.getMetrics()` 的 `ascent - descent`（Skia 约定 ascent 为负、
+     *   descent 为正，故字体盒高 = `descent - ascent`；本函数按**传入的盒高**算，不假设符号）。
+     */
+    fun baselineOffset(
+        yTop: Float,
+        fontSizePx: Float,
+        lineHeightRatio: Float,
+        ascentPx: Float,
+        descentPx: Float,
+        extraTop: Float = 0f,
+    ): Float {
+        val lineH = lineHeightPx(fontSizePx, lineHeightRatio)
+        val boxH = ascentPx + descentPx
+        val halfLeading = (lineH - boxH) / 2f
+        return yTop + extraTop + halfLeading + ascentPx
+    }
 
     /**
      * `[from, to)`（**range 本地坐标**）的可见左右并集，供 ruby 注音居中 / 着重号定位用。

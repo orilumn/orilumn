@@ -89,23 +89,26 @@ internal class GlyphPainter(
         italic: Boolean,
         monospace: Boolean,
         argb: Int,
-        fontMgr: FontMgr = SkParagraphFactory.defaultFontMgr(),
+        cp: Int = 'H'.code,
+        tag: String? = null,
     ): GlyphStyle {
-        val style = SkParagraphFactory.runFontStyle(families, weight, italic)
-        // 无匹配面 ⇒ 空 Font（Skia 用默认面绘制），与段落侧「无族回退」行为一致、不崩。
-        val tf: Typeface? = fontMgr.matchFamilyStyle(
-            SkParagraphFactory.resolveFamilies(null, families, monospace)[0], style,
-        )
-        val font = if (tf != null) Font(tf, fontSizePx.coerceAtLeast(1f)) else Font()
-        return GlyphStyle(font, argb, 0f)
+        // 取面一律走 [SkiaRunMeasurer.faceForCp]（复用整栈回退面表），不另写 matchFamilyStyle。
+        val font = measurer.faceForCp(cp, tag, families, weight, italic, monospace, fontSizePx.coerceAtLeast(1f))
+        // 无面 ⇒ 空 Font（Skia 用默认面绘制），绝不崩（与段落侧「无族回退」同态度）。
+        return GlyphStyle(font ?: Font(), argb, 0f)
     }
 
     private fun withAlpha(argb: Int, alpha: Int): Int =
         (argb and 0x00FFFFFF) or ((argb ushr 24 and 0xFF) * alpha / 255 shl 24)
 
-    /** 面缓存键（族栈 + 字重 + 斜体 + 字号 bits），避免逐字重复 `matchFamilyStyle`（native 调用）。 */
-    fun cacheKey(families: List<String>, weight: Int, italic: Boolean, sizePx: Float): Any =
-        listOf(families, weight, italic, sizePx.toBits())
+    /**
+     * 面缓存键（族栈 + 字重 + 斜体 + 字号 bits + **码本**），避免逐字重复取面（native 调用）。
+     *
+     * **码本必须进键**：逐字绘制下不同码本会落到族栈里不同的面（CJK 宋体 / Latin Times）。
+     * 键里少了它 ⇒ 一个字用错面，肉眼可见且**不报错**（与教训 ⑩ 同源的分叉，只是这次在缓存层）。
+     */
+    fun cacheKey(families: List<String>, weight: Int, italic: Boolean, sizePx: Float, cp: Int): Any =
+        listOf(families, weight, italic, sizePx.toBits(), cp)
 }
 
 /** `FontStyle` 的可读别名（避免调用方 import 两处）。 */

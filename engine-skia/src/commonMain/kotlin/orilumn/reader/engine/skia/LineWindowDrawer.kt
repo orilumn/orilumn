@@ -193,7 +193,7 @@ class LineWindowDrawer(
         }
     }
 
-    /** 主文本行绘制：JUSTIFY 追加换行制造首行以获得铺满间距（中部行两端对齐语义），见类文档。 */
+    /** 主文本行绘制（S5 逐字路径）：几何由 [LineAligner] 给、落墨由 [GlyphPainter] 逐字做。 */
     private fun paintText(canvas: Canvas, style: ParagraphStyle, line: DrawLine, textX: Float, collection: FontCollection) {
         val appendTrailingNewline = line.alignment == orilumn.reader.engine.css.TextAlign.JUSTIFY
         // P3-a: 祖先 opacity 统一乘墨色/段色；行阴影随段整形（Skia 原生，不改 advances）。

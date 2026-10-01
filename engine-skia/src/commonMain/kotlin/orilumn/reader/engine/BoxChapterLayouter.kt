@@ -176,7 +176,10 @@ class BoxChapterLayouter(
             // Q1-c：不再双引擎——重排断行统一走 engine-skia 实现。
             // S3：变体由 `bodyParagraphBreaker` 单源决定（默认 Skia = 接线前逐字节同构，
             // `ab="inhouseBreak=1"` 切自建断行器；变体进 paramHash 故拨开关即换缓存键）。
-            orilumn.reader.engine.skia.bodyParagraphBreaker(profile.letterSpacingEm),
+            // 重路径表格 auto 分列用的断行器也由 `heavyPathBreaker` 单源接管——它把
+            // `tableCellPref` 的度量方法钉回 Skia，断行仍走变体，从而避免重轻不一致
+            // 且绕开自建侧 `preferredWidth` 仍是桩的问题。详见 KDoc。
+            orilumn.reader.engine.skia.heavyPathBreaker(profile.letterSpacingEm),
         )
         // Heavy: full-chapter line shaping (real skia break per leaf). Only needed for line-level
         // pagination — small-chapter foreground and large-chapter background canonical. The display gate
@@ -2985,7 +2988,13 @@ class LightPrepare(
      * 全落在 auto 分列三段式的 `avail>=totalMax` 段 —— 该段 `w[i] = pref[i]`，
      * min-content 一次都没被读过，故表格这条线对断行器变体零响应。留在 Skia 有两个好处：
      * A/B 只隔离正文变化、表格列宽在两侧完全相同，便于归因。
-     * 要激活见 TODO Q6（需 `table-layout: fixed` / 指定列宽 / 更多列 / 更窄版心之一）。
+     *
+     * **别以为这里钉住就够了**：重路径的表格 auto 分列**不走** `tableBreaker`，它用的是
+     * `NormalFlowLayout.buildTableRows` 里 `tableCellPref` 收到的**透传**断行器
+     * （`NormalFlowLayout.kt:746`），而那个就是正文断行器。所以重路径那一侧由
+     * `heavyPathBreaker` 把度量方法单独钉回 Skia —— 两处缺一不可。
+     *
+     * 要激活见 TODO Q6：**前提是自建侧先补上真 `preferredWidth`**，光让表格可观测不够。
      */
     private val tableBreaker by lazy { orilumn.reader.engine.skia.SkiaParagraphBreaker(profile.letterSpacingEm) }
 

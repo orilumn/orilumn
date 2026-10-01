@@ -17,7 +17,11 @@ import orilumn.reader.engine.text.TypographicProfile
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.After
+import org.junit.Before
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.junit.runners.Parameterized
 
 /**
  * 《摄影的艺术》ch44 图页回归（真书链路，共享引擎，无平台代码）。
@@ -32,7 +36,26 @@ import org.junit.Test
  *  - 传统主题 + href 空白（修复前 persist）：1590×795 —— 旧 bug（宽/2 回退）
  *  - 原书设置（无主题层，当前新装默认）：915×1105 —— 设计行为，非 bug
  */
-class PhotoPersistFullWidthRegressionTest {
+@RunWith(Parameterized::class)
+class PhotoPersistFullWidthRegressionTest(private val variant: String) {
+
+    companion object {
+        /**
+         * S3：两个变体都要成立。
+         *
+         * 本类锁的是「图片拿全宽类 + 盒高等比」这条不变式，断行器只是同页文本的**邻居**：
+         * 断点一变，图片所在段的宽度就可能变，进而动到盒高。所以它不是「与断行无关」，
+         * 但也不是主题 —— 两侧都跑一遍即可，不为它单开断行专属断言。
+         */
+        @JvmStatic
+        @Parameterized.Parameters(name = "breaker={0}")
+        fun variants() = breakerVariantParams()
+    }
+
+    @Before fun applyVariant() = applyBreakerVariant(variant)
+
+    @After fun resetVariant() = resetBreakerVariant()
+
 
     /** 真实版心宽：设备 view 1840，左右边距各 125 → 1590（与旧实测几何同）。 */
     private val contentW = 1590
@@ -100,7 +123,7 @@ class PhotoPersistFullWidthRegressionTest {
         val engine = styleEngine(profile)
         val styles = engine.compute(root)
         val classify = NormalFlowLayout.heavyClassify(styles, engine.hasDisplayDeclaration())
-        val result = BoxLayouter(profile.bodyPx, SkiaParagraphBreaker(0f))
+        val result = BoxLayouter(profile.bodyPx, variantBreaker())
             .layoutBoxes(root, contentW, styles, classify, imageLoader = imgLoader, chapterHref = href)
         var boxHeight = -1
         fun walkBox(b: LayoutBox) {

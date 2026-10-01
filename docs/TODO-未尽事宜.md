@@ -113,15 +113,27 @@
     让 `advanceOf(i)` 返回 `adv(cp_i) + kern(cp_{i−1}, cp_i)`。连字仍无解。
   - 详见 `docs/自建断行引擎-实施方案.md` §2.2(d) 与 `docs/自建断行引擎-测试计划.md` §T8.4。
 
-- **Q6 — `min-content` 这条路径在宽版心下整条闲置，S3 收益不含表格（2026-10-01 记，待裁决）**：
+- **Q6 — 表格侧：min 侧闲置 + 自建侧无真测量（2026-10-01 记；S3 接线时已查清前半个前提）**：
   auto 分列的 min 侧只有一个消费点（`NormalFlowLayout.tableCellPref` → `ParagraphBreaker.minContentWidth`）。
   真机 A/B 查明：13 本语料 49 张表**全部**落在 `autoColumnWidths` 三段式的 `avail >= totalMax` 段，
   该段 `w[i] = pref[i]`，**min-content 一次都没被读过**。故 T2d/T2e 的禁则补表在现实版心下不可观测。
   - **量级**（实测，`docs/自建断行引擎-测试计划.md` §T2f）：格级 7 处变化 → 列级 **1** 列 → live **0 列**。
     表要进插值段需版心 ≲ 0.8× 字号量级；即使挤进去，49 张表里也只有 1 列可观测。
   - **对 S3 的影响**：自建断行器的 R1（长串兜底）价值**不来自 min-content 这条路**，
-    接线前需先决定是否要激活它（`table-layout: fixed` / 指定列宽 / 更多列 / 更窄版心），
-    否则表格这条线可以整条从 S3 验收判据里划掉。
+    表格这条线已整条从 S3 验收判据里划掉。
+  - **【2026-10-01 新增，比上面更要紧】自建侧根本没有真 `preferredWidth`/`minContentWidth`**：
+    `InhouseParagraphBreaker` 未覆写这两个方法，用的是接口默认桩 `段长 x fontSizePx`
+    （接口 KDoc 自称「CJK 精确、拉丁偏宽、永不窄于实需」——**永不窄于实需在表格语境下恰恰是坏事**）。
+    实测 fs=44.4 / `STSong,serif`：`preferredWidth` CJK 1.000（汉字 advance 恰好 1em，巧合）、
+    Latin **2.49x**、URL **2.09x**、混排 **1.95x**；`minContentWidth` Latin 2.61x / URL 2.03x。
+    ⇒ **表格侧的正确解锁顺序是「先补真测量，再谈可观测」**；仅让表格落进插值段（fixed 列宽 /
+    指定列宽 / 更多列 / 更窄版心）**不足以**安全切换。此前把这条写成「满足其一即可」是错的，已订正。
+  - **接线时踩到并已修的坑：重路径的表格度量并不走 `tableBreaker`**。
+    重路径用的是 `NormalFlowLayout.buildTableRows` → `tableCellPref` 里**透传**下来的正文断行器
+    （`NormalFlowLayout.kt:746`），所以正文一接线，重路径表格列宽就跟着变体走 —— 与轻路径分叉，
+    且自建侧那个桩会让 Latin 列宽翻倍。已加 `heavyPathBreaker` 把**度量方法**单独钉回 Skia
+    （断行仍走变体），并用 `TableBreakerStaysSkiaTest` 双向钉住（变体开关 + 变异验证）。
+    原则一句话：**变体只该改变行，不该改变列。**
   - **顺带查清的两处缓存陷阱**（不是 bug，但会让人量到假结论）：
     ① `LayoutParamKey` 不含禁则表身份 ⇒ 改断行规则不改 `paramHash`；
     ② `app/build.gradle.kts:18` 的 `versionCode = 20` 是写死常量、非单调递增构建号，

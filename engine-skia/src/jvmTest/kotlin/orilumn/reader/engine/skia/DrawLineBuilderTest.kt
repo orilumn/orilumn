@@ -11,21 +11,38 @@ import orilumn.reader.engine.laying.NormalFlowLayout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.After
+import org.junit.Before
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.junit.runners.Parameterized
 
 /**
  * Q1-a — 共享 DrawLineBuilder：盒式布局 → 每行 DrawLine 的唯一语义测试。
  *
  * 桌面壳只调用它做单源投影（P3 xLeft/marker 语义在这里守住）；平板 Q1-a 输出端改造后同吃这一份。
  */
-class DrawLineBuilderTest {
+@RunWith(Parameterized::class)
+class DrawLineBuilderTest(private val variant: String) {
+
+    companion object {
+        /** S3：同一个不变量必须在两个断行器变体上都成立，见 [BreakerVariantFixture]。 */
+        @JvmStatic
+        @Parameterized.Parameters(name = "breaker={0}")
+        fun variants() = breakerVariantParams()
+    }
+
+    @Before fun applyVariant() = applyBreakerVariant(variant)
+
+    @After fun resetVariant() = resetBreakerVariant()
+
 
     private fun build(html: String, ua: String = ""): Map<Int, DrawLine> {
         val root = HtmlTreeConverter().convert(html)!!
         val engine = StyleComputer(16f, LightCssParser().parse(ua), emptyList())
         val styleMap = engine.compute(root)
         val classify = NormalFlowLayout.heavyClassify(styleMap, engine.hasDisplayDeclaration())
-        val result = BoxLayouter(16f, SkiaParagraphBreaker(0f)).layoutBoxes(root, 600, styleMap, classify)
+        val result = BoxLayouter(16f, variantBreaker()).layoutBoxes(root, 600, styleMap, classify)
         return DrawLineBuilder.build(result, styleMap, classify, HIDDEN_NONE, 0f)
     }
 
@@ -37,7 +54,7 @@ class DrawLineBuilderTest {
         val engine = StyleComputer(16f, LightCssParser().parse(""), emptyList())
         val styleMap = engine.compute(root)
         val classify = NormalFlowLayout.heavyClassify(styleMap, engine.hasDisplayDeclaration())
-        val result = BoxLayouter(16f, SkiaParagraphBreaker(0f)).layoutBoxes(root, 600, styleMap, classify)
+        val result = BoxLayouter(16f, variantBreaker()).layoutBoxes(root, 600, styleMap, classify)
         val ink = 0xFF123456.toInt()
         val map = DrawLineBuilder.build(result, styleMap, classify, HIDDEN_NONE, 0f, ink)
         assertTrue("must produce lines", map.isNotEmpty())
@@ -62,7 +79,7 @@ class DrawLineBuilderTest {
         val engine = StyleComputer(16f, LightCssParser().parse(""), emptyList())
         val styleMap = engine.compute(root)
         val classify = NormalFlowLayout.heavyClassify(styleMap, engine.hasDisplayDeclaration())
-        val result = BoxLayouter(16f, SkiaParagraphBreaker(0f)).layoutBoxes(root, 600, styleMap, classify)
+        val result = BoxLayouter(16f, variantBreaker()).layoutBoxes(root, 600, styleMap, classify)
         val map = DrawLineBuilder.build(result, styleMap, classify, HIDDEN_NONE, 0f)
         val dl = map[0] ?: error("no line")
         assertEquals("abcdef", dl.text.substring(dl.range))
@@ -75,7 +92,7 @@ class DrawLineBuilderTest {
         val engine = StyleComputer(16f, LightCssParser().parse(""), emptyList())
         val styleMap = engine.compute(root)
         val classify = NormalFlowLayout.heavyClassify(styleMap, engine.hasDisplayDeclaration())
-        val result = BoxLayouter(16f, SkiaParagraphBreaker(0f)).layoutBoxes(root, 600, styleMap, classify)
+        val result = BoxLayouter(16f, variantBreaker()).layoutBoxes(root, 600, styleMap, classify)
         val map = DrawLineBuilder.build(result, styleMap, classify, HIDDEN_NONE, 0f)
         val dl = map[0] ?: error("no line")
         assertEquals(listOf(ColorRun(0, 5, 0xFF0000FF.toInt())), dl.colorRuns)
@@ -95,7 +112,7 @@ class DrawLineBuilderTest {
         val engine = StyleComputer(16f, LightCssParser().parse("pre{background-color:#eeeeee}"), emptyList())
         val styleMap = engine.compute(root)
         val classify = NormalFlowLayout.heavyClassify(styleMap, engine.hasDisplayDeclaration())
-        val result = BoxLayouter(16f, SkiaParagraphBreaker(0f)).layoutBoxes(root, 600, styleMap, classify)
+        val result = BoxLayouter(16f, variantBreaker()).layoutBoxes(root, 600, styleMap, classify)
         val bgs = DrawLineBuilder.pageBackgrounds(result, 0, 1)
         assertTrue("pre background must be emitted", bgs.isNotEmpty())
         assertTrue(bgs.all { it.argb == 0xFFEEEEEE.toInt() })
@@ -105,7 +122,7 @@ class DrawLineBuilderTest {
         val engine2 = StyleComputer(16f, LightCssParser().parse(""), emptyList())
         val styleMap2 = engine2.compute(plain)
         val classify2 = NormalFlowLayout.heavyClassify(styleMap2, engine2.hasDisplayDeclaration())
-        val result2 = BoxLayouter(16f, SkiaParagraphBreaker(0f)).layoutBoxes(plain, 600, styleMap2, classify2)
+        val result2 = BoxLayouter(16f, variantBreaker()).layoutBoxes(plain, 600, styleMap2, classify2)
         assertTrue(DrawLineBuilder.pageBackgrounds(result2, 0, 1).isEmpty())
     }
 
@@ -133,7 +150,7 @@ class DrawLineBuilderTest {
         val engine = StyleComputer(16f, LightCssParser().parse(""), listOf(LightCssParser().parse(author)))
         val styleMap = engine.compute(root)
         val classify = NormalFlowLayout.heavyClassify(styleMap, engine.hasDisplayDeclaration())
-        val result = BoxLayouter(16f, SkiaParagraphBreaker(0f)).layoutBoxes(root, 600, styleMap, classify)
+        val result = BoxLayouter(16f, variantBreaker()).layoutBoxes(root, 600, styleMap, classify)
         val map = DrawLineBuilder.build(result, styleMap, classify, HIDDEN_NONE, 0f)
         assertEquals(2, map.size)
         val anon = map.values.single { it.text == "标题文字" }
@@ -190,7 +207,7 @@ class DrawLineBuilderTest {
         val engine = StyleComputer(16f, LightCssParser().parse("img{height:40px}"), emptyList())
         val styleMap = engine.compute(root)
         val classify = NormalFlowLayout.heavyClassify(styleMap, engine.hasDisplayDeclaration())
-        val result = BoxLayouter(16f, SkiaParagraphBreaker(0f)).layoutBoxes(root, 600, styleMap, classify)
+        val result = BoxLayouter(16f, variantBreaker()).layoutBoxes(root, 600, styleMap, classify)
         val map = DrawLineBuilder.build(result, styleMap, classify, HIDDEN_NONE, 0f)
         assertTrue("sole-figure must not emit an OBJ-glyph text line", map.isEmpty())
         val imgs = DrawLineBuilder.pageImages(result, 0, 1, null, "Text/Ch.htm")
@@ -217,7 +234,7 @@ class DrawLineBuilderTest {
             val light = ArrayList<orilumn.reader.engine.html.MarkupElement>()
             NormalFlowLayout.enumerateBlockLeaves(root, light, classify, HIDDEN_NONE)
             assertEquals("$html light leaf", listOf("img"), light.map { it.tag })
-            val result = BoxLayouter(16f, SkiaParagraphBreaker(0f)).layoutBoxes(root, 600, styleMap, classify)
+            val result = BoxLayouter(16f, variantBreaker()).layoutBoxes(root, 600, styleMap, classify)
             val heavy = ArrayList<orilumn.reader.engine.laying.LayoutBox>()
             fun walk(boxes: List<orilumn.reader.engine.laying.LayoutBox>) {
                 for (b in boxes) if (b.isContainer) walk(b.childBoxes) else heavy.add(b)
@@ -239,7 +256,7 @@ class DrawLineBuilderTest {
         val light = ArrayList<orilumn.reader.engine.html.MarkupElement>()
         NormalFlowLayout.enumerateBlockLeaves(root, light, classify, HIDDEN_NONE)
         assertEquals(listOf("p"), light.map { it.tag })
-        val result = BoxLayouter(16f, SkiaParagraphBreaker(0f)).layoutBoxes(root, 600, styleMap, classify)
+        val result = BoxLayouter(16f, variantBreaker()).layoutBoxes(root, 600, styleMap, classify)
         val map = DrawLineBuilder.build(result, styleMap, classify, HIDDEN_NONE, 0f)
         assertTrue(map.values.any { it.text.contains("\uFFFC") })
         assertTrue(DrawLineBuilder.pageImages(result, 0, 1, null, "Text/Ch.htm").isEmpty())
@@ -252,7 +269,7 @@ class DrawLineBuilderTest {
         val styleMap = engine.compute(root)
         val classify = NormalFlowLayout.heavyClassify(styleMap, engine.hasDisplayDeclaration())
         val hidden = { el: orilumn.reader.engine.html.MarkupElement -> styleMap[el]?.displayNone == true }
-        val result = BoxLayouter(16f, SkiaParagraphBreaker(0f)).layoutBoxes(root, 600, styleMap, classify)
+        val result = BoxLayouter(16f, variantBreaker()).layoutBoxes(root, 600, styleMap, classify)
         val map = DrawLineBuilder.build(result, styleMap, classify, hidden, 0f)
         assertTrue(map.values.all { !it.text.contains("hidden") })
         assertTrue(map.values.any { it.text.contains("shown") })
@@ -269,7 +286,7 @@ class DrawLineBuilderTest {
         val styleMap = engine.compute(root)
         val classify = NormalFlowLayout.heavyClassify(styleMap, engine.hasDisplayDeclaration())
         val hidden = { el: orilumn.reader.engine.html.MarkupElement -> styleMap[el]?.displayNone == true }
-        val result = BoxLayouter(10f, SkiaParagraphBreaker(0f)).layoutBoxes(root, 600, styleMap, classify)
+        val result = BoxLayouter(10f, variantBreaker()).layoutBoxes(root, 600, styleMap, classify)
         val map = DrawLineBuilder.build(result, styleMap, classify, hidden, 0f)
         assertTrue(map.isNotEmpty())
         val rubyLine = map.values.first { it.text.contains("漢") }
@@ -304,7 +321,7 @@ class DrawLineBuilderTest {
         val classify = NormalFlowLayout.heavyClassify(styleMap, engine.hasDisplayDeclaration())
         val hidden = { el: orilumn.reader.engine.html.MarkupElement -> styleMap[el]?.displayNone == true }
         val map = DrawLineBuilder.build(
-            BoxLayouter(10f, SkiaParagraphBreaker(0f)).layoutBoxes(root, 600, styleMap, classify),
+            BoxLayouter(10f, variantBreaker()).layoutBoxes(root, 600, styleMap, classify),
             styleMap, classify, hidden, 0f,
         )
         val dl = map.values.first()
@@ -324,7 +341,7 @@ class DrawLineBuilderTest {
         val classify = NormalFlowLayout.heavyClassify(styleMap, engine.hasDisplayDeclaration())
         val hidden = { el: orilumn.reader.engine.html.MarkupElement -> styleMap[el]?.displayNone == true }
         val map = DrawLineBuilder.build(
-            BoxLayouter(10f, SkiaParagraphBreaker(0f)).layoutBoxes(root, 600, styleMap, classify),
+            BoxLayouter(10f, variantBreaker()).layoutBoxes(root, 600, styleMap, classify),
             styleMap, classify, hidden, 0f,
         )
         val linked = map.values.first { it.text.contains("表1") }

@@ -206,209 +206,118 @@ class LineWindowDrawer(
     }
 
     /** 主文本行绘制（S5 逐字路径）：几何由 [LineAligner] 给、落墨由 [GlyphPainter] 逐字做。 */
+    /**
+     * 主文本行绘制 —— **S5 逐字路径，本函数内不出现 `Paragraph`**。
+     *
+     * 几何（逐字 x / 可见右边界 / 拉伸）由 [LineAligner] 给，落墨由 [GlyphPainter] 逐字
+     * `drawString` 做；两者与断行侧共用 [SkiaRunMeasurer] 取宽，**量画同源**。
+     *
+     * ## 为什么这里一句 `Paragraph` 都没有（S5 清理）
+     *
+     * S5 落地时为了少改，`paragraph.layout()` 被留着只用来取 `lineMetrics.height` 算基线，
+     * 于是**两套基线计算并存**、60 行 `ParagraphBuilder` 分段喂文本成了死代码。
+     * 「换断行器是为了真正实现 JUSTIFY」这个主要目的会被这种残骸掩盖 ——
+     * 读代码的人看到 `ParagraphBuilder` + `Alignment.JUSTIFY` 会以为对齐还是 Skia 在做。
+     *
+     * 现在基线由 [LineAligner.baselineOffset] 单独算（半行距居中 + ascent，CSS 2.2 §10.8.1），
+     * **Android 的 `setHeight`/`setHalfLeading` 平台差异一并消失**（旧路径靠
+     * `deviceBaselineShift` 补，现在两侧同式）。故整段 Paragraph 装配可以删净。
+     *
+     * [style] 形参仍在：ruby rt 与 marker 两处仍需自建 `ParagraphStyle`（注音独立居中整形、
+     * marker 单行短文本），它们与本行的对齐无关。
+     */
     private fun paintText(canvas: Canvas, style: ParagraphStyle, line: DrawLine, textX: Float, collection: FontCollection) {
-        // S5: 追加换行（`appendTrailingNewline`）已**退役**。它原本是「Skia 无 JUSTIFY 拉伸开关」
-        // 这个误判下的权宜之计 —— 那个 `\n` 把软断行变成硬换行，靠「制造首行」骗 Skia 拉伸整段，
-        // 是真机两端对齐失效的根源之一（行末空白一出现就不拉伸，教训 29b）。
-        // 现在拉伸由 [LineAligner] 显式做（slack 均摊到可见间隙），不再需要制造首行。
-        // P3-a: 祖先 opacity 统一乘墨色/段色；行阴影随段整形（Skia 原生，不改 advances）。
-        // 注意 skija `textStyle` getter 返回拷贝：改完必须重赋回 paragraphStyle。
+        // P3-a: 祖先 opacity 统一乘墨色/段色。
         val ink = withAlpha(line.inkColor, line.alpha)
-        val lineShadow = line.textShadow?.let { ts ->
-            val c = ts.colorHex?.let(::cssHexToArgb) ?: return@let null
-            Shadow(c, ts.dx, ts.dy, (ts.blur / 2).toDouble())
-        }
-        // 基底样式挂阴影（无 run 快径走它；有 run 段在 textStyleFor 内同挂）。
-        if (lineShadow != null) {
-            val base = style.textStyle
-            base.addShadow(lineShadow)
-            style.textStyle = base
-        }
-        if (lineShadow != null) style.textStyle.addShadow(lineShadow)
-        // 钳位：range 越界只跳过该行（Skia 度量版本差异曾让末行 end 超出），绝不在绘制线程崩 activity。
+        // 钳位：range 越界只跳过该行，绝不在绘制线程崩 activity。
         val start = line.range.first.coerceIn(0, line.text.length)
         val endExcl = (line.range.last + 1).coerceIn(start, line.text.length)
-        // P6-b: 本行相交的叠排 runs（叶坐标）；内联 rt 源文以透明墨隐藏（占宽保守，字符流/断行不变）。
+
+        // P6-b 本行相交的叠排 runs；内联 rt 源文以透明墨隐藏（占宽保守，字符流/断行不变）。
         val rubyHits = line.rubyRuns.filter { it.start < endExcl && it.endExclusive > start }
-        val rtHidden = rubyHits.mapNotNull { run ->
-            val s = run.rtStart.coerceIn(start, endExcl)
-            val e = run.rtEndExclusive.coerceIn(start, endExcl)
-            if (e > s && run.rtStart >= 0) s until e else null
+        // 表格图占位隐藏（与注音源文同法：占宽保留，字符流/断行不变）。
+        val hiddenRuns = buildList {
+            for (run in rubyHits) {
+                val s = run.rtStart.coerceIn(start, endExcl)
+                val e = run.rtEndExclusive.coerceIn(start, endExcl)
+                if (e > s && run.rtStart >= 0) add(s until e)
+            }
+            for (r in line.imgHidden) {
+                val s = r.first.coerceIn(start, endExcl)
+                val e = (r.last + 1).coerceIn(start, endExcl)
+                if (e > s) add(s until e)
+            }
         }
-        // 表格图占位隐藏（与注音源文同法：透明墨，占宽保留；字符流/断行不变）。
-        val imgHidden = line.imgHidden.mapNotNull { r ->
-            val s = r.first.coerceIn(start, endExcl)
-            val e = (r.last + 1).coerceIn(start, endExcl)
-            if (e > s) s until e else null
-        }
-        val hiddenRuns = rtHidden + imgHidden
-        // 子段 [from,to) 被隐藏 ⟺ 其末字符 to-1 落在区间内；区间按 `until` 存
-        //（last = 排外末端-1），故判 `to <= last + 1`。旧 `to <= last` 差一，
-        // 恰好覆盖的段永不隐藏（表图占位 tofu 残留即此；注音尾字同病）。
+        // 子段 [from,to) 被隐藏 ⟺ 其末字符 to-1 落在区间内（区间按 `until` 存，last = 排外末端-1）。
         fun isHidden(from: Int, to: Int): Boolean {
             for (r in hiddenRuns) if (from >= r.first && to <= r.last + 1) return true
             return false
         }
         val lineExtra = rubyHits.maxOfOrNull { it.extraHeightPx() } ?: 0
-        // 下划线：行区间相交段（叶坐标），随段挂原生装饰（CSS 标准：声明元素整段传播）。
+        // 下划线：行区间相交段（叶坐标）。CSS 标准是整段传播，故按区间并集画，不逐字跳。
         val ulHits = line.underlineRuns.mapNotNull { r ->
             val s = r.start.coerceIn(start, endExcl)
             val e = r.endExclusive.coerceIn(start, endExcl)
             if (e > s) s until e else null
         }
-        fun isUnderlined(from: Int, to: Int): Boolean {
-            for (r in ulHits) if (from >= r.first && to <= r.last) return true
-            return false
+
+        // ── 几何：Aligner 给逐字 x / 拉伸 / 可见右边界（P1-2 不换行段以无限宽排，单行溢出）──
+        val placement = aligner.align(
+            text = line.text,
+            range = start until endExcl,
+            fontSizePx = line.fontSizePx,
+            lineWidthPx = if (line.nowrap) Float.MAX_VALUE else line.lineWidthPx.coerceAtLeast(1).toFloat(),
+            letterSpacingEm = line.letterSpacingEm,
+            tag = line.tag,
+            families = line.families,
+            weight = line.weight,
+            italic = line.italic,
+            monospace = line.monospace,
+            fontRuns = line.fontRuns,
+            align = line.alignment,
+            firstLineIndentPx = 0f,
+            // 末行不拉伸：两端对齐的定义本身。
+            isLastLine = isLastLineOf(line, endExcl),
+        )
+        // 首行缩进：断行侧已按减宽排过，这里把本行整体右移（marker 另行绘制，不动）。
+        val paintX = textX + line.firstLineIndentPx.coerceAtLeast(0f)
+        // 基线：半行距居中 + ascent（CSS 2.2 §10.8.1）。**自算**，不再借道 Paragraph。
+        val baseY = baselineY(line, lineExtra)
+        // paintX 已含缩进 ⇒ placement 的 x 起点归零，这里统一加 paintX。
+        paintGlyphs(canvas, line, placement, paintX, baseY, start, endExcl, { f, t -> isHidden(f, t) }, ulHits)
+
+        // 注音/着重号与文字同盒，随 half-leading 一并下移，保持与基字的相对位置。
+        if (rubyHits.isNotEmpty() && endExcl > start) {
+            drawRuby(canvas, line, placement, paintX, start, endExcl, rubyHits, ink, collection, 0f)
         }
-        val builder = ParagraphBuilder(style, collection)
-        val hasRuns = line.colorRuns.isNotEmpty() || line.fontRuns.isNotEmpty() || line.baselineShifts.isNotEmpty() || hiddenRuns.isNotEmpty() || ulHits.isNotEmpty()
-        if (!hasRuns) {
-            builder.addText(line.text.substring(start, endExcl))
-        } else {
-            // 行内着色 + 行内 face + 基线位移 + 下划线：把行区间按四份 runs 合并切成段（sorted,
-            // 段内肤色/face/位移/下划线恒定），无色无 face 无位移无下划线的段走基底（默认 style）, 其余段 push
-            // 同配置换 style。位移 em 相对行基底字号，Skia 正值下移故取反。
-            // 同 style 段按「argb+face+位移+下划线」缓存复用；run 越界按行钳位（防御，正常不会触发）。
-            val styles = HashMap<StyleKey, TextStyle>()
-            fun textStyleFor(argb: Int?, run: orilumn.reader.engine.css.FontRun?, shiftEm: Float, underlined: Boolean): TextStyle = styles.getOrPut(
-                StyleKey(argb, run?.fontPxOr(line.fontSizePx) ?: line.fontSizePx, run?.tag ?: line.tag, run?.families ?: line.families, run?.weight ?: line.weight, run?.italic ?: line.italic, run?.monospace ?: line.monospace, shiftEm, underlined),
-            ) {
-                val segInk = withAlpha(argb ?: line.inkColor, line.alpha)
-                SkParagraphFactory.runTextStyle(
-                    line.alignment,
-                    run?.fontPxOr(line.fontSizePx) ?: line.fontSizePx,
-                    line.lineHeightRatio,
-                    run?.tag ?: line.tag,
-                    run?.families ?: line.families,
-                    run?.weight ?: line.weight,
-                    run?.italic ?: line.italic,
-                    run?.monospace ?: line.monospace,
-                    line.letterSpacingEm,
-                    inkColor = segInk,
-                    baselineShiftPx = -shiftEm * line.fontSizePx,
-                ).apply {
-                    if (lineShadow != null) addShadow(lineShadow)
-                    // 下划线装饰色跟段墨色（CSS 无 text-decoration-color 解析时与文字同色，浏览器标准）。
-                    if (underlined) {
-                        setDecorationStyle(
-                            org.jetbrains.skia.paragraph.DecorationStyle(
-                                true, false, false, false, segInk,
-                                org.jetbrains.skia.paragraph.DecorationLineStyle.SOLID, 1f,
-                            ),
-                        )
-                    }
-                }
-            }
-            fun paintSegment(from: Int, to: Int, argb: Int?, run: orilumn.reader.engine.css.FontRun?, shiftEm: Float, underlined: Boolean) {
-                if (to <= from) return
-                // P6-b: 内联 rt 源文透明（占宽保留）：按隐藏区间切分，隐藏段走透明墨。
-                var c = from
-                // 收集本段内的隐藏边界，切成透明/可见子段。
-                val cuts = ArrayList<Int>(4)
-                cuts.add(c)
-                for (r in hiddenRuns) {
-                    if (r.first > c && r.first < to) cuts.add(r.first)
-                    if (r.last > c && r.last < to) cuts.add(r.last)
-                }
-                cuts.add(to)
-                val sorted = cuts.distinct().sorted()
-                for (k in 0 until sorted.size - 1) {
-                    val s = sorted[k]
-                    val e = sorted[k + 1]
-                    if (e <= s) continue
-                    val hidden = isHidden(s, e)
-                    if (!hidden && argb == null && run == null && shiftEm == 0f && !underlined) {
-                        builder.addText(line.text.substring(s, e))
-                    } else {
-                        builder.pushStyle(textStyleFor(if (hidden) 0x00000000 else argb, run, shiftEm, underlined))
-                        builder.addText(line.text.substring(s, e))
-                        builder.popStyle()
-                    }
-                }
-            }
-            var cursor = start
-            for (band in mergeBands(line, start, endExcl)) {
-                if (band.start > cursor) paintSegment(cursor, band.start, null, null, 0f, isUnderlined(cursor, band.start))
-                paintSegment(band.start, band.end, band.argb, band.font, band.shiftEm, band.underlined)
-                if (band.end > cursor) cursor = band.end
-            }
-            if (cursor < endExcl) paintSegment(cursor, endExcl, null, null, 0f, isUnderlined(cursor, endExcl))
-        }
-        val paragraph = builder.build()
-        try {
-            // P1-2: 不换行段以无限宽整形（单行溢出，CSS overflow 可见语义；对齐退为行首）。
-            paragraph.layout(if (line.nowrap) Float.MAX_VALUE else line.lineWidthPx.coerceAtLeast(1).toFloat())
-            // 首行缩进：断行侧已按减宽排过，这里把本行整体右移（marker 另行绘制，不动）。
-            val paintX = textX + line.firstLineIndentPx.coerceAtLeast(0f)
-            // P6-b: 有注音的行基文下移注音高（行顶留给叠排 rt），无注音走旧 yTop。
-            // 半行距居中（CSS 2.2 §10.8.1）按平台能力分两路，覆盖两个平台的 Skia 差异：
-            //  - jvm：`Paragraph.paint` 按 setHeight 缩放后的 ascent 落基线；整形侧开 setHalfLeading(true)
-            //    （见 [SkParagraphFactory]）即得浏览器语义——leading 上下各半，行盒内文字垂直居中，
-            //    此时 lineMetrics.height ≈ 行高，无需再手工位移。
-            //  - android：`Paragraph.paint` 忽略 setHeight / setHalfLeading，基线 = 画笔原点 + 字体自然盒的一半，
-            //    比浏览器少了 (行高 − 自然字体高)。下面把绘制原点整体下移这一差值补回，落笔即与浏览器一致
-            //    （Android 的 lineMetrics.height 就是自然盒高，不受 setHeight 影响）。
-            // 平台判定经 [paragraphPaintHonorsLineHeight]（jvm true / android false）。
-            // 只动绘制原点：DrawLine 的 yTop/yBottom（页行几何）不变，分页与行盒窗口完全不动。
-            val lineMetrics0 = paragraph.lineMetrics.getOrNull(0)
-            val deviceBaselineShift = if (
-                !paragraphPaintHonorsLineHeight &&
-                lineMetrics0 != null &&
-                lineMetrics0.height > 0.0
-            ) {
-                (line.lineHeightRatio * line.fontSizePx - lineMetrics0.height).coerceAtLeast(0.0)
-            } else {
-                0.0
-            }
-            // S5：逐字 `drawString` 的原点**就是基线**，故基线必须自己算（旧路径由 `Paragraph.paint`
-            // 内部按 setHeight + setHalfLeading 落位）。缺这一项整行字画在 yTop=0 被裁 ⇒「行无墨」。
-            val baseFont = glyphPainter.baseGlyphStyle(
-                line.fontSizePx, line.families, line.weight, line.italic, line.monospace,
-                0xFF000000.toInt(), 'H'.code, line.tag,
-            ).font
-            val fm = baseFont.metrics
-            val baseY = aligner.baselineOffset(
-                yTop = line.yTop.toFloat(),
-                fontSizePx = line.fontSizePx,
-                lineHeightRatio = line.lineHeightRatio,
-                ascentPx = -fm.ascent,
-                descentPx = fm.descent,
-                extraTop = lineExtra.toFloat(),
-            )
-            // ── S5 主干：逐字落墨 ──
-            // 几何来自 [LineAligner]（与断行侧同一取宽口），落墨由 [GlyphPainter] 逐字做。
-            // **不再 `paragraph.paint`**：整段 paint 会让 Skia 二次整形（有 kerning/liga），
-            // 与「裸 cmap 量宽」的断行侧量画失配（教训 20），且拉伸只能靠 `kJustify` 挂起规则。
-            val placement = aligner.align(
-                text = line.text,
-                range = start until endExcl,
-                fontSizePx = line.fontSizePx,
-                lineWidthPx = if (line.nowrap) Float.MAX_VALUE else line.lineWidthPx.coerceAtLeast(1).toFloat(),
-                letterSpacingEm = line.letterSpacingEm,
-                tag = line.tag,
-                families = line.families,
-                weight = line.weight,
-                italic = line.italic,
-                monospace = line.monospace,
-                fontRuns = line.fontRuns,
-                align = line.alignment,
-                firstLineIndentPx = 0f,
-                // 末行不拉伸：绘制侧按「行区间是否覆盖到该叶末」判定，与两端对齐定义一致。
-                isLastLine = isLastLineOf(line, endExcl),
-            )
-            paintGlyphs(canvas, line, placement, paintX, baseY.toFloat(), start, endExcl, { f, t -> isHidden(f, t) }, ulHits)
-            // 注音/着重号与文字同盒，随 half-leading 一并下移，保持与基字的相对位置。
-            if (rubyHits.isNotEmpty() && endExcl > start) {
-                drawRuby(canvas, line, placement, paintX, start, endExcl, rubyHits, ink, collection, deviceBaselineShift.toFloat())
-            }
-            // P3-a: 着重号（圆点/圆圈，逐字定位，行上/下方）。
-            if (line.emphasis != orilumn.reader.engine.css.EmphasisStyle.NONE && endExcl > start) {
-                drawEmphasis(canvas, line, placement, paintX, ink, start, endExcl, deviceBaselineShift.toFloat())
-            }
-        } finally {
-            paragraph.close()
+        if (line.emphasis != orilumn.reader.engine.css.EmphasisStyle.NONE && endExcl > start) {
+            drawEmphasis(canvas, line, placement, paintX, ink, start, endExcl, 0f)
         }
     }
+
+    /**
+     * 本行基线 y（绝对坐标）。
+     *
+     * **替换掉旧路径的两套基线计算**：旧代码先按 `Paragraph.paint` 的内部语义定位，再按平台
+     * （`paragraphPaintHonorsLineHeight`：jvm true / android false）用 `deviceBaselineShift`
+     * 补差；现在两侧同式 —— [LineAligner.baselineOffset] 一次算完，平台差异不再需要分支。
+     */
+    private fun baselineY(line: DrawLine, lineExtra: Int): Float {
+        val font = glyphPainter.baseGlyphStyle(
+            line.fontSizePx, line.families, line.weight, line.italic, line.monospace,
+            0xFF000000.toInt(), 'H'.code, line.tag,
+        ).font
+        val fm = font.metrics
+        return aligner.baselineOffset(
+            yTop = line.yTop.toFloat(),
+            fontSizePx = line.fontSizePx,
+            lineHeightRatio = line.lineHeightRatio,
+            ascentPx = -fm.ascent,
+            descentPx = fm.descent,
+            extraTop = lineExtra.toFloat(),
+        )
+    }
+
 
     /**
      * P6-b 叠排注音绘制（Skia 端）：每个相交 run 的 rt 文本以注音字号居中画在基字上方。

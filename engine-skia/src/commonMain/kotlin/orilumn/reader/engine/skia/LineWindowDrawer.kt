@@ -6,6 +6,7 @@ import orilumn.reader.engine.layout.ListMarkers
 import orilumn.reader.engine.laying.HYPHEN_GLYPH
 import orilumn.reader.engine.laying.SOFT_HYPHEN
 import orilumn.reader.engine.laying.extraHeightPx
+import orilumn.reader.engine.laying.isDocumentSpace
 import org.jetbrains.skia.Canvas
 import org.jetbrains.skia.Paint
 import org.jetbrains.skia.Rect
@@ -285,17 +286,25 @@ class LineWindowDrawer(
             monospace = line.monospace,
             fontRuns = line.fontRuns,
             align = line.alignment,
-            firstLineIndentPx = 0f,
+            // 首行缩进**必须交给 Aligner**，不能画完再整体右移（用户报缺陷①的修法）。
+            //
+            // Aligner 的 `natural` 本来就以 `x0 = firstLineIndentPx` 起算（`natural = x0 + Σadv`），
+            // 所以 `slack = lineWidthPx − natural` 已经把缩进扣掉了，拉伸后右缘正好落在版心。
+            // 旧写法传 `0f` 再 `paintX += indent`：拉伸基数**少了缩进** ⇒ JUSTIFY 首行被拉到
+            // 版心宽之后又整体右移 indent ⇒ **右溢出一个缩进**。实测（Rust 书 22 章）：
+            // `p { text-align: justify; text-indent: 2em }` 的**每一个**正文段首行都如此，
+            // 溢出量恒等于缩进（`2em` = 84.36px @fs=42.18），22 章里 555 行，末两个字被页面裁掉。
+            firstLineIndentPx = line.firstLineIndentPx,
             // 末行不拉伸：两端对齐的定义本身。
             isLastLine = isLastLineOf(line, endExcl),
             // 行尾连字符：进拉伸基数与可见右缘（连字符占版心，否则 JUSTIFY 会少算一个字位）。
             hyphenAtEnd = line.hyphenAtEnd,
         )
-        // 首行缩进：断行侧已按减宽排过，这里把本行整体右移（marker 另行绘制，不动）。
-        val paintX = textX + line.firstLineIndentPx.coerceAtLeast(0f)
+        // 缩进已在 placement 内（x0），落墨起点即文本区左缘（marker 另行绘制，不动）。
+        val paintX = textX
         // 基线：半行距居中 + ascent（CSS 2.2 §10.8.1）。**自算**，不再借道 Paragraph。
         val baseY = baselineY(line, lineExtra)
-        // paintX 已含缩进 ⇒ placement 的 x 起点归零，这里统一加 paintX。
+        // paintX 是纯内容区偏移；placement 的 x 已含缩进与对齐偏移，逐字落墨时统一加上。
         paintGlyphs(canvas, line, placement, paintX, baseY, start, endExcl, { f, t -> isHidden(f, t) }, ulHits)
 
         // 注音/着重号与文字同盒，随 half-leading 一并下移，保持与基字的相对位置。
@@ -478,19 +487,32 @@ class LineWindowDrawer(
         val n = endExcl - start
         // S5b：含拉丁字母的行改用 Skia 簇位（保 kerning + fi/fl 连字），纯 CJK 行零成本走 Aligner 的 x。
         // **逐行判据、不混用**：一行要么全用簇位、要么全用 Aligner —— 两套 x 混在一行里就是错位。
-        val xs: FloatArray = if (kerningTable.needsClusters(line.text, start, endExcl)) {
-            // 簇位是**段落内**绝对 x（从 0 起），不含 JUSTIFY 拉伸与 CENTER/RIGHT 的整体偏移。
-            // 逐字画时要在**同一坐标系**里落，故先把该行整体偏移补上：
-            // 段落坐标 0 ≡ 本行 placement 的首字 x（= 缩进 + 对齐偏移）。
-            val origin = placement.xs.firstOrNull() ?: 0f
-            kerningTable.clusterXs(
-                line.text, start, endExcl, line.fontSizePx, line.lineHeightRatio,
-                line.tag, line.families, line.weight, line.italic, line.monospace,
-                line.fontRuns, originX = origin,
-            ) ?: placement.xs
-        } else {
-            placement.xs
-        }
+        //
+        // 簇位轨是「未拉伸的自然轨」，拉伸 / 对齐偏移必须由 Aligner 出、[graftKerningOnto] 嫁接。
+        // 全部推导、实测数据、不变式与两个禁忌都写在那里（真书实测：修复前 965 行右缘缺口 >1px、
+        // 最大 17.29px；18 行右溢最大 6.116px；修复后两者归零）。
+        val graft: ClusterTrackGraft? =
+            if (!kerningTable.needsClusters(line.text, start, endExcl)) null else {
+                // originX 必须 0：本轨要与 Placement.advs 同坐标系，才能逐字相减出 kerning 增量。
+                kerningTable.clusterXs(
+                    line.text, start, endExcl, line.fontSizePx, line.lineHeightRatio,
+                    line.tag, line.families, line.weight, line.italic, line.monospace,
+                    line.fontRuns, originX = 0f, letterSpacingEm = line.letterSpacingEm,
+                )?.let { cnat ->
+                    graftKerningOnto(
+                        placement, cnat, line.text, start,
+                        line.fontSizePx, line.letterSpacingEm, line.fontRuns,
+                        // 只有 JUSTIFY 且非末行才把收紧量补回右缘；其余传 NaN = 「不补」。
+                        if (line.alignment == TextAlign.JUSTIFY && endExcl < line.text.length) {
+                            line.lineWidthPx.toFloat()
+                        } else {
+                            Float.NaN
+                        },
+                    )
+                }
+            }
+        val xs: FloatArray = graft?.xs ?: placement.xs
+        val kernEndDelta = graft?.endDelta ?: 0f
         // 段样式缓存：同一 (色, 面, 位移) 只解析一次 Font（matchFamilyStyle 是 native 调用）。
         val fontCache = HashMap<Any, org.jetbrains.skia.Font>()
         val fonts = object : FontResolver {
@@ -535,14 +557,17 @@ class LineWindowDrawer(
                     run?.monospace ?: line.monospace, run?.tag ?: line.tag,
                 )
                 val y = baseY - (band.shiftEm ?: 0f) * line.fontSizePx
+                // 与逐字轨同一个 kerning 增量：簇位行末比 Aligner 略紧，连字符跟着一起挪，
+                // 否则 JUSTIFY 行会出现「末字与连字符之间凭空一个空当」（实测 ≤ 几 px）。
+                val hxK = hx + kernEndDelta
                 val paint = org.jetbrains.skia.Paint().apply { color = withAlpha(band.argb ?: line.inkColor, line.alpha) }
-                canvas.drawString(HYPHEN_GLYPH.toString(), paintX + hx, y, font, paint)
+                canvas.drawString(HYPHEN_GLYPH.toString(), paintX + hxK, y, font, paint)
                 // 阴影层同样要补一个，否则带 text-shadow 的行连字符没有影。
                 if (shadow != null) {
                     val sp = org.jetbrains.skia.Paint().apply {
                         color = withAlpha(shadow.colorHex?.let(::cssHexToArgb) ?: 0xFF000000.toInt(), line.alpha)
                     }
-                    canvas.drawString(HYPHEN_GLYPH.toString(), paintX + hx + shadow.dx, y + shadow.dy, font, sp)
+                    canvas.drawString(HYPHEN_GLYPH.toString(), paintX + hxK + shadow.dx, y + shadow.dy, font, sp)
                 }
             }
         }

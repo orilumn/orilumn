@@ -46,6 +46,11 @@ internal class KerningClusterTable(
     /**
      * 取 `text[start, endExcl)` 的逐字符绘制 x（含 kerning；连字共用簇时同x）。
      *
+     * @param originX 整条簇位轨的起点偏移。**JUSTIFY 行必须传 0**：本方法给的是**未拉伸的自然轨**，
+     *   拉伸/对齐偏移由 [LineWindowDrawer.paintGlyphs] 按 [orilumn.reader.engine.skia.LineAligner.Placement]
+     *   平移叠加（把 kerning 增量嫁接到已对齐的落位上）。传非 0 会让那条偏移被计两遍。
+     * @param letterSpacingEm 与量宽侧同一个 em 值（[SkiaRunMeasurer] 的 `lsPx` 口径）。传 0 会让
+     *   带字距的行整行窄 `n·lsPx`（与断行几何失配 ⇒ JUSTIFY 铺不满、可能右溢）。
      * @return 与 range 同长的 x 数组；无命中簇时返回 null（调用方退回 [LineAligner] 的 x）。
      */
     fun clusterXs(
@@ -61,12 +66,13 @@ internal class KerningClusterTable(
         monospace: Boolean,
         fontRuns: List<FontRun> = emptyList(),
         originX: Float = 0f,
+        letterSpacingEm: Float = 0f,
     ): FloatArray? {
         val n = endExcl - start
         if (n <= 0) return null
         // 行内换面：分段建（浏览器 inline-run 语义），否则簇位会按错误的面算。
         if (fontRuns.isEmpty()) {
-            return clusterXsSingle(text, start, endExcl, fontSizePx, lineHeightRatio, tag, families, weight, italic, monospace, originX)
+            return clusterXsSingle(text, start, endExcl, fontSizePx, lineHeightRatio, tag, families, weight, italic, monospace, originX, letterSpacingEm)
         }
         val edges = (fontRuns.flatMap { listOf(it.start, it.endExclusive) } + listOf(start, endExcl))
             .filter { it in start..endExcl }.distinct().sorted()
@@ -85,18 +91,26 @@ internal class KerningClusterTable(
             val seg = clusterXsSingle(
                 text, s, e, segSize, lineHeightRatio,
                 r?.tag ?: tag, segFam, r?.weight ?: weight,
-                r?.italic ?: italic, r?.monospace ?: monospace, cursorX,
+                r?.italic ?: italic, r?.monospace ?: monospace, cursorX, letterSpacingEm,
             )
             if (seg == null) return null
             for (j in s until e) out[j - start] = seg[j - s]
             // 下一段起点 = 本段末字 x + 该字 advance（**用当前段的面**量，与量宽侧同一出口；
             // 段内 kerning 已含在簇位里，不重复加）。
+            //
+            // ⚠ **下标必须是全文本绝对下标 `e-1`**：`adv` 是对**整段 `text`** 量的（形参就是 `text`），
+            // 与 `text` 同坐标。曾经写成段内局部下标 `e-1-s`（`advances` 早先是对子串量的），
+            // 换段后就取了**别的字符**的 advance 当交界宽 —— 而 Rust 书正文 `<code>` 段几乎都是
+            // **单字符**（`x` / `4` / `y` …），于是每遇一个换面边界就凭空加进一个 CJK 全角宽
+            // （实测 42.18px），逐段累加。实测（19.xhtml 一行 47 字、17 个换面段）：
+            // 我方 Σadv=1510.99 而簇位轨末 x=1718.19，**漂移 207.21px** ⇒ 该行右溢出版心 244px，
+            // 末字被页面裁掉半个。全书 19257 行里这类「p + 行内换面」行几乎全中。
             val adv = measurer.advances(
-                text, segSize, 0f, r?.tag ?: tag, segFam,
+                text, segSize, letterSpacingEm, r?.tag ?: tag, segFam,
                 r?.weight ?: weight, r?.italic ?: italic, r?.monospace ?: monospace,
                 emptyList(),
             )
-            cursorX = out[e - 1 - start] + adv[e - 1 - s]
+            cursorX = out[e - 1 - start] + adv[e - 1]
         }
         return if (out.any { it.isNaN() }) null else out
     }
@@ -113,12 +127,13 @@ internal class KerningClusterTable(
         italic: Boolean,
         monospace: Boolean,
         originX: Float,
+        letterSpacingEm: Float,
     ): FloatArray? {
         val n = endExcl - start
         if (n <= 0) return null
         val style = SkParagraphFactory.paragraphStyle(
             TextAlign.LEFT, fontSizePx, lineHeightRatio, tag, families, weight, italic,
-            monospace, 0f, firstLineIndentPx = 0f,
+            monospace, letterSpacingEm, firstLineIndentPx = 0f,
         )
         val p = ParagraphBuilder(style, SkiaFontPool.current()).addText(text.subSequence(start, endExcl).toString()).build()
         try {

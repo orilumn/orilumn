@@ -205,7 +205,7 @@ internal class LineAligner(
         // 末字的 `lsPx` 通常排在末字**之后、无后继**，不可见 ⇒ 不计。
         // **但断词收尾时末字总有后继**（那个行尾连字符就跟在它后面），那份 `lsPx` 是
         // 字与连字符之间**确实存在的间隙** ⇒ 必须计入。这是「量画同源」的对称要求：
-        // `xs` 循环会把这份 `lsPx` 算进落墨推进，这里不减，`finalVisible`
+        // `xs` 循环会把这份 `lsPx` 算进落墨推进，这里不减，`finalContent`
         // （= [visibleRight] = 连字符右缘）才与墨真正到的地方一致，否则 JUSTIFY 行
         // 凭空少铺一个 `lsPx`、右缘说谎。实测（ls=0.05, fs=42.18 ⇒ **2.109px**）。
         //
@@ -262,12 +262,31 @@ internal class LineAligner(
         val doJustify = align == TextAlign.JUSTIFY && !isLastLine && gapCount > 0
         val slack = lineWidthPx - natural
         val extra = if (doJustify && slack > 0f) slack / gapCount else 0f
-        // 拉伸后总宽恒等于 natural + extra×gapCount，故 JUSTIFY 时正好铺满版心。
-        val finalVisible = natural + extra * gapCount
-        // CENTER/RIGHT 按**最终**可见宽定位（用拉伸前的 natural 会偏）。
+        // 拉伸后**内容**宽恒等于 natural + extra×gapCount（natural 已含缩进 x0Raw，故这里要减掉）。
+        //
+        // ⚠ **`natural` 含缩进而 `x0` 也要含缩进**，`trailStartX` 若直接 `x0 + natural + extra×gapCount`
+        //   就把缩进**算了两遍** ⇒ 右缘越出版心整一个缩进。绘制侧现在把 `firstLineIndentPx` 交给本方法
+        //   （不再画完再右移），这条路径才第一次真的带上非零缩进（Rust 书 `p { text-indent: 2em }`
+        //   + `text-align: justify`，即**每个正文段首行**）⇒ 必须在此扣掉，否则那行右溢 84.36px。
+        val finalContent = natural + extra * gapCount - x0Raw
+        // CENTER/RIGHT 按**最终**内容宽定位（用拉伸前的 natural 会偏）。
+        //
+        // ⚠ 这里**不能再加 `x0Raw`**：缩进只是「行首多出来的一段空白」，它排在文字**前面**，
+        // 而 [finalContent] 量的是「从首字笔位到末字右缘」的内容宽。对齐要把**末字右缘**
+        // 贴到版心右缘（`x0 + finalContent == lineWidthPx`），故 `x0` 就是 `lineWidthPx − finalContent`。
+        // 曾经写成 `x0Raw + (lineWidthPx − finalContent)` ⇒ 缩进被算两遍 ⇒ 右溢**恰好一个缩进**。
+        // 实测（Rust 书 00_2.xhtml 译名行：`text-align: right` + `text-indent: 2em`）：
+        // 右溢 **82.885px**（= 缩进 84.36 − kerning 1.48）。
         val x0 = when (align) {
-            TextAlign.CENTER -> x0Raw + (lineWidthPx - finalVisible).coerceAtLeast(0f) / 2f
-            TextAlign.RIGHT -> x0Raw + (lineWidthPx - finalVisible).coerceAtLeast(0f)
+            // ⚠ `+ x0Raw`：**缩进排在内容块前面**，居中要把缩进算进块宽再折半。
+            //   正确落位 = `x0Raw + (width − x0Raw − finalContent)/2` = `(width − finalContent + x0Raw)/2`。
+            //   漏掉 `x0Raw` ⇒ 整行左移**半个缩进**（实测 fs=44.4、2em 缩进 ⇒ 44.4px）：
+            //   缩进被彻底吃掉（带缩进与不带缩进的 `xs[0]` 分毫不差，实测差 0.0000305px）。
+            TextAlign.CENTER -> (lineWidthPx - finalContent + x0Raw).coerceAtLeast(0f) / 2f
+            // RIGHT 则**不加**：`x0Raw + (width − x0Raw − finalContent)` 化简回 `width − finalContent`。
+            //   这是对的 —— CSS 里首行缩进只是把「可用行宽」缩小 `x0Raw`，右对齐的内容照旧贴右缘，
+            //   左边多出来的那截缩进落在本来就空着的左侧空白里，**没有可见效果**。
+            TextAlign.RIGHT -> (lineWidthPx - finalContent).coerceAtLeast(0f)
             else -> x0Raw
         }
 
@@ -286,23 +305,12 @@ internal class LineAligner(
 
         // 行末尾随空白紧贴**可见右缘**（含对齐偏移 x0）。有连字符时它就是**连字符右缘**，
         // 连字符左缘 = 本值 − `hyphenWidth`（见 [Placement.hyphenXOf]）。
-        val trailStartX = x0 + finalVisible
+        val trailStartX = x0 + finalContent
         return Placement(xs, adv.copyOf(n), trailStartX, trailStartX, hyphenW)
     }
 
-    /**
-     * 末字所属 run 的**字号**（逐 run 查回，而非用全局值）。
-     *
-     * 行内换面 run 有各自字号（`fontRuns[].fontSizePx`），用全局 `fontSizePx` 会在换面行上
-     * 算错末字的 `lsPx` ⇒ 拉伸基数偏 ⇒ JUSTIFY 铺不满或溢出。
-     */
-    private fun lastRunSizePx(
-        text: CharSequence, start: Int, lastLocal: Int, fontSizePx: Float, fontRuns: List<FontRun>,
-    ): Float {
-        if (fontRuns.isEmpty()) return fontSizePx
-        val abs = start + lastLocal
-        return fontRuns.firstOrNull { it.start <= abs && abs < it.endExclusive }?.fontPxOr(fontSizePx) ?: fontSizePx
-    }
+    // 末字 run 字号取自**顶层** [lastRunSizePx]（与 [graftKerningOnto] 共用同一份定义 ——
+    // 「同一规则两处各写一份」会在换面行上静默分叉，见教训㉛）。
 
     /** 行末圆整右边界（版心对齐判据用，避免 899.9997 判成未铺满）。 */
     fun visibleRightInt(p: Placement): Int = p.visibleRight.roundToInt()

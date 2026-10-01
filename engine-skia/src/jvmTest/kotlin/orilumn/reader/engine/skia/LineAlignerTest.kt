@@ -241,6 +241,151 @@ class LineAlignerTest {
         )
     }
 
+    // ---- 锁 5：RIGHT / CENTER + 首行缩进不得把缩进算两遍（用户报缺陷①的真因之一）----
+
+    /**
+     * **右对齐/居中行 + 非零 `text-indent`：末字右缘必须正好贴版心右缘。**
+     *
+     * ## 缺陷形态（Rust 书 `00_2.xhtml` 译名行）
+     *
+     * `div.translation { text-align: right }` 里的 `<p>` 同时带 `text-indent: 2em`。
+     * 第一版把缩进交给 [LineAligner]（绘制侧不再画完右移）后，`x0` 写成
+     * `x0Raw + (lineWidthPx − finalContent)`，而 `finalContent = natural + … − x0Raw`
+     * **已经把缩进扣掉了** ⇒ 缩进被算两遍 ⇒ 右溢**恰好一个缩进**。
+     * 实测：右溢 **82.885px**（缩进 84.36 − kerning 收紧 1.48），版心 1600。
+     *
+     * 修法：`x0 = lineWidthPx − finalContent`（RIGHT）/ `(lineWidthPx − finalContent)/2`（CENTER）。
+     *
+     * 变异验证（改坏必须红）：
+     * - `x0` 加回 `x0Raw +` ⇒ 本锁与 `RIGHT 与 CENTER 都不得右溢版心` 双双**红**；
+     * - 把 CENTER 的 `/2` 去掉 ⇒ 本锁**红**。
+     */
+    @Test
+    fun `右对齐行带首行缩进时右缘仍贴版心`() {
+        val text = "Bec Rumbul，Rust 基金会执行董事"
+        val fs = 44.4f
+        val width = 1600f
+        val indent = fs * 2f // `text-indent: 2em`
+        for (lsEm in floatArrayOf(0f, 0.05f)) {
+            val p = align(
+                text, text.indices, fs, width, lsEm = lsEm,
+                align = TextAlign.RIGHT, isLast = true, fam = SYNTH_FAM, indent = indent,
+            )
+            assertEquals(
+                "RIGHT 行带缩进 $indent 时末字右缘必须 == 版心 $width（实测 ${p.visibleRight}）",
+                width, p.visibleRight, 0.05f,
+            )
+            assertTrue(
+                "RIGHT 行首字 x 必须 >= 0（缩进不该把行推到版心左侧之外）：xs[0]=${p.xs[0]}",
+                p.xs[0] >= -0.05f,
+            )
+        }
+    }
+
+    /**
+     * 居中同理：**内容块中心**对齐版心中心，缩进算两遍会整体偏右半个缩进。
+     *
+     * ⚠ 判据不能用 `visibleRight == 版心`：CENTER 的内容块居中 ⇒ 右缘**本来就在版心内侧**
+     * （实测 `visibleRight = 1133.555` = `(1600 + 667.11)/2`）。真正的判据是
+     * 「块中心 == 版心中心」：`xs[0] + content/2 == width/2`。
+     */
+    @Test
+    fun `居中行带首行缩进时内容中心对齐版心中心`() {
+        val text = "Bec Rumbul，Rust 基金会执行董事"
+        val fs = 44.4f
+        val width = 1600f
+        val indent = fs * 2f
+        for (ind in floatArrayOf(0f, indent)) {
+            val p = align(
+                text, text.indices, fs, width,
+                align = TextAlign.CENTER, isLast = true, fam = SYNTH_FAM, indent = ind,
+            )
+            // 内容块 = [缩进左缘 `xs[0] − ind`, 末字右缘 `visibleRight`]，
+            // 块中心 = `blockStart + blockW/2` = `(xs[0] + visibleRight)/2 − ind/2`
+            //（`xs[0]` 是**首字笔位**，缩进落在它**前面**，故要从块中心里减半个缩进）。
+            assertEquals(
+                "缩进=$ind 时内容块中心必须 == 版心中心 ${width / 2}" +
+                    "（实得 ${(p.xs[0] + p.visibleRight) / 2 - ind / 2}）",
+                width / 2f, (p.xs[0] + p.visibleRight) / 2f - ind / 2f, 0.05f,
+            )
+        }
+        // 缩进占位在内容块**前面** ⇒ 块宽 = 缩进 + 文字 ⇒ 居中后整体**右移 indent/2**。
+        val pNoIndent = align(text, text.indices, fs, width, align = TextAlign.CENTER, isLast = true, fam = SYNTH_FAM)
+        val pIndent = align(
+            text, text.indices, fs, width,
+            align = TextAlign.CENTER, isLast = true, fam = SYNTH_FAM, indent = indent,
+        )
+        assertEquals(
+            "带缩进时首字笔位应右移 indent/2（缩进计入块宽再折半）",
+            indent / 2f, pIndent.xs[0] - pNoIndent.xs[0], 0.05f,
+        )
+    }
+
+    /**
+     * **RIGHT + 首行缩进：缩进没有可见效果**（与 CENTER 相反，这是 CSS 的定义，不是 bug）。
+     *
+     * 首行缩进只把「可用行宽」缩小 `x0Raw`；右对齐的内容照旧贴右缘，多出的那截缩进落在
+     * 本来就空着的左侧空白里。⇒ 带缩进与不带缩进，`xs[0]` 应**完全相同**。
+     *
+     * 这条与 [TextAlign.CENTER] 分支必须分开写：CENTER 要 `+x0Raw`（块宽含缩进），
+     * RIGHT 化简后**不加**。把两者写成同一个表达式就是「缩进算两遍」或「缩进被吃掉」，
+     * 两个都是错的，且互为镜像 ⇒ 必须各有一把锁盯着。
+     */
+    @Test
+    fun `右对齐行的首行缩进没有可见效果`() {
+        val text = "Bec Rumbul，Rust 基金会执行董事"
+        val fs = 44.4f
+        val width = 1600f
+        val pNoIndent = align(text, text.indices, fs, width, align = TextAlign.RIGHT, isLast = true, fam = SYNTH_FAM)
+        for (ind in floatArrayOf(fs, fs * 2f, fs * 4f)) {
+            val p = align(text, text.indices, fs, width, align = TextAlign.RIGHT, isLast = true, fam = SYNTH_FAM, indent = ind)
+            assertEquals(
+                "RIGHT + 缩进 $ind：首字笔位与无缩进版相同（缩进落在左侧空白里）",
+                pNoIndent.xs[0], p.xs[0], 0.05f,
+            )
+            assertEquals("RIGHT + 缩进 $ind：末字右缘仍贴版心", width, p.visibleRight, 0.05f)
+        }
+    }
+
+    /**
+     * RIGHT / CENTER 在各种缩进、末行标记下都不得右溢版心。
+     *
+     * ⚠ 守卫：只对「自然宽 ≤ 版心」的行断言。装不下的行 `x0` 被 `coerceAtLeast(0f)` 夹在 0，
+     *   右缘**必然**超出版心 —— 那是**正确行为**（版心装不下就该让字溢出/裁字，不是右对齐的错）。
+     *   排除它，否则这把锁在退化路径上恒红、等于没有锁（教训㉛：先确认锁能红，再谈它有用）。
+     */
+    @Test
+    fun `RIGHT 与 CENTER 都不得右溢版心`() {
+        val text = "两端对齐与右对齐居中都不得把文字推出版心右缘"
+        val fs = 44.4f
+        var checked = 0
+        for (width in floatArrayOf(600f, 900f, 1600f, 2400f)) {
+            for (indent in floatArrayOf(0f, fs * 2f)) {
+                for (align in listOf(TextAlign.RIGHT, TextAlign.CENTER)) {
+                    for (isLast in listOf(true, false)) {
+                        val p = align(
+                            text, text.indices, fs, width,
+                            align = align, isLast = isLast, fam = SYNTH_FAM, indent = indent,
+                        )
+                        // LEFT 对齐的落位就是自然宽，用它取「本行装不装得下」
+                        val natural = align(
+                            text, text.indices, fs, width,
+                            align = TextAlign.LEFT, isLast = isLast, fam = SYNTH_FAM, indent = indent,
+                        ).visibleRight
+                        if (natural > width + 0.5f) continue
+                        checked++
+                        assertTrue(
+                            "对齐=$align 缩进=$indent 末行=$isLast 版心=$width " +
+                                "右缘=${p.visibleRight} 越界 ${p.visibleRight - width}",
+                            p.visibleRight <= width + 0.05f,
+                        )
+                    }
+                }
+            }
+        }
+        assertTrue("本组合必须至少验到 8 行，否则这把锁在退化路径上也能过 = 假锁（实测 $checked）", checked >= 8)
+    }
+
     // ---- 前提守卫：语料必须对 fontRuns 敏感（教训 29 的汉字 1em 巧合）----
 
     @Test

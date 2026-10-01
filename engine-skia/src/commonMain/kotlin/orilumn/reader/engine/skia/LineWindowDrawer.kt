@@ -137,6 +137,7 @@ class LineWindowDrawer(
      */
     private val aligner = LineAligner()
     private val glyphPainter = GlyphPainter()
+    private val kerningTable = KerningClusterTable()
 
     fun drawLines(canvas: Canvas, contentLeft: Float, lines: List<DrawLine>, clip: Rect? = null) {
         if (lines.isEmpty()) return
@@ -554,6 +555,21 @@ class LineWindowDrawer(
     ) {
         if (endExcl <= start) return
         val n = endExcl - start
+        // S5b：含拉丁字母的行改用 Skia 簇位（保 kerning + fi/fl 连字），纯 CJK 行零成本走 Aligner 的 x。
+        // **逐行判据、不混用**：一行要么全用簇位、要么全用 Aligner —— 两套 x 混在一行里就是错位。
+        val xs: FloatArray = if (kerningTable.needsClusters(line.text, start, endExcl)) {
+            // 簇位是**段落内**绝对 x（从 0 起），不含 JUSTIFY 拉伸与 CENTER/RIGHT 的整体偏移。
+            // 逐字画时要在**同一坐标系**里落，故先把该行整体偏移补上：
+            // 段落坐标 0 ≡ 本行 placement 的首字 x（= 缩进 + 对齐偏移）。
+            val origin = placement.xs.firstOrNull() ?: 0f
+            kerningTable.clusterXs(
+                line.text, start, endExcl, line.fontSizePx, line.lineHeightRatio,
+                line.tag, line.families, line.weight, line.italic, line.monospace,
+                line.fontRuns, originX = origin,
+            ) ?: placement.xs
+        } else {
+            placement.xs
+        }
         // 段样式缓存：同一 (色, 面, 位移) 只解析一次 Font（matchFamilyStyle 是 native 调用）。
         val fontCache = HashMap<Any, org.jetbrains.skia.Font>()
         val fonts = object : FontResolver {
@@ -569,9 +585,9 @@ class LineWindowDrawer(
         // 先画阴影层（偏移同色），再画正字 —— CSS text-shadow 的常规两层近似。
         if (shadow != null) {
             val sc = shadow.colorHex?.let(::cssHexToArgb) ?: 0xFF000000.toInt()
-            drawGlyphPass(canvas, line, placement, paintX, baseY, start, endExcl, isHidden, shadow.dx, shadow.dy, sc, true, fonts)
+            drawGlyphPass(canvas, line, placement, paintX, baseY, start, endExcl, isHidden, shadow.dx, shadow.dy, sc, true, fonts, xs)
         }
-        drawGlyphPass(canvas, line, placement, paintX, baseY, start, endExcl, isHidden, 0f, 0f, 0, false, fonts)
+        drawGlyphPass(canvas, line, placement, paintX, baseY, start, endExcl, isHidden, 0f, 0f, 0, false, fonts, xs)
 
         // 下划线：行区间相交段的 x 并集，用线画（不逐字跳）。
         if (ulHits.isNotEmpty()) {
@@ -620,12 +636,13 @@ class LineWindowDrawer(
         overrideInk: Int,
         isShadowPass: Boolean,
         fontFor: FontResolver,
+        xs: FloatArray = placement.xs,
     ) {
         val n = endExcl - start
         for (i in start until endExcl) {
             val local = i - start
             if (local >= n || local < 0) continue
-            val x = placement.xs.getOrNull(local) ?: continue
+            val x = xs.getOrNull(local) ?: continue
             val band = mergeBands(line, i, i + 1).firstOrNull()
             val hidden = isHidden(i, i + 1)
             // 注音源文/表图占位：透明墨占宽（字符流不变）——逐字路径直接跳过落墨即可。

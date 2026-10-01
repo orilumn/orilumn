@@ -116,6 +116,9 @@ object DrawLineBuilder {
                     fontRuns = fontRuns,
                     firstLineIndentPx = if (lineIdx == leaf.firstLineIndex) indent else 0f,
                     nowrap = nowrap,
+                    // 逐行索引对齐 leaf.hyphenAtEnd（与 ranges 同长同序）；短于 lineIdx 说明
+                    // 该叶没带这个位（老路径的裸 LayoutBox）⇒ 退到「无连字符」而不是崩。
+                    hyphenAtEnd = leaf.hyphenAtEnd.getOrElse(lineIdx) { false },
                     baselineShifts = shifts,
                     textShadow = shadow,
                     emphasis = style.emphasisStyle,

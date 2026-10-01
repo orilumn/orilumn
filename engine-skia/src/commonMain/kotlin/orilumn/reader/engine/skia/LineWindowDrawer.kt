@@ -3,6 +3,8 @@ package orilumn.reader.engine.skia
 import orilumn.reader.engine.css.TextAlign
 import orilumn.reader.engine.css.cssHexToArgb
 import orilumn.reader.engine.layout.ListMarkers
+import orilumn.reader.engine.laying.HYPHEN_GLYPH
+import orilumn.reader.engine.laying.SOFT_HYPHEN
 import orilumn.reader.engine.laying.extraHeightPx
 import org.jetbrains.skia.Canvas
 import org.jetbrains.skia.Paint
@@ -64,6 +66,14 @@ data class DrawLine(
     val fontRuns: List<orilumn.reader.engine.css.FontRun> = emptyList(),
     val firstLineIndentPx: Float = 0f,
     val nowrap: Boolean = false,
+    /**
+     * 本行是否**断词收尾** —— 行尾要补一个 [orilumn.reader.engine.laying.HYPHEN_GLYPH]。
+     *
+     * 断行侧已为它**预留了版心**（`InhouseParagraphBreaker.reserveHyphenWidth`），
+     * [LineAligner] 也把它算进 JUSTIFY 拉伸基数与可见右缘，故本字段只管「落墨」。
+     * 漏传的表现是连字符没画（版心被白白让出一截），反过来画了而没预留就会溢出被裁。
+     */
+    val hyphenAtEnd: Boolean = false,
     /**
      * P1-2 行内基线位移（[orilumn.reader.engine.laying.BaselineShift]，[text] 全文本坐标系，
      * 空 = 纯基线）：随段整形（`SkParagraphFactory.runTextStyle` 位移＋行盒 strut 固定基线），
@@ -278,6 +288,8 @@ class LineWindowDrawer(
             firstLineIndentPx = 0f,
             // 末行不拉伸：两端对齐的定义本身。
             isLastLine = isLastLineOf(line, endExcl),
+            // 行尾连字符：进拉伸基数与可见右缘（连字符占版心，否则 JUSTIFY 会少算一个字位）。
+            hyphenAtEnd = line.hyphenAtEnd,
         )
         // 首行缩进：断行侧已按减宽排过，这里把本行整体右移（marker 另行绘制，不动）。
         val paintX = textX + line.firstLineIndentPx.coerceAtLeast(0f)
@@ -491,12 +503,49 @@ class LineWindowDrawer(
         }
 
         val shadow = line.textShadow
+        // **切段每行算一次**（不是每字一次，见 [drawGlyphPass] 的性能注记）；连字符也要用末字那段。
+        val bands = mergeBands(line, start, endExcl)
         // 先画阴影层（偏移同色），再画正字 —— CSS text-shadow 的常规两层近似。
         if (shadow != null) {
             val sc = shadow.colorHex?.let(::cssHexToArgb) ?: 0xFF000000.toInt()
-            drawGlyphPass(canvas, line, placement, paintX, baseY, start, endExcl, isHidden, shadow.dx, shadow.dy, sc, true, fonts, xs)
+            drawGlyphPass(canvas, line, placement, paintX, baseY, start, endExcl, isHidden, shadow.dx, shadow.dy, sc, true, fonts, xs, bands)
         }
-        drawGlyphPass(canvas, line, placement, paintX, baseY, start, endExcl, isHidden, 0f, 0f, 0, false, fonts, xs)
+        drawGlyphPass(canvas, line, placement, paintX, baseY, start, endExcl, isHidden, 0f, 0f, 0, false, fonts, xs, bands)
+
+        // **行尾连字符**（`hyphens: auto` 的音节断点 / `&shy;` 断行显形）。
+        //
+        // `&shy;` 的槽位是它自己那个字位 ⇒ `adv[shySlot]` 已含连字符宽，但逐字循环画的是
+        // `drawString("\u00AD")`（零宽，**什么也画不出来**）⇒ 这时要补画一个真 `-`。
+        // K-L 断词没有槽位 ⇒ 连字符在行末之外，`hyphenX = trailStartX − hyphenWidth`。
+        // 两种情况同一个式子，不必分支（[LineAligner.hyphenXOf]）。
+        if (placement.hyphenWidth > 0f) {
+            val hx = aligner.hyphenXOf(placement)
+            val lastIdx = endExcl - 1
+            val band = bands.lastOrNull { it.start <= lastIdx && lastIdx < it.end }
+            if (hx >= 0f && band != null && lastIdx >= start) {
+                // face/墨色/基线位移取**行末字所属的那段**：`<code>` 里的断词要按等宽面画连字符。
+                val run = band.font
+                val sizePx = run?.fontPxOr(line.fontSizePx) ?: line.fontSizePx
+                val famList = run?.families ?: line.families
+                val wt = run?.weight ?: line.weight
+                val ital = run?.italic ?: line.italic
+                val key = glyphPainter.cacheKey(famList, wt, ital, sizePx, HYPHEN_GLYPH.code)
+                val font = fonts.resolve(
+                    HYPHEN_GLYPH.code, key, sizePx, famList, wt, ital,
+                    run?.monospace ?: line.monospace, run?.tag ?: line.tag,
+                )
+                val y = baseY - (band.shiftEm ?: 0f) * line.fontSizePx
+                val paint = org.jetbrains.skia.Paint().apply { color = withAlpha(band.argb ?: line.inkColor, line.alpha) }
+                canvas.drawString(HYPHEN_GLYPH.toString(), paintX + hx, y, font, paint)
+                // 阴影层同样要补一个，否则带 text-shadow 的行连字符没有影。
+                if (shadow != null) {
+                    val sp = org.jetbrains.skia.Paint().apply {
+                        color = withAlpha(shadow.colorHex?.let(::cssHexToArgb) ?: 0xFF000000.toInt(), line.alpha)
+                    }
+                    canvas.drawString(HYPHEN_GLYPH.toString(), paintX + hx + shadow.dx, y + shadow.dy, font, sp)
+                }
+            }
+        }
 
         // 下划线：行区间相交段的 x 并集，用线画（不逐字跳）。
         if (ulHits.isNotEmpty()) {
@@ -546,13 +595,16 @@ class LineWindowDrawer(
         isShadowPass: Boolean,
         fontFor: FontResolver,
         xs: FloatArray = placement.xs,
+        preBands: List<Band>? = null,
     ) {
+        if (endExcl <= start) return
         val n = endExcl - start
         // **切段每行算一次**（不是每字一次）。第一版写成 `mergeBands(line, i, i+1).firstOrNull()`
         // 在逐字循环里，等于每字重建整行的 band 列表 —— JUSTIFY 行实测 13.00ms vs
         // LEFT 行 4.73ms（同文本、同字号），**拉伸不该让绘制慢 2.7 倍**，那全是这份重复计算。
         // 走游标：band 列表已按区间排序且无缝，顺序扫即可。
-        val bands = mergeBands(line, start, endExcl)
+        // （[preBands] 由 [paintGlyphs] 一次算好传进来：行尾连字符也要用末字那段。）
+        val bands = preBands ?: mergeBands(line, start, endExcl)
         var bandIdx = 0
         for (i in start until endExcl) {
             val local = i - start
@@ -564,6 +616,10 @@ class LineWindowDrawer(
             val hidden = isHidden(i, i + 1)
             // 注音源文/表图占位：透明墨占宽（字符流不变）——逐字路径直接跳过落墨即可。
             if (hidden) continue
+            // **软连字符永不落墨**：`&shy;` 是「不换行时看不见、换行时才显形」的占位符。
+            // 实测它在 STSong 里有真字形（glyph 271），不跳过就会在**没断行**的行里画出一道杠。
+            // 断行显形的那一个由 [paintGlyphs] 在行尾补画真 `-`（含 SHY 槽位复用的情况）。
+            if (line.text[i] == SOFT_HYPHEN) continue
             val run = band?.font
             val sizePx = run?.fontPxOr(line.fontSizePx) ?: line.fontSizePx
             val cp = line.text[i].code

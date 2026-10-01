@@ -45,6 +45,9 @@ class TableCellLayout(
  * @property contentTop absolute y of the border-box top; filled by the flow pass.
  * @property contentBottom absolute y of the border-box bottom; filled by the flow pass.
  * @property ranges (leaf only) the char ranges this text block breaks into, relative to its own text.
+ * @property hyphenAtEnd (leaf only) 与 [ranges] **逐项对应**：该行是否断词收尾（行尾要补一个
+ *   [HYPHEN_GLYPH]）。断行侧已为它预留了版心（[BrokenLine.hyphenAtEnd]），绘制侧靠这个字段才知道
+ *   行尾要落墨 —— 漏传 = 连字符被裁掉（分页阅读器不能横向滚动）。
  * @property textLength (leaf only) the length of this block's absorbed text (char advancement).
  * @property lineHeights (leaf only) each line's height (px), aligned with [ranges]; the box flow
  *   uses these to place lines, so they must match the drawing shaper's per-line metrics.
@@ -71,6 +74,15 @@ class LayoutBox(
      * 前 [lines] 行按 [widthPx] 收缩断行并右移 [xOffPx]（左浮动），余行全宽。
      */
     val floatLead: FloatLead? = null,
+    /**
+     * **行尾连字符位**（与 [ranges] 同长同序）：该行是否断词收尾（行尾要补一个
+     * [orilumn.reader.engine.laying.HYPHEN_GLYPH]）。断行侧已为它预留了版心
+     * （[orilumn.reader.engine.laying.BrokenLine.hyphenAtEnd]），绘制侧靠这个字段才知行尾要落墨；
+     * 漏传 = 连字符被裁掉（分页阅读器不能横向滚动）。
+     *
+     * 放在**参数表末尾**：本类有大量按位置传参的调用点，插在中间会打断它们。
+     */
+    val hyphenAtEnd: List<Boolean> = emptyList(),
 ) {
     var contentTop: Int = 0
 

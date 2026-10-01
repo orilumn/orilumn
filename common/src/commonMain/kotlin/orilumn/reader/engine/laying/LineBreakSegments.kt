@@ -39,6 +39,10 @@ class KinsokuRules(
         if (isHighSurrogate(prev) && isLowSurrogate(next)) return false
         if (isDocumentSpace(prev) || isDocumentSpace(next)) return true
         if (noBreakBefore.indexOf(next) >= 0 || noBreakAfter.indexOf(prev) >= 0) return false
+        // 软连字符之后可断（UAX#14 class BA「break after」）。**置禁则之后**是刻意的：
+        // 否则 `a&shy;。` 会把句号丢到行首破禁则；词内字符本就不触发禁则，故不损失词内断点。
+        // 「补连字符」这件事不在这里判定，由 [SoftHyphenBreakSource] 另标 [BreakOpportunitySet.markHyphen]。
+        if (prev == SOFT_HYPHEN) return true
         return breakAfter.indexOf(prev) >= 0 || isWideBreakChar(prev) || isWideBreakChar(next)
     }
 
@@ -164,6 +168,43 @@ private fun emitSegment(text: CharSequence, from: Int, to: Int, out: ArrayList<I
  */
 fun isDocumentSpace(c: Char): Boolean =
     c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\u000C'
+
+/**
+ * **软连字符** `U+00AD SOFT HYPHEN`（HTML 里写作 `&shy;`）——断点规则单源。
+ *
+ * ## 它在文本流里是什么（CSS Text 3 §5.2）
+ *
+ * 一个**零宽、不渲染**的占位符，语义是「**这里可以断，断了就显示一个连字符**」。
+ * 与音节断词（[EnglishHyphenationSource] 的 K-L 断点）产出的断点是**同一类断点**，
+ * 故两者共用 [BreakOpportunitySet.markHyphen] 这一个「需要补连字符」的标记位。
+ *
+ * ## 实测（本仓改造前的四处缺陷，全部由 [TmpShyProbe] 量出）
+ *
+ * | 缺陷 | 实测 |
+ * |---|---|
+ * | 占 1em 全宽 | `adv[U+00AD] = 42.18` @fs=42.18（与 `-` 的 13.20 差 3.2 倍） |
+ * | 会被画出来 | `faceForCp(0x00AD)` = STSong glyph **271**（有字形） |
+ * | 其后不能断 | `hy­phen­ation` @W=120 断成 `hy­p` / `hen­` / `ation` —— **R1 硬切在字母中间** |
+ * | K-L 断点无连字符 | `hyphenation` @W=120 断成 `hy`/`phen`/`ation`，行尾无 `-` |
+ *
+ * ## 判定顺序（[KinsokuRules.allowsBreakAt]）
+ *
+ * 排在**禁则之后**而非之前：`a&shy;。` 若因 SHY 放行，会把句号丢到行首，违反中文禁则。
+ * 排在**文档空白之后**：空白已 return true，不受影响。软连字符的实际用法都在词内，
+ * 词内字符本就不触发禁则，故「置禁则之后」既拿到词内断点、又不破禁则。
+ */
+const val SOFT_HYPHEN: Char = '\u00AD'
+
+/** 是否软连字符 [SOFT_HYPHEN]（零宽占位符，其后是断点）。 */
+fun isSoftHyphen(c: Char): Boolean = c == SOFT_HYPHEN
+
+/**
+ * **连字符字形**（CSS Text 4 `hyphenate-character` 的默认取值 `U+002D HYPHEN-MINUS`）。
+ *
+ * 「断在该处」时行尾补画的就是它；它的宽度必须与断行侧预留的宽度同源，
+ * 否则要么超版心、要么 JUSTIFY 铺不满。
+ */
+const val HYPHEN_GLYPH: Char = '-'
 
 /**
  * CJK／假名／全角判定（断点用，与 Chrome 实测集合一致）。

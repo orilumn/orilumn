@@ -31,6 +31,7 @@ fun interface BreakOpportunitySource {
  */
 class BreakOpportunitySet private constructor(
     private val flags: BooleanArray,
+    private val hyphens: BooleanArray = BooleanArray(flags.size),
 ) {
     /** 段长（`text.length`）：下标上界（不含）——`opportunityAt(n)` 恒 false。 */
     val size: Int get() = flags.size - 1
@@ -45,10 +46,27 @@ class BreakOpportunitySet private constructor(
     }
 
     /**
+     * 标一个**「断在此处需补连字符」**的断点（前置条件 `0 <= i <= size`）。
+     *
+     * 与 [mark] 的区别只有「行尾要不要补一个 [HYPHEN_GLYPH]」。三类 source 用它：
+     * 软连字符（`&shy;`，槽位是那个 SHY 字符本身）、K-L 音节断词（无槽位，行尾新增）。
+     * **代码标识符断点（[CodeIdentifierBreakSource]）不用它** —— `maxWidth` 断开时不补连字符，
+     * 浏览器对代码也是 `overflow-wrap` 硬切，补了反而是错的。
+     *
+     * 只置位不清位，与 [mark] 同一条多源顺序无关性。
+     */
+    fun markHyphen(i: Int) {
+        flags[i] = true
+        hyphens[i] = true
+    }
+
+    /**
      * 紧急态：**每个位置都算断点**（R1 core ——「无可用断点且该单元放不下时，在任意字符处断开」）。
      *
      * 前置条件 `0 <= i <= size`。含下标 0：整段第一个字符之后允许断开，即「一字一行」是可达状态
      * （S2 R1 core 行为规格：`abcd` @Roboto 20px，W=12/14/16/20 → 逐字一行）。
+     *
+     * **不清 `hyphens`**：R1 core 是「无处可断才硬切」，不是断词 ⇒ 行尾不该出现连字符。
      */
     fun markAll() {
         flags.fill(true)
@@ -56,6 +74,14 @@ class BreakOpportunitySet private constructor(
 
     /** 位置 [i] 是否可断（前置条件 `0 <= i <= size`；`i == size` 恒 false）。 */
     fun opportunityAt(i: Int): Boolean = flags[i]
+
+    /**
+     * 位置 [i] 是否是「断在此处需补连字符」的断点（前置条件 `0 <= i <= size`）。
+     *
+     * **必须与 [opportunityAt] 同源**：绘制侧只有靠它才知道行尾该不该画 `-`，
+     * 而断行侧只有靠它才知道该不该把连字符宽预留进版心。两处算错 = 超版心或铺不满。
+     */
+    fun isHyphenAt(i: Int): Boolean = hyphens[i]
 
     /**
      * `<= i` 的最后一个断点位置；一个都没有返回 `-1`。
@@ -69,8 +95,9 @@ class BreakOpportunitySet private constructor(
         return j
     }
 
-    /** 逐位相等（回归测试用；不含 [size]，两个不同长度的段自然不等）。 */
-    fun contentEquals(other: BreakOpportunitySet): Boolean = flags.contentEquals(other.flags)
+    /** 逐位相等（回归测试用；含 `hyphens`，不含 [size]，两个不同长度的段自然不等）。 */
+    fun contentEquals(other: BreakOpportunitySet): Boolean =
+        flags.contentEquals(other.flags) && hyphens.contentEquals(other.hyphens)
 
     companion object {
         /**
@@ -103,6 +130,44 @@ object KinsokuBreakSource : BreakOpportunitySource {
         // 下标 0 不标：位置 0 是段首、之前没有字符，「断在这里」无意义（R1 紧急态才可能标 0）。
         for (i in 1 until text.length) {
             if (isBreakOpportunity(text, i)) into.mark(i)
+        }
+    }
+}
+
+/**
+ * **软连字符断点源**（`&shy;`，U+00AD）：标出每个 SHY **之后**的位置，并标记「需补连字符」。
+ *
+ * ## 为什么不并进 [KinsokuRules]
+ *
+ * [KinsokuBreakSource] 只标**可断**，不标「可断且要补字符」——后者是**另一维信息**
+ * （[BreakOpportunitySet.hyphens]），两者独立。故本对象独立成一个 source，顺序无关地叠加。
+ *
+ * ## 与 [KinsokuBreakSource] 的关系：**必须先问禁则，不能无条件标**（实测踩过）
+ *
+ * SHY 后的位置在 [KinsokuRules.allowsBreakAt] 里已放行（`prev == SOFT_HYPHEN`），
+ * 故 [KinsokuBreakSource] 也会标它。两个 source 都标同一位置时 [mark] 只置位不清位，
+ * 结果集不变；本对象额外把 `hyphens[i]` 置上。**这就是「顺序无关」的具体含义**。
+ *
+ * 但**反向不成立**：禁则可以在 SHY 处**否决**（`a&shy;。` —— 句号在 `noBreakBefore`）。
+ * 若本对象无条件 `markHyphen`，就会凭一维 `hyphens[i]` 单独造出一个 `KinsokuBreakSource`
+ * 坚决否决的断点 —— `markHyphen` 只置位不清位，[BreakOpportunitySet.opportunityAt] 一旦被别处
+ * 读到就生效。实测症状：`a­。` @窄版心断成 `a­` / `。`，**句号被丢到行首，破禁则**。
+ *
+ * ⇒ 故条件是 `isBreakOpportunity(text, i) && isSoftHyphen(text[i-1])`：
+ * **禁则单一判定入口**（[isBreakOpportunity]，与另两个 source 同一函数）当门卫，
+ * 本对象只加 `hyphens` 这一维，不重新发明规则。
+ *
+ * ## 无条件注入（不按 tag 分流）
+ *
+ * 与 [EnglishHyphenationSource]（仅普通段落）/ [CodeIdentifierBreakSource]（仅代码 tag）不同：
+ * `&shy;` 是**作者显式写进正文的**断点意图，任何 tag 下都该认 —— 即使它出现在 `<code>` 里。
+ */
+object SoftHyphenBreakSource : BreakOpportunitySource {
+    override fun mark(text: CharSequence, into: BreakOpportunitySet) {
+        for (i in 1 until text.length) {
+            if (!isSoftHyphen(text[i - 1])) continue
+            if (!isBreakOpportunity(text, i)) continue // 禁则否决（如 `a&shy;。`）
+            into.markHyphen(i)
         }
     }
 }

@@ -138,8 +138,18 @@ private fun fontRunsWithin(runs: List<FontRun>, from: Int, to: Int): List<FontRu
     return out ?: emptyList()
 }
 
-/** One produced text line of a run: its char range into the run's text plus its height in px. */
-class BrokenLine(val range: IntRange, val heightPx: Int)
+/**
+ * One produced text line of a run: its char range into the run's text plus its height in px.
+ *
+ * @property hyphenAtEnd 本行是否**断词断点收尾** —— 行尾要补一个 [HYPHEN_GLYPH]（`hyphens: auto`
+ *   的音节断词，或 `&shy;` 落在行末）。默认 false = 行尾无连字符。
+ *
+ *   **为什么必须显式携带**：断行侧为它**预留了版心**（[orilumn.reader.engine.skia.InhouseParagraphBreaker]
+ *   把连字符宽算进判定宽），绘制侧若不知道，行尾那个连字符就会**溢出页宽被裁掉** ——
+ *   分页阅读器没有横向滚动条，溢出 = 内容丢失（`NoLineExceedsContentWidthTest` 钉的同一条硬约束）。
+ *   反过来绘制侧靠「自己重算断点」也不可靠：贪心断在哪由版心决定，绘制侧没有版心上下文。
+ */
+class BrokenLine(val range: IntRange, val heightPx: Int, val hyphenAtEnd: Boolean = false)
 
 /**
  * Pure, **single-source** form of the uniform line height for a `fontSizePx x lineHeightRatio` run.

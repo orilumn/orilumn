@@ -3,6 +3,7 @@ package orilumn.reader.engine.skia
 import orilumn.reader.engine.css.FontRun
 import orilumn.reader.engine.css.TextAlign
 import orilumn.reader.engine.laying.isDocumentSpace
+import orilumn.reader.engine.laying.isSoftHyphen
 import orilumn.reader.engine.laying.lineHeightPx
 import kotlin.math.roundToInt
 
@@ -66,7 +67,19 @@ internal class LineAligner(
         val visibleRight: Float,
         /** 行末连续文档空白的 x 起点（= 尾随空白**之前**那个字符的右边缘；无尾空白则 = [visibleRight]）。 */
         val trailStartX: Float,
+        /**
+         * **行尾连字符宽**（px）：本行断词收尾（`hyphens: auto` 的音节断点，或 `&shy;` 落在行末）时
+         * 行尾那个 [orilumn.reader.engine.laying.HYPHEN_GLYPH] 的宽；无连字符恒 `0f`。
+         *
+         * 连字符**已经计入** [visibleRight] / [trailStartX]（它占版心，不能溢出），
+         * 本字段只告诉绘制侧「那个位置要画 `-`、画多宽」。
+         */
+        val hyphenWidth: Float = 0f,
     )
+
+    /** 连字符左缘（= [Placement.trailStartX] − [Placement.hyphenWidth]）；无连字符时 −1。 */
+    fun hyphenXOf(p: Placement): Float =
+        if (p.hyphenWidth > 0f) p.trailStartX - p.hyphenWidth else -1f
 
     /**
      * 把 `text[range]` 对齐落位。
@@ -74,6 +87,9 @@ internal class LineAligner(
      * @param lineWidthPx 本行整形宽（[orilumn.reader.engine.skia.DrawLine.lineWidthPx]）。
      * @param justify 是否拉伸（[TextAlign.JUSTIFY] 且**非末行**时为 true —— 末行按定义左对齐）。
      * @param isLastLine 该行是否为段落末行。末行不拉伸（CSS 两端对齐的定义本身）。
+     * @param hyphenAtEnd 本行是否断词收尾（[orilumn.reader.engine.laying.BrokenLine.hyphenAtEnd]）——
+     *   行尾补一个连字符，**它占版心**：进 [Placement.natural] 参与的拉伸基数、进 [visibleRight]，
+     *   否则要么超出版心被裁、要么 JUSTIFY 按「少一个字」铺满而右缘退进版心。
      */
     fun align(
         text: CharSequence,
@@ -90,6 +106,7 @@ internal class LineAligner(
         align: TextAlign = TextAlign.LEFT,
         firstLineIndentPx: Float = 0f,
         isLastLine: Boolean = false,
+        hyphenAtEnd: Boolean = false,
     ): Placement {
         val start = range.first.coerceIn(0, text.length)
         val endExcl = (range.last + 1).coerceIn(start, text.length)
@@ -119,6 +136,33 @@ internal class LineAligner(
         while (visEnd > start && isDocumentSpace(text[visEnd - 1])) visEnd--
         val trailLen = endExcl - visEnd
         val visibleCount = visEnd - start
+
+        // ---- 软连字符与行尾连字符（量画同源：宽度全部来自 [SkiaRunMeasurer]）----
+        //
+        // `SkiaRunMeasurer` 已把 SHY 位置 0（不占宽、不绘制）。本段处理两件事：
+        // ① 本行断词收尾且 SHY 落在行末 ⇒ 把**那个 SHY 字位**从 0 宽改成连字符宽（槽位复用，
+        //    这就是 `&shy;` 的标准行为：不换行时看不见，换行时才显形）；
+        // ② 本行断词收尾但没有 SHY 槽位（K-L 音节断词）⇒ 行末**外新增**一个字位。
+        // 两种情况最终右缘都是 `trailStartX`，故 [Placement.hyphenXOf] 无需分支。
+        //
+        // ⚠ **SHY 个数必须从拉伸基数里扣掉**：SHY 不可见，给它分一份 `extra` 就是在行里
+        //   撑出一个看不见的洞，行右缘冲出版心（实测一行的 SHY 越多冲得越远）。
+        val shySlot: Int = if (
+            hyphenAtEnd && visibleCount > 0 && isSoftHyphen(text[endExcl - 1])
+        ) endExcl - 1 - start else -1
+        val hyphenW = if (hyphenAtEnd) {
+            measurer.hyphenWidthPx(
+                fontSizePx, letterSpacingEm, tag, families, weight, italic, monospace,
+                fontRuns, endExcl - 1,
+            )
+        } else {
+            0f
+        }
+        if (shySlot >= 0) adv[shySlot] = hyphenW
+        var shyCount = 0
+        for (k in 0 until visibleCount) if (isSoftHyphen(text[start + k])) shyCount++
+        // 无 SHY 槽位而要补连字符时，连字符在**可见区间之外**新增一个字位 ⇒ 多一个可拉伸间隙。
+        val extraGlyphGap = hyphenAtEnd && shySlot < 0
         // **对齐的水平定位**（S5 第一版漏了，只做了 JUSTIFY ⇒ CENTER 行左缘起墨，`LineWindowDrawerTest`
         // 1 把红）。四种语义在此**一次性**算清，绘制侧不再各自为政：
         //  - LEFT   ：x0 = 缩进。
@@ -158,14 +202,68 @@ internal class LineAligner(
             else letterSpacingEm * lastRunSizePx(text, start, visibleCount - 1, fontSizePx, fontRuns)
         var natural = x0Raw
         for (k in 0 until visibleCount) natural += adv[k]
-        natural -= lastLs
+        // 末字的 `lsPx` 通常排在末字**之后、无后继**，不可见 ⇒ 不计。
+        // **但断词收尾时末字总有后继**（那个行尾连字符就跟在它后面），那份 `lsPx` 是
+        // 字与连字符之间**确实存在的间隙** ⇒ 必须计入。这是「量画同源」的对称要求：
+        // `xs` 循环会把这份 `lsPx` 算进落墨推进，这里不减，`finalVisible`
+        // （= [visibleRight] = 连字符右缘）才与墨真正到的地方一致，否则 JUSTIFY 行
+        // 凭空少铺一个 `lsPx`、右缘说谎。实测（ls=0.05, fs=42.18 ⇒ **2.109px**）。
+        //
+        // ⚠ 槽位复用（[shySlot] ≥ 0）时**减得更不能减**：那个字位的 `adv` 已被覆写成
+        // [hyphenW]，**它自己的 `lsPx` 早就不在里面了**（[SkiaRunMeasurer] 量的
+        // SHY 是严格 0 宽、连 `lsPx` 也不给）。再减一次就是**减了两遍** ——
+        // 实测 `hyphen&shy;` @300 ls=0.05：`hyphenX = 284.689` 而 `xs[末] = 286.798`，
+        // 连字符左缘比它的槽位左缘**内缩了整整一个 `lsPx`（2.109px）**。
+        if (shySlot < 0 && !extraGlyphGap) natural -= lastLs
+        // 行尾连字符（K-L 音节断词那种「无 SHY 槽位」的）：接在可见行末**之外**，占版心。
+        // SHY 槽位那种已写进 `adv[shySlot]`，这里**不能再加**（否则算两遍）。
+        if (extraGlyphGap) natural += hyphenW
 
-        // JUSTIFY 拉伸：均摊到**可见字符之间的 N−1 个间隙**；末行不拉伸（两端对齐的定义本身）。
-        val doJustify = align == TextAlign.JUSTIFY && !isLastLine && visibleCount > 1
+        // JUSTIFY 拉伸：均摊到**可见字形之间的间隙**；末行不拉伸（两端对齐的定义本身）。
+        //
+        // ## 间隙数必须与「行里真正存在的字间空当数」一致（否则右缘会说谎）
+        //
+        // 一行的**可见字形序列** = 文本可见字形 + （断词收尾时）那个行尾连字符：
+        // ```
+        // G = visibleCount − shyCount + (shySlot >= 0 ? 1 : 0)   // 文本里的可见字形数
+        //   （shySlot 复用后那个 SHY **不再不可见**，要加回来）
+        // 可见字形总数 = G + (extraGlyphGap ? 1 : 0)            // 行末外新增的连字符
+        // 间隙数 = 可见字形总数 − 1
+        // ```
+        // 两个分支互斥且都等价于「`hyphenAtEnd` 加一」，故公式可化简成下面这一行：
+        //
+        // ```
+        // gapCount = visibleCount − shyCount − 1 + (hyphenAtEnd ? 1 : 0)
+        // ```
+        //
+        // **踩过的坑（两处都错，且方向相反，实测才抓到）**：
+        //  - 第一版是 `(visibleCount − 1 − shyCount) + (extraGlyphGap ? 1 : 0)`。
+        //    K-L 情形（`extraGlyphGap`）得 `visibleCount`，SHY 情形少 1。
+        //  - 而下面 `xs` 循环的护栏是 `k < visibleCount − 1`，两处各错一边 ⇒ **净额为零、
+        //    但方向相反的错位**：`hy­phen` @200 JUSTIFY 时 `gapCount=6` 而只放了 5 份，
+        //    剩下的 `extra`（实测 10.25px）被凭空当作「末字到连字符之间的空当」留在行里，
+        //    同时 `visibleRight` 报告 200.0 = 版心。**墨实际停在 176.55**，连字符从 186.80 起
+        //    ⇒ 一个 10.25px 的假洞；反向的 K-L 情形则整行少铺 `slack/gapCount`。
+        // - 故 [gapCount] 的公式是上面那个推导的**结论**，不是随手写的；
+        //    [xsExtraLimit] 处另记了「它与 [gapCount] 其实不必同式」的变异验证结论。
+        val gapCount = visibleCount - shyCount - 1 + (if (hyphenAtEnd) 1 else 0)
+        // `xs` 循环放 `extra` 的上界：**只到「末可见字形之后」为止**（`k < visibleCount - 1`）。
+        //
+        // 「末字 → 连字符」那一个间隙**不放进 `xs`**：连字符在区间之外（[extraGlyphGap]），
+        // 它到 `xs[n-1]` 没有 x 坐标可落，放进去也无处可观测 —— 它的位置由
+        // [Placement.trailStartX] − [hyphenWidth] 一次算清（见 [hyphenXOf]）。
+        //
+        // ⚠ 变异验证：这上界若改成 `visibleCount - 1 + extraGlyphGap`（看似对称、实则
+        //   把一份 `extra` 加到最后一个字的 x **之后**）**全部现有锁仍全绿** ——
+        //   因为那份 `extra` 加在 `xs[n-1]` 记完之后，`x` 随即被丢弃。
+        //   两版可观测几何逐位相同（实测 `hyphenation` @300：`gap` 同为 6.4780）。
+        //   ⇒ 保留朴素写法（少一处状态、语义更直白），并在此登记该变异点。
+        val xsExtraLimit = visibleCount - 1
+        val doJustify = align == TextAlign.JUSTIFY && !isLastLine && gapCount > 0
         val slack = lineWidthPx - natural
-        val extra = if (doJustify && slack > 0f) slack / (visibleCount - 1) else 0f
-        // 拉伸后总宽恒等于 natural + extra×(N−1)，故 JUSTIFY 时正好铺满版心。
-        val finalVisible = natural + extra * (visibleCount - 1)
+        val extra = if (doJustify && slack > 0f) slack / gapCount else 0f
+        // 拉伸后总宽恒等于 natural + extra×gapCount，故 JUSTIFY 时正好铺满版心。
+        val finalVisible = natural + extra * gapCount
         // CENTER/RIGHT 按**最终**可见宽定位（用拉伸前的 natural 会偏）。
         val x0 = when (align) {
             TextAlign.CENTER -> x0Raw + (lineWidthPx - finalVisible).coerceAtLeast(0f) / 2f
@@ -178,13 +276,18 @@ internal class LineAligner(
         for (k in 0 until n) {
             xs[k] = x
             x += adv[k]
-            // 拉伸只加在**可见字符之间**：k 是前一个字符的本地下标，末字之后不加。
-            if (extra != 0f && k < visibleCount - 1) x += extra
+            // 拉伸只加在**可见字形之间**：k 是前一个字符的本地下标。
+            // ① 上界 [xsExtraLimit]（与 [gapCount] 同式）；② **SHY 之后不加**
+            // （零宽不可见，它的 `lsPx`/拉伸都不该给 —— 不加就等于在行里留一个看不见的洞）。
+            // ③ 不可见的 SHY **跨过去不加**之后仍要继续给下一个可见字形分拉伸，故只是
+            //    跳过 `k` 这一次，不是 `continue` 整个可见段。
+            if (extra != 0f && k < xsExtraLimit && !isSoftHyphen(text[start + k])) x += extra
         }
 
-                // 行末尾随空白紧贴**可见右缘**（含对齐偏移 x0）。
+        // 行末尾随空白紧贴**可见右缘**（含对齐偏移 x0）。有连字符时它就是**连字符右缘**，
+        // 连字符左缘 = 本值 − `hyphenWidth`（见 [Placement.hyphenXOf]）。
         val trailStartX = x0 + finalVisible
-        return Placement(xs, adv.copyOf(n), trailStartX, trailStartX)
+        return Placement(xs, adv.copyOf(n), trailStartX, trailStartX, hyphenW)
     }
 
     /**

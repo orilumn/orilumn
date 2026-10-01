@@ -1,6 +1,7 @@
 package orilumn.reader.engine.skia
 
 import orilumn.reader.engine.css.FontRun
+import orilumn.reader.engine.laying.SoftHyphenBreakSource
 import orilumn.reader.engine.css.TextAlign
 import orilumn.reader.engine.laying.BaselineShift
 import orilumn.reader.engine.laying.BreakOpportunitySet
@@ -54,11 +55,13 @@ class InhouseParagraphBreaker(
      * 那是已知缺口（要读 `class`/`style`），登记在 docs 29g，不在本轮扩接缝。
      */
     private fun sourcesFor(tag: String?): List<BreakOpportunitySource> = when {
-        tag != null && tag in CODE_TAGS -> breakSources + CodeIdentifierBreakSource
+        // `&shy;` 是**作者显式写进正文的**断点意图 ⇒ **两个分支都要注入**，
+        // 即使它出现在 `<code>` 里（作者在代码注释里写 `&shy;` 也是有意的）。
+        tag != null && tag in CODE_TAGS -> breakSources + SoftHyphenBreakSource + CodeIdentifierBreakSource
         // S7：`lang` 未声明（空）时按 en —— 书库里绝大多数非中文段落是英文，
         // 且 [EnglishHyphenationSource.forLang] 对未加载语言退到 [NoHyphenation]（= R1 兜底），
         // 不会误用 en 表去断德语/法语词。真正按 `lang` 分表需要样式通道，见 docs 29g。
-        else -> breakSources + EnglishHyphenationSource.forLang("en")
+        else -> breakSources + SoftHyphenBreakSource + EnglishHyphenationSource.forLang("en")
     }
 
     private companion object {
@@ -163,13 +166,82 @@ class InhouseParagraphBreaker(
             // 缩进已吃满版心：整段一行（再细分只会每行都放不下一个字符）。
             return listOf(BrokenLine(0 until n, lineHeightPx(fontSizePx, lineHeightRatio)))
         }
+        val opp = BreakOpportunitySet.of(text, sourcesFor(tag))
+        val hyphenW = hyphenWidths(
+            n, opp, fontSizePx, letterSpacingEm, tag, families, weight, italic, monospace, fontRuns,
+        )
         return greedy(
             text, adv, n,
             headPx = headPx,
             restPx = widthPx.toFloat(),
-            opp = BreakOpportunitySet.of(text, sourcesFor(tag)),
+            opp = opp,
+            hyphenW = hyphenW,
             targetLh = lineHeightPx(fontSizePx, lineHeightRatio),
         )
+    }
+
+    /**
+     * **逐断点算出「若在该处断开、要补的连字符有多宽」**（数组与 `adv` 同长，非断词点为 0）。
+     *
+     * ## 为什么断行侧必须预留（不能只在绘制侧补画）
+     *
+     * 行尾那个连字符是**真实占版心的墨**。不预留的话，断行器会认为 `hyphen|ation` 放得下，
+     * 画完连字符就**超出版心** —— 而分页阅读器没有横向滚动条，超出部分被页面裁掉 = 内容丢失
+     * （同 `NoLineExceedsContentWidthTest` 钉的硬约束）。
+     *
+     * ## 为什么**不能**把连字符宽焊进 `adv[i-1]`（第一版就这么写，实测被打脸）
+     *
+     * `adv[i-1]` 是**行内任意位置都会累计**的量：一条行里若含有 3 个断词点，
+     * 焊进去就等于**三份**连字符宽全被算进这一行，哪怕这一行只在**其中一处**断开。
+     * 实测后果：`line count fairness holds on production configurations`
+     * 的最差单格比值从 1.500 涨到 **2.0**（URL 格 360px 从 1 行变 2 行）、
+     * 行数比值 0.9924 → 1.0102 —— 明明放得下却提前断行，正是这条的实现错误。
+     *
+     * ⇒ 正确形态是**独立数组，只在真正选中该断点的那一行生效**（见 [greedy]）。
+     *
+     * ## 软连字符（`&shy;`）与 K-L 断词共用这一个数组
+     *
+     * 区别只在**槽位**：SHY 的槽位是它自己那个字位（[LineAligner] 把 `adv[shySlot]`
+     * 从 0 改成连字符宽），K-L 断词的槽位在行末之外。断行侧只管「宽多少」，不管画在哪。
+     *
+     * @return 长度 = `text.length`；下标 `j` = 「行尾是第 j 字、且此处可断词」时要补的宽，否则 0。
+     */
+    private fun hyphenWidths(
+        n: Int,
+        opp: BreakOpportunitySet,
+        fontSizePx: Float,
+        letterSpacingEm: Float,
+        tag: String?,
+        families: List<String>,
+        weight: Int,
+        italic: Boolean,
+        monospace: Boolean,
+        fontRuns: List<FontRun>,
+    ): FloatArray {
+        val out = FloatArray(n)
+        // 缓存键必须覆盖**全部**决定 face 的参数：`<code>` 与正文字号相同但族不同，
+        // 按字号单独缓存会让等宽段里的连字符按正文字体量宽（行尾对不齐）。
+        val cache = HashMap<String, Float>()
+        for (i in 1 until n) {
+            if (!opp.isHyphenAt(i)) continue
+            val at = i - 1
+            val r = fontRuns.firstOrNull { it.start <= at && at < it.endExclusive }
+            val size = r?.fontPxOr(fontSizePx) ?: fontSizePx
+            val key = buildString {
+                append(size.toRawBits()).append('\u0001')
+                append(r?.tag ?: tag).append('\u0001')
+                append(r?.families ?: families).append('\u0001')
+                append(r?.weight ?: weight).append('\u0001')
+                append(r?.italic ?: italic).append('\u0001')
+                append(r?.monospace ?: monospace)
+            }
+            out[at] = cache.getOrPut(key) {
+                measurer.hyphenWidthPx(
+                    fontSizePx, letterSpacingEm, tag, families, weight, italic, monospace, fontRuns, at,
+                )
+            }
+        }
+        return out
     }
 
     /**
@@ -184,12 +256,15 @@ class InhouseParagraphBreaker(
      *    `填充填   填充填` @350 断在 `[0,6)`（"填充填␣␣␣" 判定宽 300），若把行内 3 个空格也免掉则断在 `[0,7)`。
      *  - **`\n` 硬断**，行区间不含它；行首「预领」的 `\n` 跳过 → `a\n\nb` 得 2 行不是 3 行。
      *  - **R1 core**：退不到任何断点即在此断开（贪心填满，不是溢出）。见类 KDoc 的行为规格。
+     *  - **断词断点的连字符宽只在「本行真断在那里」时计入**（[hyphenW]）：断点候选的判定宽
+     *    是 `hang + hyphenW[brk-1]`，**不是**把连字符宽焊进 `adv`（第一版焊进 `adv` 导致
+     *    一行里多个断词点被重复计宽、提前断行，实测最差单格比值 1.5→2.0，见 [hyphenWidths] KDoc）。
      *
      * 不变量（`s` 行首 / `i` 待消费）：
-     *  [hang] = `[s, i)` 扣掉**紧贴行尾的那一段**空白后的宽（UAX#14 LB SP）；
+     *  [hang] = `[s, i)` 扣掉**紧贴行尾的那一段**空白后的宽（UAX#14 LB SP）；**不含**连字符宽；
      *  [trail] = 紧贴行尾的那一段空白的宽（`hang` 加下一个字符时若该字符非空白，这段要并回来）；
-     *  [lastOpp] = 已消费范围内最后一个断点（`-1` = 一个都没有）；已消费的每个断点位置判定宽必然 ≤ avail，
-     *  故「最靠右的可达断点」就是它。
+     *  [lastOpp] = 已消费范围内最后一个断点（`-1` = 一个都没有）；[lastOppWidth] = 该断点处的
+     *  判定宽 `hang + hyphenW[lastOpp-1]`（断词断点的连字符**在这一行真的会出现**）。
      */
     private fun greedy(
         text: CharSequence,
@@ -198,6 +273,7 @@ class InhouseParagraphBreaker(
         headPx: Float,
         restPx: Float,
         opp: BreakOpportunitySet,
+        hyphenW: FloatArray,
         targetLh: Int,
     ): List<BrokenLine> {
         val out = ArrayList<BrokenLine>(8)
@@ -219,6 +295,9 @@ class InhouseParagraphBreaker(
             // 供退出循环后判「该断点是否装得下」。O(1) 更新，不能用重算（那是 O(n) × 行数）。
             var lastOppWidth = 0f
             var brk = -1
+            // 本行行尾**是不是我们主动选中的断点**（而非 R1 core 兜底 / 硬换行）。
+            // 这是 `hyphenAtEnd` 的前提，见下面产出处的注释。
+            var brkIsOpp = false
             while (i < n) {
                 val c = text[i]
                 if (c == '\n') {
@@ -233,7 +312,8 @@ class InhouseParagraphBreaker(
                 hang = next
                 trail = if (sp) trail + w else 0f
                 i++
-                if (opp.opportunityAt(i)) { lastOpp = i; lastOppWidth = hang }
+                // **含该断点自己的连字符宽**：断在这里 ⇒ 行尾真会多一个 `-` ⇒ 它占版心。
+                if (opp.opportunityAt(i)) { lastOpp = i; lastOppWidth = hang + hyphenW[i - 1] }
             }
             if (brk < 0) {
                 brk = when {
@@ -250,14 +330,26 @@ class InhouseParagraphBreaker(
                     // 注意「记账点在 `i++` 之后」：`hang > avail` 的那一刻循环已 `break`，
                     // 故常规路径下 `lastOppWidth <= avail` 恒成立 —— 这条判定只在**版心窄到
                     // 连断点都装不下**（版心 80 / 缩进吃掉版心）时才真正生效。
-                    lastOpp > s && lastOppWidth <= avail -> lastOpp
+                    lastOpp > s && lastOppWidth <= avail -> { brkIsOpp = true; lastOpp }
                     else -> i                          // R1 core：退无可退（含「最近断点也装不下」）→ 填满即断
                 }
             }
             // 反自旋护栏（正常路径不可达：`brk > s` 由上面的 `i > s` 前置条件保证）。
             // 留着是因为一旦未来某个 source 标出 0 号断点，这里就是死循环而不是一次错行。
             if (brk <= s) brk = s + 1
-            out.add(BrokenLine(s until brk, targetLh))
+            // **只有真正退到断点的那条路径才可能带连字符。**
+            //
+            // ⚠ R1 core（`brk = i`）与硬换行（`text[brk] == '\n'`）这两条路径的行宽
+            //   **从未把连字符宽算进过可用性判定** —— 它们是在「装不下」的前提下退到
+            //   「贪心填满」的。此处若照抄 `opp.isHyphenAt(brk)`，就会给一条
+            //   **放不下连字符**的行补上一个连字符 ⇒ **超出版心被裁**（分页阅读器硬错误）。
+            //   实测：`hyphenation extraordinarily` @版心 80 的 `n ex` 行
+            //   （字符宽 70.53，`isHyphenAt(14)=true` 但 [lastOppWidth]=83.73 > 80 走了 R1 core）
+            //   ⇒ 补上 13.20 的连字符后行宽 **83.73 > 80**，溢出 3.73px。
+            //
+            // ⇒ 连字符是「**主动选了某个断点**」的产物，[brkIsOpp] 才是它的前提；
+            //   而 [lastOppWidth <= avail] 这个门槛保证了「选中的断点连同连字符一起装得下」。
+            out.add(BrokenLine(s until brk, targetLh, hyphenAtEnd = brkIsOpp && opp.isHyphenAt(brk)))
             s = brk
         }
         if (out.isEmpty()) out.add(BrokenLine(0 until n, targetLh))

@@ -1,6 +1,7 @@
 package orilumn.reader.engine.skia
 
 import orilumn.reader.engine.css.FontRun
+import orilumn.reader.engine.laying.HYPHEN_GLYPH
 import org.jetbrains.skia.Font
 import org.jetbrains.skia.FontMgr
 import org.jetbrains.skia.FontStyle
@@ -123,6 +124,52 @@ class SkiaRunMeasurer(
         return sum
     }
 
+    /**
+     * **连字符宽**（px）：断词断点处行尾要补的那个 [HYPHEN_GLYPH] 的 advance。
+     *
+     * ## 为什么必须走本量宽器（量画同源，教训 20）
+     *
+     * 断行侧用它**预留**版心、绘制侧用它**落墨**、Aligner 用它算 JUSTIFY 拉伸基数 ——
+     * 三处任一处另算就是量画失配（行溢出 / 铺不满）。故与 [advances] 共用同一条取面出口。
+     *
+     * @param at 连字符所在的**绝对下标**（行末）。用它查 [fontRuns] 得到该字的 face：
+     *   `<code>hyphenation</code>` 里的连字符必须按等宽面量，不能按正文字体量。
+     * @return 该 face 下 `-` 的 advance；无候选面时按 [advances] 同款兜底（不抛）。
+     */
+    fun hyphenWidthPx(
+        fontSizePx: Float,
+        letterSpacingEm: Float,
+        tag: String?,
+        families: List<String>,
+        weight: Int,
+        italic: Boolean,
+        monospace: Boolean,
+        fontRuns: List<FontRun> = emptyList(),
+        at: Int = -1,
+    ): Float {
+        val r = fontRuns.firstOrNull { at >= 0 && it.start <= at && at < it.endExclusive }
+        val size = r?.fontPxOr(fontSizePx) ?: fontSizePx
+        val mgrs = managers()
+        val seg = Seg(
+            0, 0,
+            faceTable(
+                r?.tag ?: tag, r?.families ?: families, r?.monospace ?: monospace,
+                r?.weight ?: weight, r?.italic ?: italic, size, mgrs,
+            ),
+            letterSpacingEm * size, size,
+            SkParagraphFactory.resolveFamilies(r?.tag ?: tag, r?.families ?: families, r?.monospace ?: monospace),
+            SkParagraphFactory.runFontStyle(r?.families ?: families, r?.weight ?: weight, r?.italic ?: italic),
+            mgrs,
+        )
+        val cp = HYPHEN_GLYPH.code
+        for (font in seg.fonts) {
+            val w = font.getWidths(shortArrayOf(font.getUTF32Glyph(cp)))
+            if (font.getUTF32Glyph(cp) != NOTDEF) return w[0] + seg.lsPx
+        }
+        // 无候选面覆盖：与 [measure] 同款兜底（字面上画出来也是 .notdef，量画一致）。
+        return fallbackWidth(seg, cp) ?: notdefWidth(seg.fonts[0])
+    }
+
     // ---- 分段：按 run 边界切，同段共用一张面表与一个 lsPx ----
 
     private class Seg(
@@ -197,6 +244,10 @@ class SkiaRunMeasurer(
         var nCp = 0
         for (i in from until to) {
             val cp = cpAt(text, i)
+            // **软连字符不进面表**（零宽占位符，见 [SOFT_HYPHEN]）：它不占宽度也不绘制，
+            // 真去查面只会拿到 STSong 的 glyph 271 并算出一个 1em 的全宽（实测 42.18 @fs=42.18）。
+            // 它的「可见性」由断点判定决定：行若断在它之后，那里画一个 [HYPHEN_GLYPH]。
+            if (cp == SOFT_HYPHEN_CODE) continue
             if (slotOf.putIfAbsent(cp, nCp) == null) {
                 cps[nCp] = cp
                 nCp++
@@ -236,7 +287,12 @@ class SkiaRunMeasurer(
             }
         }
         val ls = seg.lsPx
-        for (i in from until to) out[i] = width[slotOf.getValue(cpAt(text, i))] + ls
+        for (i in from until to) {
+            val cp = cpAt(text, i)
+            // 软连字符**严格 0 宽**（连 `lsPx` 也不给）：它是「不占位」的占位符。
+            // 给 letterSpacing 会凭空多出一个幽灵间隙 → 行内出现看不见的洞。
+            out[i] = if (cp == SOFT_HYPHEN_CODE) 0f else width[slotOf.getValue(cp)] + ls
+        }
     }
 
     private fun notdefWidth(font: Font): Float = font.getWidths(shortArrayOf(NOTDEF))[0]
@@ -291,6 +347,9 @@ class SkiaRunMeasurer(
 }
 
 private const val NOTDEF: Short = 0
+
+/** [SOFT_HYPHEN] 的码本（取宽路径的热路径判定，用 Int 常量免去 Char→Int 装箱）。 */
+private const val SOFT_HYPHEN_CODE = 0x00AD
 
 /** 码本：代理对取整个代理对的值（`text[i]` 为高位时读低位），否则原样。 */
 private fun cpAt(text: CharSequence, i: Int): Int {

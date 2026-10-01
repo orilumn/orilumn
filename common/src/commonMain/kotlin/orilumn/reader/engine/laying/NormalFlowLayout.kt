@@ -582,6 +582,7 @@ object NormalFlowLayout {
                     LayoutBox(
                         el, style, boxLeft, floatW,
                         ranges = brokenF.map { it.range },
+                        hyphenAtEnd = brokenF.map { it.hyphenAtEnd },
                         textLength = text.length,
                         lineHeights = grownF,
                         childBoxes = emptyList(),
@@ -604,6 +605,7 @@ object NormalFlowLayout {
                     LayoutBox(
                         el, style, left, contentW,
                         ranges = broken.map { it.range },
+                        hyphenAtEnd = broken.map { it.hyphenAtEnd },
                         textLength = text.length,
                         lineHeights = grownHeights,
                         childBoxes = emptyList(),
@@ -692,7 +694,8 @@ object NormalFlowLayout {
         return listOf(
             LayoutBox(
                 el = textEl, style = style, contentLeft = left, contentWidth = contentW,
-                ranges = broken.map { it.range }, textLength = text.length,
+                ranges = broken.map { it.range }, hyphenAtEnd = broken.map { it.hyphenAtEnd },
+                textLength = text.length,
                 lineHeights = broken.map { it.heightPx.coerceAtLeast(1) },
                 childBoxes = emptyList(),
             ),

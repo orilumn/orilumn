@@ -11,9 +11,11 @@ package orilumn.reader.engine.laying
  *
  * ## 断点即「连字符该出现的位置」
  *
- * [Hyphenator] 给的是词内音节边界。**绘制侧在断点处补一个 U+2010/连字符**即 CSS
- * `hyphenate-character`；本仓当前不自动补字符（见 docs 29g 的 TODO），只提供断点位置，
- * 因为「哪一行恰好断在词中间」由贪心决定，绘制时才知道该不该补。
+ * [Hyphenator] 给的是词内音节边界。**行恰在某个音节边界断开时，行尾必须补一个
+ * [HYPHEN_GLYPH]**（CSS Text 4 `hyphenate-character` 的默认取值）——本类用
+ * [BreakOpportunitySet.markHyphen] 标这件事，断行侧据此**预留连字符宽**（否则超版心），
+ * 绘制侧据此**落墨**。与软连字符（`&shy;`，[SoftHyphenBreakSource]）是同一类断点：
+ * 区别仅在于 SHY 的槽位是那个字符本身，而 K-L 断词没有槽位、要在行末**外新增**一个字位。
  *
  * ## 语言来源
  *
@@ -60,8 +62,9 @@ object EnglishHyphenationSource {
                 var e = s
                 while (e < word.length && isLatin(word[e])) e++
                 if (e - s >= MIN_WORD) {
+                    // 音节断点 = **要补连字符**的断点（与 `&shy;` 同类），故用 markHyphen。
                     for (p in Hyphenator.hyphenate(word.subSequence(s, e).toString(), lang = lang)) {
-                        into.mark(base + s + p)
+                        into.markHyphen(base + s + p)
                     }
                 }
                 s = e

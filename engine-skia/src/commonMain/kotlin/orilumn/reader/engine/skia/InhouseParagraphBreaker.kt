@@ -55,12 +55,35 @@ class InhouseParagraphBreaker(
      */
     private fun sourcesFor(tag: String?): List<BreakOpportunitySource> = when {
         tag != null && tag in CODE_TAGS -> breakSources + CodeIdentifierBreakSource
-        else -> breakSources + EnglishHyphenationSource
+        // S7：`lang` 未声明（空）时按 en —— 书库里绝大多数非中文段落是英文，
+        // 且 [EnglishHyphenationSource.forLang] 对未加载语言退到 [NoHyphenation]（= R1 兜底），
+        // 不会误用 en 表去断德语/法语词。真正按 `lang` 分表需要样式通道，见 docs 29g。
+        else -> breakSources + EnglishHyphenationSource.forLang("en")
     }
 
     private companion object {
-        /** 代码语境 tag（CSS UA 默认等宽的这些元素）。 */
-        val CODE_TAGS = setOf("pre", "code", "kbd", "samp", "var", "tt")
+        /**
+         * **代码/技术文本语境**的 HTML tag（CSS2.1 §16 与 HTML5 里 UA 默认 `font-family: monospace`
+         * 的那一组），命中则注入 [CodeIdentifierBreakSource] 而非音节断词。
+         *
+         * - `code` 代码片段 —— 语料 **26229** 处（最常见）
+         * - `pre` 预格式化块 —— 语料 **2021** 处
+         * - `kbd` 键盘输入 —— 语料 14 处
+         * - `tt` 老式打字机文本（HTML2）、`samp` 程序输出、`var` 程序变量、`data` 机器可读数据
+         *   —— 本仓语料 0 处，但**书商转换器爱用老标签**，同样要进。
+         *
+         * 判据是「**浏览器 UA 默认给它 monospace**」而不是「语料里出现得多」——
+         * 零出现的 `tt`/`samp`/`var` 同样要进，书商转换器爱用老标签。
+         *
+         * **刻意排除** `acronym` / `abbr`：语料里 585 / 39 处，但它们是**术语缩写**而非
+         * 代码（浏览器也只给 `abbr` 加虚线下划线，不给 monospace）。把缩写当代码会
+         * 禁掉音节断词、且给 `HTTP` 这类词强加驼峰规则，属误判。
+         *
+         * **判据的另一面**：`class="language-*"` / `class="highlight"` 这类**类名**标记
+         * 判不出来（[ParagraphBreaker.breakLines] 签名被 S2 冻结，没有 class 通道）。
+         * 实测语料里 `code`+`pre` 已覆盖绝大部分代码块，剩下的漏网形态已登记 docs 29g。
+         */
+        val CODE_TAGS = setOf("pre", "code", "kbd", "samp", "var", "tt", "data")
     }
 
     override fun breakLines(

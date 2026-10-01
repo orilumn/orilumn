@@ -116,6 +116,20 @@ class StyleComputer(
     private fun isDisplayBlock(value: String): Boolean =
         value in DISPLAY_BLOCK_VALUES || value.startsWith("table")
 
+    /**
+     * S7：`lang` 属性 → 主语言子标签（小写）。**空/非法一律返 null**（调用方继承父级）。
+     *
+     * 只保留 `[A-Za-z]{2,3}` 的主标签：`de-DE`/`de_AT` → `de`；`zh-Hans-CN` → `zh`。
+     * 刻意**不**做 locale 继承链（`zh-Hant-TW` → …→ `zh`）：断词表按语言组织，
+     * 繁体与简体的断点需求不同，但那是**词表**层面的事，不该在这里猜。
+     */
+    private fun normalizeLang(raw: String?): String? {
+        val v = raw?.trim()?.lowercase() ?: return null
+        if (v.isEmpty()) return null
+        val primary = v.substringBefore('-').substringBefore('_')
+        return primary.takeIf { it.length in 2..3 && it.all { c -> c in 'a'..'z' } }
+    }
+
     /** Computes styles for the whole tree; the root node's own style starts from the root defaults. */
     fun compute(root: MarkupElement): Map<MarkupElement, ComputedStyle> {
         val out = HashMap<MarkupElement, ComputedStyle>()
@@ -170,7 +184,7 @@ class StyleComputer(
     fun pseudoStyle(el: MarkupElement, ancestors: List<MarkupElement>, base: ComputedStyle, pseudo: String): ComputedStyle {
         val winners = cascade.winningDeclarations(el, ancestors, emptyList(), pseudo)
         if (winners.isEmpty()) return base
-        return computeStyle(winners, base, el.tag)
+        return computeStyle(winners, base, el.tag, normalizeLang(el.attrs["lang"]))
     }
 
     private fun computeOne(el: MarkupElement, ancestors: List<MarkupElement>, parent: ComputedStyle): ComputedStyle {
@@ -186,7 +200,7 @@ class StyleComputer(
         if (probe != null) parseMs = orilumn.reader.time.platformNowMs() - tP
         val winners = cascade.winningDeclarations(el, ancestors, inline)
         val tB = if (probe != null) orilumn.reader.time.platformNowMs() else 0L
-        val style = computeStyle(winners, parent, el.tag)
+        val style = computeStyle(winners, parent, el.tag, normalizeLang(el.attrs["lang"]))
         if (probe != null) buildMs = orilumn.reader.time.platformNowMs() - tB
         // 读者层裸通用名兜底合并：主题预设（serif/sans-serif）只能缀在书栈后面做最终回退，
         // 不能替换——否则书里点名的导入字体（池中有）在主题模式下永远够不着（传统变黑体）。
@@ -203,6 +217,7 @@ class StyleComputer(
                     winners + ("font-family" to (author + fams[0]).joinToString(",")),
                     parent,
                     el.tag,
+                    normalizeLang(el.attrs["lang"]),
                 )
                 if (probe != null) {
                     secondPassMs = orilumn.reader.time.platformNowMs() - tS
@@ -215,7 +230,12 @@ class StyleComputer(
         return style
     }
 
-    private fun computeStyle(w: Map<String, String>, parent: ComputedStyle, tag: String): ComputedStyle {
+    /**
+     * @param lang 已规范化的主语言子标签（S7）。**单独传参而不让本函数自己读 `el`**：
+     *   本函数是**纯函数**（只吃 `w`/`parent`/`tag`，无节点访问），给它加 `el` 会破坏这个性质，
+     *   而 `lang` 是 HTML **属性**（不是 CSS 声明）本来就不在 `w` 里。三个调用点各自解析一次。
+     */
+    private fun computeStyle(w: Map<String, String>, parent: ComputedStyle, tag: String, lang: String?): ComputedStyle {
         // 1) font-size first (em/% boxes resolve against this final value)
         val fontSize = resolveFontSize(w["font-size"], parent.fontSizePx)
 
@@ -316,6 +336,8 @@ class StyleComputer(
             borderRadius = radiusPx,
             borderRadiusPct = radiusPct,
             textAlign = w["text-align"]?.let { parseTextAlign(it) } ?: parent.textAlign,
+            // S7：HTML 属性（不在 `w` 里），继承；已由调用点规范化为主子标签。
+            lang = lang ?: parent.lang,
             breakInside = parseBreakAny(w, "break-inside", "page-break-inside"),
             breakAfter = parseBreakAny(w, "break-after", "page-break-after"),
             breakBefore = parseBreakAny(w, "break-before", "page-break-before"),

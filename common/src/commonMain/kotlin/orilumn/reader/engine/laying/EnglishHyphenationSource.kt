@@ -21,42 +21,57 @@ package orilumn.reader.engine.laying
  * `BreakOpportunitySource` 形状允许，但 source 拿不到 `ComputedStyle`，需在接线处按 `tag`
  * 之外的维度决定用哪个 source，见 docs 29g。
  */
-object EnglishHyphenationSource : BreakOpportunitySource {
+object EnglishHyphenationSource {
 
     /** 最小词长：短于此不断（太短的词断出来两侧都不成词）。 */
     private const val MIN_WORD = 6
 
-    override fun mark(text: CharSequence, into: BreakOpportunitySet) {
-        val n = text.length
-        var wordStart = 0
-        var i = 0
-        while (i <= n) {
-            if (i == n || !isWordChar(text[i])) {
-                if (i - wordStart >= MIN_WORD) {
-                    markWord(text.subSequence(wordStart, i), wordStart, into)
+    /** 按语言的 source 缓存：同一叶多次排版（翻页回看）不该重建。 */
+    private val byLang = HashMap<String, BreakOpportunitySource>()
+
+    /** 取该语言的断词源（未加载语言返 [NoHyphenation]，退到 R1 硬切）。 */
+    fun forLang(lang: String): BreakOpportunitySource =
+        byLang.getOrPut(lang) {
+            if (lang in Hyphenator.loadedLanguages()) LangHyphenationSource(lang) else NoHyphenation
+        }
+
+    /** 实际断词实现（一个固定语言）。不可变、可缓存。 */
+    class LangHyphenationSource(private val lang: String) : BreakOpportunitySource {
+        override fun mark(text: CharSequence, into: BreakOpportunitySet) {
+            val n = text.length
+            var wordStart = 0
+            var i = 0
+            while (i <= n) {
+                if (i == n || !isWordChar(text[i])) {
+                    if (i - wordStart >= MIN_WORD) {
+                        markWord(text.subSequence(wordStart, i), wordStart, into)
+                    }
+                    wordStart = i + 1
                 }
-                wordStart = i + 1
+                i++
             }
-            i++
+        }
+
+        private fun markWord(word: CharSequence, base: Int, into: BreakOpportunitySet) {
+            // 词内可能因数字/连字符被拆开，只对纯字母段断词。
+            var s = 0
+            while (s < word.length) {
+                if (!isLatin(word[s])) { s++; continue }
+                var e = s
+                while (e < word.length && isLatin(word[e])) e++
+                if (e - s >= MIN_WORD) {
+                    for (p in Hyphenator.hyphenate(word.subSequence(s, e).toString(), lang = lang)) {
+                        into.mark(base + s + p)
+                    }
+                }
+                s = e
+            }
         }
     }
 
-    /** 词内音节点 → 全文本坐标的断点。 */
-    private fun markWord(word: CharSequence, base: Int, into: BreakOpportunitySet) {
-        // 逐字符收集连续拉丁字母段（词内可能因数字/连字符被拆开，只对纯字母段断词）
-        var s = 0
-        while (s < word.length) {
-            if (!isLatin(word[s])) { s++; continue }
-            var e = s
-            while (e < word.length && isLatin(word[e])) e++
-            if (e - s >= MIN_WORD) {
-                val piece = word.subSequence(s, e).toString()
-                for (p in Hyphenator.hyphenate(piece)) {
-                    into.mark(base + s + p)
-                }
-            }
-            s = e
-        }
+    /** 未加载语言：不加任何断点，由 R1 兜底硬切。**显式类型**，不是「空实现」以便区分。 */
+    object NoHyphenation : BreakOpportunitySource {
+        override fun mark(text: CharSequence, into: BreakOpportunitySet) = Unit
     }
 
     private fun isWordChar(c: Char): Boolean = isLatin(c) || c.isDigit() || c == '\'' || c == '-'

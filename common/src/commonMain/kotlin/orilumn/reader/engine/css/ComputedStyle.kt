@@ -237,6 +237,18 @@ class ComputedStyle(
     /** CSS `text-emphasis-position: under` (default over). Inherited. */
     val emphasisUnder: Boolean = false,
     val textAlign: TextAlign = TextAlign.LEFT,
+    /**
+     * BCP47 语言标记（HTML `lang` 属性，**继承**），小写；空 = 未声明。
+     *
+     * S7 用来选断词表（[orilumn.reader.engine.laying.Hyphenator] 的 `lang` 形参）。
+     *
+     * **为什么放在样式层而不是断行器里另读**：`lang` 是**继承属性**（`<html lang="de">` 覆盖全篇），
+     * 与 `fontFamily`/`textAlign` 走同一条继承链最自然，且断行器签名**不因此改变**
+     * （S2 冻结：`BreakOpportunitySource` 由接线处按 tag/style 决定，source 内部不查样式）。
+     *
+     * 只取主语言子标签（`de-DE` → `de`），因为内置表按语言而非地区组织。
+     */
+    val lang: String = "",
     /** Paged-media break preferences; non-inherited (initial 0). */
     val breakInside: BreakRule = BreakRule.AUTO,
     val breakAfter: BreakRule = BreakRule.AUTO,

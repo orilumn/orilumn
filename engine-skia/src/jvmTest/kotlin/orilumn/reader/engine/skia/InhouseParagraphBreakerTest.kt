@@ -104,11 +104,17 @@ class InhouseParagraphBreakerTest {
     }
 
     /**
-     * 结构不变量：区间不越界 / 非空 / 不与上行重叠 / 不含 `\n` / 并起来覆盖全部非 `\n` 字符 / 行高合规。
+     * 结构不变量：区间不越界 / 非空（**除非是落在硬换行上的空行**）/ 不与上行重叠 / 不含 `\n` /
+     * 并起来覆盖全部非 `\n` 字符 / 行高合规。
      * **这一层与禁则取舍无关**，任何格都必须成立 —— 丢字符 / 区间含 `\n` 是绝不能有的 bug。
      *
      * 例外：**整段只有换行**的输入（`"\n"`、`"\n\n\n"`）两侧都退到 `BrokenLine(0 until n)` 的兜底单行，
      * 区间因此含 `\n`。那是两侧同口径的既有行为，由 [greedy semantics 3b] 单独锁一致性，此处不适用。
+     *
+     * **零宽行（空行）是合法的**：`a\n\nb` 的中间那行是空区间，它是一个**真实行盒**
+     * （占一整行高；CSS `pre-wrap` / `<br><br>` 都如此，仓内口径见 [WhiteSpaceBreak.breakLeafLines]
+     * 的 `else if (i < n)` 分支）。但「空区间」不能成为丢字符的遮羞布 ⇒ 判据收紧为：
+     * **空区间必须落在硬换行处**（`text[r.first] == '\n'`），落在别处的空洞仍然判红。
      */
     private fun assertWellFormed(text: String, w: Int, ls: Float = 0f) {
         val n = text.length
@@ -117,7 +123,12 @@ class InhouseParagraphBreakerTest {
         mineLines(text, w, ls).forEachIndexed { k, l ->
             val r = l.range
             assertTrue("第 ${k + 1} 行区间越界（r=$r n=$n text=«$text» W=$w ls=$ls）", r.first >= 0 && r.last < n)
-            assertTrue("第 ${k + 1} 行区间为空（text=«$text» W=$w）", !r.isEmpty())
+            if (r.isEmpty()) {
+                assertTrue(
+                    "第 ${k + 1} 行是空区间却不落在硬换行处（r=$r text=«$text» W=$w ls=$ls）",
+                    r.first in 0 until n && text[r.first] == '\n',
+                )
+            }
             assertTrue("第 ${k + 1} 行与上一行重叠（r=$r prevEnd=$prevEnd）", r.first >= prevEnd)
             prevEnd = r.last + 1
             assertEquals("第 ${k + 1} 行行高（text=«$text» W=$w）", lineHeightPx(size, lh), l.heightPx)
@@ -374,11 +385,21 @@ class InhouseParagraphBreakerTest {
         )
     }
 
+    /**
+     * 硬换行断行 + **空行保留** + 末尾换行不产幻影行。
+     *
+     * ⚠ 本锁早先把「`a\n\nb` 是 **2** 行」当成规格钉住，那正是用户报的
+     * 「`pre code` 块里空行全部消失」（Q16）。规格已改为**以 CSS 为准**：空行是真实行盒。
+     * 「以 CSS 为准」不需要外部裁决 —— 仓内**早就有正确的那份实现**：
+     * [WhiteSpaceBreak.breakLeafLines] 不折行分支（`PRE`/`NOWRAP`）一直产零宽空行，
+     * 只有 `pre` 被降级成 `PRE_WRAP`（`wraps()==true`）后走断行器的那条在丢。
+     * ⇒ 本锁钉的是**两个 `white-space` 分支行数一致**，不是某一条孤立的期望值。
+     */
     @Test
-    fun `greedy semantics 3 - hard newline breaks and pure newlines produce no phantom line`() {
+    fun `greedy semantics 3 - hard newline breaks keep blank lines and no phantom trailing line`() {
         val cases = listOf("a\n\nb", "a\nb", "a\n", "\na", "ab\ncd", "\n", "\n\n\n", "a\n\n\nb", " \n a")
         for (t in cases) {
-            assertParity(t, 1000) // 宽到放得下：验「硬断 + 空行丢弃」
+            assertParity(t, 1000) // 宽到放得下：验「硬断 + 空行保留」
             val floor = floorPx(t).coerceAtLeast(1)
             for (w in intArrayOf(floor, floor + 1, floor + 7, floor + 40)) {
                 assertParity(t, w)
@@ -386,16 +407,24 @@ class InhouseParagraphBreakerTest {
                 if (t.any { it != '\n' }) assertWellFormed(t, w)
             }
         }
-        assertEquals("`a\\n\\nb` 是 2 行而非 3 行（纯换行空行丢弃）", 2, mineLines("a\n\nb", 1000).size)
+        // 空行 = 连续换行之间的零宽行。`2 until 2` 即空区间（首字符位与末字符位重合）。
+        assertEquals("`a\\n\\nb` 的空行必须保留（3 行）", listOf(0..0, 2 until 2, 3..3), mineLines("a\n\nb", 1000).map { it.range })
+        assertEquals(3, mineLines("a\n\nb", 1000).size)
+        // 末尾**单个** `'\n'` 不产幻影行（EPUB 源码惯用 `<pre>…\n</pre>`）；末尾**两个** `'\n'` 时
+        // 靠前那个终止的是一个真实空行（CSS 口径），必须保留。
+        assertEquals(1, mineLines("a\n", 1000).size)
+        assertEquals(listOf(0..0, 2 until 2), mineLines("a\n\n", 1000).map { it.range })
     }
 
     /**
-     * 「整段只有换行」的兜底单行：两侧**同口径**，不是分歧。
+     * 「整段只有换行」的两侧**同口径**：不是分歧。
      *
-     * `"\n"` / `"\n\n\n"` 这类输入没有可断点也没有可绘制字符，两侧都会退到
-     * `BrokenLine(0 until n)` 的兜底（见 [InhouseParagraphBreaker.greedy] 与
-     * [SkiaParagraphBreaker.layoutOnce] 的 `out.isEmpty()` 分支），区间因此含 `\n`。
-     * 真实文本不会出现这种段，调用侧 [LineWindowDrawer] 画 `\n` 也是既有行为，故只锁**两侧一致**。
+     * `"\n"` 没有可断点也没有可绘制字符，两侧都退到 `BrokenLine(0 until n)` 的兜底
+     * （见 [InhouseParagraphBreaker.greedy] 与 [SkiaParagraphBreaker.layoutOnce] 的 `out.isEmpty()` 分支），
+     * 区间因此含 `\n`。真实文本不会出现这种段，调用侧 [LineWindowDrawer] 画 `\n` 也是既有行为，故只锁**两侧一致**。
+     *
+     * `"\n\n\n"` / `"\n \n"` 这类**多行全换行**的输入现在走的是「零宽空行」那条路（末尾换行不产行），
+     * 不再退到兜底 —— 但两侧仍然一致，故同属本锁。
      */
     @Test
     fun `greedy semantics 3b - newline-only paragraphs fall back identically on both sides`() {

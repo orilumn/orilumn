@@ -229,27 +229,47 @@
 
 - **Q16 — `pre code` 块里的空行全部消失（2026-10-02 用户报）**：
   **根因（排版层·上）**：断行器丢空行，**两侧断行实现都丢**：
-  - 自建侧 `InhouseParagraphBreaker.greedy`（`engine-skia/.../skia/InhouseParagraphBreaker.kt:369-376`）
-    行首遇 `'\n'` 即 `s++; continue`，**不产出任何 `BrokenLine`** ⇒ `"a\n\nb"` 得 2 行。
-  - 回退阀 `SkiaParagraphBreaker`（`:196-198`）归一化后 `if (e > s)` 把变空的行丢掉 ⇒ **同样 2 行**。
+  - 自建侧 `InhouseParagraphBreaker.greedy` 行首遇 `'\n'` 即 `s++; continue`，**不产出任何 `BrokenLine`**
+    ⇒ `"a\nb"` 得 2 行。
+  - 回退阀 `SkiaParagraphBreaker.layoutOnce` 归一化后 `if (e > s)` 把变空的行丢掉 ⇒ **同样 2 行**。
     ⇒ **拨 `inhouseBreak=0` 回退也修不好**，这点必须写死，否则会有人往回退阀上找。
 
-  **`StyleComputer.resolveWhiteSpace`（`:232`）不是元凶，但是放大器**：它把 `pre` 子树里
-  不可折行的值一律降级成 `PRE_WRAP`，而 `WhiteSpaceBreak.breakLeafLines:27` 的
-  `wraps()==false` 分支（`PRE`/`NOWRAP`）**显式产出零宽空行**、`wraps()==true` 分支
-  把空行判给断行器 ⇒ **降级恰好把 `pre` 送进丢空行的那条路**。讽刺的是它是「为不横滚做的妥协」。
+  **`StyleComputer.resolveWhiteSpace` 不是元凶，但是放大器**：它把 `pre` 子树里不可折行的值一律降级成
+  `PRE_WRAP`，而 `WhiteSpaceBreak.breakLeafLines` 的 `wraps()==false` 分支（`PRE`/`NOWRAP`）
+  **显式产出零宽空行**、`wraps()==true` 分支把空行判给断行器
+  ⇒ **降级恰好把 `pre` 送进丢空行的那条路**。讽刺的是它是「为不横滚做的妥协」。
 
-  **认知源头（已钉进测试计划 §T1b 第③行）**：「纯换行空行丢弃」被当成 **Skia 的固有语义**写进了规格，
-  而实测它只是**本仓 `layoutOnce` 归一化步骤**的行为（`SkParagraphBreaker` 裸跑是否吐空行未验证）。
-  现有两条单测把这个 bug 钉成了规格：`InhouseParagraphBreakerTest:377` 断言 `"a\n\nb"` 是 2 行；
-  `SkiaParagraphBreakerTest:150` 用例名叫 `brNewlinesKeepInteriorLines` 却断言 `listOf(0..0, 3..3)`（空行被丢）。
-  **没有任何测试断言 `pre`/`pre-wrap` 下空行应保留。**
+  **认知源头（本轮已翻案，见测试计划 §T1b ③ 与教训 ⑳）**：「纯换行空行丢弃」被当成 **Skia 的固有语义**
+  写进了规格。**探针实测裸 `SkParagraph.lineMetrics`：Skia 本来就有空行** ——
+  `a\n\nb` → `[0..1, **2..2**, 3..4]`、`\na` → `[**0..0**, 1..2]`；
+  丢空行的是**本仓的归一化步骤**（`if (e > s)`）。两条单测把这个 bug 钉成了规格：
+  `InhouseParagraphBreakerTest` 断言 `"a\n\nb"` 是 2 行；`SkiaParagraphBreakerTest.brNewlinesKeepInteriorLines`
+  用例名叫 `KeepInteriorLines` 却断言 `listOf(0..0, 3..3)`。
+  ⇒ 「需先决定以 CSS 为准还是以现状为准」这个待裁决项**不成立**：仓内**早有正确的那份实现**
+  （`breakLeafLines` 不折行分支一直在产零宽空行），这是**两条分支口径不一致**，不是取舍。
 
   **渲染层无责**：`LineAligner:113` 对 `n<=0` 正常返回空 `Placement`，`DrawLineBuilder:87-97` 不丢零宽行
-  ⇒ **零宽空行一旦被生产出来就能正常画**。修在断行器就够。
+  ⇒ **零宽空行一旦被生产出来就能正常画**。修在断行器就够（端到端锁已证）。
 
-  **⬜ 未修**（修法 = 断行器为「连续硬换行之间的空段」产出零宽行；但会与 §T1b 第③行那条已被钉死的
-  「Skia 逐行等价」金标准冲突，需先决定「以浏览器/CSS 为准」还是「以现状为准」）。
+  **✅ 已修（2026-10-02）**。规格：空行 = **连续硬换行之间的空段**，是**真实行盒**（零宽区间、占一整行高）；
+  末尾**单个** `\n` 不产幻影行（EPUB 源码惯用 `<pre>…\n</pre>`），末尾**两个** `\n` 时靠前那个终止的是
+  真实空行、必须保留。落点（排版层·上）：
+  - `InhouseParagraphBreaker.greedy`：行首 `\n` 产出 `BrokenLine(s until s)`；并在 `s = brk` 处
+    **跨过硬换行终止符**（否则 `a\n\nb` 会多产一行）；末尾换行用 `trailingTerminator` 门槛挡掉。
+  - `SkiaParagraphBreaker.layoutOnce`：保留**归一化前就零宽**的指标（`blank = s == e`）——
+    这正是「Skia 对空行给的就是零宽区间」与「纯换行幻影行非零宽」的唯一区分点；
+    另在循环后**按字符补回最后一个空行**（Skia 对文本以 `\n\n` 结尾时把空行与幻影行**合并成同一条非零宽指标**，
+    实测 `[0..1, 2..3, 2..3]`，归一化后那一行就没了）。
+  - 两条分支的**区间口径不同**（nowrap 分支的段含终止 `\n`、断行器分支不含）**未动**：那是既有差异、
+    两侧都画得对，本轮只锁「行数 + 逐行可见文本」一致。
+
+  **锁**：新增 `engine-skia:WhiteSpaceBlankLineParityTest`（3 把，钉「两个断行器 × white-space 两个分支」
+  四格两两一致 + 空行占满行高 + `normal` 语境 `<br><br>`）；新增 `app:PreBlankLineEndToEndTest`（4 把，
+  走 `prepare`→`fullLayout`/`prepareLight`→`incrementalLayoutForPage` 整条链路，断言叶文本/区间/行几何/行窗）；
+  改写两条把 bug 钉成规格的既有锁。
+  **逐把变异验证（4 个，全部应验）**：M1 自建侧退回修复前（9 把红）、M2 只退 Skia 侧（6 把红，
+  含 `brNewlinesKeepInteriorLines`）、M3 只去掉「按字符补回最后一个空行」那 5 行（4 把红）、
+  M4 只去掉 `s = brk + 1` 的跨 terminator（9 把红，连既有的公平性锁也一并红）。
 
 - **Q17 — 中英（中西）文之间**零自动间距**；`CjkLatinSpacing` 是死代码（2026-10-02 用户问，现已查清）**：
   用户的三个子问题，逐一实测回答：

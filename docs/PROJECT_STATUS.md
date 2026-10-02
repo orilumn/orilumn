@@ -761,7 +761,7 @@ kerning/连字信息只存在于字体 GPOS/GSUB，取它必须有 shaper，而 
 | 编号 | 症状 | 根因（层） | 状态 |
 | --- | --- | --- | --- |
 | Q15 | GIMP 手册表格「显示不出来」 | `StyledText.kt:107` 对块级子节点 `isBlock(c) -> Unit` ⇒ **`<td><p>…</p></td>` 整格文本为空**（排版层·上） | 确诊，**已修**（见「第二批」） |
-| Q16 | `pre code` 空行全没了 | 断行器**两侧都丢**空行（自建 `greedy` 行首 `'\n'` 跳过 + Skia 侧 `if (e > s)`）⇒ **回退阀也修不好**（排版层·上） | 确诊，未修 |
+| Q16 | `pre code` 空行全没了 | 断行器**两侧都丢**空行（自建 `greedy` 行首 `'\n'` 跳过 + Skia 侧 `if (e > s)`）⇒ **回退阀也修不好**（排版层·上） | 确诊，**已修**（见「第三批」） |
 | Q17 | 中英之间空白怎么处理的 | **什么都没做**；`CjkLatinSpacing` 是死代码；「盒边界」在这条链路上不存在（`<code>` 不是盒，只是 `FontRun` 区间） | 已回答 |
 | Q18 | `wrap(断行)ping_add` 断行优先级 | **先压缩空白再断行**；断在字母中间是**英语音节断词**把 `wrapping` 断成 `wrap-`+`ping`，而 `_` 断点因「判据看叶块 tag」没注入（分行控制） | 确诊，未修 |
 | Q19 | 标题看不出粗 + 选粗细对标题无效 | `anchoredWeight` 第一行 `if (italic \|\| weight != 400) return` ⇒ 对 h1–h6 的 700 **恒不触发**；且**全仓无合成粗体**（渲染层） | 确诊，未修 |
@@ -853,3 +853,46 @@ Q15（表格格内块级内容消失）与 Q20（断词行尾连字符）**同�
 - 全量 `./gradlew :common:jvmTest :engine-skia:jvmTest :app:testDebugUnitTest --offline --continue`
   = **1208 条 / 1 红 / 1 跳过**，与本轮开始前逐项一致
   （唯一红 = Q12 `CrossChapterPreflightProbeTest`；唯一跳过 = `GlyphFallbackFaceTest` 锁 7）。
+
+---
+
+## 2026-10-02 — 真机报缺陷的排查轮·第三批：Q16 修完（`pre code` 空行）
+
+### 「要不要以 CSS 为准」这个裁决项**不成立**
+
+TODO 里 Q16 挂着一条待裁决：「与 §T1b 第③行那条已被钉死的『Skia 逐行等价』金标准冲突，
+需先决定『以浏览器/CSS 为准』还是『以现状为准』」。**不需要裁决** —— 探针直接问**裸 `SkParagraph.lineMetrics`**：
+
+| 文本 | Skia **裸** `lineMetrics` | 本仓适配层（修复前） |
+| --- | --- | --- |
+| `a\n\nb` | `[0..1, **2..2**, 3..4]` ← 空行**在** | 2 行（`if (e > s)` 把它剔了） |
+| `\na` | `[**0..0**, 1..2]` | 1 行 |
+
+⇒ **空行从来没丢在 Skia 里**，丢在本仓的 `layoutOnce` 归一化与自建 `greedy` 的行首跳过里；
+「Skia 逐行等价」被误读成「Skia 的行为就是规格」，等于**把我们自己的 bug 追认成规格**，
+还被两条单测加固（一条断言 2 行，一条用例名叫 `brNewlinesKeepInteriorLines` 却断言 `[0..0, 3..3]`）。
+
+而**仓内第三份实现本来就是对的**：`WhiteSpaceBreak.breakLeafLines` 不折行分支（`PRE`/`NOWRAP`）
+一直在产零宽空行；而 `pre` 必然被 `StyleComputer.resolveWhiteSpace` 降级成 `PRE_WRAP`（无横向滚动，Q13）
+⇒ 对的那份永远轮不到。⇒ 这不是取舍，是**两条分支口径不一致**。§T1b ③ 已按实测翻案并附证据表。
+
+### 修法（排版层·上）
+
+规格：空行 = 连续硬换行之间的空段，是**真实行盒**（零宽区间、占满行高）；
+末尾**单个** `\n` 不产幻影行（EPUB 源码惯用 `<pre>…\n</pre>`），末尾**两个** `\n` 时靠前那个终止的是真实空行。
+
+- 自建 `greedy`：行首 `\n` 产出 `BrokenLine(s until s)`；`s = brk` 处**跨过终止符**（否则 `a\n\nb` 多一行）；
+  末尾换行用 `trailingTerminator` 门槛挡掉。
+- Skia 适配 `layoutOnce`：保留**归一化前就零宽**的指标（`blank = s == e`）—— 这是「空行」与
+  「纯换行幻影行」的唯一区分点；循环后再**按字符补回最后一个空行**（Skia 对文本以 `\n\n` 结尾时把空行
+  与幻影行**合并成同一条非零宽指标**，实测 `[0..1, 2..3, 2..3]`）。
+
+### Verification
+
+- 锁：新增 `engine-skia:WhiteSpaceBlankLineParityTest`（3 把，钉「两个断行器 × white-space 两个分支」四格两两一致）
+  ＋ 新增 `app:PreBlankLineEndToEndTest`（4 把，整条链路断言叶文本/区间/行几何/行窗，含 `<br><br>` 与
+  `pre` vs `white-space:pre` 可见文本一致）＋ 改写两条把 bug 钉成规格的既有锁。
+- **逐把变异验证（4 个全部应验）**：M1 自建侧整体退回（9 把红）、M2 只退 Skia 侧（6 把红）、
+  M3 只去掉「补回最后一个空行」那 5 行（4 把红）、M4 只去掉 `s = brk + 1`（9 把红，连既有公平性锁也红）。
+- 全量 `./gradlew :common:jvmTest :engine-skia:jvmTest :app:testDebugUnitTest --offline --rerun-tasks --continue`
+  = **1216 条 / 1 红 / 1 跳过**（基线 1208 + 本轮 8 把新锁；唯一红 = 已登记 Q12，唯一跳过 = `GlyphFallbackFaceTest` 锁 7）。

@@ -369,8 +369,25 @@ class InhouseParagraphBreaker(
         var s = 0
         var first = true
         while (s < n) {
-            // 行首若「预领」了换行符则跳过（与 SkiaParagraphBreaker 的区间归一化同口径）。
+            // 行首遇硬换行 = **空行**（连续换行之间的空段）⇒ 产出一行**零宽**行。
+            //
+            // ⚠ 早前的写法是 `s++; continue` —— 不产出任何行 ⇒ `pre code` 块里的空行**全部消失**
+            //   （用户真机报）。根因不是渲染层：`LineAligner` 对零宽行正常返回空 `Placement`，
+            //   `DrawLineBuilder` 也不丢零宽行，**零宽空行一旦被生产出来就能正常画**。
+            //   而且 `WhiteSpaceBreak.breakLeafLines` 的**不折行分支**（`PRE`/`NOWRAP`）一直
+            //   就是这么产的（`:44` 的 `else if (i < n)` 分支）—— 只有 `wraps()` 的这条
+            //   （`pre` 被 [StyleComputer.resolveWhiteSpace] 降级成 `PRE_WRAP` ⇒ `wraps()==true`）
+            //   在丢。⇒ 两个分支此前**口径不一致**，本行就是对齐点。
+            //
+            // 末尾的 `'\n'` **一般**不产行（`s + 1 < n` 门槛，与 [WhiteSpaceBreak.breakLeafLines] 的
+            // 「以 `\n` 结尾不产生额外空行」同一条）：EPUB 源码惯用 `<pre>…\n</pre>`，多一行空白是噪声。
+            // **唯一例外**：最后两个字符都是 `'\n'` 时（`a\n\n`），末尾那个换行终止的是**一个真实空行**
+            // （CSS：段「a」「」「」三行，去掉未终结的末行仍是两行），必须保留。
+            // 门槛写这么长是因为两侧要逐条一致 —— Skia 侧把这个空行与末尾幻影行**合并成同一条非零宽指标**
+            // （实测 `[0..1, 2..3, 2..3]`），归一化剔掉幻影行后要靠字符补回来，见 [SkiaParagraphBreaker.layoutOnce]。
             if (text[s] == '\n') {
+                val trailingTerminator = s + 1 == n && (s == 0 || text[s - 1] != '\n')
+                if (!trailingTerminator) out.add(BrokenLine(s until s, targetLh))
                 s++
                 continue
             }
@@ -457,7 +474,9 @@ class InhouseParagraphBreaker(
             // ⇒ 连字符是「**主动选了某个断点**」的产物，[brkIsOpp] 才是它的前提；
             //   而 [lastOppWidth <= avail] 这个门槛保证了「选中的断点连同连字符一起装得下」。
             out.add(BrokenLine(s until brk, targetLh, hyphenAtEnd = brkIsOpp && opp.isHyphenAt(brk)))
-            s = brk
+            // `brk` 落在硬换行上时 `text[brk]` 就是**刚这一行的终止符**，不是空行的开头。
+            // 跨过去，行首的 `'\n'` 判据才只表示**真正的空行**（否则 `a\n\nb` 会多产一行）。
+            s = if (brk < n && text[brk] == '\n') brk + 1 else brk
         }
         if (out.isEmpty()) out.add(BrokenLine(0 until n, targetLh))
         return out

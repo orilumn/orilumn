@@ -193,9 +193,26 @@ class SkiaParagraphBreaker(
                 // Skia LineMetrics 对硬换行的归属不统一：行首可能「预领」'\n'、行尾也可能「多算」'\n'，
                 // 且文本以 '\n' 结尾时会生成一条仅含换行符的幻影行。统一归一化为「不含换行符的可绘制区间」：
                 // 与 StaticLayoutBreaker 的 `e > s`（并排除 '\n'）口径一致，行区间不重叠、可逐一单行整形绘制。
+                //
+                // ⚠ **零宽区间要留着**（`blank`）：Skia 对**空行**给的正是零宽区间
+                //   （实测 `a\n\nb` → `[0..1, 2..2, 3..4]`，中项 `2..2` 即空行），
+                //   归一化后与「纯换行幻影行」撞在同一个 `e > s` 门槛上。两者靠**归一化前的宽度**区分：
+                //   幻影行非零宽（`a\n` → `[0..2, 1..2]`）、空行零宽。
+                //   早前的写法两者一起丢 ⇒ `pre code` 块里的空行全部消失（用户真机报）。
+                //   `white-space: pre`/`nowrap` 的对照口径见 [WhiteSpaceBreak.breakLeafLines] 的 `else if (i < n)`。
+                val blank = s == e
                 if (s < e && text[s] == '\n') s += 1
                 if (s < e && text[e - 1] == '\n') e -= 1
-                if (e > s) out.add(BrokenLine(s until e, targetLh))
+                if (e > s || blank) out.add(BrokenLine(s until e, targetLh))
+            }
+            // **补回 Skia 少报的那一个空行**：文本最后两个字符都是 `'\n'` 时，两者之间是一个空行，
+            // 而 Skia 把这个空行与末尾幻影行**合并成同一条非零宽指标**（实测 `a\n\n` → `[0..1, 2..3, 2..3]`，
+            // 而内部空行它给的是零宽 `a\n\nb` → `[0..1, 2..2, 3..4]`）。归一化把幻影行剔掉后这一行就丢了
+            // ⇒ `a\n\n` 会从 3 行掉成 2 行。CSS 的口径是「空行是真实行盒」，故按字符补回
+            // （位置 = 末尾换行符下标）。[out] 里已有同位置的行时不补（防重复计数）。
+            val n = text.length
+            if (n >= 2 && text[n - 1] == '\n' && text[n - 2] == '\n' && out.none { it.range.first == n - 1 }) {
+                out.add(BrokenLine(n - 1 until n - 1, targetLh))
             }
             if (out.isEmpty()) out.add(BrokenLine(0 until text.length, targetLh))
             return Once(out, paragraph.maxIntrinsicWidth)

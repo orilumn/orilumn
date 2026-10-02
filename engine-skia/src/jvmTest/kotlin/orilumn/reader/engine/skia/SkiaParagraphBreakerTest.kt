@@ -153,9 +153,15 @@ class SkiaParagraphBreakerTest {
         val lines = breaks(text, widthPx = 10000)
         assertEquals(3, lines.size)
         assertEquals(listOf(0..4, 6..11, 13..17), lines.map { it.range })
-        // 内部空行（两换行之间的空串）被跳过——与 StaticLayoutBreaker 的 `e > s` 口径逐行对齐（不丢字）。
+        // **内部空行保留**（用例名即此意；早前的断言 `listOf(0..0, 3..3)` 把空行钉成了丢弃，
+        // 那是 Q16「`pre code` 块里空行全部消失」的真因）。
+        // 形态：Skia 对空行给的就是**零宽区间**（实测 `[0..1, 2..2, 3..4]`），归一化后即空区间
+        // ——`2 until 2`（首末字符位重合）。区间不含 `\n`，与静态口径一致。
         val both = breaks("a\n\nb", widthPx = 10000)
-        assertEquals(listOf(0..0, 3..3), both.map { it.range })
+        assertEquals(listOf(0..0, 2 until 2, 3..3), both.map { it.range })
+        // 连续 N 个换行 ⇒ N-1 个空行；末尾单个 `\n` 不产幻影行，末尾两个 `\n` 保留靠前那个空行。
+        assertEquals(4, breaks("a\n\n\nb", widthPx = 10000).size)
+        assertEquals(listOf(0..0, 2 until 2), breaks("a\n\n", widthPx = 10000).map { it.range })
     }
 
     @Test

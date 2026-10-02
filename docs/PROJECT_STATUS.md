@@ -763,7 +763,7 @@ kerning/连字信息只存在于字体 GPOS/GSUB，取它必须有 shaper，而 
 | Q15 | GIMP 手册表格「显示不出来」 | `StyledText.kt:107` 对块级子节点 `isBlock(c) -> Unit` ⇒ **`<td><p>…</p></td>` 整格文本为空**（排版层·上） | 确诊，**已修**（见「第二批」） |
 | Q16 | `pre code` 空行全没了 | 断行器**两侧都丢**空行（自建 `greedy` 行首 `'\n'` 跳过 + Skia 侧 `if (e > s)`）⇒ **回退阀也修不好**（排版层·上） | 确诊，**已修**（见「第三批」） |
 | Q17 | 中英之间空白怎么处理的 | **什么都没做**；`CjkLatinSpacing` 是死代码；「盒边界」在这条链路上不存在（`<code>` 不是盒，只是 `FontRun` 区间） | 已回答 |
-| Q18 | `wrap(断行)ping_add` 断行优先级 | **先压缩空白再断行**；断在字母中间是**英语音节断词**把 `wrapping` 断成 `wrap-`+`ping`，而 `_` 断点因「判据看叶块 tag」没注入（分行控制） | 确诊，未修 |
+| Q18 | `wrap(断行)ping_add` 断行优先级 | **先压缩空白再断行**；断在字母中间是**英语音节断词**把 `wrapping` 断成 `wrap-`+`ping`，而 `_` 断点因「判据看叶块 tag」没注入（分行控制） | 确诊，**已修**（见「第四批」） |
 | Q19 | 标题看不出粗 + 选粗细对标题无效 | `anchoredWeight` 第一行 `if (italic \|\| weight != 400) return` ⇒ 对 h1–h6 的 700 **恒不触发**；且**全仓无合成粗体**（渲染层） | 确诊，未修 |
 | **Q20** | **断词行尾没有连字符**（用户指「上次发现过、没彻底解决」） | `DrawLine` 有**三个**构造点，上次只修了 canonical 那一个：**增量路径 `BoxChapterLayouter:797` 与表格格 `TableCellLines:172` 都没传 `hyphenAtEnd`** ⇒ 取默认 `false` ⇒ `placement.hyphenWidth==0` ⇒ 落墨整块跳过 | 确诊，**已修**（见「第二批」） |
 
@@ -896,3 +896,66 @@ TODO 里 Q16 挂着一条待裁决：「与 §T1b 第③行那条已被钉死的
   M3 只去掉「补回最后一个空行」那 5 行（4 把红）、M4 只去掉 `s = brk + 1`（9 把红，连既有公平性锁也红）。
 - 全量 `./gradlew :common:jvmTest :engine-skia:jvmTest :app:testDebugUnitTest --offline --rerun-tasks --continue`
   = **1216 条 / 1 红 / 1 跳过**（基线 1208 + 本轮 8 把新锁；唯一红 = 已登记 Q12，唯一跳过 = `GlyphFallbackFaceTest` 锁 7）。
+
+## 2026-10-02 — 真机报缺陷的排查轮·第四批：Q18 修完（行内 `<code>` 里的标识符被切开）
+
+### 缺陷：判「是不是代码」只看了**叶块 tag**，没看**行内 run**
+
+Rust 书真源码 `<li>… 如 <code>wrapping_add</code></li>`（`tag = "li"`）在版心 640 下断成
+`…如 wrap` ‖ `ping_add`，行尾还补了 `-`。根因：**断点源只拿到「整段文本 + 一个叶块 tag」**，
+而「代码性」在 CSS 里是**行内元素的属性** ⇒ 段落里的行内 `<code>` 走的是散文规则（K-L 音节断词），
+**在 `<code>` 内部**断词。这**违反**了 `CodeIdentifierBreakSource` 与 `EnglishHyphenationSource`
+**各自 KDoc 里写明的规则**（同一个引擎对整块 `<pre>` 和行内 `<code>` 给两套规则）。
+
+### 修法（排版层·上 / 分行控制，不跨层）
+
+新增 `RegionScopedBreakSource`（`common/.../laying`）——**按位置分区**的断点源：
+
+- **不用「清位 API」**：那会破坏 `BreakOpportunitySet`「只置位不清位 ⇒ 顺序无关」的冻结不变式。
+  分区后各区只跑自己的 source，**集合内部仍是纯并集**，不变式原样保留。
+- 判据：位置 `i` 的**两侧字符都在代码内**（`maskOf`）⇒ 内区只含 run 的严格内部，边界归外区。
+- 「整块代码」与「行内代码内区」**共用同一个 `codeSources()`** ⇒ 同一种代码只给一套规则。
+- `InhouseParagraphBreaker.breakOpportunities` 三条路径：叶块是代码 ⇒ 整段 `codeSources`（**不分区**，
+  否则 `<pre>` 里嵌的 `<em>` 会落进散文规则）；有行内代码 run ⇒ 分区；都没有 ⇒ 整段 `proseSources`。
+- **两条子决策都做**（用户裁决）：① 行内代码内**禁**音节断词；② 行内代码内**也**注入 `_` 分隔符断点。
+
+### 实测（生产路径，Rust 真源码）
+
+| 版心 | 改动前 | 改动后 |
+| --- | --- | --- |
+| 360 | `…方法进行 wrapping，如 wrap` ‖ `ping_add` | `…方法进行 wrapping，如 wrapping_` ‖ `add` |
+| **420 / 480 / 520** | — | **与改动前逐值相同**（零回归的实测证据） |
+| 640 | `…如 wrap` ‖ `ping_add` ← **用户报的那行** | `…如 ` ‖ ` wrapping_add` |
+
+⚠ 480 那档的 `wrap` ‖ `ping` 断在**正文裸词** `wrapping`（码位 `[27,35)`，不在任何 `code` run 内），
+是合法音节断词，**不要去"修"它**。② 的决策依据是补测的窄版心长标识符：不注入时 R1 会**硬切在字母中间**
+（`wrapping_add_w` ‖ `ith_capacity_c`）—— 正是用户报的那一类难看。
+
+### 实现期自查出的两个真缺陷 + 两条新教训
+
+- 子串坐标换算 off-by-one（`t` 写成 `pos - i + 1`）；子串缺一字符左邻域（每个分区首个位置算不出来）。
+  ⚠ 我第一版给这两处写的后果说明**也错了**（写了「可能超出版心被裁」）—— 逐字推了贪心才看清：
+  `hang` 只在 `next <= avail` 时才被赋值 ⇒ **恒不溢出**。KDoc 与锁注释已按实测改正。
+- **教训 ㉓：判据要放在「能测到它的那一层」。** 两把变异各自暴露了一次放错地方：
+  M4（边界判据 `&&`→`||`）端到端与断行器层**全绿** —— 因为那些多出来的断点全落在 min-content 单元内部，
+  而生产恒有 `widthPx ≥ ceil(minContentWidth)` ⇒ 贪心永远选不到 ⇒ **只能钉在断点集层**，
+  于是把该判据从断行器搬进公共的 `RegionScopedBreakSource.maskOf`。
+  M2（去掉左邻域）在断行器层与端到端层**也全绿**，只被位置层抓到 —— 丢一个断点后贪心要么选更靠右的断点、
+  要么走 R1 core **在同一处**切出同样的行区间 ⇒ `BrokenLine` 逐值相同。
+  ⇒ **「断点集」与「行」是两个粒度，断点级的错常在行级完全隐形；分区/下标换算类改动必须钉位置集合。**
+- **教训 ㉔：「我推荐 A」这句话本身要能被数据推翻。** ② 我第一轮只测 5 个中宽版心就判净负收益并推荐不做，
+  补测 4 个窄版心后**自己的推荐被自己的数据推翻**（② 净正）。给建议时要说清覆盖了哪些输入。
+- 顺带：断行器层扫描型断言**必须从生产地板 `ceil(minContentWidth)` 起** ——
+  第一版扫版心 `1..420`，在版心 1 上拿到 `[3,4,…,13]` 全落点，那是 **R1 core** 的产物，把性质直接作废。
+
+### Verification
+
+- 锁：新增 `common:RegionScopedBreakSourceTest`（12 把，逐位置钉死坐标换算 / 左邻域 / `maskOf` 判据）
+  ＋ `engine-skia:InlineCodeBreakRulesTest`（7 把，断行器三条路径）
+  ＋ `app:InlineCodeIdentifierBreakEndToEndTest`（5 把，整条链路 + Rust 真源码五档逐值）。
+- **逐把变异验证（7 把全部应验）**：M1 off-by-one（单测 4 + 断行器 2 + 端到端 2，连既有 `LineAlignerTest`
+  的 JUSTIFY 一条也红）、M2 去掉左邻域（单测 4，端到端全绿）、M3 内/外区对调（9 把红）、
+  M4 边界判据 `||`（单测 2；**第一轮没抓到，补锁后才有**）、M5 内区用散文源（5 把红）、
+  M6 去掉 `_` 断点源（7 把红）、M7 叶块是代码时也分区（3 把红）。
+- 全量 `./gradlew :common:jvmTest :engine-skia:jvmTest :app:testDebugUnitTest --offline --rerun-tasks --continue`
+  = **1340 条 / 1 红 / 1 跳过**（唯一红 = 已登记 Q12 `CrossChapterPreflightProbeTest`）。

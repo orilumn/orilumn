@@ -5,9 +5,15 @@ package orilumn.reader.engine.laying
  *
  * ## 适用范围（刻意窄）
  *
- * 只对普通段落（`tag == "p"` 且非代码/引用）注入。**代码标识符不走这里** —— 见
- * [CodeIdentifierBreakSource]：K-L 是为散文设计的，`parse_config_file` 按音节断会产出
- * `parse_con-fig_file`，既不认得又破坏可读性，浏览器对代码也是用 `overflow-wrap` 硬切（R1）。
+ * 只对**散文位置**注入。**代码不走这里** —— 见 [CodeIdentifierBreakSource]：K-L 是为散文设计的，
+ * `parse_config_file` 按音节断会产出 `parse_con-fig_file`，既不认得又破坏可读性，
+ * 浏览器对代码也是用 `overflow-wrap` 硬切（R1）。
+ *
+ * 「散文位置」由 [orilumn.reader.engine.skia.InhouseParagraphBreaker] 判定，两种形态：
+ * ① 叶块不是代码（`tag` ∉ `CODE_TAGS`）且该位置**不在**任何行内代码 run 内；
+ * ② 行内代码 run 与散文相接的**边界位置**（判据见 [RegionScopedBreakSource]）。
+ * ⚠ Q18 之前只判 ①，于是行内 `<code>` 内部也拿到了本 source（真机实测 `wrapping_add`
+ * 被断成 `wrap` ‖ `ping_add`）—— 与 [CodeIdentifierBreakSource] 的规则直接冲突。
  *
  * ## 断点即「连字符该出现的位置」
  *

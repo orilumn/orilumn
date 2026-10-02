@@ -11,6 +11,7 @@ import orilumn.reader.engine.laying.CodeIdentifierBreakSource
 import orilumn.reader.engine.laying.EnglishHyphenationSource
 import orilumn.reader.engine.laying.KinsokuBreakSource
 import orilumn.reader.engine.laying.ParagraphBreaker
+import orilumn.reader.engine.laying.RegionScopedBreakSource
 import orilumn.reader.engine.laying.isDocumentSpace
 import orilumn.reader.engine.laying.lineHeightPx
 
@@ -45,23 +46,83 @@ class InhouseParagraphBreaker(
 ) : ParagraphBreaker {
 
     /**
-     * S7：按 `tag` 分流额外的断点源。
+     * S7 + Q18：**代码语境**的 source 集 —— 整块代码（叶块 tag ∈ [CODE_TAGS]）与**行内代码 run**
+     * （[codeInteriorMask] 掩码出的内区）**共用这一个**，保证「同一个引擎对同一种代码只给一套规则」。
      *
-     * - **代码语境**（`pre`/`code`/`kbd`/`samp`/`tt`；判据见 CODE_TAGS 的逐条核对）→ [CodeIdentifierBreakSource]
-     *   （分隔符后 + 驼峰交界）。**不给**音节断词：代码标识符按音节断是错的（见该类 KDoc）。
-     * - **普通段落** → [EnglishHyphenationSource]（K-L 音节断点，R2 的落点）。
+     * 组成：禁则（[breakSources]）+ 软连字符（[SoftHyphenBreakSource]，两个区都要 —— `&shy;` 是
+     * **作者显式写进正文的**断点意图，即使它出现在 `<code>` 里也是有意的）+ [CodeIdentifierBreakSource]
+     * （标识符分隔符后 + 驼峰交界）。**不给**音节断词：代码标识符按音节断是错的
+     * （`parse_config_file` → `parse_con-fig_file`；见 [CodeIdentifierBreakSource] KDoc）。
      *
-     * 判定用 `tag`：`class="highlight"` 的代码块 tag 仍是 `p`，靠 tag 判不出来 ——
-     * 那是已知缺口（要读 `class`/`style`），登记在 docs 29g，不在本轮扩接缝。
+     * 行内代码**也**注入 [CodeIdentifierBreakSource]（Q18②，实测已定）：否则窄版心下 R1 会硬切在
+     * 字母中间（`wrapping_add_w` ‖ `ith_capacity_c`），正是用户报的那一类难看。
      */
-    private fun sourcesFor(tag: String?): List<BreakOpportunitySource> = when {
-        // `&shy;` 是**作者显式写进正文的**断点意图 ⇒ **两个分支都要注入**，
-        // 即使它出现在 `<code>` 里（作者在代码注释里写 `&shy;` 也是有意的）。
-        tag != null && tag in CODE_TAGS -> breakSources + SoftHyphenBreakSource + CodeIdentifierBreakSource
-        // S7：`lang` 未声明（空）时按 en —— 书库里绝大多数非中文段落是英文，
-        // 且 [EnglishHyphenationSource.forLang] 对未加载语言退到 [NoHyphenation]（= R1 兜底），
-        // 不会误用 en 表去断德语/法语词。真正按 `lang` 分表需要样式通道，见 docs 29g。
-        else -> breakSources + SoftHyphenBreakSource + EnglishHyphenationSource.forLang("en")
+    private fun codeSources(): List<BreakOpportunitySource> =
+        breakSources + SoftHyphenBreakSource + CodeIdentifierBreakSource
+
+    /**
+     * **散文语境**的 source 集：禁则 + 软连字符 + [EnglishHyphenationSource]（K-L 音节断点，R2 的落点）。
+     *
+     * S7：`lang` 未声明（空）时按 en —— 书库里绝大多数非中文段落是英文，
+     * 且 [EnglishHyphenationSource.forLang] 对未加载语言退到 [NoHyphenation]（= R1 兜底），
+     * 不会误用 en 表去断德语/法语词。真正按 `lang` 分表需要样式通道，见 docs 29g。
+     */
+    private fun proseSources(): List<BreakOpportunitySource> =
+        breakSources + SoftHyphenBreakSource + EnglishHyphenationSource.forLang("en")
+
+    /**
+     * Q18：收集「代码 run」的下标区间，交给 [RegionScopedBreakSource.maskOf] 算位置掩码。
+     *
+     * ## 判据 = run 的 `tag` 落在 [CODE_TAGS]
+     *
+     * 与「整块代码」分支**同一个判据**（不是新的一套）：代码性在 CSS 里是元素属性，
+     * 而本仓能拿到的最细粒度就是 [FontRun.tag]（[orilumn.reader.engine.laying.collectFontRuns]
+     * 对文本节点取 `node.parent?.tag` ⇒ `<code>` 里的文本 run 正是 `tag = "code"`；已实测确认）。
+     *
+     * **刻意不用 `run.monospace` 作为判据**：那会把「非代码但等宽」的文本（作者手写
+     * `font-family: monospace` 的 `<span>`）也切进代码规则，而本仓对那类文本没有断词口径的裁决。
+     * 宁可漏（退回散文规则 = 现状），不可误判。
+     *
+     * ## 「哪些位置算内区」的判据不在本类
+     *
+     * 在 [RegionScopedBreakSource.maskOf]（两侧字符都在代码内 ⇒ 边界归外区）。本类只负责
+     * 「哪些**字符**是代码」。分家是因为那条判据**在生产版心下观察不到**（`&&` 与 `||` 只在
+     * min-content 单元内部有别，而生产恒有 `widthPx ≥ ceil(minContentWidth)`），
+     * 只有断点集层能钉住它 ⇒ 判据必须落在可单测的那一侧。
+     *
+     * @return `null` = 整段没有任何代码 run（调用点直接走整段老路径，热路径零额外开销）。
+     */
+    private fun codeInteriorMask(n: Int, fontRuns: List<FontRun>): BooleanArray? {
+        if (fontRuns.isEmpty()) return null
+        val spans = ArrayList<IntRange>(2)
+        for (r in fontRuns) {
+            if (r.tag == null || r.tag !in CODE_TAGS) continue
+            if (r.endExclusive <= r.start) continue
+            spans.add(r.start until r.endExclusive)
+        }
+        return RegionScopedBreakSource.maskOf(n, spans)
+    }
+
+    /**
+     * Q18 接线点（断点集的唯一入口）。三条路径：
+     *
+     * 1. **叶块本身就是代码**（tag ∈ [CODE_TAGS]）→ 整段 [codeSources]，**不分区**。
+     *    刻意不分区：`<pre>` 里可以嵌 `<em>`/`<span>`（那些 run 的 tag 不是代码 tag），
+     *    一旦分区它们就会落进散文规则、被音节断词切开 —— 而 `pre` 整块都是代码，**不能**切。
+     * 2. **有行内代码 run** → [RegionScopedBreakSource] 按 [codeInteriorMask] 分区。
+     * 3. **都没有** → 整段 [proseSources]（与本轮改动前**逐值相同**，普通段落零回归）。
+     *
+     * 已知缺口（不在本轮）：`class="highlight"` 的代码块 tag 仍是 `p`，靠 tag 判不出来 ——
+     * 要读 `class`/`style`，登记在 docs 29g。
+     */
+    private fun breakOpportunities(text: CharSequence, tag: String?, fontRuns: List<FontRun>): BreakOpportunitySet {
+        if (tag != null && tag in CODE_TAGS) return BreakOpportunitySet.of(text, codeSources())
+        val mask = codeInteriorMask(text.length, fontRuns)
+            ?: return BreakOpportunitySet.of(text, proseSources())
+        return BreakOpportunitySet.of(
+            text,
+            listOf(RegionScopedBreakSource(mask, inner = codeSources(), outer = proseSources())),
+        )
     }
 
     private companion object {
@@ -223,7 +284,7 @@ class InhouseParagraphBreaker(
             // 缩进已吃满版心：整段一行（再细分只会每行都放不下一个字符）。
             return listOf(BrokenLine(0 until n, lineHeightPx(fontSizePx, lineHeightRatio)))
         }
-        val opp = BreakOpportunitySet.of(text, sourcesFor(tag))
+        val opp = breakOpportunities(text, tag, fontRuns)
         val hyphenW = hyphenWidths(
             n, opp, fontSizePx, letterSpacingEm, tag, families, weight, italic, monospace, fontRuns,
         )

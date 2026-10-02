@@ -302,7 +302,12 @@
 
   **⬜ 未修**（要不要接、默认开不开、是否与 Q16 的空白折叠口径统一，都需先定产品口径）。
 
-- **Q18 — 行内 `<code>` 里的标识符被英语音节断词切开，而 `_` 断点不注入**（2026-10-02 用户报 Rust 书 `wrap(断行)ping_add`）**：
+- **Q18 — 行内 `<code>` 里的标识符被英语音节断词切开，而 `_` 断点不注入**（2026-10-02 用户报 Rust 书 `wrap(断行)ping_add`）**✅ 已修**：
+
+  > 修复记录（2026-10-02）：①② 两条子决策**都做**（用户裁决，理由见下）。落点从
+  > `InhouseParagraphBreaker.sourcesFor` 改为新增 `RegionScopedBreakSource`（`common`/分行控制）
+  > + `InhouseParagraphBreaker.breakOpportunities` 三条路径接线。三把锁、7 把变异全部应验。
+  > 完整实测表与教训见 `docs/自建断行引擎-测试计划.md`「2026-10-02 — Q18」一节。
 
   **先回答用户问的「断行优先级」（实测，不是推断）：先压缩空白，再断行。**
   压缩在**排版层·上**的文本吸收步骤完成，早于任何断点计算：
@@ -318,41 +323,42 @@
   ```
   **书里没有「断」字、没有删除线、没有 `<wbr>`、没有 `<br>`** —— 用户看到的 `wrap(断行)ping_add`
   那个 `(断行)` 是**引擎自己断出来的**。（`<wbr>` 全仓只有 converter 保留节点、**无任何代码把它转成断点**，
-  而 `docs/engine-html-css-capability.md:26` 却宣称支持 ⇒ **已存在的文档-实现偏差**。）
+  而 `docs/engine-html-css-capability.md:26` 却宣称支持 ⇒ **已存在的文档-实现偏差，仍未登记修复。**）
 
-  **实测断点集（探针跑生产代码，`tag=\"li\"` ⇒ 走 `sourcesFor` 的 else 分支）**：
-  | 位置 | 谁标的 | 含义 |
-  | --- | --- | --- |
-  | 1–11、21–27、36–38 | `KinsokuBreakSource`（ZH_EN） | CJK 逐字 + 空格 |
-  | **15、31、42** `'p|p'` | **`EnglishHyphenationSource.forLang("en")`** | **音节断词，标 `markHyphen`（补连字符）** |
+  **实测前提**：`NormalFlowLayout.leafFontRuns` 给出的 run **确实带 `tag`** ——
+  `[11,21) tag=code wrapping_*`、`[38,50) tag=code wrapping_add`（Q18 整套机制的地基，已钉进端到端锁）。
 
-  **实测断行结果（fs=16，`非法断点` 按上面这个真实断点集判）**：
-  ```
-  版心480 → 2行  非法断点=0   «…，如 wrap»-  ‖  «ping_add»     ← 用户看到的
-  版心420 → 2行  非法断点=0   «…，如 »      ‖  «wrapping_add»
-  ```
-  ⇒ **不是非法断点，也不是硬切**：480 那行是**音节断词**把 `wrapping` 断成 `wrap-` + `ping`，
-  且行尾**补了连字符**。贪心取**最靠右**的合法断点，42 比空格断点 38 更靠右，所以选 42。
+  **真正的缺陷（项目自己的规则被自己违反）**：`CodeIdentifierBreakSource` 与
+  `EnglishHyphenationSource` 各自的 KDoc 都明写「代码标识符不走音节断词」（否则
+  `parse_config_file` → `parse_con-fig_file`），而接线只判**叶块 tag**（本例是 `<li>`）⇒
+  **在行内 `<code>` 内部**断音节词并补连字符；同时本该标的 `_|*`、`_|a` 两个断点一个都没注入。
+  ⇒ **同一个引擎对「整块 `<pre>`」和「段落里的行内 `<code>`」给出两套断点规则，后者违反自己的规则。**
 
-  **真正的缺陷（项目自己的规则被自己违反）**：`CodeIdentifierBreakSource` 的 KDoc 明写
-  「**不给**音节断词：代码标识符按音节断是错的」，而 `sourcesFor` 用 **`tag`（叶块元素）**判「是不是代码」
-  （`CODE_TAGS = {pre, code, kbd, samp, tt}`）。本例叶块是 `<li>`、代码是**行内 run** ⇒
-  走 else 分支拿 `EnglishHyphenationSource`，**在 `<code>…</code>` 里面断词**；
-  同时 `CodeIdentifierBreakSource` 本该标的 **`_|*`(20) 与 `_|a`(47) 两个断点一个都没注入**
-  （探针实测：`li` 语境 24 个断点里没有它们；`pre` 语境才有）。
-  ⇒ **同一个引擎对「整块 `<pre>`」和「段落里的行内 `<code>`」给出两套断点规则，
-  而后者违反了该 source 自己声明的规则。**
+  **修法（两条子决策都做，用户裁决）**：
 
-  **这是已登记缺口 docs 29g（`class` 通道不存在）的另一面**：同一根因 ——
-  「是不是代码」判据挂在**叶块 tag** 上，而代码性其实是**行内 run 的属性**。
+  - **① 必须**：行内 code run 内**禁止**音节断词。
+  - **② 也做**：行内 code run 内**注入** `_` 分隔符断点（`mark`，不补连字符）。
+    用户明知 ② 在中宽版心（样本 A 的 360）是负收益仍选「都做」，理由是**行内 code 与整块 `<pre>`
+    规则统一**。补测窄版心长标识符（样本 B）后确认 ② **净正收益**：不注入时 R1 会**硬切在字母中间**
+    （`wrapping_add_w` ‖ `ith_capacity_c`），正是用户报的那一类难看。
 
-  **⬜ 未修**（两条子决策，口味不同，得分开定）：
-  ① **必须**：行内 code run 内**禁止**音节断词（对齐 `CodeIdentifierBreakSource` 自己的 KDoc，纯 bug 修复）。
-  ② **可选**：行内 code run 内**注入** `_` 分隔符断点（用了 `mark` 不用 `markHyphen`，故不补连字符）。
-  这会改变断行外观（`wrapping_` ‖ `ping_add`），属产品口味。
-  落点在 `InhouseParagraphBreaker.sourcesFor` —— `breakLines` **已经收到 `fontRuns`**
-  （每个 run 自带 `tag`），属**排版层·上/分行控制内部**改动，**不跨层**。
-  但需一并处理口径分叉：`minContentSegments`（`LineBreakSegments:140`）恒用 ZH_EN、不带任何 source。
+  **落点**：`RegionScopedBreakSource`（`common/.../laying`，**按位置分区**的断点源）。
+  **不用「清位 API」** —— 那会破坏 `BreakOpportunitySet`「只置位不清位 ⇒ 顺序无关」的冻结不变式；
+  分区后 source 集合内部仍是纯并集，不变式原样保留。
+  「整块代码」与「行内代码内区」**共用同一个 `codeSources()`** ⇒ 同一种代码只给一套规则。
+  属**排版层·上 / 分行控制内部**改动，**不跨层**。
+
+  **口径分叉（未动，先前既有）**：`minContentSegments`（`LineBreakSegments:140`）恒只用 ZH_EN，
+  连音节断词都不算 —— 本改动**不改变** min-content 的任何输出，故那条分叉不由本次引入。
+
+  **实测结果**：Rust 真源码版心 640 由 `…如 wrap` ‖ `ping_add` 变为 `…如 ` ‖ ` wrapping_add`（用户报的那行已修）；
+  **420 / 480 / 520 三档与改动前逐值相同**（零回归的实测证据）。
+  ⚠ **480 那档的 `wrap` ‖ `ping` 断在正文裸词 `wrapping` 上（不在任何 `code` run 内），是合法音节断词，不要去"修"它。**
+
+  **判据分层（教训 ㉓）**：「哪些**字符**是代码」留在断行器（它有 `CODE_TAGS` 与 `FontRun`）；
+  「哪些**位置**属内区」（`inCode[i-1] && inCode[i]`，边界归外区）搬进
+  `RegionScopedBreakSource.maskOf` —— 因为这条判据**在生产版心下不可观测**（`&&` 与 `||` 只在
+  min-content 单元内部有别，而生产恒有 `widthPx ≥ ceil(minContentWidth)`），只有断点集层能钉住它。
 
 - **Q19 — 标题字重：①看不出粗 ②选粗细对标题恒无效**（2026-10-02 用户报 GIMP 手册标题用「方正粗金陵」）：**：
 

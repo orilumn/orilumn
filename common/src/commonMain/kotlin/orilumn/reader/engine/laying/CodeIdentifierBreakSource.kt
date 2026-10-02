@@ -12,7 +12,7 @@ package orilumn.reader.engine.laying
  *
  * 故本 source 只在**两类自然边界**上给断点，不碰词内部：
  *
- * 1. **分隔符之后**：`_` `.` `:` `/` `->` 等标识符/成员访问分隔处（`foo_.bar` / `foo._bar`）。
+ * 1. **分隔符之后**：`_` `.` `:` `/` `→`（U+2192）等标识符/成员访问分隔处（`foo_.bar` / `foo._bar`）。
  * 2. **驼峰交界**：小写/数字 → 大写（`parse|Config|File`、`get|User|By|Id`）。
  *    camelCase 命名法自带的词边界，读者天然认得。
  *
@@ -23,11 +23,26 @@ package orilumn.reader.engine.laying
  * 但 [BreakOpportunitySource] 只**置位不清位**（[BreakOpportunitySet.of] 顺序无关），
  * 所以本 source 可安全地在 `.` 之前置位，**不需要改禁则表**，也不影响散文行为。
  *
- * ## 生效范围（不全局开）
+ * ## 生效范围（不全局开）：**代码语境**，含行内 run（Q18）
  *
- * 只对**代码语境**的叶生效：由 [InhouseParagraphBreaker.sourcesFor] 按 `tag`
- * （`pre`/`code`/`kbd`/`samp`/`var`/`tt`）按需注入。正文散文不注入 ⇒
- * 汉字与中文标点的断点行为**逐值不变**。
+ * 由 [orilumn.reader.engine.skia.InhouseParagraphBreaker] 按**同一个判据**（tag ∈ `CODE_TAGS`）
+ * 在两处注入，**两处用的是同一个 source 集**（`codeSources()`）：① 叶块本身就是代码
+ * （`pre`/`code`/`kbd`/`samp`/`tt`）→ 整段本 source；② 段落里的**行内** `<code>`/`<kbd>` run
+ * → 由 [RegionScopedBreakSource] 把这些位置换成这一套（内区）**且不注入音节断词**。
+ *
+ * ⚠ 改动前的接线只判**叶块 tag**，于是「段落里的行内 `<code>`」走的是散文规则，
+ * 在 `<code>` **内部**按音节断词（真机实测 `wrapping_add` → `wrap` ‖ `ping_add`）——
+ * **违反的正是本类上面那段 KDoc 自己写的规则**。Q18 已修。
+ *
+ * 散文侧不注入 ⇒ 汉字与中文标点的断点行为**逐值不变**。
+ *
+ * ## Q18②：行内代码**也**注入本 source（已实测定为「要」）
+ *
+ * 决策依据（Rust 真源码 + 窄版心长标识符，走生产路径实测，证据表见 docs Q18）：
+ * **不**注入时窄版心下 R1 会**硬切在字母中间**（`wrapping_add_w` ‖ `ith_capacity_c`），
+ * 正是用户报的 `wrap(断行)ping_add` 那一类难看；注入后一律只在 `_` 处断。
+ * 代价：标识符**本来就放得下整行**时，贪心取更靠右的 `_` 断点而不是空格断点，会切一个本可以不切的标识符。
+ * 净收益，且让行内 `<code>` 与 `<pre>` 规则完全统一（整类 bug 从根上消失）。
  */
 object CodeIdentifierBreakSource : BreakOpportunitySource {
 

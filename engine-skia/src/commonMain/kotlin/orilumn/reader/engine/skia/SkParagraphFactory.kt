@@ -303,6 +303,24 @@ object SkParagraphFactory {
         return css
     }
 
+    /**
+     * **保底候选族名**（字体解析，渲染层）——通用关键字展开出来的全部候选，按优先级去重。
+     *
+     * ## 谁在用、为什么要有这个口
+     *
+     * [SkiaRunMeasurer] 的「通用面表」（族栈一个都覆盖不到时的最后去处）需要一份**定序**的候选族名，
+     * 而候选表的单源是本对象的 [GENERIC_CANDIDATES]。若在量宽器里另抄一份，两处一漂移就会出现
+     * 「级联认得这个族、保底表里没有」的怪现象 —— 与教训 ⑩（量画失配）同源，故只开读取口。
+     *
+     * @param monospace 为 true 时把 `monospace` 的候选提到最前：代码块里的 CJK 该落到等宽 CJK 面
+     *        （`Noto Sans Mono CJK` 一类），而不是被无衬线候选抢先。默认 false 时以 `sans-serif` 起。
+     */
+    internal fun genericFallbackFamilyNames(monospace: Boolean): List<String> {
+        val primary = if (monospace) "monospace" else "sans-serif"
+        val order = listOf(primary) + GENERIC_CANDIDATES.keys.filter { it != primary }
+        return order.flatMap { GENERIC_CANDIDATES.getValue(it) }.distinct()
+    }
+
     private const val DEFAULT_FAMILY = "sans-serif"
     private const val MONO_FAMILY = "monospace"
     private val GENERIC_CANDIDATES = mapOf(

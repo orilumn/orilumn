@@ -3,6 +3,85 @@
 > Keeps a running log of significant milestones for the Orilumn reader engine. Supersedes
 > everything marked done; each section reflects a completed stage.
 
+## 2026-10-02 — 换自建断行引擎后代码块里的 Unicode 特殊字符不显示 / 显示乱码（取面缺保底）
+
+**Issue.** 真机《Rust 程序设计语言》代码块里的特殊字符「要么不显示、要么显示乱码」，
+且**是换成自建断行引擎之后才出现的**。
+
+**不是断行问题。** 拿真书 `07.xhtml` 的 cargo 树（`├──` `└──` `│` 制表符 + `U+00A0` NBSP）过完整管线，
+`skia` 与 `inhouse` 两个变体的**断行区间逐行完全相同**（`0..7 / 9..22 / 24..37 / 39..45 / 47..60 /
+62..86 / 88..104 / 106..120`），换行保留、制表符与 NBSP 一个不少。落在**渲染层·字体解析**上。
+
+**根因：换实现时把「系统级逐字形回退」弄丢了。**
+
+- 旧的 `SkiaParagraphBreaker` 经 `SkParagraphFactory.defaultCollection()`
+  （= `FontCollection().setDefaultFontManager(systemFonts())`）整形，**族栈覆盖不到的码本它照样画得出来**。
+- 自建断行引擎把落墨换成 S5 逐字 `drawString` 后，取面只剩 `SkiaRunMeasurer.faceForCp` 一条路，
+  而它**只在 CSS 族栈里找覆盖面**，找不到就交 `.notdef` ⇒ 豆腐块。
+
+真书 `stylesheet.css:127` 的 `pre` 族栈是 `"Fira Code","Hack Nerd Font Mono","Roboto Mono",monospace`
+—— 全是拉丁等宽族。实测（JVM 量宽器，fs=16，`tag=pre`）：
+
+| 码本 | 族栈解出的面 | glyph | 结果 |
+|---|---|---|---|
+| `U+2500 ─` `U+2502 │` `U+251C ├` `U+2514 └` | Menlo | 2236/2238/2264/2256 | 正常 |
+| `U+00A0` NBSP | Menlo | 98 | 正常 |
+| `U+4E2D 中` | Menlo | **0** | **豆腐块** |
+| `U+FF21 Ａ` | Menlo | **0** | **豆腐块** |
+| `U+0432 в` | Menlo | 872 | 正常 |
+
+`─│├└` 恰好在等宽面里有字形、`中` 与 `Ａ` 没有 ⇒ **「有的显示、有的不显示」**，与真机症状一致。
+
+顺带量到一个**潜伏崩溃**：族栈里若一个可匹配的族都没有（如书只写了一个没装的字体名），
+`measure` 的 `notdefWidth(fonts[0])` 会 `ArrayIndexOutOfBoundsException`。
+
+**Resolution.** 在**渲染层·字体解析**补一张「通用面表」（`SkiaRunMeasurer.universalTypefaces`）：
+
+1. 先按 `SkParagraphFactory.genericFallbackFamilyNames()` 的候选顺序取面（mono 时 `monospace`
+   候选提前 ⇒ 代码块里的 CJK 落到等宽 CJK 面而非无衬线面）；
+2. 再把系统里**其余**已装族按 `FontMgr.getFamilyName` 顺序补齐 —— 真·保底：**只要任何已装字体
+   有该字形就找得到**；
+3. 排除 `Last Resort`（它对任何码本都「有字形」，但画出来就是一块诊断豆腐块）。
+
+**关键设计：保底表**不进热循环**。** 族栈面表恒只含 CSS 族栈的面（热路径逐值不变）；
+`measure` 只在 `nPending > 0`（族栈**真的一个都不覆盖**）时另走 `universalPass` 扫保底表，
+`faceForCp` 同样在族栈全灭后才查。两侧走**同一张表、同一条规则**（第一个
+`getUTF32Glyph(cp) != 0` 即采用）⇒ **量画同源，不会出现「量取到保底面、画还在用 notdef」**。
+
+代价：建表一次性付 `已装族数` 次 `matchFamilyStyle` native 调用（约 370ms / 326 族），
+按 **(mono, 字重, 斜体)** 缓存、存 `Typeface`（不是 `Font`），与字号和族栈都无关。
+
+**两个性能坑（都是本轮实测踩到，不是理论担忧）**：
+
+- **坑 1：缓存键里带字号**。第一版把 `sizePx.toRawBits()` 放进键 ⇒ 每个新 font-size 触发一次
+  326 族全量扫描；真书几十个尺寸桶 ⇒ `:app:testDebugUnitTest` 里两个 15 秒预算的跨章调度探针
+  **双双超时**（`CrossChapterPreflightProbeTest` / `WholeBookCanonicalQueueProbeTest`）。
+  昂贵的 `matchFamilyStyle` 与字号无关 ⇒ 键里删掉字号，换字号后 0ms。
+- **坑 2：把保底面并进 `measure` 主循环**。主循环每面付 2 次 native 调用（`getUTF32Glyphs` +
+  `getWidths`），数百个保底面 ⇒ 每段几百次。实测**正文段**（`STSong` 首族本已覆盖、根本不需要
+  保底）**0.017ms → 整书 5000 段 85 秒**，同样把那两个探针顶爆。⇒ 拆成 `universalPass`，
+  只在族栈全灭时才走。
+
+附带修掉一个潜伏崩溃：族栈里一个可匹配的族都没有时，`measure` 的 `notdefWidth(fonts[0])` 会
+`ArrayIndexOutOfBoundsException`（真书只写了一个没装的字体名即可触发）。
+
+**锁**（`GlyphFallbackFaceTest`，5 把，每把单独变异验证过）：
+
+| 锁 | 变异 | 结果 |
+|---|---|---|
+| 保底可达：族栈解不出、已装字体解得出的码本必须拿到有字形的面 | 摘掉两侧保底通道 | 红 |
+| 量画同源：`advances` 的宽 == `faceForCp` 那张面的宽 | 同上 | 红（量=24.000 画=14.769，差 9.23px/字） |
+| 不误伤：族栈能覆盖时仍取族栈那张面 | 让 `faceForCp` 先查保底表 | 红（拿到 Helvetica，栈是 Times New Roman） |
+| 空栈不崩 | 回到修复前状态 | 红（`ArrayIndexOutOfBoundsException`） |
+| 宿主字体集探针 | —— | 绿（326 族 / 9 个可用候选码本） |
+
+锁 3 第一版是**假绿锁**：用等宽栈写的，而等宽场景下保底表队首（Menlo）与族栈解出的面**恰好是同一张
+Typeface**，「在队首还是在队尾」根本测不出来 —— 变异验证当场抓出，改用衬线栈才拿到牙齿。
+锁 1 也不能钉死 `中`：各宿主已装字体集不同，`中` 在某个宿主上可能已被族栈覆盖 ⇒ 静默空断言。
+故锁 1 **在宿主上现挑**满足「族栈解不出 ∧ 已装字体解得出」的码本，挑不到就显式失败。
+锁 4 的机制是「保底表保证面表恒非空」，不是那个越界守卫本身（守卫现在不可达，作为零成本的
+防御保留）。
+
 ## 2026-10-02 — `pre` 代码块在书声明 `white-space: nowrap` 时连成一段并被裁（级联层降级）
 
 **Issue.** 真机《Rust 程序设计语言》代码块全部连成一段、横向溢出页宽被裁。

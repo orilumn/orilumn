@@ -150,6 +150,22 @@ class LineWindowDrawer(
     private val glyphPainter = GlyphPainter()
     private val kerningTable = KerningClusterTable()
 
+    /**
+     * **诊断/测试钩子**：逐字落墨时回调每一个**真正画出去**的码本与其占用的码元数。
+     * 生产恒为 `null`（一次 `?.let` 的代价），测试用来钉住「落墨侧取码本的契约」。
+     *
+     * ## 为什么需要它（像素判据抓不到这个缺陷）
+     *
+     * 代理对被拆开落墨时，画面上**并不是两个豆腐块** —— skiko 会把孤立代理编码成 `?` 画出来，
+     * 墨迹存在、左右还不对称 ⇒ 「豆腐块是左右对称的」这个像素判据**恒为假**（实测 `sym=false`），
+     * 一把**假绿锁**。教训见 `自建断行引擎-测试计划.md` ⑫。
+     *
+     * 而这里要钉的契约本来就只是个**取值问题**（画出去的码本是不是合并后的那个），
+     * 不该绕到像素上去猜。回调把契约直接暴露出来：断言「画出去的码本里没有孤立代理、
+     * 且含合并后的 U+1F642」—— 这对**任何宿主**都成立，不依赖宿主装了什么字体。
+     */
+    internal var onGlyphCp: ((cp: Int, units: Int) -> Unit)? = null
+
     fun drawLines(canvas: Canvas, contentLeft: Float, lines: List<DrawLine>, clip: Rect? = null) {
         if (lines.isEmpty()) return
         val collection = collections()
@@ -623,7 +639,6 @@ class LineWindowDrawer(
         preBands: List<Band>? = null,
     ) {
         if (endExcl <= start) return
-        val n = endExcl - start
         // **切段每行算一次**（不是每字一次）。第一版写成 `mergeBands(line, i, i+1).firstOrNull()`
         // 在逐字循环里，等于每字重建整行的 band 列表 —— JUSTIFY 行实测 13.00ms vs
         // LEFT 行 4.73ms（同文本、同字号），**拉伸不该让绘制慢 2.7 倍**，那全是这份重复计算。
@@ -631,37 +646,45 @@ class LineWindowDrawer(
         // （[preBands] 由 [paintGlyphs] 一次算好传进来：行尾连字符也要用末字那段。）
         val bands = preBands ?: mergeBands(line, start, endExcl)
         var bandIdx = 0
-        for (i in start until endExcl) {
+        var i = start
+        while (i < endExcl) {
+            // **码本单源**（见 [codePointAt]）：代理对必须整对取面、整对绘制。
+            // 按 `text[i].code` 取 ⇒ emoji 被拆成两个**孤立代理** ⇒ 没有任何字体有它们的字形
+            // ⇒ 画出来是**两个豆腐块**（真机报「代码块里特殊字符乱码」的根因之一）。
+            val at = codePointAt(line.text, i)
+            val units = at.units
             val local = i - start
-            if (local >= n || local < 0) continue
-            val x = xs.getOrNull(local) ?: continue
+            val x = xs.getOrNull(local)
             // 游标推进到覆盖 i 的那一段（band 之间有「无 run 覆盖」的间隙，band 为 null）。
             while (bandIdx < bands.size && bands[bandIdx].end <= i) bandIdx++
             val band = bands.getOrNull(bandIdx)?.takeIf { i >= it.start && i < it.end }
-            val hidden = isHidden(i, i + 1)
-            // 注音源文/表图占位：透明墨占宽（字符流不变）——逐字路径直接跳过落墨即可。
-            if (hidden) continue
-            // **软连字符永不落墨**：`&shy;` 是「不换行时看不见、换行时才显形」的占位符。
+            val hidden = isHidden(i, i + units)
+            // 代理对的低位代理尾**不落墨**：它已随高位代理整对画过（见上方 units）。
+            // 软连字符同样永不落墨：`&shy;` 是「不换行时看不见、换行时才显形」的占位符。
             // 实测它在 STSong 里有真字形（glyph 271），不跳过就会在**没断行**的行里画出一道杠。
             // 断行显形的那一个由 [paintGlyphs] 在行尾补画真 `-`（含 SHY 槽位复用的情况）。
-            if (line.text[i] == SOFT_HYPHEN) continue
-            val run = band?.font
-            val sizePx = run?.fontPxOr(line.fontSizePx) ?: line.fontSizePx
-            val cp = line.text[i].code
-            val famList = run?.families ?: line.families
-            val wt = run?.weight ?: line.weight
-            val ital = run?.italic ?: line.italic
-            val mono = run?.monospace ?: line.monospace
-            val rtag = run?.tag ?: line.tag
-            // 缓存键含码本：CJK 与 Latin 会落到族栈里不同的面（少这一点 = 一个字用错面）。
-            val key = glyphPainter.cacheKey(famList, wt, ital, sizePx, cp)
-            val font = fontFor.resolve(cp, key, sizePx, famList, wt, ital, mono, rtag)
-            val argb = if (isShadowPass) overrideInk else withAlpha(band?.argb ?: line.inkColor, line.alpha)
-            val paint = org.jetbrains.skia.Paint().apply { color = argb }
-            // 行内基线位移（Skia 正值下移，故原点上移）。
-            val shiftEm = band?.shiftEm ?: 0f
-            val y = baseY - shiftEm * line.fontSizePx + dy
-            canvas.drawString(line.text.substring(i, i + 1), paintX + x + dx, y, font, paint)
+            if (x != null && !hidden && !at.isLowSurrogateTail && line.text[i] != SOFT_HYPHEN) {
+                val run = band?.font
+                val sizePx = run?.fontPxOr(line.fontSizePx) ?: line.fontSizePx
+                val cp = at.cp
+                val famList = run?.families ?: line.families
+                val wt = run?.weight ?: line.weight
+                val ital = run?.italic ?: line.italic
+                val mono = run?.monospace ?: line.monospace
+                val rtag = run?.tag ?: line.tag
+                // 缓存键含码本：CJK 与 Latin 会落到族栈里不同的面（少这一点 = 一个字用错面）。
+                val key = glyphPainter.cacheKey(famList, wt, ital, sizePx, cp)
+                val font = fontFor.resolve(cp, key, sizePx, famList, wt, ital, mono, rtag)
+                val argb = if (isShadowPass) overrideInk else withAlpha(band?.argb ?: line.inkColor, line.alpha)
+                val paint = org.jetbrains.skia.Paint().apply { color = argb }
+                // 行内基线位移（Skia 正值下移，故原点上移）。
+                val shiftEm = band?.shiftEm ?: 0f
+                val y = baseY - shiftEm * line.fontSizePx + dy
+                // 代理对整对画（units=2）；普通字符 units=1，行为与原来逐字版完全一致。
+                onGlyphCp?.invoke(cp, units)
+                canvas.drawString(line.text.substring(i, i + units), paintX + x + dx, y, font, paint)
+            }
+            i += units
         }
     }
 

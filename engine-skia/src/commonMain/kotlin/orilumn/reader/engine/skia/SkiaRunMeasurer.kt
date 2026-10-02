@@ -2,8 +2,10 @@ package orilumn.reader.engine.skia
 
 import orilumn.reader.engine.css.FontRun
 import orilumn.reader.engine.laying.HYPHEN_GLYPH
+import orilumn.reader.io.Logger
 import org.jetbrains.skia.Font
 import org.jetbrains.skia.FontMgr
+import org.jetbrains.skia.FontSlant
 import org.jetbrains.skia.FontStyle
 import org.jetbrains.skia.Typeface
 
@@ -105,10 +107,14 @@ class SkiaRunMeasurer(
         }
         // 族栈全灭 ⇒ 保底面表（与 [universalPass] 同一张、同一条「第一个覆盖者即采用」规则 ⇒ 量画同源）。
         // 仍无 ⇒ 与 [measure] 同口径用首面 notdef（画出来也是 .notdef，量画一致）。
-        for (tf in universalTypefaces(seg.mono, seg.style.weight, seg.style.slant == org.jetbrains.skia.FontSlant.ITALIC, seg.mgrs)) {
+        for (tf in universalTypefaces(seg.mono, seg.style.weight, seg.style.slant == FontSlant.ITALIC, seg.mgrs)) {
             val font = Font(tf, seg.sizePx)
             if (font.getUTF32Glyph(cp) != NOTDEF) return font
         }
+        // 保底表也没有 ⇒ **系统回退链**（旧 Skia 路径靠的就是它，见 [systemFallbackFace]）。
+        // 枚举表按族名建，看不到 emoji 这类「宿主链能到、族名里没有」的面。
+        systemFallbackFace(cp, seg.style, families.firstOrNull(), sizePx)?.let { return it }
+        logUnresolvableCp(cp, seg)
         return if (seg.fonts.isEmpty()) null else seg.fonts[0]
     }
 
@@ -250,7 +256,12 @@ class SkiaRunMeasurer(
         val cps = IntArray(len)
         var nCp = 0
         for (i in from until to) {
-            val cp = cpAt(text, i)
+            val at = codePointAt(text, i)
+            // **代理对的低位代理尾不是独立字位**：它已被前一个位置合并成**一个码本**量过了。
+            // 放它进来查字体必然查不到 ⇒ 落 notdef 宽（约 0.6em）⇒ **行凭空宽出一个字位**，
+            // 后续字位全体右移。真机症状：书里 emoji 少 ⇒「只有没几个字符乱码」。
+            if (at.isLowSurrogateTail) continue
+            val cp = at.cp
             // **软连字符不进面表**（零宽占位符，见 [SOFT_HYPHEN]）：它不占宽度也不绘制，
             // 真去查面只会拿到 STSong 的 glyph 271 并算出一个 1em 的全宽（实测 42.18 @fs=42.18）。
             // 它的「可见性」由断点判定决定：行若断在它之后，那里画一个 [HYPHEN_GLYPH]。
@@ -302,15 +313,25 @@ class SkiaRunMeasurer(
             for (p in 0 until nPending) {
                 val cp = pending[p]
                 val slot = slotOf.getValue(cp)
-                width[slot] = fallbackWidth(seg, cp) ?: notdef
+                // 最后一道：**系统回退链**（与落墨侧 [faceForCp] 同一个出口 ⇒ 量画同源）。
+                width[slot] = systemFallbackFace(cp, seg.style, seg.stack.firstOrNull(), seg.sizePx)
+                    ?.let { it.getWidths(shortArrayOf(it.getUTF32Glyph(cp)))[0] }
+                    ?: fallbackWidth(seg, cp) ?: notdef
             }
         }
         val ls = seg.lsPx
         for (i in from until to) {
-            val cp = cpAt(text, i)
+            val at = codePointAt(text, i)
+            // 代理对的低位代理尾：**严格 0 宽**。它的宽度已经计在高位代理那个位置上了。
+            if (at.isLowSurrogateTail) {
+                out[i] = 0f
+                continue
+            }
             // 软连字符**严格 0 宽**（连 `lsPx` 也不给）：它是「不占位」的占位符。
             // 给 letterSpacing 会凭空多出一个幽灵间隙 → 行内出现看不见的洞。
-            out[i] = if (cp == SOFT_HYPHEN_CODE) 0f else width[slotOf.getValue(cp)] + ls
+            out[i] =
+                if (at.cp == SOFT_HYPHEN_CODE) 0f
+                else width[slotOf.getValue(at.cp)] + ls
         }
     }
 
@@ -340,7 +361,7 @@ class SkiaRunMeasurer(
     ): Int {
         var remain = IntArray(nPending) { pending[it] }
         var n = nPending
-        for (tf in universalTypefaces(seg.mono, seg.style.weight, seg.style.slant == org.jetbrains.skia.FontSlant.ITALIC, seg.mgrs)) {
+        for (tf in universalTypefaces(seg.mono, seg.style.weight, seg.style.slant == FontSlant.ITALIC, seg.mgrs)) {
             if (n == 0) break
             val font = Font(tf, seg.sizePx)
             val glyphs = font.getUTF32Glyphs(remain)
@@ -373,6 +394,71 @@ class SkiaRunMeasurer(
         }
         return null
     }
+
+    /**
+     * **系统回退链**（渲染层·字体解析）：[universalTypefaces] 也解不出时的**最后一道**通道。
+     *
+     * ## 为什么必须有它（这是「之前用 skia 是好的」那句话的直接兑现）
+     *
+     * 旧实现走 `SkParagraphFactory.defaultCollection()` = `FontCollection().setDefaultFontManager(systemFonts())`，
+     * SkParagraph 内部靠 `FontCollection` 的**系统级回退链**（`defaultFallback(character, style, family)`）
+     * 逐码本找面。那条链**不靠族名枚举**，它直接问宿主「哪个字体覆盖这个码本」。
+     *
+     * 我的 [universalTypefaces] 是**按族名枚举**建表的（平板 63 族），
+     * 而**枚举能到的严格窄于系统回退链**。现场证据（vivo 平板，日志实证）：
+     *
+     * - 设备 `/system/fonts/NotoColorEmoji.ttf` **存在**，`U+1F44D`（👍）有字形；
+     * - 但 skiko `FontMgr` 的 63 个族名里**没有任何 emoji 族** ⇒ 枚举表里根本没有这张面
+     *   ⇒ 「按名字找」永远找不到它，「设备没字体」的结论是**假的**。
+     *
+     * 两级通道的关系：**枚举表在前、系统链在后**。前者便宜且可缓存（覆盖绝大多数缺字），
+     * 后者是一次 native 调用、只在彻底解不出时才付。顺序反过来会让所有已正常的取面都多走一遍系统链，
+     * 属于拿已验证的行为去冒险。
+     *
+     * ## 量画同源
+     *
+     * [measure] 与 [faceForCp] 调的是**同一个** [systemFallbackFace]、**同一张**缓存，
+     * 且两侧都再验一次 `getUTF32Glyph(cp) != 0` 才采用（`defaultFallback` 本身也允许返 `null`）。
+     */
+    private fun systemFallbackFace(cp: Int, style: FontStyle, familyHint: String?, sizePx: Float): Font? {
+        val key = SystemFallbackKey(cp, style.weight, style.slant.ordinal)
+        systemFallbackCache[key]?.let { return it }
+        val tf = runCatching {
+            systemFallbackCollection().defaultFallback(cp, style, familyHint)
+        }.getOrNull()
+        val face = tf?.let {
+            val f = Font(it, sizePx)
+            // 再验一次覆盖：`defaultFallback` 可能给出一张并不含该码本的面（宿主链自身的兜底）。
+            if (f.getUTF32Glyph(cp) != NOTDEF) f else null
+        }
+        synchronized(lock) { systemFallbackCache[key] = face }
+        return face
+    }
+
+    private data class SystemFallbackKey(val cp: Int, val weight: Int, val slant: Int)
+
+    /**
+     * 系统回退用的 [FontCollection]：**整个进程只建一次**。
+     *
+     * `FontCollection.setDefaultFontManager(systemFonts())` 不是廉价构造 —— 它要把
+     * **全部系统字体注册进集合**，是重量级 native 操作。而 [systemFallbackFace] 是
+     * **按码本**调用的：书里每个「族名枚举够不到」的码本都要问一次系统链
+     * （emoji、生僻字、组合符号都可能落进来）。
+     *
+     * 每个码本新建一个集合 ⇒ 无界的 native 对象 churn。第一版就是这么写的，
+     * `WholeBookRelayoutEpochProbeTest`（15 秒预算的整书重排探针）在全量跑时**超时**。
+     * 与 [universalTypefaces] 的缓存键踩的是同一类坑（教训 ⑩：缓存键/缓存粒度要按**代价**算，不是按调用次数）。
+     */
+    @Volatile
+    private var fallbackCollection: org.jetbrains.skia.paragraph.FontCollection? = null
+
+    private fun systemFallbackCollection(): org.jetbrains.skia.paragraph.FontCollection =
+        fallbackCollection ?: synchronized(this) {
+            fallbackCollection ?: SkParagraphFactory.defaultCollection().also { fallbackCollection = it }
+        }
+
+    /** 系统回退链的结果缓存（面与字号无关 ⇒ 键里不含 sizePx）。 */
+    private val systemFallbackCache = HashMap<SystemFallbackKey, Font?>()
 
     // ---- 面表解析与缓存（跨 run / 跨叶复用；值不可变，读写在锁内）----
 
@@ -495,8 +581,152 @@ class SkiaRunMeasurer(
         }
         val arr = out.toTypedArray()
         synchronized(lock) { universalCache[key] = arr }
+        logUniversalTableOnce(key, arr, mgrs)
         return arr
     }
+
+    /**
+     * 诊断日志（渲染层·字体解析）：**每个保底桶只打一条**。
+     *
+     * 存在的理由：JVM 宿主的已装字体集和真机不同（宿主 326 族 / 平板 63 族），
+     * 锁在 JVM 上绿**证明不了**平板上保底真能命中。真机只能看落盘日志。
+     *
+     * ## 为什么要额外判「字形是不是真的」
+     *
+     * 整套保底的判据是 `getUTF32Glyph(cp) != 0`。这条判据**默认等价于「这张面有真字形」**，
+     * 但那是个**假设**：某些宿主（Android 的 `sans-serif` 别名会把系统回退链一起带进来）
+     * 可能对缺失码本也回一个非零 glyph id。若那条假设不成立，兜底就会
+     * 「成功地选中一张画出来仍是豆腐块的面」——**比不兜底更坏，因为它把缺陷藏起来了**。
+     *
+     * 所以诊断里额外做一次**可判定的反证**：看解出字形的路径**是不是一个矩形**
+     * （[Path.isRect]）以及**有多少轮廓**（[Path.verbsCount]）。
+     *
+     * ## 判据为什么不是「和 .notdef 逐字节比」，也不是「纯数轮廓」
+     *
+     * 「逐字节比」**实测无效**：`.notdef` 在 macOS 与 Android 上经 skiko 取到的都是**空路径**，
+     * 于是「解出的路径 == .notdef 路径」对**任何空字形**都成立 —— NBSP/空格这种
+     * **合法空白**（零轮廓是正确画法）被误报成豆腐块，判据在两个宿主上都给不出可用信号。
+     *
+     * 「纯数轮廓」**会误报框线字符**：框线（`─ │ ├ └`）天生只有 6–8 个轮廓，
+     * 与豆腐块（空心矩形 = 8）区间重叠。平板实测第一版把 `─ │ └` 全判成「豆腐块?」——
+     * 而这三个正是 Rust 书代码块树形图里最要紧的字符。
+     *
+     * ⇒ 判据是 **[Path.isRect] 优先，轮廓数只作辅助分档**（真字形 / 简单几何 / 空白）。
+     */
+    private fun logUniversalTableOnce(key: UniversalKey, arr: Array<Typeface>, mgrs: List<FontMgr>) {
+        val tag = "mono=${key.monospace},w=${key.weight},sl=${key.slant}"
+        if (!universalLogged.add(tag)) return
+        val installed = mgrs.sumOf { runCatching { it.familiesCount }.getOrDefault(0) }
+        var tofu = 0
+        val probes = DIAG_CANDIDATES.mapNotNull { cp ->
+            val tf = arr.firstOrNull { Font(it, 16f).getUTF32Glyph(cp) != NOTDEF } ?: return@mapNotNull null
+            val font = Font(tf, 16f)
+            val gid = font.getUTF32Glyph(cp)
+            val path = runCatching { font.getPath(gid) }.getOrNull()
+            val verbs = path?.verbsCount ?: -1
+            val verdict = when {
+                verbs < 0 -> "路径取不到"
+                verbs == 0 -> "空白"
+                // .notdef 的典型画法是**矩形**（有的字体画实心、有的画空心两圈）。
+                // `isRect()!=null` 是「这就是个方块」的直接证据，比数轮廓准。
+                isBoxShaped(path, verbs) -> "豆腐块"
+                verbs <= SimpleGeometryVerbCeiling -> "简单几何"
+                else -> "真字形"
+            }
+            if (verdict == "豆腐块") tofu++
+            "U+%04X→%s#%d/v%d/%s".format(cp, tf.familyName, gid, verbs, verdict)
+        }
+        Logger.d(
+            "Orilumn.FACE",
+            "universal mono=${key.monospace} w=${key.weight} sl=${key.slant} " +
+                "installed=$installed faces=${arr.size} 探针可解 ${probes.size}/${DIAG_CANDIDATES.size} " +
+                "其中豆腐块=$tofu " + probes.joinToString(" "),
+        )
+    }
+
+
+    /**
+     * 这个字形**是不是一个方块**（.notdef 的典型画法）。
+     *
+     * ## 为什么不直接用 `Path.isRect`
+     *
+     * 想用，但 skiko 的 `isRect` 在 Kotlin 侧解析不到（`path.isRect()` 会被绑到
+     * `DeepRecursiveFunction`，`isRect(Rect())` 也不匹配）—— 属于库元数据问题，
+     * 为一条诊断去绕开不值得。改用**纯几何**判据：`Path.bounds` 是无参 getter，稳。
+     *
+     * 判据：豆腐块是**近似正方形**的实心/空心方块；框线字符是**细长条**
+     * （`─` 宽高比 ≈16、`│` ≈0.06），两者用宽高比就分得开。
+     */
+    private fun isBoxShaped(path: org.jetbrains.skia.Path?, verbs: Int): Boolean {
+        if (path == null || verbs <= 0) return false
+        val b = runCatching { path.bounds }.getOrNull() ?: return false
+        val w = b.width
+        val h = b.height
+        if (w <= 0f || h <= 0f) return false
+        val ratio = maxOf(w, h) / minOf(w, h)
+        // 正方形（宽高比≈1）且轮廓数落在 .notdef 的典型区间 ⇒ 判为方块
+        return ratio < BoxAspectTolerance && verbs <= BoxVerbCeiling
+    }
+
+    /** 诊断探针码本：真书代码块里真实出现过的「族栈解不出」的字符 + 常用 CJK/全角/生僻字。 */
+    private val DIAG_CANDIDATES = listOf(
+        0x00A0, 0x2500, 0x2502, 0x251C, 0x2514, // NBSP + 框线（真书 cargo 语料）
+        0x4E2D, 0x6587, 0x3042, 0x30A2, 0xAC00, // 中 日 ア ア 한글
+        0xFF21, 0xFF41, 0x0E01, 0x1F600, 0x03B2,
+    )
+
+
+    /**
+     * 诊断（渲染层·字体解析）：记下**连保底表都解不出**的码本。
+     *
+     * 这是「还是乱码」时唯一能给出确定答案的信号：解不出的码本**在这台设备上真的没有字体**
+     * （vivo 平板 63 族，缺 emoji / 泰文 / 部分符号区），**不是兜底逻辑没生效**。
+     * 两者的修法完全不同：前者要装字体，后者要改代码。分不清就会一直改错地方。
+     *
+     * 同一个码本只记一次，条目有上限（否则生僻字多的书能把日志刷爆）。
+     */
+    private fun logUnresolvableCp(cp: Int, seg: Seg) {
+        synchronized(lock) {
+            if (unresolvable.size >= UNRESOLVABLE_LOG_CAP) return
+            if (!unresolvable.add(cp)) return
+        }
+        val c = if (cp in 0..0xFFFF) cp.toChar() else '?'
+        val shown = if (c.code < 0x20 || c.code == 0x7F) "(不可见控制符)" else c.toString()
+        Logger.w(
+            "Orilumn.FACE",
+            "无字体的码本 U+%04X %s（stack=%s size=%.1f）——这台设备没装能画它的字体".format(
+                cp, shown, seg.stack.joinToString(","), seg.sizePx,
+            ),
+        )
+    }
+
+    private val unresolvable = HashSet<Int>()
+
+    /** 无字体码本的记录上限（防止生僻字多的书把日志刷爆）。 */
+    private val UNRESOLVABLE_LOG_CAP = 40
+
+    /** 每个保底桶只打一条诊断（key = "mono,w,sl"）。 */
+    private val universalLogged = HashSet<String>()
+
+    /**
+     * 轮廓数 ≤ 此值 ⇒ 判为「简单几何」，**不是缺陷**。
+     *
+     * 框线字符（`─ │ ├ └ ┌`）**天生就只 contours 个轮廓** —— 一条线而已。
+     * 平板实测 `─`=6、`│`=6、`└`=8，而豆腐块（空心矩形）=8。
+     * **两者区间重叠，所以只靠数轮廓分不开**；第一版用「≤8 即豆腐块」的阈值
+     * 把 `─ │ └` 全误报了 —— 而这三个恰恰是 Rust 书代码块树形图里最要紧的字符，
+     * 诊断对着它们哭狼獴等于这个诊断没有用。
+     *
+     * 真正的判据是 [Path.isRect]：`.notdef` 的典型画法就是**一个方块**。
+     * 框线不是矩形（是细长条 + 分叉），天然被分到「简单几何」或「真字形」。
+     */
+    private val SimpleGeometryVerbCeiling = 8
+
+    /** 判「方块」的宽高比上限：豆腐块近似正方形，框线是细长条（`─`≈16、`│`≈0.06）。 */
+    private val BoxAspectTolerance = 1.6f
+
+    /** 判「方块」的轮廓数上限：.notdef 典型画法是空心矩形（两圈各 4 段 = 8）。 */
+    private val BoxVerbCeiling = 12
 
     /** 保底表缓存键：**刻意不含字号** —— 见 [universalTypefaces] 的踩坑记录。 */
     private data class UniversalKey(val monospace: Boolean, val weight: Int, val slant: Int)
@@ -517,10 +747,3 @@ private val DENIED_FAMILIES = setOf("Last Resort")
 private const val SOFT_HYPHEN_CODE = 0x00AD
 
 /** 码本：代理对取整个代理对的值（`text[i]` 为高位时读低位），否则原样。 */
-private fun cpAt(text: CharSequence, i: Int): Int {
-    val c = text[i]
-    if (c.code in 0xD800..0xDBFF && i + 1 < text.length && text[i + 1].code in 0xDC00..0xDFFF) {
-        return 0x10000 + ((c.code - 0xD800) shl 10) + (text[i + 1].code - 0xDC00)
-    }
-    return c.code
-}

@@ -179,6 +179,76 @@ class GlyphFallbackFaceTest {
         assertTrue(ok.isNotEmpty())
     }
 
+    /**
+     * 锁 6：**保底解出的字形必须不是豆腐块**。
+     *
+     * 整套兜底立在一条**假设**上：「`getUTF32Glyph(cp) != 0` ⇒ 这张面有真字形」。
+     * 这条假设在某些宿主上可能不成立（Android 的 `sans-serif` 别名把系统回退链一起带进来）。
+     * 一旦不成立，兜底就会「成功地选中一张画出来仍是豆腐块的面」——**比不兜底更坏**，
+     * 因为它把缺陷藏起来了，让缺陷看起来像被修好了。所以这条假设本身必须被钉住。
+     *
+     * ## 判据：轮廓数，不是「和 .notdef 逐字节比」
+     *
+     * 后者**实测无效**：`.notdef` 经 skiko 在 macOS 与 Android 上取到的都是**空路径**，
+     * 于是「解出的路径 == .notdef」对**任何空字形**都成立，NBSP/空格这种**合法空白**
+     * 被误报成豆腐块（平板上实测误报），判据给不出可用信号。轮廓数分得开：
+     * 豆腐块是空心矩形（8 个 verb），真字形几十个。
+     */
+    @Test
+    fun `保底解出的字形必须不是豆腐块`() {
+        val cp = CANDIDATES.firstOrNull { pickFor(it) }
+        org.junit.Assume.assumeTrue("宿主上没有『族栈解不出 ∧ 已装字体解得出』的码本", cp != null)
+        val face = m.faceForCp(cp!!, "pre", bookPreStack, weight, italic, mono, fs)
+        assertNotNull("U+%04X 应当有保底面".format(cp), face)
+        val font = face!!
+        val gid = font.getUTF32Glyph(cp)
+        assertTrue("U+%04X 的 glyph id 应非 0".format(cp), gid != 0.toShort())
+        val verbs = font.getPath(gid)?.verbsCount ?: -1
+        assertTrue(
+            "U+%04X 落到了 %s#%d，轮廓数只有 %d（≤8 = 空心矩形，即豆腐块）".format(
+                cp, face.typeface?.familyName, gid, verbs,
+            ),
+            verbs > TOFU_VERB_CEILING,
+        )
+        println("U+%04X → %s#%d 轮廓数=%d".format(cp, face.typeface?.familyName, gid, verbs))
+    }
+
+    /**
+     * 测试侧探针：挑一个「**族名枚举解不出、但系统回退链解得出**」的码本；找不到返 null。
+     *
+     * **这是动态挑的，不钉死具体码本。** 钉死 `U+1F44D` 那种写法在 macOS 上是**永真空断言**
+     * —— 枚举表里就有 Apple Color Emoji，生产代码压根走不到系统回退链，断言恒真、没有牙齿
+     * （本项目已登记的假绿形态）。动态挑才能保证「挑中的那一刻，这条通道就是唯一的活路」。
+     *
+     * @param requireEnumerationMiss true = 只接受枚举表解不出的（锁系统链专用）；
+     *   false = 只要系统链能解出即可（锁量画同源时用，让 macOS 也能真跑）。
+     */
+    private fun pickSystemChainOnlyCp(requireEnumerationMiss: Boolean): Int? =
+        CANDIDATES.firstOrNull { cp ->
+            val sysOk = systemChainCovers(cp)
+            sysOk && (!requireEnumerationMiss || !installedCovers(cp))
+        }
+
+    /**
+     * 测试侧 oracle：问**系统回退链**这个码本有没有字形。
+     *
+     * ⚠ 这不是独立 oracle（它用的就是被测那条通道），但只用于**挑探针码本**，
+     * 不用于判定通过 —— 断言本身仍由生产路径的返回值担责。
+     */
+    private fun systemChainCovers(cp: Int): Boolean {
+        val tf = runCatching {
+            org.jetbrains.skia.paragraph.FontCollection()
+                .setDefaultFontManager(SkParagraphFactory.defaultFontMgr())
+                .defaultFallback(cp, FontStyle.NORMAL, null)
+        }.getOrNull() ?: return false
+        return runCatching { Font(tf, fs).getUTF32Glyph(cp).toInt() }.getOrDefault(0) != 0
+    }
+
+    /** 码本 → 字符串（含代理对，供 [SkiaRunMeasurer.advances] 的 UTF-16 槽位用）。 */
+    private fun Int.toCodePointString(): String =
+        if (this <= 0xFFFF) toChar().toString()
+        else String(charArrayOf(Character.highSurrogate(this), Character.lowSurrogate(this)))
+
     private fun pickFor(cp: Int): Boolean {
         val stack = SkParagraphFactory.resolveFamilies("pre", bookPreStack, mono)
         val stackFaces = stack.flatMap { f -> mgrs.mapNotNull { runCatching { it.matchFamilyStyle(f, FontStyle.NORMAL) }.getOrNull() } }
@@ -186,7 +256,97 @@ class GlyphFallbackFaceTest {
         return !onStack && installedCovers(cp)
     }
 
+    /**
+     * **锁 7 —— 系统回退链必须真的被问到**（跨宿主**只在枚举表够不到时有牙齿**）。
+     *
+     * ## 缺陷现场
+     *
+     * 真机报「之前用 skia 是好的」。真因不是设备缺字体，而是**两条通道不等宽**：
+     * 旧 Skia 路径靠 `FontCollection` 的**系统回退链**（`defaultFallback(character, style, family)`），
+     * 那条链**直接问宿主「哪个字体覆盖这个码本」**，不靠族名；
+     * 我建的保底表是**按族名枚举**（平板 63 族）。vivo 平板上 `/system/fonts/NotoColorEmoji.ttf`
+     * **存在**且 `U+1F44D`（👍）有字形，但那 63 个族名里**没有任何 emoji 族**
+     * ⇒ 枚举表里根本没有这张面 ⇒ 日志误报「这台设备没装能画它的字体」。
+     *
+     * ## 为什么这把锁在 JVM 上会 skip 而不是假装通过
+     *
+     * macOS 的枚举表里**有** Apple Color Emoji ⇒ 枚举通道先命中 ⇒ 断言恒真、**没有牙齿**
+     * （本项目已登记的假绿形态之一：永真空断言）。所以显式 `assumeTrue(!installedCovers(cp))`：
+     * 枚举表能覆盖时**跳过**并说明原因，**绝不**报一个「绿」来骗人。
+     * 它的牙齿在**真机**上（那里枚举表确实够不到 emoji）。
+     */
+    @Test
+    fun `枚举表够不到的码本必须由系统回退链兜住`() {
+        // **动态挑**：必须挑一个枚举表真的够不到的，否则本锁是空断言（macOS 上会挑不到 ⇒ skip）。
+        val cp = pickSystemChainOnlyCp(requireEnumerationMiss = true)
+        org.junit.Assume.assumeTrue(
+            "本宿主上「族名枚举解不出 ∧ 系统回退链解得出」的码本一个都没有" +
+                "（macOS 有 Apple Color Emoji，枚举表就够）⇒ 本锁在此宿主无牙齿，跳过",
+            cp != null,
+        )
+        val face = m.faceForCp(cp!!, "pre", bookPreStack, 400, false, mono, fs)
+        val gid = face?.getUTF32Glyph(cp)?.toInt() ?: 0
+        assertTrue(
+            "族名枚举解不出 U+%04X 时，系统回退链必须兜住（glyph id 应非 0）".format(cp),
+            gid != 0,
+        )
+    }
+
+    /**
+     * **锁 8 —— 量画同源：系统链兜住的码本，量到的宽必须就是画出去那张面的宽**（**所有宿主都有牙齿**）。
+     *
+     * 这是锁 7 缺失的那一半：锁 7 在枚举表够得到的宿主上是空断言，而本锁不是 ——
+     * 只要 `measure` 与 `faceForCp` 对**同一个码本**从**不同通道**解出面（或一个走系统链、另一个走 notdef），
+     * 宽度就会对不上。真实踩过的坑就是这个形态：绘制侧走保底表、量宽侧还停在 notdef，
+     * 屏幕上字位整体偏移，而任何「有没有解出字形」的断言都是绿的。
+     *
+     * 变异（只在 `measure` 侧摘掉 `systemFallbackFace` 调用）⇒ 必须红。
+     */
+    @Test
+    fun `系统链兜住的码本其量宽必须等于绘制那张面的宽`() {
+        // **遍历全部候选码本**，而不是挑一个 —— 挑一个会漏掉「某个码本走这条通道、
+        // 另一个走那条通道」的分裂，那正是量画失配最常见的形态。
+        //
+        // 对每个码本走一遍完整链路：[faceForCp] 解面 → 量那张面的宽 → [advances] 量整行的宽，
+        // 三者必须一致。任一环节从**不同的通道**解出面，宽度立刻对不上。
+        //
+        // ⚠ **这把锁的系统链牙齿只在真机上**（macOS 的枚举表已覆盖全部候选码本 ⇒ 那条通道是死代码，
+        //   JVM 上怎么变异都是绿的）。真机上的验证手段是日志：
+        //   `无字体的码本 U+1F44D` 这行**必须消失**（消失 = 系统链接住了它）。
+        //   本锁在 JVM 上能牙齿的是「量画同源」这个更大的性质（对三条通道的任意分裂都敏感）。
+        var checked = 0
+        for (cp in CANDIDATES) {
+            val face = m.faceForCp(cp, "pre", bookPreStack, 400, false, mono, fs)
+            val gid = face?.getUTF32Glyph(cp)?.toInt() ?: 0
+            // 这个码本连兜底都解不出（宿主真没字体）⇒ 不参与本锁，不是缺陷。
+            if (gid == 0) continue
+            checked++
+            val faceW = faceWidthPx(face!!, cp)
+            val text = "a" + cp.toCodePointString()
+            val adv = m.advances(text, fs, 0f, "pre", bookPreStack, 400, false, mono)
+            assertEquals(
+                "U+%04X 量画必须同源（量=%.4f 画=%.4f，面=%s）".format(
+                    cp, adv[1], faceW, face.typeface?.familyName,
+                ),
+                faceW,
+                adv[1],
+                0.01f,
+            )
+        }
+        assertTrue(
+            "候选码本一个都没解出 ⇒ 本锁什么也没验证（宿主字体集异常）",
+            checked > 0,
+        )
+    }
+
     private companion object {
+        /**
+         * 轮廓数上限：**≤ 此值判为豆腐块**。豆腐块（.notdef 的典型画法）是空心矩形
+         * = 两圈各 4 段 = 8 个 verb；真字形远超它（平板实测 `中`=30、`ア`=46）。
+         * 宁可误报也不漏报：误报只多一行日志，漏报会让缺陷被当成修好了。
+         */
+        const val TOFU_VERB_CEILING = 8
+
         /** 锁 3 用的衬线族探针（与 [SkParagraphFactory.genericFallbackFamilyNames] 的 serif 候选同源同序）。 */
         val SERIF_PROBE = listOf(
             "Times New Roman", "Times", "Georgia", "Songti SC", "STSong",
@@ -210,6 +370,8 @@ class GlyphFallbackFaceTest {
             0x0627, // ا
             0x0E01, // ก
             0x1F600, // 😀（emoji）
+            0x1F44D, // 👍（emoji；**vivo 平板上只有系统回退链能解出它**）
+            0x1F9EA, // 🧪（emoji）
             0x3042, 0x30A2, // あ ア（kana）
             0xAC00, // 가
         )

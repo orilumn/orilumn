@@ -22,19 +22,23 @@ object SkiaFontPool {
         val aliases: List<String> = emptyList(),
         /** ttc/otc 集合内的面序号（0 为第一个面）：宿主补装系统 CJK 衬线 ttc 时用它指定 SC/TC 面。 */
         val faceIndex: Int = 0,
+        val weight: Int? = null,
+        val italic: Boolean? = null,
     ) {
         companion object {
             /**
              * 按“族名 + 展示名双注册”装配条目（展示名与族名相同时不重复）：级联槽位存哪个名，
              * 池里就得认哪个名——该对应策略归引擎，不在各宿主重复。
              */
-            fun forFace(familyName: String, displayName: String, bytes: ByteArray): EmbeddedFont =
+            fun forFace(familyName: String, displayName: String, bytes: ByteArray, weight: Int? = null, italic: Boolean? = null): EmbeddedFont =
                 EmbeddedFont(
                     familyName = familyName,
                     bytes = bytes,
                     aliases = listOfNotNull(
                         displayName.takeIf { it.isNotBlank() && it != familyName },
                     ),
+                    weight = weight,
+                    italic = italic,
                 )
         }
     }

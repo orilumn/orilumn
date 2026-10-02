@@ -29,11 +29,19 @@ data class BookFontRef(
 data class BookFont(
     val family: String,
     val bytes: ByteArray,
+    val weight: Int? = null,
+    val italic: Boolean? = null,
 ) {
     override fun equals(other: Any?): Boolean =
-        other is BookFont && family == other.family && bytes.contentEquals(other.bytes)
+        other is BookFont && family == other.family && bytes.contentEquals(other.bytes) && weight == other.weight && italic == other.italic
 
-    override fun hashCode(): Int = 31 * family.hashCode() + bytes.contentHashCode()
+    override fun hashCode(): Int {
+        var result = family.hashCode()
+        result = 31 * result + bytes.contentHashCode()
+        result = 31 * result + (weight ?: 0)
+        result = 31 * result + (italic?.hashCode() ?: 0)
+        return result
+    }
 }
 
 /**

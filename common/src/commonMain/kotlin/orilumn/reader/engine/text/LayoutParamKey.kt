@@ -20,6 +20,7 @@ data class LayoutParamKey(
     val lineSpacing: Float,
     val firstLineIndentEm: Float,
     val letterSpacingEm: Float,
+    val cjkLatinSpacingEm: Float = 0f,
     val paragraphSpacingPx: Int,
     val paragraphGapScale: Float,
     val fontBody: String,
@@ -56,6 +57,7 @@ data class LayoutParamKey(
         crc = Crc32.update4(crc, lineSpacing.bits())
         crc = Crc32.update4(crc, firstLineIndentEm.bits())
         crc = Crc32.update4(crc, letterSpacingEm.bits())
+        crc = Crc32.update4(crc, cjkLatinSpacingEm.bits())
         crc = Crc32.update4(crc, paragraphSpacingPx.bits())
         crc = Crc32.update4(crc, paragraphGapScale.bits())
         crc = Crc32.updateString(crc, fontBody)
@@ -100,6 +102,7 @@ data class LayoutParamKey(
             lineSpacing = profile.lineSpacing,
             firstLineIndentEm = profile.firstLineIndentEm,
             letterSpacingEm = profile.letterSpacingEm,
+            cjkLatinSpacingEm = profile.cjkLatinSpacingEm,
             paragraphSpacingPx = profile.paragraphSpacingPx,
             paragraphGapScale = profile.paragraphGapScale,
             fontBody = profile.fontBody,

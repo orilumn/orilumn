@@ -70,6 +70,8 @@ data class TypographicProfile(
     /** Character spacing in em (letterSpacing slot -100..100 / 500 = -0.2em..0.2em); 0 = no extra
      * spacing. Applied to the base text paint in the shaping layer. */
     val letterSpacingEm: Float,
+    /** CJK–Latin automatic spacing in em (0..1.0). */
+    val cjkLatinSpacingEm: Float = 0f,
 ) {
 
     /** 主题感知链接色（Z4 单源）：暗底亮青 (#71B8FF) / 亮底深蓝 (#1A66CC)，按背景亮度判定。
@@ -125,6 +127,7 @@ data class TypographicProfile(
                 // 疏密/字距: 同样原样透传, 用户可随时调整.
                 paragraphGapScale = (s.paragraphGap / 100f).toFloat(),
                 letterSpacingEm = Math.round(s.letterSpacing.coerceIn(-100.0, 100.0)) / 500f,
+                cjkLatinSpacingEm = (s.cjkLatinSpacing.coerceIn(0.0, 100.0) / 100f).toFloat(),
             )
         }
 

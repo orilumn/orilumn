@@ -50,9 +50,9 @@ object SkParagraphFactory {
     @Volatile
     var weightAnchors: Map<String, Int> = emptyMap()
 
-    /** 锚点改写（纯函数）：正体 400 且族命中锚点即改用，否则原样。 */
+    /** 锚点改写（纯函数）：正体（非斜体）且族命中锚点即改用锚点字重，否则原样。 */
     fun anchoredWeight(families: List<String>, weight: Int, italic: Boolean): Int {
-        if (italic || weight != 400) return weight
+        if (italic) return weight
         for (f in families) {
             val a = weightAnchors[f.trim()].takeIf { it in 100..900 } ?: continue
             return a

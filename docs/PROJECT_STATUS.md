@@ -624,3 +624,42 @@ longer first-line-indented.
 **Tests.** Added `BoxSharedGeometryTest` locking the shared width/advance functions byte-for-byte to canonical emit geometry (nested containers, container margins, leaf→container abutting). Full `:app:testDebugUnitTest` is green.
 
 **Pending / to verify on device.** Device regression (page last line no longer clipped; spacing matches pre-change; large-font / multi-margin chapters). The temporary `INCR-OVERFLOW` diagnostic log was already absent from the tree (nothing left to remove).
+## 2026-10-02 — 真机「代码块特殊字符乱码」定案（提交 1120a97）
+
+**Issue.** 真机报代码块里 Unicode 特殊字符「要么不显示、要么显示乱码」，用户明确「之前用 skia 是好的」，
+且第一轮修完（补保底面表）**仍乱码**。
+
+**两个根因，都是「平台附赠能力在换实现时丢掉了」的变体。**
+
+1. **取码本有两份实现，落墨那份是错的。** 量宽侧合并代理对，落墨侧 `drawGlyphPass` 用 `text[i].code`
+   ⇒ emoji 被拆成两个孤立代理（没有任何字体有它们的字形）；量宽侧还把孤立低位代理当独立码本去查字体，
+   查不到 ⇒ 记 notdef 宽（实测 fs=24 时 15.21px）⇒ **行凭空宽出一个字位，后续字位全体右移**。
+   平板日志实证：`无字体的码本 U+D83D` / `U+DC4D` 是一**对代理的上下半**。
+   修法 = **取码本收成单源** `codePointAt`（`CodePointAt.kt`），量与画都必须用它。
+
+2. **枚举表按族名建，严格窄于系统回退链。** 保底表遍历 63 个族名，**里面没有任何 emoji 族**，
+   而 `/system/fonts/NotoColorEmoji.ttf` **存在**且 U+1F44D 有字形 ⇒「设备没字体」的结论是假的。
+   旧 Skia 路径靠 `FontCollection` 的系统回退链（`defaultFallback`），那条链直接问宿主、不靠族名。
+   修法 = 在保底表之后补最后一道 `systemFallbackFace`（同一出口、同一缓存，量画同源）。
+
+**性能坑（本轮实测）.** `FontCollection.setDefaultFontManager(systemFonts())` 不是廉价构造，
+而 `systemFallbackFace` 是按码本调用的 ⇒ 第一版每次新建，整书重排探针（15 秒预算）全量跑时超时。
+改为整个进程只建一次。
+
+**Tests.** 新增 `SurrogatePairLayoutTest`（5 把，MUT-E/MUT-F 逐把变异验证）、
+`GlyphFallbackFaceTest` 锁 7/8（MUT-H 验证）。锁变异表：
+
+| 锁 | 变异 | 结果 |
+| --- | --- | --- |
+| 代理对低位代理槽位必须零宽 | MUT-E 撤掉零宽 | RED `expected:<0.0> but was:<15.2109375>` |
+| 落墨必须整对取码本 | MUT-F 退回 `text[i].code` | RED `落墨取到了孤立代理 ⇒ 代理对被拆开画了` |
+| 量画同源（遍历候选码本） | MUT-H 量宽侧摘掉保底通道 | RED `U+0E01 量画必须同源（量=14.4000 画=14.2852）` |
+| 枚举表够不到必须由系统链接住 | — | macOS 上 SKIP（枚举表够得到 ⇒ 空断言），牙齿在真机 |
+
+**踩掉的假绿锁.** 第一版像素锁判据「左右不对称 ⇒ 不是豆腐块」实测恒绿：skiko 把孤立代理编码成 `?` 画出来，
+`?` 有墨且不对称 ⇒ 前提不成立。**已删除**（教训 ⑫）。锁 7/8 的系统链牙齿在 macOS 上不存在
+（枚举表覆盖全部候选码本 ⇒ 该通道是死代码），已在锁注释里写明。
+
+**Verification.** 全量 `./gradlew jvmTest test` = 1281 条 / 1 红（唯一红是已登记的 Q12
+`CrossChapterPreflightProbeTest`，与本次无关）。装机后真机确认「已经显示出来了」；
+日志 0 异常、无孤立代理残留、`无字体的码本 U+1F44D` 不再出现。诊断用的族名转储与「可疑取面」探针**跑完即删**。

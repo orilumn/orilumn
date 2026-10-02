@@ -233,6 +233,7 @@ class SkiaParagraphBreaker(
         italic: Boolean,
         monospace: Boolean,
         fontRuns: List<FontRun>,
+        cjkLatinSpacingEm: Float,
     ): Float {
         if (text.isEmpty()) return 0f
         val style = SkParagraphFactory.paragraphStyle(

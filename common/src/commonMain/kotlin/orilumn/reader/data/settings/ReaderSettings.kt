@@ -37,7 +37,7 @@ data class ReaderSettings(
     val paragraphGap: Double = 100.0,
     /** [Style system] Character spacing (letter-spacing) slot -100..100, mapped to -0.2em..0.2em (each slot unit = 0.002em); 0 = no extra spacing. */
     val letterSpacing: Double = 0.0,
-    /** [Style system] CJK–Latin automatic spacing (中西间距) 0..100, mapped to 0..1.0em; 0 = off, 25 = 0.25em (CLREQ default). */
+    /** [Style system] CJK–Latin automatic spacing (中西字距) 0..100, mapped to 0..1.0em; 0 = off, 25 = 0.25em (CLREQ default). */
     val cjkLatinSpacing: Double = 0.0,
 
     /** Page margins: four directions independent (px). */

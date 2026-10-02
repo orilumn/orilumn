@@ -87,7 +87,8 @@ interface ParagraphBreaker {
         italic: Boolean,
         monospace: Boolean,
         fontRuns: List<FontRun> = emptyList(),
-    ): Float = text.length * fontSizePx
+        cjkLatinSpacingEm: Float = 0f,
+    ): Float = text.length * fontSizePx + cjkLatinSpacingPx(text, fontSizePx, cjkLatinSpacingEm)
 
     /**
      * min-content 宽（px）：内容可在任意断点换行、且**不溢出**时所需的最小可用宽——浏览器
@@ -109,6 +110,7 @@ interface ParagraphBreaker {
         italic: Boolean,
         monospace: Boolean,
         fontRuns: List<FontRun> = emptyList(),
+        cjkLatinSpacingEm: Float = 0f,
     ): Float {
         if (text.isEmpty() || fontSizePx <= 0f) return 0f
         var best = 0f
@@ -117,11 +119,24 @@ interface ParagraphBreaker {
                 text.subSequence(seg.first, seg.last + 1),
                 fontSizePx, families, weight, italic, monospace,
                 fontRunsWithin(fontRuns, seg.first, seg.last + 1),
+                cjkLatinSpacingEm,
             )
             if (w > best) best = w
         }
-        return best
+        return best + cjkLatinSpacingPx(text, fontSizePx, cjkLatinSpacingEm)
     }
+}
+
+/**
+ * 估算 CJK–Latin 自动间距对宽度的影响（粗略但保守：把全部 gaps 宽度相加，确保不窄于实需；
+ * 精确影响取决于断行位置，这里用于 min-content/max-content 的保守估计。实际断行由 breaker 自身处理时应精确加算）。
+ */
+internal fun cjkLatinSpacingPx(text: CharSequence, fontSizePx: Float, cjkLatinSpacingEm: Float): Float {
+    if (cjkLatinSpacingEm <= 0f || text.isEmpty() || fontSizePx <= 0f) return 0f
+    val s = text.toString()
+    val gaps = orilumn.reader.engine.text.preprocess.CjkLatinSpacing.gaps(s, cjkLatinSpacingEm)
+    if (gaps.isEmpty()) return 0f
+    return gaps.size * cjkLatinSpacingEm * fontSizePx
 }
 
 /** [runs] 裁剪到 `[from, to)` 并平移到子串坐标系（[ParagraphBreaker.minContentWidth] 逐段度量用）。 */

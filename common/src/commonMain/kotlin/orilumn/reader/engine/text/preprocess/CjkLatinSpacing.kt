@@ -1,5 +1,7 @@
 package orilumn.reader.engine.text.preprocess
 
+import orilumn.reader.engine.css.FontRun
+
 /**
  * One CJK↔Western boundary adjustment.
  *
@@ -36,7 +38,7 @@ data class CjkLatinGap(
 object CjkLatinSpacing {
 
     /** Returns the CJK↔Western boundary gaps of [text]. */
-    fun gaps(text: String, gapEm: Float = DEFAULT_GAP_EM): List<CjkLatinGap> {
+    fun gaps(text: String, gapEm: Float = DEFAULT_GAP_EM, runs: List<FontRun> = emptyList()): List<CjkLatinGap> {
         val out = mutableListOf<CjkLatinGap>()
         var i = 0
         val n = text.length
@@ -45,30 +47,40 @@ object CjkLatinSpacing {
             val ciKind = kindOf(ci.first)
             if (ciKind != KIND_NONE && i + 1 < n) {
                 val j = ci.second
-                // Left index of the boundary = index of the boundary char's last UTF-16 unit
-                // (a surrogate-pair CJK's low surrogate), so the gap always sits between
-                // text[left] and text[left+1].
                 val left = ci.second - 1
                 val leftC = text[j]
                 if (isSeparatingSpace(leftC)) {
-                    // CJK SPACE Western / Western SPACE CJK: collapse the space into a fixed gap.
                     if (j + 1 < n) {
                         val ck = codePointAt(text, j + 1)
                         if (opposite(ciKind, kindOf(ck.first))) {
                             out += CjkLatinGap(left, gapEm, suppressSpace = true)
-                            // consume the space and the second char as left side of later pairs
                             i = ck.second
                             continue
                         }
                     }
-                } else if (opposite(ciKind, kindOf(text[j].code))) {
-                    out += CjkLatinGap(left, gapEm, suppressSpace = false)
+                } else {
+                    val nextKind = kindOf(text[j].code)
+                    if (opposite(ciKind, nextKind)) {
+                        val nextCp = text[j].code
+                        val isSpecial = isWesternPunctOrSymbol(nextCp) || isWesternPunctOrSymbol(ci.first)
+                        if (isSpecial) {
+                            var hasSepSpace = false
+                            if (j > 0 && j - 1 >= 0 && j - 1 < text.length && isSeparatingSpace(text[j - 1])) hasSepSpace = true
+                            if (i + 1 < j && isSeparatingSpace(text[i + 1])) hasSepSpace = true
+                            if (hasSepSpace) {
+                                out += CjkLatinGap(left, gapEm, suppressSpace = false)
+                            }
+                        } else {
+                            out += CjkLatinGap(left, gapEm, suppressSpace = false)
+                        }
+                    }
                 }
             }
             i = ci.second
         }
         return out
     }
+
 
     private const val DEFAULT_GAP_EM = 0.25f
     private const val KIND_NONE = 0
@@ -98,6 +110,14 @@ object CjkLatinSpacing {
         (a == KIND_CJK && b == KIND_WESTERN) || (a == KIND_WESTERN && b == KIND_CJK)
 
     private fun isSeparatingSpace(c: Char): Boolean = c == ' ' || c == '\u00A0'
+
+    private fun isWesternPunctOrSymbol(cp: Int): Boolean {
+        return cp == '/'.code || cp == ':'.code || cp == ';'.code || cp == '.'.code || cp == ','.code ||
+            cp == '-'.code || cp == '_'.code || cp == '@'.code || cp == '#'.code || cp == '%'.code || cp == '&'.code ||
+            cp == '+'.code || cp == '='.code || cp == '?'.code || cp == '!'.code || cp == '('.code || cp == ')'.code ||
+            cp == '['.code || cp == ']'.code || cp == '{'.code || cp == '}'.code || cp == '"'.code || cp == 0x27 ||
+            cp == '<'.code || cp == '>'.code || cp == '|'.code || cp == '~'.code || cp == '^'.code || cp == '*'.code
+    }
 
     /**
      * Reads the code point starting at [i] and its next char index (surrogate-pair aware), so

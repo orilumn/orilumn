@@ -54,7 +54,7 @@ import orilumn.reader.engine.laying.ParagraphBreaker
  * ⚠️ 教训（`docs/自建断行引擎-测试计划.md` 教训 ⑮）：「同一个函数」还不够，
  * 两处各调一次工厂时，改其中一处另一处的锁**照样绿**（实测 MUT-I 两轮 BUILD SUCCESSFUL）。
  */
-fun bodyParagraphBreaker(letterSpacingEm: Float): ParagraphBreaker =
+fun bodyParagraphBreaker(letterSpacingEm: Float, cjkLatinSpacingEm: Float = 0f): ParagraphBreaker =
     if (AbSwitch.inhouseBreak()) InhouseParagraphBreaker(letterSpacingEm)
     else SkiaParagraphBreaker(letterSpacingEm)
 

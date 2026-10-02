@@ -264,6 +264,26 @@ class InhouseParagraphBreaker(
         firstLineIndentPx: Float,
         fontRuns: List<FontRun>,
         baselineShifts: List<BaselineShift>,
+    ): List<BrokenLine> = breakLines(
+        text, fontSizePx, lineHeightRatio, widthPx, alignment, tag, families, weight, italic, monospace,
+        firstLineIndentPx, fontRuns, baselineShifts, 0f
+    )
+
+    fun breakLines(
+        text: CharSequence,
+        fontSizePx: Float,
+        lineHeightRatio: Float,
+        widthPx: Int,
+        alignment: TextAlign,
+        tag: String?,
+        families: List<String>,
+        weight: Int,
+        italic: Boolean,
+        monospace: Boolean,
+        firstLineIndentPx: Float,
+        fontRuns: List<FontRun>,
+        baselineShifts: List<BaselineShift>,
+        cjkLatinSpacingEm: Float,
     ): List<BrokenLine> {
         val n = text.length
         if (n == 0) return emptyList()

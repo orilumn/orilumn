@@ -882,7 +882,7 @@ private fun TextPage(
     /** 族 → 展示名（调用方由 fontEntries 预建；缺席回退族名本身，另给 CSS 通用族 3 个中文标签）。 */
     fontDisplayByFamily: Map<String, String>,
 ) {
-    val labelW = sliderLabelWidth(listOf("字号", "字间距", "中西间距"), p)
+    val labelW = sliderLabelWidth(listOf("字号", "字间距", "中西字距"), p)
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
         // Three font-replacement tiers (body/heading/code); each row drills down into the font panel.
         FONT_FIELDS.forEachIndexed { i, (label, key) ->
@@ -899,7 +899,7 @@ private fun TextPage(
             { preview(s.copy(letterSpacing = it)) }, { commit(s.copy(letterSpacing = it)) }, p, labelWidth = labelW,
             nav = nav, index = 4) }
         // CJK–Latin spacing: 0..100 mapped to 0..1.0em, default 0 (25 = 0.25em).
-        item { UiSliderRow("中西间距", 0.0, 100.0, 1.0, s.cjkLatinSpacing,
+        item { UiSliderRow("中西字距", 0.0, 100.0, 1.0, s.cjkLatinSpacing,
             { it.roundToInt().toString() },
             { preview(s.copy(cjkLatinSpacing = it)) }, { commit(s.copy(cjkLatinSpacing = it)) }, p, labelWidth = labelW,
             nav = nav, index = 5) }

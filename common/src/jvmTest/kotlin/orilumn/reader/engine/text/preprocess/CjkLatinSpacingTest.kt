@@ -7,7 +7,7 @@ import org.junit.Test
 class CjkLatinSpacingTest {
 
     private fun gapsOf(text: String, em: Float = 0.25f): List<CjkLatinGap> =
-        CjkLatinSpacing.gaps(text, em)
+        CjkLatinSpacing.gaps(text, em, emptyList())
 
     @Test
     fun `cjk then latin gets a gap`() {

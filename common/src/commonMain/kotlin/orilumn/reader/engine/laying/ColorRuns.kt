@@ -92,9 +92,11 @@ fun collectColorRuns(
         for (c in node.children) {
             when {
                 isExcluded(c) -> Unit
+                // 顺序与 `styledSegments` 同式：`isBlock` = 本节点不吸收（Q15 匿名块靠它排掉
+                // run 外的**文本**兄弟，故必须排在 `c.isText` 之前）。
+                isBlock(c) -> Unit
                 c.isText -> argbByNode[c] = argbOf(c, inherited)
                 c.tag == "br" -> Unit
-                isBlock(c) -> Unit
                 c.tag == "img" -> argbByNode[c] = argbOf(c, inherited)
                 else -> {
                     val a = argbOf(c, inherited)
@@ -162,9 +164,10 @@ fun collectFontRuns(
         for (c in node.children) {
             when {
                 isExcluded(c) -> Unit
+                // 同 [collectColorRuns]：`isBlock` 排在 `c.isText` 之前（Q15 匿名块排 run 外兄弟）。
+                isBlock(c) -> Unit
                 c.isText -> fontByNode[c] = fontOf(c, inherited)
                 c.tag == "br" -> Unit
-                isBlock(c) -> Unit
                 c.tag == "img" -> Unit
                 else -> {
                     val f = fontOf(c, inherited)

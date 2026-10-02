@@ -135,6 +135,283 @@
     形态 A/B 落地后，`resolveWhiteSpace` 的降级策略应重新评估
     （横滚可用 ⇒ `pre` 那档也能满足，不必再强制 `pre-wrap`）。
 
+- **Q14 — `SkiaRunMeasurer` 的保底表缓存是**每实例**的，进程里至少新建过 214 个（2026-10-02 记，顺带查出，未动手）**：
+  `SkiaRunMeasurer()` 在生产路径上是**四处默认实参**
+  （`GlyphPainter` / `KerningClusterTable` / `InhouseParagraphBreaker` / `LineAligner`），
+  寿命短于任何一次排版会话。而 `universalCache`（`HashMap<UniversalKey, Array<Typeface>>`）
+  是**该类的实例字段** ⇒ **每个新实例都重扫一遍全部已装族**（平板 59 族，每族一次 `matchFamilyStyle` native），
+  扫出来的结果对所有实例**完全相同**。
+  - **量化（平板 vivo PA2353，2026-10-02）**：靠已删诊断 `logUniversalTableOnce` 的行数折算 ——
+    一次运行 39 秒打出 641 行探针日志，而它每实例最多打 3 行 ⇒ **≥214 个实例 = ≥214 次全量重扫**。
+    （真机 59 族 ⇒ 约 1.3 万次 `matchFamilyStyle`；JVM 宿主 326 族 ⇒ 同一缺陷在桌面端是它的 5.5 倍。）
+  - **为什么现在不动**：修法看似显然（提到 `companion object`，照抄同文件已有的
+    `systemFallbackCollection` 模式），但**有一个反向代价没排除** ——
+    **进程级缓存对「已装字体集变化」是陈旧的**（热插字体 / 运行期切换字体配置），
+    而每实例缓存天然规避了这一点。要改成进程级，得先答「运行期内字体集是否真不变」，
+    否则是用一个**看不见的字体陈旧缺陷**换一个**看得见的 CPU 浪费**。
+  - **⬜ 未结**。已在 `SkiaRunMeasurer.universalTypefaces` 的 KDoc 上标注（现场），
+    结论与「每实例的 once 门等于没有门」写在 `自建断行引擎-测试计划.md` §教训 ⑰。
+  - 附带删掉：`logUniversalTableOnce` 诊断（结论已落 §教训 ⑯，探针跑完即删）。
+
+- **Q15 — `<td>` 里的块级内容（`<p>`/`<div>`/`<ul>`…）**整格丢弃**，表格大面积「显示不出来」（2026-10-02 用户报 GIMP 手册表格不显示，探针已定位）：
+  **这是既有缺陷，与 Q6（表格侧度量）无关** —— 已用探针逐值证明 Q6 前后列宽完全相同（见下）。
+
+  **根因（一行）**：`StyledText.styledSegments` 吸收叶文本时对块级子节点直接跳过
+  （`common/src/commonMain/kotlin/orilumn/reader/engine/laying/StyledText.kt:107` `isBlock(c) -> Unit`），
+  而 `"p"` 在 `NormalFlowLayout.BOX_BLOCK_TAGS`（`:1672`）里 ⇒
+  **`<td><p>文字</p></td>` 归一化后 `text` 是空串**，该格既量不到宽、也画不出字。
+
+  **探针实测（GIMP 手册 chap_0021 的真实表形，跑生产代码）**：
+  | | 图标格 `rowspan=2` | `th 注意` | 正文格 `<td><p>…</p></td>` |
+  | --- | --- | --- | --- |
+  | `absorbStyled(...).text` | `«￼»`（1 字） | `«注意»`（2 字） | **`«»`（0 字）** |
+  | `LayoutBox.textLength` | — | 两格合计 **3** | **0** |
+
+  排版产出：`tr` 两行，一行 `textLength=3`、另一行 **`textLength=0`**；
+  版心 800px 下 `columnWidths=[25, 32]`、表总宽 **57px** —— 即「图标 + 标题」在，正文整格凭空。
+
+  **Q6 无关的证明**：同一张表用**旧桩**（`preferredWidth` 默认实现 `text.length × fontSizePx`）
+  与**新真测量**各跑一遍 `tableCellPref` + `autoColumnLayout`，列宽 `[25, 32]` **逐值相同**。
+  两条理由：① 图标格文本是 `«￼»` 非空，走真实测量，但 U+FFFC 在两侧都量到 16.0；
+  ② 正文格 `text` 为空，`tableCellPref:1537` **早退**，根本不调 `preferredWidth`。
+
+  **影响面（平板 35 本书里 7 本有表格，逐书扫 `<td>` 形状）**：
+  | 书 | 块级包裹的 `td` / 总 `td` | 占比 |
+  | --- | --- | --- |
+  | `book_1790742729435` | 908 / 987 | **92%** |
+  | `book_1790742665434` | 1058 / 1170 | **90%** |
+  | `book_1790742662856`（GIMP 3.0 用户手册） | 591 / 1249 | 47% |
+  | `book_1790742718646` | 1 / 10 | 10% |
+  | `book_1790742700787` / `book_1790865097552` / `book_1790872978337` | 0 | 0%（安全） |
+  ⇒ 设备书库合计 **2558 / 4309（59.4%）个单元格不可见**。
+  GIMP 手册全书 539 张表，`<td>` 绝大多数是「图标格 + 标题格 + `<p>` 正文格」三格结构 ⇒ **每张表的正文格都丢**。
+
+  **为什么既有测试没抓到**：`TableFamilyTest` / 新加的 `TableColumnWidthRealMeasureTest`
+  用的都是**裸文本单元格**，没有一个带 `<p>` ⇒ 覆盖面漏了这一形状。
+  ⇒ 教训：**接线/几何锁必须用真实语料的单元格形状**，合成形状会把最常见的形态整个漏掉。
+
+  **✅ 已修（2026-10-02，与 Q20 同批）**。规格定案：格内容按 **CSS 2.1 §16.3**（单元格内容是块级流）
+  拆成**块序列**纵向堆叠 —— 格内**块级**子节点各自成块，格的**直接内联内容**合成一个匿名块。
+  落点（排版层·上 + 塑形侧，逐块共用 [stackTableCellBlocks] 一处定位式）：
+  - [LayoutBox.kt]：单 `shape` ⇒ `blocks: List<TableCellBlock>`（`el`/`imageRoot`/`outsideSiblings`/
+    `style`/`text`/`runs`/`gapBefore`/`edgeH`/`edgeV` ＋ 可写 `top`/`height`/`ranges`/`lineHeights`/`shape`）。
+  - [NormalFlowLayout.kt]：新增 `cellFlowItems`/`walkCellBlocks`/`cellRunAfter`/`absorbCellBlock`；
+    重路径 `buildTableRows` 与轻路径 `BoxChapterLayouter.cellBlockPlan` 共调 `cellBlocks`。
+  - [TableCellLines.kt]：`emitCell`/`emitCellImages` 逐块发射（逐块 style/tag/`edgeH`/`top`，
+    `charBase` 逐块推进）。
+  - `tableCellPref` 跨块**取 max**（CSS 2.1 §10.5），轻路径经 `cellBlockPlan`/`cellStyle` 与重路径同源。
+
+  **踩过的三个坑（都是先做成错的版本、被探针/既有红锁打回来的）**：
+  ① **匿名块的 `el` 必须是所在容器本身，不能造合成 `#text`**：塑形侧 [shapeGeometry] 从**真实子树**
+  重抽文本（配 `outsideSiblings` 排掉 run 外兄弟），合成空节点子树为空 ⇒ `<br>` 硬换行被
+  `white-space:normal` 折成空格 ⇒ 实测 Kindle 跨行格 5 行掉成 3 行、格高 161→105，
+  `SkiaDrawLineWindowCoherenceTest.rowspanTableSharesSpanningCellHeightAcrossRows` 新红
+  （`5 yTop(rel) expected:<98> but was:<77>`）—— 这条红锁就是本轮重构的触发点。
+  ② **行内 `<img>` 不拆块**（与 `flowChildren` 同式）：它是 run 里的一个 U+FFFC 占位，只按 §10.8
+  抬行高。拆块会让塑形侧对 `img` 根早退、塑出零行；且 `<td><img></td>` 要与修复前**逐字节同式**。
+  ③ **`appendInlineText` 必须与 `styledSegments` 的 `walk` 逐条同形**（`br`/`img` 都要产字符）：
+  它只当「这一段 run 有没有内容」的判据（`sb.isNotBlank()`），判据与内容不同形 ⇒ run 被判空丢块 ——
+  GIMP 图标格 `<td rowspan="2"><img/></td>` 就是这样整格零块（`sb` 空、实际文本是 `￼`）。
+  顺带修好嵌套图（`<p>字<span><img/></span>字</p>`）此前被静默丢字符的分叉。
+
+  **顺带修掉的重路径 char 基址漂移**：`rowChars` 对 `<td><p>…</p></td>` 得 0、轻路径
+  `styledCharAdvance` 得 N ⇒ char 基址整表漂移（点按/选区落错章内字符）。
+
+  **锁**：`common:TableCellBlocksTest`（16 把，正向：块枚举/`outsideSiblings`/叶状块判据/堆叠几何）
+  ＋ 新增 `app:TableCellBlocksEndToEndTest`（5 把，走 `prepareLight`→`incrementalLayoutForPage`/
+  `shapeTempPageForward`→`tableCellLines` 整条链路，含 GIMP 2×2 rowspan 真实表形）。
+  逐把变异验证（6 个变异，全部应验）：M1 `shapeLineHyphenAtEnd→false`、M2 删 `appendInlineText`
+  的 img 分支、M3 `cellFlowItems` 不拆块、M4 匿名块 `el` 换回合成 `#text`、M5 `charAcc += 0`、
+  M6 `stackTableCellBlocks` 不累计前块高度。
+
+  **注意它与 Q13 的关系**：Q13 是「代码块该有的横滚能力没有」，本条是「表格内容直接消失」，
+  两者无关；但都在 DocBook 风格书（GIMP 手册的 `summary="Note"` / `align` / `valign` 就是 DocBook 产物）上暴露。
+
+- **Q16 — `pre code` 块里的空行全部消失（2026-10-02 用户报）**：
+  **根因（排版层·上）**：断行器丢空行，**两侧断行实现都丢**：
+  - 自建侧 `InhouseParagraphBreaker.greedy`（`engine-skia/.../skia/InhouseParagraphBreaker.kt:369-376`）
+    行首遇 `'\n'` 即 `s++; continue`，**不产出任何 `BrokenLine`** ⇒ `"a\n\nb"` 得 2 行。
+  - 回退阀 `SkiaParagraphBreaker`（`:196-198`）归一化后 `if (e > s)` 把变空的行丢掉 ⇒ **同样 2 行**。
+    ⇒ **拨 `inhouseBreak=0` 回退也修不好**，这点必须写死，否则会有人往回退阀上找。
+
+  **`StyleComputer.resolveWhiteSpace`（`:232`）不是元凶，但是放大器**：它把 `pre` 子树里
+  不可折行的值一律降级成 `PRE_WRAP`，而 `WhiteSpaceBreak.breakLeafLines:27` 的
+  `wraps()==false` 分支（`PRE`/`NOWRAP`）**显式产出零宽空行**、`wraps()==true` 分支
+  把空行判给断行器 ⇒ **降级恰好把 `pre` 送进丢空行的那条路**。讽刺的是它是「为不横滚做的妥协」。
+
+  **认知源头（已钉进测试计划 §T1b 第③行）**：「纯换行空行丢弃」被当成 **Skia 的固有语义**写进了规格，
+  而实测它只是**本仓 `layoutOnce` 归一化步骤**的行为（`SkParagraphBreaker` 裸跑是否吐空行未验证）。
+  现有两条单测把这个 bug 钉成了规格：`InhouseParagraphBreakerTest:377` 断言 `"a\n\nb"` 是 2 行；
+  `SkiaParagraphBreakerTest:150` 用例名叫 `brNewlinesKeepInteriorLines` 却断言 `listOf(0..0, 3..3)`（空行被丢）。
+  **没有任何测试断言 `pre`/`pre-wrap` 下空行应保留。**
+
+  **渲染层无责**：`LineAligner:113` 对 `n<=0` 正常返回空 `Placement`，`DrawLineBuilder:87-97` 不丢零宽行
+  ⇒ **零宽空行一旦被生产出来就能正常画**。修在断行器就够。
+
+  **⬜ 未修**（修法 = 断行器为「连续硬换行之间的空段」产出零宽行；但会与 §T1b 第③行那条已被钉死的
+  「Skia 逐行等价」金标准冲突，需先决定「以浏览器/CSS 为准」还是「以现状为准」）。
+
+- **Q17 — 中英（中西）文之间**零自动间距**；`CjkLatinSpacing` 是死代码（2026-10-02 用户问，现已查清）**：
+  用户的三个子问题，逐一实测回答：
+
+  | 情形 | 现状 | 代码位置 |
+  | --- | --- | --- |
+  | **原文有空格** `中文 Eng` | 空格**保留**，按普通空格字形算宽（不定宽，约 0.25–0.33em），且**是无条件断点** | `WhiteSpaceNormalize` 折叠为单空格；`LineBreakSegments:40` `if (isDocumentSpace(prev) ‖ isDocumentSpace(next)) return true` |
+  | **原文没空格** `中文Eng` | **不插任何间距（0）**。视觉间隙纯粹是两种字体各自侧边距的副产品 | 无 `text-autospace` 实现；`SkParagraphFactory` 的 `ParagraphStyle`/`TextStyle` 也没设该属性 |
+  | **中间夹 HTML 标记** `中文<code>Eng</code>` | **既不产生间距、也不影响断行** —— 因为 `<code>` 在这条链路上**根本不是盒子** | 见下 |
+
+  **「盒边界」这个概念在本项目这条路径上不存在**：`LayoutBox` 只装块级节点（`LayoutBox.kt:32-40`），
+  内联元素被 `styledSegments` 递归吸收进**一个扁平字符串**，只留 `FontRun(start, endExclusive, …)` 区间
+  （`CssValues.kt:92-105`）。于是 `中文<code>Eng</code>` 在引擎里是
+  叶文本 `"中文Eng"`（5 字连续）+ `FontRun[2,5)` 表示「第 2..4 字用等宽面」。
+  - 断行器签名里**没有盒列表参数**（`ParagraphBreaker.breakLines` 只有 `text` + `fontRuns`），
+    断点判定 `isBreakOpportunity(text, i)` 只看相邻两字符 ⇒ `文|E` 因 `isWideBreakChar(文)` 为真**可断**。
+  - 绘制层 `LineWindowDrawer.drawGlyphPass:657,685` 是 `paintX + xs[local]`，
+    `xs` 由 `LineAligner` 按 advance 累加 ⇒ `<code>` 的 `E` 紧挨着 `文` 画，**零边界补偿**。
+    `Band`（`:703`）只携带 color/font/shift/underline，**没有间距字段**。
+
+  **死代码**：`common/.../text/preprocess/CjkLatinSpacing.kt` 已实现与 CSS `text-autospace` 等价的行为
+  （固定 0.25em 间隙 + 吸收多余半角空格），但**全项目零生产消费**（只被自己的单测调用）。
+  与 `LongStringBreaker`/`overflow-wrap`/`word-break` 是**同一批**未接线的件（见 Q3 的同类决策）。
+  接线 TODO 另登记在 `docs/upgrade-train-plan.md:96`。
+  **顺带**：`wordSpacingPx`（`ComputedStyle.kt:307`）也是同类死属性 —— 解析了，排版链路不读。
+
+  **测试覆盖**：**没有**任何「CJK+Latin 无空格混排」的像素/宽度断言。
+  `CjkLatinSpacingTest` 只测纯函数返回值；`LineAlignerTest:27` 的不变式写的是
+  「`x[i+1] == x[i] + adv[i]`（逐字相接）」—— **将来接线 `CjkLatinSpacing` 必须改这条不变式**。
+
+  **⬜ 未修**（要不要接、默认开不开、是否与 Q16 的空白折叠口径统一，都需先定产品口径）。
+
+- **Q18 — 行内 `<code>` 里的标识符被英语音节断词切开，而 `_` 断点不注入**（2026-10-02 用户报 Rust 书 `wrap(断行)ping_add`）**：
+
+  **先回答用户问的「断行优先级」（实测，不是推断）：先压缩空白，再断行。**
+  压缩在**排版层·上**的文本吸收步骤完成，早于任何断点计算：
+  `NormalFlowLayout.absorbStyled`（`:563`）→ `styledSegments` → `WhiteSpaceNormalize.normalizeNode`
+  （逐文本节点折叠）→ `mergeBoundarySpaces`（跨行内边界合并）→ `finishSegments`/`finishLeaf`（叶级 trim）
+  ⇒ 断行器拿到的已经是折叠后的串，**断行器自己明确不做折叠**（`InhouseParagraphBreaker` KDoc `:29-30`
+  「无空白折叠/无行首裁剪」只描述断行器这一层，别误读成引擎整体不折叠）。
+  `white-space: normal` 下 epub 源码的换行与缩进**不会**撑宽行，在上一步就压成单空格。
+
+  **真源码（`book_1790865097552.epub` / `book_1790872978337.epub` 实测，设备上的两本《Rust 程序设计语言》）**：
+  ```html
+  <li>所有模式下都可以使用 <code>wrapping_*</code> 方法进行 wrapping，如 <code>wrapping_add</code></li>
+  ```
+  **书里没有「断」字、没有删除线、没有 `<wbr>`、没有 `<br>`** —— 用户看到的 `wrap(断行)ping_add`
+  那个 `(断行)` 是**引擎自己断出来的**。（`<wbr>` 全仓只有 converter 保留节点、**无任何代码把它转成断点**，
+  而 `docs/engine-html-css-capability.md:26` 却宣称支持 ⇒ **已存在的文档-实现偏差**。）
+
+  **实测断点集（探针跑生产代码，`tag=\"li\"` ⇒ 走 `sourcesFor` 的 else 分支）**：
+  | 位置 | 谁标的 | 含义 |
+  | --- | --- | --- |
+  | 1–11、21–27、36–38 | `KinsokuBreakSource`（ZH_EN） | CJK 逐字 + 空格 |
+  | **15、31、42** `'p|p'` | **`EnglishHyphenationSource.forLang("en")`** | **音节断词，标 `markHyphen`（补连字符）** |
+
+  **实测断行结果（fs=16，`非法断点` 按上面这个真实断点集判）**：
+  ```
+  版心480 → 2行  非法断点=0   «…，如 wrap»-  ‖  «ping_add»     ← 用户看到的
+  版心420 → 2行  非法断点=0   «…，如 »      ‖  «wrapping_add»
+  ```
+  ⇒ **不是非法断点，也不是硬切**：480 那行是**音节断词**把 `wrapping` 断成 `wrap-` + `ping`，
+  且行尾**补了连字符**。贪心取**最靠右**的合法断点，42 比空格断点 38 更靠右，所以选 42。
+
+  **真正的缺陷（项目自己的规则被自己违反）**：`CodeIdentifierBreakSource` 的 KDoc 明写
+  「**不给**音节断词：代码标识符按音节断是错的」，而 `sourcesFor` 用 **`tag`（叶块元素）**判「是不是代码」
+  （`CODE_TAGS = {pre, code, kbd, samp, tt}`）。本例叶块是 `<li>`、代码是**行内 run** ⇒
+  走 else 分支拿 `EnglishHyphenationSource`，**在 `<code>…</code>` 里面断词**；
+  同时 `CodeIdentifierBreakSource` 本该标的 **`_|*`(20) 与 `_|a`(47) 两个断点一个都没注入**
+  （探针实测：`li` 语境 24 个断点里没有它们；`pre` 语境才有）。
+  ⇒ **同一个引擎对「整块 `<pre>`」和「段落里的行内 `<code>`」给出两套断点规则，
+  而后者违反了该 source 自己声明的规则。**
+
+  **这是已登记缺口 docs 29g（`class` 通道不存在）的另一面**：同一根因 ——
+  「是不是代码」判据挂在**叶块 tag** 上，而代码性其实是**行内 run 的属性**。
+
+  **⬜ 未修**（两条子决策，口味不同，得分开定）：
+  ① **必须**：行内 code run 内**禁止**音节断词（对齐 `CodeIdentifierBreakSource` 自己的 KDoc，纯 bug 修复）。
+  ② **可选**：行内 code run 内**注入** `_` 分隔符断点（用了 `mark` 不用 `markHyphen`，故不补连字符）。
+  这会改变断行外观（`wrapping_` ‖ `ping_add`），属产品口味。
+  落点在 `InhouseParagraphBreaker.sourcesFor` —— `breakLines` **已经收到 `fontRuns`**
+  （每个 run 自带 `tag`），属**排版层·上/分行控制内部**改动，**不跨层**。
+  但需一并处理口径分叉：`minContentSegments`（`LineBreakSegments:140`）恒用 ZH_EN、不带任何 source。
+
+- **Q19 — 标题字重：①看不出粗 ②选粗细对标题恒无效**（2026-10-02 用户报 GIMP 手册标题用「方正粗金陵」）：**：
+
+  **(b) 选粗细对标题恒无效 —— 根因一行（渲染层）**：
+  用户字重**唯一**通路是 `SkParagraphFactory.anchoredWeight`
+  （`engine-skia/.../skia/SkParagraphFactory.kt:54-61`），它第一行就 `if (italic || weight != 400) return weight`；
+  而 `h1`–`h6` 的 UA 字重是 `bold`=700（`common/src/commonMain/resources/css/ua.css:18-23`，已核）
+  ⇒ **对标题恒不触发**。这条语义还被 `WeightAnchorTest:17-18` 固化成断言。
+  **用户层没有第二个出口**：`ReaderUiSheet.fontRules`（`common/.../css/ReaderUiSheet.kt:62-68`）只写
+  `font-family`（含标题槽 `h1..h6`）与 `line-height`/`margin`/`text-indent`，**一个字重都没有**。
+
+  **(a) 看不出粗 —— 三个叠加原因，前两个已核**：
+  ① **全仓无合成粗体**：`fakeBold`/`embolden`/描边加粗**零命中**（已核），落墨就是
+  `GlyphPainter.kt:80` 的 `drawString` ⇒ **`font-weight` 的唯一视觉效果是「能不能选到更粗的面」**，
+  选不到就原样。单面族（如只嵌一份的「方正粗金陵」）请求 400/700 都返回同一张面。
+  ② **书内 `@font-face` 的 `font-weight` 描述符一路被丢**：`LightCssParser` 解析了（`:234`）
+  → `CssFontFace.weight` → `BookFontRef.weight` → **`BookFont(family, bytes)` 没有字重字段**（已核，`BookFonts.kt:29-31`）
+  → `EmbeddedFont(familyName, bytes, aliases, faceIndex)` 也没有（已核，`SkiaFontPool.kt:19-24`）
+  → `SkParagraphFactory` 只 `registerTypeface(tf, f.familyName)` ⇒ **只按族名注册，face 的 CSS 字重从不参与匹配**。
+  ③ **用户设了同族锚点会把池收窄成单面**：`FontPoolSync.kt:48-62`（尤其 `:54-56`）只保留锚点字重那一张面；
+  正文 400 被 `anchoredWeight` 改写后命中它，标题 700 **不改写**、Skia 在单面集合里也只能返回它
+  ⇒ **标题字重被锚点间接锁死，而用户又无法纠正（＝就是 (b)）**。
+
+  **顺带两个设置层坑**：`FontLibraryPanel:296/307` 只让**多字重族**进字重页（单面族进不去）；
+  `:443-458` 的 `weightChoices()` 无「自动/跟随原书」项；`ReaderSettingsPanel:290` 的「跟随原书」只清字体槽、
+  **不清 `fontWeightAnchors`**，残留锚点会继续收窄池。
+
+  **无法从代码断定**：该字体文件内禀是 400 还是 700（字体在 EPUB 内，仓库无此资产）⇒ **(a) 的最后一环不下结论**。
+
+  **⬜ 未修**。修 (b) 的落点是渲染层 `SkParagraphFactory`，用户层不需改 ⇒ **不跨层**。
+  若要修 ②（`@font-face` 字重参与匹配），需给 `BookFont`/`EmbeddedFont` 加字重字段并透传到 `registerTypeface`，
+  那是**排版层(上) → 渲染层**的数据形状变更；建议先在 `common/engine/css` 内定一个「face 描述符」模型，
+  由渲染层单向消费，**别把 CSS 语义漏进渲染层**。
+
+- **Q20 — 断词连字符在「增量路径」和「表格格」两条路上 100% 画不出来**（2026-10-02 用户报 Rust 书 `wrap` 行尾无 `-`，并指「上次发现过、应该没彻底解决」——**确实没彻底解决**）**：
+
+  **上次那次修的是 `DrawLineBuilder` 的下标错位，锁叫 `HyphenAtEndEndToEndTest`；但 `DrawLine` 全仓有
+  **三个**构造点，那次只覆盖了其中一个。**
+
+  | # | 构造点 | 服务的路径 | `hyphenAtEnd` |
+  | --- | --- | --- | --- |
+  | 1 | `DrawLineBuilder.kt:97`（`:129` 传值） | **canonical / 重路径** | ✅ **已修**（上次就修的这里） |
+  | 2 | `BoxChapterLayouter.kt:797`（`buildPartialSkiaWindow`） | **增量 / 磁盘表命中**（读者日常稳态走的就是这条；两个调用点 `:1010`、`:1958`） | ❌ **整段没传** ⇒ 取默认 `false` |
+  | 3 | `TableCellLines.kt:172`（`emitCell`） | **全部路径的表格单元格**（构造点 1、2 都在 `leaf.table != null` 时 `continue`，表格一律走这里） | ❌ **整段没传** ⇒ 取默认 `false` |
+
+  **掉链子的机制**：`DrawLine.hyphenAtEnd`（`LineWindowDrawer.kt:77`）默认 `false`
+  ⇒ `LineWindowDrawer:317` 把它转给 `LineAligner.place`
+  ⇒ `LineAligner:151/153` 的 `hyphenW` 恒 `0f` ⇒ `placement.hyphenWidth == 0f`
+  ⇒ 落墨那段的守卫 `if (placement.hyphenWidth > 0f)`（`LineWindowDrawer.kt:559`）**整块跳过**
+  ⇒ **既不画 `-`，也不为它留宽**（留宽由断行器在 `oppW` 里已经算过，故不会溢出，只是少一个字符）。
+  副作用：JUSTIFY 行的 `gapCount`（`LineAligner:249`）少算一个，行内字缝与断行器的假设差一格。
+
+  **为什么既有锁全绿**：`HyphenAtEndEndToEndTest`（3 把，KDoc 自己写了「本锁必须走完整链路
+  `BoxLayouter` → `DrawLineBuilder`」）**三把全部只调 `DrawLineBuilder.build(...)`**，
+  从没碰过 `buildPartialSkiaWindow`，也没碰过 `TableCellLines`
+  ⇒ **它锁的是 3 条路里的 1 条**。⇒ 教训 ⑮（接线锁必须真走那条接线）的第二次应验：
+  上次那条锁证明了「下标要对」，没证明「三条路都要对」。
+
+  **修法（已按此落地，但载体换了个地方）**：
+  - 构造点 ②：原计划的 `leaf.hyphenAtEnd` **不够用** —— 轻路径（增量/临时页）**根本没有可读的
+    `LayoutBox.hyphenAtEnd`**：`BoxChapterLayouter` 那边的叶是按 `ranges = emptyList()` 建的，
+    断行只发生在塑形那一步（`tempShape`/`shapeLeaf`）。⇒ 改挂 **shape**：
+    `ParagraphShapeRef.shapeLineHyphenAtEnd(k)`（接口默认 `false`，哑实现零改动）
+    ＋ `ShapedGeometry.lineHyphenAtEnd`，由 `shapeGeometry` 从 `broken.map { it.hyphenAtEnd }` 直接搬。
+  - 构造点 ③：格内块两路都由 `fillTableRowCells` 塑形、**形状即单源** ⇒ 也读
+    `shape.shapeLineHyphenAtEnd(k)`（轻路径不回填 `TableCellBlock.hyphenAtEnd`，读块会漏）。
+  - 构造点 ①（canonical）仍读 `leaf.hyphenAtEnd`：`DrawLineBuilder` **不塑形**，手里只有盒流记录。
+    两路同断行器同宽，值逐项一致 —— 与 `ranges` 的既有口径完全一样
+    （canonical 读 `leaf.ranges`，轻路径读 `shape.lineStart/lineEnd`）。
+
+**✅ 已修（2026-10-02，与 Q15 同批）**，三个构造点一次补齐（`DrawLineBuilder` /
+`BoxChapterLayouter.buildPartialSkiaWindow` / `TableCellLines.emitCell`）。
+
+**锁**：`app:SkiaDrawLineWindowCoherenceTest.hyphenAtEndFlagIsCarriedByIncrementalAndTempWindows` ——
+6 档版心（180/240/300/380/460/560）逐档比 canonical ↔ 增量 ↔ 临时三窗的 `range`/`text`/`hyphenAtEnd`，
+并显式断言增量窗与临时窗**存在**断词行（缺这条，锁会在「没逼出断词」时静默通过）。
+变异验证：`shapeLineHyphenAtEnd` 改回恒 `false` ⇒ 红（`w=180 canon=4 incr=0`）。
+既有 `HyphenAtEndEndToEndTest`（3 把）**没动**：它验的是构造点 ①，本条补的正是 ②③ 的覆盖面漏洞。
+
 - **Q1 — 长串（超长不可断单元）症状用户无法复现（2026-09-30 记）**：
   真机曾见长串行溢出/参差，但用户侧无法稳定复现，缺可复现样本。
   自建断行引擎**必须不比 Skia 差** —— T1 等价性（99.0038%）已隐含覆盖该场景，
@@ -179,7 +456,21 @@
     `font_faces.lang` 是**字体表**的一列（跟着 `FontFace` 走），**语义未查证**，但它**不是「书的语言」**。
   - 详见 `docs/自建断行引擎-实施方案.md` §0.1 / §0.2 / S7。
 
-- **Q5 — 含拉丁字母的行失去 kerning 与 fi/fl 连字（2026-09-30 记，本轮有意接受）**：
+- **Q5 — 含拉丁字母的行失去 kerning 与 fi/fl 连字 ✅ 已解决并销案（2026-10-02 销；S5b 落地于 2026-10-01）**：
+  > **销案结论**：`KerningClusterTable` **就是解法本身**，不是「未接管的缺口」。
+  > kerning/连字信息只存在于字体 GPOS/GSUB 表里，取它必须有一个 shaper，而 shaper 就是 Skia（底层 HarfBuzz）。
+  > `SkiaRunMeasurer` 刻意「逐码本量宽、**不整形**」是 S2 冻结的契约（段落是逐字形回退的），
+  > 于是形成有意分工：**量宽侧不整形 + 落墨侧现算簇位**。
+  > ⇒ 判据不是「自建要接管整形」，而是「**取簇位必须同源**」—— 现算簇位与量宽出自同一次 Skia 整形，
+  > 两者**同源**，量画一致的前提仍然成立（`GraftKerningOntoTest` 的「绘制轨恒不宽于量出轨且单调」钉住）。
+  > **成本**：`needsClusters` 先判 `isLatinish`，纯 CJK 行**不建 Paragraph**（零行为变化）；
+  >   含 Latin 的行 `getRectsForRange(0, len)` 一次拿整段全部簇矩形，**比裸 cmap 还快**（0.047ms vs 0.0877ms / 段）。
+  > **锁**：`KerningClusterTableTest` 3 把（kerning 对位置的簇位与裸 cmap 不等 = 证明生效 /
+  >   纯 CJK 行不建 Paragraph / 行内换面分段各自取簇位不混面）、`GraftKerningOntoTest` 10 把
+  >   （簇位轨放宽时落位一点不动、收紧时逐字采纳、混合时净偏移只算收紧、
+  >   绘制轨恒不宽于量出轨且单调、JUSTIFY 补偿 6 条）。
+  > 下面保留当时的量级数据与分析，作为「为什么这个缺口存在、后来靠什么填上」的记录。
+
   路线 B 的管线是「逐码本量宽 → 逐字 `drawString` 落位」，`Font.getWidths(glyphs)` 是裸 cmap 查表、
   **不整形**，而 skParagraph 走 HarfBuzz（带 `liga` 与 kern 表）。故两者在拉丁字母上不等宽。
   - **量级（实测，T8.4）**：连字只在 CJK 面（`STSong` 的 `fi` **−9.00px** @100px、`Songti SC` −4.10、
@@ -187,7 +478,7 @@
     Helvetica 56 对最大 −1.76、**Georgia 0 对**）。CJK 侧**完全干净**：兰亭序 84 字长串 Δ=+0.000000%。
   - **暴露面（实测，`books/` 11 本 epub 正文）**：3 本中文网文 ≈ 0 处/万字符；
     英文书 25–32 处/万字符（moby-dick 32.24、gutenberg-84 31.12、gutenberg-1342 25.52）。
-  - **为什么本轮不修**：① skiko `Paragraph` 无任何字形/簇级位置查询（`javap` 确认），
+  - **【历史】当时的理由（本轮不修；已被 S5b 的「落墨现算簇位」推翻，保留以说明缺口为何存在）**：① skiko `Paragraph` 无任何字形/簇级位置查询（`javap` 确认），
     「整段整形一次 + 查每簇位置」这条路不存在；② kern 可以在 Aligner 里补
     （`w_j = adv_j + kern(cp_{j−1}, cp_j)`，两侧同表即自洽），但**连字补不了**（它改变字形个数），
     而连字恰是 CJK 面上更大的那个 —— 补一半要「每面 62×62=3844 次 Paragraph 测量建表」，
@@ -201,12 +492,61 @@
     中文书无感知（Δ=+0.000000%），英文技术书每万字符 25–32 处字距略宽。
     ⇒ **真机复测时看到英文行「字距略宽」是预期行为，不是 bug**，别再当回归查。
     验证手段：`LineWindowDrawerTest` 21 把像素级锁全绿（它比的是像素位置，不是宽度）。
-  - **补的话怎么做（留档）**：在 `SkiaRunMeasurer` 里加一层「per-face kern 表」，
+  - **【历史】当时设想的补法（未采用）**：在 `SkiaRunMeasurer` 里加一层「per-face kern 表」，
     按 (面, size) 懒建表（`para("ab") - adv(a) - adv(b)`，62×62 上界），
     让 `advanceOf(i)` 返回 `adv(cp_i) + kern(cp_{i−1}, cp_i)`。连字仍无解。
+    **这条路与 S2 契约冲突**（量宽侧「不整形」是逐字形回退的地基），实际改走「落墨现算簇位」，**量宽侧一字未动**。
   - 详见 `docs/自建断行引擎-实施方案.md` §2.2(d) 与 `docs/自建断行引擎-测试计划.md` §T8.4。
 
-- **Q6 — 表格侧：min 侧闲置 + 自建侧无真测量（2026-10-01 记；S3 接线时已查清前半个前提）**：
+- **Q6 — 表格侧：min 侧闲置 + 自建侧无真测量 ✅ 两个前提都已消解（2026-10-02 销）**：
+  > **销案结论**：两个前提分别被两件事拆掉，且**都只改了一行**。
+  >
+  > ① **「自建侧无真测量」**：`InhouseParagraphBreaker` 补 `preferredWidth` 覆写，接
+  >    `SkiaRunMeasurer.naturalWidth`（与断行**同一个 `advances` 单源**，只差「不施加版心宽、不找断点」）。
+  >    `minContentWidth` **一个字都没写** —— 接口默认实现本身就是「按 `minContentSegments` 切段后
+  >    逐段调 `preferredWidth` 取最大」，故随 ① 自动变真，实测与 Skia 侧**逐值相等**（181.6404）。
+  > ② **「min 侧闲置」**：本来就不是缺陷而是**实测事实**（49 张表全落 `avail>=totalMax` 直通段），
+  >    本轮只把它记成「不修也不影响」——它从来不需要修。
+  >
+  > **实测两侧差**（fs=16 与 44.4，`STSong,serif`，同宿主对照）：
+  >
+  > | 文本类别 | 差 |
+  > |---|---|
+  > | CJK / URL / code / 混排 / 无 kern 对的 Latin | **0.0000%** |
+  > | `Office of the Future`（含 kern 对） | **+1.104%**（1.44px@16 / 3.996px@44.4） |
+  > | `AVATAR Wayfinding WA` | **+0.838%**（同一个 kern 对） |
+  > | min-content（Latin 37 字） | **0.0000%** |
+  >
+  > 差值恒为**一个 kern 对的像素量**（1.44→3.996，比值 2.775 = 44.4/16），方向**永不反向**
+  > （整形缺口全为负，见 Q5）。对比原台账里的「桩高估 Latin **2.49x**」——
+  > 那 2.49 倍**全是桩的错**，真测量只差 ~1%。
+  >
+  > **③ 顺手拆掉的两处钉扎**（这才是「表格的问题」的本体）：
+  > `BoxChapterLayouter.tableBreaker`（恒 Skia）与 `heavyPathBreaker` /
+  > `autoColumnMeasurePinnedToSkia`（把度量方法钉回 Skia 的包装）**一并删除**，约 -90 行。
+  > 现在 `bodyParagraphBreaker` 是**唯一**断行器口，重路径 `BoxLayouter` 与轻路径
+  > `LightPrepare`（表格测宽）**共用同一个实例**（`BoxChapterLayouter.breakerFor`，
+  > 缓存键 `(profile, 变体)`）。
+  > ⇒ 原原则「**变体只该改变行，不该改变列**」**作废**：它当初是用「把列宽钉回另一套实现」
+  > 来维持的，而**那两处钉扎正是重轻分叉的真正来源**。现在一致性由「同一个对象」保证。
+  >
+  > **④ 拆钉扎时当场抓到的两个真 bug**（都是锁逼出来的，不是预演）：
+  > - **两处钉扎本身就是缺陷的温床**：`tableBreaker` 只被**轻路径**消费，重路径压根不经过它 ⇒
+  >   只走重路径的回归锁改 `tableBreaker` **照样绿**（MUT-I 两轮 BUILD SUCCESSFUL）。
+  >   这就是「假绿锁形态⑤：锁压根没碰那条路径」。
+  > - **`breakerFor` 缓存键漏了变体**：只按 `profile` 缓存，而实例的**类**由
+  >   `AbSwitch.inhouseBreak()` 决定，`BoxChapterLayouter` 寿命是整本书 ⇒ 拨开关后仍发旧变体，
+  >   **回退阀在缓存命中时静默失效**。已改成 `(profile, 变体)` 双分量。
+  >
+  > **锁**：`TableColumnWidthRealMeasureTest`（**正向**，取代前身 `TableBreakerStaysSkiaTest`
+  > 那把守卫型锁——它的 KDoc 本就写明「一旦有人补上真测量，本锁故意失败，那时改写成两侧都跑的正向锁」）
+  > 共 6 把，真测量 4 把（1 真测量 / 2 min-content 连带变真 / 3 无 kern 对文本两侧逐值相等 /
+  > 4 含 kern 对 Latin 偏宽不超 3%）+ 接线 2 把（5 重路径 / 7 轻路径，两把缺一不可）。
+  > **变异表（实测）**：MUT-I 改 `breakerFor` ⇒ 锁 7 红；MUT-J 删覆写 ⇒ 锁 1/2/3/4 红；
+  > MUT-K ×1.05 ⇒ 锁 1/2/3/4 红；MUT-L ×0.95 ⇒ 锁 2/3/4 红。
+  > 锁 5/7 在 MUT-J/K/L 下仍绿是**正确分工**（它们测接线不管测量）。
+  > 下面保留当时的量级数据与「接线时踩到的坑」作为记录。
+
   auto 分列的 min 侧只有一个消费点（`NormalFlowLayout.tableCellPref` → `ParagraphBreaker.minContentWidth`）。
   真机 A/B 查明：13 本语料 49 张表**全部**落在 `autoColumnWidths` 三段式的 `avail >= totalMax` 段，
   该段 `w[i] = pref[i]`，**min-content 一次都没被读过**。故 T2d/T2e 的禁则补表在现实版心下不可观测。
@@ -214,19 +554,21 @@
     表要进插值段需版心 ≲ 0.8× 字号量级；即使挤进去，49 张表里也只有 1 列可观测。
   - **对 S3 的影响**：自建断行器的 R1（长串兜底）价值**不来自 min-content 这条路**，
     表格这条线已整条从 S3 验收判据里划掉。
-  - **【2026-10-01 新增，比上面更要紧】自建侧根本没有真 `preferredWidth`/`minContentWidth`**：
+  - **【历史，2026-10-01 记】自建侧根本没有真 `preferredWidth`/`minContentWidth`**：
     `InhouseParagraphBreaker` 未覆写这两个方法，用的是接口默认桩 `段长 x fontSizePx`
     （接口 KDoc 自称「CJK 精确、拉丁偏宽、永不窄于实需」——**永不窄于实需在表格语境下恰恰是坏事**）。
     实测 fs=44.4 / `STSong,serif`：`preferredWidth` CJK 1.000（汉字 advance 恰好 1em，巧合）、
     Latin **2.49x**、URL **2.09x**、混排 **1.95x**；`minContentWidth` Latin 2.61x / URL 2.03x。
     ⇒ **表格侧的正确解锁顺序是「先补真测量，再谈可观测」**；仅让表格落进插值段（fixed 列宽 /
     指定列宽 / 更多列 / 更窄版心）**不足以**安全切换。此前把这条写成「满足其一即可」是错的，已订正。
-  - **接线时踩到并已修的坑：重路径的表格度量并不走 `tableBreaker`**。
+    **（该前提已于 2026-10-02 解除，见上方销案结论）**
+  - **【历史】接线时踩到并已修的坑：重路径的表格度量并不走 `tableBreaker`**。
     重路径用的是 `NormalFlowLayout.buildTableRows` → `tableCellPref` 里**透传**下来的正文断行器
     （`NormalFlowLayout.kt:746`），所以正文一接线，重路径表格列宽就跟着变体走 —— 与轻路径分叉，
-    且自建侧那个桩会让 Latin 列宽翻倍。已加 `heavyPathBreaker` 把**度量方法**单独钉回 Skia
-    （断行仍走变体），并用 `TableBreakerStaysSkiaTest` 双向钉住（变体开关 + 变异验证）。
-    原则一句话：**变体只该改变行，不该改变列。**
+    且自建侧那个桩会让 Latin 列宽翻倍。当时的处置是加 `heavyPathBreaker` 把**度量方法**单独钉回 Skia
+    （断行仍走变体），并用 `TableBreakerStaysSkiaTest` 双向钉住。
+    当时的原则一句话「**变体只该改变行，不该改变列**」**今天已作废** —— 见上方销案结论 ③：
+    那个原则是靠两处钉扎维持的，而两处钉扎恰恰是分叉的来源；真正的解法是补真测量 + 合实例。
   - **顺带查清的两处缓存陷阱**（不是 bug，但会让人量到假结论）：
     ① `LayoutParamKey` 不含禁则表身份 ⇒ 改断行规则不改 `paramHash`；
     ② `app/build.gradle.kts:18` 的 `versionCode = 20` 是写死常量、非单调递增构建号，

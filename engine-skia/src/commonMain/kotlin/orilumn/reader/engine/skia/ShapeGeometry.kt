@@ -134,6 +134,9 @@ fun shapeGeometry(
         text = text,
         lineRanges = broken.map { it.range },
         lineHeights = imageHeights,
+        // Q20：断词收尾随行搬进 shape（增量/临时页没有 LayoutBox 可读，见
+        // [orilumn.reader.engine.laying.ParagraphShapeRef.shapeLineHyphenAtEnd]）。
+        lineHyphenAtEnd = broken.map { it.hyphenAtEnd },
         listMarker = listMarker,
         alignment = rootStyle.textAlign,
         fontSizePx = rootStyle.fontSizePx.coerceAtLeast(1f),

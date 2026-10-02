@@ -53,8 +53,16 @@ class TableCellLinesTest {
         override val fontRequest get() = ShapeFontRequest(null, emptyList(), 400, false, false)
     }
 
+    /** Q15：格内块序列。纯内联格恒一块（匿名块），故单块构造即旧式「一格一 shape」。 */
     private fun cell(tag: String, text: String, x: Int, w: Int, shape: ParagraphShapeRef?): TableCellLayout =
-        TableCellLayout(MarkupElement(tag), 0, 1, x, w, 20, tag == "th", shape)
+        TableCellLayout(MarkupElement(tag), 0, 1, x, w, 20, tag == "th", blocks(tag, text, shape))
+
+    private fun blocks(tag: String, text: String, shape: ParagraphShapeRef?): List<orilumn.reader.engine.laying.TableCellBlock> =
+        listOf(
+            orilumn.reader.engine.laying.TableCellBlock(
+                MarkupElement(tag), ComputedStyle(10f, 1.5f), text, emptyList(),
+            ).also { it.shape = shape },
+        )
 
     private val style = ComputedStyle(10f, 1.5f)
 
@@ -160,7 +168,18 @@ class TableCellLinesTest {
         val shape = StubShape("￼", listOf(0..0), listOf(40))
         val table = TableRowLayout(
             intArrayOf(0), intArrayOf(300),
-            listOf(TableCellLayout(td, 0, 1, 10, 300, 44, false, shape)),
+            // 行内 `<img>` 留在匿名 run 内（Q15 决定：`<td><img></td>` 是「一块 + 一个 U+FFFC
+            // 占位」，与修复前同式），扫描根 `imageRoot` 是容器 `td`。
+            listOf(
+                TableCellLayout(
+                    td, 0, 1, 10, 300, 44, false,
+                    listOf(
+                        orilumn.reader.engine.laying.TableCellBlock(
+                            td, ComputedStyle(10f, 1.5f), "￼", emptyList(), imageRoot = td,
+                        ).also { it.shape = shape },
+                    ),
+                ),
+            ),
         )
         val loader = orilumn.reader.engine.ImageBoundsReader { _, _ -> 120 to 80 }
         val win = TableCellLines.expand(
@@ -204,9 +223,9 @@ class TableCellLinesTest {
         val top = StubShape("MS", listOf(0..1), listOf(15))
         val bot = StubShape("朝", listOf(0..0), listOf(15))
         fun spanCell(): TableCellLayout =
-            TableCellLayout(MarkupElement("th"), 0, 1, 0, 150, 15, true, span, 2)
-        val row0 = TableRowLayout(intArrayOf(0, 150), intArrayOf(150, 150), listOf(spanCell(), TableCellLayout(MarkupElement("th"), 1, 1, 150, 150, 15, true, top)))
-        val row1 = TableRowLayout(intArrayOf(0, 150), intArrayOf(150, 150), listOf(TableCellLayout(MarkupElement("th"), 1, 1, 150, 150, 15, true, bot)))
+            TableCellLayout(MarkupElement("th"), 0, 1, 0, 150, 15, true, blocks("th", "項目", span), 2)
+        val row0 = TableRowLayout(intArrayOf(0, 150), intArrayOf(150, 150), listOf(spanCell(), TableCellLayout(MarkupElement("th"), 1, 1, 150, 150, 15, true, blocks("th", "MS", top))))
+        val row1 = TableRowLayout(intArrayOf(0, 150), intArrayOf(150, 150), listOf(TableCellLayout(MarkupElement("th"), 1, 1, 150, 150, 15, true, blocks("th", "朝", bot))))
         val tableEl = MarkupElement("table")
         val win = TableCellLines.expandTable(
             listOf(

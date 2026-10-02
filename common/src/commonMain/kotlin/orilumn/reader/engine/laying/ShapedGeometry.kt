@@ -18,6 +18,12 @@ data class ShapedGeometry(
     override val text: String = "",
     val lineRanges: List<IntRange> = emptyList(),
     val lineHeights: List<Int> = emptyList(),
+    /**
+     * **Q20** 与 [lineRanges] 同长同序：该行是否断词收尾（见
+     * [ParagraphShapeRef.shapeLineHyphenAtEnd]）。由 `shapeGeometry` 从断行器的
+     * [BrokenLine.hyphenAtEnd] 直接搬来 —— 断行器已为连字符预留版心，漏传 = 画不出。
+     */
+    val lineHyphenAtEnd: List<Boolean> = emptyList(),
     override val isReplaceable: Boolean = false,
     /** Mutable: the light path's rowspan redistribution resolves table-row heights after shaping. */
     override var replaceableBottom: Int = 0,
@@ -42,6 +48,8 @@ data class ShapedGeometry(
     override fun shapeLineEnd(k: Int): Int = lineEnd(k)
     override fun shapeLineTop(k: Int): Int = lineTop(k)
     override fun shapeLineBottom(k: Int): Int = lineBottom(k)
+    override fun shapeLineHyphenAtEnd(k: Int): Boolean =
+        if (isReplaceable) false else lineHyphenAtEnd.getOrElse(k) { false }
     override val shapeFontSizePx: Float get() = fontSizePx
     override val shapeAlignment: TextAlign get() = alignment
     override val shapeColorRuns: List<ColorRun> get() = colorRuns

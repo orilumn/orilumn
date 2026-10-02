@@ -550,6 +550,14 @@ class SkiaRunMeasurer(
      * 与 CSS 族栈无关 ⇒ 各条规则共用一张，不重复付扫描代价。
      * 遍历侧 [measure] 在 `nPending == 0` 时提前退出，故**只有真正落到保底的码本**才会多走几次批量
      * native 调用，正常文本（首族即覆盖）零成本。
+     *
+     * ⚠ **未销的缺陷（教训 ⑰）**：`universalCache` 是**本类的实例字段**，
+     * 而 `SkiaRunMeasurer()` 在生产路径上是 `GlyphPainter` / `KerningClusterTable` /
+     * `InhouseParagraphBreaker` / `LineAligner` 四处的**默认实参** ⇒ 每个新实例都要重扫一遍
+     * 全部已装族（平板 59 族、每族一次 `matchFamilyStyle` native），而扫出来的结果对所有实例**完全相同**。
+     * 平板实测一次运行 39 秒内至少新建 **214 个实例**（按已删诊断 `logUniversalTableOnce` 那 641 行折算）。
+     * **正确的作用域是进程级**（与 `systemFallbackCollection` 同一个模式），
+     * 未改是因为还没量化收益/边界，先记账。
      */
     private fun universalTypefaces(
         monospace: Boolean,
@@ -581,100 +589,8 @@ class SkiaRunMeasurer(
         }
         val arr = out.toTypedArray()
         synchronized(lock) { universalCache[key] = arr }
-        logUniversalTableOnce(key, arr, mgrs)
         return arr
     }
-
-    /**
-     * 诊断日志（渲染层·字体解析）：**每个保底桶只打一条**。
-     *
-     * 存在的理由：JVM 宿主的已装字体集和真机不同（宿主 326 族 / 平板 63 族），
-     * 锁在 JVM 上绿**证明不了**平板上保底真能命中。真机只能看落盘日志。
-     *
-     * ## 为什么要额外判「字形是不是真的」
-     *
-     * 整套保底的判据是 `getUTF32Glyph(cp) != 0`。这条判据**默认等价于「这张面有真字形」**，
-     * 但那是个**假设**：某些宿主（Android 的 `sans-serif` 别名会把系统回退链一起带进来）
-     * 可能对缺失码本也回一个非零 glyph id。若那条假设不成立，兜底就会
-     * 「成功地选中一张画出来仍是豆腐块的面」——**比不兜底更坏，因为它把缺陷藏起来了**。
-     *
-     * 所以诊断里额外做一次**可判定的反证**：看解出字形的路径**是不是一个矩形**
-     * （[Path.isRect]）以及**有多少轮廓**（[Path.verbsCount]）。
-     *
-     * ## 判据为什么不是「和 .notdef 逐字节比」，也不是「纯数轮廓」
-     *
-     * 「逐字节比」**实测无效**：`.notdef` 在 macOS 与 Android 上经 skiko 取到的都是**空路径**，
-     * 于是「解出的路径 == .notdef 路径」对**任何空字形**都成立 —— NBSP/空格这种
-     * **合法空白**（零轮廓是正确画法）被误报成豆腐块，判据在两个宿主上都给不出可用信号。
-     *
-     * 「纯数轮廓」**会误报框线字符**：框线（`─ │ ├ └`）天生只有 6–8 个轮廓，
-     * 与豆腐块（空心矩形 = 8）区间重叠。平板实测第一版把 `─ │ └` 全判成「豆腐块?」——
-     * 而这三个正是 Rust 书代码块树形图里最要紧的字符。
-     *
-     * ⇒ 判据是 **[Path.isRect] 优先，轮廓数只作辅助分档**（真字形 / 简单几何 / 空白）。
-     */
-    private fun logUniversalTableOnce(key: UniversalKey, arr: Array<Typeface>, mgrs: List<FontMgr>) {
-        val tag = "mono=${key.monospace},w=${key.weight},sl=${key.slant}"
-        if (!universalLogged.add(tag)) return
-        val installed = mgrs.sumOf { runCatching { it.familiesCount }.getOrDefault(0) }
-        var tofu = 0
-        val probes = DIAG_CANDIDATES.mapNotNull { cp ->
-            val tf = arr.firstOrNull { Font(it, 16f).getUTF32Glyph(cp) != NOTDEF } ?: return@mapNotNull null
-            val font = Font(tf, 16f)
-            val gid = font.getUTF32Glyph(cp)
-            val path = runCatching { font.getPath(gid) }.getOrNull()
-            val verbs = path?.verbsCount ?: -1
-            val verdict = when {
-                verbs < 0 -> "路径取不到"
-                verbs == 0 -> "空白"
-                // .notdef 的典型画法是**矩形**（有的字体画实心、有的画空心两圈）。
-                // `isRect()!=null` 是「这就是个方块」的直接证据，比数轮廓准。
-                isBoxShaped(path, verbs) -> "豆腐块"
-                verbs <= SimpleGeometryVerbCeiling -> "简单几何"
-                else -> "真字形"
-            }
-            if (verdict == "豆腐块") tofu++
-            "U+%04X→%s#%d/v%d/%s".format(cp, tf.familyName, gid, verbs, verdict)
-        }
-        Logger.d(
-            "Orilumn.FACE",
-            "universal mono=${key.monospace} w=${key.weight} sl=${key.slant} " +
-                "installed=$installed faces=${arr.size} 探针可解 ${probes.size}/${DIAG_CANDIDATES.size} " +
-                "其中豆腐块=$tofu " + probes.joinToString(" "),
-        )
-    }
-
-
-    /**
-     * 这个字形**是不是一个方块**（.notdef 的典型画法）。
-     *
-     * ## 为什么不直接用 `Path.isRect`
-     *
-     * 想用，但 skiko 的 `isRect` 在 Kotlin 侧解析不到（`path.isRect()` 会被绑到
-     * `DeepRecursiveFunction`，`isRect(Rect())` 也不匹配）—— 属于库元数据问题，
-     * 为一条诊断去绕开不值得。改用**纯几何**判据：`Path.bounds` 是无参 getter，稳。
-     *
-     * 判据：豆腐块是**近似正方形**的实心/空心方块；框线字符是**细长条**
-     * （`─` 宽高比 ≈16、`│` ≈0.06），两者用宽高比就分得开。
-     */
-    private fun isBoxShaped(path: org.jetbrains.skia.Path?, verbs: Int): Boolean {
-        if (path == null || verbs <= 0) return false
-        val b = runCatching { path.bounds }.getOrNull() ?: return false
-        val w = b.width
-        val h = b.height
-        if (w <= 0f || h <= 0f) return false
-        val ratio = maxOf(w, h) / minOf(w, h)
-        // 正方形（宽高比≈1）且轮廓数落在 .notdef 的典型区间 ⇒ 判为方块
-        return ratio < BoxAspectTolerance && verbs <= BoxVerbCeiling
-    }
-
-    /** 诊断探针码本：真书代码块里真实出现过的「族栈解不出」的字符 + 常用 CJK/全角/生僻字。 */
-    private val DIAG_CANDIDATES = listOf(
-        0x00A0, 0x2500, 0x2502, 0x251C, 0x2514, // NBSP + 框线（真书 cargo 语料）
-        0x4E2D, 0x6587, 0x3042, 0x30A2, 0xAC00, // 中 日 ア ア 한글
-        0xFF21, 0xFF41, 0x0E01, 0x1F600, 0x03B2,
-    )
-
 
     /**
      * 诊断（渲染层·字体解析）：记下**连保底表都解不出**的码本。
@@ -704,29 +620,6 @@ class SkiaRunMeasurer(
 
     /** 无字体码本的记录上限（防止生僻字多的书把日志刷爆）。 */
     private val UNRESOLVABLE_LOG_CAP = 40
-
-    /** 每个保底桶只打一条诊断（key = "mono,w,sl"）。 */
-    private val universalLogged = HashSet<String>()
-
-    /**
-     * 轮廓数 ≤ 此值 ⇒ 判为「简单几何」，**不是缺陷**。
-     *
-     * 框线字符（`─ │ ├ └ ┌`）**天生就只 contours 个轮廓** —— 一条线而已。
-     * 平板实测 `─`=6、`│`=6、`└`=8，而豆腐块（空心矩形）=8。
-     * **两者区间重叠，所以只靠数轮廓分不开**；第一版用「≤8 即豆腐块」的阈值
-     * 把 `─ │ └` 全误报了 —— 而这三个恰恰是 Rust 书代码块树形图里最要紧的字符，
-     * 诊断对着它们哭狼獴等于这个诊断没有用。
-     *
-     * 真正的判据是 [Path.isRect]：`.notdef` 的典型画法就是**一个方块**。
-     * 框线不是矩形（是细长条 + 分叉），天然被分到「简单几何」或「真字形」。
-     */
-    private val SimpleGeometryVerbCeiling = 8
-
-    /** 判「方块」的宽高比上限：豆腐块近似正方形，框线是细长条（`─`≈16、`│`≈0.06）。 */
-    private val BoxAspectTolerance = 1.6f
-
-    /** 判「方块」的轮廓数上限：.notdef 典型画法是空心矩形（两圈各 4 段 = 8）。 */
-    private val BoxVerbCeiling = 12
 
     /** 保底表缓存键：**刻意不含字号** —— 见 [universalTypefaces] 的踩坑记录。 */
     private data class UniversalKey(val monospace: Boolean, val weight: Int, val slant: Int)

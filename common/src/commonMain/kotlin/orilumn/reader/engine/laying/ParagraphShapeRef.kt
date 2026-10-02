@@ -30,6 +30,19 @@ interface ParagraphShapeRef {
     fun shapeLineTop(k: Int): Int
     /** Y bottom of line [k] in the shape's own coordinates. */
     fun shapeLineBottom(k: Int): Int
+    /**
+     * **Q20**：行 [k] 是否断词收尾（行尾要补一个
+     * [orilumn.reader.engine.laying.HYPHEN_GLYPH]）。断行器已为它预留版心，绘制侧漏读 ⇒
+     * `LineAligner.hyphenW == 0` ⇒ `LineWindowDrawer` 整块跳过 ⇒ 连字符画不出来。
+     *
+     * 为什么挂在 shape 上而不只挂 [LayoutBox.hyphenAtEnd]：canonical 走盒流
+     * （`DrawLineBuilder` 不塑形，只有 `LayoutBox.hyphenAtEnd`），增量/临时页走塑形
+     * （`BoxChapterLayouter.buildPartialSkiaWindow` 手里只有 shape）。两路同断行器同宽，
+     * 值逐项一致（`SkiaDrawLineWindowCoherenceTest` 同行锁 range + 连字符位）。
+     *
+     * 默认 false = 无断词行（哑实现/替换块/旧桩零改动）。
+     */
+    fun shapeLineHyphenAtEnd(k: Int): Boolean = false
     /** Block font size (draw paint size; ≤0 when absent — caller falls back to the cell style). */
     val shapeFontSizePx: Float
     /** Block alignment (the cell style's `text-align` the shape was broken with). */

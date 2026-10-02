@@ -162,18 +162,24 @@ object AbSwitch {
      * 正因为变体进了 `paramHash`，**这次接线不需要 bump `LAYOUT_VERSION`** ——
      * 键已能精确区分两侧，两侧各自独立缓存、回退时能各自命中自己那份。
      *
-     * ## 表格侧不在本开关内（TODO Q6）—— 但**不只**因为 `tableBreaker` 恒为 Skia
+     * ## 表格侧**也在**本开关内了（2026-10-02，TODO Q6 消解）
      *
-     * 轻路径侧的 `BoxChapterLayouter.tableBreaker` 确实是恒 Skia，且 13 本语料 49 张表全落在
-     * auto 分列三段式的 `avail>=totalMax` 段、min-content 一次都没被读过（§T2f）。
+     * 接线期表格被刻意隔离在本开关外，靠两处钉扎：轻路径 `BoxChapterLayouter.tableBreaker`
+     * 恒 Skia，重路径用 `engine-skia` 的 `heavyPathBreaker` 把**度量方法**钉回 Skia。
+     * 隔离的理由有两条，现在**两条都不成立**：
      *
-     * 但**重路径原本并没有被隔离**：表格 auto 分列在重路径里用的是
-     * `NormalFlowLayout.buildTableRows` → `tableCellPref` 里那个**透传**下来的断行器
-     * （`NormalFlowLayout.kt:746`），也就是正文那个。正文一接线，重路径表格列宽就跟着本开关走，
-     * 与轻路径分叉；而自建侧 `preferredWidth` 仍是接口默认的 `段长 x fontSizePx` 桩
-     * （实测 Latin/URL 高估 2.0~2.6 倍），列宽经 `w[i]=pref[i]` 直通 ⇒ Latin 列宽翻倍。
-     * 故接线必须额外用 `engine-skia` 的 `heavyPathBreaker` 把**度量方法**钉回 Skia，
-     * 只让**断行**跟着开关走。见该函数 KDoc 与 `TableBreakerStaysSkiaTest`。
+     * - ~~「重路径本来没被隔离」~~ —— 属实，且这正是当初必须补钉扎的原因：
+     *   表格 auto 分列在重路径里用的是 `NormalFlowLayout.buildTableRows` → `tableCellPref`
+     *   里那个**透传**下来的正文断行器（`NormalFlowLayout.kt:746`），正文一接线列宽就跟着本开关走。
+     * - ~~「自建侧 `preferredWidth` 是桩，会让 Latin 列宽翻倍」~~ —— 已解除：
+     *   `InhouseParagraphBreaker.preferredWidth` 现接 `SkiaRunMeasurer.naturalWidth`
+     *   （与断行同一个 `advances` 单源）。实测两侧差 fs=16/44.4：CJK / URL / code / 混排
+     *   **0.0000%**，含 kern 对的 Latin **+1.104%**，方向永不反向。
+     *
+     * ⇒ 两处钉扎一并删除，`bodyParagraphBreaker` 成为**唯一**断行器口；
+     * `BoxChapterLayouter.breakerFor`（缓存键 `(profile, 变体)`）把重路径 `BoxLayouter`
+     * 与轻路径 `LightPrepare`（表格测宽）**接到同一个实例**上。
+     * 锁见 `TableColumnWidthRealMeasureTest`（重路径/轻路径各一把，缺一不可）。
      *
      * ## 已知未验证项（默认 on 之后这些都进了生产面）
      *

@@ -119,6 +119,47 @@ class InhouseParagraphBreaker(
         const val OPP_HISTORY = 4
     }
 
+    /**
+     * max-content 宽（px）—— **Q6：表格 auto 分列的列宽量真测量**（本类曾无覆写，落回接口
+     * 默认桩 `text.length * fontSizePx`，实测 Latin 2.49x / URL 2.09x，于是两侧列宽被迫钉回 Skia）。
+     *
+     * ## 为什么是 [SkiaRunMeasurer.naturalWidth] 而不是「再排一遍」
+     *
+     * max-content 的定义是「**不折行**时的整段宽」，而本类的 [breakLines] 在 [widthPx] 内必然折行，
+     * 拿它量等于把「排版结果」当「内容固有宽度」，是另一个量。
+     * [SkiaRunMeasurer.naturalWidth] 走的是**与断行完全相同的 `advances` 单源**（逐码本 × 逐字形回退），
+     * 差别只是**不施加版心宽、不找断点** —— 即「同一批字形宽，加起来」。
+     * ⇒ 因此本方法与 [breakLines] **量源同源**，不存在「量宽走一条、排版走另一条」的分叉。
+     *
+     * ## `tag` 传 `null` 而不是原样传下去
+     *
+     * 与 [SkiaParagraphBreaker.preferredWidth] 同口径（那里 `paragraphStyle(..., tag = null, ...)`）。
+     * 表格格子的 `mono` 已由调用方 `NormalFlowLayout.tableCellPref` 算成
+     * `style.monospace || tag == "pre"` 并**显式传进 `monospace` 形参**，
+     * 此处再按 `tag` 二次判定会让 `pre` 格被重复施加。
+     *
+     * ## 与 Skia 侧不可避免的差：整形 vs 不整形
+     *
+     * Skia 侧走 HarfBuzz（有 kern / liga），本方法走裸 cmap ⇒ 本方法**永不窄于** Skia 侧
+     * （整形缺口全为负，见 `docs/TODO-未尽事宜.md` Q5）。差值量级由
+     * `TableColumnWidthRealMeasureTest` 钉住（Latin 每万字符 25–32 处 kern，最大 −3.52px @ Times New Roman）。
+     * 方向是**偏宽**，符合 [ParagraphBreaker.preferredWidth] 契约里「永不窄于实需」那一句。
+     */
+    override fun preferredWidth(
+        text: CharSequence,
+        fontSizePx: Float,
+        families: List<String>,
+        weight: Int,
+        italic: Boolean,
+        monospace: Boolean,
+        fontRuns: List<FontRun>,
+    ): Float {
+        if (text.isEmpty()) return 0f
+        return measurer.naturalWidth(
+            text, fontSizePx, letterSpacingEm, null, families, weight, italic, monospace, fontRuns,
+        )
+    }
+
     override fun breakLines(
         text: CharSequence,
         fontSizePx: Float,

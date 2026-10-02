@@ -39,8 +39,8 @@ class SkiaDrawLineWindowCoherenceTest {
 
     private fun profile() = TypographicProfile.build(ReaderSettings.DEFAULT)
 
-    private fun prepare(html: String, css: String): ChapterPrepareResult =
-        layouter.prepare(converter.convert(html) ?: error("chapter parse failed"), CssBundle(listOf(css)), profile(), contentW, contentH)
+    private fun prepare(html: String, css: String, width: Int = contentW): ChapterPrepareResult =
+        layouter.prepare(converter.convert(html) ?: error("chapter parse failed"), CssBundle(listOf(css)), profile(), width, contentH)
 
     @Test
     fun skiaWindowMatchesLeafGeometry() {
@@ -212,6 +212,85 @@ class SkiaDrawLineWindowCoherenceTest {
             assertEquals("$i yTop(rel)", canCells[i].yTop - canBase, incCells[i].yTop - incBase)
             assertEquals("$i height", canCells[i].yBottom - canCells[i].yTop, incCells[i].yBottom - incCells[i].yTop)
         }
+    }
+
+    /**
+     * **Q20②**：断词行尾的连字符标志在 canonical ↔ 增量（disk-hit）↔ 临时（temp）三路**逐行一致**，
+     * 且语料+版心真的逼出断词行（否则这把锁验的是空气）。
+     *
+     * ## 缺陷本体（用户真机报「断词行尾连字符画不出来」）
+     *
+     * `BoxChapterLayouter.buildPartialSkiaWindow` 构造 [DrawLine] 时**漏传**断词收尾标志 ⇒ 取默认
+     * `false` ⇒ `LineAligner.place` 的 `hyphenW == 0f` ⇒ `LineWindowDrawer` 整块跳过 ⇒ 增量/临时页
+     * 的断词行尾画不出连字符（canonical 页正常：`DrawLineBuilder` 传了 `leaf.hyphenAtEnd`）。
+     * 三个 `DrawLine` 构造点本轮一次补齐：`DrawLineBuilder`、本方法、`TableCellLines.emitCell`。
+     *
+     * 标志由**断行器**产出、断行侧已为它预留版心，两路同断行器同宽 ⇒ 值逐项一致（与
+     * [orilumn.reader.engine.laying.ParagraphShapeRef.shapeLineHyphenAtEnd] 的口径相同：
+     * canonical 无 shape 可读，只有盒流的 `LayoutBox.hyphenAtEnd`）。
+     *
+     * 变异验证：[orilumn.reader.engine.laying.ParagraphShapeRef.shapeLineHyphenAtEnd] 改回恒
+     * `false` ⇒ 增量/临时两路 `hyphenAtEnd` 全为 false ⇒ 本锁红。
+     */
+    @Test
+    fun hyphenAtEndFlagIsCarriedByIncrementalAndTempWindows() {
+        val css = "html{font-size:18px} body{font-family:serif;font-size:0.95rem} p{text-align:justify}"
+        // 语料必须是**长拉丁词连续成句**：短词 K-L 无断点、中文逐字可断，两种都逼不出断词。
+        val html = """
+            <html><body>
+              <p>the configuration of dependencies is written in the manifest of every single crate</p>
+              <p>when the compilation extraordinarily succeeds the implementation is unquestionably correct</p>
+              <p>an implementation of the interoperability requires understanding the characteristics</p>
+            </body></html>
+        """.trimIndent()
+        val prof = profile()
+        // 版心逐个试：宽版心下断行器不必断词（整词放得下），窄版心才逼出断词行。逐档都比，
+        // 免得锁挂在「某一个恰好能断词的宽度」上。
+        var totalCan = 0
+        var checked = 0
+        for (w in listOf(180, 240, 300, 380, 460, 560)) {
+            // 每档重新解析：canonical `prepare` 与增量 `prepareLight` 各自持有样式/盒缓存，
+            // 共用一棵 MarkupElement 会让两路互相污染（这正是 Q15 变异验证里踩过的形态）。
+            val canonical = layouter.fullLayout(
+                prepare(html, css, w), prof, w, contentH,
+            )
+            val canWindow = (canonical.layout as orilumn.reader.engine.skia.PagedLayout).skiaLineWindow()!!
+            val light = layouter.prepareLight(
+                converter.convert(html) ?: error("chapter parse failed"),
+                CssBundle(listOf(css)), prof, w, orilumn.reader.engine.ChapterStructureCache(), contentH,
+            )
+            val table = ChapterPaginationTable.fromSlices(0, 1L, canonical.slices, light.totalBlocks, light.totalChars)
+            val incWindow = (layouter.incrementalLayoutForPage(light, prof, w, contentH, table, 0, pagesToShape = 4)
+                .layout as orilumn.reader.engine.skia.PagedLayout).skiaLineWindow()!!
+            val fwd = layouter.shapeTempPageForward(light, prof, w, contentH, 0, cache = null)
+                ?: error("temp fwd page failed at w=$w")
+            val tempWindow = (fwd.page.layout as orilumn.reader.engine.skia.PagedLayout).skiaLineWindow()!!
+
+            val canHyphens = canWindow.values.count { it.hyphenAtEnd }
+            totalCan += canHyphens
+            if (canHyphens > 0) {
+                val incHyphens = incWindow.values.count { it.hyphenAtEnd }
+                assertTrue(
+                    "w=$w 增量窗漏传断词标志 ⇒ 连字符画不出来（canon=$canHyphens incr=$incHyphens）",
+                    incHyphens > 0,
+                )
+                assertTrue(
+                    "w=$w 临时窗漏传断词标志 ⇒ 连字符画不出来（canon=$canHyphens temp=${tempWindow.values.count { it.hyphenAtEnd }}）",
+                    tempWindow.values.any { it.hyphenAtEnd },
+                )
+            }
+            // 逐行一致：第 0 页 ⇒ 三窗行键同坐标系，共有的行标志/区间/文本必须相同。
+            assertTrue("w=$w 增量窗必须非空", incWindow.isNotEmpty())
+            for ((g, dl) in incWindow) {
+                val c = canWindow[g] ?: continue
+                assertEquals("w=$w $g range", c.range, dl.range)
+                assertEquals("w=$w $g text", c.text, dl.text)
+                assertEquals("w=$w $g hyphenAtEnd", c.hyphenAtEnd, dl.hyphenAtEnd)
+                checked++
+            }
+        }
+        assertTrue("语料+版心必须真的逼出断词行，否则这把锁验的是空气（canon=$totalCan）", totalCan > 0)
+        assertTrue("可比行太少（compared=$checked），验不到错位", checked >= 6)
     }
 
     /** 断言：每个已塑形切片内的每一行都在窗口里，且几何/range 与 drawable 行流一致。 */

@@ -33,7 +33,7 @@ import orilumn.reader.engine.laying.NormalFlowLayout
  * 在测试里重写生产接线（改 `:177` 照样绿）、语料用汉字换面段（advance 在任何字族都是 1em，
  * 丢掉 `fontRuns` 测不出来）。推理在这件事上不可信。
  *
- * 判据：**同一份 HTML × 多个版心**，回退接线（`heavyPathBreaker`，`inhouseBreak=0`）
+ * 判据：**同一份 HTML × 多个版心**，回退接线（`bodyParagraphBreaker`，`inhouseBreak=0`）
  * 与接线前的裸 `SkiaParagraphBreaker` 产出的断行区间、绘制行、表格列宽**逐值相同**。
  */
 class DefaultSideIsUnchangedTest {
@@ -121,7 +121,7 @@ class DefaultSideIsUnchangedTest {
         }
     }
 
-    /** 与 [autoColumnMeasurePinnedToSkia] 同形的转发包装，但**故意丢掉 `fontRuns`**，用作敏感度基准。 */
+    /** 与 原 `autoColumnMeasurePinnedToSkia` 同形的转发包装，但**故意丢掉 `fontRuns`**，用作敏感度基准。 */
     private fun fontRunsStripped(inner: orilumn.reader.engine.laying.ParagraphBreaker) =
         object : orilumn.reader.engine.laying.ParagraphBreaker {
             override fun preferredWidth(
@@ -171,7 +171,7 @@ class DefaultSideIsUnchangedTest {
                 bodyParagraphBreaker(0f)::class.java,
             )
             val before = SkiaParagraphBreaker(0f)
-            val after = heavyPathBreaker(0f)
+            val after = bodyParagraphBreaker(0f)
             for (html in listOf(bodyHtml, tableHtml)) {
                 for (w in intArrayOf(220, 320, 400, 560, 700, 900, 1200, 1600, 1740)) {
                     assertEquals(

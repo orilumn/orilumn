@@ -663,3 +663,193 @@ longer first-line-indented.
 **Verification.** 全量 `./gradlew jvmTest test` = 1281 条 / 1 红（唯一红是已登记的 Q12
 `CrossChapterPreflightProbeTest`，与本次无关）。装机后真机确认「已经显示出来了」；
 日志 0 异常、无孤立代理残留、`无字体的码本 U+1F44D` 不再出现。诊断用的族名转储与「可疑取面」探针**跑完即删**。
+
+**同轮遗留的第二个探针也在这之后删了（2026-10-02）。** `logUniversalTableOnce`
+（`SkiaRunMeasurer` 内的保底表诊断）的取证目的已达成，随探针删除，
+其结论与「豆腐块判据连试四遍都不可用」的全过程落在
+`自建断行引擎-测试计划.md` §教训 ⑯（**否定结论**）。平板实测：
+保底表 `installed=59 faces=39`，15 个诊断码本 13 个可解，解不出的是 `U+0E01`（泰文）与 `U+1F600`（emoji），
+分档 真字形 9 / 简单几何 2 / 空白 1 / **豆腐块 1 = `└` 假阳性** ⇒ **未检出任何真豆腐块**。
+删它的直接原因是一次运行 **39 秒打出 641 行**（门是每实例的 `HashSet`，见 §教训 ⑰；该次运行日志总行 932 行，探针占 69%），
+而它写在排版热路径上。`logUnresolvableCp` **保留** —— 「设备真的没装这个字体」对用户可行动。
+
+**装机复核**：重装后同一场景 `Orilumn.FACE` **0 行**、异常 0、分页正常（`SPIKE`/`DISK`/`TEMP`/`TAP` 照常）。
+
+**同处还记下一笔未销的缺陷**：`universalCache` 与被删的 `universalLogged` 一样是 `SkiaRunMeasurer` 的**实例字段**，
+而该类在生产路径上是四处**默认实参** ⇒ 每个新实例都重扫全部 59 个已装族。按那 641 行折算，
+**39 秒内至少新建 214 个实例** = 至少 214 次结果完全相同的全量重扫。正确作用域是进程级
+（与 `systemFallbackCollection` 同模式）。**本次不动它** —— 收益未量化，且要确认「已装字体集」在运行期是否真不变
+（热插字体/换字体配置会让进程级缓存变陈旧，而每实例缓存天然规避了这一点）。已在 `universalTypefaces` 的 KDoc 上标注。
+
+## 2026-10-02 — 表格侧度量交给自建断行器（TODO Q6 销案）+ Q5（kerning）销案
+
+**Q6 是什么.** 表格 auto 分列的**列宽**原本被刻意隔离在 Skia 侧，靠两处钉扎维持：
+轻路径 `BoxChapterLayouter.tableBreaker` 恒 Skia，重路径 `engine-skia` 的 `heavyPathBreaker`
+（`autoColumnMeasurePinnedToSkia`）把 `preferredWidth`/`minContentWidth` 单独钉回 Skia。
+理由是自建侧 `preferredWidth` 只是接口默认桩 `段长 x fontSizePx`（实测 Latin/URL 高估 2.0–2.6 倍，
+而列宽经 `autoColumnLayout` 的 `avail>=totalMax` 段 `w[i]=pref[i]` **直通**，无处夹取）。
+
+**解法：一个方法 + 一个实例.**
+
+- `InhouseParagraphBreaker` 补 `preferredWidth` 覆写 → `SkiaRunMeasurer.naturalWidth`
+  （与断行**同一个 `advances` 单源**，只差「不施加版心宽、不找断点」）。
+- `minContentWidth` **一个字都没写**：接口默认实现本身就是「按 `minContentSegments` 切段后
+  逐段调 `preferredWidth` 取最大」，随上一条自动变真。
+- 两处钉扎**一并删除**（`BodyParagraphBreaker.kt` 135→56 行），`bodyParagraphBreaker` 成为唯一断行器口。
+- 新增 `BoxChapterLayouter.breakerFor`：重路径 `BoxLayouter` 与轻路径 `LightPrepare`（表格测宽）
+  **共用同一个实例**，缓存键 `(profile, 变体)`。净 **+212 / −311**。
+
+**实测两侧差**（fs=16 与 44.4，`STSong,serif`，同宿主对照）:
+
+| 文本类别 | 差 |
+| --- | --- |
+| CJK / URL / code / 混排 / 无 kern 对的 Latin | **0.0000%** |
+| `Office of the Future`、`AVATAR Wayfinding WA` | **+1.104% / +0.838%**（恒为一个 kern 对的像素量：1.44px@16、3.996px@44.4，比值 2.775 = 44.4/16） |
+| min-content（Latin 37 字） | **0.0000%**（181.6404 逐值相等） |
+
+方向**永不反向**（整形缺口全为负，见 Q5），符合 `preferredWidth` 契约「永不窄于实需」。
+原台账里的「桩高估 Latin **2.49x**」—— 那 2.49 倍**全是桩的错**，真测量只差 ~1%。
+
+**拆钉扎时抓到的两个真 bug（都不是预演出来的）.**
+
+1. **两处钉扎本身是缺陷的温床。** 表格测宽在轻路径 `LightPrepare` 里消费，重路径压根不经过它 ⇒
+   「维持重轻一致」的两处钉扎里，**改轻路径那一处永远测不到**：变异 MUT-I（把生产侧断行器来源
+   改回 `SkiaParagraphBreaker`）连跑**两轮 BUILD SUCCESSFUL**，是假绿锁形态⑤（锁压根没碰那条路径）。
+   ⇒ 解法不是加更严的锁，是**结构上收成单源**。⚠️ 这份锁的 KDoc 里**已经写着**这条错误，
+   照抄一遍又踩 —— **写在文档里的教训不会自动生效，只有当场变异验证会**（新教训 ⑮）。
+2. **`breakerFor` 缓存键漏了变体。** 只按 `profile` 缓存，而实例的**类**由 `AbSwitch.inhouseBreak()`
+   决定，且 `BoxChapterLayouter` 寿命是**整本书**、跨多次排版参数变更 ⇒ 拨开关后仍按 profile 命中缓存、
+   继续发旧变体 ⇒ **回退阀在缓存命中时静默失效**（且 `paramHash` 变了会重排、重排却拿到同一套断行器）。
+   这是教训 ⑩ 的第三种翻法：**键的分量不只看「昂贵那步的输入」，还要看「产出对象的身份由谁决定」。**
+   由新加的**轻路径**锁当场抓出 —— 绕过去测的锁连这个 bug 都看不见（两侧同样绕过，一样相等）。
+
+**Tests.** `TableColumnWidthRealMeasureTest`（**正向**，6 把，取代 `TableBreakerStaysSkiaTest` 那 2 把
+守卫锁 —— 后者 KDoc 本就写明「一旦有人补上真测量，本锁故意失败，届时改写成两侧都跑的正向锁」）。
+真测量 4 把（真测量 / min-content 连带变真 / 无 kern 对文本两侧逐值相等 / 含 kern 对 Latin 偏宽不超 3%）
++ 接线 2 把（重路径 / 轻路径，**缺一不可**）。变异表（实测）:
+
+| 变异 | 结果 |
+| --- | --- |
+| MUT-I 改 `breakerFor` | 锁 7 红（锁 5 绿——它不走 `BoxChapterLayouter`） |
+| MUT-J 删 `preferredWidth` 覆写 | 锁 1/2/3/4 红 |
+| MUT-K `naturalWidth` ×1.05 | 锁 1/2/3/4 红 |
+| MUT-L `naturalWidth` ×0.95 | 锁 2/3/4 红（**锁 1 不红**——它不测方向） |
+
+锁 5/7 在 MUT-J/K/L 下仍绿是**正确分工**（测接线不管测量）；MUT-I 只红锁 7 说明两把真在看两条不同的路。
+
+**顺带作废一条原则.** 「变体只该改变行，不该改变列」**作废** —— 它当初是用「把列宽钉回另一套实现」
+维持的，而**那两处钉扎正是重轻分叉的真正来源**；现在一致性由「重轻共用同一个实例」保证。
+
+**Q5（kerning / 连字）销案.** `KerningClusterTable` **本身就是解法**，不是「自建侧没接管的缺口」：
+kerning/连字信息只存在于字体 GPOS/GSUB，取它必须有 shaper，而 `SkiaRunMeasurer` 刻意
+「逐码本量宽、不整形」是 S2 冻结契约 ⇒ 有意分工「**量宽不整形 + 落墨现算簇位**」。
+判据不是「自建要接管整形」，而是「**取簇位必须同源**」（`GraftKerningOntoTest` 钉住）。
+成本：`needsClusters` 先判 `isLatinish`，纯 CJK 行**不建 Paragraph**（零行为变化）。
+
+**Verification.** 全量 `./gradlew jvmTest test` = **1285 条 / 1 红 / 1 跳过**
+（唯一红仍是已登记的 Q12 `CrossChapterPreflightProbeTest`；唯一跳过是
+`GlyphFallbackFaceTest` 锁 7，macOS 上枚举表够得到 ⇒ 空断言，牙齿在真机）。
+⚠️ **未做真机验证**：Latin 表格列宽会宽约 1%（CJK 逐值不变），值得装机过一眼表格。
+
+---
+
+## 2026-10-02 — 真机报缺陷的排查轮：5 条确诊，0 条销案（Q15–Q19 新登记）
+
+用户一次报来 4 条 + GIMP 表格 1 条。**全部走「实测钉死，不推测」**，探针跑完即删（结论先落纸）。
+**本轮没有改动任何生产代码** —— 5 条都还卡在「要先定规格」那一步。
+
+| 编号 | 症状 | 根因（层） | 状态 |
+| --- | --- | --- | --- |
+| Q15 | GIMP 手册表格「显示不出来」 | `StyledText.kt:107` 对块级子节点 `isBlock(c) -> Unit` ⇒ **`<td><p>…</p></td>` 整格文本为空**（排版层·上） | 确诊，**已修**（见「第二批」） |
+| Q16 | `pre code` 空行全没了 | 断行器**两侧都丢**空行（自建 `greedy` 行首 `'\n'` 跳过 + Skia 侧 `if (e > s)`）⇒ **回退阀也修不好**（排版层·上） | 确诊，未修 |
+| Q17 | 中英之间空白怎么处理的 | **什么都没做**；`CjkLatinSpacing` 是死代码；「盒边界」在这条链路上不存在（`<code>` 不是盒，只是 `FontRun` 区间） | 已回答 |
+| Q18 | `wrap(断行)ping_add` 断行优先级 | **先压缩空白再断行**；断在字母中间是**英语音节断词**把 `wrapping` 断成 `wrap-`+`ping`，而 `_` 断点因「判据看叶块 tag」没注入（分行控制） | 确诊，未修 |
+| Q19 | 标题看不出粗 + 选粗细对标题无效 | `anchoredWeight` 第一行 `if (italic \|\| weight != 400) return` ⇒ 对 h1–h6 的 700 **恒不触发**；且**全仓无合成粗体**（渲染层） | 确诊，未修 |
+| **Q20** | **断词行尾没有连字符**（用户指「上次发现过、没彻底解决」） | `DrawLine` 有**三个**构造点，上次只修了 canonical 那一个：**增量路径 `BoxChapterLayouter:797` 与表格格 `TableCellLines:172` 都没传 `hyphenAtEnd`** ⇒ 取默认 `false` ⇒ `placement.hyphenWidth==0` ⇒ 落墨整块跳过 | 确诊，**已修**（见「第二批」） |
+
+### Q15 的影响面是本轮最重的一条
+
+GIMP 只是用户点名的书。扫平板书库 7 本有表格的书，`<td>` 内以块级标签开头的占比：
+
+| 书 | 块级包裹 `td` / 总 `td` |
+| --- | --- |
+| `book_1790742729435`（Rust 程序设计 第2版） | 908 / 987 = **92%** |
+| `book_1790742665434` | 1058 / 1170 = **90%** |
+| `book_1790742662856`（GIMP 3.0 用户手册） | 591 / 1249 = 47% |
+| `book_1790742718646` | 1 / 10 |
+| 其余 3 本 | 0（安全） |
+
+⇒ 设备书库合计 **2558 / 4309（59.4%）个单元格不可见**（GIMP 539 张表每张的正文格都丢）。
+且这**与 Q6 无关**：探针用旧桩与新真测量各跑一遍
+`tableCellPref` + `autoColumnLayout`，列宽 `[25, 32]` **逐值相同**（两条理由见 TODO Q15）。
+**为什么既有测试没抓到**：`TableFamilyTest` 与本轮新加的 `TableColumnWidthRealMeasureTest` 用的
+全是**裸文本单元格**，没有一个带 `<p>` ⇒ 合成形状把最常见的形态整个漏掉。
+
+### 两处「探针自己写错判据」的假红（新教训 ⑱）
+
+查 Q18 时同一段代码连栽两次，**两次都是探针的影子判据错、不是生产错**，而且两次方向相反：
+① 用 `isBreakOpportunity`（**只有 ZH_EN**）判「非法断点」，而断行器实际喂 `sourcesFor(tag)`
+（含**英语断词**）⇒ 误报 `非法断点=1`，差一步就把一条 KDoc 已写明规则的**正确行为**
+记成「引擎非法硬切」并照着改生产代码；
+② `(marked.filter { code(it) } - marked.toSet())` 值域恒为 ∅（集合运算写错）⇒ 漏看「`_` 断点
+本该注入却没注入」这个**真正的缺陷**。
+⇒ 教训：判据不是「写一条看起来相关的检查」，而是**复用生产那个函数**；
+自己另写一份等价判定 = 制造一个可与生产分叉的影子规格。
+
+### Verification
+
+本轮零生产代码改动。删探针后全量 `./gradlew jvmTest test --offline --rerun-tasks --continue`
+= **1285 条 / 1 红 / 1 跳过**，与本轮开始前逐项一致
+（唯一红 = 已登记 Q12 `CrossChapterPreflightProbeTest`；唯一跳过 = `GlyphFallbackFaceTest` 锁 7）。
+
+---
+
+## 2026-10-02 — 真机报缺陷的排查轮·第二批：Q15 / Q20 修完
+
+Q15（表格格内块级内容消失）与 Q20（断词行尾连字符）**同批落地**，因为它们共用
+`TableCellLayout` 这一个数据结构；Q20③ 本来就与 Q15 同一个改动面。Q16/Q17/Q18/Q19 仍在 TODO 里。
+
+### Q15：格内容按 CSS 2.1 §16.3 拆成块序列
+
+规格：格内**块级**子节点各自成块、格的**直接内联内容**合成一个匿名块、逐块断行后纵向堆叠
+（兄弟外边距折叠）。`TableCellLayout` 的单 `shape` ⇒ `blocks: List<TableCellBlock>`；
+排版（`buildTableRows`）与塑形（`fillTableRowCells`）共调 `NormalFlowLayout.cellBlocks`，
+两侧共用 `stackTableCellBlocks` 这**一处**定位式；`TableCellLines.emitCell/emitCellImages` 逐块发射。
+
+**这条重构是被一条既有红锁逼出来的，不是自己发明的需求**：
+`SkiaDrawLineWindowCoherenceTest.rowspanTableSharesSpanningCellHeightAcrossRows` 变红
+（`5 yTop(rel) expected:<98> but was:<77>`），根因是轻路径把匿名 run 的 `<br>` 硬换行折成空格
+（Kindle 跨行格 5 行掉成 3 行、格高 161→105、跨行分摊量消失）。
+
+**三个坑（都先做错、被探针/红锁打回）**：
+
+| # | 做错的版本 | 现象 | 定案 |
+| --- | --- | --- | --- |
+| ① | 匿名块造一个合成 `#text` 当 `el` | 塑形侧从**真实子树**重抽文本拿不到东西，`<br>` 被 `white-space:normal` 折成空格 ⇒ 5 行→3 行 | 匿名块的 `el` **就是所在容器**；区间靠 `TableCellBlock.outsideSiblings`（**原始**兄弟，按 `container.children` 身份）复原 |
+| ② | 行内 `<img>` 独立成替换块 | 塑形侧对 `img` 根早退、塑出零行 | 行内 `<img>` **不拆块**（与 `flowChildren` 同式），`<td><img></td>` 与修复前逐字节同式 |
+| ③ | 沿用旧 `appendInlineText` | GIMP 图标格 `<td rowspan="2"><img/></td>` **整格零块** | `appendInlineText` 必须与 `styledSegments` 的 `walk` **逐条同形**（`br`/`img` 都产字符）—— 它只是「这段 run 有没有内容」的判据 |
+
+连带修掉：`isBlock` 分支在 5 处（`StyledText`/`ColorRuns`×2/`BaselineShifts`/`UnderlineRuns`）
+**统一前移到 `c.isText` 之前**（匿名块要排掉 run 外的**文本**兄弟）；重路径 `rowChars` 对
+`<td><p>…</p></td>` 得 0 的 char 基址漂移；嵌套图（`<p>字<span><img/></span>字</p>`）此前被静默丢字符。
+
+### Q20：三个 `DrawLine` 构造点一次补齐（载体从 `LayoutBox` 改挂 `shape`）
+
+②`buildPartialSkiaWindow` 原计划读 `leaf.hyphenAtEnd`，实测**读不到**：轻路径的叶是按
+`ranges = emptyList()` 建的，断行只发生在塑形那一步 ⇒ 改挂 `ParagraphShapeRef.shapeLineHyphenAtEnd(k)`
+（＋ `ShapedGeometry.lineHyphenAtEnd`，由 `shapeGeometry` 从 `broken.map { it.hyphenAtEnd }` 搬）。
+③格内块两路都由 `fillTableRowCells` 塑形、形状即单源 ⇒ 也读 shape。① canonical 的 `DrawLineBuilder`
+**不塑形**，仍读 `leaf.hyphenAtEnd` —— 与 `ranges` 的既有口径完全一样（canonical 读盒流、轻路径读 shape，
+同断行器同宽、逐项一致）。
+
+### Verification
+
+- 锁：`common:TableCellBlocksTest` 16 把 ＋ 新增 `app:TableCellBlocksEndToEndTest` 5 把
+  （走 `prepareLight`→`incrementalLayoutForPage`/`shapeTempPageForward`→`tableCellLines` 整条链路，
+  语料含 GIMP 2×2 rowspan 真实表形）＋ 新增 `app:SkiaDrawLineWindowCoherenceTest.hyphenAtEndFlagIsCarriedByIncrementalAndTempWindows`。
+- **逐把变异验证**（6 个变异全部应验）：M1 `shapeLineHyphenAtEnd→false`、M2 删 `appendInlineText` 的 img 分支、
+  M3 `cellFlowItems` 不拆块、M4 匿名块 `el` 换回合成 `#text`（**复现出原始症状** `5 yTop(rel) 98→77`）、
+  M5 `charAcc += 0`、M6 `stackTableCellBlocks` 不累计前块高度。
+- 全量 `./gradlew :common:jvmTest :engine-skia:jvmTest :app:testDebugUnitTest --offline --continue`
+  = **1208 条 / 1 红 / 1 跳过**，与本轮开始前逐项一致
+  （唯一红 = Q12 `CrossChapterPreflightProbeTest`；唯一跳过 = `GlyphFallbackFaceTest` 锁 7）。

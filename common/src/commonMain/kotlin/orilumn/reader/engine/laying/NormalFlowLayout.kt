@@ -583,6 +583,7 @@ object NormalFlowLayout {
                         el, style, boxLeft, floatW,
                         ranges = brokenF.map { it.range },
                         hyphenAtEnd = brokenF.map { it.hyphenAtEnd },
+                        squeezeRatios = brokenF.map { it.squeezeRatio },
                         textLength = text.length,
                         lineHeights = grownF,
                         childBoxes = emptyList(),
@@ -606,6 +607,7 @@ object NormalFlowLayout {
                         el, style, left, contentW,
                         ranges = broken.map { it.range },
                         hyphenAtEnd = broken.map { it.hyphenAtEnd },
+                        squeezeRatios = broken.map { it.squeezeRatio },
                         textLength = text.length,
                         lineHeights = grownHeights,
                         childBoxes = emptyList(),
@@ -707,6 +709,7 @@ object NormalFlowLayout {
             LayoutBox(
                 el = textEl, style = style, contentLeft = left, contentWidth = contentW,
                 ranges = broken.map { it.range }, hyphenAtEnd = broken.map { it.hyphenAtEnd },
+                squeezeRatios = broken.map { it.squeezeRatio },
                 textLength = text.length,
                 lineHeights = broken.map { it.heightPx.coerceAtLeast(1) },
                 childBoxes = emptyList(),
@@ -1043,6 +1046,7 @@ object NormalFlowLayout {
                     val grownHeights = adjustLineHeightsForRuby(lines, adjHeights, leafRubyRuns(b.el, styles, bCls, hidden, genOf))
                     b.ranges = lines.map { it.range }
                     b.hyphenAtEnd = lines.map { it.hyphenAtEnd }
+                    b.squeezeRatios = lines.map { it.squeezeRatio }
                     b.lineHeights = grownHeights
                     b.height = grownHeights.sum().coerceAtLeast(0) + b.edgeV
                 }

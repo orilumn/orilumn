@@ -138,6 +138,9 @@ fun shapeGeometry(
         // Q20：断词收尾随行搬进 shape（增量/临时页没有 LayoutBox 可读，见
         // [orilumn.reader.engine.laying.ParagraphShapeRef.shapeLineHyphenAtEnd]）。
         lineHyphenAtEnd = broken.map { it.hyphenAtEnd },
+        // 标点挤压比例随行搬进 shape（同 Q20 理由，见
+        // [orilumn.reader.engine.laying.ParagraphShapeRef.shapeLineSqueezeRatio]）。
+        lineSqueezeRatio = broken.map { it.squeezeRatio },
         listMarker = listMarker,
         alignment = rootStyle.textAlign,
         fontSizePx = rootStyle.fontSizePx.coerceAtLeast(1f),

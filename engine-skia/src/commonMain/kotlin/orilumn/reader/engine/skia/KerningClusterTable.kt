@@ -82,11 +82,7 @@ internal class KerningClusterTable(
         // ⚠ 这里若改成「按 `text[start, endExcl)` 子串检测」，本轨就会与 [LineAligner] 的 `adv`
         //   不同源 ⇒ `tighten = (cnat[i] − cnat[i−1]) − placement.advs[i−1]` 在行尾那个边界字上
         //   恒为负一个间隙 ⇒ 被 `min(0, ·)` 全额采纳 ⇒ **刚注入的间隙在绘制侧被抹掉**。
-        val gaps = if (cjkLatinSpacingEm > 0f) {
-            CjkLatinSpacing.gapsForRange(text, start, endExcl, cjkLatinSpacingEm, fontRuns)
-        } else {
-            emptyList()
-        }
+        val gaps = CjkLatinSpacing.gapsForRange(text, start, endExcl, cjkLatinSpacingEm, fontRuns)
         // 行内换面：分段建（浏览器 inline-run 语义），否则簇位会按错误的面算。
         if (fontRuns.isEmpty()) {
             val single = clusterXsSingle(text, start, endExcl, fontSizePx, lineHeightRatio, tag, families, weight, italic, monospace, originX, letterSpacingEm)

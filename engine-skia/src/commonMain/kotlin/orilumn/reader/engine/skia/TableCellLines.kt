@@ -237,6 +237,10 @@ object TableCellLines {
                         // 塑形，形状即单源；轻路径不回填 `TableCellBlock.hyphenAtEnd`，读块会漏）。
                         // 漏传取默认 `false` ⇒ `LineAligner.hyphenW == 0` ⇒ 落墨整块跳过。
                         hyphenAtEnd = shape.shapeLineHyphenAtEnd(k),
+                        // 挤压比例随行读 **shape**（同 Q20 理由：轻路径不回填
+                        // `TableCellBlock.squeezeRatios`，读块会漏）。漏传取默认 0 ⇒
+                        // `LineAligner` 一点不挤 ⇒ 画比量宽 ⇒ 右溢被裁。
+                        squeezeRatio = shape.shapeLineSqueezeRatio(k),
                         rubyRuns = shape.shapeRubyRuns,
                         underlineRuns = shape.shapeUnderlineRuns,
                         imgHidden = hidden[k] ?: emptyList(),

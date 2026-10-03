@@ -76,6 +76,15 @@ data class DrawLine(
      */
     val hyphenAtEnd: Boolean = false,
     /**
+     * 本行的**标点挤压比例**（`[0,1]`，0 = 不挤），来自
+     * [orilumn.reader.engine.laying.BrokenLine.squeezeRatio]。
+     *
+     * 断行侧是「挤着算宽度」才敢把词完整留在同一行的，[LineAligner] 把它乘进 `adv`
+     * ⇒ 字位变窄、行少断一次。漏传 = 按 0 挤 ⇒ **画比量宽 ⇒ 右溢被裁**（分页阅读器硬错误）；
+     * 反过来「绘制侧自己挤一个比例」也不行：那就是两个宽度，说不清哪个才是断点决策的依据。
+     */
+    val squeezeRatio: Float = 0f,
+    /**
      * P1-2 行内基线位移（[orilumn.reader.engine.laying.BaselineShift]，[text] 全文本坐标系，
      * 空 = 纯基线）：随段整形（`SkParagraphFactory.runTextStyle` 位移＋行盒 strut 固定基线），
      * 不断行几何。
@@ -324,6 +333,8 @@ class LineWindowDrawer(
             isLastLine = isLastLineOf(line, endExcl),
             // 行尾连字符：进拉伸基数与可见右缘（连字符占版心，否则 JUSTIFY 会少算一个字位）。
             hyphenAtEnd = line.hyphenAtEnd,
+            // 标点挤压：断行侧定断点时用的比例（量画同源，教训 ⑩）。
+            squeezeRatio = line.squeezeRatio,
             // 混排字距：与断行侧同一个 em（间隙进 `adv` ⇒ 逐字 x、JUSTIFY 基数、可见右缘同源）。
             cjkLatinSpacingEm = line.cjkLatinSpacingEm,
         )

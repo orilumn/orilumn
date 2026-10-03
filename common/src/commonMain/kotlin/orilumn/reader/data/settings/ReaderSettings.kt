@@ -38,14 +38,18 @@ data class ReaderSettings(
     /** [Style system] Character spacing (letter-spacing) slot -100..100, mapped to -0.2em..0.2em (each slot unit = 0.002em); 0 = no extra spacing. */
     val letterSpacing: Double = 0.0,
     /**
-     * [Style system] **混排字距** 0..100, mapped to 0..1.0em; 0 = off, 25 = 0.25em (CLREQ default).
+     * [Style system] **混排字距** 0..100, mapped to 0..1.0em; 25 = 0.25em (CLREQ default).
      *
      * 用户可见名是「混排字距」（2026-10-03 由「中西字距」改名），但**内部标识符与 JSON 键
      * 仍然是 `cjkLatinSpacing`**，两者故意不同：改名会改掉持久化键、把刚写好的
      * [schemaVersion] v1 迁移作废（老存档里根本没有 `混排字距` 这个键）。
      *
-     * 0 是**合法档位**：= 关掉注入式间隙，中西之间**只**由 [letterSpacing]（字间距）分隔，
-     * 本功能不做任何额外动作（连作者手打的空格也不删）。
+     * 0 是**合法档位**，且**不是特例档**（产品口径 2026-10-03 改）：0 = 注入的间隙宽正好 0，
+     * 中西之间**只**由 [letterSpacing]（字间距）分隔 —— 字面意义上的「距离 0」。
+     * 边界照检、作者为了让中英分开而手打的那串半角空格**照吃**（画成零宽，
+     * CLREQ 4.1「删除多余半角空格，注入固定间隙」的删除动作与间隙宽无关）。
+     * 于是 `Rust 的所有权` 在 0 档排成 `Rust的所有权`；档位之间只有间隙宽这一个数在变。
+     * 详细口径见 [orilumn.reader.engine.text.preprocess.CjkLatinSpacing] 类 KDoc。
      */
     val cjkLatinSpacing: Double = 25.0,
 

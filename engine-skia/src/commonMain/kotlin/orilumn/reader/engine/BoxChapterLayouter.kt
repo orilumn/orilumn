@@ -841,6 +841,9 @@ class BoxChapterLayouter(
                     // `leaf.hyphenAtEnd` 同断行器同宽逐项一致）。漏传取默认 `false` ⇒
                     // `LineAligner.hyphenW == 0` ⇒ `LineWindowDrawer` 整块跳过 ⇒ 连字符画不出来。
                     hyphenAtEnd = shape.shapeLineHyphenAtEnd(k),
+                    // 挤压比例随行读 **shape**（同 Q20 理由：增量/临时页手里没有 `LayoutBox`）。
+                    // 漏传取默认 0 ⇒ 画比量宽 ⇒ 右溢被裁。
+                    squeezeRatio = shape.shapeLineSqueezeRatio(k),
                     // P4-c2: 章内基址（与 canonical 同式；点按命中经它换算章内 char）。
                     charBase = shapeBase,
                 )

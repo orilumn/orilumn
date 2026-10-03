@@ -144,7 +144,9 @@ class SkiaRunMeasurer(
         cjkLatinSpacingEm: Float,
     ): FloatArray = advances(
         text, fontSizePx, letterSpacingEm, tag, families, weight, italic, monospace, fontRuns,
-        if (cjkLatinSpacingEm > 0f) CjkLatinSpacing.gaps(text, cjkLatinSpacingEm, fontRuns) else emptyList(),
+        // ⚠ **0 档不短路**（产品口径 2026-10-03）：`gapEm = 0` 仍要检出边界并吃掉分隔空格，
+        //   只是注入的间隙宽为 0。见 [CjkLatinSpacing] 类 KDoc「`gapEm = 0` 是参数为 0 的那一档」。
+        CjkLatinSpacing.gaps(text, cjkLatinSpacingEm, fontRuns),
     )
 
     /** 整段自然宽（px，max-content / [orilumn.reader.engine.laying.ParagraphBreaker.preferredWidth]）。 */

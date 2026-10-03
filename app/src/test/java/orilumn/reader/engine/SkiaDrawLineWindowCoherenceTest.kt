@@ -293,6 +293,92 @@ class SkiaDrawLineWindowCoherenceTest {
         assertTrue("可比行太少（compared=$checked），验不到错位", checked >= 6)
     }
 
+    /**
+     * **标点挤压比例在 canonical ↔ 增量（disk-hit）↔ 临时（temp）三路逐行一致**，
+     * 且语料+版心真的逼出被挤的行（否则这把锁验的是空气）。
+     *
+     * ## 缺陷本体（与 [hyphenAtEndFlagIsCarriedByIncrementalAndTempWindows] 同款，只是更隐蔽）
+     *
+     * 挤压比例参与**断点决策**：断行侧是「挤着算宽度」才敢把西文词完整留在同一行的
+     * （[orilumn.reader.engine.skia.InhouseParagraphBreaker.greedy]）。三个 [DrawLine] 构造点
+     * 任一漏传 [DrawLine.squeezeRatio] ⇒ 绘制侧按「一点不挤」落墨 ⇒ **画比量宽** ⇒ 右溢被裁
+     * （分页阅读器页宽固定、无横向滚动条 ⇒ 内容丢失）。
+     *
+     * 与连字符标志相比它更容易漏：漏了不报任何错，只是每一行凭空宽出 ΣS；而且
+     * `TableCellLines.emitCell` 那一路漏了**只有表格章节**才看得见。
+     *
+     * 变异验证：[orilumn.reader.engine.laying.ParagraphShapeRef.shapeLineSqueezeRatio] 改回恒 `0f`
+     * ⇒ 增量/临时两路比例全为 0 ⇒ 逐行比较红；[orilumn.reader.engine.skia.DrawLineBuilder] 的
+     * `squeezeRatio = leaf.squeezeRatios.getOrElse(i)` 换成 `lineIdx` 下标 ⇒ canonical 与增量不一致
+     * ⇒ 逐行比较红（与连字符那条 `lineIdx` 缺陷同一个坑，见该处的 KDoc）。
+     */
+    @Test
+    fun squeezeRatioIsCarriedByIncrementalAndTempWindows() {
+        val css = "html{font-size:18px} body{font-family:serif;font-size:0.95rem} p{text-align:justify}"
+        // 语料形状就是触发条件本身：`中文，中文；` 提供**额度**（`，`/`；`），
+        // 紧跟的 `abc` 在窄版心下把溢出点推进 `ab|c` 词内 ⇒ 「不挤就会把词切坏」成立。
+        // （纯拉丁语料造不出触发：它没有收尾标点，`squeezeW` 恒 0。）
+        val html = """
+            <html><body>
+              <p>混合 mixed 内容 with 破折号——与空格。more text here 中文，中文；abc 中文，中文；abc 中文，中文；abc 中文，中文；abc 中文，中文；abc 收尾。</p>
+            </body></html>
+        """.trimIndent()
+        val prof = profile()
+        var totalCan = 0
+        var checked = 0
+        for (w in listOf(120, 140, 160, 190, 220, 260, 300, 360, 440, 520)) {
+            val canonical = layouter.fullLayout(prepare(html, css, w), prof, w, contentH)
+            val canWindow = (canonical.layout as orilumn.reader.engine.skia.PagedLayout).skiaLineWindow()!!
+            val light = layouter.prepareLight(
+                converter.convert(html) ?: error("chapter parse failed"),
+                CssBundle(listOf(css)), prof, w, orilumn.reader.engine.ChapterStructureCache(), contentH,
+            )
+            val table = ChapterPaginationTable.fromSlices(0, 1L, canonical.slices, light.totalBlocks, light.totalChars)
+            val incWindow = (layouter.incrementalLayoutForPage(light, prof, w, contentH, table, 0, pagesToShape = 4)
+                .layout as orilumn.reader.engine.skia.PagedLayout).skiaLineWindow()!!
+            val fwd = layouter.shapeTempPageForward(light, prof, w, contentH, 0, cache = null)
+                ?: error("temp fwd page failed at w=$w")
+            val tempWindow = (fwd.page.layout as orilumn.reader.engine.skia.PagedLayout).skiaLineWindow()!!
+
+            val canSq = canWindow.values.count { it.squeezeRatio > 0f }
+            totalCan += canSq
+            if (canSq > 0) {
+                assertTrue(
+                    "w=$w 增量窗漏传挤压比例 ⇒ 画比量宽 ⇒ 右溢被裁" +
+                        "（canon=$canSq incr=${incWindow.values.count { it.squeezeRatio > 0f }}）",
+                    incWindow.values.any { it.squeezeRatio > 0f },
+                )
+                assertTrue(
+                    "w=$w 临时窗漏传挤压比例 ⇒ 画比量宽 ⇒ 右溢被裁" +
+                        "（canon=$canSq temp=${tempWindow.values.count { it.squeezeRatio > 0f }}）",
+                    tempWindow.values.any { it.squeezeRatio > 0f },
+                )
+            }
+            // 逐行一致：第 0 页 ⇒ 三窗行键同坐标系，共有的行标志/区间/比例必须相同。
+            assertTrue("w=$w 增量窗必须非空", incWindow.isNotEmpty())
+            for ((g, dl) in incWindow) {
+                val c = canWindow[g] ?: continue
+                assertEquals("w=$w $g range", c.range, dl.range)
+                assertEquals("w=$w $g text", c.text, dl.text)
+                assertEquals(
+                    "w=$w $g squeezeRatio（断行侧定断点时用的比例，两路必须逐值相同）",
+                    c.squeezeRatio, dl.squeezeRatio, 0f,
+                )
+                assertTrue(
+                    "w=$w $g squeezeRatio 必须落在 [0,1]（实测 ${dl.squeezeRatio}）",
+                    dl.squeezeRatio >= 0f && dl.squeezeRatio <= 1f,
+                )
+                checked++
+            }
+        }
+        assertTrue(
+            "语料+版心必须真的逼出被挤的行，否则这把锁验的是空气（canon=$totalCan）。" +
+                "调窄版心档或换语料，别删这条断言。",
+            totalCan > 0,
+        )
+        assertTrue("可比行太少（compared=$checked），验不到错位", checked >= 6)
+    }
+
     /** 断言：每个已塑形切片内的每一行都在窗口里，且几何/range 与 drawable 行流一致。 */
     private fun checkShapedLines(renderer: orilumn.reader.engine.paging.BookLayout, window: Map<Int, DrawLine>, slices: List<PageSlice>) {
         for (s in slices) {

@@ -13,8 +13,16 @@ import orilumn.reader.engine.text.preprocess.CjkLatinGap
  *
  * 旧实现 `extra = slack / gapCount` **均摊**：一行 `ab cd ef gh` 的 10 个槽里
  * **词内字母缝 4 个、词间空格只有 3 个**，均摊 ⇒ 单词被拉散（`a b`）、词距反而没变宽。
- * 四级瀑布（词间空格 → CJK 字间 → 中英注入间隙 → 词内字母缝兜底）才是
- * 「两端对齐靠撑词距」这条排版常识的实现。
+ * 给每一类缝一个**每槽上限**（词间空格 0.5em / CJK 字间 0.25em / 中英注入间隙 0.5em /
+ * 词内字母缝无上限兜底），并让它们**按各自额度的同一比例出资**，才是
+ * 「两端对齐靠撑词距、撑不动才动字缝」这条排版常识的实现。
+ *
+ * ## 【2026-10-03】为什么从「逐级瀑布」改成「按比例均摊」
+ *
+ * 瀑布把 `cap` 变成了**开关阈值**而不是**权重**：slack 只够级 0 的 1/3 时，
+ * 瀑布给「级 0 满、其余 0」，同一个字缝要么 0 要么 0.5em，比例法给「按 `r` 缩放」。
+ * 真书实测（25 篇）：瀑布版词内缝被压到 0.008em、词间空格被撑到 0.5em，
+ * **同一条行里两种缝差 60 倍** —— 那不是优先，那是把字拆散。详见 [JustifySlack] 类 KDoc。
  *
  * ## 为什么分成「纯判据锁」与「量画同源锁」两族
  *
@@ -33,8 +41,10 @@ import orilumn.reader.engine.text.preprocess.CjkLatinGap
  *
  * `"ab cd ef gh"`（11 字、10 槽）：级 0 = 槽 2/5/8，级 1 = 槽 1/4/7，级 3 = 槽 0/3/6/9。
  * `"中文字ab"`（6 字、5 槽）：级 1 = 槽 0/1/2，级 3 = 槽 3。
- * `"中文abc中"`（6 字、5 槽）**开滑块**：级 1 = 槽 0，级 2 = 槽 1/4，级 3 = 槽 2/3；
- * **关滑块**：级 1 = 槽 0/1/4，级 3 = 槽 2/3。
+ * `"中文abc中"`（6 字、5 槽）开滑块 0.25em **与** 0 档**分级相同**：
+ * 级 1 = 槽 0，级 2 = 槽 1/4，级 3 = 槽 2/3 —— 0 档只是间隙的自然宽为 0，
+ * 接缝的性质与级别不变（见 `0 档下间隙宽度为零但仍记级二`）。
+ * 只有**不传 gaps**（`cjkGaps` 漏传）时才是级 1 = 槽 0/1/4、级 3 = 槽 2/3。
  */
 class JustifySlackPriorityTest {
 
@@ -111,37 +121,94 @@ class JustifySlackPriorityTest {
         assertEquals("SHY 槽 = −1", -1, plan.levels[2])
         assertEquals("a|b 仍是词内", l3, plan.levels[0])
         assertEquals("b|␣ 是 CJK 级", l1, plan.levels[1])
-        // 账：级 1 有 1 槽（容量 0.25em×40 = 10）先吃 10，余 90 全给唯一的级 3 槽。
+        // 账：级 1 有 1 槽（满额 0.25em×40 = 10）⇒ `C_finite = 10`，`slack = 100 > 10` ⇒ `r = 1`
+        // ⇒ 级 1 吃满 10，差额 90 全给唯一的级 3 槽。
         // SHY 槽**不占级 3 的份额** —— 若它被算成可拉伸槽，这里会变成 45。
-        assertEquals("级 1 先吃满 0.25em", 0.25f * fs, plan.per[l1], 1e-3f)
-        assertEquals("级 3 独吞余下的 90（SHY 槽不占份额）", 90f, plan.per[l3], 1e-3f)
+        assertEquals("级 1 吃满 0.25em", 0.25f * fs, plan.per[l1], 1e-3f)
+        assertEquals("级 3 独吞差额的 90（SHY 槽不占份额）", 90f, plan.per[l3], 1e-3f)
         assertEquals("全额落位", 100f, plan.placed, 1e-3f)
     }
 
     /**
-     * **逐级瀑布**：吃满一级再进下一级，且各级额度就是 `CAP_EM × 字号`。
+     * **`slack` 大过满额容量**：有限级**全开**（各拿满 `CAP_EM`），级 3 接差额。
      *
      * `"ab cd ef gh"` 的槽位账：级 0 三槽、级 1 三槽、级 3 四槽。
-     * `slack = 120` 故意大于前两级容量之和（`60 + 30 = 90`）⇒ **三级同时非零**，
-     * 于是这一把同时钉住 `0.5 / 0.25 / ∞` 三个数字与「按这个顺序」的次序。
+     * 有限级满额容量 `C_finite = 3×0.5em + 3×0.25em = 90`，`slack = 120 > 90`
+     * ⇒ `r = 1` ⇒ 级 0 = 20/槽、级 1 = 10/槽、差额 30 由级 3 四槽平分。
+     *
+     * 这一把钉住 `0.5 / 0.25 / ∞` 三个数字**以及**「差额归兜底」这条规则。
      */
     @Test
-    fun `逐级瀑布吃满一级再进下一级`() {
+    fun `slack 大过满额容量时有限级全开且级三接差额`() {
         val plan = JustifySlack.plan("ab cd ef gh", 0, 10, emptyList(), fs, 120f)
         assertEquals("级 0 每槽封顶 0.5em", 0.5f * fs, plan.per[l0], 1e-3f)
         assertEquals("级 1 每槽封顶 0.25em", 0.25f * fs, plan.per[l1], 1e-3f)
-        assertEquals("级 3 分到余下的 30/4", 7.5f, plan.per[l3], 1e-3f)
+        assertEquals("级 3 分到差额的 30/4", 7.5f, plan.per[l3], 1e-3f)
         assertEquals("slack 被全额落位", 120f, plan.placed, 1e-3f)
     }
 
-    /** `slack` 小于级 0 容量时，**级 1/2/3 必须一分不拿**（这是「吃满再进下一级」的字面含义）。 */
+    /**
+     * **`slack` 只够一部分时，各级按同一个比例缩放，兜底级一分不拿**（2026-10-03 新口径核心）。
+     *
+     * `slack = 10`、`C_finite = 90` ⇒ `r = 1/9` ⇒ 级 0 = 20/9、级 1 = 10/9、
+     * 差额 `10 − 10 = 0` ⇒ 级 3 = 0。
+     *
+     * **与旧口径的差别就是这把锁的全部意义**：旧版在这里是「级 0 独吞 10/3、其余全 0」，
+     * 即 `cap` 变成了「开关阈值」；新版让 `cap` 回到它唯一的含义 ——「这一类最多能动多少」。
+     * 异类槽之比恒等于 `cap` 之比（20 : 10 = `0.5em` : `0.25em`）这条不变量也是新的。
+     */
     @Test
-    fun `一级没吃满就不往下分`() {
+    fun `slack 只够一部分时各级按同一比例缩放且兜底级不拿`() {
         val plan = JustifySlack.plan("ab cd ef gh", 0, 10, emptyList(), fs, 10f)
-        assertEquals("级 0 独吞 10/3", 10f / 3f, plan.per[l0], 1e-3f)
-        assertEquals("级 1 不得分到", 0f, plan.per[l1], 0f)
-        assertEquals("级 2 不得分到", 0f, plan.per[l2], 0f)
-        assertEquals("级 3 不得分到", 0f, plan.per[l3], 0f)
+        assertEquals("级 0 = 0.5em × r（r = 10/90）", 0.5f * fs / 9f, plan.per[l0], 1e-3f)
+        assertEquals("级 1 = 0.25em × 同一个 r", 0.25f * fs / 9f, plan.per[l1], 1e-3f)
+        assertEquals("级 2 本行无槽", 0f, plan.per[l2], 0f)
+        assertEquals("级 3 不得分到（差额恰为 0）", 0f, plan.per[l3], 0f)
+        assertEquals("有限级正好把 slack 用完", 10f, plan.placed, 1e-3f)
+    }
+
+    /**
+     * **同一个 `r` 缩放所有有限级**（把上一把的比例从「算出来」变成「可推导」）。
+     *
+     * `slack = 45` ⇒ `r = 45/90 = 0.5` ⇒ 级 0 = 10、级 1 = 5。
+     * 这把专门钉「**级 1 的 `per` 必须等于级 0 的一半**」——
+     * 若有人把实现改成「级 0 先按 `cap` 出资、剩下的再按比例分给其余级」，
+     * 上面的锁在 `slack=10` 时仍可能全绿（那时级 0 也拿不满），只有这一把会红。
+     */
+    @Test
+    fun `所有有限级共用同一个比例且比值恒等于 cap 之比`() {
+        val plan = JustifySlack.plan("ab cd ef gh", 0, 10, emptyList(), fs, 45f)
+        assertEquals("级 0 = 0.5em × 0.5", 10f, plan.per[l0], 1e-3f)
+        assertEquals("级 1 = 0.25em × 0.5（= 级 0 的一半）", 5f, plan.per[l1], 1e-3f)
+        assertEquals("差额 45 − 45 = 0，级 3 不拿", 0f, plan.per[l3], 0f)
+        assertEquals("全额落位", 45f, plan.placed, 1e-3f)
+    }
+
+    /**
+     * **级 2 与级 0/1 共用同一个 `r`**（注入间隙不享受特殊待遇）。
+     *
+     * `"中a"` 开滑块只有 1 个级 2 槽（满额 20）⇒ `C_finite = 20`，`slack = 30` ⇒ `r = 1`
+     * ⇒ 级 2 = 20、差额 10 **无处可去**（无级 3 槽）⇒ 留缺口。
+     */
+    @Test
+    fun `只有一个有限级时比例退化为吃满且余量留缺口`() {
+        val on = JustifySlack.plan("中a", 0, 1, listOf(CjkLatinGap(leftIndex = 0, gapEm = 0.25f)), fs, 30f)
+        assertEquals("级 2 吃满 0.5em", 0.5f * fs, on.per[l2], 1e-3f)
+        assertEquals("落位 = 20（余 10 留缺口）", 20f, on.placed, 1e-3f)
+    }
+
+    /**
+     * **纯西文长词行（只有级 3 槽）**：`C_finite = 0` ⇒ `r` 无意义，级 3 独吞 `slack`。
+     *
+     * 这是比例公式唯一的除零入口，必须有一把锁钉它（否则 `slack / 0 = +∞` 会把
+     * 有限级打成 `+∞` —— 本实现用 `capFinite > 0f` 挡住了）。
+     */
+    @Test
+    fun `没有有限级时兜底级独吞全部 slack`() {
+        val plan = JustifySlack.plan("abcdef", 0, 5, emptyList(), fs, 77f)
+        for (k in 0 until 5) assertEquals("槽 $k 都是词内级", l3, plan.levels[k])
+        assertEquals("级 3 独吞 77/5", 77f / 5f, plan.per[l3], 1e-3f)
+        assertEquals("全额落位", 77f, plan.placed, 1e-3f)
     }
 
     /** 级 2（中英注入间隙）确实被认出来，而不是被当成普通 CJK 级。 */
@@ -154,9 +221,11 @@ class JustifySlackPriorityTest {
         // 剩下的 10 就是留缺口（与 `纯汉字行封顶后留缺口而不是撑字缝` 同一条规则）。
         assertEquals("级 2 封顶 0.5em", 0.5f * fs, on.per[l2], 1e-3f)
         assertEquals("落位 = 封顶值（余 10 留缺口）", 20f, on.placed, 1e-3f)
-        // 同一段文本，关掉滑块（不传 gaps）时必须退回级 1。
+        // **不传 gaps** 时同一槽必须退回级 1 —— 这是「漏传 `cjkGaps`」这类退化的守卫。
+        // ⚠ 注意口径：`cjkEm = 0`（0 档）**照样会传 gaps**，所以 0 档**不是**这一格；
+        //   0 档下该槽仍是级 2（见 [JustifySlack.levelOf] 的注释与端到端那把锁）。
         val off = JustifySlack.plan("中a", 0, 1, emptyList(), fs, 30f)
-        assertEquals("关滑块 ⇒ 槽 0 是普通 CJK 级", l1, off.levels[0])
+        assertEquals("无 gaps ⇒ 槽 0 是普通 CJK 级", l1, off.levels[0])
         assertEquals("级 2 一分不拿", 0f, off.per[l2], 0f)
         assertEquals("级 1 只吃自己的 0.25em", 0.25f * fs, off.per[l1], 1e-3f)
     }
@@ -191,33 +260,41 @@ class JustifySlackPriorityTest {
     }
 
     /**
-     * **核心锁：词间槽拿到的增量远大于词内槽，词内槽一个字节都不许拿。**
+     * **核心锁：词间槽拿得最多、词内槽一个字节都不许拿**（真字体复核）。
      *
-     * `slack = 20`，级 0 容量 `3 × 0.5em × 40 = 60` 够 ⇒ 级 0 独吞 `20/3`。
+     * `slack = 20`，`C_finite = 90` ⇒ `r = 2/9` ⇒ 词间槽（cap 0.5em）各拿 `40/9 ≈ 4.444`，
+     * `字母|␣` 槽（cap 0.25em）各拿 `20/9 ≈ 2.222`，差额 0 ⇒ 词内槽 0。
+     *
+     * **异类槽之比恒等于 `cap` 之比**（`4.444 / 2.222 = 2 = 0.5/0.25`）——
+     * 这条不变量在旧瀑布口径下**不成立**（那时它们是 6.667 与 0）。
      * 旧均摊会给 10 个槽各 `2.0`（含 4 个词内槽）⇒ 这把锁红。
      */
     @Test
-    fun `词间槽独吞词内槽一分不拿`() {
+    fun `词间槽拿得最多而词内槽一分不拿`() {
         val text = "ab cd ef gh"
         val nat = natural(text)
         val p = alignOne(text, nat + 20f, TextAlign.JUSTIFY)
         val inc = increments(p)
         for (k in listOf(2, 5, 8)) {
-            assertEquals("词间槽 $k 应拿到 slack/3", 20f / 3f, inc[k], 1e-2f)
+            assertEquals("词间槽 $k = 0.5em × (20/90)", 40f / 9f, inc[k], 1e-2f)
+        }
+        for (k in listOf(1, 4, 7)) {
+            assertEquals("`字母|␣` 槽 $k = 0.25em × (20/90)", 20f / 9f, inc[k], 1e-2f)
         }
         for (k in listOf(0, 3, 6, 9)) {
-            assertEquals("词内槽 $k 一级没吃满就不该被撑", 0f, inc[k], 1e-3f)
+            assertEquals("词内槽 $k 不得被撑", 0f, inc[k], 1e-3f)
         }
         assertEquals("右缘仍贴版心", nat + 20f, p.visibleRight, 0.05f)
     }
 
     /**
-     * **端到端三级瀑布**（纯判据锁那组数的真字体复核）。
+     * **端到端：三级同时拿到额度**（纯判据锁那组数的真字体复核）。
      *
-     * `slack = 120` ⇒ 级 0 = 20/槽、级 1 = 10/槽、级 3 = 7.5/槽，右缘贴版心。
+     * `slack = 120 > C_finite = 90` ⇒ `r = 1` ⇒ 级 0 = 20/槽、级 1 = 10/槽、
+     * 级 3 接差额 30/4 = 7.5/槽，右缘贴版心。
      */
     @Test
-    fun `端到端三级瀑布`() {
+    fun `端到端三级同时拿到额度`() {
         val text = "ab cd ef gh"
         val nat = natural(text)
         val p = alignOne(text, nat + 120f, TextAlign.JUSTIFY)
@@ -265,22 +342,26 @@ class JustifySlackPriorityTest {
      */
     @Test
     fun `有兜底级时巨大slack也铺满`() {
-        val text = "中文字ab" // 槽 0/1/2 = CJK 级（容量 30），槽 3 = a|b = 词内（兜底）
+        // 槽 0/1 = CJK 级（0.25em）、**槽 2 = 中英注入间隙**（`字|a`，0 档下宽为 0 但**仍是级 2**，
+        // 0.5em）、槽 3 = `a|b` 词内（无上限）。C_finite = 2×10 + 20 = 40。
+        val text = "中文字ab"
         val nat = natural(text)
         val p = alignOne(text, nat + 400f, TextAlign.JUSTIFY)
         assertEquals("有级 3 ⇒ 全额铺满", nat + 400f, p.visibleRight, 0.05f)
         val inc = increments(p)
-        assertEquals("CJK 级封顶", 0.25f * fs, inc[0], 1e-2f)
-        assertEquals("兜底级独吞余下的 370", 370f, inc[3], 1e-2f)
+        assertEquals("CJK 级封顶 0.25em", 0.25f * fs, inc[0], 1e-2f)
+        assertEquals("注入间隙级封顶 0.5em", 0.5f * fs, inc[2], 1e-2f)
+        assertEquals("兜底级独吞差额 400 − 40", 360f, inc[3], 1e-2f)
     }
 
     /**
      * **中英注入间隙参与拉伸，且排在 CJK 字间之后**（产品裁决 2026-10-03 第 3 条）。
      *
      * `"中文abc中"` 开滑块 0.25em：级 1 = 槽 0，级 2 = 槽 1/4，级 3 = 槽 2/3。
-     * `slack = 60` ⇒ 级 1 吃 10（封顶）→ 级 2 吃 40（两槽 × 0.5em = 40，恰好吃满）
-     * → 级 3 分 10。**三级同时非零**，所以「注入间隙没被认出来」这种退化一定会被抓到
-     * （那时槽 1 会与槽 0 同级，拿到同一个数）。
+     * `C_finite = 10 + 2×20 = 50`，`slack = 60 > 50` ⇒ `r = 1` ⇒ 级 1 = 10、级 2 = 20/槽
+     * → 差额 10 由级 3 两槽平分。**三级同时非零**，所以「注入间隙没被认出来」这种退化一定会被抓到
+     * （那时槽 1 会与槽 0 同级，拿到同一个 `r × 0.25em`，而 `0 档下间隙宽度为零但仍记级二`
+     * 那把锁的值也就与本把完全相同，两把一起失去分辨力）。
      */
     @Test
     fun `中英注入间隙参与拉伸且排第三级`() {
@@ -297,22 +378,31 @@ class JustifySlackPriorityTest {
     }
 
     /**
-     * **A/B 反向锁：关掉滑块，同一个 `文|a` 边界退回 CJK 级**（拿到 10 而不是 20）。
+     * **0 档下间隙宽度为 0，但它**仍然**记级 2**（产品口径 2026-10-03）。
      *
-     * 防「注入间隙恒真」的实现：若 [JustifySlack.plan] 漏传 `cjkGaps`（或调用点恒传非空），
-     * 上一把会红但这里不会 —— 两把合起来才把「开则级 2、关则级 1」钉死。
+     * 旧名「关掉滑块时同一边界退回 CJK 级」已经**失效**：混排字距 0 档不再是「不处理」，
+     * 边界照检、间隙照样存在（只是自然宽 0），所以 `文|a` / `c|中` 仍是级 2。
+     * 若把 0 档当成「没有间隙」，0 档的拉伸行为就会与其它档分叉 —— 那是被删掉的特例换了个形式。
+     *
+     * 本例 `slack = 60`、`C_finite = 10 + 2×20 = 50` ⇒ `r = 1` ⇒ 级 1 = 10、级 2 = 20/槽、
+     * 差额 10 由级 3 两槽平分。与上一把（0.25em 档）的差别**只有槽 1/4 的级别来源**，
+     * 数值恰好相同 —— 这正是「0 档 = 参数为 0 的那一档」的含义。
+     *
+     * **反向守卫**（不传 `gjkGaps` ⇒ 退回级 1）在 [注入间隙被认成级二] 的纯判据段里；
+     * 「漏传 `cjkGaps`」这一变异由本把与上一把**一起**抓（上一把用 0.25em 档，
+     * 若 `cjkGaps` 恒空则它的槽 1/4 会变成 10 ⇒ 红）。
      */
     @Test
-    fun `关掉滑块时同一边界退回CJK级`() {
+    fun `0 档下间隙宽度为零但仍记级二`() {
         val text = "中文abc中"
         val nat = natural(text, cjkEm = 0f)
         val p = alignOne(text, nat + 60f, TextAlign.JUSTIFY, cjkEm = 0f)
         val inc = increments(p)
-        // 关滑块：级 1 = 槽 0/1/4（容量 30，各 10）→ 吃满 30，余 30 给级 3（2 槽各 15）。
-        assertEquals("槽 0（中|文）", 10f, inc[0], 1e-2f)
-        assertEquals("槽 1（文|a）现在只是普通 CJK 级", 10f, inc[1], 1e-2f)
-        assertEquals("槽 4（c|中）同理", 10f, inc[4], 1e-2f)
-        assertEquals("词内槽分余量", 15f, inc[2], 1e-2f)
+        assertEquals("槽 0（中|文）是 CJK 级 0.25em", 10f, inc[0], 1e-2f)
+        assertEquals("槽 1（文|a）0 档下仍是注入间隙级 0.5em", 20f, inc[1], 1e-2f)
+        assertEquals("槽 4（c|中）同理", 20f, inc[4], 1e-2f)
+        assertEquals("词内槽分差额 10/2", 5f, inc[2], 1e-2f)
+        assertEquals("全额铺满", nat + 60f, p.visibleRight, 0.05f)
     }
 
     /** 末行 / LEFT 行一个字节都不许被撑（优先级再高也不行）。 */
@@ -339,27 +429,34 @@ class JustifySlackPriorityTest {
 
     /**
      * 变异验证记录（改坏必须红，见 `docs/自建断行引擎-测试计划.md` 教训㩼）。
-     * **全部 10 项已实跑，括号内是实际变红的锁名（节选，其余同样红）**：
-     * - 把 [JustifySlack.plan] 换回均摊（`per = slack / 总槽数` 广播给每级）
-     *   ⇒ `词间槽独吞词内槽一分不拿`、`端到端三级瀑布`、`逐级瀑布吃满一级再进下一级`、
-     *   `一级没吃满就不往下分`、`有兜底级时巨大slack也铺满`（10 把中的 9 把红）。
-     * - 把 `CAP_EM` 四项全设 `+∞` ⇒ `纯汉字行封顶后留缺口而不是撑字缝`、
-     *   `中英注入间隙参与拉伸且排第三级`。
-     * - 把级 0 / 级 2 的额度对调（`0.5 ↔ 1.0`）
-     *   ⇒ `端到端三级瀑布`、`逐级瀑布吃满一级再进下一级`、
-     *   `中英注入间隙参与拉伸且排第三级`、`注入间隙被认成级二`。
+     *
+     * ## 【2026-10-03 比例化改写后】重跑，全部**实跑**，括号内是实际变红的锁数与代表锁名
+     *
+     * 分配口径的四个变异（新口径的核心，必须能区分「瀑布 / 均摊 / 比例」三形状）：
+     * - **换回逐级瀑布**（级 0 吃满再进下一级）⇒ **4 把红**：
+     *   `slack 只够一部分时各级按同一比例缩放且兜底级不拿`、`所有有限级共用同一个比例且比值恒等于 cap 之比`、
+     *   `词间槽拿得最多而词内槽一分不拿`、`补偿回填也走四级比例而不是均摊`。
+     * - **换回均摊**（`per = slack / 总槽数` 广播给每级）⇒ **13 把红**（本类 11 把 + 回填那把 + 分类那把）。
+     * - **「共用比例」改成「各级各算各的」**（`per[lvl] = min(cap[lvl], slack/自身容量 × cap[lvl])`，
+     *   看似等价、`slack` 远大于容量时**同值**）⇒ **7 把红**，且带出两条真书锁
+     *   （`NoLineExceedsContentWidthTest` 的两把 + `LineAlignerTest` 的「铺满版心」）
+     *   —— 这条变异在旧瀑布口径下**抓不到**（瀑布本来就是逐级算的），是新增分辨力的直接证据。
+     * - `FIRST_UNBOUNDED` 从 `3` 改成 `4`（把无上限的级 3 也拖进比例分配 ⇒ 除以 `∞`）
+     *   ⇒ **29 把红**。
+     *
+     * 额度与分类的变异（沿用旧记录，逐条仍成立）：
+     * - `CAP_EM` 级 0 / 级 1 对调（`0.5 ↔ 0.25`）⇒ **12 把红**。
      * - 删掉 `isSoftHyphen` 那个 `-1` 分支 ⇒ `SHY 槽标为不可拉伸但其余槽照常分级`（单把红）。
-     * - 删掉 `isDocumentSpace(c)` 那一支 ⇒ `槽位分类的判据逐条钉死`、
-     *   `连字符两侧与空格左侧都不算词间`、`词间槽独吞词内槽一分不拿`、`端到端三级瀑布`。
-     * - 删掉 `levelOf` 的第 ③ 支（两侧都西文 ⇒ 词内）⇒ `槽位分类的判据逐条钉死`、
-     *   `有兜底级时巨大slack也铺满`、`中英注入间隙参与拉伸且排第三级`。
      * - `JustifySlack.plan` 忽略 `slotLimit`（把 `levels` 铺到 `text.length`）
      *   ⇒ 9 把红（末字之后的槽白吃预算，右缘随之变短）。
-     * - [LineAligner.align] 漏传 `cjkGaps` 给 `JustifySlack.plan`（恒 `emptyList`）
-     *   ⇒ `中英注入间隙参与拉伸且排第三级`（**单把红**，正是它该负责的那件事）。
+     * - [LineAligner.align] 漏传 `cjkGaps` 给 [JustifySlack.plan]（恒 `emptyList`）⇒ **3 把红**。
+     * - [LineAligner.align] 在 `cjkLatinSpacingEm <= 0` 时给 `plan` 传空 gaps
+     *   （**把 0 档又退回「没有间隙」特例**）⇒ **2 把红**：
+     *   `0 档下间隙宽度为零但仍记级二`、`有兜底级时巨大slack也铺满`
+     *   （后者也红是因为 `中文字ab` 的 `字|a` 在 0 档下正是级 2 —— 这把锁顺带守住了 0 档口径）。
      * - [LineAligner.align] 的 `finalContent` 用 `slack` 而不是 `plan.placed`
      *   ⇒ `纯汉字行封顶后留缺口而不是撑字缝`（**单把红**）。
-     * - `graftKerningOnto` 的回填改回 `per = deficit / lv` ⇒ 见
+     * - `graftKerningOnto` 的回填改回 `per = deficit / lv`（均摊）或旧瀑布 ⇒ 见
      *   [GraftKerningOntoTest] 的同名锁（**单把红**）。
      */
 }

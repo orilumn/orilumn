@@ -65,8 +65,19 @@ class CjkLatinSpacingWiringTest {
         runs: List<FontRun> = emptyList(),
         gapEm: Float = 0f,
         families: List<String> = SYNTH_FAM,
-        gaps: List<CjkLatinGap> = if (gapEm > 0f) CjkLatinSpacing.gaps(text, gapEm, runs) else emptyList(),
+        gaps: List<CjkLatinGap> = CjkLatinSpacing.gaps(text, gapEm, runs),
     ): FloatArray = measurer().advances(text, fs, lsEm, "p", families, 400, false, false, runs, gaps)
+
+    /**
+     * 「完全不做混排处理」的基准（**显式空 `cjkGaps`**）。
+     *
+     * ⚠ **不能拿 `advances(text, gapEm = 0f)` 当基准**（产品口径 2026-10-03 起）：0 档**不是**
+     * 「不处理」，它照检边界、照吃作者手打的分隔空格。只要语料里有一个分隔空格，
+     * 0 档那份就比本函数少掉那个空格宽 —— 拿它当「无间隙」基准会把**吃掉空格**这件事
+     * 悄悄当成「什么都没发生」，锁就白写了。凡是语义上要「无间隙」的地方一律走本函数。
+     */
+    private fun noGaps(text: String, fs: Float = 40f, runs: List<FontRun> = emptyList()): FloatArray =
+        advances(text, fs = fs, runs = runs, gaps = emptyList())
 
     /** `preferredWidth` 的便捷调用（走 [InhouseParagraphBreaker] 的 max-content 口径）。 */
     private fun naturalWidth(text: String, fs: Float, gapEm: Float, families: List<String> = SYNTH_FAM): Float =
@@ -112,31 +123,164 @@ class CjkLatinSpacingWiringTest {
         runs, align, 0f, false, false, gapEm,
     )
 
-    // ---- 锁 1：滑块 = 0 是**纯不动点**（需求 2026-10-03：不做多余动作）----
+    // ---- 锁 0：0 是**参数为 0 的那一档**，不是「关掉」那一档（产品口径 2026-10-03 改）----
 
     /**
-     * **gap = 0 的输出必须与「完全不传 `cjkGaps`」逐位相同**。
+     * **0 档必须与其它档检出同一份边界**，只有 `gapEm` 一个字段不同。
      *
-     * 这是接线前后的兼容金标准：接线前所有量宽都走「无间隙」那条路，
-     * `cjkLatinSpacing = 0` 的用户（以及开关关闭时的回退阀路径）必须拿到**同一个数**。
+     * 这是「0 不是特例档」最直接的判据：`gaps(text, 0f)` 与 `gaps(text, GAP)` 的
+     * **`(leftIndex, spaceCount)` 必须逐条相同**，`gapEm` 逐条为 0。0 档若走另一条规则
+     * （少检一处边界、或不记 `spaceCount`），这里立刻红。
      *
-     * 写法上刻意用「同一段文本量两遍」而不是钉死一个魔数 —— 魔数会被字体/平台改动打碎，
-     * 而这里要守的性质是「空 `cjkGaps` 不改变任何一位」。
+     * ## 本锁守的是「调用点不许对 0 短路」，判别力在下面那三条
      *
-     * 变异验证：让 [SkiaRunMeasurer.advances] 无条件跑 `applyCjkLatinGaps`
-     * （或在该方法里对空列表做出改动）⇒ 本锁红。
+     * 探测器本身与 em 无关，所以「两份检出相等」在旧实现（0 档压根没跑探测器）下**也成立** ——
+     * 真正的判别力来自下面三条，它们量的是**施加之后**的版面：
+     * - 量宽侧：**照样吃分隔空格**（`0 档照吃分隔空格且注入零间隙`），
+     * - 落墨侧：**中西之间的墨距真的是 0**（`0 档的中西墨距真的为 0`），
+     * - 断行侧：**照样按「零宽空格」预留版心**（`0 档的预留比无间隙少掉那串空格`）。
+     *
+     * 变异验证：把任一施加点改回 `if (cjkLatinSpacingEm > 0f) … else emptyList()` ⇒ 本锁仍绿、
+     * 但下面三条至少一条红。
      */
     @Test
-    fun `gap 为 0 时逐值等于不传间隙`() {
-        val texts = listOf("中文English", "中文与English混排", "pure latin text", "纯中文", "中 A", "", "a中b中c")
+    fun `0 档与其它档检出同一份边界 只差 gapEm 一个字段`() {
+        val texts = listOf(SPACED, TIGHT, "中  A", "中\u00A0A", "中文Rust", "Rust中文", "A中A中", "纯中文")
         for (text in texts) {
-            val none = measurer().advances(text, 40f, 0f, "p", SYNTH_FAM, 400, false, false)
-            val zero = advances(text, gapEm = 0f)
-            assertEquals("文本「$text」：gap=0 必须与无间隙逐值相同", 0f, delta(none, zero))
+            val zero = CjkLatinSpacing.gaps(text, 0f)
+            val full = CjkLatinSpacing.gaps(text, GAP)
+            assertEquals(
+                "语料「$text」：0 档与 $GAP 档必须检出**同一条**边界序列（含被吃空格个数）",
+                full.map { it.leftIndex to it.spaceCount },
+                zero.map { it.leftIndex to it.spaceCount },
+            )
+            for (g in zero) {
+                assertEquals("语料「$text」：0 档的 gapEm 必须逐个等于 0", 0f, g.gapEm, 0f)
+            }
+            // `gapsForRange` 是绘制侧（`LineAligner` / `KerningClusterTable`）唯一入口，它同样不许对 0 短路。
+            val r0 = CjkLatinSpacing.gapsForRange(text, 0, text.length, 0f)
+            val r1 = CjkLatinSpacing.gapsForRange(text, 0, text.length, GAP)
+            assertEquals(
+                "语料「$text」：`gapsForRange` 在 0 档也必须返回整份（绘制侧不许短路）",
+                r1.map { it.leftIndex to it.spaceCount },
+                r0.map { it.leftIndex to it.spaceCount },
+            )
         }
     }
 
-    /** 显式传**空列表**与**不传该形参**同路（两者都必须是「关闭」）。 */
+    /**
+     * **0 档照样把作者手打的分隔空格吃掉**，只是注入的间隙宽为 0。
+     *
+     * ## 这条锁替掉的旧锁与它为什么必须换掉
+     *
+     * 旧锁是「0 档是**纯不动点**」——带分隔空格的语料逐位等于无间隙。
+     * 那正是需求否掉的口径（「混排字距 0」却让中西之间留着一整个空格宽，字面意思相反）。
+     * 本锁把期望改成：**0 档的逐槽 advance = 无间隙那份把被吃空格位清零**，其余一位不差。
+     *
+     * ## 三条断言各自抓一种「实现走偏」
+     *
+     * | 断言 | 抓什么 |
+     * |---|---|
+     * | 逐槽 = 清零后那份（零容差） | 通用：0 档只该做「清零」，不该做别的 |
+     * | `gap=GAP` 与 `gap=0` 的差**只**落在各边界左槽 | 「注入 0 宽间隙」是不是真按 0 注入（而不是偷偷用默认值） |
+     * | 无分隔空格的语料逐位等于无间隙 | 反证：清零动作**确实**来自 `spaceCount`，不是「所有字位都清一遍」 |
+     *
+     * ## 为什么必须用**带分隔空格**的语料
+     *
+     * 「吃空格」是本特性唯一会**改写字符本身**的动作。若只在无空格语料上验，
+     * 「0 档同规则」等于没验 —— 而真书里 82% 的中西边界都带空格
+     * （实测《Rust 程序设计语言》25 章 28123 处边界中 23181 处带分隔空格）。
+     *
+     * 断言一律用 `delta == 0f` 且**零容差**：这里要的就是「逐位相同」。
+     */
+    @Test
+    fun `0 档照吃分隔空格且注入零间隙`() {
+        val fs = 40f
+        val corpus = listOf("SPACED" to SPACED, "TIGHT" to TIGHT, "DOUBLE" to "中  A", "NBSP" to "中\u00A0A")
+        for ((name, text) in corpus) {
+            val none = noGaps(text, fs)
+            val zero = advances(text, fs = fs, gapEm = 0f)
+            val full = advances(text, fs = fs, gapEm = GAP)
+            val g0 = CjkLatinSpacing.gaps(text, 0f)
+            assertTrue("$name：语料必须真的检出边界（否则本锁是空断言）", g0.isNotEmpty())
+            // ① 逐槽 = 无间隙那份把被吃空格位清零（**零容差**）。
+            val expect = none.copyOf()
+            val eaten = StringBuilder()
+            for (g in g0) {
+                for (k in 1..g.spaceCount) {
+                    eaten.append(' ').append(g.leftIndex + k)
+                    expect[g.leftIndex + k] = 0f
+                }
+            }
+            assertEquals(
+                "$name：0 档的逐槽 advance 必须**恰好**等于无间隙那份清零 [${eaten}] 后的结果",
+                0f, delta(expect, zero),
+            )
+            // ② 与 $GAP 档的差**只**落在各边界左槽（注入宽度真的按 0 注入）。
+            for (k in text.indices) {
+                val expectD = if (g0.any { it.leftIndex == k }) GAP * fs else 0f
+                assertEquals(
+                    "$name：槽 $k 上 0 档与 $GAP 档的差必须是 $expectD（被吃空格位也在内，一个字节都不许动）",
+                    expectD, full[k] - zero[k], 1e-3f,
+                )
+            }
+            // ③ 反证：无分隔空格的语料，0 档与无间隙**逐位**相同（清零确实来自 spaceCount）。
+            if (g0.none { it.spaceCount > 0 }) {
+                assertEquals("$name：无分隔空格时 0 档必须与无间隙逐位相同", 0f, delta(none, zero))
+            } else {
+                assertTrue("$name：0 档必须真的比无间隙窄（吃掉空格那个动作发生了）", sum(zero) < sum(none))
+            }
+        }
+    }
+
+    /**
+     * **0 档的中西墨距真的是 0**（需求原话：「就让距离为 0 就可以了」）—— 端到端一层。
+     *
+     * 走完整管线（[LineAligner] → [KerningClusterTable.clusterXs] → `graftKerningOnto`），
+     * 量的是**用户看得见的那件事**：边界左邻字的墨右缘到右邻字墨左缘的那段白。
+     *
+     * 0 档必须**恰好 0.000px**（不是「差不多小」），`$GAP` 档必须**恰好 `GAP × 字号`**。
+     * 语料用**相邻**边界（作者没打空格）—— 带空格的形态在 0 档连那串空格一起没了，
+     * 墨距自然是 0，但判别点会被「吃空格」抢走（改动 [CjkLatinSpacing] 的空格规则时它照样绿）。
+     *
+     * 用 LEFT 对齐排除 JUSTIFY 拉伸的干扰。
+     */
+    @Test
+    fun `0 档的中西墨距真的为 0`() {
+        val fs = 40f
+        val table = KerningClusterTable()
+
+        /** 走完整管线取 [s, e) 这一段的墨位 x。 */
+        fun ink(para: String, s: Int, e: Int, gapEm: Float): FloatArray {
+            val p = LineAligner().align(
+                para, s until e, fs, 400f, 0f, "p", SYNTH_FAM, 400, false, false,
+                emptyList(), TextAlign.LEFT, 0f, false, false, gapEm,
+            )
+            assertTrue("[$s,$e) 含 Latin 却没有走簇位轨，否则本锁测不到出问题的那条路径", table.needsClusters(para, s, e))
+            val cnat = table.clusterXs(para, s, e, fs, 1.5f, "p", SYNTH_FAM, 400, false, false, emptyList(), 0f, 0f, gapEm)
+            assertNotNull("[$s,$e) 必须建得出簇位轨", cnat)
+            return graftKerningOnto(p, cnat!!, para, s, fs, 0f, emptyList(), Float.NaN).xs
+        }
+
+        val para = "前面这段中文只是为了让段首偏移推大，末尾进入中文Rust混排的句子"
+        val g = CjkLatinSpacing.gaps(para, GAP).first { it.leftIndex > 20 }
+        assertEquals("本锁必须取一个**相邻**边界（无分隔空格），否则判别点会被「吃空格」抢走", 0, g.spaceCount)
+        val s = g.leftIndex
+        val e = s + 2
+        val x0 = ink(para, s, e, 0f)
+        val x1 = ink(para, s, e, GAP)
+        val wLeft = sum(noGaps(para.substring(s, s + 1), fs))
+        assertEquals(
+            "0 档：中英之间必须是**零**白（需求原话「就让距离为 0」）",
+            0f, (x0[1] - x0[0]) - wLeft, 1e-2f,
+        )
+        assertEquals(
+            "$GAP 档：中英之间必须恰好一个 gap（否则本锁前半段测的是「恒 0」的空断言）",
+            GAP * fs, (x1[1] - x1[0]) - wLeft, 1e-2f,
+        )
+    }
+
+    /** 显式传**空列表**与**不传该形参**同路（这一层与 0 档无关：`advances` 该形参的默认值就是空列表）。 */
     @Test
     fun `空间隙列表与不传形参同路`() {
         val text = "中文English混排 42 项"
@@ -146,66 +290,116 @@ class CjkLatinSpacingWiringTest {
     }
 
     /**
-     * 需求（2026-10-03）：「滑块为 0 时代表字距为 0，仅用字间距分隔中英文字符，**不要做多余动作**」。
+     * **0 档的预留比无间隙少掉那串空格** —— 断行侧那一份（量 == 画同源）。
      *
-     * ## 这条锁钉的是「多余动作」的四类可能，逐类钉死
+     * 断行侧走 [InhouseParagraphBreaker]（整段检出 → [SkiaRunMeasurer] 施加），绘制侧走
+     * [LineAligner] / [KerningClusterTable]（[CjkLatinSpacing.gapsForRange] 裁到本行）。
+     * 若断行侧对 0 短路而绘制侧不短路（或反过来），就出现「预留按有空格算、画按零宽画」
+     * ⇒ 画比量**窄**（右缘莫名留白）或**宽**（右溢被裁）。本锁钉住 0 档下两侧同为「零宽」。
      *
-     * | 多余动作 | 症状 | 本锁的判据 |
-     |---|---|---|
-     * | 仍然删掉作者手打的空格 | 关掉滑块后正文里的空格也没了，`Rust 的所有权` 变 `Rust的所有权` | [SPACED] 的 `adv` 必须**逐位等于**无间隙那份 |
-     * | 仍然注入 0 宽间隙 | 浮点里 `+= 0f` 不改值，但若实现改成「按 gap 重算 `adv`」就会漂 | 同上，且断言差值必须**严格** 0f（不容差） |
-     * | 断行/落墨走了另一条分支 | 版心预留与落墨位置出现极小的系统性偏移 | 断点集合、逐字 `xs` 逐位相同 |
-     * | 簇位轨被平移 | 含 Latin 的行走 `graftKerningOnto` 后被 `min(0,·)` 收紧一点 | 轨逐位相同 |
+     * ## ⚠ 语料**必须不含全角标点**（第一版踩了这个坑，报 −77.7 / 实测 −166.5）
      *
-     * ## 为什么必须用**带分隔空格**的语料
+     * 这里量的是 [InhouseParagraphBreaker.preferredWidth]（max-content 口径），而它**额外减掉
+     * 标点挤压**（见 `PunctuationSqueeze`）。拿 [SPACED]（含 `，`/`。`）当语料时，
+     * 差值里混着挤压量，于是「少掉 7 个空格（77.7px）」被读成「少掉 15 个空格（166.5px）」——
+     * 两个数都对，只是量的不是同一件事。⇒ 语料换成**纯中英 + 分隔空格**，一个标点都不放。
+     * 顺带记一笔：挤压与混排字距是两个独立特性，**不要在一个断言里同时量**。
      *
-     * 「吃空格」是本特性唯一会**改写字符本身**的动作。若只在 [TIGHT]（无空格）上验，
-     * 「0 = 不动点」这条需求等于没验 —— 而真书里 82% 的中西边界都带空格
-     * （实测《Rust 程序设计语言》25 章 28123 处边界中 23181 处带分隔空格）。
-     *
-     * 断言一律用 `delta == 0f` 且**零容差**：这里要的就是「逐位相同」，
-     * 给容差会把「差了一个 ulp」这类漂移放过去。
-     *
-     * 变异验证：
-     * - 去掉任一处的 `if (gapEm <= 0f) return` 短路（[LineAligner] / [InhouseParagraphBreaker] /
-     *   [KerningClusterTable] / [SkiaRunMeasurer.advancesWithGaps]）⇒ 本锁仍绿（因为
-     *   `gaps()` 在 gap=0 时给出的 `spaceCount` 照样会置零空格 —— 不，等等，那就会红）：
-     *   `SkiaRunMeasurer` 侧去掉短路后 `applyCjkLatinGaps` 会把空格**吃掉**，`SPACED` 的
-     *   `adv[空格位]` 从 ~10 变 0 ⇒ 本锁红。
-     * - `LayoutParamKey` 侧（`paramHash` 换键 ⇒ 磁盘表失效）由
-     *   `LayoutParamKeyTest.混排字距非 0 换键、0 精确复现历史流` 单独钉，不在本类。
+     * ⚠ 上面那条只钉住 `preferredWidth`；`breakLines` 是**另一处**检出点，本类另有一条
+     *   `0 档的断行预留按零宽空格 阈值处由两行变一行` 钉它（第一版漏了它 ⇒ 变异验证时把
+     *   `breakLines` 的短路改回去，本类**全绿**，判别力为零 —— 这条纪律记在这里）。
      */
     @Test
-    fun `滑块 0 是纯不动点 带分隔空格的语料逐位等于无间隙`() {
-        for ((name, text) in listOf("SPACED" to SPACED, "TIGHT" to TIGHT)) {
-            // ① 量宽侧：逐槽严格 0 差（**不容差**），含空格语料会抓到「仍然删空格」。
-            val none = measurer().advances(text, 40f, 0f, "p", SYNTH_FAM, 400, false, false)
-            val zero = advances(text, gapEm = 0f)
-            assertEquals("$name：gap=0 的逐槽 advance 必须与无间隙**逐位**相同（严格 0，不容差）", 0f, delta(none, zero))
-            // ② 落墨侧（[LineAligner]）：逐字 x 与可见右缘都必须逐位相同。
-            val pNone = align(text)
-            val pZero = align(text, gapEm = 0f)
-            assertEquals("$name：gap=0 的落墨 x 必须逐位相同", 0f, delta(pNone.xs, pZero.xs))
-            assertEquals("$name：gap=0 的可见右缘必须逐位相同", 0f, pNone.visibleRight - pZero.visibleRight)
-            assertEquals("$name：gap=0 的 advance 轨必须逐位相同", 0f, delta(pNone.advs, pZero.advs))
-            // ③ 簇位轨（含 Latin 的行走 graft 路径）：轨必须逐位相同。
-            val cNone = KerningClusterTable().clusterXs(text, 0, text.length, 40f, 1.5f, "p", SYNTH_FAM, 400, false, false)
-            val cZero = KerningClusterTable().clusterXs(
-                text, 0, text.length, 40f, 1.5f, "p", SYNTH_FAM, 400, false, false, emptyList(), 0f, 0f, 0f,
+    fun `0 档的预留比无间隙少掉那串空格`() {
+        val fs = 44.4f
+        for (text in listOf("中 A", "中\u00A0A", "中文 Rust 的所有权 与 GC 的回收 完全不同")) {
+            val gaps = CjkLatinSpacing.gaps(text, 0f)
+            val none = noGaps(text, fs)
+            var eatenW = 0f
+            for (g in gaps) for (k in 1..g.spaceCount) eatenW += none[g.leftIndex + k]
+            assertTrue("语料「${text.take(6)}…」必须含被吃的分隔空格（否则本锁是空断言）", eatenW > 1f)
+            assertEquals(
+                "0 档的整段预留必须比无间隙少掉恰好那串空格宽（断行侧不许对 0 短路）",
+                -eatenW,
+                naturalWidth(text, fs, 0f) - sum(none),
+                1e-2f,
             )
-            assertNotNull("$name：含 Latin 的行必须建得出簇位轨", cNone)
-            assertNotNull("$name：含 Latin 的行必须建得出簇位轨（gap=0）", cZero)
-            assertEquals("$name：gap=0 的簇位轨必须逐位相同", 0f, delta(cNone!!, cZero!!))
-            // ④ 断行侧：断点集合必须逐点相同（滑块 0 不许让任何一页的断点挪动）。
-            for (w in intArrayOf(320, 480, 700, 900)) {
-                val off = InhouseParagraphBreaker(0f, 0f)
-                    .breakLines(text, 44.4f, 1.5f, w, TextAlign.LEFT, "p", SYNTH_FAM, 400, false, false)
-                val on = InhouseParagraphBreaker(0f, 0f)
-                    .breakLines(text, 44.4f, 1.5f, w, TextAlign.LEFT, "p", SYNTH_FAM, 400, false, false)
-                assertEquals("$name：版心 $w 下 gap=0 的断点集合必须完全相同", off.map { it.range }, on.map { it.range })
-                assertTrue("$name：版心 $w 的断行结果非空（否则是空断言）", off.isNotEmpty())
+            // 绘制侧同一件事：`LineAligner` 在 0 档也必须把空格画成零宽。
+            // ⚠ 这条是**画侧**唯一的 0 档判别点：逐行「画 == 量」那条抓不到画侧短路
+            //   （`gapsForRange` 与 `pAdv` 都走未变异的路径，两边一起对、照样绿）——
+            //   变异验证时把 `LineAligner` 的 `> 0f` 短路改回去，本类只有这一条会红。
+            // 版心取极大值 ⇒ 不折行、不 JUSTIFY，LEFT 下 `visibleRight = Σ adv`。
+            assertEquals(
+                "0 档的可见右缘（绘制侧）必须同样少掉那串空格宽（画侧不许对 0 短路）",
+                sum(none) - eatenW,
+                align(text, fs = fs, width = 1e6f, gapEm = 0f).visibleRight,
+                1e-2f,
+            )
+            // 逐行「画 == 量」在 0 档同样成立（0 也走 `gapsForRange`）。
+            val pAdv = measurer().advances(
+                text, fs, 0f, "p", SYNTH_FAM, 400, false, false, emptyList(), gaps,
+            )
+            for (w in 700..900 step 50) {
+                for (line in InhouseParagraphBreaker(0f, 0f)
+                    .breakLines(text, fs, 1.5f, w, TextAlign.LEFT, "p", SYNTH_FAM, 400, false, false)) {
+                    val (s, e) = line.range.first to line.range.last + 1
+                    val lineGaps = CjkLatinSpacing.gapsForRange(text, s, e, 0f)
+                    val drawn = sum(advances(text.substring(s, e), fs = fs, gaps = lineGaps))
+                    val reserved = sum(pAdv.copyOfRange(s, e))
+                    assertEquals("0 档 版心 $w 行 [$s,$e) 画宽必须逐位等于预留", reserved, drawn, 1e-2f)
+                }
             }
         }
+    }
+
+    /**
+     * **0 档的断行预留按「零宽空格」算** —— 阈值处由两行变一行。
+     *
+     * ## 为什么必须单独钉 `breakLines`（第一版的漏洞，变异验证抓出来的）
+     *
+     * 上一条量的是 [InhouseParagraphBreaker.preferredWidth]，它走的是**另一个**检出点。
+     * 把 `breakLines` 里的 `if (cjkLatinSpacingEm > 0f)` 短路改回去，本类**全绿** ——
+     * 因为本类其余断行侧断言都只比「0 档 vs GAP 档」，而短路对这两档的影响恰好被
+     * `gapsForRange`（绘制侧，仍然检出）吸收掉。判别力为零。
+     *
+     * 本锁换一种**不依赖另一侧**的判据：把版心取在「0 档宽」与「不处理宽」的正中间。
+     * 该版心下：
+     * - 正确（预留按零宽空格）⇒ 整段装得下 ⇒ **1 行**；
+     * - 短路（预留按原空格宽）⇒ 装不下 ⇒ **2 行**。
+     *
+     * ## 阈值不是拍脑袋：`w = (nat0 + natNone) / 2`，两侧各差 `K × 空格宽`
+     *
+     * 语料 `"中 A"×K` 的每个单元在 0 档宽 `2em`、在不处理口径下宽 `2em + 一个空格宽`
+     * （本机族栈的空格恰是 0.25em）。取 K = 20 ⇒ 判别窗口宽 20 个空格宽，很宽裕。
+     *
+     * ## 为什么语料**只**用带空格的形状
+     *
+     * 「相邻」边界（`中A`）根本没有空格可吃 ⇒ 短路与不短路**完全同路** ⇒ 本锁必须避开。
+     * 反过来 0.25em（= 空格宽）那个不动点也不影响本锁：它让 **0.25em 档**与不处理同宽，
+     * 而本锁比的是 **0 档**与不处理（差 `K` 个空格宽），不是 0.25em 档。
+     */
+    @Test
+    fun `0 档的断行预留按零宽空格 阈值处由两行变一行`() {
+        val fs = 44.4f
+        val k = 20
+        val text = "中 A".repeat(k)
+        val natNone = sum(noGaps(text, fs))
+        val nat0 = naturalWidth(text, fs, 0f)
+        assertEquals(
+            "0 档的自然宽必须比不处理口径恰好少掉 $k 个分隔空格宽",
+            -k * noGaps(" ", fs)[0],
+            nat0 - natNone,
+            1e-2f,
+        )
+        val w = ((nat0 + natNone) / 2f).toInt()
+        assertTrue("阈值必须落在 (0档宽, 不处理宽) 开区间内", w > nat0 && w < natNone)
+        val lines = InhouseParagraphBreaker(0f, 0f)
+            .breakLines(text, fs, 1.5f, w, TextAlign.LEFT, "p", SYNTH_FAM, 400, false, false)
+        assertEquals(
+            "0 档下整段必须装得下（断行侧若对 0 短路，预留会按原空格宽算 ⇒ 这里会是 2 行）",
+            1, lines.size,
+        )
+        assertEquals("单行必须覆盖整段（否则本锁的语料没按预期退化成一行）", 0 to text.length - 1, lines[0].range.first to lines[0].range.last)
     }
 
     /**
@@ -250,7 +444,7 @@ class CjkLatinSpacingWiringTest {
     @Test
     fun `间隙加在左字位 右邻字位不动`() {
         val text = "中文ab"
-        val base = advances(text)
+        val base = noGaps(text)
         val gapped = advances(text, gapEm = GAP)
         val gaps = CjkLatinSpacing.gaps(text, GAP)
         assertEquals("本锁的语料必须恰好产出一个间隙，否则断言无意义", 1, gaps.size)
@@ -282,7 +476,7 @@ class CjkLatinSpacingWiringTest {
         for ((text, expectGaps) in cases) {
             val gaps = CjkLatinSpacing.gaps(text, GAP)
             assertEquals("语料「$text」的边界数", expectGaps, gaps.size)
-            val d = sum(advances(text, fs = fs, gapEm = GAP)) - sum(advances(text, fs = fs))
+            val d = sum(advances(text, fs = fs, gapEm = GAP)) - sum(noGaps(text, fs))
             assertEquals(
                 "语料「$text」：$expectGaps 个边界 ⇒ 总宽多 $expectGaps × 0.25em",
                 expectGaps * GAP * fs,
@@ -337,9 +531,13 @@ class CjkLatinSpacingWiringTest {
      * 方向不能反：「画了但没预留」正是右溢被裁的成因（见上一条的类 KDoc）。
      * 所以闸门必须落在**键与 profile** 那一侧（[TypographicProfile.cjkLatinSpacingEmApplied]），
      * 让断行与绘制**一致地**退干净。
+     *
+     * ⚠ 「退干净」现在只意味着**两侧拿到同一个数**（0），不再意味着「什么都不做」：
+     *   0 是零间隙档、仍会吃分隔空格（产品口径 2026-10-03）。两侧同为 0 ⇒ 两侧吃同一批空格、
+     *   都注入 0 宽间隙 ⇒ 仍然「画 == 量」。本锁守的就是这个「同值」，不是「零动作」。
      */
     @Test
-    fun `开关关闭时间隙整条关掉`() {
+    fun `开关关闭时两侧拿到同一个 0`() {
         try {
             AbSwitch.resetForTest()
             AbSwitch.apply("inhouseBreak=1")
@@ -594,12 +792,13 @@ class CjkLatinSpacingWiringTest {
                 para, lineStart, end, fs, 1.5f, "p", SYNTH_FAM, 400, false, false,
                 emptyList(), 0f, 0f, GAP,
             )
+            // 0 档那份：注意它**也**吃分隔空格，所以「两条轨只差注入间隙」这个不变式不受影响。
             val c0 = table.clusterXs(
                 para, lineStart, end, fs, 1.5f, "p", SYNTH_FAM, 400, false, false,
                 emptyList(), 0f, 0f, 0f,
             )
             assertNotNull("start=$lineStart 的含 Latin 行必须建得出轨", c1)
-            assertNotNull("start=$lineStart 关间隙时也必须建得出轨（否则本锁是空断言）", c0)
+            assertNotNull("start=$lineStart 0 档时也必须建得出轨（否则本锁是空断言）", c0)
             val t1 = c1!!
             val t0 = c0!!
             // 逐槽期望 = 「局部下标严格小于本槽的间隙条数」× 一个 gap —— 这就是那个**阶跃函数**。
@@ -679,7 +878,7 @@ class CjkLatinSpacingWiringTest {
             )
             assertEquals("左邻字位自身不动（间隙只推开右边的字）", 0f, x1[0] - x0[0], 1e-3f)
             // 「中英间距」= 右邻左缘 − 左邻字墨右缘；左邻纯字宽取 gap=0 那档的 advance
-            val wLeft = sum(advances(para.substring(s, s + 1), fs = fs, gapEm = 0f))
+            val wLeft = sum(noGaps(para.substring(s, s + 1), fs))
             assertEquals(
                 "相邻边界：中英之间的实际间距必须恰好一个 gap",
                 GAP * fs, (x1[rx] - x1[0]) - wLeft, 1e-2f,
@@ -694,7 +893,7 @@ class CjkLatinSpacingWiringTest {
             val s = g.leftIndex
             val e = s + 1 + g.spaceCount + 1
             val (lo, hi) = 0.08f to 0.62f
-            val spaceW = sum(advances(para.substring(s + 1, s + 1 + g.spaceCount), fs = fs, gapEm = 0f))
+            val spaceW = sum(noGaps(para.substring(s + 1, s + 1 + g.spaceCount), fs))
             for (probe in listOf(lo, hi)) {
                 assertTrue(
                     "探针 $probe 必须远离不动点（空格宽 ${spaceW / fs}em），否则本锁测的是不动点",
@@ -782,7 +981,7 @@ class CjkLatinSpacingWiringTest {
             text, 0, n, 40f, 1.5f, "p", SYNTH_FAM, 400, false, false, runs, 0f, 0f, 0f,
         )
         assertNotNull("换面行必须建得出轨", c1)
-        assertNotNull("关间隙时同一份 runs 也必须建得出轨（否则本锁是空断言）", c0)
+        assertNotNull("0 档时同一份 runs 也必须建得出轨（否则本锁是空断言）", c0)
         val on = c1!!
         val off = c0!!
         assertEquals("轨长必须与 range 同长", n, on.size)
@@ -819,7 +1018,7 @@ class CjkLatinSpacingWiringTest {
             FontRun(2, 4, SYNTH_FAM, "p", 400, false, false, 20f),
         )
         val d1 = advances(text, fs = 40f, runs = runs, gapEm = GAP)[leftIdx] -
-            advances(text, fs = 40f, runs = runs, gapEm = 0f)[leftIdx]
+            noGaps(text, fs = 40f, runs = runs)[leftIdx]
         assertEquals("间隙必须按左侧 run（1.0 档 ⇒ 40px）的字号算", GAP * 40f, d1, 1e-3f)
         assertTrue(
             "若错取右侧 run（0.5 档 ⇒ 20px）则会得到一半；本锁必须能区分两者",
@@ -831,7 +1030,7 @@ class CjkLatinSpacingWiringTest {
             FontRun(2, 4, SYNTH_FAM, "p", 400, false, false, 40f),
         )
         val d2 = advances(text, fs = 40f, runs = runs2, gapEm = GAP)[leftIdx] -
-            advances(text, fs = 40f, runs = runs2, gapEm = 0f)[leftIdx]
+            noGaps(text, fs = 40f, runs = runs2)[leftIdx]
         assertEquals("反向语料的间隙按左侧 run（0.5 档 ⇒ 20px）算", GAP * 20f, d2, 1e-3f)
     }
 
@@ -852,6 +1051,11 @@ class CjkLatinSpacingWiringTest {
      *
      * 变异验证：删掉 `applyCjkLatinGaps` 里的 `for (k in 1..g.spaceCount) adv[left + k] = 0f`
      * ⇒ 本锁红。
+     *
+     * ## 0 档那半边（2026-10-03 加）：**清零与注入宽解耦**
+     *
+     * 0 档同样必须把那个空格清成严格 0（`gapEm = 0` 是参数为 0 的那一档，不是「关掉」）。
+     * 所以 `0 档` 那一支是：空格位 0、左字位不动、右字位不动、净增量 = `−空格宽`。
      */
     @Test
     fun `吃掉的分隔空格位被置成严格 0`() {
@@ -862,12 +1066,18 @@ class CjkLatinSpacingWiringTest {
         assertEquals("间隙的左下标是被吃空格**之前**那个字", 0, gaps[0].leftIndex)
         val fs = 40f
         val gapped = advances(text, fs = fs, gapEm = GAP)
-        val base = advances(text, fs = fs, gapEm = 0f)
+        val base = noGaps(text, fs)
         assertTrue("本锁的语料里那个空格必须真的有宽度（否则断言无意义）", base[1] > 1f)
         assertEquals("左字位 + 一个 gap", GAP * fs, gapped[0] - base[0], 1e-3f)
         assertEquals("分隔空格位必须被置为**严格 0**（这是本锁唯一的判别点）", 0f, gapped[1], 0f)
         assertEquals("右字位不动", 0f, gapped[2] - base[2], 1e-4f)
         assertEquals("净增量 = 注入的间隙 − 被吃掉的空格宽", GAP * fs - base[1], sum(gapped) - sum(base), 1e-3f)
+        // 0 档：清零照做、注入宽为 0 ⇒ 净增量 = −空格宽（`Rust 的所有权` → `Rust的所有权`）。
+        val zero = advances(text, fs = fs, gapEm = 0f)
+        assertEquals("0 档：分隔空格位**照**被置为严格 0（「吃空格」与间隙宽解耦）", 0f, zero[1], 0f)
+        assertEquals("0 档：左字位不加任何间隙", 0f, zero[0] - base[0], 1e-4f)
+        assertEquals("0 档：右字位不动", 0f, zero[2] - base[2], 1e-4f)
+        assertEquals("0 档：净增量 = −被吃掉的空格宽", -base[1], sum(zero) - sum(base), 1e-3f)
     }
 
     /**
@@ -895,7 +1105,7 @@ class CjkLatinSpacingWiringTest {
             val gaps = CjkLatinSpacing.gaps(text, GAP)
             assertEquals("分隔符 U+%04X 必须产出吃空格的间隙".format(sep.code), 1, gaps.size)
             assertEquals(1, gaps[0].spaceCount)
-            val base = advances(text, fs = fs)
+            val base = noGaps(text, fs)
             assertTrue("语料里那个分隔符必须真的有宽度（否则本锁是空断言）", base[1] > 0f)
             assertEquals(
                 "U+%04X 的净增量 = 注入的间隙 − 被吃掉的空格宽".format(sep.code),
@@ -909,22 +1119,33 @@ class CjkLatinSpacingWiringTest {
             //   ——那个**被吃掉的空格槽**——会右移一个 gap。但那个槽宽 0、不落墨、用户看不见；
             //   真正必须不变的是空格**之后**那个字（`A`）的 x，以及可见右缘。
             // 反过来，「`adv` 逐位不变」也是错的期望（那等于「吃空格」压根没生效）。
+            //
+            // ⚠ 落墨侧的「不变」基准**不能再用 `align(text)`**（产品口径 2026-10-03 起 0 档也吃空格，
+            //   它拿到的已经是「零间隙 + 空格被吃」那份版面）。0 档之下 `LineAligner` **没有**
+            //   「完全不处理」这档了 ⇒ 基准改成**绝对期望值**：LEFT 对齐下 `x[k] = Σ_{j<k} adv[j]`、
+            //   `visibleRight = Σ adv`（语料无行尾空白），期望值直接从 [noGaps] 的前缀和算。
+            //   这比「两份落墨互比」更强：钉的是**绝对落墨位置**，字体/对齐改动都会被抓到。
             val atFixedPoint = advances(text, fs = fs, gapEm = base[1] / fs)
             assertEquals(
                 "U+%04X 在 gap == 空格宽 那个不动点上总宽不变（一个宽 W 的空格换成一个宽 W 的间隙）"
                     .format(sep.code),
                 0f, sum(atFixedPoint) - sum(base), 1e-3f,
             )
-            val pBase = align(text, fs = fs)
             val pFix = align(text, fs = fs, gapEm = base[1] / fs)
             assertEquals(
-                "U+%04X 在不动点上可见右缘不变".format(sep.code),
-                0f, delta(floatArrayOf(pBase.visibleRight), floatArrayOf(pFix.visibleRight)), 1e-3f,
+                "U+%04X 在不动点上可见右缘必须等于「无间隙」那份的总宽".format(sep.code),
+                sum(base), pFix.visibleRight, 1e-3f,
             )
             assertEquals(
-                "U+%04X 在不动点上，被吃空格**之后**那个字（`A`）的落墨位置必须逐位相同"
+                "U+%04X 在不动点上，被吃空格**之后**那个字（`A`）的落墨位置必须等于无间隙那份的前缀和"
                     .format(sep.code),
-                0f, delta(pBase.xs.copyOfRange(2, pBase.xs.size), pFix.xs.copyOfRange(2, pFix.xs.size)), 1e-3f,
+                base[0] + base[1], pFix.xs[2], 1e-3f,
+            )
+            // 0 档那份：空格被吃、间隙 0 ⇒ 右缘正好落在「`中` 的字宽 + `A` 的字宽」上。
+            // 这是「0 档不是不动点」在落墨侧的判据（与 `0 档的中西墨距真的为 0` 互为两半）。
+            assertEquals(
+                "U+%04X 在 0 档的可见右缘 = 中 + A 两字宽（空格被吃、间隙 0）".format(sep.code),
+                base[0] + base[2], align(text, fs = fs, gapEm = 0f).visibleRight, 1e-3f,
             )
             assertTrue(
                 "U+%04X 在不动点上逐槽分布**必须变**（否则「吃空格」压根没生效，本组断言是空断言）"
@@ -956,7 +1177,7 @@ class CjkLatinSpacingWiringTest {
         val gaps = CjkLatinSpacing.gaps(text, GAP)
         assertEquals("恰好一个间隙", 1, gaps.size)
         assertEquals(2, gaps[0].spaceCount)
-        val base = advances(text, fs = fs)
+        val base = noGaps(text, fs)
         assertTrue("语料里两个空格都必须真的有宽度（否则本锁是空断言）", base[1] > 1f && base[2] > 1f)
         val gapped = advances(text, fs = fs, gapEm = GAP)
         assertEquals("左字位 + 一个 gap", GAP * fs, gapped[0] - base[0], 1e-3f)
@@ -1125,7 +1346,7 @@ class CjkLatinSpacingWiringTest {
 
     /**
      * **不动点本身**也要钉住：`gapEm × 字号 == 分隔空格原宽` 时，「吃空格」语料的
-     * **总宽与落墨位置**与关间隙时**逐位相同**。
+     * **总宽与落墨位置**与「不处理混排」那份**逐位相同**。
      *
      * 这不是 bug，是「用固定间隙替换多余半角空格」（CLREQ 4.1）的数学后果；但它是
      * 「滑块看起来没用」的**头号来源**，必须被锁成「已知的、有解释的行为」，
@@ -1140,6 +1361,13 @@ class CjkLatinSpacingWiringTest {
      * `x_{i+1} = x_i + adv[i]`、`adv[0]` 多了 gap ⇒ **被吃掉的空格槽的 x 右移一个 gap** ——
      * 那个槽宽 0、不落墨、用户看不见，但断言它不变就是错的。要钉的是空格**之后**那个字。
      *
+     * ## ⚠ 基准是「不处理混排」那份，**不是** `align(text)`
+     *
+     * 产品口径 2026-10-03 起 0 档也吃分隔空格，所以 `align(text)`（其 `gapEm` 默认 0）拿到的
+     * 已经是「零间隙 + 空格被吃」那份版面，拿它当基准会读到「不动点右缘差 11.1 = 一个空格」。
+     * 而 0 档之下 `LineAligner` **没有**「完全不处理」这一档 ⇒ 落墨侧只能对**绝对期望值**：
+     * LEFT 对齐下 `x[k] = Σ_{j<k} adv[j]`、`visibleRight = Σ adv`，从 [noGaps] 前缀和算。
+     *
      * 「逐槽分布必须变」那条断言是**防空断言**的：若特性压根没接，`sum` 当然也不变，
      * 本锁会绿得毫无意义。
      */
@@ -1147,7 +1375,7 @@ class CjkLatinSpacingWiringTest {
     fun `不动点 间隙恰等于分隔空格宽时总宽与落墨位置都不变`() {
         val fs = 44.4f
         val text = "中 A"
-        val base = advances(text, fs = fs)
+        val base = noGaps(text, fs)
         val spaceW = base[1]
         assertTrue("语料里那个分隔空格必须有宽度", spaceW > 1f)
         val atFix = advances(text, fs = fs, gapEm = spaceW / fs)
@@ -1155,15 +1383,15 @@ class CjkLatinSpacingWiringTest {
             "不动点上总宽不变（一个宽 W 的空格换成一个宽 W 的间隙）",
             0f, sum(atFix) - sum(base), 1e-4f,
         )
-        val pBase = align(text, fs = fs)
         val pFix = align(text, fs = fs, gapEm = spaceW / fs)
         assertEquals(
-            "不动点上可见右缘不变",
-            0f, delta(floatArrayOf(pBase.visibleRight), floatArrayOf(pFix.visibleRight)), 1e-4f,
+            "不动点上可见右缘必须等于「不处理混排」那份的总宽",
+            sum(base), pFix.visibleRight, 1e-4f,
         )
         assertEquals(
-            "不动点上被吃空格**之后**那个字（`A`）的落墨位置必须逐位相同（被吃掉的空格槽本身会移，不可见）",
-            0f, delta(pBase.xs.copyOfRange(2, pBase.xs.size), pFix.xs.copyOfRange(2, pFix.xs.size)), 1e-4f,
+            "不动点上被吃空格**之后**那个字（`A`）的落墨位置必须等于「不处理混排」那份的前缀和" +
+                "（被吃掉的空格槽本身会移，不可见）",
+            base[0] + base[1], pFix.xs[2], 1e-4f,
         )
         assertTrue(
             "不动点上逐槽分布**必须变**（否则「吃空格」没生效）",

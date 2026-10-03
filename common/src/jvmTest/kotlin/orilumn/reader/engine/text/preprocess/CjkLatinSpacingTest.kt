@@ -234,7 +234,9 @@ class CjkLatinSpacingTest {
     fun `gapsForRange survives degenerate ranges and a zero slider`() {
         assertEquals(emptyList<CjkLatinGap>(), CjkLatinSpacing.gapsForRange("中文A", 0, 0, 0.25f))
         assertEquals(emptyList<CjkLatinGap>(), CjkLatinSpacing.gapsForRange("中文A", 2, 2, 0.25f))
-        assertEquals(emptyList<CjkLatinGap>(), CjkLatinSpacing.gapsForRange("中文A", 1, 3, 0f))
+        // ⚠ 0 档**不再**短路（产品口径 2026-10-03）：`[1,3)` 覆盖「文↔A」那个边界，
+        //   所以 0 档返回一条 `gapEm = 0` 的间隙。旧口径下这里断言空列表。
+        assertEquals(listOf(CjkLatinGap(0, 0f)), CjkLatinSpacing.gapsForRange("中文A", 1, 3, 0f))
         // 越界范围被夹回文本长度内，不抛。
         assertEquals(1, CjkLatinSpacing.gapsForRange("中文A", 0, 99, 0.25f).size)
         assertEquals(1, CjkLatinSpacing.gapsForRange("中文A", -5, 3, 0.25f).size)

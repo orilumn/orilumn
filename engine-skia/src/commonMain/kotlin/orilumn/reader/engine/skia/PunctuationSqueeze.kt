@@ -82,11 +82,16 @@ internal object PunctuationSqueeze {
     fun appliedMaxEm(): Float = if (AbSwitch.inhouseBreak()) DEFAULT_MAX_EM else 0f
 
     /**
-     * **逐字位的可释放宽度**（px，数组与 `[from, to)` 同长且同坐标；不可压的位置恒 `0f`）。
+     * **逐字位的挤压额度**（px，数组与 `[from, to)` 同长且同坐标；不可压的位置恒 `0f`）。
+     *
+     * ⚠ **这是「额度」不是「施加量」**（产品裁决 2026-10-03）：施加量 = 额度 × 比例，
+     * 比例由调用方按「这一行到底需要挤多少」算（[ratioNeeded]）。老口径（额度全额上）
+     * 的代价见 [ratioNeeded] 的 KDoc。
      *
      * 断行器（预留版心，[orilumn.reader.engine.skia.InhouseParagraphBreaker]）与
      * [LineAligner]（落 x 位）**都调本方法**，且两侧传**同一份 `adv` 与同一套形参**
-     * ⇒ 同一个位置在两侧得到同一个 S ⇒ 画 == 量。
+     * ⇒ 同一个位置在两侧得到同一个额度 ⇒ 画 == 量（两侧再各自套同一个比例，见
+     * [orilumn.reader.engine.laying.BrokenLine.squeezeRatio]）。
      *
      * @param adv 该位置的 advance（**含 `lsPx` 与混排间隙**，即 [SkiaRunMeasurer.advances] 的原样输出）。
      * @param advBase `adv[0]` 对应的**绝对**下标 —— [LineAligner] 传的是**行内局部** `adv`，
@@ -154,4 +159,57 @@ internal object PunctuationSqueeze {
         }
         return out
     }
+
+    /**
+     * **比例化的两条算式**（产品裁决 2026-10-03 第 2、3 条）。
+     *
+     * 改写前 [widths] 的返回值**直接就是**施加量（`adv −= widths[i]`），额度与施加量是同一个数。
+     * 改写后两者分开：[widths] 只给**额度**（每槽最多能收多少），施加量 = `额度 × ratio`，
+     * 而 `ratio` 由调用方**按这一行到底需要多少**算出来。
+     *
+     * ## 为什么要分开（挤压不是目的）
+     *
+     * 挤压是**供给侧**：它造出 slack，好让行少断一次。按老口径（额度全额上），一条
+     * 纯汉字行只要版心差 1px 就把每个收尾标点各收 0.5em —— 省下的宽度**远多于需要**，
+     * 观感是「标点被压扁」。真书实测（25 篇 / 3958974 字）：挤压槽 **114456** 个、
+     * 命中 cap **112812**（98.6%），即**几乎每个候选槽都吃满了额度**，而真正省下的行只有 4035
+     * 行（1.8%）。**挤掉 11 万条缝只换来 4000 行** —— 那不是优化，那是拿字形换行数。
+     *
+     * 用户原话：「**挤压不是目的！它是不得以而为之的！**」「没必要时（不涉及单词断行）挤压什么！！！」
+     *
+     * ⇒ 两条算式：
+     *  - [ratioNeeded]：只取**刚够**的比例（总额 = `need`，不多给一分）；
+     *  - [slotSqueeze]：把这个比例落到单槽上。
+     *
+     * ## 为什么不直接返回施加量数组
+     *
+     * 因为「需要多少」只有调用方知道：断行侧要的是「挤到词尾不破词」的那个比例（见
+     * [orilumn.reader.engine.laying.BrokenLine.squeezeRatio]），画侧 ③ 要的是「把 JUSTIFY
+     * 铺不满的缺口补掉」的那个比例。两条路径的 `need` 不同，**额度表却是同一份** ——
+     * 这正是必须拆开的那条界线。
+     */
+
+    /**
+     * 「刚够用」的比例：`needPx` 是**还差多少像素**，`capTotalPx` 是这一行**全部额度之和**。
+     *
+     * 返回 `needPx / capTotalPx`（调用点自己 clamp 到 1；这里不 clamp 是因为**溢出要可判**——
+     * 挤到全额也补不上时，调用方需要知道「这条路走不通」并退回不挤，见
+     * [orilumn.reader.engine.laying.InhouseParagraphBreaker.greedy]）。
+     *
+     * `capTotalPx <= 0` ⇒ **无可挤额度** ⇒ 0（这一行不挤，不做任何补偿性尝试）。
+     */
+    fun ratioNeeded(needPx: Float, capTotalPx: Float): Float =
+        if (needTotalIsNonPositive(needPx, capTotalPx)) 0f else needPx / capTotalPx
+
+    /**
+     * 单槽实挤量 = `额度 × 比例`。`ratio <= 0` 短路返回 0（**不挤**，绝大多数位置走这条）。
+     *
+     * 比例**不做逐槽 clamp 到 1**：调用方（[ratioNeeded] 的使用者）已经保证了 `ratio ≤ 1`，
+     * 而 `ratio > 1` 意味着「额度被超发」——那是调用方的 bug，不该在这里静默吸收。
+     */
+    fun slotSqueeze(capPx: Float, ratio: Float): Float = if (ratio <= 0f) 0f else capPx * ratio
+
+    /** [ratioNeeded] 的「无解」判据（拆出来只为两处 KDoc 能各自引用同一句语义）。 */
+    private fun needTotalIsNonPositive(needPx: Float, capTotalPx: Float): Boolean =
+        capTotalPx <= 0f || needPx <= 0f || !needPx.isFinite()
 }

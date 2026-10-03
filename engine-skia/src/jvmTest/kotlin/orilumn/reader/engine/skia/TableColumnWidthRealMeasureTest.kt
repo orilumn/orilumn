@@ -15,6 +15,7 @@ import orilumn.reader.engine.laying.ParagraphBreaker
 import orilumn.reader.engine.ChapterStructureCache
 import orilumn.reader.engine.laying.minContentSegments
 import orilumn.reader.engine.text.TypographicProfile
+import orilumn.reader.engine.text.preprocess.CjkLatinSpacing
 
 /**
  * Q6 锁（**正向**，2026-10-02 取代 [原 `TableBreakerStaysSkiaTest`]）：表格 auto 分列的列宽量
@@ -162,17 +163,44 @@ class TableColumnWidthRealMeasureTest {
      * ⇒ 自建侧显式 `punctuationSqueezeMaxEm = 0f` 把这一个变量**隔离出去**，
      * 原判据（0.0000% 逐值相等）一字不改地保留。
      * 挤压本身与 `preferredWidth` 的关系由**紧邻的锁 3b** 单独立锁 —— 那条锁得更死（逐值等于总额度）。
+     *
+     * ## ⚠ 混排语料在 0 档下**不再**与 Skia 相等（2026-10-03 混排字距改口径，这是真差不是回归）
+     *
+     * 混排字距的 0 档现在与其它档同规则：**作者手打的分隔空格照吃**（画成零宽）。
+     * 而 Skia 那条路（`SkParagraph`）保得住那些空格 ⇒ 两侧行宽差 `边界数 × 空格宽`。
+     * [mixed] = `"Skia Paragraph 的 defaultFallback 链"` 正好 3 个分隔空格（11.10px 每个）
+     * ⇒ 实测 `Skia=688.38 / 自建=655.08`，差 **33.30 = 3 × 11.10**，一分不差。
+     *
+     * ⇒ 本锁对 `mixed` 的判据必须**排除吃空格那一份**，只比「注入间隙」那一份：
+     * 断言 `自建 = Skia − 被吃空格的 advance 总和`。这样锁守的仍是「整形之外逐值相等」，
+     * 且把「0 档吃空格」这个**已知差异**钉成了公式而不是豁免。
+     *
+     * ⚠ **别改成「让 0 档不���空格」来把这把锁弄绿** —— 那正是本轮删掉的特例，
+     *   需求原话是「混排字距滑块为 0 时不要做特殊操作，就让距离为 0 就可以了」。
      */
     @Test
     fun `同口径下无 kern 对的文本两侧逐值相等`() {
         val skia = SkiaParagraphBreaker(0f)
         val inhouse = InhouseParagraphBreaker(0f, 0f, punctuationSqueezeMaxEm = 0f)
+        val measurer = SkiaRunMeasurer()
         for ((s, label) in listOf(cjk to "CJK", url to "URL", mixed to "混排")) {
             val a = pref(skia, s)
             val b = pref(inhouse, s)
+            // 0 档吃掉的作者分隔空格（Skia 那侧保住了它们，见类 KDoc）。CJK / URL 语料
+            // 一个都没有 ⇒ 这一项为 0，判据自动退化成「逐值相等」，不必分叉成两把锁。
+            val adv = measurer.advances(s, fs, 0f, null, families, 400, false, false, emptyList(), emptyList())
+            var eaten = 0f
+            var spaceSlots = 0
+            for (g in CjkLatinSpacing.gaps(s, 0f)) {
+                for (k in 1..g.spaceCount) {
+                    eaten += adv[g.leftIndex + k]
+                    spaceSlots++
+                }
+            }
             assertEquals(
-                "$label 两侧应逐值相等（实测 0.0000%）：Skia=$a 自建=$b",
-                a,
+                "$label 两侧应逐值相等（除 0 档吃掉的分隔空格外，实测 0.0000%）：" +
+                    "Skia=$a 自建=$b 被吃空格 $spaceSlots 个共 $eaten",
+                a - eaten,
                 b,
                 0.001f * maxOf(1f, a) / fs,
             )
@@ -180,25 +208,30 @@ class TableColumnWidthRealMeasureTest {
     }
 
     /**
-     * 锁 3b：**max-content 与断行同源** —— `preferredWidth` 恰好比未挤的口径窄一个挤压总额度。
+     * 锁 3b：**max-content 与断行同源** —— 改口径后是「max-content **对挤压上限完全免疫**」。
      *
-     * ## 为什么必须单独立锁（这不是重复锁 3）
+     * ## 【2026-10-03 第 2 条】口径反转，本锁整体重写
      *
-     * `preferredWidth`（max-content）回答的是「**整段放不放得下一行**」，而表格 auto 分列把它
-     * **直通**成最终列宽（`avail>=totalMax` 段 `w[i]=pref[i]`，无夹取）。所以它一旦与
-     * `breakLines` 用了**不同的宽度模型**，就是「断行侧按挤后的宽判放得下、max-content 按没挤的
-     * 宽答放得下」⇒ 同一段两套答案。补上这一减之前，端到端锁实测出行宽 **706.2265 > 版心 700**。
+     * 上一轮的口径是「`preferredWidth` 恰好比未挤口径**窄一个挤压总额度**」，
+     * 前提是「挤压无条件全额上」—— 于是 max-content 必须跟着减，否则
+     * 「断行侧按挤后的宽判放得下、max-content 按没挤的宽答放得下」，端到端锁实测行宽 706.2265 > 700。
      *
-     * ## 判据为什么钉「差 == 总额度」而不是「差 <= 3%」
+     * 现在挤压**只在「不挤就会把词切坏」时**触发（[orilumn.reader.engine.skia.InhouseParagraphBreaker.greedy]），
+     * 而 max-content 的定义是「整段排成**一行**」—— 一行即段落末行，**没有断点决策**
+     * ⇒ 那一行的挤压比例恒为 0 ⇒ 绘制侧也不挤（画侧 ③ 要求 JUSTIFY 且非末行）
+     * ⇒ 两侧此刻同为「不挤」⇒ **`squeezeMaxEm` 传什么都不影响 max-content**。
      *
-     * 因为要锁的不是「挤得狠不狠」，而是**「同一个 `PunctuationSqueeze.widths` 被两侧算成同一个数」**。
-     * 钉总额度 ⇒ 挤少了（额度被 `_cap` 吃掉）红、挤多了红、两侧算得不一样也红。
-     * 上界单独钉一条：CJK 语料上总额度必须为正（否则这条锁会自证成 `0 == 0`）。
+     * ## 判据为什么钉「三档 cap 逐值全等」而不是「差 == 0」
+     *
+     * 「差 == 0」只能钉住一个 cap 值；把 cap 拉成 `0 / 0.5em / 100em` 三档一起比，
+     * 才钉住「**这条路径压根不读 cap**」这个性质 —— 否则有人把读取写成
+     * `min(cap, …)` 之类只在小 cap 下不可见的形状，会从 0.5em 那一档漏过去。
+     *
+     * 另配一条上界：语料必须真的产出挤压额度（`totalSeen > 0`），否则三档全等会自证成 `0 == 0`。
      */
     @Test
-    fun `max-content 比未挤口径恰好窄一个挤压总额度`() {
-        val squeezed = InhouseParagraphBreaker(0f, 0f, punctuationSqueezeMaxEm = PunctuationSqueeze.DEFAULT_MAX_EM)
-        val plain = InhouseParagraphBreaker(0f, 0f, punctuationSqueezeMaxEm = 0f)
+    fun `max-content 不受挤压上限影响且逐值等于未挤口径`() {
+        fun breaker(capEm: Float) = InhouseParagraphBreaker(0f, 0f, punctuationSqueezeMaxEm = capEm)
         val measurer = SkiaRunMeasurer()
         var totalSeen = 0f
         for ((s, label) in listOf(cjk to "CJK", mixed to "混排")) {
@@ -210,11 +243,19 @@ class TableColumnWidthRealMeasureTest {
             var total = 0f
             for (x in squeeze) total += x
             totalSeen += total
+            val base = pref(breaker(0f), s)
             assertEquals(
-                "$label：max-content 必须恰好窄一个挤压总额度（实测总额度 $total）。" +
-                    "多了/少了都是分叉：多了 ⇒ 列宽与断行预留不同源；少了 ⇒ 挤压额度被 _cap 吃掉。",
-                pref(plain, s) - total,
-                pref(squeezed, s),
+                "$label：max-content 是「整段一行」⇒ 挤压比例恒 0 ⇒ cap=0.5em 与 cap=0 逐值相同。" +
+                    "有差说明有人在 max-content 里减了额度，而断行侧并不挤（凭空少报一截列宽）。",
+                base,
+                pref(breaker(PunctuationSqueeze.DEFAULT_MAX_EM), s),
+                0.001f,
+            )
+            assertEquals(
+                "$label：cap 拉到 100em（远超任何额度）仍逐值相同 ⇒ 这条路径压根不读 cap" +
+                    "（本语料挤压总额度 $total）。",
+                base,
+                pref(breaker(100f), s),
                 0.001f,
             )
         }

@@ -45,9 +45,22 @@ class InhouseParagraphBreaker(
      * CJK–Latin 自动间距（em）—— **断行侧的量宽必须把它算进版心**（[SkiaRunMeasurer.advances]
      * 的单一出口，见该方法 KDoc）。
      *
-     * 0 = 关（默认）。由 [bodyParagraphBreaker] 按 [orilumn.reader.engine.AbSwitch.inhouseBreak]
-     * 闸门传入，回退到 Skia 断行器时**必须**传 0：Skia 那条路无法为间隙预留版心，
-     * 若绘制侧照插间隙就会**超出版心被裁**（`NoLineExceedsContentWidthTest` 钉的硬约束）。
+     * 由 [bodyParagraphBreaker] 按 [orilumn.reader.engine.AbSwitch.inhouseBreak] 闸门传入。
+     *
+     * ## ⚠ 0 **不是**「关」——它是零间隙档（产品口径 2026-10-03 改）
+     *
+     * 本形参默认值 0，但 0 与其它档**同规则**：边界照检、作者手打的分隔空格**照吃**（画成零宽）、
+     * 注入的间隙宽 = 0。见 [orilumn.reader.engine.text.preprocess.CjkLatinSpacing] 类 KDoc。
+     *
+     * **这条让「拿 0 当回退口径」的老构造点全部失真**：Skia 断行器那条路**保得住**作者手打的
+     * 空格（`SkParagraph` 原样排），而本类的 0 档会把它们吃掉 ⇒ 两侧行宽差 `边界数 × 空格宽`，
+     * 断点随之不同（实测《Rust 程序设计语言》语料 `Skia=688.38 / 自建=655.08`，差 33.30
+     * = 3 个 11.10px 的空格）。
+     *
+     * ⇒ **与 Skia 做逐值比对时必须显式传「关」，而「关」现在只有一个入口**：
+     *   [CjkLatinSpacing.gaps] 拿到的 `spaceCount` 为 0，也就是**语料本身没有分隔空格**。
+     *   换句话说：**比断点就别拿带分隔空格的语料**，或者比之前先确认 `spaceCount` 全为 0。
+     *   这不是可以「顺手补一个开关」的事 —— 那正是本轮删掉的那个特例。
      */
     private val cjkLatinSpacingEm: Float = 0f,
     /**
@@ -211,10 +224,10 @@ class InhouseParagraphBreaker(
      * 差别只是**不施加版心宽、不找断点** —— 即「同一批字形宽，加起来」。
      * ⇒ 因此本方法与 [breakLines] **量源同源**，不存在「量宽走一条、排版走另一条」的分叉。
      *
-     * ## 标点挤压也在这条「同源」里（2026-10-03 补）
+     * ## 标点挤压：max-content **不减**它（2026-10-03 第 2 条，逆转上一轮）
      *
-     * 挤压让字位变**窄**，所以 max-content 必须**减掉**同一份额度，否则同一个 `adv` 会被两个方法
-     * 读出两个答案。本方法在补上这一减之前，端到端锁实测出行宽 **706.2265 > 版心 700**。
+     * 挤压只在「不挤就会把词切坏」时发生（见 [greedy]），而 max-content 的定义是「整段排成一行」——
+     * 一行即段落末行，无断点决策 ⇒ 那一行的挤压比例恒为 0 ⇒ 这里也不该减。详见方法体内的注释。
      *
      * ## `tag` 传 `null` 而不是原样传下去
      *
@@ -240,27 +253,21 @@ class InhouseParagraphBreaker(
         fontRuns: List<FontRun>,
     ): Float {
         if (text.isEmpty()) return 0f
-        val n = text.length
-        val gaps = if (cjkLatinSpacingEm > 0f) {
-            CjkLatinSpacing.gaps(text, cjkLatinSpacingEm, fontRuns)
-        } else {
-            emptyList()
-        }
+        val gaps = CjkLatinSpacing.gaps(text, cjkLatinSpacingEm, fontRuns)
         val adv = measurer.advances(text, fontSizePx, letterSpacingEm, null, families, weight, italic, monospace, fontRuns, gaps)
         var sum = 0f
         for (a in adv) sum += a
-        // 标点挤压**必须从 max-content 里也减掉**（与 [breakLines] 同一个 [PunctuationSqueeze.widths]）。
+        // ⚠ **这里刻意不减挤压额度**（产品裁决 2026-10-03 第 2 条，2026-10-03 反转了上一轮的口径）。
         //
-        // ⚠ 漏这一步的后果不是「表格列宽偏大一点」这么轻：max-content 是**「整段放得下一行吗」**的判据
-        //   （表格 auto 分列、单行快路径都问它）。断行侧按挤后的宽度判「放得下」、max-content 按没挤的
-        //   宽度答「放得下」⇒ 同一段两套答案 ⇒ 画比量宽 ⇒ 右溢被裁。
-        //   实测（`CjkLatinSpacingWiringTest` 的端到端锁）：版心 700 的行量出 **706.2265**。
-        //   —— 那把锁一直拿本方法当「绘制侧宽度」用，所以它当场抓到了这个分叉。
-        val squeeze = PunctuationSqueeze.widths(
-            text, 0, n, adv, 0, measurer, fontSizePx, letterSpacingEm,
-            null, families, weight, italic, monospace, fontRuns, punctuationSqueezeMaxEm,
-        )
-        for (s in squeeze) sum -= s
+        // 上一轮加过一次（KDoc 记着「实测版心 700 量出 706.2265」），那是在「额度全额上」的老口径下：
+        // 断行侧按挤后的宽度判「放得下」、max-content 按没挤的答「放得下」，两侧两套答案 ⇒ 画比量宽。
+        // 改写后这个前提**不成立**了：挤压只在「不挤就会把词切坏」时才发生（见 [greedy]），
+        // 而 **max-content 的定义就是「整段排成一行」** —— 一行 = 段落末行 = 没有断点决策，
+        // ⇒ 断行侧那个比例恒为 0、绘制侧也就恒不挤（画侧 ③ 要求 JUSTIFY 且非末行，见 [LineAligner]）。
+        // ⇒ 两侧此刻**同为「不挤」**，这里不减才是对的。
+        //
+        // 反过来若哪天有人在此减了额度，而断行侧并不挤，就会重新长出「画比量宽」的分叉 ——
+        // 症状与上一轮完全相同（版心 700 量出 706），所以这一条必须与 `greedy` 的口径**一起**看。
         return sum
     }
 
@@ -321,11 +328,7 @@ class InhouseParagraphBreaker(
 
         // 混排字距的间隙就在这里被算进 `adv`（[SkiaRunMeasurer.applyCjkLatinGaps]）——
         // **不在别处**：断行要预留版心、绘制要落在同一批字位上，两者必须走同一个取宽口（量画同源，教训 ⑩）。
-        val gaps = if (cjkLatinSpacingEm > 0f) {
-            CjkLatinSpacing.gaps(text, cjkLatinSpacingEm, fontRuns)
-        } else {
-            emptyList()
-        }
+        val gaps = CjkLatinSpacing.gaps(text, cjkLatinSpacingEm, fontRuns)
         val adv = measurer.advances(text, fontSizePx, letterSpacingEm, tag, families, weight, italic, monospace, fontRuns, gaps)
         // 首行可用宽直接扣缩进 —— SkiaParagraphBreaker 那段「TextIndent 整段单行快捷路径」的
         // R1 补偿在新实现下自然消失（本类没有那条快捷路径，首行从一开始就按 CSS 语义排）。
@@ -520,72 +523,104 @@ class InhouseParagraphBreaker(
             }
             val avail = if (first) headPx else restPx
             first = false
+            // ---- 挤压比例（产品裁决 2026-10-03 第 2、3 条）：0 = 完全不挤 ----
+            //
+            // 老口径是「额度全额上」（`w = adv[i] − squeezeW[i]`）—— 差 1px 也把每个收尾标点
+            // 各压 0.5em。真书实测（25 篇）：挤压槽 114456 个里 **98.6% 吃满了额度**，而真正
+            // 省下的行只有 4035 行（1.8%）⇒ 挤掉 11 万条缝只换来 4000 行，那不是优化。
+            // 用户原话：「**挤压不是目的！它是不得以而为之的！**」「没必要时（不涉及单词断行）
+            // 挤压什么！！！」
+            //
+            // ⇒ 新口径：`ratio = 0`，**只在「不挤就会把词切坏」时才抬上去**，且**只抬到刚够**。
+            var sqr = 0f
+            // 扫描一趟的产物（第二趟复用同一批槽位，故声明在重试循环之外）。
+            //
+            // [oppIdx]/[oppW] 是本行的断点历史（按下标升序，[oppN-1] 是最近的）。判定宽随滚动
+            // 增量维护，供退出循环后**从最近往回**扫「装得下的那个」。不能重算（O(n)×行数×历史长）。
             var i = s
             var hang = 0f
             var trail = 0f
-            // 本行的断点历史（按下标升序，[oppN-1] 是最近的）。判定宽随滚动增量维护，
-            // 供退出循环后**从最近往回**扫「装得下的那个」。不能重算（那是 O(n) × 行数 × 历史长）。
+            /** `[s, i)` 已累计的挤压**额度**（未乘比例）：[ratioToKeepWordIntact] 要它算总容量。 */
+            var capAcc = 0f
             var oppN = 0
             var brk = -1
             // 本行行尾**是不是我们主动选中的断点**（而非 R1 core 兜底 / 硬换行）。
             // 这是 `hyphenAtEnd` 的前提，见下面产出处的注释。
             var brkIsOpp = false
-            while (i < n) {
-                val c = text[i]
-                if (c == '\n') {
-                    brk = i
-                    break
-                }
-                // 标点挤压：这一格**实际占的宽**比 [advances] 量出的少 `squeezeW[i]`。
-                // 判定宽、尾空白记账、断点记账全部走这一个 `w` ⇒ 一处施加、三处生效。
-                val w = adv[i] - squeezeW[i]
-                val sp = isDocumentSpace(c)
-                // 续上行尾空白段 → 判定宽不变；落到非空白 → 先把那段并回来再算本字符。
-                val next = if (sp) hang else hang + trail + w
-                if (i > s && next > avail) break
-                hang = next
-                trail = if (sp) trail + w else 0f
-                i++
-                // **含该断点自己的连字符宽**：断在这里 ⇒ 行尾真会多一个 `-` ⇒ 它占版心。
-                if (opp.opportunityAt(i)) {
-                    if (oppN < OPP_HISTORY) { oppIdx[oppN] = i; oppW[oppN] = hang + hyphenW[i - 1]; oppN++ }
-                    else {
-                        // 历史满：丢最旧的一个（整体左移一位）。
-                        // 只在「一行里断点多于 OPP_HISTORY」时触发（版心 1600 / 40px 字 ⇒ 一行 ~40 断点），
-                        // [OPP_HISTORY] 次移位，可接受。
-                        System.arraycopy(oppIdx, 1, oppIdx, 0, OPP_HISTORY - 1)
-                        System.arraycopy(oppW, 1, oppW, 0, OPP_HISTORY - 1)
-                        oppIdx[OPP_HISTORY - 1] = i; oppW[OPP_HISTORY - 1] = hang + hyphenW[i - 1]
+            while (true) {
+                i = s; hang = 0f; trail = 0f; capAcc = 0f; oppN = 0; brk = -1; brkIsOpp = false
+                while (i < n) {
+                    val c = text[i]
+                    if (c == '\n') {
+                        brk = i
+                        break
+                    }
+                    // 标点挤压：这一格**实际占的宽**比 [advances] 量出的少 `额度 × 比例`。
+                    // 判定宽、尾空白记账、断点记账全部走这一个 `w` ⇒ 一处施加、三处生效。
+                    val w = adv[i] - PunctuationSqueeze.slotSqueeze(squeezeW[i], sqr)
+                    val sp = isDocumentSpace(c)
+                    // 续上行尾空白段 → 判定宽不变；落到非空白 → 先把那段并回来再算本字符。
+                    val next = if (sp) hang else hang + trail + w
+                    if (i > s && next > avail) break
+                    hang = next
+                    // ⚠ **必须与 `hang` 同步、且在 `break` 之后**：[capAcc] 的口径是 `[s, i)`
+                    //   （与 `hang` 同区间），而 [ratioToKeepWordIntact] 会自己接着加 `[i, we)`。
+                    //   放前面就把 `squeezeW[i]` 算了两次 ⇒ 高估额度 ⇒ 比例偏低 ⇒ 挤不到词尾。
+                    //   今天看不出症状（溢出点 `i` 必是西文字母/数字 ⇒ `squeezeW[i] == 0`），
+                    //   但那是 `isSqueezableClosingPunct` 的性质在**替这条兜底** —— 一旦候选表变宽就现形。
+                    capAcc += squeezeW[i]
+                    trail = if (sp) trail + w else 0f
+                    i++
+                    // **含该断点自己的连字符宽**：断在这里 ⇒ 行尾真会多一个 `-` ⇒ 它占版心。
+                    if (opp.opportunityAt(i)) {
+                        if (oppN < OPP_HISTORY) { oppIdx[oppN] = i; oppW[oppN] = hang + hyphenW[i - 1]; oppN++ }
+                        else {
+                            // 历史满：丢最旧的一个（整体左移一位）。
+                            // 只在「一行里断点多于 OPP_HISTORY」时触发（版心 1600 / 40px 字 ⇒ 一行 ~40 断点），
+                            // [OPP_HISTORY] 次移位，可接受。
+                            System.arraycopy(oppIdx, 1, oppIdx, 0, OPP_HISTORY - 1)
+                            System.arraycopy(oppW, 1, oppW, 0, OPP_HISTORY - 1)
+                            oppIdx[OPP_HISTORY - 1] = i; oppW[OPP_HISTORY - 1] = hang + hyphenW[i - 1]
+                        }
                     }
                 }
-            }
-            if (brk < 0) {
-                brk = when {
-                    i >= n -> n                       // 整段装下（含「尾随空白悬到段末」）
-                    // 退到断点 —— 但**必须逐个往回退到装得下的那个**。
-                    //
-                    // ⚠ 最早的写法是 `lastOpp > s -> lastOpp` 无条件退回，于是「最近断点也放不下」
-                    // 时会产出一行**超出版心的内容**。实测 `Donaudampfschiff…`（无空格超长单词）
-                    // 在版心 80 下溢出 **32.45px**、首行缩进 88% + 版心 120 溢出 **65.07px**
-                    // （`NoLineExceedsContentWidthTest` 钉住）。**分页阅读器不能容忍溢出**：
-                    // 浏览器能横向滚动所以能溢出，本项目页宽固定、超出部分被页面裁掉 = 内容丢失。
-                    //
-                    // ⚠ 第二版改成单槽 + `lastOppWidth <= avail` 门槛，溢出是消了，但**把
-                    // 「差一个连字符宽」当成了「退无可退」** → 原地硬切又不给连字符（词被无声
-                    // 切坏）。真值只有第三个：**往回退**。见上面「为什么必须往回退」。
-                    //
-                    // 注意「记账点在 `i++` 之后」：`hang > avail` 的那一刻循环已 `break`，
-                    // 故常规路径下 `oppW <= avail` 恒成立 —— 这里的判定真正生效的只有两种情形：
-                    // ① **差一个连字符宽**（最常见，实测 gap ∈ [−23, −1]px）；
-                    // ② 版心窄到连断点都装不下（版心 80 / 缩进吃掉版心）⇒ 退到底仍失败
-                    //    才是 R1 core（逐字断开、贪心填满版心），不是溢出。
-                    else -> {
-                        // 从最近的断点**往回退**，取第一个装得下的（贪心的定义，见 KDoc）。
-                        var k = oppN - 1
-                        while (k >= 0 && (oppIdx[k] <= s || oppW[k] > avail)) k--
-                        if (k >= 0) { brkIsOpp = true; oppIdx[k] } else i   // 退无可退 → R1 core：填满即断
+                if (brk < 0 && i < n) {
+                    // 溢出点落在**词内** ⇒ 照原样就要把词切坏（拉丁音节断词 / `CodeIdentifierBreakSource`
+                    // 的驼峰处）。这是挤压**唯一**的正当理由：先问「挤到词尾要多少」，
+                    // 够就抬比例重扫一趟（下面 `while (true)` 的下一轮），不够就照旧断。
+                    val up = ratioToKeepWordIntact(text, s, i, adv, squeezeW, hang, trail, avail, capAcc)
+                    // ⚠ **只许重试一趟**：`sqr > 0f` 即收手。否则两次都判「还能再挤一点」会自旋。
+                    if (sqr <= 0f && up > 0f) { sqr = up; continue }
+                }
+                if (brk < 0) {
+                    brk = when {
+                        i >= n -> n                       // 整段装下（含「尾随空白悬到段末」）
+                        // 退到断点 —— 但**必须逐个往回退到装得下的那个**。
+                        //
+                        // ⚠ 最早的写法是 `lastOpp > s -> lastOpp` 无条件退回，于是「最近断点也放不下」
+                        // 时会产出一行**超出版心的内容**。实测 `Donaudampfschiff…`（无空格超长单词）
+                        // 在版心 80 下溢出 **32.45px**、首行缩进 88% + 版心 120 溢出 **65.07px**
+                        // （`NoLineExceedsContentWidthTest` 钉住）。**分页阅读器不能容忍溢出**：
+                        // 浏览器能横向滚动所以能溢出，本项目页宽固定、超出部分被页面裁掉 = 内容丢失。
+                        //
+                        // ⚠ 第二版改成单槽 + `lastOppWidth <= avail` 门槛，溢出是消了，但**把
+                        // 「差一个连字符宽」当成了「退无可退」** → 原地硬切又不给连字符（词被无声
+                        // 切坏）。真值只有第三个：**往回退**。见上面「为什么必须往回退」。
+                        //
+                        // 注意「记账点在 `i++` 之后」：`hang > avail` 的那一刻循环已 `break`，
+                        // 故常规路径下 `oppW <= avail` 恒成立 —— 这里的判定真正生效的只有两种情形：
+                        // ① **差一个连字符宽**（最常见，实测 gap ∈ [−23, −1]px）；
+                        // ② 版心窄到连断点都装不下（版心 80 / 缩进吃掉版心）⇒ 退到底仍失败
+                        //    才是 R1 core（逐字断开、贪心填满版心），不是溢出。
+                        else -> {
+                            // 从最近的断点**往回退**，取第一个装得下的（贪心的定义，见 KDoc）。
+                            var k = oppN - 1
+                            while (k >= 0 && (oppIdx[k] <= s || oppW[k] > avail)) k--
+                            if (k >= 0) { brkIsOpp = true; oppIdx[k] } else i   // 退无可退 → R1 core：填满即断
+                        }
                     }
                 }
+                break
             }
             // 反自旋护栏（正常路径不可达：`brk > s` 由上面的 `i > s` 前置条件保证）。
             // 留着是因为一旦未来某个 source 标出 0 号断点，这里就是死循环而不是一次错行。
@@ -602,12 +637,89 @@ class InhouseParagraphBreaker(
             //
             // ⇒ 连字符是「**主动选了某个断点**」的产物，[brkIsOpp] 才是它的前提；
             //   而 [lastOppWidth <= avail] 这个门槛保证了「选中的断点连同连字符一起装得下」。
-            out.add(BrokenLine(s until brk, targetLh, hyphenAtEnd = brkIsOpp && opp.isHyphenAt(brk)))
+            //
+            // [sqr] 随行携带（[orilumn.reader.engine.laying.BrokenLine.squeezeRatio]）：绘制侧
+            // 必须用**同一个比例**乘**同一份额度表**，否则画比量宽（量画同源，教训 ⑩）。
+            out.add(
+                BrokenLine(
+                    s until brk, targetLh,
+                    hyphenAtEnd = brkIsOpp && opp.isHyphenAt(brk),
+                    squeezeRatio = sqr,
+                ),
+            )
             // `brk` 落在硬换行上时 `text[brk]` 就是**刚这一行的终止符**，不是空行的开头。
             // 跨过去，行首的 `'\n'` 判据才只表示**真正的空行**（否则 `a\n\nb` 会多产一行）。
             s = if (brk < n && text[brk] == '\n') brk + 1 else brk
         }
         if (out.isEmpty()) out.add(BrokenLine(0 until n, targetLh))
         return out
+    }
+
+    /**
+     * **「为了不把词切坏，要挤多少」的最小比例**（0 = 不挤 / 这条路走不通）。
+     *
+     * 产品裁决 2026-10-03 第 2 条：「标点挤压是在**有必要**时才做的！没必要时（不涉及单词断行）
+     * 挤压什么！！！」—— 所以本方法的**第一件事就是判「有没有必要」**，判据是
+     * **溢出点 `i` 落在西文词内部**（`text[i-1]` 与 `text[i]` 都是西文字母/数字）。
+     * 纯汉字行、词尾溢出、标点处溢出 ⇒ 一律 0，与老口径（额度全额上）分道扬镳。
+     *
+     * ## 口径：`need / Σ额度`，**只取刚够的量**
+     *
+     * ```
+     * need = (hang + trail) + Σ_{j∈[i,we)} adv[j] − avail     // 把词放到行尾还差多少
+     * cap  = capAcc            + Σ_{j∈[i,we)} squeezeW[j]    // [s, we) 的挤压额度总和
+     * ratio = need / cap        （且仅当 need ≤ cap 时才有解）
+     * ```
+     * `we` = 含 `i` 的那段西文 run 的**词尾**（[westernRunEnd]）。于是重扫一趟（`sqr = ratio`）
+     * 之后，行要么正好落在 `we`（词完整），要么更靠后（`we` 之后的字符也塞进来了，更赚）。
+     *
+     * ## 三条返回 0 的早退（各自的道理）
+     *
+     *  - **不在词内** ⇒ 没有断词之虞，不挤（这是本轮的主口径，占真书绝大多数行）。
+     *  - **前瞻超上界**（`w > 2 × avail`）⇒ 词本身比两倍版心还长，挤到词尾也无解；
+     *    这个上界同时是**复杂度护栏**：没有它，一个 10 万字符的无空格 token 会让每行都前瞻
+     *    10 万步 ⇒ O(n²)。两倍版心足够判死，且不误伤任何能靠挤压救回来的词。
+     *  - **挤到全额也不够**（`need > cap`）⇒ 这条路走不通；此时按老路径断词，**并且一点都不挤**
+     *    （挤了也还是断词，纯亏观感 —— 这正是「挤压不是目的」的字面含义）。
+     *
+     * ## 为什么用 [CjkLatinSpacing.isWestern] 判「西文」
+     *
+     * 「什么算词内」必须与混排字距、槽位分级**同一份定义**（教训㩼：同一规则两处实现）。
+     * [CjkLatinSpacing.isWestern] 已是全仓唯一的「西文字母或数字」判据（公开理由见其 KDoc），
+     * 渲染层 [JustifySlack] 也复用它，本方法在 [common] 之下复用它不越层。
+     */
+    private fun ratioToKeepWordIntact(
+        text: CharSequence,
+        s: Int,
+        i: Int,
+        adv: FloatArray,
+        squeezeW: FloatArray,
+        hang: Float,
+        trail: Float,
+        avail: Float,
+        capAcc: Float,
+    ): Float {
+        val n = text.length
+        if (i <= s || i >= n) return 0f
+        if (!CjkLatinSpacing.isWestern(text[i - 1].code)) return 0f
+        if (!CjkLatinSpacing.isWestern(text[i].code)) return 0f
+        // 词尾：含 `i` 的西文 run 的右端（不含）。`i` 在 run 内部 ⇒ `we > i` 恒成立。
+        var we = i + 1
+        while (we < n && CjkLatinSpacing.isWestern(text[we].code)) we++
+        // `[s, we)` 的判定宽与额度总量。前者 = `hang + trail + [i, we) 的自然宽`：
+        // `hang`/`trail` 是**不乘比例**的自然口径（扫描时 `hang` 记的就是自然宽），
+        // `[i, we)` 全是词内字符、无文档空白，故尾随空白记账在这段上是恒 0。
+        var w = hang + trail
+        var cap = capAcc
+        var j = i
+        while (j < we) {
+            w += adv[j]
+            cap += squeezeW[j]
+            j++
+        }
+        if (w > avail * 2f) return 0f                    // 词太长 ⇒ 挤也没用（兼作复杂度护栏）
+        val need = w - avail
+        val ratio = PunctuationSqueeze.ratioNeeded(need, cap)
+        return if (ratio >= 1f) 0f else ratio            // `need > cap` ⇒ 无解 ⇒ 不挤
     }
 }

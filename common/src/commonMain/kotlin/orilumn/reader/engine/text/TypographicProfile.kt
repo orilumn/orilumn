@@ -85,7 +85,11 @@ data class TypographicProfile(
      * 间隙是**注入的宽度**：它必须在版心里被**预留**（否则超出版心被裁，分页阅读器硬错误），
      * 而只有 [orilumn.reader.engine.skia.InhouseParagraphBreaker] 能预留 —— Skia 回退阀那条路
      * 无法让 `SkParagraph` 为外来宽度让位。于是开关 off 时若还照画，症状就是「版面溢出」。
-     * ⇒ 开关 off ⇒ 本值返 0，绘制侧**整条不画**，与断行侧的 0 严格一致。
+     * ⇒ 开关 off ⇒ 本值返 0。0 是**零间隙档**而不是「整条关掉」档（产品口径 2026-10-03）：
+     *   边界照检、作者手打的分隔空格照吃，注入的间隙宽 0 —— 见
+     *   [orilumn.reader.engine.text.preprocess.CjkLatinSpacing] 类 KDoc。
+     *   量侧与画侧**同为 0** 就够一致了（两侧都吃同一批空格、都注入 0 宽间隙），
+     *   本闸门要的正是这个「两侧拿到同一个数」。
      *
      * ⚠ 与 [orilumn.reader.engine.text.LayoutParamKey.fromProfile] 的闸门是**同一个判据**
      *   （[orilumn.reader.engine.AbSwitch.inhouseBreak]）：键算出来的间隙值必须与实际施加的值

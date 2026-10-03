@@ -23,6 +23,9 @@ class TableCellLinesTest {
         private val ranges: List<IntRange>,
         private val heights: List<Int>,
         override val shapeFontSizePx: Float = 10f,
+        /** 逐行挤压比例（格内那一路的 `DrawLine.squeezeRatio` 源）。缺省全 0 = 不挤。 */
+        private val squeezeRatios: List<Float> = emptyList(),
+        private val hyphenFlags: List<Boolean> = emptyList(),
     ) : ParagraphShapeRef {
         private val tops: IntArray = IntArray(ranges.size).also { arr ->
             var y = 0
@@ -36,6 +39,8 @@ class TableCellLinesTest {
         override fun shapeLineEnd(k: Int): Int = ranges[k].last + 1
         override fun shapeLineTop(k: Int): Int = tops[k]
         override fun shapeLineBottom(k: Int): Int = tops[k] + heights.getOrElse(k) { 1 }
+        override fun shapeLineHyphenAtEnd(k: Int): Boolean = hyphenFlags.getOrElse(k) { false }
+        override fun shapeLineSqueezeRatio(k: Int): Float = squeezeRatios.getOrElse(k) { 0f }
         override val shapeAlignment: TextAlign get() = TextAlign.LEFT
         override val shapeColorRuns get() = emptyList<orilumn.reader.engine.css.ColorRun>()
         override val shapeFontRuns get() = emptyList<orilumn.reader.engine.css.FontRun>()
@@ -84,6 +89,51 @@ class TableCellLinesTest {
         assertEquals(4..7, win.lines[1].range)
         // 边框：无声明边框宽度即无边框（旧整框矩形已删）。
         assertTrue(win.borders.isEmpty())
+    }
+
+    /**
+     * **格内行的 `squeezeRatio` / `hyphenAtEnd` 逐行取自 shape**（canonical 之外的第三路）。
+     *
+     * ## 为什么这把锁不可省
+     *
+     * [orilumn.reader.engine.skia.DrawLine] 有**三个**构造点，三个各漏一个字段都会静默降级：
+     * [orilumn.reader.engine.skia.DrawLineBuilder]（canonical，走 `LayoutBox`）、
+     * 本文件这一路（表格格内）、`BoxChapterLayouter`（增量/临时页，走 shape）。
+     * 另两路各有 `SkiaDrawLineWindowCoherenceTest` 的两条锁盯着（它们都要跑整章重排，很贵），
+     * **只有这一路此前一个字段都没锁** —— 表格章节的连字符与挤压比例全靠肉眼。
+     *
+     * 这里直接构造 [ParagraphShapeRef] 桩喂非零值 ⇒ 漏传立刻现形，不必跑整章。
+     *
+     * 漏 `squeezeRatio` 的症状是**画比量宽 ⇒ 右溢被裁**（分页阅读器页宽固定、无横向滚动条）；
+     * 漏 `hyphenAtEnd` 的症状是连字符画不出来（已修过一次，见
+     * [orilumn.reader.engine.laying.ParagraphShapeRef.shapeLineHyphenAtEnd] 的 KDoc）。
+     */
+    @Test
+    fun `cell lines carry squeezeRatio and hyphenAtEnd from the shape`() {
+        val s1 = StubShape(
+            "項目iBooks", listOf(0..3, 4..7), listOf(15, 15),
+            squeezeRatios = listOf(0f, 0.375f),
+            hyphenFlags = listOf(false, true),
+        )
+        val s2 = StubShape(
+            "Readium", listOf(0..6), listOf(15),
+            squeezeRatios = listOf(0.5f),
+            hyphenFlags = listOf(true),
+        )
+        val table = TableRowLayout(
+            intArrayOf(0, 300), intArrayOf(300, 300),
+            listOf(cell("th", "x", 0, 300, s1), cell("td", "x", 300, 300, s2)),
+        )
+        val win = TableCellLines.expand(table, 100, 30, 1000, { style }, style, 0f)
+        assertEquals("行数", 3, win.lines.size)
+        assertEquals(
+            "逐行挤压比例必须逐值取自 shape（格 1 = [0, 0.375]，格 2 = [0.5]）",
+            listOf(0f, 0.375f, 0.5f), win.lines.map { it.squeezeRatio },
+        )
+        assertEquals(
+            "逐行断词收尾标志必须逐值取自 shape（格 1 = [false, true]，格 2 = [true]）",
+            listOf(false, true, true), win.lines.map { it.hyphenAtEnd },
+        )
     }
 
     @Test

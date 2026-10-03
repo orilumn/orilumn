@@ -6,6 +6,7 @@ import orilumn.reader.engine.laying.isDocumentSpace
 import orilumn.reader.engine.laying.isSoftHyphen
 import orilumn.reader.engine.laying.lineHeightPx
 import orilumn.reader.engine.text.preprocess.CjkLatinSpacing
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
@@ -76,6 +77,22 @@ internal class LineAligner(
          * 本字段只告诉绘制侧「那个位置要画 `-`、画多宽」。
          */
         val hyphenWidth: Float = 0f,
+        /**
+         * **本行的 slack 被优先级额度封顶了**（真 = 留缺口，[visibleRight] < 行宽）。
+         *
+         * 唯一成因（[JustifySlack.plan] 的既定行为）：有限级 0/1/2 全部吃满、
+         * 而行里**一个级 3（西文词内）槽都没有** —— 即「整行无西文字母 + slack 大到每缝都
+         * 超过该级上限」。此时**宁可右缘短一点也不把每个汉字都撑开**（实施方案 S4 当年写的
+         * 「超出即放弃该行」被实测推翻，现在只在这一种情形下才放弃）。
+         *
+         * ## 为什么这个字段住在生产侧（不是给测试开的口子）
+         *
+         * 「这一行没铺满是缺陷还是设计」这条规则**只写在 [JustifySlack.plan] 里**。
+         * 若让 `LineAlignerTest` 自己重算「有限级额度总和 vs slack」，那就成了**同一规则两份实现**
+         * —— 本仓最贵的一类 bug（教训㩼：同一规则两处各判一次必然静默分叉）。
+         * 所以这里只**汇报结果**，判定仍在 plan 里，测试只读这个布尔。
+         */
+        val justifyCapped: Boolean = false,
     )
 
     /** 连字符左缘（= [Placement.trailStartX] − [Placement.hyphenWidth]）；无连字符时 −1。 */
@@ -120,6 +137,18 @@ internal class LineAligner(
          * 显式传参只给「要单独量一侧」的测试用；生产一律走默认值。
          */
         punctuationSqueezeMaxEm: Float = PunctuationSqueeze.appliedMaxEm(),
+        /**
+         * 本行**实际施加的标点挤压比例**（`[0,1]`，0 = 不挤），来自
+         * [orilumn.reader.engine.laying.BrokenLine.squeezeRatio]。
+         *
+         * **断行侧定断点时用的是同一个比例**（[orilumn.reader.engine.skia.InhouseParagraphBreaker.greedy]
+         * 「挤到词尾不破词」），所以这里必须原样套上去才能画 == 量；漏传（默认 0）会让画比量宽
+         * ⇒ 右溢被裁（分页阅读器不能横向滚动）。
+         *
+         * 默认 0 = 完全不挤（绝大多数行；挤压只在「不挤就会把词切坏」时才发生，
+         * 见 [PunctuationSqueeze.ratioNeeded]）。
+         */
+        squeezeRatio: Float = 0f,
     ): Placement {
         val start = range.first.coerceIn(0, text.length)
         val endExcl = (range.last + 1).coerceIn(start, text.length)
@@ -149,19 +178,24 @@ internal class LineAligner(
         //   绘制侧多出一个空格宽 ⇒ 画比量宽 ⇒ 右溢被裁（实测 fs=40/版心300 时正好 10.000px），
         //   且末行没有 JUSTIFY 兜底 ⇒ 英文与中文之间那个距离与滑块无关。详见
         //   [CjkLatinSpacing.gapsForRange] 的 KDoc。
-        val cjkGaps =
-            if (cjkLatinSpacingEm > 0f) CjkLatinSpacing.gapsForRange(text, start, endExcl, cjkLatinSpacingEm, fontRuns)
-            else emptyList()
+        // ⚠ **不对 `cjkLatinSpacingEm == 0` 短路**（产品口径 2026-10-03）：0 档与其它档同规则 ——
+        //   边界照检、被吃掉的分隔空格照吃（零宽）、注入间隙宽 = 0。短路会让 0 档独走一套版面
+        //   （作者空格留着 ⇒ 中西之间还隔着一个整空格），那正是需求否掉的「0 的特例」。
+        //   见 [CjkLatinSpacing] 类 KDoc「`gapEm = 0` 是参数为 0 的那一档」。
+        val cjkGaps = CjkLatinSpacing.gapsForRange(text, start, endExcl, cjkLatinSpacingEm, fontRuns)
         val adv = measurer.advances(
             line, fontSizePx, letterSpacingEm, tag, families,
             weight, italic, monospace, lineRuns, cjkGaps,
         )
-        // 标点挤压：**收窄收尾类标点的字位**（渲染层·几何测量，[PunctuationSqueeze]）。
+        // 标点挤压：**按比例收窄收尾类标点的字位**（渲染层·几何测量，[PunctuationSqueeze]）。
         //
         // ⚠ **必须在 `natural` 之前施加**：`slack = lineWidth − natural`，`natural` 少了 ΣS
         //   ⇒ `slack` 多出 ΣS ⇒ JUSTIFY 把它分摊出去 ⇒ 行末右缘**照旧贴版心**，
-        //   变的是**墨迹**右缘（内移 S）与**总行数**（断行侧也按 S 预留了，见 [InhouseParagraphBreaker]）。
+        //   变的是**墨迹**右缘（内移 S）与**总行数**（断行侧也按同一比例预留了，见 [InhouseParagraphBreaker]）。
         //   顺序反了就是「挤了但右缘跟着退」＝ 什么都没换到。
+        //
+        // ⚠ **`squeezeRatio` 是断行侧算出的那一个**（不是这里重算的）：挤压参与断点决策，
+        //   两边各算一份就会在「挤到词尾 vs 多塞一个字」上分叉，而那种分叉表现为**画比量宽**。
         //
         // ⚠ `advBase = start`：本方法的 `adv` 是**行内局部**下标，而额度是**段级**属性
         //   （`inkLeft(i+1)` 要看下一行第一个字）。传 `start` 让 [PunctuationSqueeze.widths]
@@ -170,7 +204,7 @@ internal class LineAligner(
             text, start, endExcl, adv, start, measurer, fontSizePx, letterSpacingEm,
             tag, families, weight, italic, monospace, fontRuns, punctuationSqueezeMaxEm,
         )
-        for (k in 0 until n) if (squeeze[k] != 0f) adv[k] -= squeeze[k]
+        for (k in 0 until n) if (squeeze[k] != 0f) adv[k] -= PunctuationSqueeze.slotSqueeze(squeeze[k], squeezeRatio)
 
         // 尾随文档空白：计入 range、画（无墨无害）、但**不计入可见宽度**。
         var visEnd = endExcl
@@ -334,6 +368,43 @@ internal class LineAligner(
         } else {
             null
         }
+        // ---- 挤压理由 ③：「行尾另有剩余额度，也一并挤」（产品裁决 2026-10-03 第 2 条的第 2 个理由）----
+        //
+        // [JustifySlack] 铺不满时行末会留一道缺口（`slack − plan.placed > 0`，判据与
+        // [Placement.justifyCapped] 同一式）。唯一的例外形态是「**行内无级 3 槽**（纯汉字行）
+        // 且 `slack` 超过全部有限额度之和」—— 实测真书只占 **0.27%** 的行。那道缺口没法靠拉伸补，
+        // 就用挤压补：**二次挤压只会让行变窄** ⇒ 1-Lipschitz ⇒ 绝不产生右溢，这是它敢放在这里的前提。
+        //
+        // ⚠ **必须 clamp 到「剩余额度」**：`ratio` 是**相对**额度表的，第二次挤压若拿满额度，
+        //   一行的实际挤压比例就会 `> 1`（把标点压成负宽）。故上界取 `1 − squeezeRatio`。
+        //   （断行侧给的 [squeezeRatio] 恒 `≤ 1` —— 它自己先判过「挤到全额也不够就不挤」。）
+        //
+        // ⚠ **只扫一趟**：第二次挤压后 `slack` 变大，`plan` 可能又能铺满一点，于是可能又出现缺口。
+        //   但那属于「挤了也填不满」的病态行（额度与槽都极少），再挤一轮收益是亚像素级的 ——
+        //   与其加一趟 O(字位) 的重规划，不如让它留着缺口。
+        var plan1 = plan
+        if (plan != null) {
+            val leftover = slack - plan.placed
+            if (leftover > 1e-3f) {
+                var capTotal = 0f
+                for (k in 0 until n) capTotal += squeeze[k]
+                if (capTotal > 0f) {
+                    val room = 1f - squeezeRatio
+                    val r = min(1f, leftover / capTotal)
+                    val r2 = if (room < r) room else r
+                    if (r2 > 0f) {
+                        var applied = 0f
+                        for (k in 0 until n) {
+                            val d = PunctuationSqueeze.slotSqueeze(squeeze[k], r2)
+                            if (d != 0f) { adv[k] -= d; applied += d }
+                        }
+                        natural -= applied
+                        val slack2 = lineWidthPx - natural
+                        if (slack2 > 0f) plan1 = JustifySlack.plan(text, start, xsExtraLimit, cjkGaps, fontSizePx, slack2)
+                    }
+                }
+            }
+        }
         // 拉伸后**内容**宽 = natural + 实际落到 `xs` 上的总量 − 缩进（`natural` 已含缩进 `x0Raw`，
         // 故这里要减掉）。
         //
@@ -352,7 +423,7 @@ internal class LineAligner(
         //     每个汉字都撑开，比留缺口更难看。宁可短一点也不撑。
         //  ③ 级内均分的浮点尾差（`per × cnt` 与预算差一个 ulp）。右缘是硬边界
         //     （[NoLineExceedsContentWidthTest] 钉它），宁可短不可超。
-        val finalContent = natural + (plan?.placed ?: 0f) - x0Raw
+        val finalContent = natural + (plan1?.placed ?: 0f) - x0Raw
         // CENTER/RIGHT 按**最终**内容宽定位（用拉伸前的 natural 会偏）。
         //
         // ⚠ 这里**不能再加 `x0Raw`**：缩进只是「行首多出来的一段空白」，它排在文字**前面**，
@@ -388,16 +459,23 @@ internal class LineAligner(
             // ⚠ ①② 现在**收在 [JustifySlack.Plan.levels] 里**（`-1` 即「不是可拉伸槽」），
             //   本循环只剩「查级 → 加该级的量」一步。这是有意的：**判据只有一份**
             //   （[graftKerningOnto] 的回填走同一个 [JustifySlack.plan]），两处各判一次会分叉。
-            if (plan != null && k < xsExtraLimit) {
-                val lv = plan.levels[k]
-                if (lv >= 0) x += plan.per[lv]
+            if (plan1 != null && k < xsExtraLimit) {
+                val lv = plan1.levels[k]
+                if (lv >= 0) x += plan1.per[lv]
             }
         }
 
         // 行末尾随空白紧贴**可见右缘**（含对齐偏移 x0）。有连字符时它就是**连字符右缘**，
         // 连字符左缘 = 本值 − `hyphenWidth`（见 [Placement.hyphenXOf]）。
         val trailStartX = x0 + finalContent
-        return Placement(xs, adv.copyOf(n), trailStartX, trailStartX, hyphenW)
+        // 封顶检测：**用 `placed` 与 `slack` 比**，不重算额度（额度只有 plan 知道，见字段 KDoc）。
+        // `1e-3px` 门槛：级内均分的浮点尾差（`per × cnt` 与预算差一个 ulp）不该算成「封顶」。
+        //
+        // ⚠ `slack` 取**二次挤压后**的那个（`lineWidthPx − natural`，`natural` 已被上面改写）——
+        //   否则 `capped` 会把「二次挤压已经补上的那道缺口」也算进去，于是明明补满了却报封顶
+        //   （[LineAlignerTest] 的 `JUSTIFY 纯汉字行封顶后留缺口而不是撑字缝` 会当场红）。
+        val capped = plan1 != null && (lineWidthPx - natural) - plan1.placed > 1e-3f
+        return Placement(xs, adv.copyOf(n), trailStartX, trailStartX, hyphenW, capped)
     }
 
     // 末字 run 字号取自**顶层** [lastRunSizePx]（与 [graftKerningOnto] 共用同一份定义 ——

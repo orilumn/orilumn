@@ -147,11 +147,7 @@ internal fun graftKerningOnto(
             if (deficit > 0f) {
                 // 槽 `k` = 字符 `k` 与 `k+1` 之间 ⇒ 覆盖 `k ∈ [0, lv)`，
                 // 绝对下标区间 `[start, start + lv)`（与 `gapsForRange` 的裁剪口径一致）。
-                val gaps = if (cjkLatinSpacingEm > 0f) {
-                    CjkLatinSpacing.gapsForRange(text, start, start + lv, cjkLatinSpacingEm, fontRuns)
-                } else {
-                    emptyList()
-                }
+                val gaps = CjkLatinSpacing.gapsForRange(text, start, start + lv, cjkLatinSpacingEm, fontRuns)
                 val plan = JustifySlack.plan(text, start, lv, gaps, fontSizePx, deficit)
                 var acc = 0f
                 for (i in 1..lv) {

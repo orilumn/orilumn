@@ -42,6 +42,16 @@ data class CjkLatinGap(
  * space run is claimed by at most one adjustment, since an adjustment's left slot is the single
  * char right before that run).
  *
+ * ## `gapEm = 0` 是**参数为 0 的那一档**，不是「关掉」那一档（产品口径 2026-10-03 改）
+ *
+ * 原实现把 0 当成「整条功能不生效」：`gapsForRange` 直接返空、所有调用点还有一层
+ * `if (cjkLatinSpacingEm > 0f)` 短路 ⇒ 作者手打的分隔空格被原样保留 ⇒ `Rust 的所有权` 在 0 档
+ * 仍然是 `Rust 的所有权`，**中西之间留着一个整空格宽**，与「混排字距 = 0」的字面意思相反。
+ *
+ * 现在 0 档与其它档**走同一条规则**：边界照检、那串分隔空格照吃（画成零宽）、注入的间隙宽 = 0。
+ * 于是「混排字距 = 0」＝**字面意义上的距离 0**（只剩 [letterSpacing] 那一份字间距），
+ * 与档位之间只有 `gapEm` 这一个数在变，没有第二个分叉点。**别再把 0 写成特例分支。**
+ *
  * ## 「按段检测」与「按行检测」为什么不会打架（**画 == 量**，2026-10-03 改）
  *
  * 间隙的**施加**发生在两处：断行侧对**整段**检测
@@ -219,7 +229,22 @@ object CjkLatinSpacing {
         gapEm: Float,
         runs: List<FontRun> = emptyList(),
     ): List<CjkLatinGap> {
-        if (gapEm <= 0f || endExcl <= start) return emptyList()
+        // ⚠ **不再对 `gapEm == 0` 短路**（产品口径 2026-10-03 改，原为「0 = 整条关掉」）。
+        //
+        // **0 档不是特例档，它是参数为 0 的那一档**：「中西之间只由字间距分隔」意味着距离**真的
+        // 是 0**，而作者为了让中英分开而手打的那串半角空格正是要替换掉的东西（CLREQ 4.1
+        // 「删除多余半角空格，注入固定间隙」）—— 间隙宽可以是 0，**空格一律照吃**。
+        // 于是 `Rust 的所有权` 在 0 档排成 `Rust的所有权`，与其它档位的差别**只有间隙宽这一个数**，
+        // 而不在「有没有删空格」上分叉（原先的短路让 0 档独走一套规则，是同一条规则的两个实现）。
+        //
+        // ⚠ 代价与必须连带改的地方：
+        //  - `LayoutParamKey` 的「`cjkLatinSpacingEm == 0` 复现历史流」固定点作废（0 现在会改版面）；
+        //  - 所有 `if (cjkLatinSpacingEm > 0f)` 的短路都要删（`LineAligner` /
+        //    [orilumn.reader.engine.skia.InhouseParagraphBreaker] /
+        //    [orilumn.reader.engine.skia.KerningClusterTable] /
+        //    [orilumn.reader.engine.skia.ClusterTrackGraft] /
+        //    [orilumn.reader.engine.skia.SkiaRunMeasurer]），否则两侧对 0 档给出两套版面。
+        if (endExcl <= start) return emptyList()
         val s = start.coerceAtLeast(0)
         val e = endExcl.coerceAtMost(text.length)
         if (e <= s) return emptyList()

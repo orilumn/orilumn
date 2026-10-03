@@ -80,6 +80,13 @@ class TableCellBlock(
     var height: Int = 0,
     var ranges: List<IntRange> = emptyList(),
     var hyphenAtEnd: List<Boolean> = emptyList(),
+    /**
+     * 逐行**标点挤压比例**（与 [ranges] 同长同序；0 = 不挤）。与 [hyphenAtEnd] 同款理由：
+     * 断行侧「挤着算宽度」才定下断点，绘制侧漏读就画比量宽。塑形/断行侧写，绘制侧读。
+     * 轻路径不回填（读块会漏）⇒ 走塑形的格内两路改读 `ParagraphShapeRef.shapeLineSqueezeRatio`，
+     * 见 [orilumn.reader.engine.skia.TableCellLines] 的注释。
+     */
+    var squeezeRatios: List<Float> = emptyList(),
     var lineHeights: List<Int> = emptyList(),
     var shape: ParagraphShapeRef? = null,
 ) {
@@ -194,6 +201,14 @@ class LayoutBox(
      * 放在**参数表末尾**：本类有大量按位置传参的调用点，插在中间会打断它们。
      */
     val hyphenAtEnd: List<Boolean> = emptyList(),
+    /**
+     * **逐行标点挤压比例**（与 [ranges] 同长同序，`[0,1]`，0 = 不挤）。断行侧是「挤着算宽度」
+     * 才敢把词完整留在同一行的（[orilumn.reader.engine.laying.BrokenLine.squeezeRatio]），
+     * 绘制侧靠这个字段才知道该按什么比例落墨 —— 漏传 = 画比量宽 ⇒ 右溢被裁。
+     *
+     * 同样**放在参数表末尾**（理由同 [hyphenAtEnd]）。
+     */
+    val squeezeRatios: List<Float> = emptyList(),
 ) {
     var contentTop: Int = 0
 

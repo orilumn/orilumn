@@ -141,6 +141,9 @@ object DrawLineBuilder {
                     // 实测（Rust 书 22 章、版心 1600）：正文拉丁词内断行 253 行，丢连字符 253 行（100%）。
                     // 单段小探针（`firstLineIndex` 从 0 起）恰好对上，故旧锁全绿也没暴露。
                     hyphenAtEnd = leaf.hyphenAtEnd.getOrElse(i) { false },
+                    // 挤压比例：**下标口径与 `hyphenAtEnd` 完全同款**（叶内行序 `i`，不是章内
+                    // 全局行序 `lineIdx`）—— 理由同上，换成 `lineIdx` 会让绝大多数叶取到 0。
+                    squeezeRatio = leaf.squeezeRatios.getOrElse(i) { 0f },
                     baselineShifts = shifts,
                     textShadow = shadow,
                     emphasis = style.emphasisStyle,

@@ -124,6 +124,12 @@ class NoLineExceedsContentWidthTest {
                 dl.text, dl.range, dl.fontSizePx, dl.lineWidthPx.toFloat(), dl.letterSpacingEm,
                 dl.tag, dl.families, dl.weight, dl.italic, dl.monospace, dl.fontRuns,
                 dl.alignment, dl.firstLineIndentPx, endExcl >= dl.text.length, dl.hyphenAtEnd,
+                // ⚠ **必须带上 `squeezeRatio`**（用命名实参，因为它是形参表**最后**一位）：
+                //   断行侧可能是「挤着算宽度才保住词」的（[BrokenLine.squeezeRatio]），绘制侧
+                //   按同一个比例挤。漏传 = 本锁按「一点不挤」量，那条行就凭空宽出 ΣS
+                //   （实测真书正文 27.27px、居中缩进 7.98px）⇒ **假溢出**。
+                //   这正是 `DrawLine.squeezeRatio` 的 KDoc 说的那个症状，只不过发生在锁自己身上。
+                squeezeRatio = dl.squeezeRatio,
             )
             // 与 paintGlyphs 同分支：簇位轨可用就用簇位轨，否则退回 Aligner 的 x。
             val graft = if (kern.needsClusters(dl.text, start, endExcl)) {

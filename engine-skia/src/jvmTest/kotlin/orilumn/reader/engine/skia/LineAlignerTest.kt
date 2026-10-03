@@ -9,6 +9,7 @@ import orilumn.reader.engine.laying.BoxLayouter
 import orilumn.reader.engine.laying.HIDDEN_NONE
 import orilumn.reader.engine.laying.NormalFlowLayout
 import orilumn.reader.engine.laying.isDocumentSpace
+import orilumn.reader.engine.laying.isSoftHyphen
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -46,6 +47,15 @@ class LineAlignerTest {
      * **必须够长**：锁 1 的守卫要求「至少有 2 行装得下的中部行」，而 interior 行数 = 总行数 − 1。
      * 第一版只有 1 句，在版心 900/1600 下都只切出 3~4 行 ⇒ 扣掉末行与超宽行后参与判据的不足 2 行
      * ⇒ 守卫判「假锁」。**加到 2 句**后 1600 档下自建侧有 3 行装得下（skia 侧 2 行，见守卫注释）。
+     *
+     * 【2026-10-03 混排字距】守卫随后收紧成「装得下 + 有字缝 + **额度未封顶**」
+     * （三条排除见锁 1 内的注释），而 0 档照吃分隔空格让断点整体前移 ⇒ 前两段在自建侧只剩
+     * **2** 行合格（另一行退化成「`。`」单标点独占」，代价登记见 [visibleGlyphs]）。
+     * 守卫阈值 2 仍然成立，故语料**保持两句不变**。
+     *
+     * ⚠ 曾试过加一段纯中文把行数补上去 —— **撤回**：纯中文行没有级 3 槽，slack 一大就被
+     *   额度封顶（[Placement.justifyCapped] 那条排除），补进来的行**全部不合格**，
+     *   守卫照样红。这条弯路本身就是「额度封顶真实存在且不罕见」的一个证据。
      */
     private val realPara =
         "<p>派生 <code>Clone</code> 实现了 <code>clone</code> 方法，当其为整个类型实现时，" +
@@ -82,6 +92,42 @@ class LineAlignerTest {
         text, range, fs, width, lsEm, tag, fam, 400, false, false, runs, align, indent, isLast,
     )
 
+    /**
+     * 一行的**可见字形数** = 区间长 − 尾随文档空白 − 行内不可见 SHY
+     * （与 [LineAligner] 里 `gapCount` 的推导同式；本仓 SHY 只有 `&shy;` 一个来源）。
+     *
+     * ## 用它排除哪一类行（第二次排除，2026-10-03 混排字距改口径后新增）
+     *
+     * 可见字形 **1 个**的行**物理上拉不动**：`gapCount = 可见字形数 − 1 = 0` ⇒ 没有可拉伸槽
+     * ⇒ `JustifySlack.plan` 拿不到任何级 ⇒ `placed = 0` ⇒ `visibleRight = natural`。
+     * 这不是缺陷：JUSTIFY 的定义是「把 slack 分摊到字缝上」，**没有字缝就没有 slack 可分**。
+     * 任何排版引擎（含 Skia）在这一格上都会留缺口。
+     *
+     * ## 为什么这类行是**本轮才出现**的（不是语料退化）
+     *
+     * 语料里 `Clone</code> 。` 这类「西文 + 空格 + 全角句号」的接缝，0 档下那个分隔空格被
+     * [CjkLatinSpacing] **吃掉**（行宽变窄一个空格宽），断点整体前移，于是某一行只剩一个 `。`
+     * （实测 `visibleRight=22.2` = 44.4 − 挤压 0.5em）。改口径前这一行是两个字形，有缝可拉。
+     * ⇒ 这行**本来就该被排除**，只是改口径前它没出现。判据因此收紧成
+     * 「有槽 ⇒ 铺满，**且 `checked` 必须 ≥ 2**」——后者继续防这把锁退化成自证通过。
+     *
+     * ## ⚠ 已知代价登记：「单标点独占一行」（**本轮新暴露，未修**）
+     *
+     * 上面那行的成因**不是** JUSTIFY，而是断点：语料 `Clone</code> 。` 的接缝在
+     * [KinsokuRules.allowsBreakAt] 里被**空白优先**放行（`isDocumentSpace(prev) ⇒ 可断`，
+     * UAX#14 LB SP 优先级高于 LB13），而 0 档把那个空格吃成 0 宽后，贪心多塞进一个 `Clone`
+     * ⇒ 行尾只剩 `Clone`，下一行只剩 `。`。
+     *
+     * **处置**：本轮**不动断点策略**（改它会波及本类以外全部断行锁与公平性阈值）。
+     * 已登记为待办（`docs/TODO-未尽事宜.md`）。这里把它的存在写成注释，
+     * 免得将来有人在同一处看到 `visibleGlyphs` 的排除而以为「单标点行不存在」。
+     */
+    private fun visibleGlyphs(dl: DrawLine): Int {
+        val body = dl.text.substring(dl.range)
+        val visLen = body.length - body.takeLastWhile { isDocumentSpace(it) }.length
+        return visLen - body.count { isSoftHyphen(it) }
+    }
+
     // ---- 锁 1： JUSTIFY 中部行必须铺满版心（这就是真机缺陷的判据）----
 
     @Test
@@ -90,13 +136,18 @@ class LineAlignerTest {
             AbSwitch.resetForTest()
             applyBreakerVariant(label)
             try {
-                val fs = 44.4f
+                // ⚠ **`StyleComputer` 的根字号**（决定 CSS 解析后的真实字号），**不是**测量用的字号。
+                //   [align] 的 `fs` 实参必须喂 [DrawLine.fontSizePx]（绘制侧量的那个）——
+                //   两者在 `body { font-size: 0.95rem }` 下**不相等**（实测 44.4 vs 42.18），
+                //   喂错会把每一行量宽放大 5.3%，凭空造出「装不下」的行（第一版栽在这，
+                //   与本文件已有的 [align] 形参 `fam` 同一条纪律，见那里的注释）。
+                val rootFs = 44.4f
                 val width = 1600f
                 val root = HtmlTreeConverter().convert("<html><body>$realPara</body></html>")!!
-                val engine = StyleComputer(fs, LightCssParser().parse(realCss), emptyList())
+                val engine = StyleComputer(rootFs, LightCssParser().parse(realCss), emptyList())
                 val styles = engine.compute(root)
                 val classify = NormalFlowLayout.heavyClassify(styles, engine.hasDisplayDeclaration())
-                val result = BoxLayouter(fs, breaker).layoutBoxes(root, 1600, styles, classify)
+                val result = BoxLayouter(rootFs, breaker).layoutBoxes(root, 1600, styles, classify)
                 val lines = DrawLineBuilder.build(result, styles, classify, HIDDEN_NONE, 0f).toList()
                 assertTrue("至少要有多行才能验中部行", lines.size >= 3)
 
@@ -106,17 +157,28 @@ class LineAlignerTest {
                 // —— 它**本来就不该拉伸**（`slack < 0` ⇒ `extra = 0` ⇒ `visibleRight = natural = 907.248`）。
                 // 那个 907.248 是**正确的自然宽**，把它当「未铺满」等于要求一行超宽的字去填版心。
                 // 判据：只有 `natural <= 版心` 的行（即 slack ≥ 0、拉伸后能铺满的）才要求铺满。
+                // **三条排除**（每条都必须有物理/设计上的理由，否则就是把红灯藏起来）：
+                //  ① 装不下（`natural > 版心`）：断点是被贪心/R1 兜底塞进来的，本来就不该拉伸。
+                //  ② 无字缝（可见字形 < 2）：没有字缝就没有 slack 可分（见 [visibleGlyphs]）。
+                //  ③ **额度封顶**（[Placement.justifyCapped]）：有限级吃满且行内无级 3 槽
+                //     ⇒ [JustifySlack] 的既定行为就是留缺口（宁可右缘短一点也不撑汉字）。
+                //     这条**由生产侧汇报**，测试不重算额度（同一规则两份实现必然分叉）。
                 var filled = 0
                 var checked = 0
+                var skipped = 0
                 for ((_, dl) in interior) {
                     val p = align(
-                        dl.text, dl.range, fs, dl.lineWidthPx.toFloat(),
+                        dl.text, dl.range, dl.fontSizePx, dl.lineWidthPx.toFloat(),
                         align = dl.alignment, isLast = false, runs = dl.fontRuns,
                         fam = dl.families, tag = dl.tag,
                     )
                     // 自然宽（未拉伸）> 版心 ⇒ 装不下，本行不参与「铺满」判据。
                     val naturalOnly = p.visibleRight
-                    if (naturalOnly > dl.lineWidthPx + 0.5f) continue
+                    if (naturalOnly > dl.lineWidthPx + 0.5f) { skipped++; continue }
+                    // **行内一条字缝都没有 ⇒ 物理上拉不动**（第二次排除，见下）。
+                    if (visibleGlyphs(dl) < 2) { skipped++; continue }
+                    // 额度封顶 ⇒ 留缺口是设计（第三次排除）。
+                    if (p.justifyCapped) { skipped++; continue }
                     checked++
                     val trailWs = dl.text.substring(dl.range).takeLastWhile { isDocumentSpace(it) }.length
                     assertTrue(
@@ -130,8 +192,9 @@ class LineAlignerTest {
                 // 语料实测（版心 900）：3 个中部行里 **2 个装得下**、1 个超宽（首行 28 字 ≈1243px，
                 // 由贪心/R1 兜底塞入，本来就不该拉伸）。守卫阈值取 2 —— 实测值，不是拍的。
                 assertTrue(
-                    "本语料必须至少有 2 行「装得下」的中部行，否则这把锁在退化路径上也能过 = 假锁" +
-                        "（实测只有 $checked 行参与判据）",
+                    "本语料必须至少有 2 行「装得下 + 有字缝 + 额度未封顶」的中部行，" +
+                        "否则这把锁在退化路径上也能过 = 假锁" +
+                        "（实测只有 $checked 行参与判据，另有 $skipped 行按上面三条排除掉）",
                     checked >= 2,
                 )
                 assertEquals("全部能装下的中部行都应铺满", checked, filled)
@@ -148,17 +211,19 @@ class LineAlignerTest {
         forEachBreakerVariant { breaker, label ->
             applyBreakerVariant(label)
             try {
-                val fs = 44.4f
+                val rootFs = 44.4f
                 val root = HtmlTreeConverter().convert("<html><body>$realPara</body></html>")!!
-                val engine = StyleComputer(fs, LightCssParser().parse(realCss), emptyList())
+                val engine = StyleComputer(rootFs, LightCssParser().parse(realCss), emptyList())
                 val styles = engine.compute(root)
                 val classify = NormalFlowLayout.heavyClassify(styles, engine.hasDisplayDeclaration())
-                val result = BoxLayouter(fs, breaker).layoutBoxes(root, 900, styles, classify)
+                val result = BoxLayouter(rootFs, breaker).layoutBoxes(root, 900, styles, classify)
                 val lines = DrawLineBuilder.build(result, styles, classify, HIDDEN_NONE, 0f).toList()
                 for ((_, dl) in lines) {
                     val n = dl.range.last + 1 - dl.range.first
+                    // 字号喂 [DrawLine.fontSizePx]（绘制侧量的那个），**不是** [StyleComputer] 的根字号 ——
+                    // 见锁 1 里那条注释。本锁的判据（长度、无缝）对字号不敏感，但喂错会误导后来人。
                     val p = align(
-                        dl.text, dl.range, fs, dl.lineWidthPx.toFloat(),
+                        dl.text, dl.range, dl.fontSizePx, dl.lineWidthPx.toFloat(),
                         runs = dl.fontRuns, fam = dl.families, tag = dl.tag,
                     )
                     assertEquals(
@@ -173,7 +238,7 @@ class LineAlignerTest {
                             p.xs[k + 1] >= p.xs[k],
                         )
                     }
-                    assertTrue("lsPx 占位避免未用告警 ${lsPx + fs}", p.xs.isNotEmpty())
+                    assertTrue("lsPx 占位避免未用告警 ${lsPx + rootFs}", p.xs.isNotEmpty())
                 }
             } finally {
                 AbSwitch.resetForTest()

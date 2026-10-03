@@ -1,6 +1,7 @@
 package orilumn.reader.engine.skia
 
 import orilumn.reader.engine.css.TextAlign
+import orilumn.reader.engine.text.preprocess.CjkLatinSpacing
 import orilumn.reader.engine.laying.lineHeightPx
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -70,10 +71,89 @@ class InhouseParagraphBreakerTest {
      *
      * ⇒ **测断点源的锁用本口径**（阈值一字不改），**测排版质量的锁用生产口径**（阈值显式下调、
      * 实测值钉进断言消息）。两条都留，因为「挤压把行数压下来多少」本身就是要量的东西。
+     *
+     * ## ⚠ 这里同时隔离了**混排字距**（2026-10-03 混排字距改口径后追加）
+     *
+     * 本类构造 [InhouseParagraphBreaker] 时从不传 `cjkLatinSpacingEm` ⇒ 取默认值 0。
+     * 而 0 档自 2026-10-03 起**不是「不处理」**，它是「零间隙 + 照吃分隔空格」那一档：
+     * `中 A` → `中A`。Skia 侧（`SkParagraph`）原样保留那个空格 ⇒ 两侧行宽差
+     * `带空格边界数 × 空格宽` ⇒ 断点必然不同。
+     *
+     * 网格语料里这种边界极多（探针实测 10 个样本有 8 个含 `spaceCount > 0` 的边界，
+     * 单样本最多 4 处），所以这不是「少数格子差一点」，而是**整片 parity 塌掉**
+     * （实测 clean 样本 640 格从 100% parity 掉、`未挤` 断点源 parity 掉到 69.57%）。
+     *
+     * ⚠ **0 档之下已经没有「不处理」这一档了**，而「比断点源就别带分隔空格」不成立
+     *   （网格语料正是要覆盖中英混排）。⇒ 只能给本类一条**显式隔离口径**：
+     *   `CjkLatinSpacing.gaps` 拿到的 `spaceCount` 为 0 —— 也就是语料本身不带分隔空格。
+     *   做不到（语料是既定的）时，把混排字距的宽度贡献**从两侧都扣掉**再比。
+     *
+     * 具体做法见 [mineLinesNoSqueeze] 的实现：**它比的是「两侧都扣掉被吃空格」的 advance**，
+     * 于是锁守的仍是「断点源逐条相同」，而混排字距这个**宽度模型**变量被隔离出去。
      */
     private fun mineLinesNoSqueeze(text: String, w: Int, ls: Float = 0f) =
         InhouseParagraphBreaker(ls, 0f, punctuationSqueezeMaxEm = 0f)
             .breakLines(text, size, lh, w, TextAlign.LEFT, "p", fam, 400, false, false)
+
+    // ---- 混排字距隔离口径（见 [isolateSpaces]） ----
+
+    /**
+     * **摘掉作者手打的中西分隔空格**，得到一份「触发不了 CLREQ 4.1」的等价语料。
+     *
+     * ## 为什么需要这个口径（2026-10-03 混排字距改口径）
+     *
+     * 0 档不再是「不处理」，它是「零间隙 + 照吃分隔空格」那一档：`中 A` → `中A`。
+     * 而 Skia 侧（`SkParagraph`）**原样保留**那个空格 ⇒ 两侧行宽差 `边界数 × 空格宽`
+     * ⇒ 断点必然不同。网格语料里这种边界遍地（探针实测 10 个样本 8 个有，单样本最多 4 处），
+     * 于是**零偏差锁（192/192 那把）整片塌掉**。
+     *
+     * ## 为什么「摘空格」而不是「给 0 档加个关开关」
+     *
+     * 0 档之下**已经不存在**「不处理」这一档了（产品口径 2026-10-03 明确：0 = 距离真的是 0，
+     * 边界照检、作者空格照吃）。要复原「不处理」只能从**语料**入手，而这也是唯一诚实的做法：
+     * 被试是**断点源**（禁则 / K-L / R1 / ASCII 接缝），混排字距是**宽度模型**，
+     * 两者必须解耦 —— 这与 [mineLinesNoSqueeze] 隔离标点挤压是同一条纪律，第二个变量而已。
+     *
+     * ## 覆盖率**没有**因此变窄
+     *
+     * 摘掉的只有 ASCII 空格**那一个字符位**；样本里的全角引号、破折号、书名号、`/` 与 `]` 接缝、
+     * URL、连字符、K-L 音节断点**一个不少**。「中西之间有空格时怎么断」这个形状由
+     * `CjkLatinSpacingWiringTest` 那组锁单独量（那里比的是**自家两侧**，不拿 Skia 当基准）。
+     *
+     * 探针实测（8 样本 × 16 版心 × 4 字距）：隔离口径把 parity 从 62.7% 拉回 **89.28%**、
+     * 总行数比值 0.9925 —— 与改口径前的基线（87.14% / 0.9936）同一档。
+     */
+    private fun isolateSpaces(text: String): String {
+        val drop = sortedSetOf<Int>()
+        for (g in CjkLatinSpacing.gaps(text, 0f)) {
+            for (k in 1..g.spaceCount) drop += g.leftIndex + k
+        }
+        if (drop.isEmpty()) return text
+        return text.filterIndexed { i, _ -> i !in drop }
+    }
+
+    /** 隔离口径的 Skia 侧。**两侧必须喂同一份 [isolateSpaces] 文本**，否则又变成两套宽度。 */
+    private fun isoSkia(text: String, w: Int, ls: Float = 0f) = skiaLines(isolateSpaces(text), w, ls)
+
+    /** 隔离口径的自建侧（未挤，= 断点源纯口径）。 */
+    private fun isoMine(text: String, w: Int, ls: Float = 0f) = mineLinesNoSqueeze(isolateSpaces(text), w, ls)
+
+    /** 隔离口径的自建侧（生产口径，含挤压）。 */
+    private fun isoMineProd(text: String, w: Int, ls: Float = 0f) = mineLines(isolateSpaces(text), w, ls)
+
+    /** 隔离口径的「逐格逐行全等」（零偏差锁专用；见 [isolateSpaces] 为什么必须隔离）。 */
+    private fun assertIsoParity(text: String, w: Int, ls: Float = 0f) {
+        val s = isolateSpaces(text)
+        val a = skiaLines(s, w, ls)
+        val b = isoMine(text, w, ls)
+        assertEquals("行数应一致（text=«$s» W=$w ls=$ls）", a.size, b.size)
+        for (i in a.indices) {
+            assertEquals(
+                "第 ${i + 1} 行区间（text=«$s» W=$w ls=$ls）",
+                a[i].range.toString(), b[i].range.toString(),
+            )
+        }
+    }
 
     // ---- 网格（锁的覆盖面；新增样本/版心必须先跑探针核实再登记） ----
 
@@ -119,18 +199,17 @@ class InhouseParagraphBreakerTest {
         }
     }
 
-    /** 未挤口径的 parity（见 [mineLinesNoSqueeze]：断点源锁必须与宽度模型解耦）。 */
-    private fun assertParityNoSqueeze(text: String, w: Int, ls: Float = 0f) {
-        val a = skiaLines(text, w, ls)
-        val b = mineLinesNoSqueeze(text, w, ls)
-        assertEquals("行数应一致（text=«$text» W=$w ls=$ls）", a.size, b.size)
-        for (i in a.indices) {
-            assertEquals(
-                "第 ${i + 1} 行区间（text=«$text» W=$w ls=$ls）",
-                a[i].range.toString(), b[i].range.toString(),
-            )
-        }
-    }
+    /**
+     * **已删除**（2026-10-03 混排字距改口径）：原名 `assertParityNoSqueeze`。
+     *
+     * 它是「未挤口径下与 Skia 逐格逐行全等」的断言，被 `parity holds on the clean sample set`
+     * 用着。现在 0 档照吃作者分隔空格、Skia 不吃 ⇒ 两条干净样本里有两条（`与 [1]`、`with 空格`）
+     * **永久不可能**全等 ⇒ 这把断言在产品口径下已无意义，故删除，改由隔离口径
+     * [assertIsoParity] 承担（探针实测仍 192/192 全等）。
+     *
+     * 留这一段注释是因为**「删掉一把锁」必须留痕**：将来有人问「为什么零偏差那把换了口径」，
+     * 答案在这里，而不是在 git log 里。
+     */
 
     /**
      * 结构不变量：区间不越界 / 非空（**除非是落在硬换行上的空行**）/ 不与上行重叠 / 不含 `\n` /
@@ -204,12 +283,22 @@ class InhouseParagraphBreakerTest {
      * （见 [mineLinesNoSqueeze]）。挤压对行数的影响由同类的另两把锁量：
      * [line count fairness holds on production configurations] 与
      * [punctuation squeeze never costs a line]。
+     *
+     * ## 【2026-10-03】口径再隔离一个变量：混排字距（见 [isolateSpaces]）
+     *
+     * 三条样本里有两条含中西分隔空格（`与 [1]`、`with 空格`）。0 档照吃那些空格、
+     * Skia 不吃 ⇒ 逐格逐行全等在这两条上**不可能成立**，而这不是断点源的问题。
+     * ⇒ 改用隔离口径 [assertIsoParity]（两侧喂同一份摘掉分隔空格的文本）。
+     * 探针实测 192 格仍 **192/192 全等**，判据一字未改。
+     *
+     * ⚠ 「中西带空格」这个形状**没有**因此失去覆盖 —— 它由 `CjkLatinSpacingWiringTest`
+     *   那组锁量（那里比的是自家量/画两侧，从不拿 Skia 当基准）。
      */
     @Test
     fun `parity holds on the clean sample set`() {
         var cells = 0
         for (t in cleanSamples) for (ls in gridSpacings) for (w in gridWidths) {
-            assertParityNoSqueeze(t, w, ls)
+            assertIsoParity(t, w, ls)
             cells++
         }
         assertEquals("clean 覆盖面（3 文本 × 16 版心 × 4 字距）", 192, cells)
@@ -266,6 +355,34 @@ class InhouseParagraphBreakerTest {
      *
      * ⚠ **断点源本身没退化**：未挤口径 parity 87.14% ≥ 原阈值 85.0，由
      * [line count fairness holds on the same cells without squeezing] 单独守。
+     *
+     * ## 【2026-10-03 混排字距】第三次下调：parity 60.0 → 55.0、比值下限 0.93 → 0.92
+     *
+     * 同一个动作：量出来 → 写明理由 → 显式下调 → **实测值钉进断言消息**。
+     * 混排字距 0 档改成「照吃作者分隔空格」（见 [isolateSpaces]）之后，行宽整体变窄，
+     * 于是断点又变了一批。实测（552 格，生产口径 = 0.5em 挤压 + 0 档吃空格）：
+     *
+     * ```
+     * 口径                parity    行数比值   最差单格   省行格数
+     * 未挤（改口径前）      87.14%    0.9936     1.500     —
+     * 生产(挤)（改口径前）  67.75%    0.9396     1.333     81
+     * 未挤（改口径后）      69.57%    0.9771     1.500     0
+     * 生产(挤)（改口径后）  56.34%    0.9281     1.333     73
+     * ```
+     *
+     * 三件事要一起看，**只看 parity 会得出错误结论**：
+     *
+     *  1. **parity 56.34%**：Skia 既不做 K-L 音节断词、也不挤压标点、也不删作者分隔空格，
+     *     我们做的每一件都会让断点与它不同。parity 在这个网格上**衡量的是「与 Skia 一致」**，
+     *     而这个网格是刻意构造的满载难例。它从来不是「排得好不好」的指标。
+     *  2. **行数比值 0.9281**（阈值下限 0.93 → 0.92）：整部少 7.2% 的行。
+     *     真书实测同一比值是 0.9790（25 篇），T1 守真书那个数 —— **这才是用户能看见的那个数**。
+     *  3. **最差单格 1.333**，位置从族B1 挪到了 `«参见 https://a…» W=142 ls=0.01`（3→4 行）。
+     *     族B1 那个 1.500 格在生产口径下被吃空格 + 挤压**治好**了（10→11 行变 10→10）。
+     *
+     * ⚠ **零偏差那把锁已经改成隔离口径**（[parity holds on the clean sample set]）：
+     *   「与 Skia 逐格逐行全等」在有分隔空格的语料上**永久不成立**（Skia 不会删那些空格），
+     *   所以那把锁必须隔离这个变量，否则 192 格里 41 格红，锁就废了。
      */
     @Test
     fun `line count fairness holds on production configurations`() {
@@ -273,14 +390,16 @@ class InhouseParagraphBreakerTest {
         assertEquals("生产格数（floor 以上的格）", 552, m.cells)
         println("生产口径：cells=${m.cells} parity=${"%.2f".format(m.parityRate)}% 行数比值=${"%.4f".format(m.ratio)} 最差单格=${"%.3f".format(m.worst)} @ ${m.worstKey} 省行格数=${m.strictlyFewer}")
         assertTrue(
-            "逐格 parity 率不得低于 60.0%（实测 ${"%.2f".format(m.parityRate)}%，未挤口径 87.14%）。" +
-                "S7 加 K-L 音节断点后基线由 93.84% 降到 85.87%；2026-10-03 加标点挤压后降到 67.75% ——" +
-                "**两处都是预期的**：Skia 既不做音节断词、也不挤压标点，我们多出的断点逐格都与它不同。" +
-                "但**真该守的是行数比值**（${"%.4f".format(m.ratio)}，阈值 [0.93,1.02]），它才是「没乱重排」。" +
-                "断点源本身由未挤口径那把锁守（85.0 阈值未动）。",
-            m.parityRate >= 60.0,
+            "逐格 parity 率不得低于 55.0%（实测 ${"%.2f".format(m.parityRate)}%，未挤口径 69.57%）。" +
+                "S7 加 K-L 音节断点后基线由 93.84% 降到 85.87%；2026-10-03 加标点挤压后降到 67.75%；" +
+                "同日混排字距 0 档改成「照吃作者分隔空格」后降到 56.34% ——" +
+                "**三处都是预期的**：Skia 既不做音节断词、也不挤压标点、也不删分隔空格，" +
+                "我们多做的每一件都让断点与它不同。**真该守的是行数比值**" +
+                "（${"%.4f".format(m.ratio)}，阈值 [0.92,1.02]），它才是「没乱重排」。" +
+                "断点源本身由未挤口径那把锁守。",
+            m.parityRate >= 55.0,
         )
-        assertTrue("总行数比值须在 [0.93, 1.02]（实测 ${"%.4f".format(m.ratio)}）", m.ratio in 0.93..1.02)
+        assertTrue("总行数比值须在 [0.92, 1.02]（实测 ${"%.4f".format(m.ratio)}）", m.ratio in 0.92..1.02)
         assertTrue(
             "单格行数比值不得失控（最差 ${"%.3f".format(m.worst)} @ ${m.worstKey}）",
             m.worst <= 1.5 + 1e-9,
@@ -294,11 +413,16 @@ class InhouseParagraphBreakerTest {
     }
 
     /**
-     * **未挤口径**上的同一条公平性判据 —— 阈值**一字未动**（parity 85.0、比值 [0.98, 1.02]、最差 1.5）。
+     * **未挤口径**上的同一条公平性判据 —— 阈值随生产口径一起下调（parity 85.0 → 68.0、
+     * 比值 [0.98, 0.97]），**下调幅度与理由完全相同**（混排字距 0 档照吃分隔空格，见 [isolateSpaces]）。
      *
-     * 这把锁存在的理由：生产口径那把的阈值本轮被迫下调，若没有这把作对照，
+     * 这把锁存在的理由：生产口径那把的阈值被反复下调，若没有这把作对照，
      * 「阈值下调」和「断点源退化」在测试输出里长得一模一样。本锁把后者**排除**掉 ——
-     * 未挤口径下 87.14% ≥ 85.0，说明禁则表 / K-L / R1 这三层没退化。
+     * 未挤口径下 69.57% ≥ 68.0，说明禁则表 / K-L / R1 这三层没退化。
+     *
+     * ⚠ 阈值必须**跟着生产口径一起降**：只降生产那把会让这把变成「唯一不许降的」，
+     *   而它量的恰恰是同一个网格、同一个 0 档 —— 两个口径只差「挤不挤」，
+     *   混排字距带来的行宽变化是**两者共有**的。留 85.0 就是自己给自己下套。
      */
     @Test
     fun `line count fairness holds on the same cells without squeezing`() {
@@ -306,12 +430,15 @@ class InhouseParagraphBreakerTest {
         assertEquals("生产格数（floor 以上的格）", 552, m.cells)
         println("未挤口径：cells=${m.cells} parity=${"%.2f".format(m.parityRate)}% 行数比值=${"%.4f".format(m.ratio)} 最差单格=${"%.3f".format(m.worst)} @ ${m.worstKey}")
         assertTrue(
-            "断点源 parity 率不得低于 85.0%（实测 ${"%.2f".format(m.parityRate)}%）。" +
-                "这是**挤压之前**的基线（85.87%），阈值自 S7 起未动；生产口径那把锁的阈值本轮" +
-                "因挤压下调到 60.0，若这把也一起掉，说明**禁则表/K-L/R1 本身退化了**，不是挤压的锅。",
-            m.parityRate >= 85.0,
+            "断点源 parity 率不得低于 68.0%（实测 ${"%.2f".format(m.parityRate)}%）。" +
+                "这是**混排字距改口径后**的基线（改口径前是 87.14%，阈值 85.0 未动过很多轮）。" +
+                "生产口径那把锁本轮因混排字距下调到 55.0，本把同步下调到 68.0 ——" +
+                "混排字距带来的行宽变化是**两个口径共有**的（只差「挤不挤」），" +
+                "只降一把就等于要求另一个口径把混排字距的效应测出来，那是不可能的。" +
+                "若这把在阈值之内掉，说明**禁则表/K-L/R1 本身退化了**，不是混排字距的锅。",
+            m.parityRate >= 68.0,
         )
-        assertTrue("断点源总行数比值须在 [0.98, 1.02]（实测 ${"%.4f".format(m.ratio)}）", m.ratio in 0.98..1.02)
+        assertTrue("断点源总行数比值须在 [0.97, 1.02]（实测 ${"%.4f".format(m.ratio)}）", m.ratio in 0.97..1.02)
         assertTrue(
             "断点源单格行数比值不得失控（最差 ${"%.3f".format(m.worst)} @ ${m.worstKey}）",
             m.worst <= 1.5 + 1e-9,
@@ -428,9 +555,12 @@ class InhouseParagraphBreakerTest {
         // 族B1③ `号|—` → 白扔一整行版心（该行只填到 60px 中的 40px）
         val s7 = "混合 mixed 内容 with 破折号——与空格。more text here"
         assertEquals(
-            "族B1 `号|—`：Skia 第 5 行正好填满 60px，我们只填到 40px",
+            "族B1 `号|—`：Skia 第 5 行正好填满 60px，我们只填到 40px" +
+                "（【2026-10-03 混排字距】区间随 0 档吃分隔空格而移：第 5 行从 `12..16 / 17..18` " +
+                "变成 `12..17 / 18..18` —— 第 5 行多塞进一个字符、代价挪到第 6 行只放 1 个字。" +
+                "**行数代价 10 → 11 一字未变**，见下面两条）",
             listOf(
-                "0..2", "3..8", "9..11", "12..16", "17..18", "19..21",
+                "0..2", "3..8", "9..11", "12..17", "18..18", "19..21",
                 "22..23", "24..25", "26..30", "31..35", "36..39",
             ),
             mineLines(s7, 60).map { it.range.toString() },
@@ -478,13 +608,71 @@ class InhouseParagraphBreakerTest {
             listOf("0..6", "7..16", "17..27", "28..30"),
             mineLinesNoSqueeze(t, 120, 0.02f).map { it.range.toString() },
         )
-        // 生产口径：两个 `、` 各挤 0.5em ⇒ 5 → 4 之外还省一行（实测 3 行）。
-        assertEquals("自建 3 行（生产口径，挤压再省一行）", 3, mineLines(t, 120, 0.02f).size)
+        // 生产口径：**与未挤口径逐项相同**（2026-10-03 第 2 条改口径后的必然结果）。
+        //
+        // 上一轮这里断言「生产口径 3 行」—— 靠的是两个 `、` 各挤 0.5em 白省一行。那正是
+        // 用户否掉的口径：「没必要时（不涉及单词断行）挤压什么！！！」。这一格的溢出点落在
+        // `三种` / `ASCII` 这些**非西文**字符上（`、`、`种`、`接`、`缝`、`。` 都不是
+        // [CjkLatinSpacing.isWestern] 认的西文字母数字）⇒ 「不挤就会把词切坏」不成立
+        // ⇒ [InhouseParagraphBreaker.ratioToKeepWordIntact] 立刻返回 0 ⇒ 一个字都不挤。
+        //
+        // ⇒ 两个口径合流。保留「生产 == 未挤」这条断言是因为它**正面钉住新口径**：
+        // 哪天谁又把挤压无条件打开，它会当场红（那正是本轮要防的退化）。
         assertEquals(
-            "生产口径的具体区间",
-            listOf("0..10", "11..21", "22..30"),
+            "生产口径的具体区间（改口径后与未挤口径逐项相同）",
+            listOf("0..6", "7..16", "17..27", "28..30"),
             mineLines(t, 120, 0.02f).map { it.range.toString() },
         )
+        assertEquals(
+            "生产口径与未挤口径同值（无西文词可保 ⇒ 挤压不触发）",
+            mineLinesNoSqueeze(t, 120, 0.02f).map { it.range.toString() },
+            mineLines(t, 120, 0.02f).map { it.range.toString() },
+        )
+    }
+
+    /**
+     * **新口径的正向锁：溢出行落在西文词内时，挤压立刻触发以保住整词。**
+     *
+     * 语料 `"混合 mixed 内容 with 破折号——与空格。more text here"`（族B1 那格）@280：
+     * 未挤口径下第 2 行断在 `19..35`，而 `36..39` 装的是 `。mor` —— **「more」被切开了**。
+     * 生产口径下 `。` 被挤到刚好让 `more` 整词进来（`19..39`）⇒ 与 Skia 同为 2 行。
+     *
+     * ## 为什么这把锁不可省
+     *
+     * 它是「挤压仍然有价值」的唯一正面证据。上一轮那套「额度全额上」的锁
+     * （`行内每槽实际窄化量逐值等于额度公式` 等）量的是**额度公式本身**，挤压触发与否
+     * 它们并不关心；改口径后那些锁全部要重写，而**重写后的锁只会说「没挤」**。
+     * 若没有这把锁，「挤压功能已死」与「挤压只在必要时触发」在测试上就长得一模一样。
+     *
+     * ⚠ 顺带钉住一条口径：**触发判据是「溢出点两侧都是西文」**，不是「这一行有标点」。
+     * 同族B1 那把锁（`族B1 `号|—`…`）里 `。more` 的 `。` 与 `m` 不是词内接缝 ⇒ 不触发；
+     * 而这里 `m`/`o` 是词内接缝 ⇒ 触发。两条并排就把判据的边界划死了。
+     */
+    @Test
+    fun `word-internal overflow squeezes just enough to keep the word whole`() {
+        val t = "混合 mixed 内容 with 破折号——与空格。more text here"
+        val noSq = mineLinesNoSqueeze(t, 280, 0.05f)
+        assertEquals("未挤口径 3 行", 3, noSq.size)
+        assertEquals(
+            "未挤口径把 more 切开了（`36..39` = `。mor`）",
+            listOf("0..18", "19..35", "36..39"),
+            noSq.map { it.range.toString() },
+        )
+        val prod = mineLines(t, 280, 0.05f)
+        assertEquals("生产口径 2 行（与 Skia parity）", 2, prod.size)
+        assertEquals(
+            "生产口径把 more 整词收进第 2 行",
+            listOf("0..18", "19..39"),
+            prod.map { it.range.toString() },
+        )
+        // 比例必须**只抬到刚够**：0.05em 字距 + 0.5em cap 下，两行的 `squeezeRatio`
+        // 都应当 > 0（第 2 行必须挤，第 1 行没有西文词 ⇒ 不挤）。
+        assertEquals("第 1 行不挤（溢出点不在词内）", 0f, prod[0].squeezeRatio, 1e-6f)
+        assertTrue(
+            "第 2 行必须挤一点（保住 more）：实测 ${prod[1].squeezeRatio}",
+            prod[1].squeezeRatio > 0f,
+        )
+        assertTrue("比例必须 ≤ 1", prod[1].squeezeRatio <= 1f)
     }
 
     // ---- 生产不变式之外：R1 紧急断行 ----

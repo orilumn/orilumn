@@ -248,4 +248,61 @@ class ReaderSettingsTest {
         assertEquals("", migrated.fontTitle)
         assertEquals("", migrated.fontCode)
     }
+
+    // ---- 混排字距 `cjkLatinSpacing` 的 schemaVersion v1 迁移（一次性）----
+
+    /**
+     * 用户报「中西字距默认值是 25？打开设置看到的是 0」——根因是该字段此前是**整套死代码**
+     * （存得下、拖得动、没人消费），用户在盲选滑块上随手拖出的值被当成了明确意图继承。
+     * v1 迁移：老存档（无 `schemaVersion` 键）一律回到默认 25。
+     */
+    @Test
+    fun `混排字距 老存档无 schemaVersion 一律回到默认 25`() {
+        for (stored in listOf(0.0, 1.0, 25.0, 80.0)) {
+            val migrated = ReaderSettings.fromJson("""{"cjkLatinSpacing":$stored}""")
+            assertEquals(
+                "老存档（无 schemaVersion）里的 cjkLatinSpacing=$stored 必须回到默认值",
+                ReaderSettings.DEFAULT.cjkLatinSpacing,
+                migrated.cjkLatinSpacing,
+                0.0,
+            )
+        }
+    }
+
+    /**
+     * v1 之后**用户的每个值都尊重，包括 0**。
+     *
+     * 这条是迁移的反向锁，也是需求「滑块为 0 时不做多余动作」的持久化半边：
+     * 若实现改成判值（`stored == 0 → 25`），故意关掉混排字距的用户**每次启动都会被改回 25**，
+     * 症状是「我明明关了，它自己弹回来了」。版本号只对「写档那一刻还没有的语义」动手一次。
+     */
+    @Test
+    fun `混排字距 schemaVersion 大于等于 1 时 0 必须原样保留`() {
+        for (stored in listOf(0.0, 10.0, 25.0, 100.0)) {
+            val parsed = ReaderSettings.fromJson(
+                """{"schemaVersion":1,"cjkLatinSpacing":$stored}"""
+            )
+            assertEquals("schemaVersion=1 的存档必须原样保留用户设的值", stored, parsed.cjkLatinSpacing, 0.0)
+        }
+    }
+
+    /** 迁移后的存档必须**写回**当前版本号，否则下次启动会再迁移一次（幂等性靠这个键）。 */
+    @Test
+    fun `混排字距 迁移后写回当前 schemaVersion`() {
+        val migrated = ReaderSettings.fromJson("""{"cjkLatinSpacing":80}""")
+        assertEquals(
+            ReaderSettings.CURRENT_SCHEMA_VERSION,
+            migrated.schemaVersion,
+        )
+        // 再走一轮：已经是当前版本 ⇒ 值不再被改（幂等）。
+        val again = ReaderSettings.fromJson(migrated.toJson())
+        assertEquals(ReaderSettings.DEFAULT.cjkLatinSpacing, again.cjkLatinSpacing, 0.0)
+    }
+
+    /** 缺该键的老存档读到的是默认值，再被迁移改一次仍是默认值（不能变成 0）。 */
+    @Test
+    fun `混排字距 老存档缺该键时读到默认值`() {
+        val migrated = ReaderSettings.fromJson("""{"scheme":"day"}""")
+        assertEquals(25.0, migrated.cjkLatinSpacing, 0.0)
+    }
 }

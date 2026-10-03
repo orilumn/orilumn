@@ -5,6 +5,7 @@ import orilumn.reader.engine.css.TextAlign
 import orilumn.reader.engine.laying.isDocumentSpace
 import orilumn.reader.engine.laying.isSoftHyphen
 import orilumn.reader.engine.laying.lineHeightPx
+import orilumn.reader.engine.text.preprocess.CjkLatinSpacing
 import kotlin.math.roundToInt
 
 /**
@@ -90,6 +91,10 @@ internal class LineAligner(
      * @param hyphenAtEnd 本行是否断词收尾（[orilumn.reader.engine.laying.BrokenLine.hyphenAtEnd]）——
      *   行尾补一个连字符，**它占版心**：进 [Placement.natural] 参与的拉伸基数、进 [visibleRight]，
      *   否则要么超出版心被裁、要么 JUSTIFY 按「少一个字」铺满而右缘退进版心。
+     * @param cjkLatinSpacingEm 混排字距（em，0 = 关）。**刻意放在形参表末尾**：前面的形参全是
+     *   历史冻结签名，调用点里存在按位置传参的老写法（形如 `.align(t, r, fs, w, ls, tag, …, runs)`），
+     *   插在中间会把后面那些实参静默重绑到别的形参上 —— `Boolean`/`Float` 之间那种重绑编译器
+     *   **不报错**，症状是整本书的对齐全乱。末尾追加则既安全又显式。
      */
     fun align(
         text: CharSequence,
@@ -107,6 +112,7 @@ internal class LineAligner(
         firstLineIndentPx: Float = 0f,
         isLastLine: Boolean = false,
         hyphenAtEnd: Boolean = false,
+        cjkLatinSpacingEm: Float = 0f,
     ): Placement {
         val start = range.first.coerceIn(0, text.length)
         val endExcl = (range.last + 1).coerceIn(start, text.length)
@@ -126,9 +132,22 @@ internal class LineAligner(
         // 只测单行的用例全绿；一旦有第二行，该行的逐字宽就全取自别的字符 ——
         // 实测超长单词在版心 80 下每个单字符行都量成 `30.46`（那是 `'D'` 的宽，`'f'` 实为 14.05），
         // 于是凭空冒出 11~65px 的「溢出」（`NoLineExceedsContentWidthTest` 抓到）。
+        val lineRuns = sliceRuns(fontRuns, start, endExcl)
+        val line = text.subSequence(start, endExcl)
+        // 混排字距：间隙直接进 `adv`（由 [SkiaRunMeasurer.applyCjkLatinGaps] 施加）。
+        //
+        // ⚠ **必须在整段 `text` 上检测、再裁到本行**（[CjkLatinSpacing.gapsForRange]），
+        //   不能按行子串检测：断行器预留的是**整段**那份结果（间隙 + 被吃掉的空格都算进了 `adv`），
+        //   按子串检测会漏掉「挂在行尾空白里、仍在行区间内」的那几个被吃空格 ⇒
+        //   绘制侧多出一个空格宽 ⇒ 画比量宽 ⇒ 右溢被裁（实测 fs=40/版心300 时正好 10.000px），
+        //   且末行没有 JUSTIFY 兜底 ⇒ 英文与中文之间那个距离与滑块无关。详见
+        //   [CjkLatinSpacing.gapsForRange] 的 KDoc。
+        val cjkGaps =
+            if (cjkLatinSpacingEm > 0f) CjkLatinSpacing.gapsForRange(text, start, endExcl, cjkLatinSpacingEm, fontRuns)
+            else emptyList()
         val adv = measurer.advances(
-            text.subSequence(start, endExcl), fontSizePx, letterSpacingEm, tag, families,
-            weight, italic, monospace, sliceRuns(fontRuns, start, endExcl),
+            line, fontSizePx, letterSpacingEm, tag, families,
+            weight, italic, monospace, lineRuns, cjkGaps,
         )
 
         // 尾随文档空白：计入 range、画（无墨无害）、但**不计入可见宽度**。
@@ -218,6 +237,19 @@ internal class LineAligner(
         // 行尾连字符（K-L 音节断词那种「无 SHY 槽位」的）：接在可见行末**之外**，占版心。
         // SHY 槽位那种已写进 `adv[shySlot]`，这里**不能再加**（否则算两遍）。
         if (extraGlyphGap) natural += hyphenW
+        //
+        // ⚠ **这里原本有一段「把紧贴可见行末的混排字距间隙挂掉」的修正，2026-10-03 已删**
+        //   （它是一条**不可达**的分支，且当时的 KDoc 把因果讲反了 —— 见 [orilumn.reader.engine.text.preprocess.CjkLatinSpacing]
+        //   的类 KDoc「按段检测 vs 按行检测」一节）：
+        //
+        //   **不变式（当日已升级为等式）**：本行的间隙集合 = 断行侧在**整段**上检出、
+        //   再由 [CjkLatinSpacing.gapsForRange] 裁到本行的那一份 ⇒ 逐槽 **画 == 量**，
+        //   方向是 [NoLineExceedsContentWidthTest] 要的「画 == 量 ≤ 版心」。
+        //   **不需要**任何修正项，也不需要动断行器。
+        //
+        //   删掉它的代价记录在案：把「少算」误算成「多算」是这里唯一可能出错的改法。
+        //   若哪天 `visibleRight` / `hang` 变了口径（比如把行末 NBSP 算进可见宽），
+        //   必须重跑 `CjkLatinSpacingWiringTest` 里那两条「画 == 量」的锁（跨行边界 / 扫版心）。
 
         // JUSTIFY 拉伸：均摊到**可见字形之间的间隙**；末行不拉伸（两端对齐的定义本身）。
         //

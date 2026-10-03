@@ -116,6 +116,15 @@ data class DrawLine(
      *（占宽保留，与 P6-b 注音源文同法），字符流/断行/点按坐标不变。
      */
     val imgHidden: List<IntRange> = emptyList(),
+    /**
+     * 混排字距（em，0 = 关，[orilumn.reader.engine.text.TypographicProfile.cjkLatinSpacingEmApplied]
+     * 的值）：行内 CJK↔西文边界的注入间隙。
+     *
+     * 断行侧已为它**预留了版心**（[InhouseParagraphBreaker] 经 [SkiaRunMeasurer.advances] 计入
+     * 判定宽），本字段只管**落墨侧的 x 位**（[LineAligner.align] + [KerningClusterTable.clusterXs]
+     * 与量宽侧同源）。漏传 = 版心白白让出一截（行内看着挤），反过来传了而断行侧没预留就会右溢被裁。
+     */
+    val cjkLatinSpacingEm: Float = 0f,
 )
 
 /**
@@ -315,6 +324,8 @@ class LineWindowDrawer(
             isLastLine = isLastLineOf(line, endExcl),
             // 行尾连字符：进拉伸基数与可见右缘（连字符占版心，否则 JUSTIFY 会少算一个字位）。
             hyphenAtEnd = line.hyphenAtEnd,
+            // 混排字距：与断行侧同一个 em（间隙进 `adv` ⇒ 逐字 x、JUSTIFY 基数、可见右缘同源）。
+            cjkLatinSpacingEm = line.cjkLatinSpacingEm,
         )
         // 缩进已在 placement 内（x0），落墨起点即文本区左缘（marker 另行绘制，不动）。
         val paintX = textX
@@ -514,6 +525,9 @@ class LineWindowDrawer(
                     line.text, start, endExcl, line.fontSizePx, line.lineHeightRatio,
                     line.tag, line.families, line.weight, line.italic, line.monospace,
                     line.fontRuns, originX = 0f, letterSpacingEm = line.letterSpacingEm,
+                    // 混排字距：必须传与量宽侧同一个 em，否则 [graftKerningOnto] 会把注入的间隙
+                    // 当成「整形收紧量」吃掉（该方法的 KDoc 有完整推导）。
+                    cjkLatinSpacingEm = line.cjkLatinSpacingEm,
                 )?.let { cnat ->
                     graftKerningOnto(
                         placement, cnat, line.text, start,

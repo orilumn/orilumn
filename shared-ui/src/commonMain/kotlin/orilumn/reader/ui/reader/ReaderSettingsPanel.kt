@@ -279,6 +279,12 @@ fun ReaderSettingsPanel(
                     sliderKey(s.letterSpacing, -100.0, 100.0, 1.0,
                         apply = { v -> onPreview(s.copy(letterSpacing = v)); onCommitTypography(s.copy(letterSpacing = v)) },
                         fmt = { it.roundToInt().toString() }),
+                    // 第 6 个滑块 = 混排字距（正文页渲染在 index 5，见同函数下方的行构造）。
+                    // ⚠ 漏了这一项**不崩**（下游一律 `getOrNull`），但键盘/手柄**够不到那一行** ——
+                    //   症状是「鼠标能拖、键盘翻不到」，极难归因。故键表必须与行序逐项对齐。
+                    sliderKey(s.cjkLatinSpacing, 0.0, 100.0, 1.0,
+                        apply = { v -> onPreview(s.copy(cjkLatinSpacing = v)); onCommitTypography(s.copy(cjkLatinSpacing = v)) },
+                        fmt = { it.roundToInt().toString() }),
                 )
             }
             Sub.TextFont -> fontRows.map { row ->
@@ -882,7 +888,7 @@ private fun TextPage(
     /** 族 → 展示名（调用方由 fontEntries 预建；缺席回退族名本身，另给 CSS 通用族 3 个中文标签）。 */
     fontDisplayByFamily: Map<String, String>,
 ) {
-    val labelW = sliderLabelWidth(listOf("字号", "字间距", "中西字距"), p)
+    val labelW = sliderLabelWidth(listOf("字号", "字间距", "混排字距"), p)
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
         // Three font-replacement tiers (body/heading/code); each row drills down into the font panel.
         FONT_FIELDS.forEachIndexed { i, (label, key) ->
@@ -898,8 +904,11 @@ private fun TextPage(
         item { UiSliderRow("字间距", -100.0, 100.0, 1.0, s.letterSpacing, { it.roundToInt().toString() },
             { preview(s.copy(letterSpacing = it)) }, { commit(s.copy(letterSpacing = it)) }, p, labelWidth = labelW,
             nav = nav, index = 4) }
-        // CJK–Latin spacing: 0..100 mapped to 0..1.0em, default 0 (25 = 0.25em).
-        item { UiSliderRow("中西字距", 0.0, 100.0, 1.0, s.cjkLatinSpacing,
+        // 混排字距（用户可见名 2026-10-03 由「中西字距」改名；内部标识符与 JSON 键仍是
+        // `cjkLatinSpacing`，改名会改掉持久化键、作废刚写好的 schemaVersion 迁移）：
+        // 0..100 映射到 0..1.0em，**默认 25**（= 0.25em，CLREQ 值）；0 是合法档位 = 关掉间隙，
+        // 此时中西之间**只**靠「字间距」分隔，本功能不做任何额外动作。
+        item { UiSliderRow("混排字距", 0.0, 100.0, 1.0, s.cjkLatinSpacing,
             { it.roundToInt().toString() },
             { preview(s.copy(cjkLatinSpacing = it)) }, { commit(s.copy(cjkLatinSpacing = it)) }, p, labelWidth = labelW,
             nav = nav, index = 5) }

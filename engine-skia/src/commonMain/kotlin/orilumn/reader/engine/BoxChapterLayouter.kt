@@ -184,7 +184,7 @@ class BoxChapterLayouter(
     private fun breakerFor(profile: TypographicProfile): orilumn.reader.engine.laying.ParagraphBreaker {
         val inhouse = orilumn.reader.engine.AbSwitch.inhouseBreak()
         cachedBreaker?.takeIf { it.first == profile && it.second == inhouse }?.let { return it.third }
-        val made = orilumn.reader.engine.skia.bodyParagraphBreaker(profile.letterSpacingEm)
+        val made = orilumn.reader.engine.skia.bodyParagraphBreaker(profile.letterSpacingEm, profile.cjkLatinSpacingEmApplied)
         cachedBreaker = Triple(profile, inhouse, made)
         return made
     }
@@ -615,6 +615,7 @@ class BoxChapterLayouter(
             prepare.classify,
             prepare.hidden,
             profile.letterSpacingEm,
+            profile.cjkLatinSpacingEmApplied,
             profile.fgColor,
             prepare.genOf,
         )
@@ -636,7 +637,7 @@ class BoxChapterLayouter(
             }
             val tableWin = orilumn.reader.engine.skia.TableCellLines.expandTable(
                 frames, { prepare.styleMap[it] }, profile.letterSpacingEm, profile.fgColor,
-                imageLoader, chapterHref,
+                imageLoader, chapterHref, profile.cjkLatinSpacingEmApplied,
             )
             BoxDrawableLayout(
                 BoxLayoutResult(lines, prepare.structure.boxes), shapes,
@@ -758,6 +759,7 @@ class BoxChapterLayouter(
         shapes: List<ParagraphShapeRef>,
         lines: List<FlowedLine>,
         letterSpacingEm: Float,
+        cjkLatinSpacingEm: Float,
         inkColor: Int,
     ): Map<Int, orilumn.reader.engine.skia.DrawLine>? {
         val out = HashMap<Int, orilumn.reader.engine.skia.DrawLine>()
@@ -810,6 +812,7 @@ class BoxChapterLayouter(
                     italic = style.italic,
                     monospace = mono,
                     letterSpacingEm = letterSpacingEm,
+                    cjkLatinSpacingEm = cjkLatinSpacingEm,
                     lineWidthPx = if (intruded) lead!!.widthPx else w,
                     xLeft = xLeft + if (intruded) lead!!.xOffPx.roundToInt() else 0,
                     listMarker = if (k == 0) marker else null,
@@ -1011,7 +1014,7 @@ class BoxChapterLayouter(
         // Q1-b：本窗口已塑形块投影成 skia DrawLine（局部行序），TextReader 合流——
         // 增量页不再回落旧 StaticLayout 画法。
         val tSkia0 = orilumn.reader.time.platformNowMs()
-        val skiaLines = buildPartialSkiaWindow(prepare, leavesForDraw, localFirst, localShapes, localLines, profile.letterSpacingEm, profile.fgColor)
+        val skiaLines = buildPartialSkiaWindow(prepare, leavesForDraw, localFirst, localShapes, localLines, profile.letterSpacingEm, profile.cjkLatinSpacingEmApplied, profile.fgColor)
         val tSkia1 = orilumn.reader.time.platformNowMs()
         // 表格行展开进窗口（与 canonical/临时页同源 helper；行顶/行首取本窗 FlowedLine，char 章内；
         // 相邻同表行成组，rowspan 格边框跨行）。
@@ -1033,7 +1036,7 @@ class BoxChapterLayouter(
         val tTbl0 = orilumn.reader.time.platformNowMs()
         val incrWin = orilumn.reader.engine.skia.TableCellLines.expandTable(
             incrFrames, prepare::resolveStyle, profile.letterSpacingEm, profile.fgColor,
-            imageLoader, chapterHref,
+            imageLoader, chapterHref, profile.cjkLatinSpacingEmApplied,
         )
         val tTbl1 = orilumn.reader.time.platformNowMs()
         val tBox0 = orilumn.reader.time.platformNowMs()
@@ -1981,7 +1984,7 @@ class BoxChapterLayouter(
         val (localFirst, localLast) = localLineRanges(shapes)
         // Q1-b：临时页同样投影 skia 窗口（页内局部行序，行 y 已归一化到页首行 = 0）——
         // ReaderScreen 合流绘制，不再回落旧 StaticLayout 画法。
-        val skiaLines = buildPartialSkiaWindow(prepare, leavesForDraw, localFirst, shapes, lines, prepare.profile.letterSpacingEm, prepare.profile.fgColor)
+        val skiaLines = buildPartialSkiaWindow(prepare, leavesForDraw, localFirst, shapes, lines, prepare.profile.letterSpacingEm, prepare.profile.cjkLatinSpacingEmApplied, prepare.profile.fgColor)
         // 表格行展开进窗口（与 canonical 同源 helper；行顶/行首取本窗 FlowedLine，char 章内；
         // 相邻同表行成组，rowspan 格边框跨行）。
         val tempFrames = ArrayList<orilumn.reader.engine.skia.TableCellLines.RowFrame>()
@@ -2001,7 +2004,7 @@ class BoxChapterLayouter(
         }
         val tempWin = orilumn.reader.engine.skia.TableCellLines.expandTable(
             tempFrames, prepare::resolveStyle, prepare.profile.letterSpacingEm, prepare.profile.fgColor,
-            imageLoader, chapterHref,
+            imageLoader, chapterHref, prepare.profile.cjkLatinSpacingEmApplied,
         )
         val layout = PartialDrawableLayout(
             lines = lines,
@@ -2688,7 +2691,7 @@ class LightPrepare(
         }
         if (!anyFloat) return List(n) { null } to List(n) { null }
         // S3：与重路径同一单源（浮动 lead 的宽度决定其宿主块宽，必须与正文同变体）。
-        val breaker = orilumn.reader.engine.skia.bodyParagraphBreaker(profile.letterSpacingEm)
+        val breaker = orilumn.reader.engine.skia.bodyParagraphBreaker(profile.letterSpacingEm, profile.cjkLatinSpacingEmApplied)
         val pending = NormalFlowLayout.FloatPending()
         val out = ArrayList<orilumn.reader.engine.laying.FloatLead?>(n)
         val widths = ArrayList<Int?>(n)

@@ -53,13 +53,21 @@ object TableCellLines {
         inkColor: Int = 0xFF000000.toInt(),
         imageLoader: ImageBoundsReader? = null,
         chapterHref: String = "",
+        /**
+         * 混排字距（em，0 = 关）。
+         *
+         * **追加在形参表末尾**（不是紧跟 [letterSpacingEm]）：本方法的调用点里有按位置传参的
+         * 旧写法（`..., letterSpacingEm, inkColor, imageLoader, href`），插在中间会把后面的
+         * `Int` 实参静默重绑到 `Float` 形参上 —— 症状是「墨色变成一个浮点偏移」而非编译错误。
+         */
+        cjkLatinSpacingEm: Float = 0f,
     ): CellWindow {
         val lines = ArrayList<DrawLine>()
         val borders = ArrayList<PageBackground>()
         val images = ArrayList<PageImage>()
         var acc = 0
         for (cell in table.cells) {
-            acc = emitCell(cell, rowTop, rowTop + rowHeight.coerceAtLeast(1), rowCharBase + acc, table.emptyCellsHide, styleOf, fallback, letterSpacingEm, inkColor, lines, borders, images, imageLoader, chapterHref, acc)
+            acc = emitCell(cell, rowTop, rowTop + rowHeight.coerceAtLeast(1), rowCharBase + acc, table.emptyCellsHide, styleOf, fallback, letterSpacingEm, inkColor, lines, borders, images, imageLoader, chapterHref, acc, cjkLatinSpacingEm)
         }
         return CellWindow(lines, borders, images)
     }
@@ -76,6 +84,8 @@ object TableCellLines {
         inkColor: Int = 0xFF000000.toInt(),
         imageLoader: ImageBoundsReader? = null,
         chapterHref: String = "",
+        /** 混排字距（em）；同样**追加在末尾**，理由见 [expand]。 */
+        cjkLatinSpacingEm: Float = 0f,
     ): TableWindow {
         val byLine = HashMap<Int, List<DrawLine>>()
         val borders = ArrayList<PageBackground>()
@@ -93,7 +103,7 @@ object TableCellLines {
                 for (cell in f.table.cells) {
                     val spanLast = (k + cell.rowSpan.coerceAtLeast(1) - 1).coerceAtMost(j)
                     val spanBottom = frames[spanLast].rowTop + frames[spanLast].rowHeight.coerceAtLeast(1)
-                    acc = emitCell(cell, f.rowTop, spanBottom, f.rowCharBase + acc, f.table.emptyCellsHide, styleOf, f.fallbackStyle, letterSpacingEm, inkColor, lines, borders, frameImages, imageLoader, chapterHref, acc)
+                    acc = emitCell(cell, f.rowTop, spanBottom, f.rowCharBase + acc, f.table.emptyCellsHide, styleOf, f.fallbackStyle, letterSpacingEm, inkColor, lines, borders, frameImages, imageLoader, chapterHref, acc, cjkLatinSpacingEm)
                 }
                 if (lines.isNotEmpty()) byLine[f.lineIdx] = lines
                 if (frameImages.isNotEmpty()) imagesByLine[f.lineIdx] = frameImages
@@ -162,6 +172,8 @@ object TableCellLines {
         imageLoader: ImageBoundsReader?,
         chapterHref: String,
         acc: Int,
+        /** 混排字距（em，0 = 关）：逐块写进 [DrawLine]，断行侧已按同值预留版心。 */
+        cjkLatinSpacingEm: Float,
     ): Int {
         val blocks = cell.blocks
         if (blocks.isEmpty()) return acc
@@ -206,6 +218,7 @@ object TableCellLines {
                         italic = bs.italic,
                         monospace = bs.monospace || blockTag == "pre",
                         letterSpacingEm = letterSpacingEm,
+                        cjkLatinSpacingEm = cjkLatinSpacingEm,
                         lineWidthPx = lineW,
                         xLeft = xLeft,
                         listMarker = null,

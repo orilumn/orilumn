@@ -2,6 +2,8 @@ package orilumn.reader.engine.skia
 
 import orilumn.reader.engine.css.FontRun
 import orilumn.reader.engine.laying.HYPHEN_GLYPH
+import orilumn.reader.engine.text.preprocess.CjkLatinGap
+import orilumn.reader.engine.text.preprocess.CjkLatinSpacing
 import orilumn.reader.io.Logger
 import org.jetbrains.skia.Font
 import org.jetbrains.skia.FontMgr
@@ -49,6 +51,16 @@ class SkiaRunMeasurer(
      *
      * 行内 face 段（[fontRuns]，同文本坐标）按浏览器 inline-run 语义逐段换面 —— 与 `paragraphStyle`
      * 的 `runTextStyle` 同一口径，量画一致。
+     *
+     * @param cjkGaps 混排字距的边界间隙（**下标与 [text] 同坐标系**，[CjkLatinSpacing.gaps] 的产物；
+     *   空 = 关）。**施加只发生在 [applyCjkLatinGaps] 这一处**：断行器（预留版心）、
+     *   [LineAligner]（落 x 位）、[KerningClusterTable]（cluster 轨迹）三条路都走本方法，
+     *   故不存在「量宽算了一份、落墨算了另一份」的分叉（量画同源，教训 ⑩）。
+     *
+     *   ⚠ 形参收**间隙列表**而不是 `cjkLatinSpacingEm`（em）：三个调用方都还需要间隙的**位置**
+     *   （aligner 的「行末悬挂空格把间隙一起挂掉」、cluster 轨道的累计位移），
+     *   而检测是 O(n) 的扫描 —— 由调用方检测一次、传进来，才不会扫第二遍。
+     *   em 值仍在每个 [CjkLatinGap.gapEm] 里（检测时写入），施加侧仍是唯一一处。
      */
     fun advances(
         text: CharSequence,
@@ -60,6 +72,7 @@ class SkiaRunMeasurer(
         italic: Boolean,
         monospace: Boolean,
         fontRuns: List<FontRun> = emptyList(),
+        cjkGaps: List<CjkLatinGap> = emptyList(),
     ): FloatArray {
         val n = text.length
         val out = FloatArray(n)
@@ -67,8 +80,72 @@ class SkiaRunMeasurer(
         val mgrs = managers()
         val segs = segments(text, n, fontSizePx, letterSpacingEm, tag, families, weight, italic, monospace, fontRuns, mgrs)
         for (s in segs) measure(text, s.from, s.to, s, out)
+        if (cjkGaps.isNotEmpty()) applyCjkLatinGaps(fontRuns, fontSizePx, cjkGaps, out)
         return out
     }
+
+    /**
+     * 混排字距的**唯一施加点**（渲染层·几何测量）：把每个边界间隙加进对应字位的 advance。
+     *
+     * ## 施加规则（两条，缺一不可）
+     *
+     *  1. `adv[leftIndex] += gapEm × 该字所在 run 的字号`。字位选 **leftIndex**（边界左侧那个字）而不是
+     *     右侧那个：`x_i = x_0 + Σ_{j<i} adv[j]`（[LineAligner]），加在 leftIndex 上才把**右边的
+     *     所有字**推开；加在 `leftIndex + 1` 上则连 `leftIndex` 自己都被推开（那等于把间隔画在左边）。
+     *     字号的取法与 `lsPx` 同源（按 run 字号，即 `run.fontPxOr(fontSizePx)`）——同一条规则，
+     *     不另立标准。
+     *  2. `spaceCount > 0` 时**再把 `adv[leftIndex + 1 .. leftIndex + spaceCount]` 全部置 0**：
+     *     边界上那串手打空格被收进固定间隙里（产品口径「原有空格一律删除」/ CLREQ 4.1
+     *     「删除多余半角空格，注入固定间隙」），必须画成零宽，否则 `0.25em` 的间隙
+     *     会变成 `0.25em + 一串空格宽`。逐槽置 0 而不是「只置第一个」是「一律删除」的要求：
+     *     旧实现只吃一个、其余空格保留（且不给间隙），那条例外已删。
+     *
+     * > ⚠ 置 0 只改**绘制几何**，字符本身仍在文本模型里 ⇒ 选中/复制/检索/索引不受影响。
+     *
+     * ## 为什么放在量宽器的出口而不是段内
+     *
+     * 段内 [measure] 的 `adv[i]` 是「字形宽 + 该 run 的 lsPx」，一个段一个 `lsPx`、一个 `sizePx`；
+     * 间隙的字号判定与之逐条一致，若塞进 [measure] 就得让每段都多跑一次边界扫描（而 CJK 段恒 2 次
+     * native 调用的预算正是被 [measure] 的批量取宽守住的）。出口施加 = **段数不变、段内零改动**。
+     */
+    private fun applyCjkLatinGaps(
+        fontRuns: List<FontRun>,
+        fontSizePx: Float,
+        cjkGaps: List<CjkLatinGap>,
+        adv: FloatArray,
+    ) {
+        val n = adv.size
+        for (g in cjkGaps) {
+            val left = g.leftIndex
+            // gap 必须落在**两个边界字之间**，故其左侧那个字位一定在 text 内（探测器保证 ≥ 0）。
+            if (left < 0 || left >= n) continue
+            val size = fontRuns.firstOrNull { it.start <= left && left < it.endExclusive }?.fontPxOr(fontSizePx) ?: fontSizePx
+            adv[left] += g.gapEm * size
+            // 一律删除：`spaceCount` 个空格字位全置零。`1..0` 是空区间（Kotlin 的 IntRange 不回绕），
+            // 故「相邻、无空格可吃」的间隙不需要额外分支。
+            for (k in 1..g.spaceCount) if (left + k < n) adv[left + k] = 0f
+        }
+    }
+
+    /**
+     * 供「不需要间隙位置」的调用方（[naturalWidth] 一类）的一行便捷入口：
+     * 就地检测一次再交给 [advances]。
+     */
+    private fun advancesWithGaps(
+        text: CharSequence,
+        fontSizePx: Float,
+        letterSpacingEm: Float,
+        tag: String?,
+        families: List<String>,
+        weight: Int,
+        italic: Boolean,
+        monospace: Boolean,
+        fontRuns: List<FontRun>,
+        cjkLatinSpacingEm: Float,
+    ): FloatArray = advances(
+        text, fontSizePx, letterSpacingEm, tag, families, weight, italic, monospace, fontRuns,
+        if (cjkLatinSpacingEm > 0f) CjkLatinSpacing.gaps(text, cjkLatinSpacingEm, fontRuns) else emptyList(),
+    )
 
     /** 整段自然宽（px，max-content / [orilumn.reader.engine.laying.ParagraphBreaker.preferredWidth]）。 */
     /**
@@ -128,8 +205,11 @@ class SkiaRunMeasurer(
         italic: Boolean,
         monospace: Boolean,
         fontRuns: List<FontRun> = emptyList(),
+        cjkLatinSpacingEm: Float = 0f,
     ): Float {
-        val adv = advances(text, fontSizePx, letterSpacingEm, tag, families, weight, italic, monospace, fontRuns)
+        val adv = advancesWithGaps(
+            text, fontSizePx, letterSpacingEm, tag, families, weight, italic, monospace, fontRuns, cjkLatinSpacingEm,
+        )
         var sum = 0f
         for (a in adv) sum += a
         return sum

@@ -14,6 +14,7 @@ import orilumn.reader.engine.laying.ParagraphBreaker
 import orilumn.reader.engine.laying.RegionScopedBreakSource
 import orilumn.reader.engine.laying.isDocumentSpace
 import orilumn.reader.engine.laying.lineHeightPx
+import orilumn.reader.engine.text.preprocess.CjkLatinSpacing
 
 /**
  * 自建断行器（排版层·上）——路线 B 的断行决策本体：量宽 → 断点集 → 贪心填充 → `List<BrokenLine>`。
@@ -40,6 +41,15 @@ import orilumn.reader.engine.laying.lineHeightPx
  */
 class InhouseParagraphBreaker(
     private val letterSpacingEm: Float,
+    /**
+     * CJK–Latin 自动间距（em）—— **断行侧的量宽必须把它算进版心**（[SkiaRunMeasurer.advances]
+     * 的单一出口，见该方法 KDoc）。
+     *
+     * 0 = 关（默认）。由 [bodyParagraphBreaker] 按 [orilumn.reader.engine.AbSwitch.inhouseBreak]
+     * 闸门传入，回退到 Skia 断行器时**必须**传 0：Skia 那条路无法为间隙预留版心，
+     * 若绘制侧照插间隙就会**超出版心被裁**（`NoLineExceedsContentWidthTest` 钉的硬约束）。
+     */
+    private val cjkLatinSpacingEm: Float = 0f,
     private val measurer: SkiaRunMeasurer = SkiaRunMeasurer(),
     /** 断点增强器（顺序无关，S2(b) 冻结的形状）。本轮只接禁则表一个 source；S7 只加 source。 */
     private val breakSources: List<BreakOpportunitySource> = listOf(KinsokuBreakSource),
@@ -217,7 +227,7 @@ class InhouseParagraphBreaker(
     ): Float {
         if (text.isEmpty()) return 0f
         return measurer.naturalWidth(
-            text, fontSizePx, letterSpacingEm, null, families, weight, italic, monospace, fontRuns,
+            text, fontSizePx, letterSpacingEm, null, families, weight, italic, monospace, fontRuns, cjkLatinSpacingEm,
         )
     }
 
@@ -264,26 +274,6 @@ class InhouseParagraphBreaker(
         firstLineIndentPx: Float,
         fontRuns: List<FontRun>,
         baselineShifts: List<BaselineShift>,
-    ): List<BrokenLine> = breakLines(
-        text, fontSizePx, lineHeightRatio, widthPx, alignment, tag, families, weight, italic, monospace,
-        firstLineIndentPx, fontRuns, baselineShifts, 0f
-    )
-
-    fun breakLines(
-        text: CharSequence,
-        fontSizePx: Float,
-        lineHeightRatio: Float,
-        widthPx: Int,
-        alignment: TextAlign,
-        tag: String?,
-        families: List<String>,
-        weight: Int,
-        italic: Boolean,
-        monospace: Boolean,
-        firstLineIndentPx: Float,
-        fontRuns: List<FontRun>,
-        baselineShifts: List<BaselineShift>,
-        cjkLatinSpacingEm: Float,
     ): List<BrokenLine> {
         val n = text.length
         if (n == 0) return emptyList()
@@ -296,7 +286,14 @@ class InhouseParagraphBreaker(
         @Suppress("UNUSED_EXPRESSION")
         baselineShifts
 
-        val adv = measurer.advances(text, fontSizePx, letterSpacingEm, tag, families, weight, italic, monospace, fontRuns)
+        // 混排字距的间隙就在这里被算进 `adv`（[SkiaRunMeasurer.applyCjkLatinGaps]）——
+        // **不在别处**：断行要预留版心、绘制要落在同一批字位上，两者必须走同一个取宽口（量画同源，教训 ⑩）。
+        val gaps = if (cjkLatinSpacingEm > 0f) {
+            CjkLatinSpacing.gaps(text, cjkLatinSpacingEm, fontRuns)
+        } else {
+            emptyList()
+        }
+        val adv = measurer.advances(text, fontSizePx, letterSpacingEm, tag, families, weight, italic, monospace, fontRuns, gaps)
         // 首行可用宽直接扣缩进 —— SkiaParagraphBreaker 那段「TextIndent 整段单行快捷路径」的
         // R1 补偿在新实现下自然消失（本类没有那条快捷路径，首行从一开始就按 CSS 语义排）。
         val headPx = widthPx - firstLineIndentPx

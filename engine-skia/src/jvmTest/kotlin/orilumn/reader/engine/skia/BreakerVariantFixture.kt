@@ -32,11 +32,30 @@ import orilumn.reader.engine.laying.ParagraphBreaker
  * 故 [applyBreakerVariant] 对两侧**都写显式值**：`inhouseBreak=1` / `inhouseBreak=0`。
  * 这与「测试不依赖全局默认」是同一条纪律。
  */
-internal fun forEachBreakerVariant(block: (ParagraphBreaker, String) -> Unit) {
+internal fun forEachBreakerVariant(
+    /**
+     * 混排字距（em）的**取值函数**，在开关拨好之后才求值。
+     *
+     * ## 为什么是函数而不是 Float
+     *
+     * 该值必须取 [orilumn.reader.engine.text.TypographicProfile.cjkLatinSpacingEmApplied]（**闸过的**），
+     * 而那个 getter 自己要读 [AbSwitch.inhouseBreak] —— 本函数体第一件事才是拨开关。
+     * 若把 `Float` 在进函数时就求值，读到的是**上一轮/默认值**的开关状态，
+     * 于是自建臂可能拿到 0（Skia 臂的值）、Skia 臂可能拿到非 0，两臂都被喂错。
+     *
+     * ## 为什么默认 0f 仍然大量锁是对的
+     *
+     * 只有「显式路径 vs 生产路径（走 `BoxChapterLayouter`）」的比较型锁才必须喂 profile 真值；
+     * 两侧都不经生产接线的锁留 0f 即正确（生产接线在那些锁里根本没参与）。
+     * 喂错方向永远是「显式侧 0、生产侧非 0」⇒ 重轻不等价，症状与本文件开头描述的假失败同型。
+     */
+    cjkLatinSpacingEm: () -> Float = { 0f },
+    block: (ParagraphBreaker, String) -> Unit,
+) {
     for (label in breakerVariants().map { it.first }) {
         try {
             applyBreakerVariant(label)
-            block(bodyParagraphBreaker(letterSpacingEm = 0f), label)
+            block(bodyParagraphBreaker(letterSpacingEm = 0f, cjkLatinSpacingEm = cjkLatinSpacingEm()), label)
         } finally {
             // 复位回默认（不是回 skia）：否则污染同 JVM 里后续每个变体敏感的用例。
             AbSwitch.resetForTest()

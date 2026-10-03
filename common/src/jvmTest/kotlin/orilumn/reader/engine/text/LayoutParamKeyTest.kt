@@ -139,6 +139,83 @@ class LayoutParamKeyTest {
 
         // S3：两个变体都要过参考实现（否则这条锁只覆盖默认侧，新字段的喂入序无人看守）。
         assertEquals(javaCrc32(base.copy(inhouseBreak = true)), base.copy(inhouseBreak = true).hash())
+        // 混排字距非 0：走的是**另一条喂入分支**，同样必须过参考实现。
+        assertEquals(javaCrc32(base.copy(cjkLatinSpacingEm = 0.25f)), base.copy(cjkLatinSpacingEm = 0.25f).hash())
+        // 两个变长哨兵同时非默认（最容易被写错的一组：两个追加都触发）。
+        assertEquals(
+            javaCrc32(base.copy(inhouseBreak = true, cjkLatinSpacingEm = 0.25f)),
+            base.copy(inhouseBreak = true, cjkLatinSpacingEm = 0.25f).hash(),
+        )
+    }
+
+    /**
+     * 混排字距锁：**非 0 必须换键，0 必须精确复现历史流**。两条缺一不可，且**都只由本锁守**。
+     *
+     * - 「非 0 换键」：间隙改变行宽 ⇒ 换断点 ⇒ 换页切点。键若不变，就会命中按「无间隙」算出的
+     *   旧磁盘表，读到「滑块拖了但书没变」的假象（教训 28 同一类）。
+     * - 「0 复现历史流」：`paramHash` 是缓存文件名。接线前实测一律按 0 排，混排字距是死代码，
+     *   无条件喂 4 字节 ⇒ **所有**老用户的分页缓存一次性全废（纯浪费的全量重排）。
+     *
+     * ## 为什么「0 复现」这一半必须在这里重钉一遍金标准数字
+     *
+     * 上面 `回退侧…逐字节等于接线前 schema` 那条金标准只钉了**一个** profile 的字节流。
+     * 「变长哨兵在 0 时不喂」这条性质是**逐键成立**的，若只靠那一条来间接覆盖，写成
+     * `assertEquals(base.hash(), base.copy(cjkLatinSpacingEm = 0f).hash())` 是**空断言**
+     * —— 两侧字段完全相同，恒等，与喂入序改没改毫无关系（无条件喂时它照样绿）。
+     *
+     * 所以本锁用一个**与金标准不同**的 profile，把它的「接线前字节流」单独钉成常量：
+     * 喂入序一改（哪怕只对某些键生效），这个数字立刻对不上。突变验证：
+     * 把 `if (cjkLatinSpacingEm != 0f)` 改成无条件喂 ⇒ 本锁红。
+     *
+     * 数字由 Python 独立复刻**旧喂入序**算出（52 字节，`zlib.crc32` 与 `java.util.zip.CRC32`
+     * 同算法）；该复刻先在金标准那条 profile 上验过与 `908642712` 一致，才拿来出这个数。
+     */
+    @Test
+    fun `混排字距非 0 换键、0 精确复现历史流`() {
+        val base = LayoutParamKey(
+            bodyPx = 20f, lineSpacing = 1.75f, firstLineIndentEm = 0f, letterSpacingEm = 0.05f,
+            paragraphSpacingPx = 12, paragraphGapScale = 0.5f,
+            fontBody = "", fontTitle = "", fontCode = "",
+            useOriginalStyle = true, contentW = 1200, contentH = 1600, userCssHash = 0,
+            inhouseBreak = false,
+        )
+        // 接线前的历史流金标准（本 profile 专属，非上面那条的那个数）。
+        assertEquals(
+            "cjkLatinSpacingEm = 0 必须逐字节等于接线前的历史流（3165348332），否则老用户全书重排",
+            3165348332L,
+            base.hash() and 0xFFFFFFFFL,
+        )
+        assertEquals(
+            "显式写 0 与走字段默认值必须同键（否则「默认构造」本身就是一条旁路）",
+            base.hash(),
+            base.copy(cjkLatinSpacingEm = 0f).hash(),
+        )
+        val gap = base.copy(cjkLatinSpacingEm = 0.25f)
+        assertNotEquals(
+            "混排字距非 0 必须换键，否则会命中按无间隙算出的旧磁盘表",
+            base.hash(),
+            gap.hash(),
+        )
+        // 非 0 侧的**金标准数字**：变长哨兵必须在喂入序**最后**。只钉「非 0 换键」是钉不住的 ——
+        // 「条件喂但喂在中间」同样满足「非 0 换键」，却会让后续字段整体左移 4 字节、
+        // 与另一种键取值撞流（歧义）。钉死字节流就同时钉死了值与位置。
+        assertEquals(
+            "非 0 侧的喂入流（哨兵在末尾）必须逐字节等于金标准 2317192732",
+            2317192732L,
+            gap.hash() and 0xFFFFFFFFL,
+        )
+        // 变长哨兵的位置敏感：与别的字段**同值**也必须换键（否则两个版面共用一份表）。
+        // 这两条是「不能把中文字距塞进 `letterSpacingEm` 或 `inhouseBreak` 的喂入槽」的守卫。
+        assertNotEquals(
+            "混排字距不得与 letterSpacingEm 混用同一个喂入槽",
+            base.copy(letterSpacingEm = 0.25f).hash(),
+            gap.hash(),
+        )
+        assertNotEquals(
+            "混排字距不得与 inhouseBreak 混用同一个喂入槽",
+            base.copy(inhouseBreak = true).hash(),
+            gap.hash(),
+        )
     }
 
     /**
@@ -238,6 +315,9 @@ class LayoutParamKeyTest {
         if (k.inhouseBreak) {
             j.update(0); j.update(0); j.update(0); j.update(1)
         }
+        // 混排字距：同样是**变长哨兵**（只在非 0 时追加，位置在最后），与 `hash()` 同式。
+        // 参考实现必须逐字节跟着 schema 走：少喂一轮它就名存实亡了。
+        if (k.cjkLatinSpacingEm != 0f) k.cjkLatinSpacingEm.feed4()
         return j.value
     }
 }

@@ -53,8 +53,16 @@ import orilumn.reader.engine.laying.ParagraphBreaker
  * 而不是由「把列宽钉回另一套实现」保证—— 后者才是当初重轻分叉的真正来源。
  * ⚠️ 教训（`docs/自建断行引擎-测试计划.md` 教训 ⑮）：「同一个函数」还不够，
  * 两处各调一次工厂时，改其中一处另一处的锁**照样绿**（实测 MUT-I 两轮 BUILD SUCCESSFUL）。
+ *
+ * ## 混排字距为什么也由这个开关决定（2026-10-02）
+ *
+ * [cjkLatinSpacingEm] 只在**自建**侧才传得进去：Skia 断行器（`SkParagraph`）自己量版心，
+ * 本仓无法让它为「注入的间隙」预留宽度 —— 而绘制侧照样会按 [SkiaRunMeasurer.advances] 画出间隙
+ * ⇒ 断行器以为放得下、画出来超出版心被裁（`NoLineExceedsContentWidthTest` 钉的硬约束）。
+ * 故开关 off ⇒ 间隙**整条关掉**（量宽与绘制两侧同为 0，见 [orilumn.reader.engine.text.TypographicProfile.cjkLatinSpacingEmApplied]），
+ * 不是「画了但没预留」。开关是回退阀，两侧行为必须一致地退干净。
  */
 fun bodyParagraphBreaker(letterSpacingEm: Float, cjkLatinSpacingEm: Float = 0f): ParagraphBreaker =
-    if (AbSwitch.inhouseBreak()) InhouseParagraphBreaker(letterSpacingEm)
+    if (AbSwitch.inhouseBreak()) InhouseParagraphBreaker(letterSpacingEm, cjkLatinSpacingEm)
     else SkiaParagraphBreaker(letterSpacingEm)
 

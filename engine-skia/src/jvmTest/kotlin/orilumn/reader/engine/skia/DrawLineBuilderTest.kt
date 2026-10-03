@@ -56,7 +56,7 @@ class DrawLineBuilderTest(private val variant: String) {
         val classify = NormalFlowLayout.heavyClassify(styleMap, engine.hasDisplayDeclaration())
         val result = BoxLayouter(16f, variantBreaker()).layoutBoxes(root, 600, styleMap, classify)
         val ink = 0xFF123456.toInt()
-        val map = DrawLineBuilder.build(result, styleMap, classify, HIDDEN_NONE, 0f, ink)
+        val map = DrawLineBuilder.build(result, styleMap, classify, HIDDEN_NONE, 0f, inkColor = ink)
         assertTrue("must produce lines", map.isNotEmpty())
         assertTrue("every line carries the theme ink", map.values.all { it.inkColor == ink })
         val def = DrawLineBuilder.build(result, styleMap, classify, HIDDEN_NONE, 0f)

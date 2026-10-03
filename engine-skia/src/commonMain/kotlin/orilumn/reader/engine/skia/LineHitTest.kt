@@ -66,6 +66,8 @@ object LineHitTest {
             align = line.alignment,
             firstLineIndentPx = 0f,
             isLastLine = line.range.last + 1 >= line.text.length,
+            // 混排字距：**必须与绘制侧同一个 em**，否则点按命中的字位与落墨错开（间隙量级）。
+            cjkLatinSpacingEm = line.cjkLatinSpacingEm,
         )
         // 行尾空区不算命中：超过**可见右边界**即 miss（可见右边界已排除行末空白）。
         if (xInParagraph > placement.visibleRight + 1f) return null
@@ -90,6 +92,7 @@ object LineHitTest {
             line.text, start until (line.range.last + 1), line.fontSizePx, line.lineWidthPx.toFloat(),
             line.letterSpacingEm, line.tag, line.families, line.weight, line.italic, line.monospace,
             line.fontRuns, line.alignment, 0f, line.range.last + 1 >= line.text.length,
+            cjkLatinSpacingEm = line.cjkLatinSpacingEm,
         )
         val hit = hit(line, xInParagraph, 0f) ?: return Float.NaN
         val k = hit - start

@@ -36,6 +36,19 @@ object DrawLineBuilder {
         classify: BlockClassify,
         hidden: HiddenCheck,
         letterSpacingEm: Float,
+        /**
+         * 混排字距（em）—— 与 [letterSpacingEm] 同类但**独立开关**：
+         * `letterSpacing` 是 CSS 属性（每码本都加），混排字距是**注入式**的（只在边界处加，
+         * 且可能吃掉一个手打空格），两者口径不同，不能合成一个形参。
+         *
+         * 插在 [letterSpacingEm] **之后**（不像 [LineAligner.align] 那样只能追加到末尾）是因为本
+         * 函数的形参**除 `letterSpacingEm` 外全带默认值**：越过 `letterSpacingEm` 的调用点必须用
+         * 命名实参，而形参类型两两不同（`Float` / `Int`），类型检查能挡住错位。
+         * ⚠ 但 `letterSpacingEm` 之后**紧邻**的那一个仍可能被位置实参静默吃掉：
+         *   `build(..., 0f, ink)` 会把 `ink`（Int）绑到本形参（Float）——那个会**编译报错**（类型不符），
+         *   所以这一个是安全的；真正危险的形状是「新形参与旧形参同类型且紧邻」，那种才会无声改语义。
+         */
+        cjkLatinSpacingEm: Float = 0f,
         /** 文本墨色（ARGB Int，调用方喂 TypographicProfile.fgColor），逐行写入 DrawLine。 */
         inkColor: Int = 0xFF000000.toInt(),
         /** P3-c 生成内容查找（空即无，旧路径；调用方喂与塑形同一 phase-1 结果）。 */
@@ -108,6 +121,7 @@ object DrawLineBuilder {
                     italic = style.italic,
                     monospace = mono,
                     letterSpacingEm = letterSpacingEm,
+                    cjkLatinSpacingEm = cjkLatinSpacingEm,
                     lineWidthPx = lineW,
                     xLeft = lineX,
                     listMarker = if (lineIdx == leaf.firstLineIndex) marker else null,

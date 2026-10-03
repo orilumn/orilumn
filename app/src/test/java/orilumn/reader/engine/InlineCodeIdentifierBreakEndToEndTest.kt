@@ -35,8 +35,39 @@ import org.robolectric.annotation.Config
  *
  * 断行**位置**的分布取决于默认阅读配置的字号与族回退（各机器可能不同），所以「哪些切点可能发生」
  * 交给上面那两把锁去钉；这里钉的是**真实书源码上的具体结果**——它同时充当**零回归证据**：
- * 420 / 480 / 520 三档与 Q18 改动前**逐值相同**（同一版心下同一切点、同一个连字符位）。
- * 若哪天真出现无关改动把这两档挪了，本锁会逼改动被显式看见并解释。
+ * 同一版心下同一切点、同一个连字符位。若哪天真出现改动把某档挪了，本锁会逼改动被显式看见并解释。
+ *
+ * ## 2026-10-03：混排字距接线后 420 / 160 两档被**显式改写**（相关改动，不是回归）
+ *
+ * 本类用 `ReaderSettings.DEFAULT` 排版，也就是**生产默认配置**；混排字距（`cjkLatinSpacing`）
+ * 默认 25（0.25em）随之生效，而本类语料正是「中文 + 拉丁标识符」的混排形态 ⇒
+ * 两条行比关掉时更宽 ⇒ 断点前移。实测（同一份源码、同一批版心）：
+
+ * | 版心 | 混排字距 0 | 混排字距 25（默认，生产） |
+ * |---|---|---|
+ * | rustLi 420 | `…方法进行 ` ‖ `wrapping，如 wrapping_add` | `…方法进` ‖ `行 wrapping，如 wrapping_add` |
+ * | longIdent 160 | `…capacity_check ` ‖ `即可` | `…capacity_` ‖ `check 即可` |
+ * | 其余七档 | — | **逐值相同** |
+ *
+ * 性质没变：行内 `<code>` 的标识符**仍只在 `_` 处断**、**行尾仍不进代码 run**
+ * （`noLineEndsWithAHyphenInsideACodeRun` 与 `longIdentifierBreaksOnlyAtUnderscores` 的
+ * 不变式部分全绿），变的只是「断在哪个 `_`」。
+ *
+ * 顺带钉住一条容易被误判的现象：**行尾那个作者空格仍然存在**（360 档的 `"…wrapping_* "`）。
+ * 混排字距的「一律删除」只在**边界两侧都在本行**时才吃到那个空格；跨行的边界
+ * （`wrapping_*` ‖ `方法`）在行子串上看不到右邻码本 ⇒ 不发间隙、空格照旧。
+ *
+ * ## 2026-10-03 第二次：标点不再参与 ⇒ **640 那一档被显式改写**（相关改动，不是回归）
+ *
+ * 真机报「`Kotlin` 与后面的冒号之间也受混排间距影响」⇒ 边界判据收紧为**两侧都必须是字母数字**。
+ * 本类语料里唯一受影响的边界是 `wrapping` 的 `g` 与全角逗号 `，`（U+FF0C）之间那一条
+ * （旧口径把 `，` 当 CJK ⇒ 发间隙；新口径它是标点 ⇒ 不发）。
+ * 那条间隙**不靠空格分隔**，所以它消失 = 断行侧少预留一个 `gap` ⇒ 第一行能多装下 `wrapping_`：
+ *
+ * | 版心 | 上一版 | 本版 |
+ * |---|---|---|
+ * | rustLi 640 | `…方法进行 wrapping，如 ` ‖ `wrapping_add` | `…方法进行 wrapping，如 wrapping_` ‖ `add` |
+ * | 其余九档 | — | **逐值相同** |
  *
  * ## 480 那一档的 `wrap` ‖ `ping` **不是** bug（写在这里免得后人误"修"）
  *
@@ -119,17 +150,17 @@ class InlineCodeIdentifierBreakEndToEndTest {
             ),
             visibleLines(lay(rustLi, 360)),
         )
-        // 420 / 480 / 520：**与 Q18 改动前逐值相同**（零回归证据，见类 KDoc）。
+        // 420：**混排字距上线后被显式改写**（行更宽 ⇒ 断点前移一个字），见类 KDoc 的对照表。
         assertEquals(
-            "版心 420（与改动前逐值相同）",
+            "版心 420（混排字距默认 25 下的值；关掉时是 `…方法进行 ` ‖ `wrapping，如 wrapping_add`）",
             listOf(
-                "所有模式下都可以使用 wrapping_* 方法进行 ",
-                "wrapping，如 wrapping_add",
+                "所有模式下都可以使用 wrapping_* 方法进",
+                "行 wrapping，如 wrapping_add",
             ),
             visibleLines(lay(rustLi, 420)),
         )
         assertEquals(
-            "版心 480（与改动前逐值相同；切点 `wrap|ping` 在**正文裸词**里，是合法音节断词）",
+            "版心 480（混排字距**不影响**这一档；切点 `wrap|ping` 在**正文裸词**里，是合法音节断词）",
             listOf(
                 "所有模式下都可以使用 wrapping_* 方法进行 wrap",
                 "ping，如 wrapping_add",
@@ -137,7 +168,7 @@ class InlineCodeIdentifierBreakEndToEndTest {
             visibleLines(lay(rustLi, 480)),
         )
         assertEquals(
-            "版心 520（与改动前逐值相同）",
+            "版心 520（混排字距**不影响**这一档）",
             listOf(
                 "所有模式下都可以使用 wrapping_* 方法进行 wrapping，",
                 "如 wrapping_add",
@@ -145,10 +176,11 @@ class InlineCodeIdentifierBreakEndToEndTest {
             visibleLines(lay(rustLi, 520)),
         )
         assertEquals(
-            "版心 640：**用户报的那一行**，`wrapping_add` 现在完整成行",
+            "版心 640：**用户报的那一行**。`wrapping_add` 不再完整成行 —— 断点从 `，` 之后" +
+                "前移到了 `wrapping_` 之后（原因见类 KDoc「2026-10-03 第二次」那一节）",
             listOf(
-                "所有模式下都可以使用 wrapping_* 方法进行 wrapping，如 ",
-                "wrapping_add",
+                "所有模式下都可以使用 wrapping_* 方法进行 wrapping，如 wrapping_",
+                "add",
             ),
             visibleLines(lay(rustLi, 640)),
         )
@@ -182,8 +214,10 @@ class InlineCodeIdentifierBreakEndToEndTest {
     @Test
     fun longIdentifierBreaksOnlyAtUnderscores() {
         assertEquals(
-            "版心 160",
-            listOf("调用 wrapping_", "add_with_", "capacity_check ", "即可"),
+            // 160：混排字距上线后切点从「`capacity_check ` ‖ `即可`」前移到「`capacity_` ‖ `check 即可`」
+            // （仍然**只在 `_` 之后**，性质未变），见类 KDoc 的对照表。
+            "版心 160（混排字距默认 25 下的值；关掉时是 `capacity_check ` ‖ `即可`）",
+            listOf("调用 wrapping_", "add_with_", "capacity_", "check 即可"),
             visibleLines(lay(longIdent, 160)),
         )
         assertEquals(

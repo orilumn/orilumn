@@ -70,9 +70,31 @@ data class TypographicProfile(
     /** Character spacing in em (letterSpacing slot -100..100 / 500 = -0.2em..0.2em); 0 = no extra
      * spacing. Applied to the base text paint in the shaping layer. */
     val letterSpacingEm: Float,
-    /** CJK–Latin automatic spacing in em (0..1.0). */
+    /** CJK–Latin automatic spacing in em (0..1.0). 用户设置的原始值（**不代表能不能生效**，见
+     *  [cjkLatinSpacingEmApplied]）。 */
     val cjkLatinSpacingEm: Float = 0f,
 ) {
+
+    /**
+     * **真正施加到版面上的**混排字距（em）—— 绘制侧（[orilumn.reader.engine.skia.LineWindowDrawer] /
+     * [orilumn.reader.engine.skia.KerningClusterTable] / [orilumn.reader.engine.skia.DrawLineBuilder]）
+     * 一律读本值，不读 [cjkLatinSpacingEm]。
+     *
+     * ## 为什么多这一层（用户可见的效果：滑块拖了、书没变）
+     *
+     * 间隙是**注入的宽度**：它必须在版心里被**预留**（否则超出版心被裁，分页阅读器硬错误），
+     * 而只有 [orilumn.reader.engine.skia.InhouseParagraphBreaker] 能预留 —— Skia 回退阀那条路
+     * 无法让 `SkParagraph` 为外来宽度让位。于是开关 off 时若还照画，症状就是「版面溢出」。
+     * ⇒ 开关 off ⇒ 本值返 0，绘制侧**整条不画**，与断行侧的 0 严格一致。
+     *
+     * ⚠ 与 [orilumn.reader.engine.text.LayoutParamKey.fromProfile] 的闸门是**同一个判据**
+     *   （[orilumn.reader.engine.AbSwitch.inhouseBreak]）：键算出来的间隙值必须与实际施加的值
+     *   相等，否则磁盘表会按一种间隙算出的行宽、绘制按另一种值画（量画失配，教训 ⑩）。
+     *   两处都调 [AbSwitch.inhouseBreak]，但**都在每版心一次的构造期**调，不是每字每行调
+     *   （[AbSwitch.isOn] 走 `synchronized`，热路径调用会拖垮排版线程）。
+     */
+    val cjkLatinSpacingEmApplied: Float
+        get() = if (orilumn.reader.engine.AbSwitch.inhouseBreak()) cjkLatinSpacingEm else 0f
 
     /** 主题感知链接色（Z4 单源）：暗底亮青 (#71B8FF) / 亮底深蓝 (#1A66CC)，按背景亮度判定。
      *  平板 `CssLayouter.linkColorHex` 与桌面 `DesktopReaderHost.linkColorHex()` 公式平移后

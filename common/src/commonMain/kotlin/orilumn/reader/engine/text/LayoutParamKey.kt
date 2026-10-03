@@ -57,7 +57,6 @@ data class LayoutParamKey(
         crc = Crc32.update4(crc, lineSpacing.bits())
         crc = Crc32.update4(crc, firstLineIndentEm.bits())
         crc = Crc32.update4(crc, letterSpacingEm.bits())
-        crc = Crc32.update4(crc, cjkLatinSpacingEm.bits())
         crc = Crc32.update4(crc, paragraphSpacingPx.bits())
         crc = Crc32.update4(crc, paragraphGapScale.bits())
         crc = Crc32.updateString(crc, fontBody)
@@ -81,6 +80,24 @@ data class LayoutParamKey(
         // 变长喂入会不会引入歧义？不会：该字段在喂入序**最后**，false 复现旧流、true 是旧流
         // 追加 4 字节，两侧取值不同且 false 精确等于历史值。
         if (inhouseBreak) crc = Crc32.update4(crc, 1L)
+        // 混排字距（em）：与 [inhouseBreak] 同款的**变长哨兵** —— **只在非 0 时追加**，且追加在喂入序**最后**。
+        //
+        // ## 为什么不能无条件喂（这是本键的向后兼容金标准）
+        //
+        // `paramHash` 是分页缓存的**文件名**。混排字距接线前是死代码、实测**一律按 0 排**，
+        // 那时算出的每一份磁盘表都是「无间隙」的版面 ⇒ `cjkLatinSpacingEm == 0` 的键必须
+        // **逐字节等于**接线前的历史值，否则每个老用户升级后全书重排（纯浪费）。
+        // 无条件喂 4 个字节会让**所有**键都变，包括回退阀那条本该复现旧流的路径。
+        //
+        // ## 为什么放在末尾（而不是它在 data class 里的位置）
+        //
+        // 变长喂入在喂入序**中间**会真的产生歧义（后续字段整体左移 4 字节，可能与另一种键取值撞上）；
+        // 放末尾则「不喂 = 旧流、喂 = 旧流 + 4 字节」，与 [inhouseBreak] 同一个证明。
+        // ⚠ data class 里的**字段位置**与喂入序无关（哈希只认这里），改喂入序不必动字段序。
+        //
+        // 非 0 时键必变 —— 这正是要的：间隙改变行宽 ⇒ 换断点 ⇒ 换页切点，必须换键
+        // （与本键不含禁则表身份是同一类坑，见 `docs/自建断行引擎-测试计划.md` §T2f / 教训 28）。
+        if (cjkLatinSpacingEm != 0f) crc = Crc32.update4(crc, cjkLatinSpacingEm.bits())
         return Crc32.finish(crc)
     }
 
@@ -102,7 +119,11 @@ data class LayoutParamKey(
             lineSpacing = profile.lineSpacing,
             firstLineIndentEm = profile.firstLineIndentEm,
             letterSpacingEm = profile.letterSpacingEm,
-            cjkLatinSpacingEm = profile.cjkLatinSpacingEm,
+            // **喂闸过的值，不是原始设置值**：键必须描述「实际被施加到版面上的那个值」。
+            // 开关 off 时实测不施加间隙（否则溢出被裁），而键若还记着 25，回退期间就会按
+            // 「有间隙」算行宽去命中磁盘表、却按「无间隙」画 ⇒ 量画失配（教训 ⑩）。
+            // 本形参 `inhouseBreak` 的默认值已经读过开关，这里复用同一个闸门，两者恒一致。
+            cjkLatinSpacingEm = if (inhouseBreak) profile.cjkLatinSpacingEm else 0f,
             paragraphSpacingPx = profile.paragraphSpacingPx,
             paragraphGapScale = profile.paragraphGapScale,
             fontBody = profile.fontBody,

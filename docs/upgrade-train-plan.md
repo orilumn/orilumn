@@ -93,4 +93,9 @@ minSdk 24 / compileSdk 36 / targetSdk 36
 
 - [ ] 砍依赖评估：`Ktor`（字体上传 server → 手写 `Socket`？）、`FileKit`（→ `expect/actual` 直调 `SAF/UIDocumentPicker`）、`SQLDelight`（schema v4 是否值得留）。每项单独 `spike + 体积/维护账`，不搭车升级。
 - [ ] `bgfx` spike：与 `Kotlin` 版本无关（`C++/NDK` 编 `.so`，`JNI` 薄胶水隔离在 `CurlRenderer` 接口后）。只验静态双纹理卷曲帧率+跟手，成了再立项。
-- [ ] `LongStringBreaker/CjkLatinSpacing` 接入 `SkiaParagraphBreaker`（`ZWSP` 物化 + 超宽硬切兜底），`Methionyl…` 级长词回归。
+- [ ] `LongStringBreaker` 接入 `SkiaParagraphBreaker`（`ZWSP` 物化 + 超宽硬切兜底），`Methionyl…` 级长词回归。
+- [x] ~~`CjkLatinSpacing` 接入~~ ✅ **2026-10-03 已接线**（用户可见名「**混排字距**」，滑块 0 = 纯不动点，
+  原有空格一律删除）。四个施加点全在 `SkiaRunMeasurer.advances` 出口同一个函数上 ⇒ 量画同源；
+  **仍不做**的是把它接进 **Skia 回退断行器**（`SkiaParagraphBreaker`）：回退阀打开时混排字距恒为 0
+  （`TypographicProfile.cjkLatinSpacingEmApplied` 只认 `inhouseBreak` 开关），这是有意的
+  「宁可没有、不可量画失配」。详见 `docs/TODO-未尽事宜.md` Q17 的「2026-10-03 接线记录」。

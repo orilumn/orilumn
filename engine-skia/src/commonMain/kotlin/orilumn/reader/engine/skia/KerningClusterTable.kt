@@ -5,6 +5,8 @@ import org.jetbrains.skia.paragraph.RectHeightMode
 import org.jetbrains.skia.paragraph.RectWidthMode
 import orilumn.reader.engine.css.FontRun
 import orilumn.reader.engine.css.TextAlign
+import orilumn.reader.engine.text.preprocess.CjkLatinGap
+import orilumn.reader.engine.text.preprocess.CjkLatinSpacing
 
 /**
  * S5b **西文 kerning / 连字保留**（渲染层，绘制侧现算）。
@@ -51,6 +53,8 @@ internal class KerningClusterTable(
      *   平移叠加（把 kerning 增量嫁接到已对齐的落位上）。传非 0 会让那条偏移被计两遍。
      * @param letterSpacingEm 与量宽侧同一个 em 值（[SkiaRunMeasurer] 的 `lsPx` 口径）。传 0 会让
      *   带字距的行整行窄 `n·lsPx`（与断行几何失配 ⇒ JUSTIFY 铺不满、可能右溢）。
+     * @param cjkLatinSpacingEm 与量宽侧同一个 em 值（混排字距）。施加方式见
+     *   [shiftTrackByCjkGaps] —— **不在段内量宽里施加**。
      * @return 与 range 同长的 x 数组；无命中簇时返回 null（调用方退回 [LineAligner] 的 x）。
      */
     fun clusterXs(
@@ -67,12 +71,26 @@ internal class KerningClusterTable(
         fontRuns: List<FontRun> = emptyList(),
         originX: Float = 0f,
         letterSpacingEm: Float = 0f,
+        cjkLatinSpacingEm: Float = 0f,
     ): FloatArray? {
         val n = endExcl - start
         if (n <= 0) return null
+        // 混排字距：与 [LineAligner] **同一份**结果（同一个整段检测 + 裁到本行），最后一次性平移整条轨。
+        // 检测坐标已平移成**行内局部**（[CjkLatinSpacing.gapsForRange] 的契约），
+        // 故 [shiftTrackByCjkGaps] 拿到的是局部下标。
+        //
+        // ⚠ 这里若改成「按 `text[start, endExcl)` 子串检测」，本轨就会与 [LineAligner] 的 `adv`
+        //   不同源 ⇒ `tighten = (cnat[i] − cnat[i−1]) − placement.advs[i−1]` 在行尾那个边界字上
+        //   恒为负一个间隙 ⇒ 被 `min(0, ·)` 全额采纳 ⇒ **刚注入的间隙在绘制侧被抹掉**。
+        val gaps = if (cjkLatinSpacingEm > 0f) {
+            CjkLatinSpacing.gapsForRange(text, start, endExcl, cjkLatinSpacingEm, fontRuns)
+        } else {
+            emptyList()
+        }
         // 行内换面：分段建（浏览器 inline-run 语义），否则簇位会按错误的面算。
         if (fontRuns.isEmpty()) {
-            return clusterXsSingle(text, start, endExcl, fontSizePx, lineHeightRatio, tag, families, weight, italic, monospace, originX, letterSpacingEm)
+            val single = clusterXsSingle(text, start, endExcl, fontSizePx, lineHeightRatio, tag, families, weight, italic, monospace, originX, letterSpacingEm)
+            return single?.also { shiftTrackByCjkGaps(it, gaps, text, start, fontSizePx, fontRuns) }
         }
         val edges = (fontRuns.flatMap { listOf(it.start, it.endExclusive) } + listOf(start, endExcl))
             .filter { it in start..endExcl }.distinct().sorted()
@@ -112,8 +130,79 @@ internal class KerningClusterTable(
             )
             cursorX = out[e - 1 - start] + adv[e - 1]
         }
-        return if (out.any { it.isNaN() }) null else out
+        if (out.any { it.isNaN() }) return null
+        shiftTrackByCjkGaps(out, gaps, text, start, fontSizePx, fontRuns)
+        return out
     }
+
+    /**
+     * 混排字距在 Skia 簇位轨上的**唯一施加点**（渲染层·几何测量）。
+     *
+     * ## 为什么必须在最后统一平移，而不能塞进 [clusterXsSingle] 或段间的 [advances]
+     *
+     * 这条轨是 Skia 整形算出来的，**它不知道我们注入了间隙**（SkParagraph 只认
+     * `letterSpacing`）。若不补，[graftKerningOnto] 会把间隙当成「整形收紧量」吃掉：
+     * ```
+     * tighten(i) = (cnat[i] − cnat[i−1]) − placement.advs[i−1]
+     * ```
+     * 间隙已进 [LineAligner.Placement.advs]，而 `cnat` 里没有 ⇒ `tighten` 恒为负（正好一个间隙）
+     * ⇒ 被 `min(0, ·)` 全额采纳 ⇒ **刚注入的间隙在绘制侧被抹掉**，滑块看起来「只影响断行不影响落墨」。
+     * 补进轨里之后 `tighten` 回到 0，该路径对间隙**恒等**（[ClusterTrackGraft] 不需要改）。
+     *
+     * ## 为什么段间拼接（`cursorX = out[...] + adv[e-1]`）**必须留成不含间隙**
+     *
+     * 拼接用的是「到 `e-1` 为止的自然轨 + 交界字符的无间隙 advance」。若这里也带上间隙，
+     * 那一段间隙会在拼接时进 `cursorX`、又被末尾的累计位移再进一次 ⇒ **双计**。
+     * 末尾那次累计位移的定义是「下标严格小于 `start + j` 的全部间隙之和」，它恰好等于
+     * `x_j = x_0 + Σ_{i<j} (adv_i + gap_i)`，与断行侧的 [SkiaRunMeasurer.advances] 逐位同源。
+     *
+     * @param gaps 局部坐标的间隙（检测对象 = `text[start, endExcl)`）。
+     * @param track **原地**平移（返回同一数组；调用方按「我传的数组被改了」使用）。
+     */
+    private fun shiftTrackByCjkGaps(
+        track: FloatArray,
+        gaps: List<CjkLatinGap>,
+        text: CharSequence,
+        start: Int,
+        fontSizePx: Float,
+        fontRuns: List<FontRun>,
+    ) {
+        if (gaps.isEmpty()) return
+        // gaps 按 leftIndex 升序 ⇒ 单趟扫，「累计位移」随下标单调增长。
+        var gi = 0
+        var shift = 0f
+        for (j in track.indices) {
+            // ⚠⚠ **必须拿局部下标比局部下标**（`gaps[gi].leftIndex < j`）。
+            //   旧写法是 `gaps[gi].leftIndex < abs`（`abs = start + j`）—— 拿**行内局部**的
+            //   `leftIndex` 去比**段内绝对**的 `abs`，坐标系混用。由于段首 `start` 通常是几百/几千，
+            //   几乎每条间隙都满足 `leftIndex < abs` 而在 `j == 0` 就被计入 ⇒ 整条轨被**同一个常量**
+            //   平移 ⇒ `cnat[i] − cnat[i−1]` 的**逐槽差分里根本没有间隙**（常量在相减时消掉）⇒
+            //   [graftKerningOnto] 的 `tighten = (cnat[i] − cnat[i−1]) − placement.advs[i−1]`
+            //   在每个间隙位恒为 −gap ⇒ 被 `min(0, ·)` 全额采纳 ⇒ **刚注入的间隙在落墨侧被整条抹掉**。
+            //
+            //   实测（真书《Rust 程序设计语言》8738 段 / 29238 行，走完整绘制管线
+            //   `LineAligner` + `clusterXs` + `graftKerningOnto`，把滑块从 0.25 拉到 1.0）：
+            //   **18990 个行内中英边界里 18743 个（98.7%）墨位一动不动**（应为 32.81px）。
+            //   纯 CJK 行不走簇位轨（[needsClusters] 为 false）⇒ 间隙正常 ⇒ 这就是真机症状
+            //   「**有些**起作用、**有些**不起作用」的成因；末行更刺眼，是因为
+            //   `graftKerningOnto` 的 `justifyRightEdge` 补偿块只对「JUSTIFY 且非末行」生效，
+            //   末行没有那层补偿来掩盖被抹掉的那份间隙。
+            while (gi < gaps.size && gaps[gi].leftIndex < j) {
+                // 间隙宽度按**边界左侧那个字所在 run** 的字号算（与 [SkiaRunMeasurer.applyCjkLatinGaps]
+                // 同一条规则、同一个 [lastRunSizePx] 取字号函数 —— 那个形参收的也是**局部**下标）。
+                shift += gaps[gi].gapEm * lastRunSizePx(text, start, gaps[gi].leftIndex, fontSizePx, fontRuns)
+                gi++
+            }
+            track[j] += shift
+        }
+    }
+
+    // ⚠ 原有私有的 `runsWithin(runs, start, endExcl)`（把 [FontRun] 裁到子串并平移成局部坐标）
+    //   **已删**：它唯一的调用点就是上面那次「按行子串检测」，而检测已改为在整段上做
+    //   （[CjkLatinSpacing.gapsForRange] 的 [fontRuns] 形参要的就是**整段坐标**的 runs ——
+    //   探测器当前不消费它，但语义上必须传对，否则将来 `runs` 一旦被消费就是段/行坐标混用）。
+    //   `LineAligner.sliceRuns` 仍保留：它服务的是 `advances` 的**取宽**路径（那里 `adv` 是
+    //   行内局部数组，run 必须同步平移），与检测无关。
 
     private fun clusterXsSingle(
         text: CharSequence,

@@ -293,9 +293,16 @@ class FirstLineIndentSingleLineOverflowTest {
         }
     }
 
-    /** 重路径 vs 轻路径：同一段 HTML、同一版心，每个叶的断行区间必须逐项相同。 */
+    /**
+     * 重路径 vs 轻路径：同一段 HTML、同一版心，每个叶的断行区间必须逐项相同。
+     *
+     * ⚠ 混排字距必须喂 [TypographicProfile.cjkLatinSpacingEmApplied]（生产真值）：
+     * 轻路径走 [BoxChapterLayouter] 生产接线、恒取 profile 的间隙；显式侧若喂 0，
+     * 两侧量到不同行宽 ⇒ 分叉是**必然**的，而那证明的是「测试两侧没对齐」不是被测性质（假失败）。
+     * 传函数而非值：该 getter 自己读开关，而开关在本函数体内才拨（见 [forEachBreakerVariant]）。
+     */
     @Test
-    fun `重轻两路断行区间逐项相同`() = forEachBreakerVariant { breaker, v ->
+    fun `重轻两路断行区间逐项相同`() = forEachBreakerVariant(cjkLatinSpacingEm = { deviceProfile.cjkLatinSpacingEmApplied }) { breaker, v ->
         // 轻路径（`tempShape`）走的是**生产接线**，只有夹具拨了开关它才跟着换变体；
         // 只把这里的 `breaker` 换成自建而轻路径仍是 Skia，分叉是必然的，
         // 但那证明的是「测试两侧没对齐」而不是被测性质（假失败）。

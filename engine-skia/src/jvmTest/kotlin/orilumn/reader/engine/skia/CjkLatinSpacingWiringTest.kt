@@ -596,7 +596,7 @@ class CjkLatinSpacingWiringTest {
      * 下面两条分别钉住「本行照画」与「画 == 量」，再加第三条钉住**下一行不重复画**。
      */
     @Test
-    fun `跨行边界的间隙归本行画 且画恰好等于量`() {
+    fun `跨行边界的间隙本行不画 西文那头在下一行时宽度为0`() {
         val text = "A中A中"
         val fs = 40f
         val paragraphGaps = CjkLatinSpacing.gaps(text, GAP)
@@ -608,13 +608,23 @@ class CjkLatinSpacingWiringTest {
         val e = 2
         val lineGaps = CjkLatinSpacing.gapsForRange(text, s, e, GAP)
         assertEquals(
-            "本行必须拿到两条（左槽 0 与 1）—— 末槽那条的右邻在下一行，但**预留就在本行**，必须照画",
+            "本行必须拿到两条（左槽 0 与 1）—— 空间隙的位置仍属本行",
             listOf(0, 1),
             lineGaps.map { it.leftIndex },
         )
+        assertEquals(
+            "末槽那条（右邻在下一行）宽度必须压 0：右侧没有墨，那段宽是版心里凭空多出的空白",
+            listOf(GAP, 0f),
+            lineGaps.map { it.gapEm },
+        )
         val drawn = sum(advances(text.substring(s, e), fs = fs, gaps = lineGaps))
         val reserved = sum(paragraphAdv(text, fs = fs, gapEm = GAP).copyOfRange(s, e))
-        assertEquals("画 == 量（不再有「至多一个 gap」的缺口）", reserved, drawn, 1e-2f)
+        assertEquals(
+            "画比量**恰好窄一个悬空间隙**（方向安全：画 ≤ 量，永不右溢）",
+            reserved - GAP * fs,
+            drawn,
+            1e-2f,
+        )
 
         // 下一行 [2,4) 只拿到自己那条（左槽 2），左槽 1 那条归上一行 —— 不重复。
         assertEquals(
@@ -631,15 +641,22 @@ class CjkLatinSpacingWiringTest {
      * 旧口径（绘制侧按行子串检测）下，跨行的间隙归预留侧、本行不画 ⇒ 缺口至多一个 gap。
      * 现在两侧同源 ⇒ 每一行拿到的都是**整段检出裁到本行**的那份，逐位相等。
      *
-     * ## 残留的那一种不对称，以及它为什么**够不到**
+     * ## 唯一允许的不对称：行末悬空间隙（画比量**窄** ≤ 一个 `gapEm`）
+     *
+     * 断点落在中西接缝上时，西文那一头在下一行 ⇒ 那段宽右侧没有墨 ⇒ 绘制侧不画
+     * （[CjkLatinSpacing.gapsForRange] 把它的 `gapEm` 压 0，**分隔空格照吃**）。
+     * 断行侧仍按整段预留，于是这些行画得比预留窄**恰好一个 `gapEm`** —— 方向安全（永不右溢），
+     * 实测真书 1673/30956 行（5.4%）、总量 0.067% 行文本，肉眼不可见。
+     *
+     * ## 另一种不对称，以及它为什么**够不到**
      *
      * 「间隙的左槽在**上一行**、被吃掉的空格落在本行开头」会让本行画得比预留**宽**一个空格宽。
      * 它要求断点落在「边界字」与「它后面那串分隔空格」之间 —— UAX#14 LB 禁止在空格之前断行
      * （`× SP`），本仓断行器据此把行尾空白**悬挂**在行区间内。实测真书《Rust 程序设计语言》
-     * 8738 段 / 29151 行里，**以分隔空格开头的行 = 0 行**，逐行「画 == 量」= 29151/29151。
+     * 8738 段 / 29151 行里，**以分隔空格开头的行 = 0 行**。
      */
     @Test
-    fun `真断行器切出的每一行 画恰好等于预留`() {
+    fun `真断行器切出的每一行 画宽等于预留 减去至多一个行末悬空间隙`() {
         val fs = 40f
         var sawLineEndBoundary = false
         for (text in listOf("A中A中", TIGHT, SPACED, "中 A中文 的所有权 A", "Rust 的所有权，中文", "本书假设你使用的是 Rust 1.90.0 版本")) {
@@ -651,12 +668,22 @@ class CjkLatinSpacingWiringTest {
                     val s = line.range.first
                     val e = line.range.last + 1
                     val lineGaps = CjkLatinSpacing.gapsForRange(text, s, e, GAP)
-                    if (pGaps.any { it.leftIndex == e - 1 }) sawLineEndBoundary = true
+                    // 行末悬空间隙：左槽在本行、而西文那一头（`leftIndex + 1 + spaceCount`）在行外。
+                    // 至多一条（断点唯一），且它的宽度在绘制侧被压 0 ⇒ 画比预留窄**恰好**这么宽。
+                    val stranded = pGaps.filter { g ->
+                        g.leftIndex in s until e && g.leftIndex + 1 + g.spaceCount >= e
+                    }
+                    if (stranded.isNotEmpty()) sawLineEndBoundary = true
                     val drawn = sum(advances(text.substring(s, e), fs = fs, gaps = lineGaps))
                     val reserved = sum(pAdv.copyOfRange(s, e))
+                    val expected = reserved - stranded.sumOf { (it.gapEm * fs).toDouble() }.toFloat()
+                    assertTrue(
+                        "版心 $w 行 [$s,$e) 至多一条行末悬空间隙（实测 ${stranded.size} 条）",
+                        stranded.size <= 1,
+                    )
                     assertEquals(
-                        "版心 $w 行 [$s,$e) 画宽 $drawn 必须逐位等于预留 $reserved",
-                        reserved,
+                        "版心 $w 行 [$s,$e) 画宽 $drawn 必须等于预留 $reserved 减去悬空间隙",
+                        expected,
                         drawn,
                         1e-2f,
                     )
@@ -664,7 +691,7 @@ class CjkLatinSpacingWiringTest {
             }
         }
         assertTrue(
-            "本锁必须至少扫到一次「末字就是边界字」的跨行间隙，否则它退化成一个空断言",
+            "本锁必须至少扫到一次「西文那头在下一行」的间隙，否则它退化成一个空断言",
             sawLineEndBoundary,
         )
     }

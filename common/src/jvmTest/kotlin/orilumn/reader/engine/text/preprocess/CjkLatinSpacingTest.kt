@@ -197,9 +197,10 @@ class CjkLatinSpacingTest {
     // ---- `gapsForRange`：绘制侧与断行侧同源的**唯一**入口（画 == 量）----
 
     @Test
-    fun `gapsForRange is the paragraph set clipped to the range, in local indices`() {
+    fun `gapsForRange is the paragraph set clipped to the range, with stranded widths zeroed`() {
         // 「画 == 量」的机械形态：同一份整段结果，按 `leftIndex ∈ [start, endExcl)` 裁，
-        // 下标平移成行内局部。穷举所有子区间与整段检出逐条对齐。
+        // 下标平移成行内局部；**西文那一头不在本行的那条，宽度压 0**（行末悬空间隙，
+        // 见 [CjkLatinSpacing.gapsForRange] 的 KDoc）。穷举所有子区间与整段检出逐条对齐。
         val text = "中 A中文 ab中cd，Rust 社区 e  中A"
         val para = gapsOf(text)
         for (s in text.indices) {
@@ -207,7 +208,13 @@ class CjkLatinSpacingTest {
                 assertEquals(
                     "区间 [$s,$e)",
                     para.filter { it.leftIndex in s until e }
-                        .map { CjkLatinGap(it.leftIndex - s, it.gapEm, it.spaceCount) },
+                        .map {
+                            CjkLatinGap(
+                                it.leftIndex - s,
+                                if (it.leftIndex + 1 + it.spaceCount < e) it.gapEm else 0f,
+                                it.spaceCount,
+                            )
+                        },
                     CjkLatinSpacing.gapsForRange(text, s, e, 0.25f),
                 )
             }
@@ -215,12 +222,19 @@ class CjkLatinSpacingTest {
     }
 
     @Test
-    fun `gapsForRange keeps the gap whose right neighbour is on the next line`() {
-        // 「文│空」断行：边界字 `文` 是本行末字，右邻（空格 + `R`）在下一行。
-        // 旧口径按行子串检测 ⇒ 这条间隙整个丢掉（真机症状：英文与中文之间那个距离与滑块无关），
-        // 且那个**被吃的空格**也没人置零 ⇒ 落墨比预留宽整整一个空格宽 ⇒ 右溢被裁。
-        // 现在必须**保留** —— 断行侧本来就把它算进了本行的预留。
-        assertEquals(listOf(CjkLatinGap(1, 0.25f, spaceCount = 1)), CjkLatinSpacing.gapsForRange("中文 Rust", 0, 2, 0.25f))
+    fun `gapsForRange zeroes a stranded gap width but keeps eating its spaces`() {
+        // 「文│空│R」断行（贪心的常规形状：断点落在分隔空格**之后**，那串空格悬挂在本行尾）。
+        // 西文那一头 `R` 在下一行 ⇒ 这条间隙右侧没有墨 ⇒ 宽度必须压 0；
+        // 而**分隔空格照吃**（`spaceCount` 原样带走），否则下一行凭空多出一个空格宽的行首缩进。
+        //
+        // 旧口径在这里断言 `gapEm = 0.25f`，把「版心里凭空多出的空白」钉成了正确行为 ——
+        // 实测真书 1673/30956 行（5.4%）中招，行末右缘整整短 `0.25em`（11.1px @ 字号 44.4）。
+        assertEquals(listOf(CjkLatinGap(1, 0f, spaceCount = 1)), CjkLatinSpacing.gapsForRange("中文 Rust", 0, 3, 0.25f))
+        // 「文│R」断行（无作者空格，西文直接跟在下一行）：同样压 0，`spaceCount = 0`。
+        assertEquals(listOf(CjkLatinGap(1, 0f)), CjkLatinSpacing.gapsForRange("中文Rust", 0, 2, 0.25f))
+        // 行**内**的中西接缝（西文就在本行）：宽度必须原样保留 —— 这条是滑块真正的作用点。
+        assertEquals(listOf(CjkLatinGap(1, 0.25f, spaceCount = 1)), CjkLatinSpacing.gapsForRange("中文 Rust", 0, 7, 0.25f))
+        assertEquals(listOf(CjkLatinGap(1, 0.25f)), CjkLatinSpacing.gapsForRange("中文Rust", 0, 6, 0.25f))
         // 下一行只持有被吃的那个空格：它的左槽（`文`）在上一行，本行不注入间隙。
         //
         // ⚠ 于是本行那一格空格**不会被置零** ⇒ 本行画得比预留宽一个空格宽。真实断行器切不出

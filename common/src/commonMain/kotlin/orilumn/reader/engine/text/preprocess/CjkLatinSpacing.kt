@@ -198,7 +198,7 @@ object CjkLatinSpacing {
      * | 少掉的是什么 | 后果 |
      * |---|---|
      * | 行**中间**的间隙（不可能发生，见下） | 行比预留窄 ⇒ 安全，只是白留一点版心 |
-     * | 行**末尾**那个边界字的间隙（右邻在下一行） | 行比预留窄 ⇒ JUSTIFY 少摊一点，无害 |
+     * | 行**末尾**那个边界字的间隙（右邻在下一行） | 见下面「行末悬空间隙」一节：**这里原来判错了** |
      * | 「被吃掉的空格」（它挂在行尾空白里，仍在行区间内） | **行比预留宽整整一个空格宽** ⇒ 右溢被裁 |
      *
      * 第三条是真缺陷（`NoLineExceedsContentWidthTest` 那条硬约束的反面），且**末行无 JUSTIFY
@@ -221,6 +221,41 @@ object CjkLatinSpacing {
      * [CjkLatinGap.spaceCount] 越界**合法且必须容忍**：一串连续空格中间断开时（LB SP 允许
      * 空格之后断行），本行只持有其中前几个 —— 剩下的字位不在 `adv` 里，
      * [orilumn.reader.engine.skia.SkiaRunMeasurer.applyCjkLatinGaps] 已有 `left + k < n` 守卫。
+     *
+     * ## 行末悬空间隙：**宽度压 0，空格照吃**（2026-10-03，产品口径「没有另一头就没有缝」）
+     *
+     * `leftIndex` 在本行内**不等于**这条间隙该有宽度。间隙是「中西之间的距离」，**距离需要两头**；
+     * 而中西接缝是合法断点（[orilumn.reader.engine.laying.LineBreakSegments.allowsBreakAt] 的
+     * `isWideBreakChar(prev)`），断点正好落在这里时，西文那一头在**下一行** ⇒ 本行右侧没有任何字，
+     * 那 `gapEm × 字号` 是一段**永远不会有墨的空白**，白占版心。
+     *
+     * ⚠ **当日把这行判成「无害」，判错了**（原话：「行比预留窄 ⇒ JUSTIFY 少摊一点，无害」——
+     * 那是「按行子串检测」这条**备选**路线的后果，不是本函数这条路的后果）：本函数让**两侧同源**，
+     * 断行侧把这段宽**预留**进了版心、绘制侧又把它**落进**了 `adv`，于是它两头都算、谁也没省 ——
+     * 它变成版心里凭空多出来的一段，谁也填不满：
+     * - `natural` 里含它 ⇒ `slack = 版心 − natural` 少了它 ⇒ JUSTIFY **铺不到右缘**；
+     * - `visibleRight` 里也含它 ⇒ 该字段「= 末字墨迹右缘」的契约在这行**说谎**（虚报 `gapEm × 字号`）。
+     *
+     * 实测（真书《Rust 程序设计语言》25 篇 / 30956 行 / 版心 900 / 字号 44.4 / 0.25 档）：
+     * **1673 行（5.404%）**是行末悬空间隙；按 [orilumn.reader.engine.skia.LineAlignerTest] 锁 1 的
+     * 同口径（排除额度封顶行与可见字形 < 2 的行）逐行归因，**无悬空间隙的 24064 行右缘洞 = 0.000px**，
+     * 而**有悬空间隙的 1464 行洞均值 11.099px、最大 11.100px，其中 1460 行恰好等于
+     * `0.25 × 44.4 = 11.1px`** —— 洞**就是**这段间隙本身，一行不差；0 档（`gapEm = 0`）同一批行洞 = 0.000。
+     *
+     * ⇒ 判据：`partner = leftIndex + 1 + spaceCount`（西文侧第一个字位）落在本行外 ⇒ **宽度压 0**。
+     * 而 **spaceCount 原样带走**：那串分隔空格若悬挂在本行尾（贪心的常规断点就在空格之后，
+     * 形状占 1669/1673），它们仍要被吃成零宽，否则下一行会凭空多出一个空格宽的行首缩进。
+     *
+     * **只压宽度、不压「性质」**：本函数返回的条目照样进 [orilumn.reader.engine.skia.JustifySlack.plan]
+     * 的分类。但 JUSTIFY 拉伸**根本碰不到它** —— `LineAligner` 的 `xsExtraLimit = visibleCount − 1`
+     * 只到「末可见字形之前」，而悬空间隙的左槽**必是本行末可见槽**（右侧再无可见字形），
+     * 天然落在那个上界之外。实测「洞恰好 = 间隙宽、从不更大」正是这条的证据（若它还能被拉伸，
+     * 洞会是间隙宽 + 一份额度）。
+     *
+     * ⚠ **断行侧仍按整段预留，本行绘制侧比预留窄一个 `gapEm`**（方向安全：画 ≤ 量，永不右溢）。
+     * 实测代价：1673 行 × 11.1px ≈ 20.6 行文本 / 30956 行 = **0.067%**，肉眼不可见。
+     * 彻底对称要动断行器的 `hang` 记账（把间隙当行尾空白 deferred），会让这 1673 行的断点挪动、
+     * 全书重新分页 —— 与本条「零断点变化」的价值不合，故登记在 [docs/TODO-未尽事宜.md]，不在本轮做。
      */
     fun gapsForRange(
         text: CharSequence,
@@ -253,7 +288,10 @@ object CjkLatinSpacing {
             if (g.leftIndex < s) continue
             // [gaps] 按 leftIndex 升序 ⇒ 越过上界即可收尾。
             if (g.leftIndex >= e) break
-            out.add(CjkLatinGap(g.leftIndex - s, g.gapEm, g.spaceCount))
+            // 行末悬空间隙：**宽度压 0**（西文那一头在下一行 ⇒ 右侧无墨，这段宽白占版心）。
+            // `spaceCount` 原样带走 —— 悬挂在本行尾的那串分隔空格照吃，见 KDoc「行末悬空间隙」。
+            val em = if (g.leftIndex + 1 + g.spaceCount < e) g.gapEm else 0f
+            out.add(CjkLatinGap(g.leftIndex - s, em, g.spaceCount))
         }
         return out
     }

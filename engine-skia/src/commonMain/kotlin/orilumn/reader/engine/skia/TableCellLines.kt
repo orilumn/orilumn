@@ -53,13 +53,21 @@ object TableCellLines {
         inkColor: Int = 0xFF000000.toInt(),
         imageLoader: ImageBoundsReader? = null,
         chapterHref: String = "",
+        /**
+         * 混排字距（em，0 = 关）。
+         *
+         * **追加在形参表末尾**（不是紧跟 [letterSpacingEm]）：本方法的调用点里有按位置传参的
+         * 旧写法（`..., letterSpacingEm, inkColor, imageLoader, href`），插在中间会把后面的
+         * `Int` 实参静默重绑到 `Float` 形参上 —— 症状是「墨色变成一个浮点偏移」而非编译错误。
+         */
+        cjkLatinSpacingEm: Float = 0f,
     ): CellWindow {
         val lines = ArrayList<DrawLine>()
         val borders = ArrayList<PageBackground>()
         val images = ArrayList<PageImage>()
         var acc = 0
         for (cell in table.cells) {
-            acc = emitCell(cell, rowTop, rowTop + rowHeight.coerceAtLeast(1), rowCharBase + acc, table.emptyCellsHide, styleOf, fallback, letterSpacingEm, inkColor, lines, borders, images, imageLoader, chapterHref, acc)
+            acc = emitCell(cell, rowTop, rowTop + rowHeight.coerceAtLeast(1), rowCharBase + acc, table.emptyCellsHide, styleOf, fallback, letterSpacingEm, inkColor, lines, borders, images, imageLoader, chapterHref, acc, cjkLatinSpacingEm)
         }
         return CellWindow(lines, borders, images)
     }
@@ -76,6 +84,8 @@ object TableCellLines {
         inkColor: Int = 0xFF000000.toInt(),
         imageLoader: ImageBoundsReader? = null,
         chapterHref: String = "",
+        /** 混排字距（em）；同样**追加在末尾**，理由见 [expand]。 */
+        cjkLatinSpacingEm: Float = 0f,
     ): TableWindow {
         val byLine = HashMap<Int, List<DrawLine>>()
         val borders = ArrayList<PageBackground>()
@@ -93,7 +103,7 @@ object TableCellLines {
                 for (cell in f.table.cells) {
                     val spanLast = (k + cell.rowSpan.coerceAtLeast(1) - 1).coerceAtMost(j)
                     val spanBottom = frames[spanLast].rowTop + frames[spanLast].rowHeight.coerceAtLeast(1)
-                    acc = emitCell(cell, f.rowTop, spanBottom, f.rowCharBase + acc, f.table.emptyCellsHide, styleOf, f.fallbackStyle, letterSpacingEm, inkColor, lines, borders, frameImages, imageLoader, chapterHref, acc)
+                    acc = emitCell(cell, f.rowTop, spanBottom, f.rowCharBase + acc, f.table.emptyCellsHide, styleOf, f.fallbackStyle, letterSpacingEm, inkColor, lines, borders, frameImages, imageLoader, chapterHref, acc, cjkLatinSpacingEm)
                 }
                 if (lines.isNotEmpty()) byLine[f.lineIdx] = lines
                 if (frameImages.isNotEmpty()) imagesByLine[f.lineIdx] = frameImages
@@ -129,9 +139,22 @@ object TableCellLines {
     }
 
     /**
-     * 单格发射：文本行进 [lines]（默认首行带内顶端对齐；`vertical-align: middle/bottom`
-     * 在行带内整体下移，并含 border+padding 顶/左内缩），边框
-     * `[rowTop, spanBottom)` 进 [borders]；返回推进后的累计字符偏移（供下一格 `charBase`）。
+     * 单格发射：**逐块**（Q15，格内 `<p>`/`<div>`…各自成块、纵向堆叠）把各块文本行推进 [lines]，
+     * 边框 `[rowTop, spanBottom)` 进 [borders]；返回推进后的累计字符偏移（供下一格 `charBase`）。
+     *
+     * 几何口径：
+     * - 格自身的 border+padding 走 [insetTop] / [xCell] / [cellContentW]（行高预算侧对称，见
+     *   `NormalFlowLayout.buildTableRows`）；
+     * - 块再叠自己的 [orilumn.reader.engine.laying.TableCellBlock.top]（块间静态间隙＋折叠外边距，
+     *   排版与塑形两侧由 `stackTableCellBlocks` 算出同值）与
+     *   [orilumn.reader.engine.laying.TableCellBlock.edgeH]（逐层容器内缩）；
+     * - 字号/字族/tag 逐块取 [orilumn.reader.engine.laying.TableCellBlock.style] 与块元素 tag ——
+     *   **不能**沿用格的：`<td><p style="font-size:2em">` 的行必须按 `p` 的 2em 画。
+     *
+     * `charBase` 逐块推进（块内偏移 = 之前各块已发射的塑形文本长度），故点按/选区在格内
+     * 多块时仍落在正确的章内字符上。
+     *
+     * `vertical-align: middle/bottom` 在行带内整体下移（跨行格 `spanBottom` 已是所跨末行底）。
      */
     private fun emitCell(
         cell: TableCellLayout,
@@ -149,59 +172,82 @@ object TableCellLines {
         imageLoader: ImageBoundsReader?,
         chapterHref: String,
         acc: Int,
+        /** 混排字距（em，0 = 关）：逐块写进 [DrawLine]，断行侧已按同值预留版心。 */
+        cjkLatinSpacingEm: Float,
     ): Int {
-        val shape = cell.shape ?: return acc
-        val text = shape.shapeText
-        if (hideEmpty && text.isEmpty()) return acc
+        val blocks = cell.blocks
+        if (blocks.isEmpty()) return acc
+        if (hideEmpty && cell.textLength == 0) return acc
         val cs = styleOf(cell.el) ?: fallback
         val lineStart = lines.size
         val imgStart = images.size
-        val baseSize = shape.shapeFontSizePx.takeIf { it > 0f } ?: cs.fontSizePx
         // 单元格内容框相对行带顶/左的内缩 = 边框 + 内边距（与行高预算 padding.vertical +
         // border.vertical 对称；缺此则文本贴顶、内边距全堆在行带底部）。
         val insetTop = (cs.border.top + cs.padding.top).roundToInt()
-        val xLeft = cell.x + (cs.border.left + cs.padding.left).roundToInt()
-        val lineW = NormalFlowLayout.innerBreakWidth(cs, cell.width)
-        val nowrap = !WhiteSpaceNormalize.wraps(cs.whiteSpace)
-        val hidden = emitCellImages(cell, text, shape, cs, styleOf, rowTop, insetTop, xLeft, lineW, imageLoader, chapterHref, images)
-        for (k in 0 until shape.shapeLineCount) {
-            val s = shape.shapeLineStart(k)
-            val e = shape.shapeLineEnd(k)
-            if (s < 0 || e <= s || e > text.length) continue
-            lines.add(
-                DrawLine(
-                    text = text,
-                    range = s until e,
-                    yTop = rowTop + insetTop + shape.shapeLineTop(k),
-                    yBottom = rowTop + insetTop + shape.shapeLineBottom(k),
-                    alignment = shape.shapeAlignment,
-                    fontSizePx = baseSize,
-                    lineHeightRatio = cs.lineHeightRatio,
-                    tag = cell.el.tag,
-                    families = cs.fontFamilies,
-                    weight = cs.fontWeight,
-                    italic = cs.italic,
-                    monospace = cs.monospace || cell.el.tag == "pre",
-                    letterSpacingEm = letterSpacingEm,
-                    lineWidthPx = lineW,
-                    xLeft = xLeft,
-                    listMarker = null,
-                    inkColor = inkColor,
-                    colorRuns = shape.shapeColorRuns,
-                    fontRuns = shape.shapeFontRuns,
-                    firstLineIndentPx = 0f,
-                    nowrap = nowrap,
-                    baselineShifts = shape.shapeBaselineShifts,
-                    textShadow = shape.shapeTextShadow,
-                    emphasis = shape.shapeEmphasis,
-                    emphasisUnder = shape.shapeEmphasisUnder,
-                    alpha = shape.shapeAlpha,
-                    charBase = cellBase,
-                    rubyRuns = shape.shapeRubyRuns,
-                    underlineRuns = shape.shapeUnderlineRuns,
-                    imgHidden = hidden[k] ?: emptyList(),
-                ),
-            )
+        val xCell = cell.x + (cs.border.left + cs.padding.left).roundToInt()
+        val cellContentW = (cell.width - (cs.border.horizontal + cs.padding.horizontal).roundToInt()).coerceAtLeast(1)
+        var charAcc = 0
+        for (b in blocks) {
+            val shape = b.shape ?: continue
+            val text = shape.shapeText
+            if (text.isEmpty()) continue
+            val bs = b.style
+            val blockTag = b.el.tag
+            val baseSize = shape.shapeFontSizePx.takeIf { it > 0f } ?: bs.fontSizePx
+            val xLeft = xCell + b.edgeH
+            val lineW = (cellContentW - b.edgeH).coerceAtLeast(1)
+            val nowrap = !WhiteSpaceNormalize.wraps(bs.whiteSpace)
+            val yBlock = rowTop + insetTop + b.top
+            val hidden = emitCellImages(b, text, shape, bs, styleOf, yBlock, xLeft, lineW, imageLoader, chapterHref, images)
+            for (k in 0 until shape.shapeLineCount) {
+                val s = shape.shapeLineStart(k)
+                val e = shape.shapeLineEnd(k)
+                if (s < 0 || e <= s || e > text.length) continue
+                lines.add(
+                    DrawLine(
+                        text = text,
+                        range = s until e,
+                        yTop = yBlock + shape.shapeLineTop(k),
+                        yBottom = yBlock + shape.shapeLineBottom(k),
+                        alignment = shape.shapeAlignment,
+                        fontSizePx = baseSize,
+                        lineHeightRatio = bs.lineHeightRatio,
+                        tag = blockTag,
+                        families = bs.fontFamilies,
+                        weight = bs.fontWeight,
+                        italic = bs.italic,
+                        monospace = bs.monospace || blockTag == "pre",
+                        letterSpacingEm = letterSpacingEm,
+                        cjkLatinSpacingEm = cjkLatinSpacingEm,
+                        lineWidthPx = lineW,
+                        xLeft = xLeft,
+                        listMarker = null,
+                        inkColor = inkColor,
+                        colorRuns = shape.shapeColorRuns,
+                        fontRuns = shape.shapeFontRuns,
+                        firstLineIndentPx = 0f,
+                        nowrap = nowrap,
+                        baselineShifts = shape.shapeBaselineShifts,
+                        textShadow = shape.shapeTextShadow,
+                        emphasis = shape.shapeEmphasis,
+                        emphasisUnder = shape.shapeEmphasisUnder,
+                        alpha = shape.shapeAlpha,
+                        charBase = cellBase + charAcc,
+                        // **Q20**：断词收尾随行读 **shape**（格内块两路都由 `fillTableRowCells`
+                        // 塑形，形状即单源；轻路径不回填 `TableCellBlock.hyphenAtEnd`，读块会漏）。
+                        // 漏传取默认 `false` ⇒ `LineAligner.hyphenW == 0` ⇒ 落墨整块跳过。
+                        hyphenAtEnd = shape.shapeLineHyphenAtEnd(k),
+                        // 挤压比例随行读 **shape**（同 Q20 理由：轻路径不回填
+                        // `TableCellBlock.squeezeRatios`，读块会漏）。漏传取默认 0 ⇒
+                        // `LineAligner` 一点不挤 ⇒ 画比量宽 ⇒ 右溢被裁。
+                        squeezeRatio = shape.shapeLineSqueezeRatio(k),
+                        rubyRuns = shape.shapeRubyRuns,
+                        underlineRuns = shape.shapeUnderlineRuns,
+                        imgHidden = hidden[k] ?: emptyList(),
+                    ),
+                )
+            }
+            charAcc += text.length
         }
         emitCellBorders(cell, rowTop, spanBottom, cs, borders)
         // 单元格垂直对齐（`vertical-align: middle/bottom`；默认顶端）：内容整体在
@@ -228,22 +274,24 @@ object TableCellLines {
                 }
             }
         }
-        return acc + text.length
+        // 与修复前同口径：推进量按**实际塑形并发射**的字符数（格内块被塑形器跳过时不为它虚记）。
+        return acc + charAcc
     }
 
     /**
-     * 单元格内图片进 [PageImage]（表格图缺口的补齐）：shape 文本内 U+FFFC 占位按文档序
-     * 配对单元格内 `img` 后代；x 取格内容左（与正文行窗叶级近似同级），y/h 取占位所在行，
+     * **块内**图片进 [PageImage]（表格图缺口的补齐）：shape 文本内 U+FFFC 占位按文档序
+     * 配对 [orilumn.reader.engine.laying.TableCellBlock.imageRoot] 范围内的 `img`（Q15：逐块配对，
+     * 故 `<td><p><img></p></td>` 的占位仍能找到图；配整格子树会在格内多块时按错图）。
+     * x 取块内容左，y/h 取占位所在行，
      * 宽高经 [NormalFlowLayout.replacedUsedSize] 与正文图同口径。无 loader/href 时不产出。
      */
     private fun emitCellImages(
-        cell: TableCellLayout,
+        block: orilumn.reader.engine.laying.TableCellBlock,
         text: String,
         shape: ParagraphShapeRef,
         cs: ComputedStyle,
         styleOf: (MarkupElement) -> ComputedStyle?,
-        rowTop: Int,
-        insetTop: Int,
+        yBlock: Int,
         xLeft: Int,
         lineW: Int,
         imageLoader: ImageBoundsReader?,
@@ -259,7 +307,8 @@ object TableCellLines {
                 walk(c)
             }
         }
-        walk(cell.el)
+        val root = block.imageRoot
+        walk(root)
         if (imgEls.isEmpty()) return hidden
         var imgIdx = 0
         for (k in 0 until shape.shapeLineCount) {
@@ -273,16 +322,14 @@ object TableCellLines {
                 val src = imgEl.attrs["src"] ?: continue
                 val imgStyle = styleOf(imgEl) ?: cs
                 val used = NormalFlowLayout.replacedUsedSize(
-                    imgEl, imgStyle,
-                    NormalFlowLayout.innerBreakWidth(imgStyle, cell.width),
-                    imageLoader, chapterHref,
+                    imgEl, imgStyle, lineW, imageLoader, chapterHref,
                 )
                 val w = used.first.coerceAtLeast(1)
                 val h = used.second.coerceAtLeast(1)
-                // x 按占位行内比例推进（独占图 fraction=0 即格左；与叶级近似同级）。
+                // x 按占位行内比例推进（独占图 fraction=0 即块左；与叶级近似同级）。
                 // y/h 取占位所在行。
                 val x = xLeft + ((j - s).toFloat() / (e - s).coerceAtLeast(1) * lineW).roundToInt()
-                val yTop = rowTop + insetTop + shape.shapeLineTop(k)
+                val yTop = yBlock + shape.shapeLineTop(k)
                 images.add(
                     PageImage(
                         src = src,

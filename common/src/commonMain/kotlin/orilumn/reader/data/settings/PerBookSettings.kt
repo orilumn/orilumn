@@ -53,6 +53,7 @@ class PerBookSettings(
                 autoContinue = next.autoContinue,
                 showHiddenFonts = next.showHiddenFonts,
                 fontWeightAnchors = next.fontWeightAnchors,
+                cjkLatinSpacing = next.cjkLatinSpacing,
             )
         }
         globalStore.save(global)

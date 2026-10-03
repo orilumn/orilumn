@@ -36,6 +36,19 @@ object DrawLineBuilder {
         classify: BlockClassify,
         hidden: HiddenCheck,
         letterSpacingEm: Float,
+        /**
+         * 混排字距（em）—— 与 [letterSpacingEm] 同类但**独立开关**：
+         * `letterSpacing` 是 CSS 属性（每码本都加），混排字距是**注入式**的（只在边界处加，
+         * 且可能吃掉一个手打空格），两者口径不同，不能合成一个形参。
+         *
+         * 插在 [letterSpacingEm] **之后**（不像 [LineAligner.align] 那样只能追加到末尾）是因为本
+         * 函数的形参**除 `letterSpacingEm` 外全带默认值**：越过 `letterSpacingEm` 的调用点必须用
+         * 命名实参，而形参类型两两不同（`Float` / `Int`），类型检查能挡住错位。
+         * ⚠ 但 `letterSpacingEm` 之后**紧邻**的那一个仍可能被位置实参静默吃掉：
+         *   `build(..., 0f, ink)` 会把 `ink`（Int）绑到本形参（Float）——那个会**编译报错**（类型不符），
+         *   所以这一个是安全的；真正危险的形状是「新形参与旧形参同类型且紧邻」，那种才会无声改语义。
+         */
+        cjkLatinSpacingEm: Float = 0f,
         /** 文本墨色（ARGB Int，调用方喂 TypographicProfile.fgColor），逐行写入 DrawLine。 */
         inkColor: Int = 0xFF000000.toInt(),
         /** P3-c 生成内容查找（空即无，旧路径；调用方喂与塑形同一 phase-1 结果）。 */
@@ -108,6 +121,7 @@ object DrawLineBuilder {
                     italic = style.italic,
                     monospace = mono,
                     letterSpacingEm = letterSpacingEm,
+                    cjkLatinSpacingEm = cjkLatinSpacingEm,
                     lineWidthPx = lineW,
                     xLeft = lineX,
                     listMarker = if (lineIdx == leaf.firstLineIndex) marker else null,
@@ -116,6 +130,20 @@ object DrawLineBuilder {
                     fontRuns = fontRuns,
                     firstLineIndentPx = if (lineIdx == leaf.firstLineIndex) indent else 0f,
                     nowrap = nowrap,
+                    // **下标必须是 `i`（叶内行序），不是 `lineIdx`（章内全局行序）**。
+                    //
+                    // `leaf.hyphenAtEnd` 与 `leaf.ranges` 同长同序 ⇒ 两者都从 0 起；
+                    // 而 `lineIdx = leaf.firstLineIndex + i`，`firstLineIndex` 是
+                    // **章内全局**首行号（`NormalFlowLayout` 里 `box.firstLineIndex = out.size`，
+                    // `out` 是全章 `FlowedLine` 表）。用 `lineIdx` 去索引一张长度 = 叶行数的表
+                    // ⇒ **只有首行号恰等于叶内行号的叶才对得上**，其余一律 `getOrElse` 落空 →
+                    // `hyphenAtEnd` 恒 false ⇒ 断词行**永远画不出 `-`**。
+                    // 实测（Rust 书 22 章、版心 1600）：正文拉丁词内断行 253 行，丢连字符 253 行（100%）。
+                    // 单段小探针（`firstLineIndex` 从 0 起）恰好对上，故旧锁全绿也没暴露。
+                    hyphenAtEnd = leaf.hyphenAtEnd.getOrElse(i) { false },
+                    // 挤压比例：**下标口径与 `hyphenAtEnd` 完全同款**（叶内行序 `i`，不是章内
+                    // 全局行序 `lineIdx`）—— 理由同上，换成 `lineIdx` 会让绝大多数叶取到 0。
+                    squeezeRatio = leaf.squeezeRatios.getOrElse(i) { 0f },
                     baselineShifts = shifts,
                     textShadow = shadow,
                     emphasis = style.emphasisStyle,

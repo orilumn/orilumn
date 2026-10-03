@@ -30,6 +30,31 @@ interface ParagraphShapeRef {
     fun shapeLineTop(k: Int): Int
     /** Y bottom of line [k] in the shape's own coordinates. */
     fun shapeLineBottom(k: Int): Int
+    /**
+     * **Q20**：行 [k] 是否断词收尾（行尾要补一个
+     * [orilumn.reader.engine.laying.HYPHEN_GLYPH]）。断行器已为它预留版心，绘制侧漏读 ⇒
+     * `LineAligner.hyphenW == 0` ⇒ `LineWindowDrawer` 整块跳过 ⇒ 连字符画不出来。
+     *
+     * 为什么挂在 shape 上而不只挂 [LayoutBox.hyphenAtEnd]：canonical 走盒流
+     * （`DrawLineBuilder` 不塑形，只有 `LayoutBox.hyphenAtEnd`），增量/临时页走塑形
+     * （`BoxChapterLayouter.buildPartialSkiaWindow` 手里只有 shape）。两路同断行器同宽，
+     * 值逐项一致（`SkiaDrawLineWindowCoherenceTest` 同行锁 range + 连字符位）。
+     *
+     * 默认 false = 无断词行（哑实现/替换块/旧桩零改动）。
+     */
+    fun shapeLineHyphenAtEnd(k: Int): Boolean = false
+    /**
+     * 行 [k] 的**标点挤压比例**（`[0,1]`，默认 0 = 不挤）。与 [shapeLineHyphenAtEnd] 同款理由挂在
+     * shape 上：canonical 走盒流（只有 [LayoutBox.squeezeRatios]）、增量/临时页走塑形（只有本方法），
+     * 两路同断行器同宽、值逐项一致。
+     *
+     * 断行侧是「挤着算宽度」才敢把词完整留在同一行的（[orilumn.reader.engine.skia.InhouseParagraphBreaker]），
+     * 绘制侧必须套**同一个比例**乘**同一份额度表**（[orilumn.reader.engine.skia.PunctuationSqueeze.widths]）
+     * ⇒ 画 == 量（量画同源，教训 ⑩）。漏读的后果：绘制侧按比例 0 画 ⇒ 画比量**宽** ⇒ 右溢被裁
+     * （分页阅读器不能横向滚动）。反向的错（画侧自己挤）更隐蔽：那会让字位宽度与断点决策依据的
+     * 宽度不是一个数，省行与右溢会互相掩盖。
+     */
+    fun shapeLineSqueezeRatio(k: Int): Float = 0f
     /** Block font size (draw paint size; ≤0 when absent — caller falls back to the cell style). */
     val shapeFontSizePx: Float
     /** Block alignment (the cell style's `text-align` the shape was broken with). */

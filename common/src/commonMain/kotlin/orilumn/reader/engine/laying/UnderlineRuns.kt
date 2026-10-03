@@ -41,9 +41,10 @@ fun collectUnderlineRuns(
         for (c in node.children) {
             when {
                 isExcluded(c) -> Unit
+                // 同 `styledSegments`：`isBlock` 排在 `c.isText` 之前（Q15 匿名块排 run 外兄弟）。
+                isBlock(c) -> Unit
                 c.isText -> ulByNode[c] = (resolve(c)?.underline == true) || inherited
                 c.tag == "br" -> Unit
-                isBlock(c) -> Unit
                 c.tag == "img" -> Unit
                 else -> {
                     val u = (resolve(c)?.underline == true) || inherited

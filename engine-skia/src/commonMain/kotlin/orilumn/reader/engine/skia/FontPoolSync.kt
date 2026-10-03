@@ -151,7 +151,7 @@ object FontPoolSync {
         current: List<SkiaFontPool.EmbeddedFont>,
         fonts: List<BookFont>,
     ): List<SkiaFontPool.EmbeddedFont>? {
-        val entries = fonts.map { SkiaFontPool.EmbeddedFont(it.family, it.bytes) }
+        val entries = fonts.map { SkiaFontPool.EmbeddedFont(it.family, it.bytes, weight = it.weight, italic = it.italic) }
         val sigOf: (List<SkiaFontPool.EmbeddedFont>) -> List<Pair<String, Int>> =
             { list -> list.map { it.familyName to it.bytes.size }.sortedBy { it.first } }
         return if (sigOf(entries) == sigOf(current)) null else entries

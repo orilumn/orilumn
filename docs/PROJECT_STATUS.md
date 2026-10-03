@@ -3,6 +3,225 @@
 > Keeps a running log of significant milestones for the Orilumn reader engine. Supersedes
 > everything marked done; each section reflects a completed stage.
 
+## 2026-10-03 — 行末悬空间隙：英文词在行首时右侧留 0.25em 缺口（提交 `d85ddef`）
+
+**Issue（用户真机直觉提问，实测坐实）**：「英文词在行末（中西接缝正好是断点）时，
+混排字距会不会不去掉，导致行末留个缺口？」
+
+**根因：间隙是「中西之间的距离」，而距离需要两头。** 中西接缝是合法断点
+（`LineBreakSegments.allowsBreakAt` 的 `isWideBreakChar(prev)`），断点正好落在这里时，
+西文那一头在**下一行** ⇒ 本行右侧没有任何字，那 `gapEm × 字号` 是一段**永远不会有墨的空白**。
+
+**当天把这行判成「无害」，判错了。** 旧 KDoc 写「行比预留窄 ⇒ JUSTIFY 少摊一点，无害」——
+那是「绘制侧按行子串检测」这条**没采用的备选路线**的后果。实际走的同源路线里，
+断行侧把它**预留**进版心、绘制侧又把它**落进** `adv`，**两头都算、谁也没省**：
+
+- `natural` 含它 ⇒ `slack = 版心 − natural` 少了它 ⇒ JUSTIFY **铺不到右缘**；
+- `visibleRight` 含它 ⇒ 该字段「= 末字墨迹右缘」的契约在这行**说谎**（虚报 `gapEm × 字号`）。
+
+**实测**（真书《Rust 程序设计语言》`text/` 25 篇 / 30956 行 / 版心 900 / 字号 44.4 /
+0.25 档 / JUSTIFY / 同一生产 `InhouseParagraphBreaker`）：
+
+| | 行数 | 右缘洞均值 | 洞最大 |
+|---|---|---|---|
+| 无悬空间隙 | 24064 | **0.000px** | 0.000 |
+| 有悬空间隙 | 1464 | **11.099px** | 11.100 |
+
+**1673 行（5.404%）中招**，其中 1460 行的洞**恰好等于 `0.25 × 44.4 = 11.1px`**，一行不差；
+0 档（`gapEm = 0`）同一批行洞 = 0.000 —— 洞就是这段间隙本身，互证。
+（归因必须套 `LineAlignerTest` 锁 1 的同款排除：`justifyCapped` + 可见字形 < 2，
+否则 85% 的行被单字行 `}` `|` `6` 污染出 890px 的假洞。）
+
+**Resolution（渲染层，一处判据）。** `CjkLatinSpacing.gapsForRange` 判
+`partner = leftIndex + 1 + spaceCount`（西文侧第一个字位）在不在本行：
+不在 ⇒ 该条 **`gapEm` 压 0**，而 **`spaceCount` 原样带走** —— 悬挂在本行尾的那串分隔空格
+照吃成零宽（1669/1673 是「断点落在空格**之后**」那种贪心常规形状），
+否则下一行会凭空多出一个空格宽的行首缩进。
+一个函数、一处判据，`LineAligner` / `KerningClusterTable` / `JustifySlack.plan`
+三条路同源生效；零宽恰是 0 档已有的「宽度为 0、空格照吃」语义。
+**`JustifySlack` 无需改**：悬空间隙的左槽必是本行末可见槽，而
+`xsExtraLimit = visibleCount − 1` 的拉伸上界只到末可见槽之前 ⇒ 它拿不到额度
+（「洞恰好 = 间隙宽、从不更大」正是这条的证据）。
+
+**复测同一语料**：洞均值 11.099 → **-0.001（max 0.000）**，全语料残留洞 **0 处**，
+墨迹齐边行 24064 → **25604**。
+
+**断点零变化**：只改绘制侧量宽，断行器一个字符没碰 ⇒ 页码与分页不动，
+真机上任何观感差异都能直接归因给这一条。代价是这些行**画得比预留窄恰好一个 `gapEm`**
+（方向安全：画 ≤ 量，永不右溢），实测 0.067% 行文本。彻底对称要动断行器的 `hang` 记账、
+**会改断点**，登记在 `docs/TODO-未尽事宜.md` Q27（含「先量释放的 11.1px 够不够塞下下一个字形」
+这一步 ≈ 90 秒）。
+
+### 同日：二次订正的文档落纸（数字全部重量过）
+
+上一天改了分配与挤压两处机制，但文档全部还写着改之前的口径。落纸时**旧数字已全部失效**，
+故用真书 25 篇 / 659 829 字 / 版心 900 / fs44.4 / 0.25 档重新测了一遍，
+**结论与旧文档相反**：
+
+- **按比例均摊 vs 逐级瀑布**只在 `slack < C_finite` 时有区别（`slack ≥ C_finite ⇒ r = 1`
+  ⇒ 两者逐值相同）⇒ 旧的「四级 vs 均摊」对照数字（词内缝 −92% 等）**作废，不可比**。
+- **挤压已从「常规 slack 供给」变成「罕见兜底」**：现口径只命中 **1.178% 的行**、省 **0.071%** 行数；
+  旧数字（省 4035 行、行数比 0.98191、挤压槽 114456）全部作废。
+- **拉伸尾部集中在短行，不在满行**（此前从未按行槽数分桶读过）：
+  满行（每行槽数 ≥16，占 73.4%）单槽 >2em 的行 **≤0.92%**、封顶留缺口 **≤0.51%**；
+  而 ≤8 字/行的行（占 10.0%）是 **50.06% / 89.72%**。⇒ 「级 3 要不要设上限」这个问题的
+  提法本身需要修正（见 Q22(c)）。
+
+**方法论教训已写进 Q23**：要写进 TODO 的比例数字，必须同时写清语料/版心/字号/排除口径，
+且尾部指标**必须按「每行槽数」分桶** —— 上一轮的「改善」结论就是栽在这两条上。
+
+---
+
+## 2026-10-02 — 换自建断行引擎后代码块里的 Unicode 特殊字符不显示 / 显示乱码（取面缺保底）
+
+**Issue.** 真机《Rust 程序设计语言》代码块里的特殊字符「要么不显示、要么显示乱码」，
+且**是换成自建断行引擎之后才出现的**。
+
+**不是断行问题。** 拿真书 `07.xhtml` 的 cargo 树（`├──` `└──` `│` 制表符 + `U+00A0` NBSP）过完整管线，
+`skia` 与 `inhouse` 两个变体的**断行区间逐行完全相同**（`0..7 / 9..22 / 24..37 / 39..45 / 47..60 /
+62..86 / 88..104 / 106..120`），换行保留、制表符与 NBSP 一个不少。落在**渲染层·字体解析**上。
+
+**根因：换实现时把「系统级逐字形回退」弄丢了。**
+
+- 旧的 `SkiaParagraphBreaker` 经 `SkParagraphFactory.defaultCollection()`
+  （= `FontCollection().setDefaultFontManager(systemFonts())`）整形，**族栈覆盖不到的码本它照样画得出来**。
+- 自建断行引擎把落墨换成 S5 逐字 `drawString` 后，取面只剩 `SkiaRunMeasurer.faceForCp` 一条路，
+  而它**只在 CSS 族栈里找覆盖面**，找不到就交 `.notdef` ⇒ 豆腐块。
+
+真书 `stylesheet.css:127` 的 `pre` 族栈是 `"Fira Code","Hack Nerd Font Mono","Roboto Mono",monospace`
+—— 全是拉丁等宽族。实测（JVM 量宽器，fs=16，`tag=pre`）：
+
+| 码本 | 族栈解出的面 | glyph | 结果 |
+|---|---|---|---|
+| `U+2500 ─` `U+2502 │` `U+251C ├` `U+2514 └` | Menlo | 2236/2238/2264/2256 | 正常 |
+| `U+00A0` NBSP | Menlo | 98 | 正常 |
+| `U+4E2D 中` | Menlo | **0** | **豆腐块** |
+| `U+FF21 Ａ` | Menlo | **0** | **豆腐块** |
+| `U+0432 в` | Menlo | 872 | 正常 |
+
+`─│├└` 恰好在等宽面里有字形、`中` 与 `Ａ` 没有 ⇒ **「有的显示、有的不显示」**，与真机症状一致。
+
+顺带量到一个**潜伏崩溃**：族栈里若一个可匹配的族都没有（如书只写了一个没装的字体名），
+`measure` 的 `notdefWidth(fonts[0])` 会 `ArrayIndexOutOfBoundsException`。
+
+**Resolution.** 在**渲染层·字体解析**补一张「通用面表」（`SkiaRunMeasurer.universalTypefaces`）：
+
+1. 先按 `SkParagraphFactory.genericFallbackFamilyNames()` 的候选顺序取面（mono 时 `monospace`
+   候选提前 ⇒ 代码块里的 CJK 落到等宽 CJK 面而非无衬线面）；
+2. 再把系统里**其余**已装族按 `FontMgr.getFamilyName` 顺序补齐 —— 真·保底：**只要任何已装字体
+   有该字形就找得到**；
+3. 排除 `Last Resort`（它对任何码本都「有字形」，但画出来就是一块诊断豆腐块）。
+
+**关键设计：保底表**不进热循环**。** 族栈面表恒只含 CSS 族栈的面（热路径逐值不变）；
+`measure` 只在 `nPending > 0`（族栈**真的一个都不覆盖**）时另走 `universalPass` 扫保底表，
+`faceForCp` 同样在族栈全灭后才查。两侧走**同一张表、同一条规则**（第一个
+`getUTF32Glyph(cp) != 0` 即采用）⇒ **量画同源，不会出现「量取到保底面、画还在用 notdef」**。
+
+代价：建表一次性付 `已装族数` 次 `matchFamilyStyle` native 调用（约 370ms / 326 族），
+按 **(mono, 字重, 斜体)** 缓存、存 `Typeface`（不是 `Font`），与字号和族栈都无关。
+
+**两个性能坑（都是本轮实测踩到，不是理论担忧）**：
+
+- **坑 1：缓存键里带字号**。第一版把 `sizePx.toRawBits()` 放进键 ⇒ 每个新 font-size 触发一次
+  326 族全量扫描；真书几十个尺寸桶 ⇒ `:app:testDebugUnitTest` 里两个 15 秒预算的跨章调度探针
+  **双双超时**（`CrossChapterPreflightProbeTest` / `WholeBookCanonicalQueueProbeTest`）。
+  昂贵的 `matchFamilyStyle` 与字号无关 ⇒ 键里删掉字号，换字号后 0ms。
+- **坑 2：把保底面并进 `measure` 主循环**。主循环每面付 2 次 native 调用（`getUTF32Glyphs` +
+  `getWidths`），数百个保底面 ⇒ 每段几百次。实测**正文段**（`STSong` 首族本已覆盖、根本不需要
+  保底）**0.017ms → 整书 5000 段 85 秒**，同样把那两个探针顶爆。⇒ 拆成 `universalPass`，
+  只在族栈全灭时才走。
+
+附带修掉一个潜伏崩溃：族栈里一个可匹配的族都没有时，`measure` 的 `notdefWidth(fonts[0])` 会
+`ArrayIndexOutOfBoundsException`（真书只写了一个没装的字体名即可触发）。
+
+**锁**（`GlyphFallbackFaceTest`，5 把，每把单独变异验证过）：
+
+| 锁 | 变异 | 结果 |
+|---|---|---|
+| 保底可达：族栈解不出、已装字体解得出的码本必须拿到有字形的面 | 摘掉两侧保底通道 | 红 |
+| 量画同源：`advances` 的宽 == `faceForCp` 那张面的宽 | 同上 | 红（量=24.000 画=14.769，差 9.23px/字） |
+| 不误伤：族栈能覆盖时仍取族栈那张面 | 让 `faceForCp` 先查保底表 | 红（拿到 Helvetica，栈是 Times New Roman） |
+| 空栈不崩 | 回到修复前状态 | 红（`ArrayIndexOutOfBoundsException`） |
+| 宿主字体集探针 | —— | 绿（326 族 / 9 个可用候选码本） |
+
+锁 3 第一版是**假绿锁**：用等宽栈写的，而等宽场景下保底表队首（Menlo）与族栈解出的面**恰好是同一张
+Typeface**，「在队首还是在队尾」根本测不出来 —— 变异验证当场抓出，改用衬线栈才拿到牙齿。
+锁 1 也不能钉死 `中`：各宿主已装字体集不同，`中` 在某个宿主上可能已被族栈覆盖 ⇒ 静默空断言。
+故锁 1 **在宿主上现挑**满足「族栈解不出 ∧ 已装字体解得出」的码本，挑不到就显式失败。
+锁 4 的机制是「保底表保证面表恒非空」，不是那个越界守卫本身（守卫现在不可达，作为零成本的
+防御保留）。
+
+## 2026-10-02 — `pre` 代码块在书声明 `white-space: nowrap` 时连成一段并被裁（级联层降级）
+
+**Issue.** 真机《Rust 程序设计语言》代码块全部连成一段、横向溢出页宽被裁。
+不是引擎回归，也不是断行算法问题——**是书的 CSS 写错了，而我们的级联如实照做了**：
+
+```css
+/* book_1790865097552.epub / OEBPS/Styles/stylesheet.css:144 */
+pre code { font-size: 0.8em; white-space: nowrap; }
+```
+
+`nowrap` 是**合法**值，所以声明真的生效。浏览器靠**横向滚动条**兜底不折行；
+本项目是**页宽固定的分页阅读器**，没有横向滚动 ⇒ 不折行 = 溢出被裁 = **丢内容**。
+且 `nowrap` 按 CSS 规范还会把源码换行**折叠成空格**，代码的换行结构被彻底抹掉。
+
+此前 `480809c` 修过同一个症状，但那时书里写的是**拼错的 `nowarp`**（非法值 → 丢弃 → 继承
+UA 的 `pre-wrap`）。2026-10-01 重新导入的书把笔误改成了合法的 `nowrap`，老修复就失效了。
+
+**Resolution.** 在**级联结果**上降级：`StyleComputer.resolveWhiteSpace` —— 元素处于预格式化
+语境（自身是 `pre`，或有 `pre` 祖先）时，把 `white-space` 的 `pre`/`nowrap` 降级成 `pre-wrap`。
+
+- **为什么必须改在级联层而不是 `ua.css`**：`ua.css:32` 早就有 `pre { white-space: pre-wrap; }`
+  （`InhouseParagraphBreaker` 的 KDoc 记着这次有意偏离浏览器），但 UA 是**最低优先级**、
+  一定压不过书 ⇒ 要压过书只能在级联结果上改。
+- **为什么只限 `pre` 子树**：`pre` 是作者显式声明的「格式敏感区」，在这里禁止折行与「保留格式」
+  自相矛盾，降级没有语义代价。子树之外（正文里的短标签 `nowrap`）一律按浏览器语义放行、行为逐值不变。
+- 一处改动即全链路生效：下游全部按 `WhiteSpace` 取值（`normalizeNode`/`finishLeaf`/`wraps`/
+  `DrawLineBuilder.nowrap`/`BoxChapterLayouter`/`NormalFlowLayout`），无需各自打补丁。
+
+**Locks (mutation-verified).** `PresentationAttrCascadeTest` 新增 4 把：`pre` 子树内合法
+`nowrap` 降级 / `pre` 降级 / 声明挂在祖先时 `pre` 自身也降级 / **lazy `resolve` 与 `compute` 一致**
+（两条级联通路必须同值，否则同一页代码块时折时不折）；另加 1 把负向锁钉住「`pre` 子树外不动」。
+把降级改坏 → 4 把全红。端到端用真书 CSS + 真书 14.xhtml 最长 pre 块（241 字符一行）度量：
+**13 行 / 换行保留**（改坏则 9 行 / 换行被折成空格）。
+既有 3 条断言 `pre` 元素上 `white-space: pre` 得到 `PRE` 的锁按新语义更新为 `PRE_WRAP`
+（其中 `T3 文本属性解析` 补了一条 `div` 上的对照断言，保证解析路径本身仍被覆盖）。
+全量 `jvmTest` + `test`：tests=1268 failures=1（唯一红是既有的 `CrossChapterPreflightProbeTest`，Q12）。
+
+**Side effect（正面）。** 本轮顺带**在真机上验证了上一轮的自动指纹**：
+只改了 `StyleComputer.kt` 一处，指纹自动从 `0x5cd01516` 变到 `0x4dc7c35a`（人没碰任何常量），
+落盘日志 `pagination decode null (layout-version have=4dc7c35a/sha256:4dc7c35a8a11)`
+⇒ 旧分页表被拒、全章重排，正是设计意图。
+
+**Pending / to verify on device.** 代码块恢复按版心折行、换行结构保留、不再横向溢出被裁。
+
+## 2026-10-01 — 分页缓存失效自动化：`LAYOUT_VERSION` 改为引擎源码指纹，人不再需要记得 bump
+
+**Issue.** 分页磁盘表的 key 是 `LayoutParamKey.hash()`，只含**版面参数**、不含排版算法版本。
+所以「改了断行/度量算法但版面参数没变」时旧表继续命中，读者看到的是**上一版算法的分页结果**——
+本轮修好软连字符行尾不画 `-` 后，真机「看起来完全没生效」，就是因为忘了 bump `LAYOUT_VERSION`。
+现成的 `appVersion` 兜底也救不了：`BuildConfig.VERSION_CODE`（写死 `= 20`）与桌面
+`DISK_CACHE_VERSION`（`= 1`）都是**常量**，只在发版升级时触发，开发期一次都不触发。
+
+**Resolution.** `LAYOUT_VERSION` 从手写常量（历史 18…31）改为**引擎源码指纹自动导出**：
+根 `build.gradle.kts` 的 `generateLayoutGeometryStamp` 对已登记引擎模块（`common` + `engine-skia`）
+所有主源集文件内容求 SHA-256，取前 4 字节生成 `LayoutGeometryStamp.VALUE`。
+源码变 ⇒ 值变 ⇒ 旧表在唯一的 `decode` 关卡被拒 ⇒ 自动重排；源码没变 ⇒ 值不变 ⇒ 缓存跨构建存活。
+指纹故意取粗（宁可多作废不可少作废，多作废的生产成本为 0，因为发版本来就被 `appVersion` 全量覆盖）。
+另加 `:unregisteredEngineCode` 守卫：未登记模块里出现 `orilumn.reader.engine` 包下的 .kt 直接 **fail 构建**
+（把「新增引擎模块忘了登记」从注释提醒升级成硬检查）。`decode` 的 miss 原因带 `DIGEST_PREFIX` 便于诊断。
+
+**Locks (mutation-verified).** 内容改动 → 指纹变 / 还原 → 回到原值；未登记模块放引擎代码 → 守卫红；
+删掉生成物后 `:app:assembleDebug` 仍通过（`:common` 全任务 dependsOn 指纹任务）。
+顺带把 `PaginationCacheTest` 里写死 `layoutVersion = 0` 的几何关卡锁改成 `LAYOUT_VERSION + 1`
+（不依赖「指纹恰好非 0」）。全量 `jvmTest` + `test`：tests=1031 failures=0 errors=0。
+
+**Lessons.** ① Kotlin 块注释**可嵌套**——在 KDoc 里写 glob `src/*Main` 会让 `/*` 打开嵌套注释，
+把整份构建脚本剩余部分吞掉，**脚本照样编译通过、构建照样成功、连故意写错都不报错**，
+只表现为「任务找不到」。⇒ 构建脚本的说明一律用 `//` 行注释。
+② 任务依赖不要按任务名过滤：KMP-AGP 的 android 目标编译任务叫 `compileAndroidMain`，
+`startsWith("compile") && contains("Kotlin")` 会漏掉它。
+
 ## 2026-09-30 — 排版 R1：带 `text-indent` 的单行段「只差一两个字却不换行、尾部被裁」（LAYOUT_VERSION 30）
 
 **Issue.** 一段本来只有一行的文字，在「版心宽 − 边距」恰好比它的整段宽少 1~2 个字时，不折行也不掉字，
@@ -474,3 +693,541 @@ longer first-line-indented.
 **Tests.** Added `BoxSharedGeometryTest` locking the shared width/advance functions byte-for-byte to canonical emit geometry (nested containers, container margins, leaf→container abutting). Full `:app:testDebugUnitTest` is green.
 
 **Pending / to verify on device.** Device regression (page last line no longer clipped; spacing matches pre-change; large-font / multi-margin chapters). The temporary `INCR-OVERFLOW` diagnostic log was already absent from the tree (nothing left to remove).
+## 2026-10-02 — 真机「代码块特殊字符乱码」定案（提交 1120a97）
+
+**Issue.** 真机报代码块里 Unicode 特殊字符「要么不显示、要么显示乱码」，用户明确「之前用 skia 是好的」，
+且第一轮修完（补保底面表）**仍乱码**。
+
+**两个根因，都是「平台附赠能力在换实现时丢掉了」的变体。**
+
+1. **取码本有两份实现，落墨那份是错的。** 量宽侧合并代理对，落墨侧 `drawGlyphPass` 用 `text[i].code`
+   ⇒ emoji 被拆成两个孤立代理（没有任何字体有它们的字形）；量宽侧还把孤立低位代理当独立码本去查字体，
+   查不到 ⇒ 记 notdef 宽（实测 fs=24 时 15.21px）⇒ **行凭空宽出一个字位，后续字位全体右移**。
+   平板日志实证：`无字体的码本 U+D83D` / `U+DC4D` 是一**对代理的上下半**。
+   修法 = **取码本收成单源** `codePointAt`（`CodePointAt.kt`），量与画都必须用它。
+
+2. **枚举表按族名建，严格窄于系统回退链。** 保底表遍历 63 个族名，**里面没有任何 emoji 族**，
+   而 `/system/fonts/NotoColorEmoji.ttf` **存在**且 U+1F44D 有字形 ⇒「设备没字体」的结论是假的。
+   旧 Skia 路径靠 `FontCollection` 的系统回退链（`defaultFallback`），那条链直接问宿主、不靠族名。
+   修法 = 在保底表之后补最后一道 `systemFallbackFace`（同一出口、同一缓存，量画同源）。
+
+**性能坑（本轮实测）.** `FontCollection.setDefaultFontManager(systemFonts())` 不是廉价构造，
+而 `systemFallbackFace` 是按码本调用的 ⇒ 第一版每次新建，整书重排探针（15 秒预算）全量跑时超时。
+改为整个进程只建一次。
+
+**Tests.** 新增 `SurrogatePairLayoutTest`（5 把，MUT-E/MUT-F 逐把变异验证）、
+`GlyphFallbackFaceTest` 锁 7/8（MUT-H 验证）。锁变异表：
+
+| 锁 | 变异 | 结果 |
+| --- | --- | --- |
+| 代理对低位代理槽位必须零宽 | MUT-E 撤掉零宽 | RED `expected:<0.0> but was:<15.2109375>` |
+| 落墨必须整对取码本 | MUT-F 退回 `text[i].code` | RED `落墨取到了孤立代理 ⇒ 代理对被拆开画了` |
+| 量画同源（遍历候选码本） | MUT-H 量宽侧摘掉保底通道 | RED `U+0E01 量画必须同源（量=14.4000 画=14.2852）` |
+| 枚举表够不到必须由系统链接住 | — | macOS 上 SKIP（枚举表够得到 ⇒ 空断言），牙齿在真机 |
+
+**踩掉的假绿锁.** 第一版像素锁判据「左右不对称 ⇒ 不是豆腐块」实测恒绿：skiko 把孤立代理编码成 `?` 画出来，
+`?` 有墨且不对称 ⇒ 前提不成立。**已删除**（教训 ⑫）。锁 7/8 的系统链牙齿在 macOS 上不存在
+（枚举表覆盖全部候选码本 ⇒ 该通道是死代码），已在锁注释里写明。
+
+**Verification.** 全量 `./gradlew jvmTest test` = 1281 条 / 1 红（唯一红是已登记的 Q12
+`CrossChapterPreflightProbeTest`，与本次无关）。装机后真机确认「已经显示出来了」；
+日志 0 异常、无孤立代理残留、`无字体的码本 U+1F44D` 不再出现。诊断用的族名转储与「可疑取面」探针**跑完即删**。
+
+**同轮遗留的第二个探针也在这之后删了（2026-10-02）。** `logUniversalTableOnce`
+（`SkiaRunMeasurer` 内的保底表诊断）的取证目的已达成，随探针删除，
+其结论与「豆腐块判据连试四遍都不可用」的全过程落在
+`自建断行引擎-测试计划.md` §教训 ⑯（**否定结论**）。平板实测：
+保底表 `installed=59 faces=39`，15 个诊断码本 13 个可解，解不出的是 `U+0E01`（泰文）与 `U+1F600`（emoji），
+分档 真字形 9 / 简单几何 2 / 空白 1 / **豆腐块 1 = `└` 假阳性** ⇒ **未检出任何真豆腐块**。
+删它的直接原因是一次运行 **39 秒打出 641 行**（门是每实例的 `HashSet`，见 §教训 ⑰；该次运行日志总行 932 行，探针占 69%），
+而它写在排版热路径上。`logUnresolvableCp` **保留** —— 「设备真的没装这个字体」对用户可行动。
+
+**装机复核**：重装后同一场景 `Orilumn.FACE` **0 行**、异常 0、分页正常（`SPIKE`/`DISK`/`TEMP`/`TAP` 照常）。
+
+**同处还记下一笔未销的缺陷**：`universalCache` 与被删的 `universalLogged` 一样是 `SkiaRunMeasurer` 的**实例字段**，
+而该类在生产路径上是四处**默认实参** ⇒ 每个新实例都重扫全部 59 个已装族。按那 641 行折算，
+**39 秒内至少新建 214 个实例** = 至少 214 次结果完全相同的全量重扫。正确作用域是进程级
+（与 `systemFallbackCollection` 同模式）。**本次不动它** —— 收益未量化，且要确认「已装字体集」在运行期是否真不变
+（热插字体/换字体配置会让进程级缓存变陈旧，而每实例缓存天然规避了这一点）。已在 `universalTypefaces` 的 KDoc 上标注。
+
+## 2026-10-02 — 表格侧度量交给自建断行器（TODO Q6 销案）+ Q5（kerning）销案
+
+**Q6 是什么.** 表格 auto 分列的**列宽**原本被刻意隔离在 Skia 侧，靠两处钉扎维持：
+轻路径 `BoxChapterLayouter.tableBreaker` 恒 Skia，重路径 `engine-skia` 的 `heavyPathBreaker`
+（`autoColumnMeasurePinnedToSkia`）把 `preferredWidth`/`minContentWidth` 单独钉回 Skia。
+理由是自建侧 `preferredWidth` 只是接口默认桩 `段长 x fontSizePx`（实测 Latin/URL 高估 2.0–2.6 倍，
+而列宽经 `autoColumnLayout` 的 `avail>=totalMax` 段 `w[i]=pref[i]` **直通**，无处夹取）。
+
+**解法：一个方法 + 一个实例.**
+
+- `InhouseParagraphBreaker` 补 `preferredWidth` 覆写 → `SkiaRunMeasurer.naturalWidth`
+  （与断行**同一个 `advances` 单源**，只差「不施加版心宽、不找断点」）。
+- `minContentWidth` **一个字都没写**：接口默认实现本身就是「按 `minContentSegments` 切段后
+  逐段调 `preferredWidth` 取最大」，随上一条自动变真。
+- 两处钉扎**一并删除**（`BodyParagraphBreaker.kt` 135→56 行），`bodyParagraphBreaker` 成为唯一断行器口。
+- 新增 `BoxChapterLayouter.breakerFor`：重路径 `BoxLayouter` 与轻路径 `LightPrepare`（表格测宽）
+  **共用同一个实例**，缓存键 `(profile, 变体)`。净 **+212 / −311**。
+
+**实测两侧差**（fs=16 与 44.4，`STSong,serif`，同宿主对照）:
+
+| 文本类别 | 差 |
+| --- | --- |
+| CJK / URL / code / 混排 / 无 kern 对的 Latin | **0.0000%** |
+| `Office of the Future`、`AVATAR Wayfinding WA` | **+1.104% / +0.838%**（恒为一个 kern 对的像素量：1.44px@16、3.996px@44.4，比值 2.775 = 44.4/16） |
+| min-content（Latin 37 字） | **0.0000%**（181.6404 逐值相等） |
+
+方向**永不反向**（整形缺口全为负，见 Q5），符合 `preferredWidth` 契约「永不窄于实需」。
+原台账里的「桩高估 Latin **2.49x**」—— 那 2.49 倍**全是桩的错**，真测量只差 ~1%。
+
+**拆钉扎时抓到的两个真 bug（都不是预演出来的）.**
+
+1. **两处钉扎本身是缺陷的温床。** 表格测宽在轻路径 `LightPrepare` 里消费，重路径压根不经过它 ⇒
+   「维持重轻一致」的两处钉扎里，**改轻路径那一处永远测不到**：变异 MUT-I（把生产侧断行器来源
+   改回 `SkiaParagraphBreaker`）连跑**两轮 BUILD SUCCESSFUL**，是假绿锁形态⑤（锁压根没碰那条路径）。
+   ⇒ 解法不是加更严的锁，是**结构上收成单源**。⚠️ 这份锁的 KDoc 里**已经写着**这条错误，
+   照抄一遍又踩 —— **写在文档里的教训不会自动生效，只有当场变异验证会**（新教训 ⑮）。
+2. **`breakerFor` 缓存键漏了变体。** 只按 `profile` 缓存，而实例的**类**由 `AbSwitch.inhouseBreak()`
+   决定，且 `BoxChapterLayouter` 寿命是**整本书**、跨多次排版参数变更 ⇒ 拨开关后仍按 profile 命中缓存、
+   继续发旧变体 ⇒ **回退阀在缓存命中时静默失效**（且 `paramHash` 变了会重排、重排却拿到同一套断行器）。
+   这是教训 ⑩ 的第三种翻法：**键的分量不只看「昂贵那步的输入」，还要看「产出对象的身份由谁决定」。**
+   由新加的**轻路径**锁当场抓出 —— 绕过去测的锁连这个 bug 都看不见（两侧同样绕过，一样相等）。
+
+**Tests.** `TableColumnWidthRealMeasureTest`（**正向**，6 把，取代 `TableBreakerStaysSkiaTest` 那 2 把
+守卫锁 —— 后者 KDoc 本就写明「一旦有人补上真测量，本锁故意失败，届时改写成两侧都跑的正向锁」）。
+真测量 4 把（真测量 / min-content 连带变真 / 无 kern 对文本两侧逐值相等 / 含 kern 对 Latin 偏宽不超 3%）
++ 接线 2 把（重路径 / 轻路径，**缺一不可**）。变异表（实测）:
+
+| 变异 | 结果 |
+| --- | --- |
+| MUT-I 改 `breakerFor` | 锁 7 红（锁 5 绿——它不走 `BoxChapterLayouter`） |
+| MUT-J 删 `preferredWidth` 覆写 | 锁 1/2/3/4 红 |
+| MUT-K `naturalWidth` ×1.05 | 锁 1/2/3/4 红 |
+| MUT-L `naturalWidth` ×0.95 | 锁 2/3/4 红（**锁 1 不红**——它不测方向） |
+
+锁 5/7 在 MUT-J/K/L 下仍绿是**正确分工**（测接线不管测量）；MUT-I 只红锁 7 说明两把真在看两条不同的路。
+
+**顺带作废一条原则.** 「变体只该改变行，不该改变列」**作废** —— 它当初是用「把列宽钉回另一套实现」
+维持的，而**那两处钉扎正是重轻分叉的真正来源**；现在一致性由「重轻共用同一个实例」保证。
+
+**Q5（kerning / 连字）销案.** `KerningClusterTable` **本身就是解法**，不是「自建侧没接管的缺口」：
+kerning/连字信息只存在于字体 GPOS/GSUB，取它必须有 shaper，而 `SkiaRunMeasurer` 刻意
+「逐码本量宽、不整形」是 S2 冻结契约 ⇒ 有意分工「**量宽不整形 + 落墨现算簇位**」。
+判据不是「自建要接管整形」，而是「**取簇位必须同源**」（`GraftKerningOntoTest` 钉住）。
+成本：`needsClusters` 先判 `isLatinish`，纯 CJK 行**不建 Paragraph**（零行为变化）。
+
+**Verification.** 全量 `./gradlew jvmTest test` = **1285 条 / 1 红 / 1 跳过**
+（唯一红仍是已登记的 Q12 `CrossChapterPreflightProbeTest`；唯一跳过是
+`GlyphFallbackFaceTest` 锁 7，macOS 上枚举表够得到 ⇒ 空断言，牙齿在真机）。
+⚠️ **未做真机验证**：Latin 表格列宽会宽约 1%（CJK 逐值不变），值得装机过一眼表格。
+
+---
+
+## 2026-10-02 — 真机报缺陷的排查轮：5 条确诊，0 条销案（Q15–Q19 新登记）
+
+用户一次报来 4 条 + GIMP 表格 1 条。**全部走「实测钉死，不推测」**，探针跑完即删（结论先落纸）。
+**本轮没有改动任何生产代码** —— 5 条都还卡在「要先定规格」那一步。
+
+| 编号 | 症状 | 根因（层） | 状态 |
+| --- | --- | --- | --- |
+| Q15 | GIMP 手册表格「显示不出来」 | `StyledText.kt:107` 对块级子节点 `isBlock(c) -> Unit` ⇒ **`<td><p>…</p></td>` 整格文本为空**（排版层·上） | 确诊，**已修**（见「第二批」） |
+| Q16 | `pre code` 空行全没了 | 断行器**两侧都丢**空行（自建 `greedy` 行首 `'\n'` 跳过 + Skia 侧 `if (e > s)`）⇒ **回退阀也修不好**（排版层·上） | 确诊，**已修**（见「第三批」） |
+| Q17 | 中英之间空白怎么处理的 | **什么都没做**；`CjkLatinSpacing` 是死代码；「盒边界」在这条链路上不存在（`<code>` 不是盒，只是 `FontRun` 区间） | 已回答 → **2026-10-03 接线收口**（见文末「混排字距」） |
+| Q18 | `wrap(断行)ping_add` 断行优先级 | **先压缩空白再断行**；断在字母中间是**英语音节断词**把 `wrapping` 断成 `wrap-`+`ping`，而 `_` 断点因「判据看叶块 tag」没注入（分行控制） | 确诊，**已修**（见「第四批」） |
+| Q19 | 标题看不出粗 + 选粗细对标题无效 | `anchoredWeight` 第一行 `if (italic \|\| weight != 400) return` ⇒ 对 h1–h6 的 700 **恒不触发**；且**全仓无合成粗体**（渲染层） | 确诊，未修 |
+| **Q20** | **断词行尾没有连字符**（用户指「上次发现过、没彻底解决」） | `DrawLine` 有**三个**构造点，上次只修了 canonical 那一个：**增量路径 `BoxChapterLayouter:797` 与表格格 `TableCellLines:172` 都没传 `hyphenAtEnd`** ⇒ 取默认 `false` ⇒ `placement.hyphenWidth==0` ⇒ 落墨整块跳过 | 确诊，**已修**（见「第二批」） |
+
+### Q15 的影响面是本轮最重的一条
+
+GIMP 只是用户点名的书。扫平板书库 7 本有表格的书，`<td>` 内以块级标签开头的占比：
+
+| 书 | 块级包裹 `td` / 总 `td` |
+| --- | --- |
+| `book_1790742729435`（Rust 程序设计 第2版） | 908 / 987 = **92%** |
+| `book_1790742665434` | 1058 / 1170 = **90%** |
+| `book_1790742662856`（GIMP 3.0 用户手册） | 591 / 1249 = 47% |
+| `book_1790742718646` | 1 / 10 |
+| 其余 3 本 | 0（安全） |
+
+⇒ 设备书库合计 **2558 / 4309（59.4%）个单元格不可见**（GIMP 539 张表每张的正文格都丢）。
+且这**与 Q6 无关**：探针用旧桩与新真测量各跑一遍
+`tableCellPref` + `autoColumnLayout`，列宽 `[25, 32]` **逐值相同**（两条理由见 TODO Q15）。
+**为什么既有测试没抓到**：`TableFamilyTest` 与本轮新加的 `TableColumnWidthRealMeasureTest` 用的
+全是**裸文本单元格**，没有一个带 `<p>` ⇒ 合成形状把最常见的形态整个漏掉。
+
+### 两处「探针自己写错判据」的假红（新教训 ⑱）
+
+查 Q18 时同一段代码连栽两次，**两次都是探针的影子判据错、不是生产错**，而且两次方向相反：
+① 用 `isBreakOpportunity`（**只有 ZH_EN**）判「非法断点」，而断行器实际喂 `sourcesFor(tag)`
+（含**英语断词**）⇒ 误报 `非法断点=1`，差一步就把一条 KDoc 已写明规则的**正确行为**
+记成「引擎非法硬切」并照着改生产代码；
+② `(marked.filter { code(it) } - marked.toSet())` 值域恒为 ∅（集合运算写错）⇒ 漏看「`_` 断点
+本该注入却没注入」这个**真正的缺陷**。
+⇒ 教训：判据不是「写一条看起来相关的检查」，而是**复用生产那个函数**；
+自己另写一份等价判定 = 制造一个可与生产分叉的影子规格。
+
+### Verification
+
+本轮零生产代码改动。删探针后全量 `./gradlew jvmTest test --offline --rerun-tasks --continue`
+= **1285 条 / 1 红 / 1 跳过**，与本轮开始前逐项一致
+（唯一红 = 已登记 Q12 `CrossChapterPreflightProbeTest`；唯一跳过 = `GlyphFallbackFaceTest` 锁 7）。
+
+---
+
+## 2026-10-02 — 真机报缺陷的排查轮·第二批：Q15 / Q20 修完
+
+Q15（表格格内块级内容消失）与 Q20（断词行尾连字符）**同批落地**，因为它们共用
+`TableCellLayout` 这一个数据结构；Q20③ 本来就与 Q15 同一个改动面。Q16/Q17/Q18/Q19 仍在 TODO 里。
+
+### Q15：格内容按 CSS 2.1 §16.3 拆成块序列
+
+规格：格内**块级**子节点各自成块、格的**直接内联内容**合成一个匿名块、逐块断行后纵向堆叠
+（兄弟外边距折叠）。`TableCellLayout` 的单 `shape` ⇒ `blocks: List<TableCellBlock>`；
+排版（`buildTableRows`）与塑形（`fillTableRowCells`）共调 `NormalFlowLayout.cellBlocks`，
+两侧共用 `stackTableCellBlocks` 这**一处**定位式；`TableCellLines.emitCell/emitCellImages` 逐块发射。
+
+**这条重构是被一条既有红锁逼出来的，不是自己发明的需求**：
+`SkiaDrawLineWindowCoherenceTest.rowspanTableSharesSpanningCellHeightAcrossRows` 变红
+（`5 yTop(rel) expected:<98> but was:<77>`），根因是轻路径把匿名 run 的 `<br>` 硬换行折成空格
+（Kindle 跨行格 5 行掉成 3 行、格高 161→105、跨行分摊量消失）。
+
+**三个坑（都先做错、被探针/红锁打回）**：
+
+| # | 做错的版本 | 现象 | 定案 |
+| --- | --- | --- | --- |
+| ① | 匿名块造一个合成 `#text` 当 `el` | 塑形侧从**真实子树**重抽文本拿不到东西，`<br>` 被 `white-space:normal` 折成空格 ⇒ 5 行→3 行 | 匿名块的 `el` **就是所在容器**；区间靠 `TableCellBlock.outsideSiblings`（**原始**兄弟，按 `container.children` 身份）复原 |
+| ② | 行内 `<img>` 独立成替换块 | 塑形侧对 `img` 根早退、塑出零行 | 行内 `<img>` **不拆块**（与 `flowChildren` 同式），`<td><img></td>` 与修复前逐字节同式 |
+| ③ | 沿用旧 `appendInlineText` | GIMP 图标格 `<td rowspan="2"><img/></td>` **整格零块** | `appendInlineText` 必须与 `styledSegments` 的 `walk` **逐条同形**（`br`/`img` 都产字符）—— 它只是「这段 run 有没有内容」的判据 |
+
+连带修掉：`isBlock` 分支在 5 处（`StyledText`/`ColorRuns`×2/`BaselineShifts`/`UnderlineRuns`）
+**统一前移到 `c.isText` 之前**（匿名块要排掉 run 外的**文本**兄弟）；重路径 `rowChars` 对
+`<td><p>…</p></td>` 得 0 的 char 基址漂移；嵌套图（`<p>字<span><img/></span>字</p>`）此前被静默丢字符。
+
+### Q20：三个 `DrawLine` 构造点一次补齐（载体从 `LayoutBox` 改挂 `shape`）
+
+②`buildPartialSkiaWindow` 原计划读 `leaf.hyphenAtEnd`，实测**读不到**：轻路径的叶是按
+`ranges = emptyList()` 建的，断行只发生在塑形那一步 ⇒ 改挂 `ParagraphShapeRef.shapeLineHyphenAtEnd(k)`
+（＋ `ShapedGeometry.lineHyphenAtEnd`，由 `shapeGeometry` 从 `broken.map { it.hyphenAtEnd }` 搬）。
+③格内块两路都由 `fillTableRowCells` 塑形、形状即单源 ⇒ 也读 shape。① canonical 的 `DrawLineBuilder`
+**不塑形**，仍读 `leaf.hyphenAtEnd` —— 与 `ranges` 的既有口径完全一样（canonical 读盒流、轻路径读 shape，
+同断行器同宽、逐项一致）。
+
+### Verification
+
+- 锁：`common:TableCellBlocksTest` 16 把 ＋ 新增 `app:TableCellBlocksEndToEndTest` 5 把
+  （走 `prepareLight`→`incrementalLayoutForPage`/`shapeTempPageForward`→`tableCellLines` 整条链路，
+  语料含 GIMP 2×2 rowspan 真实表形）＋ 新增 `app:SkiaDrawLineWindowCoherenceTest.hyphenAtEndFlagIsCarriedByIncrementalAndTempWindows`。
+- **逐把变异验证**（6 个变异全部应验）：M1 `shapeLineHyphenAtEnd→false`、M2 删 `appendInlineText` 的 img 分支、
+  M3 `cellFlowItems` 不拆块、M4 匿名块 `el` 换回合成 `#text`（**复现出原始症状** `5 yTop(rel) 98→77`）、
+  M5 `charAcc += 0`、M6 `stackTableCellBlocks` 不累计前块高度。
+- 全量 `./gradlew :common:jvmTest :engine-skia:jvmTest :app:testDebugUnitTest --offline --continue`
+  = **1208 条 / 1 红 / 1 跳过**，与本轮开始前逐项一致
+  （唯一红 = Q12 `CrossChapterPreflightProbeTest`；唯一跳过 = `GlyphFallbackFaceTest` 锁 7）。
+
+---
+
+## 2026-10-02 — 真机报缺陷的排查轮·第三批：Q16 修完（`pre code` 空行）
+
+### 「要不要以 CSS 为准」这个裁决项**不成立**
+
+TODO 里 Q16 挂着一条待裁决：「与 §T1b 第③行那条已被钉死的『Skia 逐行等价』金标准冲突，
+需先决定『以浏览器/CSS 为准』还是『以现状为准』」。**不需要裁决** —— 探针直接问**裸 `SkParagraph.lineMetrics`**：
+
+| 文本 | Skia **裸** `lineMetrics` | 本仓适配层（修复前） |
+| --- | --- | --- |
+| `a\n\nb` | `[0..1, **2..2**, 3..4]` ← 空行**在** | 2 行（`if (e > s)` 把它剔了） |
+| `\na` | `[**0..0**, 1..2]` | 1 行 |
+
+⇒ **空行从来没丢在 Skia 里**，丢在本仓的 `layoutOnce` 归一化与自建 `greedy` 的行首跳过里；
+「Skia 逐行等价」被误读成「Skia 的行为就是规格」，等于**把我们自己的 bug 追认成规格**，
+还被两条单测加固（一条断言 2 行，一条用例名叫 `brNewlinesKeepInteriorLines` 却断言 `[0..0, 3..3]`）。
+
+而**仓内第三份实现本来就是对的**：`WhiteSpaceBreak.breakLeafLines` 不折行分支（`PRE`/`NOWRAP`）
+一直在产零宽空行；而 `pre` 必然被 `StyleComputer.resolveWhiteSpace` 降级成 `PRE_WRAP`（无横向滚动，Q13）
+⇒ 对的那份永远轮不到。⇒ 这不是取舍，是**两条分支口径不一致**。§T1b ③ 已按实测翻案并附证据表。
+
+### 修法（排版层·上）
+
+规格：空行 = 连续硬换行之间的空段，是**真实行盒**（零宽区间、占满行高）；
+末尾**单个** `\n` 不产幻影行（EPUB 源码惯用 `<pre>…\n</pre>`），末尾**两个** `\n` 时靠前那个终止的是真实空行。
+
+- 自建 `greedy`：行首 `\n` 产出 `BrokenLine(s until s)`；`s = brk` 处**跨过终止符**（否则 `a\n\nb` 多一行）；
+  末尾换行用 `trailingTerminator` 门槛挡掉。
+- Skia 适配 `layoutOnce`：保留**归一化前就零宽**的指标（`blank = s == e`）—— 这是「空行」与
+  「纯换行幻影行」的唯一区分点；循环后再**按字符补回最后一个空行**（Skia 对文本以 `\n\n` 结尾时把空行
+  与幻影行**合并成同一条非零宽指标**，实测 `[0..1, 2..3, 2..3]`）。
+
+### Verification
+
+- 锁：新增 `engine-skia:WhiteSpaceBlankLineParityTest`（3 把，钉「两个断行器 × white-space 两个分支」四格两两一致）
+  ＋ 新增 `app:PreBlankLineEndToEndTest`（4 把，整条链路断言叶文本/区间/行几何/行窗，含 `<br><br>` 与
+  `pre` vs `white-space:pre` 可见文本一致）＋ 改写两条把 bug 钉成规格的既有锁。
+- **逐把变异验证（4 个全部应验）**：M1 自建侧整体退回（9 把红）、M2 只退 Skia 侧（6 把红）、
+  M3 只去掉「补回最后一个空行」那 5 行（4 把红）、M4 只去掉 `s = brk + 1`（9 把红，连既有公平性锁也红）。
+- 全量 `./gradlew :common:jvmTest :engine-skia:jvmTest :app:testDebugUnitTest --offline --rerun-tasks --continue`
+  = **1216 条 / 1 红 / 1 跳过**（基线 1208 + 本轮 8 把新锁；唯一红 = 已登记 Q12，唯一跳过 = `GlyphFallbackFaceTest` 锁 7）。
+
+## 2026-10-02 — 真机报缺陷的排查轮·第四批：Q18 修完（行内 `<code>` 里的标识符被切开）
+
+### 缺陷：判「是不是代码」只看了**叶块 tag**，没看**行内 run**
+
+Rust 书真源码 `<li>… 如 <code>wrapping_add</code></li>`（`tag = "li"`）在版心 640 下断成
+`…如 wrap` ‖ `ping_add`，行尾还补了 `-`。根因：**断点源只拿到「整段文本 + 一个叶块 tag」**，
+而「代码性」在 CSS 里是**行内元素的属性** ⇒ 段落里的行内 `<code>` 走的是散文规则（K-L 音节断词），
+**在 `<code>` 内部**断词。这**违反**了 `CodeIdentifierBreakSource` 与 `EnglishHyphenationSource`
+**各自 KDoc 里写明的规则**（同一个引擎对整块 `<pre>` 和行内 `<code>` 给两套规则）。
+
+### 修法（排版层·上 / 分行控制，不跨层）
+
+新增 `RegionScopedBreakSource`（`common/.../laying`）——**按位置分区**的断点源：
+
+- **不用「清位 API」**：那会破坏 `BreakOpportunitySet`「只置位不清位 ⇒ 顺序无关」的冻结不变式。
+  分区后各区只跑自己的 source，**集合内部仍是纯并集**，不变式原样保留。
+- 判据：位置 `i` 的**两侧字符都在代码内**（`maskOf`）⇒ 内区只含 run 的严格内部，边界归外区。
+- 「整块代码」与「行内代码内区」**共用同一个 `codeSources()`** ⇒ 同一种代码只给一套规则。
+- `InhouseParagraphBreaker.breakOpportunities` 三条路径：叶块是代码 ⇒ 整段 `codeSources`（**不分区**，
+  否则 `<pre>` 里嵌的 `<em>` 会落进散文规则）；有行内代码 run ⇒ 分区；都没有 ⇒ 整段 `proseSources`。
+- **两条子决策都做**（用户裁决）：① 行内代码内**禁**音节断词；② 行内代码内**也**注入 `_` 分隔符断点。
+
+### 实测（生产路径，Rust 真源码）
+
+| 版心 | 改动前 | 改动后 |
+| --- | --- | --- |
+| 360 | `…方法进行 wrapping，如 wrap` ‖ `ping_add` | `…方法进行 wrapping，如 wrapping_` ‖ `add` |
+| **420 / 480 / 520** | — | **与改动前逐值相同**（零回归的实测证据） |
+| 640 | `…如 wrap` ‖ `ping_add` ← **用户报的那行** | `…如 ` ‖ ` wrapping_add` |
+
+⚠ 480 那档的 `wrap` ‖ `ping` 断在**正文裸词** `wrapping`（码位 `[27,35)`，不在任何 `code` run 内），
+是合法音节断词，**不要去"修"它**。② 的决策依据是补测的窄版心长标识符：不注入时 R1 会**硬切在字母中间**
+（`wrapping_add_w` ‖ `ith_capacity_c`）—— 正是用户报的那一类难看。
+
+### 实现期自查出的两个真缺陷 + 两条新教训
+
+- 子串坐标换算 off-by-one（`t` 写成 `pos - i + 1`）；子串缺一字符左邻域（每个分区首个位置算不出来）。
+  ⚠ 我第一版给这两处写的后果说明**也错了**（写了「可能超出版心被裁」）—— 逐字推了贪心才看清：
+  `hang` 只在 `next <= avail` 时才被赋值 ⇒ **恒不溢出**。KDoc 与锁注释已按实测改正。
+- **教训 ㉓：判据要放在「能测到它的那一层」。** 两把变异各自暴露了一次放错地方：
+  M4（边界判据 `&&`→`||`）端到端与断行器层**全绿** —— 因为那些多出来的断点全落在 min-content 单元内部，
+  而生产恒有 `widthPx ≥ ceil(minContentWidth)` ⇒ 贪心永远选不到 ⇒ **只能钉在断点集层**，
+  于是把该判据从断行器搬进公共的 `RegionScopedBreakSource.maskOf`。
+  M2（去掉左邻域）在断行器层与端到端层**也全绿**，只被位置层抓到 —— 丢一个断点后贪心要么选更靠右的断点、
+  要么走 R1 core **在同一处**切出同样的行区间 ⇒ `BrokenLine` 逐值相同。
+  ⇒ **「断点集」与「行」是两个粒度，断点级的错常在行级完全隐形；分区/下标换算类改动必须钉位置集合。**
+- **教训 ㉔：「我推荐 A」这句话本身要能被数据推翻。** ② 我第一轮只测 5 个中宽版心就判净负收益并推荐不做，
+  补测 4 个窄版心后**自己的推荐被自己的数据推翻**（② 净正）。给建议时要说清覆盖了哪些输入。
+- 顺带：断行器层扫描型断言**必须从生产地板 `ceil(minContentWidth)` 起** ——
+  第一版扫版心 `1..420`，在版心 1 上拿到 `[3,4,…,13]` 全落点，那是 **R1 core** 的产物，把性质直接作废。
+
+### Verification
+
+- 锁：新增 `common:RegionScopedBreakSourceTest`（12 把，逐位置钉死坐标换算 / 左邻域 / `maskOf` 判据）
+  ＋ `engine-skia:InlineCodeBreakRulesTest`（7 把，断行器三条路径）
+  ＋ `app:InlineCodeIdentifierBreakEndToEndTest`（5 把，整条链路 + Rust 真源码五档逐值）。
+- **逐把变异验证（7 把全部应验）**：M1 off-by-one（单测 4 + 断行器 2 + 端到端 2，连既有 `LineAlignerTest`
+  的 JUSTIFY 一条也红）、M2 去掉左邻域（单测 4，端到端全绿）、M3 内/外区对调（9 把红）、
+  M4 边界判据 `||`（单测 2；**第一轮没抓到，补锁后才有**）、M5 内区用散文源（5 把红）、
+  M6 去掉 `_` 断点源（7 把红）、M7 叶块是代码时也分区（3 把红）。
+- 全量 `./gradlew :common:jvmTest :engine-skia:jvmTest :app:testDebugUnitTest --offline --rerun-tasks --continue`
+  = **1340 条 / 1 红 / 1 跳过**（唯一红 = 已登记 Q12 `CrossChapterPreflightProbeTest`）。
+
+## 2026-10-03 — 混排字距：接线收口 + 「有些起作用有些不起作用」定案（Q17 销案）
+
+用户三条要求一次做完：① 中西字距「有些起作用有些不起作用」；② 改名**混排字距**；
+③ 滑块为 0 时「仅用字间距分隔中英文字符，**不做多余动作**」；外加产品裁决「**原有空格一律删除**」。
+
+### ① 的答案：不是接线 bug，是真字体的空格宽度与默认值重合
+
+真书《Rust 程序设计语言》（平板上那本）25 章全文抽出 659827 字跑探测器：
+
+| 边界形态 | 真书占比 | 默认档 25 下的净变化 | 观感 |
+| --- | --- | --- | --- |
+| 真相邻 `Rust的` | 4942（17.6%） | **+11.10px** | 明显生效 |
+| 作者打了空格 `Rust 的` | 23181（**82.4%**） | **+1.15px** | 「没反应」 |
+| 标点 / 假名等隔断 | 0 | — | — |
+
+根因：正文族 **`思源黑体` 的空格 advance = 0.2240em**（fs=44.4 时 9.9456px），而 `STSong`/`serif`
+恰为 0.25em —— 接线期据后者以为「默认值 25 落在不动点上」，真机族下**不动点是 22.4**，
+25 只比它高 1.15px。逐档净增（px/处）：`0 → −9.95`、`10 → −5.51`、`20 → −1.07`、`25 → +1.15`、
+`30 → +3.37`、`40 → +7.81`、`100 → +34.45`。⇒ 滑块 ≥40 一眼可见；「默认档就看得出」的唯一杠杆是改默认值
+（需 `schemaVersion` 升 2），**本轮未改，留待用户裁决**。
+
+### 产品口径落地
+
+- **原有空格一律删除**：`CjkLatinGap.suppressSpace: Boolean` → **`spaceCount: Int`**（吃掉几个）。
+  旧口径「只吃一个、多余保留」被删 —— `中  A` 在旧口径下**一个间隙都不发**，那是另一处「滑块完全不起作用」。
+  代价（已登记）：`<pre>` 里靠多空格对齐的 ASCII art 若含中文会错位，真书该形态 **0 次**。
+- **滑块 0 = 纯不动点**：`advances` / `LineAligner` / `InhouseParagraphBreaker` / `KerningClusterTable`
+  / `LayoutParamKey` 五处短路全部保留，并补上**带空格语料**的逐位零差锁（吃空格是本特性唯一会改写
+  字符本身的动作，只在无空格语料上验等于没验）。
+- **改名只动用户可见名**：内部标识符与 JSON 键仍是 `cjkLatinSpacing` —— 改名会改持久化键、
+  作废刚写好的 `schemaVersion` v1 迁移。
+
+### 顺带修掉的两个真缺陷（在探测器里，接线前是死代码所以从未崩过）
+
+- 旧实现发出「吃空格」间隙后写 `i = after + cc(after); continue`，那一跳**跳掉一个真边界**
+  （`中 A中文` 的 `A`↔`中`），并让产出**依赖遍历路径** ⇒ 子串检出可能多于整段检出 ⇒
+  **画比量宽 ⇒ 行右缘越出版心被裁**（分页阅读器的硬约束）。改成唯一推进点 `i = iNext`。
+- 两处越界读：代理对边界字上的 `i + 1 < n`、段末分隔空格上的 `text[after]`。
+
+### Verification
+
+- 锁：`engine-skia:CjkLatinSpacingWiringTest` **28 把**（四个施加点 / 方向 / 字号档 / 一律删除 /
+  端到端断行 / 跨行「画 ≤ 量 → 后升级为**画 == 量**，见下」/ 滑块 0 纯不动点 / 滑块→em 映射）
+  ＋ `common:CjkLatinSpacingTest` **16 把**（含**任意子区间上「子串检出 = 整段检出的受限子集」全枚举**）
+  ＋ `common:ReaderSettingsTest` ＋4 把（v1 迁移两向 + 幂等）
+  ＋ `common:LayoutParamKeyTest` 3 把（`paramHash` 非 0 换键 / 0 复现历史流）。
+- **逐把变异验证（7 组全部应验）**：M1 重新加回被删的那一跳（探测器 3 把红）、
+  M2 探测器只吃一个空格（探测器 3 把 + 接线 1 把红）、M3 施加点完全不吃空格（4 把红）、
+  M4 施加点只吃第一个空格（**只有**新的一律删除锁红 ⇒ 判别力正确）、M5 间隙加在右字位（10 把红）、
+  M6 `paramHash` 无条件喂 CRC（3 把红）、M7 迁移改成判值 `stored == 0 → 25`（0 保留那条红）。
+- 全量 `./gradlew :common:jvmTest :engine-skia:jvmTest :app:testDebugUnitTest`
+  = **222 条 :app 全绿**（除 Q12 `CrossChapterPreflightProbeTest` 这个**已登记的既有红**，
+  本轮重跑 3 次稳定复现、且它需要编译通过的基线而 `6efeb31` 本身编译不过，见下）。
+- 连带改写的金标准：`app:InlineCodeIdentifierBreakEndToEndTest` 420 / 160 两档。该类用
+  `ReaderSettings.DEFAULT` 排版（= 生产默认配置），混排字距默认 25 生效 ⇒ 混排行更宽 ⇒ 断点前移；
+  **其余七档逐值不变**，两条不变量（行内代码只在 `_` 处断 / 行尾不进代码 run）全绿。
+  顺带钉住一个易误判的现象：360 档行尾那个作者空格**仍在** —— 跨行的中西边界在行子串上
+  看不到右邻码本 ⇒ 不发间隙、空格照旧（后于下节升级为「本行照画」，这条现象只在 360 档残留）。
+- ⚠ **`6efeb31` 本身编译不过**（`InhouseParagraphBreaker.preferredWidth` 的 `override` 缺
+  `cjkLatinSpacingEm`，与 `common` 侧基类签名不匹配）⇒ 上一轮提交是半个接线，工作树才把它补完整。
+  也因此**无法用 `git stash` 做基线 A/B**（会落到编译错误），Q12 的「既有红」依据是 TODO 里的登记记录。
+
+## 2026-10-03（第二次）— 真机复验报出的两个缺陷（Q21 销案）
+
+用户拿到上一版后在设备上实测，报了两条。两条都不是「上一版没测到」，而是**上一版本身的缺陷**，
+且第二条正是第一条那句「有些起作用、有些不起作用」的**完整根因**。
+
+### ① 标点与异种字符参与了间隙
+
+用户原话：「`Kotlin` 与后面的冒号之间也受这个混排间距影响：中英文标点和异种字符之间不应该受影响！」
+
+- **根因**：边界判据是「码位落在 CJK 段 **或** `0x0030..0x024F` 段」，而两段里都混着标点与符号：
+  CJK 侧混着 `0x3000..0x303F`（CJK 标点 + U+3000 表意空格）与 `0xFF00..0xFFEF`（全角形态，含全角拉丁
+  `Ａ-Ｚ`），西文侧混着 `± × ÷ ° © « » ‹ › ¢ £ ¥ § ¶ · ¤`。
+- **修法**：收紧为**两侧都必须是字母数字**。`isCjk` 退回**表意文字**四段；
+  `isWestern` 加 `cp.toChar().isLetterOrDigit()`。顺带**删除**了原先为 NBSP / SHY 单列的两条例外
+  （已落进「非字母数字」这一条）。假名 / 谚文判为 NONE、两侧都不参与 = **改动前的行为，本轮未扩大范围**。
+- **实测**：段级间隙 **27086 → 21724（−19.8%）**；**右邻不是字母数字的间隙 = 0 条**（改前 5362 条）。
+
+### ② 每段最后一行的中英间距不受滑块控制
+
+- **根因**：`KerningClusterTable.shiftTrackByCjkGaps` 把**行内局部**的 `gaps[gi].leftIndex` 拿去比
+  **段内绝对**的 `abs = start + j`（坐标系混用）⇒ 段首 `start` 一旦是几百/几千，几乎每条间隙都在
+  `j == 0` 就被计入 ⇒ 整条簇位轨被**同一个常量**平移 ⇒ `cnat[i] − cnat[i−1]` 的**逐槽差分里根本没有间隙**
+  （常量相减消掉）⇒ `graftKerningOnto` 的 `tighten` 在每个间隙位恒为 `−gap` ⇒ 被 `min(0, ·)` 全额采纳
+  ⇒ **注入的间隙在落墨侧被整条抹掉**。纯 CJK 行不走簇位轨 ⇒ 走 `placement.xs` ⇒ 间隙正常；
+  中西边界必然含 Latin ⇒ 实际「几乎全灭」。末行更刺眼是因为 `justifyRightEdge` 补偿块只对
+  「JUSTIFY 且非末行」生效。
+- **原有那把锁为什么没抓到**：`簇位轨带上间隙且嫁接后不被抹掉` 用 `start = 0`，而 `leftIndex < start + j`
+  在 `start == 0` 时**恰好**退化成正确的 `leftIndex < j` —— **只在首行成立**。
+- **实测**（真书 8738 段 / 29151 行，完整绘制管线，滑块 0.25 → 1.0）：修复前 18990 个行内中英边界里
+  **18743 个（98.7%）墨位一动不动**（应为 32.81px）；修复后 **18990 / 18990 精确**。
+- **顺带**：绘制侧从「按行子串检测」改成「整段检测 + `gapsForRange` 裁到本行」，跨行边界那条间隙**本行照画**
+  ⇒ 逐行 **画 == 量**（29151 / 29151 精确；改前 2540 行不等）。`KerningClusterTable.runsWithin` 随之删除。
+
+### Verification
+
+- 新增 / 改写的锁：`簇位轨在非零段内偏移下仍逐槽带上间隙`（**非零 `start` 的回归锁**）、
+  `端到端 滑块一动墨位就动 相邻与空格分隔两种形状都响应`（**刻意避开 0.25em 不动点**）、
+  `标点与符号两侧不插间隙…`；两条「画 ≤ 量」的锁改写为「画 == 量」（含等号锁与扫版心锁）。
+- **逐把变异验证（3 组全部应验）**：M8 簇位轨判据改回 `leftIndex < start + j`（**只有**那两把新锁红 ⇒
+  判别力正确）、M9 `isCjk` 重新纳入 `0x3000..0x303F`（探测器 2 把 + 接线 1 把红）、
+  M10 `isWestern` 去掉 `isLetterOrDigit()`（探测器 1 把 + 接线 1 把红）。
+- 全量 `./gradlew :common:jvmTest :engine-skia:jvmTest :app:testDebugUnitTest`：
+  `:common` 与 `:engine-skia` 全绿（318 + 条）；`:app` 222 条里**只有** Q12 `CrossChapterPreflightProbeTest`
+  这个已登记的既有红。
+- 连带改写的金标准：`app:InlineCodeIdentifierBreakEndToEndTest` **640 一档**
+  （`…如 ` ‖ `wrapping_add` → `…如 wrapping_` ‖ `add`），原因是 ① 让 `wrapping` 的 `g` 与全角逗号之间
+  那条间隙消失 ⇒ 第一行多装下一个 `wrapping_`。**其余九档逐值不变。**
+- **明确不修并登记**：簇位轨上**被吃掉的分隔空格**没有同步抵消（该位 `tighten` 恒为 `+空格宽`）。
+  `graftKerningOnto` 只采纳 `min(0, ·)` ⇒ 正值被忽略 ⇒ 对落墨无影响 ⇒ 按「不做多余动作」不改。
+  若将来它改成采纳双向修正量，这条必须同步补上。
+
+---
+
+## 2026-10-03 — 四级 JUSTIFY slack 优先级 + 标点挤压补齐锁
+
+### 背景与两问
+
+**问一：标点挤压呢？** 答：实现（`PunctuationSqueeze` + 断行侧预留 + 画侧收窄 +
+`preferredWidth` 同源）上一轮已落地并修了一个真 bug，但**没带锁**。当时只有两条**别的**锁：
+`TableColumnWidthRealMeasureTest` 锁 3b 钉「`preferredWidth` 恰好窄一个挤压总额度」——
+它只保证**两侧同源**（同一个 `widths` 输出被两边加总），额度公式改坏照样绿；
+`InhouseParagraphBreakerTest` 的 `punctuation squeeze never costs a line` 是**单调性**锁
+（`squeezed ≤ plain` 且至少一格省行），抓得住「没接线 / cap = 0」，抓不住「**挤得不对**」。
+⇒ 本轮补 `PunctuationSqueezeLockTest` 6 把 + 12 项变异验证。
+
+**问二：中英注入间隙为什么排在 CJK 字间之后？** 答：**频次，不是额度**。
+瀑布的原理是「同一份 slack 摊得越薄越不显眼」。实测槽位占比 L1 56.5% vs L2 5.5%，
+同样 1em slack 摊到 ~10 个 CJK 槽上每个 0.1em（看不出来），摊到 2 个注入槽上每个 0.5em
+（一眼看出那里有个空）⇒ **反过来排会更显眼**。且级 2 几乎轮不到（262 / 14722 行），
+因为级 1 容量太大（~15 槽 × 0.25em ≈ 3.75em/行），绝大多数行的 slack 在级 1 就吃完了。
+cap 不对称（级 2 = 0.5em > 级 1 = 0.25em）不是排名矛盾：cap 答的是「轮到这一类时它最多吃多少」。
+
+> **⚠ 「级 2 几乎轮不到」这句只属于逐级瀑布口径（未重测）。**
+> 二次订正改成按比例均摊后，**有限级不再排队**：只要比例 `r > 0`，级 0/1/2 **同时**各拿
+> `r × CAP_EM` ⇒ 新口径下「级 2 几乎轮不到」不再成立。具体频次未重测，不填数字。
+
+### 四级优先级（上一轮已落地，本轮补齐锁与文档）
+
+`engine-skia/JustifySlack.kt`：槽位分四级 ——
+① 西文词间空格 0.5em → ② CJK 字间 0.25em → ③ 中英注入间隙 0.5em → ④ 西文词内字母缝 **无上限**。
+
+> **⚠ 2026-10-03 二次订正**：上面这一段描述的「**吃满一级再进下一级**」（逐级瀑布）**已不是现行口径**。
+> 现行是 `JustifySlack.plan` 的**按比例均摊 + 级 3 兜底**：
+> `r = min(1, slack / C_finite)`、有限级各拿 `r × CAP_EM`、级 3 接差额。
+> 两者**只在 `slack < C_finite` 时有区别**（`slack ≥ C_finite ⇒ r = 1` ⇒ 与瀑布逐值相同）。
+> 完整口径与实测见 `docs/自建断行引擎-实施方案.md` S4 与 `docs/TODO-未尽事宜.md` Q22/Q23/Q25。
+
+绘制侧 `LineAligner` 与 `graftKerningOnto` 的回填**共用同一套 `JustifySlack.plan`**（判据只有一份）。
+`CjkLatinSpacing.isCjk` / `isWestern` 由 `private` 改 `public`，作为唯一判据源供渲染层复用。
+
+### 标点挤压补的 6 把锁（`PunctuationSqueezeLockTest`）
+
+一律从 **`xs` / `visibleRight` 反解**实际窄化量，与 `PunctuationSqueeze.widths` 的输出逐槽对账
+（不看 `Placement.advs` —— 那是被就地减过的那份数组，用它当基准等于用被试的输出证明它对）。
+
+| 锁 | 锁什么 |
+|---|---|
+| `行内每槽实际窄化量逐值等于额度公式` | 逐槽对账（生产 cap 分支）+ 钉死可压槽位表与 cap = 20px |
+| `跨行边界计入下一行首字的左伸` | `advBase` 与「传整段 text」—— 只在行末、只在 headroom 绑定时显形 |
+| `盒宽必须减去末字那份不可见的 lsPx` | `w = adv − lsPx`，退化版多压一个 `lsPx` |
+| `挤满时相邻墨迹仍不相接` | `inkLeft(next) < 0` 那一支（STSong 下只有 ASCII `j` 能测到） |
+| `断行侧预留总额逐值等于画侧释放总额` | **跨行**扫 10 档版心，`Σ_行 S == S(整段)`（`advBase` 错配的正路） |
+| `挤过之后每行可见右缘不超版心` | 扫 8 档 × JUSTIFY，溢出方向的硬边界 |
+
+**一条必须记下的纪律**：额度是 `min(cap, headroom)`，**headroom 绑定时 `inkLeft` 与 `lsPx`
+两项才可观测，cap 绑定时被 `min` 吃掉** ⇒ 锁必须**两支都取样**（锁 1 用生产 cap，
+锁 2/3/4 用测试专用 `bigEm = 1.5em`）。只取一支等于没锁边界条款。
+实测 `STSong`/serif @40 下 `。`/`，`/`；`/`！`/`？` 的 headroom 是 22~27 > cap 20（cap 恒绑定），
+只有 `》`（headroom **17**）与三个 ASCII 弯引号会让 headroom 绑定。
+
+**锁 4 踩到的坑**：字体自己就能造负间隙（`j|y` 未挤时就是 **−0.16px**），第一版扫全行所有相邻对
+直接被这条**与挤压无关的既有事实**打红 ⇒ 判据改成只在「本槽确实被挤过」的位置上取。
+
+### 实测
+
+> **⚠ 下面这两组数字已被 2026-10-03 的二次订正作废**（口径已改，且未按行槽数分桶）。
+> 保留在案是为了记录「当时据以做了什么判断」，**不得再作为现状引用**。
+> 现行数字见本文件顶部 2026-10-03 条目与 `docs/TODO-未尽事宜.md` Q23/Q24/Q25。
+
+**四级分配**（真书 25 篇 / 31898 行 / 14722 个 JUSTIFY 中部行 / 315089 个可拉伸槽）：
+词内字母缝拉伸量 **682 281px → 54 215px（−92%）**、词间空格 **119 817px → 268 324px（+124%）**；
+超 0.25em 槽 **11.58% → 3.80%**；max 单槽 **691.241px → 648.987px**。
+代价（当时登记待裁决）：留缺口 40 行（0.27%，p50 1.75em / max 15.5em）、单槽 >2em 的行 2 → 15。
+⚠ **这组「改善」结论不成立**：分配口径已改（按比例均摊），且这组数字没有按每行槽数分桶 ——
+现口径下满行的单槽 >2em 比例是 0.07%~0.92%，尾部全在 ≤8 字/行的短行上。
+
+**标点挤压**（25 篇 / 3958974 字 / 150 格 = 25 文件 × 3 版心 × 2 字距，fs43.75）：
+行数 **223072 → 219037（比值 0.98191）**、**146 / 150 格省行**；挤压槽 114456 个，
+命中 cap 112812 / 命中物理余量 1644，**超 cap 槽 = 0**，平均每槽 21.5972px。
+⚠ 这是「**有额度就挤**」口径下的数字。改成「只挤到词尾不破词」后，
+命中率降到 **1.178% 的行**、只省 **0.071%** 行数 ⇒ **挤压是罕见兜底，不是常规 slack 供给**。
+
+### Verification
+
+- `:engine-skia:jvmTest` **342 全绿**（本轮新增 6 把挤压锁）。
+- `:app:testDebugUnitTest` 222 测试 **1 红 = 既有 `CrossChapterPreflightProbeTest`**
+  （`git stash -u` A/B 已证明非本轮引入，登记 Q26）。
+- **断行/行数金锁一个都没动**：四级只改 `xs` 与右缘、不改 `advances`；挤压的阈值下调是上一轮做的
+  （生产口径 parity 85.0 → 60.0、比值下限 0.98 → 0.93），并保留未挤口径那把作对照
+  （阈值一字未动，实测 87.14%）—— 没有那把对照就分不开「阈值下调」与「断点源退化」。

@@ -39,4 +39,5 @@ picker UI) live **above** the engine and only *inject* a pairing.
 - Geometry and drawing share one `FontPairing`/selection rule → `globalCharStarts` stable.
 - Font changes affect glyph advance only; pagination table is parameter-keyed (LayoutParamKey already
   includes fontBody/fontTitle/fontCode), no extra invalidation needed.
-- Bump disk `PaginationCacheStore.LAYOUT_VERSION` only if char/line geometry semantics change.
+- Disk `PaginationCacheStore.LAYOUT_VERSION` is derived from engine source content since 2026-10-01, so it
+  changes automatically exactly when char/line geometry semantics change. No manual bump.

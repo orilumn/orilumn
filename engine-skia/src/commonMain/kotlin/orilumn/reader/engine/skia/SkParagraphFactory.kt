@@ -50,9 +50,9 @@ object SkParagraphFactory {
     @Volatile
     var weightAnchors: Map<String, Int> = emptyMap()
 
-    /** 锚点改写（纯函数）：正体 400 且族命中锚点即改用，否则原样。 */
+    /** 锚点改写（纯函数）：正体（非斜体）且族命中锚点即改用锚点字重，否则原样。 */
     fun anchoredWeight(families: List<String>, weight: Int, italic: Boolean): Int {
-        if (italic || weight != 400) return weight
+        if (italic) return weight
         for (f in families) {
             val a = weightAnchors[f.trim()].takeIf { it in 100..900 } ?: continue
             return a
@@ -62,6 +62,21 @@ object SkParagraphFactory {
 
     /** 平台默认字体管理器：即 [systemFonts] 接缝（母文档 §3 系统字体集合边界）。 */
     fun defaultFontMgr(): FontMgr = systemFonts()
+
+    /**
+     * 一次 run 的 [FontStyle]（字重锚点已应用）——[paragraphStyle] 与逐码本量宽器
+     * （[SkiaRunMeasurer]）的**单源**。两者必须逐值一致，否则「量出来的面」与「段落选的面」不是同一张表，
+     * 断行几何与绘制字形错位（§2.2(d) 的同源约束）。
+     */
+    fun runFontStyle(families: List<String>, weight: Int, italic: Boolean): FontStyle =
+        FontStyle(
+            // 字重全粒度透传（SkFontStyle 任意 100..900，系统面经 matchFamilyStyle 就近命中；
+            // 旧二值 NORMAL/BOLD 会吞掉 300/500/600/800/900 与用户锚点，已退役）。
+            // 用户锚点：该族正体 400 改按锚点字重要求选面（系统/导入同效），粗斜体自然匹配。
+            anchoredWeight(families, weight, italic),
+            FontWidth.NORMAL,
+            if (italic) FontSlant.ITALIC else FontSlant.UPRIGHT,
+        )
 
     /** 平台默认字体集合（与 [systemFonts] 同一来源，度量/绘制共用）。 */
     fun defaultCollection(): FontCollection =
@@ -76,7 +91,23 @@ object SkParagraphFactory {
      */
     fun embeddedFontCollection(fonts: List<SkiaFontPool.EmbeddedFont>): FontCollection {
         val collection = defaultCollection()
-        if (fonts.isEmpty()) return collection
+        val provider = embeddedFontProvider(fonts) ?: return collection
+        return collection.setAssetFontManager(provider)
+    }
+
+    /**
+     * 内嵌/用户字体的 [TypefaceFontProvider]（与 [embeddedFontCollection] 的资产端**同一个实例**）。
+     *
+     * 存在的理由不是复用，是**可解性**（`docs/自建断行引擎-实施方案.md` §2.2(d) 实测 P0）：
+     * `FontMgr.matchFamiliesStyleCharacter` / `matchFamilyStyleCharacter` 是 `FontMgr` 上的 final
+     * 转发，对 provider **一律返 `null`** —— 也就是说「段落能逐字形回退到内嵌面、量宽器按官方 API
+     * 却解不出来」。逐码本量宽器必须能**自己**遍历「族栈 × manager」并用
+     * `matchFamilyStyle` + 「`getUTF32Glyph(cp) != 0`」自建覆盖判定，故资产端要能单独取到。
+     *
+     * @return provider；[fonts] 为空时 `null`（无资产端 → 量宽器的 manager 链只剩系统）。
+     */
+    fun embeddedFontProvider(fonts: List<SkiaFontPool.EmbeddedFont>): TypefaceFontProvider? {
+        if (fonts.isEmpty()) return null
         val provider = TypefaceFontProvider()
         val loader = systemFonts()
         for (f in fonts) {
@@ -90,7 +121,7 @@ object SkParagraphFactory {
                     }
                 }
         }
-        return collection.setAssetFontManager(provider)
+        return provider
     }
 
     /** CSS [TextAlign] → SkParagraph [Alignment]。JUSTIFY 即 `kJustify` 两端对齐。 */
@@ -136,15 +167,7 @@ object SkParagraphFactory {
          */
         forceStrut: Boolean = false,
     ): ParagraphStyle {
-        val effWeight = anchoredWeight(families, weight, italic)
-        val style = FontStyle(
-            // 字重全粒度透传（SkFontStyle 任意 100..900，系统面经 matchFamilyStyle 就近命中；
-            // 旧二值 NORMAL/BOLD 会吞掉 300/500/600/800/900 与用户锚点，已退役）。
-            // 用户锚点：该族正体 400 改按锚点字重要求选面（系统/导入同效），粗斜体自然匹配。
-            effWeight,
-            FontWidth.NORMAL,
-            if (italic) FontSlant.ITALIC else FontSlant.UPRIGHT,
-        )
+        val style = runFontStyle(families, weight, italic)
         val resolved = resolveFamilies(tag, families, monospace, fontManager)
         return ParagraphStyle().apply {
             this.alignment = toSkiaAlignment(alignment)
@@ -278,6 +301,24 @@ object SkParagraphFactory {
             if (canMatch(candidate)) return candidate
         }
         return css
+    }
+
+    /**
+     * **保底候选族名**（字体解析，渲染层）——通用关键字展开出来的全部候选，按优先级去重。
+     *
+     * ## 谁在用、为什么要有这个口
+     *
+     * [SkiaRunMeasurer] 的「通用面表」（族栈一个都覆盖不到时的最后去处）需要一份**定序**的候选族名，
+     * 而候选表的单源是本对象的 [GENERIC_CANDIDATES]。若在量宽器里另抄一份，两处一漂移就会出现
+     * 「级联认得这个族、保底表里没有」的怪现象 —— 与教训 ⑩（量画失配）同源，故只开读取口。
+     *
+     * @param monospace 为 true 时把 `monospace` 的候选提到最前：代码块里的 CJK 该落到等宽 CJK 面
+     *        （`Noto Sans Mono CJK` 一类），而不是被无衬线候选抢先。默认 false 时以 `sans-serif` 起。
+     */
+    internal fun genericFallbackFamilyNames(monospace: Boolean): List<String> {
+        val primary = if (monospace) "monospace" else "sans-serif"
+        val order = listOf(primary) + GENERIC_CANDIDATES.keys.filter { it != primary }
+        return order.flatMap { GENERIC_CANDIDATES.getValue(it) }.distinct()
     }
 
     private const val DEFAULT_FAMILY = "sans-serif"

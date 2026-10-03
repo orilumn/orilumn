@@ -14,17 +14,21 @@ class WeightAnchorTest {
         SkParagraphFactory.weightAnchors = mapOf("Songti SC" to 700)
         try {
             assertEquals(700, SkParagraphFactory.anchoredWeight(listOf("Songti SC"), 400, false))
-            // 粗体自然匹配，不劫持
+            // 正体无论字重都按锚点改写（放开粗细）
             assertEquals(700, SkParagraphFactory.anchoredWeight(listOf("Songti SC"), 700, false))
-            // 斜体自然匹配，不劫持
+            // 斜体不改写
             assertEquals(400, SkParagraphFactory.anchoredWeight(listOf("Songti SC"), 400, true))
+            assertEquals(700, SkParagraphFactory.anchoredWeight(listOf("Songti SC"), 700, true))
             // 未命中族原样
             assertEquals(400, SkParagraphFactory.anchoredWeight(listOf("PingFang SC"), 400, false))
+            assertEquals(700, SkParagraphFactory.anchoredWeight(listOf("PingFang SC"), 700, false))
             // 级联中后位命中也改写（槽位族不在首位时）
             assertEquals(700, SkParagraphFactory.anchoredWeight(listOf("Unknown", "Songti SC"), 400, false))
+            assertEquals(700, SkParagraphFactory.anchoredWeight(listOf("Unknown", "Songti SC"), 700, false))
             // 非法锚点值丢弃
             SkParagraphFactory.weightAnchors = mapOf("Songti SC" to 50)
             assertEquals(400, SkParagraphFactory.anchoredWeight(listOf("Songti SC"), 400, false))
+            assertEquals(700, SkParagraphFactory.anchoredWeight(listOf("Songti SC"), 700, false))
         } finally {
             SkParagraphFactory.weightAnchors = emptyMap()
         }

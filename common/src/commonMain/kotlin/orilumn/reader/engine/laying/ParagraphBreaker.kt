@@ -138,8 +138,32 @@ private fun fontRunsWithin(runs: List<FontRun>, from: Int, to: Int): List<FontRu
     return out ?: emptyList()
 }
 
-/** One produced text line of a run: its char range into the run's text plus its height in px. */
-class BrokenLine(val range: IntRange, val heightPx: Int)
+/**
+ * One produced text line of a run: its char range into the run's text plus its height in px.
+ *
+ * @property hyphenAtEnd 本行是否**断词断点收尾** —— 行尾要补一个 [HYPHEN_GLYPH]（`hyphens: auto`
+ *   的音节断词，或 `&shy;` 落在行末）。默认 false = 行尾无连字符。
+ *
+ *   **为什么必须显式携带**：断行侧为它**预留了版心**（[orilumn.reader.engine.skia.InhouseParagraphBreaker]
+ *   把连字符宽算进判定宽），绘制侧若不知道，行尾那个连字符就会**溢出页宽被裁掉** ——
+ *   分页阅读器没有横向滚动条，溢出 = 内容丢失（`NoLineExceedsContentWidthTest` 钉的同一条硬约束）。
+ *   反过来绘制侧靠「自己重算断点」也不可靠：贪心断在哪由版心决定，绘制侧没有版心上下文。
+ * @property squeezeRatio 本行**实际施加的标点挤压比例**（`[0,1]`，0 = 完全不挤）。
+ *
+ *   **为什么必须显式携带**：挤压参与**断点决策** —— 断行侧是「挤着算宽度」才敢把词完整留在
+ *   同一行的（见 [orilumn.reader.engine.skia.InhouseParagraphBreaker.greedy]）。绘制侧若不知道
+ *   用的是哪个比例，就得自己重算一遍断行 ⇒ 量画失配（画比量宽 ⇒ 右溢被裁，分页阅读器不能横向滚动）。
+ *   反过来「绘制侧自己挤」也不行：那会让字位宽度与断点决策依据的宽度不是一个数。
+ *
+ *   ⇒ 两侧套**同一个比例**、乘**同一份额度表**（[orilumn.reader.engine.skia.PunctuationSqueeze.widths]）
+ *   ⇒ 画 == 量（量画同源，教训 ⑩）。传递路径与 [hyphenAtEnd] 完全同款（shape / 盒流两路）。
+ */
+class BrokenLine(
+    val range: IntRange,
+    val heightPx: Int,
+    val hyphenAtEnd: Boolean = false,
+    val squeezeRatio: Float = 0f,
+)
 
 /**
  * Pure, **single-source** form of the uniform line height for a `fontSizePx x lineHeightRatio` run.

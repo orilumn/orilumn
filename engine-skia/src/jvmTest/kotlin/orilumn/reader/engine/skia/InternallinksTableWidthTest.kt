@@ -141,10 +141,10 @@ class InternallinksTableWidthTest {
         val prefs = ArrayList<TableGridModel.CellPref>()
         for (row in model.rows) for (cell in row.cells) {
             val cs = s.styles[cell.el]!!
-            val text = NormalFlowLayout.absorbStyled(cell.el, s.styles, s.classify, HIDDEN_NONE).text
-            val runs = NormalFlowLayout.leafFontRuns(cell.el, s.styles, s.classify, HIDDEN_NONE)
-            val pref = NormalFlowLayout.tableCellPref(measure, cell.col, cell.colSpan, text, cs, cell.el.tag, runs)
-            assertTrue("min≤max: $text", pref.min <= pref.pref + 1e-3f)
+            // Q15：重路径按块序列度量，这里同源重算（单源核对）。
+            val blocks = NormalFlowLayout.cellBlocks(cell.el, s.styles, s.classify, HIDDEN_NONE)
+            val pref = NormalFlowLayout.tableCellPref(measure, cell.col, cell.colSpan, blocks, cs)
+            assertTrue("min≤max: ${blocks.map { it.text }}", pref.min <= pref.pref + 1e-3f)
             prefs.add(pref)
         }
         val (xs, ws) = TableGridModel.autoColumnLayout(contentW, model.columnCount, 0f, 0, prefs)

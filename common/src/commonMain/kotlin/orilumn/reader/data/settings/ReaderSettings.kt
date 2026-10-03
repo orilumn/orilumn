@@ -37,6 +37,21 @@ data class ReaderSettings(
     val paragraphGap: Double = 100.0,
     /** [Style system] Character spacing (letter-spacing) slot -100..100, mapped to -0.2em..0.2em (each slot unit = 0.002em); 0 = no extra spacing. */
     val letterSpacing: Double = 0.0,
+    /**
+     * [Style system] **混排字距** 0..100, mapped to 0..1.0em; 25 = 0.25em (CLREQ default).
+     *
+     * 用户可见名是「混排字距」（2026-10-03 由「中西字距」改名），但**内部标识符与 JSON 键
+     * 仍然是 `cjkLatinSpacing`**，两者故意不同：改名会改掉持久化键、把刚写好的
+     * [schemaVersion] v1 迁移作废（老存档里根本没有 `混排字距` 这个键）。
+     *
+     * 0 是**合法档位**，且**不是特例档**（产品口径 2026-10-03 改）：0 = 注入的间隙宽正好 0，
+     * 中西之间**只**由 [letterSpacing]（字间距）分隔 —— 字面意义上的「距离 0」。
+     * 边界照检、作者为了让中英分开而手打的那串半角空格**照吃**（画成零宽，
+     * CLREQ 4.1「删除多余半角空格，注入固定间隙」的删除动作与间隙宽无关）。
+     * 于是 `Rust 的所有权` 在 0 档排成 `Rust的所有权`；档位之间只有间隙宽这一个数在变。
+     * 详细口径见 [orilumn.reader.engine.text.preprocess.CjkLatinSpacing] 类 KDoc。
+     */
+    val cjkLatinSpacing: Double = 25.0,
 
     /** Page margins: four directions independent (px). */
     val marginTop: Int = 100,
@@ -93,6 +108,26 @@ data class ReaderSettings(
      * 粗斜体仍自然匹配。纯全局（同 showHiddenFonts待遇）；空 = 全族自动匹配。
      */
     val fontWeightAnchors: Map<String, Int> = emptyMap(),
+
+    /**
+     * 持久化结构版本（**只增不改**）：`[fromJson]` 用它识别「这份存档是哪个版本写的」，
+     * 从而对**只影响本版本**的字段做一次性迁移。纯全局（[BookSettings] 无此字段，
+     * 故不参与 [applyOverlay]/[mergeFrom] 的分层逻辑）。
+     *
+     * ## 为什么不按「值」判断而要一个版本号
+     *
+     * 值判据（典型如「`cjkLatinSpacing == 0` 就当成旧档重置成 25」）**挡不住用户真的想设 0**：
+     * 混排字距的 0 是合法档位（= 关掉间隙），用户拖到 0 之后下一次启动会被强行改回 25，
+     * 且**改多少遍都会被改回去**。版本号则只对「写档那一刻还没有的语义」动手一次。
+     *
+     * ## 版本号怎么加
+     *
+     * **只加在数据类的最后一个字段**：中间插字段会改变 `toJson` 的字段顺序，
+     * 而老存档按**键名**解析（[fromJson] 走 `SettingsJson` 的 jsonObject），
+     * 顺序变不影响读；写出去的顺序变了也没有读方依赖（唯一读方就是 [fromJson]）。
+     * 真正的约束是**默认值必须等于当前版本**：缺该键 = 读到默认值 = 旧档。
+     */
+    val schemaVersion: Int = CURRENT_SCHEMA_VERSION,
 ) {
 
     /** Serialize to a JSON string; `indentFactor > 0` produces indented output. */
@@ -186,6 +221,36 @@ data class ReaderSettings(
     companion object {
         /** Default set: factory values when no customization has been made. */
         val DEFAULT = ReaderSettings()
+
+        /**
+         * 当前持久化结构版本。每有一处**只对新语义成立**的一次性迁移就 +1，
+         * 并在 [fromJson] 里补一段 `if (stored < N) …`。
+         */
+        const val CURRENT_SCHEMA_VERSION = 1
+
+        /**
+         * v1 迁移：**重置混排字距到默认值**（用户报「设置里看到 0、代码默认却是 25」）。
+         *
+         * ## 为什么重置是对的（而不是「保留 0」或「判 0 就改 25」）
+         *
+         * 这个字段在本次修复前是**整套死代码**：设置能存、滑块能拖、`fromJson` 照读，
+         * 但渲染侧没有任何一处消费它（`bodyParagraphBreaker` 丢弃第 2 个实参、
+         * `ParagraphBreaker.breakLines` 没有这个形参）。于是**在旧版里拖出来的任何值都是盲选** ——
+         * 用户在「拖了没反应」的滑块上停留时随手拖到的 80，跟他认真调到 25，在落盘文件里
+         * **完全同形、无法区分**。保留它 = 把一个无意义的数字当成用户的明确意图继承下来。
+         *
+         * ## 为什么不是「`stored == 0 → 25`」
+         *
+         * 0 是合法档位（= 关闭间隙）。判值会把**故意设 0 的用户**也改回 25，而且每次启动都改一次。
+         * 版本号只对「写档那一刻还不存在的语义」生效一次，之后用户怎么拖都尊重。
+         *
+         * ## 代价（知情）
+         *
+         * 本次修复前拖过滑块的用户，升级后 [cjkLatinSpacing] 会**从他的旧值回到 25**。
+         * 这是有意的一次性代价：那串旧值本来就没有生效过，保留它等于假装尊重一个从未存在的意图。
+         */
+        private fun migrateCjkLatinSpacing(stored: Double, storedVersion: Int): Double =
+            if (storedVersion < 1) DEFAULT.cjkLatinSpacing else stored
 
         /** Default body font size (px), the anchor body for calibrating [fontScale] to 1.0 (=50). */
         const val BASE_BODY_PX = 18
@@ -300,6 +365,11 @@ data class ReaderSettings(
                     brightnessGestureTwo = SettingsJson.optBoolean(o, "brightnessGestureTwo", d.brightnessGestureTwo),
                     showHiddenFonts = SettingsJson.optBoolean(o, "showHiddenFonts", d.showHiddenFonts),
                     fontWeightAnchors = SettingsJson.optWeightAnchors(o, "fontWeightAnchors"),
+                    cjkLatinSpacing = migrateCjkLatinSpacing(
+                        SettingsJson.optDouble(o, "cjkLatinSpacing", d.cjkLatinSpacing),
+                        SettingsJson.optInt(o, "schemaVersion", 0),
+                    ),
+                    schemaVersion = CURRENT_SCHEMA_VERSION,
                 )
             } catch (_: Exception) {
                 DEFAULT

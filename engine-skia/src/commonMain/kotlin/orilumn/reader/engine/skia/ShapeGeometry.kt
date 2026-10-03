@@ -111,7 +111,9 @@ fun shapeGeometry(
     // Whole-paragraph single-style break (canonical semantics): code-like mono 解析走
     // 级联 monospace 标志（与盒流 `style.monospace || tag == "pre"` 同式）。
     val broken = breakWrappedLines(
-        SkiaParagraphBreaker(profile.letterSpacingEm), text, rootStyle, widthPx.coerceAtLeast(1),
+        // S3：正文断行变体单源（与 BoxChapterLayouter 的两处接线同口，默认 Skia）。
+        bodyParagraphBreaker(profile.letterSpacingEm, profile.cjkLatinSpacingEmApplied),
+        text, rootStyle, widthPx.coerceAtLeast(1),
         floatLead, pairTag, fontRuns, rootStyle.textIndentPx.coerceAtLeast(0f), baselineShifts,
     )
     // P6-b: 叠排注音 runs（与 text 同构遍历；无注音回空表零回归）＋行高增量（与重路径同式）。
@@ -133,6 +135,12 @@ fun shapeGeometry(
         text = text,
         lineRanges = broken.map { it.range },
         lineHeights = imageHeights,
+        // Q20：断词收尾随行搬进 shape（增量/临时页没有 LayoutBox 可读，见
+        // [orilumn.reader.engine.laying.ParagraphShapeRef.shapeLineHyphenAtEnd]）。
+        lineHyphenAtEnd = broken.map { it.hyphenAtEnd },
+        // 标点挤压比例随行搬进 shape（同 Q20 理由，见
+        // [orilumn.reader.engine.laying.ParagraphShapeRef.shapeLineSqueezeRatio]）。
+        lineSqueezeRatio = broken.map { it.squeezeRatio },
         listMarker = listMarker,
         alignment = rootStyle.textAlign,
         fontSizePx = rootStyle.fontSizePx.coerceAtLeast(1f),

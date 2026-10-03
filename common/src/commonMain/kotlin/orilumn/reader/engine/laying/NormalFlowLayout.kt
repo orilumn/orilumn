@@ -582,6 +582,8 @@ object NormalFlowLayout {
                     LayoutBox(
                         el, style, boxLeft, floatW,
                         ranges = brokenF.map { it.range },
+                        hyphenAtEnd = brokenF.map { it.hyphenAtEnd },
+                        squeezeRatios = brokenF.map { it.squeezeRatio },
                         textLength = text.length,
                         lineHeights = grownF,
                         childBoxes = emptyList(),
@@ -604,6 +606,8 @@ object NormalFlowLayout {
                     LayoutBox(
                         el, style, left, contentW,
                         ranges = broken.map { it.range },
+                        hyphenAtEnd = broken.map { it.hyphenAtEnd },
+                        squeezeRatios = broken.map { it.squeezeRatio },
                         textLength = text.length,
                         lineHeights = grownHeights,
                         childBoxes = emptyList(),
@@ -664,12 +668,24 @@ object NormalFlowLayout {
         return out
     }
 
-    /** Appends [el]'s inline/text subtree text to [sb] (non-block only; `<br>` becomes a newline). */
+    /**
+     * Appends [el]'s inline/text subtree text to [sb] (non-block only; `<br>` becomes a newline,
+     * `<img>` becomes U+FFFC).
+     *
+     * `br`/`img` 两条必须与 [styledSegments] 的 `walk` **逐条同形**（同序同字面）：本函数的产物
+     * 只被用作「**这一段 run 有没有内容**」的判据（`flowChildren`/`cellFlowItems` 的
+     * `sb.isNotBlank()` 门、以及轻路径 `styledCharAdvance` 的计数），而真正落字的文本由
+     * `styledSegments` 给出。判据与内容不同形 ⇒ run 被判空而丢块：Q15 的 GIMP 图标格
+     * `<td rowspan="2"><img/></td>` 就是这样整格零块（`sb` 空 ⇒ run 丢；实际文本是 `￼`）。
+     * 嵌套图（`<p>字<span><img/></span>字</p>`）同理：顶层 `<img>` 走 `flowChildren` 的
+     * `isReplaceable` 分支自成一叶，嵌套的走这里，不补就是静默丢字符。
+     */
     private fun appendInlineText(el: MarkupElement, classify: BlockClassify, sb: StringBuilder, hidden: HiddenCheck = HIDDEN_NONE) {
         when {
             hidden.isHidden(el) -> Unit // display:none inline run contributes no text
             el.isText -> sb.append(el.text)
             el.tag == "br" -> sb.append('\n')
+            el.tag == "img" -> sb.append('￼')
             classify.isBlock(el) -> Unit
             else -> for (c in el.children) appendInlineText(c, classify, sb, hidden)
         }
@@ -692,16 +708,247 @@ object NormalFlowLayout {
         return listOf(
             LayoutBox(
                 el = textEl, style = style, contentLeft = left, contentWidth = contentW,
-                ranges = broken.map { it.range }, textLength = text.length,
+                ranges = broken.map { it.range }, hyphenAtEnd = broken.map { it.hyphenAtEnd },
+                squeezeRatios = broken.map { it.squeezeRatio },
+                textLength = text.length,
                 lineHeights = broken.map { it.heightPx.coerceAtLeast(1) },
                 childBoxes = emptyList(),
             ),
         )
     }
 
+    /** [walkCellBlocks] 的返回：容器**内容**之后的静态间隙 ＋ 容器折叠后的底外边距。 */
+    private class CellWalk(val nextGap: Int, val bottomMargin: Float)
+
+    /**
+     * Q15：[flowChildren] 的**带下标**版本 —— 容器的一个流项。
+     *
+     * @property el 真实元素（块级子节点）；匿名 run 恒 null。
+     * @property anon 本项是否「一段直接内联内容」合成出的 run（`el` 为 null）。
+     * @property span 本项消费的 `container.children` 下标区间（匿名 run = 连续片；命名块恒长度 1）。
+     */
+    private class CellFlowItem(val el: MarkupElement?, val span: IntRange, val anon: Boolean)
+
+    /**
+     * Q15：容器的流项序列（与 [flowChildren] **逐项同式**：块级子节点各自成项、连续内联合成
+     * 一个匿名 run、纯空白 run 丢弃），但**额外记录每项消费的 `container.children` 下标区间**。
+     *
+     * 刻意**不**把行内 `<img>` 拆成独立项（`flowChildren` 也不拆）：拆了就得让匿名块
+     * 承载 U+FFFC 之外的独立替换语义（`shapeGeometry` 对 `img` 根早退、塑出零行），而
+     * 「一个格内 `<img>` 独占一块」并不是 CSS 的语义（§10.8 它只抬所在行高）。保持 run 完整，
+     * 塑形侧与修复前逐字节同式。
+     *
+     * 为什么必须有 span：匿名 run 要「只吸收这一段」时，得按**原始节点身份**排掉区间外的兄弟；
+     * 造一个合成 `#text` 元素去比身份对不上（它是新对象），踩过一次：末尾那段文本被并进首个块。
+     */
+    private fun cellFlowItems(
+        container: MarkupElement,
+        classify: BlockClassify,
+        hidden: HiddenCheck,
+    ): List<CellFlowItem> {
+        val out = ArrayList<CellFlowItem>()
+        val kids = container.children
+        var start = -1
+        var sb: StringBuilder? = null
+        fun flush(endExclusive: Int) {
+            val s = sb
+            if (s != null && s.isNotBlank() && start >= 0) {
+                out.add(CellFlowItem(null, start until endExclusive, anon = true))
+            }
+            sb = null
+            start = -1
+        }
+        for ((i, c) in kids.withIndex()) {
+            if (hidden.isHidden(c)) continue
+            if (classify.isBlock(c)) {
+                flush(i)
+                out.add(CellFlowItem(c, i until i + 1, anon = false))
+            } else {
+                if (start < 0) { start = i; sb = StringBuilder() }
+                appendInlineText(c, classify, sb!!, hidden)
+            }
+        }
+        flush(kids.size)
+        return out
+    }
+
+    /**
+     * Q15：把单元格内容按 CSS 2.1 §16.3（单元格内容是块级流）拆成**块序列**（静态部分）。
+     *
+     * - 格内**块级**子节点各自成块；格的**直接内联内容**合成一个匿名块（沿用 [flowChildren] 的
+     *   stray `#text` 表示）⇒ `<td>字</td>` 与 `<td><p>字</p></td>` 同构（各一块），
+     *   `<td>字<p>段</p></td>` 与普通容器的「前/中/后」三段同构；
+     * - 中间容器（`<td><div><p>a</p></div></td>` 的 `div`）自身不产行，只贡献自己的
+     *   border/padding（横向折进 [TableCellBlock.edgeH]，纵向折进 [TableCellBlock.gapBefore]）
+     *   与外边距（§8.3.1：首子顶、末子底各一次）；
+     * - 嵌套 `<table>` 与修复前一样零高（修复前也整块不画），不回归。
+     *
+     * 纵向只算**静态** [TableCellBlock.gapBefore]，行高由 [stackTableCellBlocks] 在断行后补 ⇒
+     * 塑形侧（engine-skia `BoxChapterLayouter.fillTableRowCells`）无需重复这份外边距逻辑，
+     * 也能独立重算出一致的 [TableCellBlock.top]。
+     *
+     * @param styles 覆盖格子树（含格自身）的计算样式；重路径喂整章表，轻路径喂 [cellStyledText]
+     *   的懒级联快照。
+     */
+    fun cellBlocks(
+        cellEl: MarkupElement,
+        styles: Map<MarkupElement, ComputedStyle>,
+        classify: BlockClassify,
+        hidden: HiddenCheck = HIDDEN_NONE,
+        genOf: GenOf = EmptyGen,
+    ): List<TableCellBlock> {
+        val cellStyle = styles[cellEl] ?: DEFAULT_STYLE
+        val out = ArrayList<TableCellBlock>(2)
+        // 格自身的 border/padding **不**进块堆叠（行高预算与 `emitCell` 的 insetTop 单算）⇒
+        // `selfEdges = false`，起点 gap/inset 皆 0。
+        walkCellBlocks(cellEl, cellStyle, styles, classify, hidden, genOf, out, 0, 0, 0f, selfEdges = false)
+        return out
+    }
+
+    private fun walkCellBlocks(
+        container: MarkupElement,
+        cs: ComputedStyle,
+        styles: Map<MarkupElement, ComputedStyle>,
+        classify: BlockClassify,
+        hidden: HiddenCheck,
+        genOf: GenOf,
+        out: MutableList<TableCellBlock>,
+        /** 本容器内容框相对**格内容框**的横向 inset 累计（不含本容器自身的横向边）。 */
+        insetH: Int,
+        /** 本容器内容框顶相对格内容框顶的 y（不含本容器自身的纵向顶边）。 */
+        gap: Int,
+        /** 本容器首子可连接的外部折叠底外边距（有纵向边即隔断，调用方传 0f）。 */
+        prevBottom: Float,
+        /** 本容器的 border/padding 是否参与堆叠（格 = false；中间容器 = true）。 */
+        selfEdges: Boolean,
+    ): CellWalk {
+        val kids = cellFlowItems(container, classify, hidden)
+        if (kids.isEmpty()) return CellWalk(gap + if (selfEdges) (cs.border.bottom + cs.padding.bottom).roundToInt() else 0, cs.margin.bottom)
+        val topEdge = if (selfEdges) (cs.border.top + cs.padding.top).roundToInt() else 0
+        val botEdge = if (selfEdges) (cs.border.bottom + cs.padding.bottom).roundToInt() else 0
+        val insetIn = insetH + if (selfEdges) (cs.border.horizontal + cs.padding.horizontal).roundToInt() else 0
+        var cur = gap + topEdge
+        // 首子的外边距可与容器外的前兄弟折叠，当且仅当容器没有纵向顶边（§8.3.1）。
+        var prevM = if (topEdge > 0) 0f else prevBottom
+        var first = true
+        for (item in kids) {
+            val ch = item.el
+            val anon = ch == null
+            val chs = if (anon) cs else (styles[ch] ?: DEFAULT_STYLE)
+            val ownH = if (anon) 0 else (chs.border.horizontal + chs.padding.horizontal).roundToInt()
+            val ownV = if (anon) 0 else (chs.border.vertical + chs.padding.vertical).roundToInt()
+            val g = cur + (if (first) (if (anon) 0f else chs.margin.top) else collapseMargins(if (anon) 0f else chs.margin.top, prevM)).roundToInt()
+            if (anon) {
+                // 匿名 run：吸收**整容器**但把本 run **之外**的流项（块级子节点）也当块跳过 ⇒
+                // 恰好是「这一段」的文本；收尾（`finishLeaf`）自然吃掉块边界处的尾随空白
+                // （与轻路径 `styledCharAdvance.flush()` 的 `isNotBlank` 门同式）。
+                // 块 `el` 就是容器（塑形侧据 [TableCellBlock.outsideSiblings] 复原同一段），行内图
+                // 配对扫描根同为容器。
+                val after = cellRunAfter(container, item)
+                val rd = absorbCellBlock(container, styles, after, classify::isBlock, cs, hidden, genOf)
+                out.add(
+                    TableCellBlock(
+                        el = container, style = cs,
+                        text = rd.first, runs = rd.second, imageRoot = container, outsideSiblings = after,
+                        gapBefore = g, edgeH = insetIn, edgeV = 0,
+                    ),
+                )
+            } else if (ch != null) {
+                // `anon == (ch == null)`（见 [CellFlowItem]），此处只是把可空 `ch` 收窄成本地非空。
+                val blk = ch
+                // 「叶状块」= 本块自身**不再产块**（其流子项要么没有，要么全是匿名 run）。
+                // 只看 `isEmpty()` 会把 `<td><p>字</p></td>` 的 `p` 当中间容器 ⇒ 产出 `el=#text`
+                // 的匿名块，绘制侧 `tag` 丢成 `#text` ⇒ `<td><pre>` 的等宽判定失效。
+                val sub0 = cellFlowItems(blk, classify, hidden)
+                val leafish = blk.tag == "table" || sub0.isEmpty() || sub0.all { it.anon }
+                if (leafish) {
+                    val rd = absorbCellBlock(blk, styles, emptySet(), { false }, chs, hidden, genOf)
+                    out.add(
+                        TableCellBlock(
+                            el = blk, style = chs,
+                            text = rd.first, runs = rd.second, imageRoot = blk,
+                            gapBefore = g, edgeH = insetIn + ownH, edgeV = ownV,
+                        ),
+                    )
+                } else {
+                    // 中间容器：自身不产块。传 `insetIn` / `g`（容器**边框盒**口径），由递归自己
+                    // 加 `selfEdges` 的那一次横向/纵向边 —— 传 `insetIn + ownH` 会双算。
+                    // 首子因容器顶边而与外部折叠隔断（传 0f）。
+                    val sub = walkCellBlocks(blk, chs, styles, classify, hidden, genOf, out, insetIn, g, 0f, selfEdges = true)
+                    cur = sub.nextGap
+                    prevM = if ((chs.border.bottom + chs.padding.bottom) > 0f) chs.margin.bottom else collapseMargins(chs.margin.bottom, sub.bottomMargin)
+                    first = false
+                    continue
+                }
+            }
+            // 下一块的 `gapBefore` 只带**间隙**（折叠外边距）—— 块自身纵向边已在本块
+            // `height` 里、容器纵向边由 `sub.nextGap`/`botEdge` 各带一次；绝不能把 `g` 累计下来，
+            // 否则 [stackTableCellBlocks] 会把前一块的顶偏移重复加一遍。
+            cur = 0
+            prevM = if (anon) 0f else chs.margin.bottom
+            first = false
+        }
+        val tail = cur + botEdge
+        if (!selfEdges && tail > 0) {
+            // 根容器（格）的**尾部**容器边（`<td><div style="padding:8px">…</div></td>` 的 div 下内边距）
+            // 没有后继块可挂 —— 并进末块的 `edgeV`（纵向边，绘制/塑形两侧同一语义）。
+            out.lastOrNull()?.let { it.edgeV += tail }
+            return CellWalk(0, collapseMargins(cs.margin.bottom, prevM))
+        }
+        return CellWalk(tail, collapseMargins(cs.margin.bottom, prevM))
+    }
+
+    /**
+     * Q15 辅助：匿名 run [item] 之外、要额外排掉的**原始**兄弟节点集合（供
+     * [TableCellBlock.outsideSiblings] 与 [absorbCellBlock] 共用，故两侧复原出的文本逐字相同）。
+     *
+     * **必须按原始 `container.children` 的身份**（不能拿合成 `#text` 去比）：[cellFlowItems] 不再
+     * 造合成元素了，run 只记下标区间；塑形侧要拿同一份集合经块判据排掉区间外的兄弟。
+     *
+     * 区间覆盖全部子节点（纯内联容器）时返回空集 ⇒ 与修复前 `absorbStyled(cell.el)` 逐字节相同。
+     */
+    private fun cellRunAfter(container: MarkupElement, item: CellFlowItem): Set<MarkupElement> {
+        val kids = container.children
+        if (item.span.first == 0 && item.span.last == kids.size - 1) return emptySet()
+        val skip = HashSet<MarkupElement>()
+        for ((j, c) in kids.withIndex()) if (j !in item.span) skip.add(c)
+        return skip
+    }
+
+    /**
+     * Q15 辅助：一个块的 **归一文本 ＋ 行内 font 段**，一次 [styledSegments] 两家用
+     * （`segments` 同时喂 [collectFontRuns] 的 `precomputed`，与 `absorbStyled`/`leafFontRuns`
+     * 的「同参同段表」纪律一致，下标恒对齐）。
+     *
+     * @param after 本 run 之外要额外排掉的**原始**兄弟节点（见 [cellRunAfter]；空集 = 整块吸收）。
+     * @param isBlockOf 真实块级判据；与 [after] **或**起来才算跳过。命名叶传 `{ false }`
+     *   （叶状判定已保证无块级子节点，多余地跳会截断文本）。
+     */
+    private fun absorbCellBlock(
+        root: MarkupElement,
+        styles: Map<MarkupElement, ComputedStyle>,
+        after: Set<MarkupElement>,
+        isBlockOf: (MarkupElement) -> Boolean,
+        style: ComputedStyle,
+        hidden: HiddenCheck,
+        genOf: GenOf,
+    ): Pair<String, List<FontRun>> {
+        if (root.tag == "table" || root.tag == "img") return "" to emptyList()
+        val isExcluded: (MarkupElement) -> Boolean = { hidden.isHidden(it) || it in after }
+        val isBlock: (MarkupElement) -> Boolean = { it in after || isBlockOf(it) }
+        val wsOf: (MarkupElement) -> WhiteSpace = { wsOfNode(it, styles, root) }
+        val leafWs = styles[root]?.whiteSpace ?: WhiteSpace.NORMAL
+        val segs = styledSegments(root, wsOf, isExcluded, isBlock, leafWs, genOf, { styles[it] }).segments
+        val runs = collectFontRuns(
+            root, styles, isExcluded, isBlock, fontBaseOf(root, styles, style), leafWs, genOf,
+            precomputed = segs,
+        )
+        return StyledSegments(segs).text to runs
+    }
+
     /**
      * Resolves a `table` into its row leaves. Column widths come from `table-layout`
-     * (fixed = equal split, auto = content measure); each cell's text is shaped
+     * (fixed = equal split, auto = content measure); each cell's blocks are shaped
      * (via [breaker]) within its column width to determine the row height; a row leaf emits one
      * un-splittable line of that height and carries a [TableRowLayout] for the 2D grid drawing.
      */
@@ -731,19 +978,17 @@ object NormalFlowLayout {
         val hideEmpty = tableStyle.emptyCellsHide
         val tableContentW = widthPx.coerceAtLeast(1)
         val gapH = spH.coerceAtLeast(0f).roundToInt()
-        // 第一遍：吸收各单元格归一文本＋内容需求（塑形与分列共用一次吸收，runs 同样只收集一次）。
-        class CellShape(val cell: TableGridModel.Cell, val style: ComputedStyle, val text: String, val runs: List<FontRun>)
-        val rowCells = ArrayList<List<CellShape>>(model.rows.size)
+        // 第一遍：拆各单元格为块序列（Q15）＋内容需求（塑形与分列共用一次拆分，runs 同样只收集一次）。
+        class CellBlocks(val cell: TableGridModel.Cell, val style: ComputedStyle, val blocks: List<TableCellBlock>)
+        val rowCells = ArrayList<List<CellBlocks>>(model.rows.size)
         val prefs = ArrayList<TableGridModel.CellPref>()
         for (row in model.rows) {
-            val list = ArrayList<CellShape>(row.cells.size)
+            val list = ArrayList<CellBlocks>(row.cells.size)
             for (cell in row.cells) {
                 val cs = styles[cell.el] ?: DEFAULT_STYLE
-                val t = absorbStyled(cell.el, styles, classify, hidden, genOf).text
-                // P1-2: 行内 face 段只收集一次，分列度量与断行塑形同喂（重/轻两路同源）。
-                val runs = collectFontRuns(cell.el, styles, hidden::isHidden, classify::isBlock, fontBaseOf(cell.el, styles, cs), genOf = genOf)
-                list.add(CellShape(cell, cs, t, runs))
-                prefs.add(tableCellPref(breaker, cell.col, cell.colSpan, t, cs, cell.el.tag, runs))
+                val blocks = cellBlocks(cell.el, styles, classify, hidden, genOf)
+                list.add(CellBlocks(cell, cs, blocks))
+                prefs.add(tableCellPref(breaker, cell.col, cell.colSpan, blocks, cs))
             }
             rowCells.add(list)
         }
@@ -778,24 +1023,37 @@ object NormalFlowLayout {
                 val cellStyle = entry.style
                 // 跨列单元格盖住中间间隔。
                 val cellOuter = cellOuter(cell.col, cell.colSpan)
-                val cellBreak = innerBreakWidth(cellStyle, cellOuter)
-                // P1-2: 单元格文本同叶归一；行字符长度 = 各单元格归一长度之和
-                //（与轻路径 styledCharAdvance(tr) 同式）。
-                val cellText = entry.text
-                rowChars += cellText.length
-                val lines = breakLeafLines(
-                    breaker, cellText, cellStyle, cellBreak, cell.el.tag,
-                    entry.runs,
-                    0f,
-                    leafBaselineShifts(cell.el, styles, classify, hidden, genOf),
-                )
-                // Same §10.8 image-line adjustment as text leaves (cell images share the bug).
-                val adjHeights = adjustLineHeightsForInlineImages(cellText, lines, cell.el, styles, classify, hidden, cellBreak, imageLoader, chapterHref)
-                // P6-b: 叠排注音行增高（与文本叶同式；无注音零回归）。
-                val grownHeights = adjustLineHeightsForRuby(lines, adjHeights, leafRubyRuns(cell.el, styles, classify, hidden, genOf))
-                val cellH = (grownHeights.sum().coerceAtLeast(1) +
+                // 块可用宽 = 格内容宽 − 逐层容器内缩 − 块自身横向边（Q15；`edgeH` 已含块自身）。
+                val cellContentW = (cellOuter - (cellStyle.border.horizontal + cellStyle.padding.horizontal).roundToInt()).coerceAtLeast(1)
+                val blocks = entry.blocks
+                // P1-2: 行字符长度 = 各单元格各块归一长度之和（与轻路径 `styledCharAdvance(tr)`
+                // 同式；Q15 前重路径对 `<td><p>…</p></td>` 得 0、轻路径得 N，整表 char 基址漂移）。
+                for (b in blocks) {
+                    rowChars += b.textLength
+                    val blockBreak = (cellContentW - b.edgeH).coerceAtLeast(1)
+                    // **Q15**：匿名块的 `el` 是整个容器，本块只占其中一段 —— 伴生收集（基线位移/
+                    // 注音/行内图）必须按「排掉 run 外兄弟」的判据走，否则下标会跨块串位。
+                    val bCls = if (b.outsideSiblings.isEmpty()) classify else BlockClassify { it in b.outsideSiblings || classify.isBlock(it) }
+                    val lines = breakLeafLines(
+                        breaker, b.text, b.style, blockBreak, b.el.tag,
+                        b.runs,
+                        0f,
+                        leafBaselineShifts(b.el, styles, bCls, hidden, genOf),
+                    )
+                    // Same §10.8 image-line adjustment as text leaves (cell images share the bug).
+                    val adjHeights = adjustLineHeightsForInlineImages(b.text, lines, b.imageRoot, styles, bCls, hidden, blockBreak, imageLoader, chapterHref)
+                    // P6-b: 叠排注音行增高（与文本叶同式；无注音零回归）。
+                    val grownHeights = adjustLineHeightsForRuby(lines, adjHeights, leafRubyRuns(b.el, styles, bCls, hidden, genOf))
+                    b.ranges = lines.map { it.range }
+                    b.hyphenAtEnd = lines.map { it.hyphenAtEnd }
+                    b.squeezeRatios = lines.map { it.squeezeRatio }
+                    b.lineHeights = grownHeights
+                    b.height = grownHeights.sum().coerceAtLeast(0) + b.edgeV
+                }
+                val contentH = stackTableCellBlocks(blocks)
+                val cellH = (contentH.coerceAtLeast(1) +
                     (cellStyle.padding.vertical + cellStyle.border.vertical).roundToInt()).coerceAtLeast(1)
-                cells.add(TableCellLayout(cell.el, cell.col, cell.colSpan, columnXs.getOrElse(cell.col) { left }, cellOuter, cellH, cell.isHeader, null, cell.rowSpan))
+                cells.add(TableCellLayout(cell.el, cell.col, cell.colSpan, columnXs.getOrElse(cell.col) { left }, cellOuter, cellH, cell.isHeader, blocks, cell.rowSpan))
                 specs.add(TableGridModel.CellHeight(cell.rowSpan, cellH))
             }
             cellsPerRow.add(cells)
@@ -1517,29 +1775,46 @@ object NormalFlowLayout {
      *
      * 塑形参数与断行侧 `breakLeafLines` 同式（`monospace || tag == "pre"`；`white-space` 不换行的格
      * 其 min-content 即 max-content——浏览器同式），故「量」与「排」不会分家。
+     *
+     * **Q15**：格内是**块序列**（[cellBlocks]），CSS 2.1 §10.5 的单元格内容宽度取块流各子块贡献的
+     * **最大**（min-content 即最长不可断单元在块流里的最大者）⇒ 逐块度量后取 max，不是求和。
+     * 每块的边距 = 格自身横向边 ＋ [TableCellBlock.edgeH]（逐层容器内缩＋块自身横向边），
+     * 故 `<td><div style="padding:8px"><p>字</p></div></td>` 的 min-content 含那 16px。
      */
     fun tableCellPref(
         breaker: ParagraphBreaker,
         col: Int,
         colSpan: Int,
-        text: String,
-        style: ComputedStyle,
-        tag: String?,
-        fontRuns: List<FontRun>,
+        blocks: List<TableCellBlock>,
+        cellStyle: ComputedStyle,
     ): TableGridModel.CellPref {
-        val edges = style.padding.horizontal + style.border.horizontal
+        val cellEdges = cellStyle.padding.horizontal + cellStyle.border.horizontal
         // 指定宽下限（`th width=100px` 等表示型属性经级联已进 widthPx，content 口径，
-        // 故加边距成 border-box；百分比在度量期无容器可解，暂略）。
-        val specified = ((style.widthPx ?: 0f).coerceAtLeast(0f) + edges).takeIf { style.widthPx != null && style.widthPx > 0f } ?: 0f
-        if (text.isEmpty()) return TableGridModel.cellPref(col, colSpan, 0f, 0f, edges, specified)
-        val mono = style.monospace || tag == "pre"
-        val maxContent = breaker.preferredWidth(text, style.fontSizePx, style.fontFamilies, style.fontWeight, style.italic, mono, fontRuns)
-        val minContent = if (WhiteSpaceNormalize.wraps(style.whiteSpace)) {
-            breaker.minContentWidth(text, style.fontSizePx, style.fontFamilies, style.fontWeight, style.italic, mono, fontRuns)
-        } else {
-            maxContent
+        // 故加边距成 border-box；百分比在度量期无容器可解，暂略）。取**格**自身的声明，
+        // 格内块不参与（浏览器同式：列宽下限由格属性给出）。
+        val specified = ((cellStyle.widthPx ?: 0f).coerceAtLeast(0f) + cellEdges).takeIf { cellStyle.widthPx != null && cellStyle.widthPx > 0f } ?: 0f
+        var maxContent = 0f
+        var minContent = 0f
+        var any = false
+        for (b in blocks) {
+            if (b.text.isEmpty()) continue
+            any = true
+            val s = b.style
+            val tag = b.el.tag
+            val mono = s.monospace || tag == "pre"
+            val mx = breaker.preferredWidth(b.text, s.fontSizePx, s.fontFamilies, s.fontWeight, s.italic, mono, b.runs)
+            val mn = if (WhiteSpaceNormalize.wraps(s.whiteSpace)) {
+                breaker.minContentWidth(b.text, s.fontSizePx, s.fontFamilies, s.fontWeight, s.italic, mono, b.runs)
+            } else {
+                mx
+            }
+            if (mx > maxContent) maxContent = mx
+            if (mn > minContent) minContent = mn
         }
-        return TableGridModel.cellPref(col, colSpan, maxContent, minContent, edges, specified)
+        if (!any) return TableGridModel.cellPref(col, colSpan, 0f, 0f, cellEdges, specified)
+        // 块自身的横向边（逐层容器内缩 + 块自身）并入「内容宽」，`cellPref` 只再加**格**自身的边。
+        val blockInset = blocks.maxOfOrNull { it.edgeH } ?: 0
+        return TableGridModel.cellPref(col, colSpan, maxContent + blockInset, minContent + blockInset, cellEdges, specified)
     }
 
     /**

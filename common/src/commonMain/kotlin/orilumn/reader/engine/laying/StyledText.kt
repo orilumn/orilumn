@@ -99,12 +99,17 @@ fun styledSegments(
         for (c in node.children) {
             when {
                 isExcluded(c) -> Unit
+                // `isBlock` = 「此处截断，不吸收本节点」（§16.3 块边界）。**必须排在 `c.isText`
+                // 之前**：Q15 的格内匿名块就是靠块判据排掉 run 外的**文本**兄弟
+                // （`<td>前<p>中</p>后</td>` 的 `前`/`后`），排在文本之后排不掉。
+                // 现有全部生产判据都是按 tag 的（`BOX_BLOCK_TAGS`/`display:block`），对文本节点
+                // 恒 false ⇒ 既有调用方逐值不变。
+                isBlock(c) -> Unit
                 c.isText -> {
                     val t0 = WhiteSpaceNormalize.normalizeNode(c.text, wsOf(c))
                     if (t0.isNotEmpty()) addTextSeg(segs, c, t0, styleOf)
                 }
                 c.tag == "br" -> segs.add(StyledSegment(c, "\n"))
-                isBlock(c) -> Unit
                 c.tag == "img" -> segs.add(StyledSegment(c, "￼"))
                 // P3-c: 行内裸 q（无生成 CSS 章节的零开销路径；phase 开时 gen 条目已含引号）。
                 c.tag == "q" && genOf(c) == null -> {

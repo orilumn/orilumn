@@ -83,7 +83,9 @@ class PaginationCacheTest {
         val stale = Buffer().apply {
             writeInt(0x43505442) // MAGIC
             writeInt(3) // current schema VERSION
-            writeInt(0) // layoutVersion 0 ≠ current → must be rejected
+            // LAYOUT_VERSION 现在是源码指纹（见 PaginationCacheCodec），用 +1 保证「一定不等」，
+            // 别写死 0 —— 指纹理论上可能正好是 0，那样这条锁会因为错误的原因通过/失败。
+            writeInt(PaginationCacheCodec.LAYOUT_VERSION + 1) // ≠ current → must be rejected
             writeInt(18) // appVersion matches — rejection must come from the geometry gate
         }.readByteArray()
         assertNull(PaginationCacheCodec.decode(stale, 18))

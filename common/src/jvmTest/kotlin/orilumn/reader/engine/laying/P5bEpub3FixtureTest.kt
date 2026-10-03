@@ -195,7 +195,8 @@ class P5bEpub3FixtureTest {
         val root = converter.convert("<pre class=\"code\">a  b</pre><p>x<sup class=\"up\">2</sup></p>")!!
         val engine = StyleComputer(10f, LightCssParser().parse(""), listOf(LightCssParser().parse("pre.code { white-space: pre; } sup.up { vertical-align: super; }")))
         val styles = engine.compute(root)
-        assertEquals(WhiteSpace.PRE, styles[findAll(root, "pre").single()]!!.whiteSpace)
+        // pre 元素上的 `pre` 降级为 pre-wrap，见 StyleComputer.resolveWhiteSpace。
+        assertEquals(WhiteSpace.PRE_WRAP, styles[findAll(root, "pre").single()]!!.whiteSpace)
         assertEquals(VerticalAlign.SUPER, styles[findAll(root, "sup").single()]!!.verticalAlign)
     }
 

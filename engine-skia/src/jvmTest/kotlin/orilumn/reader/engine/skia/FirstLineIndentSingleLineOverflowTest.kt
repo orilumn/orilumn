@@ -15,6 +15,7 @@ import orilumn.reader.engine.laying.BoxLayouter
 import orilumn.reader.engine.laying.HIDDEN_NONE
 import orilumn.reader.engine.laying.LayoutBox
 import orilumn.reader.engine.laying.NormalFlowLayout
+import orilumn.reader.engine.laying.ParagraphBreaker
 import orilumn.reader.engine.laying.lineHeightPx
 import orilumn.reader.engine.text.TypographicProfile
 import org.junit.Assert.assertEquals
@@ -58,7 +59,6 @@ import kotlin.math.ceil
  */
 class FirstLineIndentSingleLineOverflowTest {
 
-    private val breaker = SkiaParagraphBreaker(letterSpacingEm = 0f)
     private val fs = 44.4f
     private val ratio = 1.5f
 
@@ -121,8 +121,75 @@ class FirstLineIndentSingleLineOverflowTest {
         }
     }
 
+    /**
+     * **绘制侧代理**—— 按断行臂分派（2026-10-03 标点挤压落地时改）。
+     *
+     * ## 为什么不能一直用 [drawn]（Skia `Paragraph`）
+     *
+     * S5 之后生产绘制是 [LineAligner] + 逐字 `drawString`
+     * （[orilumn.reader.engine.skia.LineWindowDrawer] 的 `paintGlyphs`），
+     * `SkParagraph` **已经不再是绘制器** —— 它只剩回退阀那一侧的**断行器**身份
+     * （[orilumn.reader.engine.skia.SkiaParagraphBreaker]）。
+     *
+     * 标点挤压（[orilumn.reader.engine.skia.PunctuationSqueeze]）让自建臂的宽度模型与
+     * `SkParagraph` **有意不同**（收窄收尾标点的字位）。此时仍拿 `SkParagraph` 当绘制侧代理，
+     * 就是「用一个不参与生产的量去判生产的不变量」⇒ 必然假红（实测本类三条锁全红：
+     * 溢出 2.0px / 60.64px，而生产绘制侧的同一行是合规的）。
+     *
+     * ⇒ **自建臂改用真正的绘制器量**；Skia 臂保持原样（那一臂的绘制侧本就是 `SkParagraph`）。
+     * 这样两条锁的不变量都变成「**该臂自己的**断行器 vs **该臂自己的**绘制器」，
+     * 而不是跨臂错配。
+     */
+    private fun painted(
+        breaker: ParagraphBreaker,
+        sub: String,
+        layoutWidth: Int,
+        alignment: TextAlign,
+        fontSizePx: Float,
+        families: List<String>,
+        weight: Int,
+        italic: Boolean,
+        monospace: Boolean,
+        letterSpacingEm: Float,
+        indentPx: Float,
+        hyphenAtEnd: Boolean,
+        fontRuns: List<orilumn.reader.engine.css.FontRun> = emptyList(),
+    ): Pair<Int, Float> {
+        if (breaker !is InhouseParagraphBreaker) {
+            return drawn(sub, layoutWidth, alignment, fontSizePx, families, weight, italic, monospace, letterSpacingEm)
+        }
+        fun rightOf(al: TextAlign, lastLine: Boolean): Float = LineAligner().align(
+            text = sub,
+            range = 0 until sub.length,
+            fontSizePx = fontSizePx,
+            lineWidthPx = layoutWidth.coerceAtLeast(1).toFloat(),
+            letterSpacingEm = letterSpacingEm,
+            tag = "p",
+            families = families,
+            weight = weight,
+            italic = italic,
+            monospace = monospace,
+            fontRuns = fontRuns,
+            align = al,
+            firstLineIndentPx = indentPx,
+            // **末行口径 = 不拉伸**，量的是**内容本来的宽**。理由：拉伸只会把右缘拉到版心、
+            // 把「断行器判错了」这个信号**掩盖**掉；不拉伸的版本在三种对齐下都给出同一个
+            // `缩进 + 内容宽`，是最严的一条。CENTER/RIGHT/JUSTIFY 的 `x0` 定位另有锁
+            // （[NoLineExceedsContentWidthTest] 与 `LineWindowDrawerTest`），此处不重复。
+            isLastLine = true,
+            hyphenAtEnd = hyphenAtEnd,
+        ).visibleRight
+        // 两个都量：真实对齐的几何 + LEFT 不拉伸的内容宽（后者恒 ≥ 前者，取 max 即最严）。
+        val real = rightOf(alignment, true)
+        val content = rightOf(TextAlign.LEFT, true)
+        // 逐字落位**不可能**二次折行（S5 的结构性质：每字一次 `drawString`，Skia 无从整形），
+        // 故行数恒为 1；这条在自建臂上不再由本代理提供，交给 [NoLineExceedsContentWidthTest] 的簇位轨分支。
+        return 1 to maxOf(real, content)
+    }
+
     /** 断行 + 「绘制侧右移后是否越版心」检查；返回违规描述（无违规返回 null）。 */
     private fun violationAt(
+        breaker: ParagraphBreaker,
         text: String,
         width: Int,
         firstLineIndentPx: Float,
@@ -137,17 +204,19 @@ class FirstLineIndentSingleLineOverflowTest {
         )
         for (line in lines) assertEquals("行高必须是统一行框单一来源", lineHeightPx(fontSizePx, ratio), line.heightPx)
         for ((i, l) in lines.withIndex()) {
-            val (n, w0) = drawn(text.substring(l.range), width, alignment, fontSizePx)
+            val (n, w0) = painted(
+                breaker, text.substring(l.range), width, alignment, fontSizePx,
+                families, 400, false, false, 0f, if (i == 0) firstLineIndentPx else 0f, l.hyphenAtEnd,
+            )
             if (n != 1) return "版心=$width 第 $i 行在绘制侧被折成 $n 行（量画失步）"
-            val shift = if (i == 0) firstLineIndentPx else 0f
-            val right = shift + w0
+            val right = w0
             if (right > width + slack) return "版心=$width 第 $i 行右缘 $right 越出版心（溢出 ${right - width}px）"
         }
         return null
     }
 
     @Test
-    fun `命中窗口的单行段落必须折行且首行不越版心`() {
+    fun `命中窗口的单行段落必须折行且首行不越版心`() = forEachBreakerVariant { breaker, v ->
         // 扫多个字号：命中窗口宽 = 2em 缩进，跨字号才覆盖到「整段恰好放得下」的全部位置。
         for (fontSizePx in listOf(16f, 24f, 33.3f, 44.4f)) {
             val nat = naturalWidth(cjk, fontSizePx)
@@ -160,37 +229,37 @@ class FirstLineIndentSingleLineOverflowTest {
             var width = ceil(nat).toInt()
             var checked = 0
             while (width > windowLo) {
-                assertNull("fs=$fontSizePx 版心=$width 必须不越版心", violationAt(cjk, width, ind, fontSizePx))
+                assertNull("[$v] fs=$fontSizePx 版心=$width 必须不越版心", violationAt(breaker, cjk, width, ind, fontSizePx))
                 assertTrue(
-                    "fs=$fontSizePx 版心=$width 命中窗口（自然宽 $nat + 缩进 $ind > 版心）必须折行，修复前是单行、尾部被裁",
+                    "[$v] fs=$fontSizePx 版心=$width 命中窗口（自然宽 $nat + 缩进 $ind > 版心）必须折行，修复前是单行、尾部被裁",
                     breaker.breakLines(cjk, fontSizePx, ratio, width, TextAlign.LEFT, "p", families, 400, false, false, ind).size >= 2,
                 )
                 width--
                 checked++
             }
-            assertTrue("fs=$fontSizePx 命中窗口至少要扫过 2 像素宽（indent=$ind），实际 $checked", checked >= 2)
+            assertTrue("[$v] fs=$fontSizePx 命中窗口至少要扫过 2 像素宽（indent=$ind），实际 $checked", checked >= 2)
         }
     }
 
     @Test
-    fun `整段加缩进放得下时保持单行`() {
+    fun `整段加缩进放得下时保持单行`() = forEachBreakerVariant { breaker, v ->
         val nat = naturalWidth(cjk)
         // 版心取 `ceil(自然宽 + 缩进)`：自然宽常是小数，分开取整会低估（`ceil(nat) + indent`
         // 仍可能小于 `nat + indent`，把版心压回命中窗口，测试就变成在测「必须折行」）。
         val width = ceil(nat + indent).toInt()
         val lines = breaker.breakLines(cjk, fs, ratio, width, TextAlign.LEFT, "p", families, 400, false, false, indent)
-        assertEquals("整段 + 缩进放得下就不该多折行（补偿只在命中窗口触发）", 1, lines.size)
+        assertEquals("[$v] 整段 + 缩进放得下就不该多折行（补偿只在命中窗口触发）", 1, lines.size)
         assertEquals(0 until cjk.length, lines[0].range)
-        assertNull(violationAt(cjk, width, indent))
+        assertNull(violationAt(breaker, cjk, width, indent))
     }
 
     @Test
-    fun `无缩进路径逐值不变`() {
+    fun `无缩进路径逐值不变`() = forEachBreakerVariant { breaker, v ->
         // 护栏：补偿只对带 text-indent 的段生效，无缩进断行与修复前完全一致。
         val text = "床前明月光，疑是地上霜。举头望明月，低头思故乡。".repeat(3)
         for (w in 120..900 step 7) {
             assertEquals(
-                "版心=$w 无缩进路径被误改",
+                "[$v] 版心=$w 无缩进路径被误改",
                 breaker.breakLines(text, fs, ratio, w, TextAlign.LEFT, "p", families, 400, false, false)
                     .map { it.range to it.heightPx },
                 breaker.breakLines(text, fs, ratio, w, TextAlign.LEFT, "p", families, 400, false, false, 0f)
@@ -200,15 +269,15 @@ class FirstLineIndentSingleLineOverflowTest {
     }
 
     @Test
-    fun `Latin与三种对齐下同样不溢出`() {
+    fun `Latin与三种对齐下同样不溢出`() = forEachBreakerVariant { breaker, v ->
         // JUSTIFY（真书 `p { text-align: justify }`）与 Latin 混排走同一命中窗口，一并锁住。
         val latin = "Chapter twelve: the registrar of the clan house was waiting. ".repeat(2).trimEnd()
         for (alignment in listOf(TextAlign.LEFT, TextAlign.JUSTIFY, TextAlign.CENTER)) {
             val nat = naturalWidth(latin)
             var width = ceil(nat).toInt() // 同上：起点向上取整，必须扫到单行失效区
             while (width > (nat - indent).toInt()) {
-                val v = violationAt(latin, width, indent, fs, alignment)
-                assertNull("对齐=$alignment 版心=$width $v", v)
+                val v2 = violationAt(breaker, latin, width, indent, fs, alignment)
+                assertNull("[$v] 对齐=$alignment 版心=$width $v2", v2)
                 width--
             }
         }
@@ -268,7 +337,7 @@ class FirstLineIndentSingleLineOverflowTest {
 
     /** 真书全链路扫版心：重路径断行 → [DrawLineBuilder] 投影 → 绘制侧真实整形，任一行右缘越版心即失败。 */
     @Test
-    fun `真书重路径全链路扫版心无一行越出右缘`() {
+    fun `真书重路径全链路扫版心无一行越出右缘`() = forEachBreakerVariant { breaker, v ->
         for (p in listOf(deviceProfile, otherProfile)) {
             val root = HtmlTreeConverter().convert(realHtml)!!
             val eng = styleEngine(p)
@@ -279,12 +348,15 @@ class FirstLineIndentSingleLineOverflowTest {
                 val result = BoxLayouter(p.bodyPx, breaker).layoutBoxes(root, w, styles, classify)
                 for ((idx, dl) in DrawLineBuilder.build(result, styles, classify, HIDDEN_NONE, p.letterSpacingEm)) {
                     val sub = dl.text.substring(dl.range)
-                    val (n, w0) = drawn(sub, dl.lineWidthPx, dl.alignment, dl.fontSizePx, dl.families, dl.weight, dl.italic, dl.monospace, dl.letterSpacingEm)
-                    assertEquals("bodyPx=${p.bodyPx} 版心=$w 行 $idx 在绘制侧被二次折行（量画失步）", 1, n)
-                    val right = dl.firstLineIndentPx + w0
+                    val (n, right) = painted(
+                        breaker, sub, dl.lineWidthPx, dl.alignment, dl.fontSizePx,
+                        dl.families, dl.weight, dl.italic, dl.monospace, dl.letterSpacingEm,
+                        dl.firstLineIndentPx, dl.hyphenAtEnd, dl.fontRuns,
+                    )
+                    assertEquals("[$v] bodyPx=${p.bodyPx} 版心=$w 行 $idx 在绘制侧被二次折行（量画失步）", 1, n)
                     assertTrue(
-                        "bodyPx=${p.bodyPx} 版心=$w 行 $idx 右缘 $right 越出版心 ${dl.lineWidthPx}" +
-                            "（缩进 ${dl.firstLineIndentPx} 行宽 $w0）：\"$sub\"",
+                        "[$v] bodyPx=${p.bodyPx} 版心=$w 行 $idx 右缘 $right 越出版心 ${dl.lineWidthPx}" +
+                            "（缩进 ${dl.firstLineIndentPx}）：\"$sub\"",
                         right <= dl.lineWidthPx + slack,
                     )
                 }
@@ -292,9 +364,19 @@ class FirstLineIndentSingleLineOverflowTest {
         }
     }
 
-    /** 重路径 vs 轻路径：同一段 HTML、同一版心，每个叶的断行区间必须逐项相同。 */
+    /**
+     * 重路径 vs 轻路径：同一段 HTML、同一版心，每个叶的断行区间必须逐项相同。
+     *
+     * ⚠ 混排字距必须喂 [TypographicProfile.cjkLatinSpacingEmApplied]（生产真值）：
+     * 轻路径走 [BoxChapterLayouter] 生产接线、恒取 profile 的间隙；显式侧若喂 0，
+     * 两侧量到不同行宽 ⇒ 分叉是**必然**的，而那证明的是「测试两侧没对齐」不是被测性质（假失败）。
+     * 传函数而非值：该 getter 自己读开关，而开关在本函数体内才拨（见 [forEachBreakerVariant]）。
+     */
     @Test
-    fun `重轻两路断行区间逐项相同`() {
+    fun `重轻两路断行区间逐项相同`() = forEachBreakerVariant(cjkLatinSpacingEm = { deviceProfile.cjkLatinSpacingEmApplied }) { breaker, v ->
+        // 轻路径（`tempShape`）走的是**生产接线**，只有夹具拨了开关它才跟着换变体；
+        // 只把这里的 `breaker` 换成自建而轻路径仍是 Skia，分叉是必然的，
+        // 但那证明的是「测试两侧没对齐」而不是被测性质（假失败）。
         val layouter = BoxChapterLayouter()
         for (p in listOf(deviceProfile, otherProfile)) {
             // 命中窗口宽 = 2em 缩进；扫这一段即可覆盖轻/重两路可能分叉的全部位置。
@@ -315,7 +397,7 @@ class FirstLineIndentSingleLineOverflowTest {
                     (0 until s.lineCount).map { s.lineStart(it) until s.lineEnd(it) }
                 }
 
-                assertEquals("bodyPx=${p.bodyPx} 版心=$w 重轻两路断行区间分叉", heavyRanges, lightRanges)
+                assertEquals("[$v] bodyPx=${p.bodyPx} 版心=$w 重轻两路断行区间分叉", heavyRanges, lightRanges)
             }
         }
     }

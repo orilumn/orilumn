@@ -1,5 +1,6 @@
 package orilumn.reader.engine.skia
 
+import org.jetbrains.skia.FontMgr
 import org.jetbrains.skia.paragraph.FontCollection
 
 /**
@@ -21,19 +22,23 @@ object SkiaFontPool {
         val aliases: List<String> = emptyList(),
         /** ttc/otc 集合内的面序号（0 为第一个面）：宿主补装系统 CJK 衬线 ttc 时用它指定 SC/TC 面。 */
         val faceIndex: Int = 0,
+        val weight: Int? = null,
+        val italic: Boolean? = null,
     ) {
         companion object {
             /**
              * 按“族名 + 展示名双注册”装配条目（展示名与族名相同时不重复）：级联槽位存哪个名，
              * 池里就得认哪个名——该对应策略归引擎，不在各宿主重复。
              */
-            fun forFace(familyName: String, displayName: String, bytes: ByteArray): EmbeddedFont =
+            fun forFace(familyName: String, displayName: String, bytes: ByteArray, weight: Int? = null, italic: Boolean? = null): EmbeddedFont =
                 EmbeddedFont(
                     familyName = familyName,
                     bytes = bytes,
                     aliases = listOfNotNull(
                         displayName.takeIf { it.isNotBlank() && it != familyName },
                     ),
+                    weight = weight,
+                    italic = italic,
                 )
         }
     }
@@ -44,10 +49,30 @@ object SkiaFontPool {
     @Volatile
     private var cached: FontCollection? = null
 
+    /** 与 [cached] 同步构建的 manager 链（逐码本量宽器用，见 [SkiaRunMeasurer]）。 */
+    @Volatile
+    private var cachedMgrs: List<FontMgr>? = null
+
     /** 当前共用集合（断行/绘制默认参数都取它）。 */
     fun current(): FontCollection =
         cached ?: synchronized(this) {
             cached ?: build().also { cached = it }
+        }
+
+    /**
+     * 当前 manager 链，**顺序即优先级**：内嵌资产端（可空）→ 系统端。
+     *
+     * 与 [current] 是**同一次 [build] 的两个产物**，共用同一个 provider 实例 —— 逐码本量宽器
+     * 自己遍历这条链做「族栈 × manager」的选面（§2.2(d)），若另起一份资产端，
+     * 「量宽器解到的面」与「段落解到的面」就可能不是同一张注册表。
+     *
+     * 遍历语义是**外层族栈、内层本链**（`FontCollection` 的语义），写反实测偏 49.51px
+     * （见 `docs/自建断行引擎-测试计划.md` §T8.3）。
+     */
+    fun managers(): List<FontMgr> =
+        cachedMgrs ?: synchronized(this) {
+            current()
+            cachedMgrs ?: emptyList<FontMgr>().also { cachedMgrs = it }
         }
 
     /**
@@ -62,13 +87,19 @@ object SkiaFontPool {
         synchronized(this) {
             this.fonts = fonts.toList()
             cached = null
+            cachedMgrs = null
         }
         return true
     }
 
     private fun build(): FontCollection {
         val list = fonts
-        return if (list.isEmpty()) SkParagraphFactory.defaultCollection()
-        else SkParagraphFactory.embeddedFontCollection(list)
+        val provider = SkParagraphFactory.embeddedFontProvider(list)
+        val chain = ArrayList<FontMgr>(2)
+        if (provider != null) chain.add(provider)
+        chain.add(SkParagraphFactory.defaultFontMgr())
+        cachedMgrs = chain
+        val collection = SkParagraphFactory.defaultCollection()
+        return if (provider == null) collection else collection.setAssetFontManager(provider)
     }
 }

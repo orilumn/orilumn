@@ -71,10 +71,13 @@ class MinContentSegmentsTest {
         assertEquals(listOf("e-", "book", "reader"), segs("e-book reader"))
         // 连字符前不断（Chrome：「日本-語」的最长断片是「本-」）。
         assertEquals(listOf("日", "本-", "語"), segs("日本-語"))
-        // 数字/小数/逗号、路径都不在内部断（LB13 IS/SY）。
+        // 数字/小数/逗号都不在内部断（LB13 IS 类，且 `,` `.` 未进 breakAfter）。
         assertEquals(listOf("Readium", "0.5.3"), segs("Readium 0.5.3"))
         assertEquals(listOf("1,234.56"), segs("1,234.56"))
-        assertEquals(listOf("foo/bar"), segs("foo/bar"))
+        // T2d 改判：路径**会**在斜杠之后断。此前本行断言 `foo/bar` 整体不可断，那是旧表的行为。
+        // T2d 的 `P×N` 二维矩阵实测 Skia 放行斜杠后断（两侧都非宽字的 `|A`/`|1`/`|(`/`|[` 四格逐格实测），
+        // 故 min-content 的最长不可断单元从 `foo/bar` 缩成 `foo/` —— auto 分列的 min 侧随之变松。
+        assertEquals(listOf("foo/", "bar"), segs("foo/bar"))
     }
 
     @Test
@@ -94,24 +97,54 @@ class MinContentSegmentsTest {
         }
     }
 
+    /**
+     * Q15：单块格的度量等价旧式「一格一段文本」调用（`tableCellPref` 现在吃**块序列**）。
+     * 纯内联格恒一块（匿名块），故这就是「格内无块级子节点」的老路径。
+     */
+    private fun oneBlock(text: String, style: ComputedStyle) =
+        listOf(TableCellBlock(orilumn.reader.engine.html.MarkupElement("td"), style, text, emptyList()))
+
     @Test
     fun `table cell pref is border-box and nowrap cells have min == max`() {
         val b = FakeBreaker()
         val style = ComputedStyle(fontSizePx = 10f, lineHeightRatio = 1f)
-        val wrap = NormalFlowLayout.tableCellPref(b, 0, 1, "aa bb", style, "td", emptyList())
+        val wrap = NormalFlowLayout.tableCellPref(b, 0, 1, oneBlock("aa bb", style), style)
         assertEquals(50f, wrap.pref, 1e-4f) // 整段 5 字 x 10
         assertEquals(20f, wrap.min, 1e-4f) // 最长单元 "aa"
         // white-space: nowrap → 不可换行，故 min-content 即 max-content（浏览器同式）。
-        val nowrap = NormalFlowLayout.tableCellPref(
-            b, 0, 1, "aa bb",
-            ComputedStyle(fontSizePx = 10f, lineHeightRatio = 1f, whiteSpace = WhiteSpace.NOWRAP),
-            "td", emptyList(),
-        )
+        val nowrapStyle = ComputedStyle(fontSizePx = 10f, lineHeightRatio = 1f, whiteSpace = WhiteSpace.NOWRAP)
+        val nowrap = NormalFlowLayout.tableCellPref(b, 0, 1, oneBlock("aa bb", nowrapStyle), nowrapStyle)
         assertEquals(nowrap.pref, nowrap.min, 1e-4f)
         // 空文本仍保留 padding+border（border-box）。
         val edges = ComputedStyle(fontSizePx = 10f, lineHeightRatio = 1f, padding = Edges(left = 3f, right = 2f))
-        val blank = NormalFlowLayout.tableCellPref(b, 0, 1, "", edges, "td", emptyList())
+        val blank = NormalFlowLayout.tableCellPref(b, 0, 1, oneBlock("", edges), edges)
         assertEquals(5f, blank.pref, 1e-4f)
         assertEquals(5f, blank.min, 1e-4f)
+    }
+
+    /**
+     * **Q15 回归**：格内块级子节点各自贡献度量、内容宽度取**最大**（CSS 2.1 §10.5，浏览器同式）
+     * —— 不是求和。这一把锁的是「别退回求和」：求和会把两段短文字的列撑到两倍宽。
+     */
+    @Test
+    fun `table cell pref takes max over cell blocks not sum`() {
+        val b = FakeBreaker()
+        val style = ComputedStyle(fontSizePx = 10f, lineHeightRatio = 1f)
+        fun blk(text: String) = TableCellBlock(orilumn.reader.engine.html.MarkupElement("p"), style, text, emptyList())
+        val two = NormalFlowLayout.tableCellPref(b, 0, 1, listOf(blk("aaaa"), blk("bbbbb")), style)
+        assertEquals("max-content 取最长块", 50f, two.pref, 1e-4f)
+        // min-content 同样取**最大**：块流里最长不可断单元在「bbbbb」(5x10) 这个块里。
+        assertEquals("min-content 取最长块的最长单元", 50f, two.min, 1e-4f)
+        // 逐块横向 inset（`edgeH`，由 `cellBlocks` 从容器的 border/padding 累加得来）计入列宽。
+        val padded = ComputedStyle(fontSizePx = 10f, lineHeightRatio = 1f, padding = Edges(left = 5f, right = 5f))
+        val onePad = NormalFlowLayout.tableCellPref(
+            b, 0, 1,
+            listOf(TableCellBlock(orilumn.reader.engine.html.MarkupElement("p"), padded, "aaaa", emptyList(), edgeH = 10)),
+            style,
+        )
+        assertEquals(50f, onePad.pref, 1e-4f) // 4x10 内容 + 10 横向 inset
+        // 空块不贡献内容（但格的 padding 仍在）。
+        val withBlank = NormalFlowLayout.tableCellPref(b, 0, 1, listOf(blk(""), blk("aa")), style)
+        assertEquals(20f, withBlank.pref, 1e-4f)
     }
 }

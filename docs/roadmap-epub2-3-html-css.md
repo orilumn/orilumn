@@ -73,7 +73,7 @@
     `staticLayout.draw`；加 `lineCount<=0`/null 守卫防 NPE。
 - **分页**：img 贡献单行高度 H，`Paginator` 放不下整行则整行后移（不劈 img）。
 - `BOX_BLOCK_TAGS += img`；`HtmlTreeConverter` img 保留 width/height attrs。
-- **必须 bump `PaginationCacheStore.LAYOUT_VERSION`**（img 改变 globalCharStarts/block 布局，老磁盘表错位）。
+- ~~必须 bump `PaginationCacheStore.LAYOUT_VERSION`~~（img 改变 globalCharStarts/block 布局，老磁盘表错位）。（2026-10-01 起 `LAYOUT_VERSION` 已改为**引擎源码指纹自动导出**，引擎源码一变即自动作废，**不再需要手动 bump**；`generateLayoutGeometryStamp`，见 `docs/自建断行引擎-测试计划.md`。）
 - 测试：文本+img 交错章节断言重/轻 `textLength` 序列、`globalCharStarts` 相等、`backfillBlockRanges` 在 img 边界切页正确、
   `Paginator` 不劈 img、`emit` 的 `contentBottom` == `rebuildLocalLines`/`AnchorPagePacker.blockHeight` 的 img 底。
 
@@ -107,7 +107,7 @@
 ## 关键不变式（改动块分类/叶推进时必守）
 - 重/轻路径 `globalCharStarts` 恒等（`BoxPathConsistencyTest`）。
 - img/display:block 步长单一来源 `leafCharAdvance`。
-- 磁盘分页表改动后 bump `PaginationCacheStore.LAYOUT_VERSION`。
+- 磁盘分页表改动后 `PaginationCacheStore.LAYOUT_VERSION` 会随引擎源码自动变化，无需人工干预。
 - 解析白名单(box) / box 块集 / 渲染三者对块的定义一致（P0-A 兜底双向对齐）。
 
 ## 追踪清单（从 P0/P1/P2 逐项勾选）

@@ -164,7 +164,11 @@ class P1StyleComputationTest {
             "pre { white-space: pre; letter-spacing: 0.1em; word-spacing: 2px; " +
                 "text-transform: uppercase; vertical-align: super }",
         )
-        assertEquals(WhiteSpace.PRE, s.whiteSpace)
+        // `pre` 元素上的 `white-space: pre` 会被降级成 pre-wrap（分页阅读器无横向滚动，
+        // 不折行 = 溢出被裁 = 丢内容，见 StyleComputer.resolveWhiteSpace）。
+        assertEquals(WhiteSpace.PRE_WRAP, s.whiteSpace)
+        // 解析本身没坏：同一个值落在 pre 子树之外仍按浏览器语义原样保留。
+        assertEquals(WhiteSpace.PRE, styled("div", "div { white-space: pre; }").whiteSpace)
         assertEquals(1.6f, s.letterSpacingPx, 1e-3f)
         assertEquals(2f, s.wordSpacingPx, 1e-3f)
         assertEquals(TextTransform.UPPERCASE, s.textTransform)
@@ -219,7 +223,8 @@ class P1StyleComputationTest {
         el.children.forEach { it.parent = el }
         val out = StyleComputer(16f, ua, emptyList()).compute(body)
         val child = out[el]!!
-        assertEquals(WhiteSpace.PRE, child.whiteSpace)
+        // span 在 pre 子树内 ⇒ 继承到的 PRE 已在 pre 那一级降级成 PRE_WRAP。
+        assertEquals(WhiteSpace.PRE_WRAP, child.whiteSpace)
         assertEquals(2f, child.letterSpacingPx, 1e-3f)
         assertEquals(TextTransform.LOWERCASE, child.textTransform)
     }

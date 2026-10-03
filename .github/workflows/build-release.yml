@@ -109,7 +109,9 @@ jobs:
       - name: Rename DMG with version and arch
         run: |
           VER=$(grep "orilumn.versionName=" gradle.properties | cut -d= -f2 | tr -d " '"'" | head -1)
-          VER=$(grep 'orilumn.versionName=' gradle.properties | cut -d= -f2 | tr -d '"\'' | head -1)
+          VER=$(sed -n 's/^orilumn.versionName=//p' gradle.properties | tr -d ' \n\r\t"\'')
+
+ 	"'"'"'"'"'"')
           ls desktopApp/build/compose/binaries/main/dmg/
 
       - name: Upload DMG as workflow artifact (all runs)

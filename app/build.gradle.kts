@@ -15,8 +15,15 @@ android {
         applicationId = "orilumn.reader"
         minSdk = 24
         targetSdk = 36
-        versionCode = 20
-        versionName = "0.2.2"
+        // 0.3.0：自建断行引擎成为生产主路径（`DefaultSideIsUnchangedTest` 钉住），
+        // **分页结果与 0.2.2 不兼容** ⇒ minor 而非 patch。
+        //
+        // 注意：本次改动**不依赖**这个号去作废旧分页表 —— `LAYOUT_VERSION` 已是引擎源码
+        // 指纹自动导出（见 common/build.gradle.kts），引擎源码一变旧表自动作废。
+        // `versionCode` 在分页缓存这条路上只是「发版时全量作废一次」的兜底（生产额外成本 0），
+        // 版本号因此只是**发布标记**，不参与正确性。
+        versionCode = 21
+        versionName = "0.3.0"
 
         // skiko 只发 arm64/x64 .so（无 32 位）：过滤后 32 位设备不再安装，避免运行时缺库崩溃
         ndk {

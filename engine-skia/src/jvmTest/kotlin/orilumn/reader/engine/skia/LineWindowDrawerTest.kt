@@ -13,6 +13,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.math.max
 import kotlin.math.roundToInt
 
 class LineWindowDrawerTest {
@@ -107,6 +108,76 @@ class LineWindowDrawerTest {
             monospace = false,
             letterSpacingEm = 0f,
             lineWidthPx = contentWidth,
+        )
+    }
+
+    /**
+     * 锁：**绘制器必须把 `DrawLine.squeezeRatio` 透传给 [LineAligner]**（V6 变异）。
+     *
+     * ## 这条链有三个跳跃点，只锁了两个
+     *
+     * `BrokenLine.squeezeRatio`（断行侧算）→ `DrawLine.squeezeRatio`（形状搬进行流）→
+     * `LineAligner` 形参 `squeezeRatio`（绘制侧用）。中间那一跳已由
+     * `app` 的 `SkiaDrawLineWindowCoherenceTest.squeezeRatioIsCarriedByIncrementalAndTempWindows`
+     * 钉住（逐窗逐值比对）；最后一跳在 2026-10-03 的变异验证里查出**全仓无锁**
+     * （把 `LineWindowDrawer.paintText` 的 `squeezeRatio = line.squeezeRatio` 改成 `0f`，
+     * `engine-skia` + `common` + `app` 全量测试**仍然全绿**）⇒ 本条补上。
+     *
+     * ## 后果与判据为什么长这样
+     *
+     * 断行侧已按挤压后的宽度预留了版心，绘制侧不挤就画得**比预留宽** ⇒ 右溢被裁。
+     * **必须用 LEFT 而不是 JUSTIFY**：JUSTIFY 会把挤出来的 slack 重新摊回去，
+     * 右缘两版都钉在版心 ⇒ 差异被完全抹掉，这把锁会变成恒绿。
+     *
+     * 判据取**两次绘制的墨迹右缘之差**，并与额度独立复算值对账（不是与生产输出比）：
+     * 差值只由「挤了多少」决定，与字体墨迹的左右边距无关 ⇒ 不受 inkRight 余量影响。
+     */
+    @Test
+    fun `绘制器把 squeezeRatio 透传给 Aligner 墨迹右缘因此收窄`() {
+        val fs = 40f
+        val text = "中文，中文；ab 中文，中文；ab"
+        val ratio = 0.6f
+        val m = SkiaRunMeasurer()
+        val fam = listOf("STSong", "serif")
+
+        // 额度独立复算（与 PunctuationSqueezeLockTest 同款：自己调 widths、自己乘 ratio）。
+        val adv = m.advances(text, fs, 0f, "p", fam, 400, false, false, emptyList(), emptyList())
+        val caps = PunctuationSqueeze.widths(
+            text, 0, text.length, adv, 0, m, fs, 0f, "p", fam, 400, false, false, emptyList(),
+            PunctuationSqueeze.appliedMaxEm(),
+        )
+        val expectedShrink = caps.sumOf { PunctuationSqueeze.slotSqueeze(it, ratio).toDouble() }.toFloat()
+        assertTrue("语料必须真的能挤（额度 ${caps.toList()}）", expectedShrink > 1f)
+
+        fun inkRightX(squeezeRatio: Float): Int {
+            val bmp = drawAndScan(
+                listOf(
+                    DrawLine(
+                        text = text, range = 0 until text.length, yTop = 0, yBottom = 70,
+                        alignment = TextAlign.LEFT, fontSizePx = fs, lineHeightRatio = 1.5f,
+                        tag = "p", families = fam, weight = 400, italic = false, monospace = false,
+                        letterSpacingEm = 0f, lineWidthPx = 1200, squeezeRatio = squeezeRatio,
+                    ),
+                ),
+                width = 1200, height = 100,
+            )
+            val px = requireNotNull(bmp.peekPixels())
+            var maxX = -1
+            for (x in 0 until 1200) for (y in 0 until 100) {
+                if (px.getColor(x, y) != Color.WHITE) { maxX = max(x, maxX); break }
+            }
+            assertTrue("ratio=$squeezeRatio 这一版必须有墨，否则这把锁验的是空气", maxX > 0)
+            return maxX
+        }
+
+        val plain = inkRightX(0f)
+        val squeezed = inkRightX(ratio)
+        val got = (plain - squeezed).toFloat()
+        // 光栅化量化到整像素 ⇒ 容差 2px；比例 0.6、cap 0.5em ⇒ 实挤约 12px，差异远超容差。
+        assertEquals(
+            "墨迹右缘必须比不挤时窄「额度 × 比例」= $expectedShrink px（实测收窄 $got px）。" +
+                "绘制器漏传 squeezeRatio ⇒ 画比量宽 ⇒ 右溢被裁",
+            expectedShrink, got, 2f,
         )
     }
 

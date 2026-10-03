@@ -670,28 +670,34 @@
   于是出现**整行只剩一个 `。`** 的行。**本轮明确不修** —— 改断点策略会波及全部断行锁，
   且用户真机未报障。登记在此以免退化成只有代码注释的债。
 
-- **Q29 — 变异验证欠账（2026-10-03 登记）**：
+- **Q29 — 变异验证：V1/V3/V4/V6 已跑（2026-10-03），**查出并修掉一个真缺口**；V2/V5 仍欠**：
 
-  - **29i 记录的那 12 项已跑完**（针对「额度公式 + 量画同源」这一族，结果见
-    `docs/自建断行引擎-测试计划.md` 29i ③）。⚠ **但它们是二次订正之前跑的** ——
-    额度公式 `S = min(cap, headroom)` 本身没变，所以 M1-M4/M8b/M9/M10 依然有效；
-    **变的是「什么时候挤」与「挤多少」，这两处没有任何变异验证**。具体该补的点：
+  脚本：`tools/mutate_squeeze_v1v6.sh`（注入 → 跑**全模块** → 记录 → `git checkout` 还原）。
+  ⚠ **必须跑全模块而不是指定测试类** —— 只跑自己那几把会漏掉「别的类恰好兜住了」的情况，
+  而 V6 的结论恰恰是靠这一条才查出来的。
 
-    | # | 变异 | 后果 | 该红的锁 |
-    |---|---|---|---|
-    | V1 | 删掉 `ratioNeeded` 的 `ratio >= 1 ⇒ 0` 守卫 | 挤不动也硬挤 ⇒ **画比量窄**、右缘出洞 | `PunctuationSqueezeLockTest` 锁 3/4 |
-    | V2 | 删掉 `need <= 0 ⇒ 0` 守卫 | 不缺也挤 ⇒ 无谓缩窄 | 同上 |
-    | V3 | `slotSqueeze` 漏乘 `ratio`（回到满额挤） | 破词率回升（Q24 的定性前提失效） | 同上 |
-    | V4 | 绘制侧 `squeezeRatio` 形参漏传（默认 0） | **画比量宽 ⇒ 右溢被裁** | 锁 5（扫版心对账） |
-    | V5 | 恢复「`gapEm == 0` 就不挤」特例分支 | 0 档作者空格又不吃了 | `CjkLatinSpacingWiringTest` 0 档锁 |
-    | V6 | `BrokenLine.squeezeRatio` 链路断点（断行侧算了不传） | 同 V4 | 锁 5 |
+  | # | 变异 | 后果 | 结果 |
+  |---|---|---|---|
+  | V1 | 删 `ratioNeeded` 的 `ratio >= 1 ⇒ 0` 守卫 | 挤不动也硬挤 ⇒ 画比量窄、右缘出洞 | ✅ 2 把红（`CjkLatinSpacingWiringTest` / `InhouseParagraphBreakerTest`） |
+  | V2 | 删 `need <= 0 ⇒ 0` 守卫 | 不缺也挤 ⇒ 无谓缩窄 | ⬜ **未跑** |
+  | V3 | `slotSqueeze` 漏乘 `ratio`（回满额挤） | 破词率回升，Q24 的定性前提失效 | ✅ 4 把红 |
+  | V4 | 绘制侧忽略 `squeezeRatio` 形参 | **画比量宽 ⇒ 右溢被裁** | ✅ 8 把红（含 `NoLineExceedsContentWidthTest`） |
+  | V5 | 恢复「`gapEm == 0` 就不挤」特例分支 | 0 档作者空格又不吃了 | ⬜ **未跑** |
+  | V6 | `LineWindowDrawer.paintText` 传 `squeezeRatio = 0f` | 同 V4 | 🔴 **初跑全绿（全仓无锁）** → 已补锁，现在 1 把红 |
 
-  - **「行末悬空间隙」（`d85ddef`）完全没做变异验证。**
-    评估：**不是硬要求** —— 该锁的期望值是测试里独立写一遍的公式（不是读生产汇报的布尔，
-    变异要么改 `gapsForRange`、要么改测试里的公式，二者必有一处响），
-    且已在真书 30956 行上直接量到症状消失（洞 11.099 → 0.000、残留 0 处），
-    这是比变异更强的行为证据。补 2 点（V-a 去掉 `partner < e` 判据、V-b 连带吃掉 `spaceCount`）即可闭环。
-  - **待补顺序**：V4/V6 优先（后果是右溢被裁，用户直接可见），其次 V1/V3。
+  **V6 查出的真缺口（已补）**：`squeezeRatio` 的链路有三个跳跃点 ——
+  `BrokenLine`（断行侧算）→ `DrawLine`（形状搬进行流）→ `LineAligner` 形参（绘制侧用）。
+  中间那一跳由 `app` 的 `SkiaDrawLineWindowCoherenceTest.squeezeRatioIsCarriedByIncrementalAndTempWindows`
+  钉住（逐窗逐值比对），**最后一跳当时无锁** ——
+  把 `LineWindowDrawer.paintText` 的 `squeezeRatio = line.squeezeRatio` 改成 `0f`，
+  `engine-skia` + `common` + `app` 全量测试**仍然全绿**。
+  已补 `LineWindowDrawerTest.绘制器把 squeezeRatio 透传给 Aligner 墨迹右缘因此收窄`：
+  用**两次绘制的墨迹右缘之差**与「额度独立复算 × 比例」对账。
+  **判据必须用 LEFT 而不是 JUSTIFY** —— JUSTIFY 会把挤出来的 slack 重新摊回去，
+  右缘两版都钉在版心 ⇒ 差异被完全抹掉，这把锁会变成恒绿。
+
+  **「行末悬空间隙」（`d85ddef`）按前一条的评估不做变异验证**（锁的期望值是独立复算的公式，
+  且真书 30956 行已直接量到症状消失）。
 
 - **Q26 — `CrossChapterPreflightProbeTest.a flip landing prewarms both neighbors…` 既有失败**（2026-10-03 登记）：
   `:89 awaitPrepared(0)` 超时。**A/B 已证明不是本轮引入**（`git stash -u` 后仍红），

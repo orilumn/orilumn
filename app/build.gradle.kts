@@ -1,6 +1,12 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.gradle.api.tasks.testing.Test
 
+/**
+ * 版本号唯一来源：`gradle.properties` 的 `orilumn.versionName`（app 与 desktopApp 共读）。
+ * 见该文件里的说明 —— 三个消费者曾各写一遍字面量，升版漏一处就出半吊子状态。
+ */
+val appVersionName: String = providers.gradleProperty("orilumn.versionName").get()
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
@@ -23,7 +29,7 @@ android {
         // `versionCode` 在分页缓存这条路上只是「发版时全量作废一次」的兜底（生产额外成本 0），
         // 版本号因此只是**发布标记**，不参与正确性。
         versionCode = 21
-        versionName = "0.3.0"
+        versionName = appVersionName
 
         // skiko 只发 arm64/x64 .so（无 32 位）：过滤后 32 位设备不再安装，避免运行时缺库崩溃
         ndk {
@@ -98,8 +104,11 @@ android {
 
     // Release 变体产物统一命名为 orilumn-<version>-<buildType>.apk（AGP 9 已删旧 applicationVariants API，
     // 改由 Gradle base.archivesName 控制；CI 用 orilumn-*.apk 通配，供本地构建、artifact、Release 附件三处一致使用）。
+    //
+    // 版本号从 `appVersionName` 取，**不再写字面量** —— 写死过一次，代价是 `versionName`
+    // 升到 0.3.0 而这里还在 0.2.2，产出「包内容新号、文件名旧号」的半吊子 APK 且无人报错。
     base {
-        archivesName.set("orilumn-0.2.2")
+        archivesName.set("orilumn-$appVersionName")
     }
 }
 

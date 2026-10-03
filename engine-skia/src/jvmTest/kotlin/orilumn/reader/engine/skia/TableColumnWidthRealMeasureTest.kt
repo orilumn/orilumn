@@ -45,6 +45,15 @@ import orilumn.reader.engine.text.TypographicProfile
  * （整形缺口全为负，见 `docs/TODO-未尽事宜.md` Q5）。符合
  * [ParagraphBreaker.preferredWidth] 契约里「永不窄于实需」那一句。
  *
+ * ## 标点挤压带来的第二条差异源（2026-10-03）
+ *
+ * 上表是「未挤口径」的对照。标点挤压（[PunctuationSqueeze]）落地后，同一句 CJK 在
+ * **生产口径**下的 max-content 比 Skia 侧窄**恰好一个挤压总额度**（实测 fs=44.4：
+ * `都用到…简单。` Skia=1287.6006 自建=1243.2004，差 44.4004 ≈ 1em）。
+ * 这是**有意**的偏离（挤压造 slack，见该对象 KDoc），不是测量走偏：
+ * 锁 3 把这一个变量**隔离**（两侧同为未挤口径，判据一字不改），
+ * 锁 3b 单独立锁把「窄的量 == 挤压总额度」逐值钉死。
+ *
  * ## 判据为什么用「方向 + 界」而不是「绝对像素」
  *
  * 本类跑在 **JVM（macOS）**，字体与平板不同 ⇒ 绝对像素值跨宿主不可移植。
@@ -141,15 +150,23 @@ class TableColumnWidthRealMeasureTest {
     }
 
     /**
-     * 锁 3：**无 kern 对的文本两侧逐值相等**（CJK / URL / 混排实测 0.0000%）。
+     * 锁 3：**同口径下**无 kern 对的文本两侧逐值相等（CJK / URL / 混排实测 0.0000%）。
      *
      * 这是本类最硬的一条：它说明自建侧与 Skia 侧**不是「差不多」，而是同一个量** ——
      * 差值只可能来自整形（kern/liga），而这些类别没有 kern 对。
+     *
+     * ## 口径对齐（2026-10-03 标点挤压落地时补的一行构造参数）
+     *
+     * 本锁的被试是**「量测差异只可能来自整形」**，而标点挤压是另一条**有意**的宽度差异。
+     * 两者混在一起测 ⇒ 锁红的不是被试性质，是**口径没对齐**。
+     * ⇒ 自建侧显式 `punctuationSqueezeMaxEm = 0f` 把这一个变量**隔离出去**，
+     * 原判据（0.0000% 逐值相等）一字不改地保留。
+     * 挤压本身与 `preferredWidth` 的关系由**紧邻的锁 3b** 单独立锁 —— 那条锁得更死（逐值等于总额度）。
      */
     @Test
-    fun `无 kern 对的文本两侧逐值相等`() {
+    fun `同口径下无 kern 对的文本两侧逐值相等`() {
         val skia = SkiaParagraphBreaker(0f)
-        val inhouse = InhouseParagraphBreaker(0f)
+        val inhouse = InhouseParagraphBreaker(0f, 0f, punctuationSqueezeMaxEm = 0f)
         for ((s, label) in listOf(cjk to "CJK", url to "URL", mixed to "混排")) {
             val a = pref(skia, s)
             val b = pref(inhouse, s)
@@ -160,6 +177,53 @@ class TableColumnWidthRealMeasureTest {
                 0.001f * maxOf(1f, a) / fs,
             )
         }
+    }
+
+    /**
+     * 锁 3b：**max-content 与断行同源** —— `preferredWidth` 恰好比未挤的口径窄一个挤压总额度。
+     *
+     * ## 为什么必须单独立锁（这不是重复锁 3）
+     *
+     * `preferredWidth`（max-content）回答的是「**整段放不放得下一行**」，而表格 auto 分列把它
+     * **直通**成最终列宽（`avail>=totalMax` 段 `w[i]=pref[i]`，无夹取）。所以它一旦与
+     * `breakLines` 用了**不同的宽度模型**，就是「断行侧按挤后的宽判放得下、max-content 按没挤的
+     * 宽答放得下」⇒ 同一段两套答案。补上这一减之前，端到端锁实测出行宽 **706.2265 > 版心 700**。
+     *
+     * ## 判据为什么钉「差 == 总额度」而不是「差 <= 3%」
+     *
+     * 因为要锁的不是「挤得狠不狠」，而是**「同一个 `PunctuationSqueeze.widths` 被两侧算成同一个数」**。
+     * 钉总额度 ⇒ 挤少了（额度被 `_cap` 吃掉）红、挤多了红、两侧算得不一样也红。
+     * 上界单独钉一条：CJK 语料上总额度必须为正（否则这条锁会自证成 `0 == 0`）。
+     */
+    @Test
+    fun `max-content 比未挤口径恰好窄一个挤压总额度`() {
+        val squeezed = InhouseParagraphBreaker(0f, 0f, punctuationSqueezeMaxEm = PunctuationSqueeze.DEFAULT_MAX_EM)
+        val plain = InhouseParagraphBreaker(0f, 0f, punctuationSqueezeMaxEm = 0f)
+        val measurer = SkiaRunMeasurer()
+        var totalSeen = 0f
+        for ((s, label) in listOf(cjk to "CJK", mixed to "混排")) {
+            val adv = measurer.advances(s, fs, 0f, null, families, 400, false, false, emptyList(), emptyList())
+            val squeeze = PunctuationSqueeze.widths(
+                s, 0, s.length, adv, 0, measurer, fs, 0f, null, families, 400, false, false, emptyList(),
+                PunctuationSqueeze.DEFAULT_MAX_EM,
+            )
+            var total = 0f
+            for (x in squeeze) total += x
+            totalSeen += total
+            assertEquals(
+                "$label：max-content 必须恰好窄一个挤压总额度（实测总额度 $total）。" +
+                    "多了/少了都是分叉：多了 ⇒ 列宽与断行预留不同源；少了 ⇒ 挤压额度被 _cap 吃掉。",
+                pref(plain, s) - total,
+                pref(squeezed, s),
+                0.001f,
+            )
+        }
+        // 上界：否则上面两条在「语料里一个可压标点都没有」时会自证通过。
+        assertTrue(
+            "本锁的前提：语料必须真的产出挤压额度（实测总额度 $totalSeen）。" +
+                "若为 0，换含收尾标点的语料，别删这条断言。",
+            totalSeen > 0f,
+        )
     }
 
     /**

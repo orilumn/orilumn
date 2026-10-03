@@ -307,7 +307,55 @@ class GraftKerningOntoTest {
     }
 
     /**
+     * **补偿回填也走四级优先级**（2026-10-03，与 [JustifySlack] 主拉伸同源）。
+     *
+     * 语料 `"ab cd ef gh"`（11 字、可回填槽 0..9）：级 0 = 槽 2/5/8（三个词间空格）、
+     * 级 1 = 槽 1/4/7（`字母|␣`）、级 3 = 槽 0/3/6/9（词内字母缝）。
+     *
+     * 簇位轨只在**字符 0** 上收紧 6px ⇒ `deficit = 6`；级 0 容量 `3 × 0.5em × 40 = 120` 够
+     * ⇒ **级 0 独吞 `6/3 = 2`**，其余级各 0。
+     *
+     * 旧版 `per = deficit / lv = 6/10` 会给 10 个槽**各** 0.6 —— 4 个词内字母缝照样被撑开，
+     * 观感与「均摊」没区别。这把锁是把回填改回均摊就会红的**唯一**守卫
+     * （既有的 `JUSTIFY 补偿后末字右缘仍贴版心` 用的是 `"abcdefgh"`，7 个槽全是级 3，
+     *  级 3 无上限 ⇒ 与均摊**同值**，故它抓不到这条退化 —— 这是分工，不是重复）。
+     *
+     * 下标口径：`out[i] += Σ_{k<i} per[k]`，故槽 `k` 的补偿体现在 `g.xs[k+1] − g.xs[k]` 上。
+     * 这里用 LEFT 对齐的 placement 造 `p`（`out` 就是自然轨、无自身拉伸），只留字符 0 的收紧，
+     * 于是「补偿增量」= `g.xs[k+1] − g.xs[k] − (p.xs[k+1] − p.xs[k])`，与收紧量正交、可直接读。
+     */
+    @Test
+    fun `补偿回填也走四级优先级而不是均摊`() {
+        val text = "ab cd ef gh"
+        val p = placement(text, TextAlign.LEFT)
+        // 目标右缘 = LEFT 的自然右缘（收紧 6px 之前）⇒ deficit = 6。
+        val target = p.xs[p.xs.size - 1] + p.advs[p.xs.size - 1]
+        val cnat = track(p, FloatArray(10) { p.advs[it] }.also { it[0] = p.advs[0] - 6f })
+        val g = graftKerningOnto(p, cnat, text, 0, fs, 0f, emptyList(), target)
+        // 整形轨把**字符 0** 的 advance 收窄 6px ⇒ 只有槽 0 带上这 −6（`tighten(i) = (cnat[i]−cnat[i−1]) − advs[i−1]`
+        // 读的是**前一个字符**的 advance）。其余槽的整形 advance 与量出逐值相同 ⇒ 收紧量 0。
+        fun tightenInto(k: Int) = if (k == 0) -6f else 0f
+        fun backfillAt(k: Int) =
+            (g.xs[k + 1] - g.xs[k]) - (p.xs[k + 1] - p.xs[k]) - tightenInto(k)
+        for (k in listOf(2, 5, 8)) {
+            assertEquals("词间槽 $k 独占补偿（6/3）", 2f, backfillAt(k), 1e-2f)
+        }
+        for (k in listOf(0, 3, 6, 9)) {
+            assertEquals("词内槽 $k 一级没吃满就不该被撑", 0f, backfillAt(k), 1e-3f)
+        }
+        for (k in listOf(1, 4, 7)) {
+            assertEquals("`字母|␣` 槽 $k 排在级 0 之后，一级没吃满就不该被撑", 0f, backfillAt(k), 1e-3f)
+        }
+        assertEquals(
+            "回填把收紧的 6px 全补回目标右缘", target, g.xs[p.xs.size - 1] + p.advs[p.xs.size - 1], 0.05f,
+        )
+    }
+
+    /**
      * 变异验证记录（改坏必须红，见 `docs/自建断行引擎-测试计划.md` 教训㉛）：
+     * - 把回填改回 `per = deficit / lv` ⇒ `补偿回填也走四级优先级而不是均摊` **红**
+     *   （**已实跑验证，2026-10-03**）。其余锁仍全绿 —— 既有的
+     *   `JUSTIFY 补偿后末字右缘仍贴版心` 用的是全词内语料，新旧规则同值，抓不到这条退化。
      * - 把 `tighten < 0f` 改成无条件采纳 ⇒ `簇位轨放宽时落位一点不动` / `结构不变式` **红**；
      * - 删掉 JUSTIFY 补偿段（`if (!justifyRightEdge.isNaN() …)`）⇒ `JUSTIFY 补偿后末字右缘仍贴版心`
      *   / `行末空白时补偿锚在末可见字` / 两把 letterSpacing 锁 **红**；

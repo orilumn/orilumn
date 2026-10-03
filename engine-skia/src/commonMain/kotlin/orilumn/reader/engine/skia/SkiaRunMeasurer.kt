@@ -261,6 +261,60 @@ class SkiaRunMeasurer(
         return fallbackWidth(seg, cp) ?: notdefWidth(seg.fonts[0])
     }
 
+    /**
+     * **单个字形相对自身笔位的墨迹区间**（px）：`[left, right]`。
+     *
+     * 左右两端都可能有负值（负边距的字形），故这是**区间**而不是「墨迹宽」——
+     * 标点挤压真正要回答的是「收窄字位后墨迹还在不在盒里、相邻两字的墨迹会不会相接」，
+     * 那两条判据分别落在 `right` 与 `left` 上（见 [PunctuationSqueeze]）。
+     *
+     * 与 [advances] 的区别：那个量的是**笔位到笔位**的推进（`Σadv` 累加用），
+     * 这个量的是**墨迹在笔位两侧的偏移**（重叠判定用）。两者不可互相换算 ——
+     * advance 恒定而墨迹可变，这正是「挤压能省出版心」的全部空间。
+     *
+     * @param cp 码本（不是字符下标）。
+     * @param at 该码本在**文本里的绝对下标**，用它查 [fontRuns] 得到该字的 face
+     *   （`fontRuns` 与正文同坐标系，见 [advances]）。
+     * @return 该 face 下 `cp` 的墨迹区间；**任何候选面都不覆盖它时返 `null`**
+     *   （调用方按「额度 0」处理 —— 量不到墨迹就不许压，这是安全的一侧）。
+     */
+    fun glyphInkBoxPx(
+        cp: Int,
+        fontSizePx: Float,
+        letterSpacingEm: Float,
+        tag: String?,
+        families: List<String>,
+        weight: Int,
+        italic: Boolean,
+        monospace: Boolean,
+        fontRuns: List<FontRun> = emptyList(),
+        at: Int = -1,
+    ): GlyphInkBox? {
+        val r = fontRuns.firstOrNull { at >= 0 && it.start <= at && at < it.endExclusive }
+        val size = r?.fontPxOr(fontSizePx) ?: fontSizePx
+        val mgrs = managers()
+        val seg = Seg(
+            0, 0,
+            faceTable(
+                r?.tag ?: tag, r?.families ?: families, r?.monospace ?: monospace,
+                r?.weight ?: weight, r?.italic ?: italic, size, mgrs,
+            ),
+            letterSpacingEm * size, size,
+            SkParagraphFactory.resolveFamilies(r?.tag ?: tag, r?.families ?: families, r?.monospace ?: monospace),
+            SkParagraphFactory.runFontStyle(r?.families ?: families, r?.weight ?: weight, r?.italic ?: italic),
+            mgrs, r?.monospace ?: monospace,
+        )
+        // **族栈优先**，取第一个覆盖者 —— 与 [measure] / [faceForCp] 同一条规则（量画同源，教训 ⑩）。
+        for (font in seg.fonts) {
+            val gid = font.getUTF32Glyph(cp)
+            if (gid != NOTDEF) {
+                val rect = font.getBounds(shortArrayOf(gid))[0]
+                return GlyphInkBox(rect.left, rect.right)
+            }
+        }
+        return null
+    }
+
     // ---- 分段：按 run 边界切，同段共用一张面表与一个 lsPx ----
 
     private class Seg(
@@ -706,6 +760,14 @@ class SkiaRunMeasurer(
 }
 
 private const val NOTDEF: Short = 0
+
+/**
+ * 一个字形相对**自身笔位原点**的墨迹区间（px）—— [SkiaRunMeasurer.glyphInkBoxPx] 的返回值。
+ *
+ * 两端都允许为负（负边距字形），因此它是区间而非宽度。
+ * @see PunctuationSqueeze 收窄字位时的两条墨迹判据分别用 [left] 与 [right]
+ */
+class GlyphInkBox(val left: Float, val right: Float)
 
 /**
  * **保底面表的排除族**（渲染层·字体解析）。

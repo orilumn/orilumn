@@ -122,6 +122,40 @@ fun isBreakOpportunity(text: CharSequence, i: Int): Boolean =
     KinsokuRules.ZH_EN.allowsBreakAt(text, i)
 
 /**
+ * **可挤压的全角收尾标点**（标点挤压的候选集，纯字符类判定，**不含量**）。
+ *
+ * ## 它是「收尾类」而不是从 [KinsokuRules.ZH_EN.noBreakBefore] 里划子集
+ *
+ * 禁则表回答的是「**能不能断**」，挤压回答的是「**能不能收窄**」——两个不同的问题，
+ * 成员的判据也不同（`/` `%` `℃` 不可落行首，但它们一个字位也不该收窄）。故独立成表，
+ * 只在**「全角 + 墨迹偏左 + 高频」**这一个口径上相交。
+ *
+ * ## 逐类取舍（数据来自真书全量探测 @fs43.75，Source Han Sans SC）
+ *
+ * | 类 | 实测 advance / 墨迹 | 收不收 | 理由 |
+ * |---|---|---|---|
+ * | 句读 `、。，．：；！？` | 1.000em / 0.13–0.50em ⇒ 内置空白 **0.497–0.817em** | ✅ 收 | 收益最大，全角收尾标点的绝大多数 |
+ * | 闭括 `）］｝〕〉》」』】` | 同上（`》` 0.497em 最紧） | ✅ 收 | 同属收尾类，内置空白够 |
+ * | 闭引号 `”’` | `”` 0.589em、`’` 0.794em | ✅ 收 | 同上 |
+ * | 省略号 `…‥` | `…` 墨迹 **0.869em** ⇒ 内置空白仅 **0.131em** | ❌ 不收 | 压了收益接近零，而两侧墨迹立刻相接 |
+ * | 破折号 `—–` / 连字符 `-‐‑` | `—` advance **0.894em**、墨迹填满字身 | ❌ 不收 | 内置空白 ≈ 0（额度公式也会算成 0，但列进来候选集就失去筛选意义） |
+ * | 单位 `%℃` | 同上，墨迹填满 | ❌ 不收 | 单位符号不是收尾标点 |
+ * | 迭代记号 `ゝゞ々〻〞` | 未实测（按字身居中处理） | ❌ 不收 | 墨迹居中 ⇒ 压右侧只会让后继字贴上来，得不偿失 |
+ * | ASCII 收尾类 `)]}!?,.:;/` | 半角，内置空白 ~0.05em 量级 | ❌ 不收 | 收益可忽略，却要给每次出现加一次墨迹测量 |
+ *
+ * > ⚠ **额度公式（`min(上限, 字宽 − 墨迹宽)`）本身已把「误收」变成无害**：
+ * > 收进来但内置空白不足的字符会算出 0 或极小的额度。表因此是**筛选器**（省测量）而不是**安全网**，
+ * > 安全网在 `orilumn.reader.engine.skia.PunctuationSqueeze`。
+ *
+ * @see orilumn.reader.engine.skia.PunctuationSqueeze 额度公式与施加点（渲染层·几何测量）
+ */
+const val SQUEEZABLE_CLOSING_PUNCT: String = "、。，．：；！？）］｝〕〉》」』】”’"
+
+/** [text] 在 [i] 处是否是**可挤压的全角收尾标点**（标点挤压的**唯一**判据入口）。 */
+fun isSqueezableClosingPunct(text: CharSequence, i: Int): Boolean =
+    i in text.indices && SQUEEZABLE_CLOSING_PUNCT.indexOf(text[i]) >= 0
+
+/**
  * min-content 断行机会分段——「最长不可断单元」的纯函数切分，[ParagraphBreaker.minContentWidth] 的输入，
  * 亦即 auto 分列 `max/min-content` 里的 min 一侧。**重/轻两路单源**（纯函数、不查字体），与 max-content
  * （[ParagraphBreaker.preferredWidth] 真测整段）同一度量源，故 `max ≥ min` 恒成立。

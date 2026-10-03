@@ -59,6 +59,22 @@ class InhouseParagraphBreakerTest {
     private fun mineLines(text: String, w: Int, ls: Float = 0f) = InhouseParagraphBreaker(ls)
         .breakLines(text, size, lh, w, TextAlign.LEFT, "p", fam, 400, false, false)
 
+    /**
+     * **未挤口径**的自建断行（`punctuationSqueezeMaxEm = 0f`）—— 用来隔离「宽度模型」这一个变量。
+     *
+     * ## 为什么要另开一个口径（2026-10-03 标点挤压落地）
+     *
+     * 本类测的是**断点源**（禁则表 / K-L / R1）这一层。而 [PunctuationSqueeze] 是**宽度模型**：
+     * 它让同一段在自建侧比在 Skia 侧**更窄** ⇒ 断点集合必然与 Skia 不同 ⇒ parity 掉、行数掉。
+     * 那是**有意**的偏离，不是断点源坏了。两者混在一把锁里量，锁红的就不是被测性质。
+     *
+     * ⇒ **测断点源的锁用本口径**（阈值一字不改），**测排版质量的锁用生产口径**（阈值显式下调、
+     * 实测值钉进断言消息）。两条都留，因为「挤压把行数压下来多少」本身就是要量的东西。
+     */
+    private fun mineLinesNoSqueeze(text: String, w: Int, ls: Float = 0f) =
+        InhouseParagraphBreaker(ls, 0f, punctuationSqueezeMaxEm = 0f)
+            .breakLines(text, size, lh, w, TextAlign.LEFT, "p", fam, 400, false, false)
+
     // ---- 网格（锁的覆盖面；新增样本/版心必须先跑探针核实再登记） ----
 
     private val gridWidths = intArrayOf(60, 100, 120, 142, 150, 160, 180, 200, 240, 280, 320, 360, 411, 600, 800, 1024)
@@ -94,6 +110,19 @@ class InhouseParagraphBreakerTest {
     private fun assertParity(text: String, w: Int, ls: Float = 0f) {
         val a = skiaLines(text, w, ls)
         val b = mineLines(text, w, ls)
+        assertEquals("行数应一致（text=«$text» W=$w ls=$ls）", a.size, b.size)
+        for (i in a.indices) {
+            assertEquals(
+                "第 ${i + 1} 行区间（text=«$text» W=$w ls=$ls）",
+                a[i].range.toString(), b[i].range.toString(),
+            )
+        }
+    }
+
+    /** 未挤口径的 parity（见 [mineLinesNoSqueeze]：断点源锁必须与宽度模型解耦）。 */
+    private fun assertParityNoSqueeze(text: String, w: Int, ls: Float = 0f) {
+        val a = skiaLines(text, w, ls)
+        val b = mineLinesNoSqueeze(text, w, ls)
         assertEquals("行数应一致（text=«$text» W=$w ls=$ls）", a.size, b.size)
         for (i in a.indices) {
             assertEquals(
@@ -162,11 +191,25 @@ class InhouseParagraphBreakerTest {
      * ⚠ **往 [cleanSamples] 加文本前必须先核实**：这三个之所以干净，正是因为不含
      * `X|—` / `X|《` / `]|字母` 这三类已知偏差接缝。
      */
+    /**
+     * **断点源**在「干净样本」上必须 192/192 与 Skia 逐格逐行全等（零偏差基线）。
+     *
+     * ## 【2026-10-03】口径改为未挤，且判据一字未改
+     *
+     * 三条样本里都有可挤标点（`。」` 与 `「`），所以生产口径下挤压会把它们压出**新的**断点：
+     * 实测生产口径下 192 格里 **41 格**不再 parity（典型 `短句。` W=100：Skia 2 行、
+     * 未挤 2 行、生产 1 行 —— `。` 被挤 0.5em 之后整段塞进版心）。
+     *
+     * 那不是断点源坏了，是宽度模型**有意**变窄。本锁的被试是断点源 ⇒ 取未挤口径
+     * （见 [mineLinesNoSqueeze]）。挤压对行数的影响由同类的另两把锁量：
+     * [line count fairness holds on production configurations] 与
+     * [punctuation squeeze never costs a line]。
+     */
     @Test
     fun `parity holds on the clean sample set`() {
         var cells = 0
         for (t in cleanSamples) for (ls in gridSpacings) for (w in gridWidths) {
-            assertParity(t, w, ls)
+            assertParityNoSqueeze(t, w, ls)
             cells++
         }
         assertEquals("clean 覆盖面（3 文本 × 16 版心 × 4 字距）", 192, cells)
@@ -176,7 +219,7 @@ class InhouseParagraphBreakerTest {
 
     /**
      * 生产配置（`W ≥ floorPx`）上的行数公平性 —— S3 判据「行数公平性 ≥95%」与
-     * 「总行数比值 ∈ [0.95, 1.05]」的回归锁。
+     * 「总行数比值 ∈ [0.95, 1.05]」的回归锁。**本锁用生产口径**（含标点挤压）。
      *
      * 实测基线（真面族、640 格中 floor 以上的 552 格）：逐格 parity **93.84%**、总行数比值 **1.0025**、
      * 最差单格比值 **1.500**。阈值按实测下浮留余量：parity 93.0、比值 0.98~1.02。
@@ -200,15 +243,135 @@ class InhouseParagraphBreakerTest {
      *
      * parity 阈值下调到 85.0：留 0.87 个点余量，且**这个数字被写进断言消息**，
      * 下次再降会立刻看到（不让阈值无声下滑 —— 教训 ㉒）。
+     *
+     * ## 【2026-10-03 标点挤压】阈值显式下调：parity 85.0 → 60.0、比值下限 0.98 → 0.93
+     *
+     * 按 [docs/自建断行引擎-测试计划.md] 29g④ 的 K-L 先例办：量出来 → 写明理由 → 显式下调 →
+     * **实测值钉进断言消息**。实测（552 格，生产口径含 0.5em 挤压）：
+     *
+     * ```
+     * 口径        parity    行数比值   最差单格   省行格数
+     * 未挤        87.14%    0.9936     1.500     —
+     * 生产(挤)   67.75%    0.9396     1.333     81
+     * ```
+     *
+     * 三件事同时发生，**每一件都是挤压的正当后果**：
+     *
+     *  1. **parity 掉 19.4 个点**：省行的格子（81 格）断点必然与 Skia 不同。**省行就是目的**。
+     *  2. **行数比值掉到 0.9396**：整部少 6% 的行 = 每页多排 6% 的字。
+     *     这个网格是**刻意构造的难例**且版心窄到 60px（0.5em 占比被放大到极端）；
+     *     真书实测同一比值是 **0.9790**（25 篇、27256 → 26684 行），T1 守真书那个数。
+     *  3. **最差单格从 1.500 降到 1.333**：挤压**治好了**族B1 那格（它现在与 Skia parity）。
+     *     上界 1.5 不动，仍作为「不失控」的守卫。
+     *
+     * ⚠ **断点源本身没退化**：未挤口径 parity 87.14% ≥ 原阈值 85.0，由
+     * [line count fairness holds on the same cells without squeezing] 单独守。
      */
     @Test
     fun `line count fairness holds on production configurations`() {
+        val m = fairness(mineLines = ::mineLines)
+        assertEquals("生产格数（floor 以上的格）", 552, m.cells)
+        println("生产口径：cells=${m.cells} parity=${"%.2f".format(m.parityRate)}% 行数比值=${"%.4f".format(m.ratio)} 最差单格=${"%.3f".format(m.worst)} @ ${m.worstKey} 省行格数=${m.strictlyFewer}")
+        assertTrue(
+            "逐格 parity 率不得低于 60.0%（实测 ${"%.2f".format(m.parityRate)}%，未挤口径 87.14%）。" +
+                "S7 加 K-L 音节断点后基线由 93.84% 降到 85.87%；2026-10-03 加标点挤压后降到 67.75% ——" +
+                "**两处都是预期的**：Skia 既不做音节断词、也不挤压标点，我们多出的断点逐格都与它不同。" +
+                "但**真该守的是行数比值**（${"%.4f".format(m.ratio)}，阈值 [0.93,1.02]），它才是「没乱重排」。" +
+                "断点源本身由未挤口径那把锁守（85.0 阈值未动）。",
+            m.parityRate >= 60.0,
+        )
+        assertTrue("总行数比值须在 [0.93, 1.02]（实测 ${"%.4f".format(m.ratio)}）", m.ratio in 0.93..1.02)
+        assertTrue(
+            "单格行数比值不得失控（最差 ${"%.3f".format(m.worst)} @ ${m.worstKey}）",
+            m.worst <= 1.5 + 1e-9,
+        )
+        // 上界：没有「省行格」时这条锁会自证成「挤压什么也没干」，那比红更糟。
+        assertTrue(
+            "本锁的前提：挤压必须真的省下行（实测 ${m.strictlyFewer} 格）。若为 0，说明挤压没生效，" +
+                "上面三个数字量的就不是生产口径 —— 那是**接线断了**，比阈值超标更严重。",
+            m.strictlyFewer > 0,
+        )
+    }
+
+    /**
+     * **未挤口径**上的同一条公平性判据 —— 阈值**一字未动**（parity 85.0、比值 [0.98, 1.02]、最差 1.5）。
+     *
+     * 这把锁存在的理由：生产口径那把的阈值本轮被迫下调，若没有这把作对照，
+     * 「阈值下调」和「断点源退化」在测试输出里长得一模一样。本锁把后者**排除**掉 ——
+     * 未挤口径下 87.14% ≥ 85.0，说明禁则表 / K-L / R1 这三层没退化。
+     */
+    @Test
+    fun `line count fairness holds on the same cells without squeezing`() {
+        val m = fairness(mineLines = ::mineLinesNoSqueeze)
+        assertEquals("生产格数（floor 以上的格）", 552, m.cells)
+        println("未挤口径：cells=${m.cells} parity=${"%.2f".format(m.parityRate)}% 行数比值=${"%.4f".format(m.ratio)} 最差单格=${"%.3f".format(m.worst)} @ ${m.worstKey}")
+        assertTrue(
+            "断点源 parity 率不得低于 85.0%（实测 ${"%.2f".format(m.parityRate)}%）。" +
+                "这是**挤压之前**的基线（85.87%），阈值自 S7 起未动；生产口径那把锁的阈值本轮" +
+                "因挤压下调到 60.0，若这把也一起掉，说明**禁则表/K-L/R1 本身退化了**，不是挤压的锅。",
+            m.parityRate >= 85.0,
+        )
+        assertTrue("断点源总行数比值须在 [0.98, 1.02]（实测 ${"%.4f".format(m.ratio)}）", m.ratio in 0.98..1.02)
+        assertTrue(
+            "断点源单格行数比值不得失控（最差 ${"%.3f".format(m.worst)} @ ${m.worstKey}）",
+            m.worst <= 1.5 + 1e-9,
+        )
+    }
+
+    /**
+     * **挤压只减不增** ⇒ 行数单调不增（`mine(挤).size ≤ mine(未挤).size`，逐格成立）。
+     *
+     * ## 为什么这条是挤压最核心的不变量
+     *
+     * 挤压的代数是 `natural' = natural − S`（`S ≥ 0`）⇒ 断行器预留的宽只会变小 ⇒ 行数只会变少或不变。
+     * 反向一旦发生，就说明额度算出了**负**的（或某处把 `S` 加回去了），那不是「排得松一点」，
+     * 是**溢出**（`NoLineExceedsContentWidthTest` 会随后红，但那条红得晚且信息难读）。
+     *
+     * 覆盖**整个网格**（含 floor 以下的 88 格）与三条干净样本，`gridSamples × 4 字距 × 16 版心` = 640 格。
+     */
+    @Test
+    fun `punctuation squeeze never costs a line`() {
+        var cells = 0
+        var strictlyFewer = 0
+        val samples = gridSamples + cleanSamples
+        for (t in samples) for (ls in gridSpacings) for (w in gridWidths) {
+            val squeezed = mineLines(t, w, ls).size
+            val plain = mineLinesNoSqueeze(t, w, ls).size
+            assertTrue(
+                "挤压只减不增，但这一格行数变多了（text=«$t» W=$w ls=$ls 挤=$squeezed 未挤=$plain）。" +
+                    "额度算出了负值，或有地方把 S 加回了宽度 —— 那是溢出方向的 bug。",
+                squeezed <= plain,
+            )
+            if (squeezed < plain) strictlyFewer++
+            cells++
+        }
+        println("挤压单调性：cells=$cells 省行格数=$strictlyFewer")
+        assertTrue(
+            "本锁的前提：网格必须真的产出省行的格子（实测 $strictlyFewer 格）。" +
+                "若为 0，本锁退化成自证通过（挤压恒等于没挤）—— 那是接线断了，不是通过。",
+            strictlyFewer > 0,
+        )
+    }
+
+    /** 公平性统计的累加器（[fairness] 的返回值）。 */
+    private class Fairness(
+        val cells: Int,
+        val parityRate: Double,
+        val ratio: Double,
+        val worst: Double,
+        val worstKey: String,
+        val strictlyFewer: Int,
+    )
+
+    /** 在 floor 以上的生产格上统计 [Fairness]（两个口径共用同一份格子集合）。 */
+    private fun fairness(mineLines: (String, Int, Float) -> List<orilumn.reader.engine.laying.BrokenLine>): Fairness {
         var cells = 0
         var sameCells = 0
         var skiaLines = 0
-        var mineLines = 0
+        var mineLinesTotal = 0
         var worst = 0.0
         var worstKey = ""
+        var strictlyFewer = 0
         for (t in gridSamples) {
             val floor = floorPx(t)
             for (ls in gridSpacings) for (w in gridWidths) {
@@ -218,26 +381,19 @@ class InhouseParagraphBreakerTest {
                 cells++
                 if (a.map { it.range } == b.map { it.range }) sameCells++
                 skiaLines += a.size
-                mineLines += b.size
+                mineLinesTotal += b.size
                 val r = b.size.toDouble() / a.size
                 if (r > worst) { worst = r; worstKey = "«$t» W=$w ls=$ls" }
+                if (b.size < mineLinesNoSqueeze(t, w, ls).size) strictlyFewer++
             }
         }
-        assertEquals("生产格数（floor 以上的格）", 552, cells)
-        val parityRate = 100.0 * sameCells / cells
-        val ratio = mineLines.toDouble() / skiaLines
-        println("生产配置：cells=$cells parity=${"%.2f".format(parityRate)}% 行数比值=${"%.4f".format(ratio)} 最差单格=$worstKey")
-        assertTrue(
-            "逐格 parity 率不得低于 85.0%（实测 ${"%.2f".format(parityRate)}%）。" +
-                "S7 加 K-L 音节断点后基线由 93.84% 降到 85.87%：**这是预期的** ——" +
-                "Skia 不做音节断词，我们多出的断点逐格都与它不同。" +
-                "但**真该守的是行数比值**（${"%.4f".format(ratio)}，阈值 [0.98,1.02]），它才是「没乱重排」。",
-            parityRate >= 85.0,
-        )
-        assertTrue("总行数比值须在 [0.98, 1.02]（实测 ${"%.4f".format(ratio)}）", ratio in 0.98..1.02)
-        assertTrue(
-            "单格行数比值不得失控（最差 ${"%.3f".format(worst)} @ $worstKey）",
-            worst <= 1.5 + 1e-9,
+        return Fairness(
+            cells = cells,
+            parityRate = 100.0 * sameCells / cells,
+            ratio = mineLinesTotal.toDouble() / skiaLines,
+            worst = worst,
+            worstKey = worstKey,
+            strictlyFewer = strictlyFewer,
         )
     }
 
@@ -283,16 +439,29 @@ class InhouseParagraphBreakerTest {
         assertEquals("族B1③ 代价：行数 10 → 11", 11, mineLines(s7, 60).size)
     }
 
+    /**
+     * 全网格最差单格：族B1 `号|—` 在版心恰好卡住时把 2 行抬成 3 行（1.50x）。
+     * 这是「不修」的**已知代价上限**，超过它就说明表又变坏了。
+     *
+     * 【2026-10-03】代价上限在**未挤口径**下量（那是禁则表的性质，3 行 / 1.50x）；
+     * 生产口径下同一格已被挤压**治好**（2 行、与 Skia parity）⇒ 两个数都钉，
+     * 因为「挤压治好了族B1 最差格」是本轮的一个实测结论，不钉就会悄悄回退。
+     */
     @Test
     fun `known deviations - over-strict X dash at a single cell reaches 1_5x line count`() {
-        // 全网格最差单格：族B1 `号|—` 在版心恰好卡住时把 2 行抬成 3 行（1.50x）。
-        // 这是「不修」的**已知代价上限**，超过它就说明表又变坏了。
         val t = "混合 mixed 内容 with 破折号——与空格。more text here"
         assertEquals("Skia 2 行", 2, skiaLines(t, 280, 0.05f).size)
-        assertEquals("自建 3 行（1.50x，族B1 代价上限）", 3, mineLines(t, 280, 0.05f).size)
+        assertEquals("自建 3 行（1.50x，族B1 代价上限，未挤口径）", 3, mineLinesNoSqueeze(t, 280, 0.05f).size)
         assertEquals(
-            "族B1 代价上限的具体区间",
+            "族B1 代价上限的具体区间（未挤口径）",
             listOf("0..18", "19..35", "36..39"),
+            mineLinesNoSqueeze(t, 280, 0.05f).map { it.range.toString() },
+        )
+        // 生产口径：`。` 被挤 0.5em 后第 2 行放得下 `。` ⇒ 与 Skia 同为 2 行。
+        assertEquals("生产口径（挤压）下这一格与 Skia parity（2 行）", 2, mineLines(t, 280, 0.05f).size)
+        assertEquals(
+            "生产口径的具体区间",
+            listOf("0..18", "19..39"),
             mineLines(t, 280, 0.05f).map { it.range.toString() },
         )
     }
@@ -303,10 +472,17 @@ class InhouseParagraphBreakerTest {
         // 方向与族B1 **相反** —— 这里我们更松，于是行数变少（5 → 4）。必须有守卫，别只盯变多那一侧。
         val t = "and/or、foo/bar、a]b 三种 ASCII 接缝。"
         assertEquals("Skia 5 行", 5, skiaLines(t, 120, 0.02f).size)
-        assertEquals("自建 4 行（T2d 代价①让我们更松）", 4, mineLines(t, 120, 0.02f).size)
+        assertEquals("自建 4 行（T2d 代价①让我们更松，未挤口径）", 4, mineLinesNoSqueeze(t, 120, 0.02f).size)
         assertEquals(
-            "T2d 代价① 的具体区间",
+            "T2d 代价① 的具体区间（未挤口径）",
             listOf("0..6", "7..16", "17..27", "28..30"),
+            mineLinesNoSqueeze(t, 120, 0.02f).map { it.range.toString() },
+        )
+        // 生产口径：两个 `、` 各挤 0.5em ⇒ 5 → 4 之外还省一行（实测 3 行）。
+        assertEquals("自建 3 行（生产口径，挤压再省一行）", 3, mineLines(t, 120, 0.02f).size)
+        assertEquals(
+            "生产口径的具体区间",
+            listOf("0..10", "11..21", "22..30"),
             mineLines(t, 120, 0.02f).map { it.range.toString() },
         )
     }
@@ -319,9 +495,11 @@ class InhouseParagraphBreakerTest {
      * 差异是**结构性**的、不是 bug：版心连最宽不可断单元都装不下时，Skia 选「整词溢出」，
      * 自建走 R1 core 贪心切（§2.2 行为表）。R1 的意义就是**宁可切也不溢出**。
      *
-     * 实测（88 格 floor 以下）：parity 26.1%、总行数比值 **1.0560**（比生产配置略高，
+     * 实测（88 格 floor 以下，生产口径）：parity 12.5%、总行数比值 **1.0313**（比生产配置略高，
      * 因为合法断点稀疏时我们更倾向退到左边的合法断点）。这一档不参与 S3 公平性统计，
      * 只锁结构不变量（已由第 1 层覆盖）与「不丢字符」。
+     * 【2026-10-03】这两个数是挤压后的：未挤口径实测 parity 26.1% / 比值 1.0560 ⇒
+     * 挤压把这一档的 parity 也拉低了（同第 3 层的理由：宽度模型变了，断点就变）。
      */
     @Test
     fun `below min-content the in-house breaker keeps every character where Skia drops a break space`() {

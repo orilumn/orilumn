@@ -252,8 +252,15 @@ object CjkLatinSpacing {
      *
      * ⇒ 判据从「落在 CJK 码位段」收紧为「**是表意文字**」。全角拉丁 `Ａ-Ｚ`（0xFF21..0xFF3A）
      * 一并不再参与：它本身是等宽的刻意字形，与半角拉丁之间再加间隙只会更难读。
+     *
+     * ## 为什么是 `public` 而不是 `private`（渲染层反查）
+     *
+     * [orilumn.reader.engine.skia.JustifySlack]（**渲染层**·行内几何）判 JUSTIFY 槽位性质时，
+     * 「哪些字符算 CJK / 哪些算西文」必须与本处**同一份**——两处各写一份码位区间，
+     * 改了一处忘了另一处就会静默分叉（教训㩼：同一规则两处实现）。
+     * 本对象已在 `common` 内、本仓唯一，渲染层**向下依赖**它不构成越层（AGENTS.md）。
      */
-    private fun isCjk(cp: Int): Boolean =
+    fun isCjk(cp: Int): Boolean =
         cp in 0x3400..0x4DBF || cp in 0x4E00..0x9FFF ||
             cp in 0xF900..0xFAFF || cp in 0x20000..0x2A6DF
 
@@ -273,8 +280,10 @@ object CjkLatinSpacing {
      *   数字）⇒ 旧的 `if` 分支删净，不必保留恒 false 的写法；
      * - 上标 `² ³ ¹`（Unicode 类别 `No`，不是 `Nd`）也一并落到 NONE。它们极少与中文相邻，
      *   即便相邻，少一个间隙也不构成缺陷 —— 换来的是判据只有一条、不必逐个列例外码本。
+     *
+     * ⚠ 公开理由与 [isCjk] 相同（`JustifySlack` 的槽位分类复用它），**别收回 `private`**。
      */
-    private fun isWestern(cp: Int): Boolean =
+    fun isWestern(cp: Int): Boolean =
         cp in 0x0030..0x024F && cp.toChar().isLetterOrDigit()
 
     private fun kindOf(cp: Int): Int = when {

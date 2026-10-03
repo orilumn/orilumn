@@ -113,6 +113,13 @@ internal class LineAligner(
         isLastLine: Boolean = false,
         hyphenAtEnd: Boolean = false,
         cjkLatinSpacingEm: Float = 0f,
+        /**
+         * 标点挤压上限（em，0 = 关）。默认读 [PunctuationSqueeze.appliedMaxEm] ——
+         * **与断行侧同一个来源**，所以两侧不可能一个挤一个不挤（量画同源，教训 ⑩）。
+         *
+         * 显式传参只给「要单独量一侧」的测试用；生产一律走默认值。
+         */
+        punctuationSqueezeMaxEm: Float = PunctuationSqueeze.appliedMaxEm(),
     ): Placement {
         val start = range.first.coerceIn(0, text.length)
         val endExcl = (range.last + 1).coerceIn(start, text.length)
@@ -149,6 +156,21 @@ internal class LineAligner(
             line, fontSizePx, letterSpacingEm, tag, families,
             weight, italic, monospace, lineRuns, cjkGaps,
         )
+        // 标点挤压：**收窄收尾类标点的字位**（渲染层·几何测量，[PunctuationSqueeze]）。
+        //
+        // ⚠ **必须在 `natural` 之前施加**：`slack = lineWidth − natural`，`natural` 少了 ΣS
+        //   ⇒ `slack` 多出 ΣS ⇒ JUSTIFY 把它分摊出去 ⇒ 行末右缘**照旧贴版心**，
+        //   变的是**墨迹**右缘（内移 S）与**总行数**（断行侧也按 S 预留了，见 [InhouseParagraphBreaker]）。
+        //   顺序反了就是「挤了但右缘跟着退」＝ 什么都没换到。
+        //
+        // ⚠ `advBase = start`：本方法的 `adv` 是**行内局部**下标，而额度是**段级**属性
+        //   （`inkLeft(i+1)` 要看下一行第一个字）。传 `start` 让 [PunctuationSqueeze.widths]
+        //   自己换算，两侧因此能共用同一份实现 —— 传别的值就会与断行侧分叉。
+        val squeeze = PunctuationSqueeze.widths(
+            text, start, endExcl, adv, start, measurer, fontSizePx, letterSpacingEm,
+            tag, families, weight, italic, monospace, fontRuns, punctuationSqueezeMaxEm,
+        )
+        for (k in 0 until n) if (squeeze[k] != 0f) adv[k] -= squeeze[k]
 
         // 尾随文档空白：计入 range、画（无墨无害）、但**不计入可见宽度**。
         var visEnd = endExcl
@@ -251,7 +273,16 @@ internal class LineAligner(
         //   若哪天 `visibleRight` / `hang` 变了口径（比如把行末 NBSP 算进可见宽），
         //   必须重跑 `CjkLatinSpacingWiringTest` 里那两条「画 == 量」的锁（跨行边界 / 扫版心）。
 
-        // JUSTIFY 拉伸：均摊到**可见字形之间的间隙**；末行不拉伸（两端对齐的定义本身）。
+        // JUSTIFY 拉伸：**按四级优先级分配到可见字形之间的间隙**（[JustifySlack]）；
+        // 末行不拉伸（两端对齐的定义本身）。
+        //
+        // ## [gapCount] 现在只剩一个作用：**「这一行到底有没有槽」的判据**
+        //
+        // 2026-10-03 起拉伸量由 [JustifySlack.plan] 逐槽给（`per[级]`），不再有单一的
+        // `extra = slack / gapCount`；分配额由 `plan.placed` 汇报。下面这整套推导因此
+        // **只用于回答「有没有槽」**（`doJustify` 守卫）与记录历史，但结论仍然成立 —— 一行有槽
+        // ⟺ `gapCount > 0` ⟺ [JustifySlack.plan] 的 `levels` 里至少有一个非 −1。
+        // 推导保留在案是因为它是 `gapCount` 公式的唯一出处，删了推导公式就成了魔数。
         //
         // ## 间隙数必须与「行里真正存在的字间空当数」一致（否则右缘会说谎）
         //
@@ -293,14 +324,35 @@ internal class LineAligner(
         val xsExtraLimit = visibleCount - 1
         val doJustify = align == TextAlign.JUSTIFY && !isLastLine && gapCount > 0
         val slack = lineWidthPx - natural
-        val extra = if (doJustify && slack > 0f) slack / gapCount else 0f
-        // 拉伸后**内容**宽恒等于 natural + extra×gapCount（natural 已含缩进 x0Raw，故这里要减掉）。
+        // 拉伸**按四级优先级分配**，不再均摊（[JustifySlack] 是唯一实现，渲染层）。
         //
-        // ⚠ **`natural` 含缩进而 `x0` 也要含缩进**，`trailStartX` 若直接 `x0 + natural + extra×gapCount`
+        // ⚠ 只在真的要拉时才做逐槽分类（每行一次），LEFT/CENTER/RIGHT、末行、`slack ≤ 0`
+        //   全都直接拿到 [JustifySlack.Plan] 的空形态（下面 `xs` 循环里 `per[lv]` 恒 0）——
+        //   分类是 O(字位) 的循环，非 JUSTIFY 行走它属于白付的成本。
+        val plan = if (doJustify && slack > 0f) {
+            JustifySlack.plan(text, start, xsExtraLimit, cjkGaps, fontSizePx, slack)
+        } else {
+            null
+        }
+        // 拉伸后**内容**宽 = natural + 实际落到 `xs` 上的总量 − 缩进（`natural` 已含缩进 `x0Raw`，
+        // 故这里要减掉）。
+        //
+        // ⚠ **`natural` 含缩进而 `x0` 也要含缩进**，`trailStartX` 若直接 `x0 + natural + 拉伸量`
         //   就把缩进**算了两遍** ⇒ 右缘越出版心整一个缩进。绘制侧现在把 `firstLineIndentPx` 交给本方法
         //   （不再画完再右移），这条路径才第一次真的带上非零缩进（Rust 书 `p { text-indent: 2em }`
         //   + `text-align: justify`，即**每个正文段首行**）⇒ 必须在此扣掉，否则那行右溢 84.36px。
-        val finalContent = natural + extra * gapCount - x0Raw
+        //
+        // ⚠ **用 [JustifySlack.Plan.placed] 而不是 `slack`**：后者是「预算」，前者是「实际落到
+        //   逐槽 x 上的量」。两者在三种情形下不同，且必须按后者算右缘：
+        //  ① K-L 音节断词（`extraGlyphGap`）：[gapCount] 里那个「末字 → 行尾连字符」的间隙
+        //     **没有 x 坐标可落**（连字符在区间之外），故实际落地的槽位比 [gapCount] 少一个
+        //     ⇒ 行比版心窄一档。用 `slack` 会在末字与连字符之间留一个「假洞」
+        //     （旧实现实测 10.25px，`visibleRight` 却报版心 —— 墨实际停在 176.55）。
+        //  ② 三级全部封顶而行内无级 3 槽（纯汉字行且每缝要超过 0.25em）：按预算铺会把
+        //     每个汉字都撑开，比留缺口更难看。宁可短一点也不撑。
+        //  ③ 级内均分的浮点尾差（`per × cnt` 与预算差一个 ulp）。右缘是硬边界
+        //     （[NoLineExceedsContentWidthTest] 钉它），宁可短不可超。
+        val finalContent = natural + (plan?.placed ?: 0f) - x0Raw
         // CENTER/RIGHT 按**最终**内容宽定位（用拉伸前的 natural 会偏）。
         //
         // ⚠ 这里**不能再加 `x0Raw`**：缩进只是「行首多出来的一段空白」，它排在文字**前面**，
@@ -332,7 +384,14 @@ internal class LineAligner(
             // （零宽不可见，它的 `lsPx`/拉伸都不该给 —— 不加就等于在行里留一个看不见的洞）。
             // ③ 不可见的 SHY **跨过去不加**之后仍要继续给下一个可见字形分拉伸，故只是
             //    跳过 `k` 这一次，不是 `continue` 整个可见段。
-            if (extra != 0f && k < xsExtraLimit && !isSoftHyphen(text[start + k])) x += extra
+            //
+            // ⚠ ①② 现在**收在 [JustifySlack.Plan.levels] 里**（`-1` 即「不是可拉伸槽」），
+            //   本循环只剩「查级 → 加该级的量」一步。这是有意的：**判据只有一份**
+            //   （[graftKerningOnto] 的回填走同一个 [JustifySlack.plan]），两处各判一次会分叉。
+            if (plan != null && k < xsExtraLimit) {
+                val lv = plan.levels[k]
+                if (lv >= 0) x += plan.per[lv]
+            }
         }
 
         // 行末尾随空白紧贴**可见右缘**（含对齐偏移 x0）。有连字符时它就是**连字符右缘**，

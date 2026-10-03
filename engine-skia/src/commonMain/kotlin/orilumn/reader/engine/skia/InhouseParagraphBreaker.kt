@@ -50,6 +50,15 @@ class InhouseParagraphBreaker(
      * 若绘制侧照插间隙就会**超出版心被裁**（`NoLineExceedsContentWidthTest` 钉的硬约束）。
      */
     private val cjkLatinSpacingEm: Float = 0f,
+    /**
+     * 标点挤压上限（em，0 = 关）—— 默认读 [PunctuationSqueeze.appliedMaxEm]（回退阀闸门后的单源值）。
+     *
+     * 与 [cjkLatinSpacingEm] 的方向**相反**（那个是**注入**宽度、本项是**让出**宽度）：
+     * 注入宽度必须两侧同进同退否则溢出裁字，让出宽度只可能让行变短 ⇒ 最坏是排得松一点，
+     * **不可能超出版心**。所以闸门关掉时即使照挤也不违反 [NoLineExceedsContentWidthTest]，
+     * 但那会让回退到 Skia 断点的那一侧排得比基线松 ⇒ 仍按闸门关掉，理由是**回退保真**。
+     */
+    private val punctuationSqueezeMaxEm: Float = PunctuationSqueeze.appliedMaxEm(),
     private val measurer: SkiaRunMeasurer = SkiaRunMeasurer(),
     /** 断点增强器（顺序无关，S2(b) 冻结的形状）。本轮只接禁则表一个 source；S7 只加 source。 */
     private val breakSources: List<BreakOpportunitySource> = listOf(KinsokuBreakSource),
@@ -202,6 +211,11 @@ class InhouseParagraphBreaker(
      * 差别只是**不施加版心宽、不找断点** —— 即「同一批字形宽，加起来」。
      * ⇒ 因此本方法与 [breakLines] **量源同源**，不存在「量宽走一条、排版走另一条」的分叉。
      *
+     * ## 标点挤压也在这条「同源」里（2026-10-03 补）
+     *
+     * 挤压让字位变**窄**，所以 max-content 必须**减掉**同一份额度，否则同一个 `adv` 会被两个方法
+     * 读出两个答案。本方法在补上这一减之前，端到端锁实测出行宽 **706.2265 > 版心 700**。
+     *
      * ## `tag` 传 `null` 而不是原样传下去
      *
      * 与 [SkiaParagraphBreaker.preferredWidth] 同口径（那里 `paragraphStyle(..., tag = null, ...)`）。
@@ -226,9 +240,28 @@ class InhouseParagraphBreaker(
         fontRuns: List<FontRun>,
     ): Float {
         if (text.isEmpty()) return 0f
-        return measurer.naturalWidth(
-            text, fontSizePx, letterSpacingEm, null, families, weight, italic, monospace, fontRuns, cjkLatinSpacingEm,
+        val n = text.length
+        val gaps = if (cjkLatinSpacingEm > 0f) {
+            CjkLatinSpacing.gaps(text, cjkLatinSpacingEm, fontRuns)
+        } else {
+            emptyList()
+        }
+        val adv = measurer.advances(text, fontSizePx, letterSpacingEm, null, families, weight, italic, monospace, fontRuns, gaps)
+        var sum = 0f
+        for (a in adv) sum += a
+        // 标点挤压**必须从 max-content 里也减掉**（与 [breakLines] 同一个 [PunctuationSqueeze.widths]）。
+        //
+        // ⚠ 漏这一步的后果不是「表格列宽偏大一点」这么轻：max-content 是**「整段放得下一行吗」**的判据
+        //   （表格 auto 分列、单行快路径都问它）。断行侧按挤后的宽度判「放得下」、max-content 按没挤的
+        //   宽度答「放得下」⇒ 同一段两套答案 ⇒ 画比量宽 ⇒ 右溢被裁。
+        //   实测（`CjkLatinSpacingWiringTest` 的端到端锁）：版心 700 的行量出 **706.2265**。
+        //   —— 那把锁一直拿本方法当「绘制侧宽度」用，所以它当场抓到了这个分叉。
+        val squeeze = PunctuationSqueeze.widths(
+            text, 0, n, adv, 0, measurer, fontSizePx, letterSpacingEm,
+            null, families, weight, italic, monospace, fontRuns, punctuationSqueezeMaxEm,
         )
+        for (s in squeeze) sum -= s
+        return sum
     }
 
     override fun breakLines(
@@ -305,12 +338,20 @@ class InhouseParagraphBreaker(
         val hyphenW = hyphenWidths(
             n, opp, fontSizePx, letterSpacingEm, tag, families, weight, italic, monospace, fontRuns,
         )
+        // 标点挤压的**预留**（与 [LineAligner] 画侧同一个 [PunctuationSqueeze.widths]）。
+        // ⚠ 必须在**整段**上算而不是按行算：S 是「位置」的属性，与行怎么切无关；
+        //   按行算则两侧的分段边界可能不同（行是由本方法切的）⇒ 同一位置两个 S ⇒ 量画失配。
+        val squeezeW = PunctuationSqueeze.widths(
+            text, 0, n, adv, 0, measurer, fontSizePx, letterSpacingEm,
+            tag, families, weight, italic, monospace, fontRuns, punctuationSqueezeMaxEm,
+        )
         return greedy(
             text, adv, n,
             headPx = headPx,
             restPx = widthPx.toFloat(),
             opp = opp,
             hyphenW = hyphenW,
+            squeezeW = squeezeW,
             targetLh = lineHeightPx(fontSizePx, lineHeightRatio),
         )
     }
@@ -438,6 +479,14 @@ class InhouseParagraphBreaker(
         restPx: Float,
         opp: BreakOpportunitySet,
         hyphenW: FloatArray,
+        /**
+         * 标点挤压的逐位置额度（px，与 `adv` 同长同坐标；见 [PunctuationSqueeze.widths]）。
+         *
+         * 在 [greedy] 里**只做一件事**：`val w = adv[i] − squeezeW[i]`。
+         * 不焊进 `adv` 本身，理由同 [hyphenW]：焊进去就得让断点记账、尾空白记账、
+         * 以及 `preferredWidth` 三处同时改口径，漏一处就静默失配。
+         */
+        squeezeW: FloatArray,
         targetLh: Int,
     ): List<BrokenLine> {
         val out = ArrayList<BrokenLine>(8)
@@ -487,7 +536,9 @@ class InhouseParagraphBreaker(
                     brk = i
                     break
                 }
-                val w = adv[i]
+                // 标点挤压：这一格**实际占的宽**比 [advances] 量出的少 `squeezeW[i]`。
+                // 判定宽、尾空白记账、断点记账全部走这一个 `w` ⇒ 一处施加、三处生效。
+                val w = adv[i] - squeezeW[i]
                 val sp = isDocumentSpace(c)
                 // 续上行尾空白段 → 判定宽不变；落到非空白 → 先把那段并回来再算本字符。
                 val next = if (sp) hang else hang + trail + w

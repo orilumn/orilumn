@@ -2,6 +2,7 @@ package orilumn.reader.engine.skia
 
 import orilumn.reader.engine.css.FontRun
 import orilumn.reader.engine.laying.isDocumentSpace
+import orilumn.reader.engine.text.preprocess.CjkLatinSpacing
 
 /**
  * [graftKerningOnto] 的返回值。
@@ -89,6 +90,17 @@ internal fun lastRunSizePx(
  * 连字符行会短掉一个 kerning 总量（**与本次修复前的行为一致，不是回归**），但绝不会
  * 「末字压进连字符槽位」或「连字符越出版心」。[ClusterTrackGraft.endDelta] 在这条路径上
  * 仍只含收紧量，连字符照旧跟随。
+ *
+ * ## 回填走与主拉伸**同一套四级优先级**（2026-10-03）
+ *
+ * 旧版是 `per = deficit / lv` 逐槽等额回填。主拉伸换成 [JustifySlack] 的四级瀑布之后，
+ * 若这里仍等额：主拉伸把 `slack` 优先花在**词间空格**上，回填却把它等额摊进**词内字母缝**
+ * —— 两笔账叠起来，词内字母缝实际拿到的仍是全量，用户看到的观感与「均摊」没区别。
+ * ⇒ 两处**必须同一套**（教训㩼：同一规则两处实现会静默分叉）。
+ *
+ * 下标口径：`out[i] += Σ_{k<i} per[k]`，故**槽 k = 字符 k 与 k+1 之间**，与
+ * [LineAligner] 的槽定义逐位对齐；SHY 槽取 [JustifySlack.Plan.levels] 的 −1（不加），
+ * 累积照旧往下走 —— 与主拉伸 `x += per[lv]` 遇 SHY 跳过的语义完全一致。
  */
 internal fun graftKerningOnto(
     placement: LineAligner.Placement,
@@ -99,6 +111,14 @@ internal fun graftKerningOnto(
     letterSpacingEm: Float,
     fontRuns: List<FontRun>,
     justifyRightEdge: Float,
+    /**
+     * 混排字距 em —— **只用于槽位分类**（[JustifySlack] 的级 2），不是宽度来源
+     * （宽度早在 [SkiaRunMeasurer.applyCjkLatinGaps] 就进了 `adv`）。
+     *
+     * 传 em 而不是现成的 `List<CjkLatinGap>`：**按需算**。分类只在真有 kerning 且真要回填时
+     * 发生（`deficit > 0`），而 [CjkLatinSpacing.gapsForRange] 要扫**整段**——绝大多数行走不到这里。
+     */
+    cjkLatinSpacingEm: Float = 0f,
 ): ClusterTrackGraft {
     val n = placement.xs.size
     val out = FloatArray(n)
@@ -125,8 +145,23 @@ internal fun graftKerningOnto(
             else letterSpacingEm * lastRunSizePx(text, start, lv, fontSizePx, fontRuns)
             val deficit = justifyRightEdge - (out[lv] + placement.advs[lv] - lastLs)
             if (deficit > 0f) {
-                val per = deficit / lv
-                for (i in 1..lv) out[i] += per * i
+                // 槽 `k` = 字符 `k` 与 `k+1` 之间 ⇒ 覆盖 `k ∈ [0, lv)`，
+                // 绝对下标区间 `[start, start + lv)`（与 `gapsForRange` 的裁剪口径一致）。
+                val gaps = if (cjkLatinSpacingEm > 0f) {
+                    CjkLatinSpacing.gapsForRange(text, start, start + lv, cjkLatinSpacingEm, fontRuns)
+                } else {
+                    emptyList()
+                }
+                val plan = JustifySlack.plan(text, start, lv, gaps, fontSizePx, deficit)
+                var acc = 0f
+                for (i in 1..lv) {
+                    val l = plan.levels[i - 1]
+                    if (l >= 0) acc += plan.per[l]
+                    out[i] += acc
+                }
+                // ⚠ `plan.placed ≤ deficit`（三级封顶且无级 3 槽时会**严格小于**）⇒ 这一行
+                //   停在距版心 `deficit − placed` 处。**这是有意的**：回填是「补回被 kerning
+                //   收掉的量」，宁可少补也不把字撑开；旧版等额回填则一定会补满。
             }
         }
     }

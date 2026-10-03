@@ -121,6 +121,72 @@ class FirstLineIndentSingleLineOverflowTest {
         }
     }
 
+    /**
+     * **绘制侧代理**—— 按断行臂分派（2026-10-03 标点挤压落地时改）。
+     *
+     * ## 为什么不能一直用 [drawn]（Skia `Paragraph`）
+     *
+     * S5 之后生产绘制是 [LineAligner] + 逐字 `drawString`
+     * （[orilumn.reader.engine.skia.LineWindowDrawer] 的 `paintGlyphs`），
+     * `SkParagraph` **已经不再是绘制器** —— 它只剩回退阀那一侧的**断行器**身份
+     * （[orilumn.reader.engine.skia.SkiaParagraphBreaker]）。
+     *
+     * 标点挤压（[orilumn.reader.engine.skia.PunctuationSqueeze]）让自建臂的宽度模型与
+     * `SkParagraph` **有意不同**（收窄收尾标点的字位）。此时仍拿 `SkParagraph` 当绘制侧代理，
+     * 就是「用一个不参与生产的量去判生产的不变量」⇒ 必然假红（实测本类三条锁全红：
+     * 溢出 2.0px / 60.64px，而生产绘制侧的同一行是合规的）。
+     *
+     * ⇒ **自建臂改用真正的绘制器量**；Skia 臂保持原样（那一臂的绘制侧本就是 `SkParagraph`）。
+     * 这样两条锁的不变量都变成「**该臂自己的**断行器 vs **该臂自己的**绘制器」，
+     * 而不是跨臂错配。
+     */
+    private fun painted(
+        breaker: ParagraphBreaker,
+        sub: String,
+        layoutWidth: Int,
+        alignment: TextAlign,
+        fontSizePx: Float,
+        families: List<String>,
+        weight: Int,
+        italic: Boolean,
+        monospace: Boolean,
+        letterSpacingEm: Float,
+        indentPx: Float,
+        hyphenAtEnd: Boolean,
+        fontRuns: List<orilumn.reader.engine.css.FontRun> = emptyList(),
+    ): Pair<Int, Float> {
+        if (breaker !is InhouseParagraphBreaker) {
+            return drawn(sub, layoutWidth, alignment, fontSizePx, families, weight, italic, monospace, letterSpacingEm)
+        }
+        fun rightOf(al: TextAlign, lastLine: Boolean): Float = LineAligner().align(
+            text = sub,
+            range = 0 until sub.length,
+            fontSizePx = fontSizePx,
+            lineWidthPx = layoutWidth.coerceAtLeast(1).toFloat(),
+            letterSpacingEm = letterSpacingEm,
+            tag = "p",
+            families = families,
+            weight = weight,
+            italic = italic,
+            monospace = monospace,
+            fontRuns = fontRuns,
+            align = al,
+            firstLineIndentPx = indentPx,
+            // **末行口径 = 不拉伸**，量的是**内容本来的宽**。理由：拉伸只会把右缘拉到版心、
+            // 把「断行器判错了」这个信号**掩盖**掉；不拉伸的版本在三种对齐下都给出同一个
+            // `缩进 + 内容宽`，是最严的一条。CENTER/RIGHT/JUSTIFY 的 `x0` 定位另有锁
+            // （[NoLineExceedsContentWidthTest] 与 `LineWindowDrawerTest`），此处不重复。
+            isLastLine = true,
+            hyphenAtEnd = hyphenAtEnd,
+        ).visibleRight
+        // 两个都量：真实对齐的几何 + LEFT 不拉伸的内容宽（后者恒 ≥ 前者，取 max 即最严）。
+        val real = rightOf(alignment, true)
+        val content = rightOf(TextAlign.LEFT, true)
+        // 逐字落位**不可能**二次折行（S5 的结构性质：每字一次 `drawString`，Skia 无从整形），
+        // 故行数恒为 1；这条在自建臂上不再由本代理提供，交给 [NoLineExceedsContentWidthTest] 的簇位轨分支。
+        return 1 to maxOf(real, content)
+    }
+
     /** 断行 + 「绘制侧右移后是否越版心」检查；返回违规描述（无违规返回 null）。 */
     private fun violationAt(
         breaker: ParagraphBreaker,
@@ -138,10 +204,12 @@ class FirstLineIndentSingleLineOverflowTest {
         )
         for (line in lines) assertEquals("行高必须是统一行框单一来源", lineHeightPx(fontSizePx, ratio), line.heightPx)
         for ((i, l) in lines.withIndex()) {
-            val (n, w0) = drawn(text.substring(l.range), width, alignment, fontSizePx)
+            val (n, w0) = painted(
+                breaker, text.substring(l.range), width, alignment, fontSizePx,
+                families, 400, false, false, 0f, if (i == 0) firstLineIndentPx else 0f, l.hyphenAtEnd,
+            )
             if (n != 1) return "版心=$width 第 $i 行在绘制侧被折成 $n 行（量画失步）"
-            val shift = if (i == 0) firstLineIndentPx else 0f
-            val right = shift + w0
+            val right = w0
             if (right > width + slack) return "版心=$width 第 $i 行右缘 $right 越出版心（溢出 ${right - width}px）"
         }
         return null
@@ -280,12 +348,15 @@ class FirstLineIndentSingleLineOverflowTest {
                 val result = BoxLayouter(p.bodyPx, breaker).layoutBoxes(root, w, styles, classify)
                 for ((idx, dl) in DrawLineBuilder.build(result, styles, classify, HIDDEN_NONE, p.letterSpacingEm)) {
                     val sub = dl.text.substring(dl.range)
-                    val (n, w0) = drawn(sub, dl.lineWidthPx, dl.alignment, dl.fontSizePx, dl.families, dl.weight, dl.italic, dl.monospace, dl.letterSpacingEm)
+                    val (n, right) = painted(
+                        breaker, sub, dl.lineWidthPx, dl.alignment, dl.fontSizePx,
+                        dl.families, dl.weight, dl.italic, dl.monospace, dl.letterSpacingEm,
+                        dl.firstLineIndentPx, dl.hyphenAtEnd, dl.fontRuns,
+                    )
                     assertEquals("[$v] bodyPx=${p.bodyPx} 版心=$w 行 $idx 在绘制侧被二次折行（量画失步）", 1, n)
-                    val right = dl.firstLineIndentPx + w0
                     assertTrue(
                         "[$v] bodyPx=${p.bodyPx} 版心=$w 行 $idx 右缘 $right 越出版心 ${dl.lineWidthPx}" +
-                            "（缩进 ${dl.firstLineIndentPx} 行宽 $w0）：\"$sub\"",
+                            "（缩进 ${dl.firstLineIndentPx}）：\"$sub\"",
                         right <= dl.lineWidthPx + slack,
                     )
                 }

@@ -538,6 +538,8 @@ class LineWindowDrawer(
                         } else {
                             Float.NaN
                         },
+                        // 槽位分类要与主拉伸同源（同 em）；不传则级 2（中英注入间隙）恒为空。
+                        line.cjkLatinSpacingEm,
                     )
                 }
             }

@@ -94,12 +94,18 @@ tasks.register<Exec>("stampDmgVolumeIcon") {
     dependsOn("packageDistributionForCurrentOS")
     onlyIf { org.gradle.internal.os.OperatingSystem.current().isMacOsX }
     outputs.upToDateWhen { false }
-    val dmg = layout.buildDirectory.file("compose/binaries/main/dmg/Orilumn-2.0.dmg")
+    // jpackage 输出的 dmg 文件名跟随 macOS packageVersion 变化：运行时在输出目录里找唯一的 .dmg，
+    // 不硬编码文件名（之前写死的 Orilumn-2.0.dmg 与实际产物已对不上），以后改版本也不用管这里。
+    val dmgFile = layout.buildDirectory.dir("compose/binaries/main/dmg").map { dir ->
+        val dmgs = dir.asFile.listFiles { f -> f.isFile && f.extension == "dmg" }?.toList().orEmpty()
+        require(dmgs.size == 1) { "Expected exactly 1 .dmg under ${dir.asFile} (found ${dmgs.size}): $dmgs" }
+        dmgs.single()
+    }
     inputs.file(project.file("icons/icon.icns"))
     commandLine(
         "sh",
         project.file("stamp-dmg-icon.sh").absolutePath,
-        dmg.get().asFile.absolutePath,
+        dmgFile.map { it.absolutePath },
         project.file("icons/icon.icns").absolutePath,
     )
 }

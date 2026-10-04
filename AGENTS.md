@@ -25,6 +25,32 @@
 
 任何代码修改、方案设计，若违反上面两条架构约束，禁止直接生成实现代码，先指出架构冲突点，并给出合规调整思路。
 
+## 发版与 tag
+
+1. **tag 必须与 `gradle.properties` 的 `orilumn.versionName` 完全一致**（带 `v` 前缀的那份）。
+   `.github/workflows/build-release.yml` 的 `Verify tag matches versionName` 是硬门禁：
+   不一致直接 `exit 1`。**只改 tag 名不打版本，Release workflow 必红。**
+2. **打 tag 前先提一个 bump 提交**：`orilumn.versionName` 递增到与 tag 相同的值，
+   `app/build.gradle.kts` 的 `versionCode` 同步 `+1`，且 tag 落在该 bump 提交上。
+   `versionCode` 的用途见该文件注释：分页失效的实际保障是 `common` 的 `LAYOUT_VERSION`
+   引擎源码指纹，它只是「发版时把旧分页表全量作废一次」的兜底（生产额外成本 0）。
+3. **`orilumn.versionName` 是版本号唯一来源**（`app` 与 `desktopApp` 共读），它同时决定
+   `versionName` / `archivesBaseName`（APK 文件名）/ 桌面 `packageVersion` —— **只改一处即全动**。
+   历史踩坑：`versionName` 升到 0.3.0 而 `archivesName` 还在 0.2.2，产出「包内容新号、
+   文件名旧号」的半吊子 APK 且无人报错。**全仓不留硬编码版本号**（`grep -rn "0\.3\.0"`
+   命中处只应剩注释里的历史事故记述）。
+4. **推 tag 是不可逆的公开副作用**：会触发签名 Release workflow（构建 APK + 建 Release）。
+   推之前本地先模拟门禁，并确认版本联动真的生效：
+
+   ```bash
+   TAG_VER="0.3.1"; CODE_VER=$(sed -n 's/^orilumn.versionName=//p' gradle.properties | head -1 | tr -d '[:space:]"')
+   [ "$TAG_VER" = "$CODE_VER" ] && echo "门禁通过" || echo "门禁会红"
+   ./gradlew :app:assembleDebug && ls app/build/outputs/apk/debug/*.apk   # 文件名应随 versionName 变
+   ```
+5. **装机验证前必须 `assembleDebug`**：只跑 `jvmTest` 不会重建 APK，此时 push 的是旧产物。
+   本轮真被这个坑到——拿旧产物当 A/B 基线，把**正确**的实现测成「反斜」，差点把符号改回去。
+   **任何截图/像素 A/B 对照，两个输入都必须当次构建，且以 `shasum -a256` 确认为不同版本。**
+
 ## 平板日志（无线 adb，vivo PA2353）
 
 - 详见 `docs/调试日志与分页跟踪.md`；下面是每次必走的摘要。

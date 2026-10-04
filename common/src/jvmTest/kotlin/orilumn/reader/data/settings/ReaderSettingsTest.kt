@@ -305,4 +305,91 @@ class ReaderSettingsTest {
         val migrated = ReaderSettings.fromJson("""{"scheme":"day"}""")
         assertEquals(25.0, migrated.cjkLatinSpacing, 0.0)
     }
+
+    // ---- 按书 overlay 稀疏化（标题字体 bug 根因）----
+
+    private fun persistInTemp(): Triple<java.io.File, PerBookSettings, ReaderSettingsStore> {
+        val dir = java.nio.file.Files.createTempDirectory("orilumn-sparse").toFile()
+        val stores = PerBookSettings(
+            ReaderSettingsStore(dir.absolutePath),
+            BookSettingsStore(dir.absolutePath),
+        )
+        return Triple(dir, stores, ReaderSettingsStore(dir.absolutePath))
+    }
+
+    @Test
+    fun `persist 只钉本次改动 没动过的槽位永不进 overlay`() {
+        // 回归“调标题影响正文”：以前任何一次提交都全量快照，别的书/全局的字体值被冻进本书。
+        val (dir, persist, _) = persistInTemp()
+        try {
+            val global = ReaderSettings.DEFAULT.copy(fontBody = "A", fontTitle = "B")
+            persist.persist(null, global)
+            // 在某书只动字号：overlay 只能有 fontScale 一项。
+            val next = persist.effectiveFor(7L).copy(fontScale = 60.0)
+            persist.persist(7L, next)
+            val overlay = BookSettingsStore(dir.absolutePath).load(7L)
+            assertEquals(60.0, overlay.fontScale)
+            assertNull("没动过的正文槽不得快照", overlay.fontBody)
+            assertNull("没动过的标题槽不得快照", overlay.fontTitle)
+            assertNull("没动过的代码槽不得快照", overlay.fontCode)
+            // 生效值：字号用书的，字体跟全局。
+            val eff = persist.effectiveFor(7L)
+            assertEquals(60.0, eff.fontScale, 0.0)
+            assertEquals("A", eff.fontBody)
+            assertEquals("B", eff.fontTitle)
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `存量全量 overlay 的陈旧 pin 在下次提交时自愈`() {
+        // 设备实证：1000.json 曾是全量快照（body=title=普惠体），之后调全局标题该书不动。
+        val (dir, persist, globals) = persistInTemp()
+        try {
+            persist.persist(null, ReaderSettings.DEFAULT.copy(fontBody = "A", fontTitle = "B"))
+            // 模拟老版本的全量快照：body 与全局一致（陈旧 pin），title 是真正的按书覆盖。
+            BookSettingsStore(dir.absolutePath).save(
+                7L,
+                BookSettings(fontScale = 60.0, fontBody = "A", fontTitle = "C"),
+            )
+            // 本书再动一个无关项：陈旧 pin（body=A=全局）恢复跟随，真正的 pin（title=C）保留。
+            val next = persist.effectiveFor(7L).copy(pageNum = true)
+            persist.persist(7L, next)
+            val overlay = BookSettingsStore(dir.absolutePath).load(7L)
+            assertNull("与全局一致的陈旧 pin 必须恢复跟随", overlay.fontBody)
+            assertEquals("真正的按书覆盖必须保留", "C", overlay.fontTitle)
+            // 生效值不变：body 跟全局 A，title 用书的 C。
+            val eff = persist.effectiveFor(7L)
+            assertEquals("A", eff.fontBody)
+            assertEquals("C", eff.fontTitle)
+            assertEquals(globals.load().fontTitle, "B")
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `本次刚改的字段即使与全局一致也保留为 pin`() {
+        // 用户在本书面显式选了与全局相同的值：那是明确意图，不得被自愈清掉。
+        val (dir, persist, _) = persistInTemp()
+        try {
+            persist.persist(null, ReaderSettings.DEFAULT.copy(fontTitle = "B"))
+            val next = persist.effectiveFor(7L).copy(fontTitle = "B", fontScale = 60.0)
+            // baseline 里 title 已是 B（跟全局），scale 60 是改动——为测豁免，先把 overlay 置空后显式提交 title。
+            persist.persist(7L, next)
+            // 此时 title 无 diff（=baseline），overlay 只有 scale。
+            var overlay = BookSettingsStore(dir.absolutePath).load(7L)
+            assertNull(overlay.fontTitle)
+            // 改全局标题后再在本书面显式选回 B：changed 含 title=B，必须钉住。
+            persist.persist(null, ReaderSettings.DEFAULT.copy(fontTitle = "D"))
+            val next2 = persist.effectiveFor(7L).copy(fontTitle = "B")
+            persist.persist(7L, next2)
+            overlay = BookSettingsStore(dir.absolutePath).load(7L)
+            assertEquals("B", overlay.fontTitle)
+            assertEquals("B", persist.effectiveFor(7L).fontTitle)
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
 }

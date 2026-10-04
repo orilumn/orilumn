@@ -67,7 +67,7 @@ jobs:
 
       # 仅打 tag 时把签名 APK 挂到对应 GitHub Release。
       - name: Attach signed APK to Release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') && success()
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ github.ref_name }}
@@ -109,6 +109,12 @@ jobs:
       - name: Rename DMG with version and arch
         run: |
           VER=$(sed -n 's/^orilumn.versionName=//p' gradle.properties | head -1 | tr -d '[:space:]"')
+          # 版本号取空时直接失败：否则会产出 Orilumn--macos-<arch>.dmg 这种坏文件名并随 Release 发布
+          # （v0.3.0 就这么多出过两个无版本号 DMG）。
+          if [ -z "$VER" ]; then
+            echo "::error::无法从 gradle.properties 读到 orilumn.versionName，拒绝重命名。"
+            exit 1
+          fi
           ls desktopApp/build/compose/binaries/main/dmg/
           for f in desktopApp/build/compose/binaries/main/dmg/*.dmg; do
             mv "$f" "desktopApp/build/compose/binaries/main/dmg/Orilumn-${VER}-macos-${{ matrix.arch }}.dmg"
@@ -125,7 +131,7 @@ jobs:
       # 仅打 tag 时把 DMG 挂到对应 GitHub Release（与 APK 同一 Release 下追加文件）。
       # 未签名：下载后首次打开需右键→打开过 Gatekeeper，自用分发可接受；要公开发行再立项做签名公证。
       - name: Attach DMG to Release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') && success()
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ github.ref_name }}

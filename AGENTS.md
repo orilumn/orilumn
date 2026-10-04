@@ -16,6 +16,43 @@
 
 2. 不得违反 KMP + CMP 跨平台共享模型：程序逻辑和基本组件跨平台共享，仅允许少量平台特殊适配代码。
 
+## 样式层叠优先级（最高依据，读者层永远压过书）
+
+**UI(间距/行距/密度) > 单元素 > 主题 > 书本原样 > UA；前三层合成一次覆盖，直接覆盖内核级联结果。**
+（出自 `docs/KMP迁移-功能架构.md` §6 覆盖层；实现在 `common/.../css/Cascade.kt`。）
+
+落地 tier（`Cascade.kt:48-54`）：书本侧 `author 20 / inline 30 / author-important 40 /
+inline-important 41`，`UA 10 / UA-important 50`；读者三层**严格夹在 41 与 50 之间**，
+`theme 42(important 46) < settings 43(47) < UI 44(48)`。
+
+1. **先比 tier，再比特异度**（`Winner.beats`：`if (tier != cur.tier) return tier > cur.tier`）。
+   ⇒ 读者层一条裸标签选择器（特异度 0,0,1）**压过书在同名元素上的任何声明**，含 `.class`
+   与 `!important`。**把选择器写窄并不能让书赢**，特异度在这条链上根本轮不到比。
+   想让书赢只能放低层（`ua.css` tier 10，作者层 20 压得过它）。
+2. **只声明它声明的**：读者层只发读者真配了的声明，没配就不发 ⇒ 书原样生效
+   （`ReaderUiSheet.fontRules` 的字重槽是范例）。反过来，**读者层一旦发了，就是覆盖书的承诺**；
+   动手前先量该属性在书里的声明分布（按标签归属，别用只数规则条数的正则扫 DOM 代替）。
+3. **不经内核级联事后改写**（决策 6 铁律「upper layers … without any post-hoc mutation」）：
+   用户字重曾由 `SkParagraphFactory.anchoredWeight` 在级联跑完后私改 `fontWeight`，判架构违规
+   并整体退役（Q19）。读者意图只能以**层叠声明**进入，不得在渲染层打补丁。
+4. **层内仍走标准级联**：同层内特异度与源码序照旧生效。已知坑：`margin` 简写与 per-side 声明
+   同时存在时 per-side 优先 ⇒ 书设了 `p{margin}` 就会盖掉 UI 层段间距，故 UI 层段间距一律写
+   per-side。读者层选择器表另有收紧纪律（`ReaderUiSheet.textBlockSelectors` 刻意排除 `h1..h6`；
+   首行缩进只给 `p`，`li` 绝不套用；段间距只在 `p/li` 相邻对之间生效）。
+5. **主题值分两类，别一律推给 UI 层**：
+   - **读者可调的**（有滑块/可换字体，读者能配出第三种状态）⇒ 值存 `ReaderSettings`，由 **UI 层
+     tier 44** 发声明。现状：`firstLineIndent` / `paragraphSpacing` / `fontBody` 等。
+   - **不可再调的基线预设**（这套主题就长这样，读者配不出别的状态）⇒ 就写主题层 asset
+     （tier 42）：`modern.css` / `traditional.css`。现状：`body{font-family}`、
+     `p{text-indent}`、`p,li{margin:0}`、正文两端对齐 `p,div,li,blockquote,dd,td{text-align:justify}`。
+     为这类值新增 `ReaderSettings` 字段是**错的**：主题按钮不写它就是死字段（写死值＝UI 层无条件覆盖），
+     而老存档里没这个键 → 停在现代/传统主题的用户实际没生效，还得补 `schemaVersion` 迁移。
+   - 三主题切换时，`withLayoutTheme` 只写「可调那一类」的值；原书设置（`useOriginalStyle`）
+     **整张主题表不加载** ⇒ 主题层的一切声明都不参与，正文对齐/字体/缩进全由书作者的 CSS 决定。
+6. **单元素层（settings，tier 43/47）尚未实现**：`BoxChapterLayouter.settingsSheet` 恒为 `null`
+   且无任何调用方传值。排序里保留它的位置，但**当前不存在这一层**，不要按「单元素能覆盖」
+   来设计方案。
+
 ## 附加约束（可选，可直接删掉）
 - 新增代码、重构、方案设计时，先校验是否突破上述层级边界；若必须跨层，提前说明理由
 - 平台差异代码集中存放，不要散落在共享业务/排版/渲染核心代码中
@@ -23,7 +60,12 @@
 
 ## 校验规则
 
-任何代码修改、方案设计，若违反上面两条架构约束，禁止直接生成实现代码，先指出架构冲突点，并给出合规调整思路。
+任何代码修改、方案设计，若违反上面两条架构约束，或违反「样式层叠优先级」，禁止直接生成实现代码，先指出架构冲突点，并给出合规调整思路。
+
+涉及样式/级联的改动，额外必答三问：
+1. 这条声明进的是哪一层、哪个 tier？该 tier 相对书本侧（author 20 / inline-important 41）是赢是输？
+2. 它会盖掉书在同名元素上的什么声明？**量过没有**（按标签归属统计，不是数规则条数）？
+3. 读者没配这个值时，是不是应该干脆不发声明？
 
 ## 发版与 tag
 

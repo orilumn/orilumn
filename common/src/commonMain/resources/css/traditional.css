@@ -24,5 +24,39 @@ body { font-family: serif; }
 p { text-indent: 2em; margin-top: 0; margin-bottom: 0; }
 li { margin-top: 0; margin-bottom: 0; }
 
+/* 正文对齐: 两端对齐。
+ *
+ * 为何留在这层 (theme=42) 而不是 UI 层 (44): UI 层代表**用户当下的意志** (拖过的滑块、选过的
+ * 字体), 所以它只发读者**显式调过**的值; 而「现代/传统这两套排版长这样」是**不可再调的基线预设**
+ * —— 本主题没有对齐滑块, 读者配不出第三种状态, 所以它是主题自身的属性, 就该写主题表。
+ * 同理 `p{text-indent}` / `p,li{margin:0}` / `body{font-family}` 都在这层。
+ * 走 UI 层反而错: 那要求 theme → ReaderSettings → UI 层绕一圈, 还会在老存档上留迁移坑
+ * (存档里没有该键就读成默认值, 停在现代/现代主题的人实际没生效)。
+ *
+ * 原书设置 (`useOriginalStyle`) **整张主题表不加载** ⇒ 本条完全不参与层叠, 由书作者的
+ * text-align 决定 (写了就照写, 没写就是自然宽)。这正是「原书设置 = 书作者说了算」。
+ *
+ * 选择器是量出来的, 不是拍的 (真书离屏全管线 71 本书 3344 行按标签归属):
+ *   p 66% / div 21% / li 5% / h1-h3 3% / span 2% / blockquote 1%
+ * - `div` 必带: 大量中文 epub 把段落直接放 div 里不套 p, 個別书整本都是 div (实测 91/92 行)。
+ *   只写 p 会漏掉五分之一正文。
+ * - `p` 是主选择器: 类型选择器不看祖先, 已覆盖 `li p` / `blockquote p` / `td p`, 无需重复列。
+ * - 补 blockquote / dd / td: 覆盖文字直接落在标签里、外面没套 p 的少数书。
+ * - 刻意不含 h1..h6 (短标题拉平反而难看, 且标题常带装饰边框) 与 pre / code (等宽代码不该被
+ *   拉伸间隙); span 是行内元素, text-align 对行内盒无效, 加了也不生效。
+ *
+ * 层叠代价 (已量化): Winner.beats **先比 tier 再比特异度**, 故 theme=42 高于作者层全部声明
+ * (含 inline !important=41), 本条会盖掉书自己写在这些标签上的 text-align, 且**选择器写窄也拦不住**。
+ * 爆炸半径实测: 35 本书作者 CSS 里非 justify 的 text-align 共 595 条, 命中真实正文的仅
+ * 13 条 / 5 本书; 其中 9 条是 left (引用/提示框, 对齐后观感更整齐), 真正可见的只有 4 处 ——
+ * #13 `.fore>p`/`.f-right>p` (居中版权页)、#27 `.signature>p` (居右落款)、
+ * #32 `.mediaobject .caption p` (居中图注), 这三类会被拉成两端对齐。
+ * 若要「书显式声明则从书、沉默才兜底」, 只能挪到 ua.css (tier 10, 作者层 20 压得过),
+ * 代价是**原书设置也会跟着兜底** —— 与「原书听书作者」冲突, 故未取。
+ *
+ * 端到端实测 (traditional, 全库 3344 行): p 2214 + div 730 + li 197 + blockquote 48
+ * = 3189/3344 = 95.4% 正文行两端对齐; 标题 97 行按设计保持原样; 余 58 行 span (1.7%) 兜不到。 */
+p, div, li, blockquote, dd, td { text-align: justify; }
+
 /* 无尺寸约束的块级/独图插图拉满正文宽度 (ChapterPreprocessor 仅在原书未设 width/max-width 时打类) */
 .orilumn-fullwidth-image { width: 100%; }

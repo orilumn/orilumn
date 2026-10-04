@@ -156,7 +156,8 @@ class SkiaRunMeasurer(
  * ## 为什么不能另写（第一版就是这么栽的）
  *
  * 我第一版在 `GlyphPainter` 里写了 `baseGlyphStyle`，它有三处与生产段落侧不一致：
- * ① 用了裸 `FontStyle(weight, …)` 而非 [SkParagraphFactory.runFontStyle]（少了字重锚点解析）；
+ * ① 用了裸 `FontStyle(weight, …)` 而非 [SkParagraphFactory.runFontStyle]（slant 映射口径不一致，
+ *    且日后字重策略变动不会同步到逐字路径）；
  * ② 只取族栈 `[0]` 首名，**丢掉整栈按字形回退**（CJK/Latin 混排必然取错面）；
  * ③ 用 `defaultFontMgr()` 而非内嵌池 manager（内嵌字体全取不到）。
  * 三条合起来 ⇒ **量画失配**（教训 ⑩ 的同一个坑：比值会从 1.20x 虚高到 4.05x），
@@ -179,15 +180,16 @@ class SkiaRunMeasurer(
         val mgrs = managers()
         val seg = Seg(
             0, 0, faceTable(tag, families, monospace, weight, italic, sizePx, mgrs),
-            0f, sizePx, emptyArray(), SkParagraphFactory.runFontStyle(families, weight, italic), mgrs, monospace,
+            0f, sizePx, emptyArray(), SkParagraphFactory.runFontStyle(weight, italic), mgrs, monospace,
         )
         for (font in seg.fonts) {
             if (font.getUTF32Glyph(cp) != NOTDEF) return font
         }
         // 族栈全灭 ⇒ 保底面表（与 [universalPass] 同一张、同一条「第一个覆盖者即采用」规则 ⇒ 量画同源）。
         // 仍无 ⇒ 与 [measure] 同口径用首面 notdef（画出来也是 .notdef，量画一致）。
-        for (tf in universalTypefaces(seg.mono, seg.style.weight, seg.style.slant == FontSlant.ITALIC, seg.mgrs)) {
-            val font = Font(tf, seg.sizePx)
+        val reqItalic = seg.style.slant == FontSlant.ITALIC
+        for (tf in universalTypefaces(seg.mono, seg.style.weight, reqItalic, seg.mgrs)) {
+            val font = SkParagraphFactory.synthFont(tf, seg.sizePx, seg.style.weight, reqItalic)
             if (font.getUTF32Glyph(cp) != NOTDEF) return font
         }
         // 保底表也没有 ⇒ **系统回退链**（旧 Skia 路径靠的就是它，见 [systemFallbackFace]）。
@@ -251,7 +253,7 @@ class SkiaRunMeasurer(
             ),
             letterSpacingEm * size, size,
             SkParagraphFactory.resolveFamilies(r?.tag ?: tag, r?.families ?: families, r?.monospace ?: monospace),
-            SkParagraphFactory.runFontStyle(r?.families ?: families, r?.weight ?: weight, r?.italic ?: italic),
+            SkParagraphFactory.runFontStyle(r?.weight ?: weight, r?.italic ?: italic),
             mgrs, r?.monospace ?: monospace,
         )
         val cp = HYPHEN_GLYPH.code
@@ -303,7 +305,7 @@ class SkiaRunMeasurer(
             ),
             letterSpacingEm * size, size,
             SkParagraphFactory.resolveFamilies(r?.tag ?: tag, r?.families ?: families, r?.monospace ?: monospace),
-            SkParagraphFactory.runFontStyle(r?.families ?: families, r?.weight ?: weight, r?.italic ?: italic),
+            SkParagraphFactory.runFontStyle(r?.weight ?: weight, r?.italic ?: italic),
             mgrs, r?.monospace ?: monospace,
         )
         // **族栈优先**，取第一个覆盖者 —— 与 [measure] / [faceForCp] 同一条规则（量画同源，教训 ⑩）。
@@ -352,7 +354,7 @@ class SkiaRunMeasurer(
                     faceTable(tag, families, monospace, weight, italic, fontSizePx, mgrs),
                     letterSpacingEm * fontSizePx, fontSizePx,
                     SkParagraphFactory.resolveFamilies(tag, families, monospace),
-                    SkParagraphFactory.runFontStyle(families, weight, italic), mgrs, monospace,
+                    SkParagraphFactory.runFontStyle(weight, italic), mgrs, monospace,
                 ),
             )
         }
@@ -376,7 +378,7 @@ class SkiaRunMeasurer(
                     faceTable(rTag, rFam, rMono, rWeight, rItalic, size, mgrs),
                     letterSpacingEm * size, size,
                     SkParagraphFactory.resolveFamilies(rTag, rFam, rMono),
-                    SkParagraphFactory.runFontStyle(rFam, rWeight, rItalic), mgrs, rMono,
+                    SkParagraphFactory.runFontStyle(rWeight, rItalic), mgrs, rMono,
                 ),
             )
         }
@@ -499,7 +501,7 @@ class SkiaRunMeasurer(
         var n = nPending
         for (tf in universalTypefaces(seg.mono, seg.style.weight, seg.style.slant == FontSlant.ITALIC, seg.mgrs)) {
             if (n == 0) break
-            val font = Font(tf, seg.sizePx)
+            val font = SkParagraphFactory.synthFont(tf, seg.sizePx, seg.style.weight, seg.style.slant == FontSlant.ITALIC)
             val glyphs = font.getUTF32Glyphs(remain)
             val w = font.getWidths(glyphs)
             var keep = 0
@@ -524,7 +526,9 @@ class SkiaRunMeasurer(
         val family = seg.stack.firstOrNull() ?: return null
         for (mgr in seg.mgrs.asReversed()) {
             val tf = runCatching { mgr.matchFamilyStyleCharacter(family, seg.style, null, cp) }.getOrNull() ?: continue
-            val font = Font(tf, seg.sizePx)
+            val font = SkParagraphFactory.synthFont(
+                tf, seg.sizePx, seg.style.weight, seg.style.slant == FontSlant.ITALIC,
+            )
             val g = font.getUTF32Glyphs(intArrayOf(cp))
             if (g[0] != NOTDEF) return font.getWidths(g)[0]
         }
@@ -563,7 +567,7 @@ class SkiaRunMeasurer(
             systemFallbackCollection().defaultFallback(cp, style, familyHint)
         }.getOrNull()
         val face = tf?.let {
-            val f = Font(it, sizePx)
+            val f = SkParagraphFactory.synthFont(it, sizePx, style.weight, style.slant == FontSlant.ITALIC)
             // 再验一次覆盖：`defaultFallback` 可能给出一张并不含该码本的面（宿主链自身的兜底）。
             if (f.getUTF32Glyph(cp) != NOTDEF) f else null
         }
@@ -611,6 +615,27 @@ class SkiaRunMeasurer(
     private val universalCache = HashMap<UniversalKey, Array<Typeface>>()
     private val lock = Any()
 
+    /**
+     * 池代次水位：[faceCache]/[universalCache] 的键里没有池身份（只有族栈字重字号），
+     * 池内容一变旧条目即错面——长驻实例（绘制侧 `LineWindowDrawer` 的 painter、
+     * 断行侧 breaker）跨越多次换字体，旧面一直用到退出重进。每次取面前对一次水位，
+     * 落后即整清（只清 map，不重扫；重扫发生在真正 miss 时，热路径只多一次 volatile 读）。
+     * `[systemFallbackCache]` 不在内：它走纯系统集合，与池内容无关。
+     */
+    @Volatile
+    private var poolGen = -1L
+
+    private fun syncPoolGen() {
+        val g = SkiaFontPool.generation()
+        if (g != poolGen) {
+            synchronized(lock) {
+                faceCache.clear()
+                universalCache.clear()
+            }
+            poolGen = g
+        }
+    }
+
     private fun faceTable(
         tag: String?,
         families: List<String>,
@@ -620,7 +645,8 @@ class SkiaRunMeasurer(
         sizePx: Float,
         mgrs: List<FontMgr>,
     ): Array<Font> {
-        val style = SkParagraphFactory.runFontStyle(families, weight, italic)
+        syncPoolGen()
+        val style = SkParagraphFactory.runFontStyle(weight, italic)
         val stack = SkParagraphFactory.resolveFamilies(tag, families, monospace)
         val key = Key(stack.joinToString(""), style.weight, style.slant.ordinal, sizePx.toRawBits())
         synchronized(lock) { faceCache[key] }?.let { return it }
@@ -628,11 +654,16 @@ class SkiaRunMeasurer(
         // 外层族栈、内层 manager —— FontCollection 的语义。写反实测偏 49.51px（§T8.3）。
         // 具名族逐 manager 各取一次面；同字体被两个名字命中（`Times` / `Times New Roman`）时按引用去重。
         val seen = HashSet<Typeface>()
+        val reqItalic = style.slant == org.jetbrains.skia.FontSlant.ITALIC
         for (family in stack) {
             for (mgr in mgrs) {
                 val tf = runCatching { mgr.matchFamilyStyle(family, style) }.getOrNull() ?: continue
                 if (!seen.add(tf)) continue
-                out.add(Font(tf, sizePx))
+                // 合成粗体（`SkParagraphFactory.synthesisFor` 的唯一执行点）：族里没有够粗的面时补一笔。
+                // **量画自动同源**：`isEmboldened` 只加墨、**不改 advance**（实测普惠体 64px
+                // 「中文标题abc」加粗前后 advance 逐值相同 263.552），而量宽与落墨共用本表里
+                // **同一批 Font 实例** ⇒ 不存在「量出来是细体、画出来是粗体」的失配。
+                out.add(SkParagraphFactory.synthFont(tf, sizePx, style.weight, reqItalic))
             }
         }
         // **保底面刻意不在这里**（见 [universalPass]）：并进来等于给每段加数百次 native 调用
@@ -701,7 +732,8 @@ class SkiaRunMeasurer(
         italic: Boolean,
         mgrs: List<FontMgr>,
     ): Array<Typeface> {
-        val style = SkParagraphFactory.runFontStyle(emptyList(), weight, italic)
+        syncPoolGen()
+        val style = SkParagraphFactory.runFontStyle(weight, italic)
         val key = UniversalKey(monospace, style.weight, style.slant.ordinal)
         synchronized(lock) { universalCache[key] }?.let { return it }
         val seen = HashSet<Typeface>()

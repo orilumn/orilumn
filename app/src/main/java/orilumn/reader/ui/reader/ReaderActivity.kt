@@ -583,7 +583,7 @@ class ReaderActivity : ComponentActivity() {
         panelSettings = next
         effective = next
         profile = TypographicProfile.build(next, dpDensity)
-        orilumn.reader.engine.skia.SkParagraphFactory.weightAnchors = profile.fontWeightAnchors
+        // 字重不在此下发：它已是 UI 层（tier 44）声明，随 profile 进级联即生效。
         engine?.profile = profile
     }
 

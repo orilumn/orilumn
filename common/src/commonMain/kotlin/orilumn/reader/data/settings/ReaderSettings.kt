@@ -104,10 +104,17 @@ data class ReaderSettings(
     /** 字体管理隐藏字体列出开关（纯全局，默认隐藏；永不进按书 overlay，见 [PerBookSettings]）。 */
     val showHiddenFonts: Boolean = false,
     /**
-     * 按族字重锚点（族名 → CSS 字重 100..900）：该族正体（400 upright）请求改用此字重的面，
-     * 粗斜体仍自然匹配。纯全局（同 showHiddenFonts待遇）；空 = 全族自动匹配。
+     * 用户在该族选的字重（族名 → CSS 字重 100..900）。**唯一消费者是 UI 层声明**：
+     * `ReaderUiSheet.fontRules` 把它写成该槽规则的 `font-weight`（tier 44），在级联里赢过 UA/作者；
+     * `FontPoolSync` 另用它决定池里要装哪几档面。空 = 未选 ⇒ 不发声明 ⇒ 原书 `font-weight` 原样生效。
+     * 纯全局（同 showHiddenFonts 待遇）；[fontWeightAnchorsBySlot] 优先，本表仅作旧档兜底。
      */
     val fontWeightAnchors: Map<String, Int> = emptyMap(),
+    /**
+     * 按 (槽位,族) 的用户字重：key = `"fontTitle|族名"`。**槽位隔离**——
+     * 同名字族在标题/正文/代码三个槽各选各的字重，互不串（`FontSlots.slotNameOf` 出这个前缀）。
+     */
+    val fontWeightAnchorsBySlot: Map<String, Int> = emptyMap(),
 
     /**
      * 持久化结构版本（**只增不改**）：`[fromJson]` 用它识别「这份存档是哪个版本写的」，
@@ -365,6 +372,7 @@ data class ReaderSettings(
                     brightnessGestureTwo = SettingsJson.optBoolean(o, "brightnessGestureTwo", d.brightnessGestureTwo),
                     showHiddenFonts = SettingsJson.optBoolean(o, "showHiddenFonts", d.showHiddenFonts),
                     fontWeightAnchors = SettingsJson.optWeightAnchors(o, "fontWeightAnchors"),
+                    fontWeightAnchorsBySlot = SettingsJson.optWeightAnchorsMap(o, "fontWeightAnchorsBySlot", d.fontWeightAnchorsBySlot),
                     cjkLatinSpacing = migrateCjkLatinSpacing(
                         SettingsJson.optDouble(o, "cjkLatinSpacing", d.cjkLatinSpacing),
                         SettingsJson.optInt(o, "schemaVersion", 0),

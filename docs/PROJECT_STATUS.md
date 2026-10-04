@@ -833,7 +833,7 @@ kerning/连字信息只存在于字体 GPOS/GSUB，取它必须有 shaper，而 
 | Q16 | `pre code` 空行全没了 | 断行器**两侧都丢**空行（自建 `greedy` 行首 `'\n'` 跳过 + Skia 侧 `if (e > s)`）⇒ **回退阀也修不好**（排版层·上） | 确诊，**已修**（见「第三批」） |
 | Q17 | 中英之间空白怎么处理的 | **什么都没做**；`CjkLatinSpacing` 是死代码；「盒边界」在这条链路上不存在（`<code>` 不是盒，只是 `FontRun` 区间） | 已回答 → **2026-10-03 接线收口**（见文末「混排字距」） |
 | Q18 | `wrap(断行)ping_add` 断行优先级 | **先压缩空白再断行**；断在字母中间是**英语音节断词**把 `wrapping` 断成 `wrap-`+`ping`，而 `_` 断点因「判据看叶块 tag」没注入（分行控制） | 确诊，**已修**（见「第四批」） |
-| Q19 | 标题看不出粗 + 选粗细对标题无效 | `anchoredWeight` 第一行 `if (italic \|\| weight != 400) return` ⇒ 对 h1–h6 的 700 **恒不触发**；且**全仓无合成粗体**（渲染层） | 确诊，未修 |
+| Q19 | 标题看不出粗 + 选粗细对标题无效 | 根因是**架构违规**：用户字重唯一通路 `SkParagraphFactory.anchoredWeight` 在**级联之后**按族名偷换 `fontWeight`（违反 `Cascade` 决策 6「without any post-hoc mutation」），且靠 `italic`/非 400 启发式猜 ⇒ 对 h1–h6 的 700 **恒不触发** | 确诊，**已修**（2026-10-04：用户字重改为 UI 层 tier-44 声明，渲染层锚点机制整体退役；「看不出粗」因无合成粗体/无斜体面仍未处理） |
 | **Q20** | **断词行尾没有连字符**（用户指「上次发现过、没彻底解决」） | `DrawLine` 有**三个**构造点，上次只修了 canonical 那一个：**增量路径 `BoxChapterLayouter:797` 与表格格 `TableCellLines:172` 都没传 `hyphenAtEnd`** ⇒ 取默认 `false` ⇒ `placement.hyphenWidth==0` ⇒ 落墨整块跳过 | 确诊，**已修**（见「第二批」） |
 
 ### Q15 的影响面是本轮最重的一条
@@ -1231,3 +1231,151 @@ cap 不对称（级 2 = 0.5em > 级 1 = 0.25em）不是排名矛盾：cap 答的
 - **断行/行数金锁一个都没动**：四级只改 `xs` 与右缘、不改 `advances`；挤压的阈值下调是上一轮做的
   （生产口径 parity 85.0 → 60.0、比值下限 0.98 → 0.93），并保留未挤口径那把作对照
   （阈值一字未动，实测 87.14%）—— 没有那把对照就分不开「阈值下调」与「断点源退化」。
+
+---
+
+## 2026-10-04 — 用户字重从「渲染层事后改写」搬进「UI 层声明」（Q19(b) 销案）
+
+用户在平板给《Kotlin in Action, Second Edition》标题槽选多字重字体后改字重**对标题无反应**。
+三轮定位，最后一轮才是根因（前两轮是真的但只是次因）。
+
+**排查过程（留档，因为前两轮都被"修好了"骗过一次）**：
+1. **跨槽串扰**：`fontWeightAnchors` 的键只有族名（不带槽位）⇒ 正文槽的字重会命中标题/代码的族。
+2. **池被收窄**：`FontPoolSync.select` 用锚点把族候选面过滤成单面 ⇒ 400 的段落与 700 的标题抢同一张面。
+3. **决定性根因**：`SkParagraphFactory.anchoredWeight` 里 `if (italic) return weight`，而本书
+   `.fm-head`/`.fm-head1`/`.tochead` **全带 `font-style: italic`** ⇒ 标题 700 永远不被改写。
+   铁证：真机日志 5815 条锚点记录里 `slot=fontTitle` 出现 **0 次**；
+   `face-miss slot=fontTitle tag=h2 w=700->700 slant=ITALIC`。
+
+**但删掉那个 guard 不是正解。** guard 只是症状，**机制本身违反层叠铁律**：
+`anchoredWeight` 是级联跑完之后在渲染层私换 `fontWeight`，而 `Cascade.kt:15-20` 决策 6 写的是
+「the upper layers are composed and applied over the book result **without any post-hoc mutation**」。
+它还无法区分「用户选的字重」与「书里的 `font-weight:bold`」，只能靠 `italic`/非 400 之类的启发式猜。
+中途「删 guard」在真机验到 8 档字重全部命中，但被用户驳回：
+**「我希望的标题是书中 CSS 规定的样子」+「我们有样式层叠优先级规则」**。
+
+**最终做法（合规，且一字不多改）**：
+- **用户字重 = UI 层（tier 44）声明**：`ReaderUiSheet.fontRules` 在**同一条规则、同一个选择器表**上
+  补 `font-weight`（`weightFor`/`wDecl`），与 `font-family`/`line-height`/`margin`/`text-indent` 同路。
+  bySlot 优先 / legacy 兜底 / 非法值丢弃 ⇒ **没选字重就不写声明**，原书 `font-weight` 原样生效。
+- **UI 只声明它声明的**：用户只配了字重，**UI 层一个字 `font-style` 都不发** ⇒
+  书里的 `font-style: italic` 原样胜出，**一个字都不丢**（用户明确要求的语义，已写成断言）。
+- **渲染层锚点机制整体退役**：`anchoredWeight` / `weightAnchors` / `weightAnchorsBySlot` /
+  `traceAnchor` / `runFontStyle` 的 slot 形参（含 3 参重载）/ `SkiaRunMeasurer` 6 处调用点 /
+  两壳下发点 / `FontPoolSync` 向 factory 的下发，全删。
+  `runFontStyle(weight, italic)` 退回**纯映射**：`font-style` 也只映射不增删。
+- **池仍按锚点字重预装面**（`slotAnchorWeights`）——池里没有那一档，级联选中的字重在设备上无处可取；
+  同时**不再收窄成单面**。
+- **槽位隔离**：键改 `"slot|family"`（`FontSlots.slotNameOf`：code-like 优先于 heading），
+  全链路含 `LayoutParamKey`(CRC ⇒ 改字重必重排)。
+
+**三槽共用一条代码路径**（此前是同一个 `anchoredWeight` 循环、但键与基线字重不同；现在字面共用
+`fontRules`）：差异只剩「哪个槽被填」，由 `FontSlots.slotFor`/`slotNameOf` 同一路由决定。
+
+**Verification.**
+- `:common:jvmTest` 新增 `ReaderWeightSlotTest` **9 条全绿**，钉住：UI 300 压过 UA `h1{bold}`
+  与作者 `.fm-head{bold}` ⇒ 300；`italic` **仍在**；斜体与字重**共存**；没选字重 ⇒ 700 原样；
+  三槽各带各的字重（500/900/700 逐值）；非法值丢弃；legacy 表兜底；`<strong>` 在正文档 300 下**恒 700**。
+- `:engine-skia:jvmTest` **354 条 / 0 红**（`WeightAnchorTest` 改钉「渲染层不再私自改写 +
+  锚点表不得回来」；`FontPoolSyncTest` 的收窄断言改成「锚点面必须在池里但不得收窄」；
+  `FontPoolGenerationTest` 去掉对已退役字段的引用）。
+- 诊断日志（`Orilumn.Anchor` / `Orilumn.FontPool` / `SIG-HIT` / `Orilumn.FACE` face-miss）已随机制一起清掉。
+- **☑ 真机验证（vivo PA2353，《Kotlin in Action, Second Edition》· 落盘日志）**：
+  临时在 `SkiaRunMeasurer.faceTable` 加一行窄探针（`Orilumn.WREQ`，**验完已删**），打「级联选中的
+  字重/斜体到达取面层」的值。标题槽 700 → **600** 后：
+
+  | tag | 请求 | 判定 |
+  | --- | --- | --- |
+  | `h1`/`h2`/`h3` | **`w=600 slant=ITALIC`** | 用户选的 600 生效（旧机制此处恒 `w=700->700`）；**原书斜体一字不丢** |
+  | `p`/`li`/`span` | `w=400 slant=UPRIGHT` | 正文槽 400 不受标题改动影响（槽位隔离成立） |
+  | `code`/`pre` | `w=400 slant=UPRIGHT` | 代码槽独立 |
+  | `span mono=true` | `w=400 slant=ITALIC` | 书上其它斜体各自原样保留 |
+
+  落盘侧同刻为 `"fontTitle|阿里巴巴普惠体 3.0": 600`，与请求侧逐值一致。
+  **这就是旧 bug 的死因对照**：改之前 `tag=h3 w=700->700 slant=ITALIC`（`italic` 启发式把标题挡在门外）。
+  ⚠️ 本书 `.fm-head` 的斜体**声明**一直在（`slant=ITALIC`），但普惠体 3.0 无斜体面 ⇒ 不合成倾斜
+  ⇒ 肉眼仍是正体——见下方「遗留」，与层叠无关。
+  ⚠️ 装机走 `adb push /data/local/tmp` + `pm install -r`：`adb install` 会撞 vivo 的安装确认弹窗
+  （`INSTALL_FAILED_ABORTED: User rejected permissions`），且设备锁屏时必失败。
+
+**遗留（与本条无关）**：「看不出粗」「斜体选完看不出来」是**字体能力**问题，不是层叠问题 ——
+全仓无合成粗体/合成斜体（零命中），且用户实测**阿里巴巴普惠体 3.0 九个文件全正体**、无斜体面
+（`ITALIC` vs `UPRIGHT` 像素差恒为 0）⇒ 胜出的**声明**是 `italic`，丢的是「面」。
+要可见斜体只能选有斜体面的族，或实现 `docs/font-weight-plan.md` §2/§3 的「视觉模拟」（仅规划，未实现）。
+
+---
+
+## 视觉模拟：合成粗体 + 合成斜体（渲染层，2026-10-04）
+
+**动机**：中文字体（思源黑体 / 思源宋体 / 普惠体 / 方正悠宋 / 寒蝉端黑宋…）**普遍没有斜体面**。
+书里的 `font-style: italic` 赢了级联却画不出斜体 —— **声明生效、视觉没生效**。
+同一个洞也吃掉 `font-weight`：选不到更粗的面就原样，用户看着"没反应"。
+
+**用户拍板**：**不要 UI 开关**，恒定行为、默认开。粗 + 斜都合成。
+
+### 设计：判据纯函数化、单源化，且不改级联
+
+- 合成决策单源：`SkParagraphFactory.synthesisFor(faceWeight, faceSlant, reqWeight, reqItalic)`
+  —— 纯函数，只回答「设备画不画得出」，**绝不改级联结果**（守 `Cascade.kt:15-20`
+  「without any post-hoc mutation」铁律；合成一旦越界成改级联，就是 Q19(b) 那类架构违规）。
+  - `embolden = reqWeight >= 600 && reqWeight - faceWeight > 100`
+    阈值用**严格 `>`**：请求 700 落到 600 面是 CSS 正常匹配、500 落 400 同理，都**不算缺面**。
+  - `oblique = reqItalic && faceSlant != FontSlant.ITALIC`
+  - `faceWeight`/`faceSlant` 取**实到那张面**的 `Typeface.fontStyle`
+    （实测：单面族请求 700/ITALIC → 读回 **400/UPRIGHT**，即面确实不存在）。
+- Font 构造单源：`SkParagraphFactory.synthFont(tf, sizePx, reqWeight, reqItalic)`。
+  渲染层从 Typeface 造 Font 的**全部 5 条路径**（`faceTable` / `faceForCp` 保底 / `universalPass` /
+  `fallbackWidth` / `systemFallbackFace`）都改走它 —— 合成不能有"某条路径漏掉"的形态。
+
+### 合成粗体：零绘制侧改动
+
+合成粗体是 `Font.isEmboldened` **属性**，不是绘制指令 ⇒ **不可能被告墨路径漏掉**。
+实测（skiko 0.144.6，jvmTest 钉死）：加墨 **+18.5%**，**advance 逐值不变**（263.552 前后同值）
+⇒ **零几何影响、零重排**，断行与分页完全无感。
+
+### 合成斜体：基线处画布剪切
+
+`drawOblique(canvas, baseY, oblique)` = `save / translate(0,baseY) / skew(SHEAR,0) / translate(0,-baseY) / restore`。
+`oblique=false` **零开销**。
+
+切在基线而非原点：切原点会把整行沿 y 平移 `|shear|×baseY ≈ 24px`，基线不再水平、字与下一行全错。
+
+**`SYNTHETIC_OBLIQUE_SHEAR = -0.203f`（负号是刻意的）**。实测 skiko 语义：
+`Canvas.skew(a, b)` = `x' = x + a·y`、`y' = y + b·x`（**第一个参数**才是 x-by-y 系数），
+而**画布 y 轴向下** ⇒ 基线上方 `y − baseY < 0` ⇒ 要让字顶**右**倾必须 `a < 0`。
+倾角 ≈11.5°（浏览器合成斜体约 14°，对汉字更保守）。
+
+### Verification
+
+- **`:engine-skia:jvmTest` 新增 `VisualSynthesisTest` 14 条全绿**：决策纯函数逐例 / 真字体 advance
+  逐值不变 / 基线锚定**含负对照**（原点剪切须推移 >8px，否则断言没牙齿）/ 端到端 `drawLines` /
+  **生产取面出口 `faceForCp` 覆盖** / 槽位隔离 / **方向锁**（裸几何，与文字实现解耦）。
+- **全量 `jvmTest` 1448 条 / 1 红**：唯一红是既有已登记的 `CrossChapterPreflightProbeTest`
+  （15s 超时，在 `common` 排版预检侧，本轮只动 `engine-skia`，连跑 2 次稳定复现，非本轮引入）。
+- **☑ 真机（vivo PA2353）**，临时探针**验完已删**，干净包日志再无 `Orilumn.Synth`：
+  - 落盘日志：`tag=h1/h2 fam=思源黑体 req=w500/ITALIC got=w500/UPRIGHT embolden=false oblique=true`
+    —— `embolden=false` **正确**（思源黑体有真 500 面 ⇒ 不合成）；`body`/其它 tag 不出现 ⇒ **三槽不串**。
+  - 生产代码路径直接量（真机真面，同一套 `drawOblique`）：
+    `shear=-0.203 upright(top=58 bot=40) → oblique(top=69 bot=40)`
+    —— 字顶**右移 11px**（正斜）、字脚**不动**（基线锚定成立），与 JVM **逐值一致**。
+  - **同页 A/B 像素对照**（只翻 `SYNTHETIC_OBLIQUE_SHEAR`：`−0.203` vs `0`）：
+
+    | 行 | y 范围 | 行高 | 有差异行 | 顶 1/4 dx | 底 1/4 dx | 判定 |
+    | --- | --- | --- | --- | --- | --- | --- |
+    | 标题 | 280-348 | 69 | **55/69** | **+10.4** | **+0.5** | 字顶右移 = **正斜体** ✔ |
+    | 其余 24 行 | — | 43-48 | 0/43… | +0.0 | +0.0 | **dx 恒为 0** ⇒ 正文零影响 |
+
+### 明确划在边界外（记录在案的取舍，非遗漏）
+
+`paintText`（list marker）与 `drawRuby` 注音走 `Paragraph.paint`，而**同一 paragraph 也用于测量** ——
+套剪切会破坏**量画同源**，故这两处不合成。已写进 `LineWindowDrawer` 类 KDoc。
+
+### 两条判据教训（本轮最贵）
+
+1. **方向判据必须独立于实现推导**。第一版断言写成「字顶**左**移」，恰好把**反斜 bug 一起钉住**、
+   测试全绿 —— 探针照抄实现而不是照抄几何。真正的斜体是字顶**右**倾。
+   现在方向锁用**裸几何**（矩形在 y=100 被 `skew(±0.25,0)` 推到 125/74 + 常量必须为负），
+   与文字实现彻底解耦。
+2. **A/B 对照必须校验 APK**。曾只跑 `jvmTest` 没跑 `assembleDebug`，push 的是**旧产物**当基线，
+   把**正确**的实现测成"反斜"，差点把符号又改回去。现在两次装机都以 `shasum -a256`
+   确认为当场构建（`e38d6d3d…` vs `43c1c3cb…`）。截图对照前先问"这两个输入真的是我要比的那两版吗"。

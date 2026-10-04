@@ -55,8 +55,11 @@ data class TypographicProfile(
     val fontBody: String,
     val fontTitle: String,
     val fontCode: String,
-    /** 按族字重锚点（族名 → CSS 字重）：该族正体请求改用此字重的面（见 FontPoolSync）。 */
+    /** 用户在该族选的字重（族名 → CSS 字重）：UI 层发 `font-weight` 声明（`ReaderUiSheet.fontRules`）。
+     *  `FontPoolSync` 用它决定预装哪几档面。 */
     val fontWeightAnchors: Map<String, Int> = emptyMap(),
+    /** 同上但**按槽位隔离**：key = "fontTitle|族名"。优先于 [fontWeightAnchors]。 */
+    val fontWeightAnchorsBySlot: Map<String, Int> = emptyMap(),
     /** Master switch to follow the original book styles. */
     val useOriginalStyle: Boolean,
     /** 排版主题 key ("original" | "modern" | "traditional"); drives the theme layer stylesheet
@@ -147,6 +150,7 @@ data class TypographicProfile(
                 fontTitle = s.fontTitle,
                 fontCode = s.fontCode,
                 fontWeightAnchors = s.fontWeightAnchors,
+                fontWeightAnchorsBySlot = s.fontWeightAnchorsBySlot,
                 useOriginalStyle = original,
                 layoutTheme = s.layoutTheme,
                 coverStretch = s.coverStretch,

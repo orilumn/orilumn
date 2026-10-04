@@ -53,6 +53,18 @@ object SkiaFontPool {
     @Volatile
     private var cachedMgrs: List<FontMgr>? = null
 
+    /**
+     * 字库代次：[setEmbedded] 实变即 +1（不变不加）。
+     *
+     * 取面缓存（[SkiaRunMeasurer] 的面表/保底表，键里只有族栈字重字号、没有池身份）
+     * 靠它判断过期：池内容变了而缓存不认，就是“换字体/换字重要退出重进才生效”。
+     */
+    @Volatile
+    private var generation = 0L
+
+    /** 当前字库代次（只读）。 */
+    fun generation(): Long = generation
+
     /** 当前共用集合（断行/绘制默认参数都取它）。 */
     fun current(): FontCollection =
         cached ?: synchronized(this) {
@@ -88,6 +100,7 @@ object SkiaFontPool {
             this.fonts = fonts.toList()
             cached = null
             cachedMgrs = null
+            generation++
         }
         return true
     }

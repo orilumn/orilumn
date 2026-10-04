@@ -11,12 +11,24 @@ import orilumn.reader.engine.html.CODE_TAGS
  */
 object FontSlots {
     fun slotFor(tag: String?, monospace: Boolean, body: String, title: String, code: String): String {
-        val codeLike = monospace || tag in CODE_TAGS
+        val codeLike = monospace || (tag != null && tag in CODE_TAGS)
         val heading = tag != null && tag.length == 2 && tag[0] == 'h' && tag[1].digitToIntOrNull() != null
         return when {
             codeLike -> code
             heading -> title
             else -> body
+        }
+    }
+
+    /** 与 [slotFor] 同一路由，但返回**槽位字段名**（`"fontBody"`/`"fontTitle"`/`"fontCode"`）。
+     *  给「按槽位寻址」的键用（当前唯一调用方：`ReaderUiSheet` 查该槽选定的字重）。 */
+    fun slotNameOf(tag: String?, monospace: Boolean): String {
+        val codeLike = monospace || (tag != null && tag in CODE_TAGS)
+        val heading = tag != null && tag.length == 2 && tag[0] == 'h' && tag[1].digitToIntOrNull() != null
+        return when {
+            codeLike -> "fontCode"
+            heading -> "fontTitle"
+            else -> "fontBody"
         }
     }
 }

@@ -264,40 +264,81 @@ data class TypographicProfile(
          */
         @JvmStatic
         fun nightBackgroundOf(dayColor: Int): Int {
-            val r = red(dayColor) / 255f
-            val g = green(dayColor) / 255f
-            val b = blue(dayColor) / 255f
+            val l = hslLightness(dayColor)
+            if (l < 0.5f) {
+                // Day background is already dark, do nothing
+                return dayColor
+            }
+            val (h, s) = hslHueSaturation(dayColor, l)
+            var newL = 1.0f - l
+            var newS = s
+            // Clamp saturation to avoid over-saturated dark colors which are harsh on eyes
+            newS = minOf(newS, 0.12f)
+            // Clamp lightness to avoid pure black (helps reduce OLED flicker and improves contrast)
+            newL = maxOf(newL, 0.08f)
+            return hslToRgb(h, newS, newL)
+        }
 
+        /**
+         * HSL 明度（0..1），**全仓「颜色暗不暗」的唯一判据**。
+         *
+         * 抽出来是为了让 [nightBackgroundOf] 与 [isDarkBackground] 共用同一阈值
+         * （`l < 0.5`）：两个用途一旦各写一份，日后改阈值就会漏改一处，
+         * 出现「夜间背景按 A 判暗、状态栏图标按 B 判亮」的错位。
+         */
+        private fun hslLightness(color: Int): Float {
+            val r = red(color) / 255f
+            val g = green(color) / 255f
+            val b = blue(color) / 255f
+            return (maxOf(r, g, b) + minOf(r, g, b)) / 2f
+        }
+
+        /** 色相与饱和度（0..1），依赖已算好的 [hslLightness] 以免重复扫通道。 */
+        private fun hslHueSaturation(color: Int, l: Float): Pair<Float, Float> {
+            val r = red(color) / 255f
+            val g = green(color) / 255f
+            val b = blue(color) / 255f
             val max = maxOf(r, g, b)
             val min = minOf(r, g, b)
-            var h = 0f
-            var s = 0f
-            val l = (max + min) / 2f
-
-            if (max != min) {
-                val d = max - min
-                s = if (l > 0.5f) d / (2 - max - min) else d / (max + min)
-                h = when (max) {
-                    r -> ((g - b) / d + if (g < b) 6 else 0) / 6f
-                    g -> ((b - r) / d + 2) / 6f
-                    b -> ((r - g) / d + 4) / 6f
-                    else -> 0f
-                }
+            if (max == min) return 0f to 0f
+            val d = max - min
+            val s = if (l > 0.5f) d / (2 - max - min) else d / (max + min)
+            val h = when (max) {
+                r -> ((g - b) / d + if (g < b) 6 else 0) / 6f
+                g -> ((b - r) / d + 2) / 6f
+                b -> ((r - g) / d + 4) / 6f
+                else -> 0f
             }
-
-            return if (l < 0.5f) {
-                // Day background is already dark, do nothing
-                dayColor
-            } else {
-                var newL = 1.0f - l
-                var newS = s
-                // Clamp saturation to avoid over-saturated dark colors which are harsh on eyes
-                newS = minOf(newS, 0.12f)
-                // Clamp lightness to avoid pure black (helps reduce OLED flicker and improves contrast)
-                newL = maxOf(newL, 0.08f)
-                hslToRgb(h, newS, newL)
-            }
+            return h to s
         }
+
+        /**
+         * 这个颜色算不算**暗色**（背景用）。判据与 [nightBackgroundOf] 的「已暗则原样保留」同一阈值。
+         *
+         * 层级：**排版层**背景色单源的派生查询。调用方是用户层（Android 状态栏图标明暗），
+         * 但**判据本身不许下沉到调用方重写** —— 一旦下游自己算一遍灰度，就会与夜间背景
+         * 的暗色判定分叉。
+         */
+        @JvmStatic
+        fun isDarkBackground(color: Int): Boolean = hslLightness(color) < 0.5f
+
+        /**
+         * 系统栏图标该用**深色**（true）还是**浅色**（false）。
+         *
+         * 语义对齐 Android 的 `WindowInsetsControllerCompat.isAppearanceLightStatusBars`：
+         * true = 「状态栏底色是亮的」⇒ 系统画深色图标。
+         *
+         * **为什么不看 `scheme`**：夜间模式下 [colors] 必给暗底（[nightBackgroundOf] 保证），
+         * 所以 `scheme != "night"` 在**夜间**一直是对的；但 `day` 分支的底色就是 [ReaderSettings.bgOverride]
+         * 原值，用户可以用滑块调深、可以存深色自定义预设 —— 那时底色是暗的而 `scheme` 仍是 `day`，
+         * 判「深色图标」就画在暗底上，**看不见**。故必须按**实际底色**判。
+         *
+         * ⚠ **边界**：书中 CSS 自带的背景图会铺在底色之上。本函数只看纯色底色，
+         * 故「深色底 + 浅色背景图」时图标色仍可能不合 —— 背景图非设置项（书里 HTML 自带），
+         * 要判就得采样位图，超出本函数职责，不在这里猜。
+         */
+        @JvmStatic
+        fun wantsLightBarIcons(s: ReaderSettings): Boolean = !isDarkBackground(colors(s).first)
 
         /** Convert HSL (h: 0..1, s: 0..1, l: 0..1) to packed ARGB Int. */
         private fun hslToRgb(h: Float, s: Float, l: Float): Int {

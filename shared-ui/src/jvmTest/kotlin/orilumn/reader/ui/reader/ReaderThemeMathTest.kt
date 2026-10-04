@@ -2,8 +2,10 @@ package orilumn.reader.ui.reader
 
 import orilumn.reader.data.epub.TocItem
 import orilumn.reader.data.settings.ReaderSettings
+import orilumn.reader.engine.text.TypographicProfile
 import androidx.compose.ui.graphics.toArgb
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -113,6 +115,31 @@ class ReaderThemeMathTest {
         assertEquals(0xFFFAF8F4.toInt(), day.bg.toArgb())
         assertEquals(0xFF1C1C1E.toInt(), night.bg.toArgb())
         assertNotEquals(day.bg, night.bg)
+    }
+
+    /**
+     * 内置 8 个主题全是浅底 ⇒ 系统栏图标判据必须给「深色图标」，与修复前的旧判据
+     * （`scheme != "night"`）结论一致，即本轮修状态栏图标色**没有改动任何既有主题的表现**。
+     *
+     * 这条放在 `shared-ui` 而非 `common`：内置主题清单是 UI 层的东西，而依赖方向是
+     * `shared-ui → common`，`common` 的测试够不着 `ReaderThemeMath`。
+     *
+     * 若日后新增内置主题时挑了个深色，这条会红 —— 那时是有意的（该主题本就需要浅色图标），
+     * 记得连同 [TypographicProfile.isDarkBackground] 的期望一起更新。
+     */
+    @Test
+    fun `every built-in theme is light so bar icons stay dark as before`() {
+        val presets = ReaderThemeMath.BUILTIN_THEMES.filter { it.bg.isNotBlank() } // 原书设置无固定底色
+        assertTrue("内置主题不应为空", presets.isNotEmpty())
+        for (p in presets) {
+            val bg = ReaderThemeMath.parseHex(p.bg)
+            assertFalse("内置主题「${p.label}」(${p.bg}) 不该被判成暗色", TypographicProfile.isDarkBackground(bg))
+            val s = ReaderSettings.DEFAULT.copy(scheme = "day", bgOverride = p.bg)
+            assertTrue(
+                "内置主题「${p.label}」(${p.bg}) 是浅底，必须仍要深色图标（与旧判据一致）",
+                TypographicProfile.wantsLightBarIcons(s),
+            )
+        }
     }
 }
 

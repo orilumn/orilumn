@@ -585,6 +585,9 @@ class ReaderActivity : ComponentActivity() {
         profile = TypographicProfile.build(next, dpDensity)
         // 字重不在此下发：它已是 UI 层（tier 44）声明，随 profile 进级联即生效。
         engine?.profile = profile
+        // 底色可能随滑块翻过暗/亮阈值 ⇒ 状态栏图标明暗得跟着换，否则拖到深色时看不见。
+        // 走 syncBarIconTone 而非 applySystemBars：后者会 show/hide 系统栏，逐帧调会抖。
+        syncBarIconTone()
     }
 
     /** 面板实时预览（排版项）：应用 + 防抖重排，不落盘。 */
@@ -598,6 +601,7 @@ class ReaderActivity : ComponentActivity() {
         effective = next
         applyPhysicalBrightness(next)
         persistSettings(next)
+        syncBarIconTone()
     }
 
     /**
@@ -731,9 +735,7 @@ class ReaderActivity : ComponentActivity() {
         window.statusBarColor = Color.TRANSPARENT
         val c = barsController()
         c.show(WindowInsetsCompat.Type.systemBars())
-        // 白天浅底用深色图标，夜间深底用浅色图标；之前写死白色致白天“栏出来了也看不见”。
-        c.isAppearanceLightStatusBars = effective.scheme != "night"
-        c.isAppearanceLightNavigationBars = effective.scheme != "night"
+        syncBarIconTone()
     }
 
     /** 栏隐藏（阅读中）：controller.hide 为主（手势 pill 唯一可靠路径），legacy 标志位兼顾旧 ROM。 */
@@ -747,8 +749,40 @@ class ReaderActivity : ComponentActivity() {
                 View.SYSTEM_UI_FLAG_FULLSCREEN or
                 View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
         window.statusBarColor = Color.TRANSPARENT
-        c.isAppearanceLightStatusBars = effective.scheme != "night"
+        // 隐藏期间也必须同步：栏虽不可见，但 appearance 标志是持久的 —— 不更新的话，
+        // 用户切夜间/调深背景后图标要等「栏重新显示」那一次才拿到新值（阅读中栏一直是隐藏的）。
+        syncBarIconTone()
     }
+
+    /**
+     * 同步系统栏**图标明暗**（不碰显隐、不触发动画）。
+     *
+     * 判据按**实际底色**而不是 `scheme`：夜间底色必暗（`TypographicProfile` 保证），但 `day` 分支的
+     * 底色就是 `bgOverride` 原值 —— 用户用滑块调深或存深色预设时底色是暗的而 `scheme` 仍是 `day`，
+     * 判「深色图标」就画在暗底上、看不见。判据单源在 `TypographicProfile.wantsLightBarIcons`。
+     *
+     * **为什么单独成函数、不并进 show/hide**：设置面板里拖背景色滑块会逐帧走 [liveApply]，
+     * 若那里调 `applySystemBars()` 就会反复 show/hide 系统栏 ⇒ 栏抖 + 每帧触发显隐动画。
+     * 这里只设 appearance 标志，且**只在判定翻转时才动**（[barsLightToneApplied] 去重），
+     * 于是拖滑块绝大多数帧零 native 调用。
+     */
+    private fun syncBarIconTone() {
+        val light = TypographicProfile.wantsLightBarIcons(effective)
+        if (light == barsLightToneApplied) return
+        barsLightToneApplied = light
+        barsController().apply {
+            isAppearanceLightStatusBars = light
+            isAppearanceLightNavigationBars = light
+        }
+    }
+
+    /**
+     * 上次已施加到系统栏的图标明暗（true = 浅底深色图标）。
+     *
+     * **初值取反**（`false` 而实际多半是 `true`）：保证 [syncBarIconTone] 首次必落一次 native 设置，
+     * 否则「首次恰好等于初值」的组合会漏设、图标停在系统默认（跟随系统主题）上。
+     */
+    private var barsLightToneApplied = false
 
     /** 系统栏控制器：transient 模式——边缘滑动临时 peek 后自动回藏，不与应用工具栏状态打架。 */
     private fun barsController(): WindowInsetsControllerCompat =

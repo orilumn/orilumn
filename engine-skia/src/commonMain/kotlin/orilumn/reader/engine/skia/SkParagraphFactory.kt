@@ -3,6 +3,7 @@ package orilumn.reader.engine.skia
 import orilumn.reader.engine.css.TextAlign
 import orilumn.reader.engine.html.CODE_TAGS
 import org.jetbrains.skia.Data
+import org.jetbrains.skia.Font
 import org.jetbrains.skia.FontMgr
 import org.jetbrains.skia.FontStyle
 import org.jetbrains.skia.FontWeight
@@ -41,42 +42,121 @@ import org.jetbrains.skia.paragraph.TypefaceFontProvider
  */
 object SkParagraphFactory {
 
-    /**
-     * 按族字重锚点（族名 → CSS 字重，渲染层·进程级状态，与 [SkiaFontPool] 同模式）：
-     * 宿主随 profile 下发（`FontPoolSync.syncPool` + 两壳 profile 应用点），度量/绘制
-     * 经同一 factory 消费，量画一致。语义沿 `ReaderSettings.fontWeightAnchors`：
-     * 该族正体（400 upright）请求改用锚点字重，粗斜体自然匹配。
-     */
-    @Volatile
-    var weightAnchors: Map<String, Int> = emptyMap()
-
-    /** 锚点改写（纯函数）：正体（非斜体）且族命中锚点即改用锚点字重，否则原样。 */
-    fun anchoredWeight(families: List<String>, weight: Int, italic: Boolean): Int {
-        if (italic) return weight
-        for (f in families) {
-            val a = weightAnchors[f.trim()].takeIf { it in 100..900 } ?: continue
-            return a
-        }
-        return weight
-    }
-
     /** 平台默认字体管理器：即 [systemFonts] 接缝（母文档 §3 系统字体集合边界）。 */
     fun defaultFontMgr(): FontMgr = systemFonts()
 
     /**
-     * 一次 run 的 [FontStyle]（字重锚点已应用）——[paragraphStyle] 与逐码本量宽器
-     * （[SkiaRunMeasurer]）的**单源**。两者必须逐值一致，否则「量出来的面」与「段落选的面」不是同一张表，
-     * 断行几何与绘制字形错位（§2.2(d) 的同源约束）。
+     * 一次 run 的 [FontStyle] ——[paragraphStyle] 与逐码本量宽器（[SkiaRunMeasurer]）的**单源**。
+     * 两者必须逐值一致，否则「量出来的面」与「段落选的面」不是同一张表，断行几何与绘制字形错位
+     * （§2.2(d) 的同源约束）。
+     *
+     * **这里只做「CSS 已算定的值 → Skia 值」的一一映射，不再改写字重。**
+     * 用户字重是读者层声明（`ReaderUiSheet.fontRules` 发 `font-weight`，tier 44），在级联里就赢了；
+     * 渲染层再按族名偷偷换字重就是 `Cascade` 决策 6 明令禁止的 post-hoc mutation（且它无法区分
+     * 「用户选的字重」与「书里的 `font-weight:bold`」，只能靠 `italic`/非 400 之类的启发式猜，
+     * 于是标题恒不触发、跨槽串扰）。同理 `font-style` 也只是映射：书里的 `italic` 若胜出就传 ITALIC，
+     * 渲染层无权增删。
+     *
+     * 字重**全粒度原样透传**（`FontStyle` 任意 100..900，系统面经 `matchFamilyStyle` 就近命中）；
+     * 旧的二值 `NORMAL`/`BOLD` 会吞掉 300/500/600/800/900 与用户选的那一档，已退役。
      */
-    fun runFontStyle(families: List<String>, weight: Int, italic: Boolean): FontStyle =
+    fun runFontStyle(weight: Int, italic: Boolean): FontStyle =
         FontStyle(
-            // 字重全粒度透传（SkFontStyle 任意 100..900，系统面经 matchFamilyStyle 就近命中；
-            // 旧二值 NORMAL/BOLD 会吞掉 300/500/600/800/900 与用户锚点，已退役）。
-            // 用户锚点：该族正体 400 改按锚点字重要求选面（系统/导入同效），粗斜体自然匹配。
-            anchoredWeight(families, weight, italic),
+            weight,
             FontWidth.NORMAL,
             if (italic) FontSlant.ITALIC else FontSlant.UPRIGHT,
         )
+
+    /**
+     * **合成（视觉模拟）决策**（渲染层·字体能力）：级联已经判定的字重/斜体，设备上**没有对应面**时
+     * 补画。这是 CSS `font-synthesis: weight style`（浏览器默认 `weight style`）在本仓的落地。
+     *
+     * ## 为什么必须有
+     *
+     * 中文字体几乎**没有斜体面**（思源黑体/思源宋体/Noto Sans SC/阿里巴巴普惠体 3.0 实测均为 0 个
+     * Italic 面），单字重字体更是满书架都是。于是「级联判定了 `italic`」与「设备画得出斜体」之间
+     * 长期断裂：声明赢了、字形没变。**这不是层叠问题**（声明从来没丢过），是字体能力问题。
+     *
+     * ## 判据：`Typeface.fontStyle` 读回的是**实到那张面**的真实值
+     *
+     * 实测（`engine-skia/jvmTest`，普惠体 + Arial 四档）：
+     * - 单面族请求 `700/ITALIC` ⇒ 读回 `400/UPRIGHT`（**真实面**，不是请求值）；
+     * - 有真斜体面时请求 `400/ITALIC` ⇒ 读回 `ITALIC`。
+     * 所以「实到哪张面」不必猜，读 `fontStyle` 即可，也不会双重合成（有真面就不补）。
+     *
+     * ## 两条阈值取自 CSS 惯例
+     *
+     * - [EMBOLDEN_MIN_WEIGHT]：CSS 字体匹配把 `500` 归到 `400` 属**正常匹配**而非「缺面」，
+     *   故 500 及以下不合成（否则每个只装 Regular 的族都会被糊成粗体）。
+     * - [EMBOLDEN_MIN_GAP]：缺口必须**严格超过**它才算缺面。请求 700 落到 600 是 CSS 匹配的
+     *   **正常结果**（算法先找 `< target` 中最接近的、直到 500），不是「没找到粗体面」。
+     */
+    data class FontSynthesis(val embolden: Boolean = false, val oblique: Boolean = false) {
+        val none: Boolean get() = !embolden && !oblique
+
+        companion object {
+            val NONE = FontSynthesis()
+        }
+    }
+
+    /** 合成粗体的最低请求字重（CSS 惯例：`>=500` 落 `400` 是正常匹配，不是缺面）。 */
+    const val EMBOLDEN_MIN_WEIGHT = 600
+
+    /** 合成粗体的字重缺口下限（请求 700 落到 600 缺口恰为 100，属正常匹配 ⇒ 不补）。 */
+    const val EMBOLDEN_MIN_GAP = 100
+
+    /**
+     * 合成斜体的剪切量（tan θ），**符号是负的，别改**。
+     *
+     * ## 为什么是负数
+     *
+     * 实测（`TmpSkewProbeTest` 跑完即删，结论已写进这里）：skiko 的
+     * `Canvas.skew(a, b)` 语义是 **`x' = x + a·y`、`y' = y + b·x`**（**第一个参数**才是「x 被 y 带偏」的
+     * 系数；传 `skew(0.25, 0)` 于 (100,100) 的方块会落到 x=125 = 100 + 0.25×100，可证）。
+     *
+     * 而**画布 y 轴向下**：基线上方的点 `y − baseY < 0`。要让字顶**向右倾**（这才是斜体；
+     * 反斜是错的），必须让 `a·(y − baseY) > 0`，即 `a < 0`。
+     *
+     * 实测对照（Arial 80px，字顶 x）：直立 61，`+0.203` → 49（**左移，反斜，错**），
+     * `-0.203` → 72（右移，正斜，对）。
+     *
+     * 倾角取 ≈11.5°：一眼看得出是斜体，又不至于把宋体拗坏（浏览器合成斜体约 14°，这里更保守）。
+     */
+    const val SYNTHETIC_OBLIQUE_SHEAR = -0.203f
+
+    /**
+     * 纯函数：级联要的（[reqWeight]/[reqItalic]）vs 实到这张面的（[faceWeight]/[faceSlant]）
+     * ⇒ 要不要补。**不改级联结果**，只回答「设备画不画得出」。
+     *
+     * 实到面比请求**更粗**（请求 600 落到 Black 1000）不合成：已经比要的更粗，再补就是画蛇添足。
+     */
+    fun synthesisFor(faceWeight: Int, faceSlant: FontSlant, reqWeight: Int, reqItalic: Boolean): FontSynthesis =
+        FontSynthesis(
+            embolden = reqWeight >= EMBOLDEN_MIN_WEIGHT && reqWeight - faceWeight > EMBOLDEN_MIN_GAP,
+            oblique = reqItalic && faceSlant != FontSlant.ITALIC,
+        )
+
+    /**
+     * 造「带合成」的 [Font]——**渲染层里每处从 [Typeface] 造 [Font] 都必须走这里**，
+     * 否则某条取面路径会漏掉合成（漏一条 = 那条路径上的字仍然看不出粗）。
+     *
+     * [synthesisFor] 的 `oblique` **不在这里落**：Skia 的 [Font] 没有斜体属性，合成斜体是
+     * **画布剪切**（[SYNTHETIC_OBLIQUE_SHEAR]，见 `LineWindowDrawer`），绘制侧按
+     * [GlyphPainter.GlyphStyle.oblique] 施加；该标志由 [needsOblique] 按**同一判据**就地重算
+     * （只读 `Typeface.fontStyle`，无 native 调用，不值得为它再存一份）。
+     */
+    fun synthFont(tf: Typeface, sizePx: Float, reqWeight: Int, reqItalic: Boolean): Font =
+        Font(tf, sizePx).apply {
+            if (synthesisFor(tf.fontStyle.weight, tf.fontStyle.slant, reqWeight, reqItalic).embolden) {
+                isEmboldened = true
+            }
+        }
+
+    /** 这个 [Font] 该不该按合成斜体落墨（判据与 [synthFont] 同源，供绘制侧取用）。 */
+    fun needsOblique(font: Font, reqWeight: Int, reqItalic: Boolean): Boolean {
+        val tf = font.typeface ?: return false
+        return synthesisFor(tf.fontStyle.weight, tf.fontStyle.slant, reqWeight, reqItalic).oblique
+    }
 
     /** 平台默认字体集合（与 [systemFonts] 同一来源，度量/绘制共用）。 */
     fun defaultCollection(): FontCollection =
@@ -167,7 +247,7 @@ object SkParagraphFactory {
          */
         forceStrut: Boolean = false,
     ): ParagraphStyle {
-        val style = runFontStyle(families, weight, italic)
+        val style = runFontStyle(weight, italic)
         val resolved = resolveFamilies(tag, families, monospace, fontManager)
         return ParagraphStyle().apply {
             this.alignment = toSkiaAlignment(alignment)

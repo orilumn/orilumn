@@ -293,7 +293,10 @@ fun ReaderSettingsPanel(
                         // 开关走无重排提交（纯全局设置，直写全局 + 落盘；见 showHiddenFonts）。
                         ItemKey(onEnter = { onCommitLight(s.copy(showHiddenFonts = !s.showHiddenFonts)) })
                     is FontPanelRow.FollowOriginal ->
-                        ItemKey(onEnter = { onCommitTypography(setField(s, slotKey, "")) })
+                        ItemKey(onEnter = {
+                            val clearedSlotAnchors = s.fontWeightAnchorsBySlot.filterKeys { !it.startsWith("$slotKey|") }
+                            onCommitTypography(setField(s, slotKey, "").copy(fontWeightAnchorsBySlot = clearedSlotAnchors))
+                        })
                     is FontPanelRow.Import ->
                         // 双按钮同行：回车走主动作（本地导入优先；单开无线时进无线下钻页）。
                         ItemKey(onEnter = { if (canFontImport) onFontImport() else stack.add(Sub.WifiImport) })
@@ -310,7 +313,10 @@ fun ReaderSettingsPanel(
                     val opts = fontEntries.filter { it.family == fam }.weightChoices()
                     opts.map { (w, _) ->
                         ItemKey(onEnter = {
-                            onCommitTypography(setField(s, slotKey, fam).copy(fontWeightAnchors = s.fontWeightAnchors + (fam to w)))
+                            onCommitTypography(setField(s, slotKey, fam).copy(
+                                fontWeightAnchors = s.fontWeightAnchors,
+                                fontWeightAnchorsBySlot = s.fontWeightAnchorsBySlot + ("$slotKey|$fam" to w),
+                            ))
                         })
                     }
                 }
@@ -715,11 +721,17 @@ fun ReaderSettingsPanel(
                                     val isCurrent = fieldOf(s, slotKey) == fam
                                     WeightPickerPage(
                                         options = opts,
-                                        selectedWeight = if (isCurrent) s.fontWeightAnchors[fam] else null,
+                                        selectedWeight = if (isCurrent) {
+                                            val k = "$slotKey|$fam"
+                                            s.fontWeightAnchorsBySlot[k] ?: s.fontWeightAnchors[fam]
+                                        } else null,
                                         nav = nav,
                                         p = p,
                                         onPickWeight = { w ->
-                                            onCommitTypography(setField(s, slotKey, fam).copy(fontWeightAnchors = s.fontWeightAnchors + (fam to w)))
+                                            onCommitTypography(setField(s, slotKey, fam).copy(
+                                                fontWeightAnchors = s.fontWeightAnchors,
+                                                fontWeightAnchorsBySlot = s.fontWeightAnchorsBySlot + ("$slotKey|$fam" to w),
+                                            ))
                                         },
                                         onMouseMove = onMove,
                                         listState = listState,

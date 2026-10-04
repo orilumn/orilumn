@@ -58,7 +58,6 @@ class DesktopReaderHost(
 ) : ReaderHost {
 
     private var profile: TypographicProfile = TypographicProfile.build(settings, density)
-        .also { orilumn.reader.engine.skia.SkParagraphFactory.weightAnchors = it.fontWeightAnchors }
     private val scopeJob = SupervisorJob()
     private val hostScope = CoroutineScope(scopeJob + Dispatchers.Default)
     private val ioScope = CoroutineScope(scopeJob + Dispatchers.IO)
@@ -303,10 +302,9 @@ class DesktopReaderHost(
             controller.setViewport(viewW.coerceAtLeast(16), viewH.coerceAtLeast(16))
         }
 
-    /** 换 profile 三件套（两段共用）：重建 profile → 字重锚点 → 控制器持有 → 追装字库池。 */
+    /** 换 profile（两段共用）：重建 profile（字重随 UI 层声明进级联）→ 控制器持有 → 追装字库池。 */
     private suspend fun applyProfile(next: ReaderSettings) {
         profile = TypographicProfile.build(next, density)
-        orilumn.reader.engine.skia.SkParagraphFactory.weightAnchors = profile.fontWeightAnchors
         controller.profile = profile
         topUpSkiaFonts(orilumn.reader.engine.css.FontDemand.EMPTY)
     }

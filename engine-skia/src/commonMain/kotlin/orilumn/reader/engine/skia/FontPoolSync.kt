@@ -39,26 +39,34 @@ object FontPoolSync {
         bookEntries: List<SkiaFontPool.EmbeddedFont>,
         fileSize: (String) -> Long?,
         /**
-         * 按族字重锚点（族名 → CSS 字重）：该族只装此字重的面（直斜各一），
-         * Skia 按内禀字重选面——池里多档并存时换 triple 也无用，必须整桶换掉。
-         * 无匹配面回退自然选择。
+         * 用户选定的字重（按槽位隔离的键 `"slot|family"`，外加无槽位的旧表）。
+         * **只用于把该档面预装进池**——用户在 UI 选的字重经 `ReaderUiSheet` 以 tier-44 声明进级联，
+         * 渲染层直接拿到那个值；渲染层无权改写（见 `SkParagraphFactory.runFontStyle`）。
+         * 池里必须有这一档面，否则级联选中的字重在设备上无处可取（回落成默认面 ⇒ 用户看着"没反应"）。
          */
+        anchorsBySlot: Map<String, Int> = emptyMap(),
         anchors: Map<String, Int> = emptyMap(),
     ): Selection {
-        val triples = triplesFor(slotFamilies, setOf(400, 700), setOf(false, true)) +
+        val slotAnchorWeights = buildSet {
+            for (fam in slotFamilies) {
+                anchorsBySlot["fontBody|$fam"]?.let { add(it) }
+                anchorsBySlot["fontTitle|$fam"]?.let { add(it) }
+                anchorsBySlot["fontCode|$fam"]?.let { add(it) }
+                anchors[fam]?.let { add(it) }
+            }
+            // 恒保 400/700：UA `h1..h6{bold}` 与正文默认 400 在任何书里都会出现，
+            // 不装这两档等于连原书基线都画不出来（用户没选字重时也必须有面）。
+            add(400); add(700)
+        }
+        val triples = triplesFor(slotFamilies, slotAnchorWeights, setOf(false, true)) +
             triplesFor(demand.families, demand.weights + setOf(400, 700), if (demand.italic) setOf(false, true) else setOf(false))
         if (triples.isEmpty()) return Selection(emptyList(), emptyMap(), "#" + bookSig(bookEntries))
         val selected = triples.flatMap { (fam, w, i) ->
             val family = faces.filter { it.familyName == fam || it.displayName == fam }
             if (family.isEmpty()) return@flatMap emptyList<FontFace>()
-            val bucket = anchors[fam]?.takeIf { it in 100..900 }?.let { a ->
-                family.filter { SubfamilyMetric.weight(it.subfamily) == a }.ifEmpty { null }
-            } ?: family
-            // 有文件的优先：系统行无 path，与导入行同桶（displayName 中文 upward）时先选导入面；
-            // 否则选到系统面后按 size 探不到文件，整桶落空（families=0，切换无效）。
-            // 纯系统槽无文件可挑，回退原语义（选后面 size 照样过滤，渲染走系统回退）。
-            val pathed = bucket.filter { it.path != null }
-            listOfNotNull(FontFaceMatcher.choose(pathed.ifEmpty { bucket }, w, i))
+            // 不裁剪池：多档面全部并存，级联选中的任意字重都有对应面可选。
+            val pathed = family.filter { it.path != null }
+            listOfNotNull(FontFaceMatcher.choose(pathed.ifEmpty { family }, w, i))
         }.distinctBy { it.id }
         val sizes = selected.mapNotNull { f ->
             val p = f.path ?: return@mapNotNull null
@@ -121,13 +129,15 @@ object FontPoolSync {
         systemSerif: SkiaFontPool.EmbeddedFont? = null,
         logTag: String = "Orilumn.Font",
     ): PoolSyncResult {
-        // 渲染字重锚点随 profile 下发（池外系统面靠 factory 改写请求字重命中，见 SkParagraphFactory）。
-        SkParagraphFactory.weightAnchors = profile.fontWeightAnchors
+        // 字重锚点**不再**下发给渲染层：级联（UI tier 44）已经决定了请求字重，
+        // 渲染层私自改写就是 `Cascade` 决策 6 禁止的 post-hoc mutation。
+        // 这里只用它决定"池里要装哪几档面"——不装的话级联选中的字重在设备上无处可取。
         val faces = loadFaces() ?: return PoolSyncResult(false, lastSig)
         val slotFams = setOf(profile.fontBody, profile.fontTitle, profile.fontCode)
             .map { it.trim() }.filter { it.isNotEmpty() }.toSet()
         val sel = select(
             faces, slotFams, demand, bookEntries, fileSize,
+            anchorsBySlot = profile.fontWeightAnchorsBySlot,
             anchors = profile.fontWeightAnchors,
         )
         if (sel.sig == lastSig) return PoolSyncResult(false, lastSig)

@@ -26,9 +26,7 @@ class FontPoolGenerationTest {
 
     @Test
     fun `same measurer sees new pool faces without reopen`() {
-        val prevAnchors = SkParagraphFactory.weightAnchors
         try {
-            SkParagraphFactory.weightAnchors = emptyMap()
             val reg = java.io.File("$tmp/puhuiti-regular.ttf").readBytes()
             val blk = java.io.File("$tmp/puhuiti-black.ttf").readBytes()
             SkiaFontPool.setEmbedded(
@@ -48,7 +46,6 @@ class FontPoolGenerationTest {
             assertNotNull(after)
         } finally {
             SkiaFontPool.setEmbedded(emptyList())
-            SkParagraphFactory.weightAnchors = prevAnchors
         }
     }
 }

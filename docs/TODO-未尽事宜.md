@@ -476,36 +476,88 @@
   `RegionScopedBreakSource.maskOf` —— 因为这条判据**在生产版心下不可观测**（`&&` 与 `||` 只在
   min-content 单元内部有别，而生产恒有 `widthPx ≥ ceil(minContentWidth)`），只有断点集层能钉住它。
 
-- **Q19 — 标题字重：①看不出粗 ②选粗细对标题恒无效**（2026-10-02 用户报 GIMP 手册标题用「方正粗金陵」）：**：
+- **Q19 — 标题字重：①看不出粗 ②选粗细对标题恒无效**（2026-10-02 用户报 GIMP 手册标题用「方正粗金陵」）
+  — **2026-10-04 ② 已按「用户字重进 UI 层声明」彻底重做（渲染层锚点机制整体退役）**：
 
-  **(b) 选粗细对标题恒无效 —— 根因一行（渲染层）**：
-  用户字重**唯一**通路是 `SkParagraphFactory.anchoredWeight`
-  （`engine-skia/.../skia/SkParagraphFactory.kt:54-61`），它第一行就 `if (italic || weight != 400) return weight`；
-  而 `h1`–`h6` 的 UA 字重是 `bold`=700（`common/src/commonMain/resources/css/ua.css:18-23`，已核）
-  ⇒ **对标题恒不触发**。这条语义还被 `WeightAnchorTest:17-18` 固化成断言。
-  **用户层没有第二个出口**：`ReaderUiSheet.fontRules`（`common/.../css/ReaderUiSheet.kt:62-68`）只写
-  `font-family`（含标题槽 `h1..h6`）与 `line-height`/`margin`/`text-indent`，**一个字重都没有**。
+  **(b) 选粗细对标题恒无效 —— 根因是架构违规，不是一行 guard**：
+  用户字重当时**唯一**通路是 `SkParagraphFactory.anchoredWeight`（渲染层·级联**之后**按族名偷换 `fontWeight`）。
+  它第一行 `if (italic || weight != 400) return weight`，而 `h1`–`h6` 的 UA 字重恒为 `bold`=700
+  （`common/src/commonMain/resources/css/ua.css:18-23`，已核）⇒ **对标题恒不触发**。
+  但**删掉那个 guard 才是正解**——guard 只是症状，机制本身违反 `Cascade.kt:15-20`
+  「the upper layers are composed and applied over the book result **without any post-hoc mutation**」。
+  中间试过「删 guard」并在真机验到 8 档字重全部命中，但被用户驳回：**「标题应是书中 CSS 规定的样子，
+  而我们有样式层叠优先级规则」** ⇒ 正确解法是**把用户字重写成 UI 层（tier 44）声明**，
+  与 `font-family`/`line-height`/`margin`/`text-indent` 同一条路（这也正是本条自记的「用户层没有第二个出口」）。
 
-  **(a) 看不出粗 —— 三个叠加原因，前两个已核**：
-  ① **全仓无合成粗体**：`fakeBold`/`embolden`/描边加粗**零命中**（已核），落墨就是
-  `GlyphPainter.kt:80` 的 `drawString` ⇒ **`font-weight` 的唯一视觉效果是「能不能选到更粗的面」**，
-  选不到就原样。单面族（如只嵌一份的「方正粗金陵」）请求 400/700 都返回同一张面。
-  ② **书内 `@font-face` 的 `font-weight` 描述符一路被丢**：`LightCssParser` 解析了（`:234`）
-  → `CssFontFace.weight` → `BookFontRef.weight` → **`BookFont(family, bytes)` 没有字重字段**（已核，`BookFonts.kt:29-31`）
-  → `EmbeddedFont(familyName, bytes, aliases, faceIndex)` 也没有（已核，`SkiaFontPool.kt:19-24`）
-  → `SkParagraphFactory` 只 `registerTypeface(tf, f.familyName)` ⇒ **只按族名注册，face 的 CSS 字重从不参与匹配**。
-  ③ **用户设了同族锚点会把池收窄成单面**：`FontPoolSync.kt:48-62`（尤其 `:54-56`）只保留锚点字重那一张面；
-  正文 400 被 `anchoredWeight` 改写后命中它，标题 700 **不改写**、Skia 在单面集合里也只能返回它
-  ⇒ **标题字重被锚点间接锁死，而用户又无法纠正（＝就是 (b)）**。
+  **☑ 已做（2026-10-04）**：
+  ① `ReaderUiSheet.fontRules` 同规则同选择器表补 `font-weight`（`weightFor(profile, slot, family)` +
+     `wDecl(w)`），**bySlot 优先 / legacy 兜底 / 非法值（不在 100..900）丢弃** ⇒
+     **没选字重就不写声明**，原书 `font-weight`（UA `h1{bold}`、作者 `.fm-head{bold}`）原样生效。
+  ② 渲染层锚点机制**整体退役**：`anchoredWeight`/`weightAnchors`/`weightAnchorsBySlot`/`traceAnchor`
+     与 `runFontStyle` 的 slot 形参（含 3 参 `@Deprecated` 重载）、`SkiaRunMeasurer` 6 处调用点、
+     两壳（`ReaderActivity.liveApply` / `DesktopReaderHost`）的下发点、`FontPoolSync` 向 factory 的下发，全部删除。
+     `runFontStyle(weight, italic)` 现在是**纯映射**：级联算出什么就传什么，`font-style` 也只映射不增删。
+  ③ `FontPoolSync` **停止下发锚点**，但保留 `slotAnchorWeights`：用户选的那档面**仍须预装进池**，
+     否则级联选中的字重在设备上无处可取（回落默认面 ⇒ 用户看着"没反应"）。
+     同时**删掉按锚点收窄池的逻辑**（旧 `:54-56` 只留锚点那一张面 ⇒ 400 段落被锁死）。
+  ④ 槽位隔离（跨槽串扰）：键从「族名」改为 `"slot|family"`（`FontSlots.slotNameOf` 路由：
+     code-like 优先于 heading），全链路 `TypographicProfile`/`LayoutParamKey`(CRC)/`ReaderSettings`/
+     `SettingsJson`/`PerBookSettings`/`ReaderSettingsPanel`/`SkiaRunMeasurer`/`FontPoolSync`/两壳。
+  ⑤ **真机已验**（vivo PA2353，本书；落盘日志，取面层窄探针 `Orilumn.WREQ`，**验完已删**）：
+     标题槽 700 → 600 后 `tag=h1/h2/h3 → w=600 slant=ITALIC`（用户值生效 + **原书斜体原样**），
+     `tag=p/li/span → w=400 UPRIGHT`、`tag=code/pre → w=400 UPRIGHT`（三槽互不串）。
+     对照旧 bug：`tag=h3 w=700->700 slant=ITALIC`。装机走 `adb push /data/local/tmp` + `pm install -r`，
+     `adb install` 会撞 vivo 安装确认弹窗（`INSTALL_FAILED_ABORTED`）。
+  ⑥ 测试迁移：`engine-skia/.../WeightAnchorTest.kt` 改钉「渲染层不再私自改写字重 + 锚点表不得回来」；
+     新增 `common/.../css/ReaderWeightSlotTest.kt`（9 条）钉级联侧语义 ——
+     **UI 字重压过 UA `h1{bold}` 与作者 `.fm-head{bold}`**、**UI 不发 `font-style` ⇒ 原书 `italic` 一字不丢**、
+     斜体与字重各走各的 tier 互不吞、三槽各带各的字重不串、**`<strong>` 的 UA 加粗恒胜**
+     （`bodyFontSelectors` 刻意不含 `strong/b/em/i`，`font-weight` 是继承属性）。
 
-  **顺带两个设置层坑**：`FontLibraryPanel:296/307` 只让**多字重族**进字重页（单面族进不去）；
-  `:443-458` 的 `weightChoices()` 无「自动/跟随原书」项；`ReaderSettingsPanel:290` 的「跟随原书」只清字体槽、
-  **不清 `fontWeightAnchors`**，残留锚点会继续收窄池。
+  **☑ (a) 视觉模拟已实现 —— 合成粗体 + 合成斜体（2026-10-04 收案，恒定行为、无 UI 开关）**
 
-  **无法从代码断定**：该字体文件内禀是 400 还是 700（字体在 EPUB 内，仓库无此资产）⇒ **(a) 的最后一环不下结论**。
+  ① **合成粗体**（原来「全仓零命中」的那条）：判据 `SkParagraphFactory.synthesisFor` 纯函数单源 ——
+     `embolden = reqWeight >= 600 && reqWeight - faceWeight > 100`（阈值严格 `>`：700→600 面是 CSS
+     正常匹配、500→400 同理，都不算缺面）。`faceWeight` 取**实到那张面**的 `Typeface.fontStyle`。
+     `Font` 构造全部收口到 `synthFont`（`faceTable`/`faceForCp` 保底/`universalPass`/`fallbackWidth`/
+     `systemFallbackFace` 五条路径），杜绝某条漏合成。
+     实测（skiko 0.144.6，jvmTest 钉死）：加墨 **+18.5%**，**advance 逐值不变**（263.552 前后同值）
+     ⇒ 合成粗体是 `Font` 属性、**零绘制侧改动、零几何影响、零重排**。
 
-  **☑ 部分处理（2026-10-02）**：(b) 已修（anchoredWeight 放开非400）；(a) 已补齐 @font-face 字重/斜体描述符透传字段，但合成粗体（fakeBold）与锚点收窄仍未处理。 `SkParagraphFactory`，用户层不需改 ⇒ **不跨层**。
-  若要修 ②（`@font-face` 字重参与匹配），需给 `BookFont`/`EmbeddedFont` 加字重字段并透传到 `registerTypeface`，
+  ② **合成斜体**：级联赢的 `italic` 遇到无斜体面的族（用户实测普惠体九文件全正体）原先直接回落正体，
+     现在 `oblique = reqItalic && faceSlant != FontSlant.ITALIC` ⇒ **基线处画布剪切**落墨。
+     `SYNTHETIC_OBLIQUE_SHEAR = -0.203f`（**负号刻意**：skiko `skew(a,b)` = `x'=x+a·y`，
+     而画布 y 向下 ⇒ 字顶右倾必须 `a<0`）。不改 advance、不改基线 ⇒ 分页几何零影响。
+
+  ③ **真机已验**（vivo PA2353，**验完探针已删**，干净包日志无 `Orilumn.Synth`）：
+     - 落盘日志：`tag=h1/h2 fam=思源黑体 req=w500/ITALIC got=w500/UPRIGHT embolden=false oblique=true`
+       （`embolden=false` 正确：思源黑体有真 500 面 ⇒ 不合成；body 不出现 ⇒ **三槽不串**）
+     - 生产代码路径直接量：`shear=-0.203 upright(top=58 bot=40) → oblique(top=69 bot=40)`
+       —— 字顶右移 11px、**字脚不动**（基线锚定成立），JVM 与 Android **逐值一致**
+     - 同页 A/B 像素（开/关，两次 APK 以 sha256 校验为当场构建）：**只有标题行变化**
+       （55/69 行，顶 1/4 dx=+10.4、底 1/4 dx=+0.5），**其余 24 行 dx 恒为 0** ⇒ 槽位隔离
+
+  ④ 测试：`engine-skia/.../VisualSynthesisTest.kt` **14 条全绿**（决策纯函数 / advance 不变 /
+     基线锚定含**负对照** / 端到端 `drawLines` / `faceForCp` 生产出口 / 槽位隔离 / 方向锁）。
+     全量回归 1448 条，唯一红是既有已登记的 `CrossChapterPreflightProbeTest`（`common` 排版预检超时，
+     与本轮无关）。
+
+  ⚠ **两条判据教训（本轮最贵）**：
+     - **方向判据必须独立于实现推导**。第一版断言写成「字顶**左**移」，恰好把**反斜 bug 一起钉住**、
+       测试全绿；真正的斜体是字顶**右**倾。方向锁现在用**裸几何**（`skew` 首参是 x-by-y 系数
+       + 常量必须为负），与文字实现解耦。
+     - **A/B 对照必须校验 APK**。曾 push 了**旧产物**（只跑过 `jvmTest` 没跑 `assembleDebug`）当基线，
+       把正确的实现测成「反斜」，差点把符号又改回去。现在两次装机都以 `shasum -a256` 确认为当场构建。
+
+  **仍在（② `@font-face` 字重描述符）**：书内 `@font-face` 的 `font-weight` 描述符一路被丢
+  （`BookFont(family, bytes)` → `EmbeddedFont(familyName, bytes, aliases, faceIndex)` 都没有字重字段
+  ⇒ `registerTypeface(tf, familyName)` 只按族名注册，face 的 CSS 字重从不参与匹配）。
+  注意：**这不影响合成**——合成判据只看**实到那张面**的 `fontStyle`，缺面就合成，两条路互补。
+
+  **顺带两个设置层坑（仍未处理）**：`FontLibraryPanel` 只让**多字重族**进字重页（单面族进不去）；
+  `weightChoices()` 无「自动/跟随原书」项。
+
+  若要修 `@font-face` 字重参与匹配，需给 `BookFont`/`EmbeddedFont` 加字重字段并透传到 `registerTypeface`，
   那是**排版层(上) → 渲染层**的数据形状变更；建议先在 `common/engine/css` 内定一个「face 描述符」模型，
   由渲染层单向消费，**别把 CSS 语义漏进渲染层**。
 

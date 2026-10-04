@@ -106,8 +106,9 @@ class FontPoolSyncTest {
     }
 
     @Test
-    fun anchorReplacesBucketWithAnchorWeightFaces() {
-        // 字重锚点：该族只装锚点字重的面（Skia 按内禀字重选面，池里多档并存锚点无效）。
+    fun anchorWeightFaceIsLoadedWithoutNarrowingTheBucket() {
+        // 用户字重是UI 层（tier 44）声明，级联里就赢 ⇒ 池必须**装得下那一档面**，
+        // 但绝不能收窄成单面（旧实现只装锚点档 ⇒ 用户选 700 时 400 的段落回落默认面）。
         val file = ttf ?: return
         val regular = importedFace(file).copy(id = 11, subfamily = "Regular")
         val bold = importedFace(file).copy(id = 12, subfamily = "Bold")
@@ -116,11 +117,15 @@ class FontPoolSyncTest {
             listOf(regular, bold), setOf("PoolSyncFam"), FontDemand.EMPTY, emptyList(), sizes,
             anchors = mapOf("PoolSyncFam" to 700),
         )
-        assertEquals(listOf(12L), sel.selected.map { it.id })
-        // 无锚点：正体 400 仍选中 Regular。
+        val ids = sel.selected.map { it.id }
+        assertTrue("用户选的 700 档面必须在池里（否则级联选中的字重无处可取）", ids.contains(12L))
+        assertTrue("400 基线面同时保留（UA h1{bold}/正文 400 任何书都会用到）", ids.contains(11L))
+        // 无锚点：400/700 两档基线恒在。
         val sel2 = FontPoolSync.select(
             listOf(regular, bold), setOf("PoolSyncFam"), FontDemand.EMPTY, emptyList(), sizes,
         )
-        assertTrue(sel2.selected.map { it.id }.contains(11L))
+        val ids2 = sel2.selected.map { it.id }
+        assertTrue(ids2.contains(11L))
+        assertTrue(ids2.contains(12L))
     }
 }

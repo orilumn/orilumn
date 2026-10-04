@@ -146,6 +146,21 @@ data class DrawLine(
  *
  * 分页与连续滚动共用此接口：两者均产出若干 [DrawLine]（绝对 Y）→ `drawLines`。
  * [clip] 用于行窗口裁剪（可选）：给定可视内容区后，窗口外行由裁剪丢弃。
+ *
+ * ## 视觉模拟（合成粗体 / 合成斜体）的落墨边界
+ *
+ * 判据与阈值全在 [SkParagraphFactory.synthesisFor]（渲染层·字体能力），本类只负责**施加**：
+ *
+ * - 合成粗体落在 [org.jetbrains.skia.Font] 上（`isEmboldened`），取面时随面走，本类无需感知；
+ * - 合成斜体是**画布剪切**（Skia 的 `Font` 没有斜体属性），施加在**逐字落墨**三处：
+ *   [drawGlyphPass] 的正字/阴影两趟、行尾连字符的正文/阴影两笔。阴影趟的剪切中心取 `y + dy`，
+ *   否则影子斜、字不斜（或反之）。
+ *
+ * **划在边界外的两处**：[paintText]（list marker）与 `drawRuby` 的注音文本走 SkParagraph 的
+ * `Paragraph.paint`，而**同一个 paragraph 对象也用于它们的测量**；在 `paint` 外面套剪切会让
+ * 「量出来的形状」与「画出来的形状」不一致（量画失配，本仓头号禁忌）。这两处都是短小附属文本
+ * （marker 形如 `1.`/`•`，注音字数 ≈ 底字数），合成与否肉眼不可辨，故明确不合成 ——
+ * 这是**记录在案的取舍**，不是遗漏。
  */
 class LineWindowDrawer(
     /**
@@ -557,13 +572,13 @@ class LineWindowDrawer(
         val xs: FloatArray = graft?.xs ?: placement.xs
         val kernEndDelta = graft?.endDelta ?: 0f
         // 段样式缓存：同一 (色, 面, 位移) 只解析一次 Font（matchFamilyStyle 是 native 调用）。
-        val fontCache = HashMap<Any, org.jetbrains.skia.Font>()
+        val fontCache = HashMap<Any, GlyphPainter.GlyphStyle>()
         val fonts = object : FontResolver {
             override fun resolve(
                 cp: Int, key: Any, sizePx: Float, fam: List<String>, wt: Int, ital: Boolean,
                 mono: Boolean, tag: String?,
-            ): org.jetbrains.skia.Font = fontCache.getOrPut(key) {
-                glyphPainter.baseGlyphStyle(sizePx, fam, wt, ital, mono, 0xFF000000.toInt(), cp, tag).font
+            ): GlyphPainter.GlyphStyle = fontCache.getOrPut(key) {
+                glyphPainter.baseGlyphStyle(sizePx, fam, wt, ital, mono, 0xFF000000.toInt(), cp, tag)
             }
         }
 
@@ -595,22 +610,28 @@ class LineWindowDrawer(
                 val wt = run?.weight ?: line.weight
                 val ital = run?.italic ?: line.italic
                 val key = glyphPainter.cacheKey(famList, wt, ital, sizePx, HYPHEN_GLYPH.code)
-                val font = fonts.resolve(
+                val gs = fonts.resolve(
                     HYPHEN_GLYPH.code, key, sizePx, famList, wt, ital,
                     run?.monospace ?: line.monospace, run?.tag ?: line.tag,
                 )
+                val font = gs.font
                 val y = baseY - (band.shiftEm ?: 0f) * line.fontSizePx
                 // 与逐字轨同一个 kerning 增量：簇位行末比 Aligner 略紧，连字符跟着一起挪，
                 // 否则 JUSTIFY 行会出现「末字与连字符之间凭空一个空当」（实测 ≤ 几 px）。
                 val hxK = hx + kernEndDelta
                 val paint = org.jetbrains.skia.Paint().apply { color = withAlpha(band.argb ?: line.inkColor, line.alpha) }
-                canvas.drawString(HYPHEN_GLYPH.toString(), paintX + hxK, y, font, paint)
+                // 合成斜体（`font-style: italic` 但无斜体面）：连字符同属该 run，必须一起斜切。
+                drawOblique(canvas, y, gs.oblique) {
+                    canvas.drawString(HYPHEN_GLYPH.toString(), paintX + hxK, y, font, paint)
+                }
                 // 阴影层同样要补一个，否则带 text-shadow 的行连字符没有影。
                 if (shadow != null) {
                     val sp = org.jetbrains.skia.Paint().apply {
                         color = withAlpha(shadow.colorHex?.let(::cssHexToArgb) ?: 0xFF000000.toInt(), line.alpha)
                     }
-                    canvas.drawString(HYPHEN_GLYPH.toString(), paintX + hxK + shadow.dx, y + shadow.dy, font, sp)
+                    drawOblique(canvas, y + shadow.dy, gs.oblique) {
+                        canvas.drawString(HYPHEN_GLYPH.toString(), paintX + hxK + shadow.dx, y + shadow.dy, font, sp)
+                    }
                 }
             }
         }
@@ -635,7 +656,13 @@ class LineWindowDrawer(
     }
 
     /** 段内面解析（抽出成接口：inline 函数不能收函数类型参数）。 */
-    private interface FontResolver {
+    /**
+ * 逐字落墨的**段内样式解析**（渲染层）。
+ *
+ * 返回 [GlyphPainter.GlyphStyle] 而非裸 [org.jetbrains.skia.Font]：合成斜体是**画布变换**
+ * （Skia 的 `Font` 无斜体属性），必须与面**一起**交给绘制侧，逐字轨才能对同一段施加剪切。
+ */
+private interface FontResolver {
         /**
          * **按码本**解析面（`cp`）：逐字绘制时不同码本可能落到族栈里不同的面
          * （CJK 落宋体、Latin 落 Times），故缓存键**必须含码本**——
@@ -644,7 +671,7 @@ class LineWindowDrawer(
         fun resolve(
             cp: Int, key: Any, sizePx: Float, fam: List<String>, wt: Int, ital: Boolean,
             mono: Boolean, tag: String?,
-        ): org.jetbrains.skia.Font
+        ): GlyphPainter.GlyphStyle
     }
 
     /** 单趟逐字绘制（阴影层与正字层各一趟）。 */
@@ -701,7 +728,7 @@ class LineWindowDrawer(
                 val rtag = run?.tag ?: line.tag
                 // 缓存键含码本：CJK 与 Latin 会落到族栈里不同的面（少这一点 = 一个字用错面）。
                 val key = glyphPainter.cacheKey(famList, wt, ital, sizePx, cp)
-                val font = fontFor.resolve(cp, key, sizePx, famList, wt, ital, mono, rtag)
+                val gs = fontFor.resolve(cp, key, sizePx, famList, wt, ital, mono, rtag)
                 val argb = if (isShadowPass) overrideInk else withAlpha(band?.argb ?: line.inkColor, line.alpha)
                 val paint = org.jetbrains.skia.Paint().apply { color = argb }
                 // 行内基线位移（Skia 正值下移，故原点上移）。
@@ -709,7 +736,11 @@ class LineWindowDrawer(
                 val y = baseY - shiftEm * line.fontSizePx + dy
                 // 代理对整对画（units=2）；普通字符 units=1，行为与原来逐字版完全一致。
                 onGlyphCp?.invoke(cp, units)
-                canvas.drawString(line.text.substring(i, i + units), paintX + x + dx, y, font, paint)
+                // 合成斜体（`font-style: italic` 但族里没有斜体面）：基线处剪切。
+                // 阴影层 `dy` 也进剪切中心，否则影子是斜的而字是正的（反之亦然）。
+                drawOblique(canvas, y, gs.oblique) {
+                    canvas.drawString(line.text.substring(i, i + units), paintX + x + dx, y, gs.font, paint)
+                }
             }
             i += units
         }

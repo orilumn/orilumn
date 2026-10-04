@@ -53,19 +53,45 @@ object ReaderUiSheet {
     /**
      * 字体槽规则：非空槽才出规则（空槽跟随原书）。族名恒加引号（CJK/空格族安全），
      * 逗号/引号剔除（族名含逗号本就不合法；防注入破坏后继规则）。
+     * **字重与 font-family 同规则同选择器表**（`hWeight`/`bodyWeight`/`codeWeight`）——
+     * 用户字重经 UI 层（tier 44）进级联，与行距/段间距/首行缩进同一条路，**不在渲染层事后改写**
+     * （`Cascade` 决策 6 明令「upper layers … without any post-hoc mutation」）。
+     * 只有用户在该槽显式选过字重才写 `font-weight`；没选就不写，书自己的 `font-weight`
+     * （UA `h1{bold}`、作者 `.fm-head{bold}`）原样生效。
      *
      * 槽位与 `fontSlotFor` 同一路由分域覆盖（正文槽=非标题非代码块，标题槽=h1..h6，代码槽=pre/code/kbd/samp）；
      * UI tier 高于一切作者声明（含 `!important`）。写 `body` 而非只靠继承：继承会被书的直接规则盖掉。
      * 标题/代码标签不在正文槽作用域内——某槽清空即该域无规则，书自己的字体直接生效（没有自身字体
      * 声明的标题/代码块仍经正文 `body` 继承兜底），避免"改正文连带标题/代码"的槽域串扰。
+     * **选择器表刻意不含 `strong/b/em/i`**：`font-weight` 是继承属性，而 `strong` 自身有 UA 声明
+     * （`ua.css:59 strong,b{font-weight:bold}`），本槽的 tier-44 声明作用在 `p` 上不影响 `strong`，
+     * 加粗语义因此完整保留（反之若把 `strong` 收进 UI 选择器表就会把加粗压成正文档）。
      */
     fun fontRules(profile: TypographicProfile): String {
         val sb = StringBuilder()
-        if (profile.fontBody.isNotBlank()) sb.append("$bodyFontSelectors{font-family:${fam(profile.fontBody)}}\n")
-        if (profile.fontTitle.isNotBlank()) sb.append("h1,h2,h3,h4,h5,h6{font-family:${fam(profile.fontTitle)}}\n")
-        if (profile.fontCode.isNotBlank()) sb.append("pre,code,kbd,samp{font-family:${fam(profile.fontCode)}}\n")
+        val bodyW = weightFor(profile, "fontBody", profile.fontBody)
+        val titleW = weightFor(profile, "fontTitle", profile.fontTitle)
+        val codeW = weightFor(profile, "fontCode", profile.fontCode)
+        if (profile.fontBody.isNotBlank()) sb.append("$bodyFontSelectors{font-family:${fam(profile.fontBody)}${wDecl(bodyW)}}\n")
+        if (profile.fontTitle.isNotBlank()) sb.append("h1,h2,h3,h4,h5,h6{font-family:${fam(profile.fontTitle)}${wDecl(titleW)}}\n")
+        if (profile.fontCode.isNotBlank()) sb.append("pre,code,kbd,samp{font-family:${fam(profile.fontCode)}${wDecl(codeW)}}\n")
         return sb.toString()
     }
+
+    /**
+     * 该 (槽位, 族) 的用户字重；bySlot 优先、legacy 表兜底（旧设置没有槽位键），
+     * 非法值（不在 100..900）丢弃 ⇒ 视为"没选"，不写 `font-weight`。
+     * 键的族名口径与 UI 层写锚点处一致（去空白原样）。
+     */
+    private fun weightFor(profile: TypographicProfile, slot: String, family: String): Int? {
+        if (family.isBlank()) return null
+        val famTrim = family.trim()
+        return profile.fontWeightAnchorsBySlot["$slot|$famTrim"]?.takeIf { it in 100..900 }
+            ?: profile.fontWeightAnchors[famTrim]?.takeIf { it in 100..900 }
+    }
+
+    /** `;font-weight:W` 或空串。 */
+    private fun wDecl(w: Int?): String = if (w == null) "" else ";font-weight:$w"
 
     /** 行距规则覆盖的全部文本块选择器表（含标题/代码/表格/列表）。 */
     private const val textBlockSelectors =

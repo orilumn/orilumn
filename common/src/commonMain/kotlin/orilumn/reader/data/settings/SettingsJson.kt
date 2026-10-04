@@ -67,4 +67,26 @@ internal object SettingsJson {
         (o[key] as? JsonObject)?.entries?.mapNotNull { (k, v) ->
             (v as? JsonPrimitive)?.intOrNull?.takeIf { it in 100..900 }?.let { k to it }
         }?.toMap().orEmpty()
+
+    fun optWeightAnchors(o: JsonObject, key: String, def: Map<String, Int>): Map<String, Int> {
+        if (!o.containsKey(key)) return def
+        return optWeightAnchors(o, key)
+    }
+
+    /** 读按槽位字重锚点 Map（key = "slot|family"）。 */
+    fun optWeightAnchorsMap(o: JsonObject, key: String, def: Map<String, Int>): Map<String, Int> {
+        if (!o.containsKey(key)) return def
+        val el = o[key] ?: return def
+        if (el !is JsonObject) return def
+        val m = LinkedHashMap<String, Int>(Math.max(4, el.size))
+        for ((k, v) in el) {
+            if (v == null) continue
+            val vPrim = v as? JsonPrimitive ?: continue
+            val wv = vPrim.intOrNull ?: vPrim.doubleOrNull?.toInt() ?: continue
+            if (wv in 100..900) {
+                m[k] = wv
+            }
+        }
+        return m
+    }
 }

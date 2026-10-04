@@ -3,6 +3,7 @@ package orilumn.reader.engine.css
 import orilumn.reader.engine.text.TypographicProfile
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -52,6 +53,69 @@ class ReaderUiSheetTest {
         val sheet = ReaderUiSheet.build(p)
         val line = sheet.rules.single { it.selectors == textBlocks.split(",") }
         assertEquals(mapOf("line-height" to "1.35"), line.declarations.associate { it.property to it.value })
+    }
+
+    // ── 容器内 p 不吃首行缩进（li/td/th）────────────────────────────────────
+    // 口径: 这是 UI 层 `p{text-indent}` **自身选择器过宽**的修正（同 tier 同源），不是层级压制。
+    // 三个模式一律发，不按 layoutTheme 分叉。
+
+    private val nestedContainers = listOf("li", "td", "th")
+
+    private fun nestedDecl(p: TypographicProfile) =
+        ReaderUiSheet.build(p).rules.single { it.selectors == nestedContainers }
+            .declarations.associate { it.property to it.value }
+
+    @Test
+    fun `container selectors zero text-indent on p inside them`() {
+        assertEquals("0", nestedDecl(profile())["text-indent"])
+    }
+
+    /** 用户拖首行缩进滑块时，容器内的 p 依然不缩进 —— 控件语义不含「只对顶层 p 生效」。 */
+    @Test
+    fun `nested container rule survives any firstLineIndent slider value`() {
+        for (em in listOf(0f, 1f, 2f, 4f)) {
+            assertEquals(
+                "slider=$em", "0",
+                nestedDecl(profile(firstLineIndentEm = em))["text-indent"],
+            )
+        }
+    }
+
+    /** 三个主题一律发：主题层只是「无 UI 干预时的基线」，这条必须活。 */
+    @Test
+    fun `nested container rule is emitted for every layout theme`() {
+        for (theme in listOf("traditional", "modern", "original")) {
+            val sheet = ReaderUiSheet.build(profile().copy(layoutTheme = theme))
+            assertTrue(
+                "$theme 应发出容器内 p 零缩进",
+                sheet.rules.any { it.selectors == nestedContainers },
+            )
+        }
+    }
+
+    /** 容器内相邻两段固定 0.5em：传统模式 paragraphSpacing=0（靠缩进分段），不补缝就糊成一片。 */
+    @Test
+    fun `adjacent p inside container get fixed gap independent of paragraphSpacing`() {
+        val p = profile(bodyPx = 18f)
+        val gap = ReaderUiSheet.build(p).rules
+            .single { it.selectors == listOf("li + p", "td + p", "th + p") }
+            .declarations.associate { it.property to it.value }
+        assertEquals("0.5em", gap["margin-top"])
+        // 刻意不跟 paragraphSpacingPx 滑块：traditional 该值恒 0，跟它等于没缝。
+        val wide = ReaderUiSheet.build(p.copy(paragraphSpacingPx = 40)).rules
+            .single { it.selectors == listOf("li + p", "td + p", "th + p") }
+            .declarations.associate { it.property to it.value }
+        assertEquals("段间距滑块不该影响容器内缝隙", "0.5em", wide["margin-top"])
+    }
+
+    /** 刻意排除 blockquote/dd：它们的内容本就从版心起，缩进是正文段落该有的样子。 */
+    @Test
+    fun `blockquote and dd keep first-line indent`() {
+        val sheet = ReaderUiSheet.build(profile())
+        val zeroed = sheet.rules.filter { r -> r.declarations.any { it.property == "text-indent" && it.value == "0" } }
+            .flatMap { it.selectors }
+        assertFalse("blockquote 不该被收窄", "blockquote" in zeroed)
+        assertFalse("dd 不该被收窄", "dd" in zeroed)
     }
 
     @Test
@@ -132,6 +196,8 @@ class ReaderUiSheetTest {
         assertEquals("p+p 后者取段间距", 13f, map[nth("p", 1)]?.margin?.top ?: -1f, 0.5f)
         assertEquals("首项 li 取基线 0", 0f, map[nth("li", 0)]?.margin?.top)
         assertEquals("li+li 后者取段间距", 13f, map[nth("li", 1)]?.margin?.top ?: -1f, 0.5f)
+        // 注：我对 li p 的处理：li/td/th 直接子 p 不吃首行缩进，且 li,td,th + p 固定 0.5em
+        // 不影响 li+li（段间距仍走 UI 层原规则），原口径仍旧，故这行保持不变。
         assertEquals("ul 后的 p 取基线 0", 0f, map[nth("p", 2)]?.margin?.top)
         assertEquals("p 纵 bottom 恒 0（缝隙单侧）", 0f, map[nth("p", 1)]?.margin?.bottom)
     }

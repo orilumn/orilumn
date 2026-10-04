@@ -611,6 +611,27 @@ class SkiaRunMeasurer(
     private val universalCache = HashMap<UniversalKey, Array<Typeface>>()
     private val lock = Any()
 
+    /**
+     * 池代次水位：[faceCache]/[universalCache] 的键里没有池身份（只有族栈字重字号），
+     * 池内容一变旧条目即错面——长驻实例（绘制侧 `LineWindowDrawer` 的 painter、
+     * 断行侧 breaker）跨越多次换字体，旧面一直用到退出重进。每次取面前对一次水位，
+     * 落后即整清（只清 map，不重扫；重扫发生在真正 miss 时，热路径只多一次 volatile 读）。
+     * `[systemFallbackCache]` 不在内：它走纯系统集合，与池内容无关。
+     */
+    @Volatile
+    private var poolGen = -1L
+
+    private fun syncPoolGen() {
+        val g = SkiaFontPool.generation()
+        if (g != poolGen) {
+            synchronized(lock) {
+                faceCache.clear()
+                universalCache.clear()
+            }
+            poolGen = g
+        }
+    }
+
     private fun faceTable(
         tag: String?,
         families: List<String>,
@@ -620,6 +641,7 @@ class SkiaRunMeasurer(
         sizePx: Float,
         mgrs: List<FontMgr>,
     ): Array<Font> {
+        syncPoolGen()
         val style = SkParagraphFactory.runFontStyle(families, weight, italic)
         val stack = SkParagraphFactory.resolveFamilies(tag, families, monospace)
         val key = Key(stack.joinToString(""), style.weight, style.slant.ordinal, sizePx.toRawBits())
@@ -701,6 +723,7 @@ class SkiaRunMeasurer(
         italic: Boolean,
         mgrs: List<FontMgr>,
     ): Array<Typeface> {
+        syncPoolGen()
         val style = SkParagraphFactory.runFontStyle(emptyList(), weight, italic)
         val key = UniversalKey(monospace, style.weight, style.slant.ordinal)
         synchronized(lock) { universalCache[key] }?.let { return it }

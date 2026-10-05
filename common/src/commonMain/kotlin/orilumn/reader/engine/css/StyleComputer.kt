@@ -253,27 +253,31 @@ class StyleComputer(
         // fontFamily/monospace 等派生字段与栈一致（token 无逗号，join 再解析无损）。
         val fams = style.fontFamilies
         if (fams.size == 1 && isGenericFontFamily(fams[0])) {
-            val authorRaw = cascade.authorFontFamily(el, ancestors, inline)
-            val authorList = authorRaw
-                ?.let { parseFontFamilyList(it) }.orEmpty()
-                .filter { it.isNotBlank() && !it.equals(fams[0], ignoreCase = true) }
-            // 只有当作者声明中包含**非通用字体名**时才做兜底合并（把具名字体前置，reader的通用名作为fallback）。
-            // 如果作者声明本身也是通用字体（如 sans-serif），不要把它前置，否则会覆盖 reader 层（theme/UI）的通用字体意图。
-            val hasNamedAuthorFont = authorList.any { !isGenericFontFamily(it) }
-            if (hasNamedAuthorFont && authorList.isNotEmpty()) {
-                val tS = if (probe != null) orilumn.reader.time.platformNowMs() else 0L
-                val merged = computeStyle(
-                    winners + ("font-family" to (authorList + fams[0]).joinToString(",")),
-                    parent,
-                    el.tag,
-                    normalizeLang(el.attrs["lang"]),
-                    isPreformatted(el, ancestors),
-                )
-                if (probe != null) {
-                    secondPassMs = orilumn.reader.time.platformNowMs() - tS
-                    CascadeProbe.hit(0L, parseMs, buildMs, secondPassMs)
+            // 如果 reader 层（theme/settings/ui，tier >= 42）已经有匹配的 font-family 声明，不要把 book author 的字体前置
+            val readerHasFontFamily = cascade.hasReaderFontFamily(el, ancestors, inline)
+            if (!readerHasFontFamily) {
+                val authorRaw = cascade.authorFontFamily(el, ancestors, inline)
+                val authorList = authorRaw
+                    ?.let { parseFontFamilyList(it) }.orEmpty()
+                    .filter { it.isNotBlank() && !it.equals(fams[0], ignoreCase = true) }
+                // 只有当作者声明中包含**非通用字体名**时才做兜底合并（把具名字体前置，reader的通用名作为fallback）。
+                // 如果作者声明本身也是通用字体（如 sans-serif），不要把它前置，否则会覆盖 reader 层（theme/UI）的通用字体意图。
+                val hasNamedAuthorFont = authorList.any { !isGenericFontFamily(it) }
+                if (hasNamedAuthorFont && authorList.isNotEmpty()) {
+                    val tS = if (probe != null) orilumn.reader.time.platformNowMs() else 0L
+                    val merged = computeStyle(
+                        winners + ("font-family" to (authorList + fams[0]).joinToString(",")),
+                        parent,
+                        el.tag,
+                        normalizeLang(el.attrs["lang"]),
+                        isPreformatted(el, ancestors),
+                    )
+                    if (probe != null) {
+                        secondPassMs = orilumn.reader.time.platformNowMs() - tS
+                        CascadeProbe.hit(0L, parseMs, buildMs, secondPassMs)
+                    }
+                    return merged
                 }
-                return merged
             }
         }
         if (probe != null) CascadeProbe.hit(0L, parseMs, buildMs, secondPassMs)

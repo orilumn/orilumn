@@ -142,6 +142,24 @@ class Cascade(
         return out
     }
 
+
+    /** Returns true if any reader layer (theme/settings/ui, tier >= 42) has a matching font-family declaration for [el]. */
+    fun hasReaderFontFamily(el: MarkupElement, ancestors: List<MarkupElement>, inlineDecls: List<Declaration>, pseudo: String? = null): Boolean {
+        for (m in matchers) {
+            if (m.tierNormal < READER_TIER_MIN && m.tierImportant < READER_TIER_MIN) continue
+            if (!m.anyTag && el.tag !in m.rightTags) continue
+            var matched: Selector? = null
+            for (sel in m.matchers) {
+                if (sel.pseudoElement == pseudo && sel.matches(el, ancestors)) { matched = sel; break }
+            }
+            if (matched == null) continue
+            for (d in m.declarations) {
+                if (d.property == "font-family") return true
+            }
+        }
+        return false
+    }
+
     /** Maps an HTML presentation attribute on [el] to a CSS value per [PRESENTATION_ATTRS]; returns
      *  null when the tag or attribute isn't present or the value is unusable (skipped entirely). */
     private fun htmlAttrOrigin(el: MarkupElement, p: PresentationAttr): String? {

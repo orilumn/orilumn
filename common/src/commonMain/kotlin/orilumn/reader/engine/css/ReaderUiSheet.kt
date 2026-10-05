@@ -100,7 +100,8 @@ object ReaderUiSheet {
 
     /** 正文槽覆盖的文本块选择器表：排除标题（h1..h6）与代码（pre/code/kbd/samp），各自交给专用槽。 */
     private const val bodyFontSelectors =
-        "body,p,div,li,dd,dt,td,th,address,blockquote,section,article,aside,header,footer,nav,figure,figcaption"
+        "body,p,div,li,dd,dt,td,th,address,blockquote,section,article,aside,header,footer,nav,figure,figcaption," +
+        ".co-summary-head,.co-summary-bullet,.co-summary-bullet-last,.fm-list-bullet,.fm-list-bullet-last,.fm-list-bullet-last1,.fm-list-bullet1,.fm-list-bullet2,.list,.list-item,.bullet"
 
     private fun fam(name: String): String =
         "\"" + name.trim().replace("\"", "").replace("'", "").replace(",", "") + "\""

@@ -12,6 +12,15 @@ import orilumn.reader.engine.html.MarkupElement
  *  - 盒流 `breakLeafLines` 系（流式 Y 记账等不及塑形结果）；
  *  - 塑形层 `ShapeGeometry`（shape 自带终高，行窗/分页/表格格高同源）。
  */
+/**
+ * Missing-entry last resort (16px/1.5): reachable only with a corrupt map and no resolver —
+ * neither production path gets here (heavy = full map, light = resolver). Previously named
+ * `NormalFlowLayout.DEFAULT_STYLE` and reused by full-map call sites, hiding the fact that
+ * light-path maps are inherently partial; now this is its only honest use, everything else
+ * fail-fast (`getValue`).
+ */
+private val FALLBACK_STYLE = ComputedStyle(fontSizePx = 16f, lineHeightRatio = 1.5f)
+
 internal fun inlineImageEls(
     root: MarkupElement,
     classify: BlockClassify,
@@ -52,6 +61,13 @@ fun adjustLineHeightsForInlineImages(
     breakW: Int,
     imageLoader: ImageBoundsReader?,
     chapterHref: String,
+    /**
+     * Light-path style fallback: windowed style maps exclude block-subtree descendants
+     * (e.g. table-cell imgs); resolve those through the cascade instead of crashing.
+     * Heavy path feeds the whole-chapter map — pass null (a miss there is a real bug
+     * and falls through to [FALLBACK_STYLE], the old behavior).
+     */
+    resolveStyle: ((MarkupElement) -> ComputedStyle?)? = null,
 ): List<Int> {
     if (broken.isEmpty() || text.indexOf('\uFFFC') < 0) return broken.map { it.heightPx }
     // Queue of images in U+FFFC order; consumed as their slots appear line by line.
@@ -71,7 +87,11 @@ fun adjustLineHeightsForInlineImages(
         var scan = cursor
         while (scan < fffcAt.size && fffcAt[scan] <= hi) {
             val img = imgs.getOrNull(scan) ?: break
-            val imgStyle = styles.getValue(img)
+            // Misses only come from windowed light-path maps (unregistered block-subtree
+            // descendants): resolve the true style through the cascade; heavy-path full maps
+            // always hit. Ultimate fallback preserves the old 16px behavior for corrupt maps
+            // (only em-relative sizes read it; width/height attrs are unaffected).
+            val imgStyle = styles[img] ?: resolveStyle?.invoke(img) ?: styles[root] ?: FALLBACK_STYLE
             val usedH = NormalFlowLayout.replacedUsedSize(img, imgStyle, breakW, imageLoader, chapterHref).second
             if (usedH > tallest) tallest = usedH
             scan++

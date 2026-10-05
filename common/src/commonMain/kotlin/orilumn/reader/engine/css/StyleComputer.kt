@@ -253,13 +253,17 @@ class StyleComputer(
         // fontFamily/monospace 等派生字段与栈一致（token 无逗号，join 再解析无损）。
         val fams = style.fontFamilies
         if (fams.size == 1 && isGenericFontFamily(fams[0])) {
-            val author = cascade.authorFontFamily(el, ancestors, inline)
+            val authorRaw = cascade.authorFontFamily(el, ancestors, inline)
+            val authorList = authorRaw
                 ?.let { parseFontFamilyList(it) }.orEmpty()
                 .filter { it.isNotBlank() && !it.equals(fams[0], ignoreCase = true) }
-            if (author.isNotEmpty()) {
+            // 只有当作者声明中包含**非通用字体名**时才做兜底合并（把具名字体前置，reader的通用名作为fallback）。
+            // 如果作者声明本身也是通用字体（如 sans-serif），不要把它前置，否则会覆盖 reader 层（theme/UI）的通用字体意图。
+            val hasNamedAuthorFont = authorList.any { !isGenericFontFamily(it) }
+            if (hasNamedAuthorFont && authorList.isNotEmpty()) {
                 val tS = if (probe != null) orilumn.reader.time.platformNowMs() else 0L
                 val merged = computeStyle(
-                    winners + ("font-family" to (author + fams[0]).joinToString(",")),
+                    winners + ("font-family" to (authorList + fams[0]).joinToString(",")),
                     parent,
                     el.tag,
                     normalizeLang(el.attrs["lang"]),

@@ -21,6 +21,8 @@
 
 body { font-family: sans-serif; }
 
+/* 正文容器统一设为无衬线，覆盖书在 p/div 等元素上写的 font-family */
+p, div, li, blockquote, dd, td { font-family: sans-serif; }
 p { text-indent: 0; }
 
 /* 正文对齐: 两端对齐。见 traditional.css 同名节的完整口径说明 (选择器/层叠代价/为何留在这层)。

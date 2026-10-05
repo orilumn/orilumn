@@ -325,6 +325,20 @@ class ReaderActivity : ComponentActivity() {
             val snapshot = remember(tabletHost) {
                 tabletHost?.let { SnapshotReaderHost(it) { pos -> currentPos = pos } }
             }
+            // 首次开书收口（与桌面同调，共享 probeOriginalOnOpen）：默认原书主题开书时，
+            // 落位即按落位章回填未钉的缩进/行距并 bookOnly 持久 + 轻刷；已钉/非原书直接跳过。
+            // 每本书一次（overlay 落 pin 后共享门控自停）。
+            var probedOpenBook by remember { mutableStateOf(-1L) }
+            LaunchedEffect(currentPos) {
+                val p = currentPos ?: return@LaunchedEffect
+                if (probedOpenBook == bookId) return@LaunchedEffect
+                probedOpenBook = bookId
+                val c = engine ?: return@LaunchedEffect
+                val probed = withContext(Dispatchers.Default) {
+                    c.probeOriginalOnOpen(p.chapter, profile.bodyPx, effective, bookSettingsStore.load(bookId))
+                }
+                if (probed != effective) commitSettings(probed, typographyChanged = true, bookOnly = true)
+            }
             if (snapshot != null) {
                 ReaderScreen(
                     host = snapshot,

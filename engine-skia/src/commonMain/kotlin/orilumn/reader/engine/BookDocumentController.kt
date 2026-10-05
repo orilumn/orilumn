@@ -3,6 +3,7 @@ package orilumn.reader.engine
 import orilumn.reader.collections.SyncLock
 import orilumn.reader.collections.withLock
 import orilumn.reader.data.book.BookReadingState
+import orilumn.reader.data.settings.BookSettings
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.time.platformNowMs
 import orilumn.reader.data.epub.EpubResourceReader
@@ -456,25 +457,62 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
         orilumn.reader.data.read.ReadingLocatorCodec.decode(locator)
 
     /**
+     * 首次开书收口（两端宿主同调）：已是原书主题、且本书从未钉过缩进/行距时，
+     * 从落位章起找首个含 `<p>` 的章回填**缺的键**；否则原样返回。
+     * 调用方负责 bookOnly 持久化 + 一次轻刷（仅返回值与 base 不同时）。
+     * 已钉过的键永不再碰 —— 用户改过即尊重，不会重启又被书盖回去。
+     */
+    suspend fun probeOriginalOnOpen(
+        startChapter: Int,
+        bodyPx: Float,
+        base: ReaderSettings,
+        overlay: BookSettings,
+    ): ReaderSettings {
+        if (base.layoutTheme != "original") return base
+        val needIndent = overlay.firstLineIndent == null
+        val needLine = overlay.lineSpacing == null
+        if (!needIndent && !needLine) return base
+        var ch = startChapter.coerceIn(0, (chapterCount - 1).coerceAtLeast(0))
+        while (ch < chapterCount) {
+            val markup = runCatching { ensureMarkup(ch) }.getOrNull()
+            if (markup != null && hasParagraph(markup)) {
+                val snap = snapshotTypography(ch, bodyPx) ?: return base
+                var out = base
+                if (needIndent) out = out.copy(firstLineIndent = snap.firstLineIndent)
+                if (needLine) out = out.copy(lineSpacing = snap.lineSpacing)
+                return out
+            }
+            ch++
+        }
+        return base
+    }
+
+    private fun hasParagraph(root: MarkupElement): Boolean =
+        root.tag == "p" || root.children.any(::hasParagraph)
+
+    /**
      * 原书设置快照（Q2 下沉：原 `ReaderActivity.withBookStyle`）：切到原书设置时，
      * 把当前章节的真实排版（首行缩进/行距）快照进设置值。探测失败原样返回。
      * 纵边距不回填：段间距即疏密，书的 margin 原样参与折叠。
      */
     fun snapshotBookStyle(chapter: Int, bodyPx: Float, base: ReaderSettings): ReaderSettings {
         if (base.layoutTheme != "original") return base
-        val snap = runCatching {
-            val unit = unitAt(chapter) ?: return@runCatching null
-            val markup = unit.markup ?: return@runCatching null
-            val sheets = (unit.cssBundle?.cssTexts ?: emptyList()).map { LightCssParser().parse(it) }
-            val styles = StyleComputer(bodyPx, StyleSheet(emptyList()), sheets).compute(markup)
-            BookStyleProbe.snapshot(styles)
-        }.onFailure { Logger.w(logTag, "snapshotBookStyle probe FAIL ch=$chapter ${it.message} → fallback base") }
-            .getOrNull() ?: return base
+        val snap = snapshotTypography(chapter, bodyPx) ?: return base
         return base.copy(
             firstLineIndent = snap.firstLineIndent,
             lineSpacing = snap.lineSpacing,
         )
     }
+
+    /** 原书排版快照（缩进/行距）：UA+作者裸级联；失败回 null（调用方回退 base）。 */
+    private fun snapshotTypography(chapter: Int, bodyPx: Float): BookStyleProbe.Snapshot? = runCatching {
+        val unit = unitAt(chapter) ?: return@runCatching null
+        val markup = unit.markup ?: return@runCatching null
+        val sheets = (unit.cssBundle?.cssTexts ?: emptyList()).map { LightCssParser().parse(it) }
+        val styles = StyleComputer(bodyPx, StyleSheet(emptyList()), sheets).compute(markup)
+        BookStyleProbe.snapshot(styles)
+    }.onFailure { Logger.w(logTag, "snapshotBookStyle probe FAIL ch=$chapter ${it.message} → fallback base") }
+        .getOrNull()
 
     /**
      * 用户层共享收口：原书主题提交探针（平板/桌面两端宿主同调，禁止各写一遍）。

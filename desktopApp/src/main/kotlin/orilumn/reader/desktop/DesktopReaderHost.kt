@@ -4,6 +4,7 @@ import orilumn.reader.data.book.BookReadingState
 import orilumn.reader.data.epub.EpubResourceReader
 import orilumn.reader.data.epub.TocItem
 import orilumn.reader.data.epub.ZipEpubResourceReader
+import orilumn.reader.data.settings.BookSettings
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.engine.BookDocumentController
 import orilumn.reader.engine.BoxChapterLayouter
@@ -336,6 +337,20 @@ class DesktopReaderHost(
      */
     fun probeOriginalTheme(next: ReaderSettings, chapter: Int): ReaderSettings =
         controller.probeOriginalTheme(chapter, profile.bodyPx, next)
+
+    /**
+     * 首次开书探针（用户层·壳，与平板开书收口同调共享 `probeOriginalOnOpen`）。
+     *
+     * 默认原书主题开书时，按落位章回填本书未钉的缩进/行距；调用方（视图）负责 bookOnly
+     * 持久化 + 设置状态更新（重排 effect 随后自动轻刷）。已钉/非原书原样返回。
+     */
+    suspend fun probeOriginalOnOpen(
+        settings: ReaderSettings,
+        overlay: BookSettings,
+        chapter: Int,
+    ): ReaderSettings = withContext(Dispatchers.Default) {
+        controller.probeOriginalOnOpen(chapter, profile.bodyPx, settings, overlay)
+    }
 
     /**
      * F4b 用户字库追装（与平板 `topUpSkiaFonts` 同式，经共享 [FontPoolSync]）：

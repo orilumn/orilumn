@@ -33,6 +33,10 @@ class PerBookSettings(
         return global.applyOverlay(bookStore.load(bookId))
     }
 
+    /** 打开某书时的原始私有层（首次开书探针判“钉没钉过”用；无书即空层）。 */
+    fun overlayFor(bookId: Long?): BookSettings =
+        if (bookId == null || bookId < 0) BookSettings.EMPTY else bookStore.load(bookId)
+
     /**
      * 提交 next（调用方先把 next 作为生效值刷新 UI）。
      * 返回写后全局（壳刷新基线用）。

@@ -1,6 +1,7 @@
 package orilumn.reader.desktop
 
 import orilumn.reader.data.font.FontEntry
+import orilumn.reader.data.settings.BookSettings
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.ui.reader.ReaderHost
 import orilumn.reader.ui.reader.ReaderPos
@@ -52,6 +53,8 @@ fun ReaderView(
     book: ShelfBook,
     store: DesktopShelfStore,
     settings: ReaderSettings,
+    /** 本书原始私有层（首次开书探针判“钉没钉过”用；与 settings 同时随书加载）。 */
+    bookOverlay: BookSettings,
     customs: List<ThemePreset>,
     onBack: () -> Unit,
     onSettingsChange: (ReaderSettings) -> Unit,
@@ -69,6 +72,10 @@ fun ReaderView(
     var currentPos by remember(book) { mutableStateOf<ReaderPos?>(null) }
     var settingsOpen by remember(book) { mutableStateOf(false) }
     var tocOpen by remember(book) { mutableStateOf(false) }
+    // 首次开书收口（与平板同调，共享 probeOriginalOnOpen）：默认原书主题开书时，
+    // 落位即按落位章回填未钉的缩进/行距并 bookOnly 持久；已钉/非原书直接跳过。
+    // 每本书一次（overlay 落 pin 后共享门控自停）。
+    var probedOpen by remember(book) { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     fun commit(next: ReaderSettings) = onSettingsChange(next)
 
@@ -177,6 +184,16 @@ fun ReaderView(
             onDispose { (snapshot.delegate as? DesktopReaderHost)?.close() }
         }
         val desktopHost = snapshot.delegate as? DesktopReaderHost
+        // 首次开书探针落位（见上）：宿主就绪 + 首定位到达后跑一次，命中即 bookOnly 提交
+        // （设置状态更新 → 重排 effect 自动轻刷）。
+        LaunchedEffect(book, currentPos) {
+            if (probedOpen) return@LaunchedEffect
+            val pos = currentPos ?: return@LaunchedEffect
+            val host = desktopHost ?: return@LaunchedEffect
+            probedOpen = true
+            val next = host.probeOriginalOnOpen(settings, bookOverlay, pos.chapter)
+            if (next != settings) onCommitBookPrivate(next)
+        }
         // 引擎重排落位推送（设置两段式与视口重排共用）：刷版本号 + 定位到含锚字符的新页，
         // NonCancellable 保证已完成的重排不被 effect 重启吞掉。
         suspend fun pushLanding(landing: ReaderPos) {

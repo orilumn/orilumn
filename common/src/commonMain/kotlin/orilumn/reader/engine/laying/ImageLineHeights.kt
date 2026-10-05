@@ -71,7 +71,7 @@ fun adjustLineHeightsForInlineImages(
         var scan = cursor
         while (scan < fffcAt.size && fffcAt[scan] <= hi) {
             val img = imgs.getOrNull(scan) ?: break
-            val imgStyle = styles[img] ?: styles[root] ?: NormalFlowLayout.DEFAULT_STYLE
+            val imgStyle = styles.getValue(img)
             val usedH = NormalFlowLayout.replacedUsedSize(img, imgStyle, breakW, imageLoader, chapterHref).second
             if (usedH > tallest) tallest = usedH
             scan++

@@ -43,10 +43,10 @@ object ReaderUiSheet {
         // 不受 疏密 缩放.
         val paraEm = if (profile.bodyPx > 0f) profile.paragraphSpacingPx / profile.bodyPx else 0f
         // 首行缩进只作用于正文段落 p 的 text-indent; li 由列表自身的沟槽缩进表达, 绝不套用.
-        val paraRule = "p:not(figure p):not(figcaption p):not(caption p){margin-top:0em;margin-bottom:0em;text-indent:${fmtEm(profile.firstLineIndentEm)}em}\n" +
+        val paraRule = "p{margin-top:0em;margin-bottom:0em;text-indent:${fmtEm(profile.firstLineIndentEm)}em}\n" +
             "li{margin-top:0em;margin-bottom:0em}\n" +
             "li p{margin-top:0em;margin-bottom:0em;text-indent:0em}\n" +
-            "p:not(figure p):not(figcaption p):not(caption p) + p:not(figure p):not(figcaption p):not(caption p),p + li,li + p,li + li{margin-top:${fmtEm(paraEm)}em}"
+            "p + p,p + li,li + p,li + li{margin-top:${fmtEm(paraEm)}em}"
         val textBlocks = textBlockSelectors
         return LightCssParser().parse("$textBlocks{line-height:$lineHeight}\n$paraRule\n${fontRules(profile)}")
     }

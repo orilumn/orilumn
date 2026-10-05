@@ -4,6 +4,7 @@ import orilumn.reader.engine.ImageBoundsReader
 import orilumn.reader.engine.css.ClearSide
 import orilumn.reader.engine.css.ColorRun
 import orilumn.reader.engine.css.ComputedStyle
+import orilumn.reader.engine.css.Edges
 import orilumn.reader.engine.css.FloatSide
 import orilumn.reader.engine.css.FontRun
 import orilumn.reader.io.Logger
@@ -467,7 +468,8 @@ object NormalFlowLayout {
     ): List<LayoutBox> {
         // display:none → this element (and its whole subtree) contributes no box, no text.
         if (hidden.isHidden(el)) return emptyList()
-        val style = styles[el] ?: DEFAULT_STYLE
+        // styles 恒全：StyleComputer.compute 覆盖整树，缺键即调用方传了残表，直接抛（静默 16px 会排错版）。
+        val style = styles.getValue(el)
         val blockChildren = el.children.filter { classify.isBlock(it) }
         return if (el.tag == "table") {
             // Table 不可环绕：emit 期越过跨度，后续文本必在跨度之下，待环绕清零。
@@ -562,7 +564,7 @@ object NormalFlowLayout {
             // 断行/几何/绘制三方同吃这一份，重轻双路经同一 helper 恒一致。
             val text = absorbStyled(el, styles, classify, hidden, genOf).text
             val contentW = widthPx.coerceAtLeast(1)
-            val styleOf: (MarkupElement) -> ComputedStyle = { styles[it] ?: DEFAULT_STYLE }
+            val styleOf: (MarkupElement) -> ComputedStyle = { styles.getValue(it) }
             val runs = leafFontRuns(el, styles, classify, hidden, genOf)
             val shifts = leafBaselineShifts(el, styles, classify, hidden, genOf)
             val side = style.floatSide
@@ -691,7 +693,16 @@ object NormalFlowLayout {
         }
     }
 
-    /** An anonymous text leaf box for a stray inline run, styled like its container. */
+    /**
+     * An anonymous text leaf box for a stray inline run.
+     *
+     * 排版层（下）: 匿名块只继承容器的字形/排版属性（字号/行高/缩进/对齐/颜色等），自身的盒边
+     * （margin/padding/border）恒为 0（CSS 2.1 §9.2.1 匿名块 + §8.3.1 边距折叠：容器的边归容器盒，
+     * 流程统一加一次）。此前这里直接复用容器样式，容器的 padding/border/margin 被匿名叶与容器盒
+     * 各算一次 —— 长生界 `h2{padding-bottom:6rem}` 的章标题→正文间隙被翻倍（252px 而非 141px）。
+     * 与轻路径同形：懒级联给合成 `#text` 算出的样式本来就是零边的（[StyleComputer.resolve] 无匹配
+     * 规则即初值），修后重轻两路逐字节一致。
+     */
     private fun buildAnonymousTextLeaf(
         textEl: MarkupElement,
         style: ComputedStyle,
@@ -699,15 +710,17 @@ object NormalFlowLayout {
         widthPx: Int,
         left: Int,
     ): List<LayoutBox> {
+        val leafStyle = style.copy(margin = Edges(), padding = Edges(), border = Edges())
         val contentW = widthPx.coerceAtLeast(1)
-        val breakW = innerBreakWidth(style, contentW)
+        // 断行宽按叶自身横向边扣（恒 0）：widthPx 已是容器内容宽，再扣容器横向边就是双扣。
+        val breakW = innerBreakWidth(leafStyle, contentW)
         // P1-2: 匿名 run 整段按容器 white-space 一次归一＋收尾（与轻路径计数同式）。
-        val text = normalizeAnonymousRun(textEl.text, style.whiteSpace)
+        val text = normalizeAnonymousRun(textEl.text, leafStyle.whiteSpace)
         // 匿名 stray 叶按构造就是单 face 叶（不在级联表里、无行内子树），无行内字体段。
-        val broken = breakLeafLines(breaker, text, style, breakW, textEl.parent?.tag ?: textEl.tag, emptyList(), 0f)
+        val broken = breakLeafLines(breaker, text, leafStyle, breakW, textEl.parent?.tag ?: textEl.tag, emptyList(), 0f)
         return listOf(
             LayoutBox(
-                el = textEl, style = style, contentLeft = left, contentWidth = contentW,
+                el = textEl, style = leafStyle, contentLeft = left, contentWidth = contentW,
                 ranges = broken.map { it.range }, hyphenAtEnd = broken.map { it.hyphenAtEnd },
                 squeezeRatios = broken.map { it.squeezeRatio },
                 textLength = text.length,
@@ -797,7 +810,7 @@ object NormalFlowLayout {
         hidden: HiddenCheck = HIDDEN_NONE,
         genOf: GenOf = EmptyGen,
     ): List<TableCellBlock> {
-        val cellStyle = styles[cellEl] ?: DEFAULT_STYLE
+        val cellStyle = styles.getValue(cellEl)
         val out = ArrayList<TableCellBlock>(2)
         // 格自身的 border/padding **不**进块堆叠（行高预算与 `emitCell` 的 insetTop 单算）⇒
         // `selfEdges = false`，起点 gap/inset 皆 0。
@@ -834,7 +847,7 @@ object NormalFlowLayout {
         for (item in kids) {
             val ch = item.el
             val anon = ch == null
-            val chs = if (anon) cs else (styles[ch] ?: DEFAULT_STYLE)
+            val chs = if (anon) cs else styles.getValue(ch)
             val ownH = if (anon) 0 else (chs.border.horizontal + chs.padding.horizontal).roundToInt()
             val ownV = if (anon) 0 else (chs.border.vertical + chs.padding.vertical).roundToInt()
             val g = cur + (if (first) (if (anon) 0f else chs.margin.top) else collapseMargins(if (anon) 0f else chs.margin.top, prevM)).roundToInt()
@@ -971,7 +984,7 @@ object NormalFlowLayout {
         // 列间＋两侧各留 `border-spacing`（`cellspacing` 属性经级联已映射到该字段）；
         // 每行高含底部 `border-spacing` 纵向间隔（表顶外间隔为已知近似，未单列）。
         // `table-layout: fixed` 均分，`auto`（默认）按单元格内容测宽分列。
-        val tableStyle = styles[el] ?: DEFAULT_STYLE
+        val tableStyle = styles.getValue(el)
         val collapse = tableStyle.borderCollapse
         val spH = if (collapse) 0f else tableStyle.borderSpacingH
         val spV = if (collapse) 0 else tableStyle.borderSpacingV.roundToInt()
@@ -985,7 +998,7 @@ object NormalFlowLayout {
         for (row in model.rows) {
             val list = ArrayList<CellBlocks>(row.cells.size)
             for (cell in row.cells) {
-                val cs = styles[cell.el] ?: DEFAULT_STYLE
+                val cs = styles.getValue(cell.el)
                 val blocks = cellBlocks(cell.el, styles, classify, hidden, genOf)
                 list.add(CellBlocks(cell, cs, blocks))
                 prefs.add(tableCellPref(breaker, cell.col, cell.colSpan, blocks, cs))
@@ -1062,7 +1075,7 @@ object NormalFlowLayout {
         }
         val resolvedRowHs = TableGridModel.resolveRowHeights(heightSpecs)
         for ((ri, row) in model.rows.withIndex()) {
-            val rowStyle = styles[row.el] ?: DEFAULT_STYLE
+            val rowStyle = styles.getValue(row.el)
             // P1-2: 行字符长度 = 各单元格归一文本长度之和（轻路径 styledCharAdvance(tr) 同式；
             // 旧 `row.el.textLength` 为原始长度，空白归一后不再一致）。
             out.add(
@@ -1947,6 +1960,4 @@ object NormalFlowLayout {
         "table", "thead", "tbody", "tfoot", "tr", "td", "th", "caption", "dl", "dt", "dd", "address", "hr",
         "main", "hgroup", "details", "summary",
     )
-
-    internal val DEFAULT_STYLE = ComputedStyle(fontSizePx = 16f, lineHeightRatio = 1.5f)
 }

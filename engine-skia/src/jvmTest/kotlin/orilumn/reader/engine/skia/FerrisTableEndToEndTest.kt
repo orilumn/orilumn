@@ -65,7 +65,7 @@ class FerrisTableEndToEndTest {
         val ui = ReaderUiSheet.build(profile)
         val engine = StyleComputer(
             profile.bodyPx, LightCssParser().parse(""), listOf(LightCssParser().parse(css)),
-            null, null, ui, spacingScale = profile.paragraphSpacingScale,
+            null, null, ui, paragraphScale = profile.paragraphSpacingScale, gapScale = profile.paragraphGapScale,
         )
         val styles = engine.compute(root)
         val classify = NormalFlowLayout.heavyClassify(styles, engine.hasDisplayDeclaration())

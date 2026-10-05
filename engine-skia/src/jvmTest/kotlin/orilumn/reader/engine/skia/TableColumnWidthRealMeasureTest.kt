@@ -392,7 +392,7 @@ class TableColumnWidthRealMeasureTest {
             fgColor = 0xFF000000.toInt(), bgColor = 0xFFFFFFFF.toInt(), quoteColor = 0xFF808080.toInt(),
             marginLeft = 0, marginRight = 0, marginTop = 0, marginBottom = 0,
             fontBody = "", fontTitle = "", fontCode = "", useOriginalStyle = true,
-            layoutTheme = "original", coverStretch = true, paragraphSpacingScale = 1f, letterSpacingEm = 0f,
+            layoutTheme = "original", coverStretch = true, paragraphSpacingScale = 1f, paragraphGapScale = 1f, letterSpacingEm = 0f,
         )
 
         AbSwitch.resetForTest()

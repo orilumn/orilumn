@@ -22,6 +22,7 @@ data class LayoutParamKey(
     val letterSpacingEm: Float,
     val cjkLatinSpacingEm: Float = 0f,
     val paragraphSpacingScale: Float,
+    val paragraphGapScale: Float,
     val fontBody: String,
     val fontTitle: String,
     val fontCode: String,
@@ -59,6 +60,7 @@ data class LayoutParamKey(
         crc = Crc32.update4(crc, firstLineIndentEm.bits())
         crc = Crc32.update4(crc, letterSpacingEm.bits())
         crc = Crc32.update4(crc, paragraphSpacingScale.bits())
+        crc = Crc32.update4(crc, paragraphGapScale.bits())
         crc = Crc32.updateString(crc, fontBody)
         crc = Crc32.updateString(crc, fontTitle)
         crc = Crc32.updateString(crc, fontCode)
@@ -128,6 +130,7 @@ data class LayoutParamKey(
             // 本形参 `inhouseBreak` 的默认值已经读过开关，这里复用同一个闸门，两者恒一致。
             cjkLatinSpacingEm = if (inhouseBreak) profile.cjkLatinSpacingEm else 0f,
             paragraphSpacingScale = profile.paragraphSpacingScale,
+            paragraphGapScale = profile.paragraphGapScale,
             fontBody = profile.fontBody,
             fontTitle = profile.fontTitle,
             fontCode = profile.fontCode,

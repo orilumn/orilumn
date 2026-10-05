@@ -40,8 +40,9 @@ inline-important 41`，`UA 10 / UA-important 50`；读者三层**严格夹在 41
    随版式乘算，不进层叠。
 5. **主题值分两类，别一律推给 UI 层**：
    - **读者可调的**（有滑块/可换字体，读者能配出第三种状态）⇒ 值存 `ReaderSettings`，由 **UI 层
-     tier 44** 发声明。现状：`firstLineIndent` / `fontBody` 等。纵边距是例外：段间距即疏密
-     百分比（`paragraphGap`），随版式乘算、不发声明（100 = 书/主题节奏，0 = 清零）。
+     tier 44** 发声明。现状：`firstLineIndent` / `fontBody` 等。纵边距是例外：段间距
+     （`paragraphSpacing`，只乘 p/li）与疏密（`paragraphGap`，乘其余一切块）都是百分比，
+     随版式乘算、不发声明（100 = 书/主题节奏，0 = 对应域清零）。
    - **不可再调的基线预设**（这套主题就长这样，读者配不出别的状态）⇒ 就写主题层 asset
      （tier 42）：`modern.css` / `traditional.css`。现状：`body{font-family}`、
      `p{text-indent}`、`p,li{margin:1em 0}`、正文两端对齐 `p,div,li,blockquote,dd,td{text-align:justify}`。

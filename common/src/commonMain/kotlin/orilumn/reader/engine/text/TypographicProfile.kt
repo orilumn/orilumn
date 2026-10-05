@@ -65,9 +65,10 @@ data class TypographicProfile(
     val layoutTheme: String,
     /** Cover stretch switch (true = stretch fullscreen). */
     val coverStretch: Boolean,
-    /** Density: vertical outer-margin scale factor for every block (headings/quotes/code/lists AND p/li)
-     * (1.0 = default, 0..4). */
+    /** 段间距：p/li 纵边距乘算 (1.0 = 书/主题节奏，0 = p/li 边距清零)。 */
     val paragraphSpacingScale: Float,
+    /** 疏密：p/li 之外一切块级纵边距乘算 (1.0 = 原书节奏，0 = 结构块边距清零)。 */
+    val paragraphGapScale: Float,
     /** Character spacing in em (letterSpacing slot -100..100 / 500 = -0.2em..0.2em); 0 = no extra
      * spacing. Applied to the base text paint in the shaping layer. */
     val letterSpacingEm: Float,
@@ -153,6 +154,7 @@ data class TypographicProfile(
                 coverStretch = s.coverStretch,
                 // 段间距/字距: 同样原样透传, 用户可随时调整.
                 paragraphSpacingScale = (s.paragraphSpacing / 100f).toFloat(),
+                paragraphGapScale = (s.paragraphGap / 100f).toFloat(),
                 letterSpacingEm = Math.round(s.letterSpacing.coerceIn(-100.0, 100.0)) / 500f,
                 cjkLatinSpacingEm = (s.cjkLatinSpacing.coerceIn(0.0, 100.0) / 100f).toFloat(),
             )
@@ -176,8 +178,10 @@ data class TypographicProfile(
                 "traditional" -> s.copy(
                     layoutTheme = theme,
                     firstLineIndent = 2.0,
-                    // 传统节奏靠 1em 主题边距 × 段间距：预设归零（缩进区分段落），用户上调即有间距。
+                    // 传统节奏靠 1em 主题边距 × 段间距：p/li 归零（缩进区分段落），标题等结构块
+                    // 照常走疏密（预设 100），用户上调段间距即有间距。
                     paragraphSpacing = 0.0,
+                    paragraphGap = 100.0,
                     fontBody = "serif",
                 )
                 "modern" -> s.copy(
@@ -185,6 +189,7 @@ data class TypographicProfile(
                     firstLineIndent = base.firstLineIndent,
                     // 现代节奏同样走主题 1em 边距 × 段间距：预设回到 100%。
                     paragraphSpacing = 100.0,
+                    paragraphGap = 100.0,
                     fontBody = "sans-serif",
                 )
                 else -> s.copy(
@@ -200,6 +205,7 @@ data class TypographicProfile(
                     lineSpacing = base.lineSpacing,
                     firstLineIndent = base.firstLineIndent,
                     paragraphSpacing = base.paragraphSpacing,
+                    paragraphGap = base.paragraphGap,
                     letterSpacing = base.letterSpacing,
                 )
             }

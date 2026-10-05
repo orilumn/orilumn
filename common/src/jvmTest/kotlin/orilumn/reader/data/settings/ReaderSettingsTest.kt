@@ -43,16 +43,15 @@ class ReaderSettingsTest {
     }
 
     @Test
-    fun `retired paragraphSpacing key is ignored and gap persists through round-trip`() {
-        // paragraphSpacing 已退役（段间距即疏密）：老存档里的键静默忽略，不进语义。
-        val parsed = ReaderSettings.fromJson("""{"paragraphSpacing":1.2,"paragraphSpacing":150}""")
+    fun `paragraph spacing and gap persist through round-trip`() {
+        val parsed = ReaderSettings.fromJson("""{"paragraphSpacing":150,"paragraphGap":150}""")
         assertEquals(150.0, parsed.paragraphSpacing, 0.0)
+        assertEquals(150.0, parsed.paragraphGap, 0.0)
         val reread = ReaderSettings.fromJson(parsed.toJson())
         assertEquals(parsed, reread)
         assertEquals(150.0, reread.paragraphSpacing, 0.0)
+        assertEquals(150.0, reread.paragraphGap, 0.0)
     }
-
-    @Test
     fun `partial json falls back to defaults for missing fields`() {
         val parsed = ReaderSettings.fromJson("""{"fontSize":20}""")
         assertEquals(20, parsed.fontSize)          // the provided value takes effect

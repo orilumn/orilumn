@@ -99,7 +99,7 @@ class PhotoPersistFullWidthRegressionTest(private val variant: String) {
             orilumn.reader.engine.css.themeSheetFromProfile(profile),
             null,
             ReaderUiSheet.build(profile),
-            spacingScale = profile.paragraphSpacingScale,
+            paragraphScale = profile.paragraphSpacingScale, gapScale = profile.paragraphGapScale,
         )
     }
 

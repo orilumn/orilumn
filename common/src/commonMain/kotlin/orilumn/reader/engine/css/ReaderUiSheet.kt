@@ -8,16 +8,15 @@ import kotlin.math.roundToInt
  *
  * 平板 `BoxChapterLayouter.uiSheetFromProfile` 与桌面 `DesktopReaderHost.uiSheet` 原本各自内联
  * 同一套规则，现统一委托 [build]：行距 line-height 覆盖所有含文本的块级元素；首行缩进
- * 只作用于正文段落 p。纵边距（margin）UI 层一律不发声明 —— 段间距即疏密百分比，随版式
- * 乘算（`StyleComputer` spacingScale，含 p/li 在内），100 = 原书节奏，0 = 全部清零；
+ * 只作用于正文段落 p。纵边距（margin）UI 层一律不发声明 —— 段间距（只乘 p/li）与疏密
+ * （乘其余一切块）两个百分比滑块随版式乘算，100 = 书/主题节奏，0 = 对应域清零；
  * 书（作者/UA/主题）的 margin 原样参与折叠。
  *
- * 段间距口径（`docs/KMP迁移-功能架构.md` §6 覆盖层，已合入疏密）：没有绝对值替换，
- * 没有基线清零，滑块语义全局统一为相对值。
+ * 双滑块分工（`docs/KMP迁移-功能架构.md` §6 覆盖层）：没有绝对值替换，没有基线清零。
  *
  * 原书设置 只是把预览值重置为中性默认，启动 UI 层照常按存储值渲染（滑块值绝对，0 = 无首行缩进）。
- * 疏密（paragraphSpacingScale）不在此写 margin：它在 StyleComputer 里统一乘算作者/UA 计算后的外边距，
- * 这里写固定基线会"替换"作者/UA 的间距，违背调节语义。
+ * 两 scale 都在 StyleComputer 里统一乘算作者/UA 计算后的外边距，这里写固定基线会"替换"
+ * 作者/UA 的间距，违背调节语义。
  *
  * 字体槽（用户显式选字体，空 = 该域跟随原书）：槽位按 `fontSlotFor` 同一路由分域——正文槽
  * 只覆盖非标题、非代码的文本块（h1..h6→标题槽，pre/code/kbd/samp→代码槽），标题/代码标签

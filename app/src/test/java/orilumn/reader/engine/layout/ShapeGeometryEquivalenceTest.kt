@@ -33,7 +33,7 @@ class ShapeGeometryEquivalenceTest {
         marginLeft = 0, marginRight = 0, marginTop = 0, marginBottom = 0,
         fontBody = "", fontTitle = "", fontCode = "", useOriginalStyle = true,
         layoutTheme = "original",
-        coverStretch = true, paragraphSpacingScale = 1f, letterSpacingEm = 0f,
+        coverStretch = true, paragraphSpacingScale = 1f, paragraphGapScale = 1f, letterSpacingEm = 0f,
     )
 
     private fun cascadeFor(root: MarkupElement, authorCss: String = "") =

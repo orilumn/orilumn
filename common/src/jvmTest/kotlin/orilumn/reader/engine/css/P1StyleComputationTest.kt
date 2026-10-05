@@ -237,7 +237,7 @@ class P1StyleComputationTest {
             val body = MarkupElement("body", emptyMap(), listOf(el))
             el.parent = body
             el.children.forEach { it.parent = el }
-            return StyleComputer(16f, ua, emptyList(), spacingScale = gap).compute(body)[el]!!
+            return StyleComputer(16f, ua, emptyList(), gapScale = gap).compute(body)[el]!!
         }
         val bq1 = styleOf("blockquote", 1f)
         val bq2 = styleOf("blockquote", 2f)

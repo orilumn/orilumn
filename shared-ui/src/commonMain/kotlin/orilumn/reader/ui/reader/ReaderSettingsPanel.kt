@@ -340,6 +340,9 @@ fun ReaderSettingsPanel(
                 sliderKey(s.paragraphSpacing, 0.0, 400.0, 1.0,
                     apply = { v -> onPreview(s.copy(paragraphSpacing = v)); onCommitTypography(s.copy(paragraphSpacing = v)) },
                     fmt = { "${it.roundToInt()}%" }),
+                sliderKey(s.paragraphGap, 0.0, 400.0, 1.0,
+                    apply = { v -> onPreview(s.copy(paragraphGap = v)); onCommitTypography(s.copy(paragraphGap = v)) },
+                    fmt = { "${it.roundToInt()}%" }),
                 sliderKey(s.marginTop.toDouble(), 0.0, 200.0, 1.0,
                     apply = { v -> onPreview(s.copy(marginTop = v.roundToInt())); onCommitTypography(s.copy(marginTop = v.roundToInt())) },
                     fmt = { "${it.roundToInt()}" }),
@@ -948,7 +951,7 @@ private fun SpacingPage(
     preview: (ReaderSettings) -> Unit,
     commit: (ReaderSettings) -> Unit,
 ) {
-    val labelW = sliderLabelWidth(listOf("首行缩进", "行距", "段间距", "上边距", "下边距", "左边距", "右边距"), p)
+    val labelW = sliderLabelWidth(listOf("首行缩进", "行距", "段间距", "疏密", "上边距", "下边距", "左边距", "右边距"), p)
     // 排版量滑块永远可调 (用户最高优先级); 原书设置 只是把值重置为中性默认.
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
         // 首行缩进 (em): UI 层最高优先级 text-indent; 0 = 无首行缩进.
@@ -960,24 +963,29 @@ private fun SpacingPage(
             { String.format("%.1f", it) },
             { preview(s.copy(lineSpacing = it)) }, { commit(s.copy(lineSpacing = it)) }, p, labelWidth = labelW,
             nav = nav, index = 1) }
-        // 段间距 (%)：纵边距统一乘算（100 = 原书/主题节奏，0 = 全部清零）。
+        // 段间距 (%)：p/li 纵边距乘算（100 = 书/主题节奏，0 = p/li 边距清零）。
         item { UiSliderRow("段间距", 0.0, 400.0, 1.0, s.paragraphSpacing,
             { "${it.roundToInt()}%" },
             { preview(s.copy(paragraphSpacing = it)) }, { commit(s.copy(paragraphSpacing = it)) }, p, labelWidth = labelW,
             nav = nav, index = 2) }
+        // 疏密 (%)：p/li 之外一切块级纵边距乘算（100 = 原书节奏，0 = 结构块边距清零）。
+        item { UiSliderRow("疏密", 0.0, 400.0, 1.0, s.paragraphGap,
+            { "${it.roundToInt()}%" },
+            { preview(s.copy(paragraphGap = it)) }, { commit(s.copy(paragraphGap = it)) }, p, labelWidth = labelW,
+            nav = nav, index = 3) }
         // 边距 (设备级几何) 不随 原书设置 禁用.
         item { UiSliderRow("上边距", 0.0, 200.0, 1.0, s.marginTop.toDouble(), { "${it.roundToInt()}" },
             { preview(s.copy(marginTop = it.roundToInt())) }, { commit(s.copy(marginTop = it.roundToInt())) }, p, labelWidth = labelW,
-            nav = nav, index = 3) }
+            nav = nav, index = 4) }
         item { UiSliderRow("下边距", 0.0, 200.0, 1.0, s.marginBottom.toDouble(), { "${it.roundToInt()}" },
             { preview(s.copy(marginBottom = it.roundToInt())) }, { commit(s.copy(marginBottom = it.roundToInt())) }, p, labelWidth = labelW,
-            nav = nav, index = 4) }
+            nav = nav, index = 5) }
         item { UiSliderRow("左边距", 0.0, 200.0, 1.0, s.marginLeft.toDouble(), { "${it.roundToInt()}" },
             { preview(s.copy(marginLeft = it.roundToInt())) }, { commit(s.copy(marginLeft = it.roundToInt())) }, p, labelWidth = labelW,
-            nav = nav, index = 5) }
+            nav = nav, index = 6) }
         item { UiSliderRow("右边距", 0.0, 200.0, 1.0, s.marginRight.toDouble(), { "${it.roundToInt()}" },
             { preview(s.copy(marginRight = it.roundToInt())) }, { commit(s.copy(marginRight = it.roundToInt())) }, p, labelWidth = labelW,
-            nav = nav, index = 6) }
+            nav = nav, index = 7) }
         item { Spacer(modifier = Modifier.height(24.dp)) }
     }
 }

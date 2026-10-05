@@ -35,7 +35,7 @@ class ReaderUiSheetTest {
         useOriginalStyle = false,
         layoutTheme = "modern",
         coverStretch = false,
-        paragraphSpacingScale = 1f,
+        paragraphSpacingScale = 1f, paragraphGapScale = 1f,
         letterSpacingEm = 0f,
     )
 

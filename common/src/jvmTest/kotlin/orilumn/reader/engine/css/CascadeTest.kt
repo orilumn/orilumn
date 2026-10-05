@@ -226,4 +226,88 @@ class CascadeTest {
         assertEquals(listOf("Fira Code", "monospace"), bookPre.fontFamilies)
         assertTrue(bookPre.monospace)
     }
+
+    @Test
+    fun `高 tier 简写压过低 tier per-side 长写`() {
+        // Rust 现代模式回归：主题 `p,li{margin:1em 0}`（tier 42）必须盖掉作者
+        // `p{margin-top:0;margin-bottom:0.3rem}`（tier 20）的每一条边，而不是被反杀。
+        val el = node("p")
+        val root = node("body", children = listOf(el))
+        val out = styleMap(
+            ua = "", author = "p{margin-top:0;margin-bottom:0.3rem}",
+            rootFontPx = 16f, root = root,
+        )
+        // 先锁作者侧基线：无主题时 per-side 原样生效。
+        assertEquals(0f, out[el]?.margin?.top)
+        assertEquals(0.3f * 16f, out[el]?.margin?.bottom ?: -1f, 0.01f)
+    }
+
+    @Test
+    fun `主题简写四条边全赢作者长写`() {
+        // StyleComputer 整层验证（含主题层）：四条边都是主题的 1em。
+        val el = node("p")
+        val root = node("body", children = listOf(el))
+        val engine = StyleComputer(
+            16f, sheet(""), listOf(sheet("p{margin-top:0;margin-bottom:0.3rem}")),
+            sheet("p,li{margin:1em 0}"),
+        )
+        val map = engine.compute(root)
+        val st = map[el]!!
+        assertEquals(16f, st.margin.top, 0.01f)
+        assertEquals(16f, st.margin.bottom, 0.01f)
+        assertEquals(0f, st.margin.left, 0.01f)
+        assertEquals(0f, st.margin.right, 0.01f)
+    }
+
+    @Test
+    fun `同 tier 后规则简写重置先规则长写`() {
+        // 同层内源码序决胜：后出现的简写把四条边全重置。
+        val el = node("p")
+        val root = node("body", children = listOf(el))
+        val out = styleMap(
+            ua = "", author = "p{margin-top:5px} p{margin:0}",
+            rootFontPx = 16f, root = root,
+        )
+        assertEquals(0f, out[el]?.margin?.top)
+        assertEquals(0f, out[el]?.margin?.bottom)
+    }
+
+    @Test
+    fun `同 tier 长写拼不过先出现的简写时序`() {
+        // 反方向同样按序：`margin:0` 在后则 top 归零（order 不同，无需平局语义）。
+        val el = node("p")
+        val root = node("body", children = listOf(el))
+        val out = styleMap(
+            ua = "", author = "p{margin:0} p{margin-top:5px}",
+            rootFontPx = 16f, root = root,
+        )
+        assertEquals(5f, out[el]?.margin?.top)
+        assertEquals(0f, out[el]?.margin?.bottom)
+    }
+
+    @Test
+    fun `margin 0 auto 的 auto 经展开仍被居中识别`() {
+        // 简写不再以原串留存：isMarginAuto 靠展开后的 margin-left/right 长写判定。
+        val el = node("table")
+        val root = node("body", children = listOf(el))
+        val out = styleMap(ua = "", author = "table{margin:0 auto}", rootFontPx = 16f, root = root)
+        assertTrue(out[el]?.marginLeftAuto ?: false)
+        assertTrue(out[el]?.marginRightAuto ?: false)
+        assertEquals(0f, out[el]?.margin?.top)
+    }
+
+    @Test
+    fun `padding 简写同样按边参 cascade`() {
+        val el = node("div")
+        val root = node("body", children = listOf(el))
+        val out = styleMap(
+            ua = "div{padding:8px}", author = "div{padding-top:1px}",
+            rootFontPx = 16f, root = root,
+        )
+        // 作者长写赢自己那条边，其余三条 UA 简写展开值。
+        assertEquals(1f, out[el]?.padding?.top)
+        assertEquals(8f, out[el]?.padding?.right)
+        assertEquals(8f, out[el]?.padding?.bottom)
+        assertEquals(8f, out[el]?.padding?.left)
+    }
 }

@@ -20,6 +20,7 @@ class TypographicProfileThemeTest {
         assertEquals("traditional", s.layoutTheme)
         assertEquals(2.0, s.firstLineIndent, 1e-9)
         assertEquals(0.0, s.paragraphSpacing, 1e-9)
+        assertEquals(100.0, s.paragraphGap, 1e-9)
         assertEquals("serif", s.fontBody)
     }
 
@@ -30,6 +31,7 @@ class TypographicProfileThemeTest {
         assertEquals("modern", s.layoutTheme)
         assertEquals(d.firstLineIndent, s.firstLineIndent, 1e-9)
         assertEquals(100.0, s.paragraphSpacing, 1e-9)
+        assertEquals(100.0, s.paragraphGap, 1e-9)
         assertEquals("sans-serif", s.fontBody)
     }
 
@@ -40,6 +42,7 @@ class TypographicProfileThemeTest {
         assertEquals("original", s.layoutTheme)
         assertEquals(d.firstLineIndent, s.firstLineIndent, 1e-9)
         assertEquals(d.paragraphSpacing, s.paragraphSpacing, 1e-9)
+        assertEquals(d.paragraphGap, s.paragraphGap, 1e-9)
         assertEquals("", s.fontBody)
     }
 
@@ -85,7 +88,7 @@ class TypographicProfileThemeTest {
         val dirty = ReaderSettings.DEFAULT.copy(
             fontSize = 22, fontScale = 40.0,
             fontBody = "屏显臻宋", fontTitle = "屏显臻宋", fontCode = "mono",
-            lineSpacing = 1.9, paragraphSpacing = 350.0, letterSpacing = 80.0,
+            lineSpacing = 1.9, paragraphSpacing = 350.0, paragraphGap = 20.0, letterSpacing = 80.0,
             firstLineIndent = 3.0,
         )
         val d = ReaderSettings.DEFAULT
@@ -98,6 +101,7 @@ class TypographicProfileThemeTest {
         assertEquals(d.fontScale, s.fontScale, 1e-9)
         assertEquals(d.lineSpacing, s.lineSpacing, 1e-9)
         assertEquals(d.paragraphSpacing, s.paragraphSpacing, 1e-9)
+        assertEquals(d.paragraphGap, s.paragraphGap, 1e-9)
         assertEquals(d.letterSpacing, s.letterSpacing, 1e-9)
         assertEquals(d.firstLineIndent, s.firstLineIndent, 1e-9)
     }

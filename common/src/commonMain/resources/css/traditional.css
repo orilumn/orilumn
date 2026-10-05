@@ -24,6 +24,8 @@ body { font-family: serif; }
 /* 正文容器统一设为衬线，覆盖书在 p/div 等元素上写的 font-family */
 p, div, li, blockquote, dd, td { font-family: serif; }
 p { text-indent: 2em; margin-top: 0; margin-bottom: 0; }
+/* 列表项内的段落不应首行缩进 */
+li p { text-indent: 0; }
 li { margin-top: 0; margin-bottom: 0; }
 
 /* 正文对齐: 两端对齐。

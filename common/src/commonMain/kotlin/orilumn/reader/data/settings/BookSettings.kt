@@ -27,9 +27,9 @@ data class BookSettings(
     val lineSpacing: Double? = null,
     /** First-line indent (em, 0..10; 0 = no indent). */
     val firstLineIndent: Double? = null,
-    /** 段间距 (% 0..400, 100 = 书/主题节奏): p/li 纵边距乘算. */
+    /** 段间距 (% 0..200, 100 = 书/主题节奏): p/li 纵边距乘算. */
     val paragraphSpacing: Double? = null,
-    /** 疏密 (% 0..400, 100 = 原书节奏): p/li 之外一切块级纵边距乘算. */
+    /** 疏密 (% 0..200, 100 = 原书节奏): p/li 之外一切块级纵边距乘算. */
     val paragraphGap: Double? = null,
     /** Character spacing slot -100..100 (each unit = 0.01em). */
     val letterSpacing: Double? = null,

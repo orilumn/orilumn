@@ -337,12 +337,12 @@ fun ReaderSettingsPanel(
                 sliderKey(s.lineSpacing, 0.5, 2.5, 0.1,
                     apply = { v -> onPreview(s.copy(lineSpacing = v)); onCommitTypography(s.copy(lineSpacing = v)) },
                     fmt = { String.format("%.1f", it) }),
-                sliderKey(s.paragraphSpacing, 0.0, 400.0, 1.0,
+                sliderKey(s.paragraphSpacing, 0.0, 200.0, 1.0,
                     apply = { v -> onPreview(s.copy(paragraphSpacing = v)); onCommitTypography(s.copy(paragraphSpacing = v)) },
-                    fmt = { "${it.roundToInt()}%" }),
-                sliderKey(s.paragraphGap, 0.0, 400.0, 1.0,
+                    fmt = { "${it.roundToInt()}" }),
+                sliderKey(s.paragraphGap, 0.0, 200.0, 1.0,
                     apply = { v -> onPreview(s.copy(paragraphGap = v)); onCommitTypography(s.copy(paragraphGap = v)) },
-                    fmt = { "${it.roundToInt()}%" }),
+                    fmt = { "${it.roundToInt()}" }),
                 sliderKey(s.marginTop.toDouble(), 0.0, 200.0, 1.0,
                     apply = { v -> onPreview(s.copy(marginTop = v.roundToInt())); onCommitTypography(s.copy(marginTop = v.roundToInt())) },
                     fmt = { "${it.roundToInt()}" }),
@@ -964,13 +964,13 @@ private fun SpacingPage(
             { preview(s.copy(lineSpacing = it)) }, { commit(s.copy(lineSpacing = it)) }, p, labelWidth = labelW,
             nav = nav, index = 1) }
         // 段间距 (%)：p/li 纵边距乘算（100 = 书/主题节奏，0 = p/li 边距清零）。
-        item { UiSliderRow("段间距", 0.0, 400.0, 1.0, s.paragraphSpacing,
-            { "${it.roundToInt()}%" },
+        item { UiSliderRow("段间距", 0.0, 200.0, 1.0, s.paragraphSpacing,
+            { "${it.roundToInt()}" },
             { preview(s.copy(paragraphSpacing = it)) }, { commit(s.copy(paragraphSpacing = it)) }, p, labelWidth = labelW,
             nav = nav, index = 2) }
         // 疏密 (%)：p/li 之外一切块级纵边距乘算（100 = 原书节奏，0 = 结构块边距清零）。
-        item { UiSliderRow("疏密", 0.0, 400.0, 1.0, s.paragraphGap,
-            { "${it.roundToInt()}%" },
+        item { UiSliderRow("疏密", 0.0, 200.0, 1.0, s.paragraphGap,
+            { "${it.roundToInt()}" },
             { preview(s.copy(paragraphGap = it)) }, { commit(s.copy(paragraphGap = it)) }, p, labelWidth = labelW,
             nav = nav, index = 3) }
         // 边距 (设备级几何) 不随 原书设置 禁用.

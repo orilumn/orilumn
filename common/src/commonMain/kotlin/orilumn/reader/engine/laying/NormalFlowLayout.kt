@@ -875,7 +875,16 @@ object NormalFlowLayout {
                 val sub0 = cellFlowItems(blk, classify, hidden)
                 val leafish = blk.tag == "table" || sub0.isEmpty() || sub0.all { it.anon }
                 if (leafish) {
-                    val rd = absorbCellBlock(blk, styles, emptySet(), { false }, chs, hidden, genOf)
+                    // 独图块（块级 img，如 `img{display:block}` 书的 `<td><img></td>`）：吸收按 img 根
+                    // 早退得 ""，此处补一个 U+FFFC 槽 —— 与 `appendInlineText` / 轻路径
+                    // `styledCharAdvance`（独图计 1 槽）/ 非表格独图叶（textLength 恒 1）同口径。
+                    // 否则重路径字符少 1（整章 char 基址漂移），且塑形 `shapeGeometry` 的
+                    // replaceable 形无槽可配、绘制侧 `emitCell` 整块跳过（Rust 简介 Ferris 表即此）。
+                    val rd = if (isReplaceable(blk)) {
+                        "\uFFFC" to emptyList<FontRun>()
+                    } else {
+                        absorbCellBlock(blk, styles, emptySet(), { false }, chs, hidden, genOf)
+                    }
                     out.add(
                         TableCellBlock(
                             el = blk, style = chs,

@@ -65,9 +65,9 @@ data class TypographicProfile(
     val layoutTheme: String,
     /** Cover stretch switch (true = stretch fullscreen). */
     val coverStretch: Boolean,
-    /** Density: vertical outer-margin scale factor for structural blocks (heading/quote/code)
+    /** Density: vertical outer-margin scale factor for every block (headings/quotes/code/lists AND p/li)
      * (1.0 = default, 0..4). */
-    val paragraphGapScale: Float,
+    val paragraphSpacingScale: Float,
     /** Character spacing in em (letterSpacing slot -100..100 / 500 = -0.2em..0.2em); 0 = no extra
      * spacing. Applied to the base text paint in the shaping layer. */
     val letterSpacingEm: Float,
@@ -151,8 +151,8 @@ data class TypographicProfile(
                 useOriginalStyle = original,
                 layoutTheme = s.layoutTheme,
                 coverStretch = s.coverStretch,
-                // 疏密/字距: 同样原样透传, 用户可随时调整.
-                paragraphGapScale = (s.paragraphGap / 100f).toFloat(),
+                // 段间距/字距: 同样原样透传, 用户可随时调整.
+                paragraphSpacingScale = (s.paragraphSpacing / 100f).toFloat(),
                 letterSpacingEm = Math.round(s.letterSpacing.coerceIn(-100.0, 100.0)) / 500f,
                 cjkLatinSpacingEm = (s.cjkLatinSpacing.coerceIn(0.0, 100.0) / 100f).toFloat(),
             )
@@ -165,7 +165,7 @@ data class TypographicProfile(
          *
          * 传统/现代: 写入首行缩进/段间距/正文字体族 (字体槽是 UI 优先级最高的覆盖层,
          * 所以预设写入 = 直接生效).
-         * 原书设置: 写入全套中性默认值 (字体不覆盖 / 字号/疏密/字距/行距 / 缩进/段距)
+         * 原书设置: 写入全套中性默认值 (字体不覆盖 / 字号/段间距/字距/行距 / 缩进)
          * 让书籍排版完全回到 CSS 原貌; 用户可随时重新调整. 持久化范围由调用方决定:
          * 现代/传统 走 diff 传染全局; 原书设置 只写本书私有 overlay, 不传染.
          */
@@ -176,19 +176,19 @@ data class TypographicProfile(
                 "traditional" -> s.copy(
                     layoutTheme = theme,
                     firstLineIndent = 2.0,
-                    // 传统节奏靠 1em 主题边距 × 疏密：预设归零（缩进区分段落），用户上调即有间距。
-                    paragraphGap = 0.0,
+                    // 传统节奏靠 1em 主题边距 × 段间距：预设归零（缩进区分段落），用户上调即有间距。
+                    paragraphSpacing = 0.0,
                     fontBody = "serif",
                 )
                 "modern" -> s.copy(
                     layoutTheme = theme,
                     firstLineIndent = base.firstLineIndent,
-                    // 现代节奏同样走主题 1em 边距 × 疏密：预设回到 100%。
-                    paragraphGap = 100.0,
+                    // 现代节奏同样走主题 1em 边距 × 段间距：预设回到 100%。
+                    paragraphSpacing = 100.0,
                     fontBody = "sans-serif",
                 )
                 else -> s.copy(
-                    // 原书设置: 全套中性值 — 不替换字体、字号回到基准、行距/疏密/字距归位
+                    // 原书设置: 全套中性值 — 不替换字体、字号回到基准、行距/段间距/字距归位
                     // (恒等), 缩进回到默认. Android 切后用书探测值替换首行缩进/行距
                     // (见 ReaderActivity.withBookStyle)，用户可随时调整滑块覆盖.
                     layoutTheme = theme,
@@ -199,7 +199,7 @@ data class TypographicProfile(
                     fontCode = "",
                     lineSpacing = base.lineSpacing,
                     firstLineIndent = base.firstLineIndent,
-                    paragraphGap = base.paragraphGap,
+                    paragraphSpacing = base.paragraphSpacing,
                     letterSpacing = base.letterSpacing,
                 )
             }

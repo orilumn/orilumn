@@ -24,7 +24,7 @@ import orilumn.reader.engine.html.MarkupElement
  * @param theme the modern/traditional/user theme stylesheet (reader layer, above the book; empty/null = off).
  * @param settings the per-item reader-settings stylesheet (above theme; empty/null = off).
  * @param ui the reader-app stylesheet (above settings; carries line-height / paragraph spacing).
- * @param gapScale 疏密 (paragraphGapScale): scales the computed top/bottom margin of every block
+ * @param spacingScale 段间距 (paragraphSpacingScale): scales the computed top/bottom margin of every block
  *   (author css / UA defaults kept, only ratio-adjusted; 1.0 = the book's own rhythm).
  *   Paragraph spacing has no absolute value anymore — it IS this scale (100 = book, 0 = clear all).
  */
@@ -35,7 +35,7 @@ class StyleComputer(
     theme: StyleSheet? = null,
     settings: StyleSheet? = null,
     ui: StyleSheet? = null,
-    private val gapScale: Float = 1f,
+    private val spacingScale: Float = 1f,
 ) {
     private val cascade = Cascade(ua, authorSheets, theme, settings, ui)
 
@@ -313,10 +313,10 @@ class StyleComputer(
         val split = CascadeProbe.splitSink
         val tE = if (split != null) orilumn.reader.time.platformNowMs() else 0L
         val rawMargin = parseEdges(w, "margin", "margin-top", "margin-right", "margin-bottom", "margin-left", fontSize, parent.fontSizePx)
-        // 疏密 (gapScale): 调节语义 —— 在 cascade 结果之上按比例缩放 (作者 css / UA 默认值保留, 不替换).
-        // 只动垂直 (top/bottom); p/li 豁免 (其纵边距归 段间距 的替换语义，仅 p/li 相邻对).
-        val margin = if (gapScale != 1f) {
-            rawMargin.copy(top = rawMargin.top * gapScale, bottom = rawMargin.bottom * gapScale)
+        // 段间距 (spacingScale): 调节语义 —— 在 cascade 结果之上按比例缩放 (作者 css / UA 默认值保留, 不替换).
+        // 只动垂直 (top/bottom)；含 p/li 在内一视同仁（段间距即此乘算，无绝对值替换）。
+        val margin = if (spacingScale != 1f) {
+            rawMargin.copy(top = rawMargin.top * spacingScale, bottom = rawMargin.bottom * spacingScale)
         } else rawMargin
 
         val width = parseBoxSize(w["width"])

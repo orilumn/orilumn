@@ -28,7 +28,7 @@ data class BookSettings(
     /** First-line indent (em, 0..10; 0 = no indent). */
     val firstLineIndent: Double? = null,
     /** Density scaling (% 0..400, 100 = default). */
-    val paragraphGap: Double? = null,
+    val paragraphSpacing: Double? = null,
     /** Character spacing slot -100..100 (each unit = 0.01em). */
     val letterSpacing: Double? = null,
     /** Page margins four directions (px). */
@@ -87,7 +87,7 @@ data class BookSettings(
                     fontScale = if (o.containsKey("fontScale")) SettingsJson.optDouble(o, "fontScale", 0.0) else null,
                     lineSpacing = if (o.containsKey("lineSpacing")) SettingsJson.optDouble(o, "lineSpacing", 0.0) else null,
                     firstLineIndent = if (o.containsKey("firstLineIndent")) SettingsJson.optDouble(o, "firstLineIndent", 0.0) else null,
-                    paragraphGap = if (o.containsKey("paragraphGap")) SettingsJson.optDouble(o, "paragraphGap", 0.0) else null,
+                    paragraphSpacing = if (o.containsKey("paragraphSpacing")) SettingsJson.optDouble(o, "paragraphSpacing", 0.0) else null,
                     letterSpacing = if (o.containsKey("letterSpacing")) SettingsJson.optDouble(o, "letterSpacing", 0.0) else null,
                     marginTop = if (o.containsKey("marginTop")) SettingsJson.optInt(o, "marginTop", 0) else null,
                     marginBottom = if (o.containsKey("marginBottom")) SettingsJson.optInt(o, "marginBottom", 0) else null,
@@ -137,7 +137,7 @@ data class BookSettings(
             fontScale = rs.fontScale,
             lineSpacing = rs.lineSpacing,
             firstLineIndent = rs.firstLineIndent,
-            paragraphGap = rs.paragraphGap,
+            paragraphSpacing = rs.paragraphSpacing,
             letterSpacing = rs.letterSpacing,
             marginTop = rs.marginTop,
             marginBottom = rs.marginBottom,
@@ -164,7 +164,7 @@ data class BookSettings(
         fun changedFrom(next: ReaderSettings, baseline: ReaderSettings): BookSettings {
             val o = BookSettings(
                 layoutTheme = next.layoutTheme, fontSize = next.fontSize, fontScale = next.fontScale,
-                lineSpacing = next.lineSpacing, firstLineIndent = next.firstLineIndent, paragraphGap = next.paragraphGap,
+                lineSpacing = next.lineSpacing, firstLineIndent = next.firstLineIndent, paragraphSpacing = next.paragraphSpacing,
                 letterSpacing = next.letterSpacing,
                 marginTop = next.marginTop, marginBottom = next.marginBottom, marginLeft = next.marginLeft, marginRight = next.marginRight,
                 bgOverride = next.bgOverride, fgOverride = next.fgOverride,
@@ -179,7 +179,7 @@ data class BookSettings(
                 fontScale = o.fontScale?.takeUnless { it == baseline.fontScale },
                 lineSpacing = o.lineSpacing?.takeUnless { it == baseline.lineSpacing },
                 firstLineIndent = o.firstLineIndent?.takeUnless { it == baseline.firstLineIndent },
-                paragraphGap = o.paragraphGap?.takeUnless { it == baseline.paragraphGap },
+                paragraphSpacing = o.paragraphSpacing?.takeUnless { it == baseline.paragraphSpacing },
                 letterSpacing = o.letterSpacing?.takeUnless { it == baseline.letterSpacing },
                 marginTop = o.marginTop?.takeUnless { it == baseline.marginTop },
                 marginBottom = o.marginBottom?.takeUnless { it == baseline.marginBottom },

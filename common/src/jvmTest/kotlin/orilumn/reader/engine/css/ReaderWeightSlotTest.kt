@@ -57,7 +57,7 @@ class ReaderWeightSlotTest {
         useOriginalStyle = false,
         layoutTheme = "modern",
         coverStretch = false,
-        paragraphGapScale = 1f,
+        paragraphSpacingScale = 1f,
         letterSpacingEm = 0f,
     )
 

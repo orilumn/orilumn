@@ -16,7 +16,7 @@ import org.robolectric.annotation.Config
 /**
  * 单滑块语义（段间距即疏密，相对值），经真实管线一次钉死：
  *
- *  疏密 (paragraphGapScale)  = 调节: 按比例缩放**一切**块级纵边距（含 p/li）——作者/UA/主题值
+ *  疏密 (paragraphSpacingScale)  = 调节: 按比例缩放**一切**块级纵边距（含 p/li）——作者/UA/主题值
  *    被保留，100 = 原书节奏，0 = 全部清零。UI 层纵边距零声明（书 margin 原样折叠）。
  *  水平 margin 永不缩放。
  *
@@ -28,7 +28,7 @@ class DensityScaleTest {
 
     private val layouter = BoxChapterLayouter()
 
-    /** Computes [tag]'s computed margin under [settings] — UI sheet (行距/缩进) + gapScale (疏密) exactly
+    /** Computes [tag]'s computed margin under [settings] — UI sheet (行距/缩进) + spacingScale (疏密) exactly
      *  as [orilumn.reader.engine.BoxChapterLayouter.styleComputerFor] wires them in production. */
     private fun margin(settings: ReaderSettings, tag: String, authorCss: String = "", uaCss: String = ""): Edges {
         val profile = TypographicProfile.build(settings)
@@ -50,16 +50,16 @@ class DensityScaleTest {
             LightCssParser().parse(uaCss),
             author,
             ui = ui,
-            gapScale = profile.paragraphGapScale,
+            spacingScale = profile.paragraphSpacingScale,
         ).compute(root)
         return map[el]!!.margin
     }
 
-    private fun withGap(paragraphGap: Double) = ReaderSettings.DEFAULT.copy(paragraphGap = paragraphGap)
+    private fun withGap(paragraphSpacing: Double) = ReaderSettings.DEFAULT.copy(paragraphSpacing = paragraphSpacing)
 
     /** 疏密 (调节) 缩放作者声明的块级 margin: h1 1em -> 16px (gap100) / 64px (gap400). */
     @Test
-    fun `author block margins scale with paragraphGap`() {
+    fun `author block margins scale with paragraphSpacing`() {
         val author = "h1{margin-top:1em}"
         assertEquals(16.0f, margin(withGap(100.0), "h1", author).top, 0.1f)
         assertEquals(64.0f, margin(withGap(400.0), "h1", author).top, 0.1f)
@@ -67,7 +67,7 @@ class DensityScaleTest {
 
     /** 疏密 (调节) 缩放 UA 默认 margin, 作者/UA 值都被保留而非替换. */
     @Test
-    fun `UA default block margins scale with paragraphGap`() {
+    fun `UA default block margins scale with paragraphSpacing`() {
         val ua = "h1{margin:1em 0 0.6em}\nblockquote{margin:1em 2.5em}\npre{margin:1em 0}"
         assertEquals(16.0f, margin(withGap(100.0), "h1", uaCss = ua).top, 0.1f)
         assertEquals(64.0f, margin(withGap(400.0), "h1", uaCss = ua).top, 0.1f)
@@ -94,7 +94,7 @@ class DensityScaleTest {
 
     /** 疏密统一乘算一切块级纵边距（含 p/li）：段间距即疏密，无绝对值替换。 */
     @Test
-    fun `p and li margins scale with paragraphGap like every other block`() {
+    fun `p and li margins scale with paragraphSpacing like every other block`() {
         for (tag in listOf("p", "li")) {
             val a = margin(withGap(100.0), tag, authorCss = "$tag{margin:1em 0}").top
             val b = margin(withGap(400.0), tag, authorCss = "$tag{margin:1em 0}").top
@@ -114,7 +114,7 @@ class DensityScaleTest {
     /** 书声明的 per-side p margin 不再被 UI 覆盖：作者赢（UI 纵边距零声明）。 */
     @Test
     fun `author per-side p margin wins over the reader`() {
-        val settings = ReaderSettings.DEFAULT.copy(paragraphGap = 400.0)
+        val settings = ReaderSettings.DEFAULT.copy(paragraphSpacing = 400.0)
         val plain = margin(settings, "p").top
         val declared = margin(settings, "p", authorCss = "p{margin-top:2em}").top
         assertEquals(0f, plain, 0.001f) // 无声明即 0（ua.css 未参与本用例），不注入基线

@@ -332,7 +332,7 @@ class FirstLineIndentSingleLineOverflowTest {
         themeSheetFromProfile(p),
         null,
         ReaderUiSheet.build(p),
-        gapScale = p.paragraphGapScale,
+        spacingScale = p.paragraphSpacingScale,
     )
 
     /** 真书全链路扫版心：重路径断行 → [DrawLineBuilder] 投影 → 绘制侧真实整形，任一行右缘越版心即失败。 */

@@ -540,7 +540,7 @@ class BoxChapterLayouter(
             else -> themeSheetFromProfile(profile)
         }
         val settings = settingsSheet
-        return StyleComputer(profile.bodyPx, ua, sheets, theme, settings, ui, gapScale = profile.paragraphGapScale)
+        return StyleComputer(profile.bodyPx, ua, sheets, theme, settings, ui, spacingScale = profile.paragraphSpacingScale)
     }
 
     /** Assembles a [ChapterPrepareResult] from a cascade + box tree, computing global char starts. */

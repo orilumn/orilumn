@@ -125,7 +125,7 @@ class LayoutParamKeyTest {
     fun `portable crc32 is byte-identical to java util zip crc32`() {
         val base = LayoutParamKey(
             bodyPx = 18.5f, lineSpacing = 1.5f, firstLineIndentEm = 2f, letterSpacingEm = 0f,
-            paragraphGapScale = 1f,
+            paragraphSpacingScale = 1f,
             fontBody = "霞鹜文楷", fontTitle = "LXGW WenKai", fontCode = "",
             useOriginalStyle = false, contentW = 1080, contentH = 1920, userCssHash = 123456789,
         )
@@ -182,7 +182,7 @@ class LayoutParamKeyTest {
     fun `混排字距任何取值都换键、且喂入流逐字节钉死`() {
         val base = LayoutParamKey(
             bodyPx = 20f, lineSpacing = 1.75f, firstLineIndentEm = 0f, letterSpacingEm = 0.05f,
-            paragraphGapScale = 0.5f,
+            paragraphSpacingScale = 0.5f,
             fontBody = "", fontTitle = "", fontCode = "",
             useOriginalStyle = true, contentW = 1200, contentH = 1600, userCssHash = 0,
             inhouseBreak = false,
@@ -267,7 +267,7 @@ class LayoutParamKeyTest {
         // 回退必须落在当前 schema 算出的那个键上。
         val base = LayoutParamKey(
             bodyPx = 18.5f, lineSpacing = 1.5f, firstLineIndentEm = 2f, letterSpacingEm = 0f,
-            paragraphGapScale = 1f,
+            paragraphSpacingScale = 1f,
             fontBody = "霞鹜文楷", fontTitle = "LXGW WenKai", fontCode = "",
             useOriginalStyle = false, contentW = 1080, contentH = 1920, userCssHash = 123456789,
             inhouseBreak = false,
@@ -318,7 +318,7 @@ class LayoutParamKeyTest {
         }
         k.bodyPx.feed4(); k.lineSpacing.feed4(); k.firstLineIndentEm.feed4()
         k.letterSpacingEm.feed4()
-        k.paragraphGapScale.feed4()
+        k.paragraphSpacingScale.feed4()
         k.fontBody.feed(); k.fontTitle.feed(); k.fontCode.feed()
         k.fontWeightAnchors.toSortedMap().forEach { (fam, w) -> fam.feed(); w.feed4() }
         (if (k.useOriginalStyle) 1L else 0L).let { v ->

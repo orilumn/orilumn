@@ -45,6 +45,7 @@ object ReaderUiSheet {
         // 首行缩进只作用于正文段落 p 的 text-indent; li 由列表自身的沟槽缩进表达, 绝不套用.
         val paraRule = "p{margin-top:0em;margin-bottom:0em;text-indent:${fmtEm(profile.firstLineIndentEm)}em}\n" +
             "li{margin-top:0em;margin-bottom:0em}\n" +
+            "li p{margin-top:0em;margin-bottom:0em;text-indent:0em}\n" +
             "p + p,p + li,li + p,li + li{margin-top:${fmtEm(paraEm)}em}"
         val textBlocks = textBlockSelectors
         return LightCssParser().parse("$textBlocks{line-height:$lineHeight}\n$paraRule\n${fontRules(profile)}")

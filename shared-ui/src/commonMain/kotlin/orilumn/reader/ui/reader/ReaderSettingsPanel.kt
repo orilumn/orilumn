@@ -339,7 +339,7 @@ fun ReaderSettingsPanel(
                     fmt = { String.format("%.1f", it) }),
                 sliderKey(s.paragraphGap, 0.0, 400.0, 1.0,
                     apply = { v -> onPreview(s.copy(paragraphGap = v)); onCommitTypography(s.copy(paragraphGap = v)) },
-                    fmt = { "${it.roundToInt()}" }),
+                    fmt = { "${it.roundToInt()}%" }),
                 sliderKey(s.marginTop.toDouble(), 0.0, 200.0, 1.0,
                     apply = { v -> onPreview(s.copy(marginTop = v.roundToInt())); onCommitTypography(s.copy(marginTop = v.roundToInt())) },
                     fmt = { "${it.roundToInt()}" }),
@@ -948,7 +948,7 @@ private fun SpacingPage(
     preview: (ReaderSettings) -> Unit,
     commit: (ReaderSettings) -> Unit,
 ) {
-    val labelW = sliderLabelWidth(listOf("首行缩进", "行距", "疏密", "上边距", "下边距", "左边距", "右边距"), p)
+    val labelW = sliderLabelWidth(listOf("首行缩进", "行距", "段间距", "上边距", "下边距", "左边距", "右边距"), p)
     // 排版量滑块永远可调 (用户最高优先级); 原书设置 只是把值重置为中性默认.
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
         // 首行缩进 (em): UI 层最高优先级 text-indent; 0 = 无首行缩进.
@@ -960,9 +960,9 @@ private fun SpacingPage(
             { String.format("%.1f", it) },
             { preview(s.copy(lineSpacing = it)) }, { commit(s.copy(lineSpacing = it)) }, p, labelWidth = labelW,
             nav = nav, index = 1) }
-        // 疏密 (%)：纵边距统一乘算（100 = 原书/主题节奏，0 = 全部清零）；段间距即此，无绝对值。
-        item { UiSliderRow("疏密", 0.0, 400.0, 1.0, s.paragraphGap,
-            { "${it.roundToInt()}" },
+        // 段间距 (%)：纵边距统一乘算（100 = 原书/主题节奏，0 = 全部清零）。
+        item { UiSliderRow("段间距", 0.0, 400.0, 1.0, s.paragraphGap,
+            { "${it.roundToInt()}%" },
             { preview(s.copy(paragraphGap = it)) }, { commit(s.copy(paragraphGap = it)) }, p, labelWidth = labelW,
             nav = nav, index = 2) }
         // 边距 (设备级几何) 不随 原书设置 禁用.

@@ -96,7 +96,7 @@ inline-important 41`，`UA 10 / UA-important 50`；读者三层**严格夹在 41
 ## 平板日志（无线 adb，vivo PA2353）
 
 - 详见 `docs/调试日志与分页跟踪.md`；下面是每次必走的摘要。
-- 连接：端口每次会变，从平板无线调试界面抄，`adb connect 172.16.0.203:<端口>`；双条目时命令一律带 `-s`。
+- 连接：端口每次会变，优先 mDNS 自查（不用看平板）：先 `dns-sd -L "adb-400D91019H00000-rg2R7j" _adb-tls-connect._tcp local` 取端口（输出 `Android.local.:<端口>`），再 `adb connect 172.16.0.203:<端口>`；mDNS 无响应才去平板无线调试界面抄；双条目时命令一律带 `-s`。
 - 定论只看落盘：`adb -s <addr> shell run-as orilumn.reader cat files/logs/日志_YYYYMMDD.txt`，配 `grep -E "Orilumn.FLIP|PGAP|PGL|DISK-HIT"`。logcat 会被 OEM 限流丢行，只做实时 tail。
 - 禁止拉取 logcat（`logcat -d` 等）：系统级日志含其他应用隐私，只看 APP 私有目录落盘文件。
 - 先看文件时间戳：无新日志 = 新包没跑起来，先 `am force-stop orilumn.reader` 再 `am start -n orilumn.reader/.MainActivity`。

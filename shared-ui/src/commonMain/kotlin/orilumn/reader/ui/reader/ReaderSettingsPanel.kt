@@ -139,8 +139,15 @@ fun ReaderSettingsPanel(
      * 调亮物理不可达也不给滑。缺省 100，所有现调用方零改动）。
      */
     brightnessMax: Int = 100,
+    /**
+     * 设备是否有物理键盘：无键盘时焦点行背景（`rowActive`）置透明——键盘/悬停共用的
+     * active 高亮只在有键盘时有意义。选中值指示（金色边框/开关）不受影响。
+     * 缺省 true（桌面恒有键盘，零改动）。
+     */
+    hasKeyboard: Boolean = true,
 ) {
     val p = paletteFor(settings.scheme)
+        .let { if (hasKeyboard) it else it.copy(rowActive = Color.Transparent) }
     val stack = remember { mutableStateListOf<Sub>(Sub.Home) }
     val current = stack.last()
     // Which typography slot (body/heading/code) the current font sub-panel selects for.

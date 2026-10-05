@@ -392,6 +392,8 @@ class ReaderActivity : ComponentActivity() {
                     if (next != customThemes) { persistCustomThemes(next); customThemes = next }
                 },
                 readSystemBrightness = { readSystemBrightnessPercent().roundToInt() },
+                // 无物理键盘不画焦点行背景（蓝牙键盘接上即恢复，configuration 活查）。
+                hasKeyboard = resources.configuration.keyboard != android.content.res.Configuration.KEYBOARD_NOKEYS,
                 onFontHide = { ids ->
                     lifecycleScope.launch {
                         val fam = familyOfFontIds(ids)

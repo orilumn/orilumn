@@ -309,6 +309,25 @@ class DesktopReaderHost(
         topUpSkiaFonts(orilumn.reader.engine.css.FontDemand.EMPTY)
     }
 
+    /** 设置面板门控（共享收口 PanelRelayoutGate，平板同调）：开抑制 + 关按指纹整书。 */
+    private val panelGate = orilumn.reader.engine.PanelRelayoutGate(controller)
+
+    /** 面板打开：抑制后台 canonical + 快照版式指纹。 */
+    fun setSettingsPanelOpen(open: Boolean) {
+        if (open) panelGate.onPanelOpen()
+    }
+
+    /**
+     * 面板关闭门控全套：版式真变了才 `finalizeRelayoutAll` 并绑定落位，不变回 null。
+     * 调用方（面板 onDismiss）负责推送落位。
+     */
+    suspend fun finalizePanelSettings(chapter: Int, anchorChar: Int): ReaderPos? =
+        withContext(Dispatchers.Default) {
+            val r = panelGate.onPanelClose(chapter, anchorChar) ?: return@withContext null
+            controller.bindReflow(r)
+            ReaderPos(r.chapter, r.page)
+        }
+
     /**
      * 原书主题提交探针（用户层·壳，与平板 `withBookStyle` 同调共享收口）。
      *

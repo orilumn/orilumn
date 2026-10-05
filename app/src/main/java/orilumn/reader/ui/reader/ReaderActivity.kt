@@ -48,7 +48,6 @@ import orilumn.reader.data.settings.ReaderSettingsStore
 import orilumn.reader.engine.AbSwitch
 import orilumn.reader.engine.BookDocumentController
 import orilumn.reader.engine.BookFileResolver
-import orilumn.reader.engine.text.LayoutParamKey
 import orilumn.reader.engine.text.SystemCjkSerif
 import orilumn.reader.engine.text.TypographicProfile
 import orilumn.reader.engine.skia.SkiaFontPool
@@ -130,7 +129,7 @@ class ReaderActivity : ComponentActivity() {
     private lateinit var fontImportLauncher: ActivityResultLauncher<Array<String>>
 
     /** 面板打开时的排版指纹；关闭时变化 → 全书 canonical 重排。 */
-    private var panelBaseHash = 0L
+    private var panelGate: orilumn.reader.engine.PanelRelayoutGate? = null
 
     /** 顶/底栏显隐（[ReaderScreen] 经 onBarsVisibleChanged 回抛，驱动系统栏 chrome）。 */
     private var barsVisible by mutableStateOf(false)
@@ -268,6 +267,8 @@ class ReaderActivity : ComponentActivity() {
         }
         if (loaded != null) {
             engine = loaded
+            // 面板门控与引擎同寿命（共享收口 PanelRelayoutGate，桌面同调）。
+            panelGate = orilumn.reader.engine.PanelRelayoutGate(loaded)
             Logger.w(TAG, "open ok chapters=${loaded.chapterCount}")
         } else {
             openFailed = true
@@ -439,10 +440,9 @@ class ReaderActivity : ComponentActivity() {
         settingsOpen = true
         loadPanelFonts()
         applySystemBars()
-        // 面板开时抑制后台 canonical 全章重排（避免与前台实时 temp 塑形抢 CPU）；关闭时若排版真实
-        // 变化再整书重跑（捕获指纹判定）。
-        engine?.deferCanonical = true
-        panelBaseHash = typographHash()
+        // 面板开抑制 + 关门控走共享收口（PanelRelayoutGate，桌面同调）；关闭时若排版真实
+        // 变化再整书重跑（门控内指纹判定）。
+        panelGate?.onPanelOpen()
         Logger.w(TAG, "open settings panel")
     }
 
@@ -450,17 +450,10 @@ class ReaderActivity : ComponentActivity() {
         settingsOpen = false
         applySystemBars()
         val c = engine
-        c?.deferCanonical = false
-        val before = panelBaseHash
-        val after = typographHash()
-        // 关面板事件无条件落盘（变与不变都记）——"改参关面板没反应"先查这条再查引擎。
-        Logger.w(TAG, "close settings panel typographHash $before -> $after changed=${before != after}")
-        // 消费本次 diff：遮罩连点/返回键竞态会导致 onDismiss 重入；不消费则第二次关闭
-        // 看到同样的 diff 而再跑一遍整书重排（20:36 双关即此）。
-        panelBaseHash = after
-        if (c != null && after != before) {
-            Logger.w(TAG, "close settings panel -> typography changed, whole-book relayout")
-            // 先停掉实时节流循环并等其当前迭代落位，避免两趟后台塑形并发作用于同一章。
+        val gate = panelGate
+        if (c != null && gate != null) {
+            // 先停掉实时节流循环并等其当前迭代落位，避免两趟后台塑形并发作用于同一章；
+            // 整书重跑与否由共享门控按指纹判定（含重入消费，第二次关闭不再跑）。
             relayoutPending = false
             val liveLoop = relayoutJob
             val p = currentPos
@@ -468,17 +461,16 @@ class ReaderActivity : ComponentActivity() {
             val anchor = p?.slice?.charStart ?: 0
             lifecycleScope.launch(Dispatchers.Default) {
                 liveLoop?.join()
-                val r = c.finalizeRelayoutAll(ch, anchor)
-                withContext(Dispatchers.Main) {
-                    if (r != null) applyReflowResult(c, r)
+                val r = gate.onPanelClose(ch, anchor)
+                if (r != null) {
+                    Logger.w(TAG, "close settings panel -> typography changed, whole-book relayout")
+                    withContext(Dispatchers.Main) {
+                        applyReflowResult(c, r)
+                    }
                 }
             }
         }
     }
-
-    /** 排版敏感设置指纹（宽度/高度为固定输入，这里只看排版是否变化）。 */
-    private fun typographHash(): Long =
-        LayoutParamKey.fromProfile(engine?.profile ?: profile, 0, 0).hash()
 
     // ---- Settings panel font/theme platform seams (shell-owned) ----
 

@@ -213,21 +213,27 @@ fun ReaderView(
         LaunchedEffect(book) {
             fontEntries = desktopHost?.syncPanelFonts() ?: fontLibrary.allEntries(fontLibrary.list())
         }
+        // 面板开抑制 + 关门控（共享收口 PanelRelayoutGate，平板同调）：打开即抑制后台
+        // canonical 并快照版式指纹；关闭经门控判定，版式真变才整书 finalize 并落位。
+        LaunchedEffect(book, session, settingsOpen) {
+            if (settingsOpen) desktopHost?.setSettingsPanelOpen(true)
+        }
         // 设置驱动的原位重排（R15 两段式，与平板“tick 轻刷新 + 关面板全套”同序）：
-        // 第一段 150ms 防抖落位即调（本章轻刷新）；第二段静默 800ms 后全套一次（bump 代际 + B2）。
-        // 新设置到达即重启本 effect，未执行的第二段自动取消。落位经 externalPos+contentRevision
-        // 推送（与平板 applyReflowResult 同口径：刷版本号 + 定位到含锚字符的新页）。
-        // 修复：推送必须在 NonCancellable 中执行，避免 LaunchedEffect 重启取消导致已完成的引擎重排被丢弃。
+        // 第一段 150ms 防抖落位即调（本章轻刷新）；第二段只在面板关闭时跑全套——面板打开
+        // 期间的拖动只有轻刷，整书沉淀等 onDismiss 经共享门控（PanelRelayoutGate）判定；
+        // 面板外提交（如夜间/字体回退）沿旧 800ms 静默全套。修复：推送必须在 NonCancellable
+        // 中执行，避免 LaunchedEffect 重启取消导致已完成的引擎重排被丢弃。
         LaunchedEffect(book, settings) {
-            delay(150)
             if (settings.withoutLight() == appliedLayout.withoutLight()) return@LaunchedEffect
+            val panelWasOpen = settingsOpen
             val host = desktopHost ?: return@LaunchedEffect
             val anchor = currentPos
             val landing = host.previewToSettings(
                 settings, anchor?.chapter ?: 0, anchor?.slice?.charStart ?: 0)
             appliedLayout = settings
             if (landing != null) pushLanding(landing)
-            // 第二段：设置静默 800ms 后全套（与平板关面板同序；新设置到达则本 effect 重启，此段取消）。
+            // 第二段：面板外提交静默 800ms 后全套；面板内拖动跳过（关面板门控接管）。
+            if (panelWasOpen) return@LaunchedEffect
             delay(800)
             val anchor2 = currentPos
             val landed2 = host.commitRelayout(anchor2?.chapter ?: 0, anchor2?.slice?.charStart ?: 0)
@@ -304,7 +310,15 @@ fun ReaderView(
                 val pos = currentPos
                 onCommitBookPrivate(if (pos != null) desktopHost?.probeOriginalTheme(it, pos.chapter) ?: it else it)
             },
-            onDismiss = { settingsOpen = false },
+            onDismiss = {
+                settingsOpen = false
+                // 关面板门控全套（共享收口，平板同调）：版式真变才 finalize 并落位，不变只关面板。
+                val pos = currentPos
+                scope.launch {
+                    val landed = desktopHost?.finalizePanelSettings(pos?.chapter ?: 0, pos?.slice?.charStart ?: 0)
+                    if (landed != null) pushLanding(landed)
+                }
+            },
             brightnessMax = if (ddcCapable == true) 100 else 0,
             onPreview = { onSettingsChange(it) },
             onCommitTypography = { commit(it) },

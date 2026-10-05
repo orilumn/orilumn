@@ -298,7 +298,12 @@ fun ReaderView(
                     fallBackFontSlots(family, settings)
                 }
             },
-            onCommitBookPrivate = onCommitBookPrivate,
+            onCommitBookPrivate = {
+                // 原书提交共享收口：先按当前章真实排版回填三滑块（与平板 withBookStyle 同调），
+                // 再进 Main.persistSettings；无定位时沿旧值直透。
+                val pos = currentPos
+                onCommitBookPrivate(if (pos != null) desktopHost?.probeOriginalTheme(it, pos.chapter) ?: it else it)
+            },
             onDismiss = { settingsOpen = false },
             brightnessMax = if (ddcCapable == true) 100 else 0,
             onPreview = { onSettingsChange(it) },

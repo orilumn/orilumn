@@ -476,6 +476,17 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
         )
     }
 
+    /**
+     * 用户层共享收口：原书主题提交探针（平板/桌面两端宿主同调，禁止各写一遍）。
+     *
+     * 背景：UI 层（tier 44）在原书模式下仍按存储滑块值渲染，而 `withLayoutTheme(original)`
+     * 只给中性默认；提交时不经此探针，三滑块就与书真实排版脱节 —— 桌面曾因此与平板
+     * 原书设置渲染不一致（桌面直透面板值、无探测）。
+     * 非 original / 探测失败一律原样返回（见 [snapshotBookStyle]）。
+     */
+    fun probeOriginalTheme(chapter: Int, bodyPx: Float, next: ReaderSettings): ReaderSettings =
+        snapshotBookStyle(chapter, bodyPx, next)
+
     /** Start location after loading (null when there is no book/no chapter).
  *   Returns (chapter, page): starting from [startChapter], skips chapters with no laid-out
  *   content (cover/empty chapters) going forward, and within the located chapter aligns to the

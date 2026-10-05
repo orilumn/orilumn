@@ -310,6 +310,15 @@ class DesktopReaderHost(
     }
 
     /**
+     * 原书主题提交探针（用户层·壳，与平板 `withBookStyle` 同调共享收口）。
+     *
+     * 面板 `commitBook` 到达时已是 `withLayoutTheme(original)` 后的中性值，此处按当前章
+     * 真实排版回填三滑块后再持久化；非 original / 无定位一律原样返回。
+     */
+    fun probeOriginalTheme(next: ReaderSettings, chapter: Int): ReaderSettings =
+        controller.probeOriginalTheme(chapter, profile.bodyPx, next)
+
+    /**
      * F4b 用户字库追装（与平板 `topUpSkiaFonts` 同式，经共享 [FontPoolSync]）：
      * 控制器整形前回调，集合变化即 true（调用方作废重排，首绘即对）。
      */

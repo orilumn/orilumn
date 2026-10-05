@@ -872,7 +872,8 @@ class ReaderActivity : ComponentActivity() {
         if (layoutTheme != "original") return this
         val c = engine ?: return this
         val p = currentPos ?: return this
-        return c.snapshotBookStyle(p.chapter, profile.bodyPx, this)
+        // 共享收口（与桌面同调）：见 BookDocumentController.probeOriginalTheme。
+        return c.probeOriginalTheme(p.chapter, profile.bodyPx, this)
     }
 
     companion object {

@@ -35,16 +35,16 @@ inline-important 41`，`UA 10 / UA-important 50`；读者三层**严格夹在 41
 3. **不经内核级联事后改写**（决策 6 铁律「upper layers … without any post-hoc mutation」）：
    用户字重曾由 `SkParagraphFactory.anchoredWeight` 在级联跑完后私改 `fontWeight`，判架构违规
    并整体退役（Q19）。读者意图只能以**层叠声明**进入，不得在渲染层打补丁。
-4. **层内仍走标准级联**：同层内特异度与源码序照旧生效。已知坑：`margin` 简写与 per-side 声明
-   同时存在时 per-side 优先 ⇒ 书设了 `p{margin}` 就会盖掉 UI 层段间距，故 UI 层段间距一律写
-   per-side。读者层选择器表另有收紧纪律（`ReaderUiSheet.textBlockSelectors` 刻意排除 `h1..h6`；
-   首行缩进只给 `p`，`li` 绝不套用；段间距只在 `p/li` 相邻对之间生效）。
+4. **层内仍走标准级联**：同层内特异度与源码序照旧生效。读者层选择器表另有收紧纪律
+   （首行缩进只给 `p`，`li` 绝不套用）。纵边距 UI 层零声明——段间距即疏密百分比，
+   随版式乘算，不进层叠。
 5. **主题值分两类，别一律推给 UI 层**：
    - **读者可调的**（有滑块/可换字体，读者能配出第三种状态）⇒ 值存 `ReaderSettings`，由 **UI 层
-     tier 44** 发声明。现状：`firstLineIndent` / `paragraphSpacing` / `fontBody` 等。
+     tier 44** 发声明。现状：`firstLineIndent` / `fontBody` 等。纵边距是例外：段间距即疏密
+     百分比（`paragraphGap`），随版式乘算、不发声明（100 = 书/主题节奏，0 = 清零）。
    - **不可再调的基线预设**（这套主题就长这样，读者配不出别的状态）⇒ 就写主题层 asset
      （tier 42）：`modern.css` / `traditional.css`。现状：`body{font-family}`、
-     `p{text-indent}`、`p,li{margin:0}`、正文两端对齐 `p,div,li,blockquote,dd,td{text-align:justify}`。
+     `p{text-indent}`、`p,li{margin:1em 0}`、正文两端对齐 `p,div,li,blockquote,dd,td{text-align:justify}`。
      为这类值新增 `ReaderSettings` 字段是**错的**：主题按钮不写它就是死字段（写死值＝UI 层无条件覆盖），
      而老存档里没这个键 → 停在现代/传统主题的用户实际没生效，还得补 `schemaVersion` 迁移。
    - 三主题切换时，`withLayoutTheme` 只写「可调那一类」的值；原书设置（`useOriginalStyle`）

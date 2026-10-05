@@ -62,8 +62,9 @@ class BookStyleProbeTest {
     }
 
     @Test
-    fun `Rust书式的三项排版一次快照`() {
+    fun `Rust书式的两项排版一次快照`() {
         // p{margin-top:0;margin-bottom:0.3rem} + body p{text-indent:2em} + 行高 1.3
+        // 纵边距不回填（段间距即疏密，书 margin 原样参与折叠），只快照缩进/行距。
         val s = snapshot(
             "html{font-size:18px} body{font-size:0.95rem;line-height:1.3rem} " +
                 "p{margin-top:0;margin-bottom:0.3rem;line-height:1.3rem} " +
@@ -71,7 +72,6 @@ class BookStyleProbeTest {
             "<p>一</p><p>二</p>",
         )
         assertEquals(2.0, s.firstLineIndent, 1e-9)
-        assertEquals(0.3, s.paragraphSpacing, 1e-9)
         assertEquals(1.3, s.lineSpacing, 1e-9)
     }
 
@@ -79,7 +79,6 @@ class BookStyleProbeTest {
     fun `无排版声明的书快照为中性值`() {
         val s = snapshot("p { color: red }", "<p>一</p>")
         assertEquals(0.0, s.firstLineIndent, 1e-9)
-        assertEquals(0.0, s.paragraphSpacing, 1e-9)
         assertEquals(CssDefaults.DEFAULT_LINE_HEIGHT.toDouble(), s.lineSpacing, 1e-9)
     }
 }

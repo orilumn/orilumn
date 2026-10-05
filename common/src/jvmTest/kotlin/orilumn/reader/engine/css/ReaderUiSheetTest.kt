@@ -16,7 +16,6 @@ class ReaderUiSheetTest {
 
     private fun profile(
         lineSpacing: Float = 1.3f,
-        paragraphSpacingPx: Int = 13,
         firstLineIndentEm: Float = 2f,
         bodyPx: Float = 18f,
         bgColor: Int = 0xFFF4F2EC.toInt(),
@@ -27,7 +26,6 @@ class ReaderUiSheetTest {
         codeScale = 0.92f,
         lineSpacing = lineSpacing,
         lineSpacingMult = lineSpacing,
-        paragraphSpacingPx = paragraphSpacingPx,
         firstLineIndentEm = firstLineIndentEm,
         fgColor = 0xFF2B2B2B.toInt(),
         bgColor = bgColor,
@@ -55,69 +53,37 @@ class ReaderUiSheetTest {
     }
 
     @Test
-    fun `p base rule zeroes vertical margins but keeps first-line indent`() {
-        // 基线：p 纵边距恒 0（替换原书 margin），段间距只在相邻对规则里给后者。
-        val p = profile(paragraphSpacingPx = 13, firstLineIndentEm = 2f, bodyPx = 18f)
+    fun `p rule carries only first-line indent and no margins`() {
+        // 新口径：UI 层纵边距零声明（段间距即疏密，版式侧乘算；书的 margin 原样折叠）。
+        val p = profile(firstLineIndentEm = 2f, bodyPx = 18f)
         val d = declarations(p, "p")
-        assertEquals("0em", d["margin-top"])
-        assertEquals("0em", d["margin-bottom"])
-        assertEquals("2em", d["text-indent"])
+        assertEquals(mapOf("text-indent" to "2em"), d)
     }
 
     @Test
-    fun `li base rule zeroes vertical margins and never carries first-line indent`() {
+    fun `no li-only rule and no margin declarations anywhere in UI tier`() {
+        // `li p` 只管缩进清零；全表扫描不得有任何 margin/margin-top/margin-bottom 声明。
         val p = profile(firstLineIndentEm = 2f)
-        val d = declarations(p, "li")
-        assertEquals("0em", d["margin-top"])
-        assertEquals("0em", d["margin-bottom"])
-        assertFalse("li 绝不套用首行缩进", d.containsKey("text-indent"))
-    }
-
-    @Test
-    fun `pair rule carries the paragraph gap on margin-top only`() {
-        // paragraphSpacingPx 13 / bodyPx 18 = 0.7222…em → 0.72em；只写 top，后者单侧即缝隙。
-        val p = profile(paragraphSpacingPx = 13, firstLineIndentEm = 2f, bodyPx = 18f)
-        val pair = ReaderUiSheet.build(p).rules
-            .single { it.selectors.size == 4 && "p + p" in it.selectors }
-            .declarations.associate { it.property to it.value }
-        assertEquals(setOf("p + p", "p + li", "li + p", "li + li"), ReaderUiSheet.build(p).rules
-            .single { it.selectors.size == 4 }.selectors.toSet())
-        assertEquals("0.72em", pair["margin-top"])
-        assertFalse("相邻对规则只写 top（bottom 恒 0，缝隙单侧即足）", pair.containsKey("margin-bottom"))
-    }
-
-    @Test
-    fun `pair rule wins over the base rule inside the same UI tier`() {
-        // 同 tier 内特异度 (0,0,2) > (0,0,1)：相邻对的后者恒取段间距，与声明顺序无关。
-        val p = profile(paragraphSpacingPx = 13, bodyPx = 18f)
         val sheet = ReaderUiSheet.build(p)
-        val root = orilumn.reader.engine.html.HtmlTreeConverter()
-            .convert("<html><body><p>a</p><p>b</p></body></html>")!!
-        val engine = StyleComputer(18f, LightCssParser().parse(""), emptyList(), null, null, sheet)
-        val map = engine.compute(root)
-        fun nth(tag: String, n: Int): orilumn.reader.engine.html.MarkupElement {
-            val acc = ArrayList<orilumn.reader.engine.html.MarkupElement>()
-            fun walk(node: orilumn.reader.engine.html.MarkupElement) {
-                if (node.tag == tag) acc.add(node)
-                node.children.forEach(::walk)
-            }
-            walk(root)
-            return acc[n]
-        }
-        assertEquals(0f, map[nth("p", 0)]?.margin?.top)
-        assertEquals(13f, map[nth("p", 1)]?.margin?.top ?: -1f, 0.5f)
+        assertFalse("不得有 li 裸规则", sheet.rules.any { it.selectors == listOf("li") })
+        assertFalse(
+            "UI 层纵边距零声明",
+            sheet.rules.any { r -> r.declarations.any { it.property.startsWith("margin") } },
+        )
+        val lip = declarations(p, "li p")
+        assertEquals(mapOf("text-indent" to "0em"), lip)
     }
 
     @Test
-    fun `paragraph gap applies only between p-li pairs`() {
-        // 口径锁：hn+p / p+ul / ul+p / 首项 li 取基线 0；p+p / li+li 后者取段间距。
-        val p = profile(paragraphSpacingPx = 13, firstLineIndentEm = 0f, bodyPx = 18f)
+    fun `author p margins flow through the UI tier untouched`() {
+        // 书的 margin 不再被基线清零：h1+p 的 1.8em 原样到达计算样式，再由疏密乘算。
+        val p = profile(firstLineIndentEm = 0f, bodyPx = 18f)
+        val author = LightCssParser().parse("h1.tochead{margin:0.3em 0 0}p.co-summary-head{margin:1.8em 0 0.6em}")
         val sheet = ReaderUiSheet.build(p)
         val root = orilumn.reader.engine.html.HtmlTreeConverter().convert(
-            "<html><body><h2>t</h2><p>a</p><p>b</p>" +
-                "<ul><li>x</li><li>y</li></ul><p>c</p></body></html>",
+            "<html><body><h1 class=\"tochead\">t</h1><p class=\"co-summary-head\">s</p></body></html>",
         )!!
-        val engine = StyleComputer(18f, LightCssParser().parse(""), emptyList(), null, null, sheet)
+        val engine = StyleComputer(18f, LightCssParser().parse(""), listOf(author), null, null, sheet)
         val map = engine.compute(root)
         fun nth(tag: String, n: Int): orilumn.reader.engine.html.MarkupElement {
             val acc = ArrayList<orilumn.reader.engine.html.MarkupElement>()
@@ -128,18 +94,8 @@ class ReaderUiSheetTest {
             walk(root)
             return acc[n]
         }
-        assertEquals("hn 后的 p 取基线 0", 0f, map[nth("p", 0)]?.margin?.top)
-        assertEquals("p+p 后者取段间距", 13f, map[nth("p", 1)]?.margin?.top ?: -1f, 0.5f)
-        assertEquals("首项 li 取基线 0", 0f, map[nth("li", 0)]?.margin?.top)
-        assertEquals("li+li 后者取段间距", 13f, map[nth("li", 1)]?.margin?.top ?: -1f, 0.5f)
-        assertEquals("ul 后的 p 取基线 0", 0f, map[nth("p", 2)]?.margin?.top)
-        assertEquals("p 纵 bottom 恒 0（缝隙单侧）", 0f, map[nth("p", 1)]?.margin?.bottom)
-    }
-
-    @Test
-    fun `paraEm guards against zero body size`() {
-        val p = profile(bodyPx = 0f, paragraphSpacingPx = 13)
-        assertEquals("0em", declarations(p, "p")["margin-top"])
+        assertEquals(0f, map[nth("h1", 0)]?.margin?.bottom)
+        assertEquals(1.8f * (map[nth("p", 0)]?.fontSizePx ?: 0f), map[nth("p", 0)]?.margin?.top ?: -1f, 0.5f)
     }
 
     @Test

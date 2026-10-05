@@ -49,13 +49,14 @@ class ThemeCssTest {
     }
 
     @Test
-    fun `traditional theme from common single source is serif with 2em indent and no paragraph gap`() {
+    fun `traditional theme from common single source is serif with 2em indent and 1em rhythm`() {
         val style = bodyParagraphStyle("traditional")
         assertEquals("serif", style.fontFamily)
         assertEquals(2f, style.textIndentPx / style.fontSizePx, 1e-3f)
-        // 无段间距: 主题表 p/li margin 清零 (UI 层同值, 见 TypographicProfileThemeTest).
-        assertEquals(0f, style.margin.top, 1e-3f)
-        assertEquals(0f, style.margin.bottom, 1e-3f)
+        // 纵节奏 1em 基准边距（主题层写死，UI 层零声明）：预设疏密 0 在版式侧清零
+        // （见 TypographicProfileThemeTest），此处只测主题层给 1em。
+        assertEquals(style.fontSizePx, style.margin.top, 1e-3f)
+        assertEquals(style.fontSizePx, style.margin.bottom, 1e-3f)
     }
 
     @Test

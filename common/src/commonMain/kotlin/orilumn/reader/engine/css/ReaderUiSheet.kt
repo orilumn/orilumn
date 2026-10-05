@@ -7,20 +7,13 @@ import kotlin.math.roundToInt
  * 阅读器 UI 层（最高书覆盖 tier）样式表**唯一单源**（Z4，`docs/平台一致性整改方案.md`）。
  *
  * 平板 `BoxChapterLayouter.uiSheetFromProfile` 与桌面 `DesktopReaderHost.uiSheet` 原本各自内联
- * 同一套规则，现统一委托 [build]：行距 line-height 覆盖所有含文本的块级元素；段间距/首行缩进
- * 只作用于正文段落 p/li。段间距必须用 per-side margin-top/bottom 声明（而非 margin 简写），
- * 否则 parseEdges 里 per-side 优先于简写 base，书设了 p margin，就会盖掉 UI 的段间距；
- * 水平边距完全交给原书（段间距只管垂直）。
+ * 同一套规则，现统一委托 [build]：行距 line-height 覆盖所有含文本的块级元素；首行缩进
+ * 只作用于正文段落 p。纵边距（margin）UI 层一律不发声明 —— 段间距即疏密百分比，随版式
+ * 乘算（`StyleComputer` gapScale，含 p/li 在内），100 = 原书节奏，0 = 全部清零；
+ * 书（作者/UA/主题）的 margin 原样参与折叠。
  *
- * 段间距口径（用户层语义，`docs/KMP迁移-功能架构.md` §6 覆盖层）：段间距只在 **p/li 相邻对**
- * 之间生效（`p+p/p+li/li+p/li+li` 的后者取 margin-top），其它缝隙（`hn+p`、`p+ul`、
- * `ul+p`、容器首尾等）一律按原书 margin × 疏密结算，段间距不参与。实现只用层叠选择器
- * （`+` 相邻兄弟，内核 `Selector` 已支持且重/轻两路同义），**不改内核 margin 折叠语义**
- * （`NormalFlowLayout` 保持浏览器标准 max 折叠）。
- *
- * 原书设置 只是把预览值重置为中性默认，启动 UI 层照常按存储值渲染（滑块值绝对，0 = 无首行缩进）。
- * 疏密（paragraphGapScale）不在此写 margin：它在 StyleComputer 里统一乘算作者/UA 计算后的外边距，
- * 这里写固定基线会"替换"作者/UA 的间距，违背调节语义。
+ * 段间距口径（`docs/KMP迁移-功能架构.md` §6 覆盖层，已合入疏密）：没有绝对值替换，
+ * 没有基线清零，滑块语义全局统一为相对值。
  *
  * 原书设置 只是把预览值重置为中性默认，启动 UI 层照常按存储值渲染（滑块值绝对，0 = 无首行缩进）。
  * 疏密（paragraphGapScale）不在此写 margin：它在 StyleComputer 里统一乘算作者/UA 计算后的外边距，
@@ -37,16 +30,10 @@ object ReaderUiSheet {
     fun build(profile: TypographicProfile): StyleSheet {
         // 行距 (line-height) 覆盖所有含文本的块级元素 (含标题/引用/代码/表格/列表文字等).
         val lineHeight = profile.lineSpacing
-        // 段间距 (paragraphSpacing): 只在 p/li 相邻对之间生效 —— 基线规则把 p/li 纵边距清零
-        // （替换原书 p/li margin），相邻对规则（特异度 0,0,2 > 基线 0,0,1，同 tier 内恒胜）
-        // 给后者 margin-top，缝隙即段间距；hn/ul/容器等非 p/li 邻边只剩基线 0，缝隙按原书×疏密。
-        // 不受 疏密 缩放.
-        val paraEm = if (profile.bodyPx > 0f) profile.paragraphSpacingPx / profile.bodyPx else 0f
         // 首行缩进只作用于正文段落 p 的 text-indent; li 由列表自身的沟槽缩进表达, 绝不套用.
-        val paraRule = "p{margin-top:0em;margin-bottom:0em;text-indent:${fmtEm(profile.firstLineIndentEm)}em}\n" +
-            "li{margin-top:0em;margin-bottom:0em}\n" +
-            "li p{margin-top:0em;margin-bottom:0em;text-indent:0em}\n" +
-            "p + p,p + li,li + p,li + li{margin-top:${fmtEm(paraEm)}em}"
+        // 纵边距无声明（段间距即疏密，版式侧乘算）：p/li 的 margin 全听书（作者/UA/主题）折叠。
+        val paraRule = "p{text-indent:${fmtEm(profile.firstLineIndentEm)}em}\n" +
+            "li p{text-indent:0em}"
         val textBlocks = textBlockSelectors
         return LightCssParser().parse("$textBlocks{line-height:$lineHeight}\n$paraRule\n${fontRules(profile)}")
     }

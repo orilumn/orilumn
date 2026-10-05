@@ -111,7 +111,7 @@
     并把「主题层盖过作者 `.copyrightbody:center`」钉住）。
     - **为何是主题层而不是 UI 层（tier 44）**：正文两端对齐**没有滑块**，读者配不出第三种状态，
       属「这套主题就长这样」的**不可再调基线预设**，同 `body{font-family}` / `p{text-indent}` /
-      `p,li{margin:0}`。UI 层只发读者**显式调过**的值（`firstLineIndent`/`paragraphSpacing`/
+      `p,li{margin:1em 0}`。UI 层只发读者**显式调过**的值（`firstLineIndent`/
       `fontBody` 等有滑块的）。已把这条区分写进 `AGENTS.md`「样式层叠优先级」第 5 条。
     - ⚠️ **中间返工过一次（结论已定，记录以免重犯）**：曾改成 `ReaderSettings.justifyText` +
       `ReaderUiSheet` UI 层发声明，**功能与 CSS 版完全等价**（现代/传统对齐、原书听书），但多一个
@@ -141,7 +141,7 @@
   - ⬜ **[排版-传统模式] li 容器内多段（li 直接子有 ≥2 个 p）的段落区分度问题**（2026-10-05）：
       量化：`li` 有直接子 `p` 的 6093/25336=24%，其中**≥2 个直接子 `p`** 的 388/25336=1.5%（主要形态 `p+p`、`p+p+p`、`p+div+p`）；
       `td/th` 有 ≥2 个直接子 `p` 的 88/12642=0.7%。传统模式下 UI 层发 `p{text-indent:2em}`（裸选择器），会把 `li p`/`td p` 也罩住。
-      书自己的态度是 `li p,td p,th p{text-indent:0 !important}`。但 traditional 的段落区分度靠缩进撑着（`paragraphSpacing=0`），一旦把容器内 p 的缩进归零，若不补相邻缝隙就会糊成一片。候选解法：在 UI 层按 `layoutTheme` 分叉，仅 traditional 对 `li,td,th` 直接子 p 零缩进，并补 `li+ p,td+p,th+p` 固定 0.5em（用 + 而非 ~，避免中间块 margin 重复；不跟段间距滑块走，避免破坏 traditional 的设计前提）。但此做法会把「容器内 p 不缩进」一刀切到 UI 层三主题——与「传统模式专属」的约束有微妙张力，且会改变现代/原书在极少数 `li` 多段场景的节奏。先记录，暂不处理，等真实书样例反馈再定。
+      书自己的态度是 `li p,td p,th p{text-indent:0 !important}`。但 traditional 的段落区分度靠缩进撑着（预设疏密 `paragraphGap=0`），一旦把容器内 p 的缩进归零，若不补相邻缝隙就会糊成一片。候选解法（2026-10-06 修订：绝对值段间距已退役，UI 层纵边距零声明）：仅 traditional 对 `li,td,th` 直接子 p 零缩进，并给主题层补容器内节奏（主题 CSS，`li p + p` 这类选择器 + em 值，再随疏密乘算；不再经 UI 相邻对规则）。但此做法会把「容器内 p 不缩进」一刀切到 UI 层三主题——与「传统模式专属」的约束有微妙张力，且会改变现代/原书在极少数 `li` 多段场景的节奏。先记录，暂不处理，等真实书样例反馈再定。
   - ⬜ 次要现象（非回归，两端同）：个别行缺口可达 **222–303px（≈8 字）**，成因是长 Latin
     token（`Message::sender`、长 URL）或不换行的行内 `code` 整体挪到下一行，
     而非断行器在 token 内找机会。窄窗口（桌面 617pt 版心）下这类行很刺眼。

@@ -125,7 +125,7 @@ class LayoutParamKeyTest {
     fun `portable crc32 is byte-identical to java util zip crc32`() {
         val base = LayoutParamKey(
             bodyPx = 18.5f, lineSpacing = 1.5f, firstLineIndentEm = 2f, letterSpacingEm = 0f,
-            paragraphSpacingPx = 28, paragraphGapScale = 1f,
+            paragraphGapScale = 1f,
             fontBody = "霞鹜文楷", fontTitle = "LXGW WenKai", fontCode = "",
             useOriginalStyle = false, contentW = 1080, contentH = 1920, userCssHash = 123456789,
         )
@@ -182,15 +182,17 @@ class LayoutParamKeyTest {
     fun `混排字距任何取值都换键、且喂入流逐字节钉死`() {
         val base = LayoutParamKey(
             bodyPx = 20f, lineSpacing = 1.75f, firstLineIndentEm = 0f, letterSpacingEm = 0.05f,
-            paragraphSpacingPx = 12, paragraphGapScale = 0.5f,
+            paragraphGapScale = 0.5f,
             fontBody = "", fontTitle = "", fontCode = "",
             useOriginalStyle = true, contentW = 1200, contentH = 1600, userCssHash = 0,
             inhouseBreak = false,
         )
         // 0 侧的喂入流金标准（本 profile 专属，非上面那条的那个数）。
+        // 2026-10-06：`2078022158` → **`1533737463**。`paragraphSpacingPx` 退役（段间距即疏密），
+        // 喂入流少 4 字节；老磁盘表对不上新键，一次性重建（与 2026-10-03 混排字距改口径同理）。
         assertEquals(
-            "cjkLatinSpacingEm = 0 的喂入流（四个 0x00 追加在末尾）必须逐字节等于金标准 2078022158",
-            2078022158L,
+            "cjkLatinSpacingEm = 0 的喂入流（四个 0x00 追加在末尾）必须逐字节等于金标准 1533737463",
+            1533737463L,
             base.hash() and 0xFFFFFFFFL,
         )
         assertEquals(
@@ -208,9 +210,9 @@ class LayoutParamKeyTest {
         // 「条件喂但喂在中间」同样满足「非 0 换键」，却会让后续字段整体左移 4 字节、
         // 与另一种键取值撞流（歧义）。钉死字节流就同时钉死了值与位置。
         assertEquals(
-            "非 0 侧的喂入流（末尾追加 4 字节）必须逐字节等于金标准 2317192732；" +
+            "非 0 侧的喂入流（末尾追加 4 字节）必须逐字节等于金标准 2863361509；" +
                 "条件喂与非 0 无条件喂对非 0 键必须产出同一条流",
-            2317192732L,
+            2863361509L,
             gap.hash() and 0xFFFFFFFFL,
         )
         // 位置敏感：与别的字段**同值**也必须换键（否则两个版面共用一份表）。
@@ -265,14 +267,14 @@ class LayoutParamKeyTest {
         // 回退必须落在当前 schema 算出的那个键上。
         val base = LayoutParamKey(
             bodyPx = 18.5f, lineSpacing = 1.5f, firstLineIndentEm = 2f, letterSpacingEm = 0f,
-            paragraphSpacingPx = 28, paragraphGapScale = 1f,
+            paragraphGapScale = 1f,
             fontBody = "霞鹜文楷", fontTitle = "LXGW WenKai", fontCode = "",
             useOriginalStyle = false, contentW = 1080, contentH = 1920, userCssHash = 123456789,
             inhouseBreak = false,
         )
         assertEquals(
-            "回退侧 paramHash 必须等于当前喂入序的金标准（1428783275）",
-            1428783275L,
+            "回退侧 paramHash 必须等于当前喂入序的金标准（4159404608）",
+            4159404608L,
             base.hash() and 0xFFFFFFFFL,
         )
         assertEquals(
@@ -315,7 +317,7 @@ class LayoutParamKeyTest {
             j.update(0); j.update(0); j.update(0); j.update(0)
         }
         k.bodyPx.feed4(); k.lineSpacing.feed4(); k.firstLineIndentEm.feed4()
-        k.letterSpacingEm.feed4(); k.paragraphSpacingPx.feed4()
+        k.letterSpacingEm.feed4()
         k.paragraphGapScale.feed4()
         k.fontBody.feed(); k.fontTitle.feed(); k.fontCode.feed()
         k.fontWeightAnchors.toSortedMap().forEach { (fam, w) -> fam.feed(); w.feed4() }

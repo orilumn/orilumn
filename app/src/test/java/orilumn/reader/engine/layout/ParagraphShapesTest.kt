@@ -33,7 +33,7 @@ class ParagraphShapesTest {
 
     private fun profile() = TypographicProfile(
         bodyPx = 16f, headingScale = 1.4f, quoteScale = 1f, codeScale = 0.92f,
-        lineSpacing = 1f, lineSpacingMult = 1f, paragraphSpacingPx = 0, firstLineIndentEm = 2f,
+        lineSpacing = 1f, lineSpacingMult = 1f, firstLineIndentEm = 2f,
         fgColor = Color.BLACK, bgColor = Color.WHITE, quoteColor = Color.GRAY,
         marginLeft = 0, marginRight = 0, marginTop = 0, marginBottom = 0,
         fontBody = "", fontTitle = "", fontCode = "", useOriginalStyle = true,
@@ -137,7 +137,7 @@ class ParagraphShapesTest {
     @Test
     fun `探测快照写入滑块后UI层还原书排版`() {
         // 切换原书设置时的组合：withLayoutTheme(original) + BookStyleProbe 快照
-        // （缩进 2em / 段距 0.3 / 行距 1.3）→ UI 层照常最高优先级渲染，还原书的排版。
+        // （缩进 2em / 行距 1.3；纵边距不回填，书 margin 原样流动）→ UI 层照常最高优先级渲染。
         val authorCss = "html{font-size:18px} body{font-size:0.95rem;line-height:1.3rem} " +
             "p{margin-top:0;margin-bottom:0.3rem;line-height:1.3rem} body p{text-indent:2em}"
         val detected = orilumn.reader.engine.css.BookStyleProbe.snapshot(
@@ -150,14 +150,13 @@ class ParagraphShapesTest {
         assertEquals(2.0, detected.firstLineIndent, 1e-9)
         val s = TypographicProfile.withLayoutTheme(ReaderSettings.DEFAULT, "original").copy(
             firstLineIndent = detected.firstLineIndent,
-            paragraphSpacing = detected.paragraphSpacing,
             lineSpacing = detected.lineSpacing,
         )
         val profile = TypographicProfile.build(s)
         val ui = BoxChapterLayouter().uiSheetFromProfile(profile)
         val ua = CssLayouter(profile).uaSheetFromProfile()
         val author = LightCssParser().parse(authorCss)
-        // 段间距口径：只在 p/li 相邻对之间生效 —— 双段验证后者取段间距（还原书的段间 0.3rem）。
+        // 新口径：UI 纵边距零声明 —— 双段的 margin 全是书的值（top 0 / bottom 0.3rem）。
         val root = converter.convert("<html><body><p>正文段落一</p><p>正文段落二</p></body></html>")!!
         val styles = StyleComputer(profile.bodyPx, ua, listOf(author), ui = ui).compute(root)
         val paras = ArrayList<orilumn.reader.engine.html.MarkupElement>()
@@ -170,8 +169,8 @@ class ParagraphShapesTest {
         val second = styles[paras[1]]!!
         assertEquals(2 * second.fontSizePx, second.textIndentPx, second.fontSizePx * 0.05f)
         assertEquals(0f, first.margin.top, 0.001f)
-        assertEquals((0.3 * second.fontSizePx).toFloat(), second.margin.top, second.fontSizePx * 0.05f)
-        assertEquals(0f, second.margin.bottom, 0.001f)
+        assertEquals(0f, second.margin.top, 0.001f)
+        assertEquals((0.3 * second.fontSizePx).toFloat(), second.margin.bottom, second.fontSizePx * 0.05f)
         assertEquals(1.3f, second.lineHeightRatio, 0.01f)
     }
 

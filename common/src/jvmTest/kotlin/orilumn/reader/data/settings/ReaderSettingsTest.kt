@@ -43,15 +43,12 @@ class ReaderSettingsTest {
     }
 
     @Test
-    fun `paragraph spacing and gap persist through round-trip`() {
+    fun `retired paragraphSpacing key is ignored and gap persists through round-trip`() {
+        // paragraphSpacing 已退役（段间距即疏密）：老存档里的键静默忽略，不进语义。
         val parsed = ReaderSettings.fromJson("""{"paragraphSpacing":1.2,"paragraphGap":150}""")
-        assertEquals(1.2, parsed.paragraphSpacing, 0.0)
         assertEquals(150.0, parsed.paragraphGap, 0.0)
-        // Persisting and reading back (reproducing the "paragraph spacing reset on open" path) should preserve
-        // rather than fall back to the defaults 0/100
         val reread = ReaderSettings.fromJson(parsed.toJson())
         assertEquals(parsed, reread)
-        assertEquals(1.2, reread.paragraphSpacing, 0.0)
         assertEquals(150.0, reread.paragraphGap, 0.0)
     }
 

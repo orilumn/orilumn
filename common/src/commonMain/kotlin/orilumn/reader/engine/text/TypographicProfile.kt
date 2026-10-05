@@ -34,8 +34,6 @@ data class TypographicProfile(
      *  so commonMain keeps the pure CSS value directly (CSS line-height / per-font kFont calibration
      *  was a TextPaint measurement and lives on the engine-skia side if ever needed again). */
     val lineSpacingMult: Float,
-    /** Paragraph gap (px), = paragraphSpacing (em ratio) x bodyPx. */
-    val paragraphSpacingPx: Int,
     /** First-line indent in em (0..10, applied to body paragraphs p/li via the UI layer; 0 = none). */
     val firstLineIndentEm: Float,
     /** Theme body-text color (ARGB). */
@@ -136,7 +134,6 @@ data class TypographicProfile(
                 codeScale = 0.92f,
                 lineSpacing = s.lineSpacing.toFloat(),
                 lineSpacingMult = s.lineSpacing.toFloat(),
-                paragraphSpacingPx = (s.paragraphSpacing * body).roundToInt(),
                 firstLineIndentEm = s.firstLineIndent.coerceIn(0.0, 10.0).toFloat(),
                 fgColor = fg,
                 bgColor = bg,
@@ -179,19 +176,21 @@ data class TypographicProfile(
                 "traditional" -> s.copy(
                     layoutTheme = theme,
                     firstLineIndent = 2.0,
-                    paragraphSpacing = 0.0,
+                    // 传统节奏靠 1em 主题边距 × 疏密：预设归零（缩进区分段落），用户上调即有间距。
+                    paragraphGap = 0.0,
                     fontBody = "serif",
                 )
                 "modern" -> s.copy(
                     layoutTheme = theme,
                     firstLineIndent = base.firstLineIndent,
-                    paragraphSpacing = base.paragraphSpacing,
+                    // 现代节奏同样走主题 1em 边距 × 疏密：预设回到 100%。
+                    paragraphGap = 100.0,
                     fontBody = "sans-serif",
                 )
                 else -> s.copy(
-                    // 原书设置: 全套中性值 — 不替换字体、字号回到基准、行距/疏密/字距归零
-                    // (恒等), 缩进/段距回到默认. Android 切后用书探测值替换排版三项
-                    // (首行缩进/段间距/行距, 见 ReaderActivity.withBookStyle)，用户可随时调整滑块覆盖.
+                    // 原书设置: 全套中性值 — 不替换字体、字号回到基准、行距/疏密/字距归位
+                    // (恒等), 缩进回到默认. Android 切后用书探测值替换首行缩进/行距
+                    // (见 ReaderActivity.withBookStyle)，用户可随时调整滑块覆盖.
                     layoutTheme = theme,
                     fontSize = base.fontSize,
                     fontScale = base.fontScale,
@@ -199,7 +198,6 @@ data class TypographicProfile(
                     fontTitle = "",
                     fontCode = "",
                     lineSpacing = base.lineSpacing,
-                    paragraphSpacing = base.paragraphSpacing,
                     firstLineIndent = base.firstLineIndent,
                     paragraphGap = base.paragraphGap,
                     letterSpacing = base.letterSpacing,

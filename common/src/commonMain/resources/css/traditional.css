@@ -4,10 +4,10 @@
  * 纸质书式的中文传统排版:
  *   - 正文用衬线字体 (body → serif, 继承到所有文字);
  *   - 正文段落首行缩进 2em (text-indent);
- *   - 无段间距 (p/li margin 清零, 段落靠首行缩进区分)。
+ *   - 段落节奏 1em 基准边距 × 疏密滑块 (预设 0 = 清零，靠缩进区分段落；上调即有间距)。
  * 层级: theme=42 < settings=43 < UI=44。优先级恒为 UI > 主题 > 原书 css;
  * 切到本主题时把主题预设同步写入 UI 设置 (TypographicProfile.withLayoutTheme):
- *   - 2em 首行缩进 / 无段间距 / 正文通用字族 → fontBody = serif;
+ *   - 2em 首行缩进 / 疏密归零 / 正文通用字族 → fontBody = serif;
  * 这些被写入的设置照常以 UI 层优先级生效 (阅读器 UI 层按 firstLineIndentEm /
  * paragraphSpacingPx 原样透传覆盖 p/li), 主题自身不额外压过任何用户设置; 主题内手动
  * 拖滑块/改字体同样实时生效。asset 的 body font-family 只作为主题层基线, 真正接管
@@ -23,17 +23,19 @@ body { font-family: serif; }
 
 /* 正文容器统一设为衬线，覆盖书在 p/div 等元素上写的 font-family */
 p, div, li, blockquote, dd, td { font-family: serif; }
-p { text-indent: 2em; margin-top: 0; margin-bottom: 0; }
+p { text-indent: 2em; }
+/* 正文纵节奏（tier 42）：1em 基准边距 × 疏密滑块。本主题预设疏密 0（清零，靠缩进区分）；
+ * 上调滑块即按比例恢复间距。`li p` 仍不缩进（下条），边距照常参与折叠。 */
 /* 列表项内的段落不应首行缩进 */
+p, li { margin: 1em 0; }
 li p { text-indent: 0; }
-li { margin-top: 0; margin-bottom: 0; }
 
 /* 正文对齐: 两端对齐。
  *
  * 为何留在这层 (theme=42) 而不是 UI 层 (44): UI 层代表**用户当下的意志** (拖过的滑块、选过的
  * 字体), 所以它只发读者**显式调过**的值; 而「现代/传统这两套排版长这样」是**不可再调的基线预设**
  * —— 本主题没有对齐滑块, 读者配不出第三种状态, 所以它是主题自身的属性, 就该写主题表。
- * 同理 `p{text-indent}` / `p,li{margin:0}` / `body{font-family}` 都在这层。
+ * 同理 `p{text-indent}` / `p,li{margin:1em 0}` / `body{font-family}` 都在这层。
  * 走 UI 层反而错: 那要求 theme → ReaderSettings → UI 层绕一圈, 还会在老存档上留迁移坑
  * (存档里没有该键就读成默认值, 停在现代/现代主题的人实际没生效)。
  *

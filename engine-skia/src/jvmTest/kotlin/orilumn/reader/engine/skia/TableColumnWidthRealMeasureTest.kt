@@ -388,7 +388,7 @@ class TableColumnWidthRealMeasureTest {
         val bc = orilumn.reader.engine.BoxChapterLayouter()
         val profile = TypographicProfile(
             bodyPx = 44.4f, headingScale = 1.4f, quoteScale = 1f, codeScale = 0.92f,
-            lineSpacing = 1f, lineSpacingMult = 1f, paragraphSpacingPx = 0, firstLineIndentEm = 2f,
+            lineSpacing = 1f, lineSpacingMult = 1f, firstLineIndentEm = 2f,
             fgColor = 0xFF000000.toInt(), bgColor = 0xFFFFFFFF.toInt(), quoteColor = 0xFF808080.toInt(),
             marginLeft = 0, marginRight = 0, marginTop = 0, marginBottom = 0,
             fontBody = "", fontTitle = "", fontCode = "", useOriginalStyle = true,

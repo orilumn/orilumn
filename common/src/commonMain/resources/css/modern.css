@@ -3,9 +3,9 @@
  * --------------------------------------------------------------------------
  * 流行的现代中文排版:
  *   - 正文用无衬线字体 (body → sans-serif, 继承到所有文字);
- *   - 无首行缩进 (p text-indent 清零, 段落靠段间距分离);
- *   - 段间距分隔段落: UI 层 (uiSheetFromProfile, tier 44) 按 段间距 只给 p/li 相邻对的后者
- *     打 margin-top (默认 1em), 其余邻边归零, 本节不重复写死 margin, 保持随阅读器调节。
+ *   - 无首行缩进 (p text-indent 清零, 段落靠纵边距分离);
+ *   - 段落节奏 1em 基准边距 × 疏密滑块（预设 100 = 1em，0 = 清零），本节写死 margin，
+ *     不再依赖 UI 绝对值（UI 层纵边距零声明）。
  * 层级: theme=42 < settings=43 < UI=44。优先级恒为 UI > 主题 > 原书 css;
  * 切到本主题时把主题预设同步写入 UI 设置 (TypographicProfile.withLayoutTheme):
  *   - 无首行缩进 → firstLineIndent = 0, 段间距 → 默认值, 正文通用字族 → fontBody = sans-serif;
@@ -24,6 +24,10 @@ body { font-family: sans-serif; }
 /* 正文容器统一设为无衬线，覆盖书在 p/div 等元素上写的 font-family */
 p, div, li, blockquote, dd, td { font-family: sans-serif; }
 p { text-indent: 0; }
+
+/* 正文纵节奏（tier 42）：1em 基准边距 × 疏密滑块（100 = 1em，0 = 清零）。
+ * 主题模式不依赖 UI 绝对值：UI 层纵边距零声明，书/主题 margin 原样折叠后再乘算。 */
+p, li { margin: 1em 0; }
 
 /* 正文对齐: 两端对齐。见 traditional.css 同名节的完整口径说明 (选择器/层叠代价/为何留在这层)。
  * 原书设置 不加载本表 ⇒ 这条完全不参与, 由书作者的 text-align 说了算。 */

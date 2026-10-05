@@ -29,11 +29,11 @@ data class ReaderSettings(
     val fontSize: Int = 18,
     /** Line spacing (number, 1.x times). */
     val lineSpacing: Double = 1.5,
-    /** [Style system] Paragraph spacing (em): bottom spacing of body paragraphs p/div/li, scaled with font size (0..2, 0 = none, paragraphs distinguished by first-line indent). */
-    val paragraphSpacing: Double = 1.0,
     /** [Style system] First-line indent (em, 0..10): `text-indent` on body paragraphs (p/li), applied by the UI layer so it overrides the book. Absolute value: 0 = no first-line indent. Switching to 原书设置 probes the book's own indent into this slot (see BookStyleProbe), so a 2em book shows 2. */
     val firstLineIndent: Double = 0.0,
-    /** [Style system] Density (% scale 0..400, default 100): overall vertical margin scaling of structural blocks such as headings/quotes/code/lists, never zero. */
+    /** [Style system] Density (% scale 0..400, default 100): overall vertical margin scaling of
+     *  every block **including p/li** (100 = the book's own rhythm, 0 = all vertical margins
+     *  cleared). Paragraph spacing has no absolute value anymore — it IS this scale. */
     val paragraphGap: Double = 100.0,
     /** [Style system] Character spacing (letter-spacing) slot -100..100, mapped to -0.2em..0.2em (each slot unit = 0.002em); 0 = no extra spacing. */
     val letterSpacing: Double = 0.0,
@@ -158,7 +158,6 @@ data class ReaderSettings(
         fontSize = overlay.fontSize ?: fontSize,
         fontScale = overlay.fontScale ?: fontScale,
         lineSpacing = overlay.lineSpacing ?: lineSpacing,
-        paragraphSpacing = overlay.paragraphSpacing ?: paragraphSpacing,
         firstLineIndent = overlay.firstLineIndent ?: firstLineIndent,
         paragraphGap = overlay.paragraphGap ?: paragraphGap,
         letterSpacing = overlay.letterSpacing ?: letterSpacing,
@@ -189,7 +188,6 @@ data class ReaderSettings(
         fontSize = overlay.fontSize ?: fontSize,
         fontScale = overlay.fontScale ?: fontScale,
         lineSpacing = overlay.lineSpacing ?: lineSpacing,
-        paragraphSpacing = overlay.paragraphSpacing ?: paragraphSpacing,
         firstLineIndent = overlay.firstLineIndent ?: firstLineIndent,
         paragraphGap = overlay.paragraphGap ?: paragraphGap,
         letterSpacing = overlay.letterSpacing ?: letterSpacing,
@@ -333,7 +331,6 @@ data class ReaderSettings(
                     theme = SettingsJson.optString(o, "theme", d.theme),
                     fontSize = SettingsJson.optInt(o, "fontSize", d.fontSize),
                     lineSpacing = SettingsJson.optDouble(o, "lineSpacing", d.lineSpacing),
-                    paragraphSpacing = SettingsJson.optDouble(o, "paragraphSpacing", d.paragraphSpacing),
                     firstLineIndent = SettingsJson.optDouble(o, "firstLineIndent", d.firstLineIndent),
                     paragraphGap = SettingsJson.optDouble(o, "paragraphGap", d.paragraphGap),
                     letterSpacing = SettingsJson.optDouble(o, "letterSpacing", d.letterSpacing),

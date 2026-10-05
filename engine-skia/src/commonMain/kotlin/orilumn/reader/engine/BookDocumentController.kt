@@ -457,7 +457,8 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
 
     /**
      * 原书设置快照（Q2 下沉：原 `ReaderActivity.withBookStyle`）：切到原书设置时，
-     * 把当前章节的真实排版（首行缩进/段间距/行距）快照进设置值。探测失败原样返回。
+     * 把当前章节的真实排版（首行缩进/行距）快照进设置值。探测失败原样返回。
+     * 纵边距不回填：段间距即疏密，书的 margin 原样参与折叠。
      */
     fun snapshotBookStyle(chapter: Int, bodyPx: Float, base: ReaderSettings): ReaderSettings {
         if (base.layoutTheme != "original") return base
@@ -471,7 +472,6 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
             .getOrNull() ?: return base
         return base.copy(
             firstLineIndent = snap.firstLineIndent,
-            paragraphSpacing = snap.paragraphSpacing,
             lineSpacing = snap.lineSpacing,
         )
     }

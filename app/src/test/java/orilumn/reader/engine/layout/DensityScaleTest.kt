@@ -8,21 +8,17 @@ import orilumn.reader.engine.css.StyleComputer
 import orilumn.reader.engine.html.MarkupElement
 import orilumn.reader.engine.text.TypographicProfile
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotEquals
-import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /**
- * Two-slider semantics (决策 of the reader layer), pinned end-to-end through the real pipeline:
+ * 单滑块语义（段间距即疏密，相对值），经真实管线一次钉死：
  *
- *  段间距 (paragraphSpacing)  = 替换: the UI layer replaces p/li vertical margins outright; it must
- *    override author per-side `p` margins and be immune to 疏密.
- *  疏密 (paragraphGapScale)  = 调节: it must scale the COMPUTED vertical margin of every OTHER block
- *    (heading/quote/pre/div/...) proportionally — the author/UA value is preserved, never replaced by
- *    a reader baseline. 1.0 = 原书排版. Horizontal margins are never scaled.
+ *  疏密 (paragraphGapScale)  = 调节: 按比例缩放**一切**块级纵边距（含 p/li）——作者/UA/主题值
+ *    被保留，100 = 原书节奏，0 = 全部清零。UI 层纵边距零声明（书 margin 原样折叠）。
+ *  水平 margin 永不缩放。
  *
  * 行距 (lineSpacing) -> line-height on all text blocks (NOT tested here).
  */
@@ -32,9 +28,8 @@ class DensityScaleTest {
 
     private val layouter = BoxChapterLayouter()
 
-    /** Computes [tag]'s computed margin under [settings] — UI sheet (段间距/行距) + gapScale (疏密) exactly
-     *  as [orilumn.reader.engine.BoxChapterLayouter.styleComputerFor] wires them in production.
-     *  p/li 测相邻对的后者（段间距口径：只在 p/li 相邻对之间生效，单块基线恒 0）。 */
+    /** Computes [tag]'s computed margin under [settings] — UI sheet (行距/缩进) + gapScale (疏密) exactly
+     *  as [orilumn.reader.engine.BoxChapterLayouter.styleComputerFor] wires them in production. */
     private fun margin(settings: ReaderSettings, tag: String, authorCss: String = "", uaCss: String = ""): Edges {
         val profile = TypographicProfile.build(settings)
         val ui = layouter.uiSheetFromProfile(profile)
@@ -97,39 +92,32 @@ class DensityScaleTest {
         assertEquals(48f, m.left, 0.1f)   // 3.0em x 16 (NOT scaled)
     }
 
-    /** 段间距 (替换) governs body paragraph/li margin and must be immune to 疏密. */
+    /** 疏密统一乘算一切块级纵边距（含 p/li）：段间距即疏密，无绝对值替换。 */
     @Test
-    fun `paragraph and li margins depend on paragraphSpacing not paragraphGap`() {
+    fun `p and li margins scale with paragraphGap like every other block`() {
         for (tag in listOf("p", "li")) {
-            val a = margin(withGap(100.0), tag).top
-            val b = margin(withGap(400.0), tag).top
-            assertEquals("$tag margin must be immune to 疏密", a, b, 0.001f)
-            assertTrue("expected a non-zero $tag gap, got $a", a > 0f)
+            val a = margin(withGap(100.0), tag, authorCss = "$tag{margin:1em 0}").top
+            val b = margin(withGap(400.0), tag, authorCss = "$tag{margin:1em 0}").top
+            assertEquals("expected 1em $tag gap at 100%, got $a", 16f, a, 0.5f)
+            assertEquals("expected 4em $tag gap at 400%, got $b", 64f, b, 0.5f)
         }
-
-        // Turning 段间距 to 0 kills the paragraph margin regardless of 疏密.
-        val zero = margin(ReaderSettings.DEFAULT.copy(paragraphSpacing = 0.0, paragraphGap = 400.0), "p").top
-        assertEquals(0f, zero, 0.001f)
     }
 
-    /** body paragraphs keep a gap (not flattened to 0) when the page is set dense. */
+    /** 书的 margin 原样流动：100% 即原书，0% 一律清零（可清零）。 */
     @Test
-    fun `paragraph margin is not disabled by paragraphGap`() {
-        assertNotEquals(0f, margin(withGap(400.0), "p").top, 0.001f)
+    fun `author p margins flow and zero density clears them`() {
+        val author = "p{margin:1.8em 0 0.6em}"
+        assertEquals(1.8f * 16f, margin(withGap(100.0), "p", authorCss = author).top, 0.5f)
+        assertEquals(0f, margin(withGap(0.0), "p", authorCss = author).top, 0.001f)
     }
 
-    /** 段间距 (替换) must override an author/inline per-side `p` margin: a book that declares
-     *  `p { margin-top: ... }` must not defeat the reader's paragraph spacing. (UI layer emits the
-     *  spacing as per-side margin-top/bottom so it wins the property-level tier.) */
+    /** 书声明的 per-side p margin 不再被 UI 覆盖：作者赢（UI 纵边距零声明）。 */
     @Test
-    fun `paragraph spacing overrides author per-side p margin`() {
-        val settings = ReaderSettings.DEFAULT.copy(paragraphSpacing = 1.0, paragraphGap = 400.0)
+    fun `author per-side p margin wins over the reader`() {
+        val settings = ReaderSettings.DEFAULT.copy(paragraphGap = 400.0)
         val plain = margin(settings, "p").top
-        val fought = margin(settings, "p", authorCss = "p{margin-top:2em}").top // author per-side must NOT win
-        assertEquals(plain, fought, 0.001f)
-        assertTrue("expected non-zero paragraph spacing, got $fought", fought > 0f)
-        // 段间距 is replace: same 1em at any 疏密.
-        val dense = margin(settings, "p").top
-        assertEquals(dense, fought, 0.001f)
+        val declared = margin(settings, "p", authorCss = "p{margin-top:2em}").top
+        assertEquals(0f, plain, 0.001f) // 无声明即 0（ua.css 未参与本用例），不注入基线
+        assertEquals(2f * 16f * 4f, declared, 1f) // 2em × 400%
     }
 }

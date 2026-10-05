@@ -7,10 +7,12 @@ import kotlin.math.roundToInt
  * Reads a book's own typography back out of its CSS (pure, JVM-testable).
  *
  * Used when switching to 原书设置: the preset overwrites the conflicting UI slider values with the
- * book's real ones (a 2em-indent book → slider 2, a 0.3rem-gap book → slider 0.3), because the UI
+ * book's real ones (a 2em-indent book → slider 2), because the UI
  * layer always wins over the book at render time and blind neutrals would wipe the book's look.
  * Afterwards the normal flow applies (UI wins, user drags to override, incremental relayout) with
  * no render-time special cases. Sliders keep absolute semantics.
+ *
+ * 纵边距不在此列：段间距即疏密百分比，随版式乘算，书的 margin 原样参与折叠，无需回填。
  *
  * The input [styles] must be computed WITHOUT the reader upper layers (no theme/settings/UI), i.e.
  * UA + author only, so the result is the book's own voice rather than an echo of the current sliders.
@@ -23,16 +25,13 @@ object BookStyleProbe {
     class Snapshot(
         /** 首行缩进 slider value (whole em, 0..10). */
         val firstLineIndent: Double,
-        /** 段间距 slider value (em, 0..2, 0.1 step). */
-        val paragraphSpacing: Double,
         /** 行距 slider value (ratio, 0.5..2.5, 0.1 step). */
         val lineSpacing: Double,
     )
 
-    /** Snapshots [firstLineIndentEm], [paragraphSpacingEm] and [lineSpacingRatio] in one pass. */
+    /** Snapshots [firstLineIndentEm] and [lineSpacingRatio] in one pass. */
     fun snapshot(styles: Map<MarkupElement, ComputedStyle>): Snapshot = Snapshot(
         firstLineIndent = firstLineIndentEm(styles),
-        paragraphSpacing = paragraphSpacingEm(styles),
         lineSpacing = lineSpacingRatio(styles),
     )
 
@@ -45,18 +44,6 @@ object BookStyleProbe {
         modeOf(styles) { st ->
             if (st.fontSizePx <= 0f) null
             else (st.textIndentPx / st.fontSizePx).roundToInt().coerceIn(0, 10).toDouble()
-        } ?: 0.0
-
-    /**
-     * The book's inter-paragraph gap in em: `margin-bottom` / `font-size`, quantized to 0.1 to
-     * match the 段间距 slider (0..2). Bottom-only is the gap heuristic: books space paragraphs
-     * with bottom margins (top 0), and the UI applies one value top+bottom whose collapse equals
-     * that same gap — so writing the bottom mode reproduces the book's rhythm.
-     */
-    fun paragraphSpacingEm(styles: Map<MarkupElement, ComputedStyle>): Double =
-        modeOf(styles) { st ->
-            if (st.fontSizePx <= 0f) null
-            else round1((st.margin.bottom / st.fontSizePx).toDouble()).coerceIn(0.0, 2.0)
         } ?: 0.0
 
     /**

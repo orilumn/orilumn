@@ -337,9 +337,6 @@ fun ReaderSettingsPanel(
                 sliderKey(s.lineSpacing, 0.5, 2.5, 0.1,
                     apply = { v -> onPreview(s.copy(lineSpacing = v)); onCommitTypography(s.copy(lineSpacing = v)) },
                     fmt = { String.format("%.1f", it) }),
-                sliderKey(s.paragraphSpacing, 0.0, 2.0, 0.1,
-                    apply = { v -> onPreview(s.copy(paragraphSpacing = v)); onCommitTypography(s.copy(paragraphSpacing = v)) },
-                    fmt = { v -> if (v == 0.0) "0" else String.format("%.1f", v) }),
                 sliderKey(s.paragraphGap, 0.0, 400.0, 1.0,
                     apply = { v -> onPreview(s.copy(paragraphGap = v)); onCommitTypography(s.copy(paragraphGap = v)) },
                     fmt = { "${it.roundToInt()}" }),
@@ -951,7 +948,7 @@ private fun SpacingPage(
     preview: (ReaderSettings) -> Unit,
     commit: (ReaderSettings) -> Unit,
 ) {
-    val labelW = sliderLabelWidth(listOf("首行缩进", "行距", "段间距", "疏密", "上边距", "下边距", "左边距", "右边距"), p)
+    val labelW = sliderLabelWidth(listOf("首行缩进", "行距", "疏密", "上边距", "下边距", "左边距", "右边距"), p)
     // 排版量滑块永远可调 (用户最高优先级); 原书设置 只是把值重置为中性默认.
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
         // 首行缩进 (em): UI 层最高优先级 text-indent; 0 = 无首行缩进.
@@ -963,28 +960,24 @@ private fun SpacingPage(
             { String.format("%.1f", it) },
             { preview(s.copy(lineSpacing = it)) }, { commit(s.copy(lineSpacing = it)) }, p, labelWidth = labelW,
             nav = nav, index = 1) }
-        item { UiSliderRow("段间距", 0.0, 2.0, 0.1, s.paragraphSpacing,
-            // A whole value (0) reads as "0", not "0.0".
-            { v -> if (v == 0.0) "0" else String.format("%.1f", v) },
-            { preview(s.copy(paragraphSpacing = it)) }, { commit(s.copy(paragraphSpacing = it)) }, p, labelWidth = labelW,
-            nav = nav, index = 2) }
+        // 疏密 (%)：纵边距统一乘算（100 = 原书/主题节奏，0 = 全部清零）；段间距即此，无绝对值。
         item { UiSliderRow("疏密", 0.0, 400.0, 1.0, s.paragraphGap,
             { "${it.roundToInt()}" },
             { preview(s.copy(paragraphGap = it)) }, { commit(s.copy(paragraphGap = it)) }, p, labelWidth = labelW,
-            nav = nav, index = 3) }
+            nav = nav, index = 2) }
         // 边距 (设备级几何) 不随 原书设置 禁用.
         item { UiSliderRow("上边距", 0.0, 200.0, 1.0, s.marginTop.toDouble(), { "${it.roundToInt()}" },
             { preview(s.copy(marginTop = it.roundToInt())) }, { commit(s.copy(marginTop = it.roundToInt())) }, p, labelWidth = labelW,
-            nav = nav, index = 4) }
+            nav = nav, index = 3) }
         item { UiSliderRow("下边距", 0.0, 200.0, 1.0, s.marginBottom.toDouble(), { "${it.roundToInt()}" },
             { preview(s.copy(marginBottom = it.roundToInt())) }, { commit(s.copy(marginBottom = it.roundToInt())) }, p, labelWidth = labelW,
-            nav = nav, index = 5) }
+            nav = nav, index = 4) }
         item { UiSliderRow("左边距", 0.0, 200.0, 1.0, s.marginLeft.toDouble(), { "${it.roundToInt()}" },
             { preview(s.copy(marginLeft = it.roundToInt())) }, { commit(s.copy(marginLeft = it.roundToInt())) }, p, labelWidth = labelW,
-            nav = nav, index = 6) }
+            nav = nav, index = 5) }
         item { UiSliderRow("右边距", 0.0, 200.0, 1.0, s.marginRight.toDouble(), { "${it.roundToInt()}" },
             { preview(s.copy(marginRight = it.roundToInt())) }, { commit(s.copy(marginRight = it.roundToInt())) }, p, labelWidth = labelW,
-            nav = nav, index = 7) }
+            nav = nav, index = 6) }
         item { Spacer(modifier = Modifier.height(24.dp)) }
     }
 }
@@ -1004,8 +997,8 @@ private fun ThemePage(
 ) {
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
         // 三个按钮都是一键重置样式的预设: 把自身的排版值写入 UI 设置 (滑块立刻跟随、值即实际值),
-        // 用户随后拖滑块是最高优先级. 现代/传统 写 缩进/段间距/字体族 (diff 传染全局);
-        // 原书设置 写全套中性默认 (字体不覆盖/字号基准/缩进与段距默认/疏密 字距 行距归位),
+        // 用户随后拖滑块是最高优先级. 现代/传统 写 缩进/疏密/字体族 (diff 传染全局);
+        // 原书设置 写全套中性默认 (字体不覆盖/字号基准/缩进与疏密默认/字距 行距归位),
         // 只写本书私有 overlay 不传染全局.
         item { ThemeOpt("原书设置", s.layoutTheme == "original", keys[0].onEnter, p, nav = nav, index = 0) }
         item { ThemeOpt("现代模式", s.layoutTheme == "modern", keys[1].onEnter, p, nav = nav, index = 1) }

@@ -859,7 +859,7 @@ class ReaderActivity : ComponentActivity() {
 
 
     /**
-     * 切到原书设置时，把当前章节的真实排版（首行缩进/段间距/行距）快照进预设的滑块值
+     * 切到原书设置时，把当前章节的真实排版（首行缩进/行距）快照进预设的滑块值
      * （2em 缩进的书滑块就是 2），再走正常提交 + 增量排版。探测失败原样返回。
      */
     private fun ReaderSettings.withBookStyle(): ReaderSettings {

@@ -332,7 +332,7 @@ class DesktopReaderHost(
      * 原书主题提交探针（用户层·壳，与平板 `withBookStyle` 同调共享收口）。
      *
      * 面板 `commitBook` 到达时已是 `withLayoutTheme(original)` 后的中性值，此处按当前章
-     * 真实排版回填三滑块后再持久化；非 original / 无定位一律原样返回。
+     * 真实排版回填首行缩进/行距后再持久化；非 original / 无定位一律原样返回。
      */
     fun probeOriginalTheme(next: ReaderSettings, chapter: Int): ReaderSettings =
         controller.probeOriginalTheme(chapter, profile.bodyPx, next)

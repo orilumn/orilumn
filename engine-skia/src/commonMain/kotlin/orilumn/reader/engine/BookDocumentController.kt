@@ -768,8 +768,11 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
         // 重排（见字段注释），此刻之后按原则次序补派。放在邻页派发**之后**，第 2/3 档就一定排在
         // B1/B2 前面（总则：目标页 > 邻页 > 本章全量 > 其他章）。
         // 幂等：非开书路径进来时闸门已开，这里什么也不做。
+        //
+        // 注意：这里**不能**顺手驱逐远章 —— 调用方可能是跨章 sweep（pageAtFraction），
+        // active 还是旧章，驱逐会把刚建好的目标章当场清掉（markup=null），调用方判空跳过，
+        // 远扫全灭、只能落在窗口内。驱逐由落位成功后显式 evictFarChapters(keep=landed) 做。
         releaseOpenGate()
-        evictFarChapters()
         return unit
     }
 
@@ -2680,11 +2683,13 @@ private fun finishCanonicalBackground(
             val p = ip.currentSlice
             if (p != null) {
                 logJumpLanding("jump", chapter)
+                evictFarChapters(keep = chapter)
                 return chapter to p
             }
         }
         val page = pageForChar(unit, anchorChar) ?: unit.firstPage() ?: return null
         logJumpLanding("jump", chapter)
+        evictFarChapters(keep = chapter)
         return chapter to page
     }
 
@@ -2941,17 +2946,18 @@ private fun finishCanonicalBackground(
      * 跳过落位章与 live 会话章；B2 尾与落位尾各扫一次（O(chapters) 纯字段检查）。
      * 窗口 30 章 ≈ 数 MB 常驻；窗口外回翻付一次重解析（百 ms 级，远跳本就付排版费）。
      */
-    private suspend fun evictFarChapters(window: Int = 30) {
-        val active = activeChapter
+    private suspend fun evictFarChapters(keep: Int = activeChapter, window: Int = 30) {
+        // keep 显式传落位章：跨章 sweep/跳转过程中 active 还是旧值，按 active 清会把刚建好的
+        // 目标章毒死。B2 尾传默认（active 稳定）；导航落位传 landed。
         // 与塑形侧同锁序（layoutMutex → structure 锁）：prepareLight 把整段 check-build-read
         // 包在 structure 锁里，清扫逐章同锁重置，无撕裂；从不反向持锁，无死锁。
         // 字段读写本身对并发读者 benign（引用原子 + 旧对象存活），锁只保 check-then-use 窗口
         // （如 buildLayout 的 markup 非空断言）与结构组的原子性。
         layoutMutex.withLock {
             for ((i, u) in chapters.withIndex()) {
-                if (i == active) continue
+                if (i == keep) continue
                 // 窗口内保留（回翻即时），之外才驱逐 —— 条件反了就是清近留远。
-                val dist = if (i >= active) i - active else active - i
+                val dist = if (i >= keep) i - keep else keep - i
                 if (dist <= window) continue
                 if (u.inProgress != null || u.tempBirth != null) continue
                 u.structureCache.lock.withLock { u.evictParsedState() }
@@ -3430,18 +3436,36 @@ private fun finishCanonicalBackground(
         val n = chapters.size
         if (n <= 0) return null
         val target = (fraction.coerceIn(0.0, 1.0) * n).toInt().coerceIn(0, n - 1)
+        // 诊断常驻：手指值→目标章，W 级防 PGAP flood 吞行（D 级 seek start 已被吞过）。
+        Logger.w(logTag, "seek map fraction=$fraction target=$target")
         // R14: nearest-content in BOTH directions (|distance| interleave, ties follow the reading
         // direction) — the old forward-only sweep could skip past the intended chapter.
+        //
+        // sweep 只判"有没有正文"（ensureMarkup：parse 级，无塑形、无临时会话），整章塑形只
+        // 发生在落位章（与目录 openTocItem 同路径）。反例：sweep 里调 ensureChapterLayout 会
+        // 给扫过的每一章建临时会话 + 塑形 —— 新进程无表时远扫即 OOM（15:50 实测），且扫过的
+        // 临时会话带 inProgress 护身、驱逐跳过它们，等于一路漏。
+        var landed: Int? = null
         for (c in listOf(target) + orderRemainingChapters(n, target, flipDir)) {
-            val u = ensureChapterLayout(c) ?: continue
-            val m = u.markup ?: continue
-            if (m.hasSignificantText()) {
-                val p = u.firstPage() ?: continue
-                logJumpLanding("seek", c)
-                return c to p
-            }
+            val m = ensureMarkup(c) ?: continue
+            if (m.hasSignificantText()) { landed = c; break }
         }
-        return null
+        val c = landed ?: run {
+            Logger.w(logTag, "seek NULL: no landed chapter (fraction=$fraction target=$target)")
+            return null
+        }
+        val u = ensureChapterLayout(c) ?: run {
+            Logger.w(logTag, "seek NULL: ensureChapterLayout failed ch=$c")
+            return null
+        }
+        val p = u.firstPage() ?: u.inProgress?.currentSlice ?: run {
+            Logger.w(logTag, "seek NULL: ch=$c has no page (slices=${u.pageSlices.size} temp=${u.inProgress != null})")
+            return null
+        }
+        logJumpLanding("seek", c)
+        // 落位成功后才驱逐，且按刚落的章保窗口 —— active 还是旧值，按它清等于毒死刚落的章。
+        evictFarChapters(keep = c)
+        return c to p
     }
 
     /**
@@ -3457,8 +3481,12 @@ private fun finishCanonicalBackground(
             val u = ensureChapterLayout(c) ?: continue
             val m = u.markup ?: continue
             if (m.hasSignificantText()) {
-                val p = u.firstPage() ?: continue
+                val p = u.firstPage() ?: u.inProgress?.currentSlice ?: run {
+                    Logger.w(logTag, "neighbor NULL: ch=$c no page (slices=${u.pageSlices.size} temp=${u.inProgress != null})")
+                    continue
+                }
                 logJumpLanding("neighbor", c)
+                evictFarChapters(keep = c)
                 return c to p
             }
         }
@@ -3494,7 +3522,10 @@ private fun finishCanonicalBackground(
                 val page = unit.inProgress?.currentSlice ?: unit.firstPage()
                 if (page != null) {
                     logJumpLanding("toc", ch)
+                    evictFarChapters(keep = ch)
                     return ch to page
+                } else {
+                    Logger.w(logTag, "toc NULL: ch=$ch no page (slices=${unit.pageSlices.size} temp=${unit.inProgress != null})")
                 }
             }
             ch++

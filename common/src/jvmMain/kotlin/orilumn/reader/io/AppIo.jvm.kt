@@ -41,6 +41,8 @@ private val workerRef = AtomicReference<Thread?>(null)
 private const val MAX_LINE_BYTES = 4000
 private const val MAX_FILE_BYTES = 1L * 1024 * 1024
 private const val ROTATE_SUFFIX = ".1"
+// 同日最多保留两个备份（.1/.2，加上当前共三个 txt）：此前只留一份，第二次轮转就删掉
+// 第一段，崩溃上下文正好落第一段里就永远找不回来。
 private const val DATE_FORMAT = "yyyyMMdd"
 private val LEVEL_LABEL = mapOf('D' to "D", 'I' to "I", 'W' to "W", 'E' to "E")
 
@@ -103,7 +105,12 @@ public actual object Logger {
             }
             val size = fs.metadata(file).size ?: 0L
             if (size > MAX_FILE_BYTES) {
+                val second = logsDir / "日志_$date.2.txt"
                 val rotated = logsDir / "日志_$date$ROTATE_SUFFIX.txt"
+                if (fs.exists(rotated)) runCatching {
+                    fs.delete(second, mustExist = false)
+                    fs.atomicMove(rotated, second)
+                }
                 fs.delete(rotated, mustExist = false)
                 fs.atomicMove(file, rotated)
             }

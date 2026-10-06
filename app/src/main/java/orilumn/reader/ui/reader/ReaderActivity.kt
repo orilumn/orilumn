@@ -154,6 +154,8 @@ class ReaderActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         // 日志根改由 AppRoot 注入（幂等、只首次生效；直启阅读页时 MainActivity 可能没跑过，此处兜底）。
         AppRoot.init(filesDir.absolutePath.toPath(), FileSystem.SYSTEM)
+        // 崩溃落盘（幂等；直启阅读页同样需要，否则该路径的崩溃无堆栈）。
+        orilumn.reader.engine.CrashLog.install(filesDir)
         // R28：平台差异留在平台层——引擎侧只认 AbSwitch 的取值，不认识 intent。
         // 必须在开书之前写；此处早于任何 layout 触发。格式见 AbSwitch.apply 的 KDoc。
         AbSwitch.apply(intent?.getStringExtra(EXTRA_AB_SPEC))

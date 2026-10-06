@@ -62,6 +62,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         // S30 横切注入：common Logger/AppRoot 的数据根（只首次生效；桌面壳/测试注入各自临时目录）。
         AppRoot.init(filesDir.absolutePath.toPath(), FileSystem.SYSTEM)
+        orilumn.reader.engine.CrashLog.install(filesDir)
         Logger.i(TAG, "shelf onCreate")
         // S33/S34a/S34b：首启把 Room 书目/进度/字体导入 SQLDelight（后台；书架流来自新库，导入完成即推送）。
         lifecycleScope.launch(Dispatchers.IO) {

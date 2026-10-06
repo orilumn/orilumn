@@ -222,7 +222,11 @@ fun ReaderScreen(
             coverDismissed = false
         } else if (contentRevision != coverRev) {
             coverRev = contentRevision
-            coverDismissed = false
+            val pNow = openPos
+            if (pNow == null || !isBookStart(pNow)) {
+                coverDismissed = false
+            }
+            // 当前正好在书首时，不重置 dismissed，避免调参时闪回封面
         }
         // open 落位前不查：与开书解析并发必撞锁/竞态（首章 check），查也白查。
         val p = openPos ?: return@LaunchedEffect
@@ -378,6 +382,8 @@ fun ReaderScreen(
     }
 
     fun seek(fraction: Float) {
+        // 诊断常驻：手指值 vs 落位章对不上（两次远端拖动都落 ch11），W 级防 PGAP  flood 吞行。
+        Logger.w("Orilumn.TAP", "seek finger fraction=$fraction")
         scope.launch {
             anchorFunnel.navigate(
                 action = "seek",

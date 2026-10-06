@@ -264,7 +264,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
     @Volatile
     private var openGateWantsB2: Boolean = false
 
-    /** **翻页方向记录**（原则 §3.2）：`+1` 上次向前翻页、`−1` 上次向后翻页、`0` **无记录**。
+        /** **翻页方向记录**（原则 §3.2）：`+1` 上次向前翻页、`−1` 上次向后翻页、`0` **无记录**。
      *
      *  写入：
      *  - 翻页入口 [findAdjacentPage] 记当次 `direction`；[nextPageInChapter] / [prevPageInChapter]
@@ -1727,6 +1727,19 @@ private fun notifyFlip() {
     scheduler.cancelLowerThan(TaskScheduler.PRIO_FLIP)
 }
 
+    /**
+     * 导航/调参入口抢占（跳转五路 + prepareRelayout 共用）：砍掉在途低档活（整书 B2、
+     * 预填充等），落位章的新布局独占 CPU/内存。砍掉过东西才把派发戳清零 —— 下次自然派发
+     * （翻页尾/循环尾）即重扫补回被砍的章；池里没活时只取消（空转）不碰戳，收敛好的书
+     * 跳转零扰动。落位后的补派走各路径已有的尾部分派（anchor 流 force / finalize 显式）。
+     */
+    private suspend fun preemptForNavigation() {
+        if (scheduler.pendingCount() + scheduler.runningCount() > 0) {
+            notifyFlip()
+            lastDispatchEpoch = -1L
+        }
+    }
+
 /** R3: immutable published neighbor shapes (chapter + paramHash keyed). Read-only after
  *  publication — safe to consult from any thread; stale entries are ignored by key check. */
 @Volatile
@@ -2773,6 +2786,9 @@ private fun finishCanonicalBackground(
      */
     suspend fun prepareRelayout(chapter: Int, anchorChar: Int): ReflowResult? {
         clearFlipDir("param-change")
+        // 调参同样第一优先：epoch 已 bump 使在途 B2 过期（执行后丢弃），此处再主动砍掉，
+        // 免得它们排完整章才丢（纯浪费 CPU/内存峰值）。落位章的新 B1 与尾部分派不受影响。
+        preemptForNavigation()
         layoutEpoch++
         val myEpoch = layoutEpoch
         activeChapter = chapter
@@ -3341,6 +3357,7 @@ private fun finishCanonicalBackground(
      */
     suspend fun pageAtFraction(fraction: Double): Pair<Int, PageSlice>? {
         clearFlipDir("seek")
+        preemptForNavigation()
         val n = chapters.size
         if (n <= 0) return null
         val target = (fraction.coerceIn(0.0, 1.0) * n).toInt().coerceIn(0, n - 1)
@@ -3363,6 +3380,7 @@ private fun finishCanonicalBackground(
      * chapter (previous/next chapter).
      */
     suspend fun neighborChapterStart(chapter: Int, direction: Int): Pair<Int, PageSlice>? {
+        preemptForNavigation()
         var c = chapter
         while (true) {
             c += direction
@@ -3397,6 +3415,7 @@ private fun finishCanonicalBackground(
  *  Used by the TOC panel to jump to an arbitrary chapter. */
     suspend fun openChapterStart(index: Int): Pair<Int, PageSlice>? {
         clearFlipDir("chapter-start")
+        preemptForNavigation()
         if (chapters.isEmpty()) return null
         var ch = index.coerceIn(0, chapters.size - 1)
         while (ch < chapters.size) {
@@ -3423,6 +3442,7 @@ private fun finishCanonicalBackground(
      */
     suspend fun openTocItem(index: Int, fragment: String?): Pair<Int, PageSlice>? {
         clearFlipDir("toc-item")
+        preemptForNavigation()
         if (fragment.isNullOrBlank() || index !in chapters.indices) return openChapterStart(index)
         val m = ensureMarkup(index) ?: return openChapterStart(index)
         val charStart = styledAnchorChar(index, m, fragment)
@@ -3474,6 +3494,7 @@ private fun finishCanonicalBackground(
      */
     suspend fun openLinkTarget(target: LinkTarget): Pair<Int, PageSlice>? {
         clearFlipDir("link-target")
+        preemptForNavigation()
         if (target.chapterIndex !in chapters.indices) return null
         val fragment = target.fragment
         if (fragment.isNullOrBlank()) return openChapterStart(target.chapterIndex)

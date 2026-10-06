@@ -13,7 +13,7 @@ package orilumn.reader.ui.reader
  *   重建本缓存（`remember(currentHost)`），双保险。
  */
 class PageImageCache<T : Any>(
-    private val maxBytes: Long = 64L * 1024 * 1024,
+    private val maxBytes: Long = 32L * 1024 * 1024,
     private val sizeOf: (T) -> Long,
 ) {
     private val map = LinkedHashMap<String, T>(16, 0.75f, true)

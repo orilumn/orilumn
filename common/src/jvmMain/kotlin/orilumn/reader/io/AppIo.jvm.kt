@@ -10,6 +10,7 @@ import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 
@@ -37,8 +38,14 @@ public actual object AppRoot {
 private data class LogEntry(val level: Char, val tag: String, val msg: String, val tr: Throwable?)
 
 private val logQueue = ConcurrentLinkedQueue<LogEntry>()
+/** 队列深度（`size()` 是 O(n)，高频路径不用它）。 */
+private val queueDepth = AtomicInteger(0)
+/** 拥塞时丢掉的行数（drain 到水位线下时记一条 marker，不断证据链）。 */
+private val droppedLines = AtomicInteger(0)
 private val workerRef = AtomicReference<Thread?>(null)
 private const val MAX_LINE_BYTES = 4000
+/** 内存队列上限（条）。行均 ~200B，2000 条 ≈ 0.5MB —— 突发再大堆也不涨。 */
+private const val MAX_QUEUE = 2000
 private const val MAX_FILE_BYTES = 1L * 1024 * 1024
 private const val ROTATE_SUFFIX = ".1"
 // 同日最多保留两个备份（.1/.2，加上当前共三个 txt）：此前只留一份，第二次轮转就删掉
@@ -65,6 +72,16 @@ public actual object Logger {
         // 先入队再 ensureWorker：worker 首次 poll 必定看到本条（镜像仓库约定——有状态 seam 的
         // 「先入队、后唤醒」落盘顺序，避免 worker 先行退出的丢唤醒竞态；FontParser 无此语义，状态无关）。
         logQueue.add(LogEntry(level, tag, msg, tr))
+        // 有界队列：B2 整书等突发可达上万行/秒，落盘（每行 open/append/close+metadata）跟不上时
+        // 无界增长即 OOM（“日志绝不影响业务”落空）。超限丢最老，水位回到一半；丢数由 drain 记 marker。
+        if (queueDepth.incrementAndGet() > MAX_QUEUE) {
+            var target = queueDepth.get() - MAX_QUEUE / 2
+            while (target-- > 0) {
+                if (logQueue.poll() == null) break
+                queueDepth.decrementAndGet()
+                droppedLines.incrementAndGet()
+            }
+        }
         ensureWorker()
     }
 
@@ -78,7 +95,12 @@ public actual object Logger {
     private fun drain() {
         try {
             while (true) {
+                // 拥塞 marker：丢弃随时发生（本轮 burst 中段），每轮先报数再写行，
+                // 让读者知道中间丢过行，而不是误判时间线连续。
+                val dropped = droppedLines.getAndSet(0)
+                if (dropped > 0) write(LogEntry('W', "Orilumn.LOG", "burst-dropped $dropped lines (queue cap $MAX_QUEUE)", null))
                 val entry = logQueue.poll() ?: break
+                queueDepth.decrementAndGet()
                 write(entry)
             }
         } finally {

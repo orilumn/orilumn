@@ -47,6 +47,42 @@ class LoggerSmokeTest {
     }
 
     @Test
+    fun `burst does not grow memory unbounded and leaves a marker`() {
+        // B2 整书突发上万行/秒：队列超过 MAX_QUEUE 即丢最老，文件总量有界，
+        // 且 marker 交代丢了多少行（证据链不断）。
+        val temp = Files.createTempDirectory("n-orilumn-log-burst").toString()
+        AppRoot.init(temp.toPath(), SYSTEM)
+        repeat(10000) { Logger.d("burst", "x".repeat(100)) }
+        val logsDir = temp.toPath() / "logs"
+        val deadline = System.currentTimeMillis() + 15000
+        var stable = 0
+        var lastSize = -1L
+        fun totalBytes(): Long = runCatching {
+            SYSTEM.list(logsDir).sumOf { runCatching { SYSTEM.metadata(it).size ?: 0L }.getOrDefault(0L) }
+        }.getOrDefault(-1L)
+        while (System.currentTimeMillis() < deadline) {
+            val sz = totalBytes()
+            if (sz > 0 && sz == lastSize) {
+                stable++
+                if (stable >= 5) break
+            } else {
+                stable = 0
+                lastSize = sz
+            }
+            Thread.sleep(100)
+        }
+        var seenMarker = false
+        for (f in runCatching { SYSTEM.list(logsDir) }.getOrDefault(emptyList())) {
+            val text = runCatching { SYSTEM.read(f) { readUtf8() } }.getOrDefault("")
+            if (text.contains("burst-dropped")) seenMarker = true
+        }
+        val total = totalBytes()
+        org.junit.Assert.assertTrue("burst 后落盘总量应有界 (<2MB), 实际=$total", total in 1..(2L * 1024 * 1024))
+        org.junit.Assert.assertTrue("应有 burst-dropped marker", seenMarker)
+        AppRoot.cleanForTest()
+    }
+
+@Test
     fun `unset root is ignored without throwing`() {
         AppRoot.cleanForTest()
         assertNull(AppRoot.root)

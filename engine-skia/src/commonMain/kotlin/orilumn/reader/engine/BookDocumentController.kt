@@ -3095,9 +3095,15 @@ private fun finishCanonicalBackground(
             }
     }
 
-    /** Full line-level canonical pre-layout of a non-current chapter: shape the whole chapter, bind its
-     *  [orilumn.reader.engine.layout.DrawableBookLayout], and persist the line-level pagination table to
-     *  disk so the chapter is ready when opened. No anchor/temp state is created here. */
+    /** Full line-level canonical pre-layout of a non-current chapter: shape the whole chapter,
+     *  persist the line-level pagination table to disk, then DROP the product (B2 只算表、不驻留）。
+     *
+     *  B2 是整书后台扫描（调度池任务），964 章的书若每章都 `bindFull` 全量版式常驻，堆无限涨
+     *  （万族之劫 256MB/512MB 连爆即此）。表（KB 级）+ markup/结构是翻页的全部所需：
+     *  落位时 `buildLayout` 走磁盘命中，只塑目标页；`crossChapterLanding` 等读表路径先
+     *  `ensureChapterLayout` 再读 slices，自愈。调用方仅 [b2ChapterTask]（前台路径另有
+     *  bind，见 `buildLayout`/`finishCanonicalBackground`），故此处不判 live 版式。
+     */
     private fun fullLayoutAndPersist(unit: ChapterUnit, bc: BoxChapterLayouter, contentW: Int, contentH: Int, paramHash: Long, checkpoint: () -> Unit = {}) {
         bindChapterFor(unit)
         val markup = unit.markup ?: return
@@ -3131,7 +3137,8 @@ private fun finishCanonicalBackground(
         // shapeLeaf into locals), so any entries here predate this param cycle — or, if same-cycle,
         // are pure memo. Dropping is always safe; keeping risks stale-metric reuse on later flips.
         unit.blockShapeCache = null
-        unit.bindFull(product.layout, slices)
+        // B2 不 bind 版式产物：表已落盘+绑定，产物出函数即释放。常驻即全书堆爆炸（见本函数 KDoc）。
+        // 翻页落位经 buildLayout 磁盘命中重塑目标页； laidOut 保持 false，ensure 路径自愈。
     }
 
     /**

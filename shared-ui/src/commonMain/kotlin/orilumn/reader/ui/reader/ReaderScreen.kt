@@ -126,7 +126,10 @@ fun ReaderScreen(
     //（回翻专用通道仍可进）；换代即重置。
     var coverDismissed by remember { mutableStateOf(false) }
     // 换代结算中：首字符页先画底色占位，不抢画正文——否则正文闪一帧再被封面盖。
-    var coverResolving by remember { mutableStateOf(false) }
+    // 默认 true：首帧组合先于 effect，openPos 落位那一拍来不及置 true 就会先画一行正文
+    // （首次开书闪正文首页即此）；误伤不了非首位（holding 门限 charStart==0）与无封面书
+    // （coverImage 回 null 即落回正文，只多一帧底色）。
+    var coverResolving by remember { mutableStateOf(true) }
     // 宿主代际：open() 落定即 +1，行/图/背景 remember 键随之刷新——同 pos 也重取，
     // 换字体不断行时不滞留旧字、不白屏（open 落定前行数据恒有旧值可显）。
     var hostRevision by remember { mutableIntStateOf(0) }
@@ -178,6 +181,8 @@ fun ReaderScreen(
     // 否则 open 是一次性事件——被吞即永久空白，无下一次点按来救。
     LaunchedEffect(currentHost) {
         suspend fun doOpen(): ReaderPos? {
+            // 先占位再落位：openPos 一提交组合即画，effect 的置 true 赶不上首帧。
+            coverResolving = true
             return anchorFunnel.push("open", { openPos = it }) {
                 val p = currentHost.open()
                 openFailed = p == null
@@ -379,6 +384,18 @@ fun ReaderScreen(
                 read = { resolveNavPos("seek") },
                 commit = ::markPositionChanged,
             ) { currentHost.pageAtFraction(fraction.toDouble())?.also { warmPageImages(it) } }
+            // 拉到头即进封面（与回翻进封面同口径）：落位首位即清已离开、封面就绪即展示；
+            // 只读，markPositionChanged 已记首位存档，不另存。bmp 未到时 effect 在 openPos
+            // 变化重跑后按新 dismissed 展示；已在首位且 bmp 未到是首开竞态，cover effect 自会收尾。
+            if (fraction <= 0f) {
+                val p = openPos
+                if (p != null && coverStartChapter != null &&
+                    p.chapter == coverStartChapter && p.slice.charStart == 0
+                ) {
+                    coverDismissed = false
+                    if (coverBmp != null) coverVisible = true
+                }
+            }
         }
     }
 

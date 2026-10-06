@@ -225,6 +225,32 @@ class ChapterUnit(
     fun invalidateForParam(newHash: Long) {
         if (newHash != paramHash) invalidateLayout()
     }
+
+    /**
+     * 远章解析态驱逐（B2 扫过/翻页远离后）：只留表（翻页的全部所需）；版式/DOM/结构按需重建。
+     *
+     * 965 章的书 markup+结构常驻即上百 MB（B2 每章都 parse，从无驱逐，堆无限涨）。
+     * 调用方保证：非 active 章、无 live 会话（inProgress）。表/参数/书内包保留；
+     * 落位经 `ensureChapterLayout → buildLayout` 磁盘命中重建（markup 经 `ensureMarkup`
+     * 重解析，结构经 prepareLight 重算，均幂等）。
+     */
+    fun evictParsedState() {
+        // 只丢重的：版式产物（layout/shapes）+ DOM + 派生结构 + 页缓存 + 块面缓存。
+        // 表/参数/页切片/书内包保留（翻页落位数学照常，ensure 重建按需回填）。
+        // tempRenderLayout 不碰：非空 ⟺ inProgress 非空（配对置空，见 clearInProgress），
+        // 调用方跳过 live 会话章，故它恒是 null。
+        layout = null
+        prepareResult = null
+        markup = null
+        blockShapeCache = null
+        pageCache.clear()
+        linkRangeCache.clear()
+        linkRangeKey = null
+        shapedPageFrom = -1
+        shapedPageTo = -1
+        laidOut = false
+        structureCache.reset()
+    }
 }
 
 /**
@@ -241,7 +267,6 @@ class ChapterStructureCache {
     /** Per-chapter lock for `prepareLight` races (C2-P2b-4: same-instance identity scope as the
      *  old `synchronized(structure)`; `SyncLock` is multiplatform). */
     val lock = orilumn.reader.collections.SyncLock()
-
     /** Fingerprint of the structural inputs this cache was computed from. */
     var key: Long = Long.MIN_VALUE
 
@@ -292,6 +317,23 @@ class ChapterStructureCache {
      * 的视口查询翻转——与同批持久化的 [leaves] / [globalCharStarts] 同等安全。
      */
     var anyFloat: Boolean = true
+
+    /**
+     * 远章驱逐配套：清空全部派生结构（下次 prepareLight 按 key/boundCssHash 重算，幂等）。
+     * 锁对象本身保留（跨线程身份域不变）。
+     */
+    fun reset() {
+        key = Long.MIN_VALUE
+        leaves = emptyList()
+        globalCharStarts = LongArray(0)
+        parsedAuthorSheets = null
+        leafToBackgroundOwner = emptyMap()
+        leafToBreakInsideAvoidOwner = emptyMap()
+        genStrings = emptyMap()
+        boundCssHash = null
+        loadedMediaFree = false
+        anyFloat = true
+    }
 }
 
 /**

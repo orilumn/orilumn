@@ -769,6 +769,7 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
         // B1/B2 前面（总则：目标页 > 邻页 > 本章全量 > 其他章）。
         // 幂等：非开书路径进来时闸门已开，这里什么也不做。
         releaseOpenGate()
+        evictFarChapters()
         return unit
     }
 
@@ -2928,8 +2929,67 @@ private fun finishCanonicalBackground(
             scheduler.awaitIdle()
             if (layoutEpoch == epoch) {
                 Logger.w(logTag, "whole-book B2 pass drained epoch=$epoch submitted=$submitted")
+                logMemoryBreakdown("b2-drained")
             }
         }
+    }
+
+    /**
+     * 远章解析态驱逐（内存有界）：只保留落位章附近窗口，之外只留表（翻页的全部所需）。
+     * markup/DOM/派生结构对远章是纯常驻（965 章即上百 MB），落位经 ensure 重建
+     * （markup 重解析、结构重算，均幂等；磁盘命中章节只塑目标页）。
+     * 跳过落位章与 live 会话章；B2 尾与落位尾各扫一次（O(chapters) 纯字段检查）。
+     * 窗口 30 章 ≈ 数 MB 常驻；窗口外回翻付一次重解析（百 ms 级，远跳本就付排版费）。
+     */
+    private suspend fun evictFarChapters(window: Int = 30) {
+        val active = activeChapter
+        // 与塑形侧同锁序（layoutMutex → structure 锁）：prepareLight 把整段 check-build-read
+        // 包在 structure 锁里，清扫逐章同锁重置，无撕裂；从不反向持锁，无死锁。
+        // 字段读写本身对并发读者 benign（引用原子 + 旧对象存活），锁只保 check-then-use 窗口
+        // （如 buildLayout 的 markup 非空断言）与结构组的原子性。
+        layoutMutex.withLock {
+            for ((i, u) in chapters.withIndex()) {
+                if (i == active) continue
+                // 窗口内保留（回翻即时），之外才驱逐 —— 条件反了就是清近留远。
+                val dist = if (i >= active) i - active else active - i
+                if (dist <= window) continue
+                if (u.inProgress != null || u.tempBirth != null) continue
+                u.structureCache.lock.withLock { u.evictParsedState() }
+            }
+        }
+    }
+
+    /**
+     * 常驻内存盘点（诊断常驻，不进热路径）：B2 落定后记一笔，定位堆增长来自哪一类常驻
+     * （markup DOM / structure / layout / pageCache / table），再决定驱逐哪一层。
+     * 只计数不估字节（节点数×经验值即可定级，精确称重走 hprof）。
+     */
+    private fun logMemoryBreakdown(why: String) {
+        var withMarkup = 0
+        var domNodes = 0L
+        var withLayout = 0
+        var withTable = 0
+        var pageCacheEntries = 0
+        var withStructure = 0
+        for (u in chapters) {
+            val m = u.markup
+            if (m != null) {
+                withMarkup++
+                var n = 0
+                fun walk(x: orilumn.reader.engine.html.MarkupElement) {
+                    n++
+                    for (c in x.children) walk(c)
+                }
+                walk(m)
+                domNodes += n
+            }
+            if (u.layout != null) withLayout++
+            if (u.paginationTable != null) withTable++
+            pageCacheEntries += u.pageCache.size
+            if (u.structureCache.key != Long.MIN_VALUE) withStructure++
+        }
+        Logger.w(logTag, "MEM $why chapters=${chapters.size} markup=$withMarkup domNodes=$domNodes " +
+            "layouts=$withLayout tables=$withTable pageCacheEntries=$pageCacheEntries structured=$withStructure")
     }
 
     /** One B2 chapter pass (P0: was one loop iteration inside the whole-book coroutine; P2.1: also
@@ -2960,6 +3020,8 @@ private fun finishCanonicalBackground(
                 // P7: a between-blocks cancel is a timely abandon, not a FAIL.
                 if (e !is CancellationException) Logger.e(logTag, "whole-book ch=${u.chapterIndex} FAIL ${e.message}")
             }
+        // 本章落定（无论成败）后清扫远章：B2 自己就是堆积源，清扫频率与 B2 同步最省事。
+        evictFarChapters()
     }
 
     /** P4: once a flip lands in [chapter], pre-warm BOTH neighbors (the chapters a next out-of-bounds

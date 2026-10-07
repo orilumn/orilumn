@@ -463,6 +463,48 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
         return true
     }
 
+    // ─────────────────────────────────────────────────────────────
+    // 首章正文号（封面层判定书首的纯查询原料）
+    // ─────────────────────────────────────────────────────────────
+
+    /**
+     * 全书第一个「含正文」章的下标（章 0 常是无文本的封面/标题页）。
+     *
+     * 封面层（ReaderScreen 封面 effect）只用它判定「当前是否落在书首」。
+     * 历史上封面层调 `bookStart()`——实现是 `openChapterStart(0)` **导航**：
+     * 逐章排版 + 落位首内容章 + `evictFarChapters(keep=首章, window=30)`
+     * 逐出窗外远章；续读位在书首 ±30 章之外（真机：长生界 ch=89）时，
+     * **正在渲染的续读章被逐出**，而封面丢弃落位结果、阅读面仍按续读位
+     * 取页 → `pageLines` 的 `unit.layout` 为 null → 整页空白（白屏），
+     * 且渲染路径不自愈（pageLines 只读不 ensure），点按翻页也无法恢复。
+     *
+     * @Volatile：宿主后台线程写，封面绘制线程读。
+     */
+    @Volatile
+    private var firstContentChapterCache: Int? = null
+
+    /**
+     * 纯查询（懒解析）：缓存命中即回；未解析时从章 0 起找首个
+     * `hasSignificantText` 的章并缓存。**只经 [ensureMarkup] 解析结构**
+     * （幂等、无排版、无落位、无逐出）——比 `bookStart()`（导航：
+     * 排版+落位+逐出）轻得多；且懒到封面首次查询才算，不碰
+     * 「开书不解析正文」的 preflight 契约（见 OpenBookPreflightProbeTest）。
+     * 未找到（全书无正文）回 null。
+     */
+    suspend fun firstContentChapter(): Int? {
+        firstContentChapterCache?.let { return it }
+        var ch = 0
+        while (ch < chapters.size) {
+            val markup = ensureMarkup(ch)
+            if (markup != null && markup.hasSignificantText()) {
+                firstContentChapterCache = ch
+                return ch
+            }
+            ch++
+        }
+        return null
+    }
+
     /**
      * 定位串解码单源见 [orilumn.reader.data.read.ReadingLocatorCodec]（写 `chapter:char`，
      * 读兼容 foliate JSON 旧行与 `chapter:char`）。

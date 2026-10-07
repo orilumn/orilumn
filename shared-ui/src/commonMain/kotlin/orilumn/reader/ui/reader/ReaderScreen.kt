@@ -243,11 +243,16 @@ fun ReaderScreen(
                     null
                 }
             }
-            // 首章号查不到退避重试（open 并发期布局未就绪是常态，最多约 1.2s）。
+            // 首章号查不到退避重试（开书并发期解析未就绪是常态，最多约 1.2s）。
+            // 必须用纯查询 firstContentChapter：bookStart() 是带落位+逐出的
+            // 导航（openChapterStart），续读位在书首 ±30 章之外时会把正在
+            // 渲染的远章逐出，而本 effect 丢弃落位结果、阅读面仍按续读位
+            // 取页 → pageLines 拿不到版式 → 白屏（FirstContentChapterProbeTest
+            // 锁住该回归）。
             if (coverBmp != null && coverStartChapter == null) {
                 repeat(6) {
                     coverStartChapter = try {
-                        currentHost.bookStart()?.chapter
+                        currentHost.firstContentChapter()
                     } catch (e: Exception) {
                         if (e is kotlinx.coroutines.CancellationException) throw e
                         null

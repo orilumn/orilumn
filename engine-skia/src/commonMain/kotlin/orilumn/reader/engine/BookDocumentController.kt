@@ -621,7 +621,16 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
     /** Injects the viewport size; returns whether it changed (a change requires relayout). */
     fun setViewport(width: Int, height: Int): Boolean {
         val changed = width > 0 && height > 0 && (width != viewW || height != viewH)
-        if (width > 0 && height > 0) {
+        if (changed) {
+            if (width > 0 && height > 0) {
+                viewW = width
+                viewH = height
+            }
+            // 视口尺寸变化（旋转屏幕/窗口调整）导致版面改变，清空整本书旧磁盘分页表
+            runCatching {
+                if (bookId >= 0) cacheStore()?.cleanBookAll(bookId.toString())
+            }.onFailure { Logger.w(logTag, "setViewport CLEAN-ALL FAIL ${it.message}") }
+        } else if (width > 0 && height > 0) {
             viewW = width
             viewH = height
         }
@@ -2884,6 +2893,10 @@ private fun finishCanonicalBackground(
         // it bound (it is the drawable page in view) and swaps in the fresh product when the caller
         // binds on the main thread. Other chapters get invalidated by prepareRelayout itself.
         val result = prepareRelayout(currentChapter, anchorChar)
+        // 版式参数真正变化导致全局失效时，清空整本书旧磁盘分页表
+        runCatching {
+            if (bookId >= 0) cacheStore()?.cleanBookAll(bookId.toString())
+        }.onFailure { Logger.w(logTag, "finalizeRelayoutAll CLEAN-ALL FAIL ${it.message}") }
         // The wrap-up routes through the same epoch-ized B2 dispatch used by the params-settled point.
         requestWholeBookRelayout()
         return result

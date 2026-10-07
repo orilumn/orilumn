@@ -2612,6 +2612,7 @@ private fun finishCanonicalBackground(
             .onFailure { Logger.e(logTag, "canonical WRITE FAIL ch=${unit.chapterIndex} ${it.message}") }
         unit.bindPaginationTable(table)
         Logger.w(logTag, "layout ${ctx(unit)} CANONICAL-DISK-WRITE pages=${table.totalPages} totalChars=$totalChars")
+        // 不在单章写入后清空全书缓存；全局失效由专门时机处理
     }
     ip.canonicalLayout = layout
     ip.canonicalSlices = slices
@@ -3200,6 +3201,8 @@ private fun finishCanonicalBackground(
                 .onFailure { Logger.e(logTag, "full prelim WRITE FAIL ch=${unit.chapterIndex} ${it.message}") }
             unit.bindPaginationTable(table)
             Logger.w(logTag, "layout ${ctx(unit)} FULL-PRELIM pages=${table.totalPages} blocks=${slices.maxOf { it.blockEndExclusive }}")
+            // 不在每章写入后清空全书缓存：B2 是逐章后台计算，整本清空会破坏其他章尚未写入的新表
+            // 只在参数变化等全局失效时机清理（如 finalizeRelayoutAll 后由调用方决定，或通过 sweepStale/trim 处理）
         }
         // R4: the heavy path never populates the shared per-block shape cache (it shapes via
         // shapeLeaf into locals), so any entries here predate this param cycle — or, if same-cycle,

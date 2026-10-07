@@ -112,4 +112,18 @@ class PaginationCacheStore(
         if (deleted > 0) Logger.w("Orilumn.DISK", "pagination sweep book=$bookId deleted=$deleted kept=${files.size - deleted}")
         return deleted
     }
+
+    /** Deletes all pagination-table files for the entire book regardless of chapter/paramHash. */
+    fun cleanBookAll(bookId: String) {
+        val dir = rootDir.resolve("pagination/$bookId")
+        val files = runCatching { fs.list(dir) }
+            .onFailure { Logger.w("Orilumn.DISK", "pagination clean list FAIL $dir ${it.message}") }
+            .getOrNull()
+            ?.filter { it.name.endsWith(".bin") }
+            ?: return
+        for (f in files) {
+            runCatching { fs.delete(f) }
+                .onFailure { Logger.w("Orilumn.DISK", "pagination clean delete FAIL $f ${it.message}") }
+        }
+    }
 }

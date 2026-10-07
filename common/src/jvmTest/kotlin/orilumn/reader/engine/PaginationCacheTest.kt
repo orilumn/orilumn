@@ -176,4 +176,44 @@ class PaginationCacheTest {
         s.clearBook(ns)
         assertEquals(0, FileSystem.SYSTEM.list(s.dirFor(ns)).size)
     }
+
+    @Test
+    fun `cleanStaleParams deletes only other-hash tables and keeps the running hash`() {
+        // 调参/字体变更后旧指纹表是孤儿（读路径按当前指纹寻址永远命中不到），
+        // 但同指纹表是有效缓存（参数回退即命中）——清理必须按指纹区分，不能全清。
+        val s = store()
+        val ns = "book_stale"
+        val fOld = s.file(ns, 1, 111L)
+        s.write(sampleTable(), fOld)
+        val fKeep = s.file(ns, 2, 222L)
+        s.write(sampleTable(), fKeep)
+        // 负 hash：文件名后缀匹配必须按 "_<hash>.bin" 整段比对，
+        // 防 "3_142.bin" 误配 "_42.bin" 一类的前缀/子串误伤。
+        val fNeg = s.file(ns, 3, -42L)
+        s.write(sampleTable(), fNeg)
+        val fNear = s.file(ns, 4, 142L)
+        s.write(sampleTable(), fNear)
+
+        // 保留 222：其余三个指纹（111 / 负 hash -42 / 近似的 142）全成孤儿删除。
+        assertEquals(3, s.cleanStaleParams(ns, 222L))
+        assertFalse(FileSystem.SYSTEM.exists(fOld))
+        assertTrue(FileSystem.SYSTEM.exists(fKeep))
+        assertFalse(FileSystem.SYSTEM.exists(fNeg))
+        assertFalse(FileSystem.SYSTEM.exists(fNear))
+        // 幂等：二轮无旧指纹文件可删。
+        assertEquals(0, s.cleanStaleParams(ns, 222L))
+
+        // 换保留指纹为负 hash："3_-42.bin" 精确命中保留；
+        // "4_142.bin" 不得因「以 42 结尾」误配 "_-42.bin"。
+        s.write(sampleTable(), fOld)
+        s.write(sampleTable(), fNear)
+        s.write(sampleTable(), fNeg)
+        assertEquals(3, s.cleanStaleParams(ns, -42L))
+        assertFalse(FileSystem.SYSTEM.exists(fOld))
+        assertFalse(FileSystem.SYSTEM.exists(fKeep))
+        assertTrue(FileSystem.SYSTEM.exists(fNeg))
+        assertFalse(FileSystem.SYSTEM.exists(fNear))
+        // 书目录不存在时安全空转。
+        assertEquals(0, s.cleanStaleParams("book_absent", 222L))
+    }
 }

@@ -290,6 +290,10 @@ class DesktopReaderHost(
                 return@withContext null
             }
             controller.bindReflow(r)
+            // 参数稳定点（面板外两段式提交，含开书探针回填）：版式指纹真变时
+            // 清全书旧指纹磁盘表；指纹未变（夜间切换等非版式提交）是空操作，
+            // 不误删当前参数下的有效磁盘表。
+            controller.cleanStaleDiskTables()
             controller.requestWholeBookRelayout()
             ReaderPos(r.chapter, r.page)
         }

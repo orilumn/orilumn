@@ -653,7 +653,11 @@ class ReaderActivity : ComponentActivity() {
                 if (relayoutPending) delay(RELAYOUT_INTERVAL_MS)
             }
             relayoutScheduled = false
-            // 参数稳定点：节流循环结束后以最终稳定参数重派整书（B2）剩余章扫描（controller 对过期 epoch 空转）。
+            // 参数稳定点：版式指纹真变（面板外提交——开书探针回填/原书设置
+            // 提交/字体回退）时清全书旧指纹磁盘表；指纹未变（夜间切换等
+            // 非版式提交）是空操作，不误删当前参数下的有效磁盘表。B2 随后
+            // 按新指纹逐章重写。
+            engine?.cleanStaleDiskTables()
             engine?.requestWholeBookRelayout()
             relayoutJob = null
         }
@@ -704,8 +708,14 @@ class ReaderActivity : ComponentActivity() {
 
     /** 字库刷新 + 按需重排（onResume 与面板内增删共用）：集合不变直接跳过。 */
     private fun refreshFontsAndRelayout() {
-        lifecycleScope.launch {
-            if (refreshSkiaFonts() && engine != null) scheduleRelayout()
+        lifecycleScope.launch(Dispatchers.Default) {
+            if (refreshSkiaFonts() && engine != null) {
+                // 字体集合真变：度量不进版式指纹，旧磁盘表按指纹清理抓不到
+                // （同指纹文件的几何已旧）——「字体修改必须删旧表」，全清后
+                // 由 B2 逐章重写。
+                engine?.cleanAllDiskTables()
+                scheduleRelayout()
+            }
         }
     }
 

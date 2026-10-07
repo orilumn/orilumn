@@ -122,6 +122,14 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
     /** 书内字体字节缓存（归一化 href → 去混淆后字节；null＝不可用，记得住不再试）。 */
     private val bookFontBytesCache = HashMap<String, ByteArray?>()
 
+    /** 版式指纹基线：上次磁盘清理时的 [currentParamHash]（构造时按初始 profile 钉底，
+     *  [setViewport] 注入真实视口后经 [cleanStaleDiskTables] 推进）。
+     *  [cleanStaleDiskTables] 只在指纹偏离基线时才动磁盘：非版式提交（夜间模式
+     *  切换、开书探针回填后与存量参数一致）零误删；换字体/调参/探针真回填
+     *  新值（指纹变）才清旧指纹磁盘表。声明在 [init] 之前：基线在构造时钉底。 */
+    @Volatile
+    private var cleanBaselineParamHash: Long = 0L
+
     /**
      * P2-b: 章节书内字体（`@font-face` → 相对源 href 解析 → zip 取字节 →
      * IDPF 去混淆 → 魔数校验）。缺 CSS/无引用即空表；坏字体跳过并记日志，永不崩版式。
@@ -174,6 +182,12 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
             // with imageLoader in its constructor (passed from ReaderActivity), so nothing to do
             // here — but this init block documents the intent.
         }
+        // 指纹基线钉底：构造时 profile 已知、视口未注入（0→内容盒钳 16px，
+        // 是幻影指纹）；宿主紧随构造调 setViewport 注入真实视口，指纹随之
+        // 偏离基线 —— 那次清理因 bookId 尚未设置（<0）不动磁盘，只把基线
+        // 推进到真实指纹。此后开书探针回填/字体变更等面板外提交才谈得上
+        // 「指纹真变 vs 一致」。
+        cleanBaselineParamHash = currentParamHash()
     }
 
     private val parser = EpubParser()
@@ -626,15 +640,50 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
                 viewW = width
                 viewH = height
             }
-            // 视口尺寸变化（旋转屏幕/窗口调整）导致版面改变，清空整本书旧磁盘分页表
-            runCatching {
-                if (bookId >= 0) cacheStore()?.cleanBookAll(bookId.toString())
-            }.onFailure { Logger.w(logTag, "setViewport CLEAN-ALL FAIL ${it.message}") }
+            // 视口尺寸变化（旋转屏幕/窗口调整）导致版面改变 → 指纹必变，走统一
+            // 收口清全书旧指纹磁盘表（守卫恒过；内容盒在边距补偿下恰不变时指纹
+            // 不变，旧表仍有效，不删才是对的）。
+            cleanStaleDiskTables()
         } else if (width > 0 && height > 0) {
             viewW = width
             viewH = height
         }
         return changed
+    }
+
+    /**
+     * 版式参数（[LayoutParamKey] 指纹）真变时的磁盘分页表清理收口（排版层·上）。
+     *
+     * 指纹与基线 [cleanBaselineParamHash] 一致 = 空操作：当前参数下的磁盘表
+     * 全部保留 —— 非版式提交（夜间模式切换、开书探针回填后与存量参数一致、
+     * 原书设置快照无变化）零误删。指纹偏离 = 删除全书**旧指纹**磁盘表（读路径
+     * 按当前指纹寻址，旧指纹文件永远命中不到，是纯孤儿）并推进基线；同指纹的
+     * 历史表保留（参数回退即命中）。
+     *
+     * 调用点 = 参数稳定点：面板外提交的收口（平板轻刷新节流循环末尾、桌面
+     * 两段式第二段 [orilumn.reader.desktop.DesktopReaderHost.commitRelayout]）；
+     * [setViewport] 与 [finalizeRelayoutAll] 同走本入口（视口变化/面板关闭的
+     * 指纹必变，守卫恒过）。
+     */
+    fun cleanStaleDiskTables() {
+        val hash = currentParamHash()
+        if (hash == cleanBaselineParamHash) return
+        cleanBaselineParamHash = hash
+        if (bookId < 0) return
+        runCatching { cacheStore()?.cleanStaleParams("book_$bookId", hash) }
+            .onFailure { Logger.w(logTag, "cleanStaleDiskTables FAIL ${it.message}") }
+    }
+
+    /** 字体集合变化（导入/删除/系统字体变更）后的全书磁盘表全清。字体度量不进
+     *  [LayoutParamKey]（键只含族名/字重锚点，不含度量）→ [cleanStaleDiskTables]
+     *  的指纹清理抓不到同指纹旧表：集合一变，旧表几何全旧 —— 「字体修改必须删
+     *  旧表」按全清兜底。B2 随后按当前指纹逐章重写；内存已驻表的章被 skip-fresh
+     *  跳过重写，下个会话首次访问经 fullLayout 重塑（纯预热损失，非正确性问题）。 */
+    fun cleanAllDiskTables() {
+        cleanBaselineParamHash = currentParamHash()
+        if (bookId < 0) return
+        runCatching { cacheStore()?.cleanBookAll(bookId.toString()) }
+            .onFailure { Logger.w(logTag, "cleanAllDiskTables FAIL ${it.message}") }
     }
 
     // ---- Layout ----
@@ -2893,10 +2942,9 @@ private fun finishCanonicalBackground(
         // it bound (it is the drawable page in view) and swaps in the fresh product when the caller
         // binds on the main thread. Other chapters get invalidated by prepareRelayout itself.
         val result = prepareRelayout(currentChapter, anchorChar)
-        // 版式参数真正变化导致全局失效时，清空整本书旧磁盘分页表
-        runCatching {
-            if (bookId >= 0) cacheStore()?.cleanBookAll(bookId.toString())
-        }.onFailure { Logger.w(logTag, "finalizeRelayoutAll CLEAN-ALL FAIL ${it.message}") }
+        // 版式参数真正变化导致全局失效时，清全书旧磁盘分页表（统一收口：门控
+        // 已保证指纹真变，守卫恒过；同指纹历史表保留，B2 逐章重写新指纹表）。
+        cleanStaleDiskTables()
         // The wrap-up routes through the same epoch-ized B2 dispatch used by the params-settled point.
         requestWholeBookRelayout()
         return result

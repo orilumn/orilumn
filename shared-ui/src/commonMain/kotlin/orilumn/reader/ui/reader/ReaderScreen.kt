@@ -45,6 +45,20 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
+
+/**
+ * 落位前等图超时（ms）：目标页缺图时最多等这一拍再提交定位，超时按缺图提交（老的异步补齐照常）。
+ * 以后翻页动画截图直接复用预热好的位图，故预热是必经之路，不是可选优化。
+ */
+private const val PAGE_IMAGE_WARM_TIMEOUT_MS = 800L
+
+/** 跨页缓存键（稳定身份，与几何无关）：同图跨页 `yTop/widthPx` 不同也命中。 */
+private fun imgKeyOf(img: orilumn.reader.engine.skia.PageImage): String =
+    "${img.chapterHref}|${img.src}|${img.widthPx}"
+
+/** 背景图缓存键。 */
+private fun bgKeyOf(href: String, src: String): String = "$href|$src"
 
 /**
  * S28 阅读面（shared-ui commonMain）：画布 + 手势 + 进度 + 亮度遮罩 + 字体切换逻辑的统一载体。
@@ -112,7 +126,10 @@ fun ReaderScreen(
     //（回翻专用通道仍可进）；换代即重置。
     var coverDismissed by remember { mutableStateOf(false) }
     // 换代结算中：首字符页先画底色占位，不抢画正文——否则正文闪一帧再被封面盖。
-    var coverResolving by remember { mutableStateOf(false) }
+    // 默认 true：首帧组合先于 effect，openPos 落位那一拍来不及置 true 就会先画一行正文
+    // （首次开书闪正文首页即此）；误伤不了非首位（holding 门限 charStart==0）与无封面书
+    // （coverImage 回 null 即落回正文，只多一帧底色）。
+    var coverResolving by remember { mutableStateOf(true) }
     // 宿主代际：open() 落定即 +1，行/图/背景 remember 键随之刷新——同 pos 也重取，
     // 换字体不断行时不滞留旧字、不白屏（open 落定前行数据恒有旧值可显）。
     var hostRevision by remember { mutableIntStateOf(0) }
@@ -133,6 +150,18 @@ fun ReaderScreen(
     // （翻页/跳转/开书/外部落位/开链接）走它串行，后到按落定后的最新位置重取源，不再各算各的。
     val anchorFunnel = remember { AnchorFunnel() }
     val currentHost by rememberUpdatedState(host)
+    // 跨页位图缓存（随宿主换代重建：换书即新池；同书内翻页/改参常驻，回访页首帧即有图）。
+    // 键是稳定身份（与几何无关），容量按字节 LRU（大截图多的书自动腾退）。
+    val imgCache = remember(currentHost) {
+        PageImageCache<androidx.compose.ui.graphics.ImageBitmap>(
+            sizeOf = { (it.width * it.height * 4L).coerceAtLeast(1L) })
+    }
+    val bgCache = remember(currentHost) {
+        PageImageCache<orilumn.reader.engine.skia.DecodedImage>(
+            sizeOf = { (it.image.width * it.image.height * 4L).coerceAtLeast(1L) })
+    }
+    // 跨页位图缓存（随宿主换代重建：换书即新池；同书内翻页/改参常驻，回访页首帧即有图）。
+    // 键是稳定身份（与几何无关），容量按字节 LRU（大截图多的书自动腾退）。
     val currentOnBack by rememberUpdatedState(onBack)
     val currentOnNight by rememberUpdatedState(onNight)
     val currentOnSettings by rememberUpdatedState(onSettings)
@@ -152,6 +181,8 @@ fun ReaderScreen(
     // 否则 open 是一次性事件——被吞即永久空白，无下一次点按来救。
     LaunchedEffect(currentHost) {
         suspend fun doOpen(): ReaderPos? {
+            // 先占位再落位：openPos 一提交组合即画，effect 的置 true 赶不上首帧。
+            coverResolving = true
             return anchorFunnel.push("open", { openPos = it }) {
                 val p = currentHost.open()
                 openFailed = p == null
@@ -191,7 +222,11 @@ fun ReaderScreen(
             coverDismissed = false
         } else if (contentRevision != coverRev) {
             coverRev = contentRevision
-            coverDismissed = false
+            val pNow = openPos
+            if (pNow == null || !isBookStart(pNow)) {
+                coverDismissed = false
+            }
+            // 当前正好在书首时，不重置 dismissed，避免调参时闪回封面
         }
         // open 落位前不查：与开书解析并发必撞锁/竞态（首章 check），查也白查。
         val p = openPos ?: return@LaunchedEffect
@@ -208,11 +243,16 @@ fun ReaderScreen(
                     null
                 }
             }
-            // 首章号查不到退避重试（open 并发期布局未就绪是常态，最多约 1.2s）。
+            // 首章号查不到退避重试（开书并发期解析未就绪是常态，最多约 1.2s）。
+            // 必须用纯查询 firstContentChapter：bookStart() 是带落位+逐出的
+            // 导航（openChapterStart），续读位在书首 ±30 章之外时会把正在
+            // 渲染的远章逐出，而本 effect 丢弃落位结果、阅读面仍按续读位
+            // 取页 → pageLines 拿不到版式 → 白屏（FirstContentChapterProbeTest
+            // 锁住该回归）。
             if (coverBmp != null && coverStartChapter == null) {
                 repeat(6) {
                     coverStartChapter = try {
-                        currentHost.bookStart()?.chapter
+                        currentHost.firstContentChapter()
                     } catch (e: Exception) {
                         if (e is kotlinx.coroutines.CancellationException) throw e
                         null
@@ -237,7 +277,14 @@ fun ReaderScreen(
     // 落位处先关再弹就是那一帧正文闪）。
     fun markPositionChanged(next: ReaderPos) {
         openPos = next
-        if (!isBookStart(next)) coverDismissed = true
+        // 封面解析未完成时 isBookStart 恒 false（缺 bmp/首章号）——那是"未知"而非
+        // "非书首"：开书探针重排/调参重排的落位推送先于封面解析到达时（启动继续阅读、
+        // 开书后立即调参），会误记 dismissed，封面解析完成后 coverVisible 恒 false、
+        // 封面永不再弹（封面跳正文首页根因）。仅在封面已解析且确实离开首位时记离开；
+        // 未知则不动，由封面 effect 按落定后的解析结果结算显隐。
+        if (coverBmp != null && coverStartChapter != null && !isBookStart(next)) {
+            coverDismissed = true
+        }
         saveJob?.cancel()
         saveJob = scope.launch {
             delay(500)
@@ -256,6 +303,35 @@ fun ReaderScreen(
     }
 
     // ---- 定位动作（host 为 suspend，统一挂到本组件作用域） ----
+    /**
+     * 落位前等图（导航提交前预热）：目标页缺的插图/背景图并行解出来进跨页缓存再提交定位，
+     * 首帧即整页。超时兜底（大图页最多慢这一拍，超时按缺图提交、老的异步补齐照常）。
+     * 以后翻页动画截图直接复用这批已解码位图。
+     */
+    suspend fun warmPageImages(pos: ReaderPos) {
+        val imgs = runCatching { currentHost.pageImages(pos) }.getOrNull()
+            ?.takeIf { it.isNotEmpty() } ?: emptyList()
+        val bgs = runCatching { currentHost.pageBackgrounds(pos) }.getOrNull()
+            ?.mapNotNull { bg -> bg.bgSrc?.takeIf { it.isNotBlank() }?.let { bg.bgChapterHref to it } }
+            ?.distinct() ?: emptyList()
+        val missImgs = imgs.filter { imgCache.get(imgKeyOf(it)) == null }
+        val missBgs = bgs.filter { bgCache.get(bgKeyOf(it.first, it.second)) == null }
+        if (missImgs.isEmpty() && missBgs.isEmpty()) return
+        withTimeoutOrNull(PAGE_IMAGE_WARM_TIMEOUT_MS) {
+            val imgJobs = missImgs.map { img ->
+                async { img to runCatching { currentHost.loadPageImage(img) }.getOrNull() }
+            }
+            val bgJobs = missBgs.map { ref ->
+                async { ref to runCatching { currentHost.loadBackgroundImage(ref.first, ref.second) }.getOrNull() }
+            }
+            for ((img, bmp) in imgJobs.awaitAll()) {
+                if (bmp != null) imgCache.put(imgKeyOf(img), bmp)
+            }
+            for ((ref, bmp) in bgJobs.awaitAll()) {
+                if (bmp != null) bgCache.put(bgKeyOf(ref.first, ref.second), bmp)
+            }
+        }
+    }
     /** openPos 优先，回退 fallbackPos（activity currentPos），都没有才丢弃——永不静默。 */
     fun resolveNavPos(action: String): ReaderPos? {
         openPos?.let { return it }
@@ -301,6 +377,7 @@ fun ReaderScreen(
                 val landed = currentHost.adjacent(p, direction)
                 // 引擎侧无声吞翻页时（返回 null），这里是唯一目击者——与 Orilumn.FLIP 对账。
                 Logger.d("Orilumn.TAP", "tap-flip result dir=$direction " + (landed?.let { "landed ch=${it.chapter} char=${it.slice?.charStart}" } ?: "NULL (engine returned null)"))
+                if (landed != null) warmPageImages(landed)
                 landed
             }
         }
@@ -312,17 +389,31 @@ fun ReaderScreen(
                 action = "jump-chapter",
                 read = { resolveNavPos("jump-chapter") },
                 commit = ::markPositionChanged,
-            ) { p -> currentHost.neighborChapterStart(p.chapter, direction) }
+            ) { p -> currentHost.neighborChapterStart(p.chapter, direction)?.also { warmPageImages(it) } }
         }
     }
 
     fun seek(fraction: Float) {
+        // 诊断常驻：手指值 vs 落位章对不上（两次远端拖动都落 ch11），W 级防 PGAP  flood 吞行。
+        Logger.w("Orilumn.TAP", "seek finger fraction=$fraction")
         scope.launch {
             anchorFunnel.navigate(
                 action = "seek",
                 read = { resolveNavPos("seek") },
                 commit = ::markPositionChanged,
-            ) { currentHost.pageAtFraction(fraction.toDouble()) }
+            ) { currentHost.pageAtFraction(fraction.toDouble())?.also { warmPageImages(it) } }
+            // 拉到头即进封面（与回翻进封面同口径）：落位首位即清已离开、封面就绪即展示；
+            // 只读，markPositionChanged 已记首位存档，不另存。bmp 未到时 effect 在 openPos
+            // 变化重跑后按新 dismissed 展示；已在首位且 bmp 未到是首开竞态，cover effect 自会收尾。
+            if (fraction <= 0f) {
+                val p = openPos
+                if (p != null && coverStartChapter != null &&
+                    p.chapter == coverStartChapter && p.slice.charStart == 0
+                ) {
+                    coverDismissed = false
+                    if (coverBmp != null) coverVisible = true
+                }
+            }
         }
     }
 
@@ -364,7 +455,7 @@ fun ReaderScreen(
                 action = "open-link",
                 read = { resolveNavPos("open-link") },
                 commit = ::markPositionChanged,
-            ) { currentHost.openLink(target) }
+            ) { currentHost.openLink(target)?.also { warmPageImages(it) } }
         }
         return true
     }
@@ -576,31 +667,43 @@ fun ReaderScreen(
             val pageBackgrounds = remember(pos, contentRevision, hostRevision) {
                 runCatching { currentHost.pageBackgrounds(pos) }.getOrNull()
             }
-            // 插图几何与位图：几何同步取（廉价），位图异步解码后按图缓存；
-            // 翻页（新 pos）即清空旧图，避免旧页图片闪留。
+            // 插图几何与位图：几何同步取（廉价）；位图跨页 LRU 缓存（`imgCache`，与几何无关的
+            // 稳定身份为键），回访页首帧即有图；未命中才异步解码入库。翻页不再清空旧图。
             val pageImages = remember(pos, contentRevision, hostRevision) {
                 runCatching { currentHost.pageImages(pos) }.getOrNull()
             }
-            var imageBitmaps by remember(pos, contentRevision, hostRevision) { mutableStateOf<Map<orilumn.reader.engine.skia.PageImage, ImageBitmap>>(emptyMap()) }
+            var imageBitmaps by remember(pos, contentRevision, hostRevision) {
+                mutableStateOf(pageImages
+                    ?.mapNotNull { img -> imgCache.get(imgKeyOf(img))?.let { img to it } }
+                    ?.toMap(LinkedHashMap()) ?: emptyMap())
+            }
             LaunchedEffect(pos, contentRevision, hostRevision, pageImages) {
                 val imgs = pageImages?.takeIf { it.isNotEmpty() } ?: run {
                     imageBitmaps = emptyMap()
                     return@LaunchedEffect
                 }
+                val missing = imgs.filter { imgCache.get(imgKeyOf(it)) == null }
+                if (missing.isEmpty()) {
+                    // 全命中：首帧已由上面的 remember 直接摆出，无灰闪、无重组。
+                    val full = imgs.mapNotNull { img -> imgCache.get(imgKeyOf(img))?.let { img to it } }
+                        .toMap(LinkedHashMap(imgs.size))
+                    if (full != imageBitmaps) imageBitmaps = full
+                    return@LaunchedEffect
+                }
                 // 并行解码（摄影类一页多图时串行要几秒，全程灰块）：每图一个 async，
                 // 先全部并发再统一收敛，避免逐张 setState 反复重组。
-                val deferred = imgs.map { img ->
+                val deferred = missing.map { img ->
                     async {
                         img to runCatching { currentHost.loadPageImage(img) }.getOrNull()
                     }
                 }
-                val out = deferred.awaitAll()
-                    .mapNotNull { pair -> pair.second?.let { pair.first to it } }
+                for ((img, bmp) in deferred.awaitAll()) {
+                    if (bmp != null) imgCache.put(imgKeyOf(img), bmp)
+                }
+                imageBitmaps = imgs.mapNotNull { img -> imgCache.get(imgKeyOf(img))?.let { img to it } }
                     .toMap(LinkedHashMap(imgs.size))
-                imageBitmaps = out
             }
-            // P3-b 背景图：按 bgKey 去重（同图多盒只解一次），异步解码后按 url 缓存；
-            // 翻页（新 pos）即清空，避免旧页底图闪留。失败项直接缺席（該幅只留底色）。
+            // P3-b 背景图：按 url 跨页缓存（同上）；失败项直接缺席（該幅只留底色），不入库。
             var bgImages by remember(pos, contentRevision, hostRevision) { mutableStateOf<Map<String, orilumn.reader.engine.skia.DecodedImage>>(emptyMap()) }
             LaunchedEffect(pos, contentRevision, hostRevision, pageBackgrounds) {
                 val refs = pageBackgrounds?.mapNotNull { bg ->
@@ -610,16 +713,27 @@ fun ReaderScreen(
                     bgImages = emptyMap()
                     return@LaunchedEffect
                 }
-                val deferred = refs.map { ref ->
+                val cached = refs.mapNotNull { ref ->
+                    bgCache.get(bgKeyOf(ref.first, ref.second))?.let { bgKeyOf(ref.first, ref.second) to it }
+                }.toMap(LinkedHashMap(refs.size))
+                val missing = refs.filter { bgCache.get(bgKeyOf(it.first, it.second)) == null }
+                if (missing.isEmpty()) {
+                    if (cached != bgImages) bgImages = cached
+                    return@LaunchedEffect
+                }
+                val deferred = missing.map { ref ->
                     async {
-                        "${ref.first}|${ref.second}" to runCatching {
+                        bgKeyOf(ref.first, ref.second) to runCatching {
                             currentHost.loadBackgroundImage(ref.first, ref.second)
                         }.getOrNull()
                     }
                 }
-                bgImages = deferred.awaitAll()
-                    .mapNotNull { pair -> pair.second?.let { pair.first to it } }
-                    .toMap(LinkedHashMap(refs.size))
+                for ((key, bmp) in deferred.awaitAll()) {
+                    if (bmp != null) bgCache.put(key, bmp)
+                }
+                bgImages = refs.mapNotNull { ref ->
+                    bgCache.get(bgKeyOf(ref.first, ref.second))?.let { bgKeyOf(ref.first, ref.second) to it }
+                }.toMap(LinkedHashMap(refs.size))
             }
 
             // 画布：行窗口经 LineWindowDrawer 落到 skiko Canvas（见 ReaderPageCanvas）。

@@ -24,9 +24,11 @@ import orilumn.reader.engine.html.MarkupElement
  * @param theme the modern/traditional/user theme stylesheet (reader layer, above the book; empty/null = off).
  * @param settings the per-item reader-settings stylesheet (above theme; empty/null = off).
  * @param ui the reader-app stylesheet (above settings; carries line-height / paragraph spacing).
- * @param gapScale 疏密 (paragraphGapScale): scales the computed top/bottom margin of every block
- *   except `p`/`li` — 作者 css / UA 默认值都被保留, 只被比例调节 (1.0 = 原书排版, 不做改动).
- *   `p`/`li` 的纵边距由 UI 层的 段间距 接管 (替换语义 + 仅 p/li 相邻对，见 [ReaderUiSheet]), 不参与缩放.
+ * @param paragraphScale 段间距 (paragraphSpacingScale): scales the computed top/bottom margin of
+ *   `p`/`li` only (author css / UA / theme values kept, only ratio-adjusted;
+ *   100 = book/theme rhythm, 0 = p/li margins cleared).
+ * @param gapScale 疏密 (paragraphGapScale): scales the computed top/bottom margin of every OTHER
+ *   block (author css / UA defaults kept; 1.0 = original rhythm).
  */
 class StyleComputer(
     private val rootFontPx: Float,
@@ -35,6 +37,7 @@ class StyleComputer(
     theme: StyleSheet? = null,
     settings: StyleSheet? = null,
     ui: StyleSheet? = null,
+    private val paragraphScale: Float = 1f,
     private val gapScale: Float = 1f,
 ) {
     private val cascade = Cascade(ua, authorSheets, theme, settings, ui)
@@ -108,8 +111,8 @@ class StyleComputer(
         /** `display` values treated as block-level for box classification (matches the roadmap). */
         val DISPLAY_BLOCK_VALUES = setOf("block", "list-item", "flex", "grid", "inline-table")
 
-        /** p/li 纵边距归 段间距 (UI 层替换语义，仅 p/li 相邻对) 所有, 疏密 (gapScale) 缩放豁免. */
-        val GAP_SCALE_EXEMPT = setOf("p", "li")
+        /** 段间距只乘算 p/li；其余块走疏密。两滑块分工，互不越界。 */
+        val PARAGRAPH_TAGS = setOf("p", "li")
     }
 
     /** Whether a raw `display` value lays the element out as a block (block/list-item/flex/grid/table*). */
@@ -253,13 +256,17 @@ class StyleComputer(
         // fontFamily/monospace 等派生字段与栈一致（token 无逗号，join 再解析无损）。
         val fams = style.fontFamilies
         if (fams.size == 1 && isGenericFontFamily(fams[0])) {
-            val author = cascade.authorFontFamily(el, ancestors, inline)
+            val authorRaw = cascade.authorFontFamily(el, ancestors, inline)
+            val authorList = authorRaw
                 ?.let { parseFontFamilyList(it) }.orEmpty()
                 .filter { it.isNotBlank() && !it.equals(fams[0], ignoreCase = true) }
-            if (author.isNotEmpty()) {
+            // 只有当作者声明中包含**非通用字体名**时才做兜底合并（把具名字体前置，reader的通用名作为fallback）。
+            // 如果作者声明本身也是通用字体（如 sans-serif），不要把它前置，否则会覆盖 reader 层（theme/UI）的通用字体意图。
+            val hasNamedAuthorFont = authorList.any { !isGenericFontFamily(it) }
+            if (hasNamedAuthorFont && authorList.isNotEmpty()) {
                 val tS = if (probe != null) orilumn.reader.time.platformNowMs() else 0L
                 val merged = computeStyle(
-                    winners + ("font-family" to (author + fams[0]).joinToString(",")),
+                    winners + ("font-family" to (authorList + fams[0]).joinToString(",")),
                     parent,
                     el.tag,
                     normalizeLang(el.attrs["lang"]),
@@ -312,10 +319,11 @@ class StyleComputer(
         val split = CascadeProbe.splitSink
         val tE = if (split != null) orilumn.reader.time.platformNowMs() else 0L
         val rawMargin = parseEdges(w, "margin", "margin-top", "margin-right", "margin-bottom", "margin-left", fontSize, parent.fontSizePx)
-        // 疏密 (gapScale): 调节语义 —— 在 cascade 结果之上按比例缩放 (作者 css / UA 默认值保留, 不替换).
-        // 只动垂直 (top/bottom); p/li 豁免 (其纵边距归 段间距 的替换语义，仅 p/li 相邻对).
-        val margin = if (gapScale != 1f && tag.lowercase() !in GAP_SCALE_EXEMPT) {
-            rawMargin.copy(top = rawMargin.top * gapScale, bottom = rawMargin.bottom * gapScale)
+        // 段间距 (spacingScale): 调节语义 —— 在 cascade 结果之上按比例缩放 (作者 css / UA 默认值保留, 不替换).
+        // 只动垂直 (top/bottom)；p/li 吃段间距，其余吃疏密。
+        val scale = if (tag.lowercase() in PARAGRAPH_TAGS) paragraphScale else gapScale
+        val margin = if (scale != 1f) {
+            rawMargin.copy(top = rawMargin.top * scale, bottom = rawMargin.bottom * scale)
         } else rawMargin
 
         val width = parseBoxSize(w["width"])

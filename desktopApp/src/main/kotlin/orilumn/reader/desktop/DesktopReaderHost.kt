@@ -4,6 +4,7 @@ import orilumn.reader.data.book.BookReadingState
 import orilumn.reader.data.epub.EpubResourceReader
 import orilumn.reader.data.epub.TocItem
 import orilumn.reader.data.epub.ZipEpubResourceReader
+import orilumn.reader.data.settings.BookSettings
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.engine.BookDocumentController
 import orilumn.reader.engine.BoxChapterLayouter
@@ -195,9 +196,15 @@ class DesktopReaderHost(
         }.getOrNull()
     }
 
-    /** 全书第一内容页（只读，不 finalize 临时表）。 */
+    /** 全书第一内容页（**导航**：openChapterStart 落位 + 逐出远章；
+     *  封面页内前进翻页用。判定书首请用 [firstContentChapter]）。 */
     override suspend fun bookStart(): ReaderPos? = withContext(Dispatchers.Default) {
         controller.openChapterStart(0)?.let { ReaderPos(it.first, it.second) }
+    }
+
+    /** 首章正文号（纯查询懒解析转发；无导航副作用，见 ReaderHost.firstContentChapter）。 */
+    override suspend fun firstContentChapter(): Int? = withContext(Dispatchers.Default) {
+        controller.firstContentChapter()
     }
 
     override fun pageLines(pos: ReaderPos): List<DrawLine>? = controller.pageLines(pos.chapter, pos.slice)
@@ -289,6 +296,10 @@ class DesktopReaderHost(
                 return@withContext null
             }
             controller.bindReflow(r)
+            // 参数稳定点（面板外两段式提交，含开书探针回填）：版式指纹真变时
+            // 清全书旧指纹磁盘表；指纹未变（夜间切换等非版式提交）是空操作，
+            // 不误删当前参数下的有效磁盘表。
+            controller.cleanStaleDiskTables()
             controller.requestWholeBookRelayout()
             ReaderPos(r.chapter, r.page)
         }
@@ -307,6 +318,48 @@ class DesktopReaderHost(
         profile = TypographicProfile.build(next, density)
         controller.profile = profile
         topUpSkiaFonts(orilumn.reader.engine.css.FontDemand.EMPTY)
+    }
+
+    /** 设置面板门控（共享收口 PanelRelayoutGate，平板同调）：开抑制 + 关按指纹整书。 */
+    private val panelGate = orilumn.reader.engine.PanelRelayoutGate(controller)
+
+    /** 面板打开：抑制后台 canonical + 快照版式指纹。 */
+    fun setSettingsPanelOpen(open: Boolean) {
+        if (open) panelGate.onPanelOpen()
+    }
+
+    /**
+     * 面板关闭门控全套：版式真变了才 `finalizeRelayoutAll` 并绑定落位，不变回 null。
+     * 调用方（面板 onDismiss）负责推送落位。
+     */
+    suspend fun finalizePanelSettings(chapter: Int, anchorChar: Int): ReaderPos? =
+        withContext(Dispatchers.Default) {
+            val r = panelGate.onPanelClose(chapter, anchorChar) ?: return@withContext null
+            controller.bindReflow(r)
+            ReaderPos(r.chapter, r.page)
+        }
+
+    /**
+     * 原书主题提交探针（用户层·壳，与平板 `withBookStyle` 同调共享收口）。
+     *
+     * 面板 `commitBook` 到达时已是 `withLayoutTheme(original)` 后的中性值，此处按当前章
+     * 真实排版回填首行缩进/行距后再持久化；非 original / 无定位一律原样返回。
+     */
+    fun probeOriginalTheme(next: ReaderSettings, chapter: Int): ReaderSettings =
+        controller.probeOriginalTheme(chapter, profile.bodyPx, next)
+
+    /**
+     * 首次开书探针（用户层·壳，与平板开书收口同调共享 `probeOriginalOnOpen`）。
+     *
+     * 默认原书主题开书时，按落位章回填本书未钉的缩进/行距；调用方（视图）负责 bookOnly
+     * 持久化 + 设置状态更新（重排 effect 随后自动轻刷）。已钉/非原书原样返回。
+     */
+    suspend fun probeOriginalOnOpen(
+        settings: ReaderSettings,
+        overlay: BookSettings,
+        chapter: Int,
+    ): ReaderSettings = withContext(Dispatchers.Default) {
+        controller.probeOriginalOnOpen(chapter, profile.bodyPx, settings, overlay)
     }
 
     /**

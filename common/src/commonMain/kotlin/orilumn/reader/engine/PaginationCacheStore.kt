@@ -90,6 +90,30 @@ class PaginationCacheStore(
         for (f in files) runCatching { fs.delete(f) }
     }
 
+    /** Deletes the book's pagination-table files orphaned by a layout-parameter
+     *  change: every `<chapterIndex>_<paramHash>.bin` whose hash differs from
+     *  [keepHash] (the running params' [LayoutParamKey] fingerprint). Pure
+     *  filename filter — no table reads, so it is cheap and idempotent.
+     *  Files matching [keepHash] **stay**: they are valid for the running params
+     *  (a previous session with identical params is a disk hit, and a settings
+     *  revert re-hits them) — unlike [cleanBookAll], which wipes those too. */
+    fun cleanStaleParams(bookId: String, keepHash: Long): Int {
+        val dir = rootDir.resolve("pagination/$bookId")
+        val files = runCatching { fs.list(dir) }
+            .onFailure { Logger.w("Orilumn.DISK", "pagination clean-stale list FAIL $dir ${it.message}") }
+            .getOrNull()
+            ?.filter { it.name.endsWith(".bin") }
+            ?: return 0
+        val suffix = "_$keepHash.bin"
+        var deleted = 0
+        for (f in files) {
+            if (f.name.endsWith(suffix)) continue
+            if (runCatching { fs.delete(f) }.isSuccess) deleted++
+        }
+        if (deleted > 0) Logger.w("Orilumn.DISK", "pagination clean-stale book=$bookId keepHash=$keepHash deleted=$deleted")
+        return deleted
+    }
+
     /** Deletes every table file in the book's directory that no longer decodes under the current
      *  build (older schema/geometry/build, or corruption). Same-hash files from the running build
      *  are untouched; different-parameter-hash files from the running build are live history (a
@@ -111,5 +135,19 @@ class PaginationCacheStore(
         }
         if (deleted > 0) Logger.w("Orilumn.DISK", "pagination sweep book=$bookId deleted=$deleted kept=${files.size - deleted}")
         return deleted
+    }
+
+    /** Deletes all pagination-table files for the entire book regardless of chapter/paramHash. */
+    fun cleanBookAll(bookId: String) {
+        val dir = rootDir.resolve("pagination/$bookId")
+        val files = runCatching { fs.list(dir) }
+            .onFailure { Logger.w("Orilumn.DISK", "pagination clean list FAIL $dir ${it.message}") }
+            .getOrNull()
+            ?.filter { it.name.endsWith(".bin") }
+            ?: return
+        for (f in files) {
+            runCatching { fs.delete(f) }
+                .onFailure { Logger.w("Orilumn.DISK", "pagination clean delete FAIL $f ${it.message}") }
+        }
     }
 }

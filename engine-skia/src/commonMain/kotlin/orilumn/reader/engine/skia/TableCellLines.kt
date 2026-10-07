@@ -189,8 +189,6 @@ object TableCellLines {
         var charAcc = 0
         for (b in blocks) {
             val shape = b.shape ?: continue
-            val text = shape.shapeText
-            if (text.isEmpty()) continue
             val bs = b.style
             val blockTag = b.el.tag
             val baseSize = shape.shapeFontSizePx.takeIf { it > 0f } ?: bs.fontSizePx
@@ -198,6 +196,34 @@ object TableCellLines {
             val lineW = (cellContentW - b.edgeH).coerceAtLeast(1)
             val nowrap = !WhiteSpaceNormalize.wraps(bs.whiteSpace)
             val yBlock = rowTop + insetTop + b.top
+            // 独图块（块级 img 的 replaceable 形，如 `img{display:block}` 书的 td>img）：无文本行，
+            // 不进下面的占位配对（shape 文本为空），直接按 used 落图（与正文独图叶同口径；
+            // x 独占即块左，y 取块顶；高度塑形侧 replaceableBottom 已进预算，两侧同值）。
+            // 必须在空文本跳过之前 —— replaceable 形恒无 shape 文本。
+            if (shape.isReplaceable && b.el.tag == "img") {
+                // 槽位照占（块 textLength 恒 1，与行级 rowChars / 轻路径计槽同账），再看能不能落图。
+                charAcc += b.textLength
+                val src = b.el.attrs["src"]
+                if (imageLoader == null || chapterHref.isBlank() || src == null) continue
+                val imgStyle = styleOf(b.el) ?: bs
+                val used = NormalFlowLayout.replacedUsedSize(b.el, imgStyle, lineW, imageLoader, chapterHref)
+                val w = used.first.coerceAtLeast(1)
+                val h = used.second.coerceAtLeast(1)
+                images.add(
+                    PageImage(
+                        src = src,
+                        chapterHref = chapterHref,
+                        xLeft = xLeft,
+                        yTop = yBlock,
+                        yBottom = yBlock + h,
+                        widthPx = w,
+                        heightPx = h,
+                    ),
+                )
+                continue
+            }
+            val text = shape.shapeText
+            if (text.isEmpty()) continue
             val hidden = emitCellImages(b, text, shape, bs, styleOf, yBlock, xLeft, lineW, imageLoader, chapterHref, images)
             for (k in 0 until shape.shapeLineCount) {
                 val s = shape.shapeLineStart(k)

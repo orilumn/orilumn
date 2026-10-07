@@ -128,9 +128,15 @@ class TabletReaderHost(
         }.getOrNull()
     }
 
-    /** 全书第一内容页（只读，不 finalize 临时表）。 */
+    /** 全书第一内容页（**导航**：openChapterStart 落位 + 逐出远章；
+     *  封面页内前进翻页用。判定书首请用 [firstContentChapter]）。 */
     override suspend fun bookStart(): ReaderPos? = withContext(Dispatchers.IO) {
         controller.openChapterStart(0)?.let { ReaderPos(it.first, it.second) }
+    }
+
+    /** 首章正文号（纯查询懒解析转发；无导航副作用，见 ReaderHost.firstContentChapter）。 */
+    override suspend fun firstContentChapter(): Int? = withContext(Dispatchers.IO) {
+        controller.firstContentChapter()
     }
 
     override fun pageLines(pos: ReaderPos): List<DrawLine>? = controller.pageLines(pos.chapter, pos.slice)

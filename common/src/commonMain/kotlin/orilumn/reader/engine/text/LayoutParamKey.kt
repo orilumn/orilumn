@@ -21,7 +21,7 @@ data class LayoutParamKey(
     val firstLineIndentEm: Float,
     val letterSpacingEm: Float,
     val cjkLatinSpacingEm: Float = 0f,
-    val paragraphSpacingPx: Int,
+    val paragraphSpacingScale: Float,
     val paragraphGapScale: Float,
     val fontBody: String,
     val fontTitle: String,
@@ -59,7 +59,7 @@ data class LayoutParamKey(
         crc = Crc32.update4(crc, lineSpacing.bits())
         crc = Crc32.update4(crc, firstLineIndentEm.bits())
         crc = Crc32.update4(crc, letterSpacingEm.bits())
-        crc = Crc32.update4(crc, paragraphSpacingPx.bits())
+        crc = Crc32.update4(crc, paragraphSpacingScale.bits())
         crc = Crc32.update4(crc, paragraphGapScale.bits())
         crc = Crc32.updateString(crc, fontBody)
         crc = Crc32.updateString(crc, fontTitle)
@@ -129,7 +129,7 @@ data class LayoutParamKey(
             // 「有间隙」算行宽去命中磁盘表、却按「无间隙」画 ⇒ 量画失配（教训 ⑩）。
             // 本形参 `inhouseBreak` 的默认值已经读过开关，这里复用同一个闸门，两者恒一致。
             cjkLatinSpacingEm = if (inhouseBreak) profile.cjkLatinSpacingEm else 0f,
-            paragraphSpacingPx = profile.paragraphSpacingPx,
+            paragraphSpacingScale = profile.paragraphSpacingScale,
             paragraphGapScale = profile.paragraphGapScale,
             fontBody = profile.fontBody,
             fontTitle = profile.fontTitle,

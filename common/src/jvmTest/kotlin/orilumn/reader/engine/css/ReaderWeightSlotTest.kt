@@ -46,8 +46,7 @@ class ReaderWeightSlotTest {
         codeScale = 0.92f,
         lineSpacing = 1.3f,
         lineSpacingMult = 1.3f,
-        paragraphSpacingPx = 13,
-        firstLineIndentEm = 0f,
+                firstLineIndentEm = 0f,
         fgColor = 0xFF2B2B2B.toInt(),
         bgColor = 0xFFF4F2EC.toInt(),
         quoteColor = 0xFF2B2B2B.toInt(),
@@ -58,7 +57,7 @@ class ReaderWeightSlotTest {
         useOriginalStyle = false,
         layoutTheme = "modern",
         coverStretch = false,
-        paragraphGapScale = 1f,
+        paragraphSpacingScale = 1f, paragraphGapScale = 1f,
         letterSpacingEm = 0f,
     )
 

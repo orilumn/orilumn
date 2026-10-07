@@ -28,12 +28,12 @@ class ShapeGeometryEquivalenceTest {
 
     private fun profile() = TypographicProfile(
         bodyPx = 16f, headingScale = 1.4f, quoteScale = 1f, codeScale = 0.92f,
-        lineSpacing = 1f, lineSpacingMult = 1f, paragraphSpacingPx = 0, firstLineIndentEm = 2f,
+        lineSpacing = 1f, lineSpacingMult = 1f, firstLineIndentEm = 2f,
         fgColor = Color.BLACK, bgColor = Color.WHITE, quoteColor = Color.GRAY,
         marginLeft = 0, marginRight = 0, marginTop = 0, marginBottom = 0,
         fontBody = "", fontTitle = "", fontCode = "", useOriginalStyle = true,
         layoutTheme = "original",
-        coverStretch = true, paragraphGapScale = 1f, letterSpacingEm = 0f,
+        coverStretch = true, paragraphSpacingScale = 1f, paragraphGapScale = 1f, letterSpacingEm = 0f,
     )
 
     private fun cascadeFor(root: MarkupElement, authorCss: String = "") =

@@ -540,7 +540,7 @@ class BoxChapterLayouter(
             else -> themeSheetFromProfile(profile)
         }
         val settings = settingsSheet
-        return StyleComputer(profile.bodyPx, ua, sheets, theme, settings, ui, gapScale = profile.paragraphGapScale)
+        return StyleComputer(profile.bodyPx, ua, sheets, theme, settings, ui, paragraphScale = profile.paragraphSpacingScale, gapScale = profile.paragraphGapScale)
     }
 
     /** Assembles a [ChapterPrepareResult] from a cascade + box tree, computing global char starts. */
@@ -1189,6 +1189,19 @@ class BoxChapterLayouter(
     /** Local FlowedLine builder for a contiguous range of leaves. Uses [leaf.contentTop] /
      *  [leaf.contentBottom] from prepare to compute inter-block gaps, so the y geometry is correct
      *  without needing to shape the preceding blocks. */
+    /** 文本叶（`el` 为 `#text` 匿名块）的**自身边**为 0：轻路径按约定给文本叶盒
+     *  继承容器样式（`LightPrepare.blockStyleFor`），而容器底边已由
+     *  [orilumn.reader.engine.laying.NormalFlowLayout.consecutiveLeafAdvance] 的
+     *  A 侧祖先链（`pathA[1..ia-1]`，含直接父容器）计入块间 advance——叶自身边
+     *  再计一次即重复（真书 `h2{padding-bottom:6rem}` 的章标题→正文间距被翻倍，
+     *  TEMP/WIN 路径相对 FULL/emit 路径漂移）。元素叶（p/img/表行）自身边不在
+     *  advance 里，照常计入；悬浮叶不在此列（浮部分支 spanEnd 取容器盒自身边距）。
+     *  与重路径 `BoxLayouter.layoutBoxes` 给文本叶盒清零盒属性（padding/margin/border
+     *  为 0、仅继承字体属性）的约定同效——重路径 emit 叶分支 `s = box.style` 因此
+     *  对文本叶加 0 边，容器边由容器分支恰好加一次。 */
+    private fun ownBottomEdges(leaf: LayoutBox): Int =
+        if (leaf.el?.isText == true) 0 else (leaf.style.padding.bottom + leaf.style.border.bottom).roundToInt()
+
     private fun rebuildLocalLines(
         prepare: LightPrepare,
         blockLo: Int,
@@ -1408,7 +1421,7 @@ class BoxChapterLayouter(
             prevLastLineYBottom = cumY
             // Mirror emit(): a leaf's contentBottom = last line bottom + its vertical padding/border.
             prevBlock = leaf
-            prevContentBottom = cumY + (leaf.style.padding.bottom + leaf.style.border.bottom).roundToInt()
+            prevContentBottom = cumY + ownBottomEdges(leaf)
             // P6-a2: 实高行底记账（回填不上越它；与重路径同式）。
             if (prevContentBottom > y + (leaf.style.border.top + leaf.style.padding.top).roundToInt()) {
                 lastTextBottom = maxOf(lastTextBottom, prevContentBottom)
@@ -1479,7 +1492,7 @@ class BoxChapterLayouter(
                 // span rebuildLocalLines now gives between prev's last line and this leaf's first line
                 // (which sits at contentTop + this leaf's top border/padding). Mirrors heavy pagination,
                 // which counts a pre block's top padding in its occupied page height.
-                acc += (prevLeaf.style.padding.bottom + prevLeaf.style.border.bottom).roundToInt() + advance +
+                acc += ownBottomEdges(prevLeaf) + advance +
                     (thisLeaf.style.border.top + thisLeaf.style.padding.top).roundToInt()
             }
             firstInPage = false
@@ -1557,7 +1570,7 @@ class BoxChapterLayouter(
                 // span rebuildLocalLines now gives between prev's last line and this leaf's first line
                 // (which sits at contentTop + this leaf's top border/padding). Mirrors heavy pagination,
                 // which counts a pre block's top padding in its occupied page height.
-                acc += (prevLeaf.style.padding.bottom + prevLeaf.style.border.bottom).roundToInt() + advance +
+                acc += ownBottomEdges(prevLeaf) + advance +
                     (thisLeaf.style.border.top + thisLeaf.style.padding.top).roundToInt()
             }
             firstInPage = false
@@ -1644,7 +1657,7 @@ class BoxChapterLayouter(
                 // Inter-block gap between b and b+1 = b's bottom edges + margin collapse + the block
                 // below's own top edges (its first line sits at contentTop + its top border/padding after
                 // the rebuildLocalLines fix). Mirrors heavy pagination counting a padded block's top padding.
-                acc += (leaf.style.padding.bottom + leaf.style.border.bottom).roundToInt() + advance +
+                acc += ownBottomEdges(leaf) + advance +
                     (belowLeaf.style.border.top + belowLeaf.style.padding.top).roundToInt()
             }
             firstInPage = false

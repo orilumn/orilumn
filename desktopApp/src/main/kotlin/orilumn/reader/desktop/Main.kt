@@ -1,5 +1,6 @@
 package orilumn.reader.desktop
 
+import orilumn.reader.data.settings.BookSettings
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.data.settings.ReaderSettingsStore
 import orilumn.reader.data.settings.BookSettingsStore
@@ -125,6 +126,8 @@ private fun DesktopRoot(store: DesktopShelfStore) {
     val scope = rememberCoroutineScope()
 
     var settings by remember { mutableStateOf(settingsStore.load()) }
+    // 本书原始私有层（首次开书探针判“钉没钉过”用；随书加载，见下）。
+    var bookOverlay by remember { mutableStateOf(BookSettings.EMPTY) }
     var customs by remember { mutableStateOf(emptyList<ThemePreset>()) }
     var openBook by remember { mutableStateOf<ShelfBook?>(null) }
     // DB 打开是挂起调用：首帧组合先于 LaunchedEffect 执行，直接挂 App 会让
@@ -155,6 +158,7 @@ private fun DesktopRoot(store: DesktopShelfStore) {
     LaunchedEffect(openBook) {
         val b = openBook
         settings = withContext(Dispatchers.IO) { settingsPersist.effectiveFor(b?.id) }
+        bookOverlay = withContext(Dispatchers.IO) { settingsPersist.overlayFor(b?.id) }
     }
 
     if (openBook == null) {
@@ -177,6 +181,7 @@ private fun DesktopRoot(store: DesktopShelfStore) {
             book = book,
             store = store,
             settings = settings,
+            bookOverlay = bookOverlay,
             customs = customs,
             onBack = { openBook = null },
             onSettingsChange = { persistSettings(it) },

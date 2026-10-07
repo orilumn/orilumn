@@ -222,4 +222,26 @@ class TableCellBlocksTest {
     fun `empty cell yields no blocks`() {
         assertTrue(blocksOf("<table><tr><td></td></tr></table>").isEmpty())
     }
+
+    @Test
+    fun `block level img cell keeps one object replacement slot`() {
+        // Rust 简介 Ferris 表：书 `img{display:block}` 使 `<td><img></td>` 成块级独图块；吸收按
+        // img 根早退得 ""，此处必须补一个 U+FFFC 槽 —— 否则重路径字符少 1（与轻路径计 1 漂移，
+        // 整章 char 基址错位），且绘制侧无槽可配整块丢图。行内 img 不受影响（仍是匿名 run 内占位）。
+        val (root, styles, classify) = setup(
+            "<table><tr><td><img src=\"a.png\" width=\"60\"/></td><td>文</td></tr></table>",
+            "img{display:block}",
+        )
+        val cell = firstCell(root)
+        val bs = NormalFlowLayout.cellBlocks(cell, styles, classify, { styles[it]?.displayNone == true })
+        assertEquals(1, bs.size)
+        assertEquals("img", bs[0].el.tag)
+        assertEquals("\uFFFC", bs[0].text)
+        assertEquals(1, bs[0].textLength)
+        // 轻路径同口径：独图计 1 槽，重轻字符必须同账。
+        val light = NormalFlowLayout.styledCharAdvance(
+            cell, { styles.getValue(it) }, classify, { styles[it]?.displayNone == true })
+        assertEquals(light, bs.sumOf { it.textLength }.toLong())
+        assertEquals(1L, light)
+    }
 }

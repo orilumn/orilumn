@@ -48,7 +48,6 @@ import orilumn.reader.data.settings.ReaderSettingsStore
 import orilumn.reader.engine.AbSwitch
 import orilumn.reader.engine.BookDocumentController
 import orilumn.reader.engine.BookFileResolver
-import orilumn.reader.engine.text.LayoutParamKey
 import orilumn.reader.engine.text.SystemCjkSerif
 import orilumn.reader.engine.text.TypographicProfile
 import orilumn.reader.engine.skia.SkiaFontPool
@@ -130,7 +129,7 @@ class ReaderActivity : ComponentActivity() {
     private lateinit var fontImportLauncher: ActivityResultLauncher<Array<String>>
 
     /** 面板打开时的排版指纹；关闭时变化 → 全书 canonical 重排。 */
-    private var panelBaseHash = 0L
+    private var panelGate: orilumn.reader.engine.PanelRelayoutGate? = null
 
     /** 顶/底栏显隐（[ReaderScreen] 经 onBarsVisibleChanged 回抛，驱动系统栏 chrome）。 */
     private var barsVisible by mutableStateOf(false)
@@ -155,6 +154,8 @@ class ReaderActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         // 日志根改由 AppRoot 注入（幂等、只首次生效；直启阅读页时 MainActivity 可能没跑过，此处兜底）。
         AppRoot.init(filesDir.absolutePath.toPath(), FileSystem.SYSTEM)
+        // 崩溃落盘（幂等；直启阅读页同样需要，否则该路径的崩溃无堆栈）。
+        orilumn.reader.engine.CrashLog.install(filesDir)
         // R28：平台差异留在平台层——引擎侧只认 AbSwitch 的取值，不认识 intent。
         // 必须在开书之前写；此处早于任何 layout 触发。格式见 AbSwitch.apply 的 KDoc。
         AbSwitch.apply(intent?.getStringExtra(EXTRA_AB_SPEC))
@@ -268,6 +269,8 @@ class ReaderActivity : ComponentActivity() {
         }
         if (loaded != null) {
             engine = loaded
+            // 面板门控与引擎同寿命（共享收口 PanelRelayoutGate，桌面同调）。
+            panelGate = orilumn.reader.engine.PanelRelayoutGate(loaded)
             Logger.w(TAG, "open ok chapters=${loaded.chapterCount}")
         } else {
             openFailed = true
@@ -323,6 +326,20 @@ class ReaderActivity : ComponentActivity() {
 
             val snapshot = remember(tabletHost) {
                 tabletHost?.let { SnapshotReaderHost(it) { pos -> currentPos = pos } }
+            }
+            // 首次开书收口（与桌面同调，共享 probeOriginalOnOpen）：默认原书主题开书时，
+            // 落位即按落位章回填未钉的缩进/行距并 bookOnly 持久 + 轻刷；已钉/非原书直接跳过。
+            // 每本书一次（overlay 落 pin 后共享门控自停）。
+            var probedOpenBook by remember { mutableStateOf(-1L) }
+            LaunchedEffect(currentPos) {
+                val p = currentPos ?: return@LaunchedEffect
+                if (probedOpenBook == bookId) return@LaunchedEffect
+                probedOpenBook = bookId
+                val c = engine ?: return@LaunchedEffect
+                val probed = withContext(Dispatchers.Default) {
+                    c.probeOriginalOnOpen(p.chapter, profile.bodyPx, effective, bookSettingsStore.load(bookId))
+                }
+                if (probed != effective) commitSettings(probed, typographyChanged = true, bookOnly = true)
             }
             if (snapshot != null) {
                 ReaderScreen(
@@ -391,6 +408,8 @@ class ReaderActivity : ComponentActivity() {
                     if (next != customThemes) { persistCustomThemes(next); customThemes = next }
                 },
                 readSystemBrightness = { readSystemBrightnessPercent().roundToInt() },
+                // 无物理键盘不画焦点行背景（蓝牙键盘接上即恢复，configuration 活查）。
+                hasKeyboard = resources.configuration.keyboard != android.content.res.Configuration.KEYBOARD_NOKEYS,
                 onFontHide = { ids ->
                     lifecycleScope.launch {
                         val fam = familyOfFontIds(ids)
@@ -439,10 +458,9 @@ class ReaderActivity : ComponentActivity() {
         settingsOpen = true
         loadPanelFonts()
         applySystemBars()
-        // 面板开时抑制后台 canonical 全章重排（避免与前台实时 temp 塑形抢 CPU）；关闭时若排版真实
-        // 变化再整书重跑（捕获指纹判定）。
-        engine?.deferCanonical = true
-        panelBaseHash = typographHash()
+        // 面板开抑制 + 关门控走共享收口（PanelRelayoutGate，桌面同调）；关闭时若排版真实
+        // 变化再整书重跑（门控内指纹判定）。
+        panelGate?.onPanelOpen()
         Logger.w(TAG, "open settings panel")
     }
 
@@ -450,17 +468,10 @@ class ReaderActivity : ComponentActivity() {
         settingsOpen = false
         applySystemBars()
         val c = engine
-        c?.deferCanonical = false
-        val before = panelBaseHash
-        val after = typographHash()
-        // 关面板事件无条件落盘（变与不变都记）——"改参关面板没反应"先查这条再查引擎。
-        Logger.w(TAG, "close settings panel typographHash $before -> $after changed=${before != after}")
-        // 消费本次 diff：遮罩连点/返回键竞态会导致 onDismiss 重入；不消费则第二次关闭
-        // 看到同样的 diff 而再跑一遍整书重排（20:36 双关即此）。
-        panelBaseHash = after
-        if (c != null && after != before) {
-            Logger.w(TAG, "close settings panel -> typography changed, whole-book relayout")
-            // 先停掉实时节流循环并等其当前迭代落位，避免两趟后台塑形并发作用于同一章。
+        val gate = panelGate
+        if (c != null && gate != null) {
+            // 先停掉实时节流循环并等其当前迭代落位，避免两趟后台塑形并发作用于同一章；
+            // 整书重跑与否由共享门控按指纹判定（含重入消费，第二次关闭不再跑）。
             relayoutPending = false
             val liveLoop = relayoutJob
             val p = currentPos
@@ -468,17 +479,16 @@ class ReaderActivity : ComponentActivity() {
             val anchor = p?.slice?.charStart ?: 0
             lifecycleScope.launch(Dispatchers.Default) {
                 liveLoop?.join()
-                val r = c.finalizeRelayoutAll(ch, anchor)
-                withContext(Dispatchers.Main) {
-                    if (r != null) applyReflowResult(c, r)
+                val r = gate.onPanelClose(ch, anchor)
+                if (r != null) {
+                    Logger.w(TAG, "close settings panel -> typography changed, whole-book relayout")
+                    withContext(Dispatchers.Main) {
+                        applyReflowResult(c, r)
+                    }
                 }
             }
         }
     }
-
-    /** 排版敏感设置指纹（宽度/高度为固定输入，这里只看排版是否变化）。 */
-    private fun typographHash(): Long =
-        LayoutParamKey.fromProfile(engine?.profile ?: profile, 0, 0).hash()
 
     // ---- Settings panel font/theme platform seams (shell-owned) ----
 
@@ -643,7 +653,11 @@ class ReaderActivity : ComponentActivity() {
                 if (relayoutPending) delay(RELAYOUT_INTERVAL_MS)
             }
             relayoutScheduled = false
-            // 参数稳定点：节流循环结束后以最终稳定参数重派整书（B2）剩余章扫描（controller 对过期 epoch 空转）。
+            // 参数稳定点：版式指纹真变（面板外提交——开书探针回填/原书设置
+            // 提交/字体回退）时清全书旧指纹磁盘表；指纹未变（夜间切换等
+            // 非版式提交）是空操作，不误删当前参数下的有效磁盘表。B2 随后
+            // 按新指纹逐章重写。
+            engine?.cleanStaleDiskTables()
             engine?.requestWholeBookRelayout()
             relayoutJob = null
         }
@@ -694,8 +708,14 @@ class ReaderActivity : ComponentActivity() {
 
     /** 字库刷新 + 按需重排（onResume 与面板内增删共用）：集合不变直接跳过。 */
     private fun refreshFontsAndRelayout() {
-        lifecycleScope.launch {
-            if (refreshSkiaFonts() && engine != null) scheduleRelayout()
+        lifecycleScope.launch(Dispatchers.Default) {
+            if (refreshSkiaFonts() && engine != null) {
+                // 字体集合真变：度量不进版式指纹，旧磁盘表按指纹清理抓不到
+                // （同指纹文件的几何已旧）——「字体修改必须删旧表」，全清后
+                // 由 B2 逐章重写。
+                engine?.cleanAllDiskTables()
+                scheduleRelayout()
+            }
         }
     }
 
@@ -865,14 +885,15 @@ class ReaderActivity : ComponentActivity() {
 
 
     /**
-     * 切到原书设置时，把当前章节的真实排版（首行缩进/段间距/行距）快照进预设的滑块值
+     * 切到原书设置时，把当前章节的真实排版（首行缩进/行距）快照进预设的滑块值
      * （2em 缩进的书滑块就是 2），再走正常提交 + 增量排版。探测失败原样返回。
      */
     private fun ReaderSettings.withBookStyle(): ReaderSettings {
         if (layoutTheme != "original") return this
         val c = engine ?: return this
         val p = currentPos ?: return this
-        return c.snapshotBookStyle(p.chapter, profile.bodyPx, this)
+        // 共享收口（与桌面同调）：见 BookDocumentController.probeOriginalTheme。
+        return c.probeOriginalTheme(p.chapter, profile.bodyPx, this)
     }
 
     companion object {

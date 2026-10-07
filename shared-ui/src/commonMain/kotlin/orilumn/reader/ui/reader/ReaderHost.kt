@@ -107,9 +107,24 @@ interface ReaderHost {
 
     /**
      * 全书第一内容页（封面页的后一页判定 + 前进落位用；失败回 null）。
-     * 只读查询，不碰临时表（与 chapterStart 的 finalize 语义不同）。默认 null。
+     *
+     * **导航**（不是只读查询）：`openChapterStart(0)` 逐章排版、落位
+     * 首内容章并 `evictFarChapters` 逐出 ±30 窗外的远章。旧 KDoc
+     * 误写「只读查询，不碰临时表」——封面 effect 据此调用，续读位在
+     * 深处时把正在渲染的远章逐出 → 白屏（见 [firstContentChapter] 与
+     * FirstContentChapterProbeTest）。只用于真正需要落位的路径
+     * （如封面页内前进翻页）；判定书首请用无副作用的 [firstContentChapter]。
      */
     suspend fun bookStart(): ReaderPos? = null
+
+    /**
+     * 全书第一个含正文章的下标（**纯查询，懒解析**：无落位、无排版、
+     * 无逐出；仅 markup 结构解析。缓存未命中时从章 0 起找首个含正文
+     * 章——在宿主后台线程执行）。封面层判定「当前是否书首」用——
+     * 严禁用 [bookStart] 替代（那是导航，续读位在书首 ±30 章之外
+     * 时会逐出正在渲染的远章 → 白屏）。
+     */
+    suspend fun firstContentChapter(): Int?
 }
 
 /**

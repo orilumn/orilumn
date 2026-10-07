@@ -599,9 +599,9 @@ class CjkLatinSpacingWiringTest {
     fun `跨行边界的间隙本行不画 西文那头在下一行时宽度为0`() {
         val text = "A中A中"
         val fs = 40f
-        val paragraphGaps = CjkLatinSpacing.gaps(text, GAP)
-        assertEquals("整段上有三个间隙（每对相邻字都是中西边界）", 3, paragraphGaps.size)
-        assertEquals("依次落在 0/1/2", listOf(0, 1, 2), paragraphGaps.map { it.leftIndex })
+        val paragraphSpacings = CjkLatinSpacing.gaps(text, GAP)
+        assertEquals("整段上有三个间隙（每对相邻字都是中西边界）", 3, paragraphSpacings.size)
+        assertEquals("依次落在 0/1/2", listOf(0, 1, 2), paragraphSpacings.map { it.leftIndex })
 
         // 行 = [0,2) = 「A中」，其末字 `中`(1) 的右邻 `A`(2) 在下一行。
         val s = 0

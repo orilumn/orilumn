@@ -128,6 +128,8 @@ fun shapeGeometry(
         },
         el, styles, classify ?: BlockClassify(isBlock), hidden,
         widthPx, imageLoader, chapterHref,
+        // 轻路径窗口化表缺块级子树后代（表格内图）：经级联懒算真样式，不崩。
+        resolveStyle = ancestorStyleOf,
     )
     // Whole-paragraph single-style break (canonical semantics): code-like blocks resolve mono
     // exactly like the skia font stack ([SkParagraphFactory] CODE_TAGS rule).

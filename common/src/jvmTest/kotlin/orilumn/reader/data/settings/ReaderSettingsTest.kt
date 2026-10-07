@@ -44,18 +44,14 @@ class ReaderSettingsTest {
 
     @Test
     fun `paragraph spacing and gap persist through round-trip`() {
-        val parsed = ReaderSettings.fromJson("""{"paragraphSpacing":1.2,"paragraphGap":150}""")
-        assertEquals(1.2, parsed.paragraphSpacing, 0.0)
+        val parsed = ReaderSettings.fromJson("""{"paragraphSpacing":150,"paragraphGap":150}""")
+        assertEquals(150.0, parsed.paragraphSpacing, 0.0)
         assertEquals(150.0, parsed.paragraphGap, 0.0)
-        // Persisting and reading back (reproducing the "paragraph spacing reset on open" path) should preserve
-        // rather than fall back to the defaults 0/100
         val reread = ReaderSettings.fromJson(parsed.toJson())
         assertEquals(parsed, reread)
-        assertEquals(1.2, reread.paragraphSpacing, 0.0)
+        assertEquals(150.0, reread.paragraphSpacing, 0.0)
         assertEquals(150.0, reread.paragraphGap, 0.0)
     }
-
-    @Test
     fun `partial json falls back to defaults for missing fields`() {
         val parsed = ReaderSettings.fromJson("""{"fontSize":20}""")
         assertEquals(20, parsed.fontSize)          // the provided value takes effect

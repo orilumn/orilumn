@@ -3,6 +3,7 @@ package orilumn.reader.engine
 import orilumn.reader.collections.SyncLock
 import orilumn.reader.collections.withLock
 import orilumn.reader.data.book.BookReadingState
+import orilumn.reader.data.settings.BookSettings
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.time.platformNowMs
 import orilumn.reader.data.epub.EpubResourceReader
@@ -121,6 +122,14 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
     /** 书内字体字节缓存（归一化 href → 去混淆后字节；null＝不可用，记得住不再试）。 */
     private val bookFontBytesCache = HashMap<String, ByteArray?>()
 
+    /** 版式指纹基线：上次磁盘清理时的 [currentParamHash]（构造时按初始 profile 钉底，
+     *  [setViewport] 注入真实视口后经 [cleanStaleDiskTables] 推进）。
+     *  [cleanStaleDiskTables] 只在指纹偏离基线时才动磁盘：非版式提交（夜间模式
+     *  切换、开书探针回填后与存量参数一致）零误删；换字体/调参/探针真回填
+     *  新值（指纹变）才清旧指纹磁盘表。声明在 [init] 之前：基线在构造时钉底。 */
+    @Volatile
+    private var cleanBaselineParamHash: Long = 0L
+
     /**
      * P2-b: 章节书内字体（`@font-face` → 相对源 href 解析 → zip 取字节 →
      * IDPF 去混淆 → 魔数校验）。缺 CSS/无引用即空表；坏字体跳过并记日志，永不崩版式。
@@ -173,6 +182,12 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
             // with imageLoader in its constructor (passed from ReaderActivity), so nothing to do
             // here — but this init block documents the intent.
         }
+        // 指纹基线钉底：构造时 profile 已知、视口未注入（0→内容盒钳 16px，
+        // 是幻影指纹）；宿主紧随构造调 setViewport 注入真实视口，指纹随之
+        // 偏离基线 —— 那次清理因 bookId 尚未设置（<0）不动磁盘，只把基线
+        // 推进到真实指纹。此后开书探针回填/字体变更等面板外提交才谈得上
+        // 「指纹真变 vs 一致」。
+        cleanBaselineParamHash = currentParamHash()
     }
 
     private val parser = EpubParser()
@@ -263,7 +278,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
     @Volatile
     private var openGateWantsB2: Boolean = false
 
-    /** **翻页方向记录**（原则 §3.2）：`+1` 上次向前翻页、`−1` 上次向后翻页、`0` **无记录**。
+        /** **翻页方向记录**（原则 §3.2）：`+1` 上次向前翻页、`−1` 上次向后翻页、`0` **无记录**。
      *
      *  写入：
      *  - 翻页入口 [findAdjacentPage] 记当次 `direction`；[nextPageInChapter] / [prevPageInChapter]
@@ -448,6 +463,48 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
         return true
     }
 
+    // ─────────────────────────────────────────────────────────────
+    // 首章正文号（封面层判定书首的纯查询原料）
+    // ─────────────────────────────────────────────────────────────
+
+    /**
+     * 全书第一个「含正文」章的下标（章 0 常是无文本的封面/标题页）。
+     *
+     * 封面层（ReaderScreen 封面 effect）只用它判定「当前是否落在书首」。
+     * 历史上封面层调 `bookStart()`——实现是 `openChapterStart(0)` **导航**：
+     * 逐章排版 + 落位首内容章 + `evictFarChapters(keep=首章, window=30)`
+     * 逐出窗外远章；续读位在书首 ±30 章之外（真机：长生界 ch=89）时，
+     * **正在渲染的续读章被逐出**，而封面丢弃落位结果、阅读面仍按续读位
+     * 取页 → `pageLines` 的 `unit.layout` 为 null → 整页空白（白屏），
+     * 且渲染路径不自愈（pageLines 只读不 ensure），点按翻页也无法恢复。
+     *
+     * @Volatile：宿主后台线程写，封面绘制线程读。
+     */
+    @Volatile
+    private var firstContentChapterCache: Int? = null
+
+    /**
+     * 纯查询（懒解析）：缓存命中即回；未解析时从章 0 起找首个
+     * `hasSignificantText` 的章并缓存。**只经 [ensureMarkup] 解析结构**
+     * （幂等、无排版、无落位、无逐出）——比 `bookStart()`（导航：
+     * 排版+落位+逐出）轻得多；且懒到封面首次查询才算，不碰
+     * 「开书不解析正文」的 preflight 契约（见 OpenBookPreflightProbeTest）。
+     * 未找到（全书无正文）回 null。
+     */
+    suspend fun firstContentChapter(): Int? {
+        firstContentChapterCache?.let { return it }
+        var ch = 0
+        while (ch < chapters.size) {
+            val markup = ensureMarkup(ch)
+            if (markup != null && markup.hasSignificantText()) {
+                firstContentChapterCache = ch
+                return ch
+            }
+            ch++
+        }
+        return null
+    }
+
     /**
      * 定位串解码单源见 [orilumn.reader.data.read.ReadingLocatorCodec]（写 `chapter:char`，
      * 读兼容 foliate JSON 旧行与 `chapter:char`）。
@@ -456,25 +513,73 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
         orilumn.reader.data.read.ReadingLocatorCodec.decode(locator)
 
     /**
+     * 首次开书收口（两端宿主同调）：已是原书主题、且本书从未钉过缩进/行距时，
+     * 从落位章起找首个含 `<p>` 的章回填**缺的键**；否则原样返回。
+     * 调用方负责 bookOnly 持久化 + 一次轻刷（仅返回值与 base 不同时）。
+     * 已钉过的键永不再碰 —— 用户改过即尊重，不会重启又被书盖回去。
+     */
+    suspend fun probeOriginalOnOpen(
+        startChapter: Int,
+        bodyPx: Float,
+        base: ReaderSettings,
+        overlay: BookSettings,
+    ): ReaderSettings {
+        if (base.layoutTheme != "original") return base
+        val needIndent = overlay.firstLineIndent == null
+        val needLine = overlay.lineSpacing == null
+        if (!needIndent && !needLine) return base
+        var ch = startChapter.coerceIn(0, (chapterCount - 1).coerceAtLeast(0))
+        while (ch < chapterCount) {
+            val markup = runCatching { ensureMarkup(ch) }.getOrNull()
+            if (markup != null && hasParagraph(markup)) {
+                val snap = snapshotTypography(ch, bodyPx) ?: return base
+                var out = base
+                if (needIndent) out = out.copy(firstLineIndent = snap.firstLineIndent)
+                if (needLine) out = out.copy(lineSpacing = snap.lineSpacing)
+                return out
+            }
+            ch++
+        }
+        return base
+    }
+
+    private fun hasParagraph(root: MarkupElement): Boolean =
+        root.tag == "p" || root.children.any(::hasParagraph)
+
+    /**
      * 原书设置快照（Q2 下沉：原 `ReaderActivity.withBookStyle`）：切到原书设置时，
-     * 把当前章节的真实排版（首行缩进/段间距/行距）快照进设置值。探测失败原样返回。
+     * 把当前章节的真实排版（首行缩进/行距）快照进设置值。探测失败原样返回。
+     * 纵边距不回填：段间距即疏密，书的 margin 原样参与折叠。
      */
     fun snapshotBookStyle(chapter: Int, bodyPx: Float, base: ReaderSettings): ReaderSettings {
         if (base.layoutTheme != "original") return base
-        val snap = runCatching {
-            val unit = unitAt(chapter) ?: return@runCatching null
-            val markup = unit.markup ?: return@runCatching null
-            val sheets = (unit.cssBundle?.cssTexts ?: emptyList()).map { LightCssParser().parse(it) }
-            val styles = StyleComputer(bodyPx, StyleSheet(emptyList()), sheets).compute(markup)
-            BookStyleProbe.snapshot(styles)
-        }.onFailure { Logger.w(logTag, "snapshotBookStyle probe FAIL ch=$chapter ${it.message} → fallback base") }
-            .getOrNull() ?: return base
+        val snap = snapshotTypography(chapter, bodyPx) ?: return base
         return base.copy(
             firstLineIndent = snap.firstLineIndent,
-            paragraphSpacing = snap.paragraphSpacing,
             lineSpacing = snap.lineSpacing,
         )
     }
+
+    /** 原书排版快照（缩进/行距）：UA+作者裸级联；失败回 null（调用方回退 base）。 */
+    private fun snapshotTypography(chapter: Int, bodyPx: Float): BookStyleProbe.Snapshot? = runCatching {
+        val unit = unitAt(chapter) ?: return@runCatching null
+        val markup = unit.markup ?: return@runCatching null
+        val sheets = (unit.cssBundle?.cssTexts ?: emptyList()).map { LightCssParser().parse(it) }
+        val styles = StyleComputer(bodyPx, StyleSheet(emptyList()), sheets).compute(markup)
+        BookStyleProbe.snapshot(styles)
+    }.onFailure { Logger.w(logTag, "snapshotBookStyle probe FAIL ch=$chapter ${it.message} → fallback base") }
+        .getOrNull()
+
+    /**
+     * 用户层共享收口：原书主题提交探针（平板/桌面两端宿主同调，禁止各写一遍）。
+     *
+     * 背景：UI 层（tier 44）在原书模式下仍按存储滑块值渲染，而 `withLayoutTheme(original)`
+     * 只给中性默认；提交时不经此探针，三滑块就与书真实排版脱节 —— 桌面曾因此与平板
+     * 原书设置渲染不一致（桌面直透面板值、无探测）。
+     * 非 original / 探测失败一律原样返回（见 [snapshotBookStyle]）。
+     */
+    fun probeOriginalTheme(chapter: Int, bodyPx: Float, next: ReaderSettings): ReaderSettings =
+        snapshotBookStyle(chapter, bodyPx, next)
 
     /** Start location after loading (null when there is no book/no chapter).
  *   Returns (chapter, page): starting from [startChapter], skips chapters with no laid-out
@@ -572,11 +677,55 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
     /** Injects the viewport size; returns whether it changed (a change requires relayout). */
     fun setViewport(width: Int, height: Int): Boolean {
         val changed = width > 0 && height > 0 && (width != viewW || height != viewH)
-        if (width > 0 && height > 0) {
+        if (changed) {
+            if (width > 0 && height > 0) {
+                viewW = width
+                viewH = height
+            }
+            // 视口尺寸变化（旋转屏幕/窗口调整）导致版面改变 → 指纹必变，走统一
+            // 收口清全书旧指纹磁盘表（守卫恒过；内容盒在边距补偿下恰不变时指纹
+            // 不变，旧表仍有效，不删才是对的）。
+            cleanStaleDiskTables()
+        } else if (width > 0 && height > 0) {
             viewW = width
             viewH = height
         }
         return changed
+    }
+
+    /**
+     * 版式参数（[LayoutParamKey] 指纹）真变时的磁盘分页表清理收口（排版层·上）。
+     *
+     * 指纹与基线 [cleanBaselineParamHash] 一致 = 空操作：当前参数下的磁盘表
+     * 全部保留 —— 非版式提交（夜间模式切换、开书探针回填后与存量参数一致、
+     * 原书设置快照无变化）零误删。指纹偏离 = 删除全书**旧指纹**磁盘表（读路径
+     * 按当前指纹寻址，旧指纹文件永远命中不到，是纯孤儿）并推进基线；同指纹的
+     * 历史表保留（参数回退即命中）。
+     *
+     * 调用点 = 参数稳定点：面板外提交的收口（平板轻刷新节流循环末尾、桌面
+     * 两段式第二段 [orilumn.reader.desktop.DesktopReaderHost.commitRelayout]）；
+     * [setViewport] 与 [finalizeRelayoutAll] 同走本入口（视口变化/面板关闭的
+     * 指纹必变，守卫恒过）。
+     */
+    fun cleanStaleDiskTables() {
+        val hash = currentParamHash()
+        if (hash == cleanBaselineParamHash) return
+        cleanBaselineParamHash = hash
+        if (bookId < 0) return
+        runCatching { cacheStore()?.cleanStaleParams("book_$bookId", hash) }
+            .onFailure { Logger.w(logTag, "cleanStaleDiskTables FAIL ${it.message}") }
+    }
+
+    /** 字体集合变化（导入/删除/系统字体变更）后的全书磁盘表全清。字体度量不进
+     *  [LayoutParamKey]（键只含族名/字重锚点，不含度量）→ [cleanStaleDiskTables]
+     *  的指纹清理抓不到同指纹旧表：集合一变，旧表几何全旧 —— 「字体修改必须删
+     *  旧表」按全清兜底。B2 随后按当前指纹逐章重写；内存已驻表的章被 skip-fresh
+     *  跳过重写，下个会话首次访问经 fullLayout 重塑（纯预热损失，非正确性问题）。 */
+    fun cleanAllDiskTables() {
+        cleanBaselineParamHash = currentParamHash()
+        if (bookId < 0) return
+        runCatching { cacheStore()?.cleanBookAll(bookId.toString()) }
+            .onFailure { Logger.w(logTag, "cleanAllDiskTables FAIL ${it.message}") }
     }
 
     // ---- Layout ----
@@ -719,6 +868,10 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
         // 重排（见字段注释），此刻之后按原则次序补派。放在邻页派发**之后**，第 2/3 档就一定排在
         // B1/B2 前面（总则：目标页 > 邻页 > 本章全量 > 其他章）。
         // 幂等：非开书路径进来时闸门已开，这里什么也不做。
+        //
+        // 注意：这里**不能**顺手驱逐远章 —— 调用方可能是跨章 sweep（pageAtFraction），
+        // active 还是旧章，驱逐会把刚建好的目标章当场清掉（markup=null），调用方判空跳过，
+        // 远扫全灭、只能落在窗口内。驱逐由落位成功后显式 evictFarChapters(keep=landed) 做。
         releaseOpenGate()
         return unit
     }
@@ -1678,6 +1831,19 @@ private fun notifyFlip() {
     scheduler.cancelLowerThan(TaskScheduler.PRIO_FLIP)
 }
 
+    /**
+     * 导航/调参入口抢占（跳转五路 + prepareRelayout 共用）：砍掉在途低档活（整书 B2、
+     * 预填充等），落位章的新布局独占 CPU/内存。砍掉过东西才把派发戳清零 —— 下次自然派发
+     * （翻页尾/循环尾）即重扫补回被砍的章；池里没活时只取消（空转）不碰戳，收敛好的书
+     * 跳转零扰动。落位后的补派走各路径已有的尾部分派（anchor 流 force / finalize 显式）。
+     */
+    private suspend fun preemptForNavigation() {
+        if (scheduler.pendingCount() + scheduler.runningCount() > 0) {
+            notifyFlip()
+            lastDispatchEpoch = -1L
+        }
+    }
+
 /** R3: immutable published neighbor shapes (chapter + paramHash keyed). Read-only after
  *  publication — safe to consult from any thread; stale entries are ignored by key check. */
 @Volatile
@@ -2546,6 +2712,7 @@ private fun finishCanonicalBackground(
             .onFailure { Logger.e(logTag, "canonical WRITE FAIL ch=${unit.chapterIndex} ${it.message}") }
         unit.bindPaginationTable(table)
         Logger.w(logTag, "layout ${ctx(unit)} CANONICAL-DISK-WRITE pages=${table.totalPages} totalChars=$totalChars")
+        // 不在单章写入后清空全书缓存；全局失效由专门时机处理
     }
     ip.canonicalLayout = layout
     ip.canonicalSlices = slices
@@ -2617,11 +2784,13 @@ private fun finishCanonicalBackground(
             val p = ip.currentSlice
             if (p != null) {
                 logJumpLanding("jump", chapter)
+                evictFarChapters(keep = chapter)
                 return chapter to p
             }
         }
         val page = pageForChar(unit, anchorChar) ?: unit.firstPage() ?: return null
         logJumpLanding("jump", chapter)
+        evictFarChapters(keep = chapter)
         return chapter to page
     }
 
@@ -2724,6 +2893,9 @@ private fun finishCanonicalBackground(
      */
     suspend fun prepareRelayout(chapter: Int, anchorChar: Int): ReflowResult? {
         clearFlipDir("param-change")
+        // 调参同样第一优先：epoch 已 bump 使在途 B2 过期（执行后丢弃），此处再主动砍掉，
+        // 免得它们排完整章才丢（纯浪费 CPU/内存峰值）。落位章的新 B1 与尾部分派不受影响。
+        preemptForNavigation()
         layoutEpoch++
         val myEpoch = layoutEpoch
         activeChapter = chapter
@@ -2812,6 +2984,9 @@ private fun finishCanonicalBackground(
         // it bound (it is the drawable page in view) and swaps in the fresh product when the caller
         // binds on the main thread. Other chapters get invalidated by prepareRelayout itself.
         val result = prepareRelayout(currentChapter, anchorChar)
+        // 版式参数真正变化导致全局失效时，清全书旧磁盘分页表（统一收口：门控
+        // 已保证指纹真变，守卫恒过；同指纹历史表保留，B2 逐章重写新指纹表）。
+        cleanStaleDiskTables()
         // The wrap-up routes through the same epoch-ized B2 dispatch used by the params-settled point.
         requestWholeBookRelayout()
         return result
@@ -2863,8 +3038,68 @@ private fun finishCanonicalBackground(
             scheduler.awaitIdle()
             if (layoutEpoch == epoch) {
                 Logger.w(logTag, "whole-book B2 pass drained epoch=$epoch submitted=$submitted")
+                logMemoryBreakdown("b2-drained")
             }
         }
+    }
+
+    /**
+     * 远章解析态驱逐（内存有界）：只保留落位章附近窗口，之外只留表（翻页的全部所需）。
+     * markup/DOM/派生结构对远章是纯常驻（965 章即上百 MB），落位经 ensure 重建
+     * （markup 重解析、结构重算，均幂等；磁盘命中章节只塑目标页）。
+     * 跳过落位章与 live 会话章；B2 尾与落位尾各扫一次（O(chapters) 纯字段检查）。
+     * 窗口 30 章 ≈ 数 MB 常驻；窗口外回翻付一次重解析（百 ms 级，远跳本就付排版费）。
+     */
+    private suspend fun evictFarChapters(keep: Int = activeChapter, window: Int = 30) {
+        // keep 显式传落位章：跨章 sweep/跳转过程中 active 还是旧值，按 active 清会把刚建好的
+        // 目标章毒死。B2 尾传默认（active 稳定）；导航落位传 landed。
+        // 与塑形侧同锁序（layoutMutex → structure 锁）：prepareLight 把整段 check-build-read
+        // 包在 structure 锁里，清扫逐章同锁重置，无撕裂；从不反向持锁，无死锁。
+        // 字段读写本身对并发读者 benign（引用原子 + 旧对象存活），锁只保 check-then-use 窗口
+        // （如 buildLayout 的 markup 非空断言）与结构组的原子性。
+        layoutMutex.withLock {
+            for ((i, u) in chapters.withIndex()) {
+                if (i == keep) continue
+                // 窗口内保留（回翻即时），之外才驱逐 —— 条件反了就是清近留远。
+                val dist = if (i >= keep) i - keep else keep - i
+                if (dist <= window) continue
+                if (u.inProgress != null || u.tempBirth != null) continue
+                u.structureCache.lock.withLock { u.evictParsedState() }
+            }
+        }
+    }
+
+    /**
+     * 常驻内存盘点（诊断常驻，不进热路径）：B2 落定后记一笔，定位堆增长来自哪一类常驻
+     * （markup DOM / structure / layout / pageCache / table），再决定驱逐哪一层。
+     * 只计数不估字节（节点数×经验值即可定级，精确称重走 hprof）。
+     */
+    private fun logMemoryBreakdown(why: String) {
+        var withMarkup = 0
+        var domNodes = 0L
+        var withLayout = 0
+        var withTable = 0
+        var pageCacheEntries = 0
+        var withStructure = 0
+        for (u in chapters) {
+            val m = u.markup
+            if (m != null) {
+                withMarkup++
+                var n = 0
+                fun walk(x: orilumn.reader.engine.html.MarkupElement) {
+                    n++
+                    for (c in x.children) walk(c)
+                }
+                walk(m)
+                domNodes += n
+            }
+            if (u.layout != null) withLayout++
+            if (u.paginationTable != null) withTable++
+            pageCacheEntries += u.pageCache.size
+            if (u.structureCache.key != Long.MIN_VALUE) withStructure++
+        }
+        Logger.w(logTag, "MEM $why chapters=${chapters.size} markup=$withMarkup domNodes=$domNodes " +
+            "layouts=$withLayout tables=$withTable pageCacheEntries=$pageCacheEntries structured=$withStructure")
     }
 
     /** One B2 chapter pass (P0: was one loop iteration inside the whole-book coroutine; P2.1: also
@@ -2895,6 +3130,8 @@ private fun finishCanonicalBackground(
                 // P7: a between-blocks cancel is a timely abandon, not a FAIL.
                 if (e !is CancellationException) Logger.e(logTag, "whole-book ch=${u.chapterIndex} FAIL ${e.message}")
             }
+        // 本章落定（无论成败）后清扫远章：B2 自己就是堆积源，清扫频率与 B2 同步最省事。
+        evictFarChapters()
     }
 
     /** P4: once a flip lands in [chapter], pre-warm BOTH neighbors (the chapters a next out-of-bounds
@@ -3030,9 +3267,15 @@ private fun finishCanonicalBackground(
             }
     }
 
-    /** Full line-level canonical pre-layout of a non-current chapter: shape the whole chapter, bind its
-     *  [orilumn.reader.engine.layout.DrawableBookLayout], and persist the line-level pagination table to
-     *  disk so the chapter is ready when opened. No anchor/temp state is created here. */
+    /** Full line-level canonical pre-layout of a non-current chapter: shape the whole chapter,
+     *  persist the line-level pagination table to disk, then DROP the product (B2 只算表、不驻留）。
+     *
+     *  B2 是整书后台扫描（调度池任务），964 章的书若每章都 `bindFull` 全量版式常驻，堆无限涨
+     *  （万族之劫 256MB/512MB 连爆即此）。表（KB 级）+ markup/结构是翻页的全部所需：
+     *  落位时 `buildLayout` 走磁盘命中，只塑目标页；`crossChapterLanding` 等读表路径先
+     *  `ensureChapterLayout` 再读 slices，自愈。调用方仅 [b2ChapterTask]（前台路径另有
+     *  bind，见 `buildLayout`/`finishCanonicalBackground`），故此处不判 live 版式。
+     */
     private fun fullLayoutAndPersist(unit: ChapterUnit, bc: BoxChapterLayouter, contentW: Int, contentH: Int, paramHash: Long, checkpoint: () -> Unit = {}) {
         bindChapterFor(unit)
         val markup = unit.markup ?: return
@@ -3061,12 +3304,15 @@ private fun finishCanonicalBackground(
                 .onFailure { Logger.e(logTag, "full prelim WRITE FAIL ch=${unit.chapterIndex} ${it.message}") }
             unit.bindPaginationTable(table)
             Logger.w(logTag, "layout ${ctx(unit)} FULL-PRELIM pages=${table.totalPages} blocks=${slices.maxOf { it.blockEndExclusive }}")
+            // 不在每章写入后清空全书缓存：B2 是逐章后台计算，整本清空会破坏其他章尚未写入的新表
+            // 只在参数变化等全局失效时机清理（如 finalizeRelayoutAll 后由调用方决定，或通过 sweepStale/trim 处理）
         }
         // R4: the heavy path never populates the shared per-block shape cache (it shapes via
         // shapeLeaf into locals), so any entries here predate this param cycle — or, if same-cycle,
         // are pure memo. Dropping is always safe; keeping risks stale-metric reuse on later flips.
         unit.blockShapeCache = null
-        unit.bindFull(product.layout, slices)
+        // B2 不 bind 版式产物：表已落盘+绑定，产物出函数即释放。常驻即全书堆爆炸（见本函数 KDoc）。
+        // 翻页落位经 buildLayout 磁盘命中重塑目标页； laidOut 保持 false，ensure 路径自愈。
     }
 
     /**
@@ -3292,21 +3538,40 @@ private fun finishCanonicalBackground(
      */
     suspend fun pageAtFraction(fraction: Double): Pair<Int, PageSlice>? {
         clearFlipDir("seek")
+        preemptForNavigation()
         val n = chapters.size
         if (n <= 0) return null
         val target = (fraction.coerceIn(0.0, 1.0) * n).toInt().coerceIn(0, n - 1)
+        // 诊断常驻：手指值→目标章，W 级防 PGAP flood 吞行（D 级 seek start 已被吞过）。
+        Logger.w(logTag, "seek map fraction=$fraction target=$target")
         // R14: nearest-content in BOTH directions (|distance| interleave, ties follow the reading
         // direction) — the old forward-only sweep could skip past the intended chapter.
+        //
+        // sweep 只判"有没有正文"（ensureMarkup：parse 级，无塑形、无临时会话），整章塑形只
+        // 发生在落位章（与目录 openTocItem 同路径）。反例：sweep 里调 ensureChapterLayout 会
+        // 给扫过的每一章建临时会话 + 塑形 —— 新进程无表时远扫即 OOM（15:50 实测），且扫过的
+        // 临时会话带 inProgress 护身、驱逐跳过它们，等于一路漏。
+        var landed: Int? = null
         for (c in listOf(target) + orderRemainingChapters(n, target, flipDir)) {
-            val u = ensureChapterLayout(c) ?: continue
-            val m = u.markup ?: continue
-            if (m.hasSignificantText()) {
-                val p = u.firstPage() ?: continue
-                logJumpLanding("seek", c)
-                return c to p
-            }
+            val m = ensureMarkup(c) ?: continue
+            if (m.hasSignificantText()) { landed = c; break }
         }
-        return null
+        val c = landed ?: run {
+            Logger.w(logTag, "seek NULL: no landed chapter (fraction=$fraction target=$target)")
+            return null
+        }
+        val u = ensureChapterLayout(c) ?: run {
+            Logger.w(logTag, "seek NULL: ensureChapterLayout failed ch=$c")
+            return null
+        }
+        val p = u.firstPage() ?: u.inProgress?.currentSlice ?: run {
+            Logger.w(logTag, "seek NULL: ch=$c has no page (slices=${u.pageSlices.size} temp=${u.inProgress != null})")
+            return null
+        }
+        logJumpLanding("seek", c)
+        // 落位成功后才驱逐，且按刚落的章保窗口 —— active 还是旧值，按它清等于毒死刚落的章。
+        evictFarChapters(keep = c)
+        return c to p
     }
 
     /**
@@ -3314,6 +3579,7 @@ private fun finishCanonicalBackground(
      * chapter (previous/next chapter).
      */
     suspend fun neighborChapterStart(chapter: Int, direction: Int): Pair<Int, PageSlice>? {
+        preemptForNavigation()
         var c = chapter
         while (true) {
             c += direction
@@ -3321,8 +3587,12 @@ private fun finishCanonicalBackground(
             val u = ensureChapterLayout(c) ?: continue
             val m = u.markup ?: continue
             if (m.hasSignificantText()) {
-                val p = u.firstPage() ?: continue
+                val p = u.firstPage() ?: u.inProgress?.currentSlice ?: run {
+                    Logger.w(logTag, "neighbor NULL: ch=$c no page (slices=${u.pageSlices.size} temp=${u.inProgress != null})")
+                    continue
+                }
                 logJumpLanding("neighbor", c)
+                evictFarChapters(keep = c)
                 return c to p
             }
         }
@@ -3348,6 +3618,7 @@ private fun finishCanonicalBackground(
  *  Used by the TOC panel to jump to an arbitrary chapter. */
     suspend fun openChapterStart(index: Int): Pair<Int, PageSlice>? {
         clearFlipDir("chapter-start")
+        preemptForNavigation()
         if (chapters.isEmpty()) return null
         var ch = index.coerceIn(0, chapters.size - 1)
         while (ch < chapters.size) {
@@ -3357,7 +3628,10 @@ private fun finishCanonicalBackground(
                 val page = unit.inProgress?.currentSlice ?: unit.firstPage()
                 if (page != null) {
                     logJumpLanding("toc", ch)
+                    evictFarChapters(keep = ch)
                     return ch to page
+                } else {
+                    Logger.w(logTag, "toc NULL: ch=$ch no page (slices=${unit.pageSlices.size} temp=${unit.inProgress != null})")
                 }
             }
             ch++
@@ -3374,6 +3648,7 @@ private fun finishCanonicalBackground(
      */
     suspend fun openTocItem(index: Int, fragment: String?): Pair<Int, PageSlice>? {
         clearFlipDir("toc-item")
+        preemptForNavigation()
         if (fragment.isNullOrBlank() || index !in chapters.indices) return openChapterStart(index)
         val m = ensureMarkup(index) ?: return openChapterStart(index)
         val charStart = styledAnchorChar(index, m, fragment)
@@ -3425,6 +3700,7 @@ private fun finishCanonicalBackground(
      */
     suspend fun openLinkTarget(target: LinkTarget): Pair<Int, PageSlice>? {
         clearFlipDir("link-target")
+        preemptForNavigation()
         if (target.chapterIndex !in chapters.indices) return null
         val fragment = target.fragment
         if (fragment.isNullOrBlank()) return openChapterStart(target.chapterIndex)

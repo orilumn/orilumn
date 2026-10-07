@@ -194,7 +194,11 @@ sealed class ContentItem {
     object NoCloseQuote : ContentItem()
 }
 
-class ComputedStyle(
+/**
+ * data class（而非普通 class）：匿名块等需要派生样式的消费点用 `copy()` 零改边
+ * （见 [orilumn.reader.engine.laying.NormalFlowLayout]），全等语义无调用方依赖引用同一性。
+ */
+data class ComputedStyle(
     val fontSizePx: Float,
     val lineHeightRatio: Float,
     val colorHex: String? = null,

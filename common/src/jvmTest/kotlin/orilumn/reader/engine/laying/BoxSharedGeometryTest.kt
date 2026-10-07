@@ -312,4 +312,31 @@ class BoxSharedGeometryTest {
         val gap = NormalFlowLayout.consecutiveLeafAdvance(leaves[0].el!!, leaves[1].el!!) { compute(styleMap, it) }
         assertEquals(8 + 14, gap) // padding-bottom 8 + section's own margin-bottom 14 — children's 8 NOT folded
     }
+
+    /**
+     * 长生界回归：带内边距的容器 + 块级子 + 尾随杂散文本时，匿名 run 不得复算容器盒边。
+     *
+     * `h2{margin-bottom:14px;padding-bottom:8px}` 内是 `display:block` 的 span 与一段杂散标题文本：
+     * 标题行底 → 正文行顶只能是容器的 8px padding + 自身 14px margin = 22px。若匿名叶复用容器
+     * 样式，8px 会在叶内与容器各算一次（30px），且重轻两路就此分叉（轻路径 `#text` 级联本就是零边）。
+     */
+    @Test
+    fun `anonymous run never duplicates container padding`() {
+        val span = MarkupElement("span", mapOf("class" to "sec-num"), listOf(MarkupElement("#text", text = "sec")))
+        val h2 = MarkupElement("h2", children = listOf(span, MarkupElement("#text", text = "title")))
+        val next = node("p", children = listOf(text("body")))
+        val root = MarkupElement("body", children = listOf(h2, next))
+        linkParents(root, null)
+
+        val css = "h2 { margin-bottom: 14px; padding-bottom: 8px } .sec-num { display: block }"
+        assertConsecutiveAdvancesMatchHeavy(root, css)
+
+        val styleMap = StyleComputer(10f, LightCssParser().parse(""), listOf(LightCssParser().parse(css))).compute(root)
+        val classify = NormalFlowLayout.heavyClassify(styleMap, true)
+        val result = BoxLayouter(10f, FixedWidthBreaker(100)).layoutBoxes(root, widthPx = 300, styleMap = styleMap, classify = classify)
+        val leaves = flattenLeaves(result.boxes)
+        assertEquals(3, leaves.size)
+        // title 行底 → body 行顶 = padding-bottom 8 + h2 自身 margin-bottom 14（只算一次）。
+        assertEquals(8 + 14, leaves[2].contentTop - leaves[1].contentBottom)
+    }
 }

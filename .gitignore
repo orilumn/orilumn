@@ -20,3 +20,6 @@ ref/
 # Local runtime assets (books/ is P5-c corpus, synced via syncthing — never commit)
 books/
 hs_err
+
+# Syncthing conflict copies (never commit)
+*.sync-conflict-*

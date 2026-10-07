@@ -310,7 +310,7 @@ class FirstLineIndentSingleLineOverflowTest {
     private fun profile(fontSize: Int, fontScale: Double) = TypographicProfile.build(
         ReaderSettings.DEFAULT.copy(
             layoutTheme = "traditional", fontSize = fontSize, fontScale = fontScale,
-            lineSpacing = 1.5, firstLineIndent = 2.0, paragraphSpacing = 0.0,
+            lineSpacing = 1.5, firstLineIndent = 2.0,
             marginLeft = 50, marginRight = 50, marginTop = 100, marginBottom = 60,
         ),
         2.4f,
@@ -332,7 +332,7 @@ class FirstLineIndentSingleLineOverflowTest {
         themeSheetFromProfile(p),
         null,
         ReaderUiSheet.build(p),
-        gapScale = p.paragraphGapScale,
+        paragraphScale = p.paragraphSpacingScale, gapScale = p.paragraphGapScale,
     )
 
     /** 真书全链路扫版心：重路径断行 → [DrawLineBuilder] 投影 → 绘制侧真实整形，任一行右缘越版心即失败。 */

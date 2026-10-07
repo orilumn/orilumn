@@ -121,13 +121,19 @@ class Cascade(
                 consider(winners, d.property, d.value, Winner(d.value, d.important, tier, matched, m.order))
             }
         }
-        // HTML presentation attrs → low-tier cascade origin (15), all with the same order so the
-        // first applicable mapping wins per property; CSS always wins over this layer.
+        // HTML presentation attrs → low-tier cascade origin (15); same order key, ties go to the
+        // later mapping (no same-property multi-mapping exists, so behavior is deterministic).
         // P3-c: 表示属性与内联样式只进元素自身，伪元素只吃样式表规则（浏览器同式）。
         if (pseudo == null) {
             val htmlOrder = 0
             for (p in PRESENTATION_ATTRS) {
-                htmlAttrOrigin(el, p)?.let { consider(winners, p.property, it, Winner(it, false, 15, null, htmlOrder)) }
+                htmlAttrOrigin(el, p)?.let { v ->
+                    // Box shorthands (cellpadding → `padding`) expand like sheet rules so per-side
+                    // winners stay tier-true; other properties pass through untouched.
+                    expandBoxShorthand(p.property, v)?.forEach { (prop, vv) ->
+                        consider(winners, prop, vv, Winner(vv, false, 15, null, htmlOrder))
+                    } ?: consider(winners, p.property, v, Winner(v, false, 15, null, htmlOrder))
+                }
             }
             // Inline styles act as a high-tier author origin (importance honored last).
             var inlineOrder = 10
@@ -297,14 +303,16 @@ class Cascade(
         val selector: Selector?,
         val order: Int,
     ) {
-        /** True when this candidate beats the current winner (higher tier → higher specificity → later order). */
+        /** True when this candidate beats the current winner (higher tier → higher specificity → later order;
+         *  exact ties go to the later declaration, i.e. CSS source order, including shorthand-vs-longhand
+         *  inside one rule after [expandLogical] expansion). */
         fun beats(cur: Winner?): Boolean {
             if (cur == null) return true
             if (tier != cur.tier) return tier > cur.tier
             val spec = selector?.specificity
             val curSpec = cur.selector?.specificity
             if (spec != null && curSpec != null && spec != curSpec) return spec > curSpec
-            return order > cur.order
+            return order >= cur.order
         }
     }
 
@@ -397,12 +405,38 @@ class Cascade(
 
     /** Expands every logical declaration in [in] into physical declarations (LTR). Properties
      *  already physical (or unknown) are kept verbatim; shorthands that map to two edges are
-     *  split into two declarations with the same [Declaration.important] flag. */
+     *  split into two declarations with the same [Declaration.important] flag.
+     *
+     *  `margin`/`padding` 4-value shorthands expand into their four physical longhands here as
+     *  well (same flag, in place) — CSS 2.1 §8.3: a shorthand IS its longhands at the same
+     *  origin/priority. Without this, `margin` and `margin-top` enter the cascade as two
+     *  independent properties and the downstream merge (`parseEdges`: per-side beats shorthand
+     *  base, tier-blind) lets a LOWER-tier per-side declaration defeat a HIGHER-tier shorthand
+     *  (e.g. theme `p,li{margin:1em 0}` losing to author `p{margin-top:0}` — Rust 现代模式段间距
+     *  不足 1em 即此). After expansion every edge carries its own tier/specificity/order and the
+     *  per-side-over-base merge is harmless (no shorthand key survives).
+     *
+     *  同规则内声明顺序同样精确：平局（同 tier/特异度/规则序）以后胜者为准（`Winner.beats`
+     *  `>=`），故 `padding:0.5rem;padding-bottom:0.2rem` 的 bottom 取 0.2rem（见
+     *  PaddingOverrideTest）。表示属性同 order=0 但无同属性多重映射，行为不变。
+     */
     private fun expandLogical(src: List<Declaration>): List<Declaration> {
         if (src.isEmpty()) return src
         var touched = false
         val out = ArrayList<Declaration>(src.size + 2)
         for (d in src) {
+            if (d.property == "margin" || d.property == "padding") {
+                val expanded = expandBoxShorthand(d.property, d.value) ?: emptyList()
+                if (expanded.isNotEmpty()) {
+                    for ((prop, vv) in expanded) out += Declaration(prop, vv, d.important)
+                    touched = true
+                } else {
+                    // Invalid shorthand (>4 tokens / blank): dropped. Downstream would have
+                    // zeroed it anyway (missing keys read as 0), so the outcome is identical.
+                    touched = true
+                }
+                continue
+            }
             when (val action = LOGICAL_MAP[d.property]) {
                 is PhysicalAlias -> out += Declaration(action.physical, d.value, d.important).also { touched = true }
                 is PhysicalTwoWay -> {
@@ -426,5 +460,28 @@ class Cascade(
             1 -> toks[0] to toks[0]
             else -> toks[0] to toks[1]  // CSS allows more tokens than we need; take first two
         }
+    }
+
+    /**
+     * CSS 2.1 §8.3 box shorthand (`margin`/`padding`, 1–4 tokens) → four physical longhands.
+     * Null unless [prop] is a box shorthand (caller keeps the original declaration); empty list
+     * when the value is malformed (>4 tokens per CSS, blank) — the declaration is dropped, which
+     * reads as zero downstream, identical to the old merge path.
+     */
+    private fun expandBoxShorthand(prop: String, value: String): List<Pair<String, String>>? {
+        val (t, r, b, l) = when (prop) {
+            "margin" -> listOf("margin-top", "margin-right", "margin-bottom", "margin-left")
+            "padding" -> listOf("padding-top", "padding-right", "padding-bottom", "padding-left")
+            else -> return null
+        }
+        val toks = value.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (toks.isEmpty() || toks.size > 4) return emptyList()
+        val (top, right, bottom, left) = when (toks.size) {
+            1 -> listOf(toks[0], toks[0], toks[0], toks[0])
+            2 -> listOf(toks[0], toks[1], toks[0], toks[1])
+            3 -> listOf(toks[0], toks[1], toks[2], toks[1])
+            else -> listOf(toks[0], toks[1], toks[2], toks[3])
+        }
+        return listOf(t to top, r to right, b to bottom, l to left)
     }
 }

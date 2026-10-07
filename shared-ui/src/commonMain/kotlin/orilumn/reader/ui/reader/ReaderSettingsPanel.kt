@@ -93,7 +93,11 @@ import kotlin.time.Duration.Companion.milliseconds
  *  - 自定义阅读主题预设在面板内为纯内存列表，经 [onSaveTheme]/[onDeleteTheme] 交宿主持久化；
  *  - Android 返回键（BackHandler）不在此承载——Android 壳（S31）负责路由到 [onDismiss]。
  *
- * 语义条约：排版类改动走 [onCommitTypography]（触发重排），亮度/护眼走 [onCommitLight]（只刷新遮罩）。
+ * 语义条约：排版类改动走 [onCommitTypography]（触发重排）；不影响排版的设置
+ * （亮度/护眼/纯 UI 开关——翻页动画、封面拉伸、启动续读、页码、隐藏字体等）
+ * 走 [onCommitLight]（不重排，只持久化 + 重组）。新增开关先判「是否影响版式指纹」：
+ * 不影响就必须走 [onCommitLight]——排版提交会触发重排绑定并推落位，与开书封面解析
+ * 竞态会误记封面 dismissed（封面不弹），纯开关本也无需重排。
  *
  * 按键模型（与目录同款）：焦点落在抽屉容器本身只做按键捕获（[panelKeyEvents] 共享路由），
  * 移动是纯状态驱动——各子页共享一个 `activeIdx` + 跟随滚动（`ensureVisible`），悬停认领与
@@ -268,11 +272,15 @@ fun ReaderSettingsPanel(
                 ItemKey(onEnter = { stack.add(Sub.Text) }),
                 ItemKey(onEnter = { stack.add(Sub.ReadingTheme) }),
                 ItemKey(onEnter = { stack.add(Sub.Brightness) }),
-                ItemKey(onEnter = { onCommitTypography(s.copy(pageAnim = !s.pageAnim)) }),
+                // 以下四个开关不影响排版（翻页动画/封面拉伸/启动续读/页码）：
+                // 走无重排提交（纯 UI 设置，与 showHiddenFonts 同口径）——
+                // 走排版提交会触发重排绑定并推落位，与开书封面解析竞态
+                // （误记 dismissed 致封面不弹），且纯开关本无需重排。
+                ItemKey(onEnter = { onCommitLight(s.copy(pageAnim = !s.pageAnim)) }),
                 ItemKey(onEnter = { stack.add(Sub.AnimMode) }),
-                ItemKey(onEnter = { onCommitTypography(s.copy(coverStretch = !s.coverStretch)) }),
-                ItemKey(onEnter = { onCommitTypography(s.copy(autoContinue = !s.autoContinue)) }),
-                ItemKey(onEnter = { onCommitTypography(s.copy(pageNum = !s.pageNum)) }),
+                ItemKey(onEnter = { onCommitLight(s.copy(coverStretch = !s.coverStretch)) }),
+                ItemKey(onEnter = { onCommitLight(s.copy(autoContinue = !s.autoContinue)) }),
+                ItemKey(onEnter = { onCommitLight(s.copy(pageNum = !s.pageNum)) }),
             )
             Sub.Text -> {
                 val px = s.fontSize * ReaderSettings.fontScaleToRatio(s.fontScale)
@@ -692,7 +700,7 @@ fun ReaderSettingsPanel(
                     Box(modifier = Modifier.weight(1f)) {
                         val onMove: () -> Unit = { nav.releaseHold() }
                         when (current) {
-                            Sub.Home -> HomePage(s, keys, nav, onMove, listState, onCommitTypography, customs, p)
+                            Sub.Home -> HomePage(s, keys, nav, onMove, listState, onCommitTypography, onCommitLight, customs, p)
                             Sub.Text -> TextPage(s, keys, nav, onMove, listState, p, onPreview, onCommitTypography, fontDisplayByFamily)
                             Sub.TextFont -> FontLibraryPanel(
                                 rows = fontRows,
@@ -874,6 +882,8 @@ private fun HomePage(
     onMouseMove: () -> Unit,
     listState: LazyListState,
     commit: (ReaderSettings) -> Unit,
+    /** 不影响排版的纯 UI 开关走它（无重排提交，与 showHiddenFonts 同口径）。 */
+    commitPlain: (ReaderSettings) -> Unit,
     customs: List<ThemePreset>,
     p: Palette,
 ) {
@@ -883,11 +893,11 @@ private fun HomePage(
         item { SetRow("文字", onTap = keys[2].onEnter, p = p, nav = nav, index = 2) }
         item { SetRow("阅读主题", ReaderThemeMath.themeName(s, customs), keys[3].onEnter, p, nav = nav, index = 3) }
         item { SetRow("亮度", if (s.brightnessFollowSystem) "跟随系统" else "自定义", keys[4].onEnter, p, nav = nav, index = 4) }
-        item { SetSwitch("翻页动画", s.pageAnim, { commit(s.copy(pageAnim = it)) }, p, nav = nav, index = 5) }
+        item { SetSwitch("翻页动画", s.pageAnim, { commitPlain(s.copy(pageAnim = it)) }, p, nav = nav, index = 5) }
         item { SetRow("翻页动画模式", ReaderThemeMath.pageAnimationModeLabel(s.pageAnimationMode), keys[6].onEnter, p, nav = nav, index = 6) }
-        item { SetSwitch("封面拉伸全屏", s.coverStretch, { commit(s.copy(coverStretch = it)) }, p, nav = nav, index = 7) }
-        item { SetSwitch("启动时继续阅读", s.autoContinue, { commit(s.copy(autoContinue = it)) }, p, nav = nav, index = 8) }
-        item { SetSwitch("显示页码", s.pageNum, { commit(s.copy(pageNum = it)) }, p, nav = nav, index = 9) }
+        item { SetSwitch("封面拉伸全屏", s.coverStretch, { commitPlain(s.copy(coverStretch = it)) }, p, nav = nav, index = 7) }
+        item { SetSwitch("启动时继续阅读", s.autoContinue, { commitPlain(s.copy(autoContinue = it)) }, p, nav = nav, index = 8) }
+        item { SetSwitch("显示页码", s.pageNum, { commitPlain(s.copy(pageNum = it)) }, p, nav = nav, index = 9) }
         item { Spacer(modifier = Modifier.height(24.dp)) }
     }
 }

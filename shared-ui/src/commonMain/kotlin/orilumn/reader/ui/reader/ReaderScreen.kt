@@ -277,7 +277,14 @@ fun ReaderScreen(
     // 落位处先关再弹就是那一帧正文闪）。
     fun markPositionChanged(next: ReaderPos) {
         openPos = next
-        if (!isBookStart(next)) coverDismissed = true
+        // 封面解析未完成时 isBookStart 恒 false（缺 bmp/首章号）——那是"未知"而非
+        // "非书首"：开书探针重排/调参重排的落位推送先于封面解析到达时（启动继续阅读、
+        // 开书后立即调参），会误记 dismissed，封面解析完成后 coverVisible 恒 false、
+        // 封面永不再弹（封面跳正文首页根因）。仅在封面已解析且确实离开首位时记离开；
+        // 未知则不动，由封面 effect 按落定后的解析结果结算显隐。
+        if (coverBmp != null && coverStartChapter != null && !isBookStart(next)) {
+            coverDismissed = true
+        }
         saveJob?.cancel()
         saveJob = scope.launch {
             delay(500)

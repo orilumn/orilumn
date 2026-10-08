@@ -77,7 +77,15 @@ class PageRasterStore<T : Any>(
     private var height = -1
     private val cache = PageRasterCache<T>(maxBytes, sizeOf, onEvict)
 
-    fun obtain(key: PageRasterKey?, spec: PageRasterSpec): PageRasterResult<T>? {
+    /**
+     * 取一页位图。命中直接返回；未命中真正栅格化。
+     *
+     * @param onMiss **仅在未命中、即将真正栅格化时**调用一次（宿主用来在「第 1 档渲染」
+     *   开始前抢占后台预排 —— 见 `线程调度原则.md` §3.6/§5 与 AGENTS.md 总则第 1 条：
+     *   栅格是第 1 档的一部分，必须像翻页一样让后台让路，否则第 7 档整章全量会把绘制
+     *   线程压住。命中路径**不调**（每帧命中是常态，调了等于每帧都抢）。
+     */
+    fun obtain(key: PageRasterKey?, spec: PageRasterSpec, onMiss: (() -> Unit)? = null): PageRasterResult<T>? {
         val w = spec.widthPx
         val h = spec.heightPx
         if (surface == null || w != width || h != height) {
@@ -91,6 +99,7 @@ class PageRasterStore<T : Any>(
         if (key != null) {
             cache.get(key, fingerprint)?.let { return PageRasterResult(it, true, 0L) }
         }
+        onMiss?.invoke() // 第 1 档渲染开始 —— 让后台预排让路（一次性，仅未命中）
         val s = surface ?: return null
         val t0 = System.nanoTime()
         drawPageContent(

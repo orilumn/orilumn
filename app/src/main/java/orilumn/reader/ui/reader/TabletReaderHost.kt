@@ -52,6 +52,9 @@ class TabletReaderHost(
 
     override fun title(): String = controller.title()
 
+    /** 第 1 档「渲染」半边的抢占钩子（见 `ReaderHost.onRasterMiss`）。 */
+    override fun onRasterMiss() = controller.onForegroundRaster()
+
     override fun unitTitle(chapter: Int): String {
         val unit = controller.unitAt(chapter) ?: return ""
         return unit.title

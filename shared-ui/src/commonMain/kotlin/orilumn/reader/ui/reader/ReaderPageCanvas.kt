@@ -58,6 +58,12 @@ fun ReaderPageCanvas(
      * 由 [ReaderScreen] 从 `pos` + 视口 + 修订号 + 主题色算出的稳定值。
      */
     rasterKey: PageRasterKey? = null,
+    /**
+     * 未命中、即将真正栅格化时回调一次（`线程调度原则.md` §5「唯一钩子」：
+     * 栅格属总则第 1 档的「渲染」半边，必须与翻页同权抢占后台预排）。
+     * 由 [ReaderScreen] 接宿主钩子；默认 null = 不抢占。
+     */
+    onMiss: (() -> Unit)? = null,
 ) {
     val renderer = rememberReaderPageRenderer()
     // 修订号版本化：只包画布发射器（渲染器实例保留在 key 之外，Android 离屏
@@ -109,6 +115,7 @@ fun ReaderPageCanvas(
             images = slots,
             contentRevision = contentRevision,
             rasterKey = rasterKey,
+            onMiss = onMiss,
         )
     }
     }

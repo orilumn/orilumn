@@ -78,6 +78,8 @@ private const val PAGE_IMAGE_WARM_TIMEOUT_MS = 800L
 @Composable
 fun ReaderScreen(
     host: ReaderHost,
+    // 第 1 档「渲染」半边的抢占钩子（栅格未命中时让后台预排让路）；默认接宿主实现。
+    onRasterMiss: () -> Unit = { host.onRasterMiss() },
     settings: ReaderSettings,
     statusBarInset: Dp = 0.dp,
     onBack: () -> Unit = {},
@@ -935,6 +937,9 @@ fun ReaderScreen(
                     contentRevision = contentRevision,
                     // P0b：页身份键（多页位图缓存下标）
                     rasterKey = content?.rasterKey,
+                    // 第 1 档「渲染」半边的抢占钩子：未命中真正栅格化时，让后台预排让路
+                    // （总则第 1 条 + 线程调度原则 §5「唯一钩子」；翻页那半边早已接上）。
+                    onMiss = onRasterMiss,
                 )
             }
             if (targetContent != null) {

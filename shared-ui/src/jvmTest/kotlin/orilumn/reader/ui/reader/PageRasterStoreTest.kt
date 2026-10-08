@@ -67,6 +67,25 @@ class PageRasterStoreTest {
         r.value.close()
     }
 
+    /**
+     * `onMiss` 钩子（第 1 档「渲染」半边的抢占）：**只在未命中触发一次**，命中不触发。
+     *
+     * 这是 `线程调度原则.md` §5「唯一钩子」接到栅格上的行为锁：漏接则第 7 档整章全量
+     * 能压住绘制线程（实测单页栅格被压到 3.9s）；误触发（命中也调）则每帧抢占后台，
+     * 后台预排永远排不上。两种错都必须在这里被挡住。
+     */
+    @Test
+    fun `onMiss 只在未命中触发一次_命中不触发`() {
+        val s = store()
+        var misses = 0
+        s.obtain(key(), spec(), onMiss = { misses++ })
+        assertEquals("首次未命中应触发一次", 1, misses)
+        s.obtain(key(), spec(), onMiss = { misses++ })
+        assertEquals("命中不得再触发（否则每帧都抢）", 1, misses)
+        s.obtain(key(charStart = 50), spec(), onMiss = { misses++ })
+        assertEquals("换页（另一键）未命中应再触发一次", 2, misses)
+    }
+
     @Test
     fun `同键同规格二次命中——不重栅格（这是翻页不卡的前提）`() {
         encodeCalls = 0

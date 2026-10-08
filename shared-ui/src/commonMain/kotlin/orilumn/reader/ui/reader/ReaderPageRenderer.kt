@@ -60,6 +60,12 @@ interface ReaderPageRenderer {
          * （封面等无页身份的调用方直接重画）。键必须含视口/修订号/颜色，理由见 `PageRasterCache.kt`。
          */
         rasterKey: PageRasterKey? = null,
+        /**
+         * 未命中、即将真正栅格化时调用一次（宿主接后台抢占钩子，让第 7 档后台预排让路 ——
+         * 见 `线程调度原则.md` §5「唯一钩子」与 §3.6；栅格属总则第 1 档的「渲染」半边）。
+         * 命中路径不调。默认 null = 不抢占。
+         */
+        onMiss: (() -> Unit)? = null,
     )
 }
 

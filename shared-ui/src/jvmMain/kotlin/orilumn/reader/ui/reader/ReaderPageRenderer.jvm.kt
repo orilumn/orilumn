@@ -65,9 +65,11 @@ private class JvmReaderPageRenderer : ReaderPageRenderer {
         images: List<PageImageSlot>,
         contentRevision: Int,
         rasterKey: PageRasterKey?,
+        onMiss: (() -> Unit)?,
     ) {
         val r = store.obtain(
             key = rasterKey,
+            onMiss = onMiss,
             spec = PageRasterSpec(
                 lines = lines,
                 backgrounds = backgrounds,

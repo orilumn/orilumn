@@ -69,10 +69,12 @@ private class AndroidReaderPageRenderer : ReaderPageRenderer {
         images: List<PageImageSlot>,
         contentRevision: Int,
         rasterKey: PageRasterKey?,
+        onMiss: (() -> Unit)?,
     ) {
         // 无 key（封面等无页身份的调用）⇒ store 不入池，但照样栅格并画出来。
         val r = store.obtain(
             key = rasterKey,
+            onMiss = onMiss,
             spec = PageRasterSpec(
                 lines = lines,
                 backgrounds = backgrounds,

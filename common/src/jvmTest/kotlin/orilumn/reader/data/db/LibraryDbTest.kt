@@ -329,4 +329,53 @@ class LibraryDbTest {
         db.syncSystemFonts(emptyList())
         assertEquals(listOf("Regular"), db.allFonts().map { it.subfamily })
     }
+
+    @Test
+    fun syncSystemFontsPrunesFamiliesGoneFromPlatform() = runBlocking {
+        // 字体集变化（卸载 / fontconfig 过滤）后，本次枚举里不存在的族必须清掉——
+        // 面板列全表，不清即把「早就不存在的字体」继续列给用户。
+        // Linux 实锤：系统实际 178 族，库里却积着 1322 族 / 2697 行。
+        val db = freshDb()
+        db.syncSystemFonts(
+            listOf(
+                orilumn.reader.data.font.SystemFontFace("Noto Sans Arabic", "Regular"),
+                orilumn.reader.data.font.SystemFontFace("Noto Serif CJK SC", "Regular"),
+            ),
+        )
+        assertEquals(2, db.allFonts().size)
+
+        // 新枚举只剩中文那一族（阿拉伯语族被过滤掉了）。
+        db.syncSystemFonts(listOf(orilumn.reader.data.font.SystemFontFace("Noto Serif CJK SC", "Regular")))
+
+        val families = db.allFonts().map { it.familyName }.distinct()
+        assertEquals("消失的族应被清掉", listOf("Noto Serif CJK SC"), families)
+    }
+
+    @Test
+    fun syncSystemFontsKeepsImportedRowsWhenPruning() = runBlocking {
+        // 护栏一：导入字体没有平台枚举来源，删陈旧系统行时**绝不能**牵连它们。
+        val db = freshDb()
+        db.importFont(
+            orilumn.reader.data.font.FontFace(
+                id = 42,
+                familyName = "MyImported",
+                displayName = "MyImported",
+                subfamily = "Regular",
+                path = "/fonts/my.ttf",
+                lang = "cjk",
+            ),
+        )
+        db.syncSystemFonts(listOf(orilumn.reader.data.font.SystemFontFace("SysA", "Regular")))
+        // 系统枚举变了（SysA 不再出现），导入行必须原样还在。
+        db.syncSystemFonts(listOf(orilumn.reader.data.font.SystemFontFace("SysB", "Regular")))
+
+        val imported = db.allFonts().filter { it.source != orilumn.reader.data.font.FontFace.SOURCE_SYSTEM }
+        assertEquals("导入字体不得被陈旧清理牵连", 1, imported.size)
+        assertEquals("MyImported", imported.single().familyName)
+        // 被过滤掉的系统族照常清掉（这条是本测试的另一面）。
+        assertEquals(
+            listOf("SysB"),
+            db.allFonts().filter { it.source == orilumn.reader.data.font.FontFace.SOURCE_SYSTEM }.map { it.familyName },
+        )
+    }
 }

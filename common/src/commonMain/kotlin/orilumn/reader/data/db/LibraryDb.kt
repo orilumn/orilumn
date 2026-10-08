@@ -7,6 +7,7 @@ import orilumn.reader.data.book.BookReadingState
 import orilumn.reader.data.font.FontFace
 import orilumn.reader.data.font.SystemFontFace
 import orilumn.reader.db.OrilumnDb
+import orilumn.reader.io.Logger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -215,6 +216,17 @@ class LibraryDb(db: OrilumnDb) {
         if (rows.isNotEmpty()) {
             rows.groupBy({ it.first }, { it.second }).forEach { (f, subs) ->
                 fonts.deleteRenamedSystemRows(f, subs.distinct().ifEmpty { listOf("") })
+            }
+            // 整族级陈旧清理：本次枚举里不存在的族（卸载 / fontconfig 过滤掉的），
+            // 其残留行必须删，否则面板列全表会把「早就不存在的字体」继续列给用户
+            // （Linux 实测 2697 行 / 1322 族 vs 系统实际 178 族）。
+            // 只删 source='system'（导入字体无枚举来源，绝不牵连）；空枚举已在上方短路。
+            val liveFamilies = rows.map { it.first }.toSet()
+            val before = fonts.countSystemRows().executeAsOne()
+            fonts.deleteSystemFontsNotIn(liveFamilies.toList())
+            val pruned = before - fonts.countSystemRows().executeAsOne()
+            if (pruned > 0) {
+                Logger.i("Orilumn.Font", "pruned $pruned stale system font row(s) (families gone from platform enumeration)")
             }
         }
     }

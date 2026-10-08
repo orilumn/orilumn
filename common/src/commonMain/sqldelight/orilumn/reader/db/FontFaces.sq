@@ -71,7 +71,28 @@ deleteRenamedSystemRows:
 DELETE FROM font_faces
 WHERE familyName = ? AND source = 'system' AND subfamily NOT IN ?;
 
+-- **整族级陈旧清理**：本次枚举里**根本不存在**的系统族，其残留行一并删除。
+--
+-- 动机（Linux 实锤）：字体集变化（卸载 / fontconfig 过滤）后，旧族永远留在库里
+-- ——面板直接列全表，于是「已不存在的 Noto 其他语系」全都还在字体列表里
+-- （实测 font_faces 2697 行 / 1322 族，而系统实际只剩 178 族）。
+-- 上方两条删除都以「本次枚举到的族」为作用域，管不到「没枚举到的族」，
+-- 所以必须补这一条按族集合取补集的删除。
+--
+-- 三条护栏：
+-- 1. `source = 'system'` —— **绝不动 imported 行**（导入字体没有平台枚举来源，
+--    不在枚举集合里是正常的，删了就丢用户的字）。
+-- 2. 调用方保证**枚举非空**才调（空枚举通常是平台枚举失败，此时清库等于丢全部字库）。
+-- 3. hidden 不作条件：族都没了，它的隐藏态没有意义。
+deleteSystemFontsNotIn:
+DELETE FROM font_faces
+WHERE source = 'system' AND familyName NOT IN ?;
+
 -- F 系列：族内是否存在已被用户隐藏的系统行（同步新字重行时继承族隐藏态）。
 anyHiddenSystemRow:
 SELECT COUNT(*) FROM font_faces
 WHERE familyName = ? AND source = 'system' AND hidden = 1;
+
+-- 系统行总数（整族级陈旧清理的前后计数，只为日志报数用）。
+countSystemRows:
+SELECT COUNT(*) FROM font_faces WHERE source = 'system';

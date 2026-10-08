@@ -29,7 +29,7 @@ class FlipSessionTest {
         assertTrue(s.onDrag(dx = -100f, pageW = 1000f))
         assertEquals(FlipSession.Phase.Dragging, s.phase)
         assertEquals(1, s.direction)
-        assertEquals(-0.1f, s.progress, 1e-4f)
+        assertEquals(0.1f, s.progress, 1e-4f)
     }
 
     @Test
@@ -52,11 +52,12 @@ class FlipSessionTest {
     fun `progress 夹在域内——过冲有限但不为零`() {
         val s = session()
         s.onDrag(dx = -5000f, pageW = 1000f)
-        assertEquals(-FlipSession.PROGRESS_MAX, s.progress, 1e-4f)
+        assertEquals(FlipSession.PROGRESS_MAX, s.progress, 1e-4f)
         s.onDrag(dx = 5000f, pageW = 1000f)
         // 方向锁定：不会因为反向拖而改朝上翻。
         assertEquals(1, s.direction)
-        assertEquals(FlipSession.PROGRESS_MAX, s.progress, 1e-4f)
+        // 归一后往回拖是负值，且同样被夹住（否则回拖过冲会飞出域外）。
+        assertEquals(-FlipSession.PROGRESS_MAX, s.progress, 1e-4f)
     }
 
     @Test
@@ -66,7 +67,7 @@ class FlipSessionTest {
         assertEquals(1, s.direction)
         s.onDrag(dx = 300f, pageW = 1000f) // 手指折回右边
         assertEquals(1, s.direction)
-        assertEquals(0.3f, s.progress, 1e-4f)
+        assertEquals(-0.3f, s.progress, 1e-4f)
     }
 
     @Test
@@ -138,13 +139,14 @@ class FlipSessionTest {
     }
 
     @Test
-    fun `上一页结算到 -1 回空闲`() {
+    fun `上一页结算同样走到 +1——归一后两个方向共用一条路径`() {
         val s = session()
         s.onDrag(dx = 600f, pageW = 1000f)
+        assertEquals(-1, s.direction)
         s.beginSettle(s.decide())
-        s.onSettleProgress(-0.5f)
+        s.onSettleProgress(0.5f)
         assertEquals(FlipSession.Phase.Settling, s.phase)
-        s.onSettleProgress(-1f)
+        s.onSettleProgress(1f)
         assertEquals(FlipSession.Phase.Idle, s.phase)
     }
 

@@ -38,9 +38,17 @@ class FlipSession {
     var direction: Int = 0
         private set
 
-    /** 当前进度（页宽的倍数），Idle 时 0。 */
+    /**
+     * 当前进度，**已按方向归一**：正值 = 朝目标页翻了这么多页，负值 = 往回拖。
+     *
+     * 归一是必须的：原始 `dx/pageW` 对「下一页」是负的（dx<0），若直接用它，
+     * `beginSettle(COMMIT)` 会从 -0.6 跳到 +1（符号反了），动画中途整页瞬移。
+     */
     var progress: Float = 0f
         private set
+
+    /** 结算目标（commit → +1，rollback → 0）；非 Settling 时无意义。 */
+    private var settleTarget: Float = 0f
 
     /**
      * 提前落位阈值（`CurlView.kt:215-221`）：commit 途中 progress 越过它就先落数据，
@@ -68,13 +76,13 @@ class FlipSession {
         return when (phase) {
             Phase.Idle -> {
                 direction = dir
-                progress = clampProgress(dx / pageW)
+                progress = clampProgress(normalize(dx / pageW, dir))
                 phase = Phase.Dragging
                 true
             }
             // 方向锁定：手势起手就定死，中途反向不重新选（否则来回拖会左右横跳）。
             Phase.Dragging -> {
-                progress = clampProgress(dx / pageW)
+                progress = clampProgress(normalize(dx / pageW, direction))
                 true
             }
             // 结算中不接受新的拖动输入：动画尾正在落位，插手会让像素与数据错位。
@@ -85,19 +93,18 @@ class FlipSession {
     /**
      * 松手裁决。[velocityX] 是抬手瞬间的横向速度（px/s，符号与 [dx] 同向；取不到传 0）。
      *
-     * 判据统一到「**朝翻页方向的行程**」上，两个量都先按 [direction] 归一：
-     *  - [travel] = `-progress * direction`：已走过多少页（0.6 = 走了六成页）；
-     *  - [forwardFling] = `-velocityX * direction`：甩动朝不朝翻页方向。
+     * [progress] 已归一（正 = 朝目标页），位移判据直接读它；速度仍需按方向归一
+     * （[forwardFling] = `-velocityX * direction`，正 = 甩向目标页）。
      *
-     * 归一之后「快甩过阈即翻」与「反方向甩判回退」是同一条规则的自然结果：
-     * 反向甩的 [forwardFling] 为负，自然不触发 commit ⇒ 回退。
-     * 不归一就会把「起手左滑、抬手右甩」（明确的改主意）判成 commit。
+     * 两个判据取或：位移过阈 **或** 甩得够快。快甩是明确意图，即使位移没过半页也该翻；
+     * 只看位移会让快速轻扫被吃掉（`CurlView` 与多数阅读器的共同口径）。
+     * 反向甩的 [forwardFling] 为负，自然不触发 commit ⇒ 回退，即「起手左滑、
+     * 抬手右甩」这种明确改主意的会被尊重。
      */
     fun decide(velocityX: Float = 0f): Decision {
         if (direction == 0) return Decision.ROLLBACK
-        val travel = -progress * direction
         val forwardFling = -velocityX * direction
-        return if (travel >= COMMIT_PROGRESS || forwardFling >= FLING_VELOCITY) {
+        return if (progress >= COMMIT_PROGRESS || forwardFling >= FLING_VELOCITY) {
             Decision.COMMIT
         } else {
             Decision.ROLLBACK
@@ -114,21 +121,18 @@ class FlipSession {
      */
     fun beginSettle(decision: Decision) {
         phase = Phase.Settling
-        progress = when (decision) {
-            Decision.COMMIT -> direction.toFloat()
-            Decision.ROLLBACK -> 0f
-        }
+        settleTarget = if (decision == Decision.COMMIT) 1f else 0f
+        progress = settleTarget
     }
 
     /** 结算途中推进（由动画器每帧调用）。到端点即回 [Phase.Idle]。 */
     fun onSettleProgress(value: Float) {
         if (phase != Phase.Settling) return
         progress = clampProgress(value)
-        val end = if (direction > 0) 1f else if (direction < 0) -1f else 0f
-        val settled = if (direction == 0) abs(progress) < 1e-3f else abs(progress - end) < 1e-3f
-        if (settled) {
+        if (abs(progress - settleTarget) < 1e-3f) {
             progress = 0f
             direction = 0
+            settleTarget = 0f
             phase = Phase.Idle
         }
     }
@@ -142,18 +146,27 @@ class FlipSession {
         phase = Phase.Idle
         direction = 0
         progress = 0f
+        settleTarget = 0f
     }
 
     /** 结算动画时长（ms）：commit 600 / rollback 500（`CurlView.kt:196-210`）。 */
     fun settleDurationMs(decision: Decision): Int =
         if (decision == Decision.COMMIT) COMMIT_MS else ROLLBACK_MS
 
-    /** 当前是否应做落位（提前落位窗口内为 true）。 */
+    /** 当前是否应做落位（提前落位窗口内为 true）。progress 已归一，直接比大小。 */
     fun shouldEarlyCommit(): Boolean =
-        phase == Phase.Settling && direction != 0 && abs(progress) >= earlyCommitAt
+        phase == Phase.Settling && direction != 0 && progress >= earlyCommitAt
 
     /** 结算是否刚刚结束（供调用方在帧回调里感知「该清会话了」）。 */
     fun isSettled(): Boolean = phase == Phase.Idle
+
+    /**
+     * 把原始 `dx/pageW` 归一成「朝目标页为正」。
+     *
+     * 手指方向与翻页方向天然相反（左滑 = 下一页 ⇒ dx<0 而 direction=+1），
+     * 不翻转符号的话 `beginSettle(COMMIT)` 会朝 −1 走，动画从当前位置反向抽搐。
+     */
+    private fun normalize(raw: Float, dir: Int): Float = -raw * dir
 
     private fun clampProgress(v: Float): Float = v.coerceIn(-PROGRESS_MAX, PROGRESS_MAX)
 

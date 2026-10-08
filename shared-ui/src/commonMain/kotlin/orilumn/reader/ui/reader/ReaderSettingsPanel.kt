@@ -99,6 +99,13 @@ import kotlin.time.Duration.Companion.milliseconds
  * 不影响就必须走 [onCommitLight]——排版提交会触发重排绑定并推落位，与开书封面解析
  * 竞态会误记封面 dismissed（封面不弹），纯开关本也无需重排。
  *
+ * **两端同规则，不各写一遍**：这条「是否影响版式」的判定收敛在
+ * [orilumn.reader.data.settings.ReaderSettings.withoutNonLayout]（亮度族 + 纯 UI 开关整族，
+ * 字段族由 `SettingsLayoutScopeTest` 锁完备性）。平板按本面板的两类回调分流
+ * （`ReaderActivity.commitSettings(typographyChanged=…)`），桌面两条回调合流、改为在
+ * `ReaderView` 里比对该共享函数——两端问同一个问题。**新增字段必须同时改两处**：
+ * 本面板的路由 + `withoutNonLayout` 的登记（漏一处 = 切开关白跑一次整书重排）。
+ *
  * 按键模型（与目录同款）：焦点落在抽屉容器本身只做按键捕获（[panelKeyEvents] 共享路由），
  * 移动是纯状态驱动——各子页共享一个 `activeIdx` + 跟随滚动（`ensureVisible`），悬停认领与
  * 键盘共用同一个 active（`kbHold` 仲裁，滚动带过静止光标不抢）。行不再走焦点遍历：

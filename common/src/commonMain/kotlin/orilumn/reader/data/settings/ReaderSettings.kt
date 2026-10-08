@@ -216,6 +216,9 @@ data class ReaderSettings(
      * `withoutLight()` 是否变化，决定是否向排版/宿主传播。
      * 亮度族 = brightness/brightnessFollowSystem/brightnessOffset/eyeProtectionLevel/
      * brightnessGestureLeft/Right/Two（纯全局，不出 overlay）。
+     *
+     * ⚠ 只含亮度族。**判断「这次设置变更要不要重排」一律用 [withoutNonLayout]**（整族），
+     * 本函数保留给「只关心亮度族」的窄口径调用点。
      */
     fun withoutLight(): ReaderSettings = copy(
         brightness = 0,
@@ -225,6 +228,42 @@ data class ReaderSettings(
         brightnessGestureLeft = false,
         brightnessGestureRight = false,
         brightnessGestureTwo = false,
+    )
+
+    /**
+     * **不进版式管线**的整族（亮度族 + 纯 UI 开关）：两端壳共用的一条规则，单一真相源。
+     *
+     * 背景：共享面板已把设置分成两类提交——排版类走 `onCommitTypography`（触发重排），
+     * 不影响排版的走 `onCommitLight`（只持久化 + 重组，见 `ReaderSettingsPanel` KDoc 语义条约）。
+     * 平板壳照此分流（`ReaderActivity.commitSettings(typographyChanged=false)` 不重排）；
+     * 桌面壳两条回调合流，只能自己比对判断，原先用的 [withoutLight] **只含亮度族**，
+     * 于是切纯 UI 开关仍会走完「本章全量重排 + 整书重排请求 + 两次落位推送」白干一场
+     * （`LayoutParamKey.fromProfile` 不含这些字段 ⇒ 磁盘表不会被误删，属浪费而非损坏）。
+     *
+     * 语义：把整族清成**中性值**，使相等比较只关心版式族（与 [withoutLight] 同构）。
+     * 布尔清 `false`、字符串清 `""` —— 不能清成某个真值，否则基线本身就是那个值时比较失效。
+     *
+     * 维护纪律（`SettingsLayoutScopeTest` 锁）：
+     *  1. 新增设置字段先判「是否进 [orilumn.reader.engine.text.LayoutParamKey]」——
+     *     **不进就必须登记进本函数**，否则又变一次「切开关触发全量重排」；
+     *  2. 登记后，面板那一行也必须走 `onCommitLight`（两处必须同改，`SettingsLayoutScopeTest`
+     *     只锁字段族，改不到面板路由——面板路由由该测试的源码扫描断言兜底）。
+     */
+    fun withoutNonLayout(): ReaderSettings = copy(
+        brightness = 0,
+        brightnessFollowSystem = false,
+        brightnessOffset = 0,
+        eyeProtectionLevel = 0,
+        brightnessGestureLeft = false,
+        brightnessGestureRight = false,
+        brightnessGestureTwo = false,
+        // 纯 UI 开关族（f2571fa 起面板已走 onCommitLight，此处补桌面壳的判定侧）
+        pageAnim = false,
+        pageAnimationMode = "",
+        autoContinue = false,
+        pageNum = false,
+        coverStretch = false,
+        showHiddenFonts = false,
     )
 
     companion object {

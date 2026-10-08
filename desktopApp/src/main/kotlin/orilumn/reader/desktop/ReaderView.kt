@@ -121,11 +121,15 @@ fun ReaderView(
         }?.family
 
     // 版式防抖 + 原位重排（R5/R15，与平板 tick 轻刷新 + 关面板全套同序）：
-    // 亮度分叉（与平板同规则，共享 `withoutLight`）：纯亮度变化不进版式管线；
+    // 亮度/纯 UI 分叉（与平板同规则，共享 `withoutNonLayout`）：不进版式管线的那一族；
     // 排版变化走宿主两段式（previewToSettings 行锚合位 + commitRelayout 全套），经 externalPos 推送阅读面，
     // 不再重建宿主（旧 `remember(layoutSettings)` 整宿主重建丢内存位是跳章首页根因）。
     // 视口/换书/session 仍走下方的宿主重建（存档定位）。
     var appliedLayout by remember(book) { mutableStateOf(settings) }
+    // 版式快照（只用于「这次设置变更是否要重排」的比较基准）：纯 UI 开关变更也要跟随，
+    // 否则它会被反复判成「版式变化」而每次都重排。语义与 `appliedLayout` 分开是刻意的：
+    // 前者喂宿主构造，后者是重排判定基线。
+    var layoutSnapshot by remember(book) { mutableStateOf(settings) }
     var externalPos by remember(book) { mutableStateOf<ReaderPos?>(null) }
     var contentRevision by remember(book) { mutableStateOf(0) }
     // 真背光（macOS DDC；scan 一次常驻）：支持时亮度滑块 -50..100（>0 下发硬件），
@@ -241,7 +245,16 @@ fun ReaderView(
         // 面板外提交（如夜间/字体回退）沿旧 800ms 静默全套。修复：推送必须在 NonCancellable
         // 中执行，避免 LaunchedEffect 重启取消导致已完成的引擎重排被丢弃。
         LaunchedEffect(book, settings) {
-            if (settings.withoutLight() == appliedLayout.withoutLight()) return@LaunchedEffect
+            // 版式快照无条件跟随（宿主重建要用最新值，见 `remember(book, session)` 的 appliedLayout）；
+            // 是否重排则问共享规则 [ReaderSettings.withoutNonLayout]（亮度族 + 纯 UI 开关整族）——
+            // 与平板同源：平板按面板两类提交分流（`commitSettings(typographyChanged)`），
+            // 桌面两条回调合流，只能在此比对。原先用 withoutLight()（只含亮度族）⇒ 切纯 UI
+            // 开关会白跑一次本章全量重排 + 整书重排请求 + 两次落位推送。
+            if (settings.withoutNonLayout() == layoutSnapshot.withoutNonLayout()) {
+                appliedLayout = settings
+                return@LaunchedEffect
+            }
+            layoutSnapshot = settings
             val panelWasOpen = settingsOpen
             val host = desktopHost ?: return@LaunchedEffect
             val anchor = currentPos

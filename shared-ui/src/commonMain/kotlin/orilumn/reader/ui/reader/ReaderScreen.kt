@@ -53,12 +53,7 @@ import kotlinx.coroutines.withTimeoutOrNull
  */
 private const val PAGE_IMAGE_WARM_TIMEOUT_MS = 800L
 
-/** 跨页缓存键（稳定身份，与几何无关）：同图跨页 `yTop/widthPx` 不同也命中。 */
-private fun imgKeyOf(img: orilumn.reader.engine.skia.PageImage): String =
-    "${img.chapterHref}|${img.src}|${img.widthPx}"
-
-/** 背景图缓存键。 */
-private fun bgKeyOf(href: String, src: String): String = "$href|$src"
+// 跨页缓存键 imgKeyOf / bgKeyOf 已搬到 PageContent.kt（P1-2：页内容成模块后它们有两个用户）。
 
 /**
  * S28 阅读面（shared-ui commonMain）：画布 + 手势 + 进度 + 亮度遮罩 + 字体切换逻辑的统一载体。
@@ -663,98 +658,23 @@ fun ReaderScreen(
                 currentHost.pageProgress(pos).toFloat().coerceIn(0f, 1f)
             }
             val chapterTitle = remember(pos) { currentHost.unitTitle(pos.chapter) }
-            val lines = remember(pos, contentRevision, hostRevision) { currentHost.pageLines(pos) }
-            // 盒背景/边框：与行同一切片口径，画布内画在文字之下（翻页即随 pos 刷新）。
-            val pageBackgrounds = remember(pos, contentRevision, hostRevision) {
-                runCatching { currentHost.pageBackgrounds(pos) }.getOrNull()
-            }
-            // 插图几何与位图：几何同步取（廉价）；位图跨页 LRU 缓存（`imgCache`，与几何无关的
-            // 稳定身份为键），回访页首帧即有图；未命中才异步解码入库。翻页不再清空旧图。
-            val pageImages = remember(pos, contentRevision, hostRevision) {
-                runCatching { currentHost.pageImages(pos) }.getOrNull()
-            }
-            var imageBitmaps by remember(pos, contentRevision, hostRevision) {
-                mutableStateOf(pageImages
-                    ?.mapNotNull { img -> imgCache.get(imgKeyOf(img))?.let { img to it } }
-                    ?.toMap(LinkedHashMap()) ?: emptyMap())
-            }
-            LaunchedEffect(pos, contentRevision, hostRevision, pageImages) {
-                val imgs = pageImages?.takeIf { it.isNotEmpty() } ?: run {
-                    imageBitmaps = emptyMap()
-                    return@LaunchedEffect
-                }
-                val missing = imgs.filter { imgCache.get(imgKeyOf(it)) == null }
-                if (missing.isEmpty()) {
-                    // 全命中：首帧已由上面的 remember 直接摆出，无灰闪、无重组。
-                    val full = imgs.mapNotNull { img -> imgCache.get(imgKeyOf(img))?.let { img to it } }
-                        .toMap(LinkedHashMap(imgs.size))
-                    if (full != imageBitmaps) imageBitmaps = full
-                    return@LaunchedEffect
-                }
-                // 并行解码（摄影类一页多图时串行要几秒，全程灰块）：每图一个 async，
-                // 先全部并发再统一收敛，避免逐张 setState 反复重组。
-                val deferred = missing.map { img ->
-                    async {
-                        img to runCatching { currentHost.loadPageImage(img) }.getOrNull()
-                    }
-                }
-                for ((img, bmp) in deferred.awaitAll()) {
-                    if (bmp != null) imgCache.put(imgKeyOf(img), bmp)
-                }
-                imageBitmaps = imgs.mapNotNull { img -> imgCache.get(imgKeyOf(img))?.let { img to it } }
-                    .toMap(LinkedHashMap(imgs.size))
-            }
-            // P3-b 背景图：按 url 跨页缓存（同上）；失败项直接缺席（該幅只留底色），不入库。
-            var bgImages by remember(pos, contentRevision, hostRevision) { mutableStateOf<Map<String, orilumn.reader.engine.skia.DecodedImage>>(emptyMap()) }
-            LaunchedEffect(pos, contentRevision, hostRevision, pageBackgrounds) {
-                val refs = pageBackgrounds?.mapNotNull { bg ->
-                    bg.bgSrc?.takeIf { it.isNotBlank() }?.let { bg.bgChapterHref to it }
-                }?.distinct().orEmpty()
-                if (refs.isEmpty()) {
-                    bgImages = emptyMap()
-                    return@LaunchedEffect
-                }
-                val cached = refs.mapNotNull { ref ->
-                    bgCache.get(bgKeyOf(ref.first, ref.second))?.let { bgKeyOf(ref.first, ref.second) to it }
-                }.toMap(LinkedHashMap(refs.size))
-                val missing = refs.filter { bgCache.get(bgKeyOf(it.first, it.second)) == null }
-                if (missing.isEmpty()) {
-                    if (cached != bgImages) bgImages = cached
-                    return@LaunchedEffect
-                }
-                val deferred = missing.map { ref ->
-                    async {
-                        bgKeyOf(ref.first, ref.second) to runCatching {
-                            currentHost.loadBackgroundImage(ref.first, ref.second)
-                        }.getOrNull()
-                    }
-                }
-                for ((key, bmp) in deferred.awaitAll()) {
-                    if (bmp != null) bgCache.put(key, bmp)
-                }
-                bgImages = refs.mapNotNull { ref ->
-                    bgCache.get(bgKeyOf(ref.first, ref.second))?.let { bgKeyOf(ref.first, ref.second) to it }
-                }.toMap(LinkedHashMap(refs.size))
-            }
+            // P1-2：页内容抽成对任意 pos 可复用的 `rememberPageContent`（见 PageContent.kt）。
+            // 本步是纯重构，数据流与 remember 键一字未改——像素必须与本步前全等。
+            val pageContent = rememberPageContent(
+                host = currentHost,
+                pos = pos,
+                contentRevision = contentRevision,
+                hostRevision = hostRevision,
+                contentWidthPx = (contentRight - contentLeft).toInt(),
+                contentHeightPx = (contentBottom - contentTop).toInt(),
+                bgColor = profile.bgColor,
+                inkColor = profile.fgColor,
+                imgCache = imgCache,
+                bgCache = bgCache,
+            )
 
-            // 画布：行窗口经 LineWindowDrawer 落到 skiko Canvas（见 ReaderPageCanvas）。
-            // P0b 页身份键：页 + 视口 + 修订号 + 主题色 → 渲染器多页位图缓存的下标。
-            // 少任何一项都会静默复用旧像素（视口变、字重变、换色都必须重画）。
-            val rasterKey = remember(pos, contentRevision, hostRevision, pxWidth, pxHeight, light) {
-                // 栅格尺寸就是内容区尺寸（见下方 contentRect* 传参），故键里的宽高与画布 1:1。
-                PageRasterKey(
-                    chapter = pos.chapter,
-                    charStart = pos.slice.charStart,
-                    charEnd = pos.slice.charEnd,
-                    widthPx = (contentRight - contentLeft).toInt(),
-                    heightPx = (contentBottom - contentTop).toInt(),
-                    contentRevision = contentRevision,
-                    bgColor = profile.bgColor,
-                    inkColor = profile.fgColor,
-                )
-            }
             ReaderPageCanvas(
-                lines = lines,
+                lines = pageContent?.lines,
                 contentLeft = contentLeft,
                 contentTop = contentTop,
                 contentRectLeft = contentLeft,
@@ -764,14 +684,14 @@ fun ReaderScreen(
                 pageBg = profile.bgColor,
                 inkColor = profile.fgColor,
                 modifier = Modifier.fillMaxSize(),
-                pageImages = pageImages,
-                imageBitmaps = imageBitmaps,
-                pageBackgrounds = pageBackgrounds,
-                bgImages = bgImages,
+                pageImages = pageContent?.pageImages,
+                imageBitmaps = pageContent?.imageBitmaps,
+                pageBackgrounds = pageContent?.pageBackgrounds,
+                bgImages = pageContent?.bgImages ?: emptyMap(),
                 // 字重这类纯字形变更行数据完全相等，靠修订号强制重画（见 ReaderPageCanvas）。
                 contentRevision = contentRevision,
                 // P0b：页身份键（多页位图缓存下标）
-                rasterKey = rasterKey,
+                rasterKey = pageContent?.rasterKey,
             )
             // 亮度/护眼遮罩：纯绘制于画布之上、栏之下。
             ReaderLightMask(light = light, modifier = Modifier.fillMaxSize())

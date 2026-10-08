@@ -5,6 +5,10 @@ plugins {
     alias(libs.plugins.android.kmp.library)
 }
 
+// Skiko JVM 原生库按当前 OS 选择（jvmMain runtimeOnly 读 project.extra，
+// 唯一映射见该文件头注）。
+apply(from = "../gradle/skiko-jvm-runtime.gradle.kts")
+
 kotlin {
     android {
         namespace = "orilumn.reader.engine.skia"
@@ -33,13 +37,14 @@ kotlin {
             api(libs.okio)
         }
 
-        // jvmMain 的桌面 runtime（skiko-awt dylib）仅 JVM 可见：android 有独立 androidMain
-        // actual + skiko-android AAR，不再复用 jvmMain（旧 androidMain.dependsOn(jvmMain)
-        // 会把 awt jar 漏进 APK 造成 Duplicate class）。
+        // jvmMain 的桌面 runtime（skiko-awt so/dylib）仅 JVM 可见：android 有独立
+        // androidMain actual + skiko-android AAR，不再复用 jvmMain（旧
+        // androidMain.dependsOn(jvmMain) 会把 awt jar 漏进 APK 造成 Duplicate class）。
         jvmMain.dependencies {
-            // Skiko JVM 原生库（x64+arm64 dylib 同包）：仅 macOS 开发机。CI/其他 OS 需按平台补对应
-            // skiko-awt-runtime-<os>-<arch> artifact（跨平台构建再统一处理，见 docs 修订记录）。
-            runtimeOnly(libs.skiko.awt.runtime.macos)
+            // Skiko JVM 原生库按当前 OS 选择（唯一映射在
+            // gradle/skiko-jvm-runtime.gradle.kts，desktopApp 同口径）。
+            // 嵌套块里必须显式 project.extra（裸 extra 解析到脚本自身容器）。
+            runtimeOnly(project.extra["skikoJvmRuntime"] as Any)
         }
 
         jvmTest.dependencies {

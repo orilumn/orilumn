@@ -64,8 +64,12 @@ okio = { group = "com.squareup.okio", name = "okio", version.ref = "okio" }
 kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "serialization" }
 # Skiko：Skia 的 Kotlin 绑定；engine-skia 唯一排版/绘制底座（G 阶段起使用）
 skiko = { group = "org.jetbrains.skiko", name = "skiko", version.ref = "skiko" }
-# Skiko JVM 原生库（macOS，x64+arm64 dylib 同包）：S23 起 jvmTest 加载 Skia native 所需
+# Skiko JVM 原生库（JVM 宿主的 dylib/so）：仅 macOS 开发机时期只发 mac；
+# Linux/Windows 各取对应 arch（MavenCentral 直发）。OS 选择统一在
+# gradle/skiko-jvm-runtime.gradle.kts（engine-skia jvmMain 与 desktopApp 共用）。
 skiko-awt-runtime-macos = { group = "org.jetbrains.skiko", name = "skiko-awt-runtime-macos-x64", version.ref = "skiko" }
+skiko-awt-runtime-linux = { group = "org.jetbrains.skiko", name = "skiko-awt-runtime-linux-x64", version.ref = "skiko" }
+skiko-awt-runtime-windows = { group = "org.jetbrains.skiko", name = "skiko-awt-runtime-windows-x64", version.ref = "skiko" }
 # Skiko Android 原生库（compose-dev 独发，AAR 不含 .so）：app 经 jniLibs 解压随 APK 打包；
 # skiko 只发 arm64/x64（无 32 位），与 ndk.abiFilters 对齐
 skiko-android-runtime-arm64 = { group = "org.jetbrains.skiko", name = "skiko-android-runtime-arm64", version.ref = "skiko" }

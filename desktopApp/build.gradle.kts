@@ -8,10 +8,19 @@ plugins {
     alias(libs.plugins.compose.multiplatform)
 }
 
+// Skiko JVM 原生库按当前 OS 选择（唯一映射见该文件头注）。
+apply(from = "../gradle/skiko-jvm-runtime.gradle.kts")
+
 kotlin {
     compilerOptions {
         jvmTarget.set(JvmTarget.JVM_17)
     }
+}
+
+// 与 Kotlin jvmTarget 对齐：JDK ≥18 的机器上 compileJava 默认目标跟随
+// JDK 版本（21），与 compileKotlin(17) 不一致会直接构建失败。
+tasks.withType<JavaCompile> {
+    options.release.set(17)
 }
 
 dependencies {
@@ -41,11 +50,13 @@ dependencies {
 
     // JNA：macOS CoreText 桥（F5 中文名方案A，`MacFamilyNames` 直调
     // CTFontCopyDisplayName 取本地化族名）；仅桌面 JVM 使用（KMP 模块不引）。
+    // 非 mac 平台 MacFamilyNames 内部有 isMac 门控（非 mac 恒空表），JNA 库本身跨平台。
     implementation(libs.jna)
 
-    // Skiko JVM 原生库（与 engine-skia jvmMain 同口径：macOS x64+arm64 dylib 同包；
-    // 跨平台构建再统一处理）。
-    runtimeOnly(libs.skiko.awt.runtime.macos)
+    // Skiko JVM 原生库（与 engine-skia jvmMain 同口径）：按当前 OS 选择，
+    // 唯一映射在 gradle/skiko-jvm-runtime.gradle.kts。
+    // 嵌套块里必须显式 project.extra（裸 extra 解析到脚本自身容器）。
+    runtimeOnly(project.extra["skikoJvmRuntime"] as Any)
 
     testImplementation(libs.junit)
 }
@@ -58,7 +69,15 @@ compose.desktop {
             packageVersion = providers.gradleProperty("orilumn.versionName").get()
             description = "Orilumn"
             vendor = "Orilumn"
-            targetFormats(TargetFormat.Dmg)
+            // 打包格式按当前 OS 选：Dmg 仅 macOS 合法，Deb 仅 Linux 合法
+            // （jpackage 对不支持的格式会直接失败，故不能无条件列全）。
+            val pkgOs = org.gradle.internal.os.OperatingSystem.current()
+            targetFormats(
+                *buildList {
+                    if (pkgOs.isMacOsX) add(TargetFormat.Dmg)
+                    if (pkgOs.isLinux) add(TargetFormat.Deb)
+                }.toTypedArray(),
+            )
             // 打包图标：macOS 要 .icns，Linux 要 .png（均由根目录 icon.png 生成；
             // Windows 要 .ico，暂未生成故不配置，用默认图标）。
             macOS {

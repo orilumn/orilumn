@@ -27,7 +27,7 @@ Orilumn is an EPUB reader for Android tablets and phones, built with a self-deve
 ./gradlew :app:installDebug
 ```
 
-### Desktop (macOS)
+### Desktop (macOS / Linux)
 
 Trial run needs no packaging:
 
@@ -35,15 +35,33 @@ Trial run needs no packaging:
 ./gradlew :desktopApp:run
 ```
 
-Packaging (`createDistributable`) requires a **full JDK 17** with `jpackage`/`jlink`
-(Android Studio's bundled JBR lacks `jpackage` and fails `checkRuntime`):
+桌面壳是纯 JVM 模块，但 `:common` / `:engine-skia` 含 Android 目标
+（AGP 配置期即要 SDK），故**任何桌面机构建都需 JDK 17+ 与 Android SDK**
+（后者只需 cmdline-tools + `platforms;android-36`，不必装 IDE）：
 
 ```bash
-brew install --cask temurin@17
+export JAVA_HOME=<jdk-17+ 根目录>          # 如 ~/tools/jdk-21
+export ANDROID_HOME=<Android SDK 根目录>    # 如 ~/Android/Sdk
+./gradlew :desktopApp:run
+```
+
+打包格式按当前 OS 自动选（macOS=Dmg，Linux=Deb）。Packaging
+（`createDistributable`）需要带 `jpackage`/`jlink` 的完整 JDK
+（Android Studio 的 JBR 缺 `jpackage`）：
+
+```bash
+brew install --cask temurin@17        # macOS
 export JAVA_HOME=/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home
 ./gradlew :desktopApp:createDistributable
-# output: desktopApp/build/compose/binaries/main/app/desktopApp.app
+# macOS 输出: desktopApp/build/compose/binaries/main/app/desktopApp.app
 ```
+
+**Linux 已知缺口**（桌面壳其余功能与 macOS 同源同行为）：
+
+- 外接显示器真背光（DDC/CI）：macOS 走 IOKit；Linux 暂未接
+  （`DisplayBrightness.currentOs()` 回落无 DDC 实现，亮度滑块只画遮罩）。
+- 书内嵌 **woff2** 字体：Linux skiko 构建不解 woff2（TTF/TTC 正常），
+  内嵌字体回退系统字体（`BookFontPoolTest` 按此门控）。
 
 Tagging `v*` triggers the GitHub Actions workflow to build a signed APK and attach it to a Release. Signing keys are injected via GitHub Secrets and never committed.
 

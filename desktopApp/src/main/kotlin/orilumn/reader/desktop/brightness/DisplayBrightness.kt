@@ -32,4 +32,30 @@ interface DisplayBrightness {
 
     /** 置所有 DDC 外接屏亮度（0..max，钳制；至少一台成功回 true）。 */
     fun set(level: Int): Boolean
+
+    companion object {
+        /**
+         * 按当前 OS 选实现（唯一构造入口，平台差异收敛于此）：
+         * macOS 走 IOKit DDC（[MacDisplayBrightness]）；其余平台暂无 DDC
+         * 通路，回落 [UnsupportedDisplayBrightness]（ddcCapable=false ⇒
+         * 调用方按接口契约回落遮罩，亮度滑块钳到纯遮罩档）。
+         *
+         * TODO(Linux DDC)：Linux 外接屏 DDC/CI 可经 /dev/i2c-N（i2c-dev
+         * 模块 + 用户组权限）走同一 [DdcPackets] 组帧，接 [DisplayBrightness]
+         * 同一契约即可，调用方零改动。
+         */
+        fun currentOs(): DisplayBrightness =
+            if (System.getProperty("os.name")?.contains("Mac", ignoreCase = true) == true) {
+                MacDisplayBrightness()
+            } else {
+                UnsupportedDisplayBrightness
+            }
+    }
+}
+
+/** 无 DDC 通路平台的回落实现：probe 恒空（⇒ ddcCapable()=false），读写空转。 */
+private object UnsupportedDisplayBrightness : DisplayBrightness {
+    override fun probe(): List<DisplayBrightness.Display> = emptyList()
+    override fun current(): Int? = null
+    override fun set(level: Int): Boolean = false
 }

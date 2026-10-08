@@ -132,9 +132,10 @@ fun ReaderView(
     var layoutSnapshot by remember(book) { mutableStateOf(settings) }
     var externalPos by remember(book) { mutableStateOf<ReaderPos?>(null) }
     var contentRevision by remember(book) { mutableStateOf(0) }
-    // 真背光（macOS DDC；scan 一次常驻）：支持时亮度滑块 -50..100（>0 下发硬件），
+    // 真背光（macOS DDC；scan 一次常驻；非 mac 平台由 currentOs() 回落
+    // 无 DDC 实现）：支持时亮度滑块 -50..100（>0 下发硬件），
     // 不支持时钳到 -50..0（纯遮罩，物理调亮不可达也不给滑）。
-    val displayBrightness = remember { orilumn.reader.desktop.brightness.MacDisplayBrightness() }
+    val displayBrightness = remember { orilumn.reader.desktop.brightness.DisplayBrightness.currentOs() }
     var ddcCapable by remember(book) { mutableStateOf<Boolean?>(null) }
     LaunchedEffect(book) {
         ddcCapable = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {

@@ -1,8 +1,9 @@
 package orilumn.reader.desktop
 
 import orilumn.reader.data.font.FontParser
-import java.io.File
-import java.io.RandomAccessFile
+import orilumn.reader.engine.skia.systemFontFamilies
+import orilumn.reader.engine.skia.systemFonts
+import org.jetbrains.skia.FontMgr
 
 /**
  * 方案B：系统字体中文族名扫描器 —— 不依赖 CoreText / 不依赖字典，直接读 OpenType
@@ -13,21 +14,15 @@ import java.io.RandomAccessFile
  * 接入链（ReaderView）：name 表直读 **优先** → 方案A `MacFamilyNames`（CoreText）补缺
  * → `FontEntry.display` 无本地化名时回退族名本身。
  *
- * 读法：只读取每个字体文件的 sfnt 表目录 + name 表区间（RandomAccessFile 定位区间），
- * 不整读大文件（STHeiti Light.ttc 55MB 只读头几十 KB），进程内缓存一次。
+ * 字体发现走 skiko 枚举（[systemFontFamilies] + `matchFamily` + `getTypeface`
+ * + `getTableData("name")`，与 engine-skia `styleNameZh` 同一套平台无关 API）：
+ * 枚举出的正是阅读器能渲染的字体，macOS（CoreText）/Linux（fontconfig）/
+ * Windows（GDI）同一段代码，不读平台字体目录。只读 name 表字节，
+ * 进程内缓存一次。
  */
 object NameTableChineseNames {
 
     private val parser = FontParser()
-
-    private val fontDirs = listOf(
-        "/System/Library/Fonts",
-        "/System/Library/Fonts/Supplemental",
-        "/System/Library/AssetsV2/com_apple_MobileAsset_Font7",
-        "/Library/Fonts",
-        "${System.getProperty("user.home")}/Library/Fonts",
-        "${System.getProperty("user.home")}/.fonts",
-    )
 
     @Volatile private var cache: Map<String, String>? = null
 
@@ -43,83 +38,36 @@ object NameTableChineseNames {
     }
 
     private fun scanAll(): Map<String, String> = buildMap {
-        for (dir in fontDirs) {
-            val d = File(dir)
-            if (!d.isDirectory()) continue
-            d.walkTopDown().filter { f ->
-                val n = f.name.lowercase()
-                n.endsWith(".ttf") || n.endsWith(".otf") || n.endsWith(".ttc") || n.endsWith(".otc")
-            }.forEach { f ->
-                for (names in faceNamesOf(f)) {
-                    val latin = names.latin ?: continue
-                    val chinese = names.chinese ?: continue
-                    if (chinese.any { it.code in 0x4E00..0x9FFF } && latin !in this) {
-                        put(latin, chinese)
-                    }
-                }
+        val mgr = runCatching { systemFonts() }.getOrNull() ?: return@buildMap
+        for (family in runCatching { systemFontFamilies() }.getOrDefault(emptyList())) {
+            val chinese = chineseOf(mgr, family) ?: continue
+            if (chinese.any { it.code in 0x4E00..0x9FFF } && family !in this) {
+                put(family, chinese)
             }
         }
     }
 
     /**
-     * 列出文件内每个面（TTC 每面独立 name 表，逐个解析；TTF/OTF 单面）的 latin/中文名对。
-     * 只读各区间的表目录 + name 表，不整读大文件；任一面失败不影响其他面。
+     * 取一族的中文名：`matchFamily` 命中的首个 typeface 的
+     * `name` 表字节，重组为最小 sfnt（sfnt 头 + 1 条目录项 + name 表本体）
+     * 后交 [FontParser.familyNamesOf]（TTC 已由 skiko 按面枚举，无需再拆）。
+     * 键用枚举族名（[namesFor] 的查询键）， latin 记录仅作可用性守卫。
      */
-    private fun faceNamesOf(file: File): List<FontParser.FamilyNames> = runCatching {
-        RandomAccessFile(file, "r").use { raf ->
-            if (raf.length() < 12) return@use emptyList()
-            val head = ByteArray(16)
-            raf.readFully(head)
-            val isTtc = String(head, 0, 4, Charsets.US_ASCII) == "ttcf"
-            val numFonts = if (isTtc) {
-                val n = intAt(head, 8)
-                if (n < 1 || n > 128) return@use emptyList()
-                n
-            } else 1
-            val bases = if (isTtc) {
-                raf.seek(12)
-                val offs = ByteArray(numFonts * 4)
-                raf.readFully(offs)
-                List(numFonts) { intAt(offs, it * 4) }
-            } else listOf(0)
-            bases.mapNotNull { base ->
-                readFaceNameBytes(raf, base)?.let {
-                    runCatching { parser.familyNamesOf(it) }.getOrNull()
+    private fun chineseOf(mgr: FontMgr, family: String): String? = runCatching {
+        mgr.matchFamily(family)?.use { set ->
+            if (set.count() <= 0) return@runCatching null
+            set.getTypeface(0)?.use { tf ->
+                tf.getTableData("name")?.use { data ->
+                    val table = data.bytes
+                    if (table.isEmpty()) return@use null
+                    parser.familyNamesOf(minimalSfnt(table))?.chinese
                 }
             }
         }
-    }.getOrDefault(emptyList())
+    }.getOrNull()
 
-    /**
-     * 只读单个面的 sfnt 表目录 + 定位 'name' 表区间，重组为最小可解析字节
-     * （sfnt 头 + 单个 name 表目录项 + name 表本体），供 [FontParser.familyNamesOf]。
-     */
-    private fun readFaceNameBytes(raf: RandomAccessFile, base: Int): ByteArray? = runCatching {
-        raf.seek((base + 4).toLong())
-        val numTables = raf.readUnsignedShort()
-        if (numTables <= 0 || numTables > 4096) return@runCatching null
-
-        raf.seek((base + 12).toLong())
-        val dir = ByteArray(numTables * 16)
-        raf.readFully(dir)
-
-        var nameOff = -1
-        var nameLen = -1
-        for (i in 0 until numTables) {
-            val rec = i * 16
-            if (String(dir, rec, 4, Charsets.US_ASCII) == "name") {
-                nameOff = intAt(dir, rec + 8)
-                nameLen = intAt(dir, rec + 12)
-                break
-            }
-        }
-        if (nameOff < 0 || nameLen <= 0 || nameLen > 1 shl 20) return@runCatching null
-
-        raf.seek(nameOff.toLong())
-        val table = ByteArray(nameLen)
-        raf.readFully(table)
-
-        // 重组最小字模：sfnt 头(12) + 1 条目录项(16) + name 表本体。
+    /** 重组最小字模：sfnt 头(12) + 1 条目录项(16) + name 表本体。 */
+    private fun minimalSfnt(table: ByteArray): ByteArray {
         val out = ByteArray(28 + table.size)
         out[0] = 0; out[1] = 1; out[2] = 0; out[3] = 0 // sfnt version 1.0
         out[4] = 0; out[5] = 1 // numTables = 1
@@ -129,12 +77,8 @@ object NameTableChineseNames {
         putInt(out, rec + 8, 28)
         putInt(out, rec + 12, table.size)
         System.arraycopy(table, 0, out, 28, table.size)
-        out
-    }.getOrNull()
-
-    private fun intAt(b: ByteArray, off: Int): Int =
-        (b[off].toInt() and 0xff shl 24) or (b[off + 1].toInt() and 0xff shl 16) or
-            (b[off + 2].toInt() and 0xff shl 8) or (b[off + 3].toInt() and 0xff)
+        return out
+    }
 
     private fun putInt(b: ByteArray, off: Int, v: Int) {
         b[off] = (v ushr 24).toByte()

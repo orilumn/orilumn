@@ -355,45 +355,53 @@ fun ReaderScreen(
         Logger.d("Orilumn.TAP", "$action DROPPED (openPos null, no fallback)")
         return null
     }
-    fun flip(direction: Int) {
+    /**
+     * 落位并**等待结果**：返回真正落定的 pos；被 BUSY-DROP / 边界 / 无源时返回 null。
+     *
+     * 为什么要「可等待」而不是发射后不管：翻页动画提交后必须核对「数据真的换了吗」，
+     * 换不了就得把动画拨回原页（见 [endSlide]）。发射后立刻返回的话那次核对必然
+     * 读到着陆前的 `openPos`，恒判失败 ⇒ 每次提交都回滚 ⇒ 观感是「翻到位又弹回去」。
+     */
+    suspend fun flipAwait(direction: Int): ReaderPos? {
         // 封面页内翻页：前进回正文第一页（现查 fresh 落位，走漏斗，可存档），
         // 落定即记显式离开（否则推送带来的 effect 重算又弹回去）；封面已是第一页，后退无操作。
         if (coverVisible) {
             if (direction > 0 && coverBmp != null) {
-                scope.launch {
-                    val target = runCatching { currentHost.bookStart() }.getOrNull() ?: return@launch
-                    val landed = anchorFunnel.navigate(
-                        action = "cover-forward",
-                        read = { target },
-                        commit = ::markPositionChanged,
-                    ) { target }
-                    if (landed != null) {
-                        coverDismissed = true
-                        coverVisible = false
-                    }
+                val target = runCatching { currentHost.bookStart() }.getOrNull() ?: return null
+                val landed = anchorFunnel.navigate(
+                    action = "cover-forward",
+                    read = { target },
+                    commit = ::markPositionChanged,
+                ) { target }
+                if (landed != null) {
+                    coverDismissed = true
+                    coverVisible = false
                 }
+                return landed
             }
-            return
+            return null
         }
         // 正文第一页回翻且有封面 → 进封面（只读，不经过引擎翻页/存档）。
         if (direction < 0 && isBookStart(openPos)) {
             coverVisible = true
-            return
+            return null
         }
-        scope.launch {
-            anchorFunnel.navigate(
-                action = "tap-flip",
-                read = { resolveNavPos("tap-flip") },
-                commit = ::markPositionChanged,
-            ) { p ->
-                Logger.d("Orilumn.TAP", "tap-flip dispatch dir=$direction from ch=${p.chapter} char=${p.slice?.charStart}")
-                val landed = currentHost.adjacent(p, direction)
-                // 引擎侧无声吞翻页时（返回 null），这里是唯一目击者——与 Orilumn.FLIP 对账。
-                Logger.d("Orilumn.TAP", "tap-flip result dir=$direction " + (landed?.let { "landed ch=${it.chapter} char=${it.slice?.charStart}" } ?: "NULL (engine returned null)"))
-                if (landed != null) warmPageImages(landed)
-                landed
-            }
+        return anchorFunnel.navigate(
+            action = "tap-flip",
+            read = { resolveNavPos("tap-flip") },
+            commit = ::markPositionChanged,
+        ) { p ->
+            Logger.d("Orilumn.TAP", "tap-flip dispatch dir=$direction from ch=${p.chapter} char=${p.slice.charStart}")
+            val landed = currentHost.adjacent(p, direction)
+            // 引擎侧无声吞翻页时（返回 null），这里是唯一目击者——与 Orilumn.FLIP 对账。
+            Logger.d("Orilumn.TAP", "tap-flip result dir=$direction " + (landed?.let { "landed ch=${it.chapter} char=${it.slice.charStart}" } ?: "NULL (engine returned null)"))
+            if (landed != null) warmPageImages(landed)
+            landed
         }
+    }
+
+    fun flip(direction: Int) {
+        scope.launch { flipAwait(direction) }
     }
 
     fun jumpChapter(direction: Int) {
@@ -451,6 +459,17 @@ fun ReaderScreen(
     }
 
     /**
+     * 两处 pos 是否指同一页。
+     *
+     * **不能用 `==`**：`ReaderPos.slice` 是排版侧的页切片对象，重排后落位是行锚页
+     * （blockStart=-1）、内存表拒绝回填旧表，两次查询拿到的切片不是同一实例 ⇒
+     * 对象比较**永不等**。项目在 [isBookStart] 的注释里已经踩过并明写「不比较整页
+     * 切片对象」。故按章 + 首字符比，与封面首位判定同口径。
+     */
+    fun samePage(a: ReaderPos?, b: ReaderPos?): Boolean =
+        a != null && b != null && a.chapter == b.chapter && a.slice.charStart == b.slice.charStart
+
+    /**
      * 松手：裁决 → 结算动画；commit 同时发起真落位。
      *
      * **落位失败必须回滚动画**（§11.1 第 4 步）：`AnchorFunnel` 会 BUSY-DROP 或在边界返回
@@ -482,16 +501,22 @@ fun ReaderScreen(
                 slideDirection = 0
                 return@launch
             }
-            // 动画到位 ⇒ 落数据。flip() 内部走锚页漏斗，可能被 BUSY-DROP 或在边界返回 null，
-            // 所以落完必须核 openPos 真的换了；没换就把动画拨回原页（见 KDoc「落位失败必须回滚」）。
+            // 动画到位 ⇒ 落数据。flipAwait 会**等**落位结果：被 BUSY-DROP 或在边界返回 null 时
+            // 拿不到落定 pos，就把动画拨回原页（见 KDoc「落位失败必须回滚」）。
+            // 早先用发射后不管的 flip() + 立刻核 openPos，那次核对必然读到着陆前的值 ⇒
+            // 恒判失败 ⇒ 每次提交都回滚 ⇒ 观感是「翻到位又弹回上一页」。
             val expected = slideTargetPos
-            flip(commitDir)
-            if (expected != null && openPos == expected) {
+            val landed = flipAwait(commitDir)
+            if (landed != null && (expected == null || samePage(landed, expected))) {
                 slideTargetPos = null
                 slideProgress = 0f
                 slideDirection = 0
             } else {
-                Logger.d("Orilumn.TAP", "flip-commit landed-nowhere (open=${openPos?.slice?.charStart} want=${expected?.slice?.charStart}) ⇒ rollback")
+                Logger.d(
+                    "Orilumn.TAP",
+                    "flip-commit landed-nowhere (landed=${landed?.let { "ch=${it.chapter} char=${it.slice.charStart}" }} " +
+                        "want=${expected?.let { "ch=${it.chapter} char=${it.slice.charStart}" }}) ⇒ rollback",
+                )
                 rollbackSlide()
             }
         }
@@ -502,9 +527,13 @@ fun ReaderScreen(
      *
      * 不作废的后果是「拿旧页配新数据」：会话还锁着旧的两页，而 openPos 已经换成第三页，
      * 位移算式继续用旧方向画 ⇒ 画面与内容永久错位。
+     *
+     * 判「换没换」必须用 [samePage] 而不是 `!=`：落位成功后 openPos 变成 landed，
+     * 它与预取的 slideTargetPos 是两次独立查询、切片不同实例，`!=` 恒真 ⇒ 每次成功
+     * 落位都被当成「外部改写」而回滚，观感同样是「翻到位又弹回去」。
      */
     LaunchedEffect(openPos, hostRevision, contentRevision) {
-        if (flipSession.phase != FlipSession.Phase.Idle && openPos != slideTargetPos) {
+        if (flipSession.phase != FlipSession.Phase.Idle && !samePage(openPos, slideTargetPos)) {
             Logger.d("Orilumn.TAP", "flip-session ABORT external pos change (open=${openPos?.slice?.charStart} target=${slideTargetPos?.slice?.charStart})")
             rollbackSlide()
         }

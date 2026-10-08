@@ -16,6 +16,27 @@ class FlipSessionTest {
     private fun session() = FlipSession()
 
     @Test
+    fun `onDrag 必须能从 Idle 自行进入 Dragging——调用方不得预判 phase`() {
+        // 回归锁：ReaderScreen.updateSlide 曾写成「还是 Idle 就 return」，
+        // 而 Idle→Dragging 的迁移正是 onDrag 干的活 ⇒ 永远进不了 Dragging，
+        // 症状是「完全拖不动」且不报错。这条锁死调用契约。
+        val s = session()
+        assertEquals(FlipSession.Phase.Idle, s.phase)
+        assertTrue("首次 onDrag 就该接管手势", s.onDrag(dx = -50f, pageW = 1000f))
+        assertEquals(FlipSession.Phase.Dragging, s.phase)
+        assertTrue("progress 已非零（渲染才有位移）", s.progress > 0f)
+    }
+
+    @Test
+    fun `Settling 时 onDrag 返回 false 但不改状态`() {
+        val s = session()
+        s.onDrag(dx = -600f, pageW = 1000f)
+        s.beginSettle(s.decide())
+        assertFalse(s.onDrag(dx = -900f, pageW = 1000f))
+        assertEquals(FlipSession.Phase.Settling, s.phase)
+    }
+
+    @Test
     fun `初始为空闲`() {
         val s = session()
         assertEquals(FlipSession.Phase.Idle, s.phase)

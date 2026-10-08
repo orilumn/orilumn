@@ -13,6 +13,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -140,6 +141,18 @@ fun ReaderScreen(
     var brightnessUi by remember { mutableStateOf<BrightnessGestureUi?>(null) }
     var saveJob by remember { mutableStateOf<Job?>(null) }
 
+    // ---- P1 L1 整幅滑动 ----
+    // 会话状态机（纯逻辑见 FlipSession）。这里只持有「渲染需要的那几个数」：
+    // progress 驱动位移、direction 定方向、targetPos 是目标页身份（决定第二张画布）。
+    val flipSession = remember { FlipSession() }
+    // 逐帧写 Compose 状态：graphicsLayer 的 lambda 每帧重读它，避免重组。
+    var slideProgress by remember { mutableFloatStateOf(0f) }
+    var slideDirection by remember { mutableIntStateOf(0) }
+    var slideTargetPos by remember { mutableStateOf<ReaderPos?>(null) }
+    var settleJob by remember { mutableStateOf<Job?>(null) }
+    // L1 只在「动画总闸开 + 模式为 slide」时生效；curl 暂落 L0（P3 接 3D）。
+    val slideEnabled = light.pageAnim && light.pageAnimationMode == "slide"
+
     val scope = rememberCoroutineScope()
     // 锚页事件串行漏斗：显示状态的唯一写入通道（见 AnchorFunnel）。所有改锚页位置的动作
     // （翻页/跳转/开书/外部落位/开链接）走它串行，后到按落定后的最新位置重取源，不再各算各的。
@@ -171,6 +184,10 @@ fun ReaderScreen(
     val currentBarsVisible by rememberUpdatedState(barsVisible)
     val currentTopBarH by rememberUpdatedState(topBarH)
     val currentBotBarH by rememberUpdatedState(botBarH)
+    // L1 滑动的开关与三个动作也必须经引用读（声明在下方 beginSlide/updateSlide/endSlide
+    // 之后——Kotlin 局部函数不可前向引用）。pointerInput 的 block 只在 touchSlop 变化时
+    // 重建，直接捕获 val 会拿到**首次组合时**的快照——设置里刚打开「翻页动画」，手势那边
+    // 还当关着，且不报错（只是滑不动，极难察觉）。
 
     // 打开书籍并定位起始页（自动续读/首页）。落定即推代际：同 pos 也刷新行数据。
     // 经锚页漏斗：与在途导航互斥，首帧后放行。漏斗 BUSY-DROP 时补一次重试，
@@ -389,6 +406,111 @@ fun ReaderScreen(
         }
     }
 
+    // ---- P1 L1：拖动开始（预取目标页） / 拖动中（跟手） / 松手（结算） ----
+
+    /**
+     * 拖动起手：锁定方向并**预取目标页**。
+     *
+     * 预取走 `currentHost.adjacent`（**只读，不经锚页漏斗**）——漏斗是显示状态的唯一写入
+     * 通道，动画层去抢它就会和真落位打架（BUSY-DROP 掉真落位比没有动画糟得多）。
+     * `adjacent` 是 suspend ⇒ 目标页内容晚一帧到位，那一帧 [FlipSlideLayer] 只画当前页。
+     */
+    fun beginSlide(direction: Int) {
+        if (!slideEnabled || coverVisible) return
+        flipSession.onDown()
+        val src = openPos ?: return
+        slideTargetPos = null
+        scope.launch {
+            val target = runCatching { currentHost.adjacent(src, direction) }.getOrNull()
+            if (flipSession.phase != FlipSession.Phase.Idle) slideTargetPos = target
+        }
+    }
+
+    /**
+     * 拖动中：把位移喂给状态机，逐帧写回渲染用的 progress。
+     *
+     * **不要在这里预判 phase == Idle**：Idle → Dragging 的迁移正是 [FlipSession.onDrag]
+     * 干的活，先判掉就永远进不了 Dragging（progress 恒 0、endSlide 永不触发），
+     * 症状是「完全拖不动」且不报错。状态机自己会在 Settling 时返回 false。
+     */
+    fun updateSlide(dx: Float, pageW: Float) {
+        if (!slideEnabled) return
+        if (!flipSession.onDrag(dx, pageW)) return
+        slideProgress = flipSession.progress
+        slideDirection = flipSession.direction
+    }
+
+    /** 把当前动画拨回起点并清场（落位失败、或外部改写了 openPos）。 */
+    fun rollbackSlide() {
+        settleJob?.cancel()
+        settleJob = null
+        flipSession.abort()
+        slideTargetPos = null
+        slideProgress = 0f
+        slideDirection = 0
+    }
+
+    /**
+     * 松手：裁决 → 结算动画；commit 同时发起真落位。
+     *
+     * **落位失败必须回滚动画**（§11.1 第 4 步）：`AnchorFunnel` 会 BUSY-DROP 或在边界返回
+     * null，此时若动画照走完，画面停在目标页、数据却还停在原页——静默错页，用户看得见
+     * 却无从报错，比没有动画糟得多。
+     */
+    fun endSlide(velocityX: Float = 0f) {
+        if (!slideEnabled || flipSession.phase != FlipSession.Phase.Dragging) return
+        val decision = flipSession.decide(velocityX)
+        // 方向必须在 beginSettle 之前取：动画走到端点时状态机会把 direction 清零。
+        val commitDir = flipSession.direction
+        flipSession.beginSettle(decision)
+        val from = flipSession.progress
+        val duration = flipSession.settleDurationMs(decision)
+        settleJob?.cancel()
+        settleJob = scope.launch {
+            val anim = androidx.compose.animation.core.Animatable(from)
+            val target = if (decision == FlipSession.Decision.COMMIT) 1f else 0f
+            anim.animateTo(
+                targetValue = target,
+                animationSpec = androidx.compose.animation.core.tween(duration),
+            ) {
+                flipSession.onSettleProgress(value)
+                slideProgress = value
+            }
+            if (decision != FlipSession.Decision.COMMIT) {
+                slideTargetPos = null
+                slideProgress = 0f
+                slideDirection = 0
+                return@launch
+            }
+            // 动画到位 ⇒ 落数据。flip() 内部走锚页漏斗，可能被 BUSY-DROP 或在边界返回 null，
+            // 所以落完必须核 openPos 真的换了；没换就把动画拨回原页（见 KDoc「落位失败必须回滚」）。
+            val expected = slideTargetPos
+            flip(commitDir)
+            if (expected != null && openPos == expected) {
+                slideTargetPos = null
+                slideProgress = 0f
+                slideDirection = 0
+            } else {
+                Logger.d("Orilumn.TAP", "flip-commit landed-nowhere (open=${openPos?.slice?.charStart} want=${expected?.slice?.charStart}) ⇒ rollback")
+                rollbackSlide()
+            }
+        }
+    }
+
+    /**
+     * 外部改写了 openPos（重排 / 外部落位 / seek）⇒ 作废进行中的会话。
+     *
+     * 不作废的后果是「拿旧页配新数据」：会话还锁着旧的两页，而 openPos 已经换成第三页，
+     * 位移算式继续用旧方向画 ⇒ 画面与内容永久错位。
+     */
+    LaunchedEffect(openPos, hostRevision, contentRevision) {
+        if (flipSession.phase != FlipSession.Phase.Idle && openPos != slideTargetPos) {
+            Logger.d("Orilumn.TAP", "flip-session ABORT external pos change (open=${openPos?.slice?.charStart} target=${slideTargetPos?.slice?.charStart})")
+            rollbackSlide()
+        }
+    }
+
+
     fun seek(fraction: Float) {
         // 诊断常驻：手指值 vs 落位章对不上（两次远端拖动都落 ch11），W 级防 PGAP  flood 吞行。
         Logger.w("Orilumn.TAP", "seek finger fraction=$fraction")
@@ -503,6 +625,12 @@ fun ReaderScreen(
         if (keysEnabled) focusRequester.requestFocus()
     }
 
+    // L1 滑动的引用包装（必须在上面几个局部函数声明之后——Kotlin 局部函数不可前向引用）。
+    val currentSlideEnabled by rememberUpdatedState(slideEnabled)
+    val currentBeginSlide by rememberUpdatedState<(Int) -> Unit> { beginSlide(it) }
+    val currentUpdateSlide by rememberUpdatedState<(Float, Float) -> Unit> { dx, w -> updateSlide(dx, w) }
+    val currentEndSlide by rememberUpdatedState<(Float) -> Unit> { endSlide(it) }
+
     // S29：Toast → CMP Snackbar；书签/笔记占位动作未接线（null）时给出提示。
     val snackbar = rememberReaderSnackbar()
 
@@ -524,8 +652,14 @@ fun ReaderScreen(
                     )
                     var axis = ReaderMath.Axis.NONE
                     var dragDir = 0
+                    var slideActive = false
                     var brightnessActive = false
                     var brightnessBase = ReaderMath.MAX_BRIGHTNESS
+                    // 抬手速度样本（两次采样的位移/时差）：滑动判定要「快甩过阈即翻」，
+                    // 只看位移会把快速轻扫吃掉。
+                    var lastDx = 0f
+                    var lastMoveTime = downTime
+                    var vx = 0f
                     while (true) {
                         val event = awaitPointerEvent()
                         val change = event.changes.firstOrNull { it.id == down.id } ?: break
@@ -546,6 +680,7 @@ fun ReaderScreen(
                         if (!change.pressed) {
                             val upTime = change.uptimeMillis
                             if (brightnessActive) endBrightnessGesture()
+                            else if (slideActive) currentEndSlide(vx)
                             else if (dragDir != 0) flip(dragDir)
                             else if (upTime - downTime < ReaderMath.TAP_MAX_MS) {
                                 onTap(downX, downY, size.width.toFloat())
@@ -554,11 +689,27 @@ fun ReaderScreen(
                         }
                         val dx = change.position.x - downX
                         val dy = change.position.y - downY
+                        // 抬手速度：本次 MOVE 相对上次 MOVE 的位移/时差（px/s）。
+                        val now = change.uptimeMillis
+                        val dt = (now - lastMoveTime).coerceAtLeast(1L)
+                        vx = (dx - lastDx) / dt * 1000f
+                        lastDx = dx
+                        lastMoveTime = now
                         if (axis == ReaderMath.Axis.NONE) {
                             axis = ReaderMath.gestureAxis(dx, dy, touchSlop)
                         }
                         when (axis) {
-                            ReaderMath.Axis.HORIZONTAL -> if (dragDir == 0) dragDir = ReaderMath.flipDirection(dx)
+                            ReaderMath.Axis.HORIZONTAL -> {
+                                if (dragDir == 0) dragDir = ReaderMath.flipDirection(dx)
+                                // L1 跟手：起手那一次 beginSlide（预取目标页），其后逐帧 updateSlide。
+                                if (currentSlideEnabled) {
+                                    if (!slideActive) {
+                                        currentBeginSlide(dragDir)
+                                        slideActive = true
+                                    }
+                                    currentUpdateSlide(dx, size.width.toFloat())
+                                }
+                            }
                             ReaderMath.Axis.VERTICAL -> if (!brightnessActive) {
                                 val s = light
                                 if (!s.brightnessFollowSystem &&
@@ -673,26 +824,59 @@ fun ReaderScreen(
                 bgCache = bgCache,
             )
 
-            ReaderPageCanvas(
-                lines = pageContent?.lines,
-                contentLeft = contentLeft,
-                contentTop = contentTop,
-                contentRectLeft = contentLeft,
-                contentRectTop = contentTop,
-                contentRectRight = contentRight,
-                contentRectBottom = contentBottom,
-                pageBg = profile.bgColor,
-                inkColor = profile.fgColor,
-                modifier = Modifier.fillMaxSize(),
-                pageImages = pageContent?.pageImages,
-                imageBitmaps = pageContent?.imageBitmaps,
-                pageBackgrounds = pageContent?.pageBackgrounds,
-                bgImages = pageContent?.bgImages ?: emptyMap(),
-                // 字重这类纯字形变更行数据完全相等，靠修订号强制重画（见 ReaderPageCanvas）。
-                contentRevision = contentRevision,
-                // P0b：页身份键（多页位图缓存下标）
-                rasterKey = pageContent?.rasterKey,
-            )
+            // P1 L1：目标页内容（预取未到位时为 null ⇒ 只画当前页，那一帧不动画）。
+            val targetContent = if (slideTargetPos != null && slideTargetPos != pos) {
+                rememberPageContent(
+                    host = currentHost,
+                    pos = slideTargetPos,
+                    contentRevision = contentRevision,
+                    hostRevision = hostRevision,
+                    contentWidthPx = (contentRight - contentLeft).toInt(),
+                    contentHeightPx = (contentBottom - contentTop).toInt(),
+                    bgColor = profile.bgColor,
+                    inkColor = profile.fgColor,
+                    imgCache = imgCache,
+                    bgCache = bgCache,
+                )
+            } else {
+                null
+            }
+
+            // 画布本体（当前页 / 目标页同形，只是位移不同）。
+            val PageCanvasFun: @Composable (PageContent?) -> Unit = { content ->
+                ReaderPageCanvas(
+                    lines = content?.lines,
+                    contentLeft = contentLeft,
+                    contentTop = contentTop,
+                    contentRectLeft = contentLeft,
+                    contentRectTop = contentTop,
+                    contentRectRight = contentRight,
+                    contentRectBottom = contentBottom,
+                    pageBg = profile.bgColor,
+                    inkColor = profile.fgColor,
+                    modifier = Modifier.fillMaxSize(),
+                    pageImages = content?.pageImages,
+                    imageBitmaps = content?.imageBitmaps,
+                    pageBackgrounds = content?.pageBackgrounds,
+                    bgImages = content?.bgImages ?: emptyMap(),
+                    // 字重这类纯字形变更行数据完全相等，靠修订号强制重画（见 ReaderPageCanvas）。
+                    contentRevision = contentRevision,
+                    // P0b：页身份键（多页位图缓存下标）
+                    rasterKey = content?.rasterKey,
+                )
+            }
+            if (slideTargetPos != null && slideTargetPos != pos) {
+                FlipSlideLayer(
+                    direction = slideDirection,
+                    progress = slideProgress,
+                    pageWidthPx = pxWidth,
+                    modifier = Modifier.fillMaxSize(),
+                    target = { PageCanvasFun(targetContent) },
+                    current = { PageCanvasFun(pageContent) },
+                )
+            } else {
+                PageCanvasFun(pageContent)
+            }
             // 亮度/护眼遮罩：纯绘制于画布之上、栏之下。
             ReaderLightMask(light = light, modifier = Modifier.fillMaxSize())
             // 顶/底栏：中部点按切换；条外点击收起。

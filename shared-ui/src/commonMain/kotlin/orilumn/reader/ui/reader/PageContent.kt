@@ -67,18 +67,22 @@ fun rememberPageContent(
     imgCache: PageImageCache<DecodedImage>,
     bgCache: PageImageCache<DecodedImage>,
 ): PageContent? {
-    if (pos == null) return null
     val currentHost by rememberUpdatedState(host)
+    // 不用 `if (pos == null) return null` 提前返回：那样 remember 的调用次数会随 pos
+    // 摆动而变（Compose 允许条件 composable，但两个调用点共用本页时极易记错槽）。
+    // 这里让 pos 可空贯穿始终，返回值末尾再判 null。
 
-    val lines = remember(pos, contentRevision, hostRevision) { currentHost.pageLines(pos) }
+    val lines = remember(pos, contentRevision, hostRevision) {
+        pos?.let { currentHost.pageLines(it) }
+    }
     // 盒背景/边框：与行同一切片口径，画布内画在文字之下（翻页即随 pos 刷新）。
     val pageBackgrounds = remember(pos, contentRevision, hostRevision) {
-        runCatching { currentHost.pageBackgrounds(pos) }.getOrNull()
+        pos?.let { runCatching { currentHost.pageBackgrounds(it) }.getOrNull() }
     }
     // 插图几何与位图：几何同步取（廉价）；位图跨页 LRU 缓存（`imgCache`，与几何无关的
     // 稳定身份为键），回访页首帧即有图；未命中才异步解码入库。翻页不再清空旧图。
     val pageImages = remember(pos, contentRevision, hostRevision) {
-        runCatching { currentHost.pageImages(pos) }.getOrNull()
+        pos?.let { runCatching { currentHost.pageImages(it) }.getOrNull() }
     }
     var imageBitmaps by remember(pos, contentRevision, hostRevision) {
         mutableStateOf(pageImages
@@ -147,18 +151,21 @@ fun rememberPageContent(
     // P0b 页身份键：页 + 视口 + 修订号 + 主题色 → 渲染器多页位图缓存的下标。
     // 少任何一项都会静默复用旧像素（视口变、字重变、换色都必须重画）。
     val rasterKey = remember(pos, contentRevision, hostRevision, contentWidthPx, contentHeightPx, bgColor, inkColor) {
-        PageRasterKey(
-            chapter = pos.chapter,
-            charStart = pos.slice.charStart,
-            charEnd = pos.slice.charEnd,
-            widthPx = contentWidthPx,
-            heightPx = contentHeightPx,
-            contentRevision = contentRevision,
-            bgColor = bgColor,
-            inkColor = inkColor,
-        )
+        pos?.let {
+            PageRasterKey(
+                chapter = it.chapter,
+                charStart = it.slice.charStart,
+                charEnd = it.slice.charEnd,
+                widthPx = contentWidthPx,
+                heightPx = contentHeightPx,
+                contentRevision = contentRevision,
+                bgColor = bgColor,
+                inkColor = inkColor,
+            )
+        }
     }
 
+    if (pos == null) return null
     return PageContent(
         lines = lines,
         pageImages = pageImages,

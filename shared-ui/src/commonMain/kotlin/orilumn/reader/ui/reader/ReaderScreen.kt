@@ -738,6 +738,21 @@ fun ReaderScreen(
             }
 
             // 画布：行窗口经 LineWindowDrawer 落到 skiko Canvas（见 ReaderPageCanvas）。
+            // P0b 页身份键：页 + 视口 + 修订号 + 主题色 → 渲染器多页位图缓存的下标。
+            // 少任何一项都会静默复用旧像素（视口变、字重变、换色都必须重画）。
+            val rasterKey = remember(pos, contentRevision, hostRevision, pxWidth, pxHeight, light) {
+                // 栅格尺寸就是内容区尺寸（见下方 contentRect* 传参），故键里的宽高与画布 1:1。
+                PageRasterKey(
+                    chapter = pos.chapter,
+                    charStart = pos.slice.charStart,
+                    charEnd = pos.slice.charEnd,
+                    widthPx = (contentRight - contentLeft).toInt(),
+                    heightPx = (contentBottom - contentTop).toInt(),
+                    contentRevision = contentRevision,
+                    bgColor = profile.bgColor,
+                    inkColor = profile.fgColor,
+                )
+            }
             ReaderPageCanvas(
                 lines = lines,
                 contentLeft = contentLeft,
@@ -755,6 +770,8 @@ fun ReaderScreen(
                 bgImages = bgImages,
                 // 字重这类纯字形变更行数据完全相等，靠修订号强制重画（见 ReaderPageCanvas）。
                 contentRevision = contentRevision,
+                // P0b：页身份键（多页位图缓存下标）
+                rasterKey = rasterKey,
             )
             // 亮度/护眼遮罩：纯绘制于画布之上、栏之下。
             ReaderLightMask(light = light, modifier = Modifier.fillMaxSize())

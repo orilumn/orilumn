@@ -53,6 +53,11 @@ fun ReaderPageCanvas(
      * 推送即重建画布发射器、必重画（与数据是否相等无关）。
      */
     contentRevision: Int = 0,
+    /**
+     * P0b：页身份键（供渲染器的多页位图缓存下标）。null = 不缓存。
+     * 由 [ReaderScreen] 从 `pos` + 视口 + 修订号 + 主题色算出的稳定值。
+     */
+    rasterKey: PageRasterKey? = null,
 ) {
     val renderer = rememberReaderPageRenderer()
     // 修订号版本化：只包画布发射器（渲染器实例保留在 key 之外，Android 离屏
@@ -103,6 +108,7 @@ fun ReaderPageCanvas(
             bgImages = bgImages,
             images = slots,
             contentRevision = contentRevision,
+            rasterKey = rasterKey,
         )
     }
     }

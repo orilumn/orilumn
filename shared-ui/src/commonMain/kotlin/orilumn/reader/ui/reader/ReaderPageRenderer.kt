@@ -55,6 +55,11 @@ interface ReaderPageRenderer {
          * （绘制仍读 live 锚点，见 `SkParagraphFactory.anchoredWeight`）。
          */
         contentRevision: Int = 0,
+        /**
+         * P0b：页身份键。非 null 即参与 [PageRasterCache]（多页 LRU）；null = 不缓存
+         * （封面等无页身份的调用方直接重画）。键必须含视口/修订号/颜色，理由见 `PageRasterCache.kt`。
+         */
+        rasterKey: PageRasterKey? = null,
     )
 }
 
@@ -65,14 +70,11 @@ interface ReaderPageRenderer {
  * 语义）——所以这里用槽位而不是 `Map<PageImage, DecodedImage>`：map 表达不了
  * 「该位置有图但还没解出来」，而那正是首帧最常见的中间态。
  */
-class PageImageSlot(
+data class PageImageSlot(
     val image: orilumn.reader.engine.skia.PageImage,
+    /** 解码结果；null = 还没解出来（画灰色占位）。skia Image 无值相等 ⇒ 按实例比。 */
     val decoded: DecodedImage?,
-) {
-    /** 缓存/比较用（skia Image 无值相等，按实例比）。 */
-    fun sameAs(other: PageImageSlot?): Boolean =
-        other != null && image == other.image && (decoded === other.decoded)
-}
+)
 
 /**
  * skia Image → Compose [ImageBitmap] 的最后一跳（平台 actual）。

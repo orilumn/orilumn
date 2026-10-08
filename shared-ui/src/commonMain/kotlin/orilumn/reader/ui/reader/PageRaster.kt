@@ -4,6 +4,7 @@ import org.jetbrains.skia.Canvas
 import org.jetbrains.skia.Paint
 import org.jetbrains.skia.Rect
 import org.jetbrains.skia.SamplingMode
+import kotlin.math.roundToInt
 import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.engine.skia.LineWindowDrawer
 import orilumn.reader.engine.skia.PageBackground
@@ -22,12 +23,15 @@ import orilumn.reader.engine.skia.drawPageBackground
  * 顺序、几何、占位语义由此只有一份，不会再各自漂移。
  *
  * 坐标约定（与 `ReaderPageCanvas` 同款，勿改）：
- *  - 调用方传入的 [lines]/[backgrounds]/[images] 已是**页坐标系**（章节绝对 Y 已减去 shift）；
- *  - 画布原点 = 内容区左上，故 X 传 `contentLeft - contentRectLeft`、Y 传 `-contentRectTop`；
+ *  - 调用方传入的 [lines]/[backgrounds]/[images] 一律是**页坐标系**（章节绝对 Y 已减去 shift）；
+ *  - 本函数**自己**把屏幕坐标换算到离屏画布（原点 = 内容区左上）：X 减 `contentRectLeft`、
+ *    Y 减 `contentRectTop`——三类元素统一在这里做，**不许各 actual 各自平移**。
+ *    （P0a 教训：Android actual 起初只平移了 lines/backgrounds 而漏了 images，插图整体下移
+ *    一个上边距，肉眼可见；像素 A/B 逮到。故把换算收进本函数，让"漏一类"不可表达。）
  *  - 裁剪区恒为整块内容区 `[0,0,w,h]`。
  *
  * 绘制顺序（**改这里等于改屏幕像素**，顺序有物理含义：底 → 盒背景 → 文字 → 插图）：
- *  1. `clear(pageBg)`：页面底色打底（JPEG/无 alpha 时代的老问题如今是「卷曲时页背不能透明」）；
+ *  1. `clear(pageBg)`：页面底色打底（卷曲时页背不能透明）；
  *  2. 盒背景/边框/背景图（`drawPageBackground` 单源，含圆角/描边/阴影/alpha）；
  *  3. 行窗口（`LineWindowDrawer`，与断行共用同一 FontCollection）；
  *  4. 插图（`PageImageSlot`；缺图画灰色占位，不静默空白）。
@@ -35,6 +39,8 @@ import orilumn.reader.engine.skia.drawPageBackground
 internal fun drawPageContent(
     canvas: Canvas,
     contentLeft: Float,
+    contentRectLeft: Float,
+    contentRectTop: Float,
     lines: List<DrawLine>,
     backgrounds: List<PageBackground>,
     bgImages: Map<String, orilumn.reader.engine.skia.DecodedImage>,
@@ -45,21 +51,34 @@ internal fun drawPageContent(
     drawer: LineWindowDrawer,
 ) {
     canvas.clear(pageBg)
+    val xOff = contentLeft - contentRectLeft
+    val yOff = contentRectTop.roundToInt()
     if (backgrounds.isNotEmpty()) {
         for (bg in backgrounds) {
-            canvas.drawPageBackground(bg, contentLeft, 0f, bg.bgKey()?.let { bgImages[it]?.image })
+            canvas.drawPageBackground(bg, xOff, -yOff.toFloat(), bg.bgKey()?.let { bgImages[it]?.image })
         }
     }
     if (lines.isNotEmpty()) {
         drawer.drawLines(
             canvas = canvas,
-            contentLeft = contentLeft,
-            lines = lines,
+            contentLeft = xOff,
+            lines = if (yOff != 0) lines.map { it.copy(yTop = it.yTop - yOff, yBottom = it.yBottom - yOff) } else lines,
             clip = Rect.makeLTRB(0f, 0f, w.toFloat(), h.toFloat()),
         )
     }
-    drawPageImages(canvas, images, contentLeft)
+    drawPageImages(
+        canvas = canvas,
+        images = if (yOff != 0) images.map { it.shiftBy(-yOff) } else images,
+        contentLeft = xOff,
+    )
 }
+
+/** 槽位整体上移 [dy]（页坐标 → 离屏坐标；几何与解码结果都不变，只换 y）。 */
+private fun PageImageSlot.shiftBy(dy: Int): PageImageSlot =
+    if (dy == 0) this else PageImageSlot(
+        image.copy(yTop = image.yTop + dy, yBottom = image.yBottom + dy),
+        decoded,
+    )
 
 /**
  * 插图落位（与旧 `ReaderPageCanvas.drawPageImage` 逐项同形）：

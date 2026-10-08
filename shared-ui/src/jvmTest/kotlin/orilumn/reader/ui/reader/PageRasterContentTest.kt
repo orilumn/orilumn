@@ -46,11 +46,16 @@ class PageRasterContentTest {
         pageBg: Int = this.pageBg,
         backgrounds: List<orilumn.reader.engine.skia.PageBackground> = emptyList(),
         images: List<PageImageSlot> = emptyList(),
+        contentLeft: Float = 0f,
+        contentRectLeft: Float = 0f,
+        contentRectTop: Float = 0f,
     ): Array<IntArray> {
         val s = Surface.makeRasterN32Premul(w, h)
         drawPageContent(
             canvas = s.canvas,
-            contentLeft = 0f,
+            contentLeft = contentLeft,
+            contentRectLeft = contentRectLeft,
+            contentRectTop = contentRectTop,
             lines = emptyList(),
             backgrounds = backgrounds,
             bgImages = emptyMap(),
@@ -144,6 +149,38 @@ class PageRasterContentTest {
         )
         assertTrue("图一位置错", argbNear(px[20][20], 0xFFFF0000.toInt()))
         assertTrue("图二位置错：${Integer.toHexString(px[80][120])}", argbNear(px[80][120], 0xFF00FF00.toInt()))
+    }
+
+    /**
+     * 回归锁（P0a 真机像素 A/B 逮到的 bug）：`contentRectTop != 0` 时（真实阅读面永远如此——
+     * 上边距 100px 起），**三类元素必须统一减去它**。初版 actual 只平移了 lines/backgrounds，
+     * 插图整体下移一个上边距，肉眼可见「图压着文字/图文错位」。
+     */
+    @Test
+    fun `contentRectTop 非零时插图与文字同样被归一`() {
+        val red = solidImage(0xFFFF0000.toInt(), 8, 8)
+        // 页坐标 yTop=90（栅格高 120，上边距 100 ⇒ 40 仍可见），离屏原点=内容区左上 ⇒ 落在 y=-10 不可见，
+        // 故取 yTop=150 会被裁掉；改用 yTop=90/2：见下——真正要锁的是「减了 yOff」。
+        // 用 yTop=130、height=40：归一后 y=30..70 可见。
+        val slot = PageImageSlot(img(20, 130, 60, 40), red)
+        val px = raster(images = listOf(slot), contentRectTop = 100f)
+        assertTrue("图未随 contentRectTop 上移：${Integer.toHexString(px[30][20])}",
+            argbNear(px[30][20], 0xFFFF0000.toInt()))
+        assertTrue("图心不对：${Integer.toHexString(px[50][50])}", argbNear(px[50][50], 0xFFFF0000.toInt()))
+        assertTrue("归一后下沿不该溢出：${Integer.toHexString(px[75][50])}", argbNear(px[75][50], pageBg))
+    }
+
+    /** 同样锁 X：`contentLeft - contentRectLeft` 才是离屏 X 原点。 */
+    @Test
+    fun `contentRectLeft 非零时插图 X 归一`() {
+        val red = solidImage(0xFFFF0000.toInt(), 8, 8)
+        val slot = PageImageSlot(img(20, 20, 40, 40), red)
+        // 画布原点 = 内容区左边（contentRectLeft=0），内容区左缘在屏幕 60 ⇒ xOff=60 ⇒ 图落 x=80
+        val px = raster(images = listOf(slot), contentLeft = 60f, contentRectLeft = 0f)
+        assertTrue("X 未按 contentLeft-contentRectLeft 归一：${Integer.toHexString(px[30][80])}",
+            argbNear(px[30][80], 0xFFFF0000.toInt()))
+        assertTrue("未归一时会落在这里（应为底色）：${Integer.toHexString(px[30][20])}",
+            argbNear(px[30][20], pageBg))
     }
 
     @Test

@@ -86,20 +86,13 @@ private class JvmReaderPageRenderer : ReaderPageRenderer {
         }
         if (page == null) {
             val s = surface!!
-            val yOff = contentRectTop.toInt()
             drawPageContent(
                 canvas = s.canvas,
-                contentLeft = contentLeft - contentRectLeft,
-                lines = if (yOff != 0 && lines.isNotEmpty()) {
-                    lines.map { it.copy(yTop = it.yTop - yOff, yBottom = it.yBottom - yOff) }
-                } else {
-                    lines
-                },
-                backgrounds = if (yOff != 0 && backgrounds.isNotEmpty()) {
-                    backgrounds.map { it.copy(yTop = it.yTop - yOff, yBottom = it.yBottom - yOff) }
-                } else {
-                    backgrounds
-                },
+                contentLeft = contentLeft,
+                contentRectLeft = contentRectLeft,
+                contentRectTop = contentRectTop,
+                lines = lines,
+                backgrounds = backgrounds,
                 bgImages = bgImages,
                 images = images,
                 pageBg = pageBg,

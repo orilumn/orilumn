@@ -98,26 +98,16 @@ private class AndroidReaderPageRenderer : ReaderPageRenderer {
 
         val t0 = android.os.SystemClock.uptimeMillis()
         val s = surface!!
-        // [drawPageContent] 收口了「一页像素长什么样」：打底 → 盒背景 → 文字 → 插图。
-        // Y 归一：lines 是页坐标系（含上边距 contentTop），离屏原点在内容区左上 ⇒ 减 contentRectTop
-        // （不减则文本整体下压一个上边距，而插图同式归一，双倍上边距 = 图文错位）。
-        val xOff = contentLeft - contentRectLeft
-        val yOff = contentRectTop.roundToInt()
-        val localLines = if (yOff != 0 && lines.isNotEmpty()) {
-            lines.map { it.copy(yTop = it.yTop - yOff, yBottom = it.yBottom - yOff) }
-        } else {
-            lines
-        }
-        val localBgs = if (yOff != 0 && backgrounds.isNotEmpty()) {
-            backgrounds.map { it.copy(yTop = it.yTop - yOff, yBottom = it.yBottom - yOff) }
-        } else {
-            backgrounds
-        }
+        // [drawPageContent] 收口了「一页像素长什么样」+ 坐标换算：打底 → 盒背景 → 文字 → 插图，
+        // 页坐标 → 离屏坐标（减 contentRectTop/Leftover）由它统一做，本 actual 不再各自平移
+        // （P0a 初版在这里只平移了 lines/backgrounds 而漏 images，插图整体下移一个上边距）。
         drawPageContent(
             canvas = s.canvas,
-            contentLeft = xOff,
-            lines = localLines,
-            backgrounds = localBgs,
+            contentLeft = contentLeft,
+            contentRectLeft = contentRectLeft,
+            contentRectTop = contentRectTop,
+            lines = lines,
+            backgrounds = backgrounds,
             bgImages = bgImages,
             images = images,
             pageBg = pageBg,

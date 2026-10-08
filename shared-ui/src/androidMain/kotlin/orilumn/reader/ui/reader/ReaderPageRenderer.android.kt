@@ -10,6 +10,7 @@ import orilumn.reader.engine.skia.DecodedImage
 import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.engine.skia.LineWindowDrawer
 import orilumn.reader.engine.skia.PageBackground
+import orilumn.reader.io.Logger
 import kotlin.math.roundToInt
 import org.jetbrains.skia.ColorAlphaType
 import org.jetbrains.skia.ColorType
@@ -128,10 +129,10 @@ private class AndroidReaderPageRenderer : ReaderPageRenderer {
         val bmp = skiaImageToAndroidBitmap(s.makeImageSnapshot(), w, h)
         val t2 = android.os.SystemClock.uptimeMillis()
         if (bmp == null) {
-            android.util.Log.w("Orilumn.SkiaBridge", "pixel bridge failed w=$w h=$h shape=${t1 - t0}ms bridge=${t2 - t1}ms")
+            Logger.w("Orilumn.SkiaBridge", "pixel bridge FAILED w=$w h=$h shape=${t1 - t0}ms bridge=${t2 - t1}ms")
             return
         }
-        android.util.Log.w("Orilumn.SkiaBridge", "raster n=${lines.size} imgs=${images.size} shape=${t1 - t0}ms bridge=${t2 - t1}ms")
+        Logger.w("Orilumn.SkiaBridge", "raster n=${lines.size} imgs=${images.size} shape=${t1 - t0}ms bridge=${t2 - t1}ms")
         cachedLines = lines
         cachedBg = pageBg
         cachedBgs = backgrounds

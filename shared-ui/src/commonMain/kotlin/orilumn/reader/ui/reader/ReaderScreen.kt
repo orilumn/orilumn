@@ -148,7 +148,11 @@ fun ReaderScreen(
     // 逐帧写 Compose 状态：graphicsLayer 的 lambda 每帧重读它，避免重组。
     var slideProgress by remember { mutableFloatStateOf(0f) }
     var slideDirection by remember { mutableIntStateOf(0) }
+    // 起手那一页（正被拖走的那张）。落位在起手就发生，所以 openPos 已经是目标页了，
+    // 「当前页」必须另存一份，否则动画画的是已经换掉的页。
+    var slideFromPos by remember { mutableStateOf<ReaderPos?>(null) }
     var slideTargetPos by remember { mutableStateOf<ReaderPos?>(null) }
+    var slidePrefetch by remember { mutableStateOf<Job?>(null) }
     var settleJob by remember { mutableStateOf<Job?>(null) }
     // L1 只在「动画总闸开 + 模式为 slide」时生效；curl 暂落 L0（P3 接 3D）。
     val slideEnabled = light.pageAnim && light.pageAnimationMode == "slide"
@@ -414,23 +418,81 @@ fun ReaderScreen(
         }
     }
 
-    // ---- P1 L1：拖动开始（预取目标页） / 拖动中（跟手） / 松手（结算） ----
+    /**
+     * 清场（只清动画状态，不动数据）。
+     *
+     * 数据要不要退回由调用方决定：commit 路径数据已落定，直接清；rollback 路径要先
+     * `flipAwait(-dir)` 把引擎指针翻回原页再清（见 [endSlide]）。
+     */
+    fun clearSlide() {
+        settleJob?.cancel()
+        settleJob = null
+        slidePrefetch?.cancel()
+        slidePrefetch = null
+        flipSession.abort()
+        slideFromPos = null
+        slideTargetPos = null
+        slideProgress = 0f
+        slideDirection = 0
+    }
 
     /**
-     * 拖动起手：锁定方向并**预取目标页**。
+     * 动画作废**并把数据退回原页**。
      *
-     * 预取走 `currentHost.adjacent`（**只读，不经锚页漏斗**）——漏斗是显示状态的唯一写入
-     * 通道，动画层去抢它就会和真落位打架（BUSY-DROP 掉真落位比没有动画糟得多）。
-     * `adjacent` 是 suspend ⇒ 目标页内容晚一帧到位，那一帧 [FlipSlideLayer] 只画当前页。
+     * 用于：落位失败、或外部改写了 openPos。起手已经落位过一次，所以这里必须翻回去，
+     * 否则引擎指针停在新页而画面回原页 ⇒ 下次翻页从错的页起（静默错页）。
+     */
+    fun rollbackSlide(navigateBack: Boolean = true) {
+        val back = if (navigateBack) slideFromPos else null
+        val dir = slideDirection
+        clearSlide()
+        if (back != null && dir != 0) {
+            scope.launch {
+                val landed = flipAwait(-dir)
+                Logger.d(
+                    "Orilumn.TAP",
+                    "slide-rollback data dir=${-dir} landed=${landed?.let { "ch=${it.chapter} char=${it.slice.charStart}" } ?: "NULL"}",
+                )
+            }
+        }
+    }
+
+    // ---- P1 L1：拖动开始（落位一次） / 拖动中（跟手） / 松手（结算或回退） ----
+
+    /**
+     * 拖动起手：**就地落位一次**，把落定结果当作本次动画的目标页。
+     *
+     * 这里是 P1 最容易写错的地方，代价是「翻到位又弹回原页」，记下来别再犯：
+     *
+     * 1. `ReaderHost.adjacent()` **不是只读查询，是有副作用的真导航**——引擎侧
+     *    `tempNav` 会 `ip.curIndex = next`，真把临时表指针挪到下一页。曾在这里
+     *    「预取」一次、松手落位时再调一次，第二次引擎已不在源页上，返回原页 ⇒
+     *    落位落回原处 ⇒ 观感正是「翻上页停稳后又跳回上一页」（真机日志：
+     *    `want=char=4751 landed=char=5539`）。⇒ 一次翻页**只能调一次** adjacent。
+     *
+     * 2. 因此改回设计文档 §6.2 的「**先落位（数据）后出画（像素）**」：起手就落位，
+     *    动画层拿已落定的 pos 当目标页画，拖动期间不再问引擎。松手时 commit 无需
+     *    再落位（数据早在起手就落了），rollback 才 `flipAwait(-dir)` 翻回去。
+     *
+     * 落位仍走 [anchorFunnel]，动画层不新增第二个落位通道。
      */
     fun beginSlide(direction: Int) {
         if (!slideEnabled || coverVisible) return
-        flipSession.onDown()
         val src = openPos ?: return
+        flipSession.onDown()
+        slideFromPos = src
         slideTargetPos = null
-        scope.launch {
-            val target = runCatching { currentHost.adjacent(src, direction) }.getOrNull()
-            if (flipSession.phase != FlipSession.Phase.Idle) slideTargetPos = target
+        slidePrefetch?.cancel()
+        slidePrefetch = scope.launch {
+            val landed = flipAwait(direction)
+            // 边界 / 无源 / BUSY-DROP：没有目标页，这次手势不动画（画面保持原样）。
+            // 必须在 await 之后再读 phase——期间可能已经松手结算完了。
+            if (landed == null) {
+                Logger.d("Orilumn.TAP", "slide-begin no target dir=$direction ⇒ no animation")
+                if (flipSession.phase == FlipSession.Phase.Dragging) rollbackSlide()
+                return@launch
+            }
+            slideTargetPos = landed
         }
     }
 
@@ -448,16 +510,6 @@ fun ReaderScreen(
         slideDirection = flipSession.direction
     }
 
-    /** 把当前动画拨回起点并清场（落位失败、或外部改写了 openPos）。 */
-    fun rollbackSlide() {
-        settleJob?.cancel()
-        settleJob = null
-        flipSession.abort()
-        slideTargetPos = null
-        slideProgress = 0f
-        slideDirection = 0
-    }
-
     /**
      * 两处 pos 是否指同一页。
      *
@@ -470,11 +522,13 @@ fun ReaderScreen(
         a != null && b != null && a.chapter == b.chapter && a.slice.charStart == b.slice.charStart
 
     /**
-     * 松手：裁决 → 结算动画；commit 同时发起真落位。
+     * 松手：裁决 → 结算动画。
      *
-     * **落位失败必须回滚动画**（§11.1 第 4 步）：`AnchorFunnel` 会 BUSY-DROP 或在边界返回
-     * null，此时若动画照走完，画面停在目标页、数据却还停在原页——静默错页，用户看得见
-     * 却无从报错，比没有动画糟得多。
+     * **commit 不再落位**：起手已落过一次（见 [beginSlide]），这里只需把动画走完并清场。
+     * 早先在这里再落一次位，正是「翻到位又弹回上一页」的根因（第二次 adjacent 引擎已不在源页）。
+     *
+     * **rollback 要把数据翻回去**：起手那次落位是真的推进了引擎指针，不翻回去的话
+     * 下次翻页从错的页起——静默错页。
      */
     fun endSlide(velocityX: Float = 0f) {
         if (!slideEnabled || flipSession.phase != FlipSession.Phase.Dragging) return
@@ -495,29 +549,12 @@ fun ReaderScreen(
                 flipSession.onSettleProgress(value)
                 slideProgress = value
             }
-            if (decision != FlipSession.Decision.COMMIT) {
-                slideTargetPos = null
-                slideProgress = 0f
-                slideDirection = 0
-                return@launch
-            }
-            // 动画到位 ⇒ 落数据。flipAwait 会**等**落位结果：被 BUSY-DROP 或在边界返回 null 时
-            // 拿不到落定 pos，就把动画拨回原页（见 KDoc「落位失败必须回滚」）。
-            // 早先用发射后不管的 flip() + 立刻核 openPos，那次核对必然读到着陆前的值 ⇒
-            // 恒判失败 ⇒ 每次提交都回滚 ⇒ 观感是「翻到位又弹回上一页」。
-            val expected = slideTargetPos
-            val landed = flipAwait(commitDir)
-            if (landed != null && (expected == null || samePage(landed, expected))) {
-                slideTargetPos = null
-                slideProgress = 0f
-                slideDirection = 0
+            if (decision == FlipSession.Decision.COMMIT) {
+                // 数据早已落定（起手那次），动画走完即达成：清场即可。
+                clearSlide()
             } else {
-                Logger.d(
-                    "Orilumn.TAP",
-                    "flip-commit landed-nowhere (landed=${landed?.let { "ch=${it.chapter} char=${it.slice.charStart}" }} " +
-                        "want=${expected?.let { "ch=${it.chapter} char=${it.slice.charStart}" }}) ⇒ rollback",
-                )
-                rollbackSlide()
+                // 回弹：动画回到 0，同时把引擎指针翻回原页。
+                rollbackSlide(navigateBack = true)
             }
         }
     }
@@ -528,15 +565,19 @@ fun ReaderScreen(
      * 不作废的后果是「拿旧页配新数据」：会话还锁着旧的两页，而 openPos 已经换成第三页，
      * 位移算式继续用旧方向画 ⇒ 画面与内容永久错位。
      *
-     * 判「换没换」必须用 [samePage] 而不是 `!=`：落位成功后 openPos 变成 landed，
-     * 它与预取的 slideTargetPos 是两次独立查询、切片不同实例，`!=` 恒真 ⇒ 每次成功
-     * 落位都被当成「外部改写」而回滚，观感同样是「翻到位又弹回去」。
+     * 判据：起手落位后 `openPos` 就是 `slideTargetPos`，所以「openPos 既不是目标页、
+     * 也不是起手那一页」才算被外部改写。两者都用 [samePage] 比——`ReaderPos.slice`
+     * 是排版侧对象，两次查询不同实例，`==` 恒不等（见 [samePage] 的 KDoc）。
      */
     LaunchedEffect(openPos, hostRevision, contentRevision) {
-        if (flipSession.phase != FlipSession.Phase.Idle && !samePage(openPos, slideTargetPos)) {
-            Logger.d("Orilumn.TAP", "flip-session ABORT external pos change (open=${openPos?.slice?.charStart} target=${slideTargetPos?.slice?.charStart})")
-            rollbackSlide()
-        }
+        if (flipSession.phase == FlipSession.Phase.Idle) return@LaunchedEffect
+        if (samePage(openPos, slideTargetPos) || samePage(openPos, slideFromPos)) return@LaunchedEffect
+        Logger.d(
+            "Orilumn.TAP",
+            "flip-session ABORT external pos change (open=${openPos?.slice?.charStart} " +
+                "target=${slideTargetPos?.slice?.charStart} from=${slideFromPos?.slice?.charStart})",
+        )
+        rollbackSlide()
     }
 
 
@@ -839,10 +880,12 @@ fun ReaderScreen(
             }
             val chapterTitle = remember(pos) { currentHost.unitTitle(pos.chapter) }
             // P1-2：页内容抽成对任意 pos 可复用的 `rememberPageContent`（见 PageContent.kt）。
-            // 本步是纯重构，数据流与 remember 键一字未改——像素必须与本步前全等。
+            // 动画中「当前页」= slideFromPos（起手那一页），因为落位已在起手发生、
+            // openPos 此刻已是目标页；非动画时 slideFromPos 为 null，即用 pos。
+            val fromPos = slideFromPos ?: pos
             val pageContent = rememberPageContent(
                 host = currentHost,
-                pos = pos,
+                pos = fromPos,
                 contentRevision = contentRevision,
                 hostRevision = hostRevision,
                 contentWidthPx = (contentRight - contentLeft).toInt(),
@@ -853,8 +896,8 @@ fun ReaderScreen(
                 bgCache = bgCache,
             )
 
-            // P1 L1：目标页内容（预取未到位时为 null ⇒ 只画当前页，那一帧不动画）。
-            val targetContent = if (slideTargetPos != null && slideTargetPos != pos) {
+            // P1 L1：目标页内容（落位未回 ⇒ null，此时只画当前页，那一帧不动画）。
+            val targetContent = if (slideTargetPos != null && !samePage(slideTargetPos, fromPos)) {
                 rememberPageContent(
                     host = currentHost,
                     pos = slideTargetPos,
@@ -894,7 +937,7 @@ fun ReaderScreen(
                     rasterKey = content?.rasterKey,
                 )
             }
-            if (slideTargetPos != null && slideTargetPos != pos) {
+            if (targetContent != null) {
                 FlipSlideLayer(
                     direction = slideDirection,
                     progress = slideProgress,

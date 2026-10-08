@@ -8,8 +8,11 @@ import orilumn.reader.engine.laying.SOFT_HYPHEN
 import orilumn.reader.engine.laying.extraHeightPx
 import orilumn.reader.engine.laying.isDocumentSpace
 import org.jetbrains.skia.Canvas
+import org.jetbrains.skia.Font
 import org.jetbrains.skia.Paint
+import org.jetbrains.skia.Point
 import org.jetbrains.skia.Rect
+import org.jetbrains.skia.TextBlobBuilder
 import org.jetbrains.skia.paragraph.FontCollection
 import org.jetbrains.skia.paragraph.ParagraphBuilder
 import org.jetbrains.skia.paragraph.ParagraphStyle
@@ -701,6 +704,49 @@ private interface FontResolver {
         val bands = preBands ?: mergeBands(line, start, endExcl)
         var bandIdx = 0
         var i = start
+        // ---- 批处理（渲染层·落墨）--------------------------------------------
+        // 逐字 `drawString` + 逐字新建 `Paint` 是「一屏 1000 字 = 2000 次分配/JNI」的来源
+        // （Linux 实测单屏栅格 2.2s；平板约 0.2s）。改为：**连续「同面 + 同色 + 同基线 +
+        // 同斜切」的字符合成一个 TextBlob 一次 `drawTextBlob`**。
+        //
+        // 像素不变性：glyph 取自同一张面（`font.getUTF32Glyphs`，与 drawString 内部同源），
+        // 位置取自同一份 `xs` + 同一个 `y`，Paint 只改 color 不改其它状态 ⇒ 同一 glyph
+        // 落在同一像素位置。验收走 P5cOffscreenCorpusTest 落 PNG 逐像素 A/B。
+        //
+        // 批的切分键：**面 / 墨色 / 基线 y / 斜切标志**四者任一不同即换批
+        // （换面与换色换 band，换基线换 band 的 shiftEm，换斜切换 canvas 变换）。
+        val batchPaint = Paint()
+        var batchFont: Font? = null
+        var batchInk = 0
+        var batchOblique = false
+        var batchY = 0f
+        var batchCps: ArrayList<Int>? = null
+        var batchXs: ArrayList<Float>? = null
+
+        fun flushBatch() {
+            val f = batchFont
+            val cps = batchCps
+            val xArr = batchXs
+            batchFont = null
+            batchCps = null
+            batchXs = null
+            if (f == null || cps == null || xArr == null || cps.isEmpty()) return
+            // **一组的字形一次 native 取回**（`getUTF32Glyphs(IntArray)`），不是逐字一次：
+            // 逐字 JNI + 逐字 IntArray 分配是批量 drawTextBlob 之后剩下的最大单项开销。
+            val gids = f.getUTF32Glyphs(cps.toIntArray())
+            val pos = Array(cps.size) { k -> Point(xArr[k], batchY) }
+            val blob = TextBlobBuilder().appendRunPos(f, gids, pos, null).build() ?: return
+            batchPaint.color = batchInk
+            // 合成斜体（`font-style: italic` 但族里没有斜体面）：基线处剪切。
+            // 阴影层 `dy` 也进剪切中心，否则影子是斜的而字是正的（反之亦然）。
+            drawOblique(canvas, batchY, batchOblique) {
+                // blob 里的点已是绝对坐标（appendRunPos 收的就是 paintX+x+dx / y），
+                // 故偏移传 0,0（skiko 的签名是 drawTextBlob(blob, x, y, paint)，没有两参重载）。
+                canvas.drawTextBlob(blob, 0f, 0f, batchPaint)
+            }
+            blob.close()
+        }
+
         while (i < endExcl) {
             // **码本单源**（见 [codePointAt]）：代理对必须整对取面、整对绘制。
             // 按 `text[i].code` 取 ⇒ emoji 被拆成两个**孤立代理** ⇒ 没有任何字体有它们的字形
@@ -730,20 +776,28 @@ private interface FontResolver {
                 val key = glyphPainter.cacheKey(famList, wt, ital, sizePx, cp)
                 val gs = fontFor.resolve(cp, key, sizePx, famList, wt, ital, mono, rtag)
                 val argb = if (isShadowPass) overrideInk else withAlpha(band?.argb ?: line.inkColor, line.alpha)
-                val paint = org.jetbrains.skia.Paint().apply { color = argb }
                 // 行内基线位移（Skia 正值下移，故原点上移）。
                 val shiftEm = band?.shiftEm ?: 0f
                 val y = baseY - shiftEm * line.fontSizePx + dy
-                // 代理对整对画（units=2）；普通字符 units=1，行为与原来逐字版完全一致。
+                // 代理对整对入批（units=2）；普通字符 units=1，行为与原来逐字版完全一致。
                 onGlyphCp?.invoke(cp, units)
-                // 合成斜体（`font-style: italic` 但族里没有斜体面）：基线处剪切。
-                // 阴影层 `dy` 也进剪切中心，否则影子是斜的而字是正的（反之亦然）。
-                drawOblique(canvas, y, gs.oblique) {
-                    canvas.drawString(line.text.substring(i, i + units), paintX + x + dx, y, gs.font, paint)
+                // 换批判定：四要素任一不同即先落地上批。
+                if (batchFont !== gs.font || batchInk != argb || batchY != y || batchOblique != gs.oblique) {
+                    flushBatch()
+                    batchFont = gs.font
+                    batchInk = argb
+                    batchOblique = gs.oblique
+                    batchY = y
+                    batchCps = ArrayList()
+                    batchXs = ArrayList()
                 }
+                // 字形留到 flush 时按整批一次取（见 flushBatch 的注释）。
+                batchCps!!.add(cp)
+                batchXs!!.add(paintX + x + dx)
             }
             i += units
         }
+        flushBatch()
     }
 
     /**

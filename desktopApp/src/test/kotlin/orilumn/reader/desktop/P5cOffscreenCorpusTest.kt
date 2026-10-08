@@ -99,21 +99,23 @@ class P5cOffscreenCorpusTest {
     }
 
     private fun savePng(bmp: Bitmap, file: File) {
-        val px = requireNotNull(bmp.peekPixels())
+        // 直接以 bmp 为接收者逐像素读（不用 peekPixels() 的 Pixmap）：
+        // Pixmap 只持有原生像素指针、不引用 Bitmap，而 bmp 在 peekPixels()
+        // 后对 JIT 是死变量——GC 可在像素循环中回收 Bitmap（Managed 的
+        // Cleaner 释放原生像素）⇒ Pixmap 悬空读（Linux 全量跑测时实测
+        // SIGSEGV；单跑无 GC 压力故幸存）。接收者读法使 bmp 全程存活。
         val img = BufferedImage(pageW, pageH, BufferedImage.TYPE_INT_ARGB)
-        for (y in 0 until pageH) for (x in 0 until pageW) img.setRGB(x, y, px.getColor(x, y))
+        for (y in 0 until pageH) for (x in 0 until pageW) img.setRGB(x, y, bmp.getColor(x, y))
         ImageIO.write(img, "png", file)
     }
 
     /** 两位图差异像素占比（尺寸必须一致）。 */
     private fun pixDiff(a: Bitmap, b: Bitmap): Double {
-        val pa = requireNotNull(a.peekPixels())
-        val pb = requireNotNull(b.peekPixels())
         var diff = 0L
         var n = 0L
         for (y in 0 until pageH) for (x in 0 until pageW) {
             n++
-            if (pa.getColor(x, y) != pb.getColor(x, y)) diff++
+            if (a.getColor(x, y) != b.getColor(x, y)) diff++
         }
         return diff.toDouble() / n
     }

@@ -17,6 +17,11 @@ class NameTableFamilyAlignTest {
         val sys = runCatching { systemFontFaces() }.getOrDefault(emptyList())
         val families = sys.map { it.family }.distinct().sorted()
 
+        // 本测试的校准基准是 macOS 预装 CJK 字体族（简宋/游/黑体/楷体/宋体系列，
+        // 命中率阈值 >=40 亦按 mac 字体集标定）；未装它们的机器（非 mac
+        // 开发机）整体跳过——LXGW 链路由 SystemFontDisplayChainTest 覆盖。
+        if (listOf("SimSong", "Heiti SC", "Songti SC", "Kaiti SC").none { it in families }) return
+
         val mapped = NameTableChineseNames.namesFor(families)
         val hits = families.filter { mapped.containsKey(it) }
         val misses = families.filter { !mapped.containsKey(it) }

@@ -81,13 +81,15 @@ class SystemFontDisplayChainTest {
 
     @Test
     fun installedOpenSourceCjkAllChineseDisplay() = runBlocking {
-        // 顺手核一遍：本机现存的开源 CJK 族（Sarasa/Source Han/Noto CJK/等）展示名必须中文，
-        // 不允许英文名躺在列表（name 表直读 + CoreText 两链，无记录的族回退族名本身）。
+        // 顺手核一遍：本机现存的开源 CJK 族（Sarasa/Source Han/LXGW 等）展示名
+        // 必须中文，不允许英文名躺在列表（name 表直读 + CoreText 两链，
+        // 无记录的族回退族名本身）。
+        // 注意：Noto CJK 系（*Noto Sans/Serif/Mono CJK*）name 表**只有拉丁+日文
+        // 记录、没有任何含 CJK 的记录**（Google 出厂如此，各平台一致），
+        // 其展示名回退族名本身是正确行为，不进本断言集。
         val sys = runCatching { systemFontFaces() }.getOrDefault(emptyList())
         val known = sys.map { it.family }.filter {
-            it.startsWith("LXGW") || it.startsWith("Sarasa") || it.startsWith("Source Han") ||
-                it.startsWith("Noto Sans CJK") || it.startsWith("Noto Serif CJK") ||
-                it.startsWith("Noto Sans Mono CJK")
+            it.startsWith("LXGW") || it.startsWith("Sarasa") || it.startsWith("Source Han")
         }.distinct()
         if (known.isEmpty()) return@runBlocking
         val (lib, dir) = freshLib()

@@ -42,6 +42,14 @@ import org.jetbrains.skia.Typeface
  *
  * 线程：面表缓存（[faceCache]）在锁内读写、值不可变；**段内备忘是方法局部变量**（天然线程安全），
  * 故排版线程与绘制线程可各自调用本量宽器，无需外部串行化。
+ *
+ * **缓存作用域 = 进程级**（教训 ⑰ 收口，2026-10-08）：面表缓存原为**实例字段**，而本类在生产
+ * 路径上是 `GlyphPainter` / `KerningClusterTable` / `InhouseParagraphBreaker` / `LineAligner`
+ * 四处的**默认实参**（每段一个新实例）⇒ 每个新实例都要重扫一遍全部已装族
+ * （每族一次 `matchFamilyStyle` native），而结果对所有实例**完全相同**。
+ * 代价按「已装族数 × 单次 native」放大：平板 59 族是毫秒级、可以先记账；
+ * Linux 桌面 1981 族 × ~6ms = **单次 11.4 秒**，且每段落一个新实例 ⇒ 开书/翻页全面劣化。
+ * 故缓存一律进程级（键含 mgrs 链，见 [StackKey]），实例只持有注入的 mgrs 取法。
  */
 class SkiaRunMeasurer(
     private val managers: () -> List<FontMgr> = SkiaFontPool::managers,
@@ -562,20 +570,26 @@ class SkiaRunMeasurer(
      */
     private fun systemFallbackFace(cp: Int, style: FontStyle, familyHint: String?, sizePx: Float): Font? {
         val key = SystemFallbackKey(cp, style.weight, style.slant.ordinal)
+        // 缓存的是 **Typeface**（与字号无关），Font 按当次字号现包 —— 原实现缓存 Font 而键里
+        // 没有 sizePx，同一码本在两种字号下会拿到**前一个字号**的面（量出来的宽/画出来的墨都对不上）。
+        val tf = systemFallbackTypeface(key, cp, style, familyHint) ?: return null
+        val f = SkParagraphFactory.synthFont(tf, sizePx, style.weight, style.slant == FontSlant.ITALIC)
+        return if (f.getUTF32Glyph(cp) != NOTDEF) f else null
+    }
+
+    private fun systemFallbackTypeface(key: SystemFallbackKey, cp: Int, style: FontStyle, familyHint: String?): Typeface? {
         systemFallbackCache[key]?.let { return it }
         val tf = runCatching {
             systemFallbackCollection().defaultFallback(cp, style, familyHint)
-        }.getOrNull()
-        val face = tf?.let {
-            val f = SkParagraphFactory.synthFont(it, sizePx, style.weight, style.slant == FontSlant.ITALIC)
+        }.getOrNull()?.takeIf { candidate ->
             // 再验一次覆盖：`defaultFallback` 可能给出一张并不含该码本的面（宿主链自身的兜底）。
-            if (f.getUTF32Glyph(cp) != NOTDEF) f else null
+            SkParagraphFactory
+                .synthFont(candidate, 1f, style.weight, style.slant == FontSlant.ITALIC)
+                .getUTF32Glyph(cp) != NOTDEF
         }
-        synchronized(lock) { systemFallbackCache[key] = face }
-        return face
+        synchronized(lock) { systemFallbackCache[key] = tf }
+        return tf
     }
-
-    private data class SystemFallbackKey(val cp: Int, val weight: Int, val slant: Int)
 
     /**
      * 系统回退用的 [FontCollection]：**整个进程只建一次**。
@@ -588,48 +602,82 @@ class SkiaRunMeasurer(
      * 每个码本新建一个集合 ⇒ 无界的 native 对象 churn。第一版就是这么写的，
      * `WholeBookRelayoutEpochProbeTest`（15 秒预算的整书重排探针）在全量跑时**超时**。
      * 与 [universalTypefaces] 的缓存键踩的是同一类坑（教训 ⑩：缓存键/缓存粒度要按**代价**算，不是按调用次数）。
+     * 作用域同 [universalTypefaces]：**进程级**（原为实例字段 ⇒ 每个新实例重建一次重量级集合）。
      */
-    @Volatile
-    private var fallbackCollection: org.jetbrains.skia.paragraph.FontCollection? = null
-
     private fun systemFallbackCollection(): org.jetbrains.skia.paragraph.FontCollection =
-        fallbackCollection ?: synchronized(this) {
+        fallbackCollection ?: synchronized(lock) {
             fallbackCollection ?: SkParagraphFactory.defaultCollection().also { fallbackCollection = it }
         }
 
-    /** 系统回退链的结果缓存（面与字号无关 ⇒ 键里不含 sizePx）。 */
-    private val systemFallbackCache = HashMap<SystemFallbackKey, Font?>()
-
-    // ---- 面表解析与缓存（跨 run / 跨叶复用；值不可变，读写在锁内）----
-
-    private data class Key(val stack: String, val weight: Int, val slant: Int, val sizeBits: Int)
-
-    private val faceCache = HashMap<Key, Array<Font>>()
+    // ---- 面表解析与缓存（**进程级**；值不可变，读写在锁内）----
 
     /**
-     * 通用面表缓存（键 = mono/字重/斜体，**与字号和 CSS 族栈都无关**）——见 [universalTypefaces]。
+     * 族栈 + 字重 + 斜体 → [Typeface] 列表（**与字号无关**）。
      *
-     * 两个「无关」各有理由：族栈无关 ⇒ 所有族栈共用一张；**字号无关** ⇒ 见 [universalTypefaces]
-     * 的踩坑记录（带字号会把跨章调度探针顶到超时）。
+     * 键里含 mgrs 链（[FontMgr] 不覆写 equals ⇒ 走引用相等）：生产链是进程级单例
+     * （`FontMgr.default` + 池 provider），故跨实例命中；测试注入的自建 mgr 各自成桶，互不串味。
+     * 池内容变更由 [syncPoolGen] 整清（provider 是链上元素，但换代不必逐键比对）。
      */
-    private val universalCache = HashMap<UniversalKey, Array<Typeface>>()
-    private val lock = Any()
+    private data class StackKey(val mgrs: List<FontMgr>, val stack: String, val weight: Int, val slant: Int)
+
+    /** [StackKey] + 字号 → [Font]（**只在上一层之上包一层 Font**，不重扫族栈）。 */
+    private data class FontKey(
+        val mgrs: List<FontMgr>,
+        val stack: String,
+        val weight: Int,
+        val slant: Int,
+        val sizeBits: Int,
+    )
+
+    /** 保底面表缓存键：**刻意不含字号与 CSS 族栈** —— 见 [universalTypefaces] 的踩坑记录。 */
+    private data class UniversalKey(
+        val mgrs: List<FontMgr>,
+        val monospace: Boolean,
+        val weight: Int,
+        val slant: Int,
+    )
+
+    /** 系统回退链的结果缓存（**缓存 [Typeface] 而非 [Font]**：值与字号无关，见 [systemFallbackFace]）。 */
+    private data class SystemFallbackKey(val cp: Int, val weight: Int, val slant: Int)
+
+    private companion object {
+        /** 族栈 → 面（贵：逐族一次 `matchFamilyStyle` native）。 */
+        private val stackTypefaceCache = HashMap<StackKey, Array<Typeface>>()
+
+        /** 族栈 + 字号 → Font（廉价：只是给上一层的面按字号包一层）。 */
+        private val faceFontCache = HashMap<FontKey, Array<Font>>()
+
+        /** 通用/保底面表（最贵：扫全部已装族）。 */
+        private val universalCache = HashMap<UniversalKey, Array<Typeface>>()
+
+        /** 系统回退链（按码本问宿主链）。 */
+        private val systemFallbackCache = HashMap<SystemFallbackKey, Typeface?>()
+
+        /** 系统回退集合（重量级 native 对象，只建一次）。 */
+        @Volatile
+        private var fallbackCollection: org.jetbrains.skia.paragraph.FontCollection? = null
+
+        /** 池代次水位（见 [syncPoolGen]）。 */
+        @Volatile
+        private var poolGen = -1L
+
+        private val lock = Any()
+    }
 
     /**
-     * 池代次水位：[faceCache]/[universalCache] 的键里没有池身份（只有族栈字重字号），
-     * 池内容一变旧条目即错面——长驻实例（绘制侧 `LineWindowDrawer` 的 painter、
-     * 断行侧 breaker）跨越多次换字体，旧面一直用到退出重进。每次取面前对一次水位，
-     * 落后即整清（只清 map，不重扫；重扫发生在真正 miss 时，热路径只多一次 volatile 读）。
+     * 池代次水位：[stackTypefaceCache]/[faceFontCache]/[universalCache] 的键里没有池身份
+     * （只有 mgrs 链与族栈字重字号），池内容一变旧条目即错面——长驻实例（绘制侧
+     * `LineWindowDrawer` 的 painter、断行侧 breaker）跨越多次换字体，旧面一直用到退出重进。
+     * 每次取面前对一次水位，落后即整清（只清 map，不重扫；重扫发生在真正 miss 时，
+     * 热路径只多一次 volatile 读）。
      * `[systemFallbackCache]` 不在内：它走纯系统集合，与池内容无关。
      */
-    @Volatile
-    private var poolGen = -1L
-
     private fun syncPoolGen() {
         val g = SkiaFontPool.generation()
         if (g != poolGen) {
             synchronized(lock) {
-                faceCache.clear()
+                stackTypefaceCache.clear()
+                faceFontCache.clear()
                 universalCache.clear()
             }
             poolGen = g
@@ -648,30 +696,58 @@ class SkiaRunMeasurer(
         syncPoolGen()
         val style = SkParagraphFactory.runFontStyle(weight, italic)
         val stack = SkParagraphFactory.resolveFamilies(tag, families, monospace)
-        val key = Key(stack.joinToString(""), style.weight, style.slant.ordinal, sizePx.toRawBits())
-        synchronized(lock) { faceCache[key] }?.let { return it }
-        val out = ArrayList<Font>(stack.size * mgrs.size)
-        // 外层族栈、内层 manager —— FontCollection 的语义。写反实测偏 49.51px（§T8.3）。
-        // 具名族逐 manager 各取一次面；同字体被两个名字命中（`Times` / `Times New Roman`）时按引用去重。
-        val seen = HashSet<Typeface>()
+        val stackKey = StackKey(mgrs, stack.joinToString(""), style.weight, style.slant.ordinal)
+        // 字号层：只给上一层的面包一层 Font，**不重扫族栈**。教训 ⑰ 的同一条纪律在这里
+        // 也要守：把 sizePx 放进「扫族栈」那一层的键里，等于每遇一个新 font-size
+        // 就重付一次「族数 × matchFamilyStyle」的扫描（真书几十个字号桶）。
+        val fontKey = FontKey(mgrs, stackKey.stack, style.weight, style.slant.ordinal, sizePx.toRawBits())
+        synchronized(lock) { faceFontCache[fontKey] }?.let { return it }
+        val tfs = stackTypefaces(stackKey, stack, style, mgrs)
         val reqItalic = style.slant == org.jetbrains.skia.FontSlant.ITALIC
+        val arr = Array(tfs.size) { i ->
+            // 合成粗体（`SkParagraphFactory.synthesisFor` 的唯一执行点）：族里没有够粗的面时补一笔。
+            // **量画自动同源**：`isEmboldened` 只加墨、**不改 advance**（实测普惠体 64px
+            // 「中文标题abc」加粗前后 advance 逐值相同 263.552），而量宽与落墨共用本表里
+            // **同一批 Font 实例** ⇒ 不存在「量出来是细体、画出来是粗体」的失配。
+            SkParagraphFactory.synthFont(tfs[i], sizePx, style.weight, reqItalic)
+        }
+        synchronized(lock) { faceFontCache[fontKey] = arr }
+        return arr
+    }
+
+    /**
+     * 族栈 → [Typeface]（**进程级缓存**；贵 —— 逐族一次 `matchFamilyStyle` native）。
+     *
+     * 首个 miss 在锁内构建：宁可让并发 miss 者排队，也不要各扫一遍全族
+     * （这个活在字体多的机器上是十秒级，重复几次就是卡死）。
+     */
+    private fun stackTypefaces(
+        key: StackKey,
+        stack: Array<String>,
+        style: FontStyle,
+        mgrs: List<FontMgr>,
+    ): Array<Typeface> {
+        synchronized(lock) { stackTypefaceCache[key] }?.let { return it }
+        return synchronized(lock) {
+            stackTypefaceCache[key] ?: buildStackTypefaces(stack, style, mgrs)
+                .also { stackTypefaceCache[key] = it }
+        }
+    }
+
+    private fun buildStackTypefaces(stack: Array<String>, style: FontStyle, mgrs: List<FontMgr>): Array<Typeface> {
+        val out = ArrayList<Typeface>(stack.size * mgrs.size)
+        val seen = HashSet<Typeface>()
         for (family in stack) {
             for (mgr in mgrs) {
                 val tf = runCatching { mgr.matchFamilyStyle(family, style) }.getOrNull() ?: continue
                 if (!seen.add(tf)) continue
-                // 合成粗体（`SkParagraphFactory.synthesisFor` 的唯一执行点）：族里没有够粗的面时补一笔。
-                // **量画自动同源**：`isEmboldened` 只加墨、**不改 advance**（实测普惠体 64px
-                // 「中文标题abc」加粗前后 advance 逐值相同 263.552），而量宽与落墨共用本表里
-                // **同一批 Font 实例** ⇒ 不存在「量出来是细体、画出来是粗体」的失配。
-                out.add(SkParagraphFactory.synthFont(tf, sizePx, style.weight, reqItalic))
+                out.add(tf)
             }
         }
         // **保底面刻意不在这里**（见 [universalPass]）：并进来等于给每段加数百次 native 调用
         // （实测正文段 0.017ms → 整书 5000 段 85s，把 15 秒预算的调度探针顶爆）。
         // 族栈表恒只含 CSS 族栈的面；保底由 [measure] 在全灭时另走 [universalPass]。
-        val arr = out.toTypedArray()
-        synchronized(lock) { faceCache[key] = arr }
-        return arr
+        return out.toTypedArray()
     }
 
     /**
@@ -723,8 +799,12 @@ class SkiaRunMeasurer(
      * `InhouseParagraphBreaker` / `LineAligner` 四处的**默认实参** ⇒ 每个新实例都要重扫一遍
      * 全部已装族（平板 59 族、每族一次 `matchFamilyStyle` native），而扫出来的结果对所有实例**完全相同**。
      * 平板实测一次运行 39 秒内至少新建 **214 个实例**（按已删诊断 `logUniversalTableOnce` 那 641 行折算）。
-     * **正确的作用域是进程级**（与 `systemFallbackCollection` 同一个模式），
-     * 未改是因为还没量化收益/边界，先记账。
+     * **作用域已于 2026-10-08 收口为进程级**（[universalCache] 移入 companion，与
+     * `systemFallbackCollection` 同一模式；键加 mgrs 链）。收口的触发事件即本段
+     * 「平板 59 族毫秒级」的假设被推翻：Linux 桌面 1981 族 × ~6ms = 单次 11.4 秒，
+     * 乘上「每段落一个新实例」的开书/翻页成本（实测单章布局 25 秒）。
+     * 教训仍在：**缓存键/作用域都按「代价」算**——同一个「先记账」的判断，
+     * 在便宜平台上无害、在贵平台上就是十秒。
      */
     private fun universalTypefaces(
         monospace: Boolean,
@@ -734,8 +814,19 @@ class SkiaRunMeasurer(
     ): Array<Typeface> {
         syncPoolGen()
         val style = SkParagraphFactory.runFontStyle(weight, italic)
-        val key = UniversalKey(monospace, style.weight, style.slant.ordinal)
+        val key = UniversalKey(mgrs, monospace, style.weight, style.slant.ordinal)
         synchronized(lock) { universalCache[key] }?.let { return it }
+        // 首个 miss 在锁内构建：并发 miss 者排队，胜过各扫一遍全族（下面②段的代价是
+        // 「已装族数 × 单次 matchFamilyStyle」——字体多的机器上是十秒级）。
+        return synchronized(lock) {
+            universalCache[key] ?: buildUniversalTypefaces(key, style)
+                .also { universalCache[key] = it }
+        }
+    }
+
+    private fun buildUniversalTypefaces(key: UniversalKey, style: FontStyle): Array<Typeface> {
+        val mgrs = key.mgrs
+        val monospace = key.monospace
         val seen = HashSet<Typeface>()
         val out = ArrayList<Typeface>()
         fun add(mgr: FontMgr, family: String) {
@@ -788,9 +879,6 @@ class SkiaRunMeasurer(
 
     /** 无字体码本的记录上限（防止生僻字多的书把日志刷爆）。 */
     private val UNRESOLVABLE_LOG_CAP = 40
-
-    /** 保底表缓存键：**刻意不含字号** —— 见 [universalTypefaces] 的踩坑记录。 */
-    private data class UniversalKey(val monospace: Boolean, val weight: Int, val slant: Int)
 }
 
 private const val NOTDEF: Short = 0

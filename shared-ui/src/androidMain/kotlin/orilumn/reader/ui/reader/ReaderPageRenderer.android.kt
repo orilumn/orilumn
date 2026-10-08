@@ -1,33 +1,47 @@
 package orilumn.reader.ui.reader
 
-import android.graphics.Canvas as AndroidCanvas
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.Canvas
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.nativeCanvas
 import orilumn.reader.engine.skia.DecodedImage
 import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.engine.skia.LineWindowDrawer
 import orilumn.reader.engine.skia.PageBackground
-import orilumn.reader.engine.skia.drawPageBackground
 import kotlin.math.roundToInt
+import org.jetbrains.skia.ColorAlphaType
+import org.jetbrains.skia.ColorType
+import org.jetbrains.skia.ImageInfo
 import org.jetbrains.skia.Rect
 import org.jetbrains.skia.Surface as SkiaSurface
 
 /**
- * Android actual：CMP 的 DrawScope 在 Android 上暴露的是
- * `android.graphics.Canvas`，无法直接取出 skia Canvas，故用 skia 离屏
- * [SkiaSurface] 走同一套 [LineWindowDrawer] 光栅化，再把像素桥回
- * `android.graphics.Bitmap` 之后 drawBitmap 到 Compose 画布。
+ * Android actual：离屏 skia 光栅化整页 → `android.graphics.Bitmap` → Compose 画布。
  *
- * 像素桥（m144）：`Bitmap.readPixels` 在真机回 null 且无诊断，改单跳 PNG 编解码。
+ * 为什么不能直画：CMP 的 DrawScope 在 Android 上是 `android.graphics.Canvas`，
+ * 取不出 skia Canvas，故用离屏 [SkiaSurface] 走与 Desktop **同一份** [drawPageContent]
+ * （绘制顺序/几何/占位语义单源，见 `PageRaster.kt`），再把像素桥回平台位图。
  *
- * 页缓存：调用方 `ReaderScreen` 经 `remember(pos)` 给出同页同一 List 实例；内容不变的
- * 重组（点工具栏/设置/目录）直接复用成品位图，不再逐行整形+编解码——否则主线程每帧
- * 几百毫秒，全部交互都慢一截。翻页（新实例）才走全量栅格化。
+ * 像素桥（P0a，取代 JPEG 单跳）：`Image.readPixels` 进 skia Bitmap → `readPixels(RGBA_8888)`
+ * 拿行序确定的字节 → `Bitmap.copyPixelsFromBuffer`。纯 memcpy（1200×1800 约 8.6MB），
+ * 而旧路 `encodeToData(JPEG,85)+decodeByteArray` 实测 ~100ms/页且有损——
+ * 动画要按帧拿页纹理，100ms/页直接不可用。RGBA_8888 显式指定：skia 的 N32 字节序
+ * 随平台变（N32 在小端是 BGRA），不指定就会在某些设备上红蓝互换。
+ *
+ * 页缓存：同页命中直接 `drawBitmap` 复用成品位图，零整形+零栅格化。命中条件必须含
+ * [contentRevision]（字重这类"行数据完全相等"的纯字形变更只能靠它失效，见字段注释）。
  */
 @Composable
 actual fun rememberReaderPageRenderer(): ReaderPageRenderer = remember { AndroidReaderPageRenderer() }
+
+/**
+ * skia Image → Compose [ImageBitmap]（Android actual，零编码像素搬运）。
+ * 失败返回 null 由调用方回退（不抛：栅格化是显示路径，坏了不该崩阅读）。
+ */
+actual fun skiaImageToImageBitmap(image: org.jetbrains.skia.Image): ImageBitmap? =
+    skiaImageToAndroidBitmap(image, image.width, image.height)?.asImageBitmap()
 
 private class AndroidReaderPageRenderer : ReaderPageRenderer {
     private val drawer = LineWindowDrawer()
@@ -39,6 +53,8 @@ private class AndroidReaderPageRenderer : ReaderPageRenderer {
     private var cachedBg: Int = 0
     private var cachedBgs: List<PageBackground>? = null
     private var cachedBgImgKeys: Set<String>? = null
+    /** P0a：插图也进缓存比对（DecodedImage 无值相等，按实例比，命中即可——同页同实例）。 */
+    private var cachedImages: List<PageImageSlot>? = null
     private var cachedRevision: Int = -1
     private var cachedPage: android.graphics.Bitmap? = null
 
@@ -53,6 +69,7 @@ private class AndroidReaderPageRenderer : ReaderPageRenderer {
         pageBg: Int,
         backgrounds: List<PageBackground>,
         bgImages: Map<String, DecodedImage>,
+        images: List<PageImageSlot>,
         contentRevision: Int,
     ) {
         val w = (contentRectRight - contentRectLeft).toInt().coerceAtLeast(1)
@@ -66,84 +83,98 @@ private class AndroidReaderPageRenderer : ReaderPageRenderer {
             cachedPage?.recycle()
             cachedPage = null
         }
-        // 同页命中：行、底色、背景矩形、修订号都相等才复用（背景画进成品位图，不比对即串页；
-        // 字重这类纯字形变更行数据完全相等，必须经修订号失效，否则成品位图永不刷新）。
+        // 同页命中：行、底色、背景矩形、背景图键集、插图槽位、修订号都相等才复用。
         // shiftToPageFrame 每次 map 出新 List，=== 永不命中；data class == 按值比对是微秒级。
-        // 内容不变的重组零栅格化。P3-b 背景图只比键集（DecodedImage 无值相等，按实例比恒 miss）。
-        val bgKeys = backgrounds.mapNotNullTo(HashSet()) { it.bgKey()?.takeIf { bgImages.containsKey(it) } }
-        val hit = cachedPage?.takeIf { pageBg == cachedBg && backgrounds == cachedBgs && lines == cachedLines && bgKeys == cachedBgImgKeys && contentRevision == cachedRevision }
+        val bgKeys = backgrounds.mapNotNullTo(HashSet()) { it.bgKey()?.takeIf { k -> bgImages.containsKey(k) } }
+        val hit = cachedPage?.takeIf {
+            pageBg == cachedBg && backgrounds == cachedBgs && lines == cachedLines &&
+                bgKeys == cachedBgImgKeys && images == cachedImages && contentRevision == cachedRevision
+        }
         if (hit != null) {
-            (canvas.nativeCanvas as AndroidCanvas).drawBitmap(
-                hit,
-                android.graphics.Rect(0, 0, hit.width, hit.height),
-                android.graphics.RectF(contentRectLeft, contentRectTop, contentRectRight, contentRectBottom),
-                null,
-            )
+            drawPageBitmap(canvas, hit, contentRectLeft, contentRectTop, contentRectRight, contentRectBottom)
             return
         }
 
         val t0 = android.os.SystemClock.uptimeMillis()
         val s = surface!!
-        // JPEG 无 alpha：先按主题底色打底（与外层 Compose 背景同色，无缝），再落墨。
-        s.canvas.clear(pageBg)
-        // 离屏 surface 原点 = 内容区左上（0,0 即 contentRectLeft/Top）：X 已在参数侧
-        // 归一（contentLeft - contentRectLeft），Y 同理须减 contentRectTop——[lines]
-        // 是页坐标系（含上边距 contentTop），不减则文本被整体下压一个上边距
-        // （双倍上边距），而 Compose 层直画的插图是单倍，图文错位、图“无视上边距”。
+        // [drawPageContent] 收口了「一页像素长什么样」：打底 → 盒背景 → 文字 → 插图。
+        // Y 归一：lines 是页坐标系（含上边距 contentTop），离屏原点在内容区左上 ⇒ 减 contentRectTop
+        // （不减则文本整体下压一个上边距，而插图同式归一，双倍上边距 = 图文错位）。
+        val xOff = contentLeft - contentRectLeft
         val yOff = contentRectTop.roundToInt()
-        val localLines = if (yOff != 0) {
+        val localLines = if (yOff != 0 && lines.isNotEmpty()) {
             lines.map { it.copy(yTop = it.yTop - yOff, yBottom = it.yBottom - yOff) }
         } else {
             lines
         }
-        // 盒背景/边框：成品位图不透明，只能画进离屏 surface 且在文字之下（与行同一归一：
-        // 行画在 (contentLeft-contentRectLeft)+xLeft，背景同式，xLeft 换成盒左/右缘）。
-        // P3-a 单源（圆角/描边环/阴影/alpha，见 drawPageBackground）；P3-b 背景图同形平铺。
-        if (backgrounds.isNotEmpty()) {
-            val xOff = contentLeft - contentRectLeft
-            for (bg in backgrounds) {
-                s.canvas.drawPageBackground(bg, xOff, -yOff.toFloat(), bg.bgKey()?.let { bgImages[it]?.image })
-            }
+        val localBgs = if (yOff != 0 && backgrounds.isNotEmpty()) {
+            backgrounds.map { it.copy(yTop = it.yTop - yOff, yBottom = it.yBottom - yOff) }
+        } else {
+            backgrounds
         }
-        drawer.drawLines(
+        drawPageContent(
             canvas = s.canvas,
-            contentLeft = contentLeft - contentRectLeft,
+            contentLeft = xOff,
             lines = localLines,
-            clip = Rect.makeLTRB(0f, 0f, w.toFloat(), h.toFloat()),
+            backgrounds = localBgs,
+            bgImages = bgImages,
+            images = images,
+            pageBg = pageBg,
+            w = w,
+            h = h,
+            drawer = drawer,
         )
         val t1 = android.os.SystemClock.uptimeMillis()
-        // 像素桥（m144）：Bitmap.readPixels 真机回 null，PNG 编码又要 ~800ms，只能 JPEG 单跳；
-        // 白底黑字 q85 无可见损失，编解码合计 ~100ms；同页命中缓存后为 0。
-        val img = s.makeImageSnapshot()
-        val jpg: ByteArray? = try {
-            img.encodeToData(org.jetbrains.skia.EncodedImageFormat.JPEG, 85)?.bytes
-        } finally {
-            img.close()
-        }
+        val bmp = skiaImageToAndroidBitmap(s.makeImageSnapshot(), w, h)
         val t2 = android.os.SystemClock.uptimeMillis()
-        if (jpg == null) {
-            android.util.Log.w("Orilumn.SkiaBridge", "encodeToData null w=$w h=$h")
-            return
-        }
-        val bmp = android.graphics.BitmapFactory.decodeByteArray(jpg, 0, jpg.size)
-        val t3 = android.os.SystemClock.uptimeMillis()
         if (bmp == null) {
-            android.util.Log.w("Orilumn.SkiaBridge", "decodeByteArray null jpgBytes=${jpg.size}")
+            android.util.Log.w("Orilumn.SkiaBridge", "pixel bridge failed w=$w h=$h shape=${t1 - t0}ms bridge=${t2 - t1}ms")
             return
         }
-        android.util.Log.w("Orilumn.SkiaBridge", "raster n=${lines.size} shape=${t1 - t0}ms enc=${t2 - t1}ms dec=${t3 - t2}ms jpg=${jpg.size / 1024}KB")
+        android.util.Log.w("Orilumn.SkiaBridge", "raster n=${lines.size} imgs=${images.size} shape=${t1 - t0}ms bridge=${t2 - t1}ms")
         cachedLines = lines
         cachedBg = pageBg
         cachedBgs = backgrounds
         cachedBgImgKeys = bgKeys
+        cachedImages = images
         cachedRevision = contentRevision
         cachedPage?.recycle()
         cachedPage = bmp
-        (canvas.nativeCanvas as AndroidCanvas).drawBitmap(
+        drawPageBitmap(canvas, bmp, contentRectLeft, contentRectTop, contentRectRight, contentRectBottom)
+    }
+
+    private fun drawPageBitmap(
+        canvas: Canvas,
+        bmp: android.graphics.Bitmap,
+        left: Float,
+        top: Float,
+        right: Float,
+        bottom: Float,
+    ) {
+        (canvas.nativeCanvas as android.graphics.Canvas).drawBitmap(
             bmp,
             android.graphics.Rect(0, 0, bmp.width, bmp.height),
-            android.graphics.RectF(contentRectLeft, contentRectTop, contentRectRight, contentRectBottom),
+            android.graphics.RectF(left, top, right, bottom),
             null,
         )
     }
 }
+
+/**
+ * skia 离屏产物 → `android.graphics.Bitmap`（内部版：已知尺寸，省一次查询；
+ * [skiaImageToImageBitmap] 是对外接缝走同一条路）。
+ */
+private fun skiaImageToAndroidBitmap(
+    image: org.jetbrains.skia.Image,
+    w: Int,
+    h: Int,
+): android.graphics.Bitmap? = runCatching {
+    val tmp = org.jetbrains.skia.Bitmap()
+    tmp.allocN32Pixels(w, h, true)
+    if (!image.readPixels(tmp)) return@runCatching null
+    val info = ImageInfo(w, h, ColorType.RGBA_8888, ColorAlphaType.OPAQUE)
+    val bytes = tmp.readPixels(info, w * 4, 0, 0) ?: return@runCatching null
+    android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888).apply {
+        copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(bytes))
+    }
+}.getOrNull()

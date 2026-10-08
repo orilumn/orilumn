@@ -2,6 +2,7 @@ package orilumn.reader.ui.reader
 
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Canvas
+import androidx.compose.ui.graphics.ImageBitmap
 import orilumn.reader.engine.skia.DecodedImage
 import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.engine.skia.PageBackground
@@ -39,6 +40,15 @@ interface ReaderPageRenderer {
         backgrounds: List<PageBackground> = emptyList(),
         bgImages: Map<String, DecodedImage> = emptyMap(),
         /**
+         * P0a：**整页插图下沉进渲染器**（此前由 `ReaderPageCanvas` 在 Compose 层另画）。
+         *
+         * 下沉的理由不是洁癖，是**像素单一真相源**：翻页动画要拿「整页一张位图」当纹理，
+         * 插图若留在 Compose 层，截图就丢图、且静止画面与动画像素不一致（卷曲时插图
+         * 不跟着卷 = 露馅）。绘制语义与旧 Compose 路径逐项同形（`dstLeft = contentLeft + xLeft`，
+         * `dstTop = yTop - shift`，`decoded == null` 画灰色占位，绝不静默空白）。
+         */
+        images: List<PageImageSlot> = emptyList(),
+        /**
          * 版式版本号（调用方 `ReaderScreen.contentRevision` 同源）：
          * 字重这类"只换字形、不断行"的变更会产出与当前页结构完全相等的行数据，
          * 相等即被跳过/缓存命中、零像素重画；版本号递增即强制重走绘制
@@ -47,6 +57,32 @@ interface ReaderPageRenderer {
         contentRevision: Int = 0,
     )
 }
+
+/**
+ * 一个 `<img>` 槽位（几何 + 解码结果，缺图显式为 null）。
+ *
+ * 「缺图」不是被跳过的条目，而是**画灰色占位**的条目（复刻旧 `drawPageImage` 的 `:136`
+ * 语义）——所以这里用槽位而不是 `Map<PageImage, DecodedImage>`：map 表达不了
+ * 「该位置有图但还没解出来」，而那正是首帧最常见的中间态。
+ */
+class PageImageSlot(
+    val image: orilumn.reader.engine.skia.PageImage,
+    val decoded: DecodedImage?,
+) {
+    /** 缓存/比较用（skia Image 无值相等，按实例比）。 */
+    fun sameAs(other: PageImageSlot?): Boolean =
+        other != null && image == other.image && (decoded === other.decoded)
+}
+
+/**
+ * skia Image → Compose [ImageBitmap] 的最后一跳（平台 actual）。
+ *
+ * - jvmMain：skia Image 本身就是 Compose 位图的 backing，零拷贝；
+ * - androidMain：`android.graphics.Bitmap` 与 skia 内存布局不同，必须过一次像素搬运
+ *   （skia `Image.readPixels` → RGBA_8888 字节 → `Bitmap.copyPixelsFromBuffer`），
+ *   取代此前"JPEG 编解码单跳"（实测 ~100ms/页，见 `docs/翻页动画设计.md` §3.2 S1）。
+ */
+expect fun skiaImageToImageBitmap(image: org.jetbrains.skia.Image): ImageBitmap?
 
 @Composable
 expect fun rememberReaderPageRenderer(): ReaderPageRenderer

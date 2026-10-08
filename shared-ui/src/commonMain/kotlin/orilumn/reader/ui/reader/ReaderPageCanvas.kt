@@ -4,12 +4,6 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.key
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.drawscope.DrawScope
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.IntSize
 import orilumn.reader.engine.skia.DecodedImage
 import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.engine.skia.PageBackground
@@ -39,10 +33,15 @@ fun ReaderPageCanvas(
     /** 文本墨色（ARGB Int，调用方喂主题 fgColor）：逐帧盖章，与行数据的版式缓存无关。 */
     inkColor: Int = 0xFF000000.toInt(),
     modifier: Modifier = Modifier,
-    /** 与 [lines] 同一切片的 `<img>` 几何（章节绝对 Y）；null/空 = 本页无图。 */
+    /**
+     * 与 [lines] 同一切片的 `<img>` 几何（章节绝对 Y）；null/空 = 本页无图。
+     * **P0a 起插图不再在此绘制**：它与文字/背景一起下沉进 [ReaderPageRenderer]，
+     * 由 [PageImageSlot] 传入（含「有图但未解出」的占位槽位）。
+     * 理由是像素单一真相源——翻页动画拿整页位图当纹理，插图留在 Compose 层就会丢图。
+     */
     pageImages: List<PageImage>? = null,
-    /** 已解码位图（键与 [pageImages] 同实例/同值）；缺失项画灰色占位，不跳过几何。 */
-    imageBitmaps: Map<PageImage, ImageBitmap>? = null,
+    /** 已解码的插图（键与 [pageImages] 同实例/同值）；缺失项由渲染器画灰色占位。 */
+    imageBitmaps: Map<PageImage, DecodedImage>? = null,
     /** 与 [lines] 同一切片的盒背景/边框（章节绝对 Y）；null/空 = 本页无背景块。 */
     pageBackgrounds: List<PageBackground>? = null,
     /** P3-b: 背景图解码结果（键为 [PageBackground.bgKey]）；缺失项該幅只留底色。 */
@@ -78,65 +77,33 @@ fun ReaderPageCanvas(
         val bgs = rawBgs?.map {
             it.copy(yTop = it.yTop - shift, yBottom = it.yBottom - shift)
         }.orEmpty()
-        if (!list.isNullOrEmpty() || bgs.isNotEmpty()) {
-            val frame = if (!list.isNullOrEmpty()) ReaderMath.shiftToPageFrame(list, shift) else emptyList()
-            // 主题墨色盖章：行自带墨色只在“恰好重排过”时才新鲜，绘制时按当前主题统一覆盖，
-            // 换色即时生效且不触发布局/分页缓存失效（键里本来就没有颜色）。
-            val inked = if (frame.any { it.inkColor != inkColor }) {
-                frame.map { if (it.inkColor != inkColor) it.copy(inkColor = inkColor) else it }
-            } else {
-                frame
-            }
-            renderer.drawLines(
-                canvas = drawContext.canvas,
-                contentLeft = contentLeft,
-                lines = inked,
-                contentRectLeft = contentRectLeft,
-                contentRectTop = contentRectTop,
-                contentRectRight = contentRectRight,
-                contentRectBottom = contentRectBottom,
-                pageBg = pageBg,
-                backgrounds = bgs,
-                bgImages = bgImages,
-                contentRevision = contentRevision,
-            )
+        // P0a：插图与文本同一 shift 一并下沉进渲染器（整页一张位图，动画与静止同像素）。
+        // 槽位**逐项保留**（含 decoded=null 的占位槽）——map 表达不了「有图未解出」，
+        // 而那正是首帧常态；漏一个就是静默空白。
+        val slots = imgs?.map { PageImageSlot(it.copy(yTop = it.yTop - shift, yBottom = it.yBottom - shift), imageBitmaps?.get(it)) }
+            .orEmpty()
+        val frame = if (!list.isNullOrEmpty()) ReaderMath.shiftToPageFrame(list, shift) else emptyList()
+        // 主题墨色盖章：行自带墨色只在“恰好重排过”时才新鲜，绘制时按当前主题统一覆盖，
+        // 换色即时生效且不触发布局/分页缓存失效（键里本来就没有颜色）。
+        val inked = if (frame.any { it.inkColor != inkColor }) {
+            frame.map { if (it.inkColor != inkColor) it.copy(inkColor = inkColor) else it }
+        } else {
+            frame
         }
-        // 插图：与文本同一 shift 平移后按盒流 used 尺寸贴图（Compose 层直画，
-        // 双平台共用；Android 离屏文本缓存不受影响）。
-        imgs?.forEach { img ->
-            drawPageImage(img, shift, contentLeft, imageBitmaps?.get(img))
-        }
-    }
-    }
-}
-
-/**
- * 单张插图落位：[PageImage.xLeft] 与 [DrawLine.xLeft] 同口径（相对内容区左缘），
- * 故 `dstLeft = contentLeft + xLeft`；Y 与文本共用同一 [shift]（章节绝对 Y → 页坐标）。
- */
-private fun DrawScope.drawPageImage(
-    img: PageImage,
-    shift: Int,
-    contentLeft: Float,
-    bitmap: ImageBitmap?,
-) {
-    val w = img.widthPx.coerceAtLeast(1)
-    val h = (img.yBottom - img.yTop).coerceAtLeast(1)
-    val dstLeft = (contentLeft + img.xLeft).roundToInt()
-    val dstTop = img.yTop - shift
-    if (bitmap != null) {
-        drawImage(
-            image = bitmap,
-            dstOffset = IntOffset(dstLeft, dstTop),
-            dstSize = IntSize(w, h),
+        renderer.drawLines(
+            canvas = drawContext.canvas,
+            contentLeft = contentLeft,
+            lines = inked,
+            contentRectLeft = contentRectLeft,
+            contentRectTop = contentRectTop,
+            contentRectRight = contentRectRight,
+            contentRectBottom = contentRectBottom,
+            pageBg = pageBg,
+            backgrounds = bgs,
+            bgImages = bgImages,
+            images = slots,
+            contentRevision = contentRevision,
         )
-    } else {
-        // 解码中/失败的灰色占位（与旧 Android drawImageOrPlaceholder 同语义），
-        // 保证“有图几何”永远可见，不会静默空白。
-        drawRect(
-            color = androidx.compose.ui.graphics.Color(0xFFDDDDDD),
-            topLeft = Offset(dstLeft.toFloat(), dstTop.toFloat()),
-            size = Size(w.toFloat(), h.toFloat()),
-        )
+    }
     }
 }

@@ -152,9 +152,10 @@ fun ReaderScreen(
     val currentHost by rememberUpdatedState(host)
     // 跨页位图缓存（随宿主换代重建：换书即新池；同书内翻页/改参常驻，回访页首帧即有图）。
     // 键是稳定身份（与几何无关），容量按字节 LRU（大截图多的书自动腾退）。
+    // P0a：正文插图与背景图同为 skia `DecodedImage`（插图已下沉进页位图，不再是 Compose 位图）。
     val imgCache = remember(currentHost) {
-        PageImageCache<androidx.compose.ui.graphics.ImageBitmap>(
-            sizeOf = { (it.width * it.height * 4L).coerceAtLeast(1L) })
+        PageImageCache<orilumn.reader.engine.skia.DecodedImage>(
+            sizeOf = { (it.image.width * it.image.height * 4L).coerceAtLeast(1L) })
     }
     val bgCache = remember(currentHost) {
         PageImageCache<orilumn.reader.engine.skia.DecodedImage>(

@@ -6,8 +6,8 @@ import orilumn.reader.data.epub.TocItem
 import orilumn.reader.engine.BookDocumentController
 import orilumn.reader.engine.skia.DecodedImage
 import orilumn.reader.engine.skia.DrawLine
+import orilumn.reader.engine.skia.ImageCodec
 import orilumn.reader.ui.imageBitmapOf
-import orilumn.reader.ui.sampledImageBitmapOf
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -151,15 +151,18 @@ class TabletReaderHost(
     override suspend fun loadBackgroundImage(chapterHref: String, src: String): DecodedImage? =
         withContext(Dispatchers.IO) { controller.loadBackgroundImage(chapterHref, src) }
 
-    override suspend fun loadPageImage(img: orilumn.reader.engine.skia.PageImage): androidx.compose.ui.graphics.ImageBitmap? =
+    override suspend fun loadPageImage(img: orilumn.reader.engine.skia.PageImage): DecodedImage? =
         withContext(Dispatchers.IO) {
-            // 解码走共享接缝（Q1-6）：原字节按宽采样，失败回退 PNG 字节直解。
+            // P0a：正文插图解码统一到 skia（与背景图 `loadBackgroundImage` 同一类型）——
+            // 插图已下沉进整页位图，下游要能直接进 skia 画布的东西，不再经 Compose BitmapFactory。
+            // 采样口径不变：按 used 宽度精确缩放（`decodeScaled` 即旧 inSampleSize+createScaledBitmap
+            // 的等价物，见 engine-skia `ImageCodec` KDoc）；失败回退 PNG 字节直解。
             val raw = controller.loadPageImageRaw(img)
             if (raw != null) {
-                sampledImageBitmapOf(raw, img.widthPx.coerceAtLeast(1))?.let { return@withContext it }
+                ImageCodec.decodeScaled(raw, img.widthPx.coerceAtLeast(1))?.let { return@withContext it }
             }
             val png = controller.loadPageImageBytes(img) ?: return@withContext null
-            imageBitmapOf(png)
+            ImageCodec.decode(png)
         }
 
     override fun onSaveProgress(pos: ReaderPos) {

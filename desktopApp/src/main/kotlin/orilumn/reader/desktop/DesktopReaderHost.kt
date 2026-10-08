@@ -12,6 +12,7 @@ import orilumn.reader.engine.ImageLoader
 import orilumn.reader.engine.LinkTarget
 import orilumn.reader.engine.skia.DecodedImage
 import orilumn.reader.engine.skia.DrawLine
+import orilumn.reader.engine.skia.ImageCodec
 import orilumn.reader.engine.skia.PageImage
 import orilumn.reader.engine.text.TypographicProfile
 import orilumn.reader.ui.reader.ReaderHost
@@ -215,11 +216,11 @@ class DesktopReaderHost(
     override fun pageBackgrounds(pos: ReaderPos): List<orilumn.reader.engine.skia.PageBackground>? =
         controller.pageBackgrounds(pos.chapter, pos.slice)
 
-    override suspend fun loadPageImage(img: PageImage): ImageBitmap? = withContext(Dispatchers.IO) {
-        // 取字节走控制器单源（常驻 reader；与平板 `loadPageImageRaw` 同一管线），解码走共享接缝：
-        // 与书架封面同一解码口径，失败回 null（阅读面画灰色占位）。
+    override suspend fun loadPageImage(img: PageImage): DecodedImage? = withContext(Dispatchers.IO) {
+        // P0a：与平板同一口径——正文插图解码结果统一是 skia `DecodedImage`（插图已下沉进
+        // 整页位图）；取字节仍走控制器单源，失败回 null（阅读面画灰色占位）。
         val bytes = controller.loadPageImageRaw(img) ?: return@withContext null
-        orilumn.reader.ui.imageBitmapOf(bytes)
+        ImageCodec.decodeScaled(bytes, img.widthPx.coerceAtLeast(1)) ?: ImageCodec.decode(bytes)
     }
 
     // P3-b: 背景图按需直解（取字节+解码全走控制器，与平板同一管线；失败回 null，該幅只留底色）。

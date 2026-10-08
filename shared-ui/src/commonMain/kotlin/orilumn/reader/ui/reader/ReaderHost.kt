@@ -81,8 +81,15 @@ interface ReaderHost {
      */
     fun pageImages(pos: ReaderPos): List<PageImage>? = null
 
-    /** 按 [PageImage] 异步解码成位图（阅读面 produceState 按图缓存）；null = 跳过该图。 */
-    suspend fun loadPageImage(img: PageImage): ImageBitmap? = null
+    /**
+     * 按 [PageImage] 异步解码成位图（阅读面按图缓存）；null = 解码失败。
+     *
+     * P0a：**返回 skia [DecodedImage] 而非 Compose `ImageBitmap`** —— 与 [loadBackgroundImage]
+     * 统一成「skia 解码结果」单一类型。理由是插图已下沉进页位图（整页一张纹理），
+     * 下游要的是能直接进 skia 画布的东西；Compose 位图在 Android 上还得再桥回 skia，
+     * 白绕一圈（原先正文图在 Compose 层直画时不需要这一步）。
+     */
+    suspend fun loadPageImage(img: PageImage): DecodedImage? = null
 
     /**
      * 当前页可视窗口的盒背景/边框（章节绝对 Y，与 pageLines 同一切片同坐标系），

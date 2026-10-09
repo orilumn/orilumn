@@ -98,4 +98,51 @@ private class JvmReaderPageRenderer : ReaderPageRenderer {
         // 1:1 贴回（栅格尺寸 == 内容区尺寸，故无缩放；坐标取整避免亚像素抖动）。
         canvas.skiaCanvas.drawImage(r.value, contentRectLeft.toInt().toFloat(), contentRectTop.toInt().toFloat())
     }
+
+    /** 预栅格：与 [drawLines] 共用同一个 store，故同样限 UI 线程（见接口 KDoc）。 */
+    override fun preraster(
+        lines: List<DrawLine>,
+        contentLeft: Float,
+        contentRectLeft: Float,
+        contentRectTop: Float,
+        contentRectRight: Float,
+        contentRectBottom: Float,
+        pageBg: Int,
+        backgrounds: List<PageBackground>,
+        bgImages: Map<String, DecodedImage>,
+        images: List<PageImageSlot>,
+        contentRevision: Int,
+        rasterKey: PageRasterKey?,
+    ): Boolean {
+        if (rasterKey == null) return false
+        if (lines.isEmpty() && images.isEmpty() && backgrounds.isEmpty()) return false
+        val r = store.obtain(
+            key = rasterKey,
+            onMiss = null,
+            spec = PageRasterSpec(
+                lines = lines,
+                backgrounds = backgrounds,
+                bgImages = bgImages,
+                images = images,
+                pageBg = pageBg,
+                contentLeft = contentLeft,
+                contentRectLeft = contentRectLeft,
+                contentRectTop = contentRectTop,
+                contentRight = contentRectRight,
+                contentBottom = contentRectBottom,
+                contentRevision = contentRevision,
+            ),
+        )
+        if (r == null) {
+            Logger.w("Orilumn.Desktop", "preraster FAILED n=${lines.size} imgs=${images.size}")
+            return false
+        }
+        val (pages, bytes) = store.stats()
+        Logger.w(
+            "Orilumn.Desktop",
+            "preraster n=${lines.size} imgs=${images.size} ${r.rasterMs}ms hit=${r.cacheHit} " +
+                "pool=$pages/${bytes / 1024 / 1024}MB",
+        )
+        return true
+    }
 }

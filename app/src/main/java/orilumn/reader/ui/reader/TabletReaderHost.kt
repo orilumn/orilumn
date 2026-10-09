@@ -40,6 +40,8 @@ class TabletReaderHost(
 
     private val scopeJob = SupervisorJob()
     private val ioScope = CoroutineScope(scopeJob + Dispatchers.IO)
+    /** UI 线程作用域：预栅格必须在这里跑（与 UI 绘制共用离屏 surface，见 onPrefillReady）。 */
+    private val mainScope = CoroutineScope(scopeJob + Dispatchers.Main.immediate)
 
     private var opened = false
 
@@ -54,6 +56,21 @@ class TabletReaderHost(
 
     /** 第 1 档「渲染」半边的抢占钩子（见 `ReaderHost.onRasterMiss`）。 */
     override fun onRasterMiss() = controller.onForegroundRaster()
+
+    /**
+     * 预排出邻页版式后按方向补一张栅格（见 `ReaderHost.observePrefillReady`）。
+     *
+     * 引擎在后台线程抛信号，这里切到 **UI 线程**执行——预栅格与 UI 的绘制共用
+     * `PageRasterStore` 的离屏 surface，跨线程会出事（见 `ReaderPageRenderer.preraster`）。
+     * 重复订阅覆盖而非累加（设置/视口变化会重建订阅，见 `Preraster.kt`）。
+     */
+    override fun observePrefillReady(handler: suspend (chapter: Int, direction: Int) -> Unit) {
+        // 订阅本身只是「装一个回调」，不需要切线程；回调被触发时才切 UI 线程执行
+        // （引擎在后台线程抛信号，而预栅格必须在 UI 线程——与绘制共用离屏 surface）。
+        controller.onPrefillReadyListener = { chapter ->
+            mainScope.launch { handler(chapter, 0) }
+        }
+    }
 
     override fun unitTitle(chapter: Int): String {
         val unit = controller.unitAt(chapter) ?: return ""

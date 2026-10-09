@@ -12,6 +12,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.CoroutineScope
+import orilumn.reader.engine.skia.DecodedImage
+import orilumn.reader.io.Logger
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -57,6 +59,11 @@ class FlipController(
     private val forceOpenPos: (ReaderPos) -> Unit,
     private val scope: CoroutineScope,
     private val log: (String) -> Unit = {},
+    /**
+     * 是否允许真跑结算动画。单测环境没有 Compose 的 `MonotonicFrameClock`，
+     * `Animatable.animateTo` 会直接抛异常，故测试传 false 只走状态机。
+     */
+    private val allowAnimation: Boolean = true,
 ) {
     /**
      * 渲染用的位移进度（0..1）+ 方向（+1 下一页 / -1 上一页）。
@@ -76,6 +83,64 @@ class FlipController(
 
     private var prefetchJob: Job? = null
     private var settleJob: Job? = null
+
+    /**
+     * 落定后补栅**反方向**那一页（维持「当前页 ±1」两张都在池里）。
+     *
+     * 预栅格只补方向侧一张（翻页只需一页），所以往回翻时目标页那张还没备好，
+     * 仍要付一次 ~143ms 的实时栅格（真机 `raster hit=false`）。落定是此刻页面静止、
+     * 用户已在读新页的时刻——补这张的成本落在阅读间隙而非手指上。
+     */
+    fun prerasterOpposite(
+        host: ReaderHost,
+        renderer: ReaderPageRenderer,
+        contentLeft: Float,
+        contentTop: Float,
+        contentRight: Float,
+        contentBottom: Float,
+        pageBg: Int,
+        inkColor: Int,
+        contentRevision: Int,
+        imgCache: PageImageCache<DecodedImage>,
+        bgCache: PageImageCache<DecodedImage>,
+        /** 锚点覆盖：commit 后「新页」= openPos，而 fromPos 已被 clear 清空。 */
+        anchorOverride: ReaderPos? = null,
+    ) {
+        // 会话仍在飞时不补：动画层正锁着两页。
+        if (isBusy()) return
+        val anchor = anchorOverride ?: fromPos.value ?: return
+        val dir = direction.value
+        if (dir == 0) return
+        val back = scope.launch {
+            // 落位已完成（clear 在 animateTo 之后才跑，这里已在 clear 之后调用）。
+            val target = runCatching { host.adjacent(anchor, -dir) }.getOrNull() ?: return@launch
+            prerasterPage(
+                host = host,
+                pos = target,
+                renderer = renderer,
+                contentLeft = contentLeft,
+                contentTop = contentTop,
+                contentRight = contentRight,
+                contentBottom = contentBottom,
+                pageBg = pageBg,
+                inkColor = inkColor,
+                contentRevision = contentRevision,
+                imgCache = imgCache,
+                bgCache = bgCache,
+            )
+        }
+        // 不占 settleJob：它不是动画，只是后台补一张位图。
+        prerasterJob = back
+    }
+
+    /** 补栅协程（与动画协程分开，取消语义不同）。 */
+    private var prerasterJob: Job? = null
+
+    /** 落定后回调：让调用方补栅反方向那一页（见 prerasterOpposite）。 */
+    var onSettled: ((ReaderPos?) -> Unit)? = null
+
+    /** 落定锚点覆盖：commit 后「新页」= openPos，clear 前的 fromPos 是旧页。 */
+    var settledAnchorOverride: ReaderPos? = null
 
     /** 纯状态机（无 Compose 依赖，可直测）。 */
     val session: FlipSession = FlipSession()
@@ -117,6 +182,8 @@ class FlipController(
     fun clear() {
         settleJob?.cancel()
         settleJob = null
+        prerasterJob?.cancel()
+        prerasterJob = null
         prefetchJob?.cancel()
         prefetchJob = null
         session.abort()
@@ -194,11 +261,16 @@ class FlipController(
         progress.value = 0f
         prefetchJob?.cancel()
         prefetchJob = scope.launch {
+            // 起手→目标页就绪的分段计时（配合手势层 FLIPLAT 的 lat 相加即端到端时延）：
+            // 这一段包含「漏斗抢锁 + adjacent 落位 + beforeCommit 等图」，是时延的主要来源。
+            val t0 = System.nanoTime()
             val landed = flipAwait(direction)
+            val tLanded = System.nanoTime()
             // 边界/无源/BUSY-DROP：**数据从未移动**（返回 null 即没有 commit），
             // 所以只能清场。早先误调 rollback 会多翻回去一页。
             if (landed == null) {
                 log("slide-begin no target dir=$direction ⇒ no animation")
+                logLat(dir = direction, phase = "landed-null", ms = (tLanded - t0) / 1_000_000)
                 clear()
                 return@launch
             }
@@ -206,7 +278,31 @@ class FlipController(
             // 等图由 flipAwait 内部的 AnchorFunnel.beforeCommit 在 commit 之前做完，
             // 这里再等一次是冗余，且会和下一手势抢同一个漏斗锁 ⇒ 连锁 BUSY-DROP。
             targetPos.value = landed
+            // 目标页已进渲染层：这一刻起 updateDrag 的位移才会写回 progress、页面才动。
+            logLat(dir = direction, phase = "target-ready", ms = (tLanded - t0) / 1_000_000)
+            // 调用方可能已经放弃（松手走了 abort 超时分支，见 [waitLandingThenSettle]）。
+            // 那时没人会再触发 settle ⇒ 这里自己收场，否则会话永久停在 Dragging，
+            // 后续手势全被 isBusy 吞。仍处于 Dragging 则交给调用方（松手/补播）。
+            if (session.phase == FlipSession.Phase.Idle) {
+                log("landing finished after abandon ⇒ settle now")
+                settle(FlipSession.Decision.COMMIT, velocityX = 0f, pageW = 0f)
+            }
         }
+    }
+
+    /**
+     * 分段时延日志（tag `Orilumn.FLIPLAT`，W 级常驻）。
+     *
+     * 与手势层那条 `FLIPLAT drag … lat=` 的关系：
+     *  - 手势层 `lat` = 手指按下 → 第一帧页面位移（**用户真正感知的起手延迟**）；
+     *  - 本函数 `ms` = 目标页落位就绪耗时（含 beforeCommit 等图，最长 800ms）。
+     *
+     * 端到端 ≈ `lat`（若 `target-ready` 早于首次位移，则完全由 `lat` 决定）。
+     * 若 `target-ready` 晚于首次位移，那段差额就是「页面本该动却没动」的空窗，
+     * 两条日志按 dir 与时间先后对齐即可读出来。
+     */
+    private fun logLat(dir: Int, phase: String, ms: Long) {
+        log("FLIPLAT $phase dir=$dir ms=$ms")
     }
 
     /**
@@ -252,19 +348,69 @@ class FlipController(
             rollback(navigateBack = true)
             return
         }
-        // COMMIT 但目标页还没进渲染层：**直接收场**，不挂起。
+        // COMMIT 但目标页还没进渲染层。
         //
-        // 数据在起手那次 `flipAwait` 就已落定，所以「目标页没到」只影响动画，
-        // 不影响结果——收场后 `openPos` 就是新页，用户看到的是瞬切。
+        // ## 为什么不能直接 clear()（上一版的空白页）
         //
-        // 早先这里「挂起等目标页就绪再补播动画」，为的是保住插图页的滑入观感。
-        // 但它引入了一个**无人认领的等待窗口**：预取协程可能已经跑完并 `clear()`
-        // 过，此后 `endDrag` 才写挂起标志，就再没有任何代码会清它 ⇒ `isBusy()`
-        // 恒 true ⇒ 后续点按被 `onTap` 全吞、页面锁死在两页之间 ⇒ 白屏。
-        // 真机日志实测过：`slide-end not ready but COMMIT` 之后连续 8 次
-        // `tap IGNORED`，持续 8 秒。动画是锦上添花，卡死是硬伤，取舍明确。
-        log("slide-end not ready but COMMIT ⇒ settle instantly (data already landed)")
+        // 预取协程**可能仍在途**（`flipAwait` 在等漏斗锁 + beforeCommit 等图，
+        // 真机实测有 667ms 的窗口）。此时 `clear()` 会把 fromPos/targetPos 清空，
+        // 协程随后回来再设 `targetPos` —— 而 `fromPos` 已是 null ⇒ 渲染层
+        // `fromPos ?: pos` 退回用 `pos`，若此刻 openPos 尚未 commit，画出来的
+        // 就是一个尚未就绪的页 ⇒ 白屏。
+        //
+        // 早先的「挂起等补播」也错：它留下一个**无人认领**的等待窗口
+        // （协程可能已跑完 clear 过，此后 endDrag 才写标志，就再没人清它）
+        // ⇒ `isBusy()` 恒 true ⇒ 点按全被 `onTap` 吞 ⇒ 8 秒白屏。
+        //
+        // 现在的做法：**协程在途就等它自己收场**，但等待有界（[LANDING_WAIT_MS]）。
+        // 等到 ⇒ 走正常 settle；等不到 ⇒ 放弃并把 openPos 强制对齐到起手页，
+        // 保证「数据与像素自洽」，绝不停在两者错位的死局。
+        if (prefetchInFlight()) {
+            log("slide-end not ready & prefetch in flight ⇒ wait for it")
+            waitLandingThenSettle(velocityX, pageW)
+            return
+        }
+        // 协程不在途（已收场）：此刻清场是安全的。
+        log("slide-end not ready but COMMIT & prefetch done ⇒ settle instantly")
         clear()
+    }
+
+    /** 预取协程是否仍在途（锁未抢到 / 落位未回 / 等图未完）。 */
+    private fun prefetchInFlight(): Boolean = prefetchJob?.let { it.isActive && !it.isCompleted } ?: false
+
+    /**
+     * 等在途的落位收场，然后按结果结算。等待有界，超时则强制对齐（见 [endDrag]）。
+     *
+     * 用「轮询 `prefetchJob` 是否完成」而不是挂起标志：后者需要有人负责清理，
+     * 而清理方（协程）可能根本不会跑到那条分支——那正是上一版死锁的成因。
+     */
+    private fun waitLandingThenSettle(velocityX: Float, pageW: Float) {
+        settleJob?.cancel()
+        settleJob = scope.launch {
+            var waited = 0L
+            while (prefetchInFlight() && waited < LANDING_WAIT_MS) {
+                delay(LANDING_POLL_MS)
+                waited += LANDING_POLL_MS
+            }
+            if (prefetchInFlight()) {
+                // 等不到：协程还锁着漏斗。多半是上一次落位的等图还没放完。
+                // 此时**不能**裸 clear（协程回来会再设 targetPos，与 fromPos=null
+                // 错位 ⇒ 白屏）。改用 abort：只停状态机，保留 fromPos/targetPos，
+                // 让协程回来时它自己的 clear() 去收尾。
+                Logger.w(
+                    "Orilumn.TAP",
+                    "landing wait timed out (${waited}ms) ⇒ abort, keep page lock",
+                )
+                session.abort()
+                return@launch
+            }
+            // 协程已收场：按当前数据决定去向。
+            if (targetReady()) {
+                settle(FlipSession.Decision.COMMIT, velocityX, pageW)
+            } else {
+                clear()
+            }
+        }
     }
 
     /**
@@ -329,7 +475,16 @@ class FlipController(
         velocityX: Float,
         pageW: Float,
     ) {
+        if (!allowAnimation) {
+            // 测试路径：只推进状态机到端点，不启动 Animatable。
+            session.beginSettle(decision)
+            session.onSettleProgress(if (decision == FlipSession.Decision.COMMIT) 1f else 0f)
+            if (decision == FlipSession.Decision.COMMIT) clear() else clear()
+            return
+        }
         val from = session.progress
+        // clear() 会清空 fromPos，补栅要用「新页」（= openPos），故先抓住。
+        val anchorForOpposite = settledAnchorOverride ?: fromPos.value
         session.beginSettle(decision)
         val duration = session.settleDurationMs(decision, from, velocityX, pageW)
         settleJob?.cancel()
@@ -348,6 +503,9 @@ class FlipController(
             if (decision == FlipSession.Decision.COMMIT) {
                 // 数据早在起手那次 flipAwait 就已落定，动画走完即达成：清场即可。
                 clear()
+                // 补栅反方向那一页，维持「当前页 ±1」都在池里：预栅格只补了方向侧，
+                // 不补的话往回翻仍要付一次 ~143ms 实时栅格（见 prerasterOpposite）。
+                onSettled?.invoke(anchorForOpposite)
             } else {
                 // 回弹：动画回到 0，同时把引擎指针翻回原页。
                 rollback(navigateBack = true)
@@ -361,6 +519,16 @@ class FlipController(
  * 给占锁方（通常是上一次落位尾巴上的等图）一个收尾窗口。
  */
 internal const val ROLLBACK_RETRY_DELAY_MS = 60L
+
+/**
+ * 松手时等在途落位的上限（ms）与轮询间隔。
+ *
+ * 落位包含「漏斗抢锁 + adjacent + beforeCommit 等图」，真机实测最慢见过 667ms
+ * （`Orilumn.FLIPLAT` 日志：dispatch 之后 667ms 才有 slide-end）。所以给一个
+ * 宽裕但有界的窗口：有界是为了「等不到」也必须有个确定结局，而不是无限挂着。
+ */
+internal const val LANDING_WAIT_MS = 900L
+internal const val LANDING_POLL_MS = 30L
 
 
 /**

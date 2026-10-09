@@ -1509,7 +1509,15 @@ private fun scheduleTempPrefill(unit: ChapterUnit, ip: InProgressPagination, las
             // 无步数截断：循环在窗口补满（stepTempPrefill 回 false）时自然结束；
             // 每步只塑一页且前后邻均有界（章尾/章首），无死循环空间。
             var guard = 0
-            while (stepTempPrefill(unit, ip, lastDir)) { guard++; kotlinx.coroutines.delay(4) }
+            while (true) {
+                val stepped = stepTempPrefill(unit, ip, lastDir)
+                if (!stepped) break
+                guard++
+                // 刚塑出一页版式 ⇒ 该页的像素可以开始生产了（阶梯里补的栅格档）。
+                // 抛信号让用户层按方向补一张；不在此直接栅格（引擎线程不能碰画布）。
+                onPrefillReadyListener?.invoke(unit.chapterIndex)
+                kotlinx.coroutines.delay(4)
+            }
             // 报块水位深度，否则第 4 档在临时表侧的推进幅度设备上不可见。
             val (fwd, total) = tempStateLock.withLock { ip.shapedForwardTo to ip.prepare.totalBlocks }
             Logger.d(logTag, "temp prefill done ch=${unit.chapterIndex} steps=$guard shapedFwdTo=$fwd/$total")
@@ -1849,6 +1857,38 @@ private fun notifyFlip() {
 fun onForegroundRaster() {
     notifyFlip()
 }
+
+/**
+ * 预排出邻页版式后抛信号：**像素尚缺，用户层可据此按方向补一张栅格**
+ * （`线程调度原则.md` §3 阶梯补的那一档）。
+ *
+ * ## 为什么需要
+ *
+ * 阶梯第 2/3/4 档全是**排版**（产出 `pageLines`），栅格不在体系内，于是像素只在页面
+ * **被绘制时**才生产。实测单页栅格 p50 143ms、max 977ms，而翻页的 `target-ready`
+ * p50 59ms —— 用户手指按下后要先等这张位图才动得了。
+ *
+ * 但预排出的邻页**用户下一步就要用**（§0 紧急度原则），像素该同号跟进而非等绘制。
+ * moon+ 就是这么做的：页面静止时 `getPageShot()` 预先截好下一页（`tmpFlipShot2`），
+ * 滑动时直接复用，于是感知零时延。
+ *
+ * ## 为什么由引擎抛、用户层执行
+ *
+ * 引擎跑后台线程且**不能碰画布**（`LineWindowDrawer`/`drawPageContent` 在本模块，但栅格
+ * 产物要与 UI 的 `PageRasterStore` 共用离屏 surface，跨线程会出事）。故这里只抛信号，
+ * 执行落在用户层的 UI 线程（见 `ReaderHost.observePrefillReady`）。
+ *
+ * **翻页只需一页**：由订阅方按方向取那一张（§3.2 方向记录），不在这里扇出。
+ *
+ * @param chapter 刚出版式的那一章。
+ */
+fun notifyPrefillReady(chapter: Int) {
+    onPrefillReadyListener?.invoke(chapter)
+}
+
+/** 用户层注册的预排完成回调（`ReaderHost.observePrefillReady` 装进来）。非空即表示有订阅者。 */
+@Volatile
+var onPrefillReadyListener: ((Int) -> Unit)? = null
 
     /**
      * 导航/调参入口抢占（跳转五路 + prepareRelayout 共用）：砍掉在途低档活（整书 B2、

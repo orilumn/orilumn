@@ -103,6 +103,54 @@ private class AndroidReaderPageRenderer : ReaderPageRenderer {
         drawPageBitmap(canvas, r.value, contentRectLeft, contentRectTop, contentRectRight, contentRectBottom)
     }
 
+    /**
+     * 预栅格：与 [drawLines] 走**同一个** store（见接口 KDoc 的「线程：限 UI/渲染线程」）。
+     *
+     * 复用 store 意味着 surface 也共用 —— 这正是接口 KDoc 说的「不能后台另开 surface」
+     * 的原因：后台与 UI 共用一个 surface 必然出事。所以调用方必须在 UI 线程择时调用，
+     * 引擎后台线程只抛信号（`ReaderHost.onPrefillReady`），执行落在这里。
+     */
+    override fun preraster(
+        lines: List<DrawLine>,
+        contentLeft: Float,
+        contentRectLeft: Float,
+        contentRectTop: Float,
+        contentRectRight: Float,
+        contentRectBottom: Float,
+        pageBg: Int,
+        backgrounds: List<PageBackground>,
+        bgImages: Map<String, DecodedImage>,
+        images: List<PageImageSlot>,
+        contentRevision: Int,
+        rasterKey: PageRasterKey?,
+    ): Boolean {
+        // 无页身份（封面等）无法入池，直接跳过：预栅格只服务翻页动画。
+        if (rasterKey == null) return false
+        if (lines.isEmpty() && images.isEmpty() && backgrounds.isEmpty()) return false
+        val r = store.obtain(
+            key = rasterKey,
+            onMiss = null, // 已在 UI 线程，无需再抢后台（第 1 档本就在前台）
+            spec = PageRasterSpec(
+                lines = lines,
+                backgrounds = backgrounds,
+                bgImages = bgImages,
+                images = images,
+                pageBg = pageBg,
+                contentLeft = contentLeft,
+                contentRectLeft = contentRectLeft,
+                contentRectTop = contentRectTop,
+                contentRight = contentRectRight,
+                contentBottom = contentRectBottom,
+                contentRevision = contentRevision,
+            ),
+        ) ?: return false
+        Logger.w(
+            "Orilumn.SkiaBridge",
+            "preraster n=${lines.size} imgs=${images.size} ${r.rasterMs}ms hit=${r.cacheHit}",
+        )
+        return true
+    }
+
     private fun drawPageBitmap(
         canvas: Canvas,
         bmp: android.graphics.Bitmap,

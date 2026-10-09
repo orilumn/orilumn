@@ -30,6 +30,7 @@ class FlipControllerTest {
         forceOpenPos = { forced += it },
         scope = scope,
         log = {},
+        allowAnimation = false, // 单测无 MonotonicFrameClock，不能真跑 Animatable
     )
 
     @Test
@@ -116,6 +117,35 @@ class FlipControllerTest {
             ctl.slideActive(enabled = true),
         )
         assertEquals(1f, ctl.progress.value, 0f)
+    }
+
+@Test
+    fun `落位在途时不得裸clear——否则协程回来设targetPos 而fromPos 已空`() = runBlocking {
+        // 回归锁（真机空白页）：`flipAwait` 在等漏斗锁+等图时最长见过 667ms，
+        // 期间用户松手。早先 endDrag 直接 clear()，而预取协程仍在途 ——
+        // 协程回来再设 targetPos，此时 fromPos 已是 null ⇒ 渲染层
+        // `fromPos ?: pos` 退回用尚未 commit 的 pos ⇒ 画出未就绪的页（白屏）。
+        val forced = mutableListOf<ReaderPos>()
+        val gate = kotlinx.coroutines.CompletableDeferred<ReaderPos?>()
+        val ctl = FlipController(
+            flipAwait = { gate.await() },      // 挂住 ⇒ 模拟在途
+            forceOpenPos = { forced += it },
+            scope = this,
+            log = {},
+            allowAnimation = false,
+        )
+        ctl.beginDrag(pos(0), direction = 1, enabled = true, coverVisible = false)
+        ctl.updateDrag(dx = -300f, pageW = 2560f, enabled = true)
+        // 目标页未就绪 + COMMIT ⇒ 走「等在途落位」分支，**不是**裸 clear。
+        ctl.endDrag(velocityX = 0f, pageW = 2560f, enabled = true)
+        // 起手页必须仍在：这是渲染层画「当前页」的唯一依据。
+        assertEquals(
+            "落位在途时 fromPos 必须保留，否则协程回来即错位",
+            0,
+            ctl.fromPos.value?.slice?.charStart,
+        )
+        gate.complete(pos(100))
+        ctl.clear()
     }
 
 @Test

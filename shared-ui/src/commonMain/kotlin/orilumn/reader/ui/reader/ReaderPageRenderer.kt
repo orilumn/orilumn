@@ -67,6 +67,48 @@ interface ReaderPageRenderer {
          */
         onMiss: (() -> Unit)? = null,
     )
+
+    /**
+     * **预栅格**：[drawLines] 的无 UI 版本——把一页画进离屏 surface 并入
+     * [PageRasterStore]，之后该页首次 [drawLines] 即命中缓存、零栅格开销。
+     *
+     * ## 为什么需要它（`线程调度原则.md` §3 阶梯缺的那一档）
+     *
+     * 阶梯第 2/3/4 档全是**排版**，产出 `pageLines` 版式数据；栅格这一档一直不在体系内，
+     * 于是像素只在页面**被绘制时**才生产。实测单页栅格 p50 **143ms**、max 977ms，而翻页
+     * 时 `target-ready` p50 59ms ——用户手指按下后要先等这一张位图才动得了。
+     *
+     * 但预排的下一页版式**用户下一步就要用**（§0 紧急度原则），像素该同号跟进而非等绘制。
+     * 所以在预排完成的那一刻栅格一次，成本落在「用户还在读当前页」时，而不是手指上。
+     *
+     * ## 为什么不能直接复用 [drawLines]
+     *
+     * 它要一个 Compose `Canvas` 才能画，而预栅格发生在**没有画布**的后台时刻。
+     * 本方法自己开离屏 surface 画完整页，产物按 [rasterKey] 入同一个 store。
+     *
+     * ## 线程：**限 UI/渲染线程**
+     *
+     * 与 [drawLines] 共用 store（及其 surface），所以必须在 UI 线程调用。调用方负责
+     * 择时（如预排完成回调、落定后的空闲帧），不得从引擎后台线程直接调。
+     * 引擎侧只抛「该页可栅格」的信号（见 `ReaderHost.onPrefillReady`），执行在此层。
+     *
+     * @return true = 已入池（后续 [drawLines] 会命中）；false = 未入池（缺 key/栅格失败），
+     *   调用方应记日志：预栅格失败只影响手感（退化为实时栅格），不影响正确性。
+     */
+    fun preraster(
+        lines: List<DrawLine>,
+        contentLeft: Float,
+        contentRectLeft: Float,
+        contentRectTop: Float,
+        contentRectRight: Float,
+        contentRectBottom: Float,
+        pageBg: Int,
+        backgrounds: List<PageBackground> = emptyList(),
+        bgImages: Map<String, DecodedImage> = emptyMap(),
+        images: List<PageImageSlot> = emptyList(),
+        contentRevision: Int = 0,
+        rasterKey: PageRasterKey?,
+    ): Boolean
 }
 
 /**

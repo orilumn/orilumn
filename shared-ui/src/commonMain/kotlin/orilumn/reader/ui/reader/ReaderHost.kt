@@ -53,6 +53,35 @@ interface ReaderHost {
      */
     fun onRasterMiss() {}
 
+    /**
+     * **预排出版式、像素尚缺**时回调一次（`线程调度原则.md` §3 阶梯要补的那一档）。
+     *
+     * 阶梯第 2/3/4 档全是**排版**（产出 `pageLines`），栅格一直不在体系内，于是像素只在
+     * 页面被绘制时才生产 —— 而单页栅格实测 p50 143ms。用户手指按下后要先等这张位图。
+     *
+     * 预排出的邻页**用户下一步就要用**（§0 紧急度原则），所以像素该在预排完成那一刻就
+     * 跟上。引擎跑在后台线程、**只抛信号**；执行在用户层的 UI 线程（`preraster` 与
+     * `drawLines` 共用离屏 surface，不能跨线程）。
+     *
+     * 翻页只需准备**一页**（方向侧那一张），不是把窗口全截一遍。
+     *
+     * @param chapter 已出版式的那一章。
+     * @param direction 上次翻页方向（`1` 前 / `-1` 后 / `0` 无记录，语义见 §3.2）。
+     */
+    fun onPrefillReady(chapter: Int, direction: Int) {}
+
+    /**
+     * 订阅「预排出邻页版式」事件（引擎 → 用户层的栅格信号通道）。
+     *
+     * 引擎跑在后台线程且不能碰 skia 画布，故只抛信号、在此注册执行侧；回调在
+     * **UI 线程**的调用方协程上跑（`preraster` 与 `drawLines` 共用离屏 surface，
+     * 跨线程会出事，见 [ReaderPageRenderer.preraster]）。
+     *
+     * 订阅随设置/视口变化重建（见 `Preraster.kt` 的 `LaunchedEffect` 键），
+     * 重复订阅由宿主覆盖而非累加。
+     */
+    fun observePrefillReady(handler: suspend (chapter: Int, direction: Int) -> Unit) {}
+
     /** 打开书籍并定位起始页（自动续读/首页），失败返回 null。 */
     suspend fun open(): ReaderPos?
 

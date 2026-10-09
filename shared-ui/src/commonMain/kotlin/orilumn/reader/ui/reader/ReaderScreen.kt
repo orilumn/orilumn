@@ -916,6 +916,10 @@ fun ReaderScreen(
                 null
             }
 
+            // 画布渲染器（栅格 + 多页位图缓存的宿主）在**此处** remember 一份，注入给 current/target
+            // 两张画布：否则两个组合位置各自 remember，各得一池，当前页位图在 target 侧永远查不到
+            // （真机日志：动画期间每页每轮各栅格一次，`hit=false`）。
+            val pageRenderer = rememberReaderPageRenderer()
             // 画布本体（当前页 / 目标页同形，只是位移不同）。
             val PageCanvasFun: @Composable (PageContent?) -> Unit = { content ->
                 ReaderPageCanvas(
@@ -940,20 +944,27 @@ fun ReaderScreen(
                     // 第 1 档「渲染」半边的抢占钩子：未命中真正栅格化时，让后台预排让路
                     // （总则第 1 条 + 线程调度原则 §5「唯一钩子」；翻页那半边早已接上）。
                     onMiss = onRasterMiss,
+                    // 双页共用一个渲染器 ⇒ 共用一个多页位图池（见 ReaderPageCanvas.renderer）。
+                    renderer = pageRenderer,
                 )
             }
-            if (targetContent != null) {
-                FlipSlideLayer(
-                    direction = slideDirection,
-                    progress = slideProgress,
-                    pageWidthPx = pxWidth,
-                    modifier = Modifier.fillMaxSize(),
-                    target = { PageCanvasFun(targetContent) },
-                    current = { PageCanvasFun(pageContent) },
-                )
-            } else {
-                PageCanvasFun(pageContent)
-            }
+            // P1 L1：滑动层**始终在场**，且**只有一个调用点**——早先按 targetContent 有无
+            // 分成两个 `FlipSlideLayer` 调用点，起手/落位/收尾之间来回切，等于每轮都把
+            // `ReaderPageCanvas` 里 remember 的渲染器（多页位图缓存宿主）连池丢弃重建，
+            // 一轮翻页重栅格 3～5 次整页（真机 87ms/次）——就是「滑一点卡一下」的来源。
+            // 现在目标槽恒在（target 为 null 时画空，见 FlipSlideLayer KDoc），结构稳定。
+            FlipSlideLayer(
+                direction = slideDirection,
+                progress = slideProgress,
+                pageWidthPx = pxWidth,
+                modifier = Modifier.fillMaxSize(),
+                target = if (targetContent != null) {
+                    { PageCanvasFun(targetContent) }
+                } else {
+                    null
+                },
+                current = { PageCanvasFun(pageContent) },
+            )
             // 亮度/护眼遮罩：纯绘制于画布之上、栏之下。
             ReaderLightMask(light = light, modifier = Modifier.fillMaxSize())
             // 顶/底栏：中部点按切换；条外点击收起。

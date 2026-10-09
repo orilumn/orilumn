@@ -308,4 +308,129 @@ class FlipSessionTest {
         // 速度取不到（程序化翻页传 0）：默认时长。
         assertEquals(600, s.settleDurationMs(FlipSession.Decision.COMMIT))
     }
+
+    @Test
+    fun `少量慢速滑动不再误判为点击——点按判据是「没动过」`() {
+        // 手势层早先以 dragDir==0 代理「没动过」，而 dragDir 只在定轴 HORIZONTAL
+        // 后才赋值 ⇒ 未过 slop 的少量滑动会带着 dragDir==0 落进点按分支。
+        // movedBeyondTapSlop 不要求定轴：任一轴过 slop 就不算点按。
+        assertFalse("未动过才是点按", ReaderMath.movedBeyondTapSlop(0f, 0f))
+        assertFalse("小幅抖动仍算点按", ReaderMath.movedBeyondTapSlop(8f, 3f))
+        assertTrue(
+            "未过 slop 的横滑：定轴为 NONE，但确实动过 ⇒ 不是点按",
+            ReaderMath.movedBeyondTapSlop(30f, 5f),
+        )
+        assertTrue(
+            "纵向占优被判 VERTICAL 的那一路，同样不该落进点按",
+            ReaderMath.movedBeyondTapSlop(5f, 60f),
+        )
+    }
+
+    @Test
+    fun `未就绪期间位移仍累积——否则松手把「拖满页」判成「没动过」`() {
+        // 回归锁：目标页未就绪（落位/等图在途）时，ReaderScreen 早先整段 return，
+        // 既不写回 progress 也不喂状态机 ⇒ progress 恒 0 ⇒ 松手 decide() 判
+        // ROLLBACK，用户拖了满页却被弹回。现在 onDrag 无条件喂，仅渲染层不写回。
+        val s = session()
+        // 模拟「未就绪」期间的三帧拖动：只有 onDrag，没有渲染写回。
+        assertTrue(s.onDrag(dx = -200f, pageW = 1000f))
+        assertTrue(s.onDrag(dx = -600f, pageW = 1000f))
+        assertTrue(s.onDrag(dx = -900f, pageW = 1000f))
+        // 关键：progress 必须反映真实拖动量（90%），而不是 0。
+        assertTrue("progress 应累积到 0.9，实际 ${s.progress}", s.progress > 0.85f)
+        // 于是松手裁决为 COMMIT —— 用户「开始滑动就是要翻页」的意图被尊重。
+        assertEquals(FlipSession.Decision.COMMIT, s.decide(velocityX = 0f))
+    }
+
+    @Test
+    fun `回弹阈值是三四个字宽——拖过约55px 即翻页`() {
+        val s = session()
+        // 平板页宽约 2560px：拖 55px（三个汉字）就该翻，早先的「半页」要 1280px。
+        s.onDrag(dx = -60f, pageW = 2560f)
+        assertEquals(FlipSession.Decision.COMMIT, s.decide(velocityX = 0f, pageW = 2560f))
+
+        val s2 = session()
+        // 未过阈（约 40px < 55px）⇒ 回滚。
+        s2.onDrag(dx = -40f, pageW = 2560f)
+        assertEquals(FlipSession.Decision.ROLLBACK, s2.decide(velocityX = 0f, pageW = 2560f))
+    }
+
+    @Test
+    fun `阈值是绝对像素而非页宽比例——同一拖动距离在大小屏都翻`() {
+        // 手机页宽 ~1080px：拖 60px 同样过阈（3.5% 页宽）。
+        val phone = session()
+        phone.onDrag(dx = -60f, pageW = 1080f)
+        assertEquals(FlipSession.Decision.COMMIT, phone.decide(velocityX = 0f, pageW = 1080f))
+        // 平板页宽 ~2560px：同样 60px 也过阈。若按页宽比例，手机会过、平板不会。
+        val tablet = session()
+        tablet.onDrag(dx = -60f, pageW = 2560f)
+        assertEquals(FlipSession.Decision.COMMIT, tablet.decide(velocityX = 0f, pageW = 2560f))
+    }
+
+    @Test
+    fun `拿不到页宽时退回半页——不是零像素`() {
+        val s = session()
+        s.onDrag(dx = -400f, pageW = 1000f) // 40% 页宽
+        // pageW=0（拿不到页面尺寸）：退回半页阈值 ⇒ 40% 不够，回滚。
+        // 不能退成「零像素」，那会让任何微小位移都翻页，误翻页比误弹回更烦。
+        assertEquals(FlipSession.Decision.ROLLBACK, s.decide(velocityX = 0f, pageW = 0f))
+    }
+
+    @Test
+    fun `快甩仍能救快速轻扫——小位移高速度照样翻`() {
+        val s = session()
+        s.onDrag(dx = -30f, pageW = 2560f) // 远未到 55px
+        assertEquals(FlipSession.Decision.COMMIT, s.decide(velocityX = -2000f, pageW = 2560f))
+    }
+
+    @Test
+    fun `末段回拉否决翻页——拖过阈又往回带就弹回`() {
+        val s = session()
+        // 先拖过阈（-200px > 55px 阈值）
+        assertTrue(s.onDrag(dx = -200f, pageW = 2560f))
+        // 临抬手往回带（dx 减小 = 往右拉回）
+        assertTrue(s.onDrag(dx = -150f, pageW = 2560f))
+        assertTrue("末段应是回拉", s.isTailRetreating())
+        // 累计位移仍过阈（progress≈0.078 > 0.021），但末段反悔 ⇒ 判回滚。
+        assertEquals(FlipSession.Decision.ROLLBACK, s.decide(velocityX = 0f, pageW = 2560f))
+    }
+
+    @Test
+    fun `末段回拉连快甩也否决——反悔是强信号`() {
+        val s = session()
+        assertTrue(s.onDrag(dx = -300f, pageW = 2560f))
+        assertTrue(s.onDrag(dx = -280f, pageW = 2560f)) // 极小的回拉
+        assertTrue(s.isTailRetreating())
+        // 抬手瞬间速度是「往回」的速度（vx>0 = 右），forwardFling 为负，本来就不 commit；
+        // 这里再给一个「仍朝前的伪造高速」确认末段否决独立生效。
+        assertEquals(FlipSession.Decision.ROLLBACK, s.decide(velocityX = -3000f, pageW = 2560f))
+    }
+
+    @Test
+    fun `末段继续前进则照常翻页——否决项不误伤`() {
+        val s = session()
+        assertTrue(s.onDrag(dx = -60f, pageW = 2560f))
+        assertTrue(s.onDrag(dx = -120f, pageW = 2560f)) // 继续往外拖
+        assertFalse("末段应是前进", s.isTailRetreating())
+        assertEquals(FlipSession.Decision.COMMIT, s.decide(velocityX = 0f, pageW = 2560f))
+    }
+
+    @Test
+    fun `抬手前静止不算反悔`() {
+        val s = session()
+        assertTrue(s.onDrag(dx = -200f, pageW = 2560f))
+        // 手指停住：MOVE 继续来但 dx 不变
+        assertTrue(s.onDrag(dx = -200f, pageW = 2560f))
+        assertTrue(s.onDrag(dx = -200f, pageW = 2560f))
+        assertFalse("静止不该被当成回拉", s.isTailRetreating())
+        assertEquals(FlipSession.Decision.COMMIT, s.decide(velocityX = 0f, pageW = 2560f))
+    }
+
+    @Test
+    fun `未就绪期间少量拖动仍回弹——挂起结算不会把每次都当翻页`() {
+        val s = session()
+        assertTrue(s.onDrag(dx = -30f, pageW = 2560f))
+        // 只拖 30px < 55px 阈值、速度也不够 ⇒ 回滚（否则误翻页比误弹回更烦人）。
+        assertEquals(FlipSession.Decision.ROLLBACK, s.decide(velocityX = 0f, pageW = 2560f))
+    }
 }

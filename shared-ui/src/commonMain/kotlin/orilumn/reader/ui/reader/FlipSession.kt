@@ -66,6 +66,18 @@ class FlipSession {
     fun onDown(): Unit = Unit
 
     /**
+     * 抬手前**最后一段**的位移方向（已按 [direction] 归一：正 = 仍朝目标页）。
+     *
+     * 为什么要单独记：用户常在松手前「犹豫一下往回带一点」——先拖过阈、临抬手
+     * 又反向回拉。此时累计位移（[progress]）仍过阈 ⇒ 只看位移会照样翻页，
+     * 但用户最后那一段的意图明明是「算了，不翻了」。这是「离屏前最后滑动方向」
+     * 要回答的问题，也是手势里最常见的反悔动作。
+     *
+     * 与速度判据不同：抬手前手指停住再抬起时速度 ≈ 0，方向信息全靠这里。
+     */
+    private var tailDirection: Int = 0
+
+    /**
      * 水平拖动。[dx] 是自按下起的累计横向位移，[pageW] 页宽（<=0 视为无效，按 0 处理）。
      *
      * 返回 true 表示会话进入/保持 Dragging（调用方据此决定要不要接管这次手势）。
@@ -77,12 +89,18 @@ class FlipSession {
             Phase.Idle -> {
                 direction = dir
                 progress = clampProgress(normalize(dx / pageW, dir))
+                tailDirection = 0
                 phase = Phase.Dragging
                 true
             }
             // 方向锁定：手势起手就定死，中途反向不重新选（否则来回拖会左右横跳）。
             Phase.Dragging -> {
+                val prev = progress
                 progress = clampProgress(normalize(dx / pageW, direction))
+                // 只在**确实动了**的那一段更新末段方向：手指停住不动时 dx 不变，
+                // 不能把「静止」记成「回拉」，否则抬手前静止反被判成反悔。
+                if (progress > prev + PROGRESS_EPSILON) tailDirection = 1
+                else if (progress < prev - PROGRESS_EPSILON) tailDirection = -1
                 true
             }
             // 结算中不接受新的拖动输入：动画尾正在落位，插手会让像素与数据错位。
@@ -106,30 +124,42 @@ class FlipSession {
         if (phase != Phase.Idle) return false
         this.direction = direction
         progress = 0f
+        tailDirection = 0
         phase = Phase.Dragging
         return true
     }
 
     /**
      * 松手裁决。[velocityX] 是抬手瞬间的横向速度（px/s，符号与 [dx] 同向；取不到传 0）。
+     * [pageW] 是页宽（px），用于把 [COMMIT_THRESHOLD_PX] 这个绝对阈值换算成 progress；
+     * 取不到（0）时退化到 [COMMIT_PROGRESS]（半页）。
      *
-     * [progress] 已归一（正 = 朝目标页），位移判据直接读它；速度仍需按方向归一
-     * （[forwardFling] = `-velocityX * direction`，正 = 甩向目标页）。
+     * [progress] 已归一（正 = 朝目标页），位移判据读它 × pageW 得到实际像素位移；
+     * 速度仍需按方向归一（[forwardFling] = `-velocityX * direction`，正 = 甩向目标页）。
      *
-     * 两个判据取或：位移过阈 **或** 甩得够快。快甩是明确意图，即使位移没过半页也该翻；
-     * 只看位移会让快速轻扫被吃掉（`CurlView` 与多数阅读器的共同口径）。
-     * 反向甩的 [forwardFling] 为负，自然不触发 commit ⇒ 回退，即「起手左滑、
-     * 抬手右甩」这种明确改主意的会被尊重。
+     * 两个判据取或：位移过 [COMMIT_THRESHOLD_PX]（约三四个字）**或** 甩得够快
+     * （[FLING_VELOCITY]）。快甩是明确意图，即使位移没过阈也该翻；只看位移会把
+     * 快速轻扫吃掉（`CurlView` 与多数阅读器的共同口径）。反向甩的 [forwardFling]
+     * 为负，自然不触发 commit ⇒ 回退，即「起手左滑、抬手右甩」这种明确改主意的会被尊重。
      */
-    fun decide(velocityX: Float = 0f): Decision {
+    fun decide(velocityX: Float = 0f, pageW: Float = 0f): Decision {
         if (direction == 0) return Decision.ROLLBACK
         val forwardFling = -velocityX * direction
-        return if (progress >= COMMIT_PROGRESS || forwardFling >= FLING_VELOCITY) {
+        // 阈值：能拿到页宽就用绝对像素（跨设备手感一致），否则退回半页。
+        val commitAt = if (pageW > 0f) (COMMIT_THRESHOLD_PX / pageW).coerceIn(0.01f, 0.5f) else COMMIT_PROGRESS
+        // 末段反悔否决：累计位移/速度都说「翻」，但抬手前最后一段是**往回拉**的
+        // ⇒ 用户改主意了，尊重它。放在位移与速度**之后**作为否决项——它是唯一的
+        // 反向信号，两个正向判据都不能推翻它。
+        val tailRejects = tailDirection < 0
+        return if (!tailRejects && (progress >= commitAt || forwardFling >= FLING_VELOCITY)) {
             Decision.COMMIT
         } else {
             Decision.ROLLBACK
         }
     }
+
+    /** 抬手前最后一段是否在往回拉（已归一：true = 反悔）。诊断/测试用。 */
+    fun isTailRetreating(): Boolean = tailDirection < 0
 
     /**
      * 进入结算。[Decision.COMMIT] 朝 ±1 走，[ROLLBACK] 回 0。
@@ -156,6 +186,7 @@ class FlipSession {
             progress = 0f
             direction = 0
             settleTarget = 0f
+            tailDirection = 0
             phase = Phase.Idle
         }
     }
@@ -170,6 +201,7 @@ class FlipSession {
         direction = 0
         progress = 0f
         settleTarget = 0f
+        tailDirection = 0
     }
 
     /**
@@ -212,14 +244,47 @@ class FlipSession {
         /** progress 域上限（`CurlView.kt:128-131`）：1.9 允许略微过冲，回弹有空间。 */
         const val PROGRESS_MAX = 1.9f
 
-        /** 位移过阈即翻页（页宽的 0.5）。 */
+        /**
+         * 位移过阈即翻页的**绝对像素**：约 3～4 个汉字宽（正文 18.5px × 3 ≈ 55px）。
+         *
+         * 早先用「页宽的一半」（[COMMIT_PROGRESS]）作阈值，在平板上那是几百像素——
+         * 用户得把整页拖掉小半才翻页，体感是「怎么老弹回」。多数阅读器（duokan/moon
+         * 的实测口径）都是**按内容尺寸给阈值**，不按页宽：手指划过三四个字就够，
+         * 因为「开始滑动」本身就是明确意图。
+         *
+         * 为什么不用页宽比例：同一阈值在手机（页宽 ~1080px）与平板（~2560px）差一倍多，
+         * 跨设备手感会漂。绝对像素才有「三四个字」这个跨设备稳定的语义。
+         */
+        const val COMMIT_THRESHOLD_PX = 55f
+
+        /**
+         * 位移过阈比例（页宽的 0.5）——仅在拿不到页宽时兜底（见 [decide]）。
+         *
+         * 保留是因为 `decide` 允许 `pageW = 0`（拿不到页面尺寸）；那时退化到
+         * 「半页」而不是「零像素」（后者会让任何位移都翻页，误翻页比误弹回更烦）。
+         */
         const val COMMIT_PROGRESS = 0.5f
 
-        /** 甩动速度阈值（px/s）：过阈即翻，与位移判据取或。 */
-        const val FLING_VELOCITY = 800f
+        /**
+         * 快甩阈值（px/s）：救「快速轻扫」，与位移判据取或。
+         *
+         * 早先取 800，在平板上随手一划就过 ⇒ 等于把「滑一点点也翻页」合法化，
+         * 用户反馈的「回弹阈值太大」正是这条在起作用。收紧到 1400：只有**真的**
+         * 甩起来才免位移，否则一律按半页线裁决。
+         */
+        const val FLING_VELOCITY = 1400f
 
         /** 结算动画时长下限（ms）：再快也不许「瞬切」级的视觉割裂。 */
         const val MIN_ANIM_MS = 180
+
+        /**
+         * 判定「这一段算不算动了」的 progress 死区。
+         *
+         * 手指停在屏幕上时 MOVE 事件仍会送来，但 dx 不变 ⇒ progress 不变。若不设死区，
+         * 「抬手前静止」会被逐帧判成「仍在前进/回拉」，把末段方向判错。取 0.002
+         * （约 5px @2560px 页宽）——小于一次正常 MOVE 的抖动，大于浮点噪声。
+         */
+        const val PROGRESS_EPSILON = 0.002f
 
         /** 提前落位阈值（`CurlView.kt:215-221`）。 */
         const val EARLY_COMMIT_AT = 0.9f

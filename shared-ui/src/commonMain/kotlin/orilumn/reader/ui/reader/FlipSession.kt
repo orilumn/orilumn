@@ -223,6 +223,44 @@ class FlipSession {
         return (remaining * pageW / speed * 1000f).toInt().coerceIn(MIN_ANIM_MS, base)
     }
 
+    /**
+     * 结算动画的**起手斜率衔接系数** `a ∈ [0,1]`（用户层纯计算，可 jvmTest 直测）。
+     *
+     * ## 它修的是「翻一半停一下」
+     *
+     * 跟手阶段 progress 由手指逐帧驱动，松手瞬间页面速度 = 手指速度。若结算动画起手
+     * 斜率为 0，页面会在离手那一刻**刹停**，再从静止重新加速 —— 观感正是「动画分成
+     * 两截、中间停顿一下」，快甩与跨章连翻最明显。生产实现早先用的是 `tween` 默认的
+     * `FastOutSlowInEasing`（起点斜率 = 0），而权威参考 `CurlView.kt:211` 用的是
+     * `DecelerateInterpolator()`（起点斜率非零、一股冲劲衰减）——这一条当初被漏掉了。
+     *
+     * ## 定义（配合 `VelocityHandoffEasing`）
+     *
+     * 结算缓动 `u(s) = h01(s) + a·h10(s)`：`u(0)=0, u(1)=1, u'(0)=a, u'(1)=0`。
+     * 要离手速度连续，需 `Δ · u'(0) / D = v₀`，其中 `Δ = target − fromProgress`、
+     * `D = 时长`（秒）、`v₀ = d(progress)/dt = −velocityX·direction/pageW`（progress/s）。
+     * 解得 `a = v₀·D/Δ`，夹在 `[0,1]`：`a=1` = 起手速度与手指完全一致（快甩），
+     * `a=0` = 从静止缓起（点按 / 慢拖 / 拿不到速度 / 速度与去向相反）。
+     *
+     * 快甩时 [settleDurationMs] 取 `D = Δ·pageW/speed`，代回恰好 `a = 1` —— 两条口径
+     * 天然自洽：时长那条本就是按「匀速走完剩余距离」定的。
+     */
+    fun settleInitialSlope(
+        decision: Decision,
+        fromProgress: Float,
+        velocityX: Float,
+        pageW: Float,
+        durationMs: Int = settleDurationMs(decision, fromProgress, velocityX, pageW),
+    ): Float {
+        if (pageW <= 0f) return 0f
+        val target = if (decision == Decision.COMMIT) 1f else 0f
+        val delta = target - fromProgress
+        if (abs(delta) < 1e-6f) return 0f
+        // progress 的瞬时速度：progress = -dx·dir/pageW ⇒ d(progress)/dt = −velocityX·dir/pageW。
+        val v0 = -velocityX * direction / pageW
+        return (v0 * (durationMs / 1000f) / delta).coerceIn(0f, 1f)
+    }
+
     /** 当前是否应做落位（提前落位窗口内为 true）。progress 已归一，直接比大小。 */
     fun shouldEarlyCommit(): Boolean =
         phase == Phase.Settling && direction != 0 && progress >= earlyCommitAt

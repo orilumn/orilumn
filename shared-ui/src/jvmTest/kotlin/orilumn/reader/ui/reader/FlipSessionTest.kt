@@ -433,4 +433,85 @@ class FlipSessionTest {
         // 只拖 30px < 55px 阈值、速度也不够 ⇒ 回滚（否则误翻页比误弹回更烦人）。
         assertEquals(FlipSession.Decision.ROLLBACK, s.decide(velocityX = 0f, pageW = 2560f))
     }
+
+    // ---- 离手速度衔接（真机「翻一半停一下」的回归锁）----
+
+    @Test
+    fun `快甩 commit 起手斜率与手指速度一致——离手不刹停`() {
+        val s = session()
+        s.onDrag(dx = -500f, pageW = 1000f) // progress 0.5，方向 +1
+        val vx = -2000f // px/s，朝下一页
+        val from = s.progress
+        val d = s.settleDurationMs(FlipSession.Decision.COMMIT, from, vx, 1000f) // 250ms
+        val a = s.settleInitialSlope(FlipSession.Decision.COMMIT, from, vx, 1000f, d)
+        assertEquals("快甩起手斜率必须为 1（速度连续）", 1f, a, 1e-4f)
+        // 不变式：动画起手速度（px/s）== 手指速度。
+        val delta = 1f - from
+        val animV = delta * a / (d / 1000f) * 1000f
+        assertEquals(2000f, animV, 1f)
+    }
+
+    @Test
+    fun `快甩 rollback 起手斜率同样为 1`() {
+        val s = session()
+        s.onDrag(dx = -500f, pageW = 1000f) // progress 0.5，方向 +1
+        val vx = 2000f // 手指向右回拖
+        val from = s.progress
+        val d = s.settleDurationMs(FlipSession.Decision.ROLLBACK, from, vx, 1000f) // 250ms
+        val a = s.settleInitialSlope(FlipSession.Decision.ROLLBACK, from, vx, 1000f, d)
+        assertEquals(1f, a, 1e-4f)
+    }
+
+    @Test
+    fun `点按与拿不到速度时起手斜率为 0——缓动保持原样`() {
+        val s = session()
+        // 程序化翻页：pageW=0（调用点不传页面尺寸）
+        assertEquals(0f, s.settleInitialSlope(FlipSession.Decision.COMMIT, 0.5f, 2000f, 0f), 0f)
+        // 已起手但速度取不到
+        s.onDrag(dx = -500f, pageW = 1000f)
+        assertEquals(0f, s.settleInitialSlope(FlipSession.Decision.COMMIT, 0.5f, 0f, 1000f), 0f)
+    }
+
+    @Test
+    fun `速度与去向相反时不起手加速——夹到 0 不给负斜率`() {
+        val s = session()
+        s.onDrag(dx = -200f, pageW = 1000f) // direction +1，progress 0.2
+        // 判回滚，但手指仍在朝前甩（vx<0）⇒ 不能给负斜率让它先往前冲。
+        assertEquals(0f, s.settleInitialSlope(FlipSession.Decision.ROLLBACK, 0.2f, -2000f, 1000f), 1e-5f)
+    }
+
+    @Test
+    fun `剩余距离极小时斜率夹在 1——不越界过冲`() {
+        val s = session()
+        s.onDrag(dx = -990f, pageW = 1000f) // progress 0.99
+        val a = s.settleInitialSlope(FlipSession.Decision.COMMIT, 0.99f, -5000f, 1000f)
+        assertEquals(1f, a, 1e-4f)
+    }
+
+    @Test
+    fun `VelocityHandoffEasing 端点归位、起点斜率等于 a、终点斜率归零`() {
+        val a = 0.5f
+        val e = VelocityHandoffEasing(a)
+        assertEquals(0f, e.transform(0f), 1e-5f)
+        assertEquals(1f, e.transform(1f), 1e-5f)
+        val h = 1e-3f
+        assertEquals("起点斜率 = a", a, (e.transform(h) - e.transform(0f)) / h, 1e-2f)
+        assertEquals("终点斜率 = 0", 0f, (e.transform(1f) - e.transform(1f - h)) / h, 1e-2f)
+    }
+
+    @Test
+    fun `VelocityHandoffEasing 在 a 全域单调不越界`() {
+        for (a in listOf(0f, 0.25f, 0.5f, 0.75f, 1f)) {
+            val e = VelocityHandoffEasing(a)
+            var prev = e.transform(0f)
+            var s = 0.01f
+            while (s <= 1.0001f) {
+                val v = e.transform(s)
+                assertTrue("a=$a 必须单调（$prev → $v @ $s）", v >= prev - 1e-4f)
+                assertTrue("a=$a 不得越界：$v", v >= -1e-4f && v <= 1f + 1e-4f)
+                prev = v
+                s += 0.01f
+            }
+        }
+    }
 }

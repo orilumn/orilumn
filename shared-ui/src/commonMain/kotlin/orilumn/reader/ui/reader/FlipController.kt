@@ -1,5 +1,6 @@
 package orilumn.reader.ui.reader
 
+import androidx.compose.animation.core.Easing
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.MutableFloatState
 import androidx.compose.runtime.MutableIntState
@@ -424,13 +425,22 @@ class FlipController(
         val from = session.progress
         session.beginSettle(decision)
         val duration = session.settleDurationMs(decision, from, velocityX, pageW)
+        // 离手速度衔接：起手斜率取手指速度，页面不在松手那一下刹停（详见
+        // FlipSession.settleInitialSlope 的 KDoc）。slope==0（点按/慢拖/拿不到速度）
+        // 时保持既有缓动，点按翻页的手感零变化。
+        val slope = session.settleInitialSlope(decision, from, velocityX, pageW, duration)
+        val spec = if (slope > 0f) {
+            androidx.compose.animation.core.tween<Float>(duration, easing = VelocityHandoffEasing(slope))
+        } else {
+            androidx.compose.animation.core.tween<Float>(duration)
+        }
         settleJob?.cancel()
         settleJob = scope.launch {
             val anim = androidx.compose.animation.core.Animatable(from)
             val target = if (decision == FlipSession.Decision.COMMIT) 1f else 0f
             anim.animateTo(
                 targetValue = target,
-                animationSpec = androidx.compose.animation.core.tween(duration),
+                animationSpec = spec,
             ) {
                 // animateTo 的回调是无参的 Animatable.() -> Unit，当前值在 this.value 上。
                 val v = value
@@ -463,6 +473,29 @@ internal const val ROLLBACK_RETRY_DELAY_MS = 60L
  */
 internal const val LANDING_WAIT_MS = 900L
 internal const val LANDING_POLL_MS = 30L
+
+
+/**
+ * 起手斜率连续的结算缓动（用户层·纯数学，与平台无关）。
+ *
+ * Hermite 基 `u(s) = h01(s) + a·h10(s)`，其中 `h01 = -2s³+3s²`、`h10 = s³-2s²+s`：
+ *  - 端点 `u(0)=0, u(1)=1`（位移与端点对齐）；
+ *  - 斜率 `u'(0)=a, u'(1)=0` —— 起手保留手指速度、终点速度归零。
+ *
+ * `a=0` 退化为 smoothstep（两端都静止，点按/慢拖，与旧的 `FastOutSlowInEasing` 同为
+ * 缓入缓出）；`a=1` 时起手斜率等于「匀速走完剩余距离」的斜率，即快甩离手那一下不再
+ * 刹停（见 [FlipSession.settleInitialSlope]）。
+ *
+ * 对 `a∈[0,1]` 恒单调、不越界：`u'(s) = (1-a)·6s(1-s) + a·(1-s)(3s+1) ≥ 0`。
+ */
+internal class VelocityHandoffEasing(private val a: Float) : Easing {
+    override fun transform(fraction: Float): Float {
+        val s = fraction
+        val s2 = s * s
+        val s3 = s2 * s
+        return (-2f * s3 + 3f * s2) + a * (s3 - 2f * s2 + s)
+    }
+}
 
 
 /**

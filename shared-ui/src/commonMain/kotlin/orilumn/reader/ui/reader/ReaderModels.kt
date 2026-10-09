@@ -57,6 +57,21 @@ object ReaderMath {
     /** 水平滑方向：左滑（dx<0）→ +1（下一页），右滑 → -1（上一页）。 */
     fun flipDirection(dx: Float): Int = if (dx < 0f) 1 else -1
 
+    /**
+     * 抬手时判定「这次到底算不算点按」：**任一轴越过 slop 就不算**。
+     *
+     * 与 [gestureAxis] 用同一个 slop，但**不要求定轴**：定轴还额外要求「明显大于
+     * 另一轴 1.2 倍」，那是为区分横向翻页与纵向亮度；判定「有没有动过」不需要
+     * 这个区分——挪了就是挪了。
+     *
+     * 为什么要单列：手势层早先以 `dragDir == 0` 代理「没动过」，而 `dragDir` 只在
+     * 定轴为 HORIZONTAL 后才赋值，于是少量滑动（未过 slop、或纵向占优被判成
+     * VERTICAL）会带着 `dragDir == 0` 落进点按分支——正文被点掉、栏弹出、
+     * 翻页没发生。症状是「轻轻一划变成了点击」，不崩不报错，最难自查。
+     */
+    fun movedBeyondTapSlop(dx: Float, dy: Float, slop: Float = TAP_SLOP): Boolean =
+        abs(dx) > slop || abs(dy) > slop
+
     /** 阅读面键盘动作（桌面三端统一）：左右箭头翻页，Esc 等效中部点按。
      *  上/下箭头刻意不绑——将来滚动阅读模式用它们滚屏；面板内上下另走焦点遍历。 */
     enum class ReaderKeyAction { Prev, Next, MiddleTap }

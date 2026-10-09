@@ -12,7 +12,8 @@ import kotlin.math.abs
  *
  * 语义取自死代码 `app/.../ui/reader/curl/CurlView.kt`（本文 §6.2 的权威参考）：
  *  - `progress = dx / pageW`，域 `[-0.9, 1.9]`（`CurlView.kt:128-131`）；
- *  - commit 600ms / rollback 500ms（`:196-210`）；
+ *  - 结算时长以 `CurlView` 的 commit 600ms / rollback 500ms（`:196-210`）为**基准**，
+ *    本仓按「两倍速」取半（见 [COMMIT_MS]）：CurlView 的 600ms 在平板上体感拖沓；
  *  - `p ≥ 0.9` 时**提前落位**，动画尾与落位重叠（`:215-221`）——
  *    否则会出现「看起来翻完了但点不动」：像素已到位、落位还在路上，那一拍的手势被吞。
  *
@@ -205,10 +206,11 @@ class FlipSession {
     }
 
     /**
-     * 结算动画时长（ms）：commit 600 / rollback 500（`CurlView.kt:196-210`）。
+     * 结算动画时长（ms）：commit/rollback 取 [COMMIT_MS]/[ROLLBACK_MS]（CurlView 600/500 的
+     * **半速**，见常量 KDoc）。
      *
      * 速度折算：快甩时动画按「剩余进度 ÷ 速度」短促收尾（对过快甩动过慢的观感——
-     * 甩得飞快还要匀速走满 600ms，读起来就是「释放后动画拖沓」），慢拖/点按保持默认。
+     * 甩得飞快还要匀速走满整段，读起来就是「释放后动画拖沓」），慢拖/点按保持默认。
      * [fromProgress] 是 settle 起点的归一 progress（屏上真实位置），[velocityX] 是松手瞬间
      * 横向速度（px/s，符号与位移同向，参见 [decide]）。速度取不到（程序化翻页传 0）时
      * 走默认时长，手势手感的基准不变。
@@ -312,8 +314,13 @@ class FlipSession {
          */
         const val FLING_VELOCITY = 1400f
 
-        /** 结算动画时长下限（ms）：再快也不许「瞬切」级的视觉割裂。 */
-        const val MIN_ANIM_MS = 180
+        /**
+         * 结算动画时长下限（ms）：再快也不许「瞬切」级的视觉割裂。
+         *
+         * 随基准时长同比例取半（180 → 90）：快甩的短促收尾可以更快，但仍留一个
+         * 可辨识的滑行段。
+         */
+        const val MIN_ANIM_MS = 90
 
         /**
          * 判定「这一段算不算动了」的 progress 死区。
@@ -327,7 +334,14 @@ class FlipSession {
         /** 提前落位阈值（`CurlView.kt:215-221`）。 */
         const val EARLY_COMMIT_AT = 0.9f
 
-        const val COMMIT_MS = 600
-        const val ROLLBACK_MS = 500
+        /**
+         * 结算动画基准时长（ms）：commit 翻页 / rollback 回弹。
+         *
+         * 取自 `CurlView.kt:196-210` 的 600/500，但按**两倍速取半**（600→300、500→250）：
+         * 600ms 在平板上体感「拖沓」（手指早已离开、页面还在慢慢走），与 moon+/多看
+         * 的翻页节奏对不上。要回到 CurlView 基准就把这两个数乘 2、[MIN_ANIM_MS] 同步。
+         */
+        const val COMMIT_MS = 300
+        const val ROLLBACK_MS = 250
     }
 }

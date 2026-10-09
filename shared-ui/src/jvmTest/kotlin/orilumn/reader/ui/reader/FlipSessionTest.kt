@@ -258,10 +258,10 @@ class FlipSessionTest {
     }
 
     @Test
-    fun `时长——commit 600 rollback 500`() {
+    fun `时长——commit 300 rollback 250（CurlView 基准的两倍速）`() {
         val s = session()
-        assertEquals(600, s.settleDurationMs(FlipSession.Decision.COMMIT))
-        assertEquals(500, s.settleDurationMs(FlipSession.Decision.ROLLBACK))
+        assertEquals(300, s.settleDurationMs(FlipSession.Decision.COMMIT))
+        assertEquals(250, s.settleDurationMs(FlipSession.Decision.ROLLBACK))
     }
 
     @Test
@@ -279,34 +279,36 @@ class FlipSessionTest {
     fun `慢拖时长保持默认——速度未过甩动阈值`() {
         val s = session()
         // 400px/s < 800 阈值：无论拖到哪，时长都不折算。
-        assertEquals(600, s.settleDurationMs(FlipSession.Decision.COMMIT, 0.5f, 400f, 1000f))
-        assertEquals(500, s.settleDurationMs(FlipSession.Decision.ROLLBACK, 0.5f, 400f, 1000f))
+        assertEquals(300, s.settleDurationMs(FlipSession.Decision.COMMIT, 0.5f, 400f, 1000f))
+        assertEquals(250, s.settleDurationMs(FlipSession.Decision.ROLLBACK, 0.5f, 400f, 1000f))
     }
 
     @Test
     fun `快甩时长按剩余距离折算——甩越快收得越快`() {
         val s = session()
-        // 2000px/s 甩动、剩余半页（500px）：500/2000*1000 = 250ms。
+        // 2000px/s 甩动、剩余半页（500px）：500/2000*1000 = 250ms（仍 < 默认 300ms）。
         val duration = s.settleDurationMs(FlipSession.Decision.COMMIT, fromProgress = 0.5f, velocityX = 2000f, pageW = 1000f)
         assertEquals(250, duration)
-        // 更快的 4000px/s：500/4000*1000 = 125ms → 被下限 180ms 托住（不许瞬切）。
-        assertEquals(FlipSession.MIN_ANIM_MS, s.settleDurationMs(FlipSession.Decision.COMMIT, 0.5f, 4000f, 1000f))
+        // 更快的 4000px/s：500/4000*1000 = 125ms（仍 > 下限）。
+        assertEquals(125, s.settleDurationMs(FlipSession.Decision.COMMIT, 0.5f, 4000f, 1000f))
+        // 10000px/s：500/10000*1000 = 50ms → 被下限托住（不许瞬切）。
+        assertEquals(FlipSession.MIN_ANIM_MS, s.settleDurationMs(FlipSession.Decision.COMMIT, 0.5f, 10000f, 1000f))
     }
 
     @Test
     fun `快甩 rollback 同样折算——回弹也跟手速`() {
         val s = session()
-        // fromProgress=0.2、rollback 剩余 0.2 页（200px）、3000px/s：200/3000*1000 ≈ 66ms → 180ms 下限。
+        // fromProgress=0.2、rollback 剩余 0.2 页（200px）、3000px/s：200/3000*1000 ≈ 66ms → 下限。
         assertEquals(FlipSession.MIN_ANIM_MS, s.settleDurationMs(FlipSession.Decision.ROLLBACK, 0.2f, 3000f, 1000f))
     }
 
     @Test
     fun `速度折算拿不到页宽时回退默认——程序化翻页不意外变速`() {
         val s = session()
-        // pageW=0（点按翻页不传页面尺寸）：即使速度虚构为快，也走默认 600ms。
-        assertEquals(600, s.settleDurationMs(FlipSession.Decision.COMMIT, 0.5f, 2000f, 0f))
+        // pageW=0（点按翻页不传页面尺寸）：即使速度虚构为快，也走默认 300ms。
+        assertEquals(300, s.settleDurationMs(FlipSession.Decision.COMMIT, 0.5f, 2000f, 0f))
         // 速度取不到（程序化翻页传 0）：默认时长。
-        assertEquals(600, s.settleDurationMs(FlipSession.Decision.COMMIT))
+        assertEquals(300, s.settleDurationMs(FlipSession.Decision.COMMIT))
     }
 
     @Test

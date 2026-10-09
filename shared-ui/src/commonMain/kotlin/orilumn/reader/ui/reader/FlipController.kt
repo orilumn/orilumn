@@ -429,6 +429,9 @@ class FlipController(
         // FlipSession.settleInitialSlope 的 KDoc）。slope==0（点按/慢拖/拿不到速度）
         // 时保持既有缓动，点按翻页的手感零变化。
         val slope = session.settleInitialSlope(decision, from, velocityX, pageW, duration)
+        // 结算时长/起手斜率（与 FLIPLAT 同级的常驻单行日志）：验「两倍速」是否生效、
+        // 快甩是否真衔接上（slope>0 才走 VelocityHandoffEasing）。
+        log("settle ${if (decision == FlipSession.Decision.COMMIT) "commit" else "rollback"} dur=${duration}ms slope=$slope")
         val spec = if (slope > 0f) {
             androidx.compose.animation.core.tween<Float>(duration, easing = VelocityHandoffEasing(slope))
         } else {

@@ -19,6 +19,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -175,6 +176,57 @@ fun ReaderScreen(
         PageImageCache<orilumn.reader.engine.skia.DecodedImage>(
             sizeOf = { (it.image.width * it.image.height * 4L).coerceAtLeast(1L) })
     }
+    // ---- 定位动作（host 为 suspend，统一挂到本组件作用域） ----
+    /**
+     * 落位前等图（导航提交前预热）：目标页缺的插图/背景图并行解出来进跨页缓存再提交定位，
+     * 首帧即整页。以后翻页动画截图直接复用这批已解码位图。
+     *
+     * 调用点在拿到 [ReaderScreen] 返回的落定 pos 之后、`slideTargetPos` 赋值之前
+     * （见 `beginSlide` / `flipWithAnimation`）：目标页在图齐之前**不进渲染层**，
+     * 所以首帧就是整页真图，不存在「灰占位块 → 整页重栅格 → 真图」两跳。
+     *
+     * 两个调用来源，语义不同、互不替代：
+     *  - [AnchorFunnel.beforeCommit]（**覆盖所有落位路径**）：commit 之前等，于是
+     *    `openPos` 一变页面首帧即整页。这是「页面全部处理好再显示」的落点。
+     *  - `beginSlide` / `flipWithAnimation`：排在 `slideTargetPos` 赋值之前。翻页
+     *    动画另有一道闸（目标页未进渲染层 ⇒ 不许平移），等的是**渲染层入场**时机。
+     *
+     * 超时兜底（大图页最多慢这一拍）：超时按缺图放行，目标页会带占位块进场，
+     * 由 `rememberPageContent` 的 `LaunchedEffect` 异步补齐（那条路径此时是**唯一**
+     * 能救的路径，重复解码是有意的冗余，不是 bug）。
+     */
+    suspend fun warmPageImages(pos: ReaderPos) {
+        val imgs = runCatching { currentHost.pageImages(pos) }.getOrNull()
+            ?.takeIf { it.isNotEmpty() } ?: emptyList()
+        val bgs = runCatching { currentHost.pageBackgrounds(pos) }.getOrNull()
+            ?.mapNotNull { bg -> bg.bgSrc?.takeIf { it.isNotBlank() }?.let { bg.bgChapterHref to it } }
+            ?.distinct() ?: emptyList()
+        val missImgs = imgs.filter { imgCache.get(imgKeyOf(it)) == null }
+        val missBgs = bgs.filter { bgCache.get(bgKeyOf(it.first, it.second)) == null }
+        if (missImgs.isEmpty() && missBgs.isEmpty()) return
+        withTimeoutOrNull(PAGE_IMAGE_WARM_TIMEOUT_MS) {
+            val imgJobs = missImgs.map { img ->
+                async { img to runCatching { currentHost.loadPageImage(img) }.getOrNull() }
+            }
+            val bgJobs = missBgs.map { ref ->
+                async { ref to runCatching { currentHost.loadBackgroundImage(ref.first, ref.second) }.getOrNull() }
+            }
+            for ((img, bmp) in imgJobs.awaitAll()) {
+                if (bmp != null) imgCache.put(imgKeyOf(img), bmp)
+            }
+            for ((ref, bmp) in bgJobs.awaitAll()) {
+                if (bmp != null) bgCache.put(bgKeyOf(ref.first, ref.second), bmp)
+            }
+        }
+    }
+
+    // 「显示前把像素备齐」钩子挂进漏斗（见 AnchorFunnel.beforeCommit）：commit 之前
+    // **真等**（suspend，不是 launch 出去）——钩子返回即 commit，若不等，页面照旧
+    // 带着灰占位块显示，这套机制就白搭了。经引用读，避免捕获首次组合时的旧
+    // imgCache/bgCache（它们随宿主换代重建）。写入走 SideEffect：组合体里直接
+    // 赋值是副作用，每次重组都写。
+    val warmByRef = rememberUpdatedState<suspend (ReaderPos) -> Unit> { pos -> warmPageImages(pos) }
+    SideEffect { anchorFunnel.beforeCommit = { pos -> warmByRef.value(pos) } }
     // 跨页位图缓存（随宿主换代重建：换书即新池；同书内翻页/改参常驻，回访页首帧即有图）。
     // 键是稳定身份（与几何无关），容量按字节 LRU（大截图多的书自动腾退）。
     val currentOnBack by rememberUpdatedState(onBack)
@@ -321,36 +373,7 @@ fun ReaderScreen(
         }
     }
 
-    // ---- 定位动作（host 为 suspend，统一挂到本组件作用域） ----
-    /**
-     * 落位前等图（导航提交前预热）：目标页缺的插图/背景图并行解出来进跨页缓存再提交定位，
-     * 首帧即整页。超时兜底（大图页最多慢这一拍，超时按缺图提交、老的异步补齐照常）。
-     * 以后翻页动画截图直接复用这批已解码位图。
-     */
-    suspend fun warmPageImages(pos: ReaderPos) {
-        val imgs = runCatching { currentHost.pageImages(pos) }.getOrNull()
-            ?.takeIf { it.isNotEmpty() } ?: emptyList()
-        val bgs = runCatching { currentHost.pageBackgrounds(pos) }.getOrNull()
-            ?.mapNotNull { bg -> bg.bgSrc?.takeIf { it.isNotBlank() }?.let { bg.bgChapterHref to it } }
-            ?.distinct() ?: emptyList()
-        val missImgs = imgs.filter { imgCache.get(imgKeyOf(it)) == null }
-        val missBgs = bgs.filter { bgCache.get(bgKeyOf(it.first, it.second)) == null }
-        if (missImgs.isEmpty() && missBgs.isEmpty()) return
-        withTimeoutOrNull(PAGE_IMAGE_WARM_TIMEOUT_MS) {
-            val imgJobs = missImgs.map { img ->
-                async { img to runCatching { currentHost.loadPageImage(img) }.getOrNull() }
-            }
-            val bgJobs = missBgs.map { ref ->
-                async { ref to runCatching { currentHost.loadBackgroundImage(ref.first, ref.second) }.getOrNull() }
-            }
-            for ((img, bmp) in imgJobs.awaitAll()) {
-                if (bmp != null) imgCache.put(imgKeyOf(img), bmp)
-            }
-            for ((ref, bmp) in bgJobs.awaitAll()) {
-                if (bmp != null) bgCache.put(bgKeyOf(ref.first, ref.second), bmp)
-            }
-        }
-    }
+
     /** openPos 优先，回退 fallbackPos（activity currentPos），都没有才丢弃——永不静默。 */
     fun resolveNavPos(action: String): ReaderPos? {
         openPos?.let { return it }
@@ -401,11 +424,22 @@ fun ReaderScreen(
             val landed = currentHost.adjacent(p, direction)
             // 引擎侧无声吞翻页时（返回 null），这里是唯一目击者——与 Orilumn.FLIP 对账。
             Logger.d("Orilumn.TAP", "tap-flip result dir=$direction " + (landed?.let { "landed ch=${it.chapter} char=${it.slice.charStart}" } ?: "NULL (engine returned null)"))
-            if (landed != null) warmPageImages(landed)
+            // 等图**不在这里**做：本函数只负责「数据落定并返回落定页」，像素归调用点管。
+            // 早先把 `warmPageImages(landed)` 放在这里 await 曾被指为「起手顿一下」的
+            // 元凶，但真正的根因不是 await 本身（解码真身在 Dispatchers.IO，不占
+            // 主线程），而是**目标页未就绪时却让当前页独自平移**——那会露出底色空白
+            // （另见 updateSlide / FlipSlideLayer 的 KDoc）。该前提已修掉，于是等图
+            // 挪到调用点、排在 `slideTargetPos` 赋值之前：两页齐备才允许动画开始。
             landed
         }
     }
 
+    /**
+     * 瞬切翻页（无动画路径：封面页 / 关掉动画 / 模式非 slide）。
+     *
+     * 等图由 [AnchorFunnel.beforeCommit] 在 commit 之前统一完成（所有落位路径共用），
+     * 故 `openPos` 变化那一刻页面首帧即整页真图，不会「页面先出现、图再刷新」。
+     */
     fun flip(direction: Int) {
         scope.launch { flipAwait(direction) }
     }
@@ -416,7 +450,7 @@ fun ReaderScreen(
                 action = "jump-chapter",
                 read = { resolveNavPos("jump-chapter") },
                 commit = ::markPositionChanged,
-            ) { p -> currentHost.neighborChapterStart(p.chapter, direction)?.also { warmPageImages(it) } }
+            ) { p -> currentHost.neighborChapterStart(p.chapter, direction) }
         }
     }
 
@@ -484,16 +518,34 @@ fun ReaderScreen(
         flipSession.onDown()
         slideFromPos = src
         slideTargetPos = null
+        // 方向在此定，不是等到 updateSlide：`updateSlide` 在目标页未就绪时会提前
+        // return（见其 KDoc），若方向只在那里赋值，起手到就绪之间 direction 恒 0，
+        // 渲染层 shift = pageW * 0 ⇒ 目标页叠在当前页原位、不是从侧面滑入。
+        slideDirection = direction
+        slideProgress = 0f
         slidePrefetch?.cancel()
         slidePrefetch = scope.launch {
             val landed = flipAwait(direction)
             // 边界 / 无源 / BUSY-DROP：没有目标页，这次手势不动画（画面保持原样）。
             // 必须在 await 之后再读 phase——期间可能已经松手结算完了。
             if (landed == null) {
+                // 数据从未移动（flipAwait 返回 null = 没有 commit），所以**只能清场**。
+                // 早先这里调 rollbackSlide 会把引擎指针再翻回去一页 ⇒ 静默多翻一页。
                 Logger.d("Orilumn.TAP", "slide-begin no target dir=$direction ⇒ no animation")
-                if (flipSession.phase == FlipSession.Phase.Dragging) rollbackSlide()
+                clearSlide()
                 return@launch
             }
+            // 数据先落（落位在起手，见本函数 KDoc），但**目标页暂不进渲染层**：
+            // 翻页动画的前提是相邻两页都就绪；目标页缺席期间画面保持静止
+            // （见 updateSlide KDoc：未就绪不采纳位移，否则会拉出空白页）。
+            //
+            // 顺带消掉了「占位块 → 重栅格 → 真图」两跳：等图期间目标页根本不画，
+            // 首帧就是整页真图。
+            //
+            // 为什么这样不卡：warmPageImages 的解码真身是 Dispatchers.IO 的 suspend，
+            // 这里 await 的是 IO 而非主线程，不占帧；且对纯文页（无插图）
+            // `missImgs` 为空、函数直接 return，零等待。
+            warmPageImages(landed)
             slideTargetPos = landed
         }
     }
@@ -501,12 +553,22 @@ fun ReaderScreen(
     /**
      * 拖动中：把位移喂给状态机，逐帧写回渲染用的 progress。
      *
-     * **不要在这里预判 phase == Idle**：Idle → Dragging 的迁移正是 [FlipSession.onDrag]
-     * 干的活，先判掉就永远进不了 Dragging（progress 恒 0、endSlide 永不触发），
-     * 症状是「完全拖不动」且不报错。状态机自己会在 Settling 时返回 false。
+     * ## 目标页未就绪 ⇒ 位移一律不采纳（翻页动画的前提是**相邻两页都就绪**）
+     *
+     * 早先这里无条件把 `dx` 喂进状态机，而渲染层「滑动层始终在场」：于是目标页
+     * （等图/落位尚未完成，`slideTargetPos == null`）缺席时，**当前页独自平移**，
+     * 身后直接露出阅读面底色——用户看到的就是「先拉出一个空白页」，然后目标页才
+     * 补进来。单独平移一页在物理上就不成立：平移必须有另一页填坑。
+     *
+     * 故未就绪时整段丢弃位移（progress 恒0，画面停在当前页）。这不是「卡住」而是
+     * 正确姿态：目标页就绪后（`slideTargetPos` 赋值）后续 `dx` 立即跟手，用户
+     * 手指还按在屏幕上，动画无缝接上。松手时若仍未就绪，[endSlide] 走
+     * `decide()`：progress≈0 ⇒ 判ROLLBACK ⇒ `rollbackSlide()` 把数据翻回原页。
      */
     fun updateSlide(dx: Float, pageW: Float) {
         if (!slideEnabled) return
+        // 未就绪：目标页不在场，不许平移当前页（否则露底色空白）。
+        if (slideTargetPos == null) return
         if (!flipSession.onDrag(dx, pageW)) return
         slideProgress = flipSession.progress
         slideDirection = flipSession.direction
@@ -524,22 +586,21 @@ fun ReaderScreen(
         a != null && b != null && a.chapter == b.chapter && a.slice.charStart == b.slice.charStart
 
     /**
-     * 松手：裁决 → 结算动画。
+     * 跑结算动画（commit 走满位 / rollback 回零），拖动松手与点按翻页共用。
      *
-     * **commit 不再落位**：起手已落过一次（见 [beginSlide]），这里只需把动画走完并清场。
-     * 早先在这里再落一次位，正是「翻到位又弹回上一页」的根因（第二次 adjacent 引擎已不在源页）。
+     * 起点 [from] 必须取自 [FlipSession.beginSettle] **之前**的 progress：状态机进入
+     * 结算时不再改写 progress（它只记目标），所以调用方手上这份就是「屏幕上真实的位置」。
+     * 时长按 [velocityX] 折算（快甩短促收尾，见 [FlipSession.settleDurationMs]）——
+     * 这是「释放后动画太慢」的修法：甩得越快该收得越快，不再无条件匀速 600ms。
+     * [pageW] 用于把归一进度换算回像素距离，取不到（0）时回退默认时长。
      *
-     * **rollback 要把数据翻回去**：起手那次落位是真的推进了引擎指针，不翻回去的话
-     * 下次翻页从错的页起——静默错页。
+     * commit 的数据在**起手**那次 [flipAwait] 就已落定，这里走完动画即达成，清场即可；
+     * rollback 才需要把引擎指针翻回原页。
      */
-    fun endSlide(velocityX: Float = 0f) {
-        if (!slideEnabled || flipSession.phase != FlipSession.Phase.Dragging) return
-        val decision = flipSession.decide(velocityX)
-        // 方向必须在 beginSettle 之前取：动画走到端点时状态机会把 direction 清零。
-        val commitDir = flipSession.direction
-        flipSession.beginSettle(decision)
+    fun settleSlide(decision: FlipSession.Decision, velocityX: Float = 0f, pageW: Float = 0f) {
         val from = flipSession.progress
-        val duration = flipSession.settleDurationMs(decision)
+        flipSession.beginSettle(decision)
+        val duration = flipSession.settleDurationMs(decision, from, velocityX, pageW)
         settleJob?.cancel()
         settleJob = scope.launch {
             val anim = androidx.compose.animation.core.Animatable(from)
@@ -558,6 +619,80 @@ fun ReaderScreen(
                 // 回弹：动画回到 0，同时把引擎指针翻回原页。
                 rollbackSlide(navigateBack = true)
             }
+        }
+    }
+
+    /**
+     * 松手：裁决 → 结算动画（[settleSlide]）。
+     *
+     * **commit 不再落位**：起手已落过一次（见 [beginSlide]），这里只需把动画走完并清场。
+     * 早先在这里再落一次位，正是「翻到位又弹回上一页」的根因（第二次 adjacent 引擎已不在源页）。
+     *
+     * **rollback 要把数据翻回去**：起手那次落位是真的推进了引擎指针，不翻回去的话
+     * 下次翻页从错的页起——静默错页。
+     */
+    fun endSlide(velocityX: Float = 0f, pageW: Float = 0f) {
+        if (!slideEnabled || flipSession.phase != FlipSession.Phase.Dragging) return
+        // 目标页始终未就绪 ⇒ 整场没动过（progress 恒 0，见 updateSlide KDoc）。
+        // 此时播「回弹到 0」是零位移的空动画，直接退场并把起手落的数据翻回去。
+        if (slideTargetPos == null) {
+            Logger.d("Orilumn.TAP", "slide-end target never ready ⇒ rollback (no animation)")
+            rollbackSlide(navigateBack = true)
+            return
+        }
+        settleSlide(flipSession.decide(velocityX), velocityX, pageW)
+    }
+
+    /**
+     * 点按/方向键翻页：有动画时走「程序化滑动」，否则退回瞬切 [flip]。
+     *
+     * 与拖动路径共用同一套落位与结算（[flipAwait] / [settleSlide]），差别只有一处：
+     * 起点是 [FlipSession.beginProgrammatic]（progress=0、方向由调用方给），而不是手指位移。
+     * 因此「点按翻页」与「拖过半页松手」落在同一段 600ms 动画上，观感一致。
+     *
+     * 两条不做动画的出口：
+     *  - 封面页 / 关掉动画 / 模式非 slide ⇒ 瞬切（没有可滑的相邻页，或用户不要动画）。
+     *  - 会话不空闲（动画在飞）⇒ **丢弃**这次翻页，与 [AnchorFunnel] 的 BUSY-DROP 同口径。
+     */
+    fun flipWithAnimation(direction: Int) {
+        if (!slideEnabled || coverVisible) {
+            flip(direction)
+            return
+        }
+        // 动画在飞 ⇒ 丢弃，**不能退回 flip()**：那会硬切数据，而屏幕上仍锁着旧的两页，
+        // 落位通道与像素立刻错位。
+        if (!flipSession.beginProgrammatic(direction)) {
+            Logger.d("Orilumn.TAP", "tap-flip dropped dir=$direction (session busy)")
+            return
+        }
+        val src = openPos
+        if (src == null) {
+            // 无源可落：数据没动，清场即可（不能走 rollbackSlide——那次落位根本没发生）。
+            clearSlide()
+            flip(direction)
+            return
+        }
+        slideFromPos = src
+        slideTargetPos = null
+        slideProgress = 0f
+        // 渲染层读的是这个 state（FlipSlideLayer 的 shift = pageW * direction），
+        // 不是状态机的 direction —— 不同步则目标页从错侧滑入。
+        slideDirection = direction
+        slidePrefetch?.cancel()
+        slidePrefetch = scope.launch {
+            val landed = flipAwait(direction)
+            if (landed == null) {
+                // 边界/无源/BUSY-DROP：**数据从未移动**（flipAwait 返回 null 即没有 commit），
+                // 所以这里只能 clearSlide。早先误调 rollbackSlide 会多翻回去一页。
+                Logger.d("Orilumn.TAP", "tap-flip no target dir=$direction ⇒ no animation")
+                clearSlide()
+                return@launch
+            }
+            // 先等图再把目标页交给渲染层（同 beginSlide：避免占位块两跳闪烁）。
+            // 点按路径尤其要等：没有跟手过程垫底，若不等图就是「整页动画播一遍占位块」。
+            warmPageImages(landed)
+            slideTargetPos = landed
+            settleSlide(FlipSession.Decision.COMMIT)
         }
     }
 
@@ -591,7 +726,7 @@ fun ReaderScreen(
                 action = "seek",
                 read = { resolveNavPos("seek") },
                 commit = ::markPositionChanged,
-            ) { currentHost.pageAtFraction(fraction.toDouble())?.also { warmPageImages(it) } }
+            ) { currentHost.pageAtFraction(fraction.toDouble()) }
             // 拉到头即进封面（与回翻进封面同口径）：落位首位即清已离开、封面就绪即展示；
             // 只读，markPositionChanged 已记首位存档，不另存。bmp 未到时 effect 在 openPos
             // 变化重跑后按新 dismissed 展示；已在首位且 bmp 未到是首开竞态，cover effect 自会收尾。
@@ -645,7 +780,7 @@ fun ReaderScreen(
                 action = "open-link",
                 read = { resolveNavPos("open-link") },
                 commit = ::markPositionChanged,
-            ) { currentHost.openLink(target)?.also { warmPageImages(it) } }
+            ) { currentHost.openLink(target) }
         }
         return true
     }
@@ -670,8 +805,9 @@ fun ReaderScreen(
         val zone = ReaderMath.tapZone(xPx, widthPx)
         Logger.d("Orilumn.TAP", "tap x=${xPx.roundToInt()} y=${yPx.roundToInt()} w=${widthPx.roundToInt()} zone=$zone bars=${currentBarsVisible}")
         when (zone) {
-            -1 -> flip(-1)
-            1 -> flip(1)
+            // 点按翻页与拖动松手走同一条动画路径（见 flipWithAnimation）。
+            -1 -> flipWithAnimation(-1)
+            1 -> flipWithAnimation(1)
             else -> barsVisible = !barsVisible
         }
     }
@@ -701,7 +837,10 @@ fun ReaderScreen(
     val currentSlideEnabled by rememberUpdatedState(slideEnabled)
     val currentBeginSlide by rememberUpdatedState<(Int) -> Unit> { beginSlide(it) }
     val currentUpdateSlide by rememberUpdatedState<(Float, Float) -> Unit> { dx, w -> updateSlide(dx, w) }
-    val currentEndSlide by rememberUpdatedState<(Float) -> Unit> { endSlide(it) }
+    val currentEndSlide by rememberUpdatedState<(Float, Float) -> Unit> { vx, w -> endSlide(vx, w) }
+    // 点按/方向键翻页同样走动画，必须经引用读：否则设置里刚打开「翻页动画」，
+    // 键盘那侧还按旧的瞬切走（与 pointerInput 的坑同源，见上方注释）。
+    val currentFlipWithAnimation by rememberUpdatedState<(Int) -> Unit> { flipWithAnimation(it) }
 
     // S29：Toast → CMP Snackbar；书签/笔记占位动作未接线（null）时给出提示。
     val snackbar = rememberReaderSnackbar()
@@ -752,7 +891,7 @@ fun ReaderScreen(
                         if (!change.pressed) {
                             val upTime = change.uptimeMillis
                             if (brightnessActive) endBrightnessGesture()
-                            else if (slideActive) currentEndSlide(vx)
+                            else if (slideActive) currentEndSlide(vx, size.width.toFloat())
                             else if (dragDir != 0) flip(dragDir)
                             else if (upTime - downTime < ReaderMath.TAP_MAX_MS) {
                                 onTap(downX, downY, size.width.toFloat())
@@ -829,8 +968,8 @@ fun ReaderScreen(
                         (action == ReaderMath.ReaderKeyAction.Prev || action == ReaderMath.ReaderKeyAction.Next)
                     ) return@onKeyEvent false
                     when (action) {
-                        ReaderMath.ReaderKeyAction.Prev -> { flip(-1); true }
-                        ReaderMath.ReaderKeyAction.Next -> { flip(1); true }
+                        ReaderMath.ReaderKeyAction.Prev -> { currentFlipWithAnimation(-1); true }
+                        ReaderMath.ReaderKeyAction.Next -> { currentFlipWithAnimation(1); true }
                         ReaderMath.ReaderKeyAction.MiddleTap -> { onTap(pxWidth / 2f, pxHeight / 2f, pxWidth); true }
                         null -> false
                     }

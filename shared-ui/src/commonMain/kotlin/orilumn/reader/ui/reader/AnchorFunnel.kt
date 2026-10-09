@@ -18,6 +18,24 @@ class AnchorFunnel(private val logTag: String = "Orilumn.TAP") {
     private val mutex = Mutex()
 
     /**
+     * **提交前的最后一刻**：等目标页像素就绪（等图），再让它显示。
+     *
+     * 收口在这里而不是散在各调用点，是因为漏斗是 `openPos` 的唯一写入通道：
+     * `commit(dst)` 一执行，页面首帧就开始画，而插图位图靠
+     * `rememberPageContent` 的 `LaunchedEffect` 异步补 ⇒ 首帧必是灰占位块，
+     * 图到后再整页重栅格（`PageRasterFingerprint.images` 的 skia Image 按实例比，
+     * 换了实例即缓存失效）——用户看到的就是「页面先出现、图再刷新」两跳。
+     *
+     * 早先只有 `jumpChapter` / `pageAtFraction` / `openLink` 三条路径各自
+     * `.also { warmPageImages(it) }`，最常走的 `flip` 与 `external` 推送都漏了，
+     * 于是闪烁时有时无。挂在这里，新增落位路径自动继承。
+     *
+     * 由 [ReaderScreen] 注入（它持有 `imgCache`/`bgCache`）；为 null 时退化为旧行为。
+     * 解码真身在 `Dispatchers.IO`，不占主线程；纯文页无插图直接返回、零等待。
+     */
+    var beforeCommit: (suspend (ReaderPos) -> Unit)? = null
+
+    /**
      * 需要源的导航（翻页/跳章/seek/开链接）：有锁直接放弃；无锁则取最新源 → 执行 → 提交。
      * 无源（首次打开前）不执行直接回 null；[run] 回 null（到边界/失败）则不提交。
      */
@@ -43,6 +61,9 @@ class AnchorFunnel(private val logTag: String = "Orilumn.TAP") {
                 Logger.d(logTag, "$action NULL (no target)")
                 return null
             }
+            // 显示前把像素备齐（见 beforeCommit KDoc）。失败/超时按缺图放行，
+            // 由渲染侧的异步补齐兜底——绝不能因为图没备好就不翻页。
+            runCatching { beforeCommit?.invoke(dst) }
             commit(dst)
             Logger.d(logTag, "$action done → ch=${dst.chapter} char=${dst.slice.charStart}")
             return dst
@@ -70,6 +91,7 @@ class AnchorFunnel(private val logTag: String = "Orilumn.TAP") {
                 Logger.d(logTag, "$action NULL")
                 return null
             }
+            runCatching { beforeCommit?.invoke(dst) }
             commit(dst)
             Logger.d(logTag, "$action done → ch=${dst.chapter} char=${dst.slice.charStart}")
             return dst

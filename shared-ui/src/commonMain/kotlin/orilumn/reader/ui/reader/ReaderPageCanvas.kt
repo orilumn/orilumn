@@ -64,8 +64,18 @@ fun ReaderPageCanvas(
      * 由 [ReaderScreen] 接宿主钩子；默认 null = 不抢占。
      */
     onMiss: (() -> Unit)? = null,
+    /**
+     * 渲染器（栅格 + 多页位图缓存的宿主）。默认在本组件位置 remember。
+     *
+     * 调用方**翻页双页时应显式传入同一个实例**：本组件在 current/target 两个
+     * 组合位置各被调用一次，各自 remember 会得到两个渲染器、两个互不相通的
+     * 页位图池（每池只养得起当前这一页，回翻必重栅格）。提到调用方一处
+     * remember 后两页共用一池，才能真正挡住「翻回去又画一遍」。
+     */
+    renderer: ReaderPageRenderer? = null,
 ) {
-    val renderer = rememberReaderPageRenderer()
+    val localRenderer = rememberReaderPageRenderer()
+    val renderer = renderer ?: localRenderer
     // 修订号版本化：只包画布发射器（渲染器实例保留在 key 之外，Android 离屏
     // surface 不重建、其页缓存另经 contentRevision 显式失效，见各 actual）。
     key(contentRevision) {

@@ -4,10 +4,6 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.key
 import androidx.compose.ui.Modifier
-import orilumn.reader.engine.skia.DecodedImage
-import orilumn.reader.engine.skia.DrawLine
-import orilumn.reader.engine.skia.PageBackground
-import orilumn.reader.engine.skia.PageImage
 import kotlin.math.roundToInt
 /**
  * S28 阅读画布：「画布」平移——把 [ReaderHost.pageLines] 给出的行窗口经 [ReaderPageRenderer]
@@ -19,10 +15,16 @@ import kotlin.math.roundToInt
  * 窗口外行由裁剪丢弃。文字墨色以 [inkColor] 为准：行数据是 `remember(pos)` 锁死的，换主题色常常不触发
  * 重排版（分页键故意排除颜色），绘制时盖章是唯一与重排/缓存路径无关的落墨点；[DrawLine.inkColor]
  * 只做版式侧回退（旧直绘路径）。底色由 [pageBg] 打底（Android 离屏 surface / 桌面 Compose 背景同色）。
+ *
+ * 内容整体由一个 [PageContent] 持有（[Immutable] + 值相等）：早先拆成 `lines`/`pageImages`/
+ * `imageBitmaps`/`pageBackgrounds`/`bgImages`/`rasterKey` 六个参数，列表/映射都是 Compose 眼里的
+ * **不稳定**类型。强跳过虽能按实例比，但每次重组都新建的实例仍会拖累判断，且参数一多极易漏传；
+ * 收成一个不可变值对象后，内容未变即整体跳过（`==` 短路到同一实例），翻页帧不再重走 drawLines。
  */
 @Composable
 fun ReaderPageCanvas(
-    lines: List<DrawLine>?,
+    /** 一页的全部绘制输入（行窗口 + 插图几何/位图 + 盒背景 + 背景图 + 页身份键）。null = 空页。 */
+    content: PageContent?,
     contentLeft: Float,
     contentTop: Float,
     contentRectLeft: Float,
@@ -34,30 +36,12 @@ fun ReaderPageCanvas(
     inkColor: Int = 0xFF000000.toInt(),
     modifier: Modifier = Modifier,
     /**
-     * 与 [lines] 同一切片的 `<img>` 几何（章节绝对 Y）；null/空 = 本页无图。
-     * **P0a 起插图不再在此绘制**：它与文字/背景一起下沉进 [ReaderPageRenderer]，
-     * 由 [PageImageSlot] 传入（含「有图但未解出」的占位槽位）。
-     * 理由是像素单一真相源——翻页动画拿整页位图当纹理，插图留在 Compose 层就会丢图。
-     */
-    pageImages: List<PageImage>? = null,
-    /** 已解码的插图（键与 [pageImages] 同实例/同值）；缺失项由渲染器画灰色占位。 */
-    imageBitmaps: Map<PageImage, DecodedImage>? = null,
-    /** 与 [lines] 同一切片的盒背景/边框（章节绝对 Y）；null/空 = 本页无背景块。 */
-    pageBackgrounds: List<PageBackground>? = null,
-    /** P3-b: 背景图解码结果（键为 [PageBackground.bgKey]）；缺失项該幅只留底色。 */
-    bgImages: Map<String, DecodedImage> = emptyMap(),
-    /**
      * 版式版本号（`ReaderScreen.contentRevision` 同源）：
      * 字重这类"只换字形、不断行"的变更会产出与当前页结构完全相等的行数据，
      * 强跳过下相等即整棵跳过、零像素重画；此处用版本号做 key，
      * 推送即重建画布发射器、必重画（与数据是否相等无关）。
      */
     contentRevision: Int = 0,
-    /**
-     * P0b：页身份键（供渲染器的多页位图缓存下标）。null = 不缓存。
-     * 由 [ReaderScreen] 从 `pos` + 视口 + 修订号 + 主题色算出的稳定值。
-     */
-    rasterKey: PageRasterKey? = null,
     /**
      * 未命中、即将真正栅格化时回调一次（`线程调度原则.md` §5「唯一钩子」：
      * 栅格属总则第 1 档的「渲染」半边，必须与翻页同权抢占后台预排）。
@@ -80,9 +64,9 @@ fun ReaderPageCanvas(
     // surface 不重建、其页缓存另经 contentRevision 显式失效，见各 actual）。
     key(contentRevision) {
     Canvas(modifier = modifier) {
-        val list = lines
-        val imgs = pageImages?.takeIf { it.isNotEmpty() }
-        val rawBgs = pageBackgrounds?.takeIf { it.isNotEmpty() }
+        val list = content?.lines
+        val imgs = content?.pageImages?.takeIf { it.isNotEmpty() }
+        val rawBgs = content?.pageBackgrounds?.takeIf { it.isNotEmpty() }
         if ((list.isNullOrEmpty()) && imgs == null && rawBgs == null) return@Canvas
         // 章节绝对 Y → 页面坐标系：对齐基准必须覆盖行与图两者。
         // 替换块（img）不产出 DrawLine：若只取行最小值，行窗内首图（gearIndex < 首文本行）
@@ -101,6 +85,7 @@ fun ReaderPageCanvas(
         // P0a：插图与文本同一 shift 一并下沉进渲染器（整页一张位图，动画与静止同像素）。
         // 槽位**逐项保留**（含 decoded=null 的占位槽）——map 表达不了「有图未解出」，
         // 而那正是首帧常态；漏一个就是静默空白。
+        val imageBitmaps = content?.imageBitmaps
         val slots = imgs?.map { PageImageSlot(it.copy(yTop = it.yTop - shift, yBottom = it.yBottom - shift), imageBitmaps?.get(it)) }
             .orEmpty()
         val frame = if (!list.isNullOrEmpty()) ReaderMath.shiftToPageFrame(list, shift) else emptyList()
@@ -121,10 +106,10 @@ fun ReaderPageCanvas(
             contentRectBottom = contentRectBottom,
             pageBg = pageBg,
             backgrounds = bgs,
-            bgImages = bgImages,
+            bgImages = content?.bgImages ?: emptyMap(),
             images = slots,
             contentRevision = contentRevision,
-            rasterKey = rasterKey,
+            rasterKey = content?.rasterKey,
             onMiss = onMiss,
         )
     }

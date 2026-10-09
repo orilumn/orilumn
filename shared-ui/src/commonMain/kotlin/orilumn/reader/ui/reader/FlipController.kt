@@ -12,7 +12,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.CoroutineScope
-import orilumn.reader.engine.skia.DecodedImage
 import orilumn.reader.io.Logger
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -84,64 +83,6 @@ class FlipController(
     private var prefetchJob: Job? = null
     private var settleJob: Job? = null
 
-    /**
-     * 落定后补栅**反方向**那一页（维持「当前页 ±1」两张都在池里）。
-     *
-     * 预栅格只补方向侧一张（翻页只需一页），所以往回翻时目标页那张还没备好，
-     * 仍要付一次 ~143ms 的实时栅格（真机 `raster hit=false`）。落定是此刻页面静止、
-     * 用户已在读新页的时刻——补这张的成本落在阅读间隙而非手指上。
-     */
-    fun prerasterOpposite(
-        host: ReaderHost,
-        renderer: ReaderPageRenderer,
-        contentLeft: Float,
-        contentTop: Float,
-        contentRight: Float,
-        contentBottom: Float,
-        pageBg: Int,
-        inkColor: Int,
-        contentRevision: Int,
-        imgCache: PageImageCache<DecodedImage>,
-        bgCache: PageImageCache<DecodedImage>,
-        /** 锚点覆盖：commit 后「新页」= openPos，而 fromPos 已被 clear 清空。 */
-        anchorOverride: ReaderPos? = null,
-    ) {
-        // 会话仍在飞时不补：动画层正锁着两页。
-        if (isBusy()) return
-        val anchor = anchorOverride ?: fromPos.value ?: return
-        val dir = direction.value
-        if (dir == 0) return
-        val back = scope.launch {
-            // 落位已完成（clear 在 animateTo 之后才跑，这里已在 clear 之后调用）。
-            val target = runCatching { host.adjacent(anchor, -dir) }.getOrNull() ?: return@launch
-            prerasterPage(
-                host = host,
-                pos = target,
-                renderer = renderer,
-                contentLeft = contentLeft,
-                contentTop = contentTop,
-                contentRight = contentRight,
-                contentBottom = contentBottom,
-                pageBg = pageBg,
-                inkColor = inkColor,
-                contentRevision = contentRevision,
-                imgCache = imgCache,
-                bgCache = bgCache,
-            )
-        }
-        // 不占 settleJob：它不是动画，只是后台补一张位图。
-        prerasterJob = back
-    }
-
-    /** 补栅协程（与动画协程分开，取消语义不同）。 */
-    private var prerasterJob: Job? = null
-
-    /** 落定后回调：让调用方补栅反方向那一页（见 prerasterOpposite）。 */
-    var onSettled: ((ReaderPos?) -> Unit)? = null
-
-    /** 落定锚点覆盖：commit 后「新页」= openPos，clear 前的 fromPos 是旧页。 */
-    var settledAnchorOverride: ReaderPos? = null
-
     /** 纯状态机（无 Compose 依赖，可直测）。 */
     val session: FlipSession = FlipSession()
 
@@ -182,8 +123,6 @@ class FlipController(
     fun clear() {
         settleJob?.cancel()
         settleJob = null
-        prerasterJob?.cancel()
-        prerasterJob = null
         prefetchJob?.cancel()
         prefetchJob = null
         session.abort()
@@ -483,8 +422,6 @@ class FlipController(
             return
         }
         val from = session.progress
-        // clear() 会清空 fromPos，补栅要用「新页」（= openPos），故先抓住。
-        val anchorForOpposite = settledAnchorOverride ?: fromPos.value
         session.beginSettle(decision)
         val duration = session.settleDurationMs(decision, from, velocityX, pageW)
         settleJob?.cancel()
@@ -503,9 +440,6 @@ class FlipController(
             if (decision == FlipSession.Decision.COMMIT) {
                 // 数据早在起手那次 flipAwait 就已落定，动画走完即达成：清场即可。
                 clear()
-                // 补栅反方向那一页，维持「当前页 ±1」都在池里：预栅格只补了方向侧，
-                // 不补的话往回翻仍要付一次 ~143ms 实时栅格（见 prerasterOpposite）。
-                onSettled?.invoke(anchorForOpposite)
             } else {
                 // 回弹：动画回到 0，同时把引擎指针翻回原页。
                 rollback(navigateBack = true)

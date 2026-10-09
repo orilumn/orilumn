@@ -153,6 +153,11 @@ class DesktopReaderHost(
         controller.findAdjacentPage(pos.chapter, pos.slice, direction)?.let { ReaderPos(it.first, it.second) }
     }
 
+    /** 只读邻页查询：预栅格专用，**不推进指针、不抢占后台**（见 [ReaderHost.peekAdjacent]）。 */
+    override suspend fun peekAdjacent(pos: ReaderPos, direction: Int): ReaderPos? = withContext(Dispatchers.Default) {
+        controller.peekAdjacentPage(pos.chapter, pos.slice, direction)?.let { ReaderPos(it.first, it.second) }
+    }
+
     override suspend fun neighborChapterStart(chapter: Int, direction: Int): ReaderPos? =
         withContext(Dispatchers.Default) {
             controller.finalizeOnLeave(chapter)

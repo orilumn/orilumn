@@ -456,11 +456,6 @@ fun ReaderScreen(
     SideEffect { flipCtl = controller }
     // 手势/渲染层一律经它取会话；理论上组合内已完成赋值（SideEffect 在 apply 变更前跑）。
     val ctl = controller
-    // 落定后补栅反方向那一页：预栅格只补了方向侧，不补则往回翻仍要付一次 ~143ms
-    // 实时栅格。锚点是**新页**（起手 commit 已落地，openPos 就是刚落定那页）。
-    SideEffect {
-        ctl.settledAnchorOverride = openPos
-    }
 
     fun jumpChapter(direction: Int) {
         scope.launch {
@@ -756,7 +751,12 @@ fun ReaderScreen(
                             val upDy = change.position.y - downY
                             if (brightnessActive) endBrightnessGesture()
                             else if (slideActive) currentEndSlide(vx, size.width.toFloat())
-                            else if (dragDir != 0) flip(dragDir)
+                            // 走 flipWithAnimation（同点按）而非 flip()：flip() 是**瞬切**——直接
+                            // flipAwait 硬换数据、不播动画、也不经过 FlipController，于是会话
+                            // 状态与渲染层不同步。真机症状：快速翻页时同一内容"快速闪一下"
+                            // （FLIPLAT 日志里 axis 定轴后紧跟一条 tap-flip，源页与滑动落定的
+                            // 目标页一致 ⇒ 同一次手势既滑动又瞬切了一次）。
+                            else if (dragDir != 0) flipWithAnimation(dragDir)
                             else if (upTime - downTime < ReaderMath.TAP_MAX_MS &&
                                 !ReaderMath.movedBeyondTapSlop(upDx, upDy)
                             ) {
@@ -956,31 +956,6 @@ fun ReaderScreen(
             // （真机日志：动画期间每页每轮各栅格一次，`hit=false`）。
             val pageRenderer = rememberReaderPageRenderer()
 
-            val prerasterOnSettle = false
-            // 落定后补栅反方向：维持「当前页 ±1」两张都在池里（预栅格只补了方向侧那一张）。
-            // 「落定后补反方向」默认**关闭**：它在动画刚结束时补，而那一刻用户很可能
-            // 立刻再滑——预栅格跑在 UI 线程，一次 300~580ms 正好砸在手指上
-            // （真机实测 preraster miss 582/355/321ms，与绘制争同一页，净效果为负）。
-            // 第 1 档优先于一切（§3.6）：只靠预排信号那条路径补，它发生在阅读间隙。
-            SideEffect {
-                ctl.onSettled = { _anchor ->
-                    val a = if (prerasterOnSettle) _anchor else null
-                    if (a != null) ctl.prerasterOpposite(
-                        host = currentHost,
-                        renderer = pageRenderer,
-                        contentLeft = contentLeft,
-                        contentTop = contentTop,
-                        contentRight = contentRight,
-                        contentBottom = contentBottom,
-                        pageBg = profile.bgColor,
-                        inkColor = profile.fgColor,
-                        contentRevision = contentRevision,
-                        imgCache = imgCache,
-                        bgCache = bgCache,
-                        anchorOverride = a,
-                    )
-                }
-            }
 
             // 预栅格（`线程调度原则.md` §3 阶梯补的那一档）：引擎在预排出邻页版式后抛信号，
             // 此刻在 UI 线程按**方向**补一张像素，落定时目标页即可命中缓存、零栅格开销。
@@ -1004,15 +979,11 @@ fun ReaderScreen(
                 hostRevision = hostRevision,
                 imgCache = imgCache,
                 bgCache = bgCache,
-                // 第 1 档优先于一切（§3.6 抢占代替等待）：拖动中/结算中/落位在途，
-                // 用户马上要用别的页，预栅格一律让路。真机教训——预栅格跑在 UI 线程
-                // （与 drawLines 共用 surface 的约束），一次 300~580ms，撞上滑动就是卡顿。
-                gate = { ctl.isBusy() },
             )
             // 画布本体（当前页 / 目标页同形，只是位移不同）。
             val PageCanvasFun: @Composable (PageContent?) -> Unit = { content ->
                 ReaderPageCanvas(
-                    lines = content?.lines,
+                    content = content,
                     contentLeft = contentLeft,
                     contentTop = contentTop,
                     contentRectLeft = contentLeft,
@@ -1022,14 +993,8 @@ fun ReaderScreen(
                     pageBg = profile.bgColor,
                     inkColor = profile.fgColor,
                     modifier = Modifier.fillMaxSize(),
-                    pageImages = content?.pageImages,
-                    imageBitmaps = content?.imageBitmaps,
-                    pageBackgrounds = content?.pageBackgrounds,
-                    bgImages = content?.bgImages ?: emptyMap(),
                     // 字重这类纯字形变更行数据完全相等，靠修订号强制重画（见 ReaderPageCanvas）。
                     contentRevision = contentRevision,
-                    // P0b：页身份键（多页位图缓存下标）
-                    rasterKey = content?.rasterKey,
                     // 第 1 档「渲染」半边的抢占钩子：未命中真正栅格化时，让后台预排让路
                     // （总则第 1 条 + 线程调度原则 §5「唯一钩子」；翻页那半边早已接上）。
                     onMiss = onRasterMiss,
@@ -1044,7 +1009,10 @@ fun ReaderScreen(
             // 现在目标槽恒在（target 为 null 时画空，见 FlipSlideLayer KDoc），结构稳定。
             FlipSlideLayer(
                 direction = ctl.direction.value,
-                progress = if (ctl.slideActive(slideEnabled)) ctl.progress.value else 0f,
+                // **不要在这里读 ctl.progress.value**：一旦在组合里读，动画每帧都会让整个
+                // 阅读面重组、两个画布每帧重走 drawLines（见 FlipSlideLayer KDoc）。
+                // 传闭包，让 progress 只在 graphicsLayer 的 draw 相位被读。
+                progress = { if (ctl.slideActive(slideEnabled)) ctl.progress.value else 0f },
                 pageWidthPx = pxWidth,
                 modifier = Modifier.fillMaxSize(),
                 target = if (targetContent != null) {

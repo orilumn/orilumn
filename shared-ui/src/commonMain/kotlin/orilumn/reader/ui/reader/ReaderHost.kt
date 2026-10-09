@@ -63,7 +63,8 @@ interface ReaderHost {
      * 跟上。引擎跑在后台线程、**只抛信号**；执行在用户层的 UI 线程（`preraster` 与
      * `drawLines` 共用离屏 surface，不能跨线程）。
      *
-     * 翻页只需准备**一页**（方向侧那一张），不是把窗口全截一遍。
+     * 翻页准备的是**当前三页截图窗口**：一次信号补齐当前页 ±1（方向侧优先、反侧随后），
+     * 而不是只截方向侧那一张（见 `Preraster.kt`）。
      *
      * @param chapter 已出版式的那一章。
      * @param direction 上次翻页方向（`1` 前 / `-1` 后 / `0` 无记录，语义见 §3.2）。
@@ -87,6 +88,24 @@ interface ReaderHost {
 
     /** 相邻页翻页：跨章并跳过空白短章；到边界返回 null。direction 语义同 [ReaderMath.flipDirection]。 */
     suspend fun adjacent(pos: ReaderPos, direction: Int): ReaderPos?
+
+    /**
+     * [adjacent] 的**只读**版本：不推进引擎指针，只回答「那一页是哪个页」。
+     *
+     * ## 为什么必须有这个（预栅格不能调 [adjacent]）
+     *
+     * `ReaderHost.adjacent` 不是查询而是**有副作用的真导航**——引擎侧 `tempNav` 会
+     * `ip.curIndex = next`，真把临时表指针挪到下一页。故预栅格（`Preraster.kt`）调它
+     * 会在**没有用户手势**的情况下把指针多推一格。
+     *
+     * 真机症状（19:56:25）：预排在落位之后仍持续出版式并触发预栅格，每次预栅格都
+     * 调 `adjacent(anchor, dir)` ⇒ 指针被多推 ⇒「翻页完成后又跳了一页」；同时预栅格
+     * 算出的是另一页（`raster n=36` vs `preraster n=37`），既没备好用户要的那页，
+     * 又把目标页白栅一次。
+     *
+     * 预栅格是投机活，**绝不能改数据**（§0：它只为「让将来的目标页变成命中」）。
+     */
+    suspend fun peekAdjacent(pos: ReaderPos, direction: Int): ReaderPos? = null
 
     /** 章节切换（上/下一章）到相邻有内容章节的第一页；边界返回 null。 */
     suspend fun neighborChapterStart(chapter: Int, direction: Int): ReaderPos?

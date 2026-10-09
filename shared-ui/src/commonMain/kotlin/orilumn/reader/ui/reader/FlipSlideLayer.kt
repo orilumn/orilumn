@@ -43,11 +43,27 @@ import androidx.compose.ui.graphics.graphicsLayer
  *
  * 现在目标槽恒在、target 为 null 时**画空**（空 Box 零成本），组合结构稳定，
  * 渲染器跨整个翻页会话存活 ⇒ 当前页位图始终命中，只目标页首现栅格一次。
+ *
+ * ## progress 为什么是 `() -> Float` 而不是 `Float`（每帧重组 / 每帧重栅的根因）
+ *
+ * 早先形参是 `Float`，调用方在组合里读 `ctl.progress.value` 再喂进来。于是
+ * **动画期间每一帧 progress 一变，整个阅读面组合作用域就重组一次**：`ReaderPageCanvas`
+ * 的形参含 `List<DrawLine>` 这类不稳定集合 ⇒ 不可跳过 ⇒ 两个画布每帧重新组合，
+ * `Canvas { }` 的 draw lambda 是新实例 ⇒ 绘制节点失效、**每帧重走 `drawLines`**：
+ * 指纹深比较（逐行 data class 相等）+ 位图重贴 + 每帧一条 `SkiaBridge` 日志。
+ * 一帧的 CPU 开销就落在这个数量级，和 moon+/多看的「onDraw 贴两张已缓存位图」差出一档。
+ *
+ * 改成传闭包后，`progress()` 只在 `graphicsLayer { }` 的 **draw 相位**被读：Compose 会
+ * 把这次读登记成「层属性依赖」，progress 变化只刷新两张页的平移量，**不触发重组、
+ * 不重走 Canvas 绘制**——动画期间只剩 GPU 平移两张已缓存的页位图。
+ *
+ * 语义不变（调用方闭包内仍含 `slideActive` 守卫）：动画关闭 / 无会话时 progress()
+ * 返回 0，画面静止。
  */
 @Composable
 fun FlipSlideLayer(
     direction: Int,
-    progress: Float,
+    progress: () -> Float,
     pageWidthPx: Float,
     modifier: Modifier = Modifier,
     target: (@Composable () -> Unit)? = null,
@@ -55,10 +71,12 @@ fun FlipSlideLayer(
 ) {
     val shift = pageWidthPx * direction
     Box(modifier = modifier) {
-        Box(Modifier.fillMaxSize().graphicsLayer { translationX = (1f - progress) * shift }) {
+        // 读 progress() 的位置是关键：写在 graphicsLayer 的 lambda 里 = draw 相位读，
+        // 快照依赖挂在层上而非组合作用域（见本函数 KDoc）。
+        Box(Modifier.fillMaxSize().graphicsLayer { translationX = (1f - progress()) * shift }) {
             target?.invoke()
         }
-        Box(Modifier.fillMaxSize().graphicsLayer { translationX = -progress * shift }) {
+        Box(Modifier.fillMaxSize().graphicsLayer { translationX = -progress() * shift }) {
             current()
         }
     }

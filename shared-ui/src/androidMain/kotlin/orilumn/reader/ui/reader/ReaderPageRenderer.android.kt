@@ -98,7 +98,9 @@ private class AndroidReaderPageRenderer : ReaderPageRenderer {
         Logger.w(
             "Orilumn.SkiaBridge",
             "raster n=${lines.size} imgs=${images.size} ${r.rasterMs}ms hit=${r.cacheHit} " +
-                "pool=$pages/${bytes / 1024 / 1024}MB",
+                "pool=$pages/${bytes / 1024 / 1024}MB " +
+                "key=${rasterKey?.chapter}/${rasterKey?.charStart}-${rasterKey?.charEnd}" +
+                " rev=${rasterKey?.contentRevision}",
         )
         drawPageBitmap(canvas, r.value, contentRectLeft, contentRectTop, contentRectRight, contentRectBottom)
     }
@@ -146,7 +148,9 @@ private class AndroidReaderPageRenderer : ReaderPageRenderer {
         ) ?: return false
         Logger.w(
             "Orilumn.SkiaBridge",
-            "preraster n=${lines.size} imgs=${images.size} ${r.rasterMs}ms hit=${r.cacheHit}",
+            "preraster n=${lines.size} imgs=${images.size} ${r.rasterMs}ms hit=${r.cacheHit} " +
+                "key=${rasterKey.chapter}/${rasterKey.charStart}-${rasterKey.charEnd}" +
+                " rev=${rasterKey.contentRevision}",
         )
         return true
     }

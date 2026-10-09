@@ -1,6 +1,7 @@
 package orilumn.reader.ui.reader
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -35,8 +36,14 @@ internal fun bgKeyOf(href: String, src: String): String = "$href|$src"
  *
  * 逐字段对应原 `ReaderScreen` 内联的那几段，语义与 remember 键**一字不改**
  * （本步是纯重构，验收线是像素全等——见设计文档 §11.1 第 2 步）。
+ *
+ * **[Immutable] + `data class`**：给 `ReaderPageCanvas` 当唯一内容入参用。Compose 的
+ * 强跳过只能按实例比不稳定参数，而本类每次重组都会新建实例 ⇒ 不标不可变、不给值相等，
+ * 画布每帧都无法跳过（每帧重走 drawLines）。标不可变后按值比较，字段多是 remember
+ * 出来的同一实例，比较是廉价的短路相等。
  */
-class PageContent(
+@Immutable
+data class PageContent(
     val lines: List<DrawLine>?,
     val pageImages: List<PageImage>?,
     val imageBitmaps: Map<PageImage, DecodedImage>,

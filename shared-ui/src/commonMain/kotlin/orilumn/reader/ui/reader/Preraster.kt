@@ -10,6 +10,9 @@ import orilumn.reader.engine.skia.DecodedImage
 import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.engine.skia.PageBackground
 import orilumn.reader.engine.skia.PageImage
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import orilumn.reader.io.Logger
 
 /**
  * 预栅格执行器（用户层·`线程调度原则.md` §3 阶梯补的那一档）。
@@ -24,10 +27,12 @@ import orilumn.reader.engine.skia.PageImage
  * 所以像素该在预排完成那一刻就跟上，而不是等绘制。这也是 moon+ 的做法：它静止时就
  * `getPageShot()` 预先截好下一页（`tmpFlipShot2`），滑动时直接复用。
  *
- * ## 翻页只需一页
+ * ## 截图窗口 = 当前页 ±1（三页）
  *
- * 每次只栅格**方向侧**那一张（§3.2 方向记录）。三窗口已有：`PAGE_CACHE_BYTES` 56MB ÷
- * 单页约 14MB = 4 槽，落定时补一张、LRU 自动淘汰最旧，不用改容量策略。
+ * 引擎在「±1 页分页完成」时抛信号（临时表逐页成形 / 磁盘表 d=1 两侧装配 / 小章全章排完），
+ * 用户层据**当前三页截图窗口的需要**立即补栅：一次信号补**两侧各一张**（当前页由绘制同步栅格），
+ * 不单独设置优先级、不排队（§0：需要得越快 → 越靠前；排队＝把成本推给用户）。
+ * 方向侧先栅（§3.1 每层先方向侧），反侧随后。
  *
  * ## 指纹必须与 UI 首帧逐字一致，否则照样 miss
  *
@@ -56,13 +61,6 @@ fun PrerasterOnPrefill(
     hostRevision: Int,
     imgCache: PageImageCache<DecodedImage>,
     bgCache: PageImageCache<DecodedImage>,
-    /**
-     * 让路闸：返回 true 表示**不要**预栅格（此刻用户更需要别的页）。
-     *
-     * 判据是「有没有交互在飞」——拖动中、结算动画中、落位在途中。预栅格是投机活
-     * （用户不等它），按§3.6「抢占代替等待」必须给第 1 档让路，而不是等静默。
-     */
-    gate: () -> Boolean = { false },
 ) {
     val hostRef = rememberUpdatedState(host)
     val onPrefillRef = rememberUpdatedState<suspend (Int, Int) -> Unit>(onPrefillReady)
@@ -71,8 +69,6 @@ fun PrerasterOnPrefill(
     val rendererRef = rememberUpdatedState(renderer)
     val imgCacheRef = rememberUpdatedState(imgCache)
     val bgCacheRef = rememberUpdatedState(bgCache)
-    // 闸 1：会话在飞就让路（用户马上要用别的页）。经引用读，避免捕获旧闭包。
-    val gateRef = rememberUpdatedState(gate)
     // 闸 2：同一时刻只允许一张预栅格在跑，不排队（排队＝把成本推给用户）。
     val prerasterBusy = remember { mutableStateOf(false) }
 
@@ -84,46 +80,54 @@ fun PrerasterOnPrefill(
         val bgCacheNow = bgCacheRef.value
         val dirNow = dirRef.value
         val posNow = posRef.value
+        // 三页截图窗口 = 当前页 ±1：每次信号到达，补**两侧各一张**（当前页由绘制同步栅）。
+        // 顺序：方向侧优先（§3.1 每层先方向侧；§0 需要得越快越靠前），再补反侧。
+        // 不设第二套优先级：抢占仍由唯一钩子负责——栅格未命中时 `onRasterMiss` →
+        // `controller.onForegroundRaster()` → `cancelForRaster(PRIO_FLIP)`（§5「唯一钩子」）。
+        // 该钩子与翻页的 `notifyFlip()` 同源，但**放行当前章的 ±1 页预排**（`pg:` d=1 两档）：
+        // ±1 正是本窗口要截的像素源，砍掉它会让 `pageCache` 永热不起来（真机 137–308ms/次）。
+        // 预栅格自己再判一套「要不要让路」只会出错：第三版按「是否会话
+        // 目标页」判，把预栅格整个掐死（真机：temp prefill 信号持续在发，preraster 只触发 7 次，
+        // 每页仍现场栅 75~179ms ⇒ 每次翻页 200~250ms 空白）。
+        //
         // 具名 suspend fun 而非 lambda：`return@...` 在 lambda 里不合法，而这段全是
         // 「条件不满足就地退出」的守卫。
-        suspend fun rasterDirectionSide(chapter: Int) {
-            // **第 1 档优先于一切**（§3.6：抢占代替等待）。预栅格是投机活——用户不等它，
-            // 它绝不能跟「用户正想翻到的那页」抢主线程。真机教训：预栅格跑在 UI 线程
-            //（与 drawLines 共用 surface 的约束），一次 300~580ms，撞上滑动就是卡顿。
-            // 三道闸，任一命中就让路：
-            //   1. 会话在飞（正在拖/正在结算/落位在途）⇒ 用户马上要用别的页，让路；
-            //   2. 上一张预栅格还在跑 ⇒ 不排队（排队只会把成本推给用户），让路；
-            //   3. 已在渲染层调用 ⇒ 让路（§0：第 1 档「渲染」半边优先）。
-            if (gateRef.value()) return
+        suspend fun rasterWindow(chapter: Int) {
+            // 同一时刻只允许窗口内一轮预栅在跑（两个信号同时到达时不排队——这是去重不是优先级判断）。
             if (prerasterBusy.value) return
+            val anchor = posNow() ?: return
+            // 只处理当前章：跨章预排由第 2/3 档的整章兜底另行处理。
+            if (anchor.chapter != chapter) return
+            // 方向 0 = 无记录（开书/跳转/调参），此时前向更可能被用，语义等同向前（§3.2）。
+            val effDir = if (dirNow() == 0) 1 else dirNow()
             prerasterBusy.value = true
             try {
-                // 方向 0 = 无记录（开书/跳转/调参），此时前向更可能被用，语义等同向前（§3.2）。
-                val effDir = if (dirNow() == 0) 1 else dirNow()
-                val anchor = posNow() ?: return
-                // 只处理当前章：跨章预排由第 2/3 档的整章兜底另行处理。
-                if (anchor.chapter != chapter) return
-                val target = runCatching { hostNow.adjacent(anchor, effDir) }.getOrNull() ?: return
-                prerasterPage(
-                    host = hostNow,
-                    pos = target,
-                    renderer = rendererNow,
-                    contentLeft = contentLeft,
-                    contentTop = contentTop,
-                    contentRight = contentRight,
-                    contentBottom = contentBottom,
-                    pageBg = pageBg,
-                    inkColor = inkColor,
-                    contentRevision = contentRevision,
-                    imgCache = imgCacheNow,
-                    bgCache = bgCacheNow,
-                )
+                for (d in intArrayOf(effDir, -effDir)) {
+                    // **必须用只读的 peekAdjacent**：`adjacent` 是有副作用的真导航（引擎 tempNav
+                    // 推进指针），预栅格调它会在无手势时把指针多推一格 ⇒ 真机症状
+                    // 「翻页完成后又跳了一页」（19:56:25日志）。
+                    val target = runCatching { hostNow.peekAdjacent(anchor, d) }.getOrNull() ?: continue
+                    prerasterPage(
+                        host = hostNow,
+                        pos = target,
+                        renderer = rendererNow,
+                        contentLeft = contentLeft,
+                        contentTop = contentTop,
+                        contentRight = contentRight,
+                        contentBottom = contentBottom,
+                        pageBg = pageBg,
+                        inkColor = inkColor,
+                        contentRevision = contentRevision,
+                        imgCache = imgCacheNow,
+                        bgCache = bgCacheNow,
+                    )
+                }
             } finally {
                 prerasterBusy.value = false
             }
         }
         // 引擎抛信号 → 执行栅格（本协程在 UI 线程，与 drawLines 共用 surface 故安全）。
-        hostNow.observePrefillReady { chapter, _ -> rasterDirectionSide(chapter) }
+        hostNow.observePrefillReady { chapter, _ -> rasterWindow(chapter) }
     }
 }
 
@@ -133,7 +137,7 @@ fun PrerasterOnPrefill(
  * 取数口径与 [rememberPageContent] 逐条对齐（`pageLines` / `pageImages` / `pageBackgrounds`
  * + `imgKeyOf`/`bgKeyOf` 命中缓存），否则指纹不等、首帧仍会重画。
  */
-internal fun prerasterPage(
+internal suspend fun prerasterPage(
     host: ReaderHost,
     pos: ReaderPos,
     renderer: ReaderPageRenderer,
@@ -151,6 +155,23 @@ internal fun prerasterPage(
     if (lines.isEmpty()) return false
     val pageImages: List<PageImage> = runCatching { host.pageImages(pos) }.getOrNull().orEmpty()
     val pageBackgrounds: List<PageBackground> = runCatching { host.pageBackgrounds(pos) }.getOrNull().orEmpty()
+
+    // **先把图解出来再栅**：早先这里只用 `imgCache.get()` 取已缓存的图，取不到就填
+    // null⇒ 把**灰占位块**栅进池子；真图解出后 `PageRasterFingerprint.images` 里的
+    // skia Image换了实例（该字段按实例比）⇒ 整页重栅 ⇒ 用户看到「先页面、后插图」
+    // 两跳（真机日志：raster imgs=1 连续两次 hit=false 114ms/120ms，第三次才 hit=true）。
+    //
+    // 口径复用 [warmPageImages]（同一个 `imgKeyOf`/`bgKeyOf`、同一个 cache），否则
+    // 解出来的图与 UI 首帧认的不是同一份，指纹仍不等。
+    if (!warmImagesForPreraster(host, pos, pageImages, pageBackgrounds, imgCache, bgCache)) {
+        // 有图但没备齐 ⇒ **不入池**。留空池比入一个灰块好：入灰块会被当成命中，
+        // 真图到达后仍要重画，且用户已经看到灰块闪了一下。
+        Logger.w(
+            "Orilumn.TAP",
+            "preraster skipped: images not ready ch=${pos.chapter} char=${pos.slice.charStart}",
+        )
+        return false
+    }
 
     // 与 ReaderPageCanvas 同款对齐：章节绝对 Y → 页坐标系。
     val imgs = pageImages.takeIf { it.isNotEmpty() }
@@ -198,4 +219,39 @@ internal fun prerasterPage(
         contentRevision = contentRevision,
         rasterKey = key,
     )
+}
+
+/**
+ * 预栅格前的等图（与 `ReaderScreen.warmPageImages` 同口径、同 cache）。
+ *
+ * 返回 true = 该页所有图都已进缓存、可安全栅格；false = 仍有图没备齐（调用方应放弃，
+ * 不要把灰占位块栅进池子——见 `prerasterPage` 的 KDoc）。
+ */
+private suspend fun warmImagesForPreraster(
+    host: ReaderHost,
+    pos: ReaderPos,
+    pageImages: List<orilumn.reader.engine.skia.PageImage>,
+    pageBackgrounds: List<PageBackground>,
+    imgCache: PageImageCache<DecodedImage>,
+    bgCache: PageImageCache<DecodedImage>,
+): Boolean {
+    val missImgs = pageImages.filter { imgCache.get(imgKeyOf(it)) == null }
+    val bgRefs = pageBackgrounds
+        .mapNotNull { bg -> bg.bgSrc?.takeIf { it.isNotBlank() }?.let { bg.bgChapterHref to it } }
+        .distinct()
+    val missBgs = bgRefs.filter { bgCache.get(bgKeyOf(it.first, it.second)) == null }
+    if (missImgs.isEmpty() && missBgs.isEmpty()) return true
+
+    // 并行解，与 warmPageImages 同一并发口径（逐张串行会让摄影类一页多图等几秒）。
+    kotlinx.coroutines.coroutineScope {
+        val imgDeferred = missImgs.map { img -> this.async { img to runCatching { host.loadPageImage(img) }.getOrNull() } }
+        val bgDeferred = missBgs.map { ref -> this.async { ref to runCatching { host.loadBackgroundImage(ref.first, ref.second) }.getOrNull() } }
+        for ((img, bmp) in imgDeferred.awaitAll()) if (bmp != null) imgCache.put(imgKeyOf(img), bmp)
+        for ((ref, bmp) in bgDeferred.awaitAll()) if (bmp != null) bgCache.put(bgKeyOf(ref.first, ref.second), bmp)
+    }
+
+    // 复核：解码失败/超时的图不算备齐（占位块入池就是闪烁的来源）。
+    val stillMissing = missImgs.any { imgCache.get(imgKeyOf(it)) == null } ||
+        missBgs.any { bgCache.get(bgKeyOf(it.first, it.second)) == null }
+    return !stillMissing
 }

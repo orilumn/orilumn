@@ -91,6 +91,26 @@ class FlipSession {
     }
 
     /**
+     * 无拖动的程序化起手（点按翻页 / 方向键翻页）：没有手指，所以不经 [onDrag]，
+     * 由调用方直接把方向定死并进入 [Phase.Dragging]，progress 从 **0** 起。
+     *
+     * 为什么不拿一个假位移去喂 [onDrag]：那会把 progress 写成非零，等于宣称
+     * 「用户已经拖出去这么多了」——点按翻页并没有拖。progress 必须停在 0，
+     * 随后的 [beginSettle] 才能从静止处把这一页平滑推走。
+     *
+     * 返回 false = 会话不空闲（有动画正在结算），调用方应**丢弃**这次翻页，
+     * 与 [AnchorFunnel] 的 BUSY-DROP 同一口径：不排队、不打断进行中的动画。
+     */
+    fun beginProgrammatic(direction: Int): Boolean {
+        if (direction == 0) return false
+        if (phase != Phase.Idle) return false
+        this.direction = direction
+        progress = 0f
+        phase = Phase.Dragging
+        return true
+    }
+
+    /**
      * 松手裁决。[velocityX] 是抬手瞬间的横向速度（px/s，符号与 [dx] 同向；取不到传 0）。
      *
      * [progress] 已归一（正 = 朝目标页），位移判据直接读它；速度仍需按方向归一
@@ -117,12 +137,15 @@ class FlipSession {
      * 裁决（[decide]）与进入结算分两步：调用方要先按裁决结果决定「要不要发起落位」，
      * 再推进动画——顺序反了会出现「像素已经翻过去了、数据还没换」的错位帧。
      *
+     * **这里刻意不写 [progress]**：动画器把当前 progress 当起点（`Animatable(from)`），
+     * 若此处就把它拨到终点，起终点相等 ⇒ 整段结算零位移，观感是「松手瞬移」而不是滑动。
+     * progress 只由动画器的每帧回调 [onSettleProgress] 推进。
+     *
      * 动画时长随之不同（commit 600ms / rollback 500ms，见 [settleDurationMs]）。
      */
     fun beginSettle(decision: Decision) {
         phase = Phase.Settling
         settleTarget = if (decision == Decision.COMMIT) 1f else 0f
-        progress = settleTarget
     }
 
     /** 结算途中推进（由动画器每帧调用）。到端点即回 [Phase.Idle]。 */
@@ -149,9 +172,24 @@ class FlipSession {
         settleTarget = 0f
     }
 
-    /** 结算动画时长（ms）：commit 600 / rollback 500（`CurlView.kt:196-210`）。 */
-    fun settleDurationMs(decision: Decision): Int =
-        if (decision == Decision.COMMIT) COMMIT_MS else ROLLBACK_MS
+    /**
+     * 结算动画时长（ms）：commit 600 / rollback 500（`CurlView.kt:196-210`）。
+     *
+     * 速度折算：快甩时动画按「剩余进度 ÷ 速度」短促收尾（对过快甩动过慢的观感——
+     * 甩得飞快还要匀速走满 600ms，读起来就是「释放后动画拖沓」），慢拖/点按保持默认。
+     * [fromProgress] 是 settle 起点的归一 progress（屏上真实位置），[velocityX] 是松手瞬间
+     * 横向速度（px/s，符号与位移同向，参见 [decide]）。速度取不到（程序化翻页传 0）时
+     * 走默认时长，手势手感的基准不变。
+     */
+    fun settleDurationMs(decision: Decision, fromProgress: Float = 0f, velocityX: Float = 0f, pageW: Float = 0f): Int {
+        val base = if (decision == Decision.COMMIT) COMMIT_MS else ROLLBACK_MS
+        val speed = abs(velocityX)
+        if (speed < FLING_VELOCITY) return base
+        if (pageW <= 0f) return base
+        val remaining = if (decision == Decision.COMMIT) (1f - fromProgress).coerceIn(0f, 1f) else fromProgress.coerceIn(0f, 1f)
+        // 剩余进度按页宽换成像素距离，除以速度得秒数再放大成 ms；夹在 [MIN_ANIM_MS, base]。
+        return (remaining * pageW / speed * 1000f).toInt().coerceIn(MIN_ANIM_MS, base)
+    }
 
     /** 当前是否应做落位（提前落位窗口内为 true）。progress 已归一，直接比大小。 */
     fun shouldEarlyCommit(): Boolean =
@@ -179,6 +217,9 @@ class FlipSession {
 
         /** 甩动速度阈值（px/s）：过阈即翻，与位移判据取或。 */
         const val FLING_VELOCITY = 800f
+
+        /** 结算动画时长下限（ms）：再快也不许「瞬切」级的视觉割裂。 */
+        const val MIN_ANIM_MS = 180
 
         /** 提前落位阈值（`CurlView.kt:215-221`）。 */
         const val EARLY_COMMIT_AT = 0.9f

@@ -28,6 +28,40 @@ class FlipSessionTest {
     }
 
     @Test
+    fun `程序化起手点按即翻——progress 从 0 起`() {
+        // 点按/方向键没有手指，不能拿假位移喂 onDrag：progress 必须是 0，
+        // 否则 beginSettle 的起点被抬高，点按翻页会「从中途开始滑」。
+        val s = session()
+        assertTrue(s.beginProgrammatic(1))
+        assertEquals(FlipSession.Phase.Dragging, s.phase)
+        assertEquals(1, s.direction)
+        assertEquals(0f, s.progress, 0f)
+    }
+
+    @Test
+    fun `程序化起手上上一页方向为负`() {
+        val s = session()
+        assertTrue(s.beginProgrammatic(-1))
+        assertEquals(-1, s.direction)
+        assertEquals(0f, s.progress, 0f)
+    }
+
+    @Test
+    fun `程序化起手无方向不入会话`() {
+        assertFalse(session().beginProgrammatic(0))
+    }
+
+    @Test
+    fun `程序化起手在结算中拒绝——新翻页须被丢弃而非打断动画`() {
+        val s = session()
+        assertTrue(s.beginProgrammatic(1))
+        s.beginSettle(FlipSession.Decision.COMMIT)
+        assertFalse("结算中再来一次翻页必须丢弃", s.beginProgrammatic(-1))
+        assertEquals(FlipSession.Phase.Settling, s.phase)
+        assertEquals(1, s.direction)
+    }
+
+    @Test
     fun `Settling 时 onDrag 返回 false 但不改状态`() {
         val s = session()
         s.onDrag(dx = -600f, pageW = 1000f)
@@ -128,22 +162,35 @@ class FlipSessionTest {
     }
 
     @Test
-    fun `commit 结算朝方向满位`() {
+    fun `commit 进入结算后 progress 停在拖动处——起点由动画器取走`() {
+        // 回归锁：beginSettle 曾把 progress 直接写成结算目标，于是动画器拿到
+        // Animatable(from=目标)，animateTo(同一目标) 零位移 ⇒ 松手瞬间整页瞬移。
+        // 起点必须留给 onSettleProgress 逐帧推进。
         val s = session()
         s.onDrag(dx = -600f, pageW = 1000f)
-        val d = s.decide()
-        s.beginSettle(d)
+        s.beginSettle(FlipSession.Decision.COMMIT)
         assertEquals(FlipSession.Phase.Settling, s.phase)
-        assertEquals(1f, s.progress, 1e-4f)
+        assertEquals(0.6f, s.progress, 1e-4f)
     }
 
     @Test
-    fun `rollback 结算回零`() {
+    fun `commit 结算终点是满位`() {
+        val s = session()
+        s.onDrag(dx = -600f, pageW = 1000f)
+        s.beginSettle(FlipSession.Decision.COMMIT)
+        s.onSettleProgress(1f)
+        assertEquals(FlipSession.Phase.Idle, s.phase)
+    }
+
+    @Test
+    fun `rollback 结算起点停在拖动处`() {
         val s = session()
         s.onDrag(dx = -200f, pageW = 1000f)
-        s.beginSettle(s.decide())
+        s.beginSettle(FlipSession.Decision.ROLLBACK)
         assertEquals(FlipSession.Phase.Settling, s.phase)
-        assertEquals(0f, s.progress, 1e-4f)
+        assertEquals(0.2f, s.progress, 1e-4f)
+        s.onSettleProgress(0f)
+        assertEquals(FlipSession.Phase.Idle, s.phase)
     }
 
     @Test
@@ -226,5 +273,39 @@ class FlipSessionTest {
         s.beginSettle(FlipSession.Decision.ROLLBACK)
         s.onSettleProgress(0f)
         assertEquals(FlipSession.Phase.Idle, s.phase)
+    }
+
+    @Test
+    fun `慢拖时长保持默认——速度未过甩动阈值`() {
+        val s = session()
+        // 400px/s < 800 阈值：无论拖到哪，时长都不折算。
+        assertEquals(600, s.settleDurationMs(FlipSession.Decision.COMMIT, 0.5f, 400f, 1000f))
+        assertEquals(500, s.settleDurationMs(FlipSession.Decision.ROLLBACK, 0.5f, 400f, 1000f))
+    }
+
+    @Test
+    fun `快甩时长按剩余距离折算——甩越快收得越快`() {
+        val s = session()
+        // 2000px/s 甩动、剩余半页（500px）：500/2000*1000 = 250ms。
+        val duration = s.settleDurationMs(FlipSession.Decision.COMMIT, fromProgress = 0.5f, velocityX = 2000f, pageW = 1000f)
+        assertEquals(250, duration)
+        // 更快的 4000px/s：500/4000*1000 = 125ms → 被下限 180ms 托住（不许瞬切）。
+        assertEquals(FlipSession.MIN_ANIM_MS, s.settleDurationMs(FlipSession.Decision.COMMIT, 0.5f, 4000f, 1000f))
+    }
+
+    @Test
+    fun `快甩 rollback 同样折算——回弹也跟手速`() {
+        val s = session()
+        // fromProgress=0.2、rollback 剩余 0.2 页（200px）、3000px/s：200/3000*1000 ≈ 66ms → 180ms 下限。
+        assertEquals(FlipSession.MIN_ANIM_MS, s.settleDurationMs(FlipSession.Decision.ROLLBACK, 0.2f, 3000f, 1000f))
+    }
+
+    @Test
+    fun `速度折算拿不到页宽时回退默认——程序化翻页不意外变速`() {
+        val s = session()
+        // pageW=0（点按翻页不传页面尺寸）：即使速度虚构为快，也走默认 600ms。
+        assertEquals(600, s.settleDurationMs(FlipSession.Decision.COMMIT, 0.5f, 2000f, 0f))
+        // 速度取不到（程序化翻页传 0）：默认时长。
+        assertEquals(600, s.settleDurationMs(FlipSession.Decision.COMMIT))
     }
 }

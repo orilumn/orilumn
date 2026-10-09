@@ -168,6 +168,36 @@ class TaskScheduler(
         }
     }
 
+    /**
+     * 栅格抢占：同 [cancelLowerThan]，但**放行当前章的 ±1 页预排**（`pg:` 且处于两个 d=1 档）。
+     *
+     * 为什么不能用 [cancelLowerThan] 一刀切：三页截图窗口（当前页 ±1）的像素源正是这两条 ±1
+     * 装配任务（`scheduleWindowPrefill` 里 `assemble=true` 的那两步）。栅格未命中时把它们一并
+     * 取消，等于**反手掐掉自己下一步要用的 ±1**——`pageCache` 永远热不起来，于是每次翻页落位都要
+     * 走 `ensurePageRangeShaped` 同步重排（真机 150–300ms），且栅格永远 miss，形成冷稳态自锁。
+     * 与总则「截图跟在 ±1 页分页完成后」一致：±1 是栅格的前置，不是可牺牲的后台。
+     *
+     * 其余（`PRIO_PAGE_REST` 的整章余量、edge 整章、B2 等）照常让路——它们才是真正会拖慢
+     * 前台栅格的活。
+     */
+    fun cancelForRaster(threshold: Int) {
+        scope.launch {
+            mutex.withLock {
+                queue.removeAll { it.priority > threshold && !isPlusMinusOnePrefill(it.key, it.priority) }
+                for ((key, prio) in runningPrio.toMap()) {
+                    if (prio > threshold && !isPlusMinusOnePrefill(key, prio)) {
+                        running[key]?.cancel()
+                    }
+                }
+                syncKeysLocked()
+            }
+        }
+    }
+
+    /** `pg:<chapter>:<page>` 且处于两个 d=1 档（方向侧 / 反侧）—— 三页截图窗口的像素源。 */
+    private fun isPlusMinusOnePrefill(key: String, priority: Int): Boolean =
+        key.startsWith("pg:") && priority <= PRIO_PAGE_PREV
+
     suspend fun pendingCount(): Int = mutex.withLock { queue.size }
     suspend fun runningCount(): Int = mutex.withLock { running.size }
 

@@ -17,6 +17,7 @@ import orilumn.reader.engine.html.ChapterPreprocessor
 import orilumn.reader.engine.html.HtmlTreeConverter
 import orilumn.reader.engine.html.MarkupElement
 import orilumn.reader.engine.html.ParsedChapter
+import orilumn.reader.engine.paging.BookLayout
 import orilumn.reader.engine.paging.PageSlice
 import orilumn.reader.engine.paging.Paginator
 import orilumn.reader.engine.skia.DrawLine
@@ -1088,6 +1089,9 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
             // 翻页线程上即崩（开发期暴露）；重排路径各自 runCatching 记 e 后丢弃本轮。
             throw it
         }
+        // 三页截图窗口：版式已就绪（小章**全章排完** / 磁盘命中目标窗）→ 立即让用户层补栅 ±1。
+        // 大章磁盘未命中已在 [startAnchorStream] 处 `return`（临时表路径自带逐页信号），不到这里。
+        notifyPrefillReady(unit.chapterIndex)
     }
 
     /** Chapters at or below this many blocks are laid out fully (small chapters are fast enough and a
@@ -1853,9 +1857,16 @@ private fun notifyFlip() {
  *
  * 平板核多、槽位只占 2/8，同一缺陷不显形，但**两端同源**，故钩子进共享排版层。
  * 幂等可重入：被抢占的后台活按状态表/代际门自行重启（§3.6：低优可被无限推迟，不加 aging）。
+ *
+ * **但必须放行当前章的 ±1 页预排**（[TaskScheduler.cancelForRaster]，不是裸 [notifyFlip]）：
+ * ±1 装配正是三页截图窗口（当前页 ±1）的像素源，也是下一次翻页落位能命中
+ * `pageCache` 快路径（`ensurePageRangeShaped` pagecache-hit）的前提。裸砍等于「反手掐掉
+ * 自己下一步要用的 ±1」——真机（vivo PA2353）实测：连读翻页时每次落位都走同步重排
+ * `shape=115–176ms`、`target-ready 137–308ms`，预栅格一次都不触发，形成冷稳态自锁；
+ * 放行后同一序列 target-ready 回落到 32–40ms，预栅格正常命中。参见 `Preraster.kt`。
  */
 fun onForegroundRaster() {
-    notifyFlip()
+    scheduler.cancelForRaster(TaskScheduler.PRIO_FLIP)
 }
 
 /**
@@ -2171,12 +2182,14 @@ private fun scheduleWindowPrefill(unit: ChapterUnit, targetPage: Int, dir: Int) 
             is NeighborItem.Page -> steps.add(RollingStep(
                 key = "pg:$chapterIdx:${item.index}",
                 priority = item.tier,
-                // R17-proven shape: only the 第2档 side assembles (fits the flip cadence); the
-                // other sides stay L2-warmed. Doubling assembly per landing cost more than it covered.
+                // 三页截图窗口（当前页 ±1）需要**两侧**邻页都能被预栅格读取：d=1 的两侧
+                //（第2档方向侧 + 第3档反侧）都装配 product 进 `pageCache`。早先只装方向侧
+                //（注释：翻页节奏只吃一页），但预栅格要补满 ±1，反侧不装配则永远只能实时栅格。
                 body = {
                     prefillPageTask(
                         chapterIdx, item.index, targetPage,
-                        assemble = item.tier == TaskScheduler.PRIO_PAGE_NEXT,
+                        assemble = item.tier == TaskScheduler.PRIO_PAGE_NEXT ||
+                            item.tier == TaskScheduler.PRIO_PAGE_PREV,
                     )
                 },
             ))
@@ -2335,7 +2348,12 @@ private suspend fun prefillPageTask(chapterIdx: Int, page: Int, anchor: Int, ass
             true
         }
     }
-    if (stored) Logger.w(logTag, "win-prefill ch=$chapterIdx page=$page cached")
+    if (stored) {
+        Logger.w(logTag, "win-prefill ch=$chapterIdx page=$page cached")
+        // ±1 页分页（装配）完成 → 抛信号让用户层立即补栅。三页窗口的两侧都经此路径（assemble 为真）。
+        // 本函数跑在调度器线程，`onPrefillReadyListener` 会把执行切回 UI 线程（见 TabletReaderHost）。
+        notifyPrefillReady(chapterIdx)
+    }
 }
 
 /** P2.1: merge warmed blocks into the published L2 snapshot (copy-on-write replace). */
@@ -3507,22 +3525,66 @@ private fun finishCanonicalBackground(
      * (temporary/incremental layouts under the legacy StaticLayout engine — Q1-b accepts that interim
      * degradation for anchor-temp pages, canonical pages are always liftable).
      */
-    fun pageLines(chapter: Int, slice: PageSlice): List<DrawLine>? {
-        val unit = unitAt(chapter) ?: return null
-        if (slice.kind != PageSlice.Kind.TEXT || slice.firstLine < 0) return null
-        val layout = (unit.tempRenderLayout ?: unit.layout) as? LayoutReadback ?: run {
+    /**
+     * 预栅格读「非当前页」的绘制源（**只读**，不改指针、不改窗口）。
+     *
+     * 三页截图窗口（当前页 ±1）要求 [pageLines]/[pageImages]/[pageBackgrounds] 能读 ±1 页：
+     *  - **临时表**：每页各有自己的 `TempPage.layout`，行号是**该页局部序**（`slice.firstLine=0`）。
+     *    早先无条件读 `tempRenderLayout`（当前页）⇒ 拿邻居 slice 去读会读到**当前页的行**（栅错页）。
+     *  - **磁盘表**：窗口内直用 `unit.layout`；窗口外（增量 1 页窗）用 `unit.pageCache` 里已装配的
+     *    product（`prefillPageTask` 产物，行号在 product 内自洽）。
+     *
+     * 解析由 [peekAdjacentPage]（IO 线程）写入 [peekedReadback]；本方法在 UI 线程紧随读取——
+     * 避开 `pageCache`/临时页列表的跨线程裸读（它们只在排版锁/临时锁内变更）。
+     */
+    private class PeekedReadback(
+        val chapter: Int,
+        val charStart: Int,
+        val layout: BookLayout,
+        val slice: PageSlice,
+        /** 临时表会话身份（磁盘表路径为 null）：换会话即失效，避免旧会话页冒充当前页。 */
+        val ipRef: InProgressPagination?,
+        /** 磁盘表参数哈希（临时表路径不参与比较）：换版式/重排即失效。 */
+        val paramHash: Long,
+    )
+
+    @Volatile
+    private var peekedReadback: PeekedReadback? = null
+
+    /** 一页的绘制回读源（版式 + 该版式内有效的行区间）。非当前页经 [peekedReadback] 命中。 */
+    private fun readbackFor(unit: ChapterUnit, slice: PageSlice): Pair<LayoutReadback, PageSlice>? {
+        val ip = unit.inProgress
+        val pk = peekedReadback
+        // 临时表按会话身份判新鲜（不依赖 unit.paramHash——它由 prepare/bind 分支写，未必等于 ip）；
+        // 磁盘表按参数哈希判新鲜（inProgress 均为 null，用哈希挡住重排后的旧产物）。
+        val fresh = pk != null && pk.chapter == unit.chapterIndex && pk.charStart == slice.charStart &&
+            if (ip != null) pk.ipRef === ip
+            else pk.ipRef == null && pk.paramHash == unit.paramHash
+        if (fresh) {
+            val rb = pk!!.layout as? LayoutReadback ?: return null
+            return rb to pk.slice
+        }
+        val rb = (unit.tempRenderLayout ?: unit.layout) as? LayoutReadback ?: run {
             // 非 Readback 的 drawable（legacy/增量布局）静默空白：Q1-b interim 降级，记 w 可见。
-            Logger.w(logTag, "non-Readback layout ch=$chapter kind=${slice.kind}, blank content")
+            Logger.w(logTag, "non-Readback layout ch=${unit.chapterIndex} kind=${slice.kind}, blank content")
             return null
         }
+        return rb to slice
+    }
+
+    fun pageLines(chapter: Int, slice: PageSlice): List<DrawLine>? {
+        val unit = unitAt(chapter) ?: return null
+        if (slice.kind != PageSlice.Kind.TEXT) return null
+        val (layout, s) = readbackFor(unit, slice) ?: return null
+        if (s.firstLine < 0) return null
         val window = layout.skiaLineWindow() ?: return null
-        val out = ArrayList<DrawLine>(slice.lastLineExclusive - slice.firstLine)
-        for (i in slice.firstLine until slice.lastLineExclusive) {
+        val out = ArrayList<DrawLine>(s.lastLineExclusive - s.firstLine)
+        for (i in s.firstLine until s.lastLineExclusive) {
             window[i]?.let { out.add(it) }
         }
         // 表格单元格行（表行不产出行窗行，展开附在行下标上；纯表页只有它们）。
         // 与行窗合并后按 yTop 稳定排序（多列表格同行多列同 yTop；map 迭代序不定，见 gutenberg-11 1629/1657 错位）。
-        out += layout.tableCellLines(slice.firstLine, slice.lastLineExclusive)
+        out += layout.tableCellLines(s.firstLine, s.lastLineExclusive)
         if (out.isEmpty()) return null
         out.sortBy { it.yTop }
         return out
@@ -3534,13 +3596,10 @@ private fun finishCanonicalBackground(
      */
     fun pageImages(chapter: Int, slice: PageSlice): List<orilumn.reader.engine.skia.PageImage>? {
         val unit = unitAt(chapter) ?: return null
-        if (slice.kind != PageSlice.Kind.TEXT || slice.firstLine < 0) return null
-        val layout = (unit.tempRenderLayout ?: unit.layout) as? LayoutReadback ?: run {
-            // 非 Readback 的 drawable（legacy/增量布局）静默空白：Q1-b interim 降级，记 w 可见。
-            Logger.w(logTag, "non-Readback layout ch=$chapter kind=${slice.kind}, blank content")
-            return null
-        }
-        return layout.pageImages(slice.firstLine, slice.lastLineExclusive).ifEmpty { null }
+        if (slice.kind != PageSlice.Kind.TEXT) return null
+        val (layout, s) = readbackFor(unit, slice) ?: return null
+        if (s.firstLine < 0) return null
+        return layout.pageImages(s.firstLine, s.lastLineExclusive).ifEmpty { null }
     }
 
     /**
@@ -3549,13 +3608,10 @@ private fun finishCanonicalBackground(
      */
     fun pageBackgrounds(chapter: Int, slice: PageSlice): List<orilumn.reader.engine.skia.PageBackground>? {
         val unit = unitAt(chapter) ?: return null
-        if (slice.kind != PageSlice.Kind.TEXT || slice.firstLine < 0) return null
-        val layout = (unit.tempRenderLayout ?: unit.layout) as? LayoutReadback ?: run {
-            // 非 Readback 的 drawable（legacy/增量布局）静默空白：Q1-b interim 降级，记 w 可见。
-            Logger.w(logTag, "non-Readback layout ch=$chapter kind=${slice.kind}, blank content")
-            return null
-        }
-        return layout.pageBackgrounds(slice.firstLine, slice.lastLineExclusive).ifEmpty { null }
+        if (slice.kind != PageSlice.Kind.TEXT) return null
+        val (layout, s) = readbackFor(unit, slice) ?: return null
+        if (s.firstLine < 0) return null
+        return layout.pageBackgrounds(s.firstLine, s.lastLineExclusive).ifEmpty { null }
     }
 
     /** 按 [PageImage] 取原字节（直解用，不经 skia 缩放/PNG 往返）；缺失回 null。 */
@@ -3869,6 +3925,72 @@ private fun finishCanonicalBackground(
             // e.g. open-prewarm still in flight) — navigation never cancels in-flight work (S7).
             requestWholeBookRelayout()
         }
+    }
+
+    /**
+     * **只读**地回答「相邻页是哪个」：不推进引擎指针、不`notifyFlip()`抢占。
+     *
+     * 供预栅格用（`ReaderHost.peekAdjacent`）。`findAdjacentPage` 有两处副作用，
+     * 投机活都不能承受：
+     *  - `flipDir = direction`：改全局翻页方向记录（§3.2），会把后台预排的排序带偏；
+     *  - `notifyFlip()`：`cancelLowerThan(PRIO_FLIP)` **砍掉所有后台预排**——预栅格
+     *    每触发一次就把预排打断一次，于是「预排→预栅格」互相打断，两边都做不成。
+     *
+     * 指针推进在 `navigateAdjacentPage`（tempNav），预栅格同样不能碰——真机症状
+     * 「翻页完成后又跳了一页」（预栅格调 adjacent 把指针多推一格）。
+     *
+     * 只读路径：从当前窗口直接读相邻页，不做任何推进。读不到（窗口未成形）返回 null，
+     * 调用方跳过即可——预栅格失败只影响手感（退化为实时栅格），不影响正确性。
+     */
+    suspend fun peekAdjacentPage(chapter: Int, slice: PageSlice, direction: Int): Pair<Int, PageSlice>? {
+        val unit = unitAt(chapter) ?: return null
+        val ip = unit.inProgress
+        if (ip != null) {
+            // 增量（临时表）窗口：阅读序为 `Bwd(末) … Bwd(0), Fwd(0), Fwd(1) …`（见 [tempNav] /
+            // [TempNavigation.tempNavBackwardPointerStep]）。方向由最近翻页决定：direction>0 = 后一页。
+            // 取页在 [tempStateLock] 内做（列表随临时预排增删）；解析出的邻页绘制源一并落入
+            // [peekedReadback]，供 UI 线程 [pageLines] 读取——临时表每页各有自己的 layout。
+            val neighbour = tempStateLock.withLock {
+                val f = ip.forwardPages
+                val b = ip.backwardPages
+                if (direction > 0) {
+                    if (ip.curIsForward) f.getOrNull(ip.curIndex + 1)
+                    else if (ip.curIndex > 0) b.getOrNull(ip.curIndex - 1)
+                    else f.getOrNull(0)
+                } else {
+                    if (ip.curIsForward) {
+                        if (ip.curIndex > 0) f.getOrNull(ip.curIndex - 1) else b.getOrNull(0)
+                    } else {
+                        b.getOrNull(ip.curIndex + 1)
+                    }
+                }
+            } ?: return null
+            peekedReadback = PeekedReadback(
+                chapter, neighbour.slice.charStart, neighbour.layout, neighbour.slice, ip, ip.paramHash,
+            )
+            return chapter to neighbour.slice
+        }
+        // 磁盘表路径：按 char 定位后读 ±1。窗口内直用 unit.layout；窗口外（增量 1 页窗）
+        // 查已装配的 pageCache——它只在排版锁内变更，故读取也在锁内（本方法在 IO 线程，不卡 UI）。
+        val pages = unit.pageSlices
+        if (pages.isEmpty()) return null
+        val idx = pages.indexOfFirst { it.charStart == slice.charStart }
+        if (idx < 0) return null
+        val nIdx = idx + direction
+        val neighbour = pages.getOrNull(nIdx) ?: return null
+        val resolved: Pair<BookLayout, PageSlice> = if (neighbour.firstLine >= 0) {
+            (unit.layout ?: return null) to neighbour
+        } else {
+            layoutMutex.withLock {
+                val cached = unit.pageCache[nIdx]?.takeIf { it.paramHash == unit.paramHash } ?: return@withLock null
+                val cs = cached.slices.getOrNull(nIdx)?.takeIf { it.firstLine >= 0 } ?: return@withLock null
+                cached.layout to cs
+            } ?: return null
+        }
+        peekedReadback = PeekedReadback(
+            chapter, neighbour.charStart, resolved.first, resolved.second, null, unit.paramHash,
+        )
+        return chapter to neighbour
     }
 
     /** The actual adjacent-page navigation (direction already tracked by [findAdjacentPage] — see P12). */

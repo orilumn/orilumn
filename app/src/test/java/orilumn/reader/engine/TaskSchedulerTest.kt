@@ -88,6 +88,48 @@ class TaskSchedulerTest {
         }
     }
 
+    /**
+     * 栅格抢占（`onForegroundRaster` → [TaskScheduler.cancelForRaster]）必须**放行当前章的 ±1 页预排**：
+     * 这两条 `pg:` d=1 任务是三页截图窗口（当前页 ±1）的装配源，也是下一次落位命中 `pageCache`
+     * 快路径的前提。真实 bug：栅格未命中时裸 `cancelLowerThan` 把它们一并砍掉，`pageCache` 永热不起来，
+     * 每次翻页落位都退化成 `ensurePageRangeShaped` 同步重排（真机 137–308ms）且栅格永 miss。
+     * 其余档（第 4 档 `PRIO_PAGE_REST`、章外 edge 整章、B2）照常被抢占。
+     */
+    @Test
+    fun `cancelForRaster spares the plus-minus-one page prefill only`() = runBlocking {
+        val (sched, scope) = newScheduler(1)
+        try {
+            val gate = CompletableDeferred<Unit>()
+            val ran = Collections.synchronizedList(ArrayList<String>())
+            // Occupy the single slot so everything below queues up.
+            sched.submit(TaskScheduler.Task("gate", 0) { gate.await() })
+            withTimeout(5_000) { while (sched.runningCount() == 0) delay(10) }
+
+            // ±1 page prefill (the two d=1 tiers) — must survive.
+            sched.submit(TaskScheduler.Task("pg:8:16", TaskScheduler.PRIO_PAGE_NEXT) { ran.add("dir-side") })
+            sched.submit(TaskScheduler.Task("pg:8:14", TaskScheduler.PRIO_PAGE_PREV) { ran.add("other-side") })
+            // Everything else — must be preempted.
+            sched.submit(TaskScheduler.Task("pg:8:17", TaskScheduler.PRIO_PAGE_REST) { ran.add("rest") })
+            sched.submit(TaskScheduler.Task("edge:9", TaskScheduler.PRIO_EDGE_FORWARD) { ran.add("edge") })
+            sched.submit(TaskScheduler.Task("b2:11", TaskScheduler.PRIO_B2_CHAPTER) { ran.add("b2") })
+            delay(200) // let all five queue behind the gate
+
+            sched.cancelForRaster(TaskScheduler.PRIO_FLIP)
+            delay(300) // let the async preemption install
+
+            gate.complete(Unit)
+            withTimeout(10_000) { while (ran.size < 2) delay(10) }
+            delay(300) // give any leaked task time to (not) run
+            assertEquals(
+                "only the two d=1 page-prefill tiers may survive the raster preemption",
+                listOf("dir-side", "other-side"),
+                ran,
+            )
+        } finally {
+            scope.cancel()
+        }
+    }
+
     @Test
     fun `concurrency never exceeds slots`() = runBlocking {
         val (sched, scope) = newScheduler(2)

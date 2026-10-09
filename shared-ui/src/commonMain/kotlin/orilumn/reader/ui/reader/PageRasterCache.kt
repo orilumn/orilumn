@@ -1,5 +1,7 @@
 package orilumn.reader.ui.reader
 
+import orilumn.reader.collections.SyncLock
+import orilumn.reader.collections.withLock
 import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.engine.skia.PageBackground
 
@@ -62,7 +64,12 @@ data class PageRasterFingerprint(
  *   桌面侧 skia `Image` 有 finalizer，回调里 `close()` 只是更干净。
  *
  * 为什么不复用 `PageImageCache`：那个是给插图/背景图用的纯值 LRU，没有淘汰回调语义；
- * 页位图的回收是平台义务，两者混用会把「像素必须显式回收」这条约束藏掉。
+ * 页位图的回收是平台义务，两者混用会把「必须显式回收」这条约束藏掉。
+ *
+ * 线程（P0c）：预栅格移到后台线程后，**同一池**会被后台预栅格与 UI 绘制并发读写，
+ * 故本类所有入口都过 [SyncLock]（只护 `map`/`bytes` 这一小段，命中路径也是这笔开销）。
+ * [onEvict] 在锁内调用，实现方**不得**回调本类（会自锁），且应把真正的释放推迟到
+ * 平台主线程——淘汰可能发生在后台线程，`recycle()` 正在绘制的那张会崩（Android actual 已推迟）。
  */
 class PageRasterCache<T : Any>(
     private val maxBytes: Long,
@@ -71,22 +78,26 @@ class PageRasterCache<T : Any>(
 ) {
     private class Entry<T : Any>(val value: T, val fingerprint: PageRasterFingerprint, val bytes: Long)
 
+    private val lock = SyncLock()
     private val map = LinkedHashMap<String, Entry<T>>(16, 0.75f, true)
     private var bytes = 0L
 
     /** 命中返回位图；键或指纹不符返回 null（调用方重画并 [put]）。 */
-    fun get(key: PageRasterKey, fingerprint: PageRasterFingerprint): T? =
+    fun get(key: PageRasterKey, fingerprint: PageRasterFingerprint): T? = lock.withLock {
         map[key.id]?.takeIf { it.fingerprint == fingerprint }?.value
+    }
 
     fun put(key: PageRasterKey, fingerprint: PageRasterFingerprint, value: T) {
-        val size = sizeOf(value).coerceAtLeast(1L)
-        val prev = map.put(key.id, Entry(value, fingerprint, size))
-        if (prev != null) {
-            bytes -= prev.bytes
-            if (prev.value !== value) onEvict(prev.value)
+        lock.withLock {
+            val size = sizeOf(value).coerceAtLeast(1L)
+            val prev = map.put(key.id, Entry(value, fingerprint, size))
+            if (prev != null) {
+                bytes -= prev.bytes
+                if (prev.value !== value) onEvict(prev.value)
+            }
+            bytes += size
+            evict()
         }
-        bytes += size
-        evict()
     }
 
     private fun evict() {
@@ -101,11 +112,13 @@ class PageRasterCache<T : Any>(
 
     /** 清空（宿主换代/换书时调用，逐页回收）。 */
     fun clear() {
-        for (e in map.values) onEvict(e.value)
-        map.clear()
-        bytes = 0L
+        lock.withLock {
+            for (e in map.values) onEvict(e.value)
+            map.clear()
+            bytes = 0L
+        }
     }
 
     /** 当前持有页数 + 字节数（诊断/测试用）。 */
-    fun stats(): Pair<Int, Long> = map.size to bytes
+    fun stats(): Pair<Int, Long> = lock.withLock { map.size to bytes }
 }

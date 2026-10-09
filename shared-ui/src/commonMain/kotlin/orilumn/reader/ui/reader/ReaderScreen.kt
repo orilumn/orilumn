@@ -228,7 +228,17 @@ fun ReaderScreen(
     // imgCache/bgCache（它们随宿主换代重建）。写入走 SideEffect：组合体里直接
     // 赋值是副作用，每次重组都写。
     val warmByRef = rememberUpdatedState<suspend (ReaderPos) -> Unit> { pos -> warmPageImages(pos) }
-    SideEffect { anchorFunnel.beforeCommit = { pos -> warmByRef.value(pos) } }
+    // 「提交前把**整页位图**也备好」的实现，在下方（拿到渲染器/几何的那一段）按当前组合重建。
+    // 声明在此、实现留在后：局部函数不能前向引用，而渲染器 `remember` 在 `pos != null` 分支里。
+    // 读经 State，避免捕获首次组合的旧值；`pos == null`（封面）时保持空实现。
+    val rasterByRef = remember { mutableStateOf<suspend (ReaderPos) -> Unit>({ }) }
+    SideEffect {
+        anchorFunnel.beforeCommit = { pos ->
+            // 先等图（缺图必等，灰占位不可入场），再等整页位图（翻页动画/首帧直接复用这张）。
+            warmByRef.value(pos)
+            rasterByRef.value(pos)
+        }
+    }
     // 跨页位图缓存（随宿主换代重建：换书即新池；同书内翻页/改参常驻，回访页首帧即有图）。
     // 键是稳定身份（与几何无关），容量按字节 LRU（大截图多的书自动腾退）。
     val currentOnBack by rememberUpdatedState(onBack)
@@ -980,6 +990,27 @@ fun ReaderScreen(
                 imgCache = imgCache,
                 bgCache = bgCache,
             )
+            // 上面 `beforeCommit` 的「整页位图备齐」实现：与 PrerasterOnPrefill 同口径
+            //（同一渲染器、同一缓存、同一条取数路径），只是针对**本次落位目标页**。
+            // `prerasterPage` 已把重画切到 Default 线程，所以这里 await 不冻 UI；等它的结果是
+            // 提交即命中——翻页动画不再在 UI 线程同步栅格（0.5–0.9s 冻帧的来源）。
+            val rasterPageNow: suspend (ReaderPos) -> Unit = { p ->
+                prerasterPage(
+                    host = currentHost,
+                    pos = p,
+                    renderer = pageRenderer,
+                    contentLeft = contentLeft,
+                    contentTop = contentTop,
+                    contentRight = contentRight,
+                    contentBottom = contentBottom,
+                    pageBg = profile.bgColor,
+                    inkColor = profile.fgColor,
+                    contentRevision = contentRevision,
+                    imgCache = imgCache,
+                    bgCache = bgCache,
+                )
+            }
+            SideEffect { rasterByRef.value = rasterPageNow }
             // 画布本体（当前页 / 目标页同形，只是位移不同）。
             val PageCanvasFun: @Composable (PageContent?) -> Unit = { content ->
                 ReaderPageCanvas(

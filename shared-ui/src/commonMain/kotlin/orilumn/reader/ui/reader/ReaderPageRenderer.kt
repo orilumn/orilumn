@@ -86,11 +86,12 @@ interface ReaderPageRenderer {
      * 它要一个 Compose `Canvas` 才能画，而预栅格发生在**没有画布**的后台时刻。
      * 本方法自己开离屏 surface 画完整页，产物按 [rasterKey] 入同一个 store。
      *
-     * ## 线程：**限 UI/渲染线程**
+     * ## 线程：可在后台线程调用（P0c）
      *
-     * 与 [drawLines] 共用 store（及其 surface），所以必须在 UI 线程调用。调用方负责
-     * 择时（如预排完成回调、落定后的空闲帧），不得从引擎后台线程直接调。
-     * 引擎侧只抛「该页可栅格」的信号（见 `ReaderHost.onPrefillReady`），执行在此层。
+     * 与 [drawLines] 共用 store（及其 surface），但 `PageRasterStore` 的重画路径已由内部
+     * `renderLock` 串行、缓存由自身锁保护，所以实现方**可以（也应当）**在后台线程调用：
+     * 单页栅格 p50 143ms、高负载 0.5–0.9s，计入 UI 帧预算就是冻帧。唯一硬约束：同一 store
+     * 的重画路径串行（由 store 保证），命中路径无锁、不受后台预栅格影响。
      *
      * @return true = 已入池（后续 [drawLines] 会命中）；false = 未入池（缺 key/栅格失败），
      *   调用方应记日志：预栅格失败只影响手感（退化为实时栅格），不影响正确性。

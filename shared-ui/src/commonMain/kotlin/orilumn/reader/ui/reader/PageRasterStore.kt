@@ -2,6 +2,8 @@ package orilumn.reader.ui.reader
 
 import org.jetbrains.skia.Image as SkiaImage
 import org.jetbrains.skia.Surface as SkiaSurface
+import orilumn.reader.collections.SyncLock
+import orilumn.reader.collections.withLock
 import orilumn.reader.engine.skia.DecodedImage
 import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.engine.skia.LineWindowDrawer
@@ -61,8 +63,10 @@ class PageRasterResult<T : Any>(
  * Android 传「skia Image → `android.graphics.Bitmap`」的零编码像素桥。
  * 它**接管传入 snapshot 的所有权**（恒等时返回的就是 snapshot 本身），不得提前 close。
  *
- * 线程：**限 UI/渲染线程**。后台预栅格（翻页动画要的那条）在验证线程安全后另开一条路，
- * 不在本类里开——后台与 UI 共用一个 raster surface 必然出事。
+ * 线程（P0c）：预栅格已移到后台线程（见 `Preraster.kt`），与 UI 绘制**共用同一个 store**。
+ * 分工是「命中走缓存自己的锁、重画进本类的 [renderLock]」——命中路径完全绕开 surface，
+ * 所以翻页动画里的每帧命中不会被后台预栅格挡住；只有真正重画才在 surface 上串行。
+ * [PageRasterCache]、画布与 `surface/width/height` 均受锁保护，可被 UI/后台两条线程交替调用。
  */
 class PageRasterStore<T : Any>(
     private val maxBytes: Long,
@@ -72,6 +76,7 @@ class PageRasterStore<T : Any>(
     drawer: LineWindowDrawer = LineWindowDrawer(),
 ) {
     private val drawer = drawer
+    private val renderLock = SyncLock()
     private var surface: SkiaSurface? = null
     private var width = -1
     private var height = -1
@@ -86,46 +91,53 @@ class PageRasterStore<T : Any>(
      *   线程压住。命中路径**不调**（每帧命中是常态，调了等于每帧都抢）。
      */
     fun obtain(key: PageRasterKey?, spec: PageRasterSpec, onMiss: (() -> Unit)? = null): PageRasterResult<T>? {
-        val w = spec.widthPx
-        val h = spec.heightPx
-        if (surface == null || w != width || h != height) {
-            width = w
-            height = h
-            surface?.close()
-            surface = SkiaSurface.makeRasterN32Premul(w, h)
-            cache.clear() // 视口变了：旧尺寸页整池回收
-        }
         val fingerprint = spec.fingerprint()
+        // 命中快路径：不碰 surface，不抢 renderLock（翻页每帧命中是常态，不能排队）。
         if (key != null) {
             cache.get(key, fingerprint)?.let { return PageRasterResult(it, true, 0L) }
         }
         onMiss?.invoke() // 第 1 档渲染开始 —— 让后台预排让路（一次性，仅未命中）
-        val s = surface ?: return null
-        val t0 = System.nanoTime()
-        drawPageContent(
-            canvas = s.canvas,
-            contentLeft = spec.contentLeft,
-            contentRectLeft = spec.contentRectLeft,
-            contentRectTop = spec.contentRectTop,
-            lines = spec.lines,
-            backgrounds = spec.backgrounds,
-            bgImages = spec.bgImages,
-            images = spec.images,
-            pageBg = spec.pageBg,
-            w = w,
-            h = h,
-            drawer = drawer,
-        )
-        // encode 拿走 snapshot 的所有权：桌面恒等（零拷贝，直接持 skia Image），Android 转 Bitmap。
-        // 所以只有 encode 失败时才在这里回收——成功路径回收等于把返回给调用方的页图提前释放。
-        val snapshot = s.makeImageSnapshot()
-        val value = encode(snapshot)
-        if (value == null) {
-            snapshot.close()
-            return null
+        return renderLock.withLock {
+            // 双检：进锁前另一条线程可能刚画好同一页（预栅格与绘制同时要这张）。
+            if (key != null) {
+                cache.get(key, fingerprint)?.let { return@withLock PageRasterResult(it, true, 0L) }
+            }
+            val w = spec.widthPx
+            val h = spec.heightPx
+            if (surface == null || w != width || h != height) {
+                width = w
+                height = h
+                surface?.close()
+                surface = SkiaSurface.makeRasterN32Premul(w, h)
+                cache.clear() // 视口变了：旧尺寸页整池回收
+            }
+            val s = surface ?: return@withLock null
+            val t0 = System.nanoTime()
+            drawPageContent(
+                canvas = s.canvas,
+                contentLeft = spec.contentLeft,
+                contentRectLeft = spec.contentRectLeft,
+                contentRectTop = spec.contentRectTop,
+                lines = spec.lines,
+                backgrounds = spec.backgrounds,
+                bgImages = spec.bgImages,
+                images = spec.images,
+                pageBg = spec.pageBg,
+                w = w,
+                h = h,
+                drawer = drawer,
+            )
+            // encode 拿走 snapshot 的所有权：桌面恒等（零拷贝，直接持 skia Image），Android 转 Bitmap。
+            // 所以只有 encode 失败时才在这里回收——成功路径回收等于把返回给调用方的页图提前释放。
+            val snapshot = s.makeImageSnapshot()
+            val value = encode(snapshot)
+            if (value == null) {
+                snapshot.close()
+                return@withLock null
+            }
+            if (key != null) cache.put(key, fingerprint, value)
+            PageRasterResult(value, false, (System.nanoTime() - t0) / 1_000_000)
         }
-        if (key != null) cache.put(key, fingerprint, value)
-        return PageRasterResult(value, false, (System.nanoTime() - t0) / 1_000_000)
     }
 
     /** 池状态（诊断/测试用）：页数 + 字节数。 */

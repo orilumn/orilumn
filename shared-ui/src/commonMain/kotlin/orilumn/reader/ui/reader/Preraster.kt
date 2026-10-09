@@ -10,8 +10,10 @@ import orilumn.reader.engine.skia.DecodedImage
 import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.engine.skia.PageBackground
 import orilumn.reader.engine.skia.PageImage
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.withContext
 import orilumn.reader.io.Logger
 
 /**
@@ -94,10 +96,16 @@ fun PrerasterOnPrefill(
         // 「条件不满足就地退出」的守卫。
         suspend fun rasterWindow(chapter: Int) {
             // 同一时刻只允许窗口内一轮预栅在跑（两个信号同时到达时不排队——这是去重不是优先级判断）。
-            if (prerasterBusy.value) return
+            if (prerasterBusy.value) {
+                Logger.d("Orilumn.TAP", "preraster window skip: busy ch=$chapter")
+                return
+            }
             val anchor = posNow() ?: return
             // 只处理当前章：跨章预排由第 2/3 档的整章兜底另行处理。
-            if (anchor.chapter != chapter) return
+            if (anchor.chapter != chapter) {
+                Logger.d("Orilumn.TAP", "preraster window skip: anchor ch=${anchor.chapter} != $chapter")
+                return
+            }
             // 方向 0 = 无记录（开书/跳转/调参），此时前向更可能被用，语义等同向前（§3.2）。
             val effDir = if (dirNow() == 0) 1 else dirNow()
             prerasterBusy.value = true
@@ -106,7 +114,11 @@ fun PrerasterOnPrefill(
                     // **必须用只读的 peekAdjacent**：`adjacent` 是有副作用的真导航（引擎 tempNav
                     // 推进指针），预栅格调它会在无手势时把指针多推一格 ⇒ 真机症状
                     // 「翻页完成后又跳了一页」（19:56:25日志）。
-                    val target = runCatching { hostNow.peekAdjacent(anchor, d) }.getOrNull() ?: continue
+                    val target = runCatching { hostNow.peekAdjacent(anchor, d) }.getOrNull()
+                    if (target == null) {
+                        Logger.d("Orilumn.TAP", "preraster window: peek d=$d ch=$chapter → null")
+                        continue
+                    }
                     prerasterPage(
                         host = hostNow,
                         pos = target,
@@ -126,13 +138,18 @@ fun PrerasterOnPrefill(
                 prerasterBusy.value = false
             }
         }
-        // 引擎抛信号 → 执行栅格（本协程在 UI 线程，与 drawLines 共用 surface 故安全）。
+        // 引擎抛信号 → 执行栅格。取数在本协程（前台），整页重画由 `prerasterPage` 切到
+        // Default；store 的 surface 已加锁，命中路径不碰锁（见 `PageRasterStore` 线程段）。
         hostNow.observePrefillReady { chapter, _ -> rasterWindow(chapter) }
     }
 }
 
 /**
- * 把一页栅进 [PageRasterStore]（UI 线程，与 `drawLines` 共用 store/surface）。
+ * 把一页栅进 [PageRasterStore]（与 `drawLines` 共用 store/surface）。
+ *
+ * 取数与建 key 在前台上下文（读 `ReaderHost`/快照），**整页重画切到 [Dispatchers.Default]**
+ * ——`PageRasterStore` 的 surface 已加锁，可被 UI/后台两条线程交替使用；命中判定仍在锁外，
+ * 所以 UI 帧里的命中不会被后台预栅格挡住。栅格耗时因此不再计入 UI 帧预算。
  *
  * 取数口径与 [rememberPageContent] 逐条对齐（`pageLines` / `pageImages` / `pageBackgrounds`
  * + `imgKeyOf`/`bgKeyOf` 命中缓存），否则指纹不等、首帧仍会重画。
@@ -151,8 +168,11 @@ internal suspend fun prerasterPage(
     imgCache: PageImageCache<DecodedImage>,
     bgCache: PageImageCache<DecodedImage>,
 ): Boolean {
-    val lines = runCatching { host.pageLines(pos) }.getOrNull() ?: return false
-    if (lines.isEmpty()) return false
+    val lines = runCatching { host.pageLines(pos) }.getOrNull()
+    if (lines == null || lines.isEmpty()) {
+        Logger.d("Orilumn.TAP", "preraster skip: no lines ch=${pos.chapter} char=${pos.slice.charStart}")
+        return false
+    }
     val pageImages: List<PageImage> = runCatching { host.pageImages(pos) }.getOrNull().orEmpty()
     val pageBackgrounds: List<PageBackground> = runCatching { host.pageBackgrounds(pos) }.getOrNull().orEmpty()
 
@@ -205,20 +225,24 @@ internal suspend fun prerasterPage(
         bgColor = pageBg,
         inkColor = inkColor,
     )
-    return renderer.preraster(
-        lines = inked,
-        contentLeft = contentLeft,
-        contentRectLeft = contentLeft,
-        contentRectTop = contentTop,
-        contentRectRight = contentRight,
-        contentRectBottom = contentBottom,
-        pageBg = pageBg,
-        backgrounds = bgs,
-        bgImages = bgImages,
-        images = slots,
-        contentRevision = contentRevision,
-        rasterKey = key,
-    )
+    // P0c：整页光栅化搬离 UI 线程（栅格 p50 143ms、高负载 0.5–0.9s，计入帧预算就是冻帧）。
+    // 只切「重画」这一段：`store.obtain` 的命中判定在锁外，UI 帧命中零阻塞。
+    return withContext(Dispatchers.Default) {
+        renderer.preraster(
+            lines = inked,
+            contentLeft = contentLeft,
+            contentRectLeft = contentLeft,
+            contentRectTop = contentTop,
+            contentRectRight = contentRight,
+            contentRectBottom = contentBottom,
+            pageBg = pageBg,
+            backgrounds = bgs,
+            bgImages = bgImages,
+            images = slots,
+            contentRevision = contentRevision,
+            rasterKey = key,
+        )
+    }
 }
 
 /**

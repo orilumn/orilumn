@@ -45,12 +45,17 @@ actual fun skiaImageToImageBitmap(image: org.jetbrains.skia.Image): ImageBitmap?
 private const val PAGE_CACHE_BYTES = 56L * 1024 * 1024
 
 private class AndroidReaderPageRenderer : ReaderPageRenderer {
+    // 淘汰回收的落点：预栅格已移到后台线程（见 Preraster.kt），LRU 淘汰可能发生在后台，
+    // 而 `Bitmap.recycle()` 会把 native 像素立刻释放——若 UI 正在画同一张就崩/花屏。
+    // 统一 post 到主线程回收：与绘制同线程，排在该帧之后，不会回收正在画的位图。
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
     // 命中判据 / 池容量 / 淘汰 / 离屏 surface 生命周期全在 store 里（与 Desktop 同一份，
     // 可脱离 GUI 直测，见 PageRasterStoreTest）；本 actual 只剩最后一跳：skia 图 → Bitmap。
     private val store = PageRasterStore<android.graphics.Bitmap>(
         maxBytes = PAGE_CACHE_BYTES,
         sizeOf = { it.width * it.height * 4L },
-        onEvict = { runCatching { it.recycle() } },
+        onEvict = { bmp -> mainHandler.post { runCatching { bmp.recycle() } } },
         // 唯一的平台缝：零编码像素桥（取代旧 JPEG 单跳）。
         encode = { img -> skiaImageToAndroidBitmap(img, img.width, img.height) },
     )

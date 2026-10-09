@@ -23,6 +23,14 @@ object ReaderMath {
     /** 点按/滑动的触摸松弛（px），对应旧 `scaledTouchSlop` 的近似值（宿主可按密度覆盖）。 */
     const val TAP_SLOP = 24f
 
+    /**
+     * 横向手势的**最小即时判定位移**（px）：首个 MOVE 事件超过它就接管手势，不再等 slop。
+     *
+     * 取 2px：只排掉「完全没动」的数值噪声（触摸抖动通常 < 1px），任何有意的
+     * 手指移动都立刻越过。理由见 [gestureAxis] 的 KDoc（真机 FLIPLAT 实测）。
+     */
+    const val FLING_AXIS_MIN_PX = 2f
+
     /** 无位移即举起判为点按的最长间隔（ms），对应旧 `FlipGestureDetector` 的 400ms。 */
     const val TAP_MAX_MS = 400L
 
@@ -45,11 +53,40 @@ object ReaderMath {
     }
 
     /**
-     * 手势主轴判定，复刻旧 `FlipGestureDetector`：横向位移先越过 slop 且明显大于纵向（>1.2x）→ 水平翻页；
-     * 纵向先越过 slop 且明显大于横向 → 垂直（亮度）手势；都未越过 → 未定型（点按）。
+     * 手势主轴判定。
+     *
+     * ## 两条路径：快速通道（手指一动就响应）+ slop 通道（防抖）
+     *
+     * 早先只有 slop 一条（`abs(dx) > slop && abs(dx) > abs(dy) * 1.2`，slop≈20px）。
+     * 真机实测（`Orilumn.FLIPLAT axis` 日志，density 400 / 1840×2800）：
+     *
+     * ```
+     * axis dir=1 dx=-35 dy=0 slop=20 lat=184ms
+     * axis dir=1 dx=-34 dy=-1 slop=20 lat=77ms
+     * axis dir=1 dx=-22 dy=0 slop=20 lat=91ms
+     * ```
+     *
+     * `dx` 只有 22~47px（slop 刚过），`dy≈0`（1.2 倍轻松满足），可按下→定轴仍要
+     * 67~184ms。而定轴之后 `axis2move` 是**1ms**——代码零延迟。
+     *
+     * 也就是说：这几十毫秒不是我们算得慢，而是**手指真的只移动了 22~47px**，
+     * 而人在「刚要划」到「划出 30px」之间的物理起动就要几十毫秒。moon+ 之所以
+     * 「手指一动立刻响应」，是因为它**没有 slop**：第一个 MOVE 事件就接管。
+     *
+     * 故加一条快速通道：横向有 [FLING_AXIS_MIN_PX]（2px，纯排抖动）以上位移、
+     * 且纵向不超过横向的 1.2 倍时**立刻**判水平——不等 slop。
+     *
+     * 代价与取舍：轻微手抖可能被当成翻页。但按当前阈值（位移 55px 才 commit、
+     * 末段回拉还可否决），抖一下不会真的翻页，最多是画面轻微动一下然后弹回。
+     * 这与用户诉求「开始滑动大概率就是要翻页」一致。
+     *
+     * 纵向亮度手势仍走 slop 通道：它要的是「整根手指在左/右 1/3 竖划」这种
+     * 明确动作，早判定会让横滑时的轻微纵向抖动抢走手势。
      */
     fun gestureAxis(dx: Float, dy: Float, slop: Float = TAP_SLOP): Axis = when {
-        abs(dx) > slop && abs(dx) > abs(dy) * 1.2f -> Axis.HORIZONTAL
+        // 快速通道：横向一动就接管（不等 slop），纵向必须明显更小。
+        abs(dx) >= FLING_AXIS_MIN_PX && abs(dx) > abs(dy) * 1.2f -> Axis.HORIZONTAL
+        // slop 通道：纵向手势仍需越过 slop（防抖，见上）。
         abs(dy) > slop && abs(dy) > abs(dx) * 1.2f -> Axis.VERTICAL
         else -> Axis.NONE
     }

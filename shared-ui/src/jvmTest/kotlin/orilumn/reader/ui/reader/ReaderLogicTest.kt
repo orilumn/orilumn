@@ -76,14 +76,33 @@ class ReaderLogicTest {
     // ---- 手势主轴 ----
 
     @Test
-    fun gestureAxis_requiresSlopAndDominance_likeOldDetector() {
+    fun gestureAxis_横向走快速通道_不等slop() {
+        // 真机 FLIPLAT 实测：按下→定轴要 67~184ms，而定轴时 dx 只有 22~47px
+        // （slop≈20 刚过）。手指「刚要划」到「划出 30px」的物理起动就是几十毫秒，
+        // 所以横向不等 slop：只要动了 ≥2px 且纵向不占优就接管（moon+ 的体感）。
+        assertEquals(ReaderMath.Axis.HORIZONTAL, ReaderMath.gestureAxis(3f, 0f, slop = 24f))
+        assertEquals(ReaderMath.Axis.HORIZONTAL, ReaderMath.gestureAxis(8f, 2f, slop = 24f))
         assertEquals(ReaderMath.Axis.HORIZONTAL, ReaderMath.gestureAxis(40f, 5f, slop = 24f))
-        assertEquals(ReaderMath.Axis.VERTICAL, ReaderMath.gestureAxis(5f, 40f, slop = 24f))
-        assertEquals(ReaderMath.Axis.NONE, ReaderMath.gestureAxis(10f, 10f, slop = 24f))
-        // |dy| 未满足 > |dx|*1.2 → 不判为垂直
-        assertEquals(ReaderMath.Axis.NONE, ReaderMath.gestureAxis(30f, 30f, slop = 24f))
-        // |dx| 恰好过 slop 但纵向不占优 → 保持未定型
+        // 纵向占优时不抢手势（否则横滑时轻微纵向抖动会抢走）
         assertEquals(ReaderMath.Axis.NONE, ReaderMath.gestureAxis(26f, 30f, slop = 24f))
+        // dx=2 未达快速通道的「占优」要求（2 > 10*1.2 不成立），dy=10 未过 slop
+        // ⇒ 双向都未定型，交给点按判定。
+        assertEquals(ReaderMath.Axis.NONE, ReaderMath.gestureAxis(2f, 10f, slop = 24f))
+        // 纯抖动（0 / 1px）不接管
+        assertEquals(ReaderMath.Axis.NONE, ReaderMath.gestureAxis(0f, 0f, slop = 24f))
+        assertEquals(ReaderMath.Axis.NONE, ReaderMath.gestureAxis(1f, 0f, slop = 24f))
+    }
+
+    @Test
+    fun gestureAxis_纵向仍走slop通道防抖() {
+        // 纵向亮度手势要的是明确竖划，早判定会让横滑的纵向抖动抢走手势。
+        assertEquals(ReaderMath.Axis.VERTICAL, ReaderMath.gestureAxis(5f, 40f, slop = 24f))
+        assertEquals(ReaderMath.Axis.VERTICAL, ReaderMath.gestureAxis(2f, 30f, slop = 24f))
+        // 未过 slop 的纵向移动不接管
+        assertEquals(ReaderMath.Axis.NONE, ReaderMath.gestureAxis(2f, 10f, slop = 24f))
+        // 双向都未过/势均力敌 → 未定型（点按）
+        assertEquals(ReaderMath.Axis.NONE, ReaderMath.gestureAxis(10f, 10f, slop = 24f))
+        assertEquals(ReaderMath.Axis.NONE, ReaderMath.gestureAxis(30f, 30f, slop = 24f))
     }
 
     @Test

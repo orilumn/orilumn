@@ -81,6 +81,13 @@ fun ReaderScreen(
     host: ReaderHost,
     // 第 1 档「渲染」半边的抢占钩子（栅格未命中时让后台预排让路）；默认接宿主实现。
     onRasterMiss: () -> Unit = { host.onRasterMiss() },
+    /**
+     * 预排出版式后回调（见 `ReaderHost.onPrefillReady`）：此刻**按翻页方向补栅格一张**。
+     *
+     * 翻页只需准备一页——方向侧那一张；另一侧等它成为方向侧时再补（§3.2 方向记录）。
+     * 0 页（第 1 档）不在此列：它同步阻塞、像素早已随绘制产出。
+     */
+    onPrefillReady: (chapter: Int, direction: Int) -> Unit = { c, d -> host.onPrefillReady(c, d) },
     settings: ReaderSettings,
     statusBarInset: Dp = 0.dp,
     onBack: () -> Unit = {},
@@ -449,6 +456,11 @@ fun ReaderScreen(
     SideEffect { flipCtl = controller }
     // 手势/渲染层一律经它取会话；理论上组合内已完成赋值（SideEffect 在 apply 变更前跑）。
     val ctl = controller
+    // 落定后补栅反方向那一页：预栅格只补了方向侧，不补则往回翻仍要付一次 ~143ms
+    // 实时栅格。锚点是**新页**（起手 commit 已落地，openPos 就是刚落定那页）。
+    SideEffect {
+        ctl.settledAnchorOverride = openPos
+    }
 
     fun jumpChapter(direction: Int) {
         scope.launch {
@@ -712,6 +724,14 @@ fun ReaderScreen(
                     var lastDx = 0f
                     var lastMoveTime = downTime
                     var vx = 0f
+                    // ---- 「手指按下 → 页面动起来」时延测量（见 FlipController 的 FLIPLAT KDoc）----
+                    // 三个时刻取自 `System.nanoTime()`（单调钟，与事件 uptimeMillis 不同源，
+                    // 但三者同源即可相减；uptimeMillis 只用于手势内的相对判定）。
+                    // 关键锚点是 tMove：**第一帧 progress 真正写回渲染**的时刻，
+                    // 它之后才谈得上「页面动起来」。
+                    val tDown = System.nanoTime()
+                    var tAxis = 0L
+                    var tMove = 0L
                     while (true) {
                         val event = awaitPointerEvent()
                         val change = event.changes.firstOrNull { it.id == down.id } ?: break
@@ -748,6 +768,19 @@ fun ReaderScreen(
                                 // 栏弹出、翻页没发生。抬手时只要真的挪过就不算点按。
                                 onTap(downX, downY, size.width.toFloat())
                             }
+                            // 抬手：把本次手势的起手时延落盘（W 级，常驻量级）。
+                            // 口径见下：`latency = tMove - tDown`，即「手指按下 → 第一帧
+                            // 页面位移真正写回渲染」。`tMove==0` 说明整场没采纳过位移
+                            // （目标页始终未就绪），此时另打 `nomove` 分支便于区分。
+                            if (slideActive || dragDir != 0) {
+                                val lat = if (tMove != 0L) (tMove - tDown) / 1_000_000 else -1
+                                val latAxis = if (tAxis != 0L && tMove != 0L) (tMove - tAxis) / 1_000_000 else -1
+                                Logger.w(
+                                    "Orilumn.FLIPLAT",
+                                    "drag dir=$dragDir lat=${lat}ms axis2move=${latAxis}ms " +
+                                        "dx=${upDx.roundToInt()} vx=${vx.roundToInt()}",
+                                )
+                            }
                             break
                         }
                         val dx = change.position.x - downX
@@ -763,7 +796,17 @@ fun ReaderScreen(
                         }
                         when (axis) {
                             ReaderMath.Axis.HORIZONTAL -> {
-                                if (dragDir == 0) dragDir = ReaderMath.flipDirection(dx)
+                                if (dragDir == 0) {
+                                    dragDir = ReaderMath.flipDirection(dx)
+                                    tAxis = System.nanoTime()
+                                    // 带上 slop 与当时的 |dy|：区分「位移还没到slop」
+                                    // 与「到了但没过 1.2 倍」两种推迟原因。
+                                    Logger.w(
+                                        "Orilumn.FLIPLAT",
+                                        "axis dir=$dragDir dx=${dx.roundToInt()} dy=${dy.roundToInt()} " +
+                                            "slop=${touchSlop.roundToInt()} lat=${(tAxis - tDown) / 1_000_000}ms",
+                                    )
+                                }
                                 // L1 跟手：起手那一次 beginSlide（预取目标页），其后逐帧 updateSlide。
                                 if (currentSlideEnabled) {
                                     if (!slideActive) {
@@ -771,6 +814,7 @@ fun ReaderScreen(
                                         slideActive = true
                                     }
                                     currentUpdateSlide(dx, size.width.toFloat())
+                                    if (tMove == 0L) tMove = System.nanoTime()
                                 }
                             }
                             ReaderMath.Axis.VERTICAL -> if (!brightnessActive) {
@@ -911,6 +955,60 @@ fun ReaderScreen(
             // 两张画布：否则两个组合位置各自 remember，各得一池，当前页位图在 target 侧永远查不到
             // （真机日志：动画期间每页每轮各栅格一次，`hit=false`）。
             val pageRenderer = rememberReaderPageRenderer()
+
+            val prerasterOnSettle = false
+            // 落定后补栅反方向：维持「当前页 ±1」两张都在池里（预栅格只补了方向侧那一张）。
+            // 「落定后补反方向」默认**关闭**：它在动画刚结束时补，而那一刻用户很可能
+            // 立刻再滑——预栅格跑在 UI 线程，一次 300~580ms 正好砸在手指上
+            // （真机实测 preraster miss 582/355/321ms，与绘制争同一页，净效果为负）。
+            // 第 1 档优先于一切（§3.6）：只靠预排信号那条路径补，它发生在阅读间隙。
+            SideEffect {
+                ctl.onSettled = { _anchor ->
+                    val a = if (prerasterOnSettle) _anchor else null
+                    if (a != null) ctl.prerasterOpposite(
+                        host = currentHost,
+                        renderer = pageRenderer,
+                        contentLeft = contentLeft,
+                        contentTop = contentTop,
+                        contentRight = contentRight,
+                        contentBottom = contentBottom,
+                        pageBg = profile.bgColor,
+                        inkColor = profile.fgColor,
+                        contentRevision = contentRevision,
+                        imgCache = imgCache,
+                        bgCache = bgCache,
+                        anchorOverride = a,
+                    )
+                }
+            }
+
+            // 预栅格（`线程调度原则.md` §3 阶梯补的那一档）：引擎在预排出邻页版式后抛信号，
+            // 此刻在 UI 线程按**方向**补一张像素，落定时目标页即可命中缓存、零栅格开销。
+            // 翻页只需一页——方向侧那张；另一侧等它成为方向侧再补。
+            //
+            // 为什么此刻做：单页栅格 p50 143ms，落在「用户还在读当前页」时最划算；
+            // 落在手指按下后就是可感知的迟钝（实测 target-ready p50 59ms 全等它）。
+            PrerasterOnPrefill(
+                host = currentHost,
+                onPrefillReady = onPrefillReady,
+                directionProvider = { ctl.session.direction },
+                currentPos = { openPos },
+                renderer = pageRenderer,
+                contentLeft = contentLeft,
+                contentTop = contentTop,
+                contentRight = contentRight,
+                contentBottom = contentBottom,
+                pageBg = profile.bgColor,
+                inkColor = profile.fgColor,
+                contentRevision = contentRevision,
+                hostRevision = hostRevision,
+                imgCache = imgCache,
+                bgCache = bgCache,
+                // 第 1 档优先于一切（§3.6 抢占代替等待）：拖动中/结算中/落位在途，
+                // 用户马上要用别的页，预栅格一律让路。真机教训——预栅格跑在 UI 线程
+                // （与 drawLines 共用 surface 的约束），一次 300~580ms，撞上滑动就是卡顿。
+                gate = { ctl.isBusy() },
+            )
             // 画布本体（当前页 / 目标页同形，只是位移不同）。
             val PageCanvasFun: @Composable (PageContent?) -> Unit = { content ->
                 ReaderPageCanvas(

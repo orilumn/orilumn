@@ -58,11 +58,28 @@ jobs:
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
 
+      # Gradle 产出的 APK 文件名固定带构建类型后缀（orilumn-<ver>-release.apk）。
+      # 按 versionName 重命名为平台口径 orilumn-<ver>-android.apk，与 DMG/DEB/MSI 的
+      # Orilumn-<ver>-<平台>.<ext> 对齐（Release 列表里一眼看出这是 Android 包）。
+      - name: Rename APK with version
+        run: |
+          VER=$(sed -n 's/^orilumn.versionName=//p' gradle.properties | head -1 | tr -d '[:space:]"')
+          # 版本号取空时直接失败：否则会产出 orilumn--android.apk 这种坏文件名并随 Release 发布。
+          if [ -z "$VER" ]; then
+            echo "::error::无法从 gradle.properties 读到 orilumn.versionName，拒绝重命名。"
+            exit 1
+          fi
+          ls app/build/outputs/apk/release/
+          for f in app/build/outputs/apk/release/orilumn-*.apk; do
+            mv "$f" "app/build/outputs/apk/release/orilumn-${VER}-android.apk"
+          done
+          ls app/build/outputs/apk/release/
+
       - name: Upload APK as workflow artifact (all runs)
         uses: actions/upload-artifact@v4
         with:
           name: apk-release
-          path: app/build/outputs/apk/release/orilumn-*.apk
+          path: app/build/outputs/apk/release/orilumn-*-android.apk
           if-no-files-found: error
 
       # 仅打 tag 时把签名 APK 挂到对应 GitHub Release。
@@ -73,7 +90,7 @@ jobs:
           name: ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
           body: 自动构建的签名 APK（由 GitHub Actions 云端编译、tested/签名后发布）。
-          files: app/build/outputs/apk/release/orilumn-*.apk
+          files: app/build/outputs/apk/release/orilumn-*-android.apk
 
   build-macos:
     strategy:

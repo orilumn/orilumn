@@ -286,13 +286,25 @@ private fun DesktopRoot(
     val reading = openBook != null
     val stripVisible = !reading || readingBarsVisible || topHover
     val hoverZonePx = with(LocalDensity.current) { (TitleBarHeight + 8.dp).toPx() }
-    // 阅读模式把标题栏高度当顶栏 inset 传给阅读面：系统按钮区与阅读顶栏拼成一条整栏，
-    // 而不是两块互相盖住。同一时长动画，避免切栏时错位。
+    // 阅读模式把标题栏高度当顶栏 inset 传给阅读面：窗口标题栏区（Win/Linux 自绘按钮区、
+    // macOS 系统红绿灯区）与阅读顶栏拼成一条整栏，而不是两块互相盖住。同一时长动画，避免错位。
+    // 例外：macOS 全屏 Space 里系统自己收掉了标题栏（悬停才浮出），壳不再预留这一截，
+    // 否则阅读顶栏上方会多出一截空白深色横条（顶栏底色但无内容）。Win/Linux 全屏时自绘按钮仍在，
+    // 照旧预留。注意只有阅读顶栏真正滑出时（stripVisible）才预留，平时阅读面顶到窗口顶。
+    val reserveSystemTitleBar = reading && stripVisible && !(IS_MAC && chrome.fullscreen)
     val readerTopInset by animateDpAsState(
-        targetValue = if (reading && stripVisible) TitleBarHeight else 0.dp,
+        targetValue = if (reserveSystemTitleBar) TitleBarHeight else 0.dp,
         animationSpec = tween(ChromeAnimMs),
         label = "desktopTitleBarInset",
     )
+
+    // macOS 系统红绿灯（平台层·桌面壳）：Apple Books 式——阅读界面平时隐藏，鼠标移到窗口顶部
+    //（条滑出）才浮出；回书架 / 阅读栏切出时照常显示。全屏 Space 里系统本就收掉标题栏，这里也
+    // 一致隐藏。非 macOS 是 no-op（Win/Linux 用自绘按钮，见 DesktopTitleBar）。系统在进出全屏 /
+    // 窗口重显时会自己改回去，靠 DesktopWindowChrome.attach 每帧补一次纠回来。
+    LaunchedEffect(reading, stripVisible) {
+        chrome.setMacTitleBarHidden(reading && !stripVisible)
+    }
 
     Box(Modifier.fillMaxSize()) {
         if (openBook == null) {

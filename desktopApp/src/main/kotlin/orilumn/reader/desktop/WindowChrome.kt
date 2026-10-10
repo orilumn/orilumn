@@ -376,6 +376,12 @@ internal class DesktopWindowChrome {
 
     private var watched: Window? = null
 
+    /** 阅读界面里系统红绿灯当前是否该隐藏（Apple Books 式：平时隐藏、悬停顶部才浮出）。 */
+    private var macTitleBarHidden = false
+
+    /** 上一次**投递出去**的红绿灯显隐态（null = 还没投过）；用于跳过重复投递。 */
+    private var macTitleBarApplied: Boolean? = null
+
     /** 由 `Window {}` 内容每帧交上来（只存引用，不产生可观察写；重复调用无副作用）。 */
     fun attach(window: Window, windowState: WindowState) {
         this.window = window
@@ -388,16 +394,51 @@ internal class DesktopWindowChrome {
             watched = window
         }
         applyMacSystemWindow(window)
+        // 红绿灯显隐是窗口级原生状态，系统在进出全屏 / 窗口重显时会自己改回去。这里走非 force 版：
+        // 期望值没变就跳过（不重复投递），变了（含窗口刚 attach、此前投不出去）才补投。
+        applyMacTitleBarVisibility()
         syncFullscreen()
     }
 
+    /**
+     * macOS：隐藏/显示系统红绿灯三键（阅读界面 Apple Books 观感，见 [MacTrafficLights]）。
+     * 非 macOS 恒为 no-op；窗口未 [attach] 时只记状态，attach 后立即落位。
+     */
+    fun setMacTitleBarHidden(hidden: Boolean) {
+        macTitleBarHidden = hidden
+        applyMacTitleBarVisibility(force = true)
+    }
+
+    /**
+     * 把 [macTitleBarHidden] 投给原生层（异步到 AppKit 主线程，见 [MacTrafficLights]）。
+     *
+     * @param force 忽略「与上次同值」短路、强制重投。系统在**进出全屏 / 窗口重显**时会把红绿灯
+     *   改回可见，这时期望值没变、必须靠 force 纠回来；[attach] 每帧走的是非 force 版（跳重复），
+     *   [geometryWatcher] 的 resize / shown 才 force。
+     */
+    private fun applyMacTitleBarVisibility(force: Boolean = false) {
+        if (!IS_MAC) return
+        val w = window ?: return
+        if (!force && macTitleBarApplied == macTitleBarHidden) return
+        macTitleBarApplied = macTitleBarHidden
+        MacTrafficLights.setTitleBarButtonsHidden(w, macTitleBarHidden)
+    }
+
     private val geometryWatcher = object : ComponentAdapter() {
-        override fun componentResized(e: ComponentEvent?) = syncFullscreen()
+        // 全屏进出 / 外部改几何都会触发 resize：既回读真全屏态，也**强制重投**红绿灯显隐
+        //（系统在进出全屏时会把红绿灯改回可见，期望值没变，只有 force 才纠得回来）。
+        override fun componentResized(e: ComponentEvent?) {
+            syncFullscreen()
+            applyMacTitleBarVisibility(force = true)
+        }
 
         // 窗口首次显示后落位系统窗口的无边框视觉（见 [applyMacSystemWindow] 的 KDoc：
         // 显示前设置会导致 CMP 内容不渲染）。
         override fun componentShown(e: ComponentEvent?) {
-            if (IS_MAC) watched?.let { applyMacSystemWindow(it) }
+            if (IS_MAC) watched?.let {
+                applyMacSystemWindow(it)
+                applyMacTitleBarVisibility(force = true)
+            }
         }
     }
 

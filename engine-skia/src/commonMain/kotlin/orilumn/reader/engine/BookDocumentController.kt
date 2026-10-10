@@ -14,6 +14,7 @@ import orilumn.reader.engine.css.LightCssParser
 import orilumn.reader.engine.css.StyleComputer
 import orilumn.reader.engine.css.StyleSheet
 import orilumn.reader.engine.html.ChapterPreprocessor
+import orilumn.reader.engine.html.HEADING_TAGS
 import orilumn.reader.engine.html.HtmlTreeConverter
 import orilumn.reader.engine.html.MarkupElement
 import orilumn.reader.engine.html.ParsedChapter
@@ -4196,11 +4197,21 @@ private fun finishCanonicalBackground(
     /** Chapter context exposed to the UI layer for logging. */
     fun ctxPublic(index: Int): String = ctx(unitAt(index))
 
-    /** Chapter title: first 20 characters of the text from the first non-empty paragraph; empty
-     * when none. */
-    private fun chapterTitle(markup: orilumn.reader.engine.html.MarkupElement): String {
-        val t = collectText(markup).trim()
-        return t.take(20).replace(Regex("\\s+"), " ")
+    /** Chapter title: the first heading (`h1`–`h6`) node's own text, whitespace-normalized; empty
+     *  when the chapter carries no heading (callers fall back to the href name / "第 N 章").
+     *
+     *  只取标题元素自身文本，**绝不**把正文并进来：早先取「全树前 20 字」，而章节树的第一段
+     *  正文紧跟着标题，于是顶栏章节名后面挂着一截正文（读起来像标题没写完）。 */
+    private fun chapterTitle(markup: MarkupElement): String {
+        val heading = firstHeading(markup) ?: return ""
+        return collectText(heading).trim().replace(Regex("\\s+"), " ").take(20)
+    }
+
+    /** First heading node in document order (depth-first pre-order), or null when the tree has none. */
+    private fun firstHeading(el: MarkupElement): MarkupElement? {
+        if (el.tag in HEADING_TAGS) return el
+        for (c in el.children) firstHeading(c)?.let { return it }
+        return null
     }
 
     /** Page-location description, e.g. `pages[0..1)line0-3`; "(无页)" when there is no page. */

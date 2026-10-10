@@ -69,17 +69,19 @@ compose.desktop {
             packageVersion = providers.gradleProperty("orilumn.versionName").get()
             description = "Orilumn"
             vendor = "Orilumn"
-            // 打包格式按当前 OS 选：Dmg 仅 macOS 合法，Deb 仅 Linux 合法
-            // （jpackage 对不支持的格式会直接失败，故不能无条件列全）。
+            // 打包格式按当前 OS 选：Dmg 仅 macOS 合法，Deb 仅 Linux 合法，Msi 仅 Windows 合法
+            // （jpackage 对不支持的格式会直接失败，故不能无条件列全；Windows 不列则 targetFormats
+            //  为空，:desktopApp:packageMsi 根本不会生成）。
             val pkgOs = org.gradle.internal.os.OperatingSystem.current()
             targetFormats(
                 *buildList {
                     if (pkgOs.isMacOsX) add(TargetFormat.Dmg)
                     if (pkgOs.isLinux) add(TargetFormat.Deb)
+                    if (pkgOs.isWindows) add(TargetFormat.Msi)
                 }.toTypedArray(),
             )
-            // 打包图标：macOS 要 .icns，Linux 要 .png（均由根目录 icon.png 生成；
-            // Windows 要 .ico，暂未生成故不配置，用默认图标）。
+            // 打包图标：macOS 要 .icns，Linux 要 .png，Windows 要 .ico
+            // （.icns/.ico 均由根目录 icon.png 生成后提交；改图需同步重生成两处）。
             macOS {
                 bundleID = "orilumn.reader"
                 iconFile.set(project.file("icons/icon.icns"))
@@ -89,6 +91,9 @@ compose.desktop {
             }
             linux {
                 iconFile.set(project.file("src/main/resources/icon.png"))
+            }
+            windows {
+                iconFile.set(project.file("icons/icon.ico"))
             }
             // jlink 默认按静态依赖推断模块，反射加载的 sqlite-jdbc 会被裁掉：
             // :desktopApp:suggestRuntimeModules 输出即此列表（含 java.sql，

@@ -137,3 +137,111 @@ jobs:
           name: ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
           files: desktopApp/build/compose/binaries/main/dmg/*.dmg
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Grant gradlew execute permission
+        run: chmod +x gradlew
+
+      # jpackage 打 deb 依赖 fakeroot/dpkg；ubuntu-latest 已预装（fakeroot 1.28），无需 apt-get。
+      - name: Build DEB
+        run: ./gradlew :desktopApp:packageDeb --no-daemon
+
+      # deb 文件名带 jpackage 版本，按 app versionName + 架构重命名后再上传（与 DMG 同口径）。
+      - name: Rename DEB with version
+        run: |
+          VER=$(sed -n 's/^orilumn.versionName=//p' gradle.properties | head -1 | tr -d '[:space:]"')
+          # 版本号取空时直接失败：否则会产出 Orilumn--linux-x64.deb 这种坏文件名并随 Release 发布。
+          if [ -z "$VER" ]; then
+            echo "::error::无法从 gradle.properties 读到 orilumn.versionName，拒绝重命名。"
+            exit 1
+          fi
+          ls desktopApp/build/compose/binaries/main/deb/
+          for f in desktopApp/build/compose/binaries/main/deb/*.deb; do
+            mv "$f" "desktopApp/build/compose/binaries/main/deb/Orilumn-${VER}-linux-x64.deb"
+          done
+          ls desktopApp/build/compose/binaries/main/deb/
+
+      - name: Upload DEB as workflow artifact (all runs)
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-linux-x64
+          path: desktopApp/build/compose/binaries/main/deb/*.deb
+          if-no-files-found: error
+
+      # 仅打 tag 时把 deb 挂到对应 GitHub Release（与 APK/DMG 同一 Release 下追加文件）。
+      - name: Attach DEB to Release
+        if: startsWith(github.ref, 'refs/tags/') && success()
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          files: desktopApp/build/compose/binaries/main/deb/*.deb
+
+  build-windows:
+    runs-on: windows-latest
+    # Windows runner 默认 pwsh；下面的 sed/循环用 bash（Git Bash），故显式指定。
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Grant gradlew execute permission
+        run: chmod +x gradlew
+
+      # jpackage 打 msi 依赖 WiX Toolset；windows-latest 已预装（WiX 3.14），无需 choco。
+      - name: Build MSI
+        run: ./gradlew :desktopApp:packageMsi --no-daemon
+
+      - name: Rename MSI with version
+        run: |
+          VER=$(sed -n 's/^orilumn.versionName=//p' gradle.properties | head -1 | tr -d '[:space:]"')
+          if [ -z "$VER" ]; then
+            echo "::error::无法从 gradle.properties 读到 orilumn.versionName，拒绝重命名。"
+            exit 1
+          fi
+          ls desktopApp/build/compose/binaries/main/msi/
+          for f in desktopApp/build/compose/binaries/main/msi/*.msi; do
+            mv "$f" "desktopApp/build/compose/binaries/main/msi/Orilumn-${VER}-windows-x64.msi"
+          done
+          ls desktopApp/build/compose/binaries/main/msi/
+
+      - name: Upload MSI as workflow artifact (all runs)
+        uses: actions/upload-artifact@v4
+        with:
+          name: msi-windows-x64
+          path: desktopApp/build/compose/binaries/main/msi/*.msi
+          if-no-files-found: error
+
+      # 未签名：SmartScreen 会拦一次（更多信息→仍要运行），自用分发可接受；要公开发行再立项做签名。
+      - name: Attach MSI to Release
+        if: startsWith(github.ref, 'refs/tags/') && success()
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          files: desktopApp/build/compose/binaries/main/msi/*.msi

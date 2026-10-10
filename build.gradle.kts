@@ -82,11 +82,13 @@ val generateLayoutGeometryStamp by tasks.registering {
     doLast {
         val root = rootProject.projectDir
         // 排序后按「相对路径 \0 长度 \0 内容 \0」喂 SHA-256 ⇒ 与文件系统遍历顺序、绝对路径无关。
-        val files = layoutGeometryFiles.files.sortedBy { it.relativeTo(root).path }
+        // .invariantSeparatorsPath（而非 .path）：Windows 上 .path 是反斜杠，会算出与
+        // Unix 不同的指纹 ⇒ 同一份源码在两平台产出不同 LAYOUT_VERSION。Unix 上两者相同。
+        val files = layoutGeometryFiles.files.sortedBy { it.relativeTo(root).invariantSeparatorsPath }
         check(files.isNotEmpty()) { "layoutGeometryStamp: 没找到任何几何源码，拒绝产出一个全零指纹" }
         val md = MessageDigest.getInstance("SHA-256")
         for (f in files) {
-            md.update(f.relativeTo(root).path.toByteArray())
+            md.update(f.relativeTo(root).invariantSeparatorsPath.toByteArray())
             md.update(0)
             md.update(f.length().toString().toByteArray())
             md.update(0)
@@ -167,10 +169,14 @@ val unregisteredEngineCode by tasks.registering {
     doLast {
         val root = rootProject.projectDir
         // 相对路径形如 `<module>/src/<sourceSet>/kotlin/orilumn/reader/engine/...` ⇒ 首段即模块名。
+        // 必须用 .invariantSeparatorsPath：Windows 上 .path 是 "common\src\commonMain\…"，
+        // 下面按 "/src/" 切取模块名会**永远切不开** ⇒ 整个模块被判成「未登记」⇒ 构建失败
+        // （v0.4.1 首次在 CI 打 Windows 包时踩中：:unregisteredEngineCode FAILED）。
+        // Unix 上该属性返回值与 .path 相同，故判据不变。
         val offenders = allEngineCode.files
             .filter { it.extension == "kt" }
-            .filter { f -> f.relativeTo(root).path.substringBefore("/src/") !in registered }
-            .map { it.relativeTo(root).path }
+            .filter { f -> f.relativeTo(root).invariantSeparatorsPath.substringBefore("/src/") !in registered }
+            .map { it.relativeTo(root).invariantSeparatorsPath }
             .sorted()
         check(offenders.isEmpty()) {
             buildString {

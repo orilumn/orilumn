@@ -1301,7 +1301,7 @@ private fun AnimModePage(
     p: Palette,
 ) {
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
-        item { ThemeOpt("平滑", s.pageAnimationMode != "curl", keys[0].onEnter, p, nav = nav, index = 0) }
+        item { ThemeOpt("滑动", s.pageAnimationMode != "curl", keys[0].onEnter, p, nav = nav, index = 0) }
         item { ThemeOpt("卷曲", s.pageAnimationMode == "curl", keys[1].onEnter, p, nav = nav, index = 1) }
         item { Spacer(modifier = Modifier.height(24.dp)) }
     }

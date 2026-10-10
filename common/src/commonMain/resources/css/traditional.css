@@ -64,5 +64,16 @@ li p { text-indent: 0; }
  * = 3189/3344 = 95.4% 正文行两端对齐; 标题 97 行按设计保持原样; 余 58 行 span (1.7%) 兜不到。 */
 p, div, li, blockquote, dd, td { text-align: justify; }
 
+/* 代码块永不两端对齐: justify 列表刻意不含 pre / code (见上), 但 text-align 是继承属性 ——
+ * `div` 的 justify 会经继承漏进嵌套的 pre。真书《Kotlin in Action》8.1.4「从字符串转换」侧边栏
+ * (div.fm-sidebar-block 下三个代码块) 即中招: 书侧从没给 pre 写过 text-align, UA 也只兜底
+ * margin/white-space/font-family, pre 便一路继承 div 的 justify 被拉成两端对齐。
+ * 与上条同为 theme=42 的基线预设 (本主题无对齐滑块, 读者配不出第三种状态): 直接在 pre/code
+ * 上声明 left 掐掉继承路径。同 tier 高于作者层全部声明 (含 inline !important=41)。
+ * 量过 (46 本语料 308 个 CSS, 规则+内联双路按标签归属): 书作者对 pre 声明 text-align 仅 1 条
+ * 且为 left, 对 code 为 0 条, <pre style> 内联为 0 条 ⇒ 覆盖后视觉零变化。
+ * 原书设置整张主题表不加载, 本条不参与 ⇒ 书说了算。 */
+pre, code { text-align: left; }
+
 /* 无尺寸约束的块级/独图插图拉满正文宽度 (ChapterPreprocessor 仅在原书未设 width/max-width 时打类) */
 .orilumn-fullwidth-image { width: 100%; }

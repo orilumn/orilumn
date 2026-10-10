@@ -107,6 +107,30 @@ class ThemeCssTest {
     }
 
     /**
+     * 主题 justify 不得漏进嵌套的 pre（text-align 是继承属性）：真书《Kotlin in Action》8.1.4
+     * 「从字符串转换」侧边栏（div.fm-sidebar-block）下三个代码块曾被拉成两端对齐 —— 主题层
+     * `div{text-align:justify}`（tier 42）经继承传进书侧声明缺失的 pre。主题表在 pre/code 上
+     * 直接声明 left（同 tier 42）掐掉该路径；量过：46 本语料里书作者对 pre 的 text-align 声明
+     * 仅 1 条（left 值，覆盖后视觉零变化）、对 code 为 0 条。
+     */
+    @Test
+    fun `theme justify must not leak into pre nested under a justified div`() {
+        for (theme in listOf("traditional", "modern")) {
+            val pre = node("pre", children = listOf(MarkupElement("#text", text = "fun main() {}")))
+            val div = node("div", children = listOf(pre))
+            val root = node("body", children = listOf(div))
+            val prof = profile(theme)
+            val engine = StyleComputer(
+                prof.bodyPx, StyleSheet(emptyList()), emptyList(),
+                CssLayouter(prof).themeSheetFromProfile(prof),
+            )
+            assertEquals(
+                "$theme: pre inherits div justify", TextAlign.LEFT, engine.compute(root)[pre]!!.textAlign,
+            )
+        }
+    }
+
+    /**
      * 原书设置 = 书作者说了算：主题表整张不加载，所以正文对齐完全不参与层叠，
      * `<p>` 落回 UA 默认 left。书上写了 `text-align` 才由书的说了算。
      */

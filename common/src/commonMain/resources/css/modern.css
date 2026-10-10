@@ -33,5 +33,10 @@ p, li { margin: 1em 0; }
  * 原书设置 不加载本表 ⇒ 这条完全不参与, 由书作者的 text-align 说了算。 */
 p, div, li, blockquote, dd, td { text-align: justify; }
 
+/* 代码块同样不两端对齐: div 的 justify 是继承属性, 会漏进嵌套的 pre (真书《Kotlin in Action》
+ * 8.1.4 侧边栏代码块即中招)。与 justify 同为 theme=42 基线预设, 直接在 pre/code 上声明 left
+ * 掐掉继承路径; 完整口径 (选择器/量化/层叠代价) 见 traditional.css 同名节。 */
+pre, code { text-align: left; }
+
 /* 无尺寸约束的块级/独图插图拉满正文宽度 (ChapterPreprocessor 仅在原书未设 width/max-width 时打类) */
 .orilumn-fullwidth-image { width: 100%; }

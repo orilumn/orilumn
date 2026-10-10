@@ -84,6 +84,20 @@ class FlipController(
     private var prefetchJob: Job? = null
     private var settleJob: Job? = null
 
+    /**
+     * 回滚落位协程（`rollback()` 里的 `flipAwait(-dir)`）。
+     *
+     * 与 [prefetchJob] 一样**不可取消**：`adjacent`/`findAdjacentPage` 会推进引擎指针，
+     * 半路取消 = 引擎指针与显示层错位（下一页从错误的源页出发）。但它区别于
+     * [settleJob]（结算动画，数据已落定，可安全取消）。
+     *
+     * 早先它是不被跟踪的孤儿协程（`scope.launch` 结果丢弃）：phase 已回 Idle 时它仍在途，
+     * 快速连翻时新手势拿到了空会话，随后它收尾的 `clear()` 把新会话的落位掐掉
+     * ⇒「划了不翻页 + 当页闪烁」。记进字段后，在途期间被 [beginDrag]/[beginProgrammatic]
+     * 当作忙碌丢弃，且 [clear] 能收掉它。
+     */
+    private var rollbackJob: Job? = null
+
     /** 纯状态机（无 Compose 依赖，可直测）。 */
     val session: FlipSession = FlipSession()
 
@@ -126,6 +140,8 @@ class FlipController(
         settleJob = null
         prefetchJob?.cancel()
         prefetchJob = null
+        rollbackJob?.cancel()
+        rollbackJob = null
         session.abort()
         fromPos.value = null
         targetPos.value = null
@@ -158,9 +174,15 @@ class FlipController(
         settleJob = null
         prefetchJob?.cancel()
         prefetchJob = null
+        rollbackJob?.cancel()
+        rollbackJob = null
         session.abort()
         progress.value = 0f
-        scope.launch {
+        // 回滚落位记进 rollbackJob（不是孤儿协程）：这段 flipAwait **不可取消**
+        // （adjacent 会推进引擎指针），在途期间 phase 已是 Idle，新手势必须被
+        // 忙碌墙挡掉，否则其收尾 clear() 会把新人会话的落位掐掉（快速连翻
+        // 「划了不翻页」的根因之一，日志：dispatch 后无 result、直接 settle instantly）。
+        rollbackJob = scope.launch {
             var landed = flipAwait(-dir)
             // try-lock 不排队：被占时立刻失败，重试一次。
             if (landed == null) {
@@ -188,10 +210,33 @@ class FlipController(
      *
      * 方向在此定，不是等 [updateSlide]：未就绪时那里不写回渲染，而方向是渲染层
      * `shift = pageW * direction` 的因子，恒 0 会让目标页叠在原位而非从侧面滑入。
+     *
+     * ## 忙碌墙（快速连翻「划了不翻页 + 当页闪烁」的根因收敛点）
+     *
+     * 早先这里无任何守卫：上一手势的结算动画还在飞（90–300ms 的尾巴）就冲进来，
+     * 覆盖 fromPos/targetPos/direction，却**不取消旧 settleJob**——旧动画照旧逐帧写
+     * progress（用新 direction 画错的位移 ⇒ 当页闪烁/抽搐），随后旧 clear() 把新
+     * 手势的 prefetchJob 掐掉 ⇒「划了不翻页」。两类在途分别处置：
+     *
+     * - **落位在途**（[prefetchJob] / [rollbackJob]）：**不可以取消**——`adjacent`/`findAdjacentPage`
+     *   已推进引擎指针，半路取消是引擎与显示层次久错位（下一页从错误源页出发）。
+     *   沿用漏斗 BUSY-DROP 口径**丢弃**这次起手（本次拖动整场不采纳位移、不翻页，
+     *   在途落位自己收尾）。
+     * - **结算动画在飞**（[settleJob]）：数据早已在起手那次 commit 落定，**可以安全取消**。
+     *   取消旧动画、abort 会话，从「已落定的当前页」干净起手——新一划就从落定页跟手，
+     *   不再等 90–300ms 尾巴（少等待；与「分页调度总则」第一优先级一致）。
      */
     fun beginDrag(src: ReaderPos, direction: Int, enabled: Boolean, coverVisible: Boolean) {
         if (!enabled || coverVisible) return
-        session.onDown()
+        if (prefetchInFlight() || rollbackInFlight()) {
+            log("slide-begin DROPPED busy (${if (prefetchInFlight()) "landing" else "rollback-nav"} in flight)")
+            return
+        }
+        // 残留结算动画（含「最后一帧 → clear()」那个微窗口，见 slideActive KDoc）：
+        // 取消它，避免旧动画继续写 progress/direction 并在此后 clear() 掐掉本次落位。
+        settleJob?.cancel()
+        settleJob = null
+        session.abort()
         // 起手页 = 「当前页」身份，必须在这里存一份：落位在预取协程里发生，
         // 完成后 openPos 就是目标页了。不存的话渲染层 `fromPos ?: pos` 会退回用
         // pos（=目标页）⇒ 两张画布都画目标页，观感是「目标页空白、内容重复」。
@@ -318,6 +363,9 @@ class FlipController(
     /** 预取协程是否仍在途（锁未抢到 / 落位未回 / 等图未完）。 */
     private fun prefetchInFlight(): Boolean = prefetchJob?.let { it.isActive && !it.isCompleted } ?: false
 
+    /** 回滚落位协程是否在途（phase 已 Idle 也可能为 true——见 [rollbackJob] KDoc）。 */
+    private fun rollbackInFlight(): Boolean = rollbackJob?.let { it.isActive && !it.isCompleted } ?: false
+
     /**
      * 等在途的落位收场，然后按结果结算。等待有界，超时则强制对齐（见 [endDrag]）。
      *
@@ -366,11 +414,20 @@ class FlipController(
     /**
      * 点按/方向键的无拖动起手：判忙 + 把会话置为 Dragging、方向定死、progress 从 0。
      *
-     * 返回 false = 会话不空闲（有动画在飞），调用方应**丢弃**这次翻页，与
-     * [AnchorFunnel] 的 BUSY-DROP 同一口径：不排队、不打断进行中的动画。
+     * 返回 false = 会话不空闲（有动画在飞 / 落位回滚在途），调用方应**丢弃**这次翻页，
+     * 与 [AnchorFunnel] 的 BUSY-DROP 同一口径：不排队、不打断进行中的动画。
      * 紧接着调 [beginProgrammaticPage] 落位。
+     *
+     * 判忙不能只看 phase：落位/回滚协程在途时 phase 可能已是 Idle（`rollback()`
+     * 先 abort 会话再起落位协程），若放行，那个在途协程的收尾 `clear()` 会掐掉
+     * 本次新起的落位 ⇒ 快速连翻/连点「点了没反应」（与 [beginDrag] 的忙碌墙同源）。
      */
-    fun beginProgrammatic(direction: Int): Boolean = session.beginProgrammatic(direction)
+    fun beginProgrammatic(direction: Int): Boolean {
+        if (direction == 0) return false
+        if (session.phase != FlipSession.Phase.Idle) return false
+        if (prefetchInFlight() || rollbackInFlight() || settleJob != null) return false
+        return session.beginProgrammatic(direction)
+    }
 
     /**
      * 点按/方向键翻页的落位（无手指，progress 从 0 起）。

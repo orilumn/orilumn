@@ -157,4 +157,122 @@ class FlipControllerTest {
         assertFalse("清场后不应再驱动动画", ctl.slideActive(enabled = true))
         assertEquals(0f, ctl.progress.value, 0f)
     }
+
+    // ---- 快速连翻：beginDrag 的忙碌墙（「划了不翻页 + 当页闪烁」回归锁）----
+
+    @Test
+    fun `结算动画在飞时beginDrag接管——取消旧动画从落定页干净起手`() = runBlocking {
+        val ctl = controller({ pos(100) }, mutableListOf(), this)
+        // 上一手势已起手并进入结算（数据落定为 pos(100)，动画仍在飞）。
+        ctl.beginDrag(pos(0), direction = 1, enabled = true, coverVisible = false)
+        ctl.updateDrag(dx = -300f, pageW = 2560f, enabled = true)
+        kotlinx.coroutines.yield() // 让上一手势的落位协程真正跑完（targetPos=pos(100)）
+        ctl.session.beginSettle(FlipSession.Decision.COMMIT)
+        ctl.session.onSettleProgress(0.6f)
+        ctl.progress.value = 0.6f
+        assertEquals(FlipSession.Phase.Settling, ctl.session.phase)
+        // 新一划（快速连翻，落位返回同一页）——必须接管而不是并发覆盖。
+        ctl.beginDrag(pos(100), direction = 1, enabled = true, coverVisible = false)
+        // 旧会话被 abort、旧动画（settleJob）被取消 ⇒ 状态从「落定页」干净起手。
+        assertEquals(FlipSession.Phase.Idle, ctl.session.phase)
+        assertEquals(100, ctl.fromPos.value?.slice?.charStart)
+        assertNull("目标页重置，等新落位", ctl.targetPos.value)
+        assertEquals(0f, ctl.progress.value, 0f)
+        assertEquals(1, ctl.direction.value)
+        ctl.clear()
+    }
+
+    @Test
+    fun `落位在途时beginDrag丢弃——不得取消在途落位`() = runBlocking {
+        val gate = kotlinx.coroutines.CompletableDeferred<ReaderPos?>()
+        var landingCalls = 0
+        val ctl = FlipController(
+            flipAwait = { landingCalls++; gate.await() }, // 挂住 ⇒ 第一手势落位在途
+            forceOpenPos = {},
+            scope = this,
+            log = {},
+            allowAnimation = false,
+        )
+        ctl.beginDrag(pos(0), direction = 1, enabled = true, coverVisible = false)
+        ctl.updateDrag(dx = -300f, pageW = 2560f, enabled = true)
+        kotlinx.coroutines.yield() // 让落位协程真正起跑（挂死在 gate.await 上）
+        assertEquals("第一手势应已在落位", 1, landingCalls)
+        assertEquals(0, ctl.fromPos.value?.slice?.charStart)
+        // 新一划落在在途落位上：BUSY-DROP——不能覆盖会话、更不能取消在途 adjacent。
+        ctl.beginDrag(pos(100), direction = 1, enabled = true, coverVisible = false)
+        assertEquals("在途落位不得被新一划取消", 1, landingCalls)
+        assertEquals("fromPos 不得被覆盖", 0, ctl.fromPos.value?.slice?.charStart)
+        assertTrue("会话仍在 Dragging", ctl.session.phase == FlipSession.Phase.Dragging)
+        gate.complete(pos(100))
+        ctl.clear()
+    }
+
+    @Test
+    fun `回滚落位在途时beginDrag丢弃——孤儿clear不再掐新会话`() = runBlocking {
+        val gate = kotlinx.coroutines.CompletableDeferred<ReaderPos?>()
+        var landingCalls = 0
+        val ctl = FlipController(
+            flipAwait = { landingCalls++; gate.await() },
+            forceOpenPos = {},
+            scope = this,
+            log = {},
+            allowAnimation = false,
+        )
+        ctl.beginDrag(pos(0), direction = 1, enabled = true, coverVisible = false)
+        ctl.updateDrag(dx = -300f, pageW = 2560f, enabled = true)
+        kotlinx.coroutines.yield()
+        assertEquals(1, landingCalls)
+        // 直接触发回滚（回弹路径）：rollbackJob 起落位协程（phase 已回 Idle）。
+        ctl.rollback(navigateBack = true)
+        kotlinx.coroutines.yield() // 让回滚落位协程真正起跑
+        assertEquals(FlipSession.Phase.Idle, ctl.session.phase)
+        assertEquals("回滚落位应在途", 2, landingCalls) // +rollback 的 flipAwait(-1)
+        // 新手势在回滚落位在途时起手：必须丢弃，不能抢在孤儿 clear() 前覆盖会话。
+        ctl.beginDrag(pos(10), direction = -1, enabled = true, coverVisible = false)
+        assertEquals(2, landingCalls)
+        assertEquals("fromPos 仍是回滚那次的起手页", 0, ctl.fromPos.value?.slice?.charStart)
+        gate.complete(pos(0))
+        ctl.clear()
+    }
+
+    @Test
+    fun `落位在途时点按翻页丢弃——beginProgrammatic 走同一道忙碌墙`() = runBlocking {
+        val gate = kotlinx.coroutines.CompletableDeferred<ReaderPos?>()
+        val ctl = FlipController(
+            flipAwait = { gate.await() },
+            forceOpenPos = {},
+            scope = this,
+            log = {},
+            allowAnimation = false,
+        )
+        ctl.beginDrag(pos(0), direction = 1, enabled = true, coverVisible = false)
+        ctl.updateDrag(dx = -300f, pageW = 2560f, enabled = true)
+        kotlinx.coroutines.yield()
+        // 落位在途（phase Dragging）时点按/方向键不得起新会话。
+        assertFalse("落位在途应丢弃程序化翻页", ctl.beginProgrammatic(1))
+        assertFalse(ctl.beginProgrammatic(-1))
+        gate.complete(pos(100))
+        ctl.clear()
+    }
+
+    @Test
+    fun `回滚落位在途时点按翻页丢弃`() = runBlocking {
+        val gate = kotlinx.coroutines.CompletableDeferred<ReaderPos?>()
+        val ctl = FlipController(
+            flipAwait = { gate.await() },
+            forceOpenPos = {},
+            scope = this,
+            log = {},
+            allowAnimation = false,
+        )
+        ctl.beginDrag(pos(0), direction = 1, enabled = true, coverVisible = false)
+        ctl.updateDrag(dx = -300f, pageW = 2560f, enabled = true)
+        kotlinx.coroutines.yield()
+        ctl.rollback(navigateBack = true) // rollbackJob 在途、phase 已 Idle
+        kotlinx.coroutines.yield()
+        // 旧守卫只看 phase ⇒ Idle 会放行；新守卫必须把在途回滚落位也当忙碌。
+        assertFalse("回滚落位在途应丢弃程序化翻页", ctl.beginProgrammatic(1))
+        gate.complete(pos(0))
+        ctl.clear()
+    }
 }

@@ -8,6 +8,7 @@ import orilumn.reader.engine.skia.DecodedImage
 import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.engine.skia.LineWindowDrawer
 import orilumn.reader.engine.skia.PageBackground
+import kotlin.math.roundToInt
 
 /**
  * P0b 栅格请求（**页坐标**，未归一）：一页像素的全部输入。
@@ -28,6 +29,15 @@ class PageRasterSpec(
     val contentRight: Float,
     val contentBottom: Float,
     val contentRevision: Int,
+    /**
+     * 栅格缩放（1f = 与内容区 1:1 全分辨率）。小于 1 ⇒ 离屏 surface 按比例缩小，
+     * 贴回内容区时再放大（见 [PageRasterStore.obtain]）。
+     *
+     * 这是「两级分辨率」的**第二级**（设计文档 §3.3）：卷曲/滑动过程中纹理被
+     * 压缩/拉伸，全分辨率无视觉收益，1/2 只有 1/4 内存。当前 [PAGE_RASTER_SCALE]
+     * 取值见 `PageRaster.kt`。
+     */
+    val rasterScale: Float = 1f,
 ) {
     /** 内容指纹：同键下「内容没变」的判据（插图补解码会改它）。 */
     fun fingerprint(): PageRasterFingerprint =
@@ -38,10 +48,20 @@ class PageRasterSpec(
             images = images,
             pageBg = pageBg,
             contentRevision = contentRevision,
+            rasterScale = rasterScale,
         )
 
+    /** 内容区宽（逻辑像素，= 贴回的目标宽）。 */
     val widthPx: Int get() = (contentRight - contentRectLeft).toInt().coerceAtLeast(1)
+
+    /** 内容区高（逻辑像素，= 贴回的目标高）。 */
     val heightPx: Int get() = (contentBottom - contentRectTop).toInt().coerceAtLeast(1)
+
+    /** 离屏 surface 实际像素宽（= 内容区 × [rasterScale]）。 */
+    val surfaceWidthPx: Int get() = (widthPx * rasterScale).roundToInt().coerceAtLeast(1)
+
+    /** 离屏 surface 实际像素高（= 内容区 × [rasterScale]）。 */
+    val surfaceHeightPx: Int get() = (heightPx * rasterScale).roundToInt().coerceAtLeast(1)
 }
 
 /** [PageRasterStore.obtain] 的结果，顺带把「这次是命中还是重画」带出来给日志/测试看。 */
@@ -102,19 +122,29 @@ class PageRasterStore<T : Any>(
             if (key != null) {
                 cache.get(key, fingerprint)?.let { return@withLock PageRasterResult(it, true, 0L) }
             }
+            // 内容区尺寸（逻辑，贴回目标）与离屏 surface 尺寸（= 内容区 × 缩放）分开：
+            // 下面把绘制坐标一律当「内容区坐标」交给 drawPageContent，缩放由画布矩阵承担。
             val w = spec.widthPx
             val h = spec.heightPx
-            if (surface == null || w != width || h != height) {
-                width = w
-                height = h
+            val sw = spec.surfaceWidthPx
+            val sh = spec.surfaceHeightPx
+            if (surface == null || sw != width || sh != height) {
+                width = sw
+                height = sh
                 surface?.close()
-                surface = SkiaSurface.makeRasterN32Premul(w, h)
-                cache.clear() // 视口变了：旧尺寸页整池回收
+                surface = SkiaSurface.makeRasterN32Premul(sw, sh)
+                cache.clear() // 视口/缩放变了：旧尺寸页整池回收
             }
             val s = surface ?: return@withLock null
             val t0 = System.nanoTime()
+            // 缩放代理：surface 小于内容区时，把画布矩阵整体缩放，
+            // drawPageContent 仍按内容区坐标画（几何/顺序单源，两端一致），
+            // 贴回时再由平台侧放大到内容区。
+            val canvas = s.canvas
+            val saveCount = canvas.save()
+            if (spec.rasterScale != 1f) canvas.scale(spec.rasterScale, spec.rasterScale)
             drawPageContent(
-                canvas = s.canvas,
+                canvas = canvas,
                 contentLeft = spec.contentLeft,
                 contentRectLeft = spec.contentRectLeft,
                 contentRectTop = spec.contentRectTop,
@@ -127,6 +157,7 @@ class PageRasterStore<T : Any>(
                 h = h,
                 drawer = drawer,
             )
+            canvas.restoreToCount(saveCount)
             // encode 拿走 snapshot 的所有权：桌面恒等（零拷贝，直接持 skia Image），Android 转 Bitmap。
             // 所以只有 encode 失败时才在这里回收——成功路径回收等于把返回给调用方的页图提前释放。
             val snapshot = s.makeImageSnapshot()

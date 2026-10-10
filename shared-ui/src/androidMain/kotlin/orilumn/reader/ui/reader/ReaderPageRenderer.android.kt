@@ -6,6 +6,7 @@ import androidx.compose.ui.graphics.Canvas
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.platform.LocalContext
 import orilumn.reader.engine.skia.DecodedImage
 import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.engine.skia.PageBackground
@@ -32,7 +33,46 @@ import org.jetbrains.skia.Surface as SkiaSurface
  * 只靠 GC 会一路涨到 OOM（P0a 的单槽版本每次替换都 recycle，正是为此）。
  */
 @Composable
-actual fun rememberReaderPageRenderer(): ReaderPageRenderer = remember { AndroidReaderPageRenderer() }
+actual fun rememberReaderPageRenderer(): ReaderPageRenderer {
+    val ctx = LocalContext.current
+    val scale = remember { readRasterScaleDebug(ctx) ?: PAGE_RASTER_SCALE }
+    val cacheBytes = remember { readCacheBytesDebug(ctx) ?: PAGE_CACHE_BYTES }
+    return remember { AndroidReaderPageRenderer(ctx.applicationContext, scale, cacheBytes) }
+}
+
+/**
+ * 临时调试（「缩小截图」真机验证用，定稿前删）：用 `Settings.Global` 覆盖
+ * [PAGE_RASTER_SCALE]，一次构建即可在平板上扫多个档（改完须重启进程）：
+ *
+ * ```
+ * adb shell settings put global orilumn_raster_scale 0.7
+ * adb shell am force-stop orilumn.reader && adb shell am start -n orilumn.reader/.MainActivity
+ * adb shell settings delete global orilumn_raster_scale   # 恢回常量默认
+ * ```
+ *
+ * 未设/非法（不在 0.1..1）则回退常量默认。
+ */
+private const val RASTER_SCALE_SETTING = "orilumn_raster_scale"
+
+private fun readRasterScaleDebug(context: android.content.Context): Float? = runCatching {
+    android.provider.Settings.Global.getString(context.contentResolver, RASTER_SCALE_SETTING)
+        ?.trim()?.toFloat()?.takeIf { it in 0.1f..1f }
+}.getOrNull()
+
+/**
+ * 临时调试（同上，定稿前删）：用 `Settings.Global` 覆盖 [PAGE_CACHE_BYTES]（单位 MB），
+ * 用于在真机上量「池容量 → 预栅格重做率」。
+ *
+ * ```
+ * adb shell settings put global orilumn_page_cache_mb 192
+ * ```
+ */
+private const val CACHE_MB_SETTING = "orilumn_page_cache_mb"
+
+private fun readCacheBytesDebug(context: android.content.Context): Long? = runCatching {
+    android.provider.Settings.Global.getString(context.contentResolver, CACHE_MB_SETTING)
+        ?.trim()?.toLongOrNull()?.takeIf { it in 16L..1024L }?.times(1024L * 1024L)
+}.getOrNull()
 
 /**
  * skia Image → Compose [ImageBitmap]（Android actual，零编码像素搬运）。
@@ -44,7 +84,14 @@ actual fun skiaImageToImageBitmap(image: org.jetbrains.skia.Image): ImageBitmap?
 /** 页位图缓存预算（字节）：约 6 页（1200×1800 的页 ≈ 8.6MB）。低端机按内存调小。 */
 private const val PAGE_CACHE_BYTES = 56L * 1024 * 1024
 
-private class AndroidReaderPageRenderer : ReaderPageRenderer {
+private class AndroidReaderPageRenderer(
+    context: android.content.Context,
+    /** 本次运行的栅格缩放（调试覆盖优先，见 [readRasterScaleDebug]）。 */
+    private val rasterScale: Float,
+    /** 页位图缓存预算（调试覆盖优先，见 [readCacheBytesDebug]）。 */
+    cacheBytes: Long = PAGE_CACHE_BYTES,
+) : ReaderPageRenderer {
+    private val cacheBudgetMb = cacheBytes / 1024 / 1024
     // 淘汰回收的落点：预栅格已移到后台线程（见 Preraster.kt），LRU 淘汰可能发生在后台，
     // 而 `Bitmap.recycle()` 会把 native 像素立刻释放——若 UI 正在画同一张就崩/花屏。
     // 统一 post 到主线程回收：与绘制同线程，排在该帧之后，不会回收正在画的位图。
@@ -53,7 +100,7 @@ private class AndroidReaderPageRenderer : ReaderPageRenderer {
     // 命中判据 / 池容量 / 淘汰 / 离屏 surface 生命周期全在 store 里（与 Desktop 同一份，
     // 可脱离 GUI 直测，见 PageRasterStoreTest）；本 actual 只剩最后一跳：skia 图 → Bitmap。
     private val store = PageRasterStore<android.graphics.Bitmap>(
-        maxBytes = PAGE_CACHE_BYTES,
+        maxBytes = cacheBytes,
         sizeOf = { it.width * it.height * 4L },
         onEvict = { bmp -> mainHandler.post { runCatching { bmp.recycle() } } },
         // 唯一的平台缝：零编码像素桥（取代旧 JPEG 单跳）。
@@ -92,6 +139,7 @@ private class AndroidReaderPageRenderer : ReaderPageRenderer {
                 contentRight = contentRectRight,
                 contentBottom = contentRectBottom,
                 contentRevision = contentRevision,
+                rasterScale = rasterScale,
             ),
         )
         if (r == null) {
@@ -103,7 +151,8 @@ private class AndroidReaderPageRenderer : ReaderPageRenderer {
         Logger.w(
             "Orilumn.SkiaBridge",
             "raster n=${lines.size} imgs=${images.size} ${r.rasterMs}ms hit=${r.cacheHit} " +
-                "pool=$pages/${bytes / 1024 / 1024}MB " +
+                "px=${r.value.width}x${r.value.height} scale=$rasterScale " +
+                "pool=$pages/${bytes / 1024 / 1024}MB budget=${cacheBudgetMb}MB " +
                 "key=${rasterKey?.chapter}/${rasterKey?.charStart}-${rasterKey?.charEnd}" +
                 " rev=${rasterKey?.contentRevision}",
         )
@@ -149,6 +198,7 @@ private class AndroidReaderPageRenderer : ReaderPageRenderer {
                 contentRight = contentRectRight,
                 contentBottom = contentRectBottom,
                 contentRevision = contentRevision,
+                rasterScale = rasterScale,
             ),
         ) ?: return false
         Logger.w(
@@ -159,6 +209,12 @@ private class AndroidReaderPageRenderer : ReaderPageRenderer {
         )
         return true
     }
+
+    /**
+     * 贴回内容区的 Paint：显式开 FILTER_BITMAP —— `rasterScale < 1`（代理位图）时是放大贴回，
+     * 默认 Paint（不滤波）会走最近邻，屏幕上是 2×2 块状锯齿；双线性只是变柔，不会块状。
+     */
+    private val bitmapPaint = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
 
     private fun drawPageBitmap(
         canvas: Canvas,
@@ -172,7 +228,7 @@ private class AndroidReaderPageRenderer : ReaderPageRenderer {
             bmp,
             android.graphics.Rect(0, 0, bmp.width, bmp.height),
             android.graphics.RectF(left, top, right, bottom),
-            null,
+            bitmapPaint,
         )
     }
 }

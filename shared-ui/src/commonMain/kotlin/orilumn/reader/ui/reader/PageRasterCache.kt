@@ -52,6 +52,12 @@ data class PageRasterFingerprint(
     val images: List<PageImageSlot>,
     val pageBg: Int,
     val contentRevision: Int,
+    /**
+     * 该页位图按哪个缩放栅格出来（[PageRasterSpec.rasterScale]）。进指纹是**防串档**：
+     * 将来「静止全分辨率 + 动画代理」两级并存时，同一页会有 1f 与 0.5f 两张图，
+     * 键相同，命中判据必须能把它们分开。
+     */
+    val rasterScale: Float = 1f,
 )
 
 /**

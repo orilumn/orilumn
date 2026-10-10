@@ -171,8 +171,9 @@ class TaskScheduler(
     /**
      * 栅格抢占：同 [cancelLowerThan]，但**放行当前章的 ±1 页预排**（`pg:` 且处于两个 d=1 档）。
      *
-     * 为什么不能用 [cancelLowerThan] 一刀切：三页截图窗口（当前页 ±1）的像素源正是这两条 ±1
-     * 装配任务（`scheduleWindowPrefill` 里 `assemble=true` 的那两步）。栅格未命中时把它们一并
+     * 为什么不能用 [cancelLowerThan] 一刀切：方向侧预栅格的版式源，以及下一次落位命中
+     * `pageCache` 快路径的前提，正是这两条 ±1 装配任务（`scheduleWindowPrefill` 里
+     * `assemble=true` 的那两步）。栅格未命中时把它们一并
      * 取消，等于**反手掐掉自己下一步要用的 ±1**——`pageCache` 永远热不起来，于是每次翻页落位都要
      * 走 `ensurePageRangeShaped` 同步重排（真机 150–300ms），且栅格永远 miss，形成冷稳态自锁。
      * 与总则「截图跟在 ±1 页分页完成后」一致：±1 是栅格的前置，不是可牺牲的后台。
@@ -194,7 +195,7 @@ class TaskScheduler(
         }
     }
 
-    /** `pg:<chapter>:<page>` 且处于两个 d=1 档（方向侧 / 反侧）—— 三页截图窗口的像素源。 */
+    /** `pg:<chapter>:<page>` 且处于两个 d=1 档（方向侧 / 反侧）—— ±1 邻页的版式源（第二优先级）。 */
     private fun isPlusMinusOnePrefill(key: String, priority: Int): Boolean =
         key.startsWith("pg:") && priority <= PRIO_PAGE_PREV
 

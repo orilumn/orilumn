@@ -10,6 +10,9 @@ import orilumn.reader.engine.skia.DecodedImage
 import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.engine.skia.PageBackground
 import orilumn.reader.io.Logger
+import org.jetbrains.skia.Paint
+import org.jetbrains.skia.Rect
+import org.jetbrains.skia.SamplingMode
 import org.jetbrains.skia.Image as SkiaImage
 
 /**
@@ -82,6 +85,7 @@ private class JvmReaderPageRenderer : ReaderPageRenderer {
                 contentRight = contentRectRight,
                 contentBottom = contentRectBottom,
                 contentRevision = contentRevision,
+                rasterScale = PAGE_RASTER_SCALE,
             ),
         )
         if (r == null) {
@@ -95,8 +99,25 @@ private class JvmReaderPageRenderer : ReaderPageRenderer {
             "page-raster n=${lines.size} imgs=${images.size} ${r.value.width}x${r.value.height} " +
                 "${r.rasterMs}ms hit=${r.cacheHit} pool=$pages/${bytes / 1024 / 1024}MB",
         )
-        // 1:1 贴回（栅格尺寸 == 内容区尺寸，故无缩放；坐标取整避免亚像素抖动）。
-        canvas.skiaCanvas.drawImage(r.value, contentRectLeft.toInt().toFloat(), contentRectTop.toInt().toFloat())
+        // 贴回内容区。栅格缩放 = 1 时是 1:1（坐标取整避免亚像素抖动，保持与旧路径逐像素一致）；
+        // 小于 1（代理位图）时按内容区放大，LINEAR 采样避免锯齿。
+        val img = r.value
+        val dstL = contentRectLeft.toInt().toFloat()
+        val dstT = contentRectTop.toInt().toFloat()
+        val dstW = (contentRectRight - contentRectLeft).toInt()
+        val dstH = (contentRectBottom - contentRectTop).toInt()
+        if (img.width == dstW && img.height == dstH) {
+            canvas.skiaCanvas.drawImage(img, dstL, dstT)
+        } else {
+            canvas.skiaCanvas.drawImageRect(
+                img,
+                Rect.makeWH(img.width.toFloat(), img.height.toFloat()),
+                Rect.makeLTRB(dstL, dstT, dstL + dstW, dstT + dstH),
+                SamplingMode.LINEAR,
+                Paint(),
+                false,
+            )
+        }
     }
 
     /** 预栅格：与 [drawLines] 共用同一个 store，故同样限 UI 线程（见接口 KDoc）。 */
@@ -131,6 +152,7 @@ private class JvmReaderPageRenderer : ReaderPageRenderer {
                 contentRight = contentRectRight,
                 contentBottom = contentRectBottom,
                 contentRevision = contentRevision,
+                rasterScale = PAGE_RASTER_SCALE,
             ),
         )
         if (r == null) {

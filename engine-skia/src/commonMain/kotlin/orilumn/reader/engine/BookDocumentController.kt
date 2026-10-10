@@ -1089,7 +1089,7 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
             // 翻页线程上即崩（开发期暴露）；重排路径各自 runCatching 记 e 后丢弃本轮。
             throw it
         }
-        // 三页截图窗口：版式已就绪（小章**全章排完** / 磁盘命中目标窗）→ 立即让用户层补栅 ±1。
+        // 版式已就绪（小章**全章排完** / 磁盘命中目标窗）→ 立即让用户层补栅方向侧那一张。
         // 大章磁盘未命中已在 [startAnchorStream] 处 `return`（临时表路径自带逐页信号），不到这里。
         notifyPrefillReady(unit.chapterIndex)
     }
@@ -1859,7 +1859,7 @@ private fun notifyFlip() {
  * 幂等可重入：被抢占的后台活按状态表/代际门自行重启（§3.6：低优可被无限推迟，不加 aging）。
  *
  * **但必须放行当前章的 ±1 页预排**（[TaskScheduler.cancelForRaster]，不是裸 [notifyFlip]）：
- * ±1 装配正是三页截图窗口（当前页 ±1）的像素源，也是下一次翻页落位能命中
+ * ±1 装配正是方向侧预栅格（`Preraster.kt`）的版式源，也是下一次翻页落位能命中
  * `pageCache` 快路径（`ensurePageRangeShaped` pagecache-hit）的前提。裸砍等于「反手掐掉
  * 自己下一步要用的 ±1」——真机（vivo PA2353）实测：连读翻页时每次落位都走同步重排
  * `shape=115–176ms`、`target-ready 137–308ms`，预栅格一次都不触发，形成冷稳态自锁；
@@ -2182,9 +2182,10 @@ private fun scheduleWindowPrefill(unit: ChapterUnit, targetPage: Int, dir: Int) 
             is NeighborItem.Page -> steps.add(RollingStep(
                 key = "pg:$chapterIdx:${item.index}",
                 priority = item.tier,
-                // 三页截图窗口（当前页 ±1）需要**两侧**邻页都能被预栅格读取：d=1 的两侧
-                //（第2档方向侧 + 第3档反侧）都装配 product 进 `pageCache`。早先只装方向侧
-                //（注释：翻页节奏只吃一页），但预栅格要补满 ±1，反侧不装配则永远只能实时栅格。
+                // 三页窗口 {反侧, 当前, 方向侧} 需要**两侧**邻页的版式都能被读到：总则第 2 条
+                // 把 d=1 两侧都列为第二优先级（方向侧 = 第2档「下一页」、反侧 = 第3档「上一页」），
+                // 两侧都装配 product 进 `pageCache`。用户层预栅格只补**方向侧**像素（反侧＝上一刻的
+                // 当前页，池中命中），但反侧版式仍要备好——回翻时显示路径直接读它。
                 body = {
                     prefillPageTask(
                         chapterIdx, item.index, targetPage,
@@ -2350,7 +2351,8 @@ private suspend fun prefillPageTask(chapterIdx: Int, page: Int, anchor: Int, ass
     }
     if (stored) {
         Logger.w(logTag, "win-prefill ch=$chapterIdx page=$page cached")
-        // ±1 页分页（装配）完成 → 抛信号让用户层立即补栅。三页窗口的两侧都经此路径（assemble 为真）。
+        // ±1 页分页（装配）完成 → 抛信号让用户层立即补栅。两侧都经此路径（assemble 为真）：
+        // 用户层只补方向侧那一张像素，反侧的版式供落位/回翻命中 `pageCache` 快路径。
         // 本函数跑在调度器线程，`onPrefillReadyListener` 会把执行切回 UI 线程（见 TabletReaderHost）。
         notifyPrefillReady(chapterIdx)
     }
@@ -3528,7 +3530,7 @@ private fun finishCanonicalBackground(
     /**
      * 预栅格读「非当前页」的绘制源（**只读**，不改指针、不改窗口）。
      *
-     * 三页截图窗口（当前页 ±1）要求 [pageLines]/[pageImages]/[pageBackgrounds] 能读 ±1 页：
+     * 邻页预栅格要求 [pageLines]/[pageImages]/[pageBackgrounds] 能读 ±1 页：
      *  - **临时表**：每页各有自己的 `TempPage.layout`，行号是**该页局部序**（`slice.firstLine=0`）。
      *    早先无条件读 `tempRenderLayout`（当前页）⇒ 拿邻居 slice 去读会读到**当前页的行**（栅错页）。
      *  - **磁盘表**：窗口内直用 `unit.layout`；窗口外（增量 1 页窗）用 `unit.pageCache` 里已装配的

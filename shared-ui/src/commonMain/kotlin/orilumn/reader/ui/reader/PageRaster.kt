@@ -117,3 +117,21 @@ private fun drawPageImages(canvas: Canvas, images: List<PageImageSlot>, contentL
 
 /** 缺图占位色（复刻旧 `drawPageImage` 的 `0xFFDDDDDD`）。 */
 private const val PLACEHOLDER_GRAY = 0xFFDDDDDD.toInt()
+
+/**
+ * 页栅格缩放（「两级分辨率」第二级，见设计文档 §3.3）。
+ *
+ * **1f** = 与内容区 1:1 全分辨率（P0b 起的原状）。**小于 1** ⇒ 离屏 surface 按比例缩小、
+ * 贴回内容区时放大：内存按 `scale²` 下降（0.5 ⇒ 1/4），栅格耗时基本不变
+ * （真机实测 0.5/0.7/0.85/1.0 冷栅格都在 680–910ms —— 成本在文字排版与字形，不在像素填充）。
+ *
+ * 动机：卷曲/滑动过程中纹理被压缩/拉伸，全分辨率无视觉收益（平板单页 14.3MB、
+ * 56MB 池只装 3 页，零余量）。1/2 代理把单页压到 3.6MB，池能装十几页。
+ *
+ * **固定为 1f，阅读页维持原样**（2026-10 决定）：本值作用于**包括静止显示页**在内的
+ * 全部栅格，0.5 时正文边能量掉到 12%，肉眼能看出柔——静止阅读不该承担这个代价。
+ * 缩图只能出现在**翻页动画那一级**，且不得改动静置画面的像素；
+ * 分工与落地方式见 §3.3（代理位图），不要用「把本常量调小」来实现。
+ * `ReaderPageRenderer.android.kt` 里的 `readRasterScaleDebug` 是实验钩子，不是入口。
+ */
+internal const val PAGE_RASTER_SCALE = 1f

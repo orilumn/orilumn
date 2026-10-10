@@ -29,12 +29,17 @@ import orilumn.reader.io.Logger
  * 所以像素该在预排完成那一刻就跟上，而不是等绘制。这也是 moon+ 的做法：它静止时就
  * `getPageShot()` 预先截好下一页（`tmpFlipShot2`），滑动时直接复用。
  *
- * ## 截图窗口 = 当前页 ±1（三页）
+ * ## 每次只栅**方向侧**那一张（§3.2 方向记录）
  *
  * 引擎在「±1 页分页完成」时抛信号（临时表逐页成形 / 磁盘表 d=1 两侧装配 / 小章全章排完），
- * 用户层据**当前三页截图窗口的需要**立即补栅：一次信号补**两侧各一张**（当前页由绘制同步栅格），
+ * 用户层据翻页方向补**一张**像素即可。窗口 {反侧, 当前, 方向侧} 三页里：
+ *  - **反侧 = 上一刻的当前页**，必然还在池中（命中 0ms）—— 补它是重复劳动；
+ *  - 当前页由绘制同步栅格；
+ *  - **只有方向侧是缺的**。
  * 不单独设置优先级、不排队（§0：需要得越快 → 越靠前；排队＝把成本推给用户）。
- * 方向侧先栅（§3.1 每层先方向侧），反侧随后。
+ *
+ * 补反侧不只是白做：缓存是 access-order LRU，读它会给它续命，
+ * 于是被挤出去的反而可能是方向侧那一张（真机实测：两侧版 16 次翻页 29 次整页真栅格）。
  *
  * ## 指纹必须与 UI 首帧逐字一致，否则照样 miss
  *
@@ -82,12 +87,12 @@ fun PrerasterOnPrefill(
         val bgCacheNow = bgCacheRef.value
         val dirNow = dirRef.value
         val posNow = posRef.value
-        // 三页截图窗口 = 当前页 ±1：每次信号到达，补**两侧各一张**（当前页由绘制同步栅）。
-        // 顺序：方向侧优先（§3.1 每层先方向侧；§0 需要得越快越靠前），再补反侧。
+        // 只补**方向侧**那一张（§3.2 方向记录）：反侧就是上一刻的当前页、必然还在池中，
+        // 补它是重复劳动，且会给它续命（access-order LRU）而挤掉方向侧。
         // 不设第二套优先级：抢占仍由唯一钩子负责——栅格未命中时 `onRasterMiss` →
         // `controller.onForegroundRaster()` → `cancelForRaster(PRIO_FLIP)`（§5「唯一钩子」）。
         // 该钩子与翻页的 `notifyFlip()` 同源，但**放行当前章的 ±1 页预排**（`pg:` d=1 两档）：
-        // ±1 正是本窗口要截的像素源，砍掉它会让 `pageCache` 永热不起来（真机 137–308ms/次）。
+        // ±1 是方向侧像素的版式来源，砍掉它会让 `pageCache` 永热不起来（真机 137–308ms/次）。
         // 预栅格自己再判一套「要不要让路」只会出错：第三版按「是否会话
         // 目标页」判，把预栅格整个掐死（真机：temp prefill 信号持续在发，preraster 只触发 7 次，
         // 每页仍现场栅 75~179ms ⇒ 每次翻页 200~250ms 空白）。
@@ -110,15 +115,13 @@ fun PrerasterOnPrefill(
             val effDir = if (dirNow() == 0) 1 else dirNow()
             prerasterBusy.value = true
             try {
-                for (d in intArrayOf(effDir, -effDir)) {
-                    // **必须用只读的 peekAdjacent**：`adjacent` 是有副作用的真导航（引擎 tempNav
-                    // 推进指针），预栅格调它会在无手势时把指针多推一格 ⇒ 真机症状
-                    // 「翻页完成后又跳了一页」（19:56:25日志）。
-                    val target = runCatching { hostNow.peekAdjacent(anchor, d) }.getOrNull()
-                    if (target == null) {
-                        Logger.d("Orilumn.TAP", "preraster window: peek d=$d ch=$chapter → null")
-                        continue
-                    }
+                // **必须用只读的 peekAdjacent**：`adjacent` 是有副作用的真导航（引擎 tempNav
+                // 推进指针），预栅格调它会在无手势时把指针多推一格 ⇒ 真机症状
+                // 「翻页完成后又跳了一页」（19:56:25日志）。
+                val target = runCatching { hostNow.peekAdjacent(anchor, effDir) }.getOrNull()
+                if (target == null) {
+                    Logger.d("Orilumn.TAP", "preraster window: peek d=$effDir ch=$chapter → null")
+                } else {
                     prerasterPage(
                         host = hostNow,
                         pos = target,

@@ -28,7 +28,7 @@ android {
         // 指纹自动导出（见 common/build.gradle.kts），引擎源码一变旧表自动作废。
         // `versionCode` 在分页缓存这条路上只是「发版时全量作废一次」的兜底（生产额外成本 0），
         // 版本号因此只是**发布标记**，不参与正确性。
-        versionCode = 23
+        versionCode = 24
         versionName = appVersionName
 
         // skiko 只发 arm64/x64 .so（无 32 位）：过滤后 32 位设备不再安装，避免运行时缺库崩溃

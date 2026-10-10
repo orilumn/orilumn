@@ -1172,6 +1172,32 @@
 
 - 批注/修订模块，以及修订后的 epub 导出、批注导出
 
+- **书内脚注的「点击弹窗」呈现（2026-10-10 登记，未动手）**：
+  书里脚注标记形如 `<a class="note-d" href="xnotes.xhtml#n.0001.1.r"><sup>[1]</sup></a>`
+  （原文脚注；见 `P4cInternallinksReproTest.footnote sup link resolves cross-chapter`）。
+  （术语：指向**注文章节**的这类结构上实为**尾注** endnote，读者口语通称脚注；本条目两者同办，UI 弹层不分家。）
+  **现状已具备**：(a) `<a><sup>[1]</sup></a>` 解析成链接区间（`LinkRanges`）；(b) 上标字形可稳定命中
+  （`LineHitTest`）；(c) 跨章解析目标（`LinkTargets.resolveLinkTarget`）；(d) `BookDocumentController.linkTargetAt`
+  / `openLinkTarget` 命中并跳到注文所在章 + 片段。**缺的是「就地弹窗」**：点 `[1]` 时用浮层显示注文正文
+  （含「标记 → 弹层」「弹层 → 返回原位」双向），而不是跳走离开当前阅读位置。
+  - 待决：① 注文取用口径（按 `href` fragment 从目标章抽该节点文本/轻排版，还是让排版层单节点布局）；
+    ② 弹层内容排版基准（目标章版心 ≠ 当前版心，口径须与页内一致，否则换行位置不同）；
+    ③ 跨页/跨章脚注的滚动定位与「返回原位」；④ 双端一致（KMP+CMP：浮层属用户层，命中/解析信息由引擎层给）。
+  - **与上方「批注/修订模块」条目区分**：那条是**读者自己**的批注/修订与导出，本条是**书自带注文**的呈现。
+
+- **`pre`/`code` 语法高亮（2026-10-10 登记，未动手）**：
+  **现状**：代码块只用书内 CSS 的 `color`（`ColorRuns` 把一级联 `colorHex` 投影成叶文本着色的唯一核心），
+  **没有按语言词法着色**。语言标记在语料里两处：`class="language-*"`（标准）与 `class="highlight"`（Pygments），
+  但**代码块的 tag 常是 `p`**，引擎靠 tag 判不出代码语境——已在 `InhouseParagraphBreaker.kt`（`CODE_TAGS` KDoc）
+  登记为「已知缺口：要读 `class`/`style`，登记在 docs 29g」。
+  - 落地前置：① 先让引擎从 `class`/`style` 识别「代码块 + 语言」（现 `CODE_TAGS` 只认 tag，
+    `breakLines` 签名被 S2 冻结无 class 形参）；② 词法器选型（自建多语言 lexer vs 引第三方，
+    注意 **KMP + CMP 共享**、包体与许可）；③ 着色走**行内着色通道**（`ColorRuns` / `DrawLine.colorRuns`）
+    落到叶文本坐标系，**不得**在绘制层打补丁（否则违反「读者意图只以层叠声明进入、不经级联后改写」的架构铁律）；
+    ④ 配色表归主题层/用户层（给几套默认 token 配色，读者不配就不发声明）。
+  - 与 **Q13**（代码块横滚/独立窗口）同属「代码块的呈现能力」：Q13 管**介质**（能横滑/能开窗），本条管**着色**；
+    两者可共享「代码块识别」这一前置（都受 `class` 通道缺失之限）。
+
 - **字体管理面板余项（F 系列收尾，2026-09-23 列表；除 6 外均已闭环）**：字重枚举 + 中文名
   方案A 已合入（`feat(F-F5)`），以下是目验/追问后发现的不算完结的事项：
   1. **霞鹜文楷仍显示英文名（已闭环，闭环方式变更）**：初版经字典补 LXGW/Sarasa/方正等
@@ -1254,7 +1280,36 @@
 
 - 根据用户选择内容，弹出选择器列表供选择，并允许用户指定css样式和属性
 
-- 完善传统和现代样式主题，并允许用户使用自定义样式主题
+- **完善传统和现代样式主题，并允许用户使用自定义样式主题**（2026-10-10 细化：标签级 blanket 规则的粒度问题 + A/B 决策）：
+  - **已收口一个结构性问题（`7dff983`，2026-10-10）**：主题 `p,div,li,blockquote,dd,td{text-align:justify}`
+    （tier 42）命中容器 div 后，`text-align` 经继承（`StyleComputer.kt:400` `?: parent.textAlign`）漏进
+    **书侧无声明**的嵌套 `pre`（真书《Kotlin in Action》8.1.4 侧边栏 `div.fm-sidebar-block` 三个代码块中招；
+    书侧从没给 pre 写过 text-align，UA 也只兜底 margin/white-space/font-family）。修法：主题表补
+    `pre, code { text-align: left; }`（同 tier 42，接收端掐断继承）。量过 46 本 308 CSS：书作者对 pre 的
+    text-align 声明仅 1 条（值即 `left`）、code 0 条、内联 0 条 ⇒ **0 视觉变化**；红绿双证见 `ThemeCssTest`。
+  - **暴露的根因（本项要解决的方向）**：主题按**标签归属**发 blanket 规则，粒度过粗 → 系统性踩踏
+    「作者用 p/div 表达标题/图注/对齐意图」的合法排版。pre 只是它踩到的第一类，下一类是**作者意图类**。
+  - **量书证据（46 本 = `~/sync/books` 35 + 仓库 `books/` 11；2026-10-10）**：
+    - 标题：45/46 本用 h1-h6（标题语义主流已规范，仅 1 本全无 h）。p 标题集中在**有限工具链命名族**：
+      `fm-*`（出版社模板，含 `fm-figure-caption`/`fm-table-caption`/`fm-code-listing-caption`/`fm-sidebar-title`）、
+      `kindle-cn-*`（亚马逊中国转换）、`duokan-*`（多看）、通用 `title`/`subtitle`/`chaptertitle`/`sectiontitle`。
+    - 图注/表注：`caption`（2 本）、`fm-*-caption`、`duokan-image-subtitle` —— **EPUB2 工具链基本不用
+      `<caption>` 元素，图注普遍是 p/div + 类**。
+    - **最疼的是作者意图类**：`noindent`（5 本，作者明说别首行缩进，被传统主题 `p{text-indent:2em}` 压掉）、
+      `right`（6 本，落款/版权页要右对齐，被 `p{justify}` 拉平）、`center`（4 本，扉页/图注居中，单行
+      justify=左对齐被拉平）、`poem`（3 本）、`note`（4 本）。⇒ 把 `traditional.css:56` 里「真正可见的
+      只有 4 处」的爆炸半径量化成**结构性簇（≥11% 书含 noindent）**。
+  - **A/B 决策**：
+    - **A（当前基线，保持）**：主题 = CSS-only，接受已量化的爆炸半径（4 处可见 + noindent 类被压）。
+      架构最简单。
+    - **B（本项立项，未动手）**：**annotation-assisted theme** —— 扩展 `ChapterPreprocessor`
+      （它已是「用户层 annotation pass」，**先例 `orilumn-fullwidth-image` 就是「预处理打类 + 主题认类」**）：
+      识别 p 的作者意图类 → 打**读者层命名空间标记类**（`orilumn-*`）→ 主题 CSS 对标记类**不缩进/不 justify**
+      （或按作者意图对齐）。**不重写 DOM**（保「原书设置 = 书说了算」安全）、类加在**级联之前**
+      （不违反决策 6 铁律「不经内核级联事后改写」）、原书模式整表不加载 ⇒ 标记类对书不可见。
+    - B 的代价诚实认领：主题从此两段式（CSS asset + 预处理 lexicon），lexicon 需维护；但命名族**有界**
+      （工具链方言有限，量过），可**按族增量落地**（建议先 `noindent`/`center`/`right`/`caption`），
+      每族配离屏回归 + 全库截图 A/B。每一步必答 `AGENTS.md` 校验规则三问（tier / 量过 / 没配就不发）。
 
 - **标准化遗留 L1（待办：parsed-only 补消费）**：`visibility/overflow/position:relative/direction/unicode-bidi/font-stretch` 目前只落 `ComputedStyle` 计算值（`ComputedStyle.kt` / `StyleComputer.kt`），laying/draw 零消费。后续补祖先裁剪、相对偏移、RTL 流、字形压缩消费，双路一致 + bump `LAYOUT_VERSION`。
 - **标准化遗留 L2（待办：§0 例外收口）**：`flex/grid` 真实布局（现按 `block` 降级）、`list-style-image/@page/vertical writing/cursor`、脚本/表单/音视频/`canvas/iframe/object-embed`、固定版式（pre-paginated）。后续收口时先修范围定义与验收矩阵，按需逐项立项。

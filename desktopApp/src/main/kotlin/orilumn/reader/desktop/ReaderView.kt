@@ -22,6 +22,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
 import io.github.vinceglb.filekit.PlatformFile
 import io.github.vinceglb.filekit.dialogs.FileKitDialogSettings
 import io.github.vinceglb.filekit.dialogs.FileKitMode
@@ -63,6 +65,13 @@ fun ReaderView(
     onSaveTheme: (ThemePreset) -> Unit,
     onDeleteTheme: (ThemePreset) -> Unit,
     modifier: Modifier = Modifier,
+    /**
+     * 顶栏 inset（平台层·桌面壳）：无边框窗口的自绘系统标题栏高度，由壳动画驱动。
+     * 阅读顶栏据此把内容行让到标题栏之下，使「系统按钮 + 阅读顶栏」拼成一条整栏（见 WindowChrome.kt）。
+     */
+    statusBarInset: Dp = 0.dp,
+    /** 顶/底栏显隐回抛（壳据此让系统标题栏与阅读栏同拍滑入/滑出）。 */
+    onBarsVisibleChanged: (Boolean) -> Unit = {},
 ) {
     var anchorOverride by remember(book) { mutableStateOf<Pair<Int, Int>?>(null) }
     var session by remember(book) { mutableStateOf(0) }
@@ -274,6 +283,8 @@ fun ReaderView(
         ReaderScreen(
             host = snapshot,
             settings = settings,
+            statusBarInset = statusBarInset,
+            onBarsVisibleChanged = onBarsVisibleChanged,
             onBack = onBack,
             onNight = {
                 commit(settings.copy(scheme = if (settings.scheme == "night") "day" else "night"))

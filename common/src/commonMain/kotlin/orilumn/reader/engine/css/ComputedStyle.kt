@@ -24,8 +24,21 @@ data class Edges(
 /** Text horizontal alignment within each line's content box. */
 enum class TextAlign { LEFT, CENTER, RIGHT, JUSTIFY }
 
-/** Page-break preference, reduced to the two values the reader's paginator consumes. */
-enum class BreakRule { AUTO, AVOID }
+/**
+ * Page-break preference.
+ *
+ * - [AUTO] — a break is allowed here (default).
+ * - [AVOID] — the layout should avoid breaking here (`avoid` / `avoid-page`).
+ * - [ALWAYS] — a break is **forced** (`always` / `page` / `left` / `right` / `recto` / `verso`; the
+ *   single-column reader treats all of them as "start the next page").
+ *
+ * **[ALWAYS] used to be silently folded into [AUTO]**: `parseBreakRule` returned AVOID only for
+ * values containing "avoid" and AUTO for everything else, so every `break-before: always` /
+ * `page-break-before: always` (very common at EPUB chapter/section starts) was dropped on the floor.
+ * The enum now carries the value; consumers are wired separately (see
+ * `docs/分页高度约束与断页规则-方案.md`).
+ */
+enum class BreakRule { AUTO, AVOID, ALWAYS }
 
 /** CSS `border-style` per edge. `hidden` is folded into [NONE] at parse (same drawing outcome). */
 enum class BorderStyle { NONE, SOLID, DASHED, DOTTED }

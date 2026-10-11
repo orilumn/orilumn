@@ -1208,6 +1208,87 @@ class BoxChapterLayouter(
     private fun ownBottomEdges(leaf: LayoutBox): Int =
         if (leaf.el?.isText == true) 0 else (leaf.style.padding.bottom + leaf.style.border.bottom).roundToInt()
 
+    // ─────────────────────────────────────────────────────────────────
+    // P4d：临时页的 forced/avoid（与 canonical 的 `BreakClusters`/`Paginator` 同源判据）
+    // ─────────────────────────────────────────────────────────────────
+
+    /**
+     * P4d：块 [i] 所在 **avoid 边簇**的首块 —— 相邻块之间任一端 `break-*: avoid` 串成的最大块链。
+     * 边判据就是 canonical 的单源 [orilumn.reader.engine.laying.BreakClusters.joins]，故临时页与磁盘表
+     * 对「哪些块必须同页」有同一个定义。
+     */
+    private fun avoidChainStart(prepare: LightPrepare, i: Int): Int {
+        var f = i
+        while (f - 1 >= 0 && orilumn.reader.engine.laying.BreakClusters.joins(
+                prepare.block(f - 1).breakAfter, prepare.block(f).breakBefore,
+            )
+        ) {
+            f--
+        }
+        return f
+    }
+
+    /** P4d：块 [i] 所在 avoid 边簇的**末块**（含）。与 [avoidChainStart] 同判据。 */
+    private fun avoidChainEnd(prepare: LightPrepare, i: Int): Int {
+        var l = i
+        while (l + 1 < prepare.totalBlocks && orilumn.reader.engine.laying.BreakClusters.joins(
+                prepare.block(l).breakAfter, prepare.block(l + 1).breakBefore,
+            )
+        ) {
+            l++
+        }
+        return l
+    }
+
+    /**
+     * P4d：块链 `[from, to]` 的**实测高**（各行高之和 + 链内块间距），与 [shapeTempPageForward] 的
+     * 填充累加同一公式（`ownBottomEdges` + `consecutiveLeafAdvance` + 下块的顶部边框/内边距）。
+     * 只用于「整簇装得下一页否」这一 oversized 判据。
+     */
+    private fun chainHeight(
+        prepare: LightPrepare,
+        profile: TypographicProfile,
+        cache: MutableMap<Int, ParagraphShapeRef>?,
+        from: Int,
+        to: Int,
+    ): Int {
+        var h = 0
+        for (i in from..to) {
+            val s = tempShape(cache, prepare, i, profile)
+            for (k in 0 until s.lineCount) h += (s.lineBottom(k) - s.lineTop(k)).coerceAtLeast(1)
+            if (i < to) {
+                val a = prepare.block(i)
+                val b = prepare.block(i + 1)
+                h += ownBottomEdges(a) +
+                    NormalFlowLayout.consecutiveLeafAdvance(a.el!!, b.el!!, prepare::resolveStyle) +
+                    (b.style.border.top + b.style.padding.top).roundToInt()
+            }
+        }
+        return h
+    }
+
+    /** P4d：块链 `[from, to]` 的行数（簇右沿，`be`）。悬浮叶与填充同口径地不计行。 */
+    private fun chainLineCount(
+        prepare: LightPrepare,
+        profile: TypographicProfile,
+        cache: MutableMap<Int, ParagraphShapeRef>?,
+        from: Int,
+        to: Int,
+    ): Int {
+        var n = 0
+        for (i in from..to) {
+            val s = tempShape(cache, prepare, i, profile)
+            val leaf = prepare.block(i)
+            if (leaf.table == null && leaf.style.floatSide != orilumn.reader.engine.css.FloatSide.NONE &&
+                (s.isReplaceable || s.lineCount > 0)
+            ) {
+                continue
+            }
+            n += s.lineCount
+        }
+        return n
+    }
+
     private fun rebuildLocalLines(
         prepare: LightPrepare,
         blockLo: Int,
@@ -1568,11 +1649,23 @@ class BoxChapterLayouter(
         var firstInPage = true
         // 本页已纳入的行数（「游标永不停滞」判据，见下）。
         var placedLines = 0
+        // P4d：本页**触达块**在页局部行空间（页首行 = 0）里的起点。avoid 簇判据解出的局部切点
+        // 靠它翻译回 `(block, line)` 游标。
+        val localFirstOf = HashMap<Int, Int>()
+        val reachedBlocks = ArrayList<Int>()
+        // P4d：强制断页边（`break-before/after: always`）⇒ 本页在右侧块**之前**收盘（允许不满）。
+        var forcedCutLocal = -1
         while (b < total) {
             if (!firstInPage) {
                 // Inter-block gap: prev content-bottom → this content-top.
                 val prevLeaf = prepare.block(b - 1)
                 val thisLeaf = prepare.block(b)
+                // P4d：强制边压过整行填充（canonical 同口径：先按强制行切段，段首必为页首）。
+                if (orilumn.reader.engine.laying.BreakClusters.isForced(prevLeaf.breakAfter, thisLeaf.breakBefore)) {
+                    endBlockExclusive = b
+                    forcedCutLocal = placedLines
+                    break
+                }
                 val advance = NormalFlowLayout.consecutiveLeafAdvance(prevLeaf.el!!, thisLeaf.el!!, prepare::resolveStyle)
                 // prev bottom edges + margin collapse + THIS leaf's own top edges: exactly the vertical
                 // span rebuildLocalLines now gives between prev's last line and this leaf's first line
@@ -1584,6 +1677,8 @@ class BoxChapterLayouter(
             firstInPage = false
             val s = tempShape(cache, prepare, b, profile)
             shapes.add(s)
+            localFirstOf[b] = placedLines
+            reachedBlocks.add(b)
             val k0 = if (b == startBlock) startLine.coerceAtLeast(0) else 0
             // P4-a3: 悬浮零高（字符槽照占、页高不计；与重路径分页同式）。
             // P6-a2: img/文本悬浮一律跳过（文本悬浮行画在悬浮位，分页不计高）。
@@ -1609,6 +1704,42 @@ class BoxChapterLayouter(
             if (cutLine >= 0) { endBlockExclusive = b + 1; break }
             endBlockExclusive = b + 1
             b++
+        }
+        // P4d：avoid 边簇（块链）——切点落在簇**内部**时退到簇首，整簇搬到下一页；整簇装不下
+        // 下一页时允许撕裂。判据与 canonical **同一段逻辑**（`Paginator.retreatFor`），故临时页与
+        // 磁盘表的边界在 avoid 上不会漂移。
+        val cutLocal = if (cutLine >= 0) placedLines else forcedCutLocal
+        if (cutLocal > 0) {
+            // 切点的「前一行」所在块：块内切 = 切点块；边界切 = 边界左侧块。
+            val pb = if (cutLine >= 0) cutBlock else endBlockExclusive - 1
+            if (pb >= 0) {
+                val f = avoidChainStart(prepare, pb)
+                val l = avoidChainEnd(prepare, pb)
+                val bs = localFirstOf[f] ?: -1
+                // 单块不构成簇（与 `BreakClusters` 同口径：≥2 叶才成簇）；簇首在页首时不动
+                //（canonical 的「装满整簇」分支在整行填充下恒为惰性，见 `resolveAvoidCut` 注释）。
+                if (l > f && bs > 0) {
+                    val be = bs + chainLineCount(prepare, profile, cache, f, l)
+                    val clusterH = chainHeight(prepare, profile, cache, f, l)
+                    val nc = Paginator.retreatFor(cutLocal, bs, be, clusterH, 0, contentH)
+                    if (nc != cutLocal) {
+                        // 局部切点 → `(block, line)`：取第一个「起点 + 已收行数」越过切点的块。
+                        var tb = -1
+                        var tLine = 0
+                        for (bi in reachedBlocks) {
+                            val lo = localFirstOf.getValue(bi)
+                            val cnt = (localFirstOf[bi + 1] ?: placedLines) - lo
+                            if (nc < lo + cnt) { tb = bi; tLine = nc - lo; break }
+                        }
+                        if (tb >= 0) {
+                            val absLine = tLine + (if (tb == startBlock) startLine.coerceAtLeast(0) else 0)
+                            endBlockExclusive = if (tLine == 0) tb else tb + 1
+                            if (tLine == 0) { cutBlock = -1; cutLine = -1 } else { cutBlock = tb; cutLine = absLine }
+                            while (shapes.size > endBlockExclusive - startBlock) shapes.removeAt(shapes.size - 1)
+                        }
+                    }
+                }
+            }
         }
         val ecs = if (cutBlock >= 0) {
             val s = tempShape(cache, prepare, cutBlock, profile)
@@ -1664,6 +1795,16 @@ class BoxChapterLayouter(
         var placedLines = 0
         while (b >= 0) {
             val leaf = prepare.block(b)
+            // P4d：强制断页边（块 b 与 b+1 之间，`always`）⇒ 本页必须在块 b **之前**收盘，
+            // 块 b 归前一页。与 `shapeTempPageForward`、与 canonical 的分段同口径。
+            if (!firstInPage &&
+                orilumn.reader.engine.laying.BreakClusters.isForced(leaf.breakAfter, prepare.block(b + 1).breakBefore)
+            ) {
+                startBlock = b + 1
+                startLine = 0
+                truncated = true
+                break
+            }
             val s = tempShape(cache, prepare, b, profile)
             allShapes.add(0, s)  // prepend — we walk backward, but shapes must stay in visual order
 
@@ -1716,6 +1857,19 @@ class BoxChapterLayouter(
         }
         // If no truncation happened, all blocks from 0..endExclusive-1 fit perfectly.
         if (!truncated) startBlock = 0
+        // P4d：avoid 边簇（块链）——页首若**严格落在簇内部**（簇首块在页首块之前，或页首是块内行），
+        // 就把整簇让给前一页（页首下移到簇尾之后的块边界）。整簇装不下一页时允许撕裂，与 canonical
+        // 的 oversized 口径一致。仅在页首块仍是簇内块、且让出后本页非空时才动。
+        if (truncated && startBlock < endExclusive) {
+            val f = avoidChainStart(prepare, startBlock)
+            val l = avoidChainEnd(prepare, startBlock)
+            if (l > f && l + 1 < endExclusive && (f < startBlock || startLine > 0)) {
+                if (chainHeight(prepare, profile, cache, f, l) <= contentH) {
+                    startBlock = l + 1
+                    startLine = 0
+                }
+            }
+        }
         val shapes = allShapes.takeLast(endExclusive - startBlock)
         val backPage = assembleTempPage(prepare, startBlock, endExclusive, shapes,
             pageFirstLine = startLine, endLineCharStart = if (endLineCharStart >= 0) endLineCharStart else null,
@@ -2078,6 +2232,9 @@ class BoxChapterLayouter(
             boxes = buildBackgroundDrawBoxes(prepare, leavesForDraw, lines, localFirst, localLast),
             loader = imageLoader,
             href = chapterHref,
+            // P4d：临时页的绘制布局也带上 `break-inside: avoid` 属主图 —— 临时/磁盘两条路径的
+            // `avoidSplitRanges` 因此同源（临时页填充另经 `Paginator.retreatFor` 走同一条判据）。
+            avoidOwnerMap = prepare.avoidOwnerMap,
             skiaLinesSource = skiaLines,
             tableCellsSource = tempWin.lines,
             tableCellImagesSource = tempWin.images,
@@ -2590,6 +2747,40 @@ private class PartialDrawableLayout(
         }
         out
     }
+
+    /**
+     * P4：断页约束**单源**（[orilumn.reader.engine.laying.BreakClusters.plan]）的窗口叶序列。
+     *
+     * 叶序 = 本窗口的局部行序；每叶的 `break-*` 取盒上的**有效**边（提升叶取宿主块，见
+     * `LayoutBox.breakCarrierStyle`），`break-inside` 属主取结构缓存给的 [avoidOwnerMap]。
+     * 与 [breakInsideAvoidRanges] 的关系：后者是这里的 `break-inside` 子集（原子簇），
+     * [avoidSplitRanges] 是「边簇 ∪ 原子簇」的超集。
+     */
+    private val breakLeaves: List<orilumn.reader.engine.laying.BreakClusters.Leaf> by lazy {
+        val out = ArrayList<orilumn.reader.engine.laying.BreakClusters.Leaf>(leafList.size)
+        for (i in leafList.indices) {
+            val leaf = leafList[i]
+            val lo = localFirst[i].coerceAtLeast(0)
+            val hi = localLast[i]
+            out.add(
+                orilumn.reader.engine.laying.BreakClusters.Leaf(
+                    before = leaf.breakBefore,
+                    after = leaf.breakAfter,
+                    lines = if (hi > lo) lo until hi else IntRange.EMPTY,
+                    avoidOwner = leaf.el?.let { avoidOwnerMap[it] },
+                ),
+            )
+        }
+        out
+    }
+
+    private val breakPlan: orilumn.reader.engine.laying.BreakClusters.Plan by lazy {
+        orilumn.reader.engine.laying.BreakClusters.plan(breakLeaves)
+    }
+
+    override val avoidSplitRanges: List<IntRange> get() = breakPlan.clusters
+
+    override val forcedBreakBeforeLines: Set<Int> get() = breakPlan.forcedBeforeLines
 }
 
 /**

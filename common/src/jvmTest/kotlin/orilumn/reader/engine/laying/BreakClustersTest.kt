@@ -42,11 +42,17 @@ class BreakClustersTest {
         }
     }
 
-    private fun clusters(vararg ps: MarkupElement): List<IntRange> {
+    private fun clusters(vararg ps: MarkupElement): List<IntRange> =
+        BreakClusters.of(BreakClusters.leavesOf(layoutBoxes(*ps)))
+
+    /** P4：[plan] 同时给出簇与**强制断页行**（强制边右侧的页首行）。 */
+    private fun plan(vararg ps: MarkupElement): BreakClusters.Plan =
+        BreakClusters.plan(BreakClusters.leavesOf(layoutBoxes(*ps)))
+
+    private fun layoutBoxes(vararg ps: MarkupElement): List<LayoutBox> {
         val root = MarkupElement("body", emptyMap(), ps.toList())
         val styles = StyleComputer(10f, LightCssParser().parse(""), listOf(LightCssParser().parse(""))).compute(root)
-        val result = BoxLayouter(10f, FixedWidthBreaker(3)).layoutBoxes(root, widthPx = 30, styleMap = styles)
-        return BreakClusters.of(result.boxes)
+        return BoxLayouter(10f, FixedWidthBreaker(3)).layoutBoxes(root, widthPx = 30, styleMap = styles).boxes
     }
 
     @Test
@@ -92,25 +98,67 @@ class BreakClustersTest {
     @Test
     fun `break-inside avoid 的容器整棵成原子簇`() {
         // <div style="break-inside:avoid"><p>a</p><p>a</p></div> + 独立 <p> ⇒ 原子簇行 0..2。
-        val inner1 = p()
-        val inner2 = p()
-        val div = MarkupElement("div", mapOf("style" to "break-inside: avoid"), listOf(inner1, inner2))
+        val div = MarkupElement("div", mapOf("style" to "break-inside: avoid"), listOf(p(), p()))
         val root = MarkupElement("body", emptyMap(), listOf(div, p()))
-        val styles = StyleComputer(10f, LightCssParser().parse(""), listOf(LightCssParser().parse(""))).compute(root)
-        val result = BoxLayouter(10f, FixedWidthBreaker(3)).layoutBoxes(root, widthPx = 30, styleMap = styles)
-        val got = BreakClusters.of(result.boxes)
-        assertEquals(listOf(0 until 2), got)
+        assertEquals(listOf(0 until 2), clusters(div, p()))
     }
 
     @Test
     fun `原子容器可被 avoid 边串上邻块`() {
-        // p1(avoid-after) + <div break-inside:avoid>[p,p] ⇒ 串成 [0,3)；div 自身原子簇 [1,3) 同时保留
-        //（**嵌套区间是有意的**：分页器逐条独立判「装得下才躲」，丢掉内层会让「内层装得下、外层装不下」
-        // 时本该保整的内层被撕）。
+        // p1(avoid-after) + <div>[p,p] ⇒ 边簇 [0,2)（p1 与 div 首叶相邻）∪ div 原子簇 [1,3)。
+        // 两个区间都保留（**嵌套区间是有意的**：分页器逐条独立判「整簇装得下才躲」）。
         val div = MarkupElement("div", mapOf("style" to "break-inside: avoid"), listOf(p(), p()))
-        val root = MarkupElement("body", emptyMap(), listOf(p("break-after: avoid"), div))
-        val styles = StyleComputer(10f, LightCssParser().parse(""), listOf(LightCssParser().parse(""))).compute(root)
-        val result = BoxLayouter(10f, FixedWidthBreaker(3)).layoutBoxes(root, widthPx = 30, styleMap = styles)
-        assertEquals(setOf(0 until 3, 1 until 3), BreakClusters.of(result.boxes).toSet())
+        assertEquals(setOf(0 until 2, 1 until 3), clusters(p("break-after: avoid"), div).toSet())
+    }
+
+    @Test
+    fun `跨容器边界的 avoid 边在扁平叶序上成簇`() {
+        // 判据是**扁平块叶序列**（与 P3 预算同源），不做父容器边界检查：
+        // p(after avoid) 在 <div> 外，p 在 <div> 内 ⇒ 两叶相邻 ⇒ 成簇 [0,2)。
+        // 这条差异（相对 CSS 的同父容器判定）是**有意为之**并被此处钉住，见 BreakClusters 的类注释。
+        val div = MarkupElement("div", emptyMap(), listOf(p()))
+        assertEquals(listOf(0 until 2), clusters(p("break-after: avoid"), div))
+    }
+
+    // ---- P4：强制断页行（plan.forcedBeforeLines） ----
+
+    @Test
+    fun `break-after always 报出下一块的首行为强制页首`() {
+        // p1 后强制断页 ⇒ 行 1（p2 首行）是页首；p1 本身不成簇。
+        val got = plan(p("break-after: always"), p(), p())
+        assertTrue(got.clusters.isEmpty())
+        assertEquals(setOf(1), got.forcedBeforeLines)
+    }
+
+    @Test
+    fun `break-before always 报出该块首行为强制页首`() {
+        val got = plan(p(), p("break-before: always"), p())
+        assertTrue(got.clusters.isEmpty())
+        assertEquals(setOf(1), got.forcedBeforeLines)
+    }
+
+    @Test
+    fun `avoid 边不产生强制页首`() {
+        val got = plan(p("break-after: avoid"), p())
+        assertEquals(listOf(0 until 2), got.clusters)
+        assertTrue(got.forcedBeforeLines.isEmpty())
+    }
+
+    @Test
+    fun `强制边截断的簇不再与右侧成簇且仍报页首`() {
+        // p1 强制断页；p2→p3 avoid ⇒ 簇只剩 p2+p3（行 1..3），页首行 = 1。
+        val got = plan(p("break-after: always"), p("break-after: avoid"), p())
+        assertEquals(listOf(1 until 3), got.clusters)
+        assertEquals(setOf(1), got.forcedBeforeLines)
+    }
+
+    @Test
+    fun `强制行与簇不相交`() {
+        // 每个强制边右侧的页首行都不落在任何簇区间内部（段尾是硬边界）。
+        val got = plan(p("break-after: avoid"), p("break-after: always"), p("break-after: avoid"), p())
+        for (f in got.forcedBeforeLines) {
+            for (c in got.clusters) assertTrue("forced $f inside cluster $c", f !in c.first + 1..c.last)
+        }
+        assertEquals(setOf(2), got.forcedBeforeLines)
     }
 }

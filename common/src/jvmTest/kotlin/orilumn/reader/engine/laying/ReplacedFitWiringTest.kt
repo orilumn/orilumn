@@ -147,7 +147,7 @@ class ReplacedFitWiringTest {
         val img = imgOf(r)
         val caption = captionOf(r, "图 1 说明")
         assertEquals(orilumn.reader.engine.css.BreakRule.AVOID, img.breakAfter)
-        val clusters = BreakClusters.of(r.boxes)
+        val clusters = BreakClusters.of(BreakClusters.leavesOf(r.boxes))
         assertTrue(
             "img..caption 应落在同一个簇区间里",
             clusters.any { it.first <= img.firstLineIndex && it.last >= caption.lastLineExclusive - 1 },

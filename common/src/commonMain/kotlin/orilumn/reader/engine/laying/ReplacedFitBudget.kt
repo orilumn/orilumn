@@ -66,19 +66,19 @@ object ReplacedFitBudget {
     /** 一个块叶的**有效**断页边（提升叶取宿主块；见 `LayoutBox.breakCarrierStyle`）。 */
     data class BreakPair(val before: BreakRule, val after: BreakRule)
 
-    private fun joins(a: BreakPair, b: BreakPair): Boolean {
-        if (a.after == BreakRule.ALWAYS || b.before == BreakRule.ALWAYS) return false
-        return a.after == BreakRule.AVOID || b.before == BreakRule.AVOID
-    }
+    private fun joins(a: BreakPair, b: BreakPair): Boolean = BreakClusters.joins(a.after, b.before)
 
     /**
      * **扁平块叶序列**上、叶 [index] 所属的不可断簇下标区间（含自身）。
      *
-     * 判据与 [BreakClusters] 的兄弟分组同源：相邻叶之间，任一端 `ALWAYS` ⇒ 断开，任一端 `AVOID`
-     * ⇒ 同簇，否则断开。
+     * 判据与 [BreakClusters] **完全同源**（`BreakClusters.joins`）：相邻叶之间，任一端 `ALWAYS`
+     * ⇒ 断开，任一端 `AVOID` ⇒ 同簇，否则断开。分页侧消费的就是同一条判据 —— 预算与分页必须
+     * 对「簇」有同一个定义，否则缩了图却被分页撕裂。
      *
      * **有意不展开 `break-inside: avoid` 的祖先原子簇**：那种情形下 `othersH` 往往已经 ≥
-     * `contentH`（预算自然失效），而「整段不许切」的语义已由既有 `breakInsideAvoidRanges` 承担。
+     * `contentH`（预算自然失效），而「整段不许切」的语义已由既有 `breakInsideAvoidRanges` /
+     * [BreakClusters.plan] 的原子簇承担（见方案 §9「簇判据不展开祖先原子簇」）。
+     *
      * 于是两路只需要同一份扁平叶序列 —— 而它正是重/轻两路**保证一致**的那份
      * （`NormalFlowLayout.enumerateBlockLeaves` ↔ `LightPrepare.markupLeaves`）。
      */

@@ -9,7 +9,9 @@ import orilumn.reader.engine.paging.BreakAwareBookLayout
  *
  * The paging algorithm consumes only [BookLayout], so [BoxLayouter] can feed the Paginator entirely
  * through this type without touching rendering. As a [BreakAwareBookLayout] it also surfaces the
- * line ranges of `break-inside: avoid` boxes so the Paginator refuses to tear them across pages.
+ * pagination break constraints — the avoid ranges (`break-inside: avoid` union `break-*: avoid` edge
+ * clusters) and the forced page-start lines — so the Paginator both keeps clusters whole and honours
+ * `break-*: always`.
  *
  * Coordinates follow the BookLayout convention (y relative to the content-area top, char offsets
  * into the whole stream).
@@ -45,6 +47,23 @@ class BoxBookLayout(
         for (box in result.boxes) collectBreakRanges(box, out)
         out
     }
+
+    /**
+     * P4：分页侧的**断页约束单源**（[BreakClusters.plan]）——扁平块叶序列上的 `break-*: avoid`
+     * 边簇（[avoidSplitRanges]）∪ `break-inside: avoid` 原子簇，以及强制边右侧的页首行
+     * （[forcedBreakBeforeLines]）。
+     *
+     * 判据与 P3 的插图预算 [ReplacedFitBudget.clusterRange] 同源（`BreakClusters.joins`），
+     * 保证「预算按簇缩图」与「分页保整簇」用的是同一个簇定义。
+     *
+     * `by lazy`：只在分页真的消费时才走查盒树；[breakInsideAvoidRanges] 是其 break-inside 子集，
+     * 保留为独立属性（旧调用点/测试的既有语义不变）。
+     */
+    private val breakPlan: BreakClusters.Plan by lazy { BreakClusters.plan(BreakClusters.leavesOf(result.boxes)) }
+
+    override val avoidSplitRanges: List<IntRange> get() = breakPlan.clusters
+
+    override val forcedBreakBeforeLines: Set<Int> get() = breakPlan.forcedBeforeLines
 
     private fun collectBreakRanges(box: LayoutBox, out: MutableList<IntRange>) {
         if (box.breakInsideAvoid && box.firstLineIndex >= 0 && box.lastLineExclusive > box.firstLineIndex) {

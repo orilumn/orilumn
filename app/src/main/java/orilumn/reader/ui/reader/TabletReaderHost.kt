@@ -180,8 +180,10 @@ class TabletReaderHost(
         withContext(Dispatchers.IO) {
             // P0a：正文插图解码统一到 skia（与背景图 `loadBackgroundImage` 同一类型）——
             // 插图已下沉进整页位图，下游要能直接进 skia 画布的东西，不再经 Compose BitmapFactory。
-            // 采样口径不变：按 used 宽度精确缩放（`decodeScaled` 即旧 inSampleSize+createScaledBitmap
-            // 的等价物，见 engine-skia `ImageCodec` KDoc）；失败回退 PNG 字节直解。
+            // 采样口径：按 used 宽度缩放，且**只缩不放**（`decodeScaled` 即旧 inSampleSize+
+            // createScaledBitmap 的等价物，见 engine-skia `ImageCodec` KDoc；绘制侧
+            // `drawImageRect(源尺寸 → used 尺寸)` 会兜住放大，故源图更小时不退化解码工作）；
+            // 失败回退 PNG 字节直解。
             val raw = controller.loadPageImageRaw(img)
             if (raw != null) {
                 ImageCodec.decodeScaled(raw, img.widthPx.coerceAtLeast(1))?.let { return@withContext it }

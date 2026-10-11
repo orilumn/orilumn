@@ -227,6 +227,7 @@ class DesktopReaderHost(
     override suspend fun loadPageImage(img: PageImage): DecodedImage? = withContext(Dispatchers.IO) {
         // P0a：与平板同一口径——正文插图解码结果统一是 skia `DecodedImage`（插图已下沉进
         // 整页位图）；取字节仍走控制器单源，失败回 null（阅读面画灰色占位）。
+        // `decodeScaled` 只缩不放（源图更小时直接给全量解码结果，绘制侧 `drawImageRect` 兜住放大）。
         val bytes = controller.loadPageImageRaw(img) ?: return@withContext null
         ImageCodec.decodeScaled(bytes, img.widthPx.coerceAtLeast(1)) ?: ImageCodec.decode(bytes)
     }

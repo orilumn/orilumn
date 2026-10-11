@@ -82,6 +82,48 @@ class ReplacedSizingTest {
         assertEquals(999 to 359, style().usedReplacedSize(999, 359, 800))
     }
 
+    // ---- P3：分页层高度预算 `fitMaxH`（口径乙）。它不是 CSS 声明，只折进 §10.4 的 max-height 槽位。 ----
+
+    @Test
+    fun `fitMaxH 把超页图等比缩到预算，宽随之收`() {
+        // 1000×5000 在 800 版心，预算 2560 → 512×2560（2560*1000/5000=512）。
+        assertEquals(512 to 2560, style().usedReplacedSize(1000, 5000, 800, fitMaxH = 2560))
+    }
+
+    @Test
+    fun `图装得下时 fitMaxH 完全不介入`() {
+        assertEquals(1122 to 735, style().usedReplacedSize(1122, 735, 4920, fitMaxH = 2560))
+    }
+
+    @Test
+    fun `fitMaxH 与元素自身 max-height 取更严者`() {
+        // 元素 max-height 更严 → 用它。
+        assertEquals(200 to 1000, style(maxHeightPx = 1000f).usedReplacedSize(1000, 5000, 800, fitMaxH = 2560))
+        // fitMaxH 更严 → 用它。
+        assertEquals(512 to 2560, style(maxHeightPx = 4000f).usedReplacedSize(1000, 5000, 800, fitMaxH = 2560))
+    }
+
+    @Test
+    fun `min-height 照旧胜过 fitMaxH`() {
+        // §10.4 min>max：更严的上限先被 min-height 抬回 3000，故仍超页（设计如此，见方案 §5-B5）。
+        assertEquals(600 to 3000, style(minHeightPx = 3000f).usedReplacedSize(1000, 5000, 800, fitMaxH = 2560))
+    }
+
+    @Test
+    fun `fitMaxH 与 max-width 同时绑定时取更严那侧`() {
+        // 4000×8000，版心 800，UA max-width:100%；预算 2560。
+        // effMaxW/w0 = 0.2 ≤ effMaxH/h0 = 0.32 → 宽侧绑定 → 800×1600。
+        val ua = style(maxWidthPct = 100f)
+        assertEquals(800 to 1600, ua.usedReplacedSize(4000, 8000, 800, fitMaxH = 2560))
+    }
+
+    @Test
+    fun `fitMaxH 为 null 或非正等于不约束`() {
+        assertEquals(1000 to 5000, style().usedReplacedSize(1000, 5000, 800, fitMaxH = null))
+        assertEquals(1000 to 5000, style().usedReplacedSize(1000, 5000, 800, fitMaxH = 0))
+        assertEquals(1000 to 5000, style().usedReplacedSize(1000, 5000, 800, fitMaxH = -7))
+    }
+
     @Test
     fun `StyleComputer 解析 max-width 与 width 百分比`() {
         val root = orilumn.reader.engine.html.MarkupElement(

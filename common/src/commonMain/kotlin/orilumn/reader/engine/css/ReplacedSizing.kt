@@ -28,16 +28,21 @@ import kotlin.math.roundToInt
  * @param intrinsicW intrinsic width px (HTML attrs → binary bounds); null = unknown.
  * @param intrinsicH intrinsic height px; null = unknown.
  * @param containingW containing-block width px (the block's line-break width); ≥ 1.
+ * @param fitMaxH reader-imposed height ceiling from the **pagination layer** (口径乙：图要装进它
+ *   所属的不可断簇；见 `docs/分页高度约束与断页规则-方案.md` §5），null = 不约束。它不是 CSS
+ *   声明：只折进下面 §10.4 的 `max-height` 槽位，与元素自身的 `max-height` 取**更严**者，
+ *   `min-height` 照旧胜过它（`min > max`，故显式 `min-height` 的图仍可超页并撕裂）。
  * @return used (width, height) px, each ≥ 1.
  *
  * NOTE (架构归位)：独占插图撑满版心（`width:100%` 等价语义）是用户层样式主题的工作，
  * 不属于浏览器内核——只要样式主题（传统/现代/自定义）没有注入此类规则，内核就按标准
- * 输出 intrinsic 尺寸，超宽才由 `max-width` 收敛，绝不多做。
+ * 输出 intrinsic 尺寸，超宽才由 `max-width` 收敛，绝不多做。（P3a 起传统/现代主题都不再注入。）
  */
 fun ComputedStyle.usedReplacedSize(
     intrinsicW: Int?,
     intrinsicH: Int?,
     containingW: Int,
+    fitMaxH: Int? = null,
 ): Pair<Int, Int> {
     val cb = containingW.coerceAtLeast(1).toFloat()
     // Specified sizes: % against the containing block, else the pre-resolved absolute px.
@@ -47,7 +52,11 @@ fun ComputedStyle.usedReplacedSize(
     val minW = ((if (minWidthPct != null) minWidthPct / 100f * cb else minWidthPx) ?: 0f).coerceAtLeast(0f)
     val maxW = (if (maxWidthPct != null) maxWidthPct / 100f * cb else maxWidthPx)?.takeIf { it >= 0f }
     val minH = (minHeightPx ?: 0f).coerceAtLeast(0f)
-    val maxH = maxHeightPx?.takeIf { it >= 0f }
+    // 元素自身 max-height 与分页层 fitMaxH 取**更严**者（两者都是上限，谁更紧谁说话）。
+    val maxH = listOfNotNull(
+        maxHeightPx?.takeIf { it >= 0f },
+        fitMaxH?.takeIf { it > 0 }?.toFloat(),
+    ).minOrNull()
 
     val iw = if (intrinsicW != null && intrinsicW > 0) intrinsicW.toFloat() else null
     val ih = if (intrinsicH != null && intrinsicH > 0) intrinsicH.toFloat() else null

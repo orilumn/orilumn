@@ -66,8 +66,8 @@ object BreakClusters {
     }
 
     private fun joins(a: LayoutBox, b: LayoutBox): Boolean {
-        val after = a.style.breakAfter
-        val before = b.style.breakBefore
+        val after = a.breakAfter
+        val before = b.breakBefore
         if (after == BreakRule.ALWAYS || before == BreakRule.ALWAYS) return false
         return after == BreakRule.AVOID || before == BreakRule.AVOID
     }

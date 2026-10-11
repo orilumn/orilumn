@@ -229,7 +229,7 @@ class BoxChapterLayouter(
             ?.takeIf { it.isNotEmpty() }
             ?.let { genOfFromStrings(authorSheets, it, engine) { styleMap[it] } }
             ?: genOfFor(markup, authorSheets, { styleMap[it] }, engine, hidden)
-        val structure = boxLayouter.layoutBoxes(markup, contentW, styleMap, classify, imageLoader, chapterHref, genOf = genOf)
+        val structure = boxLayouter.layoutBoxes(markup, contentW, styleMap, classify, imageLoader, chapterHref, genOf = genOf, contentH = contentH)
         val leaves = collectLeaves(structure.boxes)
         return buildPrepareResult(markup, styleMap, structure, leaves, classify, hidden, genOf)
     }
@@ -357,7 +357,11 @@ class BoxChapterLayouter(
         // `hidden` is a cheap closure; it is only exercised later, lazily, during per-block materialization
         // and its display decisions are typography-invariant, so the cached leaf set stays valid.
         val hidden = hiddenCheckFor(engine)
-        LightPrepare(markup, profile, contentW, engine, structure.leaves, structure.globalCharStarts, hidden, imageLoader, chapterHref, structure.leafToBackgroundOwner, structure.leafToBreakInsideAvoidOwner, structure.genStrings, structure.anyFloat, breakerFor(profile))
+        val prepare = LightPrepare(markup, profile, contentW, engine, structure.leaves, structure.globalCharStarts, hidden, imageLoader, chapterHref, structure.leafToBackgroundOwner, structure.leafToBreakInsideAvoidOwner, structure.genStrings, structure.anyFloat, breakerFor(profile), contentH)
+        // P3：预算的测量回调（块自身 border-box 高）。预算定在塑形之前，故这里量出的自然尺寸
+        // 不会被后续按预算的塑形污染（见 `LightPrepare.clusterBlockOwnHeight`）。
+        prepare.clusterBlockOwnHeight = { i -> clusterBlockOwnHeight(prepare, i) }
+        prepare
     }
 
     /** Parses the chapter's author CSS once into [StyleSheet]s (cached in [ChapterStructureCache]).
@@ -591,7 +595,9 @@ class BoxChapterLayouter(
             // P4-a3: 环绕前导随叶下发（与盒流断行同宽，否则 canonical 形状与结构行漂移）。
             shapeLeaf(leaf, prepare.styleMap, profile,
                 listMarkerFor(leaf.el, prepare.styleMap::get, carriers), genOf = prepare.genOf,
-                floatLead = leaf.floatLead, classify = prepare.classify, hidden = prepare.hidden)
+                floatLead = leaf.floatLead, classify = prepare.classify, hidden = prepare.hidden,
+                // P3：重路径的预算已写在盒上（含量画同值）。
+                replaceableFitH = leaf.replaceableFitH)
         }
         return completeFullLayout(prepare, shapes, contentH, profile)
     }
@@ -1786,6 +1792,25 @@ class BoxChapterLayouter(
     private var shapeProbe: ShapeProbe? = null
 
     /** Shapes one block's [ParagraphShape] for the temp-page path. */
+    /**
+     * P3：一个块**自身 border-box 高**的自然测量（口径乙 `othersH` 的轻路径口径）。
+     *
+     * 与重路径的 `box.contentBottom - box.contentTop` 同式：正文叶 = 行高和，替换叶 = used 高，
+     * 都再＋自身纵向 padding/border（表格行高由 [shapeLeaf] 内部合成，同式）。
+     *
+     * 塑形**不进共享塑形缓存**：预算定在各叶塑形**之前**，此时若是把自然尺寸的 shape 写进缓存，
+     * 之后按预算塑形就会命中旧值（图的 used 高与预算不符 ⇒ 量画漂移）。
+     */
+    private fun clusterBlockOwnHeight(prepare: LightPrepare, i: Int): Int {
+        if (i < 0 || i >= prepare.totalBlocks) return 0
+        val leaf = prepare.block(i)
+        val edges = (leaf.style.padding.vertical + leaf.style.border.vertical).roundToInt()
+        if (leaf.replaceableHeight > 0) return leaf.replaceableHeight + edges
+        val sh = shapeBlock(prepare, i, leaf, prepare.profile)
+        val contentH = if (sh.lineCount > 0) (sh.lineBottom(sh.lineCount - 1) - sh.lineTop(0)) else 0
+        return contentH + edges
+    }
+
     private fun shapeBlock(
         prepare: LightPrepare,
         i: Int,
@@ -1834,6 +1859,8 @@ class BoxChapterLayouter(
         } else null,
         classify = prepare.lightClassify(),
         hidden = prepare.hidden,
+        // P3：分页层高度预算来自盒（`LightPrepare.applyReplacedFits` 写入），塑形只是读它。
+        replaceableFitH = leaf.replaceableFitH,
     )
 
     /** 无 [classify] 时的块判据回退（与 [shapeLeaf] 的 `BLOCK_TAGS` 同规则）。 */
@@ -1915,6 +1942,8 @@ class BoxChapterLayouter(
         /** 行内图行高配对用分类/隐藏判定（与盒流同口径；塑形层透传）。 */
         classify: orilumn.reader.engine.laying.BlockClassify? = null,
         hidden: orilumn.reader.engine.laying.HiddenCheck = orilumn.reader.engine.laying.HIDDEN_NONE,
+        /** P3：盒上写好的分页高度预算（重/轻两路都在盒上，塑形只读）。 */
+        replaceableFitH: Int? = null,
     ): ParagraphShapeRef {
         val t = leaf.table
         if (t != null) {
@@ -1926,6 +1955,7 @@ class BoxChapterLayouter(
             profile, breakWidthOverride ?: breakWidthPx(leaf), listMarker,
             imageLoader = imageLoader, chapterHref = chapterHref, ancestorStyleOf = ancestorStyleOf, genOf = genOf,
             floatLead = floatLead, classify = classify, hidden = hidden, isBlock = { it.tag in BLOCK_TAGS },
+            replaceableFitH = replaceableFitH,
         )
     }
 
@@ -1961,6 +1991,9 @@ class BoxChapterLayouter(
         profile: TypographicProfile,
         l2: Map<Int, ParagraphShapeRef>? = null,
     ): ParagraphShapeRef {
+        // P3：塑形**之前**定这一块的高度预算（口径乙）；命中缓存也不能跳过——盒上的预算必须在
+        // 任何一次塑形之前就位，否则塑形读到的 used 高与后续预算不一致（量画漂移）。
+        prepare.applyReplacedFits(i, i + 1)
         val hit = cache?.get(i) ?: l2?.get(i)
         if (hit != null) {
             // 表格行命中塑形缓存也必须回填当前实例的格 shape：格 shape 只活在叶实例上
@@ -2597,6 +2630,17 @@ class LightPrepare(
      * 共用同一个实例**（见 [BoxChapterLayouter.breakerFor]）。本类自己**不再构造**断行器。
      */
     private val breaker: orilumn.reader.engine.laying.ParagraphBreaker,
+    /**
+     * P3：一页内容高（px）——替换叶高度预算（口径乙）的唯一依据。≤ 0 ⇒ 不施加预算。
+     * 与重路径 [BoxChapterLayouter.prepare] 收到的 `contentH` 同一个值。
+     */
+    private val contentH: Int = 0,
+    /**
+     * P3：**块自身 border-box 高**的测量回调，由 [BoxChapterLayouter] 注入（用与临时页同一份
+     * 塑形器量块 j；自带缓存，**不进共享塑形缓存** —— 预算定在塑形之前，若复用缓存会把自然尺寸
+     * 的 shape 留在那儿）。null = 不施加预算（旧调用方/测试）。
+     */
+    internal var clusterBlockOwnHeight: ((Int) -> Int)? = null,
 ) {
     val totalBlocks: Int get() = markupLeaves.size
     /**
@@ -2903,6 +2947,85 @@ class LightPrepare(
         return globalCharStarts[leafIdx].toInt()
     }
 
+    /**
+     * P3：**提升叶的宿主块**（叶是 `<img>`，块是最近的块级祖先）。
+     *
+     * `enumerateBlockLeaves` 把「独图块」枚举成它里面的 img（重路径同式），于是叶的 `el` 是 img
+     * 而布局地位是那个块：`break-*` 这类挂在块上的属性该按块算。img 自身就是块级子元素时返回
+     * `el`（那个分支里叶本来就是块本身，自身样式即正确语义）。`null` = 找不到（不该发生）。
+     */
+    private fun carrierBlockOf(el: MarkupElement): MarkupElement? {
+        if (el.tag != "img") return el
+        val classify = lightClassify()
+        if (classify.isBlock(el)) return el
+        var p = el.parent
+        while (p != null) {
+            if (classify.isBlock(p)) return p
+            p = p.parent
+        }
+        return null
+    }
+
+    /** P3：叶的**有效**断页边（提升叶取宿主块，与重路径 `LayoutBox.breakBefore/breakAfter` 同义）。 */
+    private fun breakPairOf(el: MarkupElement): orilumn.reader.engine.laying.ReplacedFitBudget.BreakPair {
+        val s = if (el.tag == "img") resolveStyle(carrierBlockOf(el) ?: el) else resolveStyle(el)
+        return orilumn.reader.engine.laying.ReplacedFitBudget.BreakPair(s.breakBefore, s.breakAfter)
+    }
+
+    /** 替换叶的**自然** used 高（无视任何已写入的预算）——预算重算的幂等输入。 */
+    private fun naturalReplaceableHeight(b: LayoutBox): Int {
+        val el = b.el ?: return b.replaceableHeight
+        return NormalFlowLayout.replaceableHeightOf(
+            el, b.style, NormalFlowLayout.innerBreakWidth(b.style, b.contentWidth), imageLoader, chapterHref,
+        )
+    }
+
+    /**
+     * P3：给 `[lo, hi)` 的替换叶写入高度预算（口径乙），**必须在塑形之前**调用。
+     *
+     * 与重路径 [orilumn.reader.engine.laying.NormalFlowLayout.layout] 的 `applyReplacedFit` 同一份
+     * 决策单源（[orilumn.reader.engine.laying.ReplacedFitBudget.plan]）：这里只把「自然高 / 自身高 /
+     * 断页边」三条喂成轻路径的几何。簇按**扁平叶序列**取（与重路径同一份、重轻恒一致），
+     * 故«图 + 图注»在两侧都被当成一个簇。
+     *
+     * 幂等：`naturalH` 走 [naturalReplaceableHeight]（不看已写入的预算），重复调用同一区间结果不变。
+     */
+    fun applyReplacedFits(lo: Int, hi: Int) {
+        val measure = clusterBlockOwnHeight ?: return
+        if (contentH <= 0 || totalBlocks <= 0) return
+        val a = lo.coerceIn(0, totalBlocks)
+        val b = hi.coerceIn(a, totalBlocks)
+        val leaves = markupLeaves
+        val plan = orilumn.reader.engine.laying.ReplacedFitBudget.plan(
+            leaves = leaves,
+            lo = a,
+            hi = b,
+            contentH = contentH,
+            naturalH = { i ->
+                val box = block(i)
+                if (box.replaceableHeight > 0) naturalReplaceableHeight(box) else 0
+            },
+            ownHeight = { i ->
+                val box = block(i)
+                if (box.replaceableHeight > 0) {
+                    box.replaceableHeight + (box.style.padding.vertical + box.style.border.vertical).roundToInt()
+                } else measure(i)
+            },
+            breakOf = ::breakPairOf,
+            styleOf = ::resolveStyle,
+        )
+        if (plan.isEmpty()) return
+        for ((i, fit) in plan) {
+            val box = block(i)
+            val el = box.el ?: continue
+            box.replaceableFitH = fit
+            box.replaceableHeight = NormalFlowLayout.replaceableHeightOf(
+                el, box.style, NormalFlowLayout.innerBreakWidth(box.style, box.contentWidth),
+                imageLoader, chapterHref, fit,
+            )
+        }
+    }
+
     /** Materializes (and caches) index [i]'s [LayoutBox] — style via lazy cascade, content width via the
      *  container chain — without ever cascading the whole chapter. */
     fun block(i: Int): LayoutBox {
@@ -2951,6 +3074,10 @@ class LightPrepare(
             val fw = floatWidths[i]
             if (fw != null && fw > 0) boxLeft = contentLeft + maxOf(0, contentWidth - fw)
         }
+        // P3：独图提升叶的宿主块样式（break-* 挂在块上；见 `LayoutBox.breakCarrierStyle`）。
+        val carrierStyle = if (!replaceable) null else (carrierBlockOf(el) ?: el).let { c ->
+            if (c === el) null else resolveStyle(c)
+        }
         val box = LayoutBox(
             el = el, style = style,
             contentLeft = boxLeft,
@@ -2966,6 +3093,7 @@ class LightPrepare(
             table = if (isTr) tableRowLayoutFor(el, contentWidth) else null,
             // P6-a2: 环绕前导取全章 eager 表（与重路径 pending 透传同式；匿名/替换/表格叶恒空）。
             floatLead = floatLeads[i],
+            breakCarrierStyle = carrierStyle,
         )
         materialized[i] = box
         if (sink != null) {

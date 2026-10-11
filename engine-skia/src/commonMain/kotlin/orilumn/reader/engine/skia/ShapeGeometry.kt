@@ -60,6 +60,14 @@ fun shapeGeometry(
     /** 行内图行高：classify/hidden 喂全即与盒流同口径配对 U+FFFC；缺省只用 isBlock＋不过滤。 */
     classify: BlockClassify? = null,
     hidden: HiddenCheck = HIDDEN_NONE,
+    /**
+     * P3：分页层给该替换叶的高度上限（口径乙）。调用方喂 `LayoutBox.replaceableFitH`，
+     * 与盒流测量同值 —— 量画同源的唯一渠道（见 `docs/分页高度约束与断页规则-方案.md` §5）。
+     *
+     * 刻意**排在 [isBlock] 之前**：`app` 侧 `ParagraphShapes.shapeOf` 用**尾随 lambda** 传
+     * [isBlock]，加在它之后会改掉 lambda 的绑定目标。
+     */
+    replaceableFitH: Int? = null,
     isBlock: (MarkupElement) -> Boolean,
 ): ShapedGeometry {
     // Replaceable (img) leaf: no text to shape — a synthetic single line whose height is the
@@ -68,7 +76,7 @@ fun shapeGeometry(
     if (el.tag == "img") {
         return ShapedGeometry(
             isReplaceable = true,
-            replaceableBottom = NormalFlowLayout.replaceableHeightOf(el, rootStyle, widthPx, imageLoader, chapterHref),
+            replaceableBottom = NormalFlowLayout.replaceableHeightOf(el, rootStyle, widthPx, imageLoader, chapterHref, replaceableFitH),
         )
     }
     // An anonymous text leaf belongs to its container block, so pair it with the parent's tag

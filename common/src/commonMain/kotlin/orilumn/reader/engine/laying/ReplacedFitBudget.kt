@@ -1,5 +1,9 @@
 package orilumn.reader.engine.laying
 
+import orilumn.reader.engine.css.BreakRule
+import orilumn.reader.engine.css.ComputedStyle
+import orilumn.reader.engine.html.MarkupElement
+
 /**
  * 排版层（上）· 分页约束：块级替换叶（`display:block` 的 img）的**高度预算**。
  *
@@ -57,5 +61,102 @@ object ReplacedFitBudget {
         // 缩到下限以下不如不缩。
         if (avail < floor(contentH)) return null
         return avail
+    }
+
+    /** 一个块叶的**有效**断页边（提升叶取宿主块；见 `LayoutBox.breakCarrierStyle`）。 */
+    data class BreakPair(val before: BreakRule, val after: BreakRule)
+
+    private fun joins(a: BreakPair, b: BreakPair): Boolean {
+        if (a.after == BreakRule.ALWAYS || b.before == BreakRule.ALWAYS) return false
+        return a.after == BreakRule.AVOID || b.before == BreakRule.AVOID
+    }
+
+    /**
+     * **扁平块叶序列**上、叶 [index] 所属的不可断簇下标区间（含自身）。
+     *
+     * 判据与 [BreakClusters] 的兄弟分组同源：相邻叶之间，任一端 `ALWAYS` ⇒ 断开，任一端 `AVOID`
+     * ⇒ 同簇，否则断开。
+     *
+     * **有意不展开 `break-inside: avoid` 的祖先原子簇**：那种情形下 `othersH` 往往已经 ≥
+     * `contentH`（预算自然失效），而「整段不许切」的语义已由既有 `breakInsideAvoidRanges` 承担。
+     * 于是两路只需要同一份扁平叶序列 —— 而它正是重/轻两路**保证一致**的那份
+     * （`NormalFlowLayout.enumerateBlockLeaves` ↔ `LightPrepare.markupLeaves`）。
+     */
+    fun clusterRange(leaves: List<MarkupElement>, index: Int, breakOf: (MarkupElement) -> BreakPair): IntRange {
+        var lo = index
+        while (lo > 0 && joins(breakOf(leaves[lo - 1]), breakOf(leaves[lo]))) lo--
+        var hi = index
+        while (hi + 1 < leaves.size && joins(breakOf(leaves[hi]), breakOf(leaves[hi + 1]))) hi++
+        return lo..hi
+    }
+
+    /**
+     * 簇内**除图自身**以外内容的总高。
+     *
+     * 口径：Σ 各成员自身 border-box 高 ＋ Σ 相邻成员之间**折叠后**的纵向间隙。间隙用
+     * [NormalFlowLayout.consecutiveLeafAdvance] —— 与轻路径 [orilumn.reader.engine.laying] 行流
+     * 同一个函数，重路径 [NormalFlowLayout.emit] 的间隙按定义与它相等（`rebuildLocalLines` 的注释
+     * 已把这个恒等式当作前提），故两路量出同一个 `othersH`。
+     *
+     * @param members 簇成员（文档序，含图自身）
+     * @param imageIndex [members] 中图的**下标**（不是叶下标）
+     * @param ownHeight 按下标返回成员自身 border-box 高；图自身传**自然尺寸**（不受预算影响）
+     * @param styleOf 元素 → 样式（折叠需要祖先链样式）
+     */
+    fun othersHeight(
+        members: List<MarkupElement>,
+        imageIndex: Int,
+        ownHeight: (Int) -> Int,
+        styleOf: (MarkupElement) -> ComputedStyle,
+    ): Int {
+        if (members.size <= 1) return 0
+        var total = 0
+        for (k in members.indices) {
+            if (k > 0) total += NormalFlowLayout.consecutiveLeafAdvance(members[k - 1], members[k], styleOf)
+            total += ownHeight(k)
+        }
+        return (total - ownHeight(imageIndex)).coerceAtLeast(0)
+    }
+
+    /**
+     * **唯一写者**：给定一份扁平块叶序列，算出需要缩的替换叶 → 高度上限。
+     *
+     * 重路径（`NormalFlowLayout.layout`）与轻路径（`LightPrepare.applyReplacedFits`）都调这一个
+     * 函数，各自只负责把 [naturalH]/[ownHeight]/[breakOf] 喂成自己那份几何。图自身的高度**不参与**
+     * `othersH`（只影响它自己那一行），所以一遍自然流量即可定案，不需要迭代。
+     *
+     * @param leaves 扁平块叶序列（文档序）
+     * @param lo 起点叶下标（含）
+     * @param hi 终点叶下标（不含）——只给这个区间的叶算预算；簇成员可越界（只被量，不被改）
+     * @param contentH 一页内容高（px）；≤ 0 ⇒ 空表（无约束）
+     * @param naturalH 按下标返回替换叶的**自然** used 高（非替换叶返回 0）
+     * @param ownHeight 按下标返回该叶自身 border-box 高（自然尺寸）
+     * @param breakOf 按下标（元素）返回有效断页边
+     * @return 叶下标 → 高度上限（只含需要缩的叶）
+     */
+    fun plan(
+        leaves: List<MarkupElement>,
+        lo: Int,
+        hi: Int,
+        contentH: Int,
+        naturalH: (Int) -> Int,
+        ownHeight: (Int) -> Int,
+        breakOf: (MarkupElement) -> BreakPair,
+        styleOf: (MarkupElement) -> ComputedStyle,
+    ): Map<Int, Int> {
+        if (contentH <= 0) return emptyMap()
+        val a = lo.coerceIn(0, leaves.size)
+        val b = hi.coerceIn(a, leaves.size)
+        var out: MutableMap<Int, Int>? = null
+        for (i in a until b) {
+            val natural = naturalH(i)
+            if (natural <= 0) continue
+            val range = clusterRange(leaves, i, breakOf)
+            val members = range.map { leaves[it] }
+            val others = othersHeight(members, i - range.first, { k -> ownHeight(range.first + k) }, styleOf)
+            val fit = budget(natural, others, contentH) ?: continue
+            (out ?: HashMap<Int, Int>().also { out = it })[i] = fit
+        }
+        return out ?: emptyMap()
     }
 }

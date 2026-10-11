@@ -6,9 +6,7 @@ import orilumn.reader.engine.BoxChapterLayouter
 import orilumn.reader.engine.ImageLoader
 import orilumn.reader.engine.LightPrepare
 import orilumn.reader.engine.css.CssBundle
-import orilumn.reader.engine.css.LightCssParser
 import orilumn.reader.engine.css.themeSheetFromProfile
-import orilumn.reader.engine.html.ChapterPreprocessor
 import orilumn.reader.engine.html.HtmlTreeConverter
 import orilumn.reader.engine.html.MarkupElement
 import orilumn.reader.engine.text.TypographicProfile
@@ -26,11 +24,11 @@ import org.junit.runner.RunWith
 import org.junit.runners.Parameterized
 
 /**
- * 临时表「游标永不停滞」回归：**整宽插图高过版心时，临时表必须照样前进，不得产出零前进退化页**。
+ * 临时表「游标永不停滞」回归：**块级插图高过版心时，临时表必须照样前进，不得产出零前进退化页**。
  *
  * ## 现场（2026-10-11，桌面全屏，真书《Kotlin in Action》ch7 §1.4 图 1.2）
  *
- * 版心 4920x2560（设备 px；全屏横向 1.92:1），`modern.css` 的
+ * 版心 4920x2560（设备 px；全屏横向 1.92:1）。当时的触发路径是 `modern.css` 的
  * `.orilumn-fullwidth-image{width:100%}` 把内在 1122x735 的 `CH01_F02_Isakova.png` 拉到 4920 宽
  * ⇒ 盒高 4920×735/1122 = **3222 > 2560**（超页 26%）。该 img 块字符区间为空，于是
  * `shapeTempPageForward` 在**页首行**（k0=0）就撞上 `acc + h > contentH`，切点落在
@@ -38,6 +36,13 @@ import org.junit.runners.Parameterized
  * 前向预填水位永不推进（窗口塞满同页副本），翻页原地不动。真机日志：
  * `FLIP … slice[0,1)char[17667,17667)blk[201,202) … fwd=[b201[17667,17667),b201[17667,17667)]`
  * 然后 `tap-flip result dir=1 landed ch=7 char=17667`（原地）。
+ *
+ * ## P3a 后的输入改基（本题守的是「游标前进」，不是「主题拉伸」）
+ *
+ * 主题那条全宽拉伸规则已退役（见 `traditional.css` 编者注 / 方案 §4.5）⇒ 上述「原书未声明宽度
+ * 的图被拉超高」不再发生，`replaceableHeight` 只剩 735。为继续锁住同一 bug（超高块必须前进），
+ * 输入改用**原书自己声明的 `min-height:3000px`**：§10.4 `violMinH` 分支在 intrinsic 之上放大，
+ * 得 4580×3000（宽 = min(版心, 3000×1122/735)）⇒ 仍高过版心 2560（也仍高过将来的插图装页预算）。
  *
  * 重路径（磁盘表）不会停滞：`Paginator.fillWholeLines` 末行明写
  * 「`if (end == startLine) end = startLine + 1` —— 单行高过整页时至少推进一行（cursor never stalls）」。
@@ -59,7 +64,7 @@ class OversizedReplacedPageProgressTest(private val variant: String) {
 
     @After fun resetVariant() = resetBreakerVariant()
 
-    /** 全屏横向版心（设备 px）：图被拉到 4920 宽 ⇒ 高 3222 > 版心高 2560。 */
+    /** 全屏横向版心（设备 px）：min-height 3000 > 版心高 2560。 */
     private val contentW = 4920
     private val contentH = 2560
 
@@ -69,8 +74,11 @@ class OversizedReplacedPageProgressTest(private val variant: String) {
 
     private val chapterHref = "OEBPS/Text/Ch01.htm"
 
-    /** 版心 4920 下拉满宽后的盒高（= round(4920 × 735/1122) = 3223；真机 FLIP 日志记 ~3222）。 */
-    private val fullWidthBoxH = 3223
+    /** 原书声明的 `min-height`：§10.4 `violMinH` 把它抬到 3000（宽随之 4580）。 */
+    private val declaredMinH = 3000
+
+    /** §10.4 `violMinH` 后的盒高（= 声明的 min-height；宽 = round(3000×1122/735) = 4580）。 */
+    private val oversizedBoxH = 3000
 
     private val html = """
         <html><body>
@@ -81,8 +89,8 @@ class OversizedReplacedPageProgressTest(private val variant: String) {
         </body></html>
     """.trimIndent()
 
-    /** 原书未给该 img width/max-width（CSS）⇒ `ChapterPreprocessor` 打 `orilumn-fullwidth-image`。 */
-    private val authorCss = "img { display: block; margin: 1em auto; }"
+    /** 原书用 `min-height` 自己声明了高度 ⇒ 块级独图仍可超高（P3a 后不再靠主题拉伸）。 */
+    private val authorCss = "img { display: block; margin: 1em auto; min-height: ${declaredMinH}px; }"
 
     /** 生成一张 `intrinsicW x intrinsicH` 纯色 PNG（不依赖仓库静态资源）。 */
     private val png: ByteArray by lazy {
@@ -110,9 +118,8 @@ class OversizedReplacedPageProgressTest(private val variant: String) {
 
     private fun prepare(): LightPrepare {
         val root = HtmlTreeConverter().convert(html)!!
-        val preprocessed = ChapterPreprocessor.preprocess(root, listOf(LightCssParser().parse(authorCss)))
         return layouter().prepareLight(
-            preprocessed, CssBundle(listOf(authorCss)), profile(), contentW,
+            root, CssBundle(listOf(authorCss)), profile(), contentW,
             orilumn.reader.engine.ChapterStructureCache(), contentH,
         )
     }
@@ -128,9 +135,9 @@ class OversizedReplacedPageProgressTest(private val variant: String) {
     }
 
     @Test
-    fun `触发条件成立：整宽图盒高超过版心高`() {
+    fun `触发条件成立：块级图盒高超过版心高`() {
         val leaf = prepare().let { p -> p.block(imageBlock(p)) }
-        assertEquals("整宽盒高应为 round(4920×735/1122)", fullWidthBoxH, leaf.replaceableHeight)
+        assertEquals("原书 min-height 3000 ⇒ §10.4 violMinH 盒高 3000", oversizedBoxH, leaf.replaceableHeight)
         assertTrue(
             "触发条件是「单行(替换块)高过整页」：replaceableHeight=${leaf.replaceableHeight} contentH=$contentH",
             leaf.replaceableHeight > contentH,

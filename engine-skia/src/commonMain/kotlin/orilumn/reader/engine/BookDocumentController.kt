@@ -13,7 +13,6 @@ import orilumn.reader.engine.css.CssBundle
 import orilumn.reader.engine.css.LightCssParser
 import orilumn.reader.engine.css.StyleComputer
 import orilumn.reader.engine.css.StyleSheet
-import orilumn.reader.engine.html.ChapterPreprocessor
 import orilumn.reader.engine.html.HEADING_TAGS
 import orilumn.reader.engine.html.HtmlTreeConverter
 import orilumn.reader.engine.html.MarkupElement
@@ -790,9 +789,11 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
      *
      *  Why: [readChapter] (the epub-fallback path) was the only caller of `bindChapterContext`, so
      *  a persist-loaded chapter on a cold process left `chapterHref` empty. `intrinsicSizeOf`
-     *  then skipped the binary-bounds probe (`chapterHref.isNotBlank()` guard), and full-width
-     *  images (`orilumn-fullwidth-image { width:100% }`) fell back to height=width/2 — 半高图盒 —
-     *  which changed the pagination table (修复见分支 fix/photo-relayout-height，实测 5页↔4页)。
+     *  then skipped the binary-bounds probe (`chapterHref.isNotBlank()` guard) and the image fell
+     *  back to the "no intrinsic info" 300px / 2:1 box, which changed the pagination table
+     *  (修复见分支 fix/photo-relayout-height，实测 5页↔4页)。当时主题还把无约束独图拉满宽，
+     *  回退后果被放大成「半高图盒」；该主题规则已于 P3a 退役（见 `traditional.css` 编者注），
+     *  但探图仍必须发生 —— 否则连自然尺寸都拿不到。
      *
      *  层级：排版层·上 编排——把正在铺排的章（spine href）喂给 排版层·下 的分层引擎上下文，
      *  不改形状/量测语义、不动用户层主题。廉价幂等（字符串赋值），热路径无感。
@@ -4158,16 +4159,7 @@ private fun finishCanonicalBackground(
             // Collect the chapter's stylesheets (embedded <style> + linked css) for the cascade step.
             unitAt(index)?.cssBundle = buildCssBundle(spine.href, parsed)
             Logger.w(logTag, "readChapter ch=$index len=${text.length} css=${unitAt(index)?.cssBundle?.cssTexts?.size ?: 0} t=${platformNowMs() - t0}ms")
-            // User-layer annotations (e.g. full-width image figures) run here, once, and are cached
-            // with the chapter tree. Author stylesheets feed a book-only cascade so a book that
-            // sized an image itself is never stretched.
-            // P2: 与排版同视口的 @media 求值（内容区全视口）。
-            val contentW = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
-            val contentH = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
-            val viewport = orilumn.reader.engine.css.CssViewport(contentW, contentH)
-            val authorSheets: List<StyleSheet> =
-                (unitAt(index)?.cssBundle?.cssTexts ?: emptyList()).map { LightCssParser().parse(it, viewport) }
-            return ChapterPreprocessor.preprocess(parsed.tree, authorSheets)
+            return parsed.tree
         }
         // Malformed XML: fall back to plain text (no stylesheet sources).
         unitAt(index)?.cssBundle = null

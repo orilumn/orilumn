@@ -20,8 +20,8 @@ import orilumn.reader.io.Logger
  *    relinks node identities by root→leaf child-index paths, skipping the cascade entirely.
  *  - Chapters with media-affected CSS never get a file; the runtime path is unchanged.
  *
- * Nodes are referenced by child-index paths from the chapter root (post-[ChapterPreprocessor]
- * tree — the importer and the opener must run the same preprocess; any relink failure falls back
+ * Nodes are referenced by child-index paths from the chapter root (the raw converter tree —
+ * the importer and the opener must re-parse identically; any relink failure falls back
  * to computing). Text is never stored: the tree is always re-parsed at open, so this payload is
  * small (paths + starts + owners ≈ hundreds of KB per book, not MBs).
  *
@@ -39,12 +39,13 @@ object ChapterStructureCodec {
 
     /**
      * Cascade-semantics version. Bump on ANY change to what the structure means: the converter
-     * (tree shape), [ChapterPreprocessor], the display/hidden/caption predicates, char-advance
+     * (tree shape), the display/hidden/caption predicates, char-advance
      * normalization, background/avoid attribution, generated-content strings, or any UA/theme/UI
      * sheet rule touching a structure-consumed property (display/white-space/background/
      * break-inside/visibility/float). Same manual discipline as `PaginationCacheCodec.LAYOUT_VERSION`.
+     * 3: `ChapterPreprocessor`（`orilumn-fullwidth-image` 打类）退役，持久化的树少一个 class attr。
      */
-    const val STRUCTURE_VERSION = 2
+    const val STRUCTURE_VERSION = 3
 
     /** Filename convention: `<chapterIndex>.bin` (keys live inside the content, not the name). */
     fun filename(chapterIndex: Int): String = "$chapterIndex.bin"
@@ -54,10 +55,11 @@ object ChapterStructureCodec {
 
     /**
      * Tree-semantics version. Bump on ANY change to what the persisted tree means: the converter
-     * (node shape/attrs/text), [ChapterPreprocessor] (which tree gets persisted), or the
+     * (node shape/attrs/text) or the
      * post-process contract the relink paths assume. Same manual discipline as [STRUCTURE_VERSION].
+     * 2: `ChapterPreprocessor` 退役 —— 持久化的树不再带 `orilumn-fullwidth-image` 类。
      */
-    const val TREE_VERSION = 1
+    const val TREE_VERSION = 2
 
     /** Stable hash over a chapter's flattened CSS texts (`CssBundle.cssTexts`, post-`@import`
      *  resolution — the exact list sheets are parsed from and structures are keyed on). */
@@ -402,7 +404,7 @@ data class LeafRef(
 )
 
 /**
- * One chapter's import-built file: post-[ChapterPreprocessor] tree, deduped sheet references,
+ * One chapter's import-built file: post-parse tree, deduped sheet references,
  * and the nested structure payload. Open resolves [sheetHashes] through the book's
  * `_sheets.bin`, rebuilds `CssBundle(texts, [baseHrefs])` (identical to the epub-read path for
  * media-free chapters), and relinks [structure] onto [tree] — no epub text IO.

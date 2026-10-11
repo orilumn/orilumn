@@ -1,5 +1,18 @@
 # Plan: Full-width Image Preprocessing for Traditional / Modern Themes
 
+> ## ⚠ 已退役（P3a）
+>
+> 本文所述特性**整体退役**：`ChapterPreprocessor`（给「原书未声明 width/max-width」的块级独图
+> 打 `orilumn-fullwidth-image` 类）与该类在 `traditional.css` / `modern.css` 里的
+> `.orilumn-fullwidth-image { width: 100% }`（tier 42）都已删除。
+>
+> 原因：把图拉满版心是**纵向溢出**（图高过一页、被页底裁掉，分页阅读器无横向滚动）的最主要成因。
+> 现在无尺寸约束的图回到 intrinsic 尺寸；超宽 intrinsic 仍由 `ua.css` 的 `img{max-width:100%}`
+> （tier 10）按 CSS 2.1 §10.4 等比收敛。书自身的 width/max-width 一直不受影响。
+>
+> 决策、层叠三问与连带项清点见 `docs/分页高度约束与断页规则-方案.md` §4.5。
+> **本文以下内容保留作历史记录**（设计/算法/验收口径对「若要重启类似特性」仍有参考价值）。
+
 ## 1. Problem
 
 When switching to "Traditional" or "Modern" layout themes, block-level images and paragraphs consisting solely of an image (`<p><img/></p>`) should fill the full reader width — **but only if the original book did not specify a `width` or `max-width`** for that image. This respects authors who explicitly sized images while automatically stretching unsized illustrations.

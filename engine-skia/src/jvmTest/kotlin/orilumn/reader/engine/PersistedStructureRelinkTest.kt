@@ -2,7 +2,6 @@ package orilumn.reader.engine
 
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.engine.css.CssBundle
-import orilumn.reader.engine.html.ChapterPreprocessor
 import orilumn.reader.engine.html.HtmlTreeConverter
 import orilumn.reader.engine.html.MarkupElement
 import orilumn.reader.engine.text.TypographicProfile
@@ -54,8 +53,7 @@ class PersistedStructureRelinkTest {
 
     private fun payloadOf(profile: TypographicProfile): PersistedChapterStructure {
         val (tree0, bundle) = treeAndBundle()
-        val sheets = bundle.cssTexts.map { orilumn.reader.engine.css.LightCssParser().parse(it, null) }
-        val tree = ChapterPreprocessor.preprocess(tree0, sheets)
+        val tree = tree0
         val cache = ChapterStructureCache()
         layouter.prepareLight(tree, bundle, profile, 1600, cache, 2400)
         val cssHash = ChapterStructureCodec.cssHashOf(bundle.cssTexts)
@@ -76,16 +74,15 @@ class PersistedStructureRelinkTest {
     fun `relink reproduces leaves starts owners and gen strings`() {
         val profile = profileOf(46f, "屏显臻宋", true)
         val (tree0, bundle) = treeAndBundle()
-        val sheets = bundle.cssTexts.map { orilumn.reader.engine.css.LightCssParser().parse(it, null) }
         val cssHash = ChapterStructureCodec.cssHashOf(bundle.cssTexts)
         // Reference: compute directly.
-        val refTree = ChapterPreprocessor.preprocess(tree0, sheets)
+        val refTree = tree0
         val refCache = ChapterStructureCache()
         layouter.prepareLight(refTree, bundle, profile, 1600, refCache, 2400)
         val payload = ChapterStructurePersist.extract(7, cssHash, refTree, refCache) ?: error("extract")
         // Relink onto a freshly parsed tree (simulates open-time re-parse).
         val (tree02, _) = treeAndBundle()
-        val freshTree = ChapterPreprocessor.preprocess(tree02, sheets)
+        val freshTree = tree02
         val relinked = ChapterStructureCache()
         assertTrue(ChapterStructurePersist.apply(freshTree, payload, cssHash, relinked))
         assertEquals(refCache.leaves.size, relinked.leaves.size)
@@ -109,8 +106,7 @@ class PersistedStructureRelinkTest {
     @Test
     fun `relink fails closed on css change and bad paths`() {
         val (tree0, bundle) = treeAndBundle()
-        val sheets = bundle.cssTexts.map { orilumn.reader.engine.css.LightCssParser().parse(it, null) }
-        val tree = ChapterPreprocessor.preprocess(tree0, sheets)
+        val tree = tree0
         val cache = ChapterStructureCache()
         val profile = profileOf(46f, "屏显臻宋", true)
         layouter.prepareLight(tree, bundle, profile, 1600, cache, 2400)
@@ -133,8 +129,7 @@ class PersistedStructureRelinkTest {
         """.trimIndent()
         val parsed = converter.convertWithStyles(html) ?: error("parse failed")
         val bundle = ImportStructures.collectChapterCssTexts(EmptyReader, "ch.html", parsed, null)
-        val sheets = bundle.cssTexts.map { orilumn.reader.engine.css.LightCssParser().parse(it, null) }
-        val tree = ChapterPreprocessor.preprocess(parsed.tree, sheets)
+        val tree = parsed.tree
         val profile = profileOf(46f, "屏显臻宋", true)
         // Light path binds the strings (the persisted source in production).
         val cache = ChapterStructureCache()
@@ -161,7 +156,7 @@ class PersistedStructureRelinkTest {
         """.trimIndent()
         val parsed = converter.convertWithStyles(html) ?: error("parse failed")
         val bundle = ImportStructures.collectChapterCssTexts(EmptyReader, "ch.html", parsed, null)
-        val tree = ChapterPreprocessor.preprocess(parsed.tree, emptyList())
+        val tree = parsed.tree
         val profile = profileOf(46f, "屏显臻宋", true)
         val cache = ChapterStructureCache()
         layouter.prepareLight(tree, bundle, profile, 1600, cache, 2400)
@@ -172,7 +167,7 @@ class PersistedStructureRelinkTest {
         val read = ChapterStructureCodec.decodeFile(ChapterStructureCodec.encodeFile(file)) ?: error("file codec")
         // Fresh re-parse (simulates open): relink must reproduce every leaf's text in order.
         val parsed2 = converter.convertWithStyles(html) ?: error("re-parse failed")
-        val tree2 = ChapterPreprocessor.preprocess(parsed2.tree, emptyList())
+        val tree2 = parsed2.tree
         val relinked = ChapterStructureCache()
         assertTrue(ChapterStructurePersist.apply(tree2, read.structure, read.cssHash, relinked))
         assertEquals(cache.leaves.size, relinked.leaves.size)
@@ -207,8 +202,7 @@ class PersistedStructureRelinkTest {
         // open loads tree + sheets from disk only and relinks — no XML re-parse.
         val profile = profileOf(46f, "屏显臻宋", true)
         val (tree0, bundle) = treeAndBundle()
-        val sheets = bundle.cssTexts.map { orilumn.reader.engine.css.LightCssParser().parse(it, null) }
-        val tree = ChapterPreprocessor.preprocess(tree0, sheets)
+        val tree = tree0
         val cache = ChapterStructureCache()
         layouter.prepareLight(tree, bundle, profile, 1600, cache, 2400)
         val dir = java.nio.file.Files.createTempDirectory("struct-e2e").toString()

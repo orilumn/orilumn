@@ -14,7 +14,7 @@ import orilumn.reader.engine.html.MarkupElement
  * to computing at open, exactly as today.
  *
  * Node identity crosses the process boundary as child-index paths from the chapter root. Both
- * sides must walk the same post-[ChapterPreprocessor] tree; every resolution is bounds-checked
+ * sides must walk the same converter tree; every resolution is bounds-checked
  * and any failure returns false → the caller computes instead. Trust nothing.
  */
 object ChapterStructurePersist {

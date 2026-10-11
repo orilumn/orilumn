@@ -7,7 +7,6 @@ import orilumn.reader.engine.css.ReaderUiSheet
 import orilumn.reader.engine.css.StyleComputer
 import orilumn.reader.engine.css.themeSheetFromProfile
 import orilumn.reader.engine.css.usedReplacedSize
-import orilumn.reader.engine.html.ChapterPreprocessor
 import orilumn.reader.engine.html.HtmlTreeConverter
 import orilumn.reader.engine.html.MarkupElement
 import orilumn.reader.engine.laying.BoxLayouter
@@ -24,26 +23,32 @@ import org.junit.runner.RunWith
 import org.junit.runners.Parameterized
 
 /**
- * 《摄影的艺术》ch44 图页回归（真书链路，共享引擎，无平台代码）。
+ * 《摄影的艺术》ch44 图页回归（真书链路，共享引擎，无平台代码）——**P3a 后改基**
+ * （原名 `PhotoPersistFullWidthRegressionTest`）。
  *
  * 背景：章节 persist 加载路径此前不绑 `chapterHref` → [NormalFlowLayout.intrinsicSizeOf]
- * 跳过二进制探测 → `.orilumn-fullwidth-image{width:100%}` 的主题规则把图片拉全宽时
- * 高度回退成 `宽/2`（旧平板实测盒高 795 = 1590/2）。修复 = persist 加载时绑定
- * `bindChapterFor` → 探测命中 915×1105 → 同参数下盒高应还原为 1590×1920（旧正确同为 1920）。
+ * 跳过二进制探测 ⇒ 图片拿不到真实内在尺寸。旧口径下主题还会把独图拉全宽，于是回退被放大成
+ * 「半高图盒」（旧平板实测盒高 795 = 1590/2）；修复 = persist 加载时绑定 `bindChapterFor`
+ * → 探测命中 915×1105。
  *
- * 三态对照（同一 ch44 图块、同一 traditional 排版主题）：
- *  - 传统主题 + href 已绑（修复后）：1590×1920 —— 修复目标
- *  - 传统主题 + href 空白（修复前 persist）：1590×795 —— 旧 bug（宽/2 回退）
- *  - 原书设置（无主题层，当前新装默认）：915×1105 —— 设计行为，非 bug
+ * **P3a（2026-10-11）**：主题那条 `.orilumn-fullwidth-image{width:100%}` 已退役（见 `traditional.css`
+ * 编者注 / `docs/分页高度约束与断页规则-方案.md` §4.5）⇒ 图片一律按自然尺寸。本类锁的不变式不变
+ * （persist 路径必须绑 `chapterHref` 让探图发生），只是数字从「1590 宽拉伸」回到 intrinsic：
+ *
+ *  - 传统主题 + href 已绑：915×1105 —— 正确路径
+ *  - 传统主题 + href 空白：无 intrinsic ⇒ §10.3.2 的「无信息回落」300×150（原为 1590×795）
+ *  - 原书设置（无主题层）：915×1105 —— 与主题模式同值（主题不再动图宽）
+ *
+ * 另加一条 P3a 契约断言：两个主题都**不得**再给独图注入 `width`。
  */
 @RunWith(Parameterized::class)
-class PhotoPersistFullWidthRegressionTest(private val variant: String) {
+class PhotoPersistIntrinsicRegressionTest(private val variant: String) {
 
     companion object {
         /**
          * S3：两个变体都要成立。
          *
-         * 本类锁的是「图片拿全宽类 + 盒高等比」这条不变式，断行器只是同页文本的**邻居**：
+         * 本类锁的是「persist 探图 + 盒高按标准尺寸」这条不变式，断行器只是同页文本的**邻居**：
          * 断点一变，图片所在段的宽度就可能变，进而动到盒高。所以它不是「与断行无关」，
          * 但也不是主题 —— 两侧都跑一遍即可，不为它单开断行专属断言。
          */
@@ -69,7 +74,7 @@ class PhotoPersistFullWidthRegressionTest(private val variant: String) {
         </body></html>
     """.trimIndent()
 
-    /** 原书 stylesheet.css 中对图块生效的真实规则（无宽度约束 → img 有资格自动全宽）。 */
+    /** 原书 stylesheet.css 中对图块生效的真实规则（未声明宽度 ⇒ 今天不再被任何主题拉伸）。 */
     private val authorCss = """
         img { border: none; margin: 0.5rem auto; display: block; }
         img + .caption, pre + .caption { margin-top: 0rem; margin-bottom: 1rem; page-break-before: avoid; }
@@ -84,11 +89,8 @@ class PhotoPersistFullWidthRegressionTest(private val variant: String) {
     private fun originalProfile() =
         TypographicProfile.build(ReaderSettings.DEFAULT) // default layoutTheme = "original"
 
-    /** 预处理后的树（persist 加载的标记即此形态）：img 应带 FULLWIDTH_CLASS。 */
-    private fun preprocessed(authorCss: String = this.authorCss): MarkupElement {
-        val root = HtmlTreeConverter().convert(html)!!
-        return ChapterPreprocessor.preprocess(root, listOf(LightCssParser().parse(authorCss)))
-    }
+    /** 原始解析树（P3a 后不再有预处理打类；persist 持久化的标记即此形态）。 */
+    private fun converted(): MarkupElement = HtmlTreeConverter().convert(html)!!
 
     private fun styleEngine(profile: TypographicProfile): StyleComputer {
         val author = listOf(LightCssParser().parse(authorCss))
@@ -118,7 +120,7 @@ class PhotoPersistFullWidthRegressionTest(private val variant: String) {
     }
 
     private fun imgBoxHeight(href: String): Int {
-        val root = preprocessed()
+        val root = converted()
         val profile = traditionalProfile()
         val engine = styleEngine(profile)
         val styles = engine.compute(root)
@@ -127,7 +129,7 @@ class PhotoPersistFullWidthRegressionTest(private val variant: String) {
             .layoutBoxes(root, contentW, styles, classify, imageLoader = imgLoader, chapterHref = href)
         var boxHeight = -1
         fun walkBox(b: LayoutBox) {
-            if (b.el?.tag == "img" && boxHeight == -1) boxHeight = (b.contentBottom - b.contentTop).toInt()
+            if (b.el?.tag == "img" && boxHeight == -1) boxHeight = b.contentBottom - b.contentTop
             for (c in b.childBoxes) walkBox(c)
         }
         for (b in result.boxes) walkBox(b)
@@ -135,49 +137,56 @@ class PhotoPersistFullWidthRegressionTest(private val variant: String) {
     }
 
     @Test
-    fun `预处理交给持久化的树带全宽类`() {
-        assertTrue("图片未获得全宽类", firstImg(preprocessed()).attrs["class"].orEmpty().contains(ChapterPreprocessor.FULLWIDTH_CLASS))
-    }
-
-    @Test
-    fun `传统主题级联给图片注入 width 100 百分比`() {
-        val root = preprocessed()
+    fun `传统主题不再给独图注入全宽百分比(P3a 退役)`() {
+        val root = converted()
         val st = stylesOf(root, traditionalProfile())[firstImg(root)]!!
-        assertEquals(100f, st.widthPct ?: -1f, 0.001f)
+        assertNull("P3a 后主题不得再给独图注入 width:100%", st.widthPct)
+        assertNull("P3a 后主题不得再给独图注入 width:100%", st.widthPx)
+        assertEquals(915 to 1105, st.usedReplacedSize(915, 1105, contentW))
     }
 
     @Test
-    fun `修复后已知href+探图成功 → 全宽等比图盒 1590x1920`() {
-        // 与旧正确会话实测盒高 1920 一致（1590 × 1105/915）。
-        assertEquals(1920, imgBoxHeight(href = "text/part0009_split_004.html"))
+    fun `已知href+探图成功 → 自然尺寸盒 915x1105`() {
+        assertEquals(1105, imgBoxHeight(href = "text/part0009_split_004.html"))
     }
 
     @Test
-    fun `修复前persist空白href → 宽减半回退 1590x795`() {
-        // 与旧错误会话实测盒高 795（= 1590/2）一致。
-        assertEquals(795, imgBoxHeight(href = ""))
+    fun `persist空白href → 探图跳过，无信息回落 300x150`() {
+        // 无 intrinsic 时按 CSS 2.1 §10.3.2 的「300px 或装得下的最大 2:1 矩形」⇒ 300×150
+        // （旧口径因主题拉全宽而放大成 1590×795，P3a 后回到这条标准回落）。
+        assertEquals(150, imgBoxHeight(href = ""))
     }
 
     @Test
     fun `原书设置无主题层 → 自然尺寸 915x1105 不拉伸`() {
-        val root = preprocessed()
+        val root = converted()
         val st = stylesOf(root, originalProfile())[firstImg(root)]!!
-        assertNull("原书设置下不应注入全宽百分比", st.widthPct)
+        assertNull("原书设置下也不应有全宽百分比", st.widthPct)
         val (w, h) = st.usedReplacedSize(915, 1105, contentW)
         assertEquals(915 to 1105, w to h)
     }
 
     @Test
     fun `href绑定与否决定探测是否发生(修复机关)`() {
-        val root = preprocessed()
+        val root = converted()
         val img = firstImg(root)
         val profile = traditionalProfile()
         val stylesA = stylesOf(root, profile)
         // href 空白 → 不探测；href 绑定 → 命中 915x1105。
         assertNull(NormalFlowLayout.intrinsicSizeOf(img, imgLoader, ""))
         assertEquals(915 to 1105, NormalFlowLayout.intrinsicSizeOf(img, imgLoader, "text/part0009_split_004.html"))
-        // 级联尺寸路径同源：usedReplacedSize 直接对 same style 生效。
+        // 级联尺寸路径同源：usedReplacedSize 直接对 same style 生效（自然高 1105）。
         val st = stylesA[img]!!
-        assertEquals(1920, st.usedReplacedSize(915, 1105, contentW).second)
+        assertEquals(1105, st.usedReplacedSize(915, 1105, contentW).second)
+    }
+
+    @Test
+    fun `原书未设宽度的独图在传统主题下仍不越版心宽`() {
+        // P3a 的可见结果：915 < 1590 ⇒ 既不拉伸也不左挪（居中交给书/主题的 margin auto）。
+        val root = converted()
+        val st = stylesOf(root, traditionalProfile())[firstImg(root)]!!
+        val (w, h) = st.usedReplacedSize(915, 1105, contentW)
+        assertTrue("自然宽应等于 intrinsic 且不越版心：$w", w == 915 && w <= contentW)
+        assertEquals(1105, h)
     }
 }

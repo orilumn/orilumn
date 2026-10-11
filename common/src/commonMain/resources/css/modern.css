@@ -38,5 +38,6 @@ p, div, li, blockquote, dd, td { text-align: justify; }
  * 掐掉继承路径; 完整口径 (选择器/量化/层叠代价) 见 traditional.css 同名节。 */
 pre, code { text-align: left; }
 
-/* 无尺寸约束的块级/独图插图拉满正文宽度 (ChapterPreprocessor 仅在原书未设 width/max-width 时打类) */
-.orilumn-fullwidth-image { width: 100%; }
+/* 编者注（P3a）：此处原有 `.orilumn-fullwidth-image { width: 100% }`（把原书未声明 width/max-width
+ * 的块级独图拉满正文宽）—— **已退役**，完整口径/层叠三问见 traditional.css 同位置注释与
+ * docs/分页高度约束与断页规则-方案.md §4.5。 */

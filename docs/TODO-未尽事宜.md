@@ -1327,11 +1327,13 @@
   - **A/B 决策**：
     - **A（当前基线，保持）**：主题 = CSS-only，接受已量化的爆炸半径（4 处可见 + noindent 类被压）。
       架构最简单。
-    - **B（本项立项，未动手）**：**annotation-assisted theme** —— 扩展 `ChapterPreprocessor`
-      （它已是「用户层 annotation pass」，**先例 `orilumn-fullwidth-image` 就是「预处理打类 + 主题认类」**）：
+    - **B（本项立项，未动手）**：**annotation-assisted theme** —— 需要一个新的「用户层 annotation pass」：
       识别 p 的作者意图类 → 打**读者层命名空间标记类**（`orilumn-*`）→ 主题 CSS 对标记类**不缩进/不 justify**
       （或按作者意图对齐）。**不重写 DOM**（保「原书设置 = 书说了算」安全）、类加在**级联之前**
       （不违反决策 6 铁律「不经内核级联事后改写」）、原书模式整表不加载 ⇒ 标记类对书不可见。
+      **注意**：先例骨架 `ChapterPreprocessor` 已于 P3a 退役（见 `docs/分页高度约束与断页规则-方案.md`
+      §4.5.5 β）—— 立项时按同一形态重建（约 100 行：DOM 走查 + 基于 author 表的意图判定 + CoW 重建，
+      并同步 bump `ChapterStructureCodec.STRUCTURE_VERSION`/`TREE_VERSION`）。
     - B 的代价诚实认领：主题从此两段式（CSS asset + 预处理 lexicon），lexicon 需维护；但命名族**有界**
       （工具链方言有限，量过），可**按族增量落地**（建议先 `noindent`/`center`/`right`/`caption`），
       每族配离屏回归 + 全库截图 A/B。每一步必答 `AGENTS.md` 校验规则三问（tier / 量过 / 没配就不发）。

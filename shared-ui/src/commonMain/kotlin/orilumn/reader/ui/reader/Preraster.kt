@@ -277,8 +277,13 @@ private suspend fun warmImagesForPreraster(
     kotlinx.coroutines.coroutineScope {
         val imgDeferred = missImgs.map { img -> this.async { img to runCatching { host.loadPageImage(img) }.getOrNull() } }
         val bgDeferred = missBgs.map { ref -> this.async { ref to runCatching { host.loadBackgroundImage(ref.first, ref.second) }.getOrNull() } }
-        for ((img, bmp) in imgDeferred.awaitAll()) if (bmp != null) imgCache.put(imgKeyOf(img), bmp)
-        for ((ref, bmp) in bgDeferred.awaitAll()) if (bmp != null) bgCache.put(bgKeyOf(ref.first, ref.second), bmp)
+        // 整批 putAll：同页多图必须一起留下，否则后一条会把前一条（同页仍在用）淘汰掉。
+        imgCache.putAll(imgDeferred.awaitAll().mapNotNull { (img, bmp) -> bmp?.let { imgKeyOf(img) to it } })
+        bgCache.putAll(
+            bgDeferred.awaitAll().mapNotNull { (ref, bmp) ->
+                bmp?.let { bgKeyOf(ref.first, ref.second) to it }
+            },
+        )
     }
 
     // 复核：解码失败/超时的图不算备齐（占位块入池就是闪烁的来源）。

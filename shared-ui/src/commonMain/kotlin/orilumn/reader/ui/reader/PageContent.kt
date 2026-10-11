@@ -116,9 +116,9 @@ fun rememberPageContent(
                 img to runCatching { currentHost.loadPageImage(img) }.getOrNull()
             }
         }
-        for ((img, bmp) in deferred.awaitAll()) {
-            if (bmp != null) imgCache.put(imgKeyOf(img), bmp)
-        }
+        // 整批 putAll（不是逐条 put）：同一页的多图必须一起留下，否则后一条会把前一条
+        // （同页仍在用）淘汰掉 ⇒ 同页只画得出一张图（见 PageImageCache.putAll）。
+        imgCache.putAll(deferred.awaitAll().mapNotNull { (img, bmp) -> bmp?.let { imgKeyOf(img) to it } })
         imageBitmaps = imgs.mapNotNull { img -> imgCache.get(imgKeyOf(img))?.let { img to it } }
             .toMap(LinkedHashMap(imgs.size))
     }
@@ -148,9 +148,8 @@ fun rememberPageContent(
                 }.getOrNull()
             }
         }
-        for ((key, bmp) in deferred.awaitAll()) {
-            if (bmp != null) bgCache.put(key, bmp)
-        }
+        // 整批 putAll：同页多背景图必须一起留下（见 PageImageCache.putAll）。
+        bgCache.putAll(deferred.awaitAll().mapNotNull { (key, bmp) -> bmp?.let { key to it } })
         bgImages = refs.mapNotNull { ref -> bgCache.get(bgKeyOf(ref.first, ref.second))?.let { bgKeyOf(ref.first, ref.second) to it } }
             .toMap(LinkedHashMap(refs.size))
     }

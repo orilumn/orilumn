@@ -1454,6 +1454,13 @@ private fun stepTempPrefill(unit: ChapterUnit, ip: InProgressPagination, lastDir
         // 开发期 fail-fast：记 e 后抛（后台 SupervisorJob 收容，不连累前台；栈留痕）。
         val fwd = bc.shapeTempPageForward(prep, ip.profileSnapshot, ip.contentW, ip.contentH, origin.first, ip.shapes, origin.second)
             ?: error("stepTempPrefill fillForward FAIL ch=${unit.chapterIndex} origin=(${origin.first},${origin.second})")
+        // 「游标永不停滞」canary（按理恒为零；源头是 shapeTempPageForward 内的 placedLines guard）：
+        // 塑形点没越过入参原点 ⇒ 该页一个字符都没推进。追进去只会让窗口塞满同页副本、水位永不推进，
+        // 症状是前向翻页原地不动（曾经的真实事故：宽屏全屏下超高整宽插图）。丢弃并记 w。
+        if (fwd.nextBlock < origin.first || (fwd.nextBlock == origin.first && fwd.nextLine <= origin.second)) {
+            Logger.w(logTag, "prefill fwd-stall DROP ch=${unit.chapterIndex} origin=(${origin.first},${origin.second}) next=(${fwd.nextBlock},${fwd.nextLine}) shaped=b${fwd.page.blockStart}[${fwd.page.slice.charStart},${fwd.page.slice.charEnd})")
+            return 0
+        }
         // 失配即窗口/水位已分叉：追加即跳页。丢弃（不追加、不推水位，不变量 intact），记 e 待查。
         if (!tempPagesTile(tail.slice, fwd.page.slice)) {
             Logger.e(logTag, "prefill fwd-stale-window DROP ch=${unit.chapterIndex} tail=b${tail.blockStart}[${tail.slice.charStart},${tail.slice.charEnd}) shaped=b${fwd.page.blockStart}[${fwd.page.slice.charStart},${fwd.page.slice.charEnd})")

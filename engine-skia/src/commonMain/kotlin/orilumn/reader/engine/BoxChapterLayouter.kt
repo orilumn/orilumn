@@ -1560,6 +1560,8 @@ class BoxChapterLayouter(
         var cutLine = -1
         var b = startBlock
         var firstInPage = true
+        // 本页已纳入的行数（「游标永不停滞」判据，见下）。
+        var placedLines = 0
         while (b < total) {
             if (!firstInPage) {
                 // Inter-block gap: prev content-bottom → this content-top.
@@ -1587,8 +1589,15 @@ class BoxChapterLayouter(
             for (k in k0 until s.lineCount) {
                 // Every shaped line is the CSS line box; fill by it so capacity matches drawn pixels.
                 val h = (s.lineBottom(k) - s.lineTop(k)).coerceAtLeast(1)
-                if (acc + h > contentH) { cutBlock = b; cutLine = k; break }
+                // 游标永不停滞（单源口径：重路径 `Paginator.fillWholeLines` 末尾
+                // `if (end == startLine) end = startLine + 1`）——页首行自身就高过整页时**强收这一行**
+                // 并允许它被页面裁掉（`applyBreakInsideAvoid`：oversized block 允许撕裂，与浏览器一致），
+                // 而不是把切点留在页首行。切在页首行会产出 `charStart == charEnd` 且 next == 起点的
+                // 零前进退化页：前向预填水位永不推进（窗口塞满同页副本），翻页原地不动。
+                // 复现：宽屏全屏（版心 4920x2560）下主题 `width:100%` 把 1122x735 的插图拉到 3223 高。
+                if (placedLines > 0 && acc + h > contentH) { cutBlock = b; cutLine = k; break }
                 acc += h
+                placedLines++
             }
             }
             if (cutLine >= 0) { endBlockExclusive = b + 1; break }
@@ -1645,6 +1654,8 @@ class BoxChapterLayouter(
         var b = endExclusive - 1
         var firstInPage = true
         var truncated = false
+        // 本页已纳入的行数（「游标永不停滞」判据，见下）。
+        var placedLines = 0
         while (b >= 0) {
             val leaf = prepare.block(b)
             val s = tempShape(cache, prepare, b, profile)
@@ -1680,8 +1691,12 @@ class BoxChapterLayouter(
             for (k in (maxLine - 1) downTo 0) {
                 // Every shaped line is the CSS line box; fill by it so capacity matches drawn pixels.
                 val h = (s.lineBottom(k) - s.lineTop(k)).coerceAtLeast(1)
-                if (acc + h > contentH) { overflowLine = k; break }
+                // 与 shapeTempPageForward 同一条「游标永不停滞」guard（单源：重路径 fillWholeLines）：
+                // 页底块自己那一行就高过整页时（宽屏全屏下的超高插图）强收它并允许撕裂，否则
+                // `overflowLine == maxLine - 1` ⇒ `startLine = maxLine` ⇒ 空页/丢块，向前回溯同样卡住。
+                if (placedLines > 0 && acc + h > contentH) { overflowLine = k; break }
                 acc += h
+                placedLines++
             }
             }
             if (overflowLine >= 0) {

@@ -85,6 +85,29 @@ object BreakClusters {
     /** 只要簇（[plan] 的薄包装）。 */
     fun of(leaves: List<Leaf>): List<IntRange> = plan(leaves).clusters
 
+    /**
+     * avoid **边簇的块级范围**（`[f, l]`，含两端），边界判据仍是 [joins] 单源。
+     *
+     * 给**没有全章叶序列**的调用方（临时页填充）把窗口取整到整簇用：窗口若把簇截断，[plan]
+     * 会把整簇误判成「装得下一页」，于是错误退簇。本函数**只取窗口**，不做任何页边界决定
+     * —— 页边界一律由 `Paginator` 在取整后的窗口上算。
+     *
+     * @param i 起点块；窗口块域 `[lo, hi)`；`before/after` 为块的有效断页边。
+     */
+    fun chainRange(
+        i: Int,
+        lo: Int,
+        hi: Int,
+        before: (Int) -> BreakRule,
+        after: (Int) -> BreakRule,
+    ): IntRange {
+        var f = i
+        while (f - 1 >= lo && joins(after(f - 1), before(f))) f--
+        var l = i
+        while (l + 1 < hi && joins(after(l), before(l + 1))) l++
+        return f..l
+    }
+
     /** 扁平块叶序列上的**簇 + 强制断页行**（分页侧两条约束的单源）。 */
     fun plan(leaves: List<Leaf>): Plan {
         val clusters = ArrayList<IntRange>()

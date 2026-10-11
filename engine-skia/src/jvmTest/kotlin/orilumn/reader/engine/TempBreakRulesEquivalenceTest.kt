@@ -18,17 +18,18 @@ import org.junit.Test
  *
  * ## 为什么必须等价
  *
- * AGENTS.md 分页调度：锚章先用临时表，磁盘表就绪后**立即切到磁盘表**。若两表对同一条 `break-*`
- * 规则给出不同边界，切换瞬间就会「跳页」——用户在调参/开书时看到页内容整段位移。所以临时路径
- * 不能只「大概差不多」，必须与 canonical 逐页 `charStart/charEnd` 相等。
+ * AGENTS.md 分页调度：本章内**始终用临时表**，只在翻回章开头且磁盘表已就绪时才切到磁盘表（直接
+ * 显示磁盘表对应页），离开本章则废弃临时表。若两表对同一条 `break-*` 规则给出不同边界，切换瞬间
+ * 就会「跳页」——用户翻回章首时看到页内容整段位移。所以临时路径不能只「大概差不多」，必须与
+ * canonical 逐页 `charStart/charEnd` 相等。
  *
- * ## 覆盖的两条规则（P4a/P4c/P4d 全链）
+ * ## 单源口径
  *
- * 1. **强制断页**（`page-break-before: always`）：canonical 用 `BreakClusters.isForced` 切段
- *    （`BoxDrawableLayout.forcedBreakBeforeLines`），临时路径在填充循环里同判据提前收盘；
- * 2. **avoid 边簇**（`page-break-after: avoid` 的两段）：canonical 用
- *    `BoxDrawableLayout.avoidSplitRanges`，临时路径按块链自算簇区间并调用**同一个**
- *    `Paginator.retreatFor`。
+ * 两边**不是各写一份规则碰巧等价**，而是调用同一段代码：临时页在 `BoxChapterLayouter` 里先建出窗口
+ * 布局（`PartialDrawableLayout`，本身实现 `BreakAwareBookLayout`，其簇/强制行来自单源
+ * `BreakClusters.plan`），再交给 `Paginator.paginateFrom` 定页尾；`shapeTempPageForward` 只负责
+ * 「圈窗口」（按行高累加）与沿 `BreakClusters.chainRange` 把窗口取整到 avoid 簇闭合——它不含任何
+ * 分页判据。
  *
  * ## 前向为什么是「全等」、后向为什么只是「自身合规」
  *
@@ -62,6 +63,26 @@ class TempBreakRulesEquivalenceTest {
           <p style="page-break-after: avoid">图注上段（与下一段同页）。</p>
           <p>图注下段。</p>
           <p>${body("山重水复疑无路，柳暗花明又一村。", 12)}</p>
+        </body></html>
+        """.trimIndent(),
+    )!!
+
+    /**
+     * 巨型 avoid 边簇（目录 / 前言类）：多个 `page-break-after: avoid` 段落串成一条**总高远过一页**
+     * 的长链，链后接 `pre` 与长段。
+     *
+     * 这正是旧临时填充的原始现场：窗口在切点块处被截断，`BreakClusters.plan` 于是把整簇看成
+     * 「装得下一页」而错误退簇 —— 表现为半页空白、`pre` 整块后移。窗口必须沿
+     * `BreakClusters.chainRange` 补到簇闭合，页尾仍交 `Paginator`（整簇装不下 ⇒ 允许撕裂）。
+     */
+    private fun giantClusterChapter(): MarkupElement = converter.convert(
+        """
+        <html><body>
+          <h2>目录</h2>
+          <p>${body("启程之前，先说清这册书怎么读。", 8)}</p>
+          ${(1..7).joinToString("") { "<p style=\"page-break-after: avoid\">${body("第 $it 节 断页规则示例文字。", 18)}</p>" }}
+          <pre>${body("缩进与空行都要保住的原始块。", 6)}</pre>
+          <p>${body("尾声很长的一节，用来把后面的页填满。", 12)}</p>
         </body></html>
         """.trimIndent(),
     )!!
@@ -168,6 +189,44 @@ class TempBreakRulesEquivalenceTest {
 
         assertTrue("扫不到强制页首：本锁空跑", sawForcedPageStart)
         assertTrue("扫不到 avoid 簇首断页：本锁空跑", sawAvoidClusterBoundary)
+    }
+
+    /**
+     * 巨型 avoid 簇锁：与 §「前向全等」同一条断言，但样本换成**簇长跨页**的目录链。
+     * 若窗口不沿 `chainRange` 补到簇闭合，这里必然出现半页空白 / `pre` 整块后移。
+     */
+    @Test
+    fun `giant avoid cluster keeps temp forward pages identical to canonical`() {
+        val markup = giantClusterChapter()
+        var sawClusterTear = false
+
+        for (contentH in 300..700 step 20) {
+            val product = canonical(markup, contentH)
+            val canon = product.slices
+            val temp = tempForward(markup, contentH)
+            val aware = product.layout as BreakAwareBookLayout
+
+            assertEquals("contentH=$contentH page count", canon.size, temp.size)
+            for (i in canon.indices) {
+                assertEquals("contentH=$contentH page $i charStart", canon[i].charStart, temp[i].charStart)
+                assertEquals("contentH=$contentH page $i charEnd", canon[i].charEnd, temp[i].charEnd)
+            }
+
+            // canonical 自身不得撕裂「装得下」的簇；整簇装不下时允许撕裂（oversized 口径）。
+            for ((i, p) in canon.withIndex()) {
+                val cut = p.lastLineExclusive
+                val torn = aware.avoidSplitRanges.filter { it.first < cut && cut < it.last + 1 }
+                if (torn.isEmpty()) continue
+                assertTrue(
+                    "contentH=$contentH page $i torn inside avoid ranges that all fit one page: $torn",
+                    torn.any { aware.getLineBottom(it.last) - aware.getLineTop(it.first) > contentH },
+                )
+                sawClusterTear = true
+            }
+        }
+
+        // 本锁必须真的扫到「超页高的巨型簇被撕」——否则本锁空跑（小簇根本碰不到窗口截断坑）。
+        assertTrue("语料没造出跨页的巨型 avoid 簇：本锁空跑", sawClusterTear)
     }
 
     @Test

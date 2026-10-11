@@ -1,5 +1,6 @@
 package orilumn.reader.engine.laying
 
+import orilumn.reader.engine.css.BreakRule
 import orilumn.reader.engine.css.LightCssParser
 import orilumn.reader.engine.css.StyleComputer
 import orilumn.reader.engine.html.MarkupElement
@@ -118,6 +119,44 @@ class BreakClustersTest {
         // 这条差异（相对 CSS 的同父容器判定）是**有意为之**并被此处钉住，见 BreakClusters 的类注释。
         val div = MarkupElement("div", emptyMap(), listOf(p()))
         assertEquals(listOf(0 until 2), clusters(p("break-after: avoid"), div))
+    }
+
+    // ---- P4：窗口取整 chainRange（只取窗口，不做页边界决定） ----
+
+    /** 块级 `before`/`after` 取值的 lambda（`chainRange` 的入参）。 */
+    private fun edgeRules(vararg ps: MarkupElement): Pair<(Int) -> BreakRule, (Int) -> BreakRule> {
+        val leaves = BreakClusters.leavesOf(layoutBoxes(*ps))
+        val before: (Int) -> BreakRule = { i -> leaves[i].before }
+        val after: (Int) -> BreakRule = { i -> leaves[i].after }
+        return before to after
+    }
+
+    @Test
+    fun `chainRange 从簇中任意块都能取到整簇块域`() {
+        // p1→p2 avoid、p2→p3 avoid ⇒ 三块一簇；从中间块 1 出发应取到 0..2。
+        val (before, after) = edgeRules(p("break-after: avoid"), p("break-after: avoid"), p())
+        assertEquals(0..2, BreakClusters.chainRange(1, 0, 3, before, after))
+    }
+
+    @Test
+    fun `chainRange 不越过调用方给的窗口下界`() {
+        // 同一簇，但窗口下界是 1（页首就是块 1）⇒ 不得把块 0 圈回来：窗口变大不会改页边界，
+        // 却会让 `plan` 看到「另一个簇」，故下界必须由调用方（页首）兜住。
+        val (before, after) = edgeRules(p("break-after: avoid"), p("break-after: avoid"), p())
+        assertEquals(1..2, BreakClusters.chainRange(1, 1, 3, before, after))
+    }
+
+    @Test
+    fun `chainRange 尊重窗口上界`() {
+        // 三块一簇，但窗口块域只到 2（`[0,2)`）⇒ 前向只补到 1，不越界取块 2。
+        val (before, after) = edgeRules(p("break-after: avoid"), p("break-after: avoid"), p())
+        assertEquals(0..1, BreakClusters.chainRange(1, 0, 2, before, after))
+    }
+
+    @Test
+    fun `chainRange 对孤立块返回自身`() {
+        val (before, after) = edgeRules(p(), p(), p())
+        assertEquals(1..1, BreakClusters.chainRange(1, 0, 3, before, after))
     }
 
     // ---- P4：强制断页行（plan.forcedBeforeLines） ----

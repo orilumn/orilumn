@@ -48,8 +48,9 @@ import org.junit.runners.Parameterized
  * 「`if (end == startLine) end = startLine + 1` —— 单行高过整页时至少推进一行（cursor never stalls）」。
  * 两代口径分叉就是本 bug；这里把同一判据锁进临时表（前向 / 后向两侧）。
  *
- * 撕裂（页底裁掉超页部分）是**有意**口径，与重路径 `applyBreakInsideAvoid`
- * 「oversized blocks are allowed to tear」一致——本测试只锁「必须有字符前进」，不锁可见像素。
+ * 撕裂（页底裁掉超页部分）是**有意**口径，与重路径单源分页核
+ * `Paginator.resolveAvoidCut` / `tornByAtomic` 的「oversized blocks are allowed to tear」一致
+ * ——本测试只锁「必须有字符前进」，不锁可见像素。
  */
 @RunWith(Parameterized::class)
 class OversizedReplacedPageProgressTest(private val variant: String) {

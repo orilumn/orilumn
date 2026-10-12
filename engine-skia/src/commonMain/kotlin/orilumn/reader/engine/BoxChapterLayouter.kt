@@ -1607,9 +1607,9 @@ class BoxChapterLayouter(
             if (full) break
             b++
         }
-        // 窗口取整：切点块所在的 avoid **边簇**可能跨出本窗（簇尾在后面若干块）。窗口若把簇截断，
-        // `PartialDrawableLayout.breakPlan` 会把整簇看成「装得下一页」而错误退簇（半页空白），故沿
-        // 单源 [BreakClusters.chainRange] 把窗口补到簇闭合。这**只是取窗口**，不决定任何页边界。
+        // 窗口取整：切点块所在的 avoid **边链**可能跨出本窗（链尾在后面若干块）。窗口若把链截断，
+        // `PartialDrawableLayout.breakPlan` 就看不到链上后续接口的禁止切点，故沿单源
+        // [BreakClusters.chainRange] 把窗口补到链闭合。这**只是取窗口**，不决定任何页边界。
         if (endBlockExclusive < total) {
             val chain = orilumn.reader.engine.laying.BreakClusters.chainRange(
                 endBlockExclusive - 1, startBlock, total,
@@ -1743,10 +1743,11 @@ class BoxChapterLayouter(
         }
         // If no truncation happened, all blocks from 0..endExclusive-1 fit perfectly.
         if (!truncated) startBlock = 0
-        // P4：页首不得**严格落在 avoid 簇内部** —— 与 canonical 同判据、同几何，全部来自单源：
-        // 窗口先按 [BreakClusters.chainRange] 取整到簇闭合，再用 `PartialDrawableLayout.breakPlan`
-        // （= `BreakClusters.plan`）的簇区间，由 `Paginator.resolveAvoidCut` 求簇首、`Paginator.paginateFrom`
-        // 校验「自簇首整行填充恰好收到锚点行」（既不溢出也不早停）。旧版自算块链高度，与 canonical 漂移。
+        // P4：页首 = 前一页的切点，故须与 canonical 同源判「这个切点是否合法」——与 canonical 同判据、
+        // 同几何，全部来自单源：窗口先沿 [BreakClusters.chainRange] 取整到 avoid 边链闭合，再用
+        // `PartialDrawableLayout.breakPlan`（= `BreakClusters.plan`）的原子区间 / 禁止切点，由
+        // `Paginator.resolveAvoidCut` 退到前一个合法切点、`Paginator.paginateFrom` 校验「自该切点整行
+        // 填充恰好收到锚点行」（既不溢出也不早停）。旧版自算块链高度，与 canonical 漂移。
         var pageStartBlock = startBlock
         var pageStartLine = startLine
         var shapes = allShapes.takeLast(endExclusive - pageStartBlock)
@@ -1764,11 +1765,13 @@ class BoxChapterLayouter(
                     prepare, chain.first, endExclusive, probeShapes, pageFirstLine = packStart,
                     endLineCharStart = if (endLineCharStart >= 0) endLineCharStart else null, contentH = contentH,
                 ) { tempShape(cache, prepare, it, profile) }
-                val probeRanges = (probe.layout as? orilumn.reader.engine.paging.BreakAwareBookLayout)?.avoidSplitRanges ?: emptyList()
-                // `pageStartLine = -1`：本页页首 = **前一页的切点**，故簇首在 0 时也要退到簇首（而非
-                // `retreatFor` 的「簇首即页首 ⇒ 装到簇尾」分支）。
+                val probeAware = probe.layout as? orilumn.reader.engine.paging.BreakAwareBookLayout
+                val probeRanges = probeAware?.avoidSplitRanges ?: emptyList()
+                val probeForbidden = probeAware?.forbiddenCutLines ?: emptySet()
+                // `pageStartLine = -1`：本页页首 = **前一页的切点**，故原子区间首在 0 时也要退到区间首
+                // （而不是把它当成「页首恰为区间首 ⇒ 装到区间尾」）。禁止切点同源一并修正。
                 val adj = Paginator.resolveAvoidCut(
-                    probeRanges, -1, packStart, contentH,
+                    probeRanges, probeForbidden, -1, packStart, contentH,
                     probe.layout::getLineTop, probe.layout::getLineBottom,
                 )
                 if (adj != packStart) {
@@ -2155,7 +2158,8 @@ class BoxChapterLayouter(
             loader = imageLoader,
             href = chapterHref,
             // P4d：临时页的绘制布局也带上 `break-inside: avoid` 属主图 —— 临时/磁盘两条路径的
-            // `avoidSplitRanges` 因此同源（临时页填充另经 `Paginator.retreatFor` 走同一条判据）。
+            // `avoidSplitRanges` / `forbiddenCutLines` 因此同源（临时页填充另经
+            // `Paginator.resolveAvoidCut` 走同一条判据）。
             avoidOwnerMap = prepare.avoidOwnerMap,
             skiaLinesSource = skiaLines,
             tableCellsSource = tempWin.lines,
@@ -2691,8 +2695,7 @@ private class PartialDrawableLayout(
      *
      * 叶序 = 本窗口的局部行序；每叶的 `break-*` 取盒上的**有效**边（提升叶取宿主块，见
      * `LayoutBox.breakCarrierStyle`），`break-inside` 属主取结构缓存给的 [avoidOwnerMap]。
-     * 与 [breakInsideAvoidRanges] 的关系：后者是这里的 `break-inside` 子集（原子簇），
-     * [avoidSplitRanges] 是「边簇 ∪ 原子簇」的超集。
+     * [breakInsideAvoidRanges] 是这里的 `break-inside` 子集（原子区间）。
      */
     private val breakLeaves: List<orilumn.reader.engine.laying.BreakClusters.Leaf> by lazy {
         val out = ArrayList<orilumn.reader.engine.laying.BreakClusters.Leaf>(leafList.size)
@@ -2716,7 +2719,9 @@ private class PartialDrawableLayout(
         orilumn.reader.engine.laying.BreakClusters.plan(breakLeaves)
     }
 
-    override val avoidSplitRanges: List<IntRange> get() = breakPlan.clusters
+    override val avoidSplitRanges: List<IntRange> get() = breakPlan.atomicRanges
+
+    override val forbiddenCutLines: Set<Int> get() = breakPlan.forbiddenCutLines
 
     override val forcedBreakBeforeLines: Set<Int> get() = breakPlan.forcedBeforeLines
 }

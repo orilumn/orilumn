@@ -13,10 +13,15 @@ class FakeBookLayout(
     private val lineHeight: Int = 20,
     private val boundaryLines: Set<Int> = emptySet(),
     /**
-     * P4：不可断簇（[BreakAwareBookLayout.avoidSplitRanges]）——`break-inside: avoid` 块与
-     * `break-*: avoid` 边簇合并后的行区间。空表（默认）⇒ `Paginator` 行为与旧版逐字节一致。
+     * P4：原子区间（[BreakAwareBookLayout.avoidSplitRanges]）——`break-inside: avoid` 块的行区间，
+     * 区间内部不许断（装得下才躲）。空表（默认）⇒ `Paginator` 行为与旧版逐字节一致。
      */
     private val avoidRanges: List<IntRange> = emptyList(),
+    /**
+     * P4：禁止切点（[BreakAwareBookLayout.forbiddenCutLines]）——`break-*: avoid` 边的 class A 断点
+     * （该行不得成为页首）。空集（默认）⇒ 行为与旧版逐字节一致。
+     */
+    private val forbiddenLines: Set<Int> = emptySet(),
     /**
      * P4：强制断页行（[BreakAwareBookLayout.forcedBreakBeforeLines]）——该行必为页首。
      * 空集（默认）⇒ 整章一段，行为与旧版逐字节一致。
@@ -51,6 +56,8 @@ class FakeBookLayout(
 
     override val avoidSplitRanges: List<IntRange> get() = avoidRanges
 
+    override val forbiddenCutLines: Set<Int> get() = forbiddenLines
+
     override val forcedBreakBeforeLines: Set<Int> get() = forcedLines
 
     companion object {
@@ -61,7 +68,10 @@ class FakeBookLayout(
             lineHeight: Int = 20,
             boundaryLines: Set<Int>? = null,
             avoidRanges: List<IntRange> = emptyList(),
+            forbiddenLines: Set<Int> = emptySet(),
             forcedLines: Set<Int> = emptySet(),
-        ) = FakeBookLayout(lines.toList(), lineHeight, boundaryLines ?: emptySet(), avoidRanges, forcedLines)
+        ) = FakeBookLayout(
+            lines.toList(), lineHeight, boundaryLines ?: emptySet(), avoidRanges, forbiddenLines, forcedLines,
+        )
     }
 }

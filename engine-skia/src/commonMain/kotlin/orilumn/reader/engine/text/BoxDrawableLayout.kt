@@ -77,8 +77,8 @@ class BoxDrawableLayout(
 
     /**
      * P4：分页侧的**断页约束单源**（[orilumn.reader.engine.laying.BreakClusters.plan]）——
-     * 扁平块叶序列上的 `break-*: avoid` 边簇 ∪ `break-inside: avoid` 原子簇，以及强制边右侧的页首行。
-     * 与纯 JVM 路径 `BoxBookLayout`、与轻路径 `PartialDrawableLayout` 同源同判据。
+     * 扁平块叶序列上的 `break-inside: avoid` 原子区间、`break-*: avoid` 边的禁止切点，以及强制边
+     * 右侧的页首行。三条与纯 JVM 路径 `BoxBookLayout`、轻路径 `PartialDrawableLayout` 同源同判据。
      */
     private val breakPlan: orilumn.reader.engine.laying.BreakClusters.Plan by lazy {
         orilumn.reader.engine.laying.BreakClusters.plan(
@@ -86,7 +86,9 @@ class BoxDrawableLayout(
         )
     }
 
-    override val avoidSplitRanges: List<IntRange> get() = breakPlan.clusters
+    override val avoidSplitRanges: List<IntRange> get() = breakPlan.atomicRanges
+
+    override val forbiddenCutLines: Set<Int> get() = breakPlan.forbiddenCutLines
 
     override val forcedBreakBeforeLines: Set<Int> get() = breakPlan.forcedBeforeLines
 

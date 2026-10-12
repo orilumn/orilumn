@@ -7,9 +7,10 @@ package orilumn.reader.engine.paging
  * A line is added to the current page only if it fully fits in the remaining content height —
  * otherwise that line is carried over entirely to the next page, so a page **never ends with a
  * partially visible (half) line**. Paragraphs flow continuously and are allowed to straddle page
- * boundaries; only the avoid ranges of a [BreakAwareBookLayout] (whole `break-inside: avoid` blocks
- * and `break-*: avoid` edge clusters) are kept whole, and its
- * [BreakAwareBookLayout.forcedBreakBeforeLines] are hard page starts.
+ * boundaries; only the CSS Fragmentation constraints of a [BreakAwareBookLayout] are honoured:
+ * `break-inside: avoid` atomic ranges ([BreakAwareBookLayout.avoidSplitRanges]), `break-before/after:
+ * avoid` forbidden cut points ([BreakAwareBookLayout.forbiddenCutLines]) and forced page starts
+ * ([BreakAwareBookLayout.forcedBreakBeforeLines]).
  *
  * Because pages are filled by lines (not retro-fitted to paragraph starts), a trailing paragraph is
  * no longer pushed alone onto a near-empty page — the second-to-last page stays densely filled.
@@ -52,9 +53,11 @@ object Paginator {
      * exact same cut rule the canonical path used — so with matching geometry the two paths produce
      * identical boundaries instead of drifting wherever the shared fill rule is re-implemented.
      *
-     * **强制分页**（[BreakAwareBookLayout.forcedBreakBeforeLines]）：先按强制行把行流**切段**，段首
-     * 必为页首（上一页在该行之前结束，可能不满页），段内再走整行填充 + [BreakAwareBookLayout.avoidSplitRanges]。
-     * 段尾是硬边界：avoid 簇即使跨过强制行也不得越过它（强制断页压过 avoid —— CSS 同一口径）。
+     * **断页规则**（[BreakAwareBookLayout]）：先按强制行
+     * （[BreakAwareBookLayout.forcedBreakBeforeLines]）把行流**切段**，段首必为页首（上一页在该行
+     * 之前结束，可能不满页）；段内整行填充后用 [BreakAwareBookLayout.avoidSplitRanges]（原子区间）与
+     * [BreakAwareBookLayout.forbiddenCutLines]（avoid 边的禁止切点）修正切点。段尾是硬边界：avoid
+     * 即使跨过强制行也不得越过它（强制断页压过 avoid —— 与 CSS 一致）。
      */
     fun paginateFrom(layout: BookLayout, startLine: Int, contentH: Int): List<PageSlice> {
         // P1-2: 空章（纯空白/封面 svg 等归一化后零行）仍给一空页，保证可翻页、可落位、
@@ -65,6 +68,7 @@ object Paginator {
         val n = layout.lineCount
         val aware = layout as? BreakAwareBookLayout
         val avoidRanges = aware?.avoidSplitRanges ?: emptyList()
+        val forbiddenCutLines = aware?.forbiddenCutLines ?: emptySet()
         // 强制断页行：只取 (startLine, n) 内的，升序去重（startLine 自身是页首，无意义）。
         val forced = aware?.forcedBreakBeforeLines
             ?.filter { it > startLine && it < n }
@@ -82,10 +86,10 @@ object Paginator {
                 val end = fillWholeLines(layout, pageStartLine, contentH)
                 // 段内整行填充不越段尾：撞到强制行即提前收盘（该页允许不满）。
                 val baseCut = if (end < segEnd) end else segEnd
-                // Honour the break rules: a whole cluster that would be torn by this cut moves intact
-                // to the next page (only when it fits a page); oversized clusters are allowed to tear.
+                // Honour the break rules: a cut landing inside a `break-inside: avoid` block (that
+                // fits a page) or on a `break-*: avoid` edge retreats to the previous legal break.
                 // 段尾是硬边界（强制断页压过 avoid），故再夹一次。
-                val cut = applyAvoidRanges(layout, avoidRanges, pageStartLine, baseCut, contentH)
+                val cut = applyAvoidRanges(layout, avoidRanges, forbiddenCutLines, pageStartLine, baseCut, contentH)
                     .coerceIn(pageStartLine + 1, segEnd)
 
                 val charStart = layout.getLineStart(pageStartLine)
@@ -101,74 +105,74 @@ object Paginator {
     }
 
     /**
-     * Adjusts [baseCut] so an avoid range is never torn across a page, while guaranteeing the page
-     * cursor always advances (no stall).
-     *
-     * For each avoid-range `[bs, be)` whose interior the current cut lands in:
-     *  - if the range starts **after** this page's first line, retreat `cut` to `bs` — the whole
-     *    range moves intact to the next page;
-     *  - if the range starts exactly **at** this page's first line, extend `cut` to `be` — the
-     *    whole range fills this page instead of a line cut splitting it.
-     *
-     * Only ranges that fit a single page are moved; oversized ranges are allowed to tear, matching
-     * browser behavior. The caller clamps the result to the current forced segment.
+     * Applies the two avoid constraints of a [BreakAwareBookLayout] to [baseCut], then guarantees
+     * forward progress. See [resolveAvoidCut] for the exact rule.
      */
     private fun applyAvoidRanges(
         layout: BookLayout,
         avoidRanges: List<IntRange>,
+        forbiddenCutLines: Set<Int>,
         pageStartLine: Int,
         baseCut: Int,
         contentH: Int,
     ): Int = resolveAvoidCut(
-        avoidRanges, pageStartLine, baseCut, contentH,
+        avoidRanges, forbiddenCutLines, pageStartLine, baseCut, contentH,
         topAt = layout::getLineTop, bottomAt = layout::getLineBottom,
     )
 
     /**
      * [applyAvoidRanges] 的**几何无关**版本（单源）：行顶/行底由 `topAt`/`bottomAt` 注入，于是
      * canonical 全章分页与临时页填充（`BoxChapterLayouter.shapeTempPageForward/Backward`）在各自的
-     * 行空间里调用**同一段逻辑**，对 avoid 簇给出逐字相同的页边界。
+     * 行空间里调用**同一段逻辑**，对两条 avoid 约束给出逐字相同的页边界。
+     *
+     * 两类约束**正交**（CSS Fragmentation §4.4）：
+     *
+     * 1. **原子区间** [avoidRanges]（`break-inside: avoid`）：cut 落在区间内部且整区间装得下一页时
+     *    退到区间首（整块搬到下一页）；装不下允许撕裂（oversized，与浏览器一致）。
+     * 2. **禁止切点** [forbiddenCutLines]（`break-*: avoid` 边）：命中时退到**前一个合法断点** ——
+     *    规范只否掉那一条 class A 断点，左侧块内部的行缝仍合法，所以逐行回退（连续回退越过一串
+     *    1 行条目 = 把整串 avoid 边链顶到下一页）。
+     *
+     * 页内已无合法断点时，按规范放弃 discourage（drop rule 1/2/4），仍切在自然填充点——避免丢内容。
      */
     fun resolveAvoidCut(
         avoidRanges: List<IntRange>,
+        forbiddenCutLines: Set<Int>,
         pageStartLine: Int,
         baseCut: Int,
         contentH: Int,
         topAt: (Int) -> Int,
         bottomAt: (Int) -> Int,
     ): Int {
-        if (avoidRanges.isEmpty() || baseCut <= pageStartLine) return baseCut
+        if (baseCut <= pageStartLine) return baseCut
+        if (avoidRanges.isEmpty() && forbiddenCutLines.isEmpty()) return baseCut
         var cut = baseCut
-        for (range in avoidRanges) {
-            val bs = range.first
-            val be = range.last + 1
-            if (cut < bs || cut >= be) continue      // cut not inside this range
-            val rangeH = bottomAt(be - 1) - topAt(bs)
-            cut = retreatFor(cut, bs, be, rangeH, pageStartLine, contentH)
+        while (cut > pageStartLine) {
+            if (cut !in forbiddenCutLines && !tornByAtomic(cut, avoidRanges, contentH, topAt, bottomAt)) {
+                return cut
+            }
+            cut--
         }
-        return cut.coerceAtLeast(pageStartLine + 1)
+        // 页内已无合法断点 ⇒ 按规范放弃 discourage，切在自然填充点（允许撕裂 / 跨过 avoid 边）。
+        return baseCut
     }
 
     /**
-     * **单簇内核**（几何无关）：[cut] 落在簇 `[bs, be)` 内部时按同一口径调整 —— 整簇装得下一页
-     * （`clusterHeight <= contentH`）才动：簇首在页首之下的退到簇首（整簇搬到下一页），簇首恰为页首
-     * 的装到簇尾（整行填充下恒为惰性）；装不下则允许撕裂（与浏览器 oversized 口径一致）。
-     *
-     * 独立暴露是因为**临时页填充**按块链自算簇的局部区间与实测高（没有全章行几何），但仍必须与
-     * canonical 走同一条判据 —— 否则锚章临时表与磁盘表在 avoid 上漂移。
+     * [cut] 是否落在某个**装得下一页**的原子区间内部（区间 `[first, last]` 的内部 = 行缝
+     * `first < cut <= last`）。装不下整页的区间（oversized）允许撕裂 ⇒ 不算被撕。
      */
-    fun retreatFor(
+    private fun tornByAtomic(
         cut: Int,
-        bs: Int,
-        be: Int,
-        clusterHeight: Int,
-        pageStartLine: Int,
+        ranges: List<IntRange>,
         contentH: Int,
-    ): Int {
-        if (cut < bs || cut >= be) return cut
-        if (clusterHeight > contentH) return cut      // oversized cluster → allowed to tear
-        if (bs > pageStartLine) return minOf(cut, bs)  // cluster starts below this page → move it whole to the next page
-        if (bs == pageStartLine) return maxOf(cut, be) // cluster starts at this page → whole range fills this page
-        return cut
+        topAt: (Int) -> Int,
+        bottomAt: (Int) -> Int,
+    ): Boolean {
+        for (r in ranges) {
+            if (cut <= r.first || cut > r.last) continue
+            if (bottomAt(r.last) - topAt(r.first) > contentH) continue
+            return true
+        }
+        return false
     }
 }

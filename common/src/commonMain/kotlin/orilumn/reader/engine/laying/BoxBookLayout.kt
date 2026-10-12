@@ -49,19 +49,21 @@ class BoxBookLayout(
     }
 
     /**
-     * P4：分页侧的**断页约束单源**（[BreakClusters.plan]）——扁平块叶序列上的 `break-*: avoid`
-     * 边簇（[avoidSplitRanges]）∪ `break-inside: avoid` 原子簇，以及强制边右侧的页首行
-     * （[forcedBreakBeforeLines]）。
+     * P4：分页侧的**断页约束单源**（[BreakClusters.plan]）——扁平块叶序列上的
+     * `break-inside: avoid` 原子区间（[avoidSplitRanges]）、`break-*: avoid` 边的禁止切点
+     * （[forbiddenCutLines]）与强制边右侧的页首行（[forcedBreakBeforeLines]）。
      *
-     * 判据与 P3 的插图预算 [ReplacedFitBudget.clusterRange] 同源（`BreakClusters.joins`），
-     * 保证「预算按簇缩图」与「分页保整簇」用的是同一个簇定义。
+     * 边判据与 P3 的插图预算 [ReplacedFitBudget.clusterRange] 同源（`BreakClusters.joins`），
+     * 保证「预算按 avoid 边链缩图」与「分页不跨这条边」用的是同一个判据。
      *
      * `by lazy`：只在分页真的消费时才走查盒树；[breakInsideAvoidRanges] 是其 break-inside 子集，
      * 保留为独立属性（旧调用点/测试的既有语义不变）。
      */
     private val breakPlan: BreakClusters.Plan by lazy { BreakClusters.plan(BreakClusters.leavesOf(result.boxes)) }
 
-    override val avoidSplitRanges: List<IntRange> get() = breakPlan.clusters
+    override val avoidSplitRanges: List<IntRange> get() = breakPlan.atomicRanges
+
+    override val forbiddenCutLines: Set<Int> get() = breakPlan.forbiddenCutLines
 
     override val forcedBreakBeforeLines: Set<Int> get() = breakPlan.forcedBeforeLines
 

@@ -6,6 +6,7 @@ import orilumn.reader.engine.html.HtmlTreeConverter
 import orilumn.reader.engine.html.MarkupElement
 import orilumn.reader.engine.paging.BreakAwareBookLayout
 import orilumn.reader.engine.paging.PageSlice
+import orilumn.reader.engine.paging.Paginator
 import orilumn.reader.engine.text.TypographicProfile
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -26,9 +27,9 @@ import org.junit.Test
  * ## 单源口径
  *
  * 两边**不是各写一份规则碰巧等价**，而是调用同一段代码：临时页在 `BoxChapterLayouter` 里先建出窗口
- * 布局（`PartialDrawableLayout`，本身实现 `BreakAwareBookLayout`，其簇/强制行来自单源
+ * 布局（`PartialDrawableLayout`，本身实现 `BreakAwareBookLayout`，其原子区间/禁止切点/强制行来自单源
  * `BreakClusters.plan`），再交给 `Paginator.paginateFrom` 定页尾；`shapeTempPageForward` 只负责
- * 「圈窗口」（按行高累加）与沿 `BreakClusters.chainRange` 把窗口取整到 avoid 簇闭合——它不含任何
+ * 「圈窗口」（按行高累加）与沿 `BreakClusters.chainRange` 把窗口取整到 avoid 边链闭合——它不含任何
  * 分页判据。
  *
  * ## 前向为什么是「全等」、后向为什么只是「自身合规」
@@ -36,7 +37,7 @@ import org.junit.Test
  * 前向从章首整行填充，与 canonical 同一起点、同一填充式 ⇒ 页界**逐页相等**。
  * 后向是**从章末倒包**的独立岛（`BookDocumentController` 的 backward-packed island，见
  * `shapeNextBackward`），倒包与正包的页界本就不保证重合（10 行 / 每页 3 行：正包 [0,3)[3,6)[6,9)[9,10)，
- * 倒包 [7,10)[4,7)[1,4)[0,1)）。所以后向只锁**自身合规**：不得撕裂 avoid 簇、强制行必为页首、
+ * 倒包 [7,10)[4,7)[1,4)[0,1)）。所以后向只锁**自身合规**：禁止切点不得成为页首、强制行必为页首、
  * 且整链无缝覆盖全章（无洞/无重叠）。
  */
 class TempBreakRulesEquivalenceTest {
@@ -50,8 +51,8 @@ class TempBreakRulesEquivalenceTest {
     private fun body(text: String, times: Int) = text.repeat(times)
 
     /**
-     * 一章同时含强制断页与 avoid 边簇，且夹在长段之间，保证扫描 `contentH` 时切点会落到：
-     * 长段内部、强制段落之前、以及 avoid 簇内部。
+     * 一章同时含强制断页与 `break-after: avoid` 边，且夹在长段之间，保证扫描 `contentH` 时切点会落到：
+     * 长段内部、强制段落之前、以及 avoid 边的禁止切点。
      */
     private fun chapter(): MarkupElement = converter.convert(
         """
@@ -68,12 +69,12 @@ class TempBreakRulesEquivalenceTest {
     )!!
 
     /**
-     * 巨型 avoid 边簇（目录 / 前言类）：多个 `page-break-after: avoid` 段落串成一条**总高远过一页**
+     * 巨型 avoid 边链（目录 / 前言类）：多个 `page-break-after: avoid` 段落串成一条**总高远过一页**
      * 的长链，链后接 `pre` 与长段。
      *
-     * 这正是旧临时填充的原始现场：窗口在切点块处被截断，`BreakClusters.plan` 于是把整簇看成
-     * 「装得下一页」而错误退簇 —— 表现为半页空白、`pre` 整块后移。窗口必须沿
-     * `BreakClusters.chainRange` 补到簇闭合，页尾仍交 `Paginator`（整簇装不下 ⇒ 允许撕裂）。
+     * 这正是旧临时填充的原始现场：窗口在切点块处被截断 ⇒ 链上后续接口的禁止切点看不到 ⇒ 临时页与
+     * canonical 漂移（半页空白、`pre` 整块后移）。窗口必须沿 `BreakClusters.chainRange` 补到链闭合，
+     * 页尾仍交 `Paginator`（长链装不下 ⇒ 允许在链内的行缝处撕裂）。
      */
     private fun giantClusterChapter(): MarkupElement = converter.convert(
         """
@@ -148,13 +149,12 @@ class TempBreakRulesEquivalenceTest {
     fun `temp forward pages equal canonical pages under forced and avoid rules`() {
         val markup = chapter()
         var sawForcedPageStart = false
-        var sawAvoidClusterBoundary = false
+        var sawRetreat = false
 
         for (contentH in 300..660 step 12) {
             val product = canonical(markup, contentH)
             val canon = product.slices
             val temp = tempForward(markup, contentH)
-            val aware = product.layout as BreakAwareBookLayout
 
             // 1) 页数 + 逐页 charStart/charEnd 全等（页边界即「切片」的唯一定义）。
             assertEquals("contentH=$contentH page count", canon.size, temp.size)
@@ -163,42 +163,26 @@ class TempBreakRulesEquivalenceTest {
                 assertEquals("contentH=$contentH page $i charEnd", canon[i].charEnd, temp[i].charEnd)
             }
 
-            // 2) canonical 自身的两条不变量。
-            val pageStarts = canon.map { it.firstLine }.toSet()
-            for (forcedLine in aware.forcedBreakBeforeLines) {
-                assertTrue(
-                    "contentH=$contentH forced line $forcedLine must start a page (starts=$pageStarts)",
-                    forcedLine in pageStarts,
-                )
-                sawForcedPageStart = true
-            }
-            for ((i, p) in canon.withIndex()) {
-                val cut = p.lastLineExclusive
-                for (range in aware.avoidSplitRanges) {
-                    assertTrue(
-                        "contentH=$contentH page $i boundary $cut torn inside avoid range $range",
-                        !(range.first < cut && cut < range.last + 1),
-                    )
-                }
-                // 3) 触发检测：某页恰好收在某个 avoid 簇首（且不是页首本身）＝ 整簇顺延过。
-                if (aware.avoidSplitRanges.any { it.first == cut && it.first > p.firstLine }) {
-                    sawAvoidClusterBoundary = true
-                }
-            }
+            // 2) canonical 自身的断页合规 + 触发检测（临时页与它全等，故合规只需验一次）。
+            val (f, r) = assertCanonicalCompliant(product, contentH)
+            sawForcedPageStart = sawForcedPageStart || f
+            sawRetreat = sawRetreat || r
         }
 
-        assertTrue("扫不到强制页首：本锁空跑", sawForcedPageStart)
-        assertTrue("扫不到 avoid 簇首断页：本锁空跑", sawAvoidClusterBoundary)
+        assertTrue("内容里没有强制页首 ⇒ 用例空跑", sawForcedPageStart)
+        assertTrue("没有任何页边界因 avoid 边而回退 ⇒ 用例空跑", sawRetreat)
     }
 
     /**
-     * 巨型 avoid 簇锁：与 §「前向全等」同一条断言，但样本换成**簇长跨页**的目录链。
-     * 若窗口不沿 `chainRange` 补到簇闭合，这里必然出现半页空白 / `pre` 整块后移。
+     * 巨型 avoid 边链锁（目录 / 前言类）：与 §「前向全等」同一条断言，但样本换成**链长远过一页**的目录链。
+     * 若窗口不沿 `BreakClusters.chainRange` 补到链闭合，临时页就看不到链上后续接口的禁止切点 ⇒ 与
+     * canonical 漂移（半页空白 / `pre` 整块后移）。
      */
     @Test
-    fun `giant avoid cluster keeps temp forward pages identical to canonical`() {
+    fun `giant avoid chain keeps temp equal to canonical and never over-defers`() {
         val markup = giantClusterChapter()
-        var sawClusterTear = false
+        var sawRetreat = false
+        var sawForbiddenCuts = false
 
         for (contentH in 300..700 step 20) {
             val product = canonical(markup, contentH)
@@ -212,27 +196,76 @@ class TempBreakRulesEquivalenceTest {
                 assertEquals("contentH=$contentH page $i charEnd", canon[i].charEnd, temp[i].charEnd)
             }
 
-            // canonical 自身不得撕裂「装得下」的簇；整簇装不下时允许撕裂（oversized 口径）。
-            for ((i, p) in canon.withIndex()) {
-                val cut = p.lastLineExclusive
-                val torn = aware.avoidSplitRanges.filter { it.first < cut && cut < it.last + 1 }
-                if (torn.isEmpty()) continue
-                assertTrue(
-                    "contentH=$contentH page $i torn inside avoid ranges that all fit one page: $torn",
-                    torn.any { aware.getLineBottom(it.last) - aware.getLineTop(it.first) > contentH },
-                )
-                sawClusterTear = true
-            }
+            if (aware.forbiddenCutLines.isNotEmpty()) sawForbiddenCuts = true
+            sawRetreat = sawRetreat || assertCanonicalCompliant(product, contentH).second
         }
 
-        // 本锁必须真的扫到「超页高的巨型簇被撕」——否则本锁空跑（小簇根本碰不到窗口截断坑）。
-        assertTrue("语料没造出跨页的巨型 avoid 簇：本锁空跑", sawClusterTear)
+        assertTrue("巨型 avoid 链没有产生禁止切点 ⇒ 用例空跑", sawForbiddenCuts)
+        assertTrue("没有任何页边界因 avoid 边而回退 ⇒ 用例空跑", sawRetreat)
+    }
+
+    /**
+     * canonical 断页合规 + 触发检测（[Paginator] 三条约束的**规范口径**）：
+     *
+     * 1. `forcedBreakBeforeLines` 的每一行都必须是某页页首；
+     * 2. `break-inside: avoid` 原子区间（装得下一页的那些）内部不得有页边界；
+     * 3. `break-*: avoid` 禁止切点被跨过时，必须**退无可退** —— 页内每个候选断点都是禁止切点或在
+     *    装得下的原子区间内部（规范 §4.4 兜底：drop rule 1/2/4）。
+     *
+     * @return (是否见到强制页首, 是否见到「因 avoid 回退」的页边界)
+     */
+    private fun assertCanonicalCompliant(
+        product: ChapterLayouter.ChapterLayoutProduct,
+        contentH: Int,
+    ): Pair<Boolean, Boolean> {
+        val layout = product.layout
+        val aware = layout as BreakAwareBookLayout
+        var sawForced = false
+        var sawRetreat = false
+        val pageStarts = product.slices.map { it.firstLine }.toSet()
+        for (forcedLine in aware.forcedBreakBeforeLines) {
+            assertTrue(
+                "contentH=$contentH forced line $forcedLine must start a page (starts=$pageStarts)",
+                forcedLine in pageStarts,
+            )
+            sawForced = true
+        }
+        val rowH: (IntRange) -> Int = { layout.getLineBottom(it.last) - layout.getLineTop(it.first) }
+        for ((i, p) in product.slices.withIndex()) {
+            val cut = p.lastLineExclusive
+            // (2) 装得下一页的原子区间不得被撕。
+            for (r in aware.avoidSplitRanges) {
+                if (r.first > r.last || rowH(r) > contentH) continue
+                assertTrue(
+                    "contentH=$contentH page $i boundary $cut torn inside avoid range $r",
+                    !(r.first < cut && cut <= r.last),
+                )
+            }
+            // (3) 命中禁止切点时，页内必须已无合法断点。
+            if (cut in aware.forbiddenCutLines) {
+                for (c in (p.firstLine + 1)..cut) {
+                    val atomic = aware.avoidSplitRanges.any { r ->
+                        r.first <= r.last && c > r.first && c <= r.last && rowH(r) <= contentH
+                    }
+                    assertTrue(
+                        "contentH=$contentH page $i cut=$cut crossed forbidden line $c but a legal break existed",
+                        c in aware.forbiddenCutLines || atomic,
+                    )
+                }
+            }
+            // 触发检测：页边界被 avoid 拉短（自然填充本可更远，且这次切点不是强制行）。
+            if (cut !in aware.forcedBreakBeforeLines) {
+                val natural = Paginator.fillWholeLines(layout, p.firstLine, contentH)
+                if (natural > cut) sawRetreat = true
+            }
+        }
+        return sawForced to sawRetreat
     }
 
     @Test
     fun `temp backward pages honour forced and avoid rules while tiling the chapter`() {
         val markup = chapter()
-        var sawAvoidBoundary = false
+        var sawForbiddenCuts = false
         var sawForcedPageStart = false
 
         for (contentH in 300..660 step 12) {
@@ -245,9 +278,7 @@ class TempBreakRulesEquivalenceTest {
             // 行空间 → 字符空间（后向页切片自带字符区间，判据在字符空间比）。
             fun lineCharStart(line: Int) = if (line >= layout.lineCount) totalChars else layout.getLineStart(line)
             val forcedChars = aware.forcedBreakBeforeLines.map { lineCharStart(it) }.toSet()
-            val avoidChars = aware.avoidSplitRanges
-                .map { lineCharStart(it.first) to lineCharStart(it.last + 1) }
-                .filter { it.first < it.second }
+            val forbiddenChars = aware.forbiddenCutLines.map { lineCharStart(it) }.toSet()
 
             val pages = tempBackward(markup, contentH)
             assertTrue("contentH=$contentH backward must produce pages", pages.isNotEmpty())
@@ -269,18 +300,18 @@ class TempBreakRulesEquivalenceTest {
                 )
                 sawForcedPageStart = true
             }
+            if (forbiddenChars.isNotEmpty()) sawForbiddenCuts = true
+            // 后向岛**自身合规**：页首必须落在合法断点上 —— 禁止切点的行不得当页首（章首除外）。
             for (p in pages) {
-                for ((lo, hi) in avoidChars) {
-                    assertTrue(
-                        "contentH=$contentH backward boundary ${p.charEnd} torn inside avoid [$lo,$hi)",
-                        !(lo < p.charEnd && p.charEnd < hi),
-                    )
-                }
-                if (avoidChars.any { it.first == p.charEnd && p.charStart < it.first }) sawAvoidBoundary = true
+                if (p.charStart <= 0) continue
+                assertTrue(
+                    "contentH=$contentH backward page starts on forbidden cut char ${p.charStart} (forbidden=$forbiddenChars)",
+                    p.charStart !in forbiddenChars,
+                )
             }
         }
 
-        assertTrue("扫不到 avoid 簇首断页：本锁空跑", sawAvoidBoundary)
+        assertTrue("内容里没有禁止切点 ⇒ 用例空跑", sawForbiddenCuts)
         assertTrue("扫不到强制页首：本锁空跑", sawForcedPageStart)
     }
 }

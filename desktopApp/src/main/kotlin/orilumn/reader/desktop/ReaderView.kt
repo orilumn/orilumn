@@ -170,11 +170,22 @@ fun ReaderView(
         val densityScope = LocalDensity.current
         val viewportW = with(densityScope) { maxWidth.toPx() }.toInt().coerceAtLeast(16)
         val viewportH = with(densityScope) { maxHeight.toPx() }.toInt().coerceAtLeast(16)
-        // 窗口拉伸防抖：拖动中每像素都重组，宿主重建（重解析+重排）配漏斗互斥即自杀式
-        // BUSY-DROP 风暴——旧宿主落位、新宿主画布=白屏。静置 400ms 后再用稳定值重建。
+        // 视口变化 → **按帧节流**提交给排版（分页调度总则第 1 条：改变版面的情况立即同步排版
+        // 渲染，锚页所在章转临时表；下方 `applyViewportSize` + 两段式重排就是那个「立即」）。
+        //
+        // 为什么是「按帧」而不是「逐事件」也不是「静置 400ms」（旧口径）：
+        //  - 逐事件：鼠标移动事件可达 100+Hz，每个像素都排版会把手工闸门打满，酿成
+        //    BUSY-DROP 风暴（旧宿主落位 + 新画布 = 白屏，这条教训仍在）；
+        //  - 静置 400ms：那 400ms 里**内容区与窗口不符** —— 页位图要么被非等比拉变形、
+        //    要么整块留底色（用户实测：右边界反复重画、字被压扁）。那是拿观感换性能，
+        //    与总则「哪个有利用哪个」相悖：单页栅格已从 1674ms 降到 5ms，排版侧负担得起。
+        //
+        // 实现：每次尺寸变化都**重启**本 effect，`withFrameNanos` 等到下一帧才提交 ⇒
+        // 同帧内的后续变化取消前一次提交，每帧至多排一次，中间尺寸丢弃（conflate 语义），
+        // 且松手后下一帧即完成，不再额外等 400ms。
         var settledViewport by remember(book) { mutableStateOf(viewportW to viewportH) }
         LaunchedEffect(book, viewportW, viewportH) {
-            kotlinx.coroutines.delay(400)
+            androidx.compose.runtime.withFrameNanos { }
             settledViewport = viewportW to viewportH
         }
 
@@ -283,11 +294,6 @@ fun ReaderView(
         ReaderScreen(
             host = snapshot,
             settings = settings,
-            // 栅格几何跟**同一个**静置视口走：拖窗期间版面本来就不重排（上面的 400ms 防抖），
-            // 若栅格逐像素跟窗口走，就是「每一帧重画整页 + 重建离屏 surface + 清空整池」
-            // （页位图键含内容区宽高，见 `ReaderScreen.rasterViewport` 的 KDoc）。
-            // 静置后两者一起换 ⇒ 不会出现「按新尺寸画一遍旧版式」的多余一帧。
-            rasterViewport = settledViewport,
             statusBarInset = statusBarInset,
             onBarsVisibleChanged = onBarsVisibleChanged,
             onBack = onBack,

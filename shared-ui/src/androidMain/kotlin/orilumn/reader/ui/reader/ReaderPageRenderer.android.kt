@@ -122,8 +122,6 @@ private class AndroidReaderPageRenderer(
         contentRevision: Int,
         rasterKey: PageRasterKey?,
         onMiss: (() -> Unit)?,
-        rasterContentRight: Float,
-        rasterContentBottom: Float,
     ) {
         // 无 key（封面等无页身份的调用）⇒ store 不入池，但照样栅格并画出来。
         val r = store.obtain(
@@ -138,9 +136,8 @@ private class AndroidReaderPageRenderer(
                 contentLeft = contentLeft,
                 contentRectLeft = contentRectLeft,
                 contentRectTop = contentRectTop,
-                // 栅格几何（静置视口），不是贴回几何——见接口 KDoc「两套几何」。
-                contentRight = rasterContentRight,
-                contentBottom = rasterContentBottom,
+                contentRight = contentRectRight,
+                contentBottom = contentRectBottom,
                 contentRevision = contentRevision,
                 rasterScale = rasterScale,
             ),

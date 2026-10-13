@@ -19,17 +19,6 @@ import orilumn.reader.engine.skia.PageBackground
  *
  * 语义约定（与 [ReaderPageCanvas] 相同）：[lines] 已是**页面坐标系**（章节绝对 Y 已平移），
  * 画进内容区并裁剪在 [contentRectLeft/Top/Right/Bottom]（物理 px）内。
- *
- * ## 两套几何：贴回几何 vs 栅格几何（拖窗口时二者会短暂不等）
- *
- * - **贴回几何** [contentRectRight/Bottom]：位图画到画布的哪个矩形 —— 取**实时**窗口尺寸，
- *   内容永远铺满当前窗口，拖动时随窗口一起长大（别的应用也是这个观感）。
- * - **栅格几何** [rasterContentRight/Bottom]：位图**按多大栅格化并缓存** —— 取**静置**视口，
- *   这样拖动期间页位图键不变、逐帧命中（单页栅格真机 ~87ms，逐帧换几何等于全程冻帧）。
- *
- * 两者不等时，实现方按「整图 → 目标矩形」**拉伸贴回**（JVM 走 `drawImageRect`+LINEAR、
- * Android 走 `drawBitmap(FILTER_BITMAP)`，两条路径本来就是这个语义）。拖动期间文字会有
- * 轻微变形，松手静置后两者相等、自动回到 1:1 像素对齐。
  */
 interface ReaderPageRenderer {
     /**
@@ -77,13 +66,6 @@ interface ReaderPageRenderer {
          * 命中路径不调。默认 null = 不抢占。
          */
         onMiss: (() -> Unit)? = null,
-        /**
-         * **栅格几何**（内容区右/下缘，物理 px）：离屏 surface 按它开、页位图按它缓存。
-         * 与「贴回几何」[contentRectRight/Bottom] 刻意分开，理由见本接口 KDoc「两套几何」。
-         * 默认 = 贴回几何（静止态两者本就相等）。
-         */
-        rasterContentRight: Float = contentRectRight,
-        rasterContentBottom: Float = contentRectBottom,
     )
 
     /**

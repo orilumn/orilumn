@@ -332,11 +332,72 @@ object SkParagraphFactory {
      *    映射即命中。sans-serif/monospace 保留平台通用族置首（内部回退即黑体，现代模式/代码期望）。
      *  - 空栈（章节没写 font-family）：回到默认族第一个可落实的实族，保持既有的默认几何基线
      *    （Helvetica 等）不漂移。code-like → monospace。
+     *
+     * 结果按 `(tag, families, monospace, fontManager)` **进程级记忆化**：展开要逐个
+     * `matchFamilyStyle` 探测系统字体（字体多的机器上 13.7ms/次），而下游
+     * [SkiaRunMeasurer.faceTable] 的缓存键又依赖本结果，不记忆化即每次都付这笔钱。
+     * 理由与代价记在 [familiesCache]。
      */
-    fun resolveFamilies(tag: String?, families: List<String>, monospace: Boolean, fontManager: FontMgr = defaultFontMgr()): Array<String> =
-        resolveFamiliesFor(tag, families, monospace) { name ->
+    fun resolveFamilies(
+        tag: String?,
+        families: List<String>,
+        monospace: Boolean,
+        fontManager: FontMgr = defaultFontMgr(),
+    ): Array<String> {
+        val key = FamiliesKey(tag, families, monospace, fontManager)
+        synchronized(familiesLock) { familiesCache[key] }?.let { return it.copyOf() }
+        val resolved = resolveFamiliesFor(tag, families, monospace) { name ->
             fontManager.matchFamilyStyle(name, FontStyle.NORMAL) != null
         }
+        synchronized(familiesLock) { familiesCache[key] = resolved }
+        return resolved.copyOf()
+    }
+
+    /** [resolveFamilies] 的进程级记忆化键（[FontMgr] 按实例比：系统端恒为 [systemFonts] 单例）。 */
+    private class FamiliesKey(
+        val tag: String?,
+        val families: List<String>,
+        val monospace: Boolean,
+        val manager: FontMgr,
+    ) {
+        override fun equals(other: Any?): Boolean {
+            val o = other as? FamiliesKey ?: return false
+            return tag == o.tag && monospace == o.monospace &&
+                manager == o.manager && families == o.families
+        }
+
+        override fun hashCode(): Int =
+            ((tag?.hashCode() ?: 0) * 31 + families.hashCode()) * 31 + (if (monospace) 1 else 0) * 31 +
+                manager.hashCode()
+    }
+
+    private val familiesLock = Any()
+
+    /**
+     * 族栈展开的**进程级**结果缓存。
+     *
+     * ## 为什么必须有（实测：一次 13.7ms，整页栅格 2s）
+     *
+     * 展开的 `canMatch` 谓词是 `fontManager.matchFamilyStyle(...)` —— 一次**系统字体匹配**，
+     * 字体多的机器上是十毫秒级（Linux 桌面实测 13.7ms/次，737 个已装条目）。而
+     * [SkiaRunMeasurer.faceTable] 的缓存键**要先算出族栈才能构造** ⇒ 不记忆化就是
+     * 「每次都先付 13.7ms、再查那个注定命中的缓存」。
+     *
+     * 逐字绘制把这条路径放大成灾难：[SkiaRunMeasurer.faceForCp] 每个**新码本**走一次，
+     * 一页正文几百个不同的字 ⇒ 单页栅格秒级（对照：同一页文字 skia 原生整行 `drawString`
+     * 1ms）。绘制与量宽两侧都走本函数，故两侧同时受益。
+     *
+     * ## 为什么不需要随字库失效
+     *
+     * 谓词只问**平台系统 FontMgr** 能不能匹配某个族名，而用户/书内字体走的是
+     * [SkiaFontPool] 的 embedded provider（不进系统 FontMgr）⇒ 换字库不改变本结果，
+     * 不需要挂 [SkiaFontPool.generation] 的水位（与 [SkiaRunMeasurer.systemFallbackCache]
+     * 同一判断）。
+     *
+     * 返回**副本**：缓存里的数组只对内可见，调用方拿到的可以随便改（成本是一次几元素的
+     * 数组分配，相对 13.7ms 可忽略）。
+     */
+    private val familiesCache = HashMap<FamiliesKey, Array<String>>()
 
     /**
      * 纯决策核（匹配谓词可注入，便于在 JVM 上复现 Android 等平台的 FontMgr 行为做回归单测）：

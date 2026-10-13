@@ -251,9 +251,10 @@ fun ReaderView(
             host.commitRelayout(anchor2?.chapter ?: 0, anchor2?.slice?.charStart ?: 0)?.let { pushLanding(it) }
         }
         // 面板字库经宿主装载（R4：枚举+中文名链已下沉 `syncPanelFonts`，视图只收表；
-        // 键只跟书，视口 resize 重建宿主不重枚举）。
+        // 键只跟书，视口 resize 重建宿主不重枚举）。开书路径不触发扫描，改由面板可见性/启动检测驱动。
         LaunchedEffect(book) {
-            fontEntries = desktopHost?.syncPanelFonts() ?: fontLibrary.allEntries(fontLibrary.list())
+            // 不在开书时同步系统字体，避免抢占锚页排版；面板打开时会按需求加载
+            fontEntries = fontLibrary.allEntries(fontLibrary.list())
         }
         // 面板开抑制 + 关门控（共享收口 PanelRelayoutGate，平板同调）：打开即抑制后台
         // canonical 并快照版式指纹；关闭经门控判定，版式真变才整书 finalize 并落位。

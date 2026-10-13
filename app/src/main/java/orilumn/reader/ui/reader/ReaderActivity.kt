@@ -233,14 +233,7 @@ class ReaderActivity : ComponentActivity() {
                 // 绘制切内嵌字体即全书错位）。IO 内同步等，不与首排抢跑。
                 // P2-b: 新书清掉旧书内字体条目（池刷新只含本书）。
                 bookFontEntries = emptyList()
-                // F4c: 系统族落行（INSERT OR IGNORE，开屏一次；面板开页再同步一次）。
-                // 中文名链（桌面同式方案B）：name 表直读优先，无本地化名的族展示层回退族名本身。
-                runCatching {
-                    fontRepository.syncSystemFaces(
-                        orilumn.reader.engine.skia.systemFontFaces(),
-                        fontRepository.systemFontLocalizedNames(),
-                    )
-                }
+                // F4c: 系统族落行改由启动检测/面板可见性驱动，不随开书执行，避免抢占锚页排版。
                 refreshSkiaFonts()
                 val file = BookFileResolver(this@ReaderActivity).resolve(bookPath ?: return@runCatching null)
                     ?: return@runCatching null

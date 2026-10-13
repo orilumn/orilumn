@@ -286,6 +286,9 @@ private fun WindowControls(
 /** JDK 客户属性名：macOS 标题栏透明（挂在 rootPane 上，见 [applyMacSystemWindow]）。 */
 private const val MAC_TRANSPARENT_TITLE_BAR = "apple.awt.transparentTitleBar"
 
+/** 拖窗停止多久后纠正一次红绿灯显隐（ms；见 `DesktopWindowChrome.scheduleMacTitleBarCorrection`）。 */
+private const val MAC_TITLE_BAR_FIX_MS = 150
+
 /** JDK 客户属性名：macOS 内容铺满整窗（含标题栏区）。 */
 private const val MAC_FULL_WINDOW_CONTENT = "apple.awt.fullWindowContent"
 
@@ -414,7 +417,9 @@ internal class DesktopWindowChrome {
      *
      * @param force 忽略「与上次同值」短路、强制重投。系统在**进出全屏 / 窗口重显**时会把红绿灯
      *   改回可见，这时期望值没变、必须靠 force 纠回来；[attach] 每帧走的是非 force 版（跳重复），
-     *   [geometryWatcher] 的 resize / shown 才 force。
+     *   force 只出现在三处：进出全屏（[geometryWatcher] 里态变即投）、窗口重显、以及
+     *   **停手后**的 resize 防抖（[scheduleMacTitleBarCorrection]）——拖动过程中一次都不投，
+     *   否则几百个 AppKit 工作项会挤在主线程上与窗口合成抢时间。
      */
     private fun applyMacTitleBarVisibility(force: Boolean = false) {
         if (!IS_MAC) return
@@ -424,12 +429,42 @@ internal class DesktopWindowChrome {
         MacTrafficLights.setTitleBarButtonsHidden(w, macTitleBarHidden)
     }
 
-    private val geometryWatcher = object : ComponentAdapter() {
-        // 全屏进出 / 外部改几何都会触发 resize：既回读真全屏态，也**强制重投**红绿灯显隐
-        //（系统在进出全屏时会把红绿灯改回可见，期望值没变，只有 force 才纠得回来）。
-        override fun componentResized(e: ComponentEvent?) {
-            syncFullscreen()
+    /**
+     * 「停手后纠正一次」的红绿灯重投（resize 防抖；见 [geometryWatcher] 的 KDoc）。
+     *
+     * 用 `javax.swing.Timer` 而不是协程：重投本来就该在 EDT 上做，而 resize 事件本身
+     * 也在 EDT（`ComponentListener`），`restart()` 是 EDT 内的合法调用，不必再引一个 scope。
+     * 非 macOS 直接返回，连 Timer 都不建。
+     */
+    private var macTitleBarFixTimer: javax.swing.Timer? = null
+
+    private fun scheduleMacTitleBarCorrection() {
+        if (!IS_MAC) return
+        val timer = macTitleBarFixTimer ?: javax.swing.Timer(MAC_TITLE_BAR_FIX_MS) {
             applyMacTitleBarVisibility(force = true)
+        }.also {
+            it.isRepeats = false
+            macTitleBarFixTimer = it
+        }
+        // 重启式防抖：每次 resize 都把计时推后 ⇒ 连续拖动期间一次都不会投。
+        if (timer.isRunning) timer.restart() else timer.start()
+    }
+
+    private val geometryWatcher = object : ComponentAdapter() {
+        // resize 的两种来源要分开处理（**拖动期间绝不能逐帧碰 AppKit**）：
+        //  - 全屏进出：系统必定把红绿灯改回可见 ⇒ 立刻 force 纠正（同 componentShown 口径）；
+        //  - 普通拖窗 / 切 Space：旧口径每次 resize 都 force 一次 = 每个鼠标移动事件一个
+        //    `dispatch_async_f` 工作项，拖一次窗口几百个，全排在 **AppKit 主线程**上与窗口
+        //    合成抢同一个线程（新区域来不及合成 ⇒ 肉眼就是「先黑一块再刷新」）。故改成
+        //    **停手后纠正一次**：150ms 防抖，拖动期间一次都不投。
+        override fun componentResized(e: ComponentEvent?) {
+            val wasFullscreen = fullscreen
+            syncFullscreen()
+            if (fullscreen != wasFullscreen) {
+                applyMacTitleBarVisibility(force = true)
+                return
+            }
+            scheduleMacTitleBarCorrection()
         }
 
         // 窗口首次显示后落位系统窗口的无边框视觉（见 [applyMacSystemWindow] 的 KDoc：

@@ -57,6 +57,16 @@ fun ReaderPageCanvas(
      * remember 后两页共用一池，才能真正挡住「翻回去又画一遍」。
      */
     renderer: ReaderPageRenderer? = null,
+    /**
+     * **栅格几何**（内容区右/下缘，px）：页位图按多大栅格化并缓存，默认 = [contentRectRight]
+     * /[contentRectBottom]（静止态两者相等）。
+     *
+     * 拖动窗口时壳层把**静置视口**算出的这一对传进来（见 [ReaderScreen.rasterViewport]），
+     * 而上面四个 `contentRect*` 仍是**实时**窗口尺寸：位图按静置尺寸缓存（逐帧命中、不重画），
+     * 贴回时按实时矩形拉伸 ⇒ 内容铺满窗口、随窗口变形，松手静置后自动回到 1:1。
+     */
+    rasterContentRight: Float = contentRectRight,
+    rasterContentBottom: Float = contentRectBottom,
 ) {
     val localRenderer = rememberReaderPageRenderer()
     val renderer = renderer ?: localRenderer
@@ -111,6 +121,8 @@ fun ReaderPageCanvas(
             contentRevision = contentRevision,
             rasterKey = content?.rasterKey,
             onMiss = onMiss,
+            rasterContentRight = rasterContentRight,
+            rasterContentBottom = rasterContentBottom,
         )
     }
     }

@@ -283,6 +283,11 @@ fun ReaderView(
         ReaderScreen(
             host = snapshot,
             settings = settings,
+            // 栅格几何跟**同一个**静置视口走：拖窗期间版面本来就不重排（上面的 400ms 防抖），
+            // 若栅格逐像素跟窗口走，就是「每一帧重画整页 + 重建离屏 surface + 清空整池」
+            // （页位图键含内容区宽高，见 `ReaderScreen.rasterViewport` 的 KDoc）。
+            // 静置后两者一起换 ⇒ 不会出现「按新尺寸画一遍旧版式」的多余一帧。
+            rasterViewport = settledViewport,
             statusBarInset = statusBarInset,
             onBarsVisibleChanged = onBarsVisibleChanged,
             onBack = onBack,

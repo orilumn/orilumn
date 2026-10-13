@@ -45,6 +45,7 @@ import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.platform.LocalDensity
+import java.awt.Dimension
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.WindowDecoration
 import androidx.compose.ui.window.WindowPlacement
@@ -64,6 +65,16 @@ private const val PREF_WIN_W = "window_width_dp"
 private const val PREF_WIN_H = "window_height_dp"
 private const val PREF_WIN_X = "window_x_dp"
 private const val PREF_WIN_Y = "window_y_dp"
+
+/**
+ * 最小窗口**内容**尺寸（dp）。同时用作：`minimumSize` 下限 + 读存档时的钳制下限。
+ *
+ * 下限的由来不是拍脑袋，是版心：页边距默认上 100 / 下 60 / 左右各 50dp，正文 18dp，
+ * 故内容高 −160dp、内容宽 −100dp 就是版心。240×300 ⇒ 版心 140×140dp（约每行 7 字、4 行），
+ * 再小就一行字都放不下（版心高 ≤ 0 时分页直接空页）。
+ */
+private const val MinContentW = 240
+private const val MinContentH = 300
 
 /**
  * 存档坐标是否落在任一当前屏幕内（dp 按该屏缩放换算 px，200px 容差允许半出屏；
@@ -115,9 +126,12 @@ fun main() {
         val shadowOffsetDp = if (canTransparent) WindowShadowMargin.value else 0f
         fun contentDp(key: String, def: Int, lo: Int, hi: Int): Float =
             (store.loadPref(key, def.toString()).toIntOrNull() ?: def).coerceIn(lo, hi).toFloat()
+        // 默认/钳制下限同「最小窗口」口径（下方 `minimumSize` 一处定，两处引用同一常量）：
+        // 550×400 是桌面阅读的舒服尺寸（小屏/高分屏上不至于占满），240×300 是能读的版心下限
+        // （版心 = 内容尺寸 − 上100/下60/左右50dp 的页边距；再小就一行字都放不下）。
         val windowState = rememberWindowState(
-            width = (contentDp(PREF_WIN_W, 1100, 480, 2560) + shadowInsetDp).dp,
-            height = (contentDp(PREF_WIN_H, 800, 320, 1600) + shadowInsetDp).dp,
+            width = (contentDp(PREF_WIN_W, 550, MinContentW, 2560) + shadowInsetDp).dp,
+            height = (contentDp(PREF_WIN_H, 400, MinContentH, 1600) + shadowInsetDp).dp,
             position = remember {
                 val x = store.loadPref(PREF_WIN_X, "").toIntOrNull()
                 val y = store.loadPref(PREF_WIN_Y, "").toIntOrNull()
@@ -172,7 +186,21 @@ fun main() {
             // macOS 保留系统装饰换原生圆角/阴影/resize 热区/全屏 Space——透明标题栏 + 全窗内容
             // 的无边框观感（见 WindowChrome.applyMacSystemWindow），自绘那套在 mac 上进不了
             // 真全屏（AppKit 拒绝给透明窗口开全屏 Space）。
-            decoration = if (IS_MAC) WindowDecoration.SystemDefault else WindowDecoration.Undecorated(),
+            // 无边框窗口没有系统缩放热区，CMP 只能自绘，且恒定贴在 **AWT 窗口边缘**往内
+            // `resizerThickness`（默认 8dp，见 `WindowDecoration.Undecorated`）。
+            // 自绘阴影把可视内容整体内缩 `WindowShadowMargin`，那 8dp 热区于是整条陷进不可见的
+            // 透明环 —— 指针不变缩放光标、也抓不到，表现为「能拖不能缩」。
+            //
+            // 热区厚度直接从**同一个** `shadowInsetDp` 导出（= 单侧留边 + 默认热区），与窗口尺寸、
+            // 内容 padding 共用一把尺 ⇒ 留边为 0 的平台（macOS 走系统窗口 / 不支持透明的 Linux）
+            // 自动退回 8dp，无需按平台分叉。这是共享机制的一次修复，不是 Win/Linux 的特例。
+            // 历史：ff7d9de 记录过 macOS 撞的是同一个病根（「resize 热区与视觉边缘错位」），
+            // 但当时选择退回系统窗口绕开；此处补上机制层的修法。
+            decoration = if (IS_MAC) {
+                WindowDecoration.SystemDefault
+            } else {
+                WindowDecoration.Undecorated((shadowInsetDp / 2f + 8f).dp)
+            },
             transparent = canTransparent,
             // 平台惯例全屏快捷键：F11 三平台通吃，macOS 另加 ⌃⌘F（见 WindowChrome.isFullscreenShortcut）。
             onPreviewKeyEvent = { event ->
@@ -185,6 +213,20 @@ fun main() {
             },
         ) {
             SideEffect { chrome.attach(window, windowState) }
+            // 最小窗口尺寸兜底：防止拖到比阴影留边还小导致 contentH ≤ 0。
+            // 取值见 [MinContentW]/[MinContentH]（与上方读存档的钳制下限同源）。
+            val densityMin = LocalDensity.current
+            val awtWin = window as? java.awt.Window
+            SideEffect {
+                val w = awtWin ?: return@SideEffect
+                with(densityMin) {
+                    val minW = (MinContentW.dp + shadowInsetDp.dp * 2).roundToPx()
+                    val minH = (MinContentH.dp + shadowInsetDp.dp * 2).roundToPx()
+                    if (w.minimumSize.width != minW || w.minimumSize.height != minH) {
+                        w.minimumSize = Dimension(minW, minH)
+                    }
+                }
+            }
             MaterialTheme {
                 // 无边框窗口（Win/Linux）丢掉了系统圆角与投影，靠内容自绘补回
                 //（[WindowCornerRadius] / [windowShadow]）：四角裁掉、投影画在留边上，

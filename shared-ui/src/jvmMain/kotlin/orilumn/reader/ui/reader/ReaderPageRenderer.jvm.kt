@@ -69,6 +69,8 @@ private class JvmReaderPageRenderer : ReaderPageRenderer {
         contentRevision: Int,
         rasterKey: PageRasterKey?,
         onMiss: (() -> Unit)?,
+        rasterContentRight: Float,
+        rasterContentBottom: Float,
     ) {
         val r = store.obtain(
             key = rasterKey,
@@ -82,8 +84,9 @@ private class JvmReaderPageRenderer : ReaderPageRenderer {
                 contentLeft = contentLeft,
                 contentRectLeft = contentRectLeft,
                 contentRectTop = contentRectTop,
-                contentRight = contentRectRight,
-                contentBottom = contentRectBottom,
+                // 栅格几何（静置视口），不是贴回几何——见接口 KDoc「两套几何」。
+                contentRight = rasterContentRight,
+                contentBottom = rasterContentBottom,
                 contentRevision = contentRevision,
                 rasterScale = PAGE_RASTER_SCALE,
             ),
@@ -99,8 +102,10 @@ private class JvmReaderPageRenderer : ReaderPageRenderer {
             "page-raster n=${lines.size} imgs=${images.size} ${r.value.width}x${r.value.height} " +
                 "${r.rasterMs}ms hit=${r.cacheHit} pool=$pages/${bytes / 1024 / 1024}MB",
         )
-        // 贴回内容区。栅格缩放 = 1 时是 1:1（坐标取整避免亚像素抖动，保持与旧路径逐像素一致）；
-        // 小于 1（代理位图）时按内容区放大，LINEAR 采样避免锯齿。
+        // 贴回内容区。尺寸相等时是 1:1（坐标取整避免亚像素抖动，保持与旧路径逐像素一致）；
+        // 不相等时按内容区拉伸——两种来源：栅格缩放 < 1（代理位图），或**拖动窗口时
+        // 栅格几何（静置视口）≠ 贴回几何（实时窗口）**，见接口 KDoc「两套几何」。
+        // LINEAR 采样，避免锯齿。
         val img = r.value
         val dstL = contentRectLeft.toInt().toFloat()
         val dstT = contentRectTop.toInt().toFloat()

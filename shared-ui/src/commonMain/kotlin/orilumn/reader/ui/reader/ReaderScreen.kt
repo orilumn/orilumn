@@ -118,6 +118,30 @@ fun ReaderScreen(
      * 桌面壳经 `ReaderView` 按面板状态传入。
      */
     keysEnabled: Boolean = true,
+    /**
+     * **页位图的视口几何**（整窗 px，`窗宽 to 窗高`）；null（默认）= 用组合的实时约束。
+     *
+     * ## 为什么需要它（拖窗口卡顿的根因）
+     *
+     * 页位图缓存的身份键 [PageRasterKey] 含内容区像素宽高（视口变了像素就得重画，缺了会
+     * 静默复用旧像素）。阅读面的内容区又直接来自 `BoxWithConstraints` 的实时约束 ⇒ **拖一次
+     * 窗口就是几百次「键变」**：每一帧都 miss ⇒ 每帧重画整页，还要重建离屏 surface 并把整
+     * 个页位图池清空（邻页预栅格一起陪葬）。单页栅格 desktop 真机 ~87ms、平板 p50 143ms，
+     * 于是拖窗等于全程冻帧。
+     *
+     * ## 怎么解
+     *
+     * 壳层（桌面 `ReaderView` 的 `settledViewport`、平板 activity 的对应静置值）把**静置
+     * 后的**视口传进来：拖动期间几何不变 ⇒ 逐帧命中（0ms），松手静置后换一次几何、重画
+     * 一次。排版侧的防抖本就在同一口径上（`ReaderView` 400ms），两者共用一个静置值 ⇒
+     * 栅格与分页看到的永远是同一个几何，不会「按新尺寸画一遍旧版式」。
+     *
+     * 拖动期间页面按旧几何画在内容区左上、窗口边界外由窗口裁掉；页底色与根盒底色同为
+     * `profile.bgColor`，故多出来/少掉的那圈看不出差别，正文本来就要等静置才重排。
+     *
+     * 传 null = 原行为（几何逐帧跟随约束），平台自己负责不在拖动中频繁改几何。
+     */
+    rasterViewport: Pair<Int, Int>? = null,
 ) {
     val density = LocalDensity.current.density
     val profile = remember(settings, density) { TypographicProfile.build(settings, density) }
@@ -857,10 +881,24 @@ fun ReaderScreen(
     ) {
         val pxWidth = with(LocalDensity.current) { maxWidth.toPx() }
         val pxHeight = with(LocalDensity.current) { maxHeight.toPx() }
+        // **两套几何**（拖窗口时不等，见 `ReaderPageRenderer` 的 KDoc）：
+        // - 贴回几何 contentRight/Bottom = **实时**窗口：内容铺满当前窗口，随窗口一起长大，
+        //   位图按实时矩形拉伸贴回（拖动期间几毫秒一次 blip，不重画）。这才跟别的应用观感一致；
+        //   「先拉出一块空地、再刷新填充」正是没做这一套时的症状。
+        // - 栅格几何 rasterContentRight/Bottom = **静置**视口：页位图键与离屏 surface 按它走，
+        //   拖动期间键不变 ⇒ 逐帧命中（单页栅格真机 ~87ms，逐帧换几何就是全程冻帧）。
+        // null（未传静置视口）时两者都取实时值 = 原行为。
         val contentLeft = profile.marginLeft.toFloat()
         val contentTop = profile.marginTop.toFloat()
         val contentRight = (pxWidth - profile.marginRight).coerceAtLeast(contentLeft)
         val contentBottom = (pxHeight - profile.marginBottom).coerceAtLeast(contentTop)
+        val rasterW = rasterViewport?.first?.toFloat() ?: pxWidth
+        val rasterH = rasterViewport?.second?.toFloat() ?: pxHeight
+        val rasterContentRight = (rasterW - profile.marginRight).coerceAtLeast(contentLeft)
+        val rasterContentBottom = (rasterH - profile.marginBottom).coerceAtLeast(contentTop)
+        // 栅格键的宽高（px）：进 `PageRasterKey`，必须用栅格几何（否则拖动时逐帧变键 = 逐帧重画）。
+        val rasterContentW = (rasterContentRight - contentLeft).toInt()
+        val rasterContentH = (rasterContentBottom - contentTop).toInt()
 
         // 键盘入口（内层盒载焦点）：左右箭头翻页，Esc 等效中部点按。
         Box(
@@ -939,8 +977,8 @@ fun ReaderScreen(
                 pos = fromPos,
                 contentRevision = contentRevision,
                 hostRevision = hostRevision,
-                contentWidthPx = (contentRight - contentLeft).toInt(),
-                contentHeightPx = (contentBottom - contentTop).toInt(),
+                contentWidthPx = rasterContentW,
+                contentHeightPx = rasterContentH,
                 bgColor = profile.bgColor,
                 inkColor = profile.fgColor,
                 imgCache = imgCache,
@@ -954,8 +992,8 @@ fun ReaderScreen(
                     pos = ctl.targetPos.value,
                     contentRevision = contentRevision,
                     hostRevision = hostRevision,
-                    contentWidthPx = (contentRight - contentLeft).toInt(),
-                    contentHeightPx = (contentBottom - contentTop).toInt(),
+                    contentWidthPx = rasterContentW,
+                    contentHeightPx = rasterContentH,
                     bgColor = profile.bgColor,
                     inkColor = profile.fgColor,
                     imgCache = imgCache,
@@ -985,8 +1023,8 @@ fun ReaderScreen(
                 renderer = pageRenderer,
                 contentLeft = contentLeft,
                 contentTop = contentTop,
-                contentRight = contentRight,
-                contentBottom = contentBottom,
+                contentRight = rasterContentRight,
+                contentBottom = rasterContentBottom,
                 pageBg = profile.bgColor,
                 inkColor = profile.fgColor,
                 contentRevision = contentRevision,
@@ -1005,8 +1043,8 @@ fun ReaderScreen(
                     renderer = pageRenderer,
                     contentLeft = contentLeft,
                     contentTop = contentTop,
-                    contentRight = contentRight,
-                    contentBottom = contentBottom,
+                    contentRight = rasterContentRight,
+                    contentBottom = rasterContentBottom,
                     pageBg = profile.bgColor,
                     inkColor = profile.fgColor,
                     contentRevision = contentRevision,
@@ -1035,6 +1073,10 @@ fun ReaderScreen(
                     onMiss = onRasterMiss,
                     // 双页共用一个渲染器 ⇒ 共用一个多页位图池（见 ReaderPageCanvas.renderer）。
                     renderer = pageRenderer,
+                    // 贴回几何=实时窗口（上面 contentRect*）、栅格几何=静置视口：拖动期间
+                    // 命中旧位图并按实时矩形拉伸贴回（不重画、不留空边）。
+                    rasterContentRight = rasterContentRight,
+                    rasterContentBottom = rasterContentBottom,
                 )
             }
             // P1 L1：滑动层**始终在场**，且**只有一个调用点**——早先按 targetContent 有无

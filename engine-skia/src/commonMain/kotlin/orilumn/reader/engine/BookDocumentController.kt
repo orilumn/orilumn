@@ -2922,8 +2922,8 @@ private fun finishCanonicalBackground(
     suspend fun prepareRelayoutLight(chapter: Int, anchorChar: Int): ReflowResult? {
         clearFlipDir("param-preview")
         val unit = unitAt(chapter) ?: return null
+        val markup = unit.markup ?: return null   // 无 markup：无事可做，副作用全免
         bindChapterFor(unit)
-        val markup = unit.markup ?: return null
         activeChapter = chapter
         // 整形前先备字体（同 prepareRelayout；新字体预览依赖池跟进）。
         (layouter as? BoxChapterLayouter)?.let { bc ->
@@ -2981,6 +2981,8 @@ private fun finishCanonicalBackground(
      */
     suspend fun prepareRelayout(chapter: Int, anchorChar: Int): ReflowResult? {
         clearFlipDir("param-change")
+        val unit = unitAt(chapter) ?: return null
+        val markup = unit.markup ?: return null   // 无 markup：无事可做，副作用全免
         // 调参同样第一优先：epoch 已 bump 使在途 B2 过期（执行后丢弃），此处再主动砍掉，
         // 免得它们排完整章才丢（纯浪费 CPU/内存峰值）。落位章的新 B1 与尾部分派不受影响。
         preemptForNavigation()
@@ -2988,9 +2990,7 @@ private fun finishCanonicalBackground(
         val myEpoch = layoutEpoch
         activeChapter = chapter
         voidPreflight()
-        val unit = unitAt(chapter) ?: return null
         bindChapterFor(unit)
-        val markup = unit.markup ?: return null
         // 整形前先备字体（同 ensureChapterLayout；本函数产物必重建，无需作废）。
         (layouter as? BoxChapterLayouter)?.let { bc ->
             onDemandFonts(bc.fontDemandFor(unit.cssBundle))

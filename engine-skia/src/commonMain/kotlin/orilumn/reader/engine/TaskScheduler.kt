@@ -79,6 +79,12 @@ class TaskScheduler(
          *  第 2/3 档那些邻页，把一页的增量排在包含它的一趟之前说不通。 */
         const val PRIO_B1_URGENT = PRIO_PAGE_NEXT
 
+        /** 面板在使用 ⇒ 读者此刻要它。池内最高，但仍让位翻页/栅格（号>0）。 */
+        const val PRIO_FONT_DEMAND = 5
+
+        /** 无人等 ⇒ 第 6.5 档：低于本章（40）/±1 章，高于其他章（50）。 */
+        const val PRIO_FONT_SCAN = 45
+
         const val PRIO_FLIP = 0 // reference only — flips never enqueue
     }
 

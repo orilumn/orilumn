@@ -67,6 +67,27 @@
   - `FONT_SCAN_CACHE_VERSION` 1 → 2（指纹组成变化，主动作废老存档、不必等字体变）。
     **无需 DB 迁移**：指纹仍是 `font_scan_state` 的两列 Long。
 
+## 调度两洞收口（本轮）：开书不再砍扫描 + 让位不丢活
+
+桌面时序验证（`~/.orilumn/logs/`，`Orilumn.SPIKE`/`Orilumn.FontScan`）暴露两个洞，均在**共享层**修：
+
+- **A｜同档重提＝取消 + 重启**。宿主把「面板关着」与「刚开书/换版面」走同一个
+  `onPanelVisibility(false)`；`TaskScheduler.submit` 对同键的语义是取消在跑的孪生再重启 ⇒
+  每次开书都把在途扫描砍掉重来（实测 `16:27:11 start 45 → 13 start 45 → 13 cancel 45`）。
+  修：`onPanelVisibility` 按 `TaskScheduler.pendingPriority(KEY)` 去重，**已在目标档则什么都不做**。
+  用调度器当唯一事实源（而不是扫描器自己记"在途"），因为排队中的任务会被抢占直接从队列里清掉，
+  自记标志会永远停在「在途」。
+- **B｜让位即丢活**。初版只在任务体 `catch (CancellationException)` 里重提，且要求「面板可见」：
+  ①排队期被 `queue.removeAll { priority > threshold }` 清掉的任务**从未起跑、没有 catch**；
+  ②面板关着时干脆不重提 ⇒ 开书瞬间被栅格抢占后本进程内扫描死掉、**指纹不落库** ⇒ 下次启动白扫。
+  修：`TaskScheduler.submitWhenIdle`（`awaitIdle()` 后执行，**不在队列里** ⇒ 抢占清不到）→
+  `SystemFontScanner.armResume` 续跑看门狗：队列真空时补一次，补跑后自行续挂，直到指纹落库
+  （对上即解锁 ⇒ 常态零成本）。两道防空转：空族集（平台失败）停摆等下次外部触发；
+  连续无成果补跑超 20 次放弃。另设 200ms「入队静置窗」，避开 `submit` 异步入队跳导致的
+  「刚提交查不到键 ⇒ 误判丢活 ⇒ 多排一次」。
+
+新增 API 仅两个，都在 `TaskScheduler`（排版层（上））：`pendingPriority(key)`、`submitWhenIdle(action)`。
+
 ## 顺手修复（本轮暴露）：桌面库迁移漏盖章
 
 `5.sqm` 上线后桌面**第二次启动必崩** `table font_scan_state already exists`：
@@ -88,9 +109,16 @@
   文件增删必变 / 缺根回 0）
 - `:desktopApp:test` ✅（`SystemFontScannerProbeTest` 4 → 6 例：新增「逐族回调 `(done,total)` 序列」、
   「族名不变但环境哈希变 ⇒ 重扫」；真 SQLite 内存库 + 注入假枚举端口）
+  - 本轮再加 4 例（共 10 例）：`opening a book must not restart an in-flight scan`（A）、
+    `preemption with the panel closed resumes and finishes`（B①）、
+    `scan dropped while queued resumes when the queue goes idle`（B②）、
+    `empty enumeration writes no fingerprint and does not spin`（防空转）。
+    前三例在修前均为失败/超时，修后连跑 4 次稳定绿。
 - `:app:testDebugUnitTest` ✅（原预存在失败 `CrossChapterPreflightProbeTest` 的两例已处理：
   超时的 `a flip landing prewarms both neighbors...` 与依赖缺失测试字体的
   `FontPoolGenerationTest`（engine-skia）整体删除；已验证为非本次改动引入，见 git 历史）
+  - `TaskSchedulerTest` 本轮加 2 例：`pendingPriority tracks the queued or running tier`、
+    `submitWhenIdle waits for the drain and is not preempted`。
 
 ## 已知遗留 / 下一步
 

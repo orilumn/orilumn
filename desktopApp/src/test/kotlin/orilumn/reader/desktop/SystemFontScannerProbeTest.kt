@@ -1,6 +1,7 @@
 package orilumn.reader.desktop
 
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -34,9 +35,11 @@ import java.util.concurrent.atomic.AtomicInteger
  *  1. 启动一次性检测：指纹变才扫；扫完写指纹；再次启动（指纹已匹配）**什么都不做**；
  *  2. 逐族落成果 + 回调：每族写库后调用一次 [SystemFontScanner.onFamilyScanned]（面板增量刷新）；
  *  3. 面板需求模式：指纹过期时打开面板即实扫（`PRIO_FONT_DEMAND`）；
- *  4. 抗抢占续跑：扫到一半被 `cancelLowerThan(0)`（模拟翻页）砍掉，面板仍可见 ⇒ 自动重提续跑，
- *     已完成族不重扫；
- *  5. 收尾清孤儿：本次枚举里不存在的族残留行删除。
+ *  4. 抗抢占续跑：扫到一半被 `cancelLowerThan(0)`（模拟翻页）砍掉，**面板开没开都要**续跑到底
+ *     并写指纹（让位不丢活），已完成族不重扫；
+ *  5. 收尾清孤儿：本次枚举里不存在的族残留行删除；
+ *  6. 开书/换书带的 `onPanelVisibility(false)` **不得**重启在途扫描（同档去重）；
+ *  7. 空族集（平台枚举失败）不写指纹、也不空转。
  */
 class SystemFontScannerProbeTest {
 
@@ -60,8 +63,14 @@ class SystemFontScannerProbeTest {
         var environmentHash: Long = 0L
         val facesCalls: MutableList<String> = Collections.synchronizedList(ArrayList())
 
+        /** 族名枚举次数：续跑看门狗空转（无成果的反复补跑）会把它推高。 */
+        val familiesCalls = java.util.concurrent.atomic.AtomicInteger(0)
+
         fun asSource(): SystemFontSource = SystemFontSource(
-            families = { families },
+            families = {
+                familiesCalls.incrementAndGet()
+                families
+            },
             facesFor = { f ->
                 facesCalls.add(f)
                 listOf(SystemFontFace(f, "Regular"), SystemFontFace(f, "Bold"))
@@ -226,6 +235,155 @@ class SystemFontScannerProbeTest {
             scanner.onPanelVisibility(true)
             awaitTrue("FamB rows must be pruned") { lib.list().all { it.familyName == "FamA" } && lib.list().size == 2 }
             assertTrue("FamA still present", lib.list().any { it.familyName == "FamA" })
+        } finally {
+            scope.cancel()
+            dir.deleteRecursively()
+        }
+    }
+
+    /**
+     * **开书（面板并未打开）不得重启在途扫描**（问题 A 回归）。
+     *
+     * 宿主把「面板关着」与「版面刚换/刚开书」走同一个 `onPanelVisibility(false)` 调用。同档同键重提
+     * 在 `TaskScheduler.submit` 里 = 取消在跑的孪生再重启，所以没去重时每次开书都会把在途扫描砍掉
+     * 重来（实测日志：`start 45 → start 45 → cancel 45`）。
+     */
+    @Test
+    fun `opening a book must not restart an in-flight scan`() = runBlocking {
+        val (lib, dir) = freshLib()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val fake = FakeSource(listOf("FamA", "FamB", "FamC"))
+            val scheduler = TaskScheduler(scope, Dispatchers.Default, 1)
+            val scanner = SystemFontScanner(lib, scheduler, source = fake.asSource())
+
+            val entered = CompletableDeferred<Unit>()
+            val release = CompletableDeferred<Unit>()
+            val callbacks = AtomicInteger(0)
+            var cancelled = false
+            scanner.onFamilyScanned = { _, _ ->
+                if (callbacks.incrementAndGet() == 1) {
+                    entered.complete(Unit)
+                    try {
+                        release.await()
+                    } catch (e: CancellationException) {
+                        cancelled = true
+                        throw e
+                    }
+                }
+            }
+
+            scanner.detectOnStart() // 启动检测 ⇒ 在途、档位 45、扫到首族卡住
+            entered.await()
+            delay(50)
+            scanner.onPanelVisibility(false) // 开书/换书/视口变化路径
+            delay(200)
+            assertTrue("开书不得取消在途扫描（同档重提）", !cancelled)
+
+            release.complete(Unit)
+            awaitTrue("scan must still finish after the book-open call") { lib.list().size == 6 }
+            assertEquals("每族只枚举一次", listOf("FamA", "FamB", "FamC"), fake.facesCalls.toList())
+        } finally {
+            scope.cancel()
+            dir.deleteRecursively()
+        }
+    }
+
+    /**
+     * **被抢占的扫描必须还能回来**（问题 B 回归）：面板没开、扫描在跑时被翻页取消（`cancelLowerThan(0)`）
+     * 也要续跑到底并写指纹；初版只在「面板可见」时自动重提，这里是超时。
+     */
+    @Test
+    fun `preemption with the panel closed resumes and finishes`() = runBlocking {
+        val (lib, dir) = freshLib()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val fake = FakeSource(listOf("FamA", "FamB", "FamC"))
+            val scheduler = TaskScheduler(scope, Dispatchers.Default, 1)
+            val scanner = SystemFontScanner(lib, scheduler, source = fake.asSource())
+
+            val entered = CompletableDeferred<Unit>()
+            val release = CompletableDeferred<Unit>()
+            val callbacks = AtomicInteger(0)
+            scanner.onFamilyScanned = { _, _ ->
+                if (callbacks.incrementAndGet() == 1) {
+                    entered.complete(Unit)
+                    release.await() // 永不完成：这就是"扫到一半"的卡点，随抢占被取消
+                }
+            }
+
+            scanner.detectOnStart() // demand = false（面板关着）
+            entered.await()
+            scheduler.cancelLowerThan(0) // 翻页抢占
+            awaitTrue("preempted scan must resume on idle even with the panel closed") { lib.list().size == 6 }
+            assertEquals("FamA must not be re-enumerated on resume", listOf("FamA", "FamB", "FamC"), fake.facesCalls.toList())
+            awaitTrue("指纹必须落库，否则下次启动白扫一遍") { lib.fontScanState() != null }
+            assertEquals(
+                "指纹必须等于当前族名指纹",
+                version to fake.families.joinToString("|").hashCode().toLong(),
+                lib.fontScanState(),
+            )
+        } finally {
+            scope.cancel()
+            dir.deleteRecursively()
+        }
+    }
+
+    /**
+     * **排队期被清掉的扫描也要补回来**（问题 B 的另一半）：`cancelLowerThan` 的
+     * `queue.removeAll { priority > threshold }` 会把还没起跑的 `fontscan` 直接扫出队列——任务体
+     * 从未起跑，**没有 catch 可进**，靠自己重提是补不回来的。
+     */
+    @Test
+    fun `scan dropped while queued resumes when the queue goes idle`() = runBlocking {
+        val (lib, dir) = freshLib()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val fake = FakeSource(listOf("FamA", "FamB"))
+            val scheduler = TaskScheduler(scope, Dispatchers.Default, 1)
+            val scanner = SystemFontScanner(lib, scheduler, source = fake.asSource())
+
+            // 占住唯一槽位，让 fontscan 只进队、不起跑。
+            val blockerEntered = CompletableDeferred<Unit>()
+            val releaseBlocker = CompletableDeferred<Unit>()
+            scheduler.submit(
+                TaskScheduler.Task("hold", TaskScheduler.PRIO_PAGE_NEXT) {
+                    blockerEntered.complete(Unit)
+                    releaseBlocker.await()
+                },
+            )
+            blockerEntered.await()
+
+            scanner.detectOnStart()
+            awaitTrue("scan must be enqueued behind the blocker, not started") {
+                scheduler.pendingPriority("fontscan") == TaskScheduler.PRIO_FONT_SCAN && fake.familiesCalls.get() == 0
+            }
+            // 翻页抢占：队列里 priority > 0 的活被一并清掉 —— fontscan 从未起跑，没进过任何 catch。
+            scheduler.cancelLowerThan(0)
+            awaitTrue("queued scan must be dropped from the queue") { scheduler.pendingPriority("fontscan") == null }
+
+            awaitTrue("queued-drop must be healed by the idle resume") { lib.list().size == 4 }
+            assertEquals(listOf("FamA", "FamB"), fake.facesCalls.toList())
+        } finally {
+            scope.cancel()
+            dir.deleteRecursively()
+        }
+    }
+
+    /** 平台枚举失败（空族集）⇒ 不写指纹、也不许续跑看门狗空转（无成果的补跑循环）。 */
+    @Test
+    fun `empty enumeration writes no fingerprint and does not spin`() = runBlocking {
+        val (lib, dir) = freshLib()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val fake = FakeSource(emptyList())
+            SystemFontScanner(lib, TaskScheduler(scope, Dispatchers.Default, 1), source = fake.asSource())
+                .detectOnStart()
+            delay(600)
+            val enumerations = fake.familiesCalls.get()
+            assertNull("empty enumeration must not be stored as a fingerprint", lib.fontScanState())
+            delay(600)
+            assertEquals("resume must not spin on empty enumeration", enumerations, fake.familiesCalls.get())
         } finally {
             scope.cancel()
             dir.deleteRecursively()

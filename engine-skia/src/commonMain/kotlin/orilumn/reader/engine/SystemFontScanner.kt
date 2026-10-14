@@ -3,6 +3,7 @@ package orilumn.reader.engine
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import orilumn.reader.collections.SyncLock
@@ -14,6 +15,9 @@ import orilumn.reader.engine.skia.systemFontFacesFor
 import orilumn.reader.engine.skia.systemFontFamilies
 import orilumn.reader.engine.skia.systemFontFamilyHash
 import orilumn.reader.io.Logger
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.TimeMark
+import kotlin.time.TimeSource
 
 /**
  * **系统字体枚举端口**（注入接缝，方案 §5「平台差异经注入端口进任务体」）。
@@ -56,11 +60,14 @@ class SystemFontSource(
  * 需求模式（方案 §2.4、§3.4）：面板可见 ⇒ 同键 `fontscan` 提档到
  * [TaskScheduler.PRIO_FONT_DEMAND]（池顶、立即实扫）；面板关闭 ⇒ 同键降回
  * [TaskScheduler.PRIO_FONT_SCAN]（续跑不丢成果）。同键重提＝提/降档，无需调度器新 API。
+ * **同档重提绝不发**（[TaskScheduler.pendingPriority] 去重）：`submit` 对同键的语义是「取消在跑的
+ * 旧孪生 + 重启」，而开书/换书/视口变化都会带着 `open=false` 打进来，不去重就会把在途扫描反复
+ * 砍掉重来。
  *
  * 抗抢占（方案 §3.3、§8-1）：任务体**逐族落成果**，被 `notifyFlip`
  * （[TaskScheduler.cancelLowerThan] 0）/ `onForegroundRaster`（[TaskScheduler.cancelForRaster]
- * 0）抢占后跳过 [scannedFamilies] 里已完成的族。面板仍可见时（需求模式）被抢占会**自动重提**
- * 续跑（让位翻页/栅格，不真的放弃）；面板不可见则等下一次触发（面板打开 / 下次启动）。
+ * 0）抢占后跳过 [scannedFamilies] 里已完成的族。让位后**必须还能回来**，见 [armResume]：
+ * 无论面板开没开，扫描都会在队列真空时自行续跑，直到写出指纹为止。
  *
  * @param library 共享字体库（`:common`）。
  * @param scheduler 应用级队列（[AppTaskScheduler.scheduler]）。
@@ -82,6 +89,19 @@ class SystemFontScanner(
     companion object {
         /** 扫描任务的键：提/降档靠**同键重提**，见类文档。 */
         const val KEY = "fontscan"
+
+        /**
+         * 续跑看门狗[armResume]连续「空转」上限：只在**没有成果**的补跑上累加，落一族的成果
+         * 即归零（见 [scanBody]）。纯粹防空转——例如任务体反复抛异常时，不至于无休止地空闲重排。
+         */
+        private const val MAX_RESUME_ATTEMPTS = 20
+
+        /**
+         * 续跑看门狗的「入队静置窗」：`TaskScheduler.submit` 的入队维护跳是**异步**的，刚提交完
+         * 立刻查 [TaskScheduler.pendingPriority] 会查不到键（还没登记），把「还没登记」误判成
+         * 「活丢了」而多排一次 —— 那会把刚起跑的扫描砍掉重来。补跑本就在等队列，静置一拍零成本。
+         */
+        private val RESUME_SETTLE = 200.milliseconds
     }
 
     /**
@@ -94,7 +114,7 @@ class SystemFontScanner(
      */
     var onFamilyScanned: suspend (done: Int, total: Int) -> Unit = { _, _ -> }
 
-    /** 非挂起门（[SyncLock]）：保护 [scannedFamilies]/[scannedFingerprint]/[scanning]/[generation]。 */
+    /** 非挂起门（[SyncLock]）：保护 [scannedFamilies]/[scannedFingerprint]。 */
     private val gate = SyncLock()
 
     /** 同进程内已扫完的族。**跨重提保留** ⇒ 被抢占后重提跳过已完成族；指纹变才整体作废。 */
@@ -103,16 +123,25 @@ class SystemFontScanner(
     /** [scannedFamilies] 所属的指纹；与当前指纹不同 ⇒ 先整体作废再扫。 */
     private var scannedFingerprint: Pair<Long, Long>? = null
 
-    /** 提/降档代数：每次提交 +1。旧任务据此判断「我是不是已被同键重提取代」。 */
-    private var generation = 0
-
-    /** 面板是否在用（需求模式）：被抢占后据此决定是否自动重提续跑。 */
+    /** 面板是否在用（需求模式）：只影响**续跑**时补跑的档位（面板在用则池顶，否则 45）。 */
     @Volatile
     private var demand: Boolean = false
 
     /** 启动一次性检测门闩（方案 §2.2 `@Volatile once`）：本实例只检测一次。 */
     @Volatile
     private var detected: Boolean = false
+
+    /** 续跑看门狗[armResume]连续「空转」计数：落一族的成果即归零，只有无成果的补跑才累加。 */
+    @Volatile
+    private var resumeAttempts: Int = 0
+
+    /** 平台枚举失败（空族集）⇒ 停摆续跑看门狗，等下一次外部触发（面板打开 / 下次启动）再试。 */
+    @Volatile
+    private var resumeSuppressed: Boolean = false
+
+    /** 最近一次提交的时刻（[RESUME_SETTLE] 静置窗用）。 */
+    @Volatile
+    private var lastSubmitAt: TimeMark? = null
 
     /**
      * **层次二 · 启动一次性检测**：只比族名指纹（廉价），指纹变才提交 [TaskScheduler.PRIO_FONT_SCAN]
@@ -121,9 +150,10 @@ class SystemFontScanner(
     suspend fun detectOnStart() {
         if (detected) return
         detected = true
+        resumeSuppressed = false
         withContext(Dispatchers.Default) {
             // 已有在途扫描（例如面板先打开、已按需求提档到 5）：别用 45 覆盖它，交给它收尾写指纹。
-            if (isScanning()) return@withContext
+            if (scheduler.pendingPriority(KEY) != null) return@withContext
             val current = currentFingerprint()
             val stored = storedFingerprint()
             if (stored == current) {
@@ -139,85 +169,116 @@ class SystemFontScanner(
      * **需求模式**（方案 §2.4、§3.4）：面板可见 ⇒ 提档到池顶（立即实扫）；不可见 ⇒ 降回 45 续跑。
      *
      * 打开时若已有在途扫描，也要提档（那是「面板要用，正扫着」）；指纹未变且没有在途扫描则什么都不做
-     * （库热，DB 直读即可）。关闭时同键重提 45 —— 已扫完再重提是白跑，故仅在确有在途扫描时提。
+     * （库热，DB 直读即可）。关闭时仅在**确实被提档过**（在途档位就是 5）时才降回 45。
+     *
+     * **同档不动**：开书 / 换书 / 视口变化都会带着 `open=false` 打进来（宿主把「面板关着」与
+     * 「版面刚换」走同一个调用），而 `submit` 对同键的语义是取消在跑的孪生再重启 —— 不按档位去重，
+     * 就等于每次开书都把在途扫描砍掉重来（实测：`start 45 → start 45 → cancel 45`）。
      */
     suspend fun onPanelVisibility(open: Boolean) {
         demand = open
+        if (open) resumeSuppressed = false
         withContext(Dispatchers.Default) {
+            val target = if (open) TaskScheduler.PRIO_FONT_DEMAND else TaskScheduler.PRIO_FONT_SCAN
+            val current = scheduler.pendingPriority(KEY)
+            if (current == target) return@withContext
             if (open) {
                 // 在途 ⇒ 同键提档；不在途但指纹过期 ⇒ 提档启动；库热 ⇒ 什么都不做。
-                if (isScanning() || !storedFingerprintMatches()) {
-                    submitScan(TaskScheduler.PRIO_FONT_DEMAND)
-                }
+                if (current != null || !storedFingerprintMatches()) submitScan(target)
             } else {
-                if (isScanning()) submitScan(TaskScheduler.PRIO_FONT_SCAN)
+                if (current == TaskScheduler.PRIO_FONT_DEMAND) submitScan(target)
             }
         }
     }
 
-    /** 是否有一次扫描在途（已提交未收尾）。 */
-    private fun isScanning(): Boolean = gate.withLock { scanning }
-
-    @Volatile
-    private var scanning: Boolean = false
-
     /**
-     * 同键提交一次扫描（提/降档）。**非挂起**：这样被抢占的 [scanBody] 在 catch 里也能重提
-     * （挂起调用在已取消的协程里会立即抛 CancellationException）。指纹枚举（族名，廉价）走调用方
-     * 线程，故 [detectOnStart]/[onPanelVisibility] 已把自身切到 [Dispatchers.Default]。
+     * 同键提交一次扫描（提/降档），并挂上续跑看门狗 [armResume]。
+     *
+     * **非挂起**：指纹枚举（族名，廉价）与看门狗续挂都不需要挂起点，且这样 [armResume] 的动作体
+     * 也能直接重排。指纹枚举走调用方线程，故 [detectOnStart]/[onPanelVisibility] 已把自身切到
+     * [Dispatchers.Default]，看门狗动作体亦然。
      */
     private fun submitScan(priority: Int) {
         val current = currentFingerprint()
-        val myGen = gate.withLock {
+        gate.withLock {
             if (scannedFingerprint != current) {
                 // 系统字体集合变了（或首次）：已完成族集整体作废。
                 scannedFamilies.clear()
                 scannedFingerprint = current
             }
-            scanning = true
-            generation += 1
-            generation
         }
         scheduler.submit(
-            TaskScheduler.Task(KEY, priority) { scanBody(myGen) },
+            TaskScheduler.Task(KEY, priority) { scanBody() },
         )
+        lastSubmitAt = TimeSource.Monotonic.markNow()
+        armResume()
     }
 
-    private suspend fun scanBody(myGen: Int) {
-        try {
-            val families = source.families()
-            if (families.isEmpty()) {
-                // 平台枚举失败：不落成果、不写指纹（否则空指纹会被当成"已扫完"，永久跳过）。
-                Logger.w(logTag, "scan aborted: no families enumerated (platform failure)")
-                return
+    /**
+     * **续跑看门狗**（方案 §8-1「抢占饥饿」收口）：让位给翻页 / 栅格的扫描**必须还能回来**。
+     *
+     * 为什么不能只在被抢占的 `catch` 里重提（初版做法）：抢占有两条路，只有一条进得了 `catch`。
+     * ①在跑被 [TaskScheduler.cancelLowerThan] / [cancelForRaster] 取消 ⇒ 进 catch；
+     * ②**还在排队**就被同一句 `queue.removeAll { priority > threshold }` 清出队列 ⇒ 任务体从未
+     * 起跑，**没有 catch 可进**，且外面无人知道它没了（连"在途"标志都会永远停在 true）。
+     *
+     * 于是改挂 [TaskScheduler.submitWhenIdle]：它**不在队列里**，抢占清不到它；等队列真空了再补一次
+     * ——那正是「该轮到没人等的活」的时刻。补跑后自行续挂，直到扫描真正收尾（写指纹）为止；
+     * 指纹对上即解锁，所以常态（库热）与扫完之后都是零成本、零残留。
+     */
+    private fun armResume() {
+        scheduler.submitWhenIdle {
+            withContext(Dispatchers.Default) {
+                // 先静置：submit 的入队跳是异步的，刚提交完就查会查不到键（见 [RESUME_SETTLE]）。
+                lastSubmitAt?.let { mark ->
+                    val elapsed = mark.elapsedNow()
+                    if (elapsed < RESUME_SETTLE) delay((RESUME_SETTLE - elapsed).inWholeMilliseconds)
+                }
+                if (resumeSuppressed) return@withContext
+                if (scheduler.pendingPriority(KEY) != null) {
+                    // 已有人在扫：接着看（这个分支不会空转——awaitIdle 要求队列真空，而只要它还在
+                    // 队里/在跑，下一轮就会继续等它）。
+                    armResume()
+                    return@withContext
+                }
+                if (storedFingerprintMatches()) return@withContext // 已收尾：解锁
+                if (resumeAttempts >= MAX_RESUME_ATTEMPTS) {
+                    Logger.w(logTag, "scan resume gave up after $resumeAttempts attempts without progress")
+                    return@withContext
+                }
+                resumeAttempts += 1
+                Logger.w(logTag, "scan resume on idle (attempt $resumeAttempts, demand=$demand)")
+                submitScan(if (demand) TaskScheduler.PRIO_FONT_DEMAND else TaskScheduler.PRIO_FONT_SCAN)
             }
-            for (family in families) {
-                // 被抢占（翻页/栅格/同键重提）时在此抛出。
-                currentCoroutineContext().ensureActive()
-                if (gate.withLock { family in scannedFamilies }) continue
-                val faces = source.facesFor(family)
-                val localized = localizedNames(listOf(family))
-                library.syncSystemFamily(faces, localized)
-                val done = gate.withLock { scannedFamilies.add(family); scannedFamilies.size }
-                notifyFamilyScanned(done, families.size)
-            }
-            // 收尾：删除本次全量枚举里已不存在的族残留行（空集合短路，平台失败不清库）+ 写指纹。
-            library.pruneMissingSystemFamilies(families)
-            val fp = currentFingerprint()
-            library.saveFontScanState(fp.first, fp.second)
-            Logger.w(logTag, "scan done families=${families.size}")
-        } catch (e: CancellationException) {
-            // 让位翻页/栅格（方案 §3.3）。**仅当不是被同键重提取代**（generation 未前进）且面板仍在用
-            // 时自动重提续跑——否则提/降档会互相踢成死循环。
-            if (demand && gate.withLock { generation == myGen }) {
-                Logger.w(logTag, "scan preempted while panel visible, resubmit prio=${TaskScheduler.PRIO_FONT_DEMAND}")
-                submitScan(TaskScheduler.PRIO_FONT_DEMAND)
-            }
-            throw e
-        } finally {
-            // 仅当没有更新的同键任务时清在途标志（否则会把新任务标成"不在途"）。
-            gate.withLock { if (generation == myGen) scanning = false }
         }
+    }
+
+    private suspend fun scanBody() {
+        val families = source.families()
+        if (families.isEmpty()) {
+            // 平台枚举失败：不落成果、不写指纹（否则空指纹会被当成"已扫完"，永久跳过）；同时停摆
+            // 续跑看门狗，否则会「补跑又空 ⇒ 再补」空转（等下一次外部触发再试）。
+            resumeSuppressed = true
+            Logger.w(logTag, "scan aborted: no families enumerated (platform failure)")
+            return
+        }
+        for (family in families) {
+            // 被抢占（翻页/栅格/同键重提）时在此抛出；让位后由 [armResume] 的看门狗补回来。
+            currentCoroutineContext().ensureActive()
+            if (gate.withLock { family in scannedFamilies }) continue
+            val faces = source.facesFor(family)
+            val localized = localizedNames(listOf(family))
+            library.syncSystemFamily(faces, localized)
+            // 有成果 ⇒ 续跑看门狗的"空转"计数归零（只有连着补跑又扫不出东西的才该被上限挡下）。
+            resumeAttempts = 0
+            val done = gate.withLock { scannedFamilies.add(family); scannedFamilies.size }
+            notifyFamilyScanned(done, families.size)
+        }
+        // 收尾：删除本次全量枚举里已不存在的族残留行（空集合短路，平台失败不清库）+ 写指纹。
+        library.pruneMissingSystemFamilies(families)
+        val fp = currentFingerprint()
+        library.saveFontScanState(fp.first, fp.second)
+        Logger.w(logTag, "scan done families=${families.size}")
     }
 
     /** 面板增量刷新/进度回调：UI 回调自身不该中断扫描，但要放行取消（否则吞掉抢占）。 */

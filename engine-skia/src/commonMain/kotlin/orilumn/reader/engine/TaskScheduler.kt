@@ -228,6 +228,19 @@ class TaskScheduler(
     suspend fun pendingCount(): Int = mutex.withLock { queue.size }
     suspend fun runningCount(): Int = mutex.withLock { running.size }
 
+    /**
+     * 同键「在队或在跑」任务的档位；无 ⇒ null。
+     *
+     * 用途：同档重提在 [submit] 里的语义是**取消在跑的旧孪生 + 重启**（纯浪费）。调用方
+     * （字体扫描的提/降档，见 `SystemFontScanner.onPanelVisibility`）据此去重：档位已到位就
+     * 什么都不做。刻意让**调度器**当唯一事实源，而不是调用方自己记在途标志——排队中的任务可能被
+     * [cancelLowerThan] / [cancelForRaster] 直接从队列里清掉（任务体从未起跑，没有任何回调），
+     * 那种情况下调用方的标志会永远停在「在途」。
+     */
+    suspend fun pendingPriority(key: String): Int? = mutex.withLock {
+        queue.firstOrNull { it.key == key }?.priority ?: runningPrio[key]
+    }
+
     /** P1a: diagnostic-grade idle wait (polling). Resolves when no task is queued or running.
      *  Callers must re-validate whatever they were waiting for (new submits may land after). */
     suspend fun awaitIdle() {
@@ -235,6 +248,21 @@ class TaskScheduler(
             val busy = mutex.withLock { queue.isNotEmpty() || running.isNotEmpty() }
             if (!busy) return
             delay(200)
+        }
+    }
+
+    /**
+     * 队列**真空时**执行 [action]（即 [awaitIdle] 之后再执行）。
+     *
+     * 与 [submit] 的关键区别：它**不占队列位置**，因此 [cancelLowerThan] / [cancelForRaster] 里
+     * `queue.removeAll { priority > threshold }` 清不到它。用途是**被抢占让位的活重新入场**（字体扫描
+     * 的续跑看门狗，见 `SystemFontScanner.armResume`）——这件事故意不靠任务体自己的 catch 补：
+     * **排队期就被清掉的任务体从未起跑，没有 catch 可进**，且它连「我没了」都没人知道。
+     */
+    fun submitWhenIdle(action: suspend () -> Unit) {
+        scope.launch {
+            awaitIdle()
+            action()
         }
     }
 

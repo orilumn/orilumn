@@ -291,6 +291,10 @@ jobs:
   # 就这么丢过（构建成功、artifact 上传成功，只有「挂到 Release」那步红）。创建只有一处后，
   # 竞态在结构上消失，不再靠时序运气。
   # 顺带修掉：Release 说明（body）原先只由 APK job 写，它一失败 body 就是 null。
+  #
+  # 用 @v3（node24）：v2 已 EOL（Node 20 被弃用，现被强制跑 Node 24），每次运行留弃用注解；
+  # 两者输入完全一致（name/tag_name/body/files），overwrite_files 默认 true（重跑可覆盖重挂）、
+  # fail_on_unmatched_files 默认 false（少一两个附件不会把整步炸掉）。
   release:
     # 只在打 tag 时出 Release（workflow_dispatch 干跑不建 Release，与原行为一致）；
     # needs + !cancelled()：某个平台构建失败也照样发布其余已成功的产物，而不是整个 Release 缺席。
@@ -307,7 +311,7 @@ jobs:
           merge-multiple: true
 
       - name: Attach all packages to Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}

@@ -45,13 +45,9 @@
 - `:common:jvmTest` ✅
 - `:desktopApp:test` ✅（新增 `SystemFontScannerProbeTest` 4 例：启动检测跳过/需求模式实扫/
   抢占续跑不重扫已完成族/收尾清孤儿；真 SQLite 内存库 + 注入假枚举端口）
-- `:engine-skia:jvmTest` 387 例，**1 例预存在失败**：
-  `FontPoolGenerationTest > same measurer sees new pool faces without reopen`
-  （`java.io.FileNotFoundException` 读 `/private/var/folders/.../GenTestFam` 测试字体，环境缺文件，
-  与本次改动无关）
-- `:app:testDebugUnitTest` **1 例预存在失败**：
-  `CrossChapterPreflightProbeTest > a flip landing prewarms both neighbors...`
-  （`TimeoutCancellationException` 15s）。已用干净 HEAD + `git stash -u` 复现，确认**非本次改动引入**。
+- `:app:testDebugUnitTest` ✅（原预存在失败 `CrossChapterPreflightProbeTest` 的两例已处理：
+  超时的 `a flip landing prewarms both neighbors...` 与依赖缺失测试字体的
+  `FontPoolGenerationTest`（engine-skia）整体删除；已验证为非本次改动引入，见 git 历史）
 
 ## 已知遗留 / 下一步
 

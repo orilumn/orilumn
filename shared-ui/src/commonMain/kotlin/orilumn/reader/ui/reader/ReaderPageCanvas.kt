@@ -68,15 +68,19 @@ fun ReaderPageCanvas(
         val imgs = content?.pageImages?.takeIf { it.isNotEmpty() }
         val rawBgs = content?.pageBackgrounds?.takeIf { it.isNotEmpty() }
         if ((list.isNullOrEmpty()) && imgs == null && rawBgs == null) return@Canvas
-        // 章节绝对 Y → 页面坐标系：对齐基准必须覆盖行与图两者。
-        // 替换块（img）不产出 DrawLine：若只取行最小值，行窗内首图（gearIndex < 首文本行）
-        // 的 yTop 会小于锚点，dstTop 为负而跑到屏外。取两者最小即复刻旧 drawPageSlice
-        // alignPageTop(firstLine)（对齐切片首行，含图片行）。
-        // 纯图页（无文本行）时以首图为对齐基准。
+        // 章节绝对 Y → 页面坐标系：锚点取本页**行内容**（文本行、插图）最小者。
+        // 替换块（img）不产出 DrawLine：纯图页、或插图单独占行（它比其后首个文本行更靠上）时，
+        // 只取行最小值会让首图 dstTop 为负而跑到屏外，故行与图取最小。
+        // 盒背景/边框**不进锚点**：BoxDrawer 对本页内起止的箱子放宽到 border-box（可越出页带），
+        // 那是装饰，页外部分由栅格（恰为 contentH）裁掉；若让它参与锚点，整页被下推，
+        // 末行落到分页帧之外被裁（真机 `.fm-sidebar-block` 91px 首部装饰即此）。
         val lineMin = list?.takeIf { it.isNotEmpty() }?.minOf { it.yTop }
         val imgMin = imgs?.minOf { it.yTop }
-        val bgMin = rawBgs?.minOf { it.yTop }
-        val anchorY = listOfNotNull(lineMin, imgMin, bgMin).minOrNull() ?: return@Canvas
+        val anchorY = ReaderMath.pageAnchorY(
+            lineMin = lineMin,
+            imgMin = imgMin,
+            bgMin = rawBgs?.minOf { it.yTop },
+        ) ?: return@Canvas
         val shift = anchorY - contentTop.roundToInt()
         // 盒背景/边框与文本同一 shift（章节绝对 Y → 页坐标），渲染器画在文字之下。
         val bgs = rawBgs?.map {

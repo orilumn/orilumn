@@ -178,11 +178,23 @@ object ReaderMath {
     }
 
     /**
-     * P4-c2u: 页内点按的对齐锚点 Y（复刻 [ReaderPageCanvas]：行/图/背景三者最小 —
-     * 只取行最小会让行窗内首图跑到屏外）。任一为 null 即忽略；全空回 null（调用方退回三区行为）。
+     * 页内绘制/点按的对齐锚点 Y —— **只由行内容（文本行、插图）决定**，盒背景/边框不参与。
+     *
+     * 为什么不能取「行/图/背景三者最小」（曾经的写法）：页栅格的尺寸恰为 `contentW × contentH`，
+     * 即**分页帧**（`Paginator.fillWholeLines` 从切片首行顶量起，保证
+     * `getLineBottom(末行) − getLineTop(首行) ≤ contentH`）。而 [orilumn.reader.engine.laying.BoxDrawer]
+     * 对本页内起始的箱子**有意**放宽到 border-box（见 `BoxDrawerPageBandTest`「页首起块顶 padding 不裁」），
+     * 于是盒背景的 yTop 可以比本页首行更靠上（真机：`.fm-sidebar-block` 的 padding-top 10 +
+     * 首子块 `.fm-sidebar-title` 的 margin-top 65.5 + padding-top 15 ≈ 91px）。一旦把这种**装饰**
+     * 算进锚点，整页被下推 91px，末行落到栅格外被裁 →「最后一行只显示半行」。
+     *
+     * 对齐口径与页底装饰对称：页外延伸的盒装饰由栅格边界自然裁掉即可，**绝不移动锚点**。
+     * 行/图仍取最小：纯图页（无文本行）以首图为基准，而插图单独占行时它可能比其后首个文本行更靠上。
+     * 背景只在**行与图都缺**（如只有盒背景的页）时兜底，避免整页空白。任一为 null 即忽略；
+     * 全空回 null（调用方退回三区行为）。
      */
     fun pageAnchorY(lineMin: Int?, imgMin: Int?, bgMin: Int?): Int? =
-        listOfNotNull(lineMin, imgMin, bgMin).minOrNull()
+        listOfNotNull(lineMin, imgMin).minOrNull() ?: bgMin
 
     /**
      * P4-c2u: 点按行命中（纯几何）：点按 (tapX, tapY) → (行, 段落内 x, 行内 y)，供字形反查。

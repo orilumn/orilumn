@@ -200,13 +200,15 @@ internal suspend fun prerasterPage(
         return false
     }
 
-    // 与 ReaderPageCanvas 同款对齐：章节绝对 Y → 页坐标系。
+    // 与 ReaderPageCanvas 同款对齐：章节绝对 Y → 页坐标系，单一来源见 ReaderMath.pageAnchorY
+    //（盒背景/边框不进锚点，理由见该函数 KDoc）。
     val imgs = pageImages.takeIf { it.isNotEmpty() }
     val rawBgs = pageBackgrounds.takeIf { it.isNotEmpty() }
-    val lineMin = lines.minOfOrNull { it.yTop }
-    val imgMin = imgs?.minOf { it.yTop }
-    val bgMin = rawBgs?.minOf { it.yTop }
-    val anchorY = listOfNotNull(lineMin, imgMin, bgMin).minOrNull() ?: return false
+    val anchorY = ReaderMath.pageAnchorY(
+        lineMin = lines.minOfOrNull { it.yTop },
+        imgMin = imgs?.minOf { it.yTop },
+        bgMin = rawBgs?.minOf { it.yTop },
+    ) ?: return false
     val shift = anchorY - contentTop.toInt()
     val bgs = rawBgs?.map { it.copy(yTop = it.yTop - shift, yBottom = it.yBottom - shift) }.orEmpty()
     val slots = imgs?.map {

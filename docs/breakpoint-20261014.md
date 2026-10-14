@@ -67,9 +67,22 @@
   - `FONT_SCAN_CACHE_VERSION` 1 → 2（指纹组成变化，主动作废老存档、不必等字体变）。
     **无需 DB 迁移**：指纹仍是 `font_scan_state` 的两列 Long。
 
+## 顺手修复（本轮暴露）：桌面库迁移漏盖章
+
+`5.sqm` 上线后桌面**第二次启动必崩** `table font_scan_state already exists`：
+   `JdbcSqliteDriver` 不像 Android helper 自动维护 `user_version`，而
+   `ShelfStore.openDb()` 的 `old in 1 until current` 分支迁移后**漏盖 `PRAGMA user_version`**
+   ⇒ 5.sqm 建表成功但版本仍停在 5 → 每次启动重跑 → 撞表已存在。
+   **Android 走 SupportSQLiteOpenHelper，不受影响。**
+   修复：①迁移后补盖章；②表齐（`sqlite_master` ⊇ `OrilumnDb.allTableNames()`）但版本落后 ⇒
+   判定为历史漂移、直接盖章不重跑迁移。真实库已验证：`user_version` 5 → 6，
+   日志 `[Orilumn.Shelf] db drift healed: ... stamp -> 6`，复启幂等。
+
 ## 测试状态
 
 四个模块全绿：`:common:jvmTest`、`:engine-skia:jvmTest`、`:desktopApp:test`、`:app:testDebugUnitTest`。
+`desktopApp` 新增 2 例回归：`desktopDbUpgradeStampsUserVersion`（v5 库迁移后盖章 + 复启不崩）、
+`desktopDbDriftWithAllTablesPresentIsHealed`（表齐 + 版本落后 ⇒ 盖章自愈）。
 
 - `:common:jvmTest` ✅（P2 新增 `FontEnvironmentHashTest` 3 例：同树幂等 / 改 mtime 必变 /
   文件增删必变 / 缺根回 0）

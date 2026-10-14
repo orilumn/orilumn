@@ -8,6 +8,7 @@ import orilumn.reader.data.db.BookSort
 import orilumn.reader.data.db.LibraryDb
 import orilumn.reader.data.font.FontLibrary
 import orilumn.reader.db.OrilumnDb
+import orilumn.reader.io.Logger
 import orilumn.reader.ui.reader.ThemePreset
 import orilumn.reader.ui.shelf.ShelfBook
 import orilumn.reader.ui.shelf.ShelfRepository
@@ -112,10 +113,40 @@ class DesktopShelfStore(root: File) : ShelfRepository {
                 repairUnversionedFontTable(driver)
                 runCatching { driver.execute(null, "PRAGMA user_version = $current;", 0) }
             } else if (old in 1 until current) {
-                OrilumnDb.Schema.migrate(driver, old, current)
+                if (allTablesPresent(driver)) {
+                    // 表齐但版本落后：上一次 `migrate` 其实已把表建出来，只是没盖章（旧 openDb 只在
+                    // 建库分支盖章）。此时再跑迁移必撞 "table ... already exists"，直接盖章即自愈。
+                    Logger.w(TAG, "db drift healed: tables complete but user_version=$old, stamp -> $current")
+                } else {
+                    OrilumnDb.Schema.migrate(driver, old, current)
+                }
+                // **迁移后必须自己盖章**：JdbcSqliteDriver 不像 Android helper 自动维护
+                // `user_version`，漏盖则库版本永远停在 old，**每次启动都重跑迁移**，
+                // 第一次之后必然撞 "table ... already exists" 并炸掉整个启动（G 系列故障）。
+                runCatching { driver.execute(null, "PRAGMA user_version = $current;", 0) }
             }
         }
         return LibraryDb(OrilumnDb(driver))
+    }
+
+    /**
+     * 库里是否已具备**全部**已知表（按 `sqlite_master` 查名）。
+     *
+     * 只用于识别「表已建齐、user_version 却没跟上」的历史漂移（见 [openDb] 注释）；
+     * 判列完整性超出所需（漂移只发生在新增表这一档），故不比对列。
+     */
+    private fun allTablesPresent(driver: JdbcSqliteDriver): Boolean {
+        val present = runCatching {
+            driver.executeQuery(
+                null,
+                "SELECT name FROM sqlite_master WHERE type = 'table';",
+                { cursor ->
+                    QueryResult.Value(buildList { while (cursor.next().value) add(cursor.getString(0) ?: "") })
+                },
+                0,
+            ) { }.value
+        }.getOrDefault(emptyList())
+        return present.containsAll(OrilumnDb.allTableNames())
     }
 
     /**
@@ -334,6 +365,7 @@ class DesktopShelfStore(root: File) : ShelfRepository {
     }
 
     private companion object {
+        const val TAG = "Orilumn.Shelf"
         /** 自定义主题预设的键值键（与平板 SharedPreferences 同 key、同 schema）。 */
         const val KEY_THEMES = "theme_presets"
     }

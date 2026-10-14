@@ -235,6 +235,67 @@ class DesktopReaderHostTest {
         assertEquals(true, lib.list().single().hidden)
     }
 
+    /**
+     * 回归：`JdbcSqliteDriver` 不自动维护 `user_version`，迁移后必须自己盖章；否则库版本永远停在
+     * 旧值，**每次启动重跑迁移**，第二次即撞 `table font_scan_state already exists` 直接崩（真实故障）。
+     */
+    @Test
+    fun desktopDbUpgradeStampsUserVersion() = kotlinx.coroutines.runBlocking {
+        val root = tmpRoot()
+        val dbFile = File(root, "orilumn.db")
+        val setup = app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver("jdbc:sqlite:${dbFile.absolutePath}")
+        orilumn.reader.db.OrilumnDb.Schema.create(setup)
+        // 伪装成「P1 之前的 v5 库」：最新表尚未存在，版本停在 5。
+        setup.execute(null, "DROP TABLE font_scan_state;", 0)
+        setup.execute(null, "PRAGMA user_version = 5;", 0)
+        setup.close()
+
+        DesktopShelfStore(root).load()
+        val current = orilumn.reader.db.OrilumnDb.Schema.version
+        assertEquals("迁移后必须盖章到 current", current, readUserVersion(dbFile))
+
+        // 二次打开：版本已对齐，不得再迁移（旧实现在此抛 already exists）。
+        DesktopShelfStore(root).load()
+        assertEquals(current, readUserVersion(dbFile))
+    }
+
+    /**
+     * 漂移自愈：上一次迁移已建表但漏盖章（表齐、版本落后）。此时不得重跑迁移，
+     * 直接盖章复位即可。
+     */
+    @Test
+    fun desktopDbDriftWithAllTablesPresentIsHealed() = kotlinx.coroutines.runBlocking {
+        val root = tmpRoot()
+        val dbFile = File(root, "orilumn.db")
+        val setup = app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver("jdbc:sqlite:${dbFile.absolutePath}")
+        orilumn.reader.db.OrilumnDb.Schema.create(setup)
+        setup.execute(null, "PRAGMA user_version = 5;", 0) // 表齐但版本落后
+        setup.close()
+
+        DesktopShelfStore(root).load()
+        assertEquals(6L, orilumn.reader.db.OrilumnDb.Schema.version) // 守卫：本断言口径
+        assertEquals(
+            "表齐 + 版本落后 ⇒ 直接盖章，不重跑迁移",
+            orilumn.reader.db.OrilumnDb.Schema.version,
+            readUserVersion(dbFile),
+        )
+    }
+
+    private fun readUserVersion(dbFile: File): Long {
+        val driver =
+            app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver("jdbc:sqlite:${dbFile.absolutePath}")
+        return try {
+            driver.executeQuery(
+                null,
+                "PRAGMA user_version;",
+                { cursor -> app.cash.sqldelight.db.QueryResult.Value(if (cursor.next().value) cursor.getLong(0) ?: 0L else 0L) },
+                0,
+            ) { }.value
+        } finally {
+            driver.close()
+        }
+    }
+
     private fun paramHashOf(): Long {
         val profile = orilumn.reader.engine.text.TypographicProfile.build(ReaderSettings.DEFAULT, 1f)
         return orilumn.reader.engine.text.LayoutParamKey.fromProfile(

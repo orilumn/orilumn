@@ -38,7 +38,8 @@ class ShapingSlotsProbeTest {
 
     // 本文件的顶层声明都在 BookDocumentController 类体内（Kotlin 允许成员不缩进），
     // 故与 controller.remainingScanOrder(1) 等既有 probe 同例，走接收者调用。
-    private fun slots(cpu: Int) = controller.shapingSlotsFor(cpu)
+    // 调度重构后公式抽为顶层纯函数（排版与共享池共用一个并行度来源）。
+    private fun slots(cpu: Int) = shapingSlotsFor(cpu)
 
     @Test
     fun `degenerate core counts still get one slot`() {

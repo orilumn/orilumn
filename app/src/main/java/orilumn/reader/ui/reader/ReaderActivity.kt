@@ -246,6 +246,8 @@ class ReaderActivity : ComponentActivity() {
                     TAG,
                     lifecycleScope,
                     imageLoader = imageLoader,
+                    // 调度重构：应用级共享队列（排版与系统级字体扫描同池，翻页/栅格抢占才可能）。
+                    sharedScheduler = orilumn.reader.engine.AppTaskScheduler.scheduler,
                 )
                 c.cacheRoot = this@ReaderActivity.cacheDir.absolutePath.toPath()
                 // 磁盘分页表构建号：发版即 versionCode 递增 → 旧构建的表统一失效（见 PaginationCacheCodec）。

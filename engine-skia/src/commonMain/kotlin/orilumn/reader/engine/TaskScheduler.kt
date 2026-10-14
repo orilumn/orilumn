@@ -155,6 +155,26 @@ class TaskScheduler(
         }
     }
 
+    /**
+     * 按 key **前缀**整域取消（[cancelKey] 的批量形式）：清队列 + 就地取消在跑孪生。
+     *
+     * 用途：调度器提升为**应用级共享**后，单个 [BookDocumentController] 关闭时只能撤自己
+     * 键域内的活（`b1:`/`b2:`/`edge:`/`pre:`/`pg:`），不能像「每书一个池」那样整池
+     * `cancel()`——那会误杀其他书/系统级字体任务。键域前缀是排他命名空间（见各 dispatch 点）。
+     */
+    fun cancelMatchingPrefixes(prefixes: Collection<String>) {
+        if (prefixes.isEmpty()) return
+        scope.launch {
+            mutex.withLock {
+                queue.removeAll { q -> prefixes.any { q.key.startsWith(it) } }
+                for (key in running.keys.toList()) {
+                    if (prefixes.any { key.startsWith(it) }) running[key]?.cancel()
+                }
+                syncKeysLocked()
+            }
+        }
+    }
+
     /** Preempt everything less urgent than [threshold] (greater number = less urgent).
      *  P0 fix: jobs are cancelled in place; map entries (the liveness record) are removed only
      *  by their own finally-block on actual death, so slot accounting never diverges from reality.

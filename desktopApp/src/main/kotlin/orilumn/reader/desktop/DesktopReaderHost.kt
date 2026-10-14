@@ -73,6 +73,8 @@ class DesktopReaderHost(
         logTag = "Orilumn.Desktop",
         scope = hostScope,
         imageLoader = ImageLoader(reader),
+        // 调度重构：应用级共享队列（排版 + 系统级字体扫描同池，抢占才有意义）。
+        sharedScheduler = orilumn.reader.engine.AppTaskScheduler.scheduler,
     ).also {
         it.cacheRoot = cacheRoot?.absolutePath?.toPath()
         it.diskCacheVersion = diskCacheVersion

@@ -111,9 +111,10 @@ const val FONT_SCAN_CACHE_VERSION = 1L
 /** 计算系统字体族名集合的哈希（用于判定系统字体是否变化） */
 fun systemFontFamilyHash(): Long {
     val families = systemFontFamilies()
-    var h: Long = 0x9e3779b97f4a7c15L
+    // 0x9e3779b97f4a7c15（FNV 黄金比例种子）超出 Long.MAX_VALUE，取其二补（两的补码）负字面量。
+    var h: Long = -0x61c8864680b583ebL
     for (f in families) {
-        h ^= f.hashCode().toLong()
+        h = h xor f.hashCode().toLong()
         h *= 1099511628211L
     }
     return h

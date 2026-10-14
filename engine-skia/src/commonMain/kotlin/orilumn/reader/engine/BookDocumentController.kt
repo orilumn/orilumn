@@ -105,6 +105,14 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
     private val backgroundDispatcher: kotlinx.coroutines.CoroutineDispatcher = Dispatchers.Default,
     /** Optional EPUB image loader for `<img>` rendering; null = images fall back to placeholders. */
     private val imageLoader: ImageLoader? = null,
+    /**
+     * **应用级共享队列**（宿主注入 [AppTaskScheduler.scheduler]）。null ⇒ 退回「每书一个池」
+     * （绑定 [bgScope]，[close] 整池取消）——**测试与无宿主场景的兼容默认值**，语义与旧行为一致。
+     *
+     * 注入共享池时，[close] 只撤本控制器键域内的活（[controllerKeyPrefixes]），不惊动
+     * 共享池里的其他书 / 系统级字体任务。
+     */
+    private val sharedScheduler: TaskScheduler? = null,
 ) {
 
     /**
@@ -301,18 +309,6 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         flipDir = 0
     }
 
-    /** 排版槽数（原则 §5）：`max(1, min(2, cpuCount - 2))`。
- *
- *  - `cpuCount - 2`：给 UI / 目标页 / 系统各留一份核。
- *  - **上限 2**：P0 真机实测的拐点（平板：轻页在 0/1/2 并发下耗时持平、无 Skia 锁式崩塌；
- *    重页由内容主导、与槽数无关）。既然加槽买不到速度，就只给 2。
- *  - 下限 1：小核设备退化为串行后台塑形。
- *
- *  抽成纯函数（而非内联在构造器里）是为了能测：3 核一类设备上「减 1」与「减 2」的差别
- *  只有这一个函数能表达清楚，而开发机通常测不出（核数多时被上限夹住）。
- *
- *  @param cpuCount 逻辑核数（[platformCpuCount] 的取值）。 */
-fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
 
 /** P1f/R13: controller-owned background scope (child of the injected [scope]'s Job).
      *  ALL background launches (prefill/B1/B2/prewarm/watchers, scheduler internals) run here so
@@ -328,12 +324,18 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
         openGateWantsB1 = false
         openGateWantsB2 = false
         rollingLaneLock.withLock { rollingLanes.clear() }
+        // 键域取消要先于 bgScope.cancel()：共享池的任务体不在 bgScope 上，不受后者影响。
+        if (sharedScheduler != null) scheduler.cancelMatchingPrefixes(CONTROLLER_KEY_PREFIXES)
         bgScope.cancel()
     }
 
     /** Priority pool for ALL background layout work (P2.1/P2.4: page prefill, prev-chapter bump,
-     *  B1, B2, parse prewarm). P0 spike measurements decided the shape; it is production since P1. */
-    private val scheduler = TaskScheduler(
+     *  B1, B2, parse prewarm). P0 spike measurements decided the shape; it is production since P1.
+     *
+     *  调度重构：宿主注入 [sharedScheduler]（[AppTaskScheduler.scheduler]，应用级单例）后，
+     *  排版与系统级字体扫描共处同一队列；未注入（测试/无宿主）时退回每书一池（绑 [bgScope]，
+     *  [close] 随 [bgScope] 整池取消，旧语义）。 */
+    private val scheduler: TaskScheduler = sharedScheduler ?: TaskScheduler(
         bgScope,
         // 原则 §5：`max(1, cpuCount() - 2)` —— 给 UI / 目标页 / 系统各留一份。**上限 2** 是 P0 真机
         // 实测的拐点（平板：轻页在 0/1/2 并发下耗持平，重页由内容主导、与槽数无关），既然加槽
@@ -344,6 +346,7 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
         // 翻页永不占槽（调用方线程同步跑），槽数只管后台活。
         maxSlots = shapingSlotsFor(platformCpuCount()),
     )
+
 
     /** P4: chapters whose markup + light structure were already prepped, chapter → the paramHash they
      *  were prepped under. A later change of the (paramHash-determining) typography throws it out; the
@@ -1948,6 +1951,15 @@ fun windowPrefillSnapshotForTest(): Triple<Int, Long, Set<Int>>? =
  * 兜底降级回第 7 档，兜底随即被埋进章距序列——这正是"跨章跳过"旧规则想避开的困境，
  * 换个键才是真正的解法。 */
 fun edgeKey(chapter: Int) = "edge:$chapter"
+
+/**
+ * 本控制器在（可能共享的）[TaskScheduler] 中拥有的**全部键域前缀**。
+ *
+ * [BookDocumentController.close] 在调度器为应用级共享时按此整域取消，避免误杀他书/系统任务。
+ * 新增 dispatch 点时**必须同步登记**（键命名见：`b1:` 本章全量、`b2:` 整书章扫描、
+ * `edge:` d=1 章外兜底、`pg:` 邻页装配、`pre:` 解析预热）。
+ */
+private val CONTROLLER_KEY_PREFIXES = listOf("b1:", "b2:", "edge:", "pre:", "pg:")
 
 /** 邻页序列的一项（原则 §3.1）。序列本身是**有序**的，出队次序即优先级次序。 */
 sealed class NeighborItem {

@@ -1,4 +1,4 @@
-name: Build signed release APK
+name: Build & Release
 
 on:
   push:
@@ -10,7 +10,9 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  # Android 签名 APK。历史上这是工作流里唯一的 job，所以叫 `build`；现在四个平台 job
+  # 按平台命名（build-android / build-macos / build-linux / build-windows），它跟着对齐。
+  build-android:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -82,16 +84,6 @@ jobs:
           path: app/build/outputs/apk/release/orilumn-*-android.apk
           if-no-files-found: error
 
-      # 仅打 tag 时把签名 APK 挂到对应 GitHub Release。
-      - name: Attach signed APK to Release
-        if: startsWith(github.ref, 'refs/tags/') && success()
-        uses: softprops/action-gh-release@v2
-        with:
-          name: ${{ github.ref_name }}
-          tag_name: ${{ github.ref_name }}
-          body: 自动构建的签名 APK（由 GitHub Actions 云端编译、tested/签名后发布）。
-          files: app/build/outputs/apk/release/orilumn-*-android.apk
-
   build-macos:
     strategy:
       fail-fast: false
@@ -144,16 +136,6 @@ jobs:
           name: dmg-macos-${{ matrix.arch }}
           path: desktopApp/build/compose/binaries/main/dmg/*.dmg
           if-no-files-found: error
-
-      # 仅打 tag 时把 DMG 挂到对应 GitHub Release（与 APK 同一 Release 下追加文件）。
-      # 未签名：下载后首次打开需右键→打开过 Gatekeeper，自用分发可接受；要公开发行再立项做签名公证。
-      - name: Attach DMG to Release
-        if: startsWith(github.ref, 'refs/tags/') && success()
-        uses: softprops/action-gh-release@v2
-        with:
-          name: ${{ github.ref_name }}
-          tag_name: ${{ github.ref_name }}
-          files: desktopApp/build/compose/binaries/main/dmg/*.dmg
 
   build-linux:
     runs-on: ubuntu-latest
@@ -253,18 +235,6 @@ jobs:
           path: desktopApp/build/compose/binaries/main/appimage/*.AppImage
           if-no-files-found: error
 
-      # 仅打 tag 时把 deb/rpm/AppImage 挂到对应 GitHub Release（与 APK/DMG 同一 Release 下追加文件）。
-      - name: Attach Linux packages to Release
-        if: startsWith(github.ref, 'refs/tags/') && success()
-        uses: softprops/action-gh-release@v2
-        with:
-          name: ${{ github.ref_name }}
-          tag_name: ${{ github.ref_name }}
-          files: |
-            desktopApp/build/compose/binaries/main/deb/*.deb
-            desktopApp/build/compose/binaries/main/rpm/*.rpm
-            desktopApp/build/compose/binaries/main/appimage/*.AppImage
-
   build-windows:
     runs-on: windows-latest
     # Windows runner 默认 pwsh；下面的 sed/循环用 bash（Git Bash），故显式指定。
@@ -311,11 +281,42 @@ jobs:
           path: desktopApp/build/compose/binaries/main/msi/*.msi
           if-no-files-found: error
 
-      # 未签名：SmartScreen 会拦一次（更多信息→仍要运行），自用分发可接受；要公开发行再立项做签名。
-      - name: Attach MSI to Release
-        if: startsWith(github.ref, 'refs/tags/') && success()
+  # Release 附件收口到这一个 job —— 全流程里**唯一一次创建 Release**。
+  #
+  # 注意：Windows MSI 与 macOS DMG 至今未签名（SmartScreen 拦一次 / Gatekeeper 需右键打开），
+  # 自用分发可接受；要公开发行再立项做代码签名与公证。
+  #
+  # 以前是四个构建 job 各自 softprops「没有就建、有就追加」：「先查后建」不是原子操作，
+  # 两个 job 同时查到「还没有」就同时去建，后者必得 422 already_exists —— v0.4.3 的签名 APK
+  # 就这么丢过（构建成功、artifact 上传成功，只有「挂到 Release」那步红）。创建只有一处后，
+  # 竞态在结构上消失，不再靠时序运气。
+  # 顺带修掉：Release 说明（body）原先只由 APK job 写，它一失败 body 就是 null。
+  release:
+    # 只在打 tag 时出 Release（workflow_dispatch 干跑不建 Release，与原行为一致）；
+    # needs + !cancelled()：某个平台构建失败也照样发布其余已成功的产物，而不是整个 Release 缺席。
+    if: ${{ startsWith(github.ref, 'refs/tags/') && !cancelled() }}
+    needs: [build-android, build-macos, build-linux, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      # 四个构建 job 都已把成品作为 artifact 上传（全场景上传，不限 tag），这里一次性合并下载。
+      # 每个 artifact 内就是那个改好名的成品文件，merge-multiple 后平铺在 dist/ 下。
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Attach all packages to Release
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
-          files: desktopApp/build/compose/binaries/main/msi/*.msi
+          # 附件全部取自合并下载的 artifact（dist/），不再回头读各 job 的构建产物目录。
+          files: dist/**
+          body: |
+            自动构建的产物（GitHub Actions 云端编译）。
+
+            - Android（已签名）：`orilumn-<版本>-android.apk`
+            - Windows：`Orilumn-<版本>-windows-x64.msi`（未签名，SmartScreen 会拦一次：更多信息 → 仍要运行）
+            - macOS：`Orilumn-<版本>-macos-arm64.dmg` / `-macos-x64.dmg`（未签名，首次打开需右键 → 打开）
+            - Linux：`Orilumn-<版本>-linux-x64.deb` / `.rpm` / `.AppImage`

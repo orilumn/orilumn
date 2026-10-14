@@ -75,6 +75,9 @@ inline-important 41`，`UA 10 / UA-important 50`；读者三层**严格夹在 41
    不一致直接 `exit 1`。**只改 tag 名不打版本，Release workflow 必红。**
 2. **打 tag 前先提一个 bump 提交**：`orilumn.versionName` 递增到与 tag 相同的值，
    `app/build.gradle.kts` 的 `versionCode` 同步 `+1`，且 tag 落在该 bump 提交上。
+   **同一个 bump 提交里必须把 `CHANGELOG.md` 的「未发布」段落实化为 `<版本号> - <日期>`**
+   （自 0.4.3 起记录用户可见变更，之前版本不追述；只写读者/用户能感知的条目，
+   内部重构、测试与文档修订不进 CHANGELOG）。
    `versionCode` 的用途见该文件注释：分页失效的实际保障是 `common` 的 `LAYOUT_VERSION`
    引擎源码指纹，它只是「发版时把旧分页表全量作废一次」的兜底（生产额外成本 0）。
 3. **`orilumn.versionName` 是版本号唯一来源**（`app` 与 `desktopApp` 共读），它同时决定

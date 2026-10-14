@@ -28,6 +28,7 @@ class LibraryDb(db: OrilumnDb) {
     private val books = db.booksQueries
     private val progress = db.readingStatesQueries
     private val fonts = db.fontFacesQueries
+    private val fontScan = db.fontScanStateQueries
 
     fun observeBooks(sort: BookSort = BookSort.Added): Flow<List<Book>> {
         val flow = when (sort) {
@@ -231,6 +232,17 @@ class LibraryDb(db: OrilumnDb) {
         }
     }
 
+
+    // ---- 字体扫描指纹（P1） ----
+
+    suspend fun fontScanState(): Pair<Long, Long>? = withContext(Dispatchers.IO) {
+        fontScan.getState().executeAsOneOrNull()?.let { it.cacheSchemaVersion to it.familyHash }
+    }
+
+    suspend fun saveFontScanState(cacheSchemaVersion: Long, familyHash: Long, updatedAt: Long = System.currentTimeMillis()) =
+        withContext(Dispatchers.IO) {
+            fontScan.upsertState(cacheSchemaVersion, familyHash, updatedAt)
+        }
     private fun orilumn.reader.db.Books.toBook(): Book = Book(
         id = id,
         title = title,

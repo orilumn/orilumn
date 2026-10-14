@@ -1,29 +1,68 @@
-# 断点：P0 已完成，P1 待续
+# 断点：P0 + P1（字体发现三层次 + 应用级调度）已完成
 
-时间：Wed Oct 14 2026
+时间：Wed Oct 14 2026 ｜ 分支：`fix/platform-consistency`
 
-## 已提交（fix/platform-consistency）
-- 9c6f826 P0-1: prepareRelayout/prepareRelayoutLight 判空提前到副作用之前
-- 1873205 P0-2: 从开书路径摘掉字体扫描（ReaderView/ReaderActivity）
-- 5920ca5 P0-3: TaskScheduler 新增 PRIO_FONT_DEMAND=5、PRIO_FONT_SCAN=45
+## 已提交
 
-## 改动文件
-- engine-skia/src/commonMain/kotlin/orilumn/reader/engine/BookDocumentController.kt
-- engine-skia/src/commonMain/kotlin/orilumn/reader/engine/TaskScheduler.kt
-- desktopApp/src/main/kotlin/orilumn/reader/desktop/ReaderView.kt
-- app/src/main/java/orilumn/reader/ui/reader/ReaderActivity.kt
+- P0-1 `9c6f826` prepareRelayout/prepareRelayoutLight 判空提前到副作用之前
+- P0-2 `1873205` 从开书路径摘掉字体扫描（ReaderView / ReaderActivity）
+- P0-3 `5920ca5` TaskScheduler 新增 `PRIO_FONT_DEMAND=5`、`PRIO_FONT_SCAN=45`
+- P1-1a `14c238b` `font_scan_state` 表
+- P1-1b `e9371e2` 5.sqm 迁移
+- P1-2 `72210d8` SystemFonts 新增 `FONT_SCAN_CACHE_VERSION` + `systemFontFamilyHash`
+- P1-3a `38aa1af` LibraryDb 指纹读写
+- P1-3b `211f0de` FontLibrary 指纹代理- Stage A `c01d63b` TaskScheduler 提升为应用级（`AppTaskScheduler`、`sharedScheduler` 注入、
+  `close()` 键域取消 `cancelMatchingPrefixes`、`shapingSlotsFor` 顶层化）
+- **Stage B `79a64aa`** 扫描编排 `SystemFontScanner` + 逐族落库 + 枚举注入端口 + 桌面
+  `NameTableChineseNames` 逐族增量发布
+- **Stage C `6cb03b9`** 宿主接线：启动检测 + 面板需求模式（Android / 桌面）
 
-## 下步（P1：字体发现三层次，按方案 §2-§5）
-1. **FontLibrary/LibraryDb**：增加族名指纹（cacheSchemaVersion + familyHash）用于判定系统字体是否变化（指纹 = `(cacheSchemaVersion, hash(sorted(systemFontFamilies())))`，方案 §2.1）
-2. **engine-skia SystemFonts**：暴露族名集合计算与指纹计算
-3. **排版层（上）BookDocumentController/宿主**：启动一次性检测（app 启动时只检测一次，@Volatile once 门控）→ 指纹变才进 TaskScheduler 提交 `fontscan`（prio=45）；指纹不变什么都不做（方案 §2.2）
-4. **面板可见性驱动**：面板打开 → 同键 `fontscan` 提档到 `PRIO_FONT_DEMAND=5`（同键重提已由 TaskScheduler 支持），面板关闭 → 降回 `PRIO_FONT_SCAN=45` 或 `cancelKey`（方案 §2.4、§3.4）
-5. **字体扫描任务编排进 TaskScheduler**：逐族落成果（每完成一族即提交进 DB/指纹，抗抢占续跑），面板随每族完成增量刷新（方案 §3.3）
-6. **平板端 ReaderActivity 启动检测时机、桌面端 Main/宿主启动检测时机**（方案 §5 分层）
+## 实现落点（相对方案 §5 表的两处偏差，均同层）
 
-## 测试状态（engine-skia jvmTest）
-- tests=129, failures=1, skipped=1, errors=0
-- 主要失败是 Gradle Test Run 的环境性问题（非单个用例失败统计异常）；单个用例统计显示绝大多通过。改动未触及排版算法主路径。
+1. 扫描编排**未塞进 `BookDocumentController`**，另建
+   `engine-skia/.../engine/SystemFontScanner.kt`（同在排版层·上）。控制器是「每书」对象，
+   字体扫描是「应用级」任务，混在一起会让共享池的注入语义更绕；独立类也让注入端口干净。
+2. 触发点是 `detected` 门闩 + 面板可见性，**未新增 Application 类**（工程无自定义
+   `Application`；Android 侧挂在 `MainActivity`/`ReaderActivity` `onCreate`，桌面侧挂
+   `Main.kt` 的 `store.load()` 之后）。
 
-## 备注
-- 本次改动最小（P0），每步提交。测试耗时较长，先在此断点，明天从 P1-1 开始。
+## 关键语义（已落地，均见代码注释）
+
+- **开书零字体任务**：桌面 `ReaderView` 开书只 `fontLibrary.list()` DB 直读；Android
+  `loadPanelFonts` 只读 DB。扫描改由「启动检测 / 面板可见性」驱动。
+- **指纹** = `(FONT_SCAN_CACHE_VERSION, hash(sorted(systemFontFamilies())))`；启动只枚举族名比指纹。
+- **需求模式** = 面板可见性 → 同键 `fontscan` 提/降档 5/45（同键重提＝改优先级，无需调度器新 API）。
+- **抗抢占续跑**：逐族落库 + 进程内 `scannedFamilies`；面板可见时被 `cancelLowerThan(0)`
+  （翻页）/`cancelForRaster(0)`（栅格）砍掉会**自动重提**续跑（代次门 `generation` 防提/降档互踢）。
+  面板不可见时不自动重提，等下一次触发（面板打开 / 下次启动）。
+- **面板增量刷新**：可更换的 `SystemFontScanner.onFamilyScanned`（打开时装、关闭/离视图时卸），
+  每族落库后台线程调用，壳负责切主线程重读 DB。
+- **单例理由**：`detected` 与 `scannedFamilies` 必须跨 Activity/视图切换保留（`AndroidFontScan`
+  / `DesktopFontScan`，均用 `applicationContext` / 进程 store，不持 UI 引用）。
+
+## 测试状态
+
+- `:common:jvmTest` ✅
+- `:desktopApp:test` ✅（新增 `SystemFontScannerProbeTest` 4 例：启动检测跳过/需求模式实扫/
+  抢占续跑不重扫已完成族/收尾清孤儿；真 SQLite 内存库 + 注入假枚举端口）
+- `:engine-skia:jvmTest` 387 例，**1 例预存在失败**：
+  `FontPoolGenerationTest > same measurer sees new pool faces without reopen`
+  （`java.io.FileNotFoundException` 读 `/private/var/folders/.../GenTestFam` 测试字体，环境缺文件，
+  与本次改动无关）
+- `:app:testDebugUnitTest` **1 例预存在失败**：
+  `CrossChapterPreflightProbeTest > a flip landing prewarms both neighbors...`
+  （`TimeoutCancellationException` 15s）。已用干净 HEAD + `git stash -u` 复现，确认**非本次改动引入**。
+
+## 已知遗留 / 下一步
+
+1. **只认族名指纹**（方案 §8-2）：同族名换文件（改 name 表、族名不变）检测不到，P2 可加文件 mtime 加固。
+2. **首启冷库 + 立刻开面板**（方案 §8-3/§8-6）：可能与锚页落位短暂争锁；常态库热不扫。
+   「首启额外预扫一次」是否要做，待拍板。
+3. `NameTableChineseNames.chineseNameOf` 现按需逐族缓存，**无整表预热**；若有调用方需要
+   「一次拿全量」，需另开方法（当前无调用方）。
+4. Android 本地化名链（`FontRepository.systemFontLocalizedNames`）改为进程内缓存一次；
+   `/system/fonts` 首扫成本落在首次 `localizedNames` 调用（被指纹门闩限制在「字体变了」那次）。
+4b. 扫描任务的**进度态**（已 N / 共 M 族）尚未接到 UI——方案 §2.4「显示真实进度」的 UI 部分未做，
+   数据侧（逐族回调 + 逐族落库）已就绪。
+5. 装机验证：需 `./gradlew :app:assembleDebug` 后真机跑，看落盘日志
+   `Orilumn.FontScan` / `Orilumn.SPIKE` 里 `fontscan` 与锚页 `LARGE-ANCHOR` 无重叠。

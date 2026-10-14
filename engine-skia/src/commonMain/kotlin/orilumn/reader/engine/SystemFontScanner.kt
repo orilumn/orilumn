@@ -29,6 +29,13 @@ class SystemFontSource(
     val facesFor: (String) -> List<SystemFontFace> = ::systemFontFacesFor,
     /** 族名集合哈希（指纹的一半）。 */
     val familyHash: () -> Long = ::systemFontFamilyHash,
+    /**
+     * **字体文件环境哈希**（指纹的另一半，§8-2 加固）：平台字体文件「路径 + 大小 + mtime」哈希，
+     * 用于检测「族名不变、文件被换」（同族名重打包 / OTA 更新系统字体）。默认 `0L` = 无环境信息
+     * （纯族名指纹）——测试与未接平台的宿主零改动。宿主传入
+     * [orilumn.reader.data.font.fontFilesEnvironmentHash] 按平台根目录计算。
+     */
+    val environmentHash: () -> Long = { 0L },
     /** 缓存 schema 版本：本地化名推导逻辑变更时递增以主动作废。 */
     val cacheVersion: Long = FONT_SCAN_CACHE_VERSION,
 )
@@ -42,7 +49,8 @@ class SystemFontSource(
  *    （[FontLibrary.syncSystemFamily]，②③贵）+ 收尾清孤儿（[FontLibrary.pruneMissingSystemFamilies]）
  *    → 写指纹。**逐族提交**是抗抢占续跑与面板增量刷新的同一机制（方案 §3.3）。
  *  - **层次二 · 阅读期变化检测**：每次进程启动**只检测一次**（廉价族名枚举 + 比指纹），
- *    指纹变才提交扫描（档 [TaskScheduler.PRIO_FONT_SCAN]）。
+ *    指纹变才提交扫描（档 [TaskScheduler.PRIO_FONT_SCAN]）。指纹 = 族名哈希
+ *    ⊕ [SystemFontSource.environmentHash]（§8-2：族名不变但字体文件被换也判为「变」）。
  *  - **层次三 · 导入**：不进调度（用户直接动作，调用方立即刷新）。
  *
  * 需求模式（方案 §2.4、§3.4）：面板可见 ⇒ 同键 `fontscan` 提档到
@@ -61,6 +69,7 @@ class SystemFontSource(
  * @param source 平台枚举端口（[SystemFontSource]，默认真程序系统枚举；测试可注入）。
  *
  * 面板增量刷新经可更换的 [onFamilyScanned] 回调接入（面板打开时装、关闭时卸）。
+ * 回调带 `(done, total)` 族数——面板据此显示「已 N / 共 M 族」实时进度（方案 §2.4）。
  */
 class SystemFontScanner(
     private val library: FontLibrary,
@@ -76,11 +85,14 @@ class SystemFontScanner(
     }
 
     /**
-     * 每族落库回调（**可更换**）：面板打开时装上（增量刷新列表）、关闭时卸下。
+     * 每族落库回调（**可更换**）：面板打开时装上（增量刷新列表 + 显示进度）、关闭时卸下。
      * 在扫描任务线程（后台）调用，壳负责切回主线程。可变是为了让应用级单例扫描器
      * 服务「当前这台设备上唯一打开的」那个面板，而无需把 UI 引用塞进构造器。
+     *
+     * @param done 本轮已落库族数（含被抢占续跑前已完成的），随每族完成递增。
+     * @param total 本轮枚举到的族总数（`source.families().size`）。
      */
-    var onFamilyScanned: suspend () -> Unit = {}
+    var onFamilyScanned: suspend (done: Int, total: Int) -> Unit = { _, _ -> }
 
     /** 非挂起门（[SyncLock]）：保护 [scannedFamilies]/[scannedFingerprint]/[scanning]/[generation]。 */
     private val gate = SyncLock()
@@ -186,8 +198,8 @@ class SystemFontScanner(
                 val faces = source.facesFor(family)
                 val localized = localizedNames(listOf(family))
                 library.syncSystemFamily(faces, localized)
-                gate.withLock { scannedFamilies.add(family) }
-                notifyFamilyScanned()
+                val done = gate.withLock { scannedFamilies.add(family); scannedFamilies.size }
+                notifyFamilyScanned(done, families.size)
             }
             // 收尾：删除本次全量枚举里已不存在的族残留行（空集合短路，平台失败不清库）+ 写指纹。
             library.pruneMissingSystemFamilies(families)
@@ -208,10 +220,10 @@ class SystemFontScanner(
         }
     }
 
-    /** 面板增量刷新回调：UI 回调自身不该中断扫描，但要放行取消（否则吞掉抢占）。 */
-    private suspend fun notifyFamilyScanned() {
+    /** 面板增量刷新/进度回调：UI 回调自身不该中断扫描，但要放行取消（否则吞掉抢占）。 */
+    private suspend fun notifyFamilyScanned(done: Int, total: Int) {
         try {
-            onFamilyScanned()
+            onFamilyScanned(done, total)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
@@ -219,9 +231,12 @@ class SystemFontScanner(
         }
     }
 
-    /** 当前指纹 =（缓存 schema 版本，族名集合哈希）。 */
+    /**
+     * 当前指纹 =（缓存 schema 版本，族名哈希 ⊕ 字体文件环境哈希）。
+     * 环境哈希默认 `0L` ⇒ `a xor 0 == a`，等价旧「纯族名」指纹（未接平台/测试零改动）。
+     */
     private fun currentFingerprint(): Pair<Long, Long> =
-        source.cacheVersion to source.familyHash()
+        source.cacheVersion to (source.familyHash() xor source.environmentHash())
 
     /** 已存档指纹；无 / 读失败回 null（视作「变」）。 */
     private suspend fun storedFingerprint(): Pair<Long, Long>? =

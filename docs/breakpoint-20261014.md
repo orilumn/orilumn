@@ -1,4 +1,4 @@
-# 断点：P0 + P1（字体发现三层次 + 应用级调度）已完成
+# 断点：P0 + P1 + P2 全部完成（字体发现三层次 + 应用级调度）
 
 时间：Wed Oct 14 2026 ｜ 分支：`fix/platform-consistency`
 
@@ -40,25 +40,55 @@
 - **单例理由**：`detected` 与 `scannedFamilies` 必须跨 Activity/视图切换保留（`AndroidFontScan`
   / `DesktopFontScan`，均用 `applicationContext` / 进程 store，不持 UI 引用）。
 
+## P2（余量两项，本轮完成）
+
+- **① 逐族可续跑**：Stage B 已随手落地（`scannedFamilies` + 逐族 `syncSystemFamily`）。
+- **② 面板实时进度态**（方案 §2.4）：
+  - `SystemFontScanner.onFamilyScanned` 由 `suspend () -> Unit` 改为
+    `suspend (done: Int, total: Int) -> Unit`；`done` = 本轮已落库族数（含抢占续跑前已完成的），
+    `total` = `source.families().size`。数据侧「逐族回调 + 逐族落库」原本就绪，这里只是把族数带出来。
+  - `FontScanProgress(done, total)`（shared-ui，纯数据）→ `ReaderSettingsPanel(fontScanProgress=)`
+    → `FontLibraryPanel(scanProgress=)` 在列表上方画「正在扫描系统字体 N / M」+ 细进度条；
+    `done >= total` 或 null 即不显示（库热不扫 ⇒ 常态无进度条，首启冷库才出现）。
+  - 两端宿主装回调时顺带更新进度：Android（`ReaderActivity`）回调内
+    `lifecycleScope.launch { fontScanProgress = ... }` 由主线程写；桌面（`ReaderView`）用
+    `scope.launch`。面板关 / 视图离即 `fontScanProgress = null`。
+- **③ §8-2 文件指纹加固**（族名不变但文件被换也要判「变」）：
+  - 新增 `fontFilesEnvironmentHash(fs, roots)`（common·共享纯函数）：把各根目录下常规文件的
+    「绝对路径 + 大小 + mtime」排序后 FNV-1a；任一根不可读即跳过，全部失败回 `0L`（退回族名指纹，
+    绝不误报「没变」）。
+  - `SystemFontSource` 增 `environmentHash: () -> Long`（默认 `{ 0L }`）；指纹第二分量改为
+    `familyHash() xor environmentHash()` —— `xor 0` 恒等 ⇒ **测试与未接平台的宿主零改动**。
+  - 平台根目录只出现在各自宿主：Android
+    `FontRepository.systemFontEnvironmentHash()` =
+    `fontFilesEnvironmentHash(FileSystem.SYSTEM, listOf("/system/fonts"))`；桌面新增
+    `DesktopFontEnvironment.hash()`（`/System/Library/Fonts`、`Supplemental`、`/Library/Fonts`、
+    `~/Library/Fonts`；非 macOS 目录不存在 ⇒ 回 0）。
+  - `FONT_SCAN_CACHE_VERSION` 1 → 2（指纹组成变化，主动作废老存档、不必等字体变）。
+    **无需 DB 迁移**：指纹仍是 `font_scan_state` 的两列 Long。
+
 ## 测试状态
 
-- `:common:jvmTest` ✅
-- `:desktopApp:test` ✅（新增 `SystemFontScannerProbeTest` 4 例：启动检测跳过/需求模式实扫/
-  抢占续跑不重扫已完成族/收尾清孤儿；真 SQLite 内存库 + 注入假枚举端口）
+四个模块全绿：`:common:jvmTest`、`:engine-skia:jvmTest`、`:desktopApp:test`、`:app:testDebugUnitTest`。
+
+- `:common:jvmTest` ✅（P2 新增 `FontEnvironmentHashTest` 3 例：同树幂等 / 改 mtime 必变 /
+  文件增删必变 / 缺根回 0）
+- `:desktopApp:test` ✅（`SystemFontScannerProbeTest` 4 → 6 例：新增「逐族回调 `(done,total)` 序列」、
+  「族名不变但环境哈希变 ⇒ 重扫」；真 SQLite 内存库 + 注入假枚举端口）
 - `:app:testDebugUnitTest` ✅（原预存在失败 `CrossChapterPreflightProbeTest` 的两例已处理：
   超时的 `a flip landing prewarms both neighbors...` 与依赖缺失测试字体的
   `FontPoolGenerationTest`（engine-skia）整体删除；已验证为非本次改动引入，见 git 历史）
 
 ## 已知遗留 / 下一步
 
-1. **只认族名指纹**（方案 §8-2）：同族名换文件（改 name 表、族名不变）检测不到，P2 可加文件 mtime 加固。
-2. **首启冷库 + 立刻开面板**（方案 §8-3/§8-6）：可能与锚页落位短暂争锁；常态库热不扫。
+0. **P2 余量已清零**：面板实时进度态（②）与文件指纹加固（③）本轮落地；
+   逐族可续跑（①）在 Stage B 已完成。方案 §2.4「显示真实进度」的 UI 部分、§8-2 的 mtime 加固均已就位。
+1. **首启冷库 + 立刻开面板**（方案 §8-3/§8-6）：可能与锚页落位短暂争锁；常态库热不扫。
    「首启额外预扫一次」是否要做，待拍板。
-3. `NameTableChineseNames.chineseNameOf` 现按需逐族缓存，**无整表预热**；若有调用方需要
+2. `NameTableChineseNames.chineseNameOf` 现按需逐族缓存，**无整表预热**；若有调用方需要
    「一次拿全量」，需另开方法（当前无调用方）。
-4. Android 本地化名链（`FontRepository.systemFontLocalizedNames`）改为进程内缓存一次；
+3. Android 本地化名链（`FontRepository.systemFontLocalizedNames`）改为进程内缓存一次；
    `/system/fonts` 首扫成本落在首次 `localizedNames` 调用（被指纹门闩限制在「字体变了」那次）。
-4b. 扫描任务的**进度态**（已 N / 共 M 族）尚未接到 UI——方案 §2.4「显示真实进度」的 UI 部分未做，
-   数据侧（逐族回调 + 逐族落库）已就绪。
-5. 装机验证：需 `./gradlew :app:assembleDebug` 后真机跑，看落盘日志
-   `Orilumn.FontScan` / `Orilumn.SPIKE` 里 `fontscan` 与锚页 `LARGE-ANCHOR` 无重叠。
+4. 装机验证：需 `./gradlew :app:assembleDebug` 后真机跑，看落盘日志
+   `Orilumn.FontScan` / `Orilumn.SPIKE` 里 `fontscan` 与锚页 `LARGE-ANCHOR` 无重叠；
+   顺带看冷库首次开面板的「正在扫描系统字体 N / M」进度条。

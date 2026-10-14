@@ -3,6 +3,7 @@ package orilumn.reader.desktop
 import orilumn.reader.data.font.FontEntry
 import orilumn.reader.data.settings.BookSettings
 import orilumn.reader.data.settings.ReaderSettings
+import orilumn.reader.ui.reader.FontScanProgress
 import orilumn.reader.ui.reader.ReaderHost
 import orilumn.reader.ui.reader.ReaderPos
 import orilumn.reader.ui.reader.ReaderScreen
@@ -97,6 +98,8 @@ fun ReaderView(
     //   是平板 UI，不进共享）。
     val fontLibrary = remember(store) { store.fontLibrary() }
     var fontEntries by remember(book) { mutableStateOf<List<FontEntry>>(emptyList()) }
+    /** 系统字体扫描实时进度（方案 §2.4）：面板可见且扫描在途时非 null。 */
+    var fontScanProgress by remember(book) { mutableStateOf<FontScanProgress?>(null) }
     fun refreshFonts() = scope.launch(kotlinx.coroutines.Dispatchers.IO) {
         fontEntries = fontLibrary.allEntries(fontLibrary.list())
     }
@@ -266,18 +269,24 @@ fun ReaderView(
         LaunchedEffect(book, session, settingsOpen) {
             val scan = DesktopFontScan.scanner(fontLibrary)
             if (settingsOpen) {
-                // 面板要用：装增量刷新回调（每族落库后重读 DB），再提档。
-                scan.onFamilyScanned = { refreshFonts() }
+                // 面板要用：装增量刷新回调（每族落库后重读 DB + 更新进度），再提档。
+                scan.onFamilyScanned = { done, total ->
+                    scope.launch {
+                        fontScanProgress = if (done < total) FontScanProgress(done, total) else null
+                    }
+                    refreshFonts()
+                }
                 desktopHost?.setSettingsPanelOpen(true)
                 scan.onPanelVisibility(true)
             } else {
                 scan.onPanelVisibility(false)
-                scan.onFamilyScanned = {}
+                scan.onFamilyScanned = { _, _ -> }
+                fontScanProgress = null
             }
         }
         // 扫描器是**进程级单例**：离开本视图（回书架/换书重建）时卸下回调，别让它持有已销毁的组合作用域。
         DisposableEffect(book) {
-            onDispose { DesktopFontScan.scanner(fontLibrary).onFamilyScanned = {} }
+            onDispose { DesktopFontScan.scanner(fontLibrary).onFamilyScanned = { _, _ -> } }
         }
         // 设置驱动的原位重排（R15 两段式，与平板“tick 轻刷新 + 关面板全套”同序）：
         // 第一段 150ms 防抖落位即调（本章轻刷新）；第二段只在面板关闭时跑全套——面板打开
@@ -337,6 +346,7 @@ fun ReaderView(
             // 内容与平板同口径：导入区 + 已导入区全开；
             // 导入经 FileKit（桌面 UI），WiFi 经桌面独写对话框（服务共享），发现链见上（macOS 独有，保留）。
             fontEntries = fontEntries,
+            fontScanProgress = fontScanProgress,
             showImportedSection = true,
             canFontImport = true,
             onFontImport = { fontPicker.launch() },

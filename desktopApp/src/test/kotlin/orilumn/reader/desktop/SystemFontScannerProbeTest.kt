@@ -54,6 +54,10 @@ class SystemFontScannerProbeTest {
     private class FakeSource(families: List<String>) {
         @Volatile
         var families: List<String> = families
+
+        /** 文件环境哈希（§8-2）：默认 0（纯族名指纹）；测试可改以模拟「族名不变、文件被换」。 */
+        @Volatile
+        var environmentHash: Long = 0L
         val facesCalls: MutableList<String> = Collections.synchronizedList(ArrayList())
 
         fun asSource(): SystemFontSource = SystemFontSource(
@@ -63,6 +67,7 @@ class SystemFontScannerProbeTest {
                 listOf(SystemFontFace(f, "Regular"), SystemFontFace(f, "Bold"))
             },
             familyHash = { families.joinToString("|").hashCode().toLong() },
+            environmentHash = { environmentHash },
             cacheVersion = 7L,
         )
     }
@@ -88,7 +93,7 @@ class SystemFontScannerProbeTest {
                 scheduler = TaskScheduler(scope, Dispatchers.Default, 1),
                 source = fake.asSource(),
             )
-            scanner.onFamilyScanned = { callbacks++ }
+            scanner.onFamilyScanned = { _, _ -> callbacks++ }
 
             scanner.detectOnStart()
             awaitTrue("scan must land both families × 2 styles") { lib.list().size == 4 }
@@ -102,6 +107,52 @@ class SystemFontScannerProbeTest {
                 .detectOnStart()
             delay(300)
             assertTrue("unchanged fingerprint must not enumerate faces", fake2.facesCalls.isEmpty())
+        } finally {
+            scope.cancel()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `per-family callback reports running done over total`() = runBlocking {
+        val (lib, dir) = freshLib()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val fake = FakeSource(listOf("FamA", "FamB", "FamC"))
+            val seen = Collections.synchronizedList(ArrayList<Pair<Int, Int>>())
+            val scanner = SystemFontScanner(
+                library = lib,
+                scheduler = TaskScheduler(scope, Dispatchers.Default, 1),
+                source = fake.asSource(),
+            )
+            scanner.onFamilyScanned = { done, total -> seen.add(done to total) }
+
+            scanner.detectOnStart()
+            awaitTrue("all families land") { lib.list().size == 6 }
+            assertEquals("每族回调须带 (已扫, 总数)", listOf(1 to 3, 2 to 3, 3 to 3), seen.toList())
+        } finally {
+            scope.cancel()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `unchanged family names but changed font files still rescan`() = runBlocking {
+        val (lib, dir) = freshLib()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val fake = FakeSource(listOf("FamA", "FamB"))
+            SystemFontScanner(lib, TaskScheduler(scope, Dispatchers.Default, 1), source = fake.asSource())
+                .detectOnStart()
+            awaitTrue("initial scan lands both families") { lib.list().size == 4 }
+            assertEquals(listOf("FamA", "FamB"), fake.facesCalls.toList())
+
+            // 族名集合**不变**，但字体文件被换（环境哈希 0 -> 42）⇒ 指纹变 ⇒ 下次检测必须重扫。
+            val fake2 = FakeSource(listOf("FamA", "FamB")).also { it.environmentHash = 42L }
+            SystemFontScanner(lib, TaskScheduler(scope, Dispatchers.Default, 1), source = fake2.asSource())
+                .detectOnStart()
+            awaitTrue("environment change must trigger a rescan") { fake2.facesCalls.size == 2 }
+            assertEquals(listOf("FamA", "FamB"), fake2.facesCalls.toList())
         } finally {
             scope.cancel()
             dir.deleteRecursively()
@@ -139,7 +190,7 @@ class SystemFontScannerProbeTest {
             val entered = CompletableDeferred<Unit>()
             val release = CompletableDeferred<Unit>()
             val callbacks = AtomicInteger(0)
-            scanner.onFamilyScanned = {
+            scanner.onFamilyScanned = { _, _ ->
                 // 首族落库后卡住扫描（此刻 FamA 已在库 + 已完成族集里），模拟"扫到一半"。
                 if (callbacks.incrementAndGet() == 1) {
                     entered.complete(Unit)

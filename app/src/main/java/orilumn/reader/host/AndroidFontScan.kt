@@ -4,6 +4,7 @@ import android.content.Context
 import orilumn.reader.data.font.FontRepository
 import orilumn.reader.engine.AppTaskScheduler
 import orilumn.reader.engine.SystemFontScanner
+import orilumn.reader.engine.SystemFontSource
 
 /**
  * **Android 字体扫描单例**（进程级）：与桌面 `DesktopFontScan` 同位（方案 §5 分层）。
@@ -44,6 +45,8 @@ object AndroidFontScan {
                     val want = families.toSet()
                     all.filterKeys { it in want }
                 },
+                // §8-2 指纹加固：族名不变但 /system/fonts 文件被换（OTA/重打包）也判「变」。
+                source = SystemFontSource(environmentHash = { repo.systemFontEnvironmentHash() }),
             ).also { scanner = it }
         }
     }

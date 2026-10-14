@@ -125,6 +125,8 @@ class ReaderActivity : ComponentActivity() {
 
     /** 设置面板字库列表（壳自持：开面板同步系统族 + 取全量表；增删改后重载）。 */
     private var fontEntries by mutableStateOf<List<FontEntry>>(emptyList())
+    /** 系统字体扫描实时进度（方案 §2.4）：面板可见且扫描在途时非 null，喂共享面板显示「已 N / 共 M 族」。 */
+    private var fontScanProgress by mutableStateOf<FontScanProgress?>(null)
     /** 自定义阅读主题预设（SharedPreferences 持久化，喂共享面板）。 */
     private var customThemes by mutableStateOf<List<ThemePreset>>(emptyList())
     private lateinit var fontImportLauncher: ActivityResultLauncher<Array<String>>
@@ -394,6 +396,7 @@ class ReaderActivity : ComponentActivity() {
                 visible = settingsOpen,
                 settings = panelSettings,
                 fontEntries = fontEntries,
+                fontScanProgress = fontScanProgress,
                 onDismiss = { closeSettingsPanel() },
                 onPreview = { previewLive(it) },
                 onCommitTypography = { commitSettings(it, typographyChanged = true) },
@@ -465,7 +468,13 @@ class ReaderActivity : ComponentActivity() {
         // 需求模式（方案 §2.4/§3.4，与桌面同式）：面板要用 ⇒ 同键 `fontscan` 提档池顶，
         // 立即实扫；逐族落库回调重读 DB，列表增量长出（库热时指纹没变，什么都不做）。
         val scan = AndroidFontScan.scanner(this)
-        scan.onFamilyScanned = { loadPanelFonts() }
+        scan.onFamilyScanned = { done, total ->
+            // 逐族落库回调：主线程重读 DB 增量刷新列表 + 更新「已 N / 共 M 族」进度（扫完即隐藏）。
+            lifecycleScope.launch {
+                fontScanProgress = if (done < total) FontScanProgress(done, total) else null
+            }
+            loadPanelFonts()
+        }
         lifecycleScope.launch { runCatching { scan.onPanelVisibility(true) } }
         Logger.w(TAG, "open settings panel")
     }
@@ -475,7 +484,8 @@ class ReaderActivity : ComponentActivity() {
         applySystemBars()
         // 需求模式退出：同键 `fontscan` 降回 45 续跑（在途时；已扫完重提是白跑，扫描器内判）。
         val scan = AndroidFontScan.scanner(this)
-        scan.onFamilyScanned = {}
+        scan.onFamilyScanned = { _, _ -> }
+        fontScanProgress = null
         lifecycleScope.launch { runCatching { scan.onPanelVisibility(false) } }
         val c = engine
         val gate = panelGate
@@ -835,7 +845,7 @@ class ReaderActivity : ComponentActivity() {
         // R13: 先落盘再杀后台（close 只停塑形，不管落盘）。
         host?.closeController()
         // 字体扫描是**应用级单例**：卸下本页装的增量刷新回调，避免它持有已销毁的 Activity。
-        AndroidFontScan.scanner(this).onFamilyScanned = {}
+        AndroidFontScan.scanner(this).onFamilyScanned = { _, _ -> }
         super.onDestroy()
     }
 

@@ -119,8 +119,14 @@ private fun styleNameOf(s: FontStyle): String = buildString {
     }
     if (s.slant != FontSlant.UPRIGHT) append(" Italic")
 }
-/** 字体扫描指纹：cacheSchemaVersion + familyHash（sorted(systemFontFamilies())） */
-const val FONT_SCAN_CACHE_VERSION = 1L
+/**
+ * 字体扫描指纹的 schema 版本：**指纹组成变化时递增**以主动作废既有存档（不必等系统字体变）。
+ *
+ * v1 → v2：指纹第二分量由「纯族名哈希」变为「族名哈希 ⊕ 平台字体文件环境哈希
+ * （见 `SystemFontSource.environmentHash` / `fontFilesEnvironmentHash`）」，以检测
+ * 「同族名换文件」（§8-2 加固）。老库存的是 v1 ⇒ 首次启动指纹不匹配、重扫一次。
+ */
+const val FONT_SCAN_CACHE_VERSION = 2L
 
 /** 计算系统字体族名集合的哈希（用于判定系统字体是否变化） */
 fun systemFontFamilyHash(): Long {

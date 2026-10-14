@@ -3,6 +3,7 @@ package orilumn.reader.desktop
 import orilumn.reader.data.font.FontLibrary
 import orilumn.reader.engine.AppTaskScheduler
 import orilumn.reader.engine.SystemFontScanner
+import orilumn.reader.engine.SystemFontSource
 
 /**
  * 桌面**系统字体扫描单例**（进程级，与平板 `AndroidFontScan` 同位，方案 §5 分层）：
@@ -28,6 +29,8 @@ object DesktopFontScan {
                 val coreText = MacFamilyNames.localizedFamilyNames(families)
                 coreText + nameTable // 同键以右侧（name 表）为准
             },
+            // §8-2 指纹加固：族名不变但字体文件被换（重打包/系统更新）也判「变」。
+            source = SystemFontSource(environmentHash = { DesktopFontEnvironment.hash() }),
         ).also { scanner = it }
     }
 }

@@ -22,7 +22,7 @@ object DesktopFontScan {
     fun scanner(library: FontLibrary): SystemFontScanner = scanner ?: synchronized(this) {
         scanner ?: SystemFontScanner(
             library = library,
-            scheduler = orilumn.reader.engine.AppTaskScheduler.scheduler,
+            scheduler = AppTaskScheduler.scheduler,
             localizedNames = { families ->
                 val nameTable = NameTableChineseNames.namesFor(families)
                 val coreText = MacFamilyNames.localizedFamilyNames(families)

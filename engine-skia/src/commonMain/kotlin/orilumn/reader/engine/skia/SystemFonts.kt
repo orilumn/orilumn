@@ -55,6 +55,20 @@ fun systemFontFaces(): List<SystemFontFace> {
     }
 }
 
+/**
+ * 单族字形枚举（[systemFontFaces] 的**逐族**形式）：族名 + 字重名列表，解析不出回落"无字重名"单行。
+ *
+ * 逐族是「抗抢占续跑 + 面板增量刷新」的前提（方案 §3.3）：一次只算一族、落一族，
+ * 被 `cancelLowerThan` 抢占时已完成族已进库，不必从头再来。
+ */
+fun systemFontFacesFor(family: String): List<SystemFontFace> {
+    val f = family.trim()
+    if (f.isEmpty()) return emptyList()
+    val mgr = runCatching { systemFonts() }.getOrNull() ?: return listOf(SystemFontFace(f))
+    val styles = styleNamesOfFamily(mgr, f)
+    return if (styles.isEmpty()) listOf(SystemFontFace(f)) else styles.map { SystemFontFace(f, it) }
+}
+
 /** 单族的字重名列表；解析不出回空（调用方落到"无字重名"单行）。 */
 private fun styleNamesOfFamily(mgr: FontMgr, family: String): List<String> =
     styleNameCache(family) ?: runCatching {

@@ -168,6 +168,20 @@ class FontLibrary(
     /** 统一列表（全量，含隐藏；展示层按 hidden 分区/标态）。 */
     fun allEntries(faces: List<FontFace>): List<FontEntry> = faces.map { it.toEntry() }
 
+    /**
+     * **逐族**系统字形落行（P1 字体发现）：只 upsert 本族 + 清本族改名残留，
+     * 不做「族不再存在」的全局删除（见 [pruneMissingSystemFamilies]）。
+     * 供字体扫描任务逐族提交（抗抢占续跑 + 面板增量刷新）。
+     */
+    suspend fun syncSystemFamily(
+        faces: List<SystemFontFace>,
+        localizedNames: Map<String, String> = emptyMap(),
+    ) = db.syncSystemFamily(faces, localizedNames)
+
+    /** 全量扫描收尾：删除本次枚举里不存在的族残留行（空集合短路）。 */
+    suspend fun pruneMissingSystemFamilies(liveFamilies: Collection<String>) =
+        db.pruneMissingSystemFamilies(liveFamilies)
+
     /** 选择器候选（隐藏过滤）。 */
     fun visibleEntries(faces: List<FontFace>): List<FontEntry> =
         faces.filter { !it.hidden }.map { it.toEntry() }

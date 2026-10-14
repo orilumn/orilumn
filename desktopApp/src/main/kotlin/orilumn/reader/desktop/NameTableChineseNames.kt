@@ -1,7 +1,6 @@
 package orilumn.reader.desktop
 
 import orilumn.reader.data.font.FontParser
-import orilumn.reader.engine.skia.systemFontFamilies
 import orilumn.reader.engine.skia.systemFonts
 import org.jetbrains.skia.FontMgr
 
@@ -11,41 +10,45 @@ import org.jetbrains.skia.FontMgr
  * 均无回退任意含 CJK 记录；不筛简繁，name 表里是什么就显示什么），建立
  * 「拉丁族名（对齐平台枚举键）→ 中文族名」映射。
  *
- * 接入链（ReaderView）：name 表直读 **优先** → 方案A `MacFamilyNames`（CoreText）补缺
+ * 接入链（`DesktopFontScan`）：name 表直读 **优先** → 方案A `MacFamilyNames`（CoreText）补缺
  * → `FontEntry.display` 无本地化名时回退族名本身。
  *
- * 字体发现走 skiko 枚举（[systemFontFamilies] + `matchFamily` + `getTypeface`
+ * 字体发现走 skiko 枚举（[systemFonts] + `matchFamily` + `getTypeface`
  * + `getTableData("name")`，与 engine-skia `styleNameZh` 同一套平台无关 API）：
  * 枚举出的正是阅读器能渲染的字体，macOS（CoreText）/Linux（fontconfig）/
- * Windows（GDI）同一段代码，不读平台字体目录。只读 name 表字节，
- * 进程内缓存一次。
+ * Windows（GDI）同一段代码，不读平台字体目录。
+ *
+ * **逐族增量发布**（方案《字体发现与开书调度方案》§3.3）：旧版「全扫完才 publish」
+ * 在字体扫描任务被翻页抢占时会丢掉全部成果；现改为**每族算完立即入缓存**
+ * （否定结果也缓存，避免重复读表），与字体扫描体的逐族落库同节拍。
  */
 object NameTableChineseNames {
 
     private val parser = FontParser()
 
-    @Volatile private var cache: Map<String, String>? = null
+    private val lock = Any()
 
-    /** 全量映射：拉丁族名 → 中文族名（仅收录 chinese 含 CJK 的族）。扫描一次进程内缓存。 */
-    fun chineseNames(): Map<String, String> = cache ?: synchronized(this) {
-        cache ?: scanAll().also { cache = it }
-    }
+    /** 已探测过的族（含"无中文名"的否定结果）——避免重复读表。 */
+    private val inspected = HashSet<String>()
 
-    /** 只取给定族的映射（供 syncSystemFaces 落 displayName）。 */
-    fun namesFor(families: Collection<String>): Map<String, String> {
-        val all = chineseNames()
-        return families.mapNotNull { fam -> all[fam]?.let { fam to it } }.toMap()
-    }
+    /** 逐族增量发布的成果：拉丁族名 → 中文族名（仅含 CJK 记录）。 */
+    private val names = HashMap<String, String>()
 
-    private fun scanAll(): Map<String, String> = buildMap {
-        val mgr = runCatching { systemFonts() }.getOrNull() ?: return@buildMap
-        for (family in runCatching { systemFontFamilies() }.getOrDefault(emptyList())) {
-            val chinese = chineseOf(mgr, family) ?: continue
-            if (chinese.any { it.code in 0x4E00..0x9FFF } && family !in this) {
-                put(family, chinese)
-            }
+    /**
+     * 单族中文名（**逐族增量发布**）：每族算完立即入缓存，被抢占不丢成果；
+     * 无中文名（含解析失败）记否定结果，避免重复读表。
+     */
+    fun chineseNameOf(family: String): String? = synchronized(lock) {
+        if (family !in inspected) {
+            inspected.add(family)
+            chineseOfUncached(family)?.let { names[family] = it }
         }
+        names[family]
     }
+
+    /** 只取给定族的映射（供扫描体逐族落 displayName）。 */
+    fun namesFor(families: Collection<String>): Map<String, String> =
+        families.mapNotNull { fam -> chineseNameOf(fam)?.let { fam to it } }.toMap()
 
     /**
      * 取一族的中文名：`matchFamily` 命中的首个 typeface 的
@@ -53,14 +56,17 @@ object NameTableChineseNames {
      * 后交 [FontParser.familyNamesOf]（TTC 已由 skiko 按面枚举，无需再拆）。
      * 键用枚举族名（[namesFor] 的查询键）， latin 记录仅作可用性守卫。
      */
-    private fun chineseOf(mgr: FontMgr, family: String): String? = runCatching {
+    private fun chineseOfUncached(family: String): String? = runCatching {
+        val mgr: FontMgr = systemFonts()
         mgr.matchFamily(family)?.use { set ->
             if (set.count() <= 0) return@runCatching null
             set.getTypeface(0)?.use { tf ->
                 tf.getTableData("name")?.use { data ->
                     val table = data.bytes
                     if (table.isEmpty()) return@use null
-                    parser.familyNamesOf(minimalSfnt(table))?.chinese
+                    val chinese = parser.familyNamesOf(minimalSfnt(table))?.chinese ?: return@use null
+                    // 与旧 `scanAll` 同判据：只收录含 CJK 的记录。
+                    if (chinese.any { it.code in 0x4E00..0x9FFF }) chinese else null
                 }
             }
         }

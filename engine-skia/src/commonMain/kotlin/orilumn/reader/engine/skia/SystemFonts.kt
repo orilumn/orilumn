@@ -105,3 +105,16 @@ private fun styleNameOf(s: FontStyle): String = buildString {
     }
     if (s.slant != FontSlant.UPRIGHT) append(" Italic")
 }
+/** 字体扫描指纹：cacheSchemaVersion + familyHash（sorted(systemFontFamilies())） */
+const val FONT_SCAN_CACHE_VERSION = 1L
+
+/** 计算系统字体族名集合的哈希（用于判定系统字体是否变化） */
+fun systemFontFamilyHash(): Long {
+    val families = systemFontFamilies()
+    var h: Long = 0x9e3779b97f4a7c15L
+    for (f in families) {
+        h ^= f.hashCode().toLong()
+        h *= 1099511628211L
+    }
+    return h
+}

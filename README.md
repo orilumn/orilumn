@@ -64,11 +64,12 @@ GitHub Actions 构建。
 
 ### 排版主题与版式
 
-- 内置三套排版主题：**原样 / 现代 / 传统**。原样 = 主题表整张不加载，完全由书作者的 CSS 决定
-  （正文字体、对齐、缩进、段距节奏都是书里怎么写就怎么排）。
-- 现代 / 传统两套各自给一套不可再调的基线预设（正文字体、正文两端对齐、首行缩进、段间距节奏）；
-  读者可调的部分（字号、行距、段距、首行缩进开关）在其之上覆盖。
-- 支持自定义阅读配色预设（保存 / 删除）。
+- 排版主题三档：**原书设置 / 现代模式 / 传统模式**。原书设置 = 主题表整张不加载，完全由书作者的 CSS
+  决定（正文字体、对齐、缩进、段距节奏都是书里怎么写就怎么排）。
+- **现代模式 / 传统模式各自带一套基线预设**（正文字体、正文两端对齐、首行缩进、段间距节奏），读者
+  可调的部分（字号、行距、段距、首行缩进开关）在其之上覆盖。—— 这两档的说明**待完善**。
+- 阅读配色：内置 8 套底色预设（精白 / 象牙白 / 霜色 / 缃色 / 鸭卵青 / 月白 / 粉白 / 丁香），并可
+  自定义配色预设（调背景通道与前景灰度，支持保存 / 删除）。—— 这一段说明**待完善**。
 - 版式可调：正文字号、行距、段间距（疏密百分比）、页边距等。
 
 ### 其他
@@ -77,78 +78,6 @@ GitHub Actions 构建。
 - 分页阅读、跨章翻页、阅读进度记忆与精确恢复。
 - 翻页动画（可关）、亮度与护眼遮罩。
 - 仓库 `books/` 下带若干 EPUB 测试书（公版 / 规范样例），可直接拿来试排版。
-
-## 下载与安装
-
-- **Android**：装 `orilumn-<版本>-android.apk`（需允许安装未知来源应用）。
-- **Linux**
-  - Debian / Ubuntu：`sudo apt install ./Orilumn-<版本>-linux-x64.deb`
-  - Fedora / RHEL 系：`sudo dnf install ./Orilumn-<版本>-linux-x64.rpm`
-  - 任意发行版（免安装）：`chmod +x Orilumn-<版本>-linux-x64.AppImage && ./Orilumn-<版本>-linux-x64.AppImage`
-- **macOS**：打开 `.dmg`，把 Orilumn 拖进「应用程序」。产物**未签名/未公证**，首次打开被 Gatekeeper
-  拦下时右键 →「打开」即可。
-- **Windows**：装 `.msi`（未实测）。
-
-## 构建与运行
-
-要求：**JDK 17+**。桌面机构建还需要 Android SDK（`:common` / `:engine-skia` 含 Android 目标，
-AGP 配置期即要 SDK；cmdline-tools + `platforms;android-36` 即可，不必装 IDE）。
-
-```bash
-export JAVA_HOME=<jdk-17+ 根目录>          # 如 ~/tools/jdk-21
-export ANDROID_HOME=<Android SDK 根目录>    # 如 ~/Android/Sdk
-```
-
-### Android
-
-```bash
-./gradlew :app:installDebug     # 编译并装到已连接设备
-./gradlew :app:assembleDebug    # 只出 APK
-```
-
-### 桌面（macOS / Linux / Windows）
-
-```bash
-./gradlew :desktopApp:run       # 直接跑，无需打包
-```
-
-打包格式按当前 OS 自动选（macOS=DMG，Linux=deb+rpm，Windows=MSI）。打包（`jpackage`/`jlink`）
-需要完整 JDK——Android Studio 自带的 JBR 缺 `jpackage`：
-
-```bash
-./gradlew :desktopApp:packageDeb :desktopApp:packageRpm   # Linux
-./gradlew :desktopApp:createDistributable                 # 便携目录（各平台）
-```
-
-Linux 的单文件 **AppImage** 不在 Gradle 里出（Compose 的 `TargetFormat.AppImage` 只是便携目录），
-由 CI 用 appimagetool 打包；本地要复现可直接调脚本：
-
-```bash
-sh desktopApp/make-appimage.sh \
-  desktopApp/build/compose/binaries/main/app \
-  desktopApp/src/main/resources/icon.png \
-  /tmp/Orilumn-9.9.9-linux-x64.AppImage \
-  /path/to/appimagetool-x86_64.AppImage
-```
-
-### 测试
-
-```bash
-./gradlew :common:jvmTest :engine-skia:jvmTest :shared-ui:jvmTest \
-          :app:testDebugUnitTest :desktopApp:test
-```
-
-## 仓库结构
-
-| 模块 | 职责 |
-|---|---|
-| `common` | 跨平台地基层：分页算法（全量 / 增量）、断行引擎、章节与样式模型、调度 |
-| `engine-skia` | Skia 排版与绘制（几何测量、字体、逐字绘制通路） |
-| `shared-ui` | 两端共享的阅读面与面板（画布、手势、设置、字体管理） |
-| `app` | Android 壳：进程入口、系统能力接缝、打包 |
-| `desktopApp` | 桌面壳（JVM）：入口、文件系统与窗口接缝、打包 |
-
-平台壳只留**进程入口 + expect/actual 接缝 + 打包**三件事，其余逻辑与渲染语义一律共享。
 
 ## License
 

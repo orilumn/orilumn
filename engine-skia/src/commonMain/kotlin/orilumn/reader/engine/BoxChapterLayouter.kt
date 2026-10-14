@@ -229,7 +229,7 @@ class BoxChapterLayouter(
             ?.takeIf { it.isNotEmpty() }
             ?.let { genOfFromStrings(authorSheets, it, engine) { styleMap[it] } }
             ?: genOfFor(markup, authorSheets, { styleMap[it] }, engine, hidden)
-        val structure = boxLayouter.layoutBoxes(markup, contentW, styleMap, classify, imageLoader, chapterHref, genOf = genOf)
+        val structure = boxLayouter.layoutBoxes(markup, contentW, styleMap, classify, imageLoader, chapterHref, genOf = genOf, contentH = contentH)
         val leaves = collectLeaves(structure.boxes)
         return buildPrepareResult(markup, styleMap, structure, leaves, classify, hidden, genOf)
     }
@@ -357,7 +357,11 @@ class BoxChapterLayouter(
         // `hidden` is a cheap closure; it is only exercised later, lazily, during per-block materialization
         // and its display decisions are typography-invariant, so the cached leaf set stays valid.
         val hidden = hiddenCheckFor(engine)
-        LightPrepare(markup, profile, contentW, engine, structure.leaves, structure.globalCharStarts, hidden, imageLoader, chapterHref, structure.leafToBackgroundOwner, structure.leafToBreakInsideAvoidOwner, structure.genStrings, structure.anyFloat, breakerFor(profile))
+        val prepare = LightPrepare(markup, profile, contentW, engine, structure.leaves, structure.globalCharStarts, hidden, imageLoader, chapterHref, structure.leafToBackgroundOwner, structure.leafToBreakInsideAvoidOwner, structure.genStrings, structure.anyFloat, breakerFor(profile), contentH)
+        // P3：预算的测量回调（块自身 border-box 高）。预算定在塑形之前，故这里量出的自然尺寸
+        // 不会被后续按预算的塑形污染（见 `LightPrepare.clusterBlockOwnHeight`）。
+        prepare.clusterBlockOwnHeight = { i -> clusterBlockOwnHeight(prepare, i) }
+        prepare
     }
 
     /** Parses the chapter's author CSS once into [StyleSheet]s (cached in [ChapterStructureCache]).
@@ -591,7 +595,9 @@ class BoxChapterLayouter(
             // P4-a3: 环绕前导随叶下发（与盒流断行同宽，否则 canonical 形状与结构行漂移）。
             shapeLeaf(leaf, prepare.styleMap, profile,
                 listMarkerFor(leaf.el, prepare.styleMap::get, carriers), genOf = prepare.genOf,
-                floatLead = leaf.floatLead, classify = prepare.classify, hidden = prepare.hidden)
+                floatLead = leaf.floatLead, classify = prepare.classify, hidden = prepare.hidden,
+                // P3：重路径的预算已写在盒上（含量画同值）。
+                replaceableFitH = leaf.replaceableFitH)
         }
         return completeFullLayout(prepare, shapes, contentH, profile)
     }
@@ -1547,19 +1553,18 @@ class BoxChapterLayouter(
     ): ForwardedPage? {
         val total = prepare.totalBlocks
         if (startBlock !in 0 until total) return null
-        // LINE-based, MARGIN-AWARE fill from (startBlock, startLine). Accumulate content line heights,
-        // and between consecutive blocks add the inter-block advance `rebuildLocalLines`/emit use:
-        // previous padding/border bottom + the margin-collapse (neighbours take the larger margin). A
-        // page's FIRST block's top margin is excluded (it merges into the page top edge), and a page's
-        // LAST block's bottom margin is excluded (merges into the page bottom edge). Half-blocks on a
-        // page boundary carry no extra margin at the seam.
+        // 本函数**只圈窗口**（本页大致触达哪些块）：按内容行高 + 块间 advance 累加到超出 contentH。
+        // 页尾切点**不在这里决定** —— 它由 `assembleTempPage` 内的 `Paginator.paginateFrom` 给出，
+        // 即临时表与磁盘表/增量窗**同一段**分页代码（旧版在此另写了一份 avoid 块链 + 簇高填充，
+        // 与 canonical 漂移：`pre` 整块后移、目录乱分页、半页空白）。
         val shapes = ArrayList<ParagraphShapeRef>()
         var acc = 0
         var endBlockExclusive = startBlock
-        var cutBlock = -1
-        var cutLine = -1
         var b = startBlock
         var firstInPage = true
+        // 本页已纳入的行数（「游标永不停滞」判据，见下）。
+        var placedLines = 0
+        var full = false
         while (b < total) {
             if (!firstInPage) {
                 // Inter-block gap: prev content-bottom → this content-top.
@@ -1587,25 +1592,52 @@ class BoxChapterLayouter(
             for (k in k0 until s.lineCount) {
                 // Every shaped line is the CSS line box; fill by it so capacity matches drawn pixels.
                 val h = (s.lineBottom(k) - s.lineTop(k)).coerceAtLeast(1)
-                if (acc + h > contentH) { cutBlock = b; cutLine = k; break }
+                // 游标永不停滞（单源口径：重路径 `Paginator.fillWholeLines` 末尾
+                // `if (end == startLine) end = startLine + 1`）——页首行自身就高过整页时**强收这一行**
+                // 并允许它被页面裁掉（oversized block 允许撕裂，与浏览器一致），而不是把切点留在页首行。
+                // 切在页首行会产出 `charStart == charEnd` 且 next == 起点的零前进退化页：前向预填水位
+                // 永不推进（窗口塞满同页副本），翻页原地不动。
+                // 复现：宽屏全屏（版心 4920x2560）下主题 `width:100%` 把 1122x735 的插图拉到 3223 高。
+                if (placedLines > 0 && acc + h > contentH) { full = true; break }
                 acc += h
+                placedLines++
             }
             }
-            if (cutLine >= 0) { endBlockExclusive = b + 1; break }
             endBlockExclusive = b + 1
+            if (full) break
             b++
         }
-        val ecs = if (cutBlock >= 0) {
-            val s = tempShape(cache, prepare, cutBlock, profile)
-            prepare.globalCharStarts[cutBlock].toInt() + (s.lineStart(cutLine) - s.lineStart(0))
-        } else null
-        val page = assembleTempPage(prepare, startBlock, endBlockExclusive, shapes, pageFirstLine = startLine.coerceAtLeast(0), endLineCharStart = ecs, contentH = contentH) {
+        // 窗口取整：切点块所在的 avoid **边链**可能跨出本窗（链尾在后面若干块）。窗口若把链截断，
+        // `PartialDrawableLayout.breakPlan` 就看不到链上后续接口的禁止切点，故沿单源
+        // [BreakClusters.chainRange] 把窗口补到链闭合。这**只是取窗口**，不决定任何页边界。
+        if (endBlockExclusive < total) {
+            val chain = orilumn.reader.engine.laying.BreakClusters.chainRange(
+                endBlockExclusive - 1, startBlock, total,
+                before = { prepare.block(it).breakBefore }, after = { prepare.block(it).breakAfter },
+            )
+            while (endBlockExclusive <= chain.last) {
+                shapes.add(tempShape(cache, prepare, endBlockExclusive, profile))
+                endBlockExclusive++
+            }
+        }
+        // 页尾切点 = `Paginator.paginateFrom`（临时表与磁盘表/增量窗的**同一段**代码）；
+        // `endLineCharStart = null` ⇒ 走整行填充 + 断页规则，而不是把切点钉在某个字符行上。
+        val page = assembleTempPage(prepare, startBlock, endBlockExclusive, shapes, pageFirstLine = startLine.coerceAtLeast(0), endLineCharStart = null, contentH = contentH) {
             tempShape(cache, prepare, it, profile)
         }
         diagPage(contentH, page, "fwd")
-        val nb = if (cutLine >= 0) cutBlock else endBlockExclusive
-        val nl = if (cutLine >= 0) cutLine else 0
-        tempDiag("FWD", "in blk=$startBlock line=$startLine", page, "cut=${if (cutLine >= 0) "blk$cutBlock/line$cutLine" else "-"} next=($nb,$nl)")
+        // 把 `Paginator` 解出的行切点翻回 `(block, line)` 游标（行区间与 `rebuildLocalLines` 同式）。
+        val (lf, ll) = localLineRanges(shapes)
+        var nb = endBlockExclusive
+        var nl = 0
+        for (i in lf.indices) {
+            if (page.slice.lastLineExclusive in lf[i] until ll[i]) {
+                nb = startBlock + i
+                nl = page.slice.lastLineExclusive - lf[i]
+                break
+            }
+        }
+        tempDiag("FWD", "in blk=$startBlock line=$startLine", page, "next=($nb,$nl)")
         return ForwardedPage(page, nb, nl)
     }
 
@@ -1645,8 +1677,20 @@ class BoxChapterLayouter(
         var b = endExclusive - 1
         var firstInPage = true
         var truncated = false
+        // 本页已纳入的行数（「游标永不停滞」判据，见下）。
+        var placedLines = 0
         while (b >= 0) {
             val leaf = prepare.block(b)
+            // P4d：强制断页边（块 b 与 b+1 之间，`always`）⇒ 本页必须在块 b **之前**收盘，
+            // 块 b 归前一页。与 `shapeTempPageForward`、与 canonical 的分段同口径。
+            if (!firstInPage &&
+                orilumn.reader.engine.laying.BreakClusters.isForced(leaf.breakAfter, prepare.block(b + 1).breakBefore)
+            ) {
+                startBlock = b + 1
+                startLine = 0
+                truncated = true
+                break
+            }
             val s = tempShape(cache, prepare, b, profile)
             allShapes.add(0, s)  // prepend — we walk backward, but shapes must stay in visual order
 
@@ -1680,8 +1724,12 @@ class BoxChapterLayouter(
             for (k in (maxLine - 1) downTo 0) {
                 // Every shaped line is the CSS line box; fill by it so capacity matches drawn pixels.
                 val h = (s.lineBottom(k) - s.lineTop(k)).coerceAtLeast(1)
-                if (acc + h > contentH) { overflowLine = k; break }
+                // 与 shapeTempPageForward 同一条「游标永不停滞」guard（单源：重路径 fillWholeLines）：
+                // 页底块自己那一行就高过整页时（宽屏全屏下的超高插图）强收它并允许撕裂，否则
+                // `overflowLine == maxLine - 1` ⇒ `startLine = maxLine` ⇒ 空页/丢块，向前回溯同样卡住。
+                if (placedLines > 0 && acc + h > contentH) { overflowLine = k; break }
                 acc += h
+                placedLines++
             }
             }
             if (overflowLine >= 0) {
@@ -1695,14 +1743,62 @@ class BoxChapterLayouter(
         }
         // If no truncation happened, all blocks from 0..endExclusive-1 fit perfectly.
         if (!truncated) startBlock = 0
-        val shapes = allShapes.takeLast(endExclusive - startBlock)
-        val backPage = assembleTempPage(prepare, startBlock, endExclusive, shapes,
-            pageFirstLine = startLine, endLineCharStart = if (endLineCharStart >= 0) endLineCharStart else null,
+        // P4：页首 = 前一页的切点，故须与 canonical 同源判「这个切点是否合法」——与 canonical 同判据、
+        // 同几何，全部来自单源：窗口先沿 [BreakClusters.chainRange] 取整到 avoid 边链闭合，再用
+        // `PartialDrawableLayout.breakPlan`（= `BreakClusters.plan`）的原子区间 / 禁止切点，由
+        // `Paginator.resolveAvoidCut` 退到前一个合法切点、`Paginator.paginateFrom` 校验「自该切点整行
+        // 填充恰好收到锚点行」（既不溢出也不早停）。旧版自算块链高度，与 canonical 漂移。
+        var pageStartBlock = startBlock
+        var pageStartLine = startLine
+        var shapes = allShapes.takeLast(endExclusive - pageStartBlock)
+        if (truncated && pageStartBlock < endExclusive) {
+            val chain = orilumn.reader.engine.laying.BreakClusters.chainRange(
+                pageStartBlock, 0, endExclusive,
+                before = { prepare.block(it).breakBefore }, after = { prepare.block(it).breakAfter },
+            )
+            if (chain.first < pageStartBlock || pageStartLine > 0) {
+                val below = ArrayList<ParagraphShapeRef>()
+                for (i in chain.first until pageStartBlock) below.add(tempShape(cache, prepare, i, profile))
+                val probeShapes = below + shapes
+                val packStart = below.sumOf { it.lineCount } + pageStartLine
+                val probe = assembleTempPage(
+                    prepare, chain.first, endExclusive, probeShapes, pageFirstLine = packStart,
+                    endLineCharStart = if (endLineCharStart >= 0) endLineCharStart else null, contentH = contentH,
+                ) { tempShape(cache, prepare, it, profile) }
+                val probeAware = probe.layout as? orilumn.reader.engine.paging.BreakAwareBookLayout
+                val probeRanges = probeAware?.avoidSplitRanges ?: emptyList()
+                val probeForbidden = probeAware?.forbiddenCutLines ?: emptySet()
+                // `pageStartLine = -1`：本页页首 = **前一页的切点**，故原子区间首在 0 时也要退到区间首
+                // （而不是把它当成「页首恰为区间首 ⇒ 装到区间尾」）。禁止切点同源一并修正。
+                val adj = Paginator.resolveAvoidCut(
+                    probeRanges, probeForbidden, -1, packStart, contentH,
+                    probe.layout::getLineTop, probe.layout::getLineBottom,
+                )
+                if (adj != packStart) {
+                    val pinned = (0 until probe.layout.lineCount).firstOrNull { probe.layout.getLineStart(it) >= endLineCharStart }
+                        ?: probe.layout.lineCount
+                    val p0 = Paginator.paginateFrom(probe.layout, adj, contentH).firstOrNull()
+                    if (p0 != null && p0.lastLineExclusive == pinned) {
+                        val (lf, ll) = localLineRanges(probeShapes)
+                        for (i in lf.indices) {
+                            if (adj in lf[i] until ll[i]) {
+                                pageStartBlock = chain.first + i
+                                pageStartLine = adj - lf[i]
+                                shapes = probeShapes.takeLast(endExclusive - pageStartBlock)
+                                break
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        val backPage = assembleTempPage(prepare, pageStartBlock, endExclusive, shapes,
+            pageFirstLine = pageStartLine, endLineCharStart = if (endLineCharStart >= 0) endLineCharStart else null,
             contentH = contentH) {
             tempShape(cache, prepare, it, profile)
         }
         tempDiag("BWD", "in endExcl=$endExclusive lineCut=$endLineCharStart", backPage,
-            "truncated=$truncated start=($startBlock,$startLine)")
+            "truncated=$truncated start=($pageStartBlock,$pageStartLine)")
         return backPage
     }
 
@@ -1771,6 +1867,25 @@ class BoxChapterLayouter(
     private var shapeProbe: ShapeProbe? = null
 
     /** Shapes one block's [ParagraphShape] for the temp-page path. */
+    /**
+     * P3：一个块**自身 border-box 高**的自然测量（口径乙 `othersH` 的轻路径口径）。
+     *
+     * 与重路径的 `box.contentBottom - box.contentTop` 同式：正文叶 = 行高和，替换叶 = used 高，
+     * 都再＋自身纵向 padding/border（表格行高由 [shapeLeaf] 内部合成，同式）。
+     *
+     * 塑形**不进共享塑形缓存**：预算定在各叶塑形**之前**，此时若是把自然尺寸的 shape 写进缓存，
+     * 之后按预算塑形就会命中旧值（图的 used 高与预算不符 ⇒ 量画漂移）。
+     */
+    private fun clusterBlockOwnHeight(prepare: LightPrepare, i: Int): Int {
+        if (i < 0 || i >= prepare.totalBlocks) return 0
+        val leaf = prepare.block(i)
+        val edges = (leaf.style.padding.vertical + leaf.style.border.vertical).roundToInt()
+        if (leaf.replaceableHeight > 0) return leaf.replaceableHeight + edges
+        val sh = shapeBlock(prepare, i, leaf, prepare.profile)
+        val contentH = if (sh.lineCount > 0) (sh.lineBottom(sh.lineCount - 1) - sh.lineTop(0)) else 0
+        return contentH + edges
+    }
+
     private fun shapeBlock(
         prepare: LightPrepare,
         i: Int,
@@ -1819,6 +1934,8 @@ class BoxChapterLayouter(
         } else null,
         classify = prepare.lightClassify(),
         hidden = prepare.hidden,
+        // P3：分页层高度预算来自盒（`LightPrepare.applyReplacedFits` 写入），塑形只是读它。
+        replaceableFitH = leaf.replaceableFitH,
     )
 
     /** 无 [classify] 时的块判据回退（与 [shapeLeaf] 的 `BLOCK_TAGS` 同规则）。 */
@@ -1900,6 +2017,8 @@ class BoxChapterLayouter(
         /** 行内图行高配对用分类/隐藏判定（与盒流同口径；塑形层透传）。 */
         classify: orilumn.reader.engine.laying.BlockClassify? = null,
         hidden: orilumn.reader.engine.laying.HiddenCheck = orilumn.reader.engine.laying.HIDDEN_NONE,
+        /** P3：盒上写好的分页高度预算（重/轻两路都在盒上，塑形只读）。 */
+        replaceableFitH: Int? = null,
     ): ParagraphShapeRef {
         val t = leaf.table
         if (t != null) {
@@ -1911,6 +2030,7 @@ class BoxChapterLayouter(
             profile, breakWidthOverride ?: breakWidthPx(leaf), listMarker,
             imageLoader = imageLoader, chapterHref = chapterHref, ancestorStyleOf = ancestorStyleOf, genOf = genOf,
             floatLead = floatLead, classify = classify, hidden = hidden, isBlock = { it.tag in BLOCK_TAGS },
+            replaceableFitH = replaceableFitH,
         )
     }
 
@@ -1946,6 +2066,9 @@ class BoxChapterLayouter(
         profile: TypographicProfile,
         l2: Map<Int, ParagraphShapeRef>? = null,
     ): ParagraphShapeRef {
+        // P3：塑形**之前**定这一块的高度预算（口径乙）；命中缓存也不能跳过——盒上的预算必须在
+        // 任何一次塑形之前就位，否则塑形读到的 used 高与后续预算不一致（量画漂移）。
+        prepare.applyReplacedFits(i, i + 1)
         val hit = cache?.get(i) ?: l2?.get(i)
         if (hit != null) {
             // 表格行命中塑形缓存也必须回填当前实例的格 shape：格 shape 只活在叶实例上
@@ -2027,9 +2150,17 @@ class BoxChapterLayouter(
             leafList = leavesForDraw,
             shapeList = shapes,
             localFirst = localFirst,
+            // 必须显式传 `localLast`：它是 `localFirst` 的默认值，漏传会让**每个叶的行区间都是空**
+            // （`localLast[i] == localFirst[i]`），于是本窗口的 `BreakClusters.plan` 恒为「无簇、无
+            // 强制行」——临时页/增量窗的断页规则静默失效（P4 曾如此）。
+            localLast = localLast,
             boxes = buildBackgroundDrawBoxes(prepare, leavesForDraw, lines, localFirst, localLast),
             loader = imageLoader,
             href = chapterHref,
+            // P4d：临时页的绘制布局也带上 `break-inside: avoid` 属主图 —— 临时/磁盘两条路径的
+            // `avoidSplitRanges` / `forbiddenCutLines` 因此同源（临时页填充另经
+            // `Paginator.resolveAvoidCut` 走同一条判据）。
+            avoidOwnerMap = prepare.avoidOwnerMap,
             skiaLinesSource = skiaLines,
             tableCellsSource = tempWin.lines,
             tableCellImagesSource = tempWin.images,
@@ -2038,17 +2169,33 @@ class BoxChapterLayouter(
         var lastLine = if (lines.isEmpty()) 0 else lines.size
         var charEnd = if (blockEndExclusive < total) prepare.globalCharStarts[blockEndExclusive].toInt()
             else prepare.totalChars
+        var sliceEndBlock = blockEndExclusive
         if (endLineCharStart != null) {
+            // 页尾被**钉死**在某个字符行（锚页 / 锚前页：读者锚点决定，不是填充判据）——
+            // 只做「不超页高」回退（`lastLine` 只会变小）。
             val cut = rawLines.indexOfFirst { it.charStart == endLineCharStart }
             lastLine = if (cut >= 0) cut else lines.size
             charEnd = endLineCharStart
-        }
-        // Guarantee the page never exceeds the content area: back off trailing lines that would push
-        // the page's vertical extent past contentH (which would clip a bottom line). This only ever
-        // shrinks a page, never grows it, and keeps the page's char range consistent with what's shown.
-        val pageTop = lines.getOrNull(pageFirstLine.coerceAtLeast(0))?.yTop ?: 0
-        while (lastLine > pageFirstLine + 1 && lastLine - 1 in lines.indices && lines[lastLine - 1].yBottom - pageTop > contentH) {
-            lastLine--
+            val pageTop = lines.getOrNull(pageFirstLine.coerceAtLeast(0))?.yTop ?: 0
+            while (lastLine > pageFirstLine + 1 && lastLine - 1 in lines.indices && lines[lastLine - 1].yBottom - pageTop > contentH) {
+                lastLine--
+            }
+        } else {
+            // **单源**页尾（临时表与磁盘表/增量窗的同一段代码）：`Paginator.paginateFrom` =
+            // 整行填充 `fillWholeLines` + 强制段 + avoid 簇。临时页**不再**自算填充/簇高
+            // （旧版两份实现会漂移：`pre` 整块后移、目录乱分页、半页空白）。
+            val startLine = pageFirstLine.coerceAtLeast(0)
+            val p = if (startLine < layout.lineCount) {
+                Paginator.paginateFrom(layout, startLine, contentH).firstOrNull()
+            } else null
+            if (p != null) {
+                lastLine = p.lastLineExclusive
+                // 调用方会把窗口取整到 avoid 簇闭合（切点可能落在窗口内部），故块区间也收到切点
+                // 所在块 —— 与本页真正画出的行一致。
+                for (i in localFirst.indices) {
+                    if (lastLine - 1 in localFirst[i] until localLast[i]) { sliceEndBlock = blockStart + i + 1; break }
+                }
+            }
         }
         if (lastLine - 1 in lines.indices) {
             val lastActualEnd = lines[lastLine - 1].charEnd
@@ -2063,7 +2210,7 @@ class BoxChapterLayouter(
             lastLineExclusive = lastLine.coerceAtLeast(pageFirstLine + 1),
             kind = PageSlice.Kind.TEXT,
             blockStart = blockStart,
-            blockEndExclusive = blockEndExclusive,
+            blockEndExclusive = sliceEndBlock,
         )
         return TempPage(slice, layout)
     }
@@ -2542,6 +2689,41 @@ private class PartialDrawableLayout(
         }
         out
     }
+
+    /**
+     * P4：断页约束**单源**（[orilumn.reader.engine.laying.BreakClusters.plan]）的窗口叶序列。
+     *
+     * 叶序 = 本窗口的局部行序；每叶的 `break-*` 取盒上的**有效**边（提升叶取宿主块，见
+     * `LayoutBox.breakCarrierStyle`），`break-inside` 属主取结构缓存给的 [avoidOwnerMap]。
+     * [breakInsideAvoidRanges] 是这里的 `break-inside` 子集（原子区间）。
+     */
+    private val breakLeaves: List<orilumn.reader.engine.laying.BreakClusters.Leaf> by lazy {
+        val out = ArrayList<orilumn.reader.engine.laying.BreakClusters.Leaf>(leafList.size)
+        for (i in leafList.indices) {
+            val leaf = leafList[i]
+            val lo = localFirst[i].coerceAtLeast(0)
+            val hi = localLast[i]
+            out.add(
+                orilumn.reader.engine.laying.BreakClusters.Leaf(
+                    before = leaf.breakBefore,
+                    after = leaf.breakAfter,
+                    lines = if (hi > lo) lo until hi else IntRange.EMPTY,
+                    avoidOwner = leaf.el?.let { avoidOwnerMap[it] },
+                ),
+            )
+        }
+        out
+    }
+
+    private val breakPlan: orilumn.reader.engine.laying.BreakClusters.Plan by lazy {
+        orilumn.reader.engine.laying.BreakClusters.plan(breakLeaves)
+    }
+
+    override val avoidSplitRanges: List<IntRange> get() = breakPlan.atomicRanges
+
+    override val forbiddenCutLines: Set<Int> get() = breakPlan.forbiddenCutLines
+
+    override val forcedBreakBeforeLines: Set<Int> get() = breakPlan.forcedBeforeLines
 }
 
 /**
@@ -2582,6 +2764,17 @@ class LightPrepare(
      * 共用同一个实例**（见 [BoxChapterLayouter.breakerFor]）。本类自己**不再构造**断行器。
      */
     private val breaker: orilumn.reader.engine.laying.ParagraphBreaker,
+    /**
+     * P3：一页内容高（px）——替换叶高度预算（口径乙）的唯一依据。≤ 0 ⇒ 不施加预算。
+     * 与重路径 [BoxChapterLayouter.prepare] 收到的 `contentH` 同一个值。
+     */
+    private val contentH: Int = 0,
+    /**
+     * P3：**块自身 border-box 高**的测量回调，由 [BoxChapterLayouter] 注入（用与临时页同一份
+     * 塑形器量块 j；自带缓存，**不进共享塑形缓存** —— 预算定在塑形之前，若复用缓存会把自然尺寸
+     * 的 shape 留在那儿）。null = 不施加预算（旧调用方/测试）。
+     */
+    internal var clusterBlockOwnHeight: ((Int) -> Int)? = null,
 ) {
     val totalBlocks: Int get() = markupLeaves.size
     /**
@@ -2888,6 +3081,85 @@ class LightPrepare(
         return globalCharStarts[leafIdx].toInt()
     }
 
+    /**
+     * P3：**提升叶的宿主块**（叶是 `<img>`，块是最近的块级祖先）。
+     *
+     * `enumerateBlockLeaves` 把「独图块」枚举成它里面的 img（重路径同式），于是叶的 `el` 是 img
+     * 而布局地位是那个块：`break-*` 这类挂在块上的属性该按块算。img 自身就是块级子元素时返回
+     * `el`（那个分支里叶本来就是块本身，自身样式即正确语义）。`null` = 找不到（不该发生）。
+     */
+    private fun carrierBlockOf(el: MarkupElement): MarkupElement? {
+        if (el.tag != "img") return el
+        val classify = lightClassify()
+        if (classify.isBlock(el)) return el
+        var p = el.parent
+        while (p != null) {
+            if (classify.isBlock(p)) return p
+            p = p.parent
+        }
+        return null
+    }
+
+    /** P3：叶的**有效**断页边（提升叶取宿主块，与重路径 `LayoutBox.breakBefore/breakAfter` 同义）。 */
+    private fun breakPairOf(el: MarkupElement): orilumn.reader.engine.laying.ReplacedFitBudget.BreakPair {
+        val s = if (el.tag == "img") resolveStyle(carrierBlockOf(el) ?: el) else resolveStyle(el)
+        return orilumn.reader.engine.laying.ReplacedFitBudget.BreakPair(s.breakBefore, s.breakAfter)
+    }
+
+    /** 替换叶的**自然** used 高（无视任何已写入的预算）——预算重算的幂等输入。 */
+    private fun naturalReplaceableHeight(b: LayoutBox): Int {
+        val el = b.el ?: return b.replaceableHeight
+        return NormalFlowLayout.replaceableHeightOf(
+            el, b.style, NormalFlowLayout.innerBreakWidth(b.style, b.contentWidth), imageLoader, chapterHref,
+        )
+    }
+
+    /**
+     * P3：给 `[lo, hi)` 的替换叶写入高度预算（口径乙），**必须在塑形之前**调用。
+     *
+     * 与重路径 [orilumn.reader.engine.laying.NormalFlowLayout.layout] 的 `applyReplacedFit` 同一份
+     * 决策单源（[orilumn.reader.engine.laying.ReplacedFitBudget.plan]）：这里只把「自然高 / 自身高 /
+     * 断页边」三条喂成轻路径的几何。簇按**扁平叶序列**取（与重路径同一份、重轻恒一致），
+     * 故«图 + 图注»在两侧都被当成一个簇。
+     *
+     * 幂等：`naturalH` 走 [naturalReplaceableHeight]（不看已写入的预算），重复调用同一区间结果不变。
+     */
+    fun applyReplacedFits(lo: Int, hi: Int) {
+        val measure = clusterBlockOwnHeight ?: return
+        if (contentH <= 0 || totalBlocks <= 0) return
+        val a = lo.coerceIn(0, totalBlocks)
+        val b = hi.coerceIn(a, totalBlocks)
+        val leaves = markupLeaves
+        val plan = orilumn.reader.engine.laying.ReplacedFitBudget.plan(
+            leaves = leaves,
+            lo = a,
+            hi = b,
+            contentH = contentH,
+            naturalH = { i ->
+                val box = block(i)
+                if (box.replaceableHeight > 0) naturalReplaceableHeight(box) else 0
+            },
+            ownHeight = { i ->
+                val box = block(i)
+                if (box.replaceableHeight > 0) {
+                    box.replaceableHeight + (box.style.padding.vertical + box.style.border.vertical).roundToInt()
+                } else measure(i)
+            },
+            breakOf = ::breakPairOf,
+            styleOf = ::resolveStyle,
+        )
+        if (plan.isEmpty()) return
+        for ((i, fit) in plan) {
+            val box = block(i)
+            val el = box.el ?: continue
+            box.replaceableFitH = fit
+            box.replaceableHeight = NormalFlowLayout.replaceableHeightOf(
+                el, box.style, NormalFlowLayout.innerBreakWidth(box.style, box.contentWidth),
+                imageLoader, chapterHref, fit,
+            )
+        }
+    }
+
     /** Materializes (and caches) index [i]'s [LayoutBox] — style via lazy cascade, content width via the
      *  container chain — without ever cascading the whole chapter. */
     fun block(i: Int): LayoutBox {
@@ -2936,6 +3208,10 @@ class LightPrepare(
             val fw = floatWidths[i]
             if (fw != null && fw > 0) boxLeft = contentLeft + maxOf(0, contentWidth - fw)
         }
+        // P3：独图提升叶的宿主块样式（break-* 挂在块上；见 `LayoutBox.breakCarrierStyle`）。
+        val carrierStyle = if (!replaceable) null else (carrierBlockOf(el) ?: el).let { c ->
+            if (c === el) null else resolveStyle(c)
+        }
         val box = LayoutBox(
             el = el, style = style,
             contentLeft = boxLeft,
@@ -2951,6 +3227,7 @@ class LightPrepare(
             table = if (isTr) tableRowLayoutFor(el, contentWidth) else null,
             // P6-a2: 环绕前导取全章 eager 表（与重路径 pending 透传同式；匿名/替换/表格叶恒空）。
             floatLead = floatLeads[i],
+            breakCarrierStyle = carrierStyle,
         )
         materialized[i] = box
         if (sink != null) {

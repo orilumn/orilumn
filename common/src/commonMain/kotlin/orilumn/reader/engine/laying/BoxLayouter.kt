@@ -58,10 +58,12 @@ class BoxLayouter(
         chapterHref: String = "",
         /** P3-c 生成内容查找（空即无，旧路径）。 */
         genOf: GenOf = EmptyGen,
+        /** P3：一页内容高（px）；> 0 时施加替换叶高度预算（口径乙）。0 = 不约束（旧行为）。 */
+        contentH: Int = 0,
     ): BoxLayoutResult =
         NormalFlowLayout.layout(
             root, styleMap, breaker, widthPx, classify,
             HiddenCheck { styleMap[it]?.displayNone == true },
-            imageLoader, chapterHref, genOf,
+            imageLoader, chapterHref, genOf, contentH,
         )
 }

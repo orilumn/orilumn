@@ -92,7 +92,7 @@ class ReaderThemeMathTest {
         assertEquals("传统模式", ReaderThemeMath.layoutThemeLabel("traditional"))
         assertEquals("原书设置", ReaderThemeMath.layoutThemeLabel("original"))
         assertEquals("卷曲", ReaderThemeMath.pageAnimationModeLabel("curl"))
-        assertEquals("平滑", ReaderThemeMath.pageAnimationModeLabel("slide"))
+        assertEquals("滑动", ReaderThemeMath.pageAnimationModeLabel("slide"))
     }
 
     @Test

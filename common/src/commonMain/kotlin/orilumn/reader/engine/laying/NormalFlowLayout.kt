@@ -1,6 +1,7 @@
 package orilumn.reader.engine.laying
 
 import orilumn.reader.engine.ImageBoundsReader
+import orilumn.reader.engine.css.BreakRule
 import orilumn.reader.engine.css.ClearSide
 import orilumn.reader.engine.css.ColorRun
 import orilumn.reader.engine.css.ComputedStyle
@@ -62,11 +63,85 @@ object NormalFlowLayout {
         chapterHref: String = "",
         /** P3-c 生成内容查找（空即无，旧路径）。 */
         genOf: GenOf = EmptyGen,
+        /**
+         * P3：一页内容高（px）。> 0 时施加「块级替换叶 ≤ 一页 − 簇内其它内容」预算
+         * （口径乙，[ReplacedFitBudget]）——**分页层**的约束，不是 CSS 声明；0 = 不约束
+         * （旧行为逐字节一致，测试与小工具走这条）。
+         */
+        contentH: Int = 0,
     ): BoxLayoutResult {
         val boxes = buildBoxTree(root, styles, breaker, widthPx, left = 0, classify, hidden, imageLoader, chapterHref, genOf)
         val lines = ArrayList<FlowedLine>()
         flowBoxes(boxes, lines)
+        if (contentH > 0) applyReplacedFit(boxes, lines, styles, contentH, imageLoader, chapterHref)
         return BoxLayoutResult(lines, boxes)
+    }
+
+    /**
+     * P3：重路径的替换叶高度预算。
+     *
+     * 两趟：第一趟 [buildBoxTree] + [flowBoxes] 流出**自然**几何（图的 used 高、簇里其它成员的
+     * 实测高都在里面）；据此算出每个需要缩的图的高度上限，改写盒上的
+     * [LayoutBox.replaceableFitH] / [LayoutBox.replaceableHeight]，再重流一次。
+     *
+     * 之所以「改写 + 重流」而不是重建盒树：块级无浮动替换叶占满版心宽（`contentWidth = 内容宽`，
+     * 见 `buildBoxTree` 的 img 分支），它的 used 宽只在绘制时按比例还原 —— 缩高不改变任何盒的
+     * 水平几何，故 [flowBoxes] 重跑一次即精确（且它不塑形，成本是线性的一趟）。
+     *
+     * 悬浮替换叶不参与（浮动几何是另一套，本轮 out of scope，见方案 §4.5）。
+     */
+    private fun applyReplacedFit(
+        boxes: List<LayoutBox>,
+        lines: MutableList<FlowedLine>,
+        styles: Map<MarkupElement, ComputedStyle>,
+        contentH: Int,
+        imageLoader: ImageBoundsReader?,
+        chapterHref: String,
+    ) {
+        val leaves = collectLeafBoxes(boxes)
+        val els = leaves.mapNotNull { it.el }
+        if (els.size != leaves.size) return
+        val styleOf: (MarkupElement) -> ComputedStyle = { styles.getValue(it) }
+        val breaks = HashMap<MarkupElement, ReplacedFitBudget.BreakPair>(els.size)
+        for (b in leaves) {
+            val el = b.el ?: continue
+            breaks[el] = ReplacedFitBudget.BreakPair(b.breakBefore, b.breakAfter)
+        }
+        val breakOf: (MarkupElement) -> ReplacedFitBudget.BreakPair = { el ->
+            breaks[el] ?: ReplacedFitBudget.BreakPair(BreakRule.AUTO, BreakRule.AUTO)
+        }
+        val plan = ReplacedFitBudget.plan(
+            leaves = els,
+            lo = 0,
+            hi = els.size,
+            contentH = contentH,
+            naturalH = { i ->
+                val b = leaves[i]
+                if (b.style.floatSide != FloatSide.NONE) 0 else b.replaceableHeight
+            },
+            ownHeight = { i -> (leaves[i].contentBottom - leaves[i].contentTop).coerceAtLeast(0) },
+            breakOf = breakOf,
+            styleOf = styleOf,
+        )
+        if (plan.isEmpty()) return
+        for ((i, fit) in plan) {
+            val box = leaves[i]
+            val el = box.el ?: continue
+            val st = box.style
+            box.replaceableFitH = fit
+            box.replaceableHeight = replaceableHeightOf(
+                el, st, innerBreakWidth(st, box.contentWidth), imageLoader, chapterHref, fit,
+            )
+        }
+        lines.clear()
+        flowBoxes(boxes, lines)
+    }
+
+    /** Flatten a box list into its **leaf** boxes, in document order (containers recursed). */
+    fun collectLeafBoxes(boxes: List<LayoutBox>): List<LayoutBox> {
+        val out = ArrayList<LayoutBox>()
+        for (b in boxes) if (b.isContainer) out.addAll(collectLeafBoxes(b.childBoxes)) else out.add(b)
+        return out
     }
 
     /**
@@ -529,6 +604,7 @@ object NormalFlowLayout {
             val contentW = widthPx.coerceAtLeast(1)
             val breakW = innerBreakWidth(imgStyle, contentW)
             // P6-a: 与 img 分支同式（悬浮注册 + 右对齐；非悬浮清零）。
+            // P3：`fitMaxH` 由第一趟流出的几何给出（此趟恒 null = 自然尺寸），见 `applyReplacedFit`。
             val (floatW, repH) = replacedUsedSize(img, imgStyle, breakW, imageLoader, chapterHref)
             val side = imgStyle.floatSide
             val (boxLeft, boxW) = if (side != FloatSide.NONE) {
@@ -548,6 +624,9 @@ object NormalFlowLayout {
                     lineHeights = emptyList(),
                     childBoxes = emptyList(),
                     replaceableHeight = repH,
+                    // P3：叶是 img，块却是 `el`（`<p class="fm-figure">`）——break-* 挂在块上，
+                    // 必须带过来，否则「图 + 图注」的 avoid 边丢失（真书 .fm-figure 正是如此）。
+                    breakCarrierStyle = style,
                 ),
             )
         } else if (blockChildren.isEmpty()) {
@@ -1913,17 +1992,19 @@ object NormalFlowLayout {
         containingW: Int,
         imageLoader: ImageBoundsReader? = null,
         chapterHref: String = "",
+        /** P3：分页层的高度上限（口径乙）；null = 不约束。见 [ReplacedFitBudget]。 */
+        fitMaxH: Int? = null,
     ): Pair<Int, Int> {
         val intrinsic = intrinsicSizeOf(el, imageLoader, chapterHref)
-        return style.usedReplacedSize(intrinsic?.first, intrinsic?.second, containingW)
+        return style.usedReplacedSize(intrinsic?.first, intrinsic?.second, containingW, fitMaxH)
     }
 
     /**
      * Resolved pixel height of a replaceable (img) block. Delegates to [replacedUsedSize], i.e.
      * standard CSS sizing: `auto/auto` yields the intrinsic height (CSS 2.1 §10.3.4 sizes
      * block-level replaced exactly like inline replaced), with only `max-width`/`min-*` able
-     * to shrink/grow it via the §10.4 table. No figure-fit here — that belongs to the user
-     * layer's style themes, never the render-layer box model.
+     * to shrink/grow it via the §10.4 table. `fitMaxH` is the pagination layer's page-fit ceiling
+     * (口径乙) — it folds into the same §10.4 table (never a CSS declaration).
      */
     fun replaceableHeightOf(
         el: MarkupElement,
@@ -1931,7 +2012,9 @@ object NormalFlowLayout {
         contentWidthPx: Int,
         imageLoader: ImageBoundsReader? = null,
         chapterHref: String = "",
-    ): Int = replacedUsedSize(el, style, contentWidthPx.coerceAtLeast(1), imageLoader, chapterHref).second
+        /** P3：分页层的高度上限（口径乙）；null = 不约束。见 [ReplacedFitBudget]。 */
+        fitMaxH: Int? = null,
+    ): Int = replacedUsedSize(el, style, contentWidthPx.coerceAtLeast(1), imageLoader, chapterHref, fitMaxH).second
 
     /** Intrinsic (w, h) px of an `<img>`: HTML attrs (both numeric) → binary bounds → null.
      *  A single HTML attr is NOT an intrinsic side (the ratio is unknown) — it already reaches

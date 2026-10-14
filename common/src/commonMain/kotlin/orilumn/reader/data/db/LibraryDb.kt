@@ -28,6 +28,7 @@ class LibraryDb(db: OrilumnDb) {
     private val books = db.booksQueries
     private val progress = db.readingStatesQueries
     private val fonts = db.fontFacesQueries
+    private val fontScan = db.fontScanStateQueries
 
     fun observeBooks(sort: BookSort = BookSort.Added): Flow<List<Book>> {
         val flow = when (sort) {
@@ -183,6 +184,31 @@ class LibraryDb(db: OrilumnDb) {
         faces: List<SystemFontFace>,
         localizedNames: Map<String, String> = emptyMap(),
     ) = withContext(Dispatchers.IO) {
+        syncSystemFamilyBlocking(faces, localizedNames)
+        pruneMissingSystemFamiliesBlocking(faces.map { it.family.trim() }.filter { it.isNotEmpty() }.toSet())
+    }
+
+    /**
+     * **逐族**落行（[syncSystemFonts] 的单族形式）：只对本族做 upsert + 改名残留清理，
+     * **不做**「族不再存在」的全局删除（那需要全量枚举作参照，交给 [pruneMissingSystemFamilies]）。
+     *
+     * 逐族是字体扫描「抗抢占续跑 + 面板增量刷新」的前提（方案 §3.3）：每完成一族即进库，
+     * 被抢占时已完成族保留；面板随每族完成重读列表。
+     */
+    suspend fun syncSystemFamily(
+        faces: List<SystemFontFace>,
+        localizedNames: Map<String, String> = emptyMap(),
+    ) = withContext(Dispatchers.IO) { syncSystemFamilyBlocking(faces, localizedNames) }
+
+    /** 全局陈旧清理：本次枚举里不存在的系统族（卸载/fontconfig 过滤掉的）删残行。**只删 source='system'**。 */
+    suspend fun pruneMissingSystemFamilies(liveFamilies: Collection<String>) = withContext(Dispatchers.IO) {
+        pruneMissingSystemFamiliesBlocking(liveFamilies.toSet())
+    }
+
+    private fun syncSystemFamilyBlocking(
+        faces: List<SystemFontFace>,
+        localizedNames: Map<String, String>,
+    ) {
         val rows = faces.map { it.family.trim() to it.subfamily.trim() }
             .filter { (f, _) -> f.isNotEmpty() }
             .distinct()
@@ -217,20 +243,36 @@ class LibraryDb(db: OrilumnDb) {
             rows.groupBy({ it.first }, { it.second }).forEach { (f, subs) ->
                 fonts.deleteRenamedSystemRows(f, subs.distinct().ifEmpty { listOf("") })
             }
-            // 整族级陈旧清理：本次枚举里不存在的族（卸载 / fontconfig 过滤掉的），
-            // 其残留行必须删，否则面板列全表会把「早就不存在的字体」继续列给用户
-            // （Linux 实测 2697 行 / 1322 族 vs 系统实际 178 族）。
-            // 只删 source='system'（导入字体无枚举来源，绝不牵连）；空枚举已在上方短路。
-            val liveFamilies = rows.map { it.first }.toSet()
-            val before = fonts.countSystemRows().executeAsOne()
-            fonts.deleteSystemFontsNotIn(liveFamilies.toList())
-            val pruned = before - fonts.countSystemRows().executeAsOne()
-            if (pruned > 0) {
-                Logger.i("Orilumn.Font", "pruned $pruned stale system font row(s) (families gone from platform enumeration)")
-            }
         }
     }
 
+    /**
+     * 整族级陈旧清理：本次全量枚举里**不存在**的族（卸载 / fontconfig 过滤掉的），
+     * 其残留行必须删，否则面板列全表会把「早就不存在的字体」继续列给用户
+     * （Linux 实测 2697 行 / 1322 族 vs 系统实际 178 族）。
+     * 只删 `source='system'`（导入字体无枚举来源，绝不牵连）；空枚举短路（平台失败不清库）。
+     */
+    private fun pruneMissingSystemFamiliesBlocking(liveFamilies: Set<String>) {
+        if (liveFamilies.isEmpty()) return
+        val before = fonts.countSystemRows().executeAsOne()
+        fonts.deleteSystemFontsNotIn(liveFamilies.toList())
+        val pruned = before - fonts.countSystemRows().executeAsOne()
+        if (pruned > 0) {
+            Logger.i("Orilumn.Font", "pruned $pruned stale system font row(s) (families gone from platform enumeration)")
+        }
+    }
+
+
+    // ---- 字体扫描指纹（P1） ----
+
+    suspend fun fontScanState(): Pair<Long, Long>? = withContext(Dispatchers.IO) {
+        fontScan.getState().executeAsOneOrNull()?.let { it.cacheSchemaVersion to it.familyHash }
+    }
+
+    suspend fun saveFontScanState(cacheSchemaVersion: Long, familyHash: Long, updatedAt: Long = System.currentTimeMillis()) =
+        withContext(Dispatchers.IO) {
+            fontScan.upsertState(cacheSchemaVersion, familyHash, updatedAt)
+        }
     private fun orilumn.reader.db.Books.toBook(): Book = Book(
         id = id,
         title = title,

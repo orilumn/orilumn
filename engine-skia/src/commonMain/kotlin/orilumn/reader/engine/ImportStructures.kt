@@ -4,9 +4,7 @@ import orilumn.reader.data.epub.EpubResourceReader
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.engine.css.CssBundle
 import orilumn.reader.engine.css.CssViewport
-import orilumn.reader.engine.css.LightCssParser
 import orilumn.reader.engine.css.resolveCssImports
-import orilumn.reader.engine.html.ChapterPreprocessor
 import orilumn.reader.engine.html.HtmlTreeConverter
 import orilumn.reader.engine.html.MarkupElement
 import orilumn.reader.engine.html.ParsedChapter
@@ -167,8 +165,7 @@ object ImportStructures {
                     skippedMedia++
                     return@forEachIndexed
                 }
-                val sheets = bundle.cssTexts.map { LightCssParser().parse(it, IMPORT_VIEWPORT) }
-                val tree = ChapterPreprocessor.preprocess(parsed.tree, sheets)
+                val tree = parsed.tree
                 val cache = ChapterStructureCache()
                 layouter.prepareLight(tree, bundle, IMPORT_PROFILE, 1600, cache, 2400)
                 if (persistChapter(store, bookNamespace, index, tree, bundle, cache)) persisted++

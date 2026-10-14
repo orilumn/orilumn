@@ -79,6 +79,12 @@ class TaskScheduler(
          *  第 2/3 档那些邻页，把一页的增量排在包含它的一趟之前说不通。 */
         const val PRIO_B1_URGENT = PRIO_PAGE_NEXT
 
+        /** 面板在使用 ⇒ 读者此刻要它。池内最高，但仍让位翻页/栅格（号>0）。 */
+        const val PRIO_FONT_DEMAND = 5
+
+        /** 无人等 ⇒ 第 6.5 档：低于本章（40）/±1 章，高于其他章（50）。 */
+        const val PRIO_FONT_SCAN = 45
+
         const val PRIO_FLIP = 0 // reference only — flips never enqueue
     }
 
@@ -149,6 +155,26 @@ class TaskScheduler(
         }
     }
 
+    /**
+     * 按 key **前缀**整域取消（[cancelKey] 的批量形式）：清队列 + 就地取消在跑孪生。
+     *
+     * 用途：调度器提升为**应用级共享**后，单个 [BookDocumentController] 关闭时只能撤自己
+     * 键域内的活（`b1:`/`b2:`/`edge:`/`pre:`/`pg:`），不能像「每书一个池」那样整池
+     * `cancel()`——那会误杀其他书/系统级字体任务。键域前缀是排他命名空间（见各 dispatch 点）。
+     */
+    fun cancelMatchingPrefixes(prefixes: Collection<String>) {
+        if (prefixes.isEmpty()) return
+        scope.launch {
+            mutex.withLock {
+                queue.removeAll { q -> prefixes.any { q.key.startsWith(it) } }
+                for (key in running.keys.toList()) {
+                    if (prefixes.any { key.startsWith(it) }) running[key]?.cancel()
+                }
+                syncKeysLocked()
+            }
+        }
+    }
+
     /** Preempt everything less urgent than [threshold] (greater number = less urgent).
      *  P0 fix: jobs are cancelled in place; map entries (the liveness record) are removed only
      *  by their own finally-block on actual death, so slot accounting never diverges from reality.
@@ -202,6 +228,19 @@ class TaskScheduler(
     suspend fun pendingCount(): Int = mutex.withLock { queue.size }
     suspend fun runningCount(): Int = mutex.withLock { running.size }
 
+    /**
+     * 同键「在队或在跑」任务的档位；无 ⇒ null。
+     *
+     * 用途：同档重提在 [submit] 里的语义是**取消在跑的旧孪生 + 重启**（纯浪费）。调用方
+     * （字体扫描的提/降档，见 `SystemFontScanner.onPanelVisibility`）据此去重：档位已到位就
+     * 什么都不做。刻意让**调度器**当唯一事实源，而不是调用方自己记在途标志——排队中的任务可能被
+     * [cancelLowerThan] / [cancelForRaster] 直接从队列里清掉（任务体从未起跑，没有任何回调），
+     * 那种情况下调用方的标志会永远停在「在途」。
+     */
+    suspend fun pendingPriority(key: String): Int? = mutex.withLock {
+        queue.firstOrNull { it.key == key }?.priority ?: runningPrio[key]
+    }
+
     /** P1a: diagnostic-grade idle wait (polling). Resolves when no task is queued or running.
      *  Callers must re-validate whatever they were waiting for (new submits may land after). */
     suspend fun awaitIdle() {
@@ -209,6 +248,21 @@ class TaskScheduler(
             val busy = mutex.withLock { queue.isNotEmpty() || running.isNotEmpty() }
             if (!busy) return
             delay(200)
+        }
+    }
+
+    /**
+     * 队列**真空时**执行 [action]（即 [awaitIdle] 之后再执行）。
+     *
+     * 与 [submit] 的关键区别：它**不占队列位置**，因此 [cancelLowerThan] / [cancelForRaster] 里
+     * `queue.removeAll { priority > threshold }` 清不到它。用途是**被抢占让位的活重新入场**（字体扫描
+     * 的续跑看门狗，见 `SystemFontScanner.armResume`）——这件事故意不靠任务体自己的 catch 补：
+     * **排队期就被清掉的任务体从未起跑，没有 catch 可进**，且它连「我没了」都没人知道。
+     */
+    fun submitWhenIdle(action: suspend () -> Unit) {
+        scope.launch {
+            awaitIdle()
+            action()
         }
     }
 

@@ -36,6 +36,9 @@ class FontRepository(
     /** All fonts (persistent,含隐藏；选择器候选经 [FontLibrary.visibleEntries] 过滤）. */
     suspend fun list(): List<FontFace> = library.list()
 
+    /** 共享底层字体库（P1 字体扫描编排器直接喂逐族落库用；不复制第二份实例）。 */
+    val fontLibrary: FontLibrary get() = library
+
     /** F4c 统一列表（系统 + 导入，含隐藏；展示层分区/过滤）。 */
     suspend fun entries(): List<orilumn.reader.data.font.FontEntry> =
         library.allEntries(library.list())
@@ -91,4 +94,12 @@ class FontRepository(
         }
         return out
     }
+
+    /**
+     * 系统字体文件环境哈希（方案 §8-2 指纹加固）：族名不变但文件被换（OTA 更新 / 同族名重打包）
+     * 也要判「字体变了」进重扫。只列 `/system/fonts` 取文件元数据（廉价），不读字节——
+     * 与 [systemFontLocalizedNames] 同一根目录，仅多取 size/mtime。
+     */
+    fun systemFontEnvironmentHash(): Long =
+        fontFilesEnvironmentHash(FileSystem.SYSTEM, listOf("/system/fonts"))
 }

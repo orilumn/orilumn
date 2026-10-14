@@ -145,6 +145,23 @@ class P1StyleComputationTest {
     }
 
     @Test
+    fun `forced break 值映射 ALWAYS`() {
+        // 强制分页值（单栏下 page/left/right/recto/verso 一律等价「另起一页」）。
+        for (v in listOf("always", "page", "left", "right", "recto", "verso")) {
+            assertEquals("break-before: $v", BreakRule.ALWAYS, styled("h1", "h1 { break-before: $v }").breakBefore)
+            assertEquals("break-after: $v", BreakRule.ALWAYS, styled("h1", "h1 { break-after: $v }").breakAfter)
+        }
+        // legacy 别名同样认。
+        assertEquals(BreakRule.ALWAYS, styled("h1", "h1 { page-break-before: always }").breakBefore)
+        // avoid 家族不受影响。
+        assertEquals(BreakRule.AVOID, styled("h1", "h1 { break-before: avoid-page }").breakBefore)
+        // 未声明 / 显式 auto / 非法值仍是 AUTO。
+        assertEquals(BreakRule.AUTO, styled("h1", "h1 { break-before: auto }").breakBefore)
+        assertEquals(BreakRule.AUTO, styled("h1", "h1 { break-before: banana }").breakBefore)
+        assertEquals(BreakRule.AUTO, styled("h1", "").breakBefore)
+    }
+
+    @Test
     fun `list-style 简写拆分`() {
         val s = styled("ul", "ul { list-style: square inside }")
         assertEquals("square", s.listStyleType)

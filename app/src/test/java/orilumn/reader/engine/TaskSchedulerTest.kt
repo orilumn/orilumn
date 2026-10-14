@@ -9,6 +9,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.Collections
@@ -237,6 +238,66 @@ class TaskSchedulerTest {
             withTimeout(10_000) { while (done.isEmpty()) delay(10) }
             delay(300)
             assertEquals("only the newer twin's work runs", listOf("new-finished"), done)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // 抢占让位后的「重新入场」基元（SystemFontScanner 续跑看门狗的地基）。
+    // ───────────────────────────────────────────────────────────────
+
+    /** [TaskScheduler.pendingPriority] 是提/降档去重的事实源：在跑/在队都算「在途」，出队即 null。 */
+    @Test
+    fun `pendingPriority tracks the queued or running tier`() = runBlocking {
+        val (sched, scope) = newScheduler(1)
+        try {
+            val gate = CompletableDeferred<Unit>()
+            sched.submit(TaskScheduler.Task("gate", 0) { gate.await() })
+            withTimeout(5_000) { while (sched.runningCount() == 0) delay(10) }
+            assertNull("absent key has no tier", sched.pendingPriority("k"))
+            assertEquals("running twin reports its tier", 0, sched.pendingPriority("gate"))
+
+            sched.submit(TaskScheduler.Task("k", TaskScheduler.PRIO_FONT_SCAN) {})
+            withTimeout(5_000) { while (sched.pendingPriority("k") == null) delay(10) }
+            assertEquals("queued twin reports its tier", TaskScheduler.PRIO_FONT_SCAN, sched.pendingPriority("k"))
+
+            // 同键重提＝换档：档位跟着新孪生走（提/降档去重靠它判断"已在目标档"）。
+            sched.submit(TaskScheduler.Task("k", TaskScheduler.PRIO_FONT_DEMAND) {})
+            withTimeout(5_000) { while (sched.pendingPriority("k") != TaskScheduler.PRIO_FONT_DEMAND) delay(10) }
+
+            gate.complete(Unit)
+            withTimeout(10_000) { while (sched.pendingPriority("k") != null) delay(10) }
+            assertNull("drained key has no tier", sched.pendingPriority("k"))
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    /**
+     * [TaskScheduler.submitWhenIdle] 的要点：**它不在队列里**，所以抢占（`queue.removeAll
+     * { priority > threshold }`）清不到它 —— 这正是被让位的活能重新入场的根据。
+     */
+    @Test
+    fun `submitWhenIdle waits for the drain and is not preempted`() = runBlocking {
+        val (sched, scope) = newScheduler(1)
+        try {
+            val gate = CompletableDeferred<Unit>()
+            val ran = Collections.synchronizedList(ArrayList<String>())
+            sched.submit(TaskScheduler.Task("gate", 0) { gate.await(); ran.add("gate") })
+            withTimeout(5_000) { while (sched.runningCount() == 0) delay(10) }
+
+            sched.submitWhenIdle { ran.add("idle") }
+            delay(300)
+            assertTrue("must not run while the queue is busy: $ran", ran.isEmpty())
+            // 抢占把队里/在跑的 priority>0 全清掉——空闲回调不在此列，不许被清。
+            sched.cancelLowerThan(0)
+            delay(300)
+            assertTrue("preemption must not drop the idle callback: $ran", ran.isEmpty())
+
+            gate.complete(Unit)
+            withTimeout(10_000) { while (ran.size < 2) delay(10) }
+            assertEquals(listOf("gate", "idle"), ran)
         } finally {
             scope.cancel()
         }

@@ -37,6 +37,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import orilumn.reader.data.book.BookRepository
 import orilumn.reader.host.AndroidDb
+import orilumn.reader.host.AndroidFontScan
 import orilumn.reader.data.font.FontRepository
 import orilumn.reader.data.font.FontEntry
 import orilumn.reader.data.epub.TocItem
@@ -124,6 +125,8 @@ class ReaderActivity : ComponentActivity() {
 
     /** 设置面板字库列表（壳自持：开面板同步系统族 + 取全量表；增删改后重载）。 */
     private var fontEntries by mutableStateOf<List<FontEntry>>(emptyList())
+    /** 系统字体扫描实时进度（方案 §2.4）：面板可见且扫描在途时非 null，喂共享面板显示「已 N / 共 M 族」。 */
+    private var fontScanProgress by mutableStateOf<FontScanProgress?>(null)
     /** 自定义阅读主题预设（SharedPreferences 持久化，喂共享面板）。 */
     private var customThemes by mutableStateOf<List<ThemePreset>>(emptyList())
     private lateinit var fontImportLauncher: ActivityResultLauncher<Array<String>>
@@ -171,6 +174,11 @@ class ReaderActivity : ComponentActivity() {
         settingsStore = ReaderSettingsStore(File(filesDir, "settings").absolutePath)
         bookSettingsStore = BookSettingsStore(File(filesDir, "settings").absolutePath)
         fontRepository = FontRepository(this, AndroidDb.library(this))
+        // P1 字体发现·层次二（方案 §2.2）：启动一次性检测，只在**指纹变**时进共享池 45 档扫。
+        // 进程级单例：书架/阅读面重复调用由 `detected` 门闩收敛为一次。
+        lifecycleScope.launch(Dispatchers.IO) {
+            runCatching { AndroidFontScan.scanner(this@ReaderActivity).detectOnStart() }
+        }
         customThemes = loadCustomThemes()
         // 本地字体导入（SAF）：launcher 归壳持有，共享面板经 onFontImport 触发。
         fontImportLauncher = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
@@ -233,14 +241,7 @@ class ReaderActivity : ComponentActivity() {
                 // 绘制切内嵌字体即全书错位）。IO 内同步等，不与首排抢跑。
                 // P2-b: 新书清掉旧书内字体条目（池刷新只含本书）。
                 bookFontEntries = emptyList()
-                // F4c: 系统族落行（INSERT OR IGNORE，开屏一次；面板开页再同步一次）。
-                // 中文名链（桌面同式方案B）：name 表直读优先，无本地化名的族展示层回退族名本身。
-                runCatching {
-                    fontRepository.syncSystemFaces(
-                        orilumn.reader.engine.skia.systemFontFaces(),
-                        fontRepository.systemFontLocalizedNames(),
-                    )
-                }
+                // F4c: 系统族落行改由启动检测/面板可见性驱动，不随开书执行，避免抢占锚页排版。
                 refreshSkiaFonts()
                 val file = BookFileResolver(this@ReaderActivity).resolve(bookPath ?: return@runCatching null)
                     ?: return@runCatching null
@@ -253,6 +254,8 @@ class ReaderActivity : ComponentActivity() {
                     TAG,
                     lifecycleScope,
                     imageLoader = imageLoader,
+                    // 调度重构：应用级共享队列（排版与系统级字体扫描同池，翻页/栅格抢占才可能）。
+                    sharedScheduler = orilumn.reader.engine.AppTaskScheduler.scheduler,
                 )
                 c.cacheRoot = this@ReaderActivity.cacheDir.absolutePath.toPath()
                 // 磁盘分页表构建号：发版即 versionCode 递增 → 旧构建的表统一失效（见 PaginationCacheCodec）。
@@ -393,6 +396,7 @@ class ReaderActivity : ComponentActivity() {
                 visible = settingsOpen,
                 settings = panelSettings,
                 fontEntries = fontEntries,
+                fontScanProgress = fontScanProgress,
                 onDismiss = { closeSettingsPanel() },
                 onPreview = { previewLive(it) },
                 onCommitTypography = { commitSettings(it, typographyChanged = true) },
@@ -461,12 +465,28 @@ class ReaderActivity : ComponentActivity() {
         // 面板开抑制 + 关门控走共享收口（PanelRelayoutGate，桌面同调）；关闭时若排版真实
         // 变化再整书重跑（门控内指纹判定）。
         panelGate?.onPanelOpen()
+        // 需求模式（方案 §2.4/§3.4，与桌面同式）：面板要用 ⇒ 同键 `fontscan` 提档池顶，
+        // 立即实扫；逐族落库回调重读 DB，列表增量长出（库热时指纹没变，什么都不做）。
+        val scan = AndroidFontScan.scanner(this)
+        scan.onFamilyScanned = { done, total ->
+            // 逐族落库回调：主线程重读 DB 增量刷新列表 + 更新「已 N / 共 M 族」进度（扫完即隐藏）。
+            lifecycleScope.launch {
+                fontScanProgress = if (done < total) FontScanProgress(done, total) else null
+            }
+            loadPanelFonts()
+        }
+        lifecycleScope.launch { runCatching { scan.onPanelVisibility(true) } }
         Logger.w(TAG, "open settings panel")
     }
 
     private fun closeSettingsPanel() {
         settingsOpen = false
         applySystemBars()
+        // 需求模式退出：同键 `fontscan` 降回 45 续跑（在途时；已扫完重提是白跑，扫描器内判）。
+        val scan = AndroidFontScan.scanner(this)
+        scan.onFamilyScanned = { _, _ -> }
+        fontScanProgress = null
+        lifecycleScope.launch { runCatching { scan.onPanelVisibility(false) } }
         val c = engine
         val gate = panelGate
         if (c != null && gate != null) {
@@ -492,10 +512,13 @@ class ReaderActivity : ComponentActivity() {
 
     // ---- Settings panel font/theme platform seams (shell-owned) ----
 
-    /** 面板字库重载（开面板/增删改后）：同步系统族落行 + 取统一全量表。 */
-    private fun loadPanelFonts(resyncSystem: Boolean = true) {
+    /**
+     * 面板字库**只读 DB** 重载（与桌面 `refreshFonts` 同式，方案 §2.1 收口）：
+     * 系统行的枚举/落库由字体扫描任务负责（启动检测 / 面板提档），本函数不再触发任何扫描，
+     * 开面板与导入/隐藏/删除后重读列表都是同一个廉价的 DB 直读。
+     */
+    private fun loadPanelFonts() {
         lifecycleScope.launch {
-            if (resyncSystem) runCatching { fontRepository.syncSystemFaces(orilumn.reader.engine.skia.systemFontFaces()) }
             fontEntries = runCatching { fontRepository.entries() }.getOrDefault(emptyList())
         }
     }
@@ -509,7 +532,7 @@ class ReaderActivity : ComponentActivity() {
         wifiBatchJob?.cancel()
         wifiBatchJob = lifecycleScope.launch {
             delay(WIFI_BATCH_DELAY_MS)
-            loadPanelFonts(resyncSystem = false)
+            loadPanelFonts()
             if (settingsOpen) withContext(Dispatchers.Default) { refreshSkiaFonts() }
             else refreshFontsAndRelayout()
         }
@@ -821,6 +844,8 @@ class ReaderActivity : ComponentActivity() {
         if (host != null && p != null) host.onSaveProgress(p)
         // R13: 先落盘再杀后台（close 只停塑形，不管落盘）。
         host?.closeController()
+        // 字体扫描是**应用级单例**：卸下本页装的增量刷新回调，避免它持有已销毁的 Activity。
+        AndroidFontScan.scanner(this).onFamilyScanned = { _, _ -> }
         super.onDestroy()
     }
 

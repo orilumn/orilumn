@@ -14,6 +14,14 @@ val BLOCK_TAGS: Set<String> = setOf(
 )
 
 /**
+ * 标题标签集合（`h1`–`h6`）：章节名提取（阅读顶栏 / 宿主 `unitTitle`）的单源。
+ *
+ * 章节名只认标题元素自身的文本——正文段落一律不算（详见
+ * `BookDocumentController.chapterTitle`）。
+ */
+val HEADING_TAGS: Set<String> = setOf("h1", "h2", "h3", "h4", "h5", "h6")
+
+/**
  * Q1-3 单源：code-like 标签集合（代码字体槽路由）。
  *
  * 原三处同义定义（`shared-ui ReaderMath` / `engine-skia SkParagraphFactory` /

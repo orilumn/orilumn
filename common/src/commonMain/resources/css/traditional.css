@@ -75,5 +75,9 @@ p, div, li, blockquote, dd, td { text-align: justify; }
  * 原书设置整张主题表不加载, 本条不参与 ⇒ 书说了算。 */
 pre, code { text-align: left; }
 
-/* 无尺寸约束的块级/独图插图拉满正文宽度 (ChapterPreprocessor 仅在原书未设 width/max-width 时打类) */
-.orilumn-fullwidth-image { width: 100%; }
+/* 编者注（P3a）：此处原有 `.orilumn-fullwidth-image { width: 100% }` —— 把「原书未声明
+ * width/max-width」的块级独图拉满正文宽。**已退役**：拉宽是纵向溢出（图高过一页、被页底裁掉）
+ * 的最主要成因，而分页阅读器没有横向滚动条，溢出只能裁。现在无尺寸约束的图回到 intrinsic 尺寸；
+ * 超宽 intrinsic 仍由 UA 层 `img { max-width: 100% }`（tier 10）按 CSS 2.1 §10.4 等比收敛到版心；
+ * 书自身的 width/max-width 一直不受影响。完整口径与层叠三问见
+ * docs/分页高度约束与断页规则-方案.md §4.5。 */

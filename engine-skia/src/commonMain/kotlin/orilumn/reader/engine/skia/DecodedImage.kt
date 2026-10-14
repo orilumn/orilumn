@@ -44,12 +44,21 @@ object ImageCodec {
     }.getOrNull()
 
     /**
-     * 解码并缩放到精确 [targetWidth] 宽（保留纵横比）。[targetWidth] <= 0 时只解码不缩放。
-     * 缩放走 CPU 栅格 surface 的 `drawImageRect`（Mitchell 采样），产物仍是 [DecodedImage]。
+     * 解码并缩放到 [targetWidth] 宽（保留纵横比）。**只缩不放**：`targetWidth <= 0` 或
+     * `targetWidth >= 源宽` 时直接返回全量解码结果。缩放走 CPU 栅格 surface 的 `drawImageRect`
+     * （Mitchell 采样），产物仍是 [DecodedImage]。
+     *
+     * 为什么明确不放大：源图没有的细节，放大只是伪造像素。解码期把一张 569×245 的小图拉到
+     * 4880×2101（8.6×，ARGB = 41 MB，Mitchell 重采样 409 ms）纯粹是白烧内存与时间——而绘制侧
+     * `PageRaster.drawPageImages` 本就用 `drawImageRect(源尺寸 → used 尺寸)` 把整张图映射进目标
+     * 矩形，**不要求两者相等**，所以放大拿不到任何视觉回报。
+     *
+     * （此前的 `full.width == targetWidth` 判等只挡住了「恰好相等」，`targetWidth` 更大时照放不误；
+     * `ImageCodecTest.decodeScaledUpscaleKeepsTargetWidth` 就是那条旧契约，已随之改判。）
      */
     fun decodeScaled(bytes: ByteArray, targetWidth: Int): DecodedImage? {
         val full = decode(bytes) ?: return null
-        if (targetWidth <= 0 || full.width == targetWidth || full.width <= 0) return full
+        if (targetWidth <= 0 || full.width <= 0 || targetWidth >= full.width) return full
         val newH = maxOf(1, (full.height * targetWidth.toFloat() / full.width).roundToInt())
         val surface = Surface.makeRasterN32Premul(targetWidth, newH)
         surface.canvas.drawImageRect(

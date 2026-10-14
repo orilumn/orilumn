@@ -55,6 +55,20 @@ fun systemFontFaces(): List<SystemFontFace> {
     }
 }
 
+/**
+ * 单族字形枚举（[systemFontFaces] 的**逐族**形式）：族名 + 字重名列表，解析不出回落"无字重名"单行。
+ *
+ * 逐族是「抗抢占续跑 + 面板增量刷新」的前提（方案 §3.3）：一次只算一族、落一族，
+ * 被 `cancelLowerThan` 抢占时已完成族已进库，不必从头再来。
+ */
+fun systemFontFacesFor(family: String): List<SystemFontFace> {
+    val f = family.trim()
+    if (f.isEmpty()) return emptyList()
+    val mgr = runCatching { systemFonts() }.getOrNull() ?: return listOf(SystemFontFace(f))
+    val styles = styleNamesOfFamily(mgr, f)
+    return if (styles.isEmpty()) listOf(SystemFontFace(f)) else styles.map { SystemFontFace(f, it) }
+}
+
 /** 单族的字重名列表；解析不出回空（调用方落到"无字重名"单行）。 */
 private fun styleNamesOfFamily(mgr: FontMgr, family: String): List<String> =
     styleNameCache(family) ?: runCatching {
@@ -104,4 +118,24 @@ private fun styleNameOf(s: FontStyle): String = buildString {
         else -> append("Black")
     }
     if (s.slant != FontSlant.UPRIGHT) append(" Italic")
+}
+/**
+ * 字体扫描指纹的 schema 版本：**指纹组成变化时递增**以主动作废既有存档（不必等系统字体变）。
+ *
+ * v1 → v2：指纹第二分量由「纯族名哈希」变为「族名哈希 ⊕ 平台字体文件环境哈希
+ * （见 `SystemFontSource.environmentHash` / `fontFilesEnvironmentHash`）」，以检测
+ * 「同族名换文件」（§8-2 加固）。老库存的是 v1 ⇒ 首次启动指纹不匹配、重扫一次。
+ */
+const val FONT_SCAN_CACHE_VERSION = 2L
+
+/** 计算系统字体族名集合的哈希（用于判定系统字体是否变化） */
+fun systemFontFamilyHash(): Long {
+    val families = systemFontFamilies()
+    // 0x9e3779b97f4a7c15（FNV 黄金比例种子）超出 Long.MAX_VALUE，取其二补（两的补码）负字面量。
+    var h: Long = -0x61c8864680b583ebL
+    for (f in families) {
+        h = h xor f.hashCode().toLong()
+        h *= 1099511628211L
+    }
+    return h
 }

@@ -171,13 +171,17 @@ internal suspend fun prerasterPage(
     imgCache: PageImageCache<DecodedImage>,
     bgCache: PageImageCache<DecodedImage>,
 ): Boolean {
-    val lines = runCatching { host.pageLines(pos) }.getOrNull()
-    if (lines == null || lines.isEmpty()) {
-        Logger.d("Orilumn.TAP", "preraster skip: no lines ch=${pos.chapter} char=${pos.slice.charStart}")
-        return false
-    }
+    val lines: List<DrawLine> = runCatching { host.pageLines(pos) }.getOrNull().orEmpty()
     val pageImages: List<PageImage> = runCatching { host.pageImages(pos) }.getOrNull().orEmpty()
     val pageBackgrounds: List<PageBackground> = runCatching { host.pageBackgrounds(pos) }.getOrNull().orEmpty()
+    // 跳过条件必须与绘制路径 `ReaderPageCanvas` 同口径（「三类皆空」才算空页）：纯图页没有
+    // 任何行（替换块不产 `DrawLine`），早先这里只看 `lines` ⇒ 图页既不预栅也不预热位图，
+    // 翻到它只能靠绘制路径现解现画：真机日志 `preraster skip: no lines ch=7 char=17667` 之后
+    // 整页栅格 `n=0 imgs=1`（灰占位就有图位）⇒ 症状「翻到图页先空/灰一下」。
+    if (lines.isEmpty() && pageImages.isEmpty() && pageBackgrounds.isEmpty()) {
+        Logger.d("Orilumn.TAP", "preraster skip: empty page ch=${pos.chapter} char=${pos.slice.charStart}")
+        return false
+    }
 
     // **先把图解出来再栅**：早先这里只用 `imgCache.get()` 取已缓存的图，取不到就填
     // null⇒ 把**灰占位块**栅进池子；真图解出后 `PageRasterFingerprint.images` 里的
@@ -199,7 +203,7 @@ internal suspend fun prerasterPage(
     // 与 ReaderPageCanvas 同款对齐：章节绝对 Y → 页坐标系。
     val imgs = pageImages.takeIf { it.isNotEmpty() }
     val rawBgs = pageBackgrounds.takeIf { it.isNotEmpty() }
-    val lineMin = lines.minOf { it.yTop }
+    val lineMin = lines.minOfOrNull { it.yTop }
     val imgMin = imgs?.minOf { it.yTop }
     val bgMin = rawBgs?.minOf { it.yTop }
     val anchorY = listOfNotNull(lineMin, imgMin, bgMin).minOrNull() ?: return false
@@ -273,8 +277,13 @@ private suspend fun warmImagesForPreraster(
     kotlinx.coroutines.coroutineScope {
         val imgDeferred = missImgs.map { img -> this.async { img to runCatching { host.loadPageImage(img) }.getOrNull() } }
         val bgDeferred = missBgs.map { ref -> this.async { ref to runCatching { host.loadBackgroundImage(ref.first, ref.second) }.getOrNull() } }
-        for ((img, bmp) in imgDeferred.awaitAll()) if (bmp != null) imgCache.put(imgKeyOf(img), bmp)
-        for ((ref, bmp) in bgDeferred.awaitAll()) if (bmp != null) bgCache.put(bgKeyOf(ref.first, ref.second), bmp)
+        // 整批 putAll：同页多图必须一起留下，否则后一条会把前一条（同页仍在用）淘汰掉。
+        imgCache.putAll(imgDeferred.awaitAll().mapNotNull { (img, bmp) -> bmp?.let { imgKeyOf(img) to it } })
+        bgCache.putAll(
+            bgDeferred.awaitAll().mapNotNull { (ref, bmp) ->
+                bmp?.let { bgKeyOf(ref.first, ref.second) to it }
+            },
+        )
     }
 
     // 复核：解码失败/超时的图不算备齐（占位块入池就是闪烁的来源）。

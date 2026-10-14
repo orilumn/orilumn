@@ -192,8 +192,9 @@ object DrawLineBuilder {
             val line = result.lines.getOrNull(gearIndex) ?: continue
             val xOff = leaf.contentLeft + (leaf.style.border.left + leaf.style.padding.left).roundToInt()
             val breakW = NormalFlowLayout.innerBreakWidth(leaf.style, leaf.contentWidth)
+            // P3：绘制与测量读**同一**高度预算（盒上的 replaceableFitH）——量画同值的唯一渠道。
             val usedW = NormalFlowLayout.replacedUsedSize(
-                el, leaf.style, breakW, imageLoader, chapterHref,
+                el, leaf.style, breakW, imageLoader, chapterHref, leaf.replaceableFitH,
             ).first.coerceAtLeast(1)
             out.add(
                 PageImage(

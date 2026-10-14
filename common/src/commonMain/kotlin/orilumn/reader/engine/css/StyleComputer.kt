@@ -559,9 +559,26 @@ class StyleComputer(
 
     private var _hasDisplay: Boolean? = null
 
-    /** Break values not declared default to AUTO; `avoid` (any variant of "avoid", incl. `avoid-page`) → AVOID. */
-    private fun parseBreakRule(value: String?): BreakRule =
-        if (value?.lowercase()?.contains("avoid") == true) BreakRule.AVOID else BreakRule.AUTO
+    /**
+     * Break values not declared default to [BreakRule.AUTO]. `avoid` (any variant, incl. `avoid-page`)
+     * → [BreakRule.AVOID]; the forced values `always` / `page` / `left` / `right` / `recto` / `verso`
+     * → [BreakRule.ALWAYS].
+     *
+     * Before 2026-10-11 anything without "avoid" became AUTO, so **forced breaks were
+     * indistinguishable from AUTO** and every `break-before: always` / `page-break-before: always`
+     * (and the `left`/`right`/`recto`/`verso` variants) was dropped. Valid `break-inside` only ever
+     * takes auto/avoid, so mapping the forced values to ALWAYS cannot regress it (`breakInsideAvoid`
+     * still tests `== AVOID`).
+     */
+    private fun parseBreakRule(value: String?): BreakRule {
+        val v = value?.trim()?.lowercase() ?: return BreakRule.AUTO
+        if (v.isEmpty()) return BreakRule.AUTO
+        if (v.contains("avoid")) return BreakRule.AVOID
+        return when (v) {
+            "always", "page", "left", "right", "recto", "verso" -> BreakRule.ALWAYS
+            else -> BreakRule.AUTO
+        }
+    }
 
     /** `break-*` with the legacy `page-break-*` alias (declared main wins, else alias). */
     private fun parseBreakAny(w: Map<String, String>, main: String, alias: String): BreakRule =

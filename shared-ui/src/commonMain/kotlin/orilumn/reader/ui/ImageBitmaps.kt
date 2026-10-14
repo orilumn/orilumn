@@ -14,6 +14,7 @@ expect fun imageBitmapOf(bytes: ByteArray): ImageBitmap?
 
 /**
  * 按目标宽采样的解码（正文大图省内存）：Android 用 `inSampleSize` 粗采样+精缩一次到位；
+ * **只缩不放**（目标宽 ≥ 源宽时给全量解码结果，绘制侧缩放兜住放大）。
  * JVM 端 Skia 无采样语义，直解后由 Compose 绘制期缩放（内存由调用方缓存约束）。
  */
 expect fun sampledImageBitmapOf(bytes: ByteArray, targetWidth: Int): ImageBitmap?

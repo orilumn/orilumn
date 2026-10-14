@@ -13,7 +13,7 @@ import orilumn.reader.engine.css.CssBundle
 import orilumn.reader.engine.css.LightCssParser
 import orilumn.reader.engine.css.StyleComputer
 import orilumn.reader.engine.css.StyleSheet
-import orilumn.reader.engine.html.ChapterPreprocessor
+import orilumn.reader.engine.html.HEADING_TAGS
 import orilumn.reader.engine.html.HtmlTreeConverter
 import orilumn.reader.engine.html.MarkupElement
 import orilumn.reader.engine.html.ParsedChapter
@@ -105,6 +105,14 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
     private val backgroundDispatcher: kotlinx.coroutines.CoroutineDispatcher = Dispatchers.Default,
     /** Optional EPUB image loader for `<img>` rendering; null = images fall back to placeholders. */
     private val imageLoader: ImageLoader? = null,
+    /**
+     * **应用级共享队列**（宿主注入 [AppTaskScheduler.scheduler]）。null ⇒ 退回「每书一个池」
+     * （绑定 [bgScope]，[close] 整池取消）——**测试与无宿主场景的兼容默认值**，语义与旧行为一致。
+     *
+     * 注入共享池时，[close] 只撤本控制器键域内的活（[controllerKeyPrefixes]），不惊动
+     * 共享池里的其他书 / 系统级字体任务。
+     */
+    private val sharedScheduler: TaskScheduler? = null,
 ) {
 
     /**
@@ -301,18 +309,6 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         flipDir = 0
     }
 
-    /** 排版槽数（原则 §5）：`max(1, min(2, cpuCount - 2))`。
- *
- *  - `cpuCount - 2`：给 UI / 目标页 / 系统各留一份核。
- *  - **上限 2**：P0 真机实测的拐点（平板：轻页在 0/1/2 并发下耗时持平、无 Skia 锁式崩塌；
- *    重页由内容主导、与槽数无关）。既然加槽买不到速度，就只给 2。
- *  - 下限 1：小核设备退化为串行后台塑形。
- *
- *  抽成纯函数（而非内联在构造器里）是为了能测：3 核一类设备上「减 1」与「减 2」的差别
- *  只有这一个函数能表达清楚，而开发机通常测不出（核数多时被上限夹住）。
- *
- *  @param cpuCount 逻辑核数（[platformCpuCount] 的取值）。 */
-fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
 
 /** P1f/R13: controller-owned background scope (child of the injected [scope]'s Job).
      *  ALL background launches (prefill/B1/B2/prewarm/watchers, scheduler internals) run here so
@@ -328,12 +324,18 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
         openGateWantsB1 = false
         openGateWantsB2 = false
         rollingLaneLock.withLock { rollingLanes.clear() }
+        // 键域取消要先于 bgScope.cancel()：共享池的任务体不在 bgScope 上，不受后者影响。
+        if (sharedScheduler != null) scheduler.cancelMatchingPrefixes(CONTROLLER_KEY_PREFIXES)
         bgScope.cancel()
     }
 
     /** Priority pool for ALL background layout work (P2.1/P2.4: page prefill, prev-chapter bump,
-     *  B1, B2, parse prewarm). P0 spike measurements decided the shape; it is production since P1. */
-    private val scheduler = TaskScheduler(
+     *  B1, B2, parse prewarm). P0 spike measurements decided the shape; it is production since P1.
+     *
+     *  调度重构：宿主注入 [sharedScheduler]（[AppTaskScheduler.scheduler]，应用级单例）后，
+     *  排版与系统级字体扫描共处同一队列；未注入（测试/无宿主）时退回每书一池（绑 [bgScope]，
+     *  [close] 随 [bgScope] 整池取消，旧语义）。 */
+    private val scheduler: TaskScheduler = sharedScheduler ?: TaskScheduler(
         bgScope,
         // 原则 §5：`max(1, cpuCount() - 2)` —— 给 UI / 目标页 / 系统各留一份。**上限 2** 是 P0 真机
         // 实测的拐点（平板：轻页在 0/1/2 并发下耗持平，重页由内容主导、与槽数无关），既然加槽
@@ -344,6 +346,7 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
         // 翻页永不占槽（调用方线程同步跑），槽数只管后台活。
         maxSlots = shapingSlotsFor(platformCpuCount()),
     )
+
 
     /** P4: chapters whose markup + light structure were already prepped, chapter → the paramHash they
      *  were prepped under. A later change of the (paramHash-determining) typography throws it out; the
@@ -789,9 +792,11 @@ fun shapingSlotsFor(cpuCount: Int): Int = maxOf(1, minOf(2, cpuCount - 2))
      *
      *  Why: [readChapter] (the epub-fallback path) was the only caller of `bindChapterContext`, so
      *  a persist-loaded chapter on a cold process left `chapterHref` empty. `intrinsicSizeOf`
-     *  then skipped the binary-bounds probe (`chapterHref.isNotBlank()` guard), and full-width
-     *  images (`orilumn-fullwidth-image { width:100% }`) fell back to height=width/2 — 半高图盒 —
-     *  which changed the pagination table (修复见分支 fix/photo-relayout-height，实测 5页↔4页)。
+     *  then skipped the binary-bounds probe (`chapterHref.isNotBlank()` guard) and the image fell
+     *  back to the "no intrinsic info" 300px / 2:1 box, which changed the pagination table
+     *  (修复见分支 fix/photo-relayout-height，实测 5页↔4页)。当时主题还把无约束独图拉满宽，
+     *  回退后果被放大成「半高图盒」；该主题规则已于 P3a 退役（见 `traditional.css` 编者注），
+     *  但探图仍必须发生 —— 否则连自然尺寸都拿不到。
      *
      *  层级：排版层·上 编排——把正在铺排的章（spine href）喂给 排版层·下 的分层引擎上下文，
      *  不改形状/量测语义、不动用户层主题。廉价幂等（字符串赋值），热路径无感。
@@ -1453,6 +1458,13 @@ private fun stepTempPrefill(unit: ChapterUnit, ip: InProgressPagination, lastDir
         // 开发期 fail-fast：记 e 后抛（后台 SupervisorJob 收容，不连累前台；栈留痕）。
         val fwd = bc.shapeTempPageForward(prep, ip.profileSnapshot, ip.contentW, ip.contentH, origin.first, ip.shapes, origin.second)
             ?: error("stepTempPrefill fillForward FAIL ch=${unit.chapterIndex} origin=(${origin.first},${origin.second})")
+        // 「游标永不停滞」canary（按理恒为零；源头是 shapeTempPageForward 内的 placedLines guard）：
+        // 塑形点没越过入参原点 ⇒ 该页一个字符都没推进。追进去只会让窗口塞满同页副本、水位永不推进，
+        // 症状是前向翻页原地不动（曾经的真实事故：宽屏全屏下超高整宽插图）。丢弃并记 w。
+        if (fwd.nextBlock < origin.first || (fwd.nextBlock == origin.first && fwd.nextLine <= origin.second)) {
+            Logger.w(logTag, "prefill fwd-stall DROP ch=${unit.chapterIndex} origin=(${origin.first},${origin.second}) next=(${fwd.nextBlock},${fwd.nextLine}) shaped=b${fwd.page.blockStart}[${fwd.page.slice.charStart},${fwd.page.slice.charEnd})")
+            return 0
+        }
         // 失配即窗口/水位已分叉：追加即跳页。丢弃（不追加、不推水位，不变量 intact），记 e 待查。
         if (!tempPagesTile(tail.slice, fwd.page.slice)) {
             Logger.e(logTag, "prefill fwd-stale-window DROP ch=${unit.chapterIndex} tail=b${tail.blockStart}[${tail.slice.charStart},${tail.slice.charEnd}) shaped=b${fwd.page.blockStart}[${fwd.page.slice.charStart},${fwd.page.slice.charEnd})")
@@ -1939,6 +1951,15 @@ fun windowPrefillSnapshotForTest(): Triple<Int, Long, Set<Int>>? =
  * 兜底降级回第 7 档，兜底随即被埋进章距序列——这正是"跨章跳过"旧规则想避开的困境，
  * 换个键才是真正的解法。 */
 fun edgeKey(chapter: Int) = "edge:$chapter"
+
+/**
+ * 本控制器在（可能共享的）[TaskScheduler] 中拥有的**全部键域前缀**。
+ *
+ * [BookDocumentController.close] 在调度器为应用级共享时按此整域取消，避免误杀他书/系统任务。
+ * 新增 dispatch 点时**必须同步登记**（键命名见：`b1:` 本章全量、`b2:` 整书章扫描、
+ * `edge:` d=1 章外兜底、`pg:` 邻页装配、`pre:` 解析预热）。
+ */
+private val CONTROLLER_KEY_PREFIXES = listOf("b1:", "b2:", "edge:", "pre:", "pg:")
 
 /** 邻页序列的一项（原则 §3.1）。序列本身是**有序**的，出队次序即优先级次序。 */
 sealed class NeighborItem {
@@ -2913,8 +2934,8 @@ private fun finishCanonicalBackground(
     suspend fun prepareRelayoutLight(chapter: Int, anchorChar: Int): ReflowResult? {
         clearFlipDir("param-preview")
         val unit = unitAt(chapter) ?: return null
+        val markup = unit.markup ?: return null   // 无 markup：无事可做，副作用全免
         bindChapterFor(unit)
-        val markup = unit.markup ?: return null
         activeChapter = chapter
         // 整形前先备字体（同 prepareRelayout；新字体预览依赖池跟进）。
         (layouter as? BoxChapterLayouter)?.let { bc ->
@@ -2972,6 +2993,8 @@ private fun finishCanonicalBackground(
      */
     suspend fun prepareRelayout(chapter: Int, anchorChar: Int): ReflowResult? {
         clearFlipDir("param-change")
+        val unit = unitAt(chapter) ?: return null
+        val markup = unit.markup ?: return null   // 无 markup：无事可做，副作用全免
         // 调参同样第一优先：epoch 已 bump 使在途 B2 过期（执行后丢弃），此处再主动砍掉，
         // 免得它们排完整章才丢（纯浪费 CPU/内存峰值）。落位章的新 B1 与尾部分派不受影响。
         preemptForNavigation()
@@ -2979,9 +3002,7 @@ private fun finishCanonicalBackground(
         val myEpoch = layoutEpoch
         activeChapter = chapter
         voidPreflight()
-        val unit = unitAt(chapter) ?: return null
         bindChapterFor(unit)
-        val markup = unit.markup ?: return null
         // 整形前先备字体（同 ensureChapterLayout；本函数产物必重建，无需作废）。
         (layouter as? BoxChapterLayouter)?.let { bc ->
             onDemandFonts(bc.fontDemandFor(unit.cssBundle))
@@ -4150,16 +4171,7 @@ private fun finishCanonicalBackground(
             // Collect the chapter's stylesheets (embedded <style> + linked css) for the cascade step.
             unitAt(index)?.cssBundle = buildCssBundle(spine.href, parsed)
             Logger.w(logTag, "readChapter ch=$index len=${text.length} css=${unitAt(index)?.cssBundle?.cssTexts?.size ?: 0} t=${platformNowMs() - t0}ms")
-            // User-layer annotations (e.g. full-width image figures) run here, once, and are cached
-            // with the chapter tree. Author stylesheets feed a book-only cascade so a book that
-            // sized an image itself is never stretched.
-            // P2: 与排版同视口的 @media 求值（内容区全视口）。
-            val contentW = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
-            val contentH = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
-            val viewport = orilumn.reader.engine.css.CssViewport(contentW, contentH)
-            val authorSheets: List<StyleSheet> =
-                (unitAt(index)?.cssBundle?.cssTexts ?: emptyList()).map { LightCssParser().parse(it, viewport) }
-            return ChapterPreprocessor.preprocess(parsed.tree, authorSheets)
+            return parsed.tree
         }
         // Malformed XML: fall back to plain text (no stylesheet sources).
         unitAt(index)?.cssBundle = null
@@ -4196,11 +4208,21 @@ private fun finishCanonicalBackground(
     /** Chapter context exposed to the UI layer for logging. */
     fun ctxPublic(index: Int): String = ctx(unitAt(index))
 
-    /** Chapter title: first 20 characters of the text from the first non-empty paragraph; empty
-     * when none. */
-    private fun chapterTitle(markup: orilumn.reader.engine.html.MarkupElement): String {
-        val t = collectText(markup).trim()
-        return t.take(20).replace(Regex("\\s+"), " ")
+    /** Chapter title: the first heading (`h1`–`h6`) node's own text, whitespace-normalized; empty
+     *  when the chapter carries no heading (callers fall back to the href name / "第 N 章").
+     *
+     *  只取标题元素自身文本，**绝不**把正文并进来：早先取「全树前 20 字」，而章节树的第一段
+     *  正文紧跟着标题，于是顶栏章节名后面挂着一截正文（读起来像标题没写完）。 */
+    private fun chapterTitle(markup: MarkupElement): String {
+        val heading = firstHeading(markup) ?: return ""
+        return collectText(heading).trim().replace(Regex("\\s+"), " ").take(20)
+    }
+
+    /** First heading node in document order (depth-first pre-order), or null when the tree has none. */
+    private fun firstHeading(el: MarkupElement): MarkupElement? {
+        if (el.tag in HEADING_TAGS) return el
+        for (c in el.children) firstHeading(c)?.let { return it }
+        return null
     }
 
     /** Page-location description, e.g. `pages[0..1)line0-3`; "(无页)" when there is no page. */

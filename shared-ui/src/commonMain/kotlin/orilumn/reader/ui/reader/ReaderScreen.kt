@@ -213,12 +213,16 @@ fun ReaderScreen(
             val bgJobs = missBgs.map { ref ->
                 async { ref to runCatching { currentHost.loadBackgroundImage(ref.first, ref.second) }.getOrNull() }
             }
-            for ((img, bmp) in imgJobs.awaitAll()) {
-                if (bmp != null) imgCache.put(imgKeyOf(img), bmp)
-            }
-            for ((ref, bmp) in bgJobs.awaitAll()) {
-                if (bmp != null) bgCache.put(bgKeyOf(ref.first, ref.second), bmp)
-            }
+            // 整批 putAll（不是逐条 put）：同一页的多图必须一起留下，否则后一条会把前一条
+            // （同页仍在用）淘汰掉 ⇒ 同页只画得出一张图（见 PageImageCache.putAll）。
+            imgCache.putAll(
+                imgJobs.awaitAll().mapNotNull { (img, bmp) -> bmp?.let { imgKeyOf(img) to it } },
+            )
+            bgCache.putAll(
+                bgJobs.awaitAll().mapNotNull { (ref, bmp) ->
+                    bmp?.let { bgKeyOf(ref.first, ref.second) to it }
+                },
+            )
         }
     }
 

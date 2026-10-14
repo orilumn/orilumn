@@ -92,6 +92,12 @@ sealed interface FontPanelRow {
     data class Entry(val family: String, val members: List<FontEntry>, val selected: Boolean) : FontPanelRow
 }
 
+/**
+ * 系统字体扫描进度（用户层·共享）：面板打开且扫描在途时的实时态（方案 §2.4）。
+ * `done` = 已落库族数，`total` = 本轮枚举到的族总数；`done >= total` 或 null 即不显示。
+ */
+data class FontScanProgress(val done: Int, val total: Int)
+
 /** 纯行模型：开关 + 导入区 + 跟随原书 + 单列字体（调用方只管喂全量表 + 当前槽位值）。 */
 fun buildFontRows(
     entries: List<FontEntry>,
@@ -200,6 +206,8 @@ fun FontLibraryPanel(
     importFocusedKey: String? = null,
     /** 独立开关行聚焦态（无导入区时，Tab 环驱动）。 */
     toggleFocused: Boolean = false,
+    /** 系统字体扫描实时进度（方案 §2.4）：非 null 时在列表上方显示「已 N / 共 M 族」。 */
+    scanProgress: FontScanProgress? = null,
 ) {
     // 同时只展开一行的滑动操作：新展开即收起旧行。
     var openKey by remember { mutableStateOf<String?>(null) }
@@ -249,6 +257,10 @@ fun FontLibraryPanel(
                     )
                 else -> Unit
             }
+        }
+        // 实时进度（方案 §2.4）：扫描在途时钉在列表上方，逐族长出；已扫完/库热即不显示。
+        if (scanProgress != null && scanProgress.total > 0) {
+            FontScanProgressBar(scanProgress, p)
         }
         LazyColumn(state = listState, modifier = Modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
             items(rows.size - fixedCount) { i ->
@@ -313,6 +325,28 @@ fun FontLibraryPanel(
                     }
                 }
             }
+        }
+    }
+}
+
+/**
+ * 扫描进度条（用户层·共享）：文字「正在扫描系统字体 N / M」+ 细进度条。
+ * 纯展示，不参与行模型（[buildFontRows] 保持纯函数）；键盘导航不涉及本区。
+ */
+@Composable
+private fun FontScanProgressBar(progress: FontScanProgress, p: Palette) {
+    val frac = (progress.done.toFloat() / progress.total).coerceIn(0f, 1f)
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+    ) {
+        Text(
+            "正在扫描系统字体 ${progress.done} / ${progress.total}",
+            color = p.muted,
+            fontSize = 12.sp,
+        )
+        Spacer(Modifier.height(4.dp))
+        Box(Modifier.fillMaxWidth().height(2.dp).background(p.borderSoft)) {
+            Box(Modifier.fillMaxWidth(frac).height(2.dp).background(PanelGold))
         }
     }
 }

@@ -3,6 +3,7 @@ package orilumn.reader.desktop
 import orilumn.reader.data.font.FontEntry
 import orilumn.reader.data.settings.BookSettings
 import orilumn.reader.data.settings.ReaderSettings
+import orilumn.reader.ui.reader.FontScanProgress
 import orilumn.reader.ui.reader.ReaderHost
 import orilumn.reader.ui.reader.ReaderPos
 import orilumn.reader.ui.reader.ReaderScreen
@@ -22,6 +23,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
 import io.github.vinceglb.filekit.PlatformFile
 import io.github.vinceglb.filekit.dialogs.FileKitDialogSettings
 import io.github.vinceglb.filekit.dialogs.FileKitMode
@@ -63,6 +66,13 @@ fun ReaderView(
     onSaveTheme: (ThemePreset) -> Unit,
     onDeleteTheme: (ThemePreset) -> Unit,
     modifier: Modifier = Modifier,
+    /**
+     * 顶栏 inset（平台层·桌面壳）：无边框窗口的自绘系统标题栏高度，由壳动画驱动。
+     * 阅读顶栏据此把内容行让到标题栏之下，使「系统按钮 + 阅读顶栏」拼成一条整栏（见 WindowChrome.kt）。
+     */
+    statusBarInset: Dp = 0.dp,
+    /** 顶/底栏显隐回抛（壳据此让系统标题栏与阅读栏同拍滑入/滑出）。 */
+    onBarsVisibleChanged: (Boolean) -> Unit = {},
 ) {
     var anchorOverride by remember(book) { mutableStateOf<Pair<Int, Int>?>(null) }
     var session by remember(book) { mutableStateOf(0) }
@@ -80,13 +90,16 @@ fun ReaderView(
     fun commit(next: ReaderSettings) = onSettingsChange(next)
 
     // 桌面字库（用户层·壳自持，内容与平板同口径）：
-    // - 发现链在宿主 `syncPanelFonts`：macOS 目录扫描 + 中文名链（方案B name 表 → 方案A CoreText），
-    //   落库 displayName；与平板 systemFontFaces 同源（skia 系统枚举），只是本地化名来源不同；
+    // - 发现链在 `DesktopFontScan`（应用级共享池 45/5 档）：skia 系统枚举 + 中文名链
+    //   （方案B name 表 → 方案A CoreText），逐族落库 displayName；与平板 systemFontFaces 同源，
+    //   只是本地化名来源不同；启动检测一次、面板打开提档实扫（方案 §2.2/§2.4）；
     // - 列表不再只留系统行：导入/隐藏/删除与平板同一 `buildFontRows`（导入区 + 已导入区全开，
     //   本地导入经 FileKit 原生对话框、无线导入经桌面独写对话框，同走共享服务；SAF/Android Dialog
     //   是平板 UI，不进共享）。
     val fontLibrary = remember(store) { store.fontLibrary() }
     var fontEntries by remember(book) { mutableStateOf<List<FontEntry>>(emptyList()) }
+    /** 系统字体扫描实时进度（方案 §2.4）：面板可见且扫描在途时非 null。 */
+    var fontScanProgress by remember(book) { mutableStateOf<FontScanProgress?>(null) }
     fun refreshFonts() = scope.launch(kotlinx.coroutines.Dispatchers.IO) {
         fontEntries = fontLibrary.allEntries(fontLibrary.list())
     }
@@ -161,11 +174,22 @@ fun ReaderView(
         val densityScope = LocalDensity.current
         val viewportW = with(densityScope) { maxWidth.toPx() }.toInt().coerceAtLeast(16)
         val viewportH = with(densityScope) { maxHeight.toPx() }.toInt().coerceAtLeast(16)
-        // 窗口拉伸防抖：拖动中每像素都重组，宿主重建（重解析+重排）配漏斗互斥即自杀式
-        // BUSY-DROP 风暴——旧宿主落位、新宿主画布=白屏。静置 400ms 后再用稳定值重建。
+        // 视口变化 → **按帧节流**提交给排版（分页调度总则第 1 条：改变版面的情况立即同步排版
+        // 渲染，锚页所在章转临时表；下方 `applyViewportSize` + 两段式重排就是那个「立即」）。
+        //
+        // 为什么是「按帧」而不是「逐事件」也不是「静置 400ms」（旧口径）：
+        //  - 逐事件：鼠标移动事件可达 100+Hz，每个像素都排版会把手工闸门打满，酿成
+        //    BUSY-DROP 风暴（旧宿主落位 + 新画布 = 白屏，这条教训仍在）；
+        //  - 静置 400ms：那 400ms 里**内容区与窗口不符** —— 页位图要么被非等比拉变形、
+        //    要么整块留底色（用户实测：右边界反复重画、字被压扁）。那是拿观感换性能，
+        //    与总则「哪个有利用哪个」相悖：单页栅格已从 1674ms 降到 5ms，排版侧负担得起。
+        //
+        // 实现：每次尺寸变化都**重启**本 effect，`withFrameNanos` 等到下一帧才提交 ⇒
+        // 同帧内的后续变化取消前一次提交，每帧至多排一次，中间尺寸丢弃（conflate 语义），
+        // 且松手后下一帧即完成，不再额外等 400ms。
         var settledViewport by remember(book) { mutableStateOf(viewportW to viewportH) }
         LaunchedEffect(book, viewportW, viewportH) {
-            kotlinx.coroutines.delay(400)
+            androidx.compose.runtime.withFrameNanos { }
             settledViewport = viewportW to viewportH
         }
 
@@ -230,15 +254,39 @@ fun ReaderView(
             val anchor2 = currentPos
             host.commitRelayout(anchor2?.chapter ?: 0, anchor2?.slice?.charStart ?: 0)?.let { pushLanding(it) }
         }
-        // 面板字库经宿主装载（R4：枚举+中文名链已下沉 `syncPanelFonts`，视图只收表；
-        // 键只跟书，视口 resize 重建宿主不重枚举）。
+        // 面板字库读 DB（R4 的枚举+中文名链已迁到 `DesktopFontScan` 的扫描任务，视图只收表）；
+        // 键只跟书，视口 resize 重建宿主不重枚举。开书路径不触发扫描，改由面板可见性/启动检测驱动。
         LaunchedEffect(book) {
-            fontEntries = desktopHost?.syncPanelFonts() ?: fontLibrary.allEntries(fontLibrary.list())
+            // 开书只直读 DB（廉价）：扫描由启动检测/面板可见性驱动（方案 §2.2/§2.4），
+            // 库冷时不是占位——面板打开即提档到池顶实扫，逐族增量长出列表。
+            fontEntries = fontLibrary.allEntries(fontLibrary.list())
         }
         // 面板开抑制 + 关门控（共享收口 PanelRelayoutGate，平板同调）：打开即抑制后台
         // canonical 并快照版式指纹；关闭经门控判定，版式真变才整书 finalize 并落位。
+        //
+        // 同处驱动**系统字体扫描需求模式**（方案 §2.4/§3.4，与平板同式）：面板可见 ⇒ 同键
+        // `fontscan` 提档到池顶（立即实扫，逐族增量刷新列表）；不可见 ⇒ 降回 45 续跑。
         LaunchedEffect(book, session, settingsOpen) {
-            if (settingsOpen) desktopHost?.setSettingsPanelOpen(true)
+            val scan = DesktopFontScan.scanner(fontLibrary)
+            if (settingsOpen) {
+                // 面板要用：装增量刷新回调（每族落库后重读 DB + 更新进度），再提档。
+                scan.onFamilyScanned = { done, total ->
+                    scope.launch {
+                        fontScanProgress = if (done < total) FontScanProgress(done, total) else null
+                    }
+                    refreshFonts()
+                }
+                desktopHost?.setSettingsPanelOpen(true)
+                scan.onPanelVisibility(true)
+            } else {
+                scan.onPanelVisibility(false)
+                scan.onFamilyScanned = { _, _ -> }
+                fontScanProgress = null
+            }
+        }
+        // 扫描器是**进程级单例**：离开本视图（回书架/换书重建）时卸下回调，别让它持有已销毁的组合作用域。
+        DisposableEffect(book) {
+            onDispose { DesktopFontScan.scanner(fontLibrary).onFamilyScanned = { _, _ -> } }
         }
         // 设置驱动的原位重排（R15 两段式，与平板“tick 轻刷新 + 关面板全套”同序）：
         // 第一段 150ms 防抖落位即调（本章轻刷新）；第二段只在面板关闭时跑全套——面板打开
@@ -274,6 +322,8 @@ fun ReaderView(
         ReaderScreen(
             host = snapshot,
             settings = settings,
+            statusBarInset = statusBarInset,
+            onBarsVisibleChanged = onBarsVisibleChanged,
             onBack = onBack,
             onNight = {
                 commit(settings.copy(scheme = if (settings.scheme == "night") "day" else "night"))
@@ -296,6 +346,7 @@ fun ReaderView(
             // 内容与平板同口径：导入区 + 已导入区全开；
             // 导入经 FileKit（桌面 UI），WiFi 经桌面独写对话框（服务共享），发现链见上（macOS 独有，保留）。
             fontEntries = fontEntries,
+            fontScanProgress = fontScanProgress,
             showImportedSection = true,
             canFontImport = true,
             onFontImport = { fontPicker.launch() },

@@ -117,6 +117,8 @@ fun ReaderSettingsPanel(
     settings: ReaderSettings,
     /** F4a 统一字体列表（系统 + 导入，含隐藏；排序/分区由 [buildFontRows]）。 */
     fontEntries: List<FontEntry>,
+    /** 系统字体扫描实时进度（方案 §2.4）：面板打开且扫描在途时非 null，字体页显示「已 N / 共 M 族」。 */
+    fontScanProgress: FontScanProgress? = null,
     onDismiss: () -> Unit,
     onPreview: (ReaderSettings) -> Unit,
     onCommitTypography: (ReaderSettings) -> Unit,
@@ -734,6 +736,7 @@ fun ReaderSettingsPanel(
                                 toggleFocused = fontButtonFocus?.let { fontButtonRing.getOrNull(it)?.first } == "toggle",
                                 onMouseMove = onMove,
                                 listState = listState,
+                                scanProgress = fontScanProgress,
                             )
                             Sub.WeightPicker -> {
                                 val fam = weightPickFamily
@@ -1301,7 +1304,7 @@ private fun AnimModePage(
     p: Palette,
 ) {
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
-        item { ThemeOpt("平滑", s.pageAnimationMode != "curl", keys[0].onEnter, p, nav = nav, index = 0) }
+        item { ThemeOpt("滑动", s.pageAnimationMode != "curl", keys[0].onEnter, p, nav = nav, index = 0) }
         item { ThemeOpt("卷曲", s.pageAnimationMode == "curl", keys[1].onEnter, p, nav = nav, index = 1) }
         item { Spacer(modifier = Modifier.height(24.dp)) }
     }

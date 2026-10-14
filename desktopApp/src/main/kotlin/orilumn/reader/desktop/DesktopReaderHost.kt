@@ -73,6 +73,8 @@ class DesktopReaderHost(
         logTag = "Orilumn.Desktop",
         scope = hostScope,
         imageLoader = ImageLoader(reader),
+        // 调度重构：应用级共享队列（排版 + 系统级字体扫描同池，抢占才有意义）。
+        sharedScheduler = orilumn.reader.engine.AppTaskScheduler.scheduler,
     ).also {
         it.cacheRoot = cacheRoot?.absolutePath?.toPath()
         it.diskCacheVersion = diskCacheVersion
@@ -227,6 +229,7 @@ class DesktopReaderHost(
     override suspend fun loadPageImage(img: PageImage): DecodedImage? = withContext(Dispatchers.IO) {
         // P0a：与平板同一口径——正文插图解码结果统一是 skia `DecodedImage`（插图已下沉进
         // 整页位图）；取字节仍走控制器单源，失败回 null（阅读面画灰色占位）。
+        // `decodeScaled` 只缩不放（源图更小时直接给全量解码结果，绘制侧 `drawImageRect` 兜住放大）。
         val bytes = controller.loadPageImageRaw(img) ?: return@withContext null
         ImageCodec.decodeScaled(bytes, img.widthPx.coerceAtLeast(1)) ?: ImageCodec.decode(bytes)
     }
@@ -257,24 +260,6 @@ class DesktopReaderHost(
     /** 锚点落位（目录跳转/设置重建）：章内字符所在页；无内容回 null（调用方退回 locateStart）。 */
     private suspend fun landAnchor(chapter: Int, char: Int): ReaderPos? =
         controller.pageAtChar(chapter, char)?.let { ReaderPos(chapter, it) }
-
-    /**
-     * R4 面板字库装载（用户层·壳，与平板 `ReaderActivity.loadPanelFonts` 同位）：
-     * 系统枚举 + 中文名链（方案B name 表 → 方案A CoreText，macOS 独有，保留）+ 落库，
-     * 返回统一全量表。原 `ReaderView` 视图层直写，归位到此。
-     */
-    suspend fun syncPanelFonts(): List<orilumn.reader.data.font.FontEntry> = withContext(Dispatchers.IO) {
-        val sys = runCatching { orilumn.reader.engine.skia.systemFontFaces() }.getOrDefault(emptyList())
-        val faces = runCatching {
-            val localized = withContext(Dispatchers.Default) {
-                val nameTable = NameTableChineseNames.namesFor(sys.map { it.family })
-                val coreText = MacFamilyNames.localizedFamilyNames(sys.map { it.family })
-                coreText + nameTable // 同键以右侧（name 表）为准
-            }
-            fontLibrary.syncSystemFaces(sys, localizedNames = localized)
-        }.getOrElse { runCatching { fontLibrary.list() }.getOrDefault(emptyList()) }
-        fontLibrary.allEntries(faces)
-    }
 
     /**
      * R15 设置两段式·第一段（用户层·壳，150ms 防抖落位即调）：本章轻刷新。换 profile → 追装字库池 →

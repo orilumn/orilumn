@@ -123,8 +123,7 @@ class P5cOffscreenCorpusTest {
     private fun checkPageLines(book: String, lines: List<DrawLine>) {
         // 空页合法：纯空白/封面章零行仍给一空页（Paginator.paginateFrom），只验单调与页高。
         if (lines.isEmpty()) return
-        // yTop 是章内绝对坐标：单调 + 行高为正恒成立；页内高度用相对首行 top 断言
-        // （== 版心高 = viewportH - 上下边距，break-inside:avoid 整块扩展时可超，见 Paginator.applyBreakInsideAvoid）。
+        // yTop 是章内绝对坐标：单调 + 行高为正恒成立；页内高度用相对首行 top 断言。
         val firstTop = lines.first().yTop
         for (l in lines) {
             assertTrue("$book 行高为正：$l", l.yBottom > l.yTop)
@@ -136,7 +135,15 @@ class P5cOffscreenCorpusTest {
         val contentH = viewportH - orilumn.reader.engine.text.TypographicProfile.build(
             orilumn.reader.data.settings.ReaderSettings.DEFAULT, 1f,
         ).let { it.marginTop + it.marginBottom }
-        assertTrue("$book 页高 $pageH 超限（contentH=$contentH ＋ avoid 扩展 400）", pageH <= contentH + 400)
+        // 分页只装整行、且只收「行底 ≤ 首行顶 + contentH」的行（`Paginator.fillWholeLines`）
+        // ⇒ 页高恒 ≤ contentH；唯一例外是**单行本身高于版心**时仍前进一行
+        // （`cursor never stalls`），此时页高 = 该行高。旧断言的 `+ 400` 是已退役的
+        // `Paginator.applyBreakInsideAvoid`（`break-inside: avoid` 整块可扩展出页）留下的宽容差，已删。
+        val tallestLine = lines.maxOf { it.yBottom - it.yTop }
+        assertTrue(
+            "$book 页高 $pageH 超限（contentH=$contentH，最高行=$tallestLine）",
+            pageH <= maxOf(contentH, tallestLine),
+        )
     }
 
     @Test

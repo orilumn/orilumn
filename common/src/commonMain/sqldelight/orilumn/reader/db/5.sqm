@@ -1,0 +1,7 @@
+-- 字体扫描指纹：新增 font_scan_state（单行 id=1）
+CREATE TABLE font_scan_state(
+  id INTEGER PRIMARY KEY NOT NULL DEFAULT 1,
+  cacheSchemaVersion INTEGER NOT NULL,
+  familyHash INTEGER NOT NULL,
+  updatedAt INTEGER NOT NULL
+);

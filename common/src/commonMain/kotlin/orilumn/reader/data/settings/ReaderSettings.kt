@@ -71,8 +71,8 @@ data class ReaderSettings(
     val useUserScripts: Boolean = false,
     /** Page-turn animation (smooth swipe). */
     val pageAnim: Boolean = true,
-    /** Page-turn animation mode: "slide" (smooth swipe) / "curl" (page curl) */
-    val pageAnimationMode: String = "curl",
+    /** Page-turn animation mode: "slide" (smooth swipe) / "curl" (page curl). 默认「滑动」。 */
+    val pageAnimationMode: String = "slide",
     /** Auto-continue reading on open (resume at last position). */
     val autoContinue: Boolean = true,
     /** Show page numbers. */

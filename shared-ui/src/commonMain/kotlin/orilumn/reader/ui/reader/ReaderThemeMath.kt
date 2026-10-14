@@ -79,7 +79,7 @@ object ReaderThemeMath {
         else -> "原书设置"
     }
 
-    fun pageAnimationModeLabel(v: String) = if (v == "curl") "卷曲" else "平滑"
+    fun pageAnimationModeLabel(v: String) = if (v == "curl") "卷曲" else "滑动"
 
     /** [ReaderSettings.BASE_BODY_PX] 锚定的「物理字号 px → 相对字号槽位」。 */
     fun pxToScale(px: Double): Double = ReaderSettings.ratioToFontScale(px / ReaderSettings.BASE_BODY_PX)

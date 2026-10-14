@@ -182,8 +182,11 @@ class LayoutBox(
     val childBoxes: List<LayoutBox> = emptyList(),
     /** For a replaceable ("img") block: its pixel height; 0 for text blocks. An img is still a leaf
      *  (no childBoxes), but it owns no text and its [textLength] is 1 (one char-slot `[k,k+1)`). The
-     *  box flow emits a single un-splittable line of this height. */
-    val replaceableHeight: Int = 0,
+     *  box flow emits a single un-splittable line of this height.
+     *
+     *  P3：**可变**——分页层的高度预算（[replaceableFitH]）可能把它按比例缩到装进一页。
+     *  重路径在流出自然几何后按预算改写并重流一次（[orilumn.reader.engine.laying.NormalFlowLayout.layout]）。 */
+    var replaceableHeight: Int = 0,
     /** For a table row leaf: the resolved 2D grid to draw (columns + cells). Rows are emitted like a
      *  replaceable single line of [replaceableHeight], and are drawn as a grid instead of shaped text. */
     val table: TableRowLayout? = null,
@@ -209,6 +212,16 @@ class LayoutBox(
      * 同样**放在参数表末尾**（理由同 [hyphenAtEnd]）。
      */
     val squeezeRatios: List<Float> = emptyList(),
+    /**
+     * P3：**提升叶的宿主块样式**（独图提升：叶是 `<img>`，布局地位却是宿主 `<p>`/`<div>`）。
+     *
+     * CSS 的 `break-*` 挂在**块**上，不在 img 上：真书 `.fm-figure { page-break-after: avoid }`
+     * 提升后若只读 img 自身样式，这条 avoid 边就丢了，「图 + 图注」永远不成簇。带宿主样式进来，
+     * [breakBefore]/[breakAfter]/[breakInsideAvoid] 才对得上原书语义。
+     *
+     * 非提升叶恒 `null` ⇒ 一切取自身 [style]，行为与旧路径逐字节一致。
+     */
+    val breakCarrierStyle: ComputedStyle? = null,
 ) {
     var contentTop: Int = 0
 
@@ -220,8 +233,24 @@ class LayoutBox(
     /** Global exclusive end line index of this box's last line in the whole stream (leaf); -1 when empty. */
     var lastLineExclusive: Int = -1
 
+    /**
+     * P3：分页层给这个替换叶的高度上限（口径乙，[orilumn.reader.engine.laying.ReplacedFitBudget]
+     * 算出）；`null` = 无预算。
+     *
+     * **量画同值的唯一渠道**：测量侧（重/轻/临时三路）在定尺寸时把预算写进这里，绘制侧
+     * （`DrawLineBuilder` / `WindowedBookLayout`）直接读同一字段去还原 used 宽高 —— 绘制侧
+     * 不得自行重算预算（CSS 拿不到 `contentH`，重算必漂移）。
+     */
+    var replaceableFitH: Int? = null
+
+    /** 断页边**之前**规则：提升叶取宿主块（见 [breakCarrierStyle]）。 */
+    val breakBefore: BreakRule get() = (breakCarrierStyle ?: style).breakBefore
+
+    /** 断页边**之后**规则：提升叶取宿主块（见 [breakCarrierStyle]）。 */
+    val breakAfter: BreakRule get() = (breakCarrierStyle ?: style).breakAfter
+
     /** Whether this box (its whole line range) is not to be torn across pages. */
-    val breakInsideAvoid: Boolean get() = style.breakInside == BreakRule.AVOID
+    val breakInsideAvoid: Boolean get() = (breakCarrierStyle ?: style).breakInside == BreakRule.AVOID
 
     /** Whether this node is a container (has nested blocks) rather than a text leaf. */
     val isContainer: Boolean get() = childBoxes.isNotEmpty()

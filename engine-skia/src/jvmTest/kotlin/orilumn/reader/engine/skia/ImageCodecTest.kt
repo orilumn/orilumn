@@ -43,11 +43,18 @@ class ImageCodecTest {
         assertEquals(16, d.height)
     }
 
+    /**
+     * 只缩不放：`targetWidth` 大于源宽时返回全量解码结果。
+     *
+     * 旧契约是「放大到 targetWidth 精确宽」（见 [decodeScaled] KDoc）。改判理由：源图没有的
+     * 细节放大只是伪造像素，而 8.6× 放大一张 569×245 小图 = 41 MB / 409 ms 纯浪费；绘制侧
+     * `drawImageRect(源尺寸 → used 尺寸)` 不要求两者相等，放大没有视觉回报。
+     */
     @Test
-    fun decodeScaledUpscaleKeepsTargetWidth() {
+    fun decodeScaledNeverUpscales() {
         val d = ImageCodec.decodeScaled(pngBytes(8, 8), 24) ?: error("decode failed")
-        assertEquals(24, d.width)
-        assertEquals(24, d.height)
+        assertEquals(8, d.width)
+        assertEquals(8, d.height)
     }
 
     @Test

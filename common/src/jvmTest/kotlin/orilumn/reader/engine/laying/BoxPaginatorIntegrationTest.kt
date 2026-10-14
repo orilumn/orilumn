@@ -119,4 +119,62 @@ class BoxPaginatorIntegrationTest {
         // 不产生空页且覆盖全文
         for (i in 1 until pages.size) assertTrue(pages[i].charEnd > pages[i - 1].charStart)
     }
+
+    // ---- P4b：canonical 重路径真的消费 BreakClusters 的约束 ----
+
+    /** 五块，每块 6 字符 → `FixedWidthBreaker(3)` 下每块恰好 2 行（行高 15px）。 */
+    private fun fiveBlocks(): MutableList<MarkupElement> =
+        MutableList(5) { node("p", children = listOf(text("abcdef"))) }
+
+    @Test
+    fun `break-after avoid 只否掉那一条边_不把两侧块整段锁死`() {
+        // 行高 15px（fontSize 10 × lineHeightRatio 1.5），每块 6 字符 → 2 行，共 10 行。
+        // 只在块 1 上写 break-after: avoid ⇒ 只禁止切点 **行 4**（块 2 首行 = 块 1|块 2 之间那一条边）。
+        val blocks = fiveBlocks()
+        blocks[1] = node("p", mapOf("style" to "break-after: avoid"), listOf(text("abcdef")))
+        val root = node("body", children = blocks)
+
+        // (a) 页高 75（5 行）：自然填充切到行 5，**不落在禁止切点 4 上** ⇒ avoid 完全不生效。
+        val loose = pagesOf(root, contentH = 75)
+        assertEquals(listOf(0 to 5, 5 to 10), loose.map { it.firstLine to it.lastLineExclusive })
+
+        // (b) 页高 60（4 行）：自然切点正好落在禁止切点 4 ⇒ 退到前一个**合法**断点 3。
+        // 规范只否掉 3|4 那一条 class A 边，2|3 是块 1 内部的 class B 行缝，仍然合法 ⇒ 切在 3
+        // （块 1 被切成 1/1；原书模式不引入 `orphans`/`widows`，故不做「整块搬走」的额外绑定）。
+        val pages = pagesOf(root, contentH = 60)
+        assertEquals(listOf(0 to 3, 3 to 7, 7 to 10), pages.map { it.firstLine to it.lastLineExclusive })
+    }
+
+    @Test
+    fun `avoid 边把单行标题顶到下一页与后继同页`() {
+        // 书里最常见的写法：标题（1 行）写 break-after: avoid，后面跟一大段正文。
+        // 行流：块0 [0,2)、标题 [2,3)、正文 [3,7)。禁止切点 = {3}（正文首行）。
+        val root = node("body", children = listOf(
+            node("p", children = listOf(text("abcdef"))),                            // 2 行
+            node("p", mapOf("style" to "break-after: avoid"), listOf(text("a"))),    // 1 行标题
+            node("p", children = listOf(text("abcdefghijkl"))),                      // 4 行正文
+        ))
+        // 页高 45（3 行）：整行填充第 1 页会切到行 3 = 标题|正文之间那条边 ⇒ 退到行 2（标题首行）
+        // ⇒ 标题整条顶到下一页与正文同页（正文内部仍可跨页）。
+        val pages = pagesOf(root, contentH = 45)
+        assertEquals(listOf(0 to 2, 2 to 5, 5 to 7), pages.map { it.firstLine to it.lastLineExclusive })
+    }
+
+    @Test
+    fun `无 avoid 时自然填充切点不变`() {
+        val root = node("body", children = fiveBlocks())
+        val pages = pagesOf(root, contentH = 60)
+        assertEquals(listOf(0 to 4, 4 to 8, 8 to 10), pages.map { it.firstLine to it.lastLineExclusive })
+    }
+
+    @Test
+    fun `break-before always 使该块成为页首`() {
+        val blocks = fiveBlocks()
+        blocks[3] = node("p", mapOf("style" to "page-break-before: always"), listOf(text("abcdef")))
+        val root = node("body", children = blocks)
+        // 10 行（15px/行），块 3 从行 6 起。页高 75（5 行）：
+        // 无强制 ⇒ [0,5) [5,10)；有强制 ⇒ 第 2 页在行 5 处就断（只装行 5），行 6 另起一页。
+        val pages = pagesOf(root, contentH = 75)
+        assertEquals(listOf(0 to 5, 5 to 6, 6 to 10), pages.map { it.firstLine to it.lastLineExclusive })
+    }
 }

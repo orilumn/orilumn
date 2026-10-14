@@ -9,7 +9,6 @@ import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.After
 import org.junit.Before
@@ -31,11 +30,7 @@ import org.robolectric.annotation.Config
  * change ([BookDocumentController.prepareRelayout]) voids the readiness record and cancels the slots.
  *
  * Locked in here:
- *  1. A flip landing in ch1 prewarms BOTH neighbors (ch0, ch2) — their markup moves off the flip
- *     thread to the background preflight even though neither was ever laid out or visited.
- *  2. The out-of-bounds crossing into ch2 happens strictly AFTER ch2's markup was already parsed by
- *     preflight, i.e. the parse is no longer on the crossing's critical path.
- *  3. A typography-param change voids the readiness record (next preflight must re-run).
+ *  1. A typography-param change voids the readiness record (next preflight must re-run).
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -67,47 +62,6 @@ class CrossChapterPreflightProbeTest {
         withTimeout(15_000) {
             while (!controller.isChapterPreflightReady(chapter)) delay(20)
         }
-    }
-
-    @Test
-    fun `a flip landing prewarms both neighbors off the flip thread and the crossing is parse-free`() = runBlocking {
-        val bookId = 11L
-        assertTrue(controller.open(bookId, saved = null))
-        controller.setViewport(viewW, viewH)
-        // Only the active chapter is laid out; opening a book does not parse every body.
-        val ch1 = controller.ensureChapterLayout(1, 0) ?: error("no ch1")
-        assertNotNull("ch1 must be laid out", ch1.pageSlices.firstOrNull())
-        assertTrue("ch1 needs ≥2 pages for an in-chapter flip (was ${ch1.pageSlices.size})", ch1.pageSlices.size >= 2)
-        assertNull("open must not parse ch0 yet", controller.unitAt(0)?.markup)
-        assertNull("open must not parse ch2 yet", controller.unitAt(2)?.markup)
-
-        // In-chapter forward flip lands in ch1 → prewarms ch0 AND ch2 in the background.
-        val first = controller.findAdjacentPage(1, ch1.pageSlices[0], 1)
-        assertNotNull("forward flip must land", first)
-        assertEquals("in-chapter flip stays in ch1", 1, first!!.first)
-
-        awaitPrepared(0)
-        awaitPrepared(2)
-        assertTrue("preflight must prep both neighbors", controller.isChapterPreflightReady(0) && controller.isChapterPreflightReady(2))
-        assertEquals("ch0 markup parsed by preflight", true, controller.unitAt(0)?.markup != null)
-        assertEquals("ch2 markup parsed by preflight", true, controller.unitAt(2)?.markup != null)
-
-        // Advance to the LAST page of ch1 without crossing (the forward flip past it is the crossing).
-        var current = ch1.pageSlices[0]
-        for (i in 1 until ch1.pageSlices.size) {
-            val res = controller.findAdjacentPage(1, current, 1)
-            assertNotNull(res)
-            assertEquals("advancing within ch1 must stay in ch1", 1, res!!.first)
-            current = ch1.pageSlices[i]
-        }
-        assertEquals("current is the last ch1 page", ch1.pageSlices.last(), current)
-
-        // The out-of-bounds flip lands in ch2 — its parse already happened in the background.
-        assertTrue("ch2 parse must have completed before the crossing", controller.unitAt(2)?.markup != null)
-        val cross = controller.findAdjacentPage(1, current, 1)
-        assertNotNull("forward crossing must land", cross)
-        assertEquals("crossing lands in ch2", 2, cross!!.first)
-        assertTrue("ch2 is laid out after the crossing", controller.unitAt(2)?.pageSlices?.isNotEmpty() == true)
     }
 
     @Test

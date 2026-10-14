@@ -28,7 +28,9 @@ actual fun sampledImageBitmapOf(bytes: ByteArray, targetWidth: Int): ImageBitmap
     val bmp = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
         ?: return@runCatching null
     val tw = targetWidth.coerceAtLeast(1)
-    if (bmp.width != tw) {
+    // 只缩不放（与 engine-skia `ImageCodec.decodeScaled` 同一条纪律）：源图没有的细节放大只是
+    // 伪造像素 + 白烧内存；缺省 targetWidth 大于源宽时直接给全量解码结果。
+    if (tw < bmp.width) {
         val th = ((bmp.height * tw.toFloat() / bmp.width).toInt()).coerceAtLeast(1)
         val scaled = android.graphics.Bitmap.createScaledBitmap(bmp, tw, th, true)
         if (scaled !== bmp) runCatching { bmp.recycle() }

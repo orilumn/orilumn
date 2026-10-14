@@ -133,3 +133,64 @@
 4. 装机验证：需 `./gradlew :app:assembleDebug` 后真机跑，看落盘日志
    `Orilumn.FontScan` / `Orilumn.SPIKE` 里 `fontscan` 与锚页 `LARGE-ANCHOR` 无重叠；
    顺带看冷库首次开面板的「正在扫描系统字体 N / M」进度条。
+
+## 平板真机验收（vivo PA2353 / Android 14，`orilumn-0.4.1-debug.apk`）
+
+装机：`adb install -r`（0.4.0 → 0.4.1 成功），sha256 `f1ae59af…bb4f9`。
+判据全部取自落盘 `files/logs/日志_20261014.txt`（不拉 logcat）。
+
+| 项 | 判据 | 结果 |
+| --- | --- | --- |
+| 首扫 | `startup detect: fingerprint null -> (2, -3632…)` → 仅一条 `start key=fontscan prio=45` → `scan done families=51`（1.5–2.6s） | ✅ |
+| 指纹落库 | `font_scan_state = (1, 2, -3632153667365110075, ts)`；`pragma integrity_check` = ok | ✅ |
+| 温机跳过 | 冷启 `startup detect: fingerprint unchanged, skip scan` | ✅ |
+| (A) 开书不砍在途扫描 | 启动续读落在扫描在途期间（`start prio=45` → `ReaderActivity onCreate` → `done`），全程仅一条 `start` | ✅ |
+| 面板需求模式 | ⚙ → `open settings panel` + `start key=fontscan prio=5` | ✅ |
+| (B) 抢占后能回来 | 见下（需制造可抢占负载） | ✅ |
+
+### (B) 真机复现记录（18:57:27–18:58:22）
+
+```
+27.534 start key=fontscan prio=5      ← 面板提档真扫（进程内族集为空 ⇒ 真干活）
+27.607 close settings panel
+27.800 start key=fontscan prio=45     ← 关面板同键降档
+28.312 cancel key=fontscan            ← 被顶掉的 5 档孪生
+28.670 [TAP] tap x=1600 … zone=1      ← 翻页 ⇒ notifyFlip ⇒ cancelLowerThan(0)
+33.287 spike-task cancel key=fontscan ← 在跑的 45 档被清（观测滞后：当时正卡在一次落库写）
+33.557 scan resume on idle (attempt 1, demand=false)   ★ 看门狗把它带回来
+33.630 scan resume on idle (attempt 2, demand=false)
+33.655 start key=fontscan prio=45     ← 自行续跑（scannedFamilies 保留，跳过已完成族）
+33.731 start key=fontscan prio=45
+38.477 spike-task cancel key=fontscan
+18:58:22.812 scan done families=51    ← 收尾并写指纹
+```
+
+复现配方（常态下 (B) 在平板打不到，原因见下）：
+1. 把库指纹改成与当前不一致（`update font_scan_state set familyHash=0`），但**让进程以「指纹一致」冷启**
+   ⇒ `skip scan`，进程内 `scannedFamilies` 为空且无在途扫描；
+2. 应用运行中再改库 ⇒ 面板打开时 `storedFingerprintMatches()` 为 false ⇒ 提档 `prio=5` 触发一次
+   **真扫**（51 族 ≈ 0.9s），此时阅读面已完全可交互；
+3. 关面板（同键降 45）后翻页 ⇒ 任务被 `cancelLowerThan(0)` 清掉；
+4. 用 I/O 占满（`dd … conv=fsync`）把单族落库写拉慢，使抢占窗口从 ~0.9s 拉到数秒，
+   adb `input`（每发 ~0.4s）才来得及落进窗口。
+
+### 为什么 (B) 在平板常态不可达
+
+1. 进程内首扫（~1.5s）早于阅读面可交互（≥ +2.4s）⇒ 用户第一次点按必落在扫描之后；
+2. 后续面板扫描因进程内 `scannedFamilies` 已全量而**瞬时 no-op**（只重写指纹）；
+3. 让指纹变化需动 `/system/fonts`（无 root 不可）。
+⇒ 若要让 (B) 常态可验，需另加可注入触发点（如 debug 命令强制 `scannedFamilies.clear()`）。
+
+### 观察（未定论，非本次改动引入）
+
+- 18:20 那次「启动瞬间旋转屏幕」使 App 停在 `shelf onCreate` 之后不再前进；未复现亦未归因，留待后续。
+- 上表 33.557 / 33.630 两条 `scan resume on idle` 是**多个在等空闲的看门狗各自提交**：`submitScan`
+  每次都 `armResume()`，队列真空时它们同时醒来，第一条的入队跳尚未登记，第二条查
+  `pendingPriority` 仍为 null 便再提一次 —— 第二次的孪生顶掉第一次（`scannedFamilies` 保留，
+  只是空走一遍跳过循环，无正确性影响、无用户可见成本）。如需收敛，可在 `submitScan` 里以代次计数去重。
+
+### 现场还原
+
+- `user_rotation=0` / `accelerometer_rotation=1`（竖屏已还原）；
+- 设备库 `font_scan_state` 已回到正确指纹；`/data/local/tmp` 临时文件与 CPU/IO hog 全部清除；
+- 7 次面板开合全程 `typographHash 518906858 -> 518906858 changed=false`（排版参数零改动）。

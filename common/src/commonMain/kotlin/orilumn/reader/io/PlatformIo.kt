@@ -6,10 +6,10 @@ import okio.Path
 /**
  * S30 io/log expect/actual —— 平台壳 + 横切（I 阶段）第 1 步，也是本仓库第一个 `expect/actual`。
  *
- * 与 S21 `FontParser` 的 jvmLike 共享接缝（`androidMain.dependsOn(jvmMain)`，common/build.gradle.kts:46）
- * 同源：`jvmMain actual` **一套 actual 同时服务 android 与桌面**，桌面侧由 `:common:jvmTest` 冒烟
+ * 与 S21 `FontParser` 的 jvmLike 共享接缝（`jvmLikeMain` 中间源集，见 common/build.gradle.kts）
+ * 同源：`jvmLikeMain actual` **一套 actual 同时服务 android 与桌面**，桌面侧由 `:common:jvmTest` 冒烟
  * （PlatformIoTest）证明——这正是 FontParserTest 对 FontParser 的证明方式，只是这台 seam 是跨切面的
- * **expect/actual**，而 FontParser 是 commonMain 纯类 + jvmMain 便利重载（不需要 expect 关键字的
+ * **expect/actual**，而 FontParser 是 commonMain 纯类 + jvmLikeMain 便利重载（不需要 expect 关键字的
  * 第二种接缝风格）。
  *
  * 横切面提供两件东西（按计划原文 S30「common 定义 `FileSystem.root` 路径、`Logger`」）：

@@ -15,8 +15,8 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 
 /**
- * S30 actual —— 一套 jvmMain actual 服务 android + desktop 两个 jvmLike 平台（镜像
- * FontParser.jvm.kt 的共享 actual 接缝；androidMain.dependsOn(jvmMain) 使 android 复用同一文件）。
+ * S30 actual —— 一套 jvmLikeMain actual 服务 android + desktop 两个 jvmLike 平台（镜像
+ * FontParser.jvm.kt 的共享 actual 接缝；两个目标各自 dependsOn jvmLikeMain，android 复用同一文件）。
  */
 private val rootRef = AtomicReference<RootHolder?>(null)
 

@@ -46,10 +46,28 @@ kotlin {
         // **不能靠人手动 bump 那个数字**——本轮就因为漏 bump 导致真机仍命中旧表（修复看起来没生效）。
         val layoutGeometryStampDir = rootProject.layout.buildDirectory.dir("generated/layoutGeometryStamp")
 
-        // jvmLike 共享源集：S21 的 FontParser.parse(File/InputStream) JVM 便捷重载同时供 desktop(jvm) 与 android 使用
+        // jvmLike 中间源集（**地基层 · common**）：JVM 系 `actual`（lanIpv4 / AppRoot / Logger /
+        // platformNowMs / identityMap / SyncLock / readReaderCss）+ S21 的
+        // FontParser.parse(File/InputStream) 便捷重载，同时供 android 与 desktop(jvm) 使用。
+        //
+        // 为什么是中间源集，而不是 `androidMain.dependsOn(jvmMain)`（后者正是两条构建警告的根）：
+        //  1. `jvmMain` 是 jvm 编译的**默认源集**，任何源集都不许依赖编译默认源集 ⇒
+        //     「Invalid Dependency on Default Compilation Source Set」警告，且 Android 靠这条
+        //     非法边才拿得到那些 actual —— 直接删边会让 Android 编译缺 actual。
+        //  2. 手工在 androidMain 上加 dependsOn 边 ⇒ 默认层级模板整体拒绝应用 ⇒
+        //     「Default Kotlin Hierarchy Template Not Applied Correctly」警告。
+        // 中间源集是合法写法（层级模板自己也这么摆中间层）；但「存在显式 dependsOn 边」仍会让
+        // 默认层级模板整体让位 —— 那是另一回事，已在 gradle.properties 用
+        // `kotlin.mpp.applyDefaultHierarchyTemplate=false` 写成明确意图（模板对 android+jvm
+        // 本就无中间层可造，关掉零行为变化）。
+        val jvmLikeMain by creating {
+            // 这里的 `commonMain` 是容器访问器（NamedDomainObjectProvider），须 .get()
+            dependsOn(commonMain.get())
+        }
         val androidMain by getting
         val jvmMain by getting
-        androidMain.dependsOn(jvmMain)
+        androidMain.dependsOn(jvmLikeMain)
+        jvmMain.dependsOn(jvmLikeMain)
 
         jvmTest.dependencies {
             implementation(libs.junit)

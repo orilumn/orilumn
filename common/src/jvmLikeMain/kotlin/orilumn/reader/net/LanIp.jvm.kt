@@ -4,7 +4,8 @@ import java.net.Inet4Address
 import java.net.NetworkInterface
 
 /**
- * S35 `lanIpv4` 的 JVM 系 actual：android 与桌面共用（`androidMain.dependsOn(jvmMain)`）。
+ * S35 `lanIpv4` 的 JVM 系 actual：android 与桌面共用（`androidMain`/`jvmMain` 各自
+ * `dependsOn(jvmLikeMain)`，见 common/build.gradle.kts）。
  */
 actual fun lanIpv4(): String? {
     runCatching {

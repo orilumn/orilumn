@@ -69,14 +69,21 @@ compose.desktop {
             packageVersion = providers.gradleProperty("orilumn.versionName").get()
             description = "Orilumn"
             vendor = "Orilumn"
-            // 打包格式按当前 OS 选：Dmg 仅 macOS 合法，Deb 仅 Linux 合法，Msi 仅 Windows 合法
+            // 打包格式按当前 OS 选：Dmg 仅 macOS 合法，Deb/Rpm 仅 Linux 合法，Msi 仅 Windows 合法
             // （jpackage 对不支持的格式会直接失败，故不能无条件列全；Windows 不列则 targetFormats
             //  为空，:desktopApp:packageMsi 根本不会生成）。
+            //
+            // 注意 TargetFormat.AppImage 不是 AppImage 单文件：它只是 jpackage --type app-image
+            // 的便携目录别名（TargetFormat.outputDirName 对 AppImage 返回 "app"，fileExt 直接
+            // check 失败抛异常），产物与 :desktopApp:createDistributable 完全相同，不含 type-2
+            // runtime + squashfs 附加体。真 .AppImage 单文件由 CI 用 appimagetool 把该便携目录
+            // 打成（见 desktopApp/make-appimage.sh 与 .github/workflows/build-release.yml），
+            // 故此处不列 AppImage。
             val pkgOs = org.gradle.internal.os.OperatingSystem.current()
             targetFormats(
                 *buildList {
                     if (pkgOs.isMacOsX) add(TargetFormat.Dmg)
-                    if (pkgOs.isLinux) add(TargetFormat.Deb)
+                    if (pkgOs.isLinux) addAll(listOf(TargetFormat.Deb, TargetFormat.Rpm))
                     if (pkgOs.isWindows) add(TargetFormat.Msi)
                 }.toTypedArray(),
             )
@@ -91,6 +98,9 @@ compose.desktop {
             }
             linux {
                 iconFile.set(project.file("src/main/resources/icon.png"))
+                // RPM 的 License 字段（jpackage --linux-rpm-license-type，缺省时 jpackage 用
+                // "unknown" 会被 rpmbuild 警告）：本仓 LICENSE 是 MIT，与声明一致。
+                rpmLicenseType = "MIT"
             }
             windows {
                 iconFile.set(project.file("icons/icon.ico"))

@@ -59,7 +59,7 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
 
       # Gradle 产出的 APK 文件名固定带构建类型后缀（orilumn-<ver>-release.apk）。
-      # 按 versionName 重命名为平台口径 orilumn-<ver>-android.apk，与 DMG/DEB/MSI 的
+      # 按 versionName 重命名为平台口径 orilumn-<ver>-android.apk，与 DMG/DEB/RPM/AppImage/MSI 的
       # Orilumn-<ver>-<平台>.<ext> 对齐（Release 列表里一眼看出这是 Android 包）。
       - name: Rename APK with version
         run: |
@@ -173,12 +173,17 @@ jobs:
       - name: Grant gradlew execute permission
         run: chmod +x gradlew
 
-      # jpackage 打 deb 依赖 fakeroot/dpkg；ubuntu-latest 已预装（fakeroot 1.28），无需 apt-get。
-      - name: Build DEB
-        run: ./gradlew :desktopApp:packageDeb --no-daemon
+      # jpackage 打 deb 依赖 fakeroot/dpkg（ubuntu-latest 已预装），打 rpm 依赖 rpmbuild
+      # ——由 Ubuntu 的 rpm 包提供，镜像不带，必须先装；缺它时 jpackage 直接报错。
+      - name: Install RPM build tooling
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends rpm
 
-      # deb 文件名带 jpackage 版本，按 app versionName + 架构重命名后再上传（与 DMG 同口径）。
-      - name: Rename DEB with version
+      - name: Build DEB and RPM
+        run: ./gradlew :desktopApp:packageDeb :desktopApp:packageRpm --no-daemon
+
+      # 两个安装包的文件名里 jpackage 版本与发版版本（versionName）不同，
+      # 按 app versionName 重命名后再上传（与 DMG 同口径）。
+      - name: Rename DEB and RPM with version
         run: |
           VER=$(sed -n 's/^orilumn.versionName=//p' gradle.properties | head -1 | tr -d '[:space:]"')
           # 版本号取空时直接失败：否则会产出 Orilumn--linux-x64.deb 这种坏文件名并随 Release 发布。
@@ -191,6 +196,41 @@ jobs:
             mv "$f" "desktopApp/build/compose/binaries/main/deb/Orilumn-${VER}-linux-x64.deb"
           done
           ls desktopApp/build/compose/binaries/main/deb/
+          ls desktopApp/build/compose/binaries/main/rpm/
+          for f in desktopApp/build/compose/binaries/main/rpm/*.rpm; do
+            mv "$f" "desktopApp/build/compose/binaries/main/rpm/Orilumn-${VER}-linux-x64.rpm"
+          done
+          ls desktopApp/build/compose/binaries/main/rpm/
+
+      # Compose 的 AppImage 目标只是 jpackage --type app-image 的便携目录（不是单文件），
+      # 先用 createDistributable 拿到它，再交给 make-appimage.sh 配 appimagetool 打成 .AppImage。
+      - name: Build portable app-image (for AppImage)
+        run: ./gradlew :desktopApp:createDistributable --no-daemon
+
+      # 锁版本而非 continuous：出包工具是外部依赖，同一 tag 必须能复现同一产物。
+      # 无 FUSE 也能跑（APPIMAGE_EXTRACT_AND_RUN=1 自解包执行），故不需要装 libfuse2。
+      - name: Fetch appimagetool
+        run: |
+          curl -fsSLo "$RUNNER_TEMP/appimagetool" \
+            "https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage"
+          chmod +x "$RUNNER_TEMP/appimagetool"
+          # 提前验证它真能跑（下个步骤就靠它），失败立刻停这里而不是等到出包。
+          APPIMAGE_EXTRACT_AND_RUN=1 "$RUNNER_TEMP/appimagetool" --version
+
+      - name: Build AppImage
+        run: |
+          VER=$(sed -n 's/^orilumn.versionName=//p' gradle.properties | head -1 | tr -d '[:space:]"')
+          if [ -z "$VER" ]; then
+            echo "::error::无法从 gradle.properties 读到 orilumn.versionName，拒绝命名 AppImage。"
+            exit 1
+          fi
+          # VERSION 由 appimagetool 写进 AppDir 的 desktop 文件（X-AppImage-Version），
+          # 供桌面集成/AppImageLauncher 显示版本；有显式输出名，故不影响产物文件名。
+          VERSION="$VER" sh desktopApp/make-appimage.sh \
+            desktopApp/build/compose/binaries/main/app \
+            desktopApp/src/main/resources/icon.png \
+            "desktopApp/build/compose/binaries/main/appimage/Orilumn-${VER}-linux-x64.AppImage" \
+            "$RUNNER_TEMP/appimagetool"
 
       - name: Upload DEB as workflow artifact (all runs)
         uses: actions/upload-artifact@v4
@@ -199,14 +239,31 @@ jobs:
           path: desktopApp/build/compose/binaries/main/deb/*.deb
           if-no-files-found: error
 
-      # 仅打 tag 时把 deb 挂到对应 GitHub Release（与 APK/DMG 同一 Release 下追加文件）。
-      - name: Attach DEB to Release
+      - name: Upload RPM as workflow artifact (all runs)
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-linux-x64
+          path: desktopApp/build/compose/binaries/main/rpm/*.rpm
+          if-no-files-found: error
+
+      - name: Upload AppImage as workflow artifact (all runs)
+        uses: actions/upload-artifact@v4
+        with:
+          name: appimage-linux-x64
+          path: desktopApp/build/compose/binaries/main/appimage/*.AppImage
+          if-no-files-found: error
+
+      # 仅打 tag 时把 deb/rpm/AppImage 挂到对应 GitHub Release（与 APK/DMG 同一 Release 下追加文件）。
+      - name: Attach Linux packages to Release
         if: startsWith(github.ref, 'refs/tags/') && success()
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
-          files: desktopApp/build/compose/binaries/main/deb/*.deb
+          files: |
+            desktopApp/build/compose/binaries/main/deb/*.deb
+            desktopApp/build/compose/binaries/main/rpm/*.rpm
+            desktopApp/build/compose/binaries/main/appimage/*.AppImage
 
   build-windows:
     runs-on: windows-latest

@@ -1,0 +1,15 @@
+-- 系统字体扫描指纹（方案 §2.1）：cacheSchemaVersion + familyHash（sorted(systemFontFamilies()) 的 hash）
+CREATE TABLE font_scan_state(
+  id INTEGER PRIMARY KEY NOT NULL DEFAULT 1,
+  cacheSchemaVersion INTEGER NOT NULL,
+  familyHash INTEGER NOT NULL,
+  updatedAt INTEGER NOT NULL
+);
+
+-- 始终只有一行（id=1）
+getState:
+SELECT * FROM font_scan_state WHERE id = 1;
+
+upsertState:
+INSERT OR REPLACE INTO font_scan_state(id, cacheSchemaVersion, familyHash, updatedAt)
+VALUES (1, ?, ?, ?);

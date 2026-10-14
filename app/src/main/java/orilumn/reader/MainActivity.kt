@@ -11,6 +11,7 @@ import orilumn.reader.data.book.BookImporter
 import orilumn.reader.data.font.FontRepository
 import orilumn.reader.data.settings.ReaderSettingsStore
 import orilumn.reader.host.AndroidDb
+import orilumn.reader.host.AndroidFontScan
 import orilumn.reader.host.AndroidShelfHost
 import orilumn.reader.host.AndroidShelfRepository
 import orilumn.reader.io.AppRoot
@@ -73,6 +74,9 @@ class MainActivity : ComponentActivity() {
             runCatching {
                 FontRepository(this@MainActivity, AndroidDb.library(this@MainActivity)).reconcileOrphanFiles()
             }
+            // P1 字体发现·层次二（方案 §2.2）：app 启动一次性系统字体指纹检测（廉价族名枚举）。
+            // 指纹变才进共享池 45 档扫；不变什么都不做。进程级单例，与 ReaderActivity 同源。
+            runCatching { AndroidFontScan.scanner(this@MainActivity).detectOnStart() }
         }
 
         if (savedInstanceState == null) maybeContinueLastBook()

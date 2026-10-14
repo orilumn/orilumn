@@ -36,6 +36,9 @@ class FontRepository(
     /** All fonts (persistent,含隐藏；选择器候选经 [FontLibrary.visibleEntries] 过滤）. */
     suspend fun list(): List<FontFace> = library.list()
 
+    /** 共享底层字体库（P1 字体扫描编排器直接喂逐族落库用；不复制第二份实例）。 */
+    val fontLibrary: FontLibrary get() = library
+
     /** F4c 统一列表（系统 + 导入，含隐藏；展示层分区/过滤）。 */
     suspend fun entries(): List<orilumn.reader.data.font.FontEntry> =
         library.allEntries(library.list())

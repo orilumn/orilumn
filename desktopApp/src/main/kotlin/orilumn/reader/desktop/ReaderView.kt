@@ -89,8 +89,9 @@ fun ReaderView(
     fun commit(next: ReaderSettings) = onSettingsChange(next)
 
     // 桌面字库（用户层·壳自持，内容与平板同口径）：
-    // - 发现链在宿主 `syncPanelFonts`：macOS 目录扫描 + 中文名链（方案B name 表 → 方案A CoreText），
-    //   落库 displayName；与平板 systemFontFaces 同源（skia 系统枚举），只是本地化名来源不同；
+    // - 发现链在 `DesktopFontScan`（应用级共享池 45/5 档）：skia 系统枚举 + 中文名链
+    //   （方案B name 表 → 方案A CoreText），逐族落库 displayName；与平板 systemFontFaces 同源，
+    //   只是本地化名来源不同；启动检测一次、面板打开提档实扫（方案 §2.2/§2.4）；
     // - 列表不再只留系统行：导入/隐藏/删除与平板同一 `buildFontRows`（导入区 + 已导入区全开，
     //   本地导入经 FileKit 原生对话框、无线导入经桌面独写对话框，同走共享服务；SAF/Android Dialog
     //   是平板 UI，不进共享）。
@@ -250,16 +251,33 @@ fun ReaderView(
             val anchor2 = currentPos
             host.commitRelayout(anchor2?.chapter ?: 0, anchor2?.slice?.charStart ?: 0)?.let { pushLanding(it) }
         }
-        // 面板字库经宿主装载（R4：枚举+中文名链已下沉 `syncPanelFonts`，视图只收表；
-        // 键只跟书，视口 resize 重建宿主不重枚举）。开书路径不触发扫描，改由面板可见性/启动检测驱动。
+        // 面板字库读 DB（R4 的枚举+中文名链已迁到 `DesktopFontScan` 的扫描任务，视图只收表）；
+        // 键只跟书，视口 resize 重建宿主不重枚举。开书路径不触发扫描，改由面板可见性/启动检测驱动。
         LaunchedEffect(book) {
-            // 不在开书时同步系统字体，避免抢占锚页排版；面板打开时会按需求加载
+            // 开书只直读 DB（廉价）：扫描由启动检测/面板可见性驱动（方案 §2.2/§2.4），
+            // 库冷时不是占位——面板打开即提档到池顶实扫，逐族增量长出列表。
             fontEntries = fontLibrary.allEntries(fontLibrary.list())
         }
         // 面板开抑制 + 关门控（共享收口 PanelRelayoutGate，平板同调）：打开即抑制后台
         // canonical 并快照版式指纹；关闭经门控判定，版式真变才整书 finalize 并落位。
+        //
+        // 同处驱动**系统字体扫描需求模式**（方案 §2.4/§3.4，与平板同式）：面板可见 ⇒ 同键
+        // `fontscan` 提档到池顶（立即实扫，逐族增量刷新列表）；不可见 ⇒ 降回 45 续跑。
         LaunchedEffect(book, session, settingsOpen) {
-            if (settingsOpen) desktopHost?.setSettingsPanelOpen(true)
+            val scan = DesktopFontScan.scanner(fontLibrary)
+            if (settingsOpen) {
+                // 面板要用：装增量刷新回调（每族落库后重读 DB），再提档。
+                scan.onFamilyScanned = { refreshFonts() }
+                desktopHost?.setSettingsPanelOpen(true)
+                scan.onPanelVisibility(true)
+            } else {
+                scan.onPanelVisibility(false)
+                scan.onFamilyScanned = {}
+            }
+        }
+        // 扫描器是**进程级单例**：离开本视图（回书架/换书重建）时卸下回调，别让它持有已销毁的组合作用域。
+        DisposableEffect(book) {
+            onDispose { DesktopFontScan.scanner(fontLibrary).onFamilyScanned = {} }
         }
         // 设置驱动的原位重排（R15 两段式，与平板“tick 轻刷新 + 关面板全套”同序）：
         // 第一段 150ms 防抖落位即调（本章轻刷新）；第二段只在面板关闭时跑全套——面板打开

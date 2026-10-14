@@ -293,6 +293,9 @@ private fun DesktopRoot(
 
     LaunchedEffect(Unit) {
         store.load()
+        // 启动一次性系统字体检测（方案 §2.2）：只比族名指纹，变才进共享池 45 档扫；
+        // 面板打开时同键提档到 5（见 ReaderView 的可见性驱动）。开书路径零字体任务。
+        runCatching { DesktopFontScan.scanner(store.fontLibrary()).detectOnStart() }
         customs = store.loadThemes()
         ready = true
     }

@@ -59,6 +59,12 @@ class FontLibrary(
     private val fontsDir: Path,
     private val logTag: String = "Orilumn.Font",
 ) {
+
+    /** 字体扫描指纹（P1） */
+    suspend fun fontScanState(): Pair<Long, Long>? = db.fontScanState()
+
+    suspend fun saveFontScanState(cacheSchemaVersion: Long, familyHash: Long, updatedAt: Long = System.currentTimeMillis()) =
+        db.saveFontScanState(cacheSchemaVersion, familyHash, updatedAt)
     /** 全量字体行（持久化；含隐藏）。 */
     suspend fun list(): List<FontFace> = db.allFonts()
 

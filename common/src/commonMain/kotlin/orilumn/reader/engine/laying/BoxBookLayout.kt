@@ -65,6 +65,55 @@ class BoxBookLayout(
         getLineBottom(i) + if (i in 0 until lineCount) leafBottomEdgesByLastLine[i] else 0
 
     /**
+     * 行下标 → 该行为**叶首行**时该叶自身 top 边（`padding-top + border-top`）。文本叶恒 0
+     * （重路径文本叶盒的盒属性被清零，见 `NormalFlowLayout.emit`），与绘制侧
+     * `BoxChapterLayouter.ownTopEdges` 同判据；容器链的顶边不计（重/轻路径必须同值，口径见
+     * [BookLayout.getPageTopLead]）。
+     */
+    private val leafTopEdgesByFirstLine: IntArray by lazy {
+        val out = IntArray(lineCount)
+        fun walk(box: LayoutBox) {
+            if (box.isContainer) {
+                for (c in box.childBoxes) walk(c)
+                return
+            }
+            if (box.firstLineIndex < 0 || box.lastLineExclusive <= box.firstLineIndex) return
+            val first = box.firstLineIndex
+            if (first in out.indices) {
+                out[first] = if (box.el?.isText == true) 0
+                else (box.style.padding.top + box.style.border.top).roundToInt()
+            }
+        }
+        for (b in result.boxes) walk(b)
+        out
+    }
+
+    /**
+     * 章首（第 0 行所属叶）自身 `margin-top`：章首段前距**不与页边距合并**，照常画在章首页页首
+     * （[BookLayout.getPageTopLead] 的 `i == 0` 分支）。文本叶恒 0，判据同 [leafTopEdgesByFirstLine]。
+     */
+    private val chapterHeadMarginTop: Int by lazy {
+        var out = 0
+        fun walk(box: LayoutBox) {
+            if (box.isContainer) {
+                for (c in box.childBoxes) walk(c)
+                return
+            }
+            if (box.firstLineIndex != 0 || box.lastLineExclusive <= box.firstLineIndex) return
+            out = if (box.el?.isText == true) 0 else box.style.margin.top.roundToInt()
+        }
+        for (b in result.boxes) walk(b)
+        out
+    }
+
+    /** [BookLayout.getPageTopLead]：叶自身 top 边；章首（i == 0）另加首叶自身 `margin-top`。 */
+    override fun getPageTopLead(i: Int): Int {
+        if (i !in 0 until lineCount) return 0
+        val edges = leafTopEdgesByFirstLine[i]
+        return if (i == 0) edges + chapterHeadMarginTop else edges
+    }
+
+    /**
      * Line ranges that must stay whole across a page break. A box (leaf or container) contributes a
      * range when it opts into `break-inside: avoid` and actually owns lines. Whether a range
      * physically fits a page is left to the Paginator (the only party that knows the page height),

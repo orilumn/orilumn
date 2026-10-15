@@ -88,6 +88,56 @@ abstract class WindowedBookLayout : PagedLayout, BreakAwareBookLayout {
     override fun getPageFrameBottom(i: Int): Int =
         getLineBottom(i) + if (i in 0 until lineCount) leafBottomEdgesByLastLine[i] else 0
 
+    /**
+     * 叶自身 top 边（`padding-top + border-top`；文本叶恒 0，与 [ownLeafBottomEdges] 同判据）。
+     */
+    private fun ownLeafTopEdges(leaf: LayoutBox): Int =
+        if (leaf.el?.isText == true) 0
+        else (leaf.style.padding.top + leaf.style.border.top).roundToInt()
+
+    /** 叶自身 `margin-top`（文本叶恒 0）。章首段前距用，见 [BookLayout.getPageTopLead]。 */
+    private fun ownLeafMarginTop(leaf: LayoutBox): Int =
+        if (leaf.el?.isText == true) 0 else leaf.style.margin.top.roundToInt()
+
+    /**
+     * 行下标 → 该行为**叶首行**时页首叶自身占的上边界高（[BookLayout.getPageTopLead] 的覆盖）。
+     *
+     * 与 [leafBottomEdgesByLastLine] 同款：每条叶只在它的**首行**记一次，行区间由
+     * [leafLocalFirstLine] + 自身 shape 行数给出，**不读 `LayoutBox.firstLineIndex`**（相邻临时页
+     * 共用同一批盒、会覆写这些字段）。叶的首行在窗口之上（本流里已被截掉）则不记——叶在本页
+     * 仍是中段开页，页首无缺口，与 canonical 同判据。
+     */
+    private val leafTopEdgesByFirstLine: IntArray by lazy {
+        val out = IntArray(lineCount)
+        for (j in leaves.indices) {
+            val n = shapes[j].lineCount
+            if (n <= 0) continue
+            val lo = leafLocalFirstLine[j]
+            if (lo in out.indices) out[lo] = ownLeafTopEdges(leaves[j])
+        }
+        out
+    }
+
+    /**
+     * 行 0 所属叶自身 `margin-top`：章首段前距**不与页边距合并**，照常画在章首页页首
+     * （[BookLayout.getPageTopLead] 的 `i == 0` 分支）。
+     *
+     * 窗口（[PartialDrawableLayout]）另按调用方传入的窗外缺口 [getPageFrameTop] 覆盖 `i <= 0`，
+     * 不看这里；本值只服务**整章**绘制布局（[orilumn.reader.engine.text.BoxDrawableLayout]），
+     * 它的行 0 就是章首行。
+     */
+    private val chapterHeadMarginTop: Int by lazy {
+        val si = if (lineCount > 0) leavesByShape[0] else -1
+        if (si in leaves.indices) ownLeafMarginTop(leaves[si]) else 0
+    }
+
+    /** [BookLayout.getPageTopLead]：叶自身 top 边；章首（i == 0）另加首叶自身 `margin-top`。 */
+    override fun getPageTopLead(i: Int): Int {
+        if (i !in 0 until lineCount) return 0
+        val edges = leafTopEdgesByFirstLine[i]
+        return if (i == 0) edges + chapterHeadMarginTop else edges
+    }
+
     override fun tableCellLines(firstLine: Int, lastLineExclusive: Int): List<DrawLine> {
         if (firstLine < 0 || lastLineExclusive <= firstLine || tableCells.isEmpty()) return emptyList()
         val out = ArrayList<DrawLine>()

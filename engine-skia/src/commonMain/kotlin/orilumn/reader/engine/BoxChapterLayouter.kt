@@ -1211,12 +1211,32 @@ class BoxChapterLayouter(
         if (leaf.el?.isText == true) 0 else (leaf.style.padding.bottom + leaf.style.border.bottom).roundToInt()
 
     /**
+     * 叶自身 **top 边** = `border-top + padding-top`（文本叶恒 0，判据同 [ownBottomEdges]）。
+     * 块边界开页时只有这一段画在本页页首（段前折叠 `margin-top` 并入页边距，见 [leadAbove] 与
+     * `BookLayout.getPageTopLead`）。
+     */
+    private fun ownTopEdges(leaf: LayoutBox): Int =
+        if (leaf.el?.isText == true) 0 else (leaf.style.padding.top + leaf.style.border.top).roundToInt()
+
+    /** 叶自身 `margin-top`（文本叶恒 0）。章首段前距不并入页边距，见 [leadAbove]。 */
+    private fun ownMarginTop(leaf: LayoutBox): Int =
+        if (leaf.el?.isText == true) 0 else leaf.style.margin.top.roundToInt()
+
+    /**
      * 块边界落差单源：块 [a] 的**末行行底** → 块 [b] 的**首行行顶**。与 [rebuildLocalLines] 的行流推进
      * 逐字节同式（`ownBottomEdges(prev) + consecutiveLeafAdvance + 后块自身 top 边`，见该函数 1395/1430
      * 与 [shapeAnchorPageForward] 的累计式），也因此与 canonical `emit` 的块间距同值。
      *
-     * 只服务**窗口两端**：窗内每一块的间距本来就在行流里（相邻行的差），只有窗外那一块的行不在流里，
-     * 才需要这个数补窗口上边界缺口 [windowLeadTop]（与块 [b] 作为页首块时的 [leadAbove]）。
+     * 只服务**窗内块间落差**：窗内每一块的间距本来就在行流里（相邻行的差），但倒包/锚页估计按
+     * shapes 的行高逐块重建，块与块之间要靠这个数与 canonical 同值（[interiorGapAbove] 是它减去
+     * 前块自身下边后的「页内边界」段）。窗口**上边界**（窗外那段）另走 [leadAbove]/[windowLeadTop]，
+     * 两者相差一个段前折叠 `margin-top`（页首并入页边距，页内边界记满）。
+     *
+     * ⚠ 已知口径差（**本次不动**，非本函数职责）：第三项对**文本叶**不按 [ownTopEdges] 清零
+     * （文本叶的 `style` 是宿主容器样式 ⇒ 等于把宿主的 `border/padding-top` 记成后块自身 top 边），
+     * 而 [ownBottomEdges] 对 A 侧文本叶清零（A 侧祖先链底边已在 `consecutiveLeafAdvance` 里）。
+     * 后块是**宿主首子**文本叶时宿主 top 边确实在它上方（该记），非首子时不该记。既有 fixture 宿主
+     * `padding-top` 多为 0，未触到该差；要修需按盒树判「是否首子」，另立项。
      */
     private fun blockBoundaryGap(prepare: LightPrepare, a: Int, b: Int): Int {
         val pa = prepare.block(a)
@@ -1227,21 +1247,39 @@ class BoxChapterLayouter(
     }
 
     /**
-     * 块 [b] 作为**页首块**时的**页首缺口**：块 b−1 末行帧底 → 块 b 首行行顶。
+     * 块 [b] 作为**页首块**时，页首行行顶之上**归本页**的那段缺口
+     * （[orilumn.reader.engine.paging.BookLayout.getPageTopLead] 的轻路径单源）。
      *
-     * = [blockBoundaryGap] 减去**前块自身下边**：前块的 `padding-bottom/border-bottom` 归**前一页页尾**
-     * （帧必须拼合，见 [BookLayout.getPageFrameTop]），留在这里就重复计一次。章首块（b == 0）无上邻块，恒 0。
+     * v3 口径（2026-10-15）：页首块的**段前折叠 `margin-top` 并入页边距**（不画在本页、也不留给
+     * 下一页），只留本块**自身**的 `border-top`/`padding-top` ⇒ `ownTopEdges(b)`。
+     * **章首块（b == 0）例外**：章首段前距不与页边距合并，另加本块自身 `margin-top`。
+     * 段中开页（调用方的 `k0 > 0`）本页首行之上无缺口，恒 0 —— 调用方按 `k0 > 0` 短路。
      */
-    private fun leadAbove(prepare: LightPrepare, b: Int): Int =
+    private fun leadAbove(prepare: LightPrepare, b: Int): Int {
+        val leaf = prepare.block(b)
+        return ownTopEdges(leaf) + if (b <= 0) ownMarginTop(leaf) else 0
+    }
+
+    /**
+     * **页内**块边界单源：块 [b] 首行行顶之上到**前块末行帧底**的那段 = [blockBoundaryGap]`(b-1,b)`
+     * 减去**前块自身下边**（前块下边归本页前一行的帧底，见 [ownBottomEdges]，别处已单记一次）。
+     *
+     * 与 [leadAbove]（页首）的差别正是那段段前距：页首块的折叠 `margin-top` 并入页边距，页内
+     * 边界的落差两端都在本页里、没有下一页来分摊 ⇒ 必须记满「段前距 + 本块自身 top 边」。
+     * 倒包估计（[shapeTempPageBackward]）逐行向上累加时按本函数记 `acc`，仅在该行**当选页首行**
+     * 的判据里改用 [leadAbove]。
+     */
+    private fun interiorGapAbove(prepare: LightPrepare, b: Int): Int =
         if (b <= 0) 0
         else blockBoundaryGap(prepare, b - 1, b) - ownBottomEdges(prepare.block(b - 1))
 
     /**
-     * 窗口**上边界缺口**（[PartialDrawableLayout.frameLeadTop] 的取值单源）：窗口首块首行行顶之上、
-     * 落在窗外的那段 = 窗外前一块与首块之间的块边界落差 G **减去前一块自身下边**——前一块的
-     * `padding-bottom/border-bottom` 归**前一页页尾**（帧必须拼合，见 [BookLayout.getPageFrameTop]），
-     * 留在窗口缺口里就重复计一次（临时页比磁盘表少装一行）。
-     * 空行块（`lineCount == 0`，轻路径理论上不产出）按最近的实块兜底，不追求该退化情形的精度。
+     * 窗口**上边界缺口**（[PartialDrawableLayout.frameLeadTop] 的取值单源）：窗口首行行顶之上、
+     * 落在窗外的那段页首缺口 = 窗口首行所属块的 [leadAbove]（窗口首行必为该页页首行）。
+     *
+     * 窗口从**章头**起（[blockLo] == 0）时首行即章首行，章首段前距不并入页边距 ⇒ 另加首块自身
+     * `margin-top`（见 [leadAbove]）。空行块（`lineCount == 0`，轻路径理论上不产出）按最近的实块
+     * 兜底，不追求该退化情形的精度。
      */
     private fun windowLeadTop(
         prepare: LightPrepare,
@@ -1250,9 +1288,8 @@ class BoxChapterLayouter(
     ): Int {
         val firstIdx = shapes.indexOfFirst { it.lineCount > 0 }
         if (firstIdx < 0) return 0
-        val firstBlock = blockLo + firstIdx
-        if (firstBlock == 0) return 0
-        return blockBoundaryGap(prepare, firstBlock - 1, firstBlock) - ownBottomEdges(prepare.block(firstBlock - 1))
+        val leaf = prepare.block(blockLo + firstIdx)
+        return ownTopEdges(leaf) + if (blockLo == 0) ownMarginTop(leaf) else 0
     }
 
     private fun rebuildLocalLines(
@@ -1527,13 +1564,14 @@ class BoxChapterLayouter(
 
         // LINE-based, MARGIN-AWARE fill from the anchor line (like forward pages): accumulate content line
         // heights and inter-block margin advances until contentH, cutting mid-block. The page's first
-        // block starts at the anchor line: if that is the block's FIRST line the block boundary gap above
-        // it is charged (leading gap of the page — the element's `margin-top`/`border`/`padding`), if it
-        // is a mid-block line there is no gap (a mid-block page start owes nothing above). Between blocks
-        // the full boundary gap applies; the page's last line additionally carries its own leaf's
-        // `padding-bottom`/`border-bottom`. This is `getPageFrameTop`/`getPageFrameBottom` line by line —
-        // the same pair `Paginator.fillWholeLines` accumulates — so this manual fill and the canonical
-        // disk-table fill agree line for line.
+        // block starts at the anchor line: if that is the block's FIRST line the page-top gap above it is
+        // charged ([leadAbove]: the element's own `border-top`/`padding-top`; its collapsed `margin-top`
+        // merges into the page's top inset — except at the chapter head), if it is a mid-block line there
+        // is no gap (a mid-block page start owes nothing above). Between blocks the full boundary gap
+        // applies; the page's last line additionally carries its own leaf's `padding-bottom`/
+        // `border-bottom`. This is `getPageFrameTop`/`getPageFrameBottom` line by line — the same pair
+        // `Paginator.fillWholeLines` accumulates — so this manual fill and the canonical disk-table fill
+        // agree line for line.
         val shapes = ArrayList<ParagraphShapeRef>()
         var acc = 0
         var endBlockExclusive = anchorBlock
@@ -1547,10 +1585,10 @@ class BoxChapterLayouter(
             // 页内每一处块边界**只记一次**。两种口径分管不同段的边界，绝不能叠加：
             //  · `b > anchorBlock`（页内相邻块）：整段落差 [blockBoundaryGap]（前块自身下边 + 折叠边距 +
             //    本块自身 top 边）全归本页——缺口两端都在本页内，没有下一页来分摊。
-            //  · `b == anchorBlock && k0 == 0`（本页首块首行）：只记 [leadAbove]（= 整段落差**减去**前块
-            //    自身下边）。前块自身下边已归**前一页页尾**（[BookLayout.getPageFrameBottom]），本页只认
-            //    「上一行帧底 → 首行行顶」这一段。中段开页（k0 > 0）本页首行之上无缺口，记 0。
-            // 教训：把 [leadAbove] 无条件记给**每个**块首行，而 `b > anchorBlock` 已按 [blockBoundaryGap]
+            //  · `b == anchorBlock && k0 == 0`（本页首块首行）：只记 [leadAbove]（= 本块**自身** top 边；
+            //    折叠段前距并入页边距，章首（b == 0）另加本块自身 `margin-top`）。中段开页（k0 > 0）
+            //    本页首行之上无缺口，记 0。
+            // 教训：把块首缺口无条件记给**每个**块首行，而 `b > anchorBlock` 已按 [blockBoundaryGap]
             // 记过同一段，就是每个块边界白丢一段「折叠边距 + 本块自身 top 边」——真书 46~122px × 十余处
             // ⇒ 锚页页尾空 532px、少装五行（2026-10-15 真机）。
             if (b > anchorBlock) {
@@ -1764,7 +1802,8 @@ class BoxChapterLayouter(
                 // 剪掉末行）时该边不在页内，故按 `maxLine` 判定。
                 //
                 // 块边界缺口仍不再算进本页——它归**下一页**页首（旧口径把整段缺口算进页尾，页尾就少装
-                // 一行），而本块的**自身下边**例外：它是帧**内**的一段（见下）。
+                // 一行；v3 下下一页页首只收 [leadAbove]，折叠段前距两页都不收），而本块的**自身下边**
+                // 例外：它是帧**内**的一段（见下）。
                 if (maxLine == s.lineCount) {
                     acc += ownBottomEdges(prepare.block(endExclusive - 1))
                 }
@@ -1776,10 +1815,13 @@ class BoxChapterLayouter(
                 //
                 // 帧高单源推导：自页首行 S 到页尾行 L 的帧跨度
                 //   span(S, L) = frameBottom(L) − frameTop(S)
-                //              = Σ_{页内块 b} [ leadAbove(b)（仅当页首落在 b 首行）+ Σ行高 + ownBottomEdges(b) ]
-                // （用 [blockBoundaryGap] = ownBottomEdges(prev) + 折叠边距 + 本块 top 边、[leadAbove] =
-                // blockBoundaryGap − ownBottomEdges(prev) 逐段展开即得；`shapeAnchorPageForward` 的累加式
-                // 是同一恒等式的另一种写法。）⇒ **每个**页内块都要记一次自身下边。旧式只记页尾那一次，
+                //              = [leadAbove(页首块)（仅当页首落在某块首行）] + Σ行高
+                //              + Σ_{页内块 b} ownBottomEdges(b) + Σ_{页内块 b > 页首块} interiorGapAbove(b)
+                // （[blockBoundaryGap] = ownBottomEdges(prev) + 折叠边距 + 本块自身 top 边；
+                // [interiorGapAbove] = blockBoundaryGap − ownBottomEdges(prev) 是**页内**边界段，
+                // [leadAbove] 是它的**页首**版本（段前距并入页边距，故少一段）。
+                // `shapeAnchorPageForward` 的累加式是同一恒等式的另一种写法。）
+                // ⇒ **每个**页内块都要记一次自身下边。旧式只记页尾那一次，
                 // acc 偏小 ⇒ 倒包起点过早 ⇒ `Paginator` 从该起点整行填充收不到页尾（帧高先超）⇒
                 // 「末行被推走/页尾 2 字落到页外」——真机 ch2 倒包页少了整整一行（10 字），随后前向重建
                 // 从错位原点起塑，来回翻页内容就变了。
@@ -1797,16 +1839,21 @@ class BoxChapterLayouter(
             for (k in (maxLine - 1) downTo 0) {
                 // Every shaped line is the CSS line box; fill by it so capacity matches drawn pixels.
                 val h = (s.lineBottom(k) - s.lineTop(k)).coerceAtLeast(1)
-                // 页**首**块的页首缺口 G(b)：只有本块首行（k == 0）进页时才算——它正是把
-                // `getPageFrameTop(页首行)` 自该行行顶下拉到上一行**帧底**的那段（不含前块自身下边，
-                // 见 [leadAbove]）。若只按行高累加，短页就会多收一行（真机：后向临时页比磁盘表多一行，
-                // 页尾 2 字落在页外）。
-                val leadGap = if (k == 0) leadAbove(prepare, b) else 0
+                // 行顶之上那一段（只有本块首行 k == 0 才有）分两种口径，**绝不混用**：
+                //  · 本行若**当选页首行**（下面已收的各行都在本页内、更靠上的行都进不来）⇒ 只记本块
+                //    **自身 top 边** [leadAbove]：段前折叠 `margin-top` 并入页边距（v3 口径）。
+                //  · 本行只是**页内**边界（页首还在更上面）⇒ 整段落差 [interiorGapAbove]（段前距 +
+                //    本块自身 top 边）。
+                // `acc` 一路按**页内**口径累加；判据才用 [leadAbove]，两者之差正是被页边距吞掉的段前距。
+                // 这样继续向上找页首时，下面已收的各段仍是完整的页内落差（若把页首口径也累进 acc，
+                // 每个块边界都会少收一段折叠边距 ⇒ 倒包页多装行）。
+                val interior = if (k == 0 && b > 0) interiorGapAbove(prepare, b) else 0
+                val pageTop = if (k == 0) leadAbove(prepare, b) else 0
                 // 与 shapeTempPageForward 同一条「游标永不停滞」guard（单源：重路径 fillWholeLines）：
                 // 页底块自己那一行就高过整页时（宽屏全屏下的超高插图）强收它并允许撕裂，否则
                 // `overflowLine == maxLine - 1` ⇒ `startLine = maxLine` ⇒ 空页/丢块，向前回溯同样卡住。
-                if (placedLines > 0 && acc + leadGap + h > contentH) { overflowLine = k; break }
-                acc += leadGap + h
+                if (placedLines > 0 && acc + pageTop + h > contentH) { overflowLine = k; break }
+                acc += interior + h
                 placedLines++
             }
             }
@@ -2827,11 +2874,11 @@ private class PartialDrawableLayout(
     private val tableCellImagesSource: Map<Int, List<orilumn.reader.engine.skia.PageImage>> = emptyMap(),
     private val tableBordersSource: List<orilumn.reader.engine.skia.PageBackground> = emptyList(),
     /**
-     * 窗口**上边界缺口**：本窗口首行之上、落在窗外（前一块）的那段竖向间距，**减去前一块自身
-     * 下边**（前一块的 `padding-bottom/border-bottom` 归前一页页尾，见
-     * [BookLayout.getPageFrameBottom]）。窗口行流的原点建在首块上，前一块不在流里 ⇒
-     * [BookLayout.getPageFrameTop] 的默认式（取上一行帧底）查不到它，必须由调用方按盒树算出传入
-     * （[windowLeadTop]）。0 = 窗口即章首。
+     * 窗口**上边界缺口**：本窗口首行之上、落在窗外（前一块）的那段页首缺口 ——
+     * [orilumn.reader.engine.paging.BookLayout.getPageTopLead] 的窗外取值（[windowLeadTop]）。窗口
+     * 行流的原点建在首行自己身上，前一块不在流里 ⇒ 默认式（取上一行帧底）查不到它，必须由调用方
+     * 按盒树算出传入。窗口从章头起时为「首块自身 top 边 + 首块自身 margin-top」（章首段前距不与
+     * 页边距合并），否则只为「首块自身 top 边」（折叠段前距并入页边距）。0 = 段中开页。
      */
     private val frameLeadTop: Int = 0,
 ) : orilumn.reader.engine.skia.WindowedBookLayout() {
@@ -2870,13 +2917,14 @@ private class PartialDrawableLayout(
 
     /**
      * 页面绘制帧上沿：与 [BookLayout.getPageFrameTop] 同口径，只把**窗口首行**换成调用方传入的
-     * 窗外缺口（[frameLeadTop]）——窗口首行的上一行不在本流里，默认式会退化成行顶，临时页就会比
-     * 磁盘表多装一行（真机=调参后页数对不上）。窗口**末**行不需要特殊处理：[WindowedBookLayout]
-     * 已按叶自身边给出帧底，且它不依赖窗外（口径见 [BookLayout.getPageFrameBottom]）。
+     * 窗外缺口（[frameLeadTop]，= [windowLeadTop]，即 [BookLayout.getPageTopLead] 的窗外取值）——
+     * 窗口首行的上一行不在本流里，默认式会退化成行顶，临时页就会比磁盘表多装一行（真机=调参后
+     * 页数对不上）。窗口**末**行不需要特殊处理：[WindowedBookLayout] 已按叶自身边给出帧底，且它
+     * 不依赖窗外（口径见 [BookLayout.getPageFrameBottom]）。
      */
     override fun getPageFrameTop(i: Int): Int =
         if (i <= 0) getLineTop(0) - frameLeadTop
-        else minOf(getLineTop(i), getPageFrameBottom(i - 1))
+        else maxOf(getPageFrameBottom(i - 1), getLineTop(i) - getPageTopLead(i))
 
     /**
      * Line ranges of `break-inside: avoid` blocks, in this window's LOCAL line indexes — mirrors

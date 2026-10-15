@@ -43,22 +43,46 @@ interface BookLayout {
     /**
      * **页面绘制帧上沿**：行 [i] 作为**页首行**时本页绘制帧的顶（与 [getLineTop] 同坐标系）。
      *
-     * 口径（2026-10-15 拍板 v2「完整帧口径」）：页首元素的 `margin-top` 与页首块的 `border`/
-     * `padding` 都画在**本页**（`margin-top` 不与页边距合并；首行是容器的首行时容器装饰也画全），
-     * 即帧上沿 = 上一行的**帧底** [getPageFrameBottom]`(i-1)`（行 [i] 为章首行时无上文，退化为
-     * [getLineTop]）。段内相邻行的行盒紧贴（段内行间差为 0），故中段开页不产生额外开销。
+     * 口径（2026-10-15 拍板 v3「页首段前距并入页边距」）：
      *
-     * **一条缺口只归一页（帧必须拼合）**：`frameBottom(i) == frameTop(i+1)` 才能让块边界缺口恰好
-     * 被装它的那一页收一次。旧口径 `bottom(i)=lineTop(i+1)` 与 `top(i+1)=lineBottom(i)` 把同一段
-     * 缺口**两页各收一次** ⇒ 每页白丢一行（真机症状：「明明还有空间，最后一行却被推到下一页」，
-     * 且被推走的那行又把缺口带到下一页页首，缺口沿途重复累积）。
+     * 1. **块边界开页**（行 [i] 是某叶的首行，i > 0）：该块的 `margin-top` 与**页边距合并**——
+     *    既不在页首留白、也不推给下一页，只保留该块**自身**的 `border-top`/`padding-top`
+     *    （[getPageTopLead]`(i)`）。页首装饰因此真画在页顶，页底不留等量空洞。
+     * 2. **章首例外**（i == 0）：章首**第一个块的 `margin-top` 不与页边距合并**，照常画在章首页
+     *    页首（章题的设计留白不被吞掉）⇒ 帧上沿 = 首个块的 **margin-box 顶**。
+     * 3. **段中开页**（[i] 不是叶首行）：行盒紧贴，无页首缺口，帧上沿 = 上一行帧底。
      *
-     * **分页预算与绘制锚点同值**：阅读面 `ReaderPageCanvas` 的 shift 锚点（`ReaderHost.pageFrameLead`
+     * **一条缺口只归一页（帧不许重复收）**：`frameTop(i) >= frameBottom(i-1)`，两者之差恰为被
+     * 页边距吞掉的那段折叠 `margin-top`（0 = 段中开页；正 = 块边界开页时吞掉的段前距）。
+     * 旧口径 `bottom(i)=lineTop(i+1)` 与 `top(i+1)=lineBottom(i)` 曾把同一段缺口**两页各收一次**
+     * ⇒ 每页白丢一行（真机症状：「明明还有空间，最后一行却被推到下一页」，且被推走的那行又把
+     * 缺口带到下一页页首，缺口沿途重复累积）。
+     *
+     * 上沿还与**绘制锚点同值**：阅读面的 shift 锚点（`ReaderHost.pageFrameLead`
      * = `getLineTop(首行) - getPageFrameTop(首行)`）与 [Paginator.fillWholeLines] 的预算取同一对帧，
-     * 整页因此在栅格里恰好铺满（页首缺口真画在页顶、页尾装饰不越栅格）。
+     * 整页因此在栅格里恰好铺满（页首块自身装饰真画在页顶、页尾装饰不越栅格）。
+     * `maxOf` 只是「帧不许负高」的下限夹取（负边距把行顶抬到上一帧底之上时不再重叠收缺口）。
      */
     fun getPageFrameTop(i: Int): Int =
-        if (i <= 0) getLineTop(i) else minOf(getLineTop(i), getPageFrameBottom(i - 1))
+        if (i <= 0) getLineTop(0) - getPageTopLead(0)
+        else maxOf(getPageFrameBottom(i - 1), getLineTop(i) - getPageTopLead(i))
+
+    /**
+     * 行 [i] 行顶之上**仍画在本页**的那段页首缺口（[getPageFrameTop] 的唯一内缩量）。
+     *
+     * 默认实现没有盒树（只有行几何），分不出页首块的**自身 top 边**（`border-top`/`padding-top`，
+     * 画在本页）与被并入页边距的**段前距**（折叠 `margin-top`），保守退化为**整段缺口**
+     * （`getLineTop(i) - getPageFrameBottom(i-1)`）⇒ 行为与旧口径逐字节相同，只有行几何的实现
+     * （[FakeBookLayout] 这类测试替身）零变化。
+     *
+     * 有盒树的实现覆盖它（重路径 [orilumn.reader.engine.laying.BoxBookLayout]、绘制侧
+     * `WindowedBookLayout`，两者判据必须同源）：
+     *  - 段中行、文本叶（盒属性被清零）⇒ 0；
+     *  - 叶首行 ⇒ 该叶**自身** `border-top + padding-top`；
+     *  - `i == 0`（章首首行）⇒ 再加该叶自身 `margin-top`（章首段前距不并入页边距）。
+     */
+    fun getPageTopLead(i: Int): Int =
+        if (i <= 0) 0 else (getLineTop(i) - getPageFrameBottom(i - 1)).coerceAtLeast(0)
 
     /**
      * **页面绘制帧下沿**：行 [i] 作为**页尾行**时的帧底 = [getLineBottom]`(i)` + **页尾叶自身**

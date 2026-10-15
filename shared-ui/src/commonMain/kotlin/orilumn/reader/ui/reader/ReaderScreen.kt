@@ -616,11 +616,12 @@ fun ReaderScreen(
         if (lines.isEmpty()) return false
         val contentLeft = profile.marginLeft.toFloat()
         val contentTop = profile.marginTop.toFloat()
-        // 对齐锚点与画布同式（单一来源 ReaderMath.pageAnchorY：行/图取最小，盒背景不进锚点），
-        // 否则行窗内首图页、或页首带盒装饰的页，y 会全偏。
+        // 对齐锚点与画布同式（单一来源 ReaderMath.pageAnchorY：行/图取最小，盒背景不进锚点，
+        // 再上抬页首缺口），否则行窗内首图页、或页首带盒装饰的页，y 会全偏。
         val imgMin = runCatching { currentHost.pageImages(p)?.minOfOrNull { it.yTop } }.getOrNull()
         val bgMin = runCatching { currentHost.pageBackgrounds(p)?.minOfOrNull { it.yTop } }.getOrNull()
-        val anchorY = ReaderMath.pageAnchorY(lines.minOf { it.yTop }, imgMin, bgMin) ?: return false
+        val frameLead = runCatching { currentHost.pageFrameLead(p) }.getOrDefault(0)
+        val anchorY = ReaderMath.pageAnchorY(lines.minOf { it.yTop }, imgMin, bgMin, frameLead) ?: return false
         val shift = anchorY - contentTop.roundToInt()
         // 行窗 Y 是屏坐标（含 contentTop，见 ReaderPageCanvas 同式 shift），故 y 传屏坐标；
         // x 原点是内容区左缘，故 x 减 contentLeft（与绘制侧 paintX = contentLeft + xLeft 同式）。

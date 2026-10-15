@@ -200,14 +200,17 @@ internal suspend fun prerasterPage(
         return false
     }
 
-    // 与 ReaderPageCanvas 同款对齐：章节绝对 Y → 页坐标系，单一来源见 ReaderMath.pageAnchorY
+    // 与 ReaderPageCanvas 同款对齐：章节绝对 Y → 页坐标系，单一来源见 ReaderMath.pageAnchorY。
+    // 页首缺口（`pageFrameLead`）必须与绘制路径取同值，否则预栅格与 UI 首帧指纹不等 ⇒ 首帧重画。
     //（盒背景/边框不进锚点，理由见该函数 KDoc）。
     val imgs = pageImages.takeIf { it.isNotEmpty() }
     val rawBgs = pageBackgrounds.takeIf { it.isNotEmpty() }
+    val frameLead = runCatching { host.pageFrameLead(pos) }.getOrDefault(0)
     val anchorY = ReaderMath.pageAnchorY(
         lineMin = lines.minOfOrNull { it.yTop },
         imgMin = imgs?.minOf { it.yTop },
         bgMin = rawBgs?.minOf { it.yTop },
+        frameLead = frameLead,
     ) ?: return false
     val shift = anchorY - contentTop.toInt()
     val bgs = rawBgs?.map { it.copy(yTop = it.yTop - shift, yBottom = it.yBottom - shift) }.orEmpty()

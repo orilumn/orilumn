@@ -21,7 +21,7 @@ import orilumn.reader.engine.paging.BookLayout
 import orilumn.reader.engine.paging.PageSlice
 import orilumn.reader.engine.paging.Paginator
 import orilumn.reader.engine.skia.DrawLine
-import orilumn.reader.engine.skia.LayoutReadback
+import orilumn.reader.engine.skia.PagedLayout
 import orilumn.reader.engine.text.LayoutParamKey
 import orilumn.reader.engine.text.TypographicProfile
 import orilumn.reader.engine.laying.ParagraphShapeRef
@@ -3445,9 +3445,11 @@ private fun finishCanonicalBackground(
                 if (anchorOffset <= contentH * 0.5f) start = 0
             }
         }
-        val base = layout.getLineTop(start)
+        val base = layout.getPageFrameTop(start)
         var end = start
-        while (end < n && layout.getLineBottom(end) - base <= contentH) end++
+        // 与 `Paginator.fillWholeLines` 同判据（帧几何：含页首元素的 margin-top 与页首块的
+        // border/padding）——少了这一段，绘制侧按盒顶对齐时末行越出页高被裁。
+        while (end < n && layout.getPageFrameBottom(end) - base <= contentH) end++
         if (end == start) end = start + 1
         val charStart = layout.getLineStart(start)
         val charEnd = if (end < n) layout.getLineStart(end) else layout.length
@@ -3463,9 +3465,10 @@ private fun finishCanonicalBackground(
     private fun forwardPageFrom(layout: orilumn.reader.engine.paging.BookLayout, startLine: Int, contentH: Int): PageSlice? {
         val n = layout.lineCount
         if (n <= 0 || contentH <= 0 || startLine < 0 || startLine >= n) return null
-        val base = layout.getLineTop(startLine)
+        // 帧几何与 `Paginator.fillWholeLines` 同源（页首/页尾块装饰占页内空间）。
+        val base = layout.getPageFrameTop(startLine)
         var end = startLine
-        while (end < n && layout.getLineBottom(end) - base <= contentH) end++
+        while (end < n && layout.getPageFrameBottom(end) - base <= contentH) end++
         if (end == startLine) end = startLine + 1
         val cs = layout.getLineStart(startLine)
         val ce = if (end < n) layout.getLineStart(end) else layout.length
@@ -3485,7 +3488,8 @@ private fun finishCanonicalBackground(
         if (n <= 0 || contentH <= 0) return null
         val e = endExclusive.coerceAtMost(n)
         var start = e - 1
-        while (start > 0 && layout.getLineBottom(e - 1) - layout.getLineTop(start - 1) <= contentH) start--
+        // 反向填充同样走帧几何：页尾钉死在行 [e-1]，问「再往上含一行 [start-1] 还装得下吗」。
+        while (start > 0 && layout.getPageFrameBottom(e - 1) - layout.getPageFrameTop(start - 1) <= contentH) start--
         val cs = layout.getLineStart(start)
         val ce = if (e < n) layout.getLineStart(e) else layout.length
         return PageSlice(cs, ce.coerceAtLeast(cs), start, e, PageSlice.Kind.TEXT, -1, -1)
@@ -3575,7 +3579,7 @@ private fun finishCanonicalBackground(
     private var peekedReadback: PeekedReadback? = null
 
     /** 一页的绘制回读源（版式 + 该版式内有效的行区间）。非当前页经 [peekedReadback] 命中。 */
-    private fun readbackFor(unit: ChapterUnit, slice: PageSlice): Pair<LayoutReadback, PageSlice>? {
+    private fun readbackFor(unit: ChapterUnit, slice: PageSlice): Pair<PagedLayout, PageSlice>? {
         val ip = unit.inProgress
         val pk = peekedReadback
         // 临时表按会话身份判新鲜（不依赖 unit.paramHash——它由 prepare/bind 分支写，未必等于 ip）；
@@ -3584,10 +3588,10 @@ private fun finishCanonicalBackground(
             if (ip != null) pk.ipRef === ip
             else pk.ipRef == null && pk.paramHash == unit.paramHash
         if (fresh) {
-            val rb = pk!!.layout as? LayoutReadback ?: return null
+            val rb = pk!!.layout as? PagedLayout ?: return null
             return rb to pk.slice
         }
-        val rb = (unit.tempRenderLayout ?: unit.layout) as? LayoutReadback ?: run {
+        val rb = (unit.tempRenderLayout ?: unit.layout) as? PagedLayout ?: run {
             // 非 Readback 的 drawable（legacy/增量布局）静默空白：Q1-b interim 降级，记 w 可见。
             Logger.w(logTag, "non-Readback layout ch=${unit.chapterIndex} kind=${slice.kind}, blank content")
             return null
@@ -3623,6 +3627,23 @@ private fun finishCanonicalBackground(
         val (layout, s) = readbackFor(unit, slice) ?: return null
         if (s.firstLine < 0) return null
         return layout.pageImages(s.firstLine, s.lastLineExclusive).ifEmpty { null }
+    }
+
+    /**
+     * 本页**页首缺口**（[orilumn.reader.ui...] `ReaderHost.pageFrameLead` 的引擎侧实现）：
+     * `getLineTop(首行) - getPageFrameTop(首行)`，px ≥ 0。
+     *
+     * 与分页预算（[orilumn.reader.engine.paging.Paginator.fillWholeLines]）取**同一对帧函数**，
+     * 故绘制锚点抬头的那段恰好等于预算里记在页首的那段——重路径与临时页因此同值
+     * （返回值是相对首行行顶的差值，与坐标系无关）。
+     * 空窗口/非法行回 0（= 旧口径，绘制像素与修前一致）。
+     */
+    fun pageFrameLead(chapter: Int, slice: PageSlice): Int {
+        val unit = unitAt(chapter) ?: return 0
+        if (slice.kind != PageSlice.Kind.TEXT) return 0
+        val (layout, s) = readbackFor(unit, slice) ?: return 0
+        if (s.firstLine < 0 || s.firstLine >= layout.lineCount) return 0
+        return (layout.getLineTop(s.firstLine) - layout.getPageFrameTop(s.firstLine)).coerceAtLeast(0)
     }
 
     /**

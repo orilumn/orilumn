@@ -56,6 +56,38 @@ abstract class WindowedBookLayout : PagedLayout, BreakAwareBookLayout {
         out
     }
 
+    /**
+     * 页尾叶自身边（`padding-bottom + border-bottom`；文本叶恒 0，与重路径文本叶盒盒属性清零、
+     * 与 `BoxChapterLayouter.ownBottomEdges` 同判据）。
+     */
+    private fun ownLeafBottomEdges(leaf: LayoutBox): Int =
+        if (leaf.el?.isText == true) 0
+        else (leaf.style.padding.bottom + leaf.style.border.bottom).roundToInt()
+
+    /**
+     * 行下标 → 该行为**页尾行**时页尾叶自身占的下边界高（[BookLayout.getPageFrameBottom] 的覆盖）。
+     *
+     * 每条叶只在它的**末行**记一次：叶的行区间由 [leafLocalFirstLine] + 自身 shape 行数给出，
+     * **不读 `LayoutBox.firstLineIndex/lastLineExclusive`** —— 相邻临时页共用同一批盒、会覆写这些字段
+     * （见 [PartialDrawableLayout] 的注释）。叶若在窗口里被截断（末行在窗外）则落不进本流，
+     * 自然不记（叶在窗外仍在继续，本页不欠它下边）。
+     */
+    private val leafBottomEdgesByLastLine: IntArray by lazy {
+        val out = IntArray(lineCount)
+        for (j in leaves.indices) {
+            val n = shapes[j].lineCount
+            if (n <= 0) continue
+            val lo = leafLocalFirstLine[j]
+            if (lo < 0) continue
+            val last = lo + n - 1
+            if (last in out.indices) out[last] = ownLeafBottomEdges(leaves[j])
+        }
+        out
+    }
+
+    override fun getPageFrameBottom(i: Int): Int =
+        getLineBottom(i) + if (i in 0 until lineCount) leafBottomEdgesByLastLine[i] else 0
+
     override fun tableCellLines(firstLine: Int, lastLineExclusive: Int): List<DrawLine> {
         if (firstLine < 0 || lastLineExclusive <= firstLine || tableCells.isEmpty()) return emptyList()
         val out = ArrayList<DrawLine>()

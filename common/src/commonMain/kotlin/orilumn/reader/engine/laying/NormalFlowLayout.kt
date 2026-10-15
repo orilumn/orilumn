@@ -600,13 +600,46 @@ object NormalFlowLayout {
             // over it — the illustration is lost. Unwrapping keeps heavy/light char accounting
             // identical (both see the img leaf, one slot) and reuses the standard replaced sizing.
             val img = soleFigureImage(el, classify, hidden)!!
-            val imgStyle = styles[img] ?: style
+            // 宿主块（`<p class="fm-figure">` 之类「只含一幅图」的块）被摘掉后，**它自己的纵向 margin
+            // 不能跟着丢**：轻路径的块边界间距由 [consecutiveLeafAdvance] 沿**标记祖先链**算（含宿主
+            // 块：真书 `.fm-figure{margin:1.2em 0 .8em}` 在那里是 79px/52px），本路径 `emit` 只看叶
+            // 自身 `style`。两边口径不齐 ⇒ 同一个「图块」磁盘表少一段、临时表多一段 ⇒ 逐页错位
+            // （实测真书 ch2：43 页里 39 页页边界不同），页首/页尾缺口（`windowLeadTop` →
+            // `PartialDrawableLayout.frameLeadTop`）也随之单源失效。把宿主块（及 img 到宿主块之间的
+            // 内联包装）的 margin 折叠进叶 margin，重路径的间距即与轻路径逐像素一致。
+            // 只折 margin：纵向 padding/border 一并折进来的话，重路径会把这些边画成「贴着图」的窄框，
+            // 而轻路径是按祖先载体（整幅宽）画 —— 反而引入新的不一致（见 `buildBackgroundDrawBoxes`）。
+            val imgStyleRaw = styles[img] ?: style
+            var mTop = imgStyleRaw.margin.top
+            var mBottom = imgStyleRaw.margin.bottom
+            var wrap: MarkupElement? = img.parent
+            while (wrap != null && wrap !== el) {
+                val ws = styles.getValue(wrap)
+                mTop = collapseMargins(ws.margin.top, mTop)
+                mBottom = collapseMargins(ws.margin.bottom, mBottom)
+                wrap = wrap.parent
+            }
+            val imgStyle = if (wrap === el) {
+                val ws = styles.getValue(el)
+                imgStyleRaw.copy(
+                    margin = Edges(
+                        top = collapseMargins(ws.margin.top, mTop),
+                        right = imgStyleRaw.margin.right,
+                        bottom = collapseMargins(ws.margin.bottom, mBottom),
+                        left = imgStyleRaw.margin.left,
+                    ),
+                )
+            } else {
+                // 不是 `el` 的后代（不该发生）：不折，保持旧行为。
+                imgStyleRaw
+            }
             val contentW = widthPx.coerceAtLeast(1)
-            val breakW = innerBreakWidth(imgStyle, contentW)
+            // 折进来的只是纵向 margin，横向断行宽/图尺寸仍按 img 自身样式（含横向 padding/border）。
+            val breakW = innerBreakWidth(imgStyleRaw, contentW)
             // P6-a: 与 img 分支同式（悬浮注册 + 右对齐；非悬浮清零）。
             // P3：`fitMaxH` 由第一趟流出的几何给出（此趟恒 null = 自然尺寸），见 `applyReplacedFit`。
-            val (floatW, repH) = replacedUsedSize(img, imgStyle, breakW, imageLoader, chapterHref)
-            val side = imgStyle.floatSide
+            val (floatW, repH) = replacedUsedSize(img, imgStyleRaw, breakW, imageLoader, chapterHref)
+            val side = imgStyleRaw.floatSide
             val (boxLeft, boxW) = if (side != FloatSide.NONE) {
                 val w = floatW.coerceAtLeast(1)
                 pending.preClear(style.floatSide.let { style.clearSide })

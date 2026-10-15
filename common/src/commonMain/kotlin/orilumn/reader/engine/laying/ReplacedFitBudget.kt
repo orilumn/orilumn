@@ -1,4 +1,5 @@
 package orilumn.reader.engine.laying
+import kotlin.math.roundToInt
 
 import orilumn.reader.engine.css.BreakRule
 import orilumn.reader.engine.css.ComputedStyle
@@ -90,6 +91,16 @@ object ReplacedFitBudget {
         return lo..hi
     }
 
+    private fun ownBottomEdgesStyle(el: MarkupElement, styleOf: (MarkupElement) -> ComputedStyle): Int =
+        if (el.isText) 0 else (styleOf(el).padding.bottom + styleOf(el).border.bottom).roundToInt()
+
+    private fun topEdgesStyle(el: MarkupElement, styleOf: (MarkupElement) -> ComputedStyle): Int =
+        if (el.isText) 0 else (styleOf(el).padding.top + styleOf(el).border.top).roundToInt()
+
+    /** 块间落差（前叶自身下边 + 折叠边距 + 后叶自身 top 边），与 `BoxChapterLayouter.blockBoundaryGap` 同式。 */
+    private fun blockBoundaryGapStyle(a: MarkupElement, b: MarkupElement, styleOf: (MarkupElement) -> ComputedStyle): Int =
+        ownBottomEdgesStyle(a, styleOf) + NormalFlowLayout.consecutiveLeafAdvance(a, b, styleOf) + topEdgesStyle(b, styleOf)
+
     /**
      * 簇内**除图自身**以外内容的总高。
      *
@@ -98,23 +109,36 @@ object ReplacedFitBudget {
      * 同一个函数，重路径 [NormalFlowLayout.emit] 的间隙按定义与它相等（`rebuildLocalLines` 的注释
      * 已把这个恒等式当作前提），故两路量出同一个 `othersH`。
      *
+     * 再加上簇落在整页上时**周边归本页**的那两段（帧口径见 [orilumn.reader.engine.paging.BookLayout]）：
+     * 簇首之上的**页首缺口**（块间落差**减去前叶自身下边**——前叶下边归前一页页尾）与簇尾所属叶
+     * 自身的下边（簇尾恰为该叶末行时）。装不下这两段的簇同样会被推到下一页而图被迫裁切。
+     * 簇尾**之下**的块间落差**不进本页**（它归下一页页首），故不以簇尾的后一叶计。
+     *
      * @param members 簇成员（文档序，含图自身）
      * @param imageIndex [members] 中图的**下标**（不是叶下标）
      * @param ownHeight 按下标返回成员自身 border-box 高；图自身传**自然尺寸**（不受预算影响）
      * @param styleOf 元素 → 样式（折叠需要祖先链样式）
+     * @param prevLeaf 簇首的上一个叶（用以计算簇首页首缺口）
      */
     fun othersHeight(
         members: List<MarkupElement>,
         imageIndex: Int,
         ownHeight: (Int) -> Int,
         styleOf: (MarkupElement) -> ComputedStyle,
+        prevLeaf: MarkupElement? = null,
     ): Int {
-        if (members.size <= 1) return 0
+        if (members.isEmpty()) return 0
         var total = 0
         for (k in members.indices) {
             if (k > 0) total += NormalFlowLayout.consecutiveLeafAdvance(members[k - 1], members[k], styleOf)
             total += ownHeight(k)
         }
+        if (prevLeaf != null) {
+            total += blockBoundaryGapStyle(prevLeaf, members[0], styleOf) - ownBottomEdgesStyle(prevLeaf, styleOf)
+        }
+        // 页尾叶自身边：簇尾属于某叶，只有簇尾是该叶末行时才占本页下边界（这里按「簇即末行」计，
+        // 保守取满——预算偏大只会更早缩图，不会裁图）。
+        total += ownBottomEdgesStyle(members[members.size - 1], styleOf)
         return (total - ownHeight(imageIndex)).coerceAtLeast(0)
     }
 
@@ -153,7 +177,13 @@ object ReplacedFitBudget {
             if (natural <= 0) continue
             val range = clusterRange(leaves, i, breakOf)
             val members = range.map { leaves[it] }
-            val others = othersHeight(members, i - range.first, { k -> ownHeight(range.first + k) }, styleOf)
+            val others = othersHeight(
+                members,
+                i - range.first,
+                { k -> ownHeight(range.first + k) },
+                styleOf,
+                prevLeaf = if (range.first > 0) leaves[range.first - 1] else null,
+            )
             val fit = budget(natural, others, contentH) ?: continue
             (out ?: HashMap<Int, Int>().also { out = it })[i] = fit
         }

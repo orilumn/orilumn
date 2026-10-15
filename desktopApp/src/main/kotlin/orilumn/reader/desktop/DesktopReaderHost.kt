@@ -220,6 +220,9 @@ class DesktopReaderHost(
 
     override fun pageLines(pos: ReaderPos): List<DrawLine>? = controller.pageLines(pos.chapter, pos.slice)
 
+    /** 页首缺口（绘制帧顶相对首行行顶的距离），画布/点按/预栅格三方同源（与平板同口径）。 */
+    override fun pageFrameLead(pos: ReaderPos): Int = controller.pageFrameLead(pos.chapter, pos.slice)
+
     override fun pageImages(pos: ReaderPos): List<PageImage>? =
         controller.pageImages(pos.chapter, pos.slice)
 

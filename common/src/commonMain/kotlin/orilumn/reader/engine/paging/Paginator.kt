@@ -36,8 +36,12 @@ object Paginator {
      */
     fun fillWholeLines(layout: BookLayout, startLine: Int, contentH: Int): Int {
         var end = startLine
-        val firstTop = layout.getLineTop(startLine)
-        while (end < layout.lineCount && layout.getLineBottom(end) - firstTop <= contentH) end++
+        // 帧上沿/下沿（[BookLayout.getPageFrameTop]/[getPageFrameBottom]）而不是行顶/行底：页首元素的
+        // margin-top 与页首块的 padding/border 占本页页首空间，页尾叶自身边占本页页尾空间
+        // （块边界缺口只归下一页，口径与收敛条件见 BookLayout 两函数的 KDoc）。少了这一段，绘制侧
+        // 把页面从帧顶对齐时末行就被推出栅格裁掉 —— 这正是「最后一行半行」的真根因。
+        val frameTop = layout.getPageFrameTop(startLine)
+        while (end < layout.lineCount && layout.getPageFrameBottom(end) - frameTop <= contentH) end++
         if (end == startLine) end = startLine + 1
         return end
     }
@@ -117,7 +121,9 @@ object Paginator {
         contentH: Int,
     ): Int = resolveAvoidCut(
         avoidRanges, forbiddenCutLines, pageStartLine, baseCut, contentH,
-        topAt = layout::getLineTop, bottomAt = layout::getLineBottom,
+        // 原子区间「装得下一页」的判据同样走**页面绘制帧**（含页首/页尾块的 padding 与 margin），
+        // 否则带装饰的整块会被判成装得下、放上去仍溢出被裁。
+        topAt = layout::getPageFrameTop, bottomAt = layout::getPageFrameBottom,
     )
 
     /**

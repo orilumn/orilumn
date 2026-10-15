@@ -3,6 +3,7 @@ package orilumn.reader.engine.laying
 import orilumn.reader.engine.css.BreakRule
 import orilumn.reader.engine.paging.BookLayout
 import orilumn.reader.engine.paging.BreakAwareBookLayout
+import kotlin.math.roundToInt
 
 /**
  * [BookLayout] backed by the box-flow line stream produced by [NormalFlowLayout].
@@ -17,7 +18,7 @@ import orilumn.reader.engine.paging.BreakAwareBookLayout
  * into the whole stream).
  */
 class BoxBookLayout(
-    result: BoxLayoutResult,
+    private val result: BoxLayoutResult,
 ) : BreakAwareBookLayout {
 
     private val lines: List<FlowedLine> = result.lines
@@ -35,6 +36,33 @@ class BoxBookLayout(
     override fun getLineEnd(i: Int): Int = lines[i].charEnd
 
     override fun isParagraphBoundaryLine(i: Int): Boolean = lines[i].paragraphStart
+
+    /**
+     * 行下标 → 该行为页尾行时**页尾叶自身**的下边界高（`padding-bottom + border-bottom`）。
+     * 文本叶恒 0（重路径文本叶盒的盒属性被清零，见 `NormalFlowLayout.emit`），与绘制侧
+     * `BoxChapterLayouter.ownBottomEdges` 同判据；容器链的底边不计（重/轻路径必须同值，口径见
+     * [BookLayout.getPageFrameBottom]）。
+     */
+    private val leafBottomEdgesByLastLine: IntArray by lazy {
+        val out = IntArray(lineCount)
+        fun walk(box: LayoutBox) {
+            if (box.isContainer) {
+                for (c in box.childBoxes) walk(c)
+                return
+            }
+            if (box.firstLineIndex < 0 || box.lastLineExclusive <= box.firstLineIndex) return
+            val last = box.lastLineExclusive - 1
+            if (last in out.indices) {
+                out[last] = if (box.el?.isText == true) 0
+                else (box.style.padding.bottom + box.style.border.bottom).roundToInt()
+            }
+        }
+        for (b in result.boxes) walk(b)
+        out
+    }
+
+    override fun getPageFrameBottom(i: Int): Int =
+        getLineBottom(i) + if (i in 0 until lineCount) leafBottomEdgesByLastLine[i] else 0
 
     /**
      * Line ranges that must stay whole across a page break. A box (leaf or container) contributes a

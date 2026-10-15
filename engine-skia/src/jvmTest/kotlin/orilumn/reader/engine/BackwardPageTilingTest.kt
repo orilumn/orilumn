@@ -21,9 +21,10 @@ import org.junit.Test
  *     这条由 [orilumn.reader.engine.BoxChapterLayouter.shapeTempPageBackward] 内的 pin 自校验兜底
  *     （几何倒包估计失配时按 `Paginator` 反查修正），与累加器是否精确无关。
  *  2. **链边缓存页首**：给定本会话前向链登记过的游标（`prevStart`）时，倒包页必须与读者刚看过的前
- *     一页**逐字一致**（`charStart` + `charEnd`）。这是「同一翻页手势永远给出同一页」的保证——**不是**
- *     「临时页 == 磁盘表」：两份分页在章内允许不同（同一个页尾的回原像常有多解：真书 ch2 的 45 个
- *     页界里 15 个不是唯一解），只在章首 char 0 合一，切换只发生在回章首 / 离开本章（AGENTS.md 总则 1）。
+ *     一页**逐字一致**（`charStart` + `charEnd`）。这是「同一翻页手势永远给出同一页」的保证。
+ *     （本锁只测**排版层**的 tiling 与游标命中；「临时页 == 磁盘表」另有真书锁
+ *     `RealBookPaginationParityTest` + 文档 §12.10：倒包页首的权威现在是①前向链边②**章首（块 0）起的
+ *     前向正典链**（轻路径前向链逐页等于重路径全量分页）③几何倒包兜底；中章起锚的行切页首才走③。）
  *
  * 合成书特意混入 `pre { padding-bottom }`（`ownBottomEdges > 0` 的非文本块）：页内**每一块**的自身
  * 下边都落在本页帧内，漏记任一块都会让倒包起点过早、页尾收不到 pin。

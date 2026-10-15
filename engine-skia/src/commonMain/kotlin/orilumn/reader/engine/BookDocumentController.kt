@@ -1124,6 +1124,10 @@ internal val HEAD_START_BLOCK_LIMIT = 100
  *  Window depth symmetric ⇒ forward/backward flip latency risk symmetric. */
 private val TEMP_WINDOW_DEPTH = 1
 
+/** 章首前向正典链采样（[seedHeadRootedEdges]）的页数上限：真书单章页数在数十量级，取远大于其的护栏，
+ *  只防畸形内容（块数极多而逐页不推进）把前台线程钉死。 */
+private val TEMP_HEAD_ROOTED_MAX_PAGES = 4096
+
 
 // ─────────────────────────────────────────────────────────────────
 // Anchor-based incremental layout (large-chapter, disk-miss)
@@ -1418,11 +1422,11 @@ private fun shapeNextBackward(ip: InProgressPagination, bc: BoxChapterLayouter):
  *  由调用方按「相邻前向页页首」折算成 `(endExclusive, lineCut)`——页首块或页首字符所在块 +1，
  *  `lineCut` = 页首字符（块内行切时）或 -1（块边界收页）。
  *
- *  页首游标优先取**临时表自身记忆**（[resolveBackwardStartCursor]：前向链边缓存 → 几何倒包），两条
- *  路都过 [BoxChapterLayouter.shapeTempPageBackward] 内的 pin 自校验，故**本页页尾恒等于 pin**
- *  （区块 tiling 不变量：既不留空洞丢字，也不重叠重字）。章内**绝不**引入磁盘表/正典边界——两份
- *  分页在章内允许不同，只在章首 char 0 合一；磁盘表只在章首交接 / 离开本章时出场。端到端见
- *  `docs/分页高度约束与断页规则-方案.md` §12.7。
+ *  页首游标取 [resolveBackwardStartCursor]（前向链边缓存 → 章首前向正典链 → 几何倒包），三条路都过
+ *  [BoxChapterLayouter.shapeTempPageBackward] 内的 pin 自校验，故**本页页尾恒等于 pin**（区块 tiling
+ *  不变量：既不留空洞丢字，也不重叠重字）。临时表的页界与磁盘表**同源**：轻路径前向链逐页等于重路径
+ *  整章全量分页，故从章首起的倒包页就是 canonical 页页——两份分页在章内不再允许不同，交接时无缝。
+ *  端到端见 `docs/分页高度约束与断页规则-方案.md` §12.7/§12.10。
  *
  *  只在 [tempStateLock] 内调用（读 `ip.prevStart`）。`endExclusive <= 0` 返回
  *  null = 章首不适用（非塑形失败，调用方据此返回 0 而非中止预填循环）；塑形失败抛（fail-fast）。 */
@@ -1431,25 +1435,75 @@ private fun shapeBackwardPage(ip: InProgressPagination, bc: BoxChapterLayouter, 
     val prep = ip.prepare
     val pinChar = if (lineCut >= 0) lineCut
         else prep.globalCharStarts.getOrElse(endExclusive) { prep.totalChars.toLong() }.toInt()
-    val cursor = resolveBackwardStartCursor(ip, pinChar)
+    val cursor = resolveBackwardStartCursor(ip, bc, pinChar)
     return bc.shapeTempPageBackward(
         prep, ip.profileSnapshot, ip.contentW, ip.contentH, endExclusive, lineCut, ip.shapes, cursor,
     ) ?: error("shapeBackwardPage FAIL ch=${ip.chapterIndex} endExclusive=$endExclusive lineCut=$lineCut pin=$pinChar")
 }
 
-/** 倒包页首来源（按优先级），**只许来自临时表自己**，null 才回退几何倒包 + pin 自校验。
+/** 倒包页首来源（按优先级），前两级都**只来自临时表自己**；第三级才是几何倒包 + pin 自校验。
  *
- *  1. **前向链边缓存** [InProgressPagination.prevStart]：本会话前向塑形登记过的「页尾字符 → 页首
- *     游标」边。那是读者往前翻时**实际看到的**那一页，回翻必须逐字回到它——已见过的页界不得漂移。
- *  2. **几何倒包**（由 [BoxChapterLayouter.shapeTempPageBackward] 的估计 + pin 自校验兜底）：
- *     中章起锚（TOC/搜索跳转）且前向链没有该边时用。页界仍严格 tiling（页尾恒等于 pin），
- *     但**不保证等于磁盘表**——章内用临时表本就是设计预期（两份分页只在章首 char 0 合一）。
+ *  1. **本会话前向链边缓存** [InProgressPagination.prevStart]：读者往前翻时**实际看到的**那一页。回翻
+ *     必须逐字回到它——已见过的页界不得漂移。
+ *  2. **章首（块 0）起的前向正典链** [seedHeadRootedEdges]：临时表的页界与磁盘表**同源**。轻路径前向
+ *     链与重路径整章全量分页逐页同值（JVM 真书 ch2 复算：14/14 页 `[start,end)` 逐字相等），所以从块 0
+ *     前向塑形得到的「页尾 → 页首」边就是 canonical 页界。几何倒包只能猜回原像多解之一——真书 ch2 的
+ *     13 个内部页界里 3 个会被估早 72~98 字，而每个估早的页首又成为下一页的 pin ⇒ 漂移逐页累积（真机
+ *     倒包链相对磁盘表整体偏早至 ~600 字）。章首链把这条漂移从构造上消掉。
+ *  3. **几何倒包**（`shapeTempPageBackward` 的估计 + pin 自校验）：pin **不是**正典页界时（中章起锚的
+ *     行切页首、畸形章）用。页界仍严格 tiling（页尾恒等于 pin），只是不保证等于磁盘表。
  *
- *  **不读 `ip.canonicalSlices` / 磁盘表**：那等于把「后台正典何时算完」变成翻页结果的输入——同一
- *  手势因时机不同给出不同页界（不可复现），也等于在章内掺入另一份分页的边界（AGENTS.md 总则
- *  1：章内始终使用临时表；切换只允许发生在回章首 / 离开本章）。读 `ip.prevStart` 全程在
- *  [tempStateLock] 内（写也只在锁内，无发布问题）。 */
-private fun resolveBackwardStartCursor(ip: InProgressPagination, pinChar: Int): Pair<Int, Int>? = ip.prevStart[pinChar]
+ *  **不读 `ip.canonicalSlices` / 磁盘表**：那等于把「后台正典何时算完」变成翻页结果的输入（同一手势
+ *  因时机不同给出不同页界）。第 2 级是**确定性**的轻路径前向链（与后台何时算完无关），不是另一份时序
+ *  相关的分页。读 `ip.prevStart` / 采样水位全程在 [tempStateLock] 内（写也只在锁内，无发布问题）。 */
+private fun resolveBackwardStartCursor(ip: InProgressPagination, bc: BoxChapterLayouter, pinChar: Int): Pair<Int, Int>? {
+    ip.prevStart[pinChar]?.let { return it }
+    return seedHeadRootedEdges(ip, bc, pinChar)
+}
+
+/** 章首（块 0）起的前向正典链采样（见 [resolveBackwardStartCursor] 第 2 级）。
+ *
+ *  从块 0、首行起逐页 [BoxChapterLayouter.shapeTempPageForward]，登记 `prevStart[页尾字符] = (页首块, 块内行)`，
+ *  直到某页页尾 ≥ [upToChar]：命中 ⇒ 返回该页首游标（= `upToChar` 所在页的页首）；越过 ⇒ 返回 null
+ *  （`upToChar` 不是正典页界，交几何倒包）。采样水位 [InProgressPagination.headRootedTo] 兼作负缓存，
+ *  已越过而未登记 ⇒ 直接 null，不重复整章前向塑形。
+ *
+ *  **只登记前向页**（与 [prevStart] 纪律一致：倒包页的页首不回写）。顺带把整章各块塑形进共享缓存
+ *  （[InProgressPagination.shapes]），故这次采样也让后续回翻页的塑形变便宜。
+ *
+ *  只在 [tempStateLock] 内调用。 */
+private fun seedHeadRootedEdges(ip: InProgressPagination, bc: BoxChapterLayouter, upToChar: Int): Pair<Int, Int>? {
+    if (upToChar <= 0) return null
+    if (upToChar <= ip.headRootedTo) return null // 已采样越过且未登记：非正典页界
+    val prep = ip.prepare
+    var b = 0
+    var line = 0
+    var guard = 0
+    while (guard++ < TEMP_HEAD_ROOTED_MAX_PAGES) {
+        val fwd = bc.shapeTempPageForward(prep, ip.profileSnapshot, ip.contentW, ip.contentH, b, ip.shapes, line)
+            ?: error("seedHeadRootedEdges FAIL ch=${ip.chapterIndex} blk=$b line=$line")
+        val s = fwd.page.slice
+        // putIfAbsent：读者**实际看到过**的边（第 1 级）优先，采样只补空缺——否则会把读者见过的页界
+        // 改成正典的，回翻当场「内容变了」（正是本要修的症状）。
+        if (s.charEnd > s.charStart) ip.prevStart.putIfAbsent(s.charEnd, s.blockStart to s.firstLine)
+        if (s.charEnd >= upToChar) {
+            // 命中页尾恰好 = 目标 ⇒ 该边就是目标页的页首游标；越过 ⇒ 目标不是正典页界。
+            ip.headRootedTo = maxOf(ip.headRootedTo, s.charEnd)
+            return if (s.charEnd == upToChar) ip.prevStart[upToChar] else null
+        }
+        ip.headRootedTo = maxOf(ip.headRootedTo, s.charEnd)
+        // 「游标永不停滞」（同 shapeTempPageForward 内 guard）：不推进即停，防死循环。
+        if (fwd.nextBlock < b || (fwd.nextBlock == b && fwd.nextLine <= line)) break
+        b = fwd.nextBlock
+        line = fwd.nextLine
+    }
+    Logger.w(
+        logTag,
+        "head-rooted chain incomplete ch=${ip.chapterIndex} upTo=$upToChar reached=${ip.headRootedTo} " +
+            "blocks=${prep.totalBlocks} chars=${prep.totalChars}",
+    )
+    return null
+}
 
 /** 前向链边登记（见 [InProgressPagination.prevStart]）：`prevStart[本页页尾] = 本页页首游标 (块, 行)`。
  *  前向塑形的**每一个**页面都要登记（含锚点页与失配补塑页）——回翻时据此重建即为同一页。

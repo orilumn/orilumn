@@ -453,10 +453,28 @@ class InProgressPagination(
      *
      * 只在 [tempStateLock] 内读写（与临时会话同生命周期；会话作废即随对象废弃，不跨会话串味）。
      * 只登记**前向**页：倒包页的页首按设计**不**回写（避免把几何估计当边记忆，覆盖真正见过的前向
-     * 链边）。**不以磁盘表/正典为权威**——章内掺入另一份分页的边界会令同一翻页手势因后台正典
-     * 何时算完而结果不同；磁盘表只在章首交接 / 离开本章时出场（AGENTS.md 总则 1）。
+     * 链边）。两条来源按优先级：读者实际走过的前向链边（[BookDocumentController.recordChainEdge]）
+     * 优先，缺口由[章首前向正典链][headRootedTo]补齐（[BookDocumentController.seedHeadRootedEdges]，
+     * 只 `putIfAbsent`，绝不改写读者见过的边）。**不读磁盘表/`canonicalSlices`**：那会把「后台正典
+     * 何时算完」变成翻页结果的输入（同一手势因时机不同给出不同页界）；章首链是**确定性**的轻路径
+     * 前向塑形，不是时序相关的第二份分页。磁盘表仍只在章首交接 / 离开本章时出场（AGENTS.md 总则 1）。
      */
     val prevStart: MutableMap<Int, Pair<Int, Int>> = HashMap()
+
+    /**
+     * 章首（块 0）起的前向正典链已采样到的页尾字符（含）；0 = 未采样。
+     *
+     * [BookDocumentController.seedHeadRootedEdges] 用 [BoxChapterLayouter.shapeTempPageForward] 从块 0
+     * 逐页前向塑形，把每条「页尾字符 → 页首游标」边登记进 [prevStart]，直到越过某个目标页尾。轻路径前向
+     * 链与重路径整章全量分页**逐页同值**（真书 ch2 JVM 复算 14/14 页逐字相等），故这些边就是 canonical
+     * 页界——临时表倒包据此取页首，回原像的多解不再靠猜测（几何估计只能命中其一，猜错即漂移）。
+     *
+     * **确定性**：链只由轻路径 + 本章参数算出，**不读 [canonicalSlices]/磁盘表**，故同一 pin 恒得同一页，
+     * 与后台正典何时算完无关（AGENTS.md 总则：章内只用临时表；这里只是让临时表自己的页界与磁盘表同源）。
+     * 采样水位同时是**负缓存**：目标页尾小于水位却没登记边 ⇒ 该字符不是正典页界（中章起锚的行切页首、
+     * 畸形章）⇒ 直接交几何倒包，不重复整章前向塑形。
+     */
+    var headRootedTo: Int = 0
 
     /** True once a backward page reaching block 0 was produced (the real chapter head). */
     var headReached: Boolean = false

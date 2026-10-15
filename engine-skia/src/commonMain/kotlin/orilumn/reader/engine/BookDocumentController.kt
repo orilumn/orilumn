@@ -4152,12 +4152,20 @@ private fun finishCanonicalBackground(
         val ps0 = ps.firstOrNull()
         val psN = ps.lastOrNull()
         val ip = unit.inProgress
+        // 页首缺口（§12.9 v4）：本片首行之上**仍画在本页**的那段（重路径=整章布局，t=临时窗口布局）。
+        // 排障「侧栏/有背景的父容器里第一段被推走或被裁」时直接读这里：值应等于
+        // 容器 padding-top + 首子 margin-top + 首子 padding-top（§12.9），两路必须同值。
+        fun BookLayout.topLeadOf(firstLine: Int): Int =
+            if (firstLine in 0 until lineCount) getPageTopLead(firstLine) else -1
+        val topLeadF = unit.layout?.topLeadOf(slice.firstLine) ?: -1
+        val topLeadT = unit.tempRenderLayout?.topLeadOf(slice.firstLine) ?: -1
         Logger.w(flipTag, "FLIP dir=$direction ch=$chapter title=${unit.title?.take(16) ?: "-"} " +
             "|slice[${slice.firstLine},${slice.lastLineExclusive})char[${slice.charStart},${slice.charEnd})blk[${slice.blockStart},${slice.blockEndExclusive})] " +
             "|inProgress=${ip != null}${ip?.let{"anchorBlk=${it.anchorBlockStart} anchorLineCh=${it.anchorLineCharStart} curFwd=${it.curIsForward} curIdx=${it.curIndex} head=${it.headReached} fwdPages=${it.forwardPages.size} bwdPages=${it.backwardPages.size} shapedFwdTo=${it.shapedForwardTo} fwd=[${tempWinSpans(it.forwardPages)}] bwd=[${tempWinSpans(it.backwardPages)}]"} ?: ""} " +
             "|diskTable=${pt != null}${pt?.let{"pages=${it.pages.size} tableParam=${it.paramHash}"} ?: ""} " +
             "|layoutLC=$layoutLc tempLC=$tempLc " +
             "|pageSlices=${ps.size}${ps0?.let{" f[${it.charStart},${it.charEnd})"} ?: ""}${psN?.let{" l[${it.charStart},${it.charEnd})"} ?: ""} " +
+            "|topLead=f:$topLeadF t:$topLeadT " +
             "|laidOut=${unit.laidOut} paramHash=${unit.paramHash} path=${unit.pathMarker}")
         // Anchor temp streaming: navigate the whole-block temp pages instead of pageSlices indices.
         val inProgress = unit.inProgress

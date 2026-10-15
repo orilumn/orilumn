@@ -4,6 +4,7 @@ import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.engine.css.CssBundle
 import orilumn.reader.engine.html.HtmlTreeConverter
 import orilumn.reader.engine.html.MarkupElement
+import orilumn.reader.engine.laying.BoxBookLayout
 import orilumn.reader.engine.paging.BookLayout
 import orilumn.reader.engine.paging.PageSlice
 import orilumn.reader.engine.text.TypographicProfile
@@ -261,4 +262,177 @@ class PageFrameTilingTest {
     /** 布局级反空跑：存在某行 `frameBottom > 行底`，即页尾叶自身 `padding-bottom/border-bottom` 被量到。 */
     private fun BookLayout.hasLineWithTailEdges(): Boolean =
         (0 until lineCount).any { getPageFrameBottom(it) > getLineBottom(it) }
+
+    /**
+     * v4 口径直测（期望值来自 fixture 样式，不来自实现式）：页首叶的**可见外沿盒**（背景色/背景图/
+     * 边框/盒阴影 —— 与绘制侧 `hasPaintedSlab` 同判据）**之内**的首子 `margin-top` 不并入页边距。
+     *
+     * fixture（真书 `div.fm-sidebar-block` 形）：
+     * `div.sidebar{background:#eee; padding:10px 20px}` 的首子
+     * `p.title{margin:30px 0; padding-top:15px}` ⇒ 页首落在 title 段首时缺口 =
+     * `10（容器 padding-top） + 30（首子 margin-top，**保留**） + 15（首子 padding-top） = 55`。
+     * 同一 fixture 里 `p.plain{margin:100px 0; padding:40px 0}` 直挂 `<body>`（无可见盒）落页首时，
+     * 段前距整段并入页边距，只留自身 `padding-top` = 40（v3 不变）。
+     *
+     * 直取两路（重 = `BoxBookLayout`，轻 = `shapeTempPageForward` 从该块开盘）避免依赖「扫描恰好
+     * 在 title 处断页」——那是概率事件，锁不住。
+     */
+    @Test
+    fun `painted container keeps its first child margin at page top`() {
+        val css4 = CssBundle(
+            listOf(
+                """
+                body { font-size: 16px; line-height: 1.5; margin: 0; }
+                p { margin: 100px 0; padding: 40px 0; }
+                div.sidebar { background: #eee; padding: 10px 20px; }
+                p.title { margin: 30px 0; padding-top: 15px; }
+                """.trimIndent(),
+            ),
+        )
+        val markup = converter.convert(
+            """
+            <html><body>
+              <p class="head">章首段。正文内容多一些以便分页。${"正文内容。".repeat(30)}</p>
+              <div class="sidebar">
+                <p class="title">枚举是软关键字</p>
+                <p>侧栏第二段。${"正文内容。".repeat(20)}</p>
+                <p>侧栏第三段。${"正文内容。".repeat(20)}</p>
+              </div>
+              ${(1..6).joinToString("\n") { "<p class=\"plain\">第${it}段。正文内容多一些以便分页。${"正文内容。".repeat(30)}</p>" }}
+            </body></html>
+            """.trimIndent(),
+        )!!
+
+        // ---- 重路径：直接从盒树取叶首行，量 getPageTopLead ----
+        val heavy = layouter.prepare(markup, css4, profile, contentW, 900)
+        val book = BoxBookLayout(heavy.structure)
+        val titleEl = findByClass(markup, "title")!!
+        val titleLine = heavy.leaves.first { it.el === titleEl }.firstLineIndex
+        assertTrue("title 叶没有行 ⇒ fixture 没量到东西", titleLine > 0)
+        assertEquals("canonical：可见外沿盒内首子 margin-top 必须保留", 55, book.getPageTopLead(titleLine))
+        val plainLine = heavy.leaves.first { it.el === findByClass(markup, "plain") }.firstLineIndex
+        assertEquals("canonical：无可见盒的普通段仍按 v3 只留自身 padding-top", 40, book.getPageTopLead(plainLine))
+
+        // ---- 轻路径：从 title 块开盘，页首缺口 = 行顶 − 帧顶 ----
+        val light = layouter.prepareLight(markup, css4, profile, contentW, ChapterStructureCache(), 900)
+        var titleBlock = -1
+        for (i in 0 until light.totalBlocks) if (light.block(i).el === titleEl) { titleBlock = i; break }
+        assertTrue("轻路径找不到 title 块 ⇒ fixture 没量到东西", titleBlock > 0)
+        val fwd = layouter.shapeTempPageForward(light, profile, contentW, 900, titleBlock, cache = null, startLine = 0)!!
+        val s = fwd.page.slice
+        val lay = fwd.page.layout
+        assertEquals(
+            "temp：与 canonical 的可见外沿盒缺口必须同值",
+            55, lay.getLineTop(s.firstLine) - lay.getPageFrameTop(s.firstLine),
+        )
+    }
+
+    /**
+     * v4 扫描锁：本 fixture 下**所有**页首缺口只能是 fixture 派生的四个值 ——
+     * `0`（段中开页）、`40`（普通段首：自身 `padding-top`，段前距并入页边距）、
+     * `55`（可见外沿盒内首子：容器 `padding-top` 10 + 首子 `margin-top` 30 + 首子 `padding-top` 15）、
+     * `140`（章首：自身 `padding-top` 40 + 自身 `margin-top` 100）。重/轻两路同口径、同取值域。
+     */
+    @Test
+    fun `painted container scan keeps only fixture derived leads`() {
+        val css4 = CssBundle(
+            listOf(
+                """
+                body { font-size: 16px; line-height: 1.5; margin: 0; }
+                p { margin: 100px 0; padding: 40px 0; }
+                div.sidebar { background: #eee; padding: 10px 20px; }
+                p.title { margin: 30px 0; padding-top: 15px; }
+                """.trimIndent(),
+            ),
+        )
+        val markup = converter.convert(
+            """
+            <html><body>
+              <p>章首段。正文内容多一些以便分页。${"正文内容。".repeat(30)}</p>
+              <div class="sidebar">
+                <p class="title">枚举是软关键字</p>
+                <p>侧栏第二段。${"正文内容。".repeat(20)}</p>
+                <p>侧栏第三段。${"正文内容。".repeat(20)}</p>
+              </div>
+              ${(1..6).joinToString("\n") { "<p>第${it}段。正文内容多一些以便分页。${"正文内容。".repeat(30)}</p>" }}
+            </body></html>
+            """.trimIndent(),
+        )!!
+        val allowed = setOf(0, 40, 55, 140)
+        var sawPlainStart = 0
+        var sawChapterHead = 0
+        var sawMidBlock = 0
+        for (contentH in 100..420 step 7) {
+            val canon = canonical(markup, contentH, css4)
+            for (s in canon.slices) {
+                val lead = canon.layout.getLineTop(s.firstLine) - canon.layout.getPageFrameTop(s.firstLine)
+                assertTrue(
+                    "contentH=$contentH canonical 首行=${s.firstLine} 页首缺口 $lead 不在 fixture 派生取值域 $allowed 内",
+                    lead in allowed,
+                )
+                if (s.charStart == 0) sawChapterHead++ else if (lead == 40) sawPlainStart++ else if (lead == 0) sawMidBlock++
+            }
+            for ((s, lay) in tempForward(markup, contentH, css4)) {
+                val lead = lay.getLineTop(s.firstLine) - lay.getPageFrameTop(s.firstLine)
+                assertTrue(
+                    "contentH=$contentH 临时页首行=${s.firstLine} 页首缺口 $lead 不在 fixture 派生取值域 $allowed 内",
+                    lead in allowed,
+                )
+            }
+        }
+        assertTrue("从未出现章首开页 ⇒ 用例空跑", sawChapterHead > 0)
+        assertTrue("从未出现普通段首开页（缺口 = 自身 padding-top）⇒ 用例空跑", sawPlainStart > 0)
+        assertTrue("从未出现段中开页 ⇒ 用例空跑", sawMidBlock > 0)
+    }
+
+    /** 首个带 [cls] 的元素（fixture 定位用；不依赖实现式）。 */
+    private fun findByClass(root: MarkupElement, cls: String): MarkupElement? {
+        if (root.attrs["class"]?.split(' ')?.contains(cls) == true) return root
+        for (c in root.children) findByClass(c, cls)?.let { return it }
+        return null
+    }
+
+    /**
+     * v4 重/轻同值扫描锁：同一 fixture、同一 `contentH` 下两路**逐页**页首缺口序列必须相等
+     * （[orilumn.reader.engine.paging.BookLayout.getPageTopLead] 的重（`BoxBookLayout` 盒树）与轻
+     * （`BoxChapterLayouter.leadAbove`/`windowLeadTop`）两套实现同口径 —— 不同值就是「调参后页数
+     * 对不上」）。页数/序列一致顺带锁住两路分页同切。
+     */
+    @Test
+    fun `page top lead agrees between heavy and light`() {
+        val css4 = CssBundle(
+            listOf(
+                """
+                body { font-size: 16px; line-height: 1.5; margin: 0; }
+                p { margin: 100px 0; padding: 40px 0; }
+                div.sidebar { background: #eee; padding: 10px 20px; }
+                p.title { margin: 30px 0; padding-top: 15px; }
+                """.trimIndent(),
+            ),
+        )
+        val markup = converter.convert(
+            """
+            <html><body>
+              <p>章首段。正文内容多一些以便分页。${"正文内容。".repeat(30)}</p>
+              <div class="sidebar">
+                <p class="title">枚举是软关键字</p>
+                <p>侧栏第二段。${"正文内容。".repeat(20)}</p>
+                <p>侧栏第三段。${"正文内容。".repeat(20)}</p>
+              </div>
+              ${(1..6).joinToString("\n") { "<p>第${it}段。正文内容多一些以便分页。${"正文内容。".repeat(30)}</p>" }}
+            </body></html>
+            """.trimIndent(),
+        )!!
+        var seenTitleLead = 0
+        for (contentH in 150..420 step 9) {
+            val canon = canonical(markup, contentH, css4)
+            val heavyLeads = canon.slices.map { canon.layout.getLineTop(it.firstLine) - canon.layout.getPageFrameTop(it.firstLine) }
+            val lightLeads = tempForward(markup, contentH, css4).map { (s, lay) ->
+                lay.getLineTop(s.firstLine) - lay.getPageFrameTop(s.firstLine)
+            }
+            assertEquals("contentH=$contentH 两路页首缺口序列必须同值（页数/切点同源）", heavyLeads, lightLeads)
+            seenTitleLead += heavyLeads.count { it == 55 }
+        }
+        assertTrue("扫描中从未出现可见外沿盒内首子开页（缺口 55）⇒ 用例空跑", seenTitleLead > 0)
+    }
 }

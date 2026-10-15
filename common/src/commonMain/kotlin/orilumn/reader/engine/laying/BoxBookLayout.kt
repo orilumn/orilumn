@@ -1,6 +1,8 @@
 package orilumn.reader.engine.laying
 
 import orilumn.reader.engine.css.BreakRule
+import orilumn.reader.engine.css.ComputedStyle
+import orilumn.reader.engine.html.MarkupElement
 import orilumn.reader.engine.paging.BookLayout
 import orilumn.reader.engine.paging.BreakAwareBookLayout
 import kotlin.math.roundToInt
@@ -106,11 +108,49 @@ class BoxBookLayout(
         out
     }
 
-    /** [BookLayout.getPageTopLead]：叶自身 top 边；章首（i == 0）另加首叶自身 `margin-top`。 */
+    /**
+     * 行下标 → 该行为**叶首行**时该叶的元素（非叶首行 = null）。v4 页首缺口要按盒链上溯找**可见
+     * 外沿盒**（[NormalFlowLayout.pageTopLead]），只看叶自身边不够。
+     */
+    private val leafElementByFirstLine: Array<MarkupElement?> by lazy {
+        val out = arrayOfNulls<MarkupElement>(lineCount)
+        fun walk(box: LayoutBox) {
+            if (box.isContainer) {
+                for (c in box.childBoxes) walk(c)
+                return
+            }
+            if (box.firstLineIndex < 0 || box.lastLineExclusive <= box.firstLineIndex) return
+            val first = box.firstLineIndex
+            if (first in out.indices) out[first] = box.el
+        }
+        for (b in result.boxes) walk(b)
+        out
+    }
+
+    /** 元素 → 该元素盒的计算样式（v4 页首缺口按祖先链取样式；文本叶盒的盒属性已被清零）。 */
+    private val styleByElement: Map<MarkupElement, ComputedStyle> by lazy {
+        val out = HashMap<MarkupElement, ComputedStyle>()
+        fun walk(box: LayoutBox) {
+            val el = box.el
+            if (el != null) out.putIfAbsent(el, box.style)
+            for (c in box.childBoxes) walk(c)
+        }
+        for (b in result.boxes) walk(b)
+        out
+    }
+
+    /**
+     * [BookLayout.getPageTopLead]：章首（i == 0）叶自身 top 边 + 首叶自身 `margin-top`（v3 口径，
+     * 章首段前距不与页边距合并）；其余页首按 [NormalFlowLayout.pageTopLead]（v4：可见外沿盒的边框
+     * 顶到叶首行行顶，外沿盒**以下**一切保留，其上折叠 margin 并入页边距）。样式缺项（盒树上无该
+     * 元素的盒）时退回叶自身边。
+     */
     override fun getPageTopLead(i: Int): Int {
         if (i !in 0 until lineCount) return 0
         val edges = leafTopEdgesByFirstLine[i]
-        return if (i == 0) edges + chapterHeadMarginTop else edges
+        if (i == 0) return edges + chapterHeadMarginTop
+        val el = leafElementByFirstLine[i] ?: return edges
+        return NormalFlowLayout.pageTopLead(el) { e -> styleByElement[e] }
     }
 
     /**

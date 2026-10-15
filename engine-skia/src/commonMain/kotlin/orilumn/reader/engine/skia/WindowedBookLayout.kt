@@ -1,6 +1,8 @@
 package orilumn.reader.engine.skia
 
 import orilumn.reader.engine.ImageLoader
+import orilumn.reader.engine.css.ComputedStyle
+import orilumn.reader.engine.html.MarkupElement
 import orilumn.reader.engine.laying.BoxDrawer
 import orilumn.reader.engine.laying.LayoutBox
 import orilumn.reader.engine.laying.NormalFlowLayout
@@ -131,11 +133,37 @@ abstract class WindowedBookLayout : PagedLayout, BreakAwareBookLayout {
         if (si in leaves.indices) ownLeafMarginTop(leaves[si]) else 0
     }
 
-    /** [BookLayout.getPageTopLead]：叶自身 top 边；章首（i == 0）另加首叶自身 `margin-top`。 */
+    /**
+     * 祖先元素的计算样式（v4 页首缺口要沿盒链上溯找**可见外沿盒**，见
+     * [NormalFlowLayout.pageTopLead]）。null = 本实现没有样式源 ⇒ 退回「叶自身 top 边」口径
+     * （[BoxDrawableLayout] 与 [PartialDrawableLayout] 各自覆盖；前者吃整章盒树，后者吃调用方的
+     * `prepare`）。
+     */
+    protected open fun elementStyle(el: MarkupElement): ComputedStyle? = null
+
+    /** 行下标 → 该行为**叶首行**时该叶的元素（非叶首行 = null）。v4 页首缺口按盒链上溯要用它。 */
+    private val leafElementByFirstLine: Array<MarkupElement?> by lazy {
+        val out = arrayOfNulls<MarkupElement>(lineCount)
+        for (j in leaves.indices) {
+            val lo = leafLocalFirstLine[j]
+            if (lo in out.indices) out[lo] = leaves[j].el
+        }
+        out
+    }
+
+    /**
+     * [BookLayout.getPageTopLead]：章首（i == 0）叶自身 top 边 + 首叶自身 `margin-top`（章首段前距
+     * 不与页边距合并）；其余页首按 [NormalFlowLayout.pageTopLead]（v4：**可见外沿盒**的边框顶到叶
+     * 首行行顶，外沿盒**以下**一切保留，其上折叠 `margin-top` 并入页边距）。无样式源或样式缺项时
+     * 退回叶自身 top 边（v3 口径）。
+     */
     override fun getPageTopLead(i: Int): Int {
         if (i !in 0 until lineCount) return 0
         val edges = leafTopEdgesByFirstLine[i]
-        return if (i == 0) edges + chapterHeadMarginTop else edges
+        if (i == 0) return edges + chapterHeadMarginTop
+        val el = leafElementByFirstLine[i] ?: return edges
+        if (elementStyle(el) == null) return edges
+        return NormalFlowLayout.pageTopLead(el, ::elementStyle)
     }
 
     override fun tableCellLines(firstLine: Int, lastLineExclusive: Int): List<DrawLine> {

@@ -1650,6 +1650,12 @@ object NormalFlowLayout {
         owner: MarkupElement,
         firstLeaf: MarkupElement,
         styleOf: (MarkupElement) -> ComputedStyle,
+        /**
+         * true = 首叶按**匿名文本叶**处理：末一步的 `margin.top` 不计（文本叶盒的盒属性已清零，
+         * 其样式里本就没有 margin；置位只是防 `styleOf` 换成宿主样式源时把宿主 margin 重复计入）。
+         * 绘制侧调它的地方保持 false（窗口页带口径不变）。
+         */
+        zeroLeafBox: Boolean = false,
     ): Int? {
         if (owner === firstLeaf) return 0
         // 上行收链：leaf→owner，中途断开即非后代（理论上不会发生，防呆）。
@@ -1678,12 +1684,72 @@ object NormalFlowLayout {
                     merged = 0f
                 }
             } else {
-                merged = collapseMargins(merged, styleOf(el).margin.top)
+                val leafMargin = if (zeroLeafBox) 0f else styleOf(el).margin.top
+                merged = collapseMargins(merged, leafMargin)
                 dist += merged.roundToInt()
             }
         }
         return dist
     }
+
+    /**
+     * **页首块组的外沿盒**（v4 口径，2026-10-15）：从页首叶 [leaf] 沿「首有效子」链上溯，取链上
+     * **最外层的可见盒**（绘制侧真会在页上出矩形的那种：背景色/背景图/边框/盒阴影）。
+     *
+     * 判据为什么要与**绘制**同源：页首帧若切进这个盒的盒内，绘制侧画在栅格上沿的部分就被裁掉一块
+     * ——真书 `.fm-sidebar-block{background:#EEE;padding:10px 20px}` 里
+     * `.fm-sidebar-title{margin:1em 0;padding:15px 1px -10px}` 的段前距与容器 padding 就是这么被
+     * 吃掉的（用户报「有背景色的父容器里，第一个子元素的 margin-top 被省掉」）。只带 padding 而
+     * 不可见（无背景/无边框/无阴影）的容器**不设外沿**：它的 top 边在栅格上沿被吞掉看不出差别，
+     * 留着反而白占页高。
+     *
+     * 链在半途断开（该层不是父的**首有效子**）即止：那时折叠组在更低层结算，没有「外沿」可言。
+     * 返回 null = 链上无可见盒（或一路到顶都没有）⇒ 调用方退回「叶自身 top 边」口径（v3）。
+     */
+    fun pageStartOwner(leaf: MarkupElement, styleOf: (MarkupElement) -> ComputedStyle?): MarkupElement? {
+        var child = leaf
+        var owner: MarkupElement? = null
+        while (true) {
+            val parent = child.parent ?: break
+            if (!isFirstSignificantChild(parent, child)) break
+            val s = styleOf(parent) ?: break // 样式缺项（盒树无该元素）⇒ 无从判可见，止步
+            if (s.hasPaintedSlab() || s.boxShadow != null) owner = parent // 越往上越外，取到顶
+            child = parent
+        }
+        return owner
+    }
+
+    /**
+     * **页首缺口**（v4）：从外沿盒 X 的**边框顶**到叶 [leaf] 首行行顶的距离
+     * = `X 自身 top 边 + firstChildDescentTop(X, leaf) + 叶自身 top 边`。
+     *
+     * X 边框盒**以下**的一切（X 的 padding、中间容器的边距、**首子自己的** `margin-top`/`padding-top`）
+     * 一律画在本页页首；**X 之上**的折叠 `margin-top`（X 自身 margin + 与上一块的段间折叠组）并入
+     * 页边距、两页都不画（v3「一条缺口不许两页各收一次」不变，只是被吞的那段从「叶的 margin」上移到
+     * 「X 的 margin」）。无可见祖先盒（或链在首子处断开）⇒ 退回叶自身 top 边（= v3：整段段前距并入）。
+     *
+     * 文本叶（匿名块）自身盒属性按重路径约定清零（`emit` 给文本叶盒清零盒属性；轻路径
+     * `ownTopEdges` 对 `isText` 同样清零）。
+     */
+    fun pageTopLead(leaf: MarkupElement, styleOf: (MarkupElement) -> ComputedStyle?): Int {
+        val leafStyle = styleOf(leaf)
+        val leafEdges =
+            if (leaf.isText || leafStyle == null) 0
+            else (leafStyle.border.top + leafStyle.padding.top).roundToInt()
+        val owner = pageStartOwner(leaf, styleOf) ?: return leafEdges
+        if (owner === leaf) return leafEdges
+        val ownerStyle = styleOf(owner) ?: return leafEdges
+        val ownerEdges = (ownerStyle.border.top + ownerStyle.padding.top).roundToInt()
+        // 走到 owner 的整条链在上面上溯时都已取到非空样式，这里的兜底实际不可达。
+        // 文本叶：末一步不计宿主 margin（`resolveStyle(#text)` 与盒树上文本叶盒的样式都无 margin，
+        // 这里再挡一道，防 `styleOf` 换成宿主样式时把宿主 margin 重复计入）。
+        val descent = firstChildDescentTop(owner, leaf, { e -> styleOf(e) ?: UNKNOWN_STYLE }, zeroLeafBox = leaf.isText)
+            ?: return leafEdges
+        return ownerEdges + descent + leafEdges
+    }
+
+    /** 样式缺项兜底：无任何可见盒属性（正常路径取不到它，见 [pageTopLead]）。 */
+    private val UNKNOWN_STYLE = ComputedStyle(fontSizePx = 0f, lineHeightRatio = 0f)
 
     /** 首个有效子（跳过纯空白 #text；与 Selector 相邻语义同口径，保守：行内元素也算阻挡）。 */
     private fun isFirstSignificantChild(parent: MarkupElement, el: MarkupElement): Boolean {

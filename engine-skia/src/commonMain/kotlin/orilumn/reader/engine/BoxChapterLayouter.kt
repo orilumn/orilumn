@@ -1067,6 +1067,7 @@ class BoxChapterLayouter(
             tableCellImagesSource = incrWin.images,
             tableBordersSource = incrWin.borders,
             frameLeadTop = frameLeadTop,
+            elementStyleSource = prepare::resolveStyle,
         )
 
         // 6. Paginate the shaped window's OWN line stream by content height — the SAME whole-line fill
@@ -1250,14 +1251,20 @@ class BoxChapterLayouter(
      * 块 [b] 作为**页首块**时，页首行行顶之上**归本页**的那段缺口
      * （[orilumn.reader.engine.paging.BookLayout.getPageTopLead] 的轻路径单源）。
      *
-     * v3 口径（2026-10-15）：页首块的**段前折叠 `margin-top` 并入页边距**（不画在本页、也不留给
-     * 下一页），只留本块**自身**的 `border-top`/`padding-top` ⇒ `ownTopEdges(b)`。
+     * v4 口径（2026-10-15）：本块**作为页首块**时的缺口 = [NormalFlowLayout.pageTopLead] —— 页首叶沿
+     * 「首有效子」链上溯到**最外层可见盒 X**（背景色/背景图/边框/盒阴影），X 边框顶以下一切（X 的
+     * padding、中间容器的边距、**首子自己的** `margin-top`/`padding-top`）画在本页页首；X 之上的折叠
+     * `margin-top` 并入页边距。链上无可见盒（纯文本块直接挂在 `<body>` 下）⇒ 退回 v3：只留本块
+     * **自身**的 `border-top`/`padding-top` ⇒ `ownTopEdges(b)`。
      * **章首块（b == 0）例外**：章首段前距不与页边距合并，另加本块自身 `margin-top`。
      * 段中开页（调用方的 `k0 > 0`）本页首行之上无缺口，恒 0 —— 调用方按 `k0 > 0` 短路。
      */
     private fun leadAbove(prepare: LightPrepare, b: Int): Int {
         val leaf = prepare.block(b)
-        return ownTopEdges(leaf) + if (b <= 0) ownMarginTop(leaf) else 0
+        // 章首：v3 不变（章首段前距不与页边距合并，照画在章首页页首）。
+        if (b <= 0) return ownTopEdges(leaf) + ownMarginTop(leaf)
+        val el = leaf.el ?: return ownTopEdges(leaf)
+        return NormalFlowLayout.pageTopLead(el, prepare::resolveStyle)
     }
 
     /**
@@ -1289,7 +1296,10 @@ class BoxChapterLayouter(
         val firstIdx = shapes.indexOfFirst { it.lineCount > 0 }
         if (firstIdx < 0) return 0
         val leaf = prepare.block(blockLo + firstIdx)
-        return ownTopEdges(leaf) + if (blockLo == 0) ownMarginTop(leaf) else 0
+        // 章头起：v3 不变（章首段前距不与页边距合并，另加首块自身 `margin-top`）。
+        if (blockLo == 0) return ownTopEdges(leaf) + ownMarginTop(leaf)
+        val el = leaf.el ?: return ownTopEdges(leaf)
+        return NormalFlowLayout.pageTopLead(el, prepare::resolveStyle)
     }
 
     private fun rebuildLocalLines(
@@ -2367,6 +2377,7 @@ class BoxChapterLayouter(
             tableCellImagesSource = tempWin.images,
             tableBordersSource = tempWin.borders,
             frameLeadTop = tempEdgeGaps,
+            elementStyleSource = prepare::resolveStyle,
         )
         var lastLine = if (lines.isEmpty()) 0 else lines.size
         var charEnd = if (blockEndExclusive < total) prepare.globalCharStarts[blockEndExclusive].toInt()
@@ -2881,6 +2892,12 @@ private class PartialDrawableLayout(
      * 页边距合并），否则只为「首块自身 top 边」（折叠段前距并入页边距）。0 = 段中开页。
      */
     private val frameLeadTop: Int = 0,
+    /**
+     * v4 页首缺口的**祖先样式源**（= 调用方的 `prepare::resolveStyle`）。`getPageTopLead(i > 0)`
+     * 按盒链上溯找可见外沿盒（[NormalFlowLayout.pageTopLead]）要用它；null = 无源，退回叶自身
+     * top 边（v3 口径）。
+     */
+    private val elementStyleSource: ((MarkupElement) -> orilumn.reader.engine.css.ComputedStyle)? = null,
 ) : orilumn.reader.engine.skia.WindowedBookLayout() {
 
     init {
@@ -2908,6 +2925,10 @@ private class PartialDrawableLayout(
 
     override val lineCount: Int get() = lines.size
     override val length: Int get() = lines.lastOrNull()?.charEnd ?: 0
+
+    /** v4 页首缺口：祖先样式源（调用方的 `prepare::resolveStyle`）；null = 无源，退回 v3 口径。 */
+    override fun elementStyle(el: MarkupElement): orilumn.reader.engine.css.ComputedStyle? =
+        elementStyleSource?.invoke(el)
 
     override fun getLineTop(i: Int): Int = lines[i].yTop
     override fun getLineBottom(i: Int): Int = lines[i].yBottom

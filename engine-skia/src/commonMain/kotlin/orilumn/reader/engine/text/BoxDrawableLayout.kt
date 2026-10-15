@@ -1,6 +1,8 @@
 package orilumn.reader.engine.text
 
 import orilumn.reader.engine.ImageLoader
+import orilumn.reader.engine.css.ComputedStyle
+import orilumn.reader.engine.html.MarkupElement
 import orilumn.reader.engine.laying.BoxLayoutResult
 import orilumn.reader.engine.laying.FlowedLine
 import orilumn.reader.engine.laying.LayoutBox
@@ -53,6 +55,23 @@ class BoxDrawableLayout(
     protected override val boxesForDraw: List<LayoutBox> get() = result.boxes
     protected override val imageLoader: ImageLoader? get() = loader
     protected override val chapterHref: String get() = href
+
+    /**
+     * v4 页首缺口用的**祖先样式源**：整章盒树上每个元素盒的计算样式（文本叶盒的盒属性已被清零，
+     * 与 [WindowedBookLayout.getPageTopLead] 的叶自身边同判据）。
+     */
+    private val styleByElement: Map<MarkupElement, ComputedStyle> by lazy {
+        val out = HashMap<MarkupElement, ComputedStyle>()
+        fun walk(box: LayoutBox) {
+            val el = box.el
+            if (el != null) out.putIfAbsent(el, box.style)
+            for (c in box.childBoxes) walk(c)
+        }
+        for (b in result.boxes) walk(b)
+        out
+    }
+
+    override fun elementStyle(el: MarkupElement): ComputedStyle? = styleByElement[el]
 
     private fun collectLeaves(boxes: List<LayoutBox>): List<LayoutBox> {
         val out = ArrayList<LayoutBox>()

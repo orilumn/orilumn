@@ -441,6 +441,23 @@ class InProgressPagination(
     var curIsForward: Boolean = true
     var curIndex: Int = 0
 
+    /**
+     * 前向链边缓存（排版层-上/增量分页）：`页尾字符 → 该页页首游标 (块, 块内行)`。
+     *
+     * 倒包一页时，「以哪一行为页首」**不能**由几何累加器反推——同一个页尾字符在回原像里常有多个
+     * 候选行首（真书 ch2 的 45 个页界：唯一解 30、最大解 8、最小解 7、内部解 3），几何倒包只能猜
+     * 其中之一，猜错即与**本会话已见过的**页界漂移（真机：倒包页比前向页多收一行，页尾少 10 字，
+     * 随后前向重建从错位原点起塑，来回翻页内容就变了）。本会话内唯一可靠的来源是**前向链本身**：
+     * 每塑一页前向页就登记一条边（键=该页 [PageSlice.charEnd]，值=该页页首游标），回翻时命中即
+     * **同一页**。
+     *
+     * 只在 [tempStateLock] 内读写（与临时会话同生命周期；会话作废即随对象废弃，不跨会话串味）。
+     * 只登记**前向**页：倒包页的页首按设计**不**回写（避免把几何估计当边记忆，覆盖真正见过的前向
+     * 链边）。**不以磁盘表/正典为权威**——章内掺入另一份分页的边界会令同一翻页手势因后台正典
+     * 何时算完而结果不同；磁盘表只在章首交接 / 离开本章时出场（AGENTS.md 总则 1）。
+     */
+    val prevStart: MutableMap<Int, Pair<Int, Int>> = HashMap()
+
     /** True once a backward page reaching block 0 was produced (the real chapter head). */
     var headReached: Boolean = false
 
@@ -449,8 +466,17 @@ class InProgressPagination(
      *  lands the FULL chapter-head page and only the NEXT one crosses to the previous chapter. */
     var headLanded: Boolean = false
 
-    /** Canonical (chapter-head) full-layout, produced in the background; used when head/leave. */
+    /** 正典（章首全量）版式 + 页切，后台线程 [BookDocumentController.finishCanonicalBackground] 产出，
+     *  只在**交接点**（回章首 / 离开本章）被前台使用——章内绝不据此切换（AGENTS.md 总则 1）。
+     *
+     *  **发布规则（无锁跨线程，必须守）**：写侧先 `canonicalSlices` 后 `canonicalLayout`，读侧先判
+     *  `canonicalLayout != null` 再取 `canonicalSlices`。两个字段都 `@Volatile`，`layout` 因此是
+     *  「已发布」标记：看到非空即能读到非空 slices（否则会 `bindFull(layout, emptyList())` → 零页单元）。
+     *  读侧全在 [BookDocumentController] 的 `tempStateLock` 内，写侧不在 → 无该锁即无 happens-before。 */
+    @Volatile
     var canonicalLayout: BookLayout? = null
+
+    @Volatile
     var canonicalSlices: List<PageSlice> = emptyList()
 
     /** The currently displayed page, kept so callers know what to show after a background switch. */

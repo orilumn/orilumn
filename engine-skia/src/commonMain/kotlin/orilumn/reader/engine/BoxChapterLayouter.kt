@@ -1703,6 +1703,10 @@ class BoxChapterLayouter(
      * current block is **kept and truncated** (its topmost fitting line becomes the page's first line),
      * matching forward's "cut inside block" semantics exactly.
      * @return the built page, or null when [endExclusive] is out of range.
+     * @param pinnedStart 本会话前向链边缓存 `ip.prevStart` 给出的页首游标 `(块, 块内行)`——命中即以该行
+     *   页首组装，跳过几何倒包估计；仍要过下面的页尾 pin 自校验，失配则记 w 回退倒包（见
+     *   `BookDocumentController.resolveBackwardStartCursor`）。**不读磁盘表/正典**：章内边界只由临时
+     *   表自己决定。
      */
     fun shapeTempPageBackward(
         prepare: LightPrepare,
@@ -1712,6 +1716,7 @@ class BoxChapterLayouter(
         endExclusive: Int,
         endLineCharStart: Int,
         cache: MutableMap<Int, ParagraphShapeRef>?,
+        pinnedStart: Pair<Int, Int>? = null,
     ): TempPage? {
         val total = prepare.totalBlocks
         if (endExclusive <= 0 || endExclusive > total) return null
@@ -1755,11 +1760,30 @@ class BoxChapterLayouter(
             if (firstInPage) {
                 firstInPage = false
                 // 页**尾**叶自身边：页尾行恰为本窗末块末行时，帧底 = 行底 + 该叶自身 `padding-bottom`/
-                // `border-bottom`（[BookLayout.getPageFrameBottom]）。块边界缺口不再算进本页——它归
-                // **下一页**页首（旧口径把整段缺口算进页尾，页尾就少装一行）。
+                // `border-bottom`（[BookLayout.getPageFrameBottom]）。页尾被钉在锚点行（`endLineCharStart`
+                // 剪掉末行）时该边不在页内，故按 `maxLine` 判定。
+                //
+                // 块边界缺口仍不再算进本页——它归**下一页**页首（旧口径把整段缺口算进页尾，页尾就少装
+                // 一行），而本块的**自身下边**例外：它是帧**内**的一段（见下）。
                 if (maxLine == s.lineCount) {
                     acc += ownBottomEdges(prepare.block(endExclusive - 1))
                 }
+            } else {
+                // 页内**其余块**（含本页起始块）的自身下边同样落在本页帧内：本页无论从本块哪一行起页，
+                // 块末行都在页内，而块底那段（`ownBottomEdges`）是「块末行行底 → 下一块首行行顶」整段
+                // 落差 [blockBoundaryGap] 里属于**本块帧底**的一部分（[BookLayout.getPageFrameBottom]），
+                // 故随块末行落进本页。
+                //
+                // 帧高单源推导：自页首行 S 到页尾行 L 的帧跨度
+                //   span(S, L) = frameBottom(L) − frameTop(S)
+                //              = Σ_{页内块 b} [ leadAbove(b)（仅当页首落在 b 首行）+ Σ行高 + ownBottomEdges(b) ]
+                // （用 [blockBoundaryGap] = ownBottomEdges(prev) + 折叠边距 + 本块 top 边、[leadAbove] =
+                // blockBoundaryGap − ownBottomEdges(prev) 逐段展开即得；`shapeAnchorPageForward` 的累加式
+                // 是同一恒等式的另一种写法。）⇒ **每个**页内块都要记一次自身下边。旧式只记页尾那一次，
+                // acc 偏小 ⇒ 倒包起点过早 ⇒ `Paginator` 从该起点整行填充收不到页尾（帧高先超）⇒
+                // 「末行被推走/页尾 2 字落到页外」——真机 ch2 倒包页少了整整一行（10 字），随后前向重建
+                // 从错位原点起塑，来回翻页内容就变了。
+                acc += ownBottomEdges(leaf)
             }
 
             // Accumulate lines from the bottom of this block upward. On overflow truncate this block
@@ -1846,13 +1870,88 @@ class BoxChapterLayouter(
                 }
             }
         }
-        val backPage = assembleTempPage(prepare, pageStartBlock, endExclusive, shapes,
-            pageFirstLine = pageStartLine, endLineCharStart = if (endLineCharStart >= 0) endLineCharStart else null,
-            contentH = contentH) {
-            tempShape(cache, prepare, it, profile)
+        // ── 页尾 pin 自校验（**单源**：页首切点由 `Paginator` 反查，不由自算累加器拍板）──
+        // 本页必须**恰好**收到 pinChar —— 相邻前向页的页首字符（`endLineCharStart`）或本窗末块的后继
+        // 块首字（块边界收页）。短了 = 页缝丢字（两页之间那段字符无人显示），长了 = 两页重叠。
+        // 倒包估计与 `Paginator` 帧口径的**任何**失配（页内块自身下边、页首缺口、avoid 退切、窗口端点）
+        // 都在这里被拦下、当场修正并出声，而不是把错位页灌进窗口。真机症状「来回翻页内容变了」正是
+        // 错位页进窗口：倒包页尾少 10 字，前向重建又从错位的原点起塑，页界整条链跟着漂。
+        val pinChar = if (endLineCharStart >= 0) endLineCharStart
+            else prepare.globalCharStarts.getOrElse(endExclusive) { prepare.totalChars.toLong() }.toInt()
+        fun assembleFrom(sb: Int, sl: Int, sh: List<ParagraphShapeRef>): TempPage =
+            assembleTempPage(prepare, sb, endExclusive, sh, pageFirstLine = sl,
+                endLineCharStart = if (endLineCharStart >= 0) endLineCharStart else null,
+                contentH = contentH) { tempShape(cache, prepare, it, profile) }
+        // 本会话前向链边缓存给出的页首游标（`ip.prevStart`）：按该行组装即为读者刚看过的那一页，省掉
+        // 整段几何估计。仍要过 pin 自校验——游标与轻路径几何若分叉（落在别的行上），这里当场拦下。
+        if (pinnedStart != null) {
+            val (pb, pl) = pinnedStart
+            val pShape = if (pb in 0 until endExclusive) tempShape(cache, prepare, pb, profile) else null
+            if (pShape != null && pl >= 0 && pl < pShape.lineCount) {
+                val pShapes = (pb until endExclusive).map { tempShape(cache, prepare, it, profile) }
+                val pinned = assembleFrom(pb, pl, pShapes)
+                if (pinned.slice.charEnd == pinChar) {
+                    tempDiag("BWD", "in endExcl=$endExclusive lineCut=$endLineCharStart", pinned,
+                        "truncated=$truncated pinned=($pb,$pl)")
+                    return pinned
+                }
+                Logger.w(
+                    "Orilumn.TEMP",
+                    "BWD-PIN-DRIFT href=$chapterHref pin=$pinChar pinned=($pb,$pl) " +
+                        "got=[${pinned.slice.charStart},${pinned.slice.charEnd}) —— 权威页首游标与几何不一致，回退倒包",
+                )
+            } else {
+                Logger.w("Orilumn.TEMP", "BWD-PIN-STALE href=$chapterHref pinnedStart=($pb,$pl) endExcl=$endExclusive")
+            }
         }
+        val backPage = assembleFrom(pageStartBlock, pageStartLine, shapes)
+        if (backPage.slice.charEnd == pinChar) {
+            tempDiag("BWD", "in endExcl=$endExclusive lineCut=$endLineCharStart", backPage,
+                "truncated=$truncated start=($pageStartBlock,$pageStartLine)")
+            return backPage
+        }
+        // 慢路（估计失配）：在**探针布局**上用帧几何反查「自哪一行起页，整行填充恰好收到 pin」——
+        // 逐行下移（页变短）取**首个**可行行 = 倒包允许的最大填充（页最满），判据就是
+        // `Paginator.paginateFrom`（与 `assembleTempPage` 逐字同式），只多付一次组装。
+        val layout = backPage.layout
+        val pinLine = if (endLineCharStart >= 0) {
+            (0 until layout.lineCount).firstOrNull { layout.getLineStart(it) == pinChar } ?: layout.lineCount
+        } else layout.lineCount
+        var fixedLine = -1
+        var probeLine = pageStartLine + 1
+        while (probeLine < pinLine) {
+            val p = Paginator.paginateFrom(layout, probeLine, contentH).firstOrNull()
+            if (p != null && p.lastLineExclusive >= pinLine) { fixedLine = probeLine; break }
+            probeLine++
+        }
+        if (fixedLine >= 0) {
+            val (lf, ll) = localLineRanges(shapes)
+            for (i in lf.indices) {
+                if (fixedLine in lf[i] until ll[i]) {
+                    val fb = pageStartBlock + i
+                    val fl = fixedLine - lf[i]
+                    val fixed = assembleFrom(fb, fl, shapes.drop(i))
+                    if (fixed.slice.charEnd == pinChar) {
+                        Logger.w(
+                            "Orilumn.TEMP",
+                            "BWD-FIX href=$chapterHref pin=$pinChar start=($pageStartBlock,$pageStartLine)→($fb,$fl) " +
+                                "lost=${pinChar - backPage.slice.charEnd}（倒包估计偏差，已按 Paginator 反查修正）",
+                        )
+                        tempDiag("BWD", "in endExcl=$endExclusive lineCut=$endLineCharStart", fixed,
+                            "truncated=$truncated fixed=($fb,$fl)")
+                        return fixed
+                    }
+                    break
+                }
+            }
+        }
+        Logger.e(
+            "Orilumn.TEMP",
+            "BWD-UNFIXED href=$chapterHref pin=$pinChar endExcl=$endExclusive start=($pageStartBlock,$pageStartLine) " +
+                "got=[${backPage.slice.charStart},${backPage.slice.charEnd}) lines=${layout.lineCount} —— 反查无解（页缝丢字），保留估计页待查",
+        )
         tempDiag("BWD", "in endExcl=$endExclusive lineCut=$endLineCharStart", backPage,
-            "truncated=$truncated start=($pageStartBlock,$pageStartLine)")
+            "truncated=$truncated start=($pageStartBlock,$pageStartLine) UNFIXED")
         return backPage
     }
 

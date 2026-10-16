@@ -3,6 +3,15 @@
 > Keeps a running log of significant milestones for the Orilumn reader engine. Supersedes
 > everything marked done; each section reflects a completed stage.
 
+## 2026-10-16 — 分页同源（临时表页界 = 磁盘表页界）与页首段前距口径收口（合并提交 `bc42923`）
+
+**分页同源（§12.10）**：临时表页界改由章首前向正典链给出，锚页页尾交给 Paginator。
+
+**页首段前距口径收口（§12.9/v4）**：带背景色/边框/阴影的可见父容器内，页首落在其第一个子元素时，把容器内边距 + 子元素段前距一并画在页顶。
+
+**验证**：全章页首 frameTop <= 0 且首行墨偏移恒正。
+
+
 ## 2026-10-03 — 行末悬空间隙：英文词在行首时右侧留 0.25em 缺口（提交 `d85ddef`）
 
 **Issue（用户真机直觉提问，实测坐实）**：「英文词在行末（中西接缝正好是断点）时，

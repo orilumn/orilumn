@@ -62,6 +62,10 @@ fun adjustLineHeightsForInlineImages(
     imageLoader: ImageBoundsReader?,
     chapterHref: String,
     /**
+     * 图片资源固有 px → 画布 px 的倍率（平台层实测）。
+     */
+    density: Float = 1f,
+    /**
      * Light-path style fallback: windowed style maps exclude block-subtree descendants
      * (e.g. table-cell imgs); resolve those through the cascade instead of crashing.
      * Heavy path feeds the whole-chapter map — pass null (a miss there is a real bug
@@ -92,7 +96,7 @@ fun adjustLineHeightsForInlineImages(
             // always hit. Ultimate fallback preserves the old 16px behavior for corrupt maps
             // (only em-relative sizes read it; width/height attrs are unaffected).
             val imgStyle = styles[img] ?: resolveStyle?.invoke(img) ?: styles[root] ?: FALLBACK_STYLE
-            val usedH = NormalFlowLayout.replacedUsedSize(img, imgStyle, breakW, imageLoader, chapterHref).second
+            val usedH = NormalFlowLayout.replacedUsedSize(img, imgStyle, breakW, imageLoader, chapterHref, density = density).second
             if (usedH > tallest) tallest = usedH
             scan++
         }

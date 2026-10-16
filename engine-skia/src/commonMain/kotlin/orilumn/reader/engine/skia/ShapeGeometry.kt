@@ -76,7 +76,7 @@ fun shapeGeometry(
     if (el.tag == "img") {
         return ShapedGeometry(
             isReplaceable = true,
-            replaceableBottom = NormalFlowLayout.replaceableHeightOf(el, rootStyle, widthPx, imageLoader, chapterHref, replaceableFitH),
+            replaceableBottom = NormalFlowLayout.replaceableHeightOf(el, rootStyle, widthPx, imageLoader, chapterHref, replaceableFitH, profile.density),
         )
     }
     // An anonymous text leaf belongs to its container block, so pair it with the parent's tag
@@ -136,6 +136,7 @@ fun shapeGeometry(
         },
         el, styles, classify ?: BlockClassify(isBlock), hidden,
         widthPx, imageLoader, chapterHref,
+        profile.density,
         // 轻路径窗口化表缺块级子树后代（表格内图）：经级联懒算真样式，不崩。
         resolveStyle = ancestorStyleOf,
     )

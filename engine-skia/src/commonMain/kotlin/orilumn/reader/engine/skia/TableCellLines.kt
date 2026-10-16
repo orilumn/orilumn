@@ -61,13 +61,14 @@ object TableCellLines {
          * `Int` 实参静默重绑到 `Float` 形参上 —— 症状是「墨色变成一个浮点偏移」而非编译错误。
          */
         cjkLatinSpacingEm: Float = 0f,
+        density: Float = 1f,
     ): CellWindow {
         val lines = ArrayList<DrawLine>()
         val borders = ArrayList<PageBackground>()
         val images = ArrayList<PageImage>()
         var acc = 0
         for (cell in table.cells) {
-            acc = emitCell(cell, rowTop, rowTop + rowHeight.coerceAtLeast(1), rowCharBase + acc, table.emptyCellsHide, styleOf, fallback, letterSpacingEm, inkColor, lines, borders, images, imageLoader, chapterHref, acc, cjkLatinSpacingEm)
+            acc = emitCell(cell, rowTop, rowTop + rowHeight.coerceAtLeast(1), rowCharBase + acc, table.emptyCellsHide, styleOf, fallback, letterSpacingEm, inkColor, lines, borders, images, imageLoader, chapterHref, acc, cjkLatinSpacingEm, density)
         }
         return CellWindow(lines, borders, images)
     }
@@ -86,6 +87,7 @@ object TableCellLines {
         chapterHref: String = "",
         /** 混排字距（em）；同样**追加在末尾**，理由见 [expand]。 */
         cjkLatinSpacingEm: Float = 0f,
+        density: Float = 1f,
     ): TableWindow {
         val byLine = HashMap<Int, List<DrawLine>>()
         val borders = ArrayList<PageBackground>()
@@ -103,7 +105,7 @@ object TableCellLines {
                 for (cell in f.table.cells) {
                     val spanLast = (k + cell.rowSpan.coerceAtLeast(1) - 1).coerceAtMost(j)
                     val spanBottom = frames[spanLast].rowTop + frames[spanLast].rowHeight.coerceAtLeast(1)
-                    acc = emitCell(cell, f.rowTop, spanBottom, f.rowCharBase + acc, f.table.emptyCellsHide, styleOf, f.fallbackStyle, letterSpacingEm, inkColor, lines, borders, frameImages, imageLoader, chapterHref, acc, cjkLatinSpacingEm)
+                    acc = emitCell(cell, f.rowTop, spanBottom, f.rowCharBase + acc, f.table.emptyCellsHide, styleOf, f.fallbackStyle, letterSpacingEm, inkColor, lines, borders, frameImages, imageLoader, chapterHref, acc, cjkLatinSpacingEm, density)
                 }
                 if (lines.isNotEmpty()) byLine[f.lineIdx] = lines
                 if (frameImages.isNotEmpty()) imagesByLine[f.lineIdx] = frameImages
@@ -174,6 +176,7 @@ object TableCellLines {
         acc: Int,
         /** 混排字距（em，0 = 关）：逐块写进 [DrawLine]，断行侧已按同值预留版心。 */
         cjkLatinSpacingEm: Float,
+        density: Float = 1f,
     ): Int {
         val blocks = cell.blocks
         if (blocks.isEmpty()) return acc
@@ -206,7 +209,7 @@ object TableCellLines {
                 val src = b.el.attrs["src"]
                 if (imageLoader == null || chapterHref.isBlank() || src == null) continue
                 val imgStyle = styleOf(b.el) ?: bs
-                val used = NormalFlowLayout.replacedUsedSize(b.el, imgStyle, lineW, imageLoader, chapterHref)
+                val used = NormalFlowLayout.replacedUsedSize(b.el, imgStyle, lineW, imageLoader, chapterHref, density = density)
                 val w = used.first.coerceAtLeast(1)
                 val h = used.second.coerceAtLeast(1)
                 images.add(
@@ -224,7 +227,7 @@ object TableCellLines {
             }
             val text = shape.shapeText
             if (text.isEmpty()) continue
-            val hidden = emitCellImages(b, text, shape, bs, styleOf, yBlock, xLeft, lineW, imageLoader, chapterHref, images)
+            val hidden = emitCellImages(b, text, shape, bs, styleOf, yBlock, xLeft, lineW, imageLoader, chapterHref, images, density)
             for (k in 0 until shape.shapeLineCount) {
                 val s = shape.shapeLineStart(k)
                 val e = shape.shapeLineEnd(k)
@@ -323,6 +326,7 @@ object TableCellLines {
         imageLoader: ImageBoundsReader?,
         chapterHref: String,
         images: MutableList<PageImage>,
+        density: Float = 1f,
     ): Map<Int, List<IntRange>> {
         val hidden = HashMap<Int, MutableList<IntRange>>()
         if (imageLoader == null || chapterHref.isBlank()) return hidden
@@ -348,7 +352,7 @@ object TableCellLines {
                 val src = imgEl.attrs["src"] ?: continue
                 val imgStyle = styleOf(imgEl) ?: cs
                 val used = NormalFlowLayout.replacedUsedSize(
-                    imgEl, imgStyle, lineW, imageLoader, chapterHref,
+                    imgEl, imgStyle, lineW, imageLoader, chapterHref, density = density,
                 )
                 val w = used.first.coerceAtLeast(1)
                 val h = used.second.coerceAtLeast(1)

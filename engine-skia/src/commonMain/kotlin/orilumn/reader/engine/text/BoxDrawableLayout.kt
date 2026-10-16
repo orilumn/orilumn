@@ -37,6 +37,7 @@ class BoxDrawableLayout(
     protected override val tableCellImages: Map<Int, List<orilumn.reader.engine.skia.PageImage>> = emptyMap(),
     /** 表格单元格边框（章节绝对 Y；随背景绘制）。 */
     protected override val tableBorders: List<orilumn.reader.engine.skia.PageBackground> = emptyList(),
+    protected override val density: Float = 1f,
 ) : WindowedBookLayout() {
 
     private val lines: List<FlowedLine> = result.lines

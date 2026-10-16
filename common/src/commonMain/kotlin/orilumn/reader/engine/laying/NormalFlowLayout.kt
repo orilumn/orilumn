@@ -61,6 +61,11 @@ object NormalFlowLayout {
         hidden: HiddenCheck = HIDDEN_NONE,
         imageLoader: ImageBoundsReader? = null,
         chapterHref: String = "",
+        /**
+         * 平台层实测的 dp→物理像素倍率（见 `TypographicProfile.density`）：图片资源自身的
+         * 像素尺寸按 CSS px 语义换算到画布像素（×density）。默认 1 保持既有测试/工具不变。
+         */
+        density: Float = 1f,
         /** P3-c 生成内容查找（空即无，旧路径）。 */
         genOf: GenOf = EmptyGen,
         /**
@@ -70,10 +75,10 @@ object NormalFlowLayout {
          */
         contentH: Int = 0,
     ): BoxLayoutResult {
-        val boxes = buildBoxTree(root, styles, breaker, widthPx, left = 0, classify, hidden, imageLoader, chapterHref, genOf)
+        val boxes = buildBoxTree(root, styles, breaker, widthPx, left = 0, classify, hidden, imageLoader, chapterHref, density, genOf)
         val lines = ArrayList<FlowedLine>()
         flowBoxes(boxes, lines)
-        if (contentH > 0) applyReplacedFit(boxes, lines, styles, contentH, imageLoader, chapterHref)
+        if (contentH > 0) applyReplacedFit(boxes, lines, styles, contentH, imageLoader, chapterHref, density)
         return BoxLayoutResult(lines, boxes)
     }
 
@@ -97,6 +102,7 @@ object NormalFlowLayout {
         contentH: Int,
         imageLoader: ImageBoundsReader?,
         chapterHref: String,
+        density: Float = 1f,
     ) {
         val leaves = collectLeafBoxes(boxes)
         val els = leaves.mapNotNull { it.el }
@@ -130,7 +136,7 @@ object NormalFlowLayout {
             val st = box.style
             box.replaceableFitH = fit
             box.replaceableHeight = replaceableHeightOf(
-                el, st, innerBreakWidth(st, box.contentWidth), imageLoader, chapterHref, fit,
+                el, st, innerBreakWidth(st, box.contentWidth), imageLoader, chapterHref, fit, density,
             )
         }
         lines.clear()
@@ -536,6 +542,8 @@ object NormalFlowLayout {
         hidden: HiddenCheck = HIDDEN_NONE,
         imageLoader: ImageBoundsReader? = null,
         chapterHref: String = "",
+        /** 图片资源固有 px → 画布 px 的倍率（平台层实测；见 `TypographicProfile.density`）。 */
+        density: Float = 1f,
         /** P3-c 生成内容查找（空即无，旧路径）。 */
         genOf: GenOf = EmptyGen,
         /** P6-a 待环绕透传（文档序；容器递归共享同一份）。 */
@@ -558,10 +566,10 @@ object NormalFlowLayout {
             val innerW = g.contentW
             // The table's own border-box left is its children's baseline; rows start after its left edge.
             val rowLeft = g.tableLeft + (style.border.left + style.padding.left).roundToInt()
-            val rows = buildTableRows(el, styles, breaker, innerW, rowLeft, classify, hidden, imageLoader, chapterHref, genOf)
+            val rows = buildTableRows(el, styles, breaker, innerW, rowLeft, classify, hidden, imageLoader, chapterHref, density, genOf)
             val cap = TableGridModel.build(el).caption
             val capBoxes = if (cap != null && !hidden.isHidden(cap)) {
-                buildBoxTree(cap, styles, breaker, innerW, rowLeft, classify, hidden, imageLoader, chapterHref, genOf, pending)
+                buildBoxTree(cap, styles, breaker, innerW, rowLeft, classify, hidden, imageLoader, chapterHref, density, genOf, pending)
             } else emptyList()
             val children = if (capBoxes.isNotEmpty() && captionIsBottom(el) { styles[it] }) rows + capBoxes else capBoxes + rows
             listOf(LayoutBox(el, style, g.tableLeft, g.outerW, emptyList(), 0, emptyList(), children))
@@ -571,7 +579,7 @@ object NormalFlowLayout {
             // P6-a: 悬浮 img 注册跨度（右对齐 x，双端绘制同吃 contentLeft）；非悬浮 img 块清零待环绕。
             val contentW = widthPx.coerceAtLeast(1)
             val breakW = innerBreakWidth(style, contentW)
-            val (floatW, repH) = replacedUsedSize(el, style, breakW, imageLoader, chapterHref)
+            val (floatW, repH) = replacedUsedSize(el, style, breakW, imageLoader, chapterHref, density = density)
             val side = style.floatSide
             val (boxLeft, boxW) = if (side != FloatSide.NONE) {
                 val w = floatW.coerceAtLeast(1)
@@ -638,7 +646,7 @@ object NormalFlowLayout {
             val breakW = innerBreakWidth(imgStyleRaw, contentW)
             // P6-a: 与 img 分支同式（悬浮注册 + 右对齐；非悬浮清零）。
             // P3：`fitMaxH` 由第一趟流出的几何给出（此趟恒 null = 自然尺寸），见 `applyReplacedFit`。
-            val (floatW, repH) = replacedUsedSize(img, imgStyleRaw, breakW, imageLoader, chapterHref)
+            val (floatW, repH) = replacedUsedSize(img, imgStyleRaw, breakW, imageLoader, chapterHref, density = density)
             val side = imgStyleRaw.floatSide
             val (boxLeft, boxW) = if (side != FloatSide.NONE) {
                 val w = floatW.coerceAtLeast(1)
@@ -685,7 +693,7 @@ object NormalFlowLayout {
                 val boxLeft = if (side == FloatSide.RIGHT) left + maxOf(0, contentW - floatW) else left
                 val breakWf = innerBreakWidth(style, floatW)
                 val brokenF = breakWrappedLines(breaker, text, style, breakWf, null, el.tag, runs, style.textIndentPx.coerceAtLeast(0f), shifts)
-                val heightsF = adjustLineHeightsForInlineImages(text, brokenF, el, styles, classify, hidden, breakWf, imageLoader, chapterHref)
+                val heightsF = adjustLineHeightsForInlineImages(text, brokenF, el, styles, classify, hidden, breakWf, imageLoader, chapterHref, density = density)
                     .map { it.coerceAtLeast(1) }
                 // P6-b: 叠排注音行增高（与行内图抬升同式；无注音零回归）。
                 val grownF = adjustLineHeightsForRuby(brokenF, heightsF, leafRubyRuns(el, styles, classify, hidden, genOf))
@@ -710,7 +718,7 @@ object NormalFlowLayout {
                 val lead = if (el.tag == "#text") null else pendingLeadFor(pending, style, contentW)
                 val breakW = innerBreakWidth(style, contentW)
                 val broken = breakWrappedLines(breaker, text, style, breakW, lead, el.tag, runs, style.textIndentPx.coerceAtLeast(0f), shifts)
-                val lineHeights = adjustLineHeightsForInlineImages(text, broken, el, styles, classify, hidden, breakW, imageLoader, chapterHref)
+                val lineHeights = adjustLineHeightsForInlineImages(text, broken, el, styles, classify, hidden, breakW, imageLoader, chapterHref, density = density)
                     .map { it.coerceAtLeast(1) }
                 // P6-b: 叠排注音行增高（与行内图抬升同式；无注音零回归）。
                 val grownHeights = adjustLineHeightsForRuby(broken, lineHeights, leafRubyRuns(el, styles, classify, hidden, genOf))
@@ -746,7 +754,7 @@ object NormalFlowLayout {
                     buildAnonymousTextLeaf(ch, style, breaker, innerW, childLeft).also { bs ->
                         pending.consume(bs.sumOf { it.lineHeights.sum() })
                     }
-                } else buildBoxTree(ch, styles, breaker, innerW, childLeft, classify, hidden, imageLoader, chapterHref, genOf, pending)
+                } else buildBoxTree(ch, styles, breaker, innerW, childLeft, classify, hidden, imageLoader, chapterHref, density, genOf, pending)
             }
             // P6-a: 容器自身纵向边（border+padding 永不折叠；margin 会折叠，已由子女记账）回记账。
             pending.consume(
@@ -1096,6 +1104,7 @@ object NormalFlowLayout {
         hidden: HiddenCheck = HIDDEN_NONE,
         imageLoader: ImageBoundsReader? = null,
         chapterHref: String = "",
+        density: Float = 1f,
         /** P3-c 生成内容查找（空即无，旧路径）。 */
         genOf: GenOf = EmptyGen,
     ): List<LayoutBox> {
@@ -1175,7 +1184,7 @@ object NormalFlowLayout {
                         leafBaselineShifts(b.el, styles, bCls, hidden, genOf),
                     )
                     // Same §10.8 image-line adjustment as text leaves (cell images share the bug).
-                    val adjHeights = adjustLineHeightsForInlineImages(b.text, lines, b.imageRoot, styles, bCls, hidden, blockBreak, imageLoader, chapterHref)
+                    val adjHeights = adjustLineHeightsForInlineImages(b.text, lines, b.imageRoot, styles, bCls, hidden, blockBreak, imageLoader, chapterHref, density = density)
                     // P6-b: 叠排注音行增高（与文本叶同式；无注音零回归）。
                     val grownHeights = adjustLineHeightsForRuby(lines, adjHeights, leafRubyRuns(b.el, styles, bCls, hidden, genOf))
                     b.ranges = lines.map { it.range }
@@ -2056,6 +2065,7 @@ object NormalFlowLayout {
         contentW: Int,
         imageLoader: ImageBoundsReader? = null,
         chapterHref: String = "",
+        density: Float = 1f,
     ): FloatLead? {
         if (prev == null || prev.tag != "img") return null
         val side = styleOf(prev).floatSide
@@ -2066,7 +2076,7 @@ object NormalFlowLayout {
         val lstyle = styleOf(leaf)
         val cw = contentW.coerceAtLeast(1)
         val (floatW, floatH) = replacedUsedSize(
-            prev, styleOf(prev), innerBreakWidth(styleOf(prev), cw), imageLoader, chapterHref,
+            prev, styleOf(prev), innerBreakWidth(styleOf(prev), cw), imageLoader, chapterHref, density = density,
         )
         if (floatW <= 0 || floatH <= 0 || floatW >= cw) return null
         val (lW, rW) = if (side == FloatSide.LEFT) floatW to 0 else 0 to floatW
@@ -2093,8 +2103,9 @@ object NormalFlowLayout {
         chapterHref: String = "",
         /** P3：分页层的高度上限（口径乙）；null = 不约束。见 [ReplacedFitBudget]。 */
         fitMaxH: Int? = null,
+        density: Float = 1f,
     ): Pair<Int, Int> {
-        val intrinsic = intrinsicSizeOf(el, imageLoader, chapterHref)
+        val intrinsic = intrinsicSizeOf(el, imageLoader, chapterHref, density)
         return style.usedReplacedSize(intrinsic?.first, intrinsic?.second, containingW, fitMaxH)
     }
 
@@ -2113,7 +2124,8 @@ object NormalFlowLayout {
         chapterHref: String = "",
         /** P3：分页层的高度上限（口径乙）；null = 不约束。见 [ReplacedFitBudget]。 */
         fitMaxH: Int? = null,
-    ): Int = replacedUsedSize(el, style, contentWidthPx.coerceAtLeast(1), imageLoader, chapterHref, fitMaxH).second
+        density: Float = 1f,
+    ): Int = replacedUsedSize(el, style, contentWidthPx.coerceAtLeast(1), imageLoader, chapterHref, fitMaxH, density).second
 
     /** Intrinsic (w, h) px of an `<img>`: HTML attrs (both numeric) → binary bounds → null.
      *  A single HTML attr is NOT an intrinsic side (the ratio is unknown) — it already reaches
@@ -2124,6 +2136,7 @@ object NormalFlowLayout {
         el: MarkupElement,
         imageLoader: ImageBoundsReader? = null,
         chapterHref: String = "",
+        density: Float = 1f,
     ): Pair<Int, Int>? {
         val aw = el.attrs["width"]?.toFloatOrNull()
         val ah = el.attrs["height"]?.toFloatOrNull()
@@ -2137,7 +2150,9 @@ object NormalFlowLayout {
                     .onFailure { Logger.d("Orilumn.IMG", "decodeBounds FAIL $src ${it.message}") }
                     .getOrNull()
                 if (bounds != null && bounds.first > 0 && bounds.second > 0) {
-                    return bounds.first to bounds.second
+                    // 资源固有像素按 CSS px 语义换算到画布像素（宽高同乘 density，比例不变）。
+                    // 画布是物理 px、渲染层不再二次缩放，故密度只在这一处进几何。
+                    return (bounds.first * density).roundToInt() to (bounds.second * density).roundToInt()
                 }
             }
         }

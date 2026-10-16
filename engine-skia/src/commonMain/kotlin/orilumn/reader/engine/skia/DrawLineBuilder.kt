@@ -171,6 +171,7 @@ object DrawLineBuilder {
         lastLineExclusive: Int,
         imageLoader: ImageBoundsReader? = null,
         chapterHref: String = "",
+        density: Float = 1f,
     ): List<PageImage> {
         if (firstLine < 0 || lastLineExclusive <= firstLine) return emptyList()
         val pageEnd = minOf(lastLineExclusive, result.lines.size)
@@ -194,7 +195,7 @@ object DrawLineBuilder {
             val breakW = NormalFlowLayout.innerBreakWidth(leaf.style, leaf.contentWidth)
             // P3：绘制与测量读**同一**高度预算（盒上的 replaceableFitH）——量画同值的唯一渠道。
             val usedW = NormalFlowLayout.replacedUsedSize(
-                el, leaf.style, breakW, imageLoader, chapterHref, leaf.replaceableFitH,
+                el, leaf.style, breakW, imageLoader, chapterHref, leaf.replaceableFitH, density,
             ).first.coerceAtLeast(1)
             out.add(
                 PageImage(

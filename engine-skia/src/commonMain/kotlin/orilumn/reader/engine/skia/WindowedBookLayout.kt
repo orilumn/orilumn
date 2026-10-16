@@ -40,6 +40,7 @@ abstract class WindowedBookLayout : PagedLayout, BreakAwareBookLayout {
     protected abstract val boxesForDraw: List<LayoutBox>
     protected abstract val imageLoader: ImageLoader?
     protected abstract val chapterHref: String
+    protected open val density: Float = 1f
     protected abstract val skiaLines: Map<Int, DrawLine>?
     protected abstract val tableCells: Map<Int, List<DrawLine>>
     protected abstract val tableCellImages: Map<Int, List<PageImage>>
@@ -228,7 +229,7 @@ abstract class WindowedBookLayout : PagedLayout, BreakAwareBookLayout {
             val leafBreakW = NormalFlowLayout.innerBreakWidth(leaf.style, leaf.contentWidth)
             // P3：绘制与测量读**同一**高度预算（盒上的 replaceableFitH）——量画同值的唯一渠道。
             val usedW = NormalFlowLayout.replacedUsedSize(
-                el, leaf.style, leafBreakW, imageLoader, chapterHref, leaf.replaceableFitH,
+                el, leaf.style, leafBreakW, imageLoader, chapterHref, leaf.replaceableFitH, density,
             ).first.coerceAtLeast(1)
             // 块级替换元 `margin-left/right: auto` 水平居中（CSS 2.1 §10.3.3：剩余空间进 auto 边）；
             // 悬浮图不参与（左右对齐另有归属）。

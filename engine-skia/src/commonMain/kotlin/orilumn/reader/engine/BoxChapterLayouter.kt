@@ -217,7 +217,7 @@ class BoxChapterLayouter(
         )
         val styleMap = engine.compute(markup)
         val breaker = breakerFor(profile)
-        val boxLayouter = BoxLayouter(profile.bodyPx, breaker)
+        val boxLayouter = BoxLayouter(profile.bodyPx, breaker, profile.density)
         // Heavy: full-chapter line shaping (real skia break per leaf). Only needed for line-level
         // pagination — small-chapter foreground and large-chapter background canonical. The display gate
         // is shared with the light path so both produce identical leaf sets / globalCharStarts.
@@ -643,12 +643,13 @@ class BoxChapterLayouter(
             }
             val tableWin = orilumn.reader.engine.skia.TableCellLines.expandTable(
                 frames, { prepare.styleMap[it] }, profile.letterSpacingEm, profile.fgColor,
-                imageLoader, chapterHref, profile.cjkLatinSpacingEmApplied,
+                imageLoader, chapterHref, profile.cjkLatinSpacingEmApplied, profile.density,
             )
             BoxDrawableLayout(
                 BoxLayoutResult(lines, prepare.structure.boxes), shapes,
                 imageLoader, chapterHref, skiaLines = skiaLines,
                 tableCells = tableWin.lines, tableCellImages = tableWin.images, tableBorders = tableWin.borders,
+                density = profile.density,
             )
         }
         val rawSlices = Paginator.paginate(drawable, contentH)
@@ -1045,7 +1046,7 @@ class BoxChapterLayouter(
         val tTbl0 = orilumn.reader.time.platformNowMs()
         val incrWin = orilumn.reader.engine.skia.TableCellLines.expandTable(
             incrFrames, prepare::resolveStyle, profile.letterSpacingEm, profile.fgColor,
-            imageLoader, chapterHref, profile.cjkLatinSpacingEmApplied,
+            imageLoader, chapterHref, profile.cjkLatinSpacingEmApplied, profile.density,
         )
         val tTbl1 = orilumn.reader.time.platformNowMs()
         val tBox0 = orilumn.reader.time.platformNowMs()
@@ -1068,6 +1069,10 @@ class BoxChapterLayouter(
             tableBordersSource = incrWin.borders,
             frameLeadTop = frameLeadTop,
             elementStyleSource = prepare::resolveStyle,
+            // 量画同源：本窗 `pageImages` 的 used 宽必须与 shape 高（`shapeGeometry` 已按
+            // profile.density 算）同一个 density。漏传取默认 1 ⇒ 宽 ×1、高 ×density，
+            // 图被竖向拉伸（宽高比坏），此为「长宽比不对」的直接根因。
+            density = prepare.profile.density,
         )
 
         // 6. Paginate the shaped window's OWN line stream by content height — the SAME whole-line fill
@@ -2370,7 +2375,7 @@ class BoxChapterLayouter(
         }
         val tempWin = orilumn.reader.engine.skia.TableCellLines.expandTable(
             tempFrames, prepare::resolveStyle, prepare.profile.letterSpacingEm, prepare.profile.fgColor,
-            imageLoader, chapterHref, prepare.profile.cjkLatinSpacingEmApplied,
+            imageLoader, chapterHref, prepare.profile.cjkLatinSpacingEmApplied, prepare.profile.density,
         )
         val tempEdgeGaps = windowLeadTop(prepare, blockStart, shapes)
         val layout = PartialDrawableLayout(
@@ -2395,6 +2400,7 @@ class BoxChapterLayouter(
             tableBordersSource = tempWin.borders,
             frameLeadTop = tempEdgeGaps,
             elementStyleSource = prepare::resolveStyle,
+            density = prepare.profile.density,
         )
         var lastLine = if (lines.isEmpty()) 0 else lines.size
         var charEnd = if (blockEndExclusive < total) prepare.globalCharStarts[blockEndExclusive].toInt()
@@ -2915,6 +2921,7 @@ private class PartialDrawableLayout(
      * top 边（v3 口径）。
      */
     private val elementStyleSource: ((MarkupElement) -> orilumn.reader.engine.css.ComputedStyle)? = null,
+    protected override val density: Float = 1f,
 ) : orilumn.reader.engine.skia.WindowedBookLayout() {
 
     init {
@@ -3231,7 +3238,7 @@ class LightPrepare(
             if (NormalFlowLayout.isReplaceable(el)) {
                 if (style.floatSide != orilumn.reader.engine.css.FloatSide.NONE) {
                     val (fw, fh) = NormalFlowLayout.replacedUsedSize(
-                        el, style, NormalFlowLayout.innerBreakWidth(style, cw), imageLoader, chapterHref,
+                        el, style, NormalFlowLayout.innerBreakWidth(style, cw), imageLoader, chapterHref, density = profile.density,
                     )
                     pending.register(style.floatSide, fw.coerceAtLeast(1), fh)
                     widths.add(fw.coerceAtLeast(1))
@@ -3260,7 +3267,7 @@ class LightPrepare(
                     NormalFlowLayout.leafBaselineShifts(el, sub, classify, hidden, genOf),
                 )
                 val baseH = adjustLineHeightsForInlineImages(
-                    text, shaped, el, sub, classify, hidden, breakWf, imageLoader, chapterHref,
+                    text, shaped, el, sub, classify, hidden, breakWf, imageLoader, chapterHref, profile.density,
                 )
                 // P6-b: 叠排注音行增高（与重路径同式；无注音零回归）。
                 val grownH = orilumn.reader.engine.laying.adjustLineHeightsForRuby(
@@ -3283,7 +3290,7 @@ class LightPrepare(
                 NormalFlowLayout.leafBaselineShifts(el, sub, classify, hidden, genOf),
             )
             val baseH = adjustLineHeightsForInlineImages(
-                text, shaped, el, sub, classify, hidden, NormalFlowLayout.innerBreakWidth(style, cw), imageLoader, chapterHref,
+                text, shaped, el, sub, classify, hidden, NormalFlowLayout.innerBreakWidth(style, cw), imageLoader, chapterHref, profile.density,
             )
             // P6-b: 叠排注音行增高（与重路径同式；无注音零回归）。
             val grownH = orilumn.reader.engine.laying.adjustLineHeightsForRuby(
@@ -3412,7 +3419,7 @@ class LightPrepare(
     private fun naturalReplaceableHeight(b: LayoutBox): Int {
         val el = b.el ?: return b.replaceableHeight
         return NormalFlowLayout.replaceableHeightOf(
-            el, b.style, NormalFlowLayout.innerBreakWidth(b.style, b.contentWidth), imageLoader, chapterHref,
+            el, b.style, NormalFlowLayout.innerBreakWidth(b.style, b.contentWidth), imageLoader, chapterHref, density = profile.density,
         )
     }
 
@@ -3457,7 +3464,7 @@ class LightPrepare(
             box.replaceableFitH = fit
             box.replaceableHeight = NormalFlowLayout.replaceableHeightOf(
                 el, box.style, NormalFlowLayout.innerBreakWidth(box.style, box.contentWidth),
-                imageLoader, chapterHref, fit,
+                imageLoader, chapterHref, fit, profile.density,
             )
         }
     }
@@ -3524,7 +3531,7 @@ class LightPrepare(
             lineHeights = emptyList(),
             childBoxes = emptyList(),
             replaceableHeight = if (replaceable) {
-                NormalFlowLayout.replaceableHeightOf(el, style, NormalFlowLayout.innerBreakWidth(style, contentWidth), imageLoader, chapterHref)
+                NormalFlowLayout.replaceableHeightOf(el, style, NormalFlowLayout.innerBreakWidth(style, contentWidth), imageLoader, chapterHref, density = profile.density)
             } else 0,
             table = if (isTr) tableRowLayoutFor(el, contentWidth) else null,
             // P6-a2: 环绕前导取全章 eager 表（与重路径 pending 透传同式；匿名/替换/表格叶恒空）。

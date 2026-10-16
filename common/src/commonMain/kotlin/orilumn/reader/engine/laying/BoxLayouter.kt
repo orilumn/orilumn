@@ -20,6 +20,7 @@ import orilumn.reader.engine.paging.BookLayout
 class BoxLayouter(
     private val rootFontPx: Float,
     private val breaker: ParagraphBreaker,
+    private val density: Float = 1f,
 ) {
     /**
      * Lays a body tree out as a continuous [BookLayout] line stream.
@@ -64,6 +65,6 @@ class BoxLayouter(
         NormalFlowLayout.layout(
             root, styleMap, breaker, widthPx, classify,
             HiddenCheck { styleMap[it]?.displayNone == true },
-            imageLoader, chapterHref, genOf, contentH,
+            imageLoader, chapterHref, density, genOf, contentH,
         )
 }

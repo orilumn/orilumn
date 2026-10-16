@@ -75,6 +75,15 @@ data class TypographicProfile(
     /** CJK–Latin automatic spacing in em (0..1.0). 用户设置的原始值（**不代表能不能生效**，见
      *  [cjkLatinSpacingEmApplied]）。 */
     val cjkLatinSpacingEm: Float = 0f,
+    /**
+     * 平台层实测的 dp→物理像素倍率（口径见 [build]）。
+     *
+     * 引擎画布恒为物理像素，读者设置（dp）已在 [build] 里乘过它；书里**图片资源自身的像素
+     * 尺寸**按 CSS px 语义解释（浏览器/其它阅读器同口径），故这里保留倍率，供排版/渲染层把
+     * 图片固有尺寸换算到画布像素（`NormalFlowLayout.replacedUsedSize` 一族）。
+     * 倍率一律由平台层实测后传入，内核只做乘法，不猜设备参数。
+     */
+    val density: Float = 1f,
 ) {
 
     /**
@@ -157,6 +166,7 @@ data class TypographicProfile(
                 paragraphGapScale = (s.paragraphGap / 100f).toFloat(),
                 letterSpacingEm = Math.round(s.letterSpacing.coerceIn(-100.0, 100.0)) / 500f,
                 cjkLatinSpacingEm = (s.cjkLatinSpacing.coerceIn(0.0, 100.0) / 100f).toFloat(),
+                density = density,
             )
         }
 

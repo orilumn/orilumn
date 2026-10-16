@@ -354,11 +354,13 @@ fun ReaderSettingsPanel(
                 sliderKey(s.lineSpacing, 0.5, 2.5, 0.1,
                     apply = { v -> onPreview(s.copy(lineSpacing = v)); onCommitTypography(s.copy(lineSpacing = v)) },
                     fmt = { String.format("%.1f", it) }),
-                sliderKey(s.paragraphSpacing, 0.0, 200.0, 1.0,
-                    apply = { v -> onPreview(s.copy(paragraphSpacing = v)); onCommitTypography(s.copy(paragraphSpacing = v)) },
+                // 段间距/疏密：滑块取值 0..100 映射存储百分比 0..1000（10 = 100% 原节奏），
+                // 存档仍存百分比 ⇒ 旧档 0..200 直接可读，无需迁移。
+                sliderKey(s.paragraphSpacing / 10.0, 0.0, 100.0, 1.0,
+                    apply = { v -> onPreview(s.copy(paragraphSpacing = v * 10.0)); onCommitTypography(s.copy(paragraphSpacing = v * 10.0)) },
                     fmt = { "${it.roundToInt()}" }),
-                sliderKey(s.paragraphGap, 0.0, 200.0, 1.0,
-                    apply = { v -> onPreview(s.copy(paragraphGap = v)); onCommitTypography(s.copy(paragraphGap = v)) },
+                sliderKey(s.paragraphGap / 10.0, 0.0, 100.0, 1.0,
+                    apply = { v -> onPreview(s.copy(paragraphGap = v * 10.0)); onCommitTypography(s.copy(paragraphGap = v * 10.0)) },
                     fmt = { "${it.roundToInt()}" }),
                 sliderKey(s.marginTop.toDouble(), 0.0, 200.0, 1.0,
                     apply = { v -> onPreview(s.copy(marginTop = v.roundToInt())); onCommitTypography(s.copy(marginTop = v.roundToInt())) },
@@ -983,15 +985,16 @@ private fun SpacingPage(
             { String.format("%.1f", it) },
             { preview(s.copy(lineSpacing = it)) }, { commit(s.copy(lineSpacing = it)) }, p, labelWidth = labelW,
             nav = nav, index = 1) }
-        // 段间距 (%)：p/li 纵边距乘算（100 = 书/主题节奏，0 = p/li 边距清零）。
-        item { UiSliderRow("段间距", 0.0, 200.0, 1.0, s.paragraphSpacing,
+        // 段间距：p/li 纵边距乘算。滑块取值 0..100 映射存储百分比 0..1000（10 = 100% = 书/主题
+        // 节奏，0 = p/li 边距清零，100 = 1000%）。存档存百分比 ⇒ 旧档 0..200 读出来 ÷10 即滑块值。
+        item { UiSliderRow("段间距", 0.0, 100.0, 1.0, s.paragraphSpacing / 10.0,
             { "${it.roundToInt()}" },
-            { preview(s.copy(paragraphSpacing = it)) }, { commit(s.copy(paragraphSpacing = it)) }, p, labelWidth = labelW,
+            { preview(s.copy(paragraphSpacing = it * 10.0)) }, { commit(s.copy(paragraphSpacing = it * 10.0)) }, p, labelWidth = labelW,
             nav = nav, index = 2) }
-        // 疏密 (%)：p/li 之外一切块级纵边距乘算（100 = 原书节奏，0 = 结构块边距清零）。
-        item { UiSliderRow("疏密", 0.0, 200.0, 1.0, s.paragraphGap,
+        // 疏密：p/li 之外一切块级纵边距乘算，同段间距的取值映射（10 = 100% = 原书节奏，0 = 结构块边距清零）。
+        item { UiSliderRow("疏密", 0.0, 100.0, 1.0, s.paragraphGap / 10.0,
             { "${it.roundToInt()}" },
-            { preview(s.copy(paragraphGap = it)) }, { commit(s.copy(paragraphGap = it)) }, p, labelWidth = labelW,
+            { preview(s.copy(paragraphGap = it * 10.0)) }, { commit(s.copy(paragraphGap = it * 10.0)) }, p, labelWidth = labelW,
             nav = nav, index = 3) }
         // 边距 (设备级几何) 不随 原书设置 禁用.
         item { UiSliderRow("上边距", 0.0, 200.0, 1.0, s.marginTop.toDouble(), { "${it.roundToInt()}" },

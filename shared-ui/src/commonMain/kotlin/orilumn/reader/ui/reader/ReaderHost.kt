@@ -123,6 +123,21 @@ interface ReaderHost {
     fun pageLines(pos: ReaderPos): List<DrawLine>?
 
     /**
+     * 本页**页首缺口**：页首行行顶之下到本页绘制帧顶的距离（px，≥0，见
+     * [orilumn.reader.engine.paging.BookLayout.getPageFrameTop]）。
+     *
+     * 分页预算把页首元素的 `margin-top` 与页首块的 `border/padding` 记在**本页**帧内，绘制侧
+     * 就必须把整页从**帧顶**（= 首行行顶 − 本值）对齐，那一段间距才会画在页顶而不是漏在页底：
+     * 否则页首块的装饰在栅格上沿被裁、且预留的缺口留成页底空白（「明明有空间，最后一行却被推走」）。
+     *
+     * **坐标无关**：返回值是相对首行行顶的差值，重路径（章节绝对 Y）与临时页（页内归一化 Y）
+     * 同值——阅读面只需 `anchorY = min(行, 图) - lead`。
+     *
+     * 默认 0 = 旧口径（锚点即行/图最小者）；宿主未实现时不影响既有像素。
+     */
+    fun pageFrameLead(pos: ReaderPos): Int = 0
+
+    /**
      * P4-c2u: 章内字符处的 `<a href>` 目标（点按命中的查表口；同步廉价，默认 null = 宿主未实现，
      * 阅读面点按退回三区行为）。
      */

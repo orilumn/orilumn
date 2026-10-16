@@ -50,6 +50,11 @@ data class PageContent(
     val pageBackgrounds: List<PageBackground>?,
     val bgImages: Map<String, DecodedImage>,
     val rasterKey: PageRasterKey?,
+    /**
+     * 页首缺口（[ReaderHost.pageFrameLead]，px）：画布锚点 = `min(行, 图) - 本值`。
+     * 进 `data class` 比较（同一 pos 恒同值，翻页即变），栅格键不含它——它由 pos 唯一决定。
+     */
+    val pageFrameLead: Int = 0,
 )
 
 /**
@@ -171,6 +176,12 @@ fun rememberPageContent(
         }
     }
 
+    // 页首缺口：绘制帧顶相对本页首行行顶的距离（与分页预算同源的 `getPageFrameTop`）。
+    // 取数同 [lines]（同一 pos + 修订号），失败/未实现回 0（= 旧口径，像素与修前一致）。
+    val pageFrameLead = remember(pos, contentRevision, hostRevision) {
+        pos?.let { runCatching { currentHost.pageFrameLead(it) }.getOrDefault(0) } ?: 0
+    }
+
     if (pos == null) return null
     return PageContent(
         lines = lines,
@@ -179,5 +190,6 @@ fun rememberPageContent(
         pageBackgrounds = pageBackgrounds,
         bgImages = bgImages,
         rasterKey = rasterKey,
+        pageFrameLead = pageFrameLead,
     )
 }

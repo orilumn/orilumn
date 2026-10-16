@@ -178,11 +178,31 @@ object ReaderMath {
     }
 
     /**
-     * P4-c2u: 页内点按的对齐锚点 Y（复刻 [ReaderPageCanvas]：行/图/背景三者最小 —
-     * 只取行最小会让行窗内首图跑到屏外）。任一为 null 即忽略；全空回 null（调用方退回三区行为）。
+     * 页内绘制/点按的对齐锚点 Y —— **行内容（文本行、插图）最小者**再上抬**页首缺口** [frameLead]。
+     *
+     * **为什么上抬**：分页预算（`Paginator.fillWholeLines`）按**绘制帧**
+     * （`getPageFrameTop/Bottom`）算，帧顶 = 页首行行顶 − 页首缺口（= 上一行**帧底**，即页首元素的
+     * margin-top 与页首块的 border/padding 所占的那段）。栅格尺寸恰为 `contentW × contentH`，故绘制
+     * 必须与预算同一起点（帧顶）对齐：缺口画在页顶（页首装饰真画出来、不越过栅格被裁），页底留下的
+     * 余量恰好是本页没装下的内容。
+     *
+     * **为什么盒背景/边框仍不进锚点**：[orilumn.reader.engine.laying.BoxDrawer]
+     * 对本页内起始的箱子**有意**放宽到 border-box（见 `BoxDrawerPageBandTest`「页首起块顶 padding 不裁」），
+     * 盒背景的 yTop 可比页首行更靠上（真机：`.fm-sidebar-block` 的 padding-top 10 + 首子块
+     * `.fm-sidebar-title` 的 margin-top 65.5 + padding-top 15 ≈ 91px）。那段间距已由 [frameLead] 承担，
+     * 再让盒 yTop 参与取最小就会**重复下推**整页、末行落到栅格外被裁（「最后一行只显示半行」）。
+     *
+     * 行/图仍取最小：纯图页（无文本行）以首图为基准，插图单独占行时它可能比其后首个文本行更靠上。
+     * 背景只在**行与图都缺**（如只有盒背景的页）时兜底，避免整页空白。任一为 null 即忽略；
+     * 全空回 null（调用方退回三区行为）。
+     *
+     * @param frameLead [ReaderHost.pageFrameLead]（宿主按 `getLineTop(首行) - getPageFrameTop(首行)`
+     *   给出；默认 0 = 旧口径，此时行为与修前逐像素相同）
      */
-    fun pageAnchorY(lineMin: Int?, imgMin: Int?, bgMin: Int?): Int? =
-        listOfNotNull(lineMin, imgMin, bgMin).minOrNull()
+    fun pageAnchorY(lineMin: Int?, imgMin: Int?, bgMin: Int?, frameLead: Int = 0): Int? {
+        val top = listOfNotNull(lineMin, imgMin).minOrNull() ?: return bgMin
+        return top - frameLead.coerceAtLeast(0)
+    }
 
     /**
      * P4-c2u: 点按行命中（纯几何）：点按 (tapX, tapY) → (行, 段落内 x, 行内 y)，供字形反查。

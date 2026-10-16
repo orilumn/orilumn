@@ -36,7 +36,7 @@ class FirstChildDescentTest {
         root.children.forEach { it.parent = root }
         h2.parent = bq
         val map = styles(root)
-        assertEquals(32, NormalFlowLayout.firstChildDescentTop(bq, h2) { map[it]!! })
+        assertEquals(32, NormalFlowLayout.firstChildDescentTop(bq, h2, { map[it]!! }))
     }
 
     @Test
@@ -45,7 +45,7 @@ class FirstChildDescentTest {
         val root = el("body", "", pre)
         root.children.forEach { it.parent = root }
         val map = styles(root)
-        assertEquals(0, NormalFlowLayout.firstChildDescentTop(pre, pre) { map[it]!! })
+        assertEquals(0, NormalFlowLayout.firstChildDescentTop(pre, pre, { map[it]!! }))
     }
 
     @Test
@@ -58,7 +58,7 @@ class FirstChildDescentTest {
         h2.parent = div
         p.parent = div
         val map = styles(root)
-        assertNull(NormalFlowLayout.firstChildDescentTop(div, p) { map[it]!! })
+        assertNull(NormalFlowLayout.firstChildDescentTop(div, p, { map[it]!! }))
     }
 
     @Test
@@ -72,7 +72,7 @@ class FirstChildDescentTest {
         div.parent = owner
         p.parent = div
         val map = styles(root)
-        assertEquals(30, NormalFlowLayout.firstChildDescentTop(owner, p) { map[it]!! })
+        assertEquals(30, NormalFlowLayout.firstChildDescentTop(owner, p, { map[it]!! }))
     }
 
     @Test
@@ -86,6 +86,6 @@ class FirstChildDescentTest {
         div.parent = owner
         p.parent = div
         val map = styles(root)
-        assertEquals(23, NormalFlowLayout.firstChildDescentTop(owner, p) { map[it]!! })
+        assertEquals(23, NormalFlowLayout.firstChildDescentTop(owner, p, { map[it]!! }))
     }
 }

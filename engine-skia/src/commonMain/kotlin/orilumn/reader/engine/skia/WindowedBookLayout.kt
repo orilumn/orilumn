@@ -1,6 +1,8 @@
 package orilumn.reader.engine.skia
 
 import orilumn.reader.engine.ImageLoader
+import orilumn.reader.engine.css.ComputedStyle
+import orilumn.reader.engine.html.MarkupElement
 import orilumn.reader.engine.laying.BoxDrawer
 import orilumn.reader.engine.laying.LayoutBox
 import orilumn.reader.engine.laying.NormalFlowLayout
@@ -54,6 +56,114 @@ abstract class WindowedBookLayout : PagedLayout, BreakAwareBookLayout {
             for (g in lo until minOf(hi, lineCount)) out[g] = i
         }
         out
+    }
+
+    /**
+     * 页尾叶自身边（`padding-bottom + border-bottom`；文本叶恒 0，与重路径文本叶盒盒属性清零、
+     * 与 `BoxChapterLayouter.ownBottomEdges` 同判据）。
+     */
+    private fun ownLeafBottomEdges(leaf: LayoutBox): Int =
+        if (leaf.el?.isText == true) 0
+        else (leaf.style.padding.bottom + leaf.style.border.bottom).roundToInt()
+
+    /**
+     * 行下标 → 该行为**页尾行**时页尾叶自身占的下边界高（[BookLayout.getPageFrameBottom] 的覆盖）。
+     *
+     * 每条叶只在它的**末行**记一次：叶的行区间由 [leafLocalFirstLine] + 自身 shape 行数给出，
+     * **不读 `LayoutBox.firstLineIndex/lastLineExclusive`** —— 相邻临时页共用同一批盒、会覆写这些字段
+     * （见 [PartialDrawableLayout] 的注释）。叶若在窗口里被截断（末行在窗外）则落不进本流，
+     * 自然不记（叶在窗外仍在继续，本页不欠它下边）。
+     */
+    private val leafBottomEdgesByLastLine: IntArray by lazy {
+        val out = IntArray(lineCount)
+        for (j in leaves.indices) {
+            val n = shapes[j].lineCount
+            if (n <= 0) continue
+            val lo = leafLocalFirstLine[j]
+            if (lo < 0) continue
+            val last = lo + n - 1
+            if (last in out.indices) out[last] = ownLeafBottomEdges(leaves[j])
+        }
+        out
+    }
+
+    override fun getPageFrameBottom(i: Int): Int =
+        getLineBottom(i) + if (i in 0 until lineCount) leafBottomEdgesByLastLine[i] else 0
+
+    /**
+     * 叶自身 top 边（`padding-top + border-top`；文本叶恒 0，与 [ownLeafBottomEdges] 同判据）。
+     */
+    private fun ownLeafTopEdges(leaf: LayoutBox): Int =
+        if (leaf.el?.isText == true) 0
+        else (leaf.style.padding.top + leaf.style.border.top).roundToInt()
+
+    /** 叶自身 `margin-top`（文本叶恒 0）。章首段前距用，见 [BookLayout.getPageTopLead]。 */
+    private fun ownLeafMarginTop(leaf: LayoutBox): Int =
+        if (leaf.el?.isText == true) 0 else leaf.style.margin.top.roundToInt()
+
+    /**
+     * 行下标 → 该行为**叶首行**时页首叶自身占的上边界高（[BookLayout.getPageTopLead] 的覆盖）。
+     *
+     * 与 [leafBottomEdgesByLastLine] 同款：每条叶只在它的**首行**记一次，行区间由
+     * [leafLocalFirstLine] + 自身 shape 行数给出，**不读 `LayoutBox.firstLineIndex`**（相邻临时页
+     * 共用同一批盒、会覆写这些字段）。叶的首行在窗口之上（本流里已被截掉）则不记——叶在本页
+     * 仍是中段开页，页首无缺口，与 canonical 同判据。
+     */
+    private val leafTopEdgesByFirstLine: IntArray by lazy {
+        val out = IntArray(lineCount)
+        for (j in leaves.indices) {
+            val n = shapes[j].lineCount
+            if (n <= 0) continue
+            val lo = leafLocalFirstLine[j]
+            if (lo in out.indices) out[lo] = ownLeafTopEdges(leaves[j])
+        }
+        out
+    }
+
+    /**
+     * 行 0 所属叶自身 `margin-top`：章首段前距**不与页边距合并**，照常画在章首页页首
+     * （[BookLayout.getPageTopLead] 的 `i == 0` 分支）。
+     *
+     * 窗口（[PartialDrawableLayout]）另按调用方传入的窗外缺口 [getPageFrameTop] 覆盖 `i <= 0`，
+     * 不看这里；本值只服务**整章**绘制布局（[orilumn.reader.engine.text.BoxDrawableLayout]），
+     * 它的行 0 就是章首行。
+     */
+    private val chapterHeadMarginTop: Int by lazy {
+        val si = if (lineCount > 0) leavesByShape[0] else -1
+        if (si in leaves.indices) ownLeafMarginTop(leaves[si]) else 0
+    }
+
+    /**
+     * 祖先元素的计算样式（v4 页首缺口要沿盒链上溯找**可见外沿盒**，见
+     * [NormalFlowLayout.pageTopLead]）。null = 本实现没有样式源 ⇒ 退回「叶自身 top 边」口径
+     * （[BoxDrawableLayout] 与 [PartialDrawableLayout] 各自覆盖；前者吃整章盒树，后者吃调用方的
+     * `prepare`）。
+     */
+    protected open fun elementStyle(el: MarkupElement): ComputedStyle? = null
+
+    /** 行下标 → 该行为**叶首行**时该叶的元素（非叶首行 = null）。v4 页首缺口按盒链上溯要用它。 */
+    private val leafElementByFirstLine: Array<MarkupElement?> by lazy {
+        val out = arrayOfNulls<MarkupElement>(lineCount)
+        for (j in leaves.indices) {
+            val lo = leafLocalFirstLine[j]
+            if (lo in out.indices) out[lo] = leaves[j].el
+        }
+        out
+    }
+
+    /**
+     * [BookLayout.getPageTopLead]：章首（i == 0）叶自身 top 边 + 首叶自身 `margin-top`（章首段前距
+     * 不与页边距合并）；其余页首按 [NormalFlowLayout.pageTopLead]（v4：**可见外沿盒**的边框顶到叶
+     * 首行行顶，外沿盒**以下**一切保留，其上折叠 `margin-top` 并入页边距）。无样式源或样式缺项时
+     * 退回叶自身 top 边（v3 口径）。
+     */
+    override fun getPageTopLead(i: Int): Int {
+        if (i !in 0 until lineCount) return 0
+        val edges = leafTopEdgesByFirstLine[i]
+        if (i == 0) return edges + chapterHeadMarginTop
+        val el = leafElementByFirstLine[i] ?: return edges
+        if (elementStyle(el) == null) return edges
+        return NormalFlowLayout.pageTopLead(el, ::elementStyle)
     }
 
     override fun tableCellLines(firstLine: Int, lastLineExclusive: Int): List<DrawLine> {

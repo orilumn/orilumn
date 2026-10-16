@@ -21,7 +21,7 @@ import orilumn.reader.engine.paging.BookLayout
 import orilumn.reader.engine.paging.PageSlice
 import orilumn.reader.engine.paging.Paginator
 import orilumn.reader.engine.skia.DrawLine
-import orilumn.reader.engine.skia.LayoutReadback
+import orilumn.reader.engine.skia.PagedLayout
 import orilumn.reader.engine.text.LayoutParamKey
 import orilumn.reader.engine.text.TypographicProfile
 import orilumn.reader.engine.laying.ParagraphShapeRef
@@ -988,12 +988,16 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
             val contentHeight = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
             val paramHash = LayoutParamKey.fromProfile(profile, contentWidth, contentHeight).hash()
 
-            // Check disk cache (shared okio store; bookId<0 = no namespace → disabled).
+            // 磁盘命中判据（总则 1：命中磁盘表 → 同步渲染目标页）：先读缓存文件，再退回**内存里已
+            // 绑定的本章表**——同一 paramHash 的表与文件同源（同一产者），有它就等于命中：不必回读
+            // 缓存，更不该退回临时表。覆盖两种文件读不到的情形：缓存写入失败、bookId<0 / 无 store
+            //（那时内存表就是唯一副本）。write-only 的 prewarm/B2 路径也正靠它「直接晋级整表」。
             val cache = cacheStore()
             val cacheFile = if (cache != null && bookId >= 0) {
                 cache.file("book_$bookId", unit.chapterIndex, paramHash)
             } else null
-            val cached = if (cache != null) cacheFile?.let { cache.read(it) } else null
+            val cached = (if (cache != null) cacheFile?.let { cache.read(it) } else null)
+                ?: unit.paginationTable?.takeIf { it.paramHash == paramHash }
 
             if (cached != null) {
                 // PaginationMode.LINE_DISK: the disk CFI table holds the authoritative line-level page
@@ -1120,6 +1124,10 @@ internal val HEAD_START_BLOCK_LIMIT = 100
  *  Window depth symmetric ⇒ forward/backward flip latency risk symmetric. */
 private val TEMP_WINDOW_DEPTH = 1
 
+/** 章首前向正典链采样（[seedHeadRootedEdges]）的页数上限：真书单章页数在数十量级，取远大于其的护栏，
+ *  只防畸形内容（块数极多而逐页不推进）把前台线程钉死。 */
+private val TEMP_HEAD_ROOTED_MAX_PAGES = 4096
+
 
 // ─────────────────────────────────────────────────────────────────
 // Anchor-based incremental layout (large-chapter, disk-miss)
@@ -1234,7 +1242,9 @@ private fun startAnchorStream(
         val anchorLineChar = anchorPage.slice.charStart
         val superseded = tempStateLock.withLock {
             if (unit.tempBirth !== birth) true else {
-                ip.forwardPages.add(anchorPage.copy(resumeBlock = shapedFwdTo, resumeLine = fwdFromLine))
+                val anchorTemp = anchorPage.copy(resumeBlock = shapedFwdTo, resumeLine = fwdFromLine)
+                ip.forwardPages.add(anchorTemp)
+                recordChainEdge(ip, anchorTemp)
                 ip.shapedForwardTo = shapedFwdTo
                 ip.forwardFromLine = fwdFromLine
                 ip.anchorLineCharStart = anchorLineChar
@@ -1405,11 +1415,102 @@ private fun shapeNextBackward(ip: InProgressPagination, bc: BoxChapterLayouter):
     val prevBlockCharStart = prep.globalCharStarts[prevBlockStart].toInt()
     val lineCut = if (prevLineCharStart > prevBlockCharStart) prevLineCharStart else -1
     val endExcl = if (lineCut >= 0) prevBlockStart + 1 else prevBlockStart
-    // 章首不适用（非塑形失败）：fillBackward 据此返回 0，不中止 prefill 循环。
-    if (endExcl <= 0) return null
-    // 塑形器回归：抛（fail-fast），不当越界吞。
-    return bc.shapeTempPageBackward(prep, ip.profileSnapshot, ip.contentW, ip.contentH, endExcl, lineCut, ip.shapes)
-        ?: error("shapeNextBackward FAIL ch=${ip.chapterIndex} endExcl=$endExcl lineCut=$lineCut")
+    return shapeBackwardPage(ip, bc, endExcl, lineCut)
+}
+
+/** 倒包一页的**唯一入口**（预填与前台翻页共用同一页界制式）：pin = 本页必须**恰好**收到的字符，
+ *  由调用方按「相邻前向页页首」折算成 `(endExclusive, lineCut)`——页首块或页首字符所在块 +1，
+ *  `lineCut` = 页首字符（块内行切时）或 -1（块边界收页）。
+ *
+ *  页首游标取 [resolveBackwardStartCursor]（前向链边缓存 → 章首前向正典链 → 几何倒包），三条路都过
+ *  [BoxChapterLayouter.shapeTempPageBackward] 内的 pin 自校验，故**本页页尾恒等于 pin**（区块 tiling
+ *  不变量：既不留空洞丢字，也不重叠重字）。临时表的页界与磁盘表**同源**：轻路径前向链逐页等于重路径
+ *  整章全量分页，故从章首起的倒包页就是 canonical 页页——两份分页在章内不再允许不同，交接时无缝。
+ *  端到端见 `docs/分页高度约束与断页规则-方案.md` §12.7/§12.10。
+ *
+ *  只在 [tempStateLock] 内调用（读 `ip.prevStart`）。`endExclusive <= 0` 返回
+ *  null = 章首不适用（非塑形失败，调用方据此返回 0 而非中止预填循环）；塑形失败抛（fail-fast）。 */
+private fun shapeBackwardPage(ip: InProgressPagination, bc: BoxChapterLayouter, endExclusive: Int, lineCut: Int): TempPage? {
+    if (endExclusive <= 0) return null
+    val prep = ip.prepare
+    val pinChar = if (lineCut >= 0) lineCut
+        else prep.globalCharStarts.getOrElse(endExclusive) { prep.totalChars.toLong() }.toInt()
+    val cursor = resolveBackwardStartCursor(ip, bc, pinChar)
+    return bc.shapeTempPageBackward(
+        prep, ip.profileSnapshot, ip.contentW, ip.contentH, endExclusive, lineCut, ip.shapes, cursor,
+    ) ?: error("shapeBackwardPage FAIL ch=${ip.chapterIndex} endExclusive=$endExclusive lineCut=$lineCut pin=$pinChar")
+}
+
+/** 倒包页首来源（按优先级），前两级都**只来自临时表自己**；第三级才是几何倒包 + pin 自校验。
+ *
+ *  1. **本会话前向链边缓存** [InProgressPagination.prevStart]：读者往前翻时**实际看到的**那一页。回翻
+ *     必须逐字回到它——已见过的页界不得漂移。
+ *  2. **章首（块 0）起的前向正典链** [seedHeadRootedEdges]：临时表的页界与磁盘表**同源**。轻路径前向
+ *     链与重路径整章全量分页逐页同值（JVM 真书 ch2 复算：14/14 页 `[start,end)` 逐字相等），所以从块 0
+ *     前向塑形得到的「页尾 → 页首」边就是 canonical 页界。几何倒包只能猜回原像多解之一——真书 ch2 的
+ *     13 个内部页界里 3 个会被估早 72~98 字，而每个估早的页首又成为下一页的 pin ⇒ 漂移逐页累积（真机
+ *     倒包链相对磁盘表整体偏早至 ~600 字）。章首链把这条漂移从构造上消掉。
+ *  3. **几何倒包**（`shapeTempPageBackward` 的估计 + pin 自校验）：pin **不是**正典页界时（中章起锚的
+ *     行切页首、畸形章）用。页界仍严格 tiling（页尾恒等于 pin），只是不保证等于磁盘表。
+ *
+ *  **不读 `ip.canonicalSlices` / 磁盘表**：那等于把「后台正典何时算完」变成翻页结果的输入（同一手势
+ *  因时机不同给出不同页界）。第 2 级是**确定性**的轻路径前向链（与后台何时算完无关），不是另一份时序
+ *  相关的分页。读 `ip.prevStart` / 采样水位全程在 [tempStateLock] 内（写也只在锁内，无发布问题）。 */
+private fun resolveBackwardStartCursor(ip: InProgressPagination, bc: BoxChapterLayouter, pinChar: Int): Pair<Int, Int>? {
+    ip.prevStart[pinChar]?.let { return it }
+    return seedHeadRootedEdges(ip, bc, pinChar)
+}
+
+/** 章首（块 0）起的前向正典链采样（见 [resolveBackwardStartCursor] 第 2 级）。
+ *
+ *  从块 0、首行起逐页 [BoxChapterLayouter.shapeTempPageForward]，登记 `prevStart[页尾字符] = (页首块, 块内行)`，
+ *  直到某页页尾 ≥ [upToChar]：命中 ⇒ 返回该页首游标（= `upToChar` 所在页的页首）；越过 ⇒ 返回 null
+ *  （`upToChar` 不是正典页界，交几何倒包）。采样水位 [InProgressPagination.headRootedTo] 兼作负缓存，
+ *  已越过而未登记 ⇒ 直接 null，不重复整章前向塑形。
+ *
+ *  **只登记前向页**（与 [prevStart] 纪律一致：倒包页的页首不回写）。顺带把整章各块塑形进共享缓存
+ *  （[InProgressPagination.shapes]），故这次采样也让后续回翻页的塑形变便宜。
+ *
+ *  只在 [tempStateLock] 内调用。 */
+private fun seedHeadRootedEdges(ip: InProgressPagination, bc: BoxChapterLayouter, upToChar: Int): Pair<Int, Int>? {
+    if (upToChar <= 0) return null
+    if (upToChar <= ip.headRootedTo) return null // 已采样越过且未登记：非正典页界
+    val prep = ip.prepare
+    var b = 0
+    var line = 0
+    var guard = 0
+    while (guard++ < TEMP_HEAD_ROOTED_MAX_PAGES) {
+        val fwd = bc.shapeTempPageForward(prep, ip.profileSnapshot, ip.contentW, ip.contentH, b, ip.shapes, line)
+            ?: error("seedHeadRootedEdges FAIL ch=${ip.chapterIndex} blk=$b line=$line")
+        val s = fwd.page.slice
+        // putIfAbsent：读者**实际看到过**的边（第 1 级）优先，采样只补空缺——否则会把读者见过的页界
+        // 改成正典的，回翻当场「内容变了」（正是本要修的症状）。
+        if (s.charEnd > s.charStart) ip.prevStart.putIfAbsent(s.charEnd, s.blockStart to s.firstLine)
+        if (s.charEnd >= upToChar) {
+            // 命中页尾恰好 = 目标 ⇒ 该边就是目标页的页首游标；越过 ⇒ 目标不是正典页界。
+            ip.headRootedTo = maxOf(ip.headRootedTo, s.charEnd)
+            return if (s.charEnd == upToChar) ip.prevStart[upToChar] else null
+        }
+        ip.headRootedTo = maxOf(ip.headRootedTo, s.charEnd)
+        // 「游标永不停滞」（同 shapeTempPageForward 内 guard）：不推进即停，防死循环。
+        if (fwd.nextBlock < b || (fwd.nextBlock == b && fwd.nextLine <= line)) break
+        b = fwd.nextBlock
+        line = fwd.nextLine
+    }
+    Logger.w(
+        logTag,
+        "head-rooted chain incomplete ch=${ip.chapterIndex} upTo=$upToChar reached=${ip.headRootedTo} " +
+            "blocks=${prep.totalBlocks} chars=${prep.totalChars}",
+    )
+    return null
+}
+
+/** 前向链边登记（见 [InProgressPagination.prevStart]）：`prevStart[本页页尾] = 本页页首游标 (块, 行)`。
+ *  前向塑形的**每一个**页面都要登记（含锚点页与失配补塑页）——回翻时据此重建即为同一页。
+ *  只在 [tempStateLock] 内调用。 */
+private fun recordChainEdge(ip: InProgressPagination, page: TempPage) {
+    val s = page.slice
+    if (s.blockStart >= 0 && s.charEnd > s.charStart) ip.prevStart[s.charEnd] = s.blockStart to s.firstLine
 }
 
 /** The window head-edge page: [InProgressPagination.forwardPages][0] (the anchor page until far-end
@@ -1470,7 +1571,9 @@ private fun stepTempPrefill(unit: ChapterUnit, ip: InProgressPagination, lastDir
             Logger.e(logTag, "prefill fwd-stale-window DROP ch=${unit.chapterIndex} tail=b${tail.blockStart}[${tail.slice.charStart},${tail.slice.charEnd}) shaped=b${fwd.page.blockStart}[${fwd.page.slice.charStart},${fwd.page.slice.charEnd})")
             return 0
         }
-        f.add(fwd.page.copy(resumeBlock = fwd.nextBlock, resumeLine = fwd.nextLine))
+        val appended = fwd.page.copy(resumeBlock = fwd.nextBlock, resumeLine = fwd.nextLine)
+        f.add(appended)
+        recordChainEdge(ip, appended)
         ip.shapedForwardTo = fwd.nextBlock
         ip.forwardFromLine = fwd.nextLine
         enforceTempWindow(ip)
@@ -1717,6 +1820,7 @@ private fun repairTempForwardGap(
     }
     ip.shapedForwardTo = fwd.nextBlock
     ip.forwardFromLine = fwd.nextLine
+    recordChainEdge(ip, page)
     enforceTempWindow(ip)
     setCurrentTempPage(unit, ip, page)
     Logger.w(logTag, "tempNav fwd-repair ch=${unit.chapterIndex} src=char[${src.charStart},${src.charEnd}) bad=char[${bad.charStart},${bad.charEnd}) fixed=char[${page.slice.charStart},${page.slice.charEnd}) dev=${resume.third}")
@@ -2428,6 +2532,7 @@ private fun shapeAndAppendForward(
     ip.forwardFromLine = fwd.nextLine
     val page = fwd.page.copy(resumeBlock = fwd.nextBlock, resumeLine = fwd.nextLine)
     ip.forwardPages.add(page)
+    recordChainEdge(ip, page)
     return page
 }
 
@@ -2548,7 +2653,7 @@ private fun tempNav(unit: ChapterUnit, ip: InProgressPagination, slice: PageSlic
             }
             is TempNavBackwardStep.Shape -> {
                 // 纯判据已保证 endExclusive>0 且不超全章：null 即回归，抛，不当边界吞。
-                val p = bc.shapeTempPageBackward(prep, ip.profileSnapshot, ip.contentW, ip.contentH, step.endExclusive, step.lineCut, ip.shapes)
+                val p = shapeBackwardPage(ip, bc, step.endExclusive, step.lineCut)
                     ?: error("tempNav bwd-shape-fail ch=${ip.chapterIndex} endExclusive=${step.endExclusive} lineCut=${step.lineCut}")
                 ip.backwardPages.add(p)
                 if (p.blockStart == 0) ip.headReached = true
@@ -2626,6 +2731,10 @@ private fun tempNav(unit: ChapterUnit, ip: InProgressPagination, slice: PageSlic
  *     shapeAnchorPageForward(0) fills the head page forward to contentH, so the head page is full and
  *     the forward stream rebuilds from char 0. Mark the session headLanded so the NEXT boundary (reader
  *     already on the full head) crosses straight to the previous chapter, not re-landing the same page.
+ *     Sub-case: 本章磁盘表已就绪，但**本会话**没拿到正典副本（B1 被 skip-fresh，或上一代会话的 B1 晚到
+ *     ——`ip` 已换代）。此时仍走重根：章首那一页两条路径逐字同源（同一段 `paginateFrom` 从 char 0 起
+ *     切），读者看到的内容与磁盘表那一页相同，只是会话继续用临时表。字面偏离总则 1(d)，理由与代价见
+ *     `docs/分页高度约束与断页规则-方案.md` §12.7 结论 2；这里记 w 以便落盘日志可判。
  * Returns null when the caller should fall through to cross-chapter.
  */
 private fun resolveHeadArrival(unit: ChapterUnit, ip: InProgressPagination): Pair<Int, PageSlice>? {
@@ -2643,7 +2752,13 @@ private fun resolveHeadArrival(unit: ChapterUnit, ip: InProgressPagination): Pai
         }
         return null
     }
-    Logger.w(logTag, "tempNav head-arrival → re-root temp stream at chapter head ch=${ip.chapterIndex}")
+    if (unit.paginationTable?.paramHash == ip.paramHash) {
+        // 表其实已就绪（本会话没拿到副本）：仍按「未就绪」重根——重根后章首页与磁盘表那一页逐字同源，
+        // 读者可见内容无差（§12.7 结论 2）。此行是给落盘日志的判断标记，不是错误。
+        Logger.w(logTag, "tempNav head-arrival → re-root temp stream (disk table already fresh, no session copy) ch=${ip.chapterIndex}")
+    } else {
+        Logger.w(logTag, "tempNav head-arrival → re-root temp stream at chapter head ch=${ip.chapterIndex}")
+    }
     // layouter 装配不变量：头到达重根无处可降级（返回 null 会把读者丢到上一章），抛。
     val bc = checkNotNull(layouter as? BoxChapterLayouter) { "resolveHeadArrival without BoxChapterLayouter ch=${ip.chapterIndex}" }
     startAnchorStream(unit, 0, ip.prepare, bc, ip.paramHash, ip.contentW, ip.contentH)
@@ -2663,7 +2778,10 @@ private fun resolveHeadArrival(unit: ChapterUnit, ip: InProgressPagination): Pai
  *  启用磁盘分页表"). Binding happens here on leave — never mid-chapter — so the current page is not
  *  re-rendered in place while the temp session is active. */
 private fun finalizeTempOnLeave(unit: ChapterUnit, ip: InProgressPagination) {
-    if (ip.canonicalLayout != null) {
+    // 就绪判据与 [resolveHeadArrival] 一致：`layout` 非空 **且** slices 非空。两个字段都 `@Volatile`
+    // 且写侧固定先 slices 后 layout，故「layout 非空 + slices 空」按说不该出现；此处仍按不变式判，
+    // 真出现也只是走下面的磁盘表分支（比 `bindFull(layout, emptyList())` 出零页单元安全）。
+    if (ip.canonicalLayout != null && ip.canonicalSlices.isNotEmpty()) {
         unit.bindFull(ip.canonicalLayout!!, ip.canonicalSlices)
         unit.clearInProgress()
         Logger.w(logTag, "temp 作废→磁盘 ${ctx(unit)} pages=${ip.canonicalSlices.size}")
@@ -2681,12 +2799,23 @@ private fun finalizeTempOnLeave(unit: ChapterUnit, ip: InProgressPagination) {
             }
         }
     } else {
-        // Canonical not ready yet at leave: clear the temp session. Under P3 (queue-not-kill) the
-        // chapter's own B1 is NOT cancelled by another chapter's dispatch, so it keeps running and
-        // persists on the canonical thread even after we leave — the next entry into this chapter is
-        // therefore usually a disk hit (S5), not a re-temp.
+        // 本会话没拿到正典副本，但**本章磁盘表可能已就绪**：B1 的 skip-fresh 命中（另一路已落表），
+        // 或上一代会话的 B1 在读者离开后才落盘（`ip` 已换代，`unit` 上的表才是权威）。此时按总则 1
+        // 「若本章磁盘表已就绪，则立即切换到磁盘表」——**保留该表**，只清临时会话与旧版式：下一次
+        // 进入即磁盘命中（[buildLayout] 用内存表直接塑目标页，连回读缓存文件都省了）。丢掉它就等于
+        // 磁盘表已就绪却作废重排。
+        val keep = unit.paginationTable?.takeIf { it.paramHash == ip.paramHash }
         unit.invalidateLayout()
-        Logger.w(logTag, "temp 作废→重排 ${ctx(unit)} (canonical 未就绪; P3 B1 仍在后台落盘)")
+        if (keep != null) {
+            unit.bindPaginationTable(keep)
+            Logger.w(logTag, "temp 作废→磁盘 ${ctx(unit)} pages=${keep.pages.size} (leave 时表已就绪; 会话副本未及发布/已换代)")
+        } else {
+            // Canonical not ready yet at leave: clear the temp session. Under P3 (queue-not-kill) the
+            // chapter's own B1 is NOT cancelled by another chapter's dispatch, so it keeps running and
+            // persists on the canonical thread even after we leave — the next entry into this chapter is
+            // therefore usually a disk hit (S5), not a re-temp.
+            Logger.w(logTag, "temp 作废→重排 ${ctx(unit)} (canonical 未就绪; P3 B1 仍在后台落盘)")
+        }
     }
 }
 
@@ -2814,8 +2943,16 @@ private fun finishCanonicalBackground(
         Logger.w(logTag, "layout ${ctx(unit)} CANONICAL-DISK-WRITE pages=${table.totalPages} totalChars=$totalChars")
         // 不在单章写入后清空全书缓存；全局失效由专门时机处理
     }
-    ip.canonicalLayout = layout
-    ip.canonicalSlices = slices
+    // 发布序（[InProgressPagination.canonicalLayout] 的规则）：先 slices 后 layout——layout 非空即
+    // 「本会话已拿到完整正典」，读侧不会再看到「layout 非空 + slices 空」的半初始化副本。
+    if (unit.inProgress === ip) {
+        ip.canonicalSlices = slices
+        ip.canonicalLayout = layout
+    } else {
+        // 会话已换代（读者离开本章又回来）：ip 对象已作废，副本无处可读——交接点的权威是 unit 上的
+        // 磁盘表（上面的 bindPaginationTable 已落），[finalizeTempOnLeave]/[resolveHeadArrival] 直接读它。
+        Logger.w(logTag, "canonical ready for superseded temp session ch=${unit.chapterIndex} (disk table on unit)")
+    }
     // Intentionally no mid-session switch here: [finalizeTempOnLeave] activates the canonical table when
     // the reader leaves the temp session (head/tail/cross-chapter), so it is never re-rendered in place.
 }
@@ -3341,6 +3478,15 @@ private fun finishCanonicalBackground(
                 val cached = if (cache != null) cacheFile?.let { cache.read(it) } else null
                 if (cached != null && unit.paginationTable == null) {
                     unit.bindPaginationTable(cached)
+                    // 表可以绑（它是本章交接点的权威，且不改变当前显示）；但**窗口预塑 `bind(layout,
+                    // slices)` 必须避开活着的临时会话**：派发时判过 `index == activeChapter`，可任务真正
+                    // 执行时读者可能已经跳进本章（此时 `unit.inProgress != null`），在章内绑磁盘版式 =
+                    // 总则 1 禁止的章内切换（显示不会变——渲染走临时版式——但 `pageSlices`/`laidOut` 会
+                    // 变成另一份分页的，随后读表路径读到的是错位的页）。留在会话里，由进入路径按需塑。
+                    if (unit.inProgress != null) {
+                        Logger.w(logTag, "prewarm ch=$index bind table only (live temp session; skip window pre-shape)")
+                        return
+                    }
                     c = c.coerceIn(0, (cached.totalChars - 1).coerceAtLeast(0))
                     val startPage = pageIndexForChar(cached.pages, c)
                     val product = bc.incrementalLayoutForPage(
@@ -3445,9 +3591,11 @@ private fun finishCanonicalBackground(
                 if (anchorOffset <= contentH * 0.5f) start = 0
             }
         }
-        val base = layout.getLineTop(start)
+        val base = layout.getPageFrameTop(start)
         var end = start
-        while (end < n && layout.getLineBottom(end) - base <= contentH) end++
+        // 与 `Paginator.fillWholeLines` 同判据（帧几何：含页首元素的 margin-top 与页首块的
+        // border/padding）——少了这一段，绘制侧按盒顶对齐时末行越出页高被裁。
+        while (end < n && layout.getPageFrameBottom(end) - base <= contentH) end++
         if (end == start) end = start + 1
         val charStart = layout.getLineStart(start)
         val charEnd = if (end < n) layout.getLineStart(end) else layout.length
@@ -3463,9 +3611,10 @@ private fun finishCanonicalBackground(
     private fun forwardPageFrom(layout: orilumn.reader.engine.paging.BookLayout, startLine: Int, contentH: Int): PageSlice? {
         val n = layout.lineCount
         if (n <= 0 || contentH <= 0 || startLine < 0 || startLine >= n) return null
-        val base = layout.getLineTop(startLine)
+        // 帧几何与 `Paginator.fillWholeLines` 同源（页首/页尾块装饰占页内空间）。
+        val base = layout.getPageFrameTop(startLine)
         var end = startLine
-        while (end < n && layout.getLineBottom(end) - base <= contentH) end++
+        while (end < n && layout.getPageFrameBottom(end) - base <= contentH) end++
         if (end == startLine) end = startLine + 1
         val cs = layout.getLineStart(startLine)
         val ce = if (end < n) layout.getLineStart(end) else layout.length
@@ -3485,7 +3634,8 @@ private fun finishCanonicalBackground(
         if (n <= 0 || contentH <= 0) return null
         val e = endExclusive.coerceAtMost(n)
         var start = e - 1
-        while (start > 0 && layout.getLineBottom(e - 1) - layout.getLineTop(start - 1) <= contentH) start--
+        // 反向填充同样走帧几何：页尾钉死在行 [e-1]，问「再往上含一行 [start-1] 还装得下吗」。
+        while (start > 0 && layout.getPageFrameBottom(e - 1) - layout.getPageFrameTop(start - 1) <= contentH) start--
         val cs = layout.getLineStart(start)
         val ce = if (e < n) layout.getLineStart(e) else layout.length
         return PageSlice(cs, ce.coerceAtLeast(cs), start, e, PageSlice.Kind.TEXT, -1, -1)
@@ -3575,7 +3725,7 @@ private fun finishCanonicalBackground(
     private var peekedReadback: PeekedReadback? = null
 
     /** 一页的绘制回读源（版式 + 该版式内有效的行区间）。非当前页经 [peekedReadback] 命中。 */
-    private fun readbackFor(unit: ChapterUnit, slice: PageSlice): Pair<LayoutReadback, PageSlice>? {
+    private fun readbackFor(unit: ChapterUnit, slice: PageSlice): Pair<PagedLayout, PageSlice>? {
         val ip = unit.inProgress
         val pk = peekedReadback
         // 临时表按会话身份判新鲜（不依赖 unit.paramHash——它由 prepare/bind 分支写，未必等于 ip）；
@@ -3584,10 +3734,10 @@ private fun finishCanonicalBackground(
             if (ip != null) pk.ipRef === ip
             else pk.ipRef == null && pk.paramHash == unit.paramHash
         if (fresh) {
-            val rb = pk!!.layout as? LayoutReadback ?: return null
+            val rb = pk!!.layout as? PagedLayout ?: return null
             return rb to pk.slice
         }
-        val rb = (unit.tempRenderLayout ?: unit.layout) as? LayoutReadback ?: run {
+        val rb = (unit.tempRenderLayout ?: unit.layout) as? PagedLayout ?: run {
             // 非 Readback 的 drawable（legacy/增量布局）静默空白：Q1-b interim 降级，记 w 可见。
             Logger.w(logTag, "non-Readback layout ch=${unit.chapterIndex} kind=${slice.kind}, blank content")
             return null
@@ -3623,6 +3773,23 @@ private fun finishCanonicalBackground(
         val (layout, s) = readbackFor(unit, slice) ?: return null
         if (s.firstLine < 0) return null
         return layout.pageImages(s.firstLine, s.lastLineExclusive).ifEmpty { null }
+    }
+
+    /**
+     * 本页**页首缺口**（[orilumn.reader.ui...] `ReaderHost.pageFrameLead` 的引擎侧实现）：
+     * `getLineTop(首行) - getPageFrameTop(首行)`，px ≥ 0。
+     *
+     * 与分页预算（[orilumn.reader.engine.paging.Paginator.fillWholeLines]）取**同一对帧函数**，
+     * 故绘制锚点抬头的那段恰好等于预算里记在页首的那段——重路径与临时页因此同值
+     * （返回值是相对首行行顶的差值，与坐标系无关）。
+     * 空窗口/非法行回 0（= 旧口径，绘制像素与修前一致）。
+     */
+    fun pageFrameLead(chapter: Int, slice: PageSlice): Int {
+        val unit = unitAt(chapter) ?: return 0
+        if (slice.kind != PageSlice.Kind.TEXT) return 0
+        val (layout, s) = readbackFor(unit, slice) ?: return 0
+        if (s.firstLine < 0 || s.firstLine >= layout.lineCount) return 0
+        return (layout.getLineTop(s.firstLine) - layout.getPageFrameTop(s.firstLine)).coerceAtLeast(0)
     }
 
     /**
@@ -4039,12 +4206,20 @@ private fun finishCanonicalBackground(
         val ps0 = ps.firstOrNull()
         val psN = ps.lastOrNull()
         val ip = unit.inProgress
+        // 页首缺口（§12.9 v4）：本片首行之上**仍画在本页**的那段（重路径=整章布局，t=临时窗口布局）。
+        // 排障「侧栏/有背景的父容器里第一段被推走或被裁」时直接读这里：值应等于
+        // 容器 padding-top + 首子 margin-top + 首子 padding-top（§12.9），两路必须同值。
+        fun BookLayout.topLeadOf(firstLine: Int): Int =
+            if (firstLine in 0 until lineCount) getPageTopLead(firstLine) else -1
+        val topLeadF = unit.layout?.topLeadOf(slice.firstLine) ?: -1
+        val topLeadT = unit.tempRenderLayout?.topLeadOf(slice.firstLine) ?: -1
         Logger.w(flipTag, "FLIP dir=$direction ch=$chapter title=${unit.title?.take(16) ?: "-"} " +
             "|slice[${slice.firstLine},${slice.lastLineExclusive})char[${slice.charStart},${slice.charEnd})blk[${slice.blockStart},${slice.blockEndExclusive})] " +
             "|inProgress=${ip != null}${ip?.let{"anchorBlk=${it.anchorBlockStart} anchorLineCh=${it.anchorLineCharStart} curFwd=${it.curIsForward} curIdx=${it.curIndex} head=${it.headReached} fwdPages=${it.forwardPages.size} bwdPages=${it.backwardPages.size} shapedFwdTo=${it.shapedForwardTo} fwd=[${tempWinSpans(it.forwardPages)}] bwd=[${tempWinSpans(it.backwardPages)}]"} ?: ""} " +
-            "|diskTable=${pt != null}${pt?.let{"pages=${pt.pages.size}"} ?: ""} " +
+            "|diskTable=${pt != null}${pt?.let{"pages=${it.pages.size} tableParam=${it.paramHash}"} ?: ""} " +
             "|layoutLC=$layoutLc tempLC=$tempLc " +
             "|pageSlices=${ps.size}${ps0?.let{" f[${it.charStart},${it.charEnd})"} ?: ""}${psN?.let{" l[${it.charStart},${it.charEnd})"} ?: ""} " +
+            "|topLead=f:$topLeadF t:$topLeadT " +
             "|laidOut=${unit.laidOut} paramHash=${unit.paramHash} path=${unit.pathMarker}")
         // Anchor temp streaming: navigate the whole-block temp pages instead of pageSlices indices.
         val inProgress = unit.inProgress

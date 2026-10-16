@@ -1051,6 +1051,7 @@ class BoxChapterLayouter(
         val tBox0 = orilumn.reader.time.platformNowMs()
         val boxes = buildBackgroundDrawBoxes(prepare, leavesForDraw, localLines, localFirst, localLast)
         val tBox1 = orilumn.reader.time.platformNowMs()
+        val frameLeadTop = windowLeadTop(prepare, blockLo, localShapes)
         val drawable = PartialDrawableLayout(
             lines = localLines,
             leafList = leavesForDraw,
@@ -1065,6 +1066,8 @@ class BoxChapterLayouter(
             tableCellsSource = incrWin.lines,
             tableCellImagesSource = incrWin.images,
             tableBordersSource = incrWin.borders,
+            frameLeadTop = frameLeadTop,
+            elementStyleSource = prepare::resolveStyle,
         )
 
         // 6. Paginate the shaped window's OWN line stream by content height — the SAME whole-line fill
@@ -1207,6 +1210,97 @@ class BoxChapterLayouter(
      *  对文本叶加 0 边，容器边由容器分支恰好加一次。 */
     private fun ownBottomEdges(leaf: LayoutBox): Int =
         if (leaf.el?.isText == true) 0 else (leaf.style.padding.bottom + leaf.style.border.bottom).roundToInt()
+
+    /**
+     * 叶自身 **top 边** = `border-top + padding-top`（文本叶恒 0，判据同 [ownBottomEdges]）。
+     * 块边界开页时只有这一段画在本页页首（段前折叠 `margin-top` 并入页边距，见 [leadAbove] 与
+     * `BookLayout.getPageTopLead`）。
+     */
+    private fun ownTopEdges(leaf: LayoutBox): Int =
+        if (leaf.el?.isText == true) 0 else (leaf.style.padding.top + leaf.style.border.top).roundToInt()
+
+    /** 叶自身 `margin-top`（文本叶恒 0）。章首段前距不并入页边距，见 [leadAbove]。 */
+    private fun ownMarginTop(leaf: LayoutBox): Int =
+        if (leaf.el?.isText == true) 0 else leaf.style.margin.top.roundToInt()
+
+    /**
+     * 块边界落差单源：块 [a] 的**末行行底** → 块 [b] 的**首行行顶**。与 [rebuildLocalLines] 的行流推进
+     * 逐字节同式（`ownBottomEdges(prev) + consecutiveLeafAdvance + 后块自身 top 边`，见该函数 1395/1430
+     * 与 [shapeAnchorPageForward] 的累计式），也因此与 canonical `emit` 的块间距同值。
+     *
+     * 只服务**窗内块间落差**：窗内每一块的间距本来就在行流里（相邻行的差），但倒包/锚页估计按
+     * shapes 的行高逐块重建，块与块之间要靠这个数与 canonical 同值（[interiorGapAbove] 是它减去
+     * 前块自身下边后的「页内边界」段）。窗口**上边界**（窗外那段）另走 [leadAbove]/[windowLeadTop]，
+     * 两者相差一个段前折叠 `margin-top`（页首并入页边距，页内边界记满）。
+     *
+     * ⚠ 已知口径差（**本次不动**，非本函数职责）：第三项对**文本叶**不按 [ownTopEdges] 清零
+     * （文本叶的 `style` 是宿主容器样式 ⇒ 等于把宿主的 `border/padding-top` 记成后块自身 top 边），
+     * 而 [ownBottomEdges] 对 A 侧文本叶清零（A 侧祖先链底边已在 `consecutiveLeafAdvance` 里）。
+     * 后块是**宿主首子**文本叶时宿主 top 边确实在它上方（该记），非首子时不该记。既有 fixture 宿主
+     * `padding-top` 多为 0，未触到该差；要修需按盒树判「是否首子」，另立项。
+     */
+    private fun blockBoundaryGap(prepare: LightPrepare, a: Int, b: Int): Int {
+        val pa = prepare.block(a)
+        val pb = prepare.block(b)
+        return ownBottomEdges(pa) +
+            NormalFlowLayout.consecutiveLeafAdvance(pa.el!!, pb.el!!, prepare::resolveStyle) +
+            (pb.style.border.top + pb.style.padding.top).roundToInt()
+    }
+
+    /**
+     * 块 [b] 作为**页首块**时，页首行行顶之上**归本页**的那段缺口
+     * （[orilumn.reader.engine.paging.BookLayout.getPageTopLead] 的轻路径单源）。
+     *
+     * v4 口径（2026-10-15）：本块**作为页首块**时的缺口 = [NormalFlowLayout.pageTopLead] —— 页首叶沿
+     * 「首有效子」链上溯到**最外层可见盒 X**（背景色/背景图/边框/盒阴影），X 边框顶以下一切（X 的
+     * padding、中间容器的边距、**首子自己的** `margin-top`/`padding-top`）画在本页页首；X 之上的折叠
+     * `margin-top` 并入页边距。链上无可见盒（纯文本块直接挂在 `<body>` 下）⇒ 退回 v3：只留本块
+     * **自身**的 `border-top`/`padding-top` ⇒ `ownTopEdges(b)`。
+     * **章首块（b == 0）例外**：章首段前距不与页边距合并，另加本块自身 `margin-top`。
+     * 段中开页（调用方的 `k0 > 0`）本页首行之上无缺口，恒 0 —— 调用方按 `k0 > 0` 短路。
+     */
+    private fun leadAbove(prepare: LightPrepare, b: Int): Int {
+        val leaf = prepare.block(b)
+        // 章首：v3 不变（章首段前距不与页边距合并，照画在章首页页首）。
+        if (b <= 0) return ownTopEdges(leaf) + ownMarginTop(leaf)
+        val el = leaf.el ?: return ownTopEdges(leaf)
+        return NormalFlowLayout.pageTopLead(el, prepare::resolveStyle)
+    }
+
+    /**
+     * **页内**块边界单源：块 [b] 首行行顶之上到**前块末行帧底**的那段 = [blockBoundaryGap]`(b-1,b)`
+     * 减去**前块自身下边**（前块下边归本页前一行的帧底，见 [ownBottomEdges]，别处已单记一次）。
+     *
+     * 与 [leadAbove]（页首）的差别正是那段段前距：页首块的折叠 `margin-top` 并入页边距，页内
+     * 边界的落差两端都在本页里、没有下一页来分摊 ⇒ 必须记满「段前距 + 本块自身 top 边」。
+     * 倒包估计（[shapeTempPageBackward]）逐行向上累加时按本函数记 `acc`，仅在该行**当选页首行**
+     * 的判据里改用 [leadAbove]。
+     */
+    private fun interiorGapAbove(prepare: LightPrepare, b: Int): Int =
+        if (b <= 0) 0
+        else blockBoundaryGap(prepare, b - 1, b) - ownBottomEdges(prepare.block(b - 1))
+
+    /**
+     * 窗口**上边界缺口**（[PartialDrawableLayout.frameLeadTop] 的取值单源）：窗口首行行顶之上、
+     * 落在窗外的那段页首缺口 = 窗口首行所属块的 [leadAbove]（窗口首行必为该页页首行）。
+     *
+     * 窗口从**章头**起（[blockLo] == 0）时首行即章首行，章首段前距不并入页边距 ⇒ 另加首块自身
+     * `margin-top`（见 [leadAbove]）。空行块（`lineCount == 0`，轻路径理论上不产出）按最近的实块
+     * 兜底，不追求该退化情形的精度。
+     */
+    private fun windowLeadTop(
+        prepare: LightPrepare,
+        blockLo: Int,
+        shapes: List<ParagraphShapeRef>,
+    ): Int {
+        val firstIdx = shapes.indexOfFirst { it.lineCount > 0 }
+        if (firstIdx < 0) return 0
+        val leaf = prepare.block(blockLo + firstIdx)
+        // 章头起：v3 不变（章首段前距不与页边距合并，另加首块自身 `margin-top`）。
+        if (blockLo == 0) return ownTopEdges(leaf) + ownMarginTop(leaf)
+        val el = leaf.el ?: return ownTopEdges(leaf)
+        return NormalFlowLayout.pageTopLead(el, prepare::resolveStyle)
+    }
 
     private fun rebuildLocalLines(
         prepare: LightPrepare,
@@ -1456,6 +1550,10 @@ class BoxChapterLayouter(
      * contains [anchorChar] (so that character always lands on the current page's first line), then
      * includes the rest of that block and whole blocks until the page is full. Its top may start
      * mid-block (the block's leading lines before the anchor line belong to the backward page).
+     *
+     * 页尾与 [shapeTempPageForward] **同源**：本函数只圈窗口，切点由 `assembleTempPage` 内的
+     * `Paginator.paginateFrom` 给出（整行填充 + 强制段 + avoid 簇），锚点落在正典页首行时锚页
+     * 逐字等于磁盘表对应页。
      */
     fun shapeAnchorPageForward(
         prepare: LightPrepare,
@@ -1478,60 +1576,82 @@ class BoxChapterLayouter(
         var lIdx = 0
         for (k in 0 until s0.lineCount) if (s0.lineStart(k) <= localAnchor && localAnchor < s0.lineEnd(k)) { lIdx = k; break }
 
-        // LINE-based, MARGIN-AWARE fill from the anchor line (like forward pages): accumulate content line
-        // heights and inter-block margin advances until contentH, cutting mid-block. The page's first
-        // block starts at the anchor line (no leading top margin); between blocks the margin collapse
-        // applies; the page's last block's bottom margin merges into the page bottom edge.
+        // 本函数**只圈窗口**（本页大致触达哪些块）：按内容行高 + 块间 advance 累加到超出 contentH。
+        // 页尾切点**不在这里决定** —— 它由 `assembleTempPage` 内的 `Paginator.paginateFrom` 给出，
+        // 即锚页与临时表/磁盘表/增量窗用**同一段**分页代码（含整行填充、强制段与 avoid 簇）。
+        //
+        // 旧版在这里自算填充并把它当页尾**钉死**（`endLineCharStart = ecs`）：高度累加器只看行高 +
+        // `leadAbove`/`blockBoundaryGap`，**看不到 avoid 规则**（`break-inside: avoid` 的原子区间、
+        // 禁止切点）。凡 canonical 因 avoid 提前收盘的页（真书 ch2 的图/侧栏块），锚页就把切点钉在
+        // avoid 块之后 ⇒ 页尾多吃若干行、与磁盘表错开（JVM 复现：重路径 [21240,23601) / 旧锚页
+        // [21240,23628)）。窗口不闭合 avoid 边链时 `Paginator` 同样看不到链尾接口的禁止切点，故这里
+        // 与 [shapeTempPageForward] 一样沿 [BreakClusters.chainRange] 把窗口取整到链闭合。
         val shapes = ArrayList<ParagraphShapeRef>()
         var acc = 0
         var endBlockExclusive = anchorBlock
-        var cutBlock = -1
-        var cutLine = -1
         var b = anchorBlock
-        var firstInPage = true
+        // 本页已纳入的行数（「游标永不停滞」判据，见 [shapeTempPageForward]）。
+        var placedLines = 0
+        var full = false
         while (b < total) {
-            if (!firstInPage) {
-                val prevLeaf = prepare.block(b - 1)
-                val thisLeaf = prepare.block(b)
-                val advance = NormalFlowLayout.consecutiveLeafAdvance(prevLeaf.el!!, thisLeaf.el!!, prepare::resolveStyle)
-                // prev bottom edges + margin collapse + THIS leaf's own top edges: exactly the vertical
-                // span rebuildLocalLines now gives between prev's last line and this leaf's first line
-                // (which sits at contentTop + this leaf's top border/padding). Mirrors heavy pagination,
-                // which counts a pre block's top padding in its occupied page height.
-                acc += ownBottomEdges(prevLeaf) + advance +
-                    (thisLeaf.style.border.top + thisLeaf.style.padding.top).roundToInt()
+            if (b > anchorBlock) {
+                // 块间落差单源 [blockBoundaryGap]。**页首块的缺口与页尾叶自身边在这里刻意不收**：acc
+                // 只用来圈窗口，少收 ⇒ 窗口偏大，必然仍含真实切点（证明见 [shapeTempPageForward]）。
+                acc += blockBoundaryGap(prepare, b - 1, b)
             }
-            firstInPage = false
             val s = tempShape(cache, prepare, b, profile)
             shapes.add(s)
             val k0 = if (b == anchorBlock) lIdx.coerceAtLeast(0) else 0
             // P4-a3: 悬浮 img 零高（字符槽照占、页高不计；与重路径分页同式）。
             val aLeaf = prepare.block(b)
-            val aFloat = aLeaf.table == null && s.isReplaceable && aLeaf.style.floatSide != orilumn.reader.engine.css.FloatSide.NONE
+            val aFloat = aLeaf.table == null && aLeaf.style.floatSide != orilumn.reader.engine.css.FloatSide.NONE &&
+                (s.isReplaceable || s.lineCount > 0)
             if (!aFloat) {
             for (k in k0 until s.lineCount) {
                 // Every shaped line equals the CSS line box (uniform across first/interior/last), so a
                 // page fills by exactly the drawn pixels per line, never over/under-estimating.
                 val h = (s.lineBottom(k) - s.lineTop(k)).coerceAtLeast(1)
-                if (acc + h > contentH) { cutBlock = b; cutLine = k; break }
+                // 「游标永不停滞」（单源口径同上）：页首行自身就高过整页时强收这一行。
+                if (placedLines > 0 && acc + h > contentH) { full = true; break }
                 acc += h
+                placedLines++
             }
             }
-            if (cutLine >= 0) { endBlockExclusive = b + 1; break }
             endBlockExclusive = b + 1
+            if (full) break
             b++
         }
-        val ecs = if (cutBlock >= 0) {
-            val sc = tempShape(cache, prepare, cutBlock, profile)
-            prepare.globalCharStarts[cutBlock].toInt() + (sc.lineStart(cutLine) - sc.lineStart(0))
-        } else null
-        val page = assembleTempPage(prepare, anchorBlock, endBlockExclusive, shapes, pageFirstLine = lIdx.coerceAtLeast(0), endLineCharStart = ecs, contentH = contentH) {
+        // 窗口取整：切点块所在的 avoid **边链**可能跨出本窗（链尾在后面若干块）。窗口若把链截断，
+        // `PartialDrawableLayout.breakPlan` 就看不到链上后续接口的禁止切点，故沿 [BreakClusters.chainRange]
+        // 把窗口补到链闭合。这**只是取窗口**，不决定任何页边界。
+        if (endBlockExclusive < total) {
+            val chain = orilumn.reader.engine.laying.BreakClusters.chainRange(
+                endBlockExclusive - 1, anchorBlock, total,
+                before = { prepare.block(it).breakBefore }, after = { prepare.block(it).breakAfter },
+            )
+            while (endBlockExclusive <= chain.last) {
+                shapes.add(tempShape(cache, prepare, endBlockExclusive, profile))
+                endBlockExclusive++
+            }
+        }
+        // 页尾切点 = `Paginator.paginateFrom`（与磁盘表/增量窗的**同一段**代码）；`endLineCharStart = null`
+        // ⇒ 走整行填充 + 断页规则，而不是把切点钉在某个字符行上。
+        val page = assembleTempPage(prepare, anchorBlock, endBlockExclusive, shapes, pageFirstLine = lIdx.coerceAtLeast(0), endLineCharStart = null, contentH = contentH) {
             tempShape(cache, prepare, it, profile)
         }
         diagPage(contentH, page, "anchor")
-        val nb = if (cutLine >= 0) cutBlock else endBlockExclusive
-        val nl = if (cutLine >= 0) cutLine else 0
-        tempDiag("ANCHOR", "in anchorChar=$anchorChar anchorBlk=$anchorBlock lIdx=$lIdx", page, "cut=${if (cutLine >= 0) "blk$cutBlock/line$cutLine" else "-"} next=($nb,$nl)")
+        // 把 `Paginator` 解出的行切点翻回 `(block, line)` 游标（与 [shapeTempPageForward] 同式）。
+        val (lf, ll) = localLineRanges(shapes)
+        var nb = endBlockExclusive
+        var nl = 0
+        for (i in lf.indices) {
+            if (page.slice.lastLineExclusive in lf[i] until ll[i]) {
+                nb = anchorBlock + i
+                nl = page.slice.lastLineExclusive - lf[i]
+                break
+            }
+        }
+        tempDiag("ANCHOR", "in anchorChar=$anchorChar anchorBlk=$anchorBlock lIdx=$lIdx", page, "next=($nb,$nl)")
         return ForwardedPage(page, nb, nl)
     }
 
@@ -1561,24 +1681,20 @@ class BoxChapterLayouter(
         var acc = 0
         var endBlockExclusive = startBlock
         var b = startBlock
-        var firstInPage = true
         // 本页已纳入的行数（「游标永不停滞」判据，见下）。
         var placedLines = 0
         var full = false
         while (b < total) {
-            if (!firstInPage) {
-                // Inter-block gap: prev content-bottom → this content-top.
-                val prevLeaf = prepare.block(b - 1)
-                val thisLeaf = prepare.block(b)
-                val advance = NormalFlowLayout.consecutiveLeafAdvance(prevLeaf.el!!, thisLeaf.el!!, prepare::resolveStyle)
-                // prev bottom edges + margin collapse + THIS leaf's own top edges: exactly the vertical
-                // span rebuildLocalLines now gives between prev's last line and this leaf's first line
-                // (which sits at contentTop + this leaf's top border/padding). Mirrors heavy pagination,
-                // which counts a pre block's top padding in its occupied page height.
-                acc += ownBottomEdges(prevLeaf) + advance +
-                    (thisLeaf.style.border.top + thisLeaf.style.padding.top).roundToInt()
+            if (b > startBlock) {
+                // 块间落差（单源 [blockBoundaryGap] = 前块自身下边 + 折叠边距 + 本块自身 top 边）——
+                // 与 `rebuildLocalLines` 的行流推进、与 canonical `emit` 逐字节同值。
+                //
+                // **页首块的缺口与页尾叶自身边在这里刻意不收**：本函数的 acc 只用来**圈窗口**
+                // （页尾切点由 `Paginator` 在同一段代码里决定）。少收 ⇒ acc 偏小 ⇒ 窗口偏大，
+                // 一定仍然包含真实切点（证明：若切点 C 在 acc 溢出行 L 之后，则 frame(C) ≥ acc(L)+h(L)
+                // > contentH，与 C 是切点矛盾）；多收才会把切点挤到窗外。窗口只影响塑形成本。
+                acc += blockBoundaryGap(prepare, b - 1, b)
             }
-            firstInPage = false
             val s = tempShape(cache, prepare, b, profile)
             shapes.add(s)
             val k0 = if (b == startBlock) startLine.coerceAtLeast(0) else 0
@@ -1652,6 +1768,10 @@ class BoxChapterLayouter(
      * current block is **kept and truncated** (its topmost fitting line becomes the page's first line),
      * matching forward's "cut inside block" semantics exactly.
      * @return the built page, or null when [endExclusive] is out of range.
+     * @param pinnedStart 本会话前向链边缓存 `ip.prevStart` 给出的页首游标 `(块, 块内行)`——命中即以该行
+     *   页首组装，跳过几何倒包估计；仍要过下面的页尾 pin 自校验，失配则记 w 回退倒包（见
+     *   `BookDocumentController.resolveBackwardStartCursor`）。**不读磁盘表/正典**：章内边界只由临时
+     *   表自己决定。
      */
     fun shapeTempPageBackward(
         prepare: LightPrepare,
@@ -1661,6 +1781,7 @@ class BoxChapterLayouter(
         endExclusive: Int,
         endLineCharStart: Int,
         cache: MutableMap<Int, ParagraphShapeRef>?,
+        pinnedStart: Pair<Int, Int>? = null,
     ): TempPage? {
         val total = prepare.totalBlocks
         if (endExclusive <= 0 || endExclusive > total) return null
@@ -1694,24 +1815,45 @@ class BoxChapterLayouter(
             val s = tempShape(cache, prepare, b, profile)
             allShapes.add(0, s)  // prepend — we walk backward, but shapes must stay in visual order
 
-            // Inter-block gap: above block(b) padding/border bottom + margin collapse with block(b+1).
-            if (!firstInPage) {
-                val belowLeaf = prepare.block(b + 1)
-                val advance = NormalFlowLayout.consecutiveLeafAdvance(leaf.el!!, belowLeaf.el!!, prepare::resolveStyle)
-                // Inter-block gap between b and b+1 = b's bottom edges + margin collapse + the block
-                // below's own top edges (its first line sits at contentTop + its top border/padding after
-                // the rebuildLocalLines fix). Mirrors heavy pagination counting a padded block's top padding.
-                acc += ownBottomEdges(leaf) + advance +
-                    (belowLeaf.style.border.top + belowLeaf.style.padding.top).roundToInt()
-            }
-            firstInPage = false
-
             // Bottom block's tailing lines may belong to the anchor page (endLineCharStart >= 0).
             val maxLine = if (b == endExclusive - 1 && endLineCharStart >= 0) {
                 val baseChar = prepare.globalCharStarts[b].toInt()
                 val localEnd = endLineCharStart - baseChar
                 (0 until s.lineCount).firstOrNull { s.lineStart(it) >= localEnd } ?: s.lineCount
             } else s.lineCount
+
+            if (firstInPage) {
+                firstInPage = false
+                // 页**尾**叶自身边：页尾行恰为本窗末块末行时，帧底 = 行底 + 该叶自身 `padding-bottom`/
+                // `border-bottom`（[BookLayout.getPageFrameBottom]）。页尾被钉在锚点行（`endLineCharStart`
+                // 剪掉末行）时该边不在页内，故按 `maxLine` 判定。
+                //
+                // 块边界缺口仍不再算进本页——它归**下一页**页首（旧口径把整段缺口算进页尾，页尾就少装
+                // 一行；v3 下下一页页首只收 [leadAbove]，折叠段前距两页都不收），而本块的**自身下边**
+                // 例外：它是帧**内**的一段（见下）。
+                if (maxLine == s.lineCount) {
+                    acc += ownBottomEdges(prepare.block(endExclusive - 1))
+                }
+            } else {
+                // 页内**其余块**（含本页起始块）的自身下边同样落在本页帧内：本页无论从本块哪一行起页，
+                // 块末行都在页内，而块底那段（`ownBottomEdges`）是「块末行行底 → 下一块首行行顶」整段
+                // 落差 [blockBoundaryGap] 里属于**本块帧底**的一部分（[BookLayout.getPageFrameBottom]），
+                // 故随块末行落进本页。
+                //
+                // 帧高单源推导：自页首行 S 到页尾行 L 的帧跨度
+                //   span(S, L) = frameBottom(L) − frameTop(S)
+                //              = [leadAbove(页首块)（仅当页首落在某块首行）] + Σ行高
+                //              + Σ_{页内块 b} ownBottomEdges(b) + Σ_{页内块 b > 页首块} interiorGapAbove(b)
+                // （[blockBoundaryGap] = ownBottomEdges(prev) + 折叠边距 + 本块自身 top 边；
+                // [interiorGapAbove] = blockBoundaryGap − ownBottomEdges(prev) 是**页内**边界段，
+                // [leadAbove] 是它的**页首**版本（段前距并入页边距，故少一段）。
+                // `shapeAnchorPageForward` 的累加式是同一恒等式的另一种写法。）
+                // ⇒ **每个**页内块都要记一次自身下边。旧式只记页尾那一次，
+                // acc 偏小 ⇒ 倒包起点过早 ⇒ `Paginator` 从该起点整行填充收不到页尾（帧高先超）⇒
+                // 「末行被推走/页尾 2 字落到页外」——真机 ch2 倒包页少了整整一行（10 字），随后前向重建
+                // 从错位原点起塑，来回翻页内容就变了。
+                acc += ownBottomEdges(leaf)
+            }
 
             // Accumulate lines from the bottom of this block upward. On overflow truncate this block
             // at the last fitting line — the page starts there.
@@ -1724,11 +1866,21 @@ class BoxChapterLayouter(
             for (k in (maxLine - 1) downTo 0) {
                 // Every shaped line is the CSS line box; fill by it so capacity matches drawn pixels.
                 val h = (s.lineBottom(k) - s.lineTop(k)).coerceAtLeast(1)
+                // 行顶之上那一段（只有本块首行 k == 0 才有）分两种口径，**绝不混用**：
+                //  · 本行若**当选页首行**（下面已收的各行都在本页内、更靠上的行都进不来）⇒ 只记本块
+                //    **自身 top 边** [leadAbove]：段前折叠 `margin-top` 并入页边距（v3 口径）。
+                //  · 本行只是**页内**边界（页首还在更上面）⇒ 整段落差 [interiorGapAbove]（段前距 +
+                //    本块自身 top 边）。
+                // `acc` 一路按**页内**口径累加；判据才用 [leadAbove]，两者之差正是被页边距吞掉的段前距。
+                // 这样继续向上找页首时，下面已收的各段仍是完整的页内落差（若把页首口径也累进 acc，
+                // 每个块边界都会少收一段折叠边距 ⇒ 倒包页多装行）。
+                val interior = if (k == 0 && b > 0) interiorGapAbove(prepare, b) else 0
+                val pageTop = if (k == 0) leadAbove(prepare, b) else 0
                 // 与 shapeTempPageForward 同一条「游标永不停滞」guard（单源：重路径 fillWholeLines）：
                 // 页底块自己那一行就高过整页时（宽屏全屏下的超高插图）强收它并允许撕裂，否则
                 // `overflowLine == maxLine - 1` ⇒ `startLine = maxLine` ⇒ 空页/丢块，向前回溯同样卡住。
-                if (placedLines > 0 && acc + h > contentH) { overflowLine = k; break }
-                acc += h
+                if (placedLines > 0 && acc + pageTop + h > contentH) { overflowLine = k; break }
+                acc += interior + h
                 placedLines++
             }
             }
@@ -1772,7 +1924,7 @@ class BoxChapterLayouter(
                 // （而不是把它当成「页首恰为区间首 ⇒ 装到区间尾」）。禁止切点同源一并修正。
                 val adj = Paginator.resolveAvoidCut(
                     probeRanges, probeForbidden, -1, packStart, contentH,
-                    probe.layout::getLineTop, probe.layout::getLineBottom,
+                    probe.layout::getPageFrameTop, probe.layout::getPageFrameBottom,
                 )
                 if (adj != packStart) {
                     val pinned = (0 until probe.layout.lineCount).firstOrNull { probe.layout.getLineStart(it) >= endLineCharStart }
@@ -1792,13 +1944,88 @@ class BoxChapterLayouter(
                 }
             }
         }
-        val backPage = assembleTempPage(prepare, pageStartBlock, endExclusive, shapes,
-            pageFirstLine = pageStartLine, endLineCharStart = if (endLineCharStart >= 0) endLineCharStart else null,
-            contentH = contentH) {
-            tempShape(cache, prepare, it, profile)
+        // ── 页尾 pin 自校验（**单源**：页首切点由 `Paginator` 反查，不由自算累加器拍板）──
+        // 本页必须**恰好**收到 pinChar —— 相邻前向页的页首字符（`endLineCharStart`）或本窗末块的后继
+        // 块首字（块边界收页）。短了 = 页缝丢字（两页之间那段字符无人显示），长了 = 两页重叠。
+        // 倒包估计与 `Paginator` 帧口径的**任何**失配（页内块自身下边、页首缺口、avoid 退切、窗口端点）
+        // 都在这里被拦下、当场修正并出声，而不是把错位页灌进窗口。真机症状「来回翻页内容变了」正是
+        // 错位页进窗口：倒包页尾少 10 字，前向重建又从错位的原点起塑，页界整条链跟着漂。
+        val pinChar = if (endLineCharStart >= 0) endLineCharStart
+            else prepare.globalCharStarts.getOrElse(endExclusive) { prepare.totalChars.toLong() }.toInt()
+        fun assembleFrom(sb: Int, sl: Int, sh: List<ParagraphShapeRef>): TempPage =
+            assembleTempPage(prepare, sb, endExclusive, sh, pageFirstLine = sl,
+                endLineCharStart = if (endLineCharStart >= 0) endLineCharStart else null,
+                contentH = contentH) { tempShape(cache, prepare, it, profile) }
+        // 本会话前向链边缓存给出的页首游标（`ip.prevStart`）：按该行组装即为读者刚看过的那一页，省掉
+        // 整段几何估计。仍要过 pin 自校验——游标与轻路径几何若分叉（落在别的行上），这里当场拦下。
+        if (pinnedStart != null) {
+            val (pb, pl) = pinnedStart
+            val pShape = if (pb in 0 until endExclusive) tempShape(cache, prepare, pb, profile) else null
+            if (pShape != null && pl >= 0 && pl < pShape.lineCount) {
+                val pShapes = (pb until endExclusive).map { tempShape(cache, prepare, it, profile) }
+                val pinned = assembleFrom(pb, pl, pShapes)
+                if (pinned.slice.charEnd == pinChar) {
+                    tempDiag("BWD", "in endExcl=$endExclusive lineCut=$endLineCharStart", pinned,
+                        "truncated=$truncated pinned=($pb,$pl)")
+                    return pinned
+                }
+                Logger.w(
+                    "Orilumn.TEMP",
+                    "BWD-PIN-DRIFT href=$chapterHref pin=$pinChar pinned=($pb,$pl) " +
+                        "got=[${pinned.slice.charStart},${pinned.slice.charEnd}) —— 权威页首游标与几何不一致，回退倒包",
+                )
+            } else {
+                Logger.w("Orilumn.TEMP", "BWD-PIN-STALE href=$chapterHref pinnedStart=($pb,$pl) endExcl=$endExclusive")
+            }
         }
+        val backPage = assembleFrom(pageStartBlock, pageStartLine, shapes)
+        if (backPage.slice.charEnd == pinChar) {
+            tempDiag("BWD", "in endExcl=$endExclusive lineCut=$endLineCharStart", backPage,
+                "truncated=$truncated start=($pageStartBlock,$pageStartLine)")
+            return backPage
+        }
+        // 慢路（估计失配）：在**探针布局**上用帧几何反查「自哪一行起页，整行填充恰好收到 pin」——
+        // 逐行下移（页变短）取**首个**可行行 = 倒包允许的最大填充（页最满），判据就是
+        // `Paginator.paginateFrom`（与 `assembleTempPage` 逐字同式），只多付一次组装。
+        val layout = backPage.layout
+        val pinLine = if (endLineCharStart >= 0) {
+            (0 until layout.lineCount).firstOrNull { layout.getLineStart(it) == pinChar } ?: layout.lineCount
+        } else layout.lineCount
+        var fixedLine = -1
+        var probeLine = pageStartLine + 1
+        while (probeLine < pinLine) {
+            val p = Paginator.paginateFrom(layout, probeLine, contentH).firstOrNull()
+            if (p != null && p.lastLineExclusive >= pinLine) { fixedLine = probeLine; break }
+            probeLine++
+        }
+        if (fixedLine >= 0) {
+            val (lf, ll) = localLineRanges(shapes)
+            for (i in lf.indices) {
+                if (fixedLine in lf[i] until ll[i]) {
+                    val fb = pageStartBlock + i
+                    val fl = fixedLine - lf[i]
+                    val fixed = assembleFrom(fb, fl, shapes.drop(i))
+                    if (fixed.slice.charEnd == pinChar) {
+                        Logger.w(
+                            "Orilumn.TEMP",
+                            "BWD-FIX href=$chapterHref pin=$pinChar start=($pageStartBlock,$pageStartLine)→($fb,$fl) " +
+                                "lost=${pinChar - backPage.slice.charEnd}（倒包估计偏差，已按 Paginator 反查修正）",
+                        )
+                        tempDiag("BWD", "in endExcl=$endExclusive lineCut=$endLineCharStart", fixed,
+                            "truncated=$truncated fixed=($fb,$fl)")
+                        return fixed
+                    }
+                    break
+                }
+            }
+        }
+        Logger.e(
+            "Orilumn.TEMP",
+            "BWD-UNFIXED href=$chapterHref pin=$pinChar endExcl=$endExclusive start=($pageStartBlock,$pageStartLine) " +
+                "got=[${backPage.slice.charStart},${backPage.slice.charEnd}) lines=${layout.lineCount} —— 反查无解（页缝丢字），保留估计页待查",
+        )
         tempDiag("BWD", "in endExcl=$endExclusive lineCut=$endLineCharStart", backPage,
-            "truncated=$truncated start=($pageStartBlock,$pageStartLine)")
+            "truncated=$truncated start=($pageStartBlock,$pageStartLine) UNFIXED")
         return backPage
     }
 
@@ -2145,6 +2372,7 @@ class BoxChapterLayouter(
             tempFrames, prepare::resolveStyle, prepare.profile.letterSpacingEm, prepare.profile.fgColor,
             imageLoader, chapterHref, prepare.profile.cjkLatinSpacingEmApplied,
         )
+        val tempEdgeGaps = windowLeadTop(prepare, blockStart, shapes)
         val layout = PartialDrawableLayout(
             lines = lines,
             leafList = leavesForDraw,
@@ -2165,6 +2393,8 @@ class BoxChapterLayouter(
             tableCellsSource = tempWin.lines,
             tableCellImagesSource = tempWin.images,
             tableBordersSource = tempWin.borders,
+            frameLeadTop = tempEdgeGaps,
+            elementStyleSource = prepare::resolveStyle,
         )
         var lastLine = if (lines.isEmpty()) 0 else lines.size
         var charEnd = if (blockEndExclusive < total) prepare.globalCharStarts[blockEndExclusive].toInt()
@@ -2176,8 +2406,13 @@ class BoxChapterLayouter(
             val cut = rawLines.indexOfFirst { it.charStart == endLineCharStart }
             lastLine = if (cut >= 0) cut else lines.size
             charEnd = endLineCharStart
-            val pageTop = lines.getOrNull(pageFirstLine.coerceAtLeast(0))?.yTop ?: 0
-            while (lastLine > pageFirstLine + 1 && lastLine - 1 in lines.indices && lines[lastLine - 1].yBottom - pageTop > contentH) {
+            // 帧几何（含页首/页尾块的 border/padding 与页首/页尾元素的 margin）而不是行顶/行底：
+            // 否则绘制侧按盒顶对齐时末行越出页高被裁（本页按 `endLineCharStart` 钉死页尾，只有
+            // 「不超页高」这一条回退可以救它）。与 `Paginator.fillWholeLines` 同判据。
+            val frameTop = layout.getPageFrameTop(pageFirstLine.coerceAtLeast(0))
+            while (lastLine > pageFirstLine + 1 && lastLine - 1 in lines.indices &&
+                layout.getPageFrameBottom(lastLine - 1) - frameTop > contentH
+            ) {
                 lastLine--
             }
         } else {
@@ -2197,9 +2432,47 @@ class BoxChapterLayouter(
                 }
             }
         }
+        // 裁切兜底（**恒开**，不受 `EngineDiag` 门控）：绘制侧把整页从版心顶对齐（本页首行 y=0），
+        // 末行越过版心高就被窗口裁掉 —— 这正是「最后一行被推出栅格」的真根因。`Paginator.paginateFrom`
+        // 已用同一帧几何做判据（`fillWholeLines` 的注释），此处是**兜底**：任何让帧高与内容高失配的
+        // 改动（窗口边缘缺口算错、叶自身边重复计入、新增容器盒…）都在这里被拦下并**出声**，而不是
+        // 无声裁切。`Logger.w` 是恒开通道（日志落盘见 AGENTS.md），只在本应不可能的分支触发。
+        val guardFirst = pageFirstLine.coerceAtLeast(0)
+        if (lastLine - 1 in lines.indices && lastLine > guardFirst) {
+            val frameTop = layout.getPageFrameTop(guardFirst)
+            var retreated = 0
+            while (lastLine > guardFirst + 1 &&
+                layout.getPageFrameBottom(lastLine - 1) - frameTop > contentH
+            ) {
+                lastLine--
+                retreated++
+            }
+            if (retreated > 0) {
+                Logger.w(
+                    "Orilumn.TEMP",
+                    "CLIP-GUARD href=$chapterHref blk=[$blockStart,$blockEndExclusive) " +
+                        "retreated=$retreated lines -> [$guardFirst,$lastLine) " +
+                        "frame=${layout.getPageFrameBottom(lastLine - 1) - frameTop} contentH=$contentH " +
+                        "（末行本会越出栅格被裁：帧几何与版心高失配）",
+                )
+                for (i in localFirst.indices) {
+                    if (lastLine - 1 in localFirst[i] until localLast[i]) { sliceEndBlock = blockStart + i + 1; break }
+                }
+            }
+        }
         if (lastLine - 1 in lines.indices) {
-            val lastActualEnd = lines[lastLine - 1].charEnd
-            if (charEnd > lastActualEnd) charEnd = lastActualEnd
+            // 页尾字符边界与 canonical `Paginator`/`fillWholeLines` 同口径：取**末行之后那一行的行首**
+            // （canonical 是 `charEnd = getLineStart(cut)`）。若用「末行自身的 charEnd」，因样式化归一
+            // 文本的行流满足 `lineEnd(i) == lineStart(i+1) - 1`（见 `rebuildLocalLines`），相邻两页就会
+            // 在边界处各漏 1 个字符（真机表现为「翻页/调参后少字」）；窗口末行（其下一行不在窗内）才
+            // 退到块边界/章末。真书 ch2 的 11 处漏字全落在 `<pre>` 代码块**内部**（`white-space: pre`
+            // 保留换行 ⇒ 每行末都比下一行首少 1 字符），正是用户报的 §2.1.2 代码块现象。
+            charEnd = when {
+                endLineCharStart != null -> if (lastLine in lines.indices) lines[lastLine].charStart else endLineCharStart
+                lastLine in lines.indices -> lines[lastLine].charStart
+                blockEndExclusive < total -> prepare.globalCharStarts[blockEndExclusive].toInt()
+                else -> prepare.totalChars
+            }
         }
         val charStart = if (pageFirstLine in 0 until rawLines.size) rawLines[pageFirstLine].charStart
             else prepare.globalCharStarts[blockStart].toInt()
@@ -2628,6 +2901,20 @@ private class PartialDrawableLayout(
     private val tableCellsSource: Map<Int, List<orilumn.reader.engine.skia.DrawLine>> = emptyMap(),
     private val tableCellImagesSource: Map<Int, List<orilumn.reader.engine.skia.PageImage>> = emptyMap(),
     private val tableBordersSource: List<orilumn.reader.engine.skia.PageBackground> = emptyList(),
+    /**
+     * 窗口**上边界缺口**：本窗口首行之上、落在窗外（前一块）的那段页首缺口 ——
+     * [orilumn.reader.engine.paging.BookLayout.getPageTopLead] 的窗外取值（[windowLeadTop]）。窗口
+     * 行流的原点建在首行自己身上，前一块不在流里 ⇒ 默认式（取上一行帧底）查不到它，必须由调用方
+     * 按盒树算出传入。窗口从章头起时为「首块自身 top 边 + 首块自身 margin-top」（章首段前距不与
+     * 页边距合并），否则只为「首块自身 top 边」（折叠段前距并入页边距）。0 = 段中开页。
+     */
+    private val frameLeadTop: Int = 0,
+    /**
+     * v4 页首缺口的**祖先样式源**（= 调用方的 `prepare::resolveStyle`）。`getPageTopLead(i > 0)`
+     * 按盒链上溯找可见外沿盒（[NormalFlowLayout.pageTopLead]）要用它；null = 无源，退回叶自身
+     * top 边（v3 口径）。
+     */
+    private val elementStyleSource: ((MarkupElement) -> orilumn.reader.engine.css.ComputedStyle)? = null,
 ) : orilumn.reader.engine.skia.WindowedBookLayout() {
 
     init {
@@ -2656,11 +2943,26 @@ private class PartialDrawableLayout(
     override val lineCount: Int get() = lines.size
     override val length: Int get() = lines.lastOrNull()?.charEnd ?: 0
 
+    /** v4 页首缺口：祖先样式源（调用方的 `prepare::resolveStyle`）；null = 无源，退回 v3 口径。 */
+    override fun elementStyle(el: MarkupElement): orilumn.reader.engine.css.ComputedStyle? =
+        elementStyleSource?.invoke(el)
+
     override fun getLineTop(i: Int): Int = lines[i].yTop
     override fun getLineBottom(i: Int): Int = lines[i].yBottom
     override fun getLineStart(i: Int): Int = lines[i].charStart
     override fun getLineEnd(i: Int): Int = lines[i].charEnd
     override fun isParagraphBoundaryLine(i: Int): Boolean = lines[i].paragraphStart
+
+    /**
+     * 页面绘制帧上沿：与 [BookLayout.getPageFrameTop] 同口径，只把**窗口首行**换成调用方传入的
+     * 窗外缺口（[frameLeadTop]，= [windowLeadTop]，即 [BookLayout.getPageTopLead] 的窗外取值）——
+     * 窗口首行的上一行不在本流里，默认式会退化成行顶，临时页就会比磁盘表多装一行（真机=调参后
+     * 页数对不上）。窗口**末**行不需要特殊处理：[WindowedBookLayout] 已按叶自身边给出帧底，且它
+     * 不依赖窗外（口径见 [BookLayout.getPageFrameBottom]）。
+     */
+    override fun getPageFrameTop(i: Int): Int =
+        if (i <= 0) getLineTop(0) - frameLeadTop
+        else maxOf(getPageFrameBottom(i - 1), getLineTop(i) - getPageTopLead(i))
 
     /**
      * Line ranges of `break-inside: avoid` blocks, in this window's LOCAL line indexes — mirrors

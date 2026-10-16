@@ -204,10 +204,13 @@ class ReaderLogicTest {
     // ---- P4-c2u 点按锚点/行命中 ----
 
     @Test
-    fun pageAnchorY_takesMinAndIgnoresNulls() {
+    fun pageAnchorY_ignoresBackgroundAndNulls() {
+        // 行/图取最小；盒背景不进锚点（只在前两者都缺时兜底），见 PageAnchorTest 的真机回归。
         assertEquals(100, ReaderMath.pageAnchorY(120, 100, null))
-        assertEquals(90, ReaderMath.pageAnchorY(120, 100, 90))
+        assertEquals(100, ReaderMath.pageAnchorY(120, 100, 90))
         assertEquals(120, ReaderMath.pageAnchorY(120, null, null))
+        assertEquals(120, ReaderMath.pageAnchorY(120, null, 90))
+        assertEquals(90, ReaderMath.pageAnchorY(null, null, 90))
         assertEquals(null, ReaderMath.pageAnchorY(null, null, null))
     }
 

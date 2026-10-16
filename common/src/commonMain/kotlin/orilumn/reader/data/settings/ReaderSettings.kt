@@ -31,11 +31,12 @@ data class ReaderSettings(
     val lineSpacing: Double = 1.5,
     /** [Style system] First-line indent (em, 0..10): `text-indent` on body paragraphs (p/li), applied by the UI layer so it overrides the book. Absolute value: 0 = no first-line indent. Switching to 原书设置 probes the book's own indent into this slot (see BookStyleProbe), so a 2em book shows 2. */
     val firstLineIndent: Double = 0.0,
-    /** [Style system] 段间距 (% scale 0..200, default 100): p/li 纵边距乘算
-     *  (100 = 书/主题节奏，0 = p/li 边距清零；标题等结构块不受此值影响，看疏密)。 */
+    /** [Style system] 段间距 (% scale 0..1000, default 100): p/li 纵边距乘算
+     *  (100 = 书/主题节奏，0 = p/li 边距清零；标题等结构块不受此值影响，看疏密)。
+     *  UI 滑块取值 0..100 = 本值 ÷10（10 = 100%），存档仍存本百分比 ⇒ 旧档 0..200 免迁移。 */
     val paragraphSpacing: Double = 100.0,
-    /** [Style system] 疏密 (% scale 0..200, default 100): p/li 之外一切块级纵边距乘算
-     *  (100 = 原书节奏，0 = 结构块边距清零；p/li 看段间距)。 */
+    /** [Style system] 疏密 (% scale 0..1000, default 100): p/li 之外一切块级纵边距乘算
+     *  (100 = 原书节奏，0 = 结构块边距清零；p/li 看段间距)。滑块映射同 [paragraphSpacing]。 */
     val paragraphGap: Double = 100.0,
     /** [Style system] Character spacing (letter-spacing) slot -100..100, mapped to -0.2em..0.2em (each slot unit = 0.002em); 0 = no extra spacing. */
     val letterSpacing: Double = 0.0,

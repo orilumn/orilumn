@@ -407,9 +407,11 @@ fun ReaderScreen(
      * 换不了就得把动画拨回原页（见 [endSlide]）。发射后立刻返回的话那次核对必然
      * 读到着陆前的 `openPos`，恒判失败 ⇒ 每次提交都回滚 ⇒ 观感是「翻到位又弹回去」。
      */
-    suspend fun flipAwait(direction: Int): ReaderPos? {
-        // 封面页内翻页：前进回正文第一页（现查 fresh 落位，走漏斗，可存档），
-        // 落定即记显式离开（否则推送带来的 effect 重算又弹回去）；封面已是第一页，后退无操作。
+    suspend fun flipAwait(direction: Int, dismissCoverOnLand: Boolean = true): ReaderPos? {
+        // 封面页内翻页：前进回正文第一页（现查 fresh 落位，走漏斗，可存档)。
+        // 封面已是第一页，后退无操作。
+        // `dismissCoverOnLand=false`（动画路径）时**落位不 dismiss**：封面要作为滑动
+        // 的 from 槽画到动画结束，dismiss 交由 [FlipController.onCoverCommit] 在 commit 达成时做。
         if (coverVisible) {
             if (direction > 0 && coverBmp != null) {
                 val target = runCatching { currentHost.bookStart() }.getOrNull() ?: return null
@@ -418,7 +420,7 @@ fun ReaderScreen(
                     read = { target },
                     commit = ::markPositionChanged,
                 ) { target }
-                if (landed != null) {
+                if (landed != null && dismissCoverOnLand) {
                     coverDismissed = true
                     coverVisible = false
                 }
@@ -427,8 +429,9 @@ fun ReaderScreen(
             return null
         }
         // 正文第一页回翻且有封面 → 进封面（只读，不经过引擎翻页/存档）。
+        // 瞬切路径就地显隐；动画路径只返回「目标=封面」的信号，显隐交给 commit 结算。
         if (direction < 0 && isBookStart(openPos)) {
-            coverVisible = true
+            if (dismissCoverOnLand) coverVisible = true
             return null
         }
         return anchorFunnel.navigate(
@@ -461,9 +464,18 @@ fun ReaderScreen(
 
     // FlipController 的实例化点：必须晚于 flipAwait / markPositionChanged 的声明
     // （Kotlin 局部函数不可前向引用），早于任何手势（组合体内同步完成）。
+    // 动画路径落位不就地改封面显隐（封面要画满整段滑动），结算 commit 达成后统一结算。
     val controller = rememberFlipController(
-        flipAwait = { d -> flipAwait(d) },
+        flipAwait = { d -> flipAwait(d, dismissCoverOnLand = false) },
         forceOpenPos = { p -> markPositionChanged(p) },
+        onCoverCommit = { leavingCover ->
+            if (leavingCover) {
+                coverDismissed = true
+                coverVisible = false
+            } else {
+                coverVisible = true
+            }
+        },
         scope = scope,
         log = { m -> Logger.d("Orilumn.TAP", m) },
     )
@@ -506,7 +518,9 @@ fun ReaderScreen(
      */
     fun beginSlide(direction: Int) {
         val src = openPos ?: return
-        ctl.beginDrag(src, direction, slideEnabled, coverVisible)
+        // 后退回封面：目标就绪即画（封面已解码），无需落位；前进离开封面仍需落位书首。
+        val enterCover = !coverVisible && direction < 0 && isBookStart(src)
+        ctl.beginDrag(src, direction, slideEnabled, coverVisible, enterCover)
     }
 
     /** 拖动中：喂位移。目标页未就绪时只喂状态机、不写回渲染（避免拉出空白页）。 */
@@ -527,8 +541,37 @@ fun ReaderScreen(
      * 不能退回 flip()：那会硬切数据，而屏幕上仍锁着旧的两页 ⇒ 像素与数据立刻错位。
      */
     fun flipWithAnimation(direction: Int) {
-        if (!slideEnabled || coverVisible) {
+        if (!slideEnabled) {
             flip(direction)
+            return
+        }
+        // 封面往返走同一会话机制（封面作 from/target 槽，不再瞬切）：
+        //  - 封面上前进 = 离开封面向书首落位（from 槽画封面，落位不就地 dismiss）；
+        //  - 封面是第一页，封面上后退无操作。
+        if (coverVisible) {
+            if (direction <= 0) return
+            if (!ctl.beginProgrammatic(direction)) {
+                Logger.d("Orilumn.TAP", "cover-exit dropped dir=$direction (session busy)")
+                return
+            }
+            val src = openPos
+            if (src == null) {
+                ctl.clear()
+                flip(direction)
+                return
+            }
+            ctl.beginProgrammaticPage(src, direction, fromIsCover = true)
+            return
+        }
+        // 正文首页后退且封面就绪 = 进封面（目标槽画封面，无落位、立即就绪）。
+        if (direction < 0 && isBookStart(openPos)) {
+            val src = openPos
+            if (src == null) return
+            if (!ctl.beginProgrammatic(direction)) {
+                Logger.d("Orilumn.TAP", "cover-enter dropped dir=$direction (session busy)")
+                return
+            }
+            ctl.beginProgrammaticCoverEnter(src, direction)
             return
         }
         if (!ctl.beginProgrammatic(direction)) {
@@ -569,6 +612,30 @@ fun ReaderScreen(
         rollbackSlide()
     }
 
+    /** 离开封面（点按/方向键前进）：from=封面，target=书首内容页。 */
+    fun coverExitWithAnimation() {
+        if (!ctl.beginProgrammatic(1)) {
+            Logger.d("Orilumn.TAP", "cover-exit dropped (session busy)")
+            return
+        }
+        val src = openPos
+        if (src == null) {
+            ctl.clear()
+            flip(1)
+            return
+        }
+        ctl.beginProgrammaticPage(src, 1, fromIsCover = true)
+    }
+
+    /** 进入封面（点按/方向键后退）：from=书首内容页，target=封面（立即就绪，无落位）。 */
+    fun coverEnterWithAnimation() {
+        val src = openPos ?: return
+        if (!ctl.beginProgrammatic(-1)) {
+            Logger.d("Orilumn.TAP", "cover-enter dropped (session busy)")
+            return
+        }
+        ctl.beginProgrammaticCoverEnter(src, -1)
+    }
 
     fun seek(fraction: Float) {
         // 诊断常驻：手指值 vs 落位章对不上（两次远端拖动都落 ch11），W 级防 PGAP  flood 吞行。
@@ -650,11 +717,11 @@ fun ReaderScreen(
             Logger.d("Orilumn.TAP", "tap IGNORED (flip session busy)")
             return
         }
-        // 封面页点按：无链接命中，前进区回正文、中部切栏，后退区无操作（封面已是第一页；
-        // 退出走顶栏返回键）。
+        // 封面页点按：无链接命中，前进区回正文（走滑动动画，封面作 current 槽）、
+        // 中部切栏，后退区无操作（封面已是第一页；退出走顶栏返回键）。
         if (coverVisible) {
             when (ReaderMath.tapZone(xPx, widthPx)) {
-                1 -> flip(1)
+                1 -> flipWithAnimation(1)
                 else -> barsVisible = !barsVisible
             }
             return
@@ -889,11 +956,14 @@ fun ReaderScreen(
         ) {
         val pos = openPos
         val cover = if (coverVisible) coverBmp else null
-        // 换代结算中且落在首字符页：画底色占位，不抢画正文——否则正文闪一帧再被封面盖。
+        // 封面作为滑动会话的一槽（离开封面=from 槽，进入封面=target 槽）时，路由到正文
+        // slide 分支并把封面塞进对应槽——静态封面分支只在无会话时兜底。
+        val slideFromCover = ctl.fromIsCover.value && ctl.slideActive(slideEnabled)
+        val slideToCover = ctl.targetIsCover.value && ctl.slideActive(slideEnabled)
         val holdingForCover = cover == null && coverResolving && pos?.slice?.charStart == 0
         if (holdingForCover) {
             Box(modifier = Modifier.fillMaxSize().background(Color(profile.bgColor)))
-        } else if (cover != null) {
+        } else if (cover != null && !slideFromCover) {
             // 封面页：拉伸全屏（默认开）/等比居中（关），之上同样压遮罩；
             // 栏与提示与正文同制（标题取书名、进度 0），避免封面页无处进目录/设置。
             ReaderCoverPage(
@@ -950,7 +1020,10 @@ fun ReaderScreen(
             )
 
             // P1 L1：目标页内容（落位未回 ⇒ null，此时只画当前页，那一帧不动画）。
-            val targetContent = if (ctl.targetReady() && !samePage(ctl.targetPos.value, fromPos)) {
+            // 封面离开（from=封面）时 from/target 同为书首页，但 current 槽要画封面而非正文
+            // ⇒ 不可按 samePage 抑制 targetContent（否则 target 槽空，露出底色）。
+            val suppressTarget = !ctl.fromIsCover.value && samePage(ctl.targetPos.value, fromPos)
+            val targetContent = if (ctl.targetReady() && !ctl.targetIsCover.value && !suppressTarget) {
                 rememberPageContent(
                     host = currentHost,
                     pos = ctl.targetPos.value,
@@ -966,6 +1039,19 @@ fun ReaderScreen(
             } else {
                 null
             }
+
+            // 封面槽（离开/进入封面动画）
+            val coverBmpNow = coverBmp
+            val coverComposable: (@Composable () -> Unit)? = if (coverBmpNow != null) {
+                {
+                    ReaderCoverPage(
+                        cover = coverBmpNow,
+                        proportional = !light.coverStretch,
+                        bgColor = androidx.compose.ui.graphics.Color(profile.bgColor),
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+            } else null
 
             // 画布渲染器（栅格 + 多页位图缓存的宿主）在**此处** remember 一份，注入给 current/target
             // 两张画布：否则两个组合位置各自 remember，各得一池，当前页位图在 target 侧永远查不到
@@ -1052,12 +1138,16 @@ fun ReaderScreen(
                 progress = { if (ctl.slideActive(slideEnabled)) ctl.progress.value else 0f },
                 pageWidthPx = pxWidth,
                 modifier = Modifier.fillMaxSize(),
-                target = if (targetContent != null) {
-                    { PageCanvasFun(targetContent) }
-                } else {
-                    null
+                target = when {
+                    slideToCover && coverComposable != null -> coverComposable
+                    targetContent != null -> { { PageCanvasFun(targetContent) } }
+                    else -> null
                 },
-                current = { PageCanvasFun(pageContent) },
+                current = if (slideFromCover && coverComposable != null) {
+                    coverComposable
+                } else {
+                    { PageCanvasFun(pageContent) }
+                },
             )
             // 亮度/护眼遮罩：纯绘制于画布之上、栏之下。
             ReaderLightMask(light = light, modifier = Modifier.fillMaxSize())

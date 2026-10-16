@@ -81,6 +81,26 @@ class FlipController(
     /** 目标页；null = 未就绪（此时渲染层不许平移当前页，见 [targetReady]）。 */
     val targetPos: MutableState<ReaderPos?> = mutableStateOf(null)
 
+    /**
+     * 会话的「当前页」是封面（前滑/前点离开封面）。true 时渲染层在 current 槽画封面
+     * 而非 [fromPos] 的正文画布——[fromPos] 仍记封面下的书首内容页身份（供回滚/对账），
+     * 只是不拿它画 current 槽。
+     */
+    val fromIsCover: MutableState<Boolean> = mutableStateOf(false)
+
+    /**
+     * 会话的「目标页」是封面（后退/后点进入封面）。true 时 [targetPos] 为 null 但目标
+     * **立即就绪**（封面早已解码），渲染层在 target 槽画封面；进入封面不移动引擎数据。
+     */
+    val targetIsCover: MutableState<Boolean> = mutableStateOf(false)
+
+    /**
+     * 封面会话 commit 达成后的封面显隐结算（宿主注入）：[leavingCover]=true 离开封面
+     * （dismiss），false 进入封面（show）。仅在 [settle] 的 COMMIT 完成时被调用一次；
+     * 回滚/作废不触发（离开封面时 coverVisible 仍为 true，直接回静态封面即可）。
+     */
+    var onCoverCommit: ((leavingCover: Boolean) -> Unit)? = null
+
     private var prefetchJob: Job? = null
     private var settleJob: Job? = null
 
@@ -121,13 +141,14 @@ class FlipController(
      * 按 [fromPos] 判则全程稳定：动画期间与最后一帧都照常按 progress 画，
      * `clear()` 之后 fromPos 为 null、progress 本就是 0，画面自然衔接、不跳。
      */
-    fun slideActive(enabled: Boolean): Boolean = enabled && fromPos.value != null
+    fun slideActive(enabled: Boolean): Boolean =
+        enabled && (fromPos.value != null || fromIsCover.value)
 
     /** 是否有会话在飞（含结算）：点按、键盘、外部落位都据此避让。 */
     fun isBusy(): Boolean = session.phase != FlipSession.Phase.Idle
 
     /** 目标页是否已进渲染层：未就绪时**不许**平移当前页（否则露出底色空白）。 */
-    fun targetReady(): Boolean = targetPos.value != null
+    fun targetReady(): Boolean = targetPos.value != null || targetIsCover.value
 
     // ---- 会话生命周期 ----
 
@@ -145,6 +166,8 @@ class FlipController(
         session.abort()
         fromPos.value = null
         targetPos.value = null
+        fromIsCover.value = false
+        targetIsCover.value = false
         progress.value = 0f
         direction.value = 0
     }
@@ -162,6 +185,13 @@ class FlipController(
      * 期间 `fromPos` 保持原页、`progress` 停在 0，画面稳定停在原页不动。
      */
     fun rollback(navigateBack: Boolean = true) {
+        // 封面会话不翻引擎数据：进入封面从未移动数据；离开封面虽落位到书首，但
+        // 「回到封面」只是重新显示封面浮层（coverVisible 在 commit 前仍为 true）。
+        // 故两者回滚都只清场——绝不能 flipAwait(-dir)，那会把书首再往回翻/翻进封面。
+        if (fromIsCover.value || targetIsCover.value) {
+            clear()
+            return
+        }
         val back = if (navigateBack) fromPos.value else null
         val dir = direction.value
         if (back == null || dir == 0) {
@@ -226,8 +256,16 @@ class FlipController(
      *   取消旧动画、abort 会话，从「已落定的当前页」干净起手——新一划就从落定页跟手，
      *   不再等 90–300ms 尾巴（少等待；与「分页调度总则」第一优先级一致）。
      */
-    fun beginDrag(src: ReaderPos, direction: Int, enabled: Boolean, coverVisible: Boolean) {
-        if (!enabled || coverVisible) return
+    fun beginDrag(
+        src: ReaderPos,
+        direction: Int,
+        enabled: Boolean,
+        coverVisible: Boolean,
+        enterCover: Boolean = false,
+    ) {
+        if (!enabled) return
+        // 封面是第一页：后退无操作；前进才离开封面（封面进 from 槽，见 [fromIsCover]）。
+        if (coverVisible && direction <= 0) return
         if (prefetchInFlight() || rollbackInFlight()) {
             log("slide-begin DROPPED busy (${if (prefetchInFlight()) "landing" else "rollback-nav"} in flight)")
             return
@@ -241,9 +279,18 @@ class FlipController(
         // 完成后 openPos 就是目标页了。不存的话渲染层 `fromPos ?: pos` 会退回用
         // pos（=目标页）⇒ 两张画布都画目标页，观感是「目标页空白、内容重复」。
         fromPos.value = src
+        fromIsCover.value = coverVisible
         targetPos.value = null
+        targetIsCover.value = enterCover
         this.direction.value = direction
         progress.value = 0f
+        if (enterCover) {
+            // 后退回封面：目标（封面）早已解码、立即就绪，**无需落位**——跟手由
+            // updateDrag 驱动（targetReady()=true），松手 endDrag 结算。绝不 flipAwait：
+            // 封面不是引擎页，落位会把书首再往回翻一章。
+            log("slide-begin cover-enter dir=$direction")
+            return
+        }
         prefetchJob?.cancel()
         prefetchJob = scope.launch {
             // 起手→目标页就绪的分段计时（配合手势层 FLIPLAT 的 lat 相加即端到端时延）：
@@ -438,9 +485,11 @@ class FlipController(
      * [src] 是起手时的 `openPos`：它同时是「当前页」身份，落位后 openPos 会变成
      * 目标页，不另存一份的话渲染层会拿新页当当前页画（真机症状：目标页空白）。
      */
-    fun beginProgrammaticPage(src: ReaderPos, direction: Int) {
+    fun beginProgrammaticPage(src: ReaderPos, direction: Int, fromIsCover: Boolean = false) {
         fromPos.value = src
+        this.fromIsCover.value = fromIsCover
         targetPos.value = null
+        this.targetIsCover.value = false
         this.direction.value = direction
         progress.value = 0f
         prefetchJob?.cancel()
@@ -457,6 +506,22 @@ class FlipController(
             // 点按没有跟手过程垫底，必须播完整段动画（progress 从 0 走满）。
             settle(FlipSession.Decision.COMMIT, velocityX = 0f, pageW = 0f)
         }
+    }
+
+    /**
+     * 点按/方向键的**进入封面**起手（正文首页后退）：目标=封面，无需落位。
+     *
+     * 封面不是引擎页，[flipAwait] 不该被调用（那会把书首往回翻）；目标已解码即就绪，
+     * 故这里直接置位并立即结算整段动画。[src] = 起手那页（正文首页），供渲染层 current 槽用。
+     */
+    fun beginProgrammaticCoverEnter(src: ReaderPos, direction: Int) {
+        fromPos.value = src
+        fromIsCover.value = false
+        targetPos.value = null
+        targetIsCover.value = true
+        this.direction.value = direction
+        progress.value = 0f
+        settle(FlipSession.Decision.COMMIT, velocityX = 0f, pageW = 0f)
     }
 
 
@@ -476,7 +541,8 @@ class FlipController(
             // 测试路径：只推进状态机到端点，不启动 Animatable。
             session.beginSettle(decision)
             session.onSettleProgress(if (decision == FlipSession.Decision.COMMIT) 1f else 0f)
-            if (decision == FlipSession.Decision.COMMIT) clear() else clear()
+            if (decision == FlipSession.Decision.COMMIT) notifyCoverCommit()
+            clear()
             return
         }
         val from = session.progress
@@ -509,11 +575,23 @@ class FlipController(
             }
             if (decision == FlipSession.Decision.COMMIT) {
                 // 数据早在起手那次 flipAwait 就已落定，动画走完即达成：清场即可。
+                // 封面会话在此结算封面显隐（离开封面 dismiss / 进入封面 show），
+                // 必须赶在 clear()（复位 fromIsCover/targetIsCover）之前读标志。
+                notifyCoverCommit()
                 clear()
             } else {
                 // 回弹：动画回到 0，同时把引擎指针翻回原页。
                 rollback(navigateBack = true)
             }
+        }
+    }
+
+    /** 结算 commit 达成时通知宿主封面去向（见 [onCoverCommit]）。回滚/作废不触发。 */
+    private fun notifyCoverCommit() {
+        val cb = onCoverCommit ?: return
+        when {
+            fromIsCover.value -> cb(true)   // 离开封面：dismiss
+            targetIsCover.value -> cb(false) // 进入封面：show
         }
     }
 }
@@ -569,11 +647,14 @@ internal class VelocityHandoffEasing(private val a: Float) : Easing {
 fun rememberFlipController(
     flipAwait: suspend (Int) -> ReaderPos?,
     forceOpenPos: (ReaderPos) -> Unit,
+    /** 封面会话 commit 后的显隐结算，见 [FlipController.onCoverCommit]。 */
+    onCoverCommit: ((leavingCover: Boolean) -> Unit)? = null,
     scope: CoroutineScope,
     log: (String) -> Unit = {},
 ): FlipController {
     val flipAwaitRef = rememberUpdatedState(flipAwait)
     val forceRef = rememberUpdatedState(forceOpenPos)
+    val coverCommitRef = rememberUpdatedState(onCoverCommit)
     val logRef = rememberUpdatedState(log)
     return remember {
         FlipController(
@@ -581,6 +662,9 @@ fun rememberFlipController(
             forceOpenPos = { p -> forceRef.value(p) },
             scope = scope,
             log = { m -> logRef.value(m) },
-        )
+        ).also { c ->
+            // 经 State 中转，controller 记住的恒是最新闭包（封面显隐状态在其内部）。
+            c.onCoverCommit = { leaving -> coverCommitRef.value?.invoke(leaving) }
+        }
     }
 }

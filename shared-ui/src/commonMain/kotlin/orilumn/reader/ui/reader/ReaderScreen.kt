@@ -298,8 +298,11 @@ fun ReaderScreen(
     LaunchedEffect(openPos, hostRevision, contentRevision, currentHost) {
         // 只有宿主换代才清缓存（新控制器新布局）：排版变化（contentRevision）不清，
         // 封面字节与首章号都不漂移；翻页（openPos 变化）更不清。
-        // 但显式离开标记随排版换代重置：不换宿主时调参/拉伸只换版本号，
-        // 不重置则一次离开后封面永不再弹（拉伸必跳第二页根因）。
+        // 「已离开封面」标记同样不随排版换代重置：落位现在恒是该章自己的一张页
+        //（短章 = 磁盘表里离锚点最近的那页，大章 = 锚点页），停在书首时落位仍是
+        // charStart 0 的那页，`isBookStart` 不会因换代失真，无需再清标记兜底；
+        // 反之一清，离开过封面的读者一旦回到正文首页就会重弹封面（真机：调完行距
+        // 回翻一页直接撞封面）。封面本身仍可看：正文首页再往后翻即进封面（见 flipAwait）。
         if (currentHost !== coverHost) {
             coverHost = currentHost
             coverRev = contentRevision
@@ -309,11 +312,6 @@ fun ReaderScreen(
             coverDismissed = false
         } else if (contentRevision != coverRev) {
             coverRev = contentRevision
-            val pNow = openPos
-            if (pNow == null || !isBookStart(pNow)) {
-                coverDismissed = false
-            }
-            // 当前正好在书首时，不重置 dismissed，避免调参时闪回封面
         }
         // open 落位前不查：与开书解析并发必撞锁/竞态（首章 check），查也白查。
         val p = openPos ?: return@LaunchedEffect

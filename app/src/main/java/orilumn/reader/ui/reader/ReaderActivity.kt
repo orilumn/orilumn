@@ -691,8 +691,8 @@ class ReaderActivity : ComponentActivity() {
         if (!c.bindReflow(r)) return
         // 先 bump 版式号：行/图/背景缓存键随之失效（pos 相等时也强制重取）。
         layoutRevision++
-        currentPos = ReaderPos(r.chapter, r.page)
-        externalPos = ReaderPos(r.chapter, r.page)
+        currentPos = ReaderPos(r.chapter, r.page, atCover = currentPos?.atCover == true)
+        externalPos = ReaderPos(r.chapter, r.page, atCover = currentPos?.atCover == true)
     }
 
     // ---- Brightness (physical backlight; overlay drawn by ReaderScreen's ReaderLightMask) ----

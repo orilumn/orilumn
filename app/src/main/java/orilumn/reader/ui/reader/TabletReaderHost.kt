@@ -44,6 +44,7 @@ class TabletReaderHost(
     private val mainScope = CoroutineScope(scopeJob + Dispatchers.Main.immediate)
 
     private var opened = false
+    private var openedAtCover = true
 
     // ---- ReaderHost ----
 
@@ -85,42 +86,44 @@ class TabletReaderHost(
 
     override suspend fun open(): ReaderPos? = withContext(Dispatchers.IO) {
         if (!opened) {
-            if (!controller.open(bookId, repository.readingState(bookId))) return@withContext null
+            val state = repository.readingState(bookId)
+            if (!controller.open(bookId, state)) return@withContext null
             // 注：open 后默认 prewarm 恒跳过落位章（open 同步塑形，一次为准），此处不再调用。
             // R7: open-book B2 dispatch (epoch-deduped; defer-gated inside) — far chapters get laid
             // without waiting for a settings change. Host-owned orchestration; prewarm stays single-chapter.
+            openedAtCover = (state == null) || orilumn.reader.data.read.ReadingLocatorCodec.decodeAtCover(state.locator)
             controller.requestWholeBookRelayout()
             opened = true
         }
-        controller.locateStart()?.let { ReaderPos(it.first, it.second) }
+        controller.locateStart()?.let { ReaderPos(it.first, it.second, atCover = openedAtCover) }
     }
 
     override suspend fun adjacent(pos: ReaderPos, direction: Int): ReaderPos? = withContext(Dispatchers.IO) {
-        controller.findAdjacentPage(pos.chapter, pos.slice, direction)?.let { ReaderPos(it.first, it.second) }
+        controller.findAdjacentPage(pos.chapter, pos.slice, direction)?.let { ReaderPos(it.first, it.second, atCover = false) }
     }
 
     /** 只读邻页查询：预栅格专用，**不推进指针、不抢占后台**（见 [ReaderHost.peekAdjacent]）。 */
     override suspend fun peekAdjacent(pos: ReaderPos, direction: Int): ReaderPos? = withContext(Dispatchers.IO) {
-        controller.peekAdjacentPage(pos.chapter, pos.slice, direction)?.let { ReaderPos(it.first, it.second) }
+        controller.peekAdjacentPage(pos.chapter, pos.slice, direction)?.let { ReaderPos(it.first, it.second, atCover = false) }
     }
 
     override suspend fun neighborChapterStart(chapter: Int, direction: Int): ReaderPos? =
         withContext(Dispatchers.IO) {
             // 复刻 legacy jumpGate：离开当前章前先 finalizeOnLeave（废除临时表、启用磁盘分页表）。
             controller.finalizeOnLeave(chapter)
-            controller.neighborChapterStart(chapter, direction)?.let { ReaderPos(it.first, it.second) }
+            controller.neighborChapterStart(chapter, direction)?.let { ReaderPos(it.first, it.second, atCover = false) }
         }
 
     override suspend fun pageAtFraction(fraction: Double): ReaderPos? = withContext(Dispatchers.IO) {
         val from = controller.locateStart()?.first ?: 0
         controller.finalizeOnLeave(from)
-        controller.pageAtFraction(fraction)?.let { ReaderPos(it.first, it.second) }
+        controller.pageAtFraction(fraction)?.let { ReaderPos(it.first, it.second, atCover = false) }
     }
 
     override suspend fun chapterStart(index: Int): ReaderPos? = withContext(Dispatchers.IO) {
         val from = controller.locateStart()?.first ?: 0
         controller.finalizeOnLeave(from)
-        controller.openChapterStart(index)?.let { ReaderPos(it.first, it.second) }
+        controller.openChapterStart(index)?.let { ReaderPos(it.first, it.second, atCover = false) }
     }
 
     /** 目录跳转（Android 专用）：finalizeOnLeave 后经 [BookDocumentController.openTocItem] 落位，
@@ -128,7 +131,7 @@ class TabletReaderHost(
     suspend fun jumpToToc(index: Int, fragment: String?): ReaderPos? = withContext(Dispatchers.IO) {
         val from = controller.locateStart()?.first ?: 0
         controller.finalizeOnLeave(from)
-        controller.openTocItem(index, fragment)?.let { ReaderPos(it.first, it.second) }
+        controller.openTocItem(index, fragment)?.let { ReaderPos(it.first, it.second, atCover = false) }
     }
 
     /** P4-c2u: 点按命中的链接查表（控制器轻路径样式化区间，同步廉价）。 */
@@ -139,7 +142,7 @@ class TabletReaderHost(
     override suspend fun openLink(target: orilumn.reader.engine.LinkTarget): ReaderPos? = withContext(Dispatchers.IO) {
         val from = controller.locateStart()?.first ?: target.chapterIndex
         controller.finalizeOnLeave(from)
-        controller.openLinkTarget(target)?.let { ReaderPos(it.first, it.second) }
+        controller.openLinkTarget(target)?.let { ReaderPos(it.first, it.second, atCover = false) }
     }
 
     override fun pageProgress(pos: ReaderPos): Double = controller.pageProgress(pos.chapter, pos.slice)
@@ -156,7 +159,7 @@ class TabletReaderHost(
     /** 全书第一内容页（**导航**：openChapterStart 落位 + 逐出远章；
      *  封面页内前进翻页用。判定书首请用 [firstContentChapter]）。 */
     override suspend fun bookStart(): ReaderPos? = withContext(Dispatchers.IO) {
-        controller.openChapterStart(0)?.let { ReaderPos(it.first, it.second) }
+        controller.openChapterStart(0)?.let { ReaderPos(it.first, it.second, atCover = false) }
     }
 
     /** 首章正文号（纯查询懒解析转发；无导航副作用，见 ReaderHost.firstContentChapter）。 */
@@ -203,7 +206,11 @@ class TabletReaderHost(
         ioScope.launch {
             if (bookId < 0) return@launch
             val progress = controller.pageProgress(pos.chapter, pos.slice)
-            val locator = orilumn.reader.data.read.ReadingLocatorCodec.encode(pos.chapter, pos.slice.charStart)
+            val locator = orilumn.reader.data.read.ReadingLocatorCodec.encode(
+                pos.chapter,
+                pos.slice.charStart,
+                pos.atCover,
+            )
             repository.saveReadingState(
                 BookReadingState(
                     bookId = bookId,

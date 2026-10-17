@@ -86,6 +86,7 @@ class DesktopReaderHost(
     }
 
     private var opened = false
+    private var openedAtCover = true
 
     /** 开屏预装的书内字体全集（与用户面同池；`onBookFonts` 合并后比较，无变化即 false）。 */
     private var bookFontEntries: List<orilumn.reader.engine.skia.SkiaFontPool.EmbeddedFont> = emptyList()
@@ -122,11 +123,16 @@ class DesktopReaderHost(
 
     override suspend fun open(): ReaderPos? = withContext(Dispatchers.Default) {
         if (!opened) {
-            val saved = store.loadProgress(bookId)?.let { loc ->
+            val savedLoc = store.loadProgress(bookId)
+            val saved = savedLoc?.let { loc ->
                 BookReadingState(
                     bookId = bookId,
                     chapter = loc.chapter,
-                    locator = orilumn.reader.data.read.ReadingLocatorCodec.encode(loc.chapter, loc.char),
+                    locator = orilumn.reader.data.read.ReadingLocatorCodec.encode(
+                        loc.chapter,
+                        loc.char,
+                        loc.atCover,
+                    ),
                 )
             }
             if (!controller.open(bookId, saved)) return@withContext null
@@ -135,54 +141,58 @@ class DesktopReaderHost(
             // 注：open 后默认 prewarm 恒跳过落位章（open 同步塑形，一次为准），此处不再调用。
             // R7: open-book B2 dispatch（epoch 去重；defer 门控在内）——远章不等改参即排（与平板同序）。
             controller.requestWholeBookRelayout()
+            openedAtCover = (savedLoc == null || savedLoc.atCover)
             opened = true
         }
         val anchor = initialAnchor
         if (anchor != null) {
             (landAnchor(anchor.first, anchor.second)
-                ?: controller.locateStart()?.let { ReaderPos(it.first, it.second) })?.let { landing ->
+                ?: controller.locateStart()?.let { ReaderPos(it.first, it.second, atCover = openedAtCover) })?.let { landing ->
                 // 落位即存档：一次性锚点就此转正，后续重建回退到存档定位。
                 ioScope.launch {
-                    store.saveProgress(bookId, ReadingLocator(landing.chapter, landing.slice.charStart))
+                    store.saveProgress(
+                        bookId,
+                        ReadingLocator(landing.chapter, landing.slice.charStart, atCover = false),
+                    )
                 }
-                return@withContext landing
+                return@withContext ReaderPos(landing.chapter, landing.slice, atCover = false)
             }
         }
-        controller.locateStart()?.let { ReaderPos(it.first, it.second) }
+        controller.locateStart()?.let { ReaderPos(it.first, it.second, atCover = openedAtCover) }
     }
 
     override suspend fun adjacent(pos: ReaderPos, direction: Int): ReaderPos? = withContext(Dispatchers.Default) {
-        controller.findAdjacentPage(pos.chapter, pos.slice, direction)?.let { ReaderPos(it.first, it.second) }
+        controller.findAdjacentPage(pos.chapter, pos.slice, direction)?.let { ReaderPos(it.first, it.second, atCover = false) }
     }
 
     /** 只读邻页查询：预栅格专用，**不推进指针、不抢占后台**（见 [ReaderHost.peekAdjacent]）。 */
     override suspend fun peekAdjacent(pos: ReaderPos, direction: Int): ReaderPos? = withContext(Dispatchers.Default) {
-        controller.peekAdjacentPage(pos.chapter, pos.slice, direction)?.let { ReaderPos(it.first, it.second) }
+        controller.peekAdjacentPage(pos.chapter, pos.slice, direction)?.let { ReaderPos(it.first, it.second, atCover = false) }
     }
 
     override suspend fun neighborChapterStart(chapter: Int, direction: Int): ReaderPos? =
         withContext(Dispatchers.Default) {
             controller.finalizeOnLeave(chapter)
-            controller.neighborChapterStart(chapter, direction)?.let { ReaderPos(it.first, it.second) }
+            controller.neighborChapterStart(chapter, direction)?.let { ReaderPos(it.first, it.second, atCover = false) }
         }
 
     override suspend fun pageAtFraction(fraction: Double): ReaderPos? = withContext(Dispatchers.Default) {
         val from = controller.locateStart()?.first ?: 0
         controller.finalizeOnLeave(from)
-        controller.pageAtFraction(fraction)?.let { ReaderPos(it.first, it.second) }
+        controller.pageAtFraction(fraction)?.let { ReaderPos(it.first, it.second, atCover = false) }
     }
 
     override suspend fun chapterStart(index: Int): ReaderPos? = withContext(Dispatchers.Default) {
         val from = controller.locateStart()?.first ?: 0
         controller.finalizeOnLeave(from)
-        controller.openChapterStart(index)?.let { ReaderPos(it.first, it.second) }
+        controller.openChapterStart(index)?.let { ReaderPos(it.first, it.second, atCover = false) }
     }
 
     /** 目录跳转（含子章节 fragment；与平板 `jumpToToc` 同口径，经 engine `openTocItem` 落位）。 */
     suspend fun tocItem(index: Int, fragment: String?): ReaderPos? = withContext(Dispatchers.Default) {
         val from = controller.locateStart()?.first ?: 0
         controller.finalizeOnLeave(from)
-        controller.openTocItem(index, fragment)?.let { ReaderPos(it.first, it.second) }
+        controller.openTocItem(index, fragment)?.let { ReaderPos(it.first, it.second, atCover = false) }
     }
 
     /** P4-c2u: 点按命中的链接查表（控制器轻路径样式化区间，同步廉价）。 */
@@ -193,7 +203,7 @@ class DesktopReaderHost(
     override suspend fun openLink(target: LinkTarget): ReaderPos? = withContext(Dispatchers.Default) {
         val from = controller.locateStart()?.first ?: target.chapterIndex
         controller.finalizeOnLeave(from)
-        controller.openLinkTarget(target)?.let { ReaderPos(it.first, it.second) }
+        controller.openLinkTarget(target)?.let { ReaderPos(it.first, it.second, atCover = false) }
     }
 
     override fun pageProgress(pos: ReaderPos): Double = controller.pageProgress(pos.chapter, pos.slice)
@@ -210,7 +220,7 @@ class DesktopReaderHost(
     /** 全书第一内容页（**导航**：openChapterStart 落位 + 逐出远章；
      *  封面页内前进翻页用。判定书首请用 [firstContentChapter]）。 */
     override suspend fun bookStart(): ReaderPos? = withContext(Dispatchers.Default) {
-        controller.openChapterStart(0)?.let { ReaderPos(it.first, it.second) }
+        controller.openChapterStart(0)?.let { ReaderPos(it.first, it.second, atCover = false) }
     }
 
     /** 首章正文号（纯查询懒解析转发；无导航副作用，见 ReaderHost.firstContentChapter）。 */
@@ -247,7 +257,10 @@ class DesktopReaderHost(
         // 见 TabletReaderHost.onSaveProgress），不 finalize（存档不是离开，杀 temp 会话锁死大章）。
         ioScope.launch {
             if (bookId < 0) return@launch
-            store.saveProgress(bookId, ReadingLocator(pos.chapter, pos.slice.charStart))
+            store.saveProgress(
+                bookId,
+                ReadingLocator(pos.chapter, pos.slice.charStart, atCover = pos.atCover),
+            )
         }
     }
 
@@ -262,7 +275,7 @@ class DesktopReaderHost(
 
     /** 锚点落位（目录跳转/设置重建）：章内字符所在页；无内容回 null（调用方退回 locateStart）。 */
     private suspend fun landAnchor(chapter: Int, char: Int): ReaderPos? =
-        controller.pageAtChar(chapter, char)?.let { ReaderPos(chapter, it) }
+        controller.pageAtChar(chapter, char)?.let { ReaderPos(chapter, it, atCover = false) }
 
     /**
      * R15 设置两段式·第一段（用户层·壳，150ms 防抖落位即调）：本章轻刷新。换 profile → 追装字库池 →
@@ -279,7 +292,7 @@ class DesktopReaderHost(
                 return@withContext null
             }
             controller.bindReflow(r)
-            ReaderPos(r.chapter, r.page)
+            ReaderPos(r.chapter, r.page, atCover = false)
         }
 
     /**
@@ -333,7 +346,7 @@ class DesktopReaderHost(
         withContext(Dispatchers.Default) {
             val r = panelGate.onPanelClose(chapter, anchorChar) ?: return@withContext null
             controller.bindReflow(r)
-            ReaderPos(r.chapter, r.page)
+            ReaderPos(r.chapter, r.page, atCover = false)
         }
 
     /**

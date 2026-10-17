@@ -14,8 +14,13 @@ import orilumn.reader.engine.skia.PageImage
  *
  * 三件套（chapter + slice 的 char/line 区间）足够宿主完成翻页/跳读/进度计算，与 Android 旧管线
  * `BookDocumentController.findAdjacentPage(startCh, s, dir)` 的入参同构。
+ *
+ * [atCover] 是定位链上的「封面位」（用户层前置页，不在排版层页表里）：封面盖在全书
+ * 第一内容页上时 openPos 仍指向那页，单看 (chapter, charStart) 无法把「停在封面」
+ * 与「停在正文首页」分开 —— 存档读回后易重弹封面（反复出现：停在正文首页退出、重开在封面）。
+ * 故把封面态挂进定位本身（仅用于存档/续读的状态区分），页面链与排版层页表不受影响。
  */
-data class ReaderPos(val chapter: Int, val slice: PageSlice)
+data class ReaderPos(val chapter: Int, val slice: PageSlice, val atCover: Boolean = false)
 
 /**
  * S28 阅读面宿主抽象：shared-ui 只依赖本接口，把字节取章/分页/持久化等平台能力收敛到实现方

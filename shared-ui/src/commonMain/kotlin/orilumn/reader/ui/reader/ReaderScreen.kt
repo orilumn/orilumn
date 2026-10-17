@@ -270,7 +270,12 @@ fun ReaderScreen(
         suspend fun doOpen(): ReaderPos? {
             // 先占位再落位：openPos 一提交组合即画，effect 的置 true 赶不上首帧。
             coverResolving = true
-            return anchorFunnel.push("open", { openPos = it }) {
+            return anchorFunnel.push("open", { p ->
+                openPos = p
+                // 续读位不是封面 ⇒ 本代视为「已离开封面」：存档里停的是正文页（含正文首页），
+                // 重开不该再弹一次封面。
+                if (!p.atCover) coverDismissed = true
+            }) {
                 val p = currentHost.open()
                 openFailed = p == null
                 hostRevision++
@@ -357,6 +362,15 @@ fun ReaderScreen(
         coverVisible = isBookStart(p) && !coverDismissed
     }
 
+    // 封面显隐也是定位的一部分：进入/离开封面立即落一次存档。
+    // 退出到书架常常紧跟「回翻进封面」这一拍，500ms 防抖会把它吞掉。
+    LaunchedEffect(coverVisible) {
+        val p = openPos ?: return@LaunchedEffect
+        saveJob?.cancel()
+        saveJob = null
+        currentHost.onSaveProgress(p.copy(atCover = coverVisible))
+    }
+
     // 落位统一入口：更新当前定位并防抖保存（复刻 Android scheduleSave 500ms）。
     // 只记 dismissed，不碰 coverVisible（显隐全权归下面 effect 按"首位 && 未离开"赋值；
     // 落位处先关再弹就是那一帧正文闪）。
@@ -373,7 +387,19 @@ fun ReaderScreen(
         saveJob?.cancel()
         saveJob = scope.launch {
             delay(500)
-            currentHost.onSaveProgress(next)
+            val p = openPos ?: return@launch
+            currentHost.onSaveProgress(p.copy(atCover = coverVisible))
+            saveJob = null
+        }
+    }
+
+    /** 防抖存档：位置 + 「是否停在封面」一并落盘（封面态取存档时刻的显隐）。 */
+    fun scheduleSave() {
+        saveJob?.cancel()
+        saveJob = scope.launch {
+            delay(500)
+            val p = openPos ?: return@launch
+            currentHost.onSaveProgress(p.copy(atCover = coverVisible))
             saveJob = null
         }
     }

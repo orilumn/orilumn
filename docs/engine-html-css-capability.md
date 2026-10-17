@@ -62,7 +62,7 @@ points are noted. "parsed only" = computed, draw/layout consumption pending or o
 | `font-variant` (`small-caps`) / `font-stretch` | — | ✓ | yes | small-caps 合成 **yes**；stretch 计算值 |
 | `line-height` | ✓ | ✓ | yes | **yes** |
 | `color` / `background-color` | ✓ | ✓ | yes | **yes**（主题继承 + 显式 run；块盒填充，**行内盒**也填充 —— 自 0.4.7 起按 `box-decoration-break: slice` 跨行拆片段） |
-| `text-decoration` | ✓ | ✓ | yes | 部分：underline/line-through（bool）—— **`line-through` 被画成下划线**，且无颜色/粗细/样式，欠账见《引擎欠账-对齐浏览器语义》第二刀 |
+| `text-decoration` | ✓ | ✓ | yes | 部分：underline/line-through（bool）—— **`line-through` 被画成下划线**，且无颜色/粗细/样式；欠账与排期见《引擎欠账-对齐浏览器语义》总账 §2.1（E3/E4，第三刀） |
 | `text-indent` / `text-align` | ✓ | ✓ | yes | **yes**（含 JUSTIFY） |
 | `letter-spacing`（作者） / `word-spacing` | ✓ | ✓ | yes | **yes** |
 | `text-transform` | ✓ | ✓ | yes | **yes**（字符流级，大小写 1:1） |
@@ -81,10 +81,10 @@ points are noted. "parsed only" = computed, draw/layout consumption pending or o
 | `content`/`counter-reset`/`counter-increment`/`quotes` + `::before/::after` | — | ✓ | yes | **yes**（字符流级；无 `counter-set`） |
 | `@font-face`（ttf/otf/woff/woff2 + IDPF 去混淆）/`@import`/`@media`（全视口） | — | ✓ | yes | **yes**（先行入池，双端） |
 | `float` / `clear` | ✓ | ✓ | yes | **yes**：文本/img 悬浮 + 双侧跨度并排 + 跨容器环绕 + 真 clear + 窗口 carry-in + 右悬浮绘制（双路一致） |
-| `visibility` | ✓ | ✓ | yes | parsed only（隐藏消费后续） |
-| `overflow`（祖先裁剪） | ✓ | ✓ | yes | parsed only |
-| `position`（relative 标记） | ✓ | ✓ | yes | parsed only（absolute/fixed 不做） |
-| `direction`/`unicode-bidi` | ✓ | ✓ | yes | 隔离 parsed only（RTL 流后续） |
+| `visibility` | ✓ | ✓ | yes | parsed only（隐藏未消费 —— 欠账 **E10**） |
+| `overflow`（祖先裁剪） | ✓ | ✓ | yes | parsed only（裁剪未做 —— **E11**） |
+| `position`（relative 标记） | ✓ | ✓ | yes | parsed only（绝对/固定不做 —— E12） |
+| `direction`/`unicode-bidi` | ✓ | ✓ | yes | 隔离 parsed only（RTL 流属 roadmap §0 范围外） |
 | `flex`/`grid` 真实布局 | — | ✓ | n/a | NO（按 block 降级，§0 例外） |
 | `list-style-image` / `@page` / 垂直书写 / 脚本媒体表单 | ✓ | ✓ | n/a | NO（§0 例外） |
 

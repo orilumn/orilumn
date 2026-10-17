@@ -131,7 +131,7 @@ EPUB2 是 EPUB3 的子集基础；引擎以"一张矩阵、两列标注"方式�
 | `font-family`（含栈）`font-weight` `font-style` | ✓ | ✓ | 家庭栈回退、monospace 标志 |
 | `line-height`（比值/长度） | ✓ | ✓ | |
 | `color` | ✓ | ✓ | 主题色继承 + 显式色 run |
-| `text-decoration` | ✓ | ✓ | underline/line-through（bool）；**`line-through` 仍被画成下划线、无颜色/粗细**（欠账中，见《引擎欠账-对齐浏览器语义》第二刀） |
+| `text-decoration` | ✓ | ✓ | underline/line-through（bool）；**`line-through` 仍被画成下划线、无颜色/粗细**（欠账中：见《引擎欠账-对齐浏览器语义》总账 §2.1 的 E3/E4，排第三刀） |
 | `text-indent`（首行缩进） | ✓ | ✓ | 非继承 |
 | `text-align` | ✓ | ✓ | LEFT/CENTER/RIGHT/JUSTIFY |
 | `margin`/`padding`（简写+四边+逻辑） | ✓ | ✓ | 盒几何 + margin collapse |

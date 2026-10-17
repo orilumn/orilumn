@@ -1439,6 +1439,23 @@ object NormalFlowLayout {
         return collectUnderlineRuns(el, styles, hidden::isHidden, classify::isBlock, rootWs, genOf)
     }
 
+    /**
+     * 行内盒伴生：[leafText] 同一字符串上的行内盒区间（[InlineBoxRun]，叶子全文本坐标系）。
+     * 无背景/边框叶回空表（绘制零回归）。调用方必须传与塑形同一套 [styles]/[classify]/[hidden]。
+     */
+    fun leafInlineBoxRuns(
+        el: MarkupElement?,
+        styles: Map<MarkupElement, ComputedStyle>,
+        classify: BlockClassify,
+        hidden: HiddenCheck = HIDDEN_NONE,
+        /** P3-c 生成内容查找（空即无，旧路径）。 */
+        genOf: GenOf = EmptyGen,
+    ): List<InlineBoxRun> {
+        if (el == null) return emptyList()
+        val rootWs = styles[el]?.whiteSpace ?: el.parent?.let { styles[it]?.whiteSpace } ?: WhiteSpace.NORMAL
+        return collectInlineBoxRuns(el, styles, hidden::isHidden, classify::isBlock, rootWs, genOf)
+    }
+
     /** 叶基底 face（行内 run 比对基准）：匿名叶不在表里时回传入后备，无表时回空基底。 */
     fun fontBaseOf(el: MarkupElement, styles: Map<MarkupElement, ComputedStyle>, fallback: ComputedStyle?): FontRun {
         val s = fallback ?: styles[el]

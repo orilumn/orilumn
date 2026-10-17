@@ -25,6 +25,7 @@ import orilumn.reader.engine.laying.breakWrappedLines
 import orilumn.reader.engine.laying.collectBaselineShifts
 import orilumn.reader.engine.laying.collectColorRuns
 import orilumn.reader.engine.laying.collectFontRuns
+import orilumn.reader.engine.laying.collectInlineBoxRuns
 import orilumn.reader.engine.laying.collectRubyRuns
 import orilumn.reader.engine.laying.collectUnderlineRuns
 import orilumn.reader.engine.laying.effectiveOpacity
@@ -172,6 +173,11 @@ fun shapeGeometry(
         rubyRuns = rubyRuns,
         // 下划线区间（与 text 同构遍历；无下划线回空表零回归）。
         underlineRuns = underlineRunsOf(el, styles, rootStyle, genOf, isBlock, sharedSegs),
+        // 行内盒（背景/边框；无装饰回空表零回归）。样式回退同 alpha：表外祖先按懒级联取。
+        inlineBoxRuns = inlineBoxRunsOf(
+            el, styles, rootStyle, genOf, isBlock, sharedSegs,
+            styleOf = { styles[it] ?: ancestorStyleOf?.invoke(it) },
+        ),
         fontRequest = fontRequest,
     )
 }
@@ -294,7 +300,7 @@ fun underlineRunsOf(
     base: ComputedStyle,
     genOf: GenOf = EmptyGen,
     isBlock: (MarkupElement) -> Boolean,
-    /** 预计算段表（`shapeGeometry` 一次分段五家共享；null 即现算）。 */
+    /** 预计算段表（`shapeGeometry` 一次分段多家共享；null 即现算）。 */
     segs: List<StyledSegment>? = null,
 ) = collectUnderlineRuns(
     el,
@@ -304,4 +310,25 @@ fun underlineRunsOf(
     base.whiteSpace,
     genOf,
     precomputed = segs,
+)
+
+/** 行内盒伴生（无背景/边框回空表）。样式回退与 alpha 同口径：表外祖先走懒级联。 */
+fun inlineBoxRunsOf(
+    el: MarkupElement,
+    styles: Map<MarkupElement, ComputedStyle>,
+    base: ComputedStyle,
+    genOf: GenOf = EmptyGen,
+    isBlock: (MarkupElement) -> Boolean,
+    /** 预计算段表（`shapeGeometry` 一次分段多家共享；null 即现算）。 */
+    segs: List<StyledSegment>? = null,
+    styleOf: ((MarkupElement) -> ComputedStyle?)? = null,
+) = collectInlineBoxRuns(
+    el,
+    styles,
+    { styles[it]?.displayNone == true },
+    { isBlock(it) },
+    base.whiteSpace,
+    genOf,
+    precomputed = segs,
+    styleOf = styleOf,
 )

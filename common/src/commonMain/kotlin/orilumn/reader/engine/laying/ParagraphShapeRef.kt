@@ -69,6 +69,14 @@ interface ParagraphShapeRef {
     val shapeRubyRuns: List<RubyRun>
     /** Underline spans over [shapeText] (empty = no underline). */
     val shapeUnderlineRuns: List<UnderlineRun>
+    /**
+     * 行内盒 spans over [shapeText]（空 = 无行内背景/边框）。
+     *
+     * 默认空表 = 旧行为零改动（哑实现/替换块/旧桩不必实现）。绘制侧按行裁剪成片段，
+     * 画背景（border-box）与四边边框带；**横向 padding/border 的推进量由 1b 在断行侧注入**，
+     * 本表是**同一份数据**的几何视图（量画同源）。
+     */
+    val shapeInlineBoxRuns: List<InlineBoxRun> get() = emptyList()
     /** Ancestor-chain opacity product (1 = legacy path). */
     val shapeAlpha: Float
     /** Emphasis marks (NONE = none). */
@@ -121,6 +129,8 @@ interface ParagraphShapeRef {
     val rubyRuns: List<RubyRun> get() = shapeRubyRuns
     /** Underline spans over [shapeText] (empty = no underline). */
     val underlineRuns: List<UnderlineRun> get() = shapeUnderlineRuns
+    /** 行内盒 spans over [shapeText]（空 = 无行内背景/边框）。 */
+    val inlineBoxRuns: List<InlineBoxRun> get() = shapeInlineBoxRuns
     /** Ancestor-chain opacity product (1 = legacy path). */
     val alpha: Float get() = shapeAlpha
     /** Emphasis marks (NONE = none). */

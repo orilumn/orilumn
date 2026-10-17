@@ -123,6 +123,17 @@ data class DrawLine(
      */
     val underlineRuns: List<orilumn.reader.engine.laying.UnderlineRun> = emptyList(),
     /**
+     * 行内盒 spans（[text] 全文本坐标系，空 = 无行内背景/边框）：
+     * 由 [DrawLineBuilder] 从与 [text] 同构的遍历产出。
+     *
+     * 绘制侧按本行裁剪成片段，画**背景**（border-box）与**四边边框带**；`border-left` 只在元素
+     * 首个片段、`border-right` 只在末片段（`box-decoration-break: slice`）。**必须画在文字之下**。
+     *
+     * 横向 `padding`/`border` 的**推进量**在断行侧注入（1b，与测度同源）；本字段是同一份数据的
+     * 几何视图，只负责落墨。`data class` ⇒ 加字段/改值即自动让栅格指纹失效重烤。
+     */
+    val inlineBoxRuns: List<orilumn.reader.engine.laying.InlineBoxRun> = emptyList(),
+    /**
      * 表格图占位隐藏区间（[text] 全文本坐标系，空 = 无表图旧路径）：
      * [TableCellLines] 为已进 [PageImage] 的 U+FFFC 占位记录本区间；绘制以透明墨隐藏
      *（占宽保留，与 P6-b 注音源文同法），字符流/断行/点按坐标不变。
@@ -361,6 +372,8 @@ class LineWindowDrawer(
         // 基线：半行距居中 + ascent（CSS 2.2 §10.8.1）。**自算**，不再借道 Paragraph。
         val baseY = baselineY(line, lineExtra)
         // paintX 是纯内容区偏移；placement 的 x 已含缩进与对齐偏移，逐字落墨时统一加上。
+        // **行内盒（背景/边框）先落，垫在文字之下**（CSS：背景 → 边框 → 文字）。
+        paintInlineBoxes(canvas, line, placement, paintX, baseY, start, endExcl)
         paintGlyphs(canvas, line, placement, paintX, baseY, start, endExcl, { f, t -> isHidden(f, t) }, ulHits)
 
         // 注音/着重号与文字同盒，随 half-leading 一并下移，保持与基字的相对位置。
@@ -513,6 +526,92 @@ class LineWindowDrawer(
             aligner.visibleSpan(placement, n, local, local + 1)?.let { (lx, rx) ->
                 val cx = paintX + (lx + rx) / 2f
                 canvas.drawCircle(cx, y.toFloat(), r, paint)
+            }
+        }
+    }
+
+    /**
+     * 行内盒绘制（背景 + 四边边框带）——**必须画在文字之下**（CSS：背景 → 边框 → 文字）。
+     *
+     * ## 几何（浏览器语义）
+     *
+     * 用 [LineAligner.visibleSpan] 取该片段 `[lo, hi)` 的可见左右界（**与落墨/命中/下划线同一份
+     * 几何**，量画同源）；内容区高度取该元素**自身字体**的 `ascent + descent`（**不是行高**）；
+     * `padding` 向外扩，`border` 再向外一圈。纵向 padding/border **不撑高行框**（与邻行重叠，
+     * 浏览器如此），故这里直接画到行框之外。
+     *
+     * ## `box-decoration-break: slice`（默认）
+     *
+     * `border-left` 只在元素**首个片段**、`border-right` 只在**末片段**；上/下边框每片段都有。
+     * 「首/末片段」= 本行裁剪区间是否触到 run 的头/尾（跨行时自然只在头尾行成立）。
+     *
+     * @param baseY 基线绝对 y（与 [baselineY] 同口径）。
+     */
+    private fun paintInlineBoxes(
+        canvas: Canvas,
+        line: DrawLine,
+        placement: LineAligner.Placement,
+        paintX: Float,
+        baseY: Float,
+        start: Int,
+        endExcl: Int,
+    ) {
+        val runs = line.inlineBoxRuns
+        if (runs.isEmpty() || endExcl <= start) return
+        val n = endExcl - start
+        for (r in runs) {
+            if (!r.visible) continue
+            val s = r.start.coerceIn(start, endExcl)
+            val e = r.endExclusive.coerceIn(start, endExcl)
+            if (e <= s) continue
+            val (lx, rx) = aligner.visibleSpan(placement, n, s - start, e - start) ?: continue
+            // slice 语义：左边框只首片段、右边框只末片段。
+            val firstFrag = s == r.start
+            val lastFrag = e == r.endExclusive
+            // 内容区（em 盒）高度：该元素自身字体（字号未设则回退行字号/族栈）。
+            val sizePx = if (r.fontSizePx > 0f) r.fontSizePx else line.fontSizePx
+            val famList = r.families.ifEmpty { line.families }
+            val fm = glyphPainter.baseGlyphStyle(
+                sizePx, famList, r.weight, r.italic, r.monospace,
+                0xFF000000.toInt(), 'H'.code, line.tag,
+            ).font.metrics
+            val ascent = -fm.ascent
+            val descent = fm.descent
+            val pad = r.padding
+            val bd = r.border
+            val top = baseY - ascent - pad.top - bd.top
+            val bottom = baseY + descent + pad.bottom + bd.bottom
+            val left = paintX + lx - pad.left - bd.left
+            val right = paintX + rx + pad.right + bd.right
+            // 背景：铺满 border-box（默认 background-clip: border-box）。
+            r.bgHex?.let(::cssHexToArgb)?.let { argb ->
+                canvas.drawRect(
+                    Rect.makeLTRB(left, top, right, bottom),
+                    Paint().apply { color = withAlpha(argb, line.alpha) },
+                )
+            }
+            // 边框色：每边解析 → currentColor（该元素自身色）→ 叶墨色。
+            fun edgeColor(edge: String?): Int =
+                edge?.let(::cssHexToArgb) ?: r.colorHex?.let(::cssHexToArgb) ?: line.inkColor
+            fun styleDraws(st: orilumn.reader.engine.css.BorderStyle?): Boolean =
+                st != orilumn.reader.engine.css.BorderStyle.NONE
+            val bs = r.borderStyles
+            val bp = Paint()
+            if (bd.top > 0f && styleDraws(bs?.top)) {
+                bp.color = withAlpha(edgeColor(r.borderColors?.top), line.alpha)
+                canvas.drawRect(Rect.makeLTRB(left, top, right, top + bd.top), bp)
+            }
+            if (bd.bottom > 0f && styleDraws(bs?.bottom)) {
+                bp.color = withAlpha(edgeColor(r.borderColors?.bottom), line.alpha)
+                canvas.drawRect(Rect.makeLTRB(left, bottom - bd.bottom, right, bottom), bp)
+            }
+            if (firstFrag && bd.left > 0f && styleDraws(bs?.left)) {
+                bp.color = withAlpha(edgeColor(r.borderColors?.left), line.alpha)
+                canvas.drawRect(Rect.makeLTRB(left, top, left + bd.left, bottom), bp)
+            }
+            if (lastFrag && bd.right > 0f && styleDraws(bs?.right)) {
+                bp.color = withAlpha(edgeColor(r.borderColors?.right), line.alpha)
+                canvas.drawRect(Rect.makeLTRB(right - bd.right, top, right, bottom), bp)
             }
         }
     }

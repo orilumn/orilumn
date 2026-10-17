@@ -84,6 +84,8 @@ object DrawLineBuilder {
             val rubyRuns = NormalFlowLayout.leafRubyRuns(el, styleMap, classify, hidden, genOf)
             // 下划线区间同样按叶一次算好（无下划线叶回空表零开销）。
             val underlineRuns = NormalFlowLayout.leafUnderlineRuns(el, styleMap, classify, hidden, genOf)
+            // 行内盒（背景/边框）同样按叶一次算好（无装饰叶回空表零开销）。
+            val inlineBoxes = NormalFlowLayout.leafInlineBoxRuns(el, styleMap, classify, hidden, genOf)
             // 首行缩进只给叶首行（断行侧同值已减宽，绘制侧右移同值；悬挂负值本轮不支持，归零）。
             val indent = style.textIndentPx.coerceAtLeast(0f)
             // P1-2: 不换行段绘制侧以无限宽整形（与 breakLeafLines 一致）。
@@ -152,6 +154,7 @@ object DrawLineBuilder {
                     charBase = charBase,
                     rubyRuns = rubyRuns,
                     underlineRuns = underlineRuns,
+                    inlineBoxRuns = inlineBoxes,
                 )
             }
         }

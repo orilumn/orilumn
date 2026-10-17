@@ -378,12 +378,33 @@ fun ReaderScreen(
         }
     }
 
+    // —— 外部落位在途闸：调一次排版参数只重栅格一次（用户真机：短章第二页调行距刷两次）——
+    // activity 推送重排落位时**先** bump 版式号、再写 externalPos，而落位要过锚页漏斗
+    //（等图 + 备整页位图）才 commit。闸不关的话，这一窗里渲染层会按「新版本号 × 旧落位」
+    // 重栅格一次（用户看到的「当前页自己重排了一下，页界还是旧的」），落位 commit 后
+    // 再按新页界重栅格一次 ⇒ 调一次参数刷新两次。章首页两次的差别只是页尾一两行，
+    // 肉眼看着还是一次，所以旧行为「章首只刷一次、第二页刷两次」。
+    // 闸规则：`externalPos` 与上次**已结算**的推送不等 ⇒ 在途 ⇒ 显示侧继续用推送前那一个
+    // 版本号（旧页位图原样命中、画面不动）；漏斗 push 一结束（commit 或 BUSY-DROP 丢弃）
+    // 立即开闸，位置与新版本号同帧下发，只发生一次重栅格。
+    var settledExternalPos by remember { mutableStateOf<ReaderPos?>(null) }
+    var heldRevision by remember { mutableIntStateOf(contentRevision) }
+    val externalInFlight = externalPos != null && externalPos != settledExternalPos
+    // 不在途时随手跟上最新（同值不触发重组，且不在途分支不读它 ⇒ 无额外重组）；在途时不动。
+    SideEffect { if (!externalInFlight) heldRevision = contentRevision }
+    val displayRevision = if (externalInFlight) heldRevision else contentRevision
+
     // Q1-b：外部推送落位（键 = externalPos，值变化即认领；重排绑定/TOC 落地后 activity 推送）。
     // 经锚页漏斗：与在途导航互斥，值在锁内重取（取落定后的最新推送）。
     LaunchedEffect(externalPos) {
-        anchorFunnel.push("external", ::markPositionChanged) {
-            openFailed = false
-            externalPos
+        try {
+            anchorFunnel.push("external", ::markPositionChanged) {
+                openFailed = false
+                externalPos
+            }
+        } finally {
+            // 结算（含 BUSY-DROP 丢弃）即开闸：位置与版本号同帧下发，显示只重栅格一次。
+            settledExternalPos = externalPos
         }
     }
 
@@ -1007,7 +1028,9 @@ fun ReaderScreen(
             val pageContent = rememberPageContent(
                 host = currentHost,
                 pos = fromPos,
-                contentRevision = contentRevision,
+                // 显示侧走闸后的版本号（见 externalInFlight）：在途时保持旧版式号，
+                // 免得先画一次「新参数 × 旧落位」再画最终页。
+                contentRevision = displayRevision,
                 hostRevision = hostRevision,
                 contentWidthPx = (contentRight - contentLeft).toInt(),
                 contentHeightPx = (contentBottom - contentTop).toInt(),
@@ -1025,7 +1048,7 @@ fun ReaderScreen(
                 rememberPageContent(
                     host = currentHost,
                     pos = ctl.targetPos.value,
-                    contentRevision = contentRevision,
+                    contentRevision = displayRevision,
                     hostRevision = hostRevision,
                     contentWidthPx = (contentRight - contentLeft).toInt(),
                     contentHeightPx = (contentBottom - contentTop).toInt(),
@@ -1084,6 +1107,9 @@ fun ReaderScreen(
             //（同一渲染器、同一缓存、同一条取数路径），只是针对**本次落位目标页**。
             // `prerasterPage` 已把重画切到 Default 线程，所以这里 await 不冻 UI；等它的结果是
             // 提交即命中——翻页动画不再在 UI 线程同步栅格（0.5–0.9s 冻帧的来源）。
+            // 预栅格备的是**闸开后那一次**重栅格的位图 ⇒ 取调用时刻的最新版本号：在途途中
+            // 后续 tick 还会再 bump，用构造时捕获的旧值会让这笔预栅格白做（画的那下还得重栅格）。
+            val liveRevision by rememberUpdatedState(contentRevision)
             val rasterPageNow: suspend (ReaderPos) -> Unit = { p ->
                 prerasterPage(
                     host = currentHost,
@@ -1095,7 +1121,7 @@ fun ReaderScreen(
                     contentBottom = contentBottom,
                     pageBg = profile.bgColor,
                     inkColor = profile.fgColor,
-                    contentRevision = contentRevision,
+                    contentRevision = liveRevision,
                     imgCache = imgCache,
                     bgCache = bgCache,
                 )
@@ -1115,7 +1141,8 @@ fun ReaderScreen(
                     inkColor = profile.fgColor,
                     modifier = Modifier.fillMaxSize(),
                     // 字重这类纯字形变更行数据完全相等，靠修订号强制重画（见 ReaderPageCanvas）。
-                    contentRevision = contentRevision,
+                    // 显示闸后的版本号：外部落位在途时冻结，避免「新参数 × 旧落位」多画一帧。
+                    contentRevision = displayRevision,
                     // 第 1 档「渲染」半边的抢占钩子：未命中真正栅格化时，让后台预排让路
                     // （总则第 1 条 + 线程调度原则 §5「唯一钩子」；翻页那半边早已接上）。
                     onMiss = onRasterMiss,

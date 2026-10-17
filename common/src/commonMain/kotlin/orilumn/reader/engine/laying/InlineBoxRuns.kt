@@ -162,3 +162,123 @@ fun collectInlineBoxRuns(
     out.sortWith(compareBy({ it.start }, { -it.endExclusive }))
     return out
 }
+
+/**
+ * 行内盒横向内边距 / 边框折算出的**逐字位推进量**（px）。
+ *
+ * 记在 [index] 这个字位的 advance 上（`x_i = x_0 + Σ_{j<i} adv[j]`，故记在**边界左侧那个字位**
+ * 才把右侧全部文字推开 —— 与 [orilumn.reader.engine.text.preprocess.CjkLatinGap] 同一施加规则）。
+ *
+ * [index] 在**当时被测量/落墨的文本坐标系**里；跨行/跨子串时先切（[sliceInlineBoxEdges]）再交下去。
+ * 「盒起始于叶首字符」的左边内边距**不在本表内**（advance 数组表达不了「首字符之前」），
+ * 由 [inlineBoxLeadInsetPx] 单列、折入首行缩进。
+ */
+data class InlineBoxEdge(val index: Int, val px: Float)
+
+/**
+ * 行内盒横向推进的**总闸**：与混排字距同一套回退纪律 —— 断行侧与落墨侧必须「一致地退干净」。
+ *
+ * [orilumn.reader.engine.AbSwitch.inhouseBreak] 关时用的是 `SkiaParagraphBreaker`，它拿
+ * `SkParagraph` 自量版心，本仓**无法让它为注入的推进量预留宽度**（与混排间隙同一限制）；
+ * 若只关断行侧、落墨侧照旧施加 ⇒ **画比量宽 ⇒ 右溢被裁**（分页阅读器无横向滚动条，溢出即丢内容）。
+ * 故关闸时两侧同为「零推进」：此时行内盒**只画不推**（即 1a 行为），字不会丢。
+ *
+ * 闸门放在**推导处**（[inlineBoxEdges] / [inlineBoxLeadInsetPx]）而非各处调用点：三个消费方
+ * （断行器预留版心、落墨落位、簇位轨）都经这两个函数拿到推进量，只有一处也就只有一种口径。
+ */
+private fun inlineBoxAdvanceEnabled(): Boolean = orilumn.reader.engine.AbSwitch.inhouseBreak()
+
+/**
+ * 行内盒横向推进单源（pure JVM）：把叶文本坐标系的 [runs] 折算成逐字位推进量（[textLength] = 叶文本长度）。
+ *
+ *  - **左边** = `padding.left + border.left` → 记在 `start - 1`（`start == 0` 时无处可记 ⇒ 走
+ *    [inlineBoxLeadInsetPx]，**不在此表**，避免与首行缩进双算）；
+ *  - **右边** = `padding.right + border.right` → 记在 `endExclusive - 1`（末字符位)：既推开后续文字，
+ *    也计入本行宽（末字符在行尾时体现为「行尾多出一段留白」）。
+ *
+ * 横向边距为 0 的盒（`<mark>` 只有底色、`border-bottom` 只有下边框）**产出空表 ⇒ 零推进、像素与
+ * 「只画」完全一致**：本机制只对显式设了行内横向内边距/边框的书生效。
+ *
+ * ⚠ **只认 `padding` + `border` 宽度**：与绘制侧（`paintInlineBoxes`）同一对量，量画同源。
+ * 只追加**可见**的盒（[InlineBoxRun.visible]）。
+ */
+fun inlineBoxEdges(textLength: Int, runs: List<InlineBoxRun>): List<InlineBoxEdge> {
+    if (runs.isEmpty() || !inlineBoxAdvanceEnabled()) return emptyList()
+    val out = ArrayList<InlineBoxEdge>(runs.size * 2)
+    for (r in runs) {
+        if (!r.visible) continue
+        val left = r.padding.left + r.border.left
+        if (left > 0f && r.start > 0 && r.start - 1 < textLength) out.add(InlineBoxEdge(r.start - 1, left))
+        val right = r.padding.right + r.border.right
+        val last = r.endExclusive - 1
+        if (right > 0f && last in 0 until textLength) out.add(InlineBoxEdge(last, right))
+    }
+    return out
+}
+
+/**
+ * 行内盒横向内边距 + 边框的**总量**（px）：`shrink-to-fit` 首选宽度
+ * （[ParagraphBreaker.preferredWidth]）的增量。与 [inlineBoxEdges] 逐字位之和 + [inlineBoxLeadInsetPx]
+ * **恒等**（每条边各计一次：左 `padding.left + border.left`、右 `padding.right + border.right`），
+ * 只是这里不需要位置、只要总量。同受 [inlineBoxAdvanceEnabled] 闸门。
+ */
+fun inlineBoxInsetTotalPx(runs: List<InlineBoxRun>): Float {
+    if (runs.isEmpty() || !inlineBoxAdvanceEnabled()) return 0f
+    var sum = 0f
+    for (r in runs) {
+        if (!r.visible) continue
+        sum += r.padding.left + r.border.left + r.padding.right + r.border.right
+    }
+    return sum
+}
+
+/**
+ * [runs] 裁剪到 `[from, to)` 并平移到子串坐标系（[ParagraphBreaker.minContentWidth] 逐段度量用，
+ * 与 `fontRunsWithin` 同口径）。
+ *
+ * 片段化的盒**照旧携带完整横向内边距**（不做「只有真起点才计左边」的细分）：min-content 是
+ * 「不溢出所需的最小宽」⇒ 宁可**高估**也不低估，方向与既有「永不窄于实需」一致。
+ */
+fun sliceInlineBoxRuns(runs: List<InlineBoxRun>, from: Int, to: Int): List<InlineBoxRun> {
+    if (runs.isEmpty()) return emptyList()
+    val out = ArrayList<InlineBoxRun>(runs.size)
+    for (r in runs) {
+        val s = maxOf(r.start, from)
+        val e = minOf(r.endExclusive, to)
+        if (e <= s) continue
+        out.add(r.copy(start = s - from, endExclusive = e - from))
+    }
+    return out
+}
+
+/**
+ * **起始于叶首字符**（`start == 0`）的盒的左边内边距 + 左边框之和（px）。
+ *
+ * 这一段几何上是「首行起始位移 + 首行可用宽减少」，正是 `text-indent` 的语义 ⇒ 折入首行缩进
+ * （measure 侧 [breakLeafLines] / `breakWrappedLines`，落墨侧 `DrawLineBuilder` 的 `indent`，
+ * **各一处、共用本函数**）。嵌套盒自然按「外+内」求和叠出正确层级。
+ */
+fun inlineBoxLeadInsetPx(runs: List<InlineBoxRun>): Float {
+    if (runs.isEmpty() || !inlineBoxAdvanceEnabled()) return 0f
+    var sum = 0f
+    for (r in runs) {
+        if (r.visible && r.start == 0) sum += r.padding.left + r.border.left
+    }
+    return sum
+}
+
+/**
+ * 把叶坐标系的推进量切到 `[consumed, consumed + subLen)` 的子串坐标系（越界丢弃）。
+ *
+ * **切成 `slice` 语义是自动的**：盒的左推进量记在 `start - 1`，若盒从上一行/上一段延续过来，
+ * 该字位落在切片之外 ⇒ 天然不施加 ⇒ 续片段没有左边框/内边距；右推进量同理只在末片段落在切片内时生效。
+ */
+fun sliceInlineBoxEdges(edges: List<InlineBoxEdge>, consumed: Int, subLen: Int): List<InlineBoxEdge> {
+    if (edges.isEmpty()) return emptyList()
+    val out = ArrayList<InlineBoxEdge>(edges.size)
+    for (e in edges) {
+        val i = e.index - consumed
+        if (i in 0 until subLen) out.add(InlineBoxEdge(i, e.px))
+    }
+    return out
+}

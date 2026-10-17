@@ -116,6 +116,13 @@ fun shapeGeometry(
     val fontRuns = fontRunsOf(el, styles, rootStyle, genOf, isBlock, sharedSegs)
     // P1-2: 行内基线位移段（sub/sup 等）：不断行几何，随段整形使量画一致。
     val baselineShifts = baselineShiftsOf(el, styles, rootStyle, genOf, isBlock, sharedSegs)
+    // 行内盒（背景/边框）：横向 `padding`/`border` **参与断行宽度** ⇒ 必须断行前算好，
+    // 且断行侧（本处）与绘制侧（`ShapedGeometry.inlineBoxRuns`）**同一份**（量画同源）。
+    // 样式回退同 alpha：表外祖先按懒级联取。
+    val inlineBoxes = inlineBoxRunsOf(
+        el, styles, rootStyle, genOf, isBlock, sharedSegs,
+        styleOf = { styles[it] ?: ancestorStyleOf?.invoke(it) },
+    )
     // P1-2: white-space 断行单源（NOWRAP/PRE 不换行；与盒流同式）。
     // Whole-paragraph single-style break (canonical semantics): code-like mono 解析走
     // 级联 monospace 标志（与盒流 `style.monospace || tag == "pre"` 同式）。
@@ -124,6 +131,7 @@ fun shapeGeometry(
         bodyParagraphBreaker(profile.letterSpacingEm, profile.cjkLatinSpacingEmApplied),
         text, rootStyle, widthPx.coerceAtLeast(1),
         floatLead, pairTag, fontRuns, rootStyle.textIndentPx.coerceAtLeast(0f), baselineShifts,
+        inlineBoxes,
     )
     // P6-b: 叠排注音 runs（与 text 同构遍历；无注音回空表零回归）＋行高增量（与重路径同式）。
     val rubyRuns = rubyRunsOf(el, styles, rootStyle, genOf, isBlock, sharedSegs)
@@ -174,10 +182,7 @@ fun shapeGeometry(
         // 下划线区间（与 text 同构遍历；无下划线回空表零回归）。
         underlineRuns = underlineRunsOf(el, styles, rootStyle, genOf, isBlock, sharedSegs),
         // 行内盒（背景/边框；无装饰回空表零回归）。样式回退同 alpha：表外祖先按懒级联取。
-        inlineBoxRuns = inlineBoxRunsOf(
-            el, styles, rootStyle, genOf, isBlock, sharedSegs,
-            styleOf = { styles[it] ?: ancestorStyleOf?.invoke(it) },
-        ),
+        inlineBoxRuns = inlineBoxes,
         fontRequest = fontRequest,
     )
 }

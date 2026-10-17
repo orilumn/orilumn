@@ -687,12 +687,14 @@ object NormalFlowLayout {
             val styleOf: (MarkupElement) -> ComputedStyle = { styles.getValue(it) }
             val runs = leafFontRuns(el, styles, classify, hidden, genOf)
             val shifts = leafBaselineShifts(el, styles, classify, hidden, genOf)
+            // 行内盒（横向 padding/border 参与断行宽度）：与绘制侧同一份，量画同源。
+            val boxes = leafInlineBoxRuns(el, styles, classify, hidden, genOf)
             val side = style.floatSide
             if (side != FloatSide.NONE) {
-                val floatW = floatTextWidth(style, text, contentW, breaker, runs)
+                val floatW = floatTextWidth(style, text, contentW, breaker, runs, boxes)
                 val boxLeft = if (side == FloatSide.RIGHT) left + maxOf(0, contentW - floatW) else left
                 val breakWf = innerBreakWidth(style, floatW)
-                val brokenF = breakWrappedLines(breaker, text, style, breakWf, null, el.tag, runs, style.textIndentPx.coerceAtLeast(0f), shifts)
+                val brokenF = breakWrappedLines(breaker, text, style, breakWf, null, el.tag, runs, style.textIndentPx.coerceAtLeast(0f), shifts, boxes)
                 val heightsF = adjustLineHeightsForInlineImages(text, brokenF, el, styles, classify, hidden, breakWf, imageLoader, chapterHref, density = density)
                     .map { it.coerceAtLeast(1) }
                 // P6-b: 叠排注音行增高（与行内图抬升同式；无注音零回归）。
@@ -717,7 +719,7 @@ object NormalFlowLayout {
                 pending.preClear(style.clearSide)
                 val lead = if (el.tag == "#text") null else pendingLeadFor(pending, style, contentW)
                 val breakW = innerBreakWidth(style, contentW)
-                val broken = breakWrappedLines(breaker, text, style, breakW, lead, el.tag, runs, style.textIndentPx.coerceAtLeast(0f), shifts)
+                val broken = breakWrappedLines(breaker, text, style, breakW, lead, el.tag, runs, style.textIndentPx.coerceAtLeast(0f), shifts, boxes)
                 val lineHeights = adjustLineHeightsForInlineImages(text, broken, el, styles, classify, hidden, breakW, imageLoader, chapterHref, density = density)
                     .map { it.coerceAtLeast(1) }
                 // P6-b: 叠排注音行增高（与行内图抬升同式；无注音零回归）。
@@ -2053,14 +2055,25 @@ object NormalFlowLayout {
         contentW: Int,
         breaker: ParagraphBreaker,
         fontRuns: List<FontRun>,
+        /** 行内盒（横向 `padding`/`border` 占宽，与断行侧同源）：悬浮盒按含内边距的宽度定尺。 */
+        inlineBoxRuns: List<InlineBoxRun> = emptyList(),
     ): Int {
         val cw = contentW.coerceAtLeast(1)
         style.widthPx?.let { return it.roundToInt().coerceIn(1, cw) }
         style.widthPct?.let { return (it / 100f * cw).roundToInt().coerceIn(1, cw) }
         var pref = 0f
+        var off = 0
         for (para in text.split('\n')) {
-            if (para.isEmpty()) continue
-            pref = maxOf(pref, breaker.preferredWidth(para, style.fontSizePx, emptyList(), 400, false, false, fontRuns))
+            if (para.isNotEmpty()) {
+                pref = maxOf(
+                    pref,
+                    breaker.preferredWidth(
+                        para, style.fontSizePx, emptyList(), 400, false, false, fontRuns,
+                        sliceInlineBoxRuns(inlineBoxRuns, off, off + para.length),
+                    ),
+                )
+            }
+            off += para.length + 1
         }
         if (pref <= 0f) pref = cw.toFloat()
         return pref.roundToInt().coerceIn(1, cw)

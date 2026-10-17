@@ -23,12 +23,19 @@ fun breakLeafLines(
     firstLineIndentPx: Float = 0f,
     /** P1-2 行内基线位移（不断行几何，只随段整形使量画一致；不换行段忽略）。 */
     baselineShifts: List<BaselineShift> = emptyList(),
+    /**
+     * 行内盒（叶文本坐标系）：横向 `padding`/`border` 参与断行宽度，起始于叶首字符的左边内边距
+     * 折入首行缩进。空 = 无（零回归）。与 [fontRuns] 同一纪律：调用方必须传与塑形同一份。
+     */
+    inlineBoxRuns: List<InlineBoxRun> = emptyList(),
 ): List<BrokenLine> {
+    val edges = inlineBoxEdges(text.length, inlineBoxRuns)
+    val lead = inlineBoxLeadInsetPx(inlineBoxRuns)
     if (WhiteSpaceNormalize.wraps(style.whiteSpace)) {
         return breaker.breakLines(
             text, style.fontSizePx, style.lineHeightRatio, widthPx, style.textAlign, tag,
             style.fontFamilies, style.fontWeight, style.italic, style.monospace || tag == "pre",
-            firstLineIndentPx.coerceAtLeast(0f), fontRuns, baselineShifts,
+            firstLineIndentPx.coerceAtLeast(0f) + lead, fontRuns, baselineShifts, edges,
         )
     }
     if (text.isEmpty()) return emptyList()
@@ -74,10 +81,17 @@ fun breakWrappedLines(
     fontRuns: List<FontRun> = emptyList(),
     firstLineIndentPx: Float = 0f,
     baselineShifts: List<BaselineShift> = emptyList(),
+    /** 行内盒（叶文本坐标系）：横向 `padding`/`border` 参与断行宽度（逐行切片）；空 = 无。 */
+    inlineBoxRuns: List<InlineBoxRun> = emptyList(),
 ): List<BrokenLine> {
     if (lead == null || text.isEmpty() || !WhiteSpaceNormalize.wraps(style.whiteSpace)) {
-        return breakLeafLines(breaker, text, style, widthPx, tag, fontRuns, firstLineIndentPx, baselineShifts)
+        return breakLeafLines(
+            breaker, text, style, widthPx, tag, fontRuns, firstLineIndentPx, baselineShifts, inlineBoxRuns,
+        )
     }
+    // 推进量按**叶坐标**算一次，逐轮切到子串坐标（切出 `slice` 语义：续片段无左边框/内边距）。
+    val allEdges = inlineBoxEdges(text.length, inlineBoxRuns)
+    val leadInset = inlineBoxLeadInsetPx(inlineBoxRuns)
     val out = ArrayList<BrokenLine>()
     var consumed = 0
     var i = 0
@@ -88,9 +102,11 @@ fun breakWrappedLines(
         val lines = breaker.breakLines(
             sub, style.fontSizePx, style.lineHeightRatio, w, style.textAlign, tag,
             style.fontFamilies, style.fontWeight, style.italic, mono,
-            if (i == 0) firstLineIndentPx.coerceAtLeast(0f) else 0f,
+            // 盒起始于叶首字符的左边内边距只作用于**首行**（i == 0 ⟺ consumed == 0）。
+            (if (i == 0) firstLineIndentPx.coerceAtLeast(0f) + leadInset else 0f),
             sliceRuns(fontRuns, consumed, sub.length),
             sliceShifts(baselineShifts, consumed, sub.length),
+            sliceInlineBoxEdges(allEdges, consumed, sub.length),
         )
         if (lines.isEmpty()) break
         val first = lines[0]

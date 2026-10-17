@@ -13,6 +13,7 @@ import orilumn.reader.engine.laying.HiddenCheck
 import orilumn.reader.engine.laying.LayoutBox
 import orilumn.reader.engine.laying.NormalFlowLayout
 import orilumn.reader.engine.laying.effectiveOpacity
+import orilumn.reader.engine.laying.inlineBoxLeadInsetPx
 import kotlin.math.roundToInt
 
 /**
@@ -87,7 +88,11 @@ object DrawLineBuilder {
             // 行内盒（背景/边框）同样按叶一次算好（无装饰叶回空表零开销）。
             val inlineBoxes = NormalFlowLayout.leafInlineBoxRuns(el, styleMap, classify, hidden, genOf)
             // 首行缩进只给叶首行（断行侧同值已减宽，绘制侧右移同值；悬挂负值本轮不支持，归零）。
-            val indent = style.textIndentPx.coerceAtLeast(0f)
+            //
+            // **行内盒的「起始于叶首字符」左边内边距折在这里**（`inlineBoxLeadInsetPx`）：
+            // 它与 text-indent 语义相同（首行起始位移 + 首行减宽），断行侧在
+            // [orilumn.reader.engine.laying.breakLeafLines] 折了同一份，两处共用同一函数 ⇒ 量画同源。
+            val indent = style.textIndentPx.coerceAtLeast(0f) + inlineBoxLeadInsetPx(inlineBoxes)
             // P1-2: 不换行段绘制侧以无限宽整形（与 breakLeafLines 一致）。
             val nowrap = !orilumn.reader.engine.css.WhiteSpaceNormalize.wraps(style.whiteSpace)
             // P3-a: 行阴影（currentColor 按叶墨色解）＋着重号＋祖先 opacity。

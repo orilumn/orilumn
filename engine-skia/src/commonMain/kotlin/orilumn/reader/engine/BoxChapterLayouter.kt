@@ -3259,12 +3259,16 @@ class LightPrepare(
             if (style.floatSide != orilumn.reader.engine.css.FloatSide.NONE) {
                 val text = NormalFlowLayout.absorbStyled(el, sub, classify, hidden, genOf).text
                 val runs = NormalFlowLayout.leafFontRuns(el, sub, classify, hidden, genOf)
-                val floatW = NormalFlowLayout.floatTextWidth(style, text, cw, breaker, runs)
+                val floatW = NormalFlowLayout.floatTextWidth(
+                    style, text, cw, breaker, runs,
+                    NormalFlowLayout.leafInlineBoxRuns(el, sub, classify, hidden, genOf),
+                )
                 val breakWf = NormalFlowLayout.innerBreakWidth(style, floatW)
                 val shaped = breakWrappedLines(
                     breaker, text, style, breakWf, null, el.tag, runs,
                     style.textIndentPx.coerceAtLeast(0f),
                     NormalFlowLayout.leafBaselineShifts(el, sub, classify, hidden, genOf),
+                    NormalFlowLayout.leafInlineBoxRuns(el, sub, classify, hidden, genOf),
                 )
                 val baseH = adjustLineHeightsForInlineImages(
                     text, shaped, el, sub, classify, hidden, breakWf, imageLoader, chapterHref, profile.density,
@@ -3288,6 +3292,7 @@ class LightPrepare(
                 breaker, text, style, NormalFlowLayout.innerBreakWidth(style, cw), lead, el.tag, runs,
                 style.textIndentPx.coerceAtLeast(0f),
                 NormalFlowLayout.leafBaselineShifts(el, sub, classify, hidden, genOf),
+                NormalFlowLayout.leafInlineBoxRuns(el, sub, classify, hidden, genOf),
             )
             val baseH = adjustLineHeightsForInlineImages(
                 text, shaped, el, sub, classify, hidden, NormalFlowLayout.innerBreakWidth(style, cw), imageLoader, chapterHref, profile.density,

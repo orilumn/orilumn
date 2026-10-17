@@ -2,9 +2,12 @@ package orilumn.reader.engine.skia
 
 import orilumn.reader.engine.css.FontRun
 import orilumn.reader.engine.css.TextAlign
+import orilumn.reader.engine.laying.InlineBoxRun
+import orilumn.reader.engine.laying.inlineBoxEdges
 import orilumn.reader.engine.laying.isDocumentSpace
 import orilumn.reader.engine.laying.isSoftHyphen
 import orilumn.reader.engine.laying.lineHeightPx
+import orilumn.reader.engine.laying.sliceInlineBoxEdges
 import orilumn.reader.engine.text.preprocess.CjkLatinSpacing
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -149,6 +152,13 @@ internal class LineAligner(
          * 见 [PunctuationSqueeze.ratioNeeded]）。
          */
         squeezeRatio: Float = 0f,
+        /**
+         * 行内盒（**叶文本坐标系**，与 `text` 同坐标）：横向 `padding`/`border` 的推进量必须与
+         * 断行侧同一份，否则画比量宽 ⇒ 右溢被裁。同 [cjkLatinSpacingEm] 的理由**追加在末尾**。
+         *
+         * 内部按 [range] 切片（切出 `slice` 语义：续片段无左边框/内边距）。空 = 无。
+         */
+        inlineBoxRuns: List<InlineBoxRun> = emptyList(),
     ): Placement {
         val start = range.first.coerceIn(0, text.length)
         val endExcl = (range.last + 1).coerceIn(start, text.length)
@@ -183,9 +193,14 @@ internal class LineAligner(
         //   （作者空格留着 ⇒ 中西之间还隔着一个整空格），那正是需求否掉的「0 的特例」。
         //   见 [CjkLatinSpacing] 类 KDoc「`gapEm = 0` 是参数为 0 的那一档」。
         val cjkGaps = CjkLatinSpacing.gapsForRange(text, start, endExcl, cjkLatinSpacingEm, fontRuns)
+        // 行内盒横向推进：**叶坐标算一次、裁到本行**（与 [cjkGaps] 同式）。
+        // 切片自动给出 `slice` 语义：盒从上一行延续过来时其左推进量落在切片外 ⇒ 续片段无左边框/内边距。
+        val lineBoxEdges =
+            if (inlineBoxRuns.isEmpty()) emptyList()
+            else sliceInlineBoxEdges(inlineBoxEdges(text.length, inlineBoxRuns), start, endExcl)
         val adv = measurer.advances(
             line, fontSizePx, letterSpacingEm, tag, families,
-            weight, italic, monospace, lineRuns, cjkGaps,
+            weight, italic, monospace, lineRuns, cjkGaps, lineBoxEdges,
         )
         // 标点挤压：**按比例收窄收尾类标点的字位**（渲染层·几何测量，[PunctuationSqueeze]）。
         //

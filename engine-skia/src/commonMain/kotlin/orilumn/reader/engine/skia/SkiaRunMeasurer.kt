@@ -1,6 +1,7 @@
 package orilumn.reader.engine.skia
 
 import orilumn.reader.engine.css.FontRun
+import orilumn.reader.engine.laying.InlineBoxEdge
 import orilumn.reader.engine.laying.HYPHEN_GLYPH
 import orilumn.reader.engine.text.preprocess.CjkLatinGap
 import orilumn.reader.engine.text.preprocess.CjkLatinSpacing
@@ -81,6 +82,17 @@ class SkiaRunMeasurer(
         monospace: Boolean,
         fontRuns: List<FontRun> = emptyList(),
         cjkGaps: List<CjkLatinGap> = emptyList(),
+        /**
+         * 行内盒横向推进（与 [text] 同坐标系的逐字位增量，`inlineBoxEdges` 的产物；空 = 无）。
+         *
+         * **与 [cjkGaps] 同在出口、同为「唯一施加点」**：[InhouseParagraphBreaker]（预留版心）、
+         * [LineAligner]（落 x 位）、[KerningClusterTable]（cluster 轨迹）三条路都走本方法 ⇒ 三路同源，
+         * 不存在「量宽算了一份、落墨算了另一份」的分叉（量画同源，教训 ⑩）。
+         *
+         * 施加在 [cjkGaps] **之后**：混排间隙的「吃掉分隔空格」（把字位置 0）不得抹掉行内盒推进量
+         * —— 两者是独立的加性贡献，顺序只在这一点上有关。
+         */
+        inlineBoxEdges: List<InlineBoxEdge> = emptyList(),
     ): FloatArray {
         val n = text.length
         val out = FloatArray(n)
@@ -89,7 +101,14 @@ class SkiaRunMeasurer(
         val segs = segments(text, n, fontSizePx, letterSpacingEm, tag, families, weight, italic, monospace, fontRuns, mgrs)
         for (s in segs) measure(text, s.from, s.to, s, out)
         if (cjkGaps.isNotEmpty()) applyCjkLatinGaps(fontRuns, fontSizePx, cjkGaps, out)
+        if (inlineBoxEdges.isNotEmpty()) applyInlineBoxEdges(inlineBoxEdges, out)
         return out
+    }
+
+    /** 行内盒横向推进的施加点（与 [applyCjkLatinGaps] 同级、同为出口单点；`index` 越界即忽略）。 */
+    private fun applyInlineBoxEdges(edges: List<InlineBoxEdge>, adv: FloatArray) {
+        val n = adv.size
+        for (e in edges) if (e.index in 0 until n) adv[e.index] += e.px
     }
 
     /**

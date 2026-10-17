@@ -5,6 +5,10 @@ import org.jetbrains.skia.paragraph.RectHeightMode
 import org.jetbrains.skia.paragraph.RectWidthMode
 import orilumn.reader.engine.css.FontRun
 import orilumn.reader.engine.css.TextAlign
+import orilumn.reader.engine.laying.InlineBoxEdge
+import orilumn.reader.engine.laying.InlineBoxRun
+import orilumn.reader.engine.laying.inlineBoxEdges
+import orilumn.reader.engine.laying.sliceInlineBoxEdges
 import orilumn.reader.engine.text.preprocess.CjkLatinGap
 import orilumn.reader.engine.text.preprocess.CjkLatinSpacing
 
@@ -72,9 +76,21 @@ internal class KerningClusterTable(
         originX: Float = 0f,
         letterSpacingEm: Float = 0f,
         cjkLatinSpacingEm: Float = 0f,
+        /**
+         * 行内盒（**叶文本坐标系**，与 `text` 同坐标）：横向 `padding`/`border` 的推进量必须与
+         * [LineAligner]/断行侧同一份，否则 [graftKerningOnto] 的
+         * `tighten = (cnat[i]−cnat[i−1]) − placement.advs[i−1]` 在边界字上恒为负一个推进量 ⇒
+         * 被 `min(0,·)` 全额采纳 ⇒ **注入的推进量在落墨侧被抹掉**（与混排间隙同一个坑）。
+         * 空 = 无。
+         */
+        inlineBoxRuns: List<InlineBoxRun> = emptyList(),
     ): FloatArray? {
         val n = endExcl - start
         if (n <= 0) return null
+        // 行内盒横向推进：**叶坐标算一次、裁到本行**（与下面 `gaps` 同式）。
+        val boxEdges =
+            if (inlineBoxRuns.isEmpty()) emptyList()
+            else sliceInlineBoxEdges(inlineBoxEdges(text.length, inlineBoxRuns), start, endExcl)
         // 混排字距：与 [LineAligner] **同一份**结果（同一个整段检测 + 裁到本行），最后一次性平移整条轨。
         // 检测坐标已平移成**行内局部**（[CjkLatinSpacing.gapsForRange] 的契约），
         // 故 [shiftTrackByCjkGaps] 拿到的是局部下标。
@@ -86,7 +102,10 @@ internal class KerningClusterTable(
         // 行内换面：分段建（浏览器 inline-run 语义），否则簇位会按错误的面算。
         if (fontRuns.isEmpty()) {
             val single = clusterXsSingle(text, start, endExcl, fontSizePx, lineHeightRatio, tag, families, weight, italic, monospace, originX, letterSpacingEm)
-            return single?.also { shiftTrackByCjkGaps(it, gaps, text, start, fontSizePx, fontRuns) }
+            return single?.also {
+                shiftTrackByCjkGaps(it, gaps, text, start, fontSizePx, fontRuns)
+                shiftTrackByInlineBoxEdges(it, boxEdges)
+            }
         }
         val edges = (fontRuns.flatMap { listOf(it.start, it.endExclusive) } + listOf(start, endExcl))
             .filter { it in start..endExcl }.distinct().sorted()
@@ -128,7 +147,32 @@ internal class KerningClusterTable(
         }
         if (out.any { it.isNaN() }) return null
         shiftTrackByCjkGaps(out, gaps, text, start, fontSizePx, fontRuns)
+        shiftTrackByInlineBoxEdges(out, boxEdges)
         return out
+    }
+
+    /**
+     * 行内盒横向推进在 Skia 簇位轨上的**唯一施加点**（渲染层·几何测量），与
+     * [shiftTrackByCjkGaps] 同一套「末尾统一累计位移」的推导（那里的 KDoc 有完整证明）：
+     * 轨是 Skia 整形算出来的、不知道我们注入了推进量，不补就会在
+     * `tighten = (cnat[i]−cnat[i−1]) − placement.advs[i−1]` 上被当成「整形收紧量」吃掉。
+     *
+     * @param edges **局部坐标**的推进量（已按本行切片；`index` 落在 `[0, track.size)`）。
+     * @param track **原地**平移。
+     */
+    private fun shiftTrackByInlineBoxEdges(track: FloatArray, edges: List<InlineBoxEdge>) {
+        if (edges.isEmpty()) return
+        // `inlineBoxEdges` 按 run 顺序产出，未必按下标单调 ⇒ 先排序再单趟扫（累计位移单调不减）。
+        val sorted = edges.sortedBy { it.index }
+        var ei = 0
+        var shift = 0f
+        for (j in track.indices) {
+            while (ei < sorted.size && sorted[ei].index < j) {
+                shift += sorted[ei].px
+                ei++
+            }
+            track[j] += shift
+        }
     }
 
     /**

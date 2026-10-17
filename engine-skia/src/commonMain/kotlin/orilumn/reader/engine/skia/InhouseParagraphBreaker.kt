@@ -9,6 +9,10 @@ import orilumn.reader.engine.laying.BrokenLine
 import orilumn.reader.engine.laying.BreakOpportunitySource
 import orilumn.reader.engine.laying.CodeIdentifierBreakSource
 import orilumn.reader.engine.laying.EnglishHyphenationSource
+import orilumn.reader.engine.laying.InlineBoxEdge
+import orilumn.reader.engine.laying.InlineBoxRun
+import orilumn.reader.engine.laying.inlineBoxEdges
+import orilumn.reader.engine.laying.inlineBoxLeadInsetPx
 import orilumn.reader.engine.laying.KinsokuBreakSource
 import orilumn.reader.engine.laying.ParagraphBreaker
 import orilumn.reader.engine.laying.RegionScopedBreakSource
@@ -251,11 +255,17 @@ class InhouseParagraphBreaker(
         italic: Boolean,
         monospace: Boolean,
         fontRuns: List<FontRun>,
+        inlineBoxRuns: List<InlineBoxRun>,
     ): Float {
         if (text.isEmpty()) return 0f
         val gaps = CjkLatinSpacing.gaps(text, cjkLatinSpacingEm, fontRuns)
-        val adv = measurer.advances(text, fontSizePx, letterSpacingEm, null, families, weight, italic, monospace, fontRuns, gaps)
-        var sum = 0f
+        // 行内盒横向推进：与断行同一个 `advances` 出口（量画同源）；起始于叶首字符的左边内边距
+        // 不在 edges 里，单列补回（`inlineBoxInsetTotalPx` 与「edges 之和 + lead」恒等）。
+        val edges = inlineBoxEdges(text.length, inlineBoxRuns)
+        val adv = measurer.advances(
+            text, fontSizePx, letterSpacingEm, null, families, weight, italic, monospace, fontRuns, gaps, edges,
+        )
+        var sum = inlineBoxLeadInsetPx(inlineBoxRuns)
         for (a in adv) sum += a
         // ⚠ **这里刻意不减挤压额度**（产品裁决 2026-10-03 第 2 条，2026-10-03 反转了上一轮的口径）。
         //
@@ -314,6 +324,27 @@ class InhouseParagraphBreaker(
         firstLineIndentPx: Float,
         fontRuns: List<FontRun>,
         baselineShifts: List<BaselineShift>,
+    ): List<BrokenLine> =
+        breakLines(
+            text, fontSizePx, lineHeightRatio, widthPx, alignment, tag, families, weight, italic, monospace,
+            firstLineIndentPx, fontRuns, baselineShifts, emptyList(),
+        )
+
+    override fun breakLines(
+        text: CharSequence,
+        fontSizePx: Float,
+        lineHeightRatio: Float,
+        widthPx: Int,
+        alignment: TextAlign,
+        tag: String?,
+        families: List<String>,
+        weight: Int,
+        italic: Boolean,
+        monospace: Boolean,
+        firstLineIndentPx: Float,
+        fontRuns: List<FontRun>,
+        baselineShifts: List<BaselineShift>,
+        inlineBoxEdges: List<InlineBoxEdge>,
     ): List<BrokenLine> {
         val n = text.length
         if (n == 0) return emptyList()
@@ -326,10 +357,13 @@ class InhouseParagraphBreaker(
         @Suppress("UNUSED_EXPRESSION")
         baselineShifts
 
-        // 混排字距的间隙就在这里被算进 `adv`（[SkiaRunMeasurer.applyCjkLatinGaps]）——
+        // 混排字距的间隙与行内盒横向推进都在这里被算进 `adv`（[SkiaRunMeasurer] 的出口单点）——
         // **不在别处**：断行要预留版心、绘制要落在同一批字位上，两者必须走同一个取宽口（量画同源，教训 ⑩）。
         val gaps = CjkLatinSpacing.gaps(text, cjkLatinSpacingEm, fontRuns)
-        val adv = measurer.advances(text, fontSizePx, letterSpacingEm, tag, families, weight, italic, monospace, fontRuns, gaps)
+        val adv = measurer.advances(
+            text, fontSizePx, letterSpacingEm, tag, families, weight, italic, monospace, fontRuns, gaps,
+            inlineBoxEdges,
+        )
         // 首行可用宽直接扣缩进 —— SkiaParagraphBreaker 那段「TextIndent 整段单行快捷路径」的
         // R1 补偿在新实现下自然消失（本类没有那条快捷路径，首行从一开始就按 CSS 语义排）。
         val headPx = widthPx - firstLineIndentPx

@@ -76,8 +76,42 @@ interface ParagraphBreaker {
         breakLines(text, fontSizePx, lineHeightRatio, widthPx, alignment, tag, families, weight, italic, monospace, firstLineIndentPx)
 
     /**
+     * [breakLines] 再加一路**行内盒横向推进**（[InlineBoxEdge]，与 [text] 同坐标系）：行内元素的
+     * 横向 `padding`/`border` 必须**参与断行宽度**（后续文字右移），与浏览器语义一致。
+     *
+     * 与 [fontRuns] 同一纪律：**量画必须走同一份推进量**，否则断行侧按「有推进」切行、绘制侧按
+     * 「无推进」落位 ⇒ 画比量宽 ⇒ 右溢被裁（分页阅读器无横向滚动条，溢出 = 内容丢失）。
+     *
+     * 默认实现忽略推进量（测试假实现 / 不支持的断行器照旧编译、零改动）；生产
+     * [orilumn.reader.engine.skia.InhouseParagraphBreaker] 覆写并按推进量断行。
+     * 「盒起始于叶首字符」的左边内边距**不在本参数内**（折入 [firstLineIndentPx]，见
+     * `inlineBoxLeadInsetPx`）。
+     */
+    fun breakLines(
+        text: CharSequence,
+        fontSizePx: Float,
+        lineHeightRatio: Float,
+        widthPx: Int,
+        alignment: TextAlign,
+        tag: String?,
+        families: List<String>,
+        weight: Int,
+        italic: Boolean,
+        monospace: Boolean,
+        firstLineIndentPx: Float,
+        fontRuns: List<FontRun>,
+        baselineShifts: List<BaselineShift>,
+        /** 行内盒横向推进（与 [text] 同坐标系；空 = 无行内横向内边距/边框）。 */
+        inlineBoxEdges: List<InlineBoxEdge> = emptyList(),
+    ): List<BrokenLine> =
+        breakLines(text, fontSizePx, lineHeightRatio, widthPx, alignment, tag, families, weight, italic, monospace, firstLineIndentPx, fontRuns, baselineShifts)
+
+    /**
      * P6-a: 不换行时的首选宽度（px，shrink-to-fit 依据）。生产 Skia 实现真测字形宽度；
      * 默认实现按 1em/char 保守估计（CJK 精确、拉丁偏宽——永不窄于实需，双路恒一致）。
+     *
+     * [inlineBoxRuns] 的行内盒**横向内边距 / 边框同样占宽**（与断行侧同源）：漏掉就会让悬浮 /
+     * 表格里的行内盒按「没有内边距」定宽，而落墨侧照样推开 ⇒ 内容溢出盒右缘。
      */
     fun preferredWidth(
         text: CharSequence,
@@ -87,7 +121,8 @@ interface ParagraphBreaker {
         italic: Boolean,
         monospace: Boolean,
         fontRuns: List<FontRun> = emptyList(),
-    ): Float = text.length * fontSizePx
+        inlineBoxRuns: List<InlineBoxRun> = emptyList(),
+    ): Float = text.length * fontSizePx + inlineBoxInsetTotalPx(inlineBoxRuns)
 
     /**
      * min-content 宽（px）：内容可在任意断点换行、且**不溢出**时所需的最小可用宽——浏览器
@@ -109,6 +144,7 @@ interface ParagraphBreaker {
         italic: Boolean,
         monospace: Boolean,
         fontRuns: List<FontRun> = emptyList(),
+        inlineBoxRuns: List<InlineBoxRun> = emptyList(),
     ): Float {
         if (text.isEmpty() || fontSizePx <= 0f) return 0f
         var best = 0f
@@ -117,6 +153,7 @@ interface ParagraphBreaker {
                 text.subSequence(seg.first, seg.last + 1),
                 fontSizePx, families, weight, italic, monospace,
                 fontRunsWithin(fontRuns, seg.first, seg.last + 1),
+                sliceInlineBoxRuns(inlineBoxRuns, seg.first, seg.last + 1),
             )
             if (w > best) best = w
         }

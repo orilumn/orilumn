@@ -366,6 +366,8 @@ class LineWindowDrawer(
             squeezeRatio = line.squeezeRatio,
             // 混排字距：与断行侧同一个 em（间隙进 `adv` ⇒ 逐字 x、JUSTIFY 基数、可见右缘同源）。
             cjkLatinSpacingEm = line.cjkLatinSpacingEm,
+            // 行内盒横向推进：与断行侧同一份（同 `cjkLatinSpacingEm` 的理由 —— 量画同源）。
+            inlineBoxRuns = line.inlineBoxRuns,
         )
         // 缩进已在 placement 内（x0），落墨起点即文本区左缘（marker 另行绘制，不动）。
         val paintX = textX
@@ -656,6 +658,8 @@ class LineWindowDrawer(
                     // 混排字距：必须传与量宽侧同一个 em，否则 [graftKerningOnto] 会把注入的间隙
                     // 当成「整形收紧量」吃掉（该方法的 KDoc 有完整推导）。
                     cjkLatinSpacingEm = line.cjkLatinSpacingEm,
+                    // 行内盒横向推进：同理必须与量宽侧同一份，否则被当收紧量抹掉。
+                    inlineBoxRuns = line.inlineBoxRuns,
                 )?.let { cnat ->
                     graftKerningOnto(
                         placement, cnat, line.text, start,

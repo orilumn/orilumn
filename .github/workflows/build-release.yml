@@ -329,8 +329,7 @@ jobs:
           merge-multiple: true
 
       # Release 正文取自 CHANGELOG.md：按 tag 版本摘出对应版本段（Keep a Changelog 的
-      # `## [x.y.z]` 小节），再拼上产物清单。摘不到时（版本段没落实化）退化为清单 +
-      # 指路链接，不让 Release 缺席。
+      # `## [x.y.z]` 小节）。摘不到时（版本段没落实化）退化为指路链接，不让 Release 缺席。
       - name: Compose release body from CHANGELOG
         run: |
           VER="${GITHUB_REF_NAME#v}"
@@ -347,17 +346,6 @@ jobs:
               echo "本版本的更新日志未落实化到 CHANGELOG.md，见："
               echo "https://github.com/${GITHUB_REPOSITORY}/blob/main/CHANGELOG.md"
             fi
-            # 版本段末尾是空行，但保险起见再补一行，避免 --- 被 Markdown 当成 setext 标题。
-            echo
-            cat <<'EOF'
-          ---
-          自动构建的产物（GitHub Actions 云端编译）。
-
-          - Android（已签名）：`orilumn-<版本>-android.apk`
-          - Windows：`Orilumn-<版本>-windows-x64.msi`（未签名，SmartScreen 会拦一次：更多信息 → 仍要运行）
-          - macOS：`Orilumn-<版本>-macos-arm64.dmg` / `-macos-x64.dmg`（未签名，首次打开需右键 → 打开）
-          - Linux：`Orilumn-<版本>-linux-x64.deb` / `.rpm` / `.AppImage`
-          EOF
           } > /tmp/release_body.md
           echo "---- release body ----"
           cat /tmp/release_body.md

@@ -312,6 +312,14 @@ jobs:
     needs: [build-android, build-macos, build-linux, build-windows]
     runs-on: ubuntu-latest
     steps:
+      # 先 checkout：正文要读仓库里的 CHANGELOG.md。
+      # 注意顺序——checkout 会清空工作目录（无 .git 时逐项删除），若放在下载产物之后，
+      # 会把 dist/ 一起删掉，导致最后一步挂不上任何附件。必须先 checkout 再下载产物。
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
       # 四个构建 job 都已把成品作为 artifact 上传（全场景上传，不限 tag），这里一次性合并下载。
       # 每个 artifact 内就是那个改好名的成品文件，merge-multiple 后平铺在 dist/ 下。
       - name: Download all build artifacts
@@ -319,11 +327,6 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-
-      - name: Checkout (for CHANGELOG)
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
 
       # Release 正文取自 CHANGELOG.md：按 tag 版本摘出对应版本段（Keep a Changelog 的
       # `## [x.y.z]` 小节），再拼上产物清单。摘不到时（版本段没落实化）退化为清单 +

@@ -41,7 +41,7 @@ private data class ShelfIndex(val nextId: Long = 1L, val books: List<DesktopBook
 
 /** 阅读定位：章节下标 + 章内字符偏移（内存形态；落库形态见 locator 串）。 */
 @Serializable
-data class ReadingLocator(val chapter: Int = 0, val char: Int = 0)
+data class ReadingLocator(val chapter: Int = 0, val char: Int = 0, val atCover: Boolean = false)
 
 /** 自定义阅读主题预设的桌面持久形态（与 shared-ui `ThemePreset` 同构）。 */
 @Serializable
@@ -257,7 +257,11 @@ class DesktopShelfStore(root: File) : ShelfRepository {
                 bookId = id,
                 chapter = locator.chapter,
                 progress = 0.0,
-                locator = orilumn.reader.data.read.ReadingLocatorCodec.encode(locator.chapter, locator.char),
+                locator = orilumn.reader.data.read.ReadingLocatorCodec.encode(
+                    locator.chapter,
+                    locator.char,
+                    locator.atCover,
+                ),
                 updatedAt = System.currentTimeMillis(),
             ),
         )
@@ -266,8 +270,12 @@ class DesktopShelfStore(root: File) : ShelfRepository {
     suspend fun loadProgress(id: Long): ReadingLocator? {
         val state = requireDb().readingState(id) ?: return null
         val (chapter, char) = orilumn.reader.data.read.ReadingLocatorCodec.decode(state.locator)
-            ?: return ReadingLocator(state.chapter, 0)
-        return ReadingLocator(chapter, char)
+            ?: return ReadingLocator(state.chapter, 0, atCover = orilumn.reader.data.read.ReadingLocatorCodec.decodeAtCover(state.locator))
+        return ReadingLocator(
+            chapter,
+            char,
+            atCover = orilumn.reader.data.read.ReadingLocatorCodec.decodeAtCover(state.locator),
+        )
     }
 
     /** S32 `progress/{id}.json` 一次性导入，随后逐个删除旧文件。 */
@@ -286,7 +294,11 @@ class DesktopShelfStore(root: File) : ShelfRepository {
                     bookId = id,
                     chapter = locator.chapter,
                     progress = 0.0,
-                    locator = orilumn.reader.data.read.ReadingLocatorCodec.encode(locator.chapter, locator.char),
+                    locator = orilumn.reader.data.read.ReadingLocatorCodec.encode(
+                        locator.chapter,
+                        locator.char,
+                        locator.atCover,
+                    ),
                     updatedAt = System.currentTimeMillis(),
                 ),
             )

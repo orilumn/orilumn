@@ -270,7 +270,12 @@ fun ReaderScreen(
         suspend fun doOpen(): ReaderPos? {
             // 先占位再落位：openPos 一提交组合即画，effect 的置 true 赶不上首帧。
             coverResolving = true
-            return anchorFunnel.push("open", { openPos = it }) {
+            return anchorFunnel.push("open", { p ->
+                openPos = p
+                // 续读位不是封面 ⇒ 本代视为「已离开封面」：存档里停的是正文页（含正文首页），
+                // 重开不该再弹一次封面。
+                if (!p.atCover) coverDismissed = true
+            }) {
                 val p = currentHost.open()
                 openFailed = p == null
                 hostRevision++
@@ -298,8 +303,11 @@ fun ReaderScreen(
     LaunchedEffect(openPos, hostRevision, contentRevision, currentHost) {
         // 只有宿主换代才清缓存（新控制器新布局）：排版变化（contentRevision）不清，
         // 封面字节与首章号都不漂移；翻页（openPos 变化）更不清。
-        // 但显式离开标记随排版换代重置：不换宿主时调参/拉伸只换版本号，
-        // 不重置则一次离开后封面永不再弹（拉伸必跳第二页根因）。
+        // 「已离开封面」标记同样不随排版换代重置：落位现在恒是该章自己的一张页
+        //（短章 = 磁盘表里离锚点最近的那页，大章 = 锚点页），停在书首时落位仍是
+        // charStart 0 的那页，`isBookStart` 不会因换代失真，无需再清标记兜底；
+        // 反之一清，离开过封面的读者一旦回到正文首页就会重弹封面（真机：调完行距
+        // 回翻一页直接撞封面）。封面本身仍可看：正文首页再往后翻即进封面（见 flipAwait）。
         if (currentHost !== coverHost) {
             coverHost = currentHost
             coverRev = contentRevision
@@ -309,11 +317,6 @@ fun ReaderScreen(
             coverDismissed = false
         } else if (contentRevision != coverRev) {
             coverRev = contentRevision
-            val pNow = openPos
-            if (pNow == null || !isBookStart(pNow)) {
-                coverDismissed = false
-            }
-            // 当前正好在书首时，不重置 dismissed，避免调参时闪回封面
         }
         // open 落位前不查：与开书解析并发必撞锁/竞态（首章 check），查也白查。
         val p = openPos ?: return@LaunchedEffect
@@ -359,6 +362,15 @@ fun ReaderScreen(
         coverVisible = isBookStart(p) && !coverDismissed
     }
 
+    // 封面显隐也是定位的一部分：进入/离开封面立即落一次存档。
+    // 退出到书架常常紧跟「回翻进封面」这一拍，500ms 防抖会把它吞掉。
+    LaunchedEffect(coverVisible) {
+        val p = openPos ?: return@LaunchedEffect
+        saveJob?.cancel()
+        saveJob = null
+        currentHost.onSaveProgress(p.copy(atCover = coverVisible))
+    }
+
     // 落位统一入口：更新当前定位并防抖保存（复刻 Android scheduleSave 500ms）。
     // 只记 dismissed，不碰 coverVisible（显隐全权归下面 effect 按"首位 && 未离开"赋值；
     // 落位处先关再弹就是那一帧正文闪）。
@@ -375,17 +387,50 @@ fun ReaderScreen(
         saveJob?.cancel()
         saveJob = scope.launch {
             delay(500)
-            currentHost.onSaveProgress(next)
+            val p = openPos ?: return@launch
+            currentHost.onSaveProgress(p.copy(atCover = coverVisible))
             saveJob = null
         }
     }
 
+    /** 防抖存档：位置 + 「是否停在封面」一并落盘（封面态取存档时刻的显隐）。 */
+    fun scheduleSave() {
+        saveJob?.cancel()
+        saveJob = scope.launch {
+            delay(500)
+            val p = openPos ?: return@launch
+            currentHost.onSaveProgress(p.copy(atCover = coverVisible))
+            saveJob = null
+        }
+    }
+
+    // —— 外部落位在途闸：调一次排版参数只重栅格一次（用户真机：短章第二页调行距刷两次）——
+    // activity 推送重排落位时**先** bump 版式号、再写 externalPos，而落位要过锚页漏斗
+    //（等图 + 备整页位图）才 commit。闸不关的话，这一窗里渲染层会按「新版本号 × 旧落位」
+    // 重栅格一次（用户看到的「当前页自己重排了一下，页界还是旧的」），落位 commit 后
+    // 再按新页界重栅格一次 ⇒ 调一次参数刷新两次。章首页两次的差别只是页尾一两行，
+    // 肉眼看着还是一次，所以旧行为「章首只刷一次、第二页刷两次」。
+    // 闸规则：`externalPos` 与上次**已结算**的推送不等 ⇒ 在途 ⇒ 显示侧继续用推送前那一个
+    // 版本号（旧页位图原样命中、画面不动）；漏斗 push 一结束（commit 或 BUSY-DROP 丢弃）
+    // 立即开闸，位置与新版本号同帧下发，只发生一次重栅格。
+    var settledExternalPos by remember { mutableStateOf<ReaderPos?>(null) }
+    var heldRevision by remember { mutableIntStateOf(contentRevision) }
+    val externalInFlight = externalPos != null && externalPos != settledExternalPos
+    // 不在途时随手跟上最新（同值不触发重组，且不在途分支不读它 ⇒ 无额外重组）；在途时不动。
+    SideEffect { if (!externalInFlight) heldRevision = contentRevision }
+    val displayRevision = if (externalInFlight) heldRevision else contentRevision
+
     // Q1-b：外部推送落位（键 = externalPos，值变化即认领；重排绑定/TOC 落地后 activity 推送）。
     // 经锚页漏斗：与在途导航互斥，值在锁内重取（取落定后的最新推送）。
     LaunchedEffect(externalPos) {
-        anchorFunnel.push("external", ::markPositionChanged) {
-            openFailed = false
-            externalPos
+        try {
+            anchorFunnel.push("external", ::markPositionChanged) {
+                openFailed = false
+                externalPos
+            }
+        } finally {
+            // 结算（含 BUSY-DROP 丢弃）即开闸：位置与版本号同帧下发，显示只重栅格一次。
+            settledExternalPos = externalPos
         }
     }
 
@@ -1009,7 +1054,9 @@ fun ReaderScreen(
             val pageContent = rememberPageContent(
                 host = currentHost,
                 pos = fromPos,
-                contentRevision = contentRevision,
+                // 显示侧走闸后的版本号（见 externalInFlight）：在途时保持旧版式号，
+                // 免得先画一次「新参数 × 旧落位」再画最终页。
+                contentRevision = displayRevision,
                 hostRevision = hostRevision,
                 contentWidthPx = (contentRight - contentLeft).toInt(),
                 contentHeightPx = (contentBottom - contentTop).toInt(),
@@ -1027,7 +1074,7 @@ fun ReaderScreen(
                 rememberPageContent(
                     host = currentHost,
                     pos = ctl.targetPos.value,
-                    contentRevision = contentRevision,
+                    contentRevision = displayRevision,
                     hostRevision = hostRevision,
                     contentWidthPx = (contentRight - contentLeft).toInt(),
                     contentHeightPx = (contentBottom - contentTop).toInt(),
@@ -1086,6 +1133,9 @@ fun ReaderScreen(
             //（同一渲染器、同一缓存、同一条取数路径），只是针对**本次落位目标页**。
             // `prerasterPage` 已把重画切到 Default 线程，所以这里 await 不冻 UI；等它的结果是
             // 提交即命中——翻页动画不再在 UI 线程同步栅格（0.5–0.9s 冻帧的来源）。
+            // 预栅格备的是**闸开后那一次**重栅格的位图 ⇒ 取调用时刻的最新版本号：在途途中
+            // 后续 tick 还会再 bump，用构造时捕获的旧值会让这笔预栅格白做（画的那下还得重栅格）。
+            val liveRevision by rememberUpdatedState(contentRevision)
             val rasterPageNow: suspend (ReaderPos) -> Unit = { p ->
                 prerasterPage(
                     host = currentHost,
@@ -1097,7 +1147,7 @@ fun ReaderScreen(
                     contentBottom = contentBottom,
                     pageBg = profile.bgColor,
                     inkColor = profile.fgColor,
-                    contentRevision = contentRevision,
+                    contentRevision = liveRevision,
                     imgCache = imgCache,
                     bgCache = bgCache,
                 )
@@ -1117,7 +1167,8 @@ fun ReaderScreen(
                     inkColor = profile.fgColor,
                     modifier = Modifier.fillMaxSize(),
                     // 字重这类纯字形变更行数据完全相等，靠修订号强制重画（见 ReaderPageCanvas）。
-                    contentRevision = contentRevision,
+                    // 显示闸后的版本号：外部落位在途时冻结，避免「新参数 × 旧落位」多画一帧。
+                    contentRevision = displayRevision,
                     // 第 1 档「渲染」半边的抢占钩子：未命中真正栅格化时，让后台预排让路
                     // （总则第 1 条 + 线程调度原则 §5「唯一钩子」；翻页那半边早已接上）。
                     onMiss = onRasterMiss,

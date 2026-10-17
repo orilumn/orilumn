@@ -3099,8 +3099,8 @@ private fun finishCanonicalBackground(
                     val prep = prepareFor(unit, bc, markup, contentWidth, contentHeight, paramHash)
                     val product = bc.fullLayout(prep, profile, contentWidth, contentHeight)
                         ?: return@runCatching null
-                    val slice = lineAnchoredPage(product.layout, anchorChar, contentHeight)
-                        ?: product.slices.firstOrNull() ?: return@runCatching null
+                    val slice = nearestDiskPage(product.layout, product.slices, anchorChar)
+                        ?: return@runCatching null
                     Logger.w(logTag, "relayout-light ch=$chapter SMALL-FULL prepareLight=${tLight - t0}ms fullLayout=${platformNowMs() - tLight}ms total=${platformNowMs() - t0}ms blocks=${light.totalBlocks}")
                     // R5: small chapters never enter the temp path, so rebind a fresh in-memory
                     // table here (writes still belong to background canonical). Otherwise the stale
@@ -3112,8 +3112,9 @@ private fun finishCanonicalBackground(
             } else {
                 val product = layouter.layout(markup, unit.cssBundle, profile, contentWidth, contentHeight)
                     ?: return@runCatching null
-                val slice = lineAnchoredPage(product.layout, anchorChar, contentHeight)
-                    ?: product.slices.firstOrNull() ?: return@runCatching null
+                // 非 Box 排版器同样是整章全量产物：落位取磁盘表里离锚点最近的页（同短章口径）。
+                val slice = nearestDiskPage(product.layout, product.slices, anchorChar)
+                    ?: return@runCatching null
                 ReflowResult(chapter, product.layout, product.slices, slice)
             }
         }.onFailure { Logger.e(logTag, "relayout-light FAIL ch=$chapter anchorChar=$anchorChar ${it.message}") }.getOrNull()
@@ -3184,8 +3185,8 @@ private fun finishCanonicalBackground(
                     val prep = prepareFor(unit, bc, markup, contentWidth, contentHeight, paramHash)
                     val product = bc.fullLayout(prep, profile, contentWidth, contentHeight)
                         ?: return@runCatching null
-                    val slice = lineAnchoredPage(product.layout, anchorChar, contentHeight)
-                        ?: product.slices.firstOrNull() ?: return@runCatching null
+                    val slice = nearestDiskPage(product.layout, product.slices, anchorChar)
+                        ?: return@runCatching null
                     Logger.w(logTag, "relayout ch=$chapter SMALL-FULL prepareLight=${tLight - t0}ms fullLayout=${platformNowMs() - tLight}ms total=${platformNowMs() - t0}ms blocks=${light.totalBlocks}")
                     // R5: same in-memory table rebind as the light path (see above).
                     rebindSmallTable(unit, product.slices, paramHash)
@@ -3194,8 +3195,9 @@ private fun finishCanonicalBackground(
             } else {
                 val product = layouter.layout(markup, unit.cssBundle, profile, contentWidth, contentHeight)
                     ?: return@runCatching null
-                val slice = lineAnchoredPage(product.layout, anchorChar, contentHeight)
-                    ?: product.slices.firstOrNull() ?: return@runCatching null
+                // 非 Box 排版器同样是整章全量产物：落位取磁盘表里离锚点最近的页（同短章口径）。
+                val slice = nearestDiskPage(product.layout, product.slices, anchorChar)
+                    ?: return@runCatching null
                 ReflowResult(chapter, product.layout, product.slices, slice)
             }
         }.onFailure { Logger.e(logTag, "relayout FAIL ch=$chapter anchorChar=$anchorChar epoch=$myEpoch ${it.message}") }.getOrNull()
@@ -3562,46 +3564,36 @@ private fun finishCanonicalBackground(
     }
 
     /**
-     * Builds a page slice that begins at (or above) the line containing [anchorChar], extending
-     * downward to fill [contentH]. Rendered by the standard whole-chapter
-     * [orilumn.reader.engine.layout.DrawableBookLayout], so the page's first line is the page top.
+     * Landing page for a **settings change** on a chapter that owns no temp session (short chapter,
+     * or a non-Box layouter): the canonical page of [slices] whose **first line is nearest the line
+     * holding [anchorChar]** (tie → the earlier page, i.e. the one containing the anchor).
      *
-     * A/B decision for the preceding chapter-title block: if the block right above the anchor line is
-     * the chapter's first block (title) and including it keeps the anchor line within the upper half
-     * of the page, the page starts at the title (title on top, the anchored line below — the anchor
-     * stays on screen). Otherwise the page starts at the anchor line and the title is left whole on
-     * the previous page (so it is never torn).
+     * Why not a line-anchored page (what this replaced): a short chapter is always paginated by the
+     * disk table (总则 §1「小章全部使用磁盘表，不使用临时表」), so pinning the anchor line at the page
+     * top would hand the reader a page the table does not have — its top is not a table page break and
+     * its bottom is an ad-hoc line cut. Snapping to the nearest table break keeps the reader's screen
+     * as close as possible to what it was (the anchor line stays within one line of the page top, above
+     * or below it) while every page shown is a real table page, so a subsequent flip stays index-based
+     * and never mis-resolves to the chapter head.
      */
-    private fun lineAnchoredPage(layout: orilumn.reader.engine.paging.BookLayout, anchorChar: Int, contentH: Int): PageSlice? {
+    private fun nearestDiskPage(layout: orilumn.reader.engine.paging.BookLayout, slices: List<PageSlice>, anchorChar: Int): PageSlice? {
+        if (slices.isEmpty()) return null
+        // Canonical pages only: a slice without a line window is not a disk-table page.
+        val canonical = slices.filter { it.firstLine >= 0 }
+        if (canonical.isEmpty()) return slices.firstOrNull()
         val n = layout.lineCount
-        if (n <= 0 || contentH <= 0) return null
-        var l = 0
-        for (i in 0 until n) if (layout.getLineStart(i) <= anchorChar && layout.getLineEnd(i) > anchorChar) { l = i; break }
-        var start = l
-        // First line of the anchor's block.
-        var b0 = l
-        while (b0 > 0 && !layout.isParagraphBoundaryLine(b0)) b0--
-        // Try to pull the immediately-preceding block onto this page when it is the chapter's first
-        // (title) block and it keeps the anchor line in the upper part of the page.
-        if (b0 > 0) {
-            var p0 = b0 - 1
-            while (p0 > 0 && !layout.isParagraphBoundaryLine(p0)) p0--
-            if (p0 == 0) {
-                val anchorOffset = layout.getLineTop(l) - layout.getLineTop(0)
-                if (anchorOffset <= contentH * 0.5f) start = 0
-            }
+        if (n <= 0) return canonical.firstOrNull()
+        var anchorLine = -1
+        for (i in 0 until n) if (layout.getLineStart(i) <= anchorChar && layout.getLineEnd(i) > anchorChar) { anchorLine = i; break }
+        if (anchorLine < 0) anchorLine = if (anchorChar <= 0) 0 else n - 1
+        var best = canonical.first()
+        var bestDist = Int.MAX_VALUE
+        for (s in canonical) {
+            // Strict `<` keeps the earlier page on a tie (containing the anchor: no visible line advances).
+            val d = kotlin.math.abs(s.firstLine - anchorLine)
+            if (d < bestDist) { bestDist = d; best = s }
         }
-        val base = layout.getPageFrameTop(start)
-        var end = start
-        // 与 `Paginator.fillWholeLines` 同判据（帧几何：含页首元素的 margin-top 与页首块的
-        // border/padding）——少了这一段，绘制侧按盒顶对齐时末行越出页高被裁。
-        while (end < n && layout.getPageFrameBottom(end) - base <= contentH) end++
-        if (end == start) end = start + 1
-        val charStart = layout.getLineStart(start)
-        val charEnd = if (end < n) layout.getLineStart(end) else layout.length
-        // 布局器产出倒挂（charEnd<charStart）是布局 bug：抛，不钳成空页藏。
-        check(charEnd >= charStart) { "lineAnchoredPage inverted anchor=$anchorChar charStart=$charStart charEnd=$charEnd lines=$n" }
-        return PageSlice(charStart, charEnd, start, end, PageSlice.Kind.TEXT, -1, -1)
+        return best
     }
 
     /**

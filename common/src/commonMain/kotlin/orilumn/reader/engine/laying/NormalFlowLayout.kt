@@ -79,6 +79,9 @@ object NormalFlowLayout {
         val lines = ArrayList<FlowedLine>()
         flowBoxes(boxes, lines)
         if (contentH > 0) applyReplacedFit(boxes, lines, styles, contentH, imageLoader, chapterHref, density)
+        // §10.6.7：裁剪盒（`overflow != visible` = 本引擎的 BFC 近似）的高度包住浮动后代，
+        // **先于**裁剪几何（裁剪区取自盒高）。
+        containFloatsInClippers(boxes)
         // E12：`position: relative` 的绘制偏移（**先**于裁剪几何：裁剪区随盒一起平移）。
         // 只落绘制用字段，不改流位置 ⇒ 占位/分页不受影响；无 `position: relative` 时全零。
         applyRelativeOffsets(boxes, styles::get)
@@ -86,6 +89,40 @@ object NormalFlowLayout {
         // 无 `overflow` 声明时每个盒的 clipRect 恒 null，全链零像素回归。
         applyInheritedClips(boxes)
         return BoxLayoutResult(lines, boxes)
+    }
+
+    /**
+     * CSS 2.1 §10.6.7：`overflow != visible` 的块建立 BFC，自动高度**包住浮动后代** ——
+     * 下沿取「在流内容底」与「最深浮动后代的 border-box 底」的较大者。
+     *
+     * 本引擎的流**有意**不做 BFC 包拢（浮动逃逸容器，见 [emit] 容器收尾注释）：`overflow: visible`
+     * 的块高度只计在流内容，与浏览器 §10.6.3 一致。但**裁剪盒**不包住浮动就出事 —— E11 的
+     * `overflow` 裁剪按 padding box 裁，浮动被齐根切掉，也就是**丢内容**。真书里的 clearfix 写法
+     * （裁剪容器里全是 `float` 子块，在流高 0）会整块消失；实测图片浮动高 120 被切到 61。
+     *
+     * 只改**绘制几何**（盒高 ⇒ 底色/边框/裁剪区），**不改流位置** ⇒ 占位、兄弟、分页零影响。
+     */
+    private fun containFloatsInClippers(boxes: List<LayoutBox>) {
+        for (b in boxes) {
+            // 先子后父：内层裁剪盒先长高，外层再按同一口径聚合。
+            if (b.childBoxes.isNotEmpty()) containFloatsInClippers(b.childBoxes)
+            if (!b.style.clipsOverflow()) continue
+            val floatBottom = deepestFloatBottom(b.childBoxes)
+            // 长的是**内容盒**底（§10.6.7 说的是内容边）：加回自身下边距才能让 padding box 也包住
+            // 浮动 —— 裁剪区取的正是 padding box，少算边框会把浮动最下几像素切掉（实测差 2px）。
+            val edgesBottom = (b.style.padding.bottom + b.style.border.bottom).roundToInt()
+            if (floatBottom > b.contentBottom - edgesBottom) b.contentBottom = floatBottom + edgesBottom
+        }
+    }
+
+    /** 子树里最深的**浮动**盒（含嵌套）的 border-box 底；无浮动 = [Int.MIN_VALUE]。 */
+    private fun deepestFloatBottom(boxes: List<LayoutBox>): Int {
+        var max = Int.MIN_VALUE
+        for (b in boxes) {
+            if (b.table == null && b.style.floatSide != FloatSide.NONE) max = maxOf(max, b.contentBottom)
+            if (b.childBoxes.isNotEmpty()) max = maxOf(max, deepestFloatBottom(b.childBoxes))
+        }
+        return max
     }
 
     /**

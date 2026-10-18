@@ -1353,7 +1353,12 @@
       每族配离屏回归 + 全库截图 A/B。每一步必答 `AGENTS.md` 校验规则三问（tier / 量过 / 没配就不发）。
 
 - **标准化遗留 L1（parsed-only 补消费）** —— 2026-10-18 **第六刀已补掉三条**：`visibility: hidden`（不画、仍占位）、
-  `overflow` 祖先裁剪、`position: relative` 偏移与层叠；还剩 `font-stretch` 字形压缩与 `direction`/`unicode-bidi` 的 RTL 流两项。
+  `overflow` 祖先裁剪、`position: relative` 偏移；**复查真书命中时连带修掉「裁剪盒不包浮动」**（否则 clearfix 容器会整块丢内容，
+  详见《引擎欠账-对齐浏览器语义》E20）；还剩 `font-stretch` 字形压缩与 `direction`/`unicode-bidi` 的 RTL 流两项。
+  **E20 剩余四处偏差待议**（同文 E20 节）：① 非裁剪容器的**背景范围**两路分叉（轻路径把浮动算进底色带）；
+  ② 同侧浮动兄弟的**堆叠与自身顶边距次序**两路不同（实测纵边距一有即分叉）；
+  ③ `position: absolute` 后代**不应**被祖先 `overflow` 裁（本引擎无 `absolute` 布局，记着）；
+  ④ 行内元素上的 `float`（真书的下沉首字 / 行号）「计算成块级」是否已成立**未核**。
 - **真实 RTL 双向流与竖排模式合并为单个里程碑（2026-10-18 定）**：`direction`/`unicode-bidi`/`dir` 属性目前只解析不消费
   （`ComputedStyle.directionRtl` 全仓零读取），基向、起始边、镜像标点、逻辑边映射全缺。这个方向族与竖排
   （`-epub-writing-mode` / `writing-mode: vertical-*`）共享同一层「书写方向 → 物理边」接缝，故**合并为单个里程碑**，

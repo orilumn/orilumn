@@ -172,6 +172,31 @@ class OverflowClipTest(private val variant: String) {
         assertNull(shownImgs[0].clip)
     }
 
+    @Test
+    fun `浮动内容被 overflow hidden 祖先包住时不被裁掉`() {
+        // 真书模式（`internallinks.epub` 的 `.opening div.creater dl { overflow:hidden }` 内含
+        // `dt{float:left}`）：浏览器里 `overflow != visible` 建立 BFC、把浮动包进高度，
+        // 于是容器 padding box 必须**包住**浮动内容；否则 E11 的裁剪会把整块浮动切掉 —— 真书直接丢内容。
+        val r = run(
+            "<html><body>" +
+                "<div style=\"overflow:hidden;border:2px solid #000;padding:6px\">" +
+                "<p style=\"float:left;margin:0;width:70px\">左浮动甲乙丙丁戊己庚辛壬癸子丑寅卯</p>" +
+                "<p style=\"margin:0\">右侧正文</p>" +
+                "</div></body></html>",
+        )
+        val clip = boxOf(r.result, "div").paddingBox()
+        val floats = allBoxes(r.result).filter {
+            it.style.floatSide != orilumn.reader.engine.css.FloatSide.NONE
+        }
+        assertTrue("应有浮动盒（否则本用例失去意义）", floats.isNotEmpty())
+        for (f in floats) {
+            assertTrue(
+                "浮动内容不得被祖先裁剪切掉：浮动底 ${f.contentBottom}，裁剪下沿 ${clip.bottom}",
+                f.contentBottom <= clip.bottom,
+            )
+        }
+    }
+
     // ---- 3. 真栅格化 ----
 
     private fun line(text: String, clip: ClipRect? = null): DrawLine = DrawLine(
@@ -293,5 +318,43 @@ class OverflowClipTest(private val variant: String) {
         assertEquals("左沿（内容坐标，两路同框架）", heavy.left, light.left)
         assertEquals("右沿", heavy.right, light.right)
         assertEquals("高度（Y 框架不同，只比高度）", heavy.bottom - heavy.top, light.bottom - light.top)
+    }
+
+    @Test
+    fun `浮动后代不会被 overflow hidden 祖先裁掉（重轻两路一致）`() {
+        // §10.6.7：`overflow != visible` 的盒高包住浮动后代 ⇒ 裁剪区也必须包住。真书的 clearfix
+        // 写法（裁剪容器里全是浮动子块）若照 padding box 硬裁，会**整块丢内容**。
+        val css = "p{margin:0}"
+        val html = "<html><body>" +
+            "<div style=\"overflow:hidden;border:2px solid #000;padding:6px\">" +
+            "<img src=\"a.png\" width=\"60\" height=\"120\" style=\"float:left\"/>" +
+            "<p style=\"margin:0\">右侧正文</p></div></body></html>"
+
+        // 重路径：图叶的内容裁剪必须包住整张图。
+        val l = BoxChapterLayouter(themeSheet = themeSheetFromProfile(profile())).also { it.bindChapterContext(chapterHref) }
+        val p = l.prepare(HtmlTreeConverter().convert(html)!!, CssBundle(listOf(css)), profile(), 500, contentH)
+        val img = allBoxes(p.structure).first { it.el?.tag == "img" && !it.el!!.isText }
+        val heavy = requireNotNull(img.contentClip())
+        assertTrue(
+            "重路径：图底 ${img.contentBottom} 被裁到 ${heavy.bottom}（丢内容）",
+            img.contentBottom <= heavy.bottom,
+        )
+
+        // 轻路径：同一条规则（替换型浮动叶在行流里是零高行，几何须按替换高还原）。
+        val l2 = BoxChapterLayouter(themeSheet = themeSheetFromProfile(profile())).also { it.bindChapterContext(chapterHref) }
+        val p2 = l2.prepareLight(
+            HtmlTreeConverter().convert(html)!!, CssBundle(listOf(css)), profile(), 500,
+            ChapterStructureCache(), contentH,
+        )
+        l2.tempShape(null, p2, 0, profile())
+        val page = requireNotNull(l2.shapeTempPageForward(p2, profile(), 500, contentH, 0, null, 0))
+        val rb = page.page.layout as LayoutReadback
+        val drawn = rb.pageImages(0, Int.MAX_VALUE).firstOrNull() ?: error("临时页没有插图")
+        val clip = requireNotNull(drawn.clip) { "临时页的插图必须带裁剪（窗口聚合源）" }
+        assertTrue(
+            "轻路径：图底 ${drawn.yBottom} 被裁到 ${clip.bottom}（丢内容）",
+            drawn.yBottom <= clip.bottom,
+        )
+        assertEquals("重轻两路的裁剪同高", heavy.bottom - heavy.top, clip.bottom - clip.top)
     }
 }

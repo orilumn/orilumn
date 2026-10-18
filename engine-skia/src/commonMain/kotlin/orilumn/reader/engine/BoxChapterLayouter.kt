@@ -2806,9 +2806,16 @@ class BoxChapterLayouter(
                 return LeafBand(recorded, recorded + topEdges + bottomEdges, anchor, anchor)
             }
             if (lo0 >= lines.size || hi0 <= lo0) return null
+            // §10.6.7（E11）：**替换型浮动叶**（图）在行流里只有零高行 —— 真实下沿按替换高还原，
+            // 否则裁剪盒聚合不到它（同章在轻路径上会把整张图齐根切掉）。文本浮动叶的行是真的，无需还原。
+            val bottom = if (s.floatSide != orilumn.reader.engine.css.FloatSide.NONE && leaf.replaceableHeight > 0) {
+                lines[lo0].yTop + leaf.replaceableHeight + bottomEdges
+            } else {
+                lines[minOf(hi0, lines.size) - 1].yBottom + bottomEdges
+            }
             return LeafBand(
                 top = lines[lo0].yTop - topEdges,
-                bottom = lines[minOf(hi0, lines.size) - 1].yBottom + bottomEdges,
+                bottom = bottom,
                 lo = lo0,
                 hi = hi0,
             )

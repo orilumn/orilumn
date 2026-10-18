@@ -826,7 +826,7 @@ class BoxChapterLayouter(
                     inkColor = inkColor,
                     colorRuns = shape.colorRuns,
                     fontRuns = shape.fontRuns,
-                    firstLineIndentPx = if (k == 0) leaf.style.textIndentPx.coerceAtLeast(0f) else 0f,
+                    firstLineIndentPx = if (k == 0) leaf.style.textIndentPx else 0f,
                     // P1-2: 不换行段绘制侧以无限宽整形（与 canonical DrawLineBuilder 一致）。
                     nowrap = !orilumn.reader.engine.css.WhiteSpaceNormalize.wraps(style.whiteSpace),
                     // P1-2: 行内基线位移随段整形（与 canonical 一致）。
@@ -1012,9 +1012,10 @@ class BoxChapterLayouter(
 
         // 4. Build merged local FlowedLine stream covering all shaped blocks (P6-a2 R6 前视 carry-in).
         val tLines0 = orilumn.reader.time.platformNowMs()
-        val localLines = rebuildLocalLines(prepare, blockLo, blockHi, localShapes) {
+        val localFlow = rebuildLocalLines(prepare, blockLo, blockHi, localShapes) {
             tempShape(cache, prepare, it, profile, prefillL2)
         }
+        val localLines = localFlow.lines
         val tLines1 = orilumn.reader.time.platformNowMs()
 
         // 5. Build the drawable covering all shaped pages. It is a BookLayout, so pagination below can
@@ -1050,7 +1051,9 @@ class BoxChapterLayouter(
         )
         val tTbl1 = orilumn.reader.time.platformNowMs()
         val tBox0 = orilumn.reader.time.platformNowMs()
-        val boxes = buildBackgroundDrawBoxes(prepare, leavesForDraw, localLines, localFirst, localLast)
+        val boxes = buildBackgroundDrawBoxes(
+            prepare, leavesForDraw, localLines, localFirst, localLast, localFlow.lineLessBoxTop,
+        )
         val tBox1 = orilumn.reader.time.platformNowMs()
         val frameLeadTop = windowLeadTop(prepare, blockLo, localShapes)
         val drawable = PartialDrawableLayout(
@@ -1314,8 +1317,21 @@ class BoxChapterLayouter(
         shapes: List<ParagraphShapeRef>,
         /** P6-a2 R6: 前视塑形（lookback 块状态预热用；null = 无前视，窗口即全章）。 */
         shapeLookback: ((Int) -> ParagraphShapeRef)? = null,
-    ): List<FlowedLine> {
+    ): LocalLineFlow {
         val out = ArrayList<FlowedLine>()
+        // 无行叶（零字符、只有边框/背景的块，如 UA `<hr>`：`lineCount == 0`）的 border-box 顶记账。
+        // 行流里它没有任何锚行，轻路径的画盒聚合 [buildBackgroundDrawBoxes] 本拿不到位置 —— 这里把
+        // 行流当场算出的 `y`（与重路径 `emit` 的 `st.y` 逐值同源）带出去。仅当窗内真有无行叶时才分配
+        // （其余窗口零开销、零行为变化）；有行叶的画盒仍由行流首/末行给出，与此无涉。
+        var lineLessBoxTop: IntArray? = null
+        // 记一笔无行叶的 border-box 顶（[top] = 本叶 border-box 顶 `y`，已含 advance/clear/回填，
+        // 与重路径 `emit` 的 `st.y` 同相位）。
+        fun noteLineLessBoxTop(gi: Int, shape: ParagraphShapeRef, top: Int) {
+            if (gi < blockLo || shape.lineCount > 0 || shape.isReplaceable) return
+            val arr = lineLessBoxTop
+                ?: IntArray(blockHi - blockLo) { LocalLineFlow.NO_LINE_LESS_TOP }.also { lineLessBoxTop = it }
+            arr[gi - blockLo] = top
+        }
         // P6-a2 R6: 窗口前视 carry-in（≤8 块）：状态预热，不发射；切入窗顶时整体归零。
         val lo2 = if (blockLo > 0 && shapeLookback != null) maxOf(0, blockLo - 8) else blockLo
         val extLeaves = (lo2 until blockHi).map { prepare.block(it) }
@@ -1379,6 +1395,7 @@ class BoxChapterLayouter(
                 // 相邻同侧堆叠。
                 val own = if (ls.floatSide == orilumn.reader.engine.css.FloatSide.LEFT) floatBottomL else floatBottomR
                 if (own != null && own > y) y = own
+                noteLineLessBoxTop(gi, shape, y)
                 val contentY = y + (ls.border.top + ls.padding.top).roundToInt()
                 if (shape.isReplaceable && shape.replaceableBottom > 0) {
                     if (emit) {
@@ -1483,6 +1500,7 @@ class BoxChapterLayouter(
                 }
             }
             y += advance
+            noteLineLessBoxTop(gi, shape, y)
             val shapeStart = if (shape.lineCount > 0) shape.lineStart(0) else 0
             val charBase = runningChar
             val lastK = shape.lineCount - 1
@@ -1533,7 +1551,7 @@ class BoxChapterLayouter(
             }
             runningChar += leaf.textLength
         }
-        return out
+        return LocalLineFlow(out, lineLessBoxTop)
     }
 
     /** Per-leaf local line ranges for a contiguous [shapes] list — (firstLine, lastLineExclusive)
@@ -2343,13 +2361,20 @@ class BoxChapterLayouter(
         require(shapes.size == blockEndExclusive - blockStart) { "assembleTempPage shapes/blocks misaligned shapes=${shapes.size} range=[$blockStart,$blockEndExclusive)" }
         require(contentH > 0) { "assembleTempPage contentH=$contentH" }
         val total = prepare.totalBlocks
-        val rawLines = rebuildLocalLines(prepare, blockStart, blockEndExclusive, shapes, shapeLookback)
+        val rawFlow = rebuildLocalLines(prepare, blockStart, blockEndExclusive, shapes, shapeLookback)
+        val rawLines = rawFlow.lines
         // Normalize the temp page's line y coordinates to start at the page's first line = 0. This
         // removes any dependence on the blocks' absolute content offsets (a mid-chapter anchor page can
         // start far down the chapter), so the page always renders top-aligned regardless of those offsets.
         val base = rawLines.getOrNull(pageFirstLine.coerceAtLeast(0))?.yTop ?: 0
         val lines = if (base == 0) rawLines else rawLines.map {
             FlowedLine(it.charStart, it.charEnd, it.yTop - base, it.yBottom - base, it.paragraphStart)
+        }
+        // 无行叶的 border-box 顶记账与行同坐标系 ⇒ 同样要归一化（占位值不参与减法，防下溢）。
+        val lineLessBoxTop = rawFlow.lineLessBoxTop?.let { a ->
+            if (base == 0) a else IntArray(a.size) {
+                if (a[it] == LocalLineFlow.NO_LINE_LESS_TOP) a[it] else a[it] - base
+            }
         }
         val leavesForDraw = prepare.blocks(blockStart, blockEndExclusive)
         val (localFirst, localLast) = localLineRanges(shapes)
@@ -2387,7 +2412,7 @@ class BoxChapterLayouter(
             // （`localLast[i] == localFirst[i]`），于是本窗口的 `BreakClusters.plan` 恒为「无簇、无
             // 强制行」——临时页/增量窗的断页规则静默失效（P4 曾如此）。
             localLast = localLast,
-            boxes = buildBackgroundDrawBoxes(prepare, leavesForDraw, lines, localFirst, localLast),
+            boxes = buildBackgroundDrawBoxes(prepare, leavesForDraw, lines, localFirst, localLast, lineLessBoxTop),
             loader = imageLoader,
             href = chapterHref,
             // P4d：临时页的绘制布局也带上 `break-inside: avoid` 属主图 —— 临时/磁盘两条路径的
@@ -2714,8 +2739,38 @@ class BoxChapterLayouter(
         lines: List<FlowedLine>,
         firstByBlock: IntArray,
         lastByBlock: IntArray,
+        /**
+         * E7：无行叶（零字符、只有边框/背景的块，如 UA `<hr>`）的 border-box 顶 ——
+         * [LocalLineFlow.lineLessBoxTop]，下标与 [leafList] 一一对应。null/占位 = 旧口径
+         * （该叶有行，或有行但窗口半截）。画盒侧没有它就只能整块跳过（旧行为：行流里没锚行）。
+         */
+        lineLessBoxTop: IntArray? = null,
     ): List<LayoutBox> {
-        if (leafList.isEmpty() || lines.isEmpty()) return emptyList()
+        if (leafList.isEmpty()) return emptyList()
+        // 叶 [i] 的 border-box 上下沿 + 行锚。有行叶 = 行流首/末行 ± 自身边距（旧口径逐值不变）；
+        // **无行叶**（`hi <= lo`）没有任何锚行：用行流记账的 border-box 顶 + 自身上下边距造一个零宽锚
+        // （`lo == hi`，与重路径 `emit` 的 `firstLineIndex == lastLineExclusive` 同式 ⇒ 页面归属门
+        // 两路同判）。null = 本叶无可画区间（窗口半截 / 有行但落在窗外 / 无行且无记账）。
+        fun extentOf(i: Int): LeafBand? {
+            val leaf = leafList[i]
+            val lo0 = firstByBlock[i].coerceAtLeast(0)
+            val hi0 = lastByBlock[i]
+            val s = leaf.style
+            val topEdges = (s.border.top + s.padding.top).roundToInt()
+            val bottomEdges = (s.border.bottom + s.padding.bottom).roundToInt()
+            val recorded = if (hi0 <= lo0) lineLessBoxTop?.getOrNull(i) else null
+            if (recorded != null && recorded != LocalLineFlow.NO_LINE_LESS_TOP) {
+                val anchor = lo0.coerceAtMost(lines.size)
+                return LeafBand(recorded, recorded + topEdges + bottomEdges, anchor, anchor)
+            }
+            if (lo0 >= lines.size || hi0 <= lo0) return null
+            return LeafBand(
+                top = lines[lo0].yTop - topEdges,
+                bottom = lines[minOf(hi0, lines.size) - 1].yBottom + bottomEdges,
+                lo = lo0,
+                hi = hi0,
+            )
+        }
         // A "self-owned" owner is the background bearing LEAF itself (a `pre`/`p.filename` with its own
         // background): its aggregated extent already counts its own top+bottom edges once, so the band
         // must NOT be extended by them again. Container owners (blockquote/.rust-example-rendered) are
@@ -2728,24 +2783,18 @@ class BoxChapterLayouter(
         val selfOwned = HashSet<MarkupElement>()
         for (i in leafList.indices) {
             val leaf = leafList[i]
-            val lo = firstByBlock[i].coerceAtLeast(0)
-            val hi = lastByBlock[i]
-            if (lo >= lines.size || hi <= lo) continue
-            // Mirror NormalFlowLayout.emit's leaf branch: a leaf's border box = its text lines ± its own
-            // padding/border (counted once, already including the top inset rebuildLocalLines applies).
-            val top = lines[lo].yTop - (leaf.style.border.top + leaf.style.padding.top).roundToInt()
-            val bottom = lines[minOf(hi, lines.size) - 1].yBottom + (leaf.style.border.bottom + leaf.style.padding.bottom).roundToInt()
+            val band = extentOf(i) ?: continue
             val el = leaf.el ?: continue
             val owner = prepare.backgroundOwnerMap[el] ?: continue
             if (owner === el) selfOwned.add(owner)
             val prevTop = aggTop[owner]
-            if (prevTop == null || top < prevTop) {
-                aggTop[owner] = top
+            if (prevTop == null || band.top < prevTop) {
+                aggTop[owner] = band.top
                 ownerLeaf[owner] = el
             }
-            ownerBottom[owner] = maxOf(ownerBottom[owner] ?: bottom, bottom)
-            ownerFirst[owner] = minOf(ownerFirst[owner] ?: lo, lo)
-            ownerLast[owner] = maxOf(ownerLast[owner] ?: hi, hi)
+            ownerBottom[owner] = maxOf(ownerBottom[owner] ?: band.bottom, band.bottom)
+            ownerFirst[owner] = minOf(ownerFirst[owner] ?: band.lo, band.lo)
+            ownerLast[owner] = maxOf(ownerLast[owner] ?: band.hi, band.hi)
         }
         val out = ArrayList<LayoutBox>(aggTop.size)
         for ((owner, top) in aggTop) {
@@ -2785,23 +2834,19 @@ class BoxChapterLayouter(
         for (i in leafList.indices) {
             val leaf = leafList[i]
             val el = leaf.el ?: continue
-            val lo = firstByBlock[i].coerceAtLeast(0)
-            val hi = lastByBlock[i]
-            if (lo >= lines.size || hi <= lo) continue
-            val top = lines[lo].yTop - (leaf.style.border.top + leaf.style.padding.top).roundToInt()
-            val bottom = lines[minOf(hi, lines.size) - 1].yBottom + (leaf.style.border.bottom + leaf.style.padding.bottom).roundToInt()
+            val band = extentOf(i) ?: continue
             var a = el.parent
             while (a != null && a.tag != "body") {
                 val s = prepare.resolveStyle(a)
                 if (!s.hasBackground() && s.hasBorderEdges() && !aggTop.containsKey(a)) {
                     val prev = cTop[a]
-                    if (prev == null || top < prev) {
-                        cTop[a] = top
+                    if (prev == null || band.top < prev) {
+                        cTop[a] = band.top
                         cLeaf[a] = el
                     }
-                    cBottom[a] = maxOf(cBottom[a] ?: bottom, bottom)
-                    cFirst[a] = minOf(cFirst[a] ?: lo, lo)
-                    cLast[a] = maxOf(cLast[a] ?: hi, hi)
+                    cBottom[a] = maxOf(cBottom[a] ?: band.bottom, band.bottom)
+                    cFirst[a] = minOf(cFirst[a] ?: band.lo, band.lo)
+                    cLast[a] = maxOf(cLast[a] ?: band.hi, band.hi)
                 }
                 a = a.parent
             }
@@ -2836,20 +2881,16 @@ class BoxChapterLayouter(
             val el = leaf.el ?: continue
             if (!leaf.style.hasBorderEdges()) continue
             if (aggTop.containsKey(el)) continue
-            val lo = firstByBlock[i].coerceAtLeast(0)
-            val hi = lastByBlock[i]
-            if (lo >= lines.size || hi <= lo) continue
-            val top = lines[lo].yTop - (leaf.style.border.top + leaf.style.padding.top).roundToInt()
-            val bottom = lines[minOf(hi, lines.size) - 1].yBottom + (leaf.style.border.bottom + leaf.style.padding.bottom).roundToInt()
-            if (bottom <= top) continue
+            val band = extentOf(i) ?: continue
+            if (band.bottom <= band.top) continue
             val borderBox = LayoutBox(
                 el = el, style = leaf.style, contentLeft = leaf.contentLeft, contentWidth = leaf.contentWidth,
                 ranges = emptyList(), textLength = 0, lineHeights = emptyList(), childBoxes = emptyList(),
             )
-            borderBox.contentTop = top
-            borderBox.contentBottom = bottom
-            borderBox.firstLineIndex = lo
-            borderBox.lastLineExclusive = hi
+            borderBox.contentTop = band.top
+            borderBox.contentBottom = band.bottom
+            borderBox.firstLineIndex = band.lo
+            borderBox.lastLineExclusive = band.hi
             out.add(borderBox)
         }
         return out
@@ -2883,6 +2924,31 @@ class BoxChapterLayouter(
         )
     }
 }
+
+/**
+ * 内核层：[BoxChapterLayouter.rebuildLocalLines] 的产出 —— 窗口行流 + **无行叶的 border-box 顶**记账。
+ *
+ * 无行叶 = 零字符、只有边框/背景的块（`lineCount == 0`，如 UA `<hr>`：2px 高的场景分隔线）。它在
+ * 行流里没有任何锚行，[BoxChapterLayouter.buildBackgroundDrawBoxes] 的「叶 → 行区间」聚合本来
+ * 拿不到它的位置 ⇒ 轻路径（临时页 / 增量窗）画不出它的边框盒，而重路径（盒树）画得出 ——
+ * 同章在两路下外观分叉。这里把行流当场算出的 border-box 顶（与重路径 `emit` 的 `st.y` 同式同值）
+ * 带出来，画盒侧据此补一个零宽行锚的边框盒。
+ *
+ * [lineLessBoxTop] 仅当窗内**真的存在**无行叶时非空（下标 = 窗内叶序，其余项为
+ * [NO_LINE_LESS_TOP]），所以普通窗口的分配与行为都零变化。
+ */
+private class LocalLineFlow(
+    val lines: List<FlowedLine>,
+    val lineLessBoxTop: IntArray?,
+) {
+    companion object {
+        /** [lineLessBoxTop] 的占位值：该叶有行（画盒走行流首/末行旧口径）。 */
+        const val NO_LINE_LESS_TOP = Int.MIN_VALUE
+    }
+}
+
+/** 内核层画盒侧的一次叶区间取值：border-box 上下沿 + 行锚（[lo], [hi]）。 */
+private class LeafBand(val top: Int, val bottom: Int, val lo: Int, val hi: Int)
 
 /**
  * A [DrawableBookLayout] that backs only a contiguous range of shaped blocks — the minimal rendering
@@ -3266,7 +3332,7 @@ class LightPrepare(
                 val breakWf = NormalFlowLayout.innerBreakWidth(style, floatW)
                 val shaped = breakWrappedLines(
                     breaker, text, style, breakWf, null, el.tag, runs,
-                    style.textIndentPx.coerceAtLeast(0f),
+                    style.textIndentPx,
                     NormalFlowLayout.leafBaselineShifts(el, sub, classify, hidden, genOf),
                     NormalFlowLayout.leafInlineBoxRuns(el, sub, classify, hidden, genOf),
                 )
@@ -3290,7 +3356,7 @@ class LightPrepare(
             val runs = NormalFlowLayout.leafFontRuns(el, sub, classify, hidden, genOf)
             val shaped = breakWrappedLines(
                 breaker, text, style, NormalFlowLayout.innerBreakWidth(style, cw), lead, el.tag, runs,
-                style.textIndentPx.coerceAtLeast(0f),
+                style.textIndentPx,
                 NormalFlowLayout.leafBaselineShifts(el, sub, classify, hidden, genOf),
                 NormalFlowLayout.leafInlineBoxRuns(el, sub, classify, hidden, genOf),
             )

@@ -379,7 +379,7 @@ class LineWindowDrawer(
         // 缩进已在 placement 内（x0），落墨起点即文本区左缘（marker 另行绘制，不动）。
         val paintX = textX
         // 基线：半行距居中 + ascent（CSS 2.2 §10.8.1）。**自算**，不再借道 Paragraph。
-        val baseY = baselineY(line, lineExtra)
+        val baseY = baselineY(line, lineExtra, start, endExcl)
         // paintX 是纯内容区偏移；placement 的 x 已含缩进与对齐偏移，逐字落墨时统一加上。
         // **行内盒（背景/边框）先落，垫在文字之下**（CSS：背景 → 边框 → 文字）。
         paintInlineBoxes(canvas, line, placement, paintX, baseY, start, endExcl)
@@ -399,22 +399,39 @@ class LineWindowDrawer(
      *
      * **替换掉旧路径的两套基线计算**：旧代码先按 `Paragraph.paint` 的内部语义定位，再按平台
      * （`paragraphPaintHonorsLineHeight`：jvm true / android false）用 `deviceBaselineShift`
-     * 补差；现在两侧同式 —— [LineAligner.baselineOffset] 一次算完，平台差异不再需要分支。
+     * 补差；现在两侧同式 —— [LineAligner.boxBaselineOffset] 一次算完，平台差异不再需要分支。
+     *
+     * ## E9：行内大字号必须一并把基线下移
+     *
+     * 行框高已按 CSS 2.1 §10.8 取本行各**行内盒** leading 的最大值（[growLineHeightsForInlineFontSize]，
+     * 见 `breakLeafLines` 出口）。基线若仍按叶自身字号算，大字顶部就越出行框压到上一行 ——
+     * 行框撑了、基线不同步 = 等于没修。故此处对同一批盒取 §10.8.1 的
+     * `ascent + 半行距` **最大**（行框顶 = 基线 − 该值）。
+     *
+     * 只算**字号严格更大**的 run（E9 的范围，也是唯一会改变本行高度的情形）：同号异族的度量差在
+     * 亚像素级，拿它去动全量基线是另一件事，不在本刀。
      */
-    private fun baselineY(line: DrawLine, lineExtra: Int): Float {
+    private fun baselineY(line: DrawLine, lineExtra: Int, start: Int, endExcl: Int): Float {
         val font = glyphPainter.baseGlyphStyle(
             line.fontSizePx, line.families, line.weight, line.italic, line.monospace,
             0xFF000000.toInt(), 'H'.code, line.tag,
         ).font
         val fm = font.metrics
-        return aligner.baselineOffset(
-            yTop = line.yTop.toFloat(),
-            fontSizePx = line.fontSizePx,
-            lineHeightRatio = line.lineHeightRatio,
-            ascentPx = -fm.ascent,
-            descentPx = fm.descent,
-            extraTop = lineExtra.toFloat(),
-        )
+        var offset = aligner.boxBaselineOffset(line.fontSizePx, line.lineHeightRatio, -fm.ascent, fm.descent)
+        for (r in line.fontRuns) {
+            // run 段表是**整叶**的（未按行切）：只认与本行有交集的段，否则同段别行的大字会抬起本行。
+            if (r.endExclusive <= start || r.start >= endExcl) continue
+            val px = r.fontPxOr(line.fontSizePx)
+            if (px <= line.fontSizePx) continue
+            val runFont = glyphPainter.baseGlyphStyle(
+                px, r.families, r.weight, r.italic, r.monospace,
+                0xFF000000.toInt(), 'H'.code, r.tag ?: line.tag,
+            ).font
+            val rf = runFont.metrics
+            val o = aligner.boxBaselineOffset(px, line.lineHeightRatio, -rf.ascent, rf.descent)
+            if (o > offset) offset = o
+        }
+        return line.yTop + lineExtra + offset
     }
 
 

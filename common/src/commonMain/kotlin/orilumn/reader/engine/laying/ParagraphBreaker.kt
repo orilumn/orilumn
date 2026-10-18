@@ -47,9 +47,16 @@ interface ParagraphBreaker {
     fun breakLines(text: CharSequence, fontSizePx: Float, lineHeightRatio: Float, widthPx: Int, alignment: TextAlign, tag: String?, families: List<String>, weight: Int, italic: Boolean, monospace: Boolean): List<BrokenLine>
 
     /**
-     * [breakLines] with CSS `text-indent` for the run's first line only (px, >= 0; hang/negative
-     * out of scope) — the shaper shortens the first line by it, the drawer offsets the first line
-     * by it. Non-first lines are unaffected on both sides.
+     * [breakLines] with CSS `text-indent` for the run's first line only (px) — the shaper shortens
+     * the first line by it, the drawer offsets the first line by it. Non-first lines are unaffected
+     * on both sides.
+     *
+     * **负值合法（悬挂缩进 / E8）**：CSS 2.1 §16.1 的首行缩进是**有符号长度** —— `firstLineIndentPx < 0`
+     * 时首行**左移** `|indent|`、首行可用宽**加宽** `|indent|`（`headPx = widthPx - indent` 本身就
+     * 是这条式子，不需要另外分支），其余行仍按 `widthPx`。曾一律 `coerceAtLeast(0f)` 钳零
+     * （10 个消费点）⇒ 悬挂缩进被静默吃掉、首行可用宽少一截 ⇒ 与浏览器断行分叉。
+     * 量画两侧必须传**同一个有符号值**：断行侧按它算首行可用宽，绘制侧（[orilumn.reader.engine.skia.LineAligner]）
+     * 按它定首行 `x0`。
      *
      * Default implementation delegates to the indent-agnostic overload (test fakes keep working
      * untouched); production [orilumn.reader.engine.skia.SkiaParagraphBreaker] overrides with real

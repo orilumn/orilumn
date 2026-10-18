@@ -2,6 +2,7 @@ package orilumn.reader.engine.laying
 
 import orilumn.reader.engine.css.ComputedStyle
 import orilumn.reader.engine.css.LightCssParser
+import orilumn.reader.engine.css.ReaderStylesheets
 import orilumn.reader.engine.css.StyleComputer
 import orilumn.reader.engine.html.MarkupElement
 import kotlin.math.roundToInt
@@ -311,6 +312,73 @@ class BoxSharedGeometryTest {
         assertEquals(2, leaves.size)
         val gap = NormalFlowLayout.consecutiveLeafAdvance(leaves[0].el!!, leaves[1].el!!) { compute(styleMap, it) }
         assertEquals(8 + 14, gap) // padding-bottom 8 + section's own margin-bottom 14 — children's 8 NOT folded
+    }
+
+    /**
+     * E7 竖向单源锁：`<hr>` 这类**零字符、只有边框**的块在正典 `emit` 里是「无行叶」——
+     * 盒高全靠上下边框（浏览器 UA `border: 1px` ⇒ 2px 横线），行流里没有任何锚行。
+     * 轻路径（临时页 / 增量窗）的竖向推进只能靠 [NormalFlowLayout.consecutiveLeafAdvance]，
+     * 两侧必须逐值相同，否则 hr 前后整段行位置漂移（前后两页的断点跟着变）。
+     */
+    @Test
+    fun `hr border box spacing matches the canonical flow`() {
+        val p1 = node("p", children = listOf(text("aa")))
+        val hr = node("hr")
+        val p2 = node("p", children = listOf(text("bb")))
+        val root = node("body", children = listOf(p1, hr, p2))
+        linkParents(root, null)
+
+        val css = "hr { margin: 8px 0; border: 1px solid #000000 }"
+        assertConsecutiveAdvancesMatchHeavy(root, css)
+
+        val styleMap = StyleComputer(10f, LightCssParser().parse(""), listOf(LightCssParser().parse(css))).compute(root)
+        val classify = NormalFlowLayout.heavyClassify(styleMap, true)
+        val result = BoxLayouter(10f, FixedWidthBreaker(3)).layoutBoxes(root, widthPx = 30, styleMap = styleMap, classify = classify)
+        val leaves = flattenLeaves(result.boxes)
+        assertEquals(3, leaves.size)
+        // 零字符 ⇒ 零行；盒高 = 上下边框 1px + 1px。
+        assertEquals(0, leaves[1].ranges.size)
+        assertEquals(0, leaves[1].lineHeights.size)
+        assertEquals(2, leaves[1].contentBottom - leaves[1].contentTop)
+        // 两侧落差与共享推进同值（上侧 collapse(p 的 0, hr 的 8) = 8；下侧同）。
+        assertEquals(8, leaves[1].contentTop - leaves[0].contentBottom)
+        assertEquals(8, leaves[2].contentTop - leaves[1].contentBottom)
+    }
+
+    /**
+     * E7：`ua.css` 的 `hr` 基线（对齐浏览器 UA `.5em auto` + `1px` 边框）。书不写任何样式时，
+     * `<hr>` 必须自己长出边框 —— 否则它是个零高空心块，正典/轻两路都画不出场景分隔线。
+     * UA 是最低层（tier 10），书里任何 `hr` 规则照旧压得过它。
+     */
+    @Test
+    fun `ua sheet gives hr a browser style border`() {
+        val p = node("p", children = listOf(text("aa")))
+        val hr = node("hr")
+        val root = node("body", children = listOf(p, hr))
+        linkParents(root, null)
+
+        val ua = LightCssParser().parse(
+            ReaderStylesheets.ua().replace(ReaderStylesheets.LINK_COLOR_TOKEN, "#0000ff"),
+        )
+        val styleMap = StyleComputer(10f, ua, listOf(LightCssParser().parse(""))).compute(root)
+        val hrStyle = styleMap[hr]!!
+        assertTrue("UA 的 hr 必须带边框（否则零字符块什么都不画）", hrStyle.hasBorderEdges())
+        assertEquals(1f, hrStyle.border.top)
+        assertEquals(1f, hrStyle.border.bottom)
+        assertEquals(5f, hrStyle.margin.top) // 0.5em × 10px
+        assertEquals(5f, hrStyle.margin.bottom)
+        // `margin: .5em auto`：块宽 auto 下水平 auto 外边距解析为 0（铺满版心）。
+        assertEquals(0f, hrStyle.margin.left)
+        assertEquals(0f, hrStyle.margin.right)
+
+        val classify = NormalFlowLayout.heavyClassify(styleMap, false)
+        val result = BoxLayouter(10f, FixedWidthBreaker(50)).layoutBoxes(root, widthPx = 300, styleMap = styleMap, classify = classify)
+        val leaves = flattenLeaves(result.boxes)
+        assertEquals(2, leaves.size)
+        assertEquals(2, leaves[1].contentBottom - leaves[1].contentTop)
+        assertEquals(300, leaves[1].contentWidth)
+        // UA p 的 margin 1em = 10px 压过 hr 的 0.5em = 5px（相邻外边距合并取大）。
+        assertEquals(10, leaves[1].contentTop - leaves[0].contentBottom)
     }
 
     /**

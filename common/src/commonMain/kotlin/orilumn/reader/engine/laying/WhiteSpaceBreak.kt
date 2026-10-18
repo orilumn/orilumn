@@ -32,10 +32,13 @@ fun breakLeafLines(
     val edges = inlineBoxEdges(text.length, inlineBoxRuns)
     val lead = inlineBoxLeadInsetPx(inlineBoxRuns)
     if (WhiteSpaceNormalize.wraps(style.whiteSpace)) {
-        return breaker.breakLines(
-            text, style.fontSizePx, style.lineHeightRatio, widthPx, style.textAlign, tag,
-            style.fontFamilies, style.fontWeight, style.italic, style.monospace || tag == "pre",
-            firstLineIndentPx.coerceAtLeast(0f) + lead, fontRuns, baselineShifts, edges,
+        return growLineHeightsForInlineFontSize(
+            breaker.breakLines(
+                text, style.fontSizePx, style.lineHeightRatio, widthPx, style.textAlign, tag,
+                style.fontFamilies, style.fontWeight, style.italic, style.monospace || tag == "pre",
+                firstLineIndentPx + lead, fontRuns, baselineShifts, edges,
+            ),
+            fontRuns, style.fontSizePx, style.lineHeightRatio,
         )
     }
     if (text.isEmpty()) return emptyList()
@@ -57,7 +60,8 @@ fun breakLeafLines(
         }
         i++
     }
-    return out
+    // 窄体/平面文本同吃 E9：不换行段的行框同样由行内字号撑。
+    return growLineHeightsForInlineFontSize(out, fontRuns, style.fontSizePx, style.lineHeightRatio)
 }
 
 /**
@@ -103,7 +107,7 @@ fun breakWrappedLines(
             sub, style.fontSizePx, style.lineHeightRatio, w, style.textAlign, tag,
             style.fontFamilies, style.fontWeight, style.italic, mono,
             // 盒起始于叶首字符的左边内边距只作用于**首行**（i == 0 ⟺ consumed == 0）。
-            (if (i == 0) firstLineIndentPx.coerceAtLeast(0f) + leadInset else 0f),
+            (if (i == 0) firstLineIndentPx + leadInset else 0f),
             sliceRuns(fontRuns, consumed, sub.length),
             sliceShifts(baselineShifts, consumed, sub.length),
             sliceInlineBoxEdges(allEdges, consumed, sub.length),
@@ -116,7 +120,8 @@ fun breakWrappedLines(
         consumed += adv
         i++
     }
-    return out
+    // E9：悬浮环绕逐行重断走的也是断行器（不经 [breakLeafLines]），抬升在此收口。
+    return growLineHeightsForInlineFontSize(out, fontRuns, style.fontSizePx, style.lineHeightRatio)
 }
 
 /** 把叶坐标系 run 切到子串坐标系（越界裁剪，无交集丢弃）。 */

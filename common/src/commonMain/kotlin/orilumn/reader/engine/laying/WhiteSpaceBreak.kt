@@ -7,7 +7,7 @@ import orilumn.reader.engine.css.WhiteSpaceNormalize
 /**
  * P1-2: `white-space` 断行单源（pure JVM）。
  *
- * 盒流（[NormalFlowLayout]）与轻路径塑形（`ParagraphShapes.shapeOf`）必须以同一规则
+ * 盒流（[NormalFlowLayout]）与轻路径塑形（`shapeGeometry`）必须以同一规则
  * 把样式化叶文本交给断行器，否则重轻两路行数/区间漂移（路线图 §6 inv.1）：
  *  - 可换行（NORMAL/PRE_WRAP/PRE_LINE）：整段一次委托 [ParagraphBreaker]；
  *  - 不换行（PRE/NOWRAP）：只在硬换行处分段，每段一行、不断行（CSS 溢出语义；

@@ -25,7 +25,7 @@ val HEADING_TAGS: Set<String> = setOf("h1", "h2", "h3", "h4", "h5", "h6")
  * Q1-3 单源：code-like 标签集合（代码字体槽路由）。
  *
  * 原三处同义定义（`shared-ui ReaderMath` / `engine-skia SkParagraphFactory` /
- * `:app ParagraphShapes`，字面全同）收敛至此；`engine-skia` 字体候选与
+ * `:app` 的 Android 塑形包装，字面全同）收敛至此；`engine-skia` 字体候选与
  * `shared-ui` 槽位路由都以此为准，不再各自复刻。
  */
 val CODE_TAGS: Set<String> = setOf("pre", "code", "kbd", "samp")

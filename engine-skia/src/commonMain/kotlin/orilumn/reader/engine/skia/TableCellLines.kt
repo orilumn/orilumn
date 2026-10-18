@@ -22,7 +22,7 @@ import kotlin.math.roundToInt
  * 同 helper 双路一致；边框逐边绘制（只画有宽且 style 非 NONE 的边，色跟随书内 CSS
  * `border-color`，未声明回退 `currentColor`；遗留 Android `drawTableRow` 仍为固定 `#ff999999`）。
  *
- * - 断行几何不动：行宽/对齐/字号与塑形侧（`ParagraphShapes.shapeOf` 的 cell 宽）同源，
+ * - 断行几何不动：行宽/对齐/字号与塑形侧（`shapeGeometry` 的 cell 宽）同源，
  *   此处只投影、不重排；
  * - 字符流不动：`charBase` 按行首 + 单元格累计文本长换算，与分页 `rowChars` 同账；
  * - 无 shape 的格（桌面旧路径未塑形）/ `empty-cells: hide` 空格直接跳过（与遗留绘制同式）。

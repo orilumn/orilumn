@@ -8,14 +8,13 @@ import orilumn.reader.engine.css.TextShadow
 import orilumn.reader.engine.layout.ListMarkers
 
 /**
- * Pure-JVM readable contract for a cell's shaped text, decoupling [TableCellLayout] from the
- * Android [orilumn.reader.engine.layout.ParagraphShape] class. The real [ParagraphShape] implements
- * this; table-cell expansion ([orilumn.reader.engine.skia.TableCellLines]) reads only these members,
- * so cell text joins the shared Skia [orilumn.reader.engine.skia.DrawLine] window on both platforms
- * with zero Android types involved.
+ * Pure-JVM readable contract for a cell's shaped text: the geometry the box engine hands to
+ * table-cell expansion ([orilumn.reader.engine.skia.TableCellLines]) and the window layouts, so
+ * cell text joins the shared Skia [orilumn.reader.engine.skia.DrawLine] window on both platforms
+ * with zero platform types involved. The engine's [ShapedGeometry] is the only implementation.
  *
- * Coordinates mirror [orilumn.reader.engine.layout.ParagraphShape]: line ranges are exclusive-end
- * `until` ranges into [shapeText]; heights are per-line CSS line boxes.
+ * Coordinates: line ranges are exclusive-end `until` ranges into [shapeText]; heights are per-line
+ * CSS line boxes.
  */
 interface ParagraphShapeRef {
     /** The exact plain text the breaker consumed. */

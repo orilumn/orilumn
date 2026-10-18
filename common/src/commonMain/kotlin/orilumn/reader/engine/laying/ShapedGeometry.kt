@@ -10,9 +10,7 @@ import orilumn.reader.engine.layout.ListMarkers
 /**
  * C2-P2b-1: 纯几何形状（无画笔），[ParagraphShapeRef] 的 common 实现。
  *
- * `shapeGeometry()`（engine-skia）产出它；搬走的编排代码只认接口持有它；
- * `:app` 的 `ParagraphShape` 是同一几何另加 Android 画笔的视图（同一对象两种视图
- * 中的几何视图由本类承载，画笔视图由 `ParagraphShape` 承载，几何逐字节同源）。
+ * `shapeGeometry()`（engine-skia）产出它；编排代码只认接口持有它 —— 两端几何逐字节同源。
  */
 data class ShapedGeometry(
     override val text: String = "",

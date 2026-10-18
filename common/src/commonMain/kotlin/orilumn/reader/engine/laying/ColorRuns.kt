@@ -25,7 +25,7 @@ fun wsOfNode(
 /**
  * 引擎层行内着色唯一核心：把一级联已有 `colorHex` 投影成叶文本坐标系的 [ColorRun]。
  *
- * 两条塑形路径（common 盒流 `absorbedText` / Android `ParagraphShapes.emitPlainText`）各有
+ * 两条塑形路径（common 盒流 `absorbedText` / engine-skia 塑形 `emitPlainText`）各有
  * 自己的文本构建（跳过规则不完全相同，不可合并），但着色遍历必须与**各自**的文本构建逐分支
  * 同构——否则 run 下标与字符错位。本函数收敛公共 mechanics（区间合并、颜色解析、
  * 合成匿名叶的父级回退），调用方只注入三处差异：

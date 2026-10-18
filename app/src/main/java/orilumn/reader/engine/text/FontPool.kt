@@ -11,8 +11,8 @@ import java.io.File
  * 平板字体的 Android Canvas 兜底投影 —— 替代已退役的 `FontPairing` + `WeightedFontResolver` 类型链
  * （D1：Android Typeface 参与匹配的路径删除；resolve/fallback 全走 engine-skia `resolveFamilies`）。
  *
- * 本类只把 [SkParagraphFactory.resolveFamilies] 的整栈结果**投影**到 canvas 兜底绘制
- * （表格/符号，`ParagraphShapes.drawPaint`）需要的 [Typeface]，没有任何匹配算法
+ * 本类只把 [SkParagraphFactory.resolveFamilies] 的整栈结果**投影**成 Android [Typeface]
+ * （canvas 兜底绘制预留的缝；当前生产路径全走 Skia，暂无调用方），没有任何匹配算法
  * （无 matchClass 令牌表）：槽位路由早已由级联 UI 层（`ReaderUiSheet` 字体槽规则）写进
  * `families`，这里不再复述——单源在引擎，重复即漂移：
  *  - 具名族/通用关键字：`resolveFamilies` 展开/保留后机械 `Typeface.create(name, style)`；

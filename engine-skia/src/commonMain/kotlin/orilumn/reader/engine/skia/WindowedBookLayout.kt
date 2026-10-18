@@ -31,7 +31,7 @@ interface PagedLayout : BookLayout, LayoutReadback {
  * C2-P2b-3: 窗口数据实现（从 `:app` `BoxPageRenderer` 原样搬运，只换形状类型）。
  *
  * `skiaLineWindow`/`tableCellLines`/`pageImages`/`pageBackgrounds` 四个回读口径与基类
- * 逐行一致（`shape.originTop()` 恒为 0，见 `ParagraphShape.originTop`，此处内联）；
+ * 逐行一致（`shape.originTop()` 恒为 0，见 `ParagraphShapeRef.originTop`，此处内联）；
  * 画笔/绘制留在 `:app` 基类，本类只做数据。行几何（`BookLayout`）由子类按行流实现。
  */
 abstract class WindowedBookLayout : PagedLayout, BreakAwareBookLayout {
@@ -254,7 +254,7 @@ abstract class WindowedBookLayout : PagedLayout, BreakAwareBookLayout {
                 }
             } else 0
             val xOff = baseX + centerOff
-            // `originTop()` 恒 0（见 `ParagraphShape.originTop`），直接取行顶。
+            // `originTop()` 恒 0（见 `ParagraphShapeRef.originTop`），直接取行顶。
             val yTop = getLineTop(gearIndex)
             val h = shape.shapeLineBottom(0).coerceAtLeast(1)
             out.add(

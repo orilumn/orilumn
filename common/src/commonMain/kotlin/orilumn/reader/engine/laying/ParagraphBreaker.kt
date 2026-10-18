@@ -41,7 +41,7 @@ interface ParagraphBreaker {
      * @param weight the numeric CSS `font-weight` (100–900).
      * @param italic the CSS `font-style` italic flag.
      * @param monospace whether the run resolves to a monospace face; both paths must agree so line
-     *   widths (and thus breaks) match what [orilumn.reader.engine.layout.ParagraphShapes] draws.
+     *   widths (and thus breaks) match what the shared shaper draws (量画同源，`shapeGeometry`)。
      * @return one [BrokenLine] per line, each carrying its char range into [text] and its height (px).
      */
     fun breakLines(text: CharSequence, fontSizePx: Float, lineHeightRatio: Float, widthPx: Int, alignment: TextAlign, tag: String?, families: List<String>, weight: Int, italic: Boolean, monospace: Boolean): List<BrokenLine>

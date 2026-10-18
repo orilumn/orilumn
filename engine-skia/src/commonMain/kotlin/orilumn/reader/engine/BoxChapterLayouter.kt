@@ -122,7 +122,7 @@ data class ChapterPrepareResult(
  * The **production** [ChapterLayouter], powered by the box engine (S0–S7 results),
  * and the drawable path of S7:
  *
- *  cascade → box-model geometry → per-paragraph shaping ([ParagraphShape]s) → [BoxDrawableLayout] → pages.
+ *  cascade → box-model geometry → per-paragraph shaping ([ParagraphShapeRef]s) → [BoxDrawableLayout] → pages.
  *
  * Split into [prepare] (fast, full-chapter, no per-block shaping) and [fullLayout] (shape + paginate).
  * The legacy one-shot [layout] delegates to both in sequence.
@@ -824,7 +824,7 @@ class BoxChapterLayouter(
                 val intruded = lead != null && k < lead.lines
                 out[lineIdx] = orilumn.reader.engine.skia.DrawLine(
                     text = text,
-                    // lineEnd 是开区间（ParagraphShape 约定）；DrawLine.range 是闭区间（与断行器输出一致），
+                    // lineEnd 是开区间（塑形 shape 约定）；DrawLine.range 是闭区间（与断行器输出一致），
                     // 此处 s..e 会多含下一行首字、末行直接 substring 越界崩回书架，必须 s until e。
                     range = s until e,
                     // E12：`position: relative` 的绘制偏移（叶的累积偏移；纯增量，与坐标系无关）。
@@ -2150,7 +2150,6 @@ class BoxChapterLayouter(
 
     private var shapeProbe: ShapeProbe? = null
 
-    /** Shapes one block's [ParagraphShape] for the temp-page path. */
     /**
      * P3：一个块**自身 border-box 高**的自然测量（口径乙 `othersH` 的轻路径口径）。
      *
@@ -2282,7 +2281,7 @@ class BoxChapterLayouter(
     }
 
     /**
-     * Shapes one leaf into a [ParagraphShape]. A table-row leaf fills its cells' shapes (each shaped
+     * Shapes one leaf into a [ParagraphShapeRef]. A table-row leaf fills its cells' shapes (each shaped
      * within its column width) and returns a synthetic single-line shape of the row's height; every other
      * leaf falls through to skia shapeGeometry.
      */
@@ -2650,7 +2649,7 @@ class BoxChapterLayouter(
     }
 
     /**
-     * Rebuilds the whole-chapter line stream from each leaf's real [ParagraphShape], preserving the
+     * Rebuilds the whole-chapter line stream from each leaf's real [ParagraphShapeRef], preserving the
      * box tree's structural inter-block margins (from [structure], height-independent) but laying the
      * lines with the shape's exact per-line heights. Afterwards the box geometry and painting agree
      * exactly: getLineTop(k) == the shape line's top at its global position.
@@ -3910,7 +3909,7 @@ class LightPrepare(
     }
 
     /** A small, lazily-resolved style map covering [markupLeaves[i]]'s paragraph-inline subtree, exactly the
-     *  set `ParagraphShapes.emitPlainText` walks for the shaped char stream (display:none gate). An anonymous `#text`
+     *  set `shapeGeometry` 的 `emitPlainText` walks for the shaped char stream (display:none gate). An anonymous `#text`
      *  leaf has no subtree — returning an empty map matches the heavy path (the whole-chapter styleMap
      *  holds no entry for synthesized anonymous leaves), so both paths shape the same text. */
     fun inlineStyles(i: Int): Map<MarkupElement, orilumn.reader.engine.css.ComputedStyle> = inlineMaps.getOrPut(i) {

@@ -31,7 +31,7 @@ import kotlin.math.roundToInt
  * the engine now produces a uniform CSS line box for every line, and 段间距 lives in the box path's
  * margins, not here.
  *
- * The production path now runs through [BoxChapterLayouter] + [ParagraphShapes]; this class is
+ * The production path now runs through [BoxChapterLayouter] + the shared shaper; this class is
  * retained so that `layout()` stays verifiable via `CssLayouterTest` and its [BLOCK_TAGS] set is
  * still referenced from the box engine, plus [uaSheetFromProfile] supplies heading defaults.
  */

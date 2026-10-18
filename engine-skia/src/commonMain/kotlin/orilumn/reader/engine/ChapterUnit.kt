@@ -98,7 +98,7 @@ class ChapterUnit(
     var tempRenderLayout: BookLayout? = null
         private set
 
-    /** Cache of per-block [ParagraphShape]s for the current layout-parameter cycle (indexed by leaf
+    /** Cache of per-block `ParagraphShapeRef`s for the current layout-parameter cycle (indexed by leaf
      *  index). Reused across flips so a block is shaped at most once per params; cleared on
      *  [invalidateLayout]. Null until the first block is shaped. */
     var blockShapeCache: MutableMap<Int, orilumn.reader.engine.laying.ParagraphShapeRef>? = null

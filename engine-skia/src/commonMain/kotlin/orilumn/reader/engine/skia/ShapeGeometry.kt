@@ -37,15 +37,13 @@ import orilumn.reader.engine.layout.ListMarkers
 import orilumn.reader.engine.text.TypographicProfile
 
 /**
- * C2-P2b-2: 段落纯几何整形（无画笔、无字体池），[ParagraphShapes.shapeOf] 的几何单源。
+ * C2-P2b-2: 段落纯几何整形（无画笔、无字体池）—— 断行与落墨几何的**单源**。
  *
- * 本函数即 `:app` `shapeOf` 的几何体**原样搬运**：同样的文本抽取、同样的伴生 runs、
- * 同一个 `SkiaParagraphBreaker` 断行、同样的注音行高增量 —— 只是不建 `TextPaint`、
- * 不碰 `FontPool`（KDoc 自证：pairing 只画不量）。`:app` 的 `shapeOf` 退化成
- * "本函数 + 画笔包装"，桌面直接调本函数：两端几何逐字节同源（等价单测锁定）。
+ * 同样的文本抽取、同样的伴生 runs、同一个 `SkiaParagraphBreaker` 断行、同样的注音行高增量；
+ * 不建 `TextPaint`、不碰平台类型。重路径（`BoxChapterLayouter.shapeLeaf`）、轻路径与临时页
+ * 都经本函数塑形 ⇒ 两端几何逐字节同源。
  *
- * @param isBlock 块判定（`:app` 传 `CssLayouter.BLOCK_TAGS`，桌面传同规则；抽参是因为
- *   `CssLayouter` 是 Android 绘制桥，搬不动）。
+ * @param isBlock 块判定（两侧同规则，单源 `orilumn.reader.engine.html.BLOCK_TAGS`）。
  */
 fun shapeGeometry(
     el: MarkupElement,
@@ -65,9 +63,6 @@ fun shapeGeometry(
     /**
      * P3：分页层给该替换叶的高度上限（口径乙）。调用方喂 `LayoutBox.replaceableFitH`，
      * 与盒流测量同值 —— 量画同源的唯一渠道（见 `docs/分页高度约束与断页规则-方案.md` §5）。
-     *
-     * 刻意**排在 [isBlock] 之前**：`app` 侧 `ParagraphShapes.shapeOf` 用**尾随 lambda** 传
-     * [isBlock]，加在它之后会改掉 lambda 的绑定目标。
      */
     replaceableFitH: Int? = null,
     isBlock: (MarkupElement) -> Boolean,
@@ -84,7 +79,7 @@ fun shapeGeometry(
     // An anonymous text leaf belongs to its container block, so pair it with the parent's tag
     // (e.g. "入门指南" inside <h2> uses the heading font).
     val pairTag = if (el.tag == "#text") el.parent?.tag else el.tag
-    // 取画笔请求（只装配不消费：`:app` 包装/未来卷曲凭它取 face，桌面忽略）。
+    // 取画笔请求（只装配不消费：未来卷曲凭它取 face）。
     val fontRequest = ShapeFontRequest(
         pairTag, rootStyle.fontFamilies, rootStyle.fontWeight, rootStyle.italic, rootStyle.monospace,
     )

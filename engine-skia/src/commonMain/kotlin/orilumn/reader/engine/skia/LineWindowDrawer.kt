@@ -1242,8 +1242,8 @@ private interface FontResolver {
      */
     private fun isLastLineOf(line: DrawLine, endExcl: Int): Boolean = endExcl >= line.text.length
 
-    /** 行区间内四套 runs（色 + face + 基线位移 + 下划线）合并后的 [lo, hi) 段序列：每段的肤色/face/位移/下划线恒定，供逐段渲染。 */
-    private data class Band(val start: Int, val end: Int, val argb: Int?, val font: orilumn.reader.engine.css.FontRun?, val shiftEm: Float, val underlined: Boolean)
+    /** 行区间内三套 runs（色 + face + 基线位移）合并后的 [lo, hi) 段序列：每段的肤色/face/位移恒定，供逐段渲染。 */
+    private data class Band(val start: Int, val end: Int, val argb: Int?, val font: orilumn.reader.engine.css.FontRun?, val shiftEm: Float)
 
     private fun mergeBands(line: DrawLine, lo: Int, hi: Int): List<Band> {
         val colorBounds = line.colorRuns.mapNotNull { r ->
@@ -1261,16 +1261,10 @@ private interface FontResolver {
             val e = r.endExclusive.coerceIn(lo, hi)
             if (e > s) ShiftBand(s, e, r.shiftEm) else null
         }
-        val ulBounds = line.decorationRuns.mapNotNull { r ->
-            val s = r.start.coerceIn(lo, hi)
-            val e = r.endExclusive.coerceIn(lo, hi)
-            if (e > s) UlBand(s, e) else null
-        }
-        if (colorBounds.isEmpty() && fontBounds.isEmpty() && shiftBounds.isEmpty() && ulBounds.isEmpty()) return emptyList()
+        if (colorBounds.isEmpty() && fontBounds.isEmpty() && shiftBounds.isEmpty()) return emptyList()
         val edges = (colorBounds.flatMap { listOf(it.start, it.end) } +
             fontBounds.flatMap { listOf(it.start, it.end) } +
-            shiftBounds.flatMap { listOf(it.start, it.end) } +
-            ulBounds.flatMap { listOf(it.start, it.end) } + listOf(lo, hi))
+            shiftBounds.flatMap { listOf(it.start, it.end) } + listOf(lo, hi))
             .filter { it in lo..hi }
             .distinct().sorted()
         val bands = ArrayList<Band>(edges.size - 1)
@@ -1281,8 +1275,7 @@ private interface FontResolver {
             val argb = colorBounds.firstOrNull { it.start <= s && e <= it.end }?.argb
             val font = fontBounds.firstOrNull { it.start <= s && e <= it.end }?.run
             val shiftEm = shiftBounds.firstOrNull { it.start <= s && e <= it.end }?.shiftEm ?: 0f
-            val underlined = ulBounds.any { it.start <= s && e <= it.end }
-            bands.add(Band(s, e, argb, font, shiftEm, underlined))
+            bands.add(Band(s, e, argb, font, shiftEm))
         }
         return bands
     }
@@ -1290,11 +1283,6 @@ private interface FontResolver {
     private data class ColorBand(val start: Int, val end: Int, val argb: Int)
     private data class FontBand(val start: Int, val end: Int, val run: orilumn.reader.engine.css.FontRun)
     private data class ShiftBand(val start: Int, val end: Int, val shiftEm: Float)
-    private data class UlBand(val start: Int, val end: Int)
-
-    /** [StyleKey] = 段样式缓存键（argb + face + 字号 + 位移 + 下划线全部字段，忽略 run 区间）。字号必须入键：
-     *  行内 `<sub>/<span{font-size}>` 与基底同 face 不同号的段不可相互复用 style。 */
-    private data class StyleKey(val argb: Int?, val fontSizePx: Float, val tag: String?, val families: List<String>, val weight: Int, val italic: Boolean, val monospace: Boolean, val shiftEm: Float, val underlined: Boolean)
 
     /** Marker 字形绘制（listMarker 的同一 paragraphStyle 整形，单行短文本，无需 JUSTIFY 尾行技巧）。 */
     private fun paintText(canvas: Canvas, style: ParagraphStyle, text: String, textX: Float, line: DrawLine, collection: FontCollection) {

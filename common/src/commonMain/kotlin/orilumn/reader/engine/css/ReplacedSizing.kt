@@ -7,7 +7,7 @@ import kotlin.math.roundToInt
  *
  * Single source for `<img>` (and future `iframe`/`object`/`embed`) used-size computation,
  * shared by the block-replaceable path ([orilumn.reader.engine.laying.NormalFlowLayout]) and the
- * inline-`img` path (`ParagraphShapes`). Both paths previously sized the same element
+ * inline-`img` path (light-path shaping). Both paths previously sized the same element
  * differently (block expanded `auto/auto` to the containing block; inline clamped unconditionally
  * to it) — neither of which is what browsers do.
  *

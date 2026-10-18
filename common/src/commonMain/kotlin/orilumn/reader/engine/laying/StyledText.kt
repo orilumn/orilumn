@@ -10,7 +10,7 @@ import orilumn.reader.engine.html.MarkupElement
 /**
  * P1-2: 样式化叶文本单源（pure JVM）。
  *
- * 盒流 `absorbedText` / Android `ParagraphShapes.emitPlainText` / 着色·字体·基线 run
+ * 盒流 `absorbedText` / engine-skia 塑形 `emitPlainText` / 着色·字体·基线 run
  * 收集 / 轻路径字符计数必须从同一归一化字符串取同一字符，否则 run 下标与字符错位、
  * 重轻两路 `globalCharStarts` 漂移（路线图 §6 inv.1）。
  *

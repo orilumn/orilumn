@@ -4,6 +4,7 @@ import orilumn.reader.engine.LinkTarget
 import orilumn.reader.engine.LinkTargets
 import orilumn.reader.engine.css.LightCssParser
 import orilumn.reader.engine.css.StyleComputer
+import orilumn.reader.engine.css.hasUnderline
 import orilumn.reader.engine.html.HtmlTreeConverter
 import orilumn.reader.engine.layout.LinkRange
 import orilumn.reader.engine.layout.LinkRanges
@@ -78,7 +79,7 @@ class P4cInternallinksReproTest {
         val link = findLink(s.root)
         val st = s.styleMap[link]!!
         assertEquals("a:link 蓝（非 active 橙）", "#ff4080c0", st.colorHex)
-        assertTrue("a 下划线", st.underline)
+        assertTrue("a 下划线", st.decoration.hasUnderline)
     }
 
     @Test

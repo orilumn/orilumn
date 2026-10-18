@@ -217,7 +217,14 @@ data class ComputedStyle(
     val colorHex: String? = null,
     val bold: Boolean = false,
     val italic: Boolean = false,
-    val underline: Boolean = false,
+    /**
+     * **本元素自己声明**的文本装饰（非继承；`none` = [TextDecoration.NONE]）。
+     *
+     * 后代文本仍会被祖先的装饰覆盖，但那是收集期沿树叠「装饰栈」的事
+     * （[orilumn.reader.engine.laying.collectTextDecorationRuns]），不在这里。
+     * 旧版这里是单个 `underline: Boolean`：`line-through` 被并成下划线、颜色/粗细/线型全无。
+     */
+    val decoration: TextDecoration = TextDecoration.NONE,
     val textIndentPx: Float = 0f,
     /** Outer separation from surrounding boxes; adjacent vertical margins collapse to the larger. */
     val margin: Edges = Edges(),
@@ -389,5 +396,9 @@ data class ComputedStyle(
     override fun toString(): String =
         "fs=${fontSizePx}px lh=${lineHeightRatio}" +
             if (colorHex != null) " color=$colorHex" else "" +
-            listOfNotNull(bold.takeIf { it }?.let { "bold" }, italic.takeIf { it }?.let { "italic" }, underline.takeIf { it }?.let { "ul" }).joinToString(" ", " [", "]")
+            listOfNotNull(
+                bold.takeIf { it }?.let { "bold" },
+                italic.takeIf { it }?.let { "italic" },
+                decoration.lines.takeIf { it.isNotEmpty() }?.joinToString(",") { it.name.lowercase() },
+            ).joinToString(" ", " [", "]")
 }

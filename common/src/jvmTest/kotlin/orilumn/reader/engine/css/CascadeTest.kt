@@ -119,7 +119,7 @@ class CascadeTest {
         val root = node("body", children = listOf(p))
         val out = styleMap(ua = "", author = "", root = root)
         assertEquals(0f, out[p]?.textIndentPx!!, 1e-3f)
-        assertFalse(out[p]!!.underline)
+        assertTrue(out[p]!!.decoration.lines.isEmpty())
     }
 
     @Test

@@ -54,6 +54,6 @@ class SelectorPseudoTest {
         val engine = StyleComputer(10f, LightCssParser().parse(""), listOf(LightCssParser().parse(author)))
         val styleMap = engine.compute(root)
         assertEquals("#ff4080c0", styleMap[link]!!.colorHex)
-        assertTrue(styleMap[link]!!.underline)
+        assertTrue(styleMap[link]!!.decoration.hasUnderline)
     }
 }

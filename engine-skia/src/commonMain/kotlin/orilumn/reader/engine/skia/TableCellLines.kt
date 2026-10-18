@@ -271,7 +271,7 @@ object TableCellLines {
                         // `LineAligner` 一点不挤 ⇒ 画比量宽 ⇒ 右溢被裁。
                         squeezeRatio = shape.shapeLineSqueezeRatio(k),
                         rubyRuns = shape.shapeRubyRuns,
-                        underlineRuns = shape.shapeUnderlineRuns,
+                        decorationRuns = shape.shapeDecorationRuns,
                         imgHidden = hidden[k] ?: emptyList(),
                     ),
                 )

@@ -15,7 +15,7 @@ import org.junit.Test
 /**
  * 行内盒单源：**有可见装饰的行内元素**投影成叶文本坐标系的 [InlineBoxRun]。
  *
- * 关键纪律（与 [UnderlineRunsTest] 对照）：
+ * 关键纪律（与 [TextDecorationRunsTest] 对照）：
  *  - **盒属性不继承**（与下划线相反）：`<mark><em>a</em></mark>` 只有 `<mark>` 一个盒；
  *  - **块元素不发 run**（块有自己的盒路径，重复发就是双画）；
  *  - 无装饰行内元素（`<em>`/`<a>`）回空表（零开销）；

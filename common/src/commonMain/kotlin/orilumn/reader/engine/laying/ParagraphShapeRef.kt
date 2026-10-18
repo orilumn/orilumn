@@ -68,7 +68,7 @@ interface ParagraphShapeRef {
     /** Stacked-ruby runs over [shapeText] (empty = no ruby). */
     val shapeRubyRuns: List<RubyRun>
     /** Underline spans over [shapeText] (empty = no underline). */
-    val shapeUnderlineRuns: List<UnderlineRun>
+    val shapeDecorationRuns: List<TextDecorationRun>
     /**
      * 行内盒 spans over [shapeText]（空 = 无行内背景/边框）。
      *
@@ -128,7 +128,7 @@ interface ParagraphShapeRef {
     /** Stacked-ruby runs over [shapeText] (empty = no ruby). */
     val rubyRuns: List<RubyRun> get() = shapeRubyRuns
     /** Underline spans over [shapeText] (empty = no underline). */
-    val underlineRuns: List<UnderlineRun> get() = shapeUnderlineRuns
+    val decorationRuns: List<TextDecorationRun> get() = shapeDecorationRuns
     /** 行内盒 spans over [shapeText]（空 = 无行内背景/边框）。 */
     val inlineBoxRuns: List<InlineBoxRun> get() = shapeInlineBoxRuns
     /** Ancestor-chain opacity product (1 = legacy path). */

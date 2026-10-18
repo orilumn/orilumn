@@ -113,6 +113,18 @@ class StyleComputer(
 
         /** 段间距只乘算 p/li；其余块走疏密。两滑块分工，互不越界。 */
         val PARAGRAPH_TAGS = setOf("p", "li")
+
+        /** `text-decoration` 简写里的线型关键字（与样式关键字集不相交）。 */
+        val DECORATION_LINE_TOKENS = setOf("underline", "line-through", "overline")
+
+        /** `text-decoration-style` 关键字 → 枚举（`blink` 不在表内：无视觉，解析即丢）。 */
+        val DECORATION_STYLE_TOKENS = mapOf(
+            "solid" to DecorationStyle.SOLID,
+            "double" to DecorationStyle.DOUBLE,
+            "dotted" to DecorationStyle.DOTTED,
+            "dashed" to DecorationStyle.DASHED,
+            "wavy" to DecorationStyle.WAVY,
+        )
     }
 
     /** Whether a raw `display` value lays the element out as a block (block/list-item/flex/grid/table*). */
@@ -375,7 +387,7 @@ class StyleComputer(
             colorHex = w["color"]?.let { parseCssColor(it) } ?: parent.colorHex,
             bold = w["font-weight"]?.let { parseFontWeightBold(it) } ?: parent.bold,
             italic = w["font-style"]?.let { parseFontStyleItalic(it) } ?: parent.italic,
-            underline = w["text-decoration"]?.let { parseUnderline(it) } ?: false,
+            decoration = parseTextDecoration(w, fontSize, parent.fontSizePx),
             textIndentPx = w["text-indent"]?.let { v -> parseLength(v)?.resolve(fontSize, parent.fontSizePx, rootFontPx) } ?: 0f,
             margin = margin,
             marginLeftAuto = isMarginAuto(w, left = true),
@@ -1326,8 +1338,74 @@ class StyleComputer(
         }
     }
 
-    private fun parseUnderline(value: String): Boolean = when {
-        value.contains("underline") || value.contains("line-through") -> true
-        else -> false
+    /**
+     * `text-decoration` 简写族（第三刀）：
+     * `text-decoration-line` / `-color` / `-style` / `-thickness` + `text-decoration-skip-ink`。
+     *
+     * **单属性优先、缺失才回落简写**（与 `background` / `border` 各家族同一口径）。CSS 真正按声明
+     * **先后顺序**决定（后写的简写会重置先写的长属性），本仓级联表不带顺序 ⇒ 这里取「长属性优先」。
+     * 书里同时写简写与长属性且**顺序相反**的极少，且两值同义时无差异。
+     *
+     * `text-decoration: blink` 无视觉，解析即丢（不报错）。`from-font` 与 `auto` 同路：都由绘制侧
+     * 按字体度量取（[TextDecoration.thicknessPx] = null）。
+     */
+    private fun parseTextDecoration(w: Map<String, String>, fontSize: Float, parentFontSize: Float): TextDecoration {
+        val short = w["text-decoration"]?.let { parseDecorationShorthand(it, fontSize, parentFontSize) }
+        val lines = w["text-decoration-line"]?.let { parseDecorationLines(it) } ?: short?.lines ?: emptySet()
+        val color = w["text-decoration-color"]?.let { parseCssColor(it) } ?: short?.colorHex
+        val style = w["text-decoration-style"]?.let { parseDecorationStyle(it) } ?: short?.style ?: DecorationStyle.SOLID
+        val thickness = w["text-decoration-thickness"]?.let { parseDecorationThickness(it, fontSize, parentFontSize) }
+            ?: short?.thicknessPx
+        val skipInk = w["text-decoration-skip-ink"]?.let { parseSkipInk(it) } ?: true
+        return TextDecoration(lines, color, style, thickness, skipInk)
+    }
+
+    /** `text-decoration` 简写：空白分词后逐词归类（关键字集互不相交，无序亦可）。 */
+    private fun parseDecorationShorthand(value: String, fontSize: Float, parentFontSize: Float): TextDecoration {
+        val v = value.trim().lowercase()
+        if (v.isEmpty() || v == "none") return TextDecoration.NONE
+        var lines = emptySet<DecorationLine>()
+        var color: String? = null
+        var style = DecorationStyle.SOLID
+        var thickness: Float? = null
+        for (tok in v.split(' ', '\t', '\n').filter { it.isNotBlank() }) {
+            when {
+                tok in DECORATION_LINE_TOKENS -> lines = lines + parseDecorationLines(tok)
+                tok in DECORATION_STYLE_TOKENS -> style = DECORATION_STYLE_TOKENS.getValue(tok)
+                tok == "auto" || tok == "from-font" -> thickness = null
+                parseCssColor(tok) != null -> color = parseCssColor(tok)
+                parseLength(tok) != null -> thickness = parseLength(tok)?.resolve(fontSize, parentFontSize, rootFontPx)
+            }
+        }
+        return TextDecoration(lines, color, style, thickness)
+    }
+
+    /** `text-decoration-line`：空格分隔的线型列表；含 `none` 即空集合。 */
+    private fun parseDecorationLines(value: String): Set<DecorationLine> {
+        val out = HashSet<DecorationLine>(3)
+        for (tok in value.trim().lowercase().split(' ', '\t', '\n')) {
+            when (tok) {
+                "underline" -> out.add(DecorationLine.UNDERLINE)
+                "line-through" -> out.add(DecorationLine.LINE_THROUGH)
+                "overline" -> out.add(DecorationLine.OVERLINE)
+            }
+        }
+        return out
+    }
+
+    private fun parseDecorationStyle(value: String): DecorationStyle? =
+        DECORATION_STYLE_TOKENS[value.trim().lowercase()]
+
+    /** `text-decoration-thickness`：`auto` / `from-font` = null（绘制侧按字体度量）。 */
+    private fun parseDecorationThickness(value: String, fontSize: Float, parentFontSize: Float): Float? {
+        val v = value.trim().lowercase()
+        if (v == "auto" || v == "from-font") return null
+        return parseLength(v)?.resolve(fontSize, parentFontSize, rootFontPx)
+    }
+
+    private fun parseSkipInk(value: String): Boolean? = when (value.trim().lowercase()) {
+        "auto" -> true
+        "none" -> false
+        else -> null
     }
 }

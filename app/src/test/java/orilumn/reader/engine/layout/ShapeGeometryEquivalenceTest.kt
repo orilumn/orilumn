@@ -73,7 +73,7 @@ class ShapeGeometryEquivalenceTest {
         assertEquals(painted.fontRuns, geo.fontRuns)
         assertEquals(painted.baselineShifts, geo.baselineShifts)
         assertEquals(painted.rubyRuns, geo.rubyRuns)
-        assertEquals(painted.underlineRuns, geo.underlineRuns)
+        assertEquals(painted.decorationRuns, geo.decorationRuns)
         assertEquals(painted.textShadow, geo.textShadow)
         assertEquals(painted.emphasis, geo.emphasis)
         assertEquals(painted.emphasisUnder, geo.emphasisUnder)

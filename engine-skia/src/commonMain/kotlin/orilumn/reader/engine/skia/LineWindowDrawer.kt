@@ -1,15 +1,22 @@
 package orilumn.reader.engine.skia
 
+import orilumn.reader.engine.css.DecorationLine
+import orilumn.reader.engine.css.DecorationStyle
 import orilumn.reader.engine.css.TextAlign
 import orilumn.reader.engine.css.cssHexToArgb
 import orilumn.reader.engine.layout.ListMarkers
 import orilumn.reader.engine.laying.HYPHEN_GLYPH
 import orilumn.reader.engine.laying.SOFT_HYPHEN
+import orilumn.reader.engine.laying.TextDecorationRun
 import orilumn.reader.engine.laying.extraHeightPx
 import orilumn.reader.engine.laying.isDocumentSpace
 import org.jetbrains.skia.Canvas
 import org.jetbrains.skia.Font
 import org.jetbrains.skia.Paint
+import org.jetbrains.skia.PathBuilder
+import org.jetbrains.skia.PathEffect
+import org.jetbrains.skia.PaintMode
+import org.jetbrains.skia.PaintStrokeCap
 import org.jetbrains.skia.Point
 import org.jetbrains.skia.Rect
 import org.jetbrains.skia.TextBlobBuilder
@@ -121,7 +128,7 @@ data class DrawLine(
      * 由 [DrawLineBuilder] 从与 [text] 同构的遍历产出（声明元素整段传播）；
      * Skia 端随段挂原生下划线装饰（量画同源，不改 advances）。
      */
-    val underlineRuns: List<orilumn.reader.engine.laying.UnderlineRun> = emptyList(),
+    val decorationRuns: List<orilumn.reader.engine.laying.TextDecorationRun> = emptyList(),
     /**
      * 行内盒 spans（[text] 全文本坐标系，空 = 无行内背景/边框）：
      * 由 [DrawLineBuilder] 从与 [text] 同构的遍历产出。
@@ -328,11 +335,11 @@ class LineWindowDrawer(
             return false
         }
         val lineExtra = rubyHits.maxOfOrNull { it.extraHeightPx() } ?: 0
-        // 下划线：行区间相交段（叶坐标）。CSS 标准是整段传播，故按区间并集画，不逐字跳。
-        val ulHits = line.underlineRuns.mapNotNull { r ->
+        // 文本装饰：行区间相交段（叶坐标）。CSS 标准是整段传播，故按区间并集画，不逐字跳。
+        val decRuns = line.decorationRuns.mapNotNull { r ->
             val s = r.start.coerceIn(start, endExcl)
             val e = r.endExclusive.coerceIn(start, endExcl)
-            if (e > s) s until e else null
+            if (e > s) r.copy(start = s, endExclusive = e) else null
         }
 
         // ── 几何：Aligner 给逐字 x / 拉伸 / 可见右边界（P1-2 不换行段以无限宽排，单行溢出）──
@@ -376,7 +383,7 @@ class LineWindowDrawer(
         // paintX 是纯内容区偏移；placement 的 x 已含缩进与对齐偏移，逐字落墨时统一加上。
         // **行内盒（背景/边框）先落，垫在文字之下**（CSS：背景 → 边框 → 文字）。
         paintInlineBoxes(canvas, line, placement, paintX, baseY, start, endExcl)
-        paintGlyphs(canvas, line, placement, paintX, baseY, start, endExcl, { f, t -> isHidden(f, t) }, ulHits)
+        paintGlyphs(canvas, line, placement, paintX, baseY, start, endExcl, { f, t -> isHidden(f, t) }, decRuns)
 
         // 注音/着重号与文字同盒，随 half-leading 一并下移，保持与基字的相对位置。
         if (rubyHits.isNotEmpty() && endExcl > start) {
@@ -638,7 +645,7 @@ class LineWindowDrawer(
         start: Int,
         endExcl: Int,
         isHidden: (Int, Int) -> Boolean,
-        ulHits: List<IntRange>,
+        decRuns: List<TextDecorationRun>,
     ) {
         if (endExcl <= start) return
         val n = endExcl - start
@@ -742,23 +749,242 @@ class LineWindowDrawer(
             }
         }
 
-        // 下划线：行区间相交段的 x 并集，用线画（不逐字跳）。
-        if (ulHits.isNotEmpty()) {
-            val ulPaint = org.jetbrains.skia.Paint().apply {
-                color = withAlpha(line.inkColor, line.alpha)
-                mode = org.jetbrains.skia.PaintMode.STROKE
-                strokeWidth = (line.fontSizePx * 0.06f).coerceAtLeast(1f)
-            }
-            val y = baseY + line.fontSizePx * 0.12f
-            for (r in ulHits) {
-                val lo = (r.first - start).coerceIn(0, n)
-                val hi = (r.last + 1 - start).coerceIn(lo, n)
-                if (hi <= lo) continue
-                aligner.visibleSpan(placement, n, lo, hi)?.let { (lx, rx) ->
-                    canvas.drawLine(paintX + lx, y, paintX + rx, y, ulPaint)
+        // 文本装饰（第三刀）：三种线型各画各的，颜色/粗细/线型样式/skip-ink 见 [paintDecorations]。
+        paintDecorations(canvas, line, placement, paintX, baseY, start, endExcl, decRuns, fonts, bands, xs)
+    }
+
+    /**
+     * 文本装饰落墨（渲染层）：`underline` / `overline` / `line-through` 三种线型**各画各的**，
+     * 颜色 / 粗细 / 线型样式（实线·双线·点线·虚线·波浪）/ `text-decoration-skip-ink` 全参数。
+     *
+     * ## 位置与粗细（对齐浏览器：取字体度量）
+     *
+     * 装饰线的位置与 `auto` 粗细取**声明元素那张面**的度量（`FontMetrics`）：
+     * - `underline`：`underlinePosition`（Skia 约定为「线顶距基线」的正值）与 `underlineThickness`；
+     * - `line-through`：`strikeoutPosition` / `strikeoutThickness`（位置为负 = 基线上方）；
+     * - `overline`：无对应度量，取 `ascent` 上缘（浏览器同处：升部之上）。
+     *
+     * 度量缺失（字体没给）时才回退 em 常量。**不读行墨色命名**：装饰色 = 声明元素解析后的颜色
+     * （`currentColor` 已在收集期解析），无颜色声明才落回叶墨色。
+     *
+     * ## skip-ink（initial `auto`）
+     *
+     * 逐字取**字形墨迹盒**（`Font.getBounds`，与基线同坐标系）与装饰线所在横带求交；相交即在
+     * **墨迹的左右边界**处断开（不是整字跳过）—— 下划线遇到降部（`g` / `p` / `y`）断开、
+     * 上划线遇到升部断开，与浏览器一致。`line-through` 按规范**不**做 skip-ink。
+     */
+    private fun paintDecorations(
+        canvas: Canvas,
+        line: DrawLine,
+        placement: LineAligner.Placement,
+        paintX: Float,
+        baseY: Float,
+        start: Int,
+        endExcl: Int,
+        decRuns: List<TextDecorationRun>,
+        fontFor: FontResolver,
+        bands: List<Band>,
+        xs: FloatArray,
+    ) {
+        if (decRuns.isEmpty() || endExcl <= start) return
+        val n = endExcl - start
+        for (r in decRuns) {
+            val lo = (r.start - start).coerceIn(0, n)
+            val hi = (r.endExclusive - start).coerceIn(lo, n)
+            if (hi <= lo) continue
+            for (paint in r.paints) {
+                if (paint.lines.isEmpty()) continue
+                val fs = if (paint.fontSizePx > 0f) paint.fontSizePx else line.fontSizePx
+                val fams = paint.families.ifEmpty { line.families }
+                val key = glyphPainter.cacheKey(fams, paint.weight, paint.italic, fs, DECORATION_METRIC_CP)
+                val gs = fontFor.resolve(
+                    DECORATION_METRIC_CP, key, fs, fams, paint.weight, paint.italic,
+                    paint.monospace, line.tag,
+                )
+                val fm = gs.font.metrics
+                val color = withAlpha(paint.colorHex?.let(::cssHexToArgb) ?: line.inkColor, line.alpha)
+                val left = xs.getOrNull(lo) ?: continue
+                val right = (xs.getOrNull(hi - 1) ?: continue) + (placement.advs.getOrNull(hi - 1) ?: 0f)
+                if (right <= left) continue
+                for (kind in DECORATION_PAINT_ORDER) {
+                    if (kind !in paint.lines) continue
+                    val metricThickness = when (kind) {
+                        DecorationLine.UNDERLINE, DecorationLine.OVERLINE -> fm.underlineThickness
+                        DecorationLine.LINE_THROUGH -> fm.strikeoutThickness
+                    }
+                    val t = paint.thicknessPx
+                        ?: maxOf(metricThickness ?: (fs * DECORATION_FALLBACK_THICKNESS_EM), DECORATION_MIN_THICKNESS_PX)
+                    // 线中心相对基线的偏移（画布 y 向下为正）。度量按「线顶」给，故加半个线宽取中心。
+                    val centerRel = when (kind) {
+                        DecorationLine.UNDERLINE ->
+                            (fm.underlinePosition?.takeIf { it > 0f } ?: (fs * DECORATION_UNDERLINE_FALLBACK_EM)) + t / 2f
+                        DecorationLine.LINE_THROUGH ->
+                            (fm.strikeoutPosition ?: (-fs * DECORATION_STRIKE_FALLBACK_EM)) + t / 2f
+                        DecorationLine.OVERLINE -> fm.ascent - t / 2f
+                    }
+                    val cuts = if (paint.skipInk && kind != DecorationLine.LINE_THROUGH) {
+                        inkCuts(line, xs, start, lo, hi, fontFor, bands, centerRel, t)
+                    } else {
+                        emptyList()
+                    }
+                    drawDecoration(canvas, paintX, left, right, baseY + centerRel, t, paint.style, color, cuts)
                 }
             }
         }
+    }
+
+    /** 一条装饰线的落墨（含线型样式与 skip-ink 切口）。切口与 [left]/[right] 同为 placement 坐标系。 */
+    private fun drawDecoration(
+        canvas: Canvas,
+        paintX: Float,
+        left: Float,
+        right: Float,
+        y: Float,
+        t: Float,
+        style: DecorationStyle,
+        color: Int,
+        cuts: List<ClosedFloatingPointRange<Float>>,
+    ) {
+        for ((a, b) in subtractCuts(left, right, cuts)) {
+            val x0 = paintX + a
+            val x1 = paintX + b
+            when (style) {
+                DecorationStyle.SOLID -> drawDecorationStroke(canvas, x0, x1, y, t, color, null)
+                DecorationStyle.DOUBLE -> {
+                    // 双线：两条各占 1/3 线宽的实线，间隔 1/3（CSS `double` 的定义）。
+                    val thin = t * DECORATION_DOUBLE_THIN
+                    drawDecorationStroke(canvas, x0, x1, y - t / 3f, thin, color, null)
+                    drawDecorationStroke(canvas, x0, x1, y + t / 3f, thin, color, null)
+                }
+                DecorationStyle.DOTTED ->
+                    drawDecorationStroke(canvas, x0, x1, y, t, color, floatArrayOf(t, t))
+                DecorationStyle.DASHED ->
+                    drawDecorationStroke(canvas, x0, x1, y, t, color, floatArrayOf(t * DECORATION_DASH_ON, t * DECORATION_DASH_OFF))
+                DecorationStyle.WAVY -> drawDecorationWave(canvas, x0, x1, y, t, color)
+            }
+        }
+    }
+
+    /** 一条水平线笔画（[dash] 非空即点线/虚线：Skia 的 dash 相位 0）。 */
+    private fun drawDecorationStroke(
+        canvas: Canvas,
+        x0: Float,
+        x1: Float,
+        y: Float,
+        t: Float,
+        color: Int,
+        dash: FloatArray?,
+    ) {
+        if (x1 <= x0 || t <= 0f) return
+        val paint = Paint().apply {
+            this.color = color
+            mode = PaintMode.STROKE
+            strokeWidth = t
+            strokeCap = PaintStrokeCap.BUTT
+            if (dash != null) pathEffect = PathEffect.makeDash(dash, 0f)
+        }
+        canvas.drawLine(x0, y, x1, y, paint)
+        paint.close()
+    }
+
+    /**
+     * 波浪线（`text-decoration-style: wavy`）：按正弦路径画。
+     *
+     * 波长与振幅是 UA 自定值（CSS 未规定），这里取线宽的量级：振幅 = 线宽、波长 = 4 线宽，
+     * 与原下划线的视觉量级一致；不做 subsampling（每条装饰都重建 Path，条数极少）。
+     */
+    private fun drawDecorationWave(canvas: Canvas, x0: Float, x1: Float, y: Float, t: Float, color: Int) {
+        if (x1 <= x0 || t <= 0f) return
+        val amp = t
+        val wave = (t * DECORATION_WAVE_PERIODS).coerceAtLeast(2f)
+        val builder = PathBuilder()
+        builder.moveTo(x0, y)
+        var x = x0
+        var up = true
+        while (x < x1) {
+            val next = (x + wave / 2f).coerceAtMost(x1)
+            val cy = if (up) y - amp else y + amp
+            builder.quadTo((x + next) / 2f, cy, next, y)
+            x = next
+            up = !up
+        }
+        val path = builder.snapshot()
+        val paint = Paint().apply {
+            this.color = color
+            mode = PaintMode.STROKE
+            strokeWidth = t.coerceAtLeast(DECORATION_MIN_THICKNESS_PX)
+            strokeCap = PaintStrokeCap.BUTT
+        }
+        canvas.drawPath(path, paint)
+        path.close()
+        builder.close()
+        paint.close()
+    }
+
+    /** 从 [left, right] 里挖掉 [cuts]（已排序或未排序都行），返回剩下的片段。 */
+    private fun subtractCuts(left: Float, right: Float, cuts: List<ClosedFloatingPointRange<Float>>): List<Pair<Float, Float>> {
+        if (cuts.isEmpty()) return listOf(left to right)
+        val out = ArrayList<Pair<Float, Float>>(cuts.size + 1)
+        var cursor = left
+        for (c in cuts) {
+            val a = c.start.coerceIn(left, right)
+            val b = c.endInclusive.coerceIn(left, right)
+            if (b <= a) continue
+            if (a > cursor) out.add(cursor to a)
+            if (b > cursor) cursor = b
+        }
+        if (right > cursor) out.add(cursor to right)
+        return out
+    }
+
+    /**
+     * skip-ink 切口：逐字取墨迹盒（`Font.getBounds`，与基线同坐标系）与装饰线横带
+     * `[centerRel − t/2, centerRel + t/2]` 求交，相交即返回「墨迹左右边界」这段切口。
+     *
+     * 容差 [DECORATION_INK_EPS_PX]：只是**相切**（墨迹刚好触到线）不算穿过 —— 汉字、拉丁
+     * 基字大多如此，没有这一点会把整段下划线切碎。
+     */
+    private fun inkCuts(
+        line: DrawLine,
+        xs: FloatArray,
+        start: Int,
+        lo: Int,
+        hi: Int,
+        fontFor: FontResolver,
+        bands: List<Band>,
+        centerRel: Float,
+        t: Float,
+    ): List<ClosedFloatingPointRange<Float>> {
+        val bandTop = centerRel - t / 2f
+        val bandBot = centerRel + t / 2f
+        val out = ArrayList<ClosedFloatingPointRange<Float>>(4)
+        var k = lo
+        while (k < hi) {
+            val abs = start + k
+            if (abs >= line.text.length) break
+            val at = codePointAt(line.text, abs)
+            val xHere = xs.getOrNull(k)
+            if (at.isLowSurrogateTail || xHere == null) {
+                k += at.units
+                continue
+            }
+            val run = bands.lastOrNull { it.start <= abs && abs < it.end }?.font
+            val sizePx = run?.fontPxOr(line.fontSizePx) ?: line.fontSizePx
+            val famList = run?.families ?: line.families
+            val wt = run?.weight ?: line.weight
+            val ital = run?.italic ?: line.italic
+            val key = glyphPainter.cacheKey(famList, wt, ital, sizePx, at.cp)
+            val gs = fontFor.resolve(at.cp, key, sizePx, famList, wt, ital, run?.monospace ?: line.monospace, run?.tag ?: line.tag)
+            val glyph = gs.font.getUTF32Glyph(at.cp)
+            val bounds = gs.font.getBounds(shortArrayOf(glyph)).firstOrNull()
+            if (bounds != null && bounds.right > bounds.left &&
+                bounds.bottom > bandTop + DECORATION_INK_EPS_PX && bounds.top < bandBot - DECORATION_INK_EPS_PX
+            ) {
+                out.add((xHere + bounds.left)..(xHere + bounds.right))
+            }
+            k += at.units
+        }
+        return out
     }
 
     /** 段内面解析（抽出成接口：inline 函数不能收函数类型参数）。 */
@@ -933,7 +1159,7 @@ private interface FontResolver {
             val e = r.endExclusive.coerceIn(lo, hi)
             if (e > s) ShiftBand(s, e, r.shiftEm) else null
         }
-        val ulBounds = line.underlineRuns.mapNotNull { r ->
+        val ulBounds = line.decorationRuns.mapNotNull { r ->
             val s = r.start.coerceIn(lo, hi)
             val e = r.endExclusive.coerceIn(lo, hi)
             if (e > s) UlBand(s, e) else null
@@ -1019,3 +1245,41 @@ private interface FontResolver {
         }
     }
 }
+// ── 文本装饰（第三刀）的绘制常量 ──────────────────────────────────────────────
+// 位置与 `auto` 粗细优先取字体度量（见 `paintDecorations`），这些只在度量缺失时兜底，
+// 或本身即 UA 自定值（点线/虚线/波浪的节距、双线比例）。
+
+/** 取装饰度量用的码本（拉丁大写 H）：字体度量与码本无关，固定一个即可命中缓存。 */
+private const val DECORATION_METRIC_CP = 'H'.code
+
+/** 三种线型的绘制顺序（集合本身无序，绘制要确定）。 */
+private val DECORATION_PAINT_ORDER = listOf(DecorationLine.UNDERLINE, DecorationLine.OVERLINE, DecorationLine.LINE_THROUGH)
+
+/** `auto` / `from-font` 线宽的下限（px）：细字体（宋体度量仅 0.02em）也要看得见。 */
+private const val DECORATION_MIN_THICKNESS_PX = 0.8f
+
+/** 字体度量缺失时的回退线宽（em，与旧下划线口径一致 = 0.06em）。 */
+private const val DECORATION_FALLBACK_THICKNESS_EM = 0.06f
+
+/** 字体度量缺失时的回退下划线位置（em，与旧下划线口径一致 = 0.12em）。 */
+private const val DECORATION_UNDERLINE_FALLBACK_EM = 0.12f
+
+/** 字体度量缺失时的回退删除线位置（em，基线上方 0.25em ≈ 字腰）。 */
+private const val DECORATION_STRIKE_FALLBACK_EM = 0.25f
+
+/** `double` 两条细线各占的比例（余下 1/3 为间隔）。 */
+private const val DECORATION_DOUBLE_THIN = 0.34f
+
+/** `dashed` 的划长 / 间隙（线宽的倍数；UA 自定值）。 */
+private const val DECORATION_DASH_ON = 3f
+private const val DECORATION_DASH_OFF = 2f
+
+/** `wavy` 的波长（线宽的倍数；UA 自定值）。 */
+private const val DECORATION_WAVE_PERIODS = 4f
+
+/**
+ * skip-ink 的容差（px）：墨迹与装饰线只是**相切**不算穿过。
+ *
+ * 汉字与多数拉丁基字的墨迹底边正好落在下划线上，没有这一点会把整段下划线切碎。
+ */
+private const val DECORATION_INK_EPS_PX = 0.25f

@@ -117,7 +117,7 @@ object ParagraphShapes {
             emphasisUnder = geo.emphasisUnder,
             alpha = geo.alpha,
             rubyRuns = geo.rubyRuns,
-            underlineRuns = geo.underlineRuns,
+            decorationRuns = geo.decorationRuns,
             fontRequest = geo.fontRequest,
         )
     }
@@ -219,17 +219,17 @@ object ParagraphShapes {
     )
 
     /**
-     * [emitPlainText] 的下划线伴生：与 [baselineShiftsOf] 同一遍历骨架的
-     * [orilumn.reader.engine.laying.collectUnderlineRuns]，产出与 [text] 恒对齐的下划线区间
-     * （声明元素整段向后代传播）。无下划线叶回空表，绘制零回归。
+     * [emitPlainText] 的装饰伴生：与 [baselineShiftsOf] 同一遍历骨架的
+     * [orilumn.reader.engine.laying.collectTextDecorationRuns]，产出与 [text] 恒对齐的装饰区间
+     * （声明元素整段向后代传播）。无装饰叶回空表，绘制零回归。
      */
-    fun underlineRunsOf(
+    fun decorationRunsOf(
         el: MarkupElement,
         styles: Map<MarkupElement, ComputedStyle>,
         base: ComputedStyle,
         /** P3-c 生成内容查找（空即无，旧路径）。 */
         genOf: orilumn.reader.engine.laying.GenOf = orilumn.reader.engine.laying.EmptyGen,
-    ): List<orilumn.reader.engine.laying.UnderlineRun> = orilumn.reader.engine.laying.collectUnderlineRuns(
+    ): List<orilumn.reader.engine.laying.TextDecorationRun> = orilumn.reader.engine.laying.collectTextDecorationRuns(
         el,
         styles,
         { styles[it]?.displayNone == true },

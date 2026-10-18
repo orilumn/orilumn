@@ -19,7 +19,7 @@ import orilumn.reader.engine.laying.NormalFlowLayout
 import orilumn.reader.engine.laying.RubyRun
 import orilumn.reader.engine.laying.ShapeFontRequest
 import orilumn.reader.engine.laying.ShapedGeometry
-import orilumn.reader.engine.laying.UnderlineRun
+import orilumn.reader.engine.laying.TextDecorationRun
 import orilumn.reader.engine.laying.adjustLineHeightsForRuby
 import orilumn.reader.engine.laying.breakWrappedLines
 import orilumn.reader.engine.laying.collectBaselineShifts
@@ -27,7 +27,7 @@ import orilumn.reader.engine.laying.collectColorRuns
 import orilumn.reader.engine.laying.collectFontRuns
 import orilumn.reader.engine.laying.collectInlineBoxRuns
 import orilumn.reader.engine.laying.collectRubyRuns
-import orilumn.reader.engine.laying.collectUnderlineRuns
+import orilumn.reader.engine.laying.collectTextDecorationRuns
 import orilumn.reader.engine.laying.effectiveOpacity
 import orilumn.reader.engine.laying.normalizeAnonymousRun
 import orilumn.reader.engine.laying.styledSegments
@@ -180,7 +180,7 @@ fun shapeGeometry(
         alpha = effectiveOpacity(el) { styles[it] ?: ancestorStyleOf?.invoke(it) ?: rootStyle },
         rubyRuns = rubyRuns,
         // 下划线区间（与 text 同构遍历；无下划线回空表零回归）。
-        underlineRuns = underlineRunsOf(el, styles, rootStyle, genOf, isBlock, sharedSegs),
+        decorationRuns = decorationRunsOf(el, styles, rootStyle, genOf, isBlock, sharedSegs),
         // 行内盒（背景/边框；无装饰回空表零回归）。样式回退同 alpha：表外祖先按懒级联取。
         inlineBoxRuns = inlineBoxes,
         fontRequest = fontRequest,
@@ -299,7 +299,7 @@ fun rubyRunsOf(
 )
 
 /** 下划线伴生（无下划线回空表）。 */
-fun underlineRunsOf(
+fun decorationRunsOf(
     el: MarkupElement,
     styles: Map<MarkupElement, ComputedStyle>,
     base: ComputedStyle,
@@ -307,7 +307,7 @@ fun underlineRunsOf(
     isBlock: (MarkupElement) -> Boolean,
     /** 预计算段表（`shapeGeometry` 一次分段多家共享；null 即现算）。 */
     segs: List<StyledSegment>? = null,
-) = collectUnderlineRuns(
+) = collectTextDecorationRuns(
     el,
     styles,
     { styles[it]?.displayNone == true },

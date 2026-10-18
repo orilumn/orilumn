@@ -84,7 +84,7 @@ object DrawLineBuilder {
             // P6-b: 叠排注音 runs 同样按叶一次算好（无注音叶回空表零开销；绘制侧按行过滤）。
             val rubyRuns = NormalFlowLayout.leafRubyRuns(el, styleMap, classify, hidden, genOf)
             // 下划线区间同样按叶一次算好（无下划线叶回空表零开销）。
-            val underlineRuns = NormalFlowLayout.leafUnderlineRuns(el, styleMap, classify, hidden, genOf)
+            val decorationRuns = NormalFlowLayout.leafTextDecorationRuns(el, styleMap, classify, hidden, genOf)
             // 行内盒（背景/边框）同样按叶一次算好（无装饰叶回空表零开销）。
             val inlineBoxes = NormalFlowLayout.leafInlineBoxRuns(el, styleMap, classify, hidden, genOf)
             // 首行缩进只给叶首行（断行侧同值已减宽，绘制侧右移同值；悬挂负值本轮不支持，归零）。
@@ -158,7 +158,7 @@ object DrawLineBuilder {
                     alpha = alpha,
                     charBase = charBase,
                     rubyRuns = rubyRuns,
-                    underlineRuns = underlineRuns,
+                    decorationRuns = decorationRuns,
                     inlineBoxRuns = inlineBoxes,
                 )
             }

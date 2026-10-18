@@ -1425,20 +1425,20 @@ object NormalFlowLayout {
     }
 
     /**
-     * 下划线伴生：[leafText] 同一字符串上的下划线区间（[UnderlineRun]，叶子全文本坐标系）。
+     * 下划线伴生：[leafText] 同一字符串上的下划线区间（[TextDecorationRun]，叶子全文本坐标系）。
      * 无下划线叶回空表（绘制零回归）。调用方必须传与塑形同一套 [styles]/[classify]/[hidden]。
      */
-    fun leafUnderlineRuns(
+    fun leafTextDecorationRuns(
         el: MarkupElement?,
         styles: Map<MarkupElement, ComputedStyle>,
         classify: BlockClassify,
         hidden: HiddenCheck = HIDDEN_NONE,
         /** P3-c 生成内容查找（空即无，旧路径）。 */
         genOf: GenOf = EmptyGen,
-    ): List<UnderlineRun> {
+    ): List<TextDecorationRun> {
         if (el == null) return emptyList()
         val rootWs = styles[el]?.whiteSpace ?: el.parent?.let { styles[it]?.whiteSpace } ?: WhiteSpace.NORMAL
-        return collectUnderlineRuns(el, styles, hidden::isHidden, classify::isBlock, rootWs, genOf)
+        return collectTextDecorationRuns(el, styles, hidden::isHidden, classify::isBlock, rootWs, genOf)
     }
 
     /**

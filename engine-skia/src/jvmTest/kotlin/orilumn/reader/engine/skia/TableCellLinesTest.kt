@@ -46,7 +46,7 @@ class TableCellLinesTest {
         override val shapeFontRuns get() = emptyList<orilumn.reader.engine.css.FontRun>()
         override val shapeBaselineShifts get() = emptyList<orilumn.reader.engine.laying.BaselineShift>()
         override val shapeRubyRuns get() = emptyList<orilumn.reader.engine.laying.RubyRun>()
-        override val shapeUnderlineRuns get() = emptyList<orilumn.reader.engine.laying.UnderlineRun>()
+        override val shapeDecorationRuns get() = emptyList<orilumn.reader.engine.laying.TextDecorationRun>()
         override val shapeAlpha: Float get() = 1f
         override val shapeEmphasis get() = orilumn.reader.engine.css.EmphasisStyle.NONE
         override val shapeEmphasisUnder: Boolean get() = false

@@ -70,10 +70,10 @@ class ParagraphShape(
      *  由 [ParagraphShapes.shapeOf] 从与 [text] 同构的遍历产出，索引恒对齐；
      *  行高已含注音增量，绘制把 rt 居中画在基字上方（双端同式）。 */
     override val rubyRuns: List<orilumn.reader.engine.laying.RubyRun> = emptyList(),
-    /** 下划线区间 over [text]（同一坐标系，空 = 无下划线旧路径）：
+    /** 文本装饰区间 over [text]（同一坐标系，空 = 无装饰）：
      *  由 [ParagraphShapes.shapeOf] 从与 [text] 同构的遍历产出（声明元素整段传播）；
-     *  回退绘制按段盖 `underlineText`。 */
-    override val underlineRuns: List<orilumn.reader.engine.laying.UnderlineRun> = emptyList(),
+     *  回退绘制按段盖线。 */
+    override val decorationRuns: List<orilumn.reader.engine.laying.TextDecorationRun> = emptyList(),
     /** 取画笔请求（C2-P2b-3：`shapeOf` 包装装配，与几何同源；未来卷曲凭它取 face）。 */
     override val fontRequest: orilumn.reader.engine.laying.ShapeFontRequest =
         orilumn.reader.engine.laying.ShapeFontRequest(null, emptyList(), 400, false, false),
@@ -91,7 +91,7 @@ class ParagraphShape(
     override val shapeFontRuns: List<orilumn.reader.engine.css.FontRun> get() = fontRuns
     override val shapeBaselineShifts: List<orilumn.reader.engine.laying.BaselineShift> get() = baselineShifts
     override val shapeRubyRuns: List<orilumn.reader.engine.laying.RubyRun> get() = rubyRuns
-    override val shapeUnderlineRuns: List<orilumn.reader.engine.laying.UnderlineRun> get() = underlineRuns
+    override val shapeDecorationRuns: List<orilumn.reader.engine.laying.TextDecorationRun> get() = decorationRuns
     override val shapeAlpha: Float get() = alpha
     override val shapeEmphasis: orilumn.reader.engine.css.EmphasisStyle get() = emphasis
     override val shapeEmphasisUnder: Boolean get() = emphasisUnder

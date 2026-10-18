@@ -330,7 +330,7 @@ class DrawLineBuilderTest(private val variant: String) {
     }
 
     @Test
-    fun underlineRunsFlowIntoDrawLines() {
+    fun decorationRunsFlowIntoDrawLines() {
         // 链接下划线透传绘制指令；无下划线行零 runs。
         val ua = "rp{display:none}rt{font-size:0.6em;vertical-align:super}a{text-decoration:underline}"
         val root = HtmlTreeConverter().convert(
@@ -345,9 +345,33 @@ class DrawLineBuilderTest(private val variant: String) {
             styleMap, classify, hidden, 0f,
         )
         val linked = map.values.first { it.text.contains("表1") }
-        assertEquals(1, linked.underlineRuns.size)
-        assertEquals(1, linked.underlineRuns[0].start)
-        assertEquals(3, linked.underlineRuns[0].endExclusive)
-        assertTrue(map.values.first { it.text == "plain" }.underlineRuns.isEmpty())
+        assertEquals(1, linked.decorationRuns.size)
+        assertEquals(1, linked.decorationRuns[0].start)
+        assertEquals(3, linked.decorationRuns[0].endExclusive)
+        assertTrue(map.values.first { it.text == "plain" }.decorationRuns.isEmpty())
+    }
+
+    @Test
+    fun `line-through reaches draw lines as line-through not underline`() {
+        // E3 反向锁：`<s>` 的删除线必须**原样**到绘制指令（旧模型会把它并成下划线）。
+        val root = HtmlTreeConverter().convert(
+            "<html><body><p>a<s>bc</s>d</p></body></html>",
+        )!!
+        val engine = StyleComputer(10f, LightCssParser().parse("s{text-decoration:line-through}"), emptyList())
+        val styleMap = engine.compute(root)
+        val classify = NormalFlowLayout.heavyClassify(styleMap, engine.hasDisplayDeclaration())
+        val hidden = { el: orilumn.reader.engine.html.MarkupElement -> styleMap[el]?.displayNone == true }
+        val map = DrawLineBuilder.build(
+            BoxLayouter(10f, variantBreaker()).layoutBoxes(root, 600, styleMap, classify),
+            styleMap, classify, hidden, 0f,
+        )
+        val line = map.values.first { it.text.contains("bc") }
+        assertEquals(1, line.decorationRuns.size)
+        assertEquals(
+            setOf(orilumn.reader.engine.css.DecorationLine.LINE_THROUGH),
+            line.decorationRuns[0].paints.single().lines,
+        )
+        assertEquals(1, line.decorationRuns[0].start)
+        assertEquals(3, line.decorationRuns[0].endExclusive)
     }
 }

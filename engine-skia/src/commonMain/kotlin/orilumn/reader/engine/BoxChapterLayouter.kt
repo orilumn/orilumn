@@ -842,8 +842,8 @@ class BoxChapterLayouter(
                     alpha = orilumn.reader.engine.laying.effectiveOpacity(el) { prepare.resolveStyle(it) },
                     // P6-b: 叠排注音随形透传（与 canonical DrawLineBuilder 同源 shape.rubyRuns）。
                     rubyRuns = shape.rubyRuns,
-                    // 下划线随形透传（与 canonical 同源 shape.underlineRuns）。
-                    underlineRuns = shape.underlineRuns,
+                    // 下划线随形透传（与 canonical 同源 shape.decorationRuns）。
+                    decorationRuns = shape.decorationRuns,
                     // **Q20**：断词收尾随行读 **shape**（增量/临时页手里没有 `LayoutBox`；值与盒流
                     // `leaf.hyphenAtEnd` 同断行器同宽逐项一致）。漏传取默认 `false` ⇒
                     // `LineAligner.hyphenW == 0` ⇒ `LineWindowDrawer` 整块跳过 ⇒ 连字符画不出来。

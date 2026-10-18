@@ -46,7 +46,7 @@ data class ShapedGeometry(
     override val emphasisUnder: Boolean = false,
     override val alpha: Float = 1f,
     override val rubyRuns: List<RubyRun> = emptyList(),
-    override val underlineRuns: List<UnderlineRun> = emptyList(),
+    override val decorationRuns: List<TextDecorationRun> = emptyList(),
     /** 行内盒 spans（叶文本坐标系；空 = 无行内背景/边框）。 */
     override val inlineBoxRuns: List<InlineBoxRun> = emptyList(),
     override val fontRequest: ShapeFontRequest = ShapeFontRequest(null, emptyList(), 400, false, false),
@@ -67,7 +67,7 @@ data class ShapedGeometry(
     override val shapeFontRuns: List<FontRun> get() = fontRuns
     override val shapeBaselineShifts: List<BaselineShift> get() = baselineShifts
     override val shapeRubyRuns: List<RubyRun> get() = rubyRuns
-    override val shapeUnderlineRuns: List<UnderlineRun> get() = underlineRuns
+    override val shapeDecorationRuns: List<TextDecorationRun> get() = decorationRuns
     override val shapeInlineBoxRuns: List<InlineBoxRun> get() = inlineBoxRuns
     override val shapeAlpha: Float get() = alpha
     override val shapeEmphasis: EmphasisStyle get() = emphasis

@@ -83,7 +83,7 @@ class LazyCascadeConsistencyTest {
         assertEquals("directionRtl", expected.directionRtl, actual.directionRtl)
         assertEquals("bold", expected.bold, actual.bold)
         assertEquals("italic", expected.italic, actual.italic)
-        assertEquals("underline", expected.underline, actual.underline)
+        assertEquals("decoration", expected.decoration, actual.decoration)
         assertEquals("textIndentPx", expected.textIndentPx, actual.textIndentPx, 1e-3f)
         assertEquals("margin", expected.margin, actual.margin)
         assertEquals("padding", expected.padding, actual.padding)

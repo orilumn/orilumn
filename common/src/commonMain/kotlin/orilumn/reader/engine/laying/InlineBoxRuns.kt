@@ -9,7 +9,7 @@ import orilumn.reader.engine.html.MarkupElement
 
 /**
  * 一个行内元素的「行内盒」在其叶文本上的字符区间 `[start, endExclusive)`
- * （叶文本坐标系，与 [UnderlineRun] / [orilumn.reader.engine.css.FontRun] 同源、同一次归一化段）。
+ * （叶文本坐标系，与 [TextDecorationRun] / [orilumn.reader.engine.css.FontRun] 同源、同一次归一化段）。
  *
  * ## 浏览器语义（本 run 是它的几何载体）
  *
@@ -72,7 +72,7 @@ data class InlineBoxRun(
  * 行内盒单源（pure JVM）：把叶内**有可见装饰的行内元素**投影成叶文本坐标系的 [InlineBoxRun]，
  * 与叶文本同一归一化段构建（下标恒对齐，重/轻两路同源）。
  *
- * 骨架与 [collectUnderlineRuns] **完全同构**（同一 `styledSegments`、同一 `isExcluded`/`isBlock`
+ * 骨架与 [collectTextDecorationRuns] **完全同构**（同一 `styledSegments`、同一 `isExcluded`/`isBlock`
  * 跳过规则、同一段折叠），差别只在「属性」与「聚合口径」：
  *
  *  - **下划线**是**继承型**属性：声明元素的后代全部带下划线 ⇒ 逐节点向下传播布尔。
@@ -102,7 +102,7 @@ fun collectInlineBoxRuns(
     precomputed: List<StyledSegment>? = null,
     styleOf: ((MarkupElement) -> ComputedStyle?)? = null,
 ): List<InlineBoxRun> {
-    // 表/图根、文本根：无行内盒可言（与 UnderlineRuns 同口径早退）。
+    // 表/图根、文本根：无行内盒可言（与 TextDecorationRuns 同口径早退）。
     if (root.tag == "table" || root.tag == "img") return emptyList()
     if (root.isText) return emptyList()
     val resolve: (MarkupElement) -> ComputedStyle? = styleOf ?: { styles[it] }

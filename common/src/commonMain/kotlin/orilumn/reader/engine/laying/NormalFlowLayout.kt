@@ -211,7 +211,8 @@ object NormalFlowLayout {
             return
         }
         val blockChildren = root.children.filter { !hidden.isHidden(it) && classify.isBlock(it) }
-        if (blockChildren.isEmpty()) {
+        // E19: 同 [buildBoxTree] —— 行内子树里埋着块级后代时本元素不是叶（flowChildren 会在块处断开）。
+        if (blockChildren.isEmpty() && !hasInlineWrappedBlock(root, classify, hidden)) {
             // Mirror buildBoxTree: a sole-figure block enumerates as its image, so the light path's
             // leaf set / char starts can never drift from the heavy path's unwrapped leaves.
             out.add(soleFigureImage(root, classify, hidden) ?: root)
@@ -554,6 +555,12 @@ object NormalFlowLayout {
         // styles 恒全：StyleComputer.compute 覆盖整树，缺键即调用方传了残表，直接抛（静默 16px 会排错版）。
         val style = styles.getValue(el)
         val blockChildren = el.children.filter { classify.isBlock(it) }
+        // E19（CSS 2.1 §9.2.1 block-in-inline）：直接块子节点为空、但**行内子树里**埋着块级后代时，
+        // 本元素也不是文本叶 —— 必须走容器分支，把行内盒在块级后代处断开（[splitBlockInInline]）。
+        // 否则 [appendInlineText] 与 [styledSegments] 的块跳过会把块里的文字**整段丢掉**
+        // （实测 `<a href><p>abc</p></a>` 零叶、`<a>zzz<p>abc</p>www</a>` 只剩 `zzz`）。
+        // [enumerateBlockLeaves] / [styledCharAdvance] 同判据，重轻两路叶集 / 字符起点不漂移。
+        val inlineWrappedBlock = blockChildren.isEmpty() && hasInlineWrappedBlock(el, classify, hidden)
         return if (el.tag == "table") {
             // Table 不可环绕：emit 期越过跨度，后续文本必在跨度之下，待环绕清零。
             pending.dropAll()
@@ -600,7 +607,7 @@ object NormalFlowLayout {
                     replaceableHeight = repH,
                 ),
             )
-        } else if (blockChildren.isEmpty() && soleFigureImage(el, classify, hidden) != null) {
+        } else if (blockChildren.isEmpty() && !inlineWrappedBlock && soleFigureImage(el, classify, hidden) != null) {
             // Sole-figure block (`<p><img/></p>`, `<div><img/></div>`, span-wrapped variants): the
             // block carries no text of its own, so promote the image to a replaceable leaf instead
             // of a one-U+FFFC text leaf. A text leaf would go through the shaper/drawer as the
@@ -670,7 +677,7 @@ object NormalFlowLayout {
                     breakCarrierStyle = style,
                 ),
             )
-        } else if (blockChildren.isEmpty()) {
+        } else if (blockChildren.isEmpty() && !inlineWrappedBlock) {
             // Leaf text block: absorb all inline/text descendants, break into lines.
             // Lines containing an inline <img> (U+FFFC slot) are raised to the image's used
             // height (CSS 2.1 §10.8: the line box must contain the tallest inline box; the
@@ -753,7 +760,10 @@ object NormalFlowLayout {
                 val childLeft = left + edgesL + marginL
                 if (ch.tag == "#text") {
                     // P6-a: 匿名 run 不环绕（v1 规则保留），但高度回记账（Y 记账不漂移）。
-                    buildAnonymousTextLeaf(ch, style, breaker, innerW, childLeft).also { bs ->
+                    // E19: 匿名 run 的样式取**母节点**（容器、或断开的行内包装）——与轻路径
+                    // `blockStyleFor`「`#text` 叶取父级样式」同式，字形/行高随行内链不变；
+                    // 容器直挂的匿名 run 此处 `styles[el] === style`，与旧行为逐值同。
+                    buildAnonymousTextLeaf(ch, styles[ch.parent ?: el] ?: style, breaker, innerW, childLeft).also { bs ->
                         pending.consume(bs.sumOf { it.lineHeights.sum() })
                     }
                 } else buildBoxTree(ch, styles, breaker, innerW, childLeft, classify, hidden, imageLoader, chapterHref, density, genOf, pending)
@@ -786,6 +796,9 @@ object NormalFlowLayout {
             // a block-level one: <p>前</p><img/><p>后</p> would otherwise be silently dropped here — a
             // container is not a text leaf, so absorbedText's U+FFFC path never runs for it.
             else if (isReplaceable(c)) { flush(); out.add(c) }
+            // E19（§9.2.1 block-in-inline）：行内子树里埋着块级后代 ⇒ 行内盒在此断开 —— 内联片段各成
+            // 匿名 run（母节点 = 该行内包装），块级后代提升为容器流子项。
+            else if (hasInlineWrappedBlock(c, classify, hidden)) { flush(); out.addAll(splitBlockInInline(c, classify, hidden)) }
             else appendInlineText(c, classify, sb, hidden)
         }
         flush()
@@ -816,9 +829,62 @@ object NormalFlowLayout {
     }
 
     /**
+     * E19（CSS 2.1 §9.2.1 block-in-inline）：[el] 的**行内子树**里是否埋着块级后代（经任意深度的
+     * 行内祖先可达）。行内盒一旦包住块级盒，行内盒必须在块级盒处**断开**（前后内联内容各成匿名块、
+     * 块级盒提升到最近的块容器流）；整段吸收（[appendInlineText] 与 [styledSegments] 的块跳过）
+     * 会把块里的文字整段丢掉。
+     *
+     * [buildBoxTree] / [enumerateBlockLeaves] / [styledCharAdvance] 三处叶判定同用本谓词，口径恒一
+     * （重轻两路叶集 / `globalCharStarts` 不漂移）。替换元素（img）不成块——行内图只按 CSS §10.8
+     * 抬所在行高，拆成独立块会让塑形侧对 `img` 根早退、塑出零行（教训 ⑲）。隐藏子树不参与
+     * （与 [enumerateBlockLeaves] 的直接块判据同取 [hidden]）。
+     */
+    private fun hasInlineWrappedBlock(el: MarkupElement, classify: BlockClassify, hidden: HiddenCheck): Boolean =
+        el.children.any { c ->
+            when {
+                hidden.isHidden(c) -> false
+                classify.isBlock(c) -> true
+                isReplaceable(c) -> false
+                else -> hasInlineWrappedBlock(c, classify, hidden)
+            }
+        }
+
+    /**
+     * E19：[el]（行内子树根，调用方已判 [hasInlineWrappedBlock]）拆成容器流项序列 ——
+     * 内联片段各自成匿名 `#text` run（**母节点 = 行内包装 [el]**：字形/颜色/祖先装饰链随行内链
+     * 不变，与轻路径 `blockStyleFor`「`#text` 叶取父级样式」同式），块级后代按文档序提升为真元素项。
+     *
+     * 文本/`br`/`img` 三条必须与 [appendInlineText]、[styledSegments] 的 `walk` **逐条同形**
+     * （教训 ⑲：两个遍历无法由编译器保证一致，只有显式对齐 + 变异验证）：本函数只决定**流结构**，
+     * 落字仍走同一套吸收；纯空白 run 丢弃的判据也与 [flowChildren] 一致。
+     */
+    private fun splitBlockInInline(el: MarkupElement, classify: BlockClassify, hidden: HiddenCheck): List<MarkupElement> {
+        val out = ArrayList<MarkupElement>()
+        val sb = StringBuilder()
+        fun flush() {
+            if (sb.isNotBlank()) out.add(MarkupElement("#text", text = sb.toString()).also { it.parent = el })
+            sb.setLength(0)
+        }
+        fun walk(x: MarkupElement) {
+            when {
+                hidden.isHidden(x) -> Unit
+                x.isText -> sb.append(x.text)
+                x.tag == "br" -> sb.append('\n')
+                x.tag == "img" -> sb.append('￼')
+                classify.isBlock(x) -> { flush(); out.add(x) }
+                else -> for (c in x.children) walk(c)
+            }
+        }
+        walk(el)
+        flush()
+        return out
+    }
+
+    /**
      * An anonymous text leaf box for a stray inline run.
      *
-     * 排版层（下）: 匿名块只继承容器的字形/排版属性（字号/行高/缩进/对齐/颜色等），自身的盒边
+     * 排版层（下）: 匿名块只继承**母节点**（容器、或 E19 断开的行内包装）的字形/排版属性
+     * （字号/行高/缩进/对齐/颜色等），自身的盒边
      * （margin/padding/border）恒为 0（CSS 2.1 §9.2.1 匿名块 + §8.3.1 边距折叠：容器的边归容器盒，
      * 流程统一加一次）。此前这里直接复用容器样式，容器的 padding/border/margin 被匿名叶与容器盒
      * 各算一次 —— 长生界 `h2{padding-bottom:6rem}` 的章标题→正文间隙被翻倍（252px 而非 141px）。
@@ -1272,6 +1338,14 @@ object NormalFlowLayout {
         hidden: HiddenCheck = HIDDEN_NONE,
         /** P3-c 生成内容查找（空即无；容器 stray 分支同旧式跳过，重轻同跳）。 */
         genOf: GenOf = EmptyGen,
+        /**
+         * E19 上下文开关：正常流容器 true（与 [flowChildren] 同断开行内盒）；**表格格内容 false** ——
+         * 格的字符口径在重轻两路都由 [cellBlocks]（[walkCellBlocks] → [cellFlowItems]）单源给出，
+         * 那里 v1 仍按旧式跳过行内内嵌块（[CellFlowItem] 的 `span` 按 `container.children` 原始身份
+         * 认段，行内子树里的块无法用下标表达）。进入格内容的两条路（行叶子元素、`table` 元素自身）
+         * 都翻此开关并向下继承；两路同址保持一致，绝不此处拆、彼处不拆。调用方恒用默认值。
+         */
+        hoist: Boolean = true,
     ): Long {
         if (hidden.isHidden(el)) return 0
         if (isReplaceable(el)) return 1
@@ -1280,24 +1354,28 @@ object NormalFlowLayout {
             var n = 0L
             for (row in model.rows) {
                 for (cell in row.cells) {
-                    n += styledCharAdvance(cell.el, styleOf, classify, hidden, genOf)
+                    n += styledCharAdvance(cell.el, styleOf, classify, hidden, genOf, hoist = false)
                 }
             }
             // P1-2: caption 字符计入表内（顺序无关求和；叶序由 enumerate 保证）。
+            // caption 是正常流块（重路径走 buildBoxTree 正常容器分支），照传本层 [hoist]。
             val cap = model.caption
-            if (cap != null) n += styledCharAdvance(cap, styleOf, classify, hidden, genOf)
+            if (cap != null) n += styledCharAdvance(cap, styleOf, classify, hidden, genOf, hoist = hoist)
             return n
         }
         if (soleFigureImage(el, classify, hidden) != null) return 1
         val blockChildren = el.children.filter { !hidden.isHidden(it) && classify.isBlock(it) }
-        if (blockChildren.isEmpty()) {
+        if (blockChildren.isEmpty() && !(hoist && hasInlineWrappedBlock(el, classify, hidden))) {
             if (el.isText) return normalizeAnonymousRun(el.text, styleOf(el.parent ?: el).whiteSpace).length.toLong()
             val wsOf: (MarkupElement) -> WhiteSpace = { n -> styleOf(n).whiteSpace }
             val leafWs = styleOf(el).whiteSpace
             return styledSegments(el, wsOf, hidden::isHidden, classify::isBlock, leafWs, genOf, styleOf).text.length.toLong()
         }
-        // 容器：与 flowChildren 同结构（raw 判空），匿名 run 按容器样式整段归一。
+        // 容器：与 flowChildren 同结构（raw 判空），匿名 run 按其母节点样式整段归一。
+        // 行叶（`tr`）的子格切到「格内容」口径：重路径的行长由 `cellBlocks` 给出（`cellFlowItems`
+        // 不拆行内内嵌块），轻路径必须同口径（见 [hoist]）。
         var n = 0L
+        val childHoist = hoist && el.tag != "tr"
         val sb = StringBuilder()
         fun flush() {
             if (sb.isNotBlank()) {
@@ -1309,10 +1387,17 @@ object NormalFlowLayout {
             if (hidden.isHidden(c)) continue
             if (classify.isBlock(c)) {
                 flush()
-                n += styledCharAdvance(c, styleOf, classify, hidden)
+                n += styledCharAdvance(c, styleOf, classify, hidden, hoist = childHoist)
             } else if (isReplaceable(c)) {
                 flush()
                 n += 1
+            } else if (hoist && hasInlineWrappedBlock(c, classify, hidden)) {
+                // E19: 与 flowChildren 同断开（行内子树埋块级后代）；匿名 run 的归一化按其母节点
+                // （行内包装）——递归进 `#text` 分支即走 `el.parent?.whiteSpace`，与重路径同值。
+                flush()
+                for (item in splitBlockInInline(c, classify, hidden)) {
+                    n += styledCharAdvance(item, styleOf, classify, hidden, genOf, hoist = hoist)
+                }
             } else {
                 appendInlineText(c, classify, sb, hidden)
             }

@@ -55,7 +55,7 @@ class TableBorderContainerBoxesTest {
         }
         val first = IntArray(leaves.size) { it }
         val last = IntArray(leaves.size) { it + 1 }
-        val boxes = layouter.buildBackgroundDrawBoxes(prepare, leaves, lines, first, last)
+        val boxes = layouter.buildBackgroundDrawBoxes(prepare, leaves, lines, first, last).boxes
 
         val tableBox = boxes.singleOrNull { it.el?.tag == "table" }
             ?: error("表容器边框盒缺失，boxes=${boxes.map { it.el?.tag }}")
@@ -82,7 +82,7 @@ class TableBorderContainerBoxesTest {
         }
         val boxes = layouter.buildBackgroundDrawBoxes(
             prepare, leaves, lines, IntArray(leaves.size) { it }, IntArray(leaves.size) { it + 1 },
-        )
+        ).boxes
         assertEquals("自带背景的表只应有一个盒", 1, boxes.count { it.el?.tag == "table" })
     }
 }

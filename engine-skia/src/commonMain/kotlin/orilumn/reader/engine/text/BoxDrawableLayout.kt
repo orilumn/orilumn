@@ -74,6 +74,18 @@ class BoxDrawableLayout(
 
     override fun elementStyle(el: MarkupElement): ComputedStyle? = styleByElement[el]
 
+    /**
+     * E11：`overflow` 祖先裁剪源 —— 整章盒树上每个裁剪盒元素的 padding box（章节绝对 Y，与
+     * [orilumn.reader.engine.skia.WindowedBookLayout.getLineTop] 同口径）。插图/替换叶内容的裁剪
+     * 由此上溯求交（[orilumn.reader.engine.laying.contentClipOf]）。
+     */
+    private val clipByElement: Map<MarkupElement, orilumn.reader.engine.laying.ClipRect> by lazy {
+        orilumn.reader.engine.laying.clipMapOf(result.boxes)
+    }
+
+    override fun elementClip(el: MarkupElement?): orilumn.reader.engine.laying.ClipRect? =
+        orilumn.reader.engine.laying.contentClipOf(el, clipByElement::get)
+
     private fun collectLeaves(boxes: List<LayoutBox>): List<LayoutBox> {
         val out = ArrayList<LayoutBox>()
         for (b in boxes) if (b.isContainer) out.addAll(collectLeaves(b.childBoxes)) else out.add(b)

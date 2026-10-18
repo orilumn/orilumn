@@ -55,14 +55,33 @@ internal fun drawPageContent(
     val yOff = contentRectTop.roundToInt()
     if (backgrounds.isNotEmpty()) {
         for (bg in backgrounds) {
-            canvas.drawPageBackground(bg, xOff, -yOff.toFloat(), bg.bgKey()?.let { bgImages[it]?.image })
+            // E11：`overflow` 祖先裁剪 —— 画布裁剪（不做矩形求交：圆角/阴影/背景图平铺原点保持原样）。
+            val clip = bg.clip
+            val saved = if (clip != null) {
+                canvas.save()
+                canvas.clipRect(
+                    Rect.makeLTRB(
+                        clip.left + xOff, (clip.top - yOff).toFloat(),
+                        clip.right + xOff, (clip.bottom - yOff).toFloat(),
+                    ),
+                )
+                true
+            } else {
+                false
+            }
+            try {
+                canvas.drawPageBackground(bg, xOff, -yOff.toFloat(), bg.bgKey()?.let { bgImages[it]?.image })
+            } finally {
+                if (saved) canvas.restore()
+            }
         }
     }
     if (lines.isNotEmpty()) {
         drawer.drawLines(
             canvas = canvas,
             contentLeft = xOff,
-            lines = if (yOff != 0) lines.map { it.copy(yTop = it.yTop - yOff, yBottom = it.yBottom - yOff) } else lines,
+            // E11：平移 Y 时裁剪区随行同步（`shiftedBy` 单源，漏了即裁剪区错位）。
+            lines = if (yOff != 0) lines.map { it.shiftedBy(-yOff) } else lines,
             clip = Rect.makeLTRB(0f, 0f, w.toFloat(), h.toFloat()),
         )
     }
@@ -73,12 +92,9 @@ internal fun drawPageContent(
     )
 }
 
-/** 槽位整体上移 [dy]（页坐标 → 离屏坐标；几何与解码结果都不变，只换 y）。 */
+/** 槽位整体上移 [dy]（页坐标 → 离屏坐标；几何与解码结果都不变，只换 y，裁剪区同步平移）。 */
 private fun PageImageSlot.shiftBy(dy: Int): PageImageSlot =
-    if (dy == 0) this else PageImageSlot(
-        image.copy(yTop = image.yTop + dy, yBottom = image.yBottom + dy),
-        decoded,
-    )
+    if (dy == 0) this else PageImageSlot(image.shiftedBy(dy), decoded)
 
 /**
  * 插图落位（与旧 `ReaderPageCanvas.drawPageImage` 逐项同形）：
@@ -96,21 +112,39 @@ private fun drawPageImages(canvas: Canvas, images: List<PageImageSlot>, contentL
         val left = contentLeft + img.xLeft
         val top = img.yTop.toFloat()
         val decoded = slot.decoded
-        if (decoded != null) {
-            // 采样显式给 LINEAR：与旧 Compose `drawImage` 默认 `FilterQuality.Low`（双线性）
-            // 同档，避免「下沉进位图」顺带把图片变锯齿（这种降级肉眼可见，属静默回归）。
-            canvas.drawImageRect(
-                decoded.image,
-                Rect.makeWH(decoded.width.toFloat(), decoded.height.toFloat()),
-                Rect.makeLTRB(left, top, left + w, top + h),
-                SamplingMode.LINEAR,
-                paint,
-                false,
+        // E11：`overflow` 祖先裁剪（画布裁剪，替代几何求交）。
+        val clip = img.clip
+        val saved = if (clip != null) {
+            canvas.save()
+            canvas.clipRect(
+                Rect.makeLTRB(
+                    clip.left + contentLeft, clip.top.toFloat(),
+                    clip.right + contentLeft, clip.bottom.toFloat(),
+                ),
             )
+            true
         } else {
-            // 解码中/失败的灰色占位：保证「有图几何」永远可见。
-            paint.color = PLACEHOLDER_GRAY
-            canvas.drawRect(Rect.makeLTRB(left, top, left + w, top + h), paint)
+            false
+        }
+        try {
+            if (decoded != null) {
+                // 采样显式给 LINEAR：与旧 Compose `drawImage` 默认 `FilterQuality.Low`（双线性）
+                // 同档，避免「下沉进位图」顺带把图片变锯齿（这种降级肉眼可见，属静默回归）。
+                canvas.drawImageRect(
+                    decoded.image,
+                    Rect.makeWH(decoded.width.toFloat(), decoded.height.toFloat()),
+                    Rect.makeLTRB(left, top, left + w, top + h),
+                    SamplingMode.LINEAR,
+                    paint,
+                    false,
+                )
+            } else {
+                // 解码中/失败的灰色占位：保证「有图几何」永远可见。
+                paint.color = PLACEHOLDER_GRAY
+                canvas.drawRect(Rect.makeLTRB(left, top, left + w, top + h), paint)
+            }
+        } finally {
+            if (saved) canvas.restore()
         }
     }
 }

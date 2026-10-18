@@ -77,6 +77,8 @@ interface ParagraphShapeRef {
      * 本表是**同一份数据**的几何视图（量画同源）。
      */
     val shapeInlineBoxRuns: List<InlineBoxRun> get() = emptyList()
+    /** E10 `visibility: hidden` 覆盖区间（叶文本坐标系；空 = 全叶可见）。见 [visibilityHiddenRuns]。 */
+    val shapeVisibilityHiddenRuns: List<IntRange> get() = emptyList()
     /** Ancestor-chain opacity product (1 = legacy path). */
     val shapeAlpha: Float
     /** Emphasis marks (NONE = none). */
@@ -131,6 +133,14 @@ interface ParagraphShapeRef {
     val decorationRuns: List<TextDecorationRun> get() = shapeDecorationRuns
     /** 行内盒 spans over [shapeText]（空 = 无行内背景/边框）。 */
     val inlineBoxRuns: List<InlineBoxRun> get() = shapeInlineBoxRuns
+    /**
+     * E10：`visibility: hidden` 覆盖区间（叶文本坐标系；空 = 全叶可见）。
+     *
+     * 隐藏字符**不落墨但保留占位**（与 `display:none` 的去盒语义相反）。默认空表 = 旧行为零改动
+     * （哑实现/旧桩不必实现）。canonical 走盒流（`DrawLineBuilder` 自算），增量/临时页与表内块走
+     * shape（塑形期一次算好，两路同源）。
+     */
+    val visibilityHiddenRuns: List<IntRange> get() = shapeVisibilityHiddenRuns
     /** Ancestor-chain opacity product (1 = legacy path). */
     val alpha: Float get() = shapeAlpha
     /** Emphasis marks (NONE = none). */

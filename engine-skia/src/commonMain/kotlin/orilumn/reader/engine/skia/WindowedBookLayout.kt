@@ -4,6 +4,7 @@ import orilumn.reader.engine.ImageLoader
 import orilumn.reader.engine.css.ComputedStyle
 import orilumn.reader.engine.html.MarkupElement
 import orilumn.reader.engine.laying.BoxDrawer
+import orilumn.reader.engine.laying.ClipRect
 import orilumn.reader.engine.laying.LayoutBox
 import orilumn.reader.engine.laying.NormalFlowLayout
 import orilumn.reader.engine.laying.ParagraphShapeRef
@@ -142,6 +143,13 @@ abstract class WindowedBookLayout : PagedLayout, BreakAwareBookLayout {
      */
     protected open fun elementStyle(el: MarkupElement): ComputedStyle? = null
 
+    /**
+     * E11：元素**内容**（插图/替换叶）所受的 `overflow` 祖先裁剪（含元素自身裁剪盒）。
+     * null = 本实现没有裁剪源（或该元素不受裁）⇒ 旧路径不裁。坐标与 [getLineTop] 同一 Y 口径
+     * （增量/临时页是窗口局部 Y），故裁剪源必须与本次行流同源。
+     */
+    protected open fun elementClip(el: MarkupElement?): ClipRect? = null
+
     /** 行下标 → 该行为**叶首行**时该叶的元素（非叶首行 = null）。v4 页首缺口按盒链上溯要用它。 */
     private val leafElementByFirstLine: Array<MarkupElement?> by lazy {
         val out = arrayOfNulls<MarkupElement>(lineCount)
@@ -200,6 +208,8 @@ abstract class WindowedBookLayout : PagedLayout, BreakAwareBookLayout {
                 bgPosition = r.bgImage?.position ?: orilumn.reader.engine.css.BackgroundPosition(),
                 bgBoxTop = r.bgBoxTop,
                 bgBoxBottom = r.bgBoxBottom,
+                // E11：`overflow` 祖先裁剪随指令带上（渲染层画布裁剪；null = 不裁）。
+                clip = r.clip,
             )
         }.toMutableList()
         // 表格单元格边框（与表行文本展开同源；只取与本页带相交者）。
@@ -221,6 +231,8 @@ abstract class WindowedBookLayout : PagedLayout, BreakAwareBookLayout {
             if (leaf.table != null) continue
             val el = leaf.el
             if (el == null || el.tag != "img") continue
+            // E10：隐藏的替换叶不落图（占位照旧）。
+            if (leaf.style.visibilityHidden) continue
             val gearIndex = leafLocalFirstLine[si]
             if (gearIndex < firstLine || gearIndex >= pageEnd) continue
             val src = el.attrs["src"] ?: continue
@@ -249,11 +261,14 @@ abstract class WindowedBookLayout : PagedLayout, BreakAwareBookLayout {
                 PageImage(
                     src = src,
                     chapterHref = chapterHref,
-                    xLeft = xOff,
-                    yTop = yTop,
-                    yBottom = yTop + h,
+                    // E12：`position: relative` 的绘制偏移（叶的累积偏移；两端为纯增量，与坐标系无关）。
+                    xLeft = xOff + leaf.relOffsetX,
+                    yTop = yTop + leaf.relOffsetY,
+                    yBottom = yTop + leaf.relOffsetY + h,
                     widthPx = usedW,
                     heightPx = h,
+                    // E11：`overflow` 祖先裁剪（重路径吃整章盒树、轻路径吃窗口聚合表）。
+                    clip = elementClip(el),
                 ),
             )
         }

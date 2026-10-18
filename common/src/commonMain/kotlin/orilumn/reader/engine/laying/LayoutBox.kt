@@ -243,6 +243,26 @@ class LayoutBox(
      */
     var replaceableFitH: Int? = null
 
+    /**
+     * E11：**祖先链裁剪**矩形（`overflow` 非 visible 的祖先 padding box 交集；null = 不裁）。
+     *
+     * **不含自身**：盒自己的底色/边框不受自身 `overflow` 裁剪（只有后代内容受）。内容侧另用
+     * [orilumn.reader.engine.laying.contentClip]。由 [orilumn.reader.engine.laying.applyInheritedClips]
+     * 在盒流**之后**一次性填好（流前算即错位：上下沿由流决定）；轻路径的聚合盒由
+     * `buildBackgroundDrawBoxes` 同口径填。
+     */
+    var clipRect: ClipRect? = null
+
+    /**
+     * E12：**累积**相对定位偏移（`position: relative` 自身与祖先链之和，px）。
+     *
+     * 只影响**落墨**（底色/边框/文本行/插图）：盒的 [contentLeft]/[contentTop]/[contentBottom]
+     * 保持**流位置**不变 —— 占位、兄弟位置与分页切点不受偏移影响（相对定位不改排版）。
+     * 由 [orilumn.reader.engine.laying.applyRelativeOffsets] 在盒流之后填（绘制侧直接读）。
+     */
+    var relOffsetX: Int = 0
+    var relOffsetY: Int = 0
+
     /** 断页边**之前**规则：提升叶取宿主块（见 [breakCarrierStyle]）。 */
     val breakBefore: BreakRule get() = (breakCarrierStyle ?: style).breakBefore
 
@@ -302,6 +322,11 @@ data class DrawRect(
      */
     val bgBoxTop: Int = 0,
     val bgBoxBottom: Int = 0,
+    /**
+     * E11：祖先链 `overflow` 裁剪（null = 不裁）。**只交给渲染层裁剪**，不做矩形求交 ——
+     * 求交会把圆角/阴影/背景图切出硬边（浏览器是画布裁剪，圆角与平铺原点保持原样）。
+     */
+    val clip: ClipRect? = null,
 )
 
 enum class DrawKind { BACKGROUND, BORDER }

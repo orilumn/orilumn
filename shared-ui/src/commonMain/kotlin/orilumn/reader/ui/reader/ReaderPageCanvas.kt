@@ -85,14 +85,14 @@ fun ReaderPageCanvas(
         ) ?: return@Canvas
         val shift = anchorY - contentTop.roundToInt()
         // 盒背景/边框与文本同一 shift（章节绝对 Y → 页坐标），渲染器画在文字之下。
-        val bgs = rawBgs?.map {
-            it.copy(yTop = it.yTop - shift, yBottom = it.yBottom - shift)
-        }.orEmpty()
+        // 盒背景/边框与文本同一 shift（章节绝对 Y → 页坐标），渲染器画在文字之下；
+        // E11：裁剪区随背景/图同步平移（`shiftedBy` 单源）。
+        val bgs = rawBgs?.map { it.shiftedBy(-shift) }.orEmpty()
         // P0a：插图与文本同一 shift 一并下沉进渲染器（整页一张位图，动画与静止同像素）。
         // 槽位**逐项保留**（含 decoded=null 的占位槽）——map 表达不了「有图未解出」，
         // 而那正是首帧常态；漏一个就是静默空白。
         val imageBitmaps = content?.imageBitmaps
-        val slots = imgs?.map { PageImageSlot(it.copy(yTop = it.yTop - shift, yBottom = it.yBottom - shift), imageBitmaps?.get(it)) }
+        val slots = imgs?.map { PageImageSlot(it.shiftedBy(-shift), imageBitmaps?.get(it)) }
             .orEmpty()
         val frame = if (!list.isNullOrEmpty()) ReaderMath.shiftToPageFrame(list, shift) else emptyList()
         // 主题墨色盖章：行自带墨色只在“恰好重排过”时才新鲜，绘制时按当前主题统一覆盖，

@@ -457,6 +457,7 @@ class StyleComputer(
                 ?: parent.visibilityHidden,
             overflow = parseOverflow(w) ?: OverflowValue.VISIBLE,
             positionRelative = w["position"]?.trim()?.lowercase() == "relative",
+            relativeInset = parseRelativeInset(w, fontSize, parent.fontSizePx),
             overflowWrap = w["overflow-wrap"]?.trim()?.lowercase()?.let {
                 when (it) { "break-word", "anywhere" -> OverflowWrap.BREAK_WORD; else -> OverflowWrap.NORMAL }
             } ?: parent.overflowWrap,
@@ -1239,6 +1240,24 @@ class StyleComputer(
         val len = parseLength(t) ?: return 0f
         if (len is Length.Percent) return 0f // invalid for these props
         return len.resolve(fontSize, parentFontPx, rootFontPx)
+    }
+
+    /**
+     * E12：`position: relative` 的四向偏移（`top/right/bottom/left`）。
+     *
+     * `auto`/未声明/非法/`%` ⇒ 该方向 `null`（`%` 需包含块尺寸，见 [RelativeInset]）。
+     * 与 [positionRelative] 分开存：`static`/`absolute` 上写了偏移也一律不生效（消费点判 `positionRelative`）。
+     */
+    private fun parseRelativeInset(w: Map<String, String>, fontSize: Float, parentFontPx: Float): RelativeInset {
+        fun dir(name: String): Float? {
+            val raw = w[name]?.trim()?.lowercase() ?: return null
+            if (raw.isEmpty() || raw == "auto") return null
+            val len = parseLength(raw) ?: return null
+            if (len is Length.Percent) return null
+            return len.resolve(fontSize, parentFontPx, rootFontPx)
+        }
+        val inset = RelativeInset(dir("top"), dir("right"), dir("bottom"), dir("left"))
+        return if (inset.isEmpty) RelativeInset() else inset
     }
 
     private fun parseTextTransform(value: String): TextTransform = when (value.trim().lowercase()) {

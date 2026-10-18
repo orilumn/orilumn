@@ -79,6 +79,12 @@ object NormalFlowLayout {
         val lines = ArrayList<FlowedLine>()
         flowBoxes(boxes, lines)
         if (contentH > 0) applyReplacedFit(boxes, lines, styles, contentH, imageLoader, chapterHref, density)
+        // E12：`position: relative` 的绘制偏移（**先**于裁剪几何：裁剪区随盒一起平移）。
+        // 只落绘制用字段，不改流位置 ⇒ 占位/分页不受影响；无 `position: relative` 时全零。
+        applyRelativeOffsets(boxes, styles::get)
+        // E11：`overflow` 祖先裁剪几何——必须在**最终流完之后**算（盒上下沿由流决定，流前算即错位）。
+        // 无 `overflow` 声明时每个盒的 clipRect 恒 null，全链零像素回归。
+        applyInheritedClips(boxes)
         return BoxLayoutResult(lines, boxes)
     }
 
@@ -1541,6 +1547,29 @@ object NormalFlowLayout {
         if (el == null) return emptyList()
         val rootWs = styles[el]?.whiteSpace ?: el.parent?.let { styles[it]?.whiteSpace } ?: WhiteSpace.NORMAL
         return collectInlineBoxRuns(el, styles, hidden::isHidden, classify::isBlock, rootWs, genOf)
+    }
+
+    /**
+     * E10 伴生：[leafText] 同一字符串上的 `visibility: hidden` 覆盖区间（叶文本坐标系）。
+     *
+     * 隐藏字符**不落墨、但保留占位**（与 [HiddenCheck] 的 `display:none` 去盒语义相反）；
+     * 空表 = 全叶可见（绘制零回归）。调用方必须传与塑形同一套 [styles]/[classify]/[hidden]。
+     */
+    fun leafVisibilityHiddenRuns(
+        el: MarkupElement?,
+        styles: Map<MarkupElement, ComputedStyle>,
+        classify: BlockClassify,
+        hidden: HiddenCheck = HIDDEN_NONE,
+        /** P3-c 生成内容查找（空即无，旧路径）。 */
+        genOf: GenOf = EmptyGen,
+    ): List<IntRange> {
+        if (el == null) return emptyList()
+        val base = styles[el]?.visibilityHidden
+            ?: el.parent?.let { styles[it]?.visibilityHidden }
+            ?: false
+        // 快筛留给调用方（本章/本子树有没有 `visibility` 声明）；这里只做叶自身已知隐藏时的短路。
+        val rootWs = styles[el]?.whiteSpace ?: el.parent?.let { styles[it]?.whiteSpace } ?: WhiteSpace.NORMAL
+        return collectVisibilityHiddenRuns(el, styles, base, hidden::isHidden, classify::isBlock, rootWs, genOf)
     }
 
     /** 叶基底 face（行内 run 比对基准）：匿名叶不在表里时回传入后备，无表时回空基底。 */

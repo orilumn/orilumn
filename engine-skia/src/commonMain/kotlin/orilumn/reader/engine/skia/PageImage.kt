@@ -11,6 +11,7 @@ package orilumn.reader.engine.skia
  * @property xLeft 内容区内水平起点（px，与 DrawLine.xLeft 同口径：contentLeft + 自身左边缘）。
  * @property yTop/yBottom 行几何内的绝对 Y（与 DrawLine 同一坐标系，画布侧同 shift 平移）。
  * @property widthPx/heightPx 解码目标尺寸（盒流已经算好的 used 尺寸，宿主按此解码即贴）。
+ * @property clip E11：祖先链 `overflow` 裁剪（null = 不裁），与 [yTop] 同坐标系。
  */
 data class PageImage(
     val src: String,
@@ -20,4 +21,9 @@ data class PageImage(
     val yBottom: Int,
     val widthPx: Int,
     val heightPx: Int,
-)
+    val clip: orilumn.reader.engine.laying.ClipRect? = null,
+) {
+    /** 沿 Y 平移（页切片/离屏换算；裁剪区同步平移，漏了即错位）。 */
+    fun shiftedBy(dy: Int): PageImage =
+        if (dy == 0) this else copy(yTop = yTop + dy, yBottom = yBottom + dy, clip = clip?.shifted(dy))
+}

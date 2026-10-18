@@ -44,6 +44,9 @@ import orilumn.reader.engine.html.MarkupElement
  *   null = 未声明 ⇒ 绘制侧回退到叶墨色（[orilumn.reader.engine.skia.DrawLine.inkColor]）。
  * @property fontSizePx / families / weight / italic / monospace 该元素**自身字体**：
  *   决定 em 盒高度（绘制侧取 font metrics）与合成斜体/粗体判定。
+ * @property visibilityHidden 该元素是否 `visibility: hidden`：**占位照旧、只不落墨**
+ *   （与 `display:none` 相反）。横向推进量不受影响（隐藏元素的 padding/border 仍占宽，浏览器如此），
+ *   只有绘制侧跳过本 run 的背景与边框。
  */
 data class InlineBoxRun(
     val start: Int,
@@ -59,6 +62,7 @@ data class InlineBoxRun(
     val weight: Int = 400,
     val italic: Boolean = false,
     val monospace: Boolean = false,
+    val visibilityHidden: Boolean = false,
 ) {
     /** 有边框宽（不看 style）：style 的 none 判定留给绘制侧（与 [ComputedStyle.hasBorderEdges] 同口径）。 */
     val hasBorderWidth: Boolean
@@ -155,6 +159,7 @@ fun collectInlineBoxRuns(
                 weight = st.fontWeight,
                 italic = st.italic,
                 monospace = st.monospace,
+                visibilityHidden = st.visibilityHidden,
             ),
         )
     }

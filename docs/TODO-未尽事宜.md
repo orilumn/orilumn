@@ -1352,7 +1352,15 @@
       （工具链方言有限，量过），可**按族增量落地**（建议先 `noindent`/`center`/`right`/`caption`），
       每族配离屏回归 + 全库截图 A/B。每一步必答 `AGENTS.md` 校验规则三问（tier / 量过 / 没配就不发）。
 
-- **标准化遗留 L1（待办：parsed-only 补消费）**：`visibility/overflow/position:relative/direction/unicode-bidi/font-stretch` 目前只落 `ComputedStyle` 计算值（`ComputedStyle.kt` / `StyleComputer.kt`），laying/draw 零消费。后续补祖先裁剪、相对偏移、RTL 流、字形压缩消费，双路一致 + bump `LAYOUT_VERSION`。
+- **标准化遗留 L1（parsed-only 补消费）** —— 2026-10-18 **第六刀已补掉三条**：`visibility: hidden`（不画、仍占位）、
+  `overflow` 祖先裁剪、`position: relative` 偏移与层叠；还剩 `font-stretch` 字形压缩与 `direction`/`unicode-bidi` 的 RTL 流两项。
+- **真实 RTL 双向流与竖排模式合并为单个里程碑（2026-10-18 定）**：`direction`/`unicode-bidi`/`dir` 属性目前只解析不消费
+  （`ComputedStyle.directionRtl` 全仓零读取），基向、起始边、镜像标点、逻辑边映射全缺。这个方向族与竖排
+  （`-epub-writing-mode` / `writing-mode: vertical-*`）共享同一层「书写方向 → 物理边」接缝，故**合并为单个里程碑**，
+  届时一并做：基向与起始边、`dir` 属性映射、行内级双向控制（`embed`/`isolate`/`bidi-override`、`<bdo>`）、
+  镜像括号与标点归位、`float`/缩进/列表符号/表格列序的逻辑边映射，以及竖排的断行轴与度量轴
+  （需替换 `ParagraphBreaker` 接缝，见《KMP+CMP迁移方案》§6、《引擎欠账-对齐浏览器语义》E13）。
+  动工前先出方案与验收矩阵，必答 `AGENTS.md` 层级边界与跨平台共享两问。
 - **标准化遗留 L2（待办：§0 例外收口）**：`flex/grid` 真实布局（现按 `block` 降级）、`list-style-image/@page/vertical writing/cursor`、脚本/表单/音视频/`canvas/iframe/object-embed`、固定版式（pre-paginated）。后续收口时先修范围定义与验收矩阵，按需逐项立项。
 - **标准化遗留 L3（待办：近似实现转精确）**：`background-size` 恒 1:1、`background-image` 只取首层、`counter-set`/非 `li` 的 `list-item` 生成内容不做、窄列悬浮退块式、latin 注音偏宽容差。后续按需逐项闭环。
 - **状态栏按键焦点导航（桌面键盘，待办）**：状态栏打开时左右键不再翻页（`ReaderScreen` 已放行不消费，见代码 TODO），后续补栏按键之间的焦点切换（左/右移焦、回车触发、Esc 回阅读面），与面板内 `PanelNav` 口径对齐。

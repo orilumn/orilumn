@@ -147,6 +147,14 @@ data class DrawLine(
      */
     val imgHidden: List<IntRange> = emptyList(),
     /**
+     * E10：`visibility: hidden` 覆盖区间（[text] 全文本坐标系，空 = 全叶可见）。
+     *
+     * 隐藏字符**不落墨、但保留占位**（与 `display:none` 的去盒语义相反）：字形/装饰/着重号/注音
+     * 一并跳过，advances 与断行不变（与 [imgHidden] 同一份「占宽不画」机制）。
+     * 由 [DrawLineBuilder] / 塑形 shape 从与 [text] 同构的遍历产出。
+     */
+    val visibilityHiddenRuns: List<IntRange> = emptyList(),
+    /**
      * 混排字距（em，0 = 关，[orilumn.reader.engine.text.TypographicProfile.cjkLatinSpacingEmApplied]
      * 的值）：行内 CJK↔西文边界的注入间隙。
      *
@@ -155,7 +163,18 @@ data class DrawLine(
      * 与量宽侧同源）。漏传 = 版心白白让出一截（行内看着挤），反过来传了而断行侧没预留就会右溢被裁。
      */
     val cjkLatinSpacingEm: Float = 0f,
-)
+    /**
+     * E11：本行内容所受的**祖先链 `overflow` 裁剪**（null = 不裁），与 [yTop] 同一坐标系。
+     *
+     * 渲染层按行 `save/clipRect/restore`（X 相对内容区原点，与 [xLeft] 同口径）。行切片/离屏换算
+     * 平移 Y 时**必须同时平移它**（[shiftedBy]），否则裁剪区错位。
+     */
+    val clip: orilumn.reader.engine.laying.ClipRect? = null,
+) {
+    /** 沿 Y 平移（页切片/离屏换算；裁剪区同步平移，漏了即错位）。 */
+    fun shiftedBy(dy: Int): DrawLine =
+        if (dy == 0) this else copy(yTop = yTop + dy, yBottom = yBottom + dy, clip = clip?.shifted(dy))
+}
 
 /**
  * 行窗口绘制器：按**行**的绝对 Y 坐标用 SkParagraph 单行整形绘制。
@@ -232,54 +251,73 @@ class LineWindowDrawer(
         }
         try {
             for (line in lines) {
-                val style = SkParagraphFactory.paragraphStyle(
-                    line.alignment,
-                    line.fontSizePx,
-                    line.lineHeightRatio,
-                    line.tag,
-                    line.families,
-                    line.weight,
-                    line.italic,
-                    line.monospace,
-                    line.letterSpacingEm,
-                    // P3-a: 祖先 opacity 统一乘墨色（段色在 paintText 内乘）。
-                    inkColor = withAlpha(line.inkColor, line.alpha),
-                    // P1-2: 有基线位移的行固定行盒基线（与度量侧同开，基线不浮动）。
-                    forceStrut = line.baselineShifts.isNotEmpty(),
-                )
-                var textX = contentLeft + line.xLeft
-                val marker = line.listMarker
-                if (marker != null) {
-                    val gap = ListMarkers.markerGapPx(line.fontSizePx)
-                    if (marker.isShapeKind) {
-                        // 矢量圆点/圈/方块：不随字体字形走（老 StaticLayout 管线 drawShapeMarker 同口径，
-                        // C1-0 重构搬运；字形 "•/○" 在 CJK 字库下一大一小即此回归）。
-                        val markerW = ListMarkers.shapeMarkerWidthPx(line.fontSizePx)
-                        val x = if (marker.position == ListMarkers.Position.INSIDE) textX
-                        else textX - markerW - gap
-                        drawShapeMarker(
-                            canvas, marker.kind, x, (line.yTop + line.yBottom) / 2f,
-                            line.fontSizePx * ListMarkers.SHAPE_MARKER_EM,
-                            withAlpha(line.inkColor, line.alpha),
-                        )
-                        if (marker.position == ListMarkers.Position.INSIDE) textX += markerW + gap
-                    } else {
-                        val markerString = ListMarkers.markerText(marker.kind, marker.order)
-                        val markerW = measureMarkerWidth(style, markerString, collection)
-                        when (marker.position) {
-                            // OUTSIDE：marker 在沟槽悬垂（文本左缘左侧 markerW+gap），文本位置不变.
-                            ListMarkers.Position.OUTSIDE -> {
-                                paintText(canvas, style, markerString, textX - markerW - gap, line, collection)
-                            }
-                            // INSIDE：marker 行首内嵌，文本向右让 markerW+gap（近似平板 LeadingMarginSpan）.
-                            ListMarkers.Position.INSIDE -> {
-                                paintText(canvas, style, markerString, textX, line, collection)
-                                textX += markerW + gap
+                // E11：逐行 `overflow` 祖先裁剪（行自带的裁剪区，X 相对内容区原点 = contentLeft）。
+                // 与整窗 clip 叠加（save 嵌套），行间互不影响。
+                val lc = line.clip
+                val lineSaved = if (lc != null) {
+                    canvas.save()
+                    canvas.clipRect(
+                        Rect.makeLTRB(
+                            contentLeft + lc.left, lc.top.toFloat(),
+                            contentLeft + lc.right, lc.bottom.toFloat(),
+                        ),
+                    )
+                    true
+                } else {
+                    false
+                }
+                try {
+                    val style = SkParagraphFactory.paragraphStyle(
+                        line.alignment,
+                        line.fontSizePx,
+                        line.lineHeightRatio,
+                        line.tag,
+                        line.families,
+                        line.weight,
+                        line.italic,
+                        line.monospace,
+                        line.letterSpacingEm,
+                        // P3-a: 祖先 opacity 统一乘墨色（段色在 paintText 内乘）。
+                        inkColor = withAlpha(line.inkColor, line.alpha),
+                        // P1-2: 有基线位移的行固定行盒基线（与度量侧同开，基线不浮动）。
+                        forceStrut = line.baselineShifts.isNotEmpty(),
+                    )
+                    var textX = contentLeft + line.xLeft
+                    val marker = line.listMarker
+                    if (marker != null) {
+                        val gap = ListMarkers.markerGapPx(line.fontSizePx)
+                        if (marker.isShapeKind) {
+                            // 矢量圆点/圈/方块：不随字体字形走（老 StaticLayout 管线 drawShapeMarker 同口径，
+                            // C1-0 重构搬运；字形 "•/○" 在 CJK 字库下一大一小即此回归）。
+                            val markerW = ListMarkers.shapeMarkerWidthPx(line.fontSizePx)
+                            val x = if (marker.position == ListMarkers.Position.INSIDE) textX
+                            else textX - markerW - gap
+                            drawShapeMarker(
+                                canvas, marker.kind, x, (line.yTop + line.yBottom) / 2f,
+                                line.fontSizePx * ListMarkers.SHAPE_MARKER_EM,
+                                withAlpha(line.inkColor, line.alpha),
+                            )
+                            if (marker.position == ListMarkers.Position.INSIDE) textX += markerW + gap
+                        } else {
+                            val markerString = ListMarkers.markerText(marker.kind, marker.order)
+                            val markerW = measureMarkerWidth(style, markerString, collection)
+                            when (marker.position) {
+                                // OUTSIDE：marker 在沟槽悬垂（文本左缘左侧 markerW+gap），文本位置不变.
+                                ListMarkers.Position.OUTSIDE -> {
+                                    paintText(canvas, style, markerString, textX - markerW - gap, line, collection)
+                                }
+                                // INSIDE：marker 行首内嵌，文本向右让 markerW+gap（近似平板 LeadingMarginSpan）.
+                                ListMarkers.Position.INSIDE -> {
+                                    paintText(canvas, style, markerString, textX, line, collection)
+                                    textX += markerW + gap
+                                }
                             }
                         }
                     }
+                    paintText(canvas, style, line, textX, collection)
+                } finally {
+                    if (lineSaved) canvas.restore()
                 }
-                paintText(canvas, style, line, textX, collection)
             }
         } finally {
             if (saved) canvas.restore()
@@ -316,6 +354,13 @@ class LineWindowDrawer(
 
         // P6-b 本行相交的叠排 runs；内联 rt 源文以透明墨隐藏（占宽保守，字符流/断行不变）。
         val rubyHits = line.rubyRuns.filter { it.start < endExcl && it.endExclusive > start }
+        // E10：`visibility: hidden` 覆盖区间（本行相交部分）。隐藏字符**占宽照旧、只不落墨**；
+        // 装饰线 / 着重号 / 注音 rt 也随基字一同隐去（字形之外的三处消费点都读本表）。
+        val visHidden = line.visibilityHiddenRuns.mapNotNull { r ->
+            val s = r.first.coerceIn(start, endExcl)
+            val e = (r.last + 1).coerceIn(start, endExcl)
+            if (e > s) s until e else null
+        }
         // 表格图占位隐藏（与注音源文同法：占宽保留，字符流/断行不变）。
         val hiddenRuns = buildList {
             for (run in rubyHits) {
@@ -328,6 +373,7 @@ class LineWindowDrawer(
                 val e = (r.last + 1).coerceIn(start, endExcl)
                 if (e > s) add(s until e)
             }
+            addAll(visHidden)
         }
         // 子段 [from,to) 被隐藏 ⟺ 其末字符 to-1 落在区间内（区间按 `until` 存，last = 排外末端-1）。
         fun isHidden(from: Int, to: Int): Boolean {
@@ -336,11 +382,12 @@ class LineWindowDrawer(
         }
         val lineExtra = rubyHits.maxOfOrNull { it.extraHeightPx() } ?: 0
         // 文本装饰：行区间相交段（叶坐标）。CSS 标准是整段传播，故按区间并集画，不逐字跳。
+        // E10：隐藏字符的装饰线与字形同隐 —— 从装饰段里挖掉 visHidden 区间（无隐藏时空转零开销）。
         val decRuns = line.decorationRuns.mapNotNull { r ->
             val s = r.start.coerceIn(start, endExcl)
             val e = r.endExclusive.coerceIn(start, endExcl)
             if (e > s) r.copy(start = s, endExclusive = e) else null
-        }
+        }.let { runs -> if (visHidden.isEmpty()) runs else runs.flatMap { subtractHidden(it, visHidden) } }
 
         // ── 几何：Aligner 给逐字 x / 拉伸 / 可见右边界（P1-2 不换行段以无限宽排，单行溢出）──
         val placement = aligner.align(
@@ -386,12 +433,45 @@ class LineWindowDrawer(
         paintGlyphs(canvas, line, placement, paintX, baseY, start, endExcl, { f, t -> isHidden(f, t) }, decRuns)
 
         // 注音/着重号与文字同盒，随 half-leading 一并下移，保持与基字的相对位置。
-        if (rubyHits.isNotEmpty() && endExcl > start) {
-            drawRuby(canvas, line, placement, paintX, start, endExcl, rubyHits, ink, collection, 0f)
+        // E10：基字被隐藏的注音整条不画（rt 源文与基字同属被隐藏子树）；行高增量照旧计入基线。
+        val rubyPainted =
+            if (visHidden.isEmpty()) rubyHits
+            else rubyHits.filterNot { fullyHidden(it.start, it.endExclusive, visHidden) }
+        if (rubyPainted.isNotEmpty() && endExcl > start) {
+            drawRuby(canvas, line, placement, paintX, start, endExcl, rubyPainted, ink, collection, 0f)
         }
         if (line.emphasis != orilumn.reader.engine.css.EmphasisStyle.NONE && endExcl > start) {
-            drawEmphasis(canvas, line, placement, paintX, ink, start, endExcl, 0f)
+            drawEmphasis(canvas, line, placement, paintX, ink, start, endExcl, 0f, visHidden)
         }
+    }
+
+    /** 子段 [from,to) 是否被 [hidden] 完全覆盖（E10 注音整条跳过的判据）。 */
+    private fun fullyHidden(from: Int, to: Int, hidden: List<IntRange>): Boolean {
+        if (to <= from) return true
+        for (r in hidden) if (from >= r.first && to <= r.last + 1) return true
+        return false
+    }
+
+    /**
+     * 从装饰段里挖掉隐藏区间（E10）：隐藏字符的 `text-decoration` 与字形同隐，其余片段照画
+     * （同段样式原样复制）。无隐藏区间时调用方已短路，不会走到这里。
+     */
+    private fun subtractHidden(run: TextDecorationRun, hidden: List<IntRange>): List<TextDecorationRun> {
+        var segs: List<IntRange> = listOf(run.start until run.endExclusive)
+        for (h in hidden) {
+            val next = ArrayList<IntRange>(segs.size)
+            for (s in segs) {
+                if (h.last < s.first || h.first > s.last) {
+                    next.add(s)
+                    continue
+                }
+                if (h.first > s.first) next.add(s.first until h.first)
+                if (h.last < s.last) next.add((h.last + 1)..s.last)
+            }
+            segs = next
+            if (segs.isEmpty()) return emptyList()
+        }
+        return segs.map { run.copy(start = it.first, endExclusive = it.last + 1) }
     }
 
     /**
@@ -531,6 +611,7 @@ class LineWindowDrawer(
         start: Int,
         endExcl: Int,
         halfLeading: Float,
+        hidden: List<IntRange> = emptyList(),
     ) {
         val filled = line.emphasis == orilumn.reader.engine.css.EmphasisStyle.DOT
         val r = line.fontSizePx * (if (filled) 0.09f else 0.11f)
@@ -548,6 +629,8 @@ class LineWindowDrawer(
             // S5：逐字墨盒中心改读 Aligner 的 `xs`（T0 落点 3），不再 `getRectsForRange(TIGHT)`。
             val local = i - start
             if (local >= n || local < 0) continue
+            // E10：隐藏字符不着重号（与字形同隐；`hidden` 为空时零开销）。
+            if (hidden.isNotEmpty() && hidden.any { i >= it.first && i <= it.last }) continue
             // 「空格亦置点，与浏览器一致」：尾随空白照样占一个点。
             aligner.visibleSpan(placement, n, local, local + 1)?.let { (lx, rx) ->
                 val cx = paintX + (lx + rx) / 2f
@@ -587,6 +670,8 @@ class LineWindowDrawer(
         val n = endExcl - start
         for (r in runs) {
             if (!r.visible) continue
+            // E10：`visibility: hidden` 的行内盒不落墨（底色/边框一并隐去；推进量照旧，见 [InlineBoxRun]）。
+            if (r.visibilityHidden) continue
             val s = r.start.coerceIn(start, endExcl)
             val e = r.endExclusive.coerceIn(start, endExcl)
             if (e <= s) continue

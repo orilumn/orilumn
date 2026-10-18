@@ -7,11 +7,13 @@ import orilumn.reader.engine.css.ComputedStyle
 import orilumn.reader.engine.css.Edges
 import orilumn.reader.engine.css.TextAlign
 import orilumn.reader.engine.html.MarkupElement
+import orilumn.reader.engine.laying.ClipRect
 import orilumn.reader.engine.laying.ParagraphShapeRef
 import orilumn.reader.engine.laying.ShapeFontRequest
 import orilumn.reader.engine.laying.TableCellLayout
 import orilumn.reader.engine.laying.TableRowLayout
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -26,6 +28,8 @@ class TableCellLinesTest {
         /** 逐行挤压比例（格内那一路的 `DrawLine.squeezeRatio` 源）。缺省全 0 = 不挤。 */
         private val squeezeRatios: List<Float> = emptyList(),
         private val hyphenFlags: List<Boolean> = emptyList(),
+        /** E10：`visibility: hidden` 覆盖区间（叶文本坐标系）。 */
+        private val hiddenRuns: List<IntRange> = emptyList(),
     ) : ParagraphShapeRef {
         private val tops: IntArray = IntArray(ranges.size).also { arr ->
             var y = 0
@@ -55,6 +59,7 @@ class TableCellLinesTest {
         override var replaceableBottom: Int = 0
         override val replaceableCharEnd: Int get() = 1
         override val listMarker get() = null
+        override val visibilityHiddenRuns: List<IntRange> get() = hiddenRuns
         override val fontRequest get() = ShapeFontRequest(null, emptyList(), 400, false, false)
     }
 
@@ -68,6 +73,42 @@ class TableCellLinesTest {
                 MarkupElement(tag), ComputedStyle(10f, 1.5f), text, emptyList(),
             ).also { it.shape = shape },
         )
+
+    /**
+     * E11/E12：格内容/格边框的 `overflow` 裁剪与**相对定位偏移**都必须随 [TableCellLines.RowFrame]
+     * 透传到格行上（轻/临时路径的格坐标系与正典页不同，只能由调用方按帧给值）。
+     */
+    @Test
+    fun `格行带上帧的裁剪与相对定位偏移`() {
+        val s = StubShape("x", listOf(0..0), listOf(15))
+        val table = TableRowLayout(intArrayOf(0), intArrayOf(300), listOf(cell("td", "x", 0, 300, s)))
+        val clip = ClipRect(5, 10, 200, 400)
+        val win = TableCellLines.expandTable(
+            listOf(TableCellLines.RowFrame(table, 0, 100, 15, 0, style, null, clip, offX = 7, offY = 9)),
+            { style }, 0f,
+        )
+        val dl = win.lines[0]!!.single()
+        assertEquals("裁剪随帧进格行（渲染层画布裁剪）", clip, dl.clip)
+        assertEquals("行顶随 offY 平移", 109, dl.yTop)
+        assertEquals("格左随 offX 平移", 7, dl.xLeft)
+        // 反空跑：同一帧不给裁剪/偏移时必须回到流位置（证明上面的差值真由帧参数产生）。
+        val plain = TableCellLines.expandTable(
+            listOf(TableCellLines.RowFrame(table, 0, 100, 15, 0, style, null)),
+            { style }, 0f,
+        ).lines[0]!!.single()
+        assertEquals(100, plain.yTop)
+        assertEquals(0, plain.xLeft)
+        assertNull("未给裁剪即不裁", plain.clip)
+    }
+
+    /** E10：格内隐藏区间随形透传（`visibility: hidden` 的格内文本不落墨但占位照旧）。 */
+    @Test
+    fun `格内隐藏区间随形透传`() {
+        val s = StubShape("xyz", listOf(0..2), listOf(15), hiddenRuns = listOf(1..1))
+        val table = TableRowLayout(intArrayOf(0), intArrayOf(300), listOf(cell("td", "xyz", 0, 300, s)))
+        val dl = TableCellLines.expand(table, 100, 20, 0, { style }, style, 0f).lines.single()
+        assertEquals(listOf(1..1), dl.visibilityHiddenRuns)
+    }
 
     private val style = ComputedStyle(10f, 1.5f)
 

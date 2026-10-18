@@ -213,9 +213,9 @@ internal suspend fun prerasterPage(
         frameLead = frameLead,
     ) ?: return false
     val shift = anchorY - contentTop.toInt()
-    val bgs = rawBgs?.map { it.copy(yTop = it.yTop - shift, yBottom = it.yBottom - shift) }.orEmpty()
+    val bgs = rawBgs?.map { it.shiftedBy(-shift) }.orEmpty()
     val slots = imgs?.map {
-        PageImageSlot(it.copy(yTop = it.yTop - shift, yBottom = it.yBottom - shift), imgCache.get(imgKeyOf(it)))
+        PageImageSlot(it.shiftedBy(-shift), imgCache.get(imgKeyOf(it)))
     }.orEmpty()
     val frame = ReaderMath.shiftToPageFrame(lines, shift)
     val inked = if (frame.any { it.inkColor != inkColor }) {

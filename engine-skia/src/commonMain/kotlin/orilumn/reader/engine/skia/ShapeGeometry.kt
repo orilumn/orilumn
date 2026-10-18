@@ -28,6 +28,7 @@ import orilumn.reader.engine.laying.collectFontRuns
 import orilumn.reader.engine.laying.collectInlineBoxRuns
 import orilumn.reader.engine.laying.collectRubyRuns
 import orilumn.reader.engine.laying.collectTextDecorationRuns
+import orilumn.reader.engine.laying.collectVisibilityHiddenRuns
 import orilumn.reader.engine.laying.effectiveOpacity
 import orilumn.reader.engine.laying.normalizeAnonymousRun
 import orilumn.reader.engine.laying.styledSegments
@@ -183,6 +184,18 @@ fun shapeGeometry(
         decorationRuns = decorationRunsOf(el, styles, rootStyle, genOf, isBlock, sharedSegs),
         // 行内盒（背景/边框；无装饰回空表零回归）。样式回退同 alpha：表外祖先按懒级联取。
         inlineBoxRuns = inlineBoxes,
+        // E10 `visibility: hidden` 覆盖区间（与叶文本同一段表；无隐藏声明的子树回空表零开销）。
+        visibilityHiddenRuns = if (styles.any { it.value.visibilityHidden } || rootStyle.visibilityHidden) {
+            collectVisibilityHiddenRuns(
+                el, styles, rootStyle.visibilityHidden,
+                { styles[it]?.displayNone == true }, { isBlock(it) },
+                styles[el]?.whiteSpace ?: el.parent?.let { styles[it]?.whiteSpace } ?: rootStyle.whiteSpace,
+                genOf, sharedSegs,
+                styleOf = { styles[it] ?: ancestorStyleOf?.invoke(it) },
+            )
+        } else {
+            emptyList()
+        },
         fontRequest = fontRequest,
     )
 }

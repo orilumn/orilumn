@@ -3,6 +3,7 @@ package orilumn.reader.engine.laying
 import orilumn.reader.engine.css.BorderColorEdges
 import orilumn.reader.engine.css.BorderStyleEdges
 import orilumn.reader.engine.css.ComputedStyle
+import orilumn.reader.engine.css.CornerRadius
 import orilumn.reader.engine.css.Edges
 import orilumn.reader.engine.css.WhiteSpace
 import orilumn.reader.engine.html.MarkupElement
@@ -38,10 +39,13 @@ import orilumn.reader.engine.html.MarkupElement
  * @property border 四边边框宽度（px）；只画**宽 > 0 且 style 非 none** 的边。
  * @property borderColors 每边解析后的边框色（null 行值 = `currentColor`）；整体 null = 全未声明。
  * @property borderStyles 每边 `border-style`；null = 未声明（**按实线画**，与 [ComputedStyle.borderStyles]
- *   的「老书只有宽度也照样画」口径一致）。**v1 一律实线**：`dashed` / `dotted` 暂按实线画
- *   （与块盒的差距记录在案）。
+ *   的「老书只有宽度也照样画」口径一致）。`dashed` / `dotted` 走与块盒**同一份**切段几何
+ *   （[borderEdgeRects]，E16）。
  * @property colorHex 该元素自身的 `color`（`#rrggbb`）：边框 `currentColor` 的解析依据；
  *   null = 未声明 ⇒ 绘制侧回退到叶墨色（[orilumn.reader.engine.skia.DrawLine.inkColor]）。
+ * @property borderRadius / borderRadiusPct 圆角（px / `%`，E17）：绘制侧按**本片段**的
+ *   border-box 尺寸解（[CornerRadius.resolved]，与块盒同式钳制）；跨行片段按
+ *   `box-decoration-break: slice` 只在**真角**上保留半径（切开端为 0）。
  * @property fontSizePx / families / weight / italic / monospace 该元素**自身字体**：
  *   决定 em 盒高度（绘制侧取 font metrics）与合成斜体/粗体判定。
  * @property visibilityHidden 该元素是否 `visibility: hidden`：**占位照旧、只不落墨**
@@ -63,6 +67,10 @@ data class InlineBoxRun(
     val italic: Boolean = false,
     val monospace: Boolean = false,
     val visibilityHidden: Boolean = false,
+    /** E17 圆角（px）；`%` 部分在 [borderRadiusPct]。绘制侧按本片段 border-box 解。 */
+    val borderRadius: CornerRadius = CornerRadius(),
+    /** E17 圆角的百分比部分（对 `min(w, h)` 解，与 [CornerRadius.resolved] 同式）。 */
+    val borderRadiusPct: CornerRadius = CornerRadius(),
 ) {
     /** 有边框宽（不看 style）：style 的 none 判定留给绘制侧（与 [ComputedStyle.hasBorderEdges] 同口径）。 */
     val hasBorderWidth: Boolean
@@ -160,6 +168,8 @@ fun collectInlineBoxRuns(
                 italic = st.italic,
                 monospace = st.monospace,
                 visibilityHidden = st.visibilityHidden,
+                borderRadius = st.borderRadius,
+                borderRadiusPct = st.borderRadiusPct,
             ),
         )
     }

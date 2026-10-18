@@ -418,6 +418,57 @@ class TableColumnWidthRealMeasureTest {
             AbSwitch.resetForTest()
         }
     }
+
+    /**
+     * E15（度量侧）：格内行内盒的横向 `padding`/`border` 计入 auto 分列的 max/min-content，
+     * **重轻双路**同账（两路都经 `NormalFlowLayout.tableCellPref` 单源）。
+     *
+     * 判据：同一张表，只把 `<span>` 的 `padding:0 30px`（配合 background 让盒可见）打开，
+     * 首列列宽增量必须**恰为 60**（直通段 `w[i]=pref[i]`，pref 恰好 +60；列取整对整数平移不变），
+     * 次列纹丝不动。少传 `inlineBoxRuns` ⇒ 增量 0，当场破。
+     *
+     * 两列都短（`sum(pref) ≪ 1740`）⇒ 落直通段，断言里顺带钉住这个前提。
+     */
+    @Test
+    fun `E15 行内盒横向内边距计入 auto 列宽（重轻双路）`() {
+        val padSpan = """<span style="padding:0 30px;background:#ffe082">AB</span>"""
+        val bareSpan = """<span>AB</span>"""
+        fun doc(span: String) = """
+            <html><body><table>
+            <tr><td>$span</td><td>CD</td></tr>
+            </table></body></html>
+        """.trimIndent()
+        val ua = "table { table-layout: auto; border-collapse: collapse; border-spacing: 0; }"
+
+        AbSwitch.resetForTest()
+        try {
+            val heavyPad = cellColumnWidths(doc(padSpan), ua)
+            val heavyBare = cellColumnWidths(doc(bareSpan), ua)
+            assertEquals("重路径应有两列", 2, heavyPad.size)
+            assertTrue(
+                "前提：直通段（全列等宽=被夹成等分，量到的是夹取结果）。实测=$heavyBare",
+                heavyBare[0] != heavyBare[1],
+            )
+            assertEquals("重路径首列增量 = 2×30px 内边距", 60, heavyPad[0] - heavyBare[0])
+            assertEquals("次列不受影响", heavyBare[1], heavyPad[1])
+
+            val profile = TypographicProfile(
+                bodyPx = 44.4f, headingScale = 1.4f, quoteScale = 1f, codeScale = 0.92f,
+                lineSpacing = 1f, lineSpacingMult = 1f, firstLineIndentEm = 2f,
+                fgColor = 0xFF000000.toInt(), bgColor = 0xFFFFFFFF.toInt(), quoteColor = 0xFF808080.toInt(),
+                marginLeft = 0, marginRight = 0, marginTop = 0, marginBottom = 0,
+                fontBody = "", fontTitle = "", fontCode = "", useOriginalStyle = true,
+                layoutTheme = "original", coverStretch = true, paragraphSpacingScale = 1f, paragraphGapScale = 1f, letterSpacingEm = 0f,
+            )
+            val bc = orilumn.reader.engine.BoxChapterLayouter()
+            val lightPad = lightColumns(bc, HtmlTreeConverter().convert(doc(padSpan))!!, profile)
+            val lightBare = lightColumns(bc, HtmlTreeConverter().convert(doc(bareSpan))!!, profile)
+            assertEquals("轻路径首列增量 = 2×30px 内边距", 60, lightPad[0] - lightBare[0])
+            assertEquals("轻路径次列不受影响", lightBare[1], lightPad[1])
+        } finally {
+            AbSwitch.resetForTest()
+        }
+    }
 }
 
 /** 走轻路径生产接线（`prepareLight` → `LightPrepare.block` → `tableRowLayoutFor`）取列宽。 */

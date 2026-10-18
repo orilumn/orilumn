@@ -1,6 +1,7 @@
 package orilumn.reader.engine.laying
 
 import orilumn.reader.engine.css.ComputedStyle
+import orilumn.reader.engine.css.CornerRadius
 import orilumn.reader.engine.css.Edges
 import orilumn.reader.engine.css.FontRun
 import orilumn.reader.engine.css.LightCssParser
@@ -344,5 +345,30 @@ class InlineBoxRunsTest {
             inlineBoxRuns = listOf(box(28, 30, padding = Edges(right = 50f))),
         )
         assertEquals(listOf(0..9, 10..19, 20..28, 29..29), out.map { it.range })
+    }
+
+    // ── E17：圆角随 run 走（绘制侧才解得出圆角） ────────────────────────────
+
+    @Test
+    fun `border radius 的 px 半随 run 走`() {
+        val s = node("span", mapOf("style" to "background:#ffcc00; border-radius:6px"), listOf(text("hi")))
+        val p = node("p", children = listOf(text("ab"), s, text("cd")))
+        node("body", children = listOf(p))
+        val r = runs(p).single()
+        assertEquals(2, r.start)
+        assertEquals(4, r.endExclusive)
+        assertEquals(CornerRadius(6f, 6f, 6f, 6f), r.borderRadius)
+        assertEquals(CornerRadius(), r.borderRadiusPct)
+        assertTrue(r.visible)
+    }
+
+    @Test
+    fun `border radius 的百分比半以 0 到 1 分数随 run 走`() {
+        val s = node("span", mapOf("style" to "background:#ffcc00; border-radius:10%"), listOf(text("x")))
+        val p = node("p", children = listOf(s))
+        node("body", children = listOf(p))
+        val r = runs(p).single()
+        assertEquals(CornerRadius(), r.borderRadius)
+        assertEquals(CornerRadius(0.1f, 0.1f, 0.1f, 0.1f), r.borderRadiusPct)
     }
 }

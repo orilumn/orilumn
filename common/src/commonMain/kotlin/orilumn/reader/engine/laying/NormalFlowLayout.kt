@@ -1093,7 +1093,8 @@ object NormalFlowLayout {
                 out.add(
                     TableCellBlock(
                         el = container, style = cs,
-                        text = rd.first, runs = rd.second, imageRoot = container, outsideSiblings = after,
+                        text = rd.first, runs = rd.second, inlineBoxRuns = rd.third,
+                        imageRoot = container, outsideSiblings = after,
                         gapBefore = g, edgeH = insetIn, edgeV = 0,
                     ),
                 )
@@ -1112,14 +1113,14 @@ object NormalFlowLayout {
                     // 否则重路径字符少 1（整章 char 基址漂移），且塑形 `shapeGeometry` 的
                     // replaceable 形无槽可配、绘制侧 `emitCell` 整块跳过（Rust 简介 Ferris 表即此）。
                     val rd = if (isReplaceable(blk)) {
-                        "\uFFFC" to emptyList<FontRun>()
+                        Triple("\uFFFC", emptyList<FontRun>(), emptyList<InlineBoxRun>())
                     } else {
                         absorbCellBlock(blk, styles, emptySet(), { false }, chs, hidden, genOf)
                     }
                     out.add(
                         TableCellBlock(
                             el = blk, style = chs,
-                            text = rd.first, runs = rd.second, imageRoot = blk,
+                            text = rd.first, runs = rd.second, inlineBoxRuns = rd.third, imageRoot = blk,
                             gapBefore = g, edgeH = insetIn + ownH, edgeV = ownV,
                         ),
                     )
@@ -1169,9 +1170,10 @@ object NormalFlowLayout {
     }
 
     /**
-     * Q15 辅助：一个块的 **归一文本 ＋ 行内 font 段**，一次 [styledSegments] 两家用
-     * （`segments` 同时喂 [collectFontRuns] 的 `precomputed`，与 `absorbStyled`/`leafFontRuns`
-     * 的「同参同段表」纪律一致，下标恒对齐）。
+     * Q15 辅助：一个块的 **归一文本 ＋ 行内 font 段 ＋ 行内盒 run**，一次 [styledSegments] 三家用
+     * （`segments` 同时喂 [collectFontRuns]/[collectInlineBoxRuns] 的 `precomputed`，与
+     * `absorbStyled`/`leafFontRuns` 的「同参同段表」纪律一致，下标恒对齐；E15 靠这一步把
+     * [TableCellBlock.inlineBoxRuns] 钉在与 [TableCellBlock.text] 同一坐标系上，匿名块无偏移风险）。
      *
      * @param after 本 run 之外要额外排掉的**原始**兄弟节点（见 [cellRunAfter]；空集 = 整块吸收）。
      * @param isBlockOf 真实块级判据；与 [after] **或**起来才算跳过。命名叶传 `{ false }`
@@ -1185,8 +1187,8 @@ object NormalFlowLayout {
         style: ComputedStyle,
         hidden: HiddenCheck,
         genOf: GenOf,
-    ): Pair<String, List<FontRun>> {
-        if (root.tag == "table" || root.tag == "img") return "" to emptyList()
+    ): Triple<String, List<FontRun>, List<InlineBoxRun>> {
+        if (root.tag == "table" || root.tag == "img") return Triple("", emptyList(), emptyList())
         val isExcluded: (MarkupElement) -> Boolean = { hidden.isHidden(it) || it in after }
         val isBlock: (MarkupElement) -> Boolean = { it in after || isBlockOf(it) }
         val wsOf: (MarkupElement) -> WhiteSpace = { wsOfNode(it, styles, root) }
@@ -1196,7 +1198,11 @@ object NormalFlowLayout {
             root, styles, isExcluded, isBlock, fontBaseOf(root, styles, style), leafWs, genOf,
             precomputed = segs,
         )
-        return StyledSegments(segs).text to runs
+        // E15：行内盒与 [text]/[runs] **同一份段表**（`precomputed`）同参收集 ⇒ 匿名块的
+        // 「段表坐标 = 块文本坐标」由构造保证，无容器坐标偏移风险。传 `leafWs` 与 styledSegments
+        // 的根参同值（precomputed 非空时内部不再用它分段）。
+        val boxes = collectInlineBoxRuns(root, styles, isExcluded, isBlock, leafWs, genOf, precomputed = segs)
+        return Triple(StyledSegments(segs).text, runs, boxes)
     }
 
     /**
@@ -1293,6 +1299,9 @@ object NormalFlowLayout {
                         b.runs,
                         0f,
                         leafBaselineShifts(b.el, styles, bCls, hidden, genOf),
+                        // E15：行内盒横向 padding/border 也占断行宽 —— 与塑形侧 `shapeGeometry`
+                        // 自收的同源 runs 同账（否则重路径格内行数比实排少，行高预算偏小）。
+                        b.inlineBoxRuns,
                     )
                     // Same §10.8 image-line adjustment as text leaves (cell images share the bug).
                     val adjHeights = adjustLineHeightsForInlineImages(b.text, lines, b.imageRoot, styles, bCls, hidden, blockBreak, imageLoader, chapterHref, density = density)
@@ -2152,6 +2161,10 @@ object NormalFlowLayout {
      *  - min-content = 最长不可断单元（[ParagraphBreaker.minContentWidth]）；
      *  - 两者都加单元格自身横向 padding＋border（列宽即 border-box 宽）。
      *
+     * **E15**：块内行内盒（`<span>` 的 padding/border）的横向内边距也折进两者 —— 度量必须与
+     * 断行（`buildTableRows` 的 `breakLeafLines` 同传 [TableCellBlock.inlineBoxRuns]）同账，
+     * 否则 auto 列比格内实排窄，行内盒被挤（量画分家）。与悬浮盒 [floatTextWidth] 的同传口径一致。
+     *
      * 塑形参数与断行侧 `breakLeafLines` 同式（`monospace || tag == "pre"`；`white-space` 不换行的格
      * 其 min-content 即 max-content——浏览器同式），故「量」与「排」不会分家。
      *
@@ -2181,9 +2194,15 @@ object NormalFlowLayout {
             val s = b.style
             val tag = b.el.tag
             val mono = s.monospace || tag == "pre"
-            val mx = breaker.preferredWidth(b.text, s.fontSizePx, s.fontFamilies, s.fontWeight, s.italic, mono, b.runs)
+            val mx = breaker.preferredWidth(
+                b.text, s.fontSizePx, s.fontFamilies, s.fontWeight, s.italic, mono, b.runs,
+                inlineBoxRuns = b.inlineBoxRuns,
+            )
             val mn = if (WhiteSpaceNormalize.wraps(s.whiteSpace)) {
-                breaker.minContentWidth(b.text, s.fontSizePx, s.fontFamilies, s.fontWeight, s.italic, mono, b.runs)
+                breaker.minContentWidth(
+                    b.text, s.fontSizePx, s.fontFamilies, s.fontWeight, s.italic, mono, b.runs,
+                    inlineBoxRuns = b.inlineBoxRuns,
+                )
             } else {
                 mx
             }

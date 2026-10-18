@@ -167,20 +167,20 @@ object BoxDrawer {
             return
         }
         // Horizontal edges: band runs x ∈ [l, r].
-        emitEdge(segKind = SegKind.HORIZONTAL, x0 = l, x1 = r, band0 = top, widthPx = b.top,
+        emitEdge(axis = BorderEdgeAxis.HORIZONTAL, x0 = l, x1 = r, band0 = top, widthPx = b.top,
             color = colors?.top ?: current,
             style = styles?.top ?: BorderStyle.SOLID,
             out = out, bandTop = bandT, bandBottom = bandB, alpha = alpha, clip = clip)
-        emitEdge(segKind = SegKind.HORIZONTAL, x0 = l, x1 = r, band0 = bottom - b.bottom.roundToInt(), widthPx = b.bottom,
+        emitEdge(axis = BorderEdgeAxis.HORIZONTAL, x0 = l, x1 = r, band0 = bottom - b.bottom.roundToInt(), widthPx = b.bottom,
             color = colors?.bottom ?: current,
             style = styles?.bottom ?: BorderStyle.SOLID,
             out = out, bandTop = bandT, bandBottom = bandB, alpha = alpha, clip = clip)
         // Vertical edges: band runs y ∈ [top, bottom].
-        emitEdge(segKind = SegKind.VERTICAL, x0 = top, x1 = bottom, band0 = l, widthPx = b.left,
+        emitEdge(axis = BorderEdgeAxis.VERTICAL, x0 = top, x1 = bottom, band0 = l, widthPx = b.left,
             color = colors?.left ?: current,
             style = styles?.left ?: BorderStyle.SOLID,
             out = out, bandTop = bandT, bandBottom = bandB, alpha = alpha, clip = clip)
-        emitEdge(segKind = SegKind.VERTICAL, x0 = top, x1 = bottom, band0 = r - b.right.roundToInt(), widthPx = b.right,
+        emitEdge(axis = BorderEdgeAxis.VERTICAL, x0 = top, x1 = bottom, band0 = r - b.right.roundToInt(), widthPx = b.right,
             color = colors?.right ?: current,
             style = styles?.right ?: BorderStyle.SOLID,
             out = out, bandTop = bandT, bandBottom = bandB, alpha = alpha, clip = clip)
@@ -203,16 +203,17 @@ object BoxDrawer {
 
     private class Ring(val widthPx: Float, val colorHex: String)
 
-    private enum class SegKind { HORIZONTAL, VERTICAL }
-
     /**
      * Emits one edge band. [x0..x1] is the axis range (x for horizontal edges, y for vertical),
-     * [band0] the band start on the cross axis and [widthPx] its thickness. Dashed/dotted edges
-     * become a series of filled segment rects (dash 3×thickness, gap 2×thickness; dots are
-     * thickness-sized squares every 2×thickness) — paintable by both renderers as plain fills.
+     * [band0] the band start on the cross axis and [widthPx] its thickness.
+     *
+     * 段几何（solid 整带 / dashed·dotted 分段 / none 跳过）已抽成单源 [borderEdgeRects] ——
+     * E16：块盒与行内盒必须切出**同一种**虚线/点线，规则只准一份。本函数只负责
+     * 「整像素圆整 + 页带夹取 + 落 `DrawRect`」；传入的 [widthPx] 先按历史口径取整，
+     * 于是段坐标全为整数、输出与抽取前逐字节相同。
      */
     private fun emitEdge(
-        segKind: SegKind,
+        axis: BorderEdgeAxis,
         x0: Int, x1: Int,
         band0: Int,
         widthPx: Float,
@@ -227,33 +228,12 @@ object BoxDrawer {
         val w = widthPx.roundToInt().coerceAtLeast(1)
         if (widthPx <= 0f || x1 <= x0) return
         if (style == BorderStyle.NONE) return
-        fun emit(t: Int, l: Int, b: Int, r: Int) =
-            pushRect(out, DrawKind.BORDER, t, l, b, r, color, bandTop, bandBottom, alpha = alpha, clip = clip)
-        when (style) {
-            BorderStyle.SOLID -> if (segKind == SegKind.HORIZONTAL) emit(band0, x0, band0 + w, x1)
-            else emit(x0, band0, x1, band0 + w)
-            BorderStyle.DASHED -> {
-                val dash = (3 * w).coerceAtLeast(2)
-                val gap = (2 * w).coerceAtLeast(1)
-                var p = x0
-                while (p < x1) {
-                    val e = minOf(p + dash, x1)
-                    if (segKind == SegKind.HORIZONTAL) emit(band0, p, band0 + w, e)
-                    else emit(p, band0, e, band0 + w)
-                    p += dash + gap
-                }
-            }
-            BorderStyle.DOTTED -> {
-                val step = (2 * w).coerceAtLeast(2)
-                var p = x0
-                while (p < x1) {
-                    val e = minOf(p + w, x1)
-                    if (segKind == SegKind.HORIZONTAL) emit(band0, p, band0 + w, e)
-                    else emit(p, band0, e, band0 + w)
-                    p += step
-                }
-            }
-            BorderStyle.NONE -> Unit
+        for (rc in borderEdgeRects(axis, x0.toFloat(), x1.toFloat(), band0.toFloat(), w.toFloat(), style)) {
+            pushRect(
+                out, DrawKind.BORDER,
+                rc.top.roundToInt(), rc.left.roundToInt(), rc.bottom.roundToInt(), rc.right.roundToInt(),
+                color, bandTop, bandBottom, alpha = alpha, clip = clip,
+            )
         }
     }
 

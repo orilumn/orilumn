@@ -1,13 +1,18 @@
 package orilumn.reader.engine.skia
 
+import orilumn.reader.engine.css.BorderStyle
+import orilumn.reader.engine.css.CornerRadius
 import orilumn.reader.engine.css.DecorationLine
 import orilumn.reader.engine.css.DecorationStyle
 import orilumn.reader.engine.css.TextAlign
 import orilumn.reader.engine.css.cssHexToArgb
 import orilumn.reader.engine.layout.ListMarkers
+import orilumn.reader.engine.laying.BorderEdgeAxis
 import orilumn.reader.engine.laying.HYPHEN_GLYPH
+import orilumn.reader.engine.laying.InlineBoxRun
 import orilumn.reader.engine.laying.SOFT_HYPHEN
 import orilumn.reader.engine.laying.TextDecorationRun
+import orilumn.reader.engine.laying.borderEdgeRects
 import orilumn.reader.engine.laying.extraHeightPx
 import orilumn.reader.engine.laying.isDocumentSpace
 import org.jetbrains.skia.Canvas
@@ -18,6 +23,7 @@ import org.jetbrains.skia.PathEffect
 import org.jetbrains.skia.PaintMode
 import org.jetbrains.skia.PaintStrokeCap
 import org.jetbrains.skia.Point
+import org.jetbrains.skia.RRect
 import org.jetbrains.skia.Rect
 import org.jetbrains.skia.TextBlobBuilder
 import org.jetbrains.skia.paragraph.FontCollection
@@ -694,38 +700,122 @@ class LineWindowDrawer(
             val bottom = baseY + descent + pad.bottom + bd.bottom
             val left = paintX + lx - pad.left - bd.left
             val right = paintX + rx + pad.right + bd.right
-            // 背景：铺满 border-box（默认 background-clip: border-box）。
+            // E17：圆角按**本片段** border-box 尺寸解（`%` ⇒ `min(w,h)` 基准，与块盒
+            // [CornerRadius.resolved] 同式钳制）。slice：切开端不是元素真角 ⇒ 只在真角保留半径
+            // （首片段保左两角、末片段保右两角；整盒单片段即原样）。
+            val radFull = r.borderRadius.resolved(
+                (right - left).roundToInt(), (bottom - top).roundToInt(), r.borderRadiusPct,
+            )
+            val radii = if (firstFrag && lastFrag) radFull else slicedRadii(radFull, firstFrag, lastFrag)
+            // 背景：铺满 border-box（默认 background-clip: border-box），圆角随形。
             r.bgHex?.let(::cssHexToArgb)?.let { argb ->
-                canvas.drawRect(
-                    Rect.makeLTRB(left, top, right, bottom),
-                    Paint().apply { color = withAlpha(argb, line.alpha) },
-                )
+                val bgPaint = Paint().apply { color = withAlpha(argb, line.alpha) }
+                if (radii.isSquare()) {
+                    canvas.drawRect(Rect.makeLTRB(left, top, right, bottom), bgPaint)
+                } else {
+                    canvas.drawRRect(RRect.makeComplexLTRB(left, top, right, bottom, radii.skiaArray()), bgPaint)
+                }
             }
             // 边框色：每边解析 → currentColor（该元素自身色）→ 叶墨色。
             fun edgeColor(edge: String?): Int =
                 edge?.let(::cssHexToArgb) ?: r.colorHex?.let(::cssHexToArgb) ?: line.inkColor
-            fun styleDraws(st: orilumn.reader.engine.css.BorderStyle?): Boolean =
-                st != orilumn.reader.engine.css.BorderStyle.NONE
+            fun styleDraws(st: BorderStyle?): Boolean = st != BorderStyle.NONE
             val bs = r.borderStyles
-            val bp = Paint()
-            if (bd.top > 0f && styleDraws(bs?.top)) {
-                bp.color = withAlpha(edgeColor(r.borderColors?.top), line.alpha)
-                canvas.drawRect(Rect.makeLTRB(left, top, right, top + bd.top), bp)
-            }
-            if (bd.bottom > 0f && styleDraws(bs?.bottom)) {
-                bp.color = withAlpha(edgeColor(r.borderColors?.bottom), line.alpha)
-                canvas.drawRect(Rect.makeLTRB(left, bottom - bd.bottom, right, bottom), bp)
-            }
-            if (firstFrag && bd.left > 0f && styleDraws(bs?.left)) {
-                bp.color = withAlpha(edgeColor(r.borderColors?.left), line.alpha)
-                canvas.drawRect(Rect.makeLTRB(left, top, left + bd.left, bottom), bp)
-            }
-            if (lastFrag && bd.right > 0f && styleDraws(bs?.right)) {
-                bp.color = withAlpha(edgeColor(r.borderColors?.right), line.alpha)
-                canvas.drawRect(Rect.makeLTRB(right - bd.right, top, right, bottom), bp)
+            // E16/E17：边框两条路 ——
+            //  a) 整盒（首末片段合一 ⇒ 四边都在）四边同宽、同色、全实线 + 圆角 ⇒ **描边环**：
+            //     描边内缩半宽，环整体落在 border-box 内 —— 与方形时「边带画在 border-box 内」
+            //     同位（块盒的环是居中描边、半宽越界，行内盒不跟着越）；
+            //  b) 其余（异色/异宽/虚线点线/切片段）⇒ 逐边分段（E16 单源 [borderEdgeRects]）；
+            //     圆角时先裁到圆角外形再落带，切口端与边带一律不出圆角轮廓。
+            val ring = if (!radii.isSquare() && firstFrag && lastFrag) {
+                uniformRing(r, ::edgeColor, radii, right - left, bottom - top)
+            } else null
+            if (ring != null) {
+                val inset = ring.width / 2f
+                val bp = Paint().apply {
+                    color = withAlpha(ring.colorArgb, line.alpha)
+                    mode = PaintMode.STROKE
+                    strokeWidth = ring.width
+                }
+                canvas.drawRRect(
+                    RRect.makeComplexLTRB(left + inset, top + inset, right - inset, bottom - inset, ring.radii),
+                    bp,
+                )
+            } else {
+                val rounded = !radii.isSquare()
+                val saved = if (rounded) {
+                    val s = canvas.save()
+                    canvas.clipRRect(RRect.makeComplexLTRB(left, top, right, bottom, radii.skiaArray()), true)
+                    s
+                } else 0
+                try {
+                    val bp = Paint()
+                    fun edge(
+                        style: BorderStyle?,
+                        width: Float,
+                        colorEdge: String?,
+                        axis: BorderEdgeAxis,
+                        x0: Float,
+                        x1: Float,
+                        band0: Float,
+                    ) {
+                        if (width <= 0f || !styleDraws(style)) return
+                        bp.color = withAlpha(edgeColor(colorEdge), line.alpha)
+                        for (rc in borderEdgeRects(axis, x0, x1, band0, width, style ?: BorderStyle.SOLID)) {
+                            canvas.drawRect(Rect.makeLTRB(rc.left, rc.top, rc.right, rc.bottom), bp)
+                        }
+                    }
+                    edge(bs?.top, bd.top, r.borderColors?.top, BorderEdgeAxis.HORIZONTAL, left, right, top)
+                    edge(bs?.bottom, bd.bottom, r.borderColors?.bottom, BorderEdgeAxis.HORIZONTAL, left, right, bottom - bd.bottom)
+                    if (firstFrag) edge(bs?.left, bd.left, r.borderColors?.left, BorderEdgeAxis.VERTICAL, top, bottom, left)
+                    if (lastFrag) edge(bs?.right, bd.right, r.borderColors?.right, BorderEdgeAxis.VERTICAL, top, bottom, right - bd.right)
+                } finally {
+                    if (rounded) canvas.restoreToCount(saved)
+                }
             }
         }
     }
+
+    /**
+     * E17：圆角 + **整盒四边同宽同色实线** ⇒ 可画一条闭合描边环时的参数；
+     * 不满足（异色/异宽/虚线/盒太窄）回 `null`，调用方回落逐边分段。
+     * 判据与块盒 [orilumn.reader.engine.laying.BoxDrawer] 的同款判据同式（只把颜色解析口径
+     * 换成「已折叠 currentColor 的 ARGB」，块盒侧比较的是色串，此处比较解析值等价）。
+     *
+     * @param boxW / boxH 本片段 border-box 尺寸：环要求四边都放得下，否则内缩后矩形反向 ⇒ 弃环。
+     */
+    private fun uniformRing(
+        r: InlineBoxRun,
+        colorOf: (String?) -> Int,
+        radii: CornerRadius,
+        boxW: Float,
+        boxH: Float,
+    ): InlineRing? {
+        val w = r.border.top
+        if (w <= 0f || w != r.border.right || w != r.border.bottom || w != r.border.left) return null
+        if (boxW <= w || boxH <= w) return null
+        val c = colorOf(r.borderColors?.top)
+        if (c != colorOf(r.borderColors?.right) || c != colorOf(r.borderColors?.bottom) || c != colorOf(r.borderColors?.left)) return null
+        val st = r.borderStyles
+        val solid = { v: BorderStyle? -> (v ?: BorderStyle.SOLID) == BorderStyle.SOLID }
+        if (!solid(st?.top) || !solid(st?.right) || !solid(st?.bottom) || !solid(st?.left)) return null
+        // 描边路径的半径 = 外半径 − 半宽（环带 [r−w, r] 落在 border-box 内），钳 ≥0。
+        return InlineRing(w, c, radii.grown(-w / 2f))
+    }
+
+    /** [uniformRing] 的产出：描边宽、色（已解析 currentColor）、内缩后的 8 元半径。 */
+    private class InlineRing(val width: Float, val colorArgb: Int, val radii: FloatArray)
+
+    /**
+     * E17 的 slice 切角：`box-decoration-break: slice` 下片段只有元素**真角**带半径 ——
+     * 切开端不是角（首片段保 tl/bl、末片段保 tr/br；两者齐备即原样，调用方已先行短路）。
+     */
+    private fun slicedRadii(r: CornerRadius, firstFrag: Boolean, lastFrag: Boolean): CornerRadius = CornerRadius(
+        if (firstFrag) r.topLeft else 0f,
+        if (lastFrag) r.topRight else 0f,
+        if (lastFrag) r.bottomRight else 0f,
+        if (firstFrag) r.bottomLeft else 0f,
+    )
 
     /**
      * S5 逐字落墨：按 [placement] 的 x 逐字 `drawString`，段内样式由 `mergeBands` 供（不重写切段）。

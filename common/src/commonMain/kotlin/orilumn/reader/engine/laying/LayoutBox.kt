@@ -60,6 +60,11 @@ class TableRowLayout(
  * @property top 块**内容**顶相对格内容框顶的 y（塑形行顶再加它；由 [stackTableCellBlocks] 写）。
  * @property height 块内容总高 = 各行高之和 ＋ [edgeV]（塑形侧按 `lineBottom−lineTop` 复算）。
  * @property ranges / hyphenAtEnd / lineHeights 断行结果，三者**同长同序**。
+ * @property inlineBoxRuns 行内盒（背景/边框）区间，坐标系与 [text] **同一份段表**产出
+ *   （`absorbCellBlock` 里段算一次共享，E15）—— 故匿名块也恒对齐，无「容器坐标 vs 块坐标」
+ *   偏移风险。消费两处：auto 分列的 max/min-content 计入横向内边距
+ *   （[NormalFlowLayout.tableCellPref]）与重路径格内断行（`buildTableRows`），与塑形侧
+ *   （`shapeGeometry` 自收同一套谓词）同式 ⇒ 量画同源。
  * @property shape 塑形结果（`BoxChapterLayouter.fillTableRowCells` 灌；绘制侧读）。
  */
 class TableCellBlock(
@@ -67,6 +72,12 @@ class TableCellBlock(
     val style: ComputedStyle,
     val text: String,
     val runs: List<FontRun>,
+    /**
+     * E15 行内盒（背景/边框）区间：与 [text] **同一份段表**坐标系（[NormalFlowLayout.cellBlocks]
+     * 的 [absorbCellBlock] 段算一次共享）。断行宽（`buildTableRows`）与 auto 分列 max/min-content
+     * （`tableCellPref`）都要把它的横向 padding/border 折进去 —— 否则格内行内盒比实测窄。
+     */
+    val inlineBoxRuns: List<InlineBoxRun> = emptyList(),
     /** 行内图配对扫描根（见 @property）；缺省 = [el]。 */
     val imageRoot: MarkupElement = el,
     /** 匿名块要排掉的 run 外原始兄弟节点（见 @property）；命名块恒空集。 */

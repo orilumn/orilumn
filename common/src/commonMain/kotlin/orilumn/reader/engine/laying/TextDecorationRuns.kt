@@ -69,6 +69,16 @@ data class TextDecorationRun(
  * 与 [collectInlineBoxRuns] 的旧遍历**同构**（同一 `styledSegments`、
  * 同一 `isExcluded`/`isBlock` 跳过规则），差别只在「按节点叠装饰栈」而非「累积区间」。
  *
+ * ## 叶块以上的祖先链（E18）
+ *
+ * 本函数只**向下**走 `root` 子树，而块级子元素有自己的叶路径（`isBlock` 跳过）⇒
+ * **祖先块**上声明的装饰进不了栈。规范里装饰沿**盒树**传播到**在流的**全部后代
+ * （含后代块与混合内容里的匿名文本叶），所以这里先沿 `root` 向上把祖先那几层叠成底栈
+ * （见 [ancestorDecorationStack]）：`<div style="text-decoration:underline"><p>abc</p></div>`
+ * 与 `<a href><p>abc</p></a>` 的文字都该有线。
+ * **出流祖先**（`float`）自己那层仍传给它的后代，但**其上**的装饰不再越过它传入
+ * （规范：装饰不传播进浮动/绝对定位等出流后代）。
+ *
  * @param rootWs 叶块的 `white-space`（段归一化依据）。
  * @param genOf P3-c 生成内容查找（空即无，旧路径）。`::before`/`::after` 是原发元素的子盒 ⇒
  *   祖先装饰照叠，伪元素自身再叠一层。
@@ -86,7 +96,6 @@ fun collectTextDecorationRuns(
     styleOf: ((MarkupElement) -> ComputedStyle?)? = null,
 ): List<TextDecorationRun> {
     if (root.tag == "table" || root.tag == "img") return emptyList()
-    if (root.isText) return emptyList()
     val resolve: (MarkupElement) -> ComputedStyle? = styleOf ?: { styles[it] }
     val wsOf: (MarkupElement) -> WhiteSpace = { wsOfNode(it, styles, root, rootWs) }
     val leafWs = styles[root]?.whiteSpace ?: root.parent?.let { styles[it]?.whiteSpace } ?: rootWs
@@ -114,7 +123,8 @@ fun collectTextDecorationRuns(
             }
         }
     }
-    val rootStack = stackOf(root, emptyList())
+    // 叶块以上的祖先链（E18）：装饰沿盒树传播过块边界，叶块自身那层照旧由 stackOf 叠在最后。
+    val rootStack = stackOf(root, ancestorDecorationStack(root, isExcluded, resolve))
     stackByNode[root] = rootStack
     fill(root, rootStack)
 
@@ -168,4 +178,46 @@ private fun withLayer(inherited: List<DecorationPaint>, st: ComputedStyle): List
 
 /** 装饰线型集合的便捷判据（绘制/测试用）。 */
 fun TextDecorationRun.hasLine(line: DecorationLine): Boolean = paints.any { line in it.lines }
+
+/**
+ * 取叶块 [root] 向上直到文档根的祖先链，按从根到离 [root] 最近的顺序叠装饰栈。
+ *
+ * 浏览器语义：`text-decoration` **非继承但传播**，且传播穿过**块**边界到在流后代（包括后代块）。
+ * 这里要把祖先块上声明的装饰层也带进叶块的底栈。注意：传播**不**穿过 out-of-flow（float/absolute/fixed）
+ * —— 当前计算值里没有显式标记 `position:absolute/fixed`，float 也暂未出现在这个口径里。
+ */
+private fun ancestorDecorationStack(
+    root: MarkupElement,
+    isExcluded: (MarkupElement) -> Boolean,
+    resolve: (MarkupElement) -> ComputedStyle?,
+): List<DecorationPaint> {
+    val chain = ArrayList<MarkupElement>()
+    var cur: MarkupElement? = root.parent
+    while (cur != null && cur.tag != "#document" && cur.tag != "html" && cur.tag != "body") {
+        chain.add(cur)
+        cur = cur.parent
+    }
+    chain.reverse()
+    var stack: List<DecorationPaint> = emptyList()
+    for (el in chain) {
+        if (isExcluded(el)) continue
+        val st = resolve(el) ?: continue
+        val d = st.decoration
+        if (!d.hasLines) continue
+        val layer = DecorationPaint(
+            lines = d.lines,
+            colorHex = d.colorHex ?: st.colorHex,
+            style = d.style,
+            thicknessPx = d.thicknessPx,
+            skipInk = d.skipInk,
+            fontSizePx = st.fontSizePx,
+            families = st.fontFamilies,
+            weight = st.fontWeight,
+            italic = st.italic,
+            monospace = st.monospace,
+        )
+        stack = if (stack.isEmpty()) listOf(layer) else stack + layer
+    }
+    return stack
+}
 

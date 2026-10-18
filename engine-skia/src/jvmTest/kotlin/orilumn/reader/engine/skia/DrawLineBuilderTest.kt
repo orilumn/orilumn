@@ -1,6 +1,7 @@
 package orilumn.reader.engine.skia
 
 import orilumn.reader.engine.css.ColorRun
+import orilumn.reader.engine.css.DecorationLine
 import orilumn.reader.engine.css.LightCssParser
 import orilumn.reader.engine.css.StyleComputer
 import orilumn.reader.engine.html.HtmlTreeConverter
@@ -8,6 +9,7 @@ import orilumn.reader.engine.laying.BlockClassify
 import orilumn.reader.engine.laying.BoxLayouter
 import orilumn.reader.engine.laying.HIDDEN_NONE
 import orilumn.reader.engine.laying.NormalFlowLayout
+import orilumn.reader.engine.laying.hasLine
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -327,6 +329,45 @@ class DrawLineBuilderTest(private val variant: String) {
         val dl = map.values.first()
         assertEquals("漢字kanji", dl.text.substring(dl.range))
         assertEquals(2, dl.rubyRuns.size)
+    }
+
+    @Test
+    fun `block ancestor decoration reaches descendant block and anonymous text leaf`() {
+        // E18 回归锁：装饰收集以叶块为根、原先只向下叠栈 ⇒ 块级祖先上的 `text-decoration`
+        // 到不了后代块。现沿祖先链补叠底栈（ancestorDecorationStack），这里锁三类入口。
+        val decorated = "<html><body><div style=\"text-decoration:line-through\">"
+        // 1) 块级祖先 → 内层块叶
+        val blockAnc = build("${decorated}<p>abc</p></div></body></html>")
+            .values.first { it.text.contains("abc") }.decorationRuns
+        // 2) 混合内容里，块级祖先 → 匿名文本叶（`zzz` 那一叶的根是 `#text`）
+        val mixed = build("${decorated}zzz<p>abc</p></div></body></html>")
+        val anon = mixed.values.first { it.text == "zzz" }.decorationRuns
+        val inner = mixed.values.first { it.text.contains("abc") }.decorationRuns
+        // 3) 祖先链上的链接元素（UA 表给 `a{text-decoration:underline}`）→ 包住的块。
+        //    这里把 `a` 声明成块级容器：行内 `a` 直接包块级子树正是 E19 的丢字形状
+        //    （排版把块级后代整段跳过，文字到不了叶），布局级验证走不到装饰收集；
+        //    `a` 声明 `display:block` 后语义即浏览器的块容器形态，祖先链同一路径。
+        val linkAnc = build(
+            "<html><body><a href=\"#t\"><p>abc</p></a></body></html>",
+            ua = "a{display:block;text-decoration:underline}",
+        ).values.first { it.text.contains("abc") }.decorationRuns
+
+        for ((name, runs) in listOf("blockAnc" to blockAnc, "anon" to anon, "inner" to inner, "linkAnc" to linkAnc)) {
+            assertEquals("$name must carry the ancestor decoration run", 1, runs.size)
+            assertEquals("$name run covers the whole leaf text", 0, runs[0].start)
+            assertTrue("$name carries a line-through/underline", runs[0].paints.isNotEmpty())
+        }
+        assertTrue("blockAnc is line-through", blockAnc[0].hasLine(DecorationLine.LINE_THROUGH))
+        assertTrue("anon is line-through", anon[0].hasLine(DecorationLine.LINE_THROUGH))
+        assertTrue("linkAnc is underline", linkAnc[0].hasLine(DecorationLine.UNDERLINE))
+    }
+
+    @Test
+    fun `no decoration means no runs after ancestor walk`() {
+        // 祖先链补叠的零回归：没有声明装饰的祖先绝不多发 run（否则全书行都带装饰）。
+        val map = build("<html><body><div><p>abc</p></div></body></html>")
+        val line = map.values.first { it.text.contains("abc") }
+        assertTrue("plain ancestor chain must yield no runs", line.decorationRuns.isEmpty())
     }
 
     @Test

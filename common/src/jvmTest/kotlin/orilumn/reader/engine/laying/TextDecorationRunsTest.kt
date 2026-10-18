@@ -94,6 +94,32 @@ class TextDecorationRunsTest {
         assertTrue(runs(p).isEmpty())
     }
 
+    // ── E18：祖先块级元素的装饰传播到后代块 ─────────────────────────────────
+
+    @Test
+    fun `ancestor link decoration reaches wrapped block leaf at collect level`() {
+        // E18 收集层锁：`a > p`（行内祖先包块级叶）在布局层被 E19 的丢字形状挡住
+        // （排版跳过行内里的块级后代，文字到不了叶块），这里直接调装饰收集单源验证
+        // 祖先链补叠：链接的 UA 下划线必须成为 `p` 叶的底栈。
+        val p = node("p", children = listOf(text("abc")))
+        val a = node("a", mapOf("href" to "#t"), listOf(p))
+        node("body", children = listOf(a))
+        val rs = runs(p)
+        assertEquals(1, rs.size)
+        assertEquals(0, rs[0].start)
+        assertEquals(3, rs[0].endExclusive)
+        assertEquals(setOf(DecorationLine.UNDERLINE), rs[0].paints.single().lines)
+    }
+
+    @Test
+    fun `plain ancestor chain adds no layer`() {
+        // 祖先链补叠的零回归：无装饰声明的祖先绝不多发层（否则全书行都带装饰）。
+        val p = node("p", children = listOf(node("span", children = listOf(text("abc")))))
+        node("div", children = listOf(p))
+        node("body", children = listOf())
+        assertTrue(runs(p).isEmpty())
+    }
+
     // ── E3：三种线型归位 ────────────────────────────────────────────────────
 
     @Test

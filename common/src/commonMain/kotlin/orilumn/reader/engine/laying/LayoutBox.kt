@@ -207,6 +207,12 @@ class LayoutBox(
      */
     val floatLead: FloatLead? = null,
     /**
+     * E23-b：本悬浮叶是否**另起一行**（CSS 2.1 §9.5.1 的同行装箱结果，由 [FloatPending.register]
+     * 在 build/轻路径 eager 表里定，两路同一份）。`false` = 与本行已放的同侧悬浮并排（同顶）。
+     * 非悬浮叶恒 `true`（零影响）。
+     */
+    val floatNewRow: Boolean = true,
+    /**
      * **行尾连字符位**（与 [ranges] 同长同序）：该行是否断词收尾（行尾要补一个
      * [orilumn.reader.engine.laying.HYPHEN_GLYPH]）。断行侧已为它预留了版心
      * （[orilumn.reader.engine.laying.BrokenLine.hyphenAtEnd]），绘制侧靠这个字段才知行尾要落墨；

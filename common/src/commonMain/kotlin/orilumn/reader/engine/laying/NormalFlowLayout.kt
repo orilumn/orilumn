@@ -309,9 +309,11 @@ object NormalFlowLayout {
             // P6-a: 悬浮注册——任何 floatSide != NONE 的非表格叶（img/文本块）。
             // 零行高推进（字符槽照占，行流不断），登录双侧悬浮跨度：同侧后者堆叠、异侧并存；
             // 显式 clear 先越过指定侧（CSS 2.1 §9.5）。
-            if (box.table == null && s.floatSide != FloatSide.NONE &&
-                (box.replaceableHeight > 0 || box.ranges.isNotEmpty())
-            ) {
+            // E23-b：空悬浮盒（无文本、非替换）只要**指定高为正**就是真浮动盒（Chromium 同）；
+            // 零尺寸空盒仍走下面的普通叶分支（不占行、不动流）。
+            val floatSpan = box.replaceableHeight > 0 || box.ranges.isNotEmpty() ||
+                (box.lineHeights.isEmpty() && specifiedContentHeight(s, 0) > 0)
+            if (box.table == null && s.floatSide != FloatSide.NONE && floatSpan) {
                 // 显式 clear 只越指定侧（lead 叶不可能带 BOTH，见 build 期规则）。
                 if ((s.clearSide == ClearSide.LEFT || s.clearSide == ClearSide.BOTH)) {
                     val b = st.floatBottomL
@@ -321,11 +323,16 @@ object NormalFlowLayout {
                     val b = st.floatBottomR
                     if (b != null && b > st.y) st.y = b
                 }
-                // 相邻同侧悬浮纵向堆叠：先越过本侧旧悬浮（异侧并存不碰）。
-                val ownBottom = if (s.floatSide == FloatSide.LEFT) st.floatBottomL else st.floatBottomR
-                if (ownBottom != null && ownBottom > st.y) st.y = ownBottom
+                // 相邻同侧悬浮：**另起一行**才越过本侧旧悬浮；同行并排同顶（CSS 2.1 §9.5.1）。
+                if (box.floatNewRow) {
+                    val ownBottom = if (s.floatSide == FloatSide.LEFT) st.floatBottomL else st.floatBottomR
+                    if (ownBottom != null && ownBottom > st.y) st.y = ownBottom
+                }
                 val min = when {
                     skipOwnTop -> 0f
+                    // E23-b：同行并排的第二块起不再加自身顶边距——行顶已由本行首个悬浮抬到
+                    // 外边盒上缘（CSS 2.1 §9.5.1：同一行的浮动共用行顶）。
+                    !box.floatNewRow -> 0f
                     first -> s.margin.top
                     else -> collapseMargins(s.margin.top, prevBottomMargin)
                 }
@@ -338,15 +345,19 @@ object NormalFlowLayout {
                     (if (box.replaceableHeight > 0) 0 else (s.padding.bottom + s.border.bottom).roundToInt())
                 box.firstLineIndex = out.size
                 // 零高行：字符槽连续（分页不断），几何不占竖空间（环绕叶贴着排）。
-                out.add(
-                    FlowedLine(
-                        charStart = st.char,
-                        charEnd = st.char + box.textLength,
-                        yTop = contentY,
-                        yBottom = contentY,
-                        paragraphStart = true,
-                    ),
-                )
+                // E23-b：**空悬浮盒**（无文本、无图）不发这一行 —— 与轻路径 `rebuildLocalLines` 同判
+                // （那边行数为 0、走无行叶记账），否则两路的行计数/切片对不上。
+                if (box.ranges.isNotEmpty() || box.replaceableHeight > 0) {
+                    out.add(
+                        FlowedLine(
+                            charStart = st.char,
+                            charEnd = st.char + box.textLength,
+                            yTop = contentY,
+                            yBottom = contentY,
+                            paragraphStart = true,
+                        ),
+                    )
+                }
                 box.lastLineExclusive = out.size
                 st.char += box.textLength
                 val spanBottom = box.contentBottom
@@ -647,14 +658,18 @@ object NormalFlowLayout {
             val breakW = innerBreakWidth(style, contentW)
             val (floatW, repH) = replacedUsedSize(el, style, breakW, imageLoader, chapterHref, density = density)
             val side = style.floatSide
-            val (boxLeft, boxW) = if (side != FloatSide.NONE) {
+            val (boxLeft, boxW, newRow) = if (side != FloatSide.NONE) {
                 val w = floatW.coerceAtLeast(1)
                 pending.preClear(style.clearSide)
-                pending.register(side, w, repH)
-                (left + maxOf(0, availW - w)) to w
+                // E23-b：行装箱按**外边盒**宽记账（左右外边距参与同行排位），容量 = 含边距的包含块内容宽。
+                val mH = (style.margin.left + style.margin.right).roundToInt()
+                pending.register(side, w + mH, repH, availW + mH)
+                // 同行装箱的落点（左浮动自内容左起；右浮动自内容右起、含自身外边盒宽）。
+                val x = if (side == FloatSide.RIGHT) availW + mH - pending.lastX else pending.lastX
+                Triple(left + x.coerceAtLeast(0), w, pending.lastNewRow)
             } else {
                 pending.dropAll()
-                left to contentW
+                Triple(left, contentW, true)
             }
             listOf(
                 LayoutBox(
@@ -664,6 +679,7 @@ object NormalFlowLayout {
                     lineHeights = emptyList(),
                     childBoxes = emptyList(),
                     replaceableHeight = repH,
+                    floatNewRow = newRow,
                 ),
             )
         } else if (blockChildren.isEmpty() && !inlineWrappedBlock && soleFigureImage(el, classify, hidden) != null) {
@@ -714,14 +730,18 @@ object NormalFlowLayout {
             // P3：`fitMaxH` 由第一趟流出的几何给出（此趟恒 null = 自然尺寸），见 `applyReplacedFit`。
             val (floatW, repH) = replacedUsedSize(img, imgStyleRaw, breakW, imageLoader, chapterHref, density = density)
             val side = imgStyleRaw.floatSide
-            val (boxLeft, boxW) = if (side != FloatSide.NONE) {
+            val (boxLeft, boxW, newRow) = if (side != FloatSide.NONE) {
                 val w = floatW.coerceAtLeast(1)
-                pending.preClear(style.floatSide.let { style.clearSide })
-                pending.register(side, w, repH)
-                (left + maxOf(0, contentW - w)) to w
+                pending.preClear(style.clearSide)
+                // E23-b：外边盒宽记账（同 img 分支；横向边距取 img 自身样式，宿主块的纵向边距已折进上面）。
+                val mH = (imgStyle.margin.left + imgStyle.margin.right).roundToInt()
+                pending.register(side, w + mH, repH, contentW + mH)
+                // 同行装箱的落点（左浮动自内容左起；右浮动自内容右起、含自身外边盒宽）。
+                val x = if (side == FloatSide.RIGHT) contentW + mH - pending.lastX else pending.lastX
+                Triple(left + x.coerceAtLeast(0), w, pending.lastNewRow)
             } else {
                 pending.dropAll()
-                left to contentW
+                Triple(left, contentW, true)
             }
             listOf(
                 LayoutBox(
@@ -758,19 +778,23 @@ object NormalFlowLayout {
             val side = style.floatSide
             if (side != FloatSide.NONE) {
                 val floatW = floatTextWidth(style, text, contentW, breaker, runs, boxes)
-                val boxLeft = if (side == FloatSide.RIGHT) left + maxOf(0, availW - floatW) else left
                 val breakWf = innerBreakWidth(style, floatW)
                 val brokenF = breakWrappedLines(breaker, text, style, breakWf, null, el.tag, runs, style.textIndentPx, shifts, boxes)
                 val heightsF = adjustLineHeightsForInlineImages(text, brokenF, el, styles, classify, hidden, breakWf, imageLoader, chapterHref, density = density)
                     .map { it.coerceAtLeast(1) }
                 // P6-b: 叠排注音行增高（与行内图抬升同式；无注音零回归）。
                 val grownF = adjustLineHeightsForRuby(brokenF, heightsF, leafRubyRuns(el, styles, classify, hidden, genOf, firstLetterOf))
-                val h = grownF.sum()
+                // E23-b：悬浮跨度高 = max(行高和, `height`)（与 `emit` 的叶盒高同式；空悬浮盒也占位）。
+                val spanH = specifiedContentHeight(style, grownF.sum())
                 pending.preClear(style.clearSide)
-                pending.register(side, floatW, h)
+                // E23-b：外边盒宽记账（左右外边距参与同行排位），容量 = 含边距的包含块内容宽。
+                val mH = (style.margin.left + style.margin.right).roundToInt()
+                pending.register(side, floatW + mH, spanH, contentW + mH)
+                // 同行装箱的落点（左浮动自内容左起；右浮动自内容右起、含自身外边盒宽）。
+                val x = if (side == FloatSide.RIGHT) contentW + mH - pending.lastX else pending.lastX
                 listOf(
                     LayoutBox(
-                        el, style, boxLeft, floatW,
+                        el, style, left + x.coerceAtLeast(0), floatW,
                         ranges = brokenF.map { it.range },
                         hyphenAtEnd = brokenF.map { it.hyphenAtEnd },
                         squeezeRatios = brokenF.map { it.squeezeRatio },
@@ -778,6 +802,7 @@ object NormalFlowLayout {
                         lineHeights = grownF,
                         childBoxes = emptyList(),
                         floatLead = null,
+                        floatNewRow = pending.lastNewRow,
                     ),
                 )
             } else {
@@ -2166,20 +2191,56 @@ object NormalFlowLayout {
         var rW: Int = 0
         var rH: Int = 0
         private var rUsed: Int = 0
+        // E23-b 同侧**行装箱**（CSS 2.1 §9.5.1）：本行已放悬浮的宽度和（左/右各一）。
+        private var lRowW: Int = 0
+        private var rRowW: Int = 0
+        /** 最近一次 [register] 的落点：本盒在本侧内的 x 偏移 —— 左浮动自内容左起，右浮动自内容右起
+         *  **含自身宽**（右浮动依次向左排列）。 */
+        var lastX: Int = 0
+        /** 最近一次 [register] 的盒是否**另起一行**（false = 与本行已放悬浮并排，同顶）。 */
+        var lastNewRow: Boolean = true
 
         fun activeL(): Boolean = lW > 0 && lH > lUsed
         fun activeR(): Boolean = rW > 0 && rH > rUsed
         fun remL(): Int = (lH - lUsed).coerceAtLeast(0)
         fun remR(): Int = (rH - rUsed).coerceAtLeast(0)
 
-        /** 注册本侧跨度：同侧叠加（CSS 纵向堆叠：旧余量 + 新高，宽取最大防交叠），异侧覆盖本侧。
-         * 悬浮盒零行高不占 Y，异侧不消耗（并排双浮动同顶），Y 前进只由后随文本记账。 */
-        fun register(side: FloatSide, floatW: Int, floatH: Int) {
-            if (side == FloatSide.LEFT) {
-                lW = maxOf(lW, floatW); lH = remL() + floatH; lUsed = 0
-            } else if (side == FloatSide.RIGHT) {
-                rW = maxOf(rW, floatW); rH = remR() + floatH; rUsed = 0
+        /**
+         * 注册本侧跨度：**同侧能并排就并排**（同一行放得下 ⇒ x 偏移 = 本行已放宽度，同顶），
+         * 放不下（或本行已被文本越过）才另起一行（新行顶 = 当前文本游标；旧余量 + 新高＝既有堆叠口径）。
+         * 异侧覆盖本侧；悬浮盒零行高不占 Y，Y 前进只由后随文本记账。
+         *
+         * @param availW 本悬浮包含块的**内容宽**：同行容量上限（还要再减异侧本行已占宽度）。
+         * @return 本盒是否另起一行（同 [lastNewRow]）。
+         */
+        fun register(side: FloatSide, floatW: Int, floatH: Int, availW: Int = Int.MAX_VALUE): Boolean = when (side) {
+            FloatSide.LEFT -> {
+                val other = if (activeR()) rRowW else 0
+                if (lH > 0 && lUsed == 0 && lRowW > 0 && lRowW + floatW + other <= availW) {
+                    // 并排：同顶加宽，行高取两者较大。
+                    lastX = lRowW; lRowW += floatW
+                    lW = maxOf(lW, lRowW); lH = maxOf(lH, floatH)
+                    lastNewRow = false
+                } else {
+                    lW = maxOf(lW, floatW); lH = remL() + floatH; lUsed = 0
+                    lRowW = floatW; lastX = 0; lastNewRow = true
+                }
+                lastNewRow
             }
+            FloatSide.RIGHT -> {
+                val other = if (activeL()) lRowW else 0
+                if (rH > 0 && rUsed == 0 && rRowW > 0 && rRowW + floatW + other <= availW) {
+                    rRowW += floatW
+                    lastX = rRowW
+                    rW = maxOf(rW, rRowW); rH = maxOf(rH, floatH)
+                    lastNewRow = false
+                } else {
+                    rW = maxOf(rW, floatW); rH = remR() + floatH; rUsed = 0
+                    rRowW = floatW; lastX = floatW; lastNewRow = true
+                }
+                lastNewRow
+            }
+            else -> true
         }
 
         /** 文本叶消耗（环绕/clear/回退一律计 Y 前进）。 */
@@ -2196,11 +2257,11 @@ object NormalFlowLayout {
         }
 
         fun dropLeft() {
-            lW = 0; lUsed = 0; lH = 0
+            lW = 0; lUsed = 0; lH = 0; lRowW = 0
         }
 
         fun dropRight() {
-            rW = 0; rUsed = 0; rH = 0
+            rW = 0; rUsed = 0; rH = 0; rRowW = 0
         }
 
         fun dropAll() {

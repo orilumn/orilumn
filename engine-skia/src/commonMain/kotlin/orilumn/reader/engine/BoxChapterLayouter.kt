@@ -1456,10 +1456,13 @@ class BoxChapterLayouter(
             val ls = leaf.style
             // P6-a2: 悬浮注册（img/文本；与重路径 emit 同式：零推进＋双侧跨度＋同侧堆叠）。
             // 表格行永不视为悬浮（与重路径 `box.table == null` 守卫同式）。
-            val hasSize = (shape.isReplaceable && shape.replaceableBottom > 0) || shape.lineCount > 0
+            // E23-b：空悬浮盒（无文本、非替换）只要指定高为正也是真浮动盒（重路径同判据）。
+            val hasSize = (shape.isReplaceable && shape.replaceableBottom > 0) || shape.lineCount > 0 ||
+                (!shape.isReplaceable && NormalFlowLayout.specifiedContentHeight(ls, 0) > 0)
             if (leaf.table == null && ls.floatSide != orilumn.reader.engine.css.FloatSide.NONE && hasSize) {
                 // 悬浮盒自身 advance 照常（与重路径 margin 消费同式），再堆叠/注册。
-                y += advance
+                // E23-b：同行并排的第二块起不加自身顶边距（与重路径同阶；行顶由本行首块定）。
+                if (leaf.floatNewRow) y += advance
                 // 显式 clear 只越指定侧。
                 if (ls.clearSide == orilumn.reader.engine.css.ClearSide.LEFT || ls.clearSide == orilumn.reader.engine.css.ClearSide.BOTH) {
                     val b = floatBottomL
@@ -1469,9 +1472,11 @@ class BoxChapterLayouter(
                     val b = floatBottomR
                     if (b != null && b > y) y = b
                 }
-                // 相邻同侧堆叠。
-                val own = if (ls.floatSide == orilumn.reader.engine.css.FloatSide.LEFT) floatBottomL else floatBottomR
-                if (own != null && own > y) y = own
+                // 相邻同侧：**另起一行**才越过本侧旧悬浮；同行并排同顶（CSS 2.1 §9.5.1）。
+                if (leaf.floatNewRow) {
+                    val own = if (ls.floatSide == orilumn.reader.engine.css.FloatSide.LEFT) floatBottomL else floatBottomR
+                    if (own != null && own > y) y = own
+                }
                 noteLineLessBoxTop(gi, shape, y)
                 val contentY = y + (ls.border.top + ls.padding.top).roundToInt()
                 if (shape.isReplaceable && shape.replaceableBottom > 0) {
@@ -3094,6 +3099,14 @@ class BoxChapterLayouter(
             leftEdgesOf = { e -> val s = prepare.resolveStyle(e); (s.border.left + s.padding.left).roundToInt() },
             marginLeftOf = { e -> val s = prepare.resolveStyle(e); s.margin.left.roundToInt() },
         )
+        // E23-b：悬浮叶的画盒几何走 eager 表的实际落点与自身宽（否则浮动底盒会画成满宽，
+        // 与重路径（`LayoutBox` 的 boxLeft/boxW = 悬浮盒自身）分叉）。
+        prepare.floatBoxOf(el)?.let { (x, w) ->
+            return LayoutBox(
+                el = el, style = style, contentLeft = contentLeft + x, contentWidth = w,
+                ranges = emptyList(), textLength = 0, lineHeights = emptyList(), childBoxes = emptyList(),
+            )
+        }
         // 表容器与重路径同式（指定宽/margin auto），否则增量/临时页的表边框画满容器宽，
         // 与正典页（33..627）反复横跳。descend 值是旧全宽口径：宽含表自身边距，左缘已含 margin。
         if (el.tag == "table") {
@@ -3314,6 +3327,20 @@ private class PartialDrawableLayout(
 }
 
 /**
+ * E23-b：P6-a2 悬浮 eager 透传的四张表（下标 = 叶下标）。
+ *
+ * [leads]/[widths] 是 P6-a2 原有的环绕前导与悬浮实宽；[xOffs] = 悬浮盒内容左相对其包含块内容左的
+ * 偏移（右浮动已含自身宽，直接可用）、[newRows] = 该盒是否另起一行（CSS 2.1 §9.5.1 行装箱结果，
+ * 重路径 build 期同一份 [orilumn.reader.engine.laying.NormalFlowLayout.FloatPending] 算法）。
+ */
+private class FloatEager(
+    val leads: List<orilumn.reader.engine.laying.FloatLead?>,
+    val widths: List<Int?>,
+    val xOffs: List<Int>,
+    val newRows: List<Boolean>,
+)
+
+/**
  * Light structural cascade for the large-chapter foreground: leaf ordering + char starts (a pure markup
  * pass) plus a **lazy** per-block style/width materializer. Blocks are only cascaded when actually shaped,
  * so the foreground never computes styles for the whole chapter (matching how shaping is already scoped).
@@ -3470,13 +3497,40 @@ class LightPrepare(
     /**
      * P6-a2: 文本叶相对其原文前兄弟的悬浮环绕前导（P6-a 起全章 eager 透传，
      * 与重路径 build 期 [FloatPending] 同式，双路恒一致；v1 单 img 前驱是其特例）。
+     *
+     * E23-b 起同一遍顺带给出**浮动盒落点**：[FloatEager.xOffs] = 悬浮盒的内容左相对其包含块
+     * 内容左的偏移（右浮动已含自身宽，直接可用）、[FloatEager.newRows] = 是否另起一行。
      */
-    private val floatData: Pair<List<orilumn.reader.engine.laying.FloatLead?>, List<Int?>> by lazy {
+    private val floatData: FloatEager by lazy {
         computeFloatLeads()
     }
-    val floatLeads: List<orilumn.reader.engine.laying.FloatLead?> get() = floatData.first
+    val floatLeads: List<orilumn.reader.engine.laying.FloatLead?> get() = floatData.leads
     /** P6-a2: 悬浮实宽表（与 floatLeads 同一前向透传产物；右对齐/塑形宽同源，零重算）。 */
-    val floatWidths: List<Int?> get() = floatData.second
+    val floatWidths: List<Int?> get() = floatData.widths
+    /** E23-b: 悬浮盒落点偏移表（非悬浮恒 0）。 */
+    val floatXOffs: List<Int> get() = floatData.xOffs
+    /** E23-b: 悬浮盒是否另起一行表（非悬浮恒 true）。 */
+    private val floatNewRows: List<Boolean> get() = floatData.newRows
+
+    /** E23-b: 块 [i] 是悬浮叶时给出「落点左 + 自身宽」（非悬浮 null）。 */
+    internal fun floatBoxAt(i: Int): Pair<Int, Int>? {
+        val w = floatWidths.getOrNull(i) ?: return null
+        return floatXOffs.getOrNull(i)?.let { it to w }
+    }
+
+    /** E23-b: 元素 → 悬浮盒「落点左 + 自身宽」（身份表；仅悬浮章节按需建，无悬浮零开销）。 */
+    private val floatBoxByEl: Map<MarkupElement, Pair<Int, Int>> by lazy {
+        if (!chapterHasFloat) {
+            emptyMap()
+        } else {
+            val m = identityMap<MarkupElement, Pair<Int, Int>>()
+            for (i in markupLeaves.indices) floatBoxAt(i)?.let { m[markupLeaves[i]] = it }
+            m
+        }
+    }
+
+    /** E23-b: 该元素的悬浮盒几何（非悬浮/无悬浮章节 = null ⇒ 调用方走原口径）。 */
+    internal fun floatBoxOf(el: MarkupElement): Pair<Int, Int>? = floatBoxByEl[el]
 
     fun floatLeadAt(blockIdx: Int): orilumn.reader.engine.laying.FloatLead? {
         if (totalBlocks <= 0) return null
@@ -3488,12 +3542,12 @@ class LightPrepare(
      * （注册/消耗/收窄同 helper；塑形同 breaker 同输入，高度恒等，故 lead 恒等）。
      * 无悬浮章节恒全空（仅样式扫描，零塑形开销）。
      */
-    private fun computeFloatLeads(): Pair<List<orilumn.reader.engine.laying.FloatLead?>, List<Int?>> {
+    private fun computeFloatLeads(): FloatEager {
         val n = totalBlocks
         // R26：结构层已经算过这个标志（有叶子时几乎白送），别再全章扫一遍只为回答同一个问题。
         // 实测 Rust 书 ch7（169 叶）这第一次扫描要 275ms，且它被 `block(i)` 里的 `floatLeads[i]`
         // 触发，直接落在开书关键路径上——与 totalChars 曾把整章重算 9.7s 同一个病。
-        if (!chapterHasFloat) return List(n) { null } to List(n) { null }
+        if (!chapterHasFloat) return FloatEager(List(n) { null }, List(n) { null }, List(n) { 0 }, List(n) { true })
         var anyFloat = false
         for (i in 0 until n) {
             if (blockStyleFor(markupLeaves[i]).floatSide != orilumn.reader.engine.css.FloatSide.NONE) {
@@ -3501,12 +3555,14 @@ class LightPrepare(
                 break
             }
         }
-        if (!anyFloat) return List(n) { null } to List(n) { null }
+        if (!anyFloat) return FloatEager(List(n) { null }, List(n) { null }, List(n) { 0 }, List(n) { true })
         // S3：与重路径同一单源（浮动 lead 的宽度决定其宿主块宽，必须与正文同变体）。
         val breaker = orilumn.reader.engine.skia.bodyParagraphBreaker(profile.letterSpacingEm, profile.cjkLatinSpacingEmApplied)
         val pending = NormalFlowLayout.FloatPending()
         val out = ArrayList<orilumn.reader.engine.laying.FloatLead?>(n)
         val widths = ArrayList<Int?>(n)
+        val xOffs = ArrayList<Int>(n)
+        val newRows = ArrayList<Boolean>(n)
         val classify = lightClassify()
         for (i in 0 until n) {
             val el = markupLeaves[i]
@@ -3534,6 +3590,8 @@ class LightPrepare(
                 if (el.tag != "#text") pending.dropAll()
                 out.add(null)
                 widths.add(null)
+                xOffs.add(0)
+                newRows.add(true)
                 continue
             }
             if (NormalFlowLayout.isReplaceable(el)) {
@@ -3541,11 +3599,24 @@ class LightPrepare(
                     val (fw, fh) = NormalFlowLayout.replacedUsedSize(
                         el, style, NormalFlowLayout.innerBreakWidth(style, cw), imageLoader, chapterHref, density = profile.density,
                     )
-                    pending.register(style.floatSide, fw.coerceAtLeast(1), fh)
+                    pending.register(
+                        style.floatSide, fw.coerceAtLeast(1) + (style.margin.left + style.margin.right).roundToInt(), fh,
+                        cw + (style.margin.left + style.margin.right).roundToInt(),
+                    )
                     widths.add(fw.coerceAtLeast(1))
+                    xOffs.add(
+                        if (style.floatSide == orilumn.reader.engine.css.FloatSide.RIGHT) {
+                            (cw + (style.margin.left + style.margin.right).roundToInt() - pending.lastX).coerceAtLeast(0)
+                        } else {
+                            pending.lastX
+                        },
+                    )
+                    newRows.add(pending.lastNewRow)
                 } else {
                     pending.dropAll()
                     widths.add(null)
+                    xOffs.add(0)
+                    newRows.add(true)
                 }
                 out.add(null)
                 continue
@@ -3579,14 +3650,29 @@ class LightPrepare(
                     shaped, baseH, NormalFlowLayout.leafRubyRuns(el, sub, classify, hidden, genOf, firstLetterOf = firstLetterOf),
                 )
                 val h = grownH.sumOf { it.coerceAtLeast(1) }
-                pending.register(style.floatSide, floatW, h)
+                // E23-b：悬浮跨度高 = max(行高和, `height`)（与重路径 `emit` 的叶盒高同式；空悬浮盒也占位）。
+                // 行装箱按**外边盒**宽记账（左右外边距参与同行排位），容量 = 含边距的包含块内容宽。
+                val mH = (style.margin.left + style.margin.right).roundToInt()
+                pending.register(
+                    style.floatSide, floatW + mH, NormalFlowLayout.specifiedContentHeight(style, h), cw + mH,
+                )
                 widths.add(floatW)
+                xOffs.add(
+                    if (style.floatSide == orilumn.reader.engine.css.FloatSide.RIGHT) {
+                        (cw + mH - pending.lastX).coerceAtLeast(0)
+                    } else {
+                        pending.lastX
+                    },
+                )
+                newRows.add(pending.lastNewRow)
                 out.add(null)
                 continue
             }
             val lead = NormalFlowLayout.pendingLeadFor(pending, style, cw)
             out.add(lead)
             widths.add(null)
+            xOffs.add(0)
+            newRows.add(true)
             val text = NormalFlowLayout.absorbStyled(el, sub, classify, hidden, genOf).text
             val runs = NormalFlowLayout.leafFontRuns(el, sub, classify, hidden, genOf, firstLetterOf = firstLetterOf)
             val shaped = breakWrappedLines(
@@ -3605,7 +3691,7 @@ class LightPrepare(
             val h = grownH.sumOf { it.coerceAtLeast(1) } + style.margin.top.coerceAtLeast(0f).roundToInt()
             pending.consume(h)
         }
-        return out to widths
+        return FloatEager(out, widths, xOffs, newRows)
     }
 
     /**
@@ -3826,9 +3912,13 @@ class LightPrepare(
         if (sink != null) m3 = orilumn.reader.time.platformNowMs() - tL
         // P6-a2: 右悬浮右对齐（宽取 eager 表，与重路径同源，零重算）。
         var boxLeft = contentLeft
-        if (el.tag != "#text" && style.floatSide == orilumn.reader.engine.css.FloatSide.RIGHT) {
-            val fw = floatWidths[i]
-            if (fw != null && fw > 0) boxLeft = contentLeft + maxOf(0, contentWidth - fw)
+        // E23-b：悬浮盒的落点与自身宽（同行装箱结果）——左浮动自内容左起、右浮动自内容右起，
+        // 与重路径 build 期同值；非悬浮叶走原口径（containing block 内容宽）。
+        var boxW = contentWidth
+        val floatW = if (el.tag == "#text") null else floatWidths[i]
+        if (floatW != null && floatW > 0) {
+            boxLeft = contentLeft + floatXOffs[i]
+            boxW = floatW
         }
         // P3：独图提升叶的宿主块样式（break-* 挂在块上；见 `LayoutBox.breakCarrierStyle`）。
         val carrierStyle = if (!replaceable) null else (carrierBlockOf(el) ?: el).let { c ->
@@ -3837,7 +3927,7 @@ class LightPrepare(
         val box = LayoutBox(
             el = el, style = style,
             contentLeft = boxLeft,
-            contentWidth = contentWidth,
+            contentWidth = boxW,
             ranges = emptyList(),
             // P1-2: 与重路径盒 textLength 同式（样式化归一长度）。
             textLength = textLen,
@@ -3849,6 +3939,8 @@ class LightPrepare(
             table = if (isTr) tableRowLayoutFor(el, contentWidth) else null,
             // P6-a2: 环绕前导取全章 eager 表（与重路径 pending 透传同式；匿名/替换/表格叶恒空）。
             floatLead = floatLeads[i],
+            // E23-b：同行装箱结果（重路径 build 期同一份）；非悬浮恒 true。
+            floatNewRow = if (floatW != null && floatW > 0) floatNewRows[i] else true,
             breakCarrierStyle = carrierStyle,
         )
         materialized[i] = box

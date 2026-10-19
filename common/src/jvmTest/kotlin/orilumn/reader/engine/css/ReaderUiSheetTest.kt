@@ -3,6 +3,7 @@ package orilumn.reader.engine.css
 import orilumn.reader.engine.text.TypographicProfile
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -72,6 +73,41 @@ class ReaderUiSheetTest {
         )
         val lip = declarations(p, "li p")
         assertEquals(mapOf("text-indent" to "0em"), lip)
+    }
+
+    @Test
+    fun `zero indent emits no text-indent rule so the book keeps its own`() {
+        // 0 = 读者未配（中性默认）⇒ 一条 text-indent 都不发：书的 `p{text-indent}`（含悬挂缩进的
+        // 负缩进）原样生效。wf: 读者层裸 `p{text-indent:0em}` 会凭 tier 44 压过书的一切缩进声明。
+        val sheet = ReaderUiSheet.build(profile(firstLineIndentEm = 0f))
+        assertFalse(
+            "读数 0 时 UI 层不得发 text-indent（含 li p 的归零规则）",
+            sheet.rules.any { r -> r.declarations.any { it.property == "text-indent" } },
+        )
+    }
+
+    @Test
+    fun `non zero indent still overrides the book`() {
+        val sheet = ReaderUiSheet.build(profile(firstLineIndentEm = 2f))
+        assertTrue(
+            "读者配了 2em 就该压过书",
+            sheet.rules.any { r -> r.selectors == listOf("p") && r.declarations.any { it.property == "text-indent" && it.value == "2em" } },
+        )
+    }
+
+    @Test
+    fun `hanging indent from the book survives when the reader has not configured one`() {
+        // 端到端：读者未配缩进（0）时，书里 `.hang{text-indent:-2em;margin-left:2em}` 的负缩进必须
+        // 原样到达计算样式（首行左移 2em）。这是 tier 口径的判据：UI 层不发声明 ⇒ 书 author 层赢。
+        val author = LightCssParser().parse("p.hang{text-indent:-2em;margin-left:2em}")
+        val sheet = ReaderUiSheet.build(profile(firstLineIndentEm = 0f))
+        val root = orilumn.reader.engine.html.HtmlTreeConverter().convert(
+            "<html><body><p class=\"hang\">悬挂缩进</p></body></html>",
+        )!!
+        val engine = StyleComputer(18f, LightCssParser().parse(""), listOf(author), null, null, sheet)
+        val map = engine.compute(root)
+        val p = root.children.first()
+        assertEquals("首行缩进应保留书的 -2em", -2f * 18f, map[p]?.textIndentPx ?: 0f, 0.5f)
     }
 
     @Test

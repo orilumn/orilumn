@@ -93,12 +93,14 @@ fun collectTextDecorationRuns(
     genOf: GenOf = EmptyGen,
     precomputed: List<StyledSegment>? = null,
     styleOf: ((MarkupElement) -> ComputedStyle?)? = null,
+    /** `::first-letter` 伪元素查找（null = 无该规则；`precomputed` 非空时直接吃它，现算才用）。 */
+    firstLetterOf: FirstLetterOf? = null,
 ): List<TextDecorationRun> {
     if (root.tag == "table" || root.tag == "img") return emptyList()
     val resolve: (MarkupElement) -> ComputedStyle? = styleOf ?: { styles[it] }
     val wsOf: (MarkupElement) -> WhiteSpace = { wsOfNode(it, styles, root, rootWs) }
     val leafWs = styles[root]?.whiteSpace ?: root.parent?.let { styles[it]?.whiteSpace } ?: rootWs
-    val segs = precomputed ?: styledSegments(root, wsOf, isExcluded, isBlock, leafWs, genOf, resolve).segments
+    val segs = precomputed ?: styledSegments(root, wsOf, isExcluded, isBlock, leafWs, genOf, resolve, firstLetterOf = firstLetterOf).segments
     if (segs.isEmpty()) return emptyList()
 
     /** 本元素声明的那一层（无声明即 [inherited] 原样）。 */

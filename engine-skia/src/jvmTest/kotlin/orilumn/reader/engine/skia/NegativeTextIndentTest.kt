@@ -46,8 +46,9 @@ import kotlin.math.ceil
  * 3. **重轻等价**：同一段 HTML、同一版心，重路径（[BoxLayouter] + [DrawLineBuilder]）与
  *    轻路径（[BoxChapterLayouter.tempShape]）的断行区间逐项相同，且投影出的
  *    [DrawLine.firstLineIndentPx] 是**同一个负值**；
- * 4. **分层照旧**：读者首行缩进（UI 层 tier 44）仍压过书的 `p` 缩进 —— 负缩进的可见范围是
- *    UI 层不涉及的块（`blockquote`/`dd`/`li` 等），这是既有的覆盖层设计，E8 不改它。
+ * 4. **分层照旧**：读者**配了**首行缩进（UI 层 tier 44，值 > 0）才压过书的 `p` 缩进；读数 0 =
+ *    读者未配 ⇒ UI 层一条 `text-indent` 都不发，书的缩进（含负值）原样生效。负缩进的可见范围也
+ *    因此扩大：`p` 之外（`blockquote`/`dd`/`li` 等）本来就不在 UI 层射程内。
  */
 class NegativeTextIndentTest {
 
@@ -145,9 +146,12 @@ class NegativeTextIndentTest {
     // ---- 3. 端到端：重轻两路同值 + 绘制投影 ----
 
     /** 默认档：原书样式（主题层不加载）、首行缩进 0 ⇒ 书的 `text-indent` 只受 UI 层 `p` 规则影响。 */
-    private fun profile() = TypographicProfile.build(ReaderSettings.DEFAULT, 2f)
+    private fun profile(readerIndentEm: Float = 0f) = TypographicProfile.build(
+        ReaderSettings.DEFAULT.copy(firstLineIndent = readerIndentEm.toDouble()),
+        2f,
+    )
 
-    /** 悬挂缩进写在 `blockquote` 上（UI 层只对 `p` 发首行缩进 ⇒ 书的负值能到达计算样式）。 */
+    /** 悬挂缩进写在 `blockquote` 上（读者档位默认未配首行缩进 ⇒ UI 层不发声明，书的负值原样到达）。 */
     private val authorCss = "blockquote { margin: 0; text-indent: -2em }"
 
     /** 对照：同版心、同结构，缩进为 0。 */
@@ -157,15 +161,18 @@ class NegativeTextIndentTest {
 
     private fun html() = "<html><body><blockquote>$markupText</blockquote></body></html>"
 
-    private fun styleEngine(css: String) = StyleComputer(
-        profile().bodyPx,
-        uaSheetFromProfile(profile()),
-        listOf(LightCssParser().parse(css)),
-        themeSheetFromProfile(profile()),
-        null,
-        ReaderUiSheet.build(profile()),
-        paragraphScale = profile().paragraphSpacingScale, gapScale = profile().paragraphGapScale,
-    )
+    private fun styleEngine(css: String, readerIndentEm: Float = 0f): StyleComputer {
+        val p = profile(readerIndentEm)
+        return StyleComputer(
+            p.bodyPx,
+            uaSheetFromProfile(p),
+            listOf(LightCssParser().parse(css)),
+            themeSheetFromProfile(p),
+            null,
+            ReaderUiSheet.build(p),
+            paragraphScale = p.paragraphSpacingScale, gapScale = p.paragraphGapScale,
+        )
+    }
 
     private fun heavyLeaves(css: String, w: Int): List<LayoutBox> {
         val root = HtmlTreeConverter().convert(html())!!
@@ -245,27 +252,33 @@ class NegativeTextIndentTest {
         )
     }
 
-    // ---- 4. 分层照旧：读者首行缩进仍压过书的 `p` ----
+    // ---- 4. 分层照旧：读者**配了**首行缩进才压过书的 `p` ----
 
     @Test
-    fun `读者首行缩进仍压过书的 p 缩进（负值可见范围的分层依据）`() {
+    fun `读者配了首行缩进才压过书的 p 缩进（未配则书原样）`() {
         val css = "p { text-indent: -2em } blockquote { text-indent: -2em }"
         val root = HtmlTreeConverter().convert(
             "<html><body><p>正文</p><blockquote>引文</blockquote></body></html>",
         )!!
-        val styles = styleEngine(css).compute(root)
-        fun nth(tag: String): orilumn.reader.engine.css.ComputedStyle {
+        fun nth(map: Map<orilumn.reader.engine.html.MarkupElement, orilumn.reader.engine.css.ComputedStyle>, tag: String): orilumn.reader.engine.css.ComputedStyle {
             val acc = ArrayList<orilumn.reader.engine.html.MarkupElement>()
             fun walk(n: orilumn.reader.engine.html.MarkupElement) {
                 if (n.tag == tag) acc.add(n)
                 n.children.forEach(::walk)
             }
             walk(root)
-            return styles[acc[0]]!!
+            return map[acc[0]]!!
         }
-        // UI 层（tier 44）对 `p` 无条件是「读者首行缩进」值（本档 = 0）⇒ 书的负值到不了计算样式；
-        // UI 层不涉及 `blockquote` ⇒ 书的负值原样到达（E8 的可见范围）。
-        assertEquals(0f, nth("p").textIndentPx, 0.01f)
-        assertEquals(-2f * nth("blockquote").fontSizePx, nth("blockquote").textIndentPx, 0.01f)
+
+        // 读者**未配**（0 = 中性默认）⇒ UI 层一条 `text-indent` 都不发 ⇒ 书的负缩进原样到达 `p`
+        // （悬挂缩进不再被裸 `p{text-indent:0em}` 静默吃掉）。
+        val unset = styleEngine(css, readerIndentEm = 0f).compute(root)
+        assertEquals(-2f * nth(unset, "p").fontSizePx, nth(unset, "p").textIndentPx, 0.01f)
+
+        // 读者配了 2em ⇒ UI 层（tier 44）压过书的 `p`；`blockquote` 不在 UI 层射程内 ⇒ 书的负值原样
+        // （E8 的可见范围：UI 层只给 `p` 发缩进）。
+        val set = styleEngine(css, readerIndentEm = 2f).compute(root)
+        assertEquals(2f * nth(set, "p").fontSizePx, nth(set, "p").textIndentPx, 0.01f)
+        assertEquals(-2f * nth(set, "blockquote").fontSizePx, nth(set, "blockquote").textIndentPx, 0.01f)
     }
 }

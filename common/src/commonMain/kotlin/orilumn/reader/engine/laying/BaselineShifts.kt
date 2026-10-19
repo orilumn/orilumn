@@ -50,6 +50,8 @@ fun collectBaselineShifts(
     precomputed: List<StyledSegment>? = null,
     /** P3-c 样式回退（变换/引号依据；默认读 [styles] 表）。 */
     styleOf: ((MarkupElement) -> ComputedStyle?)? = null,
+    /** `::first-letter` 伪元素查找（null = 无该规则；`precomputed` 非空时直接吃它，现算才用）。 */
+    firstLetterOf: FirstLetterOf? = null,
 ): List<BaselineShift> {
     if (root.tag == "table" || root.tag == "img") return emptyList()
     fun shiftOf(node: MarkupElement): Float? =
@@ -57,7 +59,7 @@ fun collectBaselineShifts(
     val wsOf: (MarkupElement) -> WhiteSpace = { wsOfNode(it, styles, root, rootWs) }
     val leafWs = styles[root]?.whiteSpace ?: root.parent?.let { styles[it]?.whiteSpace } ?: rootWs
     if (root.isText) return emptyList() // 合成匿名叶无子树、无偏移
-    val segs = precomputed ?: styledSegments(root, wsOf, isExcluded, isBlock, leafWs, genOf, styleOf ?: { styles[it] }).segments
+    val segs = precomputed ?: styledSegments(root, wsOf, isExcluded, isBlock, leafWs, genOf, styleOf ?: { styles[it] }, firstLetterOf = firstLetterOf).segments
     // 逐节点偏移一次算好（内层覆盖外层），段折叠时直接取用。
     val shiftByNode = HashMap<MarkupElement, Float?>()
     fun fill(node: MarkupElement, inherited: Float?) {
@@ -97,10 +99,14 @@ fun collectBaselineShifts(
     }
     for (seg in segs) {
         val node = seg.node
-        // 标记段（br/img）永不偏移。P3-c: 生成/引号段走伪元素位移。
-        val shift = if (node == null || !node.isText) {
-            seg.genStyle?.verticalAlign?.let { if (it == VerticalAlign.BASELINE) null else it.shiftEm() }
-        } else shiftByNode[node]
+        // 标记段（br/img）永不偏移。P3-c: 生成/引号段与 `::first-letter` 段都走伪元素位移
+        // （段节点是文本节点时也必须以 `genStyle` 为准，与字体收集器同一契约）。
+        val shift = when {
+            seg.genStyle != null ->
+                seg.genStyle.verticalAlign.let { if (it == VerticalAlign.BASELINE) null else it.shiftEm() }
+            node == null || !node.isText -> null
+            else -> shiftByNode[node]
+        }
         emit(seg, shift)
     }
     return out

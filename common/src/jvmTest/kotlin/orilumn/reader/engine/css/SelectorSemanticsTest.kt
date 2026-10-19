@@ -246,12 +246,13 @@ class SelectorSemanticsTest {
         val root = tree("<p>x</p><li>y</li>")
         val p = root.ofTag("p").first()
         val li = root.ofTag("li").first()
-        assertFalse(matches("p::first-letter", p))
+        assertTrue(matches("p::first-letter", p))
         assertFalse(matches("p::first-line", p))
-        assertFalse("单冒号旧写法同样按伪元素", matches("p:first-letter", p))
+        assertTrue("单冒号旧写法同样按伪元素", matches("p:first-letter", p))
         assertFalse(matches("p::selection", p))
         assertFalse(matches("li::marker", li))
         assertNull("非 before/after 不参与伪元素分流", sel("p::first-line").pseudoElement)
+        assertEquals("first-letter", sel("p::first-letter").pseudoElement)
     }
 
     @Test

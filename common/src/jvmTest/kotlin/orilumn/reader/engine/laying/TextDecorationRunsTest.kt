@@ -237,10 +237,28 @@ class TextDecorationRunsTest {
         assertEquals(DecorationStyle.DASHED, paint.style)
         assertEquals("#ffff0000", paint.colorHex)
         assertEquals(2f, paint.thicknessPx!!, 1e-3f)
-        // `auto` / `from-font` 都落成 null（粗细由绘制侧按字体度量取）。
+        // `from-font` 才是 null（绘制侧按字体度量取）；`auto`/没写 = 字号/10，见下一个用例。
         val p2 = node("p", children = listOf(node("span", mapOf("style" to "text-decoration: underline from-font"), listOf(text("xy")))))
         node("body", children = listOf(p2))
         assertNull(runs(p2).single().paints.single().thicknessPx)
+    }
+
+    @Test
+    fun `auto thickness is font size over ten when nothing is declared`() {
+        // 只写 `text-decoration: underline`（没写粗细）= `auto` = 字号/10（Chromium 口径）。
+        // 曾经落成 null 被当成 from-font ⇒ 绘制侧取字体度量（不随字号放大），线偏细、波浪线波长减半。
+        val bare = node("p", children = listOf(node("span", mapOf("style" to "text-decoration: underline; font-size: 20px"), listOf(text("xy")))))
+        node("body", children = listOf(bare))
+        assertEquals(2f, runs(bare).single().paints.single().thicknessPx!!, 1e-3f)
+
+        // 显式 `auto` 同值；显式长度仍以长度为准。
+        val explicitAuto = node("p", children = listOf(node("span", mapOf("style" to "font-size: 30px; text-decoration: underline; text-decoration-thickness: auto"), listOf(text("xy")))))
+        node("body", children = listOf(explicitAuto))
+        assertEquals(3f, runs(explicitAuto).single().paints.single().thicknessPx!!, 1e-3f)
+
+        val explicitLen = node("p", children = listOf(node("span", mapOf("style" to "font-size: 30px; text-decoration: underline; text-decoration-thickness: 1px"), listOf(text("xy")))))
+        node("body", children = listOf(explicitLen))
+        assertEquals(1f, runs(explicitLen).single().paints.single().thicknessPx!!, 1e-3f)
     }
 
     @Test

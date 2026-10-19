@@ -68,6 +68,8 @@ object NormalFlowLayout {
         density: Float = 1f,
         /** P3-c 生成内容查找（空即无，旧路径）。 */
         genOf: GenOf = EmptyGen,
+        /** `::first-letter` 伪元素查找（null = 无该规则；与 genOf 同由章节开关决定）。 */
+        firstLetterOf: FirstLetterOf? = null,
         /**
          * P3：一页内容高（px）。> 0 时施加「块级替换叶 ≤ 一页 − 簇内其它内容」预算
          * （口径乙，[ReplacedFitBudget]）——**分页层**的约束，不是 CSS 声明；0 = 不约束
@@ -75,7 +77,7 @@ object NormalFlowLayout {
          */
         contentH: Int = 0,
     ): BoxLayoutResult {
-        val boxes = buildBoxTree(root, styles, breaker, widthPx, left = 0, classify, hidden, imageLoader, chapterHref, density, genOf)
+        val boxes = buildBoxTree(root, styles, breaker, widthPx, left = 0, classify, hidden, imageLoader, chapterHref, density, genOf, firstLetterOf)
         val lines = ArrayList<FlowedLine>()
         flowBoxes(boxes, lines)
         if (contentH > 0) applyReplacedFit(boxes, lines, styles, contentH, imageLoader, chapterHref, density)
@@ -590,6 +592,8 @@ object NormalFlowLayout {
         density: Float = 1f,
         /** P3-c 生成内容查找（空即无，旧路径）。 */
         genOf: GenOf = EmptyGen,
+        /** `::first-letter` 伪元素查找（null = 无该规则；行高与塑形同吃它，量画同源）。 */
+        firstLetterOf: FirstLetterOf? = null,
         /** P6-a 待环绕透传（文档序；容器递归共享同一份）。 */
         pending: FloatPending = FloatPending(),
     ): List<LayoutBox> {
@@ -616,10 +620,10 @@ object NormalFlowLayout {
             val innerW = g.contentW
             // The table's own border-box left is its children's baseline; rows start after its left edge.
             val rowLeft = g.tableLeft + (style.border.left + style.padding.left).roundToInt()
-            val rows = buildTableRows(el, styles, breaker, innerW, rowLeft, classify, hidden, imageLoader, chapterHref, density, genOf)
+            val rows = buildTableRows(el, styles, breaker, innerW, rowLeft, classify, hidden, imageLoader, chapterHref, density, genOf, firstLetterOf)
             val cap = TableGridModel.build(el).caption
             val capBoxes = if (cap != null && !hidden.isHidden(cap)) {
-                buildBoxTree(cap, styles, breaker, innerW, rowLeft, classify, hidden, imageLoader, chapterHref, density, genOf, pending)
+                buildBoxTree(cap, styles, breaker, innerW, rowLeft, classify, hidden, imageLoader, chapterHref, density, genOf, firstLetterOf, pending)
             } else emptyList()
             val children = if (capBoxes.isNotEmpty() && captionIsBottom(el) { styles[it] }) rows + capBoxes else capBoxes + rows
             listOf(LayoutBox(el, style, g.tableLeft, g.outerW, emptyList(), 0, emptyList(), children))
@@ -735,10 +739,10 @@ object NormalFlowLayout {
             val text = absorbStyled(el, styles, classify, hidden, genOf).text
             val contentW = widthPx.coerceAtLeast(1)
             val styleOf: (MarkupElement) -> ComputedStyle = { styles.getValue(it) }
-            val runs = leafFontRuns(el, styles, classify, hidden, genOf)
-            val shifts = leafBaselineShifts(el, styles, classify, hidden, genOf)
+            val runs = leafFontRuns(el, styles, classify, hidden, genOf, firstLetterOf)
+            val shifts = leafBaselineShifts(el, styles, classify, hidden, genOf, firstLetterOf)
             // 行内盒（横向 padding/border 参与断行宽度）：与绘制侧同一份，量画同源。
-            val boxes = leafInlineBoxRuns(el, styles, classify, hidden, genOf)
+            val boxes = leafInlineBoxRuns(el, styles, classify, hidden, genOf, firstLetterOf)
             val side = style.floatSide
             if (side != FloatSide.NONE) {
                 val floatW = floatTextWidth(style, text, contentW, breaker, runs, boxes)
@@ -748,7 +752,7 @@ object NormalFlowLayout {
                 val heightsF = adjustLineHeightsForInlineImages(text, brokenF, el, styles, classify, hidden, breakWf, imageLoader, chapterHref, density = density)
                     .map { it.coerceAtLeast(1) }
                 // P6-b: 叠排注音行增高（与行内图抬升同式；无注音零回归）。
-                val grownF = adjustLineHeightsForRuby(brokenF, heightsF, leafRubyRuns(el, styles, classify, hidden, genOf))
+                val grownF = adjustLineHeightsForRuby(brokenF, heightsF, leafRubyRuns(el, styles, classify, hidden, genOf, firstLetterOf))
                 val h = grownF.sum()
                 pending.preClear(style.clearSide)
                 pending.register(side, floatW, h)
@@ -773,7 +777,7 @@ object NormalFlowLayout {
                 val lineHeights = adjustLineHeightsForInlineImages(text, broken, el, styles, classify, hidden, breakW, imageLoader, chapterHref, density = density)
                     .map { it.coerceAtLeast(1) }
                 // P6-b: 叠排注音行增高（与行内图抬升同式；无注音零回归）。
-                val grownHeights = adjustLineHeightsForRuby(broken, lineHeights, leafRubyRuns(el, styles, classify, hidden, genOf))
+                val grownHeights = adjustLineHeightsForRuby(broken, lineHeights, leafRubyRuns(el, styles, classify, hidden, genOf, firstLetterOf))
                 // 回记账（含自身上边距，与 K 公式的 mTop 对称；只多不少，漂移永朝安全方向）。
                 pending.consume(grownHeights.sum() + style.margin.top.coerceAtLeast(0f).roundToInt())
                 listOf(
@@ -815,7 +819,7 @@ object NormalFlowLayout {
                     buildAnonymousTextLeaf(ch, styles[ch.parent ?: el] ?: style, breaker, childW, childLeft).also { bs ->
                         pending.consume(bs.sumOf { it.lineHeights.sum() })
                     }
-                } else buildBoxTree(ch, styles, breaker, childW, childLeft, classify, hidden, imageLoader, chapterHref, density, genOf, pending)
+                } else buildBoxTree(ch, styles, breaker, childW, childLeft, classify, hidden, imageLoader, chapterHref, density, genOf, firstLetterOf, pending)
             }
             // P6-a: 容器自身纵向边（border+padding 永不折叠；margin 会折叠，已由子女记账）回记账。
             pending.consume(
@@ -1046,12 +1050,13 @@ object NormalFlowLayout {
         classify: BlockClassify,
         hidden: HiddenCheck = HIDDEN_NONE,
         genOf: GenOf = EmptyGen,
+        firstLetterOf: FirstLetterOf? = null,
     ): List<TableCellBlock> {
         val cellStyle = styles.getValue(cellEl)
         val out = ArrayList<TableCellBlock>(2)
         // 格自身的 border/padding **不**进块堆叠（行高预算与 `emitCell` 的 insetTop 单算）⇒
         // `selfEdges = false`，起点 gap/inset 皆 0。
-        walkCellBlocks(cellEl, cellStyle, styles, classify, hidden, genOf, out, 0, 0, 0f, selfEdges = false)
+        walkCellBlocks(cellEl, cellStyle, styles, classify, hidden, genOf, firstLetterOf, out, 0, 0, 0f, selfEdges = false)
         return out
     }
 
@@ -1062,6 +1067,7 @@ object NormalFlowLayout {
         classify: BlockClassify,
         hidden: HiddenCheck,
         genOf: GenOf,
+        firstLetterOf: FirstLetterOf?,
         out: MutableList<TableCellBlock>,
         /** 本容器内容框相对**格内容框**的横向 inset 累计（不含本容器自身的横向边）。 */
         insetH: Int,
@@ -1095,7 +1101,7 @@ object NormalFlowLayout {
                 // 块 `el` 就是容器（塑形侧据 [TableCellBlock.outsideSiblings] 复原同一段），行内图
                 // 配对扫描根同为容器。
                 val after = cellRunAfter(container, item)
-                val rd = absorbCellBlock(container, styles, after, classify::isBlock, cs, hidden, genOf)
+                val rd = absorbCellBlock(container, styles, after, classify::isBlock, cs, hidden, genOf, firstLetterOf)
                 out.add(
                     TableCellBlock(
                         el = container, style = cs,
@@ -1121,7 +1127,7 @@ object NormalFlowLayout {
                     val rd = if (isReplaceable(blk)) {
                         Triple("\uFFFC", emptyList<FontRun>(), emptyList<InlineBoxRun>())
                     } else {
-                        absorbCellBlock(blk, styles, emptySet(), { false }, chs, hidden, genOf)
+                        absorbCellBlock(blk, styles, emptySet(), { false }, chs, hidden, genOf, firstLetterOf)
                     }
                     out.add(
                         TableCellBlock(
@@ -1134,7 +1140,7 @@ object NormalFlowLayout {
                     // 中间容器：自身不产块。传 `insetIn` / `g`（容器**边框盒**口径），由递归自己
                     // 加 `selfEdges` 的那一次横向/纵向边 —— 传 `insetIn + ownH` 会双算。
                     // 首子因容器顶边而与外部折叠隔断（传 0f）。
-                    val sub = walkCellBlocks(blk, chs, styles, classify, hidden, genOf, out, insetIn, g, 0f, selfEdges = true)
+                    val sub = walkCellBlocks(blk, chs, styles, classify, hidden, genOf, firstLetterOf, out, insetIn, g, 0f, selfEdges = true)
                     cur = sub.nextGap
                     prevM = if ((chs.border.bottom + chs.padding.bottom) > 0f) chs.margin.bottom else collapseMargins(chs.margin.bottom, sub.bottomMargin)
                     first = false
@@ -1193,13 +1199,14 @@ object NormalFlowLayout {
         style: ComputedStyle,
         hidden: HiddenCheck,
         genOf: GenOf,
+        firstLetterOf: FirstLetterOf? = null,
     ): Triple<String, List<FontRun>, List<InlineBoxRun>> {
         if (root.tag == "table" || root.tag == "img") return Triple("", emptyList(), emptyList())
         val isExcluded: (MarkupElement) -> Boolean = { hidden.isHidden(it) || it in after }
         val isBlock: (MarkupElement) -> Boolean = { it in after || isBlockOf(it) }
         val wsOf: (MarkupElement) -> WhiteSpace = { wsOfNode(it, styles, root) }
         val leafWs = styles[root]?.whiteSpace ?: WhiteSpace.NORMAL
-        val segs = styledSegments(root, wsOf, isExcluded, isBlock, leafWs, genOf, { styles[it] }).segments
+        val segs = styledSegments(root, wsOf, isExcluded, isBlock, leafWs, genOf, { styles[it] }, firstLetterOf = firstLetterOf).segments
         val runs = collectFontRuns(
             root, styles, isExcluded, isBlock, fontBaseOf(root, styles, style), leafWs, genOf,
             precomputed = segs,
@@ -1230,6 +1237,8 @@ object NormalFlowLayout {
         density: Float = 1f,
         /** P3-c 生成内容查找（空即无，旧路径）。 */
         genOf: GenOf = EmptyGen,
+        /** `::first-letter` 伪元素查找（null = 无该规则）。 */
+        firstLetterOf: FirstLetterOf? = null,
     ): List<LayoutBox> {
         val model = TableGridModel.build(el)
         if (model.columnCount <= 0 || model.rows.isEmpty()) return emptyList()
@@ -1252,7 +1261,7 @@ object NormalFlowLayout {
             val list = ArrayList<CellBlocks>(row.cells.size)
             for (cell in row.cells) {
                 val cs = styles.getValue(cell.el)
-                val blocks = cellBlocks(cell.el, styles, classify, hidden, genOf)
+                val blocks = cellBlocks(cell.el, styles, classify, hidden, genOf, firstLetterOf)
                 list.add(CellBlocks(cell, cs, blocks))
                 prefs.add(tableCellPref(breaker, cell.col, cell.colSpan, blocks, cs))
             }
@@ -1304,7 +1313,7 @@ object NormalFlowLayout {
                         breaker, b.text, b.style, blockBreak, b.el.tag,
                         b.runs,
                         0f,
-                        leafBaselineShifts(b.el, styles, bCls, hidden, genOf),
+                        leafBaselineShifts(b.el, styles, bCls, hidden, genOf, firstLetterOf),
                         // E15：行内盒横向 padding/border 也占断行宽 —— 与塑形侧 `shapeGeometry`
                         // 自收的同源 runs 同账（否则重路径格内行数比实排少，行高预算偏小）。
                         b.inlineBoxRuns,
@@ -1312,7 +1321,7 @@ object NormalFlowLayout {
                     // Same §10.8 image-line adjustment as text leaves (cell images share the bug).
                     val adjHeights = adjustLineHeightsForInlineImages(b.text, lines, b.imageRoot, styles, bCls, hidden, blockBreak, imageLoader, chapterHref, density = density)
                     // P6-b: 叠排注音行增高（与文本叶同式；无注音零回归）。
-                    val grownHeights = adjustLineHeightsForRuby(lines, adjHeights, leafRubyRuns(b.el, styles, bCls, hidden, genOf))
+                    val grownHeights = adjustLineHeightsForRuby(lines, adjHeights, leafRubyRuns(b.el, styles, bCls, hidden, genOf, firstLetterOf))
                     b.ranges = lines.map { it.range }
                     b.hyphenAtEnd = lines.map { it.hyphenAtEnd }
                     b.squeezeRatios = lines.map { it.squeezeRatio }
@@ -1506,11 +1515,13 @@ object NormalFlowLayout {
         hidden: HiddenCheck = HIDDEN_NONE,
         /** P3-c 生成内容查找（空即无，旧路径）。 */
         genOf: GenOf = EmptyGen,
+        /** `::first-letter` 伪元素查找（null = 无该规则；章节开关关掉即整个传 null）。 */
+        firstLetterOf: FirstLetterOf? = null,
     ): List<ColorRun> {
         if (el == null) return emptyList()
         val seed = styles[el]?.colorHex?.let(::cssHexToArgb)
         val rootWs = styles[el]?.whiteSpace ?: el.parent?.let { styles[it]?.whiteSpace } ?: WhiteSpace.NORMAL
-        return collectColorRuns(el, styles, hidden::isHidden, classify::isBlock, seed, rootWs, genOf)
+        return collectColorRuns(el, styles, hidden::isHidden, classify::isBlock, seed, rootWs, genOf, firstLetterOf = firstLetterOf)
     }
 
     /**
@@ -1527,10 +1538,12 @@ object NormalFlowLayout {
         hidden: HiddenCheck = HIDDEN_NONE,
         /** P3-c 生成内容查找（空即无，旧路径）。 */
         genOf: GenOf = EmptyGen,
+        /** `::first-letter` 伪元素查找（null = 无该规则；章节开关关掉即整个传 null）。 */
+        firstLetterOf: FirstLetterOf? = null,
     ): List<FontRun> {
         if (el == null) return emptyList()
         val rootWs = styles[el]?.whiteSpace ?: el.parent?.let { styles[it]?.whiteSpace } ?: WhiteSpace.NORMAL
-        return collectFontRuns(el, styles, hidden::isHidden, classify::isBlock, fontBaseOf(el, styles, styles[el]), rootWs, genOf)
+        return collectFontRuns(el, styles, hidden::isHidden, classify::isBlock, fontBaseOf(el, styles, styles[el]), rootWs, genOf, firstLetterOf = firstLetterOf)
     }
 
     /**
@@ -1544,10 +1557,12 @@ object NormalFlowLayout {
         hidden: HiddenCheck = HIDDEN_NONE,
         /** P3-c 生成内容查找（空即无，旧路径）。 */
         genOf: GenOf = EmptyGen,
+        /** `::first-letter` 伪元素查找（null = 无该规则；章节开关关掉即整个传 null）。 */
+        firstLetterOf: FirstLetterOf? = null,
     ): List<BaselineShift> {
         if (el == null) return emptyList()
         val rootWs = styles[el]?.whiteSpace ?: el.parent?.let { styles[it]?.whiteSpace } ?: WhiteSpace.NORMAL
-        return collectBaselineShifts(el, styles, hidden::isHidden, classify::isBlock, rootWs, genOf)
+        return collectBaselineShifts(el, styles, hidden::isHidden, classify::isBlock, rootWs, genOf, firstLetterOf = firstLetterOf)
     }
 
     /**
@@ -1561,10 +1576,12 @@ object NormalFlowLayout {
         hidden: HiddenCheck = HIDDEN_NONE,
         /** P3-c 生成内容查找（空即无，旧路径）。 */
         genOf: GenOf = EmptyGen,
+        /** `::first-letter` 伪元素查找（null = 无该规则；章节开关关掉即整个传 null）。 */
+        firstLetterOf: FirstLetterOf? = null,
     ): List<RubyRun> {
         if (el == null) return emptyList()
         val rootWs = styles[el]?.whiteSpace ?: el.parent?.let { styles[it]?.whiteSpace } ?: WhiteSpace.NORMAL
-        return collectRubyRuns(el, styles, hidden::isHidden, classify::isBlock, rootWs, genOf)
+        return collectRubyRuns(el, styles, hidden::isHidden, classify::isBlock, rootWs, genOf, firstLetterOf = firstLetterOf)
     }
 
     /**
@@ -1578,10 +1595,12 @@ object NormalFlowLayout {
         hidden: HiddenCheck = HIDDEN_NONE,
         /** P3-c 生成内容查找（空即无，旧路径）。 */
         genOf: GenOf = EmptyGen,
+        /** `::first-letter` 伪元素查找（null = 无该规则；章节开关关掉即整个传 null）。 */
+        firstLetterOf: FirstLetterOf? = null,
     ): List<TextDecorationRun> {
         if (el == null) return emptyList()
         val rootWs = styles[el]?.whiteSpace ?: el.parent?.let { styles[it]?.whiteSpace } ?: WhiteSpace.NORMAL
-        return collectTextDecorationRuns(el, styles, hidden::isHidden, classify::isBlock, rootWs, genOf)
+        return collectTextDecorationRuns(el, styles, hidden::isHidden, classify::isBlock, rootWs, genOf, firstLetterOf = firstLetterOf)
     }
 
     /**
@@ -1595,10 +1614,12 @@ object NormalFlowLayout {
         hidden: HiddenCheck = HIDDEN_NONE,
         /** P3-c 生成内容查找（空即无，旧路径）。 */
         genOf: GenOf = EmptyGen,
+        /** `::first-letter` 伪元素查找（null = 无该规则；章节开关关掉即整个传 null）。 */
+        firstLetterOf: FirstLetterOf? = null,
     ): List<InlineBoxRun> {
         if (el == null) return emptyList()
         val rootWs = styles[el]?.whiteSpace ?: el.parent?.let { styles[it]?.whiteSpace } ?: WhiteSpace.NORMAL
-        return collectInlineBoxRuns(el, styles, hidden::isHidden, classify::isBlock, rootWs, genOf)
+        return collectInlineBoxRuns(el, styles, hidden::isHidden, classify::isBlock, rootWs, genOf, firstLetterOf = firstLetterOf)
     }
 
     /**
@@ -1614,6 +1635,8 @@ object NormalFlowLayout {
         hidden: HiddenCheck = HIDDEN_NONE,
         /** P3-c 生成内容查找（空即无，旧路径）。 */
         genOf: GenOf = EmptyGen,
+        /** `::first-letter` 伪元素查找（null = 无该规则；章节开关关掉即整个传 null）。 */
+        firstLetterOf: FirstLetterOf? = null,
     ): List<IntRange> {
         if (el == null) return emptyList()
         val base = styles[el]?.visibilityHidden
@@ -1621,7 +1644,7 @@ object NormalFlowLayout {
             ?: false
         // 快筛留给调用方（本章/本子树有没有 `visibility` 声明）；这里只做叶自身已知隐藏时的短路。
         val rootWs = styles[el]?.whiteSpace ?: el.parent?.let { styles[it]?.whiteSpace } ?: WhiteSpace.NORMAL
-        return collectVisibilityHiddenRuns(el, styles, base, hidden::isHidden, classify::isBlock, rootWs, genOf)
+        return collectVisibilityHiddenRuns(el, styles, base, hidden::isHidden, classify::isBlock, rootWs, genOf, firstLetterOf = firstLetterOf)
     }
 
     /** 叶基底 face（行内 run 比对基准）：匿名叶不在表里时回传入后备，无表时回空基底。 */

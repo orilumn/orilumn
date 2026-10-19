@@ -60,6 +60,14 @@ class StyledSegment(
 )
 
 /**
+ * `::first-letter` 伪元素计算样式查找（原发元素 → 样式；null = 无该伪元素规则 / 未命中）。
+ *
+ * 与 [GenOf] 同为「按叶根懒解＋缓存」的入参：章节级开关关掉时调用方整个传 null，
+ * 下游（[styledSegments] 与各 run 收集器）一个字都不多算。
+ */
+typealias FirstLetterOf = (MarkupElement) -> ComputedStyle?
+
+/**
  * 构建 [root] 叶内的样式化段。
  *
  * @param wsOf 任一节点（含文本节点）的有效 `white-space`；缺省回退链由调用方决定
@@ -68,6 +76,9 @@ class StyledSegment(
  * @param genOf P3-c 生成内容查找（`::before/::after` 预求值；空即无，旧路径）。
  * @param styleOf P3-c 样式回退（`text-transform`/`small-caps`/`quotes`/`q` 着色依据；
  *   null 即全按旧行为：无变换、默认引号）。
+ * @param firstLetterOf `::first-letter` 伪元素计算样式查找（[root] → 样式；null = 无该规则，
+ *   整叶单段）。命中时首字（含其前的引号/开括号）单独成段并携带该伪元素样式，其余字符照旧 ——
+ *   文本与字符数一个都不变，只多一个段边界（浏览器同式：只有首字吃 `::first-letter`）。
  *
  * 标记段（`<br>`/`<img>`）同样携带其节点：着色沿用旧语义（img 槽位带其继承色，
  * br 永空），字体/基线恒空。
@@ -80,6 +91,7 @@ fun styledSegments(
     leafWs: WhiteSpace,
     genOf: GenOf = EmptyGen,
     styleOf: ((MarkupElement) -> ComputedStyle?)? = null,
+    firstLetterOf: FirstLetterOf? = null,
 ): StyledSegments {
     if (root.tag == "table" || root.tag == "img") return StyledSegments(emptyList())
     if (root.isText) {
@@ -89,6 +101,9 @@ fun styledSegments(
         addTextSeg(out, root, t0, styleOf)
         return StyledSegments(out)
     }
+    // `::first-letter`：只对**原发元素**（叶根）解一次；匿名叶（`root.isText`）没有伪元素语义，
+    // 上面已早退。命中与否由调用方的章节级开关决定（无该规则的书连查找都不建）。
+    val firstLetter = firstLetterOf?.invoke(root)
     val segs = ArrayList<StyledSegment>()
     val rootQuotes = styleOf?.invoke(root)?.quotes ?: orilumn.reader.engine.css.DEFAULT_QUOTES
     fun walk(node: MarkupElement, qDepth: Int, quotes: List<String>) {
@@ -131,7 +146,81 @@ fun styledSegments(
     }
     walk(root, 0, rootQuotes)
     mergeBoundarySpaces(segs, leafWs)
-    return finishSegments(segs, leafWs)
+    val out = finishSegments(segs, leafWs)
+    if (firstLetter == null) return out
+    return applyFirstLetter(out, firstLetter)
+}
+
+/**
+ * `::first-letter` 分段：把**首字**（连同其前的引号/开括号）从首个文本段里切出来，单独成段并
+ * 携带伪元素样式 [style]（`genStyle`，与 `::before/::after` 同一通道 ⇒ 着色/字体/装饰/行内盒
+ * 五家收集器一次到位，无需各改一处）。
+ *
+ * 段节点沿用**原段节点**（文本节点 / 生成伪元素的原发元素）：链接区间、注音、装饰栈等按节点
+ * 归属的下游消费者一字不动；字体/基线两家收 `genStyle` 优先（与「run 收集优先用它取色/字体/位移」
+ * 同一契约），伪元素自己声明的字号/face 照样落到这一段。
+ *
+ * 只切**一个**字素簇：文本、字符数、后续段全部原样（不是重排版，只多一个段边界）。
+ */
+private fun applyFirstLetter(segs: StyledSegments, style: ComputedStyle): StyledSegments {
+    val list = segs.segments
+    // 跳过 `<br>`/`<img>` 标记段与纯空白段：它们不是「首字」。
+    var k = -1
+    for (i in list.indices) {
+        val t = list[i].text
+        if (t.isEmpty()) continue
+        val tag = list[i].node?.tag
+        if (tag == "br" || tag == "img") continue
+        if (t.all { it == ' ' || it == '\n' || it == '\t' }) continue
+        k = i
+        break
+    }
+    if (k < 0) return segs
+    val seg = list[k]
+    val cut = firstLetterUnitLength(seg.text)
+    if (cut <= 0 || cut > seg.text.length) return segs
+    val out = ArrayList<StyledSegment>(list.size + 1)
+    out.addAll(list.subList(0, k))
+    out.add(StyledSegment(seg.node, seg.text.substring(0, cut), genStyle = style))
+    val rest = seg.text.substring(cut)
+    // small-caps 段被切开时，余下部分保持它的小字号标记（首字自己按伪元素样式走整段字号）。
+    if (rest.isNotEmpty()) out.add(StyledSegment(seg.node, rest, smallCaps = seg.smallCaps))
+    out.addAll(list.subList(k + 1, list.size))
+    return StyledSegments(out)
+}
+
+/** 首字前可并入的标点（引号/开括号）：CSS 2.1 §5.12.2「首字母及其前的标点」。 */
+private const val FIRST_LETTER_LEAD_PUNCT = "\"'“”‘’「」『』（）()[]【】〔〕〈〉《》‹›«»"
+
+/**
+ * `::first-letter` 覆盖的字符数：前导标点（见 [FIRST_LETTER_LEAD_PUNCT]）＋一个**字素簇**
+ * （CJK 一字 / 拉丁一字母＝1 码元；代理对与组合序列按整簇，避免切开半个字）。
+ */
+private fun firstLetterUnitLength(text: String): Int {
+    var i = 0
+    while (i < text.length && text[i] in FIRST_LETTER_LEAD_PUNCT) i++
+    if (i >= text.length) return text.length
+    // 一个字素簇的近似切法：基码点 + 后续组合记号/变体选择符/ZWJ 连接串。
+    i += codePointSize(text, i)
+    while (i < text.length) {
+        val c = text[i].code
+        if (c == 0x200D && i + 1 < text.length) {
+            // ZWJ 连接串：连同其后的基码点一起并入（emoji 家族/连字）。
+            i += 1 + codePointSize(text, i + 1)
+            continue
+        }
+        val isCombining = c in 0x0300..0x036F || c in 0x1AB0..0x1AFF || c in 0x20D0..0x20FF ||
+            c in 0xFE00..0xFE0F
+        if (!isCombining) break
+        i++
+    }
+    return i
+}
+
+/** 起始于 [i] 的码点占几个 `Char`（代理对为 2；与 `CjkLatinSpacing` 同一纯 Int 口径）。 */
+private fun codePointSize(s: String, i: Int): Int {
+    val c = s[i]
+    return if (c.isHighSurrogate() && i + 1 < s.length && s[i + 1].isLowSurrogate()) 2 else 1
 }
 
 /** 文本节点段：归一后做 `text-transform`（1:1），`small-caps` 按原大小写切小字号段。 */

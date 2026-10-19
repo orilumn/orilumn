@@ -61,6 +61,11 @@ fun shapeGeometry(
     classify: BlockClassify? = null,
     hidden: HiddenCheck = HIDDEN_NONE,
     /**
+     * `::first-letter` 伪元素计算样式查找（原发元素 → 样式；null = 无/未命中）。
+     * 只对本叶根求一次：有命中就先分段（见 `styledSegments` 的 `firstLetter`），无则全程零开销。
+     */
+    firstLetterOf: ((MarkupElement) -> ComputedStyle?)? = null,
+    /**
      * P3：分页层给该替换叶的高度上限（口径乙）。调用方喂 `LayoutBox.replaceableFitH`，
      * 与盒流测量同值 —— 量画同源的唯一渠道（见 `docs/分页高度约束与断页规则-方案.md` §5）。
      */
@@ -97,7 +102,8 @@ fun shapeGeometry(
     }
     // 行内 face 段（`<code>`/`<strong>` 等）：与着色同构的同一遍历产出，断行与绘制按它整形。
     // 五家收集器同根同参：段表算一次共享（`precomputed`），各家折叠不变；文本/表/img 根走各自
-    // 早退分支，共享表恒为 null 不浪费。
+    // 早退分支，共享表恒为 null 不浪费。P3-c 起这张表还负责 `::first-letter`：命中即把首字单列
+    // 一段（携带伪元素样式），五家收集器一次到位（文本与字符数不变，只多一个段边界）。
     val sharedSegs: List<StyledSegment>? =
         if (el.isText || el.tag == "table" || el.tag == "img") null
         else styledSegments(
@@ -108,6 +114,7 @@ fun shapeGeometry(
             styles[el]?.whiteSpace ?: el.parent?.let { styles[it]?.whiteSpace } ?: rootStyle.whiteSpace,
             genOf,
             { styles[it] },
+            firstLetterOf = firstLetterOf,
         ).segments
     val fontRuns = fontRunsOf(el, styles, rootStyle, genOf, isBlock, sharedSegs)
     // P1-2: 行内基线位移段（sub/sup 等）：不断行几何，随段整形使量画一致。

@@ -101,6 +101,8 @@ data class ChapterPrepareResult(
     val hidden: orilumn.reader.engine.laying.HiddenCheck,
     /** P3-c 生成内容查找（与塑形同一 phase-1 结果；空即无）。 */
     val genOf: orilumn.reader.engine.laying.GenOf = orilumn.reader.engine.laying.EmptyGen,
+    /** `::first-letter` 伪元素查找（章节无该伪规则即 null，塑形侧零开销）。 */
+    val firstLetterOf: ((MarkupElement) -> orilumn.reader.engine.css.ComputedStyle?)? = null,
 ) {
     /** Locates the block index that contains the given chapter-wide char offset. */
     fun blockIndexForChar(charOffset: Int): Int {
@@ -237,9 +239,11 @@ class BoxChapterLayouter(
             ?.takeIf { it.isNotEmpty() }
             ?.let { genOfFromStrings(authorSheets, it, engine) { styleMap[it] } }
             ?: genOfFor(markup, authorSheets, { styleMap[it] }, engine, hidden)
-        val structure = boxLayouter.layoutBoxes(markup, contentW, styleMap, classify, imageLoader, chapterHref, genOf = genOf, contentH = contentH)
+        // `::first-letter`：章节无该伪规则即 null（塑形与断行侧零开销）；命中则按叶根懒解＋缓存。
+        val firstLetterOf = firstLetterOfFor(engine) { styleMap[it] }
+        val structure = boxLayouter.layoutBoxes(markup, contentW, styleMap, classify, imageLoader, chapterHref, genOf = genOf, firstLetterOf = firstLetterOf, contentH = contentH)
         val leaves = collectLeaves(structure.boxes)
-        return buildPrepareResult(markup, styleMap, structure, leaves, classify, hidden, genOf)
+        return buildPrepareResult(markup, styleMap, structure, leaves, classify, hidden, genOf, firstLetterOf)
     }
 
     /**
@@ -292,6 +296,27 @@ class BoxChapterLayouter(
             pseudoCache.getOrPut(el to p) {
                 val base = styleOf(el) ?: return@getOrPut null
                 engine.pseudoStyle(el, orilumn.reader.engine.laying.ancestorsOf(el), base, p)
+            }
+        }
+    }
+
+    /**
+     * `::first-letter` 伪元素计算样式查找（重/轻两路同式，与 [pseudoOfFor] 同一懒解＋缓存纪律）。
+     *
+     * 章节级先行门控（[StyleComputer.hasFirstLetterRules]）：整章没有 `::first-letter` 规则时返回
+     * null ⇒ 塑形侧一个字都不多算（老书零开销）。命中章节也只在**每个叶根**解一次并缓存（伪元素
+     * 样式一律按新鲜级联算，不进结构缓存，无跨字号/主题过期）。
+     */
+    private fun firstLetterOfFor(
+        engine: StyleComputer,
+        styleOf: (MarkupElement) -> orilumn.reader.engine.css.ComputedStyle?,
+    ): ((MarkupElement) -> orilumn.reader.engine.css.ComputedStyle?)? {
+        if (!engine.hasFirstLetterRules()) return null
+        val cache = HashMap<MarkupElement, orilumn.reader.engine.css.ComputedStyle?>()
+        return { el ->
+            cache.getOrPut(el) {
+                val base = styleOf(el) ?: return@getOrPut null
+                engine.firstLetterStyle(el, orilumn.reader.engine.laying.ancestorsOf(el), base)
             }
         }
     }
@@ -564,6 +589,7 @@ class BoxChapterLayouter(
         classify: orilumn.reader.engine.laying.BlockClassify,
         hidden: orilumn.reader.engine.laying.HiddenCheck,
         genOf: orilumn.reader.engine.laying.GenOf = orilumn.reader.engine.laying.EmptyGen,
+        firstLetterOf: ((MarkupElement) -> orilumn.reader.engine.css.ComputedStyle?)? = null,
     ): ChapterPrepareResult {
         // Compute global char start for each leaf by walking in chapter order and accumulating textLength.
         val starts = NormalFlowLayout.accumulateCharStarts(leaves.map { it.textLength.toLong() })
@@ -578,6 +604,7 @@ class BoxChapterLayouter(
             classify = classify,
             hidden = hidden,
             genOf = genOf,
+            firstLetterOf = firstLetterOf,
         )
     }
 
@@ -603,6 +630,9 @@ class BoxChapterLayouter(
             // P4-a3: 环绕前导随叶下发（与盒流断行同宽，否则 canonical 形状与结构行漂移）。
             shapeLeaf(leaf, prepare.styleMap, profile,
                 listMarkerFor(leaf.el, prepare.styleMap::get, carriers), genOf = prepare.genOf,
+                // 「首字」一旦按 `::first-letter` 单列一段，其字号/face 行为由伪元素样式主导；
+            // 单叶根只求一次并缓存（章节无规则即 null 零开销）。
+            firstLetterOf = prepare.firstLetterOf,
                 floatLead = leaf.floatLead, classify = prepare.classify, hidden = prepare.hidden,
                 // P3：重路径的预算已写在盒上（含量画同值）。
                 replaceableFitH = leaf.replaceableFitH)
@@ -632,6 +662,7 @@ class BoxChapterLayouter(
             profile.cjkLatinSpacingEmApplied,
             profile.fgColor,
             prepare.genOf,
+            prepare.firstLetterOf,
         )
         val drawable = run {
             // 表格行展开进窗口（Compose 面随行窗绘制单元格文本 + 边框；legacy drawTableRow 不动）。
@@ -2218,6 +2249,8 @@ class BoxChapterLayouter(
         ancestorStyleOf = prepare::resolveStyle,
         // P3-c: 生成内容与塑形同一 phase-1 结果。
         genOf = prepare.genOf,
+        // `::first-letter`：与重路径同值（叶根懒解＋缓存）。
+        firstLetterOf = prepare.firstLetterOf,
         // P4-a3: 悬浮环绕前导与重路径同源（双路断行逐字节一致）。
         floatLead = prepare.floatLeadAt(i),
         // P6-a2: 文本悬浮按悬浮宽塑形（与重路径同宽；img/表格不管）。
@@ -2255,6 +2288,8 @@ class BoxChapterLayouter(
         genOf: orilumn.reader.engine.laying.GenOf = orilumn.reader.engine.laying.EmptyGen,
         classify: orilumn.reader.engine.laying.BlockClassify? = null,
         hidden: orilumn.reader.engine.laying.HiddenCheck = orilumn.reader.engine.laying.HIDDEN_NONE,
+        /** `::first-letter` 伪元素查找（格内块同样吃首字规则的放大/着色）。 */
+        firstLetterOf: ((MarkupElement) -> orilumn.reader.engine.css.ComputedStyle?)? = null,
     ): Int {
         // 行高只取本行「rowspan==1」格的最大外高：跨行格的高度由其跨越的各行**分摊**
         // （[TableGridModel.resolveRowHeights]，浏览器实测口径），故此处不把跨行格整体压进
@@ -2279,7 +2314,7 @@ class BoxChapterLayouter(
                 // classify（重路径整章表、轻路径 `lightClassify()`），与排版侧同口径。
                 val bCls = if (b.outsideSiblings.isEmpty()) (classify ?: BLOCK_TAG_CLASSIFY)
                 else BlockClassify { it in b.outsideSiblings || (classify ?: BLOCK_TAG_CLASSIFY).isBlock(it) }
-                val sh = shapeGeometry(b.el, b.style, styles, profile, bw, imageLoader = imageLoader, chapterHref = chapterHref, ancestorStyleOf = ancestorStyleOf, genOf = genOf, classify = bCls, hidden = hidden, isBlock = { bCls.isBlock(it) })
+                val sh = shapeGeometry(b.el, b.style, styles, profile, bw, imageLoader = imageLoader, chapterHref = chapterHref, ancestorStyleOf = ancestorStyleOf, genOf = genOf, classify = bCls, hidden = hidden, isBlock = { bCls.isBlock(it) }, firstLetterOf = firstLetterOf)
                 b.shape = sh
                 val contentH = if (sh.lineCount > 0) (sh.lineBottom(sh.lineCount - 1) - sh.lineTop(0)) else 0
                 b.height = contentH + b.edgeV
@@ -2314,10 +2349,12 @@ class BoxChapterLayouter(
         hidden: orilumn.reader.engine.laying.HiddenCheck = orilumn.reader.engine.laying.HIDDEN_NONE,
         /** P3：盒上写好的分页高度预算（重/轻两路都在盒上，塑形只读）。 */
         replaceableFitH: Int? = null,
+        /** `::first-letter` 伪元素查找（null = 章节无该伪规则 / 未命中）。 */
+        firstLetterOf: ((MarkupElement) -> orilumn.reader.engine.css.ComputedStyle?)? = null,
     ): ParagraphShapeRef {
         val t = leaf.table
         if (t != null) {
-            val rowH = fillTableRowCells(t = t, leaf = leaf, styles = styles, profile = profile, ancestorStyleOf = ancestorStyleOf, genOf = genOf, classify = classify, hidden = hidden)
+            val rowH = fillTableRowCells(t = t, leaf = leaf, styles = styles, profile = profile, ancestorStyleOf = ancestorStyleOf, genOf = genOf, classify = classify, hidden = hidden, firstLetterOf = firstLetterOf)
             return ShapedGeometry(isReplaceable = true, replaceableBottom = rowH.coerceAtLeast(1), replaceableCharEnd = leaf.textLength.coerceAtLeast(1))
         }
         return shapeGeometry(
@@ -2325,7 +2362,7 @@ class BoxChapterLayouter(
             profile, breakWidthOverride ?: breakWidthPx(leaf), listMarker,
             imageLoader = imageLoader, chapterHref = chapterHref, ancestorStyleOf = ancestorStyleOf, genOf = genOf,
             floatLead = floatLead, classify = classify, hidden = hidden, isBlock = { it.tag in BLOCK_TAGS },
-            replaceableFitH = replaceableFitH,
+            replaceableFitH = replaceableFitH, firstLetterOf = firstLetterOf,
         )
     }
 
@@ -2372,7 +2409,7 @@ class BoxChapterLayouter(
             val leaf = prepare.block(i)
             val t = leaf.table
             if (t != null) {
-                fillTableRowCells(t = t, leaf = leaf, styles = prepare.inlineStyles(i), profile = profile, ancestorStyleOf = prepare::resolveStyle, genOf = prepare.genOf, classify = prepare.lightClassify(), hidden = prepare.hidden)
+                fillTableRowCells(t = t, leaf = leaf, styles = prepare.inlineStyles(i), profile = profile, ancestorStyleOf = prepare::resolveStyle, genOf = prepare.genOf, classify = prepare.lightClassify(), hidden = prepare.hidden, firstLetterOf = prepare.firstLetterOf)
             }
             return hit
         }
@@ -3321,6 +3358,22 @@ class LightPrepare(
             }
         }
     }
+    /**
+     * `::first-letter` 伪元素查找（与 [genOf] 同式：章节无该伪规则即 null ⇒ 塑形侧零开销；
+     * 命中则按叶根懒解＋缓存，伪样式恒新鲜，不吃旧表）。
+     */
+    internal val firstLetterOf: ((MarkupElement) -> orilumn.reader.engine.css.ComputedStyle?)? by lazy {
+        if (!styleComputer().hasFirstLetterRules()) {
+            null
+        } else {
+            val flCache = HashMap<MarkupElement, orilumn.reader.engine.css.ComputedStyle?>()
+            return@lazy { el: MarkupElement ->
+                flCache.getOrPut(el) {
+                    engine.firstLetterStyle(el, orilumn.reader.engine.laying.ancestorsOf(el), engine.resolve(el, styleCache))
+                }
+            }
+        }
+    }
     // P1-2: 与 computeStructure 的 globalCharStarts 同式（样式化归一长度）。
     /**
      * 全章字符总数 = 各叶 `styledCharAdvance` 之和。
@@ -3484,24 +3537,24 @@ class LightPrepare(
             reg(el)
             if (style.floatSide != orilumn.reader.engine.css.FloatSide.NONE) {
                 val text = NormalFlowLayout.absorbStyled(el, sub, classify, hidden, genOf).text
-                val runs = NormalFlowLayout.leafFontRuns(el, sub, classify, hidden, genOf)
+                val runs = NormalFlowLayout.leafFontRuns(el, sub, classify, hidden, genOf, firstLetterOf = firstLetterOf)
                 val floatW = NormalFlowLayout.floatTextWidth(
                     style, text, cw, breaker, runs,
-                    NormalFlowLayout.leafInlineBoxRuns(el, sub, classify, hidden, genOf),
+                    NormalFlowLayout.leafInlineBoxRuns(el, sub, classify, hidden, genOf, firstLetterOf = firstLetterOf),
                 )
                 val breakWf = NormalFlowLayout.innerBreakWidth(style, floatW)
                 val shaped = breakWrappedLines(
                     breaker, text, style, breakWf, null, el.tag, runs,
                     style.textIndentPx,
-                    NormalFlowLayout.leafBaselineShifts(el, sub, classify, hidden, genOf),
-                    NormalFlowLayout.leafInlineBoxRuns(el, sub, classify, hidden, genOf),
+                    NormalFlowLayout.leafBaselineShifts(el, sub, classify, hidden, genOf, firstLetterOf = firstLetterOf),
+                    NormalFlowLayout.leafInlineBoxRuns(el, sub, classify, hidden, genOf, firstLetterOf = firstLetterOf),
                 )
                 val baseH = adjustLineHeightsForInlineImages(
                     text, shaped, el, sub, classify, hidden, breakWf, imageLoader, chapterHref, profile.density,
                 )
                 // P6-b: 叠排注音行增高（与重路径同式；无注音零回归）。
                 val grownH = orilumn.reader.engine.laying.adjustLineHeightsForRuby(
-                    shaped, baseH, NormalFlowLayout.leafRubyRuns(el, sub, classify, hidden, genOf),
+                    shaped, baseH, NormalFlowLayout.leafRubyRuns(el, sub, classify, hidden, genOf, firstLetterOf = firstLetterOf),
                 )
                 val h = grownH.sumOf { it.coerceAtLeast(1) }
                 pending.register(style.floatSide, floatW, h)
@@ -3513,19 +3566,19 @@ class LightPrepare(
             out.add(lead)
             widths.add(null)
             val text = NormalFlowLayout.absorbStyled(el, sub, classify, hidden, genOf).text
-            val runs = NormalFlowLayout.leafFontRuns(el, sub, classify, hidden, genOf)
+            val runs = NormalFlowLayout.leafFontRuns(el, sub, classify, hidden, genOf, firstLetterOf = firstLetterOf)
             val shaped = breakWrappedLines(
                 breaker, text, style, NormalFlowLayout.innerBreakWidth(style, cw), lead, el.tag, runs,
                 style.textIndentPx,
-                NormalFlowLayout.leafBaselineShifts(el, sub, classify, hidden, genOf),
-                NormalFlowLayout.leafInlineBoxRuns(el, sub, classify, hidden, genOf),
+                NormalFlowLayout.leafBaselineShifts(el, sub, classify, hidden, genOf, firstLetterOf = firstLetterOf),
+                NormalFlowLayout.leafInlineBoxRuns(el, sub, classify, hidden, genOf, firstLetterOf = firstLetterOf),
             )
             val baseH = adjustLineHeightsForInlineImages(
                 text, shaped, el, sub, classify, hidden, NormalFlowLayout.innerBreakWidth(style, cw), imageLoader, chapterHref, profile.density,
             )
             // P6-b: 叠排注音行增高（与重路径同式；无注音零回归）。
             val grownH = orilumn.reader.engine.laying.adjustLineHeightsForRuby(
-                shaped, baseH, NormalFlowLayout.leafRubyRuns(el, sub, classify, hidden, genOf),
+                shaped, baseH, NormalFlowLayout.leafRubyRuns(el, sub, classify, hidden, genOf, firstLetterOf = firstLetterOf),
             )
             val h = grownH.sumOf { it.coerceAtLeast(1) } + style.margin.top.coerceAtLeast(0f).roundToInt()
             pending.consume(h)

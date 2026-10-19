@@ -385,6 +385,10 @@ class Cascade(
      *  books that never declare it. */
     fun hasDisplayDeclaration(): Boolean = matchers.any { m -> m.declarations.any { it.property == "display" } }
 
+    /** True if any sheet/layer rule targets the `::first-letter` pseudo-element. Gates the whole
+     *  first-letter path (首字放大/首字着色)：无规则的书零开销，连伪元素查找都不建。 */
+    fun hasFirstLetterRules(): Boolean = matchers.any { m -> m.matchers.any { it.pseudoElement == "first-letter" } }
+
     /** ------------------------------------------------------------------------------------------
      *  CSS Logical Properties → Physical Properties expansion (LTR horizontal writing mode).
      *

@@ -55,6 +55,8 @@ object DrawLineBuilder {
         inkColor: Int = 0xFF000000.toInt(),
         /** P3-c 生成内容查找（空即无，旧路径；调用方喂与塑形同一 phase-1 结果）。 */
         genOf: orilumn.reader.engine.laying.GenOf = orilumn.reader.engine.laying.EmptyGen,
+        /** `::first-letter` 伪元素查找（null = 无该规则；必须与塑形同源，否则首字画错字号）。 */
+        firstLetterOf: orilumn.reader.engine.laying.FirstLetterOf? = null,
     ): Map<Int, DrawLine> {
         val out = HashMap<Int, DrawLine>()
         val leaves = ArrayList<LayoutBox>()
@@ -79,20 +81,20 @@ object DrawLineBuilder {
             val xLeft = leaf.contentLeft + (style.border.left + style.padding.left).roundToInt()
             val marker = ListMarkers.markerForLeaf(el, carriers) { styleMap[it] }
             // 着色区间按叶一次算好（行循环内复用；无着色叶回空表零开销）。
-            val runs = NormalFlowLayout.leafColorRuns(el, styleMap, classify, hidden, genOf)
+            val runs = NormalFlowLayout.leafColorRuns(el, styleMap, classify, hidden, genOf, firstLetterOf = firstLetterOf)
             // 行内 face 段同样按叶一次算好（`<code>`/`<strong>` 等异 face 段；纯种叶回空表零开销）。
-            val fontRuns = NormalFlowLayout.leafFontRuns(el, styleMap, classify, hidden, genOf)
+            val fontRuns = NormalFlowLayout.leafFontRuns(el, styleMap, classify, hidden, genOf, firstLetterOf = firstLetterOf)
             // P1-2: 行内基线位移同样按叶一次算好（纯基线叶回空表零开销）。
-            val shifts = NormalFlowLayout.leafBaselineShifts(el, styleMap, classify, hidden, genOf)
+            val shifts = NormalFlowLayout.leafBaselineShifts(el, styleMap, classify, hidden, genOf, firstLetterOf = firstLetterOf)
             // P6-b: 叠排注音 runs 同样按叶一次算好（无注音叶回空表零开销；绘制侧按行过滤）。
-            val rubyRuns = NormalFlowLayout.leafRubyRuns(el, styleMap, classify, hidden, genOf)
+            val rubyRuns = NormalFlowLayout.leafRubyRuns(el, styleMap, classify, hidden, genOf, firstLetterOf = firstLetterOf)
             // 下划线区间同样按叶一次算好（无下划线叶回空表零开销）。
-            val decorationRuns = NormalFlowLayout.leafTextDecorationRuns(el, styleMap, classify, hidden, genOf)
+            val decorationRuns = NormalFlowLayout.leafTextDecorationRuns(el, styleMap, classify, hidden, genOf, firstLetterOf = firstLetterOf)
             // 行内盒（背景/边框）同样按叶一次算好（无装饰叶回空表零开销）。
-            val inlineBoxes = NormalFlowLayout.leafInlineBoxRuns(el, styleMap, classify, hidden, genOf)
+            val inlineBoxes = NormalFlowLayout.leafInlineBoxRuns(el, styleMap, classify, hidden, genOf, firstLetterOf = firstLetterOf)
             // E10 `visibility: hidden` 覆盖区间（无隐藏声明叶回空表零开销）。
             val visHidden = if (anyVisibilityHidden || style.visibilityHidden) {
-                NormalFlowLayout.leafVisibilityHiddenRuns(el, styleMap, classify, hidden, genOf)
+                NormalFlowLayout.leafVisibilityHiddenRuns(el, styleMap, classify, hidden, genOf, firstLetterOf = firstLetterOf)
             } else {
                 emptyList()
             }

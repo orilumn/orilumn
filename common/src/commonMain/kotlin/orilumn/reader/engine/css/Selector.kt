@@ -15,12 +15,13 @@ import orilumn.reader.engine.html.MarkupElement
  *   `:nth-of-type()`/`:nth-last-of-type()`（`odd`/`even`/`An+B`），以及 `:lang()`；
  * - 函数式伪类：`:not()`/`:is()`/`:matches()`/`:where()`（参数可为含组合器的选择器）、
  *   `:has()`（相对选择器：后代 / `>` / `+` / `~`）；
- * - 伪元素：只有 `::before`/`::after`（含单冒号写法）有绘制路径，经 [pseudoElement] 分流；
- *   其余伪元素（`::first-letter`/`::first-line`/`::marker`/`::selection` …）**整条不匹配**。
+ * - 伪元素：`::before`/`::after`/`::first-letter`（含单冒号写法）有绘制路径，经 [pseudoElement] 分流；
+ *   其余伪元素（`::first-line`/`::marker`/`::selection` …）**整条不匹配**。
  *
  * **未知伪类一律不匹配**。旧行为对未列出的伪名恒真 ⇒ 过度匹配：`:not(.x)` 曾把规则套到全部同类
  * 元素、`::first-letter` 曾让整段放大 3 倍。伪类条件不是可选项：匹配不上最多丢一条规则（回落默认），
- * 匹配过宽会直接改错版面。
+ * 匹配过宽会直接改错版面。分流后 `::first-letter` 只作用于**首字**那一个段（见
+ * `orilumn.reader.engine.laying.styledSegments` 的 `firstLetter` 形参），整段尺寸不受影响。
  *
  * 结构伪类按 CSS 口径只数**元素**兄弟（`#text` 不计数），依据 `MarkupElement.parent` 的真实树，
  * 与调用方传入 [matches] 的祖先链无关。
@@ -92,16 +93,16 @@ class Selector private constructor(
         }
 
     /**
-     * P3-c: 最右复合中的生成伪元素（`::before/:before` → `"before"`，
-     * `::after/:after` → `"after"`，其余/无即 null）。级联按它把伪元素规则
-     * 从元素自身匹配中分流；同一复合内多个伪名取最后一个 before/after。
+     * P3-c: 最右复合中的伪元素（`::before/:before` → `"before"`，`::after/:after` → `"after"`，
+     * `::first-letter/:first-letter` → `"first-letter"`，其余/无即 null）。级联按它把伪元素规则
+     * 从元素自身匹配中分流；同一复合内多个伪名取最后一个已支持者。
      */
     val pseudoElement: String?
         get() {
             val last = compounds.lastOrNull() ?: return null
             var out: String? = null
             for (s in last) {
-                if (s is Simple.Pseudo && (s.name == "before" || s.name == "after")) out = s.name
+                if (s is Simple.Pseudo && (s.name == "before" || s.name == "after" || s.name == "first-letter")) out = s.name
             }
             return out
         }
@@ -203,13 +204,13 @@ class Selector private constructor(
 
     /**
      * 伪类 / 伪元素匹配（浏览器标准，无状态重排阅读器口径）：
-     * - `before`/`after`：恒真（伪元素分流见 [pseudoElement]，此处不拦截）；其余伪元素恒假；
+     * - `before`/`after`/`first-letter`：恒真（伪元素分流见 [pseudoElement]，此处不拦截）；其余伪元素恒假；
      * - `link`/`any-link`：`<a href>` 恒真；`visited`/`hover`/`active`/`focus*`/`target` 等恒假；
      * - 结构伪类按文档序判定；`:not()` 取反、`:is()`/`:where()` 取并集、`:has()` 查后代/兄弟；
      * - **未知伪名一律恒假**（旧行为恒真 ⇒ 过度匹配）。
      */
     private fun pseudoMatches(p: Simple.Pseudo, el: MarkupElement, ancestors: List<MarkupElement>, ancLimit: Int): Boolean {
-        if (p.isElement) return p.name == "before" || p.name == "after"
+        if (p.isElement) return p.name == "before" || p.name == "after" || p.name == "first-letter"
         return when (p.name) {
             "link", "any-link" -> el.tag == "a" && el.attrs.containsKey("href")
             "root", "scope" -> el.parent == null

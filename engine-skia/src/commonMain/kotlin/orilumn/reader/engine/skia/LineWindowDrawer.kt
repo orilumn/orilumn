@@ -1085,7 +1085,7 @@ class LineWindowDrawer(
                     }
                 }
                 DecorationStyle.DASHED -> {
-                    val tt = kotlin.math.round(t).coerceAtLeast(1f)
+                    val tt = roundHalfUp(t).coerceAtLeast(1f)
                     // Chromium DashLengthRatio/DashGapRatio：线宽 ≥ 3 取 2:1，否则 3:2。
                     val on = if (tt >= 3f) 2f else 3f
                     val off = if (tt >= 3f) 1f else 2f
@@ -1160,8 +1160,8 @@ class LineWindowDrawer(
     private fun drawDecorationWave(canvas: Canvas, x0: Float, x1: Float, cy: Float, t: Float, color: Int) {
         if (x1 <= x0 || t <= 0f) return
         val clamped = maxOf(1f, t)
-        val waveLen = 1f + 2f * kotlin.math.round(2f * clamped + 0.5f)
-        val cp = 0.5f + kotlin.math.round(3f * clamped + 0.5f)
+        val waveLen = 1f + 2f * roundHalfUp(2f * clamped + 0.5f)
+        val cp = 0.5f + roundHalfUp(3f * clamped + 0.5f)
         val builder = PathBuilder()
         val startX = x0 - waveLen
         builder.moveTo(startX, cy)
@@ -1551,8 +1551,8 @@ private interface FontResolver {
     }
 }
 // ── 文本装饰（第三刀）的绘制常量 ──────────────────────────────────────────────
-// 位置与 `auto` 粗细优先取字体度量（见 `paintDecorations`），这些只在度量缺失时兜底，
-// 或本身即 UA 自定值（点线/虚线/波浪的节距、双线比例）。
+// 线宽由解析期定值（`auto`/初始值 = 字号/10；显式长度按声明；仅 `from-font` 落到字体度量），
+// 这里只放兜底值，或本身即 UA 自定值（点线/虚线/波浪的节距、双线比例）。
 
 /** 取装饰度量用的码本（拉丁大写 H）：字体度量与码本无关，固定一个即可命中缓存。 */
 private const val DECORATION_METRIC_CP = 'H'.code
@@ -1560,7 +1560,14 @@ private const val DECORATION_METRIC_CP = 'H'.code
 /** 三种线型的绘制顺序（集合本身无序，绘制要确定）。 */
 private val DECORATION_PAINT_ORDER = listOf(DecorationLine.UNDERLINE, DecorationLine.OVERLINE, DecorationLine.LINE_THROUGH)
 
-/** `auto` / `from-font` 线宽的下限（px）：细字体（宋体度量仅 0.02em）也要看得见。 */
+/**
+ * 四舍五入到最近整数、**恰为 .5 时进位**：Chromium/C++ 的 `std::round` 口径。
+ * Kotlin 的 `kotlin.math.round` 是「就近取偶」（`round(2.5) = 2`），照它算会与浏览器差一整个波长
+ * （实测 20px 字号：浏览器波长 11px，取偶口径 9px）。
+ */
+private fun roundHalfUp(v: Float): Float = kotlin.math.floor(v + 0.5f)
+
+/** `from-font` 线宽的下限（px）：细字体（宋体度量仅 0.02em）也要看得见。 */
 private const val DECORATION_MIN_THICKNESS_PX = 1.0f
 
 /** 字体度量缺失时的回退线宽（em，与旧下划线口径一致 = 0.06em）。 */

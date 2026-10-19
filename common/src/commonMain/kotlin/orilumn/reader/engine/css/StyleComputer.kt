@@ -125,6 +125,12 @@ class StyleComputer(
             "dashed" to DecorationStyle.DASHED,
             "wavy" to DecorationStyle.WAVY,
         )
+
+        /**
+         * `text-decoration-thickness: auto`（也是**初始值**）的字号比：Chromium 取 `font_size / 10`
+         * （实测 18.5/20/40px 字号分别画 1/2/4 像素，与字体度量无关）。绘制侧再按下限 1px 与整像素对齐。
+         */
+        const val DECORATION_AUTO_THICKNESS_EM = 0.1f
     }
 
     /** Whether a raw `display` value lays the element out as a block (block/list-item/flex/grid/table*). */
@@ -199,6 +205,20 @@ class StyleComputer(
     fun pseudoStyle(el: MarkupElement, ancestors: List<MarkupElement>, base: ComputedStyle, pseudo: String): ComputedStyle {
         val winners = cascade.winningDeclarations(el, ancestors, emptyList(), pseudo)
         if (winners.isEmpty()) return base
+        return computeStyle(winners, base, el.tag, normalizeLang(el.attrs["lang"]), isPreformatted(el, ancestors))
+    }
+
+    /**
+     * `::first-letter` 伪元素计算样式：**只有确有规则命中才返回非 null**（未命中回 null，调用方
+     * 直接跳过首字分段，零开销）。与 [pseudoStyle] 同式：无内联样式/表示属性，`em` 按**
+     * 原发元素**的字号解（伪元素的父即原发元素，浏览器同式）。
+     *
+     * 章节级先行门控 [hasFirstLetterRules]：整章没有 `::first-letter` 规则时连级联都不跑。
+     */
+    fun firstLetterStyle(el: MarkupElement, ancestors: List<MarkupElement>, base: ComputedStyle): ComputedStyle? {
+        if (!hasFirstLetterRules()) return null
+        val winners = cascade.winningDeclarations(el, ancestors, emptyList(), "first-letter")
+        if (winners.isEmpty()) return null
         return computeStyle(winners, base, el.tag, normalizeLang(el.attrs["lang"]), isPreformatted(el, ancestors))
     }
 
@@ -571,6 +591,15 @@ class StyleComputer(
     }
 
     private var _hasDisplay: Boolean? = null
+
+    /** `::first-letter` 规则的章节级开关（懒缓存，与 [hasDisplayDeclaration] 同式）。 */
+    fun hasFirstLetterRules(): Boolean {
+        var v = _hasFirstLetter
+        if (v == null) { v = cascade.hasFirstLetterRules(); _hasFirstLetter = v }
+        return v
+    }
+
+    private var _hasFirstLetter: Boolean? = null
 
     /**
      * Break values not declared default to [BreakRule.AUTO]. `avoid` (any variant, incl. `avoid-page`)
@@ -1366,15 +1395,25 @@ class StyleComputer(
      * 书里同时写简写与长属性且**顺序相反**的极少，且两值同义时无差异。
      *
      * `text-decoration: blink` 无视觉，解析即丢（不报错）。
-     * `auto` 在解析期按字号/10 定值（Chromium 行为）；`from-font` 由绘制侧按字体度量取（[TextDecoration.thicknessPx] = null）。
+     * `auto`（也是**初始值**）按字号/10 在解析期**就地定值**（Chromium 行为，字号此处已知）；
+     * `from-font` 留 null 交绘制侧取字体度量。**两者不可混为一谈**：只写
+     * `text-decoration: underline`（没写粗细）＝ `auto` ＝字号/10，此前这里落成 null 被当成
+     * `from-font`，于是绘制侧取拉丁探针面的度量（≈1px、不随字号放大），线偏细、波浪线波长只有
+     * 浏览器的一半（实测 18.5px 字号：波长 5px vs 浏览器 9px）。
      */
     private fun parseTextDecoration(w: Map<String, String>, fontSize: Float, parentFontSize: Float): TextDecoration {
         val short = w["text-decoration"]?.let { parseDecorationShorthand(it, fontSize, parentFontSize) }
         val lines = w["text-decoration-line"]?.let { parseDecorationLines(it) } ?: short?.lines ?: emptySet()
         val color = w["text-decoration-color"]?.let { parseCssColor(it) } ?: short?.colorHex
         val style = w["text-decoration-style"]?.let { parseDecorationStyle(it) } ?: short?.style ?: DecorationStyle.SOLID
-        val thickness = w["text-decoration-thickness"]?.let { parseDecorationThickness(it, fontSize, parentFontSize) }
-            ?: short?.thicknessPx
+        // 长属性优先、缺失才回落简写；**两侧都没写**才是初始值 auto。用 `containsKey` 判断声明存在，
+        // 不能用 `?.let`（显式 `from-font` 也解析成 null，会被误判成「没写」）。
+        val thickness = when {
+            w.containsKey("text-decoration-thickness") ->
+                parseDecorationThickness(w.getValue("text-decoration-thickness"), fontSize, parentFontSize)
+            short != null -> short.thicknessPx
+            else -> fontSize * DECORATION_AUTO_THICKNESS_EM
+        }
         val skipInk = w["text-decoration-skip-ink"]?.let { parseSkipInk(it) } ?: true
         return TextDecoration(lines, color, style, thickness, skipInk)
     }
@@ -1386,13 +1425,14 @@ class StyleComputer(
         var lines = emptySet<DecorationLine>()
         var color: String? = null
         var style = DecorationStyle.SOLID
-        var thickness: Float? = null
+        // 简写没写粗细 ＝ `auto`（不是 from-font）：默认就填字号/10，null 只留给显式 `from-font`。
+        var thickness: Float? = fontSize * DECORATION_AUTO_THICKNESS_EM
         for (tok in v.split(' ', '\t', '\n').filter { it.isNotBlank() }) {
             when {
                 tok in DECORATION_LINE_TOKENS -> lines = lines + parseDecorationLines(tok)
                 tok in DECORATION_STYLE_TOKENS -> style = DECORATION_STYLE_TOKENS.getValue(tok)
                 tok == "from-font" -> thickness = null
-                tok == "auto" -> thickness = fontSize * 0.1f
+                tok == "auto" -> thickness = fontSize * DECORATION_AUTO_THICKNESS_EM
                 parseCssColor(tok) != null -> color = parseCssColor(tok)
                 parseLength(tok) != null -> thickness = parseLength(tok)?.resolve(fontSize, parentFontSize, rootFontPx)
             }

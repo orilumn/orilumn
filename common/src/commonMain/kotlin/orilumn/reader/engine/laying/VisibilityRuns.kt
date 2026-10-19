@@ -41,6 +41,8 @@ fun collectVisibilityHiddenRuns(
     genOf: GenOf = EmptyGen,
     precomputed: List<StyledSegment>? = null,
     styleOf: ((MarkupElement) -> ComputedStyle?)? = null,
+    /** `::first-letter` 伪元素查找（null = 无该规则；`precomputed` 非空时直接吃它，现算才用）。 */
+    firstLetterOf: FirstLetterOf? = null,
 ): List<IntRange> {
     if (root.tag == "table" || root.tag == "img") return emptyList()
     val resolve: (MarkupElement) -> ComputedStyle? = styleOf ?: { styles[it] }
@@ -54,7 +56,7 @@ fun collectVisibilityHiddenRuns(
     }
     val wsOf: (MarkupElement) -> WhiteSpace = { wsOfNode(it, styles, root, rootWs) }
     val leafWs = styles[root]?.whiteSpace ?: root.parent?.let { styles[it]?.whiteSpace } ?: rootWs
-    val segs = precomputed ?: styledSegments(root, wsOf, isExcluded, isBlock, leafWs, genOf, resolve).segments
+    val segs = precomputed ?: styledSegments(root, wsOf, isExcluded, isBlock, leafWs, genOf, resolve, firstLetterOf = firstLetterOf).segments
     if (segs.isEmpty()) return emptyList()
     // 逐节点继承一次算好（与 `styledSegments` 同一跳过规则），段折叠时直接取用。
     val hiddenByNode = HashMap<MarkupElement, Boolean>()

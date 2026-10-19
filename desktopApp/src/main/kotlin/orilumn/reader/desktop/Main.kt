@@ -46,6 +46,7 @@ import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.platform.LocalDensity
 import java.awt.Dimension
+import java.io.File
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.WindowDecoration
 import androidx.compose.ui.window.WindowPlacement
@@ -97,10 +98,16 @@ private fun onAnyScreen(xDp: Int, yDp: Int): Boolean = runCatching {
  * - 只做真系统级：数据根初始化、窗口管理、导航状态；
  * - 书架（列表/导入/mpfilepicker/Snackbar）走 [App]；
  * - 阅读（画布/手势/进度/遮罩）走 [ReaderView] + [DesktopReaderHost]（首个真实 Skia 管线）；
+ * - 启动参数给路径即开书（与书架比对后打开/覆盖导入，见 [DesktopShelfHost.openFromPath]）；
  * - 设置（全局 `reader.json` + 自定义主题预设持久化）走 [ReaderView] 内的设置面板。
  */
-fun main() {
+fun main(args: Array<String>) {
     DesktopPaths.ensure()
+    // 启动参数开书（平台层·桌面壳）：取第一个真实存在的非选项文件参数当作要打开的书
+    //（Gradle `run --args="<epub路径>"` 与文件管理器双击给参同口径）；没给就进书架。
+    val startupPath = args.firstOrNull {
+        !it.startsWith("-") && runCatching { File(it).isFile }.getOrDefault(false)
+    }
     application {
         // 三端同一 JVM 壳：窗口尺寸+位置经 prefs 持久化，下次启动原地恢复
         // （Win/macOS/Linux 同口径；显示器变更致越界时回居中，不开到屏外）。
@@ -255,6 +262,7 @@ fun main() {
                             awtWindow = window,
                             chrome = chrome,
                             onRequestClose = ::exitApplication,
+                            startupPath = startupPath,
                         )
                     }
                 }
@@ -270,6 +278,7 @@ private fun DesktopRoot(
     awtWindow: java.awt.Window,
     chrome: DesktopWindowChrome,
     onRequestClose: () -> Unit,
+    startupPath: String?,
 ) {
     val settingsStore = remember { ReaderSettingsStore(DesktopPaths.settingsDir.absolutePath) }
     // 双层设置（与平板同规则，共享实现）：全局 + 每书 overlay。
@@ -277,6 +286,8 @@ private fun DesktopRoot(
         PerBookSettings(settingsStore, BookSettingsStore(DesktopPaths.settingsDir.absolutePath))
     }
     val scope = rememberCoroutineScope()
+    // 书架宿主单实例：启动开书（下方 LaunchedEffect）与书架界面走同一个（导入进度一致）。
+    val shelfHost = remember(store) { DesktopShelfHost(store) }
 
     var settings by remember { mutableStateOf(settingsStore.load()) }
     // 本书原始私有层（首次开书探针判“钉没钉过”用；随书加载，见下）。
@@ -297,6 +308,13 @@ private fun DesktopRoot(
         // 面板打开时同键提档到 5（见 ReaderView 的可见性驱动）。开书路径零字体任务。
         runCatching { DesktopFontScan.scanner(store.fontLibrary()).detectOnStart() }
         customs = store.loadThemes()
+        // 启动参数开书（平台层·桌面壳）：放在就绪前，导入期间维持加载占位，就绪即直达
+        // 阅读面（不闪书架）；失败留书架，日志留痕。
+        startupPath?.let { path ->
+            val entry = runCatching { shelfHost.openFromPath(path) }.getOrNull()
+            if (entry != null) openBook = entry
+            else orilumn.reader.io.Logger.w("Orilumn.Shelf", "startup open FAIL $path")
+        }
         ready = true
     }
 
@@ -365,7 +383,7 @@ private fun DesktopRoot(
                 )
                 App(
                     shelfRepository = store,
-                    shelfHost = remember(store) { DesktopShelfHost(store) },
+                    shelfHost = shelfHost,
                     initialSort = runCatching {
                         ShelfSort.valueOf(store.loadPref(PREF_SORT, ShelfSort.Added.name))
                     }.getOrDefault(ShelfSort.Added),

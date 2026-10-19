@@ -1514,7 +1514,9 @@ class BoxChapterLayouter(
                         }
                         cumY += h
                     }
-                    val spanEnd = cumY + (ls.padding.bottom + ls.border.bottom).roundToInt()
+                    // E23 指定高：内容盒高 = max(行高和, `height`)（CSS 2.1 §10.6.3，与重路径同式）。
+                    val spanEnd = contentY + NormalFlowLayout.specifiedContentHeight(ls, cumY - contentY) +
+                        (ls.padding.bottom + ls.border.bottom).roundToInt()
                     if (ls.floatSide == orilumn.reader.engine.css.FloatSide.LEFT) {
                         if (floatBottomL == null) floatTopL = y
                         floatBottomL = maxOf(floatBottomL ?: spanEnd, spanEnd)
@@ -1619,9 +1621,14 @@ class BoxChapterLayouter(
                     "firstLineH=$firstH lastLineH=$lastH")
             }
             prevLastLineYBottom = cumY
-            // Mirror emit(): a leaf's contentBottom = last line bottom + its vertical padding/border.
+            // Mirror emit(): a leaf's contentBottom = max(行底, 指定高) + its vertical padding/border.
             prevBlock = leaf
-            prevContentBottom = cumY + ownBottomEdges(leaf)
+            val leafContentTop = y + (leaf.style.border.top + leaf.style.padding.top).roundToInt()
+            val leafContentBottom =
+                if (shape.isReplaceable && shape.replaceableBottom > 0) cumY
+                else leafContentTop +
+                    NormalFlowLayout.specifiedContentHeight(leaf.style, cumY - leafContentTop)
+            prevContentBottom = leafContentBottom + ownBottomEdges(leaf)
             // P6-a2: 实高行底记账（回填不上越它；与重路径同式）。
             if (prevContentBottom > y + (leaf.style.border.top + leaf.style.padding.top).roundToInt()) {
                 lastTextBottom = maxOf(lastTextBottom, prevContentBottom)
@@ -2851,15 +2858,28 @@ class BoxChapterLayouter(
             val recorded = if (hi0 <= lo0) lineLessBoxTop?.getOrNull(i) else null
             if (recorded != null && recorded != LocalLineFlow.NO_LINE_LESS_TOP) {
                 val anchor = lo0.coerceAtMost(lines.size)
-                return LeafBand(recorded, recorded + topEdges + bottomEdges, anchor, anchor)
+                // E23 指定高：无行叶（空块）的盒高 = max(0, `height`) + 自身上下边距。
+                return LeafBand(
+                    recorded,
+                    recorded + topEdges +
+                        NormalFlowLayout.specifiedContentHeight(s, 0) + bottomEdges,
+                    anchor,
+                    anchor,
+                )
             }
             if (lo0 >= lines.size || hi0 <= lo0) return null
             // §10.6.7（E11）：**替换型浮动叶**（图）在行流里只有零高行 —— 真实下沿按替换高还原，
             // 否则裁剪盒聚合不到它（同章在轻路径上会把整张图齐根切掉）。文本浮动叶的行是真的，无需还原。
+            val contentTop = lines[lo0].yTop
             val bottom = if (s.floatSide != orilumn.reader.engine.css.FloatSide.NONE && leaf.replaceableHeight > 0) {
-                lines[lo0].yTop + leaf.replaceableHeight + bottomEdges
+                contentTop + leaf.replaceableHeight + bottomEdges
             } else {
-                lines[minOf(hi0, lines.size) - 1].yBottom + bottomEdges
+                // E23 指定高：内容盒高 = max(行底 − 内容顶, `height`)，与 `emit` 逐值同式。
+                contentTop +
+                    NormalFlowLayout.specifiedContentHeight(
+                        s,
+                        lines[minOf(hi0, lines.size) - 1].yBottom - contentTop,
+                    ) + bottomEdges
             }
             return LeafBand(
                 top = lines[lo0].yTop - topEdges,

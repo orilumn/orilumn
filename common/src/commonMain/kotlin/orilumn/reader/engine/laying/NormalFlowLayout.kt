@@ -333,7 +333,7 @@ object NormalFlowLayout {
                 box.contentTop = st.y
                 val contentY = st.y + (s.border.top + s.padding.top).roundToInt()
                 val spanH = if (box.replaceableHeight > 0) box.replaceableHeight
-                else box.lineHeights.sum()
+                else specifiedContentHeight(s, box.lineHeights.sum())
                 box.contentBottom = contentY + spanH +
                     (if (box.replaceableHeight > 0) 0 else (s.padding.bottom + s.border.bottom).roundToInt())
                 box.firstLineIndex = out.size
@@ -446,7 +446,12 @@ object NormalFlowLayout {
                 }
             }
             box.lastLineExclusive = out.size
-            val boxBottom = y + (s.padding.bottom + s.border.bottom).roundToInt()
+            // E23 指定高（CSS 2.1 §10.6.3）：内容盒高 = max(在流内容高, `height`)；替换叶的高
+            // 已由替换尺寸接管（`height` 在那条路上消费），不在此重复。
+            val contentBottomY =
+                if (box.replaceableHeight > 0) y
+                else contentY + specifiedContentHeight(s, y - contentY)
+            val boxBottom = contentBottomY + (s.padding.bottom + s.border.bottom).roundToInt()
             box.contentBottom = boxBottom
             st.y = boxBottom
             // P6-a: 实高行底记账（回填不上越它，防与前文交叠）。
@@ -1701,6 +1706,16 @@ object NormalFlowLayout {
             } ?: return null
         return (spec.roundToInt() + (s.padding.horizontal + s.border.horizontal).roundToInt()).coerceAtLeast(1)
     }
+
+    /**
+     * E23 单源：CSS 2.1 §10.6.3 —— `height` 非 auto 时盒子的**内容盒高** = max(在流内容高, `height`)。
+     *
+     * 内容比指定高时按内容（溢出照排，不裁；裁剪是 `overflow` 的事）。
+     * `height: auto` 与百分比（包含块高不定，解析期已按 auto 丢弃）返回自然高 ⇒ 逐值不变。
+     * **只补在流内容的竖向占位**（盒子高 ⇒ 底色/边框/裁剪区与后续内容起点），不动任何行。
+     */
+    fun specifiedContentHeight(style: ComputedStyle?, naturalH: Int): Int =
+        style?.heightPx?.let { maxOf(naturalH, it.roundToInt().coerceAtLeast(0)) } ?: naturalH
 
     /**
      * The vertical background/border band a box covers for drawing, given the aggregated vertical extent

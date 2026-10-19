@@ -582,7 +582,7 @@ object NormalFlowLayout {
         el: MarkupElement,
         styles: Map<MarkupElement, ComputedStyle>,
         breaker: ParagraphBreaker,
-        widthPx: Int,
+        availW: Int,
         left: Int,
         classify: BlockClassify,
         hidden: HiddenCheck = HIDDEN_NONE,
@@ -601,6 +601,13 @@ object NormalFlowLayout {
         if (hidden.isHidden(el)) return emptyList()
         // styles 恒全：StyleComputer.compute 覆盖整树，缺键即调用方传了残表，直接抛（静默 16px 会排错版）。
         val style = styles.getValue(el)
+        // B（块级指定宽）：非替换（已单独消费宽）且非 table 且非浮动 → 对块级盒应用指定 width（px/pct）；% 解按包含块内容宽。
+        // 浮动元素的宽度语义与浮动排位模型耦合（本轮暂不改浮动面），先跳过以免破坏既有 P6a 浮动测试。
+        val widthPx = if (el.tag == "table" || isReplaceable(el) || style.floatSide != orilumn.reader.engine.css.FloatSide.NONE) {
+            availW
+        } else {
+            specifiedBorderBoxWidth(style, availW) ?: availW
+        }
         val blockChildren = el.children.filter { classify.isBlock(it) }
         // E19（CSS 2.1 §9.2.1 block-in-inline）：直接块子节点为空、但**行内子树里**埋着块级后代时，
         // 本元素也不是文本叶 —— 必须走容器分支，把行内盒在块级后代处断开（[splitBlockInInline]）。
@@ -616,7 +623,7 @@ object NormalFlowLayout {
             // pagination/char leaves, so a page can split the table between rows only.
             // P1-2: caption 展开为自己的盒（递归分解；`caption-side: bottom` 时沉底）。
             // 表外盒几何（指定宽/margin auto）走重轻单源 [TableGridModel.tableOuterGeometry]。
-            val g = TableGridModel.tableOuterGeometry(widthPx, left, style)
+            val g = TableGridModel.tableOuterGeometry(availW, left, style)
             val innerW = g.contentW
             // The table's own border-box left is its children's baseline; rows start after its left edge.
             val rowLeft = g.tableLeft + (style.border.left + style.padding.left).roundToInt()
@@ -639,7 +646,7 @@ object NormalFlowLayout {
                 val w = floatW.coerceAtLeast(1)
                 pending.preClear(style.clearSide)
                 pending.register(side, w, repH)
-                (left + maxOf(0, contentW - w)) to w
+                (left + maxOf(0, availW - w)) to w
             } else {
                 pending.dropAll()
                 left to contentW
@@ -746,7 +753,7 @@ object NormalFlowLayout {
             val side = style.floatSide
             if (side != FloatSide.NONE) {
                 val floatW = floatTextWidth(style, text, contentW, breaker, runs, boxes)
-                val boxLeft = if (side == FloatSide.RIGHT) left + maxOf(0, contentW - floatW) else left
+                val boxLeft = if (side == FloatSide.RIGHT) left + maxOf(0, availW - floatW) else left
                 val breakWf = innerBreakWidth(style, floatW)
                 val brokenF = breakWrappedLines(breaker, text, style, breakWf, null, el.tag, runs, style.textIndentPx, shifts, boxes)
                 val heightsF = adjustLineHeightsForInlineImages(text, brokenF, el, styles, classify, hidden, breakWf, imageLoader, chapterHref, density = density)
@@ -1680,6 +1687,22 @@ object NormalFlowLayout {
         (borderBoxW - edges).coerceAtLeast(1)
 
     /**
+     * B（块级指定宽）单源：CSS 2.1 §10.3.3 —— `width` 非 auto 时，块盒 border-box 宽 = 指定内容宽
+     * （content-box 口径）+ 自身横向 padding+border；父给的可用宽（availBorderBoxW，=包含块内容宽
+     * − 自身横向外边距）只用于解 `%`（% 按包含块内容宽 = avail + 自身横向外边距）。
+     * 返回 null = `width: auto`（沿用父给的可用宽，行为与既有完全一致）。
+     */
+    fun specifiedBorderBoxWidth(style: ComputedStyle?, availBorderBoxW: Int): Int? {
+        val s = style ?: return null
+        val spec = s.widthPx
+            ?: s.widthPct?.let { pct ->
+                val cbW = availBorderBoxW + s.margin.left.roundToInt() + s.margin.right.roundToInt()
+                pct / 100f * cbW
+            } ?: return null
+        return (spec.roundToInt() + (s.padding.horizontal + s.border.horizontal).roundToInt()).coerceAtLeast(1)
+    }
+
+    /**
      * The vertical background/border band a box covers for drawing, given the aggregated vertical extent
      * of its text lines and whether the box is itself a background-bearing **leaf** (self-owned).
      *
@@ -1722,11 +1745,31 @@ object NormalFlowLayout {
         rootW: Int,
         edgesOf: (MarkupElement) -> Int,
         marginsOf: (MarkupElement) -> Int,
+        styleOf: (MarkupElement) -> ComputedStyle? = { null },
     ): Int {
-        val p = el.parent ?: return rootW
-        val parentW = descendContentWidth(p, rootW, edgesOf, marginsOf)
+        val p = el.parent ?: return lightSpecifiedWidth(el, rootW, styleOf) ?: rootW
+        val parentW = descendContentWidth(p, rootW, edgesOf, marginsOf, styleOf)
         val ownMargin = if (el.tag == "#text") 0 else marginsOf(el)
-        return innerFromEdges(edgesOf(p) + ownMargin, parentW)
+        val avail = innerFromEdges(edgesOf(p) + ownMargin, parentW)
+        return lightSpecifiedWidth(el, avail, styleOf) ?: avail
+    }
+
+    /**
+     * 轻路径的指定宽消费：**与重路径 [buildBoxTree] 的闸门严格同判据**，多一个元素类型
+     * 消费、少一个不消费都会让两路盒宽分叉（重/轻几何必须逐值一致）。
+     *
+     * 不在此消费（宽度另有归属）：`table` 与 `tr`/`td`/`th`（表格网格）、替换元素
+     * （`img` 的 `usedReplacedSize`）、浮动元素（浮动排位模型）。逐条与 `buildBoxTree` 对齐。
+     */
+    private fun lightSpecifiedWidth(
+        el: MarkupElement,
+        availBorderBoxW: Int,
+        styleOf: (MarkupElement) -> ComputedStyle?,
+    ): Int? {
+        if (el.tag == "table" || el.tag == "tr" || el.tag == "td" || el.tag == "th" || isReplaceable(el)) return null
+        val s = styleOf(el) ?: return null
+        if (s.floatSide != orilumn.reader.engine.css.FloatSide.NONE) return null
+        return specifiedBorderBoxWidth(s, availBorderBoxW)
     }
 
     /**

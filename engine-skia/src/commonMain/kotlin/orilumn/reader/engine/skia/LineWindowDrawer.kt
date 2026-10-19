@@ -706,10 +706,12 @@ class LineWindowDrawer(
             val descent = fm.descent
             val pad = r.padding
             val bd = r.border
-            val top = baseY - ascent - pad.top - bd.top
-            val bottom = baseY + descent + pad.bottom + bd.bottom
-            val left = paintX + lx - pad.left - bd.left
-            val right = paintX + rx + pad.right + bd.right
+            // E12：行内相对定位偏移（本元素 + 行内祖先累积）整体平移盒与其中文字；
+            // 块级祖先的偏移已在 `LayoutBox.relOffset*` 里平移整行，不在此重复。
+            val top = baseY - ascent - pad.top - bd.top + r.relDy
+            val bottom = baseY + descent + pad.bottom + bd.bottom + r.relDy
+            val left = paintX + lx - pad.left - bd.left + r.relDx
+            val right = paintX + rx + pad.right + bd.right + r.relDx
             // E17：圆角按**本片段** border-box 尺寸解（`%` ⇒ `min(w,h)` 基准，与块盒
             // [CornerRadius.resolved] 同式钳制）。slice：切开端不是元素真角 ⇒ 只在真角保留半径
             // （首片段保左两角、末片段保右两角；整盒单片段即原样）。
@@ -886,6 +888,28 @@ class LineWindowDrawer(
             }
         val xs: FloatArray = graft?.xs ?: placement.xs
         val kernEndDelta = graft?.endDelta ?: 0f
+        // E12：行内相对定位的**逐字**位移表（按全文本绝对下标；无行内偏移叶回 null 零开销）。
+        // 每个字符的位移 = 覆盖它的所有行内盒 run 的 relDx/relDy 之和（嵌套盒自然叠加）。
+        val relRuns = line.inlineBoxRuns
+        val relDx: FloatArray?
+        val relDy: FloatArray?
+        if (relRuns.none { it.relDx != 0 || it.relDy != 0 }) {
+            relDx = null
+            relDy = null
+        } else {
+            val n2 = line.text.length
+            val ax = FloatArray(n2)
+            val ay = FloatArray(n2)
+            for (r in relRuns) {
+                if (r.relDx == 0 && r.relDy == 0) continue
+                for (k in r.start.coerceAtLeast(0) until r.endExclusive.coerceAtMost(n2)) {
+                    ax[k] += r.relDx
+                    ay[k] += r.relDy
+                }
+            }
+            relDx = ax
+            relDy = ay
+        }
         // 段样式缓存：同一 (色, 面, 位移) 只解析一次 Font（matchFamilyStyle 是 native 调用）。
         val fontCache = HashMap<Any, GlyphPainter.GlyphStyle>()
         val fonts = object : FontResolver {
@@ -903,9 +927,9 @@ class LineWindowDrawer(
         // 先画阴影层（偏移同色），再画正字 —— CSS text-shadow 的常规两层近似。
         if (shadow != null) {
             val sc = shadow.colorHex?.let(::cssHexToArgb) ?: 0xFF000000.toInt()
-            drawGlyphPass(canvas, line, placement, paintX, baseY, start, endExcl, isHidden, shadow.dx, shadow.dy, sc, true, fonts, xs, bands)
+            drawGlyphPass(canvas, line, placement, paintX, baseY, start, endExcl, isHidden, shadow.dx, shadow.dy, sc, true, fonts, xs, bands, relDx, relDy)
         }
-        drawGlyphPass(canvas, line, placement, paintX, baseY, start, endExcl, isHidden, 0f, 0f, 0, false, fonts, xs, bands)
+        drawGlyphPass(canvas, line, placement, paintX, baseY, start, endExcl, isHidden, 0f, 0f, 0, false, fonts, xs, bands, relDx, relDy)
 
         // **行尾连字符**（`hyphens: auto` 的音节断点 / `&shy;` 断行显形）。
         //
@@ -963,8 +987,13 @@ class LineWindowDrawer(
      *
      * 装饰线的位置与 `auto` 粗细取**声明元素那张面**的度量（`FontMetrics`）：
      * - `underline`：`underlinePosition`（Skia 约定为「线顶距基线」的正值）与 `underlineThickness`；
-     * - `line-through`：`strikeoutPosition` / `strikeoutThickness`（位置为负 = 基线上方）；
+     * - `line-through`：**中心 = `(ascent+descent)/2`**（Chromium 同式；实测以 `H` 底边定基线，
+     *   线顶 = 基线 − 中心 − 半线宽）。不是字体的 `strikeoutPosition`——CoreText 给 Chrome 的
+     *   口径与 Skia 的字段值不同（本字体 −8.0 vs −5.7px）；
      * - `overline`：无对应度量，取 `ascent` 上缘（浏览器同处：升部之上）。
+     *
+     * **度量面 = 被装饰文字的实际面**：取装饰区间首字的码本，走与逐字落墨同一条解析
+     * （同 band、同 key）。固定码本 `'H'` 会解析到拉丁面，与正文 CJK 面度量差 0.1em 以上。
      *
      * 度量缺失（字体没给）时才回退 em 常量。**不读行墨色命名**：装饰色 = 声明元素解析后的颜色
      * （`currentColor` 已在收集期解析），无颜色声明才落回叶墨色。
@@ -999,11 +1028,27 @@ class LineWindowDrawer(
                 if (paint.lines.isEmpty()) continue
                 val fs = if (paint.fontSizePx > 0f) paint.fontSizePx else line.fontSizePx
                 val fams = paint.families.ifEmpty { line.families }
-                val key = glyphPainter.cacheKey(fams, paint.weight, paint.italic, fs, DECORATION_METRIC_CP)
-                val gs = fontFor.resolve(
-                    DECORATION_METRIC_CP, key, fs, fams, paint.weight, paint.italic,
-                    paint.monospace, line.tag,
-                )
+                // **度量面 = 被装饰文字真正用的那张面**（不是固定码本 `'H'` 解析出的面）。
+                //
+                // 旧写法固定用 `DECORATION_METRIC_CP = 'H'`：族栈里拉丁面先命中 ⇒ 拿到的
+                // 是**拉丁面**的 ascent/descent/strikeout/underline，而正文是 CJK 面
+                // （族栈回退到宋体/思源）。两套度量可以差整整 0.1em：
+                // 实测默认栈 `'H'` 面 a≈-14.7/d≈5.2，正文面 a≈-21.3/d≈+5.3（18.5px），
+                // 删除线因此比 Chromium 低 ~2px（用户实测「偏下」）。
+                //
+                // 取 `lo` 那个字的**码本**走与逐字落墨完全同一条解析（同 key、同 band 字段），
+                // 保证「量画同源」：面相同 ⇒ 度量相同。
+                val metricBand = bands.lastOrNull { it.start <= lo && lo < it.end }
+                val mRun = metricBand?.font
+                val mSize = mRun?.fontPxOr(fs) ?: fs
+                val mFams = mRun?.families ?: fams
+                val mWt = mRun?.weight ?: paint.weight
+                val mItal = mRun?.italic ?: paint.italic
+                val mMono = mRun?.monospace ?: paint.monospace
+                val mTag = mRun?.tag ?: line.tag
+                val cp = codePointAt(line.text, lo)?.cp ?: DECORATION_METRIC_CP
+                val key = glyphPainter.cacheKey(mFams, mWt, mItal, mSize, cp)
+                val gs = fontFor.resolve(cp, key, mSize, mFams, mWt, mItal, mMono, mTag)
                 val fm = gs.font.metrics
                 val color = withAlpha(paint.colorHex?.let(::cssHexToArgb) ?: line.inkColor, line.alpha)
                 val left = xs.getOrNull(lo) ?: continue
@@ -1020,7 +1065,12 @@ class LineWindowDrawer(
                         DecorationLine.UNDERLINE ->
                             (fm.underlinePosition?.takeIf { it > 0f } ?: (fs * DECORATION_UNDERLINE_FALLBACK_EM)) + t / 2f
                         DecorationLine.LINE_THROUGH ->
-                            (fm.strikeoutPosition ?: (-fs * DECORATION_STRIKE_FALLBACK_EM)) + t / 2f
+                            // **中心 = (ascent+descent)/2，与 Chromium 同式**（不是字体的 strikeout 度量）。
+                            // 实测（/tmp/gt strike-offsets，Chromium @font-face 加载同一字体文件
+                            // 屏显臻宋 18.5px/LH1.5，以 `H` 底边定基线）：线顶 = 基线 −8.5px
+                            // = 中心 −8.0px − t/2(0.5) ⇒ 中心正是 (ascent+descent)/2。
+                            // Skia 的 `strikeoutPosition`（−5.7px）与 CoreText 给 Chrome 的口径不同，不用它。
+                            (fm.ascent + fm.descent) / 2f
                         DecorationLine.OVERLINE -> fm.ascent - t / 2f
                     }
                     val cuts = if (paint.skipInk && kind != DecorationLine.LINE_THROUGH) {
@@ -1340,6 +1390,8 @@ private interface FontResolver {
         fontFor: FontResolver,
         xs: FloatArray = placement.xs,
         preBands: List<Band>? = null,
+        relDx: FloatArray? = null,
+        relDy: FloatArray? = null,
     ) {
         if (endExcl <= start) return
         // **切段每行算一次**（不是每字一次）。第一版写成 `mergeBands(line, i, i+1).firstOrNull()`
@@ -1424,7 +1476,10 @@ private interface FontResolver {
                 val argb = if (isShadowPass) overrideInk else withAlpha(band?.argb ?: line.inkColor, line.alpha)
                 // 行内基线位移（Skia 正值下移，故原点上移）。
                 val shiftEm = band?.shiftEm ?: 0f
-                val y = baseY - shiftEm * line.fontSizePx + dy
+                // E12：行内相对定位的逐字位移（不进退格化/断行，只平移落墨）。
+                val rdx = relDx?.getOrNull(i) ?: 0f
+                val rdy = relDy?.getOrNull(i) ?: 0f
+                val y = baseY - shiftEm * line.fontSizePx + dy + rdy
                 // 代理对整对入批（units=2）；普通字符 units=1，行为与原来逐字版完全一致。
                 onGlyphCp?.invoke(cp, units)
                 // 换批判定：四要素任一不同即先落地上批。
@@ -1439,7 +1494,7 @@ private interface FontResolver {
                 }
                 // 字形留到 flush 时按整批一次取（见 flushBatch 的注释）。
                 batchCps!!.add(cp)
-                batchXs!!.add(paintX + x + dx)
+                batchXs!!.add(paintX + x + dx + rdx)
             }
             i += units
         }
@@ -1575,9 +1630,6 @@ private const val DECORATION_AUTO_THICKNESS_EM = 0.1f
 
 /** 字体度量缺失时的回退下划线位置（em，与旧下划线口径一致 = 0.12em）。 */
 private const val DECORATION_UNDERLINE_FALLBACK_EM = 0.12f
-
-/** 字体度量缺失时的回退删除线位置（em，基线上方 0.25em ≈ 字腰）。 */
-private const val DECORATION_STRIKE_FALLBACK_EM = 0.25f
 
 /** skip-ink 横带的纵向内缩（px）：Chromium `decoration_bounds.Inset(InsetsF::VH(0.5, 0))`。 */
 private const val DECORATION_INK_BAND_INSET_PX = 0.5f

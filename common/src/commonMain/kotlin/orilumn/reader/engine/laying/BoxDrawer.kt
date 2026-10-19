@@ -73,9 +73,18 @@ object BoxDrawer {
     ) {
         // Skip boxes whose lines don't intersect the target page — the block belongs entirely
         // to a different page (pushed via break-inside:avoid, or ended on a previous page).
-        if (box.firstLineIndex >= 0 &&
-            (box.lastLineExclusive <= pageStartLine || box.firstLineIndex >= pageEndLine)
-        ) return
+        // 零行盒（[k,k)，如 clearfix/空盒——不产行但有 border-box）没有行可求交，按端点 k
+        // 归属：k 落在 (pageStart, pageEnd] 才属本页（恰在两页交界的 k 归前一页，与其视觉上
+        // 位于前页最后一行之后一致），否则非空盒的行相交判据会把它整块丢掉。
+        if (box.firstLineIndex >= 0) {
+            val emptyRange = box.lastLineExclusive <= box.firstLineIndex
+            val offPage = if (emptyRange) {
+                box.firstLineIndex <= pageStartLine || box.firstLineIndex > pageEndLine
+            } else {
+                box.lastLineExclusive <= pageStartLine || box.firstLineIndex >= pageEndLine
+            }
+            if (offPage) return
+        }
 
         // 渲染层：页带裁剪只约束撕裂块。在本页内开始/结束的箱子，其 border-box（含 padding，
         // 不含 margin）归属本页可见区，不得一刀切——否则章末块底 padding 明明有页空间却被裁掉。

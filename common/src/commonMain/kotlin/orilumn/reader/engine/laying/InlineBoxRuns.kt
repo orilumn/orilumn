@@ -71,6 +71,16 @@ data class InlineBoxRun(
     val borderRadius: CornerRadius = CornerRadius(),
     /** E17 圆角的百分比部分（对 `min(w, h)` 解，与 [CornerRadius.resolved] 同式）。 */
     val borderRadiusPct: CornerRadius = CornerRadius(),
+    /**
+     * E12 行内相对定位偏移（px，相对本 run 覆盖字符的**原始落墨位置**）。
+     *
+     * 取「本元素自身 + 其**行内**祖先（到叶块为止）」的累积值：块级祖先的偏移已由
+     * [LayoutBox.relOffsetX]/[relOffsetY] 整体平移整行（见 [applyRelativeOffsets]），
+     * 行内祖先（`<span>` 之类）不是盒，只能在这里按字符区间补 —— 两者相加才是 CSS 2.1
+     * §9.4.3 的「原位置」平移。偏移**不改排版**（占位/断行/分页全不动），只平移落墨。
+     */
+    val relDx: Int = 0,
+    val relDy: Int = 0,
 ) {
     /** 有边框宽（不看 style）：style 的 none 判定留给绘制侧（与 [ComputedStyle.hasBorderEdges] 同口径）。 */
     val hasBorderWidth: Boolean
@@ -138,7 +148,7 @@ fun collectInlineBoxRuns(
             while (node != null && node !== root) {
                 if (!isExcluded(node) && !isBlock(node)) {
                     val st = resolve(node)
-                    if (st != null && (st.backgroundColorHex != null || st.hasBorderEdges())) {
+                    if (st != null && (st.backgroundColorHex != null || st.hasBorderEdges() || !relativeSelfOffset(st).isZero)) {
                         val e = extents.getOrPut(node) { intArrayOf(pos, pos + n) }
                         if (pos < e[0]) e[0] = pos
                         if (pos + n > e[1]) e[1] = pos + n
@@ -152,8 +162,21 @@ fun collectInlineBoxRuns(
     if (extents.isEmpty()) return emptyList()
 
     val out = ArrayList<InlineBoxRun>(extents.size)
+    // E12：行内相对定位偏移 = 本元素 + 其**行内**祖先（到叶块为止）的自偏移之和。
+    // 叶块自身及更上层块级祖先的偏移已由 [applyRelativeOffsets] 写进 `LayoutBox.relOffset*`
+    // 整体平移整行（这里不再计一次，否则双算）。
+    fun inlineOffsetOf(el: MarkupElement): BoxOffset {
+        var acc = BoxOffset.ZERO
+        var n: MarkupElement? = el
+        while (n != null && n !== root) {
+            if (!isExcluded(n) && !isBlock(n)) acc += relativeSelfOffset(resolve(n))
+            n = n.parent
+        }
+        return acc
+    }
     for ((el, e) in extents) {
         val st = resolve(el) ?: continue
+        val off = inlineOffsetOf(el)
         out.add(
             InlineBoxRun(
                 start = e[0],
@@ -172,6 +195,8 @@ fun collectInlineBoxRuns(
                 visibilityHidden = st.visibilityHidden,
                 borderRadius = st.borderRadius,
                 borderRadiusPct = st.borderRadiusPct,
+                relDx = off.x,
+                relDy = off.y,
             ),
         )
     }

@@ -3068,6 +3068,7 @@ class BoxChapterLayouter(
                 val s = prepare.resolveStyle(e)
                 s.margin.left.roundToInt() + s.margin.right.roundToInt()
             },
+            { e -> prepare.resolveStyle(e) },
         ).coerceAtLeast(1)
         val contentLeft = NormalFlowLayout.descendContentLeft(el, 0,
             leftEdgesOf = { e -> val s = prepare.resolveStyle(e); (s.border.left + s.padding.left).roundToInt() },
@@ -3506,6 +3507,7 @@ class LightPrepare(
                     val s = styleComputer().resolve(e, styleCache)
                     s.margin.left.roundToInt() + s.margin.right.roundToInt()
                 },
+                { e -> styleComputer().resolve(e, styleCache) },
             ).coerceAtLeast(1)
             if (el.tag == "table" || el.tag == "tr" || el.tag == "#text") {
                 // 表格分支清零（重路径 table 分支同式）；合成匿名恒空（重路径匿名分支同式）。
@@ -3773,6 +3775,7 @@ class LightPrepare(
                 val s = styleComputer().resolve(e, styleCache)
                 s.margin.left.roundToInt() + s.margin.right.roundToInt()
             },
+            { e -> styleComputer().resolve(e, styleCache) },
         )
         // Horizontal position = the accumulated block left edges (mirrors the heavy path's descent).
         val tW = if (sink != null) orilumn.reader.time.platformNowMs() else 0L

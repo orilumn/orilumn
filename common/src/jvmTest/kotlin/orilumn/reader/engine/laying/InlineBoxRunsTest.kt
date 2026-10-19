@@ -10,6 +10,7 @@ import orilumn.reader.engine.css.StyleComputer
 import orilumn.reader.engine.css.TextAlign
 import orilumn.reader.engine.html.MarkupElement
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -255,8 +256,76 @@ class InlineBoxRunsTest {
         assertEquals(emptyList<InlineBoxRun>(), sliceInlineBoxRuns(emptyList(), 0, 5))
     }
 
-    /** 每字位 10px 的极简断行器；**认行内盒推进量**（与生产 [orilumn.reader.engine.skia.InhouseParagraphBreaker] 同语义）。 */
-    private class EdgeBreaker : ParagraphBreaker {
+    // ── E12：行内元素的相对定位偏移（第六刀只做了块级盒，行内这一半在此补齐） ──────────
+
+    @Test
+    fun `行内相对定位偏移记在 run 上`() {
+        val s = node(
+            "span",
+            mapOf("style" to "position:relative;left:12px;top:6px;background-color:#bae7ff"),
+            listOf(text("rel")),
+        )
+        val p = node("p", children = listOf(text("前"), s, text("后")))
+        node("body", children = listOf(p))
+        val r = runs(p).single()
+        assertEquals(1 to 4, r.start to r.endExclusive)
+        assertEquals(12, r.relDx)
+        assertEquals(6, r.relDy)
+    }
+
+    @Test
+    fun `无底色无边框的相对定位盒也发 run 且带偏移`() {
+        // 盒本身没东西可画，但**其中文字要平移** ⇒ run 必须照发（`visible == false`）。
+        val s = node("span", mapOf("style" to "position:relative;left:7px"), listOf(text("x")))
+        val p = node("p", children = listOf(s))
+        node("body", children = listOf(p))
+        val r = runs(p).single()
+        assertEquals(7, r.relDx)
+        assertFalse("没有底色/边框 ⇒ 不参与推进量与绘制", r.visible)
+    }
+
+    @Test
+    fun `嵌套行内相对定位偏移累加`() {
+        val inner = node("em", mapOf("style" to "position:relative;left:3px;top:1px"), listOf(text("cd")))
+        val outer = node(
+            "span",
+            mapOf("style" to "position:relative;left:10px;top:5px;background-color:#eee"),
+            listOf(text("ab"), inner),
+        )
+        val p = node("p", children = listOf(outer))
+        node("body", children = listOf(p))
+        val out = runs(p)
+        assertEquals(2, out.size)
+        assertEquals(0 to 4, out[0].start to out[0].endExclusive)
+        assertEquals(10 to 5, out[0].relDx to out[0].relDy)
+        // 内层 = 自身 3/1 + 外层 10/5。
+        assertEquals(2 to 4, out[1].start to out[1].endExclusive)
+        assertEquals(13 to 6, out[1].relDx to out[1].relDy)
+    }
+
+    @Test
+    fun `块级祖先的偏移不重复计在行内 run 上`() {
+        // 块级祖先的偏移已由 `LayoutBox.relOffset*` 整体平移整行；行内 run 只带行内那一段。
+        val s = node("span", mapOf("style" to "position:relative;left:4px"), listOf(text("x")))
+        val p = node("p", children = listOf(s))
+        val d = node("div", mapOf("style" to "position:relative;left:50px;top:20px"), listOf(p))
+        node("body", children = listOf(d))
+        val r = runs(p).single()
+        assertEquals(4, r.relDx)
+        assertEquals(0, r.relDy)
+    }
+
+    @Test
+    fun `非相对定位的行内盒偏移恒零`() {
+        val s = node("span", mapOf("style" to "background-color:#eee"), listOf(text("x")))
+        val p = node("p", children = listOf(s))
+        node("body", children = listOf(p))
+        val r = runs(p).single()
+        assertEquals(0, r.relDx)
+        assertEquals(0, r.relDy)
+    }
+
+    /** 每字位 10px 的极简断行器；**认行内盒推进量**（与生产 [orilumn.reader.engine.skia.InhouseParagraphBreaker] 同语义）。 */    private class EdgeBreaker : ParagraphBreaker {
         override fun breakLines(
             text: CharSequence,
             fontSizePx: Float,

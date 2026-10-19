@@ -602,6 +602,18 @@ class StyleComputer(
     private var _hasFirstLetter: Boolean? = null
 
     /**
+     * E23-b：本章样式表是否有**能出 px 的 `height` 声明**（`auto`/百分比不算）。轻路径据此决定
+     * 要不要为「容器指定高差额」沿祖先链做一遍级联（见 `Cascade.hasBoxHeightDeclaration`）。
+     */
+    fun hasBoxHeightDeclaration(): Boolean {
+        var v = _hasBoxHeight
+        if (v == null) { v = cascade.hasBoxHeightDeclaration(); _hasBoxHeight = v }
+        return v
+    }
+
+    private var _hasBoxHeight: Boolean? = null
+
+    /**
      * Break values not declared default to [BreakRule.AUTO]. `avoid` (any variant, incl. `avoid-page`)
      * → [BreakRule.AVOID]; the forced values `always` / `page` / `left` / `right` / `recto` / `verso`
      * → [BreakRule.ALWAYS].

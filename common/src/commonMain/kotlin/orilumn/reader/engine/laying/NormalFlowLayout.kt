@@ -545,7 +545,12 @@ object NormalFlowLayout {
         }
         // P6-a: 收尾不包悬浮（CSS 默认浮动逃逸容器；包住只在 BFC/clearfix，本引擎无此概念）。
         // 跨度存活供后随兄弟跨容器环绕；容器背景/高度只计 in-flow 内容。
-        box.contentBottom = st.y + edgesBottom
+        // E23-b（CSS 2.1 §10.6.3）：容器指定高同样消费 —— 内容盒高 = max(在流内容高, `height`)，
+        // 与叶同一条「只多不少」口径（内容更高照排不裁；裁不裁是 overflow 的事）。
+        // 容器底边（背景/边框/裁剪区下界）与后随内容的起点因此落在指定高上；游标只下不上 ⇒ 行位
+        // 单调，分页容量仍由行位给出（帧底恒等式见轻路径 `interiorGapAbove` 同源差额）。
+        val contentTopY = box.contentTop + edgesTop
+        box.contentBottom = contentTopY + specifiedContentHeight(sty, st.y - contentTopY) + edgesBottom
         st.y = box.contentBottom
         box.firstLineIndex = if (firstChildLine == Int.MAX_VALUE) -1 else firstChildLine
         box.lastLineExclusive = lastChildLine
@@ -569,17 +574,18 @@ object NormalFlowLayout {
      * box's (a leaf, or the first bottom-edge container that terminates the chain) margin in last.
      *
      * Mirrors the top-side first-child descent that the container branch performs inline — descending
-     * only through containers that carry no bottom border/padding and have children, folding each of
-     * those containers' margins into one group, then closing the group with the terminator's margin.
-     * (Intermediate heights are deliberately not consulted — the flow pass does not honor specified
-     * heights, so [consecutiveLeafAdvance]'s mirror must gate identically, and specified-height
-     * containers are only excluded at the OUTER eligibility check above.)
+     * only through containers that carry no bottom border/padding, no specified height, and have
+     * children, folding each of those containers' margins into one group, then closing the group with
+     * the terminator's margin. §8.3.1 requires a `height` of `auto` for the parent↔last-child collapse,
+     * so an intermediate specified height breaks the group exactly like a bottom edge does (E23-b；此前
+     * 流程不消费指定高，故只在外层判定处挡，现两处同判据）。
      */
     private fun lastChildBottomMargin(box: LayoutBox): Float {
         var child = box.childBoxes.last()
         var acc = 0f
         while (child.isContainer &&
             (child.style.border.bottom + child.style.padding.bottom).roundToInt() == 0 &&
+            child.style.heightPx == null &&
             child.childBoxes.isNotEmpty()
         ) {
             acc = collapseMargins(acc, child.style.margin.bottom)
@@ -1880,16 +1886,19 @@ object NormalFlowLayout {
         // A_m's contribution is not its raw margin-bottom when A_m is a bottom-edge-free, auto-height
         // container - then its margin collapses with its last-child chain ([lastChildBottomMargin]).
         // prevLeaf is A_m's last in-flow leaf, so folding A_m's own branch downward folds exactly the
-        // margins of the `.last()`-child descent: each edge-free ancestor's margin joins the group, and
-        // an edge-full container stops the fold with its own margin folding in last (its children's
-        // margins are dropped). Skipped entirely when A_m carries bottom border/padding or a specified
-        // height (emit then returns its raw margin-bottom).
+        // margins of the `.last()`-child descent: each edge-free, auto-height ancestor's margin joins
+        // the group, and an edge-full (or specified-height) container stops the fold with its own margin
+        // folding in last (its children's margins are dropped). Skipped entirely when A_m carries bottom
+        // border/padding or a specified height (emit then returns its raw margin-bottom).
         val aStyle = styleOf(pathA[ia - 1])
         if ((aStyle.border.bottom + aStyle.padding.bottom).roundToInt() == 0 && aStyle.heightPx == null) {
             var j = ia - 2
             while (j >= 0) {
                 val parentStyle = styleOf(pathA[j + 1])
                 if ((parentStyle.border.bottom + parentStyle.padding.bottom).roundToInt() > 0) break
+                // E23-b：§8.3.1 的父↔末子底折叠要求父 `height:auto`；指定高与底边同权断链
+                //（`emit` 侧见 [lastChildBottomMargin]，两处同一判据）。
+                if (parentStyle.heightPx != null) break
                 m1 = collapseMargins(m1, styleOf(pathA[j]).margin.bottom)
                 j--
             }

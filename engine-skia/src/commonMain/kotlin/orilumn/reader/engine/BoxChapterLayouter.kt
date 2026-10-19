@@ -1327,9 +1327,12 @@ class BoxChapterLayouter(
     private fun blockBoundaryGap(prepare: LightPrepare, a: Int, b: Int): Int {
         val pa = prepare.block(a)
         val pb = prepare.block(b)
+        // ⚠ 只用于**相邻**块（`b == a + 1`）：E23-b 的容器指定高差额按块下标记账
+        // （[containerHeightLead][b] = 进入 b 之前闭合的容器差额总和）。
         return ownBottomEdges(pa) +
             NormalFlowLayout.consecutiveLeafAdvance(pa.el!!, pb.el!!, prepare::resolveStyle) +
-            (pb.style.border.top + pb.style.padding.top).roundToInt()
+            (pb.style.border.top + pb.style.padding.top).roundToInt() +
+            containerHeightLead(prepare)[b]
     }
 
     /**
@@ -1364,6 +1367,111 @@ class BoxChapterLayouter(
     private fun interiorGapAbove(prepare: LightPrepare, b: Int): Int =
         if (b <= 0) 0
         else blockBoundaryGap(prepare, b - 1, b) - ownBottomEdges(prepare.block(b - 1))
+
+    /**
+     * E23-b：**容器指定高差额**前缀表（[LightPrepare.containerHeightLead] 的唯一写入点）。
+     *
+     * 重路径 `emit` 的容器分支把容器内容盒高定为 `max(在流内容高, height)`，容器底边随之落到
+     * 指定高，后随内容的 `st.y` 因此多出 `height − 内容高` 这一段（`.ovh{height:40px}` 里只有
+     * 一行 27px 时多 13px）。轻路径的行流是**局部位移**累加（[consecutiveLeafAdvance] 只含边距
+     * 与边，没有内容高可用），所以这一段必须另外补，否则临时/增量页相对磁盘页少一段 ⇒ 分页在
+     * 两种页之间横跳。
+     *
+     * 累计口径与行流逐值同源：容器内容高 = 首子链下沉 + 首叶 top 边 + Σ(叶内容盒高 + 叶自身下边
+     * + 块间 advance + 后叶自身 top 边)。**内层容器先算**（叶区间短的先），其差额写进前缀表后
+     * 自然被外层的内容高吃掉（内层盒子本来就是外层的内容）。内容高一旦达到指定高即**早退**
+     * （差额 0），故开销以「填满指定高所需的那几叶」为界，不会为一个固定高盒子扫全章。
+     *
+     * 保守方向：首叶不在容器首有效子链上（如容器以浮动开头）、或首叶无 `el` ⇒ **不补**
+     * （与改动前同值，宁少不多）。浮动叶不推进行流，只贡献自身边距（已含在 advance 里）。
+     */
+    private fun containerHeightLead(prepare: LightPrepare): IntArray {
+        prepare.containerHeightLead?.let { return it }
+        val n = prepare.totalBlocks
+        val before = IntArray(n + 1)
+        if (n <= 0 || !prepare.chapterHasBoxHeight) {
+            prepare.containerHeightLead = before
+            return before
+        }
+        // 指定高**容器** → 叶区间 [lo, hi)。只认祖先（叶自身的高由 `extentOf` 与行流内的
+        // `specifiedContentHeight` 单独消费，不能重复计入）。
+        val loOf = identityMap<MarkupElement, Int>()
+        val hiOf = identityMap<MarkupElement, Int>()
+        val els = ArrayList<MarkupElement>()
+        for (i in 0 until n) {
+            var a: MarkupElement? = prepare.leafElement(i).parent
+            while (a != null) {
+                if (!a.isText && prepare.resolveStyle(a).heightPx != null) {
+                    if (loOf[a] == null) {
+                        loOf[a] = i
+                        els.add(a)
+                    }
+                    hiOf[a] = i + 1
+                }
+                if (a === prepare.markup) break
+                a = a.parent
+            }
+        }
+        if (els.isEmpty()) {
+            prepare.containerHeightLead = before
+            return before
+        }
+        els.sortBy { hiOf.getValue(it) - loOf.getValue(it) }
+        for (c in els) {
+            val lo = loOf.getValue(c)
+            val hi = hiOf.getValue(c)
+            val h = prepare.resolveStyle(c).heightPx?.roundToInt() ?: continue
+            if (h <= 0) continue
+            val firstLeaf = prepare.block(lo)
+            val firstEl = prepare.leafElement(lo)
+            val descent = NormalFlowLayout.firstChildDescentTop(
+                c, firstEl, prepare::resolveStyle, zeroLeafBox = firstEl.isText,
+            ) ?: continue
+            var content = descent + ownTopEdges(firstLeaf)
+            var reached = false
+            var k = lo
+            while (k < hi) {
+                val leaf = prepare.block(k)
+                val isFloat = leaf.table == null &&
+                    leaf.style.floatSide != orilumn.reader.engine.css.FloatSide.NONE
+                if (!isFloat) content += leafContentHeight(prepare, k, leaf) + ownBottomEdges(leaf)
+                if (k + 1 >= hi) {
+                    // 容器内容底 = 末叶盒底 + 末叶到容器之间各层容器的底边 + 该边界已记的内层差额。
+                    var a: MarkupElement? = prepare.leafElement(k).parent
+                    while (a != null && a !== c) {
+                        val s2 = prepare.resolveStyle(a)
+                        content += (s2.border.bottom + s2.padding.bottom).roundToInt()
+                        a = a.parent
+                    }
+                    content += before[hi]
+                } else {
+                    val next = prepare.block(k + 1)
+                    val ea = leaf.el
+                    val eb = next.el
+                    if (ea != null && eb != null) {
+                        content += NormalFlowLayout.consecutiveLeafAdvance(ea, eb, prepare::resolveStyle)
+                    }
+                    content += ownTopEdges(next) + before[k + 1]
+                }
+                if (content >= h) { // 内容已达指定高 ⇒ 差额 0（省掉其余叶的塑形）
+                    reached = true
+                    break
+                }
+                k++
+            }
+            if (!reached && content < h) before[hi] += h - content
+        }
+        prepare.containerHeightLead = before
+        return before
+    }
+
+    /** E23-b：叶 [i] 的**内容盒高**（不含自身边；含指定高 —— 与行流、`emit` 同一口径）。 */
+    private fun leafContentHeight(prepare: LightPrepare, i: Int, leaf: LayoutBox): Int {
+        if (leaf.replaceableHeight > 0) return leaf.replaceableHeight
+        val sh = shapeBlock(prepare, i, leaf, prepare.profile)
+        val natural = if (sh.lineCount > 0) sh.lineBottom(sh.lineCount - 1) - sh.lineTop(0) else 0
+        return NormalFlowLayout.specifiedContentHeight(leaf.style, natural)
+    }
 
     /**
      * 窗口**上边界缺口**（[PartialDrawableLayout.frameLeadTop] 的取值单源）：窗口首行行顶之上、
@@ -1430,6 +1538,8 @@ class BoxChapterLayouter(
         var floatTopL: Int? = null
         var floatTopR: Int? = null
         var lastTextBottom = 0
+        // E23-b：容器指定高差额（按块下标记的前缀表；无指定高容器时恒 0）。
+        val boxLead = containerHeightLead(prepare)
         for (idx in extLeaves.indices) {
             val gi = lo2 + idx
             val leaf = extLeaves[idx]
@@ -1451,6 +1561,10 @@ class BoxChapterLayouter(
                 if (floatTopR != null) floatTopR = floatTopR!! - h
                 lastTextBottom -= h
             }
+            // E23-b：容器指定高差额。重路径的容器底边在**此刻**落到指定高（`st.y` 已含这一段），
+            // 轻路径的 advance 只带边距与边 ⇒ 这里按同一相位补回：先入基址，clear/回填/advance
+            // 全落在它上面（与重路径 `st.y` 已含差额、随后才做 margin/clear 同序）。
+            if (prevBlock != null) y += boxLead[gi]
             val advance = if (prevBlock == null) 0
             else NormalFlowLayout.consecutiveLeafAdvance(prevBlock!!.el!!, leaf.el!!, prepare::resolveStyle)
             val ls = leaf.style
@@ -2924,6 +3038,9 @@ class BoxChapterLayouter(
         // 同值，临时/增量页不会与正典页在裁剪边界上横跳。窗口叶沿**自身＋祖先链**上溯，凡
         // `overflow` 非 visible 者聚合出一个裁剪盒（横向走 `ownerBackgroundBox`，纵向走同一 band 数学）。
         // 无 `overflow` 声明时本表恒空 ⇒ 全链 clip 为 null、像素零回归。
+        // E23-b：容器（含 `overflow` 裁剪盒）的**指定高**在这里落一次 —— 内容底抬到
+        // `max(内容顶 + height, 聚合内容底)`，与重路径 `emit` 容器分支、与视口页的盒几何同式。
+        // 自属叶（背景/裁剪属主就是叶自身）的指定高已在 [extentOf] 里消费，不走这里。
         val clipTop = HashMap<MarkupElement, Int>()
         val clipBottom = HashMap<MarkupElement, Int>()
         val clipLeaf = HashMap<MarkupElement, MarkupElement>()
@@ -2958,9 +3075,11 @@ class BoxChapterLayouter(
             val descent = clipLeaf[owner]?.let {
                 NormalFlowLayout.firstChildDescentTop(owner, it, prepare::resolveStyle)
             } ?: 0
+            val contentTop = top - descent
+            val aggBottom = clipBottom[owner] ?: top
             val (bandTop, bandBottom) = NormalFlowLayout.backgroundBandExtent(
-                ownerTop = top - descent,
-                ownerBottom = clipBottom[owner] ?: top,
+                ownerTop = contentTop,
+                ownerBottom = s.heightPx?.let { maxOf(aggBottom, contentTop + it.roundToInt()) } ?: aggBottom,
                 ownerEdgesTop = (s.border.top + s.padding.top).roundToInt(),
                 ownerEdgesBottom = (s.border.bottom + s.padding.bottom).roundToInt(),
                 selfOwned = owner in clipSelfOwned,
@@ -2980,9 +3099,11 @@ class BoxChapterLayouter(
             val descent = ownerLeaf[owner]?.let {
                 NormalFlowLayout.firstChildDescentTop(owner, it, prepare::resolveStyle)
             } ?: 0
+            val contentTop = top - descent
+            val aggBottom = ownerBottom[owner] ?: top
             val (bandTop, bandBottom) = NormalFlowLayout.backgroundBandExtent(
-                ownerTop = top - descent,
-                ownerBottom = ownerBottom[owner] ?: top,
+                ownerTop = contentTop,
+                ownerBottom = s.heightPx?.let { maxOf(aggBottom, contentTop + it.roundToInt()) } ?: aggBottom,
                 ownerEdgesTop = (s.border.top + s.padding.top).roundToInt(),
                 ownerEdgesBottom = (s.border.bottom + s.padding.bottom).roundToInt(),
                 selfOwned = owner in selfOwned,
@@ -3037,9 +3158,11 @@ class BoxChapterLayouter(
             val descent = cLeaf[container]?.let {
                 NormalFlowLayout.firstChildDescentTop(container, it, prepare::resolveStyle)
             } ?: 0
+            val contentTop = top - descent
+            val aggBottom = cBottom[container] ?: top
             val (bandTop, bandBottom) = NormalFlowLayout.backgroundBandExtent(
-                ownerTop = top - descent,
-                ownerBottom = cBottom[container] ?: top,
+                ownerTop = contentTop,
+                ownerBottom = s.heightPx?.let { maxOf(aggBottom, contentTop + it.roundToInt()) } ?: aggBottom,
                 ownerEdgesTop = (s.border.top + s.padding.top).roundToInt(),
                 ownerEdgesBottom = (s.border.bottom + s.padding.bottom).roundToInt(),
                 selfOwned = false,
@@ -3391,6 +3514,52 @@ class LightPrepare(
     internal var clusterBlockOwnHeight: ((Int) -> Int)? = null,
 ) {
     val totalBlocks: Int get() = markupLeaves.size
+
+    /** E23-b：块 [i] 的叶元素 —— 只读叶集，**不物化** [block]（结构级扫描用）。 */
+    internal fun leafElement(i: Int): MarkupElement = markupLeaves[i]
+
+    /**
+     * E23-b：**块边界上的容器指定高差额**前缀表（下标 = 块下标，值 = 进入该块之前要补的差额）。
+     * 由 [BoxChapterLayouter] 首次需要时算好写回（要塑形，本类算不了）；null = 尚未计算。
+     */
+    internal var containerHeightLead: IntArray? = null
+
+    /**
+     * E23-b：本章是否可能有**指定高的非叶容器**（= [containerHeightLead] 的总开关）。
+     *
+     * 门取**超集**：样式表里有能出 px 的 `height` 声明（`auto`/百分比不算），或树上 inline `style`
+     * 提到 height；命中后才沿每叶祖先链（按元素去重）真读一次 `heightPx`。
+     * 绝大多数书的 `height` 只出现在 `img` 这类替换叶上（或压根没有）⇒ 这里恒 false，
+     * 差额表整章零扫描、零塑形（与 R26 `anyFloat` 同一个取舍：先探一次，别在开书路径上扫）。
+     */
+    val chapterHasBoxHeight: Boolean by lazy {
+        if (!engine.hasBoxHeightDeclaration() && !inlineMentionsHeight(markup)) return@lazy false
+        val seen = identityMap<MarkupElement, Boolean>()
+        for (leaf in markupLeaves) {
+            var n: MarkupElement? = leaf.parent
+            while (n != null) {
+                if (seen.containsKey(n)) break // 该节点及其祖先已扫过（链一律上溯到根）
+                seen[n] = true
+                if (resolveStyle(n).heightPx != null) return@lazy true
+                if (n === markup) break
+                n = n.parent
+            }
+        }
+        false
+    }
+
+    /** 树上是否有 inline `style` 提到 height（粗判超集：命中才交给真级联去判）。 */
+    private fun inlineMentionsHeight(root: MarkupElement): Boolean {
+        val stack = ArrayList<MarkupElement>()
+        stack.add(root)
+        while (stack.isNotEmpty()) {
+            val el = stack.removeAt(stack.size - 1)
+            if (el.attrs["style"]?.contains("height") == true) return true
+            val kids = el.children
+            for (i in kids.indices) stack.add(kids[i])
+        }
+        return false
+    }
     /**
      * P3-c: 本 prepare 的生成内容查找（字符串恒有效＋伪样式新鲜懒解，与重路径同值）。
      * 空表即 [EmptyGen] 零开销。

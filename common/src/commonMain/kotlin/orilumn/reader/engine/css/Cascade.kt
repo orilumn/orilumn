@@ -389,6 +389,24 @@ class Cascade(
      *  first-letter path (首字放大/首字着色)：无规则的书零开销，连伪元素查找都不建。 */
     fun hasFirstLetterRules(): Boolean = matchers.any { m -> m.matchers.any { it.pseudoElement == "first-letter" } }
 
+    /**
+     * True if any sheet/layer rule declares a `height` that can produce a **px** value（`logical`
+     * 的 `block-size` 已在解析期展开成 `height`）。`auto` / 百分比 / 关键字一律不算 ——
+     * `StyleComputer` 对它们给 `heightPx = null`（`parseBoxSize`），消费方无从下手。
+     *
+     * 用途：E23-b 容器指定高的轻路径差额表要沿祖先链取 `heightPx`，那是一次全元素级联；
+     * 绝大多数书里 `height` 只出现在 `img` 这类替换叶上（或压根没有），据此整章跳过扫描。
+     * 判定取**超集**（宁可多扫，不可漏判），`calc()` 之类解析不了的写法也算“有声明”。
+     */
+    fun hasBoxHeightDeclaration(): Boolean = matchers.any { m ->
+        m.declarations.any { d ->
+            d.property != "height" || run {
+                val t = d.value.trim().lowercase()
+                t != "auto" && t != "none" && t != "inherit" && t != "initial" && t != "unset" && !t.endsWith("%")
+            }
+        }
+    }
+
     /** ------------------------------------------------------------------------------------------
      *  CSS Logical Properties → Physical Properties expansion (LTR horizontal writing mode).
      *

@@ -276,6 +276,9 @@ object TableCellLines {
                         inkColor = inkColor,
                         colorRuns = shape.shapeColorRuns,
                         fontRuns = shape.shapeFontRuns,
+                        // 行内盒（背景/边框/内边距）随形透传（与正文两路径同源 shape.inlineBoxRuns；
+                        // 漏传取默认空表 ⇒ 表内行内装饰不画）。
+                        inlineBoxRuns = shape.inlineBoxRuns,
                         firstLineIndentPx = 0f,
                         nowrap = nowrap,
                         baselineShifts = shape.shapeBaselineShifts,

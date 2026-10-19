@@ -846,7 +846,19 @@ class BoxChapterLayouter(
                     inkColor = inkColor,
                     colorRuns = shape.colorRuns,
                     fontRuns = shape.fontRuns,
-                    firstLineIndentPx = if (k == 0) leaf.style.textIndentPx else 0f,
+                    // **行内盒的「起始于叶首字符」左边内边距折在首行缩进里**（与 canonical
+                    // DrawLineBuilder 同式：断行侧 breakWrappedLines 已按同一份 inlineBoxes 减宽，
+                    // 绘制侧首行右移同值 ⇒ 量画同源。漏加 ⇒ 行内盒左 padding 被文字压住）。
+                    firstLineIndentPx = if (k == 0) {
+                        leaf.style.textIndentPx +
+                            orilumn.reader.engine.laying.inlineBoxLeadInsetPx(shape.inlineBoxRuns)
+                    } else 0f,
+                    // 行内盒（背景/边框/内边距）随形透传（与 canonical 同源 shape.inlineBoxRuns，
+                    // 即喂断行器的同一份）。**漏传取默认空表 ⇒ 行内背景/边框/推进全不画**——
+                    // 症状：磁盘表命中/临时表渲染的页看不到 mark 背景、行内 padding+border
+                    // （2026-10-19 用户报「首开看不到、再开才看到」的真凶之一，探针实证
+                    // first-open 15/72 行带 run、增量再开 0/72）。
+                    inlineBoxRuns = shape.inlineBoxRuns,
                     // P1-2: 不换行段绘制侧以无限宽整形（与 canonical DrawLineBuilder 一致）。
                     nowrap = !orilumn.reader.engine.css.WhiteSpaceNormalize.wraps(style.whiteSpace),
                     // P1-2: 行内基线位移随段整形（与 canonical 一致）。
@@ -3010,10 +3022,16 @@ class BoxChapterLayouter(
     /** Builds a [LayoutBox] for a background owner: its resolved style + horizontal box geometry. */
     private fun ownerBackgroundBox(el: MarkupElement, prepare: LightPrepare): LayoutBox {
         val style = prepare.resolveStyle(el)
-        val contentWidth = NormalFlowLayout.descendContentWidth(el, prepare.layoutContentWidth) { e ->
-            val s = prepare.resolveStyle(e)
-            (s.padding.horizontal + s.border.horizontal).roundToInt()
-        }.coerceAtLeast(1)
+        val contentWidth = NormalFlowLayout.descendContentWidth(el, prepare.layoutContentWidth,
+            { e ->
+                val s = prepare.resolveStyle(e)
+                (s.padding.horizontal + s.border.horizontal).roundToInt()
+            },
+            { e ->
+                val s = prepare.resolveStyle(e)
+                s.margin.left.roundToInt() + s.margin.right.roundToInt()
+            },
+        ).coerceAtLeast(1)
         val contentLeft = NormalFlowLayout.descendContentLeft(el, 0,
             leftEdgesOf = { e -> val s = prepare.resolveStyle(e); (s.border.left + s.padding.left).roundToInt() },
             marginLeftOf = { e -> val s = prepare.resolveStyle(e); s.margin.left.roundToInt() },
@@ -3426,10 +3444,16 @@ class LightPrepare(
                 a = a.parent
             }
             val style = blockStyleFor(el)
-            val cw = NormalFlowLayout.descendContentWidth(el, contentW) { e ->
-                val s = styleComputer().resolve(e, styleCache)
-                (s.padding.horizontal + s.border.horizontal).roundToInt()
-            }.coerceAtLeast(1)
+            val cw = NormalFlowLayout.descendContentWidth(el, contentW,
+                { e ->
+                    val s = styleComputer().resolve(e, styleCache)
+                    (s.padding.horizontal + s.border.horizontal).roundToInt()
+                },
+                { e ->
+                    val s = styleComputer().resolve(e, styleCache)
+                    s.margin.left.roundToInt() + s.margin.right.roundToInt()
+                },
+            ).coerceAtLeast(1)
             if (el.tag == "table" || el.tag == "tr" || el.tag == "#text") {
                 // 表格分支清零（重路径 table 分支同式）；合成匿名恒空（重路径匿名分支同式）。
                 if (el.tag != "#text") pending.dropAll()
@@ -3687,10 +3711,16 @@ class LightPrepare(
         val el = markupLeaves[i]
         val style = blockStyleFor(el)
         if (sink != null) m0 = orilumn.reader.time.platformNowMs() - tBlk0
-        val contentWidth = NormalFlowLayout.descendContentWidth(el, contentW) { e ->
-            val s = styleComputer().resolve(e, styleCache)
-            (s.padding.horizontal + s.border.horizontal).roundToInt()
-        }
+        val contentWidth = NormalFlowLayout.descendContentWidth(el, contentW,
+            { e ->
+                val s = styleComputer().resolve(e, styleCache)
+                (s.padding.horizontal + s.border.horizontal).roundToInt()
+            },
+            { e ->
+                val s = styleComputer().resolve(e, styleCache)
+                s.margin.left.roundToInt() + s.margin.right.roundToInt()
+            },
+        )
         // Horizontal position = the accumulated block left edges (mirrors the heavy path's descent).
         val tW = if (sink != null) orilumn.reader.time.platformNowMs() else 0L
         val contentLeft = NormalFlowLayout.descendContentLeft(el, 0,

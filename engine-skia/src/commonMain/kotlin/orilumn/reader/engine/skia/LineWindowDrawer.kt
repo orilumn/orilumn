@@ -655,6 +655,9 @@ class LineWindowDrawer(
      * `padding` 向外扩，`border` 再向外一圈。纵向 padding/border **不撑高行框**（与邻行重叠，
      * 浏览器如此），故这里直接画到行框之外。
      *
+     * 「该元素自身字体」的取面口径：以**盒首字**为探针字命中族栈里的面（`'H'` 会误落 Latin 面，
+     * 中文盒因此少 0.4em；Chromium 同栈实测见 [paintInlineBoxes] 内注释）。
+     *
      * ## `box-decoration-break: slice`（默认）
      *
      * `border-left` 只在元素**首个片段**、`border-right` 只在**末片段**；上/下边框每片段都有。
@@ -688,9 +691,16 @@ class LineWindowDrawer(
             // 内容区（em 盒）高度：该元素自身字体（字号未设则回退行字号/族栈）。
             val sizePx = if (r.fontSizePx > 0f) r.fontSizePx else line.fontSizePx
             val famList = r.families.ifEmpty { line.families }
+            // 探针字必须是**盒自己的首字**，不是固定的 `'H'`：`'H'` 会落到族栈里第一个
+            // **含拉丁字形**的面（空栈/`sans-serif` 展开后都是 Helvetica，em 盒 = 1.0em），
+            // 而盒里的字形是汉面画的（苹方/宋体，em 盒 = 1.4em）⇒ 中文盒矮掉约 8px
+            // （实测 18.5 vs 25.9：样例1.2 实测盒高 24，Chromium 同栈为 32，看起来「上下
+            // padding 没了」——padding 一直在画，矮的是 em 盒）。取**盒首字**（不是片段首字）
+            // ⇒ 跨行各片段同一面，与浏览器「一个盒一个字体」一致。
+            val probeCp = line.text.getOrNull(r.start)?.code ?: 'H'.code
             val fm = glyphPainter.baseGlyphStyle(
                 sizePx, famList, r.weight, r.italic, r.monospace,
-                0xFF000000.toInt(), 'H'.code, line.tag,
+                0xFF000000.toInt(), probeCp, line.tag,
             ).font.metrics
             val ascent = -fm.ascent
             val descent = fm.descent
@@ -961,9 +971,10 @@ class LineWindowDrawer(
      *
      * ## skip-ink（initial `auto`）
      *
-     * 逐字取**字形墨迹盒**（`Font.getBounds`，与基线同坐标系）与装饰线所在横带求交；相交即在
-     * **墨迹的左右边界**处断开（不是整字跳过）—— 下划线遇到降部（`g` / `p` / `y`）断开、
-     * 上划线遇到升部断开，与浏览器一致。`line-through` 按规范**不**做 skip-ink。
+     * 与浏览器**同一套原语**：逐字取**字形轮廓**与装饰线所在横带求交，在交点区间处断开
+     * （不是整字跳过）—— 下划线遇到降部（`g` / `p` / `y`）断开、上划线遇到升部断开。
+     * 「不许切墨」的字（汉字/假名、`/ \ _`、Hangul）根本不进取样集，故整段穿过、不断线。
+     * `line-through` 按规范**不**做 skip-ink。细节见 [inkCuts]。
      */
     private fun paintDecorations(
         canvas: Canvas,
@@ -1000,12 +1011,10 @@ class LineWindowDrawer(
                 if (right <= left) continue
                 for (kind in DECORATION_PAINT_ORDER) {
                     if (kind !in paint.lines) continue
-                    val metricThickness = when (kind) {
-                        DecorationLine.UNDERLINE, DecorationLine.OVERLINE -> fm.underlineThickness
-                        DecorationLine.LINE_THROUGH -> fm.strikeoutThickness
+                    val t = when {
+                        paint.thicknessPx != null -> maxOf(paint.thicknessPx!!, DECORATION_MIN_THICKNESS_PX)
+                        else -> maxOf(fm.underlineThickness ?: (fs * DECORATION_AUTO_THICKNESS_EM), DECORATION_MIN_THICKNESS_PX)
                     }
-                    val t = paint.thicknessPx
-                        ?: maxOf(metricThickness ?: (fs * DECORATION_FALLBACK_THICKNESS_EM), DECORATION_MIN_THICKNESS_PX)
                     // 线中心相对基线的偏移（画布 y 向下为正）。度量按「线顶」给，故加半个线宽取中心。
                     val centerRel = when (kind) {
                         DecorationLine.UNDERLINE ->
@@ -1019,13 +1028,19 @@ class LineWindowDrawer(
                     } else {
                         emptyList()
                     }
-                    drawDecoration(canvas, paintX, left, right, baseY + centerRel, t, paint.style, color, cuts)
+                    drawDecoration(canvas, paintX, left, right, baseY + centerRel, t, paint.style, color, cuts, kind)
                 }
             }
         }
     }
 
-    /** 一条装饰线的落墨（含线型样式与 skip-ink 切口）。切口与 [left]/[right] 同为 placement 坐标系。 */
+    /**
+     * 一条装饰线的落墨（含线型样式与 skip-ink 切口）。切口与 [left]/[right] 同为 placement 坐标系。
+     *
+     * [y] 是**线中心**（相对基线已含在内）。双线与波浪在 Chromium 里按线型各自偏移
+     * （`TextDecorationInfo::SetLineData`：偏移 = 线宽 + 1px，删除线取整，波浪线同偏移但
+     * 删除线不偏移），故需要 [kind] 参与。
+     */
     private fun drawDecoration(
         canvas: Canvas,
         paintX: Float,
@@ -1036,28 +1051,62 @@ class LineWindowDrawer(
         style: DecorationStyle,
         color: Int,
         cuts: List<ClosedFloatingPointRange<Float>>,
+        kind: DecorationLine,
     ) {
+        // 双线第二条线、波浪线相对首线的纵向偏移（Chromium `DoubleOffset()`）。
+        val doubleDy = when (kind) {
+            DecorationLine.UNDERLINE -> t + 1f
+            DecorationLine.OVERLINE -> -(t + 1f)
+            DecorationLine.LINE_THROUGH -> kotlin.math.floor(t + 1f)
+        }
         for ((a, b) in subtractCuts(left, right, cuts)) {
             val x0 = paintX + a
             val x1 = paintX + b
             when (style) {
-                DecorationStyle.SOLID -> drawDecorationStroke(canvas, x0, x1, y, t, color, null)
+                DecorationStyle.SOLID -> drawDecorationRect(canvas, x0, x1, y, t, color)
                 DecorationStyle.DOUBLE -> {
-                    // 双线：两条各占 1/3 线宽的实线，间隔 1/3（CSS `double` 的定义）。
-                    val thin = t * DECORATION_DOUBLE_THIN
-                    drawDecorationStroke(canvas, x0, x1, y - t / 3f, thin, color, null)
-                    drawDecorationStroke(canvas, x0, x1, y + t / 3f, thin, color, null)
+                    // Chromium 画法：两条**与实线同宽**的填充矩形（各按 SnapYAxis 整像素化），
+                    // 第二条整体偏移「线宽 + 1px」⇒ 两条线之间恰好留 1px 空隙。
+                    drawDecorationRect(canvas, x0, x1, y, t, color)
+                    drawDecorationRect(canvas, x0, x1, y + doubleDy, t, color)
                 }
-                DecorationStyle.DOTTED ->
-                    drawDecorationStroke(canvas, x0, x1, y, t, color, floatArrayOf(t, t))
-                DecorationStyle.DASHED ->
-                    drawDecorationStroke(canvas, x0, x1, y, t, color, floatArrayOf(t * DECORATION_DASH_ON, t * DECORATION_DASH_OFF))
-                DecorationStyle.WAVY -> drawDecorationWave(canvas, x0, x1, y, t, color)
+                DecorationStyle.DOTTED -> {
+                    val tt = kotlin.math.round(t).coerceAtLeast(1f)
+                    if (tt >= 4f) {
+                        // 粗点线（Chromium StrokeIsDashed 为假的分支）：圆点直径 = 线宽、
+                        // 两端各内缩半个线宽，虚线段长 0 + 圆端帽即圆点。
+                        drawDecorationStroke(
+                            canvas, x0 + tt / 2f, x1 - tt / 2f, y, tt, color,
+                            floatArrayOf(0f, 2f * tt - 0.01f), PaintStrokeCap.ROUND,
+                        )
+                    } else {
+                        // 细点线（线宽 ≤ 3）：Chromium 与虚线同一路径，矩形短划 + 平头端帽。
+                        drawDecorationStroke(canvas, x0, x1, y, tt, color, floatArrayOf(tt, tt))
+                    }
+                }
+                DecorationStyle.DASHED -> {
+                    val tt = kotlin.math.round(t).coerceAtLeast(1f)
+                    // Chromium DashLengthRatio/DashGapRatio：线宽 ≥ 3 取 2:1，否则 3:2。
+                    val on = if (tt >= 3f) 2f else 3f
+                    val off = if (tt >= 3f) 1f else 2f
+                    drawDecorationStroke(canvas, x0, x1, y, tt, color, floatArrayOf(tt * on, tt * off))
+                }
+                DecorationStyle.WAVY -> {
+                    // Chromium：波浪中线 = 线顶 + 0.5 + 偏移（删除线不偏移），即相对线中心
+                    // 再移「线宽/2 + 1.5」（删除线为「-线宽/2 + 0.5」）。
+                    val shift = if (kind == DecorationLine.LINE_THROUGH) 0f else doubleDy
+                    drawDecorationWave(canvas, x0, x1, y - t / 2f + 0.5f + shift, t, color)
+                }
             }
         }
     }
 
-    /** 一条水平线笔画（[dash] 非空即点线/虚线：Skia 的 dash 相位 0）。 */
+    /**
+     * 一条水平线笔画（点线/虚线：Skia 的 dash 相位 0）。
+     *
+     * 中线按 Chromium `GetSnappedPointsForTextLine` 吸附：先 `floor(线中心)` 落到整像素，
+     * 取整后**奇数宽**再下移半像素让描边骑在像素边界上（偶数宽居中即恰好占整数行）。
+     */
     private fun drawDecorationStroke(
         canvas: Canvas,
         x0: Float,
@@ -1066,39 +1115,63 @@ class LineWindowDrawer(
         t: Float,
         color: Int,
         dash: FloatArray?,
+        cap: PaintStrokeCap = PaintStrokeCap.BUTT,
     ) {
         if (x1 <= x0 || t <= 0f) return
+        val yDraw = kotlin.math.floor(y) + if (t.toLong() % 2 == 1L) 0.5f else 0f
         val paint = Paint().apply {
             this.color = color
             mode = PaintMode.STROKE
             strokeWidth = t
-            strokeCap = PaintStrokeCap.BUTT
+            strokeCap = cap
             if (dash != null) pathEffect = PathEffect.makeDash(dash, 0f)
         }
-        canvas.drawLine(x0, y, x1, y, paint)
+        canvas.drawLine(x0, yDraw, x1, yDraw, paint)
+        paint.close()
+    }
+
+    /** 实线/双线用填充矩形绘制（避免亚像素描边，贴近 Chromium SnapYAxis 行为）。 */
+    private fun drawDecorationRect(
+        canvas: Canvas,
+        x0: Float,
+        x1: Float,
+        yCenter: Float,
+        t: Float,
+        color: Int,
+    ) {
+        if (x1 <= x0 || t <= 0f) return
+        // Chromium SnapYAxis：从**未取整的线顶**取 `floor(线顶 + 0.5)`，高取整且不小于 1。
+        val h = maxOf(kotlin.math.floor(t), 1f)
+        val ySnapped = kotlin.math.floor(yCenter - t / 2f + 0.5f)
+        val paint = Paint().apply {
+            this.color = color
+            mode = PaintMode.FILL
+        }
+        canvas.drawRect(x0, ySnapped, x1, ySnapped + h, paint)
         paint.close()
     }
 
     /**
-     * 波浪线（`text-decoration-style: wavy`）：按正弦路径画。
-     *
-     * 波长与振幅是 UA 自定值（CSS 未规定），这里取线宽的量级：振幅 = 线宽、波长 = 4 线宽，
-     * 与原下划线的视觉量级一致；不做 subsampling（每条装饰都重建 Path，条数极少）。
+     * 波浪线（`text-decoration-style: wavy`）：Chromium `MakeWave` 形状 ——
+     * 线宽钳到 ≥1 后 `波长 = 1 + 2·round(2t + 0.5)`、`控制点距 = 0.5 + round(3t + 0.5)`，
+     * 每个波长一段三次贝塞尔，路径起点相位 -1 个波长、多画 1 个波长收尾，
+     * 再**横向裁剪**到本片段（[cy] 即波浪中线，调用方已含 Chromium 的纵向偏移与半像素）。
      */
-    private fun drawDecorationWave(canvas: Canvas, x0: Float, x1: Float, y: Float, t: Float, color: Int) {
+    private fun drawDecorationWave(canvas: Canvas, x0: Float, x1: Float, cy: Float, t: Float, color: Int) {
         if (x1 <= x0 || t <= 0f) return
-        val amp = t
-        val wave = (t * DECORATION_WAVE_PERIODS).coerceAtLeast(2f)
+        val clamped = maxOf(1f, t)
+        val waveLen = 1f + 2f * kotlin.math.round(2f * clamped + 0.5f)
+        val cp = 0.5f + kotlin.math.round(3f * clamped + 0.5f)
         val builder = PathBuilder()
-        builder.moveTo(x0, y)
-        var x = x0
-        var up = true
-        while (x < x1) {
-            val next = (x + wave / 2f).coerceAtMost(x1)
-            val cy = if (up) y - amp else y + amp
-            builder.quadTo((x + next) / 2f, cy, next, y)
-            x = next
-            up = !up
+        val startX = x0 - waveLen
+        builder.moveTo(startX, cy)
+        var x = startX
+        val endX = x1 + waveLen
+        while (x < endX) {
+            val xe = x + waveLen
+            val cx = x + waveLen * 0.5f
+            builder.cubicTo(cx, cy + cp, cx, cy - cp, xe, cy)
+            x = xe
         }
         val path = builder.snapshot()
         val paint = Paint().apply {
@@ -1107,7 +1180,12 @@ class LineWindowDrawer(
             strokeWidth = t.coerceAtLeast(DECORATION_MIN_THICKNESS_PX)
             strokeCap = PaintStrokeCap.BUTT
         }
+        // 横向裁到片段（两端各多画 1 个波长正是 Chromium 的 overhang 再裁剪）；纵向留足振幅。
+        val ext = 0.289f * cp + t + 2f
+        canvas.save()
+        canvas.clipRect(Rect.makeXYWH(x0, cy - ext, x1 - x0, 2f * ext))
         canvas.drawPath(path, paint)
+        canvas.restore()
         path.close()
         builder.close()
         paint.close()
@@ -1130,11 +1208,21 @@ class LineWindowDrawer(
     }
 
     /**
-     * skip-ink 切口：逐字取墨迹盒（`Font.getBounds`，与基线同坐标系）与装饰线横带
-     * `[centerRel − t/2, centerRel + t/2]` 求交，相交即返回「墨迹左右边界」这段切口。
+     * skip-ink 切口：与浏览器同一套原语 —— **字形轮廓**（不是墨迹盒）与装饰横带求交，
+     * 回报每个交点区间。三处逐条对齐 Chromium（M134：
+     * `third_party/blink/renderer/core/paint/text_painter.cc` 的 `ClipDecorationsStripe`
+     * 与 `PaintDecorationLine`）：
      *
-     * 容差 [DECORATION_INK_EPS_PX]：只是**相切**（墨迹刚好触到线）不算穿过 —— 汉字、拉丁
-     * 基字大多如此，没有这一点会把整段下划线切碎。
+     * 1. 横带 = 装饰线矩形**纵向内缩 0.5px**（源码注释 `inflate by -0.5`：0.5px 以内的相交
+     *    忽略），即 `[center − t/2 + 0.5, center + t/2 − 0.5]`；`t = 1px` 时带退化成一条线。
+     * 2. **不许切墨**的字直接从取样集里剔掉（[canSkipInk]）—— 这就是「下划线穿过汉字
+     *    不断线」的全部原因，与墨迹几何无关。
+     * 3. 每个交点区间左右各扩 `min(t, 13px)`（`clip_rect.Outset(VH(1.0, dilation))` +
+     *    `kDecorationClipMaxDilation = 13`）；竖向不再扩，带本身已内缩。
+     *
+     * 相交判据走 [org.jetbrains.skia.TextBlob.getIntercepts]（Skia `SkTextBlob::getIntercepts`，
+     * 亦即 Blink `Font::GetTextIntercepts`）：同面的一串字合成一个 blob 一次取回，
+     * 位置与断行/落墨同源（[xs] 是 placement 坐标），切口与 [left]/[right] 同坐标系。
      */
     private fun inkCuts(
         line: DrawLine,
@@ -1147,10 +1235,39 @@ class LineWindowDrawer(
         centerRel: Float,
         t: Float,
     ): List<ClosedFloatingPointRange<Float>> {
-        val bandTop = centerRel - t / 2f
-        val bandBot = centerRel + t / 2f
+        val bandTop = centerRel - t / 2f + DECORATION_INK_BAND_INSET_PX
+        val bandBot = centerRel + t / 2f - DECORATION_INK_BAND_INSET_PX
+        // t 已由调用侧保底 1px，带非负；真退化成空带时按「无相交」处理。
+        if (bandBot < bandTop) return emptyList()
+        val dilation = minOf(t, DECORATION_CLIP_MAX_DILATION_PX)
         val out = ArrayList<ClosedFloatingPointRange<Float>>(4)
         var k = lo
+        // 同面的一串字攒一个 blob（Skia 的拦截按 blob 内的 run 取），换面就结算一次。
+        // 不许切墨的字不入 blob（位置是显式的，缺一个不影响其余字的 x）。
+        var curFont: Font? = null
+        var glyphs = ShortArray(0)
+        var posX = FloatArray(0)
+        var n = 0
+        fun flush() {
+            if (n == 0) return
+            val blob = TextBlobBuilder()
+                .appendRunPosH(curFont!!, glyphs.copyOf(n), posX.copyOf(n), 0f, null)
+                .build()
+            n = 0
+            if (blob == null) return
+            try {
+                val iv = blob.getIntercepts(bandTop, bandBot) ?: return
+                var i = 0
+                while (i + 1 < iv.size) {
+                    val a = iv[i] - dilation
+                    val b = iv[i + 1] + dilation
+                    if (b > a) out.add(a..b)
+                    i += 2
+                }
+            } finally {
+                blob.close()
+            }
+        }
         while (k < hi) {
             val abs = start + k
             if (abs >= line.text.length) break
@@ -1160,22 +1277,30 @@ class LineWindowDrawer(
                 k += at.units
                 continue
             }
-            val run = bands.lastOrNull { it.start <= abs && abs < it.end }?.font
-            val sizePx = run?.fontPxOr(line.fontSizePx) ?: line.fontSizePx
-            val famList = run?.families ?: line.families
-            val wt = run?.weight ?: line.weight
-            val ital = run?.italic ?: line.italic
-            val key = glyphPainter.cacheKey(famList, wt, ital, sizePx, at.cp)
-            val gs = fontFor.resolve(at.cp, key, sizePx, famList, wt, ital, run?.monospace ?: line.monospace, run?.tag ?: line.tag)
-            val glyph = gs.font.getUTF32Glyph(at.cp)
-            val bounds = gs.font.getBounds(shortArrayOf(glyph)).firstOrNull()
-            if (bounds != null && bounds.right > bounds.left &&
-                bounds.bottom > bandTop + DECORATION_INK_EPS_PX && bounds.top < bandBot - DECORATION_INK_EPS_PX
-            ) {
-                out.add((xHere + bounds.left)..(xHere + bounds.right))
+            if (canSkipInk(at.cp)) {
+                val run = bands.lastOrNull { it.start <= abs && abs < it.end }?.font
+                val sizePx = run?.fontPxOr(line.fontSizePx) ?: line.fontSizePx
+                val famList = run?.families ?: line.families
+                val wt = run?.weight ?: line.weight
+                val ital = run?.italic ?: line.italic
+                val key = glyphPainter.cacheKey(famList, wt, ital, sizePx, at.cp)
+                val gs = fontFor.resolve(at.cp, key, sizePx, famList, wt, ital, run?.monospace ?: line.monospace, run?.tag ?: line.tag)
+                if (gs.font !== curFont) {
+                    flush()
+                    curFont = gs.font
+                }
+                if (n == glyphs.size) {
+                    val cap = maxOf(8, n * 2)
+                    glyphs = glyphs.copyOf(cap)
+                    posX = posX.copyOf(cap)
+                }
+                glyphs[n] = gs.font.getUTF32Glyph(at.cp)
+                posX[n] = xHere
+                n++
             }
             k += at.units
         }
+        flush()
         return out
     }
 
@@ -1436,10 +1561,10 @@ private const val DECORATION_METRIC_CP = 'H'.code
 private val DECORATION_PAINT_ORDER = listOf(DecorationLine.UNDERLINE, DecorationLine.OVERLINE, DecorationLine.LINE_THROUGH)
 
 /** `auto` / `from-font` 线宽的下限（px）：细字体（宋体度量仅 0.02em）也要看得见。 */
-private const val DECORATION_MIN_THICKNESS_PX = 0.8f
+private const val DECORATION_MIN_THICKNESS_PX = 1.0f
 
 /** 字体度量缺失时的回退线宽（em，与旧下划线口径一致 = 0.06em）。 */
-private const val DECORATION_FALLBACK_THICKNESS_EM = 0.06f
+private const val DECORATION_AUTO_THICKNESS_EM = 0.1f
 
 /** 字体度量缺失时的回退下划线位置（em，与旧下划线口径一致 = 0.12em）。 */
 private const val DECORATION_UNDERLINE_FALLBACK_EM = 0.12f
@@ -1447,19 +1572,107 @@ private const val DECORATION_UNDERLINE_FALLBACK_EM = 0.12f
 /** 字体度量缺失时的回退删除线位置（em，基线上方 0.25em ≈ 字腰）。 */
 private const val DECORATION_STRIKE_FALLBACK_EM = 0.25f
 
-/** `double` 两条细线各占的比例（余下 1/3 为间隔）。 */
-private const val DECORATION_DOUBLE_THIN = 0.34f
+/** skip-ink 横带的纵向内缩（px）：Chromium `decoration_bounds.Inset(InsetsF::VH(0.5, 0))`。 */
+private const val DECORATION_INK_BAND_INSET_PX = 0.5f
 
-/** `dashed` 的划长 / 间隙（线宽的倍数；UA 自定值）。 */
-private const val DECORATION_DASH_ON = 3f
-private const val DECORATION_DASH_OFF = 2f
-
-/** `wavy` 的波长（线宽的倍数；UA 自定值）。 */
-private const val DECORATION_WAVE_PERIODS = 4f
+/** skip-ink 切口横向扩张上限（px）：Chromium `kDecorationClipMaxDilation`。 */
+private const val DECORATION_CLIP_MAX_DILATION_PX = 13f
 
 /**
- * skip-ink 的容差（px）：墨迹与装饰线只是**相切**不算穿过。
+ * `text-decoration-skip-ink: auto` 的**逐字参与判据**：true = 该字可以切墨
+ * （其字形轮廓与装饰带求交、交点处断线）。逐条对齐 Chromium M134
+ * `Character::CanTextDecorationSkipInk`（`platform/text/character.cc`），返回 false 的三类：
  *
- * 汉字与多数拉丁基字的墨迹底边正好落在下划线上，没有这一点会把整段下划线切碎。
+ * 1. `/` `\` `_` —— 三个 ASCII 例外（它们本身就长在装饰带里，浏览器明确要求不断线）；
+ * 2. `IsCJKIdeographOrSymbol` 覆盖的整片 CJK 表意/符号（含假名、注音、全角形式、
+ *    算筹/女书/西夏等，逐段抄自 `character_property_data.h` 的
+ *    `kIsCJKIdeographOrSymbolRanges` / `...Array`）；
+ * 3. Hangul 各区块与 Linear B 表意文字（`CanTextDecorationSkipInk` 里单列的 switch 分支）。
+ *
+ * 不在上面的字才去 [inkCuts] 里取字形轮廓与装饰带的交点。
  */
-private const val DECORATION_INK_EPS_PX = 0.25f
+private fun canSkipInk(cp: Int): Boolean {
+    if (cp == 0x2F || cp == 0x5C || cp == 0x5F) return false
+    if (cp < 0x2C7) return true
+    if (isCjkIdeographOrSymbol(cp)) return false
+    return cp !in 0x1100..0x11FF && cp !in 0x3130..0x318F && cp !in 0xAC00..0xD7A3 &&
+        cp !in 0xA960..0xA97F && cp !in 0xD7B0..0xD7FF && cp !in 0x10080..0x100FF
+}
+
+private fun isCjkIdeographOrSymbol(cp: Int): Boolean {
+    for (c in CJK_IDEOGRAPH_OR_SYMBOL_SINGLES) if (c == cp) return true
+    var i = 0
+    while (i + 1 < CJK_IDEOGRAPH_OR_SYMBOL_RANGES.size) {
+        if (cp <= CJK_IDEOGRAPH_OR_SYMBOL_RANGES[i + 1]) return cp >= CJK_IDEOGRAPH_OR_SYMBOL_RANGES[i]
+        i += 2
+    }
+    return false
+}
+
+/**
+ * `IsCJKIdeographOrSymbol` 的码点区间（成对 start/end），抄自 Blink M134
+ * `character_property_data.h` 的 `kIsCJKIdeographOrSymbolRanges`。**顺序照抄**
+ * （非升序），故 [isCjkIdeographOrSymbol] 线性扫描：条目数十个，逐字调用可忽略。
+ */
+private val CJK_IDEOGRAPH_OR_SYMBOL_RANGES = intArrayOf(
+    0x2695, 0x2696,
+    // cjkIdeographRanges
+    0x2E80, 0x2FDF,
+    0x31C0, 0x31EF,
+    0x3400, 0x4DBF,
+    0x4E00, 0x9FFF,
+    0xF900, 0xFAFF,
+    0x20000, 0x2FFFF,
+    // cjkSymbolRanges
+    0x2156, 0x215A, 0x2160, 0x216B, 0x2170, 0x217B, 0x231A, 0x231B, 0x23E9, 0x23EC,
+    0x23BE, 0x23CC, 0x2460, 0x2492, 0x249C, 0x24FF, 0x25CE, 0x25D3, 0x25E2, 0x25E6,
+    0x25FD, 0x25FE, 0x2600, 0x2603, 0x2660, 0x266F,
+    0x2614, 0x2615, 0x2648, 0x2653, 0x26AA, 0x26AB, 0x26C4, 0x26C5, 0x26F2, 0x26F3,
+    0x2753, 0x2757, 0x2763, 0x2764, 0x2672, 0x267D, 0x2776, 0x277F, 0x2795, 0x2797,
+    0x270A, 0x270D,
+    // 表意描述符 + CJK 符号标点（除 0x3030）/ 假名 / 注音
+    0x2FF0, 0x302D, 0x3031, 0x312F,
+    0x3190, 0x31BF,
+    0x3200, 0x33FF,
+    0x4DC0, 0x4DFF,
+    0xF860, 0xF862,
+    0xFE30, 0xFE6F,
+    0xFF00, 0xFF0C, 0xFF0E, 0xFF1A, 0xFF1F, 0xFFEF,
+    0x16FE0, 0x16FFF,
+    0x17000, 0x187FF,
+    0x18800, 0x18AFF,
+    0x1B000, 0x1B0FF,
+    0x1B100, 0x1B12F,
+    0x1B170, 0x1B2FF,
+    0x1F110, 0x1F129, 0x1F130, 0x1F149, 0x1F150, 0x1F169, 0x1F170, 0x1F189,
+    0x1F191, 0x1F19A, 0x1F1E6, 0x1F1FF, 0x1F200, 0x1F6FF,
+    0x1F3FB, 0x1F3FF,
+    0x1F6DC, 0x1F6DF,
+    0x1F7E0, 0x1F7EB,
+    0x1F7F0, 0x1F7F0,
+    0x1F900, 0x1F90F,
+    0x1F910, 0x1F918, 0x1F919, 0x1F97F, 0x1F980, 0x1F9BF, 0x1F9C0, 0x1F9FF,
+    0x1FA70, 0x1FA7C,
+    0x1FA80, 0x1FA88,
+    0x1FA90, 0x1FABD,
+    0x1FABF, 0x1FAC5,
+    0x1FACE, 0x1FACF,
+    0x1FAD0, 0x1FADB,
+    0x1FAE0, 0x1FAE8,
+    0x1FAF0, 0x1FAF8,
+)
+
+/** `kIsCJKIdeographOrSymbolArray`：单个码点。 */
+private val CJK_IDEOGRAPH_OR_SYMBOL_SINGLES = intArrayOf(
+    0x2C7, 0x2CA, 0x2CB, 0x2D9, 0x2020, 0x2021, 0x2030, 0x203B, 0x203C, 0x2042,
+    0x2047, 0x2048, 0x2049, 0x2051, 0x20DD, 0x20DE, 0x2100, 0x2103, 0x2105, 0x2109,
+    0x210A, 0x2113, 0x2116, 0x2121, 0x212B, 0x213B, 0x2150, 0x2151, 0x2152, 0x217F,
+    0x2189, 0x2307, 0x23F0, 0x23F3, 0x2312, 0x23CE, 0x2423, 0x25A0, 0x25A1, 0x25A2,
+    0x25AA, 0x25AB, 0x25B1, 0x25B2, 0x25B3, 0x25B6, 0x25B7, 0x25BC, 0x25BD, 0x25C0,
+    0x25C1, 0x25C6, 0x25C7, 0x25C9, 0x25CB, 0x25CC, 0x25EF, 0x2605, 0x2606, 0x260E,
+    0x2616, 0x2617, 0x261D, 0x2640, 0x2642, 0x267F, 0x2693, 0x26A0, 0x26A1, 0x26BD,
+    0x26BE, 0x26CE, 0x26D4, 0x26EA, 0x26F5, 0x26F9, 0x26FA, 0x26FD, 0x2705, 0x2708,
+    0x2713, 0x271A, 0x2728, 0x273F, 0x2740, 0x274C, 0x274E, 0x27B0, 0x27BF, 0x2B1A,
+    0x2B1B, 0x2B1C, 0x2B50, 0x2B55, 0xFE10, 0xFE11, 0xFE12, 0xFE19, 0xFF1D,
+    0x1F100, 0x1F004, 0x1F0CF, 0x1F18E,
+)

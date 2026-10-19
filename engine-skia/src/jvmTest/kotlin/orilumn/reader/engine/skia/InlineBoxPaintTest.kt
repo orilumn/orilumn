@@ -13,6 +13,7 @@ import org.jetbrains.skia.Canvas
 import org.jetbrains.skia.Color
 import org.jetbrains.skia.Rect
 import org.junit.Assert.assertEquals
+import org.junit.Assume
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -30,6 +31,8 @@ import kotlin.math.abs
  *   （`<mark>` / `border-bottom` 那一类）**不移动任何文字**（零回归）。
  * - **1b**：盒的横向 `padding`/`border` 把**盒内及其后**文字右移，盒前文字不动
  *   （对照：无盒 / 关闸两版的墨迹右缘都回到原位）。
+ * - **E20**：盒的**纵向**尺寸 = 盒首字命中面的 `ascent+descent`（不是固定 `'H'` 的拉丁面）
+ *   再加上下 `padding`/`border`——中文盒不得矮成 1.0em（Chromium 同栈实测 1.4em）。
  * - **回退纪律**：闸门关掉时**只画不推**（底色仍在、右缘不动），两侧一致 ⇒ 不会画比量宽。
  */
 class InlineBoxPaintTest {
@@ -99,6 +102,95 @@ class InlineBoxPaintTest {
             }
         }
         return false
+    }
+
+    /**
+     * 近似底色行跨度（含抗锯齿边缘）：白底/黑边框的混合色不算，白与黑本身也不算。
+     * 行内盒底色 `#fff176` 的上下沿用它量（`getColor` 精确相等会漏掉边缘 1~2 行）。
+     */
+    private fun boxBandHeight(bmp: Bitmap): Int {
+        val px = requireNotNull(bmp.peekPixels())
+        var top = Int.MAX_VALUE
+        var bottom = -1
+        for (y in 0 until bmp.height) {
+            var hit = false
+            for (x in 0 until bmp.width) {
+                val c = px.getColor(x, y)
+                val r = (c shr 16) and 0xFF
+                val g = (c shr 8) and 0xFF
+                val b = c and 0xFF
+                if (r > 200 && g > 180 && b < 210) { hit = true; break }
+            }
+            if (hit) { if (y < top) top = y; bottom = y }
+        }
+        return if (bottom < 0) 0 else bottom - top + 1
+    }
+
+    /** 整幅有墨（非纯白）的行跨度 = 盒的 border-box 高（含抗锯齿边缘）。 */
+    private fun inkBandHeight(bmp: Bitmap): Int {
+        val px = requireNotNull(bmp.peekPixels())
+        var top = Int.MAX_VALUE
+        var bottom = -1
+        for (y in 0 until bmp.height) {
+            var hit = false
+            for (x in 0 until bmp.width) if (px.getColor(x, y) != Color.WHITE) { hit = true; break }
+            if (hit) { if (y < top) top = y; bottom = y }
+        }
+        return if (bottom < 0) 0 else bottom - top + 1
+    }
+
+    // ---- E20：盒首字命中面决定内容区高度（中文盒不得按拉丁面算） ----
+
+    /**
+     * 内容区高度必须取**盒首字**命中面的 `ascent+descent`：固定用 `'H'` 会落到族栈里第一个
+     * 含拉丁字形的面（空栈展开即 Helvetica，em 盒 = 1.0em），而盒里的字形是汉面画的
+     * （苹方/宋体，em 盒 = 1.4em）⇒ 中文盒矮掉约 0.4em。Chromium（字体栈同为空栈、
+     * `lang=zh-CN`）同输入实测盒高 26px @18.5px（1.4em），我们修前是 18px（1.0em）。
+     *
+     * 期望值**由本机同一取面器算出**（不写死 1.4em），故字体环境无关；本机两面无法区分
+     * （无中文面）时跳过。
+     */
+    @Test
+    fun `行内盒纵向高度按盒首字命中面而非拉丁探针面（E20）`() {
+        val cjk = "内边距四周各两像素"
+        val size = 16f
+        val m = SkiaRunMeasurer()
+        fun emH(cp: Int): Float {
+            val f = requireNotNull(m.faceForCp(cp, "p", emptyList(), 400, false, false, size)) { "无可用面" }
+            return f.metrics.descent - f.metrics.ascent
+        }
+        val cjkEm = emH('内'.code)
+        val latinEm = emH('H'.code)
+        Assume.assumeTrue("本机无中文面可辨（两面 em 盒几乎相等），跳过", abs(cjkEm - latinEm) > 2f)
+
+        val text = cjk
+        val bare = InlineBoxRun(0, text.length, bgHex = "#fff176")
+        val padded = bare.copy(
+            padding = Edges(top = 2f, right = 4f, bottom = 2f, left = 4f),
+            border = Edges(top = 1f, right = 1f, bottom = 1f, left = 1f),
+        )
+        // 行下移 20px：盒高（em + padding + border）会越过行框上沿，贴着画布顶会被裁掉顶边。
+        fun paint(box: InlineBoxRun) =
+            render(listOf(line(text, listOf(box)).copy(yTop = 20, yBottom = 52)))
+        val bareBmp = paint(bare)
+        val paddedBmp = paint(padded)
+        val bareEm = boxBandHeight(bareBmp)      // 底色跨度 = 内容区（em 盒）
+        val paddedEm = boxBandHeight(paddedBmp)  // 底色跨度 = em 盒 + 上下 padding
+        val paddedBox = inkBandHeight(paddedBmp) // 有墨跨度 = em 盒 + 上下 padding + 上下 border
+
+        assertTrue(
+            "内容区高应≈盒首字面的 em 盒 ${cjkEm}（拉丁面只有 $latinEm），实测 $bareEm",
+            abs(bareEm - cjkEm) <= 2f,
+        )
+        assertTrue("内容区高不得按拉丁探针面 ${latinEm} 算，实测 $bareEm", bareEm >= latinEm + 3f)
+        assertTrue(
+            "上下 padding(2+2) 必须全在 em 盒之外（应≈${cjkEm + 4f}），实测 $paddedEm",
+            abs(paddedEm - (cjkEm + 4f)) <= 2f,
+        )
+        assertTrue(
+            "上下 border(1+1) 必须再包在 padding 之外（应≈${cjkEm + 6f}），实测 $paddedBox",
+            abs(paddedBox - (cjkEm + 6f)) <= 2f,
+        )
     }
 
     // ---- 1a：底色真的落墨 ----

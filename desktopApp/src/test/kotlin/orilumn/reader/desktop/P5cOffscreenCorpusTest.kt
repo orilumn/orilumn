@@ -171,12 +171,19 @@ class P5cOffscreenCorpusTest {
         }
     }
 
+    /** 按名取语料书；缺书（语料被精简）即跳过而非失败。 */
+    private fun bookByName(name: String): File {
+        val found = books().firstOrNull { it.nameWithoutExtension == name }
+        org.junit.Assume.assumeTrue("语料无书 $name，跳过", found != null)
+        return found!!
+    }
+
     @Test
     fun `obfuscated font matches plain`() {
         // P2-b：混淆字体解码后与明文字体同版（同文本＋像素级一致）。
         val dir = outDir()
         fun pageShots(name: String): List<Pair<String, Bitmap>> {
-            val book = books().first { it.nameWithoutExtension == name }
+            val book = bookByName(name)
             val root = java.nio.file.Files.createTempDirectory("orilumn-p5c").toFile()
             val host = openHost(book, root)
             try {
@@ -203,7 +210,7 @@ class P5cOffscreenCorpusTest {
 
     @Test
     fun `woff font loads`() {
-        val book = books().first { it.nameWithoutExtension == "wasteland-woff" }
+        val book = bookByName("wasteland-woff")
         val root = java.nio.file.Files.createTempDirectory("orilumn-p5c").toFile()
         val host = openHost(book, root)
         try {
@@ -219,7 +226,7 @@ class P5cOffscreenCorpusTest {
     @Test
     fun `internal links navigate end to end`() {
         // P4-c2：真书 href 解析→跨章/页内导航闭环。
-        val book = books().first { it.nameWithoutExtension == "internallinks" }
+        val book = bookByName("internallinks")
         val parsed = ZipEpubResourceReader(book.absolutePath).use { EpubParser().parse(it) }
         val indexByHref = parsed.spine.associate {
             LinkTargets.normalizePath(LinkTargets.splitFragment(it.href).first) to it.index

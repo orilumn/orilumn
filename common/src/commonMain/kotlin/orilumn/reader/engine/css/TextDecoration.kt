@@ -39,8 +39,11 @@ enum class DecorationStyle {
  * @property colorHex 声明值（`#rrggbb`）；**null = `currentColor`**，在**收集期**解析成声明元素的有效
  *   颜色（[ComputedStyle.colorHex] 已含继承，正是 currentColor 的定义）。故绘制侧拿到的是已解析值。
  * @property style 线型样式（实线/双线/点线/虚线/波浪）。
- * @property thicknessPx 声明值（px，em/% 已解）；**null = `auto` / `from-font`** —— 两者都由绘制侧
- *   按**声明元素的字体度量**取（`from-font` 与 `auto` 在这个粒度下同路，见 §第三刀实现设计）。
+ * @property thicknessPx 线宽（px，em/% 已解）：
+ *   - 显式声明值（`text-decoration-thickness: 2px` 等）；
+ *   - **`auto`（initial）= 字号 / 10** —— Chromium/主流引擎取 `font_size / 10`，解析期已知字号故**就地定值**；
+ *   - **null = `from-font`** —— 绘制侧取声明元素的字体下划线度量，缺失回退字号 / 10。
+ *   三者绘制时都钳到**下限 1px**（HTML 文本；Chromium `ComputeThickness` 的 `max(1, t)`）。
  * @property skipInk `text-decoration-skip-ink`（initial `auto` = true）：装饰线遇到字形墨迹
  *   （下划线遇到降部、上划线遇到升部）时在该处断开，而不是穿过字。`none` = 直画。
  */

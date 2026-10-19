@@ -799,17 +799,23 @@ object NormalFlowLayout {
             // border-box left + its left border/padding + the child's own left margin.
             val edgesL = (style.border.left + style.padding.left).roundToInt()
             val children = flowChildren(el, classify, hidden).flatMap { ch ->
-                val marginL = if (ch.tag == "#text") 0 else (styles[ch]?.margin?.left ?: 0f).roundToInt()
+                val childEdges = if (ch.tag == "#text") null else styles[ch]?.margin
+                val marginL = childEdges?.left?.roundToInt() ?: 0
+                val marginR = childEdges?.right?.roundToInt() ?: 0
                 val childLeft = left + edgesL + marginL
+                // CSS 2.1 §10.3.3：块级 auto 宽 = 包含块内容宽 − **自身横向外边距**，右缘不越包含块。
+                // 少这一步只右移不缩宽 ⇒ 行尾越出版心的字被页面裁掉（丢内容，不是不好看）；
+                // 轻路径 [descendContentWidth] 必须同式（重轻两路逐字节一致）。
+                val childW = (innerW - marginL - marginR).coerceAtLeast(1)
                 if (ch.tag == "#text") {
                     // P6-a: 匿名 run 不环绕（v1 规则保留），但高度回记账（Y 记账不漂移）。
                     // E19: 匿名 run 的样式取**母节点**（容器、或断开的行内包装）——与轻路径
                     // `blockStyleFor`「`#text` 叶取父级样式」同式，字形/行高随行内链不变；
                     // 容器直挂的匿名 run 此处 `styles[el] === style`，与旧行为逐值同。
-                    buildAnonymousTextLeaf(ch, styles[ch.parent ?: el] ?: style, breaker, innerW, childLeft).also { bs ->
+                    buildAnonymousTextLeaf(ch, styles[ch.parent ?: el] ?: style, breaker, childW, childLeft).also { bs ->
                         pending.consume(bs.sumOf { it.lineHeights.sum() })
                     }
-                } else buildBoxTree(ch, styles, breaker, innerW, childLeft, classify, hidden, imageLoader, chapterHref, density, genOf, pending)
+                } else buildBoxTree(ch, styles, breaker, childW, childLeft, classify, hidden, imageLoader, chapterHref, density, genOf, pending)
             }
             // P6-a: 容器自身纵向边（border+padding 永不折叠；margin 会折叠，已由子女记账）回记账。
             pending.consume(
@@ -1677,15 +1683,27 @@ object NormalFlowLayout {
 
     /**
      * The border-box (content) width [el] receives during box layout: the reader width [rootW] reduced
-     * by the horizontal padding+border of every ancestor container down to (but not including) [el].
+     * by the horizontal padding+border of every ancestor container down to (but not including) [el],
+     * **and by [el]'s own horizontal margins** (CSS 2.1 §10.3.3: 块级 auto 宽 = 包含块内容宽 − 自身横向
+     * 外边距 ⇒ 右缘不越包含块；[marginsOf] 供**左+右各自取整后求和**，与重路径
+     * [`buildBoxTree`] 的 `innerW - marginL - marginR` 逐字节同式)。
+     *
+     * 少扣外边距的后果不是「不好看」：盒只被右移而不缩宽，行尾越出版心的字被页面裁掉（丢内容）。
      * This is byte-identical to the recursive descent [buildBoxTree] performs top-down, and is what the
      * light (lazy-cascade) path uses instead of re-deriving it locally. [edgesOf] supplies each
      * element's horizontal padding+border in px (heavy passes the cascade map; light passes its lazy
      * style resolver).
      */
-    fun descendContentWidth(el: MarkupElement, rootW: Int, edgesOf: (MarkupElement) -> Int): Int {
+    fun descendContentWidth(
+        el: MarkupElement,
+        rootW: Int,
+        edgesOf: (MarkupElement) -> Int,
+        marginsOf: (MarkupElement) -> Int,
+    ): Int {
         val p = el.parent ?: return rootW
-        return innerFromEdges(edgesOf(p), descendContentWidth(p, rootW, edgesOf))
+        val parentW = descendContentWidth(p, rootW, edgesOf, marginsOf)
+        val ownMargin = if (el.tag == "#text") 0 else marginsOf(el)
+        return innerFromEdges(edgesOf(p) + ownMargin, parentW)
     }
 
     /**

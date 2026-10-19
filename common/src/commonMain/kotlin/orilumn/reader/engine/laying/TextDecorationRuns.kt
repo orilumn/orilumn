@@ -20,8 +20,7 @@ import orilumn.reader.engine.html.MarkupElement
  * @property colorHex **已解析**的装饰色（`#rrggbb`）；null = 落回叶墨色
  *   （声明元素的祖先链上一个 `color` 都没声明时的 `currentColor`）。
  * @property style 线型样式。
- * @property thicknessPx 声明值（px）；null = `auto` / `from-font`，绘制侧按 [fontSizePx] 那张面的
- *   字体度量取（`FontMetrics.underlineThickness`）。
+ * @property thicknessPx 声明值（px）；null = `from-font`（绘制侧取字体下划线度量），非 null：`auto` 在解析期已定为 fontSize/10。
  * @property skipInk `text-decoration-skip-ink`：装饰线遇到字形墨迹处断开。
  * @property fontSizePx 声明元素**自身字号**：em 口径的装饰线位置/粗细与 `auto` 粗细的度量基准。
  * @property families / weight / italic / monospace 声明元素自身字体（取度量用）。

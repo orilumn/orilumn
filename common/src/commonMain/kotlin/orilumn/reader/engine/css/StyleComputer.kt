@@ -1365,8 +1365,8 @@ class StyleComputer(
      * **先后顺序**决定（后写的简写会重置先写的长属性），本仓级联表不带顺序 ⇒ 这里取「长属性优先」。
      * 书里同时写简写与长属性且**顺序相反**的极少，且两值同义时无差异。
      *
-     * `text-decoration: blink` 无视觉，解析即丢（不报错）。`from-font` 与 `auto` 同路：都由绘制侧
-     * 按字体度量取（[TextDecoration.thicknessPx] = null）。
+     * `text-decoration: blink` 无视觉，解析即丢（不报错）。
+     * `auto` 在解析期按字号/10 定值（Chromium 行为）；`from-font` 由绘制侧按字体度量取（[TextDecoration.thicknessPx] = null）。
      */
     private fun parseTextDecoration(w: Map<String, String>, fontSize: Float, parentFontSize: Float): TextDecoration {
         val short = w["text-decoration"]?.let { parseDecorationShorthand(it, fontSize, parentFontSize) }
@@ -1391,7 +1391,8 @@ class StyleComputer(
             when {
                 tok in DECORATION_LINE_TOKENS -> lines = lines + parseDecorationLines(tok)
                 tok in DECORATION_STYLE_TOKENS -> style = DECORATION_STYLE_TOKENS.getValue(tok)
-                tok == "auto" || tok == "from-font" -> thickness = null
+                tok == "from-font" -> thickness = null
+                tok == "auto" -> thickness = fontSize * 0.1f
                 parseCssColor(tok) != null -> color = parseCssColor(tok)
                 parseLength(tok) != null -> thickness = parseLength(tok)?.resolve(fontSize, parentFontSize, rootFontPx)
             }
@@ -1415,10 +1416,11 @@ class StyleComputer(
     private fun parseDecorationStyle(value: String): DecorationStyle? =
         DECORATION_STYLE_TOKENS[value.trim().lowercase()]
 
-    /** `text-decoration-thickness`：`auto` / `from-font` = null（绘制侧按字体度量）。 */
+    /** `text-decoration-thickness`：`auto` → fontSize/10；`from-font` → null（绘制侧取字体度量）。 */
     private fun parseDecorationThickness(value: String, fontSize: Float, parentFontSize: Float): Float? {
         val v = value.trim().lowercase()
-        if (v == "auto" || v == "from-font") return null
+        if (v == "from-font") return null
+        if (v == "auto") return fontSize * 0.1f
         return parseLength(v)?.resolve(fontSize, parentFontSize, rootFontPx)
     }
 

@@ -47,27 +47,48 @@ class BoxSharedGeometryTest {
         map[el] ?: ComputedStyle(fontSizePx = 10f, lineHeightRatio = 1.5f)
 
     /** Runs the canonical box layout and returns the flattened leaf boxes in document order. */
-    private fun layoutLeaves(root: MarkupElement): List<LayoutBox> {
+    private fun layoutLeaves(root: MarkupElement, widthPx: Int = 30): List<LayoutBox> {
         val styleMap = StyleComputer(10f, LightCssParser().parse(""), listOf(LightCssParser().parse(""))).compute(root)
-        val result = BoxLayouter(10f, FixedWidthBreaker(3)).layoutBoxes(root, widthPx = 30, styleMap = styleMap)
+        val result = BoxLayouter(10f, FixedWidthBreaker(3)).layoutBoxes(root, widthPx = widthPx, styleMap = styleMap)
         return flattenLeaves(result.boxes)
     }
 
+    /**
+     * E20 横向单源锁：叶子的 **border-box 宽 = 版心 − 祖先横向内边距/边框 − 叶子自身横向外边距**
+     * （CSS 2.1 §10.3.3）。轻路径 [NormalFlowLayout.descendContentWidth] 必须与重路径 `buildBoxTree`
+     * 逐字节同值——两侧都按「先各自取整的外边距求和，再减包含块内宽」这一个整数式子。
+     *
+     * 本例刻意让**每一层都带边/外边距且都不触 1px 下界**（旧的 30px 版心会把每层都夹到 1，遮蔽一切漂移）：
+     * 300 −div.margin(5+5)=290 −div.边(4+20)=266 −section.边(8+8)=250 −p.margin(7+7)=236。
+     * 变异验证：把轻路径的 `marginsOf(el)` 换成 0 ⇒ 本用例红（250 ≠ 236）；把重路径的
+     * `innerW − marginL − marginR` 换成 `innerW` ⇒ 叶宽变 250 且右缘 268→282 越出版心。
+     */
     @Test
     fun sharedWidthMatchesCanonicalContentWidth() {
-        // body > div(margin/padding/border) > section(padding) > p → the leaf's border-box width.
-        val p = node("p", children = listOf(text("abcdef")))
+        // body > div(margin/padding/border) > section(padding) > p(margin) → the leaf's border-box width.
+        val p = node("p", mapOf("style" to "margin: 2px 7px"), children = listOf(text("abcdef")))
         val section = node("section", mapOf("style" to "padding: 3px 8px"), children = listOf(p))
         val div = node("div", mapOf("style" to "border: 2px; padding: 4px 10px; margin: 5px"), children = listOf(section))
         val root = node("body", children = listOf(div))
         linkParents(root, null)
 
         val styleMap = StyleComputer(10f, LightCssParser().parse(""), listOf(LightCssParser().parse(""))).compute(root)
-        val leafBox = layoutLeaves(root).single()
-        val sharedW = NormalFlowLayout.descendContentWidth(p, 30) { e ->
-            val s = compute(styleMap, e)
-            (s.padding.horizontal + s.border.horizontal).roundToInt()
-        }
+        val leafBox = layoutLeaves(root, 300).single()
+        assertEquals(236, leafBox.contentWidth)
+        assertEquals(32, leafBox.contentLeft) // 5(div.ml)+12(div.左边)+8(section.左边)+7(p.ml)
+        assertEquals(268, leafBox.contentLeft + leafBox.contentWidth) // 右缘不越 300 版心
+        val sharedW = NormalFlowLayout.descendContentWidth(
+            p, 300,
+            { e ->
+                val s = compute(styleMap, e)
+                (s.padding.horizontal + s.border.horizontal).roundToInt()
+            },
+            { e ->
+                val s = compute(styleMap, e)
+                // 与重路径逐值同式：左右**各自取整**再相加（不先加后取整）。
+                s.margin.left.roundToInt() + s.margin.right.roundToInt()
+            },
+        )
         assertEquals(leafBox.contentWidth, sharedW)
     }
 

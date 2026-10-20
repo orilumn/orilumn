@@ -4,7 +4,7 @@ import orilumn.reader.engine.text.TypographicProfile
 import kotlin.math.roundToInt
 
 /**
- * 阅读器 UI 层（最高书覆盖 tier）样式表**唯一单源**（Z4，`docs/平台一致性整改方案.md`）。
+ * 阅读器 UI 层（读者全局偏好）样式表**唯一单源**（Z4，`docs/平台一致性整改方案.md`）。
  *
  * 平板 `BoxChapterLayouter.uiSheetFromProfile` 与桌面 `DesktopReaderHost.uiSheet` 原本各自内联
  * 同一套规则，现统一委托 [build]：行距 line-height 覆盖所有含文本的块级元素；首行缩进

@@ -5,6 +5,9 @@
 --   v2 books += coverPath/readTime（S33，镜像 Room 7→8 的书架增强列）
 --   v3 reading_states（S34a）
 --   v4 font_faces（S34b）
+--   v5 font_faces += hidden（F 系列）
+--   v6 font_scan_state（P1 字体扫描指纹）
+--   v7 annotations（文本标注 / 高亮 / 划线 / 批注）
 --
 -- 本文件恒为最新终态；老库经 .sqm 逐级迁移，新库由 Schema.create() 一次建全。
 

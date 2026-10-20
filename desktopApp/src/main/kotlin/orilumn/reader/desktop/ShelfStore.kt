@@ -237,7 +237,7 @@ class DesktopShelfStore(root: File) : ShelfRepository {
 
     override suspend fun delete(id: Long) {
         val entry = requireDb().getBook(id) ?: return
-        requireDb().removeBook(id)
+        requireDb().removeBookAndData(id)
         withContext(Dispatchers.IO) {
             runCatching { File(entry.filePath).delete() }
             entry.coverPath?.let { runCatching { File(it).delete() } }

@@ -48,8 +48,7 @@ class BookRepository(
     suspend fun touchRead(id: Long) = db.touchRead(id, System.currentTimeMillis())
 
     suspend fun removeBook(book: Book) {
-        db.removeBook(book.id)
-        db.clearReadingState(book.id)
+        db.removeBookAndData(book.id)
     }
 
     // ---- Reading progress (SQLDelight；S34a) ----

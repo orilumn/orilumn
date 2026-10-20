@@ -976,7 +976,7 @@ private fun SpacingPage(
     val labelW = sliderLabelWidth(listOf("首行缩进", "行距", "段间距", "疏密", "上边距", "下边距", "左边距", "右边距"), p)
     // 排版量滑块永远可调 (用户最高优先级); 原书设置 只是把值重置为中性默认.
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
-        // 首行缩进 (em): UI 层最高优先级 text-indent; 0 = 无首行缩进.
+        // 首行缩进 (em): UI 层在全局偏好里最高优先级 text-indent; 自定义样式可再覆盖; 0 = 无首行缩进.
         item { UiSliderRow("首行缩进", 0.0, 10.0, 1.0, s.firstLineIndent,
             { "${it.roundToInt()}" },
             { preview(s.copy(firstLineIndent = it)) }, { commit(s.copy(firstLineIndent = it)) }, p, labelWidth = labelW,

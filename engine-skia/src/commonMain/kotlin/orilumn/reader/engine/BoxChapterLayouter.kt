@@ -135,11 +135,11 @@ data class ChapterPrepareResult(
  * cascade underneath.
  */
 class BoxChapterLayouter(
-    /** Reader-app layer (2nd-highest priority). */
+    /** Reader theme layer (lowest reader layer, above the book). */
     private val themeSheet: StyleSheet? = null,
 
-    /** Per-item reader-settings layer (highest of the book-overriding layers; vacant for now). */
-    private val settingsSheet: StyleSheet? = null,
+    /** Reader custom-style layer (highest reader layer; vacant for now). */
+    private val customStyleSheet: StyleSheet? = null,
 
     /** Optional EPUB image loader for `<img>` rendering. When null, images fall back to placeholder
      *  bands. Set via [bindChapterContext] before layout so image paths can be resolved relative to
@@ -568,7 +568,8 @@ class BoxChapterLayouter(
         val ua = uaSheetFromProfile(profile)
         // Reuse the caller's cached parsed author sheets (light path); otherwise parse now (heavy path).
         val sheets = authorSheets ?: parseAuthorSheets(cssBundle)
-        // UI 排版层是最高优先级且永远生效 (行距/段间距/首行缩进/疏密), 含 原书设置.
+        // UI 排版层是全局偏好的最高层且永远生效 (行距/段间距/首行缩进/疏密), 含 原书设置;
+        // 读者自定义样式层在它之上.
         val ui = uiSheetFromProfile(profile)
         // 排版主题层 (tier 42): 注入的 themeSheet 优先; 否则按 profile.layoutTheme 加载
         // 资产 CSS (traditional.css / modern.css). 原书设置不起用主题层.
@@ -577,8 +578,8 @@ class BoxChapterLayouter(
             themeSheet != null -> themeSheet
             else -> themeSheetFromProfile(profile)
         }
-        val settings = settingsSheet
-        return StyleComputer(profile.bodyPx, ua, sheets, theme, settings, ui, paragraphScale = profile.paragraphSpacingScale, gapScale = profile.paragraphGapScale, pxScale = profile.density)
+        val custom = customStyleSheet
+        return StyleComputer(profile.bodyPx, ua, sheets, theme, custom, ui, paragraphScale = profile.paragraphSpacingScale, gapScale = profile.paragraphGapScale, pxScale = profile.density)
     }
 
     /** Assembles a [ChapterPrepareResult] from a cascade + box tree, computing global char starts. */
@@ -2945,7 +2946,7 @@ class BoxChapterLayouter(
         NormalFlowLayout.innerBreakWidth(leaf.style, leaf.contentWidth)
 
     /**
-     * The reader-app (UI) layer stylesheet — highest book-overriding layer (fixed tier). It enforces
+     * The reader-app (UI) layer stylesheet — highest global reader layer (fixed tier; custom styles sit above it). It enforces
      * the reader's 行距 (line-height) and 段间距 (paragraph spacing) so they always win over the book,
      * without mutating computed styles. 单源在 common（[ReaderUiSheet], Z4），与桌面同规则生成.
      */

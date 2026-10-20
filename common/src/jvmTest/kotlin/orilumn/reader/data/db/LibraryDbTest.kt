@@ -4,6 +4,8 @@ import app.cash.sqldelight.db.QueryResult
 import app.cash.sqldelight.coroutines.asFlow
 import app.cash.sqldelight.coroutines.mapToList
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
+import orilumn.reader.data.annotation.Annotation
+import orilumn.reader.data.annotation.AnnotationKind
 import orilumn.reader.db.OrilumnDb
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -198,6 +200,137 @@ class LibraryDbTest {
         assertEquals(3, db.readingState(id)?.chapter)
         db.clearReadingState(id)
         assertNull(db.readingState(id))
+    }
+
+    @Test
+    fun annotationsCrudRoundTrip() = runBlocking {
+        val db = freshDb()
+        val book = db.addBook("T", null, "/b.epub", addedAt = 1L)
+        assertTrue(db.annotationsForChapter(book, 2).isEmpty())
+
+        val first = db.addAnnotation(
+            Annotation(
+                bookId = book,
+                chapter = 2,
+                charStart = 5,
+                charEnd = 9,
+                kind = AnnotationKind.Highlight,
+                color = 0x80FFCC00.toInt(),
+                createdAt = 10L,
+                updatedAt = 10L,
+            ),
+        )
+        val second = db.addAnnotation(
+            Annotation(
+                bookId = book,
+                chapter = 2,
+                charStart = 7,
+                charEnd = 8,
+                kind = AnnotationKind.Underline,
+                color = 0xFF3366CC.toInt(),
+                createdAt = 11L,
+                updatedAt = 11L,
+            ),
+        )
+        assertTrue(first.id > 0)
+        assertTrue(second.id > first.id)
+        assertEquals(listOf(first.id, second.id), db.annotationsForChapter(book, 2).map { it.id })
+
+        // 命中包含该偏移的最后一条；charEnd 不含。
+        assertEquals(second.id, db.annotationAt(book, 2, 7)?.id)
+        assertEquals(first.id, db.annotationAt(book, 2, 8)?.id)
+        assertNull(db.annotationAt(book, 2, 9))
+
+        // v1 只改颜色；批注文本先按可写验证，v2 界面再接。
+        db.updateAnnotation(
+            first.copy(
+                kind = AnnotationKind.Note,
+                color = 0xFF112233.toInt(),
+                note = "批注",
+                updatedAt = 20L,
+            ),
+        )
+        val updated = db.annotationsForChapter(book, 2).single { it.id == first.id }
+        assertEquals(AnnotationKind.Note, updated.kind)
+        assertEquals(0xFF112233.toInt(), updated.color)
+        assertEquals("批注", updated.note)
+        assertEquals(20L, updated.updatedAt)
+
+        db.deleteAnnotation(first.id)
+        assertEquals(listOf(second.id), db.annotationsForChapter(book, 2).map { it.id })
+        db.deleteAnnotationsForBook(book)
+        assertTrue(db.annotationsForChapter(book, 2).isEmpty())
+    }
+
+    @Test
+    fun removeBookAndDataClearsProgressAndAnnotations() = runBlocking {
+        val db = freshDb()
+        val kept = db.addBook("Keep", null, "/keep.epub", addedAt = 1L)
+        val removed = db.addBook("Remove", null, "/remove.epub", addedAt = 2L)
+        listOf(kept, removed).forEach { book ->
+            db.saveReadingState(
+                orilumn.reader.data.book.BookReadingState(
+                    bookId = book,
+                    chapter = 1,
+                    target = "c1",
+                    progress = 0.25,
+                    locator = null,
+                    updatedAt = 3L,
+                ),
+            )
+            db.addAnnotation(
+                Annotation(
+                    bookId = book,
+                    chapter = 1,
+                    charStart = 0,
+                    charEnd = 3,
+                    kind = AnnotationKind.Highlight,
+                    color = 0x80FFCC00.toInt(),
+                    createdAt = 3L,
+                    updatedAt = 3L,
+                ),
+            )
+        }
+
+        db.removeBookAndData(removed)
+
+        assertNull(db.getBook(removed))
+        assertNull(db.readingState(removed))
+        assertTrue(db.annotationsForChapter(removed, 1).isEmpty())
+
+        // 另一本书的数据不受影响。
+        assertTrue(db.getBook(kept) != null)
+        assertTrue(db.readingState(kept) != null)
+        assertEquals(1, db.annotationsForChapter(kept, 1).size)
+    }
+
+    @Test
+    fun migrate6to7AddsAnnotationTable() {
+        // 用最新 schema 建库后删掉标注表、把版本退回 6，模拟真实的 6→7 升级。
+        val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        OrilumnDb.Schema.create(driver)
+        driver.execute(null, "DROP TABLE annotations;", 0)
+        driver.execute(null, "PRAGMA user_version = 6;", 0)
+
+        OrilumnDb.Schema.migrate(driver, 6, 7)
+
+        val db = LibraryDb(OrilumnDb(driver))
+        runBlocking {
+            val book = db.addBook("T", null, "/b.epub", addedAt = 1L)
+            val row = db.addAnnotation(
+                Annotation(
+                    bookId = book,
+                    chapter = 1,
+                    charStart = 2,
+                    charEnd = 6,
+                    kind = AnnotationKind.Underline,
+                    color = 0xFF000000.toInt(),
+                    createdAt = 1L,
+                    updatedAt = 1L,
+                ),
+            )
+            assertEquals(listOf(row), db.annotationsForChapter(book, 1))
+        }
     }
 
     @Test

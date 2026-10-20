@@ -3237,18 +3237,41 @@ class BoxChapterLayouter(
             borderBox.clipRect = borderBox.inheritedClip(clip::get)
             out.add(borderBox)
         }
-        // **祖先先于后代**：上面三张表都是 HashMap（遍历序不确定），而这里的盒子是扁平表
-        // （重路径是盒树按序递归）。不排序时，一个不透明底色可能画在子孙之后把子孙盖掉
-        // （本轮的 clearfix 容器就属于这种：容器带 `#f5f5f5` 底色，里面是自带背景的浮动方块）。
-        // 按元素在文档树里的深度做**稳定**排序：同深度保持插入序，祖先恒在前。
+        val depthCache = HashMap<MarkupElement, Int>()
+        fun depthOf(el: MarkupElement): Int = depthCache.getOrPut(el) {
+            var d = 0
+            var p = el.parent
+            while (p != null) { d++; p = p.parent }
+            d
+        }
+        // **子盒底回填祖先**：上面的聚合只沿**叶带**取容器底，中间夹一个自带内边距/边框的容器
+        // （典型 `overflow:hidden;padding:4px;border:1px` 的 clearfix `.cf`）时，那一圈（4+1）
+        // 不进祖先聚合 ⇒ 祖先（`.test-case` 虚线框）的底比浏览器高 5px，框下方间距看起来变小。
+        // 与重路径 `emit` 的递归同式：祖先内容底 ≥ 子盒 border-box 底 + 祖先后沿（下内边距+下边框）。
+        // 取 max，不与已聚合的叶带重复计。**深的先算**：子盒回填后再往上回填祖父。
         if (out.size > 1) {
-            val depthCache = HashMap<MarkupElement, Int>()
-            fun depthOf(el: MarkupElement): Int = depthCache.getOrPut(el) {
-                var d = 0
-                var p = el.parent
-                while (p != null) { d++; p = p.parent }
-                d
+            val byEl = HashMap<MarkupElement, LayoutBox>(out.size)
+            for (b in out) {
+                val el = b.el ?: continue
+                if (!byEl.containsKey(el)) byEl[el] = b
             }
+            val deepestFirst = out.filter { it.el != null }.sortedByDescending { depthOf(it.el!!) }
+            for (b in deepestFirst) {
+                var a = b.el?.parent
+                while (a != null) {
+                    val p = byEl[a]
+                    if (p != null && p !== b) {
+                        val edges = (p.style.padding.bottom + p.style.border.bottom).roundToInt()
+                        val want = b.contentBottom + edges
+                        if (want > p.contentBottom) p.contentBottom = want
+                    }
+                    a = a.parent
+                }
+            }
+            // **祖先先于后代**：上面三张表都是 HashMap（遍历序不确定），而这里的盒子是扁平表
+            // （重路径是盒树按序递归）。不排序时，一个不透明底色可能画在子孙之后把子孙盖掉
+            // （本轮的 clearfix 容器就属于这种：容器带 `#f5f5f5` 底色，里面是自带背景的浮动方块）。
+            // 按元素在文档树里的深度做**稳定**排序：同深度保持插入序，祖先恒在前。
             out.sortBy { box -> box.el?.let(::depthOf) ?: Int.MAX_VALUE }
         }
         return LightDrawBoxes(out, clip)

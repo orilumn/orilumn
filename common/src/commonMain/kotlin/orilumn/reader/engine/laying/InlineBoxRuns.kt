@@ -227,8 +227,11 @@ data class InlineBoxEdge(val index: Int, val px: Float)
  *
  * 闸门放在**推导处**（[inlineBoxEdges] / [inlineBoxLeadInsetPx]）而非各处调用点：三个消费方
  * （断行器预留版心、落墨落位、簇位轨）都经这两个函数拿到推进量，只有一处也就只有一种口径。
+ *
+ * 绘制侧另有一处**读**（不改推导）：盒的右缘要判断「末字符的 advance 里是不是已经含了
+ * `padding.right + border.right`」，含了就不能再补一次（否则画比量宽、盒边压在后文上）。
  */
-private fun inlineBoxAdvanceEnabled(): Boolean = orilumn.reader.engine.AbSwitch.inhouseBreak()
+fun inlineBoxAdvanceEnabled(): Boolean = orilumn.reader.engine.AbSwitch.inhouseBreak()
 
 /**
  * 行内盒横向推进单源（pure JVM）：把叶文本坐标系的 [runs] 折算成逐字位推进量（[textLength] = 叶文本长度）。

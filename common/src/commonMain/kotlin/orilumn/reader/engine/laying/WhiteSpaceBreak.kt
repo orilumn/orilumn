@@ -28,9 +28,17 @@ fun breakLeafLines(
      * 折入首行缩进。空 = 无（零回归）。与 [fontRuns] 同一纪律：调用方必须传与塑形同一份。
      */
     inlineBoxRuns: List<InlineBoxRun> = emptyList(),
+    /**
+     * `::first-letter{float:left}` 首字下沉盒：第 1..[CapFloat.lines] 行收窄并右移，首字自身
+     * 不撑首行行框（出流）。null = 无（零回归）。
+     */
+    capFloat: CapFloat? = null,
 ): List<BrokenLine> {
     val edges = inlineBoxEdges(text.length, inlineBoxRuns)
     val lead = inlineBoxLeadInsetPx(inlineBoxRuns)
+    // 下沉首字出流：首行行框只按正文字行高算（否则 2em 首字把首行撑成两行高，与 Chromium
+    // 实测「首行行高不变、首字压住下面几行」相反）；基线账同理由绘制侧剔。
+    val growRuns = withoutCapRuns(fontRuns, capFloat)
     if (WhiteSpaceNormalize.wraps(style.whiteSpace)) {
         return growLineHeightsForInlineFontSize(
             breaker.breakLines(
@@ -38,7 +46,7 @@ fun breakLeafLines(
                 style.fontFamilies, style.fontWeight, style.italic, style.monospace || tag == "pre",
                 firstLineIndentPx + lead, fontRuns, baselineShifts, edges,
             ),
-            fontRuns, style.fontSizePx, style.lineHeightRatio,
+            growRuns, style.fontSizePx, style.lineHeightRatio,
         )
     }
     if (text.isEmpty()) return emptyList()
@@ -61,7 +69,18 @@ fun breakLeafLines(
         i++
     }
     // 窄体/平面文本同吃 E9：不换行段的行框同样由行内字号撑。
-    return growLineHeightsForInlineFontSize(out, fontRuns, style.fontSizePx, style.lineHeightRatio)
+    return growLineHeightsForInlineFontSize(out, growRuns, style.fontSizePx, style.lineHeightRatio)
+}
+
+/**
+ * 把首字那段（[CapFloat.endExclusive] 之内、即叶首的那段大字号 run）从行高账里剔除。
+ *
+ * 只剔**完全落在首字区间内**的 run（首字就是一个字素簇，`::first-letter` 恰好把它切成一段），
+ * 其余 run 原样 —— 段落里别处还有大字号（`<span style=font-size:2em>`）时照旧撑行。
+ */
+internal fun withoutCapRuns(fontRuns: List<FontRun>, capFloat: CapFloat?): List<FontRun> {
+    if (capFloat == null || fontRuns.isEmpty()) return fontRuns
+    return fontRuns.filterNot { it.start == 0 && it.endExclusive <= capFloat.endExclusive }
 }
 
 /**
@@ -87,10 +106,12 @@ fun breakWrappedLines(
     baselineShifts: List<BaselineShift> = emptyList(),
     /** 行内盒（叶文本坐标系）：横向 `padding`/`border` 参与断行宽度（逐行切片）；空 = 无。 */
     inlineBoxRuns: List<InlineBoxRun> = emptyList(),
+    /** `::first-letter{float:left}` 首字下沉盒：首行之后的 [CapFloat.lines] 行收窄右移。null = 无。 */
+    capFloat: CapFloat? = null,
 ): List<BrokenLine> {
-    if (lead == null || text.isEmpty() || !WhiteSpaceNormalize.wraps(style.whiteSpace)) {
+    if ((lead == null && capFloat == null) || text.isEmpty() || !WhiteSpaceNormalize.wraps(style.whiteSpace)) {
         return breakLeafLines(
-            breaker, text, style, widthPx, tag, fontRuns, firstLineIndentPx, baselineShifts, inlineBoxRuns,
+            breaker, text, style, widthPx, tag, fontRuns, firstLineIndentPx, baselineShifts, inlineBoxRuns, capFloat,
         )
     }
     // 推进量按**叶坐标**算一次，逐轮切到子串坐标（切出 `slice` 语义：续片段无左边框/内边距）。
@@ -101,7 +122,12 @@ fun breakWrappedLines(
     var i = 0
     val mono = style.monospace || tag == "pre"
     while (consumed < text.length) {
-        val w = (if (i < lead.lines) lead.widthPx else widthPx).coerceAtLeast(1)
+        val w = when {
+            lead != null && i < lead.lines -> lead.widthPx
+            // 首字下沉：从第 1 行起收窄（第 0 行由首字自己占位，见 [CapFloat]）。
+            capFloat != null && i >= 1 && i <= capFloat.lines -> widthPx - capFloat.widthPx
+            else -> widthPx
+        }.coerceAtLeast(1)
         val sub = text.subSequence(consumed, text.length)
         val lines = breaker.breakLines(
             sub, style.fontSizePx, style.lineHeightRatio, w, style.textAlign, tag,
@@ -121,7 +147,7 @@ fun breakWrappedLines(
         i++
     }
     // E9：悬浮环绕逐行重断走的也是断行器（不经 [breakLeafLines]），抬升在此收口。
-    return growLineHeightsForInlineFontSize(out, fontRuns, style.fontSizePx, style.lineHeightRatio)
+    return growLineHeightsForInlineFontSize(out, withoutCapRuns(fontRuns, capFloat), style.fontSizePx, style.lineHeightRatio)
 }
 
 /** 把叶坐标系 run 切到子串坐标系（越界裁剪，无交集丢弃）。 */

@@ -132,8 +132,20 @@ object DrawLineBuilder {
                 // 余行原宽原位（命中反查经 lineWidthPx 自动同源）。
                 val lead = leaf.floatLead
                 val intruded = lead != null && i < lead.lines
-                val lineW = if (intruded) lead.widthPx else w
-                val lineX = xLeft + if (intruded) lead.xOffPx.roundToInt() else 0
+                // E21 残留修复：`::first-letter{float:left}` 首字下沉 —— 首字占首行，**第 1 行起**
+                // 收窄并右移一个下沉盒宽（与 [orilumn.reader.engine.laying.breakWrappedLines] 同式）。
+                val cap = leaf.capFloat
+                val capIntruded = cap != null && i in 1..cap.lines
+                val lineW = when {
+                    intruded -> lead!!.widthPx
+                    capIntruded -> (w - cap!!.widthPx).coerceAtLeast(1)
+                    else -> w
+                }
+                val lineX = xLeft + when {
+                    intruded -> lead!!.xOffPx.roundToInt()
+                    capIntruded -> cap!!.widthPx
+                    else -> 0
+                }
                 out[lineIdx] = DrawLine(
                     text = text,
                     range = r,
@@ -152,6 +164,7 @@ object DrawLineBuilder {
                     cjkLatinSpacingEm = cjkLatinSpacingEm,
                     lineWidthPx = lineW,
                     xLeft = lineX + leaf.relOffsetX,
+                    capFloat = leaf.capFloat,
                     // marker 与叶同生死（`visibility: hidden` 的 `<li>` 不画 bullet；占位照旧）。
                     listMarker = if (lineIdx == leaf.firstLineIndex && !style.visibilityHidden) marker else null,
                     inkColor = inkColor,

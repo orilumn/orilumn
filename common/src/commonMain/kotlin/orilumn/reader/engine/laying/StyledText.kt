@@ -196,7 +196,7 @@ private const val FIRST_LETTER_LEAD_PUNCT = "\"'“”‘’「」『』（）()
  * `::first-letter` 覆盖的字符数：前导标点（见 [FIRST_LETTER_LEAD_PUNCT]）＋一个**字素簇**
  * （CJK 一字 / 拉丁一字母＝1 码元；代理对与组合序列按整簇，避免切开半个字）。
  */
-private fun firstLetterUnitLength(text: String): Int {
+fun firstLetterUnitLength(text: String): Int {
     var i = 0
     while (i < text.length && text[i] in FIRST_LETTER_LEAD_PUNCT) i++
     if (i >= text.length) return text.length

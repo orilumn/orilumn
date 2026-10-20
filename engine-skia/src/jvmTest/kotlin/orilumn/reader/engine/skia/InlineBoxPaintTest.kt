@@ -274,6 +274,33 @@ class InlineBoxPaintTest {
         }
     }
 
+    // ---- 缺陷③：盒的右缘不得把推进量算两遍 ----
+
+    /**
+     * 行内盒**末片段**的右缘 = 末字符 advance 的末端（`padding.right + border.right` 已经记在
+     * 那一字位上，见 `inlineBoxEdges`）。绘制侧若再加一遍，盒就比量宽多出 5px，压到后文头上
+     * （验收样书 V1 样例1.2 的「方框与『后』重叠」）。
+     *
+     * 判据：把盒放在**末尾**（后面没有字可压），量「最右墨」比无盒对照多出多少 ——
+     * 正确值就是一份内边距；双算会多出两份。
+     */
+    @Test
+    fun `末片段右缘只计一次内边距（盒不压后文）`() {
+        val text = "a".repeat(8)
+        val pad = 24f
+        val box = InlineBoxRun(4, 8, bgHex = "#fff176", padding = Edges(right = pad))
+
+        val withBox = render(listOf(line(text, listOf(box))))
+        val control = render(listOf(line(text)))
+
+        val grown = maxInkX(withBox) - maxInkX(control)
+        assertTrue(
+            "盒右缘比末字墨迹只应多出一份内边距（≈${pad.toInt()}），实测 $grown（双算会≈${(pad * 2).toInt()}）",
+            grown <= pad.toInt() + 4,
+        )
+        assertTrue("盒仍须真的伸出一份内边距，实测 $grown", grown >= pad.toInt() - 2)
+    }
+
     // ---- 像素助手（E16/E17 用） ----
 
     private val blueArgb = 0xFF0000FF.toInt()

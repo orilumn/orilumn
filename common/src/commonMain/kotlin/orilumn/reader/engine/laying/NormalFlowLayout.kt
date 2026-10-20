@@ -102,7 +102,8 @@ object NormalFlowLayout {
      * `overflow` 裁剪按 padding box 裁，浮动被齐根切掉，也就是**丢内容**。真书里的 clearfix 写法
      * （裁剪容器里全是 `float` 子块，在流高 0）会整块消失；实测图片浮动高 120 被切到 61。
      *
-     * 只改**绘制几何**（盒高 ⇒ 底色/边框/裁剪区），**不改流位置** ⇒ 占位、兄弟、分页零影响。
+     * **流高已由 `emit` 收尾同口径计入**（见那里的 §10.6.7 注释）；本趟只兜底那些不经 `emit`
+     * 容器收尾的盒（判定与增量同式、幂等：已经够高就不再动），并保证裁剪区（取自盒高）最大化。
      */
     private fun containFloatsInClippers(boxes: List<LayoutBox>) {
         for (b in boxes) {
@@ -546,20 +547,42 @@ object NormalFlowLayout {
         var subPrev = 0f
         var firstChildLine = Int.MAX_VALUE
         var lastChildLine = -1
+        // §10.6.7：BFC 根把浮动关在盒内 —— 盒内注册的跨度不得收窄/回填后随兄弟（浏览器里
+        // BFC 根外面看不见这些浮动）。进入时存外层跨度，收尾还原；盒内高度由下方 `floatsContentH` 计。
+        val bfc = box.style.clipsOverflow()
+        val keptBottomL = st.floatBottomL
+        val keptTopL = st.floatTopL
+        val keptBottomR = st.floatBottomR
+        val keptTopR = st.floatTopR
         for (child in box.childBoxes) {
             subPrev = emit(child, st, subFirst, subPrev, out, skipOwnTop = subFirst && hasChildren && edgesTop == 0)
             if (child.firstLineIndex >= 0) firstChildLine = minOf(firstChildLine, child.firstLineIndex)
             lastChildLine = maxOf(lastChildLine, child.lastLineExclusive)
             subFirst = false
         }
-        // P6-a: 收尾不包悬浮（CSS 默认浮动逃逸容器；包住只在 BFC/clearfix，本引擎无此概念）。
+        if (bfc) {
+            st.floatBottomL = keptBottomL; st.floatTopL = keptTopL
+            st.floatBottomR = keptBottomR; st.floatTopR = keptTopR
+        }
+        // P6-a: 收尾不包悬浮（CSS 默认浮动逃逸容器；包住只在 BFC/clearfix，见上方 §10.6.7）。
         // 跨度存活供后随兄弟跨容器环绕；容器背景/高度只计 in-flow 内容。
         // E23-b（CSS 2.1 §10.6.3）：容器指定高同样消费 —— 内容盒高 = max(在流内容高, `height`)，
         // 与叶同一条「只多不少」口径（内容更高照排不裁；裁不裁是 overflow 的事）。
         // 容器底边（背景/边框/裁剪区下界）与后随内容的起点因此落在指定高上；游标只下不上 ⇒ 行位
         // 单调，分页容量仍由行位给出（帧底恒等式见轻路径 `interiorGapAbove` 同源差额）。
         val contentTopY = box.contentTop + edgesTop
-        val naturalContentH = st.y - contentTopY
+        // §10.6.7：BFC 根（本引擎以 `overflow != visible` 近似）的自动高**包住浮动后代**，
+        // 而且这份高度是**流高**，不是只改绘制：容器的底色/边框下沿、父容器高度、后随兄弟与
+        // 分页全吃同一份（Chromium 实测 `.cf` 高 56，父级 `.test-case` 的下内边距从这 56 之后
+        // 起算）。曾只改绘制几何、流高仍按在流内容 ⇒ 灰框下沿比浏览器高出 4.5px，
+        // 下方虚线框的间距被吃掉一半（用户实测：装四个方块的那个矩形下间距偏小）。
+        val floatsContentH = if (box.style.clipsOverflow() && box.childBoxes.isNotEmpty()) {
+            val fb = deepestFloatBottom(box.childBoxes)
+            if (fb == Int.MIN_VALUE) 0 else (fb - contentTopY).coerceAtLeast(0)
+        } else {
+            0
+        }
+        val naturalContentH = maxOf(st.y - contentTopY, floatsContentH)
         // E23-e：`min-height` 只在**真的撑高**时才断掉父↔末子底折叠（Chromium 实测：`min-height`
         // 低于内容 ⇒ 末子下边距照常外塌；高于内容 ⇒ 收进盒内、后随内容贴盒底）。`height` 恒断链
         // （指定高即定高，与内容高不高无关），故两条分开判。
@@ -839,8 +862,15 @@ object NormalFlowLayout {
                 // 显式 clear 先剔除被清侧（emit 期 Y 跳跃后它们已在下方），再按剩余侧收窄。
                 pending.preClear(style.clearSide)
                 val lead = if (el.tag == "#text") null else pendingLeadFor(pending, style, contentW)
+                // E21 残留修复：`::first-letter{float:left}` 首字下沉（出流；首字仍在文本里占首行）。
+                val capF = if (el.tag == "#text") null else firstLetterOf?.invoke(el)?.let { capSt ->
+                    capFloatOf(
+                        capSt, style, text.substring(0, firstLetterUnitLength(text).coerceAtMost(text.length)),
+                        breaker,
+                    )
+                }
                 val breakW = innerBreakWidth(style, contentW)
-                val broken = breakWrappedLines(breaker, text, style, breakW, lead, el.tag, runs, style.textIndentPx, shifts, boxes)
+                val broken = breakWrappedLines(breaker, text, style, breakW, lead, el.tag, runs, style.textIndentPx, shifts, boxes, capF)
                 val lineHeights = adjustLineHeightsForInlineImages(text, broken, el, styles, classify, hidden, breakW, imageLoader, chapterHref, density = density)
                     .map { it.coerceAtLeast(1) }
                 // P6-b: 叠排注音行增高（与行内图抬升同式；无注音零回归）。
@@ -857,10 +887,14 @@ object NormalFlowLayout {
                         lineHeights = grownHeights,
                         childBoxes = emptyList(),
                         floatLead = lead,
+                        capFloat = capF,
                     ),
                 )
             }
         } else {
+            // §10.6.7：`overflow != visible` = BFC 根，浮动**关在盒内** —— 盒内浮动不逃出去收窄
+            // 后随内容（浏览器里 BFC 根外面看不见这些浮动）。进入时存登记几何，子女建完还原。
+            val keptSpans = if (style.clipsOverflow()) pending.snapshotGeometry() else null
             // Container: interleave its block children with synthetic anonymous text runs for its own
             // stray inline content (CSS anonymous-block substitution), so text like `第xx章`.
             // P6-a: 入口显式 clear 先剔除被清侧（NONE 不动，子女自理：文本环绕、不可环绕者自越）。
@@ -888,6 +922,7 @@ object NormalFlowLayout {
                     }
                 } else buildBoxTree(ch, styles, breaker, childW, childLeft, classify, hidden, imageLoader, chapterHref, density, genOf, firstLetterOf, pending)
             }
+            if (keptSpans != null) pending.restoreGeometry(keptSpans)
             // P6-a: 容器自身纵向边（border+padding 永不折叠；margin 会折叠，已由子女记账）回记账。
             pending.consume(
                 (style.border.top + style.padding.top + style.padding.bottom + style.border.bottom).roundToInt(),
@@ -2330,6 +2365,18 @@ object NormalFlowLayout {
 
         fun dropAll() {
             dropLeft(); dropRight()
+        }
+
+        /**
+         * 进入 BFC 根（`overflow != visible`）前的**登记几何**快照：只存侧/宽/高/行装箱，
+         * **不存**纵向消耗（盒内内容照样把外层浮动往下推）。收尾还原 ⇒ 盒内浮动不逃出去收窄后随内容。
+         */
+        fun snapshotGeometry(): IntArray =
+            intArrayOf(lW, lH, rW, rH, lRowW, rRowW, lastX, if (lastNewRow) 1 else 0)
+
+        fun restoreGeometry(s: IntArray) {
+            lW = s[0]; lH = s[1]; rW = s[2]; rH = s[3]
+            lRowW = s[4]; rRowW = s[5]; lastX = s[6]; lastNewRow = s[7] != 0
         }
     }
 

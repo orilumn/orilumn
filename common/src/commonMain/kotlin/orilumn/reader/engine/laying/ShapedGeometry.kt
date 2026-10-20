@@ -47,6 +47,8 @@ data class ShapedGeometry(
     override val decorationRuns: List<TextDecorationRun> = emptyList(),
     /** 行内盒 spans（叶文本坐标系；空 = 无行内背景/边框）。 */
     override val inlineBoxRuns: List<InlineBoxRun> = emptyList(),
+    /** E21 残留修复：`::first-letter{float:left}` 首字下沉盒（null = 无）。 */
+    val capFloat: CapFloat? = null,
     /**
      * E10 `visibility: hidden` 覆盖区间（叶文本坐标系；空 = 全叶可见）。
      * 隐藏字符不落墨但保留占位（见 [ParagraphShapeRef.shapeVisibilityHiddenRuns]）。
@@ -72,6 +74,7 @@ data class ShapedGeometry(
     override val shapeRubyRuns: List<RubyRun> get() = rubyRuns
     override val shapeDecorationRuns: List<TextDecorationRun> get() = decorationRuns
     override val shapeInlineBoxRuns: List<InlineBoxRun> get() = inlineBoxRuns
+    override val shapeCapFloat: CapFloat? get() = capFloat
     override val shapeVisibilityHiddenRuns: List<IntRange> get() = visibilityHiddenRuns
     override val shapeAlpha: Float get() = alpha
     override val shapeEmphasis: EmphasisStyle get() = emphasis

@@ -206,9 +206,68 @@ class FirstLetterEndToEndTest {
         assertTrue("无规则时投影零 run", baseLines.values.all { it.fontRuns.isEmpty() })
     }
 
+    // ---- `::first-letter{float:left}` 首字下沉（出流，绕排） ----
+
+    private val withFloat = bodyCss + "\n.dc::first-letter { font-size: 2em; float: left }"
+
+    /**
+     * 首字下沉是**出流浮动盒**：不撑首行行框、首行之后的若干行收窄右移。
+     *
+     * 错误形态（修前）：首字按行内语义渲染 —— 首行行框被撑成 2em、后面的行照旧全宽，
+     * 整段少一到两行、首字压在第二行字上。
+     */
     @Test
-    fun `伪元素查找只在命中时问叶根`() {
-        val h = heavy(withRule)
+    fun `首字下沉不撑首行行框且后续行收窄右移`() {
+        val h = heavy(withFloat)
+        val leaf = h.leaves.single()
+        val cap = requireNotNull(leaf.capFloat) { "带 float:left 的首字必须产出下沉盒" }
+        val bodyH = lineHeightPx(fs, ratio)
+        assertEquals("下沉盒高 = 首字自己的行高（2em × 1.5）", lineHeightPx(2f * fs, ratio), cap.heightPx)
+        assertEquals("先字区间就是一个字素簇", 1, cap.endExclusive)
+        assertTrue("2em 首字必须压住后续行（否则本锁是空的），lines=${cap.lines}", cap.lines >= 1)
+
+        assertEquals("首行行框不得被出流的首字撑高", bodyH, leaf.lineHeights[0])
+        assertTrue("整段必须真的断成多行（实际 ${leaf.lineHeights.size} 行）", leaf.lineHeights.size >= 2)
+
+        val lines = DrawLineBuilder.build(
+            h.result, h.styles, h.classify, HIDDEN_NONE, profile().letterSpacingEm,
+            firstLetterOf = h.fl,
+        ).toSortedMap()
+        val first = lines.values.first()
+        assertEquals("首行带下沉盒信息（绘制侧据此下沉首字基线）", cap, first.capFloat)
+        // 第 1 行起收窄右移一个下沉盒宽；再往后恢复全宽。
+        val l1 = lines.values.toList().getOrNull(1)
+        if (l1 != null) {
+            assertEquals("第 1 行右移一个下沉盒宽", cap.widthPx, l1.xLeft - first.xLeft)
+            assertEquals("第 1 行同时收窄同宽", first.lineWidthPx - cap.widthPx, l1.lineWidthPx)
+        }
+        val l2 = lines.values.toList().getOrNull(2)
+        if (l2 != null) assertEquals("第 2 行恢复全宽原位", first.xLeft, l2.xLeft)
+        // 无规则对照：不产出下沉盒、首行基准行框。
+        assertNull("无 float 的首字规则不产出下沉盒", heavy(withRule).leaves.single().capFloat)
+    }
+
+    @Test
+    fun `首字下沉的重轻两路行高逐项相同`() {
+        val h = heavy(withFloat)
+        assertEquals(
+            "重轻两路行高（含下沉盒）逐项相同",
+            listOf(h.leaves.single().lineHeights),
+            lightHeights(withFloat).filter { it.isNotEmpty() },
+        )
+        // 轻路径塑形也必须带同一份下沉盒（增量/临时页靠它定收窄行与首字基线）。
+        val layouter = BoxChapterLayouter()
+        val prep = layouter.prepareLight(
+            HtmlTreeConverter().convert(html())!!, CssBundle(listOf(withFloat)),
+            profile(), contentW, ChapterStructureCache(), 2400,
+        )
+        val shapes = (0 until prep.totalBlocks).mapNotNull { layouter.tempShape(null, prep, it, profile()) }
+        val cap = shapes.firstNotNullOfOrNull { it.shapeCapFloat }
+        assertEquals("轻路径下沉盒与重路径同一份", h.leaves.single().capFloat, cap)
+    }
+
+    @Test
+    fun `伪元素查找只在命中时问叶根`() {        val h = heavy(withRule)
         assertTrue("本章确有 ::first-letter 规则", h.eng.hasFirstLetterRules())
         val p = h.leaves.single().el!!
         val style = h.eng.firstLetterStyle(p, ancestorsOf(p), h.styles.getValue(p))

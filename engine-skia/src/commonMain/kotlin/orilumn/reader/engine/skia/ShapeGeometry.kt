@@ -22,6 +22,8 @@ import orilumn.reader.engine.laying.ShapedGeometry
 import orilumn.reader.engine.laying.TextDecorationRun
 import orilumn.reader.engine.laying.adjustLineHeightsForRuby
 import orilumn.reader.engine.laying.breakWrappedLines
+import orilumn.reader.engine.laying.capFloatOf
+import orilumn.reader.engine.laying.firstLetterUnitLength
 import orilumn.reader.engine.laying.collectBaselineShifts
 import orilumn.reader.engine.laying.collectColorRuns
 import orilumn.reader.engine.laying.collectFontRuns
@@ -129,12 +131,24 @@ fun shapeGeometry(
     // P1-2: white-space 断行单源（NOWRAP/PRE 不换行；与盒流同式）。
     // Whole-paragraph single-style break (canonical semantics): code-like mono 解析走
     // 级联 monospace 标志（与盒流 `style.monospace || tag == "pre"` 同式）。
+    // S3：正文断行变体单源（与 BoxChapterLayouter 的两处接线同口，默认 Skia）。
+    val bodyBreaker = bodyParagraphBreaker(profile.letterSpacingEm, profile.cjkLatinSpacingEmApplied)
+    // E21 残留修复：`::first-letter{float:left}` 首字下沉（与盒流 `NormalFlowLayout` 同一份推算）。
+    val capFloat = if (el.isText) {
+        null
+    } else {
+        firstLetterOf?.invoke(el)?.let { capSt ->
+            capFloatOf(
+                capSt, rootStyle, text.substring(0, firstLetterUnitLength(text).coerceAtMost(text.length)),
+                bodyBreaker,
+            )
+        }
+    }
     val broken = breakWrappedLines(
-        // S3：正文断行变体单源（与 BoxChapterLayouter 的两处接线同口，默认 Skia）。
-        bodyParagraphBreaker(profile.letterSpacingEm, profile.cjkLatinSpacingEmApplied),
+        bodyBreaker,
         text, rootStyle, widthPx.coerceAtLeast(1),
         floatLead, pairTag, fontRuns, rootStyle.textIndentPx, baselineShifts,
-        inlineBoxes,
+        inlineBoxes, capFloat,
     )
     // P6-b: 叠排注音 runs（与 text 同构遍历；无注音回空表零回归）＋行高增量（与重路径同式）。
     val rubyRuns = rubyRunsOf(el, styles, rootStyle, genOf, isBlock, sharedSegs)
@@ -156,6 +170,7 @@ fun shapeGeometry(
     // exactly like the skia font stack ([SkParagraphFactory] CODE_TAGS rule).
     return ShapedGeometry(
         text = text,
+        capFloat = capFloat,
         lineRanges = broken.map { it.range },
         lineHeights = imageHeights,
         // Q20：断词收尾随行搬进 shape（增量/临时页没有 LayoutBox 可读，见

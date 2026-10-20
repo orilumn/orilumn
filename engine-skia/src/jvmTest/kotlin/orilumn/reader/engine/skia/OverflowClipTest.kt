@@ -197,6 +197,41 @@ class OverflowClipTest(private val variant: String) {
         }
     }
 
+    @Test
+    fun `包住浮动的容器高度进正文流，后随内容排在容器之下`() {
+        // §10.6.7 的这份高度**是流高**，不是只改绘制：容器的边框/底色下沿、父容器高度、
+        // 后随兄弟与分页全吃同一份。此前只改绘制 ⇒ 父级少算一截，容器下方间距被吃掉。
+        val r = run(
+            "<html><body>" +
+                "<div style=\"border:1px solid #000;padding:2px\">" +
+                "<section style=\"overflow:hidden;border:1px solid #000;padding:4px\">" +
+                "<div style=\"float:left;width:30px;height:30px;margin:2px\"></div>" +
+                "<div style=\"float:left;width:40px;height:40px;margin:2px\"></div>" +
+                "</section><p>后随正文</p></div></body></html>",
+        )
+        val boxes = allBoxes(r.result)
+        val section = boxes.first { it.el?.tag == "section" }
+        val outer = boxes.first { it.el?.tag == "div" && it.style.floatSide == orilumn.reader.engine.css.FloatSide.NONE }
+        val floats = boxes.filter { it.style.floatSide != orilumn.reader.engine.css.FloatSide.NONE }
+        assertTrue("应有浮动盒（否则本用例失去意义）", floats.size >= 2)
+        val deepestOuter = floats.maxOf { it.contentBottom + it.style.margin.bottom }
+        val edgesBottom = section.style.padding.bottom + section.style.border.bottom
+        assertEquals(
+            "容器内容盒底 == 最深浮动外边盒底（§10.6.7）",
+            deepestOuter,
+            section.contentBottom - edgesBottom,
+        )
+        val p = boxes.first { it.el?.tag == "p" && !it.el!!.isText }
+        assertTrue(
+            "后随兄弟必须排在容器之下：p.top=${p.contentTop} 容器底=${section.contentBottom}",
+            p.contentTop >= section.contentBottom,
+        )
+        assertTrue(
+            "父容器高度必须包住这块：父底=${outer.contentBottom} 容器底=${section.contentBottom}",
+            outer.contentBottom > section.contentBottom,
+        )
+    }
+
     // ---- 3. 真栅格化 ----
 
     private fun line(text: String, clip: ClipRect? = null): DrawLine = DrawLine(

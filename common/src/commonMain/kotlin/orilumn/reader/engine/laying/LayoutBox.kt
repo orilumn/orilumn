@@ -4,6 +4,7 @@ import orilumn.reader.engine.css.BreakRule
 import orilumn.reader.engine.css.ComputedStyle
 import orilumn.reader.engine.css.FontRun
 import orilumn.reader.engine.html.MarkupElement
+import kotlin.math.roundToInt
 
 /** A single table row's resolved 2D grid: absolute column x positions + the row's cells. */
 class TableRowLayout(
@@ -207,6 +208,15 @@ class LayoutBox(
      */
     val floatLead: FloatLead? = null,
     /**
+     * E21 残留修复：`::first-letter{float:left}` 的首字下沉盒（出流，null = 无此规则）。
+     *
+     * 首字**留在叶文本里**：它在首行占的就是自己的推进量（浏览器算出的下沉盒宽也正是这个
+     * 推进量），故首行既不用收窄也不用偏移 —— 只有首行之后的若干行要右移 [CapFloat.widthPx]
+     * 并收窄同宽（[CapFloat.lines] 行）。行高账同理：首字出流，不撑首行行框，也不抬首行基线
+     * （绘制侧另算下沉盒自己的基线）。
+     */
+    val capFloat: CapFloat? = null,
+    /**
      * E23-b：本悬浮叶是否**另起一行**（CSS 2.1 §9.5.1 的同行装箱结果，由 [FloatPending.register]
      * 在 build/轻路径 eager 表里定，两路同一份）。`false` = 与本行已放的同侧悬浮并排（同顶）。
      * 非悬浮叶恒 `true`（零影响）。
@@ -314,6 +324,57 @@ class LayoutBox(
  * @property xOffPx 前导行的额外 x 偏移（左浮动 = `floatW + gap`，右浮动 = 0）。
  */
 data class FloatLead(val lines: Int, val widthPx: Int, val xOffPx: Float)
+
+/**
+ * `::first-letter{float:left}` 首字下沉盒（E21 残留修复）。
+ *
+ * **与 [FloatLead] 的分工**：首字仍占叶文本第 0 位，在首行里占自己的推进量 —— 首行的收窄/偏移
+ * 由首字本身自动给出（浏览器算出的下沉盒宽 = 首字推进量，故两者逐值一致）。[FloatLead] 描述
+ * 「别的浮动盒压我前几行」，从第 0 行起算；本类描述「首字自己要压住后面几行」，**从第 1 行起算**，
+ * 互不重叠、也不互相抵消。
+ *
+ * @property widthPx 下沉盒宽（px）= 首字推进量：第 1..[lines] 行右移这么宽、同时收窄同宽。
+ * @property lines 受影响的**后续**行数（不含首行）：`ceil(下沉盒高 / 正文字行高) - 1`。
+ * @property endExclusive 首字在叶文本里的结束下标（开区间）：行高账与基线账把这段字号剔除。
+ * @property heightPx 下沉盒高（px）= 首字那行的行高（`字号 × 行高比例`，比例继承）。
+ */
+data class CapFloat(
+    val widthPx: Int,
+    val lines: Int,
+    val endExclusive: Int,
+    val heightPx: Int,
+)
+
+/**
+ * 推算 [CapFloat]（pure JVM；重/轻两路同式）。
+ *
+ * @param capStyle `::first-letter` 的伪元素样式（null = 无规则/未命中）
+ * @param baseStyle 叶块样式（行高基准、字号回退）
+ * @param capText 首字（含前导引号/开括号，见 `firstLetterUnitLength`）—— 只用来量推进量
+ */
+fun capFloatOf(
+    capStyle: orilumn.reader.engine.css.ComputedStyle?,
+    baseStyle: orilumn.reader.engine.css.ComputedStyle,
+    capText: CharSequence,
+    breaker: ParagraphBreaker,
+): CapFloat? {
+    if (capStyle == null || capText.isEmpty()) return null
+    if (capStyle.floatSide == orilumn.reader.engine.css.FloatSide.NONE) return null
+    val size = if (capStyle.fontSizePx > 0f) capStyle.fontSizePx else baseStyle.fontSizePx
+    if (size <= 0f) return null
+    // 断行器内部已按 profile 的字距整形（`SkiaParagraphBreaker.preferredWidth` 走
+    // `SkParagraphFactory.paragraphStyle(letterSpacingEm)`）⇒ 这里不再补。
+    val adv = breaker.preferredWidth(
+        capText, size, capStyle.fontFamilies, capStyle.fontWeight, capStyle.italic, capStyle.monospace,
+    )
+    val w = adv.roundToInt().coerceAtLeast(1)
+    val capLineH = lineHeightPx(size, capStyle.lineHeightRatio).coerceAtLeast(1)
+    val bodyLineH = lineHeightPx(baseStyle.fontSizePx, baseStyle.lineHeightRatio).coerceAtLeast(1)
+    // 下沉盒顶 = 首行行框顶；它压住的后续行 = 盒底还在这些行的行框顶之下。
+    val lines = ((capLineH + bodyLineH - 1) / bodyLineH - 1).coerceAtLeast(0)
+    if (lines <= 0) return null
+    return CapFloat(widthPx = w, lines = lines, endExclusive = capText.length, heightPx = capLineH)
+}
 
 /** P3-b: 盒背景图（url + 平铺 + 定位；无 `background-size`，恒 1:1 原尺寸平铺）。 */
 data class BackgroundImage(

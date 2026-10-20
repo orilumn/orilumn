@@ -76,6 +76,14 @@ interface ParagraphShapeRef {
      * 本表是**同一份数据**的几何视图（量画同源）。
      */
     val shapeInlineBoxRuns: List<InlineBoxRun> get() = emptyList()
+    /**
+     * `::first-letter{float:left}` 首字下沉盒（null = 无）。
+     *
+     * 与 [shapeInlineBoxRuns] 同款理由挂在 shape 上：canonical 走盒流（只有 [LayoutBox.capFloat]），
+     * 增量/临时页走塑形（手里只有 shape），两路同一断行器同宽 ⇒ 收窄行数/宽度逐项一致。
+     * 绘制侧靠它决定**首字那一行的基线**（[orilumn.reader.engine.skia.DrawLine.capFloat]）。
+     */
+    val shapeCapFloat: CapFloat? get() = null
     /** E10 `visibility: hidden` 覆盖区间（叶文本坐标系；空 = 全叶可见）。见 [visibilityHiddenRuns]。 */
     val shapeVisibilityHiddenRuns: List<IntRange> get() = emptyList()
     /** Ancestor-chain opacity product (1 = legacy path). */

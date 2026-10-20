@@ -848,6 +848,8 @@ class BoxChapterLayouter(
             } else 0
             // P4-a3: 环绕前导行按收缩宽整形、x 右移悬浮偏移（与 DrawLineBuilder 重路径同式）。
             val lead = leaf.floatLead
+            // E21 残留修复：首字下沉盒（塑形侧已按它断行，见 `shapeGeometry`；此处同式落位）。
+            val cap = shape.shapeCapFloat
             for (k in 0 until shape.lineCount) {
                 val lineIdx = base + k
                 val fl = lines.getOrNull(lineIdx) ?: continue
@@ -857,6 +859,7 @@ class BoxChapterLayouter(
                 // 跳过，页少字而不报错。现在炸。
                 require(s >= 0 && e >= s && e <= text.length) { "buildPartialSkiaWindow bad range s=$s e=$e len=${text.length}" }
                 val intruded = lead != null && k < lead.lines
+                val capIntruded = cap != null && k in 1..cap.lines
                 out[lineIdx] = orilumn.reader.engine.skia.DrawLine(
                     text = text,
                     deviceScale = deviceScale,
@@ -876,8 +879,17 @@ class BoxChapterLayouter(
                     monospace = mono,
                     letterSpacingEm = letterSpacingEm,
                     cjkLatinSpacingEm = cjkLatinSpacingEm,
-                    lineWidthPx = if (intruded) lead!!.widthPx else w,
-                    xLeft = xLeft + if (intruded) lead!!.xOffPx.roundToInt() else 0,
+                    lineWidthPx = when {
+                        intruded -> lead!!.widthPx
+                        capIntruded -> (w - cap!!.widthPx).coerceAtLeast(1)
+                        else -> w
+                    },
+                    xLeft = xLeft + when {
+                        intruded -> lead!!.xOffPx.roundToInt()
+                        capIntruded -> cap!!.widthPx
+                        else -> 0
+                    },
+                    capFloat = cap,
                     listMarker = if (k == 0) marker else null,
                     inkColor = inkColor,
                     colorRuns = shape.colorRuns,

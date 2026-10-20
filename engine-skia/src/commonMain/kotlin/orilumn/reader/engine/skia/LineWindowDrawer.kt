@@ -14,6 +14,7 @@ import orilumn.reader.engine.laying.SOFT_HYPHEN
 import orilumn.reader.engine.laying.TextDecorationRun
 import orilumn.reader.engine.laying.borderEdgeRects
 import orilumn.reader.engine.laying.extraHeightPx
+import orilumn.reader.engine.laying.inlineBoxAdvanceEnabled
 import orilumn.reader.engine.laying.isDocumentSpace
 import org.jetbrains.skia.Canvas
 import org.jetbrains.skia.Font
@@ -154,6 +155,15 @@ data class DrawLine(
      * 几何视图，只负责落墨。`data class` ⇒ 加字段/改值即自动让栅格指纹失效重烤。
      */
     val inlineBoxRuns: List<orilumn.reader.engine.laying.InlineBoxRun> = emptyList(),
+    /**
+     * `::first-letter{float:left}` 首字下沉盒（null = 无）：本行的 x 偏移/收窄已由断行侧决定
+     * （`xLeft`/`lineWidthPx`），这里只带**首字自己的基线**信息。
+     *
+     * 首字留在行文本里（第 0 行）：它按下沉盒自己的基线落墨（盒子顶 = 首行行框顶，
+     * 基线在盒内按 `字号 × 行高比例` 居中），而不是跟正文基线走 —— 只在本行**含首字**时生效
+     * （`range.first == 0`）。
+     */
+    val capFloat: orilumn.reader.engine.laying.CapFloat? = null,
     /**
      * 表格图占位隐藏区间（[text] 全文本坐标系，空 = 无表图旧路径）：
      * [TableCellLines] 为已进 [PageImage] 的 U+FFFC 占位记录本区间；绘制以透明墨隐藏
@@ -442,9 +452,10 @@ class LineWindowDrawer(
         // 基线：半行距居中 + ascent（CSS 2.2 §10.8.1）。**自算**，不再借道 Paragraph。
         val baseY = baselineY(line, lineExtra, start, endExcl)
         // paintX 是纯内容区偏移；placement 的 x 已含缩进与对齐偏移，逐字落墨时统一加上。
-        // **行内盒（背景/边框）先落，垫在文字之下**（CSS：背景 → 边框 → 文字）。
+        // **在流行内盒（背景/边框）先落，垫在文字之下**（CSS：背景 → 边框 → 文字）。
+        val capDy = capFloatDy(line, baseY, lineExtra)
         paintInlineBoxes(canvas, line, placement, paintX, baseY, start, endExcl)
-        paintGlyphs(canvas, line, placement, paintX, baseY, start, endExcl, { f, t -> isHidden(f, t) }, decRuns)
+        paintGlyphs(canvas, line, placement, paintX, baseY, start, endExcl, { f, t -> isHidden(f, t) }, decRuns, capDy = capDy)
 
         // 注音/着重号与文字同盒，随 half-leading 一并下移，保持与基字的相对位置。
         // E10：基字被隐藏的注音整条不画（rt 源文与基字同属被隐藏子树）；行高增量照旧计入基线。
@@ -512,9 +523,13 @@ class LineWindowDrawer(
         ).font
         val fm = font.metrics
         var offset = aligner.boxBaselineOffset(line.fontSizePx, line.lineHeightRatio, -fm.ascent, fm.descent)
+        // 首字下沉（E21 残留修复）：首字出流，**不抬行框基线** —— 它按下沉盒自己的基线落墨
+        // （见 [capFloatDy]）。只在本行含首字（`range.first == 0`）时剔。
+        val capEnd = line.capFloat?.takeIf { line.range.first == 0 }?.endExclusive ?: 0
         for (r in line.fontRuns) {
             // run 段表是**整叶**的（未按行切）：只认与本行有交集的段，否则同段别行的大字会抬起本行。
             if (r.endExclusive <= start || r.start >= endExcl) continue
+            if (capEnd > 0 && r.start == 0 && r.endExclusive <= capEnd) continue
             val px = r.fontPxOr(line.fontSizePx)
             if (px <= line.fontSizePx) continue
             val runFont = glyphPainter.baseGlyphStyle(
@@ -526,6 +541,33 @@ class LineWindowDrawer(
             if (o > offset) offset = o
         }
         return line.yTop + lineExtra + offset
+    }
+
+    /**
+     * 首字下沉盒的**基线位移**（px，相对本行正文基线 [baseY]）。
+     *
+     * 浏览器把 `::first-letter{float:left}` 的首字浮出成**独立行盒**：盒顶 = 首行行框顶
+     * （`yTop`，注音抬升那截也算在盒外），盒高 = 首字自己的行高（[CapFloat.heightPx] =
+     * `字号 × 行高比例`，比例继承），盒内基线按半行距居中 —— 与正文基线无关。
+     * 实测（Chromium，18px / 1.5 / 首字 2em）：首字基线比正文基线低 14 CSS px，与下式同值。
+     *
+     * 只在**含首字那一行**（`range.first == 0`）返回非 0；其余行不受影响。
+     */
+    private fun capFloatDy(line: DrawLine, baseY: Float, lineExtra: Int): Float {
+        val cap = line.capFloat ?: return 0f
+        if (line.range.first != 0) return 0f
+        val run = line.fontRuns.firstOrNull { it.start == 0 && it.endExclusive <= cap.endExclusive }
+        val size = run?.fontPxOr(line.fontSizePx) ?: line.fontSizePx
+        val font = glyphPainter.baseGlyphStyle(
+            size, run?.families ?: line.families, run?.weight ?: line.weight,
+            run?.italic ?: line.italic, run?.monospace ?: line.monospace,
+            0xFF000000.toInt(), line.text.getOrNull(0)?.code ?: 'H'.code, run?.tag ?: line.tag,
+        ).font
+        val fm = font.metrics
+        val emH = -fm.ascent + fm.descent
+        val boxTop = line.yTop + lineExtra
+        val capBaseline = boxTop + (cap.heightPx - emH) / 2f - fm.ascent
+        return capBaseline - baseY
     }
 
 
@@ -719,7 +761,13 @@ class LineWindowDrawer(
             val top = baseY - ascent - pad.top - bd.top + r.relDy
             val bottom = baseY + descent + pad.bottom + bd.bottom + r.relDy
             val left = paintX + lx - pad.left - bd.left + r.relDx
-            val right = paintX + rx + pad.right + bd.right + r.relDx
+            // 右缘：**末片段**的 `rx` 已经含 `padding.right + border.right`（[inlineBoxEdges] 把右边记在
+            // 末字符位上，断行/落位/簇位轨同吃，见 `inlineBoxAdvanceEnabled`）。再补一遍就是
+            // 「画比量宽」：盒边（以及它带的底色）往右压出 5px 盖住后文 —— 验收样书 V1 样例1.2
+            // 「方框与后文的『后』部分重叠」即此（Chromium 实测：盒右缘 = 后文行首，其后 1px 空档）。
+            // 闸关时 advance 里不含这段（回退纪律），照旧补上。
+            val right = paintX + rx +
+                (if (lastFrag && !inlineBoxAdvanceEnabled()) pad.right + bd.right else 0f) + r.relDx
             // E17：圆角按**本片段** border-box 尺寸解（`%` ⇒ `min(w,h)` 基准，与块盒
             // [CornerRadius.resolved] 同式钳制）。slice：切开端不是元素真角 ⇒ 只在真角保留半径
             // （首片段保左两角、末片段保右两角；整盒单片段即原样）。
@@ -858,6 +906,8 @@ class LineWindowDrawer(
         endExcl: Int,
         isHidden: (Int, Int) -> Boolean,
         decRuns: List<TextDecorationRun>,
+        /** 首字下沉的基线位移（px；0 = 无）。判区间在本函数内做（[DrawLine.capFloat] + `range.first == 0`）。 */
+        capDy: Float = 0f,
     ) {
         if (endExcl <= start) return
         val n = endExcl - start
@@ -929,15 +979,20 @@ class LineWindowDrawer(
             }
         }
 
+        // 首字下沉：本行含首字时，首字那几字按**下沉盒自己的基线**落墨（不跟正文基线）。
+        val capRange: IntRange? = line.capFloat
+            ?.takeIf { line.range.first == 0 }
+            ?.let { 0 until it.endExclusive.coerceAtMost(endExcl) }
+            ?.takeIf { it.first < it.last + 1 }
         val shadow = line.textShadow
         // **切段每行算一次**（不是每字一次，见 [drawGlyphPass] 的性能注记）；连字符也要用末字那段。
         val bands = mergeBands(line, start, endExcl)
         // 先画阴影层（偏移同色），再画正字 —— CSS text-shadow 的常规两层近似。
         if (shadow != null) {
             val sc = shadow.colorHex?.let(::cssHexToArgb) ?: 0xFF000000.toInt()
-            drawGlyphPass(canvas, line, placement, paintX, baseY, start, endExcl, isHidden, shadow.dx, shadow.dy, sc, true, fonts, xs, bands, relDx, relDy)
+            drawGlyphPass(canvas, line, placement, paintX, baseY, start, endExcl, isHidden, shadow.dx, shadow.dy, sc, true, fonts, xs, bands, relDx, relDy, capRange, capDy)
         }
-        drawGlyphPass(canvas, line, placement, paintX, baseY, start, endExcl, isHidden, 0f, 0f, 0, false, fonts, xs, bands, relDx, relDy)
+        drawGlyphPass(canvas, line, placement, paintX, baseY, start, endExcl, isHidden, 0f, 0f, 0, false, fonts, xs, bands, relDx, relDy, capRange, capDy)
 
         // **行尾连字符**（`hyphens: auto` 的音节断点 / `&shy;` 断行显形）。
         //
@@ -1400,6 +1455,10 @@ private interface FontResolver {
         preBands: List<Band>? = null,
         relDx: FloatArray? = null,
         relDy: FloatArray? = null,
+        /** 首字下沉：首字区间（叶文本坐标，null = 本行无首字）。 */
+        capRange: IntRange? = null,
+        /** 首字下沉：首字基线相对正文基线的位移（px，已含下沉盒自己的半行距）。 */
+        capDy: Float = 0f,
     ) {
         if (endExcl <= start) return
         // **切段每行算一次**（不是每字一次）。第一版写成 `mergeBands(line, i, i+1).firstOrNull()`
@@ -1487,7 +1546,8 @@ private interface FontResolver {
                 // E12：行内相对定位的逐字位移（不进退格化/断行，只平移落墨）。
                 val rdx = relDx?.getOrNull(i) ?: 0f
                 val rdy = relDy?.getOrNull(i) ?: 0f
-                val y = baseY - shiftEm * line.fontSizePx + dy + rdy
+                val capShift = if (capRange != null && i in capRange) capDy else 0f
+                val y = baseY - shiftEm * line.fontSizePx + dy + rdy + capShift
                 // 代理对整对入批（units=2）；普通字符 units=1，行为与原来逐字版完全一致。
                 onGlyphCp?.invoke(cp, units)
                 // 换批判定：四要素任一不同即先落地上批。

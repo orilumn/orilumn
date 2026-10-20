@@ -359,6 +359,48 @@ class InlineBoxPaintTest {
         )
     }
 
+    /**
+     * 已定位盒必须排在**整块**在流内容之后（不是「逐行之后」）：盒下移后会压到**下一行**，
+     * 若按行画，下一行的字会把盒盖回去（用户实测：第一行对、下一行又错）。
+     *
+     * 构造：第一行一个下移 28px 的已定位盒（底色），第一行的字刷成白色（不可见，免得与盒里的字混淆），
+     * 第二行是普通黑字 —— 正确行为下盒子所在矩形内**零墨**（第二行的字被盒盖住）。
+     */
+    @Test
+    fun `已定位盒盖住下一行的在流文字`() {
+        val line1 = line("aaaa", listOf(InlineBoxRun(0, 4, bgHex = "#fff176", relDy = 28)))
+            .copy(range = 0 until 4, inkColor = 0xFFFFFFFF.toInt())
+        val line2 = line("bbbb").copy(range = 0 until 4, yTop = 32, yBottom = 64)
+        val bmp = render(listOf(line1, line2))
+        val px = requireNotNull(bmp.peekPixels())
+
+        var left = Int.MAX_VALUE
+        var right = -1
+        var top = Int.MAX_VALUE
+        var bottom = -1
+        for (y in 0 until bmp.height) {
+            for (x in 0 until bmp.width) {
+                if (px.getColor(x, y) == markerArgb) {
+                    if (x < left) left = x
+                    if (x > right) right = x
+                    if (y < top) top = y
+                    if (y > bottom) bottom = y
+                }
+            }
+        }
+        assertTrue("盒底色必须落墨（本用例以它为判据）", right > left && bottom > top)
+        assertTrue("盒必须真的压到第二行（否则用例失去意义）：盒底=$bottom 行高=$bottom", top < 40 && bottom > 40)
+
+        var ink = 0
+        for (y in top..bottom) for (x in left..right) {
+            val c = px.getColor(x, y)
+            val r = (c shr 16) and 0xFF
+            val g = (c shr 8) and 0xFF
+            if (r < 120 && g < 120) ink++
+        }
+        assertEquals("盒矩形内必须是纯底色：下一行的字要被盒盖住", 0, ink)
+    }
+
     // ---- 像素助手（E16/E17 用） ----
 
     private val blueArgb = 0xFF0000FF.toInt()

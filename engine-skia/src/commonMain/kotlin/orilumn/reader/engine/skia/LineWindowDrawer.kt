@@ -263,6 +263,14 @@ class LineWindowDrawer(
      */
     internal var onGlyphCp: ((cp: Int, units: Int) -> Unit)? = null
 
+    /** 该行是否有**带位移的已定位行内盒**（`position: relative` 且 `relDx/relDy` 非零）。 */
+    private fun hasPositionedRuns(line: DrawLine): Boolean = line.inlineBoxRuns.any {
+        it.visible && !it.visibilityHidden && (it.relDx != 0 || it.relDy != 0)
+    }
+
+    /** 延后到「整块在流内容画完之后」再补画的已定位层（见 [drawLines] 的两趟）。 */
+    private class DeferredLine(val line: DrawLine, val textX: Float, val style: ParagraphStyle)
+
     fun drawLines(canvas: Canvas, contentLeft: Float, lines: List<DrawLine>, clip: Rect? = null) {
         if (lines.isEmpty()) return
         val collection = collections()
@@ -274,6 +282,10 @@ class LineWindowDrawer(
             false
         }
         try {
+            // 附录 E 第 8 步的**已定位行内盒**必须排在**整块**的在流内容之后 —— 不是「逐行之后」：
+            // 盒下移 6px 会压到**下一行**的文字上，逐行画的话下一行的字又把盒盖回去（用户实测：
+            // 第一行对、下一行又错）。故第一趟只画在流，第二趟再按行补已定位盒（盒 → 自己的字）。
+            val deferred = ArrayList<DeferredLine>()
             for (line in lines) {
                 // E11：逐行 `overflow` 祖先裁剪（行自带的裁剪区，X 相对内容区原点 = contentLeft）。
                 // 与整窗 clip 叠加（save 嵌套），行间互不影响。
@@ -338,7 +350,31 @@ class LineWindowDrawer(
                             }
                         }
                     }
+                    if (hasPositionedRuns(line)) deferred.add(DeferredLine(line, textX, style))
                     paintText(canvas, style, line, textX, collection)
+                } finally {
+                    if (lineSaved) canvas.restore()
+                }
+            }
+            for (d in deferred) {
+                val line = d.line
+                val textX = d.textX
+                val style = d.style
+                val lc = line.clip
+                val lineSaved = if (lc != null) {
+                    canvas.save()
+                    canvas.clipRect(
+                        Rect.makeLTRB(
+                            contentLeft + lc.left, lc.top.toFloat(),
+                            contentLeft + lc.right, lc.bottom.toFloat(),
+                        ),
+                    )
+                    true
+                } else {
+                    false
+                }
+                try {
+                    paintText(canvas, style, line, textX, collection, positionedLayer = true)
                 } finally {
                     if (lineSaved) canvas.restore()
                 }
@@ -369,7 +405,15 @@ class LineWindowDrawer(
      * [style] 形参仍在：ruby rt 与 marker 两处仍需自建 `ParagraphStyle`（注音独立居中整形、
      * marker 单行短文本），它们与本行的对齐无关。
      */
-    private fun paintText(canvas: Canvas, style: ParagraphStyle, line: DrawLine, textX: Float, collection: FontCollection) {
+    private fun paintText(
+        canvas: Canvas,
+        style: ParagraphStyle,
+        line: DrawLine,
+        textX: Float,
+        collection: FontCollection,
+        /** `true` = 只补画已定位行内盒那一层（[drawLines] 的第二趟）；见函数内注释。 */
+        positionedLayer: Boolean = false,
+    ) {
         // P3-a: 祖先 opacity 统一乘墨色/段色。
         val ink = withAlpha(line.inkColor, line.alpha)
         // 钳位：range 越界只跳过该行，绝不在绘制线程崩 activity。
@@ -464,6 +508,23 @@ class LineWindowDrawer(
         val positionedRuns = line.inlineBoxRuns.filter {
             it.visible && !it.visibilityHidden && (it.relDx != 0 || it.relDy != 0)
         }
+        if (positionedLayer) {
+            // 第二趟（[drawLines] 在**整块**在流内容之后调用）：树序逐盒 —— 盒（底色/边框）→ 它自己的字。
+            // 嵌套的已定位盒按 run 顺序自然压在外层之上；本层之外的一切（注音/着重号/连字符/装饰）
+            // 已在第一趟画过，这里一概不碰，避免叠深。
+            for (r in positionedRuns) {
+                paintInlineBoxes(canvas, line, placement, paintX, baseY, start, endExcl, only = listOf(r))
+                val s = r.start.coerceIn(start, endExcl)
+                val e = r.endExclusive.coerceIn(start, endExcl)
+                if (e > s) {
+                    paintGlyphs(
+                        canvas, line, placement, paintX, baseY, s, e,
+                        { f, t -> isHidden(f, t) }, decRuns, placementStart = start,
+                    )
+                }
+            }
+            return
+        }
         paintInlineBoxes(
             canvas, line, placement, paintX, baseY, start, endExcl,
             only = if (positionedRuns.isEmpty()) null else line.inlineBoxRuns - positionedRuns.toSet(),
@@ -471,7 +532,7 @@ class LineWindowDrawer(
         if (positionedRuns.isEmpty()) {
             paintGlyphs(canvas, line, placement, paintX, baseY, start, endExcl, { f, t -> isHidden(f, t) }, decRuns, capDy = capDy)
         } else {
-            // 第一趟只画**在流**字形与装饰：已定位区间整段跳过（含下划线等装饰，避免第二趟叠深）。
+            // 在流这趟只画**在流**字形与装饰：已定位区间整段跳过（含下划线等装饰，避免第二趟叠深）。
             var cur = start
             for (r in positionedRuns.sortedBy { it.start }) {
                 val s = r.start.coerceIn(start, endExcl)
@@ -490,18 +551,6 @@ class LineWindowDrawer(
                     canvas, line, placement, paintX, baseY, cur, endExcl,
                     { f, t -> isHidden(f, t) }, decRuns, capDy = capDy, placementStart = start,
                 )
-            }
-            // 第二趟：树序逐盒 —— 盒（底色/边框）→ 它自己的字。嵌套的已定位盒按 run 顺序自然压在外层之上。
-            for (r in positionedRuns) {
-                paintInlineBoxes(canvas, line, placement, paintX, baseY, start, endExcl, only = listOf(r))
-                val s = r.start.coerceIn(start, endExcl)
-                val e = r.endExclusive.coerceIn(start, endExcl)
-                if (e > s) {
-                    paintGlyphs(
-                        canvas, line, placement, paintX, baseY, s, e,
-                        { f, t -> isHidden(f, t) }, decRuns, placementStart = start,
-                    )
-                }
             }
         }
 

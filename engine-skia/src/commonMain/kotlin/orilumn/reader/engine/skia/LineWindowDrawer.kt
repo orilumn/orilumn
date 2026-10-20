@@ -145,6 +145,15 @@ data class DrawLine(
      */
     val decorationRuns: List<orilumn.reader.engine.laying.TextDecorationRun> = emptyList(),
     /**
+     * 标注装饰区间（**章内全局坐标**，空 = 无高亮/划线）：
+     * 由 [projectDecor] 从本章标注列表投影到行上；绘制侧按 [charBase] 换回本行文本坐标。
+     *
+     * 与 [decorationRuns]（书内 `text-decoration`，[text] 坐标系）是两条通道：本字段只服务
+     * 读者标注，颜色是创建时的 ARGB 快照，不受书内样式/调色板变化影响。`data class` 加字段
+     * ⇒ 栅格指纹按值比较，装饰一变即重烤。
+     */
+    val decorRuns: List<DecorRange> = emptyList(),
+    /**
      * 行内盒 spans（[text] 全文本坐标系，空 = 无行内背景/边框）：
      * 由 [DrawLineBuilder] 从与 [text] 同构的遍历产出。
      *
@@ -384,6 +393,90 @@ class LineWindowDrawer(
         }
     }
 
+    /**
+     * 算一段章内区间在当前页各行上的**几何矩形**（只算不画），供选区覆盖层 / 手柄 / 放大镜定位。
+     *
+     * 与 [drawLines] → `paintText` 共用 [placementFor] 的逐字 x，保证「命中 / 绘制 / 装饰」同一份
+     * 几何。返回的 `Rect`：
+     * - `x` 是**相对内容区左缘**的坐标（已含 [DrawLine.xLeft]；调用方再加页面内容的绘制原点）；
+     * - `y` 与 [DrawLine.yTop] / [DrawLine.yBottom] 同一坐标系（章节绝对 Y）。
+     *
+     * 区间按 `[range.first, range.last + 1)` 解释；与行不相交的行不产出矩形。
+     * [chapter] 只用于调用方表达作用域，函数不跨章。
+     */
+    @Suppress("UNUSED_PARAMETER")
+    fun decorRects(lines: List<DrawLine>, chapter: Int, range: IntRange): List<Rect> {
+        if (range.isEmpty()) return emptyList()
+        val queryStart = range.first
+        val queryEnd = range.last + 1
+        val out = ArrayList<Rect>(lines.size)
+        for (line in lines) {
+            val start = line.range.first.coerceIn(0, line.text.length)
+            val endExcl = (line.range.last + 1).coerceIn(start, line.text.length)
+            if (endExcl <= start) continue
+            val lineStart = line.charBase + start
+            val lineEnd = line.charBase + endExcl
+            val s = maxOf(queryStart, lineStart)
+            val e = minOf(queryEnd, lineEnd)
+            if (e <= s) continue
+            val placement = placementFor(line, start, endExcl)
+            val ps = (s - line.charBase - start).coerceIn(0, endExcl - start)
+            val pe = (e - line.charBase - start).coerceIn(ps, endExcl - start)
+            val (left, right) = aligner.visibleSpan(placement, endExcl - start, ps, pe) ?: continue
+            if (right <= left) continue
+            out.add(
+                Rect.makeLTRB(
+                    line.xLeft + left,
+                    line.yTop.toFloat(),
+                    line.xLeft + right,
+                    line.yBottom.toFloat(),
+                ),
+            )
+        }
+        return out
+    }
+
+    /**
+     * 本行的逐字几何（[LineAligner.Placement] 的完整入参集中在这里）。
+     *
+     * `paintText` 与 [decorRects] 必须走同一个入口：任何只改一侧的「修法」都会让选区/装饰与
+     * 文字错位（本仓头号禁忌「量画同源」）。
+     */
+    private fun placementFor(line: DrawLine, start: Int, endExcl: Int): LineAligner.Placement =
+        aligner.align(
+            text = line.text,
+            range = start until endExcl,
+            fontSizePx = line.fontSizePx,
+            lineWidthPx = if (line.nowrap) Float.MAX_VALUE else line.lineWidthPx.coerceAtLeast(1).toFloat(),
+            letterSpacingEm = line.letterSpacingEm,
+            tag = line.tag,
+            families = line.families,
+            weight = line.weight,
+            italic = line.italic,
+            monospace = line.monospace,
+            fontRuns = line.fontRuns,
+            align = line.alignment,
+            // 首行缩进**必须交给 Aligner**，不能画完再整体右移（用户报缺陷①的修法）。
+            //
+            // Aligner 的 `natural` 本来就以 `x0 = firstLineIndentPx` 起算（`natural = x0 + Σadv`），
+            // 所以 `slack = lineWidthPx − natural` 已经把缩进扣掉了，拉伸后右缘正好落在版心。
+            // 旧写法传 `0f` 再 `paintX += indent`：拉伸基数**少了缩进** ⇒ JUSTIFY 首行被拉到
+            // 版心宽之后又整体右移 indent ⇒ **右溢出一个缩进**。实测（Rust 书 22 章）：
+            // `p { text-align: justify; text-indent: 2em }` 的**每一个**正文段首行都如此，
+            // 溢出量恒等于缩进（`2em` = 84.36px @fs=42.18），22 章里 555 行，末两个字被页面裁掉。
+            firstLineIndentPx = line.firstLineIndentPx,
+            // 末行不拉伸：两端对齐的定义本身。
+            isLastLine = isLastLineOf(line, endExcl),
+            // 行尾连字符：进拉伸基数与可见右缘（连字符占版心，否则 JUSTIFY 会少算一个字位）。
+            hyphenAtEnd = line.hyphenAtEnd,
+            // 标点挤压：断行侧定断点时用的比例（量画同源，教训 ⑩）。
+            squeezeRatio = line.squeezeRatio,
+            // 混排字距：与断行侧同一个 em（间隙进 `adv` ⇒ 逐字 x、JUSTIFY 基数、可见右缘同源）。
+            cjkLatinSpacingEm = line.cjkLatinSpacingEm,
+            // 行内盒横向推进：与断行侧同一份（同 `cjkLatinSpacingEm` 的理由 —— 量画同源）。
+            inlineBoxRuns = line.inlineBoxRuns,
+        )
+
     /** 主文本行绘制（S5 逐字路径）：几何由 [LineAligner] 给、落墨由 [GlyphPainter] 逐字做。 */
     /**
      * 主文本行绘制 —— **S5 逐字路径，本函数内不出现 `Paragraph`**。
@@ -456,41 +549,11 @@ class LineWindowDrawer(
             val e = r.endExclusive.coerceIn(start, endExcl)
             if (e > s) r.copy(start = s, endExclusive = e) else null
         }.let { runs -> if (visHidden.isEmpty()) runs else runs.flatMap { subtractHidden(it, visHidden) } }
+        // 读者标注装饰：章内全局区间 → 本行文本坐标，并按隐藏区间挖空（隐藏字符不落墨）。
+        val decorRuns = decorRunsFor(line, start, endExcl, visHidden)
 
         // ── 几何：Aligner 给逐字 x / 拉伸 / 可见右边界（P1-2 不换行段以无限宽排，单行溢出）──
-        val placement = aligner.align(
-            text = line.text,
-            range = start until endExcl,
-            fontSizePx = line.fontSizePx,
-            lineWidthPx = if (line.nowrap) Float.MAX_VALUE else line.lineWidthPx.coerceAtLeast(1).toFloat(),
-            letterSpacingEm = line.letterSpacingEm,
-            tag = line.tag,
-            families = line.families,
-            weight = line.weight,
-            italic = line.italic,
-            monospace = line.monospace,
-            fontRuns = line.fontRuns,
-            align = line.alignment,
-            // 首行缩进**必须交给 Aligner**，不能画完再整体右移（用户报缺陷①的修法）。
-            //
-            // Aligner 的 `natural` 本来就以 `x0 = firstLineIndentPx` 起算（`natural = x0 + Σadv`），
-            // 所以 `slack = lineWidthPx − natural` 已经把缩进扣掉了，拉伸后右缘正好落在版心。
-            // 旧写法传 `0f` 再 `paintX += indent`：拉伸基数**少了缩进** ⇒ JUSTIFY 首行被拉到
-            // 版心宽之后又整体右移 indent ⇒ **右溢出一个缩进**。实测（Rust 书 22 章）：
-            // `p { text-align: justify; text-indent: 2em }` 的**每一个**正文段首行都如此，
-            // 溢出量恒等于缩进（`2em` = 84.36px @fs=42.18），22 章里 555 行，末两个字被页面裁掉。
-            firstLineIndentPx = line.firstLineIndentPx,
-            // 末行不拉伸：两端对齐的定义本身。
-            isLastLine = isLastLineOf(line, endExcl),
-            // 行尾连字符：进拉伸基数与可见右缘（连字符占版心，否则 JUSTIFY 会少算一个字位）。
-            hyphenAtEnd = line.hyphenAtEnd,
-            // 标点挤压：断行侧定断点时用的比例（量画同源，教训 ⑩）。
-            squeezeRatio = line.squeezeRatio,
-            // 混排字距：与断行侧同一个 em（间隙进 `adv` ⇒ 逐字 x、JUSTIFY 基数、可见右缘同源）。
-            cjkLatinSpacingEm = line.cjkLatinSpacingEm,
-            // 行内盒横向推进：与断行侧同一份（同 `cjkLatinSpacingEm` 的理由 —— 量画同源）。
-            inlineBoxRuns = line.inlineBoxRuns,
-        )
+        val placement = placementFor(line, start, endExcl)
         // 缩进已在 placement 内（x0），落墨起点即文本区左缘（marker 另行绘制，不动）。
         val paintX = textX
         // 基线：半行距居中 + ascent（CSS 2.2 §10.8.1）。**自算**，不再借道 Paragraph。
@@ -529,6 +592,8 @@ class LineWindowDrawer(
             canvas, line, placement, paintX, baseY, start, endExcl,
             only = if (positionedRuns.isEmpty()) null else line.inlineBoxRuns - positionedRuns.toSet(),
         )
+        // 标注底色垫在文字之下、书内行内盒之上：读者高亮不会被书的代码块/行内底色吞掉。
+        paintDecorBackgrounds(canvas, line, placement, paintX, start, endExcl, decorRuns)
         if (positionedRuns.isEmpty()) {
             paintGlyphs(canvas, line, placement, paintX, baseY, start, endExcl, { f, t -> isHidden(f, t) }, decRuns, capDy = capDy)
         } else {
@@ -553,6 +618,8 @@ class LineWindowDrawer(
                 )
             }
         }
+        // 标注划线压在文字与书内装饰之上：读者线更粗、更靠下，不能被书的下划线糊住。
+        paintDecorUnderlines(canvas, line, placement, paintX, baseY, start, endExcl, decorRuns)
 
         // 注音/着重号与文字同盒，随 half-leading 一并下移，保持与基字的相对位置。
         // E10：基字被隐藏的注音整条不画（rt 源文与基字同属被隐藏子树）；行高增量照旧计入基线。
@@ -595,6 +662,133 @@ class LineWindowDrawer(
         }
         return segs.map { run.copy(start = it.first, endExclusive = it.last + 1) }
     }
+
+    /**
+     * 本行相交的标注装饰：章内全局坐标 → [line] 文本坐标，并挖掉隐藏区间。
+     *
+     * 与 [decRuns]（书内 `text-decoration`）同法，但颜色 / 粗细 / 位置来自 [DecorRange]，
+     * 不参与 CSS 级联。裁剪后仍在文本坐标系，绘制时再减 [start] 换成 placement 局部下标。
+     */
+    private fun decorRunsFor(
+        line: DrawLine,
+        start: Int,
+        endExcl: Int,
+        hidden: List<IntRange>,
+    ): List<DecorRange> {
+        if (line.decorRuns.isEmpty() || endExcl <= start) return emptyList()
+        val lineStart = line.charBase + start
+        val lineEnd = line.charBase + endExcl
+        val out = ArrayList<DecorRange>(line.decorRuns.size)
+        for (r in line.decorRuns) {
+            val s = maxOf(r.start, lineStart)
+            val e = minOf(r.endExclusive, lineEnd)
+            if (e <= s) continue
+            val local = r.copy(start = s - line.charBase, endExclusive = e - line.charBase)
+            if (hidden.isEmpty()) {
+                out.add(local)
+            } else {
+                out.addAll(subtractHiddenDecor(local, hidden))
+            }
+        }
+        return out
+    }
+
+    /** 从一条标注装饰里挖掉隐藏区间（隐藏字符的高亮/划线也不落墨）。 */
+    private fun subtractHiddenDecor(run: DecorRange, hidden: List<IntRange>): List<DecorRange> {
+        var segs: List<IntRange> = listOf(run.start until run.endExclusive)
+        for (h in hidden) {
+            val next = ArrayList<IntRange>(segs.size)
+            for (s in segs) {
+                if (h.last < s.first || h.first > s.last) {
+                    next.add(s)
+                    continue
+                }
+                if (h.first > s.first) next.add(s.first until h.first)
+                if (h.last < s.last) next.add((h.last + 1)..s.last)
+            }
+            segs = next
+            if (segs.isEmpty()) return emptyList()
+        }
+        return segs.map { run.copy(start = it.first, endExclusive = it.last + 1) }
+    }
+
+    /**
+     * 标注高亮底色：画在文字与书内行内盒之上、字形之下（读者意图压过书的背景）。
+     *
+     * 纵向取整行框 [DrawLine.yTop]..[DrawLine.yBottom]（荧光笔感，跨行连续）；横向复用
+     * [LineAligner.visibleSpan]，与落墨/命中同一份几何。
+     */
+    private fun paintDecorBackgrounds(
+        canvas: Canvas,
+        line: DrawLine,
+        placement: LineAligner.Placement,
+        paintX: Float,
+        start: Int,
+        endExcl: Int,
+        decorRuns: List<DecorRange>,
+    ) {
+        if (decorRuns.isEmpty() || endExcl <= start) return
+        val n = endExcl - start
+        for (r in decorRuns) {
+            if (r.kind != DecorKind.BACKGROUND) continue
+            val lo = (r.start - start).coerceIn(0, n)
+            val hi = (r.endExclusive - start).coerceIn(lo, n)
+            if (hi <= lo) continue
+            val (left, right) = aligner.visibleSpan(placement, n, lo, hi) ?: continue
+            if (right <= left) continue
+            val paint = Paint().apply { color = withAlpha(r.argb, line.alpha) }
+            canvas.drawRect(
+                Rect.makeLTRB(
+                    paintX + left,
+                    line.yTop.toFloat(),
+                    paintX + right,
+                    line.yBottom.toFloat(),
+                ),
+                paint,
+            )
+        }
+    }
+
+    /**
+     * 标注划线：画在文字与书内装饰之后，默认比书内下划线更粗、更靠下，避免两线糊在一起。
+     *
+     * 默认粗细 = `0.08em`、中心 = 基线下 `0.20em`；[DecorRange.thicknessPx] /
+     * [DecorRange.offsetPx] 可覆盖（offset 是中心相对基线的距离，向下为正）。
+     */
+    private fun paintDecorUnderlines(
+        canvas: Canvas,
+        line: DrawLine,
+        placement: LineAligner.Placement,
+        paintX: Float,
+        baseY: Float,
+        start: Int,
+        endExcl: Int,
+        decorRuns: List<DecorRange>,
+    ) {
+        if (decorRuns.isEmpty() || endExcl <= start) return
+        val n = endExcl - start
+        for (r in decorRuns) {
+            if (r.kind != DecorKind.UNDERLINE) continue
+            val lo = (r.start - start).coerceIn(0, n)
+            val hi = (r.endExclusive - start).coerceIn(lo, n)
+            if (hi <= lo) continue
+            val (left, right) = aligner.visibleSpan(placement, n, lo, hi) ?: continue
+            if (right <= left) continue
+            val thickness = (r.thicknessPx ?: (line.fontSizePx * ANNOTATION_UNDERLINE_THICKNESS_EM)).coerceAtLeast(1f)
+            val centerY = baseY + (r.offsetPx ?: (line.fontSizePx * ANNOTATION_UNDERLINE_OFFSET_EM))
+            val paint = Paint().apply { color = withAlpha(r.argb, line.alpha) }
+            canvas.drawRect(
+                Rect.makeLTRB(
+                    paintX + left,
+                    centerY - thickness / 2f,
+                    paintX + right,
+                    centerY + thickness / 2f,
+                ),
+                paint,
+            )
+        }
+    }
+
 
     /**
      * 本行基线 y（绝对坐标）。
@@ -1807,6 +2001,12 @@ private const val DECORATION_AUTO_THICKNESS_EM = 0.1f
 
 /** 字体度量缺失时的回退下划线位置（em，与旧下划线口径一致 = 0.12em）。 */
 private const val DECORATION_UNDERLINE_FALLBACK_EM = 0.12f
+
+/** 读者标注划线的默认粗细（em）：比书内下划线更粗，避免两线糊在一起。 */
+private const val ANNOTATION_UNDERLINE_THICKNESS_EM = 0.08f
+
+/** 读者标注划线的默认中心位置（em，基线向下）：比书内下划线更靠下。 */
+private const val ANNOTATION_UNDERLINE_OFFSET_EM = 0.20f
 
 /** skip-ink 横带的纵向内缩（px）：Chromium `decoration_bounds.Inset(InsetsF::VH(0.5, 0))`。 */
 private const val DECORATION_INK_BAND_INSET_PX = 0.5f

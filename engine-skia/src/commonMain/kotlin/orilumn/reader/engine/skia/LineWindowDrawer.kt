@@ -454,8 +454,56 @@ class LineWindowDrawer(
         // paintX 是纯内容区偏移；placement 的 x 已含缩进与对齐偏移，逐字落墨时统一加上。
         // **在流行内盒（背景/边框）先落，垫在文字之下**（CSS：背景 → 边框 → 文字）。
         val capDy = capFloatDy(line, baseY, lineExtra)
-        paintInlineBoxes(canvas, line, placement, paintX, baseY, start, endExcl)
-        paintGlyphs(canvas, line, placement, paintX, baseY, start, endExcl, { f, t -> isHidden(f, t) }, decRuns, capDy = capDy)
+        // 绘制层级（CSS 2.1 附录 E）：在流内容在第 7 步、**已定位后代**（`position: relative`，
+        // `z-index: auto`）在第 8 步 —— 后者**盖在**同行在流文字之上（CSS Position 3 §2.2：
+        // 相对定位盒「painted as if it generated a new stacking context」）。故已定位的行内盒
+        // 不能跟其它盒一起垫在文字下，要单独走第二趟：底色/边框压住在流文字，自己的字形再压盒上。
+        //
+        // 判据用 run 的累积相对位移（`relDx/relDy`）：零位移的已定位盒画在哪层都看不出差别，
+        // 不必为它多开一趟（真书里绝大多数 `position: relative` 没有位移）。
+        val positionedRuns = line.inlineBoxRuns.filter {
+            it.visible && !it.visibilityHidden && (it.relDx != 0 || it.relDy != 0)
+        }
+        paintInlineBoxes(
+            canvas, line, placement, paintX, baseY, start, endExcl,
+            only = if (positionedRuns.isEmpty()) null else line.inlineBoxRuns - positionedRuns.toSet(),
+        )
+        if (positionedRuns.isEmpty()) {
+            paintGlyphs(canvas, line, placement, paintX, baseY, start, endExcl, { f, t -> isHidden(f, t) }, decRuns, capDy = capDy)
+        } else {
+            // 第一趟只画**在流**字形与装饰：已定位区间整段跳过（含下划线等装饰，避免第二趟叠深）。
+            var cur = start
+            for (r in positionedRuns.sortedBy { it.start }) {
+                val s = r.start.coerceIn(start, endExcl)
+                val e = r.endExclusive.coerceIn(start, endExcl)
+                if (e <= cur) continue
+                if (s > cur) {
+                    paintGlyphs(
+                        canvas, line, placement, paintX, baseY, cur, s,
+                        { f, t -> isHidden(f, t) }, decRuns, capDy = capDy, placementStart = start,
+                    )
+                }
+                cur = e
+            }
+            if (cur < endExcl) {
+                paintGlyphs(
+                    canvas, line, placement, paintX, baseY, cur, endExcl,
+                    { f, t -> isHidden(f, t) }, decRuns, capDy = capDy, placementStart = start,
+                )
+            }
+            // 第二趟：树序逐盒 —— 盒（底色/边框）→ 它自己的字。嵌套的已定位盒按 run 顺序自然压在外层之上。
+            for (r in positionedRuns) {
+                paintInlineBoxes(canvas, line, placement, paintX, baseY, start, endExcl, only = listOf(r))
+                val s = r.start.coerceIn(start, endExcl)
+                val e = r.endExclusive.coerceIn(start, endExcl)
+                if (e > s) {
+                    paintGlyphs(
+                        canvas, line, placement, paintX, baseY, s, e,
+                        { f, t -> isHidden(f, t) }, decRuns, placementStart = start,
+                    )
+                }
+            }
+        }
 
         // 注音/着重号与文字同盒，随 half-leading 一并下移，保持与基字的相对位置。
         // E10：基字被隐藏的注音整条不画（rt 源文与基字同属被隐藏子树）；行高增量照旧计入基线。
@@ -723,8 +771,10 @@ class LineWindowDrawer(
         baseY: Float,
         start: Int,
         endExcl: Int,
+        /** 只画这些 run（null = 全部）。两趟绘制用：在流这一趟与已定位那一趟各传各的子集。 */
+        only: Collection<orilumn.reader.engine.laying.InlineBoxRun>? = null,
     ) {
-        val runs = line.inlineBoxRuns
+        val runs = if (only == null) line.inlineBoxRuns else line.inlineBoxRuns.filter { it in only }
         if (runs.isEmpty() || endExcl <= start) return
         val n = endExcl - start
         for (r in runs) {
@@ -908,9 +958,17 @@ class LineWindowDrawer(
         decRuns: List<TextDecorationRun>,
         /** 首字下沉的基线位移（px；0 = 无）。判区间在本函数内做（[DrawLine.capFloat] + `range.first == 0`）。 */
         capDy: Float = 0f,
+        /**
+         * [placement] 的起点（创建它时的区间起点）。
+         *
+         * 一般 = [start]（整段一次画完）。**同一行分两趟画**时（已定位行内盒压层，见调用处）
+         * 本趟的 [start] 大于整体起点 ⇒ 槽位按 `start − placementStart` 偏移索引。
+         */
+        placementStart: Int = start,
     ) {
         if (endExcl <= start) return
         val n = endExcl - start
+        val slotOff = start - placementStart
         // S5b：含拉丁字母的行改用 Skia 簇位（保 kerning + fi/fl 连字），纯 CJK 行零成本走 Aligner 的 x。
         // **逐行判据、不混用**：一行要么全用簇位、要么全用 Aligner —— 两套 x 混在一行里就是错位。
         //
@@ -941,10 +999,12 @@ class LineWindowDrawer(
                         },
                         // 槽位分类要与主拉伸同源（同 em）；不传则级 2（中英注入间隙）恒为空。
                         line.cjkLatinSpacingEm,
+                        // 本趟只画整行里的一段（同一行分两趟）⇒ 槽位按段落起点偏移索引。
+                        off = slotOff, count = n,
                     )
                 }
             }
-        val xs: FloatArray = graft?.xs ?: placement.xs
+        val xs: FloatArray = graft?.xs ?: if (slotOff == 0) placement.xs else FloatArray(n) { placement.xs[slotOff + it] }
         val kernEndDelta = graft?.endDelta ?: 0f
         // E12：行内相对定位的**逐字**位移表（按全文本绝对下标；无行内偏移叶回 null 零开销）。
         // 每个字符的位移 = 覆盖它的所有行内盒 run 的 relDx/relDy 之和（嵌套盒自然叠加）。

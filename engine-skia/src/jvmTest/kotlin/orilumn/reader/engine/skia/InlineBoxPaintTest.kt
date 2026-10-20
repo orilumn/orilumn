@@ -301,6 +301,64 @@ class InlineBoxPaintTest {
         assertTrue("盒仍须真的伸出一份内边距，实测 $grown", grown >= pad.toInt() - 2)
     }
 
+    // ---- 附录 E 第 8 步：已定位行内盒压在在流文字之上 ----
+
+    /**
+     * `position: relative` 的行内盒（`z-index: auto`）按 CSS 2.1 附录 E **第 8 步**绘制：
+     * 已定位后代排在**在流内容（第 7 步）之后** —— 盒的底色/边框盖住与它重叠的在流文字，
+     * 而盒**自己**的字再压在盒上（CSS Position 3 §2.2：相对定位盒「painted as if it generated
+     * a new stacking context」）。Calibre / Chromium 都是这个顺序。
+     *
+     * 构造：盒只包前 2 字，右内边距 40px 把后面的字推开，再整体右移 40px ⇒ 盒的右半是「空底色」，
+     * 而第 3 字起的在流行正落在盒底下。
+     * - 旧行为（盒垫在文字下）：那几行字会**透出来**，盒右半有墨；
+     * - 正确行为：盒右半必须**只有底色**；同时盒左半必须有自己的字（别把自己盖掉）。
+     */
+    @Test
+    fun `已定位行内盒压在在流文字之上、自己的字压在盒上`() {
+        val text = "a".repeat(8)
+        val box = InlineBoxRun(
+            0, 2,
+            bgHex = "#fff176",
+            padding = Edges(right = 40f),
+            relDx = 40,
+        )
+        val bmp = render(listOf(line(text, listOf(box))))
+        val px = requireNotNull(bmp.peekPixels())
+
+        // 盒的底色范围（原色白底判定）：左/右缘。
+        var left = Int.MAX_VALUE
+        var right = -1
+        for (y in 0 until bmp.height) {
+            for (x in 0 until bmp.width) {
+                if (px.getColor(x, y) == markerArgb) {
+                    if (x < left) left = x
+                    if (x > right) right = x
+                }
+            }
+        }
+        assertTrue("盒底色必须落墨", right > left)
+
+        fun inkIn(x0: Int, x1: Int): Int {
+            var n = 0
+            for (y in 0 until bmp.height) for (x in x0..x1) {
+                val c = px.getColor(x, y)
+                val r = (c shr 16) and 0xFF
+                val g = (c shr 8) and 0xFF
+                if (r < 120 && g < 120) n++
+            }
+            return n
+        }
+        // 盒左段：盒自己的两个字必须在（说明没有把自己盖掉）。
+        assertTrue("盒自己的字必须压在盒上（左段有墨）", inkIn(left + 2, left + 12) > 0)
+        // 盒右段：在流文字必须被盒盖住（纯底色，零墨）。
+        assertEquals(
+            "已定位盒必须盖住重叠的在流文字（右段只应有底色）",
+            0,
+            inkIn(right - 30, right - 4),
+        )
+    }
+
     // ---- 像素助手（E16/E17 用） ----
 
     private val blueArgb = 0xFF0000FF.toInt()

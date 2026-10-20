@@ -183,7 +183,14 @@ fun shapeGeometry(
         alpha = effectiveOpacity(el) { styles[it] ?: ancestorStyleOf?.invoke(it) ?: rootStyle },
         rubyRuns = rubyRuns,
         // 下划线区间（与 text 同构遍历；无下划线回空表零回归）。
-        decorationRuns = decorationRunsOf(el, styles, rootStyle, genOf, isBlock, sharedSegs),
+        // **样式回退与 inlineBoxes/alpha 同口径**：装饰会沿祖先链**穿过块边界**传播
+        // （`<a href><p>abc</p></a>` 的 abc 带链接下划线），而轻路径的 `styles` 只含叶根子树
+        // （`LightPrepare.inlineStyles` 不含祖先）⇒ 不喂 `ancestorStyleOf` 就会把祖先那层装饰
+        // 整个丢掉。症状：首开（临时表/增量塑形）看不到下划线，再开（磁盘表 canonical 全表）才有。
+        decorationRuns = decorationRunsOf(
+            el, styles, rootStyle, genOf, isBlock, sharedSegs,
+            styleOf = { styles[it] ?: ancestorStyleOf?.invoke(it) },
+        ),
         // 行内盒（背景/边框；无装饰回空表零回归）。样式回退同 alpha：表外祖先按懒级联取。
         inlineBoxRuns = inlineBoxes,
         // E10 `visibility: hidden` 覆盖区间（与叶文本同一段表；无隐藏声明的子树回空表零开销）。
@@ -322,6 +329,8 @@ fun decorationRunsOf(
     isBlock: (MarkupElement) -> Boolean,
     /** 预计算段表（`shapeGeometry` 一次分段多家共享；null 即现算）。 */
     segs: List<StyledSegment>? = null,
+    /** 样式回退（默认读 [styles] 表；轻路径喂懒级联 —— 祖先块上的装饰也要进栈）。 */
+    styleOf: ((MarkupElement) -> ComputedStyle?)? = null,
 ) = collectTextDecorationRuns(
     el,
     styles,
@@ -330,6 +339,7 @@ fun decorationRunsOf(
     base.whiteSpace,
     genOf,
     precomputed = segs,
+    styleOf = styleOf,
 )
 
 /** 行内盒伴生（无背景/边框回空表）。样式回退与 alpha 同口径：表外祖先走懒级联。 */

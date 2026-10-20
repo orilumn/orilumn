@@ -29,6 +29,10 @@ import orilumn.reader.engine.html.MarkupElement
  *   100 = book/theme rhythm, 0 = p/li margins cleared).
  * @param gapScale 疏密 (paragraphGapScale): scales the computed top/bottom margin of every OTHER
  *   block (author css / UA defaults kept; 1.0 = original rhythm).
+ * @param pxScale **CSS px → 画布物理 px** 的倍率（= 设备密度，见 `TypographicProfile.density`）。
+ *   书里的 `px` 长度是参考像素（浏览器 1 CSS px = 1 dp），引擎坐标是物理像素；不乘密度，
+ *   2x/3x 屏上所有 `px` 盒子/边框/外边距都只有 1/2、1/3 大小（正文却按 dp 放大），
+ *   观感与浏览器差异明显。只缩放 `px`（含无单位数值），`em/rem/%` 不动。
  */
 class StyleComputer(
     private val rootFontPx: Float,
@@ -39,8 +43,13 @@ class StyleComputer(
     ui: StyleSheet? = null,
     private val paragraphScale: Float = 1f,
     private val gapScale: Float = 1f,
+    private val pxScale: Float = 1f,
 ) {
     private val cascade = Cascade(ua, authorSheets, theme, settings, ui)
+
+    /** [Length] 在本引擎坐标系里的最终物理 px（`px` 乘设备密度，其余同 [Length.resolve]）。 */
+    private fun Length.devPx(elementFontPx: Float, parentFontPx: Float): Float =
+        resolve(elementFontPx, parentFontPx, rootFontPx, pxScale)
 
     private companion object {
         /** Matches a CSS length token (or `auto`) anywhere inside a mixed shorthand value. */
@@ -342,7 +351,7 @@ class StyleComputer(
             val len = parseLength(t) ?: return null to null
             return when (len) {
                 is Length.Percent -> null to len.value
-                else -> len.resolve(fontSize, parent.fontSizePx, rootFontPx) to null
+                else -> len.devPx(fontSize, parent.fontSizePx) to null
             }
         }
 
@@ -403,12 +412,12 @@ class StyleComputer(
 
         return ComputedStyle(
             fontSizePx = fontSize,
-            lineHeightRatio = w["line-height"]?.let { parseLineHeight(it, fontSize) } ?: parent.lineHeightRatio,
+            lineHeightRatio = w["line-height"]?.let { parseLineHeight(it, fontSize, pxScale) } ?: parent.lineHeightRatio,
             colorHex = w["color"]?.let { parseCssColor(it) } ?: parent.colorHex,
             bold = w["font-weight"]?.let { parseFontWeightBold(it) } ?: parent.bold,
             italic = w["font-style"]?.let { parseFontStyleItalic(it) } ?: parent.italic,
             decoration = parseTextDecoration(w, fontSize, parent.fontSizePx),
-            textIndentPx = w["text-indent"]?.let { v -> parseLength(v)?.resolve(fontSize, parent.fontSizePx, rootFontPx) } ?: 0f,
+            textIndentPx = w["text-indent"]?.let { v -> parseLength(v)?.devPx(fontSize, parent.fontSizePx) } ?: 0f,
             margin = margin,
             marginLeftAuto = isMarginAuto(w, left = true),
             marginRightAuto = isMarginAuto(w, left = false),
@@ -655,7 +664,7 @@ class StyleComputer(
         fun lenOf(v: String?): Float? {
             if (v == null) return null
             val t = v.trim().lowercase()
-            return borderWidthKeyword(t) ?: parseLength(t)?.resolve(fontSize, parentFontPx, rootFontPx)
+            return borderWidthKeyword(t)?.times(pxScale) ?: parseLength(t)?.devPx(fontSize, parentFontPx)
         }
         // `border-width`: 1–4 slots like margin (thin/medium/thick allowed per slot).
         val widthSlots: Edges? = w["border-width"]?.let { v ->
@@ -683,7 +692,7 @@ class StyleComputer(
     private fun extractFirstLength(value: String, fontSize: Float, parentFontPx: Float): Float {
         val m = LENGTH_TOKEN.find(value) ?: return 0f
         if (m.value.lowercase() == "auto") return 0f
-        return parseLength(m.value)?.resolve(fontSize, parentFontPx, rootFontPx) ?: 0f
+        return parseLength(m.value)?.devPx(fontSize, parentFontPx) ?: 0f
     }
 
     /** Finds the first parseable CSS color value inside any shorthand. Unlike a naive whitespace
@@ -817,7 +826,7 @@ class StyleComputer(
                         val f = (len.value / 100f).coerceIn(-2f, 2f)
                         if (!xSet) { xPct = f; xSet = true } else if (!ySet) { yPct = f; ySet = true }
                     } else {
-                        val px = len.resolve(fontSize, parentFontPx, rootFontPx)
+                        val px = len.devPx(fontSize, parentFontPx)
                         if (!xSet) { xPx = px; xPct = 0f; xSet = true } else if (!ySet) { yPx = px; yPct = 0f; ySet = true }
                     }
                     count++
@@ -1116,7 +1125,7 @@ class StyleComputer(
             }
             val len = parseLength(t.lowercase()) ?: return null // 未知 token 即整声明丢弃
             if (len is Length.Percent) return null
-            lens.add(len.resolve(fontSize, parentFontPx, rootFontPx))
+            lens.add(len.devPx(fontSize, parentFontPx))
         }
         if (lens.size < 2) return null
         if (lens.size > 4) return null // 含 spread（第 4 长度）→ 不支持
@@ -1154,7 +1163,7 @@ class StyleComputer(
             val len = parseLength(first) ?: return 0f to 0f
             // `%` kept as a 0..1 fraction (resolved+clamped against box dims at draw).
             if (len is Length.Percent) return 0f to (len.value / 100f).coerceIn(0f, 10f)
-            return len.resolve(fontSize, parentFontPx, rootFontPx).coerceAtLeast(0f) to 0f
+            return len.devPx(fontSize, parentFontPx).coerceAtLeast(0f) to 0f
         }
         val slots: List<String>? = w["border-radius"]?.let { splitWs(it) }?.filter { it.isNotBlank() }
         val quad = when {
@@ -1228,7 +1237,7 @@ class StyleComputer(
     private fun normalizeEdge(value: String, fontSize: Float, parentFontPx: Float): Float {
         val v = value.trim().lowercase()
         if (v == "auto" || v == "inherit" || v == "initial") return 0f
-        return parseLength(v)?.resolve(fontSize, parentFontPx, rootFontPx) ?: 0f
+        return parseLength(v)?.devPx(fontSize, parentFontPx) ?: 0f
     }
 
     private fun parseTextAlign(value: String): TextAlign = when (value.trim().lowercase()) {
@@ -1280,7 +1289,7 @@ class StyleComputer(
         if (t == "normal") return 0f
         val len = parseLength(t) ?: return 0f
         if (len is Length.Percent) return 0f // invalid for these props
-        return len.resolve(fontSize, parentFontPx, rootFontPx)
+        return len.devPx(fontSize, parentFontPx)
     }
 
     /**
@@ -1295,7 +1304,7 @@ class StyleComputer(
             if (raw.isEmpty() || raw == "auto") return null
             val len = parseLength(raw) ?: return null
             if (len is Length.Percent) return null
-            return len.resolve(fontSize, parentFontPx, rootFontPx)
+            return len.devPx(fontSize, parentFontPx)
         }
         val inset = RelativeInset(dir("top"), dir("right"), dir("bottom"), dir("left"))
         return if (inset.isEmpty) RelativeInset() else inset
@@ -1377,7 +1386,7 @@ class StyleComputer(
         fun pxOf(tok: String): Float {
             val len = parseLength(tok.trim().lowercase()) ?: return 0f
             if (len is Length.Percent) return 0f
-            return len.resolve(fontSize, fontSize, rootFontPx).coerceAtLeast(0f)
+            return len.devPx(fontSize, fontSize).coerceAtLeast(0f)
         }
         val toks = splitWs(raw.trim()).filter { it.isNotBlank() }
         return when (toks.size) {
@@ -1391,7 +1400,7 @@ class StyleComputer(
     private fun resolveFontSize(raw: String?, parentPx: Float): Float {
         val len = raw?.let { parseLength(it) } ?: return parentPx
         return when (len) {
-            is Length.Px -> len.value
+            is Length.Px -> len.value * pxScale
             is Length.Em -> parentPx * len.value
             is Length.Percent -> parentPx * len.value / 100f
             is Length.Rem -> rootFontPx * len.value
@@ -1446,7 +1455,7 @@ class StyleComputer(
                 tok == "from-font" -> thickness = null
                 tok == "auto" -> thickness = fontSize * DECORATION_AUTO_THICKNESS_EM
                 parseCssColor(tok) != null -> color = parseCssColor(tok)
-                parseLength(tok) != null -> thickness = parseLength(tok)?.resolve(fontSize, parentFontSize, rootFontPx)
+                parseLength(tok) != null -> thickness = parseLength(tok)?.devPx(fontSize, parentFontSize)
             }
         }
         return TextDecoration(lines, color, style, thickness)
@@ -1473,7 +1482,7 @@ class StyleComputer(
         val v = value.trim().lowercase()
         if (v == "from-font") return null
         if (v == "auto") return fontSize * 0.1f
-        return parseLength(v)?.resolve(fontSize, parentFontSize, rootFontPx)
+        return parseLength(v)?.devPx(fontSize, parentFontSize)
     }
 
     private fun parseSkipInk(value: String): Boolean? = when (value.trim().lowercase()) {

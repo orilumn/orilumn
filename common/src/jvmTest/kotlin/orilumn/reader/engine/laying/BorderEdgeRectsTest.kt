@@ -36,23 +36,41 @@ class BorderEdgeRectsTest {
     }
 
     @Test
-    fun `虚线段长 3 倍厚、隙 2 倍厚`() {
-        // 厚 4：dash 12、gap 8 → 段 [0,12) [20,32) [40,52)…；x1=36 处截断。
+    fun `虚线段长按 Chromium 设备像素口径、隙微调铺满`() {
+        // 厚 4（设备厚 4 ≥ 3）：dash 2×4=8、目标隙 1×4=4；
+        // 长 36 时 SelectBestDashGap 取 3 段、隙 6 ⇒ 三段正好铺满 [0,36)。
         val r = borderEdgeRects(BorderEdgeAxis.HORIZONTAL, 0f, 36f, 2f, 4f, BorderStyle.DASHED)
         assertEquals(
             listOf(
-                BorderEdgeRect(0f, 2f, 12f, 6f),
-                BorderEdgeRect(20f, 2f, 32f, 6f),
+                BorderEdgeRect(0f, 2f, 8f, 6f),
+                BorderEdgeRect(14f, 2f, 22f, 6f),
+                BorderEdgeRect(28f, 2f, 36f, 6f),
             ),
             r,
         )
     }
 
     @Test
-    fun `虚线点线厚度下限`() {
-        // 厚 0.5：dash 下限 2px、gap 下限 1px → 段 [0,2) [3,4)…
-        val dash = borderEdgeRects(BorderEdgeAxis.HORIZONTAL, 0f, 4f, 0f, 0.5f, BorderStyle.DASHED)
-        assertEquals(listOf(BorderEdgeRect(0f, 0f, 2f, 0.5f), BorderEdgeRect(3f, 0f, 4f, 0.5f)), dash)
+    fun `虚线换档看设备像素厚——2px 在 2x 屏按 2 倍厚算`() {
+        // 2px 边框 @2x = 设备厚 4（≥3）⇒ 段 4px、隙 2px（CSS 口径）；
+        // 同一条边若按 1x 算（设备厚 2 < 3）则是段 6px、隙 4px。
+        val at2x = borderEdgeRects(BorderEdgeAxis.HORIZONTAL, 0f, 100f, 0f, 2f, BorderStyle.DASHED, 2f)
+        assertEquals(4f, at2x[0].right - at2x[0].left, 1e-4f)
+        assertEquals(2f, at2x[1].left - at2x[0].right, 1e-4f)
+        val at1x = borderEdgeRects(BorderEdgeAxis.HORIZONTAL, 0f, 100f, 0f, 2f, BorderStyle.DASHED, 1f)
+        assertEquals(6f, at1x[0].right - at1x[0].left, 1e-4f)
+    }
+
+    @Test
+    fun `虚线放不下两段就不画`() {
+        // 设备厚 1（0.5px @1x 向上取整）⇒ 段 3px；长 4px 连两段都放不下 ⇒ 空表（Chromium 同）。
+        assertTrue(
+            borderEdgeRects(BorderEdgeAxis.HORIZONTAL, 0f, 4f, 0f, 0.5f, BorderStyle.DASHED).isEmpty(),
+        )
+    }
+
+    @Test
+    fun `点线厚度下限`() {
         // 厚 0.5：步距下限 2px、方块仍为厚本身 [p, p+0.5)
         val dot = borderEdgeRects(BorderEdgeAxis.HORIZONTAL, 0f, 4f, 0f, 0.5f, BorderStyle.DOTTED)
         assertEquals(

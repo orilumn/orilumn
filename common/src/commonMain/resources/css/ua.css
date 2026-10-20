@@ -39,10 +39,19 @@ blockquote { margin: 1em 2.5em; }
 pre { margin: 1em 0; white-space: pre-wrap; }
 /* 场景分隔线 `<hr>`：浏览器 UA 是 `margin: .5em auto; border: 1px inset`（内容高 0，靠上下两条
  * 1px 边框画出一条横线）。`auto` 水平外边距在「块宽 auto」下解析为 0（CSS 2.1 §10.3.3）⇒ 横线铺满
- * 版心，与本层基线一致。唯一降级：本引擎不实现 inset/groove/ridge 这类 3D 边框样式的明暗，
- * 按**实线**画（`border-style` 关键字不认识即回落 solid），1px 下与浏览器的灰线肉眼相近。
+ * 版心，与本层基线一致。本引擎不实现 inset/groove/ridge 这类 3D 边框样式的明暗渐变，这里用
+ * **浏览器 inset 的实际用色**等价写出（Chromium 浅色主题黑边 inset 上/左 ≈#9A9A9A、下/右
+ * ≈#EEEEEE）：上边深、下边浅，1 CSS px 在 2x 屏上是 2 物理 px，观感与浏览器那条细灰线一致。
+ * 若按纯黑实线画，上下两条各 1 CSS px 会叠成一条 2 CSS px 的粗黑线（用户报「hr 太粗」）。
  * 书里任何 `hr` 规则（含内联样式）照旧压过本层。 */
-hr { margin: 0.5em auto; border: 1px solid; }
+hr {
+  margin: 0.5em auto;
+  border: 1px solid;
+  border-top-color: #9a9a9a;
+  border-left-color: #9a9a9a;
+  border-right-color: #eeeeee;
+  border-bottom-color: #eeeeee;
+}
 /* `s` 与 `del` 同为删除线（EPUB2/3 语义重复标签各取浏览器默认）。 */
 s, del { text-decoration: line-through; }
 ins { text-decoration: underline; }

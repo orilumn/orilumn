@@ -55,10 +55,11 @@ object BoxDrawer {
         pageEndLine: Int,
         bandTop: Int,
         bandBottom: Int,
+        deviceScale: Float = 1f,
     ): List<DrawRect> {
         if (bandBottom <= bandTop) return emptyList()
         val out = ArrayList<DrawRect>()
-        for (box in boxes) emit(box, out, pageStartLine, pageEndLine, bandTop, bandBottom)
+        for (box in boxes) emit(box, out, pageStartLine, pageEndLine, bandTop, bandBottom, deviceScale = deviceScale)
         return out
     }
 
@@ -70,6 +71,7 @@ object BoxDrawer {
         bandTop: Int,
         bandBottom: Int,
         parentAlpha: Float = 1f,
+        deviceScale: Float = 1f,
     ) {
         // Skip boxes whose lines don't intersect the target page — the block belongs entirely
         // to a different page (pushed via break-inside:avoid, or ended on a previous page).
@@ -103,9 +105,11 @@ object BoxDrawer {
         // 翻回显形）；盒占位不受影响（layout 与绘制分离，`display:none` 才是去盒）。
         if (!box.style.visibilityHidden) {
             emitBackground(box, out, top, bottom, alpha, clip)
-            emitBorders(box, out, top, bottom, alpha, clip)
+            emitBorders(box, out, top, bottom, alpha, clip, deviceScale)
         }
-        for (child in box.childBoxes) emit(child, out, pageStartLine, pageEndLine, bandTop, bandBottom, alpha)
+        for (child in box.childBoxes) {
+            emit(child, out, pageStartLine, pageEndLine, bandTop, bandBottom, alpha, deviceScale)
+        }
     }
 
     /**
@@ -153,7 +157,7 @@ object BoxDrawer {
      * stroked ring (outer radii); non-uniform/dashed/dotted rounded borders fall back to square
      * bands (documented approximation — corners stick out over the rounded background).
      */
-    private fun emitBorders(box: LayoutBox, out: MutableList<DrawRect>, bandTop: Int, bandBottom: Int, alpha: Float, clip: ClipRect?) {
+    private fun emitBorders(box: LayoutBox, out: MutableList<DrawRect>, bandTop: Int, bandBottom: Int, alpha: Float, clip: ClipRect?, deviceScale: Float = 1f) {
         val b = box.style.border
         if (box.contentWidth <= 0) return
         val st = box.style
@@ -179,20 +183,20 @@ object BoxDrawer {
         emitEdge(axis = BorderEdgeAxis.HORIZONTAL, x0 = l, x1 = r, band0 = top, widthPx = b.top,
             color = colors?.top ?: current,
             style = styles?.top ?: BorderStyle.SOLID,
-            out = out, bandTop = bandT, bandBottom = bandB, alpha = alpha, clip = clip)
+            out = out, bandTop = bandT, bandBottom = bandB, alpha = alpha, clip = clip, deviceScale = deviceScale)
         emitEdge(axis = BorderEdgeAxis.HORIZONTAL, x0 = l, x1 = r, band0 = bottom - b.bottom.roundToInt(), widthPx = b.bottom,
             color = colors?.bottom ?: current,
             style = styles?.bottom ?: BorderStyle.SOLID,
-            out = out, bandTop = bandT, bandBottom = bandB, alpha = alpha, clip = clip)
+            out = out, bandTop = bandT, bandBottom = bandB, alpha = alpha, clip = clip, deviceScale = deviceScale)
         // Vertical edges: band runs y ∈ [top, bottom].
         emitEdge(axis = BorderEdgeAxis.VERTICAL, x0 = top, x1 = bottom, band0 = l, widthPx = b.left,
             color = colors?.left ?: current,
             style = styles?.left ?: BorderStyle.SOLID,
-            out = out, bandTop = bandT, bandBottom = bandB, alpha = alpha, clip = clip)
+            out = out, bandTop = bandT, bandBottom = bandB, alpha = alpha, clip = clip, deviceScale = deviceScale)
         emitEdge(axis = BorderEdgeAxis.VERTICAL, x0 = top, x1 = bottom, band0 = r - b.right.roundToInt(), widthPx = b.right,
             color = colors?.right ?: current,
             style = styles?.right ?: BorderStyle.SOLID,
-            out = out, bandTop = bandT, bandBottom = bandB, alpha = alpha, clip = clip)
+            out = out, bandTop = bandT, bandBottom = bandB, alpha = alpha, clip = clip, deviceScale = deviceScale)
     }
 
     /** Uniform solid border (width/color resolved, currentColor folded) or null. */
@@ -233,11 +237,12 @@ object BoxDrawer {
         bandBottom: Int,
         alpha: Float = 1f,
         clip: ClipRect? = null,
+        deviceScale: Float = 1f,
     ) {
         val w = widthPx.roundToInt().coerceAtLeast(1)
         if (widthPx <= 0f || x1 <= x0) return
         if (style == BorderStyle.NONE) return
-        for (rc in borderEdgeRects(axis, x0.toFloat(), x1.toFloat(), band0.toFloat(), w.toFloat(), style)) {
+        for (rc in borderEdgeRects(axis, x0.toFloat(), x1.toFloat(), band0.toFloat(), w.toFloat(), style, deviceScale)) {
             pushRect(
                 out, DrawKind.BORDER,
                 rc.top.roundToInt(), rc.left.roundToInt(), rc.bottom.roundToInt(), rc.right.roundToInt(),

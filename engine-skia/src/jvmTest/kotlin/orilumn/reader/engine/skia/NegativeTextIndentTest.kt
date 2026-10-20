@@ -170,7 +170,7 @@ class NegativeTextIndentTest {
             themeSheetFromProfile(p),
             null,
             ReaderUiSheet.build(p),
-            paragraphScale = p.paragraphSpacingScale, gapScale = p.paragraphGapScale,
+            paragraphScale = p.paragraphSpacingScale, gapScale = p.paragraphGapScale, pxScale = p.density,
         )
     }
 

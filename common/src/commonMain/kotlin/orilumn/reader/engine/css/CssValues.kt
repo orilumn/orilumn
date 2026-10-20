@@ -46,9 +46,20 @@ fun parseLength(value: String): Length? {
  * Converts a [Length] to absolute px given the element's font-size ([elementFontPx]), the parent
  * font-size ([parentFontPx]) and the root font-size ([rootFontPx]). `em`/`%` use [elementFontPx];
  * only callers resolving font-size itself pass a context where em/% map to [parentFontPx] instead.
+ *
+ * [pxScale] 是 **CSS px → 画布物理 px** 的倍率（= 设备密度；见 `TypographicProfile.density`）。
+ * CSS px 是**参考像素**（浏览器里 1 CSS px = 1 dp），本引擎的坐标系是物理像素 ⇒ 书里的
+ * `px` 长度必须随设备密度放大，否则 2x/3x 屏上 30px 的方块只有 15dp/10dp，相对正文（18dp）
+ * 明显偏小 —— 与浏览器/Calibre 的观感不一致。`em`/`rem`/`%` 已经以（同样按密度放大的）
+ * 字号/包含块为基准，故只缩放 `px`（含无单位数值）。
  */
-fun Length.resolve(elementFontPx: Float, parentFontPx: Float, rootFontPx: Float): Float = when (this) {
-    is Length.Px -> value
+fun Length.resolve(
+    elementFontPx: Float,
+    parentFontPx: Float,
+    rootFontPx: Float,
+    pxScale: Float = 1f,
+): Float = when (this) {
+    is Length.Px -> value * pxScale
     is Length.Em -> value * elementFontPx
     is Length.Percent -> value / 100f * elementFontPx
     is Length.Rem -> value * rootFontPx
@@ -299,10 +310,10 @@ fun parseFontStyleItalic(value: String): Boolean? = when (value.trim().lowercase
 }
 
 /** Parses a line-height into a unitless ratio; null when unrecognized (px → ratio relative to [elementFontPx]). */
-fun parseLineHeight(value: String, elementFontPx: Float): Float? {
+fun parseLineHeight(value: String, elementFontPx: Float, pxScale: Float = 1f): Float? {
     val plain = value.trim().toFloatOrNull()
     if (plain != null) return if (plain > 0f) plain else null // "1.5" → 1.5x
     val len = parseLength(value) ?: return null
-    val px = len.resolve(elementFontPx, elementFontPx, elementFontPx)
+    val px = len.resolve(elementFontPx, elementFontPx, elementFontPx, pxScale)
     return if (px > 0f) px / elementFontPx else null
 }

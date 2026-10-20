@@ -5,6 +5,7 @@ import orilumn.reader.collections.identityMap
 import orilumn.reader.collections.withLock
 import orilumn.reader.engine.EngineDiag
 import orilumn.reader.engine.css.CssBundle
+import orilumn.reader.engine.css.FloatSide
 import orilumn.reader.engine.css.cssHexToArgb
 import orilumn.reader.engine.css.FontDemand
 import orilumn.reader.engine.css.LightCssParser
@@ -577,7 +578,7 @@ class BoxChapterLayouter(
             else -> themeSheetFromProfile(profile)
         }
         val settings = settingsSheet
-        return StyleComputer(profile.bodyPx, ua, sheets, theme, settings, ui, paragraphScale = profile.paragraphSpacingScale, gapScale = profile.paragraphGapScale)
+        return StyleComputer(profile.bodyPx, ua, sheets, theme, settings, ui, paragraphScale = profile.paragraphSpacingScale, gapScale = profile.paragraphGapScale, pxScale = profile.density)
     }
 
     /** Assembles a [ChapterPrepareResult] from a cascade + box tree, computing global char starts. */
@@ -663,6 +664,7 @@ class BoxChapterLayouter(
             profile.fgColor,
             prepare.genOf,
             prepare.firstLetterOf,
+            deviceScale = profile.density,
         )
         val drawable = run {
             // 表格行展开进窗口（Compose 面随行窗绘制单元格文本 + 边框；legacy drawTableRow 不动）。
@@ -816,6 +818,8 @@ class BoxChapterLayouter(
          * 与本次 [lines] 同一 Y 口径（由 [buildBackgroundDrawBoxes] 的同一聚合给出）。缺省即不裁。
          */
         clipOf: (MarkupElement) -> ClipRect? = { null },
+        /** 显示密度（只影响虚线边框的段/隙比例，见 [orilumn.reader.engine.skia.DrawLine.deviceScale]）。 */
+        deviceScale: Float = 1f,
     ): Map<Int, orilumn.reader.engine.skia.DrawLine>? {
         val out = HashMap<Int, orilumn.reader.engine.skia.DrawLine>()
         for (i in leafList.indices) {
@@ -855,6 +859,7 @@ class BoxChapterLayouter(
                 val intruded = lead != null && k < lead.lines
                 out[lineIdx] = orilumn.reader.engine.skia.DrawLine(
                     text = text,
+                    deviceScale = deviceScale,
                     // lineEnd 是开区间（塑形 shape 约定）；DrawLine.range 是闭区间（与断行器输出一致），
                     // 此处 s..e 会多含下一行首字、末行直接 substring 越界崩回书架，必须 s until e。
                     range = s until e,
@@ -1101,7 +1106,7 @@ class BoxChapterLayouter(
         val tBox1 = orilumn.reader.time.platformNowMs()
         val clipOf: (MarkupElement) -> ClipRect? = { boxes.clip[it] }
         val tSkia0 = orilumn.reader.time.platformNowMs()
-        val skiaLines = buildPartialSkiaWindow(prepare, leavesForDraw, localFirst, localShapes, localLines, profile.letterSpacingEm, profile.cjkLatinSpacingEmApplied, profile.fgColor, clipOf)
+        val skiaLines = buildPartialSkiaWindow(prepare, leavesForDraw, localFirst, localShapes, localLines, profile.letterSpacingEm, profile.cjkLatinSpacingEmApplied, profile.fgColor, clipOf, deviceScale = profile.density)
         val tSkia1 = orilumn.reader.time.platformNowMs()
         // 表格行展开进窗口（与 canonical/临时页同源 helper；行顶/行首取本窗 FlowedLine，char 章内；
         // 相邻同表行成组，rowspan 格边框跨行）。
@@ -2598,7 +2603,7 @@ class BoxChapterLayouter(
         val clipOf: (MarkupElement) -> ClipRect? = { boxes.clip[it] }
         // Q1-b：临时页同样投影 skia 窗口（页内局部行序，行 y 已归一化到页首行 = 0）——
         // ReaderScreen 合流绘制，不再回落旧 StaticLayout 画法。
-        val skiaLines = buildPartialSkiaWindow(prepare, leavesForDraw, localFirst, shapes, lines, prepare.profile.letterSpacingEm, prepare.profile.cjkLatinSpacingEmApplied, prepare.profile.fgColor, clipOf)
+        val skiaLines = buildPartialSkiaWindow(prepare, leavesForDraw, localFirst, shapes, lines, prepare.profile.letterSpacingEm, prepare.profile.cjkLatinSpacingEmApplied, prepare.profile.fgColor, clipOf, deviceScale = prepare.profile.density)
         // 表格行展开进窗口（与 canonical 同源 helper；行顶/行首取本窗 FlowedLine，char 章内；
         // 相邻同表行成组，rowspan 格边框跨行）。
         val tempFrames = ArrayList<orilumn.reader.engine.skia.TableCellLines.RowFrame>()
@@ -3018,6 +3023,16 @@ class BoxChapterLayouter(
         // background): its aggregated extent already counts its own top+bottom edges once, so the band
         // must NOT be extended by them again. Container owners (blockquote/.rust-example-rendered) are
         // not self-owned and DO extend by their own edges (their lines span only the content area).
+        //
+        // 浮动叶的**底外边距**另算进「容器内容底」：CSS 2.1 §10.6.7 规定 BFC 根的高度包含浮动盒
+        // 的 margin box，且浮动盒外边距不与父底边折叠。少了这 2dp，clearfix 容器的底 padding
+        // 看起来比顶部薄一截（与 Chromium 逐值对照量出）。
+        fun bandBottomOf(i: Int, band: LeafBand, includeFloatMargin: Boolean = true): Int {
+            val s = leafList[i].style
+            return band.bottom + if (includeFloatMargin && s.floatSide != FloatSide.NONE) {
+                s.margin.bottom.roundToInt()
+            } else 0
+        }
         val aggTop = HashMap<MarkupElement, Int>()
         val ownerBottom = HashMap<MarkupElement, Int>()
         val ownerFirst = HashMap<MarkupElement, Int>()
@@ -3030,12 +3045,13 @@ class BoxChapterLayouter(
             val el = leaf.el ?: continue
             val owner = prepare.backgroundOwnerMap[el] ?: continue
             if (owner === el) selfOwned.add(owner)
+            val bottom = bandBottomOf(i, band, includeFloatMargin = owner !== el)
             val prevTop = aggTop[owner]
             if (prevTop == null || band.top < prevTop) {
                 aggTop[owner] = band.top
                 ownerLeaf[owner] = el
             }
-            ownerBottom[owner] = maxOf(ownerBottom[owner] ?: band.bottom, band.bottom)
+            ownerBottom[owner] = maxOf(ownerBottom[owner] ?: bottom, bottom)
             ownerFirst[owner] = minOf(ownerFirst[owner] ?: band.lo, band.lo)
             ownerLast[owner] = maxOf(ownerLast[owner] ?: band.hi, band.hi)
         }
@@ -3064,7 +3080,8 @@ class BoxChapterLayouter(
                         clipTop[a] = band.top
                         clipLeaf[a] = el
                     }
-                    clipBottom[a] = maxOf(clipBottom[a] ?: band.bottom, band.bottom)
+                    val b = bandBottomOf(i, band, includeFloatMargin = a !== el)
+                    clipBottom[a] = maxOf(clipBottom[a] ?: b, b)
                 }
                 a = a.parent
             }
@@ -3124,13 +3141,13 @@ class BoxChapterLayouter(
             box.clipRect = box.inheritedClip(clip::get)
             if (box.contentBottom > box.contentTop) out.add(box)
         }
-        // Border-only containers (e.g. a `table` carrying only `border-bottom`, no fill):
-        // background attribution skips them by design (hasBackground-only), but their own borders
-        // still need a carrier on the light path — the heavy path draws every container box.
-        // Aggregate each such ancestor over its in-window descendant leaves (same band math as
-        // background owners, first-child descent included); ancestors that already own a background
-        // box are skipped (that box draws their borders). Fill-less like leaf border boxes below,
-        // so emission order among them is irrelevant.
+        // **无叶属主的容器**（只带边框的 `table`；以及**背景容器**装了自绘背景的子盒，
+        // 典型是 clearfix `.cf{overflow:hidden;background:#f5f5f5;border:1px solid}` 只装浮动方块）：
+        // 上面的背景归属只沿「叶 → 最近背景属主」上溯，浮动方块自己有背景 ⇒ 属主是方块自己，
+        // 容器永远进不了 [aggTop]；重路径画每个容器盒，轻路径就会整块丢掉容器的底色与边框
+        // （症状：首开/临时页不画，再开命中磁盘表才出现）。这里补一层：沿窗内叶的祖先链
+        // 聚合出这些容器自己的矩形带（同一 band 数学、同一首子链下沉）。
+        // 已有背景盒的祖先跳过（那个盒子已经连底色带边框一起画了）。
         val cTop = HashMap<MarkupElement, Int>()
         val cBottom = HashMap<MarkupElement, Int>()
         val cFirst = HashMap<MarkupElement, Int>()
@@ -3143,13 +3160,13 @@ class BoxChapterLayouter(
             var a = el.parent
             while (a != null && a.tag != "body") {
                 val s = prepare.resolveStyle(a)
-                if (!s.hasBackground() && s.hasBorderEdges() && !aggTop.containsKey(a)) {
+                if ((s.hasBackground() || s.hasBorderEdges()) && !aggTop.containsKey(a)) {
                     val prev = cTop[a]
                     if (prev == null || band.top < prev) {
                         cTop[a] = band.top
                         cLeaf[a] = el
                     }
-                    cBottom[a] = maxOf(cBottom[a] ?: band.bottom, band.bottom)
+                    cBottom[a] = maxOf(cBottom[a] ?: Int.MIN_VALUE, bandBottomOf(i, band))
                     cFirst[a] = minOf(cFirst[a] ?: band.lo, band.lo)
                     cLast[a] = maxOf(cLast[a] ?: band.hi, band.hi)
                 }
@@ -3207,6 +3224,20 @@ class BoxChapterLayouter(
             borderBox.lastLineExclusive = band.hi
             borderBox.clipRect = borderBox.inheritedClip(clip::get)
             out.add(borderBox)
+        }
+        // **祖先先于后代**：上面三张表都是 HashMap（遍历序不确定），而这里的盒子是扁平表
+        // （重路径是盒树按序递归）。不排序时，一个不透明底色可能画在子孙之后把子孙盖掉
+        // （本轮的 clearfix 容器就属于这种：容器带 `#f5f5f5` 底色，里面是自带背景的浮动方块）。
+        // 按元素在文档树里的深度做**稳定**排序：同深度保持插入序，祖先恒在前。
+        if (out.size > 1) {
+            val depthCache = HashMap<MarkupElement, Int>()
+            fun depthOf(el: MarkupElement): Int = depthCache.getOrPut(el) {
+                var d = 0
+                var p = el.parent
+                while (p != null) { d++; p = p.parent }
+                d
+            }
+            out.sortBy { box -> box.el?.let(::depthOf) ?: Int.MAX_VALUE }
         }
         return LightDrawBoxes(out, clip)
     }

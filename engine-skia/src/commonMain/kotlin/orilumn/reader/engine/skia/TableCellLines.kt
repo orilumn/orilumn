@@ -257,6 +257,7 @@ object TableCellLines {
                 lines.add(
                     DrawLine(
                         text = text,
+                        deviceScale = density,
                         range = s until e,
                         yTop = yBlock + shape.shapeLineTop(k),
                         yBottom = yBlock + shape.shapeLineBottom(k),

@@ -117,11 +117,20 @@ object NormalFlowLayout {
         }
     }
 
-    /** 子树里最深的**浮动**盒（含嵌套）的 border-box 底；无浮动 = [Int.MIN_VALUE]。 */
+    /**
+     * 子树里最深的**浮动**盒（含嵌套）的**外边盒**底（border-box 底 + `margin-bottom`）；
+     * 无浮动 = [Int.MIN_VALUE]。
+     *
+     * CSS 2.1 §10.6.7：BFC 根的高度取子浮动盒的**外边盒**底 —— 少算 `margin-bottom` 的表现是
+     * clearfix 灰框比浏览器浅一圈（Chromium 实测 56 CSS px，本仓 54：`.fli{height:40;border:1;margin:2}`
+     * 的 40+2 边框有了，2px 下边距丢了）。
+     */
     private fun deepestFloatBottom(boxes: List<LayoutBox>): Int {
         var max = Int.MIN_VALUE
         for (b in boxes) {
-            if (b.table == null && b.style.floatSide != FloatSide.NONE) max = maxOf(max, b.contentBottom)
+            if (b.table == null && b.style.floatSide != FloatSide.NONE) {
+                max = maxOf(max, b.contentBottom + b.style.margin.bottom.roundToInt())
+            }
             if (b.childBoxes.isNotEmpty()) max = maxOf(max, deepestFloatBottom(b.childBoxes))
         }
         return max
@@ -800,7 +809,13 @@ object NormalFlowLayout {
                 // P6-b: 叠排注音行增高（与行内图抬升同式；无注音零回归）。
                 val grownF = adjustLineHeightsForRuby(brokenF, heightsF, leafRubyRuns(el, styles, classify, hidden, genOf, firstLetterOf))
                 // E23-b：悬浮跨度高 = max(行高和, `height`)（与 `emit` 的叶盒高同式；空悬浮盒也占位）。
-                val spanH = specifiedContentHeight(style, grownF.sum())
+                // E23-f：参与外围记账（包含块高度 / 环绕行数 / 后续内容起点）的是**外边盒**高，
+                // 不是内容高 —— CSS 2.1 §10.6.7：BFC 根高度取浮动盒的外边盒底。
+                // 只记内容高的表现：`<div class="cf"><div class="fli" ...></div></div>` 的灰框
+                // 比 Chromium 浅一圈（实测 42 物理 px，缺上下 border 2 + 上下 margin 4）。
+                val spanH = specifiedContentHeight(style, grownF.sum()) +
+                    (style.border.vertical + style.padding.vertical).roundToInt() +
+                    (style.margin.top + style.margin.bottom).roundToInt()
                 pending.preClear(style.clearSide)
                 // E23-b：外边盒宽记账（左右外边距参与同行排位），容量 = 含边距的包含块内容宽。
                 val mH = (style.margin.left + style.margin.right).roundToInt()

@@ -118,6 +118,14 @@ data class DrawLine(
     /** P3-a 祖先链 opacity 连乘（1 即旧路径；墨色/段色统一乘）。 */
     val alpha: Float = 1f,
     /**
+     * 显示密度（1 CSS px 落几个物理像素）。
+     *
+     * 只服务**虚线/点线边框**：Chromium 的段长/隙长比例是在设备像素空间里定的
+     * （`styled_stroke_data.cc`：设备厚 < 3 用 3/2，≥ 3 用 2/1），本仓绘制坐标是 CSS px，
+     * 不带上密度就会在 2x/2.75x 屏上把段画长一档。缺省 1 = 纯几何测试口径。
+     */
+    val deviceScale: Float = 1f,
+    /**
      * P4-c2: `text[0]` 的章内全局字符偏移（= 叶全局起点；`text[k]` ↔ `charBase + k`）。
      * 点按命中（行内 glyph → 叶内偏移）经它换算成控制器 `linkTargetAt` 要的章内 char。
      * 默认 0（旧构造点行为不变）。
@@ -773,7 +781,7 @@ class LineWindowDrawer(
                     ) {
                         if (width <= 0f || !styleDraws(style)) return
                         bp.color = withAlpha(edgeColor(colorEdge), line.alpha)
-                        for (rc in borderEdgeRects(axis, x0, x1, band0, width, style ?: BorderStyle.SOLID)) {
+                        for (rc in borderEdgeRects(axis, x0, x1, band0, width, style ?: BorderStyle.SOLID, line.deviceScale)) {
                             canvas.drawRect(Rect.makeLTRB(rc.left, rc.top, rc.right, rc.bottom), bp)
                         }
                     }

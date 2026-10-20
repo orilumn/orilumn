@@ -340,7 +340,7 @@ class ReaderActivity : ComponentActivity() {
                 probedOpenBook = bookId
                 val c = engine ?: return@LaunchedEffect
                 val probed = withContext(Dispatchers.Default) {
-                    c.probeOriginalOnOpen(p.chapter, profile.bodyPx, effective, bookSettingsStore.load(bookId))
+                    c.probeOriginalOnOpen(p.chapter, profile.bodyPx, effective, bookSettingsStore.load(bookId), profile.density)
                 }
                 if (probed != effective) commitSettings(probed, typographyChanged = true, bookOnly = true)
             }
@@ -918,7 +918,7 @@ class ReaderActivity : ComponentActivity() {
         val c = engine ?: return this
         val p = currentPos ?: return this
         // 共享收口（与桌面同调）：见 BookDocumentController.probeOriginalTheme。
-        return c.probeOriginalTheme(p.chapter, profile.bodyPx, this)
+        return c.probeOriginalTheme(p.chapter, profile.bodyPx, this, profile.density)
     }
 
     companion object {

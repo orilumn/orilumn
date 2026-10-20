@@ -189,7 +189,7 @@ abstract class WindowedBookLayout : PagedLayout, BreakAwareBookLayout {
         val bandTop = getLineTop(firstLine)
         val bandBottom = getLineBottom(pageEnd - 1)
         if (bandBottom <= bandTop) return emptyList()
-        val out = BoxDrawer.drawOnPage(boxesForDraw, firstLine, pageEnd, bandTop, bandBottom).mapNotNull { r ->
+        val out = BoxDrawer.drawOnPage(boxesForDraw, firstLine, pageEnd, bandTop, bandBottom, density).mapNotNull { r ->
             val argb = orilumn.reader.engine.css.cssHexToArgb(r.colorHex) ?: return@mapNotNull null
             PageBackground(
                 left = r.left,

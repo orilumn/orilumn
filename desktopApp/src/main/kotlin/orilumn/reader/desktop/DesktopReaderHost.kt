@@ -356,7 +356,7 @@ class DesktopReaderHost(
      * 真实排版回填首行缩进/行距后再持久化；非 original / 无定位一律原样返回。
      */
     fun probeOriginalTheme(next: ReaderSettings, chapter: Int): ReaderSettings =
-        controller.probeOriginalTheme(chapter, profile.bodyPx, next)
+        controller.probeOriginalTheme(chapter, profile.bodyPx, next, profile.density)
 
     /**
      * 首次开书探针（用户层·壳，与平板开书收口同调共享 `probeOriginalOnOpen`）。
@@ -369,7 +369,7 @@ class DesktopReaderHost(
         overlay: BookSettings,
         chapter: Int,
     ): ReaderSettings = withContext(Dispatchers.Default) {
-        controller.probeOriginalOnOpen(chapter, profile.bodyPx, settings, overlay)
+        controller.probeOriginalOnOpen(chapter, profile.bodyPx, settings, overlay, profile.density)
     }
 
     /**

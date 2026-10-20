@@ -49,7 +49,9 @@ import org.junit.Test
 class FirstLetterEndToEndTest {
 
     private val contentW = 240
-    private val fs = 20f
+    /** 设备密度：CSS px → 物理 px（`body{font-size:20px}` 在 2x 屏上是 40 物理 px）。 */
+    private val density = 2f
+    private val fs = 20f * density
     private val ratio = 1.5f
 
     private val bodyCss = "body { font-size: 20px; line-height: 1.5; margin: 0; font-family: STSong, serif }"
@@ -65,7 +67,7 @@ class FirstLetterEndToEndTest {
 
     private fun profile() = TypographicProfile.build(
         ReaderSettings.DEFAULT.copy(fontSize = 20, lineSpacing = 1.5, firstLineIndent = 0.0),
-        2f,
+        density,
     )
 
     private fun styleEngine(css: String): StyleComputer {
@@ -77,7 +79,7 @@ class FirstLetterEndToEndTest {
             themeSheetFromProfile(p),
             null,
             ReaderUiSheet.build(p),
-            paragraphScale = p.paragraphSpacingScale, gapScale = p.paragraphGapScale,
+            paragraphScale = p.paragraphSpacingScale, gapScale = p.paragraphGapScale, pxScale = p.density,
         )
     }
 
@@ -138,7 +140,7 @@ class FirstLetterEndToEndTest {
         assertEquals("段落其余同 face 同字号 ⇒ 只有首字一个 run", 1, runs.size)
         assertEquals(0, runs[0].start)
         assertEquals(1, runs[0].endExclusive)
-        assertEquals("2em × 20px", 40f, runs[0].fontSizePx, 1e-4f)
+        assertEquals("2em × 20px（含密度）", 2f * fs, runs[0].fontSizePx, 1e-4f)
         assertEquals("首字就是文本第一个字符", 'T', leafText(h).first())
 
         // 对照：同段同版心，没有 ::first-letter 时零 run、文本同长。
@@ -196,7 +198,7 @@ class FirstLetterEndToEndTest {
         assertEquals("首行投影必须带首字的 2em run（LineWindowDrawer 换字号的依据）", 1, first.fontRuns.size)
         assertEquals(0, first.fontRuns[0].start)
         assertEquals(1, first.fontRuns[0].endExclusive)
-        assertEquals(40f, first.fontRuns[0].fontSizePx, 1e-4f)
+        assertEquals(2f * fs, first.fontRuns[0].fontSizePx, 1e-4f)
 
         // 对照：没有该规则 ⇒ 投影零 run（老像素逐字节一致）。
         val base = heavy(withoutRule)
@@ -210,7 +212,7 @@ class FirstLetterEndToEndTest {
         assertTrue("本章确有 ::first-letter 规则", h.eng.hasFirstLetterRules())
         val p = h.leaves.single().el!!
         val style = h.eng.firstLetterStyle(p, ancestorsOf(p), h.styles.getValue(p))
-        assertEquals("2em 按原发元素字号解", 40f, style!!.fontSizePx, 1e-4f)
+        assertEquals("2em 按原发元素字号解", 2f * fs, style!!.fontSizePx, 1e-4f)
         assertEquals("未声明的颜色等属性照常继承", h.styles.getValue(p).colorHex, style.colorHex)
     }
 }

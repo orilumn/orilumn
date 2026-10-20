@@ -57,6 +57,8 @@ object DrawLineBuilder {
         genOf: orilumn.reader.engine.laying.GenOf = orilumn.reader.engine.laying.EmptyGen,
         /** `::first-letter` 伪元素查找（null = 无该规则；必须与塑形同源，否则首字画错字号）。 */
         firstLetterOf: orilumn.reader.engine.laying.FirstLetterOf? = null,
+        /** 显示密度（只影响虚线边框的段/隙比例，见 [DrawLine.deviceScale]）。 */
+        deviceScale: Float = 1f,
     ): Map<Int, DrawLine> {
         val out = HashMap<Int, DrawLine>()
         val leaves = ArrayList<LayoutBox>()
@@ -180,6 +182,7 @@ object DrawLineBuilder {
                     rubyRuns = rubyRuns,
                     decorationRuns = decorationRuns,
                     inlineBoxRuns = inlineBoxes,
+                    deviceScale = deviceScale,
                     visibilityHiddenRuns = visHidden,
                     clip = contentClip,
                 )
@@ -259,6 +262,7 @@ object DrawLineBuilder {
         firstLine: Int,
         lastLineExclusive: Int,
         chapterHref: String = "",
+        density: Float = 1f,
     ): List<PageBackground> {
         if (firstLine < 0 || lastLineExclusive <= firstLine) return emptyList()
         val pageEnd = minOf(lastLineExclusive, result.lines.size)
@@ -266,7 +270,7 @@ object DrawLineBuilder {
         val bandTop = result.lines[firstLine].yTop
         val bandBottom = result.lines[pageEnd - 1].yBottom
         if (bandBottom <= bandTop) return emptyList()
-        return BoxDrawer.drawOnPage(result.boxes, firstLine, pageEnd, bandTop, bandBottom).mapNotNull { r ->
+        return BoxDrawer.drawOnPage(result.boxes, firstLine, pageEnd, bandTop, bandBottom, density).mapNotNull { r ->
             val argb = cssHexToArgb(r.colorHex) ?: return@mapNotNull null
             PageBackground(
                 left = r.left,

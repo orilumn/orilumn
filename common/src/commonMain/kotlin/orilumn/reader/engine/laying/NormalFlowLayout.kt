@@ -741,10 +741,11 @@ object NormalFlowLayout {
             val breakW = innerBreakWidth(imgStyleRaw, contentW)
             // P6-a: 与 img 分支同式（悬浮注册 + 右对齐；非悬浮清零）。
             // P3：`fitMaxH` 由第一趟流出的几何给出（此趟恒 null = 自然尺寸），见 `applyReplacedFit`。
-            val (floatW, repH) = replacedUsedSize(img, imgStyleRaw, breakW, imageLoader, chapterHref, density = density)
+            val (floatContentW, repH) = replacedUsedSize(img, imgStyleRaw, breakW, imageLoader, chapterHref, density = density)
             val side = imgStyleRaw.floatSide
             val (boxLeft, boxW, newRow) = if (side != FloatSide.NONE) {
-                val w = floatW.coerceAtLeast(1)
+                // E24：`replacedUsedSize` 给内容宽；盒宽 / 排位 / 环绕一律 border-box（+ img 自身横边）。
+                val w = floatBorderBoxWidth(imgStyleRaw, floatContentW).coerceAtLeast(1)
                 pending.preClear(style.clearSide)
                 // E23-b：外边盒宽记账（同 img 分支；横向边距取 img 自身样式，宿主块的纵向边距已折进上面）。
                 val mH = (imgStyle.margin.left + imgStyle.margin.right).roundToInt()
@@ -790,7 +791,8 @@ object NormalFlowLayout {
             val boxes = leafInlineBoxRuns(el, styles, classify, hidden, genOf, firstLetterOf)
             val side = style.floatSide
             if (side != FloatSide.NONE) {
-                val floatW = floatTextWidth(style, text, contentW, breaker, runs, boxes)
+                // E24：`floatTextWidth` 给内容宽；盒宽 / 排位 / 环绕一律 border-box（+ 自身横边）。
+                val floatW = floatBorderBoxWidth(style, floatTextWidth(style, text, contentW, breaker, runs, boxes))
                 val breakWf = innerBreakWidth(style, floatW)
                 val brokenF = breakWrappedLines(breaker, text, style, breakWf, null, el.tag, runs, style.textIndentPx, shifts, boxes)
                 val heightsF = adjustLineHeightsForInlineImages(text, brokenF, el, styles, classify, hidden, breakWf, imageLoader, chapterHref, density = density)
@@ -2425,6 +2427,10 @@ object NormalFlowLayout {
     /**
      * P6-a: 文本悬浮塑形宽（CSS 2.1 §10.3.5 简化）：指定宽（px / % 解容器）优先，
      * 否则 shrink-to-fit（breaker 首选测宽，分段取最大，上限版心）。
+     *
+     * **E24：返回的是内容宽**（指定 `width` 按 CSS 内容盒口径；shrink-to-fit 的测宽本来就是内容宽）。
+     * 排位 / 环绕 / 盒宽都是 border-box 口径，调用方必须过 [floatBorderBoxWidth] 转换
+     * （断行宽再由 [innerBreakWidth] 还原成内容宽）。替换型悬浮的 `replacedUsedSize` 同是内容宽。
      */
     fun floatTextWidth(
         style: ComputedStyle,
@@ -2457,6 +2463,18 @@ object NormalFlowLayout {
     }
 
     /**
+     * E24（CSS 2.1 §10.3.5 内容盒口径）：悬浮盒的 **border-box 宽** = 内容宽 + 自身横向 padding/border。
+     *
+     * Chromium 实测（2026-10-20，`.fl{width:30px;border:1px}`）：底色 30px、边框**外画**、外框
+     * 32px；并排间距 / 环绕窄宽都按 32px 算（我方原先按 30px，每盒少自身横边 2px）。
+     * `LayoutBox.contentWidth` 与 [FloatPending.register] 的记账都是 border-box 口径，故这里是
+     * [innerBreakWidth] 的反运算：断行宽再由 `innerBreakWidth(style, borderBox)` 还原成内容宽，
+     * 量画同源（[floatTextWidth] 与 `replacedUsedSize` 都只给内容宽）。
+     */
+    fun floatBorderBoxWidth(style: ComputedStyle, contentW: Int): Int =
+        (contentW + (style.padding.horizontal + style.border.horizontal).roundToInt()).coerceAtLeast(1)
+
+    /**
      * P4-a2: 文本叶相对其原文前兄弟的悬浮环绕前导（v1 冻结语义：仅 img 前驱；P6-a 起重路径改走
      * [FloatPending] 透传，本函数留作轻路径（P6-a2 前）与单测的单源收窄口）。
      *
@@ -2482,9 +2500,11 @@ object NormalFlowLayout {
         if (leaf.parent?.children?.contains(leaf) != true) return null
         val lstyle = styleOf(leaf)
         val cw = contentW.coerceAtLeast(1)
-        val (floatW, floatH) = replacedUsedSize(
+        val (floatContentW, floatH) = replacedUsedSize(
             prev, styleOf(prev), innerBreakWidth(styleOf(prev), cw), imageLoader, chapterHref, density = density,
         )
+        // E24：环绕窄宽按悬浮盒的 **border-box** 宽（+ 自身横边）——与 `FloatPending.register` 同口径。
+        val floatW = floatBorderBoxWidth(styleOf(prev), floatContentW)
         if (floatW <= 0 || floatH <= 0 || floatW >= cw) return null
         val (lW, rW) = if (side == FloatSide.LEFT) floatW to 0 else 0 to floatW
         return narrowLead(floatH, lW, rW, lstyle.clearSide, lstyle, contentW)

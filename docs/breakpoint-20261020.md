@@ -24,32 +24,28 @@
 - **同侧浮动并排**：空浮动盒也进浮动闸门；`FloatPending` 由单列升级为行装箱（同行放得下就 x 累加、同顶、行高取 max），一律按**外边盒**宽记账；落点单源给出，重 / 轻两路同值。
 - **容器 `height`**：与叶同一条「只多不少」；轻路径行流是**局部位移**累加、拿不到内容高 ⇒ 另立**块边界差额前缀表**（内层先算、内容一到指定高即早退），开销以「填满指定高所需的那几叶」为界。绘制带 / 裁剪带 / 后随内容起点三处同吃。`§8.3.1`：指定高**打断**父子底边距合并（与底边门同一处判据）。
 - **`min-height`（竖向下限）**：与 `height` 合流成 `max(height, min-height)`，叶 / 浮动盒 / 容器同一条 `specifiedContentHeight`。底折叠**分两档**（Chromium 实测）：`height` 恒断链；`min-height` 只在**下限 > 自然内容高**（真的撑高）时断链，结论算一次带在盒上（重 `LayoutBox.verticalFloorBound`、轻 `LightPrepare.floorBoundContainers`），`lastChildBottomMargin` / `consecutiveLeafAdvance(floorBinds=…)` 读同一份。`max-height` 不做（D 表）。
+- **浮动盒内容盒宽（E24）**：`width` 算**内容区**，border-box = 内容宽 + 自身横向 `padding`+`border`；单源 `floatBorderBoxWidth` 供重路径 build、轻路径浮动 eager 表（宽 / 落点 / 行装箱容量）、画盒与环绕前导四处，断行宽再由 `innerBreakWidth` 反算回内容宽。
 - **总开关**：`chapterHasBoxHeight`（样式表里有能出 px 的 `height` / `min-height` 声明，或树上 inline `style` 提到 height —— `min-height` 含 "height" 子串自然命中）。命中才扫祖先链，普通书零扫描零塑形；百分比高被 `parseBoxSize` 挡在门外（`img{height:100%}` 零成本）。顺带修掉 `hasBoxHeightDeclaration` 把「非 height 属性的任意声明」当命中的旧笔误（此前常书门恒真、白扫一遍）。
 
 ## 三、验证状态
 
+- 新锁 `FloatBorderBoxWidthTest`（5 例）：重 / 轻盒宽与落点、画盒宽、断行宽、环绕前导、章首页切片一致。
 - 新锁 `BoxFixedHeightEquivalenceTest`（8 例）：重 / 轻两路**逐值一致** + 绘制带高锁；`min-height` 四例（撑高 / 低于内容不压扁 / 下限生效吞末子下边距 / 下限没生效照常外塌）。**变异验证**：抽掉差额表 ⇒ 两条 parity 变红；抽掉 `min-height` ⇒ 撑高例变红；抽掉「下限生效断链」⇒ 落差例变红。
 - 全量绿：`:common:jvmTest`、`:engine-skia:jvmTest`、`:desktopApp:test`、`:app:testDebugUnitTest`、`:app:assembleDebug --rerun-tasks`。
-- 验收样书 V6 无头像素：`.ovh` 外环 **110×50**（Chromium 110×50，改前 110×38）；`.cf` 底色带 h=54（Chromium 54）；四个方块同一行 `y[500,532]`。
+- 验收样书 V6 无头像素：`.ovh` 外环 **110×50**（Chromium 110×50，改前 110×38）；`.cf` 底色带 h=54（Chromium 54）；四个方块同一行；两个 `.fl` 边框环并集 **68×32**、两个 `.fli` **88×42** 与 Chromium 逐值相同（改前 64×30 / 84×40）。
 - **装机 V1–V8：未做**（平板不在线，见六）。
 
 ## 四、欠账表现状（`docs/引擎欠账-对齐浏览器语义.md` §2.1 B 表）
 
-「待补」只剩三条，各带裁定与量出的依据：
+**待补表已清零**：E23 系列（E23 / E23-b / E23-c / E23-e）与 E24 已做并入 A 表；E25 实测不成立、
+`max-height` 裁定不做，两条都在 D 表（各带再评估条件）。
 
-| # | 缺口 | 量到的可见差异（依据） | 裁定 |
-|---|---|---|---|
-| **E24** | 浮动盒指定宽的**边框盒口径** | 验收样书四个浮动方块**都带 1px 边框** ⇒ 并排间距每盒少 2px | **必做** |
-| **E25** | **文本**浮动盒的行发射口径 | 重路径每浮动叶一**零高**槽 vs 轻路径每行**实高**行 ⇒ 两路行计数不一致（切片可能对不上） | **必做**（先量后修） |
-
-`min-height`（E23-e）**已完成**、已移入 A 表；`max-height` 在 D 表（裁定不做）。
-
-## 五、开工顺序（做完即 B 表清零）
+## 五、开工顺序（已全部做完）
 
 1. ~~**`min-height`**~~ **已完成**：Chromium 实测（`--headless=new`）证明**下限真的撑高时**才断 §8.3.1 底折叠（`min-height:120` ⇒ 盒高 120、后随内容贴盒底；`min-height:10` 低于内容 ⇒ 盒高 20、下边距照常外塌 20），`height` 则恒断链。落地 = 竖向下限单源 + 叶 / 浮动 / 容器同口径 + 结论带在盒上（重 `verticalFloorBound` / 轻 `floorBoundContainers`，`consecutiveLeafAdvance` 三处调用点同传）。
-2. **E25**：先量重 / 轻两路对**多行文本浮动盒**的行发射（行数、行高、页切片），量清再定改哪边（行的位置单源）。
-3. **E24**：浮动盒 `width` 按**内容盒**口径（+ 自身横边），会**动断行宽**——重 / 轻两路 + 画盒两层同源一起改；这是两条里风险最高的一条，放最后。
-4. 两条做完 ⇒ B 表清零 ⇒ **装机 V1–V8**，整个「对齐浏览器语义」里程碑收口。
+2. ~~**E25**~~ **已量不成立**：六种浮动形状含跨页样例，重 / 轻两路行数、字符区间、相对 y、页切片逐值相同（正典行流由每叶形状重建，不进 `emit` 的零高槽）⇒ 移入 D 表记档。
+3. ~~**E24**~~ **已完成**：`width` 按内容盒口径（+ 自身横边），重 / 轻两路 + 画盒同源；V6 边框环 68×32 / 88×42 与 Chromium 同值。
+4. **下一步 = 装机 V1–V8**，整个「对齐浏览器语义」里程碑收口。
 
 ## 六、装机验收（唯一剩下的 0.4.7 待办）
 

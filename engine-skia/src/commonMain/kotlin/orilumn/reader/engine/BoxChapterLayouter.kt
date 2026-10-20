@@ -3788,11 +3788,13 @@ class LightPrepare(
                     val (fw, fh) = NormalFlowLayout.replacedUsedSize(
                         el, style, NormalFlowLayout.innerBreakWidth(style, cw), imageLoader, chapterHref, density = profile.density,
                     )
+                    // E24：`replacedUsedSize` 给内容宽；盒宽 / 排位 / 环绕一律 border-box（+ img 自身横边）。
+                    val fbb = NormalFlowLayout.floatBorderBoxWidth(style, fw)
                     pending.register(
-                        style.floatSide, fw.coerceAtLeast(1) + (style.margin.left + style.margin.right).roundToInt(), fh,
+                        style.floatSide, fbb + (style.margin.left + style.margin.right).roundToInt(), fh,
                         cw + (style.margin.left + style.margin.right).roundToInt(),
                     )
-                    widths.add(fw.coerceAtLeast(1))
+                    widths.add(fbb)
                     xOffs.add(
                         if (style.floatSide == orilumn.reader.engine.css.FloatSide.RIGHT) {
                             (cw + (style.margin.left + style.margin.right).roundToInt() - pending.lastX).coerceAtLeast(0)
@@ -3820,9 +3822,12 @@ class LightPrepare(
             if (style.floatSide != orilumn.reader.engine.css.FloatSide.NONE) {
                 val text = NormalFlowLayout.absorbStyled(el, sub, classify, hidden, genOf).text
                 val runs = NormalFlowLayout.leafFontRuns(el, sub, classify, hidden, genOf, firstLetterOf = firstLetterOf)
-                val floatW = NormalFlowLayout.floatTextWidth(
-                    style, text, cw, breaker, runs,
-                    NormalFlowLayout.leafInlineBoxRuns(el, sub, classify, hidden, genOf, firstLetterOf = firstLetterOf),
+                val floatW = NormalFlowLayout.floatBorderBoxWidth(
+                    style,
+                    NormalFlowLayout.floatTextWidth(
+                        style, text, cw, breaker, runs,
+                        NormalFlowLayout.leafInlineBoxRuns(el, sub, classify, hidden, genOf, firstLetterOf = firstLetterOf),
+                    ),
                 )
                 val breakWf = NormalFlowLayout.innerBreakWidth(style, floatW)
                 val shaped = breakWrappedLines(

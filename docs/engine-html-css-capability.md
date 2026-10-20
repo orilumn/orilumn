@@ -79,11 +79,12 @@ points are noted. "parsed only" = computed, draw/layout consumption pending or o
 | `break-inside/after/before` + `page-break-*` 别名 | ✓ | ✓ | yes | **yes**（BreakRule） |
 | `border-collapse`/`border-spacing`/`caption-side`/`empty-cells`/`table-layout` | ✓ | ✓ | yes | **yes**（2D 消费） |
 | `content`/`counter-reset`/`counter-increment`/`quotes` + `::before/::after` | — | ✓ | yes | **yes**（字符流级；无 `counter-set`） |
+| `::first-letter`（含 `float:left` 下沉） | — | ✓ | yes | **yes**（首字取自己的计算样式；`float:left` 按**出流浮动盒**排版：正文自第 2 行起收窄右移、首行行框不被撑高，落墨在首行行框内按盒居中；E20） |
 | `@font-face`（ttf/otf/woff/woff2 + IDPF 去混淆）/`@import`/`@media`（全视口） | — | ✓ | yes | **yes**（先行入池，双端） |
 | `float` / `clear` | ✓ | ✓ | yes | **yes**：文本/img 悬浮 + 双侧跨度并排 + 跨容器环绕 + 真 clear + 窗口 carry-in + 右悬浮绘制（双路一致） |
-| `visibility` | ✓ | ✓ | yes | parsed only（隐藏未消费 —— 欠账 **E10**） |
-| `overflow`（祖先裁剪） | ✓ | ✓ | yes | parsed only（裁剪未做 —— **E11**） |
-| `position`（relative 标记） | ✓ | ✓ | yes | parsed only（绝对/固定不做 —— E12） |
+| `visibility` | ✓ | ✓ | yes | **yes**（隐藏不落墨、占位照旧，含祖先继承与行内盒；E10） |
+| `overflow`（祖先裁剪） | ✓ | ✓ | yes | **yes**（祖先 `overflow` 裁到 padding box，行/块/盒底一致；E11） |
+| `position`（relative） | ✓ | ✓ | yes | **yes**（`top/right/bottom/left` 沿元素链累积平移落墨几何与裁剪区，流几何不变；绘制层级按附录 E 第 8 步压在在流内容之上；绝对/固定不做 —— E12） |
 | `direction`/`unicode-bidi` | ✓ | ✓ | yes | 隔离 parsed only（RTL 流属 roadmap §0 范围外） |
 | `flex`/`grid` 真实布局 | — | ✓ | n/a | NO（按 block 降级，§0 例外） |
 | `list-style-image` / `@page` / 垂直书写 / 脚本媒体表单 | ✓ | ✓ | n/a | NO（§0 例外） |

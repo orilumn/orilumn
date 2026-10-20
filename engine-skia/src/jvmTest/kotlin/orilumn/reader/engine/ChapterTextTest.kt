@@ -31,6 +31,8 @@ class ChapterTextTest {
         // 跨段复制由用户层按块边界补换行，不能在这里偷偷加字符（否则偏移全错）。
         assertEquals("Hello worldsecond", unit.chapterText())
         assertEquals(prepare.totalChars, unit.chapterText()!!.length)
+        // 块尾：两个段落分别 11 / 17，选区按块边界截断。
+        assertEquals(listOf(11, 17), unit.chapterTextBlockEnds()!!.toList())
     }
 
     @Test

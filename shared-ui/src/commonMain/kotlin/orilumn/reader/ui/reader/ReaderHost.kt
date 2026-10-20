@@ -140,6 +140,12 @@ interface ReaderHost {
     fun textOf(chapter: Int, start: Int, endExclusive: Int): String? = null
 
     /**
+     * 与 [textOf] 同尺的块尾偏移（每个排版叶一段，累积 exclusive）：长按选区在本块内断句/断词，
+     * 不跨标题、列表项、段落。未就绪返回 null，选区退回「整章扫描」（旧行为）。
+     */
+    fun textBlockEndsOf(chapter: Int): IntArray? = null
+
+    /**
      * 本章全部标注（D-19）：按起点、id 升序；读取失败返回空表。
      *
      * `shared-ui` 进章时读一次，之后增删改先改内存并递增装饰修订号，再异步落库；

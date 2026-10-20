@@ -179,6 +179,8 @@ class TabletReaderHost(
         return text.substring(s, e)
     }
 
+    override fun textBlockEndsOf(chapter: Int): IntArray? = controller.chapterTextBlockEnds(chapter)
+
     // ---- 文本标注：转手给共享 BookRepository/LibraryDb（平台侧只做壳） ----
 
     override suspend fun annotationsForChapter(chapter: Int): List<Annotation> = try {

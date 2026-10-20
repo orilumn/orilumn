@@ -932,6 +932,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         val contentHeight = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
         val t0 = platformNowMs()
         val prepare = boxLayouter.prepareLight(unit.markup!!, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h -> saveUnitStructure(unit, h) })
+        unit.cacheChapterTextFrom(prepare)
         val tPrep = platformNowMs()
         val pagesToShape = 1
         val newProduct = boxLayouter.incrementalLayoutForPage(
@@ -1009,6 +1010,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                     // Light prepare only (box tree, no shaping) — the table tells us which blocks to shape.
                     val startPage = pageIndexForChar(cached.pages, targetChar)
                     val prep = boxLayouter.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h -> saveUnitStructure(unit, h) })
+                    unit.cacheChapterTextFrom(prep)
                     val sp = platformNowMs()
                     val product = boxLayouter.incrementalLayoutForPage(
                         prepare = prep,
@@ -1047,6 +1049,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                     // shaping). A large chapter's foreground threads only the current page's blocks
                     // through the temp table — never a full-chapter line-level layout.
                     val light = bc.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h -> saveUnitStructure(unit, h) })
+                    unit.cacheChapterTextFrom(light)
                     if (light.totalBlocks > SMALL_CHAPTER_BLOCKS) {
                         // anchorChar stays at the user's actual position — startAnchorStream anchors the
                         // temp stream there. A head-proximity lift (anchor to block 0) is designed but
@@ -4076,6 +4079,9 @@ private fun finishCanonicalBackground(
      * 调用方（复制/选词/长按）不要为了拿文本去触发开章，避免把一次点按变成昂贵的排版。
      */
     fun chapterText(index: Int): String? = unitAt(index)?.chapterText()
+
+    /** D-18 伴生：与 [chapterText] 同尺的块尾偏移；选区据此不跨块。 */
+    fun chapterTextBlockEnds(index: Int): IntArray? = unitAt(index)?.chapterTextBlockEnds()
 
     /** One page forward within a chapter. A line-anchored slice (not a canonical page) snaps to the
  *  canonical page after the one containing its char, avoiding content skips. */

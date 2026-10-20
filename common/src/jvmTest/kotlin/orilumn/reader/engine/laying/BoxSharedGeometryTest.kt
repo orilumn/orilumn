@@ -113,7 +113,7 @@ class BoxSharedGeometryTest {
         val styleMap = StyleComputer(10f, LightCssParser().parse(""), listOf(LightCssParser().parse(""))).compute(root)
         val leaves = layoutLeaves(root)
         assertEquals(2, leaves.size)
-        val gap = NormalFlowLayout.consecutiveLeafAdvance(leaves[0].el!!, leaves[1].el!!) { compute(styleMap, it) }
+        val gap = NormalFlowLayout.consecutiveLeafAdvance(leaves[0].el!!, leaves[1].el!!, styleOf = { compute(styleMap, it) })
         assertEquals(50, gap)
         assertConsecutiveAdvancesMatchHeavy(root)
     }
@@ -131,7 +131,7 @@ class BoxSharedGeometryTest {
         val styleMap = StyleComputer(10f, LightCssParser().parse(""), listOf(LightCssParser().parse(""))).compute(root)
         val leaves = layoutLeaves(root)
         assertEquals(2, leaves.size)
-        val gap = NormalFlowLayout.consecutiveLeafAdvance(leaves[0].el!!, leaves[1].el!!) { compute(styleMap, it) }
+        val gap = NormalFlowLayout.consecutiveLeafAdvance(leaves[0].el!!, leaves[1].el!!, styleOf = { compute(styleMap, it) })
         assertEquals(40, gap)
         assertConsecutiveAdvancesMatchHeavy(root)
     }
@@ -156,7 +156,7 @@ class BoxSharedGeometryTest {
         val leaves = layoutLeaves(root)
         // Canonical emit: b's collapse consumes .roundToInt(0.5)=1, then b's top padding .roundToInt(0.5)=1.
         // (A float-summed advance would round 1.0 → 1 and drift −1 from the canonical 2.)
-        val shared = NormalFlowLayout.consecutiveLeafAdvance(leaves[0].el!!, leaves[1].el!!) { compute(styleMap, it) }
+        val shared = NormalFlowLayout.consecutiveLeafAdvance(leaves[0].el!!, leaves[1].el!!, styleOf = { compute(styleMap, it) })
         assertEquals(leaves[1].contentTop - leaves[0].contentBottom, shared)
         assertConsecutiveAdvancesMatchHeavy(root)
     }
@@ -193,7 +193,7 @@ class BoxSharedGeometryTest {
         // Bottom padding/border mirror the top: pre bg bottom = code border-box bottom + (pre bottom edges).
         assertEquals(codeLeaf.contentBottom + (12 + 1), preBox.contentBottom)
         // The shared advance (light path) equals the canonical heavy gap for this leaf pair.
-        val sharedGap = NormalFlowLayout.consecutiveLeafAdvance(paraLeaf.el!!, codeLeaf.el!!) { compute(styleMap, it) }
+        val sharedGap = NormalFlowLayout.consecutiveLeafAdvance(paraLeaf.el!!, codeLeaf.el!!, styleOf = { compute(styleMap, it) })
         assertEquals(codeLeaf.contentTop - paraLeaf.contentBottom, sharedGap)
     }
 
@@ -214,7 +214,7 @@ class BoxSharedGeometryTest {
 
         // The sibling after the pre must begin at/after the pre's content bottom, not inside its padding.
         assertTrue("following sibling pulled up into pre bottom padding", afterLeaf.contentTop >= preBox.contentBottom)
-        val shared = NormalFlowLayout.consecutiveLeafAdvance(codeLeaf.el!!, afterLeaf.el!!) { compute(styleMap, it) }
+        val shared = NormalFlowLayout.consecutiveLeafAdvance(codeLeaf.el!!, afterLeaf.el!!, styleOf = { compute(styleMap, it) })
         assertEquals(afterLeaf.contentTop - codeLeaf.contentBottom, shared)
     }
 
@@ -239,7 +239,7 @@ class BoxSharedGeometryTest {
         }
         for (i in 1 until leaves.size) {
             val heavyGap = leaves[i].contentTop - leaves[i - 1].contentBottom
-            val sharedGap = NormalFlowLayout.consecutiveLeafAdvance(leaves[i - 1].el!!, leaves[i].el!!) { styleMap[it] ?: ComputedStyle(fontSizePx = 10f, lineHeightRatio = 1.5f) }
+            val sharedGap = NormalFlowLayout.consecutiveLeafAdvance(leaves[i - 1].el!!, leaves[i].el!!, styleOf = { styleMap[it] ?: ComputedStyle(fontSizePx = 10f, lineHeightRatio = 1.5f) })
             assertEquals("pair $i heavy gap does not match shared advance", heavyGap, sharedGap)
         }
     }
@@ -307,7 +307,7 @@ class BoxSharedGeometryTest {
         val styleMap = StyleComputer(10f, LightCssParser().parse(""), listOf(LightCssParser().parse(""))).compute(root)
         val leaves = layoutLeaves(root)
         assertEquals(3, leaves.size)
-        val gap = NormalFlowLayout.consecutiveLeafAdvance(leaves[1].el!!, leaves[2].el!!) { compute(styleMap, it) }
+        val gap = NormalFlowLayout.consecutiveLeafAdvance(leaves[1].el!!, leaves[2].el!!, styleOf = { compute(styleMap, it) })
         assertEquals(14, gap)
     }
 
@@ -331,7 +331,7 @@ class BoxSharedGeometryTest {
         val styleMap = StyleComputer(10f, LightCssParser().parse(""), listOf(LightCssParser().parse(""))).compute(root)
         val leaves = layoutLeaves(root)
         assertEquals(2, leaves.size)
-        val gap = NormalFlowLayout.consecutiveLeafAdvance(leaves[0].el!!, leaves[1].el!!) { compute(styleMap, it) }
+        val gap = NormalFlowLayout.consecutiveLeafAdvance(leaves[0].el!!, leaves[1].el!!, styleOf = { compute(styleMap, it) })
         assertEquals(8 + 14, gap) // padding-bottom 8 + section's own margin-bottom 14 — children's 8 NOT folded
     }
 

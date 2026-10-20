@@ -1329,10 +1329,12 @@ class BoxChapterLayouter(
         val pb = prepare.block(b)
         // ⚠ 只用于**相邻**块（`b == a + 1`）：E23-b 的容器指定高差额按块下标记账
         // （[containerHeightLead][b] = 进入 b 之前闭合的容器差额总和）。
+        // E23-e：先取差额表（顺带填「下限真的生效」的容器集），再算间距 —— 折叠判据要读那份集。
+        val lead = containerHeightLead(prepare)[b]
         return ownBottomEdges(pa) +
-            NormalFlowLayout.consecutiveLeafAdvance(pa.el!!, pb.el!!, prepare::resolveStyle) +
+            NormalFlowLayout.consecutiveLeafAdvance(pa.el!!, pb.el!!, prepare::resolveStyle, prepare::floorBinds) +
             (pb.style.border.top + pb.style.padding.top).roundToInt() +
-            containerHeightLead(prepare)[b]
+            lead
     }
 
     /**
@@ -1402,7 +1404,7 @@ class BoxChapterLayouter(
         for (i in 0 until n) {
             var a: MarkupElement? = prepare.leafElement(i).parent
             while (a != null) {
-                if (!a.isText && prepare.resolveStyle(a).heightPx != null) {
+                if (!a.isText && NormalFlowLayout.specifiedVerticalFloor(prepare.resolveStyle(a)) != null) {
                     if (loOf[a] == null) {
                         loOf[a] = i
                         els.add(a)
@@ -1421,7 +1423,7 @@ class BoxChapterLayouter(
         for (c in els) {
             val lo = loOf.getValue(c)
             val hi = hiOf.getValue(c)
-            val h = prepare.resolveStyle(c).heightPx?.roundToInt() ?: continue
+            val h = NormalFlowLayout.specifiedVerticalFloor(prepare.resolveStyle(c)) ?: continue
             if (h <= 0) continue
             val firstLeaf = prepare.block(lo)
             val firstEl = prepare.leafElement(lo)
@@ -1450,7 +1452,7 @@ class BoxChapterLayouter(
                     val ea = leaf.el
                     val eb = next.el
                     if (ea != null && eb != null) {
-                        content += NormalFlowLayout.consecutiveLeafAdvance(ea, eb, prepare::resolveStyle)
+                        content += NormalFlowLayout.consecutiveLeafAdvance(ea, eb, prepare::resolveStyle, prepare::floorBinds)
                     }
                     content += ownTopEdges(next) + before[k + 1]
                 }
@@ -1460,7 +1462,11 @@ class BoxChapterLayouter(
                 }
                 k++
             }
-            if (!reached && content < h) before[hi] += h - content
+            if (!reached && content < h) {
+                before[hi] += h - content
+                // E23-e：下限**真的生效** ⇒ 末子下边距收进盒内（不再外塌），折叠判据要认这一条。
+                prepare.floorBoundContainers.add(c)
+            }
         }
         prepare.containerHeightLead = before
         return before
@@ -1567,7 +1573,7 @@ class BoxChapterLayouter(
             // 全落在它上面（与重路径 `st.y` 已含差额、随后才做 margin/clear 同序）。
             if (prevBlock != null) y += boxLead[gi]
             val advance = if (prevBlock == null) 0
-            else NormalFlowLayout.consecutiveLeafAdvance(prevBlock!!.el!!, leaf.el!!, prepare::resolveStyle)
+            else NormalFlowLayout.consecutiveLeafAdvance(prevBlock!!.el!!, leaf.el!!, prepare::resolveStyle, prepare::floorBinds)
             val ls = leaf.style
             // P6-a2: 悬浮注册（img/文本；与重路径 emit 同式：零推进＋双侧跨度＋同侧堆叠）。
             // 表格行永不视为悬浮（与重路径 `box.table == null` 守卫同式）。
@@ -3080,7 +3086,7 @@ class BoxChapterLayouter(
             val aggBottom = clipBottom[owner] ?: top
             val (bandTop, bandBottom) = NormalFlowLayout.backgroundBandExtent(
                 ownerTop = contentTop,
-                ownerBottom = s.heightPx?.let { maxOf(aggBottom, contentTop + it.roundToInt()) } ?: aggBottom,
+                ownerBottom = maxOf(aggBottom, contentTop + NormalFlowLayout.specifiedContentHeight(s, 0)),
                 ownerEdgesTop = (s.border.top + s.padding.top).roundToInt(),
                 ownerEdgesBottom = (s.border.bottom + s.padding.bottom).roundToInt(),
                 selfOwned = owner in clipSelfOwned,
@@ -3104,7 +3110,7 @@ class BoxChapterLayouter(
             val aggBottom = ownerBottom[owner] ?: top
             val (bandTop, bandBottom) = NormalFlowLayout.backgroundBandExtent(
                 ownerTop = contentTop,
-                ownerBottom = s.heightPx?.let { maxOf(aggBottom, contentTop + it.roundToInt()) } ?: aggBottom,
+                ownerBottom = maxOf(aggBottom, contentTop + NormalFlowLayout.specifiedContentHeight(s, 0)),
                 ownerEdgesTop = (s.border.top + s.padding.top).roundToInt(),
                 ownerEdgesBottom = (s.border.bottom + s.padding.bottom).roundToInt(),
                 selfOwned = owner in selfOwned,
@@ -3163,7 +3169,7 @@ class BoxChapterLayouter(
             val aggBottom = cBottom[container] ?: top
             val (bandTop, bandBottom) = NormalFlowLayout.backgroundBandExtent(
                 ownerTop = contentTop,
-                ownerBottom = s.heightPx?.let { maxOf(aggBottom, contentTop + it.roundToInt()) } ?: aggBottom,
+                ownerBottom = maxOf(aggBottom, contentTop + NormalFlowLayout.specifiedContentHeight(s, 0)),
                 ownerEdgesTop = (s.border.top + s.padding.top).roundToInt(),
                 ownerEdgesBottom = (s.border.bottom + s.padding.bottom).roundToInt(),
                 selfOwned = false,
@@ -3526,10 +3532,23 @@ class LightPrepare(
     internal var containerHeightLead: IntArray? = null
 
     /**
-     * E23-b：本章是否可能有**指定高的非叶容器**（= [containerHeightLead] 的总开关）。
+     * E23-e：**竖向下限真的生效**的容器（`min-height` 把盒子撑高了）—— 这些容器的末子下边距被
+     * 收进盒内、不再外塌（与 Chromium 实测同式；见 `NormalFlowLayout.emit` 的容器分支）。
+     * 由 [BoxChapterLayouter.containerHeightLead] 在算差额时顺带填，供
+     * [orilumn.reader.engine.laying.NormalFlowLayout.consecutiveLeafAdvance] 的折叠判据读取
+     * （重路径同判据读 `LayoutBox.verticalFloorBound`，两路同源）。
+     */
+    internal val floorBoundContainers = HashSet<MarkupElement>()
+
+    /** 元素 [el] 的竖向下限是否**真的生效**（撑高了盒子 ⇒ 断掉父↔末子底折叠）。 */
+    internal fun floorBinds(el: MarkupElement): Boolean = floorBoundContainers.contains(el)
+
+    /**
+     * E23-b / E23-e：本章是否可能有**指定高（或最小高）的非叶容器**（= [containerHeightLead] 的总开关）。
      *
-     * 门取**超集**：样式表里有能出 px 的 `height` 声明（`auto`/百分比不算），或树上 inline `style`
-     * 提到 height；命中后才沿每叶祖先链（按元素去重）真读一次 `heightPx`。
+     * 门取**超集**：样式表里有能出 px 的 `height` / `min-height` 声明（`auto`/百分比不算），或树上
+     * inline `style` 提到 height（`min-height` 含 "height" 子串，自然命中）；命中后才沿每叶祖先链
+     * （按元素去重）真读一次竖向下限。
      * 绝大多数书的 `height` 只出现在 `img` 这类替换叶上（或压根没有）⇒ 这里恒 false，
      * 差额表整章零扫描、零塑形（与 R26 `anyFloat` 同一个取舍：先探一次，别在开书路径上扫）。
      */
@@ -3541,7 +3560,7 @@ class LightPrepare(
             while (n != null) {
                 if (seen.containsKey(n)) break // 该节点及其祖先已扫过（链一律上溯到根）
                 seen[n] = true
-                if (resolveStyle(n).heightPx != null) return@lazy true
+                if (NormalFlowLayout.specifiedVerticalFloor(resolveStyle(n)) != null) return@lazy true
                 if (n === markup) break
                 n = n.parent
             }

@@ -244,6 +244,16 @@ class LayoutBox(
 
     var contentBottom: Int = 0
 
+    /**
+     * E23-e：本容器（非叶）的**竖向下限是否真的生效**（`height` / `min-height` 把盒子撑高）。
+     *
+     * 生效 ⇒ 末子下边距收进盒内、父↔末子底折叠断链（CSS 2.1 §8.3.1 的 `height: auto` 条件；
+     * Chromium 实测同式）。由 `emit` 的容器分支在算出自然内容高后写一次，`lastChildBottomMargin`
+     * 的折叠判据读它 —— 轻路径同判据读 `LightPrepare.floorBoundContainers`（同一份结论）。
+     * 叶恒 `false`（叶没有末子，不参与该折叠）。
+     */
+    var verticalFloorBound: Boolean = false
+
     /** Global start line index of this box's first line in the whole stream (leaf); -1 when it has no lines. */
     var firstLineIndex: Int = -1
 

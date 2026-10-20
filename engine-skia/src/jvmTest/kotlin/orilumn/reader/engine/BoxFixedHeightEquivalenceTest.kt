@@ -41,6 +41,13 @@ class BoxFixedHeightEquivalenceTest {
             .ovh { height: 40px; padding: 4px; border: 1px solid #333; background: #f5f5f5 }
             .ovh p, .tall p { margin: 0 }
             .tall { height: 200px; padding: 4px; background: #eee }
+            .minh { min-height: 120px; padding: 4px; border: 1px solid #333; background: #f5f5f5 }
+            .minh-small { min-height: 10px; padding: 4px; border: 1px solid #333; background: #f5f5f5 }
+            .minh p, .minh-small p { margin: 0 }
+            .minh-gap { min-height: 120px; background: #f5f5f5 }
+            .minh-gap p { margin: 0 0 16px }
+            .minh-gap-small { min-height: 10px; background: #f5f5f5 }
+            .minh-gap-small p { margin: 0 0 16px }
             """.trimIndent(),
         ),
     )
@@ -169,5 +176,98 @@ class BoxFixedHeightEquivalenceTest {
             "内容更高时容器应随内容长高（实际 ${canonBand.yBottom - canonBand.yTop}）",
             canonBand.yBottom - canonBand.yTop > 50,
         )
+    }
+
+    /** 正典 / 临时两路的容器底色盒（按底色认；只取章首页）。 */
+    private fun bothContainerBands(markup: MarkupElement): Pair<PageBackground, PageBackground> {
+        val canon = layouter.fullLayout(layouter.prepare(markup, css, profile, contentW, contentH), profile, contentW, contentH)
+        val cs = canon.slices[0]
+        val cb = containerBand(backgroundsOf(canon.layout, cs.firstLine, cs.lastLineExclusive))
+            ?: error("正典路径缺容器底色盒")
+        val light = layouter.prepareLight(markup, css, profile, contentW, ChapterStructureCache(), contentH)
+        val fwd = layouter.shapeTempPageForward(light, profile, contentW, contentH, 0, cache = null)
+            ?: error("临时页未产出")
+        val lb = containerBand(
+            backgroundsOf(fwd.page.layout, fwd.page.slice.firstLine, fwd.page.slice.lastLineExclusive),
+        ) ?: error("轻路径缺容器底色盒")
+        return cb to lb
+    }
+
+    @Test
+    fun `min-height container grows to the floor on both paths`() {
+        val markup = chapter(
+            """
+            <div class="minh"><p>短</p></div>
+            <p>${long("溯洄从之，道阻且长。")}</p>
+            """.trimIndent(),
+        )
+        assertHeadPageEquivalent(markup, "min-height container")
+        val (cb, lb) = bothContainerBands(markup)
+        // 120 内容 + 4+4 padding + 1+1 border = 130（Chromium 实测同值）。
+        assertEquals("最小高生效：容器盒高 = 最小高 + 自身上下边", 130, cb.yBottom - cb.yTop)
+        assertEquals("最小高生效（轻路径）", 130, lb.yBottom - lb.yTop)
+    }
+
+    @Test
+    fun `min-height below the content height is a no-op on both paths`() {
+        val markup = chapter(
+            """
+            <div class="minh-small"><p>${"路漫漫其修远兮，吾将上下而求索。".repeat(30)}</p></div>
+            <p>${long("溯洄从之，道阻且长。")}</p>
+            """.trimIndent(),
+        )
+        assertHeadPageEquivalent(markup, "min-height below content")
+        val (cb, lb) = bothContainerBands(markup)
+        assertTrue(
+            "内容更高时最小高不应压扁盒子（正典 ${cb.yBottom - cb.yTop}）",
+            cb.yBottom - cb.yTop > 130,
+        )
+        assertEquals("重/轻两路容器盒高同值", cb.yBottom - cb.yTop, lb.yBottom - lb.yTop)
+    }
+
+    /** 容器底色带**之后**的第一行（= 后随段首行）到带底的距离。 */
+    private fun gapAfterBand(
+        layout: orilumn.reader.engine.paging.BookLayout,
+        slice: orilumn.reader.engine.paging.PageSlice,
+        band: PageBackground,
+    ): Int {
+        for (i in slice.firstLine until slice.lastLineExclusive) {
+            val top = layout.getLineTop(i)
+            if (top >= band.yBottom) return top - band.yBottom
+        }
+        error("底色带之后没有行")
+    }
+
+    @Test
+    fun `min-height that binds drops the last child's bottom margin on both paths`() {
+        val markup = chapter(
+            """
+            <div class="minh-gap"><p>短</p><p>更短</p></div>
+            <div>${long("溯洄从之，道阻且长。")}</div>
+            """.trimIndent(),
+        )
+        // 重/轻两路的行几何逐行一致（含容器底之后那段）—— Chromium：末子下边距收进盒内，后随内容贴盒底。
+        assertHeadPageEquivalent(markup, "min-height bound + last margin")
+        val canon = layouter.fullLayout(layouter.prepare(markup, css, profile, contentW, contentH), profile, contentW, contentH)
+        val cs = canon.slices[0]
+        val band = containerBand(backgroundsOf(canon.layout, cs.firstLine, cs.lastLineExclusive))
+            ?: error("正典路径缺容器底色盒")
+        assertEquals("下限生效时末子下边距不外塌（Chromium 同值 0）", 0, gapAfterBand(canon.layout, cs, band))
+    }
+
+    @Test
+    fun `min-height below the content keeps the normal margin collapse on both paths`() {
+        val markup = chapter(
+            """
+            <div class="minh-gap-small"><p>${"路漫漫其修远兮，吾将上下而求索。".repeat(30)}</p></div>
+            <div>${long("溯洄从之，道阻且长。")}</div>
+            """.trimIndent(),
+        )
+        assertHeadPageEquivalent(markup, "min-height below content + margin")
+        val canon = layouter.fullLayout(layouter.prepare(markup, css, profile, contentW, contentH), profile, contentW, contentH)
+        val cs = canon.slices[0]
+        val band = containerBand(backgroundsOf(canon.layout, cs.firstLine, cs.lastLineExclusive))
+            ?: error("正典路径缺容器底色盒")
+        assertEquals("下限没生效时末子下边距照常外塌（16）", 16, gapAfterBand(canon.layout, cs, band))
     }
 }

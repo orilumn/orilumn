@@ -550,7 +550,13 @@ object NormalFlowLayout {
         // 容器底边（背景/边框/裁剪区下界）与后随内容的起点因此落在指定高上；游标只下不上 ⇒ 行位
         // 单调，分页容量仍由行位给出（帧底恒等式见轻路径 `interiorGapAbove` 同源差额）。
         val contentTopY = box.contentTop + edgesTop
-        box.contentBottom = contentTopY + specifiedContentHeight(sty, st.y - contentTopY) + edgesBottom
+        val naturalContentH = st.y - contentTopY
+        // E23-e：`min-height` 只在**真的撑高**时才断掉父↔末子底折叠（Chromium 实测：`min-height`
+        // 低于内容 ⇒ 末子下边距照常外塌；高于内容 ⇒ 收进盒内、后随内容贴盒底）。`height` 恒断链
+        // （指定高即定高，与内容高不高无关），故两条分开判。
+        val floor = specifiedVerticalFloor(sty)
+        box.verticalFloorBound = floor != null && floor > naturalContentH
+        box.contentBottom = contentTopY + maxOf(naturalContentH, floor ?: 0) + edgesBottom
         st.y = box.contentBottom
         box.firstLineIndex = if (firstChildLine == Int.MAX_VALUE) -1 else firstChildLine
         box.lastLineExclusive = lastChildLine
@@ -559,11 +565,11 @@ object NormalFlowLayout {
         // child — transitively down every edge-free last-child container (the exact mirror of the
         // top-side first-child chain). The single collapsed group is what the following sibling
         // consumes; in that case the child's margin does not add anything inside the container.
-        // A container with bottom border/padding (or a specified height) does NOT collapse: it
-        // returns its own bottom margin unchanged (the last child's bottom margin is then dropped,
-        // matching the prior box-flow behavior).
+        // A container with bottom border/padding (or a specified height, or an **effective** vertical
+        // floor / `min-height`) does NOT collapse: it returns its own bottom margin unchanged (the
+        // last child's bottom margin is then dropped, matching Chromium).
         val bottomGroup = if (hasChildren) lastChildBottomMargin(box) else 0f
-        return if (hasChildren && edgesBottom == 0 && sty.heightPx == null)
+        return if (hasChildren && edgesBottom == 0 && sty.heightPx == null && !box.verticalFloorBound)
             collapseMargins(sty.margin.bottom, bottomGroup)
         else sty.margin.bottom
     }
@@ -586,6 +592,7 @@ object NormalFlowLayout {
         while (child.isContainer &&
             (child.style.border.bottom + child.style.padding.bottom).roundToInt() == 0 &&
             child.style.heightPx == null &&
+            !child.verticalFloorBound &&
             child.childBoxes.isNotEmpty()
         ) {
             acc = collapseMargins(acc, child.style.margin.bottom)
@@ -1739,14 +1746,37 @@ object NormalFlowLayout {
     }
 
     /**
-     * E23 单源：CSS 2.1 §10.6.3 —— `height` 非 auto 时盒子的**内容盒高** = max(在流内容高, `height`)。
+     * E23 / E23-e 单源：CSS 2.1 §10.6.3 / §10.7 —— 盒子的**内容盒高** = max(在流内容高, 竖向下限)，
+     * 竖向下限 = max(`height`, `min-height`)（见 [specifiedVerticalFloor]）。
      *
-     * 内容比指定高时按内容（溢出照排，不裁；裁剪是 `overflow` 的事）。
-     * `height: auto` 与百分比（包含块高不定，解析期已按 auto 丢弃）返回自然高 ⇒ 逐值不变。
+     * 内容比下限高时按内容（溢出照排，不裁；裁剪是 `overflow` 的事）。
+     * 两者皆 auto / 百分比（包含块高不定，解析期已丢弃）返回自然高 ⇒ 逐值不变。
      * **只补在流内容的竖向占位**（盒子高 ⇒ 底色/边框/裁剪区与后续内容起点），不动任何行。
+     *
+     * 注：`max-height` **只解析不消费**（裁定不做 —— 浏览器语义是「裁切 + 溢出」并要连带决定内容被
+     * 收掉后游标往哪走，与这里「只多不少」不是一套机理；见 `docs/引擎欠账-对齐浏览器语义.md` §2.1 D 表）。
      */
     fun specifiedContentHeight(style: ComputedStyle?, naturalH: Int): Int =
-        style?.heightPx?.let { maxOf(naturalH, it.roundToInt().coerceAtLeast(0)) } ?: naturalH
+        specifiedVerticalFloor(style)?.let { maxOf(naturalH, it) } ?: naturalH
+
+    /**
+     * E23-e 单源：盒子的**竖向下限**（content-box 口径）= max(`height`, `min-height`) 取整；两者皆
+     * 未声明（`auto` / 百分比被解析期丢弃）⇒ null。`height:0` / `min-height:0` 是声明过但下限为 0，
+     * 返回 0 而非 null —— 调用方据此区分「没有下限」与「下限为零」。
+     *
+     * Chromium 实测（2026-10-20，`--headless=new`，内容 20px + 末子 `margin-bottom:20`）：
+     * `min-height:120` ⇒ 盒高 120、后随内容贴盒底（末子下边距被收进盒内）；
+     * `min-height:10`（低于内容）⇒ 盒高 20、下边距照常外塌。
+     * 折叠判据据此**分两档**（见 `emit` 容器分支与 [consecutiveLeafAdvance]）：`height` 声明即断链，
+     * `min-height` 只在本下限**大于自然内容高**（真的撑高）时断链。
+     */
+    fun specifiedVerticalFloor(style: ComputedStyle?): Int? {
+        val s = style ?: return null
+        val h = s.heightPx?.roundToInt()?.coerceAtLeast(0)
+        val m = s.minHeightPx?.roundToInt()?.coerceAtLeast(0)
+        if (h == null && m == null) return null
+        return maxOf(h ?: 0, m ?: 0)
+    }
 
     /**
      * The vertical background/border band a box covers for drawing, given the aggregated vertical extent
@@ -1874,6 +1904,12 @@ object NormalFlowLayout {
         prevLeaf: MarkupElement,
         nextLeaf: MarkupElement,
         styleOf: (MarkupElement) -> ComputedStyle,
+        /**
+         * E23-e：容器 [el] 的竖向下限是否**真的生效**（撑高了盒子）。生效 ⇒ 末子下边距收进盒内、
+         * 父↔末子底折叠断链（重路径 `emit` 读 `LayoutBox.verticalFloorBound`，两路同判据）。
+         * 默认 `{ false }` = 无下限（含 `min-height` 低于内容的情形），行为与旧路径逐字节一致。
+         */
+        floorBinds: (MarkupElement) -> Boolean = { false },
     ): Int {
         val pathA = ancestorChain(prevLeaf)
         val pathB = ancestorChain(nextLeaf)
@@ -1891,14 +1927,16 @@ object NormalFlowLayout {
         // folding in last (its children's margins are dropped). Skipped entirely when A_m carries bottom
         // border/padding or a specified height (emit then returns its raw margin-bottom).
         val aStyle = styleOf(pathA[ia - 1])
-        if ((aStyle.border.bottom + aStyle.padding.bottom).roundToInt() == 0 && aStyle.heightPx == null) {
+        if ((aStyle.border.bottom + aStyle.padding.bottom).roundToInt() == 0 &&
+            aStyle.heightPx == null && !floorBinds(pathA[ia - 1])
+        ) {
             var j = ia - 2
             while (j >= 0) {
                 val parentStyle = styleOf(pathA[j + 1])
                 if ((parentStyle.border.bottom + parentStyle.padding.bottom).roundToInt() > 0) break
-                // E23-b：§8.3.1 的父↔末子底折叠要求父 `height:auto`；指定高与底边同权断链
-                //（`emit` 侧见 [lastChildBottomMargin]，两处同一判据）。
-                if (parentStyle.heightPx != null) break
+                // E23-b/E23-e：§8.3.1 的父↔末子底折叠要求父 `height:auto`（且竖向下限没真的生效）；
+                // 指定高 / 生效的下限与底边同权断链（`emit` 侧见 [lastChildBottomMargin]，两处同一判据）。
+                if (parentStyle.heightPx != null || floorBinds(pathA[j + 1])) break
                 m1 = collapseMargins(m1, styleOf(pathA[j]).margin.bottom)
                 j--
             }

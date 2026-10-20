@@ -6,10 +6,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshots.SnapshotStateMap
+import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.engine.skia.DecodedImage
 import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.engine.skia.PageBackground
 import orilumn.reader.engine.skia.PageImage
+import orilumn.reader.engine.skia.projectDecor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -68,6 +70,10 @@ fun PrerasterOnPrefill(
     hostRevision: Int,
     imgCache: PageImageCache<DecodedImage>,
     bgCache: PageImageCache<DecodedImage>,
+    /** 当前章标注内存态（只用于同章邻页；跨章目标不投影，等真正的 `rememberPageContent`）。 */
+    annotations: List<Annotation> = emptyList(),
+    annotationChapter: Int = -1,
+    decorRevision: Int = 0,
 ) {
     val hostRef = rememberUpdatedState(host)
     val onPrefillRef = rememberUpdatedState<suspend (Int, Int) -> Unit>(onPrefillReady)
@@ -80,7 +86,7 @@ fun PrerasterOnPrefill(
     val prerasterBusy = remember { mutableStateOf(false) }
 
     // 几何/颜色随设置与视口变化，重建即重挂信号订阅。
-    LaunchedEffect(contentLeft, contentTop, contentRight, contentBottom, pageBg, inkColor, contentRevision, hostRevision) {
+    LaunchedEffect(contentLeft, contentTop, contentRight, contentBottom, pageBg, inkColor, contentRevision, hostRevision, annotationChapter, decorRevision) {
         val hostNow = hostRef.value
         val rendererNow = rendererRef.value
         val imgCacheNow = imgCacheRef.value
@@ -135,6 +141,8 @@ fun PrerasterOnPrefill(
                         contentRevision = contentRevision,
                         imgCache = imgCacheNow,
                         bgCache = bgCacheNow,
+                        annotations = annotations,
+                        annotationChapter = annotationChapter,
                     )
                 }
             } finally {
@@ -170,8 +178,18 @@ internal suspend fun prerasterPage(
     contentRevision: Int,
     imgCache: PageImageCache<DecodedImage>,
     bgCache: PageImageCache<DecodedImage>,
+    annotations: List<Annotation> = emptyList(),
+    annotationChapter: Int = -1,
 ): Boolean {
-    val lines: List<DrawLine> = runCatching { host.pageLines(pos) }.getOrNull().orEmpty()
+    val rawLines: List<DrawLine> = runCatching { host.pageLines(pos) }.getOrNull().orEmpty()
+    // 与 rememberPageContent 同一条标注投影路径：跨章目标没有当前章列表 ⇒ 不投影（宁缺勿串）。
+    val activeAnnotations =
+        if (pos.chapter == annotationChapter) annotations else emptyList()
+    val lines: List<DrawLine> = projectDecor(
+        rawLines,
+        pos.chapter,
+        annotationDecorRanges(activeAnnotations),
+    )
     val pageImages: List<PageImage> = runCatching { host.pageImages(pos) }.getOrNull().orEmpty()
     val pageBackgrounds: List<PageBackground> = runCatching { host.pageBackgrounds(pos) }.getOrNull().orEmpty()
     // 跳过条件必须与绘制路径 `ReaderPageCanvas` 同口径（「三类皆空」才算空页）：纯图页没有

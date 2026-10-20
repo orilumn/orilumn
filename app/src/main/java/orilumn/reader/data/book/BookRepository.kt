@@ -1,5 +1,6 @@
 package orilumn.reader.data.book
 
+import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.data.db.BookSort
 import orilumn.reader.data.db.LibraryDb
 import kotlinx.coroutines.flow.Flow
@@ -56,4 +57,15 @@ class BookRepository(
     suspend fun saveReadingState(state: BookReadingState) = db.saveReadingState(state)
 
     suspend fun readingState(bookId: Long): BookReadingState? = db.readingState(bookId)
+
+    // ---- 文本标注（schema v7） ----
+
+    suspend fun annotationsForChapter(bookId: Long, chapter: Int): List<Annotation> =
+        db.annotationsForChapter(bookId, chapter)
+
+    suspend fun addAnnotation(annotation: Annotation): Annotation = db.addAnnotation(annotation)
+
+    suspend fun updateAnnotation(annotation: Annotation) = db.updateAnnotation(annotation)
+
+    suspend fun deleteAnnotation(id: Long) = db.deleteAnnotation(id)
 }

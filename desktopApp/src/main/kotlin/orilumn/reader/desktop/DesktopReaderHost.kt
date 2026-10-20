@@ -1,5 +1,6 @@
 package orilumn.reader.desktop
 
+import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.data.book.BookReadingState
 import orilumn.reader.data.epub.EpubResourceReader
 import orilumn.reader.data.epub.TocItem
@@ -23,6 +24,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okio.Path.Companion.toPath
@@ -229,6 +231,57 @@ class DesktopReaderHost(
     }
 
     override fun pageLines(pos: ReaderPos): List<DrawLine>? = controller.pageLines(pos.chapter, pos.slice)
+
+    /** D-18：整章文本切片（同步；prepare 未就绪返回 null）。 */
+    override fun textOf(chapter: Int, start: Int, endExclusive: Int): String? {
+        val text = controller.chapterText(chapter) ?: return null
+        val s = start.coerceIn(0, text.length)
+        val e = endExclusive.coerceIn(s, text.length)
+        return text.substring(s, e)
+    }
+
+    // ---- 文本标注：转手给桌面 ShelfStore → 共享 LibraryDb（与平板同一条 CRUD 语义） ----
+
+    override suspend fun annotationsForChapter(chapter: Int): List<Annotation> = try {
+        store.annotationsForChapter(bookId, chapter)
+    } catch (c: CancellationException) {
+        throw c
+    } catch (_: Throwable) {
+        emptyList()
+    }
+
+    override suspend fun addAnnotation(annotation: Annotation): Annotation? = try {
+        val now = System.currentTimeMillis()
+        store.addAnnotation(
+            annotation.copy(
+                bookId = bookId,
+                createdAt = if (annotation.createdAt == 0L) now else annotation.createdAt,
+                updatedAt = now,
+            ),
+        )
+    } catch (c: CancellationException) {
+        throw c
+    } catch (_: Throwable) {
+        null
+    }
+
+    override suspend fun updateAnnotation(annotation: Annotation): Boolean = try {
+        store.updateAnnotation(annotation.copy(updatedAt = System.currentTimeMillis()))
+        true
+    } catch (c: CancellationException) {
+        throw c
+    } catch (_: Throwable) {
+        false
+    }
+
+    override suspend fun deleteAnnotation(id: Long): Boolean = try {
+        store.deleteAnnotation(id)
+        true
+    } catch (c: CancellationException) {
+        throw c
+    } catch (_: Throwable) {
+        false
+    }
 
     /** 页首缺口（绘制帧顶相对首行行顶的距离），画布/点按/预栅格三方同源（与平板同口径）。 */
     override fun pageFrameLead(pos: ReaderPos): Int = controller.pageFrameLead(pos.chapter, pos.slice)

@@ -10,10 +10,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberUpdatedState
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.engine.skia.DecodedImage
 import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.engine.skia.PageBackground
 import orilumn.reader.engine.skia.PageImage
+import orilumn.reader.engine.skia.projectDecor
 
 /**
  * 跨页缓存键（稳定身份，与几何无关）：同图跨页 `yTop/widthPx` 不同也命中。
@@ -78,14 +80,33 @@ fun rememberPageContent(
     inkColor: Int,
     imgCache: PageImageCache<DecodedImage>,
     bgCache: PageImageCache<DecodedImage>,
+    /**
+     * 当前章标注（D-19 内存态）。只有 `pos.chapter == annotationChapter` 时才投影；
+     * 传入上一章的列表不会串到目标章。
+     */
+    annotations: List<Annotation> = emptyList(),
+    annotationChapter: Int = -1,
+    /** 装饰修订号（增删改 +1），与标注列表一起作为投影的刷新键。 */
+    decorRevision: Int = 0,
 ): PageContent? {
     val currentHost by rememberUpdatedState(host)
     // 不用 `if (pos == null) return null` 提前返回：那样 remember 的调用次数会随 pos
     // 摆动而变（Compose 允许条件 composable，但两个调用点共用本页时极易记错槽）。
     // 这里让 pos 可空贯穿始终，返回值末尾再判 null。
 
-    val lines = remember(pos, contentRevision, hostRevision) {
+    val rawLines = remember(pos, contentRevision, hostRevision) {
         pos?.let { currentHost.pageLines(it) }
+    }
+    // 标注投影（D-19 / §5.1）：先按章过滤，再把章内区间合进每一行；`DrawLine` 值变即
+    // 触发栅格指纹失效，不需要额外动 contentRevision。投影在引擎里做（LineAligner 是 internal），
+    // 这里只负责取内存态并调用纯函数。
+    val activeAnnotations =
+        if (pos != null && pos.chapter == annotationChapter) annotations else emptyList()
+    val decorRanges = remember(activeAnnotations, decorRevision) {
+        annotationDecorRanges(activeAnnotations)
+    }
+    val lines = remember(rawLines, decorRanges, pos?.chapter) {
+        rawLines?.let { projectDecor(it, pos?.chapter ?: 0, decorRanges) }
     }
     // 盒背景/边框：与行同一切片口径，画布内画在文字之下（翻页即随 pos 刷新）。
     val pageBackgrounds = remember(pos, contentRevision, hostRevision) {

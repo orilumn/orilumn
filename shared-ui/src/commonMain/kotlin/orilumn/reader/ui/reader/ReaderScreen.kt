@@ -178,6 +178,12 @@ fun ReaderScreen(
         PageImageCache<orilumn.reader.engine.skia.DecodedImage>(
             sizeOf = { (it.image.width * it.image.height * 4L).coerceAtLeast(1L) })
     }
+    // D-19：当前章标注内存态。翻页不重读库，换章才清空重载；增删改先改它再落库。
+    val annotationState = remember(currentHost) { AnnotationState(currentHost) }
+    LaunchedEffect(currentHost, openPos?.chapter) {
+        val ch = openPos?.chapter
+        if (ch == null) annotationState.clear() else annotationState.load(ch)
+    }
     // ---- 定位动作（host 为 suspend，统一挂到本组件作用域） ----
     /**
      * 落位前等图（导航提交前预热）：目标页缺的插图/背景图并行解出来进跨页缓存再提交定位，
@@ -1064,6 +1070,9 @@ fun ReaderScreen(
                 inkColor = profile.fgColor,
                 imgCache = imgCache,
                 bgCache = bgCache,
+                annotations = annotationState.annotations,
+                annotationChapter = annotationState.chapter,
+                decorRevision = annotationState.revision,
             )
 
             // P1 L1：目标页内容（落位未回 ⇒ null，此时只画当前页，那一帧不动画）。
@@ -1082,6 +1091,9 @@ fun ReaderScreen(
                     inkColor = profile.fgColor,
                     imgCache = imgCache,
                     bgCache = bgCache,
+                    annotations = annotationState.annotations,
+                    annotationChapter = annotationState.chapter,
+                    decorRevision = annotationState.revision,
                 )
             } else {
                 null
@@ -1128,6 +1140,9 @@ fun ReaderScreen(
                 hostRevision = hostRevision,
                 imgCache = imgCache,
                 bgCache = bgCache,
+                annotations = annotationState.annotations,
+                annotationChapter = annotationState.chapter,
+                decorRevision = annotationState.revision,
             )
             // 上面 `beforeCommit` 的「整页位图备齐」实现：与 PrerasterOnPrefill 同口径
             //（同一渲染器、同一缓存、同一条取数路径），只是针对**本次落位目标页**。
@@ -1150,6 +1165,8 @@ fun ReaderScreen(
                     contentRevision = liveRevision,
                     imgCache = imgCache,
                     bgCache = bgCache,
+                    annotations = annotationState.annotations,
+                    annotationChapter = annotationState.chapter,
                 )
             }
             SideEffect { rasterByRef.value = rasterPageNow }

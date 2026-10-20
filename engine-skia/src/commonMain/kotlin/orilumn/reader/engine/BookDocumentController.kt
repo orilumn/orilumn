@@ -4069,6 +4069,14 @@ private fun finishCanonicalBackground(
 
     fun unitAt(index: Int): ChapterUnit? = chapters.getOrNull(index)
 
+    /**
+     * 整章纯文本（D-18）：与排版共用 [ChapterUnit.prepareResult] 的叶文本投影，同步、无毒副作用。
+     *
+     * null = 该章尚未 prepare（未打开/已被远章驱逐）；空串是合法的「本章无可排文字」。
+     * 调用方（复制/选词/长按）不要为了拿文本去触发开章，避免把一次点按变成昂贵的排版。
+     */
+    fun chapterText(index: Int): String? = unitAt(index)?.chapterText()
+
     /** One page forward within a chapter. A line-anchored slice (not a canonical page) snaps to the
  *  canonical page after the one containing its char, avoiding content skips. */
     fun nextPageInChapter(unit: ChapterUnit, slice: PageSlice): PageSlice? {

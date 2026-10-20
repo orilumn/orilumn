@@ -174,7 +174,8 @@ object ReaderMath {
      */
     fun shiftToPageFrame(lines: List<DrawLine>, shift: Int): List<DrawLine> {
         if (lines.isEmpty() || shift == 0) return lines
-        return lines.map { it.copy(yTop = it.yTop - shift, yBottom = it.yBottom - shift) }
+        // E11：裁剪区随行同步平移（`shiftedBy` 单源，漏了就裁剪区错位）。
+        return lines.map { it.shiftedBy(-shift) }
     }
 
     /**

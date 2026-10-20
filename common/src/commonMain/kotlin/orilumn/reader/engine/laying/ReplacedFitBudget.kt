@@ -97,7 +97,10 @@ object ReplacedFitBudget {
     private fun topEdgesStyle(el: MarkupElement, styleOf: (MarkupElement) -> ComputedStyle): Int =
         if (el.isText) 0 else (styleOf(el).padding.top + styleOf(el).border.top).roundToInt()
 
-    /** 块间落差（前叶自身下边 + 折叠边距 + 后叶自身 top 边），与 `BoxChapterLayouter.blockBoundaryGap` 同式。 */
+    /** 块间落差（前叶自身下边 + 折叠边距 + 后叶自身 top 边），与 `BoxChapterLayouter.blockBoundaryGap` 同式。
+     *
+     *  E23-e：此处**不传**「竖向下限真的生效」谓词 —— 那种情形下会多算一个末子下边距（预算偏大 ⇒
+     *  更早缩图），是估计的保守方向；真实几何与量画同值由重/轻两路各自给出，不经这里。 */
     private fun blockBoundaryGapStyle(a: MarkupElement, b: MarkupElement, styleOf: (MarkupElement) -> ComputedStyle): Int =
         ownBottomEdgesStyle(a, styleOf) + NormalFlowLayout.consecutiveLeafAdvance(a, b, styleOf) + topEdgesStyle(b, styleOf)
 

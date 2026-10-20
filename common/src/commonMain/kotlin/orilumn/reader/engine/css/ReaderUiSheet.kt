@@ -14,7 +14,8 @@ import kotlin.math.roundToInt
  *
  * 双滑块分工（`docs/KMP迁移-功能架构.md` §6 覆盖层）：没有绝对值替换，没有基线清零。
  *
- * 原书设置 只是把预览值重置为中性默认，启动 UI 层照常按存储值渲染（滑块值绝对，0 = 无首行缩进）。
+ * 原书设置 只是把预览值重置为中性默认，启动 UI 层照常按存储值渲染（滑块值绝对；0 = 读者未配 ⇒ 不发
+ * `text-indent`，首行缩进全听书，与「空字体槽跟随原书」同一纪律）。
  * 两 scale 都在 StyleComputer 里统一乘算作者/UA 计算后的外边距，这里写固定基线会"替换"
  * 作者/UA 的间距，违背调节语义。
  *
@@ -31,8 +32,18 @@ object ReaderUiSheet {
         val lineHeight = profile.lineSpacing
         // 首行缩进只作用于正文段落 p 的 text-indent; li 由列表自身的沟槽缩进表达, 绝不套用.
         // 纵边距无声明（段间距即疏密，版式侧乘算）：p/li 的 margin 全听书（作者/UA/主题）折叠。
-        val paraRule = "p{text-indent:${fmtEm(profile.firstLineIndentEm)}em}\n" +
-            "li p{text-indent:0em}"
+        //
+        // **0 = 读者没配（中性默认）⇒ 一条声明都不发**，书的 `text-indent` 原样生效（与字体槽
+        // 「空槽跟随原书」同一条纪律）。否则读者层的裸 `p{text-indent:0em}`（特异度 0,0,1）会凭
+        // tier 44 压过书里任何 `text-indent`——包括**悬挂缩进**（`.hang{text-indent:-2em;
+        // margin-left:2em}`）：书的负缩进被清零，首行不左移，等于把书的排版意图抹掉。
+        // 读者真配了（>0，或现代/传统主题把预设写进设置）才发声明，那时它就该压过书。
+        val paraRule = if (profile.firstLineIndentEm != 0f) {
+            "p{text-indent:${fmtEm(profile.firstLineIndentEm)}em}\n" +
+                "li p{text-indent:0em}"
+        } else {
+            ""
+        }
         val textBlocks = textBlockSelectors
         return LightCssParser().parse("$textBlocks{line-height:$lineHeight}\n$paraRule\n${fontRules(profile)}")
     }

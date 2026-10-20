@@ -3,6 +3,7 @@ package orilumn.reader.engine.skia
 import orilumn.reader.engine.css.FontRun
 import orilumn.reader.engine.css.TextAlign
 import orilumn.reader.engine.laying.BrokenLine
+import orilumn.reader.engine.laying.InlineBoxRun
 import orilumn.reader.engine.laying.ParagraphBreaker
 import orilumn.reader.engine.laying.lineHeightPx
 import org.jetbrains.skia.paragraph.FontCollection
@@ -233,6 +234,7 @@ class SkiaParagraphBreaker(
         italic: Boolean,
         monospace: Boolean,
         fontRuns: List<FontRun>,
+        inlineBoxRuns: List<InlineBoxRun>,
     ): Float {
         if (text.isEmpty()) return 0f
         val style = SkParagraphFactory.paragraphStyle(
@@ -267,7 +269,9 @@ class SkiaParagraphBreaker(
             paragraph.layout(1e6f)
             var w = 0f
             for (m in paragraph.lineMetrics) w = maxOf(w, m.width.toFloat())
-            return w
+            // 行内盒横向内边距 / 边框：本路径（SkParagraph）量不到注入的推进量，与断行侧同一纪律
+            // （见 `inlineBoxAdvanceEnabled`）——闸门开时手工补上同一份总量，闸门关时恒 0。
+            return w + orilumn.reader.engine.laying.inlineBoxInsetTotalPx(inlineBoxRuns)
         } finally {
             paragraph.close()
         }

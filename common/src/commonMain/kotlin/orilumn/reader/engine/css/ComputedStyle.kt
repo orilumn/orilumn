@@ -179,6 +179,21 @@ val DEFAULT_QUOTES: List<String> = listOf("\u201C", "\u201D", "\u2018", "\u2019"
 /** CSS `overflow-x/y` (ancestor clipping is an later consumption point). */
 enum class OverflowValue { VISIBLE, HIDDEN, CLIP, SCROLL, AUTO }
 
+/**
+ * CSS `top/right/bottom/left`（相对定位偏移，px；`null` = `auto`/未声明）。
+ *
+ * `%` 未支持：百分比要相对**包含块**的宽/高解算，而计算样式阶段拿不到包含块尺寸
+ * （见账本 E12「残留」）。四个方向互相独立，`null` 与 `0` 语义不同（`left: 0` 会压过 `right`）。
+ */
+data class RelativeInset(
+    val top: Float? = null,
+    val right: Float? = null,
+    val bottom: Float? = null,
+    val left: Float? = null,
+) {
+    val isEmpty: Boolean get() = top == null && right == null && bottom == null && left == null
+}
+
 /** CSS `overflow-wrap`. */
 enum class OverflowWrap { NORMAL, BREAK_WORD }
 
@@ -217,7 +232,14 @@ data class ComputedStyle(
     val colorHex: String? = null,
     val bold: Boolean = false,
     val italic: Boolean = false,
-    val underline: Boolean = false,
+    /**
+     * **本元素自己声明**的文本装饰（非继承；`none` = [TextDecoration.NONE]）。
+     *
+     * 后代文本仍会被祖先的装饰覆盖，但那是收集期沿树叠「装饰栈」的事
+     * （[orilumn.reader.engine.laying.collectTextDecorationRuns]），不在这里。
+     * 旧版这里是单个 `underline: Boolean`：`line-through` 被并成下划线、颜色/粗细/线型全无。
+     */
+    val decoration: TextDecoration = TextDecoration.NONE,
     val textIndentPx: Float = 0f,
     /** Outer separation from surrounding boxes; adjacent vertical margins collapse to the larger. */
     val margin: Edges = Edges(),
@@ -336,6 +358,11 @@ data class ComputedStyle(
     val overflow: OverflowValue = OverflowValue.VISIBLE,
     /** CSS `position: relative` (absolute/static/fixed out of scope — 显式不做). */
     val positionRelative: Boolean = false,
+    /**
+     * CSS `top/right/bottom/left`（**相对定位**的四向偏移；`null` = `auto`/未声明）。
+     * 只在 [positionRelative] 为真时生效；`%` 未支持（见账本 E12 残留）。Non-inherited.
+     */
+    val relativeInset: RelativeInset = RelativeInset(),
     /** CSS `overflow-wrap` (word breaking is a downstream breaker concern). */
     val overflowWrap: OverflowWrap = OverflowWrap.NORMAL,
     /** CSS `word-break`. */
@@ -389,5 +416,9 @@ data class ComputedStyle(
     override fun toString(): String =
         "fs=${fontSizePx}px lh=${lineHeightRatio}" +
             if (colorHex != null) " color=$colorHex" else "" +
-            listOfNotNull(bold.takeIf { it }?.let { "bold" }, italic.takeIf { it }?.let { "italic" }, underline.takeIf { it }?.let { "ul" }).joinToString(" ", " [", "]")
+            listOfNotNull(
+                bold.takeIf { it }?.let { "bold" },
+                italic.takeIf { it }?.let { "italic" },
+                decoration.lines.takeIf { it.isNotEmpty() }?.joinToString(",") { it.name.lowercase() },
+            ).joinToString(" ", " [", "]")
 }

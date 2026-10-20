@@ -35,7 +35,16 @@ data class PageBackground(
     /** P3-b: 平铺锚盒（未裁剪的盒上下缘；跨页撕裂仍以整盒原点平铺）。 */
     val bgBoxTop: Int = 0,
     val bgBoxBottom: Int = 0,
+    /**
+     * E11：祖先链 `overflow` 裁剪（null = 不裁）；与 [left]/[yTop] 同一坐标系，
+     * 渲染层 `save/clipRect/restore` 施加（不做矩形求交，圆角/阴影/平铺原点保持原样）。
+     */
+    val clip: orilumn.reader.engine.laying.ClipRect? = null,
 ) {
     /** 背景图解码键（`chapterHref|src`，与宿主图片缓存同口径）。 */
     fun bgKey(): String? = bgSrc?.takeIf { it.isNotBlank() }?.let { "$bgChapterHref|$it" }
+
+    /** 沿 Y 平移（页切片/离屏换算；裁剪区同步平移，漏了即错位）。 */
+    fun shiftedBy(dy: Int): PageBackground =
+        if (dy == 0) this else copy(yTop = yTop + dy, yBottom = yBottom + dy, clip = clip?.shifted(dy))
 }

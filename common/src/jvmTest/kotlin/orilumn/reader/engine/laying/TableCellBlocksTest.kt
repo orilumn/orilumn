@@ -5,6 +5,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import orilumn.reader.engine.css.LightCssParser
 import orilumn.reader.engine.css.StyleComputer
+import orilumn.reader.engine.css.TextAlign
 import orilumn.reader.engine.html.HtmlTreeConverter
 import orilumn.reader.engine.html.MarkupElement
 
@@ -243,5 +244,123 @@ class TableCellBlocksTest {
             cell, { styles.getValue(it) }, classify, { styles[it]?.displayNone == true })
         assertEquals(light, bs.sumOf { it.textLength }.toLong())
         assertEquals(1L, light)
+    }
+
+    // ── E15：格内行内盒随块走（度量/断行与塑形同一份 run） ─────────────────────
+    //
+    // 行内盒的横向 padding/border 必须进两处账：auto 分列的 max/min-content
+    // （`tableCellPref`）与重路径格内断行（`buildTableRows`）。两处都读
+    // [TableCellBlock.inlineBoxRuns]，而它必须与 [TableCellBlock.text] 同一份段表坐标系 ——
+    // 匿名块若按容器根重收段表，前面的兄弟块文本会把下标挤偏（量画分家）。
+
+    @Test
+    fun `named block carries inline box runs on its own text coordinates`() {
+        val html = """<table><tr><td><p>xx<span style="background:#ffe082">yy</span>zz</p></td></tr></table>"""
+        val bs = blocksOf(html)
+        assertEquals(1, bs.size)
+        assertEquals("xxyyzz", bs[0].text)
+        val box = bs[0].inlineBoxRuns.single()
+        assertEquals(2, box.start)
+        assertEquals(4, box.endExclusive)
+        assertTrue(box.visible)
+        // 坐标与块自身的 `text` 对齐：命名块的 run 下标不会因前面兄弟而平移。
+    }
+
+    @Test
+    fun `anonymous block box coordinates ignore preceding sibling blocks`() {
+        // 偏移风险本体：段表若不排掉「run 外兄弟」，"aaa" 会混进本块 ⇒ span 下标平移 3。
+        val bs = blocksOf(
+            """<table><tr><td>aaa<p>x</p>bb<span style="background:#ffe082">s</span>cc</td></tr></table>""",
+        )
+        assertEquals(listOf("aaa", "x", "bbscc"), bs.map { it.text })
+        assertTrue(bs[0].inlineBoxRuns.isEmpty())
+        assertTrue(bs[1].inlineBoxRuns.isEmpty())
+        val box = bs[2].inlineBoxRuns.single()
+        assertEquals(2, box.start)
+        assertEquals(3, box.endExclusive)
+    }
+
+    @Test
+    fun `auto column measurement folds inline box horizontal padding`() {
+        // 度量只验「传没传 run」：断行器走接口默认度量（len×fs + 行内盒内边距）。
+        fun prefOf(html: String): TableGridModel.CellPref {
+            val (root, styles, classify) = setup(html)
+            val cell = firstCell(root)
+            val blocks =
+                NormalFlowLayout.cellBlocks(cell, styles, classify, { styles[it]?.displayNone == true })
+            return NormalFlowLayout.tableCellPref(StubBreaker, 0, 1, blocks, styles[cell]!!)
+        }
+        val pad = prefOf(
+            """<table><tr><td><span style="background:#ffe082;padding:0 30px">AB</span></td></tr></table>""",
+        )
+        val bare = prefOf("""<table><tr><td><span>AB</span></td></tr></table>""")
+        // 每边 30px 内边距：max 与 min 各恰多 60 —— 少传 run ⇒ 差为 0，当场破。
+        assertEquals(60f, pad.pref - bare.pref, 1e-6f)
+        assertEquals(60f, pad.min - bare.min, 1e-6f)
+    }
+
+    /** 只实现抽象断行；度量走接口默认实现 —— 本节只验 run 传递，不验字形。 */
+    private object StubBreaker : ParagraphBreaker {
+        override fun breakLines(
+            text: CharSequence, fontSizePx: Float, lineHeightRatio: Float, widthPx: Int,
+            alignment: TextAlign, tag: String?, families: List<String>, weight: Int,
+            italic: Boolean, monospace: Boolean,
+        ): List<BrokenLine> = emptyList()
+    }
+
+    /** 每字 10px 且**认行内盒横向推进**的断行器（与 InlineBoxRunsTest 的桩同语义）。 */
+    private class PerCharEdgeBreaker : ParagraphBreaker {
+        override fun breakLines(
+            text: CharSequence, fontSizePx: Float, lineHeightRatio: Float, widthPx: Int,
+            alignment: TextAlign, tag: String?, families: List<String>, weight: Int,
+            italic: Boolean, monospace: Boolean,
+        ): List<BrokenLine> = breakLines(
+            text, fontSizePx, lineHeightRatio, widthPx, alignment, tag, families, weight, italic, monospace,
+            0f, emptyList(), emptyList(), emptyList(),
+        )
+
+        override fun breakLines(
+            text: CharSequence, fontSizePx: Float, lineHeightRatio: Float, widthPx: Int,
+            alignment: TextAlign, tag: String?, families: List<String>, weight: Int,
+            italic: Boolean, monospace: Boolean, firstLineIndentPx: Float,
+            fontRuns: List<orilumn.reader.engine.css.FontRun>,
+            baselineShifts: List<BaselineShift>,
+            inlineBoxEdges: List<InlineBoxEdge>,
+        ): List<BrokenLine> {
+            val out = ArrayList<BrokenLine>()
+            var i = 0
+            while (i < text.length) {
+                var x = if (out.isEmpty()) firstLineIndentPx else 0f
+                var j = i
+                while (j < text.length) {
+                    val step = 10f + inlineBoxEdges.fold(0f) { acc, e -> if (e.index == j) acc + e.px else acc }
+                    if (j > i && x + step > widthPx) break
+                    x += step
+                    j++
+                }
+                out.add(BrokenLine(i until j, lineHeightPx(fontSizePx, lineHeightRatio)))
+                i = j
+            }
+            return out
+        }
+    }
+
+    @Test
+    fun `heavy path cell break accounts for inline box horizontal padding`() {
+        // `table-layout: fixed` 把列宽钉在版心 300（auto 会按内容回撑，量/排互喂测不出差）：
+        // 30 字 × 10px 恰好一行；盒 +30px 横向内边距 ⇒ 必须断成 2 行。
+        val html = """<table style="table-layout:fixed"><tr><td>""" +
+            """<span style="background:#ffe082;padding:0 15px">""" + "a".repeat(30) +
+            "</span></td></tr></table>"
+        val (root, styles, classify) = setup(html, "table{border-spacing:0} td{padding:0}")
+        val result = BoxLayouter(10f, PerCharEdgeBreaker()).layoutBoxes(root, 300, styles, classify)
+        val leaves = ArrayList<LayoutBox>()
+        fun walk(bs: List<LayoutBox>) {
+            for (b in bs) if (b.isContainer) walk(b.childBoxes) else leaves.add(b)
+        }
+        walk(result.boxes)
+        val row = leaves.first { it.el?.tag == "tr" }
+        val block = row.table!!.cells.single().blocks.single()
+        assertEquals("行内盒内边距未折进断行宽（少传 run）", listOf(0..27, 28..29), block.ranges)
     }
 }

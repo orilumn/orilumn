@@ -236,9 +236,9 @@ object SkParagraphFactory {
         /** 文本墨色（ARGB Int，与 TypographicProfile.fgColor 同一值）：主题换色即换墨。 */
         inkColor: Int = 0xFF000000.toInt(),
         /**
-         * 首行缩进（px，仅度量侧用：首行可用宽减之；绘制侧不用——绘制按行子串重排，
+         * 首行缩进（px，**有符号**，仅度量侧用：首行可用宽 = 版心 − 本值；绘制侧不用——绘制按行子串重排，
          * 每行都会被当成“首行”，传了即 double 缩进，绘制侧走 [orilumn.reader.engine.skia.DrawLine]
-         * 的 x 偏移）。
+         * 的 x 偏移）。负值 = 悬挂缩进：首行可用宽随之**加宽**（Skia `TextIndent` 原样接负值）。
          */
         firstLineIndentPx: Float = 0f,
         /**
@@ -252,7 +252,7 @@ object SkParagraphFactory {
         return ParagraphStyle().apply {
             this.alignment = toSkiaAlignment(alignment)
             maxLinesCount = maxLines
-            if (firstLineIndentPx > 0f) textIndent = TextIndent(firstLineIndentPx, 0f)
+            if (firstLineIndentPx != 0f) textIndent = TextIndent(firstLineIndentPx, 0f)
             if (forceStrut && lineHeightRatio > 0f) {
                 strutStyle = org.jetbrains.skia.paragraph.StrutStyle()
                     .setFontFamilies(resolved)

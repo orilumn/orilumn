@@ -55,10 +55,11 @@ object BoxDrawer {
         pageEndLine: Int,
         bandTop: Int,
         bandBottom: Int,
+        deviceScale: Float = 1f,
     ): List<DrawRect> {
         if (bandBottom <= bandTop) return emptyList()
         val out = ArrayList<DrawRect>()
-        for (box in boxes) emit(box, out, pageStartLine, pageEndLine, bandTop, bandBottom)
+        for (box in boxes) emit(box, out, pageStartLine, pageEndLine, bandTop, bandBottom, deviceScale = deviceScale)
         return out
     }
 
@@ -70,12 +71,22 @@ object BoxDrawer {
         bandTop: Int,
         bandBottom: Int,
         parentAlpha: Float = 1f,
+        deviceScale: Float = 1f,
     ) {
         // Skip boxes whose lines don't intersect the target page — the block belongs entirely
         // to a different page (pushed via break-inside:avoid, or ended on a previous page).
-        if (box.firstLineIndex >= 0 &&
-            (box.lastLineExclusive <= pageStartLine || box.firstLineIndex >= pageEndLine)
-        ) return
+        // 零行盒（[k,k)，如 clearfix/空盒——不产行但有 border-box）没有行可求交，按端点 k
+        // 归属：k 落在 (pageStart, pageEnd] 才属本页（恰在两页交界的 k 归前一页，与其视觉上
+        // 位于前页最后一行之后一致），否则非空盒的行相交判据会把它整块丢掉。
+        if (box.firstLineIndex >= 0) {
+            val emptyRange = box.lastLineExclusive <= box.firstLineIndex
+            val offPage = if (emptyRange) {
+                box.firstLineIndex <= pageStartLine || box.firstLineIndex > pageEndLine
+            } else {
+                box.lastLineExclusive <= pageStartLine || box.firstLineIndex >= pageEndLine
+            }
+            if (offPage) return
+        }
 
         // 渲染层：页带裁剪只约束撕裂块。在本页内开始/结束的箱子，其 border-box（含 padding，
         // 不含 margin）归属本页可见区，不得一刀切——否则章末块底 padding 明明有页空间却被裁掉。
@@ -87,12 +98,29 @@ object BoxDrawer {
 
         // P3-a: 祖先链 opacity 连乘（本盒叠乘后传给后代；1 即旧路径）。
         val alpha = (parentAlpha * box.style.opacity.coerceIn(0f, 1f)).coerceIn(0f, 1f)
-        emitBackground(box, out, top, bottom, alpha)
-        emitBorders(box, out, top, bottom, alpha)
-        for (child in box.childBoxes) emit(child, out, pageStartLine, pageEndLine, bandTop, bandBottom, alpha)
+        // E11：`overflow` 祖先裁剪 —— 只把矩形**随指令带上**交给渲染层裁（不做几何求交，见
+        // `DrawRect.clip`）。无声明即 null，全链零像素回归。
+        val clip = box.clipRect
+        // E10：`visibility: hidden` 的盒**不画自身底色/边框**，但子树照走（后代可 `visibility: visible`
+        // 翻回显形）；盒占位不受影响（layout 与绘制分离，`display:none` 才是去盒）。
+        if (!box.style.visibilityHidden) {
+            emitBackground(box, out, top, bottom, alpha, clip)
+            emitBorders(box, out, top, bottom, alpha, clip, deviceScale)
+        }
+        for (child in box.childBoxes) {
+            emit(child, out, pageStartLine, pageEndLine, bandTop, bandBottom, alpha, deviceScale)
+        }
     }
 
-    private fun emitBackground(box: LayoutBox, out: MutableList<DrawRect>, bandTop: Int, bandBottom: Int, alpha: Float) {
+    /**
+     * E12：页带随相对定位偏移平移。`Int.MIN_VALUE` / `Int.MAX_VALUE` 是「不裁」哨兵
+     * （[draw] 用它们表示整章无页带），**不得参与加减** —— `Int.MAX_VALUE + dy` 会溢出成负号，
+     * 于是整章绘制（非分页路径）上任何相对定位盒的底色/边框都被静默丢掉。
+     */
+    private fun shiftBand(v: Int, dy: Int): Int =
+        if (dy == 0 || v == Int.MIN_VALUE || v == Int.MAX_VALUE) v else v + dy
+
+    private fun emitBackground(box: LayoutBox, out: MutableList<DrawRect>, bandTop: Int, bandBottom: Int, alpha: Float, clip: ClipRect?) {
         if (box.contentWidth <= 0 || box.contentBottom <= box.contentTop) return
         val color = box.style.backgroundColorHex
         val shadow = box.style.boxShadow
@@ -107,10 +135,13 @@ object BoxDrawer {
         val resolvedShadow = shadow?.copy(
             colorHex = shadow.colorHex ?: box.style.colorHex ?: FALLBACK_INK_HEX,
         )
+        // E12：`position: relative` 的绘制偏移 —— 盒几何与页带同平移，等价「先偏移再裁」。
+        val dx = box.relOffsetX
+        val dy = box.relOffsetY
         pushRect(
-            out, DrawKind.BACKGROUND, box.contentTop, box.contentLeft, box.contentBottom, box.contentLeft + w,
-            color ?: TRANSPARENT_HEX, bandTop, bandBottom, radii, alpha, resolvedShadow, bgImage = bgImage,
-            bgBoxTop = box.contentTop, bgBoxBottom = box.contentBottom,
+            out, DrawKind.BACKGROUND, box.contentTop + dy, box.contentLeft + dx, box.contentBottom + dy, box.contentLeft + w + dx,
+            color ?: TRANSPARENT_HEX, shiftBand(bandTop, dy), shiftBand(bandBottom, dy), radii, alpha, resolvedShadow, bgImage = bgImage,
+            bgBoxTop = box.contentTop + dy, bgBoxBottom = box.contentBottom + dy, clip = clip,
         )
     }
 
@@ -126,41 +157,46 @@ object BoxDrawer {
      * stroked ring (outer radii); non-uniform/dashed/dotted rounded borders fall back to square
      * bands (documented approximation — corners stick out over the rounded background).
      */
-    private fun emitBorders(box: LayoutBox, out: MutableList<DrawRect>, bandTop: Int, bandBottom: Int, alpha: Float) {
+    private fun emitBorders(box: LayoutBox, out: MutableList<DrawRect>, bandTop: Int, bandBottom: Int, alpha: Float, clip: ClipRect?, deviceScale: Float = 1f) {
         val b = box.style.border
         if (box.contentWidth <= 0) return
         val st = box.style
         val current = st.colorHex ?: FALLBACK_INK_HEX
         val colors = st.borderColors
         val styles = st.borderStyles
-        val l = box.contentLeft
-        val r = box.contentLeft + box.contentWidth
-        val top = box.contentTop
-        val bottom = box.contentBottom
+        // E12：`position: relative` 的绘制偏移（盒几何与页带同平移）。
+        val dx = box.relOffsetX
+        val dy = box.relOffsetY
+        val l = box.contentLeft + dx
+        val r = box.contentLeft + box.contentWidth + dx
+        val top = box.contentTop + dy
+        val bottom = box.contentBottom + dy
+        val bandT = shiftBand(bandTop, dy)
+        val bandB = shiftBand(bandBottom, dy)
         val radii = st.borderRadius.resolved(box.contentWidth, (bottom - top).coerceAtLeast(0), st.borderRadiusPct)
         val ring = if (!radii.isSquare()) uniformRing(st, current) else null
         if (ring != null) {
-            pushRect(out, DrawKind.BORDER, top, l, bottom, r, ring.colorHex, bandTop, bandBottom, radii, alpha, null, ring.widthPx)
+            pushRect(out, DrawKind.BORDER, top, l, bottom, r, ring.colorHex, bandT, bandB, radii, alpha, null, ring.widthPx, clip = clip)
             return
         }
         // Horizontal edges: band runs x ∈ [l, r].
-        emitEdge(segKind = SegKind.HORIZONTAL, x0 = l, x1 = r, band0 = top, widthPx = b.top,
+        emitEdge(axis = BorderEdgeAxis.HORIZONTAL, x0 = l, x1 = r, band0 = top, widthPx = b.top,
             color = colors?.top ?: current,
             style = styles?.top ?: BorderStyle.SOLID,
-            out = out, bandTop = bandTop, bandBottom = bandBottom, alpha = alpha)
-        emitEdge(segKind = SegKind.HORIZONTAL, x0 = l, x1 = r, band0 = bottom - b.bottom.roundToInt(), widthPx = b.bottom,
+            out = out, bandTop = bandT, bandBottom = bandB, alpha = alpha, clip = clip, deviceScale = deviceScale)
+        emitEdge(axis = BorderEdgeAxis.HORIZONTAL, x0 = l, x1 = r, band0 = bottom - b.bottom.roundToInt(), widthPx = b.bottom,
             color = colors?.bottom ?: current,
             style = styles?.bottom ?: BorderStyle.SOLID,
-            out = out, bandTop = bandTop, bandBottom = bandBottom, alpha = alpha)
+            out = out, bandTop = bandT, bandBottom = bandB, alpha = alpha, clip = clip, deviceScale = deviceScale)
         // Vertical edges: band runs y ∈ [top, bottom].
-        emitEdge(segKind = SegKind.VERTICAL, x0 = top, x1 = bottom, band0 = l, widthPx = b.left,
+        emitEdge(axis = BorderEdgeAxis.VERTICAL, x0 = top, x1 = bottom, band0 = l, widthPx = b.left,
             color = colors?.left ?: current,
             style = styles?.left ?: BorderStyle.SOLID,
-            out = out, bandTop = bandTop, bandBottom = bandBottom, alpha = alpha)
-        emitEdge(segKind = SegKind.VERTICAL, x0 = top, x1 = bottom, band0 = r - b.right.roundToInt(), widthPx = b.right,
+            out = out, bandTop = bandT, bandBottom = bandB, alpha = alpha, clip = clip, deviceScale = deviceScale)
+        emitEdge(axis = BorderEdgeAxis.VERTICAL, x0 = top, x1 = bottom, band0 = r - b.right.roundToInt(), widthPx = b.right,
             color = colors?.right ?: current,
             style = styles?.right ?: BorderStyle.SOLID,
-            out = out, bandTop = bandTop, bandBottom = bandBottom, alpha = alpha)
+            out = out, bandTop = bandT, bandBottom = bandB, alpha = alpha, clip = clip, deviceScale = deviceScale)
     }
 
     /** Uniform solid border (width/color resolved, currentColor folded) or null. */
@@ -180,16 +216,17 @@ object BoxDrawer {
 
     private class Ring(val widthPx: Float, val colorHex: String)
 
-    private enum class SegKind { HORIZONTAL, VERTICAL }
-
     /**
      * Emits one edge band. [x0..x1] is the axis range (x for horizontal edges, y for vertical),
-     * [band0] the band start on the cross axis and [widthPx] its thickness. Dashed/dotted edges
-     * become a series of filled segment rects (dash 3×thickness, gap 2×thickness; dots are
-     * thickness-sized squares every 2×thickness) — paintable by both renderers as plain fills.
+     * [band0] the band start on the cross axis and [widthPx] its thickness.
+     *
+     * 段几何（solid 整带 / dashed·dotted 分段 / none 跳过）已抽成单源 [borderEdgeRects] ——
+     * E16：块盒与行内盒必须切出**同一种**虚线/点线，规则只准一份。本函数只负责
+     * 「整像素圆整 + 页带夹取 + 落 `DrawRect`」；传入的 [widthPx] 先按历史口径取整，
+     * 于是段坐标全为整数、输出与抽取前逐字节相同。
      */
     private fun emitEdge(
-        segKind: SegKind,
+        axis: BorderEdgeAxis,
         x0: Int, x1: Int,
         band0: Int,
         widthPx: Float,
@@ -199,37 +236,18 @@ object BoxDrawer {
         bandTop: Int,
         bandBottom: Int,
         alpha: Float = 1f,
+        clip: ClipRect? = null,
+        deviceScale: Float = 1f,
     ) {
         val w = widthPx.roundToInt().coerceAtLeast(1)
         if (widthPx <= 0f || x1 <= x0) return
         if (style == BorderStyle.NONE) return
-        fun emit(t: Int, l: Int, b: Int, r: Int) =
-            pushRect(out, DrawKind.BORDER, t, l, b, r, color, bandTop, bandBottom, alpha = alpha)
-        when (style) {
-            BorderStyle.SOLID -> if (segKind == SegKind.HORIZONTAL) emit(band0, x0, band0 + w, x1)
-            else emit(x0, band0, x1, band0 + w)
-            BorderStyle.DASHED -> {
-                val dash = (3 * w).coerceAtLeast(2)
-                val gap = (2 * w).coerceAtLeast(1)
-                var p = x0
-                while (p < x1) {
-                    val e = minOf(p + dash, x1)
-                    if (segKind == SegKind.HORIZONTAL) emit(band0, p, band0 + w, e)
-                    else emit(p, band0, e, band0 + w)
-                    p += dash + gap
-                }
-            }
-            BorderStyle.DOTTED -> {
-                val step = (2 * w).coerceAtLeast(2)
-                var p = x0
-                while (p < x1) {
-                    val e = minOf(p + w, x1)
-                    if (segKind == SegKind.HORIZONTAL) emit(band0, p, band0 + w, e)
-                    else emit(p, band0, e, band0 + w)
-                    p += step
-                }
-            }
-            BorderStyle.NONE -> Unit
+        for (rc in borderEdgeRects(axis, x0.toFloat(), x1.toFloat(), band0.toFloat(), w.toFloat(), style, deviceScale)) {
+            pushRect(
+                out, DrawKind.BORDER,
+                rc.top.roundToInt(), rc.left.roundToInt(), rc.bottom.roundToInt(), rc.right.roundToInt(),
+                color, bandTop, bandBottom, alpha = alpha, clip = clip,
+            )
         }
     }
 
@@ -251,10 +269,11 @@ object BoxDrawer {
         bgImage: BackgroundImage? = null,
         bgBoxTop: Int = 0,
         bgBoxBottom: Int = 0,
+        clip: ClipRect? = null,
     ) {
         val t = maxOf(top, bandTop)
         val b = minOf(bottom, bandBottom)
-        if (b > t) out.add(DrawRect(kind, t, left, b, right, color, radii, alpha, shadow, strokeWidthPx, bgImage, bgBoxTop, bgBoxBottom))
+        if (b > t) out.add(DrawRect(kind, t, left, b, right, color, radii, alpha, shadow, strokeWidthPx, bgImage, bgBoxTop, bgBoxBottom, clip))
     }
 }
 

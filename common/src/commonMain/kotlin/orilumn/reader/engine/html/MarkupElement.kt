@@ -9,7 +9,7 @@ package orilumn.reader.engine.html
  * decoupling parsing from rendering, and malformed-book tolerance is concentrated in this layer.
  *
  * @property tag the tag name (lowercased localName; `#text` denotes a plain-text leaf, `br` a forced line-break node).
- * @property attrs the attribute map (keeps the raw `style`, parsed by [CssInlineResolver]).
+ * @property attrs the attribute map (keeps the raw `style`, parsed by the CSS cascade in `StyleComputer`).
  * @property children child nodes; a text leaf's text is stored directly in [text].
  * @property text the text carried by this node itself (only `#text` leaves have a value; empty for other nodes).
  */

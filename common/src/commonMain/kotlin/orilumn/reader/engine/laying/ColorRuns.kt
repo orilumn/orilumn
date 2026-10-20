@@ -25,7 +25,7 @@ fun wsOfNode(
 /**
  * 引擎层行内着色唯一核心：把一级联已有 `colorHex` 投影成叶文本坐标系的 [ColorRun]。
  *
- * 两条塑形路径（common 盒流 `absorbedText` / Android `ParagraphShapes.emitPlainText`）各有
+ * 两条塑形路径（common 盒流 `absorbedText` / engine-skia 塑形 `emitPlainText`）各有
  * 自己的文本构建（跳过规则不完全相同，不可合并），但着色遍历必须与**各自**的文本构建逐分支
  * 同构——否则 run 下标与字符错位。本函数收敛公共 mechanics（区间合并、颜色解析、
  * 合成匿名叶的父级回退），调用方只注入三处差异：
@@ -53,6 +53,8 @@ fun collectColorRuns(
     precomputed: List<StyledSegment>? = null,
     /** P3-c 样式回退（变换/引号依据；默认读 [styles] 表）。 */
     styleOf: ((MarkupElement) -> ComputedStyle?)? = null,
+    /** `::first-letter` 伪元素查找（null = 无该规则；`precomputed` 非空时直接吃它，现算才用）。 */
+    firstLetterOf: FirstLetterOf? = null,
 ): List<ColorRun> {
     if (root.tag == "table" || root.tag == "img") return emptyList()
     fun argbOf(node: MarkupElement, fallback: Int?): Int? =
@@ -68,7 +70,7 @@ fun collectColorRuns(
         val t = normalizeAnonymousRun(root.text, leafWs)
         return if (t.isEmpty()) emptyList() else listOf(ColorRun(0, t.length, argb))
     }
-    val segs = precomputed ?: styledSegments(root, wsOf, isExcluded, isBlock, leafWs, genOf, styleOf ?: { styles[it] }).segments
+    val segs = precomputed ?: styledSegments(root, wsOf, isExcluded, isBlock, leafWs, genOf, styleOf ?: { styles[it] }, firstLetterOf = firstLetterOf).segments
     val out = ArrayList<ColorRun>()
     var pos = 0
     fun emit(seg: StyledSegment, argb: Int?) {
@@ -141,6 +143,8 @@ fun collectFontRuns(
     precomputed: List<StyledSegment>? = null,
     /** P3-c 样式回退（变换/引号依据；默认读 [styles] 表）。 */
     styleOf: ((MarkupElement) -> ComputedStyle?)? = null,
+    /** `::first-letter` 伪元素查找（null = 无该规则；`precomputed` 非空时直接吃它，现算才用）。 */
+    firstLetterOf: FirstLetterOf? = null,
 ): List<FontRun> {
     if (root.tag == "table" || root.tag == "img") return emptyList()
     fun fontOf(node: MarkupElement, fallback: FontRun): FontRun =
@@ -157,7 +161,7 @@ fun collectFontRuns(
         return if (t.isEmpty() || eff.fontEquals(base)) emptyList()
         else listOf(FontRun(0, t.length, eff.families, eff.tag, eff.weight, eff.italic, eff.monospace, eff.fontSizePx))
     }
-    val segs = precomputed ?: styledSegments(root, wsOf, isExcluded, isBlock, leafWs, genOf, styleOf ?: { styles[it] }).segments
+    val segs = precomputed ?: styledSegments(root, wsOf, isExcluded, isBlock, leafWs, genOf, styleOf ?: { styles[it] }, firstLetterOf = firstLetterOf).segments
     // 逐节点 face 一次算好（与段构建同一跳过规则），段折叠时直接取用。
     val fontByNode = HashMap<MarkupElement, FontRun>()
     fun fill(node: MarkupElement, inherited: FontRun) {
@@ -199,11 +203,17 @@ fun collectFontRuns(
         val node = seg.node
         // 标记段（br/img）永不分 face（断行用），与旧 walk 一致留空。
         // P3-c: 生成/引号段走伪元素 face（`q{font}` 引号同字体）；small-caps 段缩字号单列。
-        val font = if (node == null || !node.isText) {
-            seg.genStyle?.let { gs ->
-                FontRun(0, 0, gs.fontFamilies, node?.tag, gs.fontWeight, gs.italic, gs.monospace, gs.fontSizePx)
-                    .takeIf { !it.fontEquals(base) }
-            }
+        // `::first-letter` 段由 `genStyle` 说话（段节点仍是文本节点 ⇒ 必须排在文本分支之前，
+        // 否则伪元素自己声明的字号/face 被整段基底吞掉）。
+        val font = if (seg.genStyle != null) {
+            val gs = seg.genStyle
+            FontRun(
+                0, 0, gs.fontFamilies,
+                if (node?.isText == true) node.parent?.tag else node?.tag,
+                gs.fontWeight, gs.italic, gs.monospace, gs.fontSizePx,
+            ).takeIf { !it.fontEquals(base) }
+        } else if (node == null || !node.isText) {
+            null
         } else {
             fontByNode[node]?.let { f ->
                 (if (seg.smallCaps) f.copy(fontSizePx = f.fontSizePx * GeneratedContent.SMALL_CAPS_SCALE) else f)

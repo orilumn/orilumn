@@ -19,14 +19,18 @@ import orilumn.reader.engine.laying.NormalFlowLayout
 import orilumn.reader.engine.laying.RubyRun
 import orilumn.reader.engine.laying.ShapeFontRequest
 import orilumn.reader.engine.laying.ShapedGeometry
-import orilumn.reader.engine.laying.UnderlineRun
+import orilumn.reader.engine.laying.TextDecorationRun
 import orilumn.reader.engine.laying.adjustLineHeightsForRuby
 import orilumn.reader.engine.laying.breakWrappedLines
+import orilumn.reader.engine.laying.capFloatOf
+import orilumn.reader.engine.laying.firstLetterUnitLength
 import orilumn.reader.engine.laying.collectBaselineShifts
 import orilumn.reader.engine.laying.collectColorRuns
 import orilumn.reader.engine.laying.collectFontRuns
+import orilumn.reader.engine.laying.collectInlineBoxRuns
 import orilumn.reader.engine.laying.collectRubyRuns
-import orilumn.reader.engine.laying.collectUnderlineRuns
+import orilumn.reader.engine.laying.collectTextDecorationRuns
+import orilumn.reader.engine.laying.collectVisibilityHiddenRuns
 import orilumn.reader.engine.laying.effectiveOpacity
 import orilumn.reader.engine.laying.normalizeAnonymousRun
 import orilumn.reader.engine.laying.styledSegments
@@ -35,15 +39,13 @@ import orilumn.reader.engine.layout.ListMarkers
 import orilumn.reader.engine.text.TypographicProfile
 
 /**
- * C2-P2b-2: 段落纯几何整形（无画笔、无字体池），[ParagraphShapes.shapeOf] 的几何单源。
+ * C2-P2b-2: 段落纯几何整形（无画笔、无字体池）—— 断行与落墨几何的**单源**。
  *
- * 本函数即 `:app` `shapeOf` 的几何体**原样搬运**：同样的文本抽取、同样的伴生 runs、
- * 同一个 `SkiaParagraphBreaker` 断行、同样的注音行高增量 —— 只是不建 `TextPaint`、
- * 不碰 `FontPool`（KDoc 自证：pairing 只画不量）。`:app` 的 `shapeOf` 退化成
- * "本函数 + 画笔包装"，桌面直接调本函数：两端几何逐字节同源（等价单测锁定）。
+ * 同样的文本抽取、同样的伴生 runs、同一个 `SkiaParagraphBreaker` 断行、同样的注音行高增量；
+ * 不建 `TextPaint`、不碰平台类型。重路径（`BoxChapterLayouter.shapeLeaf`）、轻路径与临时页
+ * 都经本函数塑形 ⇒ 两端几何逐字节同源。
  *
- * @param isBlock 块判定（`:app` 传 `CssLayouter.BLOCK_TAGS`，桌面传同规则；抽参是因为
- *   `CssLayouter` 是 Android 绘制桥，搬不动）。
+ * @param isBlock 块判定（两侧同规则，单源 `orilumn.reader.engine.html.BLOCK_TAGS`）。
  */
 fun shapeGeometry(
     el: MarkupElement,
@@ -61,11 +63,13 @@ fun shapeGeometry(
     classify: BlockClassify? = null,
     hidden: HiddenCheck = HIDDEN_NONE,
     /**
+     * `::first-letter` 伪元素计算样式查找（原发元素 → 样式；null = 无/未命中）。
+     * 只对本叶根求一次：有命中就先分段（见 `styledSegments` 的 `firstLetter`），无则全程零开销。
+     */
+    firstLetterOf: ((MarkupElement) -> ComputedStyle?)? = null,
+    /**
      * P3：分页层给该替换叶的高度上限（口径乙）。调用方喂 `LayoutBox.replaceableFitH`，
      * 与盒流测量同值 —— 量画同源的唯一渠道（见 `docs/分页高度约束与断页规则-方案.md` §5）。
-     *
-     * 刻意**排在 [isBlock] 之前**：`app` 侧 `ParagraphShapes.shapeOf` 用**尾随 lambda** 传
-     * [isBlock]，加在它之后会改掉 lambda 的绑定目标。
      */
     replaceableFitH: Int? = null,
     isBlock: (MarkupElement) -> Boolean,
@@ -82,7 +86,7 @@ fun shapeGeometry(
     // An anonymous text leaf belongs to its container block, so pair it with the parent's tag
     // (e.g. "入门指南" inside <h2> uses the heading font).
     val pairTag = if (el.tag == "#text") el.parent?.tag else el.tag
-    // 取画笔请求（只装配不消费：`:app` 包装/未来卷曲凭它取 face，桌面忽略）。
+    // 取画笔请求（只装配不消费：未来卷曲凭它取 face）。
     val fontRequest = ShapeFontRequest(
         pairTag, rootStyle.fontFamilies, rootStyle.fontWeight, rootStyle.italic, rootStyle.monospace,
     )
@@ -100,7 +104,8 @@ fun shapeGeometry(
     }
     // 行内 face 段（`<code>`/`<strong>` 等）：与着色同构的同一遍历产出，断行与绘制按它整形。
     // 五家收集器同根同参：段表算一次共享（`precomputed`），各家折叠不变；文本/表/img 根走各自
-    // 早退分支，共享表恒为 null 不浪费。
+    // 早退分支，共享表恒为 null 不浪费。P3-c 起这张表还负责 `::first-letter`：命中即把首字单列
+    // 一段（携带伪元素样式），五家收集器一次到位（文本与字符数不变，只多一个段边界）。
     val sharedSegs: List<StyledSegment>? =
         if (el.isText || el.tag == "table" || el.tag == "img") null
         else styledSegments(
@@ -111,18 +116,39 @@ fun shapeGeometry(
             styles[el]?.whiteSpace ?: el.parent?.let { styles[it]?.whiteSpace } ?: rootStyle.whiteSpace,
             genOf,
             { styles[it] },
+            firstLetterOf = firstLetterOf,
         ).segments
     val fontRuns = fontRunsOf(el, styles, rootStyle, genOf, isBlock, sharedSegs)
     // P1-2: 行内基线位移段（sub/sup 等）：不断行几何，随段整形使量画一致。
     val baselineShifts = baselineShiftsOf(el, styles, rootStyle, genOf, isBlock, sharedSegs)
+    // 行内盒（背景/边框）：横向 `padding`/`border` **参与断行宽度** ⇒ 必须断行前算好，
+    // 且断行侧（本处）与绘制侧（`ShapedGeometry.inlineBoxRuns`）**同一份**（量画同源）。
+    // 样式回退同 alpha：表外祖先按懒级联取。
+    val inlineBoxes = inlineBoxRunsOf(
+        el, styles, rootStyle, genOf, isBlock, sharedSegs,
+        styleOf = { styles[it] ?: ancestorStyleOf?.invoke(it) },
+    )
     // P1-2: white-space 断行单源（NOWRAP/PRE 不换行；与盒流同式）。
     // Whole-paragraph single-style break (canonical semantics): code-like mono 解析走
     // 级联 monospace 标志（与盒流 `style.monospace || tag == "pre"` 同式）。
+    // S3：正文断行变体单源（与 BoxChapterLayouter 的两处接线同口，默认 Skia）。
+    val bodyBreaker = bodyParagraphBreaker(profile.letterSpacingEm, profile.cjkLatinSpacingEmApplied)
+    // E21 残留修复：`::first-letter{float:left}` 首字下沉（与盒流 `NormalFlowLayout` 同一份推算）。
+    val capFloat = if (el.isText) {
+        null
+    } else {
+        firstLetterOf?.invoke(el)?.let { capSt ->
+            capFloatOf(
+                capSt, rootStyle, text.substring(0, firstLetterUnitLength(text).coerceAtMost(text.length)),
+                bodyBreaker,
+            )
+        }
+    }
     val broken = breakWrappedLines(
-        // S3：正文断行变体单源（与 BoxChapterLayouter 的两处接线同口，默认 Skia）。
-        bodyParagraphBreaker(profile.letterSpacingEm, profile.cjkLatinSpacingEmApplied),
+        bodyBreaker,
         text, rootStyle, widthPx.coerceAtLeast(1),
-        floatLead, pairTag, fontRuns, rootStyle.textIndentPx.coerceAtLeast(0f), baselineShifts,
+        floatLead, pairTag, fontRuns, rootStyle.textIndentPx, baselineShifts,
+        inlineBoxes, capFloat,
     )
     // P6-b: 叠排注音 runs（与 text 同构遍历；无注音回空表零回归）＋行高增量（与重路径同式）。
     val rubyRuns = rubyRunsOf(el, styles, rootStyle, genOf, isBlock, sharedSegs)
@@ -144,6 +170,7 @@ fun shapeGeometry(
     // exactly like the skia font stack ([SkParagraphFactory] CODE_TAGS rule).
     return ShapedGeometry(
         text = text,
+        capFloat = capFloat,
         lineRanges = broken.map { it.range },
         lineHeights = imageHeights,
         // Q20：断词收尾随行搬进 shape（增量/临时页没有 LayoutBox 可读，见
@@ -171,7 +198,28 @@ fun shapeGeometry(
         alpha = effectiveOpacity(el) { styles[it] ?: ancestorStyleOf?.invoke(it) ?: rootStyle },
         rubyRuns = rubyRuns,
         // 下划线区间（与 text 同构遍历；无下划线回空表零回归）。
-        underlineRuns = underlineRunsOf(el, styles, rootStyle, genOf, isBlock, sharedSegs),
+        // **样式回退与 inlineBoxes/alpha 同口径**：装饰会沿祖先链**穿过块边界**传播
+        // （`<a href><p>abc</p></a>` 的 abc 带链接下划线），而轻路径的 `styles` 只含叶根子树
+        // （`LightPrepare.inlineStyles` 不含祖先）⇒ 不喂 `ancestorStyleOf` 就会把祖先那层装饰
+        // 整个丢掉。症状：首开（临时表/增量塑形）看不到下划线，再开（磁盘表 canonical 全表）才有。
+        decorationRuns = decorationRunsOf(
+            el, styles, rootStyle, genOf, isBlock, sharedSegs,
+            styleOf = { styles[it] ?: ancestorStyleOf?.invoke(it) },
+        ),
+        // 行内盒（背景/边框；无装饰回空表零回归）。样式回退同 alpha：表外祖先按懒级联取。
+        inlineBoxRuns = inlineBoxes,
+        // E10 `visibility: hidden` 覆盖区间（与叶文本同一段表；无隐藏声明的子树回空表零开销）。
+        visibilityHiddenRuns = if (styles.any { it.value.visibilityHidden } || rootStyle.visibilityHidden) {
+            collectVisibilityHiddenRuns(
+                el, styles, rootStyle.visibilityHidden,
+                { styles[it]?.displayNone == true }, { isBlock(it) },
+                styles[el]?.whiteSpace ?: el.parent?.let { styles[it]?.whiteSpace } ?: rootStyle.whiteSpace,
+                genOf, sharedSegs,
+                styleOf = { styles[it] ?: ancestorStyleOf?.invoke(it) },
+            )
+        } else {
+            emptyList()
+        },
         fontRequest = fontRequest,
     )
 }
@@ -288,15 +336,17 @@ fun rubyRunsOf(
 )
 
 /** 下划线伴生（无下划线回空表）。 */
-fun underlineRunsOf(
+fun decorationRunsOf(
     el: MarkupElement,
     styles: Map<MarkupElement, ComputedStyle>,
     base: ComputedStyle,
     genOf: GenOf = EmptyGen,
     isBlock: (MarkupElement) -> Boolean,
-    /** 预计算段表（`shapeGeometry` 一次分段五家共享；null 即现算）。 */
+    /** 预计算段表（`shapeGeometry` 一次分段多家共享；null 即现算）。 */
     segs: List<StyledSegment>? = null,
-) = collectUnderlineRuns(
+    /** 样式回退（默认读 [styles] 表；轻路径喂懒级联 —— 祖先块上的装饰也要进栈）。 */
+    styleOf: ((MarkupElement) -> ComputedStyle?)? = null,
+) = collectTextDecorationRuns(
     el,
     styles,
     { styles[it]?.displayNone == true },
@@ -304,4 +354,26 @@ fun underlineRunsOf(
     base.whiteSpace,
     genOf,
     precomputed = segs,
+    styleOf = styleOf,
+)
+
+/** 行内盒伴生（无背景/边框回空表）。样式回退与 alpha 同口径：表外祖先走懒级联。 */
+fun inlineBoxRunsOf(
+    el: MarkupElement,
+    styles: Map<MarkupElement, ComputedStyle>,
+    base: ComputedStyle,
+    genOf: GenOf = EmptyGen,
+    isBlock: (MarkupElement) -> Boolean,
+    /** 预计算段表（`shapeGeometry` 一次分段多家共享；null 即现算）。 */
+    segs: List<StyledSegment>? = null,
+    styleOf: ((MarkupElement) -> ComputedStyle?)? = null,
+) = collectInlineBoxRuns(
+    el,
+    styles,
+    { styles[it]?.displayNone == true },
+    { isBlock(it) },
+    base.whiteSpace,
+    genOf,
+    precomputed = segs,
+    styleOf = styleOf,
 )

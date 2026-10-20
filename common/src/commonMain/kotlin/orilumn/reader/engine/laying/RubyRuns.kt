@@ -57,13 +57,15 @@ fun collectRubyRuns(
     precomputed: List<StyledSegment>? = null,
     /** P3-c 样式回退（默认读 [styles] 表）。 */
     styleOf: ((MarkupElement) -> ComputedStyle?)? = null,
+    /** `::first-letter` 伪元素查找（null = 无该规则；`precomputed` 非空时直接吃它，现算才用）。 */
+    firstLetterOf: FirstLetterOf? = null,
 ): List<RubyRun> {
     if (root.tag == "table" || root.tag == "img") return emptyList()
     if (root.isText) return emptyList()
     val resolve: (MarkupElement) -> ComputedStyle? = styleOf ?: { styles[it] }
     val wsOf: (MarkupElement) -> WhiteSpace = { wsOfNode(it, styles, root, rootWs) }
     val leafWs = styles[root]?.whiteSpace ?: root.parent?.let { styles[it]?.whiteSpace } ?: rootWs
-    val segs = precomputed ?: styledSegments(root, wsOf, isExcluded, isBlock, leafWs, genOf, resolve).segments
+    val segs = precomputed ?: styledSegments(root, wsOf, isExcluded, isBlock, leafWs, genOf, resolve, firstLetterOf = firstLetterOf).segments
     val out = ArrayList<RubyRun>()
     var pos = 0
     var group: MarkupElement? = null

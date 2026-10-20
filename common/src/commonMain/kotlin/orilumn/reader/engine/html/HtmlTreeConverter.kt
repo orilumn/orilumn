@@ -15,7 +15,7 @@ import com.fleeksoft.ksoup.nodes.TextNode
  * Whitelist strategy: whitelisted tags are kept semantically; non-whitelisted tags are
  * "de-shelled" — only their child nodes pass through and the tag's own attributes are dropped,
  * eliminating messy-book interfering styles at the source. Layout-relevant style info is kept in
- * [MarkupElement.attrs]'s inline `style` value for later parsing by [CssInlineResolver].
+ * [MarkupElement.attrs]'s inline `style` value for later parsing by the CSS cascade.
  */
 class HtmlTreeConverter {
 

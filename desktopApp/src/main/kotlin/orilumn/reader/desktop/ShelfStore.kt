@@ -242,6 +242,9 @@ class DesktopShelfStore(root: File) : ShelfRepository {
             runCatching { File(entry.filePath).delete() }
             entry.coverPath?.let { runCatching { File(it).delete() } }
             runCatching { File(progressDir, "$id.json").delete() }
+            // 书条目已删，只按书 id 存的结构/分页磁盘缓存再无用处：一并清，不留孤儿目录。
+            runCatching { File(DesktopPaths.cacheDir, "structure/book_$id").deleteRecursively() }
+            runCatching { File(DesktopPaths.cacheDir, "pagination/book_$id").deleteRecursively() }
         }
     }
 

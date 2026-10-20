@@ -10,9 +10,7 @@ import orilumn.reader.engine.layout.ListMarkers
 /**
  * C2-P2b-1: 纯几何形状（无画笔），[ParagraphShapeRef] 的 common 实现。
  *
- * `shapeGeometry()`（engine-skia）产出它；搬走的编排代码只认接口持有它；
- * `:app` 的 `ParagraphShape` 是同一几何另加 Android 画笔的视图（同一对象两种视图
- * 中的几何视图由本类承载，画笔视图由 `ParagraphShape` 承载，几何逐字节同源）。
+ * `shapeGeometry()`（engine-skia）产出它；编排代码只认接口持有它 —— 两端几何逐字节同源。
  */
 data class ShapedGeometry(
     override val text: String = "",
@@ -46,7 +44,16 @@ data class ShapedGeometry(
     override val emphasisUnder: Boolean = false,
     override val alpha: Float = 1f,
     override val rubyRuns: List<RubyRun> = emptyList(),
-    override val underlineRuns: List<UnderlineRun> = emptyList(),
+    override val decorationRuns: List<TextDecorationRun> = emptyList(),
+    /** 行内盒 spans（叶文本坐标系；空 = 无行内背景/边框）。 */
+    override val inlineBoxRuns: List<InlineBoxRun> = emptyList(),
+    /** E21 残留修复：`::first-letter{float:left}` 首字下沉盒（null = 无）。 */
+    val capFloat: CapFloat? = null,
+    /**
+     * E10 `visibility: hidden` 覆盖区间（叶文本坐标系；空 = 全叶可见）。
+     * 隐藏字符不落墨但保留占位（见 [ParagraphShapeRef.shapeVisibilityHiddenRuns]）。
+     */
+    override val visibilityHiddenRuns: List<IntRange> = emptyList(),
     override val fontRequest: ShapeFontRequest = ShapeFontRequest(null, emptyList(), 400, false, false),
 ) : ParagraphShapeRef {
     override val shapeText: String get() = text
@@ -65,7 +72,10 @@ data class ShapedGeometry(
     override val shapeFontRuns: List<FontRun> get() = fontRuns
     override val shapeBaselineShifts: List<BaselineShift> get() = baselineShifts
     override val shapeRubyRuns: List<RubyRun> get() = rubyRuns
-    override val shapeUnderlineRuns: List<UnderlineRun> get() = underlineRuns
+    override val shapeDecorationRuns: List<TextDecorationRun> get() = decorationRuns
+    override val shapeInlineBoxRuns: List<InlineBoxRun> get() = inlineBoxRuns
+    override val shapeCapFloat: CapFloat? get() = capFloat
+    override val shapeVisibilityHiddenRuns: List<IntRange> get() = visibilityHiddenRuns
     override val shapeAlpha: Float get() = alpha
     override val shapeEmphasis: EmphasisStyle get() = emphasis
     override val shapeEmphasisUnder: Boolean get() = emphasisUnder

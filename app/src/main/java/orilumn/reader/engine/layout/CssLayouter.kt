@@ -6,9 +6,11 @@ import android.text.Spanned
 import android.text.style.AbsoluteSizeSpan
 import android.text.style.ForegroundColorSpan
 import android.text.style.LeadingMarginSpan
+import android.text.style.StrikethroughSpan
 import android.text.style.StyleSpan
 import android.text.style.UnderlineSpan
 import orilumn.reader.engine.css.ComputedStyle
+import orilumn.reader.engine.css.DecorationLine
 import orilumn.reader.engine.css.LightCssParser
 import orilumn.reader.engine.css.ReaderStylesheets
 import orilumn.reader.engine.css.StyleComputer
@@ -29,7 +31,7 @@ import kotlin.math.roundToInt
  * the engine now produces a uniform CSS line box for every line, and 段间距 lives in the box path's
  * margins, not here.
  *
- * The production path now runs through [BoxChapterLayouter] + [ParagraphShapes]; this class is
+ * The production path now runs through [BoxChapterLayouter] + the shared shaper; this class is
  * retained so that `layout()` stays verifiable via `CssLayouterTest` and its [BLOCK_TAGS] set is
  * still referenced from the box engine, plus [uaSheetFromProfile] supplies heading defaults.
  */
@@ -90,12 +92,12 @@ class CssLayouter(
             }
             el.tag == "br" -> sb.append('\n')
             el.tag == "" -> emitChildren(el, sb, styles)          // de-shelled wrapper: children flow through
-            el.tag == "img" -> { val s = sb.length; sb.append("　　"); emitUnderline(el, sb, s, styles) }
+            el.tag == "img" -> { val s = sb.length; sb.append("　　"); emitDecoration(el, sb, s, styles) }
             el.tag in BLOCK_TAGS -> emitBlock(el, sb, styles)
             else -> {
                 val start = sb.length
                 emitChildren(el, sb, styles)
-                emitUnderline(el, sb, start, styles)              // decoration is non-inherited: emit at the declaring element's range
+                emitDecoration(el, sb, start, styles)              // decoration is non-inherited: emit at the declaring element's range
             }
         }
     }
@@ -104,7 +106,7 @@ class CssLayouter(
         if (sb.isNotEmpty()) sb.append('\n')
         val start = sb.length
         emitChildren(el, sb, styles)
-        emitUnderline(el, sb, start, styles)
+        emitDecoration(el, sb, start, styles)
         applyBlockDecor(el, sb, start)
         if (sb.length > start) sb.append('\n')
     }
@@ -117,12 +119,23 @@ class CssLayouter(
         }
     }
 
-    /** Emits the element's own underline (text-decoration) over its full emitted range — decoration is
-     * not inherited, so this must be applied at the declaring element, covering all descendant text. */
-    private fun emitUnderline(el: MarkupElement, sb: SpannableStringBuilder, start: Int, styles: Map<MarkupElement, ComputedStyle>) {
+    /** 元素自身声明的装饰盖到本元素已发出的整段：非继承属性，盖在声明它的那个元素的范围上。 */
+    private fun emitDecoration(el: MarkupElement, sb: SpannableStringBuilder, start: Int, styles: Map<MarkupElement, ComputedStyle>) {
         if (start >= sb.length) return
-        if (styles[el]?.underline == true) {
-            sb.setSpan(UnderlineSpan(), start, sb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        applyDecorationSpans(sb, start, sb.length, styles[el])
+    }
+
+    /**
+     * Android 回退的装饰 span：`underline` → `UnderlineSpan`、`line-through` → `StrikethroughSpan`。
+     * `overline` 无对应 span（本路径只服务表内/列表标记），颜色/粗细/线型样式同属回退限制。
+     */
+    private fun applyDecorationSpans(sb: SpannableStringBuilder, start: Int, end: Int, style: ComputedStyle?) {
+        val d = style?.decoration ?: return
+        if (DecorationLine.UNDERLINE in d.lines) {
+            sb.setSpan(UnderlineSpan(), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        if (DecorationLine.LINE_THROUGH in d.lines) {
+            sb.setSpan(StrikethroughSpan(), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
         }
     }
 
@@ -142,7 +155,7 @@ class CssLayouter(
                 sb.setSpan(ForegroundColorSpan(argb), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
             }
         }
-        if (style.underline) sb.setSpan(UnderlineSpan(), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        applyDecorationSpans(sb, start, end, style)
     }
 
     companion object {

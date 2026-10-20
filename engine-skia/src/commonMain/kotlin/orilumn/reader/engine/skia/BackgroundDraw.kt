@@ -35,7 +35,7 @@ fun Canvas.drawPageBackground(bg: PageBackground, xOff: Float, yOff: Float, imag
         val sc = sh.colorHex?.let(::cssHexToArgb) ?: return@let
         if (sh.blur <= 0f) {
             val shadowPaint = Paint().apply { color = withBgAlpha(sc, bg.alpha) }
-            drawShape(shadowPaint, l + sh.dx, t + sh.dy, r + sh.dx, b + sh.dy, bg.radii.toArray(), 0f)
+            drawShape(shadowPaint, l + sh.dx, t + sh.dy, r + sh.dx, b + sh.dy, bg.radii.skiaArray(), 0f)
         } else {
             for (k in 3 downTo 1) {
                 val e = sh.blur * k / 6f
@@ -51,7 +51,7 @@ fun Canvas.drawPageBackground(bg: PageBackground, xOff: Float, yOff: Float, imag
             strokeWidth = bg.strokeWidthPx.coerceAtLeast(1f)
         }
     }
-    drawShape(paint, l, t, r, b, bg.radii.toArray(), bg.strokeWidthPx)
+    drawShape(paint, l, t, r, b, bg.radii.skiaArray(), bg.strokeWidthPx)
     // P3-b: 背景图（底色之上；边框环是独立 rect，后画即在上，合规范层序）。
     if (image != null && !bg.bgSrc.isNullOrBlank() && image.width > 0 && image.height > 0) {
         drawBgTiles(this, bg, l, t, r, b, xOff, yOff, image)
@@ -73,7 +73,7 @@ private fun drawBgTiles(canvas: Canvas, bg: PageBackground, l: Float, t: Float, 
     if (tiles.isEmpty()) return
     val saved = canvas.save()
     try {
-        val radii = bg.radii.toArray()
+        val radii = bg.radii.skiaArray()
         if (radii.all { it == 0f }) {
             canvas.clipRect(Rect.makeLTRB(l, t, r, b))
         } else {
@@ -103,13 +103,15 @@ private fun withBgAlpha(argb: Int, alpha: Float): Int {
     return (a shl 24) or (argb and 0x00FFFFFF)
 }
 
-private fun orilumn.reader.engine.css.CornerRadius.toArray(): FloatArray {
+/** P3-a: `CornerRadius` → Skia 的 8 元半径数组（每角 x/y 各一）。块盒与行内盒共用。 */
+internal fun orilumn.reader.engine.css.CornerRadius.skiaArray(): FloatArray {
     val v = floatArrayOf(topLeft, topLeft, topRight, topRight, bottomRight, bottomRight, bottomLeft, bottomLeft)
     return v
 }
 
-private fun orilumn.reader.engine.css.CornerRadius.grown(e: Float): FloatArray {
-    val v = toArray()
+/** 每角半径同加 [e]（可负；钳到 ≥0）。阴影扩层与「描边内缩半宽」共用。 */
+internal fun orilumn.reader.engine.css.CornerRadius.grown(e: Float): FloatArray {
+    val v = skiaArray()
     for (i in v.indices) v[i] = (v[i] + e).coerceAtLeast(0f)
     return v
 }

@@ -23,7 +23,7 @@ non-flow content). `display:none` hides any subtree; CSS `display:block` (+`list
 | `address` `hr` | ✓ | ✓ | 块 | box 块 |
 | `table` `thead` `tbody` `tfoot` `tr` `td` `th` `caption` `colgroup` `col` | ✓ | ✓ | 保留结构 | 2D 网格 + `colspan/rowspan` + 表格族 CSS（`border-collapse/spacing`、`caption-side`、`empty-cells`、`table-layout`）；`col` 仅列元数据 |
 | `strong` `b` `em` `i` `u` `a` `code` `kbd` `samp` `tt` `span` `sub` `sup` `q` `small` `big` | 全 | 全 | 行内 | 行内 run（粗/斜/下划线/等宽/上下标字号+基线偏移/small·big 缩放）；`q` 生成引号；`a` 保留 `href`/`name` + 双端点按导航 |
-| `s` `del` `ins` `abbr` `dfn` `cite` `var` `acronym` `mark` `time` `data` `bdi` `bdo` `wbr` | ✓ | ✓ | 行内 | 行内 span + UA 兜底（删除线/下划线/斜体/mark 高亮；`title` 保留；`wbr` 断行点） |
+| `s` `del` `ins` `abbr` `dfn` `cite` `var` `acronym` `mark` `time` `data` `bdi` `bdo` `wbr` | ✓ | ✓ | 行内 | 行内 span + UA 兜底（删除线/下划线/斜体/`mark` 高亮 —— 高亮自 0.4.7 起真正可见；`title` 保留；`wbr` 断行点） |
 | `ruby` `rt` `rp` `rbc` `rtc` `rb` | ✓ | ✓ | 行内 | 叠排：`rp{display:none}`，`rbc/rtc/rb` 透明行内容器，`rt` 0.6em 居中压基字上方（行高预留注音高；内联源文透明占位，字符流不变） |
 | `br` | ✓ | ✓ | 保留 | 换行（`clear` 属性进级联，块级 clear 越过悬浮） |
 | `img` | ✓ | ✓ | 保留 | 可替换块（`width/height/srcset/sizes`；`align` → float；`float` 悬浮 + 紧随文本叶环绕，双路一致） |
@@ -61,16 +61,16 @@ points are noted. "parsed only" = computed, draw/layout consumption pending or o
 | `font-family`（含栈）`font-weight` `font-style` | ✓ | ✓ | yes | **yes**（回退 + monospace） |
 | `font-variant` (`small-caps`) / `font-stretch` | — | ✓ | yes | small-caps 合成 **yes**；stretch 计算值 |
 | `line-height` | ✓ | ✓ | yes | **yes** |
-| `color` / `background-color` | ✓ | ✓ | yes | **yes**（主题继承 + 显式 run） |
-| `text-decoration` | ✓ | ✓ | yes | **yes**（underline/line-through） |
+| `color` / `background-color` | ✓ | ✓ | yes | **yes**（主题继承 + 显式 run；块盒填充，**行内盒**也填充 —— 自 0.4.7 起按 `box-decoration-break: slice` 跨行拆片段） |
+| `text-decoration` | ✓ | ✓ | yes | 部分：underline/line-through（bool）—— **`line-through` 被画成下划线**，且无颜色/粗细/样式；欠账与排期见《引擎欠账-对齐浏览器语义》总账 §2.1（E3/E4，第三刀） |
 | `text-indent` / `text-align` | ✓ | ✓ | yes | **yes**（含 JUSTIFY） |
 | `letter-spacing`（作者） / `word-spacing` | ✓ | ✓ | yes | **yes** |
 | `text-transform` | ✓ | ✓ | yes | **yes**（字符流级，大小写 1:1） |
 | `white-space` | ✓ | ✓ | yes | **yes**（断行单源 + 制表符展开） |
 | `vertical-align`（sub/super/middle/top/bottom） | ✓ | ✓ | yes | **yes**（行内基线偏移 run） |
 | `overflow-wrap` / `word-break` | — | ✓ | yes | **yes**（断行） |
-| `margin`/`padding`（含逻辑属性） | ✓ | ✓ | yes | **yes**（盒几何 + collapse） |
-| `border-width/style/color`（四边 + currentColor）/`border-radius` | ✓ | ✓ | yes | **yes**（几何 + 分段/圆角绘制） |
+| `margin`/`padding`（含逻辑属性） | ✓ | ✓ | yes | **yes**（盒几何 + collapse；**行内元素横向 `padding` 参与断行宽度**，纵向按浏览器语义不撑高行框） |
+| `border-width/style/color`（四边 + currentColor）/`border-radius` | ✓ | ✓ | yes | **yes**（几何 + 分段/圆角绘制；**行内元素四边边框**同样绘制且横向宽度参与断行；行内盒暂无 `border-radius`） |
 | `box-shadow` / `text-shadow` / `text-emphasis`（-epub- 前缀）/ `opacity` | — | ✓ | yes | **yes**（绘制层） |
 | `background`（色）/`background-image`+`repeat`+`position` | ✓ | ✓ | yes | **yes**（平铺几何 + 双端绘制；无 `background-size`） |
 | `display`（block/none/list-item/table*） | ✓ | ✓ | yes | **yes**（块判定 + 整子树隐藏） |
@@ -79,12 +79,13 @@ points are noted. "parsed only" = computed, draw/layout consumption pending or o
 | `break-inside/after/before` + `page-break-*` 别名 | ✓ | ✓ | yes | **yes**（BreakRule） |
 | `border-collapse`/`border-spacing`/`caption-side`/`empty-cells`/`table-layout` | ✓ | ✓ | yes | **yes**（2D 消费） |
 | `content`/`counter-reset`/`counter-increment`/`quotes` + `::before/::after` | — | ✓ | yes | **yes**（字符流级；无 `counter-set`） |
+| `::first-letter`（含 `float:left` 下沉） | — | ✓ | yes | **yes**（首字取自己的计算样式；`float:left` 按**出流浮动盒**排版：正文自第 2 行起收窄右移、首行行框不被撑高，落墨在首行行框内按盒居中；E20） |
 | `@font-face`（ttf/otf/woff/woff2 + IDPF 去混淆）/`@import`/`@media`（全视口） | — | ✓ | yes | **yes**（先行入池，双端） |
 | `float` / `clear` | ✓ | ✓ | yes | **yes**：文本/img 悬浮 + 双侧跨度并排 + 跨容器环绕 + 真 clear + 窗口 carry-in + 右悬浮绘制（双路一致） |
-| `visibility` | ✓ | ✓ | yes | parsed only（隐藏消费后续） |
-| `overflow`（祖先裁剪） | ✓ | ✓ | yes | parsed only |
-| `position`（relative 标记） | ✓ | ✓ | yes | parsed only（absolute/fixed 不做） |
-| `direction`/`unicode-bidi` | ✓ | ✓ | yes | 隔离 parsed only（RTL 流后续） |
+| `visibility` | ✓ | ✓ | yes | **yes**（隐藏不落墨、占位照旧，含祖先继承与行内盒；E10） |
+| `overflow`（祖先裁剪） | ✓ | ✓ | yes | **yes**（祖先 `overflow` 裁到 padding box，行/块/盒底一致；E11） |
+| `position`（relative） | ✓ | ✓ | yes | **yes**（`top/right/bottom/left` 沿元素链累积平移落墨几何与裁剪区，流几何不变；绘制层级按附录 E 第 8 步压在在流内容之上；绝对/固定不做 —— E12） |
+| `direction`/`unicode-bidi` | ✓ | ✓ | yes | 隔离 parsed only（RTL 流属 roadmap §0 范围外） |
 | `flex`/`grid` 真实布局 | — | ✓ | n/a | NO（按 block 降级，§0 例外） |
 | `list-style-image` / `@page` / 垂直书写 / 脚本媒体表单 | ✓ | ✓ | n/a | NO（§0 例外） |
 

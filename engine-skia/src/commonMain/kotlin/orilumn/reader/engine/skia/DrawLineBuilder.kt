@@ -12,7 +12,9 @@ import orilumn.reader.engine.laying.DrawKind
 import orilumn.reader.engine.laying.HiddenCheck
 import orilumn.reader.engine.laying.LayoutBox
 import orilumn.reader.engine.laying.NormalFlowLayout
+import orilumn.reader.engine.laying.contentClip
 import orilumn.reader.engine.laying.effectiveOpacity
+import orilumn.reader.engine.laying.inlineBoxLeadInsetPx
 import kotlin.math.roundToInt
 
 /**
@@ -53,6 +55,10 @@ object DrawLineBuilder {
         inkColor: Int = 0xFF000000.toInt(),
         /** P3-c 生成内容查找（空即无，旧路径；调用方喂与塑形同一 phase-1 结果）。 */
         genOf: orilumn.reader.engine.laying.GenOf = orilumn.reader.engine.laying.EmptyGen,
+        /** `::first-letter` 伪元素查找（null = 无该规则；必须与塑形同源，否则首字画错字号）。 */
+        firstLetterOf: orilumn.reader.engine.laying.FirstLetterOf? = null,
+        /** 显示密度（只影响虚线边框的段/隙比例，见 [DrawLine.deviceScale]）。 */
+        deviceScale: Float = 1f,
     ): Map<Int, DrawLine> {
         val out = HashMap<Int, DrawLine>()
         val leaves = ArrayList<LayoutBox>()
@@ -62,6 +68,8 @@ object DrawLineBuilder {
         collect(result.boxes)
         // P3：carriers 按盒叶（文档序）一次性求；marker 每叶同一 common 规则（ListMarkers.markerForLeaf）。
         val carriers = ListMarkers.firstCarrierSet(leaves.mapNotNull { it.el })
+        // E10 快筛：整章有没有 `visibility: hidden` 声明（无则每叶回空表，零额外遍历）。
+        val anyVisibilityHidden = styleMap.any { it.value.visibilityHidden }
         for (leaf in leaves) {
             if (leaf.ranges.isEmpty() || leaf.table != null || leaf.replaceableHeight != 0) continue
             val el = leaf.el ?: continue
@@ -75,17 +83,33 @@ object DrawLineBuilder {
             val xLeft = leaf.contentLeft + (style.border.left + style.padding.left).roundToInt()
             val marker = ListMarkers.markerForLeaf(el, carriers) { styleMap[it] }
             // 着色区间按叶一次算好（行循环内复用；无着色叶回空表零开销）。
-            val runs = NormalFlowLayout.leafColorRuns(el, styleMap, classify, hidden, genOf)
+            val runs = NormalFlowLayout.leafColorRuns(el, styleMap, classify, hidden, genOf, firstLetterOf = firstLetterOf)
             // 行内 face 段同样按叶一次算好（`<code>`/`<strong>` 等异 face 段；纯种叶回空表零开销）。
-            val fontRuns = NormalFlowLayout.leafFontRuns(el, styleMap, classify, hidden, genOf)
+            val fontRuns = NormalFlowLayout.leafFontRuns(el, styleMap, classify, hidden, genOf, firstLetterOf = firstLetterOf)
             // P1-2: 行内基线位移同样按叶一次算好（纯基线叶回空表零开销）。
-            val shifts = NormalFlowLayout.leafBaselineShifts(el, styleMap, classify, hidden, genOf)
+            val shifts = NormalFlowLayout.leafBaselineShifts(el, styleMap, classify, hidden, genOf, firstLetterOf = firstLetterOf)
             // P6-b: 叠排注音 runs 同样按叶一次算好（无注音叶回空表零开销；绘制侧按行过滤）。
-            val rubyRuns = NormalFlowLayout.leafRubyRuns(el, styleMap, classify, hidden, genOf)
+            val rubyRuns = NormalFlowLayout.leafRubyRuns(el, styleMap, classify, hidden, genOf, firstLetterOf = firstLetterOf)
             // 下划线区间同样按叶一次算好（无下划线叶回空表零开销）。
-            val underlineRuns = NormalFlowLayout.leafUnderlineRuns(el, styleMap, classify, hidden, genOf)
-            // 首行缩进只给叶首行（断行侧同值已减宽，绘制侧右移同值；悬挂负值本轮不支持，归零）。
-            val indent = style.textIndentPx.coerceAtLeast(0f)
+            val decorationRuns = NormalFlowLayout.leafTextDecorationRuns(el, styleMap, classify, hidden, genOf, firstLetterOf = firstLetterOf)
+            // 行内盒（背景/边框）同样按叶一次算好（无装饰叶回空表零开销）。
+            val inlineBoxes = NormalFlowLayout.leafInlineBoxRuns(el, styleMap, classify, hidden, genOf, firstLetterOf = firstLetterOf)
+            // E10 `visibility: hidden` 覆盖区间（无隐藏声明叶回空表零开销）。
+            val visHidden = if (anyVisibilityHidden || style.visibilityHidden) {
+                NormalFlowLayout.leafVisibilityHiddenRuns(el, styleMap, classify, hidden, genOf, firstLetterOf = firstLetterOf)
+            } else {
+                emptyList()
+            }
+            // 首行缩进只给叶首行（断行侧同值已减宽，绘制侧右移同值）。
+            //
+            // **有符号**（E8）：负值是悬挂缩进（CSS 2.1 §16.1）—— 首行**左移** `|indent|`，
+            // 断行侧的首行可用宽相应加宽 `|indent|`（见 [orilumn.reader.engine.laying.ParagraphBreaker.breakLines]）。
+            // 曾在此钳零 ⇒ 断行侧按加宽排、绘制侧按 0 落位 ⇒ 量画失配（文字压回缩进里）。
+            //
+            // **行内盒的「起始于叶首字符」左边内边距折在这里**（`inlineBoxLeadInsetPx`）：
+            // 它与 text-indent 语义相同（首行起始位移 + 首行减宽），断行侧在
+            // [orilumn.reader.engine.laying.breakLeafLines] 折了同一份，两处共用同一函数 ⇒ 量画同源。
+            val indent = style.textIndentPx + inlineBoxLeadInsetPx(inlineBoxes)
             // P1-2: 不换行段绘制侧以无限宽整形（与 breakLeafLines 一致）。
             val nowrap = !orilumn.reader.engine.css.WhiteSpaceNormalize.wraps(style.whiteSpace)
             // P3-a: 行阴影（currentColor 按叶墨色解）＋着重号＋祖先 opacity。
@@ -94,6 +118,9 @@ object DrawLineBuilder {
                 orilumn.reader.engine.css.TextShadow(sh.dx, sh.dy, sh.blur, "#%08x".format(argb))
             }
             val alpha = effectiveOpacity(el) { styleMap[it] }
+            // E11：本叶内容（文本行）所受的 `overflow` 祖先裁剪（含叶自身裁剪盒；无声明即 null）。
+            // 盒流后 `clipRect` 已由 `applyInheritedClips` 填好，叶内各行共用同一值。
+            val contentClip = leaf.contentClip()
             // P4-c2: 行文本在章内的字符基址（盒流行 FlowedLine.charStart 章内全局，减首区间起点即叶 text[0] 位置）。
             val firstFl = result.lines.getOrNull(leaf.firstLineIndex)
             val charBase = if (firstFl != null && leaf.ranges.isNotEmpty()) firstFl.charStart - leaf.ranges.first().first else 0
@@ -105,13 +132,26 @@ object DrawLineBuilder {
                 // 余行原宽原位（命中反查经 lineWidthPx 自动同源）。
                 val lead = leaf.floatLead
                 val intruded = lead != null && i < lead.lines
-                val lineW = if (intruded) lead.widthPx else w
-                val lineX = xLeft + if (intruded) lead.xOffPx.roundToInt() else 0
+                // E21 残留修复：`::first-letter{float:left}` 首字下沉 —— 首字占首行，**第 1 行起**
+                // 收窄并右移一个下沉盒宽（与 [orilumn.reader.engine.laying.breakWrappedLines] 同式）。
+                val cap = leaf.capFloat
+                val capIntruded = cap != null && i in 1..cap.lines
+                val lineW = when {
+                    intruded -> lead!!.widthPx
+                    capIntruded -> (w - cap!!.widthPx).coerceAtLeast(1)
+                    else -> w
+                }
+                val lineX = xLeft + when {
+                    intruded -> lead!!.xOffPx.roundToInt()
+                    capIntruded -> cap!!.widthPx
+                    else -> 0
+                }
                 out[lineIdx] = DrawLine(
                     text = text,
                     range = r,
-                    yTop = fl.yTop,
-                    yBottom = fl.yBottom,
+                    // E12：`position: relative` 的绘制偏移（不改流几何：分页/占位不受影响）。
+                    yTop = fl.yTop + leaf.relOffsetY,
+                    yBottom = fl.yBottom + leaf.relOffsetY,
                     alignment = style.textAlign,
                     fontSizePx = style.fontSizePx,
                     lineHeightRatio = style.lineHeightRatio,
@@ -123,8 +163,10 @@ object DrawLineBuilder {
                     letterSpacingEm = letterSpacingEm,
                     cjkLatinSpacingEm = cjkLatinSpacingEm,
                     lineWidthPx = lineW,
-                    xLeft = lineX,
-                    listMarker = if (lineIdx == leaf.firstLineIndex) marker else null,
+                    xLeft = lineX + leaf.relOffsetX,
+                    capFloat = leaf.capFloat,
+                    // marker 与叶同生死（`visibility: hidden` 的 `<li>` 不画 bullet；占位照旧）。
+                    listMarker = if (lineIdx == leaf.firstLineIndex && !style.visibilityHidden) marker else null,
                     inkColor = inkColor,
                     colorRuns = runs,
                     fontRuns = fontRuns,
@@ -151,7 +193,11 @@ object DrawLineBuilder {
                     alpha = alpha,
                     charBase = charBase,
                     rubyRuns = rubyRuns,
-                    underlineRuns = underlineRuns,
+                    decorationRuns = decorationRuns,
+                    inlineBoxRuns = inlineBoxes,
+                    deviceScale = deviceScale,
+                    visibilityHiddenRuns = visHidden,
+                    clip = contentClip,
                 )
             }
         }
@@ -184,6 +230,8 @@ object DrawLineBuilder {
         val out = ArrayList<PageImage>()
         for (leaf in leaves) {
             if (leaf.replaceableHeight <= 0 || leaf.table != null) continue
+            // E10：隐藏的替换叶不落图（占位照旧）。
+            if (leaf.style.visibilityHidden) continue
             val el = leaf.el
             if (el == null || el.tag != "img") continue
             val gearIndex = leaf.firstLineIndex
@@ -201,11 +249,14 @@ object DrawLineBuilder {
                 PageImage(
                     src = src,
                     chapterHref = chapterHref,
-                    xLeft = xOff,
-                    yTop = line.yTop,
-                    yBottom = line.yTop + leaf.replaceableHeight.coerceAtLeast(1),
+                    xLeft = xOff + leaf.relOffsetX,
+                    // E12：`position: relative` 的绘制偏移（同叶文本行）。
+                    yTop = line.yTop + leaf.relOffsetY,
+                    yBottom = line.yTop + leaf.relOffsetY + leaf.replaceableHeight.coerceAtLeast(1),
                     widthPx = usedW,
                     heightPx = leaf.replaceableHeight.coerceAtLeast(1),
+                    // E11：`overflow` 祖先裁剪（同叶文本行；无声明即 null）。
+                    clip = leaf.contentClip(),
                 ),
             )
         }
@@ -224,6 +275,7 @@ object DrawLineBuilder {
         firstLine: Int,
         lastLineExclusive: Int,
         chapterHref: String = "",
+        density: Float = 1f,
     ): List<PageBackground> {
         if (firstLine < 0 || lastLineExclusive <= firstLine) return emptyList()
         val pageEnd = minOf(lastLineExclusive, result.lines.size)
@@ -231,7 +283,7 @@ object DrawLineBuilder {
         val bandTop = result.lines[firstLine].yTop
         val bandBottom = result.lines[pageEnd - 1].yBottom
         if (bandBottom <= bandTop) return emptyList()
-        return BoxDrawer.drawOnPage(result.boxes, firstLine, pageEnd, bandTop, bandBottom).mapNotNull { r ->
+        return BoxDrawer.drawOnPage(result.boxes, firstLine, pageEnd, bandTop, bandBottom, density).mapNotNull { r ->
             val argb = cssHexToArgb(r.colorHex) ?: return@mapNotNull null
             PageBackground(
                 left = r.left,
@@ -250,6 +302,8 @@ object DrawLineBuilder {
                 bgPosition = r.bgImage?.position ?: orilumn.reader.engine.css.BackgroundPosition(),
                 bgBoxTop = r.bgBoxTop,
                 bgBoxBottom = r.bgBoxBottom,
+                // E11：`overflow` 祖先裁剪随指令带上（渲染层画布裁剪；null = 不裁）。
+                clip = r.clip,
             )
         }
     }

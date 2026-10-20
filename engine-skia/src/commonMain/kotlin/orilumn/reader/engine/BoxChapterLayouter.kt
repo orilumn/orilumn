@@ -5,6 +5,7 @@ import orilumn.reader.collections.identityMap
 import orilumn.reader.collections.withLock
 import orilumn.reader.engine.EngineDiag
 import orilumn.reader.engine.css.CssBundle
+import orilumn.reader.engine.css.FloatSide
 import orilumn.reader.engine.css.cssHexToArgb
 import orilumn.reader.engine.css.FontDemand
 import orilumn.reader.engine.css.LightCssParser
@@ -27,6 +28,14 @@ import orilumn.reader.engine.laying.breakWrappedLines
 import orilumn.reader.engine.laying.BlockClassify
 import orilumn.reader.engine.laying.BoxDrawer
 import orilumn.reader.engine.laying.BoxLayouter
+import orilumn.reader.engine.laying.BoxOffset
+import orilumn.reader.engine.laying.ClipRect
+import orilumn.reader.engine.laying.contentClip
+import orilumn.reader.engine.laying.contentClipOf
+import orilumn.reader.engine.laying.relativeOffsetOf
+import orilumn.reader.engine.laying.inheritedClip
+import orilumn.reader.engine.laying.clipsOverflow
+import orilumn.reader.engine.laying.paddingBox
 import orilumn.reader.engine.laying.FlowedLine
 import orilumn.reader.engine.laying.LayoutBox
 import orilumn.reader.engine.laying.NormalFlowLayout
@@ -93,6 +102,8 @@ data class ChapterPrepareResult(
     val hidden: orilumn.reader.engine.laying.HiddenCheck,
     /** P3-c 生成内容查找（与塑形同一 phase-1 结果；空即无）。 */
     val genOf: orilumn.reader.engine.laying.GenOf = orilumn.reader.engine.laying.EmptyGen,
+    /** `::first-letter` 伪元素查找（章节无该伪规则即 null，塑形侧零开销）。 */
+    val firstLetterOf: ((MarkupElement) -> orilumn.reader.engine.css.ComputedStyle?)? = null,
 ) {
     /** Locates the block index that contains the given chapter-wide char offset. */
     fun blockIndexForChar(charOffset: Int): Int {
@@ -114,7 +125,7 @@ data class ChapterPrepareResult(
  * The **production** [ChapterLayouter], powered by the box engine (S0–S7 results),
  * and the drawable path of S7:
  *
- *  cascade → box-model geometry → per-paragraph shaping ([ParagraphShape]s) → [BoxDrawableLayout] → pages.
+ *  cascade → box-model geometry → per-paragraph shaping ([ParagraphShapeRef]s) → [BoxDrawableLayout] → pages.
  *
  * Split into [prepare] (fast, full-chapter, no per-block shaping) and [fullLayout] (shape + paginate).
  * The legacy one-shot [layout] delegates to both in sequence.
@@ -229,9 +240,11 @@ class BoxChapterLayouter(
             ?.takeIf { it.isNotEmpty() }
             ?.let { genOfFromStrings(authorSheets, it, engine) { styleMap[it] } }
             ?: genOfFor(markup, authorSheets, { styleMap[it] }, engine, hidden)
-        val structure = boxLayouter.layoutBoxes(markup, contentW, styleMap, classify, imageLoader, chapterHref, genOf = genOf, contentH = contentH)
+        // `::first-letter`：章节无该伪规则即 null（塑形与断行侧零开销）；命中则按叶根懒解＋缓存。
+        val firstLetterOf = firstLetterOfFor(engine) { styleMap[it] }
+        val structure = boxLayouter.layoutBoxes(markup, contentW, styleMap, classify, imageLoader, chapterHref, genOf = genOf, firstLetterOf = firstLetterOf, contentH = contentH)
         val leaves = collectLeaves(structure.boxes)
-        return buildPrepareResult(markup, styleMap, structure, leaves, classify, hidden, genOf)
+        return buildPrepareResult(markup, styleMap, structure, leaves, classify, hidden, genOf, firstLetterOf)
     }
 
     /**
@@ -284,6 +297,27 @@ class BoxChapterLayouter(
             pseudoCache.getOrPut(el to p) {
                 val base = styleOf(el) ?: return@getOrPut null
                 engine.pseudoStyle(el, orilumn.reader.engine.laying.ancestorsOf(el), base, p)
+            }
+        }
+    }
+
+    /**
+     * `::first-letter` 伪元素计算样式查找（重/轻两路同式，与 [pseudoOfFor] 同一懒解＋缓存纪律）。
+     *
+     * 章节级先行门控（[StyleComputer.hasFirstLetterRules]）：整章没有 `::first-letter` 规则时返回
+     * null ⇒ 塑形侧一个字都不多算（老书零开销）。命中章节也只在**每个叶根**解一次并缓存（伪元素
+     * 样式一律按新鲜级联算，不进结构缓存，无跨字号/主题过期）。
+     */
+    private fun firstLetterOfFor(
+        engine: StyleComputer,
+        styleOf: (MarkupElement) -> orilumn.reader.engine.css.ComputedStyle?,
+    ): ((MarkupElement) -> orilumn.reader.engine.css.ComputedStyle?)? {
+        if (!engine.hasFirstLetterRules()) return null
+        val cache = HashMap<MarkupElement, orilumn.reader.engine.css.ComputedStyle?>()
+        return { el ->
+            cache.getOrPut(el) {
+                val base = styleOf(el) ?: return@getOrPut null
+                engine.firstLetterStyle(el, orilumn.reader.engine.laying.ancestorsOf(el), base)
             }
         }
     }
@@ -544,7 +578,7 @@ class BoxChapterLayouter(
             else -> themeSheetFromProfile(profile)
         }
         val settings = settingsSheet
-        return StyleComputer(profile.bodyPx, ua, sheets, theme, settings, ui, paragraphScale = profile.paragraphSpacingScale, gapScale = profile.paragraphGapScale)
+        return StyleComputer(profile.bodyPx, ua, sheets, theme, settings, ui, paragraphScale = profile.paragraphSpacingScale, gapScale = profile.paragraphGapScale, pxScale = profile.density)
     }
 
     /** Assembles a [ChapterPrepareResult] from a cascade + box tree, computing global char starts. */
@@ -556,6 +590,7 @@ class BoxChapterLayouter(
         classify: orilumn.reader.engine.laying.BlockClassify,
         hidden: orilumn.reader.engine.laying.HiddenCheck,
         genOf: orilumn.reader.engine.laying.GenOf = orilumn.reader.engine.laying.EmptyGen,
+        firstLetterOf: ((MarkupElement) -> orilumn.reader.engine.css.ComputedStyle?)? = null,
     ): ChapterPrepareResult {
         // Compute global char start for each leaf by walking in chapter order and accumulating textLength.
         val starts = NormalFlowLayout.accumulateCharStarts(leaves.map { it.textLength.toLong() })
@@ -570,6 +605,7 @@ class BoxChapterLayouter(
             classify = classify,
             hidden = hidden,
             genOf = genOf,
+            firstLetterOf = firstLetterOf,
         )
     }
 
@@ -595,6 +631,9 @@ class BoxChapterLayouter(
             // P4-a3: 环绕前导随叶下发（与盒流断行同宽，否则 canonical 形状与结构行漂移）。
             shapeLeaf(leaf, prepare.styleMap, profile,
                 listMarkerFor(leaf.el, prepare.styleMap::get, carriers), genOf = prepare.genOf,
+                // 「首字」一旦按 `::first-letter` 单列一段，其字号/face 行为由伪元素样式主导；
+            // 单叶根只求一次并缓存（章节无规则即 null 零开销）。
+            firstLetterOf = prepare.firstLetterOf,
                 floatLead = leaf.floatLead, classify = prepare.classify, hidden = prepare.hidden,
                 // P3：重路径的预算已写在盒上（含量画同值）。
                 replaceableFitH = leaf.replaceableFitH)
@@ -624,6 +663,8 @@ class BoxChapterLayouter(
             profile.cjkLatinSpacingEmApplied,
             profile.fgColor,
             prepare.genOf,
+            prepare.firstLetterOf,
+            deviceScale = profile.density,
         )
         val drawable = run {
             // 表格行展开进窗口（Compose 面随行窗绘制单元格文本 + 边框；legacy drawTableRow 不动）。
@@ -638,6 +679,10 @@ class BoxChapterLayouter(
                     orilumn.reader.engine.skia.TableCellLines.RowFrame(
                         t, li, fl.yTop, leaf.replaceableHeight.coerceAtLeast(1), fl.charStart,
                         leaf.style, orilumn.reader.engine.skia.TableCellLines.tableAncestorOf(leaf.el),
+                        // E11：格内容/格边框的裁剪（重路径：盒流后叶的 `clipRect` 已就位）。
+                        leaf.contentClip(),
+                        // E12：本行的累积相对定位偏移（上下/左右都在 `expandTable` 里落到行几何上）。
+                        leaf.relOffsetX, leaf.relOffsetY,
                     ),
                 )
             }
@@ -768,6 +813,13 @@ class BoxChapterLayouter(
         letterSpacingEm: Float,
         cjkLatinSpacingEm: Float,
         inkColor: Int,
+        /**
+         * E11：裁剪几何源（元素 → 其自身 padding box，若该元素 `overflow` 裁剪；窗口坐标系）——
+         * 与本次 [lines] 同一 Y 口径（由 [buildBackgroundDrawBoxes] 的同一聚合给出）。缺省即不裁。
+         */
+        clipOf: (MarkupElement) -> ClipRect? = { null },
+        /** 显示密度（只影响虚线边框的段/隙比例，见 [orilumn.reader.engine.skia.DrawLine.deviceScale]）。 */
+        deviceScale: Float = 1f,
     ): Map<Int, orilumn.reader.engine.skia.DrawLine>? {
         val out = HashMap<Int, orilumn.reader.engine.skia.DrawLine>()
         for (i in leafList.indices) {
@@ -778,10 +830,12 @@ class BoxChapterLayouter(
             val text = shape.text
             if (text.isEmpty()) continue
             val style = leaf.style
+            // E11：本叶内容的 `overflow` 祖先裁剪（含叶自身；无声明即 null）。叶内各行共用。
+            val leafClip = contentClipOf(el, clipOf)
             val mono = style.monospace || el.tag == "pre"
             val tag = if (el.isText) el.parent?.tag ?: el.tag else el.tag
             val w = NormalFlowLayout.innerBreakWidth(style, leaf.contentWidth)
-            val xLeft = leaf.contentLeft + (style.border.left + style.padding.left).roundToInt()
+            val xLeft = leaf.contentLeft + (style.border.left + style.padding.left).roundToInt() + leaf.relOffsetX
             val marker = listMarkerFor(el, prepare::resolveStyle, prepare.firstCarrierLeaves)
             val base = localFirst.getOrElse(i) { -1 }
             if (base < 0) continue
@@ -794,6 +848,8 @@ class BoxChapterLayouter(
             } else 0
             // P4-a3: 环绕前导行按收缩宽整形、x 右移悬浮偏移（与 DrawLineBuilder 重路径同式）。
             val lead = leaf.floatLead
+            // E21 残留修复：首字下沉盒（塑形侧已按它断行，见 `shapeGeometry`；此处同式落位）。
+            val cap = shape.shapeCapFloat
             for (k in 0 until shape.lineCount) {
                 val lineIdx = base + k
                 val fl = lines.getOrNull(lineIdx) ?: continue
@@ -803,13 +859,16 @@ class BoxChapterLayouter(
                 // 跳过，页少字而不报错。现在炸。
                 require(s >= 0 && e >= s && e <= text.length) { "buildPartialSkiaWindow bad range s=$s e=$e len=${text.length}" }
                 val intruded = lead != null && k < lead.lines
+                val capIntruded = cap != null && k in 1..cap.lines
                 out[lineIdx] = orilumn.reader.engine.skia.DrawLine(
                     text = text,
-                    // lineEnd 是开区间（ParagraphShape 约定）；DrawLine.range 是闭区间（与断行器输出一致），
+                    deviceScale = deviceScale,
+                    // lineEnd 是开区间（塑形 shape 约定）；DrawLine.range 是闭区间（与断行器输出一致），
                     // 此处 s..e 会多含下一行首字、末行直接 substring 越界崩回书架，必须 s until e。
                     range = s until e,
-                    yTop = fl.yTop,
-                    yBottom = fl.yBottom,
+                    // E12：`position: relative` 的绘制偏移（叶的累积偏移；纯增量，与坐标系无关）。
+                    yTop = fl.yTop + leaf.relOffsetY,
+                    yBottom = fl.yBottom + leaf.relOffsetY,
                     alignment = style.textAlign,
                     fontSizePx = style.fontSizePx,
                     lineHeightRatio = style.lineHeightRatio,
@@ -820,13 +879,34 @@ class BoxChapterLayouter(
                     monospace = mono,
                     letterSpacingEm = letterSpacingEm,
                     cjkLatinSpacingEm = cjkLatinSpacingEm,
-                    lineWidthPx = if (intruded) lead!!.widthPx else w,
-                    xLeft = xLeft + if (intruded) lead!!.xOffPx.roundToInt() else 0,
+                    lineWidthPx = when {
+                        intruded -> lead!!.widthPx
+                        capIntruded -> (w - cap!!.widthPx).coerceAtLeast(1)
+                        else -> w
+                    },
+                    xLeft = xLeft + when {
+                        intruded -> lead!!.xOffPx.roundToInt()
+                        capIntruded -> cap!!.widthPx
+                        else -> 0
+                    },
+                    capFloat = cap,
                     listMarker = if (k == 0) marker else null,
                     inkColor = inkColor,
                     colorRuns = shape.colorRuns,
                     fontRuns = shape.fontRuns,
-                    firstLineIndentPx = if (k == 0) leaf.style.textIndentPx.coerceAtLeast(0f) else 0f,
+                    // **行内盒的「起始于叶首字符」左边内边距折在首行缩进里**（与 canonical
+                    // DrawLineBuilder 同式：断行侧 breakWrappedLines 已按同一份 inlineBoxes 减宽，
+                    // 绘制侧首行右移同值 ⇒ 量画同源。漏加 ⇒ 行内盒左 padding 被文字压住）。
+                    firstLineIndentPx = if (k == 0) {
+                        leaf.style.textIndentPx +
+                            orilumn.reader.engine.laying.inlineBoxLeadInsetPx(shape.inlineBoxRuns)
+                    } else 0f,
+                    // 行内盒（背景/边框/内边距）随形透传（与 canonical 同源 shape.inlineBoxRuns，
+                    // 即喂断行器的同一份）。**漏传取默认空表 ⇒ 行内背景/边框/推进全不画**——
+                    // 症状：磁盘表命中/临时表渲染的页看不到 mark 背景、行内 padding+border
+                    // （2026-10-19 用户报「首开看不到、再开才看到」的真凶之一，探针实证
+                    // first-open 15/72 行带 run、增量再开 0/72）。
+                    inlineBoxRuns = shape.inlineBoxRuns,
                     // P1-2: 不换行段绘制侧以无限宽整形（与 canonical DrawLineBuilder 一致）。
                     nowrap = !orilumn.reader.engine.css.WhiteSpaceNormalize.wraps(style.whiteSpace),
                     // P1-2: 行内基线位移随段整形（与 canonical 一致）。
@@ -842,8 +922,10 @@ class BoxChapterLayouter(
                     alpha = orilumn.reader.engine.laying.effectiveOpacity(el) { prepare.resolveStyle(it) },
                     // P6-b: 叠排注音随形透传（与 canonical DrawLineBuilder 同源 shape.rubyRuns）。
                     rubyRuns = shape.rubyRuns,
-                    // 下划线随形透传（与 canonical 同源 shape.underlineRuns）。
-                    underlineRuns = shape.underlineRuns,
+                    // 下划线随形透传（与 canonical 同源 shape.decorationRuns）。
+                    decorationRuns = shape.decorationRuns,
+                    // E10：`visibility: hidden` 覆盖区间随形透传（与 canonical 同源）。
+                    visibilityHiddenRuns = shape.visibilityHiddenRuns,
                     // **Q20**：断词收尾随行读 **shape**（增量/临时页手里没有 `LayoutBox`；值与盒流
                     // `leaf.hyphenAtEnd` 同断行器同宽逐项一致）。漏传取默认 `false` ⇒
                     // `LineAligner.hyphenW == 0` ⇒ `LineWindowDrawer` 整块跳过 ⇒ 连字符画不出来。
@@ -853,6 +935,8 @@ class BoxChapterLayouter(
                     squeezeRatio = shape.shapeLineSqueezeRatio(k),
                     // P4-c2: 章内基址（与 canonical 同式；点按命中经它换算章内 char）。
                     charBase = shapeBase,
+                    // E11：`overflow` 祖先裁剪（与 canonical `DrawLineBuilder` 同源：同为叶级闭包）。
+                    clip = leafClip,
                 )
             }
         }
@@ -1012,9 +1096,10 @@ class BoxChapterLayouter(
 
         // 4. Build merged local FlowedLine stream covering all shaped blocks (P6-a2 R6 前视 carry-in).
         val tLines0 = orilumn.reader.time.platformNowMs()
-        val localLines = rebuildLocalLines(prepare, blockLo, blockHi, localShapes) {
+        val localFlow = rebuildLocalLines(prepare, blockLo, blockHi, localShapes) {
             tempShape(cache, prepare, it, profile, prefillL2)
         }
+        val localLines = localFlow.lines
         val tLines1 = orilumn.reader.time.platformNowMs()
 
         // 5. Build the drawable covering all shaped pages. It is a BookLayout, so pagination below can
@@ -1023,8 +1108,17 @@ class BoxChapterLayouter(
         val (localFirst, localLast) = localLineRanges(localShapes)
         // Q1-b：本窗口已塑形块投影成 skia DrawLine（局部行序），TextReader 合流——
         // 增量页不再回落旧 StaticLayout 画法。
+        //
+        // E11：**先**聚合窗口画盒（含裁剪几何）再投影 skia 窗口 —— 行/图/表格格的 `overflow` 裁剪
+        // 与盒自身裁剪必须同源于这一份窗口几何（对调顺序即两处裁剪边界可能不一致）。
+        val tBox0 = orilumn.reader.time.platformNowMs()
+        val boxes = buildBackgroundDrawBoxes(
+            prepare, leavesForDraw, localLines, localFirst, localLast, localFlow.lineLessBoxTop,
+        )
+        val tBox1 = orilumn.reader.time.platformNowMs()
+        val clipOf: (MarkupElement) -> ClipRect? = { boxes.clip[it] }
         val tSkia0 = orilumn.reader.time.platformNowMs()
-        val skiaLines = buildPartialSkiaWindow(prepare, leavesForDraw, localFirst, localShapes, localLines, profile.letterSpacingEm, profile.cjkLatinSpacingEmApplied, profile.fgColor)
+        val skiaLines = buildPartialSkiaWindow(prepare, leavesForDraw, localFirst, localShapes, localLines, profile.letterSpacingEm, profile.cjkLatinSpacingEmApplied, profile.fgColor, clipOf, deviceScale = profile.density)
         val tSkia1 = orilumn.reader.time.platformNowMs()
         // 表格行展开进窗口（与 canonical/临时页同源 helper；行顶/行首取本窗 FlowedLine，char 章内；
         // 相邻同表行成组，rowspan 格边框跨行）。
@@ -1040,6 +1134,11 @@ class BoxChapterLayouter(
                 orilumn.reader.engine.skia.TableCellLines.RowFrame(
                     t, li, fl.yTop, rowH, fl.charStart,
                     leaf.style, orilumn.reader.engine.skia.TableCellLines.tableAncestorOf(leaf.el),
+                    // E11：格内容/格边框的裁剪取本行叶内容的裁剪（含 `<table>` 及其祖先）。
+                    contentClipOf(leaf.el, clipOf),
+                    // E12：本行的累积相对定位偏移（叶盒已由正典盒树预处理，纯增量）。`yTop` 在此**不**平移，
+                    // 由 `expandTable` 加到 `rowTop` 上（同一份偏移只落一处，避免双加）。
+                    leaf.relOffsetX, leaf.relOffsetY,
                 ),
             )
         }
@@ -1049,9 +1148,6 @@ class BoxChapterLayouter(
             imageLoader, chapterHref, profile.cjkLatinSpacingEmApplied, profile.density,
         )
         val tTbl1 = orilumn.reader.time.platformNowMs()
-        val tBox0 = orilumn.reader.time.platformNowMs()
-        val boxes = buildBackgroundDrawBoxes(prepare, leavesForDraw, localLines, localFirst, localLast)
-        val tBox1 = orilumn.reader.time.platformNowMs()
         val frameLeadTop = windowLeadTop(prepare, blockLo, localShapes)
         val drawable = PartialDrawableLayout(
             lines = localLines,
@@ -1059,7 +1155,7 @@ class BoxChapterLayouter(
             shapeList = localShapes,
             localFirst = localFirst,
             localLast = localLast,
-            boxes = boxes,
+            boxes = boxes.boxes,
             loader = imageLoader,
             href = chapterHref,
             avoidOwnerMap = prepare.avoidOwnerMap,
@@ -1069,6 +1165,7 @@ class BoxChapterLayouter(
             tableBordersSource = incrWin.borders,
             frameLeadTop = frameLeadTop,
             elementStyleSource = prepare::resolveStyle,
+            clipSource = clipOf,
             // 量画同源：本窗 `pageImages` 的 used 宽必须与 shape 高（`shapeGeometry` 已按
             // profile.density 算）同一个 density。漏传取默认 1 ⇒ 宽 ×1、高 ×density，
             // 图被竖向拉伸（宽高比坏），此为「长宽比不对」的直接根因。
@@ -1247,9 +1344,14 @@ class BoxChapterLayouter(
     private fun blockBoundaryGap(prepare: LightPrepare, a: Int, b: Int): Int {
         val pa = prepare.block(a)
         val pb = prepare.block(b)
+        // ⚠ 只用于**相邻**块（`b == a + 1`）：E23-b 的容器指定高差额按块下标记账
+        // （[containerHeightLead][b] = 进入 b 之前闭合的容器差额总和）。
+        // E23-e：先取差额表（顺带填「下限真的生效」的容器集），再算间距 —— 折叠判据要读那份集。
+        val lead = containerHeightLead(prepare)[b]
         return ownBottomEdges(pa) +
-            NormalFlowLayout.consecutiveLeafAdvance(pa.el!!, pb.el!!, prepare::resolveStyle) +
-            (pb.style.border.top + pb.style.padding.top).roundToInt()
+            NormalFlowLayout.consecutiveLeafAdvance(pa.el!!, pb.el!!, prepare::resolveStyle, prepare::floorBinds) +
+            (pb.style.border.top + pb.style.padding.top).roundToInt() +
+            lead
     }
 
     /**
@@ -1286,6 +1388,116 @@ class BoxChapterLayouter(
         else blockBoundaryGap(prepare, b - 1, b) - ownBottomEdges(prepare.block(b - 1))
 
     /**
+     * E23-b：**容器指定高差额**前缀表（[LightPrepare.containerHeightLead] 的唯一写入点）。
+     *
+     * 重路径 `emit` 的容器分支把容器内容盒高定为 `max(在流内容高, height)`，容器底边随之落到
+     * 指定高，后随内容的 `st.y` 因此多出 `height − 内容高` 这一段（`.ovh{height:40px}` 里只有
+     * 一行 27px 时多 13px）。轻路径的行流是**局部位移**累加（[consecutiveLeafAdvance] 只含边距
+     * 与边，没有内容高可用），所以这一段必须另外补，否则临时/增量页相对磁盘页少一段 ⇒ 分页在
+     * 两种页之间横跳。
+     *
+     * 累计口径与行流逐值同源：容器内容高 = 首子链下沉 + 首叶 top 边 + Σ(叶内容盒高 + 叶自身下边
+     * + 块间 advance + 后叶自身 top 边)。**内层容器先算**（叶区间短的先），其差额写进前缀表后
+     * 自然被外层的内容高吃掉（内层盒子本来就是外层的内容）。内容高一旦达到指定高即**早退**
+     * （差额 0），故开销以「填满指定高所需的那几叶」为界，不会为一个固定高盒子扫全章。
+     *
+     * 兜底：首叶取不到 `el`、或不在容器首有效子链上（理论不可达，浮动作首子并不破链）⇒ **不补**，
+     * 与改动前同值（方向宁少不多，不会多补出重叠）。浮动叶不推进行流，只贡献自身边距（已含在
+     * advance 里），所以容器内容高不会被浮动的盒高虚增。
+     */
+    private fun containerHeightLead(prepare: LightPrepare): IntArray {
+        prepare.containerHeightLead?.let { return it }
+        val n = prepare.totalBlocks
+        val before = IntArray(n + 1)
+        if (n <= 0 || !prepare.chapterHasBoxHeight) {
+            prepare.containerHeightLead = before
+            return before
+        }
+        // 指定高**容器** → 叶区间 [lo, hi)。只认祖先（叶自身的高由 `extentOf` 与行流内的
+        // `specifiedContentHeight` 单独消费，不能重复计入）。
+        val loOf = identityMap<MarkupElement, Int>()
+        val hiOf = identityMap<MarkupElement, Int>()
+        val els = ArrayList<MarkupElement>()
+        for (i in 0 until n) {
+            var a: MarkupElement? = prepare.leafElement(i).parent
+            while (a != null) {
+                if (!a.isText && NormalFlowLayout.specifiedVerticalFloor(prepare.resolveStyle(a)) != null) {
+                    if (loOf[a] == null) {
+                        loOf[a] = i
+                        els.add(a)
+                    }
+                    hiOf[a] = i + 1
+                }
+                if (a === prepare.markup) break
+                a = a.parent
+            }
+        }
+        if (els.isEmpty()) {
+            prepare.containerHeightLead = before
+            return before
+        }
+        els.sortBy { hiOf.getValue(it) - loOf.getValue(it) }
+        for (c in els) {
+            val lo = loOf.getValue(c)
+            val hi = hiOf.getValue(c)
+            val h = NormalFlowLayout.specifiedVerticalFloor(prepare.resolveStyle(c)) ?: continue
+            if (h <= 0) continue
+            val firstLeaf = prepare.block(lo)
+            val firstEl = prepare.leafElement(lo)
+            val descent = NormalFlowLayout.firstChildDescentTop(
+                c, firstEl, prepare::resolveStyle, zeroLeafBox = firstEl.isText,
+            ) ?: continue
+            var content = descent + ownTopEdges(firstLeaf)
+            var reached = false
+            var k = lo
+            while (k < hi) {
+                val leaf = prepare.block(k)
+                val isFloat = leaf.table == null &&
+                    leaf.style.floatSide != orilumn.reader.engine.css.FloatSide.NONE
+                if (!isFloat) content += leafContentHeight(prepare, k, leaf) + ownBottomEdges(leaf)
+                if (k + 1 >= hi) {
+                    // 容器内容底 = 末叶盒底 + 末叶到容器之间各层容器的底边 + 该边界已记的内层差额。
+                    var a: MarkupElement? = prepare.leafElement(k).parent
+                    while (a != null && a !== c) {
+                        val s2 = prepare.resolveStyle(a)
+                        content += (s2.border.bottom + s2.padding.bottom).roundToInt()
+                        a = a.parent
+                    }
+                    content += before[hi]
+                } else {
+                    val next = prepare.block(k + 1)
+                    val ea = leaf.el
+                    val eb = next.el
+                    if (ea != null && eb != null) {
+                        content += NormalFlowLayout.consecutiveLeafAdvance(ea, eb, prepare::resolveStyle, prepare::floorBinds)
+                    }
+                    content += ownTopEdges(next) + before[k + 1]
+                }
+                if (content >= h) { // 内容已达指定高 ⇒ 差额 0（省掉其余叶的塑形）
+                    reached = true
+                    break
+                }
+                k++
+            }
+            if (!reached && content < h) {
+                before[hi] += h - content
+                // E23-e：下限**真的生效** ⇒ 末子下边距收进盒内（不再外塌），折叠判据要认这一条。
+                prepare.floorBoundContainers.add(c)
+            }
+        }
+        prepare.containerHeightLead = before
+        return before
+    }
+
+    /** E23-b：叶 [i] 的**内容盒高**（不含自身边；含指定高 —— 与行流、`emit` 同一口径）。 */
+    private fun leafContentHeight(prepare: LightPrepare, i: Int, leaf: LayoutBox): Int {
+        if (leaf.replaceableHeight > 0) return leaf.replaceableHeight
+        val sh = shapeBlock(prepare, i, leaf, prepare.profile)
+        val natural = if (sh.lineCount > 0) sh.lineBottom(sh.lineCount - 1) - sh.lineTop(0) else 0
+        return NormalFlowLayout.specifiedContentHeight(leaf.style, natural)
+    }
+
+    /**
      * 窗口**上边界缺口**（[PartialDrawableLayout.frameLeadTop] 的取值单源）：窗口首行行顶之上、
      * 落在窗外的那段页首缺口 = 窗口首行所属块的 [leadAbove]（窗口首行必为该页页首行）。
      *
@@ -1314,8 +1526,21 @@ class BoxChapterLayouter(
         shapes: List<ParagraphShapeRef>,
         /** P6-a2 R6: 前视塑形（lookback 块状态预热用；null = 无前视，窗口即全章）。 */
         shapeLookback: ((Int) -> ParagraphShapeRef)? = null,
-    ): List<FlowedLine> {
+    ): LocalLineFlow {
         val out = ArrayList<FlowedLine>()
+        // 无行叶（零字符、只有边框/背景的块，如 UA `<hr>`：`lineCount == 0`）的 border-box 顶记账。
+        // 行流里它没有任何锚行，轻路径的画盒聚合 [buildBackgroundDrawBoxes] 本拿不到位置 —— 这里把
+        // 行流当场算出的 `y`（与重路径 `emit` 的 `st.y` 逐值同源）带出去。仅当窗内真有无行叶时才分配
+        // （其余窗口零开销、零行为变化）；有行叶的画盒仍由行流首/末行给出，与此无涉。
+        var lineLessBoxTop: IntArray? = null
+        // 记一笔无行叶的 border-box 顶（[top] = 本叶 border-box 顶 `y`，已含 advance/clear/回填，
+        // 与重路径 `emit` 的 `st.y` 同相位）。
+        fun noteLineLessBoxTop(gi: Int, shape: ParagraphShapeRef, top: Int) {
+            if (gi < blockLo || shape.lineCount > 0 || shape.isReplaceable) return
+            val arr = lineLessBoxTop
+                ?: IntArray(blockHi - blockLo) { LocalLineFlow.NO_LINE_LESS_TOP }.also { lineLessBoxTop = it }
+            arr[gi - blockLo] = top
+        }
         // P6-a2 R6: 窗口前视 carry-in（≤8 块）：状态预热，不发射；切入窗顶时整体归零。
         val lo2 = if (blockLo > 0 && shapeLookback != null) maxOf(0, blockLo - 8) else blockLo
         val extLeaves = (lo2 until blockHi).map { prepare.block(it) }
@@ -1337,6 +1562,8 @@ class BoxChapterLayouter(
         var floatTopL: Int? = null
         var floatTopR: Int? = null
         var lastTextBottom = 0
+        // E23-b：容器指定高差额（按块下标记的前缀表；无指定高容器时恒 0）。
+        val boxLead = containerHeightLead(prepare)
         for (idx in extLeaves.indices) {
             val gi = lo2 + idx
             val leaf = extLeaves[idx]
@@ -1358,15 +1585,22 @@ class BoxChapterLayouter(
                 if (floatTopR != null) floatTopR = floatTopR!! - h
                 lastTextBottom -= h
             }
+            // E23-b：容器指定高差额。重路径的容器底边在**此刻**落到指定高（`st.y` 已含这一段），
+            // 轻路径的 advance 只带边距与边 ⇒ 这里按同一相位补回：先入基址，clear/回填/advance
+            // 全落在它上面（与重路径 `st.y` 已含差额、随后才做 margin/clear 同序）。
+            if (prevBlock != null) y += boxLead[gi]
             val advance = if (prevBlock == null) 0
-            else NormalFlowLayout.consecutiveLeafAdvance(prevBlock!!.el!!, leaf.el!!, prepare::resolveStyle)
+            else NormalFlowLayout.consecutiveLeafAdvance(prevBlock!!.el!!, leaf.el!!, prepare::resolveStyle, prepare::floorBinds)
             val ls = leaf.style
             // P6-a2: 悬浮注册（img/文本；与重路径 emit 同式：零推进＋双侧跨度＋同侧堆叠）。
             // 表格行永不视为悬浮（与重路径 `box.table == null` 守卫同式）。
-            val hasSize = (shape.isReplaceable && shape.replaceableBottom > 0) || shape.lineCount > 0
+            // E23-b：空悬浮盒（无文本、非替换）只要指定高为正也是真浮动盒（重路径同判据）。
+            val hasSize = (shape.isReplaceable && shape.replaceableBottom > 0) || shape.lineCount > 0 ||
+                (!shape.isReplaceable && NormalFlowLayout.specifiedContentHeight(ls, 0) > 0)
             if (leaf.table == null && ls.floatSide != orilumn.reader.engine.css.FloatSide.NONE && hasSize) {
                 // 悬浮盒自身 advance 照常（与重路径 margin 消费同式），再堆叠/注册。
-                y += advance
+                // E23-b：同行并排的第二块起不加自身顶边距（与重路径同阶；行顶由本行首块定）。
+                if (leaf.floatNewRow) y += advance
                 // 显式 clear 只越指定侧。
                 if (ls.clearSide == orilumn.reader.engine.css.ClearSide.LEFT || ls.clearSide == orilumn.reader.engine.css.ClearSide.BOTH) {
                     val b = floatBottomL
@@ -1376,9 +1610,12 @@ class BoxChapterLayouter(
                     val b = floatBottomR
                     if (b != null && b > y) y = b
                 }
-                // 相邻同侧堆叠。
-                val own = if (ls.floatSide == orilumn.reader.engine.css.FloatSide.LEFT) floatBottomL else floatBottomR
-                if (own != null && own > y) y = own
+                // 相邻同侧：**另起一行**才越过本侧旧悬浮；同行并排同顶（CSS 2.1 §9.5.1）。
+                if (leaf.floatNewRow) {
+                    val own = if (ls.floatSide == orilumn.reader.engine.css.FloatSide.LEFT) floatBottomL else floatBottomR
+                    if (own != null && own > y) y = own
+                }
+                noteLineLessBoxTop(gi, shape, y)
                 val contentY = y + (ls.border.top + ls.padding.top).roundToInt()
                 if (shape.isReplaceable && shape.replaceableBottom > 0) {
                     if (emit) {
@@ -1420,7 +1657,9 @@ class BoxChapterLayouter(
                         }
                         cumY += h
                     }
-                    val spanEnd = cumY + (ls.padding.bottom + ls.border.bottom).roundToInt()
+                    // E23 指定高：内容盒高 = max(行高和, `height`)（CSS 2.1 §10.6.3，与重路径同式）。
+                    val spanEnd = contentY + NormalFlowLayout.specifiedContentHeight(ls, cumY - contentY) +
+                        (ls.padding.bottom + ls.border.bottom).roundToInt()
                     if (ls.floatSide == orilumn.reader.engine.css.FloatSide.LEFT) {
                         if (floatBottomL == null) floatTopL = y
                         floatBottomL = maxOf(floatBottomL ?: spanEnd, spanEnd)
@@ -1483,6 +1722,7 @@ class BoxChapterLayouter(
                 }
             }
             y += advance
+            noteLineLessBoxTop(gi, shape, y)
             val shapeStart = if (shape.lineCount > 0) shape.lineStart(0) else 0
             val charBase = runningChar
             val lastK = shape.lineCount - 1
@@ -1524,16 +1764,21 @@ class BoxChapterLayouter(
                     "firstLineH=$firstH lastLineH=$lastH")
             }
             prevLastLineYBottom = cumY
-            // Mirror emit(): a leaf's contentBottom = last line bottom + its vertical padding/border.
+            // Mirror emit(): a leaf's contentBottom = max(行底, 指定高) + its vertical padding/border.
             prevBlock = leaf
-            prevContentBottom = cumY + ownBottomEdges(leaf)
+            val leafContentTop = y + (leaf.style.border.top + leaf.style.padding.top).roundToInt()
+            val leafContentBottom =
+                if (shape.isReplaceable && shape.replaceableBottom > 0) cumY
+                else leafContentTop +
+                    NormalFlowLayout.specifiedContentHeight(leaf.style, cumY - leafContentTop)
+            prevContentBottom = leafContentBottom + ownBottomEdges(leaf)
             // P6-a2: 实高行底记账（回填不上越它；与重路径同式）。
             if (prevContentBottom > y + (leaf.style.border.top + leaf.style.padding.top).roundToInt()) {
                 lastTextBottom = maxOf(lastTextBottom, prevContentBottom)
             }
             runningChar += leaf.textLength
         }
-        return out
+        return LocalLineFlow(out, lineLessBoxTop)
     }
 
     /** Per-leaf local line ranges for a contiguous [shapes] list — (firstLine, lastLineExclusive)
@@ -2098,7 +2343,6 @@ class BoxChapterLayouter(
 
     private var shapeProbe: ShapeProbe? = null
 
-    /** Shapes one block's [ParagraphShape] for the temp-page path. */
     /**
      * P3：一个块**自身 border-box 高**的自然测量（口径乙 `othersH` 的轻路径口径）。
      *
@@ -2155,6 +2399,8 @@ class BoxChapterLayouter(
         ancestorStyleOf = prepare::resolveStyle,
         // P3-c: 生成内容与塑形同一 phase-1 结果。
         genOf = prepare.genOf,
+        // `::first-letter`：与重路径同值（叶根懒解＋缓存）。
+        firstLetterOf = prepare.firstLetterOf,
         // P4-a3: 悬浮环绕前导与重路径同源（双路断行逐字节一致）。
         floatLead = prepare.floatLeadAt(i),
         // P6-a2: 文本悬浮按悬浮宽塑形（与重路径同宽；img/表格不管）。
@@ -2192,6 +2438,8 @@ class BoxChapterLayouter(
         genOf: orilumn.reader.engine.laying.GenOf = orilumn.reader.engine.laying.EmptyGen,
         classify: orilumn.reader.engine.laying.BlockClassify? = null,
         hidden: orilumn.reader.engine.laying.HiddenCheck = orilumn.reader.engine.laying.HIDDEN_NONE,
+        /** `::first-letter` 伪元素查找（格内块同样吃首字规则的放大/着色）。 */
+        firstLetterOf: ((MarkupElement) -> orilumn.reader.engine.css.ComputedStyle?)? = null,
     ): Int {
         // 行高只取本行「rowspan==1」格的最大外高：跨行格的高度由其跨越的各行**分摊**
         // （[TableGridModel.resolveRowHeights]，浏览器实测口径），故此处不把跨行格整体压进
@@ -2216,7 +2464,7 @@ class BoxChapterLayouter(
                 // classify（重路径整章表、轻路径 `lightClassify()`），与排版侧同口径。
                 val bCls = if (b.outsideSiblings.isEmpty()) (classify ?: BLOCK_TAG_CLASSIFY)
                 else BlockClassify { it in b.outsideSiblings || (classify ?: BLOCK_TAG_CLASSIFY).isBlock(it) }
-                val sh = shapeGeometry(b.el, b.style, styles, profile, bw, imageLoader = imageLoader, chapterHref = chapterHref, ancestorStyleOf = ancestorStyleOf, genOf = genOf, classify = bCls, hidden = hidden, isBlock = { bCls.isBlock(it) })
+                val sh = shapeGeometry(b.el, b.style, styles, profile, bw, imageLoader = imageLoader, chapterHref = chapterHref, ancestorStyleOf = ancestorStyleOf, genOf = genOf, classify = bCls, hidden = hidden, isBlock = { bCls.isBlock(it) }, firstLetterOf = firstLetterOf)
                 b.shape = sh
                 val contentH = if (sh.lineCount > 0) (sh.lineBottom(sh.lineCount - 1) - sh.lineTop(0)) else 0
                 b.height = contentH + b.edgeV
@@ -2230,7 +2478,7 @@ class BoxChapterLayouter(
     }
 
     /**
-     * Shapes one leaf into a [ParagraphShape]. A table-row leaf fills its cells' shapes (each shaped
+     * Shapes one leaf into a [ParagraphShapeRef]. A table-row leaf fills its cells' shapes (each shaped
      * within its column width) and returns a synthetic single-line shape of the row's height; every other
      * leaf falls through to skia shapeGeometry.
      */
@@ -2251,10 +2499,12 @@ class BoxChapterLayouter(
         hidden: orilumn.reader.engine.laying.HiddenCheck = orilumn.reader.engine.laying.HIDDEN_NONE,
         /** P3：盒上写好的分页高度预算（重/轻两路都在盒上，塑形只读）。 */
         replaceableFitH: Int? = null,
+        /** `::first-letter` 伪元素查找（null = 章节无该伪规则 / 未命中）。 */
+        firstLetterOf: ((MarkupElement) -> orilumn.reader.engine.css.ComputedStyle?)? = null,
     ): ParagraphShapeRef {
         val t = leaf.table
         if (t != null) {
-            val rowH = fillTableRowCells(t = t, leaf = leaf, styles = styles, profile = profile, ancestorStyleOf = ancestorStyleOf, genOf = genOf, classify = classify, hidden = hidden)
+            val rowH = fillTableRowCells(t = t, leaf = leaf, styles = styles, profile = profile, ancestorStyleOf = ancestorStyleOf, genOf = genOf, classify = classify, hidden = hidden, firstLetterOf = firstLetterOf)
             return ShapedGeometry(isReplaceable = true, replaceableBottom = rowH.coerceAtLeast(1), replaceableCharEnd = leaf.textLength.coerceAtLeast(1))
         }
         return shapeGeometry(
@@ -2262,7 +2512,7 @@ class BoxChapterLayouter(
             profile, breakWidthOverride ?: breakWidthPx(leaf), listMarker,
             imageLoader = imageLoader, chapterHref = chapterHref, ancestorStyleOf = ancestorStyleOf, genOf = genOf,
             floatLead = floatLead, classify = classify, hidden = hidden, isBlock = { it.tag in BLOCK_TAGS },
-            replaceableFitH = replaceableFitH,
+            replaceableFitH = replaceableFitH, firstLetterOf = firstLetterOf,
         )
     }
 
@@ -2309,7 +2559,7 @@ class BoxChapterLayouter(
             val leaf = prepare.block(i)
             val t = leaf.table
             if (t != null) {
-                fillTableRowCells(t = t, leaf = leaf, styles = prepare.inlineStyles(i), profile = profile, ancestorStyleOf = prepare::resolveStyle, genOf = prepare.genOf, classify = prepare.lightClassify(), hidden = prepare.hidden)
+                fillTableRowCells(t = t, leaf = leaf, styles = prepare.inlineStyles(i), profile = profile, ancestorStyleOf = prepare::resolveStyle, genOf = prepare.genOf, classify = prepare.lightClassify(), hidden = prepare.hidden, firstLetterOf = prepare.firstLetterOf)
             }
             return hit
         }
@@ -2343,7 +2593,8 @@ class BoxChapterLayouter(
         require(shapes.size == blockEndExclusive - blockStart) { "assembleTempPage shapes/blocks misaligned shapes=${shapes.size} range=[$blockStart,$blockEndExclusive)" }
         require(contentH > 0) { "assembleTempPage contentH=$contentH" }
         val total = prepare.totalBlocks
-        val rawLines = rebuildLocalLines(prepare, blockStart, blockEndExclusive, shapes, shapeLookback)
+        val rawFlow = rebuildLocalLines(prepare, blockStart, blockEndExclusive, shapes, shapeLookback)
+        val rawLines = rawFlow.lines
         // Normalize the temp page's line y coordinates to start at the page's first line = 0. This
         // removes any dependence on the blocks' absolute content offsets (a mid-chapter anchor page can
         // start far down the chapter), so the page always renders top-aligned regardless of those offsets.
@@ -2351,11 +2602,20 @@ class BoxChapterLayouter(
         val lines = if (base == 0) rawLines else rawLines.map {
             FlowedLine(it.charStart, it.charEnd, it.yTop - base, it.yBottom - base, it.paragraphStart)
         }
+        // 无行叶的 border-box 顶记账与行同坐标系 ⇒ 同样要归一化（占位值不参与减法，防下溢）。
+        val lineLessBoxTop = rawFlow.lineLessBoxTop?.let { a ->
+            if (base == 0) a else IntArray(a.size) {
+                if (a[it] == LocalLineFlow.NO_LINE_LESS_TOP) a[it] else a[it] - base
+            }
+        }
         val leavesForDraw = prepare.blocks(blockStart, blockEndExclusive)
         val (localFirst, localLast) = localLineRanges(shapes)
+        // E11：同增量路径 —— **先**聚合窗口画盒（含裁剪几何），行/图/表格格的裁剪同源于它。
+        val boxes = buildBackgroundDrawBoxes(prepare, leavesForDraw, lines, localFirst, localLast, lineLessBoxTop)
+        val clipOf: (MarkupElement) -> ClipRect? = { boxes.clip[it] }
         // Q1-b：临时页同样投影 skia 窗口（页内局部行序，行 y 已归一化到页首行 = 0）——
         // ReaderScreen 合流绘制，不再回落旧 StaticLayout 画法。
-        val skiaLines = buildPartialSkiaWindow(prepare, leavesForDraw, localFirst, shapes, lines, prepare.profile.letterSpacingEm, prepare.profile.cjkLatinSpacingEmApplied, prepare.profile.fgColor)
+        val skiaLines = buildPartialSkiaWindow(prepare, leavesForDraw, localFirst, shapes, lines, prepare.profile.letterSpacingEm, prepare.profile.cjkLatinSpacingEmApplied, prepare.profile.fgColor, clipOf, deviceScale = prepare.profile.density)
         // 表格行展开进窗口（与 canonical 同源 helper；行顶/行首取本窗 FlowedLine，char 章内；
         // 相邻同表行成组，rowspan 格边框跨行）。
         val tempFrames = ArrayList<orilumn.reader.engine.skia.TableCellLines.RowFrame>()
@@ -2370,6 +2630,10 @@ class BoxChapterLayouter(
                 orilumn.reader.engine.skia.TableCellLines.RowFrame(
                     t, li, fl.yTop, rowH, fl.charStart,
                     leaf.style, orilumn.reader.engine.skia.TableCellLines.tableAncestorOf(leaf.el),
+                    // E11：格内容/格边框的裁剪取本行叶内容的裁剪（含 `<table>` 及其祖先）。
+                    contentClipOf(leaf.el, clipOf),
+                    // E12：本行的累积相对定位偏移（与重路径同源：正典叶盒预处理值）。
+                    leaf.relOffsetX, leaf.relOffsetY,
                 ),
             )
         }
@@ -2387,7 +2651,7 @@ class BoxChapterLayouter(
             // （`localLast[i] == localFirst[i]`），于是本窗口的 `BreakClusters.plan` 恒为「无簇、无
             // 强制行」——临时页/增量窗的断页规则静默失效（P4 曾如此）。
             localLast = localLast,
-            boxes = buildBackgroundDrawBoxes(prepare, leavesForDraw, lines, localFirst, localLast),
+            boxes = boxes.boxes,
             loader = imageLoader,
             href = chapterHref,
             // P4d：临时页的绘制布局也带上 `break-inside: avoid` 属主图 —— 临时/磁盘两条路径的
@@ -2400,6 +2664,7 @@ class BoxChapterLayouter(
             tableBordersSource = tempWin.borders,
             frameLeadTop = tempEdgeGaps,
             elementStyleSource = prepare::resolveStyle,
+            clipSource = clipOf,
             density = prepare.profile.density,
         )
         var lastLine = if (lines.isEmpty()) 0 else lines.size
@@ -2583,7 +2848,7 @@ class BoxChapterLayouter(
     }
 
     /**
-     * Rebuilds the whole-chapter line stream from each leaf's real [ParagraphShape], preserving the
+     * Rebuilds the whole-chapter line stream from each leaf's real [ParagraphShapeRef], preserving the
      * box tree's structural inter-block margins (from [structure], height-independent) but laying the
      * lines with the shape's exact per-line heights. Afterwards the box geometry and painting agree
      * exactly: getLineTop(k) == the shape line's top at its global position.
@@ -2714,12 +2979,72 @@ class BoxChapterLayouter(
         lines: List<FlowedLine>,
         firstByBlock: IntArray,
         lastByBlock: IntArray,
-    ): List<LayoutBox> {
-        if (leafList.isEmpty() || lines.isEmpty()) return emptyList()
+        /**
+         * E7：无行叶（零字符、只有边框/背景的块，如 UA `<hr>`）的 border-box 顶 ——
+         * [LocalLineFlow.lineLessBoxTop]，下标与 [leafList] 一一对应。null/占位 = 旧口径
+         * （该叶有行，或有行但窗口半截）。画盒侧没有它就只能整块跳过（旧行为：行流里没锚行）。
+         */
+        lineLessBoxTop: IntArray? = null,
+    ): LightDrawBoxes {
+        if (leafList.isEmpty()) return LightDrawBoxes(emptyList(), emptyMap())
+        // 叶 [i] 的 border-box 上下沿 + 行锚。有行叶 = 行流首/末行 ± 自身边距（旧口径逐值不变）；
+        // **无行叶**（`hi <= lo`）没有任何锚行：用行流记账的 border-box 顶 + 自身上下边距造一个零宽锚
+        // （`lo == hi`，与重路径 `emit` 的 `firstLineIndex == lastLineExclusive` 同式 ⇒ 页面归属门
+        // 两路同判）。null = 本叶无可画区间（窗口半截 / 有行但落在窗外 / 无行且无记账）。
+        fun extentOf(i: Int): LeafBand? {
+            val leaf = leafList[i]
+            val lo0 = firstByBlock[i].coerceAtLeast(0)
+            val hi0 = lastByBlock[i]
+            val s = leaf.style
+            val topEdges = (s.border.top + s.padding.top).roundToInt()
+            val bottomEdges = (s.border.bottom + s.padding.bottom).roundToInt()
+            val recorded = if (hi0 <= lo0) lineLessBoxTop?.getOrNull(i) else null
+            if (recorded != null && recorded != LocalLineFlow.NO_LINE_LESS_TOP) {
+                val anchor = lo0.coerceAtMost(lines.size)
+                // E23 指定高：无行叶（空块）的盒高 = max(0, `height`) + 自身上下边距。
+                return LeafBand(
+                    recorded,
+                    recorded + topEdges +
+                        NormalFlowLayout.specifiedContentHeight(s, 0) + bottomEdges,
+                    anchor,
+                    anchor,
+                )
+            }
+            if (lo0 >= lines.size || hi0 <= lo0) return null
+            // §10.6.7（E11）：**替换型浮动叶**（图）在行流里只有零高行 —— 真实下沿按替换高还原，
+            // 否则裁剪盒聚合不到它（同章在轻路径上会把整张图齐根切掉）。文本浮动叶的行是真的，无需还原。
+            val contentTop = lines[lo0].yTop
+            val bottom = if (s.floatSide != orilumn.reader.engine.css.FloatSide.NONE && leaf.replaceableHeight > 0) {
+                contentTop + leaf.replaceableHeight + bottomEdges
+            } else {
+                // E23 指定高：内容盒高 = max(行底 − 内容顶, `height`)，与 `emit` 逐值同式。
+                contentTop +
+                    NormalFlowLayout.specifiedContentHeight(
+                        s,
+                        lines[minOf(hi0, lines.size) - 1].yBottom - contentTop,
+                    ) + bottomEdges
+            }
+            return LeafBand(
+                top = lines[lo0].yTop - topEdges,
+                bottom = bottom,
+                lo = lo0,
+                hi = hi0,
+            )
+        }
         // A "self-owned" owner is the background bearing LEAF itself (a `pre`/`p.filename` with its own
         // background): its aggregated extent already counts its own top+bottom edges once, so the band
         // must NOT be extended by them again. Container owners (blockquote/.rust-example-rendered) are
         // not self-owned and DO extend by their own edges (their lines span only the content area).
+        //
+        // 浮动叶的**底外边距**另算进「容器内容底」：CSS 2.1 §10.6.7 规定 BFC 根的高度包含浮动盒
+        // 的 margin box，且浮动盒外边距不与父底边折叠。少了这 2dp，clearfix 容器的底 padding
+        // 看起来比顶部薄一截（与 Chromium 逐值对照量出）。
+        fun bandBottomOf(i: Int, band: LeafBand, includeFloatMargin: Boolean = true): Int {
+            val s = leafList[i].style
+            return band.bottom + if (includeFloatMargin && s.floatSide != FloatSide.NONE) {
+                s.margin.bottom.roundToInt()
+            } else 0
+        }
         val aggTop = HashMap<MarkupElement, Int>()
         val ownerBottom = HashMap<MarkupElement, Int>()
         val ownerFirst = HashMap<MarkupElement, Int>()
@@ -2728,36 +3053,93 @@ class BoxChapterLayouter(
         val selfOwned = HashSet<MarkupElement>()
         for (i in leafList.indices) {
             val leaf = leafList[i]
-            val lo = firstByBlock[i].coerceAtLeast(0)
-            val hi = lastByBlock[i]
-            if (lo >= lines.size || hi <= lo) continue
-            // Mirror NormalFlowLayout.emit's leaf branch: a leaf's border box = its text lines ± its own
-            // padding/border (counted once, already including the top inset rebuildLocalLines applies).
-            val top = lines[lo].yTop - (leaf.style.border.top + leaf.style.padding.top).roundToInt()
-            val bottom = lines[minOf(hi, lines.size) - 1].yBottom + (leaf.style.border.bottom + leaf.style.padding.bottom).roundToInt()
+            val band = extentOf(i) ?: continue
             val el = leaf.el ?: continue
             val owner = prepare.backgroundOwnerMap[el] ?: continue
             if (owner === el) selfOwned.add(owner)
+            val bottom = bandBottomOf(i, band, includeFloatMargin = owner !== el)
             val prevTop = aggTop[owner]
-            if (prevTop == null || top < prevTop) {
-                aggTop[owner] = top
+            if (prevTop == null || band.top < prevTop) {
+                aggTop[owner] = band.top
                 ownerLeaf[owner] = el
             }
             ownerBottom[owner] = maxOf(ownerBottom[owner] ?: bottom, bottom)
-            ownerFirst[owner] = minOf(ownerFirst[owner] ?: lo, lo)
-            ownerLast[owner] = maxOf(ownerLast[owner] ?: hi, hi)
+            ownerFirst[owner] = minOf(ownerFirst[owner] ?: band.lo, band.lo)
+            ownerLast[owner] = maxOf(ownerLast[owner] ?: band.hi, band.hi)
         }
         val out = ArrayList<LayoutBox>(aggTop.size)
+        // E11：`overflow` 祖先裁剪几何 —— **同一份窗口聚合口径**（同一 `extentOf`、同一
+        // `backgroundBandExtent` + 首子链下沉），故轻路径的裁剪区与重路径 `applyInheritedClips`
+        // 同值，临时/增量页不会与正典页在裁剪边界上横跳。窗口叶沿**自身＋祖先链**上溯，凡
+        // `overflow` 非 visible 者聚合出一个裁剪盒（横向走 `ownerBackgroundBox`，纵向走同一 band 数学）。
+        // 无 `overflow` 声明时本表恒空 ⇒ 全链 clip 为 null、像素零回归。
+        // E23-b：容器（含 `overflow` 裁剪盒）的**指定高**在这里落一次 —— 内容底抬到
+        // `max(内容顶 + height, 聚合内容底)`，与重路径 `emit` 容器分支、与视口页的盒几何同式。
+        // 自属叶（背景/裁剪属主就是叶自身）的指定高已在 [extentOf] 里消费，不走这里。
+        val clipTop = HashMap<MarkupElement, Int>()
+        val clipBottom = HashMap<MarkupElement, Int>()
+        val clipLeaf = HashMap<MarkupElement, MarkupElement>()
+        val clipSelfOwned = HashSet<MarkupElement>()
+        for (i in leafList.indices) {
+            val band = extentOf(i) ?: continue
+            val el = leafList[i].el ?: continue
+            var a: MarkupElement? = el
+            while (a != null) {
+                if (!a.isText && prepare.resolveStyle(a).clipsOverflow()) {
+                    if (a === el) clipSelfOwned.add(a)
+                    val prev = clipTop[a]
+                    if (prev == null || band.top < prev) {
+                        clipTop[a] = band.top
+                        clipLeaf[a] = el
+                    }
+                    val b = bandBottomOf(i, band, includeFloatMargin = a !== el)
+                    clipBottom[a] = maxOf(clipBottom[a] ?: b, b)
+                }
+                a = a.parent
+            }
+        }
+        val clip = HashMap<MarkupElement, ClipRect>(clipTop.size)
+        // E12：`position: relative` 的累积绘制偏移 —— 轻路径的聚合盒是**扁平**的（没有盒链可累加），
+        // 故按**元素链**现算（与重路径 `applyRelativeOffsets` 同源同值），并随盒一起平移裁剪区。
+        val offsetOf: (MarkupElement?) -> BoxOffset = { relativeOffsetOf(it, prepare::resolveStyle) }
+        for ((owner, top) in clipTop) {
+            val box = ownerBackgroundBox(owner, prepare)
+            val off = offsetOf(owner)
+            box.relOffsetX = off.x
+            box.relOffsetY = off.y
+            val s = box.style
+            val descent = clipLeaf[owner]?.let {
+                NormalFlowLayout.firstChildDescentTop(owner, it, prepare::resolveStyle)
+            } ?: 0
+            val contentTop = top - descent
+            val aggBottom = clipBottom[owner] ?: top
+            val (bandTop, bandBottom) = NormalFlowLayout.backgroundBandExtent(
+                ownerTop = contentTop,
+                ownerBottom = maxOf(aggBottom, contentTop + NormalFlowLayout.specifiedContentHeight(s, 0)),
+                ownerEdgesTop = (s.border.top + s.padding.top).roundToInt(),
+                ownerEdgesBottom = (s.border.bottom + s.padding.bottom).roundToInt(),
+                selfOwned = owner in clipSelfOwned,
+            )
+            box.contentTop = bandTop
+            box.contentBottom = bandBottom
+            clip[owner] = box.paddingBox()
+        }
+        // 盒自身（底色/边框）的裁剪 = 祖先链裁剪（不含自身 padding box；内容侧另交自身）。
         for ((owner, top) in aggTop) {
             val box = ownerBackgroundBox(owner, prepare)
+            val off = offsetOf(owner)
+            box.relOffsetX = off.x
+            box.relOffsetY = off.y
             val s = box.style
             // 首叶 margin-top 段本就画容器底：按首子链补到容器真顶（自属/窗半截即 0，保持旧行为）。
             val descent = ownerLeaf[owner]?.let {
                 NormalFlowLayout.firstChildDescentTop(owner, it, prepare::resolveStyle)
             } ?: 0
+            val contentTop = top - descent
+            val aggBottom = ownerBottom[owner] ?: top
             val (bandTop, bandBottom) = NormalFlowLayout.backgroundBandExtent(
-                ownerTop = top - descent,
-                ownerBottom = ownerBottom[owner] ?: top,
+                ownerTop = contentTop,
+                ownerBottom = maxOf(aggBottom, contentTop + NormalFlowLayout.specifiedContentHeight(s, 0)),
                 ownerEdgesTop = (s.border.top + s.padding.top).roundToInt(),
                 ownerEdgesBottom = (s.border.bottom + s.padding.bottom).roundToInt(),
                 selfOwned = owner in selfOwned,
@@ -2768,15 +3150,16 @@ class BoxChapterLayouter(
             // page-ownership gate can exclude backgrounds that belong to another page.
             box.firstLineIndex = ownerFirst[owner] ?: -1
             box.lastLineExclusive = ownerLast[owner] ?: -1
+            box.clipRect = box.inheritedClip(clip::get)
             if (box.contentBottom > box.contentTop) out.add(box)
         }
-        // Border-only containers (e.g. a `table` carrying only `border-bottom`, no fill):
-        // background attribution skips them by design (hasBackground-only), but their own borders
-        // still need a carrier on the light path — the heavy path draws every container box.
-        // Aggregate each such ancestor over its in-window descendant leaves (same band math as
-        // background owners, first-child descent included); ancestors that already own a background
-        // box are skipped (that box draws their borders). Fill-less like leaf border boxes below,
-        // so emission order among them is irrelevant.
+        // **无叶属主的容器**（只带边框的 `table`；以及**背景容器**装了自绘背景的子盒，
+        // 典型是 clearfix `.cf{overflow:hidden;background:#f5f5f5;border:1px solid}` 只装浮动方块）：
+        // 上面的背景归属只沿「叶 → 最近背景属主」上溯，浮动方块自己有背景 ⇒ 属主是方块自己，
+        // 容器永远进不了 [aggTop]；重路径画每个容器盒，轻路径就会整块丢掉容器的底色与边框
+        // （症状：首开/临时页不画，再开命中磁盘表才出现）。这里补一层：沿窗内叶的祖先链
+        // 聚合出这些容器自己的矩形带（同一 band 数学、同一首子链下沉）。
+        // 已有背景盒的祖先跳过（那个盒子已经连底色带边框一起画了）。
         val cTop = HashMap<MarkupElement, Int>()
         val cBottom = HashMap<MarkupElement, Int>()
         val cFirst = HashMap<MarkupElement, Int>()
@@ -2785,36 +3168,37 @@ class BoxChapterLayouter(
         for (i in leafList.indices) {
             val leaf = leafList[i]
             val el = leaf.el ?: continue
-            val lo = firstByBlock[i].coerceAtLeast(0)
-            val hi = lastByBlock[i]
-            if (lo >= lines.size || hi <= lo) continue
-            val top = lines[lo].yTop - (leaf.style.border.top + leaf.style.padding.top).roundToInt()
-            val bottom = lines[minOf(hi, lines.size) - 1].yBottom + (leaf.style.border.bottom + leaf.style.padding.bottom).roundToInt()
+            val band = extentOf(i) ?: continue
             var a = el.parent
             while (a != null && a.tag != "body") {
                 val s = prepare.resolveStyle(a)
-                if (!s.hasBackground() && s.hasBorderEdges() && !aggTop.containsKey(a)) {
+                if ((s.hasBackground() || s.hasBorderEdges()) && !aggTop.containsKey(a)) {
                     val prev = cTop[a]
-                    if (prev == null || top < prev) {
-                        cTop[a] = top
+                    if (prev == null || band.top < prev) {
+                        cTop[a] = band.top
                         cLeaf[a] = el
                     }
-                    cBottom[a] = maxOf(cBottom[a] ?: bottom, bottom)
-                    cFirst[a] = minOf(cFirst[a] ?: lo, lo)
-                    cLast[a] = maxOf(cLast[a] ?: hi, hi)
+                    cBottom[a] = maxOf(cBottom[a] ?: Int.MIN_VALUE, bandBottomOf(i, band))
+                    cFirst[a] = minOf(cFirst[a] ?: band.lo, band.lo)
+                    cLast[a] = maxOf(cLast[a] ?: band.hi, band.hi)
                 }
                 a = a.parent
             }
         }
         for ((container, top) in cTop) {
             val box = ownerBackgroundBox(container, prepare)
+            val off = offsetOf(container)
+            box.relOffsetX = off.x
+            box.relOffsetY = off.y
             val s = box.style
             val descent = cLeaf[container]?.let {
                 NormalFlowLayout.firstChildDescentTop(container, it, prepare::resolveStyle)
             } ?: 0
+            val contentTop = top - descent
+            val aggBottom = cBottom[container] ?: top
             val (bandTop, bandBottom) = NormalFlowLayout.backgroundBandExtent(
-                ownerTop = top - descent,
-                ownerBottom = cBottom[container] ?: top,
+                ownerTop = contentTop,
+                ownerBottom = maxOf(aggBottom, contentTop + NormalFlowLayout.specifiedContentHeight(s, 0)),
                 ownerEdgesTop = (s.border.top + s.padding.top).roundToInt(),
                 ownerEdgesBottom = (s.border.bottom + s.padding.bottom).roundToInt(),
                 selfOwned = false,
@@ -2823,6 +3207,7 @@ class BoxChapterLayouter(
             box.contentBottom = bandBottom
             box.firstLineIndex = cFirst[container] ?: -1
             box.lastLineExclusive = cLast[container] ?: -1
+            box.clipRect = box.inheritedClip(clip::get)
             if (box.contentBottom > box.contentTop) out.add(box)
         }
         // Border-only leaves (e.g. a bordered `h2` inside a `blockquote`): their background comes
@@ -2836,36 +3221,65 @@ class BoxChapterLayouter(
             val el = leaf.el ?: continue
             if (!leaf.style.hasBorderEdges()) continue
             if (aggTop.containsKey(el)) continue
-            val lo = firstByBlock[i].coerceAtLeast(0)
-            val hi = lastByBlock[i]
-            if (lo >= lines.size || hi <= lo) continue
-            val top = lines[lo].yTop - (leaf.style.border.top + leaf.style.padding.top).roundToInt()
-            val bottom = lines[minOf(hi, lines.size) - 1].yBottom + (leaf.style.border.bottom + leaf.style.padding.bottom).roundToInt()
-            if (bottom <= top) continue
+            val band = extentOf(i) ?: continue
+            if (band.bottom <= band.top) continue
             val borderBox = LayoutBox(
                 el = el, style = leaf.style, contentLeft = leaf.contentLeft, contentWidth = leaf.contentWidth,
                 ranges = emptyList(), textLength = 0, lineHeights = emptyList(), childBoxes = emptyList(),
             )
-            borderBox.contentTop = top
-            borderBox.contentBottom = bottom
-            borderBox.firstLineIndex = lo
-            borderBox.lastLineExclusive = hi
+            borderBox.contentTop = band.top
+            borderBox.contentBottom = band.bottom
+            // E12：叶的累积相对定位偏移（叶盒已由正典盒树预处理，纯增量、与坐标系无关）。
+            borderBox.relOffsetX = leaf.relOffsetX
+            borderBox.relOffsetY = leaf.relOffsetY
+            borderBox.firstLineIndex = band.lo
+            borderBox.lastLineExclusive = band.hi
+            borderBox.clipRect = borderBox.inheritedClip(clip::get)
             out.add(borderBox)
         }
-        return out
+        // **祖先先于后代**：上面三张表都是 HashMap（遍历序不确定），而这里的盒子是扁平表
+        // （重路径是盒树按序递归）。不排序时，一个不透明底色可能画在子孙之后把子孙盖掉
+        // （本轮的 clearfix 容器就属于这种：容器带 `#f5f5f5` 底色，里面是自带背景的浮动方块）。
+        // 按元素在文档树里的深度做**稳定**排序：同深度保持插入序，祖先恒在前。
+        if (out.size > 1) {
+            val depthCache = HashMap<MarkupElement, Int>()
+            fun depthOf(el: MarkupElement): Int = depthCache.getOrPut(el) {
+                var d = 0
+                var p = el.parent
+                while (p != null) { d++; p = p.parent }
+                d
+            }
+            out.sortBy { box -> box.el?.let(::depthOf) ?: Int.MAX_VALUE }
+        }
+        return LightDrawBoxes(out, clip)
     }
 
     /** Builds a [LayoutBox] for a background owner: its resolved style + horizontal box geometry. */
     private fun ownerBackgroundBox(el: MarkupElement, prepare: LightPrepare): LayoutBox {
         val style = prepare.resolveStyle(el)
-        val contentWidth = NormalFlowLayout.descendContentWidth(el, prepare.layoutContentWidth) { e ->
-            val s = prepare.resolveStyle(e)
-            (s.padding.horizontal + s.border.horizontal).roundToInt()
-        }.coerceAtLeast(1)
+        val contentWidth = NormalFlowLayout.descendContentWidth(el, prepare.layoutContentWidth,
+            { e ->
+                val s = prepare.resolveStyle(e)
+                (s.padding.horizontal + s.border.horizontal).roundToInt()
+            },
+            { e ->
+                val s = prepare.resolveStyle(e)
+                s.margin.left.roundToInt() + s.margin.right.roundToInt()
+            },
+            { e -> prepare.resolveStyle(e) },
+        ).coerceAtLeast(1)
         val contentLeft = NormalFlowLayout.descendContentLeft(el, 0,
             leftEdgesOf = { e -> val s = prepare.resolveStyle(e); (s.border.left + s.padding.left).roundToInt() },
             marginLeftOf = { e -> val s = prepare.resolveStyle(e); s.margin.left.roundToInt() },
         )
+        // E23-b：悬浮叶的画盒几何走 eager 表的实际落点与自身宽（否则浮动底盒会画成满宽，
+        // 与重路径（`LayoutBox` 的 boxLeft/boxW = 悬浮盒自身）分叉）。
+        prepare.floatBoxOf(el)?.let { (x, w) ->
+            return LayoutBox(
+                el = el, style = style, contentLeft = contentLeft + x, contentWidth = w,
+                ranges = emptyList(), textLength = 0, lineHeights = emptyList(), childBoxes = emptyList(),
+            )
+        }
         // 表容器与重路径同式（指定宽/margin auto），否则增量/临时页的表边框画满容器宽，
         // 与正典页（33..627）反复横跳。descend 值是旧全宽口径：宽含表自身边距，左缘已含 margin。
         if (el.tag == "table") {
@@ -2883,6 +3297,45 @@ class BoxChapterLayouter(
         )
     }
 }
+
+/**
+ * 内核层：[BoxChapterLayouter.rebuildLocalLines] 的产出 —— 窗口行流 + **无行叶的 border-box 顶**记账。
+ *
+ * 无行叶 = 零字符、只有边框/背景的块（`lineCount == 0`，如 UA `<hr>`：2px 高的场景分隔线）。它在
+ * 行流里没有任何锚行，[BoxChapterLayouter.buildBackgroundDrawBoxes] 的「叶 → 行区间」聚合本来
+ * 拿不到它的位置 ⇒ 轻路径（临时页 / 增量窗）画不出它的边框盒，而重路径（盒树）画得出 ——
+ * 同章在两路下外观分叉。这里把行流当场算出的 border-box 顶（与重路径 `emit` 的 `st.y` 同式同值）
+ * 带出来，画盒侧据此补一个零宽行锚的边框盒。
+ *
+ * [lineLessBoxTop] 仅当窗内**真的存在**无行叶时非空（下标 = 窗内叶序，其余项为
+ * [NO_LINE_LESS_TOP]），所以普通窗口的分配与行为都零变化。
+ */
+private class LocalLineFlow(
+    val lines: List<FlowedLine>,
+    val lineLessBoxTop: IntArray?,
+) {
+    companion object {
+        /** [lineLessBoxTop] 的占位值：该叶有行（画盒走行流首/末行旧口径）。 */
+        const val NO_LINE_LESS_TOP = Int.MIN_VALUE
+    }
+}
+
+/** 内核层画盒侧的一次叶区间取值：border-box 上下沿 + 行锚（[lo], [hi]）。 */
+private class LeafBand(val top: Int, val bottom: Int, val lo: Int, val hi: Int)
+
+/**
+ * E11：轻路径一次窗口绘盒聚合的产物。
+ *
+ * @property boxes 底色/边框盒（含只带边框的容器/叶与**裁剪属主**盒；见
+ *   [BoxChapterLayouter.buildBackgroundDrawBoxes]）。
+ * @property clip 裁剪几何：**裁剪元素 → 其 padding box**（窗口坐标系，与 [boxes] 同一 Y 口径）。
+ *   等价于重路径 [orilumn.reader.engine.laying.applyInheritedClips] 的返回表；文本行/插图/表格格内容
+ *   与盒自身的裁剪都从这张表查（[orilumn.reader.engine.laying.contentClipOf]）。
+ */
+internal class LightDrawBoxes(
+    val boxes: List<LayoutBox>,
+    val clip: Map<MarkupElement, ClipRect>,
+)
 
 /**
  * A [DrawableBookLayout] that backs only a contiguous range of shaped blocks — the minimal rendering
@@ -2921,6 +3374,11 @@ private class PartialDrawableLayout(
      * top 边（v3 口径）。
      */
     private val elementStyleSource: ((MarkupElement) -> orilumn.reader.engine.css.ComputedStyle)? = null,
+    /**
+     * E11：裁剪几何源（元素 → 自身 padding box，若该元素 `overflow` 裁剪；窗口坐标系）。
+     * 与 [boxes]/[skiaLinesSource] 同源于一次窗口聚合（[LightDrawBoxes.clip]）。null = 不裁。
+     */
+    private val clipSource: ((MarkupElement) -> ClipRect?)? = null,
     protected override val density: Float = 1f,
 ) : orilumn.reader.engine.skia.WindowedBookLayout() {
 
@@ -2953,6 +3411,12 @@ private class PartialDrawableLayout(
     /** v4 页首缺口：祖先样式源（调用方的 `prepare::resolveStyle`）；null = 无源，退回 v3 口径。 */
     override fun elementStyle(el: MarkupElement): orilumn.reader.engine.css.ComputedStyle? =
         elementStyleSource?.invoke(el)
+
+    /** E11：该元素内容的 `overflow` 祖先裁剪（含自身裁剪盒）= 窗口聚合表的交集；无源即不裁。 */
+    override fun elementClip(el: MarkupElement?): ClipRect? {
+        val src = clipSource ?: return null
+        return contentClipOf(el, src)
+    }
 
     override fun getLineTop(i: Int): Int = lines[i].yTop
     override fun getLineBottom(i: Int): Int = lines[i].yBottom
@@ -3036,6 +3500,20 @@ private class PartialDrawableLayout(
 }
 
 /**
+ * E23-b：P6-a2 悬浮 eager 透传的四张表（下标 = 叶下标）。
+ *
+ * [leads]/[widths] 是 P6-a2 原有的环绕前导与悬浮实宽；[xOffs] = 悬浮盒内容左相对其包含块内容左的
+ * 偏移（右浮动已含自身宽，直接可用）、[newRows] = 该盒是否另起一行（CSS 2.1 §9.5.1 行装箱结果，
+ * 重路径 build 期同一份 [orilumn.reader.engine.laying.NormalFlowLayout.FloatPending] 算法）。
+ */
+private class FloatEager(
+    val leads: List<orilumn.reader.engine.laying.FloatLead?>,
+    val widths: List<Int?>,
+    val xOffs: List<Int>,
+    val newRows: List<Boolean>,
+)
+
+/**
  * Light structural cascade for the large-chapter foreground: leaf ordering + char starts (a pure markup
  * pass) plus a **lazy** per-block style/width materializer. Blocks are only cascaded when actually shaped,
  * so the foreground never computes styles for the whole chapter (matching how shaping is already scoped).
@@ -3086,6 +3564,65 @@ class LightPrepare(
     internal var clusterBlockOwnHeight: ((Int) -> Int)? = null,
 ) {
     val totalBlocks: Int get() = markupLeaves.size
+
+    /** E23-b：块 [i] 的叶元素 —— 只读叶集，**不物化** [block]（结构级扫描用）。 */
+    internal fun leafElement(i: Int): MarkupElement = markupLeaves[i]
+
+    /**
+     * E23-b：**块边界上的容器指定高差额**前缀表（下标 = 块下标，值 = 进入该块之前要补的差额）。
+     * 由 [BoxChapterLayouter] 首次需要时算好写回（要塑形，本类算不了）；null = 尚未计算。
+     */
+    internal var containerHeightLead: IntArray? = null
+
+    /**
+     * E23-e：**竖向下限真的生效**的容器（`min-height` 把盒子撑高了）—— 这些容器的末子下边距被
+     * 收进盒内、不再外塌（与 Chromium 实测同式；见 `NormalFlowLayout.emit` 的容器分支）。
+     * 由 [BoxChapterLayouter.containerHeightLead] 在算差额时顺带填，供
+     * [orilumn.reader.engine.laying.NormalFlowLayout.consecutiveLeafAdvance] 的折叠判据读取
+     * （重路径同判据读 `LayoutBox.verticalFloorBound`，两路同源）。
+     */
+    internal val floorBoundContainers = HashSet<MarkupElement>()
+
+    /** 元素 [el] 的竖向下限是否**真的生效**（撑高了盒子 ⇒ 断掉父↔末子底折叠）。 */
+    internal fun floorBinds(el: MarkupElement): Boolean = floorBoundContainers.contains(el)
+
+    /**
+     * E23-b / E23-e：本章是否可能有**指定高（或最小高）的非叶容器**（= [containerHeightLead] 的总开关）。
+     *
+     * 门取**超集**：样式表里有能出 px 的 `height` / `min-height` 声明（`auto`/百分比不算），或树上
+     * inline `style` 提到 height（`min-height` 含 "height" 子串，自然命中）；命中后才沿每叶祖先链
+     * （按元素去重）真读一次竖向下限。
+     * 绝大多数书的 `height` 只出现在 `img` 这类替换叶上（或压根没有）⇒ 这里恒 false，
+     * 差额表整章零扫描、零塑形（与 R26 `anyFloat` 同一个取舍：先探一次，别在开书路径上扫）。
+     */
+    val chapterHasBoxHeight: Boolean by lazy {
+        if (!engine.hasBoxHeightDeclaration() && !inlineMentionsHeight(markup)) return@lazy false
+        val seen = identityMap<MarkupElement, Boolean>()
+        for (leaf in markupLeaves) {
+            var n: MarkupElement? = leaf.parent
+            while (n != null) {
+                if (seen.containsKey(n)) break // 该节点及其祖先已扫过（链一律上溯到根）
+                seen[n] = true
+                if (NormalFlowLayout.specifiedVerticalFloor(resolveStyle(n)) != null) return@lazy true
+                if (n === markup) break
+                n = n.parent
+            }
+        }
+        false
+    }
+
+    /** 树上是否有 inline `style` 提到 height（粗判超集：命中才交给真级联去判）。 */
+    private fun inlineMentionsHeight(root: MarkupElement): Boolean {
+        val stack = ArrayList<MarkupElement>()
+        stack.add(root)
+        while (stack.isNotEmpty()) {
+            val el = stack.removeAt(stack.size - 1)
+            if (el.attrs["style"]?.contains("height") == true) return true
+            val kids = el.children
+            for (i in kids.indices) stack.add(kids[i])
+        }
+        return false
+    }
     /**
      * P3-c: 本 prepare 的生成内容查找（字符串恒有效＋伪样式新鲜懒解，与重路径同值）。
      * 空表即 [EmptyGen] 零开销。
@@ -3097,6 +3634,22 @@ class LightPrepare(
             orilumn.reader.engine.laying.GeneratedContent.genOf(genStrings) { el, p ->
                 pseudoCache.getOrPut(el to p) {
                     engine.pseudoStyle(el, orilumn.reader.engine.laying.ancestorsOf(el), engine.resolve(el, styleCache), p)
+                }
+            }
+        }
+    }
+    /**
+     * `::first-letter` 伪元素查找（与 [genOf] 同式：章节无该伪规则即 null ⇒ 塑形侧零开销；
+     * 命中则按叶根懒解＋缓存，伪样式恒新鲜，不吃旧表）。
+     */
+    internal val firstLetterOf: ((MarkupElement) -> orilumn.reader.engine.css.ComputedStyle?)? by lazy {
+        if (!styleComputer().hasFirstLetterRules()) {
+            null
+        } else {
+            val flCache = HashMap<MarkupElement, orilumn.reader.engine.css.ComputedStyle?>()
+            return@lazy { el: MarkupElement ->
+                flCache.getOrPut(el) {
+                    engine.firstLetterStyle(el, orilumn.reader.engine.laying.ancestorsOf(el), engine.resolve(el, styleCache))
                 }
             }
         }
@@ -3176,13 +3729,40 @@ class LightPrepare(
     /**
      * P6-a2: 文本叶相对其原文前兄弟的悬浮环绕前导（P6-a 起全章 eager 透传，
      * 与重路径 build 期 [FloatPending] 同式，双路恒一致；v1 单 img 前驱是其特例）。
+     *
+     * E23-b 起同一遍顺带给出**浮动盒落点**：[FloatEager.xOffs] = 悬浮盒的内容左相对其包含块
+     * 内容左的偏移（右浮动已含自身宽，直接可用）、[FloatEager.newRows] = 是否另起一行。
      */
-    private val floatData: Pair<List<orilumn.reader.engine.laying.FloatLead?>, List<Int?>> by lazy {
+    private val floatData: FloatEager by lazy {
         computeFloatLeads()
     }
-    val floatLeads: List<orilumn.reader.engine.laying.FloatLead?> get() = floatData.first
+    val floatLeads: List<orilumn.reader.engine.laying.FloatLead?> get() = floatData.leads
     /** P6-a2: 悬浮实宽表（与 floatLeads 同一前向透传产物；右对齐/塑形宽同源，零重算）。 */
-    val floatWidths: List<Int?> get() = floatData.second
+    val floatWidths: List<Int?> get() = floatData.widths
+    /** E23-b: 悬浮盒落点偏移表（非悬浮恒 0）。 */
+    val floatXOffs: List<Int> get() = floatData.xOffs
+    /** E23-b: 悬浮盒是否另起一行表（非悬浮恒 true）。 */
+    private val floatNewRows: List<Boolean> get() = floatData.newRows
+
+    /** E23-b: 块 [i] 是悬浮叶时给出「落点左 + 自身宽」（非悬浮 null）。 */
+    internal fun floatBoxAt(i: Int): Pair<Int, Int>? {
+        val w = floatWidths.getOrNull(i) ?: return null
+        return floatXOffs.getOrNull(i)?.let { it to w }
+    }
+
+    /** E23-b: 元素 → 悬浮盒「落点左 + 自身宽」（身份表；仅悬浮章节按需建，无悬浮零开销）。 */
+    private val floatBoxByEl: Map<MarkupElement, Pair<Int, Int>> by lazy {
+        if (!chapterHasFloat) {
+            emptyMap()
+        } else {
+            val m = identityMap<MarkupElement, Pair<Int, Int>>()
+            for (i in markupLeaves.indices) floatBoxAt(i)?.let { m[markupLeaves[i]] = it }
+            m
+        }
+    }
+
+    /** E23-b: 该元素的悬浮盒几何（非悬浮/无悬浮章节 = null ⇒ 调用方走原口径）。 */
+    internal fun floatBoxOf(el: MarkupElement): Pair<Int, Int>? = floatBoxByEl[el]
 
     fun floatLeadAt(blockIdx: Int): orilumn.reader.engine.laying.FloatLead? {
         if (totalBlocks <= 0) return null
@@ -3194,12 +3774,12 @@ class LightPrepare(
      * （注册/消耗/收窄同 helper；塑形同 breaker 同输入，高度恒等，故 lead 恒等）。
      * 无悬浮章节恒全空（仅样式扫描，零塑形开销）。
      */
-    private fun computeFloatLeads(): Pair<List<orilumn.reader.engine.laying.FloatLead?>, List<Int?>> {
+    private fun computeFloatLeads(): FloatEager {
         val n = totalBlocks
         // R26：结构层已经算过这个标志（有叶子时几乎白送），别再全章扫一遍只为回答同一个问题。
         // 实测 Rust 书 ch7（169 叶）这第一次扫描要 275ms，且它被 `block(i)` 里的 `floatLeads[i]`
         // 触发，直接落在开书关键路径上——与 totalChars 曾把整章重算 9.7s 同一个病。
-        if (!chapterHasFloat) return List(n) { null } to List(n) { null }
+        if (!chapterHasFloat) return FloatEager(List(n) { null }, List(n) { null }, List(n) { 0 }, List(n) { true })
         var anyFloat = false
         for (i in 0 until n) {
             if (blockStyleFor(markupLeaves[i]).floatSide != orilumn.reader.engine.css.FloatSide.NONE) {
@@ -3207,12 +3787,14 @@ class LightPrepare(
                 break
             }
         }
-        if (!anyFloat) return List(n) { null } to List(n) { null }
+        if (!anyFloat) return FloatEager(List(n) { null }, List(n) { null }, List(n) { 0 }, List(n) { true })
         // S3：与重路径同一单源（浮动 lead 的宽度决定其宿主块宽，必须与正文同变体）。
         val breaker = orilumn.reader.engine.skia.bodyParagraphBreaker(profile.letterSpacingEm, profile.cjkLatinSpacingEmApplied)
         val pending = NormalFlowLayout.FloatPending()
         val out = ArrayList<orilumn.reader.engine.laying.FloatLead?>(n)
         val widths = ArrayList<Int?>(n)
+        val xOffs = ArrayList<Int>(n)
+        val newRows = ArrayList<Boolean>(n)
         val classify = lightClassify()
         for (i in 0 until n) {
             val el = markupLeaves[i]
@@ -3224,15 +3806,24 @@ class LightPrepare(
                 a = a.parent
             }
             val style = blockStyleFor(el)
-            val cw = NormalFlowLayout.descendContentWidth(el, contentW) { e ->
-                val s = styleComputer().resolve(e, styleCache)
-                (s.padding.horizontal + s.border.horizontal).roundToInt()
-            }.coerceAtLeast(1)
+            val cw = NormalFlowLayout.descendContentWidth(el, contentW,
+                { e ->
+                    val s = styleComputer().resolve(e, styleCache)
+                    (s.padding.horizontal + s.border.horizontal).roundToInt()
+                },
+                { e ->
+                    val s = styleComputer().resolve(e, styleCache)
+                    s.margin.left.roundToInt() + s.margin.right.roundToInt()
+                },
+                { e -> styleComputer().resolve(e, styleCache) },
+            ).coerceAtLeast(1)
             if (el.tag == "table" || el.tag == "tr" || el.tag == "#text") {
                 // 表格分支清零（重路径 table 分支同式）；合成匿名恒空（重路径匿名分支同式）。
                 if (el.tag != "#text") pending.dropAll()
                 out.add(null)
                 widths.add(null)
+                xOffs.add(0)
+                newRows.add(true)
                 continue
             }
             if (NormalFlowLayout.isReplaceable(el)) {
@@ -3240,11 +3831,26 @@ class LightPrepare(
                     val (fw, fh) = NormalFlowLayout.replacedUsedSize(
                         el, style, NormalFlowLayout.innerBreakWidth(style, cw), imageLoader, chapterHref, density = profile.density,
                     )
-                    pending.register(style.floatSide, fw.coerceAtLeast(1), fh)
-                    widths.add(fw.coerceAtLeast(1))
+                    // E24：`replacedUsedSize` 给内容宽；盒宽 / 排位 / 环绕一律 border-box（+ img 自身横边）。
+                    val fbb = NormalFlowLayout.floatBorderBoxWidth(style, fw)
+                    pending.register(
+                        style.floatSide, fbb + (style.margin.left + style.margin.right).roundToInt(), fh,
+                        cw + (style.margin.left + style.margin.right).roundToInt(),
+                    )
+                    widths.add(fbb)
+                    xOffs.add(
+                        if (style.floatSide == orilumn.reader.engine.css.FloatSide.RIGHT) {
+                            (cw + (style.margin.left + style.margin.right).roundToInt() - pending.lastX).coerceAtLeast(0)
+                        } else {
+                            pending.lastX
+                        },
+                    )
+                    newRows.add(pending.lastNewRow)
                 } else {
                     pending.dropAll()
                     widths.add(null)
+                    xOffs.add(0)
+                    newRows.add(true)
                 }
                 out.add(null)
                 continue
@@ -3258,48 +3864,71 @@ class LightPrepare(
             reg(el)
             if (style.floatSide != orilumn.reader.engine.css.FloatSide.NONE) {
                 val text = NormalFlowLayout.absorbStyled(el, sub, classify, hidden, genOf).text
-                val runs = NormalFlowLayout.leafFontRuns(el, sub, classify, hidden, genOf)
-                val floatW = NormalFlowLayout.floatTextWidth(style, text, cw, breaker, runs)
+                val runs = NormalFlowLayout.leafFontRuns(el, sub, classify, hidden, genOf, firstLetterOf = firstLetterOf)
+                val floatW = NormalFlowLayout.floatBorderBoxWidth(
+                    style,
+                    NormalFlowLayout.floatTextWidth(
+                        style, text, cw, breaker, runs,
+                        NormalFlowLayout.leafInlineBoxRuns(el, sub, classify, hidden, genOf, firstLetterOf = firstLetterOf),
+                    ),
+                )
                 val breakWf = NormalFlowLayout.innerBreakWidth(style, floatW)
                 val shaped = breakWrappedLines(
                     breaker, text, style, breakWf, null, el.tag, runs,
-                    style.textIndentPx.coerceAtLeast(0f),
-                    NormalFlowLayout.leafBaselineShifts(el, sub, classify, hidden, genOf),
+                    style.textIndentPx,
+                    NormalFlowLayout.leafBaselineShifts(el, sub, classify, hidden, genOf, firstLetterOf = firstLetterOf),
+                    NormalFlowLayout.leafInlineBoxRuns(el, sub, classify, hidden, genOf, firstLetterOf = firstLetterOf),
                 )
                 val baseH = adjustLineHeightsForInlineImages(
                     text, shaped, el, sub, classify, hidden, breakWf, imageLoader, chapterHref, profile.density,
                 )
                 // P6-b: 叠排注音行增高（与重路径同式；无注音零回归）。
                 val grownH = orilumn.reader.engine.laying.adjustLineHeightsForRuby(
-                    shaped, baseH, NormalFlowLayout.leafRubyRuns(el, sub, classify, hidden, genOf),
+                    shaped, baseH, NormalFlowLayout.leafRubyRuns(el, sub, classify, hidden, genOf, firstLetterOf = firstLetterOf),
                 )
                 val h = grownH.sumOf { it.coerceAtLeast(1) }
-                pending.register(style.floatSide, floatW, h)
+                // E23-b：悬浮跨度高 = max(行高和, `height`)（与重路径 `emit` 的叶盒高同式；空悬浮盒也占位）。
+                // 行装箱按**外边盒**宽记账（左右外边距参与同行排位），容量 = 含边距的包含块内容宽。
+                val mH = (style.margin.left + style.margin.right).roundToInt()
+                pending.register(
+                    style.floatSide, floatW + mH, NormalFlowLayout.specifiedContentHeight(style, h), cw + mH,
+                )
                 widths.add(floatW)
+                xOffs.add(
+                    if (style.floatSide == orilumn.reader.engine.css.FloatSide.RIGHT) {
+                        (cw + mH - pending.lastX).coerceAtLeast(0)
+                    } else {
+                        pending.lastX
+                    },
+                )
+                newRows.add(pending.lastNewRow)
                 out.add(null)
                 continue
             }
             val lead = NormalFlowLayout.pendingLeadFor(pending, style, cw)
             out.add(lead)
             widths.add(null)
+            xOffs.add(0)
+            newRows.add(true)
             val text = NormalFlowLayout.absorbStyled(el, sub, classify, hidden, genOf).text
-            val runs = NormalFlowLayout.leafFontRuns(el, sub, classify, hidden, genOf)
+            val runs = NormalFlowLayout.leafFontRuns(el, sub, classify, hidden, genOf, firstLetterOf = firstLetterOf)
             val shaped = breakWrappedLines(
                 breaker, text, style, NormalFlowLayout.innerBreakWidth(style, cw), lead, el.tag, runs,
-                style.textIndentPx.coerceAtLeast(0f),
-                NormalFlowLayout.leafBaselineShifts(el, sub, classify, hidden, genOf),
+                style.textIndentPx,
+                NormalFlowLayout.leafBaselineShifts(el, sub, classify, hidden, genOf, firstLetterOf = firstLetterOf),
+                NormalFlowLayout.leafInlineBoxRuns(el, sub, classify, hidden, genOf, firstLetterOf = firstLetterOf),
             )
             val baseH = adjustLineHeightsForInlineImages(
                 text, shaped, el, sub, classify, hidden, NormalFlowLayout.innerBreakWidth(style, cw), imageLoader, chapterHref, profile.density,
             )
             // P6-b: 叠排注音行增高（与重路径同式；无注音零回归）。
             val grownH = orilumn.reader.engine.laying.adjustLineHeightsForRuby(
-                shaped, baseH, NormalFlowLayout.leafRubyRuns(el, sub, classify, hidden, genOf),
+                shaped, baseH, NormalFlowLayout.leafRubyRuns(el, sub, classify, hidden, genOf, firstLetterOf = firstLetterOf),
             )
             val h = grownH.sumOf { it.coerceAtLeast(1) } + style.margin.top.coerceAtLeast(0f).roundToInt()
             pending.consume(h)
         }
-        return out to widths
+        return FloatEager(out, widths, xOffs, newRows)
     }
 
     /**
@@ -3480,10 +4109,17 @@ class LightPrepare(
         val el = markupLeaves[i]
         val style = blockStyleFor(el)
         if (sink != null) m0 = orilumn.reader.time.platformNowMs() - tBlk0
-        val contentWidth = NormalFlowLayout.descendContentWidth(el, contentW) { e ->
-            val s = styleComputer().resolve(e, styleCache)
-            (s.padding.horizontal + s.border.horizontal).roundToInt()
-        }
+        val contentWidth = NormalFlowLayout.descendContentWidth(el, contentW,
+            { e ->
+                val s = styleComputer().resolve(e, styleCache)
+                (s.padding.horizontal + s.border.horizontal).roundToInt()
+            },
+            { e ->
+                val s = styleComputer().resolve(e, styleCache)
+                s.margin.left.roundToInt() + s.margin.right.roundToInt()
+            },
+            { e -> styleComputer().resolve(e, styleCache) },
+        )
         // Horizontal position = the accumulated block left edges (mirrors the heavy path's descent).
         val tW = if (sink != null) orilumn.reader.time.platformNowMs() else 0L
         val contentLeft = NormalFlowLayout.descendContentLeft(el, 0,
@@ -3513,9 +4149,13 @@ class LightPrepare(
         if (sink != null) m3 = orilumn.reader.time.platformNowMs() - tL
         // P6-a2: 右悬浮右对齐（宽取 eager 表，与重路径同源，零重算）。
         var boxLeft = contentLeft
-        if (el.tag != "#text" && style.floatSide == orilumn.reader.engine.css.FloatSide.RIGHT) {
-            val fw = floatWidths[i]
-            if (fw != null && fw > 0) boxLeft = contentLeft + maxOf(0, contentWidth - fw)
+        // E23-b：悬浮盒的落点与自身宽（同行装箱结果）——左浮动自内容左起、右浮动自内容右起，
+        // 与重路径 build 期同值；非悬浮叶走原口径（containing block 内容宽）。
+        var boxW = contentWidth
+        val floatW = if (el.tag == "#text") null else floatWidths[i]
+        if (floatW != null && floatW > 0) {
+            boxLeft = contentLeft + floatXOffs[i]
+            boxW = floatW
         }
         // P3：独图提升叶的宿主块样式（break-* 挂在块上；见 `LayoutBox.breakCarrierStyle`）。
         val carrierStyle = if (!replaceable) null else (carrierBlockOf(el) ?: el).let { c ->
@@ -3524,7 +4164,7 @@ class LightPrepare(
         val box = LayoutBox(
             el = el, style = style,
             contentLeft = boxLeft,
-            contentWidth = contentWidth,
+            contentWidth = boxW,
             ranges = emptyList(),
             // P1-2: 与重路径盒 textLength 同式（样式化归一长度）。
             textLength = textLen,
@@ -3536,6 +4176,8 @@ class LightPrepare(
             table = if (isTr) tableRowLayoutFor(el, contentWidth) else null,
             // P6-a2: 环绕前导取全章 eager 表（与重路径 pending 透传同式；匿名/替换/表格叶恒空）。
             floatLead = floatLeads[i],
+            // E23-b：同行装箱结果（重路径 build 期同一份）；非悬浮恒 true。
+            floatNewRow = if (floatW != null && floatW > 0) floatNewRows[i] else true,
             breakCarrierStyle = carrierStyle,
         )
         materialized[i] = box
@@ -3702,7 +4344,7 @@ class LightPrepare(
     }
 
     /** A small, lazily-resolved style map covering [markupLeaves[i]]'s paragraph-inline subtree, exactly the
-     *  set `ParagraphShapes.emitPlainText` walks for the shaped char stream (display:none gate). An anonymous `#text`
+     *  set `shapeGeometry` 的 `emitPlainText` walks for the shaped char stream (display:none gate). An anonymous `#text`
      *  leaf has no subtree — returning an empty map matches the heavy path (the whole-chapter styleMap
      *  holds no entry for synthesized anonymous leaves), so both paths shape the same text. */
     fun inlineStyles(i: Int): Map<MarkupElement, orilumn.reader.engine.css.ComputedStyle> = inlineMaps.getOrPut(i) {

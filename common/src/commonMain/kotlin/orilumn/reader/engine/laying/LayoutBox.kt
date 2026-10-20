@@ -4,6 +4,7 @@ import orilumn.reader.engine.css.BreakRule
 import orilumn.reader.engine.css.ComputedStyle
 import orilumn.reader.engine.css.FontRun
 import orilumn.reader.engine.html.MarkupElement
+import kotlin.math.roundToInt
 
 /** A single table row's resolved 2D grid: absolute column x positions + the row's cells. */
 class TableRowLayout(
@@ -60,6 +61,11 @@ class TableRowLayout(
  * @property top 块**内容**顶相对格内容框顶的 y（塑形行顶再加它；由 [stackTableCellBlocks] 写）。
  * @property height 块内容总高 = 各行高之和 ＋ [edgeV]（塑形侧按 `lineBottom−lineTop` 复算）。
  * @property ranges / hyphenAtEnd / lineHeights 断行结果，三者**同长同序**。
+ * @property inlineBoxRuns 行内盒（背景/边框）区间，坐标系与 [text] **同一份段表**产出
+ *   （`absorbCellBlock` 里段算一次共享，E15）—— 故匿名块也恒对齐，无「容器坐标 vs 块坐标」
+ *   偏移风险。消费两处：auto 分列的 max/min-content 计入横向内边距
+ *   （[NormalFlowLayout.tableCellPref]）与重路径格内断行（`buildTableRows`），与塑形侧
+ *   （`shapeGeometry` 自收同一套谓词）同式 ⇒ 量画同源。
  * @property shape 塑形结果（`BoxChapterLayouter.fillTableRowCells` 灌；绘制侧读）。
  */
 class TableCellBlock(
@@ -67,6 +73,12 @@ class TableCellBlock(
     val style: ComputedStyle,
     val text: String,
     val runs: List<FontRun>,
+    /**
+     * E15 行内盒（背景/边框）区间：与 [text] **同一份段表**坐标系（[NormalFlowLayout.cellBlocks]
+     * 的 [absorbCellBlock] 段算一次共享）。断行宽（`buildTableRows`）与 auto 分列 max/min-content
+     * （`tableCellPref`）都要把它的横向 padding/border 折进去 —— 否则格内行内盒比实测窄。
+     */
+    val inlineBoxRuns: List<InlineBoxRun> = emptyList(),
     /** 行内图配对扫描根（见 @property）；缺省 = [el]。 */
     val imageRoot: MarkupElement = el,
     /** 匿名块要排掉的 run 外原始兄弟节点（见 @property）；命名块恒空集。 */
@@ -196,6 +208,21 @@ class LayoutBox(
      */
     val floatLead: FloatLead? = null,
     /**
+     * E21 残留修复：`::first-letter{float:left}` 的首字下沉盒（出流，null = 无此规则）。
+     *
+     * 首字**留在叶文本里**：它在首行占的就是自己的推进量（浏览器算出的下沉盒宽也正是这个
+     * 推进量），故首行既不用收窄也不用偏移 —— 只有首行之后的若干行要右移 [CapFloat.widthPx]
+     * 并收窄同宽（[CapFloat.lines] 行）。行高账同理：首字出流，不撑首行行框，也不抬首行基线
+     * （绘制侧另算下沉盒自己的基线）。
+     */
+    val capFloat: CapFloat? = null,
+    /**
+     * E23-b：本悬浮叶是否**另起一行**（CSS 2.1 §9.5.1 的同行装箱结果，由 [FloatPending.register]
+     * 在 build/轻路径 eager 表里定，两路同一份）。`false` = 与本行已放的同侧悬浮并排（同顶）。
+     * 非悬浮叶恒 `true`（零影响）。
+     */
+    val floatNewRow: Boolean = true,
+    /**
      * **行尾连字符位**（与 [ranges] 同长同序）：该行是否断词收尾（行尾要补一个
      * [orilumn.reader.engine.laying.HYPHEN_GLYPH]）。断行侧已为它预留了版心
      * （[orilumn.reader.engine.laying.BrokenLine.hyphenAtEnd]），绘制侧靠这个字段才知行尾要落墨；
@@ -227,6 +254,16 @@ class LayoutBox(
 
     var contentBottom: Int = 0
 
+    /**
+     * E23-e：本容器（非叶）的**竖向下限是否真的生效**（`height` / `min-height` 把盒子撑高）。
+     *
+     * 生效 ⇒ 末子下边距收进盒内、父↔末子底折叠断链（CSS 2.1 §8.3.1 的 `height: auto` 条件；
+     * Chromium 实测同式）。由 `emit` 的容器分支在算出自然内容高后写一次，`lastChildBottomMargin`
+     * 的折叠判据读它 —— 轻路径同判据读 `LightPrepare.floorBoundContainers`（同一份结论）。
+     * 叶恒 `false`（叶没有末子，不参与该折叠）。
+     */
+    var verticalFloorBound: Boolean = false
+
     /** Global start line index of this box's first line in the whole stream (leaf); -1 when it has no lines. */
     var firstLineIndex: Int = -1
 
@@ -242,6 +279,26 @@ class LayoutBox(
      * 不得自行重算预算（CSS 拿不到 `contentH`，重算必漂移）。
      */
     var replaceableFitH: Int? = null
+
+    /**
+     * E11：**祖先链裁剪**矩形（`overflow` 非 visible 的祖先 padding box 交集；null = 不裁）。
+     *
+     * **不含自身**：盒自己的底色/边框不受自身 `overflow` 裁剪（只有后代内容受）。内容侧另用
+     * [orilumn.reader.engine.laying.contentClip]。由 [orilumn.reader.engine.laying.applyInheritedClips]
+     * 在盒流**之后**一次性填好（流前算即错位：上下沿由流决定）；轻路径的聚合盒由
+     * `buildBackgroundDrawBoxes` 同口径填。
+     */
+    var clipRect: ClipRect? = null
+
+    /**
+     * E12：**累积**相对定位偏移（`position: relative` 自身与祖先链之和，px）。
+     *
+     * 只影响**落墨**（底色/边框/文本行/插图）：盒的 [contentLeft]/[contentTop]/[contentBottom]
+     * 保持**流位置**不变 —— 占位、兄弟位置与分页切点不受偏移影响（相对定位不改排版）。
+     * 由 [orilumn.reader.engine.laying.applyRelativeOffsets] 在盒流之后填（绘制侧直接读）。
+     */
+    var relOffsetX: Int = 0
+    var relOffsetY: Int = 0
 
     /** 断页边**之前**规则：提升叶取宿主块（见 [breakCarrierStyle]）。 */
     val breakBefore: BreakRule get() = (breakCarrierStyle ?: style).breakBefore
@@ -267,6 +324,57 @@ class LayoutBox(
  * @property xOffPx 前导行的额外 x 偏移（左浮动 = `floatW + gap`，右浮动 = 0）。
  */
 data class FloatLead(val lines: Int, val widthPx: Int, val xOffPx: Float)
+
+/**
+ * `::first-letter{float:left}` 首字下沉盒（E21 残留修复）。
+ *
+ * **与 [FloatLead] 的分工**：首字仍占叶文本第 0 位，在首行里占自己的推进量 —— 首行的收窄/偏移
+ * 由首字本身自动给出（浏览器算出的下沉盒宽 = 首字推进量，故两者逐值一致）。[FloatLead] 描述
+ * 「别的浮动盒压我前几行」，从第 0 行起算；本类描述「首字自己要压住后面几行」，**从第 1 行起算**，
+ * 互不重叠、也不互相抵消。
+ *
+ * @property widthPx 下沉盒宽（px）= 首字推进量：第 1..[lines] 行右移这么宽、同时收窄同宽。
+ * @property lines 受影响的**后续**行数（不含首行）：`ceil(下沉盒高 / 正文字行高) - 1`。
+ * @property endExclusive 首字在叶文本里的结束下标（开区间）：行高账与基线账把这段字号剔除。
+ * @property heightPx 下沉盒高（px）= 首字那行的行高（`字号 × 行高比例`，比例继承）。
+ */
+data class CapFloat(
+    val widthPx: Int,
+    val lines: Int,
+    val endExclusive: Int,
+    val heightPx: Int,
+)
+
+/**
+ * 推算 [CapFloat]（pure JVM；重/轻两路同式）。
+ *
+ * @param capStyle `::first-letter` 的伪元素样式（null = 无规则/未命中）
+ * @param baseStyle 叶块样式（行高基准、字号回退）
+ * @param capText 首字（含前导引号/开括号，见 `firstLetterUnitLength`）—— 只用来量推进量
+ */
+fun capFloatOf(
+    capStyle: orilumn.reader.engine.css.ComputedStyle?,
+    baseStyle: orilumn.reader.engine.css.ComputedStyle,
+    capText: CharSequence,
+    breaker: ParagraphBreaker,
+): CapFloat? {
+    if (capStyle == null || capText.isEmpty()) return null
+    if (capStyle.floatSide == orilumn.reader.engine.css.FloatSide.NONE) return null
+    val size = if (capStyle.fontSizePx > 0f) capStyle.fontSizePx else baseStyle.fontSizePx
+    if (size <= 0f) return null
+    // 断行器内部已按 profile 的字距整形（`SkiaParagraphBreaker.preferredWidth` 走
+    // `SkParagraphFactory.paragraphStyle(letterSpacingEm)`）⇒ 这里不再补。
+    val adv = breaker.preferredWidth(
+        capText, size, capStyle.fontFamilies, capStyle.fontWeight, capStyle.italic, capStyle.monospace,
+    )
+    val w = adv.roundToInt().coerceAtLeast(1)
+    val capLineH = lineHeightPx(size, capStyle.lineHeightRatio).coerceAtLeast(1)
+    val bodyLineH = lineHeightPx(baseStyle.fontSizePx, baseStyle.lineHeightRatio).coerceAtLeast(1)
+    // 下沉盒顶 = 首行行框顶；它压住的后续行 = 盒底还在这些行的行框顶之下。
+    val lines = ((capLineH + bodyLineH - 1) / bodyLineH - 1).coerceAtLeast(0)
+    if (lines <= 0) return null
+    return CapFloat(widthPx = w, lines = lines, endExclusive = capText.length, heightPx = capLineH)
+}
 
 /** P3-b: 盒背景图（url + 平铺 + 定位；无 `background-size`，恒 1:1 原尺寸平铺）。 */
 data class BackgroundImage(
@@ -302,6 +410,11 @@ data class DrawRect(
      */
     val bgBoxTop: Int = 0,
     val bgBoxBottom: Int = 0,
+    /**
+     * E11：祖先链 `overflow` 裁剪（null = 不裁）。**只交给渲染层裁剪**，不做矩形求交 ——
+     * 求交会把圆角/阴影/背景图切出硬边（浏览器是画布裁剪，圆角与平铺原点保持原样）。
+     */
+    val clip: ClipRect? = null,
 )
 
 enum class DrawKind { BACKGROUND, BORDER }

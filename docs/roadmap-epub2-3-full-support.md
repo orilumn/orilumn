@@ -131,12 +131,12 @@ EPUB2 是 EPUB3 的子集基础；引擎以"一张矩阵、两列标注"方式�
 | `font-family`（含栈）`font-weight` `font-style` | ✓ | ✓ | 家庭栈回退、monospace 标志 |
 | `line-height`（比值/长度） | ✓ | ✓ | |
 | `color` | ✓ | ✓ | 主题色继承 + 显式色 run |
-| `text-decoration` | ✓ | ✓ | underline/line-through（bool） |
+| `text-decoration` | ✓ | ✓ | underline/line-through（bool）；**`line-through` 仍被画成下划线、无颜色/粗细**（欠账中：见《引擎欠账-对齐浏览器语义》总账 §2.1 的 E3/E4，排第三刀） |
 | `text-indent`（首行缩进） | ✓ | ✓ | 非继承 |
 | `text-align` | ✓ | ✓ | LEFT/CENTER/RIGHT/JUSTIFY |
 | `margin`/`padding`（简写+四边+逻辑） | ✓ | ✓ | 盒几何 + margin collapse |
-| `background-color` `background`（仅色） | ✓ | ✓ | 盒填充（页裁剪） |
-| `border`（宽度）`border-color`（单色） | ✓ | ✓ | 4 边实线带 |
+| `background-color` `background`（仅色） | ✓ | ✓ | 块盒填充（页裁剪）；**行内盒**自 0.4.7 起同样填充（按 `box-decoration-break: slice` 跨行拆片段） |
+| `border`（宽度）`border-color`（单色） | ✓ | ✓ | 4 边实线带；**行内元素四边边框**同样绘制，横向宽度参与断行 |
 | `display`（block/none/list-item/table*） | ✓ | ✓ | 块判定谓词 + `display:none` |
 | `width`/`height`/`max-*`/`min-*` | ✓ | ✓ | px 与 % 分离，% 在布局期解 |
 | `list-style-type` `list-style-position` | ✓ | ✓ | `ListMarkers` |

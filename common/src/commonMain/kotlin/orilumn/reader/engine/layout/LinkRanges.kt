@@ -21,7 +21,7 @@ data class LinkRange(val start: Int, val endExclusive: Int, val href: String)
 
 /**
  * Extracts `<a href>` link ranges from a block leaf, aligned to the same char offsets
- * [ParagraphShapes.emitText] uses for shaping (text leaves add their length, `<br>` adds 1, nested
+ * the shared shaper's `emitPlainText` uses for shaping (text leaves add their length, `<br>` adds 1, nested
  * blocks are skipped). This is the engine-side foundation for tap-to-navigate: given a page's
  * char offset you can look up whether it lies inside a link and which chapter anchor it targets.
  *

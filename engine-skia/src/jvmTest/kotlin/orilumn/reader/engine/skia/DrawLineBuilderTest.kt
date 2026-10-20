@@ -1,6 +1,7 @@
 package orilumn.reader.engine.skia
 
 import orilumn.reader.engine.css.ColorRun
+import orilumn.reader.engine.css.DecorationLine
 import orilumn.reader.engine.css.LightCssParser
 import orilumn.reader.engine.css.StyleComputer
 import orilumn.reader.engine.html.HtmlTreeConverter
@@ -8,6 +9,7 @@ import orilumn.reader.engine.laying.BlockClassify
 import orilumn.reader.engine.laying.BoxLayouter
 import orilumn.reader.engine.laying.HIDDEN_NONE
 import orilumn.reader.engine.laying.NormalFlowLayout
+import orilumn.reader.engine.laying.hasLine
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -330,7 +332,46 @@ class DrawLineBuilderTest(private val variant: String) {
     }
 
     @Test
-    fun underlineRunsFlowIntoDrawLines() {
+    fun `block ancestor decoration reaches descendant block and anonymous text leaf`() {
+        // E18 回归锁：装饰收集以叶块为根、原先只向下叠栈 ⇒ 块级祖先上的 `text-decoration`
+        // 到不了后代块。现沿祖先链补叠底栈（ancestorDecorationStack），这里锁三类入口。
+        val decorated = "<html><body><div style=\"text-decoration:line-through\">"
+        // 1) 块级祖先 → 内层块叶
+        val blockAnc = build("${decorated}<p>abc</p></div></body></html>")
+            .values.first { it.text.contains("abc") }.decorationRuns
+        // 2) 混合内容里，块级祖先 → 匿名文本叶（`zzz` 那一叶的根是 `#text`）
+        val mixed = build("${decorated}zzz<p>abc</p></div></body></html>")
+        val anon = mixed.values.first { it.text == "zzz" }.decorationRuns
+        val inner = mixed.values.first { it.text.contains("abc") }.decorationRuns
+        // 3) 祖先链上的链接元素（UA 表给 `a{text-decoration:underline}`）→ 包住的块。
+        //    E19 修后行内 `a` 直接包块级段即可（行内盒在块处断开、块级后代提升为流子项）；
+        //    修前这是整段丢字的形状（文字到不了叶，装饰收集无从跑），故曾用 `a{display:block}`
+        //    造块容器形态代替。
+        val linkAnc = build(
+            "<html><body><a href=\"#t\"><p>abc</p></a></body></html>",
+            ua = "a{text-decoration:underline}",
+        ).values.first { it.text.contains("abc") }.decorationRuns
+
+        for ((name, runs) in listOf("blockAnc" to blockAnc, "anon" to anon, "inner" to inner, "linkAnc" to linkAnc)) {
+            assertEquals("$name must carry the ancestor decoration run", 1, runs.size)
+            assertEquals("$name run covers the whole leaf text", 0, runs[0].start)
+            assertTrue("$name carries a line-through/underline", runs[0].paints.isNotEmpty())
+        }
+        assertTrue("blockAnc is line-through", blockAnc[0].hasLine(DecorationLine.LINE_THROUGH))
+        assertTrue("anon is line-through", anon[0].hasLine(DecorationLine.LINE_THROUGH))
+        assertTrue("linkAnc is underline", linkAnc[0].hasLine(DecorationLine.UNDERLINE))
+    }
+
+    @Test
+    fun `no decoration means no runs after ancestor walk`() {
+        // 祖先链补叠的零回归：没有声明装饰的祖先绝不多发 run（否则全书行都带装饰）。
+        val map = build("<html><body><div><p>abc</p></div></body></html>")
+        val line = map.values.first { it.text.contains("abc") }
+        assertTrue("plain ancestor chain must yield no runs", line.decorationRuns.isEmpty())
+    }
+
+    @Test
+    fun decorationRunsFlowIntoDrawLines() {
         // 链接下划线透传绘制指令；无下划线行零 runs。
         val ua = "rp{display:none}rt{font-size:0.6em;vertical-align:super}a{text-decoration:underline}"
         val root = HtmlTreeConverter().convert(
@@ -345,9 +386,76 @@ class DrawLineBuilderTest(private val variant: String) {
             styleMap, classify, hidden, 0f,
         )
         val linked = map.values.first { it.text.contains("表1") }
-        assertEquals(1, linked.underlineRuns.size)
-        assertEquals(1, linked.underlineRuns[0].start)
-        assertEquals(3, linked.underlineRuns[0].endExclusive)
-        assertTrue(map.values.first { it.text == "plain" }.underlineRuns.isEmpty())
+        assertEquals(1, linked.decorationRuns.size)
+        assertEquals(1, linked.decorationRuns[0].start)
+        assertEquals(3, linked.decorationRuns[0].endExclusive)
+        assertTrue(map.values.first { it.text == "plain" }.decorationRuns.isEmpty())
+    }
+
+    @Test
+    fun `line-through reaches draw lines as line-through not underline`() {
+        // E3 反向锁：`<s>` 的删除线必须**原样**到绘制指令（旧模型会把它并成下划线）。
+        val root = HtmlTreeConverter().convert(
+            "<html><body><p>a<s>bc</s>d</p></body></html>",
+        )!!
+        val engine = StyleComputer(10f, LightCssParser().parse("s{text-decoration:line-through}"), emptyList())
+        val styleMap = engine.compute(root)
+        val classify = NormalFlowLayout.heavyClassify(styleMap, engine.hasDisplayDeclaration())
+        val hidden = { el: orilumn.reader.engine.html.MarkupElement -> styleMap[el]?.displayNone == true }
+        val map = DrawLineBuilder.build(
+            BoxLayouter(10f, variantBreaker()).layoutBoxes(root, 600, styleMap, classify),
+            styleMap, classify, hidden, 0f,
+        )
+        val line = map.values.first { it.text.contains("bc") }
+        assertEquals(1, line.decorationRuns.size)
+        assertEquals(
+            setOf(orilumn.reader.engine.css.DecorationLine.LINE_THROUGH),
+            line.decorationRuns[0].paints.single().lines,
+        )
+        assertEquals(1, line.decorationRuns[0].start)
+        assertEquals(3, line.decorationRuns[0].endExclusive)
+    }
+
+    @Test
+    fun `block inside inline is not dropped and keeps link decoration and color`() {
+        // E19 回归锁（布局级，CSS 2.1 §9.2.1 block-in-inline）：行内 `<a>` 直接包块级段。
+        // 修前块里的文字到不了叶（`<a href><p>abc</p></a>` 零叶、`<a>zzz<p>abc</p>www</a>` 只剩 zzz）。
+        // 修后行内盒在块处断开：块前/后的内联片段各成匿名叶（母节点 = `a`），块级后代提升为流子项；
+        // 三段须全在，且断开的两片随行内链带下划线＋链接色（收集层的合成匿名叶父级回退）。
+        val map = build(
+            "<html><body><a href=\"#t\">zzz<p>abc</p>www</a></body></html>",
+            ua = "a{color:#0000ff;text-decoration:underline}",
+        )
+        assertEquals("three pieces, three lines", 3, map.size)
+        val ordered = map.entries.sortedBy { it.key }.map { it.value }
+        assertEquals(listOf("zzz", "abc", "www"), ordered.map { it.text.substring(it.range) })
+        for (line in ordered) {
+            assertEquals(
+                "'${line.text.substring(line.range)}' must carry the link underline",
+                1, line.decorationRuns.size,
+            )
+            assertTrue(
+                "'${line.text.substring(line.range)}' must carry an underline",
+                line.decorationRuns[0].hasLine(DecorationLine.UNDERLINE),
+            )
+        }
+        assertEquals(
+            "split anonymous run keeps the link color",
+            listOf(ColorRun(0, 3, 0xFF0000FF.toInt())),
+            ordered[0].colorRuns,
+        )
+    }
+
+    @Test
+    fun `link wrapping only a block renders that block`() {
+        // 修前零叶（整段丢字）的形状：行内 `<a>` 只包一个块级段。
+        val map = build(
+            "<html><body><a href=\"#t\"><p>abc</p></a></body></html>",
+            ua = "a{text-decoration:underline}",
+        )
+        assertEquals(1, map.size)
+        val line = map.values.single()
+        assertEquals("abc", line.text.substring(line.range))
+        assertTrue(line.decorationRuns[0].hasLine(DecorationLine.UNDERLINE))
     }
 }

@@ -304,6 +304,73 @@ class BoxPathConsistencyTest {
     }
 
     @Test
+    fun `block inside inline splits into anonymous runs and blocks on both paths`() {
+        // E19（CSS 2.1 §9.2.1 block-in-inline）：行内元素里嵌块级后代 —— 修前块级后代整段丢字
+        // （`<a href><p>abc</p></a>` 零叶、`<a>zzz<p>abc</p>www</a>` 只剩 `zzz`）。修后行内盒在块处
+        // 断开：内联片段各成匿名 run（母节点 = 行内包装），块级后代提升为流子项。重轻两路叶集/
+        // 字符起点恒等（任一漂移都会错页）。
+        val root = converter.convert("<div><a href=\"#t\">zzz<p>abc</p>www</a></div>")!!
+        val engine = engineFor("a { font-size: 20px }")
+        assertPathsConsistent(root, engine, "block-in-inline")
+        val light = lightLeaves(root, engine)
+        assertEquals(listOf("#text", "p", "#text"), light.map { it.tag })
+        assertEquals(listOf("zzz", "www"), listOf(light[0], light[2]).map { it.text })
+        // 匿名 run 的母节点是行内包装（`a`）而不是容器（`div`）：字形/行高/颜色/装饰随行内链。
+        assertEquals("a", light[0].parent?.tag)
+        assertEquals("a", light[2].parent?.tag)
+        // 断开的匿名 run 在重轻两路都取 `a` 的样式（heavy 取 styles[a]、light 取 resolve(a)）。
+        val heavy = heavyLeafBoxes(root, engine)
+        val cache = IdentityHashMap<MarkupElement, ComputedStyle>()
+        for ((i, leafEl) in light.withIndex()) {
+            assertSameLeafStyle("block-in-inline", heavy[i].style, lightBlockStyle(engine, leafEl, cache), leafEl)
+        }
+        assertEquals(20f, heavy[0].style.fontSizePx, 0f)
+        assertEquals(20f, lightBlockStyle(engine, light[0], cache).fontSizePx, 0f)
+    }
+
+    @Test
+    fun `bare block wrapped by a link is no longer dropped`() {
+        // 修前零叶的形状：行内 `<a>` 只包一个块级段（块前后无内联内容）。
+        val root = converter.convert("<a href=\"#t\"><p>abc</p></a>")!!
+        val engine = engineFor("")
+        assertPathsConsistent(root, engine, "link-wrapped-block")
+        assertEquals(listOf("p"), lightLeaves(root, engine).map { it.tag })
+    }
+
+    @Test
+    fun `sole figure inside an inline wrapper still unwraps on both paths`() {
+        // E19 谓词不得误伤「行内包装的独图」（img 不成块，教训 ⑲）：两路仍须看到 img 叶。
+        val root = converter.convert("<p><a href=\"#t\"><img src=\"a.png\" width=\"20\" height=\"10\"/></a></p>")!!
+        val engine = engineFor("")
+        assertPathsConsistent(root, engine, "sole-figure-in-inline")
+        assertEquals(listOf("img"), lightLeaves(root, engine).map { it.tag })
+    }
+
+    @Test
+    fun `inline image plus wrapped block keeps both pieces on both paths`() {
+        // `<div><img/><a>zzz<p>abc</p></a></div>`：容器无直接块子节点、但有行内内嵌块 —— 独图提升
+        // 分支必须让位（否则 img 提升、块整段丢）。两路叶集 = img + 匿名 zzz + 提升的 p
+        // （`a` 里块级段之后没有内联内容，所以只有前置匿名 run）。
+        val root = converter.convert("<div><img src=\"a.png\" width=\"20\" height=\"10\"/><a href=\"#t\">zzz<p>abc</p></a></div>")!!
+        val engine = engineFor("")
+        assertPathsConsistent(root, engine, "img-plus-wrapped-block")
+        assertEquals(listOf("img", "#text", "p"), lightLeaves(root, engine).map { it.tag })
+    }
+
+    @Test
+    fun `block inside inline inside a table cell stays lossy but consistent`() {
+        // E19 残留（账本已记）：格的字符口径在重轻两路都由 `cellFlowItems`/`cellBlocks` 单源给出，
+        // 那里 v1 仍按旧式跳过行内内嵌块（span 按 `container.children` 原始身份认段，行内子树里的块
+        // 无法用下标表达）。两路**同址**丢掉 `abc`（行 = 3 而非 6），绝不此处拆、彼处不拆。
+        val root = converter.convert("<table><tr><td><a href=\"#t\">zzz<p>abc</p></a></td></tr></table>")!!
+        val engine = engineFor("")
+        assertPathsConsistent(root, engine, "block-in-inline-in-cell")
+        val light = lightLeaves(root, engine)
+        assertEquals(listOf("tr"), light.map { it.tag })
+        assertEquals(3, heavyLeafBoxes(root, engine).single().textLength)
+    }
+
+    @Test
     fun `per-leaf base style matches across both paths for anonymous text leaves`() {
         // Defect B: <h2><span display:block>第xx章</span> 标题名</h2>'s anonymous " 标题名" leaf must carry
         // the SAME base ComputedStyle in the heavy (whole-chapter cascade/box tree) and light (lazy

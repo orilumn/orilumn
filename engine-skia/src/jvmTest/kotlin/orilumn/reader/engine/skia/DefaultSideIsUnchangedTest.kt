@@ -127,12 +127,14 @@ class DefaultSideIsUnchangedTest {
             override fun preferredWidth(
                 text: CharSequence, fontSizePx: Float, families: List<String>,
                 weight: Int, italic: Boolean, monospace: Boolean, fontRuns: List<orilumn.reader.engine.css.FontRun>,
-            ) = inner.preferredWidth(text, fontSizePx, families, weight, italic, monospace, fontRuns)
+                inlineBoxRuns: List<orilumn.reader.engine.laying.InlineBoxRun>,
+            ) = inner.preferredWidth(text, fontSizePx, families, weight, italic, monospace, fontRuns, inlineBoxRuns)
 
             override fun minContentWidth(
                 text: CharSequence, fontSizePx: Float, families: List<String>,
                 weight: Int, italic: Boolean, monospace: Boolean, fontRuns: List<orilumn.reader.engine.css.FontRun>,
-            ) = inner.minContentWidth(text, fontSizePx, families, weight, italic, monospace, fontRuns)
+                inlineBoxRuns: List<orilumn.reader.engine.laying.InlineBoxRun>,
+            ) = inner.minContentWidth(text, fontSizePx, families, weight, italic, monospace, fontRuns, inlineBoxRuns)
 
             override fun breakLines(
                 text: CharSequence, fontSizePx: Float, lineHeightRatio: Float, widthPx: Int,

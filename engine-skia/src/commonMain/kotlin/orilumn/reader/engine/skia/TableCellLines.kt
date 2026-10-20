@@ -5,6 +5,7 @@ import orilumn.reader.engine.css.ComputedStyle
 import orilumn.reader.engine.css.WhiteSpaceNormalize
 import orilumn.reader.engine.css.cssHexToArgb
 import orilumn.reader.engine.html.MarkupElement
+import orilumn.reader.engine.laying.ClipRect
 import orilumn.reader.engine.laying.NormalFlowLayout
 import orilumn.reader.engine.laying.ParagraphShapeRef
 import orilumn.reader.engine.laying.TableCellLayout
@@ -21,7 +22,7 @@ import kotlin.math.roundToInt
  * 同 helper 双路一致；边框逐边绘制（只画有宽且 style 非 NONE 的边，色跟随书内 CSS
  * `border-color`，未声明回退 `currentColor`；遗留 Android `drawTableRow` 仍为固定 `#ff999999`）。
  *
- * - 断行几何不动：行宽/对齐/字号与塑形侧（`ParagraphShapes.shapeOf` 的 cell 宽）同源，
+ * - 断行几何不动：行宽/对齐/字号与塑形侧（`shapeGeometry` 的 cell 宽）同源，
  *   此处只投影、不重排；
  * - 字符流不动：`charBase` 按行首 + 单元格累计文本长换算，与分页 `rowChars` 同账；
  * - 无 shape 的格（桌面旧路径未塑形）/ `empty-cells: hide` 空格直接跳过（与遗留绘制同式）。
@@ -104,8 +105,10 @@ object TableCellLines {
                 var acc = 0
                 for (cell in f.table.cells) {
                     val spanLast = (k + cell.rowSpan.coerceAtLeast(1) - 1).coerceAtMost(j)
-                    val spanBottom = frames[spanLast].rowTop + frames[spanLast].rowHeight.coerceAtLeast(1)
-                    acc = emitCell(cell, f.rowTop, spanBottom, f.rowCharBase + acc, f.table.emptyCellsHide, styleOf, f.fallbackStyle, letterSpacingEm, inkColor, lines, borders, frameImages, imageLoader, chapterHref, acc, cjkLatinSpacingEm, density)
+                    // E12：跨行格底取**所跨末行**自己的偏移（`tr{position:relative}` 时不串行）。
+                    val spanBottom = frames[spanLast].rowTop + frames[spanLast].offY +
+                        frames[spanLast].rowHeight.coerceAtLeast(1)
+                    acc = emitCell(cell, f.rowTop + f.offY, spanBottom, f.rowCharBase + acc, f.table.emptyCellsHide, styleOf, f.fallbackStyle, letterSpacingEm, inkColor, lines, borders, frameImages, imageLoader, chapterHref, acc, cjkLatinSpacingEm, density, f.clip, f.offX)
                 }
                 if (lines.isNotEmpty()) byLine[f.lineIdx] = lines
                 if (frameImages.isNotEmpty()) imagesByLine[f.lineIdx] = frameImages
@@ -124,6 +127,18 @@ object TableCellLines {
         val rowCharBase: Int,
         val fallbackStyle: ComputedStyle,
         val tableEl: MarkupElement?,
+        /**
+         * E11：本行内容所受的 `overflow` 祖先裁剪（行叶内容裁剪：含 `<table>` 与更外层裁剪盒），
+         * 与 [rowTop] 同一坐标系。格内文本行/格图/格边框一并带上（渲染层画布裁剪）。
+         */
+        val clip: ClipRect? = null,
+        /**
+         * E12：本行（`<table>`/`<tr>` 链上）的**累积相对定位偏移** X（`position: relative` 只落墨、
+         * 不改排版，故行的流位置 [rowTop] 不动，横向坐标在此处平移）。
+         */
+        val offX: Int = 0,
+        /** E12：同上，Y 向偏移（调用方加在 [rowTop] 上）。 */
+        val offY: Int = 0,
     )
 
     /** 多行展开结果：行下标 → 单元格文本行；行下标 → 单元格图片；边框矩形（均章节绝对 Y）。 */
@@ -177,6 +192,10 @@ object TableCellLines {
         /** 混排字距（em，0 = 关）：逐块写进 [DrawLine]，断行侧已按同值预留版心。 */
         cjkLatinSpacingEm: Float,
         density: Float = 1f,
+        /** E11：本格的 `overflow` 祖先裁剪（[RowFrame.clip]）；null = 不裁。 */
+        clip: ClipRect? = null,
+        /** E12：本行的累积相对定位偏移 X（[RowFrame.offX]；横向几何在此平移）。 */
+        offX: Int = 0,
     ): Int {
         val blocks = cell.blocks
         if (blocks.isEmpty()) return acc
@@ -187,7 +206,7 @@ object TableCellLines {
         // 单元格内容框相对行带顶/左的内缩 = 边框 + 内边距（与行高预算 padding.vertical +
         // border.vertical 对称；缺此则文本贴顶、内边距全堆在行带底部）。
         val insetTop = (cs.border.top + cs.padding.top).roundToInt()
-        val xCell = cell.x + (cs.border.left + cs.padding.left).roundToInt()
+        val xCell = cell.x + (cs.border.left + cs.padding.left).roundToInt() + offX
         val cellContentW = (cell.width - (cs.border.horizontal + cs.padding.horizontal).roundToInt()).coerceAtLeast(1)
         var charAcc = 0
         for (b in blocks) {
@@ -209,6 +228,8 @@ object TableCellLines {
                 val src = b.el.attrs["src"]
                 if (imageLoader == null || chapterHref.isBlank() || src == null) continue
                 val imgStyle = styleOf(b.el) ?: bs
+                // E10：隐藏的独图块不落图（槽位照占）。
+                if (imgStyle.visibilityHidden) continue
                 val used = NormalFlowLayout.replacedUsedSize(b.el, imgStyle, lineW, imageLoader, chapterHref, density = density)
                 val w = used.first.coerceAtLeast(1)
                 val h = used.second.coerceAtLeast(1)
@@ -221,13 +242,14 @@ object TableCellLines {
                         yBottom = yBlock + h,
                         widthPx = w,
                         heightPx = h,
+                        clip = clip,
                     ),
                 )
                 continue
             }
             val text = shape.shapeText
             if (text.isEmpty()) continue
-            val hidden = emitCellImages(b, text, shape, bs, styleOf, yBlock, xLeft, lineW, imageLoader, chapterHref, images, density)
+            val hidden = emitCellImages(b, text, shape, bs, styleOf, yBlock, xLeft, lineW, imageLoader, chapterHref, images, density, clip)
             for (k in 0 until shape.shapeLineCount) {
                 val s = shape.shapeLineStart(k)
                 val e = shape.shapeLineEnd(k)
@@ -235,6 +257,7 @@ object TableCellLines {
                 lines.add(
                     DrawLine(
                         text = text,
+                        deviceScale = density,
                         range = s until e,
                         yTop = yBlock + shape.shapeLineTop(k),
                         yBottom = yBlock + shape.shapeLineBottom(k),
@@ -254,6 +277,9 @@ object TableCellLines {
                         inkColor = inkColor,
                         colorRuns = shape.shapeColorRuns,
                         fontRuns = shape.shapeFontRuns,
+                        // 行内盒（背景/边框/内边距）随形透传（与正文两路径同源 shape.inlineBoxRuns；
+                        // 漏传取默认空表 ⇒ 表内行内装饰不画）。
+                        inlineBoxRuns = shape.inlineBoxRuns,
                         firstLineIndentPx = 0f,
                         nowrap = nowrap,
                         baselineShifts = shape.shapeBaselineShifts,
@@ -271,14 +297,18 @@ object TableCellLines {
                         // `LineAligner` 一点不挤 ⇒ 画比量宽 ⇒ 右溢被裁。
                         squeezeRatio = shape.shapeLineSqueezeRatio(k),
                         rubyRuns = shape.shapeRubyRuns,
-                        underlineRuns = shape.shapeUnderlineRuns,
+                        decorationRuns = shape.shapeDecorationRuns,
                         imgHidden = hidden[k] ?: emptyList(),
+                        // E10：`visibility: hidden` 覆盖区间随形透传（格内块与正文同源）。
+                        visibilityHiddenRuns = shape.visibilityHiddenRuns,
+                        // E11：格内容的 `overflow` 祖先裁剪（同格各块同值）。
+                        clip = clip,
                     ),
                 )
             }
             charAcc += text.length
         }
-        emitCellBorders(cell, rowTop, spanBottom, cs, borders)
+        emitCellBorders(cell, rowTop, spanBottom, cs, borders, clip, offX)
         // 单元格垂直对齐（`vertical-align: middle/bottom`；默认顶端）：内容整体在
         // [行顶+内缩, spanBottom) 内下移；跨行格 spanBottom 已是所跨末行底。
         val align = cs.verticalAlign
@@ -294,12 +324,10 @@ object TableCellLines {
             }
             if (off > 0) {
                 for (i in lineStart until lines.size) {
-                    val l = lines[i]
-                    lines[i] = l.copy(yTop = l.yTop + off, yBottom = l.yBottom + off)
+                    lines[i] = lines[i].shiftedBy(off)
                 }
                 for (i in imgStart until images.size) {
-                    val im = images[i]
-                    images[i] = im.copy(yTop = im.yTop + off, yBottom = im.yBottom + off)
+                    images[i] = images[i].shiftedBy(off)
                 }
             }
         }
@@ -327,9 +355,11 @@ object TableCellLines {
         chapterHref: String,
         images: MutableList<PageImage>,
         density: Float = 1f,
+        /** E11：格内容的 `overflow` 祖先裁剪（[PageImage.clip]）。 */
+        clip: ClipRect? = null,
     ): Map<Int, List<IntRange>> {
         val hidden = HashMap<Int, MutableList<IntRange>>()
-        if (imageLoader == null || chapterHref.isBlank()) return hidden
+        if (imageLoader == null || chapterHref.isBlank() || cs.visibilityHidden) return hidden
         val imgEls = ArrayList<MarkupElement>()
         fun walk(n: MarkupElement) {
             for (c in n.children) {
@@ -351,6 +381,8 @@ object TableCellLines {
                 val imgEl = imgEls[imgIdx++]
                 val src = imgEl.attrs["src"] ?: continue
                 val imgStyle = styleOf(imgEl) ?: cs
+                // E10：`visibility: hidden` 的替换叶不落图（占位字符由 `visibilityHiddenRuns` 一并隐去）。
+                if (imgStyle.visibilityHidden) continue
                 val used = NormalFlowLayout.replacedUsedSize(
                     imgEl, imgStyle, lineW, imageLoader, chapterHref, density = density,
                 )
@@ -369,6 +401,7 @@ object TableCellLines {
                         yBottom = yTop + h,
                         widthPx = w,
                         heightPx = h,
+                        clip = clip,
                     ),
                 )
                 hidden.getOrPut(k) { ArrayList() }.add(j..j)
@@ -388,8 +421,14 @@ object TableCellLines {
         spanBottom: Int,
         cs: ComputedStyle,
         borders: MutableList<PageBackground>,
+        /** E11：格边框同样受 `overflow` 祖先裁剪（渲染层画布裁剪）。 */
+        clip: ClipRect? = null,
+        /** E12：本行的累积相对定位偏移 X（[RowFrame.offX]；格边框横向几何在此平移）。 */
+        offX: Int = 0,
     ) {
         val bw = cs.border
+        // E10：`visibility: hidden` 的格不画边框（底色同理由 shape 的 `visibilityHiddenRuns` 覆盖文本）。
+        if (cs.visibilityHidden) return
         val bc = cs.borderColors
         val bs = cs.borderStyles
         val cur = cs.colorHex
@@ -398,24 +437,24 @@ object TableCellLines {
         // 缺 style 声明按 SOLID（与 BoxDrawer.emitEdge 同口径）。
         fun solid(s: orilumn.reader.engine.css.BorderStyle?) =
             (s ?: orilumn.reader.engine.css.BorderStyle.SOLID) != orilumn.reader.engine.css.BorderStyle.NONE
-        val l = cell.x
-        val r = cell.x + cell.width.coerceAtLeast(1)
+        val l = cell.x + offX
+        val r = cell.x + cell.width.coerceAtLeast(1) + offX
         val b = spanBottom.coerceAtLeast(rowTop + 1)
         val tw = bw.top.roundToInt()
         if (tw > 0 && solid(bs?.top)) {
-            borders.add(PageBackground(left = l, yTop = rowTop, yBottom = rowTop + tw, right = r, argb = argbOf(bc?.top), border = true))
+            borders.add(PageBackground(left = l, yTop = rowTop, yBottom = rowTop + tw, right = r, argb = argbOf(bc?.top), border = true, clip = clip))
         }
         val bw2 = bw.bottom.roundToInt()
         if (bw2 > 0 && solid(bs?.bottom)) {
-            borders.add(PageBackground(left = l, yTop = b - bw2, yBottom = b, right = r, argb = argbOf(bc?.bottom), border = true))
+            borders.add(PageBackground(left = l, yTop = b - bw2, yBottom = b, right = r, argb = argbOf(bc?.bottom), border = true, clip = clip))
         }
         val lw = bw.left.roundToInt()
         if (lw > 0 && solid(bs?.left)) {
-            borders.add(PageBackground(left = l, yTop = rowTop, yBottom = b, right = l + lw, argb = argbOf(bc?.left), border = true))
+            borders.add(PageBackground(left = l, yTop = rowTop, yBottom = b, right = l + lw, argb = argbOf(bc?.left), border = true, clip = clip))
         }
         val rw = bw.right.roundToInt()
         if (rw > 0 && solid(bs?.right)) {
-            borders.add(PageBackground(left = r - rw, yTop = rowTop, yBottom = b, right = r, argb = argbOf(bc?.right), border = true))
+            borders.add(PageBackground(left = r - rw, yTop = rowTop, yBottom = b, right = r, argb = argbOf(bc?.right), border = true, clip = clip))
         }
     }
 

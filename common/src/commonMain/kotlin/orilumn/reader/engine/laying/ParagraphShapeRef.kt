@@ -8,14 +8,13 @@ import orilumn.reader.engine.css.TextShadow
 import orilumn.reader.engine.layout.ListMarkers
 
 /**
- * Pure-JVM readable contract for a cell's shaped text, decoupling [TableCellLayout] from the
- * Android [orilumn.reader.engine.layout.ParagraphShape] class. The real [ParagraphShape] implements
- * this; table-cell expansion ([orilumn.reader.engine.skia.TableCellLines]) reads only these members,
- * so cell text joins the shared Skia [orilumn.reader.engine.skia.DrawLine] window on both platforms
- * with zero Android types involved.
+ * Pure-JVM readable contract for a cell's shaped text: the geometry the box engine hands to
+ * table-cell expansion ([orilumn.reader.engine.skia.TableCellLines]) and the window layouts, so
+ * cell text joins the shared Skia [orilumn.reader.engine.skia.DrawLine] window on both platforms
+ * with zero platform types involved. The engine's [ShapedGeometry] is the only implementation.
  *
- * Coordinates mirror [orilumn.reader.engine.layout.ParagraphShape]: line ranges are exclusive-end
- * `until` ranges into [shapeText]; heights are per-line CSS line boxes.
+ * Coordinates: line ranges are exclusive-end `until` ranges into [shapeText]; heights are per-line
+ * CSS line boxes.
  */
 interface ParagraphShapeRef {
     /** The exact plain text the breaker consumed. */
@@ -68,7 +67,25 @@ interface ParagraphShapeRef {
     /** Stacked-ruby runs over [shapeText] (empty = no ruby). */
     val shapeRubyRuns: List<RubyRun>
     /** Underline spans over [shapeText] (empty = no underline). */
-    val shapeUnderlineRuns: List<UnderlineRun>
+    val shapeDecorationRuns: List<TextDecorationRun>
+    /**
+     * 行内盒 spans over [shapeText]（空 = 无行内背景/边框）。
+     *
+     * 默认空表 = 旧行为零改动（哑实现/替换块/旧桩不必实现）。绘制侧按行裁剪成片段，
+     * 画背景（border-box）与四边边框带；**横向 padding/border 的推进量由 1b 在断行侧注入**，
+     * 本表是**同一份数据**的几何视图（量画同源）。
+     */
+    val shapeInlineBoxRuns: List<InlineBoxRun> get() = emptyList()
+    /**
+     * `::first-letter{float:left}` 首字下沉盒（null = 无）。
+     *
+     * 与 [shapeInlineBoxRuns] 同款理由挂在 shape 上：canonical 走盒流（只有 [LayoutBox.capFloat]），
+     * 增量/临时页走塑形（手里只有 shape），两路同一断行器同宽 ⇒ 收窄行数/宽度逐项一致。
+     * 绘制侧靠它决定**首字那一行的基线**（[orilumn.reader.engine.skia.DrawLine.capFloat]）。
+     */
+    val shapeCapFloat: CapFloat? get() = null
+    /** E10 `visibility: hidden` 覆盖区间（叶文本坐标系；空 = 全叶可见）。见 [visibilityHiddenRuns]。 */
+    val shapeVisibilityHiddenRuns: List<IntRange> get() = emptyList()
     /** Ancestor-chain opacity product (1 = legacy path). */
     val shapeAlpha: Float
     /** Emphasis marks (NONE = none). */
@@ -120,7 +137,17 @@ interface ParagraphShapeRef {
     /** Stacked-ruby runs over [shapeText] (empty = no ruby). */
     val rubyRuns: List<RubyRun> get() = shapeRubyRuns
     /** Underline spans over [shapeText] (empty = no underline). */
-    val underlineRuns: List<UnderlineRun> get() = shapeUnderlineRuns
+    val decorationRuns: List<TextDecorationRun> get() = shapeDecorationRuns
+    /** 行内盒 spans over [shapeText]（空 = 无行内背景/边框）。 */
+    val inlineBoxRuns: List<InlineBoxRun> get() = shapeInlineBoxRuns
+    /**
+     * E10：`visibility: hidden` 覆盖区间（叶文本坐标系；空 = 全叶可见）。
+     *
+     * 隐藏字符**不落墨但保留占位**（与 `display:none` 的去盒语义相反）。默认空表 = 旧行为零改动
+     * （哑实现/旧桩不必实现）。canonical 走盒流（`DrawLineBuilder` 自算），增量/临时页与表内块走
+     * shape（塑形期一次算好，两路同源）。
+     */
+    val visibilityHiddenRuns: List<IntRange> get() = shapeVisibilityHiddenRuns
     /** Ancestor-chain opacity product (1 = legacy path). */
     val alpha: Float get() = shapeAlpha
     /** Emphasis marks (NONE = none). */

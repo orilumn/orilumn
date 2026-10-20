@@ -527,6 +527,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         bodyPx: Float,
         base: ReaderSettings,
         overlay: BookSettings,
+        density: Float = 1f,
     ): ReaderSettings {
         if (base.layoutTheme != "original") return base
         val needIndent = overlay.firstLineIndent == null
@@ -536,7 +537,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         while (ch < chapterCount) {
             val markup = runCatching { ensureMarkup(ch) }.getOrNull()
             if (markup != null && hasParagraph(markup)) {
-                val snap = snapshotTypography(ch, bodyPx) ?: return base
+                val snap = snapshotTypography(ch, bodyPx, density) ?: return base
                 var out = base
                 if (needIndent) out = out.copy(firstLineIndent = snap.firstLineIndent)
                 if (needLine) out = out.copy(lineSpacing = snap.lineSpacing)
@@ -555,9 +556,9 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
      * 把当前章节的真实排版（首行缩进/行距）快照进设置值。探测失败原样返回。
      * 纵边距不回填：段间距即疏密，书的 margin 原样参与折叠。
      */
-    fun snapshotBookStyle(chapter: Int, bodyPx: Float, base: ReaderSettings): ReaderSettings {
+    fun snapshotBookStyle(chapter: Int, bodyPx: Float, base: ReaderSettings, density: Float = 1f): ReaderSettings {
         if (base.layoutTheme != "original") return base
-        val snap = snapshotTypography(chapter, bodyPx) ?: return base
+        val snap = snapshotTypography(chapter, bodyPx, density) ?: return base
         return base.copy(
             firstLineIndent = snap.firstLineIndent,
             lineSpacing = snap.lineSpacing,
@@ -565,11 +566,11 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
     }
 
     /** 原书排版快照（缩进/行距）：UA+作者裸级联；失败回 null（调用方回退 base）。 */
-    private fun snapshotTypography(chapter: Int, bodyPx: Float): BookStyleProbe.Snapshot? = runCatching {
+    private fun snapshotTypography(chapter: Int, bodyPx: Float, density: Float): BookStyleProbe.Snapshot? = runCatching {
         val unit = unitAt(chapter) ?: return@runCatching null
         val markup = unit.markup ?: return@runCatching null
         val sheets = (unit.cssBundle?.cssTexts ?: emptyList()).map { LightCssParser().parse(it) }
-        val styles = StyleComputer(bodyPx, StyleSheet(emptyList()), sheets).compute(markup)
+        val styles = StyleComputer(bodyPx, StyleSheet(emptyList()), sheets, pxScale = density).compute(markup)
         BookStyleProbe.snapshot(styles)
     }.onFailure { Logger.w(logTag, "snapshotBookStyle probe FAIL ch=$chapter ${it.message} → fallback base") }
         .getOrNull()
@@ -582,8 +583,8 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
      * 原书设置渲染不一致（桌面直透面板值、无探测）。
      * 非 original / 探测失败一律原样返回（见 [snapshotBookStyle]）。
      */
-    fun probeOriginalTheme(chapter: Int, bodyPx: Float, next: ReaderSettings): ReaderSettings =
-        snapshotBookStyle(chapter, bodyPx, next)
+    fun probeOriginalTheme(chapter: Int, bodyPx: Float, next: ReaderSettings, density: Float = 1f): ReaderSettings =
+        snapshotBookStyle(chapter, bodyPx, next, density)
 
     /** Start location after loading (null when there is no book/no chapter).
  *   Returns (chapter, page): starting from [startChapter], skips chapters with no laid-out

@@ -29,6 +29,10 @@ import orilumn.reader.engine.html.MarkupElement
  *   100 = book/theme rhythm, 0 = p/li margins cleared).
  * @param gapScale 疏密 (paragraphGapScale): scales the computed top/bottom margin of every OTHER
  *   block (author css / UA defaults kept; 1.0 = original rhythm).
+ * @param pxScale **CSS px → 画布物理 px** 的倍率（= 设备密度，见 `TypographicProfile.density`）。
+ *   书里的 `px` 长度是参考像素（浏览器 1 CSS px = 1 dp），引擎坐标是物理像素；不乘密度，
+ *   2x/3x 屏上所有 `px` 盒子/边框/外边距都只有 1/2、1/3 大小（正文却按 dp 放大），
+ *   观感与浏览器差异明显。只缩放 `px`（含无单位数值），`em/rem/%` 不动。
  */
 class StyleComputer(
     private val rootFontPx: Float,
@@ -39,8 +43,13 @@ class StyleComputer(
     ui: StyleSheet? = null,
     private val paragraphScale: Float = 1f,
     private val gapScale: Float = 1f,
+    private val pxScale: Float = 1f,
 ) {
     private val cascade = Cascade(ua, authorSheets, theme, settings, ui)
+
+    /** [Length] 在本引擎坐标系里的最终物理 px（`px` 乘设备密度，其余同 [Length.resolve]）。 */
+    private fun Length.devPx(elementFontPx: Float, parentFontPx: Float): Float =
+        resolve(elementFontPx, parentFontPx, rootFontPx, pxScale)
 
     private companion object {
         /** Matches a CSS length token (or `auto`) anywhere inside a mixed shorthand value. */
@@ -113,6 +122,24 @@ class StyleComputer(
 
         /** 段间距只乘算 p/li；其余块走疏密。两滑块分工，互不越界。 */
         val PARAGRAPH_TAGS = setOf("p", "li")
+
+        /** `text-decoration` 简写里的线型关键字（与样式关键字集不相交）。 */
+        val DECORATION_LINE_TOKENS = setOf("underline", "line-through", "overline")
+
+        /** `text-decoration-style` 关键字 → 枚举（`blink` 不在表内：无视觉，解析即丢）。 */
+        val DECORATION_STYLE_TOKENS = mapOf(
+            "solid" to DecorationStyle.SOLID,
+            "double" to DecorationStyle.DOUBLE,
+            "dotted" to DecorationStyle.DOTTED,
+            "dashed" to DecorationStyle.DASHED,
+            "wavy" to DecorationStyle.WAVY,
+        )
+
+        /**
+         * `text-decoration-thickness: auto`（也是**初始值**）的字号比：Chromium 取 `font_size / 10`
+         * （实测 18.5/20/40px 字号分别画 1/2/4 像素，与字体度量无关）。绘制侧再按下限 1px 与整像素对齐。
+         */
+        const val DECORATION_AUTO_THICKNESS_EM = 0.1f
     }
 
     /** Whether a raw `display` value lays the element out as a block (block/list-item/flex/grid/table*). */
@@ -187,6 +214,20 @@ class StyleComputer(
     fun pseudoStyle(el: MarkupElement, ancestors: List<MarkupElement>, base: ComputedStyle, pseudo: String): ComputedStyle {
         val winners = cascade.winningDeclarations(el, ancestors, emptyList(), pseudo)
         if (winners.isEmpty()) return base
+        return computeStyle(winners, base, el.tag, normalizeLang(el.attrs["lang"]), isPreformatted(el, ancestors))
+    }
+
+    /**
+     * `::first-letter` 伪元素计算样式：**只有确有规则命中才返回非 null**（未命中回 null，调用方
+     * 直接跳过首字分段，零开销）。与 [pseudoStyle] 同式：无内联样式/表示属性，`em` 按**
+     * 原发元素**的字号解（伪元素的父即原发元素，浏览器同式）。
+     *
+     * 章节级先行门控 [hasFirstLetterRules]：整章没有 `::first-letter` 规则时连级联都不跑。
+     */
+    fun firstLetterStyle(el: MarkupElement, ancestors: List<MarkupElement>, base: ComputedStyle): ComputedStyle? {
+        if (!hasFirstLetterRules()) return null
+        val winners = cascade.winningDeclarations(el, ancestors, emptyList(), "first-letter")
+        if (winners.isEmpty()) return null
         return computeStyle(winners, base, el.tag, normalizeLang(el.attrs["lang"]), isPreformatted(el, ancestors))
     }
 
@@ -310,7 +351,7 @@ class StyleComputer(
             val len = parseLength(t) ?: return null to null
             return when (len) {
                 is Length.Percent -> null to len.value
-                else -> len.resolve(fontSize, parent.fontSizePx, rootFontPx) to null
+                else -> len.devPx(fontSize, parent.fontSizePx) to null
             }
         }
 
@@ -371,12 +412,12 @@ class StyleComputer(
 
         return ComputedStyle(
             fontSizePx = fontSize,
-            lineHeightRatio = w["line-height"]?.let { parseLineHeight(it, fontSize) } ?: parent.lineHeightRatio,
+            lineHeightRatio = w["line-height"]?.let { parseLineHeight(it, fontSize, pxScale) } ?: parent.lineHeightRatio,
             colorHex = w["color"]?.let { parseCssColor(it) } ?: parent.colorHex,
             bold = w["font-weight"]?.let { parseFontWeightBold(it) } ?: parent.bold,
             italic = w["font-style"]?.let { parseFontStyleItalic(it) } ?: parent.italic,
-            underline = w["text-decoration"]?.let { parseUnderline(it) } ?: false,
-            textIndentPx = w["text-indent"]?.let { v -> parseLength(v)?.resolve(fontSize, parent.fontSizePx, rootFontPx) } ?: 0f,
+            decoration = parseTextDecoration(w, fontSize, parent.fontSizePx),
+            textIndentPx = w["text-indent"]?.let { v -> parseLength(v)?.devPx(fontSize, parent.fontSizePx) } ?: 0f,
             margin = margin,
             marginLeftAuto = isMarginAuto(w, left = true),
             marginRightAuto = isMarginAuto(w, left = false),
@@ -445,6 +486,7 @@ class StyleComputer(
                 ?: parent.visibilityHidden,
             overflow = parseOverflow(w) ?: OverflowValue.VISIBLE,
             positionRelative = w["position"]?.trim()?.lowercase() == "relative",
+            relativeInset = parseRelativeInset(w, fontSize, parent.fontSizePx),
             overflowWrap = w["overflow-wrap"]?.trim()?.lowercase()?.let {
                 when (it) { "break-word", "anywhere" -> OverflowWrap.BREAK_WORD; else -> OverflowWrap.NORMAL }
             } ?: parent.overflowWrap,
@@ -559,6 +601,27 @@ class StyleComputer(
 
     private var _hasDisplay: Boolean? = null
 
+    /** `::first-letter` 规则的章节级开关（懒缓存，与 [hasDisplayDeclaration] 同式）。 */
+    fun hasFirstLetterRules(): Boolean {
+        var v = _hasFirstLetter
+        if (v == null) { v = cascade.hasFirstLetterRules(); _hasFirstLetter = v }
+        return v
+    }
+
+    private var _hasFirstLetter: Boolean? = null
+
+    /**
+     * E23-b：本章样式表是否有**能出 px 的 `height` 声明**（`auto`/百分比不算）。轻路径据此决定
+     * 要不要为「容器指定高差额」沿祖先链做一遍级联（见 `Cascade.hasBoxHeightDeclaration`）。
+     */
+    fun hasBoxHeightDeclaration(): Boolean {
+        var v = _hasBoxHeight
+        if (v == null) { v = cascade.hasBoxHeightDeclaration(); _hasBoxHeight = v }
+        return v
+    }
+
+    private var _hasBoxHeight: Boolean? = null
+
     /**
      * Break values not declared default to [BreakRule.AUTO]. `avoid` (any variant, incl. `avoid-page`)
      * → [BreakRule.AVOID]; the forced values `always` / `page` / `left` / `right` / `recto` / `verso`
@@ -601,7 +664,7 @@ class StyleComputer(
         fun lenOf(v: String?): Float? {
             if (v == null) return null
             val t = v.trim().lowercase()
-            return borderWidthKeyword(t) ?: parseLength(t)?.resolve(fontSize, parentFontPx, rootFontPx)
+            return borderWidthKeyword(t)?.times(pxScale) ?: parseLength(t)?.devPx(fontSize, parentFontPx)
         }
         // `border-width`: 1–4 slots like margin (thin/medium/thick allowed per slot).
         val widthSlots: Edges? = w["border-width"]?.let { v ->
@@ -629,7 +692,7 @@ class StyleComputer(
     private fun extractFirstLength(value: String, fontSize: Float, parentFontPx: Float): Float {
         val m = LENGTH_TOKEN.find(value) ?: return 0f
         if (m.value.lowercase() == "auto") return 0f
-        return parseLength(m.value)?.resolve(fontSize, parentFontPx, rootFontPx) ?: 0f
+        return parseLength(m.value)?.devPx(fontSize, parentFontPx) ?: 0f
     }
 
     /** Finds the first parseable CSS color value inside any shorthand. Unlike a naive whitespace
@@ -763,7 +826,7 @@ class StyleComputer(
                         val f = (len.value / 100f).coerceIn(-2f, 2f)
                         if (!xSet) { xPct = f; xSet = true } else if (!ySet) { yPct = f; ySet = true }
                     } else {
-                        val px = len.resolve(fontSize, parentFontPx, rootFontPx)
+                        val px = len.devPx(fontSize, parentFontPx)
                         if (!xSet) { xPx = px; xPct = 0f; xSet = true } else if (!ySet) { yPx = px; yPct = 0f; ySet = true }
                     }
                     count++
@@ -1062,7 +1125,7 @@ class StyleComputer(
             }
             val len = parseLength(t.lowercase()) ?: return null // 未知 token 即整声明丢弃
             if (len is Length.Percent) return null
-            lens.add(len.resolve(fontSize, parentFontPx, rootFontPx))
+            lens.add(len.devPx(fontSize, parentFontPx))
         }
         if (lens.size < 2) return null
         if (lens.size > 4) return null // 含 spread（第 4 长度）→ 不支持
@@ -1100,7 +1163,7 @@ class StyleComputer(
             val len = parseLength(first) ?: return 0f to 0f
             // `%` kept as a 0..1 fraction (resolved+clamped against box dims at draw).
             if (len is Length.Percent) return 0f to (len.value / 100f).coerceIn(0f, 10f)
-            return len.resolve(fontSize, parentFontPx, rootFontPx).coerceAtLeast(0f) to 0f
+            return len.devPx(fontSize, parentFontPx).coerceAtLeast(0f) to 0f
         }
         val slots: List<String>? = w["border-radius"]?.let { splitWs(it) }?.filter { it.isNotBlank() }
         val quad = when {
@@ -1174,7 +1237,7 @@ class StyleComputer(
     private fun normalizeEdge(value: String, fontSize: Float, parentFontPx: Float): Float {
         val v = value.trim().lowercase()
         if (v == "auto" || v == "inherit" || v == "initial") return 0f
-        return parseLength(v)?.resolve(fontSize, parentFontPx, rootFontPx) ?: 0f
+        return parseLength(v)?.devPx(fontSize, parentFontPx) ?: 0f
     }
 
     private fun parseTextAlign(value: String): TextAlign = when (value.trim().lowercase()) {
@@ -1226,7 +1289,25 @@ class StyleComputer(
         if (t == "normal") return 0f
         val len = parseLength(t) ?: return 0f
         if (len is Length.Percent) return 0f // invalid for these props
-        return len.resolve(fontSize, parentFontPx, rootFontPx)
+        return len.devPx(fontSize, parentFontPx)
+    }
+
+    /**
+     * E12：`position: relative` 的四向偏移（`top/right/bottom/left`）。
+     *
+     * `auto`/未声明/非法/`%` ⇒ 该方向 `null`（`%` 需包含块尺寸，见 [RelativeInset]）。
+     * 与 [positionRelative] 分开存：`static`/`absolute` 上写了偏移也一律不生效（消费点判 `positionRelative`）。
+     */
+    private fun parseRelativeInset(w: Map<String, String>, fontSize: Float, parentFontPx: Float): RelativeInset {
+        fun dir(name: String): Float? {
+            val raw = w[name]?.trim()?.lowercase() ?: return null
+            if (raw.isEmpty() || raw == "auto") return null
+            val len = parseLength(raw) ?: return null
+            if (len is Length.Percent) return null
+            return len.devPx(fontSize, parentFontPx)
+        }
+        val inset = RelativeInset(dir("top"), dir("right"), dir("bottom"), dir("left"))
+        return if (inset.isEmpty) RelativeInset() else inset
     }
 
     private fun parseTextTransform(value: String): TextTransform = when (value.trim().lowercase()) {
@@ -1305,7 +1386,7 @@ class StyleComputer(
         fun pxOf(tok: String): Float {
             val len = parseLength(tok.trim().lowercase()) ?: return 0f
             if (len is Length.Percent) return 0f
-            return len.resolve(fontSize, fontSize, rootFontPx).coerceAtLeast(0f)
+            return len.devPx(fontSize, fontSize).coerceAtLeast(0f)
         }
         val toks = splitWs(raw.trim()).filter { it.isNotBlank() }
         return when (toks.size) {
@@ -1319,15 +1400,94 @@ class StyleComputer(
     private fun resolveFontSize(raw: String?, parentPx: Float): Float {
         val len = raw?.let { parseLength(it) } ?: return parentPx
         return when (len) {
-            is Length.Px -> len.value
+            is Length.Px -> len.value * pxScale
             is Length.Em -> parentPx * len.value
             is Length.Percent -> parentPx * len.value / 100f
             is Length.Rem -> rootFontPx * len.value
         }
     }
 
-    private fun parseUnderline(value: String): Boolean = when {
-        value.contains("underline") || value.contains("line-through") -> true
-        else -> false
+    /**
+     * `text-decoration` 简写族（第三刀）：
+     * `text-decoration-line` / `-color` / `-style` / `-thickness` + `text-decoration-skip-ink`。
+     *
+     * **单属性优先、缺失才回落简写**（与 `background` / `border` 各家族同一口径）。CSS 真正按声明
+     * **先后顺序**决定（后写的简写会重置先写的长属性），本仓级联表不带顺序 ⇒ 这里取「长属性优先」。
+     * 书里同时写简写与长属性且**顺序相反**的极少，且两值同义时无差异。
+     *
+     * `text-decoration: blink` 无视觉，解析即丢（不报错）。
+     * `auto`（也是**初始值**）按字号/10 在解析期**就地定值**（Chromium 行为，字号此处已知）；
+     * `from-font` 留 null 交绘制侧取字体度量。**两者不可混为一谈**：只写
+     * `text-decoration: underline`（没写粗细）＝ `auto` ＝字号/10，此前这里落成 null 被当成
+     * `from-font`，于是绘制侧取拉丁探针面的度量（≈1px、不随字号放大），线偏细、波浪线波长只有
+     * 浏览器的一半（实测 18.5px 字号：波长 5px vs 浏览器 9px）。
+     */
+    private fun parseTextDecoration(w: Map<String, String>, fontSize: Float, parentFontSize: Float): TextDecoration {
+        val short = w["text-decoration"]?.let { parseDecorationShorthand(it, fontSize, parentFontSize) }
+        val lines = w["text-decoration-line"]?.let { parseDecorationLines(it) } ?: short?.lines ?: emptySet()
+        val color = w["text-decoration-color"]?.let { parseCssColor(it) } ?: short?.colorHex
+        val style = w["text-decoration-style"]?.let { parseDecorationStyle(it) } ?: short?.style ?: DecorationStyle.SOLID
+        // 长属性优先、缺失才回落简写；**两侧都没写**才是初始值 auto。用 `containsKey` 判断声明存在，
+        // 不能用 `?.let`（显式 `from-font` 也解析成 null，会被误判成「没写」）。
+        val thickness = when {
+            w.containsKey("text-decoration-thickness") ->
+                parseDecorationThickness(w.getValue("text-decoration-thickness"), fontSize, parentFontSize)
+            short != null -> short.thicknessPx
+            else -> fontSize * DECORATION_AUTO_THICKNESS_EM
+        }
+        val skipInk = w["text-decoration-skip-ink"]?.let { parseSkipInk(it) } ?: true
+        return TextDecoration(lines, color, style, thickness, skipInk)
+    }
+
+    /** `text-decoration` 简写：空白分词后逐词归类（关键字集互不相交，无序亦可）。 */
+    private fun parseDecorationShorthand(value: String, fontSize: Float, parentFontSize: Float): TextDecoration {
+        val v = value.trim().lowercase()
+        if (v.isEmpty() || v == "none") return TextDecoration.NONE
+        var lines = emptySet<DecorationLine>()
+        var color: String? = null
+        var style = DecorationStyle.SOLID
+        // 简写没写粗细 ＝ `auto`（不是 from-font）：默认就填字号/10，null 只留给显式 `from-font`。
+        var thickness: Float? = fontSize * DECORATION_AUTO_THICKNESS_EM
+        for (tok in v.split(' ', '\t', '\n').filter { it.isNotBlank() }) {
+            when {
+                tok in DECORATION_LINE_TOKENS -> lines = lines + parseDecorationLines(tok)
+                tok in DECORATION_STYLE_TOKENS -> style = DECORATION_STYLE_TOKENS.getValue(tok)
+                tok == "from-font" -> thickness = null
+                tok == "auto" -> thickness = fontSize * DECORATION_AUTO_THICKNESS_EM
+                parseCssColor(tok) != null -> color = parseCssColor(tok)
+                parseLength(tok) != null -> thickness = parseLength(tok)?.devPx(fontSize, parentFontSize)
+            }
+        }
+        return TextDecoration(lines, color, style, thickness)
+    }
+
+    /** `text-decoration-line`：空格分隔的线型列表；含 `none` 即空集合。 */
+    private fun parseDecorationLines(value: String): Set<DecorationLine> {
+        val out = HashSet<DecorationLine>(3)
+        for (tok in value.trim().lowercase().split(' ', '\t', '\n')) {
+            when (tok) {
+                "underline" -> out.add(DecorationLine.UNDERLINE)
+                "line-through" -> out.add(DecorationLine.LINE_THROUGH)
+                "overline" -> out.add(DecorationLine.OVERLINE)
+            }
+        }
+        return out
+    }
+
+    private fun parseDecorationStyle(value: String): DecorationStyle? =
+        DECORATION_STYLE_TOKENS[value.trim().lowercase()]
+
+    /** `text-decoration-thickness`：`auto` → fontSize/10；`from-font` → null（绘制侧取字体度量）。 */
+    private fun parseDecorationThickness(value: String, fontSize: Float, parentFontSize: Float): Float? {
+        val v = value.trim().lowercase()
+        if (v == "from-font") return null
+        if (v == "auto") return fontSize * 0.1f
+        return parseLength(v)?.devPx(fontSize, parentFontSize)
+    }
+
+    private fun parseSkipInk(value: String): Boolean? = when (value.trim().lowercase()) {
+        "auto" -> true
+        "none" -> false
+        else -> null
     }
 }

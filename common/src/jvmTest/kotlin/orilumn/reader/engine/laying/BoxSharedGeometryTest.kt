@@ -2,6 +2,7 @@ package orilumn.reader.engine.laying
 
 import orilumn.reader.engine.css.ComputedStyle
 import orilumn.reader.engine.css.LightCssParser
+import orilumn.reader.engine.css.ReaderStylesheets
 import orilumn.reader.engine.css.StyleComputer
 import orilumn.reader.engine.html.MarkupElement
 import kotlin.math.roundToInt
@@ -46,27 +47,48 @@ class BoxSharedGeometryTest {
         map[el] ?: ComputedStyle(fontSizePx = 10f, lineHeightRatio = 1.5f)
 
     /** Runs the canonical box layout and returns the flattened leaf boxes in document order. */
-    private fun layoutLeaves(root: MarkupElement): List<LayoutBox> {
+    private fun layoutLeaves(root: MarkupElement, widthPx: Int = 30): List<LayoutBox> {
         val styleMap = StyleComputer(10f, LightCssParser().parse(""), listOf(LightCssParser().parse(""))).compute(root)
-        val result = BoxLayouter(10f, FixedWidthBreaker(3)).layoutBoxes(root, widthPx = 30, styleMap = styleMap)
+        val result = BoxLayouter(10f, FixedWidthBreaker(3)).layoutBoxes(root, widthPx = widthPx, styleMap = styleMap)
         return flattenLeaves(result.boxes)
     }
 
+    /**
+     * E20 横向单源锁：叶子的 **border-box 宽 = 版心 − 祖先横向内边距/边框 − 叶子自身横向外边距**
+     * （CSS 2.1 §10.3.3）。轻路径 [NormalFlowLayout.descendContentWidth] 必须与重路径 `buildBoxTree`
+     * 逐字节同值——两侧都按「先各自取整的外边距求和，再减包含块内宽」这一个整数式子。
+     *
+     * 本例刻意让**每一层都带边/外边距且都不触 1px 下界**（旧的 30px 版心会把每层都夹到 1，遮蔽一切漂移）：
+     * 300 −div.margin(5+5)=290 −div.边(4+20)=266 −section.边(8+8)=250 −p.margin(7+7)=236。
+     * 变异验证：把轻路径的 `marginsOf(el)` 换成 0 ⇒ 本用例红（250 ≠ 236）；把重路径的
+     * `innerW − marginL − marginR` 换成 `innerW` ⇒ 叶宽变 250 且右缘 268→282 越出版心。
+     */
     @Test
     fun sharedWidthMatchesCanonicalContentWidth() {
-        // body > div(margin/padding/border) > section(padding) > p → the leaf's border-box width.
-        val p = node("p", children = listOf(text("abcdef")))
+        // body > div(margin/padding/border) > section(padding) > p(margin) → the leaf's border-box width.
+        val p = node("p", mapOf("style" to "margin: 2px 7px"), children = listOf(text("abcdef")))
         val section = node("section", mapOf("style" to "padding: 3px 8px"), children = listOf(p))
         val div = node("div", mapOf("style" to "border: 2px; padding: 4px 10px; margin: 5px"), children = listOf(section))
         val root = node("body", children = listOf(div))
         linkParents(root, null)
 
         val styleMap = StyleComputer(10f, LightCssParser().parse(""), listOf(LightCssParser().parse(""))).compute(root)
-        val leafBox = layoutLeaves(root).single()
-        val sharedW = NormalFlowLayout.descendContentWidth(p, 30) { e ->
-            val s = compute(styleMap, e)
-            (s.padding.horizontal + s.border.horizontal).roundToInt()
-        }
+        val leafBox = layoutLeaves(root, 300).single()
+        assertEquals(236, leafBox.contentWidth)
+        assertEquals(32, leafBox.contentLeft) // 5(div.ml)+12(div.左边)+8(section.左边)+7(p.ml)
+        assertEquals(268, leafBox.contentLeft + leafBox.contentWidth) // 右缘不越 300 版心
+        val sharedW = NormalFlowLayout.descendContentWidth(
+            p, 300,
+            { e ->
+                val s = compute(styleMap, e)
+                (s.padding.horizontal + s.border.horizontal).roundToInt()
+            },
+            { e ->
+                val s = compute(styleMap, e)
+                // 与重路径逐值同式：左右**各自取整**再相加（不先加后取整）。
+                s.margin.left.roundToInt() + s.margin.right.roundToInt()
+            },
+        )
         assertEquals(leafBox.contentWidth, sharedW)
     }
 
@@ -91,7 +113,7 @@ class BoxSharedGeometryTest {
         val styleMap = StyleComputer(10f, LightCssParser().parse(""), listOf(LightCssParser().parse(""))).compute(root)
         val leaves = layoutLeaves(root)
         assertEquals(2, leaves.size)
-        val gap = NormalFlowLayout.consecutiveLeafAdvance(leaves[0].el!!, leaves[1].el!!) { compute(styleMap, it) }
+        val gap = NormalFlowLayout.consecutiveLeafAdvance(leaves[0].el!!, leaves[1].el!!, styleOf = { compute(styleMap, it) })
         assertEquals(50, gap)
         assertConsecutiveAdvancesMatchHeavy(root)
     }
@@ -109,7 +131,7 @@ class BoxSharedGeometryTest {
         val styleMap = StyleComputer(10f, LightCssParser().parse(""), listOf(LightCssParser().parse(""))).compute(root)
         val leaves = layoutLeaves(root)
         assertEquals(2, leaves.size)
-        val gap = NormalFlowLayout.consecutiveLeafAdvance(leaves[0].el!!, leaves[1].el!!) { compute(styleMap, it) }
+        val gap = NormalFlowLayout.consecutiveLeafAdvance(leaves[0].el!!, leaves[1].el!!, styleOf = { compute(styleMap, it) })
         assertEquals(40, gap)
         assertConsecutiveAdvancesMatchHeavy(root)
     }
@@ -134,7 +156,7 @@ class BoxSharedGeometryTest {
         val leaves = layoutLeaves(root)
         // Canonical emit: b's collapse consumes .roundToInt(0.5)=1, then b's top padding .roundToInt(0.5)=1.
         // (A float-summed advance would round 1.0 → 1 and drift −1 from the canonical 2.)
-        val shared = NormalFlowLayout.consecutiveLeafAdvance(leaves[0].el!!, leaves[1].el!!) { compute(styleMap, it) }
+        val shared = NormalFlowLayout.consecutiveLeafAdvance(leaves[0].el!!, leaves[1].el!!, styleOf = { compute(styleMap, it) })
         assertEquals(leaves[1].contentTop - leaves[0].contentBottom, shared)
         assertConsecutiveAdvancesMatchHeavy(root)
     }
@@ -171,7 +193,7 @@ class BoxSharedGeometryTest {
         // Bottom padding/border mirror the top: pre bg bottom = code border-box bottom + (pre bottom edges).
         assertEquals(codeLeaf.contentBottom + (12 + 1), preBox.contentBottom)
         // The shared advance (light path) equals the canonical heavy gap for this leaf pair.
-        val sharedGap = NormalFlowLayout.consecutiveLeafAdvance(paraLeaf.el!!, codeLeaf.el!!) { compute(styleMap, it) }
+        val sharedGap = NormalFlowLayout.consecutiveLeafAdvance(paraLeaf.el!!, codeLeaf.el!!, styleOf = { compute(styleMap, it) })
         assertEquals(codeLeaf.contentTop - paraLeaf.contentBottom, sharedGap)
     }
 
@@ -192,7 +214,7 @@ class BoxSharedGeometryTest {
 
         // The sibling after the pre must begin at/after the pre's content bottom, not inside its padding.
         assertTrue("following sibling pulled up into pre bottom padding", afterLeaf.contentTop >= preBox.contentBottom)
-        val shared = NormalFlowLayout.consecutiveLeafAdvance(codeLeaf.el!!, afterLeaf.el!!) { compute(styleMap, it) }
+        val shared = NormalFlowLayout.consecutiveLeafAdvance(codeLeaf.el!!, afterLeaf.el!!, styleOf = { compute(styleMap, it) })
         assertEquals(afterLeaf.contentTop - codeLeaf.contentBottom, shared)
     }
 
@@ -217,7 +239,7 @@ class BoxSharedGeometryTest {
         }
         for (i in 1 until leaves.size) {
             val heavyGap = leaves[i].contentTop - leaves[i - 1].contentBottom
-            val sharedGap = NormalFlowLayout.consecutiveLeafAdvance(leaves[i - 1].el!!, leaves[i].el!!) { styleMap[it] ?: ComputedStyle(fontSizePx = 10f, lineHeightRatio = 1.5f) }
+            val sharedGap = NormalFlowLayout.consecutiveLeafAdvance(leaves[i - 1].el!!, leaves[i].el!!, styleOf = { styleMap[it] ?: ComputedStyle(fontSizePx = 10f, lineHeightRatio = 1.5f) })
             assertEquals("pair $i heavy gap does not match shared advance", heavyGap, sharedGap)
         }
     }
@@ -285,7 +307,7 @@ class BoxSharedGeometryTest {
         val styleMap = StyleComputer(10f, LightCssParser().parse(""), listOf(LightCssParser().parse(""))).compute(root)
         val leaves = layoutLeaves(root)
         assertEquals(3, leaves.size)
-        val gap = NormalFlowLayout.consecutiveLeafAdvance(leaves[1].el!!, leaves[2].el!!) { compute(styleMap, it) }
+        val gap = NormalFlowLayout.consecutiveLeafAdvance(leaves[1].el!!, leaves[2].el!!, styleOf = { compute(styleMap, it) })
         assertEquals(14, gap)
     }
 
@@ -309,8 +331,75 @@ class BoxSharedGeometryTest {
         val styleMap = StyleComputer(10f, LightCssParser().parse(""), listOf(LightCssParser().parse(""))).compute(root)
         val leaves = layoutLeaves(root)
         assertEquals(2, leaves.size)
-        val gap = NormalFlowLayout.consecutiveLeafAdvance(leaves[0].el!!, leaves[1].el!!) { compute(styleMap, it) }
+        val gap = NormalFlowLayout.consecutiveLeafAdvance(leaves[0].el!!, leaves[1].el!!, styleOf = { compute(styleMap, it) })
         assertEquals(8 + 14, gap) // padding-bottom 8 + section's own margin-bottom 14 — children's 8 NOT folded
+    }
+
+    /**
+     * E7 竖向单源锁：`<hr>` 这类**零字符、只有边框**的块在正典 `emit` 里是「无行叶」——
+     * 盒高全靠上下边框（浏览器 UA `border: 1px` ⇒ 2px 横线），行流里没有任何锚行。
+     * 轻路径（临时页 / 增量窗）的竖向推进只能靠 [NormalFlowLayout.consecutiveLeafAdvance]，
+     * 两侧必须逐值相同，否则 hr 前后整段行位置漂移（前后两页的断点跟着变）。
+     */
+    @Test
+    fun `hr border box spacing matches the canonical flow`() {
+        val p1 = node("p", children = listOf(text("aa")))
+        val hr = node("hr")
+        val p2 = node("p", children = listOf(text("bb")))
+        val root = node("body", children = listOf(p1, hr, p2))
+        linkParents(root, null)
+
+        val css = "hr { margin: 8px 0; border: 1px solid #000000 }"
+        assertConsecutiveAdvancesMatchHeavy(root, css)
+
+        val styleMap = StyleComputer(10f, LightCssParser().parse(""), listOf(LightCssParser().parse(css))).compute(root)
+        val classify = NormalFlowLayout.heavyClassify(styleMap, true)
+        val result = BoxLayouter(10f, FixedWidthBreaker(3)).layoutBoxes(root, widthPx = 30, styleMap = styleMap, classify = classify)
+        val leaves = flattenLeaves(result.boxes)
+        assertEquals(3, leaves.size)
+        // 零字符 ⇒ 零行；盒高 = 上下边框 1px + 1px。
+        assertEquals(0, leaves[1].ranges.size)
+        assertEquals(0, leaves[1].lineHeights.size)
+        assertEquals(2, leaves[1].contentBottom - leaves[1].contentTop)
+        // 两侧落差与共享推进同值（上侧 collapse(p 的 0, hr 的 8) = 8；下侧同）。
+        assertEquals(8, leaves[1].contentTop - leaves[0].contentBottom)
+        assertEquals(8, leaves[2].contentTop - leaves[1].contentBottom)
+    }
+
+    /**
+     * E7：`ua.css` 的 `hr` 基线（对齐浏览器 UA `.5em auto` + `1px` 边框）。书不写任何样式时，
+     * `<hr>` 必须自己长出边框 —— 否则它是个零高空心块，正典/轻两路都画不出场景分隔线。
+     * UA 是最低层（tier 10），书里任何 `hr` 规则照旧压得过它。
+     */
+    @Test
+    fun `ua sheet gives hr a browser style border`() {
+        val p = node("p", children = listOf(text("aa")))
+        val hr = node("hr")
+        val root = node("body", children = listOf(p, hr))
+        linkParents(root, null)
+
+        val ua = LightCssParser().parse(
+            ReaderStylesheets.ua().replace(ReaderStylesheets.LINK_COLOR_TOKEN, "#0000ff"),
+        )
+        val styleMap = StyleComputer(10f, ua, listOf(LightCssParser().parse(""))).compute(root)
+        val hrStyle = styleMap[hr]!!
+        assertTrue("UA 的 hr 必须带边框（否则零字符块什么都不画）", hrStyle.hasBorderEdges())
+        assertEquals(1f, hrStyle.border.top)
+        assertEquals(1f, hrStyle.border.bottom)
+        assertEquals(5f, hrStyle.margin.top) // 0.5em × 10px
+        assertEquals(5f, hrStyle.margin.bottom)
+        // `margin: .5em auto`：块宽 auto 下水平 auto 外边距解析为 0（铺满版心）。
+        assertEquals(0f, hrStyle.margin.left)
+        assertEquals(0f, hrStyle.margin.right)
+
+        val classify = NormalFlowLayout.heavyClassify(styleMap, false)
+        val result = BoxLayouter(10f, FixedWidthBreaker(50)).layoutBoxes(root, widthPx = 300, styleMap = styleMap, classify = classify)
+        val leaves = flattenLeaves(result.boxes)
+        assertEquals(2, leaves.size)
+        assertEquals(2, leaves[1].contentBottom - leaves[1].contentTop)
+        assertEquals(300, leaves[1].contentWidth)
+        // UA p 的 margin 1em = 10px 压过 hr 的 0.5em = 5px（相邻外边距合并取大）。
+        assertEquals(10, leaves[1].contentTop - leaves[0].contentBottom)
     }
 
     /**

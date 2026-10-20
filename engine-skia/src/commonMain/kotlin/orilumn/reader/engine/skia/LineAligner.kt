@@ -2,9 +2,12 @@ package orilumn.reader.engine.skia
 
 import orilumn.reader.engine.css.FontRun
 import orilumn.reader.engine.css.TextAlign
+import orilumn.reader.engine.laying.InlineBoxRun
+import orilumn.reader.engine.laying.inlineBoxEdges
 import orilumn.reader.engine.laying.isDocumentSpace
 import orilumn.reader.engine.laying.isSoftHyphen
 import orilumn.reader.engine.laying.lineHeightPx
+import orilumn.reader.engine.laying.sliceInlineBoxEdges
 import orilumn.reader.engine.text.preprocess.CjkLatinSpacing
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -149,6 +152,13 @@ internal class LineAligner(
          * 见 [PunctuationSqueeze.ratioNeeded]）。
          */
         squeezeRatio: Float = 0f,
+        /**
+         * 行内盒（**叶文本坐标系**，与 `text` 同坐标）：横向 `padding`/`border` 的推进量必须与
+         * 断行侧同一份，否则画比量宽 ⇒ 右溢被裁。同 [cjkLatinSpacingEm] 的理由**追加在末尾**。
+         *
+         * 内部按 [range] 切片（切出 `slice` 语义：续片段无左边框/内边距）。空 = 无。
+         */
+        inlineBoxRuns: List<InlineBoxRun> = emptyList(),
     ): Placement {
         val start = range.first.coerceIn(0, text.length)
         val endExcl = (range.last + 1).coerceIn(start, text.length)
@@ -183,9 +193,14 @@ internal class LineAligner(
         //   （作者空格留着 ⇒ 中西之间还隔着一个整空格），那正是需求否掉的「0 的特例」。
         //   见 [CjkLatinSpacing] 类 KDoc「`gapEm = 0` 是参数为 0 的那一档」。
         val cjkGaps = CjkLatinSpacing.gapsForRange(text, start, endExcl, cjkLatinSpacingEm, fontRuns)
+        // 行内盒横向推进：**叶坐标算一次、裁到本行**（与 [cjkGaps] 同式）。
+        // 切片自动给出 `slice` 语义：盒从上一行延续过来时其左推进量落在切片外 ⇒ 续片段无左边框/内边距。
+        val lineBoxEdges =
+            if (inlineBoxRuns.isEmpty()) emptyList()
+            else sliceInlineBoxEdges(inlineBoxEdges(text.length, inlineBoxRuns), start, endExcl)
         val adv = measurer.advances(
             line, fontSizePx, letterSpacingEm, tag, families,
-            weight, italic, monospace, lineRuns, cjkGaps,
+            weight, italic, monospace, lineRuns, cjkGaps, lineBoxEdges,
         )
         // 标点挤压：**按比例收窄收尾类标点的字位**（渲染层·几何测量，[PunctuationSqueeze]）。
         //
@@ -246,7 +261,10 @@ internal class LineAligner(
         //  - RIGHT  ：整体右移 (lineWidth - 可见宽)。
         // 可见宽在拉伸**之后**才是最终宽，故 CENTER/RIGHT 的偏移必须用拉伸后的值 ——
         // 顺序上：先按 JUSTIFY 算 natural + extra 得「最终可见宽」，再据此定位。
-        val x0Raw = firstLineIndentPx.coerceAtLeast(0f)
+        // **有符号**（E8）：负 `text-indent` 是悬挂缩进 —— 首行 `x0` 落在内容左缘之**左**，量画两侧同值
+        // （断行侧首行可用宽按 `widthPx - indent` 加宽，见 [orilumn.reader.engine.laying.ParagraphBreaker.breakLines]）。
+        // 曾一律 `coerceAtLeast(0f)` ⇒ 断行按加宽排、落墨按 0 起 ⇒ 首行整段右移、尾部被右缘裁掉。
+        val x0Raw = firstLineIndentPx
 
         if (visibleCount == 0) {
             // 整行皆文档空白：无可见字符，placement 仍铺满区间（区间无缝），右边界退到行首。
@@ -437,7 +455,15 @@ internal class LineAligner(
             //   正确落位 = `x0Raw + (width − x0Raw − finalContent)/2` = `(width − finalContent + x0Raw)/2`。
             //   漏掉 `x0Raw` ⇒ 整行左移**半个缩进**（实测 fs=44.4、2em 缩进 ⇒ 44.4px）：
             //   缩进被彻底吃掉（带缩进与不带缩进的 `xs[0]` 分毫不差，实测差 0.0000305px）。
-            TextAlign.CENTER -> (lineWidthPx - finalContent + x0Raw).coerceAtLeast(0f) / 2f
+            //
+            // ⚠ 悬挂缩进（`x0Raw < 0`，E8）时**不可钳零**：首行盒本就从 `x0Raw` 起、宽 `width − x0Raw`，
+            //   居中点 `(width − finalContent + x0Raw)/2` 随首行盒左移 —— 钳零会把内容右推 `|x0Raw|/2`，
+            //   右缘随之溢出版心（`<p style="text-align:center;text-indent:-2em">` 实测被裁尾）。
+            //   非负缩进保持既有钳零行为（内容超宽时左缘不外移，历史回归逐值不变）。
+            TextAlign.CENTER -> {
+                val centered = (lineWidthPx - finalContent + x0Raw) / 2f
+                if (x0Raw < 0f) centered else centered.coerceAtLeast(0f)
+            }
             // RIGHT 则**不加**：`x0Raw + (width − x0Raw − finalContent)` 化简回 `width − finalContent`。
             //   这是对的 —— CSS 里首行缩进只是把「可用行宽」缩小 `x0Raw`，右对齐的内容照旧贴右缘，
             //   左边多出来的那截缩进落在本来就空着的左侧空白里，**没有可见效果**。
@@ -508,10 +534,26 @@ internal class LineAligner(
         descentPx: Float,
         extraTop: Float = 0f,
     ): Float {
+        return yTop + extraTop + boxBaselineOffset(fontSizePx, lineHeightRatio, ascentPx, descentPx)
+    }
+
+    /**
+     * E9：**单个行内盒**的基线偏移（相对行顶，不含 `yTop`）—— [baselineOffset] 的那一项。
+     *
+     * 单独拆出来是因为行框里可能有**多个盒**（叶本体 + 各行内 face 段）：CSS 2.1 §10.8.1 的
+     * 「行框顶 = 基线 − max(各盒 `ascent + 半行距`)」要求逐盒算完再取最大，
+     * 不能拿「最大字号 + 最大 ascent」合成一个式子近似（异族时两者不同源）。
+     */
+    fun boxBaselineOffset(
+        fontSizePx: Float,
+        lineHeightRatio: Float,
+        ascentPx: Float,
+        descentPx: Float,
+    ): Float {
         val lineH = lineHeightPx(fontSizePx, lineHeightRatio)
         val boxH = ascentPx + descentPx
         val halfLeading = (lineH - boxH) / 2f
-        return yTop + extraTop + halfLeading + ascentPx
+        return halfLeading + ascentPx
     }
 
     /**

@@ -4,8 +4,7 @@ import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.engine.html.HtmlTreeConverter
 import orilumn.reader.engine.laying.NormalFlowLayout
 import orilumn.reader.engine.laying.ParagraphShapeRef
-import orilumn.reader.engine.layout.ParagraphShapes
-import orilumn.reader.engine.text.FontPool
+import orilumn.reader.engine.skia.shapeGeometry
 import orilumn.reader.engine.text.TypographicProfile
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -21,7 +20,7 @@ import org.robolectric.annotation.Config
  *
  * Locked in here (真实 Skia 断行，双路同 breaker）：
  *  1. `LightPrepare.floatLeadAt` 与重路径叶 `floatLead` 全章逐块相等；
- *  2. 逐块整形（`ParagraphShapes.shapeOf` + 前导）行区间/行高与重路径叶逐行相等；
+ *  2. 逐块整形（`shapeGeometry` + 前导）行区间/行高与重路径叶逐行相等；
  *  3. temp 前向流自 tiling（字符连续无洞）且含悬浮零高行、后段 clear 越位与重路径同值。
  */
 @RunWith(RobolectricTestRunner::class)
@@ -30,7 +29,6 @@ class P4aLightProbeTest {
 
     private lateinit var bc: BoxChapterLayouter
     private lateinit var profile: TypographicProfile
-    private val pairing = FontPool()
     private val contentW = 300
     private val contentH = 4000
 
@@ -73,13 +71,13 @@ class P4aLightProbeTest {
         for (i in 0 until heavy.totalBlocks) {
             val box = light.block(i)
             val el = box.el!!
-            val lightShape = ParagraphShapes.shapeOf(
+            val lightShape = shapeGeometry(
                 el, box.style, light.inlineStyles(i), profile,
                 NormalFlowLayout.innerBreakWidth(box.style, box.contentWidth),
-                pairing,
                 ancestorStyleOf = light::resolveStyle,
                 genOf = light.genOf,
                 floatLead = light.floatLeadAt(i),
+                isBlock = { it.tag in orilumn.reader.engine.html.BLOCK_TAGS },
             )
             val heavyLeaf = heavy.leaves[i]
             if (heavyLeaf.ranges.isEmpty()) {

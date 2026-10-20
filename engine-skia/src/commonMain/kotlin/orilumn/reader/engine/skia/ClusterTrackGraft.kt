@@ -119,16 +119,26 @@ internal fun graftKerningOnto(
      * 发生（`deficit > 0`），而 [CjkLatinSpacing.gapsForRange] 要扫**整段**——绝大多数行走不到这里。
      */
     cjkLatinSpacingEm: Float = 0f,
+    /**
+     * [placement] 的起点相对 [start] 的偏移（槽 0 所在处）。
+     *
+     * 正常落墨时 [placement] 就按 `start until endExcl` 建、偏移恒 0；但**同一行分两趟画**
+     * （已定位行内盒压在在流文字之上，见 `LineWindowDrawer.paintText`）时，第二趟只画 run 那段，
+     * 而 [placement] 仍是整行的 —— 此时 [off] = 该段起点 − 整行起点，槽位按它索引。
+     */
+    off: Int = 0,
+    /** 本次要处理的字数（默认 = [placement] 里剩下的槽数）。 */
+    count: Int = placement.xs.size - off,
 ): ClusterTrackGraft {
-    val n = placement.xs.size
+    val n = count
     val out = FloatArray(n)
     var delta = 0f
     for (i in 0 until n) {
         if (i > 0) {
-            val tighten = (cnat[i] - cnat[i - 1]) - placement.advs[i - 1]
+            val tighten = (cnat[i] - cnat[i - 1]) - placement.advs[i - 1 + off]
             if (tighten < 0f) delta += tighten
         }
-        out[i] = placement.xs[i] + delta
+        out[i] = placement.xs[i + off] + delta
     }
     if (!justifyRightEdge.isNaN() && placement.hyphenWidth <= 0f) {
         // 锚点 = **末可见字**（行末常带 HTML 源里的空白）。
@@ -143,7 +153,7 @@ internal fun graftKerningOnto(
         if (lv > 0) {
             val lastLs = if (letterSpacingEm == 0f) 0f
             else letterSpacingEm * lastRunSizePx(text, start, lv, fontSizePx, fontRuns)
-            val deficit = justifyRightEdge - (out[lv] + placement.advs[lv] - lastLs)
+            val deficit = justifyRightEdge - (out[lv] + placement.advs[lv + off] - lastLs)
             if (deficit > 0f) {
                 // 槽 `k` = 字符 `k` 与 `k+1` 之间 ⇒ 覆盖 `k ∈ [0, lv)`，
                 // 绝对下标区间 `[start, start + lv)`（与 `gapsForRange` 的裁剪口径一致）。
@@ -161,5 +171,5 @@ internal fun graftKerningOnto(
             }
         }
     }
-    return ClusterTrackGraft(out, out[n - 1] - placement.xs[n - 1])
+    return ClusterTrackGraft(out, out[n - 1] - placement.xs[n - 1 + off])
 }

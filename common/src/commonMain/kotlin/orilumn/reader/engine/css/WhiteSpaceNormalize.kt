@@ -3,8 +3,8 @@ package orilumn.reader.engine.css
 /**
  * P1-2: CSS `white-space` 文本归一化单源（pure JVM）。
  *
- * 盒流（[orilumn.reader.engine.laying.NormalFlowLayout]）、Android 塑形
- * （`ParagraphShapes.emitPlainText`）、字符计数（`visibleCharStarts`）、着色/字体 run
+ * 盒流（[orilumn.reader.engine.laying.NormalFlowLayout]）、engine-skia 塑形
+ * （`emitPlainText`）、字符计数（`visibleCharStarts`）、着色/字体 run
  * 收集（[orilumn.reader.engine.laying.collectColorRuns]/`collectFontRuns`）必须从同一函数取
  * 同一字符串，否则 run 下标与字符错位、重轻两路 `globalCharStarts` 漂移（§6 inv.1）。
  *

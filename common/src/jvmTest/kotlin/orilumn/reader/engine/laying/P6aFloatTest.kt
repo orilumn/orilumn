@@ -137,17 +137,41 @@ class P6aFloatTest {
     }
 
     @Test
-    fun `同侧相邻悬浮堆叠`() {
-        val a = node("img", mapOf("width" to "100", "height" to "60", "style" to "float: left"))
-        val b = node("img", mapOf("width" to "100", "height" to "60", "style" to "float: left"))
+    fun `同侧相邻悬浮并排`() {
+        // CSS 2.1 §9.5.1：同侧相邻悬浮**放得下就并排**（同一行、同顶，x 依次右挪），
+        // 后随文本按整行宽度环绕。
+        val a = node("img", mapOf("width" to "60", "height" to "60", "style" to "float: left"))
+        val b = node("img", mapOf("width" to "60", "height" to "60", "style" to "float: left"))
         val p = node("p", children = listOf(text("x".repeat(400))))
         val root = node("body", children = listOf(a, b, p))
         val result = boxes(root, styles(root))
-        // 第二悬浮越过第一（y=60），跨度到底 120；p 前导覆盖 120 高。
-        assertEquals(FloatLead(9, 194, 106f), leafBoxes(result).first { it.el === p }.floatLead)
-        val lines = result.lines
-        assertEquals(0, lines[2].yTop)
-        for (k in 1 until lines.size) assertEquals(lines[k - 1].charEnd, lines[k].charStart)
+        val leaves = leafBoxes(result)
+        val aBox = leaves.first { it.el === a }
+        val bBox = leaves.first { it.el === b }
+        // 第二块落在本行已放宽度之后（60），且与首块同顶。
+        assertEquals(60, bBox.contentLeft)
+        assertEquals(aBox.contentTop, bBox.contentTop)
+        // 环绕前导：跨度宽 120、高 60 ⇒ K=(60+15-1)/15+1=5，窄宽 300-120-6=174，右移 126。
+        assertEquals(FloatLead(5, 174, 126f), leaves.first { it.el === p }.floatLead)
+        assertEquals(0, result.lines[2].yTop)
+        for (k in 1 until result.lines.size) assertEquals(result.lines[k - 1].charEnd, result.lines[k].charStart)
+    }
+
+    @Test
+    fun `同侧相邻悬浮放不下换行`() {
+        // 两个 200 宽左浮动在 300 宽里放不下 ⇒ 第二块**另起一行**（顶越过首块底 60）。
+        val a = node("img", mapOf("width" to "200", "height" to "60", "style" to "float: left"))
+        val b = node("img", mapOf("width" to "200", "height" to "60", "style" to "float: left"))
+        val p = node("p", children = listOf(text("x".repeat(400))))
+        val root = node("body", children = listOf(a, b, p))
+        val result = boxes(root, styles(root))
+        val leaves = leafBoxes(result)
+        val bBox = leaves.first { it.el === b }
+        assertEquals(0, bBox.contentLeft)
+        assertEquals(60, bBox.contentTop)
+        // 剩余窄宽 300-200-6=94 < max(48,120) ⇒ 环绕退回块式（无 lead），文本落到跨度底 120。
+        assertNull(leaves.first { it.el === p }.floatLead)
+        assertEquals(120, result.lines[2].yTop)
     }
 
     @Test

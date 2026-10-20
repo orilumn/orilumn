@@ -116,6 +116,50 @@ class BoxNestedLayoutTest {
         assertEquals(0, layout(pRoot).boxes.single().childBoxes.single().contentLeft)
     }
 
+    /**
+     * CSS 2.1 §10.3.3：块级 auto 宽 = 包含块内容宽 − **自身横向外边距** ⇒ 右缘不越包含块。
+     *
+     * 为什么是硬要求：分页阅读器页宽固定，多出来的那一截**被页面裁掉**（丢内容，不是不好看）。
+     * 变异验证：把 `buildBoxTree` 的 `innerW − marginL − marginR` 还原成 `innerW`（只右移不缩宽）
+     * ⇒ 本用例立即红，实测 `expected:<22> but was:<30>`，即 div 右缘 34 越出版心右 30 共 4px。
+     */
+    @Test
+    fun `块级横向外边距收缩可用宽且右缘不越包含块`() {
+        // body > div(margin: 0 4px) > p：div 的 border-box 宽 = 版心(30) − 左右外边距(8)。
+        val inner = node("p", children = listOf(text("abcdef")))
+        val div = node("div", mapOf("style" to "margin: 0 4px"), children = listOf(inner))
+        val root = node("body", children = listOf(div))
+
+        val bodyBox = layout(root).boxes.single()
+        val divBox = bodyBox.childBoxes.single()
+        assertEquals(true, divBox.isContainer)
+        assertEquals(4, divBox.contentLeft)
+        assertEquals(22, divBox.contentWidth)
+        // 右缘 = 版心右 − 自身右外边距（不是版心右）⇒ 绝不越界。
+        assertEquals(26, divBox.contentLeft + divBox.contentWidth)
+
+        // 嵌套逐层扣：再嵌一层 margin: 0 3px 的容器，叶子右缘仍落在版心内。
+        val deepLeaf = node("p", children = listOf(text("abcdef")))
+        val deep = node("blockquote", mapOf("style" to "margin-left: 3px"), children = listOf(deepLeaf))
+        val wrap = node("div", mapOf("style" to "margin-right: 5px"), children = listOf(deep))
+        val deepRoot = node("body", children = listOf(wrap))
+        val wrapBox = layout(deepRoot).boxes.single().childBoxes.single()
+        val deepBox = wrapBox.childBoxes.single()
+        val leaf = deepBox.childBoxes.single()
+        assertEquals(0, wrapBox.contentLeft)
+        assertEquals(25, wrapBox.contentWidth)
+        assertEquals(3, deepBox.contentLeft)
+        assertEquals(22, deepBox.contentWidth)
+        assertEquals(22, leaf.contentWidth)
+        assertEquals(25, leaf.contentLeft + leaf.contentWidth)
+
+        // 无横向外边距的块逐值不变（防「一律缩宽」）。
+        val plainRoot = node("body", children = listOf(node("p", children = listOf(text("x")))))
+        val plain = layout(plainRoot).boxes.single().childBoxes.single()
+        assertEquals(0, plain.contentLeft)
+        assertEquals(30, plain.contentWidth)
+    }
+
     @Test
     fun `嵌套容器为其子盒子提供独立背景绘制区域`() {
         // outer div with a gray background contains an inner paragraph with a red border.

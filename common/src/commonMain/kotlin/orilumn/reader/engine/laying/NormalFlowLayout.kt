@@ -68,6 +68,8 @@ object NormalFlowLayout {
         density: Float = 1f,
         /** P3-c 生成内容查找（空即无，旧路径）。 */
         genOf: GenOf = EmptyGen,
+        /** `::first-letter` 伪元素查找（null = 无该规则；与 genOf 同由章节开关决定）。 */
+        firstLetterOf: FirstLetterOf? = null,
         /**
          * P3：一页内容高（px）。> 0 时施加「块级替换叶 ≤ 一页 − 簇内其它内容」预算
          * （口径乙，[ReplacedFitBudget]）——**分页层**的约束，不是 CSS 声明；0 = 不约束
@@ -75,11 +77,64 @@ object NormalFlowLayout {
          */
         contentH: Int = 0,
     ): BoxLayoutResult {
-        val boxes = buildBoxTree(root, styles, breaker, widthPx, left = 0, classify, hidden, imageLoader, chapterHref, density, genOf)
+        val boxes = buildBoxTree(root, styles, breaker, widthPx, left = 0, classify, hidden, imageLoader, chapterHref, density, genOf, firstLetterOf)
         val lines = ArrayList<FlowedLine>()
         flowBoxes(boxes, lines)
         if (contentH > 0) applyReplacedFit(boxes, lines, styles, contentH, imageLoader, chapterHref, density)
+        // §10.6.7：裁剪盒（`overflow != visible` = 本引擎的 BFC 近似）的高度包住浮动后代，
+        // **先于**裁剪几何（裁剪区取自盒高）。
+        containFloatsInClippers(boxes)
+        // E12：`position: relative` 的绘制偏移（**先**于裁剪几何：裁剪区随盒一起平移）。
+        // 只落绘制用字段，不改流位置 ⇒ 占位/分页不受影响；无 `position: relative` 时全零。
+        applyRelativeOffsets(boxes, styles::get)
+        // E11：`overflow` 祖先裁剪几何——必须在**最终流完之后**算（盒上下沿由流决定，流前算即错位）。
+        // 无 `overflow` 声明时每个盒的 clipRect 恒 null，全链零像素回归。
+        applyInheritedClips(boxes)
         return BoxLayoutResult(lines, boxes)
+    }
+
+    /**
+     * CSS 2.1 §10.6.7：`overflow != visible` 的块建立 BFC，自动高度**包住浮动后代** ——
+     * 下沿取「在流内容底」与「最深浮动后代的 border-box 底」的较大者。
+     *
+     * 本引擎的流**有意**不做 BFC 包拢（浮动逃逸容器，见 [emit] 容器收尾注释）：`overflow: visible`
+     * 的块高度只计在流内容，与浏览器 §10.6.3 一致。但**裁剪盒**不包住浮动就出事 —— E11 的
+     * `overflow` 裁剪按 padding box 裁，浮动被齐根切掉，也就是**丢内容**。真书里的 clearfix 写法
+     * （裁剪容器里全是 `float` 子块，在流高 0）会整块消失；实测图片浮动高 120 被切到 61。
+     *
+     * **流高已由 `emit` 收尾同口径计入**（见那里的 §10.6.7 注释）；本趟只兜底那些不经 `emit`
+     * 容器收尾的盒（判定与增量同式、幂等：已经够高就不再动），并保证裁剪区（取自盒高）最大化。
+     */
+    private fun containFloatsInClippers(boxes: List<LayoutBox>) {
+        for (b in boxes) {
+            // 先子后父：内层裁剪盒先长高，外层再按同一口径聚合。
+            if (b.childBoxes.isNotEmpty()) containFloatsInClippers(b.childBoxes)
+            if (!b.style.clipsOverflow()) continue
+            val floatBottom = deepestFloatBottom(b.childBoxes)
+            // 长的是**内容盒**底（§10.6.7 说的是内容边）：加回自身下边距才能让 padding box 也包住
+            // 浮动 —— 裁剪区取的正是 padding box，少算边框会把浮动最下几像素切掉（实测差 2px）。
+            val edgesBottom = (b.style.padding.bottom + b.style.border.bottom).roundToInt()
+            if (floatBottom > b.contentBottom - edgesBottom) b.contentBottom = floatBottom + edgesBottom
+        }
+    }
+
+    /**
+     * 子树里最深的**浮动**盒（含嵌套）的**外边盒**底（border-box 底 + `margin-bottom`）；
+     * 无浮动 = [Int.MIN_VALUE]。
+     *
+     * CSS 2.1 §10.6.7：BFC 根的高度取子浮动盒的**外边盒**底 —— 少算 `margin-bottom` 的表现是
+     * clearfix 灰框比浏览器浅一圈（Chromium 实测 56 CSS px，本仓 54：`.fli{height:40;border:1;margin:2}`
+     * 的 40+2 边框有了，2px 下边距丢了）。
+     */
+    private fun deepestFloatBottom(boxes: List<LayoutBox>): Int {
+        var max = Int.MIN_VALUE
+        for (b in boxes) {
+            if (b.table == null && b.style.floatSide != FloatSide.NONE) {
+                max = maxOf(max, b.contentBottom + b.style.margin.bottom.roundToInt())
+            }
+            if (b.childBoxes.isNotEmpty()) max = maxOf(max, deepestFloatBottom(b.childBoxes))
+        }
+        return max
     }
 
     /**
@@ -211,7 +266,8 @@ object NormalFlowLayout {
             return
         }
         val blockChildren = root.children.filter { !hidden.isHidden(it) && classify.isBlock(it) }
-        if (blockChildren.isEmpty()) {
+        // E19: 同 [buildBoxTree] —— 行内子树里埋着块级后代时本元素不是叶（flowChildren 会在块处断开）。
+        if (blockChildren.isEmpty() && !hasInlineWrappedBlock(root, classify, hidden)) {
             // Mirror buildBoxTree: a sole-figure block enumerates as its image, so the light path's
             // leaf set / char starts can never drift from the heavy path's unwrapped leaves.
             out.add(soleFigureImage(root, classify, hidden) ?: root)
@@ -263,9 +319,11 @@ object NormalFlowLayout {
             // P6-a: 悬浮注册——任何 floatSide != NONE 的非表格叶（img/文本块）。
             // 零行高推进（字符槽照占，行流不断），登录双侧悬浮跨度：同侧后者堆叠、异侧并存；
             // 显式 clear 先越过指定侧（CSS 2.1 §9.5）。
-            if (box.table == null && s.floatSide != FloatSide.NONE &&
-                (box.replaceableHeight > 0 || box.ranges.isNotEmpty())
-            ) {
+            // E23-b：空悬浮盒（无文本、非替换）只要**指定高为正**就是真浮动盒（Chromium 同）；
+            // 零尺寸空盒仍走下面的普通叶分支（不占行、不动流）。
+            val floatSpan = box.replaceableHeight > 0 || box.ranges.isNotEmpty() ||
+                (box.lineHeights.isEmpty() && specifiedContentHeight(s, 0) > 0)
+            if (box.table == null && s.floatSide != FloatSide.NONE && floatSpan) {
                 // 显式 clear 只越指定侧（lead 叶不可能带 BOTH，见 build 期规则）。
                 if ((s.clearSide == ClearSide.LEFT || s.clearSide == ClearSide.BOTH)) {
                     val b = st.floatBottomL
@@ -275,11 +333,16 @@ object NormalFlowLayout {
                     val b = st.floatBottomR
                     if (b != null && b > st.y) st.y = b
                 }
-                // 相邻同侧悬浮纵向堆叠：先越过本侧旧悬浮（异侧并存不碰）。
-                val ownBottom = if (s.floatSide == FloatSide.LEFT) st.floatBottomL else st.floatBottomR
-                if (ownBottom != null && ownBottom > st.y) st.y = ownBottom
+                // 相邻同侧悬浮：**另起一行**才越过本侧旧悬浮；同行并排同顶（CSS 2.1 §9.5.1）。
+                if (box.floatNewRow) {
+                    val ownBottom = if (s.floatSide == FloatSide.LEFT) st.floatBottomL else st.floatBottomR
+                    if (ownBottom != null && ownBottom > st.y) st.y = ownBottom
+                }
                 val min = when {
                     skipOwnTop -> 0f
+                    // E23-b：同行并排的第二块起不再加自身顶边距——行顶已由本行首个悬浮抬到
+                    // 外边盒上缘（CSS 2.1 §9.5.1：同一行的浮动共用行顶）。
+                    !box.floatNewRow -> 0f
                     first -> s.margin.top
                     else -> collapseMargins(s.margin.top, prevBottomMargin)
                 }
@@ -287,20 +350,24 @@ object NormalFlowLayout {
                 box.contentTop = st.y
                 val contentY = st.y + (s.border.top + s.padding.top).roundToInt()
                 val spanH = if (box.replaceableHeight > 0) box.replaceableHeight
-                else box.lineHeights.sum()
+                else specifiedContentHeight(s, box.lineHeights.sum())
                 box.contentBottom = contentY + spanH +
                     (if (box.replaceableHeight > 0) 0 else (s.padding.bottom + s.border.bottom).roundToInt())
                 box.firstLineIndex = out.size
                 // 零高行：字符槽连续（分页不断），几何不占竖空间（环绕叶贴着排）。
-                out.add(
-                    FlowedLine(
-                        charStart = st.char,
-                        charEnd = st.char + box.textLength,
-                        yTop = contentY,
-                        yBottom = contentY,
-                        paragraphStart = true,
-                    ),
-                )
+                // E23-b：**空悬浮盒**（无文本、无图）不发这一行 —— 与轻路径 `rebuildLocalLines` 同判
+                // （那边行数为 0、走无行叶记账），否则两路的行计数/切片对不上。
+                if (box.ranges.isNotEmpty() || box.replaceableHeight > 0) {
+                    out.add(
+                        FlowedLine(
+                            charStart = st.char,
+                            charEnd = st.char + box.textLength,
+                            yTop = contentY,
+                            yBottom = contentY,
+                            paragraphStart = true,
+                        ),
+                    )
+                }
                 box.lastLineExclusive = out.size
                 st.char += box.textLength
                 val spanBottom = box.contentBottom
@@ -400,7 +467,12 @@ object NormalFlowLayout {
                 }
             }
             box.lastLineExclusive = out.size
-            val boxBottom = y + (s.padding.bottom + s.border.bottom).roundToInt()
+            // E23 指定高（CSS 2.1 §10.6.3）：内容盒高 = max(在流内容高, `height`)；替换叶的高
+            // 已由替换尺寸接管（`height` 在那条路上消费），不在此重复。
+            val contentBottomY =
+                if (box.replaceableHeight > 0) y
+                else contentY + specifiedContentHeight(s, y - contentY)
+            val boxBottom = contentBottomY + (s.padding.bottom + s.border.bottom).roundToInt()
             box.contentBottom = boxBottom
             st.y = boxBottom
             // P6-a: 实高行底记账（回填不上越它，防与前文交叠）。
@@ -475,15 +547,48 @@ object NormalFlowLayout {
         var subPrev = 0f
         var firstChildLine = Int.MAX_VALUE
         var lastChildLine = -1
+        // §10.6.7：BFC 根把浮动关在盒内 —— 盒内注册的跨度不得收窄/回填后随兄弟（浏览器里
+        // BFC 根外面看不见这些浮动）。进入时存外层跨度，收尾还原；盒内高度由下方 `floatsContentH` 计。
+        val bfc = box.style.clipsOverflow()
+        val keptBottomL = st.floatBottomL
+        val keptTopL = st.floatTopL
+        val keptBottomR = st.floatBottomR
+        val keptTopR = st.floatTopR
         for (child in box.childBoxes) {
             subPrev = emit(child, st, subFirst, subPrev, out, skipOwnTop = subFirst && hasChildren && edgesTop == 0)
             if (child.firstLineIndex >= 0) firstChildLine = minOf(firstChildLine, child.firstLineIndex)
             lastChildLine = maxOf(lastChildLine, child.lastLineExclusive)
             subFirst = false
         }
-        // P6-a: 收尾不包悬浮（CSS 默认浮动逃逸容器；包住只在 BFC/clearfix，本引擎无此概念）。
+        if (bfc) {
+            st.floatBottomL = keptBottomL; st.floatTopL = keptTopL
+            st.floatBottomR = keptBottomR; st.floatTopR = keptTopR
+        }
+        // P6-a: 收尾不包悬浮（CSS 默认浮动逃逸容器；包住只在 BFC/clearfix，见上方 §10.6.7）。
         // 跨度存活供后随兄弟跨容器环绕；容器背景/高度只计 in-flow 内容。
-        box.contentBottom = st.y + edgesBottom
+        // E23-b（CSS 2.1 §10.6.3）：容器指定高同样消费 —— 内容盒高 = max(在流内容高, `height`)，
+        // 与叶同一条「只多不少」口径（内容更高照排不裁；裁不裁是 overflow 的事）。
+        // 容器底边（背景/边框/裁剪区下界）与后随内容的起点因此落在指定高上；游标只下不上 ⇒ 行位
+        // 单调，分页容量仍由行位给出（帧底恒等式见轻路径 `interiorGapAbove` 同源差额）。
+        val contentTopY = box.contentTop + edgesTop
+        // §10.6.7：BFC 根（本引擎以 `overflow != visible` 近似）的自动高**包住浮动后代**，
+        // 而且这份高度是**流高**，不是只改绘制：容器的底色/边框下沿、父容器高度、后随兄弟与
+        // 分页全吃同一份（Chromium 实测 `.cf` 高 56，父级 `.test-case` 的下内边距从这 56 之后
+        // 起算）。曾只改绘制几何、流高仍按在流内容 ⇒ 灰框下沿比浏览器高出 4.5px，
+        // 下方虚线框的间距被吃掉一半（用户实测：装四个方块的那个矩形下间距偏小）。
+        val floatsContentH = if (box.style.clipsOverflow() && box.childBoxes.isNotEmpty()) {
+            val fb = deepestFloatBottom(box.childBoxes)
+            if (fb == Int.MIN_VALUE) 0 else (fb - contentTopY).coerceAtLeast(0)
+        } else {
+            0
+        }
+        val naturalContentH = maxOf(st.y - contentTopY, floatsContentH)
+        // E23-e：`min-height` 只在**真的撑高**时才断掉父↔末子底折叠（Chromium 实测：`min-height`
+        // 低于内容 ⇒ 末子下边距照常外塌；高于内容 ⇒ 收进盒内、后随内容贴盒底）。`height` 恒断链
+        // （指定高即定高，与内容高不高无关），故两条分开判。
+        val floor = specifiedVerticalFloor(sty)
+        box.verticalFloorBound = floor != null && floor > naturalContentH
+        box.contentBottom = contentTopY + maxOf(naturalContentH, floor ?: 0) + edgesBottom
         st.y = box.contentBottom
         box.firstLineIndex = if (firstChildLine == Int.MAX_VALUE) -1 else firstChildLine
         box.lastLineExclusive = lastChildLine
@@ -492,11 +597,11 @@ object NormalFlowLayout {
         // child — transitively down every edge-free last-child container (the exact mirror of the
         // top-side first-child chain). The single collapsed group is what the following sibling
         // consumes; in that case the child's margin does not add anything inside the container.
-        // A container with bottom border/padding (or a specified height) does NOT collapse: it
-        // returns its own bottom margin unchanged (the last child's bottom margin is then dropped,
-        // matching the prior box-flow behavior).
+        // A container with bottom border/padding (or a specified height, or an **effective** vertical
+        // floor / `min-height`) does NOT collapse: it returns its own bottom margin unchanged (the
+        // last child's bottom margin is then dropped, matching Chromium).
         val bottomGroup = if (hasChildren) lastChildBottomMargin(box) else 0f
-        return if (hasChildren && edgesBottom == 0 && sty.heightPx == null)
+        return if (hasChildren && edgesBottom == 0 && sty.heightPx == null && !box.verticalFloorBound)
             collapseMargins(sty.margin.bottom, bottomGroup)
         else sty.margin.bottom
     }
@@ -507,17 +612,19 @@ object NormalFlowLayout {
      * box's (a leaf, or the first bottom-edge container that terminates the chain) margin in last.
      *
      * Mirrors the top-side first-child descent that the container branch performs inline — descending
-     * only through containers that carry no bottom border/padding and have children, folding each of
-     * those containers' margins into one group, then closing the group with the terminator's margin.
-     * (Intermediate heights are deliberately not consulted — the flow pass does not honor specified
-     * heights, so [consecutiveLeafAdvance]'s mirror must gate identically, and specified-height
-     * containers are only excluded at the OUTER eligibility check above.)
+     * only through containers that carry no bottom border/padding, no specified height, and have
+     * children, folding each of those containers' margins into one group, then closing the group with
+     * the terminator's margin. §8.3.1 requires a `height` of `auto` for the parent↔last-child collapse,
+     * so an intermediate specified height breaks the group exactly like a bottom edge does (E23-b；此前
+     * 流程不消费指定高，故只在外层判定处挡，现两处同判据）。
      */
     private fun lastChildBottomMargin(box: LayoutBox): Float {
         var child = box.childBoxes.last()
         var acc = 0f
         while (child.isContainer &&
             (child.style.border.bottom + child.style.padding.bottom).roundToInt() == 0 &&
+            child.style.heightPx == null &&
+            !child.verticalFloorBound &&
             child.childBoxes.isNotEmpty()
         ) {
             acc = collapseMargins(acc, child.style.margin.bottom)
@@ -536,7 +643,7 @@ object NormalFlowLayout {
         el: MarkupElement,
         styles: Map<MarkupElement, ComputedStyle>,
         breaker: ParagraphBreaker,
-        widthPx: Int,
+        availW: Int,
         left: Int,
         classify: BlockClassify,
         hidden: HiddenCheck = HIDDEN_NONE,
@@ -546,6 +653,8 @@ object NormalFlowLayout {
         density: Float = 1f,
         /** P3-c 生成内容查找（空即无，旧路径）。 */
         genOf: GenOf = EmptyGen,
+        /** `::first-letter` 伪元素查找（null = 无该规则；行高与塑形同吃它，量画同源）。 */
+        firstLetterOf: FirstLetterOf? = null,
         /** P6-a 待环绕透传（文档序；容器递归共享同一份）。 */
         pending: FloatPending = FloatPending(),
     ): List<LayoutBox> {
@@ -553,7 +662,20 @@ object NormalFlowLayout {
         if (hidden.isHidden(el)) return emptyList()
         // styles 恒全：StyleComputer.compute 覆盖整树，缺键即调用方传了残表，直接抛（静默 16px 会排错版）。
         val style = styles.getValue(el)
+        // B（块级指定宽）：非替换（已单独消费宽）且非 table 且非浮动 → 对块级盒应用指定 width（px/pct）；% 解按包含块内容宽。
+        // 浮动元素的宽度语义与浮动排位模型耦合（本轮暂不改浮动面），先跳过以免破坏既有 P6a 浮动测试。
+        val widthPx = if (el.tag == "table" || isReplaceable(el) || style.floatSide != orilumn.reader.engine.css.FloatSide.NONE) {
+            availW
+        } else {
+            specifiedBorderBoxWidth(style, availW) ?: availW
+        }
         val blockChildren = el.children.filter { classify.isBlock(it) }
+        // E19（CSS 2.1 §9.2.1 block-in-inline）：直接块子节点为空、但**行内子树里**埋着块级后代时，
+        // 本元素也不是文本叶 —— 必须走容器分支，把行内盒在块级后代处断开（[splitBlockInInline]）。
+        // 否则 [appendInlineText] 与 [styledSegments] 的块跳过会把块里的文字**整段丢掉**
+        // （实测 `<a href><p>abc</p></a>` 零叶、`<a>zzz<p>abc</p>www</a>` 只剩 `zzz`）。
+        // [enumerateBlockLeaves] / [styledCharAdvance] 同判据，重轻两路叶集 / 字符起点不漂移。
+        val inlineWrappedBlock = blockChildren.isEmpty() && hasInlineWrappedBlock(el, classify, hidden)
         return if (el.tag == "table") {
             // Table 不可环绕：emit 期越过跨度，后续文本必在跨度之下，待环绕清零。
             pending.dropAll()
@@ -562,14 +684,14 @@ object NormalFlowLayout {
             // pagination/char leaves, so a page can split the table between rows only.
             // P1-2: caption 展开为自己的盒（递归分解；`caption-side: bottom` 时沉底）。
             // 表外盒几何（指定宽/margin auto）走重轻单源 [TableGridModel.tableOuterGeometry]。
-            val g = TableGridModel.tableOuterGeometry(widthPx, left, style)
+            val g = TableGridModel.tableOuterGeometry(availW, left, style)
             val innerW = g.contentW
             // The table's own border-box left is its children's baseline; rows start after its left edge.
             val rowLeft = g.tableLeft + (style.border.left + style.padding.left).roundToInt()
-            val rows = buildTableRows(el, styles, breaker, innerW, rowLeft, classify, hidden, imageLoader, chapterHref, density, genOf)
+            val rows = buildTableRows(el, styles, breaker, innerW, rowLeft, classify, hidden, imageLoader, chapterHref, density, genOf, firstLetterOf)
             val cap = TableGridModel.build(el).caption
             val capBoxes = if (cap != null && !hidden.isHidden(cap)) {
-                buildBoxTree(cap, styles, breaker, innerW, rowLeft, classify, hidden, imageLoader, chapterHref, density, genOf, pending)
+                buildBoxTree(cap, styles, breaker, innerW, rowLeft, classify, hidden, imageLoader, chapterHref, density, genOf, firstLetterOf, pending)
             } else emptyList()
             val children = if (capBoxes.isNotEmpty() && captionIsBottom(el) { styles[it] }) rows + capBoxes else capBoxes + rows
             listOf(LayoutBox(el, style, g.tableLeft, g.outerW, emptyList(), 0, emptyList(), children))
@@ -581,14 +703,18 @@ object NormalFlowLayout {
             val breakW = innerBreakWidth(style, contentW)
             val (floatW, repH) = replacedUsedSize(el, style, breakW, imageLoader, chapterHref, density = density)
             val side = style.floatSide
-            val (boxLeft, boxW) = if (side != FloatSide.NONE) {
+            val (boxLeft, boxW, newRow) = if (side != FloatSide.NONE) {
                 val w = floatW.coerceAtLeast(1)
                 pending.preClear(style.clearSide)
-                pending.register(side, w, repH)
-                (left + maxOf(0, contentW - w)) to w
+                // E23-b：行装箱按**外边盒**宽记账（左右外边距参与同行排位），容量 = 含边距的包含块内容宽。
+                val mH = (style.margin.left + style.margin.right).roundToInt()
+                pending.register(side, w + mH, repH, availW + mH)
+                // 同行装箱的落点（左浮动自内容左起；右浮动自内容右起、含自身外边盒宽）。
+                val x = if (side == FloatSide.RIGHT) availW + mH - pending.lastX else pending.lastX
+                Triple(left + x.coerceAtLeast(0), w, pending.lastNewRow)
             } else {
                 pending.dropAll()
-                left to contentW
+                Triple(left, contentW, true)
             }
             listOf(
                 LayoutBox(
@@ -598,9 +724,10 @@ object NormalFlowLayout {
                     lineHeights = emptyList(),
                     childBoxes = emptyList(),
                     replaceableHeight = repH,
+                    floatNewRow = newRow,
                 ),
             )
-        } else if (blockChildren.isEmpty() && soleFigureImage(el, classify, hidden) != null) {
+        } else if (blockChildren.isEmpty() && !inlineWrappedBlock && soleFigureImage(el, classify, hidden) != null) {
             // Sole-figure block (`<p><img/></p>`, `<div><img/></div>`, span-wrapped variants): the
             // block carries no text of its own, so promote the image to a replaceable leaf instead
             // of a one-U+FFFC text leaf. A text leaf would go through the shaper/drawer as the
@@ -646,16 +773,21 @@ object NormalFlowLayout {
             val breakW = innerBreakWidth(imgStyleRaw, contentW)
             // P6-a: 与 img 分支同式（悬浮注册 + 右对齐；非悬浮清零）。
             // P3：`fitMaxH` 由第一趟流出的几何给出（此趟恒 null = 自然尺寸），见 `applyReplacedFit`。
-            val (floatW, repH) = replacedUsedSize(img, imgStyleRaw, breakW, imageLoader, chapterHref, density = density)
+            val (floatContentW, repH) = replacedUsedSize(img, imgStyleRaw, breakW, imageLoader, chapterHref, density = density)
             val side = imgStyleRaw.floatSide
-            val (boxLeft, boxW) = if (side != FloatSide.NONE) {
-                val w = floatW.coerceAtLeast(1)
-                pending.preClear(style.floatSide.let { style.clearSide })
-                pending.register(side, w, repH)
-                (left + maxOf(0, contentW - w)) to w
+            val (boxLeft, boxW, newRow) = if (side != FloatSide.NONE) {
+                // E24：`replacedUsedSize` 给内容宽；盒宽 / 排位 / 环绕一律 border-box（+ img 自身横边）。
+                val w = floatBorderBoxWidth(imgStyleRaw, floatContentW).coerceAtLeast(1)
+                pending.preClear(style.clearSide)
+                // E23-b：外边盒宽记账（同 img 分支；横向边距取 img 自身样式，宿主块的纵向边距已折进上面）。
+                val mH = (imgStyle.margin.left + imgStyle.margin.right).roundToInt()
+                pending.register(side, w + mH, repH, contentW + mH)
+                // 同行装箱的落点（左浮动自内容左起；右浮动自内容右起、含自身外边盒宽）。
+                val x = if (side == FloatSide.RIGHT) contentW + mH - pending.lastX else pending.lastX
+                Triple(left + x.coerceAtLeast(0), w, pending.lastNewRow)
             } else {
                 pending.dropAll()
-                left to contentW
+                Triple(left, contentW, true)
             }
             listOf(
                 LayoutBox(
@@ -670,7 +802,7 @@ object NormalFlowLayout {
                     breakCarrierStyle = style,
                 ),
             )
-        } else if (blockChildren.isEmpty()) {
+        } else if (blockChildren.isEmpty() && !inlineWrappedBlock) {
             // Leaf text block: absorb all inline/text descendants, break into lines.
             // Lines containing an inline <img> (U+FFFC slot) are raised to the image's used
             // height (CSS 2.1 §10.8: the line box must contain the tallest inline box; the
@@ -685,24 +817,37 @@ object NormalFlowLayout {
             val text = absorbStyled(el, styles, classify, hidden, genOf).text
             val contentW = widthPx.coerceAtLeast(1)
             val styleOf: (MarkupElement) -> ComputedStyle = { styles.getValue(it) }
-            val runs = leafFontRuns(el, styles, classify, hidden, genOf)
-            val shifts = leafBaselineShifts(el, styles, classify, hidden, genOf)
+            val runs = leafFontRuns(el, styles, classify, hidden, genOf, firstLetterOf)
+            val shifts = leafBaselineShifts(el, styles, classify, hidden, genOf, firstLetterOf)
+            // 行内盒（横向 padding/border 参与断行宽度）：与绘制侧同一份，量画同源。
+            val boxes = leafInlineBoxRuns(el, styles, classify, hidden, genOf, firstLetterOf)
             val side = style.floatSide
             if (side != FloatSide.NONE) {
-                val floatW = floatTextWidth(style, text, contentW, breaker, runs)
-                val boxLeft = if (side == FloatSide.RIGHT) left + maxOf(0, contentW - floatW) else left
+                // E24：`floatTextWidth` 给内容宽；盒宽 / 排位 / 环绕一律 border-box（+ 自身横边）。
+                val floatW = floatBorderBoxWidth(style, floatTextWidth(style, text, contentW, breaker, runs, boxes))
                 val breakWf = innerBreakWidth(style, floatW)
-                val brokenF = breakWrappedLines(breaker, text, style, breakWf, null, el.tag, runs, style.textIndentPx.coerceAtLeast(0f), shifts)
+                val brokenF = breakWrappedLines(breaker, text, style, breakWf, null, el.tag, runs, style.textIndentPx, shifts, boxes)
                 val heightsF = adjustLineHeightsForInlineImages(text, brokenF, el, styles, classify, hidden, breakWf, imageLoader, chapterHref, density = density)
                     .map { it.coerceAtLeast(1) }
                 // P6-b: 叠排注音行增高（与行内图抬升同式；无注音零回归）。
-                val grownF = adjustLineHeightsForRuby(brokenF, heightsF, leafRubyRuns(el, styles, classify, hidden, genOf))
-                val h = grownF.sum()
+                val grownF = adjustLineHeightsForRuby(brokenF, heightsF, leafRubyRuns(el, styles, classify, hidden, genOf, firstLetterOf))
+                // E23-b：悬浮跨度高 = max(行高和, `height`)（与 `emit` 的叶盒高同式；空悬浮盒也占位）。
+                // E23-f：参与外围记账（包含块高度 / 环绕行数 / 后续内容起点）的是**外边盒**高，
+                // 不是内容高 —— CSS 2.1 §10.6.7：BFC 根高度取浮动盒的外边盒底。
+                // 只记内容高的表现：`<div class="cf"><div class="fli" ...></div></div>` 的灰框
+                // 比 Chromium 浅一圈（实测 42 物理 px，缺上下 border 2 + 上下 margin 4）。
+                val spanH = specifiedContentHeight(style, grownF.sum()) +
+                    (style.border.vertical + style.padding.vertical).roundToInt() +
+                    (style.margin.top + style.margin.bottom).roundToInt()
                 pending.preClear(style.clearSide)
-                pending.register(side, floatW, h)
+                // E23-b：外边盒宽记账（左右外边距参与同行排位），容量 = 含边距的包含块内容宽。
+                val mH = (style.margin.left + style.margin.right).roundToInt()
+                pending.register(side, floatW + mH, spanH, contentW + mH)
+                // 同行装箱的落点（左浮动自内容左起；右浮动自内容右起、含自身外边盒宽）。
+                val x = if (side == FloatSide.RIGHT) contentW + mH - pending.lastX else pending.lastX
                 listOf(
                     LayoutBox(
-                        el, style, boxLeft, floatW,
+                        el, style, left + x.coerceAtLeast(0), floatW,
                         ranges = brokenF.map { it.range },
                         hyphenAtEnd = brokenF.map { it.hyphenAtEnd },
                         squeezeRatios = brokenF.map { it.squeezeRatio },
@@ -710,18 +855,26 @@ object NormalFlowLayout {
                         lineHeights = grownF,
                         childBoxes = emptyList(),
                         floatLead = null,
+                        floatNewRow = pending.lastNewRow,
                     ),
                 )
             } else {
                 // 显式 clear 先剔除被清侧（emit 期 Y 跳跃后它们已在下方），再按剩余侧收窄。
                 pending.preClear(style.clearSide)
                 val lead = if (el.tag == "#text") null else pendingLeadFor(pending, style, contentW)
+                // E21 残留修复：`::first-letter{float:left}` 首字下沉（出流；首字仍在文本里占首行）。
+                val capF = if (el.tag == "#text") null else firstLetterOf?.invoke(el)?.let { capSt ->
+                    capFloatOf(
+                        capSt, style, text.substring(0, firstLetterUnitLength(text).coerceAtMost(text.length)),
+                        breaker,
+                    )
+                }
                 val breakW = innerBreakWidth(style, contentW)
-                val broken = breakWrappedLines(breaker, text, style, breakW, lead, el.tag, runs, style.textIndentPx.coerceAtLeast(0f), shifts)
+                val broken = breakWrappedLines(breaker, text, style, breakW, lead, el.tag, runs, style.textIndentPx, shifts, boxes, capF)
                 val lineHeights = adjustLineHeightsForInlineImages(text, broken, el, styles, classify, hidden, breakW, imageLoader, chapterHref, density = density)
                     .map { it.coerceAtLeast(1) }
                 // P6-b: 叠排注音行增高（与行内图抬升同式；无注音零回归）。
-                val grownHeights = adjustLineHeightsForRuby(broken, lineHeights, leafRubyRuns(el, styles, classify, hidden, genOf))
+                val grownHeights = adjustLineHeightsForRuby(broken, lineHeights, leafRubyRuns(el, styles, classify, hidden, genOf, firstLetterOf))
                 // 回记账（含自身上边距，与 K 公式的 mTop 对称；只多不少，漂移永朝安全方向）。
                 pending.consume(grownHeights.sum() + style.margin.top.coerceAtLeast(0f).roundToInt())
                 listOf(
@@ -734,10 +887,14 @@ object NormalFlowLayout {
                         lineHeights = grownHeights,
                         childBoxes = emptyList(),
                         floatLead = lead,
+                        capFloat = capF,
                     ),
                 )
             }
         } else {
+            // §10.6.7：`overflow != visible` = BFC 根，浮动**关在盒内** —— 盒内浮动不逃出去收窄
+            // 后随内容（浏览器里 BFC 根外面看不见这些浮动）。进入时存登记几何，子女建完还原。
+            val keptSpans = if (style.clipsOverflow()) pending.snapshotGeometry() else null
             // Container: interleave its block children with synthetic anonymous text runs for its own
             // stray inline content (CSS anonymous-block substitution), so text like `第xx章`.
             // P6-a: 入口显式 clear 先剔除被清侧（NONE 不动，子女自理：文本环绕、不可环绕者自越）。
@@ -747,15 +904,25 @@ object NormalFlowLayout {
             // border-box left + its left border/padding + the child's own left margin.
             val edgesL = (style.border.left + style.padding.left).roundToInt()
             val children = flowChildren(el, classify, hidden).flatMap { ch ->
-                val marginL = if (ch.tag == "#text") 0 else (styles[ch]?.margin?.left ?: 0f).roundToInt()
+                val childEdges = if (ch.tag == "#text") null else styles[ch]?.margin
+                val marginL = childEdges?.left?.roundToInt() ?: 0
+                val marginR = childEdges?.right?.roundToInt() ?: 0
                 val childLeft = left + edgesL + marginL
+                // CSS 2.1 §10.3.3：块级 auto 宽 = 包含块内容宽 − **自身横向外边距**，右缘不越包含块。
+                // 少这一步只右移不缩宽 ⇒ 行尾越出版心的字被页面裁掉（丢内容，不是不好看）；
+                // 轻路径 [descendContentWidth] 必须同式（重轻两路逐字节一致）。
+                val childW = (innerW - marginL - marginR).coerceAtLeast(1)
                 if (ch.tag == "#text") {
                     // P6-a: 匿名 run 不环绕（v1 规则保留），但高度回记账（Y 记账不漂移）。
-                    buildAnonymousTextLeaf(ch, style, breaker, innerW, childLeft).also { bs ->
+                    // E19: 匿名 run 的样式取**母节点**（容器、或断开的行内包装）——与轻路径
+                    // `blockStyleFor`「`#text` 叶取父级样式」同式，字形/行高随行内链不变；
+                    // 容器直挂的匿名 run 此处 `styles[el] === style`，与旧行为逐值同。
+                    buildAnonymousTextLeaf(ch, styles[ch.parent ?: el] ?: style, breaker, childW, childLeft).also { bs ->
                         pending.consume(bs.sumOf { it.lineHeights.sum() })
                     }
-                } else buildBoxTree(ch, styles, breaker, innerW, childLeft, classify, hidden, imageLoader, chapterHref, density, genOf, pending)
+                } else buildBoxTree(ch, styles, breaker, childW, childLeft, classify, hidden, imageLoader, chapterHref, density, genOf, firstLetterOf, pending)
             }
+            if (keptSpans != null) pending.restoreGeometry(keptSpans)
             // P6-a: 容器自身纵向边（border+padding 永不折叠；margin 会折叠，已由子女记账）回记账。
             pending.consume(
                 (style.border.top + style.padding.top + style.padding.bottom + style.border.bottom).roundToInt(),
@@ -784,6 +951,9 @@ object NormalFlowLayout {
             // a block-level one: <p>前</p><img/><p>后</p> would otherwise be silently dropped here — a
             // container is not a text leaf, so absorbedText's U+FFFC path never runs for it.
             else if (isReplaceable(c)) { flush(); out.add(c) }
+            // E19（§9.2.1 block-in-inline）：行内子树里埋着块级后代 ⇒ 行内盒在此断开 —— 内联片段各成
+            // 匿名 run（母节点 = 该行内包装），块级后代提升为容器流子项。
+            else if (hasInlineWrappedBlock(c, classify, hidden)) { flush(); out.addAll(splitBlockInInline(c, classify, hidden)) }
             else appendInlineText(c, classify, sb, hidden)
         }
         flush()
@@ -814,9 +984,62 @@ object NormalFlowLayout {
     }
 
     /**
+     * E19（CSS 2.1 §9.2.1 block-in-inline）：[el] 的**行内子树**里是否埋着块级后代（经任意深度的
+     * 行内祖先可达）。行内盒一旦包住块级盒，行内盒必须在块级盒处**断开**（前后内联内容各成匿名块、
+     * 块级盒提升到最近的块容器流）；整段吸收（[appendInlineText] 与 [styledSegments] 的块跳过）
+     * 会把块里的文字整段丢掉。
+     *
+     * [buildBoxTree] / [enumerateBlockLeaves] / [styledCharAdvance] 三处叶判定同用本谓词，口径恒一
+     * （重轻两路叶集 / `globalCharStarts` 不漂移）。替换元素（img）不成块——行内图只按 CSS §10.8
+     * 抬所在行高，拆成独立块会让塑形侧对 `img` 根早退、塑出零行（教训 ⑲）。隐藏子树不参与
+     * （与 [enumerateBlockLeaves] 的直接块判据同取 [hidden]）。
+     */
+    private fun hasInlineWrappedBlock(el: MarkupElement, classify: BlockClassify, hidden: HiddenCheck): Boolean =
+        el.children.any { c ->
+            when {
+                hidden.isHidden(c) -> false
+                classify.isBlock(c) -> true
+                isReplaceable(c) -> false
+                else -> hasInlineWrappedBlock(c, classify, hidden)
+            }
+        }
+
+    /**
+     * E19：[el]（行内子树根，调用方已判 [hasInlineWrappedBlock]）拆成容器流项序列 ——
+     * 内联片段各自成匿名 `#text` run（**母节点 = 行内包装 [el]**：字形/颜色/祖先装饰链随行内链
+     * 不变，与轻路径 `blockStyleFor`「`#text` 叶取父级样式」同式），块级后代按文档序提升为真元素项。
+     *
+     * 文本/`br`/`img` 三条必须与 [appendInlineText]、[styledSegments] 的 `walk` **逐条同形**
+     * （教训 ⑲：两个遍历无法由编译器保证一致，只有显式对齐 + 变异验证）：本函数只决定**流结构**，
+     * 落字仍走同一套吸收；纯空白 run 丢弃的判据也与 [flowChildren] 一致。
+     */
+    private fun splitBlockInInline(el: MarkupElement, classify: BlockClassify, hidden: HiddenCheck): List<MarkupElement> {
+        val out = ArrayList<MarkupElement>()
+        val sb = StringBuilder()
+        fun flush() {
+            if (sb.isNotBlank()) out.add(MarkupElement("#text", text = sb.toString()).also { it.parent = el })
+            sb.setLength(0)
+        }
+        fun walk(x: MarkupElement) {
+            when {
+                hidden.isHidden(x) -> Unit
+                x.isText -> sb.append(x.text)
+                x.tag == "br" -> sb.append('\n')
+                x.tag == "img" -> sb.append('￼')
+                classify.isBlock(x) -> { flush(); out.add(x) }
+                else -> for (c in x.children) walk(c)
+            }
+        }
+        walk(el)
+        flush()
+        return out
+    }
+
+    /**
      * An anonymous text leaf box for a stray inline run.
      *
-     * 排版层（下）: 匿名块只继承容器的字形/排版属性（字号/行高/缩进/对齐/颜色等），自身的盒边
+     * 排版层（下）: 匿名块只继承**母节点**（容器、或 E19 断开的行内包装）的字形/排版属性
+     * （字号/行高/缩进/对齐/颜色等），自身的盒边
      * （margin/padding/border）恒为 0（CSS 2.1 §9.2.1 匿名块 + §8.3.1 边距折叠：容器的边归容器盒，
      * 流程统一加一次）。此前这里直接复用容器样式，容器的 padding/border/margin 被匿名叶与容器盒
      * 各算一次 —— 长生界 `h2{padding-bottom:6rem}` 的章标题→正文间隙被翻倍（252px 而非 141px）。
@@ -929,12 +1152,13 @@ object NormalFlowLayout {
         classify: BlockClassify,
         hidden: HiddenCheck = HIDDEN_NONE,
         genOf: GenOf = EmptyGen,
+        firstLetterOf: FirstLetterOf? = null,
     ): List<TableCellBlock> {
         val cellStyle = styles.getValue(cellEl)
         val out = ArrayList<TableCellBlock>(2)
         // 格自身的 border/padding **不**进块堆叠（行高预算与 `emitCell` 的 insetTop 单算）⇒
         // `selfEdges = false`，起点 gap/inset 皆 0。
-        walkCellBlocks(cellEl, cellStyle, styles, classify, hidden, genOf, out, 0, 0, 0f, selfEdges = false)
+        walkCellBlocks(cellEl, cellStyle, styles, classify, hidden, genOf, firstLetterOf, out, 0, 0, 0f, selfEdges = false)
         return out
     }
 
@@ -945,6 +1169,7 @@ object NormalFlowLayout {
         classify: BlockClassify,
         hidden: HiddenCheck,
         genOf: GenOf,
+        firstLetterOf: FirstLetterOf?,
         out: MutableList<TableCellBlock>,
         /** 本容器内容框相对**格内容框**的横向 inset 累计（不含本容器自身的横向边）。 */
         insetH: Int,
@@ -978,11 +1203,12 @@ object NormalFlowLayout {
                 // 块 `el` 就是容器（塑形侧据 [TableCellBlock.outsideSiblings] 复原同一段），行内图
                 // 配对扫描根同为容器。
                 val after = cellRunAfter(container, item)
-                val rd = absorbCellBlock(container, styles, after, classify::isBlock, cs, hidden, genOf)
+                val rd = absorbCellBlock(container, styles, after, classify::isBlock, cs, hidden, genOf, firstLetterOf)
                 out.add(
                     TableCellBlock(
                         el = container, style = cs,
-                        text = rd.first, runs = rd.second, imageRoot = container, outsideSiblings = after,
+                        text = rd.first, runs = rd.second, inlineBoxRuns = rd.third,
+                        imageRoot = container, outsideSiblings = after,
                         gapBefore = g, edgeH = insetIn, edgeV = 0,
                     ),
                 )
@@ -1001,14 +1227,14 @@ object NormalFlowLayout {
                     // 否则重路径字符少 1（整章 char 基址漂移），且塑形 `shapeGeometry` 的
                     // replaceable 形无槽可配、绘制侧 `emitCell` 整块跳过（Rust 简介 Ferris 表即此）。
                     val rd = if (isReplaceable(blk)) {
-                        "\uFFFC" to emptyList<FontRun>()
+                        Triple("\uFFFC", emptyList<FontRun>(), emptyList<InlineBoxRun>())
                     } else {
-                        absorbCellBlock(blk, styles, emptySet(), { false }, chs, hidden, genOf)
+                        absorbCellBlock(blk, styles, emptySet(), { false }, chs, hidden, genOf, firstLetterOf)
                     }
                     out.add(
                         TableCellBlock(
                             el = blk, style = chs,
-                            text = rd.first, runs = rd.second, imageRoot = blk,
+                            text = rd.first, runs = rd.second, inlineBoxRuns = rd.third, imageRoot = blk,
                             gapBefore = g, edgeH = insetIn + ownH, edgeV = ownV,
                         ),
                     )
@@ -1016,7 +1242,7 @@ object NormalFlowLayout {
                     // 中间容器：自身不产块。传 `insetIn` / `g`（容器**边框盒**口径），由递归自己
                     // 加 `selfEdges` 的那一次横向/纵向边 —— 传 `insetIn + ownH` 会双算。
                     // 首子因容器顶边而与外部折叠隔断（传 0f）。
-                    val sub = walkCellBlocks(blk, chs, styles, classify, hidden, genOf, out, insetIn, g, 0f, selfEdges = true)
+                    val sub = walkCellBlocks(blk, chs, styles, classify, hidden, genOf, firstLetterOf, out, insetIn, g, 0f, selfEdges = true)
                     cur = sub.nextGap
                     prevM = if ((chs.border.bottom + chs.padding.bottom) > 0f) chs.margin.bottom else collapseMargins(chs.margin.bottom, sub.bottomMargin)
                     first = false
@@ -1058,9 +1284,10 @@ object NormalFlowLayout {
     }
 
     /**
-     * Q15 辅助：一个块的 **归一文本 ＋ 行内 font 段**，一次 [styledSegments] 两家用
-     * （`segments` 同时喂 [collectFontRuns] 的 `precomputed`，与 `absorbStyled`/`leafFontRuns`
-     * 的「同参同段表」纪律一致，下标恒对齐）。
+     * Q15 辅助：一个块的 **归一文本 ＋ 行内 font 段 ＋ 行内盒 run**，一次 [styledSegments] 三家用
+     * （`segments` 同时喂 [collectFontRuns]/[collectInlineBoxRuns] 的 `precomputed`，与
+     * `absorbStyled`/`leafFontRuns` 的「同参同段表」纪律一致，下标恒对齐；E15 靠这一步把
+     * [TableCellBlock.inlineBoxRuns] 钉在与 [TableCellBlock.text] 同一坐标系上，匿名块无偏移风险）。
      *
      * @param after 本 run 之外要额外排掉的**原始**兄弟节点（见 [cellRunAfter]；空集 = 整块吸收）。
      * @param isBlockOf 真实块级判据；与 [after] **或**起来才算跳过。命名叶传 `{ false }`
@@ -1074,18 +1301,23 @@ object NormalFlowLayout {
         style: ComputedStyle,
         hidden: HiddenCheck,
         genOf: GenOf,
-    ): Pair<String, List<FontRun>> {
-        if (root.tag == "table" || root.tag == "img") return "" to emptyList()
+        firstLetterOf: FirstLetterOf? = null,
+    ): Triple<String, List<FontRun>, List<InlineBoxRun>> {
+        if (root.tag == "table" || root.tag == "img") return Triple("", emptyList(), emptyList())
         val isExcluded: (MarkupElement) -> Boolean = { hidden.isHidden(it) || it in after }
         val isBlock: (MarkupElement) -> Boolean = { it in after || isBlockOf(it) }
         val wsOf: (MarkupElement) -> WhiteSpace = { wsOfNode(it, styles, root) }
         val leafWs = styles[root]?.whiteSpace ?: WhiteSpace.NORMAL
-        val segs = styledSegments(root, wsOf, isExcluded, isBlock, leafWs, genOf, { styles[it] }).segments
+        val segs = styledSegments(root, wsOf, isExcluded, isBlock, leafWs, genOf, { styles[it] }, firstLetterOf = firstLetterOf).segments
         val runs = collectFontRuns(
             root, styles, isExcluded, isBlock, fontBaseOf(root, styles, style), leafWs, genOf,
             precomputed = segs,
         )
-        return StyledSegments(segs).text to runs
+        // E15：行内盒与 [text]/[runs] **同一份段表**（`precomputed`）同参收集 ⇒ 匿名块的
+        // 「段表坐标 = 块文本坐标」由构造保证，无容器坐标偏移风险。传 `leafWs` 与 styledSegments
+        // 的根参同值（precomputed 非空时内部不再用它分段）。
+        val boxes = collectInlineBoxRuns(root, styles, isExcluded, isBlock, leafWs, genOf, precomputed = segs)
+        return Triple(StyledSegments(segs).text, runs, boxes)
     }
 
     /**
@@ -1107,6 +1339,8 @@ object NormalFlowLayout {
         density: Float = 1f,
         /** P3-c 生成内容查找（空即无，旧路径）。 */
         genOf: GenOf = EmptyGen,
+        /** `::first-letter` 伪元素查找（null = 无该规则）。 */
+        firstLetterOf: FirstLetterOf? = null,
     ): List<LayoutBox> {
         val model = TableGridModel.build(el)
         if (model.columnCount <= 0 || model.rows.isEmpty()) return emptyList()
@@ -1129,7 +1363,7 @@ object NormalFlowLayout {
             val list = ArrayList<CellBlocks>(row.cells.size)
             for (cell in row.cells) {
                 val cs = styles.getValue(cell.el)
-                val blocks = cellBlocks(cell.el, styles, classify, hidden, genOf)
+                val blocks = cellBlocks(cell.el, styles, classify, hidden, genOf, firstLetterOf)
                 list.add(CellBlocks(cell, cs, blocks))
                 prefs.add(tableCellPref(breaker, cell.col, cell.colSpan, blocks, cs))
             }
@@ -1181,12 +1415,15 @@ object NormalFlowLayout {
                         breaker, b.text, b.style, blockBreak, b.el.tag,
                         b.runs,
                         0f,
-                        leafBaselineShifts(b.el, styles, bCls, hidden, genOf),
+                        leafBaselineShifts(b.el, styles, bCls, hidden, genOf, firstLetterOf),
+                        // E15：行内盒横向 padding/border 也占断行宽 —— 与塑形侧 `shapeGeometry`
+                        // 自收的同源 runs 同账（否则重路径格内行数比实排少，行高预算偏小）。
+                        b.inlineBoxRuns,
                     )
                     // Same §10.8 image-line adjustment as text leaves (cell images share the bug).
                     val adjHeights = adjustLineHeightsForInlineImages(b.text, lines, b.imageRoot, styles, bCls, hidden, blockBreak, imageLoader, chapterHref, density = density)
                     // P6-b: 叠排注音行增高（与文本叶同式；无注音零回归）。
-                    val grownHeights = adjustLineHeightsForRuby(lines, adjHeights, leafRubyRuns(b.el, styles, bCls, hidden, genOf))
+                    val grownHeights = adjustLineHeightsForRuby(lines, adjHeights, leafRubyRuns(b.el, styles, bCls, hidden, genOf, firstLetterOf))
                     b.ranges = lines.map { it.range }
                     b.hyphenAtEnd = lines.map { it.hyphenAtEnd }
                     b.squeezeRatios = lines.map { it.squeezeRatio }
@@ -1270,6 +1507,14 @@ object NormalFlowLayout {
         hidden: HiddenCheck = HIDDEN_NONE,
         /** P3-c 生成内容查找（空即无；容器 stray 分支同旧式跳过，重轻同跳）。 */
         genOf: GenOf = EmptyGen,
+        /**
+         * E19 上下文开关：正常流容器 true（与 [flowChildren] 同断开行内盒）；**表格格内容 false** ——
+         * 格的字符口径在重轻两路都由 [cellBlocks]（[walkCellBlocks] → [cellFlowItems]）单源给出，
+         * 那里 v1 仍按旧式跳过行内内嵌块（[CellFlowItem] 的 `span` 按 `container.children` 原始身份
+         * 认段，行内子树里的块无法用下标表达）。进入格内容的两条路（行叶子元素、`table` 元素自身）
+         * 都翻此开关并向下继承；两路同址保持一致，绝不此处拆、彼处不拆。调用方恒用默认值。
+         */
+        hoist: Boolean = true,
     ): Long {
         if (hidden.isHidden(el)) return 0
         if (isReplaceable(el)) return 1
@@ -1278,24 +1523,28 @@ object NormalFlowLayout {
             var n = 0L
             for (row in model.rows) {
                 for (cell in row.cells) {
-                    n += styledCharAdvance(cell.el, styleOf, classify, hidden, genOf)
+                    n += styledCharAdvance(cell.el, styleOf, classify, hidden, genOf, hoist = false)
                 }
             }
             // P1-2: caption 字符计入表内（顺序无关求和；叶序由 enumerate 保证）。
+            // caption 是正常流块（重路径走 buildBoxTree 正常容器分支），照传本层 [hoist]。
             val cap = model.caption
-            if (cap != null) n += styledCharAdvance(cap, styleOf, classify, hidden, genOf)
+            if (cap != null) n += styledCharAdvance(cap, styleOf, classify, hidden, genOf, hoist = hoist)
             return n
         }
         if (soleFigureImage(el, classify, hidden) != null) return 1
         val blockChildren = el.children.filter { !hidden.isHidden(it) && classify.isBlock(it) }
-        if (blockChildren.isEmpty()) {
+        if (blockChildren.isEmpty() && !(hoist && hasInlineWrappedBlock(el, classify, hidden))) {
             if (el.isText) return normalizeAnonymousRun(el.text, styleOf(el.parent ?: el).whiteSpace).length.toLong()
             val wsOf: (MarkupElement) -> WhiteSpace = { n -> styleOf(n).whiteSpace }
             val leafWs = styleOf(el).whiteSpace
             return styledSegments(el, wsOf, hidden::isHidden, classify::isBlock, leafWs, genOf, styleOf).text.length.toLong()
         }
-        // 容器：与 flowChildren 同结构（raw 判空），匿名 run 按容器样式整段归一。
+        // 容器：与 flowChildren 同结构（raw 判空），匿名 run 按其母节点样式整段归一。
+        // 行叶（`tr`）的子格切到「格内容」口径：重路径的行长由 `cellBlocks` 给出（`cellFlowItems`
+        // 不拆行内内嵌块），轻路径必须同口径（见 [hoist]）。
         var n = 0L
+        val childHoist = hoist && el.tag != "tr"
         val sb = StringBuilder()
         fun flush() {
             if (sb.isNotBlank()) {
@@ -1307,10 +1556,17 @@ object NormalFlowLayout {
             if (hidden.isHidden(c)) continue
             if (classify.isBlock(c)) {
                 flush()
-                n += styledCharAdvance(c, styleOf, classify, hidden)
+                n += styledCharAdvance(c, styleOf, classify, hidden, hoist = childHoist)
             } else if (isReplaceable(c)) {
                 flush()
                 n += 1
+            } else if (hoist && hasInlineWrappedBlock(c, classify, hidden)) {
+                // E19: 与 flowChildren 同断开（行内子树埋块级后代）；匿名 run 的归一化按其母节点
+                // （行内包装）——递归进 `#text` 分支即走 `el.parent?.whiteSpace`，与重路径同值。
+                flush()
+                for (item in splitBlockInInline(c, classify, hidden)) {
+                    n += styledCharAdvance(item, styleOf, classify, hidden, genOf, hoist = hoist)
+                }
             } else {
                 appendInlineText(c, classify, sb, hidden)
             }
@@ -1361,11 +1617,13 @@ object NormalFlowLayout {
         hidden: HiddenCheck = HIDDEN_NONE,
         /** P3-c 生成内容查找（空即无，旧路径）。 */
         genOf: GenOf = EmptyGen,
+        /** `::first-letter` 伪元素查找（null = 无该规则；章节开关关掉即整个传 null）。 */
+        firstLetterOf: FirstLetterOf? = null,
     ): List<ColorRun> {
         if (el == null) return emptyList()
         val seed = styles[el]?.colorHex?.let(::cssHexToArgb)
         val rootWs = styles[el]?.whiteSpace ?: el.parent?.let { styles[it]?.whiteSpace } ?: WhiteSpace.NORMAL
-        return collectColorRuns(el, styles, hidden::isHidden, classify::isBlock, seed, rootWs, genOf)
+        return collectColorRuns(el, styles, hidden::isHidden, classify::isBlock, seed, rootWs, genOf, firstLetterOf = firstLetterOf)
     }
 
     /**
@@ -1382,10 +1640,12 @@ object NormalFlowLayout {
         hidden: HiddenCheck = HIDDEN_NONE,
         /** P3-c 生成内容查找（空即无，旧路径）。 */
         genOf: GenOf = EmptyGen,
+        /** `::first-letter` 伪元素查找（null = 无该规则；章节开关关掉即整个传 null）。 */
+        firstLetterOf: FirstLetterOf? = null,
     ): List<FontRun> {
         if (el == null) return emptyList()
         val rootWs = styles[el]?.whiteSpace ?: el.parent?.let { styles[it]?.whiteSpace } ?: WhiteSpace.NORMAL
-        return collectFontRuns(el, styles, hidden::isHidden, classify::isBlock, fontBaseOf(el, styles, styles[el]), rootWs, genOf)
+        return collectFontRuns(el, styles, hidden::isHidden, classify::isBlock, fontBaseOf(el, styles, styles[el]), rootWs, genOf, firstLetterOf = firstLetterOf)
     }
 
     /**
@@ -1399,10 +1659,12 @@ object NormalFlowLayout {
         hidden: HiddenCheck = HIDDEN_NONE,
         /** P3-c 生成内容查找（空即无，旧路径）。 */
         genOf: GenOf = EmptyGen,
+        /** `::first-letter` 伪元素查找（null = 无该规则；章节开关关掉即整个传 null）。 */
+        firstLetterOf: FirstLetterOf? = null,
     ): List<BaselineShift> {
         if (el == null) return emptyList()
         val rootWs = styles[el]?.whiteSpace ?: el.parent?.let { styles[it]?.whiteSpace } ?: WhiteSpace.NORMAL
-        return collectBaselineShifts(el, styles, hidden::isHidden, classify::isBlock, rootWs, genOf)
+        return collectBaselineShifts(el, styles, hidden::isHidden, classify::isBlock, rootWs, genOf, firstLetterOf = firstLetterOf)
     }
 
     /**
@@ -1416,27 +1678,75 @@ object NormalFlowLayout {
         hidden: HiddenCheck = HIDDEN_NONE,
         /** P3-c 生成内容查找（空即无，旧路径）。 */
         genOf: GenOf = EmptyGen,
+        /** `::first-letter` 伪元素查找（null = 无该规则；章节开关关掉即整个传 null）。 */
+        firstLetterOf: FirstLetterOf? = null,
     ): List<RubyRun> {
         if (el == null) return emptyList()
         val rootWs = styles[el]?.whiteSpace ?: el.parent?.let { styles[it]?.whiteSpace } ?: WhiteSpace.NORMAL
-        return collectRubyRuns(el, styles, hidden::isHidden, classify::isBlock, rootWs, genOf)
+        return collectRubyRuns(el, styles, hidden::isHidden, classify::isBlock, rootWs, genOf, firstLetterOf = firstLetterOf)
     }
 
     /**
-     * 下划线伴生：[leafText] 同一字符串上的下划线区间（[UnderlineRun]，叶子全文本坐标系）。
+     * 下划线伴生：[leafText] 同一字符串上的下划线区间（[TextDecorationRun]，叶子全文本坐标系）。
      * 无下划线叶回空表（绘制零回归）。调用方必须传与塑形同一套 [styles]/[classify]/[hidden]。
      */
-    fun leafUnderlineRuns(
+    fun leafTextDecorationRuns(
         el: MarkupElement?,
         styles: Map<MarkupElement, ComputedStyle>,
         classify: BlockClassify,
         hidden: HiddenCheck = HIDDEN_NONE,
         /** P3-c 生成内容查找（空即无，旧路径）。 */
         genOf: GenOf = EmptyGen,
-    ): List<UnderlineRun> {
+        /** `::first-letter` 伪元素查找（null = 无该规则；章节开关关掉即整个传 null）。 */
+        firstLetterOf: FirstLetterOf? = null,
+    ): List<TextDecorationRun> {
         if (el == null) return emptyList()
         val rootWs = styles[el]?.whiteSpace ?: el.parent?.let { styles[it]?.whiteSpace } ?: WhiteSpace.NORMAL
-        return collectUnderlineRuns(el, styles, hidden::isHidden, classify::isBlock, rootWs, genOf)
+        return collectTextDecorationRuns(el, styles, hidden::isHidden, classify::isBlock, rootWs, genOf, firstLetterOf = firstLetterOf)
+    }
+
+    /**
+     * 行内盒伴生：[leafText] 同一字符串上的行内盒区间（[InlineBoxRun]，叶子全文本坐标系）。
+     * 无背景/边框叶回空表（绘制零回归）。调用方必须传与塑形同一套 [styles]/[classify]/[hidden]。
+     */
+    fun leafInlineBoxRuns(
+        el: MarkupElement?,
+        styles: Map<MarkupElement, ComputedStyle>,
+        classify: BlockClassify,
+        hidden: HiddenCheck = HIDDEN_NONE,
+        /** P3-c 生成内容查找（空即无，旧路径）。 */
+        genOf: GenOf = EmptyGen,
+        /** `::first-letter` 伪元素查找（null = 无该规则；章节开关关掉即整个传 null）。 */
+        firstLetterOf: FirstLetterOf? = null,
+    ): List<InlineBoxRun> {
+        if (el == null) return emptyList()
+        val rootWs = styles[el]?.whiteSpace ?: el.parent?.let { styles[it]?.whiteSpace } ?: WhiteSpace.NORMAL
+        return collectInlineBoxRuns(el, styles, hidden::isHidden, classify::isBlock, rootWs, genOf, firstLetterOf = firstLetterOf)
+    }
+
+    /**
+     * E10 伴生：[leafText] 同一字符串上的 `visibility: hidden` 覆盖区间（叶文本坐标系）。
+     *
+     * 隐藏字符**不落墨、但保留占位**（与 [HiddenCheck] 的 `display:none` 去盒语义相反）；
+     * 空表 = 全叶可见（绘制零回归）。调用方必须传与塑形同一套 [styles]/[classify]/[hidden]。
+     */
+    fun leafVisibilityHiddenRuns(
+        el: MarkupElement?,
+        styles: Map<MarkupElement, ComputedStyle>,
+        classify: BlockClassify,
+        hidden: HiddenCheck = HIDDEN_NONE,
+        /** P3-c 生成内容查找（空即无，旧路径）。 */
+        genOf: GenOf = EmptyGen,
+        /** `::first-letter` 伪元素查找（null = 无该规则；章节开关关掉即整个传 null）。 */
+        firstLetterOf: FirstLetterOf? = null,
+    ): List<IntRange> {
+        if (el == null) return emptyList()
+        val base = styles[el]?.visibilityHidden
+            ?: el.parent?.let { styles[it]?.visibilityHidden }
+            ?: false
+        // 快筛留给调用方（本章/本子树有没有 `visibility` 声明）；这里只做叶自身已知隐藏时的短路。
+        val rootWs = styles[el]?.whiteSpace ?: el.parent?.let { styles[it]?.whiteSpace } ?: WhiteSpace.NORMAL
+        return collectVisibilityHiddenRuns(el, styles, base, hidden::isHidden, classify::isBlock, rootWs, genOf, firstLetterOf = firstLetterOf)
     }
 
     /** 叶基底 face（行内 run 比对基准）：匿名叶不在表里时回传入后备，无表时回空基底。 */
@@ -1472,6 +1782,55 @@ object NormalFlowLayout {
         (borderBoxW - edges).coerceAtLeast(1)
 
     /**
+     * B（块级指定宽）单源：CSS 2.1 §10.3.3 —— `width` 非 auto 时，块盒 border-box 宽 = 指定内容宽
+     * （content-box 口径）+ 自身横向 padding+border；父给的可用宽（availBorderBoxW，=包含块内容宽
+     * − 自身横向外边距）只用于解 `%`（% 按包含块内容宽 = avail + 自身横向外边距）。
+     * 返回 null = `width: auto`（沿用父给的可用宽，行为与既有完全一致）。
+     */
+    fun specifiedBorderBoxWidth(style: ComputedStyle?, availBorderBoxW: Int): Int? {
+        val s = style ?: return null
+        val spec = s.widthPx
+            ?: s.widthPct?.let { pct ->
+                val cbW = availBorderBoxW + s.margin.left.roundToInt() + s.margin.right.roundToInt()
+                pct / 100f * cbW
+            } ?: return null
+        return (spec.roundToInt() + (s.padding.horizontal + s.border.horizontal).roundToInt()).coerceAtLeast(1)
+    }
+
+    /**
+     * E23 / E23-e 单源：CSS 2.1 §10.6.3 / §10.7 —— 盒子的**内容盒高** = max(在流内容高, 竖向下限)，
+     * 竖向下限 = max(`height`, `min-height`)（见 [specifiedVerticalFloor]）。
+     *
+     * 内容比下限高时按内容（溢出照排，不裁；裁剪是 `overflow` 的事）。
+     * 两者皆 auto / 百分比（包含块高不定，解析期已丢弃）返回自然高 ⇒ 逐值不变。
+     * **只补在流内容的竖向占位**（盒子高 ⇒ 底色/边框/裁剪区与后续内容起点），不动任何行。
+     *
+     * 注：`max-height` **只解析不消费**（裁定不做 —— 浏览器语义是「裁切 + 溢出」并要连带决定内容被
+     * 收掉后游标往哪走，与这里「只多不少」不是一套机理；见 `docs/引擎欠账-对齐浏览器语义.md` §2.1 D 表）。
+     */
+    fun specifiedContentHeight(style: ComputedStyle?, naturalH: Int): Int =
+        specifiedVerticalFloor(style)?.let { maxOf(naturalH, it) } ?: naturalH
+
+    /**
+     * E23-e 单源：盒子的**竖向下限**（content-box 口径）= max(`height`, `min-height`) 取整；两者皆
+     * 未声明（`auto` / 百分比被解析期丢弃）⇒ null。`height:0` / `min-height:0` 是声明过但下限为 0，
+     * 返回 0 而非 null —— 调用方据此区分「没有下限」与「下限为零」。
+     *
+     * Chromium 实测（2026-10-20，`--headless=new`，内容 20px + 末子 `margin-bottom:20`）：
+     * `min-height:120` ⇒ 盒高 120、后随内容贴盒底（末子下边距被收进盒内）；
+     * `min-height:10`（低于内容）⇒ 盒高 20、下边距照常外塌。
+     * 折叠判据据此**分两档**（见 `emit` 容器分支与 [consecutiveLeafAdvance]）：`height` 声明即断链，
+     * `min-height` 只在本下限**大于自然内容高**（真的撑高）时断链。
+     */
+    fun specifiedVerticalFloor(style: ComputedStyle?): Int? {
+        val s = style ?: return null
+        val h = s.heightPx?.roundToInt()?.coerceAtLeast(0)
+        val m = s.minHeightPx?.roundToInt()?.coerceAtLeast(0)
+        if (h == null && m == null) return null
+        return maxOf(h ?: 0, m ?: 0)
+    }
+
+    /**
      * The vertical background/border band a box covers for drawing, given the aggregated vertical extent
      * of its text lines and whether the box is itself a background-bearing **leaf** (self-owned).
      *
@@ -1498,15 +1857,47 @@ object NormalFlowLayout {
 
     /**
      * The border-box (content) width [el] receives during box layout: the reader width [rootW] reduced
-     * by the horizontal padding+border of every ancestor container down to (but not including) [el].
+     * by the horizontal padding+border of every ancestor container down to (but not including) [el],
+     * **and by [el]'s own horizontal margins** (CSS 2.1 §10.3.3: 块级 auto 宽 = 包含块内容宽 − 自身横向
+     * 外边距 ⇒ 右缘不越包含块；[marginsOf] 供**左+右各自取整后求和**，与重路径
+     * [`buildBoxTree`] 的 `innerW - marginL - marginR` 逐字节同式)。
+     *
+     * 少扣外边距的后果不是「不好看」：盒只被右移而不缩宽，行尾越出版心的字被页面裁掉（丢内容）。
      * This is byte-identical to the recursive descent [buildBoxTree] performs top-down, and is what the
      * light (lazy-cascade) path uses instead of re-deriving it locally. [edgesOf] supplies each
      * element's horizontal padding+border in px (heavy passes the cascade map; light passes its lazy
      * style resolver).
      */
-    fun descendContentWidth(el: MarkupElement, rootW: Int, edgesOf: (MarkupElement) -> Int): Int {
-        val p = el.parent ?: return rootW
-        return innerFromEdges(edgesOf(p), descendContentWidth(p, rootW, edgesOf))
+    fun descendContentWidth(
+        el: MarkupElement,
+        rootW: Int,
+        edgesOf: (MarkupElement) -> Int,
+        marginsOf: (MarkupElement) -> Int,
+        styleOf: (MarkupElement) -> ComputedStyle? = { null },
+    ): Int {
+        val p = el.parent ?: return lightSpecifiedWidth(el, rootW, styleOf) ?: rootW
+        val parentW = descendContentWidth(p, rootW, edgesOf, marginsOf, styleOf)
+        val ownMargin = if (el.tag == "#text") 0 else marginsOf(el)
+        val avail = innerFromEdges(edgesOf(p) + ownMargin, parentW)
+        return lightSpecifiedWidth(el, avail, styleOf) ?: avail
+    }
+
+    /**
+     * 轻路径的指定宽消费：**与重路径 [buildBoxTree] 的闸门严格同判据**，多一个元素类型
+     * 消费、少一个不消费都会让两路盒宽分叉（重/轻几何必须逐值一致）。
+     *
+     * 不在此消费（宽度另有归属）：`table` 与 `tr`/`td`/`th`（表格网格）、替换元素
+     * （`img` 的 `usedReplacedSize`）、浮动元素（浮动排位模型）。逐条与 `buildBoxTree` 对齐。
+     */
+    private fun lightSpecifiedWidth(
+        el: MarkupElement,
+        availBorderBoxW: Int,
+        styleOf: (MarkupElement) -> ComputedStyle?,
+    ): Int? {
+        if (el.tag == "table" || el.tag == "tr" || el.tag == "td" || el.tag == "th" || isReplaceable(el)) return null
+        val s = styleOf(el) ?: return null
+        if (s.floatSide != orilumn.reader.engine.css.FloatSide.NONE) return null
+        return specifiedBorderBoxWidth(s, availBorderBoxW)
     }
 
     /**
@@ -1565,6 +1956,12 @@ object NormalFlowLayout {
         prevLeaf: MarkupElement,
         nextLeaf: MarkupElement,
         styleOf: (MarkupElement) -> ComputedStyle,
+        /**
+         * E23-e：容器 [el] 的竖向下限是否**真的生效**（撑高了盒子）。生效 ⇒ 末子下边距收进盒内、
+         * 父↔末子底折叠断链（重路径 `emit` 读 `LayoutBox.verticalFloorBound`，两路同判据）。
+         * 默认 `{ false }` = 无下限（含 `min-height` 低于内容的情形），行为与旧路径逐字节一致。
+         */
+        floorBinds: (MarkupElement) -> Boolean = { false },
     ): Int {
         val pathA = ancestorChain(prevLeaf)
         val pathB = ancestorChain(nextLeaf)
@@ -1577,16 +1974,21 @@ object NormalFlowLayout {
         // A_m's contribution is not its raw margin-bottom when A_m is a bottom-edge-free, auto-height
         // container - then its margin collapses with its last-child chain ([lastChildBottomMargin]).
         // prevLeaf is A_m's last in-flow leaf, so folding A_m's own branch downward folds exactly the
-        // margins of the `.last()`-child descent: each edge-free ancestor's margin joins the group, and
-        // an edge-full container stops the fold with its own margin folding in last (its children's
-        // margins are dropped). Skipped entirely when A_m carries bottom border/padding or a specified
-        // height (emit then returns its raw margin-bottom).
+        // margins of the `.last()`-child descent: each edge-free, auto-height ancestor's margin joins
+        // the group, and an edge-full (or specified-height) container stops the fold with its own margin
+        // folding in last (its children's margins are dropped). Skipped entirely when A_m carries bottom
+        // border/padding or a specified height (emit then returns its raw margin-bottom).
         val aStyle = styleOf(pathA[ia - 1])
-        if ((aStyle.border.bottom + aStyle.padding.bottom).roundToInt() == 0 && aStyle.heightPx == null) {
+        if ((aStyle.border.bottom + aStyle.padding.bottom).roundToInt() == 0 &&
+            aStyle.heightPx == null && !floorBinds(pathA[ia - 1])
+        ) {
             var j = ia - 2
             while (j >= 0) {
                 val parentStyle = styleOf(pathA[j + 1])
                 if ((parentStyle.border.bottom + parentStyle.padding.bottom).roundToInt() > 0) break
+                // E23-b/E23-e：§8.3.1 的父↔末子底折叠要求父 `height:auto`（且竖向下限没真的生效）；
+                // 指定高 / 生效的下限与底边同权断链（`emit` 侧见 [lastChildBottomMargin]，两处同一判据）。
+                if (parentStyle.heightPx != null || floorBinds(pathA[j + 1])) break
                 m1 = collapseMargins(m1, styleOf(pathA[j]).margin.bottom)
                 j--
             }
@@ -1888,20 +2290,56 @@ object NormalFlowLayout {
         var rW: Int = 0
         var rH: Int = 0
         private var rUsed: Int = 0
+        // E23-b 同侧**行装箱**（CSS 2.1 §9.5.1）：本行已放悬浮的宽度和（左/右各一）。
+        private var lRowW: Int = 0
+        private var rRowW: Int = 0
+        /** 最近一次 [register] 的落点：本盒在本侧内的 x 偏移 —— 左浮动自内容左起，右浮动自内容右起
+         *  **含自身宽**（右浮动依次向左排列）。 */
+        var lastX: Int = 0
+        /** 最近一次 [register] 的盒是否**另起一行**（false = 与本行已放悬浮并排，同顶）。 */
+        var lastNewRow: Boolean = true
 
         fun activeL(): Boolean = lW > 0 && lH > lUsed
         fun activeR(): Boolean = rW > 0 && rH > rUsed
         fun remL(): Int = (lH - lUsed).coerceAtLeast(0)
         fun remR(): Int = (rH - rUsed).coerceAtLeast(0)
 
-        /** 注册本侧跨度：同侧叠加（CSS 纵向堆叠：旧余量 + 新高，宽取最大防交叠），异侧覆盖本侧。
-         * 悬浮盒零行高不占 Y，异侧不消耗（并排双浮动同顶），Y 前进只由后随文本记账。 */
-        fun register(side: FloatSide, floatW: Int, floatH: Int) {
-            if (side == FloatSide.LEFT) {
-                lW = maxOf(lW, floatW); lH = remL() + floatH; lUsed = 0
-            } else if (side == FloatSide.RIGHT) {
-                rW = maxOf(rW, floatW); rH = remR() + floatH; rUsed = 0
+        /**
+         * 注册本侧跨度：**同侧能并排就并排**（同一行放得下 ⇒ x 偏移 = 本行已放宽度，同顶），
+         * 放不下（或本行已被文本越过）才另起一行（新行顶 = 当前文本游标；旧余量 + 新高＝既有堆叠口径）。
+         * 异侧覆盖本侧；悬浮盒零行高不占 Y，Y 前进只由后随文本记账。
+         *
+         * @param availW 本悬浮包含块的**内容宽**：同行容量上限（还要再减异侧本行已占宽度）。
+         * @return 本盒是否另起一行（同 [lastNewRow]）。
+         */
+        fun register(side: FloatSide, floatW: Int, floatH: Int, availW: Int = Int.MAX_VALUE): Boolean = when (side) {
+            FloatSide.LEFT -> {
+                val other = if (activeR()) rRowW else 0
+                if (lH > 0 && lUsed == 0 && lRowW > 0 && lRowW + floatW + other <= availW) {
+                    // 并排：同顶加宽，行高取两者较大。
+                    lastX = lRowW; lRowW += floatW
+                    lW = maxOf(lW, lRowW); lH = maxOf(lH, floatH)
+                    lastNewRow = false
+                } else {
+                    lW = maxOf(lW, floatW); lH = remL() + floatH; lUsed = 0
+                    lRowW = floatW; lastX = 0; lastNewRow = true
+                }
+                lastNewRow
             }
+            FloatSide.RIGHT -> {
+                val other = if (activeL()) lRowW else 0
+                if (rH > 0 && rUsed == 0 && rRowW > 0 && rRowW + floatW + other <= availW) {
+                    rRowW += floatW
+                    lastX = rRowW
+                    rW = maxOf(rW, rRowW); rH = maxOf(rH, floatH)
+                    lastNewRow = false
+                } else {
+                    rW = maxOf(rW, floatW); rH = remR() + floatH; rUsed = 0
+                    rRowW = floatW; lastX = floatW; lastNewRow = true
+                }
+                lastNewRow
+            }
+            else -> true
         }
 
         /** 文本叶消耗（环绕/clear/回退一律计 Y 前进）。 */
@@ -1918,15 +2356,27 @@ object NormalFlowLayout {
         }
 
         fun dropLeft() {
-            lW = 0; lUsed = 0; lH = 0
+            lW = 0; lUsed = 0; lH = 0; lRowW = 0
         }
 
         fun dropRight() {
-            rW = 0; rUsed = 0; rH = 0
+            rW = 0; rUsed = 0; rH = 0; rRowW = 0
         }
 
         fun dropAll() {
             dropLeft(); dropRight()
+        }
+
+        /**
+         * 进入 BFC 根（`overflow != visible`）前的**登记几何**快照：只存侧/宽/高/行装箱，
+         * **不存**纵向消耗（盒内内容照样把外层浮动往下推）。收尾还原 ⇒ 盒内浮动不逃出去收窄后随内容。
+         */
+        fun snapshotGeometry(): IntArray =
+            intArrayOf(lW, lH, rW, rH, lRowW, rRowW, lastX, if (lastNewRow) 1 else 0)
+
+        fun restoreGeometry(s: IntArray) {
+            lW = s[0]; lH = s[1]; rW = s[2]; rH = s[3]
+            lRowW = s[4]; rRowW = s[5]; lastX = s[6]; lastNewRow = s[7] != 0
         }
     }
 
@@ -1982,6 +2432,10 @@ object NormalFlowLayout {
      *  - min-content = 最长不可断单元（[ParagraphBreaker.minContentWidth]）；
      *  - 两者都加单元格自身横向 padding＋border（列宽即 border-box 宽）。
      *
+     * **E15**：块内行内盒（`<span>` 的 padding/border）的横向内边距也折进两者 —— 度量必须与
+     * 断行（`buildTableRows` 的 `breakLeafLines` 同传 [TableCellBlock.inlineBoxRuns]）同账，
+     * 否则 auto 列比格内实排窄，行内盒被挤（量画分家）。与悬浮盒 [floatTextWidth] 的同传口径一致。
+     *
      * 塑形参数与断行侧 `breakLeafLines` 同式（`monospace || tag == "pre"`；`white-space` 不换行的格
      * 其 min-content 即 max-content——浏览器同式），故「量」与「排」不会分家。
      *
@@ -2011,9 +2465,15 @@ object NormalFlowLayout {
             val s = b.style
             val tag = b.el.tag
             val mono = s.monospace || tag == "pre"
-            val mx = breaker.preferredWidth(b.text, s.fontSizePx, s.fontFamilies, s.fontWeight, s.italic, mono, b.runs)
+            val mx = breaker.preferredWidth(
+                b.text, s.fontSizePx, s.fontFamilies, s.fontWeight, s.italic, mono, b.runs,
+                inlineBoxRuns = b.inlineBoxRuns,
+            )
             val mn = if (WhiteSpaceNormalize.wraps(s.whiteSpace)) {
-                breaker.minContentWidth(b.text, s.fontSizePx, s.fontFamilies, s.fontWeight, s.italic, mono, b.runs)
+                breaker.minContentWidth(
+                    b.text, s.fontSizePx, s.fontFamilies, s.fontWeight, s.italic, mono, b.runs,
+                    inlineBoxRuns = b.inlineBoxRuns,
+                )
             } else {
                 mx
             }
@@ -2029,6 +2489,10 @@ object NormalFlowLayout {
     /**
      * P6-a: 文本悬浮塑形宽（CSS 2.1 §10.3.5 简化）：指定宽（px / % 解容器）优先，
      * 否则 shrink-to-fit（breaker 首选测宽，分段取最大，上限版心）。
+     *
+     * **E24：返回的是内容宽**（指定 `width` 按 CSS 内容盒口径；shrink-to-fit 的测宽本来就是内容宽）。
+     * 排位 / 环绕 / 盒宽都是 border-box 口径，调用方必须过 [floatBorderBoxWidth] 转换
+     * （断行宽再由 [innerBreakWidth] 还原成内容宽）。替换型悬浮的 `replacedUsedSize` 同是内容宽。
      */
     fun floatTextWidth(
         style: ComputedStyle,
@@ -2036,18 +2500,41 @@ object NormalFlowLayout {
         contentW: Int,
         breaker: ParagraphBreaker,
         fontRuns: List<FontRun>,
+        /** 行内盒（横向 `padding`/`border` 占宽，与断行侧同源）：悬浮盒按含内边距的宽度定尺。 */
+        inlineBoxRuns: List<InlineBoxRun> = emptyList(),
     ): Int {
         val cw = contentW.coerceAtLeast(1)
         style.widthPx?.let { return it.roundToInt().coerceIn(1, cw) }
         style.widthPct?.let { return (it / 100f * cw).roundToInt().coerceIn(1, cw) }
         var pref = 0f
+        var off = 0
         for (para in text.split('\n')) {
-            if (para.isEmpty()) continue
-            pref = maxOf(pref, breaker.preferredWidth(para, style.fontSizePx, emptyList(), 400, false, false, fontRuns))
+            if (para.isNotEmpty()) {
+                pref = maxOf(
+                    pref,
+                    breaker.preferredWidth(
+                        para, style.fontSizePx, emptyList(), 400, false, false, fontRuns,
+                        sliceInlineBoxRuns(inlineBoxRuns, off, off + para.length),
+                    ),
+                )
+            }
+            off += para.length + 1
         }
         if (pref <= 0f) pref = cw.toFloat()
         return pref.roundToInt().coerceIn(1, cw)
     }
+
+    /**
+     * E24（CSS 2.1 §10.3.5 内容盒口径）：悬浮盒的 **border-box 宽** = 内容宽 + 自身横向 padding/border。
+     *
+     * Chromium 实测（2026-10-20，`.fl{width:30px;border:1px}`）：底色 30px、边框**外画**、外框
+     * 32px；并排间距 / 环绕窄宽都按 32px 算（我方原先按 30px，每盒少自身横边 2px）。
+     * `LayoutBox.contentWidth` 与 [FloatPending.register] 的记账都是 border-box 口径，故这里是
+     * [innerBreakWidth] 的反运算：断行宽再由 `innerBreakWidth(style, borderBox)` 还原成内容宽，
+     * 量画同源（[floatTextWidth] 与 `replacedUsedSize` 都只给内容宽）。
+     */
+    fun floatBorderBoxWidth(style: ComputedStyle, contentW: Int): Int =
+        (contentW + (style.padding.horizontal + style.border.horizontal).roundToInt()).coerceAtLeast(1)
 
     /**
      * P4-a2: 文本叶相对其原文前兄弟的悬浮环绕前导（v1 冻结语义：仅 img 前驱；P6-a 起重路径改走
@@ -2075,9 +2562,11 @@ object NormalFlowLayout {
         if (leaf.parent?.children?.contains(leaf) != true) return null
         val lstyle = styleOf(leaf)
         val cw = contentW.coerceAtLeast(1)
-        val (floatW, floatH) = replacedUsedSize(
+        val (floatContentW, floatH) = replacedUsedSize(
             prev, styleOf(prev), innerBreakWidth(styleOf(prev), cw), imageLoader, chapterHref, density = density,
         )
+        // E24：环绕窄宽按悬浮盒的 **border-box** 宽（+ 自身横边）——与 `FloatPending.register` 同口径。
+        val floatW = floatBorderBoxWidth(styleOf(prev), floatContentW)
         if (floatW <= 0 || floatH <= 0 || floatW >= cw) return null
         val (lW, rW) = if (side == FloatSide.LEFT) floatW to 0 else 0 to floatW
         return narrowLead(floatH, lW, rW, lstyle.clearSide, lstyle, contentW)

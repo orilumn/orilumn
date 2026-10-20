@@ -356,6 +356,50 @@ class OverflowClipTest(private val variant: String) {
     }
 
     @Test
+    fun `轻路径：子容器的内边距与边框计入祖先盒高`() {
+        // 症状（用户报，V6 灰框）：clearfix 容器（`overflow:hidden` + padding + border + 底色）
+        // 里面全是浮动方块，外层再套一个虚线框 —— **冷开**（正典盒树）时外层框底=子框底+8+1，
+        // **再开/临时页**（窗口聚合）时外层框底只到浮动方块的外边盒底，少了子容器那圈 4+1 ⇒
+        // 灰框与下方虚线框的间距看起来变小。
+        //
+        // 聚合口径：容器底 = 叶带 ∪ **子盒 border-box 底**，再各加自身后沿（下内边距+下边框）。
+        val css = "p{margin:0}"
+        val html = "<html><body>" +
+            "<div style=\"border:1px dashed #999999;padding:8px\">" +
+            "<p style=\"margin:0\">前文</p>" +
+            "<div style=\"overflow:hidden;border:1px solid #000000;padding:4px;background:#f5f5f5\">" +
+            "<div style=\"float:left;width:30px;height:30px;background:#d9f7be;border:1px solid #52c41a;margin:2px\"></div>" +
+            "<div style=\"float:left;width:40px;height:40px;background:#ffd666;border:1px solid #faad14;margin:2px\"></div>" +
+            "</div></div></body></html>"
+        val l = BoxChapterLayouter(themeSheet = themeSheetFromProfile(profile())).also { it.bindChapterContext(chapterHref) }
+        val p = l.prepareLight(
+            HtmlTreeConverter().convert(html)!!, CssBundle(listOf(css)), profile(), 500,
+            ChapterStructureCache(), contentH,
+        )
+        l.tempShape(null, p, 0, profile())
+        val page = requireNotNull(l.shapeTempPageForward(p, profile(), 500, contentH, 0, null, 0))
+        val rb = page.page.layout as LayoutReadback
+        val rects = rb.pageBackgrounds(0, Int.MAX_VALUE)
+
+        val inner = rects.first { it.argb == 0xFFF5F5F5.toInt() }
+        val outerBottom = rects.filter { it.argb == 0xFF999999.toInt() }.maxOf { it.yBottom }
+        assertEquals(
+            "外层框底 = 内层盒底 + 自身 padding 8 + border 1（少这一圈就是用户看到的「框下间距变小」）",
+            inner.yBottom + 8 + 1,
+            outerBottom,
+        )
+
+        // 同一样例重路径（正典盒树）逐值对照：两路必须同高。
+        val lh = BoxChapterLayouter(themeSheet = themeSheetFromProfile(profile())).also { it.bindChapterContext(chapterHref) }
+        val ph = lh.prepare(HtmlTreeConverter().convert(html)!!, CssBundle(listOf(css)), profile(), 500, contentH)
+        val divs = allBoxes(ph.structure).filter { it.el?.tag == "div" && !it.el!!.isText }
+        val heavyOuter = divs.first { b -> divs.any { it !== b && it.el?.parent === b.el } }
+        val heavyInner = divs.first { it.el?.attrs?.get("style")?.contains("overflow:hidden") == true }
+        assertEquals("重路径：外层框底 = 内层盒底 + 8 + 1", heavyInner.contentBottom + 9, heavyOuter.contentBottom)
+        assertEquals("重轻两路外层框高同值", heavyOuter.contentBottom - heavyOuter.contentTop, outerBottom - rects.filter { it.argb == 0xFF999999.toInt() }.minOf { it.yTop })
+    }
+
+    @Test
     fun `浮动后代不会被 overflow hidden 祖先裁掉（重轻两路一致）`() {
         // §10.6.7：`overflow != visible` 的盒高包住浮动后代 ⇒ 裁剪区也必须包住。真书的 clearfix
         // 写法（裁剪容器里全是浮动子块）若照 padding box 硬裁，会**整块丢内容**。

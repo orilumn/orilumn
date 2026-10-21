@@ -2,6 +2,7 @@ package orilumn.reader.data.settings
 
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
@@ -61,6 +62,17 @@ internal object SettingsJson {
     /** org.json.optBoolean(key, default) equivalent. */
     fun optBoolean(o: JsonObject, key: String, default: Boolean): Boolean =
         (o[key] as? JsonPrimitive)?.booleanOrNull ?: default
+
+    /**
+     * 整数列表（标注色槽）：缺键/非数组 → 默认列表；逐项取合法整数，
+     * 数量不足用默认值补齐、超出默认长度截断（存档始终得到固定槽数）。
+     */
+    fun optIntList(o: JsonObject, key: String, default: List<Int>): List<Int> {
+        val arr = o[key] as? JsonArray ?: return default
+        val values = arr.mapNotNull { (it as? JsonPrimitive)?.intOrNull }
+        if (values.isEmpty()) return default
+        return List(default.size) { i -> values.getOrNull(i) ?: default[i] }
+    }
 
     /** 族→字重表：键下非对象回空表；值非 100..900 整数即丢弃该条。 */
     fun optWeightAnchors(o: JsonObject, key: String): Map<String, Int> =

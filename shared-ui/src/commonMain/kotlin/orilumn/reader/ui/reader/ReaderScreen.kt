@@ -195,6 +195,8 @@ fun ReaderScreen(
     val selection = remember(currentHost) { TextSelectionState() }
     // 选区浮动菜单是否显示：长按/拖手柄期间收起，抬手后才出现；点正文或翻页即消失。
     var selectionMenuVisible by remember { mutableStateOf(false) }
+    // 移动端放大镜的手指位置（null = 不显示）。桌面鼠标不显示（D-10）。
+    var magnifierFinger by remember { mutableStateOf<Offset?>(null) }
     // 旧的 ClipboardManager 仍是 CMP 唯一共享可用的同步写入口；新 LocalClipboard 只支持 suspend。
     @Suppress("DEPRECATION")
     val clipboard = LocalClipboardManager.current
@@ -204,15 +206,20 @@ fun ReaderScreen(
         if (ch == null) annotationState.clear() else annotationState.load(ch)
         selection.clear()
         selectionMenuVisible = false
+        magnifierFinger = null
     }
     // 版式/参数变化后旧选区坐标不再成立（字符偏移没变，但端点所在行可能变），直接丢弃。
     LaunchedEffect(contentRevision, density) {
         selection.clear()
         selectionMenuVisible = false
+        magnifierFinger = null
     }
     // 选区被任何路径清空时，菜单必须同步收起（避免留下指向空选区的浮层）。
     LaunchedEffect(selection.hasSelection) {
-        if (!selection.hasSelection) selectionMenuVisible = false
+        if (!selection.hasSelection) {
+            selectionMenuVisible = false
+            magnifierFinger = null
+        }
     }
     // 翻页后浮动菜单不跟到新页（选区保留，各页只画交集；用户可再点选区/手柄）。
     // 但跨页自动翻页可能在抬手瞬间仍在飞行：抬手已把菜单置 true，此时不能再无条件抹掉，
@@ -992,13 +999,12 @@ fun ReaderScreen(
     val snackbar = rememberReaderSnackbar()
 
     /** 把当前选区落成一条高亮/划线：先内存出图，再异步存库；失败回滚并提示。 */
-    fun createSelectionAnnotation(kind: AnnotationKind) {
+    fun createSelectionAnnotation(kind: AnnotationKind, color: Int) {
         val ch = selection.chapter
         val s = selection.start
         val e = selection.endExclusive
         if (ch < 0 || e <= s) return
         selectionMenuVisible = false
-        val color = if (kind == AnnotationKind.Highlight) DEFAULT_HIGHLIGHT_ARGB else DEFAULT_UNDERLINE_ARGB
         scope.launch {
             val saved = annotationState.add(
                 Annotation(
@@ -1135,11 +1141,15 @@ fun ReaderScreen(
                             mouseSelectingPending = false
                             selection.beginHandleDrag(handle)
                             selecting = true
+                            if (!mouse) magnifierFinger = Offset(downX, downY)
                         } else if (!mouse) {
                             selectionMenuVisible = false
                             longPressJob = scope.launch {
                                 delay(longPressTimeout)
-                                if (!moved) selecting = beginSelectionAt(downX, downY)
+                                if (!moved) {
+                                    selecting = beginSelectionAt(downX, downY)
+                                    if (selecting) magnifierFinger = Offset(downX, downY)
+                                }
                             }
                         }
                     }
@@ -1188,12 +1198,14 @@ fun ReaderScreen(
                             if (!change.pressed) {
                                 gestureActive = false
                                 autoFlipSide = 0
+                                magnifierFinger = null
                                 if (selection.hasSelection) selectionMenuVisible = true
                                 change.consume()
                                 break
                             }
                             lastFingerX = change.position.x
                             lastFingerY = change.position.y
+                            if (!mouse) magnifierFinger = Offset(lastFingerX, lastFingerY)
                             extendSelectionAt(lastFingerX, lastFingerY)
                             autoFlipSide = selectionAutoFlipDirection(
                                 lastFingerX, size.width.toFloat(), autoFlipEdgePx,
@@ -1338,6 +1350,7 @@ fun ReaderScreen(
                         gestureActive = false
                         autoFlipSide = 0
                         longPressJob?.cancel()
+                        magnifierFinger = null
                     }
                 }
             },
@@ -1651,6 +1664,28 @@ fun ReaderScreen(
                     modifier = Modifier.fillMaxSize(),
                 )
             }
+            // 移动端放大镜：长按/拖手柄时跟随手指，桌面鼠标不显示（D-10）。
+            // 内容复用同一页栅格（同一个 renderer / content / rasterKey），只做圆形裁剪与放大。
+            val fingerNow = magnifierFinger
+            if (fingerNow != null && selection.hasSelection && pageContent != null &&
+                !coverVisible && !ctl.isBusy() && selection.chapter == fromPos.chapter
+            ) {
+                SelectionMagnifier(
+                    content = pageContent,
+                    finger = fingerNow,
+                    bounds = Rect(0f, 0f, pxWidth, pxHeight),
+                    contentLeft = contentLeft,
+                    contentTop = contentTop,
+                    contentRight = contentRight,
+                    contentBottom = contentBottom,
+                    pageBg = profile.bgColor,
+                    inkColor = profile.fgColor,
+                    contentRevision = displayRevision,
+                    renderer = pageRenderer,
+                    onMiss = onRasterMiss,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
             // 浮动菜单：抬手后出现，位置跟着选区矩形；贴顶翻到下方、贴边内收。
             if (selectionMenuVisible && selection.hasSelection && selectionMenuAnchor != null &&
                 !coverVisible && !ctl.isBusy() && selection.chapter == fromPos.chapter
@@ -1659,12 +1694,17 @@ fun ReaderScreen(
                     anchor = selectionMenuAnchor,
                     bounds = Rect(contentLeft, contentTop, contentRight, contentBottom),
                     palette = paletteFor(light.scheme),
-                    onHighlight = { createSelectionAnnotation(AnnotationKind.Highlight) },
-                    onUnderline = { createSelectionAnnotation(AnnotationKind.Underline) },
+                    highlightColors = annotationColorSlots(light, AnnotationKind.Highlight),
+                    highlightDefaultSlot = annotationDefaultSlot(light, AnnotationKind.Highlight),
+                    underlineColors = annotationColorSlots(light, AnnotationKind.Underline),
+                    underlineDefaultSlot = annotationDefaultSlot(light, AnnotationKind.Underline),
+                    onHighlight = { color -> createSelectionAnnotation(AnnotationKind.Highlight, color) },
+                    onUnderline = { color -> createSelectionAnnotation(AnnotationKind.Underline, color) },
                     onCopy = ::copySelection,
                     onCancel = {
                         selection.clear()
                         selectionMenuVisible = false
+                        magnifierFinger = null
                     },
                 )
             }

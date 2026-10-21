@@ -120,6 +120,19 @@ data class ReaderSettings(
     val fontWeightAnchorsBySlot: Map<String, Int> = emptyMap(),
 
     /**
+     * 标注色槽（ARGB，含透明度）：高亮 / 划线各一组，全局共享（D-13）。
+     *
+     * 新建标注只读取 [highlightDefaultSlot] / [underlineDefaultSlot] 指向的那一格，
+     * 并把当时的颜色写进记录；之后改色槽**不回溯**已有标注（墨迹已干）。
+     * 色槽本身不进 CSS 级联，也不影响分页；面板改色走无重排提交。
+     */
+    val highlightColorSlots: List<Int> = DEFAULT_HIGHLIGHT_COLOR_SLOTS,
+    val underlineColorSlots: List<Int> = DEFAULT_UNDERLINE_COLOR_SLOTS,
+    /** 新建高亮 / 划线默认使用的色槽下标（0 起，越界读取时钳到有效范围）。 */
+    val highlightDefaultSlot: Int = 0,
+    val underlineDefaultSlot: Int = 0,
+
+    /**
      * 持久化结构版本（**只增不改**）：`[fromJson]` 用它识别「这份存档是哪个版本写的」，
      * 从而对**只影响本版本**的字段做一次性迁移。纯全局（[BookSettings] 无此字段，
      * 故不参与 [applyOverlay]/[mergeFrom] 的分层逻辑）。
@@ -265,17 +278,46 @@ data class ReaderSettings(
         pageNum = false,
         coverStretch = false,
         showHiddenFonts = false,
+        // 标注色槽族：只改像素，不影响分页；清空后比较相等（面板走 onCommitLight）。
+        highlightColorSlots = emptyList(),
+        underlineColorSlots = emptyList(),
+        highlightDefaultSlot = 0,
+        underlineDefaultSlot = 0,
     )
 
     companion object {
-        /** Default set: factory values when no customization has been made. */
-        val DEFAULT = ReaderSettings()
-
         /**
          * 当前持久化结构版本。每有一处**只对新语义成立**的一次性迁移就 +1，
          * 并在 [fromJson] 里补一段 `if (stored < N) …`。
          */
         const val CURRENT_SCHEMA_VERSION = 1
+
+        /** 标注色槽数量（高亮 / 划线各自一组）。 */
+        const val ANNOTATION_COLOR_SLOT_COUNT = 5
+
+        /**
+         * 高亮默认色槽：琥珀荧光笔，约 45% 不透明度（`0x73`）。
+         * 其余四格为常用荧光色，透明度同样取 45%，便于直接使用。
+         */
+        val DEFAULT_HIGHLIGHT_COLOR_SLOTS: List<Int> = listOf(
+            0x73FFD54F, // 琥珀
+            0x7381C784, // 绿
+            0x7364B5F6, // 蓝
+            0x73F48FB1, // 粉
+            0x73FFB74D, // 橙
+        )
+
+        /** 划线默认色槽：不透明红；其余四格为常用深色，保证细线清晰。 */
+        val DEFAULT_UNDERLINE_COLOR_SLOTS: List<Int> = listOf(
+            0xFFE53935.toInt(), // 红
+            0xFF1E88E5.toInt(), // 蓝
+            0xFF43A047.toInt(), // 绿
+            0xFF8E24AA.toInt(), // 紫
+            0xFFFB8C00.toInt(), // 橙
+        )
+
+        /** Default set: factory values when no customization has been made. */
+        val DEFAULT = ReaderSettings()
 
         /**
          * v1 迁移：**重置混排字距到默认值**（用户报「设置里看到 0、代码默认却是 25」）。
@@ -415,6 +457,12 @@ data class ReaderSettings(
                     showHiddenFonts = SettingsJson.optBoolean(o, "showHiddenFonts", d.showHiddenFonts),
                     fontWeightAnchors = SettingsJson.optWeightAnchors(o, "fontWeightAnchors"),
                     fontWeightAnchorsBySlot = SettingsJson.optWeightAnchorsMap(o, "fontWeightAnchorsBySlot", d.fontWeightAnchorsBySlot),
+                    highlightColorSlots = SettingsJson.optIntList(o, "highlightColorSlots", d.highlightColorSlots),
+                    underlineColorSlots = SettingsJson.optIntList(o, "underlineColorSlots", d.underlineColorSlots),
+                    highlightDefaultSlot = SettingsJson.optInt(o, "highlightDefaultSlot", d.highlightDefaultSlot)
+                        .coerceIn(0, d.highlightColorSlots.lastIndex),
+                    underlineDefaultSlot = SettingsJson.optInt(o, "underlineDefaultSlot", d.underlineDefaultSlot)
+                        .coerceIn(0, d.underlineColorSlots.lastIndex),
                     cjkLatinSpacing = migrateCjkLatinSpacing(
                         SettingsJson.optDouble(o, "cjkLatinSpacing", d.cjkLatinSpacing),
                         SettingsJson.optInt(o, "schemaVersion", 0),

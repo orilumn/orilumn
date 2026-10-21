@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.offset
@@ -30,6 +31,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import orilumn.reader.data.annotation.AnnotationKind
 import kotlin.math.roundToInt
 
 /** 浮动菜单与选区之间的间距。 */
@@ -41,37 +43,119 @@ private val ANNOTATION_MENU_GAP = 8.dp
  * 不用 `Popup`：阅读层至今零 Popup，菜单只是内容区上方的一层轻量覆盖物，
  * 跟着选区矩形定位；贴顶时自动翻到下方，左右贴边时向内收。
  *
- * v1 项：高亮 / 划线 / 复制 / 取消。高亮/划线用默认色快照创建标注，
- * 颜色槽（D-21 / §5.9）在第 8 步接入后只改这里传入的色值。
+ * v1 项：高亮 / 划线 / 复制 / 取消。点高亮或划线先展开该类色槽（D-21 / §5.9），
+ * 再点一格即用**该格颜色**创建标注；默认格带金色描边，方便直接点第一格。
  */
 @Composable
 internal fun AnnotationMenu(
     anchor: Rect,
     bounds: Rect,
     palette: Palette,
-    onHighlight: () -> Unit,
-    onUnderline: () -> Unit,
+    highlightColors: List<Int>,
+    highlightDefaultSlot: Int,
+    underlineColors: List<Int>,
+    underlineDefaultSlot: Int,
+    onHighlight: (Int) -> Unit,
+    onUnderline: (Int) -> Unit,
     onCopy: () -> Unit,
     onCancel: () -> Unit,
 ) {
     var size by remember { mutableStateOf(IntSize.Zero) }
+    var expanded by remember { mutableStateOf<AnnotationKind?>(null) }
     val gap = with(LocalDensity.current) { ANNOTATION_MENU_GAP.roundToPx() }
     val offset = annotationMenuOffset(anchor, bounds, size, gap)
+    val highlightDefaultSlotSafe = highlightDefaultSlot.coerceIn(0, highlightColors.lastIndex.coerceAtLeast(0))
+    val underlineDefaultSlotSafe = underlineDefaultSlot.coerceIn(0, underlineColors.lastIndex.coerceAtLeast(0))
+    // 菜单圆点只是类别标识：固定不透明，避免默认槽 alpha=0 时圆点消失。
+    val highlightDefault = annotationWithAlpha(
+        highlightColors.getOrElse(highlightDefaultSlotSafe) { DEFAULT_HIGHLIGHT_ARGB },
+        255,
+    )
+    val underlineDefault = annotationWithAlpha(
+        underlineColors.getOrElse(underlineDefaultSlotSafe) { DEFAULT_UNDERLINE_ARGB },
+        255,
+    )
 
     Box(modifier = Modifier.offset { offset }) {
-        Row(
+        Column(
             modifier = Modifier
                 .onSizeChanged { size = it }
                 .shadow(8.dp, RoundedCornerShape(12.dp))
                 .background(palette.cardBg, RoundedCornerShape(12.dp))
                 .border(1.dp, palette.cardBorder, RoundedCornerShape(12.dp))
-                .padding(horizontal = 2.dp, vertical = 2.dp),
-            verticalAlignment = Alignment.CenterVertically,
+                .padding(vertical = 2.dp),
         ) {
-            MenuAction("高亮", DEFAULT_HIGHLIGHT_ARGB, palette.text, onHighlight)
-            MenuAction("划线", DEFAULT_UNDERLINE_ARGB, palette.text, onUnderline)
-            MenuAction("复制", null, palette.text, onCopy)
-            MenuAction("取消", null, palette.muted, onCancel)
+            Row(
+                modifier = Modifier.padding(horizontal = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                MenuAction(
+                    label = "高亮",
+                    dotArgb = highlightDefault,
+                    textColor = palette.text,
+                    palette = palette,
+                    active = expanded == AnnotationKind.Highlight,
+                    onClick = {
+                        expanded = if (expanded == AnnotationKind.Highlight) null else AnnotationKind.Highlight
+                    },
+                )
+                MenuAction(
+                    label = "划线",
+                    dotArgb = underlineDefault,
+                    textColor = palette.text,
+                    palette = palette,
+                    active = expanded == AnnotationKind.Underline,
+                    onClick = {
+                        expanded = if (expanded == AnnotationKind.Underline) null else AnnotationKind.Underline
+                    },
+                )
+                MenuAction("复制", null, palette.text, palette, active = false, onClick = onCopy)
+                MenuAction("取消", null, palette.muted, palette, active = false, onClick = onCancel)
+            }
+            when (expanded) {
+                AnnotationKind.Highlight -> ColorSlotRow(
+                    colors = highlightColors,
+                    defaultSlot = highlightDefaultSlotSafe,
+                    palette = palette,
+                    onPick = onHighlight,
+                )
+                AnnotationKind.Underline -> ColorSlotRow(
+                    colors = underlineColors,
+                    defaultSlot = underlineDefaultSlotSafe,
+                    palette = palette,
+                    onPick = onUnderline,
+                )
+                AnnotationKind.Note, null -> Unit
+            }
+        }
+    }
+}
+
+/** 展开后的色槽行：五格，默认格描金边；点一格即用该格颜色创建标注。 */
+@Composable
+private fun ColorSlotRow(
+    colors: List<Int>,
+    defaultSlot: Int,
+    palette: Palette,
+    onPick: (Int) -> Unit,
+) {
+    Row(
+        modifier = Modifier.padding(start = 10.dp, end = 10.dp, top = 2.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        colors.forEachIndexed { index, argb ->
+            if (index > 0) Spacer(Modifier.width(8.dp))
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .background(Color(argb), CircleShape)
+                    .border(
+                        width = if (index == defaultSlot) 2.dp else 1.dp,
+                        color = if (index == defaultSlot) palette.selBorder else Color.White.copy(alpha = 0.85f),
+                        shape = CircleShape,
+                    )
+                    .clickable { onPick(argb) },
+            )
         }
     }
 }
@@ -105,10 +189,16 @@ private fun MenuAction(
     label: String,
     dotArgb: Int?,
     textColor: Color,
+    palette: Palette,
+    active: Boolean,
     onClick: () -> Unit,
 ) {
     Row(
         modifier = Modifier
+            .background(
+                if (active) palette.rowActive else Color.Transparent,
+                RoundedCornerShape(8.dp),
+            )
             .clickable(onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,

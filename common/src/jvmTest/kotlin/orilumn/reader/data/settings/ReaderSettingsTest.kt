@@ -112,6 +112,39 @@ class ReaderSettingsTest {
     }
 
     @Test
+    fun `annotation color slots round-trip and fall back safely`() {
+        assertEquals(
+            ReaderSettings.ANNOTATION_COLOR_SLOT_COUNT,
+            ReaderSettings.DEFAULT.highlightColorSlots.size,
+        )
+        assertEquals(
+            ReaderSettings.ANNOTATION_COLOR_SLOT_COUNT,
+            ReaderSettings.DEFAULT.underlineColorSlots.size,
+        )
+        val custom = ReaderSettings(
+            highlightColorSlots = listOf(0x11223344, 0x22334455, 0x33445566, 0x44556677, 0x55667788),
+            underlineColorSlots = listOf(0xFF010203.toInt(), 0xFF040506.toInt(), 0xFF070809.toInt(), 0xFF0A0B0C.toInt(), 0xFF0D0E0F.toInt()),
+            highlightDefaultSlot = 3,
+            underlineDefaultSlot = 4,
+        )
+        assertEquals(custom, ReaderSettings.fromJson(custom.toJson()))
+
+        // 缺键 / 非数组 → 默认色槽；短列表用默认值补齐；长列表截断到固定槽数。
+        assertEquals(ReaderSettings.DEFAULT.highlightColorSlots, ReaderSettings.fromJson("""{"fontSize":20}""").highlightColorSlots)
+        assertEquals(ReaderSettings.DEFAULT.underlineColorSlots, ReaderSettings.fromJson("""{"underlineColorSlots":"x"}""").underlineColorSlots)
+        val short = ReaderSettings.fromJson("""{"highlightColorSlots":[1,2]}""")
+        assertEquals(5, short.highlightColorSlots.size)
+        assertEquals(1, short.highlightColorSlots[0])
+        assertEquals(ReaderSettings.DEFAULT.highlightColorSlots[2], short.highlightColorSlots[2])
+        val long = ReaderSettings.fromJson("""{"underlineColorSlots":[1,2,3,4,5,6,7]}""")
+        assertEquals(5, long.underlineColorSlots.size)
+        // 默认槽下标越界时钳到有效范围。
+        val clamped = ReaderSettings.fromJson("""{"highlightDefaultSlot":99,"underlineDefaultSlot":-3}""")
+        assertEquals(4, clamped.highlightDefaultSlot)
+        assertEquals(0, clamped.underlineDefaultSlot)
+    }
+
+    @Test
     fun `weight anchors round-trip and persist global never overlay`() {
         assertTrue(ReaderSettings.DEFAULT.fontWeightAnchors.isEmpty())
         val parsed = ReaderSettings.fromJson(
@@ -145,6 +178,7 @@ class ReaderSettingsTest {
             "fontBody", "fontTitle", "fontCode",
             "useOriginalStyle", "useUserScripts", "pageAnim", "autoContinue", "pageNum", "coverStretch",
             "fontScale", "scheme", "bgOverride", "fgOverride", "layoutTheme",
+            "highlightColorSlots", "underlineColorSlots", "highlightDefaultSlot", "underlineDefaultSlot",
         ).forEach { assertTrue("missing key $it", obj.containsKey(it)) }
         assertNotNull(obj.keys)
         assertFalse(ReaderSettings.DEFAULT.useOriginalStyle)

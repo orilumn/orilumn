@@ -69,6 +69,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import orilumn.reader.data.annotation.AnnotationKind
 import orilumn.reader.data.font.FontEntry
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.engine.text.TypographicProfile
@@ -94,13 +95,14 @@ import kotlin.time.Duration.Companion.milliseconds
  *  - Android 返回键（BackHandler）不在此承载——Android 壳（S31）负责路由到 [onDismiss]。
  *
  * 语义条约：排版类改动走 [onCommitTypography]（触发重排）；不影响排版的设置
- * （亮度/护眼/纯 UI 开关——翻页动画、封面拉伸、启动续读、页码、隐藏字体等）
- * 走 [onCommitLight]（不重排，只持久化 + 重组）。新增开关先判「是否影响版式指纹」：
+ * （亮度/护眼/纯 UI 开关——翻页动画、封面拉伸、启动续读、页码、隐藏字体，
+ * 以及标注色槽等只改像素的项）走 [onCommitLight]（不重排，只持久化 + 重组）。
+ * 新增开关先判「是否影响版式指纹」：
  * 不影响就必须走 [onCommitLight]——排版提交会触发重排绑定并推落位，与开书封面解析
  * 竞态会误记封面 dismissed（封面不弹），纯开关本也无需重排。
  *
  * **两端同规则，不各写一遍**：这条「是否影响版式」的判定收敛在
- * [orilumn.reader.data.settings.ReaderSettings.withoutNonLayout]（亮度族 + 纯 UI 开关整族，
+ * [orilumn.reader.data.settings.ReaderSettings.withoutNonLayout]（亮度族 + 纯 UI 开关 + 标注色槽整族，
  * 字段族由 `SettingsLayoutScopeTest` 锁完备性）。平板按本面板的两类回调分流
  * （`ReaderActivity.commitSettings(typographyChanged=…)`），桌面两条回调合流、改为在
  * `ReaderView` 里比对该共享函数——两端问同一个问题。**新增字段必须同时改两处**：
@@ -165,6 +167,10 @@ fun ReaderSettingsPanel(
     val current = stack.last()
     // Which typography slot (body/heading/code) the current font sub-panel selects for.
     var pickSlot by remember { mutableStateOf<String?>(null) }
+    // 标注颜色页：当前编辑的类别 / 色槽 / 预设色。只在本面板内记忆，关面板复位。
+    var annotationColorKind by remember { mutableStateOf(AnnotationKind.Highlight) }
+    var annotationColorSlot by remember { mutableStateOf(0) }
+    var annotationColorPreset by remember { mutableStateOf(0) }
     // 自定义主题预设（内存态）：Seed 自宿主列表；保存/删除经 onSaveTheme/onDeleteTheme 上报宿主。
     var customs by remember(customThemes) { mutableStateOf(customThemes) }
 
@@ -174,6 +180,9 @@ fun ReaderSettingsPanel(
             stack.clear()
             stack.add(Sub.Home)
             pickSlot = null
+            annotationColorKind = AnnotationKind.Highlight
+            annotationColorSlot = 0
+            annotationColorPreset = 0
         }
     }
 
@@ -290,6 +299,7 @@ fun ReaderSettingsPanel(
                 ItemKey(onEnter = { onCommitLight(s.copy(coverStretch = !s.coverStretch)) }),
                 ItemKey(onEnter = { onCommitLight(s.copy(autoContinue = !s.autoContinue)) }),
                 ItemKey(onEnter = { onCommitLight(s.copy(pageNum = !s.pageNum)) }),
+                ItemKey(onEnter = { stack.add(Sub.AnnotationColors) }),
             )
             Sub.Text -> {
                 val px = s.fontSize * ReaderSettings.fontScaleToRatio(s.fontScale)
@@ -375,6 +385,77 @@ fun ReaderSettingsPanel(
                     apply = { v -> onPreview(s.copy(marginRight = v.roundToInt())); onCommitTypography(s.copy(marginRight = v.roundToInt())) },
                     fmt = { "${it.roundToInt()}" }),
             )
+            Sub.AnnotationColors -> {
+                val slots = annotationColorSlots(s, annotationColorKind)
+                val slotCount = slots.size.coerceAtLeast(1)
+                val selected = annotationColorSlot.coerceIn(0, slotCount - 1)
+                val slotColor = annotationSlotColor(s, annotationColorKind, selected)
+                val presetCount = ANNOTATION_PRESET_COLORS.size
+                val preset = annotationColorPreset.coerceIn(0, presetCount - 1)
+                listOf(
+                    ItemKey(onEnter = { annotationColorKind = AnnotationKind.Highlight }),
+                    ItemKey(onEnter = { annotationColorKind = AnnotationKind.Underline }),
+                    ItemKey(
+                        // 色槽行本身没有「整行动作」：左右键移动当前槽，具体槽由各自的色点接收点击。
+                        onEnter = {},
+                        onLeft = { annotationColorSlot = (selected - 1 + slotCount) % slotCount },
+                        onRight = { annotationColorSlot = (selected + 1) % slotCount },
+                    ),
+                    ItemKey(onEnter = { onCommitLight(withAnnotationDefaultSlot(s, annotationColorKind, selected)) }),
+                    ItemKey(
+                        onEnter = {
+                            val next = annotationWithRgb(slotColor, ANNOTATION_PRESET_COLORS[preset])
+                            onCommitLight(withAnnotationColorSlot(s, annotationColorKind, selected, next))
+                        },
+                        onLeft = { annotationColorPreset = (preset - 1 + presetCount) % presetCount },
+                        onRight = { annotationColorPreset = (preset + 1) % presetCount },
+                    ),
+                    sliderKey(
+                        annotationRed(slotColor).toDouble(),
+                        0.0,
+                        255.0,
+                        1.0,
+                        apply = { v ->
+                            val next = annotationWithChannel(slotColor, 16, v.roundToInt())
+                            onCommitLight(withAnnotationColorSlot(s, annotationColorKind, selected, next))
+                        },
+                        fmt = { "${it.roundToInt()}" },
+                    ),
+                    sliderKey(
+                        annotationGreen(slotColor).toDouble(),
+                        0.0,
+                        255.0,
+                        1.0,
+                        apply = { v ->
+                            val next = annotationWithChannel(slotColor, 8, v.roundToInt())
+                            onCommitLight(withAnnotationColorSlot(s, annotationColorKind, selected, next))
+                        },
+                        fmt = { "${it.roundToInt()}" },
+                    ),
+                    sliderKey(
+                        annotationBlue(slotColor).toDouble(),
+                        0.0,
+                        255.0,
+                        1.0,
+                        apply = { v ->
+                            val next = annotationWithChannel(slotColor, 0, v.roundToInt())
+                            onCommitLight(withAnnotationColorSlot(s, annotationColorKind, selected, next))
+                        },
+                        fmt = { "${it.roundToInt()}" },
+                    ),
+                    sliderKey(
+                        annotationAlphaPercent(slotColor).toDouble(),
+                        0.0,
+                        100.0,
+                        1.0,
+                        apply = { v ->
+                            val next = annotationWithAlpha(slotColor, annotationAlphaFromPercent(v.toFloat()))
+                            onCommitLight(withAnnotationColorSlot(s, annotationColorKind, selected, next))
+                        },
+                        fmt = { "${it.roundToInt()}%" },
+                    ),
+                )
+            }
             Sub.Theme -> listOf(
                 ItemKey(onEnter = { commitBook(TypographicProfile.withLayoutTheme(s, "original")) }),
                 ItemKey(onEnter = { onCommitTypography(TypographicProfile.withLayoutTheme(s, "modern")) }),
@@ -780,6 +861,20 @@ fun ReaderSettingsPanel(
                                 p)
                             Sub.Brightness -> BrightnessPage(s, keys, nav, onMove, listState, onCommitLight, readSystemBrightness, p, brightnessMax)
                             Sub.AnimMode -> AnimModePage(s, keys, nav, onMove, listState, onCommitLight, p)
+                            Sub.AnnotationColors -> AnnotationColorPage(
+                                s = s,
+                                kind = annotationColorKind,
+                                selectedSlot = annotationColorSlot,
+                                selectedPreset = annotationColorPreset,
+                                keys = keys,
+                                nav = nav,
+                                onMouseMove = onMove,
+                                listState = listState,
+                                commitLight = onCommitLight,
+                                onSelectSlot = { annotationColorSlot = it },
+                                onSelectPreset = { annotationColorPreset = it },
+                                p = p,
+                            )
                         }
                     }
                 }
@@ -848,7 +943,7 @@ private fun WifiImportPage(
 private enum class Sub(val title: String) {
     Home("设置"), Text("文字"), TextFont("字体管理"), WeightPicker("字重"), WifiImport("WIFI 导入"), Spacing("间距"),
     Theme("排版主题"), ReadingTheme("阅读主题"), ThemePresetMgr("预设管理"),
-    Brightness("亮度"), AnimMode("翻页动画模式"),
+    Brightness("亮度"), AnimMode("翻页动画模式"), AnnotationColors("标注颜色"),
 }
 
 /** 键盘项：click 与键盘共用同一回调；网格格的左右由调用方配成步进，滑块的左右配成调值。 */
@@ -910,6 +1005,7 @@ private fun HomePage(
         item { SetSwitch("封面拉伸全屏", s.coverStretch, { commitPlain(s.copy(coverStretch = it)) }, p, nav = nav, index = 7) }
         item { SetSwitch("启动时继续阅读", s.autoContinue, { commitPlain(s.copy(autoContinue = it)) }, p, nav = nav, index = 8) }
         item { SetSwitch("显示页码", s.pageNum, { commitPlain(s.copy(pageNum = it)) }, p, nav = nav, index = 9) }
+        item { SetRow("标注颜色", onTap = keys[10].onEnter, p = p, nav = nav, index = 10) }
         item { Spacer(modifier = Modifier.height(24.dp)) }
     }
 }
@@ -1311,6 +1407,287 @@ private fun AnimModePage(
         item { ThemeOpt("卷曲", s.pageAnimationMode == "curl", keys[1].onEnter, p, nav = nav, index = 1) }
         item { Spacer(modifier = Modifier.height(24.dp)) }
     }
+}
+
+// ================= Annotation colors page =================
+
+/**
+ * 标注颜色页（D-13 / D-21）：高亮 / 划线各自一组五格色槽。
+ *
+ * 交互：先选类别，再点一格色槽选中编辑；十格基础色只换 RGB、保留该槽透明度；
+ * 红/绿/蓝滑条可调到任意颜色，透明度滑条只改 alpha；「设为默认色槽」决定新建标注用哪一格。
+ * 所有改动走 [commitLight]（只改像素，不触发重排）。
+ */
+@Composable
+private fun AnnotationColorPage(
+    s: ReaderSettings,
+    kind: AnnotationKind,
+    selectedSlot: Int,
+    selectedPreset: Int,
+    keys: List<ItemKey>,
+    nav: PanelNav,
+    onMouseMove: () -> Unit,
+    listState: LazyListState,
+    commitLight: (ReaderSettings) -> Unit,
+    onSelectSlot: (Int) -> Unit,
+    onSelectPreset: (Int) -> Unit,
+    p: Palette,
+) {
+    val slots = annotationColorSlots(s, kind)
+    val slotCount = slots.size.coerceAtLeast(1)
+    val selected = selectedSlot.coerceIn(0, slotCount - 1)
+    val defaultSlot = annotationDefaultSlot(s, kind)
+    val slotColor = annotationSlotColor(s, kind, selected)
+    val preset = selectedPreset.coerceIn(0, ANNOTATION_PRESET_COLORS.lastIndex)
+    var redDraft by remember(kind, selected, slotColor) {
+        mutableFloatStateOf(annotationRed(slotColor).toFloat())
+    }
+    var greenDraft by remember(kind, selected, slotColor) {
+        mutableFloatStateOf(annotationGreen(slotColor).toFloat())
+    }
+    var blueDraft by remember(kind, selected, slotColor) {
+        mutableFloatStateOf(annotationBlue(slotColor).toFloat())
+    }
+    var alphaDraft by remember(kind, selected, slotColor) {
+        mutableFloatStateOf(annotationAlphaPercent(slotColor))
+    }
+    LaunchedEffect(slotColor) {
+        redDraft = annotationRed(slotColor).toFloat()
+        greenDraft = annotationGreen(slotColor).toFloat()
+        blueDraft = annotationBlue(slotColor).toFloat()
+        alphaDraft = annotationAlphaPercent(slotColor)
+    }
+    val labelW = sliderLabelWidth(listOf("红", "绿", "蓝", "透明度"), p)
+
+    LazyColumn(state = listState, modifier = Modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
+        item { ThemeOpt("高亮", kind == AnnotationKind.Highlight, keys[0].onEnter, p, nav = nav, index = 0) }
+        item { ThemeOpt("划线", kind == AnnotationKind.Underline, keys[1].onEnter, p, nav = nav, index = 1) }
+        item {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(if (nav.activeIdx == 2) p.rowActive else Color.Transparent)
+                    .panelHover(nav, 2)
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("色槽", color = p.text, fontSize = 15.sp)
+                    Spacer(Modifier.weight(1f))
+                    slots.forEachIndexed { index, argb ->
+                        if (index > 0) Spacer(Modifier.width(8.dp))
+                        AnnotationSlotSwatch(
+                            argb = argb,
+                            selected = index == selected,
+                            isDefault = index == defaultSlot,
+                            p = p,
+                            onClick = { onSelectSlot(index) },
+                        )
+                    }
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "金点 = 新建标注默认色；点选色槽后可在下方改色",
+                    color = p.muted2,
+                    fontSize = 12.sp,
+                )
+            }
+            HLine(p, modifier = Modifier.padding(start = 16.dp, end = 16.dp))
+        }
+        item {
+            PingButton(
+                label = if (selected == defaultSlot) "已是默认色槽" else "设为默认色槽",
+                p = p,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 5.dp),
+                onClick = keys[3].onEnter,
+                nav = nav,
+                index = 3,
+            )
+        }
+        item {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(if (nav.activeIdx == 4) p.rowActive else Color.Transparent)
+                    .panelHover(nav, 4)
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+            ) {
+                Text("颜色", color = p.text, fontSize = 15.sp)
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    ANNOTATION_PRESET_COLORS.forEachIndexed { index, rgb ->
+                        AnnotationPresetSwatch(
+                            // 快捷色只代表 RGB；不跟当前槽的透明度走，否则 alpha=0 时整行看不见。
+                            color = Color(rgb),
+                            selected = index == preset,
+                            p = p,
+                            onClick = {
+                                onSelectPreset(index)
+                                commitLight(
+                                    withAnnotationColorSlot(
+                                        s, kind, selected,
+                                        annotationWithRgb(slotColor, rgb),
+                                    ),
+                                )
+                            },
+                        )
+                    }
+                }
+            }
+            HLine(p, modifier = Modifier.padding(start = 16.dp, end = 16.dp))
+        }
+        item {
+            UiSliderRow(
+                label = "红",
+                min = 0.0,
+                max = 255.0,
+                step = 1.0,
+                value = redDraft.toDouble(),
+                fmt = { "${it.roundToInt()}" },
+                onPreview = { redDraft = it.toFloat() },
+                onCommit = { v ->
+                    redDraft = v.toFloat()
+                    commitLight(
+                        withAnnotationColorSlot(
+                            s, kind, selected,
+                            annotationWithChannel(slotColor, 16, v.roundToInt()),
+                        ),
+                    )
+                },
+                p = p,
+                labelWidth = labelW,
+                nav = nav,
+                index = 5,
+            )
+        }
+        item {
+            UiSliderRow(
+                label = "绿",
+                min = 0.0,
+                max = 255.0,
+                step = 1.0,
+                value = greenDraft.toDouble(),
+                fmt = { "${it.roundToInt()}" },
+                onPreview = { greenDraft = it.toFloat() },
+                onCommit = { v ->
+                    greenDraft = v.toFloat()
+                    commitLight(
+                        withAnnotationColorSlot(
+                            s, kind, selected,
+                            annotationWithChannel(slotColor, 8, v.roundToInt()),
+                        ),
+                    )
+                },
+                p = p,
+                labelWidth = labelW,
+                nav = nav,
+                index = 6,
+            )
+        }
+        item {
+            UiSliderRow(
+                label = "蓝",
+                min = 0.0,
+                max = 255.0,
+                step = 1.0,
+                value = blueDraft.toDouble(),
+                fmt = { "${it.roundToInt()}" },
+                onPreview = { blueDraft = it.toFloat() },
+                onCommit = { v ->
+                    blueDraft = v.toFloat()
+                    commitLight(
+                        withAnnotationColorSlot(
+                            s, kind, selected,
+                            annotationWithChannel(slotColor, 0, v.roundToInt()),
+                        ),
+                    )
+                },
+                p = p,
+                labelWidth = labelW,
+                nav = nav,
+                index = 7,
+            )
+        }
+        item {
+            UiSliderRow(
+                label = "透明度",
+                min = 0.0,
+                max = 100.0,
+                step = 1.0,
+                value = alphaDraft.toDouble(),
+                fmt = { "${it.roundToInt()}%" },
+                onPreview = { alphaDraft = it.toFloat() },
+                onCommit = { v ->
+                    alphaDraft = v.toFloat()
+                    commitLight(
+                        withAnnotationColorSlot(
+                            s, kind, selected,
+                            annotationWithAlpha(slotColor, annotationAlphaFromPercent(v.toFloat())),
+                        ),
+                    )
+                },
+                p = p,
+                labelWidth = labelW,
+                nav = nav,
+                index = 8,
+            )
+        }
+        item { Spacer(modifier = Modifier.height(24.dp)) }
+    }
+}
+
+@Composable
+private fun AnnotationSlotSwatch(
+    argb: Int,
+    selected: Boolean,
+    isDefault: Boolean,
+    p: Palette,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .size(36.dp)
+            .background(Color(argb), CircleShape)
+            .border(
+                width = if (selected) 3.dp else if (isDefault) 2.dp else 1.dp,
+                color = if (selected) p.text else if (isDefault) p.selBorder else p.cardBorder,
+                shape = CircleShape,
+            )
+            .clickable(onClick = onClick),
+    ) {
+        if (isDefault) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(6.dp)
+                    .size(8.dp)
+                    .background(p.selBorder, CircleShape)
+                    .border(1.dp, Color.White, CircleShape),
+            )
+        }
+    }
+}
+
+@Composable
+private fun AnnotationPresetSwatch(
+    color: Color,
+    selected: Boolean,
+    p: Palette,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .size(24.dp)
+            .background(color, CircleShape)
+            .border(
+                width = if (selected) 2.dp else 1.dp,
+                color = if (selected) p.selBorder else p.cardBorder,
+                shape = CircleShape,
+            )
+            .clickable(onClick = onClick),
+    )
 }
 
 // ================= Base widgets =================

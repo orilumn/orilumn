@@ -34,6 +34,7 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
@@ -1076,6 +1077,26 @@ fun ReaderScreen(
                     var lastFingerX = downX
                     var lastFingerY = downY
                     val autoFlipEdgePx = SELECTION_AUTO_FLIP_EDGE_DP * density
+                    // D-9：按指针类型分流。鼠标拖拽只做文本选择，不拖页；点左右页边距才翻页。
+                    // 版心几何取自当前 profile，和绘制/命中同源；上下页边距不算翻页区。
+                    val mouse = down.type == PointerType.Mouse
+                    val contentLeftPx = profile.marginLeft.toFloat()
+                    val contentTopPx = profile.marginTop.toFloat()
+                    val contentRightPx = (size.width - profile.marginRight).toFloat().coerceAtLeast(contentLeftPx)
+                    val contentBottomPx = (size.height - profile.marginBottom).toFloat().coerceAtLeast(contentTopPx)
+                    val mouseTextDown = mouse && !barsOwned && !coverVisible && !ctl.isBusy() &&
+                        !down.isConsumed &&
+                        downX >= contentLeftPx && downX <= contentRightPx &&
+                        downY >= contentTopPx && downY <= contentBottomPx
+                    val mouseMarginDir = if (mouse && !barsOwned && !ctl.isBusy() && !down.isConsumed) {
+                        ReaderMath.marginFlipDirection(
+                            downX, downY,
+                            contentLeftPx, contentRightPx, contentTopPx, contentBottomPx,
+                        )
+                    } else {
+                        0
+                    }
+                    var mouseSelectingPending = mouseTextDown
                     fun scheduleAutoFlip(side: Int) {
                         if (side == 0 || boundaryHintShown || autoFlipJob?.isActive == true) return
                         autoFlipJob = scope.launch {
@@ -1111,9 +1132,10 @@ fun ReaderScreen(
                         )
                         if (handle != null) {
                             selectionMenuVisible = false
+                            mouseSelectingPending = false
                             selection.beginHandleDrag(handle)
                             selecting = true
-                        } else {
+                        } else if (!mouse) {
                             selectionMenuVisible = false
                             longPressJob = scope.launch {
                                 delay(longPressTimeout)
@@ -1177,6 +1199,45 @@ fun ReaderScreen(
                                 lastFingerX, size.width.toFloat(), autoFlipEdgePx,
                             )
                             scheduleAutoFlip(autoFlipSide)
+                            change.consume()
+                            continue
+                        }
+                        // D-9：鼠标分流——拖拽才进入选区，点击正文无操作，点左右页边距才翻页。
+                        // 触摸仍走下面的三区点按/滑动/亮度，两套语义不抢同一个手势。
+                        if (mouse) {
+                            if (mouseSelectingPending && moved) {
+                                mouseSelectingPending = false
+                                selectionMenuVisible = false
+                                if (beginSelectionAt(downX, downY)) {
+                                    selecting = true
+                                    Logger.d(
+                                        "Orilumn.SEL",
+                                        "mouse-drag ch=${selection.chapter} " +
+                                            "sel=${selection.start}-${selection.endExclusive}",
+                                    )
+                                    lastFingerX = change.position.x
+                                    lastFingerY = change.position.y
+                                    extendSelectionAt(lastFingerX, lastFingerY)
+                                    autoFlipSide = selectionAutoFlipDirection(
+                                        lastFingerX, size.width.toFloat(), autoFlipEdgePx,
+                                    )
+                                    scheduleAutoFlip(autoFlipSide)
+                                }
+                            }
+                            if (!change.pressed) {
+                                // D-9：鼠标点正文 = 无操作（不翻页、不清选区、不触发链接）；
+                                // 只有左右页边距单击翻页。
+                                if (!moved && mouseMarginDir != 0) {
+                                    Logger.d(
+                                        "Orilumn.TAP",
+                                        "mouse margin x=${downX.roundToInt()} y=${downY.roundToInt()} " +
+                                            "dir=$mouseMarginDir",
+                                    )
+                                    currentFlipWithAnimation(mouseMarginDir)
+                                }
+                                change.consume()
+                                break
+                            }
                             change.consume()
                             continue
                         }

@@ -25,6 +25,24 @@ class ReaderLogicTest {
             lineWidthPx = 300,
         )
 
+    // ---- 桌面鼠标页边距翻页 ----
+
+    @Test
+    fun marginFlipDirection_usesContentGeometryNotScreenThirds() {
+        val left = 100f
+        val right = 800f
+        val top = 100f
+        val bottom = 700f
+        assertEquals(-1, ReaderMath.marginFlipDirection(10f, 400f, left, right, top, bottom))
+        assertEquals(1, ReaderMath.marginFlipDirection(900f, 400f, left, right, top, bottom))
+        assertEquals(0, ReaderMath.marginFlipDirection(100f, 400f, left, right, top, bottom))
+        assertEquals(0, ReaderMath.marginFlipDirection(500f, 400f, left, right, top, bottom))
+        assertEquals(0, ReaderMath.marginFlipDirection(800f, 400f, left, right, top, bottom))
+        // 上下页边距不算翻页区。
+        assertEquals(0, ReaderMath.marginFlipDirection(10f, 50f, left, right, top, bottom))
+        assertEquals(0, ReaderMath.marginFlipDirection(900f, 750f, left, right, top, bottom))
+    }
+
     // ---- 三区点按 ----
 
     @Test

@@ -31,6 +31,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.data.annotation.AnnotationKind
 import kotlin.math.roundToInt
 
@@ -131,12 +132,75 @@ internal fun AnnotationMenu(
     }
 }
 
-/** 展开后的色槽行：五格，默认格描金边；点一格即用该格颜色创建标注。 */
+/**
+ * 已有标注的编辑菜单（D-14）：改色 / 删除 / 取消。
+ *
+ * 与新建菜单同制：自绘覆盖层，不用 `Popup`；色槽来自该标注所属类别，
+ * 当前色描一圈强调。改色或删除都由调用方先改内存再异步落库。
+ */
+@Composable
+internal fun AnnotationEditMenu(
+    annotation: Annotation,
+    anchor: Rect,
+    bounds: Rect,
+    palette: Palette,
+    colors: List<Int>,
+    onPickColor: (Int) -> Unit,
+    onDelete: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    var size by remember { mutableStateOf(IntSize.Zero) }
+    // 删除不可撤销：第一次点只把按钮改成「确认删除」，第二次才真删。
+    var confirmDelete by remember { mutableStateOf(false) }
+    val gap = with(LocalDensity.current) { ANNOTATION_MENU_GAP.roundToPx() }
+    val offset = annotationMenuOffset(anchor, bounds, size, gap)
+
+    Box(modifier = Modifier.offset { offset }) {
+        Column(
+            modifier = Modifier
+                .onSizeChanged { size = it }
+                .shadow(8.dp, RoundedCornerShape(12.dp))
+                .background(palette.cardBg, RoundedCornerShape(12.dp))
+                .border(1.dp, palette.cardBorder, RoundedCornerShape(12.dp))
+                .padding(vertical = 2.dp),
+        ) {
+            Text(
+                "改颜色",
+                color = palette.muted2,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(start = 12.dp, top = 6.dp, bottom = 2.dp),
+            )
+            ColorSlotRow(
+                colors = colors,
+                defaultSlot = -1,
+                palette = palette,
+                currentArgb = annotation.color ?: annotationFallbackColor(annotation.kind),
+                onPick = onPickColor,
+            )
+            Row(modifier = Modifier.padding(horizontal = 2.dp)) {
+                MenuAction(
+                    label = if (confirmDelete) "确认删除" else "删除",
+                    dotArgb = null,
+                    textColor = palette.text,
+                    palette = palette,
+                    active = confirmDelete,
+                    onClick = {
+                        if (confirmDelete) onDelete() else confirmDelete = true
+                    },
+                )
+                MenuAction("取消", null, palette.muted, palette, active = false, onClick = onCancel)
+            }
+        }
+    }
+}
+
+/** 展开后的色槽行：默认格描金边，编辑时当前色描强调边；点一格即用该格颜色。 */
 @Composable
 private fun ColorSlotRow(
     colors: List<Int>,
     defaultSlot: Int,
     palette: Palette,
+    currentArgb: Int? = null,
     onPick: (Int) -> Unit,
 ) {
     Row(
@@ -145,13 +209,18 @@ private fun ColorSlotRow(
     ) {
         colors.forEachIndexed { index, argb ->
             if (index > 0) Spacer(Modifier.width(8.dp))
+            val current = currentArgb != null && argb == currentArgb
             Box(
                 modifier = Modifier
                     .size(28.dp)
                     .background(Color(argb), CircleShape)
                     .border(
-                        width = if (index == defaultSlot) 2.dp else 1.dp,
-                        color = if (index == defaultSlot) palette.selBorder else Color.White.copy(alpha = 0.85f),
+                        width = if (current) 3.dp else if (index == defaultSlot) 2.dp else 1.dp,
+                        color = when {
+                            current -> palette.text
+                            index == defaultSlot -> palette.selBorder
+                            else -> Color.White.copy(alpha = 0.85f)
+                        },
                         shape = CircleShape,
                     )
                     .clickable { onPick(argb) },

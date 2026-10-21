@@ -1,12 +1,14 @@
 package orilumn.reader.ui.reader
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.Text
@@ -197,6 +199,11 @@ fun ReaderScreen(
     var selectionMenuVisible by remember { mutableStateOf(false) }
     // 移动端放大镜的手指位置（null = 不显示）。桌面鼠标不显示（D-10）。
     var magnifierFinger by remember { mutableStateOf<Offset?>(null) }
+    // 长按已有标注时打开的编辑菜单（D-14）；锚点是长按位置，菜单作用于整条记录。
+    var editingAnnotation by remember { mutableStateOf<Annotation?>(null) }
+    var editingAnchor by remember { mutableStateOf<Rect?>(null) }
+    // 编辑菜单的透明遮罩：点菜单外任意处只关菜单，不再翻页/改选区。
+    val editScrimInteraction = remember { MutableInteractionSource() }
     // 旧的 ClipboardManager 仍是 CMP 唯一共享可用的同步写入口；新 LocalClipboard 只支持 suspend。
     @Suppress("DEPRECATION")
     val clipboard = LocalClipboardManager.current
@@ -207,12 +214,16 @@ fun ReaderScreen(
         selection.clear()
         selectionMenuVisible = false
         magnifierFinger = null
+        editingAnnotation = null
+        editingAnchor = null
     }
     // 版式/参数变化后旧选区坐标不再成立（字符偏移没变，但端点所在行可能变），直接丢弃。
     LaunchedEffect(contentRevision, density) {
         selection.clear()
         selectionMenuVisible = false
         magnifierFinger = null
+        editingAnnotation = null
+        editingAnchor = null
     }
     // 选区被任何路径清空时，菜单必须同步收起（避免留下指向空选区的浮层）。
     LaunchedEffect(selection.hasSelection) {
@@ -226,6 +237,9 @@ fun ReaderScreen(
     // 否则「拖到页边松手」永远看不到菜单。无选区时照旧收起。
     LaunchedEffect(openPos) {
         if (!selection.hasSelection) selectionMenuVisible = false
+        // 翻页后编辑菜单不跟到新页；它锚定的是旧页上的那条记录。
+        editingAnnotation = null
+        editingAnchor = null
     }
     // ---- 定位动作（host 为 suspend，统一挂到本组件作用域） ----
     /**
@@ -859,8 +873,39 @@ fun ReaderScreen(
         }
     }
 
+    /**
+     * 长按命中已有标注（D-14）：命中则打开该标注的编辑菜单并返回 true。
+     *
+     * 只看当前章内存列表的字符区间（`charStart <= off < charEnd`），不查库、不做几何反查；
+     * 页边距不参与命中，避免在空白边距上误开菜单。命中后清掉选区，避免两套菜单叠在一起。
+     */
+    fun tryOpenAnnotationEdit(xPx: Float, yPx: Float, widthPx: Float, heightPx: Float): Boolean {
+        val p = openPos ?: return false
+        if (annotationState.chapter != p.chapter) return false
+        val left = profile.marginLeft.toFloat()
+        val top = profile.marginTop.toFloat()
+        val right = (widthPx - profile.marginRight).coerceAtLeast(left)
+        val bottom = (heightPx - profile.marginBottom).coerceAtLeast(top)
+        if (xPx < left || xPx > right || yPx < top || yPx > bottom) return false
+        val offset = charOffsetAt(p, xPx, yPx) ?: return false
+        val hit = annotationState.annotationAt(offset)?.takeIf { it.isDrawable() } ?: return false
+        selection.clear()
+        selectionMenuVisible = false
+        magnifierFinger = null
+        editingAnnotation = hit
+        editingAnchor = Rect(xPx, yPx, xPx, yPx)
+        return true
+    }
+
+    /** 收起已有标注的编辑菜单（不改数据）。 */
+    fun closeAnnotationEdit() {
+        editingAnnotation = null
+        editingAnchor = null
+    }
+
     /** 长按起手：按 D-7 选整词 / 整句；返回 false 表示此处没有可选的章文本。 */
     fun beginSelectionAt(xPx: Float, yPx: Float): Boolean {
+        closeAnnotationEdit()
         val p = openPos ?: return false
         val offset = charOffsetAt(p, xPx, yPx) ?: return false
         val text = currentHost.textOf(p.chapter, 0, Int.MAX_VALUE) ?: return false
@@ -941,6 +986,11 @@ fun ReaderScreen(
             }
             return
         }
+        // 编辑菜单开着时，正文点按只关菜单（菜单外的透明遮罩通常已先接住，这里是兜底）。
+        if (editingAnnotation != null) {
+            closeAnnotationEdit()
+            return
+        }
         // D-11：有选区时，正文点按只清除选区，不翻页也不开链接。
         if (selection.hasSelection) {
             selection.clear()
@@ -997,6 +1047,24 @@ fun ReaderScreen(
 
     // S29：Toast → CMP Snackbar；书签/笔记占位动作未接线（null）时给出提示。
     val snackbar = rememberReaderSnackbar()
+
+    /** 改已有标注的颜色：先改内存（立即出图），再异步落库；失败由状态层回滚并提示。 */
+    fun updateAnnotationColor(annotation: Annotation, color: Int) {
+        closeAnnotationEdit()
+        scope.launch {
+            val ok = annotationState.update(annotation.copy(color = color))
+            snackbar.show(if (ok) "已改色" else "改色失败")
+        }
+    }
+
+    /** 删除已有标注：先移出内存（立即消失），再异步落库；失败由状态层回滚并提示。 */
+    fun deleteAnnotation(annotation: Annotation) {
+        closeAnnotationEdit()
+        scope.launch {
+            val ok = annotationState.delete(annotation.id)
+            snackbar.show(if (ok) "已删除" else "删除失败")
+        }
+    }
 
     /** 把当前选区落成一条高亮/划线：先内存出图，再异步存库；失败回滚并提示。 */
     fun createSelectionAnnotation(kind: AnnotationKind, color: Int) {
@@ -1137,18 +1205,25 @@ fun ReaderScreen(
                             downX, downY, size.width.toFloat(), size.height.toFloat(),
                         )
                         if (handle != null) {
+                            closeAnnotationEdit()
                             selectionMenuVisible = false
                             mouseSelectingPending = false
                             selection.beginHandleDrag(handle)
                             selecting = true
                             if (!mouse) magnifierFinger = Offset(downX, downY)
-                        } else if (!mouse) {
+                        } else if (!mouse || mouseTextDown) {
                             selectionMenuVisible = false
                             longPressJob = scope.launch {
                                 delay(longPressTimeout)
                                 if (!moved) {
-                                    selecting = beginSelectionAt(downX, downY)
-                                    if (selecting) magnifierFinger = Offset(downX, downY)
+                                    // 先看是否长按在已有标注上（D-14）：命中就编辑，空白才选字。
+                                    val editing = tryOpenAnnotationEdit(
+                                        downX, downY, size.width.toFloat(), size.height.toFloat(),
+                                    )
+                                    if (!editing && !mouse) {
+                                        selecting = beginSelectionAt(downX, downY)
+                                        if (selecting) magnifierFinger = Offset(downX, downY)
+                                    }
                                 }
                             }
                         }
@@ -1175,6 +1250,12 @@ fun ReaderScreen(
                     while (true) {
                         val event = awaitPointerEvent()
                         val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                        // 长按标注刚打开编辑菜单：本次手势只负责收尾，不再翻页/拖选/调亮度。
+                        if (editingAnnotation != null) {
+                            change.consume()
+                            if (!change.pressed) break
+                            continue
+                        }
                         if (barsOwned) {
                             if (!change.pressed) {
                                 // 栏区点按被栏消费——此前静默，"点了没反应"先查这条。
@@ -1267,7 +1348,9 @@ fun ReaderScreen(
                             // 目标页一致 ⇒ 同一次手势既滑动又瞬切了一次）。
                             else if (dragDir != 0) flipWithAnimation(dragDir)
                             else if (upTime - downTime < ReaderMath.TAP_MAX_MS &&
-                                !ReaderMath.movedBeyondTapSlop(upDx, upDy)
+                                !ReaderMath.movedBeyondTapSlop(upDx, upDy) &&
+                                // 菜单/遮罩等上层已经消费的点按不再落到翻页/切栏/链接。
+                                !change.isConsumed
                             ) {
                                 // 点按的判据是「没动过」，不是「没定向过」：早先只看
                                 // dragDir==0 与时长，而 dragDir 只在 gestureAxis 判成
@@ -1706,6 +1789,29 @@ fun ReaderScreen(
                         selectionMenuVisible = false
                         magnifierFinger = null
                     },
+                )
+            }
+            // 已有标注编辑菜单（D-14）：长按命中后出现；透明遮罩接住菜单外的点按。
+            val editing = editingAnnotation
+            val editingAt = editingAnchor
+            if (editing != null && editingAt != null && !coverVisible && !ctl.isBusy()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clickable(
+                            interactionSource = editScrimInteraction,
+                            indication = null,
+                        ) { closeAnnotationEdit() },
+                )
+                AnnotationEditMenu(
+                    annotation = editing,
+                    anchor = editingAt,
+                    bounds = Rect(contentLeft, contentTop, contentRight, contentBottom),
+                    palette = paletteFor(light.scheme),
+                    colors = annotationColorSlots(light, editing.kind),
+                    onPickColor = { color -> updateAnnotationColor(editing, color) },
+                    onDelete = { deleteAnnotation(editing) },
+                    onCancel = ::closeAnnotationEdit,
                 )
             }
             // 亮度/护眼遮罩：纯绘制于画布之上、栏之下。

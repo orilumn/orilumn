@@ -214,7 +214,11 @@ fun ReaderScreen(
         if (!selection.hasSelection) selectionMenuVisible = false
     }
     // 翻页后浮动菜单不跟到新页（选区保留，各页只画交集；用户可再点选区/手柄）。
-    LaunchedEffect(openPos) { selectionMenuVisible = false }
+    // 但跨页自动翻页可能在抬手瞬间仍在飞行：抬手已把菜单置 true，此时不能再无条件抹掉，
+    // 否则「拖到页边松手」永远看不到菜单。无选区时照旧收起。
+    LaunchedEffect(openPos) {
+        if (!selection.hasSelection) selectionMenuVisible = false
+    }
     // ---- 定位动作（host 为 suspend，统一挂到本组件作用域） ----
     /**
      * 落位前等图（导航提交前预热）：目标页缺的插图/背景图并行解出来进跨页缓存再提交定位，
@@ -489,7 +493,11 @@ fun ReaderScreen(
      * 换不了就得把动画拨回原页（见 [endSlide]）。发射后立刻返回的话那次核对必然
      * 读到着陆前的 `openPos`，恒判失败 ⇒ 每次提交都回滚 ⇒ 观感是「翻到位又弹回去」。
      */
-    suspend fun flipAwait(direction: Int, dismissCoverOnLand: Boolean = true): ReaderPos? {
+    suspend fun flipAwait(
+        direction: Int,
+        dismissCoverOnLand: Boolean = true,
+        action: String = "tap-flip",
+    ): ReaderPos? {
         // 封面页内翻页：前进回正文第一页（现查 fresh 落位，走漏斗，可存档)。
         // 封面已是第一页，后退无操作。
         // `dismissCoverOnLand=false`（动画路径）时**落位不 dismiss**：封面要作为滑动
@@ -517,14 +525,14 @@ fun ReaderScreen(
             return null
         }
         return anchorFunnel.navigate(
-            action = "tap-flip",
-            read = { resolveNavPos("tap-flip") },
+            action = action,
+            read = { resolveNavPos(action) },
             commit = ::markPositionChanged,
         ) { p ->
-            Logger.d("Orilumn.TAP", "tap-flip dispatch dir=$direction from ch=${p.chapter} char=${p.slice.charStart}")
+            Logger.d("Orilumn.TAP", "$action dispatch dir=$direction from ch=${p.chapter} char=${p.slice.charStart}")
             val landed = currentHost.adjacent(p, direction)
             // 引擎侧无声吞翻页时（返回 null），这里是唯一目击者——与 Orilumn.FLIP 对账。
-            Logger.d("Orilumn.TAP", "tap-flip result dir=$direction " + (landed?.let { "landed ch=${it.chapter} char=${it.slice.charStart}" } ?: "NULL (engine returned null)"))
+            Logger.d("Orilumn.TAP", "$action result dir=$direction " + (landed?.let { "landed ch=${it.chapter} char=${it.slice.charStart}" } ?: "NULL (engine returned null)"))
             // 等图由 [AnchorFunnel.beforeCommit] 在**本函数内部、commit 之前**完成（漏斗锁内，
             // 所有落位路径共用），故返回时目标页整页就绪：`openPos` 一变，首帧即真图。
             // 调用点**不要**再等一次——那是冗余，且会和用户紧接着的下一手势抢同一个
@@ -781,6 +789,28 @@ fun ReaderScreen(
         )
     }
 
+    /**
+     * 跨页接力用：手指在页边距里时按 y 找新页最近行，取靠该边的首/末字。
+     *
+     * 与 [charOffsetAt] 共用 `pageShift`，但**不要求 x 落在可见字形内**——
+     * 自动翻页触发时手指本来就在页边，x 必然超出字形右缘。
+     */
+    fun charOffsetAtPageSide(p: ReaderPos, yPx: Float, direction: Int): Int? {
+        val lines = currentHost.pageLines(p) ?: return null
+        if (lines.isEmpty()) return null
+        val images = runCatching { currentHost.pageImages(p) }.getOrNull()
+        val backgrounds = runCatching { currentHost.pageBackgrounds(p) }.getOrNull()
+        val frameLead = runCatching { currentHost.pageFrameLead(p) }.getOrDefault(0)
+        val shift = readerPageShift(
+            lines = lines,
+            pageImages = images,
+            pageBackgrounds = backgrounds,
+            frameLead = frameLead,
+            contentTop = profile.marginTop.toFloat(),
+        ) ?: return null
+        return selectionSideOffset(lines, shift, yPx, direction)
+    }
+
     /** 当前页上的选区几何；无选区/跨章/页无行时 null。 */
     fun selectionGeometryAt(p: ReaderPos, widthPx: Float, heightPx: Float): SelectionPageGeometry? {
         if (!selection.hasSelection || selection.chapter != p.chapter) return null
@@ -834,6 +864,38 @@ fun ReaderScreen(
         val p = openPos ?: return
         val offset = charOffsetAt(p, xPx, yPx) ?: return
         selection.extendTo(offset)
+    }
+
+    /** 选区是否已顶到本章首/末页（只用于自动翻页停住时的提示，不参与导航）。 */
+    fun isSelectionChapterBoundary(p: ReaderPos, direction: Int): Boolean {
+        val length = currentHost.textOf(p.chapter, 0, Int.MAX_VALUE)?.length ?: return false
+        return selectionAtChapterBoundary(p.slice.charStart, p.slice.charEnd, length, direction)
+    }
+
+    /**
+     * 选区自动翻一页（D-8 / 3.3）：先只读确认邻页仍在**同一章**，再走 [flipAwait] 导航漏斗。
+     *
+     * 不能直接调 `adjacent`：那条口会推进临时表指针，且到章末会跨章。这里用
+     * [ReaderHost.peekAdjacent] 只读探路，确认同章后才交给漏斗；落位后按手指 y
+     * 把焦点接到新页最近行的靠边字（手柄接力）。
+     *
+     * @return true = 已翻页并接续选区；false = 到章边界 / 邻页未就绪 / 导航被 BUSY-DROP。
+     */
+    suspend fun autoFlipSelection(direction: Int, fingerY: Float): Boolean {
+        val p = openPos ?: return false
+        if (selection.chapter != p.chapter) return false
+        val peek = runCatching { currentHost.peekAdjacent(p, direction) }.getOrNull() ?: return false
+        if (peek.chapter != p.chapter) return false
+        val landed = flipAwait(direction, action = "selection-auto-flip") ?: return false
+        if (landed.chapter != p.chapter) return false
+        val offset = charOffsetAtPageSide(landed, fingerY, direction) ?: return false
+        selection.extendTo(offset)
+        Logger.d(
+            "Orilumn.SEL",
+            "auto-flip dir=$direction ch=${p.chapter} ${p.slice.charStart}→${landed.slice.charStart} " +
+                "focus=$offset sel=${selection.start}-${selection.endExclusive}",
+        )
+        return true
     }
 
     /** 点按 (xPx, yPx)（屏坐标 px）→ 命中链接即导航并返回 true；miss 回 false。 */
@@ -1005,6 +1067,44 @@ fun ReaderScreen(
                     var selecting = false
                     var moved = false
                     var longPressJob: Job? = null
+                    // D-8 / 3.3：手指在页边带内按住 → 自动翻页并接力选区。
+                    // 独立于翻页手势会话（同一根手指正在拖手柄），只走 flipAwait 导航漏斗。
+                    var gestureActive = true
+                    var autoFlipJob: Job? = null
+                    var autoFlipSide = 0
+                    var boundaryHintShown = false
+                    var lastFingerX = downX
+                    var lastFingerY = downY
+                    val autoFlipEdgePx = SELECTION_AUTO_FLIP_EDGE_DP * density
+                    fun scheduleAutoFlip(side: Int) {
+                        if (side == 0 || boundaryHintShown || autoFlipJob?.isActive == true) return
+                        autoFlipJob = scope.launch {
+                            var wait = SELECTION_AUTO_FLIP_FIRST_MS
+                            while (gestureActive && selecting && autoFlipSide == side) {
+                                delay(wait)
+                                if (!gestureActive || !selecting || autoFlipSide != side) return@launch
+                                val p = openPos
+                                if (p == null || selection.chapter != p.chapter) return@launch
+                                val ok = autoFlipSelection(side, lastFingerY)
+                                if (!ok) {
+                                    if (isSelectionChapterBoundary(p, side)) {
+                                        // 封顶到章首/章末：不再跨章，但选区要吃到边界字。
+                                        selection.extendTo(if (side > 0) Int.MAX_VALUE else 0)
+                                        boundaryHintShown = true
+                                        Logger.d(
+                                            "Orilumn.SEL",
+                                            "auto-flip boundary dir=$side ch=${p.chapter} " +
+                                                "sel=${selection.start}-${selection.endExclusive}",
+                                        )
+                                        snackbar.show(if (side > 0) "已到章末" else "已到章首")
+                                        return@launch
+                                    }
+                                    if (!selection.hasSelection) return@launch
+                                }
+                                wait = SELECTION_AUTO_FLIP_REPEAT_MS
+                            }
+                        }
+                    }
                     if (!barsOwned && !coverVisible && !ctl.isBusy() && !down.isConsumed) {
                         val handle = selectionHandleAt(
                             downX, downY, size.width.toFloat(), size.height.toFloat(),
@@ -1064,11 +1164,19 @@ fun ReaderScreen(
                         // 长按已起手/正在拖手柄：本次手势只服务选区，不翻页、不调亮度。
                         if (selecting) {
                             if (!change.pressed) {
+                                gestureActive = false
+                                autoFlipSide = 0
                                 if (selection.hasSelection) selectionMenuVisible = true
                                 change.consume()
                                 break
                             }
-                            extendSelectionAt(change.position.x, change.position.y)
+                            lastFingerX = change.position.x
+                            lastFingerY = change.position.y
+                            extendSelectionAt(lastFingerX, lastFingerY)
+                            autoFlipSide = selectionAutoFlipDirection(
+                                lastFingerX, size.width.toFloat(), autoFlipEdgePx,
+                            )
+                            scheduleAutoFlip(autoFlipSide)
                             change.consume()
                             continue
                         }
@@ -1166,6 +1274,8 @@ fun ReaderScreen(
                     }
                     } finally {
                         // 手势被取消/组合离场也必须撤掉长按计时，避免手指离开后凭空起选区。
+                        gestureActive = false
+                        autoFlipSide = 0
                         longPressJob?.cancel()
                     }
                 }

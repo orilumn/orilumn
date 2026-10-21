@@ -105,8 +105,12 @@ class SystemFontScannerProbeTest {
             scanner.onFamilyScanned = { _, _ -> callbacks++ }
 
             scanner.detectOnStart()
-            awaitTrue("scan must land both families × 2 styles") { lib.list().size == 4 }
-            assertEquals("stored fingerprint must match current", version to fake.families.joinToString("|").hashCode().toLong(), lib.fontScanState())
+            val expectedFingerprint = version to fake.families.joinToString("|").hashCode().toLong()
+            // 族行先落库、指纹在收尾时写；只等 lib.list() 会与收尾写指纹竞态（曾偶发红）。
+            awaitTrue("scan must land both families × 2 styles and the fingerprint") {
+                lib.list().size == 4 && lib.fontScanState() == expectedFingerprint
+            }
+            assertEquals("stored fingerprint must match current", expectedFingerprint, lib.fontScanState())
             assertEquals("one callback per family", 2, callbacks)
             assertEquals("one facesFor per family", listOf("FamA", "FamB"), fake.facesCalls.toList())
 

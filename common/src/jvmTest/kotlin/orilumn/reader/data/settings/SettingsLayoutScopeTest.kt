@@ -36,6 +36,8 @@ class SettingsLayoutScopeTest {
         "showHiddenFonts",
         // 标注色槽只改像素，不影响分页。
         "highlightColorSlots", "underlineColorSlots", "highlightDefaultSlot", "underlineDefaultSlot",
+        // 浮动菜单记住的上次类别 / 划线线型：纯菜单偏好，不影响版面。
+        "annotationLastKind", "annotationLastLineStyle",
     )
 
     /** 进版式管线（进 [orilumn.reader.engine.text.LayoutParamKey] 或经 profile 影响版面）。 */
@@ -81,6 +83,8 @@ class SettingsLayoutScopeTest {
         "underlineColorSlots" -> s.copy(underlineColorSlots = s.underlineColorSlots + 0x01020304)
         "highlightDefaultSlot" -> s.copy(highlightDefaultSlot = if (s.highlightDefaultSlot == 0) 1 else 0)
         "underlineDefaultSlot" -> s.copy(underlineDefaultSlot = if (s.underlineDefaultSlot == 0) 1 else 0)
+        "annotationLastKind" -> s.copy(annotationLastKind = if (s.annotationLastKind == "underline") "highlight" else "underline")
+        "annotationLastLineStyle" -> s.copy(annotationLastLineStyle = if (s.annotationLastLineStyle == "wavy") "straight" else "wavy")
 
         "lineSpacing" -> s.copy(lineSpacing = s.lineSpacing + 0.13)
         "firstLineIndent" -> s.copy(firstLineIndent = s.firstLineIndent + 0.11)

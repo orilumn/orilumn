@@ -112,6 +112,37 @@ class ReaderSettingsTest {
     }
 
     @Test
+    fun `annotation settings persist global never overlay`() {
+        // 标注色槽 / 默认格 / 上次用的类别：纯全局。persist 必须直写全局，且不进按书 overlay
+        // （进了 overlay 就会被「本书只钉改动字段」的稀疏语义冻住，别的书看不到、全局也丢）。
+        val dir = java.nio.file.Files.createTempDirectory("orilumn-annotation").toFile()
+        try {
+            val persist = PerBookSettings(
+                ReaderSettingsStore(dir.absolutePath),
+                BookSettingsStore(dir.absolutePath),
+            )
+            val next = ReaderSettings.DEFAULT.copy(
+                highlightColorSlots = listOf(0x11223344, 0x22334455, 0x33445566, 0x44556677, 0x55667788),
+                underlineDefaultSlot = 3,
+                annotationLastKind = "underline",
+                annotationLastLineStyle = "wavy",
+            )
+            persist.persist(7L, next)
+            val saved = ReaderSettingsStore(dir.absolutePath).load()
+            assertEquals(next.highlightColorSlots, saved.highlightColorSlots)
+            assertEquals(3, saved.underlineDefaultSlot)
+            assertEquals("underline", saved.annotationLastKind)
+            assertEquals("wavy", saved.annotationLastLineStyle)
+            // 只动标注偏好时 overlay 保持空白。
+            assertEquals(BookSettings.EMPTY, BookSettingsStore(dir.absolutePath).load(7L))
+            // 读回：本书生效值继承全局。
+            assertEquals("underline", persist.effectiveFor(7L).annotationLastKind)
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
     fun `annotation color slots round-trip and fall back safely`() {
         assertEquals(
             ReaderSettings.ANNOTATION_COLOR_SLOT_COUNT,
@@ -179,6 +210,7 @@ class ReaderSettingsTest {
             "useOriginalStyle", "useUserScripts", "pageAnim", "autoContinue", "pageNum", "coverStretch",
             "fontScale", "scheme", "bgOverride", "fgOverride", "layoutTheme",
             "highlightColorSlots", "underlineColorSlots", "highlightDefaultSlot", "underlineDefaultSlot",
+            "annotationLastKind", "annotationLastLineStyle",
         ).forEach { assertTrue("missing key $it", obj.containsKey(it)) }
         assertNotNull(obj.keys)
         assertFalse(ReaderSettings.DEFAULT.useOriginalStyle)

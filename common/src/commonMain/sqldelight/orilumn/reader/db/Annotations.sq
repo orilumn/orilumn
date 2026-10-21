@@ -1,4 +1,4 @@
--- 文本标注（schema v7；迁移见 6.sqm）。
+-- 文本标注（schema v7；迁移见 6.sqm；线型列见 7.sqm）。
 --
 -- 锚点 = 章号 + 章内字符区间 [charStart, charEnd)，与 PageSlice / ReadingLocator 同源：
 -- 所有标注都相对「原书」解算，排版参数（字号/边距/主题/旋转）变化不影响锚点。
@@ -13,6 +13,7 @@ CREATE TABLE annotations(
   charEnd INTEGER NOT NULL,        -- 不含
   kind TEXT NOT NULL,              -- highlight / underline / note（AnnotationKind.wire）
   color INTEGER,                   -- ARGB（含 alpha）
+  lineStyle TEXT,                  -- 划线线型 straight / wavy / dashed / strike（空 = straight）
   note TEXT,                       -- 批注文本（v2）
   createdAt INTEGER NOT NULL,
   updatedAt INTEGER NOT NULL,
@@ -23,8 +24,8 @@ CREATE TABLE annotations(
 CREATE INDEX annotations_by_book_chapter ON annotations(bookId, chapter);
 
 insertAnnotation:
-INSERT INTO annotations(bookId, chapter, charStart, charEnd, kind, color, note, createdAt, updatedAt)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+INSERT INTO annotations(bookId, chapter, charStart, charEnd, kind, color, lineStyle, note, createdAt, updatedAt)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 -- 新增行的 id：与 books.lastInsertId 同因（Jdbc 驱动按语句取连接，last_insert_rowid 不可靠）。
 lastInsertAnnotationId:
@@ -46,10 +47,10 @@ annotationById:
 SELECT * FROM annotations
 WHERE id = ?;
 
--- 锚点（书/章/区间）创建后不变；v1 只改颜色，v2 起补批注文本。
+-- 锚点（书/章/区间）创建后不变；v1 只改颜色/线型，v2 起补批注文本。
 updateAnnotation:
 UPDATE annotations
-SET kind = ?, color = ?, note = ?, updatedAt = ?
+SET kind = ?, color = ?, lineStyle = ?, note = ?, updatedAt = ?
 WHERE id = ?;
 
 deleteAnnotation:

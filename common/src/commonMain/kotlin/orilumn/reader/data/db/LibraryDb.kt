@@ -4,6 +4,7 @@ import app.cash.sqldelight.coroutines.asFlow
 import app.cash.sqldelight.coroutines.mapToList
 import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.data.annotation.AnnotationKind
+import orilumn.reader.data.annotation.AnnotationLineStyle
 import orilumn.reader.data.annotation.AnnotationStore
 import orilumn.reader.data.book.Book
 import orilumn.reader.data.book.BookReadingState
@@ -125,7 +126,7 @@ class LibraryDb(private val db: OrilumnDb) : AnnotationStore {
         progress.clearReadingState(bookId)
     }
 
-    // ---- 文本标注（schema v7；锚点为原书章内字符区间） ----
+    // ---- 文本标注（schema v7 起；v8 加划线线型列。锚点为原书章内字符区间） ----
 
     override suspend fun annotationsForChapter(bookId: Long, chapter: Int): List<Annotation> =
         withContext(Dispatchers.IO) {
@@ -149,6 +150,7 @@ class LibraryDb(private val db: OrilumnDb) : AnnotationStore {
             charEnd = annotation.charEnd.toLong(),
             kind = annotation.kind.wire,
             color = annotation.color?.toLong(),
+            lineStyle = annotation.lineStyle.wire,
             note = annotation.note,
             createdAt = annotation.createdAt,
             updatedAt = annotation.updatedAt,
@@ -162,6 +164,7 @@ class LibraryDb(private val db: OrilumnDb) : AnnotationStore {
         annotations.updateAnnotation(
             kind = annotation.kind.wire,
             color = annotation.color?.toLong(),
+            lineStyle = annotation.lineStyle.wire,
             note = annotation.note,
             updatedAt = annotation.updatedAt,
             id = annotation.id,
@@ -370,6 +373,7 @@ class LibraryDb(private val db: OrilumnDb) : AnnotationStore {
         charEnd = charEnd.toInt(),
         kind = AnnotationKind.fromWire(kind),
         color = color?.toInt(),
+        lineStyle = AnnotationLineStyle.fromWire(lineStyle),
         note = note,
         createdAt = createdAt,
         updatedAt = updatedAt,

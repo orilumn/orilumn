@@ -2,14 +2,13 @@ package orilumn.reader.ui.reader
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.clipRect
-import androidx.compose.ui.unit.dp
 import orilumn.reader.engine.paging.PageSlice
 import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.engine.skia.LineWindowDrawer
@@ -88,78 +87,55 @@ internal fun selectionPageGeometry(
  * 选区覆盖层：拖选/手柄移动时即时画，不参与页栅格。
  *
  * 画在页面画布之上、亮度遮罩之下；翻页动画期间由调用方隐藏，避免盖在滑动中的两页上。
+ * 几何由调用方算好传进来——放大镜里的同一份选区要**共用这份几何**，
+ * 否则「放大的字」与「没放大的选区」会错位。
  */
 @Composable
 internal fun SelectionOverlay(
-    drawer: LineWindowDrawer,
-    lines: List<DrawLine>,
-    chapter: Int,
-    start: Int,
-    endExclusive: Int,
-    pageSlice: PageSlice,
-    frameLead: Int,
-    pageImages: List<PageImage>?,
-    pageBackgrounds: List<PageBackground>?,
+    geometry: SelectionPageGeometry?,
     contentLeft: Float,
     contentTop: Float,
     contentRight: Float,
     contentBottom: Float,
+    handleRadiusPx: Float,
     modifier: Modifier = Modifier,
 ) {
-    val radiusPx = with(androidx.compose.ui.platform.LocalDensity.current) {
-        SELECTION_HANDLE_RADIUS_DP.dp.toPx()
-    }
-    val geometry = remember(
-        drawer,
-        lines,
-        chapter,
-        start,
-        endExclusive,
-        pageSlice,
-        frameLead,
-        pageImages,
-        pageBackgrounds,
-        contentLeft,
-        contentTop,
-        contentRight,
-        contentBottom,
-        radiusPx,
-    ) {
-        selectionPageGeometry(
-            drawer = drawer,
-            lines = lines,
-            chapter = chapter,
-            start = start,
-            endExclusive = endExclusive,
-            pageSlice = pageSlice,
-            frameLead = frameLead,
-            pageImages = pageImages,
-            pageBackgrounds = pageBackgrounds,
-            contentLeft = contentLeft,
-            contentTop = contentTop,
-            contentRight = contentRight,
-            contentBottom = contentBottom,
-            handleRadiusPx = radiusPx,
-        )
-    } ?: return
-
+    if (geometry == null) return
     Canvas(modifier = modifier) {
-        if (geometry.rects.isEmpty()) return@Canvas
-        clipRect(contentLeft, contentTop, contentRight, contentBottom) {
-            val fill = Color(SELECTION_FILL_ARGB)
-            for (r in geometry.rects) {
-                drawRect(
-                    color = fill,
-                    topLeft = Offset(r.left, r.top),
-                    size = Size(r.width, r.height),
-                )
-            }
-            val handle = Color(SELECTION_HANDLE_ARGB)
-            val white = Color.White
-            for (center in listOfNotNull(geometry.startHandle, geometry.endHandle)) {
-                drawCircle(color = white, radius = radiusPx + 2f, center = center)
-                drawCircle(color = handle, radius = radiusPx, center = center)
-            }
+        drawSelectionGeometry(
+            geometry = geometry,
+            handleRadiusPx = handleRadiusPx,
+            clip = Rect(contentLeft, contentTop, contentRight, contentBottom),
+        )
+    }
+}
+
+/**
+ * 选区底色与手柄的落墨（正文覆盖层与放大镜共用同一套画法）。
+ *
+ * 底色是半透明蓝，压不住文字；手柄先白边后实心，和正文里的落墨顺序一致。
+ * 调用方负责把选区几何与文字画在**同一坐标系**里（放大镜就是在同一缩放层里叠画）。
+ */
+internal fun DrawScope.drawSelectionGeometry(
+    geometry: SelectionPageGeometry,
+    handleRadiusPx: Float,
+    clip: Rect,
+) {
+    if (geometry.rects.isEmpty()) return
+    clipRect(clip.left, clip.top, clip.right, clip.bottom) {
+        val fill = Color(SELECTION_FILL_ARGB)
+        for (r in geometry.rects) {
+            drawRect(
+                color = fill,
+                topLeft = Offset(r.left, r.top),
+                size = Size(r.width, r.height),
+            )
+        }
+        val handle = Color(SELECTION_HANDLE_ARGB)
+        val white = Color.White
+        for (center in listOfNotNull(geometry.startHandle, geometry.endHandle)) {
+            drawCircle(color = white, radius = handleRadiusPx + 2f, center = center)
+            drawCircle(color = handle, radius = handleRadiusPx, center = center)
         }
     }
 }

@@ -4,14 +4,24 @@ package orilumn.reader.engine.skia
  * 标注装饰类型（渲染层）。
  *
  * 只描述「怎么落墨」，不关心它来自高亮还是划线；颜色 / 粗细由 [DecorRange] 携带。
- * 将来若加删除线 / 上划线，在这里追加，绘制侧按同一套区间几何处理。
+ * 线型（实线 / 虚线 / 波浪）见 [DecorStroke]。
  */
 enum class DecorKind {
     /** 在文字下方铺一块半透明底色（荧光笔）。 */
     BACKGROUND,
 
-    /** 在基线下方画一条实线（比书内下划线更粗、更靠下）。 */
+    /** 在基线下方画一条线（比书内下划线更粗、更靠下）。线型见 [DecorRange.stroke]。 */
     UNDERLINE,
+
+    /** 穿过字身的删除线（位置比下划线高，几何同下划线）。 */
+    STRIKETHROUGH,
+}
+
+/** 划线线型（渲染层）：实线 / 虚线 / 波浪线。删除线也走同一套，默认实线。 */
+enum class DecorStroke {
+    Solid,
+    Dashed,
+    Wavy,
 }
 
 /**
@@ -28,6 +38,7 @@ data class DecorRange(
     val endExclusive: Int,
     val kind: DecorKind,
     val argb: Int,
+    val stroke: DecorStroke = DecorStroke.Solid,
     val thicknessPx: Float? = null,
     val offsetPx: Float? = null,
     val priority: Int = 0,

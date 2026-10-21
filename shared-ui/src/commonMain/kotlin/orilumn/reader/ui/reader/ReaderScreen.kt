@@ -47,6 +47,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.data.annotation.AnnotationKind
+import orilumn.reader.data.annotation.AnnotationLineStyle
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.engine.skia.LineWindowDrawer
 import orilumn.reader.engine.text.TypographicProfile
@@ -1048,26 +1049,32 @@ fun ReaderScreen(
     // S29：Toast → CMP Snackbar；书签/笔记占位动作未接线（null）时给出提示。
     val snackbar = rememberReaderSnackbar()
 
-    /** 改已有标注的颜色：先改内存（立即出图），再异步落库；失败由状态层回滚并提示。 */
-    fun updateAnnotationColor(annotation: Annotation, color: Int) {
+    /**
+     * 改已有标注的颜色（顺带可换类别，D-14 合并菜单后同一格色槽既改色也定型）：
+     * 先改内存（立即出图），再异步落库；成功不弹提示（画面本身就是反馈），失败回滚并提示。
+     */
+    fun recolorAnnotation(annotation: Annotation, kind: AnnotationKind, color: Int, lineStyle: AnnotationLineStyle) {
         closeAnnotationEdit()
         scope.launch {
-            val ok = annotationState.update(annotation.copy(color = color))
-            snackbar.show(if (ok) "已改色" else "改色失败")
+            val ok = annotationState.update(
+                annotation.copy(kind = kind, color = color, lineStyle = annotationLineStyleFor(kind, lineStyle)),
+            )
+            if (!ok) snackbar.show("改色失败")
         }
     }
 
-    /** 删除已有标注：先移出内存（立即消失），再异步落库；失败由状态层回滚并提示。 */
+    /** 删除已有标注：先移出内存（立即消失），再异步落库；成功不弹提示，失败回滚并提示。 */
     fun deleteAnnotation(annotation: Annotation) {
         closeAnnotationEdit()
+        selectionMenuVisible = false
         scope.launch {
             val ok = annotationState.delete(annotation.id)
-            snackbar.show(if (ok) "已删除" else "删除失败")
+            if (!ok) snackbar.show("删除失败")
         }
     }
 
-    /** 把当前选区落成一条高亮/划线：先内存出图，再异步存库；失败回滚并提示。 */
-    fun createSelectionAnnotation(kind: AnnotationKind, color: Int) {
+    /** 把当前选区落成一条高亮/划线：先内存出图，再异步存库；成功不弹提示，失败回滚并提示。 */
+    fun createSelectionAnnotation(kind: AnnotationKind, color: Int, lineStyle: AnnotationLineStyle) {
         val ch = selection.chapter
         val s = selection.start
         val e = selection.endExclusive
@@ -1082,6 +1089,8 @@ fun ReaderScreen(
                     charEnd = e,
                     kind = kind,
                     color = color,
+                    // 线型只属于划线：高亮记录不存线型，免得与划线菜单的偏好串味。
+                    lineStyle = annotationLineStyleFor(kind, lineStyle),
                 ),
             )
             if (saved == null) {
@@ -1092,33 +1101,102 @@ fun ReaderScreen(
                 if (selection.chapter == ch && selection.start == s && selection.endExclusive == e) {
                     selection.clear()
                 }
-                snackbar.show(if (kind == AnnotationKind.Highlight) "已高亮" else "已划线")
             }
         }
     }
 
-    /** 复制选区原文：块间补换行，换行只进剪贴板、不参与标注偏移（D-18）。 */
-    fun copySelection() {
-        val ch = selection.chapter
-        val s = selection.start
-        val e = selection.endExclusive
+    /**
+     * 同一格色槽：编辑中（长按已有标注）就改它，否则用当前选区新建一条。
+     *
+     * 顺手把「这次用的类别 + 色槽」记住（写盘，无重排提交）：下次打开菜单直接停在这一类、
+     * 这一格上——色槽同时成为该类的新建默认格，故菜单里金边所指即是下次落笔的颜色。
+     */
+    fun applyAnnotationColor(kind: AnnotationKind, slot: Int, lineStyle: AnnotationLineStyle) {
+        val color = annotationSlotColor(light, kind, slot)
+        // 落盘一律小写（`highlight` / `underline`，见 ReaderSettings 的约定），
+        // 解析侧 annotationLastKindOf 再另行 lowercase，双向容错。
+        var next = withAnnotationDefaultSlot(light, kind, slot)
+            .copy(annotationLastKind = kind.name.lowercase())
+        // 线型只属于划线：在高亮那一行点色，不能顺手改掉划线菜单记住的线型（两套偏好各自独立）。
+        if (kind == AnnotationKind.Underline) {
+            next = next.copy(annotationLastLineStyle = lineStyle.wire)
+        }
+        if (next != light) {
+            light = next
+            currentOnLightCommit(next)
+        }
+        val editing = editingAnnotation
+        if (editing != null) {
+            recolorAnnotation(editing, kind, color, lineStyle)
+        } else {
+            createSelectionAnnotation(kind, color, lineStyle)
+        }
+    }
+
+    /**
+     * 线型行：记住它，下次新建直接用；并且**一次点按即落笔**——
+     * 选区场景下直接用当前划线色按这个线型画上去（不必再点一次颜色），
+     * 编辑已有标注时把它改成这个线型（高亮没有线型，顺手换成划线）。
+     */
+    fun applyAnnotationLineStyle(style: AnnotationLineStyle) {
+        val next = withAnnotationLastLineStyle(light, style)
+        if (next != light) {
+            light = next
+            currentOnLightCommit(next)
+        }
+        val editing = editingAnnotation
+        if (editing != null) {
+            if (editing.kind == AnnotationKind.Underline && editing.lineStyle == style) return
+            // 颜色跟着**线型所属的类别**走：本来就是划线时保留它自己的墨色；
+            // 从高亮转过来时不能把高亮那半透明的底色带进墨线（两个色槽体系是完全独立的）。
+            val color = annotationUnderlineInkColor(editing, light)
+            closeAnnotationEdit()
+            scope.launch {
+                val ok = annotationState.update(
+                    editing.copy(kind = AnnotationKind.Underline, lineStyle = style, color = color),
+                )
+                if (!ok) snackbar.show("改线型失败")
+            }
+        } else if (selection.hasSelection) {
+            createSelectionAnnotation(
+                kind = AnnotationKind.Underline,
+                color = annotationDefaultColor(light, AnnotationKind.Underline),
+                lineStyle = style,
+            )
+        }
+    }
+
+    /** 复制本章一段原文：块间补换行，换行只进剪贴板、不参与标注偏移（D-18）。 */
+    fun copyRange(ch: Int, s: Int, e: Int): Boolean {
         val text = currentHost.textOf(ch, 0, Int.MAX_VALUE)
         if (text == null) {
             snackbar.show("复制失败：本章内容尚未就绪")
-            return
+            return false
         }
         val copied = copyTextOf(text, s, e, currentHost.textBlockEndsOf(ch))
         if (copied.isEmpty()) {
             snackbar.show("复制失败：选区为空")
-            return
+            return false
         }
         val ok = runCatching { clipboard.setText(AnnotatedString(copied)) }.isSuccess
         if (!ok) {
             snackbar.show("复制失败")
-            return
+            return false
         }
-        selectionMenuVisible = false
         snackbar.show("已复制")
+        return true
+    }
+
+    /** 复制选区原文（复制后保留选区）。 */
+    fun copySelection() {
+        if (copyRange(selection.chapter, selection.start, selection.endExclusive)) {
+            selectionMenuVisible = false
+        }
+    }
+
+    /** 复制一条已有标注覆盖的原文：长按命中后没有选区，复制对象就是这条记录。 */
+    fun copyAnnotation(annotation: Annotation) {
+        if (copyRange(annotation.chapter, annotation.charStart, annotation.charEnd)) closeAnnotationEdit()
     }
 
     BoxWithConstraints(
@@ -1575,11 +1653,11 @@ fun ReaderScreen(
                 }
             } else null
 
-            // 选区菜单锚点：与覆盖层同一份逐字几何；跨页时只取本页交集。
-            val selectionGeometry = remember(
+            // 选区几何：覆盖层、放大镜和菜单锚点共用同一份逐字几何（拖手柄时每帧只算一次）。
+            // 跨页时只取本页交集；端点不在本页时对应手柄为空（D-8：不画假手柄）。
+            val selectionGeo = remember(
                 pageContent,
                 fromPos.slice,
-                selectionMenuVisible,
                 selection.hasSelection,
                 selection.chapter,
                 selection.start,
@@ -1590,7 +1668,6 @@ fun ReaderScreen(
                 contentBottom,
                 selectionHandleRadiusPx,
             ) {
-                if (!selectionMenuVisible) return@remember null
                 val content = pageContent ?: return@remember null
                 if (!selection.hasSelection || selection.chapter != fromPos.chapter) {
                     return@remember null
@@ -1612,6 +1689,8 @@ fun ReaderScreen(
                     handleRadiusPx = selectionHandleRadiusPx,
                 )
             }
+            // 菜单锚点只在选区抬手后需要；几何本身覆盖层与放大镜一直在用。
+            val selectionGeometry = selectionGeo.takeIf { selectionMenuVisible }
             val selectionMenuAnchor = selectionGeometry?.rects?.takeIf { it.isNotEmpty() }?.let { rects ->
                 Rect(
                     left = rects.minOf { it.left },
@@ -1731,19 +1810,12 @@ fun ReaderScreen(
                 !ctl.isBusy() && selection.chapter == fromPos.chapter
             ) {
                 SelectionOverlay(
-                    drawer = selectionDrawer,
-                    lines = pageContent.lines.orEmpty(),
-                    chapter = selection.chapter,
-                    start = selection.start,
-                    endExclusive = selection.endExclusive,
-                    pageSlice = fromPos.slice,
-                    frameLead = pageContent.pageFrameLead,
-                    pageImages = pageContent.pageImages,
-                    pageBackgrounds = pageContent.pageBackgrounds,
+                    geometry = selectionGeo,
                     contentLeft = contentLeft,
                     contentTop = contentTop,
                     contentRight = contentRight,
                     contentBottom = contentBottom,
+                    handleRadiusPx = selectionHandleRadiusPx,
                     modifier = Modifier.fillMaxSize(),
                 )
             }
@@ -1766,52 +1838,55 @@ fun ReaderScreen(
                     contentRevision = displayRevision,
                     renderer = pageRenderer,
                     onMiss = onRasterMiss,
+                    // 放大镜里的选区与正文覆盖层共用同一份几何：放大后仍能看见选到哪儿、手柄在哪儿。
+                    selection = selectionGeo,
+                    selectionHandleRadiusPx = selectionHandleRadiusPx,
                     modifier = Modifier.fillMaxSize(),
                 )
             }
-            // 浮动菜单：抬手后出现，位置跟着选区矩形；贴顶翻到下方、贴边内收。
-            if (selectionMenuVisible && selection.hasSelection && selectionMenuAnchor != null &&
-                !coverVisible && !ctl.isBusy() && selection.chapter == fromPos.chapter
-            ) {
+            // 标注浮动菜单（D-13 / D-14）：**一个弹窗服务两种入口**——选区抬手是新建，
+            // 长按已有标注是编辑（色槽预展开、删除可用）。没有「取消」项：点菜单外面即关。
+            val editing = editingAnnotation
+            val editingAt = editingAnchor
+            val selectionMenuOn = editing == null && selectionMenuVisible && selection.hasSelection &&
+                selectionMenuAnchor != null && selection.chapter == fromPos.chapter
+            val menuAnchor = if (editing != null) editingAt else if (selectionMenuOn) selectionMenuAnchor else null
+            if (menuAnchor != null && !coverVisible && !ctl.isBusy()) {
+                // 长按场景没有选区可清：透明遮罩接住菜单外的点按，只关菜单，不翻页/不改选区。
+                if (editing != null) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clickable(
+                                interactionSource = editScrimInteraction,
+                                indication = null,
+                            ) { closeAnnotationEdit() },
+                    )
+                }
+                // 选区场景：选中的字里已有高亮/划线时，删除作用于**相交的第一条**（列表按起点排序）。
+                val overlapping = if (editing == null) {
+                    annotationState.annotations.firstOrNull {
+                        it.isDrawable() && it.charStart < selection.endExclusive && selection.start < it.charEnd
+                    }
+                } else {
+                    null
+                }
                 AnnotationMenu(
-                    anchor = selectionMenuAnchor,
+                    anchor = menuAnchor,
                     bounds = Rect(contentLeft, contentTop, contentRight, contentBottom),
                     palette = paletteFor(light.scheme),
                     highlightColors = annotationColorSlots(light, AnnotationKind.Highlight),
                     highlightDefaultSlot = annotationDefaultSlot(light, AnnotationKind.Highlight),
                     underlineColors = annotationColorSlots(light, AnnotationKind.Underline),
                     underlineDefaultSlot = annotationDefaultSlot(light, AnnotationKind.Underline),
-                    onHighlight = { color -> createSelectionAnnotation(AnnotationKind.Highlight, color) },
-                    onUnderline = { color -> createSelectionAnnotation(AnnotationKind.Underline, color) },
-                    onCopy = ::copySelection,
-                    onCancel = {
-                        selection.clear()
-                        selectionMenuVisible = false
-                        magnifierFinger = null
-                    },
-                )
-            }
-            // 已有标注编辑菜单（D-14）：长按命中后出现；透明遮罩接住菜单外的点按。
-            val editing = editingAnnotation
-            val editingAt = editingAnchor
-            if (editing != null && editingAt != null && !coverVisible && !ctl.isBusy()) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .clickable(
-                            interactionSource = editScrimInteraction,
-                            indication = null,
-                        ) { closeAnnotationEdit() },
-                )
-                AnnotationEditMenu(
-                    annotation = editing,
-                    anchor = editingAt,
-                    bounds = Rect(contentLeft, contentTop, contentRight, contentBottom),
-                    palette = paletteFor(light.scheme),
-                    colors = annotationColorSlots(light, editing.kind),
-                    onPickColor = { color -> updateAnnotationColor(editing, color) },
-                    onDelete = { deleteAnnotation(editing) },
-                    onCancel = ::closeAnnotationEdit,
+                    initialKind = annotationLastKindOf(light),
+                    initialLineStyle = annotationLastLineStyleOf(light),
+                    editing = editing,
+                    deleteTarget = editing ?: overlapping,
+                    onPickColor = { kind, slot, style -> applyAnnotationColor(kind, slot, style) },
+                    onPickLineStyle = { style -> applyAnnotationLineStyle(style) },
+                    onCopy = { if (editing != null) copyAnnotation(editing) else copySelection() },
+                    onDelete = { annotation -> deleteAnnotation(annotation) },
                 )
             }
             // 亮度/护眼遮罩：纯绘制于画布之上、栏之下。

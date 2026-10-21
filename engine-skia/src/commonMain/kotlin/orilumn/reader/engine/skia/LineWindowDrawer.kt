@@ -619,7 +619,7 @@ class LineWindowDrawer(
             }
         }
         // 标注划线压在文字与书内装饰之上：读者线更粗、更靠下，不能被书的下划线糊住。
-        paintDecorUnderlines(canvas, line, placement, paintX, baseY, start, endExcl, decorRuns)
+        paintDecorLines(canvas, line, placement, paintX, baseY, start, endExcl, decorRuns)
 
         // 注音/着重号与文字同盒，随 half-leading 一并下移，保持与基字的相对位置。
         // E10：基字被隐藏的注音整条不画（rt 源文与基字同属被隐藏子树）；行高增量照旧计入基线。
@@ -750,12 +750,14 @@ class LineWindowDrawer(
     }
 
     /**
-     * 标注划线：画在文字与书内装饰之后，默认比书内下划线更粗、更靠下，避免两线糊在一起。
+     * 标注划线 / 删除线：画在文字与书内装饰之后，默认比书内下划线更粗、更靠下，避免两线糊在一起。
      *
-     * 默认粗细 = `0.08em`、中心 = 基线下 `0.20em`；[DecorRange.thicknessPx] /
-     * [DecorRange.offsetPx] 可覆盖（offset 是中心相对基线的距离，向下为正）。
+     * - 下划线中心 = 基线下 `0.20em`；删除线中心 = 基线上方 `0.28em`（穿字身）；
+     * - 线型：实线填矩形，虚线走 dash 描边，波浪线走正弦路径描边；
+     * - 默认粗细 = `0.08em`；[DecorRange.thicknessPx] / [DecorRange.offsetPx] 可覆盖
+     *   （offset 是中心相对基线的距离，向下为正）。
      */
-    private fun paintDecorUnderlines(
+    private fun paintDecorLines(
         canvas: Canvas,
         line: DrawLine,
         placement: LineAligner.Placement,
@@ -768,27 +770,51 @@ class LineWindowDrawer(
         if (decorRuns.isEmpty() || endExcl <= start) return
         val n = endExcl - start
         for (r in decorRuns) {
-            if (r.kind != DecorKind.UNDERLINE) continue
+            val defaultOffsetEm = when (r.kind) {
+                DecorKind.UNDERLINE -> ANNOTATION_UNDERLINE_OFFSET_EM
+                DecorKind.STRIKETHROUGH -> -ANNOTATION_STRIKE_OFFSET_EM
+                else -> continue
+            }
             val lo = (r.start - start).coerceIn(0, n)
             val hi = (r.endExclusive - start).coerceIn(lo, n)
             if (hi <= lo) continue
             val (left, right) = aligner.visibleSpan(placement, n, lo, hi) ?: continue
             if (right <= left) continue
             val thickness = (r.thicknessPx ?: (line.fontSizePx * ANNOTATION_UNDERLINE_THICKNESS_EM)).coerceAtLeast(1f)
-            val centerY = baseY + (r.offsetPx ?: (line.fontSizePx * ANNOTATION_UNDERLINE_OFFSET_EM))
-            val paint = Paint().apply { color = withAlpha(r.argb, line.alpha) }
-            canvas.drawRect(
-                Rect.makeLTRB(
-                    paintX + left,
-                    centerY - thickness / 2f,
-                    paintX + right,
-                    centerY + thickness / 2f,
-                ),
-                paint,
-            )
+            val centerY = baseY + (r.offsetPx ?: (line.fontSizePx * defaultOffsetEm))
+            val x0 = paintX + left
+            val x1 = paintX + right
+            when (r.stroke) {
+                DecorStroke.Solid -> {
+                    val paint = Paint().apply { color = withAlpha(r.argb, line.alpha) }
+                    canvas.drawRect(
+                        Rect.makeLTRB(x0, centerY - thickness / 2f, x1, centerY + thickness / 2f),
+                        paint,
+                    )
+                }
+                DecorStroke.Dashed -> {
+                    val paint = Paint().apply {
+                        color = withAlpha(r.argb, line.alpha)
+                        mode = PaintMode.STROKE
+                        strokeWidth = thickness
+                        strokeCap = PaintStrokeCap.ROUND
+                        pathEffect = PathEffect.makeDash(
+                            floatArrayOf(
+                                thickness * ANNOTATION_DASH_ON_RATIO,
+                                thickness * ANNOTATION_DASH_OFF_RATIO,
+                            ),
+                            0f,
+                        )
+                    }
+                    canvas.drawLine(x0, centerY, x1, centerY, paint)
+                }
+                DecorStroke.Wavy -> {
+                    // 与书内波浪装饰同一套波形几何（Chromium 口径），换成本标注的颜色与粗细。
+                    drawDecorationWave(canvas, x0, x1, centerY, thickness, withAlpha(r.argb, line.alpha))
+                }
+            }
         }
     }
-
 
     /**
      * 本行基线 y（绝对坐标）。
@@ -2007,6 +2033,13 @@ private const val ANNOTATION_UNDERLINE_THICKNESS_EM = 0.08f
 
 /** 读者标注划线的默认中心位置（em，基线向下）：比书内下划线更靠下。 */
 private const val ANNOTATION_UNDERLINE_OFFSET_EM = 0.20f
+
+/** 删除线中心相对基线的距离（em，向上）：穿字身中部（CJK 方块字居中略偏上）。 */
+private const val ANNOTATION_STRIKE_OFFSET_EM = 0.28f
+
+/** 虚线：实线段 / 空档 长度相对线粗的倍数。 */
+private const val ANNOTATION_DASH_ON_RATIO = 3f
+private const val ANNOTATION_DASH_OFF_RATIO = 2f
 
 /** skip-ink 横带的纵向内缩（px）：Chromium `decoration_bounds.Inset(InsetsF::VH(0.5, 0))`。 */
 private const val DECORATION_INK_BAND_INSET_PX = 0.5f

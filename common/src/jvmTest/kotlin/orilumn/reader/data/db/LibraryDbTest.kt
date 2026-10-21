@@ -6,6 +6,7 @@ import app.cash.sqldelight.coroutines.mapToList
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.data.annotation.AnnotationKind
+import orilumn.reader.data.annotation.AnnotationLineStyle
 import orilumn.reader.db.OrilumnDb
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -228,12 +229,16 @@ class LibraryDbTest {
                 charEnd = 8,
                 kind = AnnotationKind.Underline,
                 color = 0xFF3366CC.toInt(),
+                lineStyle = AnnotationLineStyle.Wavy,
                 createdAt = 11L,
                 updatedAt = 11L,
             ),
         )
         assertTrue(first.id > 0)
         assertTrue(second.id > first.id)
+        // 线型随记录落库（老数据缺列 = 实线，见 migration 7→8）。
+        assertEquals(AnnotationLineStyle.Wavy, db.annotationAt(book, 2, 7)?.lineStyle)
+        assertEquals(AnnotationLineStyle.Straight, db.annotationAt(book, 2, 8)?.lineStyle)
         assertEquals(listOf(first.id, second.id), db.annotationsForChapter(book, 2).map { it.id })
 
         // 命中包含该偏移的最后一条；charEnd 不含。
@@ -244,15 +249,17 @@ class LibraryDbTest {
         // v1 只改颜色；批注文本先按可写验证，v2 界面再接。
         db.updateAnnotation(
             first.copy(
-                kind = AnnotationKind.Note,
+                kind = AnnotationKind.Underline,
                 color = 0xFF112233.toInt(),
+                lineStyle = AnnotationLineStyle.Strike,
                 note = "批注",
                 updatedAt = 20L,
             ),
         )
         val updated = db.annotationsForChapter(book, 2).single { it.id == first.id }
-        assertEquals(AnnotationKind.Note, updated.kind)
+        assertEquals(AnnotationKind.Underline, updated.kind)
         assertEquals(0xFF112233.toInt(), updated.color)
+        assertEquals(AnnotationLineStyle.Strike, updated.lineStyle)
         assertEquals("批注", updated.note)
         assertEquals(20L, updated.updatedAt)
 
@@ -306,13 +313,14 @@ class LibraryDbTest {
 
     @Test
     fun migrate6to7AddsAnnotationTable() {
-        // 用最新 schema 建库后删掉标注表、把版本退回 6，模拟真实的 6→7 升级。
+        // 用最新 schema 建库后删掉标注表、把版本退回 6，模拟真实的 6→7 升级
+        // （一路迁到最新版本，顺带覆盖 7→8 的线型列）。
         val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
         OrilumnDb.Schema.create(driver)
         driver.execute(null, "DROP TABLE annotations;", 0)
         driver.execute(null, "PRAGMA user_version = 6;", 0)
 
-        OrilumnDb.Schema.migrate(driver, 6, 7)
+        OrilumnDb.Schema.migrate(driver, 6, OrilumnDb.Schema.version)
 
         val db = LibraryDb(OrilumnDb(driver))
         runBlocking {
@@ -325,11 +333,54 @@ class LibraryDbTest {
                     charEnd = 6,
                     kind = AnnotationKind.Underline,
                     color = 0xFF000000.toInt(),
+                    lineStyle = AnnotationLineStyle.Wavy,
                     createdAt = 1L,
                     updatedAt = 1L,
                 ),
             )
             assertEquals(listOf(row), db.annotationsForChapter(book, 1))
+        }
+    }
+
+    @Test
+    fun migrate7to8AddsLineStyleColumn() {
+        // 用最新 schema 建库后把线型列删掉、版本退回 7，模拟真实的 7→8 升级。
+        val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        OrilumnDb.Schema.create(driver)
+        driver.execute(null, "ALTER TABLE annotations DROP COLUMN lineStyle;", 0)
+        driver.execute(null, "PRAGMA user_version = 7;", 0)
+
+        OrilumnDb.Schema.migrate(driver, 7, OrilumnDb.Schema.version)
+
+        val db = LibraryDb(OrilumnDb(driver))
+        runBlocking {
+            val book = db.addBook("T", null, "/b.epub", addedAt = 1L)
+            // 老记录没有线型列：插一条不带线型的，读回必须是实线。
+            driver.execute(
+                null,
+                "INSERT INTO annotations(bookId, chapter, charStart, charEnd, kind, color, note, createdAt, updatedAt) " +
+                    "VALUES ($book, 1, 0, 3, 'underline', NULL, NULL, 1, 1);",
+                0,
+            )
+            assertEquals(AnnotationLineStyle.Straight, db.annotationsForChapter(book, 1).single().lineStyle)
+            // 新记录能写线型。
+            db.addAnnotation(
+                Annotation(
+                    bookId = book,
+                    chapter = 1,
+                    charStart = 5,
+                    charEnd = 9,
+                    kind = AnnotationKind.Underline,
+                    color = 0xFF000000.toInt(),
+                    lineStyle = AnnotationLineStyle.Dashed,
+                    createdAt = 2L,
+                    updatedAt = 2L,
+                ),
+            )
+            assertEquals(
+                AnnotationLineStyle.Dashed,
+                db.annotationsForChapter(book, 1).first { it.charStart == 5 }.lineStyle,
+            )
         }
     }
 

@@ -1,6 +1,8 @@
 package orilumn.reader.ui.reader
 
+import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.data.annotation.AnnotationKind
+import orilumn.reader.data.annotation.AnnotationLineStyle
 import orilumn.reader.data.settings.ReaderSettings
 import kotlin.math.roundToInt
 
@@ -82,6 +84,86 @@ internal fun annotationFallbackColor(kind: AnnotationKind): Int = when (kind) {
     AnnotationKind.Underline -> DEFAULT_UNDERLINE_ARGB
     AnnotationKind.Note -> 0
 }
+
+/**
+ * 上次新建 / 改色用的类别（`ReaderSettings.annotationLastKind` 的解析）。
+ *
+ * 浮动菜单据此**一步到位**停在该类别的色槽行上；未知值（老存档缺键、手改配置）按高亮处理，
+ * 批注类不是色槽类别，不会被选出来。
+ */
+internal fun annotationLastKindOf(settings: ReaderSettings): AnnotationKind =
+    when (settings.annotationLastKind.trim().lowercase()) {
+        AnnotationKind.Underline.name.lowercase() -> AnnotationKind.Underline
+        else -> AnnotationKind.Highlight
+    }
+
+/**
+ * 上次新建 / 改线型用的划线线型（`ReaderSettings.annotationLastLineStyle` 的解析）。
+ *
+ * 未知值（老存档缺键、手改配置）按实线处理；高亮不读这个值。
+ */
+internal fun annotationLastLineStyleOf(settings: ReaderSettings): AnnotationLineStyle =
+    AnnotationLineStyle.entries.firstOrNull {
+        it.wire == settings.annotationLastLineStyle.trim().lowercase()
+    } ?: AnnotationLineStyle.Straight
+
+/**
+ * 菜单里「高亮 / 划线」两个类别名各自的样张颜色（纯函数，便于单测）。
+ *
+ * **两个类别完全独立**：样张只取本类别的默认色槽；正在编辑的记录属于本类别时，
+ * 跟着记录自己的颜色走。编辑另一类记录不影响本类的样张（否则切换类别看一眼就串色）。
+ */
+internal fun annotationSwatchColor(
+    highlightColors: List<Int>,
+    highlightDefaultSlot: Int,
+    underlineColors: List<Int>,
+    underlineDefaultSlot: Int,
+    kind: AnnotationKind,
+    editing: Annotation?,
+): Int {
+    if (editing != null && editing.kind == kind) {
+        return editing.color ?: annotationFallbackColor(kind)
+    }
+    val colors = if (kind == AnnotationKind.Underline) underlineColors else highlightColors
+    if (colors.isEmpty()) return annotationFallbackColor(kind)
+    val slot = if (kind == AnnotationKind.Underline) underlineDefaultSlot else highlightDefaultSlot
+    return colors[slot.coerceIn(0, colors.lastIndex)]
+}
+
+/**
+ * 由某条记录改型成划线时用的**墨色**（纯函数，便于单测）。
+ *
+ * 高亮与划线是两套完全独立的色槽：高亮那半透明的底色绝不能当作墨线颜色带过去。
+ * 所以只有本来就是划线的记录才保留自己原来的颜色，其余一律取划线类别的默认色。
+ */
+internal fun annotationUnderlineInkColor(editing: Annotation?, settings: ReaderSettings): Int =
+    editing?.color?.takeIf { editing.kind == AnnotationKind.Underline }
+        ?: annotationDefaultColor(settings, AnnotationKind.Underline)
+
+/**
+ * 记录上该存哪种线型：**线型只属于划线**。
+ *
+ * 高亮侧一律存实线（不画线，仅作占位），免得高亮那行的点按把划线菜单记住的线型带歪，
+ * 也免得旧记录上无意义的线型被当成划线的初始值。
+ */
+internal fun annotationLineStyleFor(
+    kind: AnnotationKind,
+    style: AnnotationLineStyle,
+): AnnotationLineStyle = if (kind == AnnotationKind.Underline) style else AnnotationLineStyle.Straight
+
+/**
+ * 记住「上次用的线型」，同时把**上次用的类别**定为划线。
+ *
+ * 线型只属于划线：读者点线型就是一次划线动作，所以下次打开菜单要停回划线，
+ * 而不是停在早先用过的高亮上（否则「点线型直接落笔」这条最常用路径永远记不住类别）。
+ */
+internal fun withAnnotationLastLineStyle(
+    settings: ReaderSettings,
+    style: AnnotationLineStyle,
+): ReaderSettings = settings.copy(
+    annotationLastKind = AnnotationKind.Underline.name.lowercase(),
+    annotationLastLineStyle = style.wire,
+)
 
 /** 改某一格颜色（保留其它槽与默认槽）。 */
 internal fun withAnnotationColorSlot(

@@ -72,6 +72,9 @@ internal fun magnifierTranslation(center: Offset, finger: Offset, zoom: Float): 
  * 内容**复用同一页栅格**：把同一个 [PageContent] / [ReaderPageRenderer] 再画一遍，
  * 由渲染器的多页位图缓存直接命中，不另开位图、不重排版；外层只做圆形裁剪与 1.5 倍缩放。
  * 因此静止页与放大镜里的像素同源，标注/高亮也一起被放大。
+ *
+ * 选区底色与手柄**和正文叠在同一个缩放层里**（同一份 [selection] 几何）：放大镜里看得见
+ * 选到哪儿、手柄被拉到哪儿——只放大素字而看不到选区，等于没放大。
  */
 @Composable
 internal fun SelectionMagnifier(
@@ -87,6 +90,9 @@ internal fun SelectionMagnifier(
     contentRevision: Int,
     renderer: ReaderPageRenderer,
     onMiss: (() -> Unit)?,
+    /** 当前页的选区几何（与正文覆盖层共用一份）；为空时只放大正文。 */
+    selection: SelectionPageGeometry?,
+    selectionHandleRadiusPx: Float,
     modifier: Modifier = Modifier,
 ) {
     val density = LocalDensity.current
@@ -144,6 +150,16 @@ internal fun SelectionMagnifier(
                     onMiss = onMiss,
                     renderer = renderer,
                 )
+                // 选区跟着一起放大：只放大素字、看不见选到哪儿，放大镜就失去意义。
+                if (selection != null) {
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        drawSelectionGeometry(
+                            geometry = selection,
+                            handleRadiusPx = selectionHandleRadiusPx,
+                            clip = Rect(contentLeft, contentTop, contentRight, contentBottom),
+                        )
+                    }
+                }
             }
         }
         Canvas(modifier = Modifier.fillMaxSize()) {

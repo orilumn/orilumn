@@ -131,6 +131,18 @@ data class ReaderSettings(
     /** 新建高亮 / 划线默认使用的色槽下标（0 起，越界读取时钳到有效范围）。 */
     val highlightDefaultSlot: Int = 0,
     val underlineDefaultSlot: Int = 0,
+    /**
+     * 上次用于新建 / 改色标注的类别（`highlight` / `underline`，见 `annotationLastKind()`）。
+     *
+     * 浮动菜单因此**一步到位**：打开就停在这个类别的色槽行上，不必先点一次「高亮 / 划线」。
+     * 纯读者偏好（纯 UI，不进版式比较、不影响分页）；未知值按高亮处理。
+     */
+    val annotationLastKind: String = "highlight",
+    /**
+     * 上次用于新建 / 改线型的划线线型（`straight` / `wavy` / `dashed` / `strike`，
+     * 见 `annotationLastLineStyle()`）。纯读者偏好（不影响分页）；未知值按实线处理。
+     */
+    val annotationLastLineStyle: String = "straight",
 
     /**
      * 持久化结构版本（**只增不改**）：`[fromJson]` 用它识别「这份存档是哪个版本写的」，
@@ -283,6 +295,8 @@ data class ReaderSettings(
         underlineColorSlots = emptyList(),
         highlightDefaultSlot = 0,
         underlineDefaultSlot = 0,
+        annotationLastKind = "",
+        annotationLastLineStyle = "",
     )
 
     companion object {
@@ -463,6 +477,8 @@ data class ReaderSettings(
                         .coerceIn(0, d.highlightColorSlots.lastIndex),
                     underlineDefaultSlot = SettingsJson.optInt(o, "underlineDefaultSlot", d.underlineDefaultSlot)
                         .coerceIn(0, d.underlineColorSlots.lastIndex),
+                    annotationLastKind = SettingsJson.optString(o, "annotationLastKind", d.annotationLastKind),
+                    annotationLastLineStyle = SettingsJson.optString(o, "annotationLastLineStyle", d.annotationLastLineStyle),
                     cjkLatinSpacing = migrateCjkLatinSpacing(
                         SettingsJson.optDouble(o, "cjkLatinSpacing", d.cjkLatinSpacing),
                         SettingsJson.optInt(o, "schemaVersion", 0),

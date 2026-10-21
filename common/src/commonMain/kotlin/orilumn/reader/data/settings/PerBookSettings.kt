@@ -9,7 +9,9 @@ import kotlinx.serialization.json.JsonObject
  * - 纯全局：亮度族（brightness/brightnessFollowSystem/brightnessOffset/eyeProtectionLevel/
  *   brightnessGestureLeft/Right/Two）、夜间 `scheme`、打开书自动阅读 `autoContinue`、
  *   字体管理隐藏字体开关 `showHiddenFonts`、用户按槽位选的字重
- *   `fontWeightAnchorsBySlot`/`fontWeightAnchors`——不出 overlay，直写全局；
+ *   `fontWeightAnchorsBySlot`/`fontWeightAnchors`、标注家族
+ *   （`highlightColorSlots`/`underlineColorSlots`/`highlightDefaultSlot`/`underlineDefaultSlot`/
+ *   `annotationLastKind`/`annotationLastLineStyle`）——不出 overlay，直写全局；
  * - 其余（排版/字体/阅读主题覆盖等）按书私有：本书只钉住**本次实际改动的字段**
  *   （稀疏 overlay，没动过的字段永不快照）；改动项同时直写全局（传染给没有此项的书）。
  *   全量快照会把别处设的全局值冻进本书 → “这本书没调过但值变了”，以及
@@ -64,6 +66,15 @@ class PerBookSettings(
                 fontWeightAnchors = next.fontWeightAnchors,
                 fontWeightAnchorsBySlot = next.fontWeightAnchorsBySlot,
                 cjkLatinSpacing = next.cjkLatinSpacing,
+                // 标注家族：与书无关的读者偏好（色槽 / 上次用的类别）。
+                // 不进这里的后果不是「少写一个字段」——changedFrom 只认 BookSettings 的字段，
+                // 这一族既不进 overlay 也不进全局 ⇒ **改完等于没存**（重启即丢）。
+                highlightColorSlots = next.highlightColorSlots,
+                underlineColorSlots = next.underlineColorSlots,
+                highlightDefaultSlot = next.highlightDefaultSlot,
+                underlineDefaultSlot = next.underlineDefaultSlot,
+                annotationLastKind = next.annotationLastKind,
+                annotationLastLineStyle = next.annotationLastLineStyle,
             )
         }
         globalStore.save(global)

@@ -3,7 +3,9 @@ package orilumn.reader.ui.reader
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.data.annotation.AnnotationKind
+import orilumn.reader.data.annotation.AnnotationLineStyle
 import orilumn.reader.data.settings.ReaderSettings
 
 /**
@@ -25,6 +27,108 @@ class AnnotationColorsTest {
             ReaderSettings.DEFAULT_UNDERLINE_COLOR_SLOTS[4],
             annotationDefaultColor(s, AnnotationKind.Underline),
         )
+    }
+
+    @Test
+    fun `last used line style falls back to straight`() {
+        assertEquals(AnnotationLineStyle.Straight, annotationLastLineStyleOf(ReaderSettings.DEFAULT))
+        listOf(
+            AnnotationLineStyle.Wavy,
+            AnnotationLineStyle.Dashed,
+            AnnotationLineStyle.Strike,
+        ).forEach { style ->
+            assertEquals(
+                style,
+                annotationLastLineStyleOf(ReaderSettings.DEFAULT.copy(annotationLastLineStyle = style.wire)),
+            )
+        }
+        // 未知值（老存档缺键 / 手改配置）按实线。
+        assertEquals(
+            AnnotationLineStyle.Straight,
+            annotationLastLineStyleOf(ReaderSettings.DEFAULT.copy(annotationLastLineStyle = "dotted")),
+        )
+    }
+
+    @Test
+    fun `last used kind falls back to highlight`() {
+        assertEquals(AnnotationKind.Highlight, annotationLastKindOf(ReaderSettings.DEFAULT))
+        assertEquals(
+            AnnotationKind.Underline,
+            annotationLastKindOf(ReaderSettings.DEFAULT.copy(annotationLastKind = "underline")),
+        )
+        // 未知值（老存档缺键 / 手改配置 / 批注类）一律按高亮，菜单不会停在没有色槽的类别上。
+        assertEquals(
+            AnnotationKind.Highlight,
+            annotationLastKindOf(ReaderSettings.DEFAULT.copy(annotationLastKind = "note")),
+        )
+    }
+
+    @Test
+    fun `swatch of each kind ignores the other kind`() {
+        val highlight = ReaderSettings.DEFAULT_HIGHLIGHT_COLOR_SLOTS
+        val underline = ReaderSettings.DEFAULT_UNDERLINE_COLOR_SLOTS
+        // 换另一类的色槽与默认格，本类样张纹丝不动。
+        assertEquals(
+            highlight[0],
+            annotationSwatchColor(highlight, 0, underline, 3, AnnotationKind.Highlight, null),
+        )
+        assertEquals(
+            underline[3],
+            annotationSwatchColor(highlight, 4, underline, 3, AnnotationKind.Underline, null),
+        )
+    }
+
+    @Test
+    fun `swatch follows only a record of the same kind`() {
+        val highlight = ReaderSettings.DEFAULT_HIGHLIGHT_COLOR_SLOTS
+        val underline = ReaderSettings.DEFAULT_UNDERLINE_COLOR_SLOTS
+        val mark = Annotation(
+            bookId = 1,
+            chapter = 0,
+            charStart = 0,
+            charEnd = 3,
+            kind = AnnotationKind.Highlight,
+            color = 0x66FF0000,
+        )
+        // 编辑高亮：高亮样张跟着它；划线样张仍是划线默认色（不能借用高亮的底色）。
+        assertEquals(0x66FF0000, annotationSwatchColor(highlight, 0, underline, 1, AnnotationKind.Highlight, mark))
+        assertEquals(underline[1], annotationSwatchColor(highlight, 0, underline, 1, AnnotationKind.Underline, mark))
+    }
+
+    @Test
+    fun `highlight to underline conversion never carries the highlight color`() {
+        val s = ReaderSettings.DEFAULT.copy(underlineDefaultSlot = 2)
+        val highlight = Annotation(
+            bookId = 1,
+            chapter = 0,
+            charStart = 0,
+            charEnd = 3,
+            kind = AnnotationKind.Highlight,
+            color = 0x73FFD54F,
+        )
+        val underline = highlight.copy(kind = AnnotationKind.Underline, color = 0xFF1E88E5.toInt())
+        assertEquals(annotationDefaultColor(s, AnnotationKind.Underline), annotationUnderlineInkColor(highlight, s))
+        assertEquals(0xFF1E88E5.toInt(), annotationUnderlineInkColor(underline, s))
+        assertEquals(annotationDefaultColor(s, AnnotationKind.Underline), annotationUnderlineInkColor(null, s))
+    }
+
+    @Test
+    fun `line style is only stored on underlines`() {
+        assertEquals(AnnotationLineStyle.Wavy, annotationLineStyleFor(AnnotationKind.Underline, AnnotationLineStyle.Wavy))
+        // 高亮不画线：存进去也没意义，还会污染划线菜单的初始值。
+        assertEquals(AnnotationLineStyle.Straight, annotationLineStyleFor(AnnotationKind.Highlight, AnnotationLineStyle.Wavy))
+        assertEquals(AnnotationLineStyle.Straight, annotationLineStyleFor(AnnotationKind.Note, AnnotationLineStyle.Dashed))
+    }
+
+    @Test
+    fun `picking a line style also remembers underline as last kind`() {
+        val s = ReaderSettings.DEFAULT.copy(annotationLastKind = "highlight")
+        val next = withAnnotationLastLineStyle(s, AnnotationLineStyle.Dashed)
+        assertEquals(AnnotationKind.Underline, annotationLastKindOf(next))
+        assertEquals(AnnotationLineStyle.Dashed, annotationLastLineStyleOf(next))
+        // 点线型不该动颜色槽与默认格。
+        assertEquals(s.highlightDefaultSlot, next.highlightDefaultSlot)
+        assertEquals(s.underlineDefaultSlot, next.underlineDefaultSlot)
     }
 
     @Test
@@ -108,6 +212,55 @@ class AnnotationColorsTest {
             assertTrue(alpha in 0..255)
             assertEquals(percent, annotationAlphaPercent(annotationWithAlpha(0x00000000, alpha)), 0.51f)
         }
+    }
+
+    @Test
+    fun `menu swatch keeps highlight and underline slots independent`() {
+        val highlight = listOf(0x33FF0000.toInt(), 0x3300FF00, 0x330000FF, 0x33FFFF00, 0x33FF00FF.toInt())
+        val underline = listOf(0xFF112233.toInt(), 0xFF445566.toInt(), 0xFF778899.toInt())
+        // 刚在高亮行点了第 5 格（高亮默认槽 = 4），划线默认槽仍是第 2 格。
+        assertEquals(
+            underline[1],
+            annotationSwatchColor(highlight, 4, underline, 1, AnnotationKind.Underline, null),
+        )
+        assertEquals(
+            highlight[4],
+            annotationSwatchColor(highlight, 4, underline, 1, AnnotationKind.Highlight, null),
+        )
+    }
+
+    @Test
+    fun `editing one kind never paints the other kind's swatch`() {
+        val highlight = listOf(0x33FF0000.toInt(), 0x3300FF00)
+        val underline = listOf(0xFF112233.toInt(), 0xFF445566.toInt())
+        val editingHighlight = Annotation(
+            bookId = 1,
+            chapter = 0,
+            charStart = 0,
+            charEnd = 4,
+            kind = AnnotationKind.Highlight,
+            color = 0x3300FF00,
+        )
+        // 正在编辑高亮：划线样张仍取划线默认槽，不跟着高亮的半透明底色走。
+        assertEquals(
+            underline[0],
+            annotationSwatchColor(highlight, 1, underline, 0, AnnotationKind.Underline, editingHighlight),
+        )
+        // 编辑本类别时跟着记录自己的颜色。
+        assertEquals(
+            0x3300FF00,
+            annotationSwatchColor(highlight, 1, underline, 0, AnnotationKind.Highlight, editingHighlight),
+        )
+        // 编辑划线时同理，且越界槽位钳到有效范围。
+        val editingUnderline = editingHighlight.copy(kind = AnnotationKind.Underline, color = underline[1])
+        assertEquals(
+            underline[1],
+            annotationSwatchColor(highlight, 9, underline, 9, AnnotationKind.Underline, editingUnderline),
+        )
+        assertEquals(
+            highlight[1],
+            annotationSwatchColor(highlight, 9, underline, 9, AnnotationKind.Highlight, editingUnderline),
+        )
     }
 
     @Test

@@ -2,7 +2,9 @@ package orilumn.reader.ui.reader
 
 import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.data.annotation.AnnotationKind
+import orilumn.reader.data.annotation.AnnotationLineStyle
 import orilumn.reader.engine.skia.DecorKind
+import orilumn.reader.engine.skia.DecorStroke
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -16,6 +18,7 @@ class AnnotationDecorTest {
         color: Int? = null,
         start: Int = 3,
         end: Int = 7,
+        lineStyle: AnnotationLineStyle = AnnotationLineStyle.Straight,
     ) = Annotation(
         bookId = 1,
         chapter = 2,
@@ -23,6 +26,7 @@ class AnnotationDecorTest {
         charEnd = end,
         kind = kind,
         color = color,
+        lineStyle = lineStyle,
     )
 
     @Test
@@ -66,5 +70,33 @@ class AnnotationDecorTest {
         val a = annotation(AnnotationKind.Highlight)
         assertNull(a.color)
         assertEquals(1, annotationDecorRanges(listOf(a)).size)
+    }
+
+    @Test
+    fun `underline line styles map to stroke and strike kind`() {
+        val ranges = annotationDecorRanges(
+            listOf(
+                annotation(AnnotationKind.Underline, 0xFF112233.toInt()),
+                annotation(AnnotationKind.Underline, 0xFF112233.toInt(), lineStyle = AnnotationLineStyle.Wavy),
+                annotation(AnnotationKind.Underline, 0xFF112233.toInt(), lineStyle = AnnotationLineStyle.Dashed),
+                annotation(AnnotationKind.Underline, 0xFF112233.toInt(), lineStyle = AnnotationLineStyle.Strike),
+            ),
+        )
+        assertEquals(4, ranges.size)
+        assertEquals(DecorKind.UNDERLINE, ranges[0].kind)
+        assertEquals(DecorStroke.Solid, ranges[0].stroke)
+        assertEquals(DecorStroke.Wavy, ranges[1].stroke)
+        assertEquals(DecorStroke.Dashed, ranges[2].stroke)
+        // 删除线换的是落墨位置（字身中部），不是再加一条下划线。
+        assertEquals(DecorKind.STRIKETHROUGH, ranges[3].kind)
+        assertEquals(DecorStroke.Solid, ranges[3].stroke)
+    }
+
+    @Test
+    fun `highlight ignores line style`() {
+        val range = annotationDecorRanges(
+            listOf(annotation(AnnotationKind.Highlight, 0x80FF0000.toInt(), lineStyle = AnnotationLineStyle.Wavy)),
+        ).single()
+        assertEquals(DecorKind.BACKGROUND, range.kind)
     }
 }

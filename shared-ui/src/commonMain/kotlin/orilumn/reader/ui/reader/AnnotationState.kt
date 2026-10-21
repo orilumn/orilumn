@@ -93,6 +93,12 @@ class AnnotationState(private val host: ReaderHost) {
             revision++
             return null
         }
+        // 落库期间可能已经换章（或离开阅读面）：旧章的记录不能混进新章列表。
+        if (chapter != pending.chapter) {
+            annotations = annotations.filterNot { it.id == pending.id }
+            revision++
+            return saved
+        }
         annotations = sort(annotations.filterNot { it.id == pending.id } + saved)
         revision++
         return saved

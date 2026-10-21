@@ -27,6 +27,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusTarget
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.input.key.KeyEventType
@@ -34,11 +35,15 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalViewConfiguration
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import orilumn.reader.data.annotation.Annotation
+import orilumn.reader.data.annotation.AnnotationKind
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.engine.skia.LineWindowDrawer
 import orilumn.reader.engine.text.TypographicProfile
@@ -187,14 +192,29 @@ fun ReaderScreen(
     val annotationState = remember(currentHost) { AnnotationState(currentHost) }
     // D-11：长期存在的选区（用户层，不落库）。换章清空；翻页保留，覆盖层各页只画交集。
     val selection = remember(currentHost) { TextSelectionState() }
+    // 选区浮动菜单是否显示：长按/拖手柄期间收起，抬手后才出现；点正文或翻页即消失。
+    var selectionMenuVisible by remember { mutableStateOf(false) }
+    // 旧的 ClipboardManager 仍是 CMP 唯一共享可用的同步写入口；新 LocalClipboard 只支持 suspend。
+    @Suppress("DEPRECATION")
+    val clipboard = LocalClipboardManager.current
     val selectionDrawer = remember { LineWindowDrawer() }
     LaunchedEffect(currentHost, openPos?.chapter) {
         val ch = openPos?.chapter
         if (ch == null) annotationState.clear() else annotationState.load(ch)
         selection.clear()
+        selectionMenuVisible = false
     }
     // 版式/参数变化后旧选区坐标不再成立（字符偏移没变，但端点所在行可能变），直接丢弃。
-    LaunchedEffect(contentRevision, density) { selection.clear() }
+    LaunchedEffect(contentRevision, density) {
+        selection.clear()
+        selectionMenuVisible = false
+    }
+    // 选区被任何路径清空时，菜单必须同步收起（避免留下指向空选区的浮层）。
+    LaunchedEffect(selection.hasSelection) {
+        if (!selection.hasSelection) selectionMenuVisible = false
+    }
+    // 翻页后浮动菜单不跟到新页（选区保留，各页只画交集；用户可再点选区/手柄）。
+    LaunchedEffect(openPos) { selectionMenuVisible = false }
     // ---- 定位动作（host 为 suspend，统一挂到本组件作用域） ----
     /**
      * 落位前等图（导航提交前预热）：目标页缺的插图/背景图并行解出来进跨页缓存再提交定位，
@@ -854,6 +874,7 @@ fun ReaderScreen(
         // D-11：有选区时，正文点按只清除选区，不翻页也不开链接。
         if (selection.hasSelection) {
             selection.clear()
+            selectionMenuVisible = false
             return
         }
         // P4-c2u: 链接优先——点中链接字形即导航，未中才走三区（翻页/栏显隐）。
@@ -907,6 +928,62 @@ fun ReaderScreen(
     // S29：Toast → CMP Snackbar；书签/笔记占位动作未接线（null）时给出提示。
     val snackbar = rememberReaderSnackbar()
 
+    /** 把当前选区落成一条高亮/划线：先内存出图，再异步存库；失败回滚并提示。 */
+    fun createSelectionAnnotation(kind: AnnotationKind) {
+        val ch = selection.chapter
+        val s = selection.start
+        val e = selection.endExclusive
+        if (ch < 0 || e <= s) return
+        selectionMenuVisible = false
+        val color = if (kind == AnnotationKind.Highlight) DEFAULT_HIGHLIGHT_ARGB else DEFAULT_UNDERLINE_ARGB
+        scope.launch {
+            val saved = annotationState.add(
+                Annotation(
+                    bookId = 0,
+                    chapter = ch,
+                    charStart = s,
+                    charEnd = e,
+                    kind = kind,
+                    color = color,
+                ),
+            )
+            if (saved == null) {
+                if (selection.hasSelection) selectionMenuVisible = true
+                snackbar.show("保存失败")
+            } else {
+                // 落库期间用户可能已换了选区：只清掉仍是这一条的那份，别误清新选区。
+                if (selection.chapter == ch && selection.start == s && selection.endExclusive == e) {
+                    selection.clear()
+                }
+                snackbar.show(if (kind == AnnotationKind.Highlight) "已高亮" else "已划线")
+            }
+        }
+    }
+
+    /** 复制选区原文：块间补换行，换行只进剪贴板、不参与标注偏移（D-18）。 */
+    fun copySelection() {
+        val ch = selection.chapter
+        val s = selection.start
+        val e = selection.endExclusive
+        val text = currentHost.textOf(ch, 0, Int.MAX_VALUE)
+        if (text == null) {
+            snackbar.show("复制失败：本章内容尚未就绪")
+            return
+        }
+        val copied = copyTextOf(text, s, e, currentHost.textBlockEndsOf(ch))
+        if (copied.isEmpty()) {
+            snackbar.show("复制失败：选区为空")
+            return
+        }
+        val ok = runCatching { clipboard.setText(AnnotatedString(copied)) }.isSuccess
+        if (!ok) {
+            snackbar.show("复制失败")
+            return
+        }
+        selectionMenuVisible = false
+        snackbar.show("已复制")
+    }
+
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
@@ -928,14 +1005,16 @@ fun ReaderScreen(
                     var selecting = false
                     var moved = false
                     var longPressJob: Job? = null
-                    if (!barsOwned && !coverVisible && !ctl.isBusy()) {
+                    if (!barsOwned && !coverVisible && !ctl.isBusy() && !down.isConsumed) {
                         val handle = selectionHandleAt(
                             downX, downY, size.width.toFloat(), size.height.toFloat(),
                         )
                         if (handle != null) {
+                            selectionMenuVisible = false
                             selection.beginHandleDrag(handle)
                             selecting = true
                         } else {
+                            selectionMenuVisible = false
                             longPressJob = scope.launch {
                                 delay(longPressTimeout)
                                 if (!moved) selecting = beginSelectionAt(downX, downY)
@@ -985,6 +1064,7 @@ fun ReaderScreen(
                         // 长按已起手/正在拖手柄：本次手势只服务选区，不翻页、不调亮度。
                         if (selecting) {
                             if (!change.pressed) {
+                                if (selection.hasSelection) selectionMenuVisible = true
                                 change.consume()
                                 break
                             }
@@ -1228,6 +1308,52 @@ fun ReaderScreen(
                 }
             } else null
 
+            // 选区菜单锚点：与覆盖层同一份逐字几何；跨页时只取本页交集。
+            val selectionGeometry = remember(
+                pageContent,
+                fromPos.slice,
+                selectionMenuVisible,
+                selection.hasSelection,
+                selection.chapter,
+                selection.start,
+                selection.endExclusive,
+                contentLeft,
+                contentTop,
+                contentRight,
+                contentBottom,
+                selectionHandleRadiusPx,
+            ) {
+                if (!selectionMenuVisible) return@remember null
+                val content = pageContent ?: return@remember null
+                if (!selection.hasSelection || selection.chapter != fromPos.chapter) {
+                    return@remember null
+                }
+                selectionPageGeometry(
+                    drawer = selectionDrawer,
+                    lines = content.lines.orEmpty(),
+                    chapter = selection.chapter,
+                    start = selection.start,
+                    endExclusive = selection.endExclusive,
+                    pageSlice = fromPos.slice,
+                    frameLead = content.pageFrameLead,
+                    pageImages = content.pageImages,
+                    pageBackgrounds = content.pageBackgrounds,
+                    contentLeft = contentLeft,
+                    contentTop = contentTop,
+                    contentRight = contentRight,
+                    contentBottom = contentBottom,
+                    handleRadiusPx = selectionHandleRadiusPx,
+                )
+            }
+            val selectionMenuAnchor = selectionGeometry?.rects?.takeIf { it.isNotEmpty() }?.let { rects ->
+                Rect(
+                    left = rects.minOf { it.left },
+                    top = rects.minOf { it.top },
+                    right = rects.maxOf { it.right },
+                    bottom = rects.maxOf { it.bottom },
+                )
+            }
+
             // 画布渲染器（栅格 + 多页位图缓存的宿主）在**此处** remember 一份，注入给 current/target
             // 两张画布：否则两个组合位置各自 remember，各得一池，当前页位图在 target 侧永远查不到
             // （真机日志：动画期间每页每轮各栅格一次，`hit=false`）。
@@ -1352,6 +1478,23 @@ fun ReaderScreen(
                     contentRight = contentRight,
                     contentBottom = contentBottom,
                     modifier = Modifier.fillMaxSize(),
+                )
+            }
+            // 浮动菜单：抬手后出现，位置跟着选区矩形；贴顶翻到下方、贴边内收。
+            if (selectionMenuVisible && selection.hasSelection && selectionMenuAnchor != null &&
+                !coverVisible && !ctl.isBusy() && selection.chapter == fromPos.chapter
+            ) {
+                AnnotationMenu(
+                    anchor = selectionMenuAnchor,
+                    bounds = Rect(contentLeft, contentTop, contentRight, contentBottom),
+                    palette = paletteFor(light.scheme),
+                    onHighlight = { createSelectionAnnotation(AnnotationKind.Highlight) },
+                    onUnderline = { createSelectionAnnotation(AnnotationKind.Underline) },
+                    onCopy = ::copySelection,
+                    onCancel = {
+                        selection.clear()
+                        selectionMenuVisible = false
+                    },
                 )
             }
             // 亮度/护眼遮罩：纯绘制于画布之上、栏之下。

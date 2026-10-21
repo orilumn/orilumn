@@ -1,5 +1,7 @@
 package orilumn.reader.ui.reader
 
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.data.annotation.AnnotationKind
@@ -18,6 +20,8 @@ class AnnotationStateTest {
         var failAdd = false
         var failUpdate = false
         var failDelete = false
+        var addGate: CompletableDeferred<Unit>? = null
+        val addStarted = CompletableDeferred<Unit>()
         private var nextId = 100L
 
         override fun title(): String = "book"
@@ -38,6 +42,8 @@ class AnnotationStateTest {
             stored.filter { it.chapter == chapter }
 
         override suspend fun addAnnotation(annotation: Annotation): Annotation? {
+            addStarted.complete(Unit)
+            addGate?.await()
             if (failAdd) return null
             val saved = annotation.copy(id = nextId++)
             stored += saved
@@ -151,6 +157,24 @@ class AnnotationStateTest {
         val state = AnnotationState(host)
         state.load(2)
         assertNull(state.add(annotation(chapter = 3)))
+        assertTrue(state.annotations.isEmpty())
+    }
+
+    @Test
+    fun `add finishing after a chapter switch does not leak into the new chapter`() = runBlocking {
+        val host = FakeHost()
+        val gate = CompletableDeferred<Unit>()
+        host.addGate = gate
+        val state = AnnotationState(host)
+        state.load(2)
+
+        val job = launch { state.add(annotation(chapter = 2)) }
+        host.addStarted.await()
+        state.load(3)
+        gate.complete(Unit)
+        job.join()
+
+        assertEquals(3, state.chapter)
         assertTrue(state.annotations.isEmpty())
     }
 }

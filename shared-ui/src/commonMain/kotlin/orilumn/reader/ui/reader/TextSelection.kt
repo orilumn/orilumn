@@ -195,6 +195,34 @@ private fun sentenceRange(text: String, i: Int, block: IntRange): IntRange {
     return publishRange(s, e)
 }
 
+/**
+ * 复制用的选区原文（D-18）：底层章文本是各叶直接拼接、叶间无分隔，
+ * 复制结果在**块边界**补一个换行，便于阅读；换行只进剪贴板，**不参与标注偏移**。
+ *
+ * 选区结束正好落在块尾时不补尾随换行；空块（相邻块尾相等）不重复补。
+ */
+internal fun copyTextOf(
+    text: String,
+    start: Int,
+    endExclusive: Int,
+    blockEnds: IntArray?,
+): String {
+    val s = start.coerceIn(0, text.length)
+    val e = endExclusive.coerceIn(s, text.length)
+    if (e <= s) return ""
+    if (blockEnds == null || blockEnds.isEmpty()) return text.substring(s, e)
+    val out = StringBuilder(e - s + 8)
+    var pos = s
+    for (blockEnd in blockEnds) {
+        if (blockEnd <= pos || blockEnd >= e) continue
+        out.append(text, pos, blockEnd)
+        out.append('\n')
+        pos = blockEnd
+    }
+    out.append(text, pos, e)
+    return out.toString()
+}
+
 private fun isWordChar(c: Char): Boolean =
     !isCjk(c) && (c.isLetterOrDigit() || c == '\'' || c == '’' || c == '-')
 

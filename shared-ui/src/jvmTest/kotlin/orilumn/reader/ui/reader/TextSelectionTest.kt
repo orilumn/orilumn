@@ -66,6 +66,18 @@ class TextSelectionTest {
     }
 
     @Test
+    fun `copy text inserts newlines only between blocks`() {
+        val text = "Hello worldsecond"
+        val blocks = intArrayOf(11, 17)
+        assertEquals("world\nsecond", copyTextOf(text, 6, 17, blocks))
+        assertEquals("Hello world\nsecond", copyTextOf(text, 0, 17, blocks))
+        // 选区正好停在块尾：不要多一个尾随换行。
+        assertEquals("Hello world", copyTextOf(text, 0, 11, blocks))
+        // 没有块表时保持原文（旧宿主/测试）。
+        assertEquals("worldsecond", copyTextOf(text, 6, 17, null))
+    }
+
+    @Test
     fun `state begins with a unit and extends by character`() {
         val s = TextSelectionState()
         assertTrue(s.begin(chapter = 2, text = "hello world", offset = 1))

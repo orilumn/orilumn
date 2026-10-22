@@ -15,6 +15,10 @@ internal const val INPUT_SHIFT_GAP_DP: Float = 8f
 internal const val SELECTION_AUTO_FLIP_FIRST_MS: Long = 300L
 internal const val SELECTION_AUTO_FLIP_REPEAT_MS: Long = 400L
 
+/** 手柄拖到视口上下边界时整页自动滚动的步长（dp）与间隔（ms）：慢到看得清、快到不用等。 */
+internal const val PAGE_SCROLL_STEP_DP: Float = 12f
+internal const val PAGE_SCROLL_STEP_MS: Long = 40L
+
 /**
  * 手指 x 落在左/右页边带内时给出翻页方向：-1 左（上一页）/ 1 右（下一页）/ 0 不在边带。
  *

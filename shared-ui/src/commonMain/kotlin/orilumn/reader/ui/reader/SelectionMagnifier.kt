@@ -24,8 +24,14 @@ internal const val MAGNIFIER_DIAMETER_DP = 96f
 /** 放大倍数。 */
 internal const val MAGNIFIER_ZOOM = 1.5f
 
-/** 圆心相对手指上移的距离。 */
-internal const val MAGNIFIER_OFFSET_DP = 56f
+/**
+ * 圆心相对手指上移的距离。
+ *
+ * 手指接触面直径约 9~10mm（≈44dp），半径 48dp 的圆若只抬 56dp，圆的下沿离指尖只有 8dp
+ * ⇒ 放大镜下缘被手指盖住一角，正好压住放大镜里最该看清的那行字。抬到 76dp 后圆下沿离
+ * 指尖 28dp，指腹不再压住镜面；贴顶时 [magnifierCenter] 仍会翻到手指下方。
+ */
+internal const val MAGNIFIER_OFFSET_DP = 76f
 
 /** 贴屏幕边时的内移量。 */
 internal const val MAGNIFIER_EDGE_INSET_DP = 8f

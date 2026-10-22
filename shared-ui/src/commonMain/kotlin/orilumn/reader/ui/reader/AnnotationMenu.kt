@@ -54,8 +54,8 @@ private val ANNOTATION_MENU_GAP = 8.dp
  * 的色槽行（[initialKind]，编辑时用该标注的类别），点一格颜色就落笔。
  * 想换类别再点顶部的高亮 / 划线——所以按钮上的类别色小圆点已无意义（已去掉）。
  *
- * **类别名本身就是样张**：「高亮」二字垫当前高亮色，「划线」二字下沿画当前划线色，
- * 不用先点开才知道这一行长什么样。
+ * **类别名本身就是样张**：「高亮」二字垫当前高亮色，「划线」二字按当前**线型与线色**画一笔
+ * （实线贴字底、删除线过字中），不用先点开才知道这一行长什么样。
  *
  * 划线色槽下面还有一行**线型**（实线 / 波浪 / 虚线 / 删除线），只画线不写字，
  * 线色跟当前划线色；点哪一条就是新建（或改型）用的线型。高亮没有线型，那一行不出现。
@@ -140,6 +140,8 @@ internal fun AnnotationMenu(
                     palette = palette,
                     active = kind == AnnotationKind.Underline,
                     underlineArgb = swatchOf(AnnotationKind.Underline),
+                    // 样张跟着**当前线型**走：选波浪/虚线/删除线后，「划线」二字下的那笔立刻变样。
+                    underlineStyle = lineStyle,
                     onClick = { kind = AnnotationKind.Underline },
                 )
                 MenuAction("复制", palette.text, palette, active = false, onClick = onCopy)
@@ -248,28 +250,36 @@ private fun LineStyleRow(
 private fun DrawScope.drawLineStyleGlyph(
     style: AnnotationLineStyle,
     color: Color,
+    /**
+     * 线所在高度；`null` = 按样张行的默认（删除线过字中 0.5、其余贴下沿 0.68）。
+     *
+     * 类别名「划线」的样张要把线画在**字的下沿**，故显式传入。
+     */
+    lineY: Float? = null,
+    from: Float = size.width * 0.2f,
+    to: Float = size.width * 0.8f,
+    strokeWidth: Float = 2.dp.toPx(),
 ) {
-    val stroke = 2.dp.toPx()
-    val from = size.width * 0.2f
-    val to = size.width * 0.8f
-    val underlineY = size.height * 0.68f
-    val strikeY = size.height * 0.5f
+    val stroke = strokeWidth
+    // 一条线画在哪里：样张行里删除线过字中、其余贴下沿；调用方也可显式指定（类别名样张用）。
+    val y = lineY
+        ?: if (style == AnnotationLineStyle.Strike) size.height * 0.5f else size.height * 0.68f
     when (style) {
         AnnotationLineStyle.Straight -> drawLine(
             color = color,
-            start = Offset(from, underlineY),
-            end = Offset(to, underlineY),
+            start = Offset(from, y),
+            end = Offset(to, y),
             strokeWidth = stroke,
         )
         AnnotationLineStyle.Wavy -> {
             val amp = stroke * 1.2f
             val halfWave = (to - from) / 4f
-            val path = Path().apply { moveTo(from, underlineY) }
+            val path = Path().apply { moveTo(from, y) }
             var x = from
             var up = true
             while (x < to) {
                 val nx = (x + halfWave).coerceAtMost(to)
-                path.quadraticTo((x + nx) / 2f, if (up) underlineY - amp else underlineY + amp, nx, underlineY)
+                path.quadraticTo((x + nx) / 2f, if (up) y - amp else y + amp, nx, y)
                 x = nx
                 up = !up
             }
@@ -282,8 +292,8 @@ private fun DrawScope.drawLineStyleGlyph(
             while (x < to) {
                 drawLine(
                     color = color,
-                    start = Offset(x, underlineY),
-                    end = Offset((x + dash).coerceAtMost(to), underlineY),
+                    start = Offset(x, y),
+                    end = Offset((x + dash).coerceAtMost(to), y),
                     strokeWidth = stroke,
                 )
                 x += dash + gap
@@ -291,8 +301,8 @@ private fun DrawScope.drawLineStyleGlyph(
         }
         AnnotationLineStyle.Strike -> drawLine(
             color = color,
-            start = Offset(from, strikeY),
-            end = Offset(to, strikeY),
+            start = Offset(from, y),
+            end = Offset(to, y),
             strokeWidth = stroke,
         )
     }
@@ -333,6 +343,8 @@ private fun MenuAction(
     swatch: Int? = null,
     /** 非空：在文字下沿画一条该颜色的线（划线的样子）。 */
     underlineArgb: Int? = null,
+    /** 那条线**长什么样**：跟当前选定的线型走（实线/波浪/虚线/删除线），默认实线。 */
+    underlineStyle: AnnotationLineStyle = AnnotationLineStyle.Straight,
     onClick: () -> Unit,
 ) {
     // 虚掉的项仍是菜单的一部分：点它**吞掉**本次点按，只显「不可用」，
@@ -373,12 +385,22 @@ private fun MenuAction(
                 .then(
                     if (underlineArgb != null) {
                         Modifier.drawBehind {
-                            val stroke = 2.dp.toPx()
-                            drawLine(
+                            val strokeWidth = 2.dp.toPx()
+                            // 样张就是「这一笔真落下去长什么样」：线型与线色都跟当前选择走。
+                            // 删除线画在字的中间（那才是删除线的样子），其余贴字的底边，
+                            // 且留出波浪的振幅，免得下半波被文字盒裁掉。
+                            val y = if (underlineStyle == AnnotationLineStyle.Strike) {
+                                size.height * 0.5f
+                            } else {
+                                size.height - strokeWidth * 1.8f
+                            }
+                            drawLineStyleGlyph(
+                                style = underlineStyle,
                                 color = Color(underlineArgb),
-                                start = Offset(0f, size.height - stroke / 2f),
-                                end = Offset(size.width, size.height - stroke / 2f),
-                                strokeWidth = stroke,
+                                lineY = y,
+                                from = 0f,
+                                to = size.width,
+                                strokeWidth = strokeWidth,
                             )
                         }
                     } else {

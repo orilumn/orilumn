@@ -3,6 +3,7 @@ package orilumn.reader.ui.reader
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -60,5 +61,22 @@ class SelectionMagnifierTest {
         val t = magnifierTranslation(center, finger, MAGNIFIER_ZOOM)
         assertEquals(center.x, MAGNIFIER_ZOOM * finger.x + t.x, 0.001f)
         assertEquals(center.y, MAGNIFIER_ZOOM * finger.y + t.y, 0.001f)
+    }
+
+    /**
+     * 默认抬升量必须让**整个镜面离开指尖**。
+     *
+     * 指腹接触面直径约 44dp（半径 ≈ 22dp）。抬得太低时圆的下沿会落在指腹底下，
+     * 恰好挡住放大镜里最该看清的那行字 —— 这是只能靠真机才发现的「手感」缺陷，
+     * 故用常量之间的关系把它锁住（改小就红）。
+     */
+    @Test
+    fun `default lift keeps the whole lens clear of the fingertip`() {
+        val radiusDp = MAGNIFIER_DIAMETER_DP / 2f
+        val clearance = MAGNIFIER_OFFSET_DP - radiusDp
+        assertTrue(
+            "圆心距手指 $MAGNIFIER_OFFSET_DP dp、半径 $radiusDp dp ⇒ 镜面下沿离指尖仅 $clearance dp",
+            clearance >= 24f,
+        )
     }
 }

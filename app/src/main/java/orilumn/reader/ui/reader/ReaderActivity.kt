@@ -142,6 +142,12 @@ class ReaderActivity : ComponentActivity() {
     private var relayoutScheduled = false
     private var relayoutJob: Job? = null
 
+    /**
+     * 版式交互的锚点（开面板 → 关面板；面板外一轮防抖重排）：交互内不跟着落位页走，
+     * 否则拖滑块时锚点每刷一次退回一截（见 [orilumn.reader.engine.RelayoutAnchor]）。
+     */
+    private val relayoutAnchor = orilumn.reader.engine.RelayoutAnchor()
+
     /** WiFi 批量上传防抖刷新（多文件连续到达只刷一次，见 scheduleWifiBatchRefresh）。 */
     private var wifiBatchJob: Job? = null
 
@@ -306,10 +312,13 @@ class ReaderActivity : ComponentActivity() {
                     val liveLoop = relayoutJob
                     val p = currentPos
                     val ch = p?.chapter ?: 0
-                    val anchor = p?.slice?.charStart ?: 0
+                    // 旋转也是「同一次阅读位置」的版式变更：沿用已有锚点（面板拖动中旋转也不许换锚）；
+                    // 没有钉子就按当前页首钉住——连续旋转才不会每次退掉一截。
+                    relayoutAnchor.pin(ch, p?.slice?.charStart ?: 0)
+                    val a = relayoutAnchor.resolve(ch, p?.slice?.charStart ?: 0)
                     lifecycleScope.launch(Dispatchers.Default) {
                         liveLoop?.join()
-                        val r = c.finalizeRelayoutAll(ch, anchor)
+                        val r = c.finalizeRelayoutAll(a.chapter, a.char)
                         withContext(Dispatchers.Main) {
                             if (r != null) applyReflowResult(c, r)
                         }
@@ -328,7 +337,10 @@ class ReaderActivity : ComponentActivity() {
             }
 
             val snapshot = remember(tabletHost) {
-                tabletHost?.let { SnapshotReaderHost(it) { pos -> currentPos = pos } }
+                // 用户真的换了位置才松开改参锚点（翻页/跳章/进度条/开书）：重排落位与保存不算。
+                tabletHost?.let {
+                    SnapshotReaderHost(it, { pos -> currentPos = pos }, { relayoutAnchor.release() })
+                }
             }
             // 首次开书收口（与桌面同调，共享 probeOriginalOnOpen）：默认原书主题开书时，
             // 落位即按落位章回填未钉的缩进/行距并 bookOnly 持久 + 轻刷；已钉/非原书直接跳过。
@@ -465,6 +477,8 @@ class ReaderActivity : ComponentActivity() {
         // 面板开抑制 + 关门控走共享收口（PanelRelayoutGate，桌面同调）；关闭时若排版真实
         // 变化再整书重跑（门控内指纹判定）。
         panelGate?.onPanelOpen()
+        // 锚点只钉一次：拖动期间每次预览落位都会改写当前页首，拿它当下一轮锚点会一路往回退。
+        currentPos?.let { relayoutAnchor.pin(it.chapter, it.slice.charStart) }
         // 需求模式（方案 §2.4/§3.4，与桌面同式）：面板要用 ⇒ 同键 `fontscan` 提档池顶，
         // 立即实扫；逐族落库回调重读 DB，列表增量长出（库热时指纹没变，什么都不做）。
         val scan = AndroidFontScan.scanner(this)
@@ -495,14 +509,14 @@ class ReaderActivity : ComponentActivity() {
             relayoutPending = false
             val liveLoop = relayoutJob
             val p = currentPos
-            val ch = p?.chapter ?: 0
-            val anchor = p?.slice?.charStart ?: 0
+            // 关面板这次落位仍用开面板钉住的锚点（拖动已把落位页首写回定位，不能拿它当锚）。
+            val a = relayoutAnchor.resolve(p?.chapter ?: 0, p?.slice?.charStart ?: 0)
             lifecycleScope.launch(Dispatchers.Default) {
                 liveLoop?.join()
-                val r = gate.onPanelClose(ch, anchor)
-                if (r != null) {
-                    Logger.w(TAG, "close settings panel -> typography changed, whole-book relayout")
-                    withContext(Dispatchers.Main) {
+                val r = gate.onPanelClose(a.chapter, a.char)
+                withContext(Dispatchers.Main) {
+                    if (r != null) {
+                        Logger.w(TAG, "close settings panel -> typography changed, whole-book relayout")
                         applyReflowResult(c, r)
                     }
                 }
@@ -593,6 +607,8 @@ class ReaderActivity : ComponentActivity() {
             val target = host.jumpToToc(idx, item.fragment)
             withContext(Dispatchers.Main) {
                 if (target != null) {
+                    // 目录跳转是导航：改参锚点作废，下一次改参按新的当前页首取。
+                    relayoutAnchor.release()
                     currentPos = target
                     externalPos = target
                 }
@@ -661,22 +677,24 @@ class ReaderActivity : ComponentActivity() {
         relayoutPending = true
         if (relayoutScheduled) return
         relayoutScheduled = true
+        // 交互起点钉锚：面板内已由开面板钉过（这里只认第一次），面板外这一轮重排自己钉。
+        // 不钉的话每轮落位把「落位页首」当下一轮锚点，锚点会一路往回退（见 RelayoutAnchor）。
+        currentPos?.let { relayoutAnchor.pin(it.chapter, it.slice.charStart) }
         relayoutJob = lifecycleScope.launch(Dispatchers.Default) {
             while (relayoutPending) {
                 relayoutPending = false
                 val c = engine ?: break
                 val p = currentPos
-                val chapter = p?.chapter ?: 0
-                val anchorChar = p?.slice?.charStart ?: 0
+                val a = relayoutAnchor.resolve(p?.chapter ?: 0, p?.slice?.charStart ?: 0)
                 // 后台算新版式（保留当前章旧版式不闪），主线程原子替换。
-                val r = c.prepareRelayoutLight(chapter, anchorChar)
+                val r = c.prepareRelayoutLight(a.chapter, a.char)
                 withContext(Dispatchers.Main) {
                     if (r != null) applyReflowResult(c, r)
                 }
                 if (relayoutPending) delay(RELAYOUT_INTERVAL_MS)
             }
             relayoutScheduled = false
-            // 参数稳定点：版式指纹真变（面板外提交——开书探针回填/原书设置
+            // 版式指纹真变（面板外提交——开书探针回填/原书设置
             // 提交/字体回退）时清全书旧指纹磁盘表；指纹未变（夜间切换等
             // 非版式提交）是空操作，不误删当前参数下的有效磁盘表。B2 随后
             // 按新指纹逐章重写。

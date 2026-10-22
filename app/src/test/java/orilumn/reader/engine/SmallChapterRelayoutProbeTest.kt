@@ -23,9 +23,9 @@ import org.robolectric.annotation.Config
  * 回归（用户真机 §调参 on 短章）：短章（≤120 块）调节行距后的落位与后续翻页。
  *
  * 短章恒走磁盘表（整块页），不得引入临时表的「行锚页」口径：
- *  1. 落位必须是**磁盘表里真实存在的页**，且取「页首行离锚点行最近」的那一页
- *     （并列取更靠前的，即含锚点的那一页）——锚点行落在页顶上方一行内，画面几乎不动；
- *     绝不能把锚点行钉在页顶造一张表外的合成页（页界不是表的分页界）；
+ *  1. 落位必须是**磁盘表里真实存在的页**，且取**含锚点行的那一页**（总则 §2「刷新显示当前
+ *     锚点所在页面」）——绝不能把锚点行钉在页顶造一张表外的合成页（页界不是表的分页界），
+ *     也不能取「页首最近」的下一页把锚点甩出屏幕（真机 5024 → 5151）；
  *  2. 落位后翻页必须走章内相邻页（索引 ±1），不得因为切片不在表里而走「行连续」分支，
  *     回填到章首后误判书首、跨章跳走。
  *
@@ -61,7 +61,7 @@ class SmallChapterRelayoutProbeTest {
     }
 
     @Test
-    fun `small chapter relayout lands on the nearest real disk-table page`() = runBlocking {
+    fun `small chapter relayout lands on the disk-table page holding the anchor`() = runBlocking {
         controller.profile = TypographicProfile.build(ReaderSettings.DEFAULT.copy(lineSpacing = 1.4))
         controller.open(31L, saved = null)
         controller.setViewport(viewW, viewH)
@@ -74,14 +74,14 @@ class SmallChapterRelayoutProbeTest {
         controller.profile = TypographicProfile.build(ReaderSettings.DEFAULT.copy(lineSpacing = 1.5))
         val r = controller.prepareRelayoutLight(1, p2.charStart) ?: error("no relayout product")
         val layout = r.layout ?: error("small chapter relayout must carry a real layout")
-        val expected = nearestByRule(layout, r.slices, p2.charStart) ?: error("no canonical page")
+        val expected = containingByRule(layout, r.slices, p2.charStart) ?: error("no canonical page")
         println(
             "SMALL-PROBE after: page=[${r.page.charStart},${r.page.charEnd}) firstLine=${r.page.firstLine} " +
                 "slices=${r.slices.map { "[${it.charStart},${it.charEnd})" }} expected=[${expected.charStart},${expected.charEnd})",
         )
 
         assertEquals(
-            "落位必须是磁盘表里「页首行离锚点行最近」的那一页",
+            "落位必须是磁盘表里含锚点行的那一页",
             expected.charStart to expected.charEnd,
             r.page.charStart to r.page.charEnd,
         )
@@ -145,24 +145,21 @@ class SmallChapterRelayoutProbeTest {
         println("SMALL-PROBE forward  -> chapter=${fwd?.first} page=${fwd?.second?.let { "[${it.charStart},${it.charEnd}) firstLine=${it.firstLine} blk=${it.blockStart}" }}")
     }
 
-    /** 测试侧独立复算「页首行离锚点行最近」：并列取更靠前的页（与实现同口径、不共用代码）。 */
-    private fun nearestByRule(layout: BookLayout, slices: List<PageSlice>, anchorChar: Int): PageSlice? {
+    /**
+     * 测试侧独立复算「含锚点行的那一页」（与实现同口径、不共用代码）。
+     * 锚点行 = 最后一个「行首 ≤ 锚点」的行（空行 `start == end`、块间空隙都命中，不退兜底末页）。
+     */
+    private fun containingByRule(layout: BookLayout, slices: List<PageSlice>, anchorChar: Int): PageSlice? {
         val n = layout.lineCount
         if (n <= 0) return slices.firstOrNull()
-        val anchorLine = (0 until n).firstOrNull {
-            layout.getLineStart(it) <= anchorChar && layout.getLineEnd(it) > anchorChar
-        } ?: (n - 1)
+        var anchorLine = 0
+        for (i in 0 until n) if (layout.getLineStart(i) <= anchorChar) anchorLine = i
         var best: PageSlice? = null
-        var bestDist = Int.MAX_VALUE
         for (s in slices) {
             if (s.firstLine < 0) continue
-            val d = kotlin.math.abs(s.firstLine - anchorLine)
-            if (d < bestDist) {
-                bestDist = d
-                best = s
-            }
+            if (s.firstLine <= anchorLine) best = s
         }
-        return best
+        return best ?: slices.firstOrNull()
     }
 
     private fun epubFiles(): Map<String, ByteArray> {

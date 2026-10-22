@@ -81,6 +81,11 @@ fun ReaderView(
     LaunchedEffect(session) { anchorOverride = null }
     var currentPos by remember(book) { mutableStateOf<ReaderPos?>(null) }
     var settingsOpen by remember(book) { mutableStateOf(false) }
+    /**
+     * 面板内调参的锚点（与平板同调，共享 [orilumn.reader.engine.RelayoutAnchor]）：
+     * 开面板钉一次，拖动期间每次预览落位不换锚，关面板那次落位后松开。
+     */
+    val relayoutAnchor = remember(book) { orilumn.reader.engine.RelayoutAnchor() }
     var tocOpen by remember(book) { mutableStateOf(false) }
     // 首次开书收口（与平板同调，共享 probeOriginalOnOpen）：默认原书主题开书时，
     // 落位即按落位章回填未钉的缩进/行距并 bookOnly 持久；已钉/非原书直接跳过。
@@ -207,7 +212,8 @@ fun ReaderView(
                 cacheRoot = DesktopPaths.cacheDir,
                 fontLibrary = fontLibrary,
             )
-            SnapshotReaderHost(delegate) { currentPos = it }
+            // 用户真的换了位置才松开改参锚点（翻页/跳章/进度条/开书）：重排落位与保存不算。
+            SnapshotReaderHost(delegate, { currentPos = it }, { relayoutAnchor.release() })
         }
         DisposableEffect(snapshot) {
             onDispose { (snapshot.delegate as? DesktopReaderHost)?.close() }
@@ -245,14 +251,16 @@ fun ReaderView(
             if (prev == null || prev == settledViewport) return@LaunchedEffect
             val host = desktopHost ?: return@LaunchedEffect
             if (!host.applyViewportSize(settledViewport.first, settledViewport.second)) return@LaunchedEffect
-            // 第一段：轻刷新即时落位（与 previewToSettings 同）。
+            // 第一段：轻刷新即时落位（与 previewToSettings 同）；第二段全套沉淀（与 commitRelayout 同）。
+            // 两段共用**同一个锚点**：预览落位会把落位页首写回定位，第二段再取会多退一截。
+            // 连续拉伸/缩放同一口径：有钉子沿用，没钉子按当前页首钉住（松手才换锚）。
             val anchor = currentPos
-            host.previewToSettings(
-                settings, anchor?.chapter ?: 0, anchor?.slice?.charStart ?: 0,
-            )?.let { pushLanding(it) }
-            // 第二段：全套沉淀（与 commitRelayout 同）。
-            val anchor2 = currentPos
-            host.commitRelayout(anchor2?.chapter ?: 0, anchor2?.slice?.charStart ?: 0)?.let { pushLanding(it) }
+            val fromChapter = anchor?.chapter ?: 0
+            val fromChar = anchor?.slice?.charStart ?: 0
+            relayoutAnchor.pin(fromChapter, fromChar)
+            val a = relayoutAnchor.resolve(fromChapter, fromChar)
+            host.previewToSettings(settings, a.chapter, a.char)?.let { pushLanding(it) }
+            host.commitRelayout(a.chapter, a.char)?.let { pushLanding(it) }
         }
         // 面板字库读 DB（R4 的枚举+中文名链已迁到 `DesktopFontScan` 的扫描任务，视图只收表）；
         // 键只跟书，视口 resize 重建宿主不重枚举。开书路径不触发扫描，改由面板可见性/启动检测驱动。
@@ -307,15 +315,19 @@ fun ReaderView(
             val panelWasOpen = settingsOpen
             val host = desktopHost ?: return@LaunchedEffect
             val anchor = currentPos
-            val landing = host.previewToSettings(
-                settings, anchor?.chapter ?: 0, anchor?.slice?.charStart ?: 0)
+            val fromChapter = anchor?.chapter ?: 0
+            val fromChar = anchor?.slice?.charStart ?: 0
+            // 交互内只钉一次：拖动期间每次预览落位都会改写当前页首，拿它当下一轮锚点会一路退回。
+            // 面板外的静默提交同用这次交互的锚点（预览 + 800ms 全套两段不各取一次）。
+            relayoutAnchor.pin(fromChapter, fromChar)
+            val a = relayoutAnchor.resolve(fromChapter, fromChar)
+            val landing = host.previewToSettings(settings, a.chapter, a.char)
             appliedLayout = settings
             if (landing != null) pushLanding(landing)
             // 第二段：面板外提交静默 800ms 后全套；面板内拖动跳过（关面板门控接管）。
             if (panelWasOpen) return@LaunchedEffect
             delay(800)
-            val anchor2 = currentPos
-            val landed2 = host.commitRelayout(anchor2?.chapter ?: 0, anchor2?.slice?.charStart ?: 0)
+            val landed2 = host.commitRelayout(a.chapter, a.char)
             if (landed2 != null) pushLanding(landed2)
         }
 
@@ -396,8 +408,9 @@ fun ReaderView(
                 settingsOpen = false
                 // 关面板门控全套（共享收口，平板同调）：版式真变才 finalize 并落位，不变只关面板。
                 val pos = currentPos
+                val a = relayoutAnchor.resolve(pos?.chapter ?: 0, pos?.slice?.charStart ?: 0)
                 scope.launch {
-                    val landed = desktopHost?.finalizePanelSettings(pos?.chapter ?: 0, pos?.slice?.charStart ?: 0)
+                    val landed = desktopHost?.finalizePanelSettings(a.chapter, a.char)
                     if (landed != null) pushLanding(landed)
                 }
             },

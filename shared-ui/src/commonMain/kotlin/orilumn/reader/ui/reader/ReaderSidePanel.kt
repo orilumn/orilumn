@@ -40,7 +40,7 @@ import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
 /**
- * 左停靠抽屉的两页（D-23）：目录与标注共用一个壳，`☰` 落目录页、`✎` 落标注页，
+ * 左停靠抽屉的两页（D-23）：目录与笔记共用一个壳，`☰` 落目录页、`✎` 落笔记页，
  * 页内切换不关面板；当前页由平台壳记忆（会话内）。
  */
 enum class ReaderPanelPage { Toc, Annotations }
@@ -119,7 +119,7 @@ fun ReaderSidePanel(
                             PageTab("目录", page == ReaderPanelPage.Toc, p) { onPageChange(ReaderPanelPage.Toc) }
                             Text("|", color = p.muted2, fontSize = 13.sp,
                                 modifier = Modifier.padding(horizontal = 6.dp))
-                            PageTab("标注", page == ReaderPanelPage.Annotations, p) {
+                            PageTab("笔记", page == ReaderPanelPage.Annotations, p) {
                                 onPageChange(ReaderPanelPage.Annotations)
                             }
                         }

@@ -2029,12 +2029,6 @@ private const val DECORATION_AUTO_THICKNESS_EM = 0.1f
 /** 字体度量缺失时的回退下划线位置（em，与旧下划线口径一致 = 0.12em）。 */
 private const val DECORATION_UNDERLINE_FALLBACK_EM = 0.12f
 
-/** 读者标注划线的默认中心位置（em，基线向下）：比书内下划线更靠下。 */
-private const val ANNOTATION_UNDERLINE_OFFSET_EM = 0.20f
-
-/** 删除线中心相对基线的距离（em，向上）：穿字身中部（CJK 方块字居中略偏上）。 */
-private const val ANNOTATION_STRIKE_OFFSET_EM = 0.28f
-
 /** skip-ink 横带的纵向内缩（px）：Chromium `decoration_bounds.Inset(InsetsF::VH(0.5, 0))`。 */
 private const val DECORATION_INK_BAND_INSET_PX = 0.5f
 

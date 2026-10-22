@@ -1,6 +1,5 @@
 package orilumn.reader.ui.reader
 
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -8,13 +7,10 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -30,15 +26,22 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusTarget
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -47,15 +50,23 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.data.annotation.AnnotationKind
-import orilumn.reader.data.annotation.AnnotationLineStyle
 import orilumn.reader.data.epub.TocItem
+import orilumn.reader.engine.skia.ANNOTATION_DASH_OFF_RATIO
+import orilumn.reader.engine.skia.ANNOTATION_DASH_ON_RATIO
+import orilumn.reader.engine.skia.ANNOTATION_STRIKE_OFFSET_EM
+import orilumn.reader.engine.skia.ANNOTATION_UNDERLINE_OFFSET_EM
+import orilumn.reader.engine.skia.ANNOTATION_UNDERLINE_THICKNESS_EM
+import orilumn.reader.engine.skia.DecorKind
+import orilumn.reader.engine.skia.DecorStroke
+import orilumn.reader.engine.skia.decorWaveGeometry
 
 /**
- * 标注清单的列表体（用户层，D-23）：由 [ReaderSidePanel] 的抽屉壳承载，与目录同一抽屉。
+ * 笔记清单的列表体（用户层，D-23）：由 [ReaderSidePanel] 的抽屉壳承载，与目录同一抽屉。
  *
  * 入参只收「读 / 删 / 跳」三个动作与章标题表，加载逻辑自己管（平台壳不写）；
  * 按书内章序分组、章内按区间起点升序（与 `annotationsForChapter` 同序）。
- * 行内容 = 类别标记 + 两行原文摘录（可空回退「（无摘录）」）+ 章标题分组头 + 行尾删除。
+ * 行内容 = 两行原文摘录（可空回退「（无摘录）」）+ 章标题分组头 + 行尾删除；
+ * 摘录按标注本来的颜色与线型直接画在字上（与正文同口径），不另加类别图标。
  *
  * 键盘沿用面板共享的 [PanelNav]（↑↓ + Enter）；页签切换先只做点按（D-23 §9）。
  */
@@ -254,7 +265,7 @@ internal fun buildAnnotationRows(
 
 /**
  * 目录树拍平成「章号 → 标题」（章标题 = 该章最先出现的目录项；子项不覆盖）。
- * 标注清单的分组头与目录跳转共用同一份标题，缺项由面板回退「第 N 章」。
+ * 笔记清单的分组头与目录跳转共用同一份标题，缺项由面板回退「第 N 章」。
  */
 fun chapterTitlesOf(toc: List<TocItem>): Map<Int, String> {
     val out = LinkedHashMap<Int, String>()
@@ -300,19 +311,8 @@ private fun AnnotationListRow(
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.Top,
     ) {
-        Box(modifier = Modifier.width(22.dp).padding(top = 2.dp)) {
-            AnnotationMarker(annotation)
-        }
-        Column(modifier = Modifier.weight(1f).padding(start = 4.dp)) {
-            val quote = annotation.quote?.takeIf { it.isNotBlank() }
-            Text(
-                text = quote ?: "（无摘录）",
-                color = if (quote == null) palette.muted2 else palette.text,
-                fontSize = 13.sp,
-                lineHeight = 18.sp,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
+        Column(modifier = Modifier.weight(1f)) {
+            QuoteText(annotation, palette)
             val note = annotation.note?.takeIf { it.isNotBlank() }
             if (annotation.kind == AnnotationKind.Note && note != null) {
                 Text(
@@ -339,70 +339,138 @@ private fun AnnotationListRow(
     }
 }
 
+/** 清单摘录的字号；装饰几何（线宽 / 线心偏移 / 波形）都按这个字号换算，与正文同一套口径。 */
+private val QuoteFontSize = 13.sp
+
+/** 一条标注在清单里该怎么画：高亮垫底色，划线按自己的线型与颜色画在字下/字中，批注不画装饰。 */
+internal class QuoteDecor(
+    val kind: DecorKind,
+    val color: Color,
+    val stroke: DecorStroke,
+)
+
 /**
- * 类别标记：高亮 = 色块；划线 = 线型小样（实线/波浪/虚线/删除线）；批注 = ✎。
- * 颜色是记录里的创建时快照，不跟调色板走。
+ * 清单行的装饰**直接沿用正文那份投影**（[annotationDecorRanges]）：同一处颜色回退、
+ * 同一处删除线换落墨位置、同一处批注不落墨。面板不再自己判一遍类型，
+ * 才不会出现「清单里是虚线、正文里是波浪」这种两套口径。
+ */
+internal fun quoteDecorOf(annotation: Annotation): QuoteDecor? =
+    annotationDecorRanges(listOf(annotation)).firstOrNull()?.let {
+        QuoteDecor(kind = it.kind, color = Color(it.argb), stroke = it.stroke)
+    }
+
+/**
+ * 摘录按标注**本来面貌**直接画在字上：高亮 = 同色底垫在文字后；划线 = 同色同线型画在文字后
+ * （波浪用正文那一份 [decorWaveGeometry]）。不再在左侧另立类别图标——颜色和线型本身就是类别。
  */
 @Composable
-private fun AnnotationMarker(annotation: Annotation) {
-    val ink = Color(annotation.color ?: 0xFFC8A15A.toInt())
-    when (annotation.kind) {
-        AnnotationKind.Highlight -> Box(
-            modifier = Modifier
-                .size(12.dp)
-                .clip(RoundedCornerShape(3.dp))
-                .background(ink.copy(alpha = 0.85f)),
-        )
-
-        AnnotationKind.Underline -> Column(modifier = Modifier.width(18.dp)) {
-            // 色块（创建时颜色）+ 线型小样：高亮与划线两种信息都在这一列里。
-            Box(
-                modifier = Modifier
-                    .width(18.dp)
-                    .height(7.dp)
-                    .clip(RoundedCornerShape(2.dp))
-                    .background(ink.copy(alpha = 0.85f)),
-            )
-            Spacer(Modifier.height(2.dp))
-            Canvas(modifier = Modifier.width(18.dp).height(8.dp)) {
-                val y = if (annotation.lineStyle == AnnotationLineStyle.Strike) size.height * 0.45f
-                else size.height * 0.7f
-                val stroke = 1.8.dp.toPx()
-                when (annotation.lineStyle) {
-                    AnnotationLineStyle.Wavy -> {
-                        val path = Path()
-                        path.moveTo(0f, y)
-                        val amp = size.height * 0.22f
-                        val step = size.width / 4f
-                        var x = 0f
-                        var up = true
-                        while (x < size.width) {
-                            val nx = (x + step).coerceAtMost(size.width)
-                            path.quadraticTo((x + nx) / 2f, if (up) y - amp else y + amp, nx, y)
-                            x = nx
-                            up = !up
-                        }
-                        drawPath(path, ink, style = Stroke(width = stroke))
-                    }
-
-                    AnnotationLineStyle.Dashed -> drawLine(
-                        color = ink,
-                        start = Offset(0f, y),
-                        end = Offset(size.width, y),
-                        strokeWidth = stroke,
-                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(4f, 3f)),
-                    )
-
-                    else -> drawLine(
-                        color = ink,
-                        start = Offset(0f, y),
-                        end = Offset(size.width, y),
-                        strokeWidth = stroke,
-                    )
-                }
+private fun QuoteText(annotation: Annotation, palette: Palette) {
+    val quote = annotation.quote?.takeIf { it.isNotBlank() }
+    var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
+    val decor = remember(annotation) { quoteDecorOf(annotation) }
+    val em = with(LocalDensity.current) { QuoteFontSize.toPx() }
+    Text(
+        text = quote ?: "（无摘录）",
+        color = if (quote == null) palette.muted2 else palette.text,
+        fontSize = QuoteFontSize,
+        lineHeight = 18.sp,
+        maxLines = 2,
+        overflow = TextOverflow.Ellipsis,
+        onTextLayout = { layout = it },
+        modifier = Modifier.drawWithContent {
+            val lr = layout
+            val d = decor
+            val decorated = quote != null && lr != null && d != null
+            if (decorated && d.kind == DecorKind.BACKGROUND) drawQuoteHighlight(lr, d.color)
+            drawContent()
+            if (decorated && d.kind != DecorKind.BACKGROUND) {
+                drawQuoteLines(lr, d.kind, d.stroke, d.color, em)
             }
-        }
+        },
+    )
+}
 
-        AnnotationKind.Note -> Text("✎", color = PanelGold, fontSize = 15.sp)
+/** 高亮：逐行铺满该行行盒（与正文一致），四角不圆、不跨行合并。 */
+private fun DrawScope.drawQuoteHighlight(lr: TextLayoutResult, color: Color) {
+    for (i in 0 until lr.lineCount) {
+        val left = lr.getLineLeft(i)
+        val right = lr.getLineRight(i)
+        val top = lr.getLineTop(i)
+        val bottom = lr.getLineBottom(i)
+        if (right <= left || bottom <= top) continue
+        drawRect(color = color, topLeft = Offset(left, top), size = Size(right - left, bottom - top))
+    }
+}
+
+/** 划线 / 删除线：线宽与线的位置按正文字号口径换算（[ANNOTATION_UNDERLINE_THICKNESS_EM] 等）。 */
+private fun DrawScope.drawQuoteLines(
+    lr: TextLayoutResult,
+    kind: DecorKind,
+    stroke: DecorStroke,
+    color: Color,
+    em: Float,
+) {
+    val thickness = (em * ANNOTATION_UNDERLINE_THICKNESS_EM).coerceAtLeast(1f)
+    for (i in 0 until lr.lineCount) {
+        val left = lr.getLineLeft(i)
+        val right = lr.getLineRight(i)
+        if (right <= left) continue
+        val baseline = lr.getLineBaseline(i)
+        val centerY = if (kind == DecorKind.STRIKETHROUGH) {
+            baseline - em * ANNOTATION_STRIKE_OFFSET_EM
+        } else {
+            baseline + em * ANNOTATION_UNDERLINE_OFFSET_EM
+        }
+        when (stroke) {
+            DecorStroke.Wavy -> drawQuoteWave(left, right, centerY, thickness, color)
+            DecorStroke.Dashed -> drawLine(
+                color = color,
+                start = Offset(left, centerY),
+                end = Offset(right, centerY),
+                strokeWidth = thickness,
+                cap = StrokeCap.Round,
+                pathEffect = PathEffect.dashPathEffect(
+                    floatArrayOf(
+                        thickness * ANNOTATION_DASH_ON_RATIO,
+                        thickness * ANNOTATION_DASH_OFF_RATIO,
+                    ),
+                ),
+            )
+            else -> drawRect(
+                color = color,
+                topLeft = Offset(left, centerY - thickness / 2f),
+                size = Size(right - left, thickness),
+            )
+        }
+    }
+}
+
+/**
+ * 波浪线：与正文落墨**同一条曲线**——几何取 [decorWaveGeometry]，每个波长一段三次贝塞尔，
+ * 起点早一个波长、横向裁到片段（Chromium 的 overhang + 裁剪口径）。
+ */
+private fun DrawScope.drawQuoteWave(
+    left: Float,
+    right: Float,
+    centerY: Float,
+    thickness: Float,
+    color: Color,
+) {
+    val g = decorWaveGeometry(thickness)
+    val path = Path().apply {
+        val startX = left - g.wavelength
+        moveTo(startX, centerY)
+        var x = startX
+        val endX = right + g.wavelength
+        while (x < endX) {
+            val xe = x + g.wavelength
+            val cx = x + g.wavelength * 0.5f
+            cubicTo(cx, centerY + g.controlOffset, cx, centerY - g.controlOffset, xe, centerY)
+            x = xe
+        }
+    }
+    val ext = g.halfHeight
+    clipRect(left, centerY - ext, right, centerY + ext) {
+        drawPath(path, color, style = Stroke(width = g.thickness.coerceAtLeast(1f)))
     }
 }

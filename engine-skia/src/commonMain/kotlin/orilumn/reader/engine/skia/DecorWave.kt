@@ -8,6 +8,12 @@ package orilumn.reader.engine.skia
  */
 const val ANNOTATION_UNDERLINE_THICKNESS_EM = 0.08f
 
+/** 读者标注下划线的线心相对基线（em，向下）：比书内下划线更靠下。 */
+const val ANNOTATION_UNDERLINE_OFFSET_EM = 0.20f
+
+/** 删除线的线心相对基线（em，向上）：穿字身中部（CJK 方块字居中略偏上）。 */
+const val ANNOTATION_STRIKE_OFFSET_EM = 0.28f
+
 /** 虚线：实线段 / 空档 长度相对线粗的倍数（Chromium `dash_on = 3 * thickness`）。 */
 const val ANNOTATION_DASH_ON_RATIO = 3f
 const val ANNOTATION_DASH_OFF_RATIO = 2f

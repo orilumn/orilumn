@@ -123,14 +123,18 @@ class ReaderSettingsTest {
             )
             val next = ReaderSettings.DEFAULT.copy(
                 highlightColorSlots = listOf(0x11223344, 0x22334455, 0x33445566, 0x44556677, 0x55667788),
+                noteColorSlots = listOf(0x31415926, 0x27182818, 0x11235813, 0x13213455, 0x55891440),
                 underlineDefaultSlot = 3,
+                noteDefaultSlot = 2,
                 annotationLastKind = "underline",
                 annotationLastLineStyle = "wavy",
             )
             persist.persist(7L, next)
             val saved = ReaderSettingsStore(dir.absolutePath).load()
             assertEquals(next.highlightColorSlots, saved.highlightColorSlots)
+            assertEquals(next.noteColorSlots, saved.noteColorSlots)
             assertEquals(3, saved.underlineDefaultSlot)
+            assertEquals(2, saved.noteDefaultSlot)
             assertEquals("underline", saved.annotationLastKind)
             assertEquals("wavy", saved.annotationLastLineStyle)
             // 只动标注偏好时 overlay 保持空白。
@@ -152,11 +156,19 @@ class ReaderSettingsTest {
             ReaderSettings.ANNOTATION_COLOR_SLOT_COUNT,
             ReaderSettings.DEFAULT.underlineColorSlots.size,
         )
+        // 批注是独立色系（D-25）：槽数同一口径，但颜色不与高亮 / 划线共用。
+        assertEquals(
+            ReaderSettings.ANNOTATION_COLOR_SLOT_COUNT,
+            ReaderSettings.DEFAULT.noteColorSlots.size,
+        )
+        assertTrue(ReaderSettings.DEFAULT.noteColorSlots.none { it in ReaderSettings.DEFAULT.underlineColorSlots })
         val custom = ReaderSettings(
             highlightColorSlots = listOf(0x11223344, 0x22334455, 0x33445566, 0x44556677, 0x55667788),
             underlineColorSlots = listOf(0xFF010203.toInt(), 0xFF040506.toInt(), 0xFF070809.toInt(), 0xFF0A0B0C.toInt(), 0xFF0D0E0F.toInt()),
+            noteColorSlots = listOf(0xFF111213.toInt(), 0xFF141516.toInt(), 0xFF171819.toInt(), 0xFF1A1B1C.toInt(), 0xFF1D1E1F.toInt()),
             highlightDefaultSlot = 3,
             underlineDefaultSlot = 4,
+            noteDefaultSlot = 1,
         )
         assertEquals(custom, ReaderSettings.fromJson(custom.toJson()))
 
@@ -170,9 +182,12 @@ class ReaderSettingsTest {
         val long = ReaderSettings.fromJson("""{"underlineColorSlots":[1,2,3,4,5,6,7]}""")
         assertEquals(5, long.underlineColorSlots.size)
         // 默认槽下标越界时钳到有效范围。
-        val clamped = ReaderSettings.fromJson("""{"highlightDefaultSlot":99,"underlineDefaultSlot":-3}""")
+        val clamped = ReaderSettings.fromJson("""{"highlightDefaultSlot":99,"underlineDefaultSlot":-3,"noteDefaultSlot":42}""")
         assertEquals(4, clamped.highlightDefaultSlot)
         assertEquals(0, clamped.underlineDefaultSlot)
+        assertEquals(4, clamped.noteDefaultSlot)
+        // 批注色槽缺键 / 非数组同样回退到出厂色，不跟着高亮 / 划线走。
+        assertEquals(ReaderSettings.DEFAULT.noteColorSlots, ReaderSettings.fromJson("""{"fontSize":20}""").noteColorSlots)
     }
 
     @Test
@@ -209,7 +224,8 @@ class ReaderSettingsTest {
             "fontBody", "fontTitle", "fontCode",
             "useOriginalStyle", "useUserScripts", "pageAnim", "autoContinue", "pageNum", "coverStretch",
             "fontScale", "scheme", "bgOverride", "fgOverride", "layoutTheme",
-            "highlightColorSlots", "underlineColorSlots", "highlightDefaultSlot", "underlineDefaultSlot",
+            "highlightColorSlots", "underlineColorSlots", "noteColorSlots",
+            "highlightDefaultSlot", "underlineDefaultSlot", "noteDefaultSlot",
             "annotationLastKind", "annotationLastLineStyle",
         ).forEach { assertTrue("missing key $it", obj.containsKey(it)) }
         assertNotNull(obj.keys)

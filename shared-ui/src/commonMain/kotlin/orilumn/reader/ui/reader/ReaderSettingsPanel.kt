@@ -395,6 +395,7 @@ fun ReaderSettingsPanel(
                 listOf(
                     ItemKey(onEnter = { annotationColorKind = AnnotationKind.Highlight }),
                     ItemKey(onEnter = { annotationColorKind = AnnotationKind.Underline }),
+                    ItemKey(onEnter = { annotationColorKind = AnnotationKind.Note }),
                     ItemKey(
                         // 色槽行本身没有「整行动作」：左右键移动当前槽，具体槽由各自的色点接收点击。
                         onEnter = {},
@@ -1412,9 +1413,9 @@ private fun AnimModePage(
 // ================= Annotation colors page =================
 
 /**
- * 标注颜色页（D-13 / D-21）：高亮 / 划线各自一组五格色槽。
+ * 标注颜色页（D-13 / D-21 / D-25）：高亮 / 划线 / 批注各自一组五格色槽。
  *
- * 交互：先选类别，再点一格色槽选中编辑；十格基础色只换 RGB、保留该槽透明度；
+ * 交互：先选类别（高亮 / 划线 / 批注），再点一格色槽选中编辑；十格基础色只换 RGB、保留该槽透明度；
  * 红/绿/蓝滑条可调到任意颜色，透明度滑条只改 alpha；「设为默认色槽」决定新建标注用哪一格。
  * 所有改动走 [commitLight]（只改像素，不触发重排）。
  */
@@ -1462,12 +1463,13 @@ private fun AnnotationColorPage(
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
         item { ThemeOpt("高亮", kind == AnnotationKind.Highlight, keys[0].onEnter, p, nav = nav, index = 0) }
         item { ThemeOpt("划线", kind == AnnotationKind.Underline, keys[1].onEnter, p, nav = nav, index = 1) }
+        item { ThemeOpt("批注", kind == AnnotationKind.Note, keys[2].onEnter, p, nav = nav, index = 2) }
         item {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(if (nav.activeIdx == 2) p.rowActive else Color.Transparent)
-                    .panelHover(nav, 2)
+                    .background(if (nav.activeIdx == 3) p.rowActive else Color.Transparent)
+                    .panelHover(nav, 3)
                     .padding(horizontal = 16.dp, vertical = 10.dp),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1498,17 +1500,17 @@ private fun AnnotationColorPage(
                 label = if (selected == defaultSlot) "已是默认色槽" else "设为默认色槽",
                 p = p,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 5.dp),
-                onClick = keys[3].onEnter,
+                onClick = keys[4].onEnter,
                 nav = nav,
-                index = 3,
+                index = 4,
             )
         }
         item {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(if (nav.activeIdx == 4) p.rowActive else Color.Transparent)
-                    .panelHover(nav, 4)
+                    .background(if (nav.activeIdx == 5) p.rowActive else Color.Transparent)
+                    .panelHover(nav, 5)
                     .padding(horizontal = 16.dp, vertical = 10.dp),
             ) {
                 Text("颜色", color = p.text, fontSize = 15.sp)
@@ -1559,7 +1561,7 @@ private fun AnnotationColorPage(
                 p = p,
                 labelWidth = labelW,
                 nav = nav,
-                index = 5,
+                index = 6,
             )
         }
         item {
@@ -1583,7 +1585,7 @@ private fun AnnotationColorPage(
                 p = p,
                 labelWidth = labelW,
                 nav = nav,
-                index = 6,
+                index = 7,
             )
         }
         item {
@@ -1607,7 +1609,7 @@ private fun AnnotationColorPage(
                 p = p,
                 labelWidth = labelW,
                 nav = nav,
-                index = 7,
+                index = 8,
             )
         }
         item {
@@ -1631,7 +1633,7 @@ private fun AnnotationColorPage(
                 p = p,
                 labelWidth = labelW,
                 nav = nav,
-                index = 8,
+                index = 9,
             )
         }
         item { Spacer(modifier = Modifier.height(24.dp)) }

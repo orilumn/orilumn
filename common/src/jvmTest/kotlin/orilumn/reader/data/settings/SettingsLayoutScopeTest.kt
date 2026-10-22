@@ -35,7 +35,8 @@ class SettingsLayoutScopeTest {
         "pageAnim", "pageAnimationMode", "autoContinue", "pageNum", "coverStretch",
         "showHiddenFonts",
         // 标注色槽只改像素，不影响分页。
-        "highlightColorSlots", "underlineColorSlots", "highlightDefaultSlot", "underlineDefaultSlot",
+        "highlightColorSlots", "underlineColorSlots", "noteColorSlots",
+        "highlightDefaultSlot", "underlineDefaultSlot", "noteDefaultSlot",
         // 浮动菜单记住的上次类别 / 划线线型：纯菜单偏好，不影响版面。
         "annotationLastKind", "annotationLastLineStyle",
     )
@@ -81,8 +82,10 @@ class SettingsLayoutScopeTest {
         "showHiddenFonts" -> s.copy(showHiddenFonts = !s.showHiddenFonts)
         "highlightColorSlots" -> s.copy(highlightColorSlots = s.highlightColorSlots + 0x01020304)
         "underlineColorSlots" -> s.copy(underlineColorSlots = s.underlineColorSlots + 0x01020304)
+        "noteColorSlots" -> s.copy(noteColorSlots = s.noteColorSlots + 0x01020304)
         "highlightDefaultSlot" -> s.copy(highlightDefaultSlot = if (s.highlightDefaultSlot == 0) 1 else 0)
         "underlineDefaultSlot" -> s.copy(underlineDefaultSlot = if (s.underlineDefaultSlot == 0) 1 else 0)
+        "noteDefaultSlot" -> s.copy(noteDefaultSlot = if (s.noteDefaultSlot == 0) 1 else 0)
         "annotationLastKind" -> s.copy(annotationLastKind = if (s.annotationLastKind == "underline") "highlight" else "underline")
         "annotationLastLineStyle" -> s.copy(annotationLastLineStyle = if (s.annotationLastLineStyle == "wavy") "straight" else "wavy")
 

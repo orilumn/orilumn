@@ -185,6 +185,11 @@ class AnnotationState(private val host: ReaderHost) {
     private var tempId = -1L
 }
 
-/** v1 可绘制的标注类型：批注（Note）等 v2 再补；这里先把类型收敛到一个地方。 */
+/**
+ * 能在正文里留下标记、并因此可以被长按命中的标注类型。
+ *
+ * v2 起批注也算：它在正文里是一条虚线下划线（D-25），长按它能打开同一个菜单改色 / 编辑 / 删除。
+ * 「有没有落墨」与「能不能命中」是同一件事，故用一条判据。
+ */
 internal fun Annotation.isDrawable(): Boolean =
-    kind == AnnotationKind.Highlight || kind == AnnotationKind.Underline
+    kind == AnnotationKind.Highlight || kind == AnnotationKind.Underline || kind == AnnotationKind.Note

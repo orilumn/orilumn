@@ -70,8 +70,11 @@ private val ANNOTATION_MENU_GAP = 8.dp
  * 不用 `Popup`：阅读层至今零 Popup，菜单只是内容区上方的一层轻量覆盖物，跟着锚点矩形定位；
  * 贴顶时自动翻到下方，左右贴边时向内收。
  *
- * 项：高亮 / 划线（切类别）/ 复制 / 删除。没有「取消」：点菜单外面即关（遮罩/正文点按由调用方接）。
+ * 项：高亮 / 划线（切类别）/ 批注（叫出输入框）/ 复制 / 删除。没有「取消」：点菜单外面即关
+ * （遮罩/正文点按由调用方接）。
  * 删除只有存在可删记录（[deleteTarget] 非 null）时才亮，否则虚掉且点了没反应。
+ *
+ * **批注（v2，D-25）不是色槽类别**：点「批注」直接打开输入框；编辑已有批注时点色槽只改它的颜色。
  */
 @Composable
 internal fun AnnotationMenu(
@@ -86,13 +89,19 @@ internal fun AnnotationMenu(
     initialLineStyle: AnnotationLineStyle,
     editing: Annotation?,
     deleteTarget: Annotation?,
+    /**
+     * 「批注」类别名的样张颜色（虚线用）：新建时是批注默认色，编辑批注时是那条记录自己的颜色。
+     */
+    noteArgb: Int,
     onPickColor: (AnnotationKind, Int, AnnotationLineStyle) -> Unit,
     onPickLineStyle: (AnnotationLineStyle) -> Unit,
+    onOpenNote: () -> Unit,
     onCopy: () -> Unit,
     onDelete: (Annotation) -> Unit,
 ) {
     var size by remember { mutableStateOf(IntSize.Zero) }
     // 展开哪个类别的色槽：编辑时先落到该条自己的类别，否则落到上次用过的类别。
+    // 批注没有色槽行（它的颜色在输入框里挑），所以这个状态只在高亮 / 划线之间走。
     var kind by remember(editing?.id) {
         mutableStateOf(editing?.kind?.takeIf { it != AnnotationKind.Note } ?: initialKind)
     }
@@ -110,6 +119,9 @@ internal fun AnnotationMenu(
         .coerceIn(0, colors.lastIndex.coerceAtLeast(0))
     // 编辑中的记录用自身颜色描圈；只在它所属类别的色槽行里描。
     val editingColor = editing?.let { it.color ?: annotationFallbackColor(it.kind) }?.takeIf { editing.kind == kind }
+    // 正在编辑一条批注：菜单只留「批注 / 复制 / 删除」。
+    // 批注是独立类型，不能通过点高亮 / 划线的色槽把它悄悄改型（那会丢掉它自己那条虚线）。
+    val editingNote = editing?.kind == AnnotationKind.Note
     // 类别名的样张色：两类完全独立，各取本类默认槽（编辑本类记录时跟着它自己的颜色）。
     fun swatchOf(target: AnnotationKind): Int = annotationSwatchColor(
         highlightColors = highlightColors,
@@ -133,23 +145,36 @@ internal fun AnnotationMenu(
                 modifier = Modifier.padding(horizontal = 2.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                if (!editingNote) {
+                    MenuAction(
+                        label = "高亮",
+                        textColor = palette.text,
+                        palette = palette,
+                        active = kind == AnnotationKind.Highlight,
+                        swatch = swatchOf(AnnotationKind.Highlight),
+                        onClick = { kind = AnnotationKind.Highlight },
+                    )
+                    MenuAction(
+                        label = "划线",
+                        textColor = palette.text,
+                        palette = palette,
+                        active = kind == AnnotationKind.Underline,
+                        underlineArgb = swatchOf(AnnotationKind.Underline),
+                        // 样张跟着**当前线型**走：选波浪/虚线/删除线后，「划线」二字下的那笔立刻变样。
+                        underlineStyle = lineStyle,
+                        onClick = { kind = AnnotationKind.Underline },
+                    )
+                }
                 MenuAction(
-                    label = "高亮",
+                    label = "批注",
                     textColor = palette.text,
                     palette = palette,
-                    active = kind == AnnotationKind.Highlight,
-                    swatch = swatchOf(AnnotationKind.Highlight),
-                    onClick = { kind = AnnotationKind.Highlight },
-                )
-                MenuAction(
-                    label = "划线",
-                    textColor = palette.text,
-                    palette = palette,
-                    active = kind == AnnotationKind.Underline,
-                    underlineArgb = swatchOf(AnnotationKind.Underline),
-                    // 样张跟着**当前线型**走：选波浪/虚线/删除线后，「划线」二字下的那笔立刻变样。
-                    underlineStyle = lineStyle,
-                    onClick = { kind = AnnotationKind.Underline },
+                    // 正在编辑的就是一条批注时，这个按钮亮着（再点一次 = 改文字）。
+                    active = editing?.kind == AnnotationKind.Note,
+                    // 批注在正文里固定是虚线（D-25），样张也照这个口径画。
+                    underlineArgb = noteArgb,
+                    underlineStyle = AnnotationLineStyle.Dashed,
+                    onClick = onOpenNote,
                 )
                 MenuAction("复制", palette.text, palette, active = false, onClick = onCopy)
                 MenuAction(
@@ -161,24 +186,27 @@ internal fun AnnotationMenu(
                     onClick = { deleteTarget?.let(onDelete) },
                 )
             }
-            ColorSlotRow(
-                colors = colors,
-                defaultSlot = defaultSlot,
-                palette = palette,
-                currentArgb = editingColor,
-                bottomPadding = if (kind == AnnotationKind.Underline) 2.dp else 8.dp,
-                onPick = { index -> onPickColor(kind, index, lineStyle) },
-            )
-            if (kind == AnnotationKind.Underline) {
-                LineStyleRow(
-                    current = lineStyle,
-                    argb = swatchOf(AnnotationKind.Underline),
+            // 批注没有色槽行：它的颜色在输入框里挑（D-25），菜单里点一格不该把记录改型。
+            if (!editingNote) {
+                ColorSlotRow(
+                    colors = colors,
+                    defaultSlot = defaultSlot,
                     palette = palette,
-                    onPick = {
-                        lineStyle = it
-                        onPickLineStyle(it)
-                    },
+                    currentArgb = editingColor,
+                    bottomPadding = if (kind == AnnotationKind.Underline) 2.dp else 8.dp,
+                    onPick = { index -> onPickColor(kind, index, lineStyle) },
                 )
+                if (kind == AnnotationKind.Underline) {
+                    LineStyleRow(
+                        current = lineStyle,
+                        argb = swatchOf(AnnotationKind.Underline),
+                        palette = palette,
+                        onPick = {
+                            lineStyle = it
+                            onPickLineStyle(it)
+                        },
+                    )
+                }
             }
         }
     }

@@ -10,7 +10,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** 标注 → 渲染装饰的用户层映射：类型、颜色快照、批注跳过、区间不改。 */
+/** 标注 → 渲染装饰的用户层映射：类型、颜色快照、批注虚线标记、区间不改。 */
 class AnnotationDecorTest {
 
     private fun annotation(
@@ -61,8 +61,22 @@ class AnnotationDecorTest {
     }
 
     @Test
-    fun `note is not drawn in v1`() {
-        assertTrue(annotationDecorRanges(listOf(annotation(AnnotationKind.Note))).isEmpty())
+    fun `note is drawn as a dashed underline`() {
+        // D-25：批注是独立类型，正文里是一条虚线（与划线靠线型区分），颜色取自己的兜底色。
+        val range = annotationDecorRanges(
+            listOf(annotation(AnnotationKind.Note, lineStyle = AnnotationLineStyle.Wavy)),
+        ).single()
+        assertEquals(DecorKind.UNDERLINE, range.kind)
+        assertEquals(DecorStroke.Dashed, range.stroke)
+        assertEquals(DEFAULT_NOTE_ARGB, range.argb)
+    }
+
+    @Test
+    fun `note keeps its own color snapshot`() {
+        val range = annotationDecorRanges(
+            listOf(annotation(AnnotationKind.Note, 0xFF223344.toInt())),
+        ).single()
+        assertEquals(0xFF223344.toInt(), range.argb)
     }
 
     @Test

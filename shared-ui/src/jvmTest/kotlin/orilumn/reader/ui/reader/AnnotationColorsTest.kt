@@ -264,6 +264,30 @@ class AnnotationColorsTest {
     }
 
     @Test
+    fun `note has its own color family`() {
+        // D-25：批注是独立类型，色槽 / 默认格完全不与高亮、划线共用。
+        val s = ReaderSettings.DEFAULT.copy(noteDefaultSlot = 3, highlightDefaultSlot = 1, underlineDefaultSlot = 2)
+        assertEquals(
+            ReaderSettings.DEFAULT_NOTE_COLOR_SLOTS[3],
+            annotationDefaultColor(s, AnnotationKind.Note),
+        )
+        assertEquals(DEFAULT_NOTE_ARGB, annotationFallbackColor(AnnotationKind.Note))
+        // 改批注色槽不动另外两类。
+        val recolored = withAnnotationColorSlot(s, AnnotationKind.Note, 0, 0xFF123456.toInt())
+        assertEquals(0xFF123456.toInt(), recolored.noteColorSlots[0])
+        assertEquals(s.highlightColorSlots, recolored.highlightColorSlots)
+        assertEquals(s.underlineColorSlots, recolored.underlineColorSlots)
+        // 默认格同样只改自己那一类，越界钳制。
+        val picked = withAnnotationDefaultSlot(s, AnnotationKind.Note, 99)
+        assertEquals(s.noteColorSlots.lastIndex, picked.noteDefaultSlot)
+        assertEquals(s.highlightDefaultSlot, picked.highlightDefaultSlot)
+        assertEquals(s.underlineDefaultSlot, picked.underlineDefaultSlot)
+        // 老存档 / 手改配置把批注色槽清空时回退出厂色，而不是变成透明。
+        val empty = s.copy(noteColorSlots = emptyList(), noteDefaultSlot = 0)
+        assertEquals(DEFAULT_NOTE_ARGB, annotationDefaultColor(empty, AnnotationKind.Note))
+    }
+
+    @Test
     fun `preset colors are opaque and unique`() {
         assertEquals(10, ANNOTATION_PRESET_COLORS.size)
         assertEquals(ANNOTATION_PRESET_COLORS.size, ANNOTATION_PRESET_COLORS.distinct().size)

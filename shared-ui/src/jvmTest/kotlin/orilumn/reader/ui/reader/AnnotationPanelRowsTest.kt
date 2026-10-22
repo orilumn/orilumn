@@ -41,6 +41,27 @@ class AnnotationPanelRowsTest {
     }
 
     @Test
+    fun filterByKindAndNoteText() {
+        val highlight = ann(0, 1)
+        val underline = ann(0, 3).copy(kind = AnnotationKind.Underline)
+        val note = ann(0, 5).copy(kind = AnnotationKind.Note, note = "想法")
+        // 带批注的高亮：记录类型仍是高亮，但在读者眼里也是「一条笔记」。
+        val highlightedWithNote = ann(0, 7).copy(note = "补充")
+        val all = listOf(highlight, underline, note, highlightedWithNote)
+
+        assertEquals(all, filterAnnotations(all, null))
+        assertEquals(listOf(highlight, highlightedWithNote), filterAnnotations(all, AnnotationKind.Highlight))
+        assertEquals(listOf(underline), filterAnnotations(all, AnnotationKind.Underline))
+        // 「批注」按有没有批注文字判，不按记录类型。
+        assertEquals(listOf(note, highlightedWithNote), filterAnnotations(all, AnnotationKind.Note))
+        // 空白批注不算写过批注。
+        assertEquals(
+            emptyList<Annotation>(),
+            filterAnnotations(listOf(highlight.copy(note = "  ")), AnnotationKind.Note),
+        )
+    }
+
+    @Test
     fun chapterTitlesTakeFirstTocItemPerChapter() {
         val toc = listOf(
             TocItem("章一", 0, null, children = listOf(TocItem("节一", 0, "s1"))),

@@ -237,10 +237,11 @@ class ReaderLogicTest {
         val l1 = line(100, 120).copy(xLeft = 10, firstLineIndentPx = 5f)
         val l2 = line(120, 140).copy(xLeft = 10)
         val lines = listOf(l1, l2)
-        // 页坐标 y=10 落首行 [0,20)：段落 x = 30-10-5 = 15，行内 y = 10。
+        // 页坐标 y=10 落首行 [0,20)：段落 x = 30-10 = 20（**首行缩进保留在 x 里**，由
+        // LineHitTest 交给 Aligner —— 缩进参与 JUSTIFY 拉伸基数），行内 y = 10。
         val hit = ReaderMath.tapLineAt(lines, shift = 100, tapX = 30f, tapY = 10f)
         assertEquals(l1, hit?.first)
-        assertEquals(15f, hit?.second ?: Float.NaN, 1e-6f)
+        assertEquals(20f, hit?.second ?: Float.NaN, 1e-6f)
         assertEquals(10f, hit?.third ?: Float.NaN, 1e-6f)
         // y=20 是次行起点（含首不含尾）。
         assertEquals(l2, ReaderMath.tapLineAt(lines, shift = 100, tapX = 30f, tapY = 20f)?.first)
@@ -255,8 +256,20 @@ class ReaderLogicTest {
     }
 
     @Test
-    fun tapLineAt_negativeIndentClampsToZero() {
-        val l = line(0, 20).copy(xLeft = 10, firstLineIndentPx = -3f)
-        assertEquals(20f, ReaderMath.tapLineAt(listOf(l), shift = 0, tapX = 30f, tapY = 10f)?.second ?: Float.NaN, 1e-6f)
+    fun tapLineAt_keepsSignedIndentInParagraphX() {
+        // 负缩进（悬挂缩进）同样原样保留：落墨侧 `xs[0] = firstLineIndentPx` 是有符号的，
+        // 命中侧一旦钳到 0 就会与墨迹错开一个缩进量。
+        val negative = line(0, 20).copy(xLeft = 10, firstLineIndentPx = -3f)
+        assertEquals(
+            20f,
+            ReaderMath.tapLineAt(listOf(negative), shift = 0, tapX = 30f, tapY = 10f)?.second ?: Float.NaN,
+            1e-6f,
+        )
+        val positive = line(0, 20).copy(xLeft = 10, firstLineIndentPx = 40f)
+        assertEquals(
+            20f,
+            ReaderMath.tapLineAt(listOf(positive), shift = 0, tapX = 30f, tapY = 10f)?.second ?: Float.NaN,
+            1e-6f,
+        )
     }
 }

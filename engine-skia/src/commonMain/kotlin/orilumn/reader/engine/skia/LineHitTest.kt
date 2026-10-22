@@ -22,19 +22,31 @@ import kotlin.math.abs
  * 改为直接读绘制用的同一份 [LineAligner.Placement.xs] 做二分查找：
  * **命中与绘制共用一份几何**，错位在结构上不可能发生。
  *
+ * ## 横向用「落墨实走」的轨（与逐字落墨同一出口）
+ *
+ * S5b 起，含拉丁字母的行在绘制时会用 [lineGlyphTrack]（Skia 簇位 + kerning 收紧 +
+ * JUSTIFY 回填）**改写** [LineAligner.Placement.xs]。命中若仍读后者，点中的字与实际墨迹
+ * 会差「从行首到该字的累计收紧量」（真书实测 10~17px，相当于大半个字宽）。故这里也走
+ * [lineGlyphTrack]，与 `LineWindowDrawer.paintGlyphs` 同一个函数、同一份入参。
+ *
  * ## 坐标系（与绘制侧同式，未改）
  *
- * [xInParagraph] = 点按 x − 内容区左 − [DrawLine.xLeft] − [DrawLine.firstLineIndentPx]，
- * 由 [orilumn.reader.engine.ui.reader.ReaderMath.tapLineAt] 算好（`ReaderModels.kt:147`），
- * 与绘制侧 `paintX` 同一原点。命中在 `placement.xs` 上二分，`xs` 与 range 同坐标系。
+ * [xInParagraph] = 点按 x − 内容区左 − [DrawLine.xLeft]（**保留首行缩进**），
+ * 由 [orilumn.reader.engine.ui.reader.ReaderMath.tapLineAt] 算好（`ReaderModels.kt`），
+ * 与绘制侧 `paintX + placement.xs` 同一原点：落墨 `xs[0]` 本身就等于 `firstLineIndentPx`
+ * （缩进参与 JUSTIFY 的拉伸基数），所以命中侧**必须**把同一个缩进喂给 Aligner，不能既减掉
+ * 缩进又按 0 起算 —— 那样两端对齐行会因 `slack` 基数少一个缩进而整行拉伸量偏大，
+ * 行末附近的点按整体偏向左侧的字（实测缩进 2em 时最大偏差 ≈ 一个缩进量）。
  *
  * ## 语义保持不变
  *
  * - 行尾空区不算命中（x 超过**可见右边界**）—— 短行右侧空白点按不吸附到行尾字形。
  * - 返回 [DrawLine.text] 坐标系偏移；miss 回 null。
- * - **Skia 异常永不外抛**（点按路径绝不崩）—— 现在不调 Skia，天然满足。
+ * - **Skia 异常永不外抛**（点按路径绝不崩）。
  */
 object LineHitTest {
+
+    private val kerningTable = KerningClusterTable()
 
     fun hit(
         line: DrawLine,
@@ -64,15 +76,18 @@ object LineHitTest {
             monospace = line.monospace,
             fontRuns = line.fontRuns,
             align = line.alignment,
-            firstLineIndentPx = 0f,
+            // ⚠ 与绘制侧同值：缩进参与 JUSTIFY 拉伸基数，喂 0 会让本行拉伸量整行偏大。
+            firstLineIndentPx = line.firstLineIndentPx,
             isLastLine = line.range.last + 1 >= line.text.length,
             // 混排字距：**必须与绘制侧同一个 em**，否则点按命中的字位与落墨错开（间隙量级）。
             cjkLatinSpacingEm = line.cjkLatinSpacingEm,
+            // 行内盒横向推进：同理必须与绘制侧同一份。
+            inlineBoxRuns = line.inlineBoxRuns,
         )
         // 行尾空区不算命中：超过**可见右边界**即 miss（可见右边界已排除行末空白）。
         if (xInParagraph > placement.visibleRight + 1f) return null
 
-        val xs = placement.xs
+        val xs = lineGlyphTrack(line, placement, kerningTable, start, endExcl)?.xs ?: placement.xs
         if (xs.isEmpty()) return null
         // 二分找最后一个 x <= 点击位置的那个字 —— 即「点在哪个字的左半边」。
         var lo = 0
@@ -89,14 +104,17 @@ object LineHitTest {
     fun deviation(line: DrawLine, xInParagraph: Float): Float {
         val start = line.range.first.coerceIn(0, line.text.length)
         val placement = LineAligner().align(
-            line.text, start until (line.range.last + 1), line.fontSizePx, line.lineWidthPx.toFloat(),
+            line.text, start until (line.range.last + 1), line.fontSizePx,
+            if (line.nowrap) Float.MAX_VALUE else line.lineWidthPx.toFloat(),
             line.letterSpacingEm, line.tag, line.families, line.weight, line.italic, line.monospace,
-            line.fontRuns, line.alignment, 0f, line.range.last + 1 >= line.text.length,
+            line.fontRuns, line.alignment, line.firstLineIndentPx, line.range.last + 1 >= line.text.length,
             cjkLatinSpacingEm = line.cjkLatinSpacingEm,
+            inlineBoxRuns = line.inlineBoxRuns,
         )
         val hit = hit(line, xInParagraph, 0f) ?: return Float.NaN
         val k = hit - start
-        val cx = placement.xs[k] + placement.advs[k] / 2f
+        val xs = lineGlyphTrack(line, placement, kerningTable, start, line.range.last + 1)?.xs ?: placement.xs
+        val cx = xs[k] + placement.advs[k] / 2f
         return abs(cx - xInParagraph)
     }
 }

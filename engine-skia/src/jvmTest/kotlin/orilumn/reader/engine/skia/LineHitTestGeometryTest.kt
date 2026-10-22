@@ -31,40 +31,66 @@ class LineHitTestGeometryTest {
         letterSpacingEm = 0f, lineWidthPx = 900, firstLineIndentPx = indent,
     )
 
-    /** 与绘制侧同式：paintX = contentLeft + xLeft + firstLineIndentPx。 */
+    /** 与绘制侧同式：paintX = contentLeft + xLeft，`placement.xs[0] == firstLineIndentPx`。 */
     private fun placementOf(l: DrawLine) = LineAligner().align(
         l.text, l.range, l.fontSizePx, l.lineWidthPx.toFloat(), l.letterSpacingEm,
-        l.tag, l.families, l.weight, l.italic, l.monospace, l.fontRuns, l.alignment, 0f,
+        l.tag, l.families, l.weight, l.italic, l.monospace, l.fontRuns, l.alignment,
+        // ⚠ 缩进必须原样喂进来：它参与 JUSTIFY 的拉伸基数，喂 0 就等于把这一行的几何
+        //   换成另一行（`slack = 版心 − 缩进 − Σadv`）。
+        l.firstLineIndentPx,
         l.range.last + 1 >= l.text.length,
         // ⚠ 混排字距必须**显式**喂 [DrawLine.cjkLatinSpacingEm]：绘制侧喂的是那个值，
         //   本函数不喂就落到形参默认 `0f`。今天两者碰巧都是 0f（所以这把锁至今没红），
         //   但只要滑块默认档变成非 0，「量」与「命中」立刻分叉成两套几何。
         cjkLatinSpacingEm = l.cjkLatinSpacingEm,
+        inlineBoxRuns = l.inlineBoxRuns,
     )
 
-    /**
-     * **零宽字位没有中心**（2026-10-03 混排字距改口径后新增）。
-     *
-     * 0 档（以及任何档）下，被 [CjkLatinSpacing] 吃掉的中西分隔空格**宽度就是 0**
-     * （实测 `adv=0.0`）。于是 `xs[k] + adv[k]/2 == xs[k]`，而下一个字位 `xs[k+1] == xs[k]`
-     * —— 命中侧的二分（「最后一个 `xs[idx] <= x` 的下标」）把这个平局判给**后一个**字。
-     *
-     * 这**不是**错位：那个空格里没有墨迹，点它命中「它左边那一侧视觉上最近的那个可见字」
-     * 才是批注/选词该有的行为（命中一个零宽空格，选出来是空的）。
-     * ⇒ 逐字点中心的锁必须跳过零宽字位；顺带在这里钉一条断言，说明平局方向没变。
-     */
+    /** 落墨实走的逐字 x（kerning 收紧 + JUSTIFY 回填）；无拉丁字母时即 placement.xs。 */
+    private fun trackOf(l: DrawLine, p: LineAligner.Placement): FloatArray =
+        lineGlyphTrack(l, p, KerningClusterTable(), l.range.first, l.range.last + 1)?.xs ?: p.xs
+
     private fun assertCenterHitsItself(l: DrawLine, p: LineAligner.Placement, label: String) {
-        for (k in p.xs.indices) {
+        val xs = trackOf(l, p)
+        for (k in xs.indices) {
             if (p.advs[k] <= 0f) {
                 assertEquals(
                     "$label 零宽字位 $k「${l.text[l.range.first + k]}」必须让位给下一个字位" +
                         "（没有墨迹可命中；命中零宽空格会选出空串）",
-                    k + 1, LineHitTest.hit(l, p.xs[k], 10f),
+                    k + 1, LineHitTest.hit(l, xs[k], 10f),
                 )
                 continue
             }
-            val cx = p.xs[k] + p.advs[k] / 2f
+            val cx = xs[k] + p.advs[k] / 2f
             assertEquals("$label 点第 $k 字中心必须命中它", k, LineHitTest.hit(l, cx, 10f))
+        }
+    }
+
+    /**
+     * **西文行：命中必须跟随落墨轨（kerning 收紧）**。
+     *
+     * 落墨走 [lineGlyphTrack]（簇位轨 + 只收紧 + JUSTIFY 回填），命中若读
+     * [LineAligner.Placement.xs]，偏差 = 从行首到该字的累计收紧量（真书实测 10~17px）。
+     * 表现是「点在这个词上，选出来的却是旁边那个词」—— 与选区矩形偏右同一个成因。
+     */
+    @Test
+    fun `命中跟随落墨轨（含 kerning 收紧）`() {
+        val text = "AVATAR To Ye Wa Tuesday value pairs"
+        val l = DrawLine(
+            text = text, range = 0 until text.length, yTop = 0,
+            yBottom = lineHeightPx(42f, 1.5f), alignment = TextAlign.JUSTIFY,
+            fontSizePx = 42f, lineHeightRatio = 1.5f, tag = "p",
+            families = listOf("serif"), weight = 400, italic = false, monospace = false,
+            letterSpacingEm = 0f, lineWidthPx = 900,
+        )
+        val p = placementOf(l)
+        val xs = trackOf(l, p)
+        val shift = kotlin.math.abs(xs[xs.size - 1] - p.xs[p.xs.size - 1])
+        assertTrue("语料必须真产生 kerning 收紧（否则本锁假绿）：shift=$shift", shift > 3f)
+        for (k in xs.indices) {
+            if (p.advs[k] <= 0f) continue
+            val cx = xs[k] + p.advs[k] / 2f
+            assertEquals("点第 $k 字墨迹中心必须命中它", k, LineHitTest.hit(l, cx, 10f))
         }
     }
 
@@ -100,11 +126,12 @@ class LineHitTestGeometryTest {
     }
 
     @Test
-    fun `行首缩进与 xLeft 的坐标系未变（点按 x 已由调用方扣除）`() {
+    fun `行首缩进的起点与落墨一致（缩进留在段落 x 里）`() {
         val l = line("缩进行命中也要对得上", TextAlign.LEFT, indent = 40f)
         val p = placementOf(l)
-        // 绘制侧 placement 的 x 起点是 0（indent 由 paintX 加），命中侧 xInParagraph 也已扣除
-        // indent ⇒ 点第 0 字中心应命中第 0 字。
+        // 绘制侧 `xs[0] == firstLineIndentPx`，命中侧 xInParagraph 也保留缩进 ⇒
+        // 点第 0 字墨迹中心应命中第 0 字。
+        assertEquals("首字左缘 = 缩进", 40f, p.xs[0], 1e-3f)
         assertEquals(0, LineHitTest.hit(l, p.xs[0] + p.advs[0] / 2f, 10f))
     }
 

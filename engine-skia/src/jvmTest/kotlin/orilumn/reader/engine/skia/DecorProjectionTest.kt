@@ -221,6 +221,92 @@ class DecorProjectionTest {
         assertTrue("划线颜色应是标注蓝：$blue", isBlue(blue))
     }
 
+    /**
+     * **选区矩形与落墨同源**：西文行的横向几何必须走 kerning 嫁接后的落墨轨
+     * （[lineGlyphTrack]），不能读 [LineAligner.Placement.xs]。
+     *
+     * 真机缺陷：长按选词后高亮整体偏右，行首那个字母「没选上」、右侧标点「被选上」；
+     * 复制出来的文字却是对的（区间对、只是矩形位置错）。成因是落墨用簇位轨（含 kerning
+     * 收紧），矩形还用 Aligner 的自然轨 ⇒ 矩形相对墨迹右移「从行首到该字的累计收紧量」，
+     * 真书实测 10~17px（大半个字宽），且**随字在行内的位置增大**、无 kerning 的行恰好看不出
+     * —— 用户看到的正是「有时对、有时偏」。
+     *
+     * 锁法：像素级。渲染一行真字形，把「整行区间」的矩形右缘与墨迹右缘比（误差只允许
+     * 右留白那个量级），并先断言这一行**确有**收紧（否则本锁在无 kerning 的机器上假绿）。
+     */
+    @Test
+    fun `选区矩形跟随落墨轨而不是 Aligner 自然轨`() {
+        val text = "AVATAR To Ye Wa Tuesday value pairs"
+        val fs = 42f
+        val l = DrawLine(
+            text = text,
+            range = 0..text.length - 1,
+            yTop = 0,
+            yBottom = 60,
+            alignment = TextAlign.LEFT,
+            fontSizePx = fs,
+            lineHeightRatio = 1.5f,
+            tag = "p",
+            families = listOf("serif"),
+            weight = 400,
+            italic = false,
+            monospace = false,
+            letterSpacingEm = 0f,
+            lineWidthPx = 1400,
+            charBase = 0,
+        )
+        val placement = LineAligner().align(
+            text, 0..text.length - 1, fs, 1400f, 0f, "p", listOf("serif"), 400, false, false,
+            emptyList(), TextAlign.LEFT, 0f, isLastLine = false, hyphenAtEnd = false,
+        )
+        val graft = lineGlyphTrack(l, placement, KerningClusterTable(), 0, text.length)
+        val shifted = graft != null &&
+            kotlin.math.abs(graft.xs[text.length - 1] - placement.xs[text.length - 1]) > 5f
+        assertTrue("语料必须真产生 kerning 收紧，否则本锁假绿（无 kerning 的机器）", shifted)
+        assertTrue("前提：收紧后末字必须比自然轨更靠左", graft!!.xs[text.length - 1] < placement.xs[text.length - 1])
+
+        val bmp = render(listOf(l), width = 1400, height = 120)
+        val px = requireNotNull(bmp.peekPixels())
+        // 墨迹左右缘：整行任意暗像素的 x 极值。
+        var inkLeft = Int.MAX_VALUE
+        var inkRight = Int.MIN_VALUE
+        for (y in 0 until bmp.height) {
+            for (x in 0 until bmp.width) {
+                if (isDark(px.getColor(x, y))) {
+                    if (x < inkLeft) inkLeft = x
+                    if (x > inkRight) inkRight = x
+                }
+            }
+        }
+        assertTrue("测试字体没有落下字形", inkRight > inkLeft)
+
+        val r = LineWindowDrawer().decorRects(listOf(l), 0, 0..text.length - 1).single()
+        val rectLeft = contentLeft + r.left
+        val rectRight = contentLeft + r.right
+
+        // 左缘天然对（首个槽不受累计收紧影响），右缘才是这条缺陷的判据。
+        assertTrue(
+            "矩形右缘 ${rectRight} 与墨迹右缘 ${inkRight} 相差 ${rectRight - inkRight}px（应只有右留白的量级）",
+            rectRight - inkRight in -8f..6f,
+        )
+        assertTrue("矩形左缘 ${rectLeft} 不应偏离墨迹左缘 ${inkLeft}", kotlin.math.abs(rectLeft - inkLeft) < 8f)
+        // 反向判据：若退回读 placement.xs，右缘会整整多出一个累计收紧量。
+        assertTrue(
+            "矩形右缘不得退回到自然轨（${contentLeft + placement.xs[text.length - 1] + placement.advs[text.length - 1]}）",
+            rectRight < contentLeft + placement.xs[text.length - 1] + placement.advs[text.length - 1] - 5f,
+        )
+        // 行中间的词也一样：矩形左右缘就是落墨轨上该词的起止（旧实现会整体右移一个累计收紧量）。
+        val ws = text.indexOf("value")
+        val word = LineWindowDrawer().decorRects(listOf(l), 0, ws..ws + 4).single()
+        assertEquals("词左缘必须是落墨轨的起笔", graft.xs[ws], word.left, 0.01f)
+        assertEquals(
+            "词右缘必须是落墨轨上该词末字的右缘",
+            graft.xs[ws + 4] + placement.advs[ws + 4],
+            word.right,
+            0.01f,
+        )
+    }
+
     /** 与 `LineWindowDrawer.baselineY` 同源的基线（同一字体度量 + 同一个 Aligner 入口）。 */
     private fun baselineY(): Float {
         val fm = requireNotNull(

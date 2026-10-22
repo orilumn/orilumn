@@ -1,6 +1,7 @@
 package orilumn.reader.engine.skia
 
 import orilumn.reader.engine.css.FontRun
+import orilumn.reader.engine.css.TextAlign
 import orilumn.reader.engine.laying.isDocumentSpace
 import orilumn.reader.engine.text.preprocess.CjkLatinSpacing
 
@@ -172,4 +173,87 @@ internal fun graftKerningOnto(
         }
     }
     return ClusterTrackGraft(out, out[n - 1] - placement.xs[n - 1 + off])
+}
+
+/**
+ * 本行**落墨实走**的逐字 x 轨（`null` = 无拉丁字母，直接用 [LineAligner.Placement.xs]）。
+ *
+ * S5b：含拉丁字母的行改用 Skia 簇位（保 kerning + `fi`/`fl` 连字），纯 CJK 行零成本走
+ * Aligner 的 x。**逐行判据、不混用**：一行要么全用簇位、要么全用 Aligner —— 两套 x 混在
+ * 一行里就是错位。
+ *
+ * 簇位轨是「未拉伸的自然轨」，拉伸 / 对齐偏移必须由 Aligner 出、[graftKerningOnto] 嫁接。
+ * 全部推导、实测数据、不变式与两个禁忌都写在那里（真书实测：修复前 965 行右缘缺口 >1px、
+ * 最大 17.29px；18 行右溢最大 6.116px；修复后两者归零）。
+ *
+ * ⚠ **这是「画」的唯一出口**：逐字落墨、选区/标注矩形的横向几何、点按命中的二分查找
+ * **必须**都读它。谁另读 [LineAligner.Placement.xs]，谁的横向位置就与实际墨迹差一个
+ * 「从行首到该字的累计收紧量」（实测真有 10~17px 量级，即大半个字宽）——
+ * 用户看到的就是「选区整体偏右、行首那个字母没选上」。量画同源由此保证。
+ *
+ * @param slotOff 本趟起点在 [placement] 里的槽位偏移（同一行分两趟画时用，见
+ *   [LineWindowDrawer] 的 `paintGlyphs`）。
+ * @param count 本趟处理字数。
+ */
+internal fun lineGlyphTrack(
+    line: DrawLine,
+    placement: LineAligner.Placement,
+    table: KerningClusterTable,
+    start: Int,
+    endExcl: Int,
+    slotOff: Int = 0,
+    count: Int = endExcl - start,
+): ClusterTrackGraft? {
+    if (!table.needsClusters(line.text, start, endExcl)) return null
+    // originX 必须 0：本轨要与 Placement.advs 同坐标系，才能逐字相减出 kerning 增量。
+    val cnat = table.clusterXs(
+        line.text, start, endExcl, line.fontSizePx, line.lineHeightRatio,
+        line.tag, line.families, line.weight, line.italic, line.monospace,
+        line.fontRuns, originX = 0f, letterSpacingEm = line.letterSpacingEm,
+        // 混排字距：必须传与量宽侧同一个 em，否则 [graftKerningOnto] 会把注入的间隙
+        // 当成「整形收紧量」吃掉（该方法的 KDoc 有完整推导）。
+        cjkLatinSpacingEm = line.cjkLatinSpacingEm,
+        // 行内盒横向推进：同理必须与量宽侧同一份，否则被当收紧量抹掉。
+        inlineBoxRuns = line.inlineBoxRuns,
+    ) ?: return null
+    return graftKerningOnto(
+        placement, cnat, line.text, start,
+        line.fontSizePx, line.letterSpacingEm, line.fontRuns,
+        // 只有 JUSTIFY 且非末行才把收紧量补回右缘；其余传 NaN = 「不补」。
+        if (line.alignment == TextAlign.JUSTIFY && endExcl < line.text.length) {
+            line.lineWidthPx.toFloat()
+        } else {
+            Float.NaN
+        },
+        // 槽位分类要与主拉伸同源（同 em）；不传则级 2（中英注入间隙）恒为空。
+        line.cjkLatinSpacingEm,
+        // 本趟只画整行里的一段（同一行分两趟）⇒ 槽位按段落起点偏移索引。
+        off = slotOff, count = count,
+    )
+}
+
+/**
+ * 区间 `[from, to)`（**轨内局部下标**）的可见左右并集 —— [LineAligner.visibleSpan] 的同式，
+ * 但作用在**已嫁接的落墨轨**上（[LineAligner.visibleSpan] 只认 `Placement`）。
+ *
+ * 宽度仍取 [LineAligner.Placement.advs]：嫁接只**平移**槽位，不改字的 advance（见
+ * [graftKerningOnto]）。
+ */
+internal fun spanOn(
+    xs: FloatArray,
+    advs: FloatArray,
+    from: Int,
+    to: Int,
+): Pair<Float, Float>? {
+    val lo = from.coerceIn(0, xs.size)
+    val hi = to.coerceIn(lo, xs.size)
+    if (hi <= lo) return null
+    var left = Float.MAX_VALUE
+    var right = -Float.MAX_VALUE
+    for (k in lo until hi) {
+        val x = xs[k]
+        left = minOf(left, x)
+        right = maxOf(right, x + (advs.getOrNull(k) ?: 0f))
+    }
+    return if (right <= left) null else left to right
 }

@@ -14,6 +14,7 @@ import orilumn.reader.engine.skia.FONT_SCAN_CACHE_VERSION
 import orilumn.reader.engine.skia.systemFontFacesFor
 import orilumn.reader.engine.skia.systemFontFamilies
 import orilumn.reader.engine.skia.systemFontFamilyHash
+import orilumn.reader.engine.skia.systemFontFamilyHashOf
 import orilumn.reader.io.Logger
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.TimeMark
@@ -33,6 +34,8 @@ class SystemFontSource(
     val facesFor: (String) -> List<SystemFontFace> = ::systemFontFacesFor,
     /** 族名集合哈希（指纹的一半）。 */
     val familyHash: () -> Long = ::systemFontFamilyHash,
+    /** 对**已枚举的族名快照**算哈希：扫描体用它写与自己数据配对的指纹。 */
+    val familyHashOf: (List<String>) -> Long = ::systemFontFamilyHashOf,
     /**
      * **字体文件环境哈希**（指纹的另一半，§8-2 加固）：平台字体文件「路径 + 大小 + mtime」哈希，
      * 用于检测「族名不变、文件被换」（同族名重打包 / OTA 更新系统字体）。默认 `0L` = 无环境信息
@@ -255,6 +258,9 @@ class SystemFontScanner(
 
     private suspend fun scanBody() {
         val families = source.families()
+        // 指纹必须描述**这次实际扫描的族集**：中途系统字体变化时，收尾再读一次会把旧数据
+        // 贴上新手印，下次检测误判「已最新」而跳过，已卸载族的残留行也再没人清。
+        val environmentHash = source.environmentHash()
         if (families.isEmpty()) {
             // 平台枚举失败：不落成果、不写指纹（否则空指纹会被当成"已扫完"，永久跳过）；同时停摆
             // 续跑看门狗，否则会「补跑又空 ⇒ 再补」空转（等下一次外部触发再试）。
@@ -276,7 +282,7 @@ class SystemFontScanner(
         }
         // 收尾：删除本次全量枚举里已不存在的族残留行（空集合短路，平台失败不清库）+ 写指纹。
         library.pruneMissingSystemFamilies(families)
-        val fp = currentFingerprint()
+        val fp = source.cacheVersion to (source.familyHashOf(families) xor environmentHash)
         library.saveFontScanState(fp.first, fp.second)
         Logger.w(logTag, "scan done families=${families.size}")
     }

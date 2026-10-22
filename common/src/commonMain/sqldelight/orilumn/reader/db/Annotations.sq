@@ -1,0 +1,68 @@
+-- 文本标注（schema v9；迁移见 6.sqm；线型列见 7.sqm；原文摘录列见 8.sqm）。
+--
+-- 锚点 = 章号 + 章内字符区间 [charStart, charEnd)，与 PageSlice / ReadingLocator 同源：
+-- 所有标注都相对「原书」解算，排版参数（字号/边距/主题/旋转）变化不影响锚点。
+-- 颜色存创建当时的 ARGB 快照（改调色板不影响已有标注，见方案 D-13）。
+-- quote 也是创建当时的原文快照（清单行显示，见方案 D-24）；老记录留空，开章时回填。
+-- 没有外键级联：删书由 LibraryDb.removeBookAndData 在同一事务里清理本表（方案 D-17）。
+
+CREATE TABLE annotations(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bookId INTEGER NOT NULL,
+  chapter INTEGER NOT NULL,
+  charStart INTEGER NOT NULL,      -- 含
+  charEnd INTEGER NOT NULL,        -- 不含
+  kind TEXT NOT NULL,              -- highlight / underline / note（AnnotationKind.wire）
+  color INTEGER,                   -- ARGB（含 alpha）
+  lineStyle TEXT,                  -- 划线线型 straight / wavy / dashed / strike（空 = straight）
+  note TEXT,                       -- 批注文本（v2）
+  createdAt INTEGER NOT NULL,
+  updatedAt INTEGER NOT NULL,
+  quote TEXT,                      -- 创建当时的原文摘录（清单显示；老数据可空）
+  CHECK (charStart >= 0),
+  CHECK (charEnd > charStart)
+);
+
+CREATE INDEX annotations_by_book_chapter ON annotations(bookId, chapter);
+
+insertAnnotation:
+INSERT INTO annotations(bookId, chapter, charStart, charEnd, kind, color, lineStyle, note, createdAt, updatedAt, quote)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+-- 新增行的 id：与 books.lastInsertId 同因（Jdbc 驱动按语句取连接，last_insert_rowid 不可靠）。
+lastInsertAnnotationId:
+SELECT max(id) FROM annotations;
+
+annotationsForChapter:
+SELECT * FROM annotations
+WHERE bookId = ? AND chapter = ?
+ORDER BY charStart ASC, id ASC;
+
+-- 列表面板用：全书标注按章序 + 章内起点排序（与 annotationsForChapter 同序）。
+annotationsForBook:
+SELECT * FROM annotations
+WHERE bookId = ?
+ORDER BY chapter ASC, charStart ASC, id ASC;
+
+-- 长按命中：取包含该字符偏移的最后一条（同起点时后加的优先）。
+annotationAt:
+SELECT * FROM annotations
+WHERE bookId = ? AND chapter = ? AND charStart <= ? AND charEnd > ?
+ORDER BY charStart DESC, id DESC
+LIMIT 1;
+
+annotationById:
+SELECT * FROM annotations
+WHERE id = ?;
+
+-- 锚点（书/章/区间）创建后不变；改颜色/线型、补批注文本、回填原文摘录都走这里。
+updateAnnotation:
+UPDATE annotations
+SET kind = ?, color = ?, lineStyle = ?, note = ?, quote = ?, updatedAt = ?
+WHERE id = ?;
+
+deleteAnnotation:
+DELETE FROM annotations WHERE id = ?;
+
+deleteAnnotationsForBook:
+DELETE FROM annotations WHERE bookId = ?;

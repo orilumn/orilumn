@@ -1,0 +1,18 @@
+-- 文本标注（6→7）：高亮 / 划线 / 批注 / 将来的修订标记共用一张表。
+-- 锚点与 PageSlice 同口径：章号 + 章内字符区间 [charStart, charEnd)。
+CREATE TABLE annotations(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bookId INTEGER NOT NULL,
+  chapter INTEGER NOT NULL,
+  charStart INTEGER NOT NULL,
+  charEnd INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  color INTEGER,
+  note TEXT,
+  createdAt INTEGER NOT NULL,
+  updatedAt INTEGER NOT NULL,
+  CHECK (charStart >= 0),
+  CHECK (charEnd > charStart)
+);
+
+CREATE INDEX annotations_by_book_chapter ON annotations(bookId, chapter);

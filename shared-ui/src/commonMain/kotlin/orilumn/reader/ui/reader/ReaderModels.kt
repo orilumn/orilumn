@@ -53,6 +53,26 @@ object ReaderMath {
     }
 
     /**
+     * 鼠标点左右页边距翻页（D-9）：只认**版心左右之外**的页边距，上下页边距不算。
+     *
+     * 与 [tapZone] 的屏宽三等分不同：桌面宽屏下三等分会把正文也算进翻页区，
+     * 这里必须按版心几何分流。落在正文内或上下边距一律返回 0（不翻页）。
+     */
+    fun marginFlipDirection(
+        x: Float,
+        y: Float,
+        contentLeft: Float,
+        contentRight: Float,
+        contentTop: Float,
+        contentBottom: Float,
+    ): Int = when {
+        y < contentTop || y > contentBottom -> 0
+        x < contentLeft -> -1
+        x > contentRight -> 1
+        else -> 0
+    }
+
+    /**
      * 手势主轴判定。
      *
      * ## 两条路径：快速通道（手指一动就响应）+ slop 通道（防抖）
@@ -208,16 +228,21 @@ object ReaderMath {
     /**
      * P4-c2u: 点按行命中（纯几何）：点按 (tapX, tapY) → (行, 段落内 x, 行内 y)，供字形反查。
      * 坐标约定（与 [ReaderPageCanvas] 绘制侧同式，错一次即整页偏，见 LinkTap 定点记录）：
-     * x 为内容区相对坐标（调用方已减 contentLeft；段落原点 = xLeft + 首行缩进）；
+     * x 为内容区相对坐标（调用方已减 contentLeft；**段落原点 = xLeft**，首行缩进留在 x 里）；
      * y 为屏坐标（行窗 `yTop - shift` 已含 contentTop，调用方不得再减）。
      * 行区间为页坐标系 [yTop-shift, yBottom-shift)；miss 回 null。
+     *
+     * ⚠ **首行缩进不再在这里减掉**：它参与 JUSTIFY 的拉伸基数（`slack = 版心 − 缩进 − Σadv`），
+     * 落墨侧 `xs[0] == firstLineIndentPx`。命中侧若减掉缩进又按 0 起算，两端对齐的首行会整行
+     * 拉伸量偏大，行末附近的点按偏向左侧的字（实测缩进 2em 时最大偏差 ≈ 一个缩进量）。
+     * 现在命中与落墨吃同一个 [DrawLine.firstLineIndentPx]，缩进原样交给 `LineHitTest`。
      */
     fun tapLineAt(lines: List<DrawLine>, shift: Int, tapX: Float, tapY: Float): Triple<DrawLine, Float, Float>? {
         for (line in lines) {
             val top = (line.yTop - shift).toFloat()
             val bottom = (line.yBottom - shift).toFloat()
             if (tapY >= top && tapY < bottom) {
-                val xInParagraph = tapX - line.xLeft - line.firstLineIndentPx.coerceAtLeast(0f)
+                val xInParagraph = tapX - line.xLeft
                 return Triple(line, xInParagraph, tapY - top)
             }
         }

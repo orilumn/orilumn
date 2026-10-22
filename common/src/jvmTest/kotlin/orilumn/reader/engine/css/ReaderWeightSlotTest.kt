@@ -77,7 +77,7 @@ class ReaderWeightSlotTest {
             ua = LightCssParser().parse(ReaderStylesheets.ua()),
             authorSheets = listOf(LightCssParser().parse(bookHeadingCss)),
             theme = null,
-            settings = null,
+            custom = null,
             ui = ReaderUiSheet.build(p),
         )
         return engine.compute(root)

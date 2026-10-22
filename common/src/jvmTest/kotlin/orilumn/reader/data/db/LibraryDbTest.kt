@@ -4,6 +4,9 @@ import app.cash.sqldelight.db.QueryResult
 import app.cash.sqldelight.coroutines.asFlow
 import app.cash.sqldelight.coroutines.mapToList
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
+import orilumn.reader.data.annotation.Annotation
+import orilumn.reader.data.annotation.AnnotationKind
+import orilumn.reader.data.annotation.AnnotationLineStyle
 import orilumn.reader.db.OrilumnDb
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -198,6 +201,257 @@ class LibraryDbTest {
         assertEquals(3, db.readingState(id)?.chapter)
         db.clearReadingState(id)
         assertNull(db.readingState(id))
+    }
+
+    @Test
+    fun annotationsCrudRoundTrip() = runBlocking {
+        val db = freshDb()
+        val book = db.addBook("T", null, "/b.epub", addedAt = 1L)
+        assertTrue(db.annotationsForChapter(book, 2).isEmpty())
+
+        val first = db.addAnnotation(
+            Annotation(
+                bookId = book,
+                chapter = 2,
+                charStart = 5,
+                charEnd = 9,
+                kind = AnnotationKind.Highlight,
+                color = 0x80FFCC00.toInt(),
+                quote = "摘录一",
+                createdAt = 10L,
+                updatedAt = 10L,
+            ),
+        )
+        val second = db.addAnnotation(
+            Annotation(
+                bookId = book,
+                chapter = 2,
+                charStart = 7,
+                charEnd = 8,
+                kind = AnnotationKind.Underline,
+                color = 0xFF3366CC.toInt(),
+                lineStyle = AnnotationLineStyle.Wavy,
+                quote = "摘录二",
+                createdAt = 11L,
+                updatedAt = 11L,
+            ),
+        )
+        assertTrue(first.id > 0)
+        assertTrue(second.id > first.id)
+        // 线型随记录落库（老数据缺列 = 实线，见 migration 7→8）。
+        assertEquals(AnnotationLineStyle.Wavy, db.annotationAt(book, 2, 7)?.lineStyle)
+        assertEquals(AnnotationLineStyle.Straight, db.annotationAt(book, 2, 8)?.lineStyle)
+        assertEquals(listOf(first.id, second.id), db.annotationsForChapter(book, 2).map { it.id })
+        // 原文摘录随记录落库（清单显示用，见 migration 8→9）。
+        assertEquals("摘录一", db.annotationAt(book, 2, 5)?.quote)
+        assertEquals(listOf(first.id, second.id), db.annotationsForBook(book).map { it.id })
+
+        // 命中包含该偏移的最后一条；charEnd 不含。
+        assertEquals(second.id, db.annotationAt(book, 2, 7)?.id)
+        assertEquals(first.id, db.annotationAt(book, 2, 8)?.id)
+        assertNull(db.annotationAt(book, 2, 9))
+
+        // v1 只改颜色；批注文本先按可写验证，v2 界面再接。
+        db.updateAnnotation(
+            first.copy(
+                kind = AnnotationKind.Underline,
+                color = 0xFF112233.toInt(),
+                lineStyle = AnnotationLineStyle.Strike,
+                note = "批注",
+                quote = "摘录一改",
+                updatedAt = 20L,
+            ),
+        )
+        val updated = db.annotationsForChapter(book, 2).single { it.id == first.id }
+        assertEquals(AnnotationKind.Underline, updated.kind)
+        assertEquals(0xFF112233.toInt(), updated.color)
+        assertEquals(AnnotationLineStyle.Strike, updated.lineStyle)
+        assertEquals("批注", updated.note)
+        assertEquals("摘录一改", updated.quote)
+        assertEquals(20L, updated.updatedAt)
+
+        db.deleteAnnotation(first.id)
+        assertEquals(listOf(second.id), db.annotationsForChapter(book, 2).map { it.id })
+        db.deleteAnnotationsForBook(book)
+        assertTrue(db.annotationsForChapter(book, 2).isEmpty())
+    }
+
+    @Test
+    fun annotationsForBookOrdersByChapterThenStart() = runBlocking {
+        val db = freshDb()
+        val book = db.addBook("T", null, "/b.epub", addedAt = 1L)
+        suspend fun add(chapter: Int, start: Int) = db.addAnnotation(
+            Annotation(
+                bookId = book,
+                chapter = chapter,
+                charStart = start,
+                charEnd = start + 2,
+                kind = AnnotationKind.Highlight,
+                createdAt = 1L,
+                updatedAt = 1L,
+            ),
+        )        // 故意乱序插入：书级查询必须按章序 + 章内起点排（与 annotationsForChapter 同序）。
+        val c2b = add(2, 30)
+        val c0 = add(0, 10)
+        val c2a = add(2, 5)
+        assertEquals(listOf(c0.id, c2a.id, c2b.id), db.annotationsForBook(book).map { it.id })
+        assertTrue(db.annotationsForBook(book + 1).isEmpty())
+    }
+
+    @Test
+    fun removeBookAndDataClearsProgressAndAnnotations() = runBlocking {
+        val db = freshDb()
+        val kept = db.addBook("Keep", null, "/keep.epub", addedAt = 1L)
+        val removed = db.addBook("Remove", null, "/remove.epub", addedAt = 2L)
+        listOf(kept, removed).forEach { book ->
+            db.saveReadingState(
+                orilumn.reader.data.book.BookReadingState(
+                    bookId = book,
+                    chapter = 1,
+                    target = "c1",
+                    progress = 0.25,
+                    locator = null,
+                    updatedAt = 3L,
+                ),
+            )
+            db.addAnnotation(
+                Annotation(
+                    bookId = book,
+                    chapter = 1,
+                    charStart = 0,
+                    charEnd = 3,
+                    kind = AnnotationKind.Highlight,
+                    color = 0x80FFCC00.toInt(),
+                    createdAt = 3L,
+                    updatedAt = 3L,
+                ),
+            )
+        }
+
+        db.removeBookAndData(removed)
+
+        assertNull(db.getBook(removed))
+        assertNull(db.readingState(removed))
+        assertTrue(db.annotationsForChapter(removed, 1).isEmpty())
+        assertTrue(db.annotationsForBook(removed).isEmpty())
+
+        // 另一本书的数据不受影响。
+        assertTrue(db.getBook(kept) != null)
+        assertTrue(db.readingState(kept) != null)
+        assertEquals(1, db.annotationsForChapter(kept, 1).size)
+    }
+
+    @Test
+    fun migrate6to7AddsAnnotationTable() {
+        // 用最新 schema 建库后删掉标注表、把版本退回 6，模拟真实的 6→7 升级
+        // （一路迁到最新版本，顺带覆盖 7→8 的线型列）。
+        val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        OrilumnDb.Schema.create(driver)
+        driver.execute(null, "DROP TABLE annotations;", 0)
+        driver.execute(null, "PRAGMA user_version = 6;", 0)
+
+        OrilumnDb.Schema.migrate(driver, 6, OrilumnDb.Schema.version)
+
+        val db = LibraryDb(OrilumnDb(driver))
+        runBlocking {
+            val book = db.addBook("T", null, "/b.epub", addedAt = 1L)
+            val row = db.addAnnotation(
+                Annotation(
+                    bookId = book,
+                    chapter = 1,
+                    charStart = 2,
+                    charEnd = 6,
+                    kind = AnnotationKind.Underline,
+                    color = 0xFF000000.toInt(),
+                    lineStyle = AnnotationLineStyle.Wavy,
+                    createdAt = 1L,
+                    updatedAt = 1L,
+                ),
+            )
+            assertEquals(listOf(row), db.annotationsForChapter(book, 1))
+        }
+    }
+
+    @Test
+    fun migrate7to8AddsLineStyleColumn() {
+        // 用最新 schema 建库后把线型列与摘录列删掉、版本退回 7，模拟真实的 7→8 升级
+        // （一路迁到最新版本，顺带覆盖 8→9 的摘录列）。
+        val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        OrilumnDb.Schema.create(driver)
+        driver.execute(null, "ALTER TABLE annotations DROP COLUMN lineStyle;", 0)
+        driver.execute(null, "ALTER TABLE annotations DROP COLUMN quote;", 0)
+        driver.execute(null, "PRAGMA user_version = 7;", 0)
+
+        OrilumnDb.Schema.migrate(driver, 7, OrilumnDb.Schema.version)
+
+        val db = LibraryDb(OrilumnDb(driver))
+        runBlocking {
+            val book = db.addBook("T", null, "/b.epub", addedAt = 1L)
+            // 老记录没有线型列：插一条不带线型的，读回必须是实线。
+            driver.execute(
+                null,
+                "INSERT INTO annotations(bookId, chapter, charStart, charEnd, kind, color, note, createdAt, updatedAt) " +
+                    "VALUES ($book, 1, 0, 3, 'underline', NULL, NULL, 1, 1);",
+                0,
+            )
+            assertEquals(AnnotationLineStyle.Straight, db.annotationsForChapter(book, 1).single().lineStyle)
+            // 新记录能写线型。
+            db.addAnnotation(
+                Annotation(
+                    bookId = book,
+                    chapter = 1,
+                    charStart = 5,
+                    charEnd = 9,
+                    kind = AnnotationKind.Underline,
+                    color = 0xFF000000.toInt(),
+                    lineStyle = AnnotationLineStyle.Dashed,
+                    createdAt = 2L,
+                    updatedAt = 2L,
+                ),
+            )
+            assertEquals(
+                AnnotationLineStyle.Dashed,
+                db.annotationsForChapter(book, 1).first { it.charStart == 5 }.lineStyle,
+            )
+        }
+    }
+
+    @Test
+    fun migrate8to9AddsQuoteColumn() {
+        // 用最新 schema 建库后把摘录列删掉、版本退回 8，模拟真实的 8→9 升级。
+        val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        OrilumnDb.Schema.create(driver)
+        driver.execute(null, "ALTER TABLE annotations DROP COLUMN quote;", 0)
+        driver.execute(null, "PRAGMA user_version = 8;", 0)
+
+        OrilumnDb.Schema.migrate(driver, 8, OrilumnDb.Schema.version)
+
+        val db = LibraryDb(OrilumnDb(driver))
+        runBlocking {
+            val book = db.addBook("T", null, "/b.epub", addedAt = 1L)
+            // 老记录没有摘录列：读回是空值（面板显示「（无摘录）」），不阻塞跳转与删除。
+            driver.execute(
+                null,
+                "INSERT INTO annotations(bookId, chapter, charStart, charEnd, kind, color, lineStyle, note, createdAt, updatedAt) " +
+                    "VALUES ($book, 1, 0, 3, 'highlight', NULL, 'straight', NULL, 1, 1);",
+                0,
+            )
+            assertNull(db.annotationsForChapter(book, 1).single().quote)
+            // 新记录能写摘录，书级查询也能读到。
+            db.addAnnotation(
+                Annotation(
+                    bookId = book,
+                    chapter = 1,
+                    charStart = 5,
+                    charEnd = 9,
+                    kind = AnnotationKind.Highlight,
+                    quote = "摘录",
+                    createdAt = 2L,
+                    updatedAt = 2L,
+                ),
+            )
+            assertEquals("摘录", db.annotationsForBook(book).first { it.charStart == 5 }.quote)
+        }
     }
 
     @Test

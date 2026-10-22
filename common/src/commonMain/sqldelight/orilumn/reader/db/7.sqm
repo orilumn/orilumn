@@ -1,0 +1,2 @@
+-- 划线线型（7→8）：实线 / 波浪 / 删除线共用一个字段，老数据留空即实线。
+ALTER TABLE annotations ADD COLUMN lineStyle TEXT;

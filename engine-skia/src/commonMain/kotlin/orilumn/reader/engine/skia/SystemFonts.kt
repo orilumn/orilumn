@@ -129,8 +129,16 @@ private fun styleNameOf(s: FontStyle): String = buildString {
 const val FONT_SCAN_CACHE_VERSION = 2L
 
 /** 计算系统字体族名集合的哈希（用于判定系统字体是否变化） */
-fun systemFontFamilyHash(): Long {
-    val families = systemFontFamilies()
+fun systemFontFamilyHash(): Long = systemFontFamilyHashOf(systemFontFamilies())
+
+/**
+ * 对**已经枚举好的**族名快照算哈希。
+ *
+ * 扫描体必须用它与自己实际扫描的 `families` 快照配对写指纹：收尾时再读一次
+ * [systemFontFamilies] 可能读到扫描期间变化后的新集合，把旧数据贴上新手印，
+ * 下次检测就会误判「已是最新」而跳过，已卸载族的残留行也再没人清。
+ */
+fun systemFontFamilyHashOf(families: List<String>): Long {
     // 0x9e3779b97f4a7c15（FNV 黄金比例种子）超出 Long.MAX_VALUE，取其二补（两的补码）负字面量。
     var h: Long = -0x61c8864680b583ebL
     for (f in families) {

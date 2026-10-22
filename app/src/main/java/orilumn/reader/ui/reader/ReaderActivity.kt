@@ -36,6 +36,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import orilumn.reader.data.book.BookRepository
+import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.host.AndroidDb
 import orilumn.reader.host.AndroidFontScan
 import orilumn.reader.data.font.FontRepository
@@ -73,7 +74,8 @@ import org.json.JSONObject
  *
  *  - 宿主：[TabletReaderHost] + [SnapshotReaderHost]（定位回抛）接入 [ReaderScreen]，画布/手势/亮度
  *    遮罩/上下栏全走 shared-ui（引擎三路 skia 行窗口同源，见 TabletReaderHost.doc）；
- *  - 覆盖层：设置/目录抽屉共用 shared-ui（[ReaderSettingsPanel]/[ReaderTocPanel]，R3 收敛；
+ *  - 覆盖层：设置/目录/标注抽屉共用 shared-ui（[ReaderSettingsPanel]/[ReaderSidePanel]/[ReaderTocBody]/
+ *    [ReaderAnnotationPanel]，R3 收敛；
  *    返回键/SAF 导入/WiFi 对话框/字库同步/系统亮度读值/主题预设持久化由本壳承载，不进面板）。
  *  - 环境：保留系统栏沉浸（show/hide chrome + WindowInsetsAnimationCompat 逐帧 statusInset）、
  *    Room 设置持久化（fork-on-first-customization + withBookStyle）、版式重排节流
@@ -110,6 +112,15 @@ class ReaderActivity : ComponentActivity() {
     /** 当前定位（SnapshotReaderHost 回抛；目录高亮 / 重排锚点 / 退出保存）。 */
     private var currentPos by mutableStateOf<ReaderPos?>(null)
 
+    /** 侧边抽屉当前页（null = 关闭）：目录与标注共用同一抽屉（D-23）。 */
+    private var panelPage by mutableStateOf<ReaderPanelPage?>(null)
+
+    /** 抽屉最后显示的页：关闭时 `panelPage` 为 null，退场动画仍要显示原页而不是跳回目录。 */
+    private var panelLastPage by mutableStateOf(ReaderPanelPage.Toc)
+
+    /** 标注外部变更号：清单里删掉一条后 +1，阅读面据此重读当前章、屏幕装饰同步消失。 */
+    private var annotationsEpoch by mutableIntStateOf(0)
+
     /** 外部推送落位：版式重排绑定 / 目录跳转落地后置位，[ReaderScreen] 键变化即认领。 */
     private var externalPos by mutableStateOf<ReaderPos?>(null)
 
@@ -120,7 +131,6 @@ class ReaderActivity : ComponentActivity() {
     private var layoutRevision by mutableStateOf(0)
 
     private var settingsOpen by mutableStateOf(false)
-    private var tocOpen by mutableStateOf(false)
     private var panelSettings by mutableStateOf(ReaderSettings.DEFAULT)
 
     /** 设置面板字库列表（壳自持：开面板同步系统族 + 取全量表；增删改后重载）。 */
@@ -141,6 +151,12 @@ class ReaderActivity : ComponentActivity() {
     private var relayoutPending = false
     private var relayoutScheduled = false
     private var relayoutJob: Job? = null
+
+    /**
+     * 版式交互的锚点（开面板 → 关面板；面板外一轮防抖重排）：交互内不跟着落位页走，
+     * 否则拖滑块时锚点每刷一次退回一截（见 [orilumn.reader.engine.RelayoutAnchor]）。
+     */
+    private val relayoutAnchor = orilumn.reader.engine.RelayoutAnchor()
 
     /** WiFi 批量上传防抖刷新（多文件连续到达只刷一次，见 scheduleWifiBatchRefresh）。 */
     private var wifiBatchJob: Job? = null
@@ -306,10 +322,13 @@ class ReaderActivity : ComponentActivity() {
                     val liveLoop = relayoutJob
                     val p = currentPos
                     val ch = p?.chapter ?: 0
-                    val anchor = p?.slice?.charStart ?: 0
+                    // 旋转也是「同一次阅读位置」的版式变更：沿用已有锚点（面板拖动中旋转也不许换锚）；
+                    // 没有钉子就按当前页首钉住——连续旋转才不会每次退掉一截。
+                    relayoutAnchor.pin(ch, p?.slice?.charStart ?: 0)
+                    val a = relayoutAnchor.resolve(ch, p?.slice?.charStart ?: 0)
                     lifecycleScope.launch(Dispatchers.Default) {
                         liveLoop?.join()
-                        val r = c.finalizeRelayoutAll(ch, anchor)
+                        val r = c.finalizeRelayoutAll(a.chapter, a.char)
                         withContext(Dispatchers.Main) {
                             if (r != null) applyReflowResult(c, r)
                         }
@@ -328,7 +347,10 @@ class ReaderActivity : ComponentActivity() {
             }
 
             val snapshot = remember(tabletHost) {
-                tabletHost?.let { SnapshotReaderHost(it) { pos -> currentPos = pos } }
+                // 用户真的换了位置才松开改参锚点（翻页/跳章/进度条/开书）：重排落位与保存不算。
+                tabletHost?.let {
+                    SnapshotReaderHost(it, { pos -> currentPos = pos }, { relayoutAnchor.release() })
+                }
             }
             // 首次开书收口（与桌面同调，共享 probeOriginalOnOpen）：默认原书主题开书时，
             // 落位即按落位章回填未钉的缩进/行距并 bookOnly 持久 + 轻刷；已钉/非原书直接跳过。
@@ -354,40 +376,60 @@ class ReaderActivity : ComponentActivity() {
                         commitSettings(effective.copy(scheme = if (effective.scheme == "night") "day" else "night"), typographyChanged = true)
                     },
                     onSettings = { openSettingsPanel() },
-                    onToc = { openTocPanel() },
+                    onToc = { openPanel(ReaderPanelPage.Toc) },
+                    onNote = { openPanel(ReaderPanelPage.Annotations) },
                     onLightChange = { applyPhysicalBrightness(it) },
                     onLightCommit = { commitBrightness(it) },
                     onBarsVisibleChanged = { barsVisible = it; applySystemBars() },
                     externalPos = externalPos,
                     fallbackPos = currentPos,
                     contentRevision = layoutRevision,
+                    annotationsEpoch = annotationsEpoch,
                 )
             } else {
                 // 加载背页（打开的背色与正文一致）。
                 Box(Modifier.fillMaxSize().background(ComposeColor(bgTone)))
             }
 
-            // R3 收敛：目录抽屉用共享实现；返回键由壳承载（S31，不进面板）。
-            BackHandler(enabled = tocOpen) { closeTocPanel() }
-            currentPos?.let { p ->
-                ReaderTocPanel(
-                    visible = tocOpen,
-                    toc = engine?.toc() ?: emptyList(),
-                    currentChapter = p.chapter,
-                    scheme = effective.scheme,
-                    currentFragments = remember(p) {
-                        engine?.currentPageFragmentIds(p.chapter, p.slice.charStart, p.slice.charEnd) ?: emptySet()
-                    },
-                    onSelect = { item -> tocJump(item) },
-                    onDismiss = { closeTocPanel() },
-                )
-            } ?: ReaderTocPanel(
-                visible = tocOpen,
-                toc = engine?.toc() ?: emptyList(),
-                currentChapter = 0,
+            // R3 收敛：目录与标注共用同一个左侧抽屉（D-23）；返回键由壳承载（S31，不进面板）。
+            val tocItems = engine?.toc() ?: emptyList()
+            val tocTitles = remember(tocItems) { chapterTitlesOf(tocItems) }
+            val fragments = currentPos?.let { p ->
+                engine?.currentPageFragmentIds(p.chapter, p.slice.charStart, p.slice.charEnd) ?: emptySet()
+            } ?: emptySet()
+            BackHandler(enabled = panelPage != null) { closePanel() }
+            ReaderSidePanel(
+                visible = panelPage != null,
+                page = panelPage ?: panelLastPage,
+                onPageChange = { page -> panelPage = page; panelLastPage = page },
                 scheme = effective.scheme,
-                onSelect = { item -> tocJump(item) },
-                onDismiss = { closeTocPanel() },
+                onDismiss = { closePanel() },
+                tocContent = {
+                    ReaderTocBody(
+                        toc = tocItems,
+                        currentChapter = currentPos?.chapter ?: 0,
+                        scheme = effective.scheme,
+                        currentFragments = fragments,
+                        onSelect = { item -> tocJump(item) },
+                        onDismiss = { closePanel() },
+                    )
+                },
+                annotationsContent = {
+                    ReaderAnnotationPanel(
+                        scheme = effective.scheme,
+                        load = { tabletHost?.annotationsForBook() ?: emptyList() },
+                        onDelete = { annotation ->
+                            val ok = tabletHost?.deleteAnnotation(annotation.id) ?: false
+                            // 删当前章的标注后，屏幕上的装饰也要同时消失（epoch 由阅读面单独重读）。
+                            if (ok) annotationsEpoch++
+                            ok
+                        },
+                        onJump = { annotation -> annotationJump(annotation) },
+                        chapterTitles = tocTitles,
+                        currentChapter = currentPos?.chapter ?: 0,
+                        onDismiss = { closePanel() },
+                    )
+                },
             )
 
             // 设置抽屉用共享实现（R3 同口径）；返回键由壳承载，直接关面板。
@@ -457,7 +499,7 @@ class ReaderActivity : ComponentActivity() {
     // ---- Settings panel ----
 
     private fun openSettingsPanel() {
-        tocOpen = false
+        panelPage = null
         panelSettings = effective
         settingsOpen = true
         loadPanelFonts()
@@ -465,6 +507,8 @@ class ReaderActivity : ComponentActivity() {
         // 面板开抑制 + 关门控走共享收口（PanelRelayoutGate，桌面同调）；关闭时若排版真实
         // 变化再整书重跑（门控内指纹判定）。
         panelGate?.onPanelOpen()
+        // 锚点只钉一次：拖动期间每次预览落位都会改写当前页首，拿它当下一轮锚点会一路往回退。
+        currentPos?.let { relayoutAnchor.pin(it.chapter, it.slice.charStart) }
         // 需求模式（方案 §2.4/§3.4，与桌面同式）：面板要用 ⇒ 同键 `fontscan` 提档池顶，
         // 立即实扫；逐族落库回调重读 DB，列表增量长出（库热时指纹没变，什么都不做）。
         val scan = AndroidFontScan.scanner(this)
@@ -495,14 +539,14 @@ class ReaderActivity : ComponentActivity() {
             relayoutPending = false
             val liveLoop = relayoutJob
             val p = currentPos
-            val ch = p?.chapter ?: 0
-            val anchor = p?.slice?.charStart ?: 0
+            // 关面板这次落位仍用开面板钉住的锚点（拖动已把落位页首写回定位，不能拿它当锚）。
+            val a = relayoutAnchor.resolve(p?.chapter ?: 0, p?.slice?.charStart ?: 0)
             lifecycleScope.launch(Dispatchers.Default) {
                 liveLoop?.join()
-                val r = gate.onPanelClose(ch, anchor)
-                if (r != null) {
-                    Logger.w(TAG, "close settings panel -> typography changed, whole-book relayout")
-                    withContext(Dispatchers.Main) {
+                val r = gate.onPanelClose(a.chapter, a.char)
+                withContext(Dispatchers.Main) {
+                    if (r != null) {
+                        Logger.w(TAG, "close settings panel -> typography changed, whole-book relayout")
                         applyReflowResult(c, r)
                     }
                 }
@@ -570,29 +614,50 @@ class ReaderActivity : ComponentActivity() {
         getSharedPreferences("reader_settings_ui", MODE_PRIVATE).edit().putString(KEY_THEMES, arr.toString()).apply()
     }
 
-    // ---- Table of contents ----
+    // ---- Side panel (TOC / annotations, D-23) ----
 
-    private fun openTocPanel() {
+    private fun openPanel(page: ReaderPanelPage) {
         settingsOpen = false
-        tocOpen = true
+        panelPage = page
+        panelLastPage = page
         applySystemBars()
-        Logger.w(TAG, "open toc panel")
+        Logger.w(TAG, "open side panel $page")
     }
 
-    private fun closeTocPanel() {
-        tocOpen = false
+    private fun closePanel() {
+        panelPage = null
         applySystemBars()
+    }
+
+    /** 标注清单跳转：落到包含该标注起点的页（与目录跳转同口径），落位后保存进度并关面板。 */
+    private fun annotationJump(annotation: Annotation) {
+        panelPage = null
+        applySystemBars()
+        val host = tabletHost ?: return
+        lifecycleScope.launch(Dispatchers.IO) {
+            val target = host.jumpToChar(annotation.chapter, annotation.charStart)
+            withContext(Dispatchers.Main) {
+                if (target != null) {
+                    // 标注跳转是导航：改参锚点作废，下一次改参按新的当前页首取。
+                    relayoutAnchor.release()
+                    currentPos = target
+                    externalPos = target
+                }
+            }
+        }
     }
 
     /** 目录跳转：[item.fragment] 锚定子节自身标题页（回退章首），关抽屉后经 host 落位（finalizeOnLeave 语义）。 */
     private fun tocJump(item: TocItem) {
-        closeTocPanel()
+        closePanel()
         val idx = item.index ?: return
         val host = tabletHost ?: return
         lifecycleScope.launch(Dispatchers.IO) {
             val target = host.jumpToToc(idx, item.fragment)
             withContext(Dispatchers.Main) {
                 if (target != null) {
+                    // 目录跳转是导航：改参锚点作废，下一次改参按新的当前页首取。
+                    relayoutAnchor.release()
                     currentPos = target
                     externalPos = target
                 }
@@ -661,22 +726,24 @@ class ReaderActivity : ComponentActivity() {
         relayoutPending = true
         if (relayoutScheduled) return
         relayoutScheduled = true
+        // 交互起点钉锚：面板内已由开面板钉过（这里只认第一次），面板外这一轮重排自己钉。
+        // 不钉的话每轮落位把「落位页首」当下一轮锚点，锚点会一路往回退（见 RelayoutAnchor）。
+        currentPos?.let { relayoutAnchor.pin(it.chapter, it.slice.charStart) }
         relayoutJob = lifecycleScope.launch(Dispatchers.Default) {
             while (relayoutPending) {
                 relayoutPending = false
                 val c = engine ?: break
                 val p = currentPos
-                val chapter = p?.chapter ?: 0
-                val anchorChar = p?.slice?.charStart ?: 0
+                val a = relayoutAnchor.resolve(p?.chapter ?: 0, p?.slice?.charStart ?: 0)
                 // 后台算新版式（保留当前章旧版式不闪），主线程原子替换。
-                val r = c.prepareRelayoutLight(chapter, anchorChar)
+                val r = c.prepareRelayoutLight(a.chapter, a.char)
                 withContext(Dispatchers.Main) {
                     if (r != null) applyReflowResult(c, r)
                 }
                 if (relayoutPending) delay(RELAYOUT_INTERVAL_MS)
             }
             relayoutScheduled = false
-            // 参数稳定点：版式指纹真变（面板外提交——开书探针回填/原书设置
+            // 版式指纹真变（面板外提交——开书探针回填/原书设置
             // 提交/字体回退）时清全书旧指纹磁盘表；指纹未变（夜间切换等
             // 非版式提交）是空操作，不误删当前参数下的有效磁盘表。B2 随后
             // 按新指纹逐章重写。
@@ -758,7 +825,7 @@ class ReaderActivity : ComponentActivity() {
 
     /** 系统栏按当前状态收敛：面板打开 → 隐藏；否则随上下栏可见性。 */
     private fun applySystemBars() {
-        if (settingsOpen || tocOpen) hideSystemChrome()
+        if (settingsOpen || panelPage != null) hideSystemChrome()
         else if (barsVisible) showSystemChrome()
         else hideSystemChrome()
     }

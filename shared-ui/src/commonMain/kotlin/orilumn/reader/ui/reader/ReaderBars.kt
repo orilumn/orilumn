@@ -6,6 +6,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -26,6 +27,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Create
+import androidx.compose.material.icons.outlined.Menu
+import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -37,7 +43,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathOperation
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.Dp
@@ -45,6 +59,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.style.TextOverflow
 import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.sin
 
 /**
  * S28 阅读上下栏（平移自 Android `ReaderBars.kt`，行为/观感原样保留）：中部点按切换显示，
@@ -156,11 +172,11 @@ fun ReaderBars(
                         .padding(top = 2.dp, bottom = 8.dp),
                     horizontalArrangement = Arrangement.SpaceAround,
                 ) {
-                    BarTool("☰", "目录", onToc)
-                    BarTool("☆", "书签", onBookmark)
-                    BarTool("✎", "笔记", onNote)
-                    BarTool("☾", "夜间", onNight)
-                    BarTool("⚙", "设置", onSettings)
+                    BarTool(BarIcon.Menu, "目录", onToc)
+                    BarTool(BarIcon.Star, "书签", onBookmark)
+                    BarTool(BarIcon.Pencil, "笔记", onNote)
+                    BarTool(BarIcon.Moon, "夜间", onNight)
+                    BarTool(BarIcon.Gear, "设置", onSettings)
                 }
             }
         }
@@ -201,9 +217,27 @@ private fun BarTextBtn(label: String, onClick: () -> Unit) {
     )
 }
 
-/** 底栏工具按钮：上图标/下文字（对应旧 .tool ic20/lb10，按下圆角高亮）。 */
+/** 底栏工具图标：不用 Unicode 字形（☰ ☆ ✎ ☾ ⚙），它们走系统字体回退，
+ *  同一排里字面高低/大小各不相同、平台间还会换字体 —— 图标会自己「站不齐」。
+ *  Material Outlined 是项目已有的图标库（`material-icons-core`），月牙库里没有，自己画。 */
+private enum class BarIcon { Menu, Star, Pencil, Moon, Gear }
+
+private val BarIcon.imageVector: ImageVector?
+    get() = when (this) {
+        BarIcon.Menu -> Icons.Outlined.Menu
+        BarIcon.Star -> null
+        BarIcon.Pencil -> Icons.Outlined.Create
+        BarIcon.Moon -> null
+        BarIcon.Gear -> Icons.Outlined.Settings
+    }
+
+/** 底栏工具按钮：上图标/下文字（对应旧 .tool ic20/lb10，按下圆角高亮）。
+ *
+ * 图标与文字各占**固定槽位**：图标一律缩放到同一边长、在槽内居中；文字行由槽位高度决定。
+ * 五个按钮因此列高一致，图标墨迹中心与文字基线都落在同一条线上，与平台字体无关。
+ */
 @Composable
-private fun BarTool(icon: String, label: String, onClick: () -> Unit, active: Boolean = false) {
+private fun BarTool(icon: BarIcon, label: String, onClick: () -> Unit, active: Boolean = false) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val iconColor = if (active) Gold else BarFg
@@ -216,8 +250,66 @@ private fun BarTool(icon: String, label: String, onClick: () -> Unit, active: Bo
             .padding(horizontal = 12.dp, vertical = 6.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text(text = icon, color = iconColor, fontSize = 20.sp, lineHeight = 20.sp)
+        Box(
+            modifier = Modifier.size(BarToolIconSlot),
+            contentAlignment = Alignment.Center,
+        ) {
+            val vector = icon.imageVector
+            if (vector != null) {
+                Icon(
+                    imageVector = vector,
+                    contentDescription = null,
+                    tint = iconColor,
+                    modifier = Modifier.size(BarToolIconSize),
+                )
+            } else {
+                HandDrawnBarIcon(kind = icon, color = iconColor, modifier = Modifier.size(BarToolIconSize))
+            }
+        }
         Text(text = label, color = BarFg, fontSize = 10.sp, lineHeight = 12.sp)
+    }
+}
+
+/** 五个按钮共用的图标槽位与图标边长：图标在槽内居中，槽高决定下方文字行的位置。 */
+private val BarToolIconSlot = 24.dp
+private val BarToolIconSize = 20.dp
+
+/** 自己画的两个图标（图标库里没有合用的）：月牙 = 两圆求差；空心五角星 = 十点闭合路径。
+ *  与 Material 图标同一条规矩：按墨迹外框居中，所以五个图标共用同一视觉中心。 */
+@Composable
+private fun HandDrawnBarIcon(kind: BarIcon, color: Color, modifier: Modifier) {
+    Canvas(modifier) {
+        val k = size.minDimension / 24f
+        val path = when (kind) {
+            BarIcon.Moon -> {
+                val outer = Path().apply { addOval(Rect(center = Offset(12f * k, 12f * k), radius = 8.6f * k)) }
+                val inner = Path().apply { addOval(Rect(center = Offset(16.4f * k, 10.0f * k), radius = 7.8f * k)) }
+                Path.combine(PathOperation.Difference, outer, inner)
+            }
+            BarIcon.Star -> Path().apply {
+                repeat(10) { i ->
+                    val angle = Math.toRadians(-90.0 + i * 36.0)
+                    val radius = if (i % 2 == 0) 9.2f else 4.0f
+                    val x = (12.0 + radius * cos(angle)).toFloat() * k
+                    val y = (12.0 + radius * sin(angle)).toFloat() * k
+                    if (i == 0) moveTo(x, y) else lineTo(x, y)
+                }
+                close()
+            }
+            else -> return@Canvas
+        }
+        val bounds = path.getBounds()
+        path.translate(
+            Offset(
+                size.width / 2f - bounds.center.x,
+                size.height / 2f - bounds.center.y,
+            ),
+        )
+        drawPath(
+            path = path,
+            color = color,
+            style = Stroke(width = 1.9f * k, cap = StrokeCap.Round, join = StrokeJoin.Round),
+        )
     }
 }
 

@@ -1,6 +1,7 @@
 package orilumn.reader.ui.reader
 
 import androidx.compose.ui.graphics.ImageBitmap
+import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.data.epub.TocItem
 import orilumn.reader.engine.LinkTarget
 import orilumn.reader.engine.paging.PageSlice
@@ -126,6 +127,48 @@ interface ReaderHost {
 
     /** 当前页可视窗口的行绘制指令（章节绝对 Y，见上），null/空 = 暂不可画。 */
     fun pageLines(pos: ReaderPos): List<DrawLine>?
+
+    /**
+     * 整章纯文本的切片（D-18）：`[start, endExclusive)`，坐标与 [pageLines] / 标注区间同尺。
+     *
+     * **同步、廉价**：开章时已随排版缓存；未就绪（未开章 / 远章已驱逐）返回 null，
+     * 空串是合法的「本章无可排文字」。复制、选词、长按断句都读这一口，
+     * 不要在 `shared-ui` 里拼 `DrawLine.text`（那只是视口内的行，跨页/跨行会缺字）。
+     *
+     * 默认 null = 宿主尚未实现，阅读面按「暂不可选」处理。
+     */
+    fun textOf(chapter: Int, start: Int, endExclusive: Int): String? = null
+
+    /**
+     * 与 [textOf] 同尺的块尾偏移（每个排版叶一段，累积 exclusive）：长按选区在本块内断句/断词，
+     * 不跨标题、列表项、段落。未就绪返回 null，选区退回「整章扫描」（旧行为）。
+     */
+    fun textBlockEndsOf(chapter: Int): IntArray? = null
+
+    /**
+     * 本章全部标注（D-19）：按起点、id 升序；读取失败返回空表。
+     *
+     * `shared-ui` 进章时读一次，之后增删改先改内存并递增装饰修订号，再异步落库；
+     * 投影/长按命中/覆盖层都读内存列表，**不每帧查库**。
+     */
+    suspend fun annotationsForChapter(chapter: Int): List<Annotation> = emptyList()
+
+    /**
+     * 全书标注（标注清单用）：按章序、章内起点升序；读取失败返回空表。
+     *
+     * 清单只读库，不要求任何章的排版缓存就绪（原文摘录已随记录存快照，见 D-24）。
+     * 默认空表 = 宿主尚未实现，面板走空态，不崩。
+     */
+    suspend fun annotationsForBook(): List<Annotation> = emptyList()
+
+    /** 新增标注并返回带数据库 id 的记录；失败返回 null。实现方负责补 `bookId` 与时间戳。 */
+    suspend fun addAnnotation(annotation: Annotation): Annotation? = null
+
+    /** 更新标注类型/颜色/批注文本（锚点不变）；失败返回 false。 */
+    suspend fun updateAnnotation(annotation: Annotation): Boolean = false
+
+    /** 按 id 删除标注；失败返回 false。 */
+    suspend fun deleteAnnotation(id: Long): Boolean = false
 
     /**
      * 本页**页首缺口**：页首行行顶之下到本页绘制帧顶的距离（px，≥0，见

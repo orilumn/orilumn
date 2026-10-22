@@ -70,7 +70,7 @@ class CssLayouter(
      * Builds the 排版主题 stylesheet (tier 42, the reader-app **theme** layer above the book) from the
      * shared theme presets single-sourced in common (`ReaderStylesheets.theme(...)`, Z2).
      * 原书设置 (original) returns null — no theme layer, the book's own CSS stands. The theme sheet is
-     * below the per-item settings/UI layers (tier 43/44), so the reader's 行距/段间距/首行缩进 always
+     * below the UI layer (tier 44) and reader custom styles (tier 45), so the reader's 行距/段间距/首行缩进 always
      * win over it; the preset's 缩进/段间距 are mirrored into [TypographicProfile] (see its builder) so
      * the UI layer renders them exactly.
      */

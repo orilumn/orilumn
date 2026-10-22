@@ -76,6 +76,7 @@ class SystemFontScannerProbeTest {
                 listOf(SystemFontFace(f, "Regular"), SystemFontFace(f, "Bold"))
             },
             familyHash = { families.joinToString("|").hashCode().toLong() },
+            familyHashOf = { list -> list.joinToString("|").hashCode().toLong() },
             environmentHash = { environmentHash },
             cacheVersion = 7L,
         )
@@ -105,8 +106,12 @@ class SystemFontScannerProbeTest {
             scanner.onFamilyScanned = { _, _ -> callbacks++ }
 
             scanner.detectOnStart()
-            awaitTrue("scan must land both families × 2 styles") { lib.list().size == 4 }
-            assertEquals("stored fingerprint must match current", version to fake.families.joinToString("|").hashCode().toLong(), lib.fontScanState())
+            val expectedFingerprint = version to fake.families.joinToString("|").hashCode().toLong()
+            // 族行先落库、指纹在收尾时写；只等 lib.list() 会与收尾写指纹竞态（曾偶发红）。
+            awaitTrue("scan must land both families × 2 styles and the fingerprint") {
+                lib.list().size == 4 && lib.fontScanState() == expectedFingerprint
+            }
+            assertEquals("stored fingerprint must match current", expectedFingerprint, lib.fontScanState())
             assertEquals("one callback per family", 2, callbacks)
             assertEquals("one facesFor per family", listOf("FamA", "FamB"), fake.facesCalls.toList())
 
@@ -227,11 +232,16 @@ class SystemFontScannerProbeTest {
         try {
             val fake = FakeSource(listOf("FamA", "FamB"))
             val scanner = SystemFontScanner(lib, TaskScheduler(scope, Dispatchers.Default, 1), source = fake.asSource())
+            // 首族落库时卸载 FamB：扫描体仍拿着 [FamA, FamB] 快照，收尾必须按**快照**写指纹。
+            // 若收尾再读一次系统字体，就会把旧数据贴上新指纹，下一次检测误判「已最新」而跳过清理。
+            scanner.onFamilyScanned = { done, _ -> if (done == 1) fake.families = listOf("FamA") }
             scanner.detectOnStart()
-            awaitTrue("initial scan lands both families") { lib.list().size == 4 }
+            val oldHash = listOf("FamA", "FamB").joinToString("|").hashCode().toLong()
+            awaitTrue("initial scan must land rows and the snapshot fingerprint") {
+                lib.list().size == 4 && lib.fontScanState() == (version to oldHash)
+            }
 
-            // FamB 卸载：族集变 ⇒ 指纹变 ⇒ 下一次面板打开重扫并清孤儿。
-            fake.families = listOf("FamA")
+            // 族集变 ⇒ 指纹变 ⇒ 下一次面板打开重扫并清孤儿。
             scanner.onPanelVisibility(true)
             awaitTrue("FamB rows must be pruned") { lib.list().all { it.familyName == "FamA" } && lib.list().size == 2 }
             assertTrue("FamA still present", lib.list().any { it.familyName == "FamA" })

@@ -34,6 +34,10 @@ class SettingsLayoutScopeTest {
         "brightnessGestureLeft", "brightnessGestureRight", "brightnessGestureTwo",
         "pageAnim", "pageAnimationMode", "autoContinue", "pageNum", "coverStretch",
         "showHiddenFonts",
+        // 标注色槽只改像素，不影响分页。
+        "highlightColorSlots", "underlineColorSlots", "highlightDefaultSlot", "underlineDefaultSlot",
+        // 浮动菜单记住的上次类别 / 划线线型：纯菜单偏好，不影响版面。
+        "annotationLastKind", "annotationLastLineStyle",
     )
 
     /** 进版式管线（进 [orilumn.reader.engine.text.LayoutParamKey] 或经 profile 影响版面）。 */
@@ -47,12 +51,14 @@ class SettingsLayoutScopeTest {
     )
 
     /**
-     * 不影响分页、但**本次不登记**进 [ReaderSettings.withoutNonLayout] 的一族：颜色与持久化元数据。
+     * 不影响分页、但**本次不登记**进 [ReaderSettings.withoutNonLayout] 的一族：主题配色与持久化元数据。
      *
      * 它们确实只改像素不改版面（夜间/配色切换在两端都仍走排版提交 → 白跑一次本章重排，
      * 指纹不变故磁盘表不误删）。**这是刻意留下的现状**，不在本次修复范围内：
      * 摘出去要先确认阅读面配色链路（`ReaderLightMask` 盖章 + 主题探针）对无重排的假设成立。
      * 本测试锁住「它们当前仍在排版路径上」，将来要改必须连本族一起搬。
+     *
+     * 注意与**标注色槽**区分：后者是新建标注的墨色快照，不参与页面配色，已登记为无重排字段。
      */
     private val inertFields = listOf(
         "theme", "scheme", "bgOverride", "fgOverride", "schemaVersion",
@@ -73,6 +79,12 @@ class SettingsLayoutScopeTest {
         "pageNum" -> s.copy(pageNum = !s.pageNum)
         "coverStretch" -> s.copy(coverStretch = !s.coverStretch)
         "showHiddenFonts" -> s.copy(showHiddenFonts = !s.showHiddenFonts)
+        "highlightColorSlots" -> s.copy(highlightColorSlots = s.highlightColorSlots + 0x01020304)
+        "underlineColorSlots" -> s.copy(underlineColorSlots = s.underlineColorSlots + 0x01020304)
+        "highlightDefaultSlot" -> s.copy(highlightDefaultSlot = if (s.highlightDefaultSlot == 0) 1 else 0)
+        "underlineDefaultSlot" -> s.copy(underlineDefaultSlot = if (s.underlineDefaultSlot == 0) 1 else 0)
+        "annotationLastKind" -> s.copy(annotationLastKind = if (s.annotationLastKind == "underline") "highlight" else "underline")
+        "annotationLastLineStyle" -> s.copy(annotationLastLineStyle = if (s.annotationLastLineStyle == "wavy") "straight" else "wavy")
 
         "lineSpacing" -> s.copy(lineSpacing = s.lineSpacing + 0.13)
         "firstLineIndent" -> s.copy(firstLineIndent = s.firstLineIndent + 0.11)
@@ -138,7 +150,7 @@ class SettingsLayoutScopeTest {
     }
 
     @Test
-    fun `颜色族当前仍在排版路径上`() {
+    fun `主题配色族当前仍在排版路径上`() {
         for (f in inertFields) {
             assertFalse(
                 "[$f] 本次刻意不登记进 withoutNonLayout（要摘出去得连同阅读面配色链路一起改）",

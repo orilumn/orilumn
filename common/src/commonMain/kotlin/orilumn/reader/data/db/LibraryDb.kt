@@ -2,6 +2,10 @@ package orilumn.reader.data.db
 
 import app.cash.sqldelight.coroutines.asFlow
 import app.cash.sqldelight.coroutines.mapToList
+import orilumn.reader.data.annotation.Annotation
+import orilumn.reader.data.annotation.AnnotationKind
+import orilumn.reader.data.annotation.AnnotationLineStyle
+import orilumn.reader.data.annotation.AnnotationStore
 import orilumn.reader.data.book.Book
 import orilumn.reader.data.book.BookReadingState
 import orilumn.reader.data.font.FontFace
@@ -24,11 +28,12 @@ enum class BookSort { Added, Read, Name }
  * - 查询走 IO 线程；书目流经 `asFlow().mapToList()` 随库变化推送（替代 Room `observe*`）；
  * - 驱动由各壳提供（Android `AndroidSqliteDriver` / 桌面 `JdbcSqliteDriver`），本类无平台绑定。
  */
-class LibraryDb(db: OrilumnDb) {
+class LibraryDb(private val db: OrilumnDb) : AnnotationStore {
     private val books = db.booksQueries
     private val progress = db.readingStatesQueries
     private val fonts = db.fontFacesQueries
     private val fontScan = db.fontScanStateQueries
+    private val annotations = db.annotationsQueries
 
     fun observeBooks(sort: BookSort = BookSort.Added): Flow<List<Book>> {
         val flow = when (sort) {
@@ -88,6 +93,18 @@ class LibraryDb(db: OrilumnDb) {
         books.deleteBook(id)
     }
 
+    /**
+     * 删书并在**同一事务**里清掉阅读进度与标注（没有外键级联，必须一起删）。
+     * 两个平台都走这一条，避免「删了书、留了孤儿」。
+     */
+    suspend fun removeBookAndData(id: Long) = withContext(Dispatchers.IO) {
+        db.transaction {
+            annotations.deleteAnnotationsForBook(id)
+            progress.clearReadingState(id)
+            books.deleteBook(id)
+        }
+    }
+
     // ---- 阅读进度（S34a；schema v3） ----
 
     suspend fun saveReadingState(state: BookReadingState) = withContext(Dispatchers.IO) {
@@ -107,6 +124,71 @@ class LibraryDb(db: OrilumnDb) {
 
     suspend fun clearReadingState(bookId: Long) = withContext(Dispatchers.IO) {
         progress.clearReadingState(bookId)
+    }
+
+    // ---- 文本标注（schema v9 起；v8 加划线线型列，v9 加原文摘录列。锚点为原书章内字符区间） ----
+
+    override suspend fun annotationsForChapter(bookId: Long, chapter: Int): List<Annotation> =
+        withContext(Dispatchers.IO) {
+            annotations.annotationsForChapter(bookId, chapter.toLong())
+                .executeAsList()
+                .map { it.toAnnotation() }
+        }
+
+    override suspend fun annotationsForBook(bookId: Long): List<Annotation> =
+        withContext(Dispatchers.IO) {
+            annotations.annotationsForBook(bookId)
+                .executeAsList()
+                .map { it.toAnnotation() }
+        }
+
+    override suspend fun annotationAt(bookId: Long, chapter: Int, charOffset: Int): Annotation? =
+        withContext(Dispatchers.IO) {
+            annotations.annotationAt(bookId, chapter.toLong(), charOffset.toLong(), charOffset.toLong())
+                .executeAsOneOrNull()
+                ?.toAnnotation()
+        }
+
+    override suspend fun addAnnotation(annotation: Annotation): Annotation = withContext(Dispatchers.IO) {
+        annotations.insertAnnotation(
+            bookId = annotation.bookId,
+            chapter = annotation.chapter.toLong(),
+            charStart = annotation.charStart.toLong(),
+            charEnd = annotation.charEnd.toLong(),
+            kind = annotation.kind.wire,
+            color = annotation.color?.toLong(),
+            lineStyle = annotation.lineStyle.wire,
+            note = annotation.note,
+            createdAt = annotation.createdAt,
+            updatedAt = annotation.updatedAt,
+            quote = annotation.quote,
+        )
+        val id = annotations.lastInsertAnnotationId().executeAsOneOrNull()?.max
+            ?: error("insertAnnotation 未返回新行 id")
+        annotation.copy(id = id)
+    }
+
+    override suspend fun updateAnnotation(annotation: Annotation) = withContext(Dispatchers.IO) {
+        annotations.updateAnnotation(
+            kind = annotation.kind.wire,
+            color = annotation.color?.toLong(),
+            lineStyle = annotation.lineStyle.wire,
+            note = annotation.note,
+            quote = annotation.quote,
+            updatedAt = annotation.updatedAt,
+            id = annotation.id,
+        )
+        Unit
+    }
+
+    override suspend fun deleteAnnotation(id: Long) = withContext(Dispatchers.IO) {
+        annotations.deleteAnnotation(id)
+        Unit
+    }
+
+    override suspend fun deleteAnnotationsForBook(bookId: Long) = withContext(Dispatchers.IO) {
+        annotations.deleteAnnotationsForBook(bookId)
+        Unit
     }
 
     // ---- 字体池（S34b；schema v5，F 系列加 hidden） ----
@@ -289,6 +371,21 @@ class LibraryDb(db: OrilumnDb) {
         target = target,
         progress = progress,
         locator = locator,
+        updatedAt = updatedAt,
+    )
+
+    private fun orilumn.reader.db.Annotations.toAnnotation(): Annotation = Annotation(
+        id = id,
+        bookId = bookId,
+        chapter = chapter.toInt(),
+        charStart = charStart.toInt(),
+        charEnd = charEnd.toInt(),
+        kind = AnnotationKind.fromWire(kind),
+        color = color?.toInt(),
+        lineStyle = AnnotationLineStyle.fromWire(lineStyle),
+        note = note,
+        quote = quote,
+        createdAt = createdAt,
         updatedAt = updatedAt,
     )
 

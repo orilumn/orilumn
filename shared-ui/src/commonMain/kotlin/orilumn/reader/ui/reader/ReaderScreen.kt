@@ -1,12 +1,14 @@
 package orilumn.reader.ui.reader
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.Text
@@ -26,21 +28,31 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusTarget
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalViewConfiguration
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import orilumn.reader.data.annotation.Annotation
+import orilumn.reader.data.annotation.AnnotationKind
+import orilumn.reader.data.annotation.AnnotationLineStyle
 import orilumn.reader.data.settings.ReaderSettings
+import orilumn.reader.engine.skia.LineWindowDrawer
 import orilumn.reader.engine.text.TypographicProfile
 import orilumn.reader.io.Logger
+import kotlin.math.hypot
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -73,7 +85,8 @@ private const val PAGE_IMAGE_WARM_TIMEOUT_MS = 800L
  *
  * 状态机：打开后 `openPos` 为空 → 仅背页；翻页/跳转走宿主 suspend 后落位，且防抖保存
  * （[onSaveProgress]，500ms，复刻 Android `scheduleSave`）。设置面板/目录抽屉是独立组件
- * （[ReaderSettingsPanel]/[ReaderTocPanel]，S29）；书签/笔记占位未接线（onBookmark/onNote 为 null）
+ * （[ReaderSettingsPanel]/[ReaderSidePanel]，S29）；书签仍是占位（onBookmark 为 null），
+ * 笔记按钮已接标注清单（onNote）
  * 时经 CMP Snackbar（[rememberReaderSnackbar]，替代 Android Toast）提示。
  */
 @Composable
@@ -118,9 +131,17 @@ fun ReaderScreen(
      * 桌面壳经 `ReaderView` 按面板状态传入。
      */
     keysEnabled: Boolean = true,
+    /**
+     * 标注数据外部变更号（标注清单删除后 ++）：单独一条 effect 重读当前章标注，
+     * 让屏幕上那条装饰同步消失。**不能**并进「进章」effect——同章 `load(ch)` 会早退，
+     * 不会重读；它也不是版式修订号，不驱动重新分页。
+     */
+    annotationsEpoch: Int = 0,
 ) {
     val density = LocalDensity.current.density
     val profile = remember(settings, density) { TypographicProfile.build(settings, density) }
+    val selectionHandleRadiusPx = SELECTION_HANDLE_RADIUS_DP * density
+    val selectionHandleHitPx = SELECTION_HANDLE_HIT_RADIUS_DP * density
 
     var openPos by remember { mutableStateOf<ReaderPos?>(null) }
     var openFailed by remember { mutableStateOf(false) }
@@ -177,6 +198,60 @@ fun ReaderScreen(
     val bgCache = remember(currentHost) {
         PageImageCache<orilumn.reader.engine.skia.DecodedImage>(
             sizeOf = { (it.image.width * it.image.height * 4L).coerceAtLeast(1L) })
+    }
+    // D-19：当前章标注内存态。翻页不重读库，换章才清空重载；增删改先改它再落库。
+    val annotationState = remember(currentHost) { AnnotationState(currentHost) }
+    // D-11：长期存在的选区（用户层，不落库）。换章清空；翻页保留，覆盖层各页只画交集。
+    val selection = remember(currentHost) { TextSelectionState() }
+    // 选区浮动菜单是否显示：长按/拖手柄期间收起，抬手后才出现；点正文或翻页即消失。
+    var selectionMenuVisible by remember { mutableStateOf(false) }
+    // 移动端放大镜的手指位置（null = 不显示）。桌面鼠标不显示（D-10）。
+    var magnifierFinger by remember { mutableStateOf<Offset?>(null) }
+    // 长按已有标注时打开的编辑菜单（D-14）；锚点是长按位置，菜单作用于整条记录。
+    var editingAnnotation by remember { mutableStateOf<Annotation?>(null) }
+    var editingAnchor by remember { mutableStateOf<Rect?>(null) }
+    // 编辑菜单的透明遮罩：点菜单外任意处只关菜单，不再翻页/改选区。
+    val editScrimInteraction = remember { MutableInteractionSource() }
+    // 旧的 ClipboardManager 仍是 CMP 唯一共享可用的同步写入口；新 LocalClipboard 只支持 suspend。
+    @Suppress("DEPRECATION")
+    val clipboard = LocalClipboardManager.current
+    val selectionDrawer = remember { LineWindowDrawer() }
+    LaunchedEffect(currentHost, openPos?.chapter) {
+        val ch = openPos?.chapter
+        if (ch == null) annotationState.clear() else annotationState.load(ch)
+        selection.clear()
+        selectionMenuVisible = false
+        magnifierFinger = null
+        editingAnnotation = null
+        editingAnchor = null
+    }
+    // 标注清单里删了当前章的标注：重读本章，屏幕上的装饰同步消失（与进章 effect 分离，见参数注释）。
+    LaunchedEffect(currentHost, annotationsEpoch) {
+        if (annotationsEpoch > 0) annotationState.reload()
+    }
+    // 版式/参数变化后旧选区坐标不再成立（字符偏移没变，但端点所在行可能变），直接丢弃。
+    LaunchedEffect(contentRevision, density) {
+        selection.clear()
+        selectionMenuVisible = false
+        magnifierFinger = null
+        editingAnnotation = null
+        editingAnchor = null
+    }
+    // 选区被任何路径清空时，菜单必须同步收起（避免留下指向空选区的浮层）。
+    LaunchedEffect(selection.hasSelection) {
+        if (!selection.hasSelection) {
+            selectionMenuVisible = false
+            magnifierFinger = null
+        }
+    }
+    // 翻页后浮动菜单不跟到新页（选区保留，各页只画交集；用户可再点选区/手柄）。
+    // 但跨页自动翻页可能在抬手瞬间仍在飞行：抬手已把菜单置 true，此时不能再无条件抹掉，
+    // 否则「拖到页边松手」永远看不到菜单。无选区时照旧收起。
+    LaunchedEffect(openPos) {
+        if (!selection.hasSelection) selectionMenuVisible = false
+        // 翻页后编辑菜单不跟到新页；它锚定的是旧页上的那条记录。
+        editingAnnotation = null
+        editingAnchor = null
     }
     // ---- 定位动作（host 为 suspend，统一挂到本组件作用域） ----
     /**
@@ -452,7 +527,11 @@ fun ReaderScreen(
      * 换不了就得把动画拨回原页（见 [endSlide]）。发射后立刻返回的话那次核对必然
      * 读到着陆前的 `openPos`，恒判失败 ⇒ 每次提交都回滚 ⇒ 观感是「翻到位又弹回去」。
      */
-    suspend fun flipAwait(direction: Int, dismissCoverOnLand: Boolean = true): ReaderPos? {
+    suspend fun flipAwait(
+        direction: Int,
+        dismissCoverOnLand: Boolean = true,
+        action: String = "tap-flip",
+    ): ReaderPos? {
         // 封面页内翻页：前进回正文第一页（现查 fresh 落位，走漏斗，可存档)。
         // 封面已是第一页，后退无操作。
         // `dismissCoverOnLand=false`（动画路径）时**落位不 dismiss**：封面要作为滑动
@@ -480,14 +559,14 @@ fun ReaderScreen(
             return null
         }
         return anchorFunnel.navigate(
-            action = "tap-flip",
-            read = { resolveNavPos("tap-flip") },
+            action = action,
+            read = { resolveNavPos(action) },
             commit = ::markPositionChanged,
         ) { p ->
-            Logger.d("Orilumn.TAP", "tap-flip dispatch dir=$direction from ch=${p.chapter} char=${p.slice.charStart}")
+            Logger.d("Orilumn.TAP", "$action dispatch dir=$direction from ch=${p.chapter} char=${p.slice.charStart}")
             val landed = currentHost.adjacent(p, direction)
             // 引擎侧无声吞翻页时（返回 null），这里是唯一目击者——与 Orilumn.FLIP 对账。
-            Logger.d("Orilumn.TAP", "tap-flip result dir=$direction " + (landed?.let { "landed ch=${it.chapter} char=${it.slice.charStart}" } ?: "NULL (engine returned null)"))
+            Logger.d("Orilumn.TAP", "$action result dir=$direction " + (landed?.let { "landed ch=${it.chapter} char=${it.slice.charStart}" } ?: "NULL (engine returned null)"))
             // 等图由 [AnchorFunnel.beforeCommit] 在**本函数内部、commit 之前**完成（漏斗锁内，
             // 所有落位路径共用），故返回时目标页整页就绪：`openPos` 一变，首帧即真图。
             // 调用点**不要**再等一次——那是冗余，且会和用户紧接着的下一手势抢同一个
@@ -721,26 +800,174 @@ fun ReaderScreen(
         currentOnLightCommit(light)
     }
 
+    /** 当前页屏幕坐标 → 章内字符偏移；长按、拖选、链接命中三方共用。 */
+    fun charOffsetAt(p: ReaderPos, xPx: Float, yPx: Float): Int? {
+        val lines = currentHost.pageLines(p) ?: return null
+        if (lines.isEmpty()) return null
+        val images = runCatching { currentHost.pageImages(p) }.getOrNull()
+        val backgrounds = runCatching { currentHost.pageBackgrounds(p) }.getOrNull()
+        val frameLead = runCatching { currentHost.pageFrameLead(p) }.getOrDefault(0)
+        val shift = readerPageShift(
+            lines = lines,
+            pageImages = images,
+            pageBackgrounds = backgrounds,
+            frameLead = frameLead,
+            contentTop = profile.marginTop.toFloat(),
+        ) ?: return null
+        return readerCharOffsetAt(
+            lines = lines,
+            shift = shift,
+            contentLeft = profile.marginLeft.toFloat(),
+            xPx = xPx,
+            yPx = yPx,
+        )
+    }
+
+    /**
+     * 跨页接力用：手指在页边距里时按 y 找新页最近行，取靠该边的首/末字。
+     *
+     * 与 [charOffsetAt] 共用 `pageShift`，但**不要求 x 落在可见字形内**——
+     * 自动翻页触发时手指本来就在页边，x 必然超出字形右缘。
+     */
+    fun charOffsetAtPageSide(p: ReaderPos, yPx: Float, direction: Int): Int? {
+        val lines = currentHost.pageLines(p) ?: return null
+        if (lines.isEmpty()) return null
+        val images = runCatching { currentHost.pageImages(p) }.getOrNull()
+        val backgrounds = runCatching { currentHost.pageBackgrounds(p) }.getOrNull()
+        val frameLead = runCatching { currentHost.pageFrameLead(p) }.getOrDefault(0)
+        val shift = readerPageShift(
+            lines = lines,
+            pageImages = images,
+            pageBackgrounds = backgrounds,
+            frameLead = frameLead,
+            contentTop = profile.marginTop.toFloat(),
+        ) ?: return null
+        return selectionSideOffset(lines, shift, yPx, direction)
+    }
+
+    /** 当前页上的选区几何；无选区/跨章/页无行时 null。 */
+    fun selectionGeometryAt(p: ReaderPos, widthPx: Float, heightPx: Float): SelectionPageGeometry? {
+        if (!selection.hasSelection || selection.chapter != p.chapter) return null
+        val lines = currentHost.pageLines(p) ?: return null
+        if (lines.isEmpty()) return null
+        val left = profile.marginLeft.toFloat()
+        val top = profile.marginTop.toFloat()
+        val right = (widthPx - profile.marginRight).coerceAtLeast(left)
+        val bottom = (heightPx - profile.marginBottom).coerceAtLeast(top)
+        return selectionPageGeometry(
+            drawer = selectionDrawer,
+            lines = lines,
+            chapter = p.chapter,
+            start = selection.start,
+            endExclusive = selection.endExclusive,
+            pageSlice = p.slice,
+            frameLead = runCatching { currentHost.pageFrameLead(p) }.getOrDefault(0),
+            pageImages = runCatching { currentHost.pageImages(p) }.getOrNull(),
+            pageBackgrounds = runCatching { currentHost.pageBackgrounds(p) }.getOrNull(),
+            contentLeft = left,
+            contentTop = top,
+            contentRight = right,
+            contentBottom = bottom,
+            handleRadiusPx = selectionHandleRadiusPx,
+        )
+    }
+
+    /** 手指是否落在某个可见手柄的命中圈内；页面端点不在本页的手柄不参与。 */
+    fun selectionHandleAt(xPx: Float, yPx: Float, widthPx: Float, heightPx: Float): SelectionHandle? {
+        val p = openPos ?: return null
+        val g = selectionGeometryAt(p, widthPx, heightPx) ?: return null
+        fun hit(center: Offset?): Boolean =
+            center != null && hypot(xPx - center.x, yPx - center.y) <= selectionHandleHitPx
+        return when {
+            hit(g.startHandle) -> SelectionHandle.Start
+            hit(g.endHandle) -> SelectionHandle.End
+            else -> null
+        }
+    }
+
+    /**
+     * 长按命中已有标注（D-14）：命中则打开该标注的编辑菜单并返回 true。
+     *
+     * 只看当前章内存列表的字符区间（`charStart <= off < charEnd`），不查库、不做几何反查；
+     * 页边距不参与命中，避免在空白边距上误开菜单。命中后清掉选区，避免两套菜单叠在一起。
+     */
+    fun tryOpenAnnotationEdit(xPx: Float, yPx: Float, widthPx: Float, heightPx: Float): Boolean {
+        val p = openPos ?: return false
+        if (annotationState.chapter != p.chapter) return false
+        val left = profile.marginLeft.toFloat()
+        val top = profile.marginTop.toFloat()
+        val right = (widthPx - profile.marginRight).coerceAtLeast(left)
+        val bottom = (heightPx - profile.marginBottom).coerceAtLeast(top)
+        if (xPx < left || xPx > right || yPx < top || yPx > bottom) return false
+        val offset = charOffsetAt(p, xPx, yPx) ?: return false
+        val hit = annotationState.annotationAt(offset)?.takeIf { it.isDrawable() } ?: return false
+        selection.clear()
+        selectionMenuVisible = false
+        magnifierFinger = null
+        editingAnnotation = hit
+        editingAnchor = Rect(xPx, yPx, xPx, yPx)
+        return true
+    }
+
+    /** 收起已有标注的编辑菜单（不改数据）。 */
+    fun closeAnnotationEdit() {
+        editingAnnotation = null
+        editingAnchor = null
+    }
+
+    /** 长按起手：按 D-7 选整词 / 整句；返回 false 表示此处没有可选的章文本。 */
+    fun beginSelectionAt(xPx: Float, yPx: Float): Boolean {
+        closeAnnotationEdit()
+        val p = openPos ?: return false
+        val offset = charOffsetAt(p, xPx, yPx) ?: return false
+        val text = currentHost.textOf(p.chapter, 0, Int.MAX_VALUE) ?: return false
+        return selection.begin(p.chapter, text, offset, currentHost.textBlockEndsOf(p.chapter))
+    }
+
+    /** 拖动手柄/长按后移动：焦点按字符走；越出当前行时保持上一个焦点。 */
+    fun extendSelectionAt(xPx: Float, yPx: Float) {
+        val p = openPos ?: return
+        val offset = charOffsetAt(p, xPx, yPx) ?: return
+        selection.extendTo(offset)
+    }
+
+    /** 选区是否已顶到本章首/末页（只用于自动翻页停住时的提示，不参与导航）。 */
+    fun isSelectionChapterBoundary(p: ReaderPos, direction: Int): Boolean {
+        val length = currentHost.textOf(p.chapter, 0, Int.MAX_VALUE)?.length ?: return false
+        return selectionAtChapterBoundary(p.slice.charStart, p.slice.charEnd, length, direction)
+    }
+
+    /**
+     * 选区自动翻一页（D-8 / 3.3）：先只读确认邻页仍在**同一章**，再走 [flipAwait] 导航漏斗。
+     *
+     * 不能直接调 `adjacent`：那条口会推进临时表指针，且到章末会跨章。这里用
+     * [ReaderHost.peekAdjacent] 只读探路，确认同章后才交给漏斗；落位后按手指 y
+     * 把焦点接到新页最近行的靠边字（手柄接力）。
+     *
+     * @return true = 已翻页并接续选区；false = 到章边界 / 邻页未就绪 / 导航被 BUSY-DROP。
+     */
+    suspend fun autoFlipSelection(direction: Int, fingerY: Float): Boolean {
+        val p = openPos ?: return false
+        if (selection.chapter != p.chapter) return false
+        val peek = runCatching { currentHost.peekAdjacent(p, direction) }.getOrNull() ?: return false
+        if (peek.chapter != p.chapter) return false
+        val landed = flipAwait(direction, action = "selection-auto-flip") ?: return false
+        if (landed.chapter != p.chapter) return false
+        val offset = charOffsetAtPageSide(landed, fingerY, direction) ?: return false
+        selection.extendTo(offset)
+        Logger.d(
+            "Orilumn.SEL",
+            "auto-flip dir=$direction ch=${p.chapter} ${p.slice.charStart}→${landed.slice.charStart} " +
+                "focus=$offset sel=${selection.start}-${selection.endExclusive}",
+        )
+        return true
+    }
+
     /** 点按 (xPx, yPx)（屏坐标 px）→ 命中链接即导航并返回 true；miss 回 false。 */
     fun tryOpenLinkAt(xPx: Float, yPx: Float): Boolean {
         val p = openPos ?: return false
-        val lines = currentHost.pageLines(p) ?: return false
-        if (lines.isEmpty()) return false
-        val contentLeft = profile.marginLeft.toFloat()
-        val contentTop = profile.marginTop.toFloat()
-        // 对齐锚点与画布同式（单一来源 ReaderMath.pageAnchorY：行/图取最小，盒背景不进锚点，
-        // 再上抬页首缺口），否则行窗内首图页、或页首带盒装饰的页，y 会全偏。
-        val imgMin = runCatching { currentHost.pageImages(p)?.minOfOrNull { it.yTop } }.getOrNull()
-        val bgMin = runCatching { currentHost.pageBackgrounds(p)?.minOfOrNull { it.yTop } }.getOrNull()
-        val frameLead = runCatching { currentHost.pageFrameLead(p) }.getOrDefault(0)
-        val anchorY = ReaderMath.pageAnchorY(lines.minOf { it.yTop }, imgMin, bgMin, frameLead) ?: return false
-        val shift = anchorY - contentTop.roundToInt()
-        // 行窗 Y 是屏坐标（含 contentTop，见 ReaderPageCanvas 同式 shift），故 y 传屏坐标；
-        // x 原点是内容区左缘，故 x 减 contentLeft（与绘制侧 paintX = contentLeft + xLeft 同式）。
-        val (line, xInParagraph, yInLine) =
-            ReaderMath.tapLineAt(lines, shift, xPx - contentLeft, yPx) ?: return false
-        val offset = orilumn.reader.engine.skia.LineHitTest.hit(line, xInParagraph, yInLine) ?: return false
-        val target = currentHost.linkTargetAt(p.chapter, line.charBase + offset) ?: return false
+        val offset = charOffsetAt(p, xPx, yPx) ?: return false
+        val target = currentHost.linkTargetAt(p.chapter, offset) ?: return false
         scope.launch {
             anchorFunnel.navigate(
                 action = "open-link",
@@ -771,6 +998,17 @@ fun ReaderScreen(
             }
             return
         }
+        // 编辑菜单开着时，正文点按只关菜单（菜单外的透明遮罩通常已先接住，这里是兜底）。
+        if (editingAnnotation != null) {
+            closeAnnotationEdit()
+            return
+        }
+        // D-11：有选区时，正文点按只清除选区，不翻页也不开链接。
+        if (selection.hasSelection) {
+            selection.clear()
+            selectionMenuVisible = false
+            return
+        }
         // P4-c2u: 链接优先——点中链接字形即导航，未中才走三区（翻页/栏显隐）。
         // 无时间防抖：链接跳转本身走锚页漏斗（在途导航中后到的点按 BUSY-DROP），锁即防抖，
         // 不再另设时间窗（误吞正常点按的"点了没反应"即此类）。
@@ -798,6 +1036,7 @@ fun ReaderScreen(
     }
 
     val touchSlop = LocalViewConfiguration.current.touchSlop
+    val longPressTimeout = LocalViewConfiguration.current.longPressTimeoutMillis
 
     // 桌面键鼠：阅读面常驻焦点；左右箭头翻页，Esc 等效中部点按（链接优先，否则栏显隐）。
     // 冒泡口径：输入框等消费方向键后不再到这里，不劫持打字。
@@ -821,6 +1060,159 @@ fun ReaderScreen(
     // S29：Toast → CMP Snackbar；书签/笔记占位动作未接线（null）时给出提示。
     val snackbar = rememberReaderSnackbar()
 
+    /**
+     * 改已有标注的颜色（顺带可换类别，D-14 合并菜单后同一格色槽既改色也定型）：
+     * 先改内存（立即出图），再异步落库；成功不弹提示（画面本身就是反馈），失败回滚并提示。
+     */
+    fun recolorAnnotation(annotation: Annotation, kind: AnnotationKind, color: Int, lineStyle: AnnotationLineStyle) {
+        closeAnnotationEdit()
+        scope.launch {
+            val ok = annotationState.update(
+                annotation.copy(kind = kind, color = color, lineStyle = annotationLineStyleFor(kind, lineStyle)),
+            )
+            if (!ok) snackbar.show("改色失败")
+        }
+    }
+
+    /** 删除已有标注：先移出内存（立即消失），再异步落库；成功不弹提示，失败回滚并提示。 */
+    fun deleteAnnotation(annotation: Annotation) {
+        closeAnnotationEdit()
+        selectionMenuVisible = false
+        scope.launch {
+            val ok = annotationState.delete(annotation.id)
+            if (!ok) snackbar.show("删除失败")
+        }
+    }
+
+    /** 把当前选区落成一条高亮/划线：先内存出图，再异步存库；成功不弹提示，失败回滚并提示。 */
+    fun createSelectionAnnotation(kind: AnnotationKind, color: Int, lineStyle: AnnotationLineStyle) {
+        val ch = selection.chapter
+        val s = selection.start
+        val e = selection.endExclusive
+        if (ch < 0 || e <= s) return
+        selectionMenuVisible = false
+        // 创建当时的原文快照（D-24）：清单行显示用；章节文本已在缓存里，取不到就留空。
+        val quote = currentHost.textOf(ch, s, e)?.take(200)
+        scope.launch {
+            val saved = annotationState.add(
+                Annotation(
+                    bookId = 0,
+                    chapter = ch,
+                    charStart = s,
+                    charEnd = e,
+                    kind = kind,
+                    color = color,
+                    // 线型只属于划线：高亮记录不存线型，免得与划线菜单的偏好串味。
+                    lineStyle = annotationLineStyleFor(kind, lineStyle),
+                    quote = quote,
+                ),
+            )
+            if (saved == null) {
+                if (selection.hasSelection) selectionMenuVisible = true
+                snackbar.show("保存失败")
+            } else {
+                // 落库期间用户可能已换了选区：只清掉仍是这一条的那份，别误清新选区。
+                if (selection.chapter == ch && selection.start == s && selection.endExclusive == e) {
+                    selection.clear()
+                }
+            }
+        }
+    }
+
+    /**
+     * 同一格色槽：编辑中（长按已有标注）就改它，否则用当前选区新建一条。
+     *
+     * 顺手把「这次用的类别 + 色槽」记住（写盘，无重排提交）：下次打开菜单直接停在这一类、
+     * 这一格上——色槽同时成为该类的新建默认格，故菜单里金边所指即是下次落笔的颜色。
+     */
+    fun applyAnnotationColor(kind: AnnotationKind, slot: Int, lineStyle: AnnotationLineStyle) {
+        val color = annotationSlotColor(light, kind, slot)
+        // 落盘一律小写（`highlight` / `underline`，见 ReaderSettings 的约定），
+        // 解析侧 annotationLastKindOf 再另行 lowercase，双向容错。
+        var next = withAnnotationDefaultSlot(light, kind, slot)
+            .copy(annotationLastKind = kind.name.lowercase())
+        // 线型只属于划线：在高亮那一行点色，不能顺手改掉划线菜单记住的线型（两套偏好各自独立）。
+        if (kind == AnnotationKind.Underline) {
+            next = next.copy(annotationLastLineStyle = lineStyle.wire)
+        }
+        if (next != light) {
+            light = next
+            currentOnLightCommit(next)
+        }
+        val editing = editingAnnotation
+        if (editing != null) {
+            recolorAnnotation(editing, kind, color, lineStyle)
+        } else {
+            createSelectionAnnotation(kind, color, lineStyle)
+        }
+    }
+
+    /**
+     * 线型行：记住它，下次新建直接用；并且**一次点按即落笔**——
+     * 选区场景下直接用当前划线色按这个线型画上去（不必再点一次颜色），
+     * 编辑已有标注时把它改成这个线型（高亮没有线型，顺手换成划线）。
+     */
+    fun applyAnnotationLineStyle(style: AnnotationLineStyle) {
+        val next = withAnnotationLastLineStyle(light, style)
+        if (next != light) {
+            light = next
+            currentOnLightCommit(next)
+        }
+        val editing = editingAnnotation
+        if (editing != null) {
+            if (editing.kind == AnnotationKind.Underline && editing.lineStyle == style) return
+            // 颜色跟着**线型所属的类别**走：本来就是划线时保留它自己的墨色；
+            // 从高亮转过来时不能把高亮那半透明的底色带进墨线（两个色槽体系是完全独立的）。
+            val color = annotationUnderlineInkColor(editing, light)
+            closeAnnotationEdit()
+            scope.launch {
+                val ok = annotationState.update(
+                    editing.copy(kind = AnnotationKind.Underline, lineStyle = style, color = color),
+                )
+                if (!ok) snackbar.show("改线型失败")
+            }
+        } else if (selection.hasSelection) {
+            createSelectionAnnotation(
+                kind = AnnotationKind.Underline,
+                color = annotationDefaultColor(light, AnnotationKind.Underline),
+                lineStyle = style,
+            )
+        }
+    }
+
+    /** 复制本章一段原文：块间补换行，换行只进剪贴板、不参与标注偏移（D-18）。 */
+    fun copyRange(ch: Int, s: Int, e: Int): Boolean {
+        val text = currentHost.textOf(ch, 0, Int.MAX_VALUE)
+        if (text == null) {
+            snackbar.show("复制失败：本章内容尚未就绪")
+            return false
+        }
+        val copied = copyTextOf(text, s, e, currentHost.textBlockEndsOf(ch))
+        if (copied.isEmpty()) {
+            snackbar.show("复制失败：选区为空")
+            return false
+        }
+        val ok = runCatching { clipboard.setText(AnnotatedString(copied)) }.isSuccess
+        if (!ok) {
+            snackbar.show("复制失败")
+            return false
+        }
+        snackbar.show("已复制")
+        return true
+    }
+
+    /** 复制选区原文（复制后保留选区）。 */
+    fun copySelection() {
+        if (copyRange(selection.chapter, selection.start, selection.endExclusive)) {
+            selectionMenuVisible = false
+        }
+    }
+
+    /** 复制一条已有标注覆盖的原文：长按命中后没有选区，复制对象就是这条记录。 */
+    fun copyAnnotation(annotation: Annotation) {
+        if (copyRange(annotation.chapter, annotation.charStart, annotation.charEnd)) closeAnnotationEdit()
+    }
+
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
@@ -837,6 +1229,97 @@ fun ReaderScreen(
                         currentBarsVisible, downY, size.height.toFloat(),
                         currentTopBarH.toFloat(), currentBotBarH.toFloat(),
                     )
+                    // D-11：长按是进入选区的唯一入口；手柄按下则直接进入拖动。
+                    // 动画/封面/栏区都不参与选区；选区已存在时点按由 onTap 清除。
+                    var selecting = false
+                    var moved = false
+                    var longPressJob: Job? = null
+                    // D-8 / 3.3：手指在页边带内按住 → 自动翻页并接力选区。
+                    // 独立于翻页手势会话（同一根手指正在拖手柄），只走 flipAwait 导航漏斗。
+                    var gestureActive = true
+                    var autoFlipJob: Job? = null
+                    var autoFlipSide = 0
+                    var boundaryHintShown = false
+                    var lastFingerX = downX
+                    var lastFingerY = downY
+                    val autoFlipEdgePx = SELECTION_AUTO_FLIP_EDGE_DP * density
+                    // D-9：按指针类型分流。鼠标拖拽只做文本选择，不拖页；点左右页边距才翻页。
+                    // 版心几何取自当前 profile，和绘制/命中同源；上下页边距不算翻页区。
+                    val mouse = down.type == PointerType.Mouse
+                    val contentLeftPx = profile.marginLeft.toFloat()
+                    val contentTopPx = profile.marginTop.toFloat()
+                    val contentRightPx = (size.width - profile.marginRight).toFloat().coerceAtLeast(contentLeftPx)
+                    val contentBottomPx = (size.height - profile.marginBottom).toFloat().coerceAtLeast(contentTopPx)
+                    val mouseTextDown = mouse && !barsOwned && !coverVisible && !ctl.isBusy() &&
+                        !down.isConsumed &&
+                        downX >= contentLeftPx && downX <= contentRightPx &&
+                        downY >= contentTopPx && downY <= contentBottomPx
+                    val mouseMarginDir = if (mouse && !barsOwned && !ctl.isBusy() && !down.isConsumed) {
+                        ReaderMath.marginFlipDirection(
+                            downX, downY,
+                            contentLeftPx, contentRightPx, contentTopPx, contentBottomPx,
+                        )
+                    } else {
+                        0
+                    }
+                    var mouseSelectingPending = mouseTextDown
+                    fun scheduleAutoFlip(side: Int) {
+                        if (side == 0 || boundaryHintShown || autoFlipJob?.isActive == true) return
+                        autoFlipJob = scope.launch {
+                            var wait = SELECTION_AUTO_FLIP_FIRST_MS
+                            while (gestureActive && selecting && autoFlipSide == side) {
+                                delay(wait)
+                                if (!gestureActive || !selecting || autoFlipSide != side) return@launch
+                                val p = openPos
+                                if (p == null || selection.chapter != p.chapter) return@launch
+                                val ok = autoFlipSelection(side, lastFingerY)
+                                if (!ok) {
+                                    if (isSelectionChapterBoundary(p, side)) {
+                                        // 封顶到章首/章末：不再跨章，但选区要吃到边界字。
+                                        selection.extendTo(if (side > 0) Int.MAX_VALUE else 0)
+                                        boundaryHintShown = true
+                                        Logger.d(
+                                            "Orilumn.SEL",
+                                            "auto-flip boundary dir=$side ch=${p.chapter} " +
+                                                "sel=${selection.start}-${selection.endExclusive}",
+                                        )
+                                        snackbar.show(if (side > 0) "已到章末" else "已到章首")
+                                        return@launch
+                                    }
+                                    if (!selection.hasSelection) return@launch
+                                }
+                                wait = SELECTION_AUTO_FLIP_REPEAT_MS
+                            }
+                        }
+                    }
+                    if (!barsOwned && !coverVisible && !ctl.isBusy() && !down.isConsumed) {
+                        val handle = selectionHandleAt(
+                            downX, downY, size.width.toFloat(), size.height.toFloat(),
+                        )
+                        if (handle != null) {
+                            closeAnnotationEdit()
+                            selectionMenuVisible = false
+                            mouseSelectingPending = false
+                            selection.beginHandleDrag(handle)
+                            selecting = true
+                            if (!mouse) magnifierFinger = Offset(downX, downY)
+                        } else if (!mouse || mouseTextDown) {
+                            selectionMenuVisible = false
+                            longPressJob = scope.launch {
+                                delay(longPressTimeout)
+                                if (!moved) {
+                                    // 先看是否长按在已有标注上（D-14）：命中就编辑，空白才选字。
+                                    val editing = tryOpenAnnotationEdit(
+                                        downX, downY, size.width.toFloat(), size.height.toFloat(),
+                                    )
+                                    if (!editing && !mouse) {
+                                        selecting = beginSelectionAt(downX, downY)
+                                        if (selecting) magnifierFinger = Offset(downX, downY)
+                                    }
+                                }
+                            }
+                        }
+                    }
                     var axis = ReaderMath.Axis.NONE
                     var dragDir = 0
                     var slideActive = false
@@ -855,9 +1338,16 @@ fun ReaderScreen(
                     val tDown = System.nanoTime()
                     var tAxis = 0L
                     var tMove = 0L
+                    try {
                     while (true) {
                         val event = awaitPointerEvent()
                         val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                        // 长按标注刚打开编辑菜单：本次手势只负责收尾，不再翻页/拖选/调亮度。
+                        if (editingAnnotation != null) {
+                            change.consume()
+                            if (!change.pressed) break
+                            continue
+                        }
                         if (barsOwned) {
                             if (!change.pressed) {
                                 // 栏区点按被栏消费——此前静默，"点了没反应"先查这条。
@@ -870,6 +1360,70 @@ fun ReaderScreen(
                         // 覆盖层（上下栏按钮等）已消费的事件交给它们；被消费的抬起也不再触发点按/翻页。
                         if (change.isConsumed) {
                             if (!change.pressed) break
+                            continue
+                        }
+                        val dx = change.position.x - downX
+                        val dy = change.position.y - downY
+                        if (!moved && ReaderMath.movedBeyondTapSlop(dx, dy)) moved = true
+                        if (!selecting && (moved || !change.pressed)) longPressJob?.cancel()
+                        // 长按已起手/正在拖手柄：本次手势只服务选区，不翻页、不调亮度。
+                        if (selecting) {
+                            if (!change.pressed) {
+                                gestureActive = false
+                                autoFlipSide = 0
+                                magnifierFinger = null
+                                if (selection.hasSelection) selectionMenuVisible = true
+                                change.consume()
+                                break
+                            }
+                            lastFingerX = change.position.x
+                            lastFingerY = change.position.y
+                            if (!mouse) magnifierFinger = Offset(lastFingerX, lastFingerY)
+                            extendSelectionAt(lastFingerX, lastFingerY)
+                            autoFlipSide = selectionAutoFlipDirection(
+                                lastFingerX, size.width.toFloat(), autoFlipEdgePx,
+                            )
+                            scheduleAutoFlip(autoFlipSide)
+                            change.consume()
+                            continue
+                        }
+                        // D-9：鼠标分流——拖拽才进入选区，点击正文无操作，点左右页边距才翻页。
+                        // 触摸仍走下面的三区点按/滑动/亮度，两套语义不抢同一个手势。
+                        if (mouse) {
+                            if (mouseSelectingPending && moved) {
+                                mouseSelectingPending = false
+                                selectionMenuVisible = false
+                                if (beginSelectionAt(downX, downY)) {
+                                    selecting = true
+                                    Logger.d(
+                                        "Orilumn.SEL",
+                                        "mouse-drag ch=${selection.chapter} " +
+                                            "sel=${selection.start}-${selection.endExclusive}",
+                                    )
+                                    lastFingerX = change.position.x
+                                    lastFingerY = change.position.y
+                                    extendSelectionAt(lastFingerX, lastFingerY)
+                                    autoFlipSide = selectionAutoFlipDirection(
+                                        lastFingerX, size.width.toFloat(), autoFlipEdgePx,
+                                    )
+                                    scheduleAutoFlip(autoFlipSide)
+                                }
+                            }
+                            if (!change.pressed) {
+                                // D-9：鼠标点正文 = 无操作（不翻页、不清选区、不触发链接）；
+                                // 只有左右页边距单击翻页。
+                                if (!moved && mouseMarginDir != 0) {
+                                    Logger.d(
+                                        "Orilumn.TAP",
+                                        "mouse margin x=${downX.roundToInt()} y=${downY.roundToInt()} " +
+                                            "dir=$mouseMarginDir",
+                                    )
+                                    currentFlipWithAnimation(mouseMarginDir)
+                                }
+                                change.consume()
+                                break
+                            }
+                            change.consume()
                             continue
                         }
                         if (!change.pressed) {
@@ -886,7 +1440,9 @@ fun ReaderScreen(
                             // 目标页一致 ⇒ 同一次手势既滑动又瞬切了一次）。
                             else if (dragDir != 0) flipWithAnimation(dragDir)
                             else if (upTime - downTime < ReaderMath.TAP_MAX_MS &&
-                                !ReaderMath.movedBeyondTapSlop(upDx, upDy)
+                                !ReaderMath.movedBeyondTapSlop(upDx, upDy) &&
+                                // 菜单/遮罩等上层已经消费的点按不再落到翻页/切栏/链接。
+                                !change.isConsumed
                             ) {
                                 // 点按的判据是「没动过」，不是「没定向过」：早先只看
                                 // dragDir==0 与时长，而 dragDir 只在 gestureAxis 判成
@@ -911,8 +1467,6 @@ fun ReaderScreen(
                             }
                             break
                         }
-                        val dx = change.position.x - downX
-                        val dy = change.position.y - downY
                         // 抬手速度：本次 MOVE 相对上次 MOVE 的位移/时差（px/s）。
                         val now = change.uptimeMillis
                         val dt = (now - lastMoveTime).coerceAtLeast(1L)
@@ -965,6 +1519,13 @@ fun ReaderScreen(
                         if (brightnessActive) {
                             applyBrightnessDelta(brightnessBase, ReaderMath.brightnessFrac(dy, size.height.toFloat()))
                         }
+                    }
+                    } finally {
+                        // 手势被取消/组合离场也必须撤掉长按计时，避免手指离开后凭空起选区。
+                        gestureActive = false
+                        autoFlipSide = 0
+                        longPressJob?.cancel()
+                        magnifierFinger = null
                     }
                 }
             },
@@ -1064,6 +1625,9 @@ fun ReaderScreen(
                 inkColor = profile.fgColor,
                 imgCache = imgCache,
                 bgCache = bgCache,
+                annotations = annotationState.annotations,
+                annotationChapter = annotationState.chapter,
+                decorRevision = annotationState.revision,
             )
 
             // P1 L1：目标页内容（落位未回 ⇒ null，此时只画当前页，那一帧不动画）。
@@ -1082,6 +1646,9 @@ fun ReaderScreen(
                     inkColor = profile.fgColor,
                     imgCache = imgCache,
                     bgCache = bgCache,
+                    annotations = annotationState.annotations,
+                    annotationChapter = annotationState.chapter,
+                    decorRevision = annotationState.revision,
                 )
             } else {
                 null
@@ -1099,6 +1666,53 @@ fun ReaderScreen(
                     )
                 }
             } else null
+
+            // 选区几何：覆盖层、放大镜和菜单锚点共用同一份逐字几何（拖手柄时每帧只算一次）。
+            // 跨页时只取本页交集；端点不在本页时对应手柄为空（D-8：不画假手柄）。
+            val selectionGeo = remember(
+                pageContent,
+                fromPos.slice,
+                selection.hasSelection,
+                selection.chapter,
+                selection.start,
+                selection.endExclusive,
+                contentLeft,
+                contentTop,
+                contentRight,
+                contentBottom,
+                selectionHandleRadiusPx,
+            ) {
+                val content = pageContent ?: return@remember null
+                if (!selection.hasSelection || selection.chapter != fromPos.chapter) {
+                    return@remember null
+                }
+                selectionPageGeometry(
+                    drawer = selectionDrawer,
+                    lines = content.lines.orEmpty(),
+                    chapter = selection.chapter,
+                    start = selection.start,
+                    endExclusive = selection.endExclusive,
+                    pageSlice = fromPos.slice,
+                    frameLead = content.pageFrameLead,
+                    pageImages = content.pageImages,
+                    pageBackgrounds = content.pageBackgrounds,
+                    contentLeft = contentLeft,
+                    contentTop = contentTop,
+                    contentRight = contentRight,
+                    contentBottom = contentBottom,
+                    handleRadiusPx = selectionHandleRadiusPx,
+                )
+            }
+            // 菜单锚点只在选区抬手后需要；几何本身覆盖层与放大镜一直在用。
+            val selectionGeometry = selectionGeo.takeIf { selectionMenuVisible }
+            val selectionMenuAnchor = selectionGeometry?.rects?.takeIf { it.isNotEmpty() }?.let { rects ->
+                Rect(
+                    left = rects.minOf { it.left },
+                    top = rects.minOf { it.top },
+                    right = rects.maxOf { it.right },
+                    bottom = rects.maxOf { it.bottom },
+                )
+            }
 
             // 画布渲染器（栅格 + 多页位图缓存的宿主）在**此处** remember 一份，注入给 current/target
             // 两张画布：否则两个组合位置各自 remember，各得一池，当前页位图在 target 侧永远查不到
@@ -1128,6 +1742,9 @@ fun ReaderScreen(
                 hostRevision = hostRevision,
                 imgCache = imgCache,
                 bgCache = bgCache,
+                annotations = annotationState.annotations,
+                annotationChapter = annotationState.chapter,
+                decorRevision = annotationState.revision,
             )
             // 上面 `beforeCommit` 的「整页位图备齐」实现：与 PrerasterOnPrefill 同口径
             //（同一渲染器、同一缓存、同一条取数路径），只是针对**本次落位目标页**。
@@ -1150,6 +1767,8 @@ fun ReaderScreen(
                     contentRevision = liveRevision,
                     imgCache = imgCache,
                     bgCache = bgCache,
+                    annotations = annotationState.annotations,
+                    annotationChapter = annotationState.chapter,
                 )
             }
             SideEffect { rasterByRef.value = rasterPageNow }
@@ -1200,6 +1819,90 @@ fun ReaderScreen(
                     { PageCanvasFun(pageContent) }
                 },
             )
+            // 选区覆盖层：轻量即时画，不参与页栅格；翻页动画期间隐藏，避免盖在滑动中的两页上。
+            if (selection.hasSelection && pageContent != null && !coverVisible &&
+                !ctl.isBusy() && selection.chapter == fromPos.chapter
+            ) {
+                SelectionOverlay(
+                    geometry = selectionGeo,
+                    contentLeft = contentLeft,
+                    contentTop = contentTop,
+                    contentRight = contentRight,
+                    contentBottom = contentBottom,
+                    handleRadiusPx = selectionHandleRadiusPx,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+            // 移动端放大镜：长按/拖手柄时跟随手指，桌面鼠标不显示（D-10）。
+            // 内容复用同一页栅格（同一个 renderer / content / rasterKey），只做圆形裁剪与放大。
+            val fingerNow = magnifierFinger
+            if (fingerNow != null && selection.hasSelection && pageContent != null &&
+                !coverVisible && !ctl.isBusy() && selection.chapter == fromPos.chapter
+            ) {
+                SelectionMagnifier(
+                    content = pageContent,
+                    finger = fingerNow,
+                    bounds = Rect(0f, 0f, pxWidth, pxHeight),
+                    contentLeft = contentLeft,
+                    contentTop = contentTop,
+                    contentRight = contentRight,
+                    contentBottom = contentBottom,
+                    pageBg = profile.bgColor,
+                    inkColor = profile.fgColor,
+                    contentRevision = displayRevision,
+                    renderer = pageRenderer,
+                    onMiss = onRasterMiss,
+                    // 放大镜里的选区与正文覆盖层共用同一份几何：放大后仍能看见选到哪儿、手柄在哪儿。
+                    selection = selectionGeo,
+                    selectionHandleRadiusPx = selectionHandleRadiusPx,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+            // 标注浮动菜单（D-13 / D-14）：**一个弹窗服务两种入口**——选区抬手是新建，
+            // 长按已有标注是编辑（色槽预展开、删除可用）。没有「取消」项：点菜单外面即关。
+            val editing = editingAnnotation
+            val editingAt = editingAnchor
+            val selectionMenuOn = editing == null && selectionMenuVisible && selection.hasSelection &&
+                selectionMenuAnchor != null && selection.chapter == fromPos.chapter
+            val menuAnchor = if (editing != null) editingAt else if (selectionMenuOn) selectionMenuAnchor else null
+            if (menuAnchor != null && !coverVisible && !ctl.isBusy()) {
+                // 长按场景没有选区可清：透明遮罩接住菜单外的点按，只关菜单，不翻页/不改选区。
+                if (editing != null) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clickable(
+                                interactionSource = editScrimInteraction,
+                                indication = null,
+                            ) { closeAnnotationEdit() },
+                    )
+                }
+                // 选区场景：选中的字里已有高亮/划线时，删除作用于**相交的第一条**（列表按起点排序）。
+                val overlapping = if (editing == null) {
+                    annotationState.annotations.firstOrNull {
+                        it.isDrawable() && it.charStart < selection.endExclusive && selection.start < it.charEnd
+                    }
+                } else {
+                    null
+                }
+                AnnotationMenu(
+                    anchor = menuAnchor,
+                    bounds = Rect(contentLeft, contentTop, contentRight, contentBottom),
+                    palette = paletteFor(light.scheme),
+                    highlightColors = annotationColorSlots(light, AnnotationKind.Highlight),
+                    highlightDefaultSlot = annotationDefaultSlot(light, AnnotationKind.Highlight),
+                    underlineColors = annotationColorSlots(light, AnnotationKind.Underline),
+                    underlineDefaultSlot = annotationDefaultSlot(light, AnnotationKind.Underline),
+                    initialKind = annotationLastKindOf(light),
+                    initialLineStyle = annotationLastLineStyleOf(light),
+                    editing = editing,
+                    deleteTarget = editing ?: overlapping,
+                    onPickColor = { kind, slot, style -> applyAnnotationColor(kind, slot, style) },
+                    onPickLineStyle = { style -> applyAnnotationLineStyle(style) },
+                    onCopy = { if (editing != null) copyAnnotation(editing) else copySelection() },
+                    onDelete = { annotation -> deleteAnnotation(annotation) },
+                )
+            }
             // 亮度/护眼遮罩：纯绘制于画布之上、栏之下。
             ReaderLightMask(light = light, modifier = Modifier.fillMaxSize())
             // 顶/底栏：中部点按切换；条外点击收起。

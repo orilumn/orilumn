@@ -246,8 +246,9 @@ class DesktopReaderHostTest {
         val dbFile = File(root, "orilumn.db")
         val setup = app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver("jdbc:sqlite:${dbFile.absolutePath}")
         orilumn.reader.db.OrilumnDb.Schema.create(setup)
-        // 伪装成「P1 之前的 v5 库」：最新表尚未存在，版本停在 5。
+        // 伪装成「P1 之前的 v5 库」：v6/v7 的新表尚未存在，版本停在 5。
         setup.execute(null, "DROP TABLE font_scan_state;", 0)
+        setup.execute(null, "DROP TABLE annotations;", 0)
         setup.execute(null, "PRAGMA user_version = 5;", 0)
         setup.close()
 
@@ -274,7 +275,7 @@ class DesktopReaderHostTest {
         setup.close()
 
         DesktopShelfStore(root).load()
-        assertEquals(6L, orilumn.reader.db.OrilumnDb.Schema.version) // 守卫：本断言口径
+        assertEquals(9L, orilumn.reader.db.OrilumnDb.Schema.version) // 守卫：本断言口径
         assertEquals(
             "表齐 + 版本落后 ⇒ 直接盖章，不重跑迁移",
             orilumn.reader.db.OrilumnDb.Schema.version,

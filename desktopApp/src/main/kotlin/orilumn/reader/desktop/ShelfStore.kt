@@ -2,6 +2,7 @@ package orilumn.reader.desktop
 
 import app.cash.sqldelight.db.QueryResult
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
+import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.data.book.Book
 import orilumn.reader.data.book.BookReadingState
 import orilumn.reader.data.db.BookSort
@@ -237,7 +238,7 @@ class DesktopShelfStore(root: File) : ShelfRepository {
 
     override suspend fun delete(id: Long) {
         val entry = requireDb().getBook(id) ?: return
-        requireDb().removeBook(id)
+        requireDb().removeBookAndData(id)
         withContext(Dispatchers.IO) {
             runCatching { File(entry.filePath).delete() }
             entry.coverPath?.let { runCatching { File(it).delete() } }
@@ -280,6 +281,20 @@ class DesktopShelfStore(root: File) : ShelfRepository {
             atCover = orilumn.reader.data.read.ReadingLocatorCodec.decodeAtCover(state.locator),
         )
     }
+
+    // ---- 文本标注（schema v9；桌面宿主只做转发，CRUD 语义在 LibraryDb） ----
+
+    suspend fun annotationsForChapter(bookId: Long, chapter: Int): List<Annotation> =
+        requireDb().annotationsForChapter(bookId, chapter)
+
+    suspend fun annotationsForBook(bookId: Long): List<Annotation> =
+        requireDb().annotationsForBook(bookId)
+
+    suspend fun addAnnotation(annotation: Annotation): Annotation = requireDb().addAnnotation(annotation)
+
+    suspend fun updateAnnotation(annotation: Annotation) = requireDb().updateAnnotation(annotation)
+
+    suspend fun deleteAnnotation(id: Long) = requireDb().deleteAnnotation(id)
 
     /** S32 `progress/{id}.json` 一次性导入，随后逐个删除旧文件。 */
     private suspend fun importLegacyProgressIfNeeded(library: LibraryDb) {

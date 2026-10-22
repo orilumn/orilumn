@@ -22,8 +22,8 @@ import orilumn.reader.engine.html.MarkupElement
  * @param ua the UA style sheet (e.g. built from the profiling; see caller side).
  * @param authorSheets the chapter's parsed author stylesheets.
  * @param theme the modern/traditional/user theme stylesheet (reader layer, above the book; empty/null = off).
- * @param settings the per-item reader-settings stylesheet (above theme; empty/null = off).
- * @param ui the reader-app stylesheet (above settings; carries line-height / paragraph spacing).
+ * @param custom the reader's custom-style rulesheet (above UI; empty/null = off).
+ * @param ui the reader-app stylesheet (above theme, below custom styles; carries line-height / paragraph spacing).
  * @param paragraphScale 段间距 (paragraphSpacingScale): scales the computed top/bottom margin of
  *   `p`/`li` only (author css / UA / theme values kept, only ratio-adjusted;
  *   100 = book/theme rhythm, 0 = p/li margins cleared).
@@ -39,13 +39,13 @@ class StyleComputer(
     ua: StyleSheet,
     authorSheets: List<StyleSheet>,
     theme: StyleSheet? = null,
-    settings: StyleSheet? = null,
+    custom: StyleSheet? = null,
     ui: StyleSheet? = null,
     private val paragraphScale: Float = 1f,
     private val gapScale: Float = 1f,
     private val pxScale: Float = 1f,
 ) {
-    private val cascade = Cascade(ua, authorSheets, theme, settings, ui)
+    private val cascade = Cascade(ua, authorSheets, theme, custom, ui)
 
     /** [Length] 在本引擎坐标系里的最终物理 px（`px` 乘设备密度，其余同 [Length.resolve]）。 */
     private fun Length.devPx(elementFontPx: Float, parentFontPx: Float): Float =

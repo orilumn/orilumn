@@ -932,6 +932,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         val contentHeight = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
         val t0 = platformNowMs()
         val prepare = boxLayouter.prepareLight(unit.markup!!, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h -> saveUnitStructure(unit, h) })
+        unit.cacheChapterTextFrom(prepare)
         val tPrep = platformNowMs()
         val pagesToShape = 1
         val newProduct = boxLayouter.incrementalLayoutForPage(
@@ -1009,6 +1010,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                     // Light prepare only (box tree, no shaping) — the table tells us which blocks to shape.
                     val startPage = pageIndexForChar(cached.pages, targetChar)
                     val prep = boxLayouter.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h -> saveUnitStructure(unit, h) })
+                    unit.cacheChapterTextFrom(prep)
                     val sp = platformNowMs()
                     val product = boxLayouter.incrementalLayoutForPage(
                         prepare = prep,
@@ -1047,6 +1049,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                     // shaping). A large chapter's foreground threads only the current page's blocks
                     // through the temp table — never a full-chapter line-level layout.
                     val light = bc.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h -> saveUnitStructure(unit, h) })
+                    unit.cacheChapterTextFrom(light)
                     if (light.totalBlocks > SMALL_CHAPTER_BLOCKS) {
                         // anchorChar stays at the user's actual position — startAnchorStream anchors the
                         // temp stream there. A head-proximity lift (anchor to block 0) is designed but
@@ -3100,7 +3103,7 @@ private fun finishCanonicalBackground(
                     val prep = prepareFor(unit, bc, markup, contentWidth, contentHeight, paramHash)
                     val product = bc.fullLayout(prep, profile, contentWidth, contentHeight)
                         ?: return@runCatching null
-                    val slice = nearestDiskPage(product.layout, product.slices, anchorChar)
+                    val slice = anchoredDiskPage(product.layout, product.slices, anchorChar)
                         ?: return@runCatching null
                     Logger.w(logTag, "relayout-light ch=$chapter SMALL-FULL prepareLight=${tLight - t0}ms fullLayout=${platformNowMs() - tLight}ms total=${platformNowMs() - t0}ms blocks=${light.totalBlocks}")
                     // R5: small chapters never enter the temp path, so rebind a fresh in-memory
@@ -3113,8 +3116,8 @@ private fun finishCanonicalBackground(
             } else {
                 val product = layouter.layout(markup, unit.cssBundle, profile, contentWidth, contentHeight)
                     ?: return@runCatching null
-                // 非 Box 排版器同样是整章全量产物：落位取磁盘表里离锚点最近的页（同短章口径）。
-                val slice = nearestDiskPage(product.layout, product.slices, anchorChar)
+                // 非 Box 排版器同样是整章全量产物：落位取磁盘表里含锚点的那一页（同短章口径）。
+                val slice = anchoredDiskPage(product.layout, product.slices, anchorChar)
                     ?: return@runCatching null
                 ReflowResult(chapter, product.layout, product.slices, slice)
             }
@@ -3186,7 +3189,7 @@ private fun finishCanonicalBackground(
                     val prep = prepareFor(unit, bc, markup, contentWidth, contentHeight, paramHash)
                     val product = bc.fullLayout(prep, profile, contentWidth, contentHeight)
                         ?: return@runCatching null
-                    val slice = nearestDiskPage(product.layout, product.slices, anchorChar)
+                    val slice = anchoredDiskPage(product.layout, product.slices, anchorChar)
                         ?: return@runCatching null
                     Logger.w(logTag, "relayout ch=$chapter SMALL-FULL prepareLight=${tLight - t0}ms fullLayout=${platformNowMs() - tLight}ms total=${platformNowMs() - t0}ms blocks=${light.totalBlocks}")
                     // R5: same in-memory table rebind as the light path (see above).
@@ -3196,8 +3199,8 @@ private fun finishCanonicalBackground(
             } else {
                 val product = layouter.layout(markup, unit.cssBundle, profile, contentWidth, contentHeight)
                     ?: return@runCatching null
-                // 非 Box 排版器同样是整章全量产物：落位取磁盘表里离锚点最近的页（同短章口径）。
-                val slice = nearestDiskPage(product.layout, product.slices, anchorChar)
+                // 非 Box 排版器同样是整章全量产物：落位取磁盘表里含锚点的那一页（同短章口径）。
+                val slice = anchoredDiskPage(product.layout, product.slices, anchorChar)
                     ?: return@runCatching null
                 ReflowResult(chapter, product.layout, product.slices, slice)
             }
@@ -3565,37 +3568,18 @@ private fun finishCanonicalBackground(
     }
 
     /**
-     * Landing page for a **settings change** on a chapter that owns no temp session (short chapter,
-     * or a non-Box layouter): the canonical page of [slices] whose **first line is nearest the line
-     * holding [anchorChar]** (tie → the earlier page, i.e. the one containing the anchor).
-     *
-     * Why not a line-anchored page (what this replaced): a short chapter is always paginated by the
-     * disk table (总则 §1「小章全部使用磁盘表，不使用临时表」), so pinning the anchor line at the page
-     * top would hand the reader a page the table does not have — its top is not a table page break and
-     * its bottom is an ad-hoc line cut. Snapping to the nearest table break keeps the reader's screen
-     * as close as possible to what it was (the anchor line stays within one line of the page top, above
-     * or below it) while every page shown is a real table page, so a subsequent flip stays index-based
-     * and never mis-resolves to the chapter head.
+     * Landing page for a **settings change / rotation** on a chapter that owns no temp session
+     * (short chapter, or a non-Box layouter): the disk-table page that **contains the anchor**
+     * (总则 §2「刷新显示当前锚点所在页面」). Pure rule lives in
+     * [orilumn.reader.engine.paging.anchoredDiskPage] (gap/empty-line total, better unit-testable
+     * in `common`); see there for why "nearest page head" is wrong and why the old scan could land
+     * on the chapter's last page.
      */
-    private fun nearestDiskPage(layout: orilumn.reader.engine.paging.BookLayout, slices: List<PageSlice>, anchorChar: Int): PageSlice? {
-        if (slices.isEmpty()) return null
-        // Canonical pages only: a slice without a line window is not a disk-table page.
-        val canonical = slices.filter { it.firstLine >= 0 }
-        if (canonical.isEmpty()) return slices.firstOrNull()
-        val n = layout.lineCount
-        if (n <= 0) return canonical.firstOrNull()
-        var anchorLine = -1
-        for (i in 0 until n) if (layout.getLineStart(i) <= anchorChar && layout.getLineEnd(i) > anchorChar) { anchorLine = i; break }
-        if (anchorLine < 0) anchorLine = if (anchorChar <= 0) 0 else n - 1
-        var best = canonical.first()
-        var bestDist = Int.MAX_VALUE
-        for (s in canonical) {
-            // Strict `<` keeps the earlier page on a tie (containing the anchor: no visible line advances).
-            val d = kotlin.math.abs(s.firstLine - anchorLine)
-            if (d < bestDist) { bestDist = d; best = s }
-        }
-        return best
-    }
+    private fun anchoredDiskPage(
+        layout: orilumn.reader.engine.paging.BookLayout,
+        slices: List<PageSlice>,
+        anchorChar: Int,
+    ): PageSlice? = orilumn.reader.engine.paging.anchoredDiskPage(layout, slices, anchorChar)
 
     /**
      * A page starting at line [startLine], filling down to [contentH] (char-continuous tiling).
@@ -3938,6 +3922,19 @@ private fun finishCanonicalBackground(
     }
 
     /**
+     * 标注清单跳转：落到包含章内 [anchorChar] 的那一页（不是章首）。
+     *
+     * 与 [openTocItem] 同构——[preemptForNavigation] 是私有钩子，只有控制器能包这一层；
+     * 失败（章越界 / 重排失败）退回 [openChapterStart]。
+     */
+    suspend fun openAtChar(chapter: Int, anchorChar: Int): Pair<Int, PageSlice>? {
+        clearFlipDir("annotation-jump")
+        preemptForNavigation()
+        if (chapter !in chapters.indices) return null
+        return relayoutTo(chapter, anchorChar.coerceAtLeast(0)) ?: openChapterStart(chapter)
+    }
+
+    /**
      * TOC jump honoring the item's in-chapter anchor: lands on the page whose first line is the
      * element carrying [fragment] (a depth>0 subsection, e.g. `#sec3`), instead of the chapter head.
      * Falls back to [openChapterStart] when the fragment is absent/blank, the target heading cannot
@@ -4068,6 +4065,17 @@ private fun finishCanonicalBackground(
     }
 
     fun unitAt(index: Int): ChapterUnit? = chapters.getOrNull(index)
+
+    /**
+     * 整章纯文本（D-18）：与排版共用 [ChapterUnit.prepareResult] 的叶文本投影，同步、无毒副作用。
+     *
+     * null = 该章尚未 prepare（未打开/已被远章驱逐）；空串是合法的「本章无可排文字」。
+     * 调用方（复制/选词/长按）不要为了拿文本去触发开章，避免把一次点按变成昂贵的排版。
+     */
+    fun chapterText(index: Int): String? = unitAt(index)?.chapterText()
+
+    /** D-18 伴生：与 [chapterText] 同尺的块尾偏移；选区据此不跨块。 */
+    fun chapterTextBlockEnds(index: Int): IntArray? = unitAt(index)?.chapterTextBlockEnds()
 
     /** One page forward within a chapter. A line-anchored slice (not a canonical page) snaps to the
  *  canonical page after the one containing its char, avoiding content skips. */

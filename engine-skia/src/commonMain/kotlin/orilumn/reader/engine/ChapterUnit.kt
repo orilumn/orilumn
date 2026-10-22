@@ -65,6 +65,19 @@ class ChapterUnit(
     var prepareResult: ChapterPrepareResult? = null
         private set
 
+    /** D-18 整章纯文本缓存：与 [prepareResult] 同生命周期；prepare 失效时清空。 */
+    @Volatile
+    internal var chapterTextCache: String? = null
+
+    /**
+     * 整章文本的**块尾偏移**（每个排版叶一段，cumulative endExclusive，长度 = 块数）。
+     *
+     * 与 [chapterTextCache] 同时生成/清空；选区按块边界截断句子/英文词，
+     * 避免跨标题、列表项、段落把整段书选进来。
+     */
+    @Volatile
+    internal var chapterTextBlockEndsCache: IntArray? = null
+
     /** Disk-backed pagination table. Null when the table hasn't been computed yet (first open, or
      *  after a param change). Read by callers to determine which blocks to shape for a target page. */
     var paginationTable: ChapterPaginationTable? = null
@@ -189,6 +202,8 @@ class ChapterUnit(
      *  change detection). */
     fun bindPrepare(prepare: ChapterPrepareResult, hash: Long) {
         this.prepareResult = prepare
+        this.chapterTextCache = null
+        this.chapterTextBlockEndsCache = null
         this.paramHash = hash
     }
 
@@ -203,6 +218,8 @@ class ChapterUnit(
         layout = null
         pageSlices = emptyList()
         prepareResult = null
+        chapterTextCache = null
+        chapterTextBlockEndsCache = null
         paginationTable = null
         inProgress = null
         tempRenderLayout = null
@@ -241,6 +258,8 @@ class ChapterUnit(
         // 调用方跳过 live 会话章，故它恒是 null。
         layout = null
         prepareResult = null
+        chapterTextCache = null
+        chapterTextBlockEndsCache = null
         markup = null
         blockShapeCache = null
         pageCache.clear()

@@ -14,36 +14,34 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 非回归锁：**独图块（`<p class="fig"><img/></p>`）的宿主块纵向 margin** 必须同时进
- * 重路径（canonical/磁盘表）与轻路径（临时表）的块边界间距。
+ * 非回归锁：**独图块（`<p class="fig"><img/></p>`）的宿主块纵向 margin** 必须进块边界间距。
  *
  * ## 现场
  *
  * 重路径 `NormalFlowLayout.buildBoxTree` 把「只含一幅图」的块**拆包**：`<img>` 提升为替换叶、
  * 宿主 `<p>` 的盒被摘掉（否则 `U+FFFC` 走塑形会被画成小虚线框、图丢失）。但轻路径的块边界间距
  * 由 `NormalFlowLayout.consecutiveLeafAdvance` 沿**标记祖先链**算——它含宿主块；重路径 `emit`
- * 只看叶自身 `style`。摘包后若宿主块的 margin 一起丢，两边对同一个「图块」量出两个间距
- * （真书 `Kotlin in Action` ch2 `.fm-figure{margin:1.2em 0 .8em}`：重 46px / 轻 79px）。
+ * 只看叶自身 `style`。摘包后若宿主块的 margin 一起丢，图块前后间距就比 CSS 折叠值少一截
+ * （真书 `Kotlin in Action` ch2 `.fm-figure{margin:1.2em 0 .8em}`：应为 46px，实际 13px），
+ * 页高预算随之算错（真机曾出现末行越出栅格被裁）。
  *
- * 后果：同一章在临时表与磁盘表给出**不同页边界**（实测该章 43 页里 39 页不同）⇒ 翻回章首切到
- * 磁盘表时整页位移；且窗口上边界缺口（`windowLeadTop` →
- * `PartialDrawableLayout.frameLeadTop`）的单源随之失效，页高预算算错（真机曾出现末行越出栅格被裁）。
+ * ## 锁法（每张表各自对 CSS 绝对值负责，不互相比对 —— 见 AGENTS.md「磁盘表与临时表互斥」）
  *
- * ## 锁法
- *
- * 1. 提升叶的 `style.margin` 必须等于「宿主块链折叠后的纵向 margin」（直接锁住根因）；
- * 2. 一串 `contentH` 上，临时表前向翻页与 canonical 逐页 `charStart/charEnd` 全等（行为锁）。
+ * 1. 提升叶的 `style.margin` 必须等于「宿主块链折叠后的纵向 margin」；
+ * 2. 图块边界间距在磁盘表与临时表里都必须等于 CSS 折叠值（48px）；
+ * 3. 临时表前向翻页逐字符无缝拼接（页尾取行首而非行内末字符）。
  */
-class SoleFigureWrapperEquivalenceTest {
+class SoleFigureWrapperTest {
 
     private val layouter = BoxChapterLayouter()
     private val converter = HtmlTreeConverter()
     private val contentW = 720
     private val profile = TypographicProfile.build(ReaderSettings.DEFAULT)
 
-    /** 宿主块 margin：上 48 / 下 32（正文段 16/16）——摘包后丢掉它与保留它，页边界必然不同。 */
+    /** 宿主块 margin：上 48 / 下 32（正文段 16/16）⇒ 折叠后上间距 = max(48, 16) = 48。 */
     private val figTop = 48f
     private val figBottom = 32f
+    private val foldedGap = 48
 
     private val css = CssBundle(
         listOf(
@@ -80,11 +78,6 @@ class SoleFigureWrapperEquivalenceTest {
         """.trimIndent(),
     )!!
 
-    private fun canonical(markup: MarkupElement, contentH: Int): ChapterLayouter.ChapterLayoutProduct {
-        val heavy = layouter.prepare(markup, css, profile, contentW, contentH)
-        return layouter.fullLayout(heavy, profile, contentW, contentH)
-    }
-
     private fun tempForward(markup: MarkupElement, contentH: Int): List<PageSlice> {
         val light = layouter.prepareLight(markup, css, profile, contentW, ChapterStructureCache(), contentH)
         val out = ArrayList<PageSlice>()
@@ -103,7 +96,7 @@ class SoleFigureWrapperEquivalenceTest {
         return out
     }
 
-    /** 根因直锁：提升叶的 margin 必须带上宿主块链折叠后的纵向 margin。 */
+    /** 根因直锁：提升叶的 margin 必须带上宿主块链折叠后的纵向 margin（绝对值，来自 CSS）。 */
     @Test
     fun `promoted figure leaf carries its wrapper block margins`() {
         val heavy = layouter.prepare(chapter(), css, profile, contentW, 600)
@@ -116,34 +109,12 @@ class SoleFigureWrapperEquivalenceTest {
     }
 
     /**
-     * 行为锁：宿主块 margin 必须进两条路径的**同一份**块边界间距，故同一 `contentH` 下逐页页界相同。
-     * `contentH` 扫得密一些：间距差 32px 时，总有一档 `contentH` 正好把这张图挤到下一页。
-     */
-    @Test
-    fun `temp forward pages equal canonical pages across a wrapper-margin figure block`() {
-        val markup = chapter()
-        var sawFigureInsidePage = false
-        for (contentH in 220..900 step 4) {
-            val canon = canonical(markup, contentH).slices
-            val temp = tempForward(markup, contentH)
-            assertEquals("contentH=$contentH page count", canon.size, temp.size)
-            for (i in canon.indices) {
-                assertEquals("contentH=$contentH page $i charStart", canon[i].charStart, temp[i].charStart)
-                assertEquals("contentH=$contentH page $i charEnd", canon[i].charEnd, temp[i].charEnd)
-            }
-            if (canon.size > 2) sawFigureInsidePage = true
-        }
-        assertTrue("图块从未被夹在页中 ⇒ 用例空跑", sawFigureInsidePage)
-    }
-
-    /**
-     * **无洞锁**（不依赖 canonical）：临时表前向翻页必须**逐字符无缝拼接**——相邻两页
+     * **无洞锁**（只看临时表）：前向翻页必须**逐字符无缝拼接**——相邻两页
      * `charEnd == charStart`，且末页收到章末。
      *
      * 为什么单列这条：页尾字符边界若取「末行自身 charEnd」（行流里的**行内包含式**末字符），
      * 而下一页页首取「该行的 charStart」，美化排版（块内换行/缩进）归一后每个块边界都会正好
-     * 差 1 个字符 ⇒ 页页漏 1 字。真机现象即「翻页/调参后少字」，且磁盘表（canonical 取
-     * `getLineStart(cut)`）没有这个洞 —— 两表切换时字还会「跳回来」。
+     * 差 1 个字符 ⇒ 页页漏 1 字。真机现象即「翻页/调参后少字」。
      */
     @Test
     fun `temp forward pages tile the chapter without a single-char hole`() {
@@ -170,11 +141,11 @@ class SoleFigureWrapperEquivalenceTest {
         layouter.prepareLight(markup, css, profile, contentW, ChapterStructureCache(), contentH).totalChars
 
     /**
-     * 单源锁：轻路径的块边界间距（`consecutiveLeafAdvance` 祖先链口径）与重路径落在同一份行流几何上。
-     * 直接比较「图行与前一段末行的间距」在两路的相对值，避免只靠页边界间接断言。
+     * 图块边界间距：轻路径的 `consecutiveLeafAdvance` 与磁盘表的行流**各自**都要等于 CSS 折叠值
+     * （`max(48, 16) = 48`）。两边都比同一个绝对值，不互相比对。
      */
     @Test
-    fun `figure gap agrees between heavy line stream and light advance`() {
+    fun `figure gap equals the css-folded margin on each table`() {
         val markup = chapter()
         val contentH = 2400
         val heavy = layouter.prepare(markup, css, profile, contentW, contentH)
@@ -189,12 +160,13 @@ class SoleFigureWrapperEquivalenceTest {
             lightLeaves[imgIdx - 1].el!!, lightLeaves[imgIdx].el!!, styleOf,
         ) + (lightLeaves[imgIdx - 1].style.padding.bottom + lightLeaves[imgIdx - 1].style.border.bottom).toInt() +
             (lightLeaves[imgIdx].style.padding.top + lightLeaves[imgIdx].style.border.top).toInt()
+        assertEquals("临时表的图块上间距必须等于 CSS 折叠值", foldedGap, lightAdvance)
 
-        // 重路径：图行行顶 - 前一段末行行底 = 同一段块边界间距。
+        // 磁盘表：图行行顶 - 前一段末行行底 = 同一段块边界间距。
         val lines = product.layout
         val figLine = (0 until lines.lineCount).first { lines.getLineStart(it) == light.globalCharStarts[imgIdx].toInt() }
         val heavyGap = lines.getLineTop(figLine) - lines.getLineBottom(figLine - 1)
-        assertEquals("重/轻两路对独图块的块边界间距必须同值", lightAdvance, heavyGap)
+        assertEquals("磁盘表的图块上间距必须等于 CSS 折叠值", foldedGap, heavyGap)
     }
 
     /** `LayoutBox` 便捷取用（避免测试里到处写全限定名）。 */

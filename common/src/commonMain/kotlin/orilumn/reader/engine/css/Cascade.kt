@@ -4,7 +4,7 @@ import orilumn.reader.engine.html.MarkupElement
 
 /**
  * The cascade engine: merges declarations from the UA layer, author stylesheets (plus inline
- * styles, passed per element) and the **reader upper layers** (theme → per-item settings → UI) to
+ * styles, passed per element) and the **reader upper layers** (theme → UI → custom styles) to
  * pick the **winning** raw value for each property (pure JVM, unit-testable).
  *
  * Priority follows CSS2.1: importance first, then origin, then selector specificity, then source
@@ -12,24 +12,26 @@ import orilumn.reader.engine.html.MarkupElement
  * Only the winning *raw* string per property is produced here; inheritance, unit resolution and enum
  * parsing are [StyleComputer]'s job.
  *
- * **Reader intent (决策 6):** the three upper layers sit *above* the book: theme → per-item settings →
- * UI, each with a fixed tier that beats any author/inline declaration (important included), so the
- * reader is never blocked by the book. Standard CSS origins cannot express this ordering, so our
- * engine assigns numeric tiers. A layer absent/empty simply contributes no rules. In one pass the
- * cascade yields a single winner per property — the upper layers are composed and applied over the
- * book result without any post-hoc mutation.
+ * **Reader intent (决策 6):** the three upper layers sit *above* the book: theme → UI → custom
+ * styles, each with a fixed tier that beats any author/inline declaration (important included), so
+ * the reader is never blocked by the book. Custom styles are reader-authored rules (selector +
+ * declarations); they are the most specific reader intent, so they sit above the global UI layer.
+ * Standard CSS origins cannot express this ordering, so our engine assigns numeric tiers. A layer
+ * absent/empty simply contributes no rules. In one pass the cascade yields a single winner per
+ * property — the upper layers are composed and applied over the book result without any post-hoc
+ * mutation.
  *
  * @param ua the user-agent style sheet (defaults, heading scale...).
  * @param authorSheets the parsed author stylesheets for a chapter (from a [CssBundle]).
  * @param theme the modern/traditional/user theme stylesheet (may be empty/null).
- * @param settings the per-item reader settings stylesheet (element+single property; may be empty/null currently).
+ * @param custom the reader's custom-style rulesheet (selector + declarations; may be empty/null).
  * @param ui the reader-app stylesheet (line-height, paragraph spacing...); may be empty/null.
  */
 class Cascade(
     ua: StyleSheet?,
     authorSheets: List<StyleSheet>,
     theme: StyleSheet? = null,
-    settings: StyleSheet? = null,
+    custom: StyleSheet? = null,
     ui: StyleSheet? = null,
 ) {
     /** One pre-parsed, selector-bearing rule group with a fixed origin and source order. */
@@ -48,10 +50,10 @@ class Cascade(
     /** Ordinal tiers: normal / important for each origin. Higher tier wins regardless of specificity.
      *  Book authorities: author normal 20, inline 30, author important 40, inline important 41,
      *  UA important 50. Reader layers are placed strictly above inline important (41) and below UA
-     *  important (50), in the order theme < settings < UI. */
+     *  important (50), in the order theme < UI < custom styles. */
     private val themeTier = 42 to 46
-    private val settingsTier = 43 to 47
     private val uiTier = 44 to 48
+    private val customTier = 45 to 49
 
     private val matchers: List<Matcher>
 
@@ -86,8 +88,8 @@ class Cascade(
         addSheet(ua, 10, 50)
         for (sheet in authorSheets) addSheet(sheet, 20, 40)
         addSheet(theme, themeTier.first, themeTier.second)
-        addSheet(settings, settingsTier.first, settingsTier.second)
         addSheet(ui, uiTier.first, uiTier.second)
+        addSheet(custom, customTier.first, customTier.second)
         matchers = list
     }
 
@@ -157,7 +159,7 @@ class Cascade(
     }
 
     companion object {
-        /** 读者层起始 tier（theme 42 / settings 43 / UI 44；作者侧最高 inline important 41）。 */
+        /** 读者层起始 tier（theme 42 / UI 44 / 自定义样式 45；作者侧最高 inline important 41）。 */
         const val READER_TIER_MIN = 42
 
         /** Tags whose HTML width/height attrs participate in the cascade as a low-tier origin. */

@@ -145,6 +145,15 @@ data class DrawLine(
      */
     val decorationRuns: List<orilumn.reader.engine.laying.TextDecorationRun> = emptyList(),
     /**
+     * 标注装饰区间（**章内全局坐标**，空 = 无高亮/划线）：
+     * 由 [projectDecor] 从本章标注列表投影到行上；绘制侧按 [charBase] 换回本行文本坐标。
+     *
+     * 与 [decorationRuns]（书内 `text-decoration`，[text] 坐标系）是两条通道：本字段只服务
+     * 读者标注，颜色是创建时的 ARGB 快照，不受书内样式/调色板变化影响。`data class` 加字段
+     * ⇒ 栅格指纹按值比较，装饰一变即重烤。
+     */
+    val decorRuns: List<DecorRange> = emptyList(),
+    /**
      * 行内盒 spans（[text] 全文本坐标系，空 = 无行内背景/边框）：
      * 由 [DrawLineBuilder] 从与 [text] 同构的遍历产出。
      *
@@ -384,6 +393,96 @@ class LineWindowDrawer(
         }
     }
 
+    /**
+     * 算一段章内区间在当前页各行上的**几何矩形**（只算不画），供选区覆盖层 / 手柄 / 放大镜定位。
+     *
+     * 横向与 [drawLines] → `paintText` 逐字落墨**同源**：都读 [placementFor] 的 `Placement`，
+     * 再经 [glyphTrack] 换成**实际落墨的轨**（含 kerning 收紧 / 连字 / JUSTIFY 回填）。
+     * 只读 `placement.xs`（不经 [glyphTrack]）会让矩形相对墨迹右移「本行行首到该字的累计
+     * 收紧量」，真机上就是「选区偏右、行首那个字母没选上」。返回的 `Rect`：
+     * - `x` 是**相对内容区左缘**的坐标（已含 [DrawLine.xLeft]；调用方再加页面内容的绘制原点）；
+     * - `y` 与 [DrawLine.yTop] / [DrawLine.yBottom] 同一坐标系（章节绝对 Y）。
+     *
+     * 区间按 `[range.first, range.last + 1)` 解释；与行不相交的行不产出矩形。
+     * [chapter] 只用于调用方表达作用域，函数不跨章。
+     */
+    @Suppress("UNUSED_PARAMETER")
+    fun decorRects(lines: List<DrawLine>, chapter: Int, range: IntRange): List<Rect> {
+        if (range.isEmpty()) return emptyList()
+        val queryStart = range.first
+        val queryEnd = range.last + 1
+        val out = ArrayList<Rect>(lines.size)
+        for (line in lines) {
+            val start = line.range.first.coerceIn(0, line.text.length)
+            val endExcl = (line.range.last + 1).coerceIn(start, line.text.length)
+            if (endExcl <= start) continue
+            val lineStart = line.charBase + start
+            val lineEnd = line.charBase + endExcl
+            val s = maxOf(queryStart, lineStart)
+            val e = minOf(queryEnd, lineEnd)
+            if (e <= s) continue
+            val placement = placementFor(line, start, endExcl)
+            val ps = (s - line.charBase - start).coerceIn(0, endExcl - start)
+            val pe = (e - line.charBase - start).coerceIn(ps, endExcl - start)
+            // 横向必须读**落墨实走**的轨（[glyphTrack]）：含 kerning/连字收紧与 JUSTIFY 回填。
+            // 读 placement.xs 会让矩形整体右移「从行首到该字的累计收紧量」（实测 10~17px），
+            // 用户看到的是「选区偏右、行首字母没选上」（真机缺陷）。
+            val track = glyphTrack(line, placement, start, endExcl)?.xs ?: placement.xs
+            val (left, right) = spanOn(track, placement.advs, ps, pe) ?: continue
+            if (right <= left) continue
+            out.add(
+                Rect.makeLTRB(
+                    line.xLeft + left,
+                    line.yTop.toFloat(),
+                    line.xLeft + right,
+                    line.yBottom.toFloat(),
+                ),
+            )
+        }
+        return out
+    }
+
+    /**
+     * 本行的逐字几何（[LineAligner.Placement] 的完整入参集中在这里）。
+     *
+     * `paintText` 与 [decorRects] 必须走同一个入口：任何只改一侧的「修法」都会让选区/装饰与
+     * 文字错位（本仓头号禁忌「量画同源」）。
+     */
+    private fun placementFor(line: DrawLine, start: Int, endExcl: Int): LineAligner.Placement =
+        aligner.align(
+            text = line.text,
+            range = start until endExcl,
+            fontSizePx = line.fontSizePx,
+            lineWidthPx = if (line.nowrap) Float.MAX_VALUE else line.lineWidthPx.coerceAtLeast(1).toFloat(),
+            letterSpacingEm = line.letterSpacingEm,
+            tag = line.tag,
+            families = line.families,
+            weight = line.weight,
+            italic = line.italic,
+            monospace = line.monospace,
+            fontRuns = line.fontRuns,
+            align = line.alignment,
+            // 首行缩进**必须交给 Aligner**，不能画完再整体右移（用户报缺陷①的修法）。
+            //
+            // Aligner 的 `natural` 本来就以 `x0 = firstLineIndentPx` 起算（`natural = x0 + Σadv`），
+            // 所以 `slack = lineWidthPx − natural` 已经把缩进扣掉了，拉伸后右缘正好落在版心。
+            // 旧写法传 `0f` 再 `paintX += indent`：拉伸基数**少了缩进** ⇒ JUSTIFY 首行被拉到
+            // 版心宽之后又整体右移 indent ⇒ **右溢出一个缩进**。实测（Rust 书 22 章）：
+            // `p { text-align: justify; text-indent: 2em }` 的**每一个**正文段首行都如此，
+            // 溢出量恒等于缩进（`2em` = 84.36px @fs=42.18），22 章里 555 行，末两个字被页面裁掉。
+            firstLineIndentPx = line.firstLineIndentPx,
+            // 末行不拉伸：两端对齐的定义本身。
+            isLastLine = isLastLineOf(line, endExcl),
+            // 行尾连字符：进拉伸基数与可见右缘（连字符占版心，否则 JUSTIFY 会少算一个字位）。
+            hyphenAtEnd = line.hyphenAtEnd,
+            // 标点挤压：断行侧定断点时用的比例（量画同源，教训 ⑩）。
+            squeezeRatio = line.squeezeRatio,
+            // 混排字距：与断行侧同一个 em（间隙进 `adv` ⇒ 逐字 x、JUSTIFY 基数、可见右缘同源）。
+            cjkLatinSpacingEm = line.cjkLatinSpacingEm,
+            // 行内盒横向推进：与断行侧同一份（同 `cjkLatinSpacingEm` 的理由 —— 量画同源）。
+            inlineBoxRuns = line.inlineBoxRuns,
+        )
+
     /** 主文本行绘制（S5 逐字路径）：几何由 [LineAligner] 给、落墨由 [GlyphPainter] 逐字做。 */
     /**
      * 主文本行绘制 —— **S5 逐字路径，本函数内不出现 `Paragraph`**。
@@ -456,41 +555,11 @@ class LineWindowDrawer(
             val e = r.endExclusive.coerceIn(start, endExcl)
             if (e > s) r.copy(start = s, endExclusive = e) else null
         }.let { runs -> if (visHidden.isEmpty()) runs else runs.flatMap { subtractHidden(it, visHidden) } }
+        // 读者标注装饰：章内全局区间 → 本行文本坐标，并按隐藏区间挖空（隐藏字符不落墨）。
+        val decorRuns = decorRunsFor(line, start, endExcl, visHidden)
 
         // ── 几何：Aligner 给逐字 x / 拉伸 / 可见右边界（P1-2 不换行段以无限宽排，单行溢出）──
-        val placement = aligner.align(
-            text = line.text,
-            range = start until endExcl,
-            fontSizePx = line.fontSizePx,
-            lineWidthPx = if (line.nowrap) Float.MAX_VALUE else line.lineWidthPx.coerceAtLeast(1).toFloat(),
-            letterSpacingEm = line.letterSpacingEm,
-            tag = line.tag,
-            families = line.families,
-            weight = line.weight,
-            italic = line.italic,
-            monospace = line.monospace,
-            fontRuns = line.fontRuns,
-            align = line.alignment,
-            // 首行缩进**必须交给 Aligner**，不能画完再整体右移（用户报缺陷①的修法）。
-            //
-            // Aligner 的 `natural` 本来就以 `x0 = firstLineIndentPx` 起算（`natural = x0 + Σadv`），
-            // 所以 `slack = lineWidthPx − natural` 已经把缩进扣掉了，拉伸后右缘正好落在版心。
-            // 旧写法传 `0f` 再 `paintX += indent`：拉伸基数**少了缩进** ⇒ JUSTIFY 首行被拉到
-            // 版心宽之后又整体右移 indent ⇒ **右溢出一个缩进**。实测（Rust 书 22 章）：
-            // `p { text-align: justify; text-indent: 2em }` 的**每一个**正文段首行都如此，
-            // 溢出量恒等于缩进（`2em` = 84.36px @fs=42.18），22 章里 555 行，末两个字被页面裁掉。
-            firstLineIndentPx = line.firstLineIndentPx,
-            // 末行不拉伸：两端对齐的定义本身。
-            isLastLine = isLastLineOf(line, endExcl),
-            // 行尾连字符：进拉伸基数与可见右缘（连字符占版心，否则 JUSTIFY 会少算一个字位）。
-            hyphenAtEnd = line.hyphenAtEnd,
-            // 标点挤压：断行侧定断点时用的比例（量画同源，教训 ⑩）。
-            squeezeRatio = line.squeezeRatio,
-            // 混排字距：与断行侧同一个 em（间隙进 `adv` ⇒ 逐字 x、JUSTIFY 基数、可见右缘同源）。
-            cjkLatinSpacingEm = line.cjkLatinSpacingEm,
-            // 行内盒横向推进：与断行侧同一份（同 `cjkLatinSpacingEm` 的理由 —— 量画同源）。
-            inlineBoxRuns = line.inlineBoxRuns,
-        )
+        val placement = placementFor(line, start, endExcl)
         // 缩进已在 placement 内（x0），落墨起点即文本区左缘（marker 另行绘制，不动）。
         val paintX = textX
         // 基线：半行距居中 + ascent（CSS 2.2 §10.8.1）。**自算**，不再借道 Paragraph。
@@ -529,6 +598,11 @@ class LineWindowDrawer(
             canvas, line, placement, paintX, baseY, start, endExcl,
             only = if (positionedRuns.isEmpty()) null else line.inlineBoxRuns - positionedRuns.toSet(),
         )
+        // 标注底色垫在文字之下、书内行内盒之上：读者高亮不会被书的代码块/行内底色吞掉。
+        // 横向走**落墨实走**的轨（[glyphTrack]）：标注与字形必须同一份几何，否则高亮整体右移
+        // 一个累计 kerning 收紧量。只在真有标注的行上算（绝大多数行为空 ⇒ 零开销）。
+        val decorTrack = if (decorRuns.isEmpty()) null else glyphTrack(line, placement, start, endExcl)?.xs
+        paintDecorBackgrounds(canvas, line, placement, decorTrack, paintX, start, endExcl, decorRuns)
         if (positionedRuns.isEmpty()) {
             paintGlyphs(canvas, line, placement, paintX, baseY, start, endExcl, { f, t -> isHidden(f, t) }, decRuns, capDy = capDy)
         } else {
@@ -553,6 +627,8 @@ class LineWindowDrawer(
                 )
             }
         }
+        // 标注划线压在文字与书内装饰之上：读者线更粗、更靠下，不能被书的下划线糊住。
+        paintDecorLines(canvas, line, placement, decorTrack, paintX, baseY, start, endExcl, decorRuns)
 
         // 注音/着重号与文字同盒，随 half-leading 一并下移，保持与基字的相对位置。
         // E10：基字被隐藏的注音整条不画（rt 源文与基字同属被隐藏子树）；行高增量照旧计入基线。
@@ -594,6 +670,164 @@ class LineWindowDrawer(
             if (segs.isEmpty()) return emptyList()
         }
         return segs.map { run.copy(start = it.first, endExclusive = it.last + 1) }
+    }
+
+    /**
+     * 本行相交的标注装饰：章内全局坐标 → [line] 文本坐标，并挖掉隐藏区间。
+     *
+     * 与 [decRuns]（书内 `text-decoration`）同法，但颜色 / 粗细 / 位置来自 [DecorRange]，
+     * 不参与 CSS 级联。裁剪后仍在文本坐标系，绘制时再减 [start] 换成 placement 局部下标。
+     */
+    private fun decorRunsFor(
+        line: DrawLine,
+        start: Int,
+        endExcl: Int,
+        hidden: List<IntRange>,
+    ): List<DecorRange> {
+        if (line.decorRuns.isEmpty() || endExcl <= start) return emptyList()
+        val lineStart = line.charBase + start
+        val lineEnd = line.charBase + endExcl
+        val out = ArrayList<DecorRange>(line.decorRuns.size)
+        for (r in line.decorRuns) {
+            val s = maxOf(r.start, lineStart)
+            val e = minOf(r.endExclusive, lineEnd)
+            if (e <= s) continue
+            val local = r.copy(start = s - line.charBase, endExclusive = e - line.charBase)
+            if (hidden.isEmpty()) {
+                out.add(local)
+            } else {
+                out.addAll(subtractHiddenDecor(local, hidden))
+            }
+        }
+        return out
+    }
+
+    /** 从一条标注装饰里挖掉隐藏区间（隐藏字符的高亮/划线也不落墨）。 */
+    private fun subtractHiddenDecor(run: DecorRange, hidden: List<IntRange>): List<DecorRange> {
+        var segs: List<IntRange> = listOf(run.start until run.endExclusive)
+        for (h in hidden) {
+            val next = ArrayList<IntRange>(segs.size)
+            for (s in segs) {
+                if (h.last < s.first || h.first > s.last) {
+                    next.add(s)
+                    continue
+                }
+                if (h.first > s.first) next.add(s.first until h.first)
+                if (h.last < s.last) next.add((h.last + 1)..s.last)
+            }
+            segs = next
+            if (segs.isEmpty()) return emptyList()
+        }
+        return segs.map { run.copy(start = it.first, endExclusive = it.last + 1) }
+    }
+
+    /**
+     * 标注高亮底色：画在文字与书内行内盒之上、字形之下（读者意图压过书的背景）。
+     *
+     * 纵向取整行框 [DrawLine.yTop]..[DrawLine.yBottom]（荧光笔感，跨行连续）；横向读**落墨实走**
+     * 的逐字轨（[track]，= [glyphTrack]；null 时退 [LineAligner.Placement.xs]），与字形/选区
+     * 同一份几何 —— 读 `placement.xs` 会让高亮比墨迹右移一个累计 kerning 收紧量。
+     */
+    private fun paintDecorBackgrounds(
+        canvas: Canvas,
+        line: DrawLine,
+        placement: LineAligner.Placement,
+        track: FloatArray?,
+        paintX: Float,
+        start: Int,
+        endExcl: Int,
+        decorRuns: List<DecorRange>,
+    ) {
+        if (decorRuns.isEmpty() || endExcl <= start) return
+        val n = endExcl - start
+        val xs = track ?: placement.xs
+        for (r in decorRuns) {
+            if (r.kind != DecorKind.BACKGROUND) continue
+            val lo = (r.start - start).coerceIn(0, n)
+            val hi = (r.endExclusive - start).coerceIn(lo, n)
+            if (hi <= lo) continue
+            val (left, right) = spanOn(xs, placement.advs, lo, hi) ?: continue
+            if (right <= left) continue
+            val paint = Paint().apply { color = withAlpha(r.argb, line.alpha) }
+            canvas.drawRect(
+                Rect.makeLTRB(
+                    paintX + left,
+                    line.yTop.toFloat(),
+                    paintX + right,
+                    line.yBottom.toFloat(),
+                ),
+                paint,
+            )
+        }
+    }
+
+    /**
+     * 标注划线 / 删除线：画在文字与书内装饰之后，默认比书内下划线更粗、更靠下，避免两线糊在一起。
+     *
+     * - 下划线中心 = 基线下 `0.20em`；删除线中心 = 基线上方 `0.28em`（穿字身）；
+     * - 线型：实线填矩形，虚线走 dash 描边，波浪线走正弦路径描边；
+     * - 默认粗细 = `0.08em`；[DecorRange.thicknessPx] / [DecorRange.offsetPx] 可覆盖
+     *   （offset 是中心相对基线的距离，向下为正）。
+     */
+    private fun paintDecorLines(
+        canvas: Canvas,
+        line: DrawLine,
+        placement: LineAligner.Placement,
+        track: FloatArray?,
+        paintX: Float,
+        baseY: Float,
+        start: Int,
+        endExcl: Int,
+        decorRuns: List<DecorRange>,
+    ) {
+        if (decorRuns.isEmpty() || endExcl <= start) return
+        val n = endExcl - start
+        val xs = track ?: placement.xs
+        for (r in decorRuns) {
+            val defaultOffsetEm = when (r.kind) {
+                DecorKind.UNDERLINE -> ANNOTATION_UNDERLINE_OFFSET_EM
+                DecorKind.STRIKETHROUGH -> -ANNOTATION_STRIKE_OFFSET_EM
+                else -> continue
+            }
+            val lo = (r.start - start).coerceIn(0, n)
+            val hi = (r.endExclusive - start).coerceIn(lo, n)
+            if (hi <= lo) continue
+            val (left, right) = spanOn(xs, placement.advs, lo, hi) ?: continue
+            if (right <= left) continue
+            val thickness = (r.thicknessPx ?: (line.fontSizePx * ANNOTATION_UNDERLINE_THICKNESS_EM)).coerceAtLeast(1f)
+            val centerY = baseY + (r.offsetPx ?: (line.fontSizePx * defaultOffsetEm))
+            val x0 = paintX + left
+            val x1 = paintX + right
+            when (r.stroke) {
+                DecorStroke.Solid -> {
+                    val paint = Paint().apply { color = withAlpha(r.argb, line.alpha) }
+                    canvas.drawRect(
+                        Rect.makeLTRB(x0, centerY - thickness / 2f, x1, centerY + thickness / 2f),
+                        paint,
+                    )
+                }
+                DecorStroke.Dashed -> {
+                    val paint = Paint().apply {
+                        color = withAlpha(r.argb, line.alpha)
+                        mode = PaintMode.STROKE
+                        strokeWidth = thickness
+                        strokeCap = PaintStrokeCap.ROUND
+                        pathEffect = PathEffect.makeDash(
+                            floatArrayOf(
+                                thickness * ANNOTATION_DASH_ON_RATIO,
+                                thickness * ANNOTATION_DASH_OFF_RATIO,
+                            ),
+                            0f,
+                        )
+                    }
+                    canvas.drawLine(x0, centerY, x1, centerY, paint)
+                }
+                DecorStroke.Wavy -> {
+                    // 与书内波浪装饰同一套波形几何（Chromium 口径），换成本标注的颜色与粗细。
+                    drawDecorationWave(canvas, x0, x1, centerY, thickness, withAlpha(r.argb, line.alpha))
+                }
+            }
+        }
     }
 
     /**
@@ -985,6 +1219,34 @@ class LineWindowDrawer(
     )
 
     /**
+     * 本行**落墨实走**的逐字 x 轨（`null` = 无拉丁字母，直接用 [LineAligner.Placement.xs]）。
+     *
+     * S5b：含拉丁字母的行改用 Skia 簇位（保 kerning + `fi`/`fl` 连字），纯 CJK 行零成本走
+     * Aligner 的 x。**逐行判据、不混用**：一行要么全用簇位、要么全用 Aligner —— 两套 x 混在
+     * 一行里就是错位。
+     *
+     * 簇位轨是「未拉伸的自然轨」，拉伸 / 对齐偏移必须由 Aligner 出、[graftKerningOnto] 嫁接。
+     * 全部推导、实测数据、不变式与两个禁忌都写在那里（真书实测：修复前 965 行右缘缺口 >1px、
+     * 最大 17.29px；18 行右溢最大 6.116px；修复后两者归零）。
+     *
+     * ⚠ **这是「画」的唯一出口**：逐字落墨、选区/标注矩形的横向几何、点按命中的二分查找
+     * **必须**都读它。谁另读 [LineAligner.Placement.xs]，谁的横向位置就与实际墨迹差一个
+     * 「从行首到该字的累计收紧量」（实测真有 10~17px 量级，即大半个字宽）——
+     * 用户看到的就是「选区整体偏右、行首那个字母没选上」。量画同源由此保证。
+     *
+     * @param slotOff 本趟起点在 [placement] 里的槽位偏移（同一行分两趟画时用，见 [paintGlyphs]）。
+     * @param count 本趟处理字数。
+     */
+    private fun glyphTrack(
+        line: DrawLine,
+        placement: LineAligner.Placement,
+        start: Int,
+        endExcl: Int,
+        slotOff: Int = 0,
+        count: Int = endExcl - start,
+    ): ClusterTrackGraft? = lineGlyphTrack(line, placement, kerningTable, start, endExcl, slotOff, count)
+
+    /**
      * S5 逐字落墨：按 [placement] 的 x 逐字 `drawString`，段内样式由 `mergeBands` 供（不重写切段）。
      *
      * **下划线改为自绘**（原挂在 `TextStyle` 的 `DecorationStyle` 上）：
@@ -1018,41 +1280,7 @@ class LineWindowDrawer(
         if (endExcl <= start) return
         val n = endExcl - start
         val slotOff = start - placementStart
-        // S5b：含拉丁字母的行改用 Skia 簇位（保 kerning + fi/fl 连字），纯 CJK 行零成本走 Aligner 的 x。
-        // **逐行判据、不混用**：一行要么全用簇位、要么全用 Aligner —— 两套 x 混在一行里就是错位。
-        //
-        // 簇位轨是「未拉伸的自然轨」，拉伸 / 对齐偏移必须由 Aligner 出、[graftKerningOnto] 嫁接。
-        // 全部推导、实测数据、不变式与两个禁忌都写在那里（真书实测：修复前 965 行右缘缺口 >1px、
-        // 最大 17.29px；18 行右溢最大 6.116px；修复后两者归零）。
-        val graft: ClusterTrackGraft? =
-            if (!kerningTable.needsClusters(line.text, start, endExcl)) null else {
-                // originX 必须 0：本轨要与 Placement.advs 同坐标系，才能逐字相减出 kerning 增量。
-                kerningTable.clusterXs(
-                    line.text, start, endExcl, line.fontSizePx, line.lineHeightRatio,
-                    line.tag, line.families, line.weight, line.italic, line.monospace,
-                    line.fontRuns, originX = 0f, letterSpacingEm = line.letterSpacingEm,
-                    // 混排字距：必须传与量宽侧同一个 em，否则 [graftKerningOnto] 会把注入的间隙
-                    // 当成「整形收紧量」吃掉（该方法的 KDoc 有完整推导）。
-                    cjkLatinSpacingEm = line.cjkLatinSpacingEm,
-                    // 行内盒横向推进：同理必须与量宽侧同一份，否则被当收紧量抹掉。
-                    inlineBoxRuns = line.inlineBoxRuns,
-                )?.let { cnat ->
-                    graftKerningOnto(
-                        placement, cnat, line.text, start,
-                        line.fontSizePx, line.letterSpacingEm, line.fontRuns,
-                        // 只有 JUSTIFY 且非末行才把收紧量补回右缘；其余传 NaN = 「不补」。
-                        if (line.alignment == TextAlign.JUSTIFY && endExcl < line.text.length) {
-                            line.lineWidthPx.toFloat()
-                        } else {
-                            Float.NaN
-                        },
-                        // 槽位分类要与主拉伸同源（同 em）；不传则级 2（中英注入间隙）恒为空。
-                        line.cjkLatinSpacingEm,
-                        // 本趟只画整行里的一段（同一行分两趟）⇒ 槽位按段落起点偏移索引。
-                        off = slotOff, count = n,
-                    )
-                }
-            }
+        val graft = glyphTrack(line, placement, start, endExcl, slotOff, n)
         val xs: FloatArray = graft?.xs ?: if (slotOff == 0) placement.xs else FloatArray(n) { placement.xs[slotOff + it] }
         val kernEndDelta = graft?.endDelta ?: 0f
         // E12：行内相对定位的**逐字**位移表（按全文本绝对下标；无行内偏移叶回 null 零开销）。
@@ -1381,9 +1609,9 @@ class LineWindowDrawer(
      */
     private fun drawDecorationWave(canvas: Canvas, x0: Float, x1: Float, cy: Float, t: Float, color: Int) {
         if (x1 <= x0 || t <= 0f) return
-        val clamped = maxOf(1f, t)
-        val waveLen = 1f + 2f * roundHalfUp(2f * clamped + 0.5f)
-        val cp = 0.5f + roundHalfUp(3f * clamped + 0.5f)
+        // 波形几何与浮动菜单里的线型样张同源（[decorWaveGeometry]），样张才不是另一种线。
+        val g = decorWaveGeometry(t)
+        val waveLen = g.wavelength
         val builder = PathBuilder()
         val startX = x0 - waveLen
         builder.moveTo(startX, cy)
@@ -1392,18 +1620,18 @@ class LineWindowDrawer(
         while (x < endX) {
             val xe = x + waveLen
             val cx = x + waveLen * 0.5f
-            builder.cubicTo(cx, cy + cp, cx, cy - cp, xe, cy)
+            builder.cubicTo(cx, cy + g.controlOffset, cx, cy - g.controlOffset, xe, cy)
             x = xe
         }
         val path = builder.snapshot()
         val paint = Paint().apply {
             this.color = color
             mode = PaintMode.STROKE
-            strokeWidth = t.coerceAtLeast(DECORATION_MIN_THICKNESS_PX)
+            strokeWidth = g.thickness.coerceAtLeast(DECORATION_MIN_THICKNESS_PX)
             strokeCap = PaintStrokeCap.BUTT
         }
         // 横向裁到片段（两端各多画 1 个波长正是 Chromium 的 overhang 再裁剪）；纵向留足振幅。
-        val ext = 0.289f * cp + t + 2f
+        val ext = g.halfHeight
         canvas.save()
         canvas.clipRect(Rect.makeXYWH(x0, cy - ext, x1 - x0, 2f * ext))
         canvas.drawPath(path, paint)
@@ -1791,13 +2019,6 @@ private const val DECORATION_METRIC_CP = 'H'.code
 
 /** 三种线型的绘制顺序（集合本身无序，绘制要确定）。 */
 private val DECORATION_PAINT_ORDER = listOf(DecorationLine.UNDERLINE, DecorationLine.OVERLINE, DecorationLine.LINE_THROUGH)
-
-/**
- * 四舍五入到最近整数、**恰为 .5 时进位**：Chromium/C++ 的 `std::round` 口径。
- * Kotlin 的 `kotlin.math.round` 是「就近取偶」（`round(2.5) = 2`），照它算会与浏览器差一整个波长
- * （实测 20px 字号：浏览器波长 11px，取偶口径 9px）。
- */
-private fun roundHalfUp(v: Float): Float = kotlin.math.floor(v + 0.5f)
 
 /** `from-font` 线宽的下限（px）：细字体（宋体度量仅 0.02em）也要看得见。 */
 private const val DECORATION_MIN_THICKNESS_PX = 1.0f

@@ -1604,6 +1604,69 @@ object NormalFlowLayout {
     }
 
     /**
+     * 叶在**章字符流**里的文本（D-18 投影单源）：长度必须等于该叶在 `globalCharStarts`
+     * 里占的格数（[styledCharAdvance] / 重路径 `LayoutBox.textLength` 同一口径）。
+     *
+     * [leafText] 只覆盖「可排文字」，而字符流还占两类格：
+     * - **替换叶**（`img` 单独成叶）：占 1 格，文本用一个 U+FFFC（与行内图同槽位）；
+     * - **表格行叶**（`tr`）：占「格内各块归一文本之和」，文本按格内块序拼出。
+     *
+     * 漏掉这两类会让后面的每个字都与 `DrawLine.charBase` 错位——点按/长按就会选中
+     * 别的段落（真机报「长按乱选」的根因）。
+     *
+     * @param resolveStyle 轻路径补样式（[styles] 只覆盖叶自身的内联子树，格内容需要现解）；
+     *   null = [styles] 覆盖整章（重路径）。
+     */
+    fun leafStreamText(
+        el: MarkupElement?,
+        styles: Map<MarkupElement, ComputedStyle>,
+        classify: BlockClassify,
+        hidden: HiddenCheck = HIDDEN_NONE,
+        genOf: GenOf = EmptyGen,
+        resolveStyle: ((MarkupElement) -> ComputedStyle)? = null,
+    ): String {
+        if (el == null) return ""
+        if (isReplaceable(el)) return "\uFFFC"
+        if (el.tag == "tr") return tableRowStreamText(el, styles, classify, hidden, genOf, resolveStyle)
+        return leafText(el, styles, classify, hidden, genOf)
+    }
+
+    /** 表格行叶的文本：格内块序拼接（[cellBlocks] 与重路径 `rowChars` 同账）。 */
+    private fun tableRowStreamText(
+        row: MarkupElement,
+        styles: Map<MarkupElement, ComputedStyle>,
+        classify: BlockClassify,
+        hidden: HiddenCheck,
+        genOf: GenOf,
+        resolveStyle: ((MarkupElement) -> ComputedStyle)?,
+    ): String {
+        val sb = StringBuilder()
+        // 口径跟着排版走：重路径 `buildTableRows` 对 `display:none` 的行/格照常算格（行盒仍会
+        // 画出来），所以这里也不筛；轻路径 `styledCharAdvance` 会把隐藏行/格计 0，那种书上
+        // 会由 `ChapterText.kt` 的 `text-drift` 警告暴露（真实书里没有这种表，实测 36 本为 0）。
+        for (cell in row.children) {
+            if (cell.tag != "td" && cell.tag != "th") continue
+            val cellStyles = if (resolveStyle == null) styles else stylesUnder(cell, resolveStyle)
+            for (block in cellBlocks(cell, cellStyles, classify, hidden, genOf)) sb.append(block.text)
+        }
+        return sb.toString()
+    }
+
+    /** [root] 及其整棵子树的计算样式快照（轻路径按需级联；重路径直接用整章表）。 */
+    private fun stylesUnder(
+        root: MarkupElement,
+        resolve: (MarkupElement) -> ComputedStyle,
+    ): Map<MarkupElement, ComputedStyle> {
+        val map = HashMap<MarkupElement, ComputedStyle>()
+        fun reg(el: MarkupElement) {
+            map[el] = resolve(el)
+            for (c in el.children) reg(c)
+        }
+        reg(root)
+        return map
+    }
+
+    /**
      * S32 伴生：[leafText] 同一字符串上的显式着色区间（[ColorRun]，叶子全文本坐标系）。
      *
      * 引擎单源委托 [collectColorRuns]（与 [absorbedText] 同一套跳过规则）；无着色叶回空表

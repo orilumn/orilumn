@@ -1,6 +1,7 @@
 package orilumn.reader.engine
 
 import orilumn.reader.engine.laying.NormalFlowLayout
+import orilumn.reader.io.Logger
 
 /** 整章文本投影：文本本体 + 每个排版叶的累计块尾偏移（选区用来截断句子/英文词）。 */
 internal class ChapterTextProjection(
@@ -11,11 +12,12 @@ internal class ChapterTextProjection(
 /**
  * 整章纯文本投影（D-18）：把排版叶按文档序拼成一条字符串。
  *
- * **与排版同源**：每个叶都走 [NormalFlowLayout.leafText]，并传入 prepare 阶段同一份
- * `styleMap` / `classify` / `hidden` / `genOf`——这正是绘制侧 `DrawLineBuilder` 取叶文本的入口，
- * 因此拼接后的字符偏移与 `PageSlice.charStart`、`DrawLine.charBase` 完全同尺。
+ * **与排版同尺**：每个叶都走 [NormalFlowLayout.leafStreamText]（[NormalFlowLayout.leafText] +
+ * 替换叶/表格行叶的字符槽），并传入 prepare 阶段同一份 `styleMap` / `classify` / `hidden` /
+ * `genOf`。因此拼接后的字符偏移与 `PageSlice.charStart`、`DrawLine.charBase` 完全同尺——
+ * 长按点按拿到的偏移能直接在这条串上取整句 / 整词。
  *
- * 返回值只覆盖**可排文字**：表格/替换元素不产字符（与 `leafText` 的空串一致），
+ * 漏掉「替换叶占 1 格」「表格行占格内文本」会让其后每个字都错位（真机「长按乱选」的根因）；
  * 列表项目符号是装饰、不在字符流里。prepare 尚未就绪（未开章/已驱逐）时返回 null，
  * 调用方按「暂不可选」处理，不要拿空串冒充成功。
  *
@@ -27,11 +29,9 @@ internal class ChapterTextProjection(
 fun ChapterUnit.chapterText(): String? {
     chapterTextCache?.let { return it }
     val heavy = prepareResult
-    if (heavy != null) {
-        return heavy.chapterTextProjection().let { putTextProjection(it) }
-    }
+    if (heavy != null) return putTextProjection(heavy.chapterTextProjection())
     val light = inProgress?.prepare ?: return null
-    return light.chapterTextProjection().let { putTextProjection(it) }
+    return putTextProjection(light.chapterTextProjection())
 }
 
 /**
@@ -51,7 +51,7 @@ fun ChapterUnit.chapterTextBlockEnds(): IntArray? {
  */
 internal fun ChapterUnit.cacheChapterTextFrom(light: LightPrepare): String {
     chapterTextCache?.let { return it }
-    return light.chapterTextProjection().let { putTextProjection(it) }
+    return putTextProjection(light.chapterTextProjection())
 }
 
 private fun ChapterUnit.putTextProjection(projection: ChapterTextProjection): String {
@@ -60,21 +60,21 @@ private fun ChapterUnit.putTextProjection(projection: ChapterTextProjection): St
     return projection.text
 }
 
-private fun ChapterPrepareResult.chapterTextProjection(): ChapterTextProjection {
+internal fun ChapterPrepareResult.chapterTextProjection(): ChapterTextProjection {
     val out = StringBuilder(totalChars.coerceAtLeast(0))
     val ends = IntArray(leaves.size)
+    val drift = StreamDrift()
     for ((i, leaf) in leaves.withIndex()) {
-        out.append(
-            NormalFlowLayout.leafText(
-                el = leaf.el,
-                styles = styleMap,
-                classify = classify,
-                hidden = hidden,
-                genOf = genOf,
-            ),
+        val leafStr = NormalFlowLayout.leafStreamText(
+            el = leaf.el,
+            styles = styleMap,
+            classify = classify,
+            hidden = hidden,
+            genOf = genOf,
         )
-        ends[i] = out.length
+        ends[i] = appendLeaf(out, i, leafStr, globalCharStarts, totalChars.toLong(), drift)
     }
+    drift.report("heavy", out.length, totalChars)
     return ChapterTextProjection(out.toString(), ends)
 }
 
@@ -83,10 +83,11 @@ private fun ChapterPrepareResult.chapterTextProjection(): ChapterTextProjection 
  * 每个叶用 [LightPrepare.inlineStyles] 的懒级联（与塑形同入口），文本叶再补父节点样式
  * （重路径整章表里匿名文本叶会回查父容器，轻路径的 `inlineStyles` 对 `#text` 返回空表）。
  */
-private fun LightPrepare.chapterTextProjection(): ChapterTextProjection {
+internal fun LightPrepare.chapterTextProjection(): ChapterTextProjection {
     val out = StringBuilder(totalChars.coerceAtLeast(0))
     val ends = IntArray(totalBlocks)
     val classify = lightClassify()
+    val drift = StreamDrift()
     for (i in 0 until totalBlocks) {
         val el = leafElement(i)
         var styles = inlineStyles(i)
@@ -96,16 +97,57 @@ private fun LightPrepare.chapterTextProjection(): ChapterTextProjection {
                 styles = styles + (parent to resolveStyle(parent))
             }
         }
-        out.append(
-            NormalFlowLayout.leafText(
-                el = el,
-                styles = styles,
-                classify = classify,
-                hidden = hidden,
-                genOf = genOf,
-            ),
+        val leafStr = NormalFlowLayout.leafStreamText(
+            el = el,
+            styles = styles,
+            classify = classify,
+            hidden = hidden,
+            genOf = genOf,
+            resolveStyle = ::resolveStyle,
         )
-        ends[i] = out.length
+        ends[i] = appendLeaf(out, i, leafStr, globalCharStarts, totalChars.toLong(), drift)
     }
+    drift.report("light", out.length, totalChars)
     return ChapterTextProjection(out.toString(), ends)
+}
+
+/** 投影构建中的「叶文本长度 ≠ 该叶字符格数」计数（每章构建一次，只记首例，不刷屏）。 */
+private class StreamDrift {
+    private var count = 0
+    private var first = ""
+
+    fun check(index: Int, expected: Int, actual: Int, start: Long) {
+        if (expected == actual) return
+        count++
+        if (count == 1) first = "i=$index expected=$expected got=$actual start=$start"
+    }
+
+    fun report(kind: String, built: Int, total: Int) {
+        if (count == 0 && built == total) return
+        Logger.w(
+            "Orilumn.TXT",
+            "text-drift build=$kind leaves=$count first=$first built=$built totalChars=$total",
+        )
+    }
+}
+
+/**
+ * 追加一个叶的文本并回写块尾；顺带核对「本叶文本长度 == 本叶在字符流里占的格数」。
+ *
+ * 两者一旦不等，该叶之后的全部偏移都会与 `charBase` 漂移（长按/点按落到别的段落），
+ * 因此在**整章文本构建时**（每章一次，不在手势路径上）留一条警告，便于今后定位。
+ */
+private fun appendLeaf(
+    out: StringBuilder,
+    index: Int,
+    leafText: String,
+    starts: LongArray,
+    totalChars: Long,
+    drift: StreamDrift,
+): Int {
+    val start = starts.getOrElse(index) { totalChars }
+    val end = starts.getOrElse(index + 1) { totalChars }
+    drift.check(index, (end - start).toInt(), leafText.length, start)
+    out.append(leafText)
+    return out.length
 }

@@ -10,6 +10,9 @@ interface AnnotationStore {
     /** 本章全部标注，按起点、id 升序（同起点时先加的在前）。 */
     suspend fun annotationsForChapter(bookId: Long, chapter: Int): List<Annotation>
 
+    /** 全书标注，按章序、章内起点、id 升序（标注清单用，不必为远章排版）。 */
+    suspend fun annotationsForBook(bookId: Long): List<Annotation>
+
     /** 命中包含 [charOffset] 的最后一条（同起点时后加的优先）；没有则 null。 */
     suspend fun annotationAt(bookId: Long, chapter: Int, charOffset: Int): Annotation?
 

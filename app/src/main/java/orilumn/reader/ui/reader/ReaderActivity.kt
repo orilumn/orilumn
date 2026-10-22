@@ -36,6 +36,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import orilumn.reader.data.book.BookRepository
+import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.host.AndroidDb
 import orilumn.reader.host.AndroidFontScan
 import orilumn.reader.data.font.FontRepository
@@ -73,7 +74,8 @@ import org.json.JSONObject
  *
  *  - 宿主：[TabletReaderHost] + [SnapshotReaderHost]（定位回抛）接入 [ReaderScreen]，画布/手势/亮度
  *    遮罩/上下栏全走 shared-ui（引擎三路 skia 行窗口同源，见 TabletReaderHost.doc）；
- *  - 覆盖层：设置/目录抽屉共用 shared-ui（[ReaderSettingsPanel]/[ReaderTocPanel]，R3 收敛；
+ *  - 覆盖层：设置/目录/标注抽屉共用 shared-ui（[ReaderSettingsPanel]/[ReaderSidePanel]/[ReaderTocBody]/
+ *    [ReaderAnnotationPanel]，R3 收敛；
  *    返回键/SAF 导入/WiFi 对话框/字库同步/系统亮度读值/主题预设持久化由本壳承载，不进面板）。
  *  - 环境：保留系统栏沉浸（show/hide chrome + WindowInsetsAnimationCompat 逐帧 statusInset）、
  *    Room 设置持久化（fork-on-first-customization + withBookStyle）、版式重排节流
@@ -110,6 +112,15 @@ class ReaderActivity : ComponentActivity() {
     /** 当前定位（SnapshotReaderHost 回抛；目录高亮 / 重排锚点 / 退出保存）。 */
     private var currentPos by mutableStateOf<ReaderPos?>(null)
 
+    /** 侧边抽屉当前页（null = 关闭）：目录与标注共用同一抽屉（D-23）。 */
+    private var panelPage by mutableStateOf<ReaderPanelPage?>(null)
+
+    /** 抽屉最后显示的页：关闭时 `panelPage` 为 null，退场动画仍要显示原页而不是跳回目录。 */
+    private var panelLastPage by mutableStateOf(ReaderPanelPage.Toc)
+
+    /** 标注外部变更号：清单里删掉一条后 +1，阅读面据此重读当前章、屏幕装饰同步消失。 */
+    private var annotationsEpoch by mutableIntStateOf(0)
+
     /** 外部推送落位：版式重排绑定 / 目录跳转落地后置位，[ReaderScreen] 键变化即认领。 */
     private var externalPos by mutableStateOf<ReaderPos?>(null)
 
@@ -120,7 +131,6 @@ class ReaderActivity : ComponentActivity() {
     private var layoutRevision by mutableStateOf(0)
 
     private var settingsOpen by mutableStateOf(false)
-    private var tocOpen by mutableStateOf(false)
     private var panelSettings by mutableStateOf(ReaderSettings.DEFAULT)
 
     /** 设置面板字库列表（壳自持：开面板同步系统族 + 取全量表；增删改后重载）。 */
@@ -366,40 +376,60 @@ class ReaderActivity : ComponentActivity() {
                         commitSettings(effective.copy(scheme = if (effective.scheme == "night") "day" else "night"), typographyChanged = true)
                     },
                     onSettings = { openSettingsPanel() },
-                    onToc = { openTocPanel() },
+                    onToc = { openPanel(ReaderPanelPage.Toc) },
+                    onNote = { openPanel(ReaderPanelPage.Annotations) },
                     onLightChange = { applyPhysicalBrightness(it) },
                     onLightCommit = { commitBrightness(it) },
                     onBarsVisibleChanged = { barsVisible = it; applySystemBars() },
                     externalPos = externalPos,
                     fallbackPos = currentPos,
                     contentRevision = layoutRevision,
+                    annotationsEpoch = annotationsEpoch,
                 )
             } else {
                 // 加载背页（打开的背色与正文一致）。
                 Box(Modifier.fillMaxSize().background(ComposeColor(bgTone)))
             }
 
-            // R3 收敛：目录抽屉用共享实现；返回键由壳承载（S31，不进面板）。
-            BackHandler(enabled = tocOpen) { closeTocPanel() }
-            currentPos?.let { p ->
-                ReaderTocPanel(
-                    visible = tocOpen,
-                    toc = engine?.toc() ?: emptyList(),
-                    currentChapter = p.chapter,
-                    scheme = effective.scheme,
-                    currentFragments = remember(p) {
-                        engine?.currentPageFragmentIds(p.chapter, p.slice.charStart, p.slice.charEnd) ?: emptySet()
-                    },
-                    onSelect = { item -> tocJump(item) },
-                    onDismiss = { closeTocPanel() },
-                )
-            } ?: ReaderTocPanel(
-                visible = tocOpen,
-                toc = engine?.toc() ?: emptyList(),
-                currentChapter = 0,
+            // R3 收敛：目录与标注共用同一个左侧抽屉（D-23）；返回键由壳承载（S31，不进面板）。
+            val tocItems = engine?.toc() ?: emptyList()
+            val tocTitles = remember(tocItems) { chapterTitlesOf(tocItems) }
+            val fragments = currentPos?.let { p ->
+                engine?.currentPageFragmentIds(p.chapter, p.slice.charStart, p.slice.charEnd) ?: emptySet()
+            } ?: emptySet()
+            BackHandler(enabled = panelPage != null) { closePanel() }
+            ReaderSidePanel(
+                visible = panelPage != null,
+                page = panelPage ?: panelLastPage,
+                onPageChange = { page -> panelPage = page; panelLastPage = page },
                 scheme = effective.scheme,
-                onSelect = { item -> tocJump(item) },
-                onDismiss = { closeTocPanel() },
+                onDismiss = { closePanel() },
+                tocContent = {
+                    ReaderTocBody(
+                        toc = tocItems,
+                        currentChapter = currentPos?.chapter ?: 0,
+                        scheme = effective.scheme,
+                        currentFragments = fragments,
+                        onSelect = { item -> tocJump(item) },
+                        onDismiss = { closePanel() },
+                    )
+                },
+                annotationsContent = {
+                    ReaderAnnotationPanel(
+                        scheme = effective.scheme,
+                        load = { tabletHost?.annotationsForBook() ?: emptyList() },
+                        onDelete = { annotation ->
+                            val ok = tabletHost?.deleteAnnotation(annotation.id) ?: false
+                            // 删当前章的标注后，屏幕上的装饰也要同时消失（epoch 由阅读面单独重读）。
+                            if (ok) annotationsEpoch++
+                            ok
+                        },
+                        onJump = { annotation -> annotationJump(annotation) },
+                        chapterTitles = tocTitles,
+                        currentChapter = currentPos?.chapter ?: 0,
+                        onDismiss = { closePanel() },
+                    )
+                },
             )
 
             // 设置抽屉用共享实现（R3 同口径）；返回键由壳承载，直接关面板。
@@ -469,7 +499,7 @@ class ReaderActivity : ComponentActivity() {
     // ---- Settings panel ----
 
     private fun openSettingsPanel() {
-        tocOpen = false
+        panelPage = null
         panelSettings = effective
         settingsOpen = true
         loadPanelFonts()
@@ -584,23 +614,42 @@ class ReaderActivity : ComponentActivity() {
         getSharedPreferences("reader_settings_ui", MODE_PRIVATE).edit().putString(KEY_THEMES, arr.toString()).apply()
     }
 
-    // ---- Table of contents ----
+    // ---- Side panel (TOC / annotations, D-23) ----
 
-    private fun openTocPanel() {
+    private fun openPanel(page: ReaderPanelPage) {
         settingsOpen = false
-        tocOpen = true
+        panelPage = page
+        panelLastPage = page
         applySystemBars()
-        Logger.w(TAG, "open toc panel")
+        Logger.w(TAG, "open side panel $page")
     }
 
-    private fun closeTocPanel() {
-        tocOpen = false
+    private fun closePanel() {
+        panelPage = null
         applySystemBars()
+    }
+
+    /** 标注清单跳转：落到包含该标注起点的页（与目录跳转同口径），落位后保存进度并关面板。 */
+    private fun annotationJump(annotation: Annotation) {
+        panelPage = null
+        applySystemBars()
+        val host = tabletHost ?: return
+        lifecycleScope.launch(Dispatchers.IO) {
+            val target = host.jumpToChar(annotation.chapter, annotation.charStart)
+            withContext(Dispatchers.Main) {
+                if (target != null) {
+                    // 标注跳转是导航：改参锚点作废，下一次改参按新的当前页首取。
+                    relayoutAnchor.release()
+                    currentPos = target
+                    externalPos = target
+                }
+            }
+        }
     }
 
     /** 目录跳转：[item.fragment] 锚定子节自身标题页（回退章首），关抽屉后经 host 落位（finalizeOnLeave 语义）。 */
     private fun tocJump(item: TocItem) {
-        closeTocPanel()
+        closePanel()
         val idx = item.index ?: return
         val host = tabletHost ?: return
         lifecycleScope.launch(Dispatchers.IO) {
@@ -776,7 +825,7 @@ class ReaderActivity : ComponentActivity() {
 
     /** 系统栏按当前状态收敛：面板打开 → 隐藏；否则随上下栏可见性。 */
     private fun applySystemBars() {
-        if (settingsOpen || tocOpen) hideSystemChrome()
+        if (settingsOpen || panelPage != null) hideSystemChrome()
         else if (barsVisible) showSystemChrome()
         else hideSystemChrome()
     }

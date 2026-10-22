@@ -58,10 +58,13 @@ class BookRepository(
 
     suspend fun readingState(bookId: Long): BookReadingState? = db.readingState(bookId)
 
-    // ---- 文本标注（schema v7） ----
+    // ---- 文本标注（schema v9） ----
 
     suspend fun annotationsForChapter(bookId: Long, chapter: Int): List<Annotation> =
         db.annotationsForChapter(bookId, chapter)
+
+    suspend fun annotationsForBook(bookId: Long): List<Annotation> =
+        db.annotationsForBook(bookId)
 
     suspend fun addAnnotation(annotation: Annotation): Annotation = db.addAnnotation(annotation)
 

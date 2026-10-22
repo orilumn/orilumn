@@ -197,6 +197,13 @@ class DesktopReaderHost(
         controller.openTocItem(index, fragment)?.let { ReaderPos(it.first, it.second, atCover = false) }
     }
 
+    /** 标注清单跳转：落到包含该标注起点的页（与目录跳转同口径，经控制器 [BookDocumentController.openAtChar]）。 */
+    suspend fun jumpToChar(chapter: Int, charOffset: Int): ReaderPos? = withContext(Dispatchers.Default) {
+        val from = controller.locateStart()?.first ?: chapter
+        controller.finalizeOnLeave(from)
+        controller.openAtChar(chapter, charOffset)?.let { ReaderPos(it.first, it.second, atCover = false) }
+    }
+
     /** P4-c2u: 点按命中的链接查表（控制器轻路径样式化区间，同步廉价）。 */
     override fun linkTargetAt(chapter: Int, charOffset: Int): LinkTarget? =
         controller.linkTargetAt(chapter, charOffset)
@@ -246,6 +253,14 @@ class DesktopReaderHost(
 
     override suspend fun annotationsForChapter(chapter: Int): List<Annotation> = try {
         store.annotationsForChapter(bookId, chapter)
+    } catch (c: CancellationException) {
+        throw c
+    } catch (_: Throwable) {
+        emptyList()
+    }
+
+    override suspend fun annotationsForBook(): List<Annotation> = try {
+        store.annotationsForBook(bookId)
     } catch (c: CancellationException) {
         throw c
     } catch (_: Throwable) {

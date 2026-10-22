@@ -85,7 +85,8 @@ private const val PAGE_IMAGE_WARM_TIMEOUT_MS = 800L
  *
  * 状态机：打开后 `openPos` 为空 → 仅背页；翻页/跳转走宿主 suspend 后落位，且防抖保存
  * （[onSaveProgress]，500ms，复刻 Android `scheduleSave`）。设置面板/目录抽屉是独立组件
- * （[ReaderSettingsPanel]/[ReaderTocPanel]，S29）；书签/笔记占位未接线（onBookmark/onNote 为 null）
+ * （[ReaderSettingsPanel]/[ReaderSidePanel]，S29）；书签仍是占位（onBookmark 为 null），
+ * 笔记按钮已接标注清单（onNote）
  * 时经 CMP Snackbar（[rememberReaderSnackbar]，替代 Android Toast）提示。
  */
 @Composable
@@ -130,6 +131,12 @@ fun ReaderScreen(
      * 桌面壳经 `ReaderView` 按面板状态传入。
      */
     keysEnabled: Boolean = true,
+    /**
+     * 标注数据外部变更号（标注清单删除后 ++）：单独一条 effect 重读当前章标注，
+     * 让屏幕上那条装饰同步消失。**不能**并进「进章」effect——同章 `load(ch)` 会早退，
+     * 不会重读；它也不是版式修订号，不驱动重新分页。
+     */
+    annotationsEpoch: Int = 0,
 ) {
     val density = LocalDensity.current.density
     val profile = remember(settings, density) { TypographicProfile.build(settings, density) }
@@ -217,6 +224,10 @@ fun ReaderScreen(
         magnifierFinger = null
         editingAnnotation = null
         editingAnchor = null
+    }
+    // 标注清单里删了当前章的标注：重读本章，屏幕上的装饰同步消失（与进章 effect 分离，见参数注释）。
+    LaunchedEffect(currentHost, annotationsEpoch) {
+        if (annotationsEpoch > 0) annotationState.reload()
     }
     // 版式/参数变化后旧选区坐标不再成立（字符偏移没变，但端点所在行可能变），直接丢弃。
     LaunchedEffect(contentRevision, density) {
@@ -1080,6 +1091,8 @@ fun ReaderScreen(
         val e = selection.endExclusive
         if (ch < 0 || e <= s) return
         selectionMenuVisible = false
+        // 创建当时的原文快照（D-24）：清单行显示用；章节文本已在缓存里，取不到就留空。
+        val quote = currentHost.textOf(ch, s, e)?.take(200)
         scope.launch {
             val saved = annotationState.add(
                 Annotation(
@@ -1091,6 +1104,7 @@ fun ReaderScreen(
                     color = color,
                     // 线型只属于划线：高亮记录不存线型，免得与划线菜单的偏好串味。
                     lineStyle = annotationLineStyleFor(kind, lineStyle),
+                    quote = quote,
                 ),
             )
             if (saved == null) {

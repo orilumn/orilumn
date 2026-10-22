@@ -50,6 +50,7 @@ class AnnotationState(private val host: ReaderHost) {
         if (this.chapter != chapter) return
         annotations = sort(loaded)
         revision++
+        backfillQuotes(chapter)
     }
 
     /** 强制重读当前章（数据库恢复/外部导入后）。 */
@@ -147,6 +148,32 @@ class AnnotationState(private val host: ReaderHost) {
         chapter = -1
         annotations = emptyList()
         revision++
+    }
+
+    /**
+     * 老记录（v1 已有标注）没有原文摘录：开章时章节文本已在缓存里，顺手回填一次（D-24）。
+     * 逐条 UPDATE，失败静默保留空值——清单显示「（无摘录）」兜底，不阻塞跳转与删除。
+     */
+    private suspend fun backfillQuotes(chapter: Int) {
+        val missing = annotations.filter { it.quote.isNullOrBlank() }
+        if (missing.isEmpty()) return
+        for (old in missing) {
+            val quote = host.textOf(chapter, old.charStart, old.charEnd)?.take(200)
+            if (quote.isNullOrBlank()) continue
+            val filled = old.copy(quote = quote)
+            val ok = try {
+                host.updateAnnotation(filled)
+            } catch (c: kotlinx.coroutines.CancellationException) {
+                throw c
+            } catch (_: Throwable) {
+                false
+            }
+            if (!ok) continue
+            // 回填期间可能已经换章：只改仍在当前章内存里的那条。
+            if (this.chapter != chapter) return
+            annotations = sort(annotations.map { if (it.id == filled.id) filled else it })
+            revision++
+        }
     }
 
     private fun sort(list: List<Annotation>): List<Annotation> =

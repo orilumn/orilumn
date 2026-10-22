@@ -217,6 +217,7 @@ class LibraryDbTest {
                 charEnd = 9,
                 kind = AnnotationKind.Highlight,
                 color = 0x80FFCC00.toInt(),
+                quote = "摘录一",
                 createdAt = 10L,
                 updatedAt = 10L,
             ),
@@ -230,6 +231,7 @@ class LibraryDbTest {
                 kind = AnnotationKind.Underline,
                 color = 0xFF3366CC.toInt(),
                 lineStyle = AnnotationLineStyle.Wavy,
+                quote = "摘录二",
                 createdAt = 11L,
                 updatedAt = 11L,
             ),
@@ -240,6 +242,9 @@ class LibraryDbTest {
         assertEquals(AnnotationLineStyle.Wavy, db.annotationAt(book, 2, 7)?.lineStyle)
         assertEquals(AnnotationLineStyle.Straight, db.annotationAt(book, 2, 8)?.lineStyle)
         assertEquals(listOf(first.id, second.id), db.annotationsForChapter(book, 2).map { it.id })
+        // 原文摘录随记录落库（清单显示用，见 migration 8→9）。
+        assertEquals("摘录一", db.annotationAt(book, 2, 5)?.quote)
+        assertEquals(listOf(first.id, second.id), db.annotationsForBook(book).map { it.id })
 
         // 命中包含该偏移的最后一条；charEnd 不含。
         assertEquals(second.id, db.annotationAt(book, 2, 7)?.id)
@@ -253,6 +258,7 @@ class LibraryDbTest {
                 color = 0xFF112233.toInt(),
                 lineStyle = AnnotationLineStyle.Strike,
                 note = "批注",
+                quote = "摘录一改",
                 updatedAt = 20L,
             ),
         )
@@ -261,12 +267,35 @@ class LibraryDbTest {
         assertEquals(0xFF112233.toInt(), updated.color)
         assertEquals(AnnotationLineStyle.Strike, updated.lineStyle)
         assertEquals("批注", updated.note)
+        assertEquals("摘录一改", updated.quote)
         assertEquals(20L, updated.updatedAt)
 
         db.deleteAnnotation(first.id)
         assertEquals(listOf(second.id), db.annotationsForChapter(book, 2).map { it.id })
         db.deleteAnnotationsForBook(book)
         assertTrue(db.annotationsForChapter(book, 2).isEmpty())
+    }
+
+    @Test
+    fun annotationsForBookOrdersByChapterThenStart() = runBlocking {
+        val db = freshDb()
+        val book = db.addBook("T", null, "/b.epub", addedAt = 1L)
+        suspend fun add(chapter: Int, start: Int) = db.addAnnotation(
+            Annotation(
+                bookId = book,
+                chapter = chapter,
+                charStart = start,
+                charEnd = start + 2,
+                kind = AnnotationKind.Highlight,
+                createdAt = 1L,
+                updatedAt = 1L,
+            ),
+        )        // 故意乱序插入：书级查询必须按章序 + 章内起点排（与 annotationsForChapter 同序）。
+        val c2b = add(2, 30)
+        val c0 = add(0, 10)
+        val c2a = add(2, 5)
+        assertEquals(listOf(c0.id, c2a.id, c2b.id), db.annotationsForBook(book).map { it.id })
+        assertTrue(db.annotationsForBook(book + 1).isEmpty())
     }
 
     @Test
@@ -304,6 +333,7 @@ class LibraryDbTest {
         assertNull(db.getBook(removed))
         assertNull(db.readingState(removed))
         assertTrue(db.annotationsForChapter(removed, 1).isEmpty())
+        assertTrue(db.annotationsForBook(removed).isEmpty())
 
         // 另一本书的数据不受影响。
         assertTrue(db.getBook(kept) != null)
@@ -344,10 +374,12 @@ class LibraryDbTest {
 
     @Test
     fun migrate7to8AddsLineStyleColumn() {
-        // 用最新 schema 建库后把线型列删掉、版本退回 7，模拟真实的 7→8 升级。
+        // 用最新 schema 建库后把线型列与摘录列删掉、版本退回 7，模拟真实的 7→8 升级
+        // （一路迁到最新版本，顺带覆盖 8→9 的摘录列）。
         val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
         OrilumnDb.Schema.create(driver)
         driver.execute(null, "ALTER TABLE annotations DROP COLUMN lineStyle;", 0)
+        driver.execute(null, "ALTER TABLE annotations DROP COLUMN quote;", 0)
         driver.execute(null, "PRAGMA user_version = 7;", 0)
 
         OrilumnDb.Schema.migrate(driver, 7, OrilumnDb.Schema.version)
@@ -381,6 +413,44 @@ class LibraryDbTest {
                 AnnotationLineStyle.Dashed,
                 db.annotationsForChapter(book, 1).first { it.charStart == 5 }.lineStyle,
             )
+        }
+    }
+
+    @Test
+    fun migrate8to9AddsQuoteColumn() {
+        // 用最新 schema 建库后把摘录列删掉、版本退回 8，模拟真实的 8→9 升级。
+        val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        OrilumnDb.Schema.create(driver)
+        driver.execute(null, "ALTER TABLE annotations DROP COLUMN quote;", 0)
+        driver.execute(null, "PRAGMA user_version = 8;", 0)
+
+        OrilumnDb.Schema.migrate(driver, 8, OrilumnDb.Schema.version)
+
+        val db = LibraryDb(OrilumnDb(driver))
+        runBlocking {
+            val book = db.addBook("T", null, "/b.epub", addedAt = 1L)
+            // 老记录没有摘录列：读回是空值（面板显示「（无摘录）」），不阻塞跳转与删除。
+            driver.execute(
+                null,
+                "INSERT INTO annotations(bookId, chapter, charStart, charEnd, kind, color, lineStyle, note, createdAt, updatedAt) " +
+                    "VALUES ($book, 1, 0, 3, 'highlight', NULL, 'straight', NULL, 1, 1);",
+                0,
+            )
+            assertNull(db.annotationsForChapter(book, 1).single().quote)
+            // 新记录能写摘录，书级查询也能读到。
+            db.addAnnotation(
+                Annotation(
+                    bookId = book,
+                    chapter = 1,
+                    charStart = 5,
+                    charEnd = 9,
+                    kind = AnnotationKind.Highlight,
+                    quote = "摘录",
+                    createdAt = 2L,
+                    updatedAt = 2L,
+                ),
+            )
+            assertEquals("摘录", db.annotationsForBook(book).first { it.charStart == 5 }.quote)
         }
     }
 

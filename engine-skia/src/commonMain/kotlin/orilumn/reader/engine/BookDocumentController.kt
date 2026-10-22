@@ -3922,6 +3922,19 @@ private fun finishCanonicalBackground(
     }
 
     /**
+     * 标注清单跳转：落到包含章内 [anchorChar] 的那一页（不是章首）。
+     *
+     * 与 [openTocItem] 同构——[preemptForNavigation] 是私有钩子，只有控制器能包这一层；
+     * 失败（章越界 / 重排失败）退回 [openChapterStart]。
+     */
+    suspend fun openAtChar(chapter: Int, anchorChar: Int): Pair<Int, PageSlice>? {
+        clearFlipDir("annotation-jump")
+        preemptForNavigation()
+        if (chapter !in chapters.indices) return null
+        return relayoutTo(chapter, anchorChar.coerceAtLeast(0)) ?: openChapterStart(chapter)
+    }
+
+    /**
      * TOC jump honoring the item's in-chapter anchor: lands on the page whose first line is the
      * element carrying [fragment] (a depth>0 subsection, e.g. `#sec3`), instead of the chapter head.
      * Falls back to [openChapterStart] when the fragment is absent/blank, the target heading cannot

@@ -153,6 +153,14 @@ interface ReaderHost {
      */
     suspend fun annotationsForChapter(chapter: Int): List<Annotation> = emptyList()
 
+    /**
+     * 全书标注（标注清单用）：按章序、章内起点升序；读取失败返回空表。
+     *
+     * 清单只读库，不要求任何章的排版缓存就绪（原文摘录已随记录存快照，见 D-24）。
+     * 默认空表 = 宿主尚未实现，面板走空态，不崩。
+     */
+    suspend fun annotationsForBook(): List<Annotation> = emptyList()
+
     /** 新增标注并返回带数据库 id 的记录；失败返回 null。实现方负责补 `bookId` 与时间戳。 */
     suspend fun addAnnotation(annotation: Annotation): Annotation? = null
 

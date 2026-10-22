@@ -56,6 +56,11 @@ data class Annotation(
     /** 划线线型（实线 / 波浪 / 删除线）；高亮忽略。老数据缺列 = 实线。 */
     val lineStyle: AnnotationLineStyle = AnnotationLineStyle.Straight,
     val note: String? = null,
+    /**
+     * 创建当时的原文摘录（清单行显示，方案 D-24）。老记录（v1 已有标注）为空，
+     * 翻到该章时按章节文本回填一次；仍未回填时清单显示「（无摘录）」。
+     */
+    val quote: String? = null,
     val createdAt: Long = 0,
     val updatedAt: Long = 0,
 ) {

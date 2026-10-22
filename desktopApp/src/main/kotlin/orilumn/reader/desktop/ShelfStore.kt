@@ -282,10 +282,13 @@ class DesktopShelfStore(root: File) : ShelfRepository {
         )
     }
 
-    // ---- 文本标注（schema v7；桌面宿主只做转发，CRUD 语义在 LibraryDb） ----
+    // ---- 文本标注（schema v9；桌面宿主只做转发，CRUD 语义在 LibraryDb） ----
 
     suspend fun annotationsForChapter(bookId: Long, chapter: Int): List<Annotation> =
         requireDb().annotationsForChapter(bookId, chapter)
+
+    suspend fun annotationsForBook(bookId: Long): List<Annotation> =
+        requireDb().annotationsForBook(bookId)
 
     suspend fun addAnnotation(annotation: Annotation): Annotation = requireDb().addAnnotation(annotation)
 

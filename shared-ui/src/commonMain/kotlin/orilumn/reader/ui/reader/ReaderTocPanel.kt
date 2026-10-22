@@ -1,25 +1,17 @@
 package orilumn.reader.ui.reader
 
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -30,41 +22,32 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusTarget
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.key.Key
-import androidx.compose.ui.input.key.KeyEventType
-import androidx.compose.ui.input.key.key
-import androidx.compose.ui.input.key.onKeyEvent
-import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import orilumn.reader.data.epub.TocItem
-import kotlinx.coroutines.delay
-import kotlin.math.roundToInt
 
 /**
- * S29 阅读目录抽屉：**左停靠**面板，镜像设置抽屉的 slide + mask 交互（共用同一调色板），
- * 列出书本层级（缩进/当前项金字/逐节点折叠展开），选中经 [onSelect] 跳转。
- * R3 收敛后双端共用此实现（原 Android `AndroidReaderTocPanel` 已删）；返回键不在
- * commonMain 承载（各壳 S31 负责：桌面无返回键，平板由 `ReaderActivity` 接）。
+ * S29 阅读目录抽屉的**列表体**（用户层）：由 [ReaderSidePanel] 的抽屉壳承载，
+ * 与标注清单共用遮罩 + 滑入动画 + 顶部两页控件（D-23）。
+ *
+ * 列出书本层级（缩进/当前项金字/逐节点折叠展开），选中经 [onSelect] 跳转；
+ * 返回键不在 commonMain 承载（桌面无返回键，平板由 `ReaderActivity` 接）。
  */
 @Composable
-fun ReaderTocPanel(
-    visible: Boolean,
+fun ReaderTocBody(
     toc: List<TocItem>,
     currentChapter: Int,
     scheme: String,
@@ -106,127 +89,70 @@ fun ReaderTocPanel(
         }
     }
 
-    // Panel slide + mask dim/lighten synchronized: the mask ramps at the same time and duration as the
-    // panel slide (left docks here).
-    val density = LocalDensity.current
-    val slide = remember { Animatable(1f) }
-    var mounted by remember { mutableStateOf(false) }
-    var maskOn by remember { mutableStateOf(false) }
-    val maskAlpha by animateFloatAsState(if (maskOn) 1f else 0f,
-        tween(TocAnimMs, easing = FastOutSlowInEasing), label = "tocMask")
-
-    LaunchedEffect(visible) {
-        if (visible) {
-            mounted = true
-            slide.snapTo(1f)
-            // Flip the mask and the slide target at the same instant so both animate together.
-            maskOn = true
-            slide.animateTo(0f, tween(TocAnimMs, easing = FastOutSlowInEasing))
-            // 目录项2（用户层）：每次打开重置为"仅当前章展开"，不沿用上次手风琴状态。
-            collapsed = initialTocCollapsed(rows, targetRow)
-            if (targetRow >= 0) {
-                try { listState.scrollToItem((targetRow - 2).coerceAtLeast(0)) } catch (_: Exception) {}
-            }
-            // 共享高亮起点：静置鼠标所在行优先认领（行 hover effect 在动画期间认领），
-            // 无鼠标才落当前项/首行——键盘从鼠标行或当前项接着走，不是从顶部重来。
-            if (nav.activeIdx == null) {
-                nav.activeIdx = (if (targetRow >= 0 && isVisible(targetRow)) targetRow else null)
-                    ?: rows.indices.firstOrNull(::isVisible)
-            }
-            nav.releaseHold()
-        } else {
-            maskOn = false
-            nav.activeIdx = null
-            slide.animateTo(1f, tween(TocAnimMs, easing = FastOutSlowInEasing))
-            delay((TocAnimMs + 20).toLong())
-            mounted = false
+    // 焦点落列表体只做按键捕获：移动是纯状态驱动（activeIdx），不需要焦点几何。
+    // 列表体随抽屉打开而组合、随退场动画结束而卸载，所以打开时的初始化就是 LaunchedEffect(Unit)。
+    val bodyFr = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        // 目录项2（用户层）：每次打开重置为"仅当前章展开"，不沿用上次手风琴状态。
+        collapsed = initialTocCollapsed(rows, targetRow)
+        if (targetRow >= 0) {
+            try { listState.scrollToItem((targetRow - 2).coerceAtLeast(0)) } catch (_: Exception) {}
         }
+        // 共享高亮起点：静置鼠标所在行优先认领（行 hover effect 在动画期间认领），
+        // 无鼠标才落当前项/首行——键盘从鼠标行或当前项接着走，不是从顶部重来。
+        if (nav.activeIdx == null) {
+            nav.activeIdx = (if (targetRow >= 0 && isVisible(targetRow)) targetRow else null)
+                ?: rows.indices.firstOrNull(::isVisible)
+        }
+        nav.releaseHold()
+        bodyFr.requestFocus()
     }
 
-    if (mounted) {
-        // 焦点落抽屉只做按键捕获：移动是纯状态驱动（activeIdx），不需要焦点几何。
-        val drawerFr = remember { FocusRequester() }
-        LaunchedEffect(mounted, collapsed) {
-            if (mounted) drawerFr.requestFocus()
-        }
-        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-            val drawerWidth = if (maxWidth < 600.dp) maxWidth * 0.85f else 360.dp
-            val drawerPx = remember(drawerWidth, density) { with(density) { drawerWidth.toPx() } }
-            Box(modifier = Modifier.fillMaxSize()) {
-                // Dark mask over the rest of the screen.
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .alpha(maskAlpha)
-                        .background(Color.Black.copy(alpha = 0.4f))
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() }, indication = null,
-                            onClick = onDismiss,
-                        ),
-                )
-                Column(
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .offset { IntOffset((-slide.value * drawerPx).roundToInt(), 0) }
-                        .width(drawerWidth)
-                        .fillMaxHeight()
-                        .background(p.bg)
-                        .focusRequester(drawerFr)
-                        .focusTarget()
-                        .panelKeyEvents(
-                            onUp = { moveActive(-1) },
-                            onDown = { moveActive(1) },
-                            onEnter = {
-                                nav.activeIdx?.takeIf { it in rows.indices && isVisible(it) }
-                                    ?.let { onSelect(rows[it].item) }
-                            },
-                            onEscape = onDismiss,
-                        )
-                        // 点按消费（不抢焦点）：杂散点按不穿透到遮罩关闭层。
-                        .pointerInput(Unit) { detectTapGestures(onTap = {}) },
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().height(52.dp).padding(horizontal = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text("目录", color = p.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.weight(1f).padding(start = 8.dp))
-                        Text("✕", color = p.text, fontSize = 18.sp, modifier = Modifier
-                            .padding(10.dp)
-                            .clip(RoundedCornerShape(6.dp)).clickable(onClick = onDismiss))
-                    }
-                    Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(p.borderSoft))
-                    if (rows.isEmpty()) {
-                        Text("暂无目录", color = p.muted2, fontSize = 14.sp, modifier = Modifier.padding(24.dp))
-                    } else {
-                        LazyColumn(
-                            state = listState,
-                            modifier = Modifier.fillMaxWidth().fillMaxHeight()
-                                .clearKbHoldOnMove { nav.releaseHold() },
-                        ) {
-                            items(rows.size, key = { i -> i }) { rowIndex ->
-                                if (!isVisible(rowIndex)) return@items
-                                val row = rows[rowIndex]
-                                TocRow(
-                                    // 当前项 = 打开时定位到的那一行（章内优先当页子标题，
-                                    // 无命中回退章首——比逐行 fragment 比对覆盖更全）。
-                                    row = row,
-                                    current = rowIndex == targetRow,
-                                    palette = p,
-                                    hasChildren = row.item.children.isNotEmpty(),
-                                    expanded = row.idx !in collapsed,
-                                    onToggle = {
-                                        // 目录项2（用户层）：顶层展开手风琴式折叠其余章。
-                                        collapsed = toggleTocCollapsed(collapsed, rows, row.idx)
-                                        clampActive()
-                                    },
-                                    onSelect = { onSelect(row.item) },
-                                    nav = nav,
-                                    index = rowIndex,
-                                )
-                            }
-                        }
-                    }
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .focusRequester(bodyFr)
+            .focusTarget()
+            .panelKeyEvents(
+                onUp = { moveActive(-1) },
+                onDown = { moveActive(1) },
+                onEnter = {
+                    nav.activeIdx?.takeIf { it in rows.indices && isVisible(it) }
+                        ?.let { onSelect(rows[it].item) }
+                },
+                onEscape = onDismiss,
+            )
+            // 点按消费（不抢焦点）：杂散点按不穿透到遮罩关闭层。
+            .pointerInput(Unit) { detectTapGestures(onTap = {}) },
+    ) {
+        if (rows.isEmpty()) {
+            Text("暂无目录", color = p.muted2, fontSize = 14.sp, modifier = Modifier.padding(24.dp))
+        } else {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxWidth().fillMaxSize()
+                    .clearKbHoldOnMove { nav.releaseHold() },
+            ) {
+                items(rows.size, key = { i -> i }) { rowIndex ->
+                    if (!isVisible(rowIndex)) return@items
+                    val row = rows[rowIndex]
+                    TocRow(
+                        // 当前项 = 打开时定位到的那一行（章内优先当页子标题，
+                        // 无命中回退章首——比逐行 fragment 比对覆盖更全）。
+                        row = row,
+                        current = rowIndex == targetRow,
+                        palette = p,
+                        hasChildren = row.item.children.isNotEmpty(),
+                        expanded = row.idx !in collapsed,
+                        onToggle = {
+                            // 目录项2（用户层）：顶层展开手风琴式折叠其余章。
+                            collapsed = toggleTocCollapsed(collapsed, rows, row.idx)
+                            clampActive()
+                        },
+                        onSelect = { onSelect(row.item) },
+                        nav = nav,
+                        index = rowIndex,
+                    )
                 }
             }
         }
@@ -310,9 +236,6 @@ fun toggleTocCollapsed(collapsed: Set<Int>, rows: List<TocRowData>, toggledIdx: 
     }
     return collapsed + toggledIdx
 }
-
-/** Panel slide and mask dim/lighten share this duration so they stay synchronized. */
-private const val TocAnimMs = 280
 
 /** Draws one TOC row: indent by depth, label, expand/toggle caret, current-chapter highlight. */
 @Composable

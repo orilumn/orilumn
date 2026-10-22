@@ -126,11 +126,18 @@ class LibraryDb(private val db: OrilumnDb) : AnnotationStore {
         progress.clearReadingState(bookId)
     }
 
-    // ---- 文本标注（schema v7 起；v8 加划线线型列。锚点为原书章内字符区间） ----
+    // ---- 文本标注（schema v9 起；v8 加划线线型列，v9 加原文摘录列。锚点为原书章内字符区间） ----
 
     override suspend fun annotationsForChapter(bookId: Long, chapter: Int): List<Annotation> =
         withContext(Dispatchers.IO) {
             annotations.annotationsForChapter(bookId, chapter.toLong())
+                .executeAsList()
+                .map { it.toAnnotation() }
+        }
+
+    override suspend fun annotationsForBook(bookId: Long): List<Annotation> =
+        withContext(Dispatchers.IO) {
+            annotations.annotationsForBook(bookId)
                 .executeAsList()
                 .map { it.toAnnotation() }
         }
@@ -154,6 +161,7 @@ class LibraryDb(private val db: OrilumnDb) : AnnotationStore {
             note = annotation.note,
             createdAt = annotation.createdAt,
             updatedAt = annotation.updatedAt,
+            quote = annotation.quote,
         )
         val id = annotations.lastInsertAnnotationId().executeAsOneOrNull()?.max
             ?: error("insertAnnotation 未返回新行 id")
@@ -166,6 +174,7 @@ class LibraryDb(private val db: OrilumnDb) : AnnotationStore {
             color = annotation.color?.toLong(),
             lineStyle = annotation.lineStyle.wire,
             note = annotation.note,
+            quote = annotation.quote,
             updatedAt = annotation.updatedAt,
             id = annotation.id,
         )
@@ -375,6 +384,7 @@ class LibraryDb(private val db: OrilumnDb) : AnnotationStore {
         color = color?.toInt(),
         lineStyle = AnnotationLineStyle.fromWire(lineStyle),
         note = note,
+        quote = quote,
         createdAt = createdAt,
         updatedAt = updatedAt,
     )

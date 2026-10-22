@@ -275,7 +275,7 @@ class DesktopReaderHostTest {
         setup.close()
 
         DesktopShelfStore(root).load()
-        assertEquals(8L, orilumn.reader.db.OrilumnDb.Schema.version) // 守卫：本断言口径
+        assertEquals(9L, orilumn.reader.db.OrilumnDb.Schema.version) // 守卫：本断言口径
         assertEquals(
             "表齐 + 版本落后 ⇒ 直接盖章，不重跑迁移",
             orilumn.reader.db.OrilumnDb.Schema.version,

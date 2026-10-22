@@ -4,13 +4,17 @@ import orilumn.reader.data.font.FontEntry
 import orilumn.reader.data.settings.BookSettings
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.ui.reader.FontScanProgress
+import orilumn.reader.ui.reader.ReaderAnnotationPanel
 import orilumn.reader.ui.reader.ReaderHost
+import orilumn.reader.ui.reader.ReaderPanelPage
 import orilumn.reader.ui.reader.ReaderPos
 import orilumn.reader.ui.reader.ReaderScreen
 import orilumn.reader.ui.reader.ReaderSettingsPanel
+import orilumn.reader.ui.reader.ReaderSidePanel
+import orilumn.reader.ui.reader.ReaderTocBody
 import orilumn.reader.ui.reader.SnapshotReaderHost
-import orilumn.reader.ui.reader.ReaderTocPanel
 import orilumn.reader.ui.reader.ThemePreset
+import orilumn.reader.ui.reader.chapterTitlesOf
 import orilumn.reader.ui.shelf.ShelfBook
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.runtime.Composable
@@ -39,7 +43,7 @@ import kotlinx.coroutines.NonCancellable
 import okio.Path.Companion.toPath
 
 /**
- * S32 桌面阅读视图：窗口级组装（`ReaderScreen` + 设置抽屉 + 目录抽屉）。
+ * S32 桌面阅读视图：窗口级组装（`ReaderScreen` + 设置抽屉 + 目录/标注侧边抽屉）。
  *
  * 状态机（最小壳口径）：
  * - 视口/换书/session 变化 → 重建 [DesktopReaderHost]（`remember` 键），`ReaderScreen` 经
@@ -86,7 +90,12 @@ fun ReaderView(
      * 开面板钉一次，拖动期间每次预览落位不换锚，关面板那次落位后松开。
      */
     val relayoutAnchor = remember(book) { orilumn.reader.engine.RelayoutAnchor() }
-    var tocOpen by remember(book) { mutableStateOf(false) }
+    /** 侧边抽屉当前页（null = 关闭）：目录与标注共用同一个抽屉（D-23）。 */
+    var panelPage by remember(book) { mutableStateOf<ReaderPanelPage?>(null) }
+    /** 抽屉最后显示的页：关闭后退场动画仍显示原页，不跳回目录。 */
+    var panelLastPage by remember(book) { mutableStateOf(ReaderPanelPage.Toc) }
+    /** 标注外部变更号：清单删除后 +1，阅读面重读当前章、屏幕装饰同步消失。 */
+    var annotationsEpoch by remember(book) { mutableStateOf(0) }
     // 首次开书收口（与平板同调，共享 probeOriginalOnOpen）：默认原书主题开书时，
     // 落位即按落位章回填未钉的缩进/行距并 bookOnly 持久；已钉/非原书直接跳过。
     // 每本书一次（overlay 落 pin 后共享门控自停）。
@@ -341,13 +350,15 @@ fun ReaderView(
                 commit(settings.copy(scheme = if (settings.scheme == "night") "day" else "night"))
             },
             onSettings = { settingsOpen = true },
-            onToc = { tocOpen = true },
+            onToc = { panelPage = ReaderPanelPage.Toc; panelLastPage = ReaderPanelPage.Toc },
+            onNote = { panelPage = ReaderPanelPage.Annotations; panelLastPage = ReaderPanelPage.Annotations },
             onLightChange = { onSettingsChange(it) },
             onLightCommit = { commit(it) },
             externalPos = externalPos,
             contentRevision = contentRevision,
             // 面板打开时按键留给面板，阅读面不翻页；面板关闭回阅读面即重夺焦点。
-            keysEnabled = !settingsOpen && !tocOpen,
+            keysEnabled = !settingsOpen && panelPage == null,
+            annotationsEpoch = annotationsEpoch,
         )
 
         // 面板常驻组合、经 visible 驱动：关闭走面板内部退场动画（滑出+遮罩淡出后卸载）；
@@ -423,26 +434,59 @@ fun ReaderView(
             onDeleteTheme = onDeleteTheme,
         )
 
-        ReaderTocPanel(
-            visible = tocOpen,
-            toc = desktopHost?.toc ?: emptyList(),
-            currentChapter = currentPos?.chapter ?: 0,
+        val panelToc = desktopHost?.toc ?: emptyList()
+        ReaderSidePanel(
+            visible = panelPage != null,
+            page = panelPage ?: panelLastPage,
+            onPageChange = { page -> panelPage = page; panelLastPage = page },
             scheme = settings.scheme,
-            // 目录项1（用户层）：桌面此前没传当页标题 id，一直只能定位到章首；现与平板同口径。
-            currentFragments = currentPos?.let { pos ->
-                desktopHost?.currentPageFragmentIds(pos.chapter, pos.slice.charStart, pos.slice.charEnd)
-            } ?: emptySet(),
-            onSelect = { item ->
-                val idx = item.index ?: return@ReaderTocPanel
-                tocOpen = false
-                scope.launch {
-                    val target = desktopHost?.tocItem(idx, item.fragment)
-                        ?: snapshot.chapterStart(idx) ?: return@launch
-                    anchorOverride = target.chapter to target.slice.charStart
-                    session++
-                }
+            onDismiss = { panelPage = null },
+            tocContent = {
+                ReaderTocBody(
+                    toc = panelToc,
+                    currentChapter = currentPos?.chapter ?: 0,
+                    scheme = settings.scheme,
+                    // 目录项1（用户层）：桌面此前没传当页标题 id，一直只能定位到章首；现与平板同口径。
+                    currentFragments = currentPos?.let { pos ->
+                        desktopHost?.currentPageFragmentIds(pos.chapter, pos.slice.charStart, pos.slice.charEnd)
+                    } ?: emptySet(),
+                    onSelect = { item ->
+                        val idx = item.index ?: return@ReaderTocBody
+                        panelPage = null
+                        scope.launch {
+                            val target = desktopHost?.tocItem(idx, item.fragment)
+                                ?: snapshot.chapterStart(idx) ?: return@launch
+                            anchorOverride = target.chapter to target.slice.charStart
+                            session++
+                        }
+                    },
+                    onDismiss = { panelPage = null },
+                )
             },
-            onDismiss = { tocOpen = false },
+            annotationsContent = {
+                ReaderAnnotationPanel(
+                    scheme = settings.scheme,
+                    load = { desktopHost?.annotationsForBook() ?: emptyList() },
+                    onDelete = { annotation ->
+                        val ok = desktopHost?.deleteAnnotation(annotation.id) ?: false
+                        // 删当前章的标注后，屏幕上的装饰也要同时消失（epoch 由阅读面单独重读）。
+                        if (ok) annotationsEpoch++
+                        ok
+                    },
+                    onJump = { annotation ->
+                        panelPage = null
+                        relayoutAnchor.release()
+                        scope.launch {
+                            val target = desktopHost?.jumpToChar(annotation.chapter, annotation.charStart)
+                                ?: return@launch
+                            pushLanding(target)
+                        }
+                    },
+                    chapterTitles = remember(panelToc) { chapterTitlesOf(panelToc) },
+                    currentChapter = currentPos?.chapter ?: 0,
+                    onDismiss = { panelPage = null },
+                )
+            },
         )
     }
 }

@@ -1163,15 +1163,14 @@ fun ReaderScreen(
     }
 
     /**
-     * 收起卡片 = 提交（D-27 / D-28）：
+     * 落笔（D-27 / D-28）：**只有操作栏的 `完成` 一个提交口**（点卡片外 / 返回键 / Esc 都是取消）。
      *
-     * - 编辑已有记录：有字写进 `note`，清空即去掉；输入期间选过别的线型 / 颜色就在这次一起写回。
-     * - 新选区还没落笔：写了字、点过色槽、或显式按 `完成` 才落笔（按当前类别 / 线型 / 颜色新建一条），
-     *   否则只是关掉（清选区本来就可能只是「不想标了」）。
+     * - 编辑已有记录：把这一段选好的类别 / 线型 / 颜色与批注文字一次性写回（清空文字即去掉批注）。
+     * - 新选区：按当前类别 / 线型 / 颜色新建一条（没写字也落一条，这是「先选样式再落笔」的落笔口）。
      *
-     * @param explicit true = 操作栏的 `完成`：显式落笔，即便没写字也按当前类别 / 线型 / 默认色落一条。
+     * 与 [cancelNote]（点卡片外 / 返回键 / Esc）严格分开：那一个什么都不写。
      */
-    fun commitNote(explicit: Boolean) {
+    fun commitNote() {
         val text = noteText.trim()
         val picked = noteColorArgb
         val kind = noteKind
@@ -1209,18 +1208,31 @@ fun ReaderScreen(
         }
         selectionMenuVisible = false
         if (!selection.hasSelection) return
-        // 没写字、也没点过色槽、又不是显式按完成 ⇒ 只是「关掉」：
-        // 选区一并清掉，免得留下一块没卡片的蓝底。
-        if (text.isEmpty() && picked == null && !explicit) {
-            selection.clear()
-            return
-        }
         createSelectionAnnotation(
             kind = kind,
             color = picked ?: annotationDefaultColor(light, kind),
             lineStyle = style,
             note = text.ifBlank { null },
         )
+    }
+
+    /**
+     * 取消（点卡片外 / 返回键 / Esc）：**什么都不改**。
+     *
+     * 写了一半的批注、刚选的颜色与线型全部丢掉；编辑态不动原记录；新选区连同选区一起清掉
+     * （卡片都关了就没人再引用这块蓝底）。与 [commitNote] 的分工是硬的：这几条路都不是「保存后退出」，
+     * 落笔只认操作栏的 `完成`。
+     */
+    fun cancelNote() {
+        noteText = ""
+        noteColorArgb = null
+        val editing = editingAnnotation
+        if (editing != null) {
+            closeAnnotationEdit()
+            return
+        }
+        selectionMenuVisible = false
+        if (selection.hasSelection) selection.clear()
     }
 
     /**
@@ -1284,14 +1296,13 @@ fun ReaderScreen(
 
     /** 复制选区原文（复制后保留选区）。 */
     fun copySelection() {
-        if (copyRange(selection.chapter, selection.start, selection.endExclusive)) {
-            selectionMenuVisible = false
-        }
+        // 复制不改记录、也不关卡片：落笔只有「完成」与点卡片外两处（D-28）。
+        copyRange(selection.chapter, selection.start, selection.endExclusive)
     }
 
     /** 复制一条已有标注覆盖的原文：长按命中后没有选区，复制对象就是这条记录。 */
     fun copyAnnotation(annotation: Annotation) {
-        if (copyRange(annotation.chapter, annotation.charStart, annotation.charEnd)) closeAnnotationEdit()
+        copyRange(annotation.chapter, annotation.charStart, annotation.charEnd)
     }
 
     BoxWithConstraints(
@@ -1312,10 +1323,10 @@ fun ReaderScreen(
                     )
                     // 标注卡片开着（D-28）：点在卡片上归卡片（按钮/输入框自己消费），
                     // 手柄照旧可拖（否则选区改不了）；其余手势做两件事——
-                    // 上下滑 = 在视口里滚页（视口 = 卡片上沿之上那一条），点按（没动过）= 退出并保存。
+                    // 上下滑 = 在视口里滚页（视口 = 卡片上沿之上那一条），点按（没动过）= 取消。
                     if (currentNoteBarOpen && !barsOwned) {
                         if (down.isConsumed || downY >= sheetTopPxState) return@awaitEachGesture
-                        val handle = if (!coverVisible && !ctl.isBusy()) {
+                        val handle = if (editingAnnotation == null && !coverVisible && !ctl.isBusy()) {
                             selectionHandleAt(downX, downY, size.width.toFloat(), size.height.toFloat())
                         } else {
                             null
@@ -1341,7 +1352,9 @@ fun ReaderScreen(
                                 }
                                 if (!change.pressed) break
                             }
-                            if (!dragged) commitNote(explicit = false)
+                            // 点卡片外 = 取消（D-28）：落笔只认操作栏的 `完成`，点外面不写任何东西
+                            // （免得「想收起卡片」被当成「那就按当前样式落一条」）。
+                            if (!dragged) cancelNote()
                             return@awaitEachGesture
                         }
                         // 落在手柄上：交给下面的手柄拖动路径（卡片保持打开，页面跟着上顶）。
@@ -1444,10 +1457,6 @@ fun ReaderScreen(
                             if (!currentNoteBarOpen) {
                                 closeAnnotationEdit()
                                 selectionMenuVisible = false
-                            } else if (editingAnnotation != null) {
-                                // 编辑已有标注时抓手柄 = 想改选区：先把已写的字落库并收起卡片，
-                                // 这一下再当普通的（新）拖选——编辑态不该跟着选区跑。
-                                commitNote(explicit = false)
                             }
                             mouseSelectingPending = false
                             selection.beginHandleDrag(handle)
@@ -2097,8 +2106,10 @@ fun ReaderScreen(
                     fgColor = Color(profile.fgColor),
                     onOpen = { id ->
                         // 点旁注 = 打开这条标注的操作栏与输入框（有文字就带出来，可改可删）。
+                        // 顺手清掉选区：编辑态与选区不该同时挂着（两套手柄 + 两套绿框只会互相添乱）。
                         val target = annotationState.annotations.firstOrNull { it.id == id }
                         if (target != null) {
+                            selection.clear()
                             selectionMenuVisible = false
                             editingAnnotation = target
                         }
@@ -2206,14 +2217,13 @@ fun ReaderScreen(
                     onKindChange = { noteKind = it },
                     onPickColor = { kind, slot -> pickNoteColor(kind, slot) },
                     onPickLineStyle = { pickNoteLineStyle(it) },
-                    // 复制先取文本再提交：提交可能清掉选区 / 关掉卡片。
+                    // 复制只进剪贴板：不动记录、也不关卡片（落笔只有「完成」与点卡片外两处）。
                     onCopy = {
                         if (editing != null) copyAnnotation(editing) else copySelection()
-                        commitNote(explicit = false)
                     },
                     onDelete = { deleteTarget?.let { annotation -> deleteAnnotation(annotation) } },
-                    onDone = { commitNote(explicit = true) },
-                    onDismiss = { commitNote(explicit = false) },
+                    onDone = { commitNote() },
+                    onCancel = { cancelNote() },
                     onHeightChange = { noteBarHeightPx = it },
                 )
             }

@@ -66,9 +66,12 @@ internal data class NoteBarTarget(
  * 2. 输入行：只有输入框，**原来的「完成」按钮已经去掉**，提交统一走操作栏最右的 `完成`。
  *
  * 取代了原来贴着选区浮动的菜单：卡片不跟锚点走，所以选区在页面任何位置都不会「菜单跑出屏幕」，
- * 也不需要估算菜单高度。输入期间点条外 / 返回键 / Esc = 退出（[onDismiss]：有字照旧保存）。
+ * 也不需要估算菜单高度。
  *
- * 打字时正文仍看得见：遮罩只吞点按，不压暗（批注要一边看原文一边写）。
+ * 落笔**只有**操作栏的 `完成` 一条路（D-28）。点卡片外的正文、返回键、Esc 都是**取消**
+ * （[onCancel]）：写了一半的字与刚选的颜色一并不算数，原记录不动。
+ *
+ * 打字时正文仍看得见：卡片只占屏幕底部一条，不压暗（批注要一边看原文一边写）。
  */
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
@@ -93,8 +96,8 @@ internal fun AnnotationSheet(
     onDelete: () -> Unit,
     /** 操作栏的 `完成`：显式落笔（新建时即便没写字也按当前类别 / 线型 / 默认色落一条）。 */
     onDone: () -> Unit,
-    /** 点条外 / 返回键 / Esc：退出并保存已写的字（没字且没显式落笔就只关闭）。 */
-    onDismiss: () -> Unit,
+    /** 点卡片外 / 返回键 / Esc：**取消**（什么都不写，原记录不动；落笔只认 `完成`）。 */
+    onCancel: () -> Unit,
     /** 汇报卡片自身高度（像素）：页面让位要用实测值，不能靠估。 */
     onHeightChange: (Int) -> Unit = {},
 ) {
@@ -108,8 +111,8 @@ internal fun AnnotationSheet(
 
     // 打开即聚焦：移动端顺带把键盘顶起来，卡片自己贴到键盘上沿（imePadding）。
     LaunchedEffect(target.annotationId) { focus.requestFocus() }
-    // Android 返回键 / 桌面 Esc = 退出（有字就存，没字就清），不丢内容。
-    BackHandler(enabled = true) { onDismiss() }
+    // Android 返回键 / 桌面 Esc = 取消（不是「保存后退出」，落笔只认完成与点卡片外）。
+    BackHandler(enabled = true) { onCancel() }
 
     Box(modifier = Modifier.fillMaxSize().imePadding()) {
         Column(
@@ -120,7 +123,7 @@ internal fun AnnotationSheet(
                 .background(p.cardBg)
                 .onPreviewKeyEvent { event ->
                     if (event.type == KeyEventType.KeyDown && event.key == Key.Escape) {
-                        onDismiss()
+                        onCancel()
                         true
                     } else {
                         false

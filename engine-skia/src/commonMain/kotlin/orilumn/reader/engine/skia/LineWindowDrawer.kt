@@ -1609,9 +1609,9 @@ class LineWindowDrawer(
      */
     private fun drawDecorationWave(canvas: Canvas, x0: Float, x1: Float, cy: Float, t: Float, color: Int) {
         if (x1 <= x0 || t <= 0f) return
-        val clamped = maxOf(1f, t)
-        val waveLen = 1f + 2f * roundHalfUp(2f * clamped + 0.5f)
-        val cp = 0.5f + roundHalfUp(3f * clamped + 0.5f)
+        // 波形几何与浮动菜单里的线型样张同源（[decorWaveGeometry]），样张才不是另一种线。
+        val g = decorWaveGeometry(t)
+        val waveLen = g.wavelength
         val builder = PathBuilder()
         val startX = x0 - waveLen
         builder.moveTo(startX, cy)
@@ -1620,18 +1620,18 @@ class LineWindowDrawer(
         while (x < endX) {
             val xe = x + waveLen
             val cx = x + waveLen * 0.5f
-            builder.cubicTo(cx, cy + cp, cx, cy - cp, xe, cy)
+            builder.cubicTo(cx, cy + g.controlOffset, cx, cy - g.controlOffset, xe, cy)
             x = xe
         }
         val path = builder.snapshot()
         val paint = Paint().apply {
             this.color = color
             mode = PaintMode.STROKE
-            strokeWidth = t.coerceAtLeast(DECORATION_MIN_THICKNESS_PX)
+            strokeWidth = g.thickness.coerceAtLeast(DECORATION_MIN_THICKNESS_PX)
             strokeCap = PaintStrokeCap.BUTT
         }
         // 横向裁到片段（两端各多画 1 个波长正是 Chromium 的 overhang 再裁剪）；纵向留足振幅。
-        val ext = 0.289f * cp + t + 2f
+        val ext = g.halfHeight
         canvas.save()
         canvas.clipRect(Rect.makeXYWH(x0, cy - ext, x1 - x0, 2f * ext))
         canvas.drawPath(path, paint)
@@ -2020,13 +2020,6 @@ private const val DECORATION_METRIC_CP = 'H'.code
 /** 三种线型的绘制顺序（集合本身无序，绘制要确定）。 */
 private val DECORATION_PAINT_ORDER = listOf(DecorationLine.UNDERLINE, DecorationLine.OVERLINE, DecorationLine.LINE_THROUGH)
 
-/**
- * 四舍五入到最近整数、**恰为 .5 时进位**：Chromium/C++ 的 `std::round` 口径。
- * Kotlin 的 `kotlin.math.round` 是「就近取偶」（`round(2.5) = 2`），照它算会与浏览器差一整个波长
- * （实测 20px 字号：浏览器波长 11px，取偶口径 9px）。
- */
-private fun roundHalfUp(v: Float): Float = kotlin.math.floor(v + 0.5f)
-
 /** `from-font` 线宽的下限（px）：细字体（宋体度量仅 0.02em）也要看得见。 */
 private const val DECORATION_MIN_THICKNESS_PX = 1.0f
 
@@ -2036,18 +2029,11 @@ private const val DECORATION_AUTO_THICKNESS_EM = 0.1f
 /** 字体度量缺失时的回退下划线位置（em，与旧下划线口径一致 = 0.12em）。 */
 private const val DECORATION_UNDERLINE_FALLBACK_EM = 0.12f
 
-/** 读者标注划线的默认粗细（em）：比书内下划线更粗，避免两线糊在一起。 */
-private const val ANNOTATION_UNDERLINE_THICKNESS_EM = 0.08f
-
 /** 读者标注划线的默认中心位置（em，基线向下）：比书内下划线更靠下。 */
 private const val ANNOTATION_UNDERLINE_OFFSET_EM = 0.20f
 
 /** 删除线中心相对基线的距离（em，向上）：穿字身中部（CJK 方块字居中略偏上）。 */
 private const val ANNOTATION_STRIKE_OFFSET_EM = 0.28f
-
-/** 虚线：实线段 / 空档 长度相对线粗的倍数。 */
-private const val ANNOTATION_DASH_ON_RATIO = 3f
-private const val ANNOTATION_DASH_OFF_RATIO = 2f
 
 /** skip-ink 横带的纵向内缩（px）：Chromium `decoration_bounds.Inset(InsetsF::VH(0.5, 0))`。 */
 private const val DECORATION_INK_BAND_INSET_PX = 0.5f

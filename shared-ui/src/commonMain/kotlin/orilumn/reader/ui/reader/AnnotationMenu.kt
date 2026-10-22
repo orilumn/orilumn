@@ -28,8 +28,11 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
@@ -41,6 +44,10 @@ import androidx.compose.ui.unit.sp
 import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.data.annotation.AnnotationKind
 import orilumn.reader.data.annotation.AnnotationLineStyle
+import orilumn.reader.engine.skia.ANNOTATION_DASH_OFF_RATIO
+import orilumn.reader.engine.skia.ANNOTATION_DASH_ON_RATIO
+import orilumn.reader.engine.skia.ANNOTATION_UNDERLINE_THICKNESS_EM
+import orilumn.reader.engine.skia.decorWaveGeometry
 import kotlin.math.roundToInt
 
 /** 浮动菜单与选区之间的间距。 */
@@ -246,6 +253,9 @@ private fun LineStyleRow(
     }
 }
 
+/** 菜单按钮文字字号：线样张的粗细也按它算，样张才与真迹同比例。 */
+private val MENU_LABEL_FONT = 14.sp
+
 /** 线型样张：与正文里落墨的位置对齐（下划线靠下、删除线过中）。 */
 private fun DrawScope.drawLineStyleGlyph(
     style: AnnotationLineStyle,
@@ -258,7 +268,11 @@ private fun DrawScope.drawLineStyleGlyph(
     lineY: Float? = null,
     from: Float = size.width * 0.2f,
     to: Float = size.width * 0.8f,
-    strokeWidth: Float = 2.dp.toPx(),
+    /*
+     * 线宽取**正文落墨的规则**（[ANNOTATION_UNDERLINE_THICKNESS_EM] × 菜单字号）：
+     * 波形（波长、振幅）都随线宽线性放大，线宽对了样张才跟真迹一个样。
+     */
+    strokeWidth: Float = MENU_LABEL_FONT.toPx() * ANNOTATION_UNDERLINE_THICKNESS_EM,
 ) {
     val stroke = strokeWidth
     // 一条线画在哪里：样张行里删除线过字中、其余贴下沿；调用方也可显式指定（类别名样张用）。
@@ -272,33 +286,36 @@ private fun DrawScope.drawLineStyleGlyph(
             strokeWidth = stroke,
         )
         AnnotationLineStyle.Wavy -> {
-            val amp = stroke * 1.2f
-            val halfWave = (to - from) / 4f
-            val path = Path().apply { moveTo(from, y) }
-            var x = from
-            var up = true
-            while (x < to) {
-                val nx = (x + halfWave).coerceAtMost(to)
-                path.quadraticTo((x + nx) / 2f, if (up) y - amp else y + amp, nx, y)
-                x = nx
-                up = !up
+            // 与正文落墨同一套波形几何：波长/控制点都随线宽走，两端各多画一个波长再裁回片段
+            // （Chromium 的 overhang 手法），两端才不会露出半截波。
+            val g = decorWaveGeometry(stroke)
+            val path = Path().apply { moveTo(from - g.wavelength, y) }
+            var x = from - g.wavelength
+            val endX = to + g.wavelength
+            while (x < endX) {
+                val xe = x + g.wavelength
+                val cx = x + g.wavelength * 0.5f
+                path.cubicTo(cx, y + g.controlOffset, cx, y - g.controlOffset, xe, y)
+                x = xe
             }
-            drawPath(path, color, style = Stroke(width = stroke))
-        }
-        AnnotationLineStyle.Dashed -> {
-            val dash = stroke * 2.5f
-            val gap = stroke * 2f
-            var x = from
-            while (x < to) {
-                drawLine(
-                    color = color,
-                    start = Offset(x, y),
-                    end = Offset((x + dash).coerceAtMost(to), y),
-                    strokeWidth = stroke,
-                )
-                x += dash + gap
+            clipRect(from, y - g.halfHeight, to, y + g.halfHeight) {
+                drawPath(path, color, style = Stroke(width = stroke, cap = StrokeCap.Butt))
             }
         }
+        AnnotationLineStyle.Dashed -> drawLine(
+            color = color,
+            start = Offset(from, y),
+            end = Offset(to, y),
+            strokeWidth = stroke,
+            cap = StrokeCap.Round,
+            pathEffect = PathEffect.dashPathEffect(
+                floatArrayOf(
+                    stroke * ANNOTATION_DASH_ON_RATIO,
+                    stroke * ANNOTATION_DASH_OFF_RATIO,
+                ),
+                0f,
+            ),
+        )
         AnnotationLineStyle.Strike -> drawLine(
             color = color,
             start = Offset(from, y),
@@ -306,6 +323,17 @@ private fun DrawScope.drawLineStyleGlyph(
             strokeWidth = stroke,
         )
     }
+}
+
+/** 类别名样张那条线的线心：下划线贴字底并给波浪留出振幅，删除线过字中。 */
+private fun DrawScope.sampleLineY(style: AnnotationLineStyle, strokeWidth: Float): Float {
+    if (style == AnnotationLineStyle.Strike) return size.height * 0.5f
+    val half = if (style == AnnotationLineStyle.Wavy) {
+        decorWaveGeometry(strokeWidth).halfHeight
+    } else {
+        strokeWidth / 2f
+    }
+    return size.height - half
 }
 
 /**
@@ -369,7 +397,7 @@ private fun MenuAction(
         Text(
             text = label,
             color = textColor,
-            fontSize = 14.sp,
+            fontSize = MENU_LABEL_FONT,
             fontWeight = FontWeight.Medium,
             maxLines = 1,
             modifier = Modifier
@@ -385,19 +413,13 @@ private fun MenuAction(
                 .then(
                     if (underlineArgb != null) {
                         Modifier.drawBehind {
-                            val strokeWidth = 2.dp.toPx()
-                            // 样张就是「这一笔真落下去长什么样」：线型与线色都跟当前选择走。
-                            // 删除线画在字的中间（那才是删除线的样子），其余贴字的底边，
-                            // 且留出波浪的振幅，免得下半波被文字盒裁掉。
-                            val y = if (underlineStyle == AnnotationLineStyle.Strike) {
-                                size.height * 0.5f
-                            } else {
-                                size.height - strokeWidth * 1.8f
-                            }
+                            // 样张就是「这一笔真落下去长什么样」：线型、线色、线宽都跟正文落墨同一套规则，
+                            // 波形自然也与真迹同比例（波长/振幅都随线宽走）。
+                            val strokeWidth = MENU_LABEL_FONT.toPx() * ANNOTATION_UNDERLINE_THICKNESS_EM
                             drawLineStyleGlyph(
                                 style = underlineStyle,
                                 color = Color(underlineArgb),
-                                lineY = y,
+                                lineY = sampleLineY(underlineStyle, strokeWidth),
                                 from = 0f,
                                 to = size.width,
                                 strokeWidth = strokeWidth,

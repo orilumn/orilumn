@@ -22,9 +22,8 @@ import org.junit.Test
  *     （几何倒包估计失配时按 `Paginator` 反查修正），与累加器是否精确无关。
  *  2. **链边缓存页首**：给定本会话前向链登记过的游标（`prevStart`）时，倒包页必须与读者刚看过的前
  *     一页**逐字一致**（`charStart` + `charEnd`）。这是「同一翻页手势永远给出同一页」的保证。
- *     （本锁只测**排版层**的 tiling 与游标命中；「临时页 == 磁盘表」另有真书锁
- *     `RealBookPaginationParityTest` + 文档 §12.10：倒包页首的权威现在是①前向链边②**章首（块 0）起的
- *     前向正典链**（轻路径前向链逐页等于重路径全量分页）③几何倒包兜底；中章起锚的行切页首才走③。）
+ *     （本锁只测**临时表自己**的 tiling 与游标命中。不与磁盘表做任何对比 —— 两表互斥、各自独立，
+ *     见 AGENTS.md「磁盘表与临时表互斥」。）
  *
  * 合成书特意混入 `pre { padding-bottom }`（`ownBottomEdges > 0` 的非文本块）：页内**每一块**的自身
  * 下边都落在本页帧内，漏记任一块都会让倒包起点过早、页尾收不到 pin。
@@ -80,11 +79,7 @@ class BackwardPageTilingTest {
     fun `every backward page tiles at its pin and reproduces the chain-edge start`() {
         val layouter = BoxChapterLayouter()
         val markup = markup()
-        // 磁盘表口径（正典）：整章 prepare + emit 分页。
-        val heavy = layouter.prepare(markup, css, profile, contentW, contentH)
-        val canon = layouter.fullLayout(heavy, profile, contentW, contentH).slices
-        assertTrue("章节应有多页（否则本锁失效）", canon.size >= 3)
-        // 临时表口径：同一章的轻量塑形。
+        // 只看临时表自己（不与磁盘表对比，见 AGENTS.md「磁盘表与临时表互斥」）。
         val light = layouter.prepareLight(markup, css, profile, contentW, ChapterStructureCache(), contentH)
 
         // 前向链（镜像读者从块 0 起的前向铺页），同时登记链边缓存 `页尾 → 页首游标`。
@@ -105,13 +100,17 @@ class BackwardPageTilingTest {
         }
         assertTrue("前向链应有多页", fwd.size >= 3)
 
-        // 章首同源：从 char 0 起两条路径走**同一段**分页代码（`Paginator.paginateFrom`），故逐页相同
-        // ——这就是「章首是两份分页唯一合一处」的根据（回章首交接逐字无缝）。章中起锚时两份可以不同，
-        // 本测试不作要求、也不该要求。
-        for (i in fwd.indices) {
-            val c = canon.getOrNull(i) ?: break
-            assertEquals("fwd[$i] charStart 与正典同源", c.charStart, fwd[i].slice.charStart)
-            assertEquals("fwd[$i] charEnd 与正典同源", c.charEnd, fwd[i].slice.charEnd)
+        // 前向链自身：首尾相接、页高不超版心（不引用任何另一张表）。
+        for (i in 1 until fwd.size) {
+            assertEquals(
+                "fwd[$i] 必须与上一页首尾相接（不丢不重）",
+                fwd[i - 1].slice.charEnd, fwd[i].slice.charStart,
+            )
+        }
+        for ((i, p) in fwd.withIndex()) {
+            val span = p.layout.getPageFrameBottom(p.slice.lastLineExclusive - 1) -
+                p.layout.getPageFrameTop(p.slice.firstLine)
+            assertTrue("fwd[$i] 页高 $span 超出 $contentH", span <= contentH)
         }
 
         var midBlockStarts = 0

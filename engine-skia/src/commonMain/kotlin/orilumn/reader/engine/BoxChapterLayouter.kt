@@ -73,6 +73,17 @@ import kotlinx.coroutines.runBlocking
  */
 enum class PaginationMode { LINE_DISK, BLOCK_TEMP }
 
+/**
+ * 增量窗沿 `break-inside: avoid` 原子区间 / `break-*: avoid` 边链**向右**闭合时，额外现塑形的
+ * 块数上限。
+ *
+ * 只在窗口尾块落在一个跨窗约束里时才会用到；补的块本来也多是下一页要用的，正常一张卡片
+ * 十余块即可闭合。上限存在的意义是防「整章都在一个 avoid 容器里」这类病态结构把一次点按
+ * 变成整章排版：超出就停止补齐，窗口布局把那条**量不全**的原子区间视为 oversized（允许撕裂），
+ * 而不是让它按截断后的矮区间把切点退到区间首。
+ */
+private const val AVOID_WINDOW_CLOSURE_MAX_BLOCKS = 64
+
 /** R6: 平台 CPU 核数（调度塑形槽预算用；iOS actual 后续补）。 */
 internal expect fun platformCpuCount(): Int
 
@@ -1007,6 +1018,19 @@ class BoxChapterLayouter(
         }
         blockLo = blockLo.coerceAtLeast(0)
         blockHi = blockHi.coerceAtMost(prepare.totalBlocks)
+        // 窗口取整（右端）：尾块所属的 `break-inside: avoid` 原子区间与 `break-*: avoid` 边链
+        // 都可能跨出本窗。窗口一旦把原子区间截断，`PartialDrawableLayout` 量到的只是窗口内那一截
+        // （行更少 ⇒ 更矮），`Paginator.resolveAvoidCut` 的「整块装得下一页」判据于是成立，切点被
+        // 退到区间首 ⇒ 页尾整段空白。真机 ch5 p7 就是这么坏的：磁盘表 42 行（页尾卡片头 + 代码块
+        // 前 12 行），增量窗只排 24 行，页尾空 1230px，而卡片标题/引导段在下一页也从页首之上开始
+        // ⇒ 两页都看不到。正典 `emit` 走全章叶序列，不存在截断，所以要补的只有
+        // 增量窗、临时页窗、锚页窗这三条「只圈窗口」的路径（同一个 [closeWindowTail]）。
+        //
+        // 左端不取整：窗口首行是磁盘表的页首（正典页界，不在 avoid 区间内部），窗口把区间左端
+        // 截短只会让分页器「以为装得下、退到页首」→ resolveAvoidCut 发现无合法断点后放弃
+        // discourage，运行结果与不截断一致；补左端纯属白塑形。
+        val tail = closeWindowTail(prepare, blockHi)
+        blockHi = tail.hi
 
         // 3. Shape all blocks in that range (reusing already-shaped blocks from [cache]).
         // R3: l2hits counts published-neighbor hits (diagnostic for prefill effectiveness).
@@ -1160,6 +1184,7 @@ class BoxChapterLayouter(
             loader = imageLoader,
             href = chapterHref,
             avoidOwnerMap = prepare.avoidOwnerMap,
+            avoidTailOpen = tail.avoidRangeOpen,
             skiaLinesSource = skiaLines,
             tableCellsSource = incrWin.lines,
             tableCellImagesSource = incrWin.images,
@@ -1296,6 +1321,90 @@ class BoxChapterLayouter(
         }
 
         return ChapterLayouter.ChapterLayoutProduct(drawable, withBlocks)
+    }
+
+    /** [closeWindowTail] 的产物，见该函数。 */
+    private class TailClosure(
+        /** 取整后的窗口上界（块，开区间）。 */
+        val hi: Int,
+        /**
+         * 尾块所在的 `break-inside: avoid` 原子区间**量不全**（预算用尽，区间仍跨出窗口）。
+         * 窗口布局据此把这条区间当作 oversized（允许撕裂），见 [PartialDrawableLayout.avoidTailOpen]。
+         */
+        val avoidRangeOpen: Boolean,
+    )
+
+    /**
+     * 把窗口（增量窗 / 临时页窗 / 锚页窗）的块区间沿两类断页约束**向右取整到闭合**（只取窗口，
+     * 不决定任何页边界）：
+     *
+     * 1. `break-inside: avoid` 原子区间：同一属主的叶在叶序里连续，故补到属主末叶；
+     * 2. `break-*: avoid` 边链（[orilumn.reader.engine.laying.BreakClusters.chainRange]）。
+     *
+     * 为什么必须闭合：窗口布局只在**窗口内**的叶上聚合属主行区间。窗口把区间截断时，区间变矮 →
+     * `Paginator.resolveAvoidCut` 误判「整块装得下一页」→ 切点退到区间首 → 页尾大片空白。
+     * 增量路径更糟：本窗只映射磁盘表的前若干页，被退掉的这批行既不在本页、也不在下一页
+     * （下一页按磁盘表页首锚定，行在这之「上」）⇒ **两页都不画**。真机 ch5 p7 即此：
+     * 磁盘表 42 行，窗口只塑形 24 行，页尾空 1230px，卡片标题与引导段整段消失。
+     * 临时页 / 锚页不丢内容（下一页从退后的切点接着排），但页尾同样空掉一大片、同一内容整章
+     * 还多分出一页（合成用例 contentH=420：修前 10 页、修后 9 页）。正典 `emit` 走全章叶序列，
+     * 不存在截断，所以只有这三条「只圈窗口」的路径要补。
+     *
+     * 回退口径：补窗有成本（补齐的块要现塑形），单次最多补 [AVOID_WINDOW_CLOSURE_MAX_BLOCKS] 块。
+     * 预算用尽时返回 [TailClosure.avoidRangeOpen] = true，让窗口布局丢弃那条量不全的原子区间
+     * ——宁可撕开一个本可整块搬走的卡片，也不能按截断后的矮区间把切点退回去而丢内容。
+     */
+    private fun closeWindowTail(prepare: LightPrepare, hi0: Int): TailClosure {
+        val total = prepare.totalBlocks
+        var hi = hi0.coerceIn(0, total)
+        if (hi <= 0 || hi >= total) return TailClosure(hi, avoidRangeOpen = false)
+        var budget = AVOID_WINDOW_CLOSURE_MAX_BLOCKS
+        fun leafEl(i: Int): MarkupElement = prepare.leafElement(i)
+        /** 尾叶的**全部** `break-inside: avoid` 祖先（嵌套属主一个都不能漏：窗口布局按最近属主
+         *  归集行区间，外层属主的叶子被内层隔断成前后两段，只补最近一层仍会把外层截短）。 */
+        fun avoidAncestorsOf(el: MarkupElement): List<MarkupElement> {
+            val out = ArrayList<MarkupElement>(2)
+            var cur: MarkupElement? = el
+            while (cur != null) {
+                if (prepare.resolveStyle(cur).breakInside == orilumn.reader.engine.css.BreakRule.AVOID) out.add(cur)
+                cur = cur.parent
+            }
+            return out
+        }
+        fun under(el: MarkupElement, ancestor: MarkupElement): Boolean {
+            var cur: MarkupElement? = el
+            while (cur != null) {
+                if (cur === ancestor) return true
+                cur = cur.parent
+            }
+            return false
+        }
+        fun chainEnd(i: Int): Int = orilumn.reader.engine.laying.BreakClusters.chainRange(
+            i, 0, total,
+            before = { prepare.block(it).breakBefore }, after = { prepare.block(it).breakAfter },
+        ).last
+
+        while (budget > 0) {
+            var grew = false
+            // (1) 尾叶所在的每一层原子区间都补到该属主末叶
+            for (owner in avoidAncestorsOf(leafEl(hi - 1))) {
+                while (hi < total && under(leafEl(hi), owner)) {
+                    if (budget <= 0) return TailClosure(hi, avoidRangeOpen = true)
+                    hi++; budget--; grew = true
+                }
+            }
+            // (2) `break-*: avoid` 边链：链尾若在窗外，一并补进来（链闭合后尾块可能又落进
+            //     另一个原子区间，故回到 (1) 再走一轮）
+            if (hi < total) {
+                val last = chainEnd(hi - 1)
+                while (hi <= last) {
+                    if (budget <= 0) return TailClosure(hi, avoidRangeOpen = false)
+                    hi++; budget--; grew = true
+                }
+            }
+            if (!grew) break
+        }
+        return TailClosure(hi, avoidRangeOpen = false)
     }
 
     /** Local FlowedLine builder for a contiguous range of leaves. Uses [leaf.contentTop] /
@@ -1803,8 +1912,8 @@ class BoxChapterLayouter(
      * mid-block (the block's leading lines before the anchor line belong to the backward page).
      *
      * 页尾与 [shapeTempPageForward] **同源**：本函数只圈窗口，切点由 `assembleTempPage` 内的
-     * `Paginator.paginateFrom` 给出（整行填充 + 强制段 + avoid 簇），锚点落在正典页首行时锚页
-     * 逐字等于磁盘表对应页。
+     * `Paginator.paginateFrom` 给出（整行填充 + 强制段 + avoid 簇）。同一张表里，锚点落在某页首行时
+     * 锚页与该页首起排的前向页是同一页（入口不同而已）。
      */
     fun shapeAnchorPageForward(
         prepare: LightPrepare,
@@ -1872,22 +1981,27 @@ class BoxChapterLayouter(
             if (full) break
             b++
         }
-        // 窗口取整：切点块所在的 avoid **边链**可能跨出本窗（链尾在后面若干块）。窗口若把链截断，
-        // `PartialDrawableLayout.breakPlan` 就看不到链上后续接口的禁止切点，故沿 [BreakClusters.chainRange]
-        // 把窗口补到链闭合。这**只是取窗口**，不决定任何页边界。
-        if (endBlockExclusive < total) {
-            val chain = orilumn.reader.engine.laying.BreakClusters.chainRange(
-                endBlockExclusive - 1, anchorBlock, total,
-                before = { prepare.block(it).breakBefore }, after = { prepare.block(it).breakAfter },
-            )
-            while (endBlockExclusive <= chain.last) {
-                shapes.add(tempShape(cache, prepare, endBlockExclusive, profile))
-                endBlockExclusive++
-            }
+        // 窗口取整（右端）到断页约束闭合：`break-*: avoid` 边链与 `break-inside: avoid` 原子区间都可能
+        // 跨出本窗，[closeWindowTail] 一并补齐。窗口若把**原子区间**截断，窗口布局量到的只是其中一截
+        // （更矮）⇒ `Paginator.resolveAvoidCut` 误判「整块装得下一页」⇒ 切点退回区间首、页尾整段空白，
+        // 同一内容还会多分出一页（合成用例 h=420 实测：修前 10 页、修后 9 页）。这**只是取窗口**，
+        // 不决定任何页边界。
+        val tail = if (endBlockExclusive < total) {
+            closeWindowTail(prepare, endBlockExclusive)
+        } else {
+            TailClosure(endBlockExclusive, avoidRangeOpen = false)
+        }
+        while (endBlockExclusive < tail.hi) {
+            shapes.add(tempShape(cache, prepare, endBlockExclusive, profile))
+            endBlockExclusive++
         }
         // 页尾切点 = `Paginator.paginateFrom`（与磁盘表/增量窗的**同一段**代码）；`endLineCharStart = null`
         // ⇒ 走整行填充 + 断页规则，而不是把切点钉在某个字符行上。
-        val page = assembleTempPage(prepare, anchorBlock, endBlockExclusive, shapes, pageFirstLine = lIdx.coerceAtLeast(0), endLineCharStart = null, contentH = contentH) {
+        val page = assembleTempPage(
+            prepare, anchorBlock, endBlockExclusive, shapes,
+            pageFirstLine = lIdx.coerceAtLeast(0), endLineCharStart = null, contentH = contentH,
+            avoidTailOpen = tail.avoidRangeOpen,
+        ) {
             tempShape(cache, prepare, it, profile)
         }
         diagPage(contentH, page, "anchor")
@@ -1974,22 +2088,26 @@ class BoxChapterLayouter(
             if (full) break
             b++
         }
-        // 窗口取整：切点块所在的 avoid **边链**可能跨出本窗（链尾在后面若干块）。窗口若把链截断，
-        // `PartialDrawableLayout.breakPlan` 就看不到链上后续接口的禁止切点，故沿单源
-        // [BreakClusters.chainRange] 把窗口补到链闭合。这**只是取窗口**，不决定任何页边界。
-        if (endBlockExclusive < total) {
-            val chain = orilumn.reader.engine.laying.BreakClusters.chainRange(
-                endBlockExclusive - 1, startBlock, total,
-                before = { prepare.block(it).breakBefore }, after = { prepare.block(it).breakAfter },
-            )
-            while (endBlockExclusive <= chain.last) {
-                shapes.add(tempShape(cache, prepare, endBlockExclusive, profile))
-                endBlockExclusive++
-            }
+        // 窗口取整（右端）到断页约束闭合：`break-*: avoid` 边链与 `break-inside: avoid` 原子区间都可能
+        // 跨出本窗，[closeWindowTail] 一并补齐。窗口若把**原子区间**截断，窗口布局量到的只是其中一截
+        // （更矮）⇒ `Paginator.resolveAvoidCut` 误判「整块装得下一页」⇒ 切点退回区间首、页尾整段空白，
+        // 同一内容还会多分出一页。这**只是取窗口**，不决定任何页边界。
+        val tail = if (endBlockExclusive < total) {
+            closeWindowTail(prepare, endBlockExclusive)
+        } else {
+            TailClosure(endBlockExclusive, avoidRangeOpen = false)
+        }
+        while (endBlockExclusive < tail.hi) {
+            shapes.add(tempShape(cache, prepare, endBlockExclusive, profile))
+            endBlockExclusive++
         }
         // 页尾切点 = `Paginator.paginateFrom`（临时表与磁盘表/增量窗的**同一段**代码）；
         // `endLineCharStart = null` ⇒ 走整行填充 + 断页规则，而不是把切点钉在某个字符行上。
-        val page = assembleTempPage(prepare, startBlock, endBlockExclusive, shapes, pageFirstLine = startLine.coerceAtLeast(0), endLineCharStart = null, contentH = contentH) {
+        val page = assembleTempPage(
+            prepare, startBlock, endBlockExclusive, shapes,
+            pageFirstLine = startLine.coerceAtLeast(0), endLineCharStart = null, contentH = contentH,
+            avoidTailOpen = tail.avoidRangeOpen,
+        ) {
             tempShape(cache, prepare, it, profile)
         }
         diagPage(contentH, page, "fwd")
@@ -2584,6 +2702,11 @@ class BoxChapterLayouter(
         pageFirstLine: Int,
         endLineCharStart: Int?,
         contentH: Int,
+        /**
+         * 尾块所在的 `break-inside: avoid` 原子区间**跨出窗口且量不全**（[closeWindowTail] 预算用尽）。
+         * 透传给 [PartialDrawableLayout.avoidTailOpen]：丢弃那条量不全的区间，按 oversized 允许撕裂。
+         */
+        avoidTailOpen: Boolean = false,
         /** P6-a2 R6: 前视塑形（carry-in 状态预热；null = 无前视）。 */
         shapeLookback: ((Int) -> ParagraphShapeRef)? = null,
     ): TempPage {
@@ -2659,6 +2782,7 @@ class BoxChapterLayouter(
             // `avoidSplitRanges` / `forbiddenCutLines` 因此同源（临时页填充另经
             // `Paginator.resolveAvoidCut` 走同一条判据）。
             avoidOwnerMap = prepare.avoidOwnerMap,
+            avoidTailOpen = avoidTailOpen,
             skiaLinesSource = skiaLines,
             tableCellsSource = tempWin.lines,
             tableCellImagesSource = tempWin.images,
@@ -3380,6 +3504,12 @@ private class PartialDrawableLayout(
     private val loader: ImageLoader? = null,
     private val href: String = "",
     private val avoidOwnerMap: Map<MarkupElement, MarkupElement> = emptyMap(),
+    /**
+     * 尾块所在的 `break-inside: avoid` 原子区间**跨出窗口且量不全**（[BoxChapterLayouter.closeWindowTail]
+     * 预算用尽）。此时这条区间在窗口内的那一截必然矮于真实高度，若交给分页器按「装得下一页」判，
+     * 切点会被退到区间首、页尾那批行无处可画 ⇒ 丢弃它，按 oversized 允许撕裂（内容优先）。
+     */
+    private val avoidTailOpen: Boolean = false,
     private val skiaLinesSource: Map<Int, orilumn.reader.engine.skia.DrawLine>? = null,
     private val tableCellsSource: Map<Int, List<orilumn.reader.engine.skia.DrawLine>> = emptyMap(),
     private val tableCellImagesSource: Map<Int, List<orilumn.reader.engine.skia.PageImage>> = emptyMap(),
@@ -3462,9 +3592,13 @@ private class PartialDrawableLayout(
     /**
      * Line ranges of `break-inside: avoid` blocks, in this window's LOCAL line indexes — mirrors
      * [BoxDrawableLayout.breakInsideAvoidRanges] but aggregated only over the shaped leaves, then
-     * clamped to the window. This is safe because the disk table's boundary that anchors this window
-     * is a canonical boundary, which never lies strictly inside an avoid range, so a truncated range
-     * at the window's left edge can never corrupt a cut.
+     * clamped to the window.
+     *
+     * 左端截短无害：窗口首行是磁盘表的正典页界，从不在区间内部；区间被截成 `[0, …]` 只会让
+     * `resolveAvoidCut` 一路退到页首、发现没有合法断点后放弃 discourage，结果与不截断一致。
+     * **右端**截短有害（区间变矮 ⇒ 误判「装得下一页」⇒ 切点退到区间首、页尾那批行两页都不画），
+     * 所以窗口在 [BoxChapterLayouter.closeWindowTail] 里补到属主末叶；预算不够时 [avoidTailOpen]
+     * 为真，这里直接丢掉那条量不全的区间（按 oversized 允许撕裂）。
      */
     override val breakInsideAvoidRanges: List<IntRange> by lazy {
         if (avoidOwnerMap.isEmpty()) return@lazy emptyList()
@@ -3482,7 +3616,10 @@ private class PartialDrawableLayout(
         val out = ArrayList<IntRange>(ownerFirst.size)
         for ((owner, first) in ownerFirst) {
             val last = ownerLast[owner] ?: first
-            if (last > first) out.add(first until last)
+            if (last <= first) continue
+            // 区间触到窗口末行 ⇒ 可能被窗口截断（量不全），不可据此判「装得下一页」。
+            if (avoidTailOpen && last >= lines.size) continue
+            out.add(first until last)
         }
         out
     }
@@ -3516,7 +3653,13 @@ private class PartialDrawableLayout(
         orilumn.reader.engine.laying.BreakClusters.plan(breakLeaves)
     }
 
-    override val avoidSplitRanges: List<IntRange> get() = breakPlan.atomicRanges
+    /**
+     * 分页侧真正消费的原子区间。窗口尾端那条**量不全**的区间必须剔除（见 [avoidTailOpen]）：
+     * 按截断后的矮区间判「整块装得下一页」会把切点退到区间首，页尾那批行两页都不画。
+     */
+    override val avoidSplitRanges: List<IntRange>
+        get() = if (!avoidTailOpen) breakPlan.atomicRanges
+        else breakPlan.atomicRanges.filterNot { it.last >= lines.size }
 
     override val forbiddenCutLines: Set<Int> get() = breakPlan.forbiddenCutLines
 

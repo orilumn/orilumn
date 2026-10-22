@@ -30,7 +30,7 @@
 ## 三、验证状态
 
 - 新锁 `FloatBorderBoxWidthTest`（5 例）：重 / 轻盒宽与落点、画盒宽、断行宽、环绕前导、章首页切片一致。
-- 新锁 `BoxFixedHeightEquivalenceTest`（8 例）：重 / 轻两路**逐值一致** + 绘制带高锁；`min-height` 四例（撑高 / 低于内容不压扁 / 下限生效吞末子下边距 / 下限没生效照常外塌）。**变异验证**：抽掉差额表 ⇒ 两条 parity 变红；抽掉 `min-height` ⇒ 撑高例变红；抽掉「下限生效断链」⇒ 落差例变红。
+- 新锁 `FixedHeightContainerTest`（8 例）：磁盘表、临时表**各自**对 CSS 绝对值负责（容器盒高 50/130、后随间距 0/16）；`min-height` 四例（撑高 / 低于内容不压扁 / 下限生效吞末子下边距 / 下限没生效照常外塌）。**变异验证**：抽掉差额表 ⇒ 盒高/间距例变红；抽掉 `min-height` ⇒ 撑高例变红；抽掉「下限生效断链」⇒ 落差例变红。
 - 全量绿：`:common:jvmTest`、`:engine-skia:jvmTest`、`:desktopApp:test`、`:app:testDebugUnitTest`、`:app:assembleDebug --rerun-tasks`。
 - 验收样书 V6 无头像素：`.ovh` 外环 **110×50**（Chromium 110×50，改前 110×38）；`.cf` 底色带 h=54（Chromium 54）；四个方块同一行；两个 `.fl` 边框环并集 **68×32**、两个 `.fli` **88×42** 与 Chromium 逐值相同（改前 64×30 / 84×40）。
 - **装机 V1–V8：未做**（平板不在线，见六）。

@@ -13,7 +13,8 @@ import org.junit.Test
 /**
  * 问题 4 真书回归锁：《长生界》（辰东）第一章章首＋真实 stylesheet.css。
  *
- * 真书 CSS 与合成测试书（`TempVsFullTitlePageEquivalenceTest`）的关键差异——
+ * 只看**每张表自己的**章首间距是否等于 CSS 推导值（不与另一张表对比；两表互斥、各自独立，
+ * 见 AGENTS.md「磁盘表与临时表互斥」）。真书的关键差异——
  * 章标题→正文间距**不是纯折叠 margin**：
  *  `h2 { padding-bottom: 6rem; margin: 0.8em 0 }`、
  *  `span.sec_num { display: block; margin-bottom: 6rem }`、`p { margin: 0 }`
@@ -31,13 +32,10 @@ import org.junit.Test
  * 分支恰好加一次——本锁即钉死两路径同几何。
  *
  * 锁：
- *  1. 章首页切片（行区间/字符区间）两路径一致；
- *  2. 逐行相对几何一致（唯一分歧 = 章首折叠顶 margin 的绝对位置，逐页渲染
- *     归一化后不可见，与合成书锁同口径）；
- *  3. h2→正文间距 == CSS 推导值（折叠 margin 与底边各自单次取整，emit 同式），
- *     两路径均等。
+ * 锁：h2→正文间距 == CSS 推导值（折叠 margin 与底边各自单次取整），磁盘表与临时表**各自**都要对上
+ * 这个绝对值（不是互相比对）。历史缺陷就是在这一处翻倍（真机 630px vs 正确 352px）。
  */
-class RealBookTitleGapEquivalenceTest {
+class RealBookTitleGapTest {
 
     private val layouter = BoxChapterLayouter()
     private val converter = HtmlTreeConverter()
@@ -163,7 +161,7 @@ p {
     }
 
     @Test
-    fun `real book head page is identical on temp and full paths`() {
+    fun `real book head gap matches the CSS-derived value on each path`() {
         val markup = markup()
         val css = CssBundle(listOf(bookCss))
 
@@ -171,7 +169,6 @@ p {
         val heavy = layouter.prepare(markup, css, profile, contentW, contentH)
         val full = layouter.fullLayout(heavy, profile, contentW, contentH)
         val fullLayout = full.layout
-        val fullPage = full.slices[0]
 
         // TEMP 路径（大章锚页塑形：prepareLight + shapeTempPageForward）
         val structure = ChapterStructureCache()
@@ -179,32 +176,8 @@ p {
         val fwd = layouter.shapeTempPageForward(light, profile, contentW, contentH, 0, cache = null)
             ?: error("temp head page failed")
         val tempLayout = fwd.page.layout
-        val tempPage = fwd.page.slice
 
-        // (1) 章首页切片一致（页高累加对文本叶自身边计 0，切断点与 emit 对齐）
-        assertEquals("page0 firstLine", fullPage.firstLine, tempPage.firstLine)
-        assertEquals("page0 lastLineExclusive", fullPage.lastLineExclusive, tempPage.lastLineExclusive)
-        assertEquals("page0 charStart", fullPage.charStart, tempPage.charStart)
-        assertEquals("page0 charEnd", fullPage.charEnd, tempPage.charEnd)
-
-        // (2) 逐行相对几何一致（归一化掉章首折叠顶 margin 的绝对位置差）
-        val fullBase = fullLayout.getLineTop(0)
-        val tempBase = tempLayout.getLineTop(0)
-        val pageLines = tempPage.lastLineExclusive - tempPage.firstLine
-        for (i in 0 until pageLines) {
-            assertEquals(
-                "line $i relative top",
-                fullLayout.getLineTop(i) - fullBase,
-                tempLayout.getLineTop(i) - tempBase,
-            )
-            assertEquals(
-                "line $i relative bottom",
-                fullLayout.getLineBottom(i) - fullBase,
-                tempLayout.getLineBottom(i) - tempBase,
-            )
-        }
-
-        // (3) h2→正文间距 == CSS 推导值，两路径均等。
+        // h2→正文间距 == CSS 推导值；每张表各自量自己的行流，互不参照。
         //  emit 口径：折叠 margin 单次取整 ＋ 底边（border+padding）单次取整。
         val h2El = allElements(markup).first { it.tag == "h2" }
         val firstPEl = allElements(markup).first { it.tag == "p" }
@@ -213,14 +186,19 @@ p {
         val expectedGap = max(h2Style.margin.bottom, pStyle.margin.top).roundToInt() +
             (h2Style.border.bottom + h2Style.padding.bottom).roundToInt()
 
-        // h2 的末行 = 标题文本叶（#text，h2 的最后一个叶）的末行；首段首行 = 首 p 叶首行。
-        val titleLeaf = heavy.leaves.first { it.el?.tag == "#text" }
+        // 首段首字是章节文本事实（与用哪张表无关）：由正典叶序列取一次字符位置，
+        // 之后每张表都在**自己的**行流里找这一行，量自己的间距。
         val firstPLeaf = heavy.leaves.first { it.el?.tag == "p" }
-        val h2LastLine = titleLeaf.lastLineExclusive - 1
-        val pFirstLine = firstPLeaf.firstLineIndex
-        val fullGap = fullLayout.getLineTop(pFirstLine) - fullLayout.getLineBottom(h2LastLine)
-        val tempGap = tempLayout.getLineTop(pFirstLine) - tempLayout.getLineBottom(h2LastLine)
-        assertEquals("FULL h2->body gap vs CSS", expectedGap, fullGap)
-        assertEquals("TEMP h2->body gap vs CSS", expectedGap, tempGap)
+        val firstPChar = full.layout.getLineStart(firstPLeaf.firstLineIndex)
+
+        fun gapOf(layout: orilumn.reader.engine.paging.BookLayout, label: String): Int {
+            val pLine = (0 until layout.lineCount).firstOrNull { layout.getLineStart(it) == firstPChar }
+                ?: error("$label: 首段首字 $firstPChar 不在行流里")
+            check(pLine > 0) { "$label: 首段之前没有标题行" }
+            return layout.getLineTop(pLine) - layout.getLineBottom(pLine - 1)
+        }
+
+        assertEquals("磁盘表 h2->正文间距 vs CSS", expectedGap, gapOf(fullLayout, "磁盘表"))
+        assertEquals("临时表 h2->正文间距 vs CSS", expectedGap, gapOf(tempLayout, "临时表"))
     }
 }

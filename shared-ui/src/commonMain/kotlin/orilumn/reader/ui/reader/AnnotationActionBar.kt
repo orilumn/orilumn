@@ -5,10 +5,9 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -16,16 +15,11 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
@@ -33,201 +27,258 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipRect
-import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.layoutId
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.data.annotation.AnnotationKind
 import orilumn.reader.data.annotation.AnnotationLineStyle
 import orilumn.reader.engine.skia.ANNOTATION_DASH_OFF_RATIO
 import orilumn.reader.engine.skia.ANNOTATION_DASH_ON_RATIO
 import orilumn.reader.engine.skia.ANNOTATION_UNDERLINE_THICKNESS_EM
 import orilumn.reader.engine.skia.decorWaveGeometry
-import kotlin.math.roundToInt
-
-/** 浮动菜单与选区之间的间距。 */
-private val ANNOTATION_MENU_GAP = 8.dp
 
 /**
- * 标注浮动菜单（用户层，D-13 / D-14 / §3.2）。
+ * 标注操作栏（用户层，D-28 第 1 部分）。
  *
- * **一套菜单服务两种入口**：选区抬手（新建）与长按已有标注（编辑）用的是同一个弹窗。
- * 打开即**一步到位**：不先给一排按钮让你点「高亮 / 划线」，而是直接摊开**上次用过的类别**
- * 的色槽行（[initialKind]，编辑时用该标注的类别），点一格颜色就落笔。
- * 想换类别再点顶部的高亮 / 划线——所以按钮上的类别色小圆点已无意义（已去掉）。
+ * 取代原来贴着选区浮动的 [AnnotationMenu]：**没有锚点、没有翻边、没有左右收边**，
+ * 它就是键盘上沿卡片的第一段，卡片自己不乱跑，所以选区在页面哪儿都不用管。
  *
- * **类别名本身就是样张**：「高亮」二字垫当前高亮色，「划线」二字按当前**线型与线色**画一笔
- * （实线贴字底、删除线过字中），不用先点开才知道这一行长什么样。
+ * 单行时从左到右：`高亮` `划线` `编辑`(占位) → 当前类别的 5 个色槽 → 4 个线型（仅划线）
+ * → 贴右的 `复制` `删除` `完成`。装不下就换两行：第一行只放类别与右侧三键，第二行放色槽与线型；
+ * 再装不下（窄手机）就三行：类别一行、色槽一行、线型一行。判定全部来自**实测宽度**，
+ * 不看屏幕 dp 阈值。
  *
- * 划线色槽下面还有一行**线型**（实线 / 波浪 / 虚线 / 删除线），只画线不写字，
- * 线色跟当前划线色；点哪一条就是新建（或改型）用的线型。高亮没有线型，那一行不出现。
- *
- * 不用 `Popup`：阅读层至今零 Popup，菜单只是内容区上方的一层轻量覆盖物，跟着锚点矩形定位；
- * 贴顶时自动翻到下方，左右贴边时向内收。
- *
- * 项：高亮 / 划线（切类别）/ 批注（叫出输入框）/ 复制 / 删除。没有「取消」：点菜单外面即关
- * （遮罩/正文点按由调用方接）。
- * 删除只有存在可删记录（[deleteTarget] 非 null）时才亮，否则虚掉且点了没反应。
- *
- * **批注（v2，D-25）不是色槽类别**：点「批注」直接打开输入框；编辑已有批注时点色槽只改它的颜色。
+ * 类别名本身就是样张：「高亮」二字垫当前高亮色，「划线」二字按当前**线型与线色**画一笔。
+ * 线型行只画线不写字。点色槽 = 落笔（新建或改色）；点线型 = **只选中**，落笔交给色槽或 `完成`。
  */
 @Composable
-internal fun AnnotationMenu(
-    anchor: Rect,
-    bounds: Rect,
+internal fun AnnotationActionBar(
     palette: Palette,
+    kind: AnnotationKind,
+    lineStyle: AnnotationLineStyle,
     highlightColors: List<Int>,
     highlightDefaultSlot: Int,
     underlineColors: List<Int>,
     underlineDefaultSlot: Int,
-    initialKind: AnnotationKind,
-    initialLineStyle: AnnotationLineStyle,
-    editing: Annotation?,
-    deleteTarget: Annotation?,
-    /**
-     * 「批注」类别名的样张颜色（虚线用）：新建时是批注默认色，编辑批注时是那条记录自己的颜色。
-     */
-    noteArgb: Int,
-    onPickColor: (AnnotationKind, Int, AnnotationLineStyle) -> Unit,
+    /** 正在编辑的那条记录的颜色（与当前类别同类时才描圈，否则 null）。 */
+    currentColor: Int?,
+    canDelete: Boolean,
+    onKindChange: (AnnotationKind) -> Unit,
+    onPickColor: (AnnotationKind, Int) -> Unit,
     onPickLineStyle: (AnnotationLineStyle) -> Unit,
-    onOpenNote: () -> Unit,
     onCopy: () -> Unit,
-    onDelete: (Annotation) -> Unit,
+    onDelete: () -> Unit,
+    onDone: () -> Unit,
 ) {
-    var size by remember { mutableStateOf(IntSize.Zero) }
-    // 展开哪个类别的色槽：编辑时先落到该条自己的类别，否则落到上次用过的类别。
-    // 批注没有色槽行（它的颜色在输入框里挑），所以这个状态只在高亮 / 划线之间走。
-    var kind by remember(editing?.id) {
-        mutableStateOf(editing?.kind?.takeIf { it != AnnotationKind.Note } ?: initialKind)
-    }
-    // 线型：编辑划线时先落到该条自己的线型；新建、以及编辑高亮时用上次的
-    // （高亮没有线型，那条记录上存的值不代表划线菜单的偏好，不能拿它当初始值）。
-    var lineStyle by remember(editing?.id) {
-        mutableStateOf(
-            editing?.lineStyle?.takeIf { editing.kind == AnnotationKind.Underline } ?: initialLineStyle,
-        )
-    }
-    val gap = with(LocalDensity.current) { ANNOTATION_MENU_GAP.roundToPx() }
-    val offset = annotationMenuOffset(anchor, bounds, size, gap)
     val colors = if (kind == AnnotationKind.Underline) underlineColors else highlightColors
     val defaultSlot = (if (kind == AnnotationKind.Underline) underlineDefaultSlot else highlightDefaultSlot)
         .coerceIn(0, colors.lastIndex.coerceAtLeast(0))
-    // 编辑中的记录用自身颜色描圈；只在它所属类别的色槽行里描。
-    val editingColor = editing?.let { it.color ?: annotationFallbackColor(it.kind) }?.takeIf { editing.kind == kind }
-    // 正在编辑一条批注：菜单只留「批注 / 复制 / 删除」。
-    // 批注是独立类型，不能通过点高亮 / 划线的色槽把它悄悄改型（那会丢掉它自己那条虚线）。
-    val editingNote = editing?.kind == AnnotationKind.Note
-    // 类别名的样张色：两类完全独立，各取本类默认槽（编辑本类记录时跟着它自己的颜色）。
+
     fun swatchOf(target: AnnotationKind): Int = annotationSwatchColor(
         highlightColors = highlightColors,
         highlightDefaultSlot = highlightDefaultSlot,
         underlineColors = underlineColors,
         underlineDefaultSlot = underlineDefaultSlot,
         kind = target,
-        editing = editing,
+        editing = null,
     )
+    val underlineSwatch = swatchOf(AnnotationKind.Underline)
 
-    Box(modifier = Modifier.offset { offset }) {
-        Column(
-            modifier = Modifier
-                .onSizeChanged { size = it }
-                .shadow(8.dp, RoundedCornerShape(12.dp))
-                .background(palette.cardBg, RoundedCornerShape(12.dp))
-                .border(1.dp, palette.cardBorder, RoundedCornerShape(12.dp))
-                .padding(vertical = 2.dp),
-        ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 2.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                if (!editingNote) {
-                    MenuAction(
-                        label = "高亮",
-                        textColor = palette.text,
-                        palette = palette,
-                        active = kind == AnnotationKind.Highlight,
-                        swatch = swatchOf(AnnotationKind.Highlight),
-                        onClick = { kind = AnnotationKind.Highlight },
-                    )
-                    MenuAction(
-                        label = "划线",
-                        textColor = palette.text,
-                        palette = palette,
-                        active = kind == AnnotationKind.Underline,
-                        underlineArgb = swatchOf(AnnotationKind.Underline),
-                        // 样张跟着**当前线型**走：选波浪/虚线/删除线后，「划线」二字下的那笔立刻变样。
-                        underlineStyle = lineStyle,
-                        onClick = { kind = AnnotationKind.Underline },
-                    )
-                }
-                MenuAction(
-                    label = "批注",
-                    textColor = palette.text,
+    BarLayout(
+        modifier = Modifier.fillMaxWidth().padding(start = 6.dp, end = 6.dp, top = 2.dp, bottom = 2.dp),
+        lead = {
+            MenuAction(
+                label = "高亮",
+                textColor = palette.text,
+                palette = palette,
+                active = kind == AnnotationKind.Highlight,
+                swatch = swatchOf(AnnotationKind.Highlight),
+                onClick = { onKindChange(AnnotationKind.Highlight) },
+            )
+            MenuAction(
+                label = "划线",
+                textColor = palette.text,
+                palette = palette,
+                active = kind == AnnotationKind.Underline,
+                underlineArgb = underlineSwatch,
+                underlineStyle = lineStyle,
+                onClick = { onKindChange(AnnotationKind.Underline) },
+            )
+            // 占位：v3 的内容修改还没做，虚掉且点了没反应（吞掉点按，不漏到正文）。
+            MenuAction(
+                label = "编辑",
+                textColor = palette.muted,
+                palette = palette,
+                active = false,
+                enabled = false,
+                onClick = {},
+            )
+        },
+        colors = {
+            ColorSlots(
+                colors = colors,
+                defaultSlot = defaultSlot,
+                palette = palette,
+                currentArgb = currentColor,
+                onPick = { index -> onPickColor(kind, index) },
+            )
+        },
+        styles = if (kind == AnnotationKind.Underline) {
+            {
+                LineStyleRow(
+                    current = lineStyle,
+                    argb = underlineSwatch,
                     palette = palette,
-                    // 正在编辑的就是一条批注时，这个按钮亮着（再点一次 = 改文字）。
-                    active = editing?.kind == AnnotationKind.Note,
-                    // 批注在正文里固定是虚线（D-25），样张也照这个口径画。
-                    underlineArgb = noteArgb,
-                    underlineStyle = AnnotationLineStyle.Dashed,
-                    onClick = onOpenNote,
-                )
-                MenuAction("复制", palette.text, palette, active = false, onClick = onCopy)
-                MenuAction(
-                    label = "删除",
-                    textColor = if (deleteTarget != null) palette.text else palette.muted,
-                    palette = palette,
-                    active = false,
-                    enabled = deleteTarget != null,
-                    onClick = { deleteTarget?.let(onDelete) },
+                    onPick = onPickLineStyle,
                 )
             }
-            // 批注没有色槽行：它的颜色在输入框里挑（D-25），菜单里点一格不该把记录改型。
-            if (!editingNote) {
-                ColorSlotRow(
-                    colors = colors,
-                    defaultSlot = defaultSlot,
-                    palette = palette,
-                    currentArgb = editingColor,
-                    bottomPadding = if (kind == AnnotationKind.Underline) 2.dp else 8.dp,
-                    onPick = { index -> onPickColor(kind, index, lineStyle) },
-                )
-                if (kind == AnnotationKind.Underline) {
-                    LineStyleRow(
-                        current = lineStyle,
-                        argb = swatchOf(AnnotationKind.Underline),
-                        palette = palette,
-                        onPick = {
-                            lineStyle = it
-                            onPickLineStyle(it)
-                        },
+        } else {
+            null
+        },
+        trail = {
+            MenuAction("复制", palette.text, palette, active = false, onClick = onCopy)
+            MenuAction(
+                label = "删除",
+                textColor = if (canDelete) palette.text else palette.muted,
+                palette = palette,
+                active = false,
+                enabled = canDelete,
+                onClick = onDelete,
+            )
+            MenuAction(
+                label = "完成",
+                textColor = PanelGold,
+                palette = palette,
+                active = false,
+                onClick = onDone,
+            )
+        },
+    )
+}
+
+/* ---------------------------------------------------------------- 布局 */
+
+private const val PART_LEAD = "lead"
+private const val PART_COLORS = "colors"
+private const val PART_STYLES = "styles"
+private const val PART_TRAIL = "trail"
+
+/** 组与组之间的横向间距。 */
+private val BAR_GAP = 6.dp
+
+/** 两行（或三行）之间的一点点呼吸。 */
+private val BAR_ROW_GAP = 2.dp
+
+/**
+ * 操作栏的三段式布局：一段装得下就一行；装不下让位成两行；色槽 + 线型那行还装不下就三行。
+ *
+ * 判定用**实测子项宽度**（`layoutId` 分组），所以同一个组件在平板、手机、桌面窄窗里都能
+ * 自己找到合适的排法，不需要外部传屏幕宽度或 dp 阈值。
+ */
+@Composable
+private fun BarLayout(
+    modifier: Modifier = Modifier,
+    lead: @Composable () -> Unit,
+    colors: @Composable () -> Unit,
+    styles: (@Composable () -> Unit)?,
+    trail: @Composable () -> Unit,
+) {
+    Layout(
+        modifier = modifier,
+        content = {
+            Row(Modifier.layoutId(PART_LEAD), verticalAlignment = Alignment.CenterVertically) {
+                lead()
+            }
+            Row(Modifier.layoutId(PART_COLORS), verticalAlignment = Alignment.CenterVertically) {
+                colors()
+            }
+            if (styles != null) {
+                Row(Modifier.layoutId(PART_STYLES), verticalAlignment = Alignment.CenterVertically) {
+                    styles()
+                }
+            }
+            Row(Modifier.layoutId(PART_TRAIL), verticalAlignment = Alignment.CenterVertically) {
+                trail()
+            }
+        },
+    ) { measurables, constraints ->
+        fun part(id: String) = measurables.firstOrNull { it.layoutId == id }?.measure(Constraints())
+        val leadP = part(PART_LEAD)
+        val colorsP = part(PART_COLORS)
+        val stylesP = part(PART_STYLES)
+        val trailP = part(PART_TRAIL)
+        val gap = BAR_GAP.roundToPx()
+        val rowGap = BAR_ROW_GAP.roundToPx()
+        val maxW = constraints.maxWidth
+
+        fun w(p: androidx.compose.ui.layout.Placeable?) = p?.width ?: 0
+        fun h(p: androidx.compose.ui.layout.Placeable?) = p?.height ?: 0
+
+        val paletteW = w(colorsP) + if (stylesP != null) gap + w(stylesP) else 0
+        val singleW = w(leadP) + gap + paletteW + gap + w(trailP)
+
+        if (singleW <= maxW) {
+            val rowH = maxOf(h(leadP), h(colorsP), h(stylesP), h(trailP))
+            layout(maxW, rowH) {
+                leadP?.placeRelative(0, (rowH - h(leadP)) / 2)
+                var x = w(leadP) + gap
+                colorsP?.placeRelative(x, (rowH - h(colorsP)) / 2)
+                x += w(colorsP)
+                if (stylesP != null) {
+                    x += gap
+                    stylesP.placeRelative(x, (rowH - h(stylesP)) / 2)
+                }
+                trailP?.placeRelative(maxW - w(trailP), (rowH - h(trailP)) / 2)
+            }
+        } else if (paletteW <= maxW) {
+            val topH = maxOf(h(leadP), h(trailP))
+            val bottomH = maxOf(h(colorsP), h(stylesP))
+            layout(maxW, topH + rowGap + bottomH) {
+                leadP?.placeRelative(0, (topH - h(leadP)) / 2)
+                trailP?.placeRelative(maxW - w(trailP), (topH - h(trailP)) / 2)
+                colorsP?.placeRelative(0, topH + rowGap + (bottomH - h(colorsP)) / 2)
+                if (stylesP != null) {
+                    stylesP.placeRelative(
+                        w(colorsP) + gap,
+                        topH + rowGap + (bottomH - h(stylesP)) / 2,
                     )
+                }
+            }
+        } else {
+            // 窄手机：色槽与线型各占一行（线型不存在时就只有色槽）。
+            val topH = maxOf(h(leadP), h(trailP))
+            val colorsH = h(colorsP)
+            val stylesH = h(stylesP)
+            layout(maxW, topH + rowGap + colorsH + (if (stylesP != null) rowGap + stylesH else 0)) {
+                leadP?.placeRelative(0, (topH - h(leadP)) / 2)
+                trailP?.placeRelative(maxW - w(trailP), (topH - h(trailP)) / 2)
+                colorsP?.placeRelative(0, topH + rowGap)
+                if (stylesP != null) {
+                    stylesP.placeRelative(0, topH + rowGap + colorsH + rowGap)
                 }
             }
         }
     }
 }
 
-/** 展开后的色槽行：默认格描金边，编辑时当前色描强调边；点一格即用该格颜色（回调带槽下标）。 */
+/* ---------------------------------------------------------------- 色槽 / 线型 / 按钮 */
+
+/** 一排色槽：默认格描金边，编辑时当前色描强调边；点一格即用该格颜色（回调带槽下标）。 */
 @Composable
-private fun ColorSlotRow(
+private fun ColorSlots(
     colors: List<Int>,
     defaultSlot: Int,
     palette: Palette,
     currentArgb: Int? = null,
-    bottomPadding: Dp = 8.dp,
     onPick: (Int) -> Unit,
 ) {
-    Row(
-        modifier = Modifier.padding(start = 10.dp, end = 10.dp, top = 2.dp, bottom = bottomPadding),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
         colors.forEachIndexed { index, argb ->
-            if (index > 0) Spacer(Modifier.width(8.dp))
+            if (index > 0) Spacer(Modifier.width(6.dp))
             val current = currentArgb != null && argb == currentArgb
             Box(
                 modifier = Modifier
@@ -250,7 +301,7 @@ private fun ColorSlotRow(
 
 /**
  * 划线线型行：只画线、不写字（实线 / 波浪 / 虚线 / 删除线），线色 = 当前划线色。
- * 选中的那条垫一层 [Palette.rowActive]，与类别按钮的激活态同一套语汇。
+ * 选中的那条垫一层 [Palette.rowActive]：点它只是**选中**，落笔还要点色槽或 `完成`（D-28）。
  */
 @Composable
 private fun LineStyleRow(
@@ -260,12 +311,9 @@ private fun LineStyleRow(
     onPick: (AnnotationLineStyle) -> Unit,
 ) {
     val color = Color(argb)
-    Row(
-        modifier = Modifier.padding(start = 10.dp, end = 10.dp, bottom = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
         AnnotationLineStyle.entries.forEachIndexed { index, style ->
-            if (index > 0) Spacer(Modifier.width(8.dp))
+            if (index > 0) Spacer(Modifier.width(6.dp))
             val selected = style == current
             Box(
                 modifier = Modifier
@@ -364,30 +412,6 @@ private fun DrawScope.sampleLineY(style: AnnotationLineStyle, strokeWidth: Float
     return size.height - half
 }
 
-/**
- * 菜单左上角位置（px）：优先放在选区上方，贴顶翻到下方；左右不越出内容区。
- * 抽成纯函数以便单测，避免「贴边飞出屏幕」只能靠真机发现。
- */
-internal fun annotationMenuOffset(
-    anchor: Rect,
-    bounds: Rect,
-    size: IntSize,
-    gap: Int,
-): IntOffset {
-    val x = (anchor.center.x - size.width / 2f).roundToInt().coerceIn(
-        bounds.left.roundToInt(),
-        (bounds.right - size.width).roundToInt().coerceAtLeast(bounds.left.roundToInt()),
-    )
-    val above = anchor.top - gap - size.height
-    val maxY = (bounds.bottom - size.height).coerceAtLeast(bounds.top)
-    val y = if (above >= bounds.top) {
-        above
-    } else {
-        (anchor.bottom + gap).coerceAtMost(maxY)
-    }.roundToInt()
-    return IntOffset(x, y)
-}
-
 @Composable
 private fun MenuAction(
     label: String,
@@ -403,8 +427,8 @@ private fun MenuAction(
     underlineStyle: AnnotationLineStyle = AnnotationLineStyle.Straight,
     onClick: () -> Unit,
 ) {
-    // 虚掉的项仍是菜单的一部分：点它**吞掉**本次点按，只显「不可用」，
-    // 不能漏到下面去关菜单或清选区（点了没反应 ≠ 菜单自己消失）。
+    // 虚掉的项仍是操作栏的一部分：点它**吞掉**本次点按，只显「不可用」，
+    // 不能漏到下面去关卡片或翻页（点了没反应 ≠ 卡片自己消失）。
     val eatenInteraction = remember { MutableInteractionSource() }
     Row(
         modifier = Modifier
@@ -419,7 +443,7 @@ private fun MenuAction(
                     Modifier.clickable(interactionSource = eatenInteraction, indication = null) {}
                 },
             )
-            .padding(horizontal = 10.dp, vertical = 8.dp),
+            .padding(horizontal = 9.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(

@@ -32,6 +32,39 @@ internal data class SelectionPageGeometry(
 )
 
 /**
+ * 一段章内字符区间在本页的墨迹矩形（页坐标，与 [selectionPageGeometry] 同一套换算）。
+ *
+ * 单源：选区覆盖层、旁注落位、卡片让位（判断选区/标注是否被卡片压住）都走这一口，
+ * 免得各自「行宽近似」——行宽近似会把整行排满的地方误判成右侧还有空地。
+ *
+ * @return 空 = 本页没有这段字的墨迹（在别的页上 / 几何未就绪）。
+ */
+internal fun pageInkRects(
+    drawer: LineWindowDrawer,
+    lines: List<DrawLine>,
+    chapter: Int,
+    charStart: Int,
+    charEnd: Int,
+    pageImages: List<PageImage>?,
+    pageBackgrounds: List<PageBackground>?,
+    frameLead: Int,
+    contentLeft: Float,
+    contentTop: Float,
+): List<Rect> {
+    if (charEnd <= charStart || lines.isEmpty()) return emptyList()
+    val shift = readerPageShift(lines, pageImages, pageBackgrounds, frameLead, contentTop)
+        ?: return emptyList()
+    return drawer.decorRects(lines, chapter, charStart..(charEnd - 1)).map {
+        Rect(
+            left = contentLeft + it.left,
+            top = it.top - shift,
+            right = contentLeft + it.right,
+            bottom = it.bottom - shift,
+        )
+    }
+}
+
+/**
  * 把章内选区投到当前页（用户层轻量覆盖层，**不重烤栅格**）。
  *
  * `decorRects` 与标注装饰同一份逐字几何；这里只做页面平移与手柄端点判定。

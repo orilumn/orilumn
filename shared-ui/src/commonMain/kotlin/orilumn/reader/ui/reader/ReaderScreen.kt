@@ -6,7 +6,9 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.padding
@@ -31,6 +33,7 @@ import androidx.compose.ui.focus.focusTarget
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -207,13 +210,21 @@ fun ReaderScreen(
     var selectionMenuVisible by remember { mutableStateOf(false) }
     // 移动端放大镜的手指位置（null = 不显示）。桌面鼠标不显示（D-10）。
     var magnifierFinger by remember { mutableStateOf<Offset?>(null) }
-    // 长按已有标注时打开的编辑菜单（D-14）；锚点是长按位置，菜单作用于整条记录。
+    // 长按已有标注 / 单击旁注时打开的那一条（D-14 / D-28）；卡片不再需要锚点。
     var editingAnnotation by remember { mutableStateOf<Annotation?>(null) }
-    var editingAnchor by remember { mutableStateOf<Rect?>(null) }
-    // v2 批注输入框（D-25）：null = 没打开。打开期间浮动菜单、正文手势与键盘翻页都让位。
-    var noteEditor by remember { mutableStateOf<NoteEditorTarget?>(null) }
-    // 编辑菜单的透明遮罩：点菜单外任意处只关菜单，不再翻页/改选区。
-    val editScrimInteraction = remember { MutableInteractionSource() }
+    // 批注输入条的内容（D-27）：它与浮动菜单**同开同关**，所以不需要自己的「打开」状态。
+    // 文字提到这里（而不是留在输入框里），是因为点色槽落笔时要把它一起写进新记录。
+    var noteText by remember { mutableStateOf("") }
+    // 新建时用哪一类落笔：跟着操作栏顶部的 tab 走（读者切到「划线」，写下的批注就是划线的）。
+    var noteKind by remember { mutableStateOf(AnnotationKind.Highlight) }
+    // 新建 / 改型时用哪一线型：线型按钮**只选中**（D-28），落笔由点色槽或 `完成` 触发。
+    var noteLineStyle by remember { mutableStateOf(AnnotationLineStyle.Straight) }
+    // 卡片实测高度（像素）：页面让位要按它算，不能估（D-28 第 2 部分）。
+    var noteBarHeightPx by remember { mutableStateOf(0) }
+    // 卡片让位时整页上推的像素（屏幕坐标）：绘制与命中**共用这一个数**（单一来源）。
+    var inputShiftPx by remember { mutableStateOf(0f) }
+    // 卡片上沿（屏幕 px，含键盘让位）：手势侧用它判断「这一下是不是点在卡片里」。
+    var sheetTopPxState by remember { mutableStateOf(0f) }
     // 旧的 ClipboardManager 仍是 CMP 唯一共享可用的同步写入口；新 LocalClipboard 只支持 suspend。
     @Suppress("DEPRECATION")
     val clipboard = LocalClipboardManager.current
@@ -225,8 +236,7 @@ fun ReaderScreen(
         selectionMenuVisible = false
         magnifierFinger = null
         editingAnnotation = null
-        editingAnchor = null
-        noteEditor = null
+        noteText = ""
     }
     // 标注清单里删了当前章的标注：重读本章，屏幕上的装饰同步消失（与进章 effect 分离，见参数注释）。
     LaunchedEffect(currentHost, annotationsEpoch) {
@@ -238,8 +248,7 @@ fun ReaderScreen(
         selectionMenuVisible = false
         magnifierFinger = null
         editingAnnotation = null
-        editingAnchor = null
-        noteEditor = null
+        noteText = ""
     }
     // 选区被任何路径清空时，菜单必须同步收起（避免留下指向空选区的浮层）。
     LaunchedEffect(selection.hasSelection) {
@@ -255,9 +264,8 @@ fun ReaderScreen(
         if (!selection.hasSelection) selectionMenuVisible = false
         // 翻页后编辑菜单不跟到新页；它锚定的是旧页上的那条记录。
         editingAnnotation = null
-        editingAnchor = null
-        // 批注框同理：它写的是旧页选中的那一段，翻页后坐标不再对应当前页。
-        noteEditor = null
+        // 批注输入条同理：它写的是旧页上的那条标注，翻页后不该继续挂着。
+        noteText = ""
     }
     // ---- 定位动作（host 为 suspend，统一挂到本组件作用域） ----
     /**
@@ -825,7 +833,8 @@ fun ReaderScreen(
             shift = shift,
             contentLeft = profile.marginLeft.toFloat(),
             xPx = xPx,
-            yPx = yPx,
+            // 卡片让位时整页上推了 inputShiftPx：屏幕 y 换算回页坐标要加回同一个数（D-28）。
+            yPx = yPx + inputShiftPx,
         )
     }
 
@@ -848,7 +857,7 @@ fun ReaderScreen(
             frameLead = frameLead,
             contentTop = profile.marginTop.toFloat(),
         ) ?: return null
-        return selectionSideOffset(lines, shift, yPx, direction)
+        return selectionSideOffset(lines, shift, yPx + inputShiftPx, direction)
     }
 
     /** 当前页上的选区几何；无选区/跨章/页无行时 null。 */
@@ -882,8 +891,10 @@ fun ReaderScreen(
     fun selectionHandleAt(xPx: Float, yPx: Float, widthPx: Float, heightPx: Float): SelectionHandle? {
         val p = openPos ?: return null
         val g = selectionGeometryAt(p, widthPx, heightPx) ?: return null
+        // 几何是页坐标；卡片让位时整页上推了 inputShiftPx，屏幕 y 加回同一个数再比（D-28）。
+        val pageY = yPx + inputShiftPx
         fun hit(center: Offset?): Boolean =
-            center != null && hypot(xPx - center.x, yPx - center.y) <= selectionHandleHitPx
+            center != null && hypot(xPx - center.x, pageY - center.y) <= selectionHandleHitPx
         return when {
             hit(g.startHandle) -> SelectionHandle.Start
             hit(g.endHandle) -> SelectionHandle.End
@@ -904,21 +915,21 @@ fun ReaderScreen(
         val top = profile.marginTop.toFloat()
         val right = (widthPx - profile.marginRight).coerceAtLeast(left)
         val bottom = (heightPx - profile.marginBottom).coerceAtLeast(top)
-        if (xPx < left || xPx > right || yPx < top || yPx > bottom) return false
+        // 屏幕 y 换算回页坐标（卡片让位时整页上推了 inputShiftPx，与 charOffsetAt 同口径）。
+        val pageY = yPx + inputShiftPx
+        if (xPx < left || xPx > right || pageY < top || pageY > bottom) return false
         val offset = charOffsetAt(p, xPx, yPx) ?: return false
-        val hit = annotationState.annotationAt(offset)?.takeIf { it.isDrawable() } ?: return false
+        val hit = annotationState.annotationAt(offset) ?: return false
         selection.clear()
         selectionMenuVisible = false
         magnifierFinger = null
         editingAnnotation = hit
-        editingAnchor = Rect(xPx, yPx, xPx, yPx)
         return true
     }
 
     /** 收起已有标注的编辑菜单（不改数据）。 */
     fun closeAnnotationEdit() {
         editingAnnotation = null
-        editingAnchor = null
     }
 
     /** 长按起手：按 D-7 选整词 / 整句；返回 false 表示此处没有可选的章文本。 */
@@ -1051,14 +1062,15 @@ fun ReaderScreen(
     val focusRequester = remember { FocusRequester() }
     val currentKeysEnabled by rememberUpdatedState(keysEnabled)
     // 批注输入框开着时：正文手势与键盘翻页都不响应（字打在框里，页面不许动）。
-    val currentNoteEditorOpen by rememberUpdatedState(noteEditor != null)
+    // 输入条与菜单同开同关（D-27）：放在这里给「关掉后把焦点还给正文」用。
+    val currentNoteBarOpen by rememberUpdatedState(selectionMenuVisible || editingAnnotation != null)
     LaunchedEffect(openPos, barsVisible, keysEnabled) {
         if (keysEnabled) focusRequester.requestFocus()
     }
-    // 批注框关掉后把焦点还给正文：输入框卸载时焦点随之消失，不还回来就得先点一下正文，
+    // 批注输入条关掉后把焦点还给正文：输入框卸载时焦点随之消失，不还回来就得先点一下正文，
     // 方向键才会恢复翻页（桌面手上习惯键盘的人会以为「卡住了」）。
-    LaunchedEffect(noteEditor) {
-        if (noteEditor == null && keysEnabled) focusRequester.requestFocus()
+    LaunchedEffect(selectionMenuVisible, editingAnnotation) {
+        if (!currentNoteBarOpen && keysEnabled) focusRequester.requestFocus()
     }
 
     // L1 滑动的引用包装（必须在上面几个局部函数声明之后——Kotlin 局部函数不可前向引用）。
@@ -1077,11 +1089,24 @@ fun ReaderScreen(
      * 改已有标注的颜色（顺带可换类别，D-14 合并菜单后同一格色槽既改色也定型）：
      * 先改内存（立即出图），再异步落库；成功不弹提示（画面本身就是反馈），失败回滚并提示。
      */
-    fun recolorAnnotation(annotation: Annotation, kind: AnnotationKind, color: Int, lineStyle: AnnotationLineStyle) {
+    fun recolorAnnotation(
+        annotation: Annotation,
+        kind: AnnotationKind,
+        color: Int,
+        lineStyle: AnnotationLineStyle,
+    ) {
+        // 输入条里可能刚写下 / 改过批注：点色槽也是「提交」，一并写进同一次更新。
+        val note = noteText.trim().ifBlank { null }
+        noteText = ""
         closeAnnotationEdit()
         scope.launch {
             val ok = annotationState.update(
-                annotation.copy(kind = kind, color = color, lineStyle = annotationLineStyleFor(kind, lineStyle)),
+                annotation.copy(
+                    kind = kind,
+                    color = color,
+                    lineStyle = annotationLineStyleFor(kind, lineStyle),
+                    note = note,
+                ),
             )
             if (!ok) snackbar.show("改色失败")
         }
@@ -1097,124 +1122,13 @@ fun ReaderScreen(
         }
     }
 
-    /**
-     * 打开批注输入框（D-25）：长按已有记录时给它写 / 改批注，否则给当前选区新建一条批注。
-     *
-     * 输入框替换浮动菜单（菜单先收起），取消后新建场景把菜单还回去——选区没动，不必再长按一次。
-     */
-    fun openNoteEditor(slot: Int? = null) {
-        val editing = editingAnnotation
-        val colors = annotationColorSlots(light, AnnotationKind.Note)
-        val target = when {
-            editing != null -> NoteEditorTarget(
-                chapter = editing.chapter,
-                charStart = editing.charStart,
-                charEnd = editing.charEnd,
-                editing = editing,
-                quote = editing.quote,
-                // 编辑批注时先停在它自己的颜色上；给高亮/划线补批注时不显示色槽（值为默认槽）。
-                initialSlot = slot
-                    ?: colors.indexOf(editing.color).takeIf { it >= 0 }
-                    ?: annotationDefaultSlot(light, AnnotationKind.Note),
-            )
-            selection.hasSelection -> NoteEditorTarget(
-                chapter = selection.chapter,
-                charStart = selection.start,
-                charEnd = selection.endExclusive,
-                editing = null,
-                quote = currentHost.textOf(selection.chapter, selection.start, selection.endExclusive),
-                initialSlot = slot ?: annotationDefaultSlot(light, AnnotationKind.Note),
-            )
-            else -> null
-        } ?: return
-        selectionMenuVisible = false
-        noteEditor = target
-    }
-
-    /**
-     * 批注框「取消」：关掉输入框，并把浮动菜单还给新建场景（选区还在，用户多半是想改选或换个类别）。
-     * Esc / Android 返回键走同一条路径。
-     */
-    fun cancelNote() {
-        noteEditor = null
-        if (editingAnnotation == null && selection.hasSelection) selectionMenuVisible = true
-    }
-
-    /**
-     * 批注框「保存」：分三种情形，**语义与菜单里的删除/改色同口径**——
-     *
-     * - 新选区：建一条**独立的批注记录**（正文里是虚线标记，D-25），并存下原文摘录；
-     * - 编辑批注：改文字与颜色；
-     * - 给高亮 / 划线补写批注：只写 `note`，墨迹与颜色保持原样。
-     *
-     * 清空后保存：批注记录本身没有别的内容 ⇒ 直接删掉；高亮 / 划线只去掉附带的批注文字。
-     */
-    fun saveNote(text: String, slot: Int) {
-        val target = noteEditor ?: return
-        noteEditor = null
-        val body = text.trim()
-        val editing = target.editing
-        val noteColor = annotationSlotColor(light, AnnotationKind.Note, slot)
-        if (body.isEmpty()) {
-            if (editing == null) return
-            if (editing.kind == AnnotationKind.Note) {
-                deleteAnnotation(editing)
-                return
-            }
-            closeAnnotationEdit()
-            scope.launch {
-                val ok = annotationState.update(editing.copy(note = null))
-                if (!ok) snackbar.show("保存失败")
-            }
-            return
-        }
-        if (editing != null) {
-            closeAnnotationEdit()
-            scope.launch {
-                val next = if (editing.kind == AnnotationKind.Note) {
-                    editing.copy(note = body, color = noteColor)
-                } else {
-                    editing.copy(note = body)
-                }
-                val ok = annotationState.update(next)
-                if (!ok) snackbar.show("保存失败")
-            }
-            return
-        }
-        // 新建批注：独立一条记录，颜色取框里选中的那一格（顺手记住它，下次打开停在同一格）。
-        val next = withAnnotationDefaultSlot(light, AnnotationKind.Note, slot)
-        if (next != light) {
-            light = next
-            currentOnLightCommit(next)
-        }
-        val quote = target.quote?.takeIf { it.isNotBlank() }
-            ?: currentHost.textOf(target.chapter, target.charStart, target.charEnd)
-        scope.launch {
-            val saved = annotationState.add(
-                Annotation(
-                    bookId = 0,
-                    chapter = target.chapter,
-                    charStart = target.charStart,
-                    charEnd = target.charEnd,
-                    kind = AnnotationKind.Note,
-                    color = noteColor,
-                    lineStyle = AnnotationLineStyle.Straight,
-                    note = body,
-                    quote = quote?.take(200),
-                ),
-            )
-            if (saved == null) {
-                snackbar.show("保存失败")
-            } else if (selection.chapter == target.chapter &&
-                selection.start == target.charStart && selection.endExclusive == target.charEnd
-            ) {
-                selection.clear()
-            }
-        }
-    }
-
     /** 把当前选区落成一条高亮/划线：先内存出图，再异步存库；成功不弹提示，失败回滚并提示。 */
-    fun createSelectionAnnotation(kind: AnnotationKind, color: Int, lineStyle: AnnotationLineStyle) {
+    fun createSelectionAnnotation(
+        kind: AnnotationKind,
+        color: Int,
+        lineStyle: AnnotationLineStyle,
+        note: String? = null,
+    ) {
         val ch = selection.chapter
         val s = selection.start
         val e = selection.endExclusive
@@ -1233,6 +1147,8 @@ fun ReaderScreen(
                     color = color,
                     // 线型只属于划线：高亮记录不存线型，免得与划线菜单的偏好串味。
                     lineStyle = annotationLineStyleFor(kind, lineStyle),
+                    // 批注是这条记录的附件（D-27）：与墨迹同一次写入，不分两步。
+                    note = note?.trim()?.ifBlank { null },
                     quote = quote,
                 ),
             )
@@ -1249,20 +1165,77 @@ fun ReaderScreen(
     }
 
     /**
-     * 同一格色槽：编辑中（长按已有标注）就改它，否则用当前选区新建一条。
+     * 收起卡片 = 提交（D-27 / D-28）：
      *
-     * 顺手把「这次用的类别 + 色槽」记住（写盘，无重排提交）：下次打开菜单直接停在这一类、
-     * 这一格上——色槽同时成为该类的新建默认格，故菜单里金边所指即是下次落笔的颜色。
+     * - 编辑已有记录：有字写进 `note`，清空即去掉；输入期间选过别的线型就在这次一起改成划线。
+     * - 新选区还没落笔：**有字才落笔**（按当前类别 / 线型 / 默认色新建一条），
+     *   没字且不是显式点 `完成` 就只关掉（清选区本来就可能只是「不想标了」）。
+     *
+     * @param explicit true = 操作栏的 `完成`：显式落笔，即便没写字也按当前类别 / 线型 / 默认色落一条。
      */
-    fun applyAnnotationColor(kind: AnnotationKind, slot: Int, lineStyle: AnnotationLineStyle) {
+    fun commitNote(explicit: Boolean) {
+        val text = noteText.trim()
+        noteText = ""
+        val editing = editingAnnotation
+        if (editing != null) {
+            closeAnnotationEdit()
+            // 输入期间可能刚点过色槽换了颜色：按 id 取当前记录，别拿旧快照盖回去。
+            val current = annotationState.annotations.firstOrNull { it.id == editing.id } ?: return
+            val body = text.ifBlank { null }
+            // 线型只选中、不落笔（D-28）：真改过线型（或从高亮切到划线）才在提交时落成划线。
+            val restyle = noteKind == AnnotationKind.Underline &&
+                (current.kind != AnnotationKind.Underline || current.lineStyle != noteLineStyle)
+            if (!restyle && body == current.note) return
+            val next = if (restyle) {
+                // 颜色跟着**线型所属的类别**走：本来就是划线时保留它自己的墨色；
+                // 从高亮转过来时不能把高亮那半透明的底色带进墨线（两套色槽体系完全独立）。
+                current.copy(
+                    kind = AnnotationKind.Underline,
+                    lineStyle = noteLineStyle,
+                    color = annotationUnderlineInkColor(current, light),
+                    note = body,
+                )
+            } else {
+                current.copy(note = body)
+            }
+            scope.launch {
+                if (!annotationState.update(next)) snackbar.show("保存失败")
+            }
+            return
+        }
+        selectionMenuVisible = false
+        if (!selection.hasSelection) return
+        if (text.isEmpty() && !explicit) {
+            // 没写字就只是「关掉」：选区一并清掉，免得留下一块没卡片的蓝底。
+            selection.clear()
+            return
+        }
+        val kind = noteKind
+        createSelectionAnnotation(
+            kind = kind,
+            color = annotationDefaultColor(light, kind),
+            lineStyle = noteLineStyle,
+            note = text.ifBlank { null },
+        )
+    }
+
+    /**
+     * 同一格色槽：编辑中（长按已有标注 / 点旁注）就改它，否则用当前选区新建一条。
+     *
+     * 线型取操作栏当前选中的那条（它只选中、不落笔，D-28）；点色槽即落笔并关闭卡片。
+     * 顺手把「这次用的类别 + 色槽」记住（写盘，无重排提交）：下次打开卡片直接停在这一类、
+     * 这一格上——色槽同时成为该类的新建默认格，故金边所指即是下次落笔的颜色。
+     */
+    fun applyAnnotationColor(kind: AnnotationKind, slot: Int) {
         val color = annotationSlotColor(light, kind, slot)
+        noteKind = kind
         // 落盘一律小写（`highlight` / `underline`，见 ReaderSettings 的约定），
         // 解析侧 annotationLastKindOf 再另行 lowercase，双向容错。
         var next = withAnnotationDefaultSlot(light, kind, slot)
             .copy(annotationLastKind = kind.name.lowercase())
         // 线型只属于划线：在高亮那一行点色，不能顺手改掉划线菜单记住的线型（两套偏好各自独立）。
         if (kind == AnnotationKind.Underline) {
-            next = next.copy(annotationLastLineStyle = lineStyle.wire)
+            next = next.copy(annotationLastLineStyle = noteLineStyle.wire)
         }
         if (next != light) {
             light = next
@@ -1270,42 +1243,27 @@ fun ReaderScreen(
         }
         val editing = editingAnnotation
         if (editing != null) {
-            recolorAnnotation(editing, kind, color, lineStyle)
+            recolorAnnotation(editing, kind, color, noteLineStyle)
         } else {
-            createSelectionAnnotation(kind, color, lineStyle)
+            // 点色槽也是「一次性搞定」：输入框里有字就一起落进这条记录。
+            val note = noteText.trim().ifBlank { null }
+            noteText = ""
+            createSelectionAnnotation(kind, color, noteLineStyle, note)
         }
     }
 
     /**
-     * 线型行：记住它，下次新建直接用；并且**一次点按即落笔**——
-     * 选区场景下直接用当前划线色按这个线型画上去（不必再点一次颜色），
-     * 编辑已有标注时把它改成这个线型（高亮没有线型，顺手换成划线）。
+     * 线型行：**只选中**（D-28），不再一次点按即落笔——否则刚想换线型卡片就关了，批注也写不成。
+     * 落笔交给点色槽或 `完成`；收起卡片时按选中的线型落成划线（见 [commitNote]）。
+     * 顺手记住这个线型，下次新建直接用。
      */
-    fun applyAnnotationLineStyle(style: AnnotationLineStyle) {
+    fun pickNoteLineStyle(style: AnnotationLineStyle) {
+        noteKind = AnnotationKind.Underline
+        noteLineStyle = style
         val next = withAnnotationLastLineStyle(light, style)
         if (next != light) {
             light = next
             currentOnLightCommit(next)
-        }
-        val editing = editingAnnotation
-        if (editing != null) {
-            if (editing.kind == AnnotationKind.Underline && editing.lineStyle == style) return
-            // 颜色跟着**线型所属的类别**走：本来就是划线时保留它自己的墨色；
-            // 从高亮转过来时不能把高亮那半透明的底色带进墨线（两个色槽体系是完全独立的）。
-            val color = annotationUnderlineInkColor(editing, light)
-            closeAnnotationEdit()
-            scope.launch {
-                val ok = annotationState.update(
-                    editing.copy(kind = AnnotationKind.Underline, lineStyle = style, color = color),
-                )
-                if (!ok) snackbar.show("改线型失败")
-            }
-        } else if (selection.hasSelection) {
-            createSelectionAnnotation(
-                kind = AnnotationKind.Underline,
-                color = annotationDefaultColor(light, AnnotationKind.Underline),
-                lineStyle = style,
-            )
         }
     }
 
@@ -1349,12 +1307,6 @@ fun ReaderScreen(
             .pointerInput(touchSlop) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
-                    // 批注输入框是一层模态覆盖物：正文手势（长按选区、翻页、亮度）一律让位，
-                    // 点按只落在框上。吞掉这一记按下，避免遮罩点按漏到下面清选区。
-                    if (currentNoteEditorOpen) {
-                        down.consume()
-                        return@awaitEachGesture
-                    }
                     val downX = down.position.x
                     val downY = down.position.y
                     val downTime = down.uptimeMillis
@@ -1364,6 +1316,36 @@ fun ReaderScreen(
                         currentBarsVisible, downY, size.height.toFloat(),
                         currentTopBarH.toFloat(), currentBotBarH.toFloat(),
                     )
+                    // 标注卡片开着（D-28）：点在卡片上归卡片（按钮/输入框自己消费），
+                    // 手柄照旧可拖（否则选区改不了）；其余手势只为「点条外关闭」服务——
+                    // 点按（没动过）= 退出并保存，滑动一律不翻页/不调亮度。
+                    if (currentNoteBarOpen && !barsOwned) {
+                        if (down.isConsumed || downY >= sheetTopPxState) return@awaitEachGesture
+                        val handle = if (!coverVisible && !ctl.isBusy()) {
+                            selectionHandleAt(downX, downY, size.width.toFloat(), size.height.toFloat())
+                        } else {
+                            null
+                        }
+                        if (handle == null) {
+                            var dragged = false
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                if (!dragged &&
+                                    ReaderMath.movedBeyondTapSlop(
+                                        change.position.x - downX,
+                                        change.position.y - downY,
+                                    )
+                                ) {
+                                    dragged = true
+                                }
+                                if (!change.pressed) break
+                            }
+                            if (!dragged) commitNote(explicit = false)
+                            return@awaitEachGesture
+                        }
+                        // 落在手柄上：交给下面的手柄拖动路径（卡片保持打开，页面跟着上顶）。
+                    }
                     // D-11：长按是进入选区的唯一入口；手柄按下则直接进入拖动。
                     // 动画/封面/栏区都不参与选区；选区已存在时点按由 onTap 清除。
                     var selecting = false
@@ -1432,8 +1414,12 @@ fun ReaderScreen(
                             downX, downY, size.width.toFloat(), size.height.toFloat(),
                         )
                         if (handle != null) {
-                            closeAnnotationEdit()
-                            selectionMenuVisible = false
+                            // 卡片开着时先不改卡片状态：拖手柄期间卡片留在原位、字继续可写（D-28），
+                            // 松手后选区还是这份，批注接着写就行。
+                            if (!currentNoteBarOpen) {
+                                closeAnnotationEdit()
+                                selectionMenuVisible = false
+                            }
                             mouseSelectingPending = false
                             selection.beginHandleDrag(handle)
                             selecting = true
@@ -1680,7 +1666,7 @@ fun ReaderScreen(
                 .focusTarget()
                 .onKeyEvent { event ->
                     if (!currentKeysEnabled) return@onKeyEvent false
-                    if (currentNoteEditorOpen) return@onKeyEvent false
+                    if (currentNoteBarOpen) return@onKeyEvent false
                     if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
                     val action = ReaderMath.keyAction(event.key)
                     // TODO: 状态栏打开时左右键在栏按键之间切换焦点（未实现）。
@@ -1839,17 +1825,6 @@ fun ReaderScreen(
                     handleRadiusPx = selectionHandleRadiusPx,
                 )
             }
-            // 菜单锚点只在选区抬手后需要；几何本身覆盖层与放大镜一直在用。
-            val selectionGeometry = selectionGeo.takeIf { selectionMenuVisible }
-            val selectionMenuAnchor = selectionGeometry?.rects?.takeIf { it.isNotEmpty() }?.let { rects ->
-                Rect(
-                    left = rects.minOf { it.left },
-                    top = rects.minOf { it.top },
-                    right = rects.maxOf { it.right },
-                    bottom = rects.maxOf { it.bottom },
-                )
-            }
-
             // 画布渲染器（栅格 + 多页位图缓存的宿主）在**此处** remember 一份，注入给 current/target
             // 两张画布：否则两个组合位置各自 remember，各得一池，当前页位图在 target 侧永远查不到
             // （真机日志：动画期间每页每轮各栅格一次，`hit=false`）。
@@ -1908,6 +1883,43 @@ fun ReaderScreen(
                 )
             }
             SideEffect { rasterByRef.value = rasterPageNow }
+            // ---- 卡片让位（D-28 第 2 部分）：卡片会压到选区 / 这条标注的墨迹时，整页上顶 ----
+            // 卡片上沿 = 窗口高 − 键盘高 − 卡片高（adjustNothing：窗口不缩，键盘高度只能自己量）。
+            // 只算一个平移量：绘制、命中、手柄、放大镜、旁注全部读同一个数，不重排、不重烤栅格。
+            val editing = editingAnnotation
+            val selectionMenuOn = editing == null && selectionMenuVisible && selection.hasSelection &&
+                selection.chapter == fromPos.chapter
+            val menuOn = (editing != null || selectionMenuOn) && !coverVisible && !ctl.isBusy()
+            val imeBottomPx = WindowInsets.ime.getBottom(LocalDensity.current).toFloat()
+            val sheetTopPx = (pxHeight - imeBottomPx - noteBarHeightPx).coerceAtLeast(0f)
+            val anchorBottomPx = if (editing != null) {
+                pageInkRects(
+                    drawer = selectionDrawer,
+                    lines = pageContent?.lines.orEmpty(),
+                    chapter = editing.chapter,
+                    charStart = editing.charStart,
+                    charEnd = editing.charEnd,
+                    pageImages = pageContent?.pageImages,
+                    pageBackgrounds = pageContent?.pageBackgrounds,
+                    frameLead = pageContent?.pageFrameLead ?: 0,
+                    contentLeft = contentLeft,
+                    contentTop = contentTop,
+                ).maxOfOrNull { it.bottom }
+            } else {
+                selectionGeo?.rects?.maxOfOrNull { it.bottom }
+            }
+            // 选区整块都在卡片上沿之上 ⇒ 页面一动不动；会压住才推，推的距离刚好够「选区下沿 + 呼吸」高过卡片。
+            val shiftNow = if (menuOn && anchorBottomPx != null) {
+                (anchorBottomPx + INPUT_SHIFT_GAP_DP * density - sheetTopPx).coerceAtLeast(0f)
+            } else {
+                0f
+            }
+            // 命中侧读这一份（事件处理发生在组合之后，读到的是最新值）。
+            SideEffect {
+                inputShiftPx = shiftNow
+                sheetTopPxState = if (menuOn) sheetTopPx else pxHeight
+            }
+
             // 画布本体（当前页 / 目标页同形，只是位移不同）。
             val PageCanvasFun: @Composable (PageContent?) -> Unit = { content ->
                 ReaderPageCanvas(
@@ -1936,6 +1948,9 @@ fun ReaderScreen(
             // `ReaderPageCanvas` 里 remember 的渲染器（多页位图缓存宿主）连池丢弃重建，
             // 一轮翻页重栅格 3～5 次整页（真机 87ms/次）——就是「滑一点卡一下」的来源。
             // 现在目标槽恒在（target 为 null 时画空，见 FlipSlideLayer KDoc），结构稳定。
+            // 卡片让位：整层（页画布 + 选区 + 旁注 + 放大镜）一起上推，顶部超出屏幕的部分直接截断。
+            // 放在同一个 `graphicsLayer` 里 ⇒ 子层之间的相对位置不变，不可能出现「页动了字没动」。
+            Box(modifier = Modifier.fillMaxSize().graphicsLayer { translationY = -shiftNow }) {
             FlipSlideLayer(
                 direction = ctl.direction.value,
                 // **不要在这里读 ctl.progress.value**：一旦在组合里读，动画每帧都会让整个
@@ -1955,6 +1970,92 @@ fun ReaderScreen(
                     { PageCanvasFun(pageContent) }
                 },
             )
+            // 正文旁的批注文字（D-26）：批注是标注上的一句话，就显示在它旁边。
+            // 纯覆盖层：只按行几何算空白，不改排版、不进栅格；翻页动画期间整层让位。
+            val noteBubbles: List<NoteBubble> = remember(
+                pageContent, fromPos.chapter, fromPos.slice, annotationState.revision,
+                contentLeft, contentTop, contentRight, contentBottom, pxWidth,
+            ) {
+                val content = pageContent
+                val lines = content?.lines.orEmpty()
+                val shift = if (content == null || lines.isEmpty()) {
+                    null
+                } else {
+                    readerPageShift(
+                        lines, content.pageImages, content.pageBackgrounds,
+                        content.pageFrameLead, contentTop,
+                    )
+                }
+                val notes = annotationState.annotations.filter {
+                    it.chapter == fromPos.chapter && !it.note.isNullOrBlank()
+                }
+                if (content == null || shift == null || lines.isEmpty() || notes.isEmpty()) {
+                    emptyList()
+                } else {
+                    // 墨迹矩形一律问测度引擎（与画出来的字同源）：自己拿行宽估算会把
+                    // 「整行排满」误判成「右侧还有空地」，也会把段内字符坐标与章内坐标比错。
+                    val slice = fromPos.slice
+                    val pageInk = pageInkRects(
+                        drawer = selectionDrawer,
+                        lines = lines,
+                        chapter = fromPos.chapter,
+                        charStart = slice.charStart,
+                        charEnd = slice.charEnd,
+                        pageImages = content.pageImages,
+                        pageBackgrounds = content.pageBackgrounds,
+                        frameLead = content.pageFrameLead,
+                        contentLeft = contentLeft,
+                        contentTop = contentTop,
+                    )
+                    noteBubblePlacements(
+                        noteInk = notes.mapNotNull { a ->
+                            val rects = pageInkRects(
+                                drawer = selectionDrawer,
+                                lines = lines,
+                                chapter = fromPos.chapter,
+                                charStart = a.charStart,
+                                charEnd = a.charEnd,
+                                pageImages = content.pageImages,
+                                pageBackgrounds = content.pageBackgrounds,
+                                frameLead = content.pageFrameLead,
+                                contentLeft = contentLeft,
+                                contentTop = contentTop,
+                            )
+                            if (rects.isEmpty()) {
+                                null
+                            } else {
+                                NoteInk(
+                                    annotationId = a.id,
+                                    text = a.note.orEmpty(),
+                                    argb = a.color ?: annotationFallbackColor(a.kind),
+                                    rects = rects,
+                                )
+                            }
+                        },
+                        pageInk = pageInk,
+                        contentLeft = contentLeft,
+                        contentRight = contentRight,
+                        contentBottom = contentBottom,
+                        pageRight = pxWidth,
+                        fontPx = lines.first().fontSizePx,
+                    )
+                }
+            }
+            if (noteBubbles.isNotEmpty() && !coverVisible && !ctl.isBusy()) {
+                NoteBubbles(
+                    bubbles = noteBubbles,
+                    fgColor = Color(profile.fgColor),
+                    onOpen = { id ->
+                        // 点旁注 = 打开这条标注的操作栏与输入框（有文字就带出来，可改可删）。
+                        val target = annotationState.annotations.firstOrNull { it.id == id }
+                        if (target != null) {
+                            selectionMenuVisible = false
+                            editingAnnotation = target
+                        }
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
             // 选区覆盖层：轻量即时画，不参与页栅格；翻页动画期间隐藏，避免盖在滑动中的两页上。
             if (selection.hasSelection && pageContent != null && !coverVisible &&
                 !ctl.isBusy() && selection.chapter == fromPos.chapter
@@ -1994,53 +2095,73 @@ fun ReaderScreen(
                     modifier = Modifier.fillMaxSize(),
                 )
             }
-            // 标注浮动菜单（D-13 / D-14）：**一个弹窗服务两种入口**——选区抬手是新建，
-            // 长按已有标注是编辑（色槽预展开、删除可用）。没有「取消」项：点菜单外面即关。
-            // 批注输入框开着时菜单让位（输入框是更前面的一层）。
-            val editing = editingAnnotation
-            val editingAt = editingAnchor
-            val selectionMenuOn = editing == null && selectionMenuVisible && selection.hasSelection &&
-                selectionMenuAnchor != null && selection.chapter == fromPos.chapter
-            val menuAnchor = if (editing != null) editingAt else if (selectionMenuOn) selectionMenuAnchor else null
-            if (menuAnchor != null && !coverVisible && !ctl.isBusy() && noteEditor == null) {
-                // 长按场景没有选区可清：透明遮罩接住菜单外的点按，只关菜单，不翻页/不改选区。
-                if (editing != null) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .clickable(
-                                interactionSource = editScrimInteraction,
-                                indication = null,
-                            ) { closeAnnotationEdit() },
-                    )
+            } // 结束「卡片让位」的整层平移
+            // 标注卡片（D-28）：操作栏 + 输入行合成一张卡，贴键盘上沿。它不再跟选区锚点走，
+            // 所以选区在页面任何位置都不用担心「菜单跑出屏幕」；被遮住时整页上顶（第 2 部分）。
+            // 输入框与操作栏跟着「这一次写哪条」重置：编辑带出它的文字 / 类别 / 线型，新选区从空白开始。
+            LaunchedEffect(editing?.id, selectionMenuOn) {
+                when {
+                    editing != null -> {
+                        noteText = editing.note.orEmpty()
+                        noteKind = editing.kind
+                        noteLineStyle = editing.lineStyle.takeIf { editing.kind == AnnotationKind.Underline }
+                            ?: annotationLastLineStyleOf(light)
+                    }
+                    selectionMenuOn -> {
+                        noteText = ""
+                        noteKind = annotationLastKindOf(light)
+                        noteLineStyle = annotationLastLineStyleOf(light)
+                    }
+                    else -> noteText = ""
                 }
+            }
+            if (menuOn) {
                 // 选区场景：选中的字里已有高亮/划线时，删除作用于**相交的第一条**（列表按起点排序）。
                 val overlapping = if (editing == null) {
                     annotationState.annotations.firstOrNull {
-                        it.isDrawable() && it.charStart < selection.endExclusive && selection.start < it.charEnd
+                        it.charStart < selection.endExclusive && selection.start < it.charEnd
                     }
                 } else {
                     null
                 }
-                AnnotationMenu(
-                    anchor = menuAnchor,
-                    bounds = Rect(contentLeft, contentTop, contentRight, contentBottom),
+                val deleteTarget = editing ?: overlapping
+                AnnotationSheet(
+                    target = NoteBarTarget(
+                        annotationId = editing?.id,
+                        accentArgb = if (editing != null) {
+                            editing.color ?: annotationFallbackColor(editing.kind)
+                        } else {
+                            annotationSlotColor(light, noteKind, annotationDefaultSlot(light, noteKind))
+                        },
+                    ),
+                    text = noteText,
                     palette = paletteFor(light.scheme),
+                    kind = noteKind,
+                    lineStyle = noteLineStyle,
                     highlightColors = annotationColorSlots(light, AnnotationKind.Highlight),
                     highlightDefaultSlot = annotationDefaultSlot(light, AnnotationKind.Highlight),
                     underlineColors = annotationColorSlots(light, AnnotationKind.Underline),
                     underlineDefaultSlot = annotationDefaultSlot(light, AnnotationKind.Underline),
-                    initialKind = annotationLastKindOf(light),
-                    initialLineStyle = annotationLastLineStyleOf(light),
-                    editing = editing,
-                    deleteTarget = editing ?: overlapping,
-                    noteArgb = editing?.takeIf { it.kind == AnnotationKind.Note }?.color
-                        ?: annotationDefaultColor(light, AnnotationKind.Note),
-                    onPickColor = { kind, slot, style -> applyAnnotationColor(kind, slot, style) },
-                    onPickLineStyle = { style -> applyAnnotationLineStyle(style) },
-                    onOpenNote = { openNoteEditor() },
-                    onCopy = { if (editing != null) copyAnnotation(editing) else copySelection() },
-                    onDelete = { annotation -> deleteAnnotation(annotation) },
+                    // 编辑时只在本类色槽行里给这条记录描圈。
+                    currentColor = if (editing != null && editing.kind == noteKind) {
+                        editing.color ?: annotationFallbackColor(editing.kind)
+                    } else {
+                        null
+                    },
+                    canDelete = deleteTarget != null,
+                    onTextChange = { noteText = it },
+                    onKindChange = { noteKind = it },
+                    onPickColor = { kind, slot -> applyAnnotationColor(kind, slot) },
+                    onPickLineStyle = { pickNoteLineStyle(it) },
+                    // 复制先取文本再提交：提交可能清掉选区 / 关掉卡片。
+                    onCopy = {
+                        if (editing != null) copyAnnotation(editing) else copySelection()
+                        commitNote(explicit = false)
+                    },
+                    onDelete = { deleteTarget?.let { annotation -> deleteAnnotation(annotation) } },
+                    onDone = { commitNote(explicit = true) },
+                    onDismiss = { commitNote(explicit = false) },
+                    onHeightChange = { noteBarHeightPx = it },
                 )
             }
             // 亮度/护眼遮罩：纯绘制于画布之上、栏之下。
@@ -2084,19 +2205,7 @@ fun ReaderScreen(
                 )
             }
         }
-        // v2 批注输入框（D-25）：放在最外层（盖住页面、亮度遮罩、顶底栏），
-        // 打开期间正文手势与键盘翻页在各自入口让位。
-        noteEditor?.let { target ->
-            AnnotationNoteDialog(
-                target = target,
-                noteColors = annotationColorSlots(light, AnnotationKind.Note),
-                // 给高亮 / 划线补写批注时不挑颜色：那条墨迹本来就用自己的颜色。
-                showColorRow = target.editing == null || target.editing.kind == AnnotationKind.Note,
-                palette = paletteFor(light.scheme),
-                onCancel = { cancelNote() },
-                onSave = { text, slot -> saveNote(text, slot) },
-            )
-        }
+
         } // 键盘入口内层盒
     }
 }

@@ -1,0 +1,4 @@
+-- 批注并入高亮/划线做附件（9→10）：v2 试验期曾把批注做成独立类型（kind='note'），
+-- 现在它只是高亮/划线记录上的一段附带文字（note 列），墨迹仍按这两类画。
+-- 老记录一律改写成高亮：颜色是创建时的快照，不受类型改写影响；文字本来就存在 note 列。
+UPDATE annotations SET kind = 'highlight' WHERE kind = 'note';

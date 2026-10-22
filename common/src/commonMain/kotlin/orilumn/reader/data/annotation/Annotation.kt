@@ -2,23 +2,29 @@ package orilumn.reader.data.annotation
 
 /**
  * 标注类型。`wire` 是数据库里的稳定字符串；枚举改名不改变已存数据。
+ *
+ * 只有两类：高亮与划线。**批注不是第三种类型**，它是这两类记录上附带的文字
+ * （`note` 非空即「带批注的标注」）——同一段文字只可能有一种墨迹，多一种类型
+ * 只会让「这段既有高亮又有批注」变成两条互不相干的记录。
  */
 enum class AnnotationKind(val wire: String) {
     Highlight("highlight"),
     Underline("underline"),
-    Note("note"),
     ;
 
     companion object {
+        /**
+         * 未知值按高亮处理而不是抛错：老库可能留着已废弃的类型（v2 试验期短暂存过
+         * `note`，迁移 9→10 已统一改写成高亮），导入外部数据也不该让整个书架打不开。
+         */
         fun fromWire(wire: String): AnnotationKind =
-            entries.firstOrNull { it.wire == wire }
-                ?: error("未知标注类型：$wire")
+            entries.firstOrNull { it.wire == wire } ?: Highlight
     }
 }
 
 /**
  * 划线（[AnnotationKind.Underline]）的线型。`wire` 是数据库里的稳定字符串；
- * 只对划线有效，高亮 / 批注忽略本字段。
+ * 只对划线有效，高亮忽略本字段。
  *
  * - [Straight]：基线下方的实线（默认，也是老数据缺列时的取值）；
  * - [Wavy]：基线下方的波浪线；

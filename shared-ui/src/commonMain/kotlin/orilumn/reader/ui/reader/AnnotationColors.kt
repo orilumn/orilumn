@@ -20,9 +20,6 @@ internal val DEFAULT_HIGHLIGHT_ARGB: Int = ReaderSettings.DEFAULT_HIGHLIGHT_COLO
 /** 划线默认色槽（旧记录没有颜色时的兜底，也是默认色槽第一格）。 */
 internal val DEFAULT_UNDERLINE_ARGB: Int = ReaderSettings.DEFAULT_UNDERLINE_COLOR_SLOTS[0]
 
-/** 批注默认色槽（旧记录没有颜色时的兜底，也是默认色槽第一格）。 */
-internal val DEFAULT_NOTE_ARGB: Int = ReaderSettings.DEFAULT_NOTE_COLOR_SLOTS[0]
-
 /**
  * 设置面板里可直接套用的基础颜色（不透明 RGB；套用时保留当前槽的透明度）。
  * 十格刚好一行，高亮与划线共用。
@@ -40,18 +37,16 @@ internal val ANNOTATION_PRESET_COLORS: List<Int> = listOf(
     0xFF6D4C41.toInt(), // 棕
 )
 
-/** 某一类标注的色槽列表（高亮 / 划线 / 批注各自一组，互不共用）。 */
+/** 某一类标注的色槽列表（高亮 / 划线各一组，互不共用）。 */
 internal fun annotationColorSlots(settings: ReaderSettings, kind: AnnotationKind): List<Int> {
     val slots = when (kind) {
         AnnotationKind.Highlight -> settings.highlightColorSlots
         AnnotationKind.Underline -> settings.underlineColorSlots
-        AnnotationKind.Note -> settings.noteColorSlots
     }
     if (slots.isNotEmpty()) return slots
     return when (kind) {
         AnnotationKind.Highlight -> ReaderSettings.DEFAULT_HIGHLIGHT_COLOR_SLOTS
         AnnotationKind.Underline -> ReaderSettings.DEFAULT_UNDERLINE_COLOR_SLOTS
-        AnnotationKind.Note -> ReaderSettings.DEFAULT_NOTE_COLOR_SLOTS
     }
 }
 
@@ -62,7 +57,6 @@ internal fun annotationDefaultSlot(settings: ReaderSettings, kind: AnnotationKin
     val raw = when (kind) {
         AnnotationKind.Highlight -> settings.highlightDefaultSlot
         AnnotationKind.Underline -> settings.underlineDefaultSlot
-        AnnotationKind.Note -> settings.noteDefaultSlot
     }
     return raw.coerceIn(0, slots.lastIndex)
 }
@@ -85,14 +79,12 @@ internal fun annotationSlotColor(settings: ReaderSettings, kind: AnnotationKind,
 internal fun annotationFallbackColor(kind: AnnotationKind): Int = when (kind) {
     AnnotationKind.Highlight -> DEFAULT_HIGHLIGHT_ARGB
     AnnotationKind.Underline -> DEFAULT_UNDERLINE_ARGB
-    AnnotationKind.Note -> DEFAULT_NOTE_ARGB
 }
 
 /**
  * 上次新建 / 改色用的类别（`ReaderSettings.annotationLastKind` 的解析）。
  *
  * 浮动菜单据此**一步到位**停在该类别的色槽行上；未知值（老存档缺键、手改配置）按高亮处理。
- * 批注不参与这个记忆：新建批注走输入框（不是点一格就落笔），菜单打开时停在色槽类别上更顺手。
  */
 internal fun annotationLastKindOf(settings: ReaderSettings): AnnotationKind =
     when (settings.annotationLastKind.trim().lowercase()) {
@@ -115,7 +107,6 @@ internal fun annotationLastLineStyleOf(settings: ReaderSettings): AnnotationLine
  *
  * **两个类别完全独立**：样张只取本类别的默认色槽；正在编辑的记录属于本类别时，
  * 跟着记录自己的颜色走。编辑另一类记录不影响本类的样张（否则切换类别看一眼就串色）。
- * （批注的样张颜色不走这里：它没有色槽行，由调用方直接给出当前批注色。）
  */
 internal fun annotationSwatchColor(
     highlightColors: List<Int>,
@@ -182,7 +173,6 @@ internal fun withAnnotationColorSlot(
     return when (kind) {
         AnnotationKind.Highlight -> settings.copy(highlightColorSlots = slots)
         AnnotationKind.Underline -> settings.copy(underlineColorSlots = slots)
-        AnnotationKind.Note -> settings.copy(noteColorSlots = slots)
     }
 }
 
@@ -198,7 +188,6 @@ internal fun withAnnotationDefaultSlot(
     return when (kind) {
         AnnotationKind.Highlight -> settings.copy(highlightDefaultSlot = safe)
         AnnotationKind.Underline -> settings.copy(underlineDefaultSlot = safe)
-        AnnotationKind.Note -> settings.copy(noteDefaultSlot = safe)
     }
 }
 

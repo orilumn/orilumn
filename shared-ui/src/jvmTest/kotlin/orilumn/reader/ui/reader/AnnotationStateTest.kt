@@ -97,19 +97,6 @@ class AnnotationStateTest {
     }
 
     @Test
-    fun `notes stay hit-testable like any other mark`() = runBlocking {
-        // D-25：批注在正文里画虚线，长按要能命中它（否则只能从清单里翻，正文里"点不到"）。
-        val host = FakeHost()
-        host.stored += annotation(id = 1, chapter = 2, start = 3, end = 7)
-            .copy(kind = AnnotationKind.Note, note = "想法")
-        val state = AnnotationState(host)
-        state.load(2)
-        val note = state.annotationAt(4)!!
-        assertEquals(AnnotationKind.Note, note.kind)
-        assertTrue(note.isDrawable())
-    }
-
-    @Test
     fun `switch chapter clears old marks before loading new ones`() = runBlocking {
         val host = FakeHost()
         host.stored += annotation(id = 1, chapter = 2)

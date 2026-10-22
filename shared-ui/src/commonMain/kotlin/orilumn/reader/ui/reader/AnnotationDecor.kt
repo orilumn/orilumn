@@ -11,34 +11,29 @@ import orilumn.reader.engine.skia.DecorStroke
  * 标注 → 渲染层装饰区间（用户层投影输入）。
  *
  * - 区间沿用标注的章内字符坐标，`[charStart, charEnd)`；
- * - 批注（`Note`）在正文里是一条**虚线下划线**（方案 D-25）：颜色取自己的色槽，与划线靠线型区分；
  * - 划线的线型：实线 / 虚线 / 波浪都画在基线下方，删除线画在字身中部（[DecorKind.STRIKETHROUGH]）；
  * - 颜色为空时落默认色槽，已有颜色按创建时的快照原样使用（改调色板不回溯）。
+ *
+ * 批注不是类型：它只是记录上附带的一段文字，墨迹仍按这条记录本来的类别画
+ * （高亮垫底色 / 划线画卷线），文字由正文旁的旁注显示（见 `NoteBubbles`）。
  */
 internal fun annotationDecorRanges(annotations: List<Annotation>): List<DecorRange> =
-    annotations.mapNotNull { a ->
+    annotations.map { a ->
         val kind = when (a.kind) {
             AnnotationKind.Highlight -> DecorKind.BACKGROUND
             AnnotationKind.Underline -> when (a.lineStyle) {
                 AnnotationLineStyle.Strike -> DecorKind.STRIKETHROUGH
                 else -> DecorKind.UNDERLINE
             }
-            AnnotationKind.Note -> DecorKind.UNDERLINE
         }
-        // 批注固定虚线：它没有「线型」这个概念，虚线就是它区别于划线的样子。
-        val stroke = if (a.kind == AnnotationKind.Note) {
-            DecorStroke.Dashed
-        } else {
-            when (a.lineStyle) {
-                AnnotationLineStyle.Wavy -> DecorStroke.Wavy
-                AnnotationLineStyle.Dashed -> DecorStroke.Dashed
-                else -> DecorStroke.Solid
-            }
+        val stroke = when (a.lineStyle) {
+            AnnotationLineStyle.Wavy -> DecorStroke.Wavy
+            AnnotationLineStyle.Dashed -> DecorStroke.Dashed
+            else -> DecorStroke.Solid
         }
         val color = a.color ?: when (a.kind) {
             AnnotationKind.Highlight -> DEFAULT_HIGHLIGHT_ARGB
             AnnotationKind.Underline -> DEFAULT_UNDERLINE_ARGB
-            AnnotationKind.Note -> DEFAULT_NOTE_ARGB
         }
         DecorRange(
             start = a.charStart,

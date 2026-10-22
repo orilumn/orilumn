@@ -5,6 +5,12 @@ import orilumn.reader.engine.skia.DrawLine
 /** 选区拖到页边后自动翻页的触发带（dp，距屏幕左/右缘）。 */
 internal const val SELECTION_AUTO_FLIP_EDGE_DP: Float = 24f
 
+/**
+ * 卡片让位时给选区留的呼吸距离（dp）：页面只会推到「选区下沿 + 这个距离」刚好高过卡片上沿，
+ * 推得刚刚好，不多推（多推会把上半页无谓地推出屏幕）。
+ */
+internal const val INPUT_SHIFT_GAP_DP: Float = 8f
+
 /** 首次进入页边后等待多久再翻（ms）；按住不动时后续每 [SELECTION_AUTO_FLIP_REPEAT_MS] 翻一页。 */
 internal const val SELECTION_AUTO_FLIP_FIRST_MS: Long = 300L
 internal const val SELECTION_AUTO_FLIP_REPEAT_MS: Long = 400L

@@ -38,7 +38,6 @@ class AnnotationPanelDecorTest {
             annotation(AnnotationKind.Underline, 0xFF112233.toInt(), AnnotationLineStyle.Wavy),
             annotation(AnnotationKind.Underline, 0xFF112233.toInt(), AnnotationLineStyle.Dashed),
             annotation(AnnotationKind.Underline, 0xFF112233.toInt(), AnnotationLineStyle.Strike),
-            annotation(AnnotationKind.Note, 0xFF112233.toInt(), AnnotationLineStyle.Wavy),
         )
         for (a in cases) {
             val body = annotationDecorRanges(listOf(a)).firstOrNull()
@@ -47,12 +46,5 @@ class AnnotationPanelDecorTest {
             assertEquals("stroke: $a", body?.stroke, panel?.stroke)
             assertEquals("color: $a", body?.argb, panel?.color?.toArgb())
         }
-    }
-
-    @Test
-    fun `note shows the same dashed marker in the panel`() {
-        val decor = quoteDecorOf(annotation(AnnotationKind.Note))!!
-        assertEquals(DecorKind.UNDERLINE, decor.kind)
-        assertEquals(DecorStroke.Dashed, decor.stroke)
     }
 }

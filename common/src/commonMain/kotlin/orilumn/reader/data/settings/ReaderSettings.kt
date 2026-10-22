@@ -128,15 +128,9 @@ data class ReaderSettings(
      */
     val highlightColorSlots: List<Int> = DEFAULT_HIGHLIGHT_COLOR_SLOTS,
     val underlineColorSlots: List<Int> = DEFAULT_UNDERLINE_COLOR_SLOTS,
-    /**
-     * 批注色槽（ARGB，含透明度）：批注是**独立标注类型**，正文里用虚线下划线标记（方案 D-25），
-     * 颜色与高亮 / 划线各自独立，互不串用。
-     */
-    val noteColorSlots: List<Int> = DEFAULT_NOTE_COLOR_SLOTS,
-    /** 新建高亮 / 划线 / 批注默认使用的色槽下标（0 起，越界读取时钳到有效范围）。 */
+    /** 新建高亮 / 划线默认使用的色槽下标（0 起，越界读取时钳到有效范围）。 */
     val highlightDefaultSlot: Int = 0,
     val underlineDefaultSlot: Int = 0,
-    val noteDefaultSlot: Int = 0,
     /**
      * 上次用于新建 / 改色标注的类别（`highlight` / `underline`，见 `annotationLastKind()`）。
      *
@@ -299,10 +293,8 @@ data class ReaderSettings(
         // 标注色槽族：只改像素，不影响分页；清空后比较相等（面板走 onCommitLight）。
         highlightColorSlots = emptyList(),
         underlineColorSlots = emptyList(),
-        noteColorSlots = emptyList(),
         highlightDefaultSlot = 0,
         underlineDefaultSlot = 0,
-        noteDefaultSlot = 0,
         annotationLastKind = "",
         annotationLastLineStyle = "",
     )
@@ -336,18 +328,6 @@ data class ReaderSettings(
             0xFF43A047.toInt(), // 绿
             0xFF8E24AA.toInt(), // 紫
             0xFFFB8C00.toInt(), // 橙
-        )
-
-        /**
-         * 批注默认色槽：不透明的低饱和深色——批注在正文里是一条**虚线**（D-25），
-         * 太浅会在细线上糊掉，太艳又会跟划线的墨色抢眼。
-         */
-        val DEFAULT_NOTE_COLOR_SLOTS: List<Int> = listOf(
-            0xFF546E7A.toInt(), // 蓝灰
-            0xFF5C6BC0.toInt(), // 靛
-            0xFF00897B.toInt(), // 青
-            0xFF8D6E63.toInt(), // 棕灰
-            0xFF6D4C41.toInt(), // 深棕
         )
 
         /** Default set: factory values when no customization has been made. */
@@ -493,13 +473,10 @@ data class ReaderSettings(
                     fontWeightAnchorsBySlot = SettingsJson.optWeightAnchorsMap(o, "fontWeightAnchorsBySlot", d.fontWeightAnchorsBySlot),
                     highlightColorSlots = SettingsJson.optIntList(o, "highlightColorSlots", d.highlightColorSlots),
                     underlineColorSlots = SettingsJson.optIntList(o, "underlineColorSlots", d.underlineColorSlots),
-                    noteColorSlots = SettingsJson.optIntList(o, "noteColorSlots", d.noteColorSlots),
                     highlightDefaultSlot = SettingsJson.optInt(o, "highlightDefaultSlot", d.highlightDefaultSlot)
                         .coerceIn(0, d.highlightColorSlots.lastIndex),
                     underlineDefaultSlot = SettingsJson.optInt(o, "underlineDefaultSlot", d.underlineDefaultSlot)
                         .coerceIn(0, d.underlineColorSlots.lastIndex),
-                    noteDefaultSlot = SettingsJson.optInt(o, "noteDefaultSlot", d.noteDefaultSlot)
-                        .coerceIn(0, d.noteColorSlots.lastIndex),
                     annotationLastKind = SettingsJson.optString(o, "annotationLastKind", d.annotationLastKind),
                     annotationLastLineStyle = SettingsJson.optString(o, "annotationLastLineStyle", d.annotationLastLineStyle),
                     cjkLatinSpacing = migrateCjkLatinSpacing(

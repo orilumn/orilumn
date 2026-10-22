@@ -86,7 +86,7 @@ fun ReaderAnnotationPanel(
     var loaded by remember { mutableStateOf<List<Annotation>?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     // 类型筛选（v2）：null = 全部；批注一格包含「本身就是批注」和「高亮/划线附带了批注文字」两种。
-    var filter by remember { mutableStateOf<AnnotationKind?>(null) }
+    var filter by remember { mutableStateOf(AnnotationFilter.All) }
     val currentLoad by rememberUpdatedState(load)
 
     // 列表体随抽屉打开而组合，所以首次组合就是「打开」；只在点行进正文时卸载。
@@ -108,7 +108,7 @@ fun ReaderAnnotationPanel(
     val nav = remember { PanelNav() }
     val bodyFr = remember { FocusRequester() }
     var positioned by remember { mutableStateOf(false) }
-    var positionedFilter by remember { mutableStateOf<AnnotationKind?>(null) }
+    var positionedFilter by remember { mutableStateOf(AnnotationFilter.All) }
 
     fun displayIndexOfSeq(seq: Int): Int =
         rows.indexOfFirst { it is AnnotationPanelRow.Item && it.seq == seq }
@@ -205,7 +205,7 @@ fun ReaderAnnotationPanel(
                 )
 
                 rows.isEmpty() -> Text(
-                    if (filter == null) "还没有高亮、划线或批注" else "没有这一类标注",
+                    if (filter == AnnotationFilter.All) "还没有高亮、划线或批注" else "没有这一类标注",
                     color = p.muted2, fontSize = 14.sp,
                     modifier = Modifier.padding(24.dp),
                 )
@@ -285,31 +285,36 @@ internal fun buildAnnotationRows(
 }
 
 /**
- * 按类型筛选清单（v2）：`null` = 全部。
+ * 清单的类型筛选。
  *
- * 「批注」一格按**有没有批注文字**判，而不是按记录类型——高亮 / 划线也能补写批注（长按 → 批注），
- * 那些记录在读者眼里同样是「一条笔记」，不该在批注筛选里消失。
+ * 「批注」**不是标注类型**（D-26）：批注是高亮 / 划线记录上附带的一段文字，
+ * 所以这一格按「有没有批注文字」判；带文字的高亮 / 划线在读者眼里同样是「一条笔记」，
+ * 不该在批注筛选里消失。
  */
-internal fun filterAnnotations(annotations: List<Annotation>, filter: AnnotationKind?): List<Annotation> =
+internal enum class AnnotationFilter(val label: String) {
+    All("全部"),
+    Highlight("高亮"),
+    Underline("划线"),
+    Note("批注"),
+}
+
+/** 按筛选格过滤清单（纯函数，便于单测）。 */
+internal fun filterAnnotations(annotations: List<Annotation>, filter: AnnotationFilter): List<Annotation> =
     when (filter) {
-        null -> annotations
-        AnnotationKind.Note -> annotations.filter { !it.note.isNullOrBlank() }
-        else -> annotations.filter { it.kind == filter }
+        AnnotationFilter.All -> annotations
+        AnnotationFilter.Note -> annotations.filter { !it.note.isNullOrBlank() }
+        AnnotationFilter.Highlight -> annotations.filter { it.kind == AnnotationKind.Highlight }
+        AnnotationFilter.Underline -> annotations.filter { it.kind == AnnotationKind.Underline }
     }
 
 /** 筛选行的四格，顺序固定（点按切换，不进键盘焦点链——与页签同口径，见 D-23 §9）。 */
-private val ANNOTATION_FILTERS: List<Pair<AnnotationKind?, String>> = listOf(
-    null to "全部",
-    AnnotationKind.Highlight to "高亮",
-    AnnotationKind.Underline to "划线",
-    AnnotationKind.Note to "批注",
-)
+private val ANNOTATION_FILTERS: List<AnnotationFilter> = AnnotationFilter.entries.toList()
 
 @Composable
 private fun AnnotationFilterRow(
-    selected: AnnotationKind?,
+    selected: AnnotationFilter,
     palette: Palette,
-    onSelect: (AnnotationKind?) -> Unit,
+    onSelect: (AnnotationFilter) -> Unit,
 ) {
     Row(
         modifier = Modifier
@@ -317,18 +322,18 @@ private fun AnnotationFilterRow(
             .padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        ANNOTATION_FILTERS.forEachIndexed { index, (kind, label) ->
+        ANNOTATION_FILTERS.forEachIndexed { index, entry ->
             if (index > 0) Spacer(Modifier.width(6.dp))
-            val on = kind == selected
+            val on = entry == selected
             Text(
-                text = label,
+                text = entry.label,
                 color = if (on) PanelGold else palette.muted2,
                 fontSize = 13.sp,
                 fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal,
                 modifier = Modifier
                     .clip(RoundedCornerShape(7.dp))
                     .background(if (on) palette.rowActive else Color.Transparent, RoundedCornerShape(7.dp))
-                    .clickable { onSelect(kind) }
+                    .clickable { onSelect(entry) }
                     .padding(horizontal = 10.dp, vertical = 5.dp),
             )
         }

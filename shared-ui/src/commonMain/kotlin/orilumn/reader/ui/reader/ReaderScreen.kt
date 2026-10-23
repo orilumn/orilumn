@@ -2033,7 +2033,7 @@ fun ReaderScreen(
             // 纯覆盖层：只按行几何算空白，不改排版、不进栅格；翻页动画期间整层让位。
             val noteBubbles: List<NoteBubble> = remember(
                 pageContent, fromPos.chapter, fromPos.slice, annotationState.revision,
-                contentLeft, contentTop, contentRight, contentBottom, pxWidth,
+                contentLeft, contentTop, contentRight, contentBottom, pxWidth, pxHeight,
             ) {
                 val content = pageContent
                 val lines = content?.lines.orEmpty()
@@ -2054,6 +2054,8 @@ fun ReaderScreen(
                     // 墨迹矩形一律问测度引擎（与画出来的字同源）：自己拿行宽估算会把
                     // 「整行排满」误判成「右侧还有空地」，也会把段内字符坐标与章内坐标比错。
                     val slice = fromPos.slice
+                    // 四类障碍：文字逐字墨迹（与画出来的字同源）+ 图形 + 线条。
+                    // 表格整体暂时没有只读几何入口（D-29 前置），先不传。
                     val pageInk = pageInkRects(
                         drawer = selectionDrawer,
                         lines = lines,
@@ -2065,6 +2067,13 @@ fun ReaderScreen(
                         frameLead = content.pageFrameLead,
                         contentLeft = contentLeft,
                         contentTop = contentTop,
+                    )
+                    val obstacles = noteObstacles(
+                        textInk = pageInk,
+                        pageImages = content.pageImages,
+                        pageBackgrounds = content.pageBackgrounds,
+                        shift = shift,
+                        contentLeft = contentLeft,
                     )
                     noteBubblePlacements(
                         noteInk = notes.mapNotNull { a ->
@@ -2091,12 +2100,13 @@ fun ReaderScreen(
                                 )
                             }
                         },
-                        pageInk = pageInk,
+                        obstacles = obstacles,
                         contentLeft = contentLeft,
                         contentRight = contentRight,
                         contentBottom = contentBottom,
                         pageRight = pxWidth,
                         fontPx = lines.first().fontSizePx,
+                        pageBottom = pxHeight,
                     )
                 }
             }

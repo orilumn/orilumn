@@ -458,6 +458,109 @@ private fun buildFreeRects(
 }
 
 /**
+ * 整页的**极大空闲矩形**（MaxRects，Jylänki《A Thousand Ways to Pack the Bin》§2.2）。
+ *
+ * 与 [buildFreeRects] 的四块互斥切分不同：每个障碍把相交的空闲矩形切成上 / 下 / 左 / 右后，
+ * **只剪掉被其他空闲矩形包含的那些**，不做「切完就再也看不到」的互斥划分。
+ * 于是障碍之间的错位切口不会把跨过切口的大块空白切碎，后面仍能找到它。
+ *
+ * @param bounds 页面边界（含四个页边距）。
+ * @param obstacles 四类障碍（已按行合并的文字行框 / 图形 / 表格 / 线条）。
+ * @param minW/minH 低于这个尺寸的碎片直接丢弃（候选阶段还会做更严的淘汰）。
+ * @param maxRects 空闲矩形上限：极端页面上按面积保留前 N 个（只影响观感，不影响正确性）。
+ */
+internal fun maximalFreeRects(
+    bounds: Rect,
+    obstacles: List<Rect>,
+    minW: Float,
+    minH: Float,
+    maxRects: Int = 3000,
+): List<Rect> {
+    if (bounds.width < minW || bounds.height < minH) return emptyList()
+    var free = listOf(bounds)
+    for (o in dedupeRects(obstacles)) {
+        if (o.right <= bounds.left || o.left >= bounds.right ||
+            o.bottom <= bounds.top || o.top >= bounds.bottom ||
+            o.width <= 0f || o.height <= 0f
+        ) {
+            continue
+        }
+        val next = ArrayList<Rect>(free.size + 4)
+        for (f in free) {
+            if (!f.overlaps(o)) {
+                next += f
+                continue
+            }
+            // 标准 MaxRects 四切：左 / 右两道**整高**，上 / 下两道**整宽**（会互相重叠，
+            // 由 pruneFreeRects 剪掉被包含的那些）。这正是它比「四块互斥切分」强的地方：
+            // 跨过障碍切口的大块空白仍然作为一整条保留下来。
+            if (o.left > f.left + NOTE_GEOM_EPS) {
+                next += Rect(f.left, f.top, min(o.left, f.right), f.bottom)
+            }
+            if (o.right < f.right - NOTE_GEOM_EPS) {
+                next += Rect(max(o.right, f.left), f.top, f.right, f.bottom)
+            }
+            if (o.top > f.top + NOTE_GEOM_EPS) {
+                next += Rect(f.left, f.top, f.right, min(o.top, f.bottom))
+            }
+            if (o.bottom < f.bottom - NOTE_GEOM_EPS) {
+                next += Rect(f.left, max(o.bottom, f.top), f.right, f.bottom)
+            }
+        }
+        free = pruneFreeRects(next, minW, minH)
+        if (free.isEmpty()) break
+    }
+    val capped = if (free.size > maxRects) {
+        free.sortedByDescending { it.width * it.height }.take(maxRects)
+    } else {
+        free
+    }
+    return capped.sortedWith(compareBy({ it.top }, { it.left }, { it.right }, { it.bottom }))
+}
+
+/** 去掉被其他空闲矩形包含的碎片（MaxRects 的 prune），并按最小尺寸过滤。 */
+private fun pruneFreeRects(rects: List<Rect>, minW: Float, minH: Float): List<Rect> {
+    val kept = ArrayList<Rect>(rects.size)
+    outer@ for (i in rects.indices) {
+        val r = rects[i]
+        if (r.width < minW || r.height < minH) continue
+        for (j in rects.indices) {
+            if (j == i) continue
+            val other = rects[j]
+            if (!containsRect(other, r)) continue
+            // 完全相同的两块只留输入顺序靠前的那块。
+            if (!containsRect(r, other) || j < i) continue@outer
+        }
+        kept += r
+    }
+    return kept
+}
+
+/** [outer] 是否包含 [inner]（四边都不比它紧，留 [NOTE_GEOM_EPS] 容差）。 */
+private fun containsRect(outer: Rect, inner: Rect): Boolean =
+    outer.left <= inner.left + NOTE_GEOM_EPS &&
+        outer.top <= inner.top + NOTE_GEOM_EPS &&
+        outer.right >= inner.right - NOTE_GEOM_EPS &&
+        outer.bottom >= inner.bottom - NOTE_GEOM_EPS
+
+/** 四边取整去重：重复的障碍不必反复切同一块空白。 */
+private fun dedupeRects(rects: List<Rect>): List<Rect> {
+    if (rects.size < 2) return rects
+    val seen = HashSet<Long>()
+    val out = ArrayList<Rect>(rects.size)
+    for (r in rects) {
+        val l = r.left.roundToInt()
+        val t = r.top.roundToInt()
+        val rr = r.right.roundToInt()
+        val b = r.bottom.roundToInt()
+        val key = (l.toLong() shl 48) xor (t.toLong() shl 32) xor (rr.toLong() shl 16) xor b.toLong()
+        if (seen.add(key)) out += Rect(l.toFloat(), t.toFloat(), rr.toFloat(), b.toFloat())
+    }
+    return out
+}
+
+
+/**
  * 把逐字墨迹合并成**正文行框**（障碍物用）。
  *
  * 同一行的字按横向区间合并，词间空隙一并盖住（不让旁注钻进词与词之间），

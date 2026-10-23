@@ -366,6 +366,67 @@ class NoteBubblesTest {
     }
 
     @Test
+    fun `maximal free rects keep the blank that spans staggered cuts`() {
+        // 两个错位障碍：四块互斥切分会让跨过切口的大空白消失，MaxRects 仍应保留它。
+        val bounds = rect(0f, 0f, 100f, 100f)
+        val free = maximalFreeRects(
+            bounds = bounds,
+            obstacles = listOf(rect(0f, 40f, 60f, 60f), rect(40f, 0f, 100f, 20f)),
+            minW = 2f,
+            minH = 2f,
+        )
+        assertTrue("整页下半仍是空白，实际=$free", free.any { it.width >= 99f && it.top >= 59f })
+        assertTrue("被两个障碍切过的地方不该丢干净，实际=$free", free.isNotEmpty())
+    }
+
+    @Test
+    fun `maximal free rects contain no other free rect`() {
+        val free = maximalFreeRects(
+            bounds = rect(0f, 0f, 200f, 200f),
+            obstacles = listOf(
+                rect(20f, 30f, 80f, 90f),
+                rect(120f, 40f, 180f, 70f),
+                rect(30f, 130f, 90f, 170f),
+            ),
+            minW = 1f,
+            minH = 1f,
+        )
+        for (a in free) {
+            for (b in free) {
+                if (a == b) continue
+                val inside = b.left <= a.left + 0.5f && b.top <= a.top + 0.5f &&
+                    b.right >= a.right - 0.5f && b.bottom >= a.bottom - 0.5f
+                assertTrue("空闲矩形不该有包含关系：$a 被 $b 包含", !inside)
+            }
+        }
+    }
+
+    @Test
+    fun `maximal free rects drop duplicates and keep the page blank`() {
+        val free = maximalFreeRects(
+            bounds = rect(0f, 0f, 100f, 100f),
+            obstacles = listOf(rect(10f, 10f, 20f, 20f), rect(10f, 10f, 20f, 20f)),
+            minW = 1f,
+            minH = 1f,
+        )
+        assertEquals(free.size, free.distinct().size)
+        // 这个障碍只切出四块极大的空白，不会因为重复障碍再翻倍。
+        assertEquals(4, free.size)
+    }
+
+    @Test
+    fun `maximal free rects drop fragments below the minimum`() {
+        val free = maximalFreeRects(
+            bounds = rect(0f, 0f, 100f, 100f),
+            obstacles = listOf(rect(0f, 0f, 99f, 99f)),
+            minW = 5f,
+            minH = 5f,
+        )
+        assertTrue("装不下一个字的碎片应被丢掉，实际=$free", free.all { it.width >= 5f && it.height >= 5f })
+    }
+
+
+    @Test
     fun `width estimate counts wide characters wider`() {
         val wide = estimatedNoteLines("为什么有时显示", widthPx = 100f, fontPx = 14.4f)
         val narrow = estimatedNoteLines("whynot", widthPx = 100f, fontPx = 14.4f)

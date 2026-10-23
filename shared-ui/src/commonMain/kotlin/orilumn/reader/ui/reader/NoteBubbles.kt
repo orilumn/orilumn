@@ -57,8 +57,8 @@ import orilumn.reader.engine.skia.PageImage
  * @property maxLines 文字框实际要用几行（1 起，已按「整句优先」与空白高度取小）；小图标形态恒为 1。
  * @property argb 所属标注的墨色：文字框用它做淡底与左侧色条，读者一眼看出是哪一条。
  * @property fontPx 批注字号（像素）：比正文小一号，读起来不抢正文。
- * @property arrow 指向原文的箭头：小图标形态恒为 `null`；文字框在箭头路由无解时暂为 `null`
- *   （§2.2 收口后除小图标外必画）。
+ * @property arrow 指向原文的箭头：小图标形态恒为 `null`；文字框恒有箭头
+ *   （只有框已经贴住原文、连一根线都画不下时才为 `null`）。
  * @property compact 小图标形态（见上）：只在一条都排不下时由调用方置位。
  */
 internal data class NoteBubble(
@@ -101,19 +101,30 @@ private const val MAX_CANDIDATES_PER_NOTE: Int = 300
 /** 同侧页边距相邻两条旁注的间距（以旁注行高为单位）。 */
 private const val LANE_GAP_LINES: Float = 0.35f
 
-/** 引线每个拐弯的代价（以旁注行高为单位）：宁可多走一点，也少拐弯。 */
-private const val ARROW_BEND_PENALTY_LINES: Float = 0.6f
+/** 箭头避让逐字墨迹的容差：不到半个像素的贴边不算压字。 */
+private const val ARROW_GLYPH_TOL_PX: Float = 0.5f
 
-/** 引线穿越已画引线的代价（以旁注行高为单位）：软惩罚，不硬堵死。 */
-private const val ARROW_CROSS_PENALTY_LINES: Float = 3f
+/** 箭头避让图形 / 表格 / 线条 / 其他旁注框的容差：这几类边界是硬线，多让一点。 */
+private const val ARROW_SOLID_TOL_PX: Float = 1f
 
-/** 可见图节点上限：超过就放弃图搜索，退回直线 / 单折线兜底。 */
-private const val MAX_VISIBILITY_NODES: Int = 60_000
+/** 箭头不许拐回自己的旁注框：只差一根线的量就算「进去」。 */
+private const val ARROW_OWN_BUBBLE_TOL_PX: Float = 0.01f
 
-/** 可见图里的方向：无 / 水平 / 垂直（换向就是拐弯）。 */
-private const val ROUTE_DIR_NONE: Int = 0
-private const val ROUTE_DIR_H: Int = 1
-private const val ROUTE_DIR_V: Int = 2
+/** 端口在矩形每条边上取三点：两个内缩点（按边长这个比例）+ 中点。 */
+private const val ARROW_PORT_INSET_RATIO: Float = 0.25f
+
+/** 箭头最多考虑几个最近的锚点字：最近那个被围死时换下一个字。 */
+private const val ARROW_TARGET_LIMIT: Int = 4
+
+/** 一折 / 两折只试直线「最接近通畅」的前几对端口（全试一遍是白算）。 */
+private const val ARROW_ONEBEND_PAIRS: Int = 96
+private const val ARROW_TWOBEND_PAIRS: Int = 24
+
+/** 两折线每个方向最多试几个拐点坐标（再多的只是白算）。 */
+private const val ARROW_MAX_BEND_COORDS: Int = 8
+
+/** 两折线找拐点时看端口连线附近多远的障碍（以旁注行高为单位，至少 8px）。 */
+private const val ARROW_BEND_WINDOW_LINES: Float = 2f
 
 /** 一行批注折行模拟的结果：比「宽 / 字宽」粗估准，用于完整性判定。 */
 internal data class NoteTextFit(
@@ -429,11 +440,10 @@ internal fun noteObstacles(
 }
 
 /**
- * 旁注箭头（D-28 第 3 部分）：从旁注框指向原文墨迹的一条细线。
+ * 旁注箭头（D-28 第 3 部分）：从旁注框指向原文一个字的一条细线。
  *
- * 路由用正交可见图 + A*：代价 = 长度 + 拐弯惩罚 + 与已画引线的交叉惩罚，避开四类障碍、
- * 其他旁注与已画引线；图搜索无解时才退回直线 / 单折线，仍无解就不画箭头
- * （宁可少一条线，也不糊住正文）。
+ * 形态只有三种（§2.2）：直线（1 段）、一折（2 段）、两折（3 段），**最多两个拐点**。
+ * 除框退成小图标外一律画出来：宁可线贴一点字边，也不让读者不知道旁注指向哪里。
  */
 internal sealed interface NoteArrow {
     val start: Offset
@@ -441,7 +451,7 @@ internal sealed interface NoteArrow {
 
     data class Straight(override val start: Offset, override val end: Offset) : NoteArrow
 
-    /** 正交折线：起点 → 拐点 → … → 终点（至少 3 个点，相邻两点共享 x 或 y）。 */
+    /** 正交折线：起点 → 拐点 → … → 终点（3～4 个点，相邻两点共享 x 或 y，最多两个拐点）。 */
     data class Elbow(val points: List<Offset>) : NoteArrow {
         override val start: Offset get() = points.first()
         override val end: Offset get() = points.last()
@@ -499,8 +509,8 @@ internal fun noteBubblePlacements(
     val textLines = mergeTextLineRects(obstacles.textInk, small)
     val baseObstacles = textLines + obstacles.figures + obstacles.tables + obstacles.strokes
     // 箭头避让另用逐字墨迹（能穿两字之间与标点前后）；没有逐字几何时才退回行框。
-    val arrowObstacles = obstacles.arrowInk.ifEmpty { obstacles.textInk } +
-        obstacles.figures + obstacles.tables + obstacles.strokes
+    val arrowGlyphs = obstacles.arrowInk.ifEmpty { obstacles.textInk }
+    val arrowSolids = obstacles.figures + obstacles.tables + obstacles.strokes
     val freeRects = maximalFreeRects(
         bounds = pageBounds,
         obstacles = baseObstacles,
@@ -582,9 +592,9 @@ internal fun noteBubblePlacements(
         val arrow = routeNoteArrow(
             bubble = self,
             inkRects = ink,
-            obstacles = arrowObstacles,
+            glyphs = arrowGlyphs,
+            solids = arrowSolids,
             otherBubbles = others,
-            pageBounds = pageBounds,
             drawnArrows = drawn,
             lineH = lineH,
         )
@@ -1165,383 +1175,337 @@ private fun isWideCodePoint(code: Int): Boolean =
         code in 0x1F300..0x1FAFF || // emoji
         code in 0x20000..0x3FFFD
 
+/** 箭头避让的一块障碍：矩形 + 它自己的容差（逐字墨迹小，图形 / 旁注框大）。 */
+private data class ArrowObstacle(val rect: Rect, val tol: Float)
+
+/** 一条候选路径的度量：[clear] 是能否直接采用，[hits] 是全撞时比「穿得少」用的穿透长度。 */
+private data class ArrowPath(
+    val points: List<Offset>,
+    val bends: Int,
+    val length: Float,
+    val crosses: Int,
+    val hits: Float,
+    val entersBubble: Boolean,
+    val order: Int,
+) {
+    val clear: Boolean get() = hits <= 1e-4f && !entersBubble
+
+    /** 通畅路径的择优顺序（§4.4.2）：已画引线交叉少 → 折数少 → 更短 → 端口顺序。 */
+    fun betterThan(other: ArrowPath?): Boolean {
+        if (other == null) return true
+        if (crosses != other.crosses) return crosses < other.crosses
+        if (bends != other.bends) return bends < other.bends
+        if (abs(length - other.length) > 0.5f) return length < other.length
+        return order < other.order
+    }
+
+    /** 全撞时的兜底顺序：不穿自己的框 → 穿得少 → 更短 → 端口顺序。照样画，不留空。 */
+    fun betterFallbackThan(other: ArrowPath?): Boolean {
+        if (other == null) return true
+        if (entersBubble != other.entersBubble) return !entersBubble
+        if (abs(hits - other.hits) > 0.5f) return hits < other.hits
+        if (abs(length - other.length) > 0.5f) return length < other.length
+        return order < other.order
+    }
+}
+
+/** 一个目标字（锚点在本页的一个字）对应的搜索材料：它的端口 + 附近障碍。 */
+private class ArrowTarget(val ends: List<Offset>, val obstacles: List<ArrowObstacle>)
+
+/** 一对端口与它们之间直线的度量（直线被挡时拿来排「最接近通畅」的先后）。 */
+private class ArrowPair(
+    val start: Offset,
+    val end: Offset,
+    val target: ArrowTarget,
+    val straight: ArrowPath,
+)
+
 /**
- * 给一条旁注找箭头路由（纯函数）：直线 → 正交可见图 + A* → 单折线兜底 → 不画。
+ * 给一条旁注找箭头路由（纯函数）：端口搜索 + 直线 / 一折 / 两折，**最多两个拐点**。
  *
- * 只避四类障碍、**已放好的其他旁注**与**已画引线**；这条批注自己的墨迹与自己的旁注框
- * 不算障碍（箭头就是要从框边指回原文）。从块底色 / 内边距 / 页边距上穿过是允许的。
+ * 第一轮的可见图 + A* 已按 `docs/旁注布点算法重做-实施计划.md` §2.2 退役：端口只在
+ * 「旁注框四边 × 目标字四边」各取中点与两个内缩点，路径只在直线（1 段）、一折（2 段）、
+ * 两折（3 段）里挑，**禁止三折及以上**。
  *
- * @param pageBounds 页面边界（可见图的搜索范围）；null 时取框、墨迹与其他旁注的并集。
- * @param drawnArrows 已经画好的引线：尽量不穿越（软惩罚，不硬堵死）。
- * @param lineH 旁注行高（拐弯 / 交叉惩罚以它为单位）；0 时退用框高。
+ * **必画**：三种折线全撞障碍时，取「穿得最少、再最短」的一条照样画出来——宁可线贴一点字边，
+ * 也不能让读者不知道这条旁注指向哪里。只有框退成小图标才没有箭头。
+ *
+ * 避让对象（§4.4.3）：文字**逐字**墨迹（容差 0.5px，自己的锚点字除外——箭头就是要指到它）、
+ * 图形 / 表格框线 / 线条（1px）、其他旁注框（1px）。已画引线只做交叉惩罚，不硬堵死。
+ * 贴边不算穿过。块底色 / `padding` / `margin` / 页边距都算空白。
+ *
+ * @param inkRects 这条批注**自己**在本页的逐字墨迹：箭头指向它，故它不是障碍。
+ * @param glyphs 本页所有逐字墨迹（含自己的，内部剔除）：换成逐字几何后，线能从两字之间、
+ *   标点前后穿过，不再把整行当一个黑块。
+ * @param solids 图形 / 表格框线 / 线条。
+ * @param otherBubbles 其他旁注框。
+ * @param drawnArrows 已经画好的引线：尽量不穿越（软惩罚）。
+ * @param lineH 旁注行高：两折找拐点时看多远的障碍以它为单位。
  */
 internal fun routeNoteArrow(
     bubble: Rect,
     inkRects: List<Rect>,
-    obstacles: List<Rect>,
-    otherBubbles: List<Rect>,
-    pageBounds: Rect? = null,
+    glyphs: List<Rect> = emptyList(),
+    solids: List<Rect> = emptyList(),
+    otherBubbles: List<Rect> = emptyList(),
     drawnArrows: List<NoteArrow> = emptyList(),
     lineH: Float = 0f,
 ): NoteArrow? {
     if (inkRects.isEmpty() || bubble.width <= 0f || bubble.height <= 0f) return null
-    val target = inkRects.minByOrNull { rectDistance(bubble, it) } ?: return null
-    // 端口：框朝墨迹一侧的边 → 墨迹朝框一侧的边；箭头尖停在字外一线，不压字。
-    val start = portOnRect(bubble, target.center)
-    val site = portOnRect(target, bubble.center)
-    val outward = site - target.center
-    val outwardLen = sqrt(outward.x * outward.x + outward.y * outward.y)
-    val end = if (outwardLen < 0.01f) {
-        start
-    } else {
-        site + Offset(outward.x / outwardLen, outward.y / outwardLen) * NOTE_ARROW_END_GAP_PX
-    }
-    // 旁注本来就贴着墨迹（留不出一条线）：没有可画的箭头。
-    val arrowDx = end.x - start.x
-    val arrowDy = end.y - start.y
-    if (sqrt(arrowDx * arrowDx + arrowDy * arrowDy) < 1.5f) return null
+    // 框已经贴住原文：连一根线的位置都没有，画出来只会压在字上。
+    if (inkRects.minOf { rectDistance(bubble, it) } <= NOTE_ARROW_END_GAP_PX) return null
 
-    // 这条批注自己的墨迹不是障碍（其它文字/图形/线条/表格仍是）。
-    // 障碍里的正文已按行合并成行框，行框会**包住**锚点墨迹，所以这里按「相交」排除，
-    // 而不是按「被墨迹包含」排除；否则锚点所在整行都会挡在箭头前面。
-    val blockers = (obstacles + otherBubbles).filter { b ->
-        inkRects.none { ink ->
-            ink.left < b.right - NOTE_GEOM_EPS && b.left < ink.right - NOTE_GEOM_EPS &&
-                ink.top < b.bottom - NOTE_GEOM_EPS && b.top < ink.bottom - NOTE_GEOM_EPS
+    // 自己的锚点字不是障碍：箭头本来就要指到它；同一条批注的其他字也不挡自己。
+    val obstacles = buildList {
+        for (g in glyphs) {
+            if (inkRects.any { it.overlaps(g) }) continue
+            add(ArrowObstacle(g, ARROW_GLYPH_TOL_PX))
         }
-    }.map { inflate(it, NOTE_GEOM_EPS) }
-
-    if (isClear(listOf(start, end), blockers)) {
-        return NoteArrow.Straight(start, end)
+        for (s in solids) add(ArrowObstacle(s, ARROW_SOLID_TOL_PX))
+        for (b in otherBubbles) add(ArrowObstacle(b, ARROW_SOLID_TOL_PX))
     }
-
-    val unit = if (lineH > 0f) lineH else bubble.height.coerceAtLeast(8f)
-    val bounds = pageBounds ?: unionBounds(bubble, inkRects, otherBubbles)
-    val path = routeOrthogonal(
-        start = start,
-        end = end,
-        bubble = bubble,
-        blockers = blockers,
-        drawnArrows = drawnArrows,
-        bounds = bounds,
-        bendPenalty = ARROW_BEND_PENALTY_LINES * unit,
-        crossPenalty = ARROW_CROSS_PENALTY_LINES * unit,
-    )
-    // 自己的框不参与挡线，但也不许引线拐回框里：一旦穿框就当图搜索无解。
-    if (path != null && !pathEntersRect(path, bubble)) {
-        return if (path.size <= 2) NoteArrow.Straight(path.first(), path.last()) else NoteArrow.Elbow(path)
-    }
-
-    // 兜底：单折线（先竖后横 / 先横后竖），取较短且通的一条。
-    val vh = listOf(start, Offset(start.x, end.y), end)
-    val hv = listOf(start, Offset(end.x, start.y), end)
-    val vhClear = isClear(vh, blockers)
-    val hvClear = isClear(hv, blockers)
-    if (vhClear || hvClear) {
-        val pick = if (vhClear && hvClear) {
-            if (polylineLength(vh) <= polylineLength(hv)) vh else hv
-        } else if (vhClear) {
-            vh
-        } else {
-            hv
-        }
-        return NoteArrow.Elbow(pick)
-    }
-    return null
-}
-
-/**
- * 正交可见图 + A*（§7.E）。
- *
- * 坐标取自页面边界、每个障碍的四边、自己的旁注框与起终点；相邻坐标之间连边，
- * 边中点落在障碍内部就删掉（贴着障碍边可以走）。状态 = `(节点, 进入方向)`，
- * 换向付拐弯代价，穿越已画引线付交叉代价，启发式是到终点的曼哈顿距离。
- *
- * @return 简化后的折线（至少 2 点）；无解或有向图过大时返回 null。
- */
-private fun routeOrthogonal(
-    start: Offset,
-    end: Offset,
-    bubble: Rect,
-    blockers: List<Rect>,
-    drawnArrows: List<NoteArrow>,
-    bounds: Rect,
-    bendPenalty: Float,
-    crossPenalty: Float,
-): List<Offset>? {
-    if (bounds.width <= 0f || bounds.height <= 0f) return null
-    val xs = buildCoords(
-        values = buildList {
-            add(bounds.left); add(bounds.right)
-            add(bubble.left); add(bubble.right)
-            add(start.x); add(end.x)
-            for (b in blockers) { add(b.left); add(b.right) }
-        },
-        lo = bounds.left,
-        hi = bounds.right,
-    )
-    val ys = buildCoords(
-        values = buildList {
-            add(bounds.top); add(bounds.bottom)
-            add(bubble.top); add(bubble.bottom)
-            add(start.y); add(end.y)
-            for (b in blockers) { add(b.top); add(b.bottom) }
-        },
-        lo = bounds.top,
-        hi = bounds.bottom,
-    )
-    val nx = xs.size
-    val ny = ys.size
-    if (nx < 2 || ny < 2) return null
-    if (nx.toLong() * ny.toLong() > MAX_VISIBILITY_NODES) return null
-
-    val (hBlocked, vBlocked) = blockedEdges(xs, ys, blockers)
-    val sx = coordIndex(xs, start.x)
-    val sy = coordIndex(ys, start.y)
-    val ex = coordIndex(xs, end.x)
-    val ey = coordIndex(ys, end.y)
-    val startNode = sy * nx + sx
-    val endNode = ey * nx + ex
-    val endX = xs[ex]
-    val endY = ys[ey]
-
-    val stateCount = nx * ny * 3
-    val gScore = FloatArray(stateCount) { Float.POSITIVE_INFINITY }
-    val parent = IntArray(stateCount) { -1 }
-    val closed = BooleanArray(stateCount)
-    val startState = startNode * 3 + ROUTE_DIR_NONE
-    gScore[startState] = 0f
-    val queue = RoutePriorityQueue()
-    queue.add(RouteStep(heuristic(startNode, nx, xs, ys, endX, endY), startState, 0f))
     val drawnSegments = drawnArrows.flatMap { arrowSegments(it) }
-
-    while (!queue.isEmpty()) {
-        val current = queue.poll()
-        if (closed[current.state]) continue
-        closed[current.state] = true
-        val node = current.state / 3
-        if (node == endNode) {
-            return reconstructPath(parent, current.state, xs, ys, nx, start, end)
+    val starts = edgePorts(bubble, 0f)
+    val pad = max(lineH, 8f) * ARROW_BEND_WINDOW_LINES
+    // 目标只取最近的几个字：最近那个被围死时，还有同一条批注的其他字可指。
+    val targets = inkRects
+        .sortedBy { rectDistance(bubble, it) }
+        .take(ARROW_TARGET_LIMIT)
+        .map { target ->
+            val window = Rect(
+                min(bubble.left, target.left) - pad,
+                min(bubble.top, target.top) - pad,
+                max(bubble.right, target.right) + pad,
+                max(bubble.bottom, target.bottom) + pad,
+            )
+            ArrowTarget(
+                ends = edgePorts(target, NOTE_ARROW_END_GAP_PX),
+                obstacles = obstacles.filter { it.rect.overlaps(window) },
+            )
         }
-        val dir = current.state % 3
-        val xi = node % nx
-        val yi = node / nx
-        for (k in 0 until 4) {
-            val nxi = xi + NEIGHBOR_DX[k]
-            val nyi = yi + NEIGHBOR_DY[k]
-            if (nxi !in 0 until nx || nyi !in 0 until ny) continue
-            val newDir = NEIGHBOR_DIR[k]
-            if (newDir == ROUTE_DIR_H) {
-                val edge = if (nxi < xi) xi - 1 else xi
-                if (hBlocked[yi * (nx - 1) + edge]) continue
-            } else {
-                val edge = if (nyi < yi) yi - 1 else yi
-                if (vBlocked[edge * nx + xi]) continue
-            }
-            val a = Offset(xs[xi], ys[yi])
-            val b = Offset(xs[nxi], ys[nyi])
-            var step = abs(b.x - a.x) + abs(b.y - a.y)
-            if (dir != ROUTE_DIR_NONE && dir != newDir) step += bendPenalty
-            if (drawnSegments.isNotEmpty() &&
-                drawnSegments.any { segmentsIntersect(a, b, it.first, it.second) }
-            ) {
-                step += crossPenalty
-            }
-            val nextState = (nyi * nx + nxi) * 3 + newDir
-            val nextCost = current.g + step
-            if (nextCost < gScore[nextState] - 1e-4f) {
-                gScore[nextState] = nextCost
-                parent[nextState] = current.state
-                val h = heuristic(nyi * nx + nxi, nx, xs, ys, endX, endY)
-                queue.add(RouteStep(nextCost + h, nextState, nextCost))
+
+    var order = 0
+    var fallback: ArrowPath? = null
+    var best: ArrowPath? = null
+
+    fun measure(points: List<Offset>, target: ArrowTarget): ArrowPath? =
+        measureArrowPath(
+            points = points,
+            order = order++,
+            obstacles = target.obstacles,
+            bubble = bubble,
+            drawnSegments = drawnSegments,
+        )
+
+    // 1) 直线：全端口对扫一遍，顺便留下「最接近通畅」的端口对给折线用。
+    val pairs = ArrayList<ArrowPair>(starts.size * targets.size * 12)
+    for (target in targets) {
+        for (s in starts) {
+            for (e in target.ends) {
+                val path = measure(listOf(s, e), target) ?: continue
+                pairs += ArrowPair(s, e, target, path)
+                if (path.clear) {
+                    if (path.betterThan(best)) best = path
+                } else if (path.betterFallbackThan(fallback)) {
+                    fallback = path
+                }
             }
         }
     }
-    return null
+    best?.let { if (it.crosses == 0) return it.toNoteArrow() }
+
+    // 折线只试直线最接近通畅的那些端口对：几百对全试一遍是白算（§4.4.4）。
+    val ranked = pairs.sortedWith(compareBy({ it.straight.hits }, { it.straight.length }, { it.straight.order }))
+
+    // 2) 一折：先横后竖 / 先竖后横。
+    for (pair in ranked.take(ARROW_ONEBEND_PAIRS)) {
+        for (points in oneBendPaths(pair.start, pair.end)) {
+            val path = measure(points, pair.target) ?: continue
+            if (path.clear) {
+                if (path.betterThan(best)) best = path
+            } else if (path.betterFallbackThan(fallback)) {
+                fallback = path
+            }
+        }
+    }
+    best?.let { if (it.crosses == 0) return it.toNoteArrow() }
+
+    // 3) 两折：横→竖→横 / 竖→横→竖，拐点取端口坐标与附近障碍边界。
+    for (pair in ranked.take(ARROW_TWOBEND_PAIRS)) {
+        for (points in twoBendPaths(pair.start, pair.end, pair.target.obstacles, pad)) {
+            val path = measure(points, pair.target) ?: continue
+            if (path.clear) {
+                if (path.betterThan(best)) best = path
+            } else if (path.betterFallbackThan(fallback)) {
+                fallback = path
+            }
+        }
+    }
+    return (best ?: fallback)?.toNoteArrow()
 }
 
-/** 可见图的四个邻接方向（先横后竖，顺序固定保证可复现）。 */
-private val NEIGHBOR_DX = intArrayOf(1, -1, 0, 0)
-private val NEIGHBOR_DY = intArrayOf(0, 0, 1, -1)
-private val NEIGHBOR_DIR = intArrayOf(ROUTE_DIR_H, ROUTE_DIR_H, ROUTE_DIR_V, ROUTE_DIR_V)
+/** 端口：矩形四条边各取「内缩点 / 中点 / 内缩点」，顺序固定（上、右、下、左）。 */
+private fun edgePorts(rect: Rect, outward: Float): List<Offset> {
+    if (rect.width <= 0.01f || rect.height <= 0.01f) return listOf(rect.center)
+    val ix = rect.width * ARROW_PORT_INSET_RATIO
+    val iy = rect.height * ARROW_PORT_INSET_RATIO
+    val xs = floatArrayOf(rect.left + ix, rect.center.x, rect.right - ix)
+    val ys = floatArrayOf(rect.top + iy, rect.center.y, rect.bottom - iy)
+    val out = ArrayList<Offset>(12)
+    // 上边朝上、右边朝右、下边朝下、左边朝左；[outward] 让箭头尖停在字外一线。
+    for (x in xs) out += Offset(x, rect.top - outward)
+    for (y in ys) out += Offset(rect.right + outward, y)
+    for (x in xs) out += Offset(x, rect.bottom + outward)
+    for (y in ys) out += Offset(rect.left - outward, y)
+    return out
+}
 
-private data class RouteStep(val f: Float, val state: Int, val g: Float)
+/** 一折线的两种走法：先横后竖 / 先竖后横（退化成一字的由 [simplifyPolyline] 收掉）。 */
+private fun oneBendPaths(start: Offset, end: Offset): List<List<Offset>> = listOf(
+    listOf(start, Offset(end.x, start.y), end),
+    listOf(start, Offset(start.x, end.y), end),
+)
 
 /**
- * 最小二叉堆（KMP 共享层不能用 `java.util.PriorityQueue`）。
- * 同代价按状态号排，保证同一输入得到同一条路径。
+ * 两折线的两种走法：横→竖→横 / 竖→横→竖。
+ *
+ * 拐点坐标取端口本身与附近障碍的四边（贴着障碍走才绕得开），按离中点由近到远取前几个，
+ * 近的更容易凑出短路径。
  */
-private class RoutePriorityQueue {
-    private var heap = arrayOfNulls<RouteStep>(256)
-    private var size = 0
-
-    fun isEmpty(): Boolean = size == 0
-
-    fun add(item: RouteStep) {
-        if (size == heap.size) heap = heap.copyOf(size * 2)
-        heap[size] = item
-        siftUp(size)
-        size++
-    }
-
-    fun poll(): RouteStep {
-        val top = heap[0]!!
-        size--
-        if (size > 0) {
-            heap[0] = heap[size]
-            siftDown(0)
-        }
-        heap[size] = null
-        return top
-    }
-
-    private fun less(a: RouteStep, b: RouteStep): Boolean =
-        a.f < b.f - 1e-4f || (abs(a.f - b.f) <= 1e-4f && a.state < b.state)
-
-    private fun siftUp(from: Int) {
-        var i = from
-        while (i > 0) {
-            val parent = (i - 1) / 2
-            if (!less(heap[i]!!, heap[parent]!!)) break
-            swap(i, parent)
-            i = parent
-        }
-    }
-
-    private fun siftDown(from: Int) {
-        var i = from
-        while (true) {
-            val left = i * 2 + 1
-            if (left >= size) break
-            val right = left + 1
-            var best = left
-            if (right < size && less(heap[right]!!, heap[left]!!)) best = right
-            if (!less(heap[best]!!, heap[i]!!)) break
-            swap(i, best)
-            i = best
-        }
-    }
-
-    private fun swap(a: Int, b: Int) {
-        val tmp = heap[a]
-        heap[a] = heap[b]
-        heap[b] = tmp
-    }
-}
-
-private fun heuristic(node: Int, nx: Int, xs: FloatArray, ys: FloatArray, endX: Float, endY: Float): Float =
-    abs(xs[node % nx] - endX) + abs(ys[node / nx] - endY)
-
-/** 坐标去重（容差 0.01px），并保证搜索边界本身在集合里。 */
-private fun buildCoords(values: List<Float>, lo: Float, hi: Float): FloatArray {
-    val sorted = values.filter { it >= lo - 0.01f && it <= hi + 0.01f }.sorted()
-    val out = ArrayList<Float>(sorted.size)
-    for (v in sorted) {
-        val clamped = v.coerceIn(lo, hi)
-        if (out.isEmpty() || clamped - out.last() > 0.01f) out += clamped
-    }
-    if (out.isEmpty()) return floatArrayOf(lo, hi)
-    if (out.first() > lo + 0.01f) out.add(0, lo)
-    if (out.last() < hi - 0.01f) out += hi
-    return out.toFloatArray()
-}
-
-/** 最接近 [value] 的坐标下标（起终点一定已作为坐标加入，取到的就是它）。 */
-private fun coordIndex(coords: FloatArray, value: Float): Int {
-    var best = 0
-    var bestDelta = Float.MAX_VALUE
-    for (i in coords.indices) {
-        val delta = abs(coords[i] - value)
-        if (delta < bestDelta) {
-            bestDelta = delta
-            best = i
-        }
-    }
-    return best
-}
-
-/**
- * 预计算哪些相邻坐标边被障碍挡住：横边的 Y 严格在障碍内、且整段落在障碍内；
- * 竖边同理。贴着障碍边界走是允许的（障碍已外扩 0.5px）。
- */
-private fun blockedEdges(
-    xs: FloatArray,
-    ys: FloatArray,
-    blockers: List<Rect>,
-): Pair<BooleanArray, BooleanArray> {
-    val nx = xs.size
-    val ny = ys.size
-    val hBlocked = BooleanArray(ny * (nx - 1))
-    val vBlocked = BooleanArray((ny - 1) * nx)
-    for (b in blockers) {
-        if (b.width <= 0f || b.height <= 0f) continue
-        val left = lowerBound(xs, b.left)
-        val right = lowerBound(xs, b.right)
-        for (yi in 0 until ny) {
-            val y = ys[yi]
-            if (y <= b.top + 0.01f || y >= b.bottom - 0.01f) continue
-            var xi = left
-            val end = min(right, nx - 1)
-            while (xi < end) {
-                hBlocked[yi * (nx - 1) + xi] = true
-                xi++
-            }
-        }
-        val top = lowerBound(ys, b.top)
-        val bottom = lowerBound(ys, b.bottom)
-        for (xi in 0 until nx) {
-            val x = xs[xi]
-            if (x <= b.left + 0.01f || x >= b.right - 0.01f) continue
-            var yi = top
-            val end = min(bottom, ny - 1)
-            while (yi < end) {
-                vBlocked[yi * nx + xi] = true
-                yi++
-            }
-        }
-    }
-    return hBlocked to vBlocked
-}
-
-private fun lowerBound(coords: FloatArray, value: Float): Int {
-    var lo = 0
-    var hi = coords.size
-    while (lo < hi) {
-        val mid = (lo + hi) / 2
-        if (coords[mid] < value) lo = mid + 1 else hi = mid
-    }
-    return lo
-}
-
-/** 从终点状态回溯节点，再把起终点替回真实坐标并合并共线点。 */
-private fun reconstructPath(
-    parent: IntArray,
-    endState: Int,
-    xs: FloatArray,
-    ys: FloatArray,
-    nx: Int,
+private fun twoBendPaths(
     start: Offset,
     end: Offset,
-): List<Offset> {
-    val nodes = ArrayList<Int>()
-    var state = endState
-    while (state >= 0) {
-        nodes += state / 3
-        state = parent[state]
+    obstacles: List<ArrowObstacle>,
+    pad: Float,
+): List<List<Offset>> {
+    val box = Rect(
+        min(start.x, end.x) - pad,
+        min(start.y, end.y) - pad,
+        max(start.x, end.x) + pad,
+        max(start.y, end.y) + pad,
+    )
+    val xs = ArrayList<Float>(obstacles.size + 2)
+    val ys = ArrayList<Float>(obstacles.size + 2)
+    xs += start.x
+    xs += end.x
+    ys += start.y
+    ys += end.y
+    for (o in obstacles) {
+        if (!box.overlaps(o.rect)) continue
+        xs += o.rect.left - o.tol
+        xs += o.rect.right + o.tol
+        ys += o.rect.top - o.tol
+        ys += o.rect.bottom + o.tol
     }
-    val points = ArrayList<Offset>(nodes.size)
-    for (i in nodes.indices.reversed()) {
-        val node = nodes[i]
-        points += Offset(xs[node % nx], ys[node / nx])
-    }
-    if (points.isEmpty()) return emptyList()
-    points[0] = start
-    points[points.size - 1] = end
-    return simplifyPath(points)
+    val bendXs = pickCoords(xs, (start.x + end.x) * 0.5f)
+    val bendYs = pickCoords(ys, (start.y + end.y) * 0.5f)
+    val out = ArrayList<List<Offset>>(bendXs.size + bendYs.size)
+    for (x in bendXs) out += listOf(start, Offset(x, start.y), Offset(x, end.y), end)
+    for (y in bendYs) out += listOf(start, Offset(start.x, y), Offset(end.x, y), end)
+    return out
 }
 
-/** 去掉零长段与共线拐点。 */
-private fun simplifyPath(points: List<Offset>): List<Offset> {
+/** 按离 [mid] 由近到远取至多 [ARROW_MAX_BEND_COORDS] 个坐标（差半像素以内算同一个）。 */
+private fun pickCoords(values: List<Float>, mid: Float): List<Float> {
+    val sorted = values.sortedBy { abs(it - mid) }
+    val out = ArrayList<Float>(ARROW_MAX_BEND_COORDS)
+    for (v in sorted) {
+        if (out.any { abs(it - v) <= 0.5f }) continue
+        out += v
+        if (out.size >= ARROW_MAX_BEND_COORDS) break
+    }
+    return out
+}
+
+/** 量一条候选路径：长度、折数、已画引线交叉数、穿障碍的长度、有没有拐回自己的框。 */
+private fun measureArrowPath(
+    points: List<Offset>,
+    order: Int,
+    obstacles: List<ArrowObstacle>,
+    bubble: Rect,
+    drawnSegments: List<Pair<Offset, Offset>>,
+): ArrowPath? {
+    val pts = simplifyPolyline(points)
+    if (pts.size < 2) return null
+    var length = 0f
+    var hits = 0f
+    var crosses = 0
+    var enters = false
+    for (i in 1 until pts.size) {
+        val a = pts[i - 1]
+        val b = pts[i]
+        val len = segmentLength(a, b)
+        if (len < 0.01f) continue
+        length += len
+        if (insideSpan(a, b, bubble, ARROW_OWN_BUBBLE_TOL_PX) > 1e-6f) enters = true
+        // 先用线段的包围盒粗筛：绝大多数字形连边都碰不到，省掉逐块的裁剪计算。
+        val segLeft = min(a.x, b.x)
+        val segRight = max(a.x, b.x)
+        val segTop = min(a.y, b.y)
+        val segBottom = max(a.y, b.y)
+        for (o in obstacles) {
+            if (o.rect.right < segLeft || o.rect.left > segRight ||
+                o.rect.bottom < segTop || o.rect.top > segBottom
+            ) {
+                continue
+            }
+            val span = insideSpan(a, b, o.rect, o.tol)
+            if (span > 1e-6f) hits += span * len
+        }
+        for (d in drawnSegments) {
+            if (segmentsIntersect(a, b, d.first, d.second)) crosses++
+        }
+    }
+    if (length < 0.01f) return null
+    return ArrowPath(
+        points = pts,
+        bends = max(0, pts.size - 2),
+        length = length,
+        crosses = crosses,
+        hits = hits,
+        entersBubble = enters,
+        order = order,
+    )
+}
+
+/**
+ * 线段落在矩形**内部**的参数长度（0 = 没穿过）。
+ *
+ * 矩形先按 [tol] 内缩：[tol] 是该层容差（逐字墨迹 0.5px、图形 / 旁注框 1px），
+ * 贴边与平行贴边都不算穿过。返回的是 t 区间长度，乘上段长才是穿透长度。
+ */
+private fun insideSpan(a: Offset, b: Offset, r: Rect, tol: Float): Float {
+    val dx = b.x - a.x
+    val dy = b.y - a.y
+    val left = r.left + tol
+    val right = r.right - tol
+    val top = r.top + tol
+    val bottom = r.bottom - tol
+    if (left >= right || top >= bottom) return 0f
+    var t0 = 0f
+    var t1 = 1f
+    val p = floatArrayOf(-dx, dx, -dy, dy)
+    val q = floatArrayOf(a.x - left, right - a.x, a.y - top, bottom - a.y)
+    for (i in 0..3) {
+        if (abs(p[i]) < 1e-6f) {
+            // 平行且贴在这条边上：不算穿过。
+            if (q[i] <= 0f) return 0f
+        } else {
+            val t = q[i] / p[i]
+            if (p[i] < 0f) {
+                if (t > t1) return 0f
+                if (t > t0) t0 = t
+            } else {
+                if (t < t0) return 0f
+                if (t < t1) t1 = t
+            }
+        }
+    }
+    return if (t1 > t0) t1 - t0 else 0f
+}
+
+/** 去掉零长段与共线拐点（画出来还是同一条折线）。 */
+private fun simplifyPolyline(points: List<Offset>): List<Offset> {
     val out = ArrayList<Offset>(points.size)
     for (p in points) {
         val last = out.lastOrNull()
@@ -1560,59 +1524,22 @@ private fun simplifyPath(points: List<Offset>): List<Offset> {
     return out
 }
 
-/** 旁注框 / 墨迹朝对方一侧的边上的端口（另一轴按对方中心夹到框内）。 */
-private fun portOnRect(rect: Rect, toward: Offset): Offset {
-    val dx = toward.x - rect.center.x
-    val dy = toward.y - rect.center.y
-    val horizontal = rect.width > 0f && rect.height > 0f &&
-        abs(dx) * rect.height >= abs(dy) * rect.width
-    return if (horizontal) {
-        Offset(
-            if (dx >= 0f) rect.right else rect.left,
-            toward.y.coerceIn(rect.top, rect.bottom),
-        )
-    } else {
-        Offset(
-            toward.x.coerceIn(rect.left, rect.right),
-            if (dy >= 0f) rect.bottom else rect.top,
-        )
-    }
+private fun segmentLength(a: Offset, b: Offset): Float {
+    val dx = b.x - a.x
+    val dy = b.y - a.y
+    return sqrt(dx * dx + dy * dy)
 }
 
-/** 框、墨迹与其他旁注的并集（没有页面边界时的可见图搜索范围）。 */
-private fun unionBounds(bubble: Rect, inkRects: List<Rect>, otherBubbles: List<Rect>): Rect {
-    var left = bubble.left
-    var top = bubble.top
-    var right = bubble.right
-    var bottom = bubble.bottom
-    for (r in inkRects) {
-        if (r.left < left) left = r.left
-        if (r.top < top) top = r.top
-        if (r.right > right) right = r.right
-        if (r.bottom > bottom) bottom = r.bottom
+private fun ArrowPath.toNoteArrow(): NoteArrow =
+    if (points.size <= 2) {
+        NoteArrow.Straight(points.first(), points.last())
+    } else {
+        NoteArrow.Elbow(points)
     }
-    for (r in otherBubbles) {
-        if (r.left < left) left = r.left
-        if (r.top < top) top = r.top
-        if (r.right > right) right = r.right
-        if (r.bottom > bottom) bottom = r.bottom
-    }
-    return Rect(left, top, right, bottom)
-}
 
 private fun arrowSegments(arrow: NoteArrow): List<Pair<Offset, Offset>> = when (arrow) {
     is NoteArrow.Straight -> listOf(arrow.start to arrow.end)
     is NoteArrow.Elbow -> arrow.points.zipWithNext()
-}
-
-/** 折线是否进入矩形内部（贴着边走不算）。 */
-private fun pathEntersRect(points: List<Offset>, rect: Rect): Boolean {
-    if (rect.width <= 0.02f || rect.height <= 0.02f) return false
-    val inner = Rect(rect.left + 0.01f, rect.top + 0.01f, rect.right - 0.01f, rect.bottom - 0.01f)
-    for (i in 1 until points.size) {
-        if (segmentHitsRect(points[i - 1], points[i], inner)) return true
-    }
-    return false
 }
 
 /** 两条线段是否相交（含端点接触；用于引线交叉计费）。 */
@@ -1634,53 +1561,6 @@ private fun orientation(a: Offset, b: Offset, c: Offset): Float =
 private fun onSegment(a: Offset, b: Offset, p: Offset): Boolean =
     p.x >= min(a.x, b.x) - 0.01f && p.x <= max(a.x, b.x) + 0.01f &&
         p.y >= min(a.y, b.y) - 0.01f && p.y <= max(a.y, b.y) + 0.01f
-
-private fun inflate(r: Rect, by: Float): Rect = Rect(r.left - by, r.top - by, r.right + by, r.bottom + by)
-
-private fun polylineLength(points: List<Offset>): Float {
-    var total = 0f
-    for (i in 1 until points.size) {
-        val dx = points[i].x - points[i - 1].x
-        val dy = points[i].y - points[i - 1].y
-        total += sqrt(dx * dx + dy * dy)
-    }
-    return total
-}
-
-private fun isClear(points: List<Offset>, blockers: List<Rect>): Boolean {
-    for (i in 1 until points.size) {
-        val a = points[i - 1]
-        val b = points[i]
-        if (abs(a.x - b.x) < 0.01f && abs(a.y - b.y) < 0.01f) continue
-        if (blockers.any { segmentHitsRect(a, b, it) }) return false
-    }
-    return true
-}
-
-/** 线段与矩形是否相交（Liang–Barsky）。端点落在矩形内也算相交。 */
-private fun segmentHitsRect(a: Offset, b: Offset, r: Rect): Boolean {
-    var t0 = 0f
-    var t1 = 1f
-    val dx = b.x - a.x
-    val dy = b.y - a.y
-    val p = floatArrayOf(-dx, dx, -dy, dy)
-    val q = floatArrayOf(a.x - r.left, r.right - a.x, a.y - r.top, r.bottom - a.y)
-    for (i in 0..3) {
-        if (abs(p[i]) < 1e-6f) {
-            if (q[i] < 0f) return false
-        } else {
-            val t = q[i] / p[i]
-            if (p[i] < 0f) {
-                if (t > t1) return false
-                if (t > t0) t0 = t
-            } else {
-                if (t < t0) return false
-                if (t < t1) t1 = t
-            }
-        }
-    }
-    return true
-}
 
 /**
  * 批注文字覆盖层：箭头先画（框下），再把 [noteBubblePlacements] 的结果画在页面之上。

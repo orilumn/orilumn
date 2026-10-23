@@ -571,6 +571,28 @@ class NoteBubblesTest {
     }
 
     @Test
+    fun `same distance longer note picks first`() {
+        // 两条批注锚在同一行、抢同一块只放得下一条的行间空白：
+        // 距离一样时文字长的先挑（占地大），短的让位成小图标。
+        val anchor = rect(0f, 0f, 600f, 40f)
+        val bubbles = place(
+            notes = listOf(
+                noteInk(1, listOf(anchor), "想法"),
+                noteInk(2, listOf(anchor), "想法想法想法"),
+            ),
+            textInk = listOf(anchor),
+            contentBottom = 90f,
+            pageRight = 600f,
+            pageBottom = 90f,
+        )
+        assertEquals(2, bubbles.size)
+        val short = bubbles.single { it.annotationId == 1L }
+        val long = bubbles.single { it.annotationId == 2L }
+        assertTrue("长批注应先挑到行间空白：$long", !long.compact)
+        assertTrue("短批注应让位成小图标：$short", short.compact)
+    }
+
+    @Test
     fun `figure is an obstacle too`() {
         // 插图、背景图都算图形：铺满其他空白时，旁注退成小图标，不压图。
         val anchor = rect(0f, 0f, 200f, 40f)

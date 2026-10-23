@@ -676,7 +676,7 @@ internal sealed interface NoteArrow {
  * 1. 正文按行合并成行框，连同图形 / 表格 / 线条一起当障碍；
  * 2. [maximalFreeRects] 一次算出整页的极大空闲矩形（含四个页边距）；
  * 3. [noteCandidates] 为每条批注 × 每块空白生成候选框（视线内就近、整句优先、4 字保底）；
- * 4. [assignNoteCandidates] 全页分配：候选少 → 更近 → 正文靠前，单向让位、不互换；
+ * 4. [assignNoteCandidates] 全页分配：近 → 长 → 正文靠前，单向让位、不互换；
  * 5. 每条框再路由一条指向原文的箭头（小图标形态没有箭头）。
  *
  * 不重叠是硬约束；一条都排不下的批注退成原文右下角的小省略号（[NoteBubble.compact]），
@@ -836,16 +836,16 @@ private class NoteRequest(
 )
 
 /**
- * 全页分配（§4.3）：**单向让位**，不做两两互换。
+ * 全页分配（§5）：**单向让位**，不做两两互换。
  *
- * 1. **谁先挑**：候选少 → 候选里最近的那个更近 → 正文流靠前（锚点 top、id）；
- * 2. **先挑者拿走自己最好的候选**（完整优先、其次显示字数最多，候选已排好序），
- *    后来者只能跳过冲突候选，在自己剩下的候选里取最好的；
+ * 1. **谁先挑**：最近候选更近 → 批注文字更长（占地大，先选）→ 正文流靠前（锚点 top、id）；
+ * 2. **先挑者拿走自己评分最低的候选**（候选已按扣分制排好序），后来者只能跳过冲突候选，
+ *    在自己剩下的候选里取最好的；已选框立即充当后续候选的障碍（含 1em 外扩）；
  * 3. **页边距一维排布**只对同一侧页边距里的框做上下 / 左右推开，不改变先挑顺序；
  * 4. 一条都分不到的批注交给调用方退成小图标，**不重叠、不压字**。
  *
  * @param notes 已经过滤空批注 / 按锚点排好序的批注。
- * @param candidatesByNote 每条批注的候选（已按完整 → 距离 → 显示字数排好序）。
+ * @param candidatesByNote 每条批注的候选（已按扣分制分数 → 距离 → 位置排好序）。
  * @param margin 框与框之间要求的最小间距（像素，= 1em），页边距一维排布也用它。
  */
 private fun assignNoteCandidates(
@@ -860,18 +860,20 @@ private fun assignNoteCandidates(
     }
     if (requests.isEmpty()) return emptyList()
 
-    // 先挑顺序：候选少 → 最近候选更近 → 正文流靠前（锚点 top、id）。
+    // 先挑顺序（§5.1）：最近候选更近 → 批注文字更长（占地大，先给它选）→ 正文流靠前。
+    // 候选数量不再参与排序：候选多只说明这块页更碎，不代表该先挑。
     val order = requests.indices.sortedWith(
         compareBy(
-            { requests[it].candidates.size },
             { requests[it].candidates.minOf { c -> c.distance } },
+            { -requests[it].note.text.count { c -> c != '\n' } },
             { requests[it].anchor.top },
             { requests[it].note.annotationId },
         ),
     )
     val selected = arrayOfNulls<NoteCandidate>(requests.size)
 
-    // 单向让位：按顺序各取自己最好的、不与先挑者冲突的候选；先挑者永不被挤走。
+    // 单向让位：按顺序各取自己最好的、不与已选框冲突的候选；先挑者永不被挤走。
+    // 已选框就是「障碍表」：后挑者只在自己的候选里找位置，不会挤走或重叠先挑者。
     for (i in order) {
         selected[i] = requests[i].candidates.firstOrNull { fits(it, selected, i, margin) }
     }

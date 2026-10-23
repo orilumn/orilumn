@@ -95,6 +95,15 @@ private const val MIN_SHOWN_CHARS: Int = 4
 /** 右下角小图标的直径（以旁注字号为单位）：只是「这里有一条批注」的记号，不抢正文。 */
 private const val NOTE_ICON_DIAMETER_RATIO: Float = 1.5f
 
+/** 标注与障碍、与另一条标注之间的最小距离（以旁注字号为单位）。 */
+private const val NOTE_MARGIN_EM: Float = 1f
+
+/** 标注放在所选文字右侧时与文字的距离（要留出画水平箭头的地方）。 */
+private const val NOTE_SIDE_GAP_EM: Float = 1.8f
+
+/** 标注离屏幕边的距离：贴边会让框看起来像被裁掉一条。 */
+private const val NOTE_PAGE_EDGE_EM: Float = 0.5f
+
 /** 每条批注最多保留多少个候选（按排序取前 N，避免极端页面候选爆炸）。 */
 private const val MAX_CANDIDATES_PER_NOTE: Int = 300
 
@@ -119,6 +128,13 @@ private const val ARROW_TARGET_LIMIT: Int = 4
 /** 一折 / 两折只试直线「最接近通畅」的前几对端口（全试一遍是白算）。 */
 private const val ARROW_ONEBEND_PAIRS: Int = 96
 private const val ARROW_TWOBEND_PAIRS: Int = 24
+
+/** 弧线与三折只在前几对端口上试：它们是兜底形态，没必要铺满整页。 */
+private const val ARROW_CURVE_PAIRS: Int = 48
+private const val ARROW_THREEBEND_PAIRS: Int = 12
+
+/** 贝塞尔弧线的采样段数：量穿字与交叉用，24 段在页面上看不出折。 */
+private const val ARROW_CURVE_SAMPLES: Int = 24
 
 /** 两折线每个方向最多试几个拐点坐标（再多的只是白算）。 */
 private const val ARROW_MAX_BEND_COORDS: Int = 8
@@ -225,6 +241,99 @@ private fun wrapNoteText(
         shown++
     }
     return lines to shown
+}
+
+/**
+ * 旁注的度量：字号、行高、内缩、外留白全部从**正文主字号**推出来，一页只算一次。
+ *
+ * 落位、绘制与「整句宽」估算共用这一份，避免三处各写一套比例（旧实现曾出现
+ * 「文字框内缩按 0.35 算、落位按 0.7 算」这种对不上、Text 多折一行被省略号截掉）。
+ */
+internal data class NoteMetrics(val bodyPx: Float) {
+    /** 旁注字号：比正文小一号，读起来不抢正文。 */
+    val em: Float = bodyPx * NOTE_BUBBLE_FONT_RATIO
+
+    /** 旁注行高：旁注自己排自己的，与正文行高无关。 */
+    val lineH: Float = em * NOTE_BUBBLE_LINE_RATIO
+
+    /** 单侧内缩（[NoteBubbles] 里 Text 的 `padding(horizontal = padX)`）。 */
+    val padX: Float = em * NOTE_BUBBLE_PAD_RATIO
+
+    /** 两侧内缩合计：算宽度、折行都用它。 */
+    val padTotal: Float = padX * 2f
+
+    /** 标注与障碍、与另一条标注之间的最小距离。 */
+    val margin: Float = em * NOTE_MARGIN_EM
+
+    /** 标注放在所选文字右侧时的侧向距离（留给水平箭头）。 */
+    val sideGap: Float = em * NOTE_SIDE_GAP_EM
+
+    /** 标注离屏幕边的距离。 */
+    val edge: Float = em * NOTE_PAGE_EDGE_EM
+}
+
+/**
+ * 一条批注在一块空白里最终的尺寸（字体 / 字号 / 行距 / margin 一起算出来的结果）。
+ *
+ * @property width 框宽（像素，含两侧内缩）。
+ * @property lines 实际显示几行（受空白高度限制，可能少于整句所需行数）。
+ * @property height 框高 = [lines] × [lineH][NoteMetrics.lineH]。
+ * @property shownChars 放得下几个字（整体带省略号时小于 [totalChars]）。
+ * @property totalChars 整句字数（不计换行符）。
+ */
+internal data class NoteBoxSize(
+    val width: Float,
+    val lines: Int,
+    val height: Float,
+    val shownChars: Int,
+    val totalChars: Int,
+) {
+    /** 整句都放得下。 */
+    val complete: Boolean get() = totalChars > 0 && shownChars >= totalChars
+
+    /** 至少能读 4 个字（整句不足 4 字时按整句）：再少就交给小图标。 */
+    val readable: Boolean get() = lines > 0 && shownChars >= min(MIN_SHOWN_CHARS, totalChars)
+}
+
+/**
+ * 算一条批注在给定空白里的最终尺寸（见 `docs/旁注布点与引线-实施方案.md` §3）。
+ *
+ * 顺序：整句所需宽度 → 空白扣掉两侧 margin（右侧候选靠文字那一侧用 [NoteMetrics.sideGap]）
+ * 后够不够 → 够就单行并按文字宽收窄，不够才按可用宽折行 → 行数再受空白高度限制。
+ *
+ * @param blankWidth/blankHeight 这块空白的原始宽高（未扣 margin）。
+ * @param besideTextRight 框是否落在所选文字右侧：是则靠文字那一侧留 [NoteMetrics.sideGap]。
+ */
+internal fun noteBoxFit(
+    text: String,
+    metrics: NoteMetrics,
+    blankWidth: Float,
+    blankHeight: Float,
+    besideTextRight: Boolean = false,
+): NoteBoxSize {
+    val content = text.trim()
+    val total = content.count { it != '\n' }
+    if (total == 0 || blankWidth <= 0f || blankHeight <= 0f) {
+        return NoteBoxSize(0f, 0, 0f, 0, total)
+    }
+    val textSide = if (besideTextRight) metrics.sideGap else metrics.margin
+    val innerW = blankWidth - metrics.margin - textSide - metrics.padTotal
+    val capacity = ((blankHeight - metrics.margin * 2f) / metrics.lineH).toInt()
+    if (innerW <= 0f || capacity < 1) return NoteBoxSize(0f, 0, 0f, 0, total)
+
+    val desired = estimatedNoteTextWidth(content, metrics.em)
+    val width = min(desired, innerW) + metrics.padTotal
+    val inner = width - metrics.padTotal
+    val needed = noteTextFit(content, inner, metrics.em, Int.MAX_VALUE).lines
+    val lines = min(needed, capacity)
+    val fit = noteTextFit(content, inner, metrics.em, lines)
+    return NoteBoxSize(
+        width = width,
+        lines = lines,
+        height = lines * metrics.lineH,
+        shownChars = min(fit.shownChars, total),
+        totalChars = total,
+    )
 }
 
 /**
@@ -461,7 +570,7 @@ internal sealed interface NoteArrow {
 /**
  * 给本页每条批注在**整页范围内统一布点**（纯函数，无 Compose 依赖）。
  *
- * 流水线（`docs/旁注布点算法重做-实施计划.md` §5）：
+ * 流水线（`docs/旁注布点与引线-实施方案.md` §5）：
  * 1. 正文按行合并成行框，连同图形 / 表格 / 线条一起当障碍；
  * 2. [maximalFreeRects] 一次算出整页的极大空闲矩形（含四个页边距）；
  * 3. [noteCandidates] 为每条批注 × 每块空白生成候选框（视线内就近、整句优先、4 字保底）；
@@ -490,10 +599,11 @@ internal fun noteBubblePlacements(
     pageBottom: Float = contentBottom,
 ): List<NoteBubble> {
     if (noteInk.isEmpty()) return emptyList()
-    val body = fontPx.coerceAtLeast(1f)
-    val small = body * NOTE_BUBBLE_FONT_RATIO
-    val lineH = small * NOTE_BUBBLE_LINE_RATIO
-    val padX = small * NOTE_BUBBLE_PAD_RATIO * 2f
+    val metrics = NoteMetrics(fontPx.coerceAtLeast(1f))
+    val body = metrics.bodyPx
+    val small = metrics.em
+    val lineH = metrics.lineH
+    val padX = metrics.padTotal
     // 旁注框与墨迹之间留一线：贴在字上会让人觉得把正文框进去了。
     val gap = body * 0.25f
 
@@ -1223,7 +1333,7 @@ private class ArrowPair(
 /**
  * 给一条旁注找箭头路由（纯函数）：端口搜索 + 直线 / 一折 / 两折，**最多两个拐点**。
  *
- * 第一轮的可见图 + A* 已按 `docs/旁注布点算法重做-实施计划.md` §2.2 退役：端口只在
+ * 第一轮的可见图 + A* 已按 `docs/旁注布点与引线-实施方案.md` §2.2 退役：端口只在
  * 「旁注框四边 × 目标字四边」各取中点与两个内缩点，路径只在直线（1 段）、一折（2 段）、
  * 两折（3 段）里挑，**禁止三折及以上**。
  *

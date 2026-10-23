@@ -914,4 +914,93 @@ class NoteBubblesTest {
         assertTrue("中文应比同字数的西文更宽，wide=$wide narrow=$narrow", wide > narrow)
         assertTrue(abs(wide - 2) <= 1)
     }
+
+    /** 旁注度量：字号、行高、内缩、margin 都从正文主字号推出来。 */
+    @Test
+    fun `note metrics derive every size from the body font`() {
+        val m = NoteMetrics(bodyPx = 20f)
+        assertEquals(14.4f, m.em, 0.01f)
+        assertEquals(19.872f, m.lineH, 0.01f)
+        assertEquals(5.04f, m.padX, 0.01f)
+        assertEquals(10.08f, m.padTotal, 0.01f)
+        assertEquals(14.4f, m.margin, 0.01f)
+        assertEquals(25.92f, m.sideGap, 0.01f)
+        assertEquals(7.2f, m.edge, 0.01f)
+    }
+
+    /** 整句一行放得下：框宽 = 文字宽 + 两侧内缩，不多占空白。 */
+    @Test
+    fun `short note shrinks to one line inside a wide blank`() {
+        val m = NoteMetrics(bodyPx = 20f)
+        val size = noteBoxFit("用几章来", m, blankWidth = 200f, blankHeight = 100f)
+        assertEquals(1, size.lines)
+        // 4 个全角字 = 4 × em；再加两侧内缩。
+        assertEquals(57.6f + m.padTotal, size.width, 0.01f)
+        assertEquals(m.lineH, size.height, 0.01f)
+        assertEquals(4, size.shownChars)
+        assertTrue(size.complete)
+        assertTrue(size.readable)
+    }
+
+    /** 整句一行放不下：按可用宽折行，行数与整句字数都对得上。 */
+    @Test
+    fun `long note wraps to the usable width`() {
+        val m = NoteMetrics(bodyPx = 20f)
+        val text = "字".repeat(30)
+        val size = noteBoxFit(text, m, blankWidth = 200f, blankHeight = 100f)
+        val inner = 200f - m.margin * 2f - m.padTotal
+        assertEquals(inner + m.padTotal, size.width, 0.01f)
+        assertEquals(3, size.lines)
+        assertEquals(3 * m.lineH, size.height, 0.01f)
+        assertTrue("30 个字 3 行应放得下，实际 ${size.shownChars}", size.complete)
+    }
+
+    /** 放在文字右侧要让出 sideGap（画水平箭头），可用宽比普通空白窄。 */
+    @Test
+    fun `right side keeps room for a horizontal arrow`() {
+        val m = NoteMetrics(bodyPx = 20f)
+        val text = "字".repeat(12)
+        val normal = noteBoxFit(text, m, blankWidth = 200f, blankHeight = 100f)
+        val beside = noteBoxFit(text, m, blankWidth = 200f, blankHeight = 100f, besideTextRight = true)
+        assertTrue("右侧可用宽应更窄：normal=${normal.width} beside=${beside.width}", beside.width < normal.width)
+        assertEquals(normal.lines, beside.lines)
+    }
+
+    /** 空白太窄，只能读 3 个字：不算可读，交给下一位或小图标。 */
+    @Test
+    fun `sliver narrower than four characters is not readable`() {
+        val m = NoteMetrics(bodyPx = 20f)
+        val size = noteBoxFit("字".repeat(10), m, blankWidth = 60f, blankHeight = 100f)
+        assertEquals(3, size.lines)
+        assertEquals(3, size.shownChars)
+        assertTrue(!size.readable)
+        assertTrue(!size.complete)
+    }
+
+    /** 空白矮到放不下整句：按高度截断，但能读就先显示。 */
+    @Test
+    fun `blank height limits the lines and reports truncation`() {
+        val m = NoteMetrics(bodyPx = 20f)
+        val size = noteBoxFit("字".repeat(30), m, blankWidth = 200f, blankHeight = 60f)
+        assertEquals(1, size.lines)
+        assertEquals(m.lineH, size.height, 0.01f)
+        assertTrue(size.shownChars in 1..29)
+        assertTrue(!size.complete)
+        assertTrue(size.readable)
+    }
+
+    /** 高／宽不够划出一行时返回空尺寸，不产生候选。 */
+    @Test
+    fun `blank smaller than one line yields no box`() {
+        val m = NoteMetrics(bodyPx = 20f)
+        val short = noteBoxFit("用几章来", m, blankWidth = 200f, blankHeight = 40f)
+        assertEquals(0, short.lines)
+        assertEquals(0f, short.width, 0.01f)
+        val narrow = noteBoxFit("用几章来", m, blankWidth = 20f, blankHeight = 100f)
+        assertEquals(0, narrow.lines)
+        assertEquals(0f, narrow.width, 0.01f)
+        val empty = noteBoxFit("  ", m, blankWidth = 200f, blankHeight = 100f)
+        assertEquals(0, empty.lines)
+        assertEquals(0, empty.totalChars)
+    }
 }

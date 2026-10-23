@@ -244,32 +244,67 @@ private fun wrapNoteText(
 }
 
 /**
- * 旁注的度量：字号、行高、内缩、外留白全部从**正文主字号**推出来，一页只算一次。
+ * 旁注样式：字号、字体、行距、内缩与四周留白（将来由「批注样式」设置页提供，D-29）。
  *
- * 落位、绘制与「整句宽」估算共用这一份，避免三处各写一套比例（旧实现曾出现
- * 「文字框内缩按 0.35 算、落位按 0.7 算」这种对不上、Text 多折一行被省略号截掉）。
+ * 比例全部以**旁注字号**为基准；字号与字体可以脱离正文单独设置，默认值只是推荐值，
+ * 不是写死的常量。样式变化只影响旁注自己，不碰正文排版。
+ *
+ * @property fontPx 旁注字号（像素）。默认 = 正文主字号 × [NOTE_BUBBLE_FONT_RATIO]。
+ * @property fontFamily 旁注字体（`null` = 跟随界面默认）；批注样式落地后从这里进来。
+ * @property lineHeightRatio 行高 / 字号。
+ * @property padEm 单侧内缩 / 字号。
+ * @property marginEm 与障碍、与另一条旁注的最小距离 / 字号。
+ * @property sideGapEm 放在文字右侧时与文字的侧向距离 / 字号（留给水平箭头）。
+ * @property edgeEm 离屏幕边的距离 / 字号。
  */
-internal data class NoteMetrics(val bodyPx: Float) {
-    /** 旁注字号：比正文小一号，读起来不抢正文。 */
-    val em: Float = bodyPx * NOTE_BUBBLE_FONT_RATIO
+internal data class NoteStyle(
+    val fontPx: Float,
+    val fontFamily: String? = null,
+    val lineHeightRatio: Float = NOTE_BUBBLE_LINE_RATIO,
+    val padEm: Float = NOTE_BUBBLE_PAD_RATIO,
+    val marginEm: Float = NOTE_MARGIN_EM,
+    val sideGapEm: Float = NOTE_SIDE_GAP_EM,
+    val edgeEm: Float = NOTE_PAGE_EDGE_EM,
+) {
+    companion object {
+        /** 默认样式：字号比正文小一号，其余按推荐比例；字体跟随界面默认。 */
+        fun forBody(bodyPx: Float): NoteStyle =
+            NoteStyle(fontPx = bodyPx.coerceAtLeast(1f) * NOTE_BUBBLE_FONT_RATIO)
+    }
+}
+
+/**
+ * 由 [NoteStyle] 算出的像素度量：一页只算一次，落位、绘制与「整句宽」估算共用。
+ *
+ * 这里是唯一把「字号 / 行距 / 内缩 / 留白」变成像素的地方，避免三处各写一套比例
+ * （旧实现曾出现「文字框内缩按 0.35 算、落位按 0.7 算」这种对不上、Text 多折一行被截掉）。
+ */
+internal data class NoteMetrics(val style: NoteStyle) {
+    /** 旁注字号。 */
+    val em: Float get() = style.fontPx
 
     /** 旁注行高：旁注自己排自己的，与正文行高无关。 */
-    val lineH: Float = em * NOTE_BUBBLE_LINE_RATIO
+    val lineH: Float get() = em * style.lineHeightRatio
 
     /** 单侧内缩（[NoteBubbles] 里 Text 的 `padding(horizontal = padX)`）。 */
-    val padX: Float = em * NOTE_BUBBLE_PAD_RATIO
+    val padX: Float get() = em * style.padEm
 
     /** 两侧内缩合计：算宽度、折行都用它。 */
-    val padTotal: Float = padX * 2f
+    val padTotal: Float get() = padX * 2f
 
     /** 标注与障碍、与另一条标注之间的最小距离。 */
-    val margin: Float = em * NOTE_MARGIN_EM
+    val margin: Float get() = em * style.marginEm
 
     /** 标注放在所选文字右侧时的侧向距离（留给水平箭头）。 */
-    val sideGap: Float = em * NOTE_SIDE_GAP_EM
+    val sideGap: Float get() = em * style.sideGapEm
 
     /** 标注离屏幕边的距离。 */
-    val edge: Float = em * NOTE_PAGE_EDGE_EM
+    val edge: Float get() = em * style.edgeEm
+
+    companion object {
+        /** 按正文主字号取默认样式。 */
+        fun forBody(bodyPx: Float): NoteMetrics = NoteMetrics(NoteStyle.forBody(bodyPx))
+    }
 }
 
 /**
@@ -597,10 +632,11 @@ internal fun noteBubblePlacements(
     pageRight: Float,
     fontPx: Float,
     pageBottom: Float = contentBottom,
+    noteStyle: NoteStyle = NoteStyle.forBody(fontPx),
 ): List<NoteBubble> {
     if (noteInk.isEmpty()) return emptyList()
-    val metrics = NoteMetrics(fontPx.coerceAtLeast(1f))
-    val body = metrics.bodyPx
+    val metrics = NoteMetrics(noteStyle)
+    val body = fontPx.coerceAtLeast(1f)
     val small = metrics.em
     val lineH = metrics.lineH
     val padX = metrics.padTotal

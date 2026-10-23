@@ -1,5 +1,6 @@
 package orilumn.reader.ui.reader
 
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import kotlin.math.abs
 import org.junit.Assert.assertEquals
@@ -22,6 +23,31 @@ class NoteBubblesTest {
 
     private fun rect(left: Float, top: Float, right: Float, bottom: Float) =
         Rect(left, top, right, bottom)
+
+    /** 线段是否穿过矩形内部（贴着边不算；用于断言引线不压障碍）。 */
+    private fun segmentHits(a: Offset, b: Offset, r: Rect): Boolean {
+        var t0 = 0f
+        var t1 = 1f
+        val dx = b.x - a.x
+        val dy = b.y - a.y
+        val p = floatArrayOf(-dx, dx, -dy, dy)
+        val q = floatArrayOf(a.x - r.left, r.right - a.x, a.y - r.top, r.bottom - a.y)
+        for (i in 0..3) {
+            if (abs(p[i]) < 1e-6f) {
+                if (q[i] <= 0f) return false
+            } else {
+                val t = q[i] / p[i]
+                if (p[i] < 0f) {
+                    if (t > t1) return false
+                    if (t > t0) t0 = t
+                } else {
+                    if (t < t0) return false
+                    if (t < t1) t1 = t
+                }
+            }
+        }
+        return t0 < t1
+    }
 
     private val noteFont = 20f * NOTE_BUBBLE_FONT_RATIO
     private val noteLine = noteFont * NOTE_BUBBLE_LINE_RATIO
@@ -427,15 +453,87 @@ class NoteBubblesTest {
     }
 
     @Test
-    fun `arrow arcs away when straight and elbows are blocked`() {
+    fun `arrow detours around an obstacle with orthogonal segments`() {
+        // 直线穿不过中间的障碍：可见图应绕到障碍外侧，且每一段都是横平竖直。
+        val bubble = rect(0f, 0f, 100f, 40f)
+        val obstacle = rect(150f, 10f, 250f, 30f)
+        val arrow = routeNoteArrow(
+            bubble = bubble,
+            inkRects = listOf(rect(300f, 0f, 400f, 40f)),
+            obstacles = listOf(obstacle),
+            otherBubbles = emptyList(),
+        )
+        val elbow = arrow as NoteArrow.Elbow
+        assertTrue("绕障至少要两个拐点，实际=${elbow.points}", elbow.points.size >= 3)
+        for (i in 1 until elbow.points.size) {
+            val a = elbow.points[i - 1]
+            val b = elbow.points[i]
+            assertTrue("引线必须横平竖直：$a → $b", abs(a.x - b.x) < 0.01f || abs(a.y - b.y) < 0.01f)
+            assertTrue("引线不该压住障碍：$a → $b", !segmentHits(a, b, obstacle))
+            assertTrue("引线不该拐回自己的框：$a → $b", !segmentHits(a, b, bubble))
+        }
+    }
+
+    @Test
+    fun `arrow routes around a U-shaped obstacle`() {
+        // 三面围住的 U 形障碍，开口朝右：只能从外侧绕过去。
+        val bubble = rect(0f, 0f, 100f, 40f)
+        val ink = rect(300f, 20f, 400f, 35f)
+        val shape = listOf(
+            rect(150f, 0f, 250f, 15f),
+            rect(150f, 45f, 250f, 60f),
+            rect(150f, 0f, 165f, 60f),
+        )
+        val arrow = routeNoteArrow(
+            bubble = bubble,
+            inkRects = listOf(ink),
+            obstacles = shape,
+            otherBubbles = emptyList(),
+            pageBounds = rect(0f, -100f, 500f, 200f),
+        )
+        val elbow = arrow as NoteArrow.Elbow
+        assertTrue("U 形绕障至少两个拐点，实际=${elbow.points}", elbow.points.size >= 3)
+        for (i in 1 until elbow.points.size) {
+            val a = elbow.points[i - 1]
+            val b = elbow.points[i]
+            for (o in shape) {
+                assertTrue("引线不该压住 U 形障碍：$a → $b", !segmentHits(a, b, o))
+            }
+        }
+    }
+
+    @Test
+    fun `arrow avoids other bubbles`() {
+        val other = rect(140f, -20f, 160f, 120f)
+        val arrow = routeNoteArrow(
+            bubble = rect(0f, 0f, 100f, 40f),
+            inkRects = listOf(rect(300f, 0f, 400f, 40f)),
+            obstacles = emptyList(),
+            otherBubbles = listOf(other),
+            pageBounds = rect(0f, -100f, 500f, 200f),
+        )
+        val points = (arrow as NoteArrow.Elbow).points
+        for (i in 1 until points.size) {
+            assertTrue(
+                "引线不该穿过其他旁注：${points[i - 1]} → ${points[i]}",
+                !segmentHits(points[i - 1], points[i], other),
+            )
+        }
+    }
+
+    @Test
+    fun `arrow prefers the corridor without an already drawn arrow`() {
+        // 上下两条绕障走廊等长；上面那条已经有一条引线，后画的应走下面。
+        val drawn = NoteArrow.Straight(Offset(100f, 9.5f), Offset(300f, 9.5f))
         val arrow = routeNoteArrow(
             bubble = rect(0f, 0f, 100f, 40f),
             inkRects = listOf(rect(300f, 0f, 400f, 40f)),
             obstacles = listOf(rect(150f, 10f, 250f, 30f)),
             otherBubbles = emptyList(),
+            drawnArrows = listOf(drawn),
         )
-        val arc = arrow as NoteArrow.Arc
-        assertTrue("弧线应鼓出障碍之外，control=${arc.control}", arc.control.y > 30f)
+        val points = (arrow as NoteArrow.Elbow).points
+        assertTrue("应避开已画引线走下方，实际=${points}", points.any { it.y > 20f })
     }
 
     @Test

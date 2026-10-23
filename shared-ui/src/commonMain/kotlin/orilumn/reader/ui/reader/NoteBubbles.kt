@@ -38,8 +38,9 @@ import orilumn.reader.engine.skia.PageImage
  * 正文旁的批注文字（用户层覆盖层，D-26 / D-28）。
  *
  * 批注是高亮 / 划线记录上附带的一句话，所以它显示在**那条墨迹旁边**：读者不必打开清单
- * 才知道这条标注写了什么。文字块由 [noteBubblePlacements] 就近找空白放，**不改排版、
- * 不进栅格**——它只是盖在页面之上的一层，翻页即随页重组（[ReaderScreen] 在翻页动画期间隐藏它）。
+ * 才知道这条标注写了什么。文字块由 [noteBubblePlacements] 按「整句可读优先」在整页空白里
+ * 统一布点，**不改排版、不进栅格**——它只是盖在页面之上的一层，翻页即随页重组
+ * （[ReaderScreen] 在翻页动画期间隐藏它）。
  *
  * @property annotationId 这条批注属于哪条标注（点文字块 = 回去改这句话）。
  * @property text 批注正文（完整文本，超出可用行数由 Text 自己省略）。
@@ -48,7 +49,7 @@ import orilumn.reader.engine.skia.PageImage
  * @property maxLines 这块空白实际要用几行（1 起，已按「整句优先」与空白高度取小）。
  * @property argb 所属标注的墨色：文字块用它做淡底与左侧色条，读者一眼看出是哪一条。
  * @property fontPx 批注字号（像素）：比正文小一号，读起来不抢正文。
- * @property arrow 指向原文的箭头（null = 三种路由都走不通，只画旁注）。
+ * @property arrow 指向原文的箭头（null = 可见图与兜底都不通，只画旁注）。
  */
 internal data class NoteBubble(
     val annotationId: Long,
@@ -877,7 +878,7 @@ private val MARGIN_SIDES = listOf(
 /**
  * 整页的**极大空闲矩形**（MaxRects，Jylänki《A Thousand Ways to Pack the Bin》§2.2）。
  *
- * 与 [buildFreeRects] 的四块互斥切分不同：每个障碍把相交的空闲矩形切成上 / 下 / 左 / 右后，
+ * 与已经移除的「四块互斥切分」不同：每个障碍把相交的空闲矩形切成上 / 下 / 左 / 右后，
  * **只剪掉被其他空闲矩形包含的那些**，不做「切完就再也看不到」的互斥划分。
  * 于是障碍之间的错位切口不会把跨过切口的大块空白切碎，后面仍能找到它。
  *

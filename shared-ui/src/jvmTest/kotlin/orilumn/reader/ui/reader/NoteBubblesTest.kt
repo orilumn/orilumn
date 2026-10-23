@@ -3,6 +3,7 @@ package orilumn.reader.ui.reader
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import kotlin.math.abs
+import kotlin.math.min
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -287,7 +288,7 @@ class NoteBubblesTest {
 
     @Test
     fun `full page falls back to the side margin`() {
-        // 整页排满（行间无空隙、行满宽、页脚无空白）：退到右侧页边距，至少放得下一个字加省略号。
+        // 整页排满（行间无空隙、行满宽、页脚无空白）：退到右侧页边距，整句都要读得出来。
         val bubbles = place(
             notes = listOf(noteInk(1, listOf(rect(0f, 0f, 600f, 40f)))),
             textInk = listOf(rect(0f, 0f, 600f, 40f), rect(0f, 40f, 600f, 80f)),
@@ -296,7 +297,8 @@ class NoteBubblesTest {
         assertEquals(1, bubbles.size)
         val b = bubbles.single()
         assertTrue("应落在右侧页边距，实际 left=${b.leftPx}", b.leftPx > 600f)
-        assertTrue(b.widthPx >= b.fontPx * 1.05f * 1.9f)
+        val fit = noteTextFit(b.text, b.widthPx - notePad, b.fontPx, b.maxLines)
+        assertTrue("页边距够宽时应整句显示，实际 maxLines=${b.maxLines}", fit.complete)
     }
 
     @Test
@@ -309,6 +311,19 @@ class NoteBubblesTest {
             pageRight = 604f,
         )
         assertTrue(bubbles.isEmpty())
+    }
+
+    @Test
+    fun `one character wide slit never becomes an ellipsis box`() {
+        // 右边距只有一个字宽：连「读得出一行」都做不到，宁可不显示。
+        val anchor = rect(0f, 0f, 600f, 40f)
+        val bubbles = place(
+            notes = listOf(noteInk(1, listOf(anchor), "用几章来")),
+            textInk = listOf(rect(0f, 0f, 600f, 40f), rect(0f, 40f, 600f, 80f)),
+            contentBottom = 80f,
+            pageRight = 620f,
+        )
+        assertTrue("一字宽的缝不该产出省略号框，实际=$bubbles", bubbles.isEmpty())
     }
 
     @Test
@@ -409,6 +424,60 @@ class NoteBubblesTest {
         )
         assertTrue("应落在右侧页边距，实际 left=${b.leftPx}", b.leftPx >= 600f - 0.5f)
         assertTrue("旁注不该压正文", lines.none { it.overlaps(box) })
+        val fit = noteTextFit(b.text, b.widthPx - notePad, b.fontPx, b.maxLines)
+        assertTrue("页边距里应整句显示，实际 maxLines=${b.maxLines}", fit.complete)
+    }
+
+    @Test
+    fun `margin notes keep anchor order when anchors are five pixels apart`() {
+        // 两个锚点只隔 5px：页边距里的框要按锚点顺序排开，互不重叠。
+        val textInk = ArrayList<Rect>()
+        for (i in 0 until 5) textInk += rect(0f, i * 40f, 600f, i * 40f + 40f)
+        val first = rect(0f, 200f, 100f, 220f)
+        val second = rect(0f, 225f, 100f, 245f)
+        textInk += first
+        textInk += second
+        var y = 245f
+        while (y < 800f) {
+            textInk += rect(0f, y, 600f, min(y + 40f, 800f))
+            y += 40f
+        }
+        val bubbles = place(
+            notes = listOf(noteInk(1, listOf(first), "第一条"), noteInk(2, listOf(second), "第二条")),
+            textInk = textInk,
+            figures = listOf(rect(100f, 200f, 600f, 245f)),
+            contentBottom = 800f,
+        )
+        assertEquals(2, bubbles.size)
+        val boxes = bubbles.map { b ->
+            rect(
+                b.leftPx,
+                b.topPx,
+                b.leftPx + b.widthPx,
+                b.topPx + b.maxLines * b.fontPx * NOTE_BUBBLE_LINE_RATIO,
+            )
+        }
+        assertTrue("两条页边距旁注不该重叠", !boxes[0].overlaps(boxes[1]))
+        assertTrue("上面的锚点应排在上面", bubbles[0].topPx <= bubbles[1].topPx)
+        for (b in bubbles) {
+            assertTrue("应落在右侧页边距，实际 left=${b.leftPx}", b.leftPx >= 600f - 0.5f)
+            val fit = noteTextFit(b.text, b.widthPx - notePad, b.fontPx, b.maxLines)
+            assertTrue("锚点很近时也要整句显示：${b.text}", fit.complete)
+        }
+    }
+
+    @Test
+    fun `placement does not mutate its inputs`() {
+        // 纯函数只读输入：锚点墨迹、障碍列表都不该被旁注布点改写。
+        val anchor = rect(0f, 0f, 200f, 40f)
+        val inkRects = listOf(anchor)
+        val note = noteInk(1, inkRects, "想法")
+        val textInk = listOf(anchor, rect(0f, 80f, 600f, 120f))
+        val inkCopy = inkRects.toList()
+        val textCopy = textInk.toList()
+        place(notes = listOf(note), textInk = textInk)
+        assertEquals(inkCopy, note.rects)
+        assertEquals(textCopy, textInk)
     }
 
     @Test
@@ -555,7 +624,7 @@ class NoteBubblesTest {
             obstacles = listOf(rect(150f, -100f, 160f, 300f)),
             otherBubbles = emptyList(),
         )
-        assertTrue("三种路由都不通时应只画旁注", arrow == null)
+        assertTrue("可见图与兜底都不通时应只画旁注", arrow == null)
     }
 
     @Test

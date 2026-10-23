@@ -33,6 +33,7 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
+import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.engine.skia.PageBackground
 import orilumn.reader.engine.skia.PageImage
 
@@ -107,8 +108,15 @@ private const val NOTE_PAGE_EDGE_EM: Float = 0.5f
 /** 每条批注最多保留多少个候选（按排序取前 N，避免极端页面候选爆炸）。 */
 private const val MAX_CANDIDATES_PER_NOTE: Int = 300
 
-/** 同侧页边距相邻两条旁注的间距（以旁注行高为单位）。 */
-private const val LANE_GAP_LINES: Float = 0.35f
+/** 扣分制常数（单位 u = 旁注行高）：右侧最优先，左侧最后退路（§1.1）。 */
+private const val NOTE_PENALTY_RIGHT: Float = 0f
+private const val NOTE_PENALTY_BELOW: Float = 2f
+private const val NOTE_PENALTY_ABOVE: Float = 3f
+private const val NOTE_PENALTY_OTHER: Float = 4f
+private const val NOTE_PENALTY_LEFT: Float = 6f
+
+/** 截断罚分：整句放得下不扣；要截断就一次扣 6u，让「远处整句」压过「近处小缝」。 */
+private const val NOTE_TRUNC_PENALTY: Float = 6f
 
 /** 箭头避让逐字墨迹的容差：不到半个像素的贴边不算压字。 */
 private const val ARROW_GLYPH_TOL_PX: Float = 0.5f
@@ -157,12 +165,20 @@ internal data class NoteTextFit(
 /** 一块空白落在版心里还是哪一侧页边距（页边距一侧做一维排布用）。 */
 internal enum class MarginSide { NONE, LEFT, RIGHT, TOP, BOTTOM }
 
+/** 候选框相对锚点整段的位置（决定侧别罚分，也决定引线走向，§6.1）。 */
+internal enum class NoteSide(val penalty: Float) {
+    RIGHT(NOTE_PENALTY_RIGHT),
+    BELOW(NOTE_PENALTY_BELOW),
+    ABOVE(NOTE_PENALTY_ABOVE),
+    OTHER(NOTE_PENALTY_OTHER),
+    LEFT(NOTE_PENALTY_LEFT),
+}
+
 /**
- * 一条批注在某块空白里的候选框（Step 2 的中间结果，纯几何）。
+ * 一条批注在某块空白里的候选框（纯几何）。
  *
- * 字段只服务两件事：**排序**（[complete] / [shownChars] / [distance] / [lines] / [inContent]）
- * 与**落位**（[rect] 是最终框，[freeRect] 是页边距一维排布的活动范围）。
- * 旧加权 `cost` 与截断比例已按 §2.1 删除：完整与否、显示字数、距离各自成键，互不折算。
+ * 字段只服务两件事：**评分**（[side] / [distance] / [complete] → [score]）与
+ * **落位**（[rect] 是最终框，[freeRect] 是页边距一维排布的活动范围）。
  */
 internal data class NoteCandidate(
     val annotationId: Long,
@@ -174,18 +190,29 @@ internal data class NoteCandidate(
     val lines: Int,
     /** 整句在这一框里放得下（按 [shownChars] 与整句字数判）。 */
     val complete: Boolean,
-    /** 折行后实际能显示的字数（不含换行符）：没有完整候选时按它取最多。 */
+    /** 折行后实际能显示的字数（不含换行符）。 */
     val shownChars: Int,
     /** 完全落在版心内（左右页边距、页脚、页顶另外判）。 */
     val inContent: Boolean,
     /** 落在哪一侧页边距（[MarginSide.NONE] = 版心内）：页边距一维排布按它分组。 */
     val marginSide: MarginSide,
-    /** 框到锚点**最近一行**墨迹的边到边最短距离（只用于排序）。 */
+    /** 框到锚点**最近一行**墨迹的边到边最短距离（评分里的距离项）。 */
     val distance: Float,
+    /** 框相对锚点整段的位置。 */
+    val side: NoteSide,
+    /** 总分 = 侧别罚分 + 距离 / u + 截断罚分（§1.1），越小越好。 */
+    val score: Float,
 ) {
-    fun conflicts(other: NoteCandidate): Boolean =
-        rect.left < other.rect.right + 2f && other.rect.left < rect.right + 2f &&
-            rect.top < other.rect.bottom + 2f && other.rect.top < rect.bottom + 2f
+    /**
+     * 两个候选框是否冲突：矩形相交，或间距小于 [margin]。
+     *
+     * @param margin 已放好的框与这个候选之间要求的最小距离（默认只要求不重叠）。
+     */
+    fun conflicts(other: NoteCandidate, margin: Float = 0f): Boolean =
+        rect.left < other.rect.right + margin - NOTE_GEOM_EPS &&
+            other.rect.left < rect.right + margin - NOTE_GEOM_EPS &&
+            rect.top < other.rect.bottom + margin - NOTE_GEOM_EPS &&
+            other.rect.top < rect.bottom + margin - NOTE_GEOM_EPS
 }
 
 /**
@@ -333,27 +360,25 @@ internal data class NoteBoxSize(
 /**
  * 算一条批注在给定空白里的最终尺寸（见 `docs/旁注布点与引线-实施方案.md` §3）。
  *
- * 顺序：整句所需宽度 → 空白扣掉两侧 margin（右侧候选靠文字那一侧用 [NoteMetrics.sideGap]）
- * 后够不够 → 够就单行并按文字宽收窄，不够才按可用宽折行 → 行数再受空白高度限制。
+ * 顺序：整句所需宽度 → 可用宽够不够 → 够就单行并按文字宽收窄，不够才按可用宽折行
+ * → 行数再受可用高限制。
  *
- * @param blankWidth/blankHeight 这块空白的原始宽高（未扣 margin）。
- * @param besideTextRight 框是否落在所选文字右侧：是则靠文字那一侧留 [NoteMetrics.sideGap]。
+ * @param maxWidth 框可用的最大宽度（**已经扣掉** margin / 侧向间距 / 页面留白）。
+ * @param maxHeight 框可用的最大高度（**已经扣掉**上下 margin）。
  */
 internal fun noteBoxFit(
     text: String,
     metrics: NoteMetrics,
-    blankWidth: Float,
-    blankHeight: Float,
-    besideTextRight: Boolean = false,
+    maxWidth: Float,
+    maxHeight: Float,
 ): NoteBoxSize {
     val content = text.trim()
     val total = content.count { it != '\n' }
-    if (total == 0 || blankWidth <= 0f || blankHeight <= 0f) {
+    if (total == 0 || maxWidth <= 0f || maxHeight <= 0f) {
         return NoteBoxSize(0f, 0, 0f, 0, total)
     }
-    val textSide = if (besideTextRight) metrics.sideGap else metrics.margin
-    val innerW = blankWidth - metrics.margin - textSide - metrics.padTotal
-    val capacity = ((blankHeight - metrics.margin * 2f) / metrics.lineH).toInt()
+    val innerW = maxWidth - metrics.padTotal
+    val capacity = (maxHeight / metrics.lineH).toInt()
     if (innerW <= 0f || capacity < 1) return NoteBoxSize(0f, 0, 0f, 0, total)
 
     val desired = estimatedNoteTextWidth(content, metrics.em)
@@ -372,16 +397,19 @@ internal fun noteBoxFit(
 }
 
 /**
- * 每条批注 × 每个空闲矩形生成候选框（§7.C）。
+ * 每条批注 × 每个空闲矩形生成候选框（§4 / §7.D）。
  *
- * - **位置**：在空白内取离锚点**最近一行**墨迹最近的地方，并留 [gap]；
- * - **附近**：框与那一行之间的视线若被别的文字 / 图 / 表格 / 线条挡住，这个候选直接丢弃
- *   （「附近」不按行数，按视线，见实施计划 §2.1）；
- * - **可读量**：折行后不足 [MIN_SHOWN_CHARS] 个字（整句不足时按整句）就不算候选；
- *   整句放得下 = 完整候选；否则按显示字数排序。
+ * 取位只看这块空白相对「锚点整段并集」的位置：
+ * - 上方：贴空白**底部**，水平对准锚点中心并 clamp；
+ * - 下方：贴空白**顶部**，水平同上；
+ * - 左 / 右：垂直居中于锚点整段中心（clamp 进空白），右侧再让出 [NoteMetrics.sideGap]；
+ * - 其他：最近边取位。
  *
- * [blockers] 是布点用的障碍（行框 + 图形 + 表格 + 线条），只用于视线判定；
- * 与锚点墨迹相交的那几个会先剔掉（锚点自己所在的行不能挡住自己）。
+ * 尺寸由 [noteBoxFit] 按「整句宽 → 单行 / 折行 → 行数受空白高限制」算出。
+ * 候选按扣分制排序：`侧别罚分 + 距离/u + 截断罚分`，同分再比距离、上边、左边。
+ * 不再做视线过滤：越过其他文字去右侧只是距离更远，由分数决定值不值。
+ *
+ * [freeRects] 必须是**已按 margin 外扩障碍**后算出的空白，框落在里面即满足与障碍的间距。
  */
 internal fun noteCandidates(
     note: NoteInk,
@@ -389,61 +417,79 @@ internal fun noteCandidates(
     contentLeft: Float,
     contentRight: Float,
     contentBottom: Float,
-    fontPx: Float,
-    lineH: Float,
-    padX: Float,
-    gap: Float,
-    blockers: List<Rect> = emptyList(),
+    metrics: NoteMetrics,
     maxCandidates: Int = MAX_CANDIDATES_PER_NOTE,
 ): List<NoteCandidate> {
     val text = note.text.trim()
     if (text.isEmpty() || note.rects.isEmpty()) return emptyList()
-    // 整句单行宽（略微放宽一点，给字形测量留余量）。
-    val ideal = estimatedNoteTextWidth(text, fontPx) * 1.04f + padX
-    val minShown = min(MIN_SHOWN_CHARS, text.count { it != '\n' }.coerceAtLeast(1))
-    // 锚点自己的行框 / 背景不参与视线判定，否则锚点所在整行会把所有候选都挡掉。
-    val sightBlockers = blockers.filterNot { b ->
-        note.rects.any { ink ->
-            ink.left < b.right - NOTE_GEOM_EPS && b.left < ink.right - NOTE_GEOM_EPS &&
-                ink.top < b.bottom - NOTE_GEOM_EPS && b.top < ink.bottom - NOTE_GEOM_EPS
-        }
-    }
+    val total = text.count { it != '\n' }
+    if (total == 0) return emptyList()
+    val u = metrics.lineH.coerceAtLeast(1f)
+    val anchor = rectUnion(note.rects)
+    val minShown = min(MIN_SHOWN_CHARS, total)
     val out = ArrayList<NoteCandidate>(freeRects.size)
+    val seen = HashSet<Long>()
 
     for (f in freeRects) {
         if (f.width <= 0f || f.height <= 0f) continue
-        val width = min(ideal, f.width)
-        if (width - padX < fontPx * 2f) continue
-        val usable = width - padX
-        val capacity = (f.height / lineH).toInt()
-        if (capacity < 1) continue
-        val fit = noteTextFit(text, usable, fontPx, capacity)
-        if (fit.totalChars == 0) continue
-        if (fit.shownChars < minShown) continue
-        val lines = min(fit.lines, capacity)
-        val height = lines * lineH
+        val blankSide = blankSideOf(f, anchor)
+        // 右侧要额外让出 sideGap（画水平箭头），左侧 / 上下按空白边取位。
+        val widthLimit = when (blankSide) {
+            NoteSide.RIGHT -> f.right - max(f.left, anchor.right + metrics.sideGap)
+            else -> f.width
+        }
+        if (widthLimit <= 0f) continue
+        val size = noteBoxFit(text, metrics, widthLimit, f.height)
+        if (!size.readable) continue
+        if (size.width > widthLimit + NOTE_GEOM_EPS || size.height > f.height + NOTE_GEOM_EPS) continue
 
-        // 距离与位置都以**最近那一行**墨迹为基准（多行锚点不用整段并集）。
-        val anchor = note.rects.minByOrNull { rectDistance(f, it) } ?: continue
-        val x = when {
-            f.right <= anchor.left - NOTE_GEOM_EPS -> f.right - width
-            f.left >= anchor.right - NOTE_GEOM_EPS -> max(f.left, anchor.right + gap)
-            else -> (anchor.center.x - width / 2f).coerceIn(f.left, max(f.left, f.right - width))
-        }.coerceIn(f.left, max(f.left, f.right - width))
-        val y = when {
-            f.bottom <= anchor.top - NOTE_GEOM_EPS -> f.bottom - height
-            f.top >= anchor.bottom - NOTE_GEOM_EPS -> max(f.top, anchor.bottom + gap)
-            else -> (anchor.center.y - height / 2f).coerceIn(f.top, max(f.top, f.bottom - height))
-        }.coerceIn(f.top, max(f.top, f.bottom - height))
-        val rect = Rect(x, y, x + width, y + height)
-        // 视线被别的文字 / 图 / 表 / 线挡住 = 不在锚点附近，不生成候选。
-        if (sightLineBlocked(rect, anchor, sightBlockers)) continue
+        val (x, y) = when (blankSide) {
+            NoteSide.ABOVE -> {
+                val left = (anchor.center.x - size.width / 2f)
+                    .coerceIn(f.left, max(f.left, f.right - size.width))
+                left to (f.bottom - size.height)
+            }
+            NoteSide.BELOW -> {
+                val left = (anchor.center.x - size.width / 2f)
+                    .coerceIn(f.left, max(f.left, f.right - size.width))
+                left to f.top
+            }
+            NoteSide.RIGHT -> {
+                val left = max(f.left, anchor.right + metrics.sideGap)
+                val top = (anchor.center.y - size.height / 2f)
+                    .coerceIn(f.top, max(f.top, f.bottom - size.height))
+                left to top
+            }
+            NoteSide.LEFT -> {
+                val left = f.right - size.width
+                val top = (anchor.center.y - size.height / 2f)
+                    .coerceIn(f.top, max(f.top, f.bottom - size.height))
+                left to top
+            }
+            NoteSide.OTHER -> {
+                val left = (anchor.center.x - size.width / 2f)
+                    .coerceIn(f.left, max(f.left, f.right - size.width))
+                val top = (anchor.center.y - size.height / 2f)
+                    .coerceIn(f.top, max(f.top, f.bottom - size.height))
+                left to top
+            }
+        }
+        val rect = Rect(x, y, x + size.width, y + size.height)
+        // 同一块空白被不同极大矩形重复切出时，落位可能完全一样：只留一个。
+        val key = (rect.left.roundToInt().toLong() shl 48) xor
+            (rect.top.roundToInt().toLong() shl 32) xor
+            (rect.right.roundToInt().toLong() shl 16) xor
+            rect.bottom.roundToInt().toLong()
+        if (!seen.add(key)) continue
 
+        val side = sideOf(rect, anchor)
+        val distance = note.rects.minOf { rectDistance(rect, it) }
+        val score = side.penalty + distance / u + if (size.complete) 0f else NOTE_TRUNC_PENALTY
         val inContent = rect.left >= contentLeft - NOTE_GEOM_EPS &&
             rect.right <= contentRight + NOTE_GEOM_EPS &&
             rect.top >= -NOTE_GEOM_EPS &&
             rect.bottom <= contentBottom + NOTE_GEOM_EPS
-        val side = when {
+        val marginSide = when {
             inContent -> MarginSide.NONE
             rect.left >= contentRight - NOTE_GEOM_EPS -> MarginSide.RIGHT
             rect.right <= contentLeft + NOTE_GEOM_EPS -> MarginSide.LEFT
@@ -455,29 +501,50 @@ internal fun noteCandidates(
             annotationId = note.annotationId,
             rect = rect,
             freeRect = f,
-            lines = lines,
-            complete = fit.complete,
-            shownChars = fit.shownChars,
+            lines = size.lines,
+            complete = size.complete,
+            shownChars = size.shownChars,
             inContent = inContent,
-            marginSide = side,
-            distance = rectDistance(rect, anchor),
+            marginSide = marginSide,
+            distance = distance,
+            side = side,
+            score = score,
         )
     }
-    // 排序（§2.1）：完整候选按距离最近（同距离再比行数、版心内、位置）；
-    // 一个完整都没有时按显示字数最多，同字数再比距离。不再有加权 cost，页边距 / 行数不参与惩罚。
+    // 扣分制（§1.2）：总分 → 距离 → 框上边 → 框左边，保证同一输入结果恒定。
     return out
         .sortedWith(
-            compareBy<NoteCandidate> { if (it.complete) 0 else 1 }
-                .thenBy { if (it.complete) it.distance else -it.shownChars.toFloat() }
+            compareBy<NoteCandidate> { it.score }
                 .thenBy { it.distance }
-                .thenBy { it.lines }
-                .thenBy { if (it.inContent) 0 else 1 }
                 .thenBy { it.rect.top }
                 .thenBy { it.rect.left },
         )
         .take(maxCandidates)
 }
 
+/** 这块空白相对锚点整段的位置（§4 表格顺序：上 → 下 → 右 → 左 → 其他）。 */
+private fun blankSideOf(f: Rect, anchor: Rect): NoteSide = when {
+    f.bottom <= anchor.top + NOTE_GEOM_EPS -> NoteSide.ABOVE
+    f.top >= anchor.bottom - NOTE_GEOM_EPS -> NoteSide.BELOW
+    f.left >= anchor.right - NOTE_GEOM_EPS -> NoteSide.RIGHT
+    f.right <= anchor.left + NOTE_GEOM_EPS -> NoteSide.LEFT
+    else -> NoteSide.OTHER
+}
+
+/** 候选框相对锚点整段的位置（§6.1：先看水平投影是否重叠，再看左右）。 */
+private fun sideOf(box: Rect, anchor: Rect): NoteSide {
+    val overlap = min(box.right, anchor.right) - max(box.left, anchor.left)
+    if (overlap >= 1f) {
+        return if (box.center.y < anchor.center.y) NoteSide.ABOVE else NoteSide.BELOW
+    }
+    if (box.left >= anchor.right - NOTE_GEOM_EPS) return NoteSide.RIGHT
+    if (box.right <= anchor.left + NOTE_GEOM_EPS) return NoteSide.LEFT
+    return NoteSide.OTHER
+}
+
+/** 四边同时外扩 [m]：障碍按 margin 外扩后做 MaxRects，框落在空白里即满足间距。 */
+private fun inflateRect(r: Rect, m: Float): Rect =
+    Rect(r.left - m, r.top - m, r.right + m, r.bottom + m)
 
 /**
  * 一条批注在**本页**的画布事实（用户层 → 旁注层的输入）。
@@ -639,7 +706,7 @@ internal fun noteBubblePlacements(
     val body = fontPx.coerceAtLeast(1f)
     val small = metrics.em
     val lineH = metrics.lineH
-    val padX = metrics.padTotal
+    val margin = metrics.margin
     // 旁注框与墨迹之间留一线：贴在字上会让人觉得把正文框进去了。
     val gap = body * 0.25f
 
@@ -650,16 +717,25 @@ internal fun noteBubblePlacements(
         max(contentRight, pageRight),
         max(contentBottom, pageBottom),
     )
+    // 框离屏幕边留一点，避免看起来像被裁掉一条（§2.2）。
+    val blankBounds = Rect(
+        pageBounds.left + metrics.edge,
+        pageBounds.top + metrics.edge,
+        pageBounds.right - metrics.edge,
+        pageBounds.bottom - metrics.edge,
+    )
     // 正文按行合并成一个行框（不是逐字）：既减少空闲矩形碎片，
     // 也不会把词间空隙当成能放下一句批注的空白。
-    val textLines = mergeTextLineRects(obstacles.textInk, small)
+    val textLines = mergeTextLineRects(obstacles.textInk, body)
     val baseObstacles = textLines + obstacles.figures + obstacles.tables + obstacles.strokes
+    // 障碍按 margin 外扩后再切空白：框只要落在空白里，与任何障碍都至少隔 1em（§2.2）。
+    val inflatedObstacles = baseObstacles.map { inflateRect(it, margin) }
     // 箭头避让另用逐字墨迹（能穿两字之间与标点前后）；没有逐字几何时才退回行框。
     val arrowGlyphs = obstacles.arrowInk.ifEmpty { obstacles.textInk }
     val arrowSolids = obstacles.figures + obstacles.tables + obstacles.strokes
     val freeRects = maximalFreeRects(
-        bounds = pageBounds,
-        obstacles = baseObstacles,
+        bounds = blankBounds,
+        obstacles = inflatedObstacles,
         minW = max(small * 1.2f, 1f),
         minH = lineH,
     )
@@ -677,16 +753,13 @@ internal fun noteBubblePlacements(
             contentLeft = contentLeft,
             contentRight = contentRight,
             contentBottom = contentBottom,
-            fontPx = small,
-            lineH = lineH,
-            padX = padX,
-            gap = gap,
-            blockers = baseObstacles,
+            metrics = metrics,
         )
         if (list.isNotEmpty()) candidatesByNote[note.annotationId] = list
     }
 
-    val choices = assignNoteCandidates(ordered, candidatesByNote, LANE_GAP_LINES * lineH)
+    // 页边距一维排布与候选冲突用同一个 margin：框与框之间也至少隔 1em（§5.3/§5.4）。
+    val choices = assignNoteCandidates(ordered, candidatesByNote, margin)
     val chosen = choices.associateBy { it.note.annotationId }
     // 一条都分不到的批注不再消失：在原文右下角退成一个小省略号（§2.1）。
     val iconSize = small * NOTE_ICON_DIAMETER_RATIO
@@ -773,12 +846,12 @@ private class NoteRequest(
  *
  * @param notes 已经过滤空批注 / 按锚点排好序的批注。
  * @param candidatesByNote 每条批注的候选（已按完整 → 距离 → 显示字数排好序）。
- * @param laneGap 同侧页边距相邻框的间距（像素）。
+ * @param margin 框与框之间要求的最小间距（像素，= 1em），页边距一维排布也用它。
  */
 private fun assignNoteCandidates(
     notes: List<NoteInk>,
     candidatesByNote: Map<Long, List<NoteCandidate>>,
-    laneGap: Float,
+    margin: Float,
 ): List<NoteChoice> {
     val requests = notes.mapNotNull { note ->
         val candidates = candidatesByNote[note.annotationId] ?: return@mapNotNull null
@@ -800,20 +873,20 @@ private fun assignNoteCandidates(
 
     // 单向让位：按顺序各取自己最好的、不与先挑者冲突的候选；先挑者永不被挤走。
     for (i in order) {
-        selected[i] = requests[i].candidates.firstOrNull { fits(it, selected, i) }
+        selected[i] = requests[i].candidates.firstOrNull { fits(it, selected, i, margin) }
     }
 
     // 页边距一维排布：同侧同块空白的框按锚点纵序推开（只动这一组）。
-    packMarginLanes(requests, selected, laneGap)
+    packMarginLanes(requests, selected, margin, margin)
 
     // 排布后可能空出位置：还没分到的批注再试一次（仍不碰先挑者）。
     for (i in order) {
         if (selected[i] != null) continue
-        selected[i] = requests[i].candidates.firstOrNull { fits(it, selected, i) }
+        selected[i] = requests[i].candidates.firstOrNull { fits(it, selected, i, margin) }
     }
 
     // 硬约束兜底：任何残余重叠都放弃后挑的那条（交给小图标）。
-    dropConflicts(requests, selected)
+    dropConflicts(requests, selected, margin)
 
     return requests.indices.mapNotNull { i ->
         val pick = selected[i] ?: return@mapNotNull null
@@ -832,6 +905,7 @@ private fun packMarginLanes(
     requests: List<NoteRequest>,
     selected: Array<NoteCandidate?>,
     laneGap: Float,
+    margin: Float,
 ) {
     for (side in MARGIN_SIDES) {
         val members = selected.indices.filter { i -> selected[i]?.marginSide == side }
@@ -847,15 +921,15 @@ private fun packMarginLanes(
                 val i = group.single()
                 val c = selected[i] ?: continue
                 val clash = selected.indices.any { j ->
-                    j != i && selected[j]?.let { c.conflicts(it) } == true
+                    j != i && selected[j]?.let { c.conflicts(it, margin) } == true
                 }
                 if (clash) selected[i] = null
                 continue
             }
             if (side == MarginSide.LEFT || side == MarginSide.RIGHT) {
-                packLaneVertical(requests, selected, group, laneGap)
+                packLaneVertical(requests, selected, group, laneGap, margin)
             } else {
-                packLaneHorizontal(requests, selected, group, laneGap)
+                packLaneHorizontal(requests, selected, group, laneGap, margin)
             }
         }
     }
@@ -879,6 +953,7 @@ private fun packLaneVertical(
     selected: Array<NoteCandidate?>,
     group: List<Int>,
     laneGap: Float,
+    margin: Float,
 ) {
     val free = selected[group.first()]!!.freeRect
     val ordered = group.sortedWith(
@@ -919,7 +994,7 @@ private fun packLaneVertical(
         val c = selected[i]!!
         selected[i] = c.copy(rect = Rect(c.rect.left, tops[k], c.rect.right, tops[k] + heights[k]))
     }
-    dropLaneConflicts(selected, ordered)
+    dropLaneConflicts(selected, ordered, margin)
 }
 
 /** 上下页边距：沿 X 前推 / 回推，高度与 Y 不变。 */
@@ -928,6 +1003,7 @@ private fun packLaneHorizontal(
     selected: Array<NoteCandidate?>,
     group: List<Int>,
     laneGap: Float,
+    margin: Float,
 ) {
     val free = selected[group.first()]!!.freeRect
     val ordered = group.sortedWith(
@@ -968,16 +1044,20 @@ private fun packLaneHorizontal(
         val c = selected[i]!!
         selected[i] = c.copy(rect = Rect(lefts[k], c.rect.top, lefts[k] + widths[k], c.rect.bottom))
     }
-    dropLaneConflicts(selected, ordered)
+    dropLaneConflicts(selected, ordered, margin)
 }
 
 /** 一维排布后仍与其他框相撞的，按顺序放弃（先撞上的那条让位）。 */
-private fun dropLaneConflicts(selected: Array<NoteCandidate?>, group: List<Int>) {
+private fun dropLaneConflicts(
+    selected: Array<NoteCandidate?>,
+    group: List<Int>,
+    margin: Float,
+) {
     val dropped = HashSet<Int>()
     for (i in group) {
         val c = selected[i] ?: continue
         val clash = selected.indices.any { j ->
-            j != i && j !in dropped && selected[j]?.let { c.conflicts(it) } == true
+            j != i && j !in dropped && selected[j]?.let { c.conflicts(it, margin) } == true
         }
         if (clash) {
             dropped += i
@@ -987,12 +1067,16 @@ private fun dropLaneConflicts(selected: Array<NoteCandidate?>, group: List<Int>)
 }
 
 /** 任何残余重叠都放弃后挑的那条（交给小图标，宁缺勿叠）。 */
-private fun dropConflicts(requests: List<NoteRequest>, selected: Array<NoteCandidate?>) {
+private fun dropConflicts(
+    requests: List<NoteRequest>,
+    selected: Array<NoteCandidate?>,
+    margin: Float,
+) {
     val dropped = HashSet<Int>()
     for (i in requests.indices) {
         val c = selected[i] ?: continue
         val clash = selected.indices.any { j ->
-            j != i && j !in dropped && selected[j]?.let { c.conflicts(it) } == true
+            j != i && j !in dropped && selected[j]?.let { c.conflicts(it, margin) } == true
         }
         if (clash) {
             dropped += i
@@ -1006,12 +1090,16 @@ private fun fits(
     candidate: NoteCandidate,
     selected: Array<NoteCandidate?>,
     ignoreA: Int,
+    margin: Float,
     ignoreB: Int = -1,
 ): Boolean {
     for (k in selected.indices) {
         if (k == ignoreA || k == ignoreB) continue
         val other = selected[k] ?: continue
-        if (candidate.conflicts(other)) return false
+        // 同一侧页边距的框先都收下，再由 packMarginLanes 统一推开；
+        // 实在排不下会在排布 / 兜底阶段丢掉。
+        if (candidate.marginSide != MarginSide.NONE && other.marginSide == candidate.marginSide) continue
+        if (candidate.conflicts(other, margin)) return false
     }
     return true
 }
@@ -1126,6 +1214,20 @@ private fun dedupeRects(rects: List<Rect>): List<Rect> {
     return out
 }
 
+
+/**
+ * 本页正文主字号：按「行内非空白字数」加权，取字数最多的那一档字号。
+ *
+ * 页首是 h1 / h2 时首行字号可能是正文的两倍；旁注若跟着标题放大，页边距立刻塞不下几个字
+ * （真机出现过只剩「用 / va…」）。整页都是标题时退回第一行，不返回 0。
+ */
+internal fun noteBodyFontPx(lines: List<DrawLine>): Float {
+    if (lines.isEmpty()) return 0f
+    return lines
+        .groupBy { it.fontSizePx }
+        .maxByOrNull { (_, ls) -> ls.sumOf { l -> l.text.count { c -> !c.isWhitespace() } } }
+        ?.key ?: lines.first().fontSizePx
+}
 
 /**
  * 把逐字墨迹合并成**正文行框**（障碍物用）。

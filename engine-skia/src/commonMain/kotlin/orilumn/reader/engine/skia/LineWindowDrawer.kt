@@ -547,6 +547,64 @@ class LineWindowDrawer(
         return out
     }
 
+    /**
+     * 算一段章内区间内各行**列表 marker（圆点 / 编号）**的占位矩形（只算不画）。
+     *
+     * 坐标口径与 [decorRects] 相同（`x` 相对内容区左缘、`y` 为章内绝对 Y），供旁注布点把
+     * marker 当障碍。矩形覆盖 marker 本身**以及它与正文之间的沟槽**：OUTSIDE 的右缘、
+     * INSIDE 的左缘贴住正文起点，调用方按行合并时自然并进行框，不会在沟槽里留下一条
+     * 能塞下旁注的假空白。
+     *
+     * 宽度与落墨同源：矢量圆点走 [ListMarkers.shapeMarkerWidthPx]，编号 / 字母 / 罗马数字
+     * 用同一 `paragraphStyle` 实测（[measureMarkerWidth]），不是另估一个 em 值。
+     */
+    @Suppress("UNUSED_PARAMETER")
+    fun markerRects(lines: List<DrawLine>, chapter: Int, range: IntRange): List<Rect> {
+        if (range.isEmpty()) return emptyList()
+        val queryStart = range.first
+        val queryEnd = range.last + 1
+        val out = ArrayList<Rect>()
+        var collection: FontCollection? = null
+        for (line in lines) {
+            val marker = line.listMarker ?: continue
+            val start = line.range.first.coerceIn(0, line.text.length)
+            val endExcl = (line.range.last + 1).coerceIn(start, line.text.length)
+            if (endExcl <= start) continue
+            val lineStart = line.charBase + start
+            val lineEnd = line.charBase + endExcl
+            if (minOf(queryEnd, lineEnd) <= maxOf(queryStart, lineStart)) continue
+            val gap = ListMarkers.markerGapPx(line.fontSizePx)
+            val markerW = if (marker.isShapeKind) {
+                ListMarkers.shapeMarkerWidthPx(line.fontSizePx)
+            } else {
+                val fc = collection ?: collections().also { collection = it }
+                val style = SkParagraphFactory.paragraphStyle(
+                    line.alignment,
+                    line.fontSizePx,
+                    line.lineHeightRatio,
+                    line.tag,
+                    line.families,
+                    line.weight,
+                    line.italic,
+                    line.monospace,
+                    line.letterSpacingEm,
+                    inkColor = withAlpha(line.inkColor, line.alpha),
+                    forceStrut = line.baselineShifts.isNotEmpty(),
+                )
+                measureMarkerWidth(style, ListMarkers.markerText(marker.kind, marker.order), fc)
+            }
+            val (left, right) = if (marker.position == ListMarkers.Position.INSIDE) {
+                line.xLeft.toFloat() to (line.xLeft + markerW + gap).toFloat()
+            } else {
+                (line.xLeft - markerW - gap).toFloat() to line.xLeft.toFloat()
+            }
+            if (right > left) {
+                out += Rect.makeLTRB(left, line.yTop.toFloat(), right, line.yBottom.toFloat())
+            }
+        }
+        return out
+    }
+
     /** 行内相对定位（`position: relative`）在字符 [i] 上的累积位移（嵌套盒自然叠加）。 */
     private fun relOffsetFor(line: DrawLine, i: Int): Point {
         var dx = 0f

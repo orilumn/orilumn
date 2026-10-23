@@ -2054,9 +2054,20 @@ fun ReaderScreen(
                     // 墨迹矩形一律问测度引擎（与画出来的字同源）：自己拿行宽估算会把
                     // 「整行排满」误判成「右侧还有空地」，也会把段内字符坐标与章内坐标比错。
                     val slice = fromPos.slice
-                    // 四类障碍：文字逐字墨迹（与画出来的字同源）+ 图形 + 线条。
+                    // 四类障碍：文字逐字墨迹（与画出来的字同源）+ 列表圆点 / 编号 + 图形 + 线条。
                     // 表格整体暂时没有只读几何入口（D-29 前置），先不传。
                     val pageInk = pageInkRects(
+                        drawer = selectionDrawer,
+                        lines = lines,
+                        chapter = fromPos.chapter,
+                        charStart = slice.charStart,
+                        charEnd = slice.charEnd,
+                        pageImages = content.pageImages,
+                        pageBackgrounds = content.pageBackgrounds,
+                        frameLead = content.pageFrameLead,
+                        contentLeft = contentLeft,
+                        contentTop = contentTop,
+                    ) + pageMarkerRects(
                         drawer = selectionDrawer,
                         lines = lines,
                         chapter = fromPos.chapter,
@@ -2131,7 +2142,8 @@ fun ReaderScreen(
                         contentRight = contentRight,
                         contentBottom = contentBottom,
                         pageRight = pxWidth,
-                        fontPx = lines.first().fontSizePx,
+                        // 旁注字号跟正文主字号走：页首是标题时不能跟着标题放大。
+                        fontPx = noteBodyFontPx(lines),
                         pageBottom = pxHeight,
                     )
                 }

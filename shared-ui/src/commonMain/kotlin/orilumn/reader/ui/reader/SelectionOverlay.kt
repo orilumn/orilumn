@@ -65,6 +65,40 @@ internal fun pageInkRects(
 }
 
 /**
+ * 一段章内区间所覆盖各行**列表 marker（圆点 / 编号）**的占位矩形（页坐标）。
+ *
+ * 与 [pageInkRects] 同一套换算：`decorRects` 只从 `line.xLeft` 起算正文，OUTSIDE 的圆点悬在
+ * 它左边、INSIDE 的编号把正文推右，都不在行框里。旁注布点把这几块并进文字障碍，
+ * 否则会对着一个圆点安排「空白」。
+ *
+ * @return 空 = 本页没有 marker（或几何未就绪）。
+ */
+internal fun pageMarkerRects(
+    drawer: LineWindowDrawer,
+    lines: List<DrawLine>,
+    chapter: Int,
+    charStart: Int,
+    charEnd: Int,
+    pageImages: List<PageImage>?,
+    pageBackgrounds: List<PageBackground>?,
+    frameLead: Int,
+    contentLeft: Float,
+    contentTop: Float,
+): List<Rect> {
+    if (charEnd <= charStart || lines.isEmpty()) return emptyList()
+    val shift = readerPageShift(lines, pageImages, pageBackgrounds, frameLead, contentTop)
+        ?: return emptyList()
+    return drawer.markerRects(lines, chapter, charStart..(charEnd - 1)).map {
+        Rect(
+            left = contentLeft + it.left,
+            top = it.top - shift,
+            right = contentLeft + it.right,
+            bottom = it.bottom - shift,
+        )
+    }
+}
+
+/**
  * 一段章内区间在本页的**逐字**墨迹矩形（页坐标，与 [pageInkRects] 同一套换算）。
  *
  * 与 [pageInkRects] 的区别只在粒度：那边一行一个框（布点用），这边一个字一个框

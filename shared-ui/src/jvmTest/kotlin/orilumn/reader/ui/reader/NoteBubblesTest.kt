@@ -9,8 +9,11 @@ import kotlin.math.sqrt
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.engine.skia.PageBackground
 import orilumn.reader.engine.skia.PageImage
+import orilumn.reader.engine.css.TextAlign
+import orilumn.reader.engine.layout.ListMarkers
 
 /**
  * 正文旁批注的落位与箭头（D-26 / D-28）。
@@ -72,9 +75,10 @@ class NoteBubblesTest {
         return false
     }
 
-    private val noteFont = 20f * NOTE_BUBBLE_FONT_RATIO
-    private val noteLine = noteFont * NOTE_BUBBLE_LINE_RATIO
-    private val notePad = noteFont * NOTE_BUBBLE_PAD_RATIO * 2f
+    private val noteMetrics = NoteMetrics.forBody(20f)
+    private val noteFont = noteMetrics.em
+    private val noteLine = noteMetrics.lineH
+    private val notePad = noteMetrics.padTotal
 
     private fun candidates(
         note: NoteInk,
@@ -88,10 +92,7 @@ class NoteBubblesTest {
         contentLeft = contentLeft,
         contentRight = contentRight,
         contentBottom = contentBottom,
-        fontPx = noteFont,
-        lineH = noteLine,
-        padX = notePad,
-        gap = 5f,
+        metrics = noteMetrics,
     )
 
     private fun noteInk(
@@ -135,6 +136,13 @@ class NoteBubblesTest {
         b.topPx + b.maxLines * b.fontPx * NOTE_BUBBLE_LINE_RATIO,
     )
 
+    /** 两个矩形之间的最短距离（相交为 0）。 */
+    private fun gapBetween(a: Rect, b: Rect): Float {
+        val dx = max(0f, max(a.left - b.right, b.left - a.right))
+        val dy = max(0f, max(a.top - b.bottom, b.top - a.bottom))
+        return sqrt(dx * dx + dy * dy)
+    }
+
     @Test
     fun `short line puts the note to its right`() {
         // 行只占 200 / 600：这句话后面正好空着一截，旁注就该躺在那儿。
@@ -150,17 +158,22 @@ class NoteBubblesTest {
 
     @Test
     fun `full line falls back to the gap below`() {
-        // 满行右侧没地方，往下看：段落之间的空隙刚好够一行小字。
+        // 满行右侧没地方（页面右缘就是版心右缘），往下看：段落之间的大空隙放得下整句。
         val first = rect(0f, 0f, 600f, 40f)
+        val second = rect(0f, 200f, 600f, 240f)
         val bubbles = place(
-            notes = listOf(noteInk(1, listOf(first))),
-            textInk = listOf(first, rect(0f, 80f, 600f, 120f)),
+            notes = listOf(noteInk(1, listOf(first), "用几章来等")),
+            textInk = listOf(first, second),
+            pageRight = 600f,
         )
         assertEquals(1, bubbles.size)
         val b = bubbles.single()
         assertTrue("应落在行下方，实际 top=${b.topPx}", b.topPx >= 40f)
-        assertEquals(1, b.maxLines)
-        assertTrue(b.topPx + b.maxLines * b.fontPx * NOTE_BUBBLE_LINE_RATIO <= 80f)
+        assertTrue("应贴住下一行的上缘（留 margin），实际 top=${b.topPx}", b.topPx + b.maxLines * noteLine <= 200f)
+        val box = boxOf(b)
+        assertTrue("不该压住下一行：$box", !box.overlaps(second))
+        val gap = gapBetween(box, second)
+        assertTrue("框与下一行至少隔 1em（障碍已外扩 margin），实际 $gap", gap >= noteMetrics.margin - 0.5f)
         val fit = noteTextFit(b.text, b.widthPx - notePad, b.fontPx, b.maxLines)
         assertTrue("行间空隙够放整句，不该截断", fit.complete)
     }
@@ -186,17 +199,18 @@ class NoteBubblesTest {
 
     @Test
     fun `useless nearby sliver loses to a complete margin note`() {
-        // 锚点右侧只有两行高的窄缝（放了也只能读一小截）；右侧页边距能放下整句。
-        // 新口径：整句可读压过就近，哪怕页边距离得远。
+        // 锚点右侧只有两行高、每行 3 个字的窄缝（7 个字读不全）；
+        // 右侧页边距虽然远一点，但能整句放下。截断罚分 6u 让整句胜出。
         val anchor = rect(0f, 0f, 200f, 40f)
-        val long = "为什么有时显示，有时不显示？".repeat(6)
         val bubbles = place(
-            notes = listOf(noteInk(1, listOf(anchor), text = long)),
+            notes = listOf(noteInk(1, listOf(anchor), text = "为什么有时显示")),
             textInk = listOf(anchor),
-            figures = listOf(rect(0f, 45f, 600f, 800f)),
+            figures = listOf(rect(0f, 45f, 300f, 800f), rect(300f, 0f, 400f, 40f)),
+            contentRight = 300f,
+            pageRight = 400f,
         )
         val b = bubbles.single()
-        assertTrue("应去页边距整句显示，实际 left=${b.leftPx} top=${b.topPx}", b.leftPx >= 600f)
+        assertTrue("应去右侧页边距整句显示，实际 left=${b.leftPx} top=${b.topPx}", b.leftPx >= 300f)
         val fit = noteTextFit(b.text, b.widthPx - notePad, b.fontPx, b.maxLines)
         assertTrue("整句应能读完，实际 maxLines=${b.maxLines}", fit.complete)
     }
@@ -305,6 +319,120 @@ class NoteBubblesTest {
     }
 
     @Test
+    fun `two notes on the same full line stack in the side margin`() {
+        // 整页排满、两条批注锚在同一行：右侧页边距里上下排开，谁都不退成小图标。
+        val lines = (0 until 20).map { i -> rect(0f, i * 40f, 600f, i * 40f + 40f) }
+        val bubbles = place(
+            notes = listOf(
+                noteInk(1, listOf(lines[7]), "第一条"),
+                noteInk(2, listOf(lines[7]), "第二条"),
+            ),
+            textInk = lines,
+            contentBottom = 800f,
+        )
+        assertEquals(2, bubbles.size)
+        assertTrue("两条都该是正常旁注：$bubbles", bubbles.none { it.compact })
+        assertTrue("两条不能重叠：$bubbles", !boxOf(bubbles[0]).overlaps(boxOf(bubbles[1])))
+        val gap = gapBetween(boxOf(bubbles[0]), boxOf(bubbles[1]))
+        assertTrue("两条至少隔 1em（含外扩 margin），实际 $gap", gap >= noteMetrics.margin - 0.5f)
+        for (b in bubbles) {
+            assertTrue("应落在右侧页边距，实际 left=${b.leftPx}", b.leftPx >= 600f - 0.5f)
+        }
+        assertTrue("后放的应被推到下面", bubbles[1].topPx > bubbles[0].topPx)
+    }
+
+    @Test
+    fun `list marker gutter merges into the text line obstacle`() {
+        // 圆点 + 沟槽与行框相接：合并后是一整块障碍，沟槽不会变成一条能塞旁注的假空白。
+        val line = rect(120f, 100f, 300f, 140f)
+        val marker = rect(100f, 100f, 120f, 140f)
+        val merged = mergeTextLineRects(listOf(line, marker), 20f)
+        assertEquals(1, merged.size)
+        assertEquals(100f, merged.single().left, 0.01f)
+        assertEquals(300f, merged.single().right, 0.01f)
+    }
+
+    @Test
+    fun `list marker is an obstacle for the note box`() {
+        // 页面只剩锚点左侧一条空白：圆点若不算障碍，旁注会正好压在圆点上。
+        val line = rect(200f, 0f, 400f, 40f)
+        val markerW = ListMarkers.shapeMarkerWidthPx(20f).toFloat()
+        val markerGap = ListMarkers.markerGapPx(20f).toFloat()
+        val marker = rect(200f - markerW - markerGap, 0f, 200f, 40f)
+
+        fun placeWith(textInk: List<Rect>) = place(
+            notes = listOf(noteInk(1, listOf(line), "交换")),
+            textInk = textInk,
+            contentLeft = 200f,
+            contentRight = 400f,
+            contentBottom = 40f,
+            pageRight = 400f,
+            pageBottom = 40f,
+        ).single()
+
+        val control = placeWith(listOf(line))
+        assertTrue("对照：不算圆点时框会压住它，实际 ${boxOf(control)} vs $marker",
+            boxOf(control).right > marker.left)
+
+        val withMarker = placeWith(mergeTextLineRects(listOf(line, marker), 20f))
+        assertTrue("圆点并入障碍后仍是正常旁注：$withMarker", !withMarker.compact)
+        val box = boxOf(withMarker)
+        assertTrue("框不该压住圆点：$box vs $marker", !box.overlaps(marker))
+        val gap = gapBetween(box, marker)
+        assertTrue("框与圆点至少隔 1em，实际 $gap", gap >= noteMetrics.margin - 0.5f)
+    }
+
+    @Test
+    fun `below blank beats a farther left blank`() {
+        // 下方有完整空白、左侧页边距也能放下整句：下方罚分更低（2 对 6），先选下方。
+        val anchor = rect(100f, 0f, 500f, 40f)
+        val sameRowRight = rect(500f, 0f, 600f, 40f)
+        val next = rect(100f, 100f, 600f, 140f)
+        val bubbles = place(
+            notes = listOf(noteInk(1, listOf(anchor), "交换")),
+            textInk = listOf(anchor, sameRowRight, next),
+            contentLeft = 100f,
+            pageRight = 700f,
+        )
+        val b = bubbles.single()
+        assertTrue("应落在锚点下方，实际 top=${b.topPx}", b.topPx >= 40f)
+        assertTrue("不该掉到左侧页边距，实际 left=${b.leftPx}", b.leftPx >= 100f)
+    }
+
+    @Test
+    fun `above blank is used when there is no below blank`() {
+        // 锚点在页面最后一行：下方没有空白，只能用上方，且贴空白底部（离正文 margin）。
+        val anchor = rect(0f, 700f, 600f, 740f)
+        val bubbles = place(
+            notes = listOf(noteInk(1, listOf(anchor), "交换")),
+            textInk = listOf(anchor),
+            contentBottom = 740f,
+            pageRight = 600f,
+            pageBottom = 740f,
+        )
+        val b = bubbles.single()
+        assertTrue("应落在锚点上方，实际 top=${b.topPx}", b.topPx < 700f)
+        assertTrue("框不该压到正文，实际 bottom=${b.topPx + b.maxLines * noteLine}", b.topPx + b.maxLines * noteLine <= 700f)
+    }
+
+    @Test
+    fun `right blank clamps the box into its vertical range`() {
+        // 右侧空白只到锚点中段上方：垂直居中会被空白下缘挡住，框应 clamp 进空白。
+        val anchor = rect(0f, 100f, 500f, 300f)
+        val figure = rect(600f, 200f, 700f, 800f)
+        val bubbles = place(
+            notes = listOf(noteInk(1, listOf(anchor), "交换")),
+            textInk = listOf(anchor),
+            figures = listOf(figure),
+        )
+        val b = bubbles.single()
+        val box = boxOf(b)
+        assertTrue("应落在右侧空白，实际 left=${b.leftPx}", b.leftPx >= 500f)
+        assertTrue("框应被 clamp 进空白下缘，实际 bottom=${box.bottom}", box.bottom <= 200f + 0.5f)
+        assertTrue("框不该高过页面顶部，实际 top=${box.top}", box.top >= 0f)
+    }
+
+    @Test
     fun `placement is deterministic`() {
         // 同一页同一输入：两次调用结果完全一致（翻页回来不闪、不跳位）。
         val lines = (0 until 20).map { i -> rect(0f, i * 40f, 600f, i * 40f + 40f) }
@@ -363,9 +491,9 @@ class NoteBubblesTest {
     }
 
     @Test
-    fun `far blank behind other text does not count as nearby`() {
-        // 页脚有一整块能放下整句的空白，但中间隔着整页正文 ⇒ 视线被挡，不算附近；
-        // 只能就近用锚点行右侧那道窄缝，截断显示（不低于 4 个字）。
+    fun `far footer blank loses to the nearer side margin`() {
+        // 页脚有一整块能放下整句的空白，但隔着整页正文（距离 30u 以上）；
+        // 右侧页边距近得多，扣分制下页脚不该赢。
         val anchorLine = rect(0f, 0f, 300f, 30f)
         val sameRowRight = rect(380f, 0f, 600f, 30f)
         val body = (0 until 17).map { i -> rect(0f, 35f + i * 40f, 600f, 75f + i * 40f) }
@@ -376,23 +504,24 @@ class NoteBubblesTest {
             pageBottom = 800f,
         )
         val b = bubbles.single()
-        assertTrue("不该跳过正文去用页脚，实际 top=${b.topPx}", b.topPx < 200f)
-        assertTrue("应就近落在锚点行右侧的窄缝，实际 left=${b.leftPx}", b.leftPx in 300f..400f)
+        assertTrue("不该跑到页脚，实际 top=${b.topPx}", b.topPx < 200f)
+        assertTrue("应落在右侧页边距，实际 left=${b.leftPx}", b.leftPx >= 600f)
         val fit = noteTextFit(b.text, b.widthPx - notePad, b.fontPx, b.maxLines)
-        assertTrue("近处放不下整句，应截断显示", !fit.complete)
-        assertTrue("截断也要读得出至少 4 个字，实际 ${fit.shownChars}", fit.shownChars >= 4)
+        assertTrue("页边距够宽，应整句显示，实际 maxLines=${b.maxLines}", fit.complete)
     }
 
     @Test
     fun `one line is enough when four characters fit`() {
-        // 行间空隙只够一行：能读出 4 个字就成框，不再要求「至少一整行」。
-        val anchor = rect(0f, 0f, 100f, 30f)
-        val next = rect(0f, 35f, 600f, 65f)
+        // 行间空隙只够一行、页面没有右页边距：能读出 4 个字就成框。
+        val anchor = rect(0f, 0f, 80f, 30f)
+        val next = rect(0f, 80f, 100f, 110f)
         val bubbles = place(
             notes = listOf(noteInk(1, listOf(anchor), "用几章来")),
             textInk = listOf(anchor, next),
-            contentBottom = 65f,
-            pageRight = 600f,
+            contentRight = 100f,
+            contentBottom = 110f,
+            pageRight = 100f,
+            pageBottom = 110f,
         )
         val b = bubbles.single()
         assertTrue("一行也应有旁注，实际=$b", !b.compact)
@@ -785,16 +914,18 @@ class NoteBubblesTest {
         val anchor = rect(0f, 100f, 200f, 140f)
         val text = "为什么有时显示"
         val slit = rect(200f, 100f, 296f, 125f)
-        val margin = rect(600f, 0f, 700f, 800f)
+        // 页边距在 2u 外（参考 §1.1 的 6u 交界）：整句仍该压过近处截断。
+        val margin = rect(230f, 0f, 330f, 800f)
         val list = candidates(
             note = noteInk(1, listOf(anchor), text = text),
             freeRects = listOf(slit, margin),
+            contentRight = 200f,
         )
         assertTrue("窄缝的截断候选也应在列表里，实际=$list", list.any { !it.complete })
         val best = list.first()
         assertTrue("应整句显示，实际 best=$best", best.complete)
         assertEquals(MarginSide.RIGHT, best.marginSide)
-        assertTrue("应落在页边距，实际 ${best.rect}", best.rect.left >= 600f)
+        assertTrue("应落在页边距，实际 ${best.rect}", best.rect.left >= 200f)
     }
 
     @Test
@@ -832,8 +963,8 @@ class NoteBubblesTest {
     }
 
     @Test
-    fun `margin note gets a small preference penalty not a last place`() {
-        // 同为完整候选：版心内近处略胜页边距；但页边距不会被排到截断档之后。
+    fun `nearer in-content blank beats the farther page margin`() {
+        // 同为完整候选：版心内下方的距离更近（侧别 2 + 距离 0），压过远处页边距（侧别 0 + 距离）。
         val anchor = rect(0f, 0f, 200f, 40f)
         val inContent = rect(0f, 40f, 600f, 100f)
         val margin = rect(600f, 0f, 700f, 100f)
@@ -915,6 +1046,37 @@ class NoteBubblesTest {
         assertTrue(abs(wide - 2) <= 1)
     }
 
+    /** 旁注字号跟**正文**走：本页行窗口以标题开头时（章首 h1 / 页顶 h2 约正文 2 倍），
+     * 取首行字号会把旁注放大到比正文还大（真机：窄页边距只塞得下「用 / va…」）。 */
+    @Test
+    fun `note font follows body text not the heading line`() {
+        fun line(text: String, size: Float) = DrawLine(
+            text = text,
+            range = 0 until text.length,
+            yTop = 0,
+            yBottom = 40,
+            alignment = TextAlign.LEFT,
+            fontSizePx = size,
+            lineHeightRatio = 1.5f,
+            tag = null,
+            families = emptyList(),
+            weight = 400,
+            italic = false,
+            monospace = false,
+            letterSpacingEm = 0f,
+            lineWidthPx = 300,
+        )
+        val page = listOf(
+            line("你好世界", 90f),
+            line("这是一个打印 Hello world 的简单程序：", 45f),
+            line("所有程序都需要能够存储数据，而变量可以帮助您做到这一点。", 45f),
+        )
+        assertEquals(45f, noteBodyFontPx(page), 0.01f)
+        // 整页只有一行（都是标题）时退回那一行的字号，不能返回 0。
+        assertEquals(90f, noteBodyFontPx(listOf(line("你好世界", 90f))), 0.01f)
+        assertEquals(0f, noteBodyFontPx(emptyList()), 0.01f)
+    }
+
     /** 旁注样式可脱离正文单独设置字号、字体与留白（批注样式落地时只换这里）。 */
     @Test
     fun `note style overrides font size family and spacing`() {
@@ -933,8 +1095,8 @@ class NoteBubblesTest {
         assertEquals(7f, m.edge, 0.01f)
         // 同一块空白：字号变大后可用宽变窄，尺寸跟着变（不是写死的比例）。
         val text = "字".repeat(12)
-        val def = noteBoxFit(text, NoteMetrics.forBody(20f), blankWidth = 200f, blankHeight = 100f)
-        val big = noteBoxFit(text, m, blankWidth = 200f, blankHeight = 100f)
+        val def = noteBoxFit(text, NoteMetrics.forBody(20f), maxWidth = 200f, maxHeight = 100f)
+        val big = noteBoxFit(text, m, maxWidth = 200f, maxHeight = 100f)
         assertTrue("大字号的框应更宽/更多行：def=${def.width}x${def.lines} big=${big.width}x${big.lines}",
             big.width != def.width || big.lines != def.lines)
     }
@@ -956,7 +1118,7 @@ class NoteBubblesTest {
     @Test
     fun `short note shrinks to one line inside a wide blank`() {
         val m = NoteMetrics.forBody(20f)
-        val size = noteBoxFit("用几章来", m, blankWidth = 200f, blankHeight = 100f)
+        val size = noteBoxFit("用几章来", m, maxWidth = 200f, maxHeight = 100f)
         assertEquals(1, size.lines)
         // 4 个全角字 = 4 × em；再加两侧内缩。
         assertEquals(57.6f + m.padTotal, size.width, 0.01f)
@@ -971,9 +1133,8 @@ class NoteBubblesTest {
     fun `long note wraps to the usable width`() {
         val m = NoteMetrics.forBody(20f)
         val text = "字".repeat(30)
-        val size = noteBoxFit(text, m, blankWidth = 200f, blankHeight = 100f)
-        val inner = 200f - m.margin * 2f - m.padTotal
-        assertEquals(inner + m.padTotal, size.width, 0.01f)
+        val size = noteBoxFit(text, m, maxWidth = 200f, maxHeight = 100f)
+        assertEquals(200f, size.width, 0.01f)
         assertEquals(3, size.lines)
         assertEquals(3 * m.lineH, size.height, 0.01f)
         assertTrue("30 个字 3 行应放得下，实际 ${size.shownChars}", size.complete)
@@ -983,9 +1144,10 @@ class NoteBubblesTest {
     @Test
     fun `right side keeps room for a horizontal arrow`() {
         val m = NoteMetrics.forBody(20f)
-        val text = "字".repeat(12)
-        val normal = noteBoxFit(text, m, blankWidth = 200f, blankHeight = 100f)
-        val beside = noteBoxFit(text, m, blankWidth = 200f, blankHeight = 100f, besideTextRight = true)
+        val text = "字".repeat(14)
+        // 右侧候选的可用宽已经在调用方扣掉 (sideGap − margin)。
+        val normal = noteBoxFit(text, m, maxWidth = 200f, maxHeight = 100f)
+        val beside = noteBoxFit(text, m, maxWidth = 200f - (m.sideGap - m.margin), maxHeight = 100f)
         assertTrue("右侧可用宽应更窄：normal=${normal.width} beside=${beside.width}", beside.width < normal.width)
         assertEquals(normal.lines, beside.lines)
     }
@@ -994,7 +1156,8 @@ class NoteBubblesTest {
     @Test
     fun `sliver narrower than four characters is not readable`() {
         val m = NoteMetrics.forBody(20f)
-        val size = noteBoxFit("字".repeat(10), m, blankWidth = 60f, blankHeight = 100f)
+        // 60 宽的空白扣掉两侧 margin 后只剩 31.2 可用。
+        val size = noteBoxFit("字".repeat(10), m, maxWidth = 60f - m.margin * 2f, maxHeight = m.lineH * 3.5f)
         assertEquals(3, size.lines)
         assertEquals(3, size.shownChars)
         assertTrue(!size.readable)
@@ -1005,7 +1168,7 @@ class NoteBubblesTest {
     @Test
     fun `blank height limits the lines and reports truncation`() {
         val m = NoteMetrics.forBody(20f)
-        val size = noteBoxFit("字".repeat(30), m, blankWidth = 200f, blankHeight = 60f)
+        val size = noteBoxFit("字".repeat(30), m, maxWidth = 200f, maxHeight = m.lineH * 1.5f)
         assertEquals(1, size.lines)
         assertEquals(m.lineH, size.height, 0.01f)
         assertTrue(size.shownChars in 1..29)
@@ -1017,13 +1180,13 @@ class NoteBubblesTest {
     @Test
     fun `blank smaller than one line yields no box`() {
         val m = NoteMetrics.forBody(20f)
-        val short = noteBoxFit("用几章来", m, blankWidth = 200f, blankHeight = 40f)
+        val short = noteBoxFit("用几章来", m, maxWidth = 200f, maxHeight = m.lineH * 0.5f)
         assertEquals(0, short.lines)
         assertEquals(0f, short.width, 0.01f)
-        val narrow = noteBoxFit("用几章来", m, blankWidth = 20f, blankHeight = 100f)
+        val narrow = noteBoxFit("用几章来", m, maxWidth = m.padTotal, maxHeight = 100f)
         assertEquals(0, narrow.lines)
         assertEquals(0f, narrow.width, 0.01f)
-        val empty = noteBoxFit("  ", m, blankWidth = 200f, blankHeight = 100f)
+        val empty = noteBoxFit("  ", m, maxWidth = 200f, maxHeight = 100f)
         assertEquals(0, empty.lines)
         assertEquals(0, empty.totalChars)
     }

@@ -89,6 +89,7 @@ class NoteBubblesTest {
         contentRight: Float = 600f,
         contentBottom: Float = 800f,
         pageRight: Float = 700f,
+        pageBottom: Float = contentBottom,
     ) = noteBubblePlacements(
         noteInk = notes,
         obstacles = NoteObstacles(
@@ -102,6 +103,14 @@ class NoteBubblesTest {
         contentBottom = contentBottom,
         pageRight = pageRight,
         fontPx = 20f,
+        pageBottom = pageBottom,
+    )
+
+    private fun boxOf(b: NoteBubble) = rect(
+        b.leftPx,
+        b.topPx,
+        b.leftPx + b.widthPx,
+        b.topPx + b.maxLines * b.fontPx * NOTE_BUBBLE_LINE_RATIO,
     )
 
     @Test
@@ -302,33 +311,117 @@ class NoteBubblesTest {
     }
 
     @Test
-    fun `no space at all still does not cover text`() {
-        // 连页边距都没有：宁可不显示，也不把正文糊掉。
+    fun `no space at all leaves a small icon instead of vanishing`() {
+        // 连页边距都没有：不再让批注消失，改为锚点右下角的小省略号（新口径）。
         val bubbles = place(
             notes = listOf(noteInk(1, listOf(rect(0f, 0f, 600f, 40f)))),
             textInk = listOf(rect(0f, 0f, 600f, 40f), rect(0f, 40f, 600f, 80f)),
             contentBottom = 80f,
             pageRight = 604f,
         )
-        assertTrue(bubbles.isEmpty())
+        val b = bubbles.single()
+        assertTrue("整页没空白时应退成小图标，实际=$b", b.compact)
+        assertTrue("小图标不该有箭头", b.arrow == null)
+        assertTrue("小图标应贴在锚点右下角，实际 left=${b.leftPx} top=${b.topPx}",
+            b.leftPx > 500f && b.topPx >= 39f)
     }
 
     @Test
-    fun `one character wide slit never becomes an ellipsis box`() {
-        // 右边距只有一个字宽：连「读得出一行」都做不到，宁可不显示。
-        val anchor = rect(0f, 0f, 600f, 40f)
+    fun `one character wide slit becomes the small icon`() {
+        // 右边距只有一个字宽：连「4 个字」都显示不了，退成小图标，不再产出省略号框。
         val bubbles = place(
-            notes = listOf(noteInk(1, listOf(anchor), "用几章来")),
+            notes = listOf(noteInk(1, listOf(rect(0f, 0f, 600f, 40f)), "用几章来")),
             textInk = listOf(rect(0f, 0f, 600f, 40f), rect(0f, 40f, 600f, 80f)),
             contentBottom = 80f,
             pageRight = 620f,
         )
-        assertTrue("一字宽的缝不该产出省略号框，实际=$bubbles", bubbles.isEmpty())
+        val b = bubbles.single()
+        assertTrue("一字宽的缝应退成小图标，实际=$b", b.compact)
+        assertTrue("小图标应有实体尺寸", b.widthPx > 0f)
+    }
+
+    @Test
+    fun `far blank behind other text does not count as nearby`() {
+        // 页脚有一整块能放下整句的空白，但中间隔着整页正文 ⇒ 视线被挡，不算附近；
+        // 只能就近用锚点行右侧那道窄缝，截断显示（不低于 4 个字）。
+        val anchorLine = rect(0f, 0f, 300f, 30f)
+        val sameRowRight = rect(380f, 0f, 600f, 30f)
+        val body = (0 until 17).map { i -> rect(0f, 35f + i * 40f, 600f, 75f + i * 40f) }
+        val bubbles = place(
+            notes = listOf(noteInk(1, listOf(anchorLine), "用几章来测试视线")),
+            textInk = listOf(anchorLine, sameRowRight) + body,
+            contentBottom = 720f,
+            pageBottom = 800f,
+        )
+        val b = bubbles.single()
+        assertTrue("不该跳过正文去用页脚，实际 top=${b.topPx}", b.topPx < 200f)
+        assertTrue("应就近落在锚点行右侧的窄缝，实际 left=${b.leftPx}", b.leftPx in 300f..400f)
+        val fit = noteTextFit(b.text, b.widthPx - notePad, b.fontPx, b.maxLines)
+        assertTrue("近处放不下整句，应截断显示", !fit.complete)
+        assertTrue("截断也要读得出至少 4 个字，实际 ${fit.shownChars}", fit.shownChars >= 4)
+    }
+
+    @Test
+    fun `one line is enough when four characters fit`() {
+        // 行间空隙只够一行：能读出 4 个字就成框，不再要求「至少一整行」。
+        val anchor = rect(0f, 0f, 100f, 30f)
+        val next = rect(0f, 35f, 600f, 65f)
+        val bubbles = place(
+            notes = listOf(noteInk(1, listOf(anchor), "用几章来")),
+            textInk = listOf(anchor, next),
+            contentBottom = 65f,
+            pageRight = 600f,
+        )
+        val b = bubbles.single()
+        assertTrue("一行也应有旁注，实际=$b", !b.compact)
+        assertEquals(1, b.maxLines)
+        val fit = noteTextFit(b.text, b.widthPx - notePad, b.fontPx, 1)
+        assertTrue("这一行要读得出至少 4 个字，实际 ${fit.shownChars}", fit.shownChars >= 4)
+    }
+
+    @Test
+    fun `small icon never covers its anchor ink`() {
+        // 锚点就在页面最后一行：右下角放不下时也要绕开锚点墨迹，不能糊在字上。
+        val anchor = rect(0f, 760f, 600f, 800f)
+        val bubbles = place(
+            notes = listOf(noteInk(1, listOf(anchor))),
+            textInk = (0 until 20).map { i -> rect(0f, i * 40f, 600f, i * 40f + 40f) },
+            contentBottom = 800f,
+            pageRight = 604f,
+        )
+        val b = bubbles.single()
+        assertTrue("整页排满应退成小图标，实际=$b", b.compact)
+        val box = rect(b.leftPx, b.topPx, b.leftPx + b.widthPx, b.topPx + b.widthPx)
+        assertTrue("小图标压到了锚点墨迹：box=$box ink=$anchor", !box.overlaps(anchor))
+        assertTrue(
+            "小图标应留在页面内：box=$box",
+            box.left >= 0f && box.top >= 0f && box.right <= 604f && box.bottom <= 800f,
+        )
+    }
+
+    @Test
+    fun `first picker keeps its spot when a second note competes`() {
+        // 两条批注抢同一块近处空白：先挑的拿走它，位置与单独放置时一模一样；后来者换到页边距。
+        val anchor = rect(0f, 0f, 200f, 20f)
+        val block = rect(0f, 220f, 600f, 800f)
+        val alone = place(
+            notes = listOf(noteInk(1, listOf(anchor))),
+            textInk = listOf(anchor, block),
+        )
+        val both = place(
+            notes = listOf(noteInk(1, listOf(anchor)), noteInk(2, listOf(anchor))),
+            textInk = listOf(anchor, block),
+        )
+        assertEquals(2, both.size)
+        assertEquals("先挑者的位置不该被后来者挤走", alone.single().leftPx, both[0].leftPx)
+        assertEquals(alone.single().topPx, both[0].topPx)
+        assertTrue("两条不能重叠", !boxOf(both[0]).overlaps(boxOf(both[1])))
+        assertTrue("后来者应换到别的位置", both[1].topPx != both[0].topPx || both[1].leftPx != both[0].leftPx)
     }
 
     @Test
     fun `figure is an obstacle too`() {
-        // 插图、背景图都算图形：铺满右侧与页脚时，旁注宁可不显示也不压图。
+        // 插图、背景图都算图形：铺满其他空白时，旁注退成小图标，不压图。
         val anchor = rect(0f, 0f, 200f, 40f)
         val bubbles = place(
             notes = listOf(noteInk(1, listOf(anchor))),
@@ -336,7 +429,8 @@ class NoteBubblesTest {
             figures = listOf(rect(200f, 0f, 600f, 800f), rect(0f, 41f, 200f, 800f)),
             pageRight = 600f,
         )
-        assertTrue(bubbles.isEmpty())
+        val b = bubbles.single()
+        assertTrue("图形占满时应退成小图标，实际=$b", b.compact)
     }
 
     @Test
@@ -430,22 +524,19 @@ class NoteBubblesTest {
 
     @Test
     fun `margin notes keep anchor order when anchors are five pixels apart`() {
-        // 两个锚点只隔 5px：页边距里的框要按锚点顺序排开，互不重叠。
+        // 两个锚点只隔 5px、且所在行排满：页边距里的框按锚点顺序排开，互不重叠。
         val textInk = ArrayList<Rect>()
-        for (i in 0 until 5) textInk += rect(0f, i * 40f, 600f, i * 40f + 40f)
-        val first = rect(0f, 200f, 100f, 220f)
-        val second = rect(0f, 225f, 100f, 245f)
+        var y = 0f
+        while (y < 800f) textInk += rect(0f, y, 600f, min(y + 40f, 800f)).also { y += 40f }
+        // 把中间两行换成相隔 5px 的短句行（仍排满整宽，视线到页边距不被挡）。
+        val first = rect(0f, 600f, 600f, 640f)
+        val second = rect(0f, 645f, 600f, 685f)
+        textInk.removeAll { it.top >= 600f && it.bottom <= 690f }
         textInk += first
         textInk += second
-        var y = 245f
-        while (y < 800f) {
-            textInk += rect(0f, y, 600f, min(y + 40f, 800f))
-            y += 40f
-        }
         val bubbles = place(
             notes = listOf(noteInk(1, listOf(first), "第一条"), noteInk(2, listOf(second), "第二条")),
             textInk = textInk,
-            figures = listOf(rect(100f, 200f, 600f, 245f)),
             contentBottom = 800f,
         )
         assertEquals(2, bubbles.size)

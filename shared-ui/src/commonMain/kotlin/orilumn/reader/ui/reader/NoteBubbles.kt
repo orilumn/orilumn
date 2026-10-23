@@ -329,13 +329,20 @@ internal fun noteCandidates(
  *
  * [rects] 是这条标注在本页的墨迹矩形（页坐标，由测度引擎逐字算出，与画出来的字同源）：
  * 空 = 本页没有它的墨迹（在别的页上），也就没有「旁边」可言。
+ *
+ * [arrowRects] 是**箭头专用**的逐字墨迹（一个字一个矩形）：布点用行框（[rects]），
+ * 箭头要能穿两字之间与标点前后的空白（实施计划 §4.4.1）。空 = 回退到 [rects]。
  */
 internal data class NoteInk(
     val annotationId: Long,
     val text: String,
     val argb: Int,
     val rects: List<Rect>,
-)
+    val arrowRects: List<Rect> = emptyList(),
+) {
+    /** 箭头避让 / 指向用的墨迹：优先逐字，缺省回退布点墨迹。 */
+    val arrowInk: List<Rect> get() = arrowRects.ifEmpty { rects }
+}
 
 /**
  * 页面上挡旁注 / 箭头的「非空白」（D-28 第 3 部分）。
@@ -351,6 +358,13 @@ internal data class NoteObstacles(
     val figures: List<Rect> = emptyList(),
     val tables: List<Rect> = emptyList(),
     val strokes: List<Rect> = emptyList(),
+    /**
+     * 箭头避让专用的**逐字**墨迹（一个字一个矩形）。
+     *
+     * 布点用行框（[textInk]）：词间空隙不能放下一句批注；箭头要能穿两字之间与标点前后的
+     * 空白，故另收一份逐字几何（实施计划 §4.4.1 / §4.4.3）。空 = 回退到 [textInk]。
+     */
+    val arrowInk: List<Rect> = emptyList(),
 ) {
     val all: List<Rect> get() = textInk + figures + tables + strokes
 }
@@ -360,6 +374,7 @@ internal data class NoteObstacles(
  *
  * @param shift [readerPageShift] 的结果：章内绝对 Y → 页坐标。
  * @param contentLeft 内容区左缘（插图/背景的 X 是内容区相对坐标）。
+ * @param arrowInk 箭头专用的逐字墨迹（页坐标）；空 = 箭头退回行框避让。
  */
 internal fun noteObstacles(
     textInk: List<Rect>,
@@ -367,6 +382,7 @@ internal fun noteObstacles(
     pageBackgrounds: List<PageBackground>?,
     shift: Int,
     contentLeft: Float,
+    arrowInk: List<Rect> = emptyList(),
 ): NoteObstacles {
     val figures = mutableListOf<Rect>()
     val strokes = mutableListOf<Rect>()
@@ -404,7 +420,12 @@ internal fun noteObstacles(
             // 纯块底色：空白，不挡。
         }
     }
-    return NoteObstacles(textInk = textInk, figures = figures, strokes = strokes)
+    return NoteObstacles(
+        textInk = textInk,
+        figures = figures,
+        strokes = strokes,
+        arrowInk = arrowInk,
+    )
 }
 
 /**
@@ -477,6 +498,9 @@ internal fun noteBubblePlacements(
     // 也不会把词间空隙当成能放下一句批注的空白。
     val textLines = mergeTextLineRects(obstacles.textInk, small)
     val baseObstacles = textLines + obstacles.figures + obstacles.tables + obstacles.strokes
+    // 箭头避让另用逐字墨迹（能穿两字之间与标点前后）；没有逐字几何时才退回行框。
+    val arrowObstacles = obstacles.arrowInk.ifEmpty { obstacles.textInk } +
+        obstacles.figures + obstacles.tables + obstacles.strokes
     val freeRects = maximalFreeRects(
         bounds = pageBounds,
         obstacles = baseObstacles,
@@ -548,7 +572,8 @@ internal fun noteBubblePlacements(
     return out.map { b ->
         // 小图标形态没有可指向的框，本来就不画箭头（§2.1）。
         if (b.compact) return@map b
-        val ink = inkById[b.annotationId]?.rects.orEmpty()
+        // 箭头用逐字墨迹（能穿两字之间）；布点仍用行框。
+        val ink = inkById[b.annotationId]?.arrowInk.orEmpty()
         val self = bubbleRects.getValue(b.annotationId)
         val others = out.asSequence()
             .filter { it.annotationId != b.annotationId && !it.compact }
@@ -557,7 +582,7 @@ internal fun noteBubblePlacements(
         val arrow = routeNoteArrow(
             bubble = self,
             inkRects = ink,
-            obstacles = baseObstacles,
+            obstacles = arrowObstacles,
             otherBubbles = others,
             pageBounds = pageBounds,
             drawnArrows = drawn,

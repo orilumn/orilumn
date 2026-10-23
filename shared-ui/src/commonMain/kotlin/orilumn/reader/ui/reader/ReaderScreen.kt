@@ -2074,6 +2074,19 @@ fun ReaderScreen(
                         pageBackgrounds = content.pageBackgrounds,
                         shift = shift,
                         contentLeft = contentLeft,
+                        // 箭头要能穿两字之间与标点前后：另给一份逐字墨迹（实施计划 §4.4.1）。
+                        arrowInk = pageGlyphRects(
+                            drawer = selectionDrawer,
+                            lines = lines,
+                            chapter = fromPos.chapter,
+                            charStart = slice.charStart,
+                            charEnd = slice.charEnd,
+                            pageImages = content.pageImages,
+                            pageBackgrounds = content.pageBackgrounds,
+                            frameLead = content.pageFrameLead,
+                            contentLeft = contentLeft,
+                            contentTop = contentTop,
+                        ),
                     )
                     noteBubblePlacements(
                         noteInk = notes.mapNotNull { a ->
@@ -2097,6 +2110,19 @@ fun ReaderScreen(
                                     text = a.note.orEmpty(),
                                     argb = a.color ?: annotationFallbackColor(a.kind),
                                     rects = rects,
+                                    // 箭头指向与避让都按逐字墨迹，不把整行当一个黑块。
+                                    arrowRects = pageGlyphRects(
+                                        drawer = selectionDrawer,
+                                        lines = lines,
+                                        chapter = fromPos.chapter,
+                                        charStart = a.charStart,
+                                        charEnd = a.charEnd,
+                                        pageImages = content.pageImages,
+                                        pageBackgrounds = content.pageBackgrounds,
+                                        frameLead = content.pageFrameLead,
+                                        contentLeft = contentLeft,
+                                        contentTop = contentTop,
+                                    ),
                                 )
                             }
                         },

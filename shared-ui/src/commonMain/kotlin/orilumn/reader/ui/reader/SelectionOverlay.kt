@@ -65,6 +65,39 @@ internal fun pageInkRects(
 }
 
 /**
+ * 一段章内区间在本页的**逐字**墨迹矩形（页坐标，与 [pageInkRects] 同一套换算）。
+ *
+ * 与 [pageInkRects] 的区别只在粒度：那边一行一个框（布点用），这边一个字一个框
+ * （旁注箭头避让用，见实施计划 §4.4.1）——箭头因此能从两字之间、标点前后的空白穿过。
+ *
+ * @return 空 = 本页没有这段字的墨迹（在别的页上 / 几何未就绪）。
+ */
+internal fun pageGlyphRects(
+    drawer: LineWindowDrawer,
+    lines: List<DrawLine>,
+    chapter: Int,
+    charStart: Int,
+    charEnd: Int,
+    pageImages: List<PageImage>?,
+    pageBackgrounds: List<PageBackground>?,
+    frameLead: Int,
+    contentLeft: Float,
+    contentTop: Float,
+): List<Rect> {
+    if (charEnd <= charStart || lines.isEmpty()) return emptyList()
+    val shift = readerPageShift(lines, pageImages, pageBackgrounds, frameLead, contentTop)
+        ?: return emptyList()
+    return drawer.inkRects(lines, chapter, charStart..(charEnd - 1)).map {
+        Rect(
+            left = contentLeft + it.left,
+            top = it.top - shift,
+            right = contentLeft + it.right,
+            bottom = it.bottom - shift,
+        )
+    }
+}
+
+/**
  * 把章内选区投到当前页（用户层轻量覆盖层，**不重烤栅格**）。
  *
  * `decorRects` 与标注装饰同一份逐字几何；这里只做页面平移与手柄端点判定。

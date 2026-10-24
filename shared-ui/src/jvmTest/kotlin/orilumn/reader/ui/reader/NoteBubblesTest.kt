@@ -122,6 +122,7 @@ class NoteBubblesTest {
         pageRight: Float = 700f,
         pageBottom: Float = contentBottom,
         textLines: List<NoteTextLine> = emptyList(),
+        arrowInk: List<Rect> = emptyList(),
         sizer: NoteTextSizer = EstimatedNoteTextSizer,
     ) = noteBubblePlacements(
         noteInk = notes,
@@ -131,6 +132,7 @@ class NoteBubblesTest {
             tables = tables,
             strokes = strokes,
             textLines = textLines,
+            arrowInk = arrowInk,
         ),
         contentLeft = contentLeft,
         contentRight = contentRight,
@@ -931,8 +933,9 @@ class NoteBubblesTest {
     }
 
     @Test
-    fun `full mid line never tries the right side`() {
-        // 整行顶到版心右缘（空白 0）且不是段末行：正右连候选都不该有。
+    fun `full mid line never tries its own right side`() {
+        // 整行顶到版心右缘（空白 0）且不是段末行：**本行**的正右连候选都不该有。
+        // 2026-10-24 用户定口：别的行右侧那块空白仍然可用（对本行就是右上 / 右下）。
         val row = rect(0f, 100f, 600f, 140f)
         val next = rect(0f, 160f, 600f, 200f)
         val ink = rect(100f, 100f, 300f, 140f)
@@ -946,8 +949,8 @@ class NoteBubblesTest {
             lines,
         )
         assertTrue(
-            "整行顶到版心右缘的段中行不该试正右：${list.map { it.side }}",
-            list.none { it.side == NoteSide.RIGHT },
+            "整行顶到版心右缘的段中行不该试本行正右：${list.map { it.side }}",
+            list.none { it.side == NoteSide.RIGHT && it.ring == 0 },
         )
     }
 
@@ -1982,9 +1985,9 @@ class NoteBubblesTest {
         assertTrue(size.readable)
     }
 
-    /** 2026-10-24 用户定口：正右只对段末行生成（段落只有一行时它天然是末行）。 */
+    /** 2026-10-24 用户定口：整行顶到版心右缘时，本行的正右不生成（段末行也不生成，只有别的行右侧可用）。 */
     @Test
-    fun `right side is only tried on the last line of a paragraph`() {
+    fun `right side of a full row is only tried on its last line`() {
         val row0 = rect(0f, 0f, 600f, 40f)
         val row1 = rect(0f, 40f, 600f, 80f)
         val column = rect(600f, 0f, 700f, 800f)
@@ -1999,15 +2002,15 @@ class NoteBubblesTest {
             lines = lines,
         )
         assertTrue(
-            "段中行不该试正右：${midLine.filter { it.side == NoteSide.RIGHT }}",
-            midLine.none { it.side == NoteSide.RIGHT },
+            "段中行不该试本行正右：${midLine.filter { it.side == NoteSide.RIGHT && it.ring == 0 }}",
+            midLine.none { it.side == NoteSide.RIGHT && it.ring == 0 },
         )
         val lastLine = candidates(
             note = noteInk(1, listOf(rect(0f, 40f, 200f, 80f)), "想法"),
             freeRects = listOf(column, below),
             lines = lines,
         )
-        assertTrue("段末行要试正右", lastLine.any { it.side == NoteSide.RIGHT })
+        assertTrue("段末行要试正右", lastLine.any { it.side == NoteSide.RIGHT && it.ring == 0 })
     }
 
     /** 方向名次：右 → 右下 → 右上 → 左下 → 左上 → 下 → 上 → 左（2026-10-24 用户定口）。 */
@@ -2191,6 +2194,155 @@ class NoteBubblesTest {
         val first = both.first { it.annotationId == 1L }
         assertEquals("让不出空间就不该动先占那条", alone.leftPx, first.leftPx, 0.5f)
         assertEquals("让不出空间就不该动先占那条", alone.topPx, first.topPx, 0.5f)
+    }
+
+    /**
+     * 2026-10-24 用户定口：**让位优先于隔行**。本行右侧那一列只要挪一挪就能放下，
+     * 就先请既有批注让位，而不是跑到上一行 / 下一行的同一列去。
+     *
+     * 版面：四条窄行，行间只够一行旁注的 0.85 倍（正下 / 正上 都放不下），
+     * 右侧那一列**跨这四行**因此每一行都有候选（隔行也有地方可去）。
+     */
+    @Test
+    fun `making room on this row beats moving to a neighbour row`() {
+        val row0 = rect(0f, 100f, 300f, 140f)
+        val anchorRow = rect(0f, 220f, 300f, 260f)
+        val row1 = rect(0f, 300f, 300f, 340f)
+        val rows = listOf(row0, anchorRow, row1)
+        val lines = rows.mapIndexed { i, r -> NoteTextLine(rect = r, blockId = 0, index = i) }
+        val notes = listOf(
+            noteInk(1, listOf(rect(100f, 220f, 140f, 260f)), "想法"),
+            noteInk(2, listOf(rect(0f, 220f, 40f, 260f)), "也短"),
+        )
+        fun page(ids: Set<Long>) = place(
+            notes = notes.filter { it.annotationId in ids },
+            textInk = rows,
+            textLines = lines,
+            figures = listOf(
+                // 正文那一列除本行外全是「字」：正上 / 正下 放不下。
+                rect(0f, 141f, 300f, 219f),
+                rect(0f, 261f, 300f, 299f),
+                // 右侧那一列只有本行上下这一段：正右放得下，右下 / 右上放不下。
+                rect(300f, 0f, 700f, 200f),
+                rect(300f, 282f, 700f, 800f),
+            ),
+            contentBottom = 800f,
+            pageRight = 700f,
+            pageBottom = 800f,
+        )
+        val alone = page(setOf(1L)).single()
+        val both = page(setOf(1L, 2L))
+        assertEquals("两条都要留住：$both", 2, both.size)
+        assertTrue("两条都要整句读完：$both", both.none { it.compact })
+        val first = both.first { it.annotationId == 1L }
+        val second = both.first { it.annotationId == 2L }
+        assertEquals("让位后仍在同一列：${both.map { it.leftPx }}", alone.leftPx, second.leftPx, 0.5f)
+        assertTrue(
+            "该留在本行右侧这一列，而不是隔行（隔行候选在 y≈120 / 320）：top=${second.topPx}",
+            second.topPx > 200f && second.topPx < 280f,
+        )
+        assertTrue(
+            "让位：先占那条必须挪开（单独放置时 top=${alone.topPx}，现在 top=${first.topPx}）",
+            abs(first.topPx - alone.topPx) > 1f,
+        )
+    }
+
+    /** 2026-10-24 用户定口：让位后新批注**折行**也要能放下（不是只认一行）。 */
+    @Test
+    fun `make room can place a note that needs several lines`() {
+        val row = rect(0f, 200f, 600f, 240f)
+        val notes = listOf(
+            noteInk(1, listOf(rect(100f, 200f, 140f, 240f)), "想法"),
+            noteInk(2, listOf(rect(0f, 200f, 40f, 240f)), "也短也短也短"),
+        )
+        // 整页只有右侧那一列空白，且这一列只有本行上下这一段（宽约 5 个字）：
+        // 这一句只能折成两行，让位也必须认折行。
+        val page = place(
+            notes = notes,
+            textInk = listOf(row),
+            figures = listOf(
+                rect(0f, 0f, 700f, 200f),
+                rect(0f, 242f, 600f, 282f),
+                rect(0f, 282f, 700f, 800f),
+            ),
+            contentBottom = 800f,
+            pageRight = 700f,
+            pageBottom = 800f,
+        )
+        assertEquals("两条都要留住：$page", 2, page.size)
+        assertTrue("两条都要整句读完：$page", page.none { it.compact })
+        val first = page.first { it.annotationId == 1L }
+        val second = page.first { it.annotationId == 2L }
+        assertTrue("列窄，这句要折成多行：${second.maxLines}", second.maxLines >= 2)
+        assertEquals("让位后仍在同一列：${page.map { it.leftPx }}", first.leftPx, second.leftPx, 0.5f)
+        val sorted = page.sortedBy { it.topPx }
+        val gap = sorted[1].topPx - (sorted[0].topPx + sorted[0].maxLines * noteLine)
+        assertTrue("上下叠放且留出 0.1em 间距：gap=$gap", gap >= noteMetrics.marginY - 0.5f)
+    }
+
+    /**
+     * 2026-10-24 用户定口：**上一行右侧那块空白，对本行来说就是右上角**——
+     * 不能因为斜向基准点落在左边，就把正文右侧的大空白整块挤掉。
+     */
+    @Test
+    fun `previous row right blank is an upper right for this row`() {
+        val above = rect(0f, 60f, 300f, 100f)
+        val full = rect(0f, 120f, 600f, 160f)
+        val lines = listOf(
+            NoteTextLine(rect = above, blockId = 0, index = 0),
+            NoteTextLine(rect = full, blockId = 0, index = 1),
+        )
+        val list = candidates(
+            note = noteInk(1, listOf(rect(0f, 120f, 80f, 160f)), "想法"),
+            freeRects = listOf(rect(302f, 0f, 700f, 800f)),
+            lines = lines,
+        )
+        val upperRight = list.filter { it.side == NoteSide.RIGHT && it.ring == 1 }
+        assertTrue("上一行右侧该有候选：${list.map { "${it.side}#${it.ring}" }}", upperRight.isNotEmpty())
+        assertTrue(
+            "框落在上一行那一段：${upperRight.map { it.rect.top }}",
+            upperRight.any { it.rect.bottom > 60f && it.rect.top < 100f },
+        )
+    }
+
+    /** 2026-10-24 用户定口：行盒上下那半段行距也是空白，批注可以贴进两行之间。 */
+    @Test
+    fun `a note can sit in the gap between two lines`() {
+        val row0 = rect(0f, 0f, 600f, 60f)
+        val row1 = rect(0f, 60f, 600f, 120f)
+        // 字墨迹只有 30 高：两行之间净空 30，一行旁注 19.87 + 两侧 0.1em 刚好放得下。
+        val glyphs = listOf(rect(0f, 15f, 600f, 45f), rect(0f, 75f, 600f, 105f))
+        val bubbles = place(
+            notes = listOf(noteInk(1, listOf(rect(0f, 15f, 40f, 45f)), "想法")),
+            textInk = listOf(row0, row1),
+            textLines = listOf(
+                NoteTextLine(rect = row0, blockId = 0, index = 0),
+                NoteTextLine(rect = row1, blockId = 0, index = 1),
+            ),
+            arrowInk = glyphs,
+            // 整行顶到版心右缘：没有右侧页边距那一列，只剩行距可用。
+            contentRight = 600f,
+            pageRight = 600f,
+        )
+        val b = bubbles.single()
+        assertTrue("该整句放下：$b", !b.compact)
+        assertTrue(
+            "该落在两行之间的行距里：top=${b.topPx}",
+            b.topPx >= 45f + noteMetrics.marginY - 0.5f && b.topPx + noteLine <= 75f - noteMetrics.marginY + 0.5f,
+        )
+    }
+
+    /** 文字障碍只按**字墨迹**收纵向：横向保持整行，免得把词间小缝当成空白。 */
+    @Test
+    fun `text obstacles tighten to glyph ink vertically only`() {
+        val line = rect(0f, 100f, 600f, 169f)
+        val glyphs = listOf(rect(40f, 110f, 70f, 158f), rect(80f, 112f, 110f, 156f))
+        val tight = tightTextInk(listOf(line), glyphs).single()
+        assertEquals(0f, tight.left, 0.01f)
+        assertEquals(600f, tight.right, 0.01f)
+        assertEquals(110f, tight.top, 0.01f)
+        assertEquals(158f, tight.bottom, 0.01f)
+        assertEquals("没有逐字几何就原样保留行盒", listOf(line), tightTextInk(listOf(line), emptyList()))
     }
 
     /** 整句宽以实测为准：粗估偏窄时框必须跟着变宽，而不是画出来再被省略号截掉。 */

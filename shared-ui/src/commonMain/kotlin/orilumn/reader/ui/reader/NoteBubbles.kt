@@ -666,9 +666,15 @@ internal fun noteCandidates(
         // 先排除「连一行都放不下」的薄缝（贴边的切口），再按横向距离、可用进深取。
         val usable = band.filter { depth(it) >= metrics.lineH - marginY - NOTE_GEOM_EPS }
         val pool = usable.ifEmpty { band }
-        val nearest = pool.minWithOrNull(compareBy({ dx(it) }, { -depth(it) }, { -it.width }))
-        val deepest = pool.maxWithOrNull(compareBy({ depth(it) }, { -dx(it) }, { it.width }))
-        return listOfNotNull(nearest, deepest).distinct()
+        // **不能只留「最近 / 最深」两块**（2026-10-24 用户定口）：锚在行首时斜向基准点落在左边，
+        // 页面左侧页边距那条窄缝既更近又更深，于是正文右侧的大块空白被整块挤掉——
+        // 真机上就是「上一行右侧明明空着，却直接跳到隔两行」。这里按面积先取前几块，
+        // 再补上横向最近、进深最大的各一块，让宽而矮的空白和窄而高的空白都能参与竞争。
+        val picked = ArrayList<Rect>(5)
+        pool.sortedByDescending { it.width * it.height }.take(3).forEach { picked += it }
+        pool.minWithOrNull(compareBy({ dx(it) }, { -depth(it) }, { -it.width }))?.let { picked += it }
+        pool.maxWithOrNull(compareBy({ depth(it) }, { -dx(it) }, { it.width }))?.let { picked += it }
+        return picked.distinct()
     }
 
     fun add(
@@ -713,7 +719,7 @@ internal fun noteCandidates(
      * 上下两条边不是「与正文的间距」，沿用空白自带的 0.1em 最小缝即可——
      * 「1em 无论上下左右」说的是**摆放方向那一侧**离正文的间距。
      */
-    fun emitRight(f: Rect, row: NoteTextLine, tier: Int) {
+    fun emitRight(f: Rect, row: NoteTextLine, ring: Int, stage: Int, tier: Int) {
         val x = row.rect.right + metrics.sideGap
         val far = farExtra(marginX, tier)
         val left = max(x, f.left)
@@ -726,7 +732,7 @@ internal fun noteCandidates(
         val hi = f.bottom - size.height
         if (hi < lo - NOTE_GEOM_EPS) return
         val top = (row.rect.center.y - size.height / 2f).coerceIn(lo, max(lo, hi))
-        add(NoteSide.RIGHT, 0, 0, tier, f, left, top, size)
+        add(NoteSide.RIGHT, ring, stage, tier, f, left, top, size)
     }
 
     /** 正左：与正右对称。 */
@@ -746,9 +752,15 @@ internal fun noteCandidates(
         add(NoteSide.LEFT, ring, stage, tier, f, right - size.width, top, size)
     }
 
-    /** 正下：近侧固定 1em（竖直引线要从这段空档出去），下方按档位。 */
+    /** 正下：近侧 1em（竖直引线要从这段空档出去），下方按档位。 */
     fun emitBelow(f: Rect, row: NoteTextLine, ring: Int, stage: Int, tier: Int, reserveX: Float?) {
-        val y = row.rect.bottom + preferred
+        // 近侧从**字墨迹下缘**算起（不是行盒下缘）：行盒底下那半段行距也是空白（§2.1）。
+        // 最后一档把这 1em 也收到 0.1em，好让两行之间那段行距放得下一条批注。
+        // 正下只认**横向压住锚点**的空白带：右边那一列是「右」，不是「下」
+        // （否则右侧列空白一高，就会冒出「横向在页边距、却叫正下」的候选，把让位挤掉）。
+        if (f.right <= anchor.left + NOTE_GEOM_EPS || f.left >= anchor.right - NOTE_GEOM_EPS) return
+        val near = if (tier == NOTE_MARGIN_TIER_NEAR_MIN) marginY else preferred
+        val y = row.inkBottom + near
         val far = farExtra(marginY, tier)
         val top = max(y, f.top)
         val maxH = f.bottom - far - top
@@ -765,7 +777,10 @@ internal fun noteCandidates(
 
     /** 正上：与正下对称。 */
     fun emitAbove(f: Rect, row: NoteTextLine, ring: Int, stage: Int, tier: Int, reserveX: Float?) {
-        val y = row.rect.top - preferred
+        // 近侧 1em 从字墨迹上缘算起（行盒顶上那半段行距也算空白）；横向与正下同理，要压住锚点。
+        if (f.right <= anchor.left + NOTE_GEOM_EPS || f.left >= anchor.right - NOTE_GEOM_EPS) return
+        val near = if (tier == NOTE_MARGIN_TIER_NEAR_MIN) marginY else preferred
+        val y = row.inkTop - near
         val far = farExtra(marginY, tier)
         val bottom = min(y, f.bottom)
         val maxH = bottom - f.top - far
@@ -848,8 +863,10 @@ internal fun noteCandidates(
         val row = lines.getOrNull(rowIndex) ?: return
         // 同一行左侧还有批注时，框左缘要让过它首字那一格（给它留引线空档）。
         val reserveX = leftReserve(rowIndex)
-        for (tier in NOTE_MARGIN_TIER_PREFERRED..NOTE_MARGIN_TIER_FAR_MIN) {
-            for (f in bandRects(row.rect.bottom + preferred, anchor.left, below = true)) {
+        // 正下的近侧也走三档：1em → 只收远侧 → 近侧也收到 0.1em（最后才用行距）。
+        for (tier in NOTE_MARGIN_TIER_PREFERRED..NOTE_MARGIN_TIER_NEAR_MIN) {
+            val near = if (tier == NOTE_MARGIN_TIER_NEAR_MIN) marginY else preferred
+            for (f in bandRects(row.rect.bottom + near, anchor.left, below = true)) {
                 emitBelow(f, row, ring, stage, tier, reserveX)
             }
         }
@@ -867,8 +884,9 @@ internal fun noteCandidates(
     fun emitAboveFamily(rowIndex: Int, ring: Int, stage: Int) {
         val row = lines.getOrNull(rowIndex) ?: return
         val reserveX = leftReserve(rowIndex)
-        for (tier in NOTE_MARGIN_TIER_PREFERRED..NOTE_MARGIN_TIER_FAR_MIN) {
-            for (f in bandRects(row.rect.top - preferred, anchor.left, below = false)) {
+        for (tier in NOTE_MARGIN_TIER_PREFERRED..NOTE_MARGIN_TIER_NEAR_MIN) {
+            val near = if (tier == NOTE_MARGIN_TIER_NEAR_MIN) marginY else preferred
+            for (f in bandRects(row.rect.top - near, anchor.left, below = false)) {
                 emitAbove(f, row, ring, stage, tier, reserveX)
             }
         }
@@ -892,31 +910,45 @@ internal fun noteCandidates(
         }
     }
 
+    /**
+     * 第 n 环的**正右**：别的行右侧那块空白，对本行来说也是「右上 / 右下」
+     * （2026-10-24 用户定口：上一行右侧对下一行就是右上角，凭什么不能用）。
+     *
+     * 与第 0 环同一个门槛：这一行右侧离版心右缘有 1em 以上空白，或者它是所在段的末行
+     * （顶到版心右缘的段落只有末行后面才有空）。框在该行的垂直中线上，引线仍走「正右」。
+     */
+    fun emitRightFamily(rowIndex: Int, ring: Int, stage: Int) {
+        val row = lines.getOrNull(rowIndex) ?: return
+        val lastInBlock = rowIndex + 1 >= lines.size || lines[rowIndex + 1].blockId != row.blockId
+        if (contentRight - row.rect.right < preferred && !lastInBlock) return
+        for (tier in NOTE_MARGIN_TIER_PREFERRED..NOTE_MARGIN_TIER_FAR_MIN) {
+            for (f in columnRects(row.rect.right + metrics.sideGap, row.rect, toRight = true)) {
+                emitRight(f, row, ring, stage, tier)
+            }
+        }
+    }
+
     // 第 0 环：锚点末行的右侧。2026-10-24 用户定口：**不再看是不是段末行**——只要这一行
     // 右侧离版心右缘还有 1em 以上空白，正右就是第一优先级（代码行 / 标题行这类左对齐的短行
     // 右边本来就是空白区，段中行也一样）。整行顶到版心右缘的行只保留原来的「段末行」入口：
     // 段落还有下一行时不试这一行的正右。
-    val rightBlank = contentRight - baseRow.rect.right
-    if (rightBlank >= preferred || base == blockEnd) {
-        for (tier in NOTE_MARGIN_TIER_PREFERRED..NOTE_MARGIN_TIER_FAR_MIN) {
-            for (f in columnRects(baseRow.rect.right + metrics.sideGap, baseRow.rect, toRight = true)) {
-                emitRight(f, baseRow, tier)
-            }
-        }
-    }
+    emitRightFamily(base, 0, 0)
     emitBelowFamily(base, 0, 0)
     emitAboveFamily(first, 0, 0)
 
-    // 环 1…n：本段内由近到远（往下一条、上一条地数）。
+    // 环 1…n：本段内由近到远（往下一条、上一条地数），每一环都带上那一行自己的正右
+    // （上一行右侧对下一行就是右上角，2026-10-24 用户定口）。
     var k = 1
     while (true) {
         var any = false
         if (base + k <= blockEnd) {
             emitBelowFamily(base + k, k, 0)
+            emitRightFamily(base + k, k, 0)
             any = true
         }
         if (first - k >= blockStart) {
             emitAboveFamily(first - k, k, 0)
+            emitRightFamily(first - k, k, 0)
             any = true
         }
         if (!any) break
@@ -927,8 +959,14 @@ internal fun noteCandidates(
     for (idx in blockStart..blockEnd) emitLeftFamily(idx, abs(idx - base), 1)
 
     // 相邻段：继续往外，仍由近到远；左侧同样排在最后。
-    for (idx in blockEnd + 1 until lines.size) emitBelowFamily(idx, idx - base, 2)
-    for (idx in blockStart - 1 downTo 0) emitAboveFamily(idx, first - idx, 2)
+    for (idx in blockEnd + 1 until lines.size) {
+        emitBelowFamily(idx, idx - base, 2)
+        emitRightFamily(idx, idx - base, 2)
+    }
+    for (idx in blockStart - 1 downTo 0) {
+        emitAboveFamily(idx, first - idx, 2)
+        emitRightFamily(idx, first - idx, 2)
+    }
     for (idx in 0 until lines.size) {
         if (idx < blockStart || idx > blockEnd) emitLeftFamily(idx, abs(idx - base), 3)
     }
@@ -957,14 +995,16 @@ internal fun orderedNoteCandidates(
     rightTaken: Boolean,
 ): List<NoteCandidate> {
     // 右侧没被占时 RIGHT 就是 0 号方向，和枚举顺序无关；被占时挪到 LEFT 之前。
-    fun rank(side: NoteSide): Int =
-        if (rightTaken && side == NoteSide.RIGHT) NOTE_SIDE_RANK_TAKEN_RIGHT else noteSideRank(side)
+    // 只压**本行**（环 0）的正右：别的行右侧那块空白仍然按正常名次参与（§0.1 0b）。
+    fun rank(c: NoteCandidate): Int =
+        if (rightTaken && c.side == NoteSide.RIGHT && c.ring == 0) NOTE_SIDE_RANK_TAKEN_RIGHT
+        else noteSideRank(c.side)
     return all.sortedWith(
         compareBy<NoteCandidate> { it.stage }
             // 不折行优先、行数越少越优先：先比折行数，再比远近（环）。
             .thenBy { it.lines }
             .thenBy { it.ring }
-            .thenBy { rank(it.side) }
+            .thenBy { rank(it) }
             .thenBy { it.marginTier }
             .thenBy { it.distance }
             .thenBy { it.rect.top }
@@ -1007,6 +1047,12 @@ internal data class NoteTextLine(
     val rect: Rect,
     val blockId: Int = 0,
     val index: Int = 0,
+    /**
+     * 这一行**字墨迹**的上下缘（缺省 = 行盒）：
+     * 行盒上下各有半段行距，那一段是空白，批注可以贴进来（2026-10-24 用户定口，见 §2.1）。
+     */
+    val inkTop: Float = rect.top,
+    val inkBottom: Float = rect.bottom,
 )
 
 /**
@@ -1199,7 +1245,7 @@ internal fun noteBubblePlacements(
         pageBounds.bottom - metrics.edge,
     )
     // 正文行：优先用渲染层给的「行框 + 块序号」（§1.5）；缺失时退回按 y 合并行框、块号一律 0。
-    val lines = obstacles.textLines.ifEmpty {
+    val rawLines = obstacles.textLines.ifEmpty {
         // 没有块序号时按「行距 > 行高 × 1.5」断段（§1.5 的退化路径）。
         val merged = mergeTextLineRects(obstacles.textInk, body)
             .sortedWith(compareBy({ it.top }, { it.left }))
@@ -1211,8 +1257,17 @@ internal fun noteBubblePlacements(
             NoteTextLine(rect = r, blockId = block, index = index)
         }
     }
+    // 每行的「字墨迹上下缘」：行盒上下那半段行距是空白，正上 / 正下 按字的位置量 1em（§2.1）。
+    val lines = rawLines.map { line ->
+        val ink = tightLineInk(line.rect, obstacles.arrowInk)
+        line.copy(inkTop = ink.top, inkBottom = ink.bottom)
+    }
     // 障碍仍是「文字墨迹（含列表圆点）+ 图形 + 表格 + 线条」：块底色 / padding / 页边距算空白。
-    val baseObstacles = obstacles.textInk + obstacles.figures + obstacles.tables + obstacles.strokes
+    // **文字取字墨迹、不取行盒**（2026-10-24 用户定口）：行盒上下各有一段行距（≈10px），
+    // 那一段本来就是空白，批注贴着字墨迹留 0.1em 就能放进去；行盒只有**带边框时**才算实心
+    // （边框在 strokes 里，仍是硬障碍）。
+    val textObstacles = tightTextInk(obstacles.textInk, obstacles.arrowInk)
+    val baseObstacles = textObstacles + obstacles.figures + obstacles.tables + obstacles.strokes
     // 障碍按横向 / 纵向 margin 外扩后再切空白：框落在空白里即满足四周 0.1em 的间距（§2.2）。
     val inflatedObstacles = baseObstacles.map { inflateRect(it, marginX, marginY) }
     // 箭头避让另用逐字墨迹（能穿两字之间与标点前后）；没有逐字几何时才退回行框。
@@ -1270,7 +1325,7 @@ internal fun noteBubblePlacements(
     // 三档推进（整句 → 截断 → 小椭圆）：同一行从右到左逐条独立取位，
     // 整句档全部放不下时才让既有批注上下让位（§1.4 / §5）。
     val choices = assignNoteCandidates(
-        ordered, lines, candidatesByNote, marginX, marginY,
+        ordered, lines, candidatesByNote, marginX, marginY, metrics, noteTextSizer,
     )
     val chosen = choices.associateBy { it.note.annotationId }
     traceNotePlacement(ordered, lines, freeRects, candidatesByNote, chosen, marginY)
@@ -1448,6 +1503,8 @@ private fun assignNoteCandidates(
     candidatesByNote: Map<Long, List<NoteCandidate>>,
     marginX: Float,
     marginY: Float,
+    metrics: NoteMetrics,
+    sizer: NoteTextSizer,
 ): List<NoteChoice> {
     if (notes.isEmpty() || lines.isEmpty()) return emptyList()
     val chosen = LinkedHashMap<Long, NoteCandidate>()
@@ -1489,62 +1546,97 @@ private fun assignNoteCandidates(
             min(a.bottom, b.bottom) - max(a.top, b.top) > 1f
 
     /**
-     * 让占住同一块空白的既有批注**上下移动**，给 [c] 腾出位置。
+     * 让占住同一块空白的既有批注**上下让一让**，给 [c] 腾出位置。
      *
-     * - 只认整句档（`c.complete`）：不为了一条要被截断的批注去搬动别人。
-     * - 只移动刚好够的距离：上移要求既有框的底边让到 `c.top - marginY` 之上，
-     *   下移要求顶边让到 `c.bottom + marginY` 之下，取所有挡路框里需要的最大位移。
-     * - 移完必须仍在它自己的空白里、彼此不撞、也不撞没让位的批注；任一条不满足就不让。
-     * - 上 / 下两种都可行时取位移小的（一样大时取上移），保证同一输入结果恒定。
+     * 2026-10-24 用户定口：
+     * - **让位排在「隔行」之前**：本行（环 0）的位置只要别人让一让就能放下，就先让别人让，
+     *   而不是直接跑去隔一行 / 隔两行的地方（调用方只在 `ring == 0` 时问这一句）。
+     * - **让完要真能把新批注放下**，包括新批注**折行**与**不折行**两种：把挡路框推到这块空白的
+     *   上缘或下缘，剩下的那条空档里重新折行夹取整句；实在夹不下就是「无路可让」。
+     * - 只认整句档、只对同一列的正右 / 正左（竖排让位）；挡路框要么在空白上缘要么在下缘。
+     * - 上 / 下两种排法都可行时取位移小的（一样大取上移），保证同一输入结果恒定。
      *
      * @return 让位成功并放下 [c] 时为 `true`；让不出空间或让完仍放不下则为 `false`（不改任何位置）。
      */
     fun makeRoom(note: NoteInk, c: NoteCandidate): Boolean {
         if (!c.complete) return false
+        if (c.side != NoteSide.RIGHT && c.side != NoteSide.LEFT) return false
         val blockers = occupied.filter {
             c.conflicts(it.candidate, marginX, marginY) &&
                 sharedBlank(c.freeRect, it.candidate.freeRect)
         }
         if (blockers.isEmpty()) return false
         val blockerIds = blockers.map { it.note.annotationId }.toSet()
+        val f = c.freeRect
+        val top = blockers.minOf { it.candidate.rect.top }
+        val bottom = blockers.maxOf { it.candidate.rect.bottom }
 
-        fun attempt(up: Boolean): Pair<Float, List<NoteChoice>>? {
-            var delta = 0f
-            for (b in blockers) {
-                val d = if (up) {
-                    b.candidate.rect.bottom - (c.rect.top - marginY)
-                } else {
-                    (c.rect.bottom + marginY) - b.candidate.rect.top
-                }
-                if (d > delta) delta = d
+        fun attempt(up: Boolean): Pair<Float, Pair<List<NoteChoice>, NoteCandidate>>? {
+            val delta = if (up) f.top - top else f.bottom - bottom
+            val movedTop = top + delta
+            val movedBottom = bottom + delta
+            // 挡路框让到这条边，剩下的空档就是新批注能用的地方。
+            val strip = if (up) {
+                Rect(f.left, movedBottom + marginY, f.right, f.bottom)
+            } else {
+                Rect(f.left, f.top, f.right, movedTop - marginY)
             }
-            if (delta <= NOTE_GEOM_EPS) return null
-            val moved = blockers.map { b ->
-                val r = b.candidate.rect
-                val rect = if (up) {
-                    Rect(r.left, r.top - delta, r.right, r.bottom - delta)
-                } else {
-                    Rect(r.left, r.top + delta, r.right, r.bottom + delta)
-                }
-                val cand = b.candidate.copy(
-                    rect = rect,
-                    distance = b.note.rects.minOf { rectDistance(rect, it) },
-                )
-                NoteChoice(b.note, cand)
+            if (strip.height <= 1f) return null
+            val maxW = when (c.side) {
+                NoteSide.LEFT -> min(c.rect.right, strip.right) - strip.left
+                else -> strip.right - max(c.rect.left, strip.left)
             }
-            // 移动后的框必须仍在它自己的空白里（空白已含 0.1em 最小留白）。
+            if (maxW <= 1f) return null
+            // 在这一条空档里重新折行：宽了不折行，窄了折行，只要整句放下就算成。
+            val size = noteBoxFit(note.text, metrics, maxW, strip.height, sizer)
+            if (!size.complete) return null
+            val left = when (c.side) {
+                NoteSide.LEFT -> min(c.rect.right, strip.right) - size.width
+                else -> max(c.rect.left, strip.left)
+            }
+            // 新框仍夹取到它原本想待的高度（本行垂直居中），只在被挡路框挤到的那一侧收边——
+            // 贴着让位后的挡路框，而不是被甩到空档的另一头。
+            val newTop = c.rect.top.coerceIn(strip.top, max(strip.top, strip.bottom - size.height))
+            val rect = Rect(left, newTop, left + size.width, newTop + size.height)
+            if (rect.left < f.left - NOTE_GEOM_EPS || rect.right > f.right + NOTE_GEOM_EPS ||
+                rect.top < f.top - NOTE_GEOM_EPS || rect.bottom > f.bottom + NOTE_GEOM_EPS
+            ) {
+                return null
+            }
+            val fresh = c.copy(
+                rect = rect,
+                lines = size.lines,
+                complete = true,
+                shownChars = size.shownChars,
+                distance = note.rects.minOf { rectDistance(rect, it) },
+            )
+            val moved = if (abs(delta) <= NOTE_GEOM_EPS) {
+                emptyList()
+            } else {
+                blockers.map { b ->
+                    val r = b.candidate.rect
+                    val movedRect = Rect(r.left, r.top + delta, r.right, r.bottom + delta)
+                    NoteChoice(
+                        b.note,
+                        b.candidate.copy(
+                            rect = movedRect,
+                            distance = b.note.rects.minOf { rectDistance(movedRect, it) },
+                        ),
+                    )
+                }
+            }
+            // 让完必须仍在它自己的空白里、彼此不撞、不撞没让位的批注、也不撞新框。
             for (m in moved) {
-                val f = m.candidate.freeRect
-                val r = m.candidate.rect
-                if (r.left < f.left - NOTE_GEOM_EPS || r.right > f.right + NOTE_GEOM_EPS ||
-                    r.top < f.top - NOTE_GEOM_EPS || r.bottom > f.bottom + NOTE_GEOM_EPS
+                val mf = m.candidate.freeRect
+                val mr = m.candidate.rect
+                if (mr.left < mf.left - NOTE_GEOM_EPS || mr.right > mf.right + NOTE_GEOM_EPS ||
+                    mr.top < mf.top - NOTE_GEOM_EPS || mr.bottom > mf.bottom + NOTE_GEOM_EPS
                 ) {
                     return null
                 }
+                if (m.candidate.conflicts(fresh, marginX, marginY)) return null
             }
-            // 移完彼此不撞、不撞没让位的批注、也不撞新框。
             for (i in moved.indices) {
-                if (moved[i].candidate.conflicts(c, marginX, marginY)) return null
                 for (j in i + 1 until moved.size) {
                     if (moved[i].candidate.conflicts(moved[j].candidate, marginX, marginY)) return null
                 }
@@ -1553,7 +1645,12 @@ private fun assignNoteCandidates(
                     if (moved[i].candidate.conflicts(o.candidate, marginX, marginY)) return null
                 }
             }
-            return delta to moved
+            // 新框只许和让位的那几条「换位置」；撞着没让位的批注就不算成功。
+            for (o in occupied) {
+                if (o.note.annotationId in blockerIds) continue
+                if (fresh.conflicts(o.candidate, marginX, marginY)) return null
+            }
+            return abs(delta) to (moved to fresh)
         }
 
         val up = attempt(up = true)
@@ -1561,21 +1658,14 @@ private fun assignNoteCandidates(
         val pick = listOfNotNull(up, down)
             .minWithOrNull(compareBy({ it.first }, { if (it === up) 0 else 1 }))
             ?: return false
-        // 让位只解决「挡路的那几条」：新框还撞着没让位的批注就不算成功，**先判后动**，
-        // 免得让位失败时把已放批注挪到半路。
-        if (occupied.any {
-                it.note.annotationId !in blockerIds && c.conflicts(it.candidate, marginX, marginY)
-            }
-        ) {
-            return false
-        }
-        for (m in pick.second) {
+        // **先判后动**：让位失败时不能把已放批注挪到半路。
+        for (m in pick.second.first) {
             chosen[m.note.annotationId] = m.candidate
             val idx = occupied.indexOfFirst { it.note.annotationId == m.note.annotationId }
             if (idx >= 0) occupied[idx] = m
         }
-        chosen[note.annotationId] = c
-        occupied += NoteChoice(note, c)
+        chosen[note.annotationId] = pick.second.second
+        occupied += NoteChoice(note, pick.second.second)
         return true
     }
 
@@ -1587,7 +1677,8 @@ private fun assignNoteCandidates(
     )
 
     // 第 1 档：整句。逐行走（自上而下），行内从右到左，每条按自己的阶梯独立取位；
-    // 整句候选全部放不下时，才试着让既有批注上下让一让。
+    // **让位排在隔行之前**（2026-10-24 用户定口）：本行的候选只差别人让一让，就先让别人让，
+    // 而不是直接跑到隔一行、隔两行的地方去。让位只在 `ring == 0` 问。
     var start = 0
     while (start < order.size) {
         val rowIndex = baseRow(order[start])
@@ -1595,10 +1686,11 @@ private fun assignNoteCandidates(
         while (end < order.size && baseRow(order[end]) == rowIndex) end++
         val members = order.subList(start, end)
         for (note in members) {
-            val chain = chainFor(note).filter { it.complete }
-            if (chain.any { take(note, it) }) continue
+            val chain = chainFor(note)
             for (c in chain) {
-                if (makeRoom(note, c)) break
+                if (!c.complete) continue
+                if (take(note, c)) break
+                if (c.ring == 0 && makeRoom(note, c)) break
             }
         }
         start = end
@@ -1631,6 +1723,34 @@ private fun noteRightOnRow(rects: List<Rect>, lines: List<NoteTextLine>, rowInde
     return (onRow.ifEmpty { rects }).maxOf { it.right }
 }
 
+
+/**
+ * 文字障碍按**字墨迹**收紧（2026-10-24 用户定口）：只收纵向，横向仍是整行范围。
+ *
+ * 行框（`textInk`）是高 = 行高的盒子，上下各有约半段行距（正文 48 / 行高 69 时约 10px）不是字。
+ * 那一段本来就该算空白——批注贴字墨迹留 0.1em 就不会压字，所以行距能用来放批注。
+ * 横向故意**不**收到字墨迹：收窄了就会把「词与词之间的小缝」当成能放批注的地方（§2.1 禁止）。
+ *
+ * 逐字墨迹 [glyphInk] 缺失（或某行没有对应字，例如列表圆点、占位框）时原样返回该行。
+ */
+internal fun tightTextInk(textInk: List<Rect>, glyphInk: List<Rect>): List<Rect> {
+    if (textInk.isEmpty() || glyphInk.isEmpty()) return textInk
+    return textInk.map { tightLineInk(it, glyphInk) }
+}
+
+/** 单个行盒按字墨迹收紧纵向范围（横向仍是整行；无字时原样返回）。 */
+internal fun tightLineInk(line: Rect, glyphInk: List<Rect>): Rect {
+    var top = Float.MAX_VALUE
+    var bottom = -Float.MAX_VALUE
+    for (g in glyphInk) {
+        val cy = g.center.y
+        if (cy < line.top || cy > line.bottom) continue
+        if (g.right <= line.left || g.left >= line.right) continue
+        top = min(top, g.top)
+        bottom = max(bottom, g.bottom)
+    }
+    return if (bottom <= top) line else Rect(line.left, top, line.right, bottom)
+}
 
 /**
  * 整页的**极大空闲矩形**（MaxRects，Jylänki《A Thousand Ways to Pack the Bin》§2.2）。

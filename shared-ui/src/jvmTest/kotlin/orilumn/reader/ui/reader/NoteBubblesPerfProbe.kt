@@ -225,7 +225,7 @@ class NoteBubblesPerfProbe {
                 "candidates=${candTime / 1_000_000}ms candQueries=$candQueries candReal=$candCalls " +
                 "place=${placeTime / 1_000_000}ms placeQueries=${sizer.queries} " +
                 "placeReal=${counter.calls}(${counter.natural}/${counter.fits}) " +
-                "route=${routeTime / 1_000_000}ms arrows=$arrows bubbles=${out.size} " +
+                "route=${routeTime / 1_000_000}ms tries=$noteArrowRouteTries arrows=$arrows bubbles=${out.size} " +
                 "compact=${out.count { it.compact }} freeRects=${freeRects.size} glyphs=${page.glyphs.size}",
         )
     }

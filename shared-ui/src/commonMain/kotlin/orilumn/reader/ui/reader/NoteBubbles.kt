@@ -41,6 +41,7 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
+import kotlin.time.TimeSource
 import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.io.Logger
 import orilumn.reader.engine.skia.PageBackground
@@ -264,8 +265,24 @@ internal class CachingNoteTextSizer(
 
     private data class FitKey(val text: String, val fontBits: Int, val widthBits: Int, val maxLines: Int)
 
+    private data class WidthKey(val text: String, val fontBits: Int, val widthBits: Int)
+
     private val natural = HashMap<NaturalKey, Float>(64)
     private val fits = HashMap<FitKey, NoteTextFit>(128)
+
+    /** 同一宽度下「整句放得下」的结果：与 maxLines 无关（只要不比它小），可跨容量复用。 */
+    private val completeFits = HashMap<WidthKey, NoteTextFit>(128)
+
+    /** 真排版次数与耗时（真机计时用：这是布点里最贵的一笔，量清楚才知道该优化哪）。 */
+    var realFits: Int = 0
+        private set
+    var realFitNanos: Long = 0L
+        private set
+
+    fun resetStats() {
+        realFits = 0
+        realFitNanos = 0L
+    }
 
     override fun naturalWidth(text: String, fontPx: Float): Float {
         val key = NaturalKey(text, fontPx.toRawBits())
@@ -279,7 +296,16 @@ internal class CachingNoteTextSizer(
     override fun fit(text: String, fontPx: Float, widthPx: Float, maxLines: Int): NoteTextFit {
         val key = FitKey(text, fontPx.toRawBits(), widthPx.toRawBits(), maxLines)
         fits[key]?.let { return it }
+        val wide = WidthKey(text, fontPx.toRawBits(), widthPx.toRawBits())
+        completeFits[wide]?.let { if (it.lines <= maxLines) return it }
+        val mark = TimeSource.Monotonic.markNow()
         val value = delegate.fit(text, fontPx, widthPx, maxLines)
+        realFits++
+        realFitNanos += mark.elapsedNow().inWholeNanoseconds
+        if (value.shownChars >= value.totalChars) {
+            if (completeFits.size >= maxEntries) completeFits.clear()
+            completeFits[wide] = value
+        }
         if (fits.size >= maxEntries) fits.clear()
         fits[key] = value
         return value
@@ -574,6 +600,14 @@ internal fun noteBoxFit(
     maxWidth: Float,
     maxHeight: Float,
     sizer: NoteTextSizer = EstimatedNoteTextSizer,
+    /**
+     * 只保留「有可能整句放下」的候选（方案 §5 第 1 档）。
+     *
+     * 便宜的必要条件：整句字宽总和超过「每行可用宽 × 行数」时，怎么断行都装不下
+     * （断行只会浪费，不会省宽）。这种候选连排版都不必做——整句档永远不会用它，
+     * 留到截断档真要它时再量。真机上一页十条批注就是被这些候选的实测拖慢的。
+     */
+    completeOnly: Boolean = false,
 ): NoteBoxSize {
     val content = text.trim()
     val total = content.count { it != '\n' }
@@ -585,23 +619,24 @@ internal fun noteBoxFit(
     if (innerW <= 0f || capacity < 1) return NoteBoxSize(0f, 0, 0f, 0, total)
 
     val desired = sizer.naturalWidth(content, metrics.em)
+    if (completeOnly && desired > 0f && desired > innerW * capacity + NOTE_GEOM_EPS) {
+        return NoteBoxSize(0f, 0, 0f, 0, total)
+    }
     // 整句一行放得下就不再让折行模拟复核：真实排版比「宽/字宽」更怕差一像素，
     // 实测尺子（[rememberNoteTextSizer]）已在整句宽里含了绘制侧的取整余量。
     val oneLine = desired > 0f && desired <= innerW + NOTE_GEOM_EPS
     val width = min(desired, innerW) + metrics.padTotal
     val inner = width - metrics.padTotal
-    val natural = if (oneLine) null else sizer.fit(content, metrics.em, inner, Int.MAX_VALUE)
-    val needed = natural?.lines ?: 1
-    val lines = min(needed, capacity)
+    // **只量一次**：maxLines 直接给容量。整句放得下时返回真实行数（不截断），放不下时返回
+    // 容量行 + 可见字数——与「先量自然行数、再按 min(自然, 容量) 重量」完全等价。
+    // 同一宽度下「整句放得下」的结果与容量无关，由 [CachingNoteTextSizer] 跨容量复用，
+    // 所以一个宽度一辈子只排一次版（真机上这是布点里最大的一笔开销）。
     val fit = if (oneLine) {
         NoteTextFit(lines = 1, shownChars = total, totalChars = total)
-    } else if (needed <= capacity) {
-        // 这个宽度本来就能装下整句：把 maxLines 收紧到 needed 也不会截断，
-        // 与刚才那次测量完全一致，不必再排一次版——真机上这是最大的一笔开销。
-        natural!!
     } else {
-        sizer.fit(content, metrics.em, inner, lines)
+        sizer.fit(content, metrics.em, inner, capacity)
     }
+    val lines = if (oneLine) 1 else fit.lines.coerceIn(1, capacity)
     return NoteBoxSize(
         width = width,
         lines = lines,
@@ -680,6 +715,8 @@ internal fun noteCandidates(
     scope: NoteCandidateScope = NoteCandidateScope.ALL,
     ringFrom: Int = 1,
     ringTo: Int = Int.MAX_VALUE,
+    /** 只生成「有可能整句放下」的候选（整句档用）；截断档要重跑一遍取剩下的。 */
+    completeOnly: Boolean = false,
 ): List<NoteCandidate> {
     val text = note.text.trim()
     if (text.isEmpty() || note.rects.isEmpty() || lines.isEmpty() || freeRects.isEmpty()) return emptyList()
@@ -945,7 +982,7 @@ internal fun noteCandidates(
         val maxW = f.right - far - left
         val maxH = marginColumnMaxHeight(f, left, left + maxW)
         if (maxW <= 1f || maxH <= 1f) return
-        val size = noteBoxFit(text, metrics, maxW, maxH, sizer)
+        val size = noteBoxFit(text, metrics, maxW, maxH, sizer, completeOnly)
         if (!size.readable) return
         val lo = f.top
         val hi = f.bottom - size.height
@@ -962,7 +999,7 @@ internal fun noteCandidates(
         val maxW = right - f.left - far
         val maxH = marginColumnMaxHeight(f, f.left + far, right)
         if (maxW <= 1f || maxH <= 1f) return
-        val size = noteBoxFit(text, metrics, maxW, maxH, sizer)
+        val size = noteBoxFit(text, metrics, maxW, maxH, sizer, completeOnly)
         if (!size.readable) return
         val lo = f.top
         val hi = f.bottom - size.height
@@ -986,7 +1023,7 @@ internal fun noteCandidates(
         val lo = max(f.left, reserveX ?: f.left)
         val maxW = f.right - lo
         if (maxW <= 1f || maxH <= 1f) return
-        val size = noteBoxFit(text, metrics, maxW, maxH, sizer)
+        val size = noteBoxFit(text, metrics, maxW, maxH, sizer, completeOnly)
         if (!size.readable) return
         val hi = f.right - size.width
         if (hi < lo - NOTE_GEOM_EPS) return
@@ -1006,7 +1043,7 @@ internal fun noteCandidates(
         val lo = max(f.left, reserveX ?: f.left)
         val maxW = f.right - lo
         if (maxW <= 1f || maxH <= 1f) return
-        val size = noteBoxFit(text, metrics, maxW, maxH, sizer)
+        val size = noteBoxFit(text, metrics, maxW, maxH, sizer, completeOnly)
         if (!size.readable) return
         val hi = f.right - size.width
         if (hi < lo - NOTE_GEOM_EPS) return
@@ -1025,7 +1062,7 @@ internal fun noteCandidates(
         val maxW = f.right - farX - left
         val maxH = f.bottom - farY - top
         if (maxW <= 1f || maxH <= 1f) return
-        val size = noteBoxFit(text, metrics, maxW, maxH, sizer)
+        val size = noteBoxFit(text, metrics, maxW, maxH, sizer, completeOnly)
         if (!size.readable) return
         add(NoteSide.BELOW_RIGHT, ring, stage, tier, f, left, top, size)
     }
@@ -1041,7 +1078,7 @@ internal fun noteCandidates(
         val maxW = right - f.left - farX
         val maxH = f.bottom - farY - top
         if (maxW <= 1f || maxH <= 1f) return
-        val size = noteBoxFit(text, metrics, maxW, maxH, sizer)
+        val size = noteBoxFit(text, metrics, maxW, maxH, sizer, completeOnly)
         if (!size.readable) return
         add(NoteSide.BELOW_LEFT, ring, stage, tier, f, right - size.width, top, size)
     }
@@ -1057,7 +1094,7 @@ internal fun noteCandidates(
         val maxW = f.right - farX - left
         val maxH = bottom - f.top - farY
         if (maxW <= 1f || maxH <= 1f) return
-        val size = noteBoxFit(text, metrics, maxW, maxH, sizer)
+        val size = noteBoxFit(text, metrics, maxW, maxH, sizer, completeOnly)
         if (!size.readable) return
         add(NoteSide.ABOVE_RIGHT, ring, stage, tier, f, left, bottom - size.height, size)
     }
@@ -1073,7 +1110,7 @@ internal fun noteCandidates(
         val maxW = right - f.left - farX
         val maxH = bottom - f.top - farY
         if (maxW <= 1f || maxH <= 1f) return
-        val size = noteBoxFit(text, metrics, maxW, maxH, sizer)
+        val size = noteBoxFit(text, metrics, maxW, maxH, sizer, completeOnly)
         if (!size.readable) return
         add(NoteSide.ABOVE_LEFT, ring, stage, tier, f, right - size.width, bottom - size.height, size)
     }
@@ -1478,6 +1515,9 @@ internal fun noteBubblePlacements(
     noteTextSizer: NoteTextSizer = EstimatedNoteTextSizer,
 ): List<NoteBubble> {
     if (noteInk.isEmpty()) return emptyList()
+    // 分阶段计时：真机上「一页十条批注」慢的时候，要知道是切空白、量候选、还是排位置慢。
+    val placeMark = TimeSource.Monotonic.markNow()
+    noteArrowRouteTries = 0
     val metrics = NoteMetrics(noteStyle)
     val body = fontPx.coerceAtLeast(1f)
     val small = metrics.em
@@ -1540,6 +1580,7 @@ internal fun noteBubblePlacements(
         minW = max(small * 1.2f, 1f),
         minH = lineH,
     )
+    val freeMs = placeMark.elapsedNow().inWholeMilliseconds
     // 固定顺序：锚点自上而下，同高按 id —— 布点结果只跟输入几何有关，可复现。
     val ordered = noteInk
         .filter { it.text.isNotBlank() && it.rects.isNotEmpty() }
@@ -1573,6 +1614,7 @@ internal fun noteBubblePlacements(
         scope: NoteCandidateScope,
         ringFrom: Int = 1,
         ringTo: Int = Int.MAX_VALUE,
+        completeOnly: Boolean = true,
     ): List<NoteCandidate> = noteCandidates(
         note = note,
         lines = lines,
@@ -1591,6 +1633,7 @@ internal fun noteBubblePlacements(
         scope = scope,
         ringFrom = ringFrom,
         ringTo = ringTo,
+        completeOnly = completeOnly,
     )
 
     val candidatesByNote = HashMap<Long, List<NoteCandidate>>(ordered.size)
@@ -1599,6 +1642,7 @@ internal fun noteBubblePlacements(
         if (list.isNotEmpty()) candidatesByNote[note.annotationId] = list
     }
 
+    val candMs = placeMark.elapsedNow().inWholeMilliseconds - freeMs
     // 每条批注下一批要算第几圈：1 → 2 → … → 段内最后一行 → 收尾（左侧 / 相邻段）。
     val nextRing = HashMap<Long, Int>(ordered.size)
     fun nextBatch(note: NoteInk): List<NoteCandidate>? {
@@ -1619,6 +1663,10 @@ internal fun noteBubblePlacements(
     fun restBatch(note: NoteInk): List<NoteCandidate> =
         generate(note, NoteCandidateScope.RINGS) + generate(note, NoteCandidateScope.TAIL)
 
+    // 截断档才要的候选：整句注定放不下的那些，到这一步才真排版（一条批注只排一次）。
+    fun truncatedBatch(note: NoteInk): List<NoteCandidate> =
+        generate(note, NoteCandidateScope.ALL, completeOnly = false)
+
     // 整句在最宽的空白里都放不下一行时，「最少行数」这一档根本不可能命中，
     // 就别一圈一圈试了：一次取完，直接走折行档。
     val maxFreeWidth = freeRects.maxOfOrNull { it.width } ?: 0f
@@ -1633,8 +1681,10 @@ internal fun noteBubblePlacements(
         ordered, lines, candidatesByNote, marginX, marginY, metrics, noteTextSizer,
         nextBatch = ::nextBatch,
         restBatch = ::restBatch,
+        truncatedBatch = ::truncatedBatch,
         minLinesReachable = ::minLinesReachable,
     )
+    val assignMs = placeMark.elapsedNow().inWholeMilliseconds - freeMs - candMs
     val chosen = choices.associateBy { it.note.annotationId }
     // 一条都分不到的批注不再消失：在原文右下角退成小椭圆（§1.6）。
     val iconW = max(small * NOTE_ICON_WIDTH_RATIO, 4f)
@@ -1685,7 +1735,7 @@ internal fun noteBubblePlacements(
     }
     // 逐条路由：先画的先占位置，后画的把已画引线当软障碍（尽量不交叉）。
     val drawn = ArrayList<NoteArrow>(out.size)
-    return out.map { b ->
+    val routed = out.map { b ->
         // 小图标形态没有可指向的框，本来就不画箭头（§2.1）。
         if (b.compact) return@map b
         // 箭头用逐字墨迹（能穿两字之间）；布点仍用行框。
@@ -1710,6 +1760,15 @@ internal fun noteBubblePlacements(
         if (arrow != null) drawn += arrow
         b.copy(arrow = arrow)
     }
+    Logger.d(
+        "Orilumn.NOTE",
+        "NOTE-PLACE notes=${ordered.size}" +
+            " free=$freeMs cand=$candMs assign=$assignMs" +
+            " route=${placeMark.elapsedNow().inWholeMilliseconds - freeMs - candMs - assignMs}" +
+            " tries=$noteArrowRouteTries" +
+            " total=${placeMark.elapsedNow().inWholeMilliseconds}",
+    )
+    return routed
 }
 
 /** 全页分配的结果：这条批注最终用哪个候选框。 */
@@ -1748,6 +1807,11 @@ private fun assignNoteCandidates(
     nextBatch: (NoteInk) -> List<NoteCandidate>? = { null },
     /** 一次性取完剩余候选（跨行全量 + 收尾）：只在「最少行数注定不可达」时用。 */
     restBatch: (NoteInk) -> List<NoteCandidate> = { emptyList() },
+    /**
+     * 截断档要用的候选（整句注定放不下的那些，整句档没量过）：真走到这一档才补进来。
+     * 整句档已经放好的批注因此一次都不量它们——真机上这是省下来的大头。
+     */
+    truncatedBatch: (NoteInk) -> List<NoteCandidate> = { emptyList() },
     /** 这句话在本页最宽的空白里能不能排成「最少行数」（不能就别逐圈试了）。 */
     minLinesReachable: (NoteInk) -> Boolean = { true },
 ): List<NoteChoice> {
@@ -2082,9 +2146,11 @@ private fun assignNoteCandidates(
         }
         start = end
     }
-    // 第 2 档：截断（至少 4 字，候选里已保证 readable），同一顺序再走一遍；不再搬动别人。
+    // 第 2 档：截断（候选里已保证 readable），同一顺序再走一遍；不再搬动别人。
+    // 整句注定放不下的候选到这一步才补量（整句档放好的批注一次都没量过它们）。
     for (note in order) {
         if (chosen.containsKey(note.annotationId)) continue
+        addBatch(note, truncatedBatch(note))
         chainFor(note).firstOrNull { take(note, it) }
     }
     return order.mapNotNull { note -> chosen[note.annotationId]?.let { NoteChoice(note, it) } }
@@ -2661,6 +2727,7 @@ internal fun routeNoteArrow(
     fun consider(points: List<Offset>, target: ArrowTarget) {
         val path = measureArrowRoute(
             points, order++, target.obstacles, bubble, drawnSegments, hugDistance,
+            limitClear = best, limitFallback = fallback,
         ) ?: return
         if (path.clear) {
             if (path.betterThan(best)) best = path
@@ -3195,6 +3262,9 @@ private fun pickCoords(values: List<Float>, mid: Float): List<Float> {
 
 
 /** 量一条候选路径：长度、折数、已画引线交叉数、穿障碍的长度、有没有拐回自己的框。 */
+/** 候选路径的实测次数（真机排查用：一页引线慢的时候先看这个数）。 */
+internal var noteArrowRouteTries: Int = 0
+
 private fun measureArrowRoute(
     route: List<Offset>,
     order: Int,
@@ -3202,9 +3272,21 @@ private fun measureArrowRoute(
     bubble: Rect,
     drawnSegments: List<Pair<Offset, Offset>>,
     hugDistance: Float = 0f,
+    /**
+     * 现有的通畅路径 / 兜底路径：量到一半就已经**赢不了**它们时立刻放弃。
+     *
+     * 判据里交叉数排第一、长度排最后，各项都只会随段数增加而变差（交叉、穿字、贴字、长度
+     * 全是累加量，折数开局就定了），所以「已经更差」是**严格**结论，不是近似。
+     * 真机上一页九条批注要量两千多条候选路径，绝大多数第一条线段就撞上已画引线——
+     * 不在这里掐掉，引线就是全页最慢的一步。
+     */
+    limitClear: ArrowPath? = null,
+    limitFallback: ArrowPath? = null,
 ): ArrowPath? {
+    noteArrowRouteTries++
     val points = simplifyPolyline(route)
     if (points.size < 2) return null
+    val bends = max(0, points.size - 2)
     var length = 0f
     var hits = 0f
     var crosses = 0
@@ -3261,6 +3343,35 @@ private fun measureArrowRoute(
         }
         for (d in drawnSegments) {
             if (segmentsIntersect(a, b, d.first, d.second)) crosses++
+        }
+        // 已量到的部分就赢不了了：后面的段只会让交叉 / 穿字 / 长度继续变大。
+        if (limitClear != null) {
+            if (crosses > limitClear.crosses) return null
+            if (crosses == limitClear.crosses) {
+                if (bends > limitClear.bends) return null
+                if (bends == limitClear.bends) {
+                    if (hits > limitClear.hits + 0.5f) return null
+                    if (abs(hits - limitClear.hits) <= 0.5f) {
+                        if (hug > limitClear.hug + 0.5f) return null
+                        if (abs(hug - limitClear.hug) <= 0.5f && length > limitClear.length + 0.5f) {
+                            return null
+                        }
+                    }
+                }
+            }
+        }
+        if (limitFallback != null) {
+            if (enters != limitFallback.entersBubble) {
+                if (enters) return null
+            } else {
+                if (crosses > limitFallback.crosses) return null
+                if (crosses == limitFallback.crosses) {
+                    if (hits > limitFallback.hits + 0.5f) return null
+                    if (abs(hits - limitFallback.hits) <= 0.5f && length > limitFallback.length + 0.5f) {
+                        return null
+                    }
+                }
+            }
         }
     }
     if (length < 0.01f) return null

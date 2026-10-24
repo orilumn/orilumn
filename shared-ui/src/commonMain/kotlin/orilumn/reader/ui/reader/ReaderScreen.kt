@@ -2174,6 +2174,11 @@ fun ReaderScreen(
                     val totalMs = noteLayoutMark.elapsedNow().inWholeMilliseconds
                     val inkAndPlaceMs = inkMark.elapsedNow().inWholeMilliseconds
                     val placeMs = placeMark.elapsedNow().inWholeMilliseconds
+                    // 文字实测次数与耗时：布点里最贵的一笔，和总时长一起看才知道瓶颈在哪。
+                    val sizer = noteTextSizer as? CachingNoteTextSizer
+                    val fits = sizer?.realFits ?: 0
+                    val fitMs = (sizer?.realFitNanos ?: 0L) / 1_000_000
+                    sizer?.resetStats()
                     Logger.d(
                         "Orilumn.NOTE",
                         "NOTE-LAYOUT notes=${notes.size}" +
@@ -2181,7 +2186,7 @@ fun ReaderScreen(
                             " compact=${placed.count { it.compact }}" +
                             " geo=${totalMs - inkAndPlaceMs}" +
                             " ink=${inkAndPlaceMs - placeMs}" +
-                            " place=$placeMs total=$totalMs",
+                            " place=$placeMs fits=$fits fitMs=$fitMs total=$totalMs",
                     )
                     placed
                 }

@@ -144,7 +144,13 @@ private const val NOTE_SIDE_GAP_EM: Float = 1f
 /** 候选留白的三个档（2026-10-24 用户定口）：先双侧 1em，再远侧 0.1em，斜向最后收近侧。 */
 private const val NOTE_MARGIN_TIER_PREFERRED: Int = 0
 private const val NOTE_MARGIN_TIER_FAR_MIN: Int = 1
-private const val NOTE_MARGIN_TIER_NEAR_MIN: Int = 2
+/** 近侧也收：竖直方向先收到「正文行距让出来的空白」（规则第 13 条的默认上下留白）。 */
+private const val NOTE_MARGIN_TIER_NEAR_GAP: Int = 2
+/** 压到底：近侧只留 [NOTE_MIN_MARGIN_PX]（规则第 13 条的下限）。 */
+private const val NOTE_MARGIN_TIER_NEAR_MIN: Int = 3
+
+/** 留白压缩的下限（规则第 13 条：压到 2px 才算这个方向不可用）。 */
+private const val NOTE_MIN_MARGIN_PX: Float = 2f
 
 /** 标注离屏幕边的距离：贴边会让框看起来像被裁掉一条。 */
 private const val NOTE_PAGE_EDGE_EM: Float = 0.5f
@@ -651,6 +657,11 @@ internal fun noteCandidates(
     otherRowLeft: Map<Int, Float> = emptyMap(),
     contentRight: Float = Float.MAX_VALUE,
     contentLeft: Float? = null,
+    /**
+     * 竖直方向的默认留白（规则第 13 条）：取「正文行盒节距 − 行盒高」，即行与行之间
+     * 那段纯空白；压缩到 [NOTE_MIN_MARGIN_PX] 为止。缺省沿用 [NoteMetrics.marginY]。
+     */
+    verticalGap: Float = metrics.marginY,
     scope: NoteCandidateScope = NoteCandidateScope.ALL,
     ringFrom: Int = 1,
     ringTo: Int = Int.MAX_VALUE,
@@ -727,8 +738,20 @@ internal fun noteCandidates(
         if (tier == NOTE_MARGIN_TIER_PREFERRED) max(0f, preferred - axisMin) else 0f
 
     /** 斜向摆法的近侧留白：首选 / 远侧档仍是 1em，最后一档才收到 0.1em。 */
-    fun diagonalNear(axisMin: Float, tier: Int): Float =
-        if (tier == NOTE_MARGIN_TIER_NEAR_MIN) axisMin else preferred
+
+    /**
+     * 竖直近侧留白（规则第 7 / 13 条）：1em（给引线与箭头留位置）→
+     * 「正文行距让出来的纯空白」→ 2px。压到 2px 才算这个方向不可用。
+     */
+    fun nearYRoom(tier: Int): Float = when (tier) {
+        NOTE_MARGIN_TIER_NEAR_GAP -> max(NOTE_MIN_MARGIN_PX, verticalGap)
+        NOTE_MARGIN_TIER_NEAR_MIN -> NOTE_MIN_MARGIN_PX
+        else -> preferred
+    }
+
+    /** 水平近侧留白：1em → 2px（规则第 13 条：左右默认 1em，压缩不小于 2px）。 */
+    fun nearXRoom(tier: Int): Float =
+        if (tier == NOTE_MARGIN_TIER_NEAR_MIN) NOTE_MIN_MARGIN_PX else preferred
 
     /**
      * 规则第 6 条：左右**只剩页边距**那一列时最多折两行——那一列本来就窄，再多折会折成竖条。
@@ -887,7 +910,7 @@ internal fun noteCandidates(
         // 正下只认**横向压住锚点**的空白带：右边那一列是「右」，不是「下」
         // （否则右侧列空白一高，就会冒出「横向在页边距、却叫正下」的候选，把让位挤掉）。
         if (f.right <= anchor.left + NOTE_GEOM_EPS || f.left >= anchor.right - NOTE_GEOM_EPS) return
-        val near = if (tier == NOTE_MARGIN_TIER_NEAR_MIN) marginY else preferred
+        val near = nearYRoom(tier)
         val y = row.inkBottom + near
         val far = farExtra(marginY, tier)
         val top = max(y, f.top)
@@ -907,7 +930,7 @@ internal fun noteCandidates(
     fun emitAbove(f: Rect, row: NoteTextLine, ring: Int, stage: Int, tier: Int, reserveX: Float?) {
         // 近侧 1em 从字墨迹上缘算起（行盒顶上那半段行距也算空白）；横向与正下同理，要压住锚点。
         if (f.right <= anchor.left + NOTE_GEOM_EPS || f.left >= anchor.right - NOTE_GEOM_EPS) return
-        val near = if (tier == NOTE_MARGIN_TIER_NEAR_MIN) marginY else preferred
+        val near = nearYRoom(tier)
         val y = row.inkTop - near
         val far = farExtra(marginY, tier)
         val bottom = min(y, f.bottom)
@@ -925,8 +948,8 @@ internal fun noteCandidates(
 
     /** 右下：左缘在「末行第一个字 + 一个汉字」右侧，框顶在该行下方。 */
     fun emitBelowRight(f: Rect, row: NoteTextLine, ring: Int, stage: Int, tier: Int, reserveX: Float?) {
-        val nearX = diagonalNear(marginX, tier)
-        val nearY = diagonalNear(marginY, tier)
+        val nearX = nearXRoom(tier)
+        val nearY = nearYRoom(tier)
         val farX = farExtra(marginX, tier)
         val farY = farExtra(marginY, tier)
         val left = max(max(cornerRightX + nearX, f.left), reserveX ?: f.left)
@@ -941,8 +964,8 @@ internal fun noteCandidates(
 
     /** 左下：右缘在「末行末字符 - 一个汉字」左侧，框顶在该行下方。 */
     fun emitBelowLeft(f: Rect, row: NoteTextLine, ring: Int, stage: Int, tier: Int) {
-        val nearX = diagonalNear(marginX, tier)
-        val nearY = diagonalNear(marginY, tier)
+        val nearX = nearXRoom(tier)
+        val nearY = nearYRoom(tier)
         val farX = farExtra(marginX, tier)
         val farY = farExtra(marginY, tier)
         val right = min(cornerLeftX - nearX, f.right)
@@ -957,8 +980,8 @@ internal fun noteCandidates(
 
     /** 右上：横向基准与右下相同，框底在该行上方。 */
     fun emitAboveRight(f: Rect, row: NoteTextLine, ring: Int, stage: Int, tier: Int, reserveX: Float?) {
-        val nearX = diagonalNear(marginX, tier)
-        val nearY = diagonalNear(marginY, tier)
+        val nearX = nearXRoom(tier)
+        val nearY = nearYRoom(tier)
         val farX = farExtra(marginX, tier)
         val farY = farExtra(marginY, tier)
         val left = max(max(cornerRightX + nearX, f.left), reserveX ?: f.left)
@@ -973,8 +996,8 @@ internal fun noteCandidates(
 
     /** 左上：横向基准与左下相同，框底在该行上方。 */
     fun emitAboveLeft(f: Rect, row: NoteTextLine, ring: Int, stage: Int, tier: Int) {
-        val nearX = diagonalNear(marginX, tier)
-        val nearY = diagonalNear(marginY, tier)
+        val nearX = nearXRoom(tier)
+        val nearY = nearYRoom(tier)
         val farX = farExtra(marginX, tier)
         val farY = farExtra(marginY, tier)
         val right = min(cornerLeftX - nearX, f.right)
@@ -993,17 +1016,17 @@ internal fun noteCandidates(
         val reserveX = leftReserve(rowIndex)
         // 正下的近侧也走三档：1em → 只收远侧 → 近侧也收到 0.1em（最后才用行距）。
         for (tier in NOTE_MARGIN_TIER_PREFERRED..NOTE_MARGIN_TIER_NEAR_MIN) {
-            val near = if (tier == NOTE_MARGIN_TIER_NEAR_MIN) marginY else preferred
+            val near = nearYRoom(tier)
             for (f in bandRects(row.rect.bottom + near, anchor.left, below = true)) {
                 emitBelow(f, row, ring, stage, tier, reserveX)
             }
         }
         for (tier in NOTE_MARGIN_TIER_PREFERRED..NOTE_MARGIN_TIER_NEAR_MIN) {
-            val near = diagonalNear(marginX, tier)
-            for (f in bandRects(row.rect.bottom + diagonalNear(marginY, tier), cornerRightX + near, below = true)) {
+            val near = nearXRoom(tier)
+            for (f in bandRects(row.rect.bottom + nearYRoom(tier), cornerRightX + near, below = true)) {
                 emitBelowRight(f, row, ring, stage, tier, reserveX)
             }
-            for (f in bandRects(row.rect.bottom + diagonalNear(marginY, tier), cornerLeftX - near, below = true)) {
+            for (f in bandRects(row.rect.bottom + nearYRoom(tier), cornerLeftX - near, below = true)) {
                 emitBelowLeft(f, row, ring, stage, tier)
             }
         }
@@ -1013,17 +1036,17 @@ internal fun noteCandidates(
         val row = lines.getOrNull(rowIndex) ?: return
         val reserveX = leftReserve(rowIndex)
         for (tier in NOTE_MARGIN_TIER_PREFERRED..NOTE_MARGIN_TIER_NEAR_MIN) {
-            val near = if (tier == NOTE_MARGIN_TIER_NEAR_MIN) marginY else preferred
+            val near = nearYRoom(tier)
             for (f in bandRects(row.rect.top - near, anchor.left, below = false)) {
                 emitAbove(f, row, ring, stage, tier, reserveX)
             }
         }
         for (tier in NOTE_MARGIN_TIER_PREFERRED..NOTE_MARGIN_TIER_NEAR_MIN) {
-            val near = diagonalNear(marginX, tier)
-            for (f in bandRects(row.rect.top - diagonalNear(marginY, tier), cornerRightX + near, below = false)) {
+            val near = nearXRoom(tier)
+            for (f in bandRects(row.rect.top - nearYRoom(tier), cornerRightX + near, below = false)) {
                 emitAboveRight(f, row, ring, stage, tier, reserveX)
             }
-            for (f in bandRects(row.rect.top - diagonalNear(marginY, tier), cornerLeftX - near, below = false)) {
+            for (f in bandRects(row.rect.top - nearYRoom(tier), cornerLeftX - near, below = false)) {
                 emitAboveLeft(f, row, ring, stage, tier)
             }
         }
@@ -1403,8 +1426,7 @@ internal fun noteBubblePlacements(
         pageBounds.bottom - metrics.edge,
     )
     // 正文行：优先用渲染层给的「行框 + 块序号」（§1.5）；缺失时退回按 y 合并行框、块号一律 0。
-    val rawLines = obstacles.textLines.ifEmpty {
-        // 没有块序号时按「行距 > 行高 × 1.5」断段（§1.5 的退化路径）。
+    val rawLines = obstacles.textLines.ifEmpty {        // 没有块序号时按「行距 > 行高 × 1.5」断段（§1.5 的退化路径）。
         val merged = mergeTextLineRects(obstacles.textInk, body)
             .sortedWith(compareBy({ it.top }, { it.left }))
         var block = 0
@@ -1420,6 +1442,9 @@ internal fun noteBubblePlacements(
         val ink = tightLineInk(line.rect, obstacles.arrowInk)
         line.copy(inkTop = ink.top, inkBottom = ink.bottom)
     }
+    // 规则第 13 条：上下默认留白取「当前正文行距让出来的纯空白」（行盒节距 − 行盒高），
+    // 压缩下限 2px。行距越大，批注与正文之间默认就隔得越开。
+    val verticalGap = noteLineGap(lines, marginY)
     // 障碍仍是「文字墨迹（含列表圆点）+ 图形 + 表格 + 线条」：块底色 / padding / 页边距算空白。
     // **文字取字墨迹、不取行盒**（2026-10-24 用户定口）：行盒上下各有一段行距（≈10px），
     // 那一段本来就是空白，批注贴着字墨迹留 0.1em 就能放进去；行盒只有**带边框时**才算实心
@@ -1483,6 +1508,8 @@ internal fun noteBubblePlacements(
         contentRight = contentRight,
         // 版心左缘：右侧没余地时，看这一行左侧有没有明显缩进，决定正左是否提到最前（规则 4）。
         contentLeft = contentLeft,
+        // 上下默认留白（规则 13）：正文行距让出来的那段纯空白。
+        verticalGap = verticalGap,
         scope = scope,
         ringFrom = ringFrom,
         ringTo = ringTo,
@@ -1958,6 +1985,29 @@ private fun assignNoteCandidates(
         chainFor(note).firstOrNull { take(note, it) }
     }
     return order.mapNotNull { note -> chosen[note.annotationId]?.let { NoteChoice(note, it) } }
+}
+
+/**
+ * 规则第 13 条：上下默认留白 = **当前正文行距让出来的纯空白**（行盒节距 − 行盒高）。
+ *
+ * 取同段相邻行的节距中位数与行盒高中位数，避免一两个大标题把整页带偏；
+ * 量不出来（单行页、行重叠）时退回 [fallback]，并且无论如何不小于 2px。
+ */
+private fun noteLineGap(lines: List<NoteTextLine>, fallback: Float): Float {
+    val pitches = ArrayList<Float>()
+    for (i in 1 until lines.size) {
+        val up = lines[i - 1]
+        val down = lines[i]
+        if (up.blockId != down.blockId) continue
+        val pitch = down.rect.top - up.rect.top
+        if (pitch > 0f) pitches += pitch
+    }
+    val floor = max(NOTE_MIN_MARGIN_PX, fallback)
+    if (pitches.isEmpty()) return floor
+    pitches.sort()
+    val heights = lines.map { it.rect.height }.sorted()
+    val gap = pitches[pitches.size / 2] - heights[heights.size / 2]
+    return max(floor, gap)
 }
 
 /**

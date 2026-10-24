@@ -2147,17 +2147,17 @@ class NoteBubblesTest {
         assertEquals("近侧仍要 1em", 140f + noteMetrics.preferredMargin, oneLinePick.rect.top, 0.5f)
         assertEquals("横向基准不变", left, oneLinePick.rect.left, 0.5f)
 
-        // 下方只剩 1em 的近侧空档：前两档都放不下，最后一档把近侧也收到 0.1em 才放得下。
+        // 下方只剩一点近侧空档：前两档都放不下，压缩档把近侧压到 2px 下限才放得下。
         val band = rect(0f, 140f + noteMetrics.marginY, 700f, 140f + noteMetrics.marginY + noteLine + 2f)
         val squeezedList = candidates(
             note = noteInk(1, listOf(row), "想法"),
             freeRects = listOf(band),
         )
         val squeezed = squeezedList.first { it.side == NoteSide.BELOW_RIGHT }
-        assertEquals("最后一档才收近侧", 2, squeezed.marginTier)
+        assertEquals("压缩档才收近侧", 2, squeezed.marginTier)
         assertEquals(
-            "近侧收到 0.1em：top=${squeezed.rect.top}",
-            140f + noteMetrics.marginY,
+            "近侧压到底就是 2px（规则 13 的下限）：top=${squeezed.rect.top}",
+            140f + 2f,
             squeezed.rect.top,
             0.5f,
         )

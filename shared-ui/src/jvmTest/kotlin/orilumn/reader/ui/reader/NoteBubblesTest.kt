@@ -92,11 +92,15 @@ class NoteBubblesTest {
         lines: List<NoteTextLine> = note.rects
             .sortedBy { it.top }
             .mapIndexed { i, r -> NoteTextLine(rect = r, blockId = 0, index = i) },
+        otherRowLeft: Map<Int, Float> = emptyMap(),
+        contentRight: Float = 600f,
     ) = noteCandidates(
         note = note,
         lines = lines,
         freeRects = freeRects,
         metrics = noteMetrics,
+        otherRowLeft = otherRowLeft,
+        contentRight = contentRight,
     )
 
     private fun noteInk(
@@ -804,6 +808,147 @@ class NoteBubblesTest {
             b.leftPx >= expectedLeft - 0.5f,
         )
         assertTrue("框不该整条跑到选区右边太远：left=${b.leftPx}", b.leftPx < anchor.right + 3 * noteFont)
+    }
+
+    /**
+     * 同一行多条批注时给左侧那条留引线空档（2026-10-24 用户定口）：
+     * 落在这一行上方 / 下方的框，左缘不得越过左侧批注**第二个字的左缘**——
+     * 也就是它第一个字的下方（或上方）要空出来，那条批注的画线才接得进去。
+     */
+    @Test
+    fun `below and above boxes keep the left note first character clear`() {
+        val row = rect(0f, 100f, 600f, 140f)
+        // 右边这条很长：不加约束时「正下」会把框摊满整行、左缘一路压到页左。
+        val ink = rect(300f, 100f, 400f, 140f)
+        val longText = "长".repeat(42)
+        val lines = listOf(NoteTextLine(rect = row, blockId = 0, index = 0))
+        val band = rect(0f, 141f, 700f, 800f)
+        // 左侧那条批注的首字在 100，第二个字左缘 = 100 + 一个汉字（正文 20px）。
+        val reserve = 100f + 20f
+        val unguarded = candidates(noteInk(1, listOf(ink), longText), listOf(band), lines)
+        assertTrue(
+            "没有左侧批注时本来可以摊到页左（对照组）：${unguarded.map { it.side to it.rect.left }}",
+            unguarded.any {
+                (it.side == NoteSide.BELOW || it.side == NoteSide.ABOVE) && it.rect.left < reserve
+            },
+        )
+        val guarded = candidates(
+            noteInk(1, listOf(ink), longText),
+            listOf(band),
+            lines,
+            otherRowLeft = mapOf(0 to 100f),
+        )
+        val verticalSides = setOf(
+            NoteSide.BELOW_RIGHT, NoteSide.ABOVE_RIGHT, NoteSide.BELOW, NoteSide.ABOVE,
+        )
+        assertTrue(
+            "框左缘不得越过左侧批注第二个字的左缘：${guarded.filter { it.side in verticalSides }.map { it.side to it.rect.left }}",
+            guarded.filter { it.side in verticalSides }.all { it.rect.left >= reserve - 0.5f },
+        )
+        assertTrue("约束不该让批注彻底没位置", guarded.isNotEmpty())
+    }
+
+    @Test
+    fun `right side note keeps the left note first character clear`() {
+        val row = rect(0f, 100f, 600f, 140f)
+        val left = rect(100f, 100f, 120f, 140f)
+        val right = rect(300f, 100f, 320f, 140f)
+        val bubbles = place(
+            notes = listOf(
+                noteInk(1, listOf(left), "左边"),
+                // 右这条写得很长：两个斜向都放不下一行，只能落到「正下」；正是它会摊到页左。
+                noteInk(2, listOf(right), "长".repeat(42)),
+            ),
+            textInk = listOf(row),
+            contentRight = 600f,
+            contentBottom = 800f,
+            pageRight = 620f,
+            pageBottom = 800f,
+        )
+        val r = bubbles.single { it.annotationId == 2L }
+        assertTrue("右边那条不能退成小图标：$r", !r.compact)
+        assertTrue(
+            "正下的框不能让过左侧批注首字那一格：left=${r.leftPx}",
+            r.leftPx >= 100f + 20f - 0.5f,
+        )
+        assertTrue("左边那条仍在这页上", bubbles.any { it.annotationId == 1L })
+    }
+
+    /**
+     * 2026-10-24 用户补充：右侧优先级降低只针对**非段末行**；
+     * 段末行（含只有一行的段落）右侧仍然是第一优先级。
+     */
+    @Test
+    fun `last line of a paragraph still prefers the right side first`() {
+        val row = rect(0f, 100f, 600f, 140f)
+        val ink = rect(100f, 100f, 300f, 140f)
+        val lines = listOf(NoteTextLine(rect = row, blockId = 0, index = 0))
+        val column = rect(600f + noteMetrics.sideGap, 0f, 700f, 800f)
+        val below = rect(0f, 141f, 700f, 800f)
+        val list = candidates(noteInk(1, listOf(ink), "短"), listOf(column, below), lines)
+        val ordered = orderedNoteCandidates(list, rightTaken = false)
+        assertEquals("段末行正右仍是第一优先级", NoteSide.RIGHT, ordered.first().side)
+    }
+
+    /**
+     * 2026-10-24 用户定口：正右看的是「这一行右边还剩多少空白」，不是段末行身份。
+     * 左对齐的短行（代码行 / 标题行）右边本来就是空白区，段中行也要先把正右排在第一位。
+     */
+    @Test
+    fun `mid paragraph line with blank to the right takes the right side first`() {
+        // 两行同属一段（blockId 相同）：基准行是段中行，但它右边离版心右缘还有 400。
+        val row = rect(0f, 100f, 200f, 140f)
+        val next = rect(0f, 160f, 600f, 200f)
+        val ink = rect(0f, 100f, 200f, 140f)
+        val lines = listOf(
+            NoteTextLine(rect = row, blockId = 0, index = 0),
+            NoteTextLine(rect = next, blockId = 0, index = 1),
+        )
+        val column = rect(202f, 0f, 700f, 155f)
+        val below = rect(0f, 210f, 700f, 800f)
+        val list = candidates(noteInk(1, listOf(ink), "短"), listOf(column, below), lines)
+        val ordered = orderedNoteCandidates(list, rightTaken = false)
+        assertEquals("段中行右边有空白时正右也是第一优先级", NoteSide.RIGHT, ordered.first().side)
+    }
+
+    @Test
+    fun `code line inside one block still lands on its right`() {
+        // pre code：三行同属一个块（段中行），左对齐、右边大片空白 ⇒ 正右第一。
+        val rows = (0..2).map { rect(0f, it * 22f, 180f, it * 22f + 20f) }
+        val lines = rows.mapIndexed { i, r -> NoteTextLine(rect = r, blockId = 3, index = i) }
+        val ink = rect(0f, 22f, 120f, 42f)
+        val bubbles = place(
+            notes = listOf(noteInk(1, listOf(ink), "这里")),
+            textInk = rows,
+            textLines = lines,
+            contentRight = 600f,
+            pageRight = 700f,
+            pageBottom = 800f,
+        )
+        val b = bubbles.single()
+        assertTrue("代码行右边有空白，旁注该落在这一行的右边：left=${b.leftPx}", b.leftPx >= 180f)
+        assertTrue("应贴住这一行：top=${b.topPx}", b.topPx < 42f)
+    }
+
+    @Test
+    fun `full mid line never tries the right side`() {
+        // 整行顶到版心右缘（空白 0）且不是段末行：正右连候选都不该有。
+        val row = rect(0f, 100f, 600f, 140f)
+        val next = rect(0f, 160f, 600f, 200f)
+        val ink = rect(100f, 100f, 300f, 140f)
+        val lines = listOf(
+            NoteTextLine(rect = row, blockId = 0, index = 0),
+            NoteTextLine(rect = next, blockId = 0, index = 1),
+        )
+        val list = candidates(
+            noteInk(1, listOf(ink), "短"),
+            listOf(rect(600f + noteMetrics.sideGap, 0f, 700f, 800f), rect(0f, 210f, 700f, 800f)),
+            lines,
+        )
+        assertTrue(
+            "整行顶到版心右缘的段中行不该试正右：${list.map { it.side }}",
+            list.none { it.side == NoteSide.RIGHT },
+        )
     }
 
     @Test

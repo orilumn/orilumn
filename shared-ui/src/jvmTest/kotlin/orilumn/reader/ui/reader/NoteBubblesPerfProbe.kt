@@ -189,7 +189,8 @@ class NoteBubblesPerfProbe {
             b.annotationId to Rect(b.leftPx, b.topPx, b.leftPx + b.widthPx, b.topPx + b.heightPx)
         }
         var arrows = 0
-        val routeTime = measureNanoTime {
+        fun routeAll() {
+            arrows = 0
             for (b in out) {
                 if (b.compact) continue
                 val ink = notes.first { it.annotationId == b.annotationId }.arrowInk
@@ -207,6 +208,16 @@ class NoteBubblesPerfProbe {
                 )
                 if (a != null) arrows++
             }
+        }
+        routeAll()
+        var routeTime = Long.MAX_VALUE
+        var routeRound = 0
+        while (routeRound < 3) {
+            val start = System.nanoTime()
+            routeAll()
+            val spent = System.nanoTime() - start
+            if (spent < routeTime) routeTime = spent
+            routeRound++
         }
         println(
             "PERF notes=$noteCount kind=${if (short) "短" else "长"} fake=${fakeMeasureNanos / 1000}us " +

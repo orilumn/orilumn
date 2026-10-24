@@ -2543,24 +2543,21 @@ private fun arrowTargetGlyphs(side: NoteSide?, inkRects: List<Rect>, bubble: Rec
  */
 private fun arrowGapMidYs(obstacles: List<ArrowObstacle>): List<Float> {
     val glyphs = obstacles.filter { it.tol <= ARROW_GLYPH_TOL_PX + 1e-4f }.map { it.rect }
+    if (glyphs.size < 2) return emptyList()
+    // 行间空隙最多是字高的一半：按上缘排序后只和「紧接着的几行」比，隔得再远不可能相邻。
+    // 整对整对地比是 O(n²)，密页上这个函数一度是引线耗时的大头。
+    val sorted = glyphs.sortedBy { it.top }
+    val maxGap = sorted.maxOf { it.height } * 0.5f
     val out = LinkedHashSet<Float>()
-    for (i in glyphs.indices) {
-        for (j in i + 1 until glyphs.size) {
-            val a = glyphs[i]
-            val b = glyphs[j]
-            val overlapX = min(a.right, b.right) - max(a.left, b.left)
+    for (i in sorted.indices) {
+        val up = sorted[i]
+        for (j in i + 1 until sorted.size) {
+            val down = sorted[j]
+            // 后面的行只会更靠下，间隔超过上限就可以收手。
+            if (down.top - up.bottom > maxGap) break
+            if (up.bottom > down.top) continue
+            val overlapX = min(up.right, down.right) - max(up.left, down.left)
             if (overlapX < 1f) continue
-            val up: Rect
-            val down: Rect
-            if (a.bottom <= b.top) {
-                up = a
-                down = b
-            } else if (b.bottom <= a.top) {
-                up = b
-                down = a
-            } else {
-                continue
-            }
             val gap = down.top - up.bottom
             if (gap <= 0.5f || gap > max(up.height, down.height) * 0.5f) continue
             out += (up.bottom + down.top) * 0.5f

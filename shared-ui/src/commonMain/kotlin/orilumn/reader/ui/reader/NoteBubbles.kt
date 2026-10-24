@@ -695,6 +695,30 @@ internal fun noteCandidates(
     val marginX = metrics.marginX
     val marginY = metrics.marginY
     val preferred = metrics.preferredMargin
+
+    /**
+     * 规则第 9 / 11 条的「本段落可用范围」（2026-10-25 用户定口）：
+     *
+     * 指**空白连成一片**的区域——上下相邻的行只要没占满整个版心，它左右两侧的空白就把
+     * 上下两片连起来，算同一范围；**占满整个版心的行把空白切断**，范围到此为止。
+     * 页边距那一列上下是通的，但**不算**把两片空白连起来。
+     *
+     * 所以范围 = 基准段向上下各延伸到第一行「顶满版心」的行之前。
+     */
+    fun spansContent(row: NoteTextLine): Boolean {
+        val leftEdge = contentLeft ?: lines.minOf { it.rect.left }
+        val rightEdge = if (contentRight < Float.MAX_VALUE / 2f) {
+            contentRight
+        } else {
+            lines.maxOf { it.rect.right }
+        }
+        return row.rect.left - leftEdge < preferred && rightEdge - row.rect.right < preferred
+    }
+
+    var runStart = blockStart
+    while (runStart > 0 && !spansContent(lines[runStart - 1])) runStart--
+    var runEnd = blockEnd
+    while (runEnd + 1 < lines.size && !spansContent(lines[runEnd + 1])) runEnd++
     val charW = max(charWidthPx, 1f)
     val baseGlyphs = note.rects
         .filter { nearestLineIndex(it, lines) == base }
@@ -1134,8 +1158,8 @@ internal fun noteCandidates(
         emitBelowFamily(base, 0, 0)
         emitAboveFamily(first, 0, 0)
         // 规则第 5 条：**上一行和下一行的左右两侧属于本行相邻空间，不算隔行**。
-        if (base + 1 <= blockEnd) emitRightFamily(base + 1, 0, 0)
-        if (first - 1 >= blockStart) emitRightFamily(first - 1, 0, 0)
+        if (base + 1 <= runEnd) emitRightFamily(base + 1, 0, 0)
+        if (first - 1 >= runStart) emitRightFamily(first - 1, 0, 0)
     }
 
     if (scope == NoteCandidateScope.ALL || scope == NoteCandidateScope.RINGS) {
@@ -1149,12 +1173,12 @@ internal fun noteCandidates(
             var any = false
             val down = base + k + 1
             val up = first - k - 1
-            if (down <= blockEnd) {
+            if (down <= runEnd) {
                 emitBelowFamily(down, k, 0)
                 emitRightFamily(down, k, 0)
                 any = true
             }
-            if (up >= blockStart) {
+            if (up >= runStart) {
                 emitAboveFamily(up, k, 0)
                 emitRightFamily(up, k, 0)
                 any = true
@@ -1165,21 +1189,11 @@ internal fun noteCandidates(
     }
 
     if (scope == NoteCandidateScope.ALL || scope == NoteCandidateScope.TAIL) {
-        // 本段其余位置：左侧页边距最后才允许。
-        for (idx in blockStart..blockEnd) emitLeftFamily(idx, abs(idx - base), 1)
-
-        // 相邻段：继续往外，仍由近到远；左侧同样排在最后。
-        for (idx in blockEnd + 1 until lines.size) {
-            emitBelowFamily(idx, idx - base, 2)
-            emitRightFamily(idx, idx - base, 2)
-        }
-        for (idx in blockStart - 1 downTo 0) {
-            emitAboveFamily(idx, first - idx, 2)
-            emitRightFamily(idx, first - idx, 2)
-        }
-        for (idx in 0 until lines.size) {
-            if (idx < blockStart || idx > blockEnd) emitLeftFamily(idx, abs(idx - base), 3)
-        }
+        // 本范围其余位置：左侧页边距最后才允许。
+        //
+        // 2026-10-25 用户定口：范围**到此为止**——占满整个版心的行已经把空白切断，
+        // 再往下就是别的段落自己的空白，页边距上下相通也不算连成一片。
+        for (idx in runStart..runEnd) emitLeftFamily(idx, abs(idx - base), 1)
     }
 
     return orderedNoteCandidates(out, rightTaken = false).take(maxCandidates)

@@ -2480,6 +2480,53 @@ class NoteBubblesTest {
         assertEquals("整句放得下那条要先排：$ordered", completeFar, ordered.first())
     }
 
+    /**
+     * 2026-10-25 用户定口：**本段落 = 空白连成一片的区域**，占满整个版心的行把空白切断，
+     * 页边距上下相通也不算连成一片——所以隔着一行顶满版心的字，就不许再往那边的短行上放。
+     */
+    @Test
+    fun `a full width line cuts the usable range`() {
+        val row0 = rect(0f, 0f, 600f, 40f)
+        val full = rect(0f, 40f, 600f, 80f)
+        val short = rect(0f, 80f, 300f, 120f)
+        val lines = listOf(
+            NoteTextLine(rect = row0, blockId = 0, index = 0),
+            NoteTextLine(rect = full, blockId = 1, index = 1),
+            NoteTextLine(rect = short, blockId = 2, index = 2),
+        )
+        val list = candidates(
+            note = noteInk(1, listOf(rect(0f, 0f, 100f, 40f)), "想法"),
+            freeRects = listOf(rect(600f + noteMetrics.sideGap, 0f, 700f, 800f)),
+            lines = lines,
+        )
+        assertTrue(
+            "隔着顶满版心的行，不该再往那边的短行上放：${list.map { it.rect.top }}",
+            list.none { it.rect.top >= 80f },
+        )
+    }
+
+    /** 反过来：中间那行没顶满版心，两侧空白就连成一片，那边也算本段落可用范围。 */
+    @Test
+    fun `a short line keeps the usable range connected`() {
+        val row0 = rect(0f, 0f, 600f, 40f)
+        val shortMid = rect(0f, 40f, 300f, 80f)
+        val short = rect(0f, 80f, 300f, 120f)
+        val lines = listOf(
+            NoteTextLine(rect = row0, blockId = 0, index = 0),
+            NoteTextLine(rect = shortMid, blockId = 1, index = 1),
+            NoteTextLine(rect = short, blockId = 2, index = 2),
+        )
+        val list = candidates(
+            note = noteInk(1, listOf(rect(0f, 0f, 100f, 40f)), "想法"),
+            freeRects = listOf(rect(600f + noteMetrics.sideGap, 0f, 700f, 800f)),
+            lines = lines,
+        )
+        assertTrue(
+            "空白连成一片时那边可以用：${list.map { it.rect.top }}",
+            list.any { it.rect.top >= 80f },
+        )
+    }
+
     /** 2026-10-24 用户定口：行盒上下那半段行距也是空白，批注可以贴进两行之间。 */
     @Test
     fun `a note can sit in the gap between two lines`() {

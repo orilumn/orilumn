@@ -590,10 +590,15 @@ internal fun noteBoxFit(
     val oneLine = desired > 0f && desired <= innerW + NOTE_GEOM_EPS
     val width = min(desired, innerW) + metrics.padTotal
     val inner = width - metrics.padTotal
-    val needed = if (oneLine) 1 else sizer.fit(content, metrics.em, inner, Int.MAX_VALUE).lines
+    val natural = if (oneLine) null else sizer.fit(content, metrics.em, inner, Int.MAX_VALUE)
+    val needed = natural?.lines ?: 1
     val lines = min(needed, capacity)
     val fit = if (oneLine) {
         NoteTextFit(lines = 1, shownChars = total, totalChars = total)
+    } else if (needed <= capacity) {
+        // 这个宽度本来就能装下整句：把 maxLines 收紧到 needed 也不会截断，
+        // 与刚才那次测量完全一致，不必再排一次版——真机上这是最大的一笔开销。
+        natural!!
     } else {
         sizer.fit(content, metrics.em, inner, lines)
     }

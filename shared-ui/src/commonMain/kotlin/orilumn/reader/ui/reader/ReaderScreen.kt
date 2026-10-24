@@ -2117,8 +2117,7 @@ fun ReaderScreen(
                         ),
                     )
                     val noteLayoutMark = TimeSource.Monotonic.markNow()
-                    val placed = noteBubblePlacements(
-                        noteInk = notes.mapNotNull { a ->
+                    val noteInkList = notes.mapNotNull { a ->
                             val rects = pageInkRects(
                                 drawer = selectionDrawer,
                                 lines = lines,
@@ -2154,7 +2153,11 @@ fun ReaderScreen(
                                     ),
                                 )
                             }
-                        },
+                        }
+                    val inkMark = TimeSource.Monotonic.markNow()
+                    val placeMark = TimeSource.Monotonic.markNow()
+                    val placed = noteBubblePlacements(
+                        noteInk = noteInkList,
                         obstacles = obstacles,
                         contentLeft = contentLeft,
                         contentRight = contentRight,
@@ -2166,11 +2169,19 @@ fun ReaderScreen(
                         noteTextSizer = noteTextSizer,
                     )
                     // 真机计时留档（P5）：只在按页缓存失效时打一行，翻页 / 改批注才出现。
+                    // geo = 本页整页几何（行 / 逐字墨迹 / 圆点），ink = 各条批注自己的墨迹，
+                    // place = 布点 + 引线。三者分开才好判断该优化哪一段。
+                    val totalMs = noteLayoutMark.elapsedNow().inWholeMilliseconds
+                    val inkAndPlaceMs = inkMark.elapsedNow().inWholeMilliseconds
+                    val placeMs = placeMark.elapsedNow().inWholeMilliseconds
                     Logger.d(
                         "Orilumn.NOTE",
-                        "NOTE-LAYOUT notes=${notes.size} placed=${placed.count { !it.compact }}" +
+                        "NOTE-LAYOUT notes=${notes.size}" +
+                            " placed=${placed.count { !it.compact }}" +
                             " compact=${placed.count { it.compact }}" +
-                            " ms=${noteLayoutMark.elapsedNow().inWholeMilliseconds}",
+                            " geo=${totalMs - inkAndPlaceMs}" +
+                            " ink=${inkAndPlaceMs - placeMs}" +
+                            " place=$placeMs total=$totalMs",
                     )
                     placed
                 }

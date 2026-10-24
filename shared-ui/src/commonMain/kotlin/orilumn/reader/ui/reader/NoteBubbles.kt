@@ -42,6 +42,7 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 import orilumn.reader.engine.skia.DrawLine
+import orilumn.reader.io.Logger
 import orilumn.reader.engine.skia.PageBackground
 import orilumn.reader.engine.skia.PageImage
 
@@ -1525,6 +1526,8 @@ internal fun noteBubblePlacements(
     val inflatedObstacles = baseObstacles.map { inflateRect(it, marginX, marginY) }
     // 箭头避让另用逐字墨迹（能穿两字之间与标点前后）；没有逐字几何时才退回行框。
     val arrowGlyphs = obstacles.arrowInk.ifEmpty { obstacles.textInk }
+    // 行盒（正文每一行的框）：竖着进时箭头停在它的边框上（引线规则第 4 条）。
+    val lineBoxes = lines.map { it.rect }
     val arrowSolids = obstacles.figures + obstacles.tables + obstacles.strokes
     val freeRects = maximalFreeRects(
         bounds = blankBounds,
@@ -1696,6 +1699,8 @@ internal fun noteBubblePlacements(
             drawnArrows = drawn,
             lineH = lineH,
             side = chosen[b.annotationId]?.candidate?.side,
+            // 行盒：竖着进时箭头停在行盒边框上，不侵入行盒内部（引线规则第 4 条）。
+            lineBoxes = lineBoxes,
         )
         if (arrow != null) drawn += arrow
         b.copy(arrow = arrow)
@@ -2522,6 +2527,8 @@ private class ArrowTarget(
     val glyph: Rect,
     val obstacles: List<ArrowObstacle>,
     val gapYs: List<Float> = emptyList(),
+    /** 竖着进时箭头停在哪条边上：字所在的行盒（缺省退回字本身）。 */
+    val box: Rect = glyph,
 )
 
 /** 标注框与锚点墨迹的关系（§6.1）：四类互斥，判定顺序固定。 */
@@ -2577,6 +2584,8 @@ internal fun noteArrowRelation(bubble: Rect, anchor: Rect): NoteArrowRelation {
  * @param lineH 旁注行高：折线找障碍的范围以它为单位。
  * @param side 这条批注的布点方向（§1.1）：决定引线从框的哪条边出去（正对时走法线，
  *   `BELOW_RIGHT` / `ABOVE_RIGHT` 从**左边**横着出去再竖回文字）。
+ * @param lineBoxes 本页正文的行盒：竖着进的时候箭头**停在行盒边框上**、不侵入行盒内部
+ *   （引线规则第 4 条）。缺省时退回逐字墨迹的边（单测与无行盒信息的调用）。
  */
 internal fun routeNoteArrow(
     bubble: Rect,
@@ -2587,12 +2596,20 @@ internal fun routeNoteArrow(
     drawnArrows: List<NoteArrow> = emptyList(),
     lineH: Float = 0f,
     side: NoteSide? = null,
+    lineBoxes: List<Rect> = emptyList(),
 ): NoteArrow? {
     if (inkRects.isEmpty() || bubble.width <= 0f || bubble.height <= 0f) return null
     val anchor = rectUnion(inkRects)
     // 框已经贴住原文：连一根线的位置都没有，画出来只会压在字上。
     if (rectDistance(bubble, anchor) <= NOTE_ARROW_MIN_GAP_PX) return null
     val relation = noteArrowRelation(bubble, anchor)
+    // 沿边取点至少内缩 0.5em（引线规则第 6 条：端点不许落在四角）。旁注框的 em 取它的行高。
+    val bubbleEm = if (lineH > 0f) lineH else bubble.height
+    // 竖着进的时候箭头停在行盒边框上（规则第 4 条：不得侵入行盒内部）。
+    fun boxOf(glyph: Rect): Rect = lineBoxes.firstOrNull {
+        it.top <= glyph.center.y && it.bottom >= glyph.center.y &&
+            it.left <= glyph.center.x && it.right >= glyph.center.x
+    } ?: glyph
 
     // 自己的锚点字不是障碍：箭头本来就要指到它；同一条批注的其他字也不挡自己。
     val obstacles = buildList {
@@ -2604,6 +2621,9 @@ internal fun routeNoteArrow(
         for (b in otherBubbles) add(ArrowObstacle(b, ARROW_SOLID_TOL_PX))
     }
     val drawnSegments = drawnArrows.flatMap { arrowSegments(it) }
+    // 本页还一条引线都没画时不可能交叉：这时候「通畅就停」的老早停仍然成立，
+    // 免得为了一个不可能出现的交叉数把折数一路试到上限。
+    val anyDrawn = drawnSegments.isNotEmpty()
     val window = max(lineH, 8f) * ARROW_BEND_WINDOW_LINES
     // 引线贴字门槛：旁注行高的 0.3 倍（lineH 缺省时放宽到 0：单测不量贴字）。
     val hugDistance = if (lineH > 0f) lineH * ARROW_HUG_LINES else 0f
@@ -2625,6 +2645,7 @@ internal fun routeNoteArrow(
                 glyph = glyph,
                 obstacles = nearObstacles,
                 gapYs = arrowGapMidYs(nearObstacles),
+                box = boxOf(glyph),
             )
         }
 
@@ -2669,7 +2690,7 @@ internal fun routeNoteArrow(
             }
             // 只有「通畅且一条已画引线都不交叉」才值得停：判据里交叉数排第一，
             // 早停在这里会把「多折一次但绕开别人引线」的路子直接掐掉。
-            if (best?.let { it.clear && it.crosses == 0 } == true) break
+            if (best?.let { it.clear && (it.crosses == 0 || !anyDrawn) } == true) break
         }
     }
 
@@ -2692,7 +2713,7 @@ internal fun routeNoteArrow(
             val below = bubble.top >= t.glyph.bottom - NOTE_GEOM_EPS
             val above = bubble.bottom <= t.glyph.top + NOTE_GEOM_EPS
             if (!below && !above) continue
-            val yEntry = if (below) t.glyph.bottom else t.glyph.top
+            val yEntry = verticalEntryEdge(bubble, t.glyph, t.box, above = !below)
             // 同一行里靠起点 / 终点那个字：L 形的竖段贴着它的边，箭头指向锚点的角落。
             val rowGlyphs = inkRects.filter {
                 abs(it.center.y - t.glyph.center.y) <= max(it.height, t.glyph.height) * 0.6f
@@ -2702,11 +2723,20 @@ internal fun routeNoteArrow(
             } else {
                 rowGlyphs.minByOrNull { it.left } ?: t.glyph
             }
-            val xEntry = if (leftCorner) startGlyph.right else startGlyph.left
+            // 箭头末端同样离选区的角至少 0.5em（引线规则第 6 条）。
+            val xEntry = clampInset(
+                max(startGlyph.left, anchor.left + startGlyph.height * 0.5f),
+                min(startGlyph.right, anchor.right - startGlyph.height * 0.5f),
+                if (leftCorner) startGlyph.right else startGlyph.left,
+            )
             val edgeX = if (leftCorner) bubble.right else bubble.left
             if (abs(xEntry - edgeX) < 1f) continue
             for (f in floatArrayOf(0.5f, 0.25f, 0.75f)) {
-                val y = bubble.top + bubble.height * f
+                val y = clampInset(
+                    bubble.top + bubbleEm * 0.5f,
+                    bubble.bottom - bubbleEm * 0.5f,
+                    bubble.top + bubble.height * f,
+                )
                 val points = listOf(
                     Offset(edgeX, y),
                     Offset(xEntry, y),
@@ -2728,11 +2758,11 @@ internal fun routeNoteArrow(
         side != NoteSide.BELOW && side != NoteSide.ABOVE
     if (sideAware) {
         for (t in targets) {
-            for (entry in arrowSideEntries(side!!, bubble, t.glyph)) {
-                for (exit in arrowSideExits(entry, side, bubble, t.glyph)) {
+            for (entry in arrowSideEntries(side!!, bubble, t.glyph, anchor, t.box)) {
+                for (exit in arrowSideExits(entry, side, bubble, t.glyph, bubbleEm)) {
                     tryRoute(exit, entry, t)
                 }
-                best?.let { if (it.clear && it.crosses == 0) return finish(it) }
+                best?.let { if (it.clear && (it.crosses == 0 || !anyDrawn)) return finish(it) }
             }
         }
     } else {
@@ -2740,13 +2770,23 @@ internal fun routeNoteArrow(
         val exit = arrowExit(side, relation, bubble, anchor)
         for (t in targets) {
             val entryHorizontal = arrowEntryHorizontal(side, bubble, t.glyph)
-            for (entry in arrowEntries(bubble, t.glyph, exit, entryHorizontal)) {
+            for (entry in arrowEntries(bubble, t.glyph, t.box, exit, entryHorizontal)) {
                 tryRoute(exit, ArrowEntry(entry, entryHorizontal), t)
             }
-            best?.let { if (it.clear && it.crosses == 0) return finish(it) }
+            best?.let { if (it.clear && (it.crosses == 0 || !anyDrawn)) return finish(it) }
         }
     }
-    return (best ?: fallback)?.let { finish(it) }
+    val chosen = best ?: fallback ?: return null
+    if (best == null) {
+        // 兜底：一条通畅的路都没找到，只能画穿字 / 穿引线的那条（规则第 7 条：
+        // 实在找不到合适位置时宁愿穿越文字，但穿越的文字越少越好）。留给真机排查。
+        Logger.d(
+            "Orilumn.NOTE",
+            "NOTE-ARROW fallback side=$side crosses=${chosen.crosses} " +
+                "hits=${chosen.hits.toInt()} pts=${chosen.points.size}",
+        )
+    }
+    return finish(chosen)
 }
 
 /**
@@ -2828,38 +2868,63 @@ private data class ArrowEntry(val point: Offset, val horizontal: Boolean)
  *
  * 入口不再固定在字的中点：靠末端的那几个点才能「指到终点」，也更容易和出口对齐成一条直线。
  */
-private fun arrowSideEntries(side: NoteSide, bubble: Rect, glyph: Rect): List<ArrowEntry> {
+private fun arrowSideEntries(
+    side: NoteSide,
+    bubble: Rect,
+    glyph: Rect,
+    anchor: Rect,
+    box: Rect = glyph,
+): List<ArrowEntry> {
     val out = LinkedHashSet<ArrowEntry>()
-    val w = glyph.width
     val h = glyph.height
     val rightFamily = side == NoteSide.RIGHT || side == NoteSide.BELOW_RIGHT || side == NoteSide.ABOVE_RIGHT
     val overlapY = bubble.top < glyph.bottom - NOTE_GEOM_EPS && bubble.bottom > glyph.top + NOTE_GEOM_EPS
+    // 端点离**选区的四个角**至少 0.5em（引线规则第 6 条）：沿边取点的可用区间。
+    val alongLo = max(glyph.left, anchor.left + h * 0.5f)
+    val alongHi = min(glyph.right, anchor.right - h * 0.5f)
+    // 右侧摆法靠末端取点，左侧摆法靠起点取点。
+    val fractions = if (rightFamily) floatArrayOf(1f, 0.75f, 0.5f) else floatArrayOf(0f, 0.25f, 0.5f)
     when {
         overlapY -> {
+            // 进竖边：横着进，纵向也要离选区上下两个角 0.5em。
             val x = if (rightFamily) glyph.right else glyph.left
+            val lo = max(glyph.top, anchor.top + h * 0.5f)
+            val hi = min(glyph.bottom, anchor.bottom - h * 0.5f)
             for (f in floatArrayOf(0.5f, 0.25f, 0.75f)) {
-                out += ArrowEntry(Offset(x, glyph.top + h * f), horizontal = true)
+                out += ArrowEntry(Offset(x, insetAlong(lo, hi, f)), horizontal = true)
             }
-        }
-        bubble.bottom <= glyph.top + NOTE_GEOM_EPS -> {
-            val xs = if (rightFamily) {
-                floatArrayOf(glyph.right, glyph.right - w * 0.25f, glyph.center.x)
-            } else {
-                floatArrayOf(glyph.left, glyph.left + w * 0.25f, glyph.center.x)
-            }
-            for (x in xs) out += ArrowEntry(Offset(x, glyph.top), horizontal = false)
         }
         else -> {
-            val xs = if (rightFamily) {
-                floatArrayOf(glyph.right, glyph.right - w * 0.25f, glyph.center.x)
-            } else {
-                floatArrayOf(glyph.left, glyph.left + w * 0.25f, glyph.center.x)
+            val y = verticalEntryEdge(bubble, glyph, box, above = bubble.bottom <= glyph.top + NOTE_GEOM_EPS)
+            for (f in fractions) {
+                out += ArrowEntry(Offset(insetAlong(alongLo, alongHi, f), y), horizontal = false)
             }
-            for (x in xs) out += ArrowEntry(Offset(x, glyph.bottom), horizontal = false)
         }
     }
     return out.toList()
 }
+
+/**
+ * 沿边按比例取点：区间反了（这条边短得放不下 1em，怎么取都挨着角）就退回中点。
+ * 见引线规则第 6 条「至少向内偏移 0.5em」。
+ */
+private fun insetAlong(lo: Float, hi: Float, f: Float): Float =
+    if (lo >= hi) (lo + hi) * 0.5f else lo + (hi - lo) * f
+
+/** 把沿边坐标夹进「离两角至少 0.5em」的区间；区间反了就取中点。 */
+private fun clampInset(lo: Float, hi: Float, v: Float): Float =
+    if (lo >= hi) (lo + hi) * 0.5f else v.coerceIn(lo, hi)
+
+/**
+ * 竖着进时箭头停在哪条边上：优先**行盒边框**（引线规则第 4 条：画到行盒边框为止，
+ * 不得侵入行盒内部）；行盒已经和批注框叠在一起时退回字边，免得箭头从框里长出来。
+ */
+private fun verticalEntryEdge(bubble: Rect, glyph: Rect, box: Rect, above: Boolean): Float =
+    if (above) {
+        if (box.top >= bubble.bottom - NOTE_GEOM_EPS) box.top else glyph.top
+    } else {
+        if (box.bottom <= bubble.top + NOTE_GEOM_EPS) box.bottom else glyph.bottom
+    }
 
 /**
  * 出边候选（§6.1 / 2026-10-24 用户定口「起点也不一定在中心点」）：
@@ -2872,9 +2937,16 @@ private fun arrowSideExits(
     side: NoteSide,
     bubble: Rect,
     glyph: Rect,
+    em: Float = 0f,
 ): List<ArrowExit> {
     val out = LinkedHashSet<ArrowExit>()
     val eps = NOTE_GEOM_EPS
+    // 起点离框的四个角也至少 0.5em（引线规则第 6 条）：框边的可用区间。
+    val pad = if (em > 0f) em * 0.5f else 0f
+    val loY = bubble.top + max(pad, eps)
+    val hiY = bubble.bottom - max(pad, eps)
+    val loX = bubble.left + max(pad, eps)
+    val hiX = bubble.right - max(pad, eps)
     val ys = floatArrayOf(
         entry.point.y,
         bubble.center.y,
@@ -2889,18 +2961,12 @@ private fun arrowSideExits(
     )
     fun edgeY(x: Float) {
         for (y in ys) {
-            out += ArrowExit(
-                Offset(x, y.coerceIn(bubble.top + eps, bubble.bottom - eps)),
-                horizontal = true,
-            )
+            out += ArrowExit(Offset(x, clampInset(loY, hiY, y)), horizontal = true)
         }
     }
     fun edgeX(y: Float) {
         for (x in xs) {
-            out += ArrowExit(
-                Offset(x.coerceIn(bubble.left + eps, bubble.right - eps), y),
-                horizontal = false,
-            )
+            out += ArrowExit(Offset(clampInset(loX, hiX, x), y), horizontal = false)
         }
     }
     val rightFamily = side == NoteSide.RIGHT || side == NoteSide.BELOW_RIGHT || side == NoteSide.ABOVE_RIGHT
@@ -2978,18 +3044,24 @@ private fun arrowEntryHorizontal(side: NoteSide?, bubble: Rect, glyph: Rect): Bo
 private fun arrowEntries(
     bubble: Rect,
     glyph: Rect,
+    box: Rect,
     exit: ArrowExit,
     horizontal: Boolean,
 ): List<Offset> {
     val out = LinkedHashSet<Offset>()
+    val h = glyph.height
     if (horizontal) {
         val x = if (glyph.center.x <= bubble.center.x) glyph.right else glyph.left
-        out += Offset(x, exit.point.y.coerceIn(glyph.top, glyph.bottom))
-        for (f in floatArrayOf(0.5f, 0.25f, 0.75f)) out += Offset(x, glyph.top + glyph.height * f)
+        val lo = glyph.top + h * 0.5f
+        val hi = glyph.bottom - h * 0.5f
+        out += Offset(x, clampInset(lo, hi, exit.point.y.coerceIn(glyph.top, glyph.bottom)))
+        for (f in floatArrayOf(0.5f, 0.25f, 0.75f)) out += Offset(x, insetAlong(lo, hi, f))
     } else {
-        val y = if (glyph.center.y <= bubble.center.y) glyph.bottom else glyph.top
-        out += Offset(exit.point.x.coerceIn(glyph.left, glyph.right), y)
-        for (f in floatArrayOf(0.5f, 0.25f, 0.75f)) out += Offset(glyph.left + glyph.width * f, y)
+        val y = verticalEntryEdge(bubble, glyph, box, above = glyph.center.y > bubble.center.y)
+        val lo = glyph.left + h * 0.5f
+        val hi = glyph.right - h * 0.5f
+        out += Offset(clampInset(lo, hi, exit.point.x.coerceIn(glyph.left, glyph.right)), y)
+        for (f in floatArrayOf(0.5f, 0.25f, 0.75f)) out += Offset(insetAlong(lo, hi, f), y)
     }
     return out.toList()
 }

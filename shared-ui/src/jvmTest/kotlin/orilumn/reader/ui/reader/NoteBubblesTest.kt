@@ -1452,7 +1452,9 @@ class NoteBubblesTest {
         assertEquals("挤在一起的短竖线要改走 L 形：$pts", 3, pts.size)
         assertEquals("第一段从框左边横着出去", bubble.left, pts[0].x, 0.01f)
         assertTrue("第一段必须是横线：$pts", abs(pts[0].y - pts[1].y) < 0.01f)
-        assertEquals("竖段贴着锚点起点字的左缘", ink.left, pts[1].x, 0.01f)
+        // 引线规则第 6 条：箭头末端不许落在选区的四个角点上，至少向内偏移 0.5em。
+        // 起点字只有一个字宽，所以竖段落在它中心（左缘再往右半个字），不再压着左缘。
+        assertEquals("竖段离选区左角 0.5em", ink.left + ink.height * 0.5f, pts[1].x, 0.01f)
         assertEquals("末端接住文字底边", ink.bottom, pts[2].y, 0.01f)
         assertTrue("第一段要比短竖线长得多：$pts", abs(pts[1].x - pts[0].x) > 4 * abs(pts[2].y - pts[1].y))
     }
@@ -1677,7 +1679,8 @@ class NoteBubblesTest {
         assertTrue("应画得出箭头", arrow != null)
         val tip = arrowPoints(arrow!!).last()
         assertEquals("终点落在文字下边", 140f, tip.y, 0.5f)
-        assertTrue("终点要靠末端，实际 x=${tip.x}", tip.x >= 290f)
+        // 引线规则第 6 条：离选区右下角至少 0.5em（正好是末字中心），所以不再压到 300 的角上。
+        assertTrue("终点要尽量靠末端（离角 0.5em），实际 x=${tip.x}", tip.x >= 280f)
     }
 
     @Test
@@ -1690,7 +1693,79 @@ class NoteBubblesTest {
         assertTrue("应画得出箭头", arrow != null)
         val tip = arrowPoints(arrow!!).last()
         assertEquals("终点落在文字上边", 100f, tip.y, 0.5f)
-        assertTrue("终点要靠末端，实际 x=${tip.x}", tip.x >= 290f)
+        // 同上：右上角要避开，末端一侧最多到末字中心。
+        assertTrue("终点要尽量靠末端（离角 0.5em），实际 x=${tip.x}", tip.x >= 280f)
+    }
+
+    @Test
+    fun `arrow stops at the line box edge instead of the glyph edge`() {
+        // 引线规则第 4 条：引线和箭头画到**行盒边框**为止，不得侵入行盒内部。
+        // 行盒上下一共比字多出 10px，箭头要停在行盒下边 150，而不是字的下边 140。
+        val bubble = rect(140f, 220f, 420f, 260f)
+        val glyph = rect(260f, 100f, 300f, 140f)
+        val lineBox = rect(0f, 90f, 600f, 150f)
+        val arrow = routeNoteArrow(
+            bubble = bubble,
+            inkRects = listOf(glyph),
+            lineBoxes = listOf(lineBox),
+            side = NoteSide.BELOW_RIGHT,
+        )
+        assertTrue("应画得出箭头", arrow != null)
+        val tip = arrowPoints(arrow!!).last()
+        assertEquals("箭头停在行盒下边", 150f, tip.y, 0.01f)
+        assertTrue("横向仍落在末字附近，实际 x=${tip.x}", tip.x in 260f..300f)
+    }
+
+    @Test
+    fun `a diagonal note gets an L shaped leader and a side note a single segment`() {
+        // 引线规则第 1 / 2 条：上下左右摆法优先单线段，斜向摆法优先 L 形两段折线。
+        val glyph = rect(200f, 140f, 240f, 180f)
+        val diagonal = routeNoteArrow(
+            bubble = rect(320f, 60f, 420f, 100f),
+            inkRects = listOf(glyph),
+            side = NoteSide.ABOVE_RIGHT,
+        )
+        assertTrue("斜向摆法应是 L 形：$diagonal", diagonal is NoteArrow.Elbow)
+        assertEquals("L 形正好两段", 3, arrowPoints(diagonal!!).size)
+        val straight = routeNoteArrow(
+            bubble = rect(320f, 140f, 420f, 180f),
+            inkRects = listOf(glyph),
+            side = NoteSide.RIGHT,
+        )
+        assertTrue("正右摆法应是单线段：$straight", straight is NoteArrow.Straight)
+    }
+
+    @Test
+    fun `leader endpoints keep half an em away from the corners`() {
+        // 引线规则第 6 条：起点与箭头末端不要画在框和文字选区的四个角点上，
+        // 至少应向内偏移 0.5em。字高就是 1em，所以一个字的竖边只剩中点可用。
+        val bubble = rect(400f, 100f, 500f, 200f)
+        val glyph = rect(100f, 100f, 300f, 140f)
+        val em = 40f
+        val arrow = routeNoteArrow(
+            bubble = bubble,
+            inkRects = listOf(glyph),
+            lineH = em,
+            side = NoteSide.RIGHT,
+        )
+        assertTrue("应画得出箭头", arrow != null)
+        val pts = arrowPoints(arrow!!)
+        val start = pts.first()
+        val end = pts.last()
+        assertEquals("起点落在框的左边", bubble.left, start.x, 0.01f)
+        assertEquals("末端落在选区的右边", glyph.right, end.x, 0.01f)
+        assertTrue("起点不该贴着框的角：$start", !hugsCorner(start, bubble, em))
+        assertTrue("末端不该贴着选区的角：$end", !hugsCorner(end, glyph, em))
+    }
+
+    /** 这个端点是不是「贴着某个角」（落在边上、且离最近的角不到 0.5em）。 */
+    private fun hugsCorner(p: Offset, r: Rect, em: Float): Boolean {
+        val half = em * 0.5f - 0.01f
+        val onVerticalEdge = abs(p.x - r.left) < 0.01f || abs(p.x - r.right) < 0.01f
+        val onHorizontalEdge = abs(p.y - r.top) < 0.01f || abs(p.y - r.bottom) < 0.01f
+        val nearY = min(abs(p.y - r.top), abs(p.y - r.bottom)) < half
+        val nearX = min(abs(p.x - r.left), abs(p.x - r.right)) < half
+        return (onVerticalEdge && nearY) || (onHorizontalEdge && nearX)
     }
 
     @Test
@@ -1809,7 +1884,8 @@ class NoteBubblesTest {
         }
         val end = pts.last()
         assertEquals("末段要落在文字下边", anchor.bottom, end.y)
-        assertTrue("终点要靠近所选文字的末端，实际 x=${end.x}", end.x >= anchor.right - noteFont * 0.5f)
+        // 引线规则第 6 条：末端离选区右下角至少 0.5em（这里 0.5em 就是字高的一半）。
+        assertTrue("终点要靠近所选文字的末端，实际 x=${end.x}", end.x >= anchor.right - anchor.height * 0.5f)
     }
 
     @Test

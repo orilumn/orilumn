@@ -388,6 +388,12 @@ internal data class NoteCandidate(
      * 存在候选上而不是排序时现算：它取决于**这一行**的几何，不是方向的固定属性。
      */
     val sideRank: Int = noteSideRank(side),
+    /**
+     * 规则第 10 条「跨越其他标注视同跨行」：这个框与锚点之间**隔着几行别的批注墨迹**。
+     *
+     * 排序时按 `ring + crossed` 比远近：同一圈里，要越过别人那条的路子排到没越过的后面去。
+     */
+    val crossed: Int = 0,
 ) {
     /**
      * 两个候选框是否冲突：矩形相交，或间距（横向 [marginX]、纵向 [marginY]）不足。
@@ -842,6 +848,27 @@ internal fun noteCandidates(
             return
         }
         val rect = Rect(left, top, left + size.width, top + size.height)
+        // 规则第 10 条：框与锚点之间隔了几行**别的批注**，就当多跨了几行。
+        // `otherRowLeft` 的键就是「这一行有别的批注墨迹」，直接数它们有几行落在这段空档里。
+        val crossed = if (otherRowLeft.isEmpty()) {
+            0
+        } else {
+            val down = rect.top >= baseRow.rect.bottom - NOTE_GEOM_EPS
+            val up = rect.bottom <= baseRow.rect.top + NOTE_GEOM_EPS
+            when {
+                down -> otherRowLeft.keys.count { r ->
+                    val row = lines.getOrNull(r) ?: return@count false
+                    row.rect.top >= baseRow.rect.bottom - NOTE_GEOM_EPS &&
+                        row.rect.bottom <= rect.top + NOTE_GEOM_EPS
+                }
+                up -> otherRowLeft.keys.count { r ->
+                    val row = lines.getOrNull(r) ?: return@count false
+                    row.rect.bottom <= baseRow.rect.top + NOTE_GEOM_EPS &&
+                        row.rect.top >= rect.bottom - NOTE_GEOM_EPS
+                }
+                else -> 0
+            }
+        }
         // 同一块空白被不同极大矩形重复切出时，落位可能完全一样：只留一个。
         // 键打成整数（方向 + 留白档 + 四个坐标各 13 位）：页坐标 < 8192，拼字符串纯属浪费。
         fun axis(v: Float): Long = v.roundToInt().toLong() and 0x1FFF
@@ -862,6 +889,7 @@ internal fun noteCandidates(
             distance = note.rects.minOf { rectDistance(rect, it) },
             marginTier = tier,
             sideRank = sideRankOf(side),
+            crossed = crossed,
         )
     }
 
@@ -1170,7 +1198,8 @@ internal fun noteCandidateOrder(rightTaken: Boolean): Comparator<NoteCandidate> 
     return compareBy<NoteCandidate> { it.stage }
         // 不折行优先、行数越少越优先：先比折行数，再比远近（环）。
         .thenBy { it.lines }
-        .thenBy { it.ring }
+        // 规则第 10 条：越过别的批注视同跨行，所以远近按「环 + 越过的行数」比。
+        .thenBy { it.ring + it.crossed }
         .thenBy { rank(it) }
         .thenBy { it.marginTier }
         .thenBy { it.distance }

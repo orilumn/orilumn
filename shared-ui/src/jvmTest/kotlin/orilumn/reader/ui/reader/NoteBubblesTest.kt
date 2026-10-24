@@ -2428,6 +2428,31 @@ class NoteBubblesTest {
         )
     }
 
+    /**
+     * 规则第 10 条：**跨越其他标注视同跨行**——同一圈里，要越过别人那条排到没越过的后面。
+     */
+    @Test
+    fun `a candidate that crosses another note counts as one more row`() {
+        val rows = (0 until 6).map { rect(0f, it * 40f, 300f, it * 40f + 40f) }
+        val lines = rows.mapIndexed { i, r -> NoteTextLine(rect = r, blockId = 0, index = i) }
+        val list = candidates(
+            note = noteInk(1, listOf(rect(0f, 80f, 100f, 120f)), "想法"),
+            freeRects = listOf(rect(300f + noteMetrics.sideGap, -200f, 700f, 1000f)),
+            lines = lines,
+            otherRowLeft = mapOf(1 to 100f),
+        )
+        val ring1 = list.filter { it.ring == 1 }
+        val up = ring1.first { it.rect.bottom <= rows[0].bottom + 1f }
+        val down = ring1.first { it.rect.top >= rows[4].top - 1f }
+        assertEquals("上方那条要越过上一行的批注", 1, up.crossed)
+        assertEquals("下方那条没越过任何批注", 0, down.crossed)
+        assertEquals(
+            "越过别人的那条排后面",
+            down.rect.top,
+            orderedNoteCandidates(ring1, rightTaken = false).first().rect.top,
+        )
+    }
+
     /** 2026-10-24 用户定口：行盒上下那半段行距也是空白，批注可以贴进两行之间。 */
     @Test
     fun `a note can sit in the gap between two lines`() {

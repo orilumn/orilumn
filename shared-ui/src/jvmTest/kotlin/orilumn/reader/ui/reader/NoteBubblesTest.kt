@@ -75,6 +75,18 @@ class NoteBubblesTest {
         return false
     }
 
+    /** 两条线段是否真的穿过对方（端点相碰不算）。 */
+    private fun segmentsCross(a: Offset, b: Offset, c: Offset, d: Offset): Boolean {
+        fun cross(o: Offset, p: Offset, q: Offset): Float =
+            (p.x - o.x) * (q.y - o.y) - (p.y - o.y) * (q.x - o.x)
+        val d1 = cross(c, d, a)
+        val d2 = cross(c, d, b)
+        val d3 = cross(a, b, c)
+        val d4 = cross(a, b, d)
+        return ((d1 > 0f && d2 < 0f) || (d1 < 0f && d2 > 0f)) &&
+            ((d3 > 0f && d4 < 0f) || (d3 < 0f && d4 > 0f))
+    }
+
     /** 箭头折线化：直线与折线都按点列出来，供断言「不压字 / 两端接住」。 */
     private fun arrowPoints(arrow: NoteArrow): List<Offset> = when (arrow) {
         is NoteArrow.Straight -> listOf(arrow.start, arrow.end)
@@ -1556,6 +1568,36 @@ class NoteBubblesTest {
             for (w in walls) {
                 assertTrue("引线不该压住图形：$a → $b", !segmentHits(a, b, w))
             }
+        }
+    }
+
+    /**
+     * 引线规则第 9 条：**两个批注的引线不得交叉**。判据里交叉数排第一，
+     * 所以哪怕多折一次、多绕一段，也要绕开已经画好的那条引线。
+     */
+    @Test
+    fun `a leader goes around another leader instead of crossing it`() {
+        // 框比文字高：出口除了正中对齐那三个点，还能从更上 / 更下的位置出去。
+        val bubble = rect(400f, 60f, 500f, 180f)
+        val ink = rect(100f, 100f, 300f, 140f)
+        // 已经画好的一条竖引线，正挡在两者之间（把正对着的那几个出口全挡住）。
+        val drawn = NoteArrow.Straight(Offset(350f, 105f), Offset(350f, 135f))
+        // 下方一块图形：给折线一个「从下面绕」的落点（没有它，两折只能从正中间竖着穿过去）。
+        val below = rect(340f, 160f, 380f, 180f)
+        val arrow = routeNoteArrow(
+            bubble = bubble,
+            inkRects = listOf(ink),
+            glyphs = listOf(below),
+            drawnArrows = listOf(drawn),
+            side = NoteSide.RIGHT,
+        )
+        assertTrue("应画得出箭头", arrow != null)
+        val pts = arrowPoints(arrow!!)
+        for (i in 1 until pts.size) {
+            assertTrue(
+                "引线不该和已画引线交叉：$pts",
+                !segmentsCross(pts[i - 1], pts[i], drawn.start, drawn.end),
+            )
         }
     }
 

@@ -2481,26 +2481,33 @@ private data class ArrowPath(
     val clear: Boolean get() = hits <= 1e-4f && !entersBubble
 
     /**
-     * 通畅路径的择优顺序（§6.3，2026-10-24 用户再定口）：
-     * **折数少（能直线就直线）→ 不贴着字（[hug]）→ 已画引线交叉少 → 更短 → 候选顺序**。
+     * 通畅路径的择优顺序（引线规则第 9 / 3 / 7 条）：
+     * **交叉数（0 条优先）→ 折数少 → 穿字少 → 不贴着字（[hug]）→ 更短 → 候选顺序**。
      *
-     * 读者原话：「引线就近就短原则要加前提：引线不能太靠近文字；从两行文字之间横穿时，
-     * 应尽可能从中间位置穿过」。所以 [hug] 排在「短」之前——宁可多走几个像素，
-     * 也不要贴着字的顶边 / 底边划过去。交叉仍只是美观上的软约束。
+     * 规则第 9 条「两个批注的引线不得交叉」是硬要求，所以交叉数排在折数之前：
+     * 宁可多折一次绕开别人的引线，也不许交叉。
+     * 规则第 3 条「能用少线段就用少线段」→ 折数。
+     * 规则第 7 条「实在找不到合适位置时宁愿穿越文字，但穿越的文字越少越好」→ [hits]。
+     * [hug] 是「横穿两行之间要从正中间过」的度量，排在「短」之前。
      */
     fun betterThan(other: ArrowPath?): Boolean {
         if (other == null) return true
-        if (bends != other.bends) return bends < other.bends
-        if (abs(hug - other.hug) > 0.5f) return hug < other.hug
         if (crosses != other.crosses) return crosses < other.crosses
+        if (bends != other.bends) return bends < other.bends
+        if (abs(hits - other.hits) > 0.5f) return hits < other.hits
+        if (abs(hug - other.hug) > 0.5f) return hug < other.hug
         if (abs(length - other.length) > 0.5f) return length < other.length
         return order < other.order
     }
 
-    /** 全撞时的兜底顺序：不穿自己的框 → 穿得少 → 更短 → 候选顺序。照样画，不留空。 */
+    /**
+     * 全撞时的兜底顺序：不穿自己的框 → **交叉最少** → 穿得少 → 更短 → 候选顺序。
+     * 照样画，不留空（规则第 7 条：实在没路时宁愿穿越，但要穿得少）。
+     */
     fun betterFallbackThan(other: ArrowPath?): Boolean {
         if (other == null) return true
         if (entersBubble != other.entersBubble) return !entersBubble
+        if (crosses != other.crosses) return crosses < other.crosses
         if (abs(hits - other.hits) > 0.5f) return hits < other.hits
         if (abs(length - other.length) > 0.5f) return length < other.length
         return order < other.order
@@ -2660,7 +2667,9 @@ internal fun routeNoteArrow(
                 if (!orthogonalShaped(points, exit.horizontal, entry.horizontal)) continue
                 consider(points, target)
             }
-            if (best?.let { it.clear } == true) break
+            // 只有「通畅且一条已画引线都不交叉」才值得停：判据里交叉数排第一，
+            // 早停在这里会把「多折一次但绕开别人引线」的路子直接掐掉。
+            if (best?.let { it.clear && it.crosses == 0 } == true) break
         }
     }
 
@@ -2723,7 +2732,7 @@ internal fun routeNoteArrow(
                 for (exit in arrowSideExits(entry, side, bubble, t.glyph)) {
                     tryRoute(exit, entry, t)
                 }
-                best?.let { if (it.clear) return finish(it) }
+                best?.let { if (it.clear && it.crosses == 0) return finish(it) }
             }
         }
     } else {
@@ -2734,7 +2743,7 @@ internal fun routeNoteArrow(
             for (entry in arrowEntries(bubble, t.glyph, exit, entryHorizontal)) {
                 tryRoute(exit, ArrowEntry(entry, entryHorizontal), t)
             }
-            best?.let { if (it.clear) return finish(it) }
+            best?.let { if (it.clear && it.crosses == 0) return finish(it) }
         }
     }
     return (best ?: fallback)?.let { finish(it) }

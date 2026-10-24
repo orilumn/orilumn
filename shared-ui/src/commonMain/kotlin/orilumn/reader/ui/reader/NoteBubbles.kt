@@ -306,27 +306,37 @@ internal enum class NoteSide {    /** 所选行右侧（锚点末行右侧还剩
 }
 
 /**
- * 环内的方向名次（2026-10-24 用户定口）：右 → 右下 → 右上 → 左下 → 左上 → 下 → 上 → 左。
+ * 环内的方向名次（2026-10-24 用户定口，规则第 5 条）：**右上 → 右下 → 左上 → 左下 → 上 → 下 → 右 → 左**。
  *
- * 这一段只在**折行数、环都相同**时才轮到（§1.1「顺序怎么比」）。正右在锚点末行
- * **右侧还剩 1em 以上空白**时生成，所以两端对齐的段中行自然从右下开始；左对齐的代码行 /
- * 标题行右边本来就是空白区，照样先试正右。段末行（满行时用页边距）照旧生成。
- * 右侧已经被别的批注占住时，正右让到「左」之前（见 [NOTE_SIDE_RANK_TAKEN_RIGHT]）。
+ * 这一段只在**折行数、环都相同**时才轮到（§1.1「顺序怎么比」）。左右排在最后是因为
+ * 它们往往只剩页边距那一窄列（规则第 6 条：那里最多折两行）；
+ * 但规则第 3 / 4 条给了两个**提前**的例外，由候选自带的 [NoteCandidate.sideRank] 落实：
+ *
+ * - 这一行右侧离版心还有 1em 以上空白 ⇒ 正右提到最前（规则 3）；
+ * - 右侧没这余地、但这一行左侧有明显缩进 ⇒ 正左提到最前（规则 4）。
+ *
+ * 右侧已经被别的批注占住时，被提前的正右退回「左」之前（见 [NOTE_SIDE_RANK_TAKEN_RIGHT]）。
  */
-private fun noteSideRank(side: NoteSide): Int = when (side) {
-    NoteSide.RIGHT -> 0
+internal fun noteSideRank(side: NoteSide): Int = when (side) {
+    NoteSide.ABOVE_RIGHT -> 0
     NoteSide.BELOW_RIGHT -> 1
-    NoteSide.ABOVE_RIGHT -> 2
+    NoteSide.ABOVE_LEFT -> 2
     NoteSide.BELOW_LEFT -> 3
-    NoteSide.ABOVE_LEFT -> 4
+    NoteSide.ABOVE -> 4
     NoteSide.BELOW -> 5
-    NoteSide.ABOVE -> 6
-    NoteSide.LEFT -> 8
-    NoteSide.OTHER -> 9
+    NoteSide.RIGHT -> 6
+    NoteSide.LEFT -> 7
+    NoteSide.OTHER -> 8
 }
 
-/** 右侧已被占时，正右的名次：让到「左」之前（倒数第二位，§0.1 0b）。 */
-private const val NOTE_SIDE_RANK_TAKEN_RIGHT: Int = 7
+/** 规则 3 命中时正右的名次：排到八个方向之前。 */
+internal const val NOTE_SIDE_RANK_RIGHT_FIRST: Int = -2
+
+/** 规则 4 命中时正左的名次：排到八个方向之前（右侧也没余地，两条规则不会同时成立）。 */
+private const val NOTE_SIDE_RANK_LEFT_FIRST: Int = -1
+
+/** 右侧已被占时，正右的名次：让到「左」之前（倒数第二位）。 */
+private const val NOTE_SIDE_RANK_TAKEN_RIGHT: Int = 6
 
 /**
  * 一条批注的一个候选框（纯几何）。
@@ -363,6 +373,12 @@ internal data class NoteCandidate(
      * 排序时它排在方向名次之后：同一个方向上，空间够就先要 1em，不够才要细缝。
      */
     val marginTier: Int = NOTE_MARGIN_TIER_PREFERRED,
+    /**
+     * 这个候选的方向名次（规则第 3 / 4 / 5 条一起决定）：默认取 [noteSideRank]，
+     * 命中「右侧还有 1em 以上空白」或「左侧有缩进」时由生成端提前。
+     * 存在候选上而不是排序时现算：它取决于**这一行**的几何，不是方向的固定属性。
+     */
+    val sideRank: Int = noteSideRank(side),
 ) {
     /**
      * 两个候选框是否冲突：矩形相交，或间距（横向 [marginX]、纵向 [marginY]）不足。
@@ -618,7 +634,9 @@ internal enum class NoteCandidateScope {
  * @param otherRowLeft 同一页上**其他批注**在每一行的最左墨迹（行序 → x）。同一行有多条批注时，
  *   落在该行上方 / 下方的框要给左侧那条留出引线空档（见下方 `leftReserve`）。
  * @param contentRight **版心右缘**（页坐标）：锚点末行在这条线左边还留着 1em 以上空白时，
- *   正右才作为第一优先级（2026-10-24 用户定口）。默认无上限 = 右侧永远算有空白。
+ *   正右提到最前（规则第 3 条）。默认无上限 = 不做这个提前（单测与直接调用）。
+ * @param contentLeft **版心左缘**（页坐标）：右侧没余地、但这一行左侧有明显缩进时，
+ *   正左提到最前（规则第 4 条）。默认 `null` = 不做这个提前。
  * @param scope 生成范围：默认全量；布点时按 NEAR → RINGS（一圈一批）→ TAIL 分批发。
  * @param ringFrom / @param ringTo 只在 [NoteCandidateScope.RINGS] 下生效：要生成第几圈到第几圈。
  */
@@ -632,6 +650,7 @@ internal fun noteCandidates(
     charWidthPx: Float = metrics.em / NOTE_BUBBLE_FONT_RATIO,
     otherRowLeft: Map<Int, Float> = emptyMap(),
     contentRight: Float = Float.MAX_VALUE,
+    contentLeft: Float? = null,
     scope: NoteCandidateScope = NoteCandidateScope.ALL,
     ringFrom: Int = 1,
     ringTo: Int = Int.MAX_VALUE,
@@ -662,9 +681,28 @@ internal fun noteCandidates(
         .sortedBy { it.left }
     val firstGlyph = baseGlyphs.firstOrNull() ?: note.rects.minByOrNull { it.left } ?: return emptyList()
     val lastGlyph = baseGlyphs.lastOrNull() ?: note.rects.maxByOrNull { it.right } ?: return emptyList()
-    // 「首字符右移一个汉字」/「末字符左移一个汉字」：斜向摆法的横向基准（§0.2）。
+    // 「首字符右移一个汉字」/「末字符左移一个汉字」：斜向摆法的横向基准（§0.2，2026-10-24 用户定口）。
+    // 右上 / 右下看**选区首字的左缘**，左上 / 左下看**选区末字的左缘**——不是选区右缘。
     val cornerRightX = firstGlyph.left + charW
-    val cornerLeftX = lastGlyph.right - charW
+    val cornerLeftX = lastGlyph.left - charW
+
+    // 规则 3 / 4：右侧离版心还有 1em 以上空白 ⇒ 正右提到最前；否则左侧有明显缩进 ⇒ 正左提到最前。
+    // contentRight 缺省时退回「本页空白能到的最右缘」：直接调用（单测）没有版心边界，
+    // 但空白本身仍有右缘，照样能判断「这一行右边还有没有 1em」。
+    val rightEdge = if (contentRight < Float.MAX_VALUE / 2f) {
+        contentRight
+    } else {
+        freeRects.maxOfOrNull { it.right } ?: contentRight
+    }
+    val rightRoomFirst = rightEdge - baseRow.rect.right > preferred
+    val leftIndentFirst = !rightRoomFirst && contentLeft != null &&
+        baseRow.rect.left - contentLeft > preferred
+
+    fun sideRankOf(side: NoteSide): Int = when {
+        side == NoteSide.RIGHT && rightRoomFirst -> NOTE_SIDE_RANK_RIGHT_FIRST
+        side == NoteSide.LEFT && leftIndentFirst -> NOTE_SIDE_RANK_LEFT_FIRST
+        else -> noteSideRank(side)
+    }
     val out = ArrayList<NoteCandidate>()
     val seen = HashSet<Long>()
 
@@ -783,6 +821,7 @@ internal fun noteCandidates(
             stage = stage,
             distance = note.rects.minOf { rectDistance(rect, it) },
             marginTier = tier,
+            sideRank = sideRankOf(side),
         )
     }
 
@@ -1075,8 +1114,11 @@ internal fun noteCandidateOrder(rightTaken: Boolean): Comparator<NoteCandidate> 
     // 右侧没被占时 RIGHT 就是 0 号方向，和枚举顺序无关；被占时挪到 LEFT 之前。
     // 只压**本行**（环 0）的正右：别的行右侧那块空白仍然按正常名次参与（§0.1 0b）。
     fun rank(c: NoteCandidate): Int =
-        if (rightTaken && c.side == NoteSide.RIGHT && c.ring == 0) NOTE_SIDE_RANK_TAKEN_RIGHT
-        else noteSideRank(c.side)
+        if (rightTaken && c.side == NoteSide.RIGHT && c.ring == 0) {
+            max(c.sideRank, NOTE_SIDE_RANK_TAKEN_RIGHT)
+        } else {
+            c.sideRank
+        }
     return compareBy<NoteCandidate> { it.stage }
         // 不折行优先、行数越少越优先：先比折行数，再比远近（环）。
         .thenBy { it.lines }
@@ -1421,8 +1463,10 @@ internal fun noteBubblePlacements(
         // 「一个汉字」按正文字号算：斜向摆法要据此把框挪开首 / 末字符。
         charWidthPx = body,
         otherRowLeft = otherRowLefts.getValue(note.annotationId),
-        // 版心右缘：判断「这一行右侧还有没有 1em 以上空白」，决定正右是否第一优先级。
+        // 版心右缘：判断「这一行右侧还有没有 1em 以上空白」，决定正右是否提到最前（规则 3）。
         contentRight = contentRight,
+        // 版心左缘：右侧没余地时，看这一行左侧有没有明显缩进，决定正左是否提到最前（规则 4）。
+        contentLeft = contentLeft,
         scope = scope,
         ringFrom = ringFrom,
         ringTo = ringTo,
@@ -1811,6 +1855,31 @@ private fun assignNoteCandidates(
     }
 
     /**
+     * 两阶段的第一阶段（2026-10-24 用户定口，规则第 2 条的唯一例外）：
+     * 本行**最右那条**批注先试正右；占下来之后，本行其余批注从左到右取位时，
+     * 正右已经被它占住，自然不会抢。
+     *
+     * 只认「正右 + 本行 + 整句」：其余情况仍按规则顺序，交给正常流程。
+     */
+    fun tryRightFirst(note: NoteInk): Boolean {
+        var roomTriedHere = false
+        for (c in chainFor(note)) {
+            // 只认「规则第 3 条提前过的正右」：这一行右侧确实有 1em 以上空白才值得先占。
+            // 只剩页边距那一窄列（规则第 6 条）不算——那种列该排在六个方向之后，
+            // 不能因为「本行最右」就先把批注塞进去。
+            if (c.side != NoteSide.RIGHT || c.ring != 0 || !c.complete) continue
+            if (c.sideRank != NOTE_SIDE_RANK_RIGHT_FIRST) continue
+            if (take(note, c)) return true
+            // 规则第 8 条：右侧被别人占了，先让别人上下让一让。
+            if (!roomTriedHere) {
+                roomTriedHere = true
+                if (makeRoom(note, c)) return true
+            }
+        }
+        return false
+    }
+
+    /**
      * 按「最少行数」档取位：一圈一圈要候选，拿到能放下的就停。
      *
      * 为什么可以停：排序键里折行数排在跨行数之前，所以只要手里已经有了
@@ -1833,10 +1902,10 @@ private fun assignNoteCandidates(
         }
     }
 
-    // 先挑顺序（§5.1）：正文行自上而下 → 同行从右到左 → 批注 id。
+    // 先挑顺序（规则第 1 / 2 条）：正文行自上而下 → **同一行从左到右** → 批注 id。
     val order = notes.sortedWith(
         compareBy<NoteInk> { baseRow(it) }
-            .thenByDescending { noteRightOnRow(it.rects, lines, baseRow(it)) }
+            .thenBy { noteRightOnRow(it.rects, lines, baseRow(it)) }
             .thenBy { it.annotationId },
     )
 
@@ -1849,7 +1918,17 @@ private fun assignNoteCandidates(
         var end = start + 1
         while (end < order.size && baseRow(order[end]) == rowIndex) end++
         val members = order.subList(start, end)
+        // 规则第 2 条的唯一例外：本行**最右那条**先试正右（它右侧那块空白先归它），
+        // 之后再从左到右给本行其余批注取位。「最右」要与别人拉开（同一条选区的几条不算），
+        // 否则谁先谁后不该因此改变。
+        if (members.size > 1) {
+            val last = members.last()
+            val lastRight = noteRightOnRow(last.rects, lines, rowIndex)
+            val others = members.dropLast(1).maxOf { noteRightOnRow(it.rects, lines, rowIndex) }
+            if (lastRight > others + NOTE_GEOM_EPS) tryRightFirst(last)
+        }
         for (note in members) {
+            if (chosen.containsKey(note.annotationId)) continue
             // 先按「最少行数」一圈一圈要位置，拿到就停；要不到才允许折行。
             if (placeMinLines(note)) continue
             // 整句但必须折行：仍在整句档内（不折叠），只是行数多于最少行数。

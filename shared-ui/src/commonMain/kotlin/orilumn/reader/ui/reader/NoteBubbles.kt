@@ -1836,72 +1836,40 @@ private fun assignNoteCandidates(
      */
     fun makeRoom(note: NoteInk, c: NoteCandidate): Boolean {
         if (!c.complete) return false
+        // 规则第 8 条讲的是**右侧**那一条：只有「贴着某一行右边 / 左边」的框才让别人上下让。
+        // 斜向与正上 / 正下的位置不搬动别人——规则第 2 条要求同一行**左边那条先取位、
+        // 且位置与它单独放置时一样**，为了右边一条去挤左边那条会破掉这条保证；
+        // 那几种位置本来就还有别的方向可选（阶梯里接着往下试即可）。
         if (c.side != NoteSide.RIGHT && c.side != NoteSide.LEFT) return false
-        val blockers = occupied.filter {
-            c.conflicts(it.candidate, marginX, marginY) &&
-                sharedBlank(c.freeRect, it.candidate.freeRect)
-        }
+        // 2026-10-25 用户定口：**不再要求挡路框和新框在同一块空白**——挡路框只要挪完还在
+        // 它自己的空白里就行（下面的校验逐个检查），隔壁空白里那条也该让一让。
+        val blockers = occupied.filter { c.conflicts(it.candidate, marginX, marginY) }
         if (blockers.isEmpty()) return false
         val blockerIds = blockers.map { it.note.annotationId }.toSet()
         val f = c.freeRect
-        val top = blockers.minOf { it.candidate.rect.top }
-        val bottom = blockers.maxOf { it.candidate.rect.bottom }
 
-        fun attempt(up: Boolean): Pair<Float, Pair<List<NoteChoice>, NoteCandidate>>? {
-            val delta = if (up) f.top - top else f.bottom - bottom
-            val movedTop = top + delta
-            val movedBottom = bottom + delta
-            // 挡路框让到这条边，剩下的空档就是新批注能用的地方。
-            val strip = if (up) {
-                Rect(f.left, movedBottom + marginY, f.right, f.bottom)
-            } else {
-                Rect(f.left, f.top, f.right, movedTop - marginY)
-            }
-            if (strip.height <= 1f) return null
-            val maxW = when (c.side) {
-                NoteSide.LEFT -> min(c.rect.right, strip.right) - strip.left
-                else -> strip.right - max(c.rect.left, strip.left)
-            }
-            if (maxW <= 1f) return null
-            // 在这一条空档里重新折行：宽了不折行，窄了折行，只要整句放下就算成。
-            val size = noteBoxFit(note.text, metrics, maxW, strip.height, sizer)
-            if (!size.complete) return null
-            val left = when (c.side) {
-                NoteSide.LEFT -> min(c.rect.right, strip.right) - size.width
-                else -> max(c.rect.left, strip.left)
-            }
-            // 新框仍夹取到它原本想待的高度（本行垂直居中），只在被挡路框挤到的那一侧收边——
-            // 贴着让位后的挡路框，而不是被甩到空档的另一头。
-            val newTop = c.rect.top.coerceIn(strip.top, max(strip.top, strip.bottom - size.height))
-            val rect = Rect(left, newTop, left + size.width, newTop + size.height)
-            if (rect.left < f.left - NOTE_GEOM_EPS || rect.right > f.right + NOTE_GEOM_EPS ||
-                rect.top < f.top - NOTE_GEOM_EPS || rect.bottom > f.bottom + NOTE_GEOM_EPS
-            ) {
-                return null
-            }
-            val fresh = c.copy(
-                rect = rect,
-                lines = size.lines,
-                complete = true,
-                shownChars = size.shownChars,
-                distance = note.rects.minOf { rectDistance(rect, it) },
+        /** 把挡路框整体挪 (dx, dy)，返回它们的新位置。 */
+        fun shiftBlockers(dx: Float, dy: Float): List<NoteChoice> = blockers.map { b ->
+            val r = b.candidate.rect
+            val movedRect = Rect(r.left + dx, r.top + dy, r.right + dx, r.bottom + dy)
+            NoteChoice(
+                b.note,
+                b.candidate.copy(
+                    rect = movedRect,
+                    distance = b.note.rects.minOf { rectDistance(movedRect, it) },
+                ),
             )
-            val moved = if (abs(delta) <= NOTE_GEOM_EPS) {
-                emptyList()
-            } else {
-                blockers.map { b ->
-                    val r = b.candidate.rect
-                    val movedRect = Rect(r.left, r.top + delta, r.right, r.bottom + delta)
-                    NoteChoice(
-                        b.note,
-                        b.candidate.copy(
-                            rect = movedRect,
-                            distance = b.note.rects.minOf { rectDistance(movedRect, it) },
-                        ),
-                    )
-                }
-            }
-            // 让完必须仍在它自己的空白里、彼此不撞、不撞没让位的批注、也不撞新框。
+        }
+
+        /**
+         * 收尾校验：让位后每个框都要还在**它自己的空白**里、彼此不撞、不撞没让位的框、
+         * 也不撞新框；新框同样不许和没让位的框相撞。
+         */
+        fun accept(
+            delta: Float,
+            moved: List<NoteChoice>,
+            fresh: NoteCandidate,
+        ): Pair<Float, Pair<List<NoteChoice>, NoteCandidate>>? {
             for (m in moved) {
                 val mf = m.candidate.freeRect
                 val mr = m.candidate.rect
@@ -1921,7 +1889,6 @@ private fun assignNoteCandidates(
                     if (moved[i].candidate.conflicts(o.candidate, marginX, marginY)) return null
                 }
             }
-            // 新框只许和让位的那几条「换位置」；撞着没让位的批注就不算成功。
             for (o in occupied) {
                 if (o.note.annotationId in blockerIds) continue
                 if (fresh.conflicts(o.candidate, marginX, marginY)) return null
@@ -1929,8 +1896,20 @@ private fun assignNoteCandidates(
             return abs(delta) to (moved to fresh)
         }
 
-        val up = attempt(up = true)
-        val down = attempt(up = false)
+        /**
+         * 竖排让位：挡路框**只挪开刚好够的那一点**（让出新框这一条带），不推到空白边缘。
+         *
+         * 2026-10-25 用户定口：让位是为了腾地方，不是把别人的批注甩到页面另一头——尤其是
+         * 空白很大时，「推到边缘」会把一条批注从本行弹到页顶。
+         */
+        fun attemptVertical(up: Boolean): Pair<Float, Pair<List<NoteChoice>, NoteCandidate>>? {
+            val top = blockers.minOf { it.candidate.rect.top }
+            val bottom = blockers.maxOf { it.candidate.rect.bottom }
+            val dy = if (up) c.rect.top - marginY - bottom else c.rect.bottom + marginY - top
+            if (abs(dy) <= NOTE_GEOM_EPS) return null
+            return accept(abs(dy), shiftBlockers(0f, dy), c)
+        }
+
 
         /**
          * 规则第 8 条后半：**上下让不动时，看挡路框右侧还有没有地方**。
@@ -1961,9 +1940,12 @@ private fun assignNoteCandidates(
             return Float.MAX_VALUE / 2f to (emptyList<NoteChoice>() to fresh)
         }
 
-        val pick = listOfNotNull(up, down, attemptBeside())
-            .minWithOrNull(compareBy({ it.first }, { if (it === up) 0 else 1 }))
-            ?: return false
+        val tried = listOfNotNull(
+            attemptVertical(up = true),
+            attemptVertical(up = false),
+            attemptBeside(),
+        )
+        val pick = tried.minWithOrNull(compareBy({ it.first })) ?: return false
         // **先判后动**：让位失败时不能把已放批注挪到半路。
         for (m in pick.second.first) {
             chosen[m.note.annotationId] = m.candidate

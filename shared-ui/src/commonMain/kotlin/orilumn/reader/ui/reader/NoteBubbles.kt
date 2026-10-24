@@ -113,8 +113,13 @@ private const val NOTE_ICON_HEIGHT_RATIO: Float = 0.32f
 /** 小椭圆的点击热区边长（以旁注字号为单位）：视觉小，手指仍够得着。 */
 internal const val NOTE_ICON_HIT_RATIO: Float = 1.2f
 
-/** 标注与障碍、与另一条标注之间的最小距离（以旁注字号为单位）：横向 0.5em、纵向 0.1em。 */
-private const val NOTE_MARGIN_X_EM: Float = 0.5f
+/**
+ * 标注与障碍、与另一条标注之间的最小距离（以旁注字号为单位）：四周一律 0.1em。
+ *
+ * 横向只留一条细缝：只有「放在所选文字右侧」那种摆法需要给水平箭头留地方，
+ * 那一段由 [NOTE_SIDE_GAP_EM] 单独给，不该让所有批注左侧都白留一格。
+ */
+private const val NOTE_MARGIN_X_EM: Float = 0.1f
 private const val NOTE_MARGIN_Y_EM: Float = 0.1f
 
 /** 标注放在所选文字右侧时与文字的距离（要留出画水平箭头的地方）。 */
@@ -611,9 +616,9 @@ internal fun noteCandidates(
     fun emitBelow(rowIndex: Int, ring: Int, stage: Int) {
         val row = lines.getOrNull(rowIndex) ?: return
         val y = row.rect.bottom + marginY
-        // 右下角：框左边与所选文字至少隔一格（读者反馈第 4 条：不是半个 margin，而是一格）。
-        val xr = max(anchor.right, row.rect.right) + max(marginX, metrics.em)
-        val floor = anchor.left + metrics.em
+        // 右下角：框左边只留横向 margin（引线走斜线 / 折线，不需要水平箭头的空档）。
+        val xr = max(anchor.right, row.rect.right) + marginX
+        val floor = anchor.left + marginX
         for (f in bandRects(y, xr, below = true)) {
             val x0 = max(max(xr, f.left), floor)
             if (x0 < f.right - 1f) {
@@ -629,9 +634,9 @@ internal fun noteCandidates(
     fun emitAbove(rowIndex: Int, ring: Int, stage: Int) {
         val row = lines.getOrNull(rowIndex) ?: return
         val y = row.rect.top - marginY
-        // 右上角与右下角同口径：至少隔一格。
-        val xr = max(anchor.right, row.rect.right) + max(marginX, metrics.em)
-        val floor = anchor.left + metrics.em
+        // 右上角与右下角同口径：只留横向 margin。
+        val xr = max(anchor.right, row.rect.right) + marginX
+        val floor = anchor.left + marginX
         for (f in bandRects(y, xr, below = false)) {
             val x0 = max(max(xr, f.left), floor)
             if (x0 < f.right - 1f) {
@@ -730,7 +735,7 @@ private fun nearestLineIndex(ink: Rect, lines: List<NoteTextLine>): Int? {
     return best
 }
 
-/** 障碍按横向 / 纵向 margin 外扩：框落在空白里即满足横向 0.5em、纵向 0.1em 的间距。 */
+/** 障碍按横向 / 纵向 margin 外扩：框落在空白里即满足四周 0.1em 的间距（右侧箭头空档另算）。 */
 private fun inflateRect(r: Rect, marginX: Float, marginY: Float): Rect =
     Rect(r.left - marginX, r.top - marginY, r.right + marginX, r.bottom + marginY)
 
@@ -950,7 +955,7 @@ internal fun noteBubblePlacements(
     }
     // 障碍仍是「文字墨迹（含列表圆点）+ 图形 + 表格 + 线条」：块底色 / padding / 页边距算空白。
     val baseObstacles = obstacles.textInk + obstacles.figures + obstacles.tables + obstacles.strokes
-    // 障碍按横向 / 纵向 margin 外扩后再切空白：框落在空白里即满足横向 0.5em、纵向 0.1em（§2.2）。
+    // 障碍按横向 / 纵向 margin 外扩后再切空白：框落在空白里即满足四周 0.1em 的间距（§2.2）。
     val inflatedObstacles = baseObstacles.map { inflateRect(it, marginX, marginY) }
     // 箭头避让另用逐字墨迹（能穿两字之间与标点前后）；没有逐字几何时才退回行框。
     val arrowGlyphs = obstacles.arrowInk.ifEmpty { obstacles.textInk }
@@ -1073,7 +1078,7 @@ private data class NoteChoice(
  * 3. 整句都排不下的，再从自己的候选里取**至少能读 4 字**的最靠前一个；
  * 4. 仍然没有的交给调用方退成小椭圆（§1.6）。
  *
- * 已选框立即成为后选框的障碍（含横向 0.5em / 纵向 0.1em），先挑者永不被挤走。
+ * 已选框立即成为后选框的障碍（四周 0.1em），先挑者永不被挤走。
  * 不做两两互换、也不做页边距推挤：位置全部来自阶梯候选，顺序可复现。
  */
 private fun assignNoteCandidates(

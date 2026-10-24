@@ -1388,7 +1388,7 @@ class NoteBubblesTest {
         assertEquals(19.872f, m.lineH, 0.01f)
         assertEquals(5.04f, m.padX, 0.01f)
         assertEquals(10.08f, m.padTotal, 0.01f)
-        assertEquals(7.2f, m.marginX, 0.01f)
+        assertEquals(1.44f, m.marginX, 0.01f)
         assertEquals(1.44f, m.marginY, 0.01f)
         assertEquals(25.92f, m.sideGap, 0.01f)
         assertEquals(7.2f, m.edge, 0.01f)
@@ -1460,8 +1460,8 @@ class NoteBubblesTest {
     @Test
     fun `sliver narrower than four characters is not readable`() {
         val m = NoteMetrics.forBody(20f)
-        // 50 宽的空白扣掉两侧横向 margin 与内缩后只够一行一个字。
-        val size = noteBoxFit("字".repeat(10), m, maxWidth = 50f - m.marginX * 2f, maxHeight = m.lineH * 3.5f)
+        // 一行只放得下一个字、最多三行：一共只能读三个字。
+        val size = noteBoxFit("字".repeat(10), m, maxWidth = m.em + m.padTotal, maxHeight = m.lineH * 3.5f)
         assertEquals(3, size.lines)
         assertEquals(3, size.shownChars)
         assertTrue(!size.readable)

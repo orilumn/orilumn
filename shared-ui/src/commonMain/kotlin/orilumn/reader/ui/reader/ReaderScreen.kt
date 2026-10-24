@@ -57,6 +57,7 @@ import orilumn.reader.engine.text.TypographicProfile
 import orilumn.reader.io.Logger
 import kotlin.math.hypot
 import kotlin.math.roundToInt
+import kotlin.time.TimeSource
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -2115,7 +2116,8 @@ fun ReaderScreen(
                             contentTop = contentTop,
                         ),
                     )
-                    noteBubblePlacements(
+                    val noteLayoutMark = TimeSource.Monotonic.markNow()
+                    val placed = noteBubblePlacements(
                         noteInk = notes.mapNotNull { a ->
                             val rects = pageInkRects(
                                 drawer = selectionDrawer,
@@ -2163,6 +2165,14 @@ fun ReaderScreen(
                         pageBottom = pxHeight,
                         noteTextSizer = noteTextSizer,
                     )
+                    // 真机计时留档（P5）：只在按页缓存失效时打一行，翻页 / 改批注才出现。
+                    Logger.d(
+                        "Orilumn.NOTE",
+                        "NOTE-LAYOUT notes=${notes.size} placed=${placed.count { !it.compact }}" +
+                            " compact=${placed.count { it.compact }}" +
+                            " ms=${noteLayoutMark.elapsedNow().inWholeMilliseconds}",
+                    )
+                    placed
                 }
             }
             if (noteBubbles.isNotEmpty() && !coverVisible && !ctl.isBusy()) {

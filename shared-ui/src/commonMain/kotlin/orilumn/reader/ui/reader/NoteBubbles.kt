@@ -731,6 +731,20 @@ internal fun noteCandidates(
         if (tier == NOTE_MARGIN_TIER_NEAR_MIN) axisMin else preferred
 
     /**
+     * 规则第 6 条：左右**只剩页边距**那一列时最多折两行——那一列本来就窄，再多折会折成竖条。
+     *
+     * 判据看框自己落在哪儿（不是看空白矩形）：框整个在版心右缘之外（或左缘之外）才算页边距列。
+     * 短行尾部的空白、缩进让出的空白都不算页边距，那里可以放心折行。
+     */
+    fun marginColumnMaxHeight(f: Rect, boxLeft: Float, boxRight: Float): Float {
+        val inRightMargin = contentRight < Float.MAX_VALUE / 2f &&
+            boxLeft >= contentRight - NOTE_GEOM_EPS
+        val inLeftMargin = contentLeft != null && boxRight <= contentLeft + NOTE_GEOM_EPS
+        // 2.5 行高的上限：容量按整除算，正好 2 行高会因为浮点取整掉成 1 行。
+        return if (inRightMargin || inLeftMargin) min(f.height, metrics.lineH * 2.5f) else f.height
+    }
+
+    /**
      * 右 / 左：返回可用的空白列（最多两个：最宽的、最高的）。
      *
      * 只取一个矩形会漏掉「窄但高」的空白：最宽的那块常常只有一行高，框被高度逼成单行后
@@ -830,13 +844,15 @@ internal fun noteCandidates(
      *
      * 上下两条边不是「与正文的间距」，沿用空白自带的 0.1em 最小缝即可——
      * 「1em 无论上下左右」说的是**摆放方向那一侧**离正文的间距。
+     *
+     * 规则第 6 条：左右两侧**只剩页边距**时最多折两行——那一列窄，再多折会折出竖条。
      */
     fun emitRight(f: Rect, row: NoteTextLine, ring: Int, stage: Int, tier: Int) {
         val x = row.rect.right + metrics.sideGap
         val far = farExtra(marginX, tier)
         val left = max(x, f.left)
         val maxW = f.right - far - left
-        val maxH = f.height
+        val maxH = marginColumnMaxHeight(f, left, left + maxW)
         if (maxW <= 1f || maxH <= 1f) return
         val size = noteBoxFit(text, metrics, maxW, maxH, sizer)
         if (!size.readable) return
@@ -847,13 +863,13 @@ internal fun noteCandidates(
         add(NoteSide.RIGHT, ring, stage, tier, f, left, top, size)
     }
 
-    /** 正左：与正右对称。 */
+    /** 正左：与正右对称（含规则第 6 条：页边距那一列最多折两行）。 */
     fun emitLeft(f: Rect, row: NoteTextLine, ring: Int, stage: Int, tier: Int) {
         val x = row.rect.left - metrics.sideGap
         val far = farExtra(marginX, tier)
         val right = min(x, f.right)
         val maxW = right - f.left - far
-        val maxH = f.height
+        val maxH = marginColumnMaxHeight(f, f.left + far, right)
         if (maxW <= 1f || maxH <= 1f) return
         val size = noteBoxFit(text, metrics, maxW, maxH, sizer)
         if (!size.readable) return

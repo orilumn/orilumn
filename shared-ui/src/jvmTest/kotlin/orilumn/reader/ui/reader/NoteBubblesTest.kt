@@ -905,6 +905,28 @@ class NoteBubblesTest {
         )
     }
 
+    @Test
+    fun `page margin column folds at most two lines`() {
+        // 规则第 6 条：左右两侧只剩页边距时最多折两行——那一列窄，再多折就成了竖条。
+        // 上下都封死，只剩行右侧那一条页边距；这句话在那一列里本来能折五六行。
+        val row = rect(0f, 100f, 600f, 140f)
+        val ink = rect(100f, 100f, 300f, 140f)
+        val bubbles = place(
+            notes = listOf(noteInk(1, listOf(ink), "这段批注相当长放进页边距会折很多行")),
+            textInk = listOf(row),
+            figures = listOf(
+                rect(0f, 0f, 700f, 100f),
+                rect(0f, 140f, 700f, 800f),
+            ),
+            contentBottom = 800f,
+            pageRight = 700f,
+            pageBottom = 800f,
+        )
+        val b = bubbles.single()
+        assertTrue("不该退成小图标：$b", !b.compact)
+        assertTrue("页边距那一列最多折两行，实际=${b.maxLines}", b.maxLines <= 2)
+    }
+
     /**
      * 2026-10-24 用户定口：正右看的是「这一行右边还剩多少空白」，不是段末行身份。
      * 左对齐的短行（代码行 / 标题行）右边本来就是空白区，段中行也要先把正右排在第一位。

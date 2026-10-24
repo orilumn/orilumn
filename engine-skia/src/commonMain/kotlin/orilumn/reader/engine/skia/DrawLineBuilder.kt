@@ -70,7 +70,7 @@ object DrawLineBuilder {
         val carriers = ListMarkers.firstCarrierSet(leaves.mapNotNull { it.el })
         // E10 快筛：整章有没有 `visibility: hidden` 声明（无则每叶回空表，零额外遍历）。
         val anyVisibilityHidden = styleMap.any { it.value.visibilityHidden }
-        for (leaf in leaves) {
+        for ((leafIndex, leaf) in leaves.withIndex()) {
             if (leaf.ranges.isEmpty() || leaf.table != null || leaf.replaceableHeight != 0) continue
             val el = leaf.el ?: continue
             val text = NormalFlowLayout.leafText(el, styleMap, classify, hidden, genOf)
@@ -198,6 +198,8 @@ object DrawLineBuilder {
                     deviceScale = deviceScale,
                     visibilityHiddenRuns = visHidden,
                     clip = contentClip,
+                    // 旁注布点按块序号判「本段 / 相邻段」（方案 §1.5）：一叶即一块，文档序 0 起。
+                    blockId = leafIndex,
                 )
             }
         }

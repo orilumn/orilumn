@@ -20,7 +20,7 @@ import orilumn.reader.engine.layout.ListMarkers
  *
  * 这些断言只谈**旁注自己的义务**：不压四类障碍（文字 / 图形 / 表格 / 线条）、不互相重叠、
  * **整句可读优先**（放不下整句才允许截断，连一行都读不出就显示小图标）、页边距与版心内同一等候选；
- * 箭头最多两折且必画（只有小图标形态没有箭头）。
+ * 箭头按相对关系选直线 / 折线（最多三折）且必画（只有小图标形态与贴住墨迹时没有箭头）。
  *
  * 行几何 → 页坐标的换算（章内 Y 平移、章内字符区间 → 段内区间）在调用方完成，
  * 这里只吃**已经落到页坐标的墨迹矩形**。
@@ -75,6 +75,12 @@ class NoteBubblesTest {
         return false
     }
 
+    /** 箭头折线化：直线与折线都按点列出来，供断言「不压字 / 两端接住」。 */
+    private fun arrowPoints(arrow: NoteArrow): List<Offset> = when (arrow) {
+        is NoteArrow.Straight -> listOf(arrow.start, arrow.end)
+        is NoteArrow.Elbow -> arrow.points
+    }
+
     private val noteMetrics = NoteMetrics.forBody(20f)
     private val noteFont = noteMetrics.em
     private val noteLine = noteMetrics.lineH
@@ -83,15 +89,13 @@ class NoteBubblesTest {
     private fun candidates(
         note: NoteInk,
         freeRects: List<Rect>,
-        contentLeft: Float = 0f,
-        contentRight: Float = 600f,
-        contentBottom: Float = 800f,
+        lines: List<NoteTextLine> = note.rects
+            .sortedBy { it.top }
+            .mapIndexed { i, r -> NoteTextLine(rect = r, blockId = 0, index = i) },
     ) = noteCandidates(
         note = note,
+        lines = lines,
         freeRects = freeRects,
-        contentLeft = contentLeft,
-        contentRight = contentRight,
-        contentBottom = contentBottom,
         metrics = noteMetrics,
     )
 
@@ -113,6 +117,8 @@ class NoteBubblesTest {
         contentBottom: Float = 800f,
         pageRight: Float = 700f,
         pageBottom: Float = contentBottom,
+        textLines: List<NoteTextLine> = emptyList(),
+        sizer: NoteTextSizer = EstimatedNoteTextSizer,
     ) = noteBubblePlacements(
         noteInk = notes,
         obstacles = NoteObstacles(
@@ -120,6 +126,7 @@ class NoteBubblesTest {
             figures = figures,
             tables = tables,
             strokes = strokes,
+            textLines = textLines,
         ),
         contentLeft = contentLeft,
         contentRight = contentRight,
@@ -127,6 +134,7 @@ class NoteBubblesTest {
         pageRight = pageRight,
         fontPx = 20f,
         pageBottom = pageBottom,
+        noteTextSizer = sizer,
     )
 
     private fun boxOf(b: NoteBubble) = rect(
@@ -173,7 +181,7 @@ class NoteBubblesTest {
         val box = boxOf(b)
         assertTrue("不该压住下一行：$box", !box.overlaps(second))
         val gap = gapBetween(box, second)
-        assertTrue("框与下一行至少隔 1em（障碍已外扩 margin），实际 $gap", gap >= noteMetrics.margin - 0.5f)
+        assertTrue("框与下一行至少隔纵向 margin（障碍已外扩），实际 $gap", gap >= noteMetrics.marginY - 0.5f)
         val fit = noteTextFit(b.text, b.widthPx - notePad, b.fontPx, b.maxLines)
         assertTrue("行间空隙够放整句，不该截断", fit.complete)
     }
@@ -227,7 +235,7 @@ class NoteBubblesTest {
         )
         val b = bubbles.single()
         assertTrue("空白区足够高时应放得下 4 行以上，实际 ${b.maxLines}", b.maxLines >= 4)
-        assertTrue(b.topPx + b.maxLines * b.fontPx * NOTE_BUBBLE_LINE_RATIO <= 400f)
+        assertTrue("框越过下一行上缘：$b", b.topPx + b.maxLines * b.fontPx * NOTE_BUBBLE_LINE_RATIO <= 400f)
     }
 
     @Test
@@ -334,7 +342,7 @@ class NoteBubblesTest {
         assertTrue("两条都该是正常旁注：$bubbles", bubbles.none { it.compact })
         assertTrue("两条不能重叠：$bubbles", !boxOf(bubbles[0]).overlaps(boxOf(bubbles[1])))
         val gap = gapBetween(boxOf(bubbles[0]), boxOf(bubbles[1]))
-        assertTrue("两条至少隔 1em（含外扩 margin），实际 $gap", gap >= noteMetrics.margin - 0.5f)
+        assertTrue("两条至少隔纵向 margin（含外扩），实际 $gap", gap >= noteMetrics.marginY - 0.5f)
         for (b in bubbles) {
             assertTrue("应落在右侧页边距，实际 left=${b.leftPx}", b.leftPx >= 600f - 0.5f)
         }
@@ -379,7 +387,7 @@ class NoteBubblesTest {
         val box = boxOf(withMarker)
         assertTrue("框不该压住圆点：$box vs $marker", !box.overlaps(marker))
         val gap = gapBetween(box, marker)
-        assertTrue("框与圆点至少隔 1em，实际 $gap", gap >= noteMetrics.margin - 0.5f)
+        assertTrue("框与圆点至少隔横向 margin，实际 $gap", gap >= noteMetrics.marginX - 0.5f)
     }
 
     @Test
@@ -392,7 +400,7 @@ class NoteBubblesTest {
             notes = listOf(noteInk(1, listOf(anchor), "交换")),
             textInk = listOf(anchor, sameRowRight, next),
             contentLeft = 100f,
-            pageRight = 700f,
+            pageRight = 600f,
         )
         val b = bubbles.single()
         assertTrue("应落在锚点下方，实际 top=${b.topPx}", b.topPx >= 40f)
@@ -417,19 +425,18 @@ class NoteBubblesTest {
 
     @Test
     fun `right blank clamps the box into its vertical range`() {
-        // 右侧空白只到锚点中段上方：垂直居中会被空白下缘挡住，框应 clamp 进空白。
-        val anchor = rect(0f, 100f, 500f, 300f)
-        val figure = rect(600f, 200f, 700f, 800f)
-        val bubbles = place(
-            notes = listOf(noteInk(1, listOf(anchor), "交换")),
-            textInk = listOf(anchor),
-            figures = listOf(figure),
+        // 右侧空白只有 160 高、且整行都在它的中段：垂直居中会被空白下缘挡住，框应 clamp 进空白。
+        val anchor = rect(0f, 100f, 500f, 200f)
+        val right = rect(510f, 0f, 600f, 160f)
+        val list = candidates(
+            note = noteInk(1, listOf(anchor), "交换交换交换"),
+            freeRects = listOf(right),
         )
-        val b = bubbles.single()
-        val box = boxOf(b)
-        assertTrue("应落在右侧空白，实际 left=${b.leftPx}", b.leftPx >= 500f)
-        assertTrue("框应被 clamp 进空白下缘，实际 bottom=${box.bottom}", box.bottom <= 200f + 0.5f)
-        assertTrue("框不该高过页面顶部，实际 top=${box.top}", box.top >= 0f)
+        val best = list.first { it.complete }
+        assertEquals(NoteSide.RIGHT, best.side)
+        assertTrue("应落在右侧空白，实际 left=${best.rect.left}", best.rect.left >= 500f)
+        assertTrue("框应被 clamp 进空白下缘，实际 bottom=${best.rect.bottom}", best.rect.bottom <= 160f + 0.5f)
+        assertTrue("框不该高过空白顶部，实际 top=${best.rect.top}", best.rect.top >= 0f)
     }
 
     @Test
@@ -542,7 +549,8 @@ class NoteBubblesTest {
         )
         val b = bubbles.single()
         assertTrue("整页排满应退成小图标，实际=$b", b.compact)
-        val box = rect(b.leftPx, b.topPx, b.leftPx + b.widthPx, b.topPx + b.widthPx)
+        val h = if (b.heightPx > 0f) b.heightPx else b.widthPx
+        val box = rect(b.leftPx, b.topPx, b.leftPx + b.widthPx, b.topPx + h)
         assertTrue("小图标压到了锚点墨迹：box=$box ink=$anchor", !box.overlaps(anchor))
         assertTrue(
             "小图标应留在页面内：box=$box",
@@ -571,25 +579,76 @@ class NoteBubblesTest {
     }
 
     @Test
-    fun `same distance longer note picks first`() {
-        // 两条批注锚在同一行、抢同一块只放得下一条的行间空白：
-        // 距离一样时文字长的先挑（占地大），短的让位成小图标。
-        val anchor = rect(0f, 0f, 600f, 40f)
+    fun `same line notes stack vertically on the right`() {
+        // 行只占 300 / 700：两条同行的批注竖向排在右侧同一列，不并排——并排会让左边的箭头
+        // 绕到右边的框上。
+        val anchor = rect(0f, 0f, 300f, 40f)
         val bubbles = place(
             notes = listOf(
-                noteInk(1, listOf(anchor), "想法"),
-                noteInk(2, listOf(anchor), "想法想法想法"),
+                noteInk(1, listOf(anchor), "短"),
+                noteInk(2, listOf(anchor), "也短"),
             ),
             textInk = listOf(anchor),
-            contentBottom = 90f,
-            pageRight = 600f,
-            pageBottom = 90f,
+            pageRight = 700f,
+            contentBottom = 800f,
+            pageBottom = 800f,
         )
         assertEquals(2, bubbles.size)
-        val short = bubbles.single { it.annotationId == 1L }
-        val long = bubbles.single { it.annotationId == 2L }
-        assertTrue("长批注应先挑到行间空白：$long", !long.compact)
-        assertTrue("短批注应让位成小图标：$short", short.compact)
+        assertTrue("两条都应放到行尾右侧：$bubbles", bubbles.all { !it.compact && it.leftPx >= 300f })
+        assertEquals("同一列，左边应对齐", bubbles[0].leftPx, bubbles[1].leftPx, 0.5f)
+        assertTrue("应竖向排开，实际 top=${bubbles.map { it.topPx }}", bubbles[1].topPx > bubbles[0].topPx)
+        val a = boxOf(bubbles[0])
+        val b = boxOf(bubbles[1])
+        assertTrue("同行的两条不该重叠：$a / $b", !a.overlaps(b))
+    }
+
+    @Test
+    fun `same line notes put the rightmost at the bottom when stacking above`() {
+        // 上方有空间：最左的锚点排最上、最右的排最下，引线不会交叉。
+        val row = rect(0f, 200f, 200f, 240f)
+        val left = rect(20f, 200f, 60f, 240f)
+        val right = rect(120f, 200f, 160f, 240f)
+        val bubbles = place(
+            notes = listOf(
+                noteInk(1, listOf(left), "左边这条"),
+                noteInk(2, listOf(right), "右边这条"),
+            ),
+            textInk = listOf(row),
+            pageRight = 700f,
+            contentBottom = 800f,
+            pageBottom = 800f,
+        )
+        assertEquals(2, bubbles.size)
+        assertEquals("两条应同列", bubbles[0].leftPx, bubbles[1].leftPx, 0.5f)
+        assertTrue(
+            "上方成组时最右的应在最下面，实际 top=${bubbles.map { it.topPx }}",
+            bubbles[0].topPx < bubbles[1].topPx,
+        )
+        assertTrue("应落在行上方", bubbles.all { it.topPx + it.maxLines * it.fontPx * NOTE_BUBBLE_LINE_RATIO <= 240f })
+    }
+
+    @Test
+    fun `same line notes put the rightmost on top when stacking below`() {
+        // 下方有空间：最右的锚点排最上、最左的排最下，同样避免交叉。
+        val row = rect(0f, 0f, 200f, 40f)
+        val left = rect(20f, 0f, 60f, 40f)
+        val right = rect(120f, 0f, 160f, 40f)
+        val bubbles = place(
+            notes = listOf(
+                noteInk(1, listOf(left), "左边这条"),
+                noteInk(2, listOf(right), "右边这条"),
+            ),
+            textInk = listOf(row),
+            pageRight = 700f,
+            contentBottom = 800f,
+            pageBottom = 800f,
+        )
+        assertEquals(2, bubbles.size)
+        assertEquals("两条应同列", bubbles[0].leftPx, bubbles[1].leftPx, 0.5f)
+        assertTrue(
+            "下方成组时最右的应在最上面，实际 top=${bubbles.map { it.topPx }}",
+            bubbles[1].topPx < bubbles[0].topPx,
+        )
     }
 
     @Test
@@ -756,16 +815,114 @@ class NoteBubblesTest {
     }
 
     @Test
-    fun `arrow is a straight line when nothing blocks it`() {
-        val arrow = routeNoteArrow(
-            bubble = rect(0f, 0f, 100f, 40f),
-            inkRects = listOf(rect(300f, 0f, 400f, 40f)),
+    fun `right side note draws a horizontal straight line`() {
+        val bubble = rect(300f, 0f, 400f, 40f)
+        val ink = rect(0f, 0f, 100f, 40f)
+        val straight = routeNoteArrow(bubble, listOf(ink)) as NoteArrow.Straight
+        // 两端必须接住：起点在框左边中点，终点在文字右边中点（gap = 0）。
+        assertEquals(Offset(300f, 20f), straight.start)
+        assertEquals(Offset(100f, 20f), straight.end)
+    }
+
+    @Test
+    fun `right side note bends when a word sits between`() {
+        val bubble = rect(300f, 0f, 400f, 40f)
+        val ink = rect(0f, 0f, 100f, 40f)
+        val blocker = rect(150f, 10f, 250f, 60f)
+        val elbow = routeNoteArrow(
+            bubble = bubble,
+            inkRects = listOf(ink),
+            glyphs = listOf(blocker),
+            lineH = 20f,
+        ) as NoteArrow.Elbow
+        // 两端仍接住：框左边中点 → 文字右边中点；中间用正交折线绕开。
+        assertEquals(Offset(300f, 20f), elbow.start)
+        assertEquals(Offset(100f, 20f), elbow.end)
+        val pts = elbow.points
+        for (i in 1 until pts.size) {
+            assertTrue(
+                "折线不该压住中间的字：${pts[i - 1]} → ${pts[i]}",
+                !segmentHits(pts[i - 1], pts[i], blocker),
+            )
+        }
+    }
+
+    @Test
+    fun `left side note draws a horizontal straight line`() {
+        val bubble = rect(0f, 0f, 100f, 40f)
+        val ink = rect(300f, 0f, 400f, 40f)
+        val straight = routeNoteArrow(bubble, listOf(ink)) as NoteArrow.Straight
+        assertEquals(Offset(100f, 20f), straight.start)
+        assertEquals(Offset(300f, 20f), straight.end)
+    }
+
+    @Test
+    fun `left side note bends when the line is blocked`() {
+        val bubble = rect(0f, 0f, 100f, 40f)
+        val ink = rect(300f, 0f, 400f, 40f)
+        val blocker = rect(150f, 10f, 250f, 60f)
+        val elbow = routeNoteArrow(
+            bubble = bubble,
+            inkRects = listOf(ink),
+            glyphs = listOf(blocker),
+            lineH = 20f,
+        ) as NoteArrow.Elbow
+        assertEquals(Offset(100f, 20f), elbow.start)
+        assertEquals(Offset(300f, 20f), elbow.end)
+        val pts = elbow.points
+        for (i in 1 until pts.size) {
+            assertTrue(
+                "折线不该压住中间的字：${pts[i - 1]} → ${pts[i]}",
+                !segmentHits(pts[i - 1], pts[i], blocker),
+            )
+        }
+    }
+
+    @Test
+    fun `note above its text drops a vertical line from the bottom edge`() {
+        val bubble = rect(0f, 0f, 100f, 40f)
+        val ink = rect(0f, 100f, 100f, 140f)
+        val straight = routeNoteArrow(bubble, listOf(ink)) as NoteArrow.Straight
+        assertEquals(Offset(50f, 40f), straight.start)
+        assertEquals(Offset(50f, 100f), straight.end)
+    }
+
+    @Test
+    fun `note below its text rises from the top edge`() {
+        val bubble = rect(0f, 200f, 100f, 240f)
+        val ink = rect(0f, 100f, 100f, 140f)
+        val straight = routeNoteArrow(bubble, listOf(ink)) as NoteArrow.Straight
+        assertEquals(Offset(50f, 200f), straight.start)
+        assertEquals(Offset(50f, 140f), straight.end)
+    }
+
+    @Test
+    fun `narrow overlap uses the nearest points of box and text`() {
+        // 水平投影只重叠 0.5px（不足 1px）⇒ 斜向：两框最近点直线。
+        val bubble = rect(100.2f, 60f, 200f, 100f)
+        val ink = rect(0f, 0f, 100.7f, 40f)
+        val straight = routeNoteArrow(bubble, listOf(ink)) as NoteArrow.Straight
+        assertEquals(Offset(100.2f, 60f), straight.start)
+        assertEquals(Offset(100.2f, 40f), straight.end)
+    }
+
+    @Test
+    fun `three bend route has four segments`() {
+        // 两折无法避开时，三折（4 段、3 个拐点）也要能给出横平竖直的候选。
+        val routes = noteElbowRoutes(
+            start = Offset(0f, 0f),
+            end = Offset(200f, 100f),
+            obstacles = listOf(rect(80f, 30f, 120f, 70f)),
+            bends = 3,
         )
-        val straight = arrow as NoteArrow.Straight
-        assertEquals(100f, straight.start.x, 0.01f)
-        assertEquals(297.5f, straight.end.x, 0.01f)
-        assertEquals("直箭头应正对墨迹：${straight.start} → ${straight.end}", straight.start.y, straight.end.y, 0.01f)
-        assertTrue("起点必须落在框边上：${straight.start}", straight.start.y in 0f..40f)
+        val first = routes.first()
+        assertEquals("三折必须正好 4 段：$first", 5, first.size)
+        for (i in 1 until first.size) {
+            val a = first[i - 1]
+            val b = first[i]
+            assertTrue("折线必须横平竖直：$a → $b", abs(a.x - b.x) < 0.01f || abs(a.y - b.y) < 0.01f)
+            assertTrue("折点不该退化：$a → $b", abs(a.x - b.x) > 0.01f || abs(a.y - b.y) > 0.01f)
+        }
     }
 
     @Test
@@ -810,7 +967,7 @@ class NoteBubblesTest {
         )
         val elbow = arrow as NoteArrow.Elbow
         assertTrue("绕开三面墙至少要一个拐点：${elbow.points}", elbow.points.size >= 3)
-        assertTrue("最多两个拐点（3 段）：${elbow.points}", elbow.points.size <= 4)
+        assertTrue("两折就够（最多 4 段）：${elbow.points}", elbow.points.size <= 5)
         assertTrue(
             "得从墙外绕过去：${elbow.points}",
             elbow.points.any { it.y <= -20f || it.y >= 70f },
@@ -850,8 +1007,8 @@ class NoteBubblesTest {
     }
 
     @Test
-    fun `arrow slips past a punctuation mark`() {
-        // 标点只占字位的一小截：箭头从正文与标点之间的空隙过去，行框会把它整行堵死。
+    fun `arrow routes around a punctuation mark without touching it`() {
+        // 标点只占字位的一小截：线从它外侧绕过去，不把整行当黑块。
         val char = rect(150f, 100f, 170f, 120f)
         val comma = rect(176f, 112f, 180f, 122f)
         val arrow = routeNoteArrow(
@@ -860,21 +1017,14 @@ class NoteBubblesTest {
             glyphs = listOf(char, comma),
         )
         assertTrue("必须画箭头，实际=$arrow", arrow != null)
-        val points = when (arrow) {
-            is NoteArrow.Straight -> listOf(arrow.start, arrow.end)
-            is NoteArrow.Elbow -> arrow.points
-            null -> emptyList()
-        }
+        val points = arrowPoints(arrow!!)
         for (i in 1 until points.size) {
             assertTrue("引线不该压住标点墨迹", !segmentHits(points[i - 1], points[i], comma))
             assertTrue("引线不该压住正文墨迹", !segmentHits(points[i - 1], points[i], char))
         }
-        // 落在标点所在那一段高度上时，x 必须在正文与标点之间（170..176）。
-        val first = points.first()
-        val last = points.last()
-        val y = 118f
-        val x = first.x + (last.x - first.x) * (y - first.y) / (last.y - first.y)
-        assertTrue("引线应从正文与标点之间穿过：x=$x，实际=${points}", x in 170f..176f)
+        // 终点必须接住目标墨迹的边。
+        val end = points.last()
+        assertTrue("终点要落在墨迹边上：$end", abs(end.y - 200f) < 0.01f && end.x in 168f..188f)
     }
 
     @Test
@@ -913,7 +1063,7 @@ class NoteBubblesTest {
     fun `no arrow when the bubble already touches the ink`() {
         val arrow = routeNoteArrow(
             bubble = rect(0f, 0f, 100f, 40f),
-            inkRects = listOf(rect(102.5f, 0f, 200f, 40f)),
+            inkRects = listOf(rect(100.4f, 0f, 200f, 40f)),
         )
         assertTrue("贴着墨迹时没有可画的箭头", arrow == null)
     }
@@ -930,6 +1080,54 @@ class NoteBubblesTest {
     }
 
     @Test
+    fun `tall narrow blank is tried when the wide one is only one line high`() {
+        // 右侧同时有「宽但只有一行高」与「窄而很高」两块空白：宽的那块只能截断，
+        // 窄的能折行读出整句。两个候选都要进列表，分配时整句优先选中窄的那块。
+        val anchor = rect(0f, 100f, 200f, 140f)
+        val text = "这条批注需要折成好几行才能完整读出而且字数还要更多一些"
+        val wide = rect(200f, 100f, 600f, 120f)
+        val tall = rect(220f, 100f, 320f, 400f)
+        val list = candidates(
+            note = noteInk(1, listOf(anchor), text = text),
+            freeRects = listOf(wide, tall),
+        )
+        assertTrue("宽的空白应产出截断候选，实际=$list", list.any { !it.complete })
+        val full = list.firstOrNull { it.complete }
+        assertTrue("窄而高的空白应产出整句候选，实际=$list", full != null)
+        assertTrue("整句候选应落在窄空白里，实际=${full!!.rect}", full.rect.width <= 101f)
+        assertTrue("整句候选应有多行，实际 lines=${full.lines}", full.lines > 1)
+    }
+
+    @Test
+    fun `long note one line farther gets a longer arrow`() {
+        // 批注比所选文字长、紧贴正下方时，箭头只有一条短竖线；同一侧再远一行还有整句位置，
+        // 就放远一行（读者反馈第 5 条）。
+        val row0 = rect(0f, 0f, 600f, 20f)
+        val anchor = rect(40f, 0f, 80f, 20f)
+        val row1 = rect(0f, 100f, 600f, 120f)
+        val lines = listOf(
+            NoteTextLine(rect = row0, blockId = 0, index = 0),
+            NoteTextLine(rect = row1, blockId = 0, index = 1),
+        )
+        val b = place(
+            notes = listOf(noteInk(1, listOf(anchor), "这条批注明显比选中的文字长很多")),
+            textInk = listOf(row0, row1),
+            textLines = lines,
+            contentRight = 600f,
+            pageRight = 600f,
+            contentBottom = 400f,
+            pageBottom = 400f,
+        ).single()
+        assertTrue("批注应放远一行，实际 top=${b.topPx}", b.topPx >= 120f - 0.5f)
+        val arrow = b.arrow
+        assertTrue("应画得出箭头", arrow != null)
+        val len = arrowPoints(arrow!!).zipWithNext().sumOf { (p, q) ->
+            sqrt((q.x - p.x) * (q.x - p.x) + (q.y - p.y) * (q.y - p.y)).toDouble()
+        }
+        assertTrue("引线应长于一行，实际 $len", len > noteLine)
+    }
+
+    @Test
     fun `complete margin candidate beats a nearby truncated sliver`() {
         // 锚点右侧只有一条能读出 5 个字的窄缝；远处页边距能放下整句。
         // 新口径：整句可读压过就近。
@@ -941,12 +1139,11 @@ class NoteBubblesTest {
         val list = candidates(
             note = noteInk(1, listOf(anchor), text = text),
             freeRects = listOf(slit, margin),
-            contentRight = 200f,
         )
         assertTrue("窄缝的截断候选也应在列表里，实际=$list", list.any { !it.complete })
-        val best = list.first()
-        assertTrue("应整句显示，实际 best=$best", best.complete)
-        assertEquals(MarginSide.RIGHT, best.marginSide)
+        // 排序里近处截断排在前面，但分配时先跑完整句档：整句候选必须存在且落在页边距。
+        val best = list.first { it.complete }
+        assertEquals(NoteSide.BELOW_RIGHT, best.side)
         assertTrue("应落在页边距，实际 ${best.rect}", best.rect.left >= 200f)
     }
 
@@ -972,6 +1169,64 @@ class NoteBubblesTest {
         assertTrue("短批注不该带省略号，实际 width=${best.rect.width}", best.rect.width >= noteFont * 2f)
     }
 
+
+    @Test
+    fun `next line below beats the left margin`() {
+        // 本段下一行的下方能放下，左侧页边距也能放下：阶梯里「下一行」在本段左侧之前。
+        val first = rect(100f, 0f, 400f, 40f)
+        val second = rect(100f, 100f, 400f, 140f)
+        val bubbles = place(
+            notes = listOf(noteInk(1, listOf(first), "交换")),
+            textInk = listOf(first, second),
+            contentLeft = 100f,
+            contentRight = 400f,
+            pageRight = 400f,
+        )
+        val b = bubbles.single()
+        assertTrue("应先在本段下一行找位置，实际 left=${b.leftPx} top=${b.topPx}", b.leftPx >= 100f && b.topPx < 100f)
+    }
+
+    @Test
+    fun `same paragraph left beats the adjacent paragraph`() {
+        // 本段右侧 / 下方都被图挡住，只剩本段左侧；下一段下方虽然也有空白，但那是第 9 步。
+        val row1 = rect(100f, 0f, 300f, 40f)
+        val row2 = rect(100f, 40f, 300f, 80f)
+        val nextBlock = rect(100f, 205f, 300f, 245f)
+        val figure = rect(0f, 85f, 400f, 200f)
+        val lines = listOf(
+            NoteTextLine(row1, blockId = 0, index = 0),
+            NoteTextLine(row2, blockId = 0, index = 1),
+            NoteTextLine(nextBlock, blockId = 1, index = 2),
+        )
+        val bubbles = place(
+            notes = listOf(noteInk(1, listOf(row2), "交换")),
+            textInk = listOf(row1, row2, nextBlock),
+            figures = listOf(figure),
+            contentLeft = 100f,
+            contentRight = 300f,
+            pageRight = 300f,
+            textLines = lines,
+        )
+        val b = bubbles.single()
+        assertTrue("本段左侧应压过相邻段：$b", !b.compact && b.leftPx < 100f)
+    }
+
+    @Test
+    fun `small icon keeps the small ellipse size`() {
+        // 兜底小椭圆：宽 0.5em、高 0.32em（热区另行放大，不改视觉尺寸）。
+        val anchor = rect(0f, 0f, 600f, 40f)
+        val bubbles = place(
+            notes = listOf(noteInk(1, listOf(anchor))),
+            textInk = listOf(anchor, rect(0f, 40f, 600f, 80f)),
+            contentBottom = 80f,
+            pageRight = 604f,
+        )
+        val b = bubbles.single()
+        assertTrue("应退成小椭圆：$b", b.compact)
+        assertEquals(noteFont * 0.5f, b.widthPx, 0.01f)
+        assertEquals(noteFont * 0.32f, b.heightPx, 0.01f)
+    }
+
     @Test
     fun `note text fit reports complete and truncated capacities`() {
         val width = noteFont * 4f
@@ -995,7 +1250,7 @@ class NoteBubblesTest {
             freeRects = listOf(inContent, margin),
         )
         val best = list.first()
-        assertTrue(best.inContent)
+        assertEquals(NoteSide.BELOW_RIGHT, best.side)
         assertTrue("页边距只是偏好，不该被截断档压住", list.all { it.complete })
     }
 
@@ -1105,14 +1360,16 @@ class NoteBubblesTest {
         val style = NoteStyle(
             fontPx = 28f,
             fontFamily = "serif",
-            marginEm = 0.5f,
+            marginXEm = 0.5f,
+            marginYEm = 0.25f,
             sideGapEm = 1f,
             edgeEm = 0.25f,
         )
         val m = NoteMetrics(style)
         assertEquals(28f, m.em, 0.01f)
         assertEquals(28f * style.lineHeightRatio, m.lineH, 0.01f)
-        assertEquals(14f, m.margin, 0.01f)
+        assertEquals(14f, m.marginX, 0.01f)
+        assertEquals(7f, m.marginY, 0.01f)
         assertEquals(28f, m.sideGap, 0.01f)
         assertEquals(7f, m.edge, 0.01f)
         // 同一块空白：字号变大后可用宽变窄，尺寸跟着变（不是写死的比例）。
@@ -1131,7 +1388,8 @@ class NoteBubblesTest {
         assertEquals(19.872f, m.lineH, 0.01f)
         assertEquals(5.04f, m.padX, 0.01f)
         assertEquals(10.08f, m.padTotal, 0.01f)
-        assertEquals(14.4f, m.margin, 0.01f)
+        assertEquals(7.2f, m.marginX, 0.01f)
+        assertEquals(1.44f, m.marginY, 0.01f)
         assertEquals(25.92f, m.sideGap, 0.01f)
         assertEquals(7.2f, m.edge, 0.01f)
     }
@@ -1148,6 +1406,30 @@ class NoteBubblesTest {
         assertEquals(4, size.shownChars)
         assertTrue(size.complete)
         assertTrue(size.readable)
+    }
+
+    /** 整句宽以实测为准：粗估偏窄时框必须跟着变宽，而不是画出来再被省略号截掉。 */
+    @Test
+    fun `measured sentence width drives the bubble width`() {
+        val anchor = rect(0f, 0f, 200f, 40f)
+        val measured = object : NoteTextSizer {
+            override fun naturalWidth(text: String, fontPx: Float) =
+                estimatedNoteTextWidth(text, fontPx) + 4f
+
+            override fun fit(text: String, fontPx: Float, widthPx: Float, maxLines: Int) =
+                noteTextFit(text, widthPx, fontPx, maxLines)
+        }
+        val b = place(
+            notes = listOf(noteInk(1, listOf(anchor), text = "掌握基础")),
+            textInk = listOf(anchor),
+            sizer = measured,
+        ).single()
+        assertEquals(1, b.maxLines)
+        assertEquals(4 * noteFont + 4f + notePad, b.widthPx, 0.01f)
+        assertTrue(
+            "实测宽已计入框宽，整句应完整显示",
+            noteTextFit(b.text, b.widthPx - notePad, b.fontPx, b.maxLines).complete,
+        )
     }
 
     /** 整句一行放不下：按可用宽折行，行数与整句字数都对得上。 */
@@ -1167,9 +1449,9 @@ class NoteBubblesTest {
     fun `right side keeps room for a horizontal arrow`() {
         val m = NoteMetrics.forBody(20f)
         val text = "字".repeat(14)
-        // 右侧候选的可用宽已经在调用方扣掉 (sideGap − margin)。
+        // 右侧候选的可用宽已经在调用方扣掉 (sideGap − marginX)。
         val normal = noteBoxFit(text, m, maxWidth = 200f, maxHeight = 100f)
-        val beside = noteBoxFit(text, m, maxWidth = 200f - (m.sideGap - m.margin), maxHeight = 100f)
+        val beside = noteBoxFit(text, m, maxWidth = 200f - (m.sideGap - m.marginX), maxHeight = 100f)
         assertTrue("右侧可用宽应更窄：normal=${normal.width} beside=${beside.width}", beside.width < normal.width)
         assertEquals(normal.lines, beside.lines)
     }
@@ -1178,8 +1460,8 @@ class NoteBubblesTest {
     @Test
     fun `sliver narrower than four characters is not readable`() {
         val m = NoteMetrics.forBody(20f)
-        // 60 宽的空白扣掉两侧 margin 后只剩 31.2 可用。
-        val size = noteBoxFit("字".repeat(10), m, maxWidth = 60f - m.margin * 2f, maxHeight = m.lineH * 3.5f)
+        // 50 宽的空白扣掉两侧横向 margin 与内缩后只够一行一个字。
+        val size = noteBoxFit("字".repeat(10), m, maxWidth = 50f - m.marginX * 2f, maxHeight = m.lineH * 3.5f)
         assertEquals(3, size.lines)
         assertEquals(3, size.shownChars)
         assertTrue(!size.readable)

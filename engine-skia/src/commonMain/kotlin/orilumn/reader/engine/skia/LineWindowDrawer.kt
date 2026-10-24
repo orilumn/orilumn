@@ -203,11 +203,26 @@ data class DrawLine(
      * 平移 Y 时**必须同时平移它**（[shiftedBy]），否则裁剪区错位。
      */
     val clip: orilumn.reader.engine.laying.ClipRect? = null,
+    /**
+     * 本行所属**块序号**（同一叶 / 同一块的各行同号，0 起，按文档序）。
+     *
+     * 只服务旁注布点的「本段 / 相邻段」判定（`docs/旁注布点与引线-实施方案.md` §1.5）：
+     * 用户层按它分组，不参与排版、分页与落墨。默认 0（旧构造 / 纯几何测试行为不变）。
+     */
+    val blockId: Int = 0,
 ) {
     /** 沿 Y 平移（页切片/离屏换算；裁剪区同步平移，漏了即错位）。 */
     fun shiftedBy(dy: Int): DrawLine =
         if (dy == 0) this else copy(yTop = yTop + dy, yBottom = yBottom + dy, clip = clip?.shifted(dy))
 }
+
+/**
+ * 一行文本在给定章内区间上的墨迹矩形，连同它所属的行（只读几何）。
+ *
+ * 旁注布点要「每行一个框 + 块序号」，而 [LineWindowDrawer.decorRects] 只回矩形、丢掉了行身份；
+ * 这里保留行，用户层就能给每个行框配上 `blockId` 与行序（§1.5），不用再按坐标反查。
+ */
+data class LineDecorRect(val rect: Rect, val line: DrawLine)
 
 /**
  * 行窗口绘制器：按**行**的绝对 Y 坐标用 SkParagraph 单行整形绘制。
@@ -407,11 +422,20 @@ class LineWindowDrawer(
      * [chapter] 只用于调用方表达作用域，函数不跨章。
      */
     @Suppress("UNUSED_PARAMETER")
-    fun decorRects(lines: List<DrawLine>, chapter: Int, range: IntRange): List<Rect> {
+    fun decorRects(lines: List<DrawLine>, chapter: Int, range: IntRange): List<Rect> =
+        decorLineRects(lines, chapter, range).map { it.rect }
+
+    /**
+     * 与 [decorRects] 同一套几何，但**保留行身份**：旁注布点要按行分组、按块序号判段界（§1.5）。
+     *
+     * 顺序与 [lines] 一致（自上而下），所以调用方拿到的下标就是行序。
+     */
+    @Suppress("UNUSED_PARAMETER")
+    fun decorLineRects(lines: List<DrawLine>, chapter: Int, range: IntRange): List<LineDecorRect> {
         if (range.isEmpty()) return emptyList()
         val queryStart = range.first
         val queryEnd = range.last + 1
-        val out = ArrayList<Rect>(lines.size)
+        val out = ArrayList<LineDecorRect>(lines.size)
         for (line in lines) {
             val start = line.range.first.coerceIn(0, line.text.length)
             val endExcl = (line.range.last + 1).coerceIn(start, line.text.length)
@@ -431,11 +455,14 @@ class LineWindowDrawer(
             val (left, right) = spanOn(track, placement.advs, ps, pe) ?: continue
             if (right <= left) continue
             out.add(
-                Rect.makeLTRB(
-                    line.xLeft + left,
-                    line.yTop.toFloat(),
-                    line.xLeft + right,
-                    line.yBottom.toFloat(),
+                LineDecorRect(
+                    Rect.makeLTRB(
+                        line.xLeft + left,
+                        line.yTop.toFloat(),
+                        line.xLeft + right,
+                        line.yBottom.toFloat(),
+                    ),
+                    line,
                 ),
             )
         }
@@ -443,7 +470,7 @@ class LineWindowDrawer(
     }
 
     /**
-     * 算一段章内区间在当前页各行上的**逐字墨迹矩形**（只算不画），供旁注箭头避让（§4.4.1）。
+     * 算一段章内区间在当前页各行上的**逐字墨迹矩形**（只算不画），供旁注箭头避让（方案 §6.3）。
      *
      * 坐标口径与 [decorRects] 完全相同（`x` 相对内容区左缘、`y` 为章内绝对 Y），区别只在于粒度：
      * - **逐字一个矩形**，不是整行一个框 —— 箭头才能从两字之间、标点前后的空白穿过；

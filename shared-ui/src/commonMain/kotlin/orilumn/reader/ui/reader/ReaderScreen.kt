@@ -2031,9 +2031,12 @@ fun ReaderScreen(
             )
             // 正文旁的批注文字（D-26）：批注是标注上的一句话，就显示在它旁边。
             // 纯覆盖层：只按行几何算空白，不改排版、不进栅格；翻页动画期间整层让位。
+            // 文字尺寸用与绘制同源的实测尺子（不是字宽粗估）：差半像素就会被省略号截掉。
+            val noteTextSizer = rememberNoteTextSizer()
             val noteBubbles: List<NoteBubble> = remember(
                 pageContent, fromPos.chapter, fromPos.slice, annotationState.revision,
                 contentLeft, contentTop, contentRight, contentBottom, pxWidth, pxHeight,
+                noteTextSizer,
             ) {
                 val content = pageContent
                 val lines = content?.lines.orEmpty()
@@ -2085,8 +2088,21 @@ fun ReaderScreen(
                         pageBackgrounds = content.pageBackgrounds,
                         shift = shift,
                         contentLeft = contentLeft,
-                        // 箭头要能穿两字之间与标点前后：另给一份逐字墨迹（实施计划 §4.4.1）。
+                        // 箭头要能穿两字之间与标点前后：另给一份逐字墨迹（方案 §6.3）。
                         arrowInk = pageGlyphRects(
+                            drawer = selectionDrawer,
+                            lines = lines,
+                            chapter = fromPos.chapter,
+                            charStart = slice.charStart,
+                            charEnd = slice.charEnd,
+                            pageImages = content.pageImages,
+                            pageBackgrounds = content.pageBackgrounds,
+                            frameLead = content.pageFrameLead,
+                            contentLeft = contentLeft,
+                            contentTop = contentTop,
+                        ),
+                        // 布点阶梯要「隔几行 / 本段」：带上每行的块序号与行序（方案 §1.5）。
+                        textLines = pageTextLines(
                             drawer = selectionDrawer,
                             lines = lines,
                             chapter = fromPos.chapter,
@@ -2145,6 +2161,7 @@ fun ReaderScreen(
                         // 旁注字号跟正文主字号走：页首是标题时不能跟着标题放大。
                         fontPx = noteBodyFontPx(lines),
                         pageBottom = pxHeight,
+                        noteTextSizer = noteTextSizer,
                     )
                 }
             }

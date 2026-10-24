@@ -65,6 +65,42 @@ internal fun pageInkRects(
 }
 
 /**
+ * 一段章内区间在本页覆盖到的**正文行**（一行一个框 + 所属块序号），供旁注按行布点。
+ *
+ * 与 [pageInkRects] 同一套几何与换算，区别只是**保留行身份**：旁注布点要按行分组、
+ * 按块序号判段界（`docs/旁注布点与引线-实施方案.md` §1.5）。
+ */
+internal fun pageTextLines(
+    drawer: LineWindowDrawer,
+    lines: List<DrawLine>,
+    chapter: Int,
+    charStart: Int,
+    charEnd: Int,
+    pageImages: List<PageImage>?,
+    pageBackgrounds: List<PageBackground>?,
+    frameLead: Int,
+    contentLeft: Float,
+    contentTop: Float,
+): List<NoteTextLine> {
+    if (charEnd <= charStart || lines.isEmpty()) return emptyList()
+    val shift = readerPageShift(lines, pageImages, pageBackgrounds, frameLead, contentTop)
+        ?: return emptyList()
+    return drawer.decorLineRects(lines, chapter, charStart..(charEnd - 1))
+        .mapIndexed { index, item ->
+            NoteTextLine(
+                rect = Rect(
+                    left = contentLeft + item.rect.left,
+                    top = item.rect.top - shift,
+                    right = contentLeft + item.rect.right,
+                    bottom = item.rect.bottom - shift,
+                ),
+                blockId = item.line.blockId,
+                index = index,
+            )
+        }
+}
+
+/**
  * 一段章内区间所覆盖各行**列表 marker（圆点 / 编号）**的占位矩形（页坐标）。
  *
  * 与 [pageInkRects] 同一套换算：`decorRects` 只从 `line.xLeft` 起算正文，OUTSIDE 的圆点悬在
@@ -102,7 +138,7 @@ internal fun pageMarkerRects(
  * 一段章内区间在本页的**逐字**墨迹矩形（页坐标，与 [pageInkRects] 同一套换算）。
  *
  * 与 [pageInkRects] 的区别只在粒度：那边一行一个框（布点用），这边一个字一个框
- * （旁注箭头避让用，见实施计划 §4.4.1）——箭头因此能从两字之间、标点前后的空白穿过。
+ * （旁注箭头避让用，见 `docs/旁注布点与引线-实施方案.md` §6.3）——箭头因此能从两字之间、标点前后的空白穿过。
  *
  * @return 空 = 本页没有这段字的墨迹（在别的页上 / 几何未就绪）。
  */

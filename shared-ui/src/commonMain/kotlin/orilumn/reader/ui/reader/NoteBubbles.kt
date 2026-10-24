@@ -575,11 +575,12 @@ internal fun noteBoxFit(
 }
 
 /**
- * 候选生成的范围：先只算「本行相邻空间」，不够再向外扩。
+ * 候选生成的范围：分批发给调用方，放不下才继续往外要。
  *
- * 一页十条批注时，绝大多数都能在本行附近放下，但旧实现会把本段、相邻段、左侧页边距的
- * 每一行都枚举一遍（一条批注 ~380 个候选）。[NEAR] / [FAR] 让调用方先付 [NEAR] 的账，
- * 只有真的放不下时才补 [FAR]，排序仍按同一套键，结果与一次全量生成完全相同。
+ * 一页十条批注时，旧实现会把本段每一行、相邻段每一行、左侧页边距都枚举一遍
+ * （一条批注 ~380 个候选）。改成按批取：先 [NEAR]（本行相邻空间），再一圈一圈
+ * [RINGS]，最后才 [TAIL]（本段左侧 / 相邻段 / 段外左侧）。排序键不变，
+ * 所以「取到一批就够」的结论与一次全量生成完全相同。
  */
 internal enum class NoteCandidateScope {
     /** 全量（默认，测试与直接调用用这个）。 */
@@ -588,8 +589,11 @@ internal enum class NoteCandidateScope {
     /** 只算本行相邻空间：基准行 + 上下相邻行的正右 / 正下 / 正上 / 斜向。 */
     NEAR,
 
-    /** 其余部分：跨行、本段左侧、相邻段、段外左侧。 */
-    FAR,
+    /** 跨行：只算 `ringFrom..ringTo` 这几圈（0 圈归 [NEAR]）。 */
+    RINGS,
+
+    /** 收尾：本段左侧、相邻段、段外左侧（排序上排在所有跨行之后）。 */
+    TAIL,
 }
 
 /**
@@ -615,7 +619,8 @@ internal enum class NoteCandidateScope {
  *   落在该行上方 / 下方的框要给左侧那条留出引线空档（见下方 `leftReserve`）。
  * @param contentRight **版心右缘**（页坐标）：锚点末行在这条线左边还留着 1em 以上空白时，
  *   正右才作为第一优先级（2026-10-24 用户定口）。默认无上限 = 右侧永远算有空白。
- * @param scope 生成范围：默认全量；布点时先要 [NoteCandidateScope.NEAR]，不够再补 [NoteCandidateScope.FAR]。
+ * @param scope 生成范围：默认全量；布点时按 NEAR → RINGS（一圈一批）→ TAIL 分批发。
+ * @param ringFrom / @param ringTo 只在 [NoteCandidateScope.RINGS] 下生效：要生成第几圈到第几圈。
  */
 internal fun noteCandidates(
     note: NoteInk,
@@ -628,6 +633,8 @@ internal fun noteCandidates(
     otherRowLeft: Map<Int, Float> = emptyMap(),
     contentRight: Float = Float.MAX_VALUE,
     scope: NoteCandidateScope = NoteCandidateScope.ALL,
+    ringFrom: Int = 1,
+    ringTo: Int = Int.MAX_VALUE,
 ): List<NoteCandidate> {
     val text = note.text.trim()
     if (text.isEmpty() || note.rects.isEmpty() || lines.isEmpty() || freeRects.isEmpty()) return emptyList()
@@ -659,7 +666,7 @@ internal fun noteCandidates(
     val cornerRightX = firstGlyph.left + charW
     val cornerLeftX = lastGlyph.right - charW
     val out = ArrayList<NoteCandidate>()
-    val seen = HashSet<String>()
+    val seen = HashSet<Long>()
 
     /**
      * 这一行左侧那条批注的**引线空档**（2026-10-24 用户定口）：
@@ -758,8 +765,11 @@ internal fun noteCandidates(
         }
         val rect = Rect(left, top, left + size.width, top + size.height)
         // 同一块空白被不同极大矩形重复切出时，落位可能完全一样：只留一个。
-        val key = "${side.ordinal}/$tier/${rect.left.roundToInt()}/${rect.top.roundToInt()}/" +
-            "${rect.right.roundToInt()}/${rect.bottom.roundToInt()}"
+        // 键打成整数（方向 + 留白档 + 四个坐标各 13 位）：页坐标 < 8192，拼字符串纯属浪费。
+        fun axis(v: Float): Long = v.roundToInt().toLong() and 0x1FFF
+        val key = (side.ordinal.toLong() shl 55) or (tier.toLong() shl 52) or
+            (axis(rect.left) shl 39) or (axis(rect.top) shl 26) or
+            (axis(rect.right) shl 13) or axis(rect.bottom)
         if (!seen.add(key)) return
         out += NoteCandidate(
             annotationId = note.annotationId,
@@ -991,7 +1001,7 @@ internal fun noteCandidates(
         }
     }
 
-    if (scope != NoteCandidateScope.FAR) {
+    if (scope == NoteCandidateScope.ALL || scope == NoteCandidateScope.NEAR) {
         // 第 0 环：锚点末行的右侧。2026-10-24 用户定口：**不再看是不是段末行**——只要这一行
         // 右侧离版心右缘还有 1em 以上空白，正右就是第一优先级（代码行 / 标题行这类左对齐的短行
         // 右边本来就是空白区，段中行也一样）。整行顶到版心右缘的行只保留原来的「段末行」入口：
@@ -1001,11 +1011,13 @@ internal fun noteCandidates(
         emitAboveFamily(first, 0, 0)
     }
 
-    if (scope != NoteCandidateScope.NEAR) {
-        // 环 1…n：本段内由近到远（往下一条、上一条地数），每一环都带上那一行自己的正右
+    if (scope == NoteCandidateScope.ALL || scope == NoteCandidateScope.RINGS) {
+        // 跨行：本段内由近到远（往下一条、上一条地数），每一圈都带上那一行自己的正右
         // （上一行右侧对下一行就是右上角，2026-10-24 用户定口）。
-        var k = 1
-        while (true) {
+        // 分批时只算 `ringFrom..ringTo` 这几圈，调用方拿到够用的位置就不再往下要。
+        val lastRing = min(ringTo, lines.size)
+        var k = max(1, ringFrom)
+        while (k <= lastRing) {
             var any = false
             if (base + k <= blockEnd) {
                 emitBelowFamily(base + k, k, 0)
@@ -1020,7 +1032,9 @@ internal fun noteCandidates(
             if (!any) break
             k++
         }
+    }
 
+    if (scope == NoteCandidateScope.ALL || scope == NoteCandidateScope.TAIL) {
         // 本段其余位置：左侧页边距最后才允许。
         for (idx in blockStart..blockEnd) emitLeftFamily(idx, abs(idx - base), 1)
 
@@ -1057,26 +1071,45 @@ internal fun noteCandidates(
  * @param rightTaken 该行右侧已经被别的旁注占住：正右让到「左」之前
  *   （倒数第二位，§0.1 0b），不再为了「更靠右」把框推远。
  */
-internal fun orderedNoteCandidates(
-    all: List<NoteCandidate>,
-    rightTaken: Boolean,
-): List<NoteCandidate> {
+internal fun noteCandidateOrder(rightTaken: Boolean): Comparator<NoteCandidate> {
     // 右侧没被占时 RIGHT 就是 0 号方向，和枚举顺序无关；被占时挪到 LEFT 之前。
     // 只压**本行**（环 0）的正右：别的行右侧那块空白仍然按正常名次参与（§0.1 0b）。
     fun rank(c: NoteCandidate): Int =
         if (rightTaken && c.side == NoteSide.RIGHT && c.ring == 0) NOTE_SIDE_RANK_TAKEN_RIGHT
         else noteSideRank(c.side)
-    return all.sortedWith(
-        compareBy<NoteCandidate> { it.stage }
-            // 不折行优先、行数越少越优先：先比折行数，再比远近（环）。
-            .thenBy { it.lines }
-            .thenBy { it.ring }
-            .thenBy { rank(it) }
-            .thenBy { it.marginTier }
-            .thenBy { it.distance }
-            .thenBy { it.rect.top }
-            .thenBy { it.rect.left },
-    )
+    return compareBy<NoteCandidate> { it.stage }
+        // 不折行优先、行数越少越优先：先比折行数，再比远近（环）。
+        .thenBy { it.lines }
+        .thenBy { it.ring }
+        .thenBy { rank(it) }
+        .thenBy { it.marginTier }
+        .thenBy { it.distance }
+        .thenBy { it.rect.top }
+        .thenBy { it.rect.left }
+}
+
+internal fun orderedNoteCandidates(
+    all: List<NoteCandidate>,
+    rightTaken: Boolean,
+): List<NoteCandidate> = all.sortedWith(noteCandidateOrder(rightTaken))
+
+/** 两个各自有序的候选链并成一条（分批发候选时用：新批只排自己，再线性并入）。 */
+internal fun mergeOrderedCandidates(
+    a: List<NoteCandidate>,
+    b: List<NoteCandidate>,
+    order: Comparator<NoteCandidate>,
+): List<NoteCandidate> {
+    if (b.isEmpty()) return a
+    if (a.isEmpty()) return b
+    val out = ArrayList<NoteCandidate>(a.size + b.size)
+    var i = 0
+    var j = 0
+    while (i < a.size && j < b.size) {
+        out += if (order.compare(a[i], b[j]) <= 0) a[i++] else b[j++]
+    }
+    while (i < a.size) out += a[i++]
+    while (j < b.size) out += b[j++]
+    return out
 }
 
 /** 本页上的批注行，自下而上（右侧那一步「末行放不下再逐行向上」）。 */
@@ -1372,10 +1405,14 @@ internal fun noteBubblePlacements(
         n.annotationId to merged
     }
 
-    // 先只算「本行相邻空间」：一页十条批注里绝大多数在这里就能放下。
-    // 真放不下时（被已放批注挡住 / 本行确实没空）再由分配阶段补算跨行与页边距部分，
-    // 排序键不变，所以结果与一次全量生成完全相同。
-    fun generate(note: NoteInk, scope: NoteCandidateScope): List<NoteCandidate> = noteCandidates(
+    // 分批发候选：先「本行相邻空间」，再一圈一圈跨行，最后才本段左侧 / 相邻段。
+    // 放不下才继续要下一批；排序键不变，所以「拿到够用的就停」与一次全量生成结果相同。
+    fun generate(
+        note: NoteInk,
+        scope: NoteCandidateScope,
+        ringFrom: Int = 1,
+        ringTo: Int = Int.MAX_VALUE,
+    ): List<NoteCandidate> = noteCandidates(
         note = note,
         lines = lines,
         freeRects = freeRects,
@@ -1387,6 +1424,8 @@ internal fun noteBubblePlacements(
         // 版心右缘：判断「这一行右侧还有没有 1em 以上空白」，决定正右是否第一优先级。
         contentRight = contentRight,
         scope = scope,
+        ringFrom = ringFrom,
+        ringTo = ringTo,
     )
 
     val candidatesByNote = HashMap<Long, List<NoteCandidate>>(ordered.size)
@@ -1394,16 +1433,42 @@ internal fun noteBubblePlacements(
         val list = generate(note, NoteCandidateScope.NEAR)
         if (list.isNotEmpty()) candidatesByNote[note.annotationId] = list
     }
-    val farByNote = HashMap<Long, List<NoteCandidate>>(ordered.size)
-    fun farCandidates(note: NoteInk): List<NoteCandidate> = farByNote.getOrPut(note.annotationId) {
-        generate(note, NoteCandidateScope.FAR)
+
+    // 每条批注下一批要算第几圈：1 → 2 → … → 段内最后一行 → 收尾（左侧 / 相邻段）。
+    val nextRing = HashMap<Long, Int>(ordered.size)
+    fun nextBatch(note: NoteInk): List<NoteCandidate>? {
+        val id = note.annotationId
+        val k = nextRing[id] ?: 1
+        if (k <= lines.size) {
+            nextRing[id] = k + 1
+            return generate(note, NoteCandidateScope.RINGS, ringFrom = k, ringTo = k)
+        }
+        if (k != Int.MAX_VALUE) {
+            nextRing[id] = Int.MAX_VALUE
+            return generate(note, NoteCandidateScope.TAIL)
+        }
+        return null
+    }
+
+    // 收尾部分一次性取完（跨行已经全部试过之后才轮到它）。
+    fun restBatch(note: NoteInk): List<NoteCandidate> =
+        generate(note, NoteCandidateScope.RINGS) + generate(note, NoteCandidateScope.TAIL)
+
+    // 整句在最宽的空白里都放不下一行时，「最少行数」这一档根本不可能命中，
+    // 就别一圈一圈试了：一次取完，直接走折行档。
+    val maxFreeWidth = freeRects.maxOfOrNull { it.width } ?: 0f
+    fun minLinesReachable(note: NoteInk): Boolean {
+        val natural = noteTextSizer.naturalWidth(note.text.trim(), metrics.em)
+        return natural > 0f && natural <= maxFreeWidth - metrics.padTotal
     }
 
     // 三档推进（整句 → 截断 → 小椭圆）：同一行从右到左逐条独立取位，
     // 整句档全部放不下时才让既有批注上下让位（§1.4 / §5）。
     val choices = assignNoteCandidates(
         ordered, lines, candidatesByNote, marginX, marginY, metrics, noteTextSizer,
-        farCandidates = ::farCandidates,
+        nextBatch = ::nextBatch,
+        restBatch = ::restBatch,
+        minLinesReachable = ::minLinesReachable,
     )
     val chosen = choices.associateBy { it.note.annotationId }
     // 一条都分不到的批注不再消失：在原文右下角退成小椭圆（§1.6）。
@@ -1512,14 +1577,28 @@ private fun assignNoteCandidates(
     marginY: Float,
     metrics: NoteMetrics,
     sizer: NoteTextSizer,
-    /** 本行附近放不下时才调：补算跨行 / 页边距的候选（同一套排序键，结果与全量生成一致）。 */
-    farCandidates: (NoteInk) -> List<NoteCandidate> = { emptyList() },
+    /** 本行附近放不下时才调：取下一批候选（一圈跨行，或收尾档）；`null` = 没有更多了。 */
+    nextBatch: (NoteInk) -> List<NoteCandidate>? = { null },
+    /** 一次性取完剩余候选（跨行全量 + 收尾）：只在「最少行数注定不可达」时用。 */
+    restBatch: (NoteInk) -> List<NoteCandidate> = { emptyList() },
+    /** 这句话在本页最宽的空白里能不能排成「最少行数」（不能就别逐圈试了）。 */
+    minLinesReachable: (NoteInk) -> Boolean = { true },
 ): List<NoteChoice> {
     if (notes.isEmpty() || lines.isEmpty()) return emptyList()
     val chosen = LinkedHashMap<Long, NoteCandidate>()
     val occupied = ArrayList<NoteChoice>()
+    /** 已经试过「让别人让位」但让不动的候选（结论只会在已放批注变多时更差）。 */
+    val roomTried = HashSet<NoteCandidate>()
     // 候选池：先装「本行附近」，某条批注放不下时才把它的远处候选并进来。
-    val pool = HashMap<Long, List<NoteCandidate>>(candidatesByNote)
+    // 用可变列表 + 增量合并：逐圈要候选时不能每来一批就把整池重排一遍。
+    val pool = HashMap<Long, ArrayList<NoteCandidate>>(candidatesByNote.size)
+    for ((id, list) in candidatesByNote) pool[id] = ArrayList(list)
+
+    /** 往这条批注的候选池里追加一批（保持追加顺序，排序交给 [chainFor] 增量合并）。 */
+    fun addBatch(note: NoteInk, batch: List<NoteCandidate>) {
+        if (batch.isEmpty()) return
+        pool.getOrPut(note.annotationId) { ArrayList() }.addAll(batch)
+    }
 
     fun fits(c: NoteCandidate): Boolean =
         occupied.none { c.conflicts(it.candidate, marginX, marginY) }
@@ -1547,9 +1626,38 @@ private fun assignNoteCandidates(
         return rightCands.any { rc -> occupied.any { rc.conflicts(it.candidate, marginX, marginY) } }
     }
 
-    /** 按「段 → 折行数 → 环 → 方向 → 留白档 → 距离」取这条批注的候选链。 */
-    fun chainFor(note: NoteInk): List<NoteCandidate> =
-        orderedNoteCandidates(pool[note.annotationId].orEmpty(), rightTaken(note))
+    /**
+     * 按「段 → 折行数 → 环 → 方向 → 留白档 → 距离」取这条批注的候选链。
+     *
+     * 逐圈要候选时池子会一批批变大，这里只把**新进来的那批**排序，再线性并进已排好的链：
+     * 每批都整池重排会让「一圈一圈试」比一次全量还慢。
+     * 缓存按「已并到第几个 + 正右是否被占」校验，后者会随已放批注变化。
+     */
+    val chainCache = HashMap<Long, List<NoteCandidate>>(notes.size)
+    val chainMerged = HashMap<Long, Int>(notes.size)
+    val chainTaken = HashMap<Long, Boolean>(notes.size)
+    fun chainFor(note: NoteInk): List<NoteCandidate> {
+        val all = pool[note.annotationId].orEmpty()
+        val id = note.annotationId
+        val taken = rightTaken(note)
+        val cached = chainCache[id]
+        val merged = chainMerged[id] ?: 0
+        if (cached != null && merged == all.size && chainTaken[id] == taken) return cached
+        val order = noteCandidateOrder(taken)
+        val next = if (cached != null && chainTaken[id] == taken && merged <= all.size) {
+            mergeOrderedCandidates(
+                cached,
+                all.subList(merged, all.size).sortedWith(order),
+                order,
+            )
+        } else {
+            all.sortedWith(order)
+        }
+        chainCache[id] = next
+        chainMerged[id] = all.size
+        chainTaken[id] = taken
+        return next
+    }
 
     /** 两块空白是不是同一块 / 同一列（只要有一点重叠就算，跨行批注也认同一列）。 */
     fun sharedBlank(a: Rect, b: Rect): Boolean =
@@ -1695,9 +1803,34 @@ private fun assignNoteCandidates(
             if (minOnly && c.lines != minLines) continue
             if (take(note, c)) return true
             // 让位排在隔行之前：本行（ring 0）只差别人让一让就先让别人让。
-            if (c.ring == 0 && makeRoom(note, c)) return true
+            // 已经试过让不动的就别再试：逐圈补候选时同一批环 0 候选会被反复扫到，
+            // 而池子只会变长、已放批注只会变多，让不动的结论不会翻案。
+            if (c.ring == 0 && roomTried.add(c) && makeRoom(note, c)) return true
         }
         return false
+    }
+
+    /**
+     * 按「最少行数」档取位：一圈一圈要候选，拿到能放下的就停。
+     *
+     * 为什么可以停：排序键里折行数排在跨行数之前，所以只要手里已经有了
+     * 「最少行数（无换行时 1 行，有 `\n` 时按段落数）且放得下」的候选，
+     * 更远的圈不可能更好。停之前必须确认它**真能放下**（不与已放批注冲突），
+     * 否则继续要下一圈。
+     *
+     * @return 放好时为 `true`；所有批次都试完仍没有，返回 `false`。
+     */
+    fun placeMinLines(note: NoteInk): Boolean {
+        if (!minLinesReachable(note)) {
+            // 注定排不出一行：逐圈试纯属浪费，一次取完直接进折行档。
+            addBatch(note, restBatch(note))
+            return false
+        }
+        while (true) {
+            if (placeComplete(note, minOnly = true)) return true
+            val batch = nextBatch(note) ?: return false
+            addBatch(note, batch)
+        }
     }
 
     // 先挑顺序（§5.1）：正文行自上而下 → 同行从右到左 → 批注 id。
@@ -1717,14 +1850,8 @@ private fun assignNoteCandidates(
         while (end < order.size && baseRow(order[end]) == rowIndex) end++
         val members = order.subList(start, end)
         for (note in members) {
-            // 本行相邻空间能给出「最少行数」的位置就直接用掉，跨行部分根本不必生成。
-            if (placeComplete(note, minOnly = true)) continue
-            // 放不下才补算跨行 / 页边距部分，再走一遍最少行数档。
-            val extra = farCandidates(note)
-            if (extra.isNotEmpty()) {
-                pool[note.annotationId] = pool[note.annotationId].orEmpty() + extra
-                if (placeComplete(note, minOnly = true)) continue
-            }
+            // 先按「最少行数」一圈一圈要位置，拿到就停；要不到才允许折行。
+            if (placeMinLines(note)) continue
             // 整句但必须折行：仍在整句档内（不折叠），只是行数多于最少行数。
             placeComplete(note, minOnly = false)
         }

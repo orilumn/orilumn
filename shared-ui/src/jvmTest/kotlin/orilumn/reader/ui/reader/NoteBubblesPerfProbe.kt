@@ -101,10 +101,10 @@ class NoteBubblesPerfProbe {
         return Page(lines, glyphs, textLines)
     }
 
-    private fun notes(page: Page, n: Int): List<NoteInk> {
+    private fun notes(page: Page, n: Int, short: Boolean = false): List<NoteInk> {
         // 每条批注用不同文字：真实页面上一页十条批注不会都是同一句话，
         // 缓存命中率必须按「每条各自不同」来量，否则数字会虚高。
-        val base = "这一段批注要读完才看得明白，不能只剩几个字。"
+        val base = if (short) "短批注第" else "这一段批注要读完才看得明白，不能只剩几个字。第"
         return (0 until n).map { i ->
             val row = (i * 3 + 2) % page.textLines.size
             val line = page.textLines[row].rect
@@ -112,7 +112,7 @@ class NoteBubblesPerfProbe {
             val ink = listOf(Rect(startX, line.top + 10f, startX + 160f, line.top + 58f))
             NoteInk(
                 annotationId = i + 1L,
-                text = "$base 第${i + 1}条",
+                text = "$base${i + 1}条",
                 argb = 0xFF3366CC.toInt(),
                 rects = ink,
                 arrowRects = page.glyphs.filter { g -> ink.any { g.overlaps(it) } },
@@ -120,9 +120,9 @@ class NoteBubblesPerfProbe {
         }
     }
 
-    private fun run(noteCount: Int, fakeMeasureNanos: Long) {
+    private fun run(noteCount: Int, fakeMeasureNanos: Long, short: Boolean = false) {
         val page = page()
-        val notes = notes(page, noteCount)
+        val notes = notes(page, noteCount, short)
         val metrics = NoteMetrics.forBody(48f)
         val contentRight = 1128f
 
@@ -159,19 +159,30 @@ class NoteBubblesPerfProbe {
         counter.natural = 0
         counter.fits = 0
 
-        var out: List<NoteBubble> = emptyList()
-        val placeTime = measureNanoTime {
-            out = noteBubblePlacements(
-                noteInk = notes,
-                obstacles = NoteObstacles(textInk = page.lines, textLines = page.textLines, arrowInk = page.glyphs),
-                contentLeft = 72f,
-                contentRight = contentRight,
-                contentBottom = 1700f,
-                pageRight = 1200f,
-                fontPx = 48f,
-                pageBottom = 1800f,
-                noteTextSizer = sizer,
-            )
+        fun place(): List<NoteBubble> = noteBubblePlacements(
+            noteInk = notes,
+            obstacles = NoteObstacles(textInk = page.lines, textLines = page.textLines, arrowInk = page.glyphs),
+            contentLeft = 72f,
+            contentRight = contentRight,
+            contentBottom = 1700f,
+            pageRight = 1200f,
+            fontPx = 48f,
+            pageBottom = 1800f,
+            noteTextSizer = sizer,
+        )
+        // 先跑一次热身（JIT 未预热时单次数字没有参考价值），再取 3 次里最快的一次。
+        var out: List<NoteBubble> = place()
+        sizer.queries = 0
+        counter.natural = 0
+        counter.fits = 0
+        var placeTime = Long.MAX_VALUE
+        var round = 0
+        while (round < 3) {
+            val start = System.nanoTime()
+            out = place()
+            val spent = System.nanoTime() - start
+            if (spent < placeTime) placeTime = spent
+            round++
         }
 
         val bubbleRects = out.filterNot { it.compact }.associate { b ->
@@ -198,7 +209,8 @@ class NoteBubblesPerfProbe {
             }
         }
         println(
-            "PERF notes=$noteCount fake=${fakeMeasureNanos / 1000}us free=${freeTime / 1_000_000}ms " +
+            "PERF notes=$noteCount kind=${if (short) "短" else "长"} fake=${fakeMeasureNanos / 1000}us " +
+                "free=${freeTime / 1_000_000}ms " +
                 "candidates=${candTime / 1_000_000}ms candQueries=$candQueries candReal=$candCalls " +
                 "place=${placeTime / 1_000_000}ms placeQueries=${sizer.queries} " +
                 "placeReal=${counter.calls}(${counter.natural}/${counter.fits}) " +
@@ -211,9 +223,10 @@ class NoteBubblesPerfProbe {
     fun probe() {
         assumeTrue("性能探针默认不跑：设 ORILUMN_PERF=1", System.getenv("ORILUMN_PERF") != null)
         for (n in listOf(1, 10)) {
-            run(n, fakeMeasureNanos = 0L)
-            run(n, fakeMeasureNanos = 100_000L)
-            run(n, fakeMeasureNanos = 300_000L)
+            for (short in listOf(false, true)) {
+                run(n, fakeMeasureNanos = 0L, short = short)
+                run(n, fakeMeasureNanos = 300_000L, short = short)
+            }
         }
     }
 }

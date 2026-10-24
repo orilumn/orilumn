@@ -154,14 +154,28 @@ class NoteBubblesTest {
     @Test
     fun `short line puts the note to its right`() {
         // 行只占 200 / 600：这句话后面正好空着一截，旁注就该躺在那儿。
+        // 所选文字正好是行尾，引线只能从框左侧横着出去，要留出 1em 的箭头空档。
         val anchor = rect(0f, 0f, 200f, 40f)
         val bubbles = place(notes = listOf(noteInk(1, listOf(anchor))), textInk = listOf(anchor))
         assertEquals(1, bubbles.size)
         val b = bubbles.single()
-        assertTrue("应放在锚点右侧，实际 left=${b.leftPx}", b.leftPx > 200f)
+        val m = NoteMetrics.forBody(20f)
+        assertEquals("行尾摆法应留出箭头空档", 200f + m.sideGap, b.leftPx, 0.5f)
         assertTrue("应贴住锚点所在行，实际 top=${b.topPx}", b.topPx < 40f)
         assertEquals(1, b.maxLines)
         assertTrue(b.widthPx > 0f)
+    }
+
+    @Test
+    fun `note beside a mid line selection keeps one em from the line`() {
+        // 2026-10-24 用户定口：空间足够时上下左右一律先留 1em；所选文字后面还有字也一样，
+        // 不再因为「引线要折线绕开后面的字」就只贴 0.1em 的细缝。
+        val anchor = rect(0f, 0f, 200f, 40f)
+        val tail = rect(202f, 0f, 400f, 40f)
+        val bubbles = place(notes = listOf(noteInk(1, listOf(anchor))), textInk = listOf(anchor, tail))
+        val b = bubbles.single()
+        val m = NoteMetrics.forBody(20f)
+        assertEquals("选段中部的右侧也要先留 1em", 400f + m.preferredMargin, b.leftPx, 0.5f)
     }
 
     @Test
@@ -294,7 +308,7 @@ class NoteBubblesTest {
                 assertTrue("页边距里的旁注互相重叠：${boxes[i]} / ${boxes[j]}", !boxes[i].overlaps(boxes[j]))
             }
         }
-        // 页边距一维排布：位置顺序与锚点顺序一致（引线最短、不交叉）。
+        // 位置顺序与锚点顺序一致（引线最短、不交叉）。
         assertTrue(
             "旁注顺序应与锚点一致，实际 tops=${bubbles.map { it.topPx }}",
             bubbles.map { it.topPx }.zipWithNext().all { (a, b) -> a <= b },
@@ -303,7 +317,8 @@ class NoteBubblesTest {
 
     @Test
     fun `margin notes with the same anchor stack instead of hiding`() {
-        // 同一行两条批注，内容区排满：页边距按锚点纵序前推，两条都要在、且不重叠。
+        // 同一行两条批注、内容区排满：两条都要在、且不重叠（谁排在哪一格由各自的阶梯决定，
+        // 2026-10-24 用户定口：不再把同行批注收进同一列）。
         val lines = (0 until 20).map { i -> rect(0f, i * 40f, 600f, i * 40f + 40f) }
         val bubbles = place(
             notes = listOf(
@@ -314,21 +329,20 @@ class NoteBubblesTest {
             contentBottom = 800f,
         )
         assertEquals(2, bubbles.size)
-        val boxes = bubbles.map { b ->
-            rect(
-                b.leftPx,
-                b.topPx,
-                b.leftPx + b.widthPx,
-                b.topPx + b.maxLines * b.fontPx * NOTE_BUBBLE_LINE_RATIO,
+        val boxes = bubbles.map { b -> boxOf(b) }
+        assertTrue("两条页边距旁注不该重叠", !boxes[0].overlaps(boxes[1]))
+        assertTrue("两条都不该退成小图标：$bubbles", bubbles.none { it.compact })
+        for (b in bubbles) {
+            assertTrue(
+                "两条都该贴着这一行，实际 top=${b.topPx}",
+                abs(b.topPx - 280f) <= 3 * 40f,
             )
         }
-        assertTrue("两条页边距旁注不该重叠", !boxes[0].overlaps(boxes[1]))
-        assertTrue("第二条应被推到下面", bubbles[1].topPx > bubbles[0].topPx)
     }
 
     @Test
-    fun `two notes on the same full line stack in the side margin`() {
-        // 整页排满、两条批注锚在同一行：右侧页边距里上下排开，谁都不退成小图标。
+    fun `two notes on the same full line stay near it`() {
+        // 整页排满、两条批注锚在同一行：一条占行右、一条占行左，都贴着这一行，谁都不退成小图标。
         val lines = (0 until 20).map { i -> rect(0f, i * 40f, 600f, i * 40f + 40f) }
         val bubbles = place(
             notes = listOf(
@@ -343,10 +357,13 @@ class NoteBubblesTest {
         assertTrue("两条不能重叠：$bubbles", !boxOf(bubbles[0]).overlaps(boxOf(bubbles[1])))
         val gap = gapBetween(boxOf(bubbles[0]), boxOf(bubbles[1]))
         assertTrue("两条至少隔纵向 margin（含外扩），实际 $gap", gap >= noteMetrics.marginY - 0.5f)
+        // 两条各自贴着自己那一格，不重叠即可（2026-10-24 用户定口：取消同行收列）。
         for (b in bubbles) {
-            assertTrue("应落在右侧页边距，实际 left=${b.leftPx}", b.leftPx >= 600f - 0.5f)
+            assertTrue(
+                "应贴着这一行（隔行不超过一行），实际 top=${b.topPx}",
+                abs(b.topPx - 280f) <= 2 * 40f,
+            )
         }
-        assertTrue("后放的应被推到下面", bubbles[1].topPx > bubbles[0].topPx)
     }
 
     @Test
@@ -498,9 +515,9 @@ class NoteBubblesTest {
     }
 
     @Test
-    fun `far footer blank loses to the nearer side margin`() {
-        // 页脚有一整块能放下整句的空白，但隔着整页正文（距离 30u 以上）；
-        // 右侧页边距近得多，扣分制下页脚不该赢。
+    fun `far footer blank wins only when it reads the whole note in one line`() {
+        // 页脚有一整块能一行放下整句的空白，右侧页边距近得多但要折好几行。
+        // 新口径：**折行数优先于远近**——宁可放远，也要整句一行读出，不折成窄条。
         val anchorLine = rect(0f, 0f, 300f, 30f)
         val sameRowRight = rect(380f, 0f, 600f, 30f)
         val body = (0 until 17).map { i -> rect(0f, 35f + i * 40f, 600f, 75f + i * 40f) }
@@ -511,10 +528,26 @@ class NoteBubblesTest {
             pageBottom = 800f,
         )
         val b = bubbles.single()
-        assertTrue("不该跑到页脚，实际 top=${b.topPx}", b.topPx < 200f)
-        assertTrue("应落在右侧页边距，实际 left=${b.leftPx}", b.leftPx >= 600f)
+        assertEquals("能一行放下就不折行，实际 top=${b.topPx} lines=${b.maxLines}", 1, b.maxLines)
         val fit = noteTextFit(b.text, b.widthPx - notePad, b.fontPx, b.maxLines)
-        assertTrue("页边距够宽，应整句显示，实际 maxLines=${b.maxLines}", fit.complete)
+        assertTrue("必须读出整句，实际 maxLines=${b.maxLines}", fit.complete)
+    }
+
+    @Test
+    fun `same line count keeps the nearer side margin`() {
+        // 折行数相同时才比远近：页脚与页边距都是一行，页边距近，就该用页边距。
+        val anchorLine = rect(0f, 0f, 300f, 30f)
+        val sameRowRight = rect(380f, 0f, 600f, 30f)
+        val body = (0 until 17).map { i -> rect(0f, 35f + i * 40f, 600f, 75f + i * 40f) }
+        val bubbles = place(
+            notes = listOf(noteInk(1, listOf(anchorLine), "用几章")),
+            textInk = listOf(anchorLine, sameRowRight) + body,
+            contentBottom = 720f,
+            pageBottom = 800f,
+        )
+        val b = bubbles.single()
+        assertTrue("同是一行时应留在本行旁边（不跑到页脚），实际 left=${b.leftPx} top=${b.topPx}",
+            b.leftPx > 300f && b.topPx < 200f)
     }
 
     @Test
@@ -579,9 +612,9 @@ class NoteBubblesTest {
     }
 
     @Test
-    fun `same line notes stack vertically on the right`() {
-        // 行只占 300 / 700：两条同行的批注竖向排在右侧同一列，不并排——并排会让左边的箭头
-        // 绕到右边的框上。
+    fun `same line notes each find their own spot`() {
+        // 行只占 300 / 700：两条同行的批注各自独立取位——先算的那条占行右（留 1em），
+        // 第二条不再被「统一在右边竖向排成一列」拽过去，而是自己落到行右下。
         val anchor = rect(0f, 0f, 300f, 40f)
         val bubbles = place(
             notes = listOf(
@@ -594,42 +627,83 @@ class NoteBubblesTest {
             pageBottom = 800f,
         )
         assertEquals(2, bubbles.size)
-        assertTrue("两条都应放到行尾右侧：$bubbles", bubbles.all { !it.compact && it.leftPx >= 300f })
-        assertEquals("同一列，左边应对齐", bubbles[0].leftPx, bubbles[1].leftPx, 0.5f)
-        assertTrue("应竖向排开，实际 top=${bubbles.map { it.topPx }}", bubbles[1].topPx > bubbles[0].topPx)
-        val a = boxOf(bubbles[0])
-        val b = boxOf(bubbles[1])
-        assertTrue("同行的两条不该重叠：$a / $b", !a.overlaps(b))
+        val m = NoteMetrics.forBody(20f)
+        assertEquals("先算那条占行右并留 1em", 300f + m.sideGap, bubbles[0].leftPx, 0.5f)
+        assertTrue("两条都要能整句读完", bubbles.none { it.compact })
+        assertTrue(
+            "第二条独立取位，不再和右边那条叠在同一列：left=${bubbles.map { it.leftPx }}",
+            bubbles[1].leftPx != bubbles[0].leftPx,
+        )
+        assertTrue("同行的两条不该重叠", !boxOf(bubbles[0]).overlaps(boxOf(bubbles[1])))
     }
 
     @Test
-    fun `same line notes put the rightmost at the bottom when stacking above`() {
-        // 上方有空间：最左的锚点排最上、最右的排最下，引线不会交叉。
-        val row = rect(0f, 200f, 200f, 240f)
-        val left = rect(20f, 200f, 60f, 240f)
-        val right = rect(120f, 200f, 160f, 240f)
+    fun `same row notes spread to both sides instead of one column`() {
+        // 同一行两条长批注、右侧只放得下一列：先算的占行右，后算的去行左——
+        // 不再为了「同一列」把它拉到同一侧（2026-10-24 用户定口：取消同行收列）。
+        val row = rect(0f, 0f, 300f, 40f)
         val bubbles = place(
             notes = listOf(
-                noteInk(1, listOf(left), "左边这条"),
-                noteInk(2, listOf(right), "右边这条"),
+                noteInk(1, listOf(row), "第一条批注很长"),
+                noteInk(2, listOf(row), "第二条批注很长"),
             ),
             textInk = listOf(row),
+            figures = listOf(
+                // 把 400..700 的下半段封死，留出宽而较矮的一列；300..400 仍是窄而很高的列。
+                rect(400f, 250f, 700f, 800f),
+            ),
             pageRight = 700f,
             contentBottom = 800f,
             pageBottom = 800f,
         )
         assertEquals(2, bubbles.size)
-        assertEquals("两条应同列", bubbles[0].leftPx, bubbles[1].leftPx, 0.5f)
         assertTrue(
-            "上方成组时最右的应在最下面，实际 top=${bubbles.map { it.topPx }}",
-            bubbles[0].topPx < bubbles[1].topPx,
+            "两条都要能整句读完：${bubbles.map { it.maxLines }}",
+            bubbles.all { b ->
+                noteTextFit(b.text, b.widthPx - notePad, b.fontPx, b.maxLines).complete
+            },
         )
-        assertTrue("应落在行上方", bubbles.all { it.topPx + it.maxLines * it.fontPx * NOTE_BUBBLE_LINE_RATIO <= 240f })
+        assertTrue(
+            "一条在行右、一条在行左，实际 left=${bubbles.map { it.leftPx }}",
+            bubbles.any { it.leftPx >= 300f } && bubbles.any { it.leftPx < 100f },
+        )
+        assertTrue("两条不能重叠", !boxOf(bubbles[0]).overlaps(boxOf(bubbles[1])))
     }
 
     @Test
-    fun `same line notes put the rightmost on top when stacking below`() {
-        // 下方有空间：最右的锚点排最上、最左的排最下，同样避免交叉。
+    fun `taken right column drops just before the left side`() {
+        // 行右侧已经被别的旁注占住（2026-10-24 用户定口）：正右让到**左之前**（倒数第二位），
+        // 顺序变成「右下 / 右上 / 左下 / 左上 / 下 / 上 / 右 / 左」。
+        val row = rect(0f, 200f, 200f, 240f)
+        fun candidate(side: NoteSide, left: Float, lines: Int = 1) = NoteCandidate(
+            annotationId = 1,
+            rect = rect(left, 200f, left + 60f, 200f + 24f * lines),
+            freeRect = rect(left, 0f, 700f, 800f),
+            lines = lines,
+            complete = true,
+            shownChars = 4,
+            side = side,
+            ring = 0,
+            stage = 0,
+            distance = left - row.right,
+        )
+
+        val right = candidate(NoteSide.RIGHT, 300f)
+        val left = candidate(NoteSide.LEFT, -60f)
+        val below = candidate(NoteSide.BELOW, 0f)
+
+        val free = orderedNoteCandidates(listOf(left, below, right), rightTaken = false)
+        assertEquals("右侧没被占时右侧最靠前", NoteSide.RIGHT, free.first().side)
+
+        val taken = orderedNoteCandidates(listOf(left, below, right), rightTaken = true)
+        assertEquals("右侧被占后先试正下方", NoteSide.BELOW, taken[0].side)
+        assertEquals("正右让到左之前", NoteSide.RIGHT, taken[1].side)
+        assertEquals("左侧排到最后", NoteSide.LEFT, taken[2].side)
+    }
+
+    @Test
+    fun `same row notes each stay next to their own anchor`() {
+        // 同一行左右两条批注：各自贴着自己那一段文字摆，不再被「统一收进一列」拽到一起。
         val row = rect(0f, 0f, 200f, 40f)
         val left = rect(20f, 0f, 60f, 40f)
         val right = rect(120f, 0f, 160f, 40f)
@@ -644,11 +718,226 @@ class NoteBubblesTest {
             pageBottom = 800f,
         )
         assertEquals(2, bubbles.size)
-        assertEquals("两条应同列", bubbles[0].leftPx, bubbles[1].leftPx, 0.5f)
         assertTrue(
-            "下方成组时最右的应在最上面，实际 top=${bubbles.map { it.topPx }}",
-            bubbles[1].topPx < bubbles[0].topPx,
+            "左边那条应落在锚点右侧 / 下方，不该被拉到行尾列：left=${bubbles[0].leftPx}",
+            bubbles[0].leftPx < 120f,
         )
+        assertTrue(
+            "右边那条应落在行尾右侧：left=${bubbles[1].leftPx}",
+            bubbles[1].leftPx >= 200f - 0.5f,
+        )
+        assertTrue(
+            "两条都要贴着这一行：top=${bubbles.map { it.topPx }}",
+            bubbles.all { abs(it.topPx - 40f) <= 60f || abs(it.topPx) <= 0.5f },
+        )
+        assertTrue("两条不能重叠", !boxOf(bubbles[0]).overlaps(boxOf(bubbles[1])))
+    }
+
+    @Test
+    fun `band a few pixels short still holds the note next to its row`() {
+        // 真机第 1 条：带子比一行只差几像素时，旧实现整条跳过，批注只好跑到三行以外。
+        // 现在往下贴住锚点（少留这一侧的 margin），就在本行上方放下。
+        val above = rect(0f, 40f, 100f, 80f)
+        val row = rect(0f, 100f, 600f, 140f)
+        val far = rect(0f, 0f, 600f, 20f)
+        val bubbles = place(
+            notes = listOf(noteInk(1, listOf(row), "紧贴上方")),
+            textInk = listOf(above, row),
+            contentRight = 600f,
+            contentBottom = 140f,
+            pageRight = 620f,
+            pageBottom = 140f,
+        )
+        val b = bubbles.single()
+        assertTrue("不该退成小图标：$b", !b.compact)
+        assertEquals(1, b.maxLines)
+        val bottom = b.topPx + b.maxLines * b.fontPx * NOTE_BUBBLE_LINE_RATIO
+        assertTrue("应紧贴本行上方，实际 top=${b.topPx} bottom=$bottom", b.topPx > 60f && bottom <= 100.5f)
+        assertTrue("不该跑到页顶那条空白：top=${b.topPx}", b.topPx > far.bottom)
+    }
+
+    @Test
+    fun `two notes on one row split above and below the row`() {
+        // 同一行两条批注：各自独立取位。右边那条先算，落在这行右下；左边那条的右下已被
+        // 右边那条占住，就自己改落在这行右上——不再做「横向滑移 / 躲到旁边重新折行」。
+        val row = rect(0f, 100f, 600f, 140f)
+        val right = rect(300f, 100f, 400f, 140f)
+        val left = rect(100f, 100f, 200f, 140f)
+        val bubbles = place(
+            notes = listOf(
+                noteInk(1, listOf(left), "左边这条批注写得比较长一些再多几个字"),
+                noteInk(2, listOf(right), "右边这条也长"),
+            ),
+            textInk = listOf(row),
+            contentBottom = 600f,
+            pageBottom = 600f,
+        )
+        assertEquals(2, bubbles.size)
+        val l = bubbles.first { it.text.startsWith("左边") }
+        val r = bubbles.first { it.text.startsWith("右边") }
+        assertTrue("两条都要能整句读完", !l.compact && !r.compact)
+        assertTrue("右边那条落在这行下方：top=${r.topPx}", r.topPx >= row.bottom - 0.5f)
+        assertTrue("左边那条改落在这行上方：top=${l.topPx}", l.topPx + l.maxLines * noteLine <= row.top + 2f)
+        assertTrue("两条不能重叠：${l.leftPx} / ${r.leftPx}", !boxOf(l).overlaps(boxOf(r)))
+    }
+
+    @Test
+    fun `below right box shifts right of the selection first character`() {
+        // 真机第 3 条 + 2026-10-24 用户定口：右下、右上相对**末行第一个字右移一个汉字**，
+        // 再加 1em 近侧留白——不再是「贴住整个选区右缘」。
+        val row = rect(0f, 100f, 600f, 140f)
+        val anchor = rect(300f, 100f, 400f, 140f)
+        val bubbles = place(
+            notes = listOf(noteInk(1, listOf(anchor), "用几章来")),
+            textInk = listOf(row),
+            contentRight = 600f,
+            contentBottom = 500f,
+            pageRight = 620f,
+            pageBottom = 500f,
+        )
+        val b = bubbles.single()
+        assertTrue("应落在锚点下方：top=${b.topPx}", b.topPx >= 140f - 0.5f)
+        // 选区只有一个矩形，首字左缘就是 anchor.left；一个汉字按正文字号 20px 算。
+        val expectedLeft = anchor.left + 20f + noteMetrics.preferredMargin
+        assertTrue(
+            "框左缘要落在首字右移一个汉字再加 1em 处：left=${b.leftPx} 期望≈$expectedLeft",
+            b.leftPx >= expectedLeft - 0.5f,
+        )
+        assertTrue("框不该整条跑到选区右边太远：left=${b.leftPx}", b.leftPx < anchor.right + 3 * noteFont)
+    }
+
+    @Test
+    fun `same line notes are computed from right to left`() {
+        // 同一行两条批注抢页边距里唯一那一格：最右的那条先算、先拿走，左边那条只能另找地方。
+        // 行是满行（600 宽），页边距只剩行右侧上方一小块（下方用图形封死）。
+        val row = rect(0f, 0f, 600f, 40f)
+        val leftInk = rect(0f, 0f, 300f, 40f)
+        val rightInk = rect(300f, 0f, 600f, 40f)
+        val bubbles = place(
+            notes = listOf(
+                noteInk(1, listOf(leftInk), "短"),
+                noteInk(2, listOf(rightInk), "也短"),
+            ),
+            textInk = listOf(row),
+            figures = listOf(rect(600f, 40f, 700f, 800f)),
+            contentBottom = 800f,
+            pageBottom = 800f,
+        )
+        assertEquals(2, bubbles.size)
+        val right = bubbles.single { it.annotationId == 2L }
+        val left = bubbles.single { it.annotationId == 1L }
+        assertTrue("最右的批注应先拿到行右侧那一格，实际=$right", right.leftPx >= 600f)
+        assertTrue("左边那条不该越过它去抢同一格，实际=$left", left.leftPx < 600f)
+        assertTrue("任何人都不能退成小图标：$bubbles", bubbles.none { it.compact })
+    }
+
+    @Test
+    fun `multi line anchor uses the last line as its base`() {
+        // 多行选区以**末行**为基准行：跨行批注和末行上的另一条各自独立取位。
+        // 末行那条（锚点更靠右）先算，占行右；跨行批注的右侧已被占，改落在末行右下。
+        val row0 = rect(0f, 0f, 600f, 40f)
+        val row1 = rect(0f, 40f, 600f, 80f)
+        val spans = rect(0f, 0f, 300f, 40f)
+        val tail = rect(0f, 40f, 160f, 80f)
+        val onLast = rect(320f, 40f, 520f, 80f)
+        val bubbles = place(
+            notes = listOf(
+                noteInk(1, listOf(spans, tail), "跨行"),
+                noteInk(2, listOf(onLast), "同一末行"),
+            ),
+            textInk = listOf(row0, row1),
+            contentBottom = 800f,
+            pageBottom = 800f,
+        )
+        assertEquals(2, bubbles.size)
+        val spanning = bubbles.single { it.annotationId == 1L }
+        val lastLine = bubbles.single { it.annotationId == 2L }
+        assertTrue("末行那条应在右侧页边距：$lastLine", lastLine.leftPx >= 600f)
+        assertTrue("跨行批注以末行为基准、落在末行下方：$spanning", spanning.topPx >= row1.bottom - 0.5f)
+        assertTrue("两条不能重叠", !boxOf(spanning).overlaps(boxOf(lastLine)))
+        // 先算的那条不因另一条而挪位（2026-10-24 用户定口：独立取位）。
+        val solo = place(
+            notes = listOf(noteInk(2, listOf(onLast), "同一末行")),
+            textInk = listOf(row0, row1),
+            contentBottom = 800f,
+            pageBottom = 800f,
+        ).single()
+        assertEquals("右侧那条保持自己原来的位置", solo.topPx, lastLine.topPx, 0.5f)
+        assertEquals("右侧那条保持自己原来的位置", solo.leftPx, lastLine.leftPx, 0.5f)
+    }
+
+    @Test
+    fun `upper row note keeps its spot when a lower row packs a group`() {
+        // 行自上而下是硬顺序：上面那行的单条先算好，下面两行的那组不能先把它挤走。
+        // 上面这行不是所在段落的末行，按新口径不再试正右，它按自己的阶梯落位即可；
+        // 关键是位置与「单独放置」时完全一致。
+        val row0 = rect(0f, 0f, 600f, 40f)
+        val row1 = rect(0f, 60f, 600f, 100f)
+        val leftInk = rect(0f, 60f, 300f, 100f)
+        val rightInk = rect(300f, 60f, 600f, 100f)
+        val figures = listOf(rect(600f, 100f, 700f, 800f))
+        val alone = place(
+            notes = listOf(noteInk(1, listOf(row0), "上")),
+            textInk = listOf(row0, row1),
+            figures = figures,
+            contentBottom = 800f,
+            pageBottom = 800f,
+        ).single()
+        val bubbles = place(
+            notes = listOf(
+                noteInk(1, listOf(row0), "上"),
+                noteInk(2, listOf(leftInk), "下左"),
+                noteInk(3, listOf(rightInk), "下右"),
+            ),
+            textInk = listOf(row0, row1),
+            figures = figures,
+            contentBottom = 800f,
+            pageBottom = 800f,
+        )
+        assertEquals(3, bubbles.size)
+        val upper = bubbles.single { it.annotationId == 1L }
+        assertTrue("上面那行不该退成小图标：$upper", !upper.compact)
+        assertEquals("上面那行的位置不该被下面那组挤走", alone.leftPx, upper.leftPx, 0.5f)
+        assertEquals("上面那行的位置不该被下面那组挤走", alone.topPx, upper.topPx, 0.5f)
+        assertTrue("上面那行应先于下面那组落位：top=${upper.topPx}", upper.topPx < row1.top + 0.5f)
+    }
+
+    @Test
+    fun `single line beats a nearer wrapped column`() {
+        // 行右边只有一条窄而高的空白，会把这句话折成好几行；行下方有宽空白能一行放下。
+        // 同一圈里不折行优先：宁可去下方，也不为了「更靠右」先折行。
+        val row = rect(0f, 200f, 200f, 240f)
+        val bubbles = place(
+            notes = listOf(noteInk(1, listOf(row), "这条批注不该折行")),
+            textInk = listOf(row),
+            figures = listOf(
+                rect(260f, 0f, 700f, 800f), // 右边只留 200..260 这条窄列
+                rect(0f, 400f, 260f, 800f), // 下方空白到 400 为止
+            ),
+            contentBottom = 400f,
+            pageBottom = 400f,
+        )
+        val b = bubbles.single()
+        assertEquals("能一行放下就不该折行", 1, b.maxLines)
+        assertTrue("应落在行下方，实际 top=${b.topPx} left=${b.leftPx}", b.topPx >= 240f - 0.5f)
+    }
+
+    @Test
+    fun `fewer wrapped lines win within the same ring`() {
+        // 同一圈里行数少的优先：右边折 3 行、下方折 2 行时，取下方 2 行。
+        val anchor = rect(0f, 100f, 200f, 140f)
+        val text = "折行优先级实在太高"
+        val right = rect(200f, 100f, 267.68f, 800f)
+        val below = rect(0f, 141.44f, 110.88f, 800f)
+        val list = candidates(
+            note = noteInk(1, listOf(anchor), text = text),
+            freeRects = listOf(right, below),
+        )
+        val first = list.first { it.complete }
+        assertEquals("两行应压过三行", 2, first.lines)
+        // 这块空白同时能出「右下」（首字右移一个汉字之后）与「正下」，两者行数相同；
+        // 2026-10-24 用户定口后方向名次把右下排在正下之前。
+        assertEquals("行数相同时右下压过正下", NoteSide.BELOW_RIGHT, first.side)
     }
 
     @Test
@@ -835,9 +1124,11 @@ class NoteBubblesTest {
             glyphs = listOf(blocker),
             lineH = 20f,
         ) as NoteArrow.Elbow
-        // 两端仍接住：框左边中点 → 文字右边中点；中间用正交折线绕开。
+        // 两端仍接住：框左边中点 → 落在文字右边上（竖直进入文字右边，y 可在文字高度内挪动）。
         assertEquals(Offset(300f, 20f), elbow.start)
-        assertEquals(Offset(100f, 20f), elbow.end)
+        val end = elbow.points.last()
+        assertEquals("终点要落在文字右边", ink.right, end.x)
+        assertTrue("终点 y 要落在文字高度里：$end", end.y in ink.top..ink.bottom)
         val pts = elbow.points
         for (i in 1 until pts.size) {
             assertTrue(
@@ -868,7 +1159,9 @@ class NoteBubblesTest {
             lineH = 20f,
         ) as NoteArrow.Elbow
         assertEquals(Offset(100f, 20f), elbow.start)
-        assertEquals(Offset(300f, 20f), elbow.end)
+        val end = elbow.points.last()
+        assertEquals("终点要落在文字左边", ink.left, end.x)
+        assertTrue("终点 y 要落在文字高度里：$end", end.y in ink.top..ink.bottom)
         val pts = elbow.points
         for (i in 1 until pts.size) {
             assertTrue(
@@ -897,13 +1190,82 @@ class NoteBubblesTest {
     }
 
     @Test
-    fun `narrow overlap uses the nearest points of box and text`() {
-        // 水平投影只重叠 0.5px（不足 1px）⇒ 斜向：两框最近点直线。
+    fun `narrow overlap still routes orthogonally and lands perpendicular`() {
+        // 水平投影只重叠 0.5px（不足 1px），属于斜靠：不许画斜线，
+        // 仍要「横平竖直 + 第一段 ⊥ 框边 + 最后一段 ⊥ 文字框边」。
         val bubble = rect(100.2f, 60f, 200f, 100f)
         val ink = rect(0f, 0f, 100.7f, 40f)
-        val straight = routeNoteArrow(bubble, listOf(ink)) as NoteArrow.Straight
-        assertEquals(Offset(100.2f, 60f), straight.start)
-        assertEquals(Offset(100.2f, 40f), straight.end)
+        val arrow = routeNoteArrow(bubble, listOf(ink))
+        val points = arrowPoints(arrow!!)
+        assertTrue("至少要接住两端：$points", points.size >= 2)
+        for (i in 1 until points.size) {
+            val a = points[i - 1]
+            val b = points[i]
+            assertTrue("引线必须横平竖直：$a → $b", abs(a.x - b.x) < 0.01f || abs(a.y - b.y) < 0.01f)
+        }
+        // 起点在框上边（竖着出去），终点落在文字底边（竖着进来）。
+        assertEquals("起点要在框的上边", bubble.top, points.first().y)
+        assertTrue("起点 x 要落在框的横向范围里", points.first().x in bubble.left..bubble.right)
+        assertEquals("终点要落在文字下边", ink.bottom, points.last().y)
+        assertTrue("终点 x 要落在文字的横向范围里", points.last().x in ink.left..ink.right)
+    }
+
+    @Test
+    fun `squeezed vertical leader turns into a left side L`() {
+        // 真机第 2 条：框贴着文字、中间只剩几像素时，竖线几乎看不见（「讨论」那条 18px）。
+        // 改为从框左边横着出去、到锚点起点字的左缘再竖下去——L 形至少看得见。
+        val ink = rect(1000f, 80f, 1160f, 116f)
+        val bubble = rect(1100f, 120f, 1500f, 160f)
+        val arrow = routeNoteArrow(
+            bubble = bubble,
+            inkRects = listOf(ink),
+            lineH = 20f,
+            side = NoteSide.BELOW_RIGHT,
+        )
+        val pts = arrowPoints(arrow!!)
+        assertEquals("挤在一起的短竖线要改走 L 形：$pts", 3, pts.size)
+        assertEquals("第一段从框左边横着出去", bubble.left, pts[0].x, 0.01f)
+        assertTrue("第一段必须是横线：$pts", abs(pts[0].y - pts[1].y) < 0.01f)
+        assertEquals("竖段贴着锚点起点字的左缘", ink.left, pts[1].x, 0.01f)
+        assertEquals("末端接住文字底边", ink.bottom, pts[2].y, 0.01f)
+        assertTrue("第一段要比短竖线长得多：$pts", abs(pts[1].x - pts[0].x) > 4 * abs(pts[2].y - pts[1].y))
+    }
+
+    @Test
+    fun `leader crossing two lines goes through the middle of the gap`() {
+        // 真机第 6 条：从两行字之间横穿时要走**正中间**，不贴着任何一边。
+        val anchorGlyph = rect(0f, 100f, 40f, 140f)
+        val rowOne = listOf(
+            anchorGlyph,
+            rect(60f, 100f, 100f, 140f),
+            rect(120f, 100f, 160f, 140f),
+            rect(180f, 100f, 220f, 140f),
+        )
+        val rowTwo = listOf(
+            rect(0f, 152f, 40f, 192f),
+            rect(60f, 152f, 100f, 192f),
+            rect(120f, 152f, 160f, 192f),
+        )
+        val bubble = rect(260f, 100f, 360f, 140f)
+        val arrow = routeNoteArrow(
+            bubble = bubble,
+            inkRects = listOf(anchorGlyph),
+            glyphs = rowOne + rowTwo,
+            lineH = 20f,
+            side = NoteSide.RIGHT,
+        )
+        val pts = arrowPoints(arrow!!)
+        for (i in 1 until pts.size) {
+            for (g in rowOne + rowTwo) {
+                assertTrue("引线不该压字：${pts[i - 1]} → ${pts[i]} 撞 $g", !segmentHits(pts[i - 1], pts[i], g))
+            }
+        }
+        val crossing = pts.zipWithNext()
+            .filter { (a, b) -> abs(a.y - b.y) < 0.01f && abs(a.x - b.x) > 1f }
+            .map { (a, _) -> a.y }
+            .firstOrNull { it > 140.5f && it < 151.5f }
+        assertTrue("应在两行之间横穿，实际 $pts", crossing != null)
+        assertEquals("横穿要走两行墨迹的正中间", 146f, crossing!!, 1.5f)
     }
 
     @Test
@@ -967,7 +1329,8 @@ class NoteBubblesTest {
         )
         val elbow = arrow as NoteArrow.Elbow
         assertTrue("绕开三面墙至少要一个拐点：${elbow.points}", elbow.points.size >= 3)
-        assertTrue("两折就够（最多 4 段）：${elbow.points}", elbow.points.size <= 5)
+        // 首末段必须各自垂直于框边，绕过一整条竖带要 4 折（5 段）。
+        assertTrue("最多 4 折（5 段）：${elbow.points}", elbow.points.size <= 6)
         assertTrue(
             "得从墙外绕过去：${elbow.points}",
             elbow.points.any { it.y <= -20f || it.y >= 70f },
@@ -1037,6 +1400,66 @@ class NoteBubblesTest {
     }
 
     @Test
+    fun `right side arrow lands on the end of the selection`() {
+        // 标注在右侧：箭头指向所选文字的**末端**（最右那个字），不再指向起点。
+        val bubble = rect(320f, 100f, 420f, 140f)
+        val start = rect(100f, 100f, 140f, 140f)
+        val end = rect(260f, 100f, 300f, 140f)
+        val arrow = routeNoteArrow(bubble, listOf(start, end), side = NoteSide.RIGHT)
+        assertTrue("应画得出箭头", arrow != null)
+        val tip = arrowPoints(arrow!!).last()
+        assertEquals("终点落在文字边上", 300f, tip.x, 0.5f)
+    }
+
+    @Test
+    fun `below right arrow lands on the bottom edge near the end`() {
+        // 标注在右下方：终点在文字**下边靠末端**，而不是绕到最左那个字的下边。
+        val bubble = rect(140f, 150f, 420f, 190f)
+        val start = rect(100f, 100f, 140f, 140f)
+        val end = rect(260f, 100f, 300f, 140f)
+        val arrow = routeNoteArrow(bubble, listOf(start, end), side = NoteSide.BELOW_RIGHT)
+        assertTrue("应画得出箭头", arrow != null)
+        val tip = arrowPoints(arrow!!).last()
+        assertEquals("终点落在文字下边", 140f, tip.y, 0.5f)
+        assertTrue("终点要靠末端，实际 x=${tip.x}", tip.x >= 290f)
+    }
+
+    @Test
+    fun `above right arrow lands on the top edge near the end`() {
+        // 标注在右上方：终点在文字**上边靠末端**。
+        val bubble = rect(140f, 50f, 420f, 90f)
+        val start = rect(100f, 100f, 140f, 140f)
+        val end = rect(260f, 100f, 300f, 140f)
+        val arrow = routeNoteArrow(bubble, listOf(start, end), side = NoteSide.ABOVE_RIGHT)
+        assertTrue("应画得出箭头", arrow != null)
+        val tip = arrowPoints(arrow!!).last()
+        assertEquals("终点落在文字上边", 100f, tip.y, 0.5f)
+        assertTrue("终点要靠末端，实际 x=${tip.x}", tip.x >= 290f)
+    }
+
+    @Test
+    fun `above-right beats below within the same ring and line count`() {
+        // 同一环、同样不折行时，右上压过正下（2026-10-24 用户定口的新方向顺序
+        // 「右 → 右下 → 右上 → 左下 → 左上 → 下 → 上 → 左」）。
+        fun candidate(side: NoteSide, ring: Int, left: Float) = NoteCandidate(
+            annotationId = 1,
+            rect = rect(left, 0f, left + 60f, 24f),
+            freeRect = rect(0f, 0f, 700f, 800f),
+            lines = 1,
+            complete = true,
+            shownChars = 4,
+            side = side,
+            ring = ring,
+            stage = 0,
+            distance = 0f,
+        )
+        val aboveRight = candidate(NoteSide.ABOVE_RIGHT, 1, 100f)
+        val below = candidate(NoteSide.BELOW, 1, 40f)
+        val ordered = orderedNoteCandidates(listOf(aboveRight, below), rightTaken = false)
+        assertEquals("右上应排在正下之前", NoteSide.ABOVE_RIGHT, ordered.first().side)
+    }
+
+    @Test
     fun `arrow is still drawn when every route is blocked`() {
         // 一堵墙横在中间：三种折线全撞上，也要按「穿得最少」照样画，不能留空。
         val arrow = routeNoteArrow(
@@ -1099,9 +1522,9 @@ class NoteBubblesTest {
     }
 
     @Test
-    fun `long note one line farther gets a longer arrow`() {
-        // 批注比所选文字长、紧贴正下方时，箭头只有一条短竖线；同一侧再远一行还有整句位置，
-        // 就放远一行（读者反馈第 5 条）。
+    fun `long note below its text points at the end of the selection`() {
+        // 批注比所选文字长、又紧贴下方：右下角不用避让，贴着本行放；
+        // 引线最短优先——能直线就直线，终点落在所选文字**末端**的下边（不是左端的起点）。
         val row0 = rect(0f, 0f, 600f, 20f)
         val anchor = rect(40f, 0f, 80f, 20f)
         val row1 = rect(0f, 100f, 600f, 120f)
@@ -1118,13 +1541,19 @@ class NoteBubblesTest {
             contentBottom = 400f,
             pageBottom = 400f,
         ).single()
-        assertTrue("批注应放远一行，实际 top=${b.topPx}", b.topPx >= 120f - 0.5f)
+        assertEquals("能一行放下就贴着本行放", 1, b.maxLines)
+        assertTrue("应贴着第 1 行，实际 top=${b.topPx}", b.topPx < 100f)
         val arrow = b.arrow
         assertTrue("应画得出箭头", arrow != null)
-        val len = arrowPoints(arrow!!).zipWithNext().sumOf { (p, q) ->
-            sqrt((q.x - p.x) * (q.x - p.x) + (q.y - p.y) * (q.y - p.y)).toDouble()
+        val pts = arrowPoints(arrow!!)
+        for (i in 1 until pts.size) {
+            val a = pts[i - 1]
+            val c = pts[i]
+            assertTrue("引线必须横平竖直：$a → $c", abs(a.x - c.x) < 0.01f || abs(a.y - c.y) < 0.01f)
         }
-        assertTrue("引线应长于一行，实际 $len", len > noteLine)
+        val end = pts.last()
+        assertEquals("末段要落在文字下边", anchor.bottom, end.y)
+        assertTrue("终点要靠近所选文字的末端，实际 x=${end.x}", end.x >= anchor.right - noteFont * 0.5f)
     }
 
     @Test
@@ -1390,7 +1819,7 @@ class NoteBubblesTest {
         assertEquals(10.08f, m.padTotal, 0.01f)
         assertEquals(1.44f, m.marginX, 0.01f)
         assertEquals(1.44f, m.marginY, 0.01f)
-        assertEquals(25.92f, m.sideGap, 0.01f)
+        assertEquals(14.4f, m.sideGap, 0.01f)
         assertEquals(7.2f, m.edge, 0.01f)
     }
 
@@ -1406,6 +1835,217 @@ class NoteBubblesTest {
         assertEquals(4, size.shownChars)
         assertTrue(size.complete)
         assertTrue(size.readable)
+    }
+
+    /** 2026-10-24 用户定口：正右只对段末行生成（段落只有一行时它天然是末行）。 */
+    @Test
+    fun `right side is only tried on the last line of a paragraph`() {
+        val row0 = rect(0f, 0f, 600f, 40f)
+        val row1 = rect(0f, 40f, 600f, 80f)
+        val column = rect(600f, 0f, 700f, 800f)
+        val below = rect(0f, 81.44f, 700f, 800f)
+        val lines = listOf(
+            NoteTextLine(rect = row0, blockId = 0, index = 0),
+            NoteTextLine(rect = row1, blockId = 0, index = 1),
+        )
+        val midLine = candidates(
+            note = noteInk(1, listOf(rect(0f, 0f, 200f, 40f)), "想法"),
+            freeRects = listOf(column, below),
+            lines = lines,
+        )
+        assertTrue(
+            "段中行不该试正右：${midLine.filter { it.side == NoteSide.RIGHT }}",
+            midLine.none { it.side == NoteSide.RIGHT },
+        )
+        val lastLine = candidates(
+            note = noteInk(1, listOf(rect(0f, 40f, 200f, 80f)), "想法"),
+            freeRects = listOf(column, below),
+            lines = lines,
+        )
+        assertTrue("段末行要试正右", lastLine.any { it.side == NoteSide.RIGHT })
+    }
+
+    /** 方向名次：右 → 右下 → 右上 → 左下 → 左上 → 下 → 上 → 左（2026-10-24 用户定口）。 */
+    @Test
+    fun `direction order runs right diagonals below above left`() {
+        fun candidate(side: NoteSide) = NoteCandidate(
+            annotationId = 1,
+            rect = rect(100f, 100f, 160f, 124f),
+            freeRect = rect(0f, 0f, 700f, 800f),
+            lines = 1,
+            complete = true,
+            shownChars = 4,
+            side = side,
+            ring = 0,
+            stage = 0,
+            distance = 5f,
+        )
+        val sides = listOf(
+            NoteSide.LEFT, NoteSide.BELOW, NoteSide.ABOVE_LEFT,
+            NoteSide.ABOVE_RIGHT, NoteSide.RIGHT, NoteSide.ABOVE, NoteSide.BELOW_LEFT,
+        )
+        val ordered = orderedNoteCandidates(sides.map { candidate(it) }, rightTaken = false)
+        assertEquals(
+            "方向名次不对：${ordered.map { it.side }}",
+            listOf(
+                NoteSide.RIGHT,
+                NoteSide.ABOVE_RIGHT,
+                NoteSide.BELOW_LEFT,
+                NoteSide.ABOVE_LEFT,
+                NoteSide.BELOW,
+                NoteSide.ABOVE,
+                NoteSide.LEFT,
+            ),
+            ordered.map { it.side },
+        )
+    }
+
+    /** 2026-10-24 用户定口：空间足够时上下左右一律先留 1em。 */
+    @Test
+    fun `diagonal keeps one em from the row on both sides`() {
+        val row = rect(0f, 100f, 200f, 140f)
+        val list = candidates(
+            note = noteInk(1, listOf(row), "想法"),
+            freeRects = listOf(rect(0f, 141.44f, 700f, 800f)),
+        )
+        val belowRight = list.first { it.side == NoteSide.BELOW_RIGHT }
+        assertEquals("空间够时用首选留白档", 0, belowRight.marginTier)
+        assertEquals(
+            "近侧（下方）也要 1em：top=${belowRight.rect.top}",
+            140f + noteMetrics.preferredMargin,
+            belowRight.rect.top,
+            0.5f,
+        )
+        assertEquals(
+            "横向基准是首字右移一个汉字再加 1em：left=${belowRight.rect.left}",
+            20f + noteMetrics.preferredMargin,
+            belowRight.rect.left,
+            0.5f,
+        )
+        assertTrue(
+            "框右侧也要留出 1em：right=${belowRight.rect.right}",
+            belowRight.rect.right <= 700f - noteMetrics.marginX - noteMetrics.preferredMargin + 0.5f,
+        )
+    }
+
+    /** 2026-10-24 用户定口：空间不够先收**远侧**，近侧（要画引线那一侧）的 1em 尽量保留。 */
+    @Test
+    fun `diagonal gives up the far side before the near side`() {
+        val row = rect(0f, 100f, 200f, 140f)
+        val oneLine = 4 * noteFont + notePad
+        // 空白右边只差「远侧那 0.9em」：首选档折成两行，收到 0.1em 就能一行读完。
+        val left = 20f + noteMetrics.preferredMargin
+        val tight = rect(0f, 141.44f, left + oneLine + noteMetrics.marginX + 2f, 800f)
+        val list = candidates(
+            note = noteInk(1, listOf(row), "想法想法"),
+            freeRects = listOf(tight),
+        )
+        val oneLinePick = list.first { it.side == NoteSide.BELOW_RIGHT && it.lines == 1 }
+        assertEquals("先收远侧那一档", 1, oneLinePick.marginTier)
+        assertEquals("近侧仍要 1em", 140f + noteMetrics.preferredMargin, oneLinePick.rect.top, 0.5f)
+        assertEquals("横向基准不变", left, oneLinePick.rect.left, 0.5f)
+
+        // 下方只剩 1em 的近侧空档：前两档都放不下，最后一档把近侧也收到 0.1em 才放得下。
+        val band = rect(0f, 140f + noteMetrics.marginY, 700f, 140f + noteMetrics.marginY + noteLine + 2f)
+        val squeezedList = candidates(
+            note = noteInk(1, listOf(row), "想法"),
+            freeRects = listOf(band),
+        )
+        val squeezed = squeezedList.first { it.side == NoteSide.BELOW_RIGHT }
+        assertEquals("最后一档才收近侧", 2, squeezed.marginTier)
+        assertEquals(
+            "近侧收到 0.1em：top=${squeezed.rect.top}",
+            140f + noteMetrics.marginY,
+            squeezed.rect.top,
+            0.5f,
+        )
+    }
+
+    /**
+     * 2026-10-24 用户定口：别的空白都放不下时，可以请已有批注在垂直方向让一让（同一列叠放）。
+     *
+     * 版面上只有一列空白（页面右侧），刚好容得下两条：先占那条按自己的位置放好，
+     * 后来的那条挤不进去时，请先占那条往上让一格。
+     */
+    @Test
+    fun `a later note pushes the placed one down the same column`() {
+        val row = rect(0f, 200f, 600f, 240f)
+        val notes = listOf(
+            noteInk(1, listOf(rect(0f, 200f, 40f, 240f)), "想法"),
+            noteInk(2, listOf(rect(0f, 200f, 40f, 240f)), "也短"),
+        )
+        fun page(bottomBlockerTop: Float) = place(
+            notes = notes,
+            textInk = listOf(row),
+            figures = listOf(
+                rect(0f, 0f, 600f, 198f),
+                rect(0f, 241f, 600f, 800f),
+                rect(600f, 0f, 700f, 186f),
+                rect(600f, bottomBlockerTop, 700f, 800f),
+            ),
+            contentBottom = 800f,
+            pageRight = 700f,
+            pageBottom = 800f,
+        )
+        val alone = place(
+            notes = listOf(notes[0]),
+            textInk = listOf(row),
+            figures = listOf(
+                rect(0f, 0f, 600f, 198f),
+                rect(0f, 241f, 600f, 800f),
+                rect(600f, 0f, 700f, 186f),
+                rect(600f, 254f, 700f, 800f),
+            ),
+            contentBottom = 800f,
+            pageRight = 700f,
+            pageBottom = 800f,
+        ).single()
+
+        val both = page(254f)
+        assertEquals("两条都要留住：$both", 2, both.size)
+        assertTrue("两条都要整句读完：$both", both.none { it.compact })
+        assertEquals(
+            "同一列叠放：left=${both.map { it.leftPx }}",
+            1,
+            both.map { it.leftPx }.distinct().size,
+        )
+        val sorted = both.sortedBy { it.topPx }
+        assertTrue(
+            "上下叠放且留出纵向间距：${sorted.map { it.topPx }}",
+            sorted[1].topPx - (sorted[0].topPx + noteLine) >= noteMetrics.marginY - 0.5f,
+        )
+        assertTrue(
+            "先占那条要让位（单独放置时 top=${alone.topPx}）",
+            sorted.none { abs(it.topPx - alone.topPx) < 0.5f && it.annotationId == 1L },
+        )
+    }
+
+    /** 让位只能「刚好够」：移完留不下，就谁也别动（2026-10-24 用户定口）。 */
+    @Test
+    fun `no move when the column cannot hold both`() {
+        val row = rect(0f, 200f, 600f, 240f)
+        val notes = listOf(
+            noteInk(1, listOf(rect(0f, 200f, 40f, 240f)), "想法"),
+            noteInk(2, listOf(rect(0f, 200f, 40f, 240f)), "也短"),
+        )
+        fun page(picked: List<NoteInk>, bottomBlockerTop: Float) = place(
+            notes = picked,
+            textInk = listOf(row),
+            figures = listOf(
+                rect(0f, 0f, 600f, 198f),
+                rect(0f, 241f, 600f, 800f),
+                rect(600f, 0f, 700f, 205f),
+                rect(600f, bottomBlockerTop, 700f, 800f),
+            ),
+            contentBottom = 800f,
+            pageRight = 700f,
+            pageBottom = 800f,
+        )
+        val alone = page(listOf(notes[0]), 231f).single()
+        val both = page(notes, 231f)
+        val first = both.first { it.annotationId == 1L }
+        assertEquals("让不出空间就不该动先占那条", alone.leftPx, first.leftPx, 0.5f)
+        assertEquals("让不出空间就不该动先占那条", alone.topPx, first.topPx, 0.5f)
     }
 
     /** 整句宽以实测为准：粗估偏窄时框必须跟着变宽，而不是画出来再被省略号截掉。 */

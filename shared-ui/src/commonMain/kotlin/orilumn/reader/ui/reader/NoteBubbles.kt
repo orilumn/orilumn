@@ -1836,11 +1836,11 @@ private fun assignNoteCandidates(
      */
     fun makeRoom(note: NoteInk, c: NoteCandidate): Boolean {
         if (!c.complete) return false
-        // 规则第 8 条讲的是**右侧**那一条：只有「贴着某一行右边 / 左边」的框才让别人上下让。
-        // 斜向与正上 / 正下的位置不搬动别人——规则第 2 条要求同一行**左边那条先取位、
-        // 且位置与它单独放置时一样**，为了右边一条去挤左边那条会破掉这条保证；
-        // 那几种位置本来就还有别的方向可选（阶梯里接着往下试即可）。
-        if (c.side != NoteSide.RIGHT && c.side != NoteSide.LEFT) return false
+        // 规则第 8 条：先让挡路的批注挪一挪。**上下 / 斜向**摆的框，挡路框是竖着排的，往上下让；
+        // **正上 / 正下**摆的框，挡路框是横着排的，往左右让。
+        // 2026-10-25 用户定口：斜向也让位——同一行左边那条被往上挤一点、右边那条占到它原来的格子，
+        // 引线不会交叉，可以接受。
+        val verticalShift = c.side != NoteSide.ABOVE && c.side != NoteSide.BELOW
         // 2026-10-25 用户定口：**不再要求挡路框和新框在同一块空白**——挡路框只要挪完还在
         // 它自己的空白里就行（下面的校验逐个检查），隔壁空白里那条也该让一让。
         val blockers = occupied.filter { c.conflicts(it.candidate, marginX, marginY) }
@@ -1911,6 +1911,15 @@ private fun assignNoteCandidates(
         }
 
 
+        /** 横排让位：挡路框横着让开刚好够的那一点（正上 / 正下那一档用）。 */
+        fun attemptHorizontal(toLeft: Boolean): Pair<Float, Pair<List<NoteChoice>, NoteCandidate>>? {
+            val left = blockers.minOf { it.candidate.rect.left }
+            val right = blockers.maxOf { it.candidate.rect.right }
+            val dx = if (toLeft) c.rect.left - marginX - right else c.rect.right + marginX - left
+            if (abs(dx) <= NOTE_GEOM_EPS) return null
+            return accept(abs(dx), shiftBlockers(dx, 0f), c)
+        }
+
         /**
          * 规则第 8 条后半：**上下让不动时，看挡路框右侧还有没有地方**。
          *
@@ -1940,11 +1949,13 @@ private fun assignNoteCandidates(
             return Float.MAX_VALUE / 2f to (emptyList<NoteChoice>() to fresh)
         }
 
-        val tried = listOfNotNull(
-            attemptVertical(up = true),
-            attemptVertical(up = false),
-            attemptBeside(),
-        )
+        val tried = if (verticalShift) {
+            // 「往挡路框右侧找空」只认正右 / 正左（规则第 8 条后半讲的就是右侧那一条）。
+            val beside = if (c.side == NoteSide.RIGHT || c.side == NoteSide.LEFT) attemptBeside() else null
+            listOfNotNull(attemptVertical(up = true), attemptVertical(up = false), beside)
+        } else {
+            listOfNotNull(attemptHorizontal(toLeft = true), attemptHorizontal(toLeft = false))
+        }
         val pick = tried.minWithOrNull(compareBy({ it.first })) ?: return false
         // **先判后动**：让位失败时不能把已放批注挪到半路。
         for (m in pick.second.first) {

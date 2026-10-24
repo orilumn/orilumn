@@ -764,10 +764,12 @@ class NoteBubblesTest {
         assertTrue("不该跑到页顶那条空白：top=${b.topPx}", b.topPx > far.bottom)
     }
 
+    /**
+     * 同一行两条批注都想要右上。2026-10-25 用户定口：**让位可以把先落位的那条往上挤一点**，
+     * 后落位的那条占它原来的格子——两条引线不会交叉，可以接受；不必为了这条去把右边那条赶到下方。
+     */
     @Test
-    fun `two notes on one row split above and below the row`() {
-        // 同一行两条批注：各自独立取位。右边那条先算，落在这行右下；左边那条的右下已被
-        // 右边那条占住，就自己改落在这行右上——不再做「横向滑移 / 躲到旁边重新折行」。
+    fun `two notes on one row share the upper right by nudging`() {
         val row = rect(0f, 100f, 600f, 140f)
         val right = rect(300f, 100f, 400f, 140f)
         val left = rect(100f, 100f, 200f, 140f)
@@ -784,9 +786,14 @@ class NoteBubblesTest {
         val l = bubbles.first { it.text.startsWith("左边") }
         val r = bubbles.first { it.text.startsWith("右边") }
         assertTrue("两条都要能整句读完", !l.compact && !r.compact)
-        assertTrue("右边那条落在这行下方：top=${r.topPx}", r.topPx >= row.bottom - 0.5f)
-        assertTrue("左边那条改落在这行上方：top=${l.topPx}", l.topPx + l.maxLines * noteLine <= row.top + 2f)
+        assertTrue(
+            "两条都在这行上方：${l.topPx} / ${r.topPx}",
+            l.topPx + l.maxLines * noteLine <= row.top + 2f &&
+                r.topPx + r.maxLines * noteLine <= row.top + 2f,
+        )
+        assertTrue("让位后先落位那条在上面：${l.topPx} / ${r.topPx}", l.topPx < r.topPx)
         assertTrue("两条不能重叠：${l.leftPx} / ${r.leftPx}", !boxOf(l).overlaps(boxOf(r)))
+        assertTrue("都还在本行附近：${l.topPx} / ${r.topPx}", l.topPx >= row.top - 3 * noteLine)
     }
 
     @Test

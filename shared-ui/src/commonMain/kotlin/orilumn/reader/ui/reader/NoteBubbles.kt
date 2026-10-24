@@ -901,7 +901,14 @@ internal fun noteCandidates(
      *
      * 规则第 6 条：左右两侧**只剩页边距**时最多折两行——那一列窄，再多折会折出竖条。
      */
-    fun emitRight(f: Rect, row: NoteTextLine, ring: Int, stage: Int, tier: Int) {
+    fun emitRight(
+        f: Rect,
+        row: NoteTextLine,
+        ring: Int,
+        stage: Int,
+        tier: Int,
+        side: NoteSide = NoteSide.RIGHT,
+    ) {
         val x = row.rect.right + metrics.sideGap
         val far = farExtra(marginX, tier)
         val left = max(x, f.left)
@@ -914,7 +921,7 @@ internal fun noteCandidates(
         val hi = f.bottom - size.height
         if (hi < lo - NOTE_GEOM_EPS) return
         val top = (row.rect.center.y - size.height / 2f).coerceIn(lo, max(lo, hi))
-        add(NoteSide.RIGHT, ring, stage, tier, f, left, top, size)
+        add(side, ring, stage, tier, f, left, top, size)
     }
 
     /** 正左：与正右对称（含规则第 6 条：页边距那一列最多折两行）。 */
@@ -1097,15 +1104,23 @@ internal fun noteCandidates(
      * （2026-10-24 用户定口：上一行右侧对下一行就是右上角，凭什么不能用）。
      *
      * 与第 0 环同一个门槛：这一行右侧离版心右缘有 1em 以上空白，或者它是所在段的末行
-     * （顶到版心右缘的段落只有末行后面才有空）。框在该行的垂直中线上，引线仍走「正右」。
+     * （顶到版心右缘的段落只有末行后面才有空）。框在该行的垂直中线上。
+     *
+     * 规则第 9 条：跨行时只认右上 / 右下 / 左上 / 左下 / 上 / 下——**别的行的正右，对本行就是斜向**，
+     * 所以侧别按那一行在锚点上方还是下方定（引线也才能照斜向画成 L 形，规则见引线第 2 条）。
      */
     fun emitRightFamily(rowIndex: Int, ring: Int, stage: Int) {
         val row = lines.getOrNull(rowIndex) ?: return
         val lastInBlock = rowIndex + 1 >= lines.size || lines[rowIndex + 1].blockId != row.blockId
         if (contentRight - row.rect.right < preferred && !lastInBlock) return
+        val side = when {
+            rowIndex > base -> NoteSide.BELOW_RIGHT
+            rowIndex < first -> NoteSide.ABOVE_RIGHT
+            else -> NoteSide.RIGHT
+        }
         for (tier in NOTE_MARGIN_TIER_PREFERRED..NOTE_MARGIN_TIER_FAR_MIN) {
             for (f in columnRects(row.rect.right + metrics.sideGap, row.rect, toRight = true)) {
-                emitRight(f, row, ring, stage, tier)
+                emitRight(f, row, ring, stage, tier, side)
             }
         }
     }

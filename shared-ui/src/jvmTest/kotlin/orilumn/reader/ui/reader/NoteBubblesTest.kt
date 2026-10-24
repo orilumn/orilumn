@@ -991,9 +991,9 @@ class NoteBubblesTest {
         }
         assertTrue("整行顶到版心右缘的段中行不该试本行正右：$besideRow", besideRow.isEmpty())
         assertTrue(
-            "下一行的正右算本行相邻空间：${list.map { "${it.side}#${it.ring}" }}",
+            "下一行的正右算本行相邻空间（对本行是右下）：${list.map { "${it.side}#${it.ring}" }}",
             list.any {
-                it.side == NoteSide.RIGHT && it.ring == 0 && it.rect.top >= row.bottom - 0.5f
+                it.side == NoteSide.BELOW_RIGHT && it.ring == 0 && it.rect.top >= row.bottom - 0.5f
             },
         )
     }
@@ -2077,8 +2077,10 @@ class NoteBubblesTest {
         }
         assertTrue("段中行不该试本行正右：$besideRow0", besideRow0.isEmpty())
         assertTrue(
-            "下一行的正右算相邻空间：${midLine.map { "${it.side}#${it.ring}" }}",
-            midLine.any { it.side == NoteSide.RIGHT && it.ring == 0 && it.rect.top >= row0.bottom - 0.5f },
+            "下一行的正右算相邻空间（对本行是右下）：${midLine.map { "${it.side}#${it.ring}" }}",
+            midLine.any {
+                it.side == NoteSide.BELOW_RIGHT && it.ring == 0 && it.rect.top >= row0.bottom - 0.5f
+            },
         )
         val lastLine = candidates(
             note = noteInk(1, listOf(rect(0f, 40f, 200f, 80f)), "想法"),
@@ -2419,8 +2421,9 @@ class NoteBubblesTest {
             freeRects = listOf(rect(302f, 0f, 700f, 800f)),
             lines = lines,
         )
-        // 规则第 5 条：上一行的左右属于本行相邻空间，所以它现在就落在第 0 圈。
-        val upperRight = list.filter { it.side == NoteSide.RIGHT && it.ring == 0 }
+        // 规则第 5 条：上一行的左右属于本行相邻空间，所以它现在就落在第 0 圈；
+        // 规则第 9 条：别的行的正右对本行就是斜向，所以侧别是「右上」而不是「正右」。
+        val upperRight = list.filter { it.side == NoteSide.ABOVE_RIGHT && it.ring == 0 }
         assertTrue("上一行右侧该有候选：${list.map { "${it.side}#${it.ring}" }}", upperRight.isNotEmpty())
         assertTrue(
             "框落在上一行那一段：${upperRight.map { it.rect.top }}",

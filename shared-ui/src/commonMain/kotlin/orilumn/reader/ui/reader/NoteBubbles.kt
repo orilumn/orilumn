@@ -1210,7 +1210,10 @@ internal fun noteCandidateOrder(rightTaken: Boolean): Comparator<NoteCandidate> 
         } else {
             c.sideRank
         }
-    return compareBy<NoteCandidate> { it.stage }
+    // 规则第 9 / 11 条：**在本段落可用范围内，整句放得下（不折叠）永远是第一优先**，
+    // 折成省略号只是整段都放不下时的兜底，所以「能不能整句放下」排得比段 / 环都前。
+    return compareBy<NoteCandidate> { if (it.complete) 0 else 1 }
+        .thenBy { it.stage }
         // 不折行优先、行数越少越优先：先比折行数，再比远近（环）。
         .thenBy { it.lines }
         // 规则第 10 条：越过别的批注视同跨行，所以远近按「环 + 越过的行数」比。

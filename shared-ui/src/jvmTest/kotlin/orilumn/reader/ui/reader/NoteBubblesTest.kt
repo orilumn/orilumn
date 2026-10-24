@@ -2456,6 +2456,30 @@ class NoteBubblesTest {
         )
     }
 
+    /**
+     * 规则第 9 / 11 条：**在本段落可用范围内，整句放得下（不折叠）永远是第一优先**，
+     * 哪怕折成省略号的那条更近、甚至更靠本段——折叠只是整段都放不下时的兜底。
+     */
+    @Test
+    fun `a complete candidate beats a nearer folded one`() {
+        fun candidate(stage: Int, ring: Int, complete: Boolean, lines: Int) = NoteCandidate(
+            annotationId = 1,
+            rect = rect(600f, ring * 40f, 700f, ring * 40f + 40f),
+            freeRect = rect(600f, 0f, 700f, 800f),
+            lines = lines,
+            complete = complete,
+            shownChars = if (complete) 6 else 1,
+            side = NoteSide.RIGHT,
+            ring = ring,
+            stage = stage,
+            distance = 10f + ring,
+        )
+        val foldedNear = candidate(stage = 0, ring = 0, complete = false, lines = 1)
+        val completeFar = candidate(stage = 2, ring = 4, complete = true, lines = 3)
+        val ordered = orderedNoteCandidates(listOf(foldedNear, completeFar), rightTaken = false)
+        assertEquals("整句放得下那条要先排：$ordered", completeFar, ordered.first())
+    }
+
     /** 2026-10-24 用户定口：行盒上下那半段行距也是空白，批注可以贴进两行之间。 */
     @Test
     fun `a note can sit in the gap between two lines`() {

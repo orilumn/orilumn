@@ -103,8 +103,11 @@ private const val NOTE_ARROW_MIN_GAP_PX: Float = 0.5f
 /** 判断两个矩形/线段是否相碰时的容差（像素）：避免「刚好贴着」被判成压住。 */
 private const val NOTE_GEOM_EPS: Float = 0.5f
 
-/** 最少可读的字数：能显示这么多个字就显示框（一行也行）；再少就退成小图标。 */
-private const val MIN_SHOWN_CHARS: Int = 4
+/**
+ * 最少可读的字数（规则第 11 / 12 条）：折叠最多折到**一个字 + 省略号**，
+ * 所以只要能显示一个字就还画框；一个字都放不下才退成小图标。
+ */
+private const val MIN_SHOWN_CHARS: Int = 1
 
 /** 小椭圆宽 / 高（以旁注字号为单位）：只是「这里有一条批注」的记号，不抢正文。 */
 private const val NOTE_ICON_WIDTH_RATIO: Float = 0.5f
@@ -1087,24 +1090,30 @@ internal fun noteCandidates(
         emitRightFamily(base, 0, 0)
         emitBelowFamily(base, 0, 0)
         emitAboveFamily(first, 0, 0)
+        // 规则第 5 条：**上一行和下一行的左右两侧属于本行相邻空间，不算隔行**。
+        if (base + 1 <= blockEnd) emitRightFamily(base + 1, 0, 0)
+        if (first - 1 >= blockStart) emitRightFamily(first - 1, 0, 0)
     }
 
     if (scope == NoteCandidateScope.ALL || scope == NoteCandidateScope.RINGS) {
         // 跨行：本段内由近到远（往下一条、上一条地数），每一圈都带上那一行自己的正右
         // （上一行右侧对下一行就是右上角，2026-10-24 用户定口）。
         // 分批时只算 `ringFrom..ringTo` 这几圈，调用方拿到够用的位置就不再往下要。
+        // 第 k 圈 = 距基准行 **k + 1** 行：相邻行已经算在第 0 圈（规则第 5 条）。
         val lastRing = min(ringTo, lines.size)
         var k = max(1, ringFrom)
         while (k <= lastRing) {
             var any = false
-            if (base + k <= blockEnd) {
-                emitBelowFamily(base + k, k, 0)
-                emitRightFamily(base + k, k, 0)
+            val down = base + k + 1
+            val up = first - k - 1
+            if (down <= blockEnd) {
+                emitBelowFamily(down, k, 0)
+                emitRightFamily(down, k, 0)
                 any = true
             }
-            if (first - k >= blockStart) {
-                emitAboveFamily(first - k, k, 0)
-                emitRightFamily(first - k, k, 0)
+            if (up >= blockStart) {
+                emitAboveFamily(up, k, 0)
+                emitRightFamily(up, k, 0)
                 any = true
             }
             if (!any) break

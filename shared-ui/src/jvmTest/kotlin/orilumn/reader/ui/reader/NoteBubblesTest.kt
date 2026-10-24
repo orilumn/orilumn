@@ -983,9 +983,18 @@ class NoteBubblesTest {
             listOf(rect(600f + noteMetrics.sideGap, 0f, 700f, 800f), rect(0f, 210f, 700f, 800f)),
             lines,
         )
+        // 规则第 5 条：上下相邻行的左右属于本行相邻空间，所以「下一行」的正右现在也算第 0 圈；
+        // 但**本行**（顶到版心右缘、又不是段末行）自己的正右仍然不该有候选。
+        val besideRow = list.filter {
+            it.side == NoteSide.RIGHT && it.ring == 0 &&
+                it.rect.bottom > row.top && it.rect.top < row.bottom
+        }
+        assertTrue("整行顶到版心右缘的段中行不该试本行正右：$besideRow", besideRow.isEmpty())
         assertTrue(
-            "整行顶到版心右缘的段中行不该试本行正右：${list.map { it.side }}",
-            list.none { it.side == NoteSide.RIGHT && it.ring == 0 },
+            "下一行的正右算本行相邻空间：${list.map { "${it.side}#${it.ring}" }}",
+            list.any {
+                it.side == NoteSide.RIGHT && it.ring == 0 && it.rect.top >= row.bottom - 0.5f
+            },
         )
     }
 
@@ -1776,12 +1785,20 @@ class NoteBubblesTest {
     }
 
     @Test
-    fun `candidates with only an ellipsis or two characters are dropped`() {
-        // 一行高、只放得下两个字的窄缝：宁可没有候选，也不显示「用…」。
+    fun `narrow slit keeps a folded candidate down to one character`() {
+        // 规则第 11 条：空间不够就折叠，最多折到一个字 + 省略号；只有连一个字都放不下才没有候选。
         val anchor = rect(0f, 100f, 200f, 140f)
         val slit = rect(200f, 100f, 240f, 125f)
         val list = candidates(note = noteInk(1, listOf(anchor), text = "用几章来"), freeRects = listOf(slit))
-        assertTrue("窄缝不该产出候选，实际=$list", list.isEmpty())
+        assertTrue("窄缝也要留着折叠候选，实际=$list", list.isNotEmpty())
+        assertTrue("折叠候选一定不是整句", list.none { it.complete })
+        assertTrue("折叠后至少留一个字", list.all { it.shownChars >= 1 })
+        // 宽度连一个字都放不下时，才真的没有候选。
+        val tooTight = candidates(
+            note = noteInk(1, listOf(anchor), text = "用几章来"),
+            freeRects = listOf(rect(200f, 100f, 210f, 125f)),
+        )
+        assertTrue("连一个字都放不下就不该有候选，实际=$tooTight", tooTight.isEmpty())
     }
 
     @Test
@@ -2052,9 +2069,16 @@ class NoteBubblesTest {
             freeRects = listOf(column, below),
             lines = lines,
         )
+        // 规则第 5 条：本行不是段末行时，本行自己的正右仍然不试；
+        // 但**下一行**的右侧属于本行相邻空间，会以第 0 圈的正右出现。
+        val besideRow0 = midLine.filter {
+            it.side == NoteSide.RIGHT && it.ring == 0 &&
+                it.rect.bottom > row0.top && it.rect.top < row0.bottom
+        }
+        assertTrue("段中行不该试本行正右：$besideRow0", besideRow0.isEmpty())
         assertTrue(
-            "段中行不该试本行正右：${midLine.filter { it.side == NoteSide.RIGHT && it.ring == 0 }}",
-            midLine.none { it.side == NoteSide.RIGHT && it.ring == 0 },
+            "下一行的正右算相邻空间：${midLine.map { "${it.side}#${it.ring}" }}",
+            midLine.any { it.side == NoteSide.RIGHT && it.ring == 0 && it.rect.top >= row0.bottom - 0.5f },
         )
         val lastLine = candidates(
             note = noteInk(1, listOf(rect(0f, 40f, 200f, 80f)), "想法"),
@@ -2356,7 +2380,8 @@ class NoteBubblesTest {
             freeRects = listOf(rect(302f, 0f, 700f, 800f)),
             lines = lines,
         )
-        val upperRight = list.filter { it.side == NoteSide.RIGHT && it.ring == 1 }
+        // 规则第 5 条：上一行的左右属于本行相邻空间，所以它现在就落在第 0 圈。
+        val upperRight = list.filter { it.side == NoteSide.RIGHT && it.ring == 0 }
         assertTrue("上一行右侧该有候选：${list.map { "${it.side}#${it.ring}" }}", upperRight.isNotEmpty())
         assertTrue(
             "框落在上一行那一段：${upperRight.map { it.rect.top }}",
@@ -2454,14 +2479,18 @@ class NoteBubblesTest {
 
     /** 空白太窄，只能读 3 个字：不算可读，交给下一位或小图标。 */
     @Test
-    fun `sliver narrower than four characters is not readable`() {
+    fun `sliver that fits a single character is still readable`() {
         val m = NoteMetrics.forBody(20f)
-        // 一行只放得下一个字、最多三行：一共只能读三个字。
+        // 规则第 11 条：折叠最多折到**一个字 + 省略号**，所以能显示一个字就还画框。
+        // 一行只放得下一个字、最多三行：一共能读三个字。
         val size = noteBoxFit("字".repeat(10), m, maxWidth = m.em + m.padTotal, maxHeight = m.lineH * 3.5f)
         assertEquals(3, size.lines)
         assertEquals(3, size.shownChars)
-        assertTrue(!size.readable)
+        assertTrue("能读三个字就该显示", size.readable)
         assertTrue(!size.complete)
+        // 连一个字都放不下（宽度被内缩吃光）才算不可用。
+        val none = noteBoxFit("字".repeat(10), m, maxWidth = m.padTotal, maxHeight = m.lineH * 3.5f)
+        assertTrue("一个字都放不下就不该出框", !none.readable)
     }
 
     /** 空白矮到放不下整句：按高度截断，但能读就先显示。 */

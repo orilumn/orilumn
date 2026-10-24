@@ -2364,6 +2364,45 @@ class NoteBubblesTest {
     }
 
     /**
+     * 规则第 8 条后半：上下让不动了（这一列只有一行高），就看**挡路框右侧**还有没有地方，
+     * 让新批注贴着旧框右边站，而不是把新批注挤成小图标。
+     */
+    @Test
+    fun `make room falls back to the space right of the blocking bubble`() {
+        val row = rect(0f, 100f, 200f, 140f)
+        val notes = listOf(
+            noteInk(1, listOf(rect(0f, 100f, 40f, 140f)), "短"),
+            noteInk(2, listOf(rect(60f, 100f, 100f, 140f)), "想法"),
+        )
+        // 右侧那一列只有本行这一行高（上下都被图挡住），横向却有整片空白：
+        // 上下叠不下第二条，只能往第一条的右边找空。
+        val page = place(
+            notes = notes,
+            textInk = listOf(row),
+            figures = listOf(
+                rect(0f, 0f, 700f, 100f),
+                rect(0f, 141f, 700f, 800f),
+            ),
+            contentBottom = 800f,
+            pageRight = 700f,
+            pageBottom = 800f,
+        )
+        assertEquals("两条都要留住：$page", 2, page.size)
+        assertTrue("两条都要整句读完：$page", page.none { it.compact })
+        // 这一列只有一行高，叠不下第二条：必须左右并排（后到的那条贴在先到那条的右边）。
+        val left = page.minBy { it.leftPx }
+        val right = page.maxBy { it.leftPx }
+        assertTrue(
+            "两条要左右并排，不是叠在同一列：${page.map { it.leftPx to it.widthPx }}",
+            right.leftPx >= left.leftPx + left.widthPx - 0.5f,
+        )
+        assertTrue(
+            "并排还要贴在同一行：${page.map { it.topPx }}",
+            abs(left.topPx - right.topPx) < noteLine,
+        )
+    }
+
+    /**
      * 2026-10-24 用户定口：**上一行右侧那块空白，对本行来说就是右上角**——
      * 不能因为斜向基准点落在左边，就把正文右侧的大空白整块挤掉。
      */

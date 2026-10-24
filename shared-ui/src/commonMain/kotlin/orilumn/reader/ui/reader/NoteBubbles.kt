@@ -1870,7 +1870,37 @@ private fun assignNoteCandidates(
 
         val up = attempt(up = true)
         val down = attempt(up = false)
-        val pick = listOfNotNull(up, down)
+
+        /**
+         * 规则第 8 条后半：**上下让不动时，看挡路框右侧还有没有地方**。
+         *
+         * 只认同一个空白里、位于所有挡路框右缘之外的那条竖带；新框仍夹在原本想待的高度
+         * （本行垂直居中），并且不许撞任何已放批注——这一档**不搬动别人**。
+         */
+        fun attemptBeside(): Pair<Float, Pair<List<NoteChoice>, NoteCandidate>>? {
+            val left = blockers.maxOf { it.candidate.rect.right } + marginX
+            val strip = Rect(left, f.top, f.right, f.bottom)
+            if (strip.width <= 1f || strip.height <= 1f) return null
+            // 高度最多放到原候选的两倍：再高就不是「挪到旁边」而是一整条竖柱了。
+            val maxH = min(strip.height, c.rect.height * 2f)
+            val size = noteBoxFit(note.text, metrics, strip.width, maxH, sizer)
+            if (!size.complete) return null
+            val top = c.rect.top.coerceIn(strip.top, max(strip.top, strip.bottom - size.height))
+            val rect = Rect(strip.left, top, strip.left + size.width, top + size.height)
+            if (rect.right > f.right + NOTE_GEOM_EPS || rect.bottom > f.bottom + NOTE_GEOM_EPS) return null
+            val fresh = c.copy(
+                rect = rect,
+                lines = size.lines,
+                complete = true,
+                shownChars = size.shownChars,
+                distance = note.rects.minOf { rectDistance(rect, it) },
+            )
+            if (occupied.any { fresh.conflicts(it.candidate, marginX, marginY) }) return null
+            // 名次排在所有「上下让位」之后：能让人家让就让，实在让不动才自己挪到旁边。
+            return Float.MAX_VALUE / 2f to (emptyList<NoteChoice>() to fresh)
+        }
+
+        val pick = listOfNotNull(up, down, attemptBeside())
             .minWithOrNull(compareBy({ it.first }, { if (it === up) 0 else 1 }))
             ?: return false
         // **先判后动**：让位失败时不能把已放批注挪到半路。

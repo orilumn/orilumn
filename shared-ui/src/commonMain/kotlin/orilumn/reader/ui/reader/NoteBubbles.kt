@@ -198,6 +198,12 @@ private const val ARROW_MAX_BEND_COORDS: Int = 8
 /** 折线找障碍时看两端连线附近多远（以旁注行高为单位，至少 8px）。 */
 private const val ARROW_BEND_WINDOW_LINES: Float = 2f
 
+/** 一条候选折线最多几个顶点（4 折 = 6 个）：暂存数组按它开，热路径上不再分配。 */
+private const val ARROW_ROUTE_MAX_POINTS: Int = 6
+
+/** 沿框边取点的比例（正上 / 正下与左侧 L 形都按这几个比例挪）。 */
+private val ARROW_EDGE_FRACTIONS = floatArrayOf(0.5f, 0.25f, 0.75f)
+
 /** 一行批注折行模拟的结果：比「宽 / 字宽」粗估准，用于完整性判定。 */
 internal data class NoteTextFit(
     /** 整句需要几行（不限行数时的折行结果）。 */
@@ -375,6 +381,29 @@ private const val NOTE_SIDE_RANK_LEFT_FIRST: Int = -1
 private const val NOTE_SIDE_RANK_TAKEN_RIGHT: Int = 6
 
 /**
+ * 「这一条贴着自己那一行摆，会横着盖住右侧那条的选区」时的方向名次
+ * （规则第 8 条，2026-10-25 用户定口）：**左上 → 左下 → 右上 → 右下**，其余照旧。
+ *
+ * 右侧已经有批注、而本条的框横向会把它那段文字整个罩住时，右侧那片空白是**右边那条的**
+ * ——本条的框摆过去，两条的引线要在同一片空白里交叉，读者也分不清哪条批注在说哪段字。
+ * 所以先走左侧；左侧实在放不下才回到右上 / 右下，并且**按距离就近取**，不再往页面另一头跑。
+ */
+private fun coveringSideRank(side: NoteSide): Int = when (side) {
+    NoteSide.ABOVE_LEFT -> 0
+    NoteSide.BELOW_LEFT -> 1
+    NoteSide.ABOVE_RIGHT -> 2
+    NoteSide.BELOW_RIGHT -> 3
+    NoteSide.ABOVE -> 4
+    NoteSide.BELOW -> 5
+    NoteSide.RIGHT -> 6
+    NoteSide.LEFT -> 7
+    NoteSide.OTHER -> 8
+}
+
+/** 让位／自行挪开时最多试几步（每步让到最近的挡路框之外，再判一次）。 */
+private const val NOTE_SLIDE_STEPS: Int = 4
+
+/**
  * 一条批注的一个候选框（纯几何）。
  *
  * 字段只服务两件事：**排序**（[stage] → [ring] → [lines] → [side] → [distance]）与**落位**
@@ -421,7 +450,33 @@ internal data class NoteCandidate(
      * 排序时按 `ring + crossed` 比远近：同一圈里，要越过别人那条的路子排到没越过的后面去。
      */
     val crossed: Int = 0,
+    /**
+     * 这个候选是从**哪一行**生成的（`lines` 的行下标）。
+     *
+     * 2026-10-25 用户定口：**最后是按哪一行确定的位置，引线就指向哪一行**——多行选区
+     * 落在末行旁边就指向末行末端，落在首行旁边就指向首行末端。`-1` = 未标注（退回旧口径）。
+     */
+    val anchorRow: Int = -1,
+    /**
+     * 布点阶梯档（2026-10-25 用户定口）：0 = **末行侧**（末行的环 0，含下方相邻行），
+     * 1 = **首行侧**（首行的环 0，含上方相邻行），2 = 其他（跨行各圈、段外左侧）。
+     *
+     * 多行选区先贴末行排；末行那一圈放不下，才轮到首行那一圈。排序时它排在
+     * 「整句放不放得下 / 折行段」之后、环数之前——**整句优先（规则 9 / 11）不被它推翻**。
+     */
+    val nearRank: Int = 2,
 ) {
+    /**
+     * 四个斜向（右上 / 右下 / 左上 / 左下）。
+     *
+     * 斜向的留白不是规则第 7 条的 1em：横向就是规则第 5 条的「偏右 / 偏左一个字」，
+     * 纵向是行距空档，所以**留白档在斜向上不参与先后**——先取最近的，留白档只在同距时决胜。
+     * 正上 / 正下 / 正左 / 正右 那一侧的 1em 是给引线与箭头的空档，仍然优先保住。
+     */
+    val corner: Boolean
+        get() = side == NoteSide.ABOVE_RIGHT || side == NoteSide.BELOW_RIGHT ||
+            side == NoteSide.ABOVE_LEFT || side == NoteSide.BELOW_LEFT
+
     /**
      * 两个候选框是否冲突：矩形相交，或间距（横向 [marginX]、纵向 [marginY]）不足。
      */
@@ -689,6 +744,11 @@ internal enum class NoteCandidateScope {
  *
  * @param otherRowLeft 同一页上**其他批注**在每一行的最左墨迹（行序 → x）。同一行有多条批注时，
  *   落在该行上方 / 下方的框要给左侧那条留出引线空档（见下方 `leftReserve`）。
+ * @param rightInk 同一行上**在本条右边**那些批注的墨迹矩形：本条的整句宽在右侧会把它们整个罩住时，
+ *   这一条判为「会遮挡右侧文字区域」——方向改成左上 → 左下 → 右上 → 右下，同排也要让右边那条先取位
+ *   （规则第 8 条，2026-10-25 用户定口）。默认空 = 不判。
+ * @param covering 这一条是不是「会遮挡右侧文字区域」。`null` 按 [rightInk] 现算；
+ *   布点时由调用方一次算好传进来，避免每批候选都重算。
  * @param contentRight **版心右缘**（页坐标）：锚点末行在这条线左边还留着 1em 以上空白时，
  *   正右提到最前（规则第 3 条）。默认无上限 = 不做这个提前（单测与直接调用）。
  * @param contentLeft **版心左缘**（页坐标）：右侧没余地、但这一行左侧有明显缩进时，
@@ -705,6 +765,8 @@ internal fun noteCandidates(
     sizer: NoteTextSizer = EstimatedNoteTextSizer,
     charWidthPx: Float = metrics.em / NOTE_BUBBLE_FONT_RATIO,
     otherRowLeft: Map<Int, Float> = emptyMap(),
+    rightInk: List<Rect> = emptyList(),
+    covering: Boolean? = null,
     contentRight: Float = Float.MAX_VALUE,
     contentLeft: Float? = null,
     /**
@@ -768,10 +830,11 @@ internal fun noteCandidates(
         .sortedBy { it.left }
     val firstGlyph = baseGlyphs.firstOrNull() ?: note.rects.minByOrNull { it.left } ?: return emptyList()
     val lastGlyph = baseGlyphs.lastOrNull() ?: note.rects.maxByOrNull { it.right } ?: return emptyList()
-    // 「首字符右移一个汉字」/「末字符左移一个汉字」：斜向摆法的横向基准（§0.2，2026-10-24 用户定口）。
-    // 右上 / 右下看**选区首字的左缘**，左上 / 左下看**选区末字的左缘**——不是选区右缘。
+    // 「首字符右移一个汉字」/「末字符右移一个汉字」：斜向摆法的横向基准（§0.2）。
+    // 2026-10-25 用户定口：**左上 / 左下看选区最右缘再往左一个字**（= 倒数第二个字的右缘），
+    // 不是末字的左缘——框的右缘只有落在它左边，才叫「左上 / 左下」；越过它就是「正上方 / 正下方」。
     val cornerRightX = firstGlyph.left + charW
-    val cornerLeftX = lastGlyph.left - charW
+    val cornerLeftX = lastGlyph.right - charW
 
     // 规则 3 / 4：右侧离版心还有 1em 以上空白 ⇒ 正右提到最前；否则左侧有明显缩进 ⇒ 正左提到最前。
     // contentRight 缺省时退回「本页空白能到的最右缘」：直接调用（单测）没有版心边界，
@@ -785,7 +848,14 @@ internal fun noteCandidates(
     val leftIndentFirst = !rightRoomFirst && contentLeft != null &&
         baseRow.rect.left - contentLeft > preferred
 
+    // 规则第 8 条（2026-10-25 用户定口）：整句宽会罩住右侧那条的选区 ⇒ 本条先走左侧。
+    // 只在**这一条自己的基准行**上判；判据用整句一行的自然宽，不看某个候选碰巧折成多宽。
+    val coversRightText = covering
+        ?: noteCoversRightText(note, lines, rightInk, metrics, charWidthPx, sizer)
+
     fun sideRankOf(side: NoteSide): Int = when {
+        // 会遮住右侧文字的，先左侧、再右侧，规则 3 / 4 的「优先正右 / 正左」也让位给它。
+        coversRightText -> coveringSideRank(side)
         side == NoteSide.RIGHT && rightRoomFirst -> NOTE_SIDE_RANK_RIGHT_FIRST
         side == NoteSide.LEFT && leftIndentFirst -> NOTE_SIDE_RANK_LEFT_FIRST
         else -> noteSideRank(side)
@@ -824,10 +894,6 @@ internal fun noteCandidates(
         NOTE_MARGIN_TIER_NEAR_MIN -> NOTE_MIN_MARGIN_PX
         else -> preferred
     }
-
-    /** 水平近侧留白：1em → 2px（规则第 13 条：左右默认 1em，压缩不小于 2px）。 */
-    fun nearXRoom(tier: Int): Float =
-        if (tier == NOTE_MARGIN_TIER_NEAR_MIN) NOTE_MIN_MARGIN_PX else preferred
 
     /**
      * 规则第 6 条：左右**只剩页边距**那一列时最多折两行——那一列本来就窄，再多折会折成竖条。
@@ -898,8 +964,35 @@ internal fun noteCandidates(
         return picked.distinct()
     }
 
+    /**
+     * 方向按**框最终落在哪儿**判，不按「从哪个口子生成」判（规则第 5 条，2026-10-25 用户定口）。
+     *
+     * 生成端有几处会把「上一行右侧那一列」标成右上 / 右下（规则第 5 条：上一行、下一行的左右两侧
+     * 属于本行相邻空间）——那一列对锚点来说其实落在**左边**，标成右下就会凭「离得更近」抢走
+     * 真正右下角的位置（真机上就是「用几章来」明明有右下角，却摆到了左下）。
+     */
+    fun classify(rect: Rect): NoteSide {
+        if (rect.bottom <= firstRow.rect.top + NOTE_GEOM_EPS) {
+            return when {
+                rect.left >= cornerRightX - NOTE_GEOM_EPS -> NoteSide.ABOVE_RIGHT
+                rect.right <= cornerLeftX + NOTE_GEOM_EPS -> NoteSide.ABOVE_LEFT
+                else -> NoteSide.ABOVE
+            }
+        }
+        if (rect.top >= baseRow.rect.bottom - NOTE_GEOM_EPS) {
+            return when {
+                rect.left >= cornerRightX - NOTE_GEOM_EPS -> NoteSide.BELOW_RIGHT
+                rect.right <= cornerLeftX + NOTE_GEOM_EPS -> NoteSide.BELOW_LEFT
+                else -> NoteSide.BELOW
+            }
+        }
+        if (rect.right <= firstGlyph.left + NOTE_GEOM_EPS) return NoteSide.LEFT
+        if (rect.left >= lastGlyph.right - NOTE_GEOM_EPS) return NoteSide.RIGHT
+        return if (rect.center.y <= baseRow.rect.center.y) NoteSide.ABOVE else NoteSide.BELOW
+    }
+
     fun add(
-        side: NoteSide,
+        rowIndex: Int,
         ring: Int,
         stage: Int,
         tier: Int,
@@ -915,6 +1008,7 @@ internal fun noteCandidates(
             return
         }
         val rect = Rect(left, top, left + size.width, top + size.height)
+        val side = classify(rect)
         // 规则第 10 条：框与锚点之间隔了几行**别的批注**，就当多跨了几行。
         // `otherRowLeft` 的键就是「这一行有别的批注墨迹」，直接数它们有几行落在这段空档里。
         val crossed = if (otherRowLeft.isEmpty()) {
@@ -943,6 +1037,14 @@ internal fun noteCandidates(
             (axis(rect.left) shl 39) or (axis(rect.top) shl 26) or
             (axis(rect.right) shl 13) or axis(rect.bottom)
         if (!seen.add(key)) return
+        // 2026-10-25 用户定口：多行选区先贴末行（环 0），末行那一圈放不下才轮到首行那一圈。
+        // 用行下标判侧：末行及其下方相邻行 = 末行侧；首行及其上方相邻行 = 首行侧。
+        val nearRank = when {
+            ring != 0 -> 2
+            rowIndex >= base -> 0
+            rowIndex <= first -> 1
+            else -> 2
+        }
         out += NoteCandidate(
             annotationId = note.annotationId,
             rect = rect,
@@ -957,6 +1059,8 @@ internal fun noteCandidates(
             marginTier = tier,
             sideRank = sideRankOf(side),
             crossed = crossed,
+            anchorRow = rowIndex,
+            nearRank = nearRank,
         )
     }
 
@@ -967,14 +1071,17 @@ internal fun noteCandidates(
      * 「1em 无论上下左右」说的是**摆放方向那一侧**离正文的间距。
      *
      * 规则第 6 条：左右两侧**只剩页边距**时最多折两行——那一列窄，再多折会折出竖条。
+     *
+     * 落点由 [add] 按最终几何判方向：别的行右侧那一列对本行来说可能是右上 / 右下，
+     * 也可能整个落在锚点左边（那就不是「右」）。
      */
     fun emitRight(
         f: Rect,
+        rowIndex: Int,
         row: NoteTextLine,
         ring: Int,
         stage: Int,
         tier: Int,
-        side: NoteSide = NoteSide.RIGHT,
     ) {
         val x = row.rect.right + metrics.sideGap
         val far = farExtra(marginX, tier)
@@ -988,11 +1095,11 @@ internal fun noteCandidates(
         val hi = f.bottom - size.height
         if (hi < lo - NOTE_GEOM_EPS) return
         val top = (row.rect.center.y - size.height / 2f).coerceIn(lo, max(lo, hi))
-        add(side, ring, stage, tier, f, left, top, size)
+        add(rowIndex, ring, stage, tier, f, left, top, size)
     }
 
     /** 正左：与正右对称（含规则第 6 条：页边距那一列最多折两行）。 */
-    fun emitLeft(f: Rect, row: NoteTextLine, ring: Int, stage: Int, tier: Int) {
+    fun emitLeft(f: Rect, rowIndex: Int, row: NoteTextLine, ring: Int, stage: Int, tier: Int) {
         val x = row.rect.left - metrics.sideGap
         val far = farExtra(marginX, tier)
         val right = min(x, f.right)
@@ -1005,11 +1112,11 @@ internal fun noteCandidates(
         val hi = f.bottom - size.height
         if (hi < lo - NOTE_GEOM_EPS) return
         val top = (row.rect.center.y - size.height / 2f).coerceIn(lo, max(lo, hi))
-        add(NoteSide.LEFT, ring, stage, tier, f, right - size.width, top, size)
+        add(rowIndex, ring, stage, tier, f, right - size.width, top, size)
     }
 
     /** 正下：近侧 1em（竖直引线要从这段空档出去），下方按档位。 */
-    fun emitBelow(f: Rect, row: NoteTextLine, ring: Int, stage: Int, tier: Int, reserveX: Float?) {
+    fun emitBelow(f: Rect, rowIndex: Int, row: NoteTextLine, ring: Int, stage: Int, tier: Int, reserveX: Float?) {
         // 近侧从**字墨迹下缘**算起（不是行盒下缘）：行盒底下那半段行距也是空白（§2.1）。
         // 最后一档把这 1em 也收到 0.1em，好让两行之间那段行距放得下一条批注。
         // 正下只认**横向压住锚点**的空白带：右边那一列是「右」，不是「下」
@@ -1028,11 +1135,11 @@ internal fun noteCandidates(
         val hi = f.right - size.width
         if (hi < lo - NOTE_GEOM_EPS) return
         val left = anchor.left.coerceIn(lo, max(lo, hi))
-        add(NoteSide.BELOW, ring, stage, tier, f, left, top, size)
+        add(rowIndex, ring, stage, tier, f, left, top, size)
     }
 
     /** 正上：与正下对称。 */
-    fun emitAbove(f: Rect, row: NoteTextLine, ring: Int, stage: Int, tier: Int, reserveX: Float?) {
+    fun emitAbove(f: Rect, rowIndex: Int, row: NoteTextLine, ring: Int, stage: Int, tier: Int, reserveX: Float?) {
         // 近侧 1em 从字墨迹上缘算起（行盒顶上那半段行距也算空白）；横向与正下同理，要压住锚点。
         if (f.right <= anchor.left + NOTE_GEOM_EPS || f.left >= anchor.right - NOTE_GEOM_EPS) return
         val near = nearYRoom(tier)
@@ -1048,71 +1155,67 @@ internal fun noteCandidates(
         val hi = f.right - size.width
         if (hi < lo - NOTE_GEOM_EPS) return
         val left = anchor.left.coerceIn(lo, max(lo, hi))
-        add(NoteSide.ABOVE, ring, stage, tier, f, left, bottom - size.height, size)
+        add(rowIndex, ring, stage, tier, f, left, bottom - size.height, size)
     }
 
     /** 右下：左缘在「末行第一个字 + 一个汉字」右侧，框顶在该行下方。 */
-    fun emitBelowRight(f: Rect, row: NoteTextLine, ring: Int, stage: Int, tier: Int, reserveX: Float?) {
-        val nearX = nearXRoom(tier)
-        val nearY = nearYRoom(tier)
+    fun emitBelowRight(f: Rect, rowIndex: Int, row: NoteTextLine, ring: Int, stage: Int, tier: Int, reserveX: Float?) {
+        val nearY = NOTE_MIN_MARGIN_PX
         val farX = farExtra(marginX, tier)
         val farY = farExtra(marginY, tier)
-        val left = max(max(cornerRightX + nearX, f.left), reserveX ?: f.left)
+        val left = max(max(cornerRightX, f.left), reserveX ?: f.left)
         val top = max(row.rect.bottom + nearY, f.top)
         val maxW = f.right - farX - left
         val maxH = f.bottom - farY - top
         if (maxW <= 1f || maxH <= 1f) return
         val size = noteBoxFit(text, metrics, maxW, maxH, sizer, completeOnly)
         if (!size.readable) return
-        add(NoteSide.BELOW_RIGHT, ring, stage, tier, f, left, top, size)
+        add(rowIndex, ring, stage, tier, f, left, top, size)
     }
 
     /** 左下：右缘在「末行末字符 - 一个汉字」左侧，框顶在该行下方。 */
-    fun emitBelowLeft(f: Rect, row: NoteTextLine, ring: Int, stage: Int, tier: Int) {
-        val nearX = nearXRoom(tier)
-        val nearY = nearYRoom(tier)
+    fun emitBelowLeft(f: Rect, rowIndex: Int, row: NoteTextLine, ring: Int, stage: Int, tier: Int) {
+        val nearY = NOTE_MIN_MARGIN_PX
         val farX = farExtra(marginX, tier)
         val farY = farExtra(marginY, tier)
-        val right = min(cornerLeftX - nearX, f.right)
+        val right = min(cornerLeftX, f.right)
         val top = max(row.rect.bottom + nearY, f.top)
         val maxW = right - f.left - farX
         val maxH = f.bottom - farY - top
         if (maxW <= 1f || maxH <= 1f) return
         val size = noteBoxFit(text, metrics, maxW, maxH, sizer, completeOnly)
         if (!size.readable) return
-        add(NoteSide.BELOW_LEFT, ring, stage, tier, f, right - size.width, top, size)
+        add(rowIndex, ring, stage, tier, f, right - size.width, top, size)
     }
 
     /** 右上：横向基准与右下相同，框底在该行上方。 */
-    fun emitAboveRight(f: Rect, row: NoteTextLine, ring: Int, stage: Int, tier: Int, reserveX: Float?) {
-        val nearX = nearXRoom(tier)
-        val nearY = nearYRoom(tier)
+    fun emitAboveRight(f: Rect, rowIndex: Int, row: NoteTextLine, ring: Int, stage: Int, tier: Int, reserveX: Float?) {
+        val nearY = NOTE_MIN_MARGIN_PX
         val farX = farExtra(marginX, tier)
         val farY = farExtra(marginY, tier)
-        val left = max(max(cornerRightX + nearX, f.left), reserveX ?: f.left)
+        val left = max(max(cornerRightX, f.left), reserveX ?: f.left)
         val bottom = min(row.rect.top - nearY, f.bottom)
         val maxW = f.right - farX - left
         val maxH = bottom - f.top - farY
         if (maxW <= 1f || maxH <= 1f) return
         val size = noteBoxFit(text, metrics, maxW, maxH, sizer, completeOnly)
         if (!size.readable) return
-        add(NoteSide.ABOVE_RIGHT, ring, stage, tier, f, left, bottom - size.height, size)
+        add(rowIndex, ring, stage, tier, f, left, bottom - size.height, size)
     }
 
     /** 左上：横向基准与左下相同，框底在该行上方。 */
-    fun emitAboveLeft(f: Rect, row: NoteTextLine, ring: Int, stage: Int, tier: Int) {
-        val nearX = nearXRoom(tier)
-        val nearY = nearYRoom(tier)
+    fun emitAboveLeft(f: Rect, rowIndex: Int, row: NoteTextLine, ring: Int, stage: Int, tier: Int) {
+        val nearY = NOTE_MIN_MARGIN_PX
         val farX = farExtra(marginX, tier)
         val farY = farExtra(marginY, tier)
-        val right = min(cornerLeftX - nearX, f.right)
+        val right = min(cornerLeftX, f.right)
         val bottom = min(row.rect.top - nearY, f.bottom)
         val maxW = right - f.left - farX
         val maxH = bottom - f.top - farY
         if (maxW <= 1f || maxH <= 1f) return
         val size = noteBoxFit(text, metrics, maxW, maxH, sizer, completeOnly)
         if (!size.readable) return
-        add(NoteSide.ABOVE_LEFT, ring, stage, tier, f, right - size.width, bottom - size.height, size)
+        add(rowIndex, ring, stage, tier, f, right - size.width, bottom - size.height, size)
     }
 
     fun emitBelowFamily(rowIndex: Int, ring: Int, stage: Int) {
@@ -1123,16 +1226,20 @@ internal fun noteCandidates(
         for (tier in NOTE_MARGIN_TIER_PREFERRED..NOTE_MARGIN_TIER_NEAR_MIN) {
             val near = nearYRoom(tier)
             for (f in bandRects(row.rect.bottom + near, anchor.left, below = true)) {
-                emitBelow(f, row, ring, stage, tier, reserveX)
+                emitBelow(f, rowIndex, row, ring, stage, tier, reserveX)
             }
         }
-        for (tier in NOTE_MARGIN_TIER_PREFERRED..NOTE_MARGIN_TIER_NEAR_MIN) {
-            val near = nearXRoom(tier)
-            for (f in bandRects(row.rect.bottom + nearYRoom(tier), cornerRightX + near, below = true)) {
-                emitBelowRight(f, row, ring, stage, tier, reserveX)
+        // 斜向（2026-10-25 用户定口）：横向基准就是「偏右 / 偏左一个字」（规则第 5 条），
+        // 不再额外加 1em；近侧也不留 1em——贴着上一行 / 下一行放即可（那 1em 是规则第 7 条
+        // 给上 / 下 / 左 / 右 摆法让给引线的）。留白档只剩「远侧」：先保 1em，不够收 0.1em。
+        val near = NOTE_MIN_MARGIN_PX
+        for (tier in NOTE_MARGIN_TIER_PREFERRED..NOTE_MARGIN_TIER_FAR_MIN) {
+            val y = row.rect.bottom + near
+            for (f in bandRects(y, cornerRightX, below = true)) {
+                emitBelowRight(f, rowIndex, row, ring, stage, tier, reserveX)
             }
-            for (f in bandRects(row.rect.bottom + nearYRoom(tier), cornerLeftX - near, below = true)) {
-                emitBelowLeft(f, row, ring, stage, tier)
+            for (f in bandRects(y, cornerLeftX, below = true)) {
+                emitBelowLeft(f, rowIndex, row, ring, stage, tier)
             }
         }
     }
@@ -1143,16 +1250,18 @@ internal fun noteCandidates(
         for (tier in NOTE_MARGIN_TIER_PREFERRED..NOTE_MARGIN_TIER_NEAR_MIN) {
             val near = nearYRoom(tier)
             for (f in bandRects(row.rect.top - near, anchor.left, below = false)) {
-                emitAbove(f, row, ring, stage, tier, reserveX)
+                emitAbove(f, rowIndex, row, ring, stage, tier, reserveX)
             }
         }
-        for (tier in NOTE_MARGIN_TIER_PREFERRED..NOTE_MARGIN_TIER_NEAR_MIN) {
-            val near = nearXRoom(tier)
-            for (f in bandRects(row.rect.top - nearYRoom(tier), cornerRightX + near, below = false)) {
-                emitAboveRight(f, row, ring, stage, tier, reserveX)
+        // 斜向同 emitBelowFamily：横向偏一个字，近侧贴着行放，留白档只管远侧。
+        val near = NOTE_MIN_MARGIN_PX
+        for (tier in NOTE_MARGIN_TIER_PREFERRED..NOTE_MARGIN_TIER_FAR_MIN) {
+            val y = row.rect.top - near
+            for (f in bandRects(y, cornerRightX, below = false)) {
+                emitAboveRight(f, rowIndex, row, ring, stage, tier, reserveX)
             }
-            for (f in bandRects(row.rect.top - nearYRoom(tier), cornerLeftX - near, below = false)) {
-                emitAboveLeft(f, row, ring, stage, tier)
+            for (f in bandRects(y, cornerLeftX, below = false)) {
+                emitAboveLeft(f, rowIndex, row, ring, stage, tier)
             }
         }
     }
@@ -1161,7 +1270,7 @@ internal fun noteCandidates(
         val row = lines.getOrNull(rowIndex) ?: return
         for (tier in NOTE_MARGIN_TIER_PREFERRED..NOTE_MARGIN_TIER_FAR_MIN) {
             for (f in columnRects(row.rect.left - metrics.sideGap, row.rect, toRight = false)) {
-                emitLeft(f, row, ring, stage, tier)
+                emitLeft(f, rowIndex, row, ring, stage, tier)
             }
         }
     }
@@ -1174,20 +1283,15 @@ internal fun noteCandidates(
      * （顶到版心右缘的段落只有末行后面才有空）。框在该行的垂直中线上。
      *
      * 规则第 9 条：跨行时只认右上 / 右下 / 左上 / 左下 / 上 / 下——**别的行的正右，对本行就是斜向**，
-     * 所以侧别按那一行在锚点上方还是下方定（引线也才能照斜向画成 L 形，规则见引线第 2 条）。
+     * 所以侧别不能按「用哪个口子生成」定，落点由 [add] 按最终几何判定（见 `classify`）。
      */
     fun emitRightFamily(rowIndex: Int, ring: Int, stage: Int) {
         val row = lines.getOrNull(rowIndex) ?: return
         val lastInBlock = rowIndex + 1 >= lines.size || lines[rowIndex + 1].blockId != row.blockId
         if (contentRight - row.rect.right < preferred && !lastInBlock) return
-        val side = when {
-            rowIndex > base -> NoteSide.BELOW_RIGHT
-            rowIndex < first -> NoteSide.ABOVE_RIGHT
-            else -> NoteSide.RIGHT
-        }
         for (tier in NOTE_MARGIN_TIER_PREFERRED..NOTE_MARGIN_TIER_FAR_MIN) {
             for (f in columnRects(row.rect.right + metrics.sideGap, row.rect, toRight = true)) {
-                emitRight(f, row, ring, stage, tier, side)
+                emitRight(f, rowIndex, row, ring, stage, tier)
             }
         }
     }
@@ -1200,6 +1304,10 @@ internal fun noteCandidates(
         emitRightFamily(base, 0, 0)
         emitBelowFamily(base, 0, 0)
         emitAboveFamily(first, 0, 0)
+        // 2026-10-25 用户定口：多行选区先贴**末行**（上面那一圈是末行侧）；末行那一圈放不下，
+        // 才轮到**首行**那一圈——首行自己的正右（它右侧那片空白），以及它上方的正上 / 右上 / 左上。
+        // 排序靠 `nearRank`（末行侧 0 < 首行侧 1），这里只负责把候选生成出来。
+        if (first != base) emitRightFamily(first, 0, 0)
         // 规则第 5 条：**上一行和下一行的左右两侧属于本行相邻空间，不算隔行**。
         if (base + 1 <= runEnd) emitRightFamily(base + 1, 0, 0)
         if (first - 1 >= runStart) emitRightFamily(first - 1, 0, 0)
@@ -1244,40 +1352,59 @@ internal fun noteCandidates(
 
 /**
  * 一条批注的候选链顺序（§1.1）：**字典序**比较
- * 「段 → 折行数 → 环 → 方向 → 留白档 → 距离」。
+ * 「段 → 跨行 → 折行数 → 方向 → 距离（斜向）/ 留白（正侧）→ 留白 → 距离」。
  *
- * **折行数在环之前**（2026-10-24 用户定口）：**不折行优先、行数越少越优先**是段内的第一判据，
- * 折行更少的候选压过更近但折行更多的候选——宁可隔一行一行放下，也不贴着本行折三四行，
- * 更不能因为右侧页边距那一列「够高、塞得下整句」就把批注压成每行两三个字的竖条。
- * 折行数相同才比环（本行 → 隔 1 行 → 隔 2 行……），再比方向
- * （右 → 右下 → 右上 → 左下 → 左上 → 下 → 上 → 左，2026-10-24 用户定口）。
+ * **跨行在折行之前**（2026-10-25 用户定口，规则第 6 条：「其他位置都可以考虑折行，只要能放下，
+ * 不考虑跨行」）：批注也是正文的一部分，宁可贴着锚点折成两行、三行，也不要为了少折一行
+ * 就整个挪到隔行去。同一圈里仍然**折行数少的先**（2026-10-24 用户定口）——
+ * 那条是「同一条行上哪个方向更省行数」，与「就近不跨行」不冲突。
+ * 「整句放不放得下」排在段与跨行之前（规则第 9 / 11 条：折成省略号只是整段都放不下时的兜底）。
  *
- * **留白档在方向之后**（2026-10-24 用户定口）：同一个方向上，空间够就先要 1em，
- * 不够才把远侧收到 0.1em（斜向最后才收近侧）；换方向仍然排在「同方向先试留白」之后。
+ * **斜向（右上 / 右下 / 左上 / 左下）比距离、不比留白档**（2026-10-25 用户定口）：
+ * 斜向横向就是规则第 5 条的「偏一个字」，纵向就是行距空档，那 1em 是规则第 7 条给
+ * 上 / 下 / 左 / 右 摆法让给引线的——斜向为了凑 1em 把批注送到版心另一头，读者是能看见的
+ * （真机上「函数体」的批注离开上一行文字的右缘只剩 0.1em，「使用 val」明明挨着段间距
+ * 却飞到左边那条窄缝里）。正侧（右 / 下 / 上 / 左）仍按留白档优先（先要 1em，不够才收细缝）。
  *
  * @param rightTaken 该行右侧已经被别的旁注占住：正右让到「左」之前
  *   （倒数第二位，§0.1 0b），不再为了「更靠右」把框推远。
+ * @param rightCornerFirst 规则第 8 条的例外（2026-10-25 用户定口）：本条右侧只有本行最右那条，
+ *   且它已经放在本行正右 ⇒ 本条回到**右上 → 右下 → 左上 → 左下**的通常顺序，
+ *   不再因为「会罩住右侧选区」先走左侧。
  */
-internal fun noteCandidateOrder(rightTaken: Boolean): Comparator<NoteCandidate> {
+internal fun noteCandidateOrder(
+    rightTaken: Boolean,
+    rightCornerFirst: Boolean = false,
+): Comparator<NoteCandidate> {
+    fun isCorner(side: NoteSide): Boolean = when (side) {
+        NoteSide.ABOVE_RIGHT, NoteSide.BELOW_RIGHT,
+        NoteSide.ABOVE_LEFT, NoteSide.BELOW_LEFT -> true
+        else -> false
+    }
     // 右侧没被占时 RIGHT 就是 0 号方向，和枚举顺序无关；被占时挪到 LEFT 之前。
     // 只压**本行**（环 0）的正右：别的行右侧那块空白仍然按正常名次参与（§0.1 0b）。
-    fun rank(c: NoteCandidate): Int =
-        if (rightTaken && c.side == NoteSide.RIGHT && c.ring == 0) {
+    fun rank(c: NoteCandidate): Int = when {
+        // 例外：右侧只剩本行最右那条、且它已经在行右 ⇒ 四个斜向按通常顺序（右上最先）。
+        rightCornerFirst && isCorner(c.side) -> noteSideRank(c.side)
+        rightTaken && c.side == NoteSide.RIGHT && c.ring == 0 ->
             max(c.sideRank, NOTE_SIDE_RANK_TAKEN_RIGHT)
-        } else {
-            c.sideRank
-        }
+        else -> c.sideRank
+    }
     // 规则第 9 / 11 条：**在本段落可用范围内，整句放得下（不折叠）永远是第一优先**，
     // 折成省略号只是整段都放不下时的兜底，所以「能不能整句放下」排得比段 / 环都前。
     return compareBy<NoteCandidate> { if (it.complete) 0 else 1 }
         .thenBy { it.stage }
-        // 不折行优先、行数越少越优先：先比折行数，再比远近（环）。
-        .thenBy { it.lines }
+        // 2026-10-25 用户定口：位置先按**末行**来，末行那一圈放不下才轮到首行那一圈。
+        // 排在整句 / 折行段之后：整句优先（规则 9 / 11）不被位置推翻。
+        .thenBy { it.nearRank }
         // 规则第 10 条：越过别的批注视同跨行，所以远近按「环 + 越过的行数」比。
         .thenBy { it.ring + it.crossed }
+        .thenBy { it.lines }
         .thenBy { rank(it) }
-        .thenBy { it.marginTier }
+        // 斜向的留白档不参与先后（比距离），正侧仍然留白档优先。
+        .thenBy { if (it.corner) 0 else it.marginTier }
         .thenBy { it.distance }
+        .thenBy { it.marginTier }
         .thenBy { it.rect.top }
         .thenBy { it.rect.left }
 }
@@ -1607,6 +1734,74 @@ internal fun noteBubblePlacements(
         n.annotationId to merged
     }
 
+    // 同一行上**在本条右边**那些批注的墨迹（2026-10-25 用户定口，规则第 8 条）：
+    // 本条的框横向把这几个字整个罩住时，右上 / 右下就要让给左侧——否则两条批注的引线
+    // 要在同一片空白里交叉，读者分不清哪条批注在说哪段字。
+    val inkRows = ordered.associate { n ->
+        n.annotationId to n.rects.mapNotNull { ink -> nearestLineIndex(ink, lines)?.let { ink to it } }
+    }
+    val rightInks = ordered.associate { n ->
+        // 「本行」用布点的基准行（多行选区取末行）——和 [noteCoversRightText] 以及取位用的是同一行。
+        val base = noteBaseRow(n.rects, lines) ?: inkRows.getValue(n.annotationId).minByOrNull { it.second }?.second
+        val out = ArrayList<Rect>()
+        if (base != null) {
+            val myLeft = inkRows.getValue(n.annotationId)
+                .filter { it.second == base }
+                .minOfOrNull { it.first.left } ?: n.rects.minOf { it.left }
+            for (m in ordered) {
+                if (m.annotationId == n.annotationId) continue
+                for ((ink, row) in inkRows.getValue(m.annotationId)) {
+                    if (row == base && ink.left > myLeft + NOTE_GEOM_EPS) out += ink
+                }
+            }
+        }
+        n.annotationId to out
+    }
+
+    // 规则第 8 条（2026-10-25 用户定口）：这一条贴着自己那一行摆会罩住右侧那条的选区吗？
+    // 每条只算一次（整句自然宽 + 基准行），候选分批发的时候直接复用这个结论。
+    val coveringIds = ordered
+        .filter { n ->
+            noteCoversRightText(
+                note = n,
+                lines = lines,
+                rightInk = rightInks.getValue(n.annotationId),
+                metrics = metrics,
+                charWidthPx = body,
+                sizer = noteTextSizer,
+            )
+        }
+        .mapTo(HashSet(ordered.size)) { it.annotationId }
+
+    // 例外（2026-10-25 用户定口）：右侧那一片如果**只有本行最右那条**的选区，且它已经放在
+    // 本行正右，本条就回到「右上优先」——右边那条的框贴着行右，不在这一带，两条引线不会打架。
+    // 中间还夹着别的批注时不算（比如 boxes 与 of 之间还有 popcorn），仍按左上 → 左下。
+    val rightmostOnRow = HashMap<Int, NoteInk>()
+    for (n in ordered) {
+        val base = noteBaseRow(n.rects, lines) ?: continue
+        val key = noteRightOnRow(n.rects, lines, base)
+        val cur = rightmostOnRow[base]
+        val curKey = cur?.let { noteRightOnRow(it.rects, lines, base) }
+        if (curKey == null || key > curKey + NOTE_GEOM_EPS ||
+            (abs(key - curKey) <= NOTE_GEOM_EPS && n.annotationId > cur!!.annotationId)
+        ) {
+            rightmostOnRow[base] = n
+        }
+    }
+    val coveringRightmost = ordered.mapNotNull { n ->
+        if (n.annotationId !in coveringIds) return@mapNotNull null
+        val base = noteBaseRow(n.rects, lines) ?: return@mapNotNull null
+        val rightmost = rightmostOnRow[base] ?: return@mapNotNull null
+        if (rightmost.annotationId == n.annotationId) return@mapNotNull null
+        val myRight = rightInks.getValue(n.annotationId)
+        val theirRight = inkRows.getValue(rightmost.annotationId)
+            .filter { it.second == base }
+            .map { it.first }
+        val onlyRightmost = myRight.size == theirRight.size &&
+            myRight.all { r -> theirRight.any { it == r } }
+        if (onlyRightmost) n.annotationId to rightmost.annotationId else null
+    }.toMap()
+
     // 分批发候选：先「本行相邻空间」，再一圈一圈跨行，最后才本段左侧 / 相邻段。
     // 放不下才继续要下一批；排序键不变，所以「拿到够用的就停」与一次全量生成结果相同。
     fun generate(
@@ -1624,6 +1819,9 @@ internal fun noteBubblePlacements(
         // 「一个汉字」按正文字号算：斜向摆法要据此把框挪开首 / 末字符。
         charWidthPx = body,
         otherRowLeft = otherRowLefts.getValue(note.annotationId),
+        // 同一行右侧那几条的墨迹：本条整句宽会罩住它们时，先走左侧（规则 8）。
+        rightInk = rightInks.getValue(note.annotationId),
+        covering = note.annotationId in coveringIds,
         // 版心右缘：判断「这一行右侧还有没有 1em 以上空白」，决定正右是否提到最前（规则 3）。
         contentRight = contentRight,
         // 版心左缘：右侧没余地时，看这一行左侧有没有明显缩进，决定正左是否提到最前（规则 4）。
@@ -1683,6 +1881,8 @@ internal fun noteBubblePlacements(
         restBatch = ::restBatch,
         truncatedBatch = ::truncatedBatch,
         minLinesReachable = ::minLinesReachable,
+        covering = coveringIds,
+        rightmostOnRight = coveringRightmost,
     )
     val assignMs = placeMark.elapsedNow().inWholeMilliseconds - freeMs - candMs
     val chosen = choices.associateBy { it.note.annotationId }
@@ -1740,6 +1940,13 @@ internal fun noteBubblePlacements(
         if (b.compact) return@map b
         // 箭头用逐字墨迹（能穿两字之间）；布点仍用行框。
         val ink = inkById[b.annotationId]?.arrowInk.orEmpty()
+        // 2026-10-25 用户定口：**哪一行确定了位置，引线就指向哪一行**（末行还是首行）。
+        val anchorRow = chosen[b.annotationId]?.candidate?.anchorRow ?: -1
+        val targetInk = if (anchorRow in lines.indices) {
+            ink.filter { nearestLineIndex(it, lines) == anchorRow }
+        } else {
+            emptyList()
+        }
         val self = bubbleRects.getValue(b.annotationId)
         val others = out.asSequence()
             .filter { it.annotationId != b.annotationId && !it.compact }
@@ -1756,6 +1963,7 @@ internal fun noteBubblePlacements(
             side = chosen[b.annotationId]?.candidate?.side,
             // 行盒：竖着进时箭头停在行盒边框上，不侵入行盒内部（引线规则第 4 条）。
             lineBoxes = lineBoxes,
+            targetInk = targetInk,
         )
         if (arrow != null) drawn += arrow
         b.copy(arrow = arrow)
@@ -1781,9 +1989,12 @@ private data class NoteChoice(
  * 全页分配（方案 §1.4 / §5）：**整句 → 截断 → 小椭圆**三档推进。
  *
  * 先挑顺序（2026-10-24 用户定口，唯一一套）：
- * **正文行自上而下 → 同一行内从右到左 → 批注 id**。
- * 「同一行」按**基准行**算——多行选区取所选文字的**末行**（§0.1），不是首行；
- * 从右到左指**先算最右那条**的位置，右边的批注先挑，左边的只能跳过。
+ * **正文行自上而下 → 同一行内从左到右 → 批注 id**。
+ * 「同一行」按**基准行**算——多行选区取所选文字的**末行**（§0.1），不是首行。
+ *
+ * 唯一例外（2026-10-25 用户定口，规则第 8 条）：**会遮住右侧文字区域的那条排在右侧那几条之后**。
+ * 它整句宽会把右边那条的选区整个罩住时，贴着本行右侧那片空白是**右边那条的**——先让右边那条
+ * 拿到自己文字旁边的位置，罩人的这条再去左侧找；左侧没有，就自己往下让，不许把右边那条挤走。
  *
  * 每一条批注**只按自己的阶梯独立取位**（2026-10-24 用户定口：取消同行成组 / 统一收列）：
  * 不再把同一行的批注搬到右侧同一列，也不做横向滑移或「躲到旁边重新折行」。
@@ -1792,6 +2003,7 @@ private data class NoteChoice(
  * 才逐个候选去问「占住同一块空白的既有批注能不能上下让一让」。同一行右侧的既有批注、
  * 以及别的行用同一块空白的既有批注都可以让；只移动**刚好够放下新框**的距离，
  * 让完仍越界 / 撞上别的批注 / 仍然放不下新框，就**不让**，保留原位置。
+ * 会遮住右侧文字区域的那条**不搬别人**：它就是来让位的，自己继续往远处找。
  *
  * 已选框立即成为后选框的障碍（四周 0.1em），先挑者不会被无故挤走；不做两两互换，顺序可复现。
  */
@@ -1814,6 +2026,10 @@ private fun assignNoteCandidates(
     truncatedBatch: (NoteInk) -> List<NoteCandidate> = { emptyList() },
     /** 这句话在本页最宽的空白里能不能排成「最少行数」（不能就别逐圈试了）。 */
     minLinesReachable: (NoteInk) -> Boolean = { true },
+    /** 会遮住右侧文字区域的那几条：排在同排右侧那几条之后，且不搬动别人（规则第 8 条）。 */
+    covering: Set<Long> = emptySet(),
+    /** 例外（规则第 8 条）：本条右侧只有本行最右那条；值 = 那条的 id，等它落在本行正右后回到右上优先。 */
+    rightmostOnRight: Map<Long, Long> = emptyMap(),
 ): List<NoteChoice> {
     if (notes.isEmpty() || lines.isEmpty()) return emptyList()
     val chosen = LinkedHashMap<Long, NoteCandidate>()
@@ -1834,10 +2050,60 @@ private fun assignNoteCandidates(
     fun fits(c: NoteCandidate): Boolean =
         occupied.none { c.conflicts(it.candidate, marginX, marginY) }
 
+    /**
+     * 撞上已放批注时，**让自己沿远离锚点的方向挪开**（2026-10-25 用户定口，规则第 8 条）。
+     *
+     * 此前撞了就丢掉这个候选，于是同一块很高的空白里放下第一条之后，第二条只能跨行去别处
+     * （真机上「讨论」越过两行批注、飞到下面）。挪开时先按 **2 倍上下 margin** 让开，
+     * 空间不够压到 1 倍，最后才是 2px：前后两条批注之间的缝要一样宽，不能一条贴着上沿、
+     * 一条贴着下缘。挪不出（出了自己的空白）就算这个候选没位置。
+     *
+     * @return 挪好且不撞任何已放批注的候选；原位置就能放下、或挪不动时为 `null`。
+     */
+    fun slideFree(note: NoteInk, c: NoteCandidate): NoteCandidate? {
+        val dy = when (c.side) {
+            NoteSide.ABOVE, NoteSide.ABOVE_RIGHT, NoteSide.ABOVE_LEFT -> -1f
+            NoteSide.BELOW, NoteSide.BELOW_RIGHT, NoteSide.BELOW_LEFT -> 1f
+            else -> 0f
+        }
+        // 正右 / 正左那一列是「同一列上下叠放」（规则第 8 条讲的就是上下让位）：
+        // 横向挪开就变成两条并排，读者会以为它们在说不同的行，所以这里只让上下 / 斜向自己挪。
+        if (dy == 0f) return null
+        val f = c.freeRect
+        for (scale in floatArrayOf(2f, 1f, 0f)) {
+            val gapY = if (scale == 0f) NOTE_MIN_MARGIN_PX else marginY * scale
+            var cur = c
+            var dead = false
+            for (step in 0 until NOTE_SLIDE_STEPS) {
+                val hit = occupied.filter { cur.conflicts(it.candidate, marginX, marginY) }
+                if (hit.isEmpty()) break
+                val shiftY = if (dy > 0f) {
+                    hit.maxOf { it.candidate.rect.bottom } + gapY - cur.rect.top
+                } else {
+                    hit.minOf { it.candidate.rect.top } - gapY - cur.rect.bottom
+                }
+                // 只许**远离**锚点：算出来的位移方向反了，说明这条候选本来就不该往这边挪。
+                if (shiftY * dy < -NOTE_GEOM_EPS) {
+                    dead = true
+                    break
+                }
+                val r = Rect(cur.rect.left, cur.rect.top + shiftY, cur.rect.right, cur.rect.bottom + shiftY)
+                if (r.top < f.top - NOTE_GEOM_EPS || r.bottom > f.bottom + NOTE_GEOM_EPS) {
+                    dead = true
+                    break
+                }
+                cur = cur.copy(rect = r, distance = note.rects.minOf { rectDistance(r, it) })
+            }
+            if (dead) continue
+            if (fits(cur)) return if (cur.rect == c.rect) null else cur
+        }
+        return null
+    }
+
     fun take(note: NoteInk, c: NoteCandidate): Boolean {
-        if (!fits(c)) return false
-        chosen[note.annotationId] = c
-        occupied += NoteChoice(note, c)
+        val spot = if (fits(c)) c else slideFree(note, c) ?: return false
+        chosen[note.annotationId] = spot
+        occupied += NoteChoice(note, spot)
         return true
     }
 
@@ -1867,15 +2133,26 @@ private fun assignNoteCandidates(
     val chainCache = HashMap<Long, List<NoteCandidate>>(notes.size)
     val chainMerged = HashMap<Long, Int>(notes.size)
     val chainTaken = HashMap<Long, Boolean>(notes.size)
+    val chainRightCorner = HashMap<Long, Boolean>(notes.size)
     fun chainFor(note: NoteInk): List<NoteCandidate> {
         val all = pool[note.annotationId].orEmpty()
         val id = note.annotationId
         val taken = rightTaken(note)
+        // 规则第 8 条例外：右侧只剩本行最右那条、且它已经在行右 ⇒ 本条右上优先。
+        val rightCornerFirst = rightmostOnRight[id]?.let { owner ->
+            chosen[owner]?.let { it.side == NoteSide.RIGHT && it.ring == 0 } == true
+        } ?: false
         val cached = chainCache[id]
         val merged = chainMerged[id] ?: 0
-        if (cached != null && merged == all.size && chainTaken[id] == taken) return cached
-        val order = noteCandidateOrder(taken)
-        val next = if (cached != null && chainTaken[id] == taken && merged <= all.size) {
+        if (cached != null && merged == all.size && chainTaken[id] == taken &&
+            chainRightCorner[id] == rightCornerFirst
+        ) {
+            return cached
+        }
+        val order = noteCandidateOrder(taken, rightCornerFirst)
+        val next = if (cached != null && chainTaken[id] == taken &&
+            chainRightCorner[id] == rightCornerFirst && merged <= all.size
+        ) {
             mergeOrderedCandidates(
                 cached,
                 all.subList(merged, all.size).sortedWith(order),
@@ -1887,6 +2164,7 @@ private fun assignNoteCandidates(
         chainCache[id] = next
         chainMerged[id] = all.size
         chainTaken[id] = taken
+        chainRightCorner[id] = rightCornerFirst
         return next
     }
 
@@ -1910,6 +2188,9 @@ private fun assignNoteCandidates(
      */
     fun makeRoom(note: NoteInk, c: NoteCandidate): Boolean {
         if (!c.complete) return false
+        // 规则第 8 条（2026-10-25 用户定口）：会遮住右侧文字区域的那条**自己是来让位的**，
+        // 不许反过来把右侧那条挤走——它继续往远处找位置，直到不挡别人的选区。
+        if (note.annotationId in covering) return false
         // 规则第 8 条：先让挡路的批注挪一挪。**上下 / 斜向**摆的框，挡路框是竖着排的，往上下让；
         // **正上 / 正下**摆的框，挡路框是横着排的，往左右让。
         // 2026-10-25 用户定口：斜向也让位——同一行左边那条被往上挤一点、右边那条占到它原来的格子，
@@ -1919,6 +2200,10 @@ private fun assignNoteCandidates(
         // 它自己的空白里就行（下面的校验逐个检查），隔壁空白里那条也该让一让。
         val blockers = occupied.filter { c.conflicts(it.candidate, marginX, marginY) }
         if (blockers.isEmpty()) return false
+        // 行自上而下的硬顺序（2026-10-24 用户定口）：后面那行的批注不许把前面那行已放好的挤走。
+        // 否则上一行的批注会被拖到下一行旁边，读者会以为它说的是下一行（引线还要多绕一截）。
+        val myRow = baseRow(note)
+        if (blockers.any { baseRow(it.note) < myRow }) return false
         val blockerIds = blockers.map { it.note.annotationId }.toSet()
         val f = c.freeRect
 
@@ -1979,7 +2264,10 @@ private fun assignNoteCandidates(
         fun attemptVertical(up: Boolean): Pair<Float, Pair<List<NoteChoice>, NoteCandidate>>? {
             val top = blockers.minOf { it.candidate.rect.top }
             val bottom = blockers.maxOf { it.candidate.rect.bottom }
-            val dy = if (up) c.rect.top - marginY - bottom else c.rect.bottom + marginY - top
+            // 规则第 8 条（2026-10-25 用户定口）：一次让出「新批注 + **2 倍**上下 margin」，
+            // 别让让位后的新旧两条挤在一起；实在挤不出 2 倍，会先由 `slideFree` 均匀压缩
+            // 新批注自己的上下 margin（2 倍 → 1 倍 → 2px），再轮到挪动别人的批注。
+            val dy = if (up) c.rect.top - 2f * marginY - bottom else c.rect.bottom + 2f * marginY - top
             if (abs(dy) <= NOTE_GEOM_EPS) return null
             return accept(abs(dy), shiftBlockers(0f, dy), c)
         }
@@ -1989,7 +2277,7 @@ private fun assignNoteCandidates(
         fun attemptHorizontal(toLeft: Boolean): Pair<Float, Pair<List<NoteChoice>, NoteCandidate>>? {
             val left = blockers.minOf { it.candidate.rect.left }
             val right = blockers.maxOf { it.candidate.rect.right }
-            val dx = if (toLeft) c.rect.left - marginX - right else c.rect.right + marginX - left
+            val dx = if (toLeft) c.rect.left - 2f * marginX - right else c.rect.right + 2f * marginX - left
             if (abs(dx) <= NOTE_GEOM_EPS) return null
             return accept(abs(dx), shiftBlockers(dx, 0f), c)
         }
@@ -2113,13 +2401,16 @@ private fun assignNoteCandidates(
     }
 
     // 先挑顺序（规则第 1 / 2 条）：正文行自上而下 → **同一行从左到右** → 批注 id。
+    // 例外（2026-10-25 用户定口，规则第 8 条）：会遮住右侧文字区域的那条排到同排最后，
+    // 让右边那条先拿走自己文字旁边的位置；它再走左侧 / 往下让。
     val order = notes.sortedWith(
         compareBy<NoteInk> { baseRow(it) }
+            .thenBy { if (it.annotationId in covering) 1 else 0 }
             .thenBy { noteRightOnRow(it.rects, lines, baseRow(it)) }
             .thenBy { it.annotationId },
     )
 
-    // 第 1 档：整句。逐行走（自上而下），行内从右到左，每条按自己的阶梯独立取位；
+    // 第 1 档：整句。逐行走（自上而下），行内从左到右，每条按自己的阶梯独立取位；
     // **让位排在隔行之前**（2026-10-24 用户定口）：本行的候选只差别人让一让，就先让别人让，
     // 而不是直接跑到隔一行、隔两行的地方去。让位只在 `ring == 0` 问。
     var start = 0
@@ -2130,12 +2421,16 @@ private fun assignNoteCandidates(
         val members = order.subList(start, end)
         // 规则第 2 条的唯一例外：本行**最右那条**先试正右（它右侧那块空白先归它），
         // 之后再从左到右给本行其余批注取位。「最右」要与别人拉开（同一条选区的几条不算），
-        // 否则谁先谁后不该因此改变。
+        // 否则谁先谁后不该因此改变。遮挡右侧的那条排在最后，这里不能拿 `last` 当最右。
         if (members.size > 1) {
-            val last = members.last()
-            val lastRight = noteRightOnRow(last.rects, lines, rowIndex)
-            val others = members.dropLast(1).maxOf { noteRightOnRow(it.rects, lines, rowIndex) }
-            if (lastRight > others + NOTE_GEOM_EPS) tryRightFirst(last)
+            val rightmost = members.maxWith(
+                compareBy({ noteRightOnRow(it.rects, lines, rowIndex) }, { it.annotationId }),
+            )
+            val rightmostRight = noteRightOnRow(rightmost.rects, lines, rowIndex)
+            val others = members
+                .filter { it.annotationId != rightmost.annotationId }
+                .maxOf { noteRightOnRow(it.rects, lines, rowIndex) }
+            if (rightmostRight > others + NOTE_GEOM_EPS) tryRightFirst(rightmost)
         }
         for (note in members) {
             if (chosen.containsKey(note.annotationId)) continue
@@ -2197,6 +2492,38 @@ private fun noteBaseRow(rects: List<Rect>, lines: List<NoteTextLine>): Int? =
 private fun noteRightOnRow(rects: List<Rect>, lines: List<NoteTextLine>, rowIndex: Int): Float {
     val onRow = rects.filter { nearestLineIndex(it, lines) == rowIndex }
     return (onRow.ifEmpty { rects }).maxOf { it.right }
+}
+
+/**
+ * 规则第 8 条（2026-10-25 用户定口）：**这一条贴着自己那一行摆时，会不会横着罩住右侧那条的选区**。
+ *
+ * 判据：整句一行的自然宽（含两侧内缩）从右上 / 右下基准（基准行首字左缘 + 一个字）往右量，
+ * 只要把右侧任一选区的墨迹**整个**罩进去，就算会遮挡。
+ *
+ * 用「整句一行的自然宽」而不是某个候选的实际框宽：候选折行后会变窄，用它判会让同一条批注
+ * 在折行与不折行之间来回改变方向；用户定的是「这条批注会不会挡住右边」，与摆法无关。
+ */
+internal fun noteCoversRightText(
+    note: NoteInk,
+    lines: List<NoteTextLine>,
+    rightInk: List<Rect>,
+    metrics: NoteMetrics,
+    charWidthPx: Float,
+    sizer: NoteTextSizer = EstimatedNoteTextSizer,
+): Boolean {
+    if (rightInk.isEmpty() || lines.isEmpty()) return false
+    val base = noteBaseRow(note.rects, lines) ?: return false
+    val baseGlyphs = note.rects
+        .filter { nearestLineIndex(it, lines) == base }
+        .sortedBy { it.left }
+    val firstGlyph = baseGlyphs.firstOrNull() ?: note.rects.minByOrNull { it.left } ?: return false
+    val width = sizer.naturalWidth(note.text.trim(), metrics.em) + metrics.padTotal
+    if (width <= 0f) return false
+    val left = firstGlyph.left + max(charWidthPx, 1f)
+    val right = left + width
+    return rightInk.any { ink ->
+        left <= ink.left + NOTE_GEOM_EPS && right >= ink.right - NOTE_GEOM_EPS
+    }
 }
 
 
@@ -2600,7 +2927,139 @@ private class ArrowTarget(
     val gapYs: List<Float> = emptyList(),
     /** 竖着进时箭头停在哪条边上：字所在的行盒（缺省退回字本身）。 */
     val box: Rect = glyph,
-)
+) {
+    /**
+     * 折点坐标的来源（就是 [obstacles] 那批矩形）：**一条目标只建一次**。
+     * 真机上一条批注要问十来组「出口 × 入口」，每组都重新 map 一遍就是白扔几十个列表。
+     */
+    val obstacleRects: List<Rect> = obstacles.map { it.rect }
+
+    /** 障碍的空间索引：量线段时只扫「纵向可能碰到」的那几行（见 [ArrowObstacleIndex]）。 */
+    val index: ArrowObstacleIndex = ArrowObstacleIndex(obstacles)
+}
+
+/**
+ * 一批障碍的空间索引：**按上缘排好序**，量线段时二分定位纵向可能相交的第一行。
+ *
+ * 为什么要它：一条候选折线四五段，每段都要扫一遍近处五十来个逐字墨迹，而一段通常只穿一两行。
+ * 从「线段上缘再高一个最高障碍」处起步、扫到「比线段下缘还低」就停，结论与全量扫**完全一致**
+ * （再靠上的障碍，上缘加上最大高度也够不到这段），只是不再白扫那些隔着几十行的字。
+ */
+private class ArrowObstacleIndex(obstacles: List<ArrowObstacle>) {
+    val sorted: List<ArrowObstacle> = obstacles.sortedBy { it.rect.top }
+    private val tops: FloatArray = FloatArray(sorted.size) { sorted[it].rect.top }
+
+    /** 最高的那个障碍：二分起点要往上放宽这么多，才不会漏掉「起点更高、但下缘压住线段」的字。 */
+    val slack: Float = sorted.maxOfOrNull { it.rect.height } ?: 0f
+
+    /** 第一个上缘 ≥ [top] 的下标。 */
+    fun firstFrom(top: Float): Int {
+        var lo = 0
+        var hi = tops.size
+        while (lo < hi) {
+            val mid = (lo + hi) ushr 1
+            if (tops[mid] < top) lo = mid + 1 else hi = mid
+        }
+        return lo
+    }
+}
+
+/**
+ * 已画引线的索引：引线只有横竖段，按方向拆成两组、各按那条恒定坐标排好序。
+ *
+ * 量候选段时，横段只可能被「x 落在这一段范围内」的竖段穿过（共线的横段再单独按 y 找），
+ * 竖段对称。于是每条候选段只查十来条，不再把整页已画引线逐条算一遍包围盒
+ * （一页九条批注时已画引线有四十来段，乘上每条候选的四五段，这一笔在真机上是引线耗时的大头）。
+ *
+ * 斜段理论上不会出现（引线只有横平竖直）；万一出现，放一份到 [odd] 里逐条查，
+ * 保证「宁可多查，也不漏判」。
+ */
+private class DrawnSegmentIndex(segments: List<Pair<Offset, Offset>>) {
+    private val all: Array<Pair<Offset, Offset>> = segments.toTypedArray()
+    private val hSegs: Array<Pair<Offset, Offset>>
+    private val hAt: FloatArray
+    private val vSegs: Array<Pair<Offset, Offset>>
+    private val vAt: FloatArray
+    private val odd: Array<Pair<Offset, Offset>>
+
+    init {
+        val h = ArrayList<Pair<Offset, Offset>>()
+        val v = ArrayList<Pair<Offset, Offset>>()
+        val o = ArrayList<Pair<Offset, Offset>>()
+        for (s in segments) {
+            val horizontal = abs(s.first.y - s.second.y) < 0.01f
+            val vertical = abs(s.first.x - s.second.x) < 0.01f
+            when {
+                horizontal -> h += s
+                vertical -> v += s
+                else -> o += s
+            }
+        }
+        hSegs = h.sortedBy { it.first.y }.toTypedArray()
+        vSegs = v.sortedBy { it.first.x }.toTypedArray()
+        hAt = FloatArray(hSegs.size) { hSegs[it].first.y }
+        vAt = FloatArray(vSegs.size) { vSegs[it].first.x }
+        odd = o.toTypedArray()
+    }
+
+    /**
+     * 候选段与已画引线相交几次。[horizontal] 说明候选段是横段（[fixed] 是它的 y，
+     * [lo] / [hi] 是它沿 x 的范围）；竖段同理换成 x 与 y 范围。
+     */
+    fun crossings(horizontal: Boolean, ax: Float, ay: Float, bx: Float, by: Float, lo: Float, hi: Float): Int {
+        var n = 0
+        if (horizontal) {
+            var i = firstAtLeast(vAt, lo)
+            while (i < vSegs.size && vAt[i] <= hi) {
+                val s = vSegs[i]
+                if (segmentsIntersect(ax, ay, bx, by, s.first.x, s.first.y, s.second.x, s.second.y)) n++
+                i++
+            }
+            i = firstAtLeast(hAt, ay - 0.01f)
+            while (i < hSegs.size && hAt[i] <= ay + 0.01f) {
+                val s = hSegs[i]
+                if (segmentsIntersect(ax, ay, bx, by, s.first.x, s.first.y, s.second.x, s.second.y)) n++
+                i++
+            }
+        } else {
+            var i = firstAtLeast(hAt, lo)
+            while (i < hSegs.size && hAt[i] <= hi) {
+                val s = hSegs[i]
+                if (segmentsIntersect(ax, ay, bx, by, s.first.x, s.first.y, s.second.x, s.second.y)) n++
+                i++
+            }
+            i = firstAtLeast(vAt, ax - 0.01f)
+            while (i < vSegs.size && vAt[i] <= ax + 0.01f) {
+                val s = vSegs[i]
+                if (segmentsIntersect(ax, ay, bx, by, s.first.x, s.first.y, s.second.x, s.second.y)) n++
+                i++
+            }
+        }
+        for (s in odd) {
+            if (segmentsIntersect(ax, ay, bx, by, s.first.x, s.first.y, s.second.x, s.second.y)) n++
+        }
+        return n
+    }
+
+    /** 斜段 / 非横平竖直的退路：逐条比一遍。 */
+    fun crossingsAll(ax: Float, ay: Float, bx: Float, by: Float): Int {
+        var n = 0
+        for (s in all) {
+            if (segmentsIntersect(ax, ay, bx, by, s.first.x, s.first.y, s.second.x, s.second.y)) n++
+        }
+        return n
+    }
+
+    private fun firstAtLeast(values: FloatArray, v: Float): Int {
+        var lo = 0
+        var hi = values.size
+        while (lo < hi) {
+            val mid = (lo + hi) ushr 1
+            if (values[mid] < v) lo = mid + 1 else hi = mid
+        }
+        return lo
+    }
+}
 
 /** 标注框与锚点墨迹的关系（§6.1）：四类互斥，判定顺序固定。 */
 internal enum class NoteArrowRelation { RIGHT, LEFT, ABOVE, BELOW, SIDE }
@@ -2657,6 +3116,9 @@ internal fun noteArrowRelation(bubble: Rect, anchor: Rect): NoteArrowRelation {
  *   `BELOW_RIGHT` / `ABOVE_RIGHT` 从**左边**横着出去再竖回文字）。
  * @param lineBoxes 本页正文的行盒：竖着进的时候箭头**停在行盒边框上**、不侵入行盒内部
  *   （引线规则第 4 条）。缺省时退回逐字墨迹的边（单测与无行盒信息的调用）。
+ * @param targetInk 这条批注**决定落位的那一行**的逐字墨迹（2026-10-25 用户定口：哪个行确定了
+ *   位置，引线就指向哪一行）。右侧摆法取它最右那个字、左侧摆法取最左那个字；缺省空 =
+ *   退回旧口径「与框纵向最近的那一行」。
  */
 internal fun routeNoteArrow(
     bubble: Rect,
@@ -2668,11 +3130,15 @@ internal fun routeNoteArrow(
     lineH: Float = 0f,
     side: NoteSide? = null,
     lineBoxes: List<Rect> = emptyList(),
+    targetInk: List<Rect> = emptyList(),
 ): NoteArrow? {
     if (inkRects.isEmpty() || bubble.width <= 0f || bubble.height <= 0f) return null
     val anchor = rectUnion(inkRects)
     // 框已经贴住原文：连一根线的位置都没有，画出来只会压在字上。
-    if (rectDistance(bubble, anchor) <= NOTE_ARROW_MIN_GAP_PX) return null
+    // 量的是**要指的那一行**（[targetInk]）：多行选区首行比末行长时，贴在末行右侧的框
+    // 会落进整段包围盒里，但它离末行还有一段空档，引线照样画得出（2026-10-25）。
+    val hugInk = if (targetInk.isEmpty()) anchor else rectUnion(targetInk)
+    if (rectDistance(bubble, hugInk) <= NOTE_ARROW_MIN_GAP_PX) return null
     val relation = noteArrowRelation(bubble, anchor)
     // 沿边取点至少内缩 0.5em（引线规则第 6 条：端点不许落在四角）。旁注框的 em 取它的行高。
     val bubbleEm = if (lineH > 0f) lineH else bubble.height
@@ -2695,12 +3161,15 @@ internal fun routeNoteArrow(
     // 本页还一条引线都没画时不可能交叉：这时候「通畅就停」的老早停仍然成立，
     // 免得为了一个不可能出现的交叉数把折数一路试到上限。
     val anyDrawn = drawnSegments.isNotEmpty()
+    // 已画引线按横 / 竖分好桶：量候选段时只比「坐标落在这一段范围内」的那几条，
+    // 不再对每条候选段逐条算包围盒（真机上一页九条批注要乘上四十来段已画引线）。
+    val drawnIndex = DrawnSegmentIndex(drawnSegments)
     val window = max(lineH, 8f) * ARROW_BEND_WINDOW_LINES
     // 引线贴字门槛：旁注行高的 0.3 倍（lineH 缺省时放宽到 0：单测不量贴字）。
     val hugDistance = if (lineH > 0f) lineH * ARROW_HUG_LINES else 0f
-    // 目标：右侧摆法指向所选正文的**终点**（末行最右那个字），左侧摆法指向起点；
+    // 目标：右侧摆法指向**决定落位那一行**的终点（最右那个字），左侧摆法指向起点；
     // 正下 / 正上 / 退化调用才回到「最近的几个字」。
-    val targetPool = arrowTargetGlyphs(side, inkRects, bubble)
+    val targetPool = arrowTargetGlyphs(side, inkRects, bubble, targetInk)
     val targets = targetPool
         .sortedBy { rectDistance(bubble, it) }
         .take(ARROW_TARGET_LIMIT)
@@ -2724,9 +3193,17 @@ internal fun routeNoteArrow(
     var fallback: ArrowPath? = null
     var best: ArrowPath? = null
 
-    fun consider(points: List<Offset>, target: ArrowTarget) {
+    // 热路径的暂存区：候选折线先写进这两对数组，量完就丢。
+    // 真机上「一条候选 0.12ms」的大头就是每条候选一组短命对象（点列表 / 装箱的坐标），
+    // 一页几千条候选光 GC 就够呛；改成数组后逐条候选不再分配任何对象。
+    val rawX = FloatArray(ARROW_ROUTE_MAX_POINTS)
+    val rawY = FloatArray(ARROW_ROUTE_MAX_POINTS)
+    val ptsX = FloatArray(ARROW_ROUTE_MAX_POINTS)
+    val ptsY = FloatArray(ARROW_ROUTE_MAX_POINTS)
+
+    fun consider(xs: FloatArray, ys: FloatArray, count: Int, target: ArrowTarget) {
         val path = measureArrowRoute(
-            points, order++, target.obstacles, bubble, drawnSegments, hugDistance,
+            xs, ys, count, order++, target.index, bubble, drawnIndex, hugDistance,
             limitClear = best, limitFallback = fallback,
         ) ?: return
         if (path.clear) {
@@ -2745,21 +3222,33 @@ internal fun routeNoteArrow(
             } else {
                 abs(exit.point.x - entry.point.x) < 0.01f && abs(exit.point.y - entry.point.y) > 0.01f
             }
-            if (aligned) consider(listOf(exit.point, entry.point), target)
+            if (aligned) {
+                rawX[0] = exit.point.x
+                rawY[0] = exit.point.y
+                rawX[1] = entry.point.x
+                rawY[1] = entry.point.y
+                consider(rawX, rawY, 2, target)
+            }
         }
         // 1) 折线：只用横 / 竖段，且第一段 ⊥ 框边、最后一段 ⊥ 文字框边。
         // 折数由少到多，一旦这个折数有通畅路径就不再试更多折（少折永远优先）。
         for (bends in 1..ARROW_MAX_BENDS) {
-            for (points in noteElbowRoutes(
+            emitElbowRoutes(
                 start = exit.point,
                 end = entry.point,
-                obstacles = target.obstacles.map { it.rect },
+                obstacleRects = target.obstacleRects,
                 bends = bends,
                 extraYs = target.gapYs,
-            )) {
-                if (!orthogonalShaped(points, exit.horizontal, entry.horizontal)) continue
-                consider(points, target)
-            }
+                px = rawX,
+                py = rawY,
+                emit = { xs, ys, n ->
+                    // 先验形状再量：不合规矩的候选连障碍都不用看。
+                    val m = simplifyInto(xs, ys, n, ptsX, ptsY)
+                    if (m >= 2 && orthogonalShaped(ptsX, ptsY, m, exit.horizontal, entry.horizontal)) {
+                        consider(ptsX, ptsY, m, target)
+                    }
+                },
+            )
             // 只有「通畅且一条已画引线都不交叉」才值得停：判据里交叉数排第一，
             // 早停在这里会把「多折一次但绕开别人引线」的路子直接掐掉。
             if (best?.let { it.clear && (it.crosses == 0 || !anyDrawn) } == true) break
@@ -2803,20 +3292,22 @@ internal fun routeNoteArrow(
             )
             val edgeX = if (leftCorner) bubble.right else bubble.left
             if (abs(xEntry - edgeX) < 1f) continue
-            for (f in floatArrayOf(0.5f, 0.25f, 0.75f)) {
+            for (f in ARROW_EDGE_FRACTIONS) {
                 val y = clampInset(
                     bubble.top + bubbleEm * 0.5f,
                     bubble.bottom - bubbleEm * 0.5f,
                     bubble.top + bubble.height * f,
                 )
-                val points = listOf(
-                    Offset(edgeX, y),
-                    Offset(xEntry, y),
-                    Offset(xEntry, yEntry),
-                )
-                if (!orthogonalShaped(points, exitHorizontal = true, entryHorizontal = false)) continue
+                rawX[0] = edgeX
+                rawY[0] = y
+                rawX[1] = xEntry
+                rawY[1] = y
+                rawX[2] = xEntry
+                rawY[2] = yEntry
+                val m = simplifyInto(rawX, rawY, 3, ptsX, ptsY)
+                if (m < 2 || !orthogonalShaped(ptsX, ptsY, m, true, false)) continue
                 val near = measureArrowRoute(
-                    points, order++, t.obstacles, bubble, drawnSegments, hugDistance,
+                    ptsX, ptsY, m, order++, t.index, bubble, drawnIndex, hugDistance,
                 ) ?: continue
                 if (near.clear && near.betterThan(nearBest)) nearBest = near
             }
@@ -2862,27 +3353,34 @@ internal fun routeNoteArrow(
 }
 
 /**
- * 引线的目标字（§6.1，2026-10-24 用户定口）：
+ * 引线的目标字（§6.1，2026-10-24 用户定口 + 2026-10-25 补充）：
  *
- * - **放在正文右侧**（正右 / 右下 / 右上）→ 指向所选正文的**终点**：与框纵向最近的那一行里
- *   最靠右的那个字。框在文字右侧就进它的右侧面，框偏上 / 偏下就进上边 / 下边靠末端的位置。
- * - **放在左侧** → 对称地指向**起点**。
+ * - **放在正文右侧**（正右 / 右下 / 右上）→ 指向该行**最靠右**的那个字；**放在左侧** → 指向最左那个字。
+ * - 「该行」= [targetInk]（决定落位的那一行）；缺省空时退回旧口径「与框纵向最近的那一行」。
+ *   2026-10-25 用户定口：**哪一行确定了位置，引线就指向哪一行**——批注先贴末行，
+ *   末行放不下才落到首行，引线跟着一起过去，不再出现「框在末行旁边、箭头指首行」。
  * - 正下 / 正上 / 没有布点方向 → 仍旧取最近的几个字（最近那个被围死时还能换下一个）。
  */
-private fun arrowTargetGlyphs(side: NoteSide?, inkRects: List<Rect>, bubble: Rect): List<Rect> {
+private fun arrowTargetGlyphs(
+    side: NoteSide?,
+    inkRects: List<Rect>,
+    bubble: Rect,
+    targetInk: List<Rect> = emptyList(),
+): List<Rect> {
+    val pool = targetInk.ifEmpty { inkRects }
     val rightFamily = side == NoteSide.RIGHT || side == NoteSide.BELOW_RIGHT || side == NoteSide.ABOVE_RIGHT
     val leftFamily = side == NoteSide.LEFT || side == NoteSide.BELOW_LEFT || side == NoteSide.ABOVE_LEFT
     if (!rightFamily && !leftFamily) {
-        return inkRects.sortedBy { rectDistance(bubble, it) }.take(ARROW_TARGET_LIMIT)
+        return pool.sortedBy { rectDistance(bubble, it) }.take(ARROW_TARGET_LIMIT)
     }
-    // 与框纵向最近的那一行（多行选区里框贴着哪一行，就指哪一行的末端）。
+    // 与框纵向最近的那一行（同一行里框贴着哪儿都是它自己；退化成多行时才需要再挑一次）。
     fun gapY(r: Rect): Float = when {
         r.bottom <= bubble.top -> bubble.top - r.bottom
         r.top >= bubble.bottom -> r.top - bubble.bottom
         else -> 0f
     }
-    val rowAnchor = inkRects.minByOrNull { gapY(it) } ?: return emptyList()
-    val rowGlyphs = inkRects.filter {
+    val rowAnchor = pool.minByOrNull { gapY(it) } ?: return emptyList()
+    val rowGlyphs = pool.filter {
         abs(it.center.y - rowAnchor.center.y) <= max(it.height, rowAnchor.height) * 0.6f
     }
     val glyph = if (leftFamily) {
@@ -3141,23 +3639,34 @@ private fun arrowEntries(
 /**
  * 折线是否守规矩：**只有横竖段**，第一段垂直于框边（[exitHorizontal]）、
  * 最后一段垂直于文字框边（[entryHorizontal]）。
+ *
+ * 传进来的顶点必须已经去过零长段与共线拐点（[simplifyInto]）：这里不再化简一遍，
+ * 免得每条候选多扫一次数组。
  */
 private fun orthogonalShaped(
-    points: List<Offset>,
+    xs: FloatArray,
+    ys: FloatArray,
+    n: Int,
     exitHorizontal: Boolean,
     entryHorizontal: Boolean,
 ): Boolean {
-    val p = simplifyPolyline(points)
-    if (p.size < 2) return false
-    fun along(a: Offset, b: Offset, horizontal: Boolean): Boolean =
-        if (horizontal) {
-            abs(a.y - b.y) < 0.01f && abs(a.x - b.x) > 0.01f
-        } else {
-            abs(a.x - b.x) < 0.01f && abs(a.y - b.y) > 0.01f
-        }
-    if (!along(p[0], p[1], exitHorizontal)) return false
-    if (!along(p[p.size - 2], p[p.size - 1], entryHorizontal)) return false
-    return p.zipWithNext().all { (a, b) -> abs(a.x - b.x) < 0.01f || abs(a.y - b.y) < 0.01f }
+    if (n < 2) return false
+    val firstAlong = if (exitHorizontal) {
+        abs(ys[0] - ys[1]) < 0.01f && abs(xs[0] - xs[1]) > 0.01f
+    } else {
+        abs(xs[0] - xs[1]) < 0.01f && abs(ys[0] - ys[1]) > 0.01f
+    }
+    if (!firstAlong) return false
+    val lastAlong = if (entryHorizontal) {
+        abs(ys[n - 2] - ys[n - 1]) < 0.01f && abs(xs[n - 2] - xs[n - 1]) > 0.01f
+    } else {
+        abs(xs[n - 2] - xs[n - 1]) < 0.01f && abs(ys[n - 2] - ys[n - 1]) > 0.01f
+    }
+    if (!lastAlong) return false
+    for (i in 1 until n) {
+        if (abs(xs[i] - xs[i - 1]) >= 0.01f && abs(ys[i] - ys[i - 1]) >= 0.01f) return false
+    }
+    return true
 }
 
 /**
@@ -3166,6 +3675,8 @@ private fun orthogonalShaped(
  *
  * 折点坐标取自两端与附近障碍的四边（外扩 [ARROW_BEND_CLEARANCE_PX]），按离中点由近到远取前几个，
  * 近的更容易凑出短路径；两端中点补在最后。返回顺序固定，同一输入结果恒定。
+ *
+ * 一次取全部候选（测试与排查用）；路由热路径走 [emitElbowRoutes] 逐条吐。
  */
 internal fun noteElbowRoutes(
     start: Offset,
@@ -3175,43 +3686,154 @@ internal fun noteElbowRoutes(
     /** 额外的候选 y 坐标（通常是相邻两行墨迹的中线）：排在前面，优先被取到。 */
     extraYs: List<Float> = emptyList(),
 ): List<List<Offset>> {
-    if (bends !in 1..ARROW_MAX_BENDS) return emptyList()
-    val xs = ArrayList<Float>(obstacles.size + 2)
-    val ys = ArrayList<Float>(obstacles.size + 2)
-    xs += start.x
-    xs += end.x
-    ys += start.y
-    ys += end.y
-    for (r in obstacles) {
-        xs += r.left - ARROW_BEND_CLEARANCE_PX
-        xs += r.right + ARROW_BEND_CLEARANCE_PX
-        ys += r.top - ARROW_BEND_CLEARANCE_PX
-        ys += r.bottom + ARROW_BEND_CLEARANCE_PX
+    val out = ArrayList<List<Offset>>()
+    emitElbowRoutes(
+        start = start,
+        end = end,
+        obstacleRects = obstacles,
+        bends = bends,
+        extraYs = extraYs,
+        px = FloatArray(ARROW_ROUTE_MAX_POINTS),
+        py = FloatArray(ARROW_ROUTE_MAX_POINTS),
+    ) { xs, ys, n ->
+        out += List(n) { Offset(xs[it], ys[it]) }
     }
-    val bendXs = pickCoords(xs, (start.x + end.x) * 0.5f).toMutableList()
-    val bendYs = LinkedHashSet<Float>()
-    for (y in extraYs.take(2)) bendYs += y
-    for (y in pickCoords(ys, (start.y + end.y) * 0.5f)) bendYs += y
+    return out
+}
+
+/**
+ * 折线候选的**生成器内核**：一条一条写进 [px] / [py]（[emit] 拿到点数 [n]），不等整批建成
+ * 点列表再量。
+ *
+ * 为什么这么做：一页九条批注最贵的一步就是引线，一对端点在 4 折档上就有三百来条候选。
+ * 先建成「几百个点列表」再逐条量，等于给每一对端点白扔一大堆马上作废的对象；
+ * 真机（ART）上没有 JVM 那种逃逸分析兜底，这些短命对象最后都落在 GC 上。
+ *
+ * 顺序与 [noteElbowRoutes] 完全一致（同一输入逐条同序），所以选择结果不变。
+ */
+private inline fun emitElbowRoutes(
+    start: Offset,
+    end: Offset,
+    obstacleRects: List<Rect>,
+    bends: Int,
+    extraYs: List<Float>,
+    px: FloatArray,
+    py: FloatArray,
+    emit: (FloatArray, FloatArray, Int) -> Unit,
+) {
+    if (bends !in 1..ARROW_MAX_BENDS) return
+    val xs = FloatArray(obstacleRects.size * 2 + 2)
+    val ys = FloatArray(obstacleRects.size * 2 + 2)
+    var xn = 0
+    var yn = 0
+    xs[xn++] = start.x
+    xs[xn++] = end.x
+    ys[yn++] = start.y
+    ys[yn++] = end.y
+    for (r in obstacleRects) {
+        xs[xn++] = r.left - ARROW_BEND_CLEARANCE_PX
+        xs[xn++] = r.right + ARROW_BEND_CLEARANCE_PX
+        ys[yn++] = r.top - ARROW_BEND_CLEARANCE_PX
+        ys[yn++] = r.bottom + ARROW_BEND_CLEARANCE_PX
+    }
+    // 折点坐标的候选池：横向（竖带用）与纵向（横带用）各一层。
+    // 先就地把坐标排好序、去掉 0.5px 以内的重号，之后每次「取离中点最近的几个」
+    // 只要二分定位 + 两头往外扩 —— 否则一页要在这几个小数组上比上千万次（真机上真能吃掉几十毫秒）。
+    xs.sort(0, xn)
+    ys.sort(0, yn)
+    xn = uniqueFloats(xs, xn)
+    yn = uniqueFloats(ys, yn)
+    val bendXs = FloatArray(ARROW_MAX_BEND_COORDS + 1)
+    var bendXn = pickCoords(xs, xn, (start.x + end.x) * 0.5f, bendXs, ARROW_MAX_BEND_COORDS)
+    // 纵向候选：行间中线排在前面（优先被取到），再补「离中点最近的坐标」，最后是两端中点。
+    val bendYs = FloatArray(ARROW_MAX_BEND_COORDS + 3)
+    var bendYn = 0
+    for (y in extraYs) {
+        if (bendYn >= 2) break
+        bendYs[bendYn++] = y
+    }
+    val pickedYs = FloatArray(ARROW_MAX_BEND_COORDS)
+    val pickedYn = pickCoords(ys, yn, (start.y + end.y) * 0.5f, pickedYs)
+    for (i in 0 until pickedYn) {
+        val v = pickedYs[i]
+        var dup = false
+        for (j in 0 until bendYn) {
+            if (bendYs[j] == v) {
+                dup = true
+                break
+            }
+        }
+        if (!dup) bendYs[bendYn++] = v
+    }
     // 两端都不在障碍边上时（比如空地上折一次），中线坐标是唯一能同时满足「首末段垂直」的落点，
     // 所以补在最后：不抢前面候选的先后，只在它们都不通时才用上。
     val midX = (start.x + end.x) * 0.5f
     val midY = (start.y + end.y) * 0.5f
-    if (bendXs.none { abs(it - midX) <= 0.5f } && abs(start.x - end.x) > 0.01f) bendXs += midX
-    if (bendYs.none { abs(it - midY) <= 0.5f } && abs(start.y - end.y) > 0.01f) bendYs += midY
-    val out = ArrayList<List<Offset>>()
+    if (abs(start.x - end.x) > 0.01f) {
+        var hasMidX = false
+        for (i in 0 until bendXn) {
+            if (abs(bendXs[i] - midX) <= 0.5f) {
+                hasMidX = true
+                break
+            }
+        }
+        if (!hasMidX) bendXs[bendXn++] = midX
+    }
+    if (abs(start.y - end.y) > 0.01f) {
+        var hasMidY = false
+        for (i in 0 until bendYn) {
+            if (abs(bendYs[i] - midY) <= 0.5f) {
+                hasMidY = true
+                break
+            }
+        }
+        if (!hasMidY) bendYs[bendYn++] = midY
+    }
     when (bends) {
         1 -> {
-            out += listOf(start, Offset(end.x, start.y), end)
-            out += listOf(start, Offset(start.x, end.y), end)
+            emitPoints(
+                px, py, 3,
+                start.x, start.y, end.x, start.y, end.x, end.y,
+                0f, 0f, 0f, 0f, 0f, 0f, emit,
+            )
+            emitPoints(
+                px, py, 3,
+                start.x, start.y, start.x, end.y, end.x, end.y,
+                0f, 0f, 0f, 0f, 0f, 0f, emit,
+            )
         }
         2 -> {
-            for (x in bendXs) out += listOf(start, Offset(x, start.y), Offset(x, end.y), end)
-            for (y in bendYs) out += listOf(start, Offset(start.x, y), Offset(end.x, y), end)
+            for (i in 0 until bendXn) {
+                val x = bendXs[i]
+                emitPoints(
+                    px, py, 4,
+                    start.x, start.y, x, start.y, x, end.y, end.x, end.y,
+                    0f, 0f, 0f, 0f, emit,
+                )
+            }
+            for (i in 0 until bendYn) {
+                val y = bendYs[i]
+                emitPoints(
+                    px, py, 4,
+                    start.x, start.y, start.x, y, end.x, y, end.x, end.y,
+                    0f, 0f, 0f, 0f, emit,
+                )
+            }
         }
-        3 -> for (x in bendXs) {
-            for (y in bendYs) {
-                out += listOf(start, Offset(x, start.y), Offset(x, y), Offset(end.x, y), end)
-                out += listOf(start, Offset(start.x, y), Offset(x, y), Offset(x, end.y), end)
+        3 -> for (i in 0 until bendXn) {
+            val x = bendXs[i]
+            for (j in 0 until bendYn) {
+                val y = bendYs[j]
+                emitPoints(
+                    px, py, 5,
+                    start.x, start.y, x, start.y, x, y, end.x, y, end.x, end.y,
+                    0f, 0f, emit,
+                )
+                emitPoints(
+                    px, py, 5,
+                    start.x, start.y, start.x, y, x, y, x, end.y, end.x, end.y,
+                    0f, 0f, emit,
+                )
             }
         }
         // 四折只做「绕开一整条竖带 / 横带」两族：两臂各一个自由坐标，够绕过图形与表格。
@@ -3219,45 +3841,125 @@ internal fun noteElbowRoutes(
         // **贴着起点 / 终点那一侧取**——只取离中点最近的几个会漏掉「先横到障碍之外、再竖过去」
         // 的那一对（真机第 5/6 条：从两行字之间横穿的绕行正是这种形状）。
         else -> {
-            val xsFromStart = pickCoords(xs, start.x).take(4)
-            val xsFromEnd = pickCoords(xs, end.x).take(4)
-            val ysFromStart = pickCoords(ys, start.y).take(4)
-            val ysFromEnd = pickCoords(ys, end.y).take(4)
-            for (x1 in xsFromStart) {
-                for (x2 in xsFromEnd) {
-                    for (y in bendYs) {
-                        out += listOf(
-                            start, Offset(x1, start.y), Offset(x1, y),
-                            Offset(x2, y), Offset(x2, end.y), end,
+            val xsFromStart = FloatArray(4)
+            val xsFromEnd = FloatArray(4)
+            val ysFromStart = FloatArray(4)
+            val ysFromEnd = FloatArray(4)
+            val xsn = pickCoords(xs, xn, start.x, xsFromStart)
+            val xen = pickCoords(xs, xn, end.x, xsFromEnd)
+            val ysn = pickCoords(ys, yn, start.y, ysFromStart)
+            val yen = pickCoords(ys, yn, end.y, ysFromEnd)
+            for (i in 0 until xsn) {
+                val x1 = xsFromStart[i]
+                for (j in 0 until xen) {
+                    val x2 = xsFromEnd[j]
+                    for (k in 0 until bendYn) {
+                        val y = bendYs[k]
+                        emitPoints(
+                            px, py, 6,
+                            start.x, start.y, x1, start.y, x1, y, x2, y, x2, end.y, end.x, end.y,
+                            emit,
                         )
                     }
                 }
             }
-            for (y1 in ysFromStart) {
-                for (y2 in ysFromEnd) {
-                    for (x in bendXs) {
-                        out += listOf(
-                            start, Offset(start.x, y1), Offset(x, y1),
-                            Offset(x, y2), Offset(end.x, y2), end,
+            for (i in 0 until ysn) {
+                val y1 = ysFromStart[i]
+                for (j in 0 until yen) {
+                    val y2 = ysFromEnd[j]
+                    for (k in 0 until bendXn) {
+                        val x = bendXs[k]
+                        emitPoints(
+                            px, py, 6,
+                            start.x, start.y, start.x, y1, x, y1, x, y2, end.x, y2, end.x, end.y,
+                            emit,
                         )
                     }
                 }
             }
         }
     }
-    return out
 }
 
-/** 按离 [mid] 由近到远取至多 [ARROW_MAX_BEND_COORDS] 个坐标（差半像素以内算同一个）。 */
-private fun pickCoords(values: List<Float>, mid: Float): List<Float> {
-    val sorted = values.sortedBy { abs(it - mid) }
-    val out = ArrayList<Float>(ARROW_MAX_BEND_COORDS)
-    for (v in sorted) {
-        if (out.any { abs(it - v) <= 0.5f }) continue
-        out += v
-        if (out.size >= ARROW_MAX_BEND_COORDS) break
+/** 把一条折线写进暂存数组并交给 [emit]：顶点数最多 6（4 折），没用的坐标填 0。 */
+private inline fun emitPoints(
+    px: FloatArray,
+    py: FloatArray,
+    n: Int,
+    x0: Float, y0: Float,
+    x1: Float, y1: Float,
+    x2: Float, y2: Float,
+    x3: Float, y3: Float,
+    x4: Float, y4: Float,
+    x5: Float, y5: Float,
+    emit: (FloatArray, FloatArray, Int) -> Unit,
+) {
+    px[0] = x0
+    py[0] = y0
+    px[1] = x1
+    py[1] = y1
+    px[2] = x2
+    py[2] = y2
+    if (n > 3) {
+        px[3] = x3
+        py[3] = y3
     }
-    return out
+    if (n > 4) {
+        px[4] = x4
+        py[4] = y4
+    }
+    if (n > 5) {
+        px[5] = x5
+        py[5] = y5
+    }
+    emit(px, py, n)
+}
+
+/**
+ * 按离 [mid] 由近到远取至多 [limit] 个坐标，写进 [out]。
+ *
+ * [values] 的前 [count] 个必须**已升序、且两两相差超过 0.5px**（[emitElbowRoutes] 入口就排好去重了）：
+ * 于是「取最近的几个」只要二分找到 mid 落点，再像归并那样从两头往外扩。全程不分配、也不装箱。
+ */
+private fun pickCoords(
+    values: FloatArray,
+    count: Int,
+    mid: Float,
+    out: FloatArray,
+    limit: Int = out.size,
+): Int {
+    if (count <= 0) return 0
+    var lo = 0
+    var hi = count
+    while (lo < hi) {
+        val m = (lo + hi) ushr 1
+        if (values[m] < mid) lo = m + 1 else hi = m
+    }
+    var left = lo - 1
+    var right = lo
+    var picked = 0
+    val cap = min(limit, out.size)
+    while (picked < cap && (left >= 0 || right < count)) {
+        val takeLeft = if (left < 0) {
+            false
+        } else if (right >= count) {
+            true
+        } else {
+            abs(values[left] - mid) <= abs(values[right] - mid)
+        }
+        out[picked++] = if (takeLeft) values[left--] else values[right++]
+    }
+    return picked
+}
+
+/** 就地去掉 0.5px 以内的重号（输入已升序），返回剩下的个数。 */
+private fun uniqueFloats(values: FloatArray, count: Int): Int {
+    var n = 0
+    for (i in 0 until count) {
+        if (n > 0 && abs(values[i] - values[n - 1]) <= 0.5f) continue
+        values[n++] = values[i]
+    }
+    return n
 }
 
 
@@ -3265,12 +3967,21 @@ private fun pickCoords(values: List<Float>, mid: Float): List<Float> {
 /** 候选路径的实测次数（真机排查用：一页引线慢的时候先看这个数）。 */
 internal var noteArrowRouteTries: Int = 0
 
+/**
+ * 量一条候选折线（顶点已经去过零长段与共线拐点）。
+ *
+ * 入口用数组而不是点列表：真机上一页九条批注要量两千多条候选，每条都先建一份点列表的话，
+ * 光这些马上作废的对象就够 GC 忙一阵（JVM 有逃逸分析兜底，真机没有）。
+ * 只有**量完没被掐掉**的候选才建点列表（[ArrowPath]）。
+ */
 private fun measureArrowRoute(
-    route: List<Offset>,
+    xs: FloatArray,
+    ys: FloatArray,
+    count: Int,
     order: Int,
-    obstacles: List<ArrowObstacle>,
+    obstacles: ArrowObstacleIndex,
     bubble: Rect,
-    drawnSegments: List<Pair<Offset, Offset>>,
+    drawn: DrawnSegmentIndex,
     hugDistance: Float = 0f,
     /**
      * 现有的通畅路径 / 兜底路径：量到一半就已经**赢不了**它们时立刻放弃。
@@ -3284,36 +3995,46 @@ private fun measureArrowRoute(
     limitFallback: ArrowPath? = null,
 ): ArrowPath? {
     noteArrowRouteTries++
-    val points = simplifyPolyline(route)
-    if (points.size < 2) return null
-    val bends = max(0, points.size - 2)
+    if (count < 2) return null
+    val bends = max(0, count - 2)
     var length = 0f
     var hits = 0f
     var crosses = 0
     var hug = 0f
     var enters = false
-    for (i in 1 until points.size) {
-        val a = points[i - 1]
-        val b = points[i]
-        val len = segmentLength(a, b)
+    for (i in 1 until count) {
+        val ax = xs[i - 1]
+        val ay = ys[i - 1]
+        val bx = xs[i]
+        val by = ys[i]
+        val dx = bx - ax
+        val dy = by - ay
+        val len = sqrt(dx * dx + dy * dy)
         if (len < 0.01f) continue
         length += len
-        if (insideSpan(a, b, bubble, ARROW_OWN_BUBBLE_TOL_PX) > 1e-6f) enters = true
+        if (insideSpan(ax, ay, dx, dy, bubble, ARROW_OWN_BUBBLE_TOL_PX) > 1e-6f) enters = true
         // 先用线段的包围盒粗筛：绝大多数字形连边都碰不到，省掉逐块的裁剪计算。
-        val segLeft = min(a.x, b.x)
-        val segRight = max(a.x, b.x)
-        val segTop = min(a.y, b.y)
-        val segBottom = max(a.y, b.y)
-        val horizontal = abs(a.y - b.y) < 0.01f
-        val vertical = abs(a.x - b.x) < 0.01f
-        for (o in obstacles) {
+        val segLeft = min(ax, bx)
+        val segRight = max(ax, bx)
+        val segTop = min(ay, by)
+        val segBottom = max(ay, by)
+        val horizontal = abs(ay - by) < 0.01f
+        val vertical = abs(ax - bx) < 0.01f
+        // 只扫「纵向可能碰到这段」的那几行：按上缘排好序，起点上移一个最高障碍、
+        // 扫到下缘超过线段就收手。结果与全量扫一致，但不白看上下的几十个字。
+        val nearby = obstacles.sorted
+        var oi = obstacles.firstFrom(segTop - hugDistance - obstacles.slack)
+        while (oi < nearby.size) {
+            val o = nearby[oi]
+            oi++
+            if (o.rect.top > segBottom + hugDistance) break
             // 粗筛要把「贴字」的门槛算进去：刚好在门槛以内的字形不能因为包围盒不相交被跳过。
             if (o.rect.right < segLeft - hugDistance || o.rect.left > segRight + hugDistance ||
                 o.rect.bottom < segTop - hugDistance || o.rect.top > segBottom + hugDistance
             ) {
                 continue
             }
-            val span = insideSpan(a, b, o.rect, o.tol)
+            val span = insideSpan(ax, ay, dx, dy, o.rect, o.tol)
             if (span > 1e-6f) hits += span * len
             // 「贴字」只量平行段：横线看它离上下字墨迹的垂直距离，竖线看左右距离。
             // 斜着接近字边（入口那一段）不算——箭头本来就要接住字。
@@ -3327,13 +4048,13 @@ private fun measureArrowRoute(
             ) {
                 val d = when {
                     horizontal -> when {
-                        a.y <= o.rect.top -> o.rect.top - a.y
-                        a.y >= o.rect.bottom -> a.y - o.rect.bottom
+                        ay <= o.rect.top -> o.rect.top - ay
+                        ay >= o.rect.bottom -> ay - o.rect.bottom
                         else -> 0f
                     }
                     vertical -> when {
-                        a.x <= o.rect.left -> o.rect.left - a.x
-                        a.x >= o.rect.right -> a.x - o.rect.right
+                        ax <= o.rect.left -> o.rect.left - ax
+                        ax >= o.rect.right -> ax - o.rect.right
                         else -> 0f
                     }
                     else -> Float.MAX_VALUE
@@ -3341,10 +4062,15 @@ private fun measureArrowRoute(
                 if (d < hugDistance) hug += hugDistance - d
             }
         }
-        for (d in drawnSegments) {
-            if (segmentsIntersect(a, b, d.first, d.second)) crosses++
-        }
-        // 已量到的部分就赢不了了：后面的段只会让交叉 / 穿字 / 长度继续变大。
+        // 已画引线走索引：横段只比「x 落在这段里」的竖段与同 y 的横段，竖段对称。
+        crosses += if (horizontal) {
+            drawn.crossings(true, ax, ay, bx, by, segLeft, segRight)
+        } else if (vertical) {
+            drawn.crossings(false, ax, ay, bx, by, segTop, segBottom)
+        } else {
+            // 斜段（正常不会出现）：退回逐条比，宁可多查也不漏判。
+            drawn.crossingsAll(ax, ay, bx, by)
+        }        // 已量到的部分就赢不了了：后面的段只会让交叉 / 穿字 / 长度继续变大。
         if (limitClear != null) {
             if (crosses > limitClear.crosses) return null
             if (crosses == limitClear.crosses) {
@@ -3376,8 +4102,8 @@ private fun measureArrowRoute(
     }
     if (length < 0.01f) return null
     return ArrowPath(
-        points = points,
-        bends = max(0, points.size - 2),
+        points = List(count) { Offset(xs[it], ys[it]) },
+        bends = bends,
         length = length,
         crosses = crosses,
         hits = hits,
@@ -3393,9 +4119,7 @@ private fun measureArrowRoute(
  * 矩形先按 [tol] 内缩：[tol] 是该层容差（逐字墨迹 0.5px、图形 / 旁注框 1px），
  * 贴边与平行贴边都不算穿过。返回的是 t 区间长度，乘上段长才是穿透长度。
  */
-private fun insideSpan(a: Offset, b: Offset, r: Rect, tol: Float): Float {
-    val dx = b.x - a.x
-    val dy = b.y - a.y
+private fun insideSpan(ax: Float, ay: Float, dx: Float, dy: Float, r: Rect, tol: Float): Float {
     val left = r.left + tol
     val right = r.right - tol
     val top = r.top + tol
@@ -3403,50 +4127,114 @@ private fun insideSpan(a: Offset, b: Offset, r: Rect, tol: Float): Float {
     if (left >= right || top >= bottom) return 0f
     var t0 = 0f
     var t1 = 1f
-    val p = floatArrayOf(-dx, dx, -dy, dy)
-    val q = floatArrayOf(a.x - left, right - a.x, a.y - top, bottom - a.y)
-    for (i in 0..3) {
-        if (abs(p[i]) < 1e-6f) {
-            // 平行且贴在这条边上：不算穿过。
-            if (q[i] <= 0f) return 0f
+    // Liang–Barsky 四条边逐条裁剪。这里刻意**不建数组**：一条引线要量成百上千条候选 ×
+    // 每段十几个障碍，数组（哪怕只有四个元素）在这里就是热路径上最大的垃圾来源。
+    // 左：p = -dx, q = a.x - left
+    val pLeft = -dx
+    val qLeft = ax - left
+    if (abs(pLeft) < 1e-6f) {
+        // 平行且贴在这条边上：不算穿过。
+        if (qLeft <= 0f) return 0f
+    } else {
+        val t = qLeft / pLeft
+        if (pLeft < 0f) {
+            if (t > t1) return 0f
+            if (t > t0) t0 = t
         } else {
-            val t = q[i] / p[i]
-            if (p[i] < 0f) {
-                if (t > t1) return 0f
-                if (t > t0) t0 = t
-            } else {
-                if (t < t0) return 0f
-                if (t < t1) t1 = t
-            }
+            if (t < t0) return 0f
+            if (t < t1) t1 = t
+        }
+    }
+    // 右：p = dx, q = right - a.x
+    val pRight = dx
+    val qRight = right - ax
+    if (abs(pRight) < 1e-6f) {
+        if (qRight <= 0f) return 0f
+    } else {
+        val t = qRight / pRight
+        if (pRight < 0f) {
+            if (t > t1) return 0f
+            if (t > t0) t0 = t
+        } else {
+            if (t < t0) return 0f
+            if (t < t1) t1 = t
+        }
+    }
+    // 上：p = -dy, q = a.y - top
+    val pTop = -dy
+    val qTop = ay - top
+    if (abs(pTop) < 1e-6f) {
+        if (qTop <= 0f) return 0f
+    } else {
+        val t = qTop / pTop
+        if (pTop < 0f) {
+            if (t > t1) return 0f
+            if (t > t0) t0 = t
+        } else {
+            if (t < t0) return 0f
+            if (t < t1) t1 = t
+        }
+    }
+    // 下：p = dy, q = bottom - a.y
+    val pBottom = dy
+    val qBottom = bottom - ay
+    if (abs(pBottom) < 1e-6f) {
+        if (qBottom <= 0f) return 0f
+    } else {
+        val t = qBottom / pBottom
+        if (pBottom < 0f) {
+            if (t > t1) return 0f
+            if (t > t0) t0 = t
+        } else {
+            if (t < t0) return 0f
+            if (t < t1) t1 = t
         }
     }
     return if (t1 > t0) t1 - t0 else 0f
 }
 
-/** 去掉零长段与共线拐点（画出来还是同一条折线）。 */
-private fun simplifyPolyline(points: List<Offset>): List<Offset> {
-    val out = ArrayList<Offset>(points.size)
-    for (p in points) {
-        val last = out.lastOrNull()
-        if (last != null && abs(p.x - last.x) < 0.01f && abs(p.y - last.y) < 0.01f) continue
-        out += p
+/**
+ * 去掉零长段与共线拐点（画出来还是同一条折线），结果写进 [outX] / [outY]，返回顶点数。
+ *
+ * 用数组就地化简：每条候选都要过一次，不能在这里建列表。
+ */
+private fun simplifyInto(
+    srcX: FloatArray,
+    srcY: FloatArray,
+    count: Int,
+    outX: FloatArray,
+    outY: FloatArray,
+): Int {
+    var n = 0
+    for (i in 0 until count) {
+        val x = srcX[i]
+        val y = srcY[i]
+        if (n > 0 && abs(x - outX[n - 1]) < 0.01f && abs(y - outY[n - 1]) < 0.01f) continue
+        outX[n] = x
+        outY[n] = y
+        n++
     }
     var i = 1
-    while (i < out.size - 1) {
-        val a = out[i - 1]
-        val b = out[i]
-        val c = out[i + 1]
-        val collinear = (abs(a.x - b.x) < 0.01f && abs(b.x - c.x) < 0.01f) ||
-            (abs(a.y - b.y) < 0.01f && abs(b.y - c.y) < 0.01f)
-        if (collinear) out.removeAt(i) else i++
+    while (i < n - 1) {
+        val ax = outX[i - 1]
+        val ay = outY[i - 1]
+        val bx = outX[i]
+        val by = outY[i]
+        val cx = outX[i + 1]
+        val cy = outY[i + 1]
+        val collinear = (abs(ax - bx) < 0.01f && abs(bx - cx) < 0.01f) ||
+            (abs(ay - by) < 0.01f && abs(by - cy) < 0.01f)
+        if (collinear) {
+            for (k in i until n - 1) {
+                outX[k] = outX[k + 1]
+                outY[k] = outY[k + 1]
+            }
+            n--
+        } else {
+            i++
+        }
     }
-    return out
-}
-
-private fun segmentLength(a: Offset, b: Offset): Float {
-    val dx = b.x - a.x
-    val dy = b.y - a.y
-    return sqrt(dx * dx + dy * dy)
+    return n
 }
 
 private fun ArrowPath.toNoteArrow(): NoteArrow =
@@ -3462,24 +4250,33 @@ private fun arrowSegments(arrow: NoteArrow): List<Pair<Offset, Offset>> = when (
 }
 
 /** 两条线段是否相交（含端点接触；用于引线交叉计费）。 */
-private fun segmentsIntersect(a: Offset, b: Offset, c: Offset, d: Offset): Boolean {
-    val o1 = orientation(a, b, c)
-    val o2 = orientation(a, b, d)
-    val o3 = orientation(c, d, a)
-    val o4 = orientation(c, d, b)
+private fun segmentsIntersect(
+    ax: Float,
+    ay: Float,
+    bx: Float,
+    by: Float,
+    cx: Float,
+    cy: Float,
+    dx: Float,
+    dy: Float,
+): Boolean {
+    val o1 = orientation(ax, ay, bx, by, cx, cy)
+    val o2 = orientation(ax, ay, bx, by, dx, dy)
+    val o3 = orientation(cx, cy, dx, dy, ax, ay)
+    val o4 = orientation(cx, cy, dx, dy, bx, by)
     if (o1 * o2 < -1e-6f && o3 * o4 < -1e-6f) return true
-    return (abs(o1) < 1e-6f && onSegment(a, b, c)) ||
-        (abs(o2) < 1e-6f && onSegment(a, b, d)) ||
-        (abs(o3) < 1e-6f && onSegment(c, d, a)) ||
-        (abs(o4) < 1e-6f && onSegment(c, d, b))
+    return (abs(o1) < 1e-6f && onSegment(ax, ay, bx, by, cx, cy)) ||
+        (abs(o2) < 1e-6f && onSegment(ax, ay, bx, by, dx, dy)) ||
+        (abs(o3) < 1e-6f && onSegment(cx, cy, dx, dy, ax, ay)) ||
+        (abs(o4) < 1e-6f && onSegment(cx, cy, dx, dy, bx, by))
 }
 
-private fun orientation(a: Offset, b: Offset, c: Offset): Float =
-    (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+private fun orientation(ax: Float, ay: Float, bx: Float, by: Float, cx: Float, cy: Float): Float =
+    (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
 
-private fun onSegment(a: Offset, b: Offset, p: Offset): Boolean =
-    p.x >= min(a.x, b.x) - 0.01f && p.x <= max(a.x, b.x) + 0.01f &&
-        p.y >= min(a.y, b.y) - 0.01f && p.y <= max(a.y, b.y) + 0.01f
+private fun onSegment(ax: Float, ay: Float, bx: Float, by: Float, px: Float, py: Float): Boolean =
+    px >= min(ax, bx) - 0.01f && px <= max(ax, bx) + 0.01f &&
+        py >= min(ay, by) - 0.01f && py <= max(ay, by) + 0.01f
 
 /**
  * 旁注的实测尺子：与 [NoteBubbles] 里那条 `Text` 用同一套 Compose 文字测量。

@@ -1,6 +1,8 @@
 package orilumn.reader.ui.reader
 
 import androidx.compose.ui.geometry.Rect
+import com.sun.management.ThreadMXBean
+import java.lang.management.ManagementFactory
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 import kotlin.system.measureNanoTime
@@ -15,6 +17,15 @@ import kotlin.system.measureNanoTime
  * 目标见 `docs/新版批注规则-改造方案.md` §4.7（≤ 40 次、JVM ≤ 10ms）。
  */
 class NoteBubblesPerfProbe {
+
+    /**
+     * 本线程累计分配字节数：真机上「每条候选 0.12ms」最可疑的就是短命对象太多
+     * （JVM 有逃逸分析，光看耗时看不出来，所以直接量分配）。
+     */
+    private fun allocatedBytes(): Long {
+        val mx = ManagementFactory.getThreadMXBean() as? ThreadMXBean ?: return 0L
+        return mx.currentThreadAllocatedBytes
+    }
 
     private class CountingSizer(
         private val delegate: NoteTextSizer = EstimatedNoteTextSizer,
@@ -176,12 +187,19 @@ class NoteBubblesPerfProbe {
         counter.natural = 0
         counter.fits = 0
         var placeTime = Long.MAX_VALUE
+        var placeTries = 0
+        var placeAlloc = 0L
         var round = 0
         while (round < 3) {
+            val allocBefore = allocatedBytes()
             val start = System.nanoTime()
             out = place()
             val spent = System.nanoTime() - start
-            if (spent < placeTime) placeTime = spent
+            if (spent < placeTime) {
+                placeTime = spent
+                placeTries = noteArrowRouteTries
+                placeAlloc = allocatedBytes() - allocBefore
+            }
             round++
         }
 
@@ -189,8 +207,10 @@ class NoteBubblesPerfProbe {
             b.annotationId to Rect(b.leftPx, b.topPx, b.leftPx + b.widthPx, b.topPx + b.heightPx)
         }
         var arrows = 0
+        // 与生产同构：先前画的引线要算交叉，后画的才可能被「赢不了就放弃」掐掉。
         fun routeAll() {
             arrows = 0
+            val drawn = ArrayList<NoteArrow>(out.size)
             for (b in out) {
                 if (b.compact) continue
                 val ink = notes.first { it.annotationId == b.annotationId }.arrowInk
@@ -202,21 +222,33 @@ class NoteBubblesPerfProbe {
                     glyphs = page.glyphs,
                     solids = emptyList(),
                     otherBubbles = others,
-                    drawnArrows = emptyList(),
+                    drawnArrows = drawn,
                     lineH = metrics.lineH,
                     side = null,
                 )
-                if (a != null) arrows++
+                if (a != null) {
+                    arrows++
+                    drawn += a
+                }
             }
         }
+        noteArrowRouteTries = 0
         routeAll()
         var routeTime = Long.MAX_VALUE
+        var routeTries = 0
+        var routeAlloc = 0L
         var routeRound = 0
         while (routeRound < 3) {
+            noteArrowRouteTries = 0
+            val allocBefore = allocatedBytes()
             val start = System.nanoTime()
             routeAll()
             val spent = System.nanoTime() - start
-            if (spent < routeTime) routeTime = spent
+            if (spent < routeTime) {
+                routeTime = spent
+                routeTries = noteArrowRouteTries
+                routeAlloc = allocatedBytes() - allocBefore
+            }
             routeRound++
         }
         println(
@@ -224,8 +256,10 @@ class NoteBubblesPerfProbe {
                 "free=${freeTime / 1_000_000}ms " +
                 "candidates=${candTime / 1_000_000}ms candQueries=$candQueries candReal=$candCalls " +
                 "place=${placeTime / 1_000_000}ms placeQueries=${sizer.queries} " +
+                "placeTries=$placeTries placeAlloc=${placeAlloc / 1024}KB " +
                 "placeReal=${counter.calls}(${counter.natural}/${counter.fits}) " +
-                "route=${routeTime / 1_000_000}ms tries=$noteArrowRouteTries arrows=$arrows bubbles=${out.size} " +
+                "route=${routeTime / 1_000_000}ms tries=$routeTries routeAlloc=${routeAlloc / 1024}KB " +
+                "arrows=$arrows bubbles=${out.size} " +
                 "compact=${out.count { it.compact }} freeRects=${freeRects.size} glyphs=${page.glyphs.size}",
         )
     }

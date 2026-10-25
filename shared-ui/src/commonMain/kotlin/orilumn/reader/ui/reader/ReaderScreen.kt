@@ -68,8 +68,11 @@ import kotlinx.coroutines.withTimeoutOrNull
 /**
  * 落位前等图超时（ms）：目标页缺图时最多等这一拍再提交定位，超时按缺图提交（老的异步补齐照常）。
  * 以后翻页动画截图直接复用预热好的位图，故预热是必经之路，不是可选优化。
+ *
+ * 预栅格那条等图路径（[prerasterPage]）也用这个上限：它同样挂在漏斗锁内，
+ * 一旦某张图永远解不出来，整条落位链就永远不返回。
  */
-private const val PAGE_IMAGE_WARM_TIMEOUT_MS = 800L
+internal const val PAGE_IMAGE_WARM_TIMEOUT_MS = 800L
 
 // 跨页缓存键 imgKeyOf / bgKeyOf 已搬到 PageContent.kt（P1-2：页内容成模块后它们有两个用户）。
 
@@ -1313,6 +1316,10 @@ fun ReaderScreen(
             .pointerInput(touchSlop) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
+                    // 上一个手势要是没结算就消失了（抬起被吞 / 指针丢失 / 手势协程异常），
+                    // 会话会永远停在 Dragging：批注层被藏、所有点按被 busy 墙挡住。
+                    // 新的一轮按下说明上一根手指早已离开，正好在这里收尾（判据见下）。
+                    ctl.recoverStuckDrag()
                     val downX = down.position.x
                     val downY = down.position.y
                     val downTime = down.uptimeMillis
@@ -1483,6 +1490,9 @@ fun ReaderScreen(
                     var axis = ReaderMath.Axis.NONE
                     var dragDir = 0
                     var slideActive = false
+                    // 这次滑动是否已经结算过（抬起时正常结算后置 true，见下面的 finally：
+                    // 手势以**任何**方式结束，只要还没结算就必须补一次 endSlide）。
+                    var slideEnded = false
                     var brightnessActive = false
                     var brightnessBase = ReaderMath.MAX_BRIGHTNESS
                     // 抬手速度样本（两次采样的位移/时差）：滑动判定要「快甩过阈即翻」，
@@ -1602,7 +1612,10 @@ fun ReaderScreen(
                             val upDx = upX - downX
                             val upDy = change.position.y - downY
                             if (brightnessActive) endBrightnessGesture()
-                            else if (slideActive) currentEndSlide(vx, size.width.toFloat())
+                            else if (slideActive) {
+                                currentEndSlide(vx, size.width.toFloat())
+                                slideEnded = true
+                            }
                             // 走 flipWithAnimation（同点按）而非 flip()：flip() 是**瞬切**——直接
                             // flipAwait 硬换数据、不播动画、也不经过 FlipController，于是会话
                             // 状态与渲染层不同步。真机症状：快速翻页时同一内容"快速闪一下"
@@ -1662,8 +1675,10 @@ fun ReaderScreen(
                                 // L1 跟手：起手那一次 beginSlide（预取目标页），其后逐帧 updateSlide。
                                 if (currentSlideEnabled) {
                                     if (!slideActive) {
-                                        currentBeginSlide(dragDir)
+                                        // 先立旗再起手：起手这一步若抛异常，finally 仍能把会话收掉
+                                        // （否则会话停在 Dragging，批注层被 isBusy 藏起、手势全被吞）。
                                         slideActive = true
+                                        currentBeginSlide(dragDir)
                                     }
                                     currentUpdateSlide(dx, size.width.toFloat())
                                     if (tMove == 0L) tMove = System.nanoTime()
@@ -1691,6 +1706,16 @@ fun ReaderScreen(
                         }
                     }
                     } finally {
+                        // 手势以任何方式结束都必须把这次滑动结算掉：抬起事件被上层消费、
+                        // 指针 change 丢失、组合离场、循环里抛异常——这些路径原先直接 break/抛出，
+                        // `endSlide` 不再被调用，会话就永远停在 Dragging。后果是批注层被
+                        // `isBusy()` 藏起来（真机症状：**所有批注突然全部消失**）且后续手势
+                        // 全被挡（**页面翻不动**），只有返回键能退出去。
+                        if (slideActive && !slideEnded) {
+                            Logger.w("Orilumn.TAP", "slide gesture ended without up ⇒ settle")
+                            currentEndSlide(vx, size.width.toFloat())
+                            slideEnded = true
+                        }
                         // 手势被取消/组合离场也必须撤掉长按计时，避免手指离开后凭空起选区。
                         gestureActive = false
                         autoFlipSide = 0

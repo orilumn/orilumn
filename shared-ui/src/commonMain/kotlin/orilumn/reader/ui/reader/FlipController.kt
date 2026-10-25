@@ -410,6 +410,40 @@ class FlipController(
     /** 预取协程是否仍在途（锁未抢到 / 落位未回 / 等图未完）。 */
     private fun prefetchInFlight(): Boolean = prefetchJob?.let { it.isActive && !it.isCompleted } ?: false
 
+    /**
+     * 上一个手势没结算就消失时的兜底（真机「所有批注突然消失 + 页面翻不动」的恢复闸）。
+     *
+     * **只在新一轮按下那一刻调用**：`awaitEachGesture` 保证上一轮所有指针都已抬起才进新块，
+     * 所以此刻会话若仍非 Idle，只可能是上一次手势没走到 [endDrag]（抬起事件被上层消费、
+     * 指针 change 丢失、手势协程异常退出），而 [endDrag] 不会来了 —— 会话永远非 Idle：
+     * 渲染层 `isBusy()` 把批注层整个藏起来，点按也全被 busy 墙挡掉（只有返回键能退出去）。
+     *
+     * 也因此**不看 progress**：手指早已离开，位移停在哪儿都不代表「还在拖」。
+     *
+     * 两种卡死分别收场：
+     *  - 停在 **Dragging**：数据早在起手那次 `flipAwait` 就落到目标页，补一次 **COMMIT**
+     *    让像素追上去（用 rollback 会凭空多翻回去一页）；落位从未成功（目标页不就绪）
+     *    或落位/回滚协程仍在途（会自己收尾）时不动它。
+     *  - 停在 **Settling** 而结算协程已不在：动画半路没了，没人再推进状态机，裸清场。
+     */
+    fun recoverStuckDrag() {
+        if (session.phase == FlipSession.Phase.Settling) {
+            if (settleJob?.isActive == true) return
+            log("stuck settle recovered ⇒ clear (no animation in flight)")
+            clear()
+            return
+        }
+        if (session.phase != FlipSession.Phase.Dragging) return
+        if (prefetchInFlight() || rollbackInFlight()) return
+        if (!targetReady()) {
+            log("stuck drag recovered ⇒ clear (never landed)")
+            clear()
+            return
+        }
+        log("stuck drag recovered ⇒ settle commit")
+        settle(FlipSession.Decision.COMMIT, velocityX = 0f, pageW = 0f)
+    }
+
     /** 回滚落位协程是否在途（phase 已 Idle 也可能为 true——见 [rollbackJob] KDoc）。 */
     private fun rollbackInFlight(): Boolean = rollbackJob?.let { it.isActive && !it.isCompleted } ?: false
 

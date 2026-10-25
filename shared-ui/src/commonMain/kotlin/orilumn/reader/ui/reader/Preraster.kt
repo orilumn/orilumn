@@ -16,6 +16,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import orilumn.reader.io.Logger
 
 /**
@@ -297,16 +298,32 @@ private suspend fun warmImagesForPreraster(
     if (missImgs.isEmpty() && missBgs.isEmpty()) return true
 
     // 并行解，与 warmPageImages 同一并发口径（逐张串行会让摄影类一页多图等几秒）。
-    kotlinx.coroutines.coroutineScope {
-        val imgDeferred = missImgs.map { img -> this.async { img to runCatching { host.loadPageImage(img) }.getOrNull() } }
-        val bgDeferred = missBgs.map { ref -> this.async { ref to runCatching { host.loadBackgroundImage(ref.first, ref.second) }.getOrNull() } }
-        // 整批 putAll：同页多图必须一起留下，否则后一条会把前一条（同页仍在用）淘汰掉。
-        imgCache.putAll(imgDeferred.awaitAll().mapNotNull { (img, bmp) -> bmp?.let { imgKeyOf(img) to it } })
-        bgCache.putAll(
-            bgDeferred.awaitAll().mapNotNull { (ref, bmp) ->
-                bmp?.let { bgKeyOf(ref.first, ref.second) to it }
-            },
+    //
+    // **必须有界**：这段挂在 `AnchorFunnel.beforeCommit` 里，也就是漏斗锁内。某张图
+    // 永远解不出来时，落位链就永远不返回 ⇒ 会话停在 Dragging、批注层被藏、点按全被挡
+    // （真机症状「点一下，批注全消失、之后翻不动」的一种来源）。超时按「没备齐」处理：
+    // 调用方放弃预栅格，翻页照常提交，图由绘制路径异步补齐。
+    val warmed = withTimeoutOrNull(PAGE_IMAGE_WARM_TIMEOUT_MS) {
+        kotlinx.coroutines.coroutineScope {
+            val imgDeferred = missImgs.map { img -> this.async { img to runCatching { host.loadPageImage(img) }.getOrNull() } }
+            val bgDeferred = missBgs.map { ref -> this.async { ref to runCatching { host.loadBackgroundImage(ref.first, ref.second) }.getOrNull() } }
+            // 整批 putAll：同页多图必须一起留下，否则后一条会把前一条（同页仍在用）淘汰掉。
+            imgCache.putAll(imgDeferred.awaitAll().mapNotNull { (img, bmp) -> bmp?.let { imgKeyOf(img) to it } })
+            bgCache.putAll(
+                bgDeferred.awaitAll().mapNotNull { (ref, bmp) ->
+                    bmp?.let { bgKeyOf(ref.first, ref.second) to it }
+                },
+            )
+        }
+        true
+    } ?: false
+    if (!warmed) {
+        Logger.w(
+            "Orilumn.TAP",
+            "preraster warm timeout ch=${pos.chapter} char=${pos.slice.charStart} " +
+                "imgs=${missImgs.size} bgs=${missBgs.size}",
         )
+        return false
     }
 
     // 复核：解码失败/超时的图不算备齐（占位块入池就是闪烁的来源）。

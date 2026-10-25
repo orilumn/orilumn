@@ -352,10 +352,12 @@ internal enum class NoteSide {    /** 所选行右侧（锚点末行右侧还剩
  *
  * 这一段只在**折行数、环都相同**时才轮到（§1.1「顺序怎么比」）。左右排在最后是因为
  * 它们往往只剩页边距那一窄列（规则第 6 条：那里最多折两行）；
- * 但规则第 3 / 4 条给了两个**提前**的例外，由候选自带的 [NoteCandidate.sideRank] 落实：
+ * 但规则第 3 / 4 条给了**提前**的例外，由候选自带的 [NoteCandidate.sideRank] 落实
+ * （2026-10-25 用户定口，左右都可能首选）：
  *
- * - 这一行右侧离版心还有 1em 以上空白 ⇒ 正右提到最前（规则 3）；
- * - 右侧没这余地、但这一行左侧有明显缩进 ⇒ 正左提到最前（规则 4）。
+ * - 只有右侧离版心还有 1em 以上空白 ⇒ 正右提到最前；
+ * - 只有这一行左侧有明显缩进 ⇒ 正左提到最前；
+ * - 两边都空着 ⇒ 看选区在这一行里偏左还是偏右（哪边空档小），偏哪边就把哪边提到最前。
  *
  * 右侧已经被别的批注占住时，被提前的正右退回「左」之前（见 [NOTE_SIDE_RANK_TAKEN_RIGHT]）。
  */
@@ -371,11 +373,16 @@ internal fun noteSideRank(side: NoteSide): Int = when (side) {
     NoteSide.OTHER -> 8
 }
 
-/** 规则 3 命中时正右的名次：排到八个方向之前。 */
-internal const val NOTE_SIDE_RANK_RIGHT_FIRST: Int = -2
+/** 规则 3 / 4 命中时「首选那一侧」的名次：排到八个方向之前（2026-10-25：左右都可能首选）。 */
+internal const val NOTE_SIDE_RANK_SIDE_FIRST: Int = -2
 
-/** 规则 4 命中时正左的名次：排到八个方向之前（右侧也没余地，两条规则不会同时成立）。 */
-private const val NOTE_SIDE_RANK_LEFT_FIRST: Int = -1
+/**
+ * 另一侧也空着、但不是首选时的名次：排在首选侧之后、四角之前。
+ *
+ * 首选那一列太窄（缩进只让出几像素）放不下整句时，退回另一侧的正左 / 正右，
+ * 而不是直接掉到四角或页边距那条窄缝里。
+ */
+private const val NOTE_SIDE_RANK_SIDE_SECOND: Int = -1
 
 /** 右侧已被占时，正右的名次：让到「左」之前（倒数第二位）。 */
 private const val NOTE_SIDE_RANK_TAKEN_RIGHT: Int = 6
@@ -453,8 +460,8 @@ internal data class NoteCandidate(
     /**
      * 这个候选是从**哪一行**生成的（`lines` 的行下标）。
      *
-     * 2026-10-25 用户定口：**最后是按哪一行确定的位置，引线就指向哪一行**——多行选区
-     * 落在末行旁边就指向末行末端，落在首行旁边就指向首行末端。`-1` = 未标注（退回旧口径）。
+     * 引线落点**不再**跟着它走（2026-10-25 用户改口）：布线时按「框离选区开头近还是离末尾近」
+     * 另挑一头，见 [noteArrowRow]。它只剩逐字几何量不出来时的兜底。
      */
     val anchorRow: Int = -1,
     /**
@@ -836,7 +843,11 @@ internal fun noteCandidates(
     val cornerRightX = firstGlyph.left + charW
     val cornerLeftX = lastGlyph.right - charW
 
-    // 规则 3 / 4：右侧离版心还有 1em 以上空白 ⇒ 正右提到最前；否则左侧有明显缩进 ⇒ 正左提到最前。
+    // 规则 3 / 4（2026-10-25 用户定口）：
+    // - 只有右侧离版心还有 1em 以上空档 ⇒ 正右首选；
+    // - 只有这一行左侧有明显缩进 ⇒ 正左首选；
+    // - 两边都空着（左缩进 + 右非满行）⇒ 看选区在这一行里**偏左还是偏右**：
+    //   哪边空档小（离得近）就走哪边。偏左 = 左侧空档比右侧小。
     // contentRight 缺省时退回「本页空白能到的最右缘」：直接调用（单测）没有版心边界，
     // 但空白本身仍有右缘，照样能判断「这一行右边还有没有 1em」。
     val rightEdge = if (contentRight < Float.MAX_VALUE / 2f) {
@@ -844,9 +855,16 @@ internal fun noteCandidates(
     } else {
         freeRects.maxOfOrNull { it.right } ?: contentRight
     }
-    val rightRoomFirst = rightEdge - baseRow.rect.right > preferred
-    val leftIndentFirst = !rightRoomFirst && contentLeft != null &&
-        baseRow.rect.left - contentLeft > preferred
+    val leftGap = contentLeft?.let { baseRow.rect.left - it }
+    val rightGap = rightEdge - baseRow.rect.right
+    val leftRoom = leftGap != null && leftGap > preferred
+    val rightRoom = rightGap > preferred
+    val leftFirst = when {
+        leftRoom && rightRoom -> leftGap!! < rightGap
+        leftRoom -> true
+        else -> false
+    }
+    val rightFirst = rightRoom && !leftFirst
 
     // 规则第 8 条（2026-10-25 用户定口）：整句宽会罩住右侧那条的选区 ⇒ 本条先走左侧。
     // 只在**这一条自己的基准行**上判；判据用整句一行的自然宽，不看某个候选碰巧折成多宽。
@@ -854,10 +872,13 @@ internal fun noteCandidates(
         ?: noteCoversRightText(note, lines, rightInk, metrics, charWidthPx, sizer)
 
     fun sideRankOf(side: NoteSide): Int = when {
-        // 会遮住右侧文字的，先左侧、再右侧，规则 3 / 4 的「优先正右 / 正左」也让位给它。
+        // 会遮住右侧文字的，先左侧、再右侧，规则 3 / 4 的「首选一侧」也让位给它。
         coversRightText -> coveringSideRank(side)
-        side == NoteSide.RIGHT && rightRoomFirst -> NOTE_SIDE_RANK_RIGHT_FIRST
-        side == NoteSide.LEFT && leftIndentFirst -> NOTE_SIDE_RANK_LEFT_FIRST
+        leftFirst && side == NoteSide.LEFT -> NOTE_SIDE_RANK_SIDE_FIRST
+        rightFirst && side == NoteSide.RIGHT -> NOTE_SIDE_RANK_SIDE_FIRST
+        // 首选那一列放不下（缩进只让出几像素）时，退回另一侧的正左 / 正右，再轮到四角。
+        leftFirst && rightRoom && side == NoteSide.RIGHT -> NOTE_SIDE_RANK_SIDE_SECOND
+        rightFirst && leftRoom && side == NoteSide.LEFT -> NOTE_SIDE_RANK_SIDE_SECOND
         else -> noteSideRank(side)
     }
     val out = ArrayList<NoteCandidate>()
@@ -1302,6 +1323,9 @@ internal fun noteCandidates(
         // 右边本来就是空白区，段中行也一样）。整行顶到版心右缘的行只保留原来的「段末行」入口：
         // 段落还有下一行时不试这一行的正右。
         emitRightFamily(base, 0, 0)
+        // 规则第 4 条（2026-10-25 用户定口）：左侧就是首选时，它必须和正右一样进**本行这一批**——
+        // 左边那条以前只在最后一批（本段左侧）生成，排序第二个键就是批次，永远轮不到它。
+        if (leftFirst) emitLeftFamily(base, 0, 0)
         emitBelowFamily(base, 0, 0)
         emitAboveFamily(first, 0, 0)
         // 2026-10-25 用户定口：多行选区先贴**末行**（上面那一圈是末行侧）；末行那一圈放不下，
@@ -1344,7 +1368,11 @@ internal fun noteCandidates(
         //
         // 2026-10-25 用户定口：范围**到此为止**——占满整个版心的行已经把空白切断，
         // 再往下就是别的段落自己的空白，页边距上下相通也不算连成一片。
-        for (idx in runStart..runEnd) emitLeftFamily(idx, abs(idx - base), 1)
+        for (idx in runStart..runEnd) {
+            // 首选左侧时，基准行那一条已经在本行第一批里发过了，这里不再重复。
+            if (leftFirst && idx == base) continue
+            emitLeftFamily(idx, abs(idx - base), 1)
+        }
     }
 
     return orderedNoteCandidates(out, rightTaken = false).take(maxCandidates)
@@ -1352,13 +1380,17 @@ internal fun noteCandidates(
 
 /**
  * 一条批注的候选链顺序（§1.1）：**字典序**比较
- * 「段 → 跨行 → 折行数 → 方向 → 距离（斜向）/ 留白（正侧）→ 留白 → 距离」。
+ * 「段 → 跨行 → 首选一侧 → 折行数 → 方向 → 距离（斜向）/ 留白（正侧）→ 留白 → 距离」。
  *
  * **跨行在折行之前**（2026-10-25 用户定口，规则第 6 条：「其他位置都可以考虑折行，只要能放下，
  * 不考虑跨行」）：批注也是正文的一部分，宁可贴着锚点折成两行、三行，也不要为了少折一行
  * 就整个挪到隔行去。同一圈里仍然**折行数少的先**（2026-10-24 用户定口）——
  * 那条是「同一条行上哪个方向更省行数」，与「就近不跨行」不冲突。
  * 「整句放不放得下」排在段与跨行之前（规则第 9 / 11 条：折成省略号只是整段都放不下时的兜底）。
+ *
+ * **折行排在位置、距离之后**（2026-10-25 用户定口）：同一环里先看**首选那一侧**、方向名次、
+ * 留白档与距离（位置好、离锚点近的赢），折行数只是最后才比的省钱项——
+ * 宁可贴着锚点折两行，也不为了少折一行跑到隔几行的空档里去。
  *
  * **斜向（右上 / 右下 / 左上 / 左下）比距离、不比留白档**（2026-10-25 用户定口）：
  * 斜向横向就是规则第 5 条的「偏一个字」，纵向就是行距空档，那 1em 是规则第 7 条给
@@ -1399,12 +1431,18 @@ internal fun noteCandidateOrder(
         .thenBy { it.nearRank }
         // 规则第 10 条：越过别的批注视同跨行，所以远近按「环 + 越过的行数」比。
         .thenBy { it.ring + it.crossed }
-        .thenBy { it.lines }
+        // 规则 3 / 4（2026-10-25 用户定口）：同一环里先看是不是落在**首选那一侧**
+        // （选区偏左就左侧、偏右就右侧）。
+        .thenBy { if (rank(it) == NOTE_SIDE_RANK_SIDE_FIRST) 0 else 1 }
         .thenBy { rank(it) }
         // 斜向的留白档不参与先后（比距离），正侧仍然留白档优先。
         .thenBy { if (it.corner) 0 else it.marginTier }
+        // **距离 / 位置是第一优先，折行不是大问题**（2026-10-25 用户定口）：
+        // 宁可贴着锚点折两行，也不为了少折一行跑到隔几行的空档里（「在内 {}」那条长批注
+        // 曾为了单行占到锚点上方隔两行的空档）。
         .thenBy { it.distance }
         .thenBy { it.marginTier }
+        .thenBy { it.lines }
         .thenBy { it.rect.top }
         .thenBy { it.rect.left }
 }
@@ -1940,14 +1978,20 @@ internal fun noteBubblePlacements(
         if (b.compact) return@map b
         // 箭头用逐字墨迹（能穿两字之间）；布点仍用行框。
         val ink = inkById[b.annotationId]?.arrowInk.orEmpty()
-        // 2026-10-25 用户定口：**哪一行确定了位置，引线就指向哪一行**（末行还是首行）。
-        val anchorRow = chosen[b.annotationId]?.candidate?.anchorRow ?: -1
+        val self = bubbleRects.getValue(b.annotationId)
+        // 引线规则第 10 条（2026-10-25 用户定口）：位置定下来后，比一比框离**选区开头**近
+        // 还是离**选区末尾**近——近哪头就指哪一头，不再固定指「决定落位的那一行」。
+        val anchorRow = noteArrowRow(
+            bubble = self,
+            ink = ink,
+            lines = lines,
+            fallbackRow = chosen[b.annotationId]?.candidate?.anchorRow ?: -1,
+        )
         val targetInk = if (anchorRow in lines.indices) {
             ink.filter { nearestLineIndex(it, lines) == anchorRow }
         } else {
             emptyList()
         }
-        val self = bubbleRects.getValue(b.annotationId)
         val others = out.asSequence()
             .filter { it.annotationId != b.annotationId && !it.compact }
             .mapNotNull { bubbleRects[it.annotationId] }
@@ -2366,7 +2410,14 @@ private fun assignNoteCandidates(
             // 只剩页边距那一窄列（规则第 6 条）不算——那种列该排在六个方向之后，
             // 不能因为「本行最右」就先把批注塞进去。
             if (c.side != NoteSide.RIGHT || c.ring != 0 || !c.complete) continue
-            if (c.sideRank != NOTE_SIDE_RANK_RIGHT_FIRST) continue
+            // 这一行右侧确实有 1em 以上空白才值得先占：正右要么是首选（-2），要么是次选（-1，
+            // 另一侧因缩进更空）。左右互换首选之后仍要认后者，否则「本行最右那条先占正右」
+            // 会失效，右侧被左边那条抢走（2026-10-25 用户指出）。
+            if (c.sideRank != NOTE_SIDE_RANK_SIDE_FIRST &&
+                c.sideRank != NOTE_SIDE_RANK_SIDE_SECOND
+            ) {
+                continue
+            }
             if (take(note, c)) return true
             // 规则第 8 条：右侧被别人占了，先让别人上下让一让。
             if (!roomTriedHere) {
@@ -2482,6 +2533,45 @@ private fun noteLineGap(lines: List<NoteTextLine>, fallback: Float): Float {
  */
 private fun noteBaseRow(rects: List<Rect>, lines: List<NoteTextLine>): Int? =
     rects.mapNotNull { nearestLineIndex(it, lines) }.maxOrNull()
+
+/**
+ * 引线该指哪一行（引线规则第 10 条，2026-10-25 用户定口）。
+ *
+ * 框的位置定下来以后，比一比框离**选区开头**（首字左上角）近、还是离**选区末尾**
+ * （末字右下角）近：近开头就指首行，近末尾就指末行。单行选区不用挑，仍是它自己那一行；
+ * 逐字几何量不出来时退回 [fallbackRow]（哪一行决定落位就指哪一行，旧口径）。
+ */
+internal fun noteArrowRow(
+    bubble: Rect,
+    ink: List<Rect>,
+    lines: List<NoteTextLine>,
+    fallbackRow: Int = -1,
+): Int {
+    if (ink.isEmpty() || lines.isEmpty()) return fallbackRow
+    val rows = ink.mapNotNull { nearestLineIndex(it, lines) }.distinct()
+    if (rows.size <= 1) return rows.firstOrNull() ?: fallbackRow
+    val start = ink.minWithOrNull(compareBy({ it.top }, { it.left })) ?: return fallbackRow
+    val end = ink.maxWithOrNull(compareBy({ it.bottom }, { it.right })) ?: return fallbackRow
+    val startRow = nearestLineIndex(start, lines) ?: return fallbackRow
+    val endRow = nearestLineIndex(end, lines) ?: return fallbackRow
+    if (startRow == endRow) return startRow
+    // 量到**点**（开头 = 首字左上角、末尾 = 末字右下角），不量整行矩形：
+    // 首行那一段很长时，拿整行去量会把它算成「很近」，框明明在末尾旁边也会指回开头。
+    fun toPoint(px: Float, py: Float): Float {
+        val dx = when {
+            px < bubble.left -> bubble.left - px
+            px > bubble.right -> px - bubble.right
+            else -> 0f
+        }
+        val dy = when {
+            py < bubble.top -> bubble.top - py
+            py > bubble.bottom -> py - bubble.bottom
+            else -> 0f
+        }
+        return sqrt(dx * dx + dy * dy)
+    }
+    return if (toPoint(start.left, start.top) < toPoint(end.right, end.bottom)) startRow else endRow
+}
 
 /**
  * 批注墨迹落在 [rowIndex] 这一行上的**最右缘**：同一行按从右到左排序时的键。
@@ -3116,9 +3206,9 @@ internal fun noteArrowRelation(bubble: Rect, anchor: Rect): NoteArrowRelation {
  *   `BELOW_RIGHT` / `ABOVE_RIGHT` 从**左边**横着出去再竖回文字）。
  * @param lineBoxes 本页正文的行盒：竖着进的时候箭头**停在行盒边框上**、不侵入行盒内部
  *   （引线规则第 4 条）。缺省时退回逐字墨迹的边（单测与无行盒信息的调用）。
- * @param targetInk 这条批注**决定落位的那一行**的逐字墨迹（2026-10-25 用户定口：哪个行确定了
- *   位置，引线就指向哪一行）。右侧摆法取它最右那个字、左侧摆法取最左那个字；缺省空 =
- *   退回旧口径「与框纵向最近的那一行」。
+ * @param targetInk 这条批注**要指的那一行**的逐字墨迹（2026-10-25 用户定口：位置定下来后，
+ *   比一比框离选区开头近还是离末尾近，近哪头指哪头）。右侧摆法取它最右那个字、左侧摆法取
+ *   最左那个字；缺省空 = 退回旧口径「与框纵向最近的那一行」。
  */
 internal fun routeNoteArrow(
     bubble: Rect,
@@ -3167,7 +3257,7 @@ internal fun routeNoteArrow(
     val window = max(lineH, 8f) * ARROW_BEND_WINDOW_LINES
     // 引线贴字门槛：旁注行高的 0.3 倍（lineH 缺省时放宽到 0：单测不量贴字）。
     val hugDistance = if (lineH > 0f) lineH * ARROW_HUG_LINES else 0f
-    // 目标：右侧摆法指向**决定落位那一行**的终点（最右那个字），左侧摆法指向起点；
+    // 目标：右侧摆法指向**要指那一行**的终点（最右那个字），左侧摆法指向起点；
     // 正下 / 正上 / 退化调用才回到「最近的几个字」。
     val targetPool = arrowTargetGlyphs(side, inkRects, bubble, targetInk)
     val targets = targetPool
@@ -3356,9 +3446,8 @@ internal fun routeNoteArrow(
  * 引线的目标字（§6.1，2026-10-24 用户定口 + 2026-10-25 补充）：
  *
  * - **放在正文右侧**（正右 / 右下 / 右上）→ 指向该行**最靠右**的那个字；**放在左侧** → 指向最左那个字。
- * - 「该行」= [targetInk]（决定落位的那一行）；缺省空时退回旧口径「与框纵向最近的那一行」。
- *   2026-10-25 用户定口：**哪一行确定了位置，引线就指向哪一行**——批注先贴末行，
- *   末行放不下才落到首行，引线跟着一起过去，不再出现「框在末行旁边、箭头指首行」。
+ * - 「该行」= [targetInk]（要指的那一行：框离选区开头近就取首行、离末尾近就取末行，
+ *   见 [noteArrowRow]）；缺省空时退回旧口径「与框纵向最近的那一行」。
  * - 正下 / 正上 / 没有布点方向 → 仍旧取最近的几个字（最近那个被围死时还能换下一个）。
  */
 private fun arrowTargetGlyphs(

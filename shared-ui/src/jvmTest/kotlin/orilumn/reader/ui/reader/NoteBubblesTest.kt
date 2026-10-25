@@ -708,7 +708,7 @@ class NoteBubblesTest {
         )
 
         // 这一行右侧还剩 400（> 1em）：规则 3 把正右提到最前。
-        val right = candidate(NoteSide.RIGHT, 300f, rank = NOTE_SIDE_RANK_RIGHT_FIRST)
+        val right = candidate(NoteSide.RIGHT, 300f, rank = NOTE_SIDE_RANK_SIDE_FIRST)
         val left = candidate(NoteSide.LEFT, -60f)
         val below = candidate(NoteSide.BELOW, 0f)
 
@@ -1231,9 +1231,11 @@ class NoteBubblesTest {
             ),
         ).single()
         assertTrue("末行放不下就该落到首行那一圈：$b", !b.compact && b.topPx < row1.top)
+        // 2026-10-25 用户定口（引线规则第 10 条）：位置由首行那一圈定下来，但框离**选区末尾**更近
+        // （末行右端），引线就指末尾那一行，不再跟着「决定落位的那一行」走。
         val tip = arrowPoints(b.arrow!!).last()
-        assertTrue("引线指向首行末端（x≈300），实际 $tip", tip.x > 250f)
-        assertTrue("端点落在首行内：$tip", tip.y <= row0.bottom + 0.5f)
+        assertEquals("引线指向选区末尾（x≈200）", 200f, tip.x, 0.5f)
+        assertTrue("端点落在末行：$tip", tip.y >= row1.top - 0.5f)
     }
 
     @Test
@@ -1262,8 +1264,8 @@ class NoteBubblesTest {
     }
 
     @Test
-    fun `arrow follows the row that decided the placement`() {
-        // 2026-10-25 用户定口：哪一行确定位置，引线就指向哪一行。
+    fun `arrow follows the row it is asked to point at`() {
+        // routeNoteArrow 只认调用方给的那一行（哪一行由「离选区开头近还是末尾近」定）。
         // 框高跨两行时不再按「与框纵向最近的那一行」倒向首行（两行都是 0 距离，旧实现取到列表第一个）。
         val firstRow = rect(100f, 100f, 300f, 140f)
         val lastRow = rect(100f, 140f, 500f, 180f)
@@ -1278,6 +1280,63 @@ class NoteBubblesTest {
         val tip = arrowPoints(arrow!!).last()
         assertEquals("引线指向末行末端", 500f, tip.x, 0.5f)
         assertTrue("端点落在末行内：$tip", tip.y in lastRow.top - 0.5f..lastRow.bottom + 0.5f)
+    }
+
+    @Test
+    fun `multi line leader points at the nearer end of the selection`() {
+        // 引线规则第 10 条（2026-10-25 用户定口）：位置定下来后，框离开头近就指首行、离末尾近就指末行。
+        val lines = listOf(
+            NoteTextLine(rect(100f, 0f, 500f, 40f), blockId = 0, index = 0),
+            NoteTextLine(rect(100f, 40f, 300f, 80f), blockId = 0, index = 1),
+        )
+        val ink = listOf(rect(100f, 0f, 500f, 40f), rect(100f, 40f, 300f, 80f))
+        // 框在左下：离选区开头（首字左上角 100,0）近 ⇒ 指首行。
+        assertEquals(0, noteArrowRow(rect(0f, 40f, 90f, 80f), ink, lines))
+        // 框在右下：离选区末尾（末字右下角 300,80）近 ⇒ 指末行。
+        assertEquals(1, noteArrowRow(rect(320f, 40f, 400f, 80f), ink, lines))
+        // 单行选区不用挑。
+        assertEquals(0, noteArrowRow(rect(0f, 0f, 90f, 40f), listOf(ink[0]), lines))
+    }
+
+    @Test
+    fun `indented line with the selection on its left puts the note on the left`() {
+        // 2026-10-25 用户定口：左边有缩进、右边又不是满行时，按选区在这一行里**偏左还是偏右**定先后。
+        // 两行都缩进 120，文字只排到 420（右边还剩 180）——选区偏左，正左第一。
+        val rows = listOf(rect(160f, 0f, 460f, 20f), rect(160f, 22f, 420f, 42f))
+        val lines = rows.mapIndexed { i, r -> NoteTextLine(rect = r, blockId = 0, index = i) }
+        val b = place(
+            notes = listOf(noteInk(1, rows, "短")),
+            textInk = rows,
+            textLines = lines,
+            contentLeft = 40f,
+            contentRight = 600f,
+            pageRight = 640f,
+            contentBottom = 800f,
+            pageBottom = 800f,
+        ).single()
+        assertTrue("缩进让出的左边空档比右边小，应落在左侧：left=${b.leftPx}", b.leftPx < 160f)
+        assertTrue("不该退成小图标：$b", !b.compact)
+        // 落在末行左侧，但框离选区开头更近 ⇒ 引线指首行（引线规则第 10 条）。
+        val tip = arrowPoints(b.arrow!!).last()
+        assertTrue("引线应指首行起点（x≈160），实际 $tip", tip.x < 200f)
+        assertTrue("端点落在首行内：$tip", tip.y <= rows[0].bottom + 0.5f)
+    }
+
+    @Test
+    fun `indented line with the selection on its right puts the note on the right`() {
+        // 同样两边都空，但文字压到 520（离版心右缘只剩 80）：选区偏右，正右第一。
+        val row = rect(300f, 0f, 520f, 20f)
+        val b = place(
+            notes = listOf(noteInk(1, listOf(row), "短")),
+            textInk = listOf(row),
+            contentLeft = 40f,
+            contentRight = 600f,
+            pageRight = 640f,
+            contentBottom = 800f,
+            pageBottom = 800f,
+        ).single()
+        assertTrue("选区偏右，应落在右侧：left=${b.leftPx}", b.leftPx >= 520f)
+        assertTrue("不该退成小图标：$b", !b.compact)
     }
 
     @Test
@@ -1342,8 +1401,38 @@ class NoteBubblesTest {
     }
 
     @Test
-    fun `fewer wrapped lines win within the same ring`() {
-        // 同一圈里行数少的优先：右边折 3 行、下方折 2 行时，取下方 2 行。
+    fun `rightmost note still takes the right column on an indented line`() {
+        // 2026-10-25 用户定口：左边有缩进时左侧虽是首选，但「本行最右那条先占正右」的例外不变——
+        // 右侧那块空白离它最近，先归它；它占不到，本行其余批注才从左到右逐条取位。
+        val row = rect(194f, 0f, 634f, 69f)
+        val leftInk = rect(194f, 0f, 404f, 69f)
+        val rightInk = rect(542f, 0f, 634f, 69f)
+        val bubbles = place(
+            notes = listOf(
+                noteInk(1, listOf(leftInk), "用 val 声明"),
+                noteInk(2, listOf(rightInk), "只读的还能叫变量么？"),
+            ),
+            textInk = listOf(row),
+            contentLeft = 125f,
+            contentRight = 1715f,
+            pageRight = 1840f,
+            contentBottom = 2400f,
+            pageBottom = 2400f,
+        )
+        val rightNote = bubbles.single { it.annotationId == 2L }
+        val leftNote = bubbles.single { it.annotationId == 1L }
+        assertTrue("最右那条应先拿到正右：left=${rightNote.leftPx}", rightNote.leftPx >= 634f)
+        assertTrue(
+            "两条不能重叠：${boxOf(leftNote)} / ${boxOf(rightNote)}",
+            !boxOf(leftNote).overlaps(boxOf(rightNote)),
+        )
+    }
+
+    @Test
+    fun `preferred side wins even when it folds more lines`() {
+        // 2026-10-25 用户定口：位置 / 距离是第一优先，折行不是大问题。
+        // 正右（规则 3 的首选侧）要折 5 行、正下只要 2 行，仍然取正右——位置对、贴着锚点，
+        // 比为了少折几行换到别的方向更符合读者预期。
         val anchor = rect(0f, 100f, 200f, 140f)
         val text = "折行优先级实在太高"
         val right = rect(200f, 100f, 267.68f, 800f)
@@ -1353,10 +1442,12 @@ class NoteBubblesTest {
             freeRects = listOf(right, below),
         )
         val first = list.first { it.complete }
-        assertEquals("两行应压过三行", 2, first.lines)
-        // 这块空白同时能出「右下」（首字右移一个汉字之后）与「正下」，两者行数相同；
-        // 2026-10-24 用户定口后方向名次把右下排在正下之前。
-        assertEquals("行数相同时右下压过正下", NoteSide.BELOW_RIGHT, first.side)
+        assertEquals("位置优先：首选的正右即便多折几行也该赢", NoteSide.RIGHT, first.side)
+        val fewest = list.filter { it.complete }.minOf { it.lines }
+        assertTrue(
+            "这条用例本身要能体现「折行更多」：选中 ${first.lines} 行，另有 $fewest 行的位置",
+            first.lines > fewest,
+        )
     }
 
     @Test

@@ -195,6 +195,33 @@ private const val ARROW_TARGET_LIMIT: Int = 4
 /** 两折 / 三折每个方向最多试几个折点坐标（再多的只是白算）。 */
 private const val ARROW_MAX_BEND_COORDS: Int = 8
 
+/**
+ * 行间中线最多排几个在折点候选的最前面（引线规则第 9 条：两行字之间横穿要走正中间）。
+ *
+ * 只给「最靠近目标行的那几条缝」留位置：全页十几条缝都排进来的话，折点候选会被稀释，
+ * 反而挑不到真正要穿的那一条。
+ */
+private const val ARROW_GAP_MID_LIMIT: Int = 4
+
+/**
+ * 引线形状名次（规则第 1 / 2 / 3 / 4 条）：先定形状，再比折数。
+ *
+ * 交叉数仍然排在最前面（规则第 11 条）；形状只在「都不交叉」的候选之间决胜，
+ * 所以这里的名次是「这个摆法最想要哪种线型」，不参与跨摆法的比较。
+ */
+private const val ARROW_FORM_STRAIGHT: Int = 0
+private const val ARROW_FORM_FIRST: Int = 1
+private const val ARROW_FORM_SECOND: Int = 2
+private const val ARROW_FORM_OTHER: Int = 3
+
+/**
+ * 末段短于这个长度（px）时，箭头会盖到上一段上、看起来像是「横线的末端长了个竖箭头」。
+ *
+ * 不直接砍掉末段：太短时只把它当降权项（有别的形状能走就换），最后兜底照画，
+ * 由绘制侧把箭头臂长夹到末段以内（见 `drawNoteArrow`）。
+ */
+private const val ARROW_TAIL_MIN_PX: Float = 6f
+
 /** 折线找障碍时看两端连线附近多远（以旁注行高为单位，至少 8px）。 */
 private const val ARROW_BEND_WINDOW_LINES: Float = 2f
 
@@ -2970,22 +2997,35 @@ private data class ArrowPath(
     val hug: Float,
     val entersBubble: Boolean,
     val order: Int,
+    /** 横穿**自己锚点那一行的墨迹**（不是停在边上）：这种走法看着就像绕到字外面再扎回去。 */
+    val entersInk: Boolean = false,
+    /** 形状名次（[ARROW_FORM_STRAIGHT] …）：规则第 1 / 2 / 3 条先定线型。 */
+    val form: Int = ARROW_FORM_OTHER,
+    /** 第一段朝着远离目标的方向走（左右侧「先横着出、再折回来」那種），见 [arrowRetreats]。 */
+    val retreats: Boolean = false,
+    /** 末段长度：短于 [ARROW_TAIL_MIN_PX] 时箭头会画到上一段上。 */
+    val tailLen: Float = Float.MAX_VALUE,
 ) {
-    val clear: Boolean get() = hits <= 1e-4f && !entersBubble
+    val clear: Boolean get() = hits <= 1e-4f && !entersBubble && !entersInk
+
+    /** 末段短到画不下箭头：形状相同、折数相同的情况下先避开。 */
+    val tailShort: Boolean get() = tailLen < ARROW_TAIL_MIN_PX
 
     /**
-     * 通畅路径的择优顺序（引线规则第 9 / 3 / 7 条）：
-     * **交叉数（0 条优先）→ 折数少 → 穿字少 → 不贴着字（[hug]）→ 更短 → 候选顺序**。
+     * 通畅路径的择优顺序（引线规则第 11 / 1 / 2 / 3 / 4 / 8 / 9 条）：
+     * **交叉数（0 条优先）→ 不往反方向起步 → 形状名次 → 末段够长 → 折数少 → 穿字少 →
+     * 不贴着字（[hug]）→ 更短 → 候选顺序**。
      *
-     * 规则第 9 条「两个批注的引线不得交叉」是硬要求，所以交叉数排在折数之前：
-     * 宁可多折一次绕开别人的引线，也不许交叉。
-     * 规则第 3 条「能用少线段就用少线段」→ 折数。
-     * 规则第 7 条「实在找不到合适位置时宁愿穿越文字，但穿越的文字越少越好」→ [hits]。
-     * [hug] 是「横穿两行之间要从正中间过」的度量，排在「短」之前。
+     * 交叉仍然排第一（2026-10-25 用户定口）：两个批注的引线不得交叉，宁可多折一次
+     * 也要绕开已经画好的那条。形状名次排在折数之前，是因为「正右单段」「斜向 L 形」
+     * 「左右被字挡住走 下横上」这几种线型是规则直接点名的，不能因为多一折就丢掉。
      */
     fun betterThan(other: ArrowPath?): Boolean {
         if (other == null) return true
         if (crosses != other.crosses) return crosses < other.crosses
+        if (retreats != other.retreats) return !retreats
+        if (form != other.form) return form < other.form
+        if (tailShort != other.tailShort) return !tailShort
         if (bends != other.bends) return bends < other.bends
         if (abs(hits - other.hits) > 0.5f) return hits < other.hits
         if (abs(hug - other.hug) > 0.5f) return hug < other.hug
@@ -2994,13 +3034,16 @@ private data class ArrowPath(
     }
 
     /**
-     * 全撞时的兜底顺序：不穿自己的框 → **交叉最少** → 穿得少 → 更短 → 候选顺序。
-     * 照样画，不留空（规则第 7 条：实在没路时宁愿穿越，但要穿得少）。
+     * 全撞时的兜底顺序：不穿自己的框 → **交叉最少** → 不往反方向起步 → 穿得少 → 更短 → 候选顺序。
+     * 照样画，不留空（规则第 8 条：实在没路时宁愿穿越，但要穿得少）。
      */
     fun betterFallbackThan(other: ArrowPath?): Boolean {
         if (other == null) return true
         if (entersBubble != other.entersBubble) return !entersBubble
+        if (entersInk != other.entersInk) return !entersInk
         if (crosses != other.crosses) return crosses < other.crosses
+        if (retreats != other.retreats) return !retreats
+        if (form != other.form) return form < other.form
         if (abs(hits - other.hits) > 0.5f) return hits < other.hits
         if (abs(length - other.length) > 0.5f) return length < other.length
         return order < other.order
@@ -3017,6 +3060,8 @@ private class ArrowTarget(
     val gapYs: List<Float> = emptyList(),
     /** 竖着进时箭头停在哪条边上：字所在的行盒（缺省退回字本身）。 */
     val box: Rect = glyph,
+    /** 这条批注**目标那一行**自己的墨迹：箭头只能停在它边上，不许横穿过去再扎回来。 */
+    val own: Rect = glyph,
 ) {
     /**
      * 折点坐标的来源（就是 [obstacles] 那批矩形）：**一条目标只建一次**。
@@ -3183,13 +3228,19 @@ internal fun noteArrowRelation(bubble: Rect, anchor: Rect): NoteArrowRelation {
  * - 第一段 ⊥ 标注框边：从左边 / 右边出去是横线，从上边 / 下边出去是竖线；
  * - 最后一段 ⊥ 文字框边：从文字下面进来是竖线，从文字右边进来是横线。
  *
- * 正右 / 正左是水平直线（标注左边 / 右边中点 → 文字右 / 左边中点），
- * 正下 / 正上是从朝文字那条边出去的垂直直线；右下 / 右上从**左边**横着出去、再竖回文字，
- * 所以这两种本来就不需要为箭头留空档。
+ * 正右 / 正左是水平直线（出口沿框的竖边、入口沿字的竖边各滑到一个共同坐标，
+ * 两段可用区间取交集）；正下 / 正上从朝文字那条边竖着出去，横向落在「框与选区重叠段」里；
+ * 右下 / 右上优先从**左边**横着出去、再竖回文字，也可以直接从框的上 / 下边竖着出去。
  *
- * 直线被字挡住时**只用正交折线**（一折 → 两折 → 三折，最多 4 段）。
+ * 左右两侧被字挡住时走规则第 2 条的「下横上 / 上横下」：竖着从框的上 / 下边出去，
+ * 沿两行之间的空隙横穿，再竖着进目标字。行间横穿尽量走路中间（规则第 9 条）。
+ *
+ * 直线被字挡住时**只用正交折线**（一折 → 两折 → 三折，最多 4 折 / 5 段）。
  * **必画**：所有形态全撞障碍时，取「穿得最少、再最短」的一条照样画出来——宁可线贴一点字边，
  * 也不能让读者不知道这条旁注指向哪里。只有框退成小图标、或框已经贴住墨迹才没有箭头。
+ *
+ * 择优顺序（规则第 1～4 / 11 条）：**不交叉 → 不倒退 → 形状（直线 / L / 下横上优先）→
+ * 末段够长 → 折数 → 穿字 → 贴字 → 长度**。
  *
  * 避让对象（§6.3）：文字**逐字**墨迹（容差 0.5px，自己的锚点字除外——箭头就是要指到它）、
  * 图形 / 表格 / 线条（1px）、其他旁注框（1px）。已画引线只做交叉惩罚，不硬堵死。
@@ -3205,7 +3256,7 @@ internal fun noteArrowRelation(bubble: Rect, anchor: Rect): NoteArrowRelation {
  * @param side 这条批注的布点方向（§1.1）：决定引线从框的哪条边出去（正对时走法线，
  *   `BELOW_RIGHT` / `ABOVE_RIGHT` 从**左边**横着出去再竖回文字）。
  * @param lineBoxes 本页正文的行盒：竖着进的时候箭头**停在行盒边框上**、不侵入行盒内部
- *   （引线规则第 4 条）。缺省时退回逐字墨迹的边（单测与无行盒信息的调用）。
+ *   （引线规则第 5 条）。缺省时退回逐字墨迹的边（单测与无行盒信息的调用）。
  * @param targetInk 这条批注**要指的那一行**的逐字墨迹（2026-10-25 用户定口：位置定下来后，
  *   比一比框离选区开头近还是离末尾近，近哪头指哪头）。右侧摆法取它最右那个字、左侧摆法取
  *   最左那个字；缺省空 = 退回旧口径「与框纵向最近的那一行」。
@@ -3230,9 +3281,9 @@ internal fun routeNoteArrow(
     val hugInk = if (targetInk.isEmpty()) anchor else rectUnion(targetInk)
     if (rectDistance(bubble, hugInk) <= NOTE_ARROW_MIN_GAP_PX) return null
     val relation = noteArrowRelation(bubble, anchor)
-    // 沿边取点至少内缩 0.5em（引线规则第 6 条：端点不许落在四角）。旁注框的 em 取它的行高。
+    // 沿边取点至少内缩 0.5em（引线规则第 7 条：端点不许落在四角）。旁注框的 em 取它的行高。
     val bubbleEm = if (lineH > 0f) lineH else bubble.height
-    // 竖着进的时候箭头停在行盒边框上（规则第 4 条：不得侵入行盒内部）。
+    // 竖着进的时候箭头停在行盒边框上（规则第 5 条：不得侵入行盒内部）。
     fun boxOf(glyph: Rect): Rect = lineBoxes.firstOrNull {
         it.top <= glyph.center.y && it.bottom >= glyph.center.y &&
             it.left <= glyph.center.x && it.right >= glyph.center.x
@@ -3271,11 +3322,20 @@ internal fun routeNoteArrow(
                 max(bubble.bottom, glyph.bottom) + window,
             )
             val nearObstacles = obstacles.filter { it.rect.overlaps(near) }
+            // 行间中线按「离框与目标字的纵向中点由近到远」排：折点候选只取最前面的几条，
+            // 取错那几条就会从别的行缝横穿（规则第 9 条要的是这一段真正跨过的那条缝）。
+            val midY = (bubble.center.y + glyph.center.y) * 0.5f
+            // 目标那一行的墨迹（箭头只能停在它边上）：多行选区时不能拿整段包围盒当它，
+            // 否则「穿过行间空白」也会被当成压字。
+            val rowInk = inkRects.filter {
+                abs(it.center.y - glyph.center.y) <= max(it.height, glyph.height) * 0.6f
+            }
             ArrowTarget(
                 glyph = glyph,
                 obstacles = nearObstacles,
-                gapYs = arrowGapMidYs(nearObstacles),
+                gapYs = arrowGapMidYs(nearObstacles).sortedBy { abs(it - midY) },
                 box = boxOf(glyph),
+                own = rectUnion(rowInk.ifEmpty { listOf(glyph) }),
             )
         }
 
@@ -3294,7 +3354,7 @@ internal fun routeNoteArrow(
     fun consider(xs: FloatArray, ys: FloatArray, count: Int, target: ArrowTarget) {
         val path = measureArrowRoute(
             xs, ys, count, order++, target.index, bubble, drawnIndex, hugDistance,
-            limitClear = best, limitFallback = fallback,
+            limitClear = best, limitFallback = fallback, side = side, own = target.own,
         ) ?: return
         if (path.clear) {
             if (path.betterThan(best)) best = path
@@ -3305,19 +3365,55 @@ internal fun routeNoteArrow(
 
     /** 一组「出口 × 入口」：直线能走就直线，走不通再按折数由少到多试正交折线。 */
     fun tryRoute(exit: ArrowExit, entry: ArrowEntry, target: ArrowTarget) {
-        // 0) 两端恰好对齐：一条直线（横 → 横 / 竖 → 竖）。
+        // 这一组端点开始时的候选序号：判断「best 是不是这一组刚找到的」，
+        // 免得把上一组端点找到的折线当成「本组已达标」而过早收手。
+        val orderBefore = order
+        // 0) 两端同向 ⇒ 一条直线。两端的落点都在边上的可动区间里，
+        //    取两段区间的交集：交点就是「两端各自滑到同一个坐标」的那条直线。
+        //    （旧口径要求两端坐标严丝合缝地相等，框边按 0.5em 内缩后差一两像素就永远凑不齐，
+        //    本来一条直线能解决的「正右批注」被迫走成两折 Z 形。）
         if (exit.horizontal == entry.horizontal) {
-            val aligned = if (exit.horizontal) {
-                abs(exit.point.y - entry.point.y) < 0.01f && abs(exit.point.x - entry.point.x) > 0.01f
-            } else {
-                abs(exit.point.x - entry.point.x) < 0.01f && abs(exit.point.y - entry.point.y) > 0.01f
+            val lo = max(exit.lo, entry.lo)
+            val hi = min(exit.hi, entry.hi)
+            val shared = when {
+                lo <= hi + 0.01f -> clampInset(
+                    min(lo, hi),
+                    max(lo, hi),
+                    if (exit.horizontal) bubble.center.y else bubble.center.x,
+                )
+                // 两段「离角 0.5em」的可用区间对不上（一行高的框只剩中点，字墨迹中心又差几像素）：
+                // 差得不多就按规则第 7 条后半句**取消内缩**，取两段之间正中的坐标。
+                // 放宽也有底线：坐标得同时落在两条边的**整段**范围内（[ArrowExit.edgeLo] /
+                // [ArrowEntry.edgeLo]），否则起点就滑出框边、漂到框外去了。
+                // 不这么做，正右批注明明没阻挡也会被折成三段（2026-10-25 用户第 7 条）。
+                lo - hi <= max(bubbleEm * 0.5f, 2f) -> {
+                    val edgeLo = max(exit.edgeLo, entry.edgeLo)
+                    val edgeHi = min(exit.edgeHi, entry.edgeHi)
+                    val at = (lo + hi) * 0.5f
+                    if (edgeLo <= edgeHi && at >= edgeLo - 0.01f && at <= edgeHi + 0.01f) at else null
+                }
+                else -> null
             }
-            if (aligned) {
-                rawX[0] = exit.point.x
-                rawY[0] = exit.point.y
-                rawX[1] = entry.point.x
-                rawY[1] = entry.point.y
-                consider(rawX, rawY, 2, target)
+            if (shared != null) {
+                if (exit.horizontal) {
+                    // 横线：y 取两段 y 区间的共同坐标，x 各走各的边界（框边 → 文字边）。
+                    if (abs(exit.point.x - entry.point.x) > 0.01f) {
+                        rawX[0] = exit.point.x
+                        rawY[0] = shared
+                        rawX[1] = entry.point.x
+                        rawY[1] = shared
+                        consider(rawX, rawY, 2, target)
+                    }
+                } else {
+                    // 竖线：x 取两段 x 区间的共同坐标，y 各走各的边界（框边 → 行盒边）。
+                    if (abs(exit.point.y - entry.point.y) > 0.01f) {
+                        rawX[0] = shared
+                        rawY[0] = exit.point.y
+                        rawX[1] = shared
+                        rawY[1] = entry.point.y
+                        consider(rawX, rawY, 2, target)
+                    }
+                }
             }
         }
         // 1) 折线：只用横 / 竖段，且第一段 ⊥ 框边、最后一段 ⊥ 文字框边。
@@ -3341,22 +3437,33 @@ internal fun routeNoteArrow(
             )
             // 只有「通畅且一条已画引线都不交叉」才值得停：判据里交叉数排第一，
             // 早停在这里会把「多折一次但绕开别人引线」的路子直接掐掉。
-            if (best?.let { it.clear && (it.crosses == 0 || !anyDrawn) } == true) break
+            // 而且要**本组端点**自己找到了不差于当前折数的路：早停看的是全局最优的话，
+            // 上一组端点找到的一折折线会让这一组连两折都不试，竖着进 / 竖着出的
+            // 「下横上」就永远轮不到（2026-10-25 用户第 8 条）。
+            val b = best
+            if (b != null && b.order >= orderBefore && b.clear && b.bends <= bends &&
+                (b.crosses == 0 || !anyDrawn)
+            ) {
+                break
+            }
         }
     }
 
     /**
-     * 收尾：通畅路径先看是不是「挤在一起的短竖线」——是就改走左侧 L 形；
-     * 否则原样返回（2026-10-24 用户反馈：讨论的引线 17px 快看不见了）。
+     * 收尾：通畅路径的末段短到画不下箭头时，改走「贴着选区起点 / 终点的 L 形」；
+     * 否则原样返回（2026-10-24 用户反馈：讨论的引线 17px 快看不见了；
+     * 2026-10-25 补：末段一短，箭头两臂就退到上一段上，看着像「横线末端长了个竖箭头」）。
      */
     fun finish(path: ArrowPath): NoteArrow {
         val cornerFamily = side == NoteSide.BELOW_RIGHT || side == NoteSide.ABOVE_RIGHT ||
             side == NoteSide.BELOW_LEFT || side == NoteSide.ABOVE_LEFT
+        // 末段是竖线且短：不管是「只剩一条短竖线」还是「横-竖两折但竖段只剩几个像素」，都要改道。
+        val lastVertical = path.points.size >= 2 &&
+            abs(path.points[path.points.size - 1].x - path.points[path.points.size - 2].x) < 0.01f
         val squeezed = path.clear &&
             cornerFamily &&
-            path.points.size == 2 &&
-            abs(path.points[0].x - path.points[1].x) < 0.01f &&
-            path.length < max(lineH * NOTE_ARROW_MIN_VISIBLE_LINES, 8f)
+            lastVertical &&
+            path.tailLen < max(lineH * NOTE_ARROW_MIN_VISIBLE_LINES, 8f)
         if (!squeezed) return path.toNoteArrow()
         val leftCorner = side == NoteSide.BELOW_LEFT || side == NoteSide.ABOVE_LEFT
         var nearBest: ArrowPath? = null
@@ -3374,7 +3481,7 @@ internal fun routeNoteArrow(
             } else {
                 rowGlyphs.minByOrNull { it.left } ?: t.glyph
             }
-            // 箭头末端同样离选区的角至少 0.5em（引线规则第 6 条）。
+            // 箭头末端同样离选区的角至少 0.5em（引线规则第 7 条）。
             val xEntry = clampInset(
                 max(startGlyph.left, anchor.left + startGlyph.height * 0.5f),
                 min(startGlyph.right, anchor.right - startGlyph.height * 0.5f),
@@ -3398,6 +3505,7 @@ internal fun routeNoteArrow(
                 if (m < 2 || !orthogonalShaped(ptsX, ptsY, m, true, false)) continue
                 val near = measureArrowRoute(
                     ptsX, ptsY, m, order++, t.index, bubble, drawnIndex, hugDistance,
+                    side = side, own = t.own,
                 ) ?: continue
                 if (near.clear && near.betterThan(nearBest)) nearBest = near
             }
@@ -3405,33 +3513,53 @@ internal fun routeNoteArrow(
         return (nearBest ?: path).toNoteArrow()
     }
 
+    // 已经拿到**无条件最优**的引线（一条直线、且不交叉）就不必再试别的端点组合了。
+    // 折线形状（哪怕只是一折的 L）不能停：后面的「入口」还可能凑出更短的一条直线。
+    // 早停正是「正右批注明明没阻挡却被折成三段」「左右两侧永远走不成下横上」的直接原因
+    // （2026-10-25 用户第 7 / 8 条）：入口是先横后竖地枚举的，横着进的那一组先找到能通的
+    // 折线就返回，竖着进的那一组根本轮不到。
+    fun optimal(): Boolean = best?.let {
+        it.clear && it.bends == 0 && (it.crosses == 0 || !anyDrawn)
+    } == true
+
     // 按布点方向摆放的批注：两端都不再固定在中心点，出口可以沿框边挪、入口可以沿字边挪，
     // 先找「一条直线走得通」的那一对（2026-10-24 用户定口：最短优先）。
-    val sideAware = side != null && side != NoteSide.OTHER &&
-        side != NoteSide.BELOW && side != NoteSide.ABOVE
-    if (sideAware) {
+    val belowFamily = side == NoteSide.BELOW || side == NoteSide.ABOVE
+    val sideAware = side != null && side != NoteSide.OTHER && !belowFamily
+    if (belowFamily) {
+        // 正下 / 正上：竖着进出，横向优先落在「框与选区的重叠段」里（规则第 1 条）。
+        val below = side == NoteSide.BELOW
+        for (t in targets) {
+            for (entry in arrowBelowEntries(bubble, t.glyph, anchor, t.box, below)) {
+                for (exit in arrowBelowExits(bubble, below, entry, bubbleEm)) {
+                    tryRoute(exit, entry, t)
+                }
+                if (optimal()) return finish(best!!)
+            }
+        }
+    } else if (sideAware) {
         for (t in targets) {
             for (entry in arrowSideEntries(side!!, bubble, t.glyph, anchor, t.box)) {
                 for (exit in arrowSideExits(entry, side, bubble, t.glyph, bubbleEm)) {
                     tryRoute(exit, entry, t)
                 }
-                best?.let { if (it.clear && (it.crosses == 0 || !anyDrawn)) return finish(it) }
+                if (optimal()) return finish(best!!)
             }
         }
     } else {
-        // 退化路径（正下 / 正上 / 没有布点方向）：沿用「朝文字那条边的中点」。
+        // 退化路径（没有布点方向）：沿用「朝文字那条边的中点」。
         val exit = arrowExit(side, relation, bubble, anchor)
         for (t in targets) {
             val entryHorizontal = arrowEntryHorizontal(side, bubble, t.glyph)
             for (entry in arrowEntries(bubble, t.glyph, t.box, exit, entryHorizontal)) {
-                tryRoute(exit, ArrowEntry(entry, entryHorizontal), t)
+                tryRoute(exit, entry, t)
             }
-            best?.let { if (it.clear && (it.crosses == 0 || !anyDrawn)) return finish(it) }
+            if (optimal()) return finish(best!!)
         }
     }
     val chosen = best ?: fallback ?: return null
     if (best == null) {
-        // 兜底：一条通畅的路都没找到，只能画穿字 / 穿引线的那条（规则第 7 条：
+        // 兜底：一条通畅的路都没找到，只能画穿字 / 穿引线的那条（规则第 8 条：
         // 实在找不到合适位置时宁愿穿越文字，但穿越的文字越少越好）。留给真机排查。
         Logger.d(
             "Orilumn.NOTE",
@@ -3485,15 +3613,16 @@ private fun arrowTargetGlyphs(
  * 引线要从上下两行文字之间横穿时，尽可能从正中间过，不贴着任何一边。
  *
  * 只看逐字墨迹（图形 / 表格 / 旁注框的边界是硬线，中线没有意义）；两行在横向上要有重叠，
- * 间距不超过两行高度的一半（隔得很远时「中间」只是普通空地，不需要专门作为折点）。
+ * 中间的空档不超过一个字的墨迹高度（隔得很远时「中间」只是普通空地，不需要专门作为折点）。
  */
 private fun arrowGapMidYs(obstacles: List<ArrowObstacle>): List<Float> {
     val glyphs = obstacles.filter { it.tol <= ARROW_GLYPH_TOL_PX + 1e-4f }.map { it.rect }
     if (glyphs.size < 2) return emptyList()
-    // 行间空隙最多是字高的一半：按上缘排序后只和「紧接着的几行」比，隔得再远不可能相邻。
-    // 整对整对地比是 O(n²)，密页上这个函数一度是引线耗时的大头。
+    // 行间空隙以一个字的墨迹高度为上限：正常行距（两三成行高）都在内，段落之间的大空档
+    // 不算「两行之间」，那里横穿不需要专门挑中线。旧口径卡在一半字高，正常中文行距
+    // （墨迹高 20、行距 12）反而判不出来，规则第 9 条等于没落地（2026-10-25 用户第 6 条）。
     val sorted = glyphs.sortedBy { it.top }
-    val maxGap = sorted.maxOf { it.height } * 0.5f
+    val maxGap = sorted.maxOf { it.height }
     val out = LinkedHashSet<Float>()
     for (i in sorted.indices) {
         val up = sorted[i]
@@ -3505,18 +3634,48 @@ private fun arrowGapMidYs(obstacles: List<ArrowObstacle>): List<Float> {
             val overlapX = min(up.right, down.right) - max(up.left, down.left)
             if (overlapX < 1f) continue
             val gap = down.top - up.bottom
-            if (gap <= 0.5f || gap > max(up.height, down.height) * 0.5f) continue
+            if (gap <= 0.5f || gap > max(up.height, down.height)) continue
             out += (up.bottom + down.top) * 0.5f
         }
     }
     return out.toList()
 }
 
-/** 引线出口：落在框的哪条边、第一段是不是横线。 */
-private data class ArrowExit(val point: Offset, val horizontal: Boolean)
+/**
+ * 引线出口：落在框的哪条边、第一段是不是横线。
+ *
+ * [lo] / [hi] 是**这条边上还能落点的区间**（横边是 y 区间、竖边是 x 区间）：
+ * 端点离框的四角至少 0.5em，所以直线只能在这段区间里找共同坐标。
+ * 没有区间信息（退化调用）时放开成全边。
+ */
+private data class ArrowExit(
+    val point: Offset,
+    val horizontal: Boolean,
+    val lo: Float = Float.NEGATIVE_INFINITY,
+    val hi: Float = Float.POSITIVE_INFINITY,
+    /** 这条边的**整段**范围（不带 0.5em 内缩）：放宽直线时端点也不许滑出边外。 */
+    val edgeLo: Float = Float.NEGATIVE_INFINITY,
+    val edgeHi: Float = Float.POSITIVE_INFINITY,
+)
 
-/** 引线入口：落在目标字的哪条边、最后一段是不是横线。 */
-private data class ArrowEntry(val point: Offset, val horizontal: Boolean)
+/**
+ * 引线入口：落在目标字的哪条边、最后一段是不是横线。
+ *
+ * [lo] / [hi] 同 [ArrowExit]：横着进是 y 区间、竖着进是 x 区间，
+ * 竖着进时**优先取「框与选区的横向重叠段」**（引线规则第 1 条：正下方就是一条竖线）。
+ */
+private data class ArrowEntry(
+    val point: Offset,
+    val horizontal: Boolean,
+    val lo: Float = Float.NEGATIVE_INFINITY,
+    val hi: Float = Float.POSITIVE_INFINITY,
+    /** 同 [ArrowExit.edgeLo]：入口所在那条边的整段范围。 */
+    val edgeLo: Float = Float.NEGATIVE_INFINITY,
+    val edgeHi: Float = Float.POSITIVE_INFINITY,
+)
+
+/** 带宽区间统一成「下界 ≤ 上界」，供直线取交集。 */
+private fun bandOf(a: Float, b: Float): Pair<Float, Float> = min(a, b) to max(a, b)
 
 /**
  * 入边候选（§6.1）：**右侧摆法进终点所在的边**——
@@ -3538,7 +3697,7 @@ private fun arrowSideEntries(
     val h = glyph.height
     val rightFamily = side == NoteSide.RIGHT || side == NoteSide.BELOW_RIGHT || side == NoteSide.ABOVE_RIGHT
     val overlapY = bubble.top < glyph.bottom - NOTE_GEOM_EPS && bubble.bottom > glyph.top + NOTE_GEOM_EPS
-    // 端点离**选区的四个角**至少 0.5em（引线规则第 6 条）：沿边取点的可用区间。
+    // 端点离**选区的四个角**至少 0.5em（引线规则第 7 条）：沿边取点的可用区间。
     val alongLo = max(glyph.left, anchor.left + h * 0.5f)
     val alongHi = min(glyph.right, anchor.right - h * 0.5f)
     // 右侧摆法靠末端取点，左侧摆法靠起点取点。
@@ -3547,16 +3706,39 @@ private fun arrowSideEntries(
         overlapY -> {
             // 进竖边：横着进，纵向也要离选区上下两个角 0.5em。
             val x = if (rightFamily) glyph.right else glyph.left
-            val lo = max(glyph.top, anchor.top + h * 0.5f)
-            val hi = min(glyph.bottom, anchor.bottom - h * 0.5f)
+            val (lo, hi) = bandOf(
+                max(glyph.top, anchor.top + h * 0.5f),
+                min(glyph.bottom, anchor.bottom - h * 0.5f),
+            )
             for (f in floatArrayOf(0.5f, 0.25f, 0.75f)) {
-                out += ArrowEntry(Offset(x, insetAlong(lo, hi, f)), horizontal = true)
+                out += ArrowEntry(
+                    Offset(x, insetAlong(lo, hi, f)), horizontal = true, lo = lo, hi = hi,
+                    edgeLo = glyph.top, edgeHi = glyph.bottom,
+                )
             }
         }
         else -> {
             val y = verticalEntryEdge(bubble, glyph, box, above = bubble.bottom <= glyph.top + NOTE_GEOM_EPS)
+            val (lo, hi) = bandOf(alongLo, alongHi)
             for (f in fractions) {
-                out += ArrowEntry(Offset(insetAlong(alongLo, alongHi, f), y), horizontal = false)
+                out += ArrowEntry(
+                    Offset(insetAlong(lo, hi, f), y), horizontal = false, lo = lo, hi = hi,
+                    edgeLo = glyph.left, edgeHi = glyph.right,
+                )
+            }
+        }
+    }
+    // 左右两侧被正文挡住时，规则第 2 条要「下横上 / 上横下」：竖着从框的上 / 下边出去，
+    // 沿两行之间的空隙横穿，再竖着进目标字的上 / 下边。这里把上 / 下两条边也补成入口。
+    if (side == NoteSide.RIGHT || side == NoteSide.LEFT) {
+        val (lo, hi) = bandOf(alongLo, alongHi)
+        for (above in booleanArrayOf(true, false)) {
+            val y = verticalEntryEdge(bubble, glyph, box, above = above)
+            for (f in fractions) {
+                out += ArrowEntry(
+                    Offset(insetAlong(lo, hi, f), y), horizontal = false, lo = lo, hi = hi,
+                    edgeLo = glyph.left, edgeHi = glyph.right,
+                )
             }
         }
     }
@@ -3564,8 +3746,109 @@ private fun arrowSideEntries(
 }
 
 /**
+ * 正下 / 正上的入口：竖着进**朝框的那条行盒边**，横向优先落在
+ * 「批注框与选区（要指的那一行）的横向重叠段」里（引线规则第 1 / 12 条）。
+ *
+ * 重叠段就是「一条竖线够得着」的范围：框在正下方时它通常把框的中心整个包住，
+ * 于是直线一条竖线就解决；斜着靠过去时才退到「靠起点 / 靠末端」的那个字。
+ */
+private fun arrowBelowEntries(
+    bubble: Rect,
+    glyph: Rect,
+    anchor: Rect,
+    box: Rect,
+    below: Boolean,
+): List<ArrowEntry> {
+    val y = verticalEntryEdge(bubble, glyph, box, above = !below)
+    val h = glyph.height
+    val inset = max(h * 0.5f, 0.5f)
+    val (lo, hi) = overlapBand(bubble.left, bubble.right, anchor.left, anchor.right, inset)
+        ?: bandOf(
+            max(glyph.left, anchor.left + h * 0.5f),
+            min(glyph.right, anchor.right - h * 0.5f),
+        )
+    val out = LinkedHashSet<ArrowEntry>()
+    // 框的正下方优先：这就是「一条竖线」的落点，其余几个让绕行有左右挪动的余地。
+    out += ArrowEntry(
+        Offset(clampInset(lo, hi, bubble.center.x), y), horizontal = false, lo = lo, hi = hi,
+        edgeLo = glyph.left, edgeHi = glyph.right,
+    )
+    for (f in floatArrayOf(0.5f, 0.25f, 0.75f)) {
+        out += ArrowEntry(
+            Offset(insetAlong(lo, hi, f), y), horizontal = false, lo = lo, hi = hi,
+            edgeLo = glyph.left, edgeHi = glyph.right,
+        )
+    }
+    return out.toList()
+}
+
+/**
+ * 正下 / 正上的出口：从**朝文字那条边**竖着出去（第一段 ⊥ 框边），
+ * 沿边落点同样离框角至少 0.5em；再补一条侧边出口——文字横向错开时，
+ * 「侧边出去 + 一折竖回文字」比绕回正上方少一段（引线规则第 4 条）。
+ */
+private fun arrowBelowExits(
+    bubble: Rect,
+    below: Boolean,
+    entry: ArrowEntry,
+    em: Float,
+): List<ArrowExit> {
+    val out = LinkedHashSet<ArrowExit>()
+    val pad = max(if (em > 0f) em * 0.5f else 0f, NOTE_GEOM_EPS)
+    val (loX, hiX) = bandOf(bubble.left + pad, bubble.right - pad)
+    val (loY, hiY) = bandOf(bubble.top + pad, bubble.bottom - pad)
+    val facingY = if (below) bubble.top else bubble.bottom
+    val xs = floatArrayOf(
+        entry.point.x,
+        bubble.center.x,
+        bubble.left + bubble.width * 0.25f,
+        bubble.right - bubble.width * 0.25f,
+    )
+    for (x in xs) {
+        out += ArrowExit(
+            Offset(clampInset(loX, hiX, x), facingY), horizontal = false, lo = loX, hi = hiX,
+            edgeLo = bubble.left, edgeHi = bubble.right,
+        )
+    }
+    val sideX = if (bubble.center.x >= entry.point.x) bubble.left else bubble.right
+    val ys = floatArrayOf(
+        entry.point.y,
+        bubble.center.y,
+        bubble.top + bubble.height * 0.25f,
+        bubble.bottom - bubble.height * 0.25f,
+    )
+    for (y in ys) {
+        out += ArrowExit(
+            Offset(sideX, clampInset(loY, hiY, y)), horizontal = true, lo = loY, hi = hiY,
+            edgeLo = bubble.top, edgeHi = bubble.bottom,
+        )
+    }
+    return out.toList()
+}
+
+/**
+ * 两段区间（批注框与选区在某个方向上的投影）的交集，两端各留 [inset]。
+ *
+ * 交集窄到放不下两个端点（斜靠时只重叠一两个像素）就退回交集的中点；
+ * 完全没有交集时返回 null，调用方改用自己的区间。
+ */
+private fun overlapBand(
+    aLo: Float,
+    aHi: Float,
+    bLo: Float,
+    bHi: Float,
+    inset: Float,
+): Pair<Float, Float>? {
+    val lo = max(aLo, bLo)
+    val hi = min(aHi, bHi)
+    if (hi < lo) return null
+    val pad = min(inset, (hi - lo) * 0.45f)
+    return (lo + pad) to (hi - pad)
+}
+
+/**
  * 沿边按比例取点：区间反了（这条边短得放不下 1em，怎么取都挨着角）就退回中点。
- * 见引线规则第 6 条「至少向内偏移 0.5em」。
+ * 见引线规则第 7 条「至少向内偏移 0.5em」。
  */
 private fun insetAlong(lo: Float, hi: Float, f: Float): Float =
     if (lo >= hi) (lo + hi) * 0.5f else lo + (hi - lo) * f
@@ -3575,7 +3858,7 @@ private fun clampInset(lo: Float, hi: Float, v: Float): Float =
     if (lo >= hi) (lo + hi) * 0.5f else v.coerceIn(lo, hi)
 
 /**
- * 竖着进时箭头停在哪条边上：优先**行盒边框**（引线规则第 4 条：画到行盒边框为止，
+ * 竖着进时箭头停在哪条边上：优先**行盒边框**（引线规则第 5 条：画到行盒边框为止，
  * 不得侵入行盒内部）；行盒已经和批注框叠在一起时退回字边，免得箭头从框里长出来。
  */
 private fun verticalEntryEdge(bubble: Rect, glyph: Rect, box: Rect, above: Boolean): Float =
@@ -3600,7 +3883,7 @@ private fun arrowSideExits(
 ): List<ArrowExit> {
     val out = LinkedHashSet<ArrowExit>()
     val eps = NOTE_GEOM_EPS
-    // 起点离框的四个角也至少 0.5em（引线规则第 6 条）：框边的可用区间。
+    // 起点离框的四个角也至少 0.5em（引线规则第 7 条）：框边的可用区间。
     val pad = if (em > 0f) em * 0.5f else 0f
     val loY = bubble.top + max(pad, eps)
     val hiY = bubble.bottom - max(pad, eps)
@@ -3620,12 +3903,18 @@ private fun arrowSideExits(
     )
     fun edgeY(x: Float) {
         for (y in ys) {
-            out += ArrowExit(Offset(x, clampInset(loY, hiY, y)), horizontal = true)
+            out += ArrowExit(
+                Offset(x, clampInset(loY, hiY, y)), horizontal = true, lo = loY, hi = hiY,
+                edgeLo = bubble.top, edgeHi = bubble.bottom,
+            )
         }
     }
     fun edgeX(y: Float) {
         for (x in xs) {
-            out += ArrowExit(Offset(clampInset(loX, hiX, x), y), horizontal = false)
+            out += ArrowExit(
+                Offset(clampInset(loX, hiX, x), y), horizontal = false, lo = loX, hi = hiX,
+                edgeLo = bubble.left, edgeHi = bubble.right,
+            )
         }
     }
     val rightFamily = side == NoteSide.RIGHT || side == NoteSide.BELOW_RIGHT || side == NoteSide.ABOVE_RIGHT
@@ -3634,6 +3923,13 @@ private fun arrowSideExits(
     // 文字在框上方 / 下方时，也可以直接从框的上边 / 下边竖着出去（对齐就是一条直线）。
     if (glyph.center.y < bubble.top - eps) edgeX(bubble.top)
     if (glyph.center.y > bubble.bottom + eps) edgeX(bubble.bottom)
+    // 规则第 2 条「下横上 / 上横下」：左右两侧**同一行**被文字阻隔时，竖着从框的上 / 下边
+    // 出去、沿行间横穿、再竖着进目标字。没有这一对出口，候选里只剩「横出 → 竖走 → 横进」
+    // 的之字形，画出来就是绕到字外面再折回来（2026-10-25 用户第 2 / 8 条）。
+    if (side == NoteSide.RIGHT || side == NoteSide.LEFT) {
+        edgeX(bubble.top)
+        edgeX(bubble.bottom)
+    }
     return out.toList()
 }
 
@@ -3653,28 +3949,56 @@ private fun arrowExit(
     bubble: Rect,
     anchor: Rect,
 ): ArrowExit {
+    val (loY, hiY) = bandOf(bubble.top + NOTE_GEOM_EPS, bubble.bottom - NOTE_GEOM_EPS)
+    val (loX, hiX) = bandOf(bubble.left + NOTE_GEOM_EPS, bubble.right - NOTE_GEOM_EPS)
+    val yAt = clampInset(loY, hiY, bubble.center.y)
+    val xAt = clampInset(loX, hiX, bubble.center.x)
     return when (side) {
-        // 右下 / 右上 / 左下 / 左上：从**朝正文那条竖边中点**横着出去，再 90° 竖回文字。
-        NoteSide.BELOW_RIGHT, NoteSide.ABOVE_RIGHT ->
-            ArrowExit(Offset(bubble.left, bubble.center.y), horizontal = true)
-        NoteSide.BELOW_LEFT, NoteSide.ABOVE_LEFT ->
-            ArrowExit(Offset(bubble.right, bubble.center.y), horizontal = true)
-        NoteSide.RIGHT -> ArrowExit(Offset(bubble.left, bubble.center.y), horizontal = true)
-        NoteSide.LEFT -> ArrowExit(Offset(bubble.right, bubble.center.y), horizontal = true)
-        NoteSide.BELOW -> ArrowExit(Offset(bubble.center.x, bubble.top), horizontal = false)
-        NoteSide.ABOVE -> ArrowExit(Offset(bubble.center.x, bubble.bottom), horizontal = false)
+        // 右下 / 右上 / 左下 / 左上：从**朝正文那条竖边**横着出去，再 90° 竖回文字。
+        NoteSide.BELOW_RIGHT, NoteSide.ABOVE_RIGHT, NoteSide.RIGHT ->
+            ArrowExit(
+                Offset(bubble.left, yAt), horizontal = true, lo = loY, hi = hiY,
+                edgeLo = bubble.top, edgeHi = bubble.bottom,
+            )
+        NoteSide.BELOW_LEFT, NoteSide.ABOVE_LEFT, NoteSide.LEFT ->
+            ArrowExit(
+                Offset(bubble.right, yAt), horizontal = true, lo = loY, hi = hiY,
+                edgeLo = bubble.top, edgeHi = bubble.bottom,
+            )
+        NoteSide.BELOW -> ArrowExit(
+            Offset(xAt, bubble.top), horizontal = false, lo = loX, hi = hiX,
+            edgeLo = bubble.left, edgeHi = bubble.right,
+        )
+        NoteSide.ABOVE -> ArrowExit(
+            Offset(xAt, bubble.bottom), horizontal = false, lo = loX, hi = hiX,
+            edgeLo = bubble.left, edgeHi = bubble.right,
+        )
         null, NoteSide.OTHER -> when (relation) {
-            NoteArrowRelation.RIGHT -> ArrowExit(Offset(bubble.left, bubble.center.y), true)
-            NoteArrowRelation.LEFT -> ArrowExit(Offset(bubble.right, bubble.center.y), true)
-            NoteArrowRelation.ABOVE -> ArrowExit(Offset(bubble.center.x, bubble.bottom), false)
-            NoteArrowRelation.BELOW -> ArrowExit(Offset(bubble.center.x, bubble.top), false)
+            NoteArrowRelation.RIGHT -> ArrowExit(
+                Offset(bubble.left, yAt), true, loY, hiY, bubble.top, bubble.bottom,
+            )
+            NoteArrowRelation.LEFT -> ArrowExit(
+                Offset(bubble.right, yAt), true, loY, hiY, bubble.top, bubble.bottom,
+            )
+            NoteArrowRelation.ABOVE -> ArrowExit(
+                Offset(xAt, bubble.bottom), false, loX, hiX, bubble.left, bubble.right,
+            )
+            NoteArrowRelation.BELOW -> ArrowExit(
+                Offset(xAt, bubble.top), false, loX, hiX, bubble.left, bubble.right,
+            )
             // 斜靠：竖直方向先分开就先竖着出去，否则横着出去。
             NoteArrowRelation.SIDE -> if (anchor.bottom <= bubble.top || anchor.top >= bubble.bottom) {
                 val up = anchor.bottom <= bubble.top
-                ArrowExit(Offset(bubble.center.x, if (up) bubble.top else bubble.bottom), false)
+                ArrowExit(
+                    Offset(xAt, if (up) bubble.top else bubble.bottom), false, loX, hiX,
+                    bubble.left, bubble.right,
+                )
             } else {
                 val leftward = anchor.right <= bubble.left
-                ArrowExit(Offset(if (leftward) bubble.left else bubble.right, bubble.center.y), true)
+                ArrowExit(
+                    Offset(if (leftward) bubble.left else bubble.right, yAt), true, loY, hiY,
+                    bubble.top, bubble.bottom,
+                )
             }
         }
     }
@@ -3706,21 +4030,35 @@ private fun arrowEntries(
     box: Rect,
     exit: ArrowExit,
     horizontal: Boolean,
-): List<Offset> {
-    val out = LinkedHashSet<Offset>()
+): List<ArrowEntry> {
+    val out = LinkedHashSet<ArrowEntry>()
     val h = glyph.height
     if (horizontal) {
         val x = if (glyph.center.x <= bubble.center.x) glyph.right else glyph.left
-        val lo = glyph.top + h * 0.5f
-        val hi = glyph.bottom - h * 0.5f
-        out += Offset(x, clampInset(lo, hi, exit.point.y.coerceIn(glyph.top, glyph.bottom)))
-        for (f in floatArrayOf(0.5f, 0.25f, 0.75f)) out += Offset(x, insetAlong(lo, hi, f))
+        val (lo, hi) = bandOf(glyph.top + h * 0.5f, glyph.bottom - h * 0.5f)
+        out += ArrowEntry(
+            Offset(x, clampInset(lo, hi, exit.point.y.coerceIn(glyph.top, glyph.bottom))),
+            horizontal = true, lo = lo, hi = hi, edgeLo = glyph.top, edgeHi = glyph.bottom,
+        )
+        for (f in floatArrayOf(0.5f, 0.25f, 0.75f)) {
+            out += ArrowEntry(
+                Offset(x, insetAlong(lo, hi, f)), horizontal = true, lo = lo, hi = hi,
+                edgeLo = glyph.top, edgeHi = glyph.bottom,
+            )
+        }
     } else {
         val y = verticalEntryEdge(bubble, glyph, box, above = glyph.center.y > bubble.center.y)
-        val lo = glyph.left + h * 0.5f
-        val hi = glyph.right - h * 0.5f
-        out += Offset(clampInset(lo, hi, exit.point.x.coerceIn(glyph.left, glyph.right)), y)
-        for (f in floatArrayOf(0.5f, 0.25f, 0.75f)) out += Offset(insetAlong(lo, hi, f), y)
+        val (lo, hi) = bandOf(glyph.left + h * 0.5f, glyph.right - h * 0.5f)
+        out += ArrowEntry(
+            Offset(clampInset(lo, hi, exit.point.x.coerceIn(glyph.left, glyph.right)), y),
+            horizontal = false, lo = lo, hi = hi, edgeLo = glyph.left, edgeHi = glyph.right,
+        )
+        for (f in floatArrayOf(0.5f, 0.25f, 0.75f)) {
+            out += ArrowEntry(
+                Offset(insetAlong(lo, hi, f), y), horizontal = false, lo = lo, hi = hi,
+                edgeLo = glyph.left, edgeHi = glyph.right,
+            )
+        }
     }
     return out.toList()
 }
@@ -3835,10 +4173,10 @@ private inline fun emitElbowRoutes(
     val bendXs = FloatArray(ARROW_MAX_BEND_COORDS + 1)
     var bendXn = pickCoords(xs, xn, (start.x + end.x) * 0.5f, bendXs, ARROW_MAX_BEND_COORDS)
     // 纵向候选：行间中线排在前面（优先被取到），再补「离中点最近的坐标」，最后是两端中点。
-    val bendYs = FloatArray(ARROW_MAX_BEND_COORDS + 3)
+    val bendYs = FloatArray(ARROW_GAP_MID_LIMIT + ARROW_MAX_BEND_COORDS + 1)
     var bendYn = 0
     for (y in extraYs) {
-        if (bendYn >= 2) break
+        if (bendYn >= ARROW_GAP_MID_LIMIT) break
         bendYs[bendYn++] = y
     }
     val pickedYs = FloatArray(ARROW_MAX_BEND_COORDS)
@@ -4052,6 +4390,53 @@ private fun uniqueFloats(values: FloatArray, count: Int): Int {
 }
 
 
+/**
+ * 引线形状名次（规则第 1 / 2 / 3 / 4 条）：0 单段直线 → 1 首选折法 → 2 次选折法 → 3 其它。
+ *
+ * - **单段直线**（规则第 1 条）永远第一；
+ * - **一折的 L 形**（规则第 3 条）是「首选折法」：斜向摆法本来就要它，正右 / 正左
+ *   被挤得对不齐时也是它最短；
+ * - **左右两侧**被字挡住时的「下横上 / 上横下」（竖出 → 行间横穿 → 竖进，规则第 2 条）
+ *   也归首选：它跨过的是行间空白，而不是贴着字边抹过去；
+ * - 其余两折归次选。首选与次选之间还按折数决胜（[ArrowPath.betterThan]），
+ *   所以没有文字阻隔时，一折的 L 形压过两折的「下横上」。
+ */
+private fun arrowForm(
+    side: NoteSide?,
+    count: Int,
+    firstVertical: Boolean,
+    lastVertical: Boolean,
+): Int {
+    if (count <= 2) return ARROW_FORM_STRAIGHT
+    val bends = count - 2
+    val beside = side == NoteSide.RIGHT || side == NoteSide.LEFT
+    return when {
+        bends == 1 -> ARROW_FORM_FIRST
+        beside && bends == 2 && firstVertical && lastVertical -> ARROW_FORM_FIRST
+        bends == 2 -> ARROW_FORM_SECOND
+        else -> ARROW_FORM_OTHER
+    }
+}
+
+/**
+ * 第一段是不是**朝着远离目标的方向**起步（规则第 8 条：不走回头路）。
+ *
+ * 判据只看几何，不看布点在左还是右：第一段的方向与「起点 → 终点」在这一轴上的方向相反，
+ * 就是先退出去再折回来。右下方批注「先从左边出去、再绕回右侧」正是这种形状
+ * （框的左边已经越过目标字的右缘时，往左走其实是背离文字）。
+ */
+private fun arrowRetreats(start: Offset, next: Offset, end: Offset): Boolean {
+    val dx = next.x - start.x
+    val dy = next.y - start.y
+    val toX = end.x - start.x
+    val toY = end.y - start.y
+    return if (abs(dx) >= abs(dy)) {
+        abs(dx) > 0.01f && abs(toX) > 0.01f && dx * toX < 0f
+    } else {
+        abs(dy) > 0.01f && abs(toY) > 0.01f && dy * toY < 0f
+    }
+}
+
 /** 量一条候选路径：长度、折数、已画引线交叉数、穿障碍的长度、有没有拐回自己的框。 */
 /** 候选路径的实测次数（真机排查用：一页引线慢的时候先看这个数）。 */
 internal var noteArrowRouteTries: Int = 0
@@ -4082,15 +4467,33 @@ private fun measureArrowRoute(
      */
     limitClear: ArrowPath? = null,
     limitFallback: ArrowPath? = null,
+    /** 这条批注的布点方向：定形状名次与「有没有往反方向起步」。 */
+    side: NoteSide? = null,
+    /** 自己锚点那一行的墨迹：只能停在边上，不许横穿。 */
+    own: Rect? = null,
 ): ArrowPath? {
     noteArrowRouteTries++
     if (count < 2) return null
     val bends = max(0, count - 2)
+    // 形状名次 / 首段方向 / 末段长度都是「开局就定死」的：量到一半就能拿它们跟现有最优比。
+    val firstVertical = abs(xs[0] - xs[1]) < 0.01f
+    val lastVertical = abs(xs[count - 2] - xs[count - 1]) < 0.01f
+    val form = arrowForm(side, count, firstVertical, lastVertical)
+    val retreats = arrowRetreats(
+        start = Offset(xs[0], ys[0]),
+        next = Offset(xs[1], ys[1]),
+        end = Offset(xs[count - 1], ys[count - 1]),
+    )
+    val tailDx = xs[count - 1] - xs[count - 2]
+    val tailDy = ys[count - 1] - ys[count - 2]
+    val tailLen = sqrt(tailDx * tailDx + tailDy * tailDy)
+    val tailShort = tailLen < ARROW_TAIL_MIN_PX
     var length = 0f
     var hits = 0f
     var crosses = 0
     var hug = 0f
     var enters = false
+    var entersInk = false
     for (i in 1 until count) {
         val ax = xs[i - 1]
         val ay = ys[i - 1]
@@ -4102,6 +4505,7 @@ private fun measureArrowRoute(
         if (len < 0.01f) continue
         length += len
         if (insideSpan(ax, ay, dx, dy, bubble, ARROW_OWN_BUBBLE_TOL_PX) > 1e-6f) enters = true
+        if (own != null && insideSpan(ax, ay, dx, dy, own, 0f) > 1e-6f) entersInk = true
         // 先用线段的包围盒粗筛：绝大多数字形连边都碰不到，省掉逐块的裁剪计算。
         val segLeft = min(ax, bx)
         val segRight = max(ax, bx)
@@ -4161,32 +4565,44 @@ private fun measureArrowRoute(
             drawn.crossingsAll(ax, ay, bx, by)
         }        // 已量到的部分就赢不了了：后面的段只会让交叉 / 穿字 / 长度继续变大。
         if (limitClear != null) {
-            if (crosses > limitClear.crosses) return null
-            if (crosses == limitClear.crosses) {
-                if (bends > limitClear.bends) return null
-                if (bends == limitClear.bends) {
-                    if (hits > limitClear.hits + 0.5f) return null
-                    if (abs(hits - limitClear.hits) <= 0.5f) {
-                        if (hug > limitClear.hug + 0.5f) return null
-                        if (abs(hug - limitClear.hug) <= 0.5f && length > limitClear.length + 0.5f) {
-                            return null
-                        }
-                    }
+            val worse = if (crosses > limitClear.crosses) {
+                true
+            } else if (crosses == limitClear.crosses) {
+                when {
+                    retreats != limitClear.retreats -> retreats
+                    form != limitClear.form -> form > limitClear.form
+                    tailShort != limitClear.tailShort -> tailShort
+                    bends != limitClear.bends -> bends > limitClear.bends
+                    hits > limitClear.hits + 0.5f -> true
+                    abs(hits - limitClear.hits) <= 0.5f && hug > limitClear.hug + 0.5f -> true
+                    abs(hits - limitClear.hits) <= 0.5f && abs(hug - limitClear.hug) <= 0.5f &&
+                        length > limitClear.length + 0.5f -> true
+                    else -> false
                 }
+            } else {
+                false
             }
+            if (worse) return null
         }
         if (limitFallback != null) {
-            if (enters != limitFallback.entersBubble) {
-                if (enters) return null
-            } else {
-                if (crosses > limitFallback.crosses) return null
-                if (crosses == limitFallback.crosses) {
-                    if (hits > limitFallback.hits + 0.5f) return null
-                    if (abs(hits - limitFallback.hits) <= 0.5f && length > limitFallback.length + 0.5f) {
-                        return null
-                    }
+            val worse = if (enters != limitFallback.entersBubble) {
+                enters
+            } else if (crosses > limitFallback.crosses) {
+                true
+            } else if (crosses == limitFallback.crosses) {
+                when {
+                    retreats != limitFallback.retreats -> retreats
+                    form != limitFallback.form -> form > limitFallback.form
+                    hits > limitFallback.hits + 0.5f -> true
+                    abs(hits - limitFallback.hits) <= 0.5f && length > limitFallback.length + 0.5f -> true
+                    else -> false
                 }
+            } else {
+                false
             }
+            // 只有**已经确定要穿东西**的候选才归兜底那一档；通畅的候选走 best 那一档，
+            // 拿兜底的形状名次去掐它会误杀（4 折但通畅的路，名次不如一条穿字的直线）。
+            if (worse && (enters || hits > 1e-4f)) return null
         }
     }
     if (length < 0.01f) return null
@@ -4198,7 +4614,11 @@ private fun measureArrowRoute(
         hits = hits,
         hug = hug,
         entersBubble = enters,
+        entersInk = entersInk,
         order = order,
+        form = form,
+        retreats = retreats,
+        tailLen = tailLen,
     )
 }
 
@@ -4535,6 +4955,25 @@ internal fun NoteBubbles(
     }
 }
 
+/**
+ * 箭头两臂的几何：臂根中心 + 法向半宽。
+ *
+ * **两臂必须整段落在末段以内**：末段只剩几个像素时还按死 5dp 画，两臂的根部就退到
+ * 上一段上，看上去像「横线末端长了个竖箭头」（箭头和末端引线垂直，2026-10-25 用户第 3 条）。
+ * 所以臂长夹在末段长度的 90% 以内，半宽随之等比缩小。
+ */
+internal fun noteArrowHead(end: Offset, tail: Offset, headPx: Float, halfPx: Float): Pair<Offset, Float> {
+    val dx = end.x - tail.x
+    val dy = end.y - tail.y
+    val len = sqrt(dx * dx + dy * dy)
+    if (len < 0.01f) return end to 0f
+    val ux = dx / len
+    val uy = dy / len
+    val head = min(headPx, len * 0.9f)
+    val half = min(halfPx, head * 0.6f)
+    return Offset(end.x - ux * head, end.y - uy * head) to half
+}
+
 /** 箭头绘制：细线 + 小箭头，颜色取所属标注的墨色。 */
 private fun DrawScope.drawNoteArrow(arrow: NoteArrow, color: Color) {
     val stroke = 1.dp.toPx()
@@ -4556,16 +4995,12 @@ private fun DrawScope.drawNoteArrow(arrow: NoteArrow, color: Color) {
     drawPath(path, color = color, style = Stroke(width = stroke))
 
     // 箭头尖用两小段线，方向取末段。
+    val (base, half) = noteArrowHead(arrow.end, tail, 5.dp.toPx(), 2.4.dp.toPx())
+    if (half <= 0f) return
     val dx = arrow.end.x - tail.x
     val dy = arrow.end.y - tail.y
     val len = sqrt(dx * dx + dy * dy)
-    if (len < 0.01f) return
-    val ux = dx / len
-    val uy = dy / len
-    val head = 5.dp.toPx()
-    val half = 2.4.dp.toPx()
-    val base = Offset(arrow.end.x - ux * head, arrow.end.y - uy * head)
-    val normal = Offset(-uy, ux)
+    val normal = Offset(-dy / len, dx / len)
     drawLine(color, base + normal * half, arrow.end, strokeWidth = stroke)
     drawLine(color, base - normal * half, arrow.end, strokeWidth = stroke)
 }

@@ -1744,6 +1744,154 @@ class NoteBubblesTest {
     }
 
     @Test
+    fun `right side note stays a single segment when the box is a few pixels off`() {
+        // 真机第 7 条：正右没阻挡，只因为框边按 0.5em 内缩后与字墨迹中心差几像素，
+        // 就折成了三段。差得不多时按规则第 7 条后半句「距离不允许时取消内缩」，照样一条直线。
+        val ink = rect(100f, 100f, 300f, 140f)
+        for (dy in listOf(0f, 2f, 5f)) {
+            val bubble = rect(340f, 100f + dy, 440f, 140f + dy)
+            val arrow = routeNoteArrow(bubble, listOf(ink), lineH = 32f, side = NoteSide.RIGHT)
+            val straight = arrow as? NoteArrow.Straight
+            assertTrue("正右无阻挡必须是单段直线（dy=$dy）：$arrow", straight != null)
+            assertEquals("横线两端要同高", straight!!.start.y, straight.end.y, 0.01f)
+            assertEquals("起点落在框左边上", bubble.left, straight.start.x, 0.01f)
+            assertEquals("终点落在文字右边上", ink.right, straight.end.x, 0.01f)
+        }
+    }
+
+    @Test
+    fun `one line high box still gets a single segment`() {
+        // 框只有一行高时，「离角 0.5em」的可用带塌成一个点；字墨迹中心再差一两像素，
+        // 两段区间就永远对不上。正确做法是取消内缩，而不是把直线折成三段。
+        val ink = rect(100f, 100f, 300f, 140f)
+        for (dy in listOf(0f, 2f, 4f)) {
+            val bubble = rect(340f, 104f + dy, 430f, 130f + dy)
+            val arrow = routeNoteArrow(bubble, listOf(ink), lineH = 34f, side = NoteSide.RIGHT)
+            assertTrue("一行高的框也要一条直线（dy=$dy）：$arrow", arrow is NoteArrow.Straight)
+        }
+    }
+
+    @Test
+    fun `note directly below meets its text inside the horizontal overlap`() {
+        // 真机第 5 条：正下方的批注要与选区**横向重叠的那一段**对齐，一条竖线解决，
+        // 不该从框中心或某个字上随便拉一条再绕行。
+        val ink = rect(100f, 100f, 500f, 140f)
+        for (left in listOf(120f, 260f, 380f)) {
+            val bubble = rect(left, 170f, left + 200f, 210f)
+            val arrow = routeNoteArrow(bubble, listOf(ink), lineH = 32f, side = NoteSide.BELOW)
+                as? NoteArrow.Straight
+            assertTrue("正下方必须是一条竖线（left=$left）：$arrow", arrow != null)
+            assertEquals("两端 x 要相同", arrow!!.start.x, arrow.end.x, 0.01f)
+            assertEquals("起点在框上边", bubble.top, arrow.start.y, 0.01f)
+            assertEquals("终点在文字下边", ink.bottom, arrow.end.y, 0.01f)
+            val lo = max(bubble.left, ink.left)
+            val hi = min(bubble.right, ink.right)
+            assertTrue("竖线要落在横向重叠段里：x=${arrow.start.x}", arrow.start.x in lo..hi)
+        }
+    }
+
+    @Test
+    fun `note below right leaves through its top edge and never doubles back`() {
+        // 真机第 4 条：右下批注先从左边出去、绕一圈再扎回文字右侧。
+        // 框在文字右下时，正确走法是从框上边竖着出去、沿行间横穿、再竖着进文字。
+        val ink = rect(150f, 64f, 230f, 84f)
+        val rows = listOf(rect(0f, 64f, 600f, 84f), rect(0f, 96f, 600f, 116f))
+        val bubble = rect(601f, 104f, 680f, 184f)
+        val arrow = routeNoteArrow(
+            bubble = bubble,
+            inkRects = listOf(ink),
+            glyphs = rows,
+            lineH = 32f,
+            side = NoteSide.BELOW_RIGHT,
+        )
+        val pts = arrowPoints(arrow!!)
+        assertEquals("第一段要竖着从框上边出去：$pts", bubble.top, pts.first().y, 0.01f)
+        assertTrue("起点 x 要落在框的横向范围里：$pts", pts.first().x in bubble.left..bubble.right)
+        for (i in 1 until pts.size) {
+            assertTrue("引线必须横平竖直：$pts", abs(pts[i - 1].x - pts[i].x) < 0.01f || abs(pts[i - 1].y - pts[i].y) < 0.01f)
+            assertTrue("不许折回自己的框：$pts", !entersInterior(pts[i - 1], pts[i], bubble))
+        }
+        assertEquals("终点落在文字底边", ink.bottom, pts.last().y, 0.01f)
+        assertTrue("终点落在文字的横向范围里", pts.last().x in ink.left..ink.right)
+        // 文字在框的左边：第一段（竖线）之后第一段横线不许朝右（背离文字）跑。
+        val firstHorizontal = pts.zipWithNext().first { (a, b) -> abs(a.y - b.y) < 0.01f }
+        assertTrue("不许朝背离文字的方向起步：$pts", firstHorizontal.second.x <= firstHorizontal.first.x + 0.01f)
+    }
+
+    @Test
+    fun `blocked side note goes over the line instead of squeezing past the word`() {
+        // 真机第 8 + 2 条：左右两侧与文字之间有字阻隔时，规则第 2 条要「下横上 / 上横下」：
+        // 竖着从框的上 / 下边出去、沿行间横穿、再竖着进目标字，而不是横出 → 竖走 → 横进的之字形。
+        val ink = rect(100f, 100f, 300f, 140f)
+        val blocker = rect(304f, 100f, 334f, 140f)
+        val bubble = rect(340f, 100f, 440f, 140f)
+        val arrow = routeNoteArrow(
+            bubble = bubble,
+            inkRects = listOf(ink),
+            glyphs = listOf(blocker),
+            lineH = 32f,
+            side = NoteSide.RIGHT,
+        )
+        val pts = arrowPoints(arrow!!)
+        assertEquals("下横上正好三段、四个点：$pts", 4, pts.size)
+        assertTrue("第一段要竖着从框的上 / 下边出去：$pts", abs(pts[0].x - pts[1].x) < 0.01f)
+        assertTrue("最后一段要竖着进目标字：$pts", abs(pts[2].x - pts[3].x) < 0.01f)
+        assertTrue(
+            "第一段要从框边出发：$pts",
+            abs(pts[0].y - bubble.top) < 0.01f || abs(pts[0].y - bubble.bottom) < 0.01f,
+        )
+        for (i in 1 until pts.size) {
+            assertTrue(
+                "引线不该压住中间的字：${pts[i - 1]} → ${pts[i]}",
+                !segmentHits(pts[i - 1], pts[i], blocker),
+            )
+        }
+    }
+
+    @Test
+    fun `leader takes the other side when another note blocks the middle of the gap`() {
+        // 真机第 6 条 / 规则第 9 条：行间中线被别的批注占了，就走另一侧，不贴着字边抹过去。
+        val anchorGlyph = rect(100f, 100f, 140f, 140f)
+        val rowOne = listOf(anchorGlyph, rect(160f, 100f, 200f, 140f), rect(220f, 100f, 260f, 140f))
+        val rowTwo = listOf(rect(100f, 172f, 140f, 212f), rect(160f, 172f, 200f, 212f))
+        val bubble = rect(320f, 100f, 420f, 140f)
+        // 另一条批注正好压在两行字之间（中线 y = 156）。
+        val blocker = rect(270f, 136f, 400f, 158f)
+        val arrow = routeNoteArrow(
+            bubble = bubble,
+            inkRects = listOf(anchorGlyph),
+            glyphs = rowOne + rowTwo,
+            otherBubbles = listOf(blocker),
+            lineH = 32f,
+            side = NoteSide.RIGHT,
+        )
+        val pts = arrowPoints(arrow!!)
+        val crossing = pts.zipWithNext()
+            .filter { (a, b) -> abs(a.y - b.y) < 0.01f && abs(a.x - b.x) > 1f }
+            .map { (a, _) -> a.y }
+        assertTrue(
+            "中线被别的批注占了，要走另一侧：$pts",
+            crossing.none { it > 140.5f && it < 171.5f },
+        )
+    }
+
+    @Test
+    fun `arrow head arms stay inside a short last segment`() {
+        // 真机第 3 条：末段只剩几个像素时，箭头臂长还按死 5dp 画，臂根就退到上一段上，
+        // 看上去像「横线末端长了个竖箭头」。臂长必须夹在末段以内，半宽随之等比缩小。
+        val end = Offset(100f, 100f)
+        val shortTail = Offset(100f, 97f)
+        val (base, half) = noteArrowHead(end, shortTail, headPx = 12f, halfPx = 6f)
+        assertTrue("臂根不能退到末段之外：$base", abs(base.y - end.y) <= 3.01f)
+        assertEquals("臂根要落在末段方向上", 100f, base.x, 0.01f)
+        assertTrue("末段短时箭头也要等比缩窄：half=$half", half > 0f && half < 6f)
+        // 末段够长时照旧用满箭头。
+        val (base2, half2) = noteArrowHead(end, Offset(60f, 100f), headPx = 12f, halfPx = 6f)
+        assertEquals("横线箭头：臂根在末端左侧 12px", 88f, base2.x, 0.01f)
+        assertEquals(6f, half2, 0.01f)
+    }
+
+    @Test
     fun `leader crossing two lines goes through the middle of the gap`() {
         // 真机第 6 条：从两行字之间横穿时要走**正中间**，不贴着任何一边。
         val anchorGlyph = rect(0f, 100f, 40f, 140f)

@@ -1811,8 +1811,17 @@ class NoteBubblesTest {
             assertTrue("引线必须横平竖直：$pts", abs(pts[i - 1].x - pts[i].x) < 0.01f || abs(pts[i - 1].y - pts[i].y) < 0.01f)
             assertTrue("不许折回自己的框：$pts", !entersInterior(pts[i - 1], pts[i], bubble))
         }
-        assertEquals("终点落在文字底边", ink.bottom, pts.last().y, 0.01f)
-        assertTrue("终点落在文字的横向范围里", pts.last().x in ink.left..ink.right)
+        val end = pts.last()
+        val lastIsVertical = abs(pts[pts.size - 1].x - pts[pts.size - 2].x) < 0.01f
+        if (lastIsVertical) {
+            assertEquals("末段竖着落在文字底边", ink.bottom, end.y, 0.01f)
+            assertTrue("终点落在文字的横向范围里", end.x in ink.left..ink.right)
+        } else {
+            // 规则第 10 条：这一段行间空档只有 12px，末折短到画不下箭头时省掉末折，
+            // 箭头直接画在那条横线上、停在选区的近侧边线（2026-10-26 用户第 1 条）。
+            assertEquals("省掉末折时停在选区近侧边线", ink.right, end.x, 0.01f)
+            assertTrue("横线要落在两行之间：y=${end.y}", end.y in ink.bottom..rows[1].top)
+        }
         // 文字在框的左边：第一段（竖线）之后第一段横线不许朝右（背离文字）跑。
         val firstHorizontal = pts.zipWithNext().first { (a, b) -> abs(a.y - b.y) < 0.01f }
         assertTrue("不许朝背离文字的方向起步：$pts", firstHorizontal.second.x <= firstHorizontal.first.x + 0.01f)

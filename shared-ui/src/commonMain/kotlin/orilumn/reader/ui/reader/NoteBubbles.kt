@@ -171,6 +171,12 @@ private const val MAX_CANDIDATES_PER_NOTE: Int = 300
  */
 private const val NOTE_ARROW_MIN_VISIBLE_LINES: Float = 0.5f
 
+/**
+ * 末段短到**箭头都画不下**的门槛（以旁注行高为单位）：这一档才走规则第 10 条
+ * 「省掉末折、箭头画在横线上」。5dp 的箭头臂在正常字号下≈0.25 行高。
+ */
+private const val NOTE_ARROW_UNDRAWABLE_LINES: Float = 0.25f
+
 /** 引线与字墨迹贴得太近的判定距离（以旁注行高为单位）：平行段离字太近要让位。 */
 private const val ARROW_HUG_LINES: Float = 0.3f
 
@@ -3325,6 +3331,13 @@ internal fun routeNoteArrow(
             // 行间中线按「离框与目标字的纵向中点由近到远」排：折点候选只取最前面的几条，
             // 取错那几条就会从别的行缝横穿（规则第 9 条要的是这一段真正跨过的那条缝）。
             val midY = (bubble.center.y + glyph.center.y) * 0.5f
+            // 框和正文在同一行时（正右 / 正左摆法），「上横下」的横线只能走框外那条空白：
+            // 相邻两行墨迹的中线不一定有（段首上方是段间距，`arrowGapMidYs` 按一个字高截掉了），
+            // 于是折点池里根本没有框外的 y，V-H-V 生成不出来，只能退成贴框线的之字形
+            // （真机「使用 var」，2026-10-26）。框的上 / 下沿各让出一个折点，横线才算有地方放。
+            // 让出的量取三分之一行高：比箭头本身（≈0.25 行高）长一截，末折才立得住、画得下。
+            val liftPad = max(ARROW_BEND_CLEARANCE_PX * 2f, lineH * 0.35f)
+            val liftYs = listOf(bubble.top - liftPad, bubble.bottom + liftPad)
             // 目标那一行的墨迹（箭头只能停在它边上）：多行选区时不能拿整段包围盒当它，
             // 否则「穿过行间空白」也会被当成压字。
             val rowInk = inkRects.filter {
@@ -3333,9 +3346,11 @@ internal fun routeNoteArrow(
             ArrowTarget(
                 glyph = glyph,
                 obstacles = nearObstacles,
-                gapYs = arrowGapMidYs(nearObstacles).sortedBy { abs(it - midY) },
+                gapYs = liftYs + arrowGapMidYs(nearObstacles).sortedBy { abs(it - midY) },
                 box = boxOf(glyph),
-                own = rectUnion(rowInk.ifEmpty { listOf(glyph) }),
+                // 指到哪个字，就从那个字的边上进：它自己不算「穿字」。整行字高不齐时
+                // （'r' 比汉字矮）旧口径会把「落在字顶边」当成扎进行内，干净的竖进全被毙掉。
+                own = rectUnion(rowInk.filter { it != glyph }.ifEmpty { listOf(glyph) }),
             )
         }
 
@@ -3402,7 +3417,9 @@ internal fun routeNoteArrow(
                         rawY[0] = shared
                         rawX[1] = entry.point.x
                         rawY[1] = shared
-                        consider(rawX, rawY, 2, target)
+                        if (endpointsOutward(rawX, rawY, 2, exit.edge, entry.edge)) {
+                            consider(rawX, rawY, 2, target)
+                        }
                     }
                 } else {
                     // 竖线：x 取两段 x 区间的共同坐标，y 各走各的边界（框边 → 行盒边）。
@@ -3411,7 +3428,9 @@ internal fun routeNoteArrow(
                         rawY[0] = exit.point.y
                         rawX[1] = shared
                         rawY[1] = entry.point.y
-                        consider(rawX, rawY, 2, target)
+                        if (endpointsOutward(rawX, rawY, 2, exit.edge, entry.edge)) {
+                            consider(rawX, rawY, 2, target)
+                        }
                     }
                 }
             }
@@ -3430,7 +3449,10 @@ internal fun routeNoteArrow(
                 emit = { xs, ys, n ->
                     // 先验形状再量：不合规矩的候选连障碍都不用看。
                     val m = simplifyInto(xs, ys, n, ptsX, ptsY)
-                    if (m >= 2 && orthogonalShaped(ptsX, ptsY, m, exit.horizontal, entry.horizontal)) {
+                    if (m >= 2 &&
+                        orthogonalShaped(ptsX, ptsY, m, exit.horizontal, entry.horizontal) &&
+                        endpointsOutward(ptsX, ptsY, m, exit.edge, entry.edge)
+                    ) {
                         consider(ptsX, ptsY, m, target)
                     }
                 },
@@ -3460,10 +3482,37 @@ internal fun routeNoteArrow(
         // 末段是竖线且短：不管是「只剩一条短竖线」还是「横-竖两折但竖段只剩几个像素」，都要改道。
         val lastVertical = path.points.size >= 2 &&
             abs(path.points[path.points.size - 1].x - path.points[path.points.size - 2].x) < 0.01f
+        val shortTail = path.tailLen < max(lineH * NOTE_ARROW_MIN_VISIBLE_LINES, 8f)
+        // 规则第 10 条的「省掉末折」只认**画不下箭头**这一档（5dp 臂长），
+        // 半行高那一档留给上面的改道：真机行距够、折线 13px 时不许省（2026-10-26）。
+        val undrawableTail = path.tailLen < max(lineH * NOTE_ARROW_UNDRAWABLE_LINES, 10f)
+        // 规则第 10 条：行距太小、末段竖线短到画不下箭头时，这一折可以不画——
+        // 引线沿行间那条横线直接截止在选区盒子边线的延长线上，箭头就画在横线上
+        // （不再往下折一下再往回指）。只缩短、不越界：新端点必须落在原来那段横线里。
+        if (path.clear && lastVertical && path.points.size >= 3 && undrawableTail) {
+            val end = path.points[path.points.size - 1]
+            val bend = path.points[path.points.size - 2]
+            val prev = path.points[path.points.size - 3]
+            val leftward = bend.x < prev.x - 0.01f
+            val rightward = bend.x > prev.x + 0.01f
+            val xEdge = if (leftward) anchor.right else anchor.left
+            val within = if (leftward) {
+                xEdge >= bend.x - 0.01f && xEdge <= prev.x - 0.01f
+            } else {
+                xEdge <= bend.x + 0.01f && xEdge >= prev.x + 0.01f
+            }
+            if ((leftward || rightward) && within) {
+                val out = ArrayList<Offset>(path.points.size - 1)
+                for (i in 0 until path.points.size - 2) out += path.points[i]
+                out += Offset(xEdge, bend.y)
+                if (out.size == 2) return NoteArrow.Straight(out[0], out[1])
+                return NoteArrow.Elbow(out)
+            }
+        }
         val squeezed = path.clear &&
             cornerFamily &&
             lastVertical &&
-            path.tailLen < max(lineH * NOTE_ARROW_MIN_VISIBLE_LINES, 8f)
+            shortTail
         if (!squeezed) return path.toNoteArrow()
         val leftCorner = side == NoteSide.BELOW_LEFT || side == NoteSide.ABOVE_LEFT
         var nearBest: ArrowPath? = null
@@ -3656,6 +3705,8 @@ private data class ArrowExit(
     /** 这条边的**整段**范围（不带 0.5em 内缩）：放宽直线时端点也不许滑出边外。 */
     val edgeLo: Float = Float.NEGATIVE_INFINITY,
     val edgeHi: Float = Float.POSITIVE_INFINITY,
+    /** 出口在框的哪条边（[ARROW_EDGE_LEFT] …，-1 = 未知）：第一段只能朝边外走。 */
+    val edge: Int = -1,
 )
 
 /**
@@ -3672,7 +3723,15 @@ private data class ArrowEntry(
     /** 同 [ArrowExit.edgeLo]：入口所在那条边的整段范围。 */
     val edgeLo: Float = Float.NEGATIVE_INFINITY,
     val edgeHi: Float = Float.POSITIVE_INFINITY,
+    /** 入口落在目标框的哪条边：最后一段只能从边外进（否则箭头会朝"行内"指）。 */
+    val edge: Int = -1,
 )
+
+/** 端点落在哪条边：0 左 / 1 右 / 2 上 / 3 下（-1 = 未知，不判方向）。 */
+private const val ARROW_EDGE_LEFT: Int = 0
+private const val ARROW_EDGE_RIGHT: Int = 1
+private const val ARROW_EDGE_TOP: Int = 2
+private const val ARROW_EDGE_BOTTOM: Int = 3
 
 /** 带宽区间统一成「下界 ≤ 上界」，供直线取交集。 */
 private fun bandOf(a: Float, b: Float): Pair<Float, Float> = min(a, b) to max(a, b)
@@ -3714,16 +3773,19 @@ private fun arrowSideEntries(
                 out += ArrowEntry(
                     Offset(x, insetAlong(lo, hi, f)), horizontal = true, lo = lo, hi = hi,
                     edgeLo = glyph.top, edgeHi = glyph.bottom,
+                    edge = if (rightFamily) ARROW_EDGE_RIGHT else ARROW_EDGE_LEFT,
                 )
             }
         }
         else -> {
-            val y = verticalEntryEdge(bubble, glyph, box, above = bubble.bottom <= glyph.top + NOTE_GEOM_EPS)
+            val above = bubble.bottom <= glyph.top + NOTE_GEOM_EPS
+            val y = verticalEntryEdge(bubble, glyph, box, above = above)
             val (lo, hi) = bandOf(alongLo, alongHi)
             for (f in fractions) {
                 out += ArrowEntry(
                     Offset(insetAlong(lo, hi, f), y), horizontal = false, lo = lo, hi = hi,
                     edgeLo = glyph.left, edgeHi = glyph.right,
+                    edge = if (above) ARROW_EDGE_TOP else ARROW_EDGE_BOTTOM,
                 )
             }
         }
@@ -3738,6 +3800,7 @@ private fun arrowSideEntries(
                 out += ArrowEntry(
                     Offset(insetAlong(lo, hi, f), y), horizontal = false, lo = lo, hi = hi,
                     edgeLo = glyph.left, edgeHi = glyph.right,
+                    edge = if (above) ARROW_EDGE_TOP else ARROW_EDGE_BOTTOM,
                 )
             }
         }
@@ -3769,14 +3832,15 @@ private fun arrowBelowEntries(
         )
     val out = LinkedHashSet<ArrowEntry>()
     // 框的正下方优先：这就是「一条竖线」的落点，其余几个让绕行有左右挪动的余地。
+    val edge = if (below) ARROW_EDGE_BOTTOM else ARROW_EDGE_TOP
     out += ArrowEntry(
         Offset(clampInset(lo, hi, bubble.center.x), y), horizontal = false, lo = lo, hi = hi,
-        edgeLo = glyph.left, edgeHi = glyph.right,
+        edgeLo = glyph.left, edgeHi = glyph.right, edge = edge,
     )
     for (f in floatArrayOf(0.5f, 0.25f, 0.75f)) {
         out += ArrowEntry(
             Offset(insetAlong(lo, hi, f), y), horizontal = false, lo = lo, hi = hi,
-            edgeLo = glyph.left, edgeHi = glyph.right,
+            edgeLo = glyph.left, edgeHi = glyph.right, edge = edge,
         )
     }
     return out.toList()
@@ -3808,6 +3872,7 @@ private fun arrowBelowExits(
         out += ArrowExit(
             Offset(clampInset(loX, hiX, x), facingY), horizontal = false, lo = loX, hi = hiX,
             edgeLo = bubble.left, edgeHi = bubble.right,
+            edge = if (below) ARROW_EDGE_TOP else ARROW_EDGE_BOTTOM,
         )
     }
     val sideX = if (bubble.center.x >= entry.point.x) bubble.left else bubble.right
@@ -3821,6 +3886,7 @@ private fun arrowBelowExits(
         out += ArrowExit(
             Offset(sideX, clampInset(loY, hiY, y)), horizontal = true, lo = loY, hi = hiY,
             edgeLo = bubble.top, edgeHi = bubble.bottom,
+            edge = if (bubble.center.x >= entry.point.x) ARROW_EDGE_LEFT else ARROW_EDGE_RIGHT,
         )
     }
     return out.toList()
@@ -3906,6 +3972,7 @@ private fun arrowSideExits(
             out += ArrowExit(
                 Offset(x, clampInset(loY, hiY, y)), horizontal = true, lo = loY, hi = hiY,
                 edgeLo = bubble.top, edgeHi = bubble.bottom,
+                edge = if (x <= bubble.center.x) ARROW_EDGE_LEFT else ARROW_EDGE_RIGHT,
             )
         }
     }
@@ -3914,6 +3981,7 @@ private fun arrowSideExits(
             out += ArrowExit(
                 Offset(clampInset(loX, hiX, x), y), horizontal = false, lo = loX, hi = hiX,
                 edgeLo = bubble.left, edgeHi = bubble.right,
+                edge = if (y <= bubble.center.y) ARROW_EDGE_TOP else ARROW_EDGE_BOTTOM,
             )
         }
     }
@@ -4036,27 +4104,33 @@ private fun arrowEntries(
     if (horizontal) {
         val x = if (glyph.center.x <= bubble.center.x) glyph.right else glyph.left
         val (lo, hi) = bandOf(glyph.top + h * 0.5f, glyph.bottom - h * 0.5f)
+        // 端点落在哪条边：落在右边就是「从右边进」，别按 x 跟中心比（那样正好反了）。
+        val edge = if (x >= glyph.center.x) ARROW_EDGE_RIGHT else ARROW_EDGE_LEFT
         out += ArrowEntry(
             Offset(x, clampInset(lo, hi, exit.point.y.coerceIn(glyph.top, glyph.bottom))),
             horizontal = true, lo = lo, hi = hi, edgeLo = glyph.top, edgeHi = glyph.bottom,
+            edge = edge,
         )
         for (f in floatArrayOf(0.5f, 0.25f, 0.75f)) {
             out += ArrowEntry(
                 Offset(x, insetAlong(lo, hi, f)), horizontal = true, lo = lo, hi = hi,
-                edgeLo = glyph.top, edgeHi = glyph.bottom,
+                edgeLo = glyph.top, edgeHi = glyph.bottom, edge = edge,
             )
         }
     } else {
-        val y = verticalEntryEdge(bubble, glyph, box, above = glyph.center.y > bubble.center.y)
+        val above = glyph.center.y > bubble.center.y
+        val y = verticalEntryEdge(bubble, glyph, box, above = above)
+        val edge = if (above) ARROW_EDGE_TOP else ARROW_EDGE_BOTTOM
         val (lo, hi) = bandOf(glyph.left + h * 0.5f, glyph.right - h * 0.5f)
         out += ArrowEntry(
             Offset(clampInset(lo, hi, exit.point.x.coerceIn(glyph.left, glyph.right)), y),
             horizontal = false, lo = lo, hi = hi, edgeLo = glyph.left, edgeHi = glyph.right,
+            edge = edge,
         )
         for (f in floatArrayOf(0.5f, 0.25f, 0.75f)) {
             out += ArrowEntry(
                 Offset(insetAlong(lo, hi, f), y), horizontal = false, lo = lo, hi = hi,
-                edgeLo = glyph.left, edgeHi = glyph.right,
+                edgeLo = glyph.left, edgeHi = glyph.right, edge = edge,
             )
         }
     }
@@ -4094,6 +4168,37 @@ private fun orthogonalShaped(
         if (abs(xs[i] - xs[i - 1]) >= 0.01f && abs(ys[i] - ys[i - 1]) >= 0.01f) return false
     }
     return true
+}
+
+/**
+ * 端点方向：第一段必须从框边**朝外**走，最后一段必须从边**外侧**进。
+ *
+ * 只验「垂直框边」还不够：从行盒内部往上折也能满足垂直，画出来就是箭头倒着指回行间
+ * （真机「使用 val」引线，2026-10-26）。方向不对的候选直接不采用。
+ */
+private fun endpointsOutward(
+    xs: FloatArray,
+    ys: FloatArray,
+    n: Int,
+    exitEdge: Int,
+    entryEdge: Int,
+): Boolean {
+    if (n < 2) return false
+    val leaves = when (exitEdge) {
+        ARROW_EDGE_LEFT -> xs[1] < xs[0] - 0.01f
+        ARROW_EDGE_RIGHT -> xs[1] > xs[0] + 0.01f
+        ARROW_EDGE_TOP -> ys[1] < ys[0] - 0.01f
+        ARROW_EDGE_BOTTOM -> ys[1] > ys[0] + 0.01f
+        else -> true
+    }
+    if (!leaves) return false
+    return when (entryEdge) {
+        ARROW_EDGE_LEFT -> xs[n - 2] < xs[n - 1] - 0.01f
+        ARROW_EDGE_RIGHT -> xs[n - 2] > xs[n - 1] + 0.01f
+        ARROW_EDGE_TOP -> ys[n - 2] < ys[n - 1] - 0.01f
+        ARROW_EDGE_BOTTOM -> ys[n - 2] > ys[n - 1] + 0.01f
+        else -> true
+    }
 }
 
 /**
@@ -4430,10 +4535,14 @@ private fun arrowRetreats(start: Offset, next: Offset, end: Offset): Boolean {
     val dy = next.y - start.y
     val toX = end.x - start.x
     val toY = end.y - start.y
+    // 只判**主轴上真的往回走**：整体在横向跑三百像素、纵向只差 2px 时，
+    // 先竖着让开这一行不算回头路（真机「使用 var」的 上横下 就被这条误杀了，2026-10-26）。
+    val span = sqrt(toX * toX + toY * toY)
+    val minor = span * 0.2f
     return if (abs(dx) >= abs(dy)) {
-        abs(dx) > 0.01f && abs(toX) > 0.01f && dx * toX < 0f
+        abs(dx) > 0.01f && abs(toX) > minor && dx * toX < 0f
     } else {
-        abs(dy) > 0.01f && abs(toY) > 0.01f && dy * toY < 0f
+        abs(dy) > 0.01f && abs(toY) > minor && dy * toY < 0f
     }
 }
 

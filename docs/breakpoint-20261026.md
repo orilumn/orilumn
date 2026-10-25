@@ -116,3 +116,24 @@
 （`routeNoteArrow` / `tryRoute` / `finish` / `measureArrowRoute` / `arrowForm` / `arrowRetreats` /
 `arrowGapMidYs` / `arrowSideExits` / `arrowBelowEntries` / `noteArrowHead`），
 测试在 `shared-ui/src/jvmTest/kotlin/orilumn/reader/ui/reader/NoteBubblesTest.kt`。
+
+## 七、第二轮真机三条（同日收尾）
+
+装 68dc9d1 的包复核，用户又报了三条（现象 → 根因 → 改法）：
+
+| 现象 | 根因 | 改法 |
+|---|---|---|
+| 「使用 val」箭头倒着指回行间 | 只校验「两端垂直于边」，从行盒内部往上折也算垂直 | 端点带所在边，第一段必须朝框外、末段必须从字边外侧进（`endpointsOutward`） |
+| 「使用 var」从左侧出线、第一段贴着框边竖着爬，中间隔着字却没走 上横下 | 折点池里没有框外的 y（段首上方是段间距，行间中线按字高被截掉），V-H-V 生成不出来 | 框上 / 下沿各补一个「三分之一行高」的折点位（`liftYs`） |
+| 行距明明够，末折却被省掉 | 规则 10 的门槛沿用了「半行高」那条改道门槛 | 单独用「箭头画不下」这一档（0.25 行高）；「不倒退」只判主轴 |
+
+改完真机复测（同一页）：
+
+- `使用 val`（右上）：横线走在行间、箭头顺方向截止在选区右缘（规则 10）；
+- `使用 var`（正右、中间有字）：`(679,1986) → (679,1973) → (368,1973) → (368,2000)`，
+  竖出 → 行间横穿 → 竖进，末段 27px、箭头朝下落在字上；
+- 正右短引线仍是一条直线的用例未受影响。
+
+测试：`./gradlew :shared-ui:jvmTest :engine-skia:jvmTest` 绿；`NoteBubblesTest` 138 项。
+`note below right leaves through its top edge…` 按规则 10 放宽成两种合法形态（有末折竖着落字、
+末折画不下时停在横线上的选区近侧边线）。

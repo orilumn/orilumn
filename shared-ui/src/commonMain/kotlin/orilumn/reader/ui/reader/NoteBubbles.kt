@@ -479,6 +479,17 @@ internal data class NoteCandidate(
      */
     val excessDistance: Float = distance,
     /**
+     * 斜向候选离「角落基准」的横向偏移（2026-10-27 用户定口）：
+     * 右上 / 右下取 `rect.left - cornerRightX`，左上 / 左下取 `cornerLeftX - rect.right`，
+     * 其余方向为 0。
+     *
+     * 右上角的定义是「至少比选区首字右偏一个字」，那个位置就是**默认的最近位置**。
+     * 空白更靠右时（上一行右端形成的页边距列会把框一路推到行尾）也能凑出「右上」，
+     * 但那是**被拉远**的右上：就近距离同为 0 时先比这个偏移，最后才比框顶，
+     * 免得更高的远端框凭 `rect.top` 抢走角落里真正的那个位置。
+     */
+    val cornerOffset: Float = 0f,
+    /**
      * 这个候选用哪一档留白（2026-10-24 用户定口）：
      * [NOTE_MARGIN_TIER_PREFERRED] = 四周 1em；[NOTE_MARGIN_TIER_FAR_MIN] = 远侧收 0.1em；
      * [NOTE_MARGIN_TIER_NEAR_MIN] = 斜向摆法连近侧也收 0.1em。
@@ -1125,6 +1136,12 @@ internal fun noteCandidates(
         // 亚像素差不算「更远」：浮点误差会让同距的正右输给右上 / 右下。
         // 按 0.5px 分桶，半像素以内的差视觉上分不出来，交给方向名次决胜。
         val excess = distance - natural
+        // 斜向离角落基准的横向偏移（见 [NoteCandidate.cornerOffset]）：排序时先比它再比框顶。
+        val cornerOffset = when (side) {
+            NoteSide.ABOVE_RIGHT, NoteSide.BELOW_RIGHT -> max(0f, rect.left - cornerRightX)
+            NoteSide.ABOVE_LEFT, NoteSide.BELOW_LEFT -> max(0f, cornerLeftX - rect.right)
+            else -> 0f
+        }
         out += NoteCandidate(
             annotationId = note.annotationId,
             rect = rect,
@@ -1140,6 +1157,7 @@ internal fun noteCandidates(
             } else {
                 (excess / NOTE_GEOM_EPS).roundToInt() * NOTE_GEOM_EPS
             },
+            cornerOffset = cornerOffset,
             marginTier = tier,
             sideRank = marginRank ?: sideRankOf(side),
             crossed = crossed,
@@ -1528,6 +1546,9 @@ internal fun noteCandidateOrder(
         .thenBy { if (it.onBaseRow) 0 else 1 }
         // 斜向的留白档不参与先后（比距离），正侧仍然留白档优先。
         .thenBy { if (it.corner) 0 else it.marginTier }
+        // 斜向内部先比「离角落基准的横向偏移」：默认最近的位置就是「首字右偏一个字」，
+        // 远端那份空白只有基准点被占时才轮到；此前是靠 rect.top 决胜，更高的远端框会反超。
+        .thenBy { it.cornerOffset }
         .thenBy { it.marginTier }
         .thenBy { it.rect.top }
         .thenBy { it.rect.left }
@@ -3824,9 +3845,13 @@ internal fun routeNoteArrow(
 }
 
 /**
- * 引线的目标字（§6.1，2026-10-24 用户定口 + 2026-10-25 补充）：
+ * 引线的目标字（§6.1，2026-10-24 用户定口 + 2026-10-25 / 2026-10-27 补充）：
  *
- * - **放在正文右侧**（正右 / 右下 / 右上）→ 指向该行**最靠右**的那个字；**放在左侧** → 指向最左那个字。
+ * - 先按「近哪头指哪头」定**一头**：框中心落在这一行左半就指开头，右半就指末尾。
+ *   这一条对**单行选区同样生效**——右上角的横基准是「首字右偏一个字」，
+ *   框本来就贴着选区开头，再去指行尾只会横着拉一条长引线（真机上「以这种方式声明的变量」）。
+ * - 头一侧取该行**最靠左**的那个字，末尾一侧取该行**最靠右**的那个字；左右两侧的摆法
+ *   在各自那一侧自然也是这样一头（正右贴着行尾、正左贴着行首）。
  * - 「该行」= [targetInk]（要指的那一行：框离选区开头近就取首行、离末尾近就取末行，
  *   见 [noteArrowRow]）；缺省空时退回旧口径「与框纵向最近的那一行」。
  * - 正下 / 正上 / 没有布点方向 → 仍旧取最近的几个字（最近那个被围死时还能换下一个）。
@@ -3853,7 +3878,19 @@ private fun arrowTargetGlyphs(
     val rowGlyphs = pool.filter {
         abs(it.center.y - rowAnchor.center.y) <= max(it.height, rowAnchor.height) * 0.6f
     }
-    val glyph = if (leftFamily) {
+    // 规则第 10 条「近哪头指哪头」：框中心落在这一行的左半就指行首那个字，右半就指行尾那个字。
+    // 单行选区同样要比——右上角的横基准是「首字右偏一个字」，框本来就贴着头一个字，
+    // 再去指行尾只会横着拉一条长引线（真机「以这种方式声明的变量」277px）。
+    // 正右贴着行尾、正左贴着行首，按这条规则自然还是原来那一头。
+    val rowLeft = rowGlyphs.minOfOrNull { it.left } ?: rowAnchor.left
+    val rowRight = rowGlyphs.maxOfOrNull { it.right } ?: rowAnchor.right
+    val mid = (rowLeft + rowRight) * 0.5f
+    val nearStart = when {
+        bubble.center.x < mid -> true
+        bubble.center.x > mid -> false
+        else -> leftFamily
+    }
+    val glyph = if (nearStart) {
         rowGlyphs.minByOrNull { it.left } ?: rowAnchor
     } else {
         rowGlyphs.maxByOrNull { it.right } ?: rowAnchor

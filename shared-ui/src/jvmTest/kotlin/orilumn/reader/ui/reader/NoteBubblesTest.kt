@@ -2154,6 +2154,21 @@ class NoteBubblesTest {
     }
 
     @Test
+    fun `single line corner note points at the near end of the line`() {
+        // 2026-10-27 用户定口：右上角的默认位置是「首字右偏一个字」，框本来就贴着手边这几个字；
+        // 引线要指「近哪头」那一头，不许横穿整行去找行尾（真机「以这种方式声明的变量」277px）。
+        val glyphs = (0 until 5).map { rect(100f + it * 40f, 100f, 140f + it * 40f, 140f) }
+        val bubble = rect(140f, 60f, 240f, 96f)
+        val arrow = routeNoteArrow(bubble, glyphs, side = NoteSide.ABOVE_RIGHT)
+        assertTrue("应画得出箭头", arrow != null)
+        val points = arrowPoints(arrow!!)
+        val tip = points.last()
+        assertTrue("应指开头那个字，实际 x=${tip.x}", tip.x <= 170f)
+        val len = points.zipWithNext().map { (a, b) -> abs(a.x - b.x) + abs(a.y - b.y) }.sum()
+        assertTrue("引线要短，实际 $len：$points", len < 150f)
+    }
+
+    @Test
     fun `arrow stops at the line box edge instead of the glyph edge`() {
         // 引线规则第 4 条：引线和箭头画到**行盒边框**为止，不得侵入行盒内部。
         // 行盒上下一共比字多出 10px，箭头要停在行盒下边 150，而不是字的下边 140。
@@ -2703,6 +2718,35 @@ class NoteBubblesTest {
                 NoteSide.LEFT,
             ),
             ordered.map { it.side },
+        )
+    }
+
+    @Test
+    fun `corner note prefers the one character offset over a farther higher blank`() {
+        // 2026-10-27 用户定口（真机「以这种方式声明的变量」）：右上角的默认位置就是
+        // 「首字右偏一个字」。上一行行尾形成的页边距列也能凑出右上（更靠右、框还更高），
+        // 但那是被拉远的那个；就近距离相同时必须先比离基准的横向偏移，不能再被 rect.top 反超。
+        fun candidate(left: Float, top: Float, offset: Float) = NoteCandidate(
+            annotationId = 1,
+            rect = rect(left, top, left + 129.6f, top + 36.8f),
+            freeRect = rect(0f, 0f, 2000f, 2800f),
+            lines = 1,
+            complete = true,
+            shownChars = 9,
+            side = NoteSide.ABOVE_RIGHT,
+            ring = 0,
+            distance = 14.3f,
+            excessDistance = 0f,
+            cornerOffset = offset,
+        )
+        val baseline = candidate(1259.6f, 1288.2f, offset = 0f)
+        val far = candidate(1510f, 1275.9f, offset = 250.4f)
+        val ordered = orderedNoteCandidates(listOf(far, baseline), rightTaken = false)
+        assertEquals(
+            "要靠「首字右偏一个字」那个：${ordered.map { "${it.rect.left}@${it.rect.top}" }}",
+            baseline.rect.left,
+            ordered.first().rect.left,
+            0.01f,
         )
     }
 

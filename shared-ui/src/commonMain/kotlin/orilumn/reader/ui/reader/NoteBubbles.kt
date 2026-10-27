@@ -800,6 +800,9 @@ internal enum class NoteCandidateScope {
  *   整行顶到版心右缘的行也生成右页边距那一列，只是名次排在四个角之后（2026-10-27）。
  * - **右下 / 右上** 的横向基准是**末行第一个字向右一个汉字**；**左下 / 左上** 是
  *   **末行末字符向左一个汉字**。它们都不再贴整个选区的左右缘（§0.2）。
+ *   量的是**选区矩形**（选区正文的边），不是逐字墨迹（2026-10-28 用户定口）：斜体 / 标点后面
+ *   那截后侧留白属于选区，按墨迹量会把框白往左推；引线走廊的宽度由布线侧按同一把尺子保证
+ *   （见 [routeNoteArrow] 的 `cornerInk`）。
  * - 留白分两档（[NOTE_MARGIN_TIER_PREFERRED] / [NOTE_MARGIN_TIER_FAR_MIN]）：空间够时四周 1em；
  *   不够只把**远离正文那一侧**收到 0.1em。**正上 / 正下**近侧的 1em 是竖线引线空档，
  *   一律保留，推不出就不给这个方向；**四个斜向**近侧固定 2px——横向错开的那一个字才是
@@ -892,6 +895,11 @@ internal fun noteCandidates(
     // 「首字符右移一个汉字」/「末字符右移一个汉字」：斜向摆法的横向基准（§0.2）。
     // 2026-10-25 用户定口：**左上 / 左下看选区最右缘再往左一个字**（= 倒数第二个字的右缘），
     // 不是末字的左缘——框的右缘只有落在它左边，才叫「左上 / 左下」；越过它就是「正上方 / 正下方」。
+    //
+    // 2026-10-28 用户定口：量的是**选区正文右缘**（选区矩形，斜体末尾那截后侧留白也算选区的一部分），
+    // 框右缘只比它往左一个字，不要按逐字墨迹再往左挪——那会把框白推一截（真机斜体差 33px）。
+    // 引线走廊不够宽不是布点的问题，是布线那把尺子的问题：布线也必须用**选区矩形**量 0.5em 收角
+    // （见 [routeNoteArrow] 的 cornerInk），两边同源，走廊自然是一个字减 0.5em。
     val cornerRightX = firstGlyph.left + charW
     val cornerLeftX = lastGlyph.right - charW
 
@@ -2072,6 +2080,13 @@ internal fun noteBubblePlacements(
         } else {
             emptyList()
         }
+        // 斜向横向基准的尺子 = 布点用的选区矩形（取同一个目标行）：布点按「选区缘 ± 一个字」摆框，
+        // 引线的 0.5em 收角也得按选区矩形量，两边同源走廊才稳定是一个字减 0.5em。
+        val cornerInk = if (anchorRow in lines.indices) {
+            (inkById[b.annotationId]?.rects.orEmpty()).filter { nearestLineIndex(it, lines) == anchorRow }
+        } else {
+            emptyList()
+        }
         val others = out.asSequence()
             .filter { it.annotationId != b.annotationId && !it.compact }
             .mapNotNull { bubbleRects[it.annotationId] }
@@ -2088,6 +2103,7 @@ internal fun noteBubblePlacements(
             // 行盒：竖着进时箭头停在行盒边框上，不侵入行盒内部（引线规则第 4 条）。
             lineBoxes = lineBoxes,
             targetInk = targetInk,
+            cornerInk = cornerInk,
         )
         if (arrow != null) drawn += arrow
         b.copy(arrow = arrow)
@@ -3521,9 +3537,19 @@ internal fun routeNoteArrow(
     side: NoteSide? = null,
     lineBoxes: List<Rect> = emptyList(),
     targetInk: List<Rect> = emptyList(),
+    /**
+     * 斜向（四个角）横向基准的**选区矩形**（一行一个框，来自 `NoteInk.rects`）。
+     *
+     * 布点把框摆在「选区右 / 左缘 ± 一个汉字」，引线量 0.5em 收角时也必须用同一把尺子：
+     * 拿逐字墨迹量，斜体末尾那截后侧留白会把走廊吃掉（真机「使用 var」走廊只剩个位数像素，
+     * L 形折线折不出来，退化成贴着框的一条 2px 直线）。空 = 退回逐字墨迹的并集。
+     */
+    cornerInk: List<Rect> = emptyList(),
 ): NoteArrow? {
     if (inkRects.isEmpty() || bubble.width <= 0f || bubble.height <= 0f) return null
     val anchor = rectUnion(inkRects)
+    // 斜向横向基准用的「选区」：与布点同源（选区矩形），不是字墨迹。
+    val cornerAnchor = if (cornerInk.isEmpty()) anchor else rectUnion(cornerInk)
     // 框已经贴住原文：连一根线的位置都没有，画出来只会压在字上。
     // 量的是**要指的那一行**（[targetInk]）：多行选区首行比末行长时，贴在末行右侧的框
     // 会落进整段包围盒里，但它离末行还有一段空档，引线照样画得出（2026-10-25）。
@@ -3772,12 +3798,12 @@ internal fun routeNoteArrow(
             // 高矮差一截，取目标字自己的高会让同样缩进的批注画出不同长度的横段（引线规则第 7 条）。
             // 区间与端点算法和 [cornerEntryX] 完全一致，两条路径画出的落点才会是同一个。
             val em = cornerRowEm(anchor, t.glyph)
-            val insetLo = anchor.left + em * 0.5f
-            val insetHi = anchor.right - em * 0.5f
+            val insetLo = cornerAnchor.left + em * 0.5f
+            val insetHi = cornerAnchor.right - em * 0.5f
             // 先指**离框更近的那一头**（§6.1）：目标字在选区右半就取末端，否则取开头。
             // 落点必须在框外，L 的横段才走得通；那一头被框自己盖住、缝又很窄时，
             // 再改指另一头（见下面的 `wants`）。
-            val nearEnd = t.glyph.center.x > anchor.center.x
+            val nearEnd = t.glyph.center.x > cornerAnchor.center.x
             val near = clampInset(insetLo, insetHi, if (nearEnd) insetHi else insetLo)
             val far = clampInset(insetLo, insetHi, if (nearEnd) insetLo else insetHi)
             // 近端被框自己盖住时，只有缝很窄（< 8px）才改指另一头：
@@ -3785,7 +3811,7 @@ internal fun routeNoteArrow(
             val gap = if (below) bubble.top - yEntry else yEntry - bubble.bottom
             val wants = if (gap < 8f) floatArrayOf(near, far) else floatArrayOf(near)
             for (want in wants) {
-                val xEntry = want.coerceIn(anchor.left + 1f, anchor.right - 1f)
+                val xEntry = want.coerceIn(cornerAnchor.left + 1f, cornerAnchor.right - 1f)
                 // 走廊必须在框外：框盖住走廊时这个 L 就画不成了（横段会穿自己的框）。
                 val edgeX = when {
                     xEntry <= bubble.left - NOTE_GEOM_EPS -> bubble.left
@@ -3853,7 +3879,7 @@ internal fun routeNoteArrow(
         }
     } else if (sideAware) {
         for (t in targets) {
-            for (entry in arrowSideEntries(side!!, bubble, t.glyph, anchor, t.box)) {
+            for (entry in arrowSideEntries(side!!, bubble, t.glyph, anchor, t.box, cornerAnchor)) {
                 for (exit in arrowSideExits(entry, side, bubble, t.glyph, bubbleEm)) {
                     tryRoute(exit, entry, t)
                 }
@@ -4037,12 +4063,20 @@ private fun cornerRowEm(anchor: Rect, glyph: Rect): Float {
  * 竖直那一段画不下箭头，只能从框的侧边出去再竖落，落点必须换到另一头。
  * 多行选区不做这个改道（另一头在别的行，落点就对不上那一行的边了）。
  */
-private fun cornerEntryX(bubble: Rect, anchor: Rect, glyph: Rect, gap: Float): Float {
+private fun cornerEntryX(
+    bubble: Rect,
+    anchor: Rect,
+    glyph: Rect,
+    gap: Float,
+    xAnchor: Rect = anchor,
+): Float {
     val singleRow = abs(anchor.center.y - glyph.center.y) <= max(anchor.height, glyph.height) * 0.25f
     val h = cornerRowEm(anchor, glyph)
-    val lo = anchor.left + h * 0.5f
-    val hi = anchor.right - h * 0.5f
-    val nearEnd = glyph.center.x > anchor.center.x
+    // 横向区间量**选区矩形**（[xAnchor]）：与布点的「选区缘 ± 一个字」同源，
+    // 走廊 = 一个字 − 0.5em，稳定折得出 L 形。
+    val lo = xAnchor.left + h * 0.5f
+    val hi = xAnchor.right - h * 0.5f
+    val nearEnd = glyph.center.x > xAnchor.center.x
     val near = clampInset(lo, hi, if (nearEnd) hi else lo)
     val covered = near > bubble.left - NOTE_GEOM_EPS && near < bubble.right + NOTE_GEOM_EPS
     return if (singleRow && covered && gap < 8f) {
@@ -4067,6 +4101,8 @@ private fun arrowSideEntries(
     glyph: Rect,
     anchor: Rect,
     box: Rect = glyph,
+    /** 斜向横向基准的尺子（选区矩形）；其余方向仍按字墨迹的 [anchor]。 */
+    xAnchor: Rect = anchor,
 ): List<ArrowEntry> {
     val out = LinkedHashSet<ArrowEntry>()
     val h = glyph.height
@@ -4098,13 +4134,13 @@ private fun arrowSideEntries(
             val y = verticalEntryEdge(bubble, glyph, box, above = above)
             val gap = if (above) y - bubble.bottom else bubble.top - y
             // 落点唯一确定（近端、离选区角 0.5em），不再交给路由器挑比例——
-            // 同样缩进要画出同样的引线（2026-10-27）。
+            // 同样缩进要画出同样的引线（2026-10-27）。斜向的「选区角」按选区矩形量（[xAnchor]）。
             val h = cornerRowEm(anchor, glyph)
-            val (ilo, ihi) = bandOf(anchor.left + h * 0.5f, anchor.right - h * 0.5f)
+            val (ilo, ihi) = bandOf(xAnchor.left + h * 0.5f, xAnchor.right - h * 0.5f)
             out += ArrowEntry(
-                Offset(cornerEntryX(bubble, anchor, glyph, gap), y),
+                Offset(cornerEntryX(bubble, anchor, glyph, gap, xAnchor), y),
                 horizontal = false, lo = ilo, hi = ihi,
-                edgeLo = anchor.left, edgeHi = anchor.right,
+                edgeLo = xAnchor.left, edgeHi = xAnchor.right,
                 edge = if (above) ARROW_EDGE_TOP else ARROW_EDGE_BOTTOM,
             )
         }

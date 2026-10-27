@@ -2951,6 +2951,67 @@ class NoteBubblesTest {
     }
 
     /**
+     * 2026-10-28 用户定口：斜向「错开一个字」量的是**选区正文右缘**（选区矩形），不是逐字墨迹。
+     *
+     * 斜体字后面那截后侧留白也属于选区（真机「使用 var」的选区右缘比 'r' 的墨迹宽 33px）。
+     * 按墨迹量会把框往左白推一截；按选区量，框右缘正好落在选区右缘左一个汉字处。
+     * 引线走廊不会因此变窄——布线侧也改成按选区矩形量 0.5em 收角（`cornerInk`），
+     * 走廊 = 一个字 − 0.5em，L 形照常折得出来。
+     */
+    @Test
+    fun `corner offset measures the selection box and the L corridor stays half an em`() {
+        val row = rect(100f, 0f, 600f, 20f)
+        // 逐字墨迹：10 个字各 20 宽，右缘 300。
+        val glyphs = (0 until 10).map { rect(100f + it * 20f, 0f, 120f + it * 20f, 20f) }
+        // 选区矩形右缘 330：末字（墨迹 280~300）后面 30px 是字的后侧留白（斜体就是这样）。
+        val boxes = (0 until 9).map { rect(100f + it * 20f, 0f, 120f + it * 20f, 20f) } +
+            rect(280f, 0f, 330f, 20f)
+        val note = NoteInk(
+            annotationId = 1,
+            text = "一二三四五六七八九十甲乙丙丁",
+            argb = 0xFF3366CC.toInt(),
+            rects = boxes,
+            arrowRects = glyphs,
+        )
+        val lines = listOf(NoteTextLine(rect = row, blockId = 0, index = 0))
+        val cands = candidates(
+            note = note,
+            freeRects = listOf(rect(0f, 22f, 700f, 800f)),
+            lines = lines,
+        )
+        val belowLeft = cands.filter { it.side == NoteSide.BELOW_LEFT && it.ring == 0 }
+        assertTrue("左下没生成：${cands.map { "${it.side}#${it.ring}" }}", belowLeft.isNotEmpty())
+        // 选区右缘 330 − 一个汉字 20 = 310（按墨迹会是 300 − 20 = 280，那是白往左推 30px）。
+        assertEquals(
+            "横向基准要按选区矩形量（选区右缘 330 − 一个汉字 20）：" +
+                "right=${belowLeft.first().rect.right}",
+            310f,
+            belowLeft.first().rect.right,
+            0.5f,
+        )
+
+        val bubble = belowLeft.first().rect
+        val arrow = routeNoteArrow(
+            bubble = bubble,
+            inkRects = glyphs,
+            glyphs = glyphs,
+            lineH = noteLine,
+            side = NoteSide.BELOW_LEFT,
+            lineBoxes = listOf(row),
+            targetInk = glyphs,
+            cornerInk = boxes,
+        )
+        assertTrue("四角要折 L，不能退化成一点：$arrow", arrow is NoteArrow.Elbow)
+        val pts = arrowPoints(arrow!!)
+        // 走廊按选区矩形量：落点 = 选区右缘 − 0.5em = 320，框右缘 310，横段正好 10px（半个 em）。
+        val legX = pts[pts.size - 1].x
+        assertEquals("竖段要落在选区右缘左半个 em 处：$arrow", 320f, legX, 0.5f)
+        assertEquals("横段就是半个 em 的走廊：$arrow", 10f, abs(legX - bubble.right), 0.5f)
+        val tail = abs(pts[pts.size - 1].y - pts[pts.size - 2].y)
+        assertTrue("末段竖线要够画箭头（≥8px）：$arrow", tail >= 8f)
+    }
+
+    /**
      * 2026-10-24 用户定口：别的空白都放不下时，可以请已有批注在垂直方向让一让（同一列叠放）。
      *
      * 版面上只有一列空白（页面右侧），刚好容得下两条：先占那条按自己的位置放好，

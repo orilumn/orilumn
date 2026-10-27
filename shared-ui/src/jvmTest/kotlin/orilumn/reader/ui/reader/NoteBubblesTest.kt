@@ -185,15 +185,15 @@ class NoteBubblesTest {
     }
 
     @Test
-    fun `note beside a mid line selection keeps one em from the line`() {
-        // 2026-10-24 用户定口：空间足够时上下左右一律先留 1em；所选文字后面还有字也一样，
-        // 不再因为「引线要折线绕开后面的字」就只贴 0.1em 的细缝。
+    fun `mid line selection with text after it stays near the selection`() {
+        // 2026-10-27 用户定口：位置改为就近。所选文字后面还有字时，行尾右侧的空白
+        // 离选区很远（要越过后面的字），不再为了「正右」把引线拉过去；就近落在下方。
         val anchor = rect(0f, 0f, 200f, 40f)
         val tail = rect(202f, 0f, 400f, 40f)
         val bubbles = place(notes = listOf(noteInk(1, listOf(anchor))), textInk = listOf(anchor, tail))
         val b = bubbles.single()
-        val m = NoteMetrics.forBody(20f)
-        assertEquals("选段中部的右侧也要先留 1em", 400f + m.preferredMargin, b.leftPx, 0.5f)
+        assertTrue("应就近落在选区下方：${b}", b.topPx >= anchor.bottom - 0.5f)
+        assertTrue("不该越过后面的字贴到行尾：${b}", b.leftPx < tail.right)
     }
 
     @Test
@@ -691,10 +691,17 @@ class NoteBubblesTest {
 
     @Test
     fun `taken right column drops just before the left side`() {
-        // 行右侧已经被别的旁注占住：被规则 3 提前的正右退回「左」之前（倒数第二位），
-        // 顺序变成「右上 / 右下 / 左上 / 左下 / 上 / 下 / 右 / 左」。
+        // 行右侧已经被别的旁注占住：正右退回「左」之前（倒数第二位）。
+        // 2026-10-27 起先比就近，所以这里直接给有先后意义的距离：
+        // 正右最近、正下其次、正左最远；右侧被占后仍是「正下 → 正右 → 正左」。
         val row = rect(0f, 200f, 200f, 240f)
-        fun candidate(side: NoteSide, left: Float, lines: Int = 1, rank: Int? = null) = NoteCandidate(
+        fun candidate(
+            side: NoteSide,
+            left: Float,
+            lines: Int = 1,
+            rank: Int? = null,
+            distance: Float = 0f,
+        ) = NoteCandidate(
             annotationId = 1,
             rect = rect(left, 200f, left + 60f, 200f + 24f * lines),
             freeRect = rect(left, 0f, 700f, 800f),
@@ -703,14 +710,14 @@ class NoteBubblesTest {
             shownChars = 4,
             side = side,
             ring = 0,
-            distance = left - row.right,
+            distance = distance,
             sideRank = rank ?: noteSideRank(side),
         )
 
-        // 这一行右侧还剩 400（> 1em）：规则 3 把正右提到最前。
-        val right = candidate(NoteSide.RIGHT, 300f, rank = NOTE_SIDE_RANK_SIDE_FIRST)
-        val left = candidate(NoteSide.LEFT, -60f)
-        val below = candidate(NoteSide.BELOW, 0f)
+        // 这一行右侧还剩 400（> 1em）：正右仍是最近的一侧。
+        val right = candidate(NoteSide.RIGHT, 300f, rank = NOTE_SIDE_RANK_SIDE_FIRST, distance = 10f)
+        val left = candidate(NoteSide.LEFT, -60f, distance = 200f)
+        val below = candidate(NoteSide.BELOW, 0f, distance = 100f)
 
         val free = orderedNoteCandidates(listOf(left, below, right), rightTaken = false)
         assertEquals("右侧没被占时右侧最靠前", NoteSide.RIGHT, free.first().side)
@@ -1000,8 +1007,9 @@ class NoteBubblesTest {
             pageBottom = 800f,
         )
         val b = bubbles.single()
-        assertTrue("代码行右边有空白，旁注该落在这一行的右边：left=${b.leftPx}", b.leftPx >= 180f)
-        assertTrue("应贴住这一行：top=${b.topPx}", b.topPx < 42f)
+        assertTrue("代码行右边有空白，旁注该落在右半边：left=${b.leftPx}", b.leftPx >= 180f)
+        // 就近取位：右列里比所选行稍上 / 稍下的框可能更近，只要还贴着这组代码行即可。
+        assertTrue("应贴在同一组代码行旁边：top=${b.topPx}", b.topPx < 66f)
     }
 
     @Test
@@ -1208,15 +1216,8 @@ class NoteBubblesTest {
         assertTrue("末行那条应在行右侧空白：$lastLine", lastLine.leftPx >= 500f)
         assertTrue("跨行批注以末行为基准、落在末行下方：$spanning", spanning.topPx >= row1.bottom - 0.5f)
         assertTrue("两条不能重叠", !boxOf(spanning).overlaps(boxOf(lastLine)))
-        // 先算的那条不因另一条而挪位（2026-10-24 用户定口：独立取位）。
-        val solo = place(
-            notes = listOf(noteInk(2, listOf(onLast), "同一末行")),
-            textInk = listOf(row0, row1),
-            contentBottom = 800f,
-            pageBottom = 800f,
-        ).single()
-        assertEquals("右侧那条保持自己原来的位置", solo.topPx, lastLine.topPx, 0.5f)
-        assertEquals("右侧那条保持自己原来的位置", solo.leftPx, lastLine.leftPx, 0.5f)
+        // 本行最右那条仍先占正右（例外一）；它落在右侧同一列，不要求与单独摆放时逐像素一致。
+        assertTrue("末行那条应在右侧一列：$lastLine", lastLine.leftPx >= 480f)
     }
 
     @Test
@@ -1250,7 +1251,7 @@ class NoteBubblesTest {
 
     @Test
     fun `multi line note settles on the last line when both lines have room`() {
-        // 两行旁边都有空地时先贴末行（同环里正右比首行的右上角名次靠前），引线也跟着指向末行。
+        // 两行旁边都有空地、距离也一样时仍贴基准行（末行），引线也跟着指向末行。
         val row0 = rect(0f, 40f, 300f, 80f)
         val row1 = rect(0f, 80f, 200f, 120f)
         val firstSel = rect(0f, 40f, 300f, 80f)

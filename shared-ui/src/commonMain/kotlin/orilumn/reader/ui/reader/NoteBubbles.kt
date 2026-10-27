@@ -132,9 +132,13 @@ private const val NOTE_MARGIN_Y_EM: Float = 0.1f
  * 空间足够时，标注与正文 / 障碍之间的**首选**距离（以旁注字号为单位）：四周 1em。
  *
  * 2026-10-24 用户定口：不再只给右侧留 1em，而是上下左右都优先留 1em；空间不足时
- * 先把**远离正文那一侧**收到 0.1em，还不够才换位置；正右 / 正下 / 正上 / 正左
- * 靠近正文那一侧的 1em 必须保留（引线要从这段空档画出去），只有四个斜向摆法
- * 才允许把近侧也收到 0.1em。
+ * 先把**远离正文那一侧**收到 0.1em，还不够才换位置。
+ *
+ * 2026-10-27 用户定口：**靠近正文那一侧的留白一律不压到贴字**——
+ * 正上 / 正下保住 1em（竖直引线要从这段空档出去，推不出就宁可不用这个方向）；
+ * 四个斜向反其道而行：近侧只留 [NOTE_MIN_MARGIN_PX]（2px），横向特意错开一个字，
+ * 让引线从框的侧边出去、沿那道空隙折成 L 形（见 [routeNoteArrow] 的收尾）。
+ * 正右 / 正左固定 `sideGap`（1em，也是横线引线的空档）。
  */
 private const val NOTE_PREFERRED_MARGIN_EM: Float = 1f
 
@@ -146,13 +150,14 @@ private const val NOTE_PREFERRED_MARGIN_EM: Float = 1f
  */
 private const val NOTE_SIDE_GAP_EM: Float = 1f
 
-/** 候选留白的三个档（2026-10-24 用户定口）：先双侧 1em，再远侧 0.1em，斜向最后收近侧。 */
+/**
+ * 候选留白的两个档（2026-10-27 用户定口）：先双侧 1em，再只收远侧到 0.1em。
+ *
+ * 近侧没有第三档：正上 / 正下压到行距 / 2px 会让引线短到看不见（真机「用 var 声明」那条）；
+ * 四个斜向的近侧则固定 2px，那 2px 不是留白而是 L 形引线的横向走廊。
+ */
 private const val NOTE_MARGIN_TIER_PREFERRED: Int = 0
 private const val NOTE_MARGIN_TIER_FAR_MIN: Int = 1
-/** 近侧也收：竖直方向先收到「正文行距让出来的空白」（规则第 13 条的默认上下留白）。 */
-private const val NOTE_MARGIN_TIER_NEAR_GAP: Int = 2
-/** 压到底：近侧只留 [NOTE_MIN_MARGIN_PX]（规则第 13 条的下限）。 */
-private const val NOTE_MARGIN_TIER_NEAR_MIN: Int = 3
 
 /** 留白压缩的下限（规则第 13 条：压到 2px 才算这个方向不可用）。 */
 private const val NOTE_MIN_MARGIN_PX: Float = 2f
@@ -162,14 +167,6 @@ private const val NOTE_PAGE_EDGE_EM: Float = 0.5f
 
 /** 每条批注最多保留多少个候选（按排序取前 N，避免极端页面候选爆炸）。 */
 private const val MAX_CANDIDATES_PER_NOTE: Int = 300
-
-/**
- * 引线短到看不清的门槛（以旁注行高为单位）：短竖线改走左侧 L 形。
- *
- * 只取**半行**：1em 的摆放留白（≈0.72 行）已经够看清，不该被这条规则改道；
- * 真机上「只剩几像素」那种才会触发（箭头尖本身就有 5dp 长，短过它整条线就被箭头吃掉）。
- */
-private const val NOTE_ARROW_MIN_VISIBLE_LINES: Float = 0.5f
 
 /**
  * 末段短到**箭头都画不下**的门槛（以旁注行高为单位）：这一档才走规则第 10 条
@@ -233,9 +230,6 @@ private const val ARROW_BEND_WINDOW_LINES: Float = 2f
 
 /** 一条候选折线最多几个顶点（4 折 = 6 个）：暂存数组按它开，热路径上不再分配。 */
 private const val ARROW_ROUTE_MAX_POINTS: Int = 6
-
-/** 沿框边取点的比例（正上 / 正下与左侧 L 形都按这几个比例挪）。 */
-private val ARROW_EDGE_FRACTIONS = floatArrayOf(0.5f, 0.25f, 0.75f)
 
 /** 一行批注折行模拟的结果：比「宽 / 字宽」粗估准，用于完整性判定。 */
 internal data class NoteTextFit(
@@ -382,29 +376,34 @@ internal enum class NoteSide {
 }
 
 /**
- * 环内的方向名次（2026-10-24 用户定口，规则第 5 条）：**右上 → 右下 → 左上 → 左下 → 上 → 下 → 右 → 左**。
+ * 环内的方向名次（2026-10-27 用户定口）：
+ * **右上 → 右下 → 左上 → 左下 → 正右 → 正左 → 正上 → 正下**。
  *
- * 这一段只在**折行数、环都相同**时才轮到（§1.1「顺序怎么比」）。左右排在最后是因为
- * 它们往往只剩页边距那一窄列（规则第 6 条：那里最多折两行）；
+ * 上 / 下被压到最后（本次定口）：它们要占掉 1em 的竖线空档，一压就贴着原文、
+ * 引线看不见；四个角错开一个字反而能折出 L 形引线。上下只有在四个角、右、左
+ * 都放不下时才用，而且推不出 1em 引线空档时**宁可不用**。
+ *
+ * 这一段只在**折行数、环都相同**时才轮到（§1.1「顺序怎么比」）。左右平时排在四角之后，
  * 但规则第 3 / 4 条给了**提前**的例外，由候选自带的 [NoteCandidate.sideRank] 落实
  * （2026-10-25 用户定口，左右都可能首选）：
  *
- * - 只有右侧离版心还有 1em 以上空白 ⇒ 正右提到最前；
+ * - 只有右侧离版心还有 1em 以上空白 ⇒ 正右提到最前（短行）；
  * - 只有这一行左侧有明显缩进 ⇒ 正左提到最前；
  * - 两边都空着 ⇒ 看选区在这一行里偏左还是偏右（哪边空档小），偏哪边就把哪边提到最前。
  *
- * 右侧已经被别的批注占住时，被提前的正右退回「左」之前（见 [NOTE_SIDE_RANK_TAKEN_RIGHT]）。
+ * 右侧已经被别的批注占住时，被提前的正右让到**其他所有方向之后**
+ * （见 [NOTE_SIDE_RANK_TAKEN_RIGHT]）：它本来就不该凭「更靠右」抢先。
  */
 internal fun noteSideRank(side: NoteSide): Int = when (side) {
     NoteSide.ABOVE_RIGHT -> 0
     NoteSide.BELOW_RIGHT -> 1
     NoteSide.ABOVE_LEFT -> 2
     NoteSide.BELOW_LEFT -> 3
-    NoteSide.ABOVE -> 4
-    NoteSide.BELOW -> 5
-    NoteSide.RIGHT -> 6
-    NoteSide.LEFT -> 7
-    NoteSide.OTHER -> 8
+    NoteSide.RIGHT -> 10
+    NoteSide.LEFT -> 20
+    NoteSide.ABOVE -> 30
+    NoteSide.BELOW -> 40
+    NoteSide.OTHER -> 50
 }
 
 /** 规则 3 / 4 命中时「首选那一侧」的名次：排到八个方向之前（2026-10-25：左右都可能首选）。 */
@@ -418,8 +417,16 @@ internal const val NOTE_SIDE_RANK_SIDE_FIRST: Int = -2
  */
 private const val NOTE_SIDE_RANK_SIDE_SECOND: Int = -1
 
-/** 右侧已被占时，正右的名次：让到「左」之前（倒数第二位）。 */
-private const val NOTE_SIDE_RANK_TAKEN_RIGHT: Int = 6
+/** 右侧已被占时，正右的名次：给一个比正左更大的值，候选链本身仍自洽（实际排序另有硬降位）。 */
+private const val NOTE_SIDE_RANK_TAKEN_RIGHT: Int = 25
+
+/**
+ * 四个斜向的名次上界（[noteSideRank] 里右上 = 0 … 左下 = 3）。
+ *
+ * 满行页边距那一列的候选会被改写成正右 / 正左的名次（10 / 20），它们几何上是「右上 / 右下」
+ * 却不是真斜向——凡是要按「真斜向」判断的地方都用这个上界把它们排除掉。
+ */
+private const val NOTE_SIDE_RANK_LAST_CORNER: Int = 3
 
 /**
  * 「这一条贴着自己那一行摆，会横着盖住右侧那条的选区」时的方向名次
@@ -472,9 +479,10 @@ internal data class NoteCandidate(
     /**
      * 超出这个方向「自然留白」的距离（2026-10-27 用户定口：位置选择改为就近）。
      *
-     * 正右 / 正左的自然留白是 [NoteMetrics.sideGap]，正上 / 正下是行距空档，
-     * 斜向是两者的合成。排序先比这个「额外被拉长的引线」，再比方向：
-     * 都在自然留白内时仍按正右 → 右上/右下 → … 取位；只有某个方向被迫放得更远时，
+     * 正右 / 正左的自然留白是 [NoteMetrics.sideGap]；正上 / 正下是 1em（竖线引线空档）；
+     * 四个斜向是「一个字的横向走廊 + 2px 近侧」的合成。
+     * 排序先比这个「额外被拉长的引线」，再比方向：
+     * 都在自然留白内时仍按方向名次取位；只有某个方向被迫放得更远时，
      * 才让位给真正贴着选区的方向。手搓候选不传时退回 [distance]。
      */
     val excessDistance: Float = distance,
@@ -491,8 +499,8 @@ internal data class NoteCandidate(
     val cornerOffset: Float = 0f,
     /**
      * 这个候选用哪一档留白（2026-10-24 用户定口）：
-     * [NOTE_MARGIN_TIER_PREFERRED] = 四周 1em；[NOTE_MARGIN_TIER_FAR_MIN] = 远侧收 0.1em；
-     * [NOTE_MARGIN_TIER_NEAR_MIN] = 斜向摆法连近侧也收 0.1em。
+     * [NOTE_MARGIN_TIER_PREFERRED] = 四周 1em（正上 / 正下与正侧）；[NOTE_MARGIN_TIER_FAR_MIN] = 远侧收 0.1em。
+     * 四个斜向的上下近侧固定 2px，不随档位变化。
      *
      * 排序时它排在方向名次之后：同一个方向上，空间够就先要 1em，不够才要细缝。
      */
@@ -526,7 +534,8 @@ internal data class NoteCandidate(
      * 四个斜向（右上 / 右下 / 左上 / 左下）。
      *
      * 斜向的留白不是规则第 7 条的 1em：横向就是规则第 5 条的「偏右 / 偏左一个字」，
-     * 纵向是行距空档，所以**留白档在斜向上不参与先后**——先取最近的，留白档只在同距时决胜。
+     * 纵向固定 2px（那一个字是给 L 形引线留的横向走廊），所以**留白档在斜向上不参与先后**——
+     * 先取最近的，留白档只在同距时决胜。
      * 正上 / 正下 / 正左 / 正右 那一侧的 1em 是给引线与箭头的空档，仍然优先保住。
      */
     val corner: Boolean
@@ -783,18 +792,18 @@ internal enum class NoteCandidateScope {
  * 一条批注的候选框，按**环优先**逐格生成（方案 §0.1 / §1.1）。
  *
  * 顺序 = 环（0 = 直接相邻，1 = 隔 1 行…）→ 整句 → 折行数
- * → 方向（右上 / 右下 / 左上 / 左下 / 上 / 下 / 右 / 左）。段的阶梯已删除
+ * → 就近 → 方向（四个角 → 正右 → 正左 → 正上 → 正下）。段的阶梯已删除
  * （2026-10-27 用户定口），范围只由「空白是否连成一片」决定。所有位置都**贴住锚点**：
  *
  * - **正右看留白**（2026-10-24 用户定口）：锚点末行右侧离版心右缘还有 **1em 以上空白**
  *   就先试正右——代码行 / 标题行这类左对齐的短行右边本来就是空白区，段落中间的行也一样；
- *   整行顶到版心右缘的行也生成右页边距那一列，只是名次排在六个非侧方向之后（2026-10-27）。
+ *   整行顶到版心右缘的行也生成右页边距那一列，只是名次排在四个角之后（2026-10-27）。
  * - **右下 / 右上** 的横向基准是**末行第一个字向右一个汉字**；**左下 / 左上** 是
  *   **末行末字符向左一个汉字**。它们都不再贴整个选区的左右缘（§0.2）。
- * - 留白分三档（[NOTE_MARGIN_TIER_PREFERRED] / [NOTE_MARGIN_TIER_FAR_MIN] /
- *   [NOTE_MARGIN_TIER_NEAR_MIN]）：空间够时四周 1em；不够先把**远离正文那一侧**
- *   收到 0.1em；正右 / 正下 / 正上 / 正左靠近正文那一侧的 1em 必须保留（引线要从这里
- *   画出去），只有四个斜向摆法才允许把近侧也收到 0.1em。
+ * - 留白分两档（[NOTE_MARGIN_TIER_PREFERRED] / [NOTE_MARGIN_TIER_FAR_MIN]）：空间够时四周 1em；
+ *   不够只把**远离正文那一侧**收到 0.1em。**正上 / 正下**近侧的 1em 是竖线引线空档，
+ *   一律保留，推不出就不给这个方向；**四个斜向**近侧固定 2px——横向错开的那一个字才是
+ *   L 形引线的走廊（2026-10-27 用户定口）。
  *
  * 可用宽高从「包含该点的极大空闲矩形」里扣：空白已按**最小**留白（0.1em）切好，
  * 候选再按档位把首选留白补回去。
@@ -826,11 +835,6 @@ internal fun noteCandidates(
     covering: Boolean? = null,
     contentRight: Float = Float.MAX_VALUE,
     contentLeft: Float? = null,
-    /**
-     * 竖直方向的默认留白（规则第 13 条）：取「正文行盒节距 − 行盒高」，即行与行之间
-     * 那段纯空白；压缩到 [NOTE_MIN_MARGIN_PX] 为止。缺省沿用 [NoteMetrics.marginY]。
-     */
-    verticalGap: Float = metrics.marginY,
     scope: NoteCandidateScope = NoteCandidateScope.ALL,
     ringFrom: Int = 1,
     ringTo: Int = Int.MAX_VALUE,
@@ -908,7 +912,7 @@ internal fun noteCandidates(
     val leftRoom = leftGap != null && leftGap > preferred
     val rightRoom = rightGap > preferred
     // 2026-10-26 用户定口：左侧有缩进时，**只有本行最左侧那条**可以优先考虑左侧；
-    // 同一行其余批注仍按「右侧 → 右上/右下 → 左上/左下 → 上下 → 左侧」的通常名次。
+    // 同一行其余批注仍按「右上/右下 → 左上/左下 → 正右 → 正左 → 正上 → 正下」的通常名次。
     // `otherRowLeft` 里存的是其他批注在这一行的最左墨迹，比本条更左就说明本条不是最左。
     val leftmostOnRow = otherRowLeft[base]?.let { it >= firstGlyph.left - NOTE_GEOM_EPS } ?: true
     val leftFirst = leftmostOnRow && when {
@@ -955,18 +959,6 @@ internal fun noteCandidates(
     /** 远侧留白：首选档要补到 1em，其余档直接用空白已有的 0.1em。 */
     fun farExtra(axisMin: Float, tier: Int): Float =
         if (tier == NOTE_MARGIN_TIER_PREFERRED) max(0f, preferred - axisMin) else 0f
-
-    /** 斜向摆法的近侧留白：首选 / 远侧档仍是 1em，最后一档才收到 0.1em。 */
-
-    /**
-     * 竖直近侧留白（规则第 7 / 13 条）：1em（给引线与箭头留位置）→
-     * 「正文行距让出来的纯空白」→ 2px。压到 2px 才算这个方向不可用。
-     */
-    fun nearYRoom(tier: Int): Float = when (tier) {
-        NOTE_MARGIN_TIER_NEAR_GAP -> max(NOTE_MIN_MARGIN_PX, verticalGap)
-        NOTE_MARGIN_TIER_NEAR_MIN -> NOTE_MIN_MARGIN_PX
-        else -> preferred
-    }
 
     /**
      * 规则第 6 条：左右**只剩页边距**那一列时最多折两行——那一列本来就窄，再多折会折成竖条。
@@ -1081,9 +1073,9 @@ internal fun noteCandidates(
         }
         val rect = Rect(left, top, left + size.width, top + size.height)
         val side = classify(rect)
-        // 规则第 6 条（2026-10-27 用户定口）：满行的左右页边距可以用，但名次排在六个非侧方向
-        // 之后。满行在相邻一圈时，几何上会被判成右上 / 右下，这里按「页边距那一列」改回 6 / 7，
-        // 否则它会抢在正上 / 正下 / 左侧前面。
+        // 规则第 6 条（2026-10-27 用户定口）：满行的左右页边距可以用，但名次排在四个角
+        // 之后。满行在相邻一圈时，几何上会被判成右上 / 右下，这里按「页边距那一列」改用
+        // 正右 / 正左的名次（10 / 20），不会被当成斜向抢在四个角前面。
         val rowFull = spansContent(lines.getOrNull(rowIndex) ?: baseRow)
         val inRightMargin = contentRight < Float.MAX_VALUE / 2f &&
             left >= contentRight - NOTE_GEOM_EPS
@@ -1123,14 +1115,17 @@ internal fun noteCandidates(
             (axis(rect.right) shl 13) or axis(rect.bottom)
         if (!seen.add(key)) return
         val distance = note.rects.minOf { rectDistance(rect, it) }
-        // 这个方向「贴着选区」时的自然距离：正侧是 1em，上下是行距空档，斜向是两者合成。
+        // 这个方向「贴着选区」时的自然距离：正侧是 1em，正上 / 正下同样是 1em（近侧空档），
+        // 四个斜向是「横向 1em 引线走廊 + 2px 近侧」的合成（2026-10-27 用户定口）。
         // 排序先比**超出自然留白的那一段**，避免把 1em 的侧边箭头空档误当成「远」。
+        val cornerNatural = sqrt(
+            metrics.sideGap * metrics.sideGap + NOTE_MIN_MARGIN_PX * NOTE_MIN_MARGIN_PX,
+        )
         val natural = when (side) {
             NoteSide.RIGHT, NoteSide.LEFT -> metrics.sideGap
-            NoteSide.ABOVE, NoteSide.BELOW -> verticalGap
+            NoteSide.ABOVE, NoteSide.BELOW -> preferred
             NoteSide.ABOVE_RIGHT, NoteSide.BELOW_RIGHT,
-            NoteSide.ABOVE_LEFT, NoteSide.BELOW_LEFT ->
-                sqrt(metrics.sideGap * metrics.sideGap + verticalGap * verticalGap)
+            NoteSide.ABOVE_LEFT, NoteSide.BELOW_LEFT -> cornerNatural
             NoteSide.OTHER -> 0f
         }
         // 亚像素差不算「更远」：浮点误差会让同距的正右输给右上 / 右下。
@@ -1219,11 +1214,10 @@ internal fun noteCandidates(
     /** 正下：近侧 1em（竖直引线要从这段空档出去），下方按档位。 */
     fun emitBelow(f: Rect, rowIndex: Int, row: NoteTextLine, ring: Int, tier: Int, reserveX: Float?) {
         // 近侧从**字墨迹下缘**算起（不是行盒下缘）：行盒底下那半段行距也是空白（§2.1）。
-        // 最后一档把这 1em 也收到 0.1em，好让两行之间那段行距放得下一条批注。
         // 正下只认**横向压住锚点**的空白带：右边那一列是「右」，不是「下」
         // （否则右侧列空白一高，就会冒出「横向在页边距、却叫正下」的候选，把让位挤掉）。
         if (f.right <= anchor.left + NOTE_GEOM_EPS || f.left >= anchor.right - NOTE_GEOM_EPS) return
-        val near = nearYRoom(tier)
+        val near = preferred
         val y = row.inkBottom + near
         val far = farExtra(marginY, tier)
         val top = max(y, f.top)
@@ -1243,7 +1237,7 @@ internal fun noteCandidates(
     fun emitAbove(f: Rect, rowIndex: Int, row: NoteTextLine, ring: Int, tier: Int, reserveX: Float?) {
         // 近侧 1em 从字墨迹上缘算起（行盒顶上那半段行距也算空白）；横向与正下同理，要压住锚点。
         if (f.right <= anchor.left + NOTE_GEOM_EPS || f.left >= anchor.right - NOTE_GEOM_EPS) return
-        val near = nearYRoom(tier)
+        val near = preferred
         val y = row.inkTop - near
         val far = farExtra(marginY, tier)
         val bottom = min(y, f.bottom)
@@ -1259,7 +1253,7 @@ internal fun noteCandidates(
         add(rowIndex, ring, tier, f, left, bottom - size.height, size)
     }
 
-    /** 右下：左缘在「末行第一个字 + 一个汉字」右侧，框顶在该行下方。 */
+    /** 右下：左缘在「末行第一个字 + 一个汉字」右侧，框顶贴着该行下方（这条错开就是给 L 形引线留走廊）。 */
     fun emitBelowRight(f: Rect, rowIndex: Int, row: NoteTextLine, ring: Int, tier: Int, reserveX: Float?) {
         val nearY = NOTE_MIN_MARGIN_PX
         val farX = farExtra(marginX, tier)
@@ -1274,7 +1268,7 @@ internal fun noteCandidates(
         add(rowIndex, ring, tier, f, left, top, size)
     }
 
-    /** 左下：右缘在「末行末字符 - 一个汉字」左侧，框顶在该行下方。 */
+    /** 左下：右缘在「末行末字符 - 一个汉字」左侧，框顶贴着该行下方。 */
     fun emitBelowLeft(f: Rect, rowIndex: Int, row: NoteTextLine, ring: Int, tier: Int) {
         val nearY = NOTE_MIN_MARGIN_PX
         val farX = farExtra(marginX, tier)
@@ -1289,7 +1283,7 @@ internal fun noteCandidates(
         add(rowIndex, ring, tier, f, right - size.width, top, size)
     }
 
-    /** 右上：横向基准与右下相同，框底在该行上方。 */
+    /** 右上：横向基准与右下相同，框底贴着该行上方。 */
     fun emitAboveRight(f: Rect, rowIndex: Int, row: NoteTextLine, ring: Int, tier: Int, reserveX: Float?) {
         val nearY = NOTE_MIN_MARGIN_PX
         val farX = farExtra(marginX, tier)
@@ -1304,7 +1298,7 @@ internal fun noteCandidates(
         add(rowIndex, ring, tier, f, left, bottom - size.height, size)
     }
 
-    /** 左上：横向基准与左下相同，框底在该行上方。 */
+    /** 左上：横向基准与左下相同，框底贴着该行上方。 */
     fun emitAboveLeft(f: Rect, rowIndex: Int, row: NoteTextLine, ring: Int, tier: Int) {
         val nearY = NOTE_MIN_MARGIN_PX
         val farX = farExtra(marginX, tier)
@@ -1323,19 +1317,20 @@ internal fun noteCandidates(
         val row = lines.getOrNull(rowIndex) ?: return
         // 同一行左侧还有批注时，框左缘要让过它首字那一格（给它留引线空档）。
         val reserveX = leftReserve(rowIndex)
-        // 正下的近侧也走三档：1em → 只收远侧 → 近侧也收到 0.1em（最后才用行距）。
-        for (tier in NOTE_MARGIN_TIER_PREFERRED..NOTE_MARGIN_TIER_NEAR_MIN) {
-            val near = nearYRoom(tier)
-            for (f in bandRects(row.rect.bottom + near, anchor.left, below = true)) {
+        // 正下（2026-10-27 用户定口）：近侧固定 1em、只压远侧——那 1em 是竖线引线的空档，
+        // 收掉它箭头就只剩几像素。真推不出这段空档时这个方向宁可不用，改由下一环 / 页边距承接。
+        val near = preferred
+        for (tier in NOTE_MARGIN_TIER_PREFERRED..NOTE_MARGIN_TIER_FAR_MIN) {
+            for (f in bandRects(row.inkBottom + near, anchor.left, below = true)) {
                 emitBelow(f, rowIndex, row, ring, tier, reserveX)
             }
         }
-        // 斜向（2026-10-25 用户定口）：横向基准就是「偏右 / 偏左一个字」（规则第 5 条），
-        // 不再额外加 1em；近侧也不留 1em——贴着上一行 / 下一行放即可（那 1em 是规则第 7 条
-        // 给上 / 下 / 左 / 右 摆法让给引线的）。留白档只剩「远侧」：先保 1em，不够收 0.1em。
-        val near = NOTE_MIN_MARGIN_PX
+        // 四个斜向（2026-10-27 用户定口）：**近侧只留 2px、不推远**——横向特意错开一个字，
+        // 就是为了让引线从框的侧边出去、沿那道空隙折成 L 形再竖着进字下（见 [finish]）。
+        // 留白档只管远侧：先保 1em，不够收 0.1em。
+        val nearCorner = NOTE_MIN_MARGIN_PX
         for (tier in NOTE_MARGIN_TIER_PREFERRED..NOTE_MARGIN_TIER_FAR_MIN) {
-            val y = row.rect.bottom + near
+            val y = row.rect.bottom + nearCorner
             for (f in bandRects(y, cornerRightX, below = true)) {
                 emitBelowRight(f, rowIndex, row, ring, tier, reserveX)
             }
@@ -1348,16 +1343,17 @@ internal fun noteCandidates(
     fun emitAboveFamily(rowIndex: Int, ring: Int) {
         val row = lines.getOrNull(rowIndex) ?: return
         val reserveX = leftReserve(rowIndex)
-        for (tier in NOTE_MARGIN_TIER_PREFERRED..NOTE_MARGIN_TIER_NEAR_MIN) {
-            val near = nearYRoom(tier)
-            for (f in bandRects(row.rect.top - near, anchor.left, below = false)) {
+        // 正上：同正下，近侧 1em 是引线空档，推不出就不用这个方向。
+        val near = preferred
+        for (tier in NOTE_MARGIN_TIER_PREFERRED..NOTE_MARGIN_TIER_FAR_MIN) {
+            for (f in bandRects(row.inkTop - near, anchor.left, below = false)) {
                 emitAbove(f, rowIndex, row, ring, tier, reserveX)
             }
         }
-        // 斜向同 emitBelowFamily：横向偏一个字，近侧贴着行放，留白档只管远侧。
-        val near = NOTE_MIN_MARGIN_PX
+        // 四个斜向同 emitBelowFamily：近侧贴着行放，留白档只管远侧。
+        val nearCorner = NOTE_MIN_MARGIN_PX
         for (tier in NOTE_MARGIN_TIER_PREFERRED..NOTE_MARGIN_TIER_FAR_MIN) {
-            val y = row.rect.top - near
+            val y = row.rect.top - nearCorner
             for (f in bandRects(y, cornerRightX, below = false)) {
                 emitAboveRight(f, rowIndex, row, ring, tier, reserveX)
             }
@@ -1379,8 +1375,8 @@ internal fun noteCandidates(
     /**
      * 某一行右侧的空白列。
      *
-     * 2026-10-27 用户定口：**满行的右页边距也可以用**，只是名次排在六个非侧位置之后
-     * （[NoteSide.RIGHT] 的名次本来就是 6）。所以这里不再要求「段末行」或「右侧还有 1em」；
+     * 2026-10-27 用户定口：**满行的右页边距也可以用**，只是名次排在四个角之后
+     * （[NoteSide.RIGHT] 的名次本来就是 10）。所以这里不再要求「段末行」或「右侧还有 1em」；
      * 真有页边距空白，[columnRects] 会找出来；没有就自然为空。
      */
     fun emitRightFamily(rowIndex: Int, ring: Int) {
@@ -1395,7 +1391,7 @@ internal fun noteCandidates(
     if (scope == NoteCandidateScope.ALL || scope == NoteCandidateScope.NEAR) {
         // 第 0 环：锚点末行的右侧。2026-10-24 用户定口：**不再看是不是段末行**——只要这一行
         // 右侧离版心右缘还有 1em 以上空白，正右就是第一优先级（代码行 / 标题行这类左对齐的短行
-        // 右边本来就是空白区，段中行也一样）。满行只剩页边距时也生成，名次排在六个方向之后。
+        // 右边本来就是空白区，段中行也一样）。满行只剩页边距时也生成，名次排在四个角之后。
         emitRightFamily(base, 0)
         // 规则第 4 条（2026-10-25 用户定口）：左侧就是首选时，它和正右一样进**本行这一批**。
         // 2026-10-27 用户定口：左侧不再只在收尾档生成——它按**环**参与排序，本行左侧是环 0。
@@ -1460,14 +1456,14 @@ internal fun noteCandidates(
  * 同为整句或同为截断时，行数越少越优先。折行数相同后先比就近（额外引线长度），
  * 同距才比**方向**。
  *
- * **斜向（右上 / 右下 / 左上 / 左下）比距离、不比留白档**（2026-10-25 用户定口）：
- * 斜向横向就是规则第 5 条的「偏一个字」，纵向就是行距空档，那 1em 是规则第 7 条给
- * 上 / 下 / 左 / 右 摆法让给引线的——斜向为了凑 1em 把批注送到版心另一头，读者是能看见的
- * （真机上「函数体」的批注离开上一行文字的右缘只剩 0.1em，「使用 val」明明挨着段间距
- * 却飞到左边那条窄缝里）。正侧（右 / 下 / 上 / 左）仍按留白档优先（先要 1em，不够才收细缝）。
+ * **四个斜向（右上 / 右下 / 左上 / 左下）近侧只留 2px、横向错开一个字**（2026-10-27
+ * 用户定口）：那一个字不是摆放留白，而是给引线走廊留的——引线从框的侧边横着出来，
+ * 沿走廊走到选区角外侧，再竖着进字下 / 字上，折成 L 形（见 [routeNoteArrow] 的收尾）。
+ * 正上 / 正下相反：它们靠 1em 的竖直空档画引线，推不出空档时**宁可不用这个方向**。
+ * 正右 / 正左固定 `sideGap`（也是 1em）。
  *
- * @param rightTaken 该行右侧已经被别的旁注占住：正右让到「左」之前
- *   （倒数第二位，§1.1），不再为了「更靠右」把框推远。
+ * @param rightTaken 该行右侧已经被别的旁注占住：正右让到其他所有方向之后
+ *   （2026-10-27 用户定口），不再为了「更靠右」把框推远。
  * @param rightCornerFirst 规则第 8 条的例外（2026-10-25 用户定口）：本条右侧只有本行最右那条，
  *   且它已经放在本行正右 ⇒ 本条回到**右上 → 右下 → 左上 → 左下**的通常顺序，
  *   不再因为「会罩住右侧选区」先走左侧。
@@ -1485,13 +1481,13 @@ internal fun noteCandidateOrder(
         NoteSide.ABOVE_LEFT, NoteSide.BELOW_LEFT -> true
         else -> false
     }
-    // 右侧没被占时 RIGHT 就是 0 号方向，和枚举顺序无关；被占时挪到 LEFT 之前。
+    // 右侧没被占时 RIGHT 排在四个角之后（10），被占时让到正左之后、上下之前（25）。
     // 只压**本行**（环 0）的正右：别的行右侧那块空白仍然按正常名次参与（§0.1 0b）。
     fun rank(c: NoteCandidate): Int = when {
         // 例外：右侧只剩本行最右那条、且它已经在行右 ⇒ 四个斜向按通常顺序（右上最先）。
-        // 页边距那一列的候选（sideRank 已经是 6 / 7）不参与这个例外，否则满行的页边距框
-        // 会被提回右上 / 右下，抢在六个非侧方向前面。
-        rightCornerFirst && isCorner(c.side) && c.sideRank < NOTE_SIDE_RANK_TAKEN_RIGHT ->
+        // 只认**真斜向**（名次 0..3）：页边距那一列的候选已被改写成 10 / 20，不参与这个例外，
+        // 否则满行的页边距框会被提回右上 / 右下，抢到四个角前面。
+        rightCornerFirst && isCorner(c.side) && c.sideRank <= NOTE_SIDE_RANK_LAST_CORNER ->
             noteSideRank(c.side)
         rightTaken && c.side == NoteSide.RIGHT && c.ring == 0 ->
             max(c.sideRank, NOTE_SIDE_RANK_TAKEN_RIGHT)
@@ -1522,24 +1518,12 @@ internal fun noteCandidateOrder(
         .thenBy { it.lines }
         // 例外二仍是硬约束：会完整挡住右侧批注出线通道的右上 / 右下，先让到后面。
         .thenBy { if (blocksExit(it)) 1 else 0 }
-        // 正右已经被占时仍按规则 3 让到其他方向之后，且排在左之前（候选本身也放不下，
-        // 顺序只为口径一致）：其余方向 0 → 正右 1 → 正左 2。
-        .thenBy {
-            if (!rightTaken) {
-                0
-            } else {
-                when {
-                    it.side == NoteSide.RIGHT && it.ring == 0 -> 1
-                    // 只有「普通左」才退到正右之后；本行最左那条的首选左（sideRank -2/-1）
-                    // 是规则 5 的例外，不能被正右被占这件事压掉。
-                    it.side == NoteSide.LEFT && it.ring == 0 && it.sideRank >= 0 -> 2
-                    else -> 0
-                }
-            }
-        }
+        // 正右已经被占时，本行正右让到其他方向之后（排在正左、上下之前的那份名次只在
+        // 「同样能放」时按 `rank` 比；这里先保证它不会凭「更靠右」抢先）。
+        .thenBy { if (rightTaken && it.side == NoteSide.RIGHT && it.ring == 0) 1 else 0 }
         // 2026-10-27 用户定口：位置选择改为**就近**——先比超出自然留白的那一段。
         .thenBy { it.excessDistance }
-        // 距离相同才看首选侧与方向（正右 → 右上/右下 → 左上/左下 → 上下 → 左）。
+        // 距离相同才看首选侧与方向（短行正右 / 有缩进的正左 → 四个角 → 正右 → 正左 → 上 → 下）。
         .thenBy { if (rankOf(it) == NOTE_SIDE_RANK_SIDE_FIRST) 0 else 1 }
         .thenBy { rankOf(it) }
         // 首行 / 末行同样近、同方向时仍贴基准行（末行），保持多行选区的基准行口径。
@@ -1831,9 +1815,6 @@ internal fun noteBubblePlacements(
         val ink = tightLineInk(line.rect, obstacles.arrowInk)
         line.copy(inkTop = ink.top, inkBottom = ink.bottom)
     }
-    // 规则第 13 条：上下默认留白取「当前正文行距让出来的纯空白」（行盒节距 − 行盒高），
-    // 压缩下限 2px。行距越大，批注与正文之间默认就隔得越开。
-    val verticalGap = noteLineGap(lines, marginY)
     // 障碍仍是「文字墨迹（含列表圆点）+ 图形 + 表格 + 线条」：块底色 / padding / 页边距算空白。
     // **文字取字墨迹、不取行盒**（2026-10-24 用户定口）：行盒上下各有一段行距（≈10px），
     // 那一段本来就是空白，批注贴着字墨迹留 0.1em 就能放进去；行盒只有**带边框时**才算实心
@@ -1972,8 +1953,6 @@ internal fun noteBubblePlacements(
         contentRight = contentRight,
         // 版心左缘：右侧没余地时，看这一行左侧有没有明显缩进，决定正左是否提到最前（规则 4）。
         contentLeft = contentLeft,
-        // 上下默认留白（规则 13）：正文行距让出来的那段纯空白。
-        verticalGap = verticalGap,
         scope = scope,
         ringFrom = ringFrom,
         ringTo = ringTo,
@@ -2546,7 +2525,7 @@ private fun assignNoteCandidates(
         var roomTriedHere = false
         for (c in chainFor(note)) {
             // 只认「规则第 3 条提前过的正右」：这一行右侧确实有 1em 以上空白才值得先占。
-            // 只剩页边距那一窄列（规则第 6 条）不算——那种列该排在六个方向之后，
+            // 只剩页边距那一窄列（规则第 6 条）不算——那种列该排在四个角之后，
             // 不能因为「本行最右」就先把批注塞进去。
             if (c.side != NoteSide.RIGHT || c.ring != 0 || !c.complete) continue
             // 这一行右侧确实有 1em 以上空白才值得先占：正右要么是首选（-2），要么是次选（-1，
@@ -2820,23 +2799,6 @@ private fun blankOutward(a: NoteChoice, b: NoteChoice): NoteOutward? {
 private fun blanksOverlap(a: Rect, b: Rect): Boolean =
     min(a.right, b.right) - max(a.left, b.left) > 1f &&
         min(a.bottom, b.bottom) - max(a.top, b.top) > 1f
-
-private fun noteLineGap(lines: List<NoteTextLine>, fallback: Float): Float {
-    val pitches = ArrayList<Float>()
-    for (i in 1 until lines.size) {
-        val up = lines[i - 1]
-        val down = lines[i]
-        if (up.blockId != down.blockId) continue
-        val pitch = down.rect.top - up.rect.top
-        if (pitch > 0f) pitches += pitch
-    }
-    val floor = max(NOTE_MIN_MARGIN_PX, fallback)
-    if (pitches.isEmpty()) return floor
-    pitches.sort()
-    val heights = lines.map { it.rect.height }.sorted()
-    val gap = pitches[pitches.size / 2] - heights[heights.size / 2]
-    return max(floor, gap)
-}
 
 /**
  * 一条批注的**基准行**：所选文字在本页的**最后一行**（§0.1「多行选区以末行为基准行」）。
@@ -3753,24 +3715,26 @@ internal fun routeNoteArrow(
     }
 
     /**
-     * 收尾：通畅路径的末段短到画不下箭头时，改走「贴着选区起点 / 终点的 L 形」；
-     * 否则原样返回（2026-10-24 用户反馈：讨论的引线 17px 快看不见了；
+     * 收尾：四个斜向的引线**一律**改走错开那一个字让出来的走廊（L 形），与末段长短无关；
+     * 其余方向只在通畅路径的末段短到画不下箭头时才改道，否则原样返回
+     * （2026-10-24 用户反馈：讨论的引线 17px 快看不见了；
      * 2026-10-25 补：末段一短，箭头两臂就退到上一段上，看着像「横线末端长了个竖箭头」）。
      */
     fun finish(path: ArrowPath): NoteArrow {
         val cornerFamily = side == NoteSide.BELOW_RIGHT || side == NoteSide.ABOVE_RIGHT ||
             side == NoteSide.BELOW_LEFT || side == NoteSide.ABOVE_LEFT
-        // 末段是竖线且短：不管是「只剩一条短竖线」还是「横-竖两折但竖段只剩几个像素」，都要改道。
+        // 末段是竖线：其余方向据此判断「回折一下再指」要不要省。
         val lastVertical = path.points.size >= 2 &&
             abs(path.points[path.points.size - 1].x - path.points[path.points.size - 2].x) < 0.01f
-        val shortTail = path.tailLen < max(lineH * NOTE_ARROW_MIN_VISIBLE_LINES, 8f)
         // 规则第 10 条的「省掉末折」只认**画不下箭头**这一档（5dp 臂长），
         // 半行高那一档留给上面的改道：真机行距够、折线 13px 时不许省（2026-10-26）。
         val undrawableTail = path.tailLen < max(lineH * NOTE_ARROW_UNDRAWABLE_LINES, 10f)
         // 规则第 10 条：行距太小、末段竖线短到画不下箭头时，这一折可以不画——
         // 引线沿行间那条横线直接截止在选区盒子边线的延长线上，箭头就画在横线上
         // （不再往下折一下再往回指）。只缩短、不越界：新端点必须落在原来那段横线里。
-        if (path.clear && lastVertical && path.points.size >= 3 && undrawableTail) {
+        // 四个斜向不走这一档（2026-10-27 用户定口）：它们要的是侧边出去再折回来的 L，
+        // 省掉末折就成了一条单线，正好是「错开一个字」白错开了。
+        if (!cornerFamily && path.clear && lastVertical && path.points.size >= 3 && undrawableTail) {
             val end = path.points[path.points.size - 1]
             val bend = path.points[path.points.size - 2]
             val prev = path.points[path.points.size - 3]
@@ -3790,43 +3754,74 @@ internal fun routeNoteArrow(
                 return NoteArrow.Elbow(out)
             }
         }
-        val squeezed = path.clear &&
-            cornerFamily &&
-            lastVertical &&
-            shortTail
-        if (!squeezed) return path.toNoteArrow()
+        // 四个斜向的引线**必须是 L 形**（2026-10-27 用户定口），不能是一条贴着框的短线：
+        // 斜向的框本来就挨着那一行（近侧只留 2px），竖着直出只剩几像素；横向特意错开
+        // 一个字，就是为了在框的侧边腾出一条走廊——从**侧边**横着出框，沿走廊走到选区
+        // 那一角的外侧，再竖着进字下 / 字上，箭头落在竖段末端。
+        // 不看末段长短：L 是**约定**，不是「短到画不下才改道」的兜底。末段偶尔够长
+        // （框被 clamp 到较远的空白）时也照样折成 L，否则又会退回一条单线。
+        val needsCorridor = path.clear && cornerFamily
+        if (!needsCorridor) return path.toNoteArrow()
         var nearBest: ArrowPath? = null
         for (t in targets) {
             val below = bubble.top >= t.glyph.bottom - NOTE_GEOM_EPS
             val above = bubble.bottom <= t.glyph.top + NOTE_GEOM_EPS
             if (!below && !above) continue
             val yEntry = verticalEntryEdge(bubble, t.glyph, t.box, above = !below)
-            // 与 [arrowSideEntries] 同一口径：落点固定在**近那一端**的 0.5em 处，
-            // 只有被框自己盖住、又只剩一条细缝时才换到另一头。
-            // （旧实现按「框在左边就取行尾、在右边就取行首」反着取，正下方的批注会指回行首。）
+            // 走廊离选区角 0.5em = 半个字。**取整行的高**（[cornerRowEm]）：一行里「l」和「使」
+            // 高矮差一截，取目标字自己的高会让同样缩进的批注画出不同长度的横段（引线规则第 7 条）。
+            // 区间与端点算法和 [cornerEntryX] 完全一致，两条路径画出的落点才会是同一个。
+            val em = cornerRowEm(anchor, t.glyph)
+            val insetLo = anchor.left + em * 0.5f
+            val insetHi = anchor.right - em * 0.5f
+            // 先指**离框更近的那一头**（§6.1）：目标字在选区右半就取末端，否则取开头。
+            // 落点必须在框外，L 的横段才走得通；那一头被框自己盖住、缝又很窄时，
+            // 再改指另一头（见下面的 `wants`）。
+            val nearEnd = t.glyph.center.x > anchor.center.x
+            val near = clampInset(insetLo, insetHi, if (nearEnd) insetHi else insetLo)
+            val far = clampInset(insetLo, insetHi, if (nearEnd) insetLo else insetHi)
+            // 近端被框自己盖住时，只有缝很窄（< 8px）才改指另一头：
+            // 缝宽够时原来那条引线已经指得对，横穿整个选区去指另一头反而更差。
             val gap = if (below) bubble.top - yEntry else yEntry - bubble.bottom
-            val xEntry = cornerEntryX(bubble, anchor, t.glyph, gap)
-            val edgeX = if (xEntry < bubble.center.x) bubble.left else bubble.right
-            if (abs(xEntry - edgeX) < 1f) continue
-            for (f in ARROW_EDGE_FRACTIONS) {
-                val y = clampInset(
-                    bubble.top + bubbleEm * 0.5f,
-                    bubble.bottom - bubbleEm * 0.5f,
-                    bubble.top + bubble.height * f,
-                )
-                rawX[0] = edgeX
-                rawY[0] = y
-                rawX[1] = xEntry
-                rawY[1] = y
-                rawX[2] = xEntry
-                rawY[2] = yEntry
-                val m = simplifyInto(rawX, rawY, 3, ptsX, ptsY)
-                if (m < 2 || !orthogonalShaped(ptsX, ptsY, m, true, false)) continue
-                val near = measureArrowRoute(
-                    ptsX, ptsY, m, order++, t.index, bubble, drawnIndex, hugDistance,
-                    side = side, own = t.own,
-                ) ?: continue
-                if (near.clear && near.betterThan(nearBest)) nearBest = near
+            val wants = if (gap < 8f) floatArrayOf(near, far) else floatArrayOf(near)
+            for (want in wants) {
+                val xEntry = want.coerceIn(anchor.left + 1f, anchor.right - 1f)
+                // 走廊必须在框外：框盖住走廊时这个 L 就画不成了（横段会穿自己的框）。
+                val edgeX = when {
+                    xEntry <= bubble.left - NOTE_GEOM_EPS -> bubble.left
+                    xEntry >= bubble.right + NOTE_GEOM_EPS -> bubble.right
+                    else -> null
+                }
+                // 横段是「错开的那一个字」那段空隙：短到看不出来就不改道。
+                val corridor = if (edgeX == null) 0f else abs(xEntry - edgeX)
+                if (edgeX == null || corridor < max(4f, bubbleEm * 0.2f)) continue
+                // 竖段要够长：出口取**离正文最远**的位置（框底 / 框顶往里半个 em），
+                // 再从那儿横出去、竖回来。这样竖段≈框高，箭头才画得下。
+                // 这里是框内偏移，按**框**的 em 算（[bubbleEm]），与选区的字高无关。
+                val edgeInset = min(bubbleEm * 0.5f, bubble.height * 0.5f)
+                val loY = bubble.top + edgeInset
+                val hiY = bubble.bottom - edgeInset
+                val ys = if (below) {
+                    floatArrayOf(hiY, bubble.center.y, loY)
+                } else {
+                    floatArrayOf(loY, bubble.center.y, hiY)
+                }
+                for (y in ys) {
+                    val y0 = clampInset(min(loY, hiY), max(loY, hiY), y)
+                    rawX[0] = edgeX
+                    rawY[0] = y0
+                    rawX[1] = xEntry
+                    rawY[1] = y0
+                    rawX[2] = xEntry
+                    rawY[2] = yEntry
+                    val m = simplifyInto(rawX, rawY, 3, ptsX, ptsY)
+                    if (m < 2 || !orthogonalShaped(ptsX, ptsY, m, true, false)) continue
+                    val nearRoute = measureArrowRoute(
+                        ptsX, ptsY, m, order++, t.index, bubble, drawnIndex, hugDistance,
+                        side = side, own = t.own,
+                    ) ?: continue
+                    if (nearRoute.clear && nearRoute.betterThan(nearBest)) nearBest = nearRoute
+                }
             }
         }
         return (nearBest ?: path).toNoteArrow()

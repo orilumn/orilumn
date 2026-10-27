@@ -690,10 +690,11 @@ class NoteBubblesTest {
     }
 
     @Test
-    fun `taken right column drops just before the left side`() {
-        // 行右侧已经被别的旁注占住：正右退回「左」之前（倒数第二位）。
+    fun `taken right column yields to the other directions`() {
+        // 行右侧已经被别的旁注占住：正右让到其他方向之后（2026-10-27 用户定口：
+        // 上 / 下排在四个角、正右、正左之后，正右被占时更不该凭「更靠右」抢先）。
         // 2026-10-27 起先比就近，所以这里直接给有先后意义的距离：
-        // 正右最近、正下其次、正左最远；右侧被占后仍是「正下 → 正右 → 正左」。
+        // 正右最近、正下其次、正左最远；右侧被占后先试正下，再试正左，正右最后。
         val row = rect(0f, 200f, 200f, 240f)
         fun candidate(
             side: NoteSide,
@@ -723,9 +724,9 @@ class NoteBubblesTest {
         assertEquals("右侧没被占时右侧最靠前", NoteSide.RIGHT, free.first().side)
 
         val taken = orderedNoteCandidates(listOf(left, below, right), rightTaken = true)
-        assertEquals("右侧被占后先试正下（这一组里只有它）", NoteSide.BELOW, taken[0].side)
-        assertEquals("正右让到左之前", NoteSide.RIGHT, taken[1].side)
-        assertEquals("左侧排到最后", NoteSide.LEFT, taken.last().side)
+        assertEquals("右侧被占后先试正下（这一组里最近）", NoteSide.BELOW, taken[0].side)
+        assertEquals("再试正左", NoteSide.LEFT, taken[1].side)
+        assertEquals("正右让到最后", NoteSide.RIGHT, taken.last().side)
     }
 
     @Test
@@ -924,9 +925,9 @@ class NoteBubblesTest {
      * 段末行（含只有一行的段落）右侧仍然是第一优先级。
      */
     @Test
-    fun `full width line puts the page margin column after the six directions`() {
+    fun `full width line puts the page margin column after the four corners`() {
         // 规则 3 只在**这一行右侧还有 1em 以上空白**时才把正右提到最前。
-        // 行本身就是满行（右边只剩页边距那一窄列，规则 6）时，正右按规则 6 排在六个方向之后，
+        // 行本身就是满行（右边只剩页边距那一窄列，规则 6）时，正右按规则 6 排在四个角之后，
         // 但仍参与竞争（页边距那一列照样能用）。
         val row = rect(0f, 100f, 600f, 140f)
         val ink = rect(100f, 100f, 300f, 140f)
@@ -935,15 +936,15 @@ class NoteBubblesTest {
         val below = rect(0f, 141f, 700f, 800f)
         val list = candidates(noteInk(1, listOf(ink), "短"), listOf(column, below), lines)
         val ordered = orderedNoteCandidates(list, rightTaken = false)
-        // 满行的页边距那一列排在六个非侧方向之后：同一块右侧页边距里，几何上算「右上 / 右下」
-        // 的那条也按页边距档（rank 6）排，不能抢在正下前面（2026-10-27）。
+        // 满行的页边距那一列排在四个角之后：同一块右侧页边距里，几何上算「右上 / 右下」
+        // 的那条也按页边距档（正右 / 正左那一档）排，不能被当成斜向抢到前面（2026-10-27）。
         assertTrue("页边距那一列仍要参与竞争", ordered.any { it.side == NoteSide.RIGHT })
         assertTrue(
-            "右侧页边距里的候选一律按页边距档（rank 6）",
-            ordered.filter { it.rect.left >= 600f - 0.5f }.all { it.sideRank >= 6 },
+            "右侧页边距里的候选一律按页边距档",
+            ordered.filter { it.rect.left >= 600f - 0.5f }.all { it.sideRank >= 10 },
         )
         assertTrue(
-            "正右排在非侧方向之后",
+            "正右排在四个角之后",
             ordered.indexOfFirst { it.side == NoteSide.RIGHT } >
                 ordered.indexOfFirst { it.side == NoteSide.BELOW_RIGHT || it.side == NoteSide.BELOW },
         )
@@ -1034,7 +1035,7 @@ class NoteBubblesTest {
         }
         assertTrue("满行自己的右页边距要能生成：$besideRow", besideRow.isNotEmpty())
         assertTrue(
-            "满行右页边距排在六个非侧位置之后：${besideRow.map { it.sideRank }}",
+            "满行右页边距排在四个角之后：${besideRow.map { it.sideRank }}",
             besideRow.all { it.sideRank == noteSideRank(NoteSide.RIGHT) },
         )
         assertTrue(
@@ -1800,7 +1801,7 @@ class NoteBubblesTest {
         // 起点字只有一个字宽，所以竖段落在它中心（左缘再往右半个字），不再压着左缘。
         assertEquals("竖段离选区左角 0.5em", ink.left + ink.height * 0.5f, pts[1].x, 0.01f)
         assertEquals("末端接住文字底边", ink.bottom, pts[2].y, 0.01f)
-        assertTrue("第一段要比短竖线长得多：$pts", abs(pts[1].x - pts[0].x) > 4 * abs(pts[2].y - pts[1].y))
+        assertTrue("第一段要比短竖线长得多：$pts", abs(pts[1].x - pts[0].x) > 2 * abs(pts[2].y - pts[1].y))
     }
 
     @Test
@@ -2279,6 +2280,26 @@ class NoteBubblesTest {
     }
 
     @Test
+    fun `a diagonal leader leaves from the box side even when the gap is wide`() {
+        // 2026-10-27 用户定口：斜向画 L 是**约定**，不是「末段短到画不下才改道」的兜底。
+        // 框离得远、末段够长时，路由器本来会从框底竖着出去再折（Z 形）；这里必须仍然
+        // 从框的**侧边**横着出去，沿错开的那一个字走到选区角外侧，再竖着进字上。
+        val glyph = rect(100f, 100f, 140f, 140f)
+        val bubble = rect(300f, 20f, 400f, 60f)
+        val arrow = routeNoteArrow(bubble, listOf(glyph), side = NoteSide.ABOVE_RIGHT)
+        assertTrue("应画得出箭头", arrow != null)
+        val pts = arrowPoints(arrow!!)
+        assertEquals("斜向仍是两段 L：$pts", 3, pts.size)
+        assertEquals("从框的侧边出去，不是框底：$pts", bubble.left, pts[0].x, 0.01f)
+        assertTrue(
+            "起点落在框边内部、避开角点：$pts",
+            pts[0].y > bubble.top + 0.01f && pts[0].y < bubble.bottom - 0.01f,
+        )
+        assertEquals("竖段落在首字中心那一列", 120f, pts[1].x, 0.5f)
+        assertEquals("末端接住字的上边", glyph.top, pts[2].y, 0.01f)
+    }
+
+    @Test
     fun `leader endpoints keep half an em away from the corners`() {
         // 引线规则第 6 条：起点与箭头末端不要画在框和文字选区的四个角点上，
         // 至少应向内偏移 0.5em。字高就是 1em，所以一个字的竖边只剩中点可用。
@@ -2313,8 +2334,8 @@ class NoteBubblesTest {
 
     @Test
     fun `above-right beats below within the same ring and line count`() {
-        // 同一环、同样不折行时，右上压过正下（2026-10-24 用户定口的新方向顺序
-        // 「右 → 右下 → 右上 → 左下 → 左上 → 下 → 上 → 左」）。
+        // 同一环、同样不折行时，右上压过正下（2026-10-27 方向顺序
+        // 「右上 → 右下 → 左上 → 左下 → 正右 → 正左 → 正上 → 正下」）。
         fun candidate(side: NoteSide, ring: Int, left: Float) = NoteCandidate(
             annotationId = 1,
             rect = rect(left, 0f, left + 60f, 24f),
@@ -2725,7 +2746,7 @@ class NoteBubblesTest {
         assertTrue(size.readable)
     }
 
-    /** 2026-10-27 用户定口：满行的左右页边距可以用，但排在六个非侧位置之后。 */
+    /** 2026-10-27 用户定口：满行的左右页边距可以用，但排在四个角之后。 */
     @Test
     fun `right side of a full row is available in its own margin column`() {
         val row0 = rect(0f, 0f, 600f, 40f)
@@ -2756,9 +2777,9 @@ class NoteBubblesTest {
         )
     }
 
-    /** 方向名次：右 → 右下 → 右上 → 左下 → 左上 → 下 → 上 → 左（2026-10-24 用户定口）。 */
+    /** 方向名次：四个角 → 正右 → 正左 → 正上 → 正下（2026-10-27 用户定口）。 */
     @Test
-    fun `direction order runs upper right lower right upper left lower left above below right left`() {
+    fun `direction order puts the four corners first and above below last`() {
         fun candidate(side: NoteSide) = NoteCandidate(
             annotationId = 1,
             rect = rect(100f, 100f, 160f, 124f),
@@ -2778,18 +2799,51 @@ class NoteBubblesTest {
         val ordered = orderedNoteCandidates(sides.map { candidate(it) }, rightTaken = false)
         assertEquals(
             "方向名次不对：${ordered.map { it.side }}",
-            // 规则第 5 条：右上 → 右下 → 左上 → 左下 → 上 → 下 → 右 → 左。
+            // 2026-10-27 用户定口：上 / 下压到四个角、正右、正左之后；
+            // 它们要占 1em 的竖线空档，推不出空档时宁可不摆。
             listOf(
                 NoteSide.ABOVE_RIGHT,
                 NoteSide.BELOW_RIGHT,
                 NoteSide.ABOVE_LEFT,
                 NoteSide.BELOW_LEFT,
-                NoteSide.ABOVE,
-                NoteSide.BELOW,
                 NoteSide.RIGHT,
                 NoteSide.LEFT,
+                NoteSide.ABOVE,
+                NoteSide.BELOW,
             ),
             ordered.map { it.side },
+        )
+    }
+
+    /**
+     * 满行的页边距那一列几何上算「右上」，名次却已被改写成正右（10）。
+     * 规则第 8 条的「右侧只剩本行最右那条」例外只认**真斜向**（0..3），
+     * 不能把它提回 0 号去抢四个角的位置（2026-10-27）。
+     */
+    @Test
+    fun `page margin corner keeps its side rank under the corner first exception`() {
+        fun candidate(side: NoteSide, rank: Int, left: Float) = NoteCandidate(
+            annotationId = 1,
+            rect = rect(left, 100f, left + 60f, 124f),
+            freeRect = rect(0f, 0f, 700f, 800f),
+            lines = 1,
+            complete = true,
+            shownChars = 4,
+            side = side,
+            ring = 0,
+            distance = 5f,
+            excessDistance = 0f,
+            sideRank = rank,
+        )
+        val marginCorner = candidate(NoteSide.ABOVE_RIGHT, noteSideRank(NoteSide.RIGHT), 300f)
+        val realCorner = candidate(NoteSide.ABOVE_RIGHT, noteSideRank(NoteSide.ABOVE_RIGHT), 400f)
+        val ordered = listOf(marginCorner, realCorner)
+            .sortedWith(noteCandidateOrder(rightTaken = false, rightCornerFirst = true))
+        assertEquals(
+            "页边距那一列不能被「斜向优先」例外提回 0：${ordered.map { it.rect.left }}",
+            realCorner.rect.left,
+            ordered.first().rect.left,
+            0.01f,
         )
     }
 
@@ -2823,11 +2877,14 @@ class NoteBubblesTest {
     }
 
     /**
-     * 2026-10-25 用户定口：斜向**不再留 1em**——横向偏一个字、近侧贴着那一行，
-     * 否则（真机「函数体」「使用 val」）批注会被 1em 推到版心另一头，看起来跟锚点没关系。
+     * 2026-10-27 用户定口：四个斜向**贴着那一行、只留 2px**，不要推远。
+     *
+     * 横向错开一个字不是留白，而是给引线留的走廊：引线从框的侧边横着出去，
+     * 沿走廊走到选区角外侧，再竖着进字下 / 字上，折成 L 形（`routeNoteArrow` 的收尾）。
+     * 推到 1em 就把批注送离锚点，读者反而看不出它在说哪段字。
      */
     @Test
-    fun `diagonal hugs the row and offsets one character`() {
+    fun `diagonal hugs the row to keep the L corridor`() {
         val row = rect(0f, 100f, 200f, 140f)
         val list = candidates(
             note = noteInk(1, listOf(row), "想法"),
@@ -2835,7 +2892,7 @@ class NoteBubblesTest {
         )
         val belowRight = list.first { it.side == NoteSide.BELOW_RIGHT }
         assertEquals(
-            "近侧贴着行（不再留 1em）：top=${belowRight.rect.top}",
+            "近侧贴着行（2px 的 L 走廊）：top=${belowRight.rect.top}",
             140f + 2f,
             belowRight.rect.top,
             0.5f,
@@ -2852,7 +2909,7 @@ class NoteBubblesTest {
         )
     }
 
-    /** 2026-10-25 用户定口：空间不够先收**远侧**的 1em，近侧本来就贴着行。 */
+    /** 2026-10-27 用户定口：空间不够先收**远侧**的 1em，近侧那 2px 的走廊不动。 */
     @Test
     fun `diagonal gives up the far side before squeezing the box`() {
         val row = rect(0f, 100f, 200f, 140f)
@@ -2878,7 +2935,7 @@ class NoteBubblesTest {
             oneLinePick.marginTier <= 1,
         )
 
-        // 下方只剩一条窄带：斜向仍然贴进去（近侧不再是 1em 门槛）。
+        // 下方只剩一条窄带：斜向仍然贴进去（近侧只要 2px，比正上 / 正下的 1em 门槛低）。
         val band = rect(0f, 140f + noteMetrics.marginY, 700f, 140f + noteMetrics.marginY + noteLine + 2f)
         val squeezedList = candidates(
             note = noteInk(1, listOf(row), "想法"),
@@ -3241,12 +3298,17 @@ class NoteBubblesTest {
         )
     }
 
-    /** 2026-10-24 用户定口：行盒上下那半段行距也是空白，批注可以贴进两行之间。 */
+    /**
+     * 2026-10-27 用户定口：行距那点净空（不到 1em）不再用来塞批注。
+     *
+     * 原先批注能贴进两行之间：近侧只留 0.1em，引线从框顶到字底只剩几像素，
+     * 真机上箭头等于没画。现在宁可改走右侧页边距那一列。
+     */
     @Test
-    fun `a note can sit in the gap between two lines`() {
+    fun `a note no longer squeezes into a line gap narrower than one em`() {
         val row0 = rect(0f, 0f, 600f, 60f)
         val row1 = rect(0f, 60f, 600f, 120f)
-        // 字墨迹只有 30 高：两行之间净空 30，一行旁注 19.87 + 两侧 0.1em 刚好放得下。
+        // 字墨迹只有 30 高：两行之间净空 30，扣掉近侧 1em（14.4）就放不下一行旁注（19.87）。
         val glyphs = listOf(rect(0f, 15f, 600f, 45f), rect(0f, 75f, 600f, 105f))
         val bubbles = place(
             notes = listOf(noteInk(1, listOf(rect(0f, 15f, 40f, 45f)), "想法")),
@@ -3256,15 +3318,15 @@ class NoteBubblesTest {
                 NoteTextLine(rect = row1, blockId = 0, index = 1),
             ),
             arrowInk = glyphs,
-            // 整行顶到版心右缘：没有右侧页边距那一列，只剩行距可用。
+            // 整行顶到版心右缘：版心内没有余地，只剩右侧页边距那一列。
             contentRight = 600f,
-            pageRight = 600f,
+            pageRight = 700f,
         )
         val b = bubbles.single()
-        assertTrue("该整句放下：$b", !b.compact)
+        assertTrue("不该把批注挤成小图标：$b", !b.compact)
         assertTrue(
-            "该落在两行之间的行距里：top=${b.topPx}",
-            b.topPx >= 45f + noteMetrics.marginY - 0.5f && b.topPx + noteLine <= 75f - noteMetrics.marginY + 0.5f,
+            "该改走右侧页边距那一列：left=${b.leftPx}",
+            b.leftPx >= 600f - 0.5f,
         )
     }
 

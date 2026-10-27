@@ -1440,6 +1440,51 @@ class NoteBubblesTest {
     }
 
     @Test
+    fun `rightmost note does not pre-empt the blank when the right column is unavailable`() {
+        // 用户定口（2026-10-27）：最右那条的预排**只认正右**；正右放不下就作废，
+        // 它回到正常顺序（从左到右）取位。不能借预排先挑走本行共享空白里最近的一格——
+        // 否则最长的那条反而贴着正文（真机 book 39 第 2 章「函数将在几章中进行更详细的讨论」那页）。
+        val above = rect(0f, 110f, 600f, 150f)
+        val row = rect(0f, 170f, 600f, 210f)
+        fun ink(id: Long, left: Float, right: Float, text: String) =
+            noteInk(id, listOf(rect(left, 170f, right, 210f)), text)
+        val bubbles = place(
+            notes = listOf(
+                ink(1, 60f, 110f, "函数就是功能呀！老外的词汇太贫乏了"),
+                ink(2, 200f, 270f, "用几章来"),
+                ink(3, 380f, 430f, "就是具体"),
+                ink(4, 450f, 510f, "怎么讨论呢？讨论什么呢？以什么形式讨论呢？开个party可好？再长一点会怎样？折行呢？"),
+            ),
+            textInk = listOf(above, row),
+            contentBottom = 600f,
+            pageRight = 600f,
+            pageBottom = 600f,
+        )
+        assertEquals(4, bubbles.size)
+        assertTrue("四条都要能整句读完：$bubbles", bubbles.none { it.compact })
+        val first = bubbles.single { it.annotationId == 2L }
+        val longest = bubbles.single { it.annotationId == 4L }
+        assertTrue(
+            "本行最右那条不能先占共享空白：讨论 top=${longest.topPx}，最左那条 top=${first.topPx}",
+            longest.topPx >= first.topPx - 0.5f,
+        )
+        assertEquals(
+            "共享空白的第一格给正常顺序里最先排的那条：$bubbles",
+            first.topPx,
+            bubbles.minOf { it.topPx },
+            0.5f,
+        )
+        for (i in bubbles.indices) {
+            for (j in i + 1 until bubbles.size) {
+                assertTrue(
+                    "四条不能重叠：${boxOf(bubbles[i])} / ${boxOf(bubbles[j])}",
+                    !boxOf(bubbles[i]).overlaps(boxOf(bubbles[j])),
+                )
+            }
+        }
+    }
+
+    @Test
     fun `fewer lines wins even when the preferred side folds more`() {
         // 2026-10-26 规则 2：同环内**折行数先于方向**。
         // 正右是规则 3 的首选侧，但要折 3 行；正下只要 1 行，就取正下。
@@ -3443,8 +3488,6 @@ class NoteBubblesTest {
             occupied = listOf(longChoice, shortChoice),
             marginX = noteMetrics.marginX,
             marginY = noteMetrics.marginY,
-            lineH = noteLine,
-            em = noteMetrics.em,
         )
         val long = arranged.single { it.note.annotationId == 1L }
         val short = arranged.single { it.note.annotationId == 2L }
@@ -3459,6 +3502,72 @@ class NoteBubblesTest {
         assertTrue(
             "两条不能重叠",
             !long.candidate.conflicts(short.candidate, noteMetrics.marginX, noteMetrics.marginY),
+        )
+    }
+
+    /**
+     * 规则 5 的口径（2026-10-27 用户定口）：收尾只看**同一个大的空白区**，
+     * 不要求两条侧别相同，也不要求文字位置相邻。真机上「讨论」（正下，43 字）压在最上面，
+     * 「函数」（右下，17 字）在它下面，两者选区的横向距离很远；按旧口径（同侧一族的过滤）
+     * 它们永远不会被放到一起比较。按新口径应把长的换到外侧（下方）、短的换回内侧。
+     */
+    @Test
+    fun `long note moves outside across sideways siblings in the same blank`() {
+        val blank = rect(788f, 1689f, 1823f, 2020f)
+        fun candidate(id: Long, side: NoteSide, r: Rect, lines: Int) = NoteCandidate(
+            annotationId = id,
+            rect = r,
+            freeRect = blank,
+            lines = lines,
+            complete = true,
+            shownChars = 9,
+            side = side,
+            ring = 0,
+            distance = 0f,
+        )
+        val longNote = NoteChoice(
+            noteInk(118L, listOf(rect(1341f, 1627f, 1434f, 1696f)), "讨论讨论讨论讨论讨论讨论讨论讨论讨论"),
+            candidate(118L, NoteSide.BELOW, rect(788f, 1751f, 1823f, 1843f), 2),
+        )
+        val shortNote = NoteChoice(
+            noteInk(119L, listOf(rect(733f, 1627f, 826f, 1696f)), "函数就是功能呀！老外的词汇太贫乏"),
+            candidate(119L, NoteSide.BELOW_RIGHT, rect(920f, 1849f, 1528f, 1895f), 1),
+        )
+        val neighbor = NoteChoice(
+            noteInk(112L, listOf(rect(874f, 1627f, 1060f, 1696f)), "用几章来"),
+            candidate(112L, NoteSide.BELOW_RIGHT, rect(788f, 1698f, 950f, 1744f), 1),
+        )
+        val second = NoteChoice(
+            noteInk(128L, listOf(rect(1201f, 1627f, 1294f, 1696f)), "详细"),
+            candidate(128L, NoteSide.BELOW_RIGHT, rect(1247f, 1698f, 1410f, 1744f), 1),
+        )
+        val arranged = arrangeSharedBlankNotes(
+            occupied = listOf(neighbor, second, longNote, shortNote),
+            marginX = noteMetrics.marginX,
+            marginY = noteMetrics.marginY,
+        )
+        val dbg = arranged.joinToString(" | ") { "${it.note.annotationId}:${it.candidate.rect}" }
+        val long = arranged.single { it.note.annotationId == 118L }
+        val short = arranged.single { it.note.annotationId == 119L }
+        assertTrue(
+            "长的应换到外侧（下方）：long=${long.candidate.rect} short=${short.candidate.rect}",
+            long.candidate.rect.top > short.candidate.rect.top + 1f,
+        )
+        assertTrue(
+            "短的应换回内侧（上方）：long=${long.candidate.rect} short=${short.candidate.rect}",
+            short.candidate.rect.top < 1800f,
+        )
+        // 两条要贴在一起：中间只留 2 倍 margin（和让位一致），不能因为长框比短框高就空出一大截。
+        val gap = long.candidate.rect.top - short.candidate.rect.bottom
+        assertTrue(
+            "两条之间只应留 2 倍 margin，实际 gap=$gap：$dbg",
+            gap <= noteMetrics.marginY * 2f + 1f,
+        )
+        assertTrue(
+            "换完仍不能重叠",
+            !long.candidate.conflicts(neighbor.candidate, noteMetrics.marginX, noteMetrics.marginY) &&
+                !short.candidate.conflicts(neighbor.candidate, noteMetrics.marginX, noteMetrics.marginY) &&
+                !long.candidate.conflicts(short.candidate, noteMetrics.marginX, noteMetrics.marginY),
         )
     }
 }

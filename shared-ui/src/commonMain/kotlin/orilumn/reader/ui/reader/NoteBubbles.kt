@@ -2601,8 +2601,9 @@ private fun assignNoteCandidates(
         while (end < order.size && baseRow(order[end]) == rowIndex) end++
         val members = order.subList(start, end)
         // 规则第 3 条的例外一：本行**最右那条**先试正右（它右侧那块空白先归它）。
-        // 正右放不下时也先把它整条放好——例外二要知道它到底从哪儿出线，
-        // 左边那些才知道该不该让到左上 / 左下。「最右」要与别人拉开（同一条选区的几条不算）。
+        // 例外**只包含正右**：正右放不下就作废，这条按正常顺序（从左到右）取位——
+        // 不许借预排去占其他方向，否则它会先挑走本行共享空白里离正文最近的那一格。
+        // 「最右」要与别人拉开（同一条选区的几条不算）。
         if (members.size > 1) {
             val rightmost = members.maxWith(
                 compareBy({ noteRightOnRow(it.rects, lines, rowIndex) }, { it.annotationId }),
@@ -2611,9 +2612,8 @@ private fun assignNoteCandidates(
             val others = members
                 .filter { it.annotationId != rightmost.annotationId }
                 .maxOf { noteRightOnRow(it.rects, lines, rowIndex) }
-            if (rightmostRight > others + NOTE_GEOM_EPS && !tryRightFirst(rightmost)) {
-                // 预排右侧那条只为拿到它的出线方向，不许搬动上一行已经放好的批注。
-                placeNote(rightmost, allowRoom = false)
+            if (rightmostRight > others + NOTE_GEOM_EPS) {
+                tryRightFirst(rightmost)
             }
         }
         for (note in members) {
@@ -2625,7 +2625,7 @@ private fun assignNoteCandidates(
 
     // 规则 5（2026-10-27 用户定口）：同一个大空白区里的多条批注综合安排——
     // 长的放外侧、短的放内侧，把靠近正文的走廊留给短批注的引线。
-    val arranged = arrangeSharedBlankNotes(occupied, marginX, marginY, metrics.lineH, metrics.em)
+    val arranged = arrangeSharedBlankNotes(occupied, marginX, marginY)
     for (c in arranged) chosen[c.note.annotationId] = c.candidate
 
     return order.mapNotNull { note -> chosen[note.annotationId]?.let { NoteChoice(note, it) } }
@@ -2641,48 +2641,42 @@ private fun assignNoteCandidates(
  * 规则 5（2026-10-27 用户定口）：同一块大空白里的多条批注要**综合安排**，不是先到先得。
  *
  * 长的批注放到外侧（远离正文），短的放内侧（贴近正文），把靠近正文的那条走廊留给
- * 短批注的引线，避免长框横在短批注与正文之间。只在同一侧、同一块空白、文字位置相邻
- * （同一车道）的两条之间调整；沿「内 → 外」一个轴平移，不改变行、不改变方向，也不动
- * 别的批注。换完仍要满足各自的空白边界与所有已放框的间距；任何一步不满足就保持原样。
+ * 短批注的引线，避免长框横在短批注与正文之间。
+ *
+ * **只按「同一个大的空白区」认**（2026-10-27 用户定口）：不按侧别分家，也不要求两条的
+ * 文字位置相邻。两条的「内 / 外」沿**这块空白自己的朝外方向**量——锚点正文在空白上方就是
+ * 「向下」、在下方就是「向上」、在左侧就是「向右」、在右侧就是「向左」，与候选名叫「正下」
+ * 还是「右下」无关，所以右侧页边距里的正右与右上、右下也在同一个深度轴上。沿这个轴平移，
+ * 不改变行、不改变方向，也不动别的批注；短的接长的那条原来的内缘，长的紧贴短的外缘
+ * （留 2 倍 margin，与让位一致），不会因为两条高低不同而在中间空出一截。换完仍要满足各自的空白边界
+ * 与所有已放框的间距；任何一步不满足就保持原样，最多迭代 4 轮直到稳定。
  */
 internal fun arrangeSharedBlankNotes(
     occupied: List<NoteChoice>,
     marginX: Float,
     marginY: Float,
-    lineH: Float,
-    em: Float,
 ): List<NoteChoice> {
     if (occupied.size < 2) return occupied
     val out = occupied.toMutableList()
 
-    fun sideFamily(side: NoteSide): Int = when (side) {
-        NoteSide.RIGHT, NoteSide.ABOVE_RIGHT, NoteSide.BELOW_RIGHT -> 0
-        NoteSide.LEFT, NoteSide.ABOVE_LEFT, NoteSide.BELOW_LEFT -> 1
-        NoteSide.BELOW -> 2
-        NoteSide.ABOVE -> 3
-        NoteSide.OTHER -> 4
-    }
-
-    /** 朝外平移：右侧往右、左侧往左、下侧往下、上侧往上。 */
-    fun shifted(side: NoteSide, r: Rect, delta: Float): Rect = when (sideFamily(side)) {
-        0 -> Rect(r.left + delta, r.top, r.right + delta, r.bottom)
-        1 -> Rect(r.left - delta, r.top, r.right - delta, r.bottom)
-        2 -> Rect(r.left, r.top + delta, r.right, r.bottom + delta)
-        3 -> Rect(r.left, r.top - delta, r.right, r.bottom - delta)
-        else -> r
+    /** 朝外平移：向下往下、向上往上、向右往右、向左往左。 */
+    fun shifted(outward: NoteOutward, r: Rect, delta: Float): Rect = when (outward) {
+        NoteOutward.DOWN -> Rect(r.left, r.top + delta, r.right, r.bottom + delta)
+        NoteOutward.UP -> Rect(r.left, r.top - delta, r.right, r.bottom - delta)
+        NoteOutward.RIGHT -> Rect(r.left + delta, r.top, r.right + delta, r.bottom)
+        NoteOutward.LEFT -> Rect(r.left - delta, r.top, r.right - delta, r.bottom)
     }
 
     /** 批注文字长度：长批注可能是折成好几行的窄框，不能用某个方向上的框宽代替。 */
     fun textLength(c: NoteChoice): Int = c.note.text.count { it != '\n' }
 
     /** 长的那条还在内侧时，返回需要让出的深度；已经在外侧则返回 0。 */
-    fun innerGap(long: NoteChoice, short: NoteChoice): Float {
-        val gap = when (sideFamily(long.candidate.side)) {
-            0 -> short.candidate.rect.left - long.candidate.rect.left
-            1 -> long.candidate.rect.right - short.candidate.rect.right
-            2 -> short.candidate.rect.top - long.candidate.rect.top
-            3 -> long.candidate.rect.bottom - short.candidate.rect.bottom
-            else -> 0f
+    fun innerGap(long: NoteChoice, short: NoteChoice, outward: NoteOutward): Float {
+        val gap = when (outward) {
+            NoteOutward.DOWN -> short.candidate.rect.top - long.candidate.rect.top
+            NoteOutward.UP -> long.candidate.rect.bottom - short.candidate.rect.bottom
+            NoteOutward.RIGHT -> short.candidate.rect.left - long.candidate.rect.left
+            NoteOutward.LEFT -> long.candidate.rect.right - short.candidate.rect.right
         }
         return max(0f, gap)
     }
@@ -2692,17 +2686,6 @@ internal fun arrangeSharedBlankNotes(
             r.right <= c.freeRect.right + NOTE_GEOM_EPS &&
             r.top >= c.freeRect.top - NOTE_GEOM_EPS &&
             r.bottom <= c.freeRect.bottom + NOTE_GEOM_EPS
-
-    /** 文字位置相邻才算同一车道：侧向看纵向有重叠（或只差一行），上下看横向有重叠（或只差一个字）。 */
-    fun sameLane(a: NoteChoice, b: NoteChoice): Boolean {
-        val ai = rectUnion(a.note.rects)
-        val bi = rectUnion(b.note.rects)
-        return when (sideFamily(a.candidate.side)) {
-            0, 1 -> min(ai.bottom, bi.bottom) + lineH > max(ai.top, bi.top) - NOTE_GEOM_EPS
-            2, 3 -> min(ai.right, bi.right) + em > max(ai.left, bi.left) - NOTE_GEOM_EPS
-            else -> false
-        }
-    }
 
     fun reflowOne(choice: NoteChoice, r: Rect): NoteChoice = NoteChoice(
         choice.note,
@@ -2721,43 +2704,116 @@ internal fun arrangeSharedBlankNotes(
             for (j in i + 1 until out.size) {
                 val a = out[i]
                 val b = out[j]
-                val family = sideFamily(a.candidate.side)
-                if (family >= 4 || family != sideFamily(b.candidate.side)) continue
+                val outward = blankOutward(a, b) ?: continue
                 if (!blanksOverlap(a.candidate.freeRect, b.candidate.freeRect)) continue
-                if (!sameLane(a, b)) continue
                 val aLen = textLength(a)
                 val bLen = textLength(b)
                 if (aLen == bLen) continue
                 val long = if (aLen > bLen) a else b
                 val short = if (long === a) b else a
-                val delta = innerGap(long, short)
+                val delta = innerGap(long, short, outward)
                 if (delta <= NOTE_GEOM_EPS) continue
-                val longRect = shifted(long.candidate.side, long.candidate.rect, delta)
-                val shortRect = shifted(short.candidate.side, short.candidate.rect, -delta)
-                if (!inOwnBlank(long.candidate, longRect) || !inOwnBlank(short.candidate, shortRect)) continue
-                val newLong = reflowOne(long, longRect)
-                val newShort = reflowOne(short, shortRect)
-                if (newLong.candidate.conflicts(newShort.candidate, marginX, marginY)) continue
-                var blocked = false
-                for (k in out.indices) {
-                    if (k == i || k == j) continue
-                    if (newLong.candidate.conflicts(out[k].candidate, marginX, marginY) ||
-                        newShort.candidate.conflicts(out[k].candidate, marginX, marginY)
-                    ) {
-                        blocked = true
-                        break
+                val gap = when (outward) {
+                    NoteOutward.UP, NoteOutward.DOWN -> marginY
+                    NoteOutward.RIGHT, NoteOutward.LEFT -> marginX
+                } * 2f
+                // 先试「贴紧」：短的接长的那条原来的内缘，长的紧贴短的外缘（留 2 倍 margin）。
+                // 只交换上缘的话，短框比长框矮多少，两条之间就会空出多少（真机上曾空出 52px）。
+                // 贴紧放不下（越出空白或撞别人）再退回只交换深度。
+                val inner = depthOf(long.candidate.rect, outward)
+                val packedShort = rectAtDepth(short.candidate.rect, outward, inner)
+                val packedLong = rectAtDepth(
+                    long.candidate.rect,
+                    outward,
+                    inner + extentOf(short.candidate.rect, outward) + gap,
+                )
+                val attempts = arrayOf(
+                    packedLong to packedShort,
+                    shifted(outward, long.candidate.rect, delta) to
+                        shifted(outward, short.candidate.rect, -delta),
+                )
+                var applied = false
+                for ((longRect, shortRect) in attempts) {
+                    if (!inOwnBlank(long.candidate, longRect) || !inOwnBlank(short.candidate, shortRect)) continue
+                    val newLong = reflowOne(long, longRect)
+                    val newShort = reflowOne(short, shortRect)
+                    if (newLong.candidate.conflicts(newShort.candidate, marginX, marginY)) continue
+                    var blocked = false
+                    for (k in out.indices) {
+                        if (k == i || k == j) continue
+                        if (newLong.candidate.conflicts(out[k].candidate, marginX, marginY) ||
+                            newShort.candidate.conflicts(out[k].candidate, marginX, marginY)
+                        ) {
+                            blocked = true
+                            break
+                        }
                     }
+                    if (blocked) continue
+                    val longIndex = if (long === a) i else j
+                    val shortIndex = if (short === a) i else j
+                    out[longIndex] = newLong
+                    out[shortIndex] = newShort
+                    arranged = true
+                    applied = true
+                    break
                 }
-                if (blocked) continue
-                val longIndex = if (long === a) i else j
-                val shortIndex = if (short === a) i else j
-                out[longIndex] = newLong
-                out[shortIndex] = newShort
-                arranged = true
+                if (!applied) continue
             }
         }
     }
     return out
+}
+
+/** 批注框相对自己锚点正文的朝外方向，也就是「深度」的测量轴。 */
+private enum class NoteOutward { UP, DOWN, LEFT, RIGHT }
+
+/** 沿朝外方向的深度：越靠外越大。 */
+private fun depthOf(r: Rect, outward: NoteOutward): Float = when (outward) {
+    NoteOutward.DOWN -> r.top
+    NoteOutward.UP -> -r.bottom
+    NoteOutward.RIGHT -> r.left
+    NoteOutward.LEFT -> -r.right
+}
+
+/** 框在朝外方向上的长度。 */
+private fun extentOf(r: Rect, outward: NoteOutward): Float = when (outward) {
+    NoteOutward.DOWN, NoteOutward.UP -> r.height
+    NoteOutward.RIGHT, NoteOutward.LEFT -> r.width
+}
+
+/** 把框平移到指定深度（只动朝外方向上的那一轴）。 */
+private fun rectAtDepth(r: Rect, outward: NoteOutward, depth: Float): Rect = when (outward) {
+    NoteOutward.DOWN -> Rect(r.left, depth, r.right, depth + r.height)
+    NoteOutward.UP -> Rect(r.left, -depth - r.height, r.right, -depth)
+    NoteOutward.RIGHT -> Rect(depth, r.top, depth + r.width, r.bottom)
+    NoteOutward.LEFT -> Rect(-depth - r.width, r.top, -depth, r.bottom)
+}
+
+/**
+ * 同一块空白里两条批注共用的朝外方向：看**锚点正文**落在空白的哪一侧，而不是看各自的框
+ * 贴在锚点的哪个角。右侧页边距里的批注即使框在锚点上方（右上候选），朝外方向仍是「向右」；
+ * 正文下方那块空白里的批注，不论候选叫正下还是右下，朝外方向都是「向下」。
+ */
+private fun blankOutward(a: NoteChoice, b: NoteChoice): NoteOutward? {
+    val ink = rectUnion(a.note.rects + b.note.rects)
+    val blank = a.candidate.freeRect
+    val cx = (ink.left + ink.right) / 2f
+    val cy = (ink.top + ink.bottom) / 2f
+    val dx = (blank.left + blank.right) / 2f - cx
+    val dy = (blank.top + blank.bottom) / 2f - cy
+    val insideX = cx >= blank.left && cx <= blank.right
+    val insideY = cy >= blank.top && cy <= blank.bottom
+    return when {
+        insideX && !insideY -> if (dy > 0f) NoteOutward.DOWN else NoteOutward.UP
+        insideY && !insideX -> if (dx > 0f) NoteOutward.RIGHT else NoteOutward.LEFT
+        !insideX && !insideY ->
+            if (abs(dx) >= abs(dy)) {
+                if (dx > 0f) NoteOutward.RIGHT else NoteOutward.LEFT
+            } else {
+                if (dy > 0f) NoteOutward.DOWN else NoteOutward.UP
+            }
+        else -> null
+    }
 }
 
 /** 两块空白是不是同一块 / 同一列（只要有一点重叠就算，跨行批注也认同一列）。 */

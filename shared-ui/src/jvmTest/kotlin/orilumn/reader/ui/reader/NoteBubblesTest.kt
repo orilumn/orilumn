@@ -2169,6 +2169,33 @@ class NoteBubblesTest {
     }
 
     @Test
+    fun `same corner offset gives the same leader for every note on the line`() {
+        // 2026-10-27 用户定口：批注相对文字的缩进一样（都是首字右偏一个字），
+        // 引线就该一样。旧实现把落点当成 0.5em 区间里的候选、按长短从几个比例里挑，
+        // 同样的缩进会算出 2px / 8px / 14px 好几种横向。
+        val glyphs = (0 until 5).map { rect(100f + it * 40f, 100f, 140f + it * 40f, 140f) }
+        val cases = listOf(
+            rect(140f, 60f, 240f, 96f),   // 上方，缝只有 4px
+            rect(140f, 60f, 300f, 96f),   // 上方，框更宽（近端被框自己盖住）
+            rect(140f, 144f, 240f, 184f), // 下方，缝同样只有 4px
+        )
+        val runs = cases.map { bubble ->
+            val arrow = routeNoteArrow(
+                bubble = bubble,
+                inkRects = glyphs,
+                side = if (bubble.top < 100f) NoteSide.ABOVE_RIGHT else NoteSide.BELOW_RIGHT,
+            )
+            assertTrue("应画得出箭头：$bubble", arrow != null)
+            val points = arrowPoints(arrow!!)
+            val tip = points.last()
+            assertTrue("落点要在首字右偏 0.5em 处，实际 x=${tip.x}", abs(tip.x - 120f) < 0.5f)
+            points.zipWithNext().map { (a, b) -> abs(a.x - b.x) }.sum()
+        }
+        assertEquals("同样缩进、同样一行，横向长度应一致：$runs", runs[0], runs[1], 0.5f)
+        assertEquals("上方与下方摆法也应一致：$runs", runs[0], runs[2], 0.5f)
+    }
+
+    @Test
     fun `arrow stops at the line box edge instead of the glyph edge`() {
         // 引线规则第 4 条：引线和箭头画到**行盒边框**为止，不得侵入行盒内部。
         // 行盒上下一共比字多出 10px，箭头要停在行盒下边 150，而不是字的下边 140。

@@ -3739,29 +3739,18 @@ internal fun routeNoteArrow(
             lastVertical &&
             shortTail
         if (!squeezed) return path.toNoteArrow()
-        val leftCorner = side == NoteSide.BELOW_LEFT || side == NoteSide.ABOVE_LEFT
         var nearBest: ArrowPath? = null
         for (t in targets) {
             val below = bubble.top >= t.glyph.bottom - NOTE_GEOM_EPS
             val above = bubble.bottom <= t.glyph.top + NOTE_GEOM_EPS
             if (!below && !above) continue
             val yEntry = verticalEntryEdge(bubble, t.glyph, t.box, above = !below)
-            // 同一行里靠起点 / 终点那个字：L 形的竖段贴着它的边，箭头指向锚点的角落。
-            val rowGlyphs = inkRects.filter {
-                abs(it.center.y - t.glyph.center.y) <= max(it.height, t.glyph.height) * 0.6f
-            }
-            val startGlyph = if (leftCorner) {
-                rowGlyphs.maxByOrNull { it.right } ?: t.glyph
-            } else {
-                rowGlyphs.minByOrNull { it.left } ?: t.glyph
-            }
-            // 箭头末端同样离选区的角至少 0.5em（引线规则第 7 条）。
-            val xEntry = clampInset(
-                max(startGlyph.left, anchor.left + startGlyph.height * 0.5f),
-                min(startGlyph.right, anchor.right - startGlyph.height * 0.5f),
-                if (leftCorner) startGlyph.right else startGlyph.left,
-            )
-            val edgeX = if (leftCorner) bubble.right else bubble.left
+            // 与 [arrowSideEntries] 同一口径：落点固定在**近那一端**的 0.5em 处，
+            // 只有被框自己盖住、又只剩一条细缝时才换到另一头。
+            // （旧实现按「框在左边就取行尾、在右边就取行首」反着取，正下方的批注会指回行首。）
+            val gap = if (below) bubble.top - yEntry else yEntry - bubble.bottom
+            val xEntry = cornerEntryX(bubble, anchor, t.glyph, gap)
+            val edgeX = if (xEntry < bubble.center.x) bubble.left else bubble.right
             if (abs(xEntry - edgeX) < 1f) continue
             for (f in ARROW_EDGE_FRACTIONS) {
                 val y = clampInset(
@@ -3978,6 +3967,41 @@ private const val ARROW_EDGE_BOTTOM: Int = 3
 private fun bandOf(a: Float, b: Float): Pair<Float, Float> = min(a, b) to max(a, b)
 
 /**
+ * 斜向摆法的 em：单行选区取整行的高度（一行里 'l' 和「使」高矮差一截，取谁的高引线就跟着变），
+ * 多行选区取目标那一行那个字的高。
+ */
+private fun cornerRowEm(anchor: Rect, glyph: Rect): Float {
+    val singleRow = abs(anchor.center.y - glyph.center.y) <= max(anchor.height, glyph.height) * 0.25f
+    return if (singleRow) max(anchor.height, glyph.height) else glyph.height
+}
+
+/**
+ * 斜向（右上 / 右下 / 左上 / 左下）的落点：**固定**在近那一端、离选区角 0.5em 的地方。
+ *
+ * 2026-10-27 用户定口：批注相对文字的缩进一样，引线就该画出同一个样子。旧实现把这个点当成
+ * 「0.5em 区间里的一个候选」，交给路由器按长短从 {1, 0.75, 0.5} 里挑，于是同样的缩进能算出
+ * 2px / 8px / 14px / 24px 好几种横向——不是随机，是没有唯一解。
+ *
+ * 唯一的改道：[bubble] 自己盖住了这个落点，而且框离行盒只有一条细缝（< 8px）：
+ * 竖直那一段画不下箭头，只能从框的侧边出去再竖落，落点必须换到另一头。
+ * 多行选区不做这个改道（另一头在别的行，落点就对不上那一行的边了）。
+ */
+private fun cornerEntryX(bubble: Rect, anchor: Rect, glyph: Rect, gap: Float): Float {
+    val singleRow = abs(anchor.center.y - glyph.center.y) <= max(anchor.height, glyph.height) * 0.25f
+    val h = cornerRowEm(anchor, glyph)
+    val lo = anchor.left + h * 0.5f
+    val hi = anchor.right - h * 0.5f
+    val nearEnd = glyph.center.x > anchor.center.x
+    val near = clampInset(lo, hi, if (nearEnd) hi else lo)
+    val covered = near > bubble.left - NOTE_GEOM_EPS && near < bubble.right + NOTE_GEOM_EPS
+    return if (singleRow && covered && gap < 8f) {
+        clampInset(lo, hi, if (nearEnd) lo else hi)
+    } else {
+        near
+    }
+}
+
+/**
  * 入边候选（§6.1）：**右侧摆法进终点所在的边**——
  *
  * - 框与文字纵向重叠 ⇒ 进右侧面（横着进）；
@@ -4021,14 +4045,17 @@ private fun arrowSideEntries(
         else -> {
             val above = bubble.bottom <= glyph.top + NOTE_GEOM_EPS
             val y = verticalEntryEdge(bubble, glyph, box, above = above)
-            val (lo, hi) = bandOf(alongLo, alongHi)
-            for (f in fractions) {
-                out += ArrowEntry(
-                    Offset(insetAlong(lo, hi, f), y), horizontal = false, lo = lo, hi = hi,
-                    edgeLo = glyph.left, edgeHi = glyph.right,
-                    edge = if (above) ARROW_EDGE_TOP else ARROW_EDGE_BOTTOM,
-                )
-            }
+            val gap = if (above) y - bubble.bottom else bubble.top - y
+            // 落点唯一确定（近端、离选区角 0.5em），不再交给路由器挑比例——
+            // 同样缩进要画出同样的引线（2026-10-27）。
+            val h = cornerRowEm(anchor, glyph)
+            val (ilo, ihi) = bandOf(anchor.left + h * 0.5f, anchor.right - h * 0.5f)
+            out += ArrowEntry(
+                Offset(cornerEntryX(bubble, anchor, glyph, gap), y),
+                horizontal = false, lo = ilo, hi = ihi,
+                edgeLo = anchor.left, edgeHi = anchor.right,
+                edge = if (above) ARROW_EDGE_TOP else ARROW_EDGE_BOTTOM,
+            )
         }
     }
     // 左右两侧被正文挡住时，规则第 2 条要「下横上 / 上横下」：竖着从框的上 / 下边出去，

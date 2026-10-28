@@ -1878,9 +1878,10 @@ class NoteBubblesTest {
             assertEquals("末段竖着落在文字底边", ink.bottom, end.y, 0.01f)
             assertTrue("终点落在文字的横向范围里", end.x in ink.left..ink.right)
         } else {
-            // 规则第 10 条：这一段行间空档只有 12px，末折短到画不下箭头时省掉末折，
-            // 箭头直接画在那条横线上、停在选区的近侧边线（2026-10-26 用户第 1 条）。
-            assertEquals("省掉末折时停在选区近侧边线", ink.right, end.x, 0.01f)
+            // 规则第 11 条（2026-10-28 定口）：这一段行间空档只有 12px，末折短到画不下箭头时
+            // 省掉末折，箭头直接画在那条横线上、**停在拐点**——不再拉长到选区边线（ink.right）。
+            assertTrue("末折停在拐点，不拉到选区边线：x=${end.x}", end.x < ink.right - 1f)
+            assertTrue("拐点要落在选区的横向范围里：x=${end.x}", end.x in ink.left..ink.right)
             assertTrue("横线要落在两行之间：y=${end.y}", end.y in ink.bottom..rows[1].top)
         }
         // 文字在框的左边：第一段（竖线）之后第一段横线不许朝右（背离文字）跑。
@@ -2258,6 +2259,22 @@ class NoteBubblesTest {
         val tip = arrowPoints(arrow!!).last()
         assertEquals("箭头停在行盒下边", 150f, tip.y, 0.01f)
         assertTrue("横向仍落在末字附近，实际 x=${tip.x}", tip.x in 260f..300f)
+    }
+
+    @Test
+    fun `a diagonal leader drops its tail when the vertical is too short for an arrow`() {
+        // 引线规则第 11 条同样适用于四个角（2026-10-28 定口，没有例外）：
+        // 走廊竖段只剩 9px、画不下箭头时，末折省掉——箭头落在拐点上，横着收尾，
+        // 既不退回「贴着框的短线」，也不把末段横着拉到选区边线（ink.right = 240）。
+        val glyph = rect(200f, 140f, 240f, 180f)
+        val bubble = rect(320f, 185f, 420f, 193f)
+        val arrow = routeNoteArrow(bubble, listOf(glyph), side = NoteSide.BELOW_RIGHT)
+        assertTrue("应画得出箭头", arrow != null)
+        val pts = arrowPoints(arrow!!)
+        assertEquals("末折省掉后只剩一条横线：$pts", 2, pts.size)
+        val tip = pts.last()
+        assertEquals("箭头画在两行之间的横线上：$pts", 189f, tip.y, 0.01f)
+        assertTrue("停在拐点（走廊入口），不拉到选区边线：x=${tip.x}", tip.x in 200f..239f)
     }
 
     @Test

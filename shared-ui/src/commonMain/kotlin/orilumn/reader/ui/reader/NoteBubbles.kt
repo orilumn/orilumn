@@ -3581,6 +3581,9 @@ internal fun routeNoteArrow(
     // 沿边取点至少内缩 0.5em（引线规则第 4 条：端点不许落在四角）。旁注框的 em 取它的行高。
     val bubbleEm = if (lineH > 0f) lineH else bubble.height
     // 竖着进的时候箭头停在行盒边框上（规则第 9 条：不得侵入行盒内部）。
+    // 2026-10-28 真机 A/B：按「选区墨迹」量（箭头贴到字边）会让引线的终点正好压在字的边上，
+    // 被 0.5px 容差判成穿字，整条路变成「不通畅」，四角的走廊 L 反而退化成一条直线。
+    // 所以竖进端点退回**整行行框**；「行盒」= 选区墨迹的口径只管第 4 / 5 条的量尺。
     fun boxOf(glyph: Rect): Rect = lineBoxes.firstOrNull {
         it.top <= glyph.center.y && it.bottom >= glyph.center.y &&
             it.left <= glyph.center.x && it.right >= glyph.center.x
@@ -3783,53 +3786,12 @@ internal fun routeNoteArrow(
     }
 
     /**
-     * 收尾：四个斜向的引线**一律**改走错开那一个字让出来的走廊（L 形），与末段长短无关；
-     * 其余方向只在通畅路径的末段短到画不下箭头时才改道，否则原样返回
-     * （2026-10-24 用户反馈：讨论的引线 17px 快看不见了；
-     * 2026-10-25 补：末段一短，箭头两臂就退到上一段上，看着像「横线末端长了个竖箭头」）。
+     * 四角走廊（规则第 2 条）：从**框的侧边**横着出去，沿「错开的那一个字」让出来的空隙
+     * 走到选区那一角的外侧，再竖着进字下 / 字上，箭头落在竖段末端。
+     * 斜向的框本来就挨着那一行（近侧只留 2px），竖着直出只剩几像素；错开一个字就是为了
+     * 腾出这条走廊。走廊画不成（框盖住走廊、宽度不足一个字的五分之一）时返回 null。
      */
-    fun finish(path: ArrowPath): NoteArrow {
-        val cornerFamily = side == NoteSide.BELOW_RIGHT || side == NoteSide.ABOVE_RIGHT ||
-            side == NoteSide.BELOW_LEFT || side == NoteSide.ABOVE_LEFT
-        // 末段是竖线：其余方向据此判断「回折一下再指」要不要省。
-        val lastVertical = path.points.size >= 2 &&
-            abs(path.points[path.points.size - 1].x - path.points[path.points.size - 2].x) < 0.01f
-        // 规则第 11 条的「省掉末折」只认**画不下箭头**这一档（5dp 臂长），
-        // 半行高那一档留给上面的改道：真机行距够、折线 13px 时不许省（2026-10-26）。
-        val undrawableTail = path.tailLen < max(lineH * NOTE_ARROW_UNDRAWABLE_LINES, 10f)
-        // 规则第 11 条：行距太小、末段竖线短到画不下箭头时，这一折可以不画——
-        // 引线沿行间那条横线直接截止在选区盒子边线的延长线上，箭头就画在横线上
-        // （不再往下折一下再往回指）。只缩短、不越界：新端点必须落在原来那段横线里。
-        // 四个斜向不走这一档（2026-10-27 用户定口）：它们要的是侧边出去再折回来的 L，
-        // 省掉末折就成了一条单线，正好是「错开一个字」白错开了。
-        if (!cornerFamily && path.clear && lastVertical && path.points.size >= 3 && undrawableTail) {
-            val end = path.points[path.points.size - 1]
-            val bend = path.points[path.points.size - 2]
-            val prev = path.points[path.points.size - 3]
-            val leftward = bend.x < prev.x - 0.01f
-            val rightward = bend.x > prev.x + 0.01f
-            val xEdge = if (leftward) anchor.right else anchor.left
-            val within = if (leftward) {
-                xEdge >= bend.x - 0.01f && xEdge <= prev.x - 0.01f
-            } else {
-                xEdge <= bend.x + 0.01f && xEdge >= prev.x + 0.01f
-            }
-            if ((leftward || rightward) && within) {
-                val out = ArrayList<Offset>(path.points.size - 1)
-                for (i in 0 until path.points.size - 2) out += path.points[i]
-                out += Offset(xEdge, bend.y)
-                if (out.size == 2) return NoteArrow.Straight(out[0], out[1])
-                return NoteArrow.Elbow(out)
-            }
-        }
-        // 四个斜向的引线**必须是 L 形**（2026-10-27 用户定口），不能是一条贴着框的短线：
-        // 斜向的框本来就挨着那一行（近侧只留 2px），竖着直出只剩几像素；横向特意错开
-        // 一个字，就是为了在框的侧边腾出一条走廊——从**侧边**横着出框，沿走廊走到选区
-        // 那一角的外侧，再竖着进字下 / 字上，箭头落在竖段末端。
-        // 不看末段长短：L 是**约定**，不是「短到画不下才改道」的兜底。末段偶尔够长
-        // （框被 clamp 到较远的空白）时也照样折成 L，否则又会退回一条单线。
-        val needsCorridor = path.clear && cornerFamily
-        if (!needsCorridor) return path.toNoteArrow()
+    fun cornerRoute(): ArrowPath? {
         var nearBest: ArrowPath? = null
         for (t in targets) {
             val below = bubble.top >= t.glyph.bottom - NOTE_GEOM_EPS
@@ -3892,7 +3854,26 @@ internal fun routeNoteArrow(
                 }
             }
         }
-        return (nearBest ?: path).toNoteArrow()
+        return nearBest
+    }
+
+    /**
+     * 收尾：四角先按走廊构造 L 形（规则第 2 条），再按第 11 条检查末折画不画得下。
+     *
+     * 两档的顺序不能反：第 11 条只作用在**已经选定的线型**上。若先拿通畅路径的末段长短
+     * 去否决 L，四个角就全退成一条横线、箭头悬在选区外（2026-10-28 真机「L 型引线都没了」）。
+     * 走廊 L 的竖段取「框底 / 框顶往里半个 em」≈框高，本来就不会落进「画不下箭头」那一档，
+     * 所以四角的 L 照旧画得出来，第 11 条只在走廊本身也短到极点时才生效。
+     *
+     * 其余方向：末段竖线短到画不下箭头时省掉末折，箭头落在倒数第二段的末端
+     * （2026-10-24 用户反馈：讨论的引线 17px 快看不见了；
+     * 2026-10-25 补：末段一短，箭头两臂就退到上一段上，看着像「横线末端长了个竖箭头」）。
+     */
+    fun finish(path: ArrowPath): NoteArrow {
+        val cornerFamily = side == NoteSide.BELOW_RIGHT || side == NoteSide.ABOVE_RIGHT ||
+            side == NoteSide.BELOW_LEFT || side == NoteSide.ABOVE_LEFT
+        val chosen = if (path.clear && cornerFamily) cornerRoute() ?: path else path
+        return chosen.withoutUndrawableTail(lineH).toNoteArrow()
     }
 
     // 已经拿到**无条件最优**的引线（一条直线、且不交叉）就不必再试别的端点组合了。
@@ -5387,6 +5368,23 @@ private fun ArrowPath.toNoteArrow(): NoteArrow =
     } else {
         NoteArrow.Elbow(points)
     }
+
+/**
+ * 规则第 11 条：末段竖线短到画不下箭头（5dp 臂长）时，这一折不画——箭头落在**倒数第二段的
+ * 末端**，方向随那一段（第 12 条）。只缩短、不越界：拐点本来就在原来那条折线上，
+ * 不再把末段拉到选区边线（2026-10-28 定口）。
+ *
+ * 四个角同样适用，没有例外；但只作用在**已经选定的线型**上（见 `finish`）：
+ * 四角先按走廊走成 L，L 的竖段≈框高，落不进这一档。
+ */
+private fun ArrowPath.withoutUndrawableTail(lineH: Float): ArrowPath {
+    if (!clear || points.size < 3) return this
+    val end = points[points.size - 1]
+    val bend = points[points.size - 2]
+    if (abs(end.x - bend.x) >= 0.01f) return this
+    if (tailLen >= max(lineH * NOTE_ARROW_UNDRAWABLE_LINES, 10f)) return this
+    return copy(points = points.subList(0, points.size - 1).toList())
+}
 
 private fun arrowSegments(arrow: NoteArrow): List<Pair<Offset, Offset>> = when (arrow) {
     is NoteArrow.Straight -> listOf(arrow.start to arrow.end)

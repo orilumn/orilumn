@@ -1873,17 +1873,14 @@ class NoteBubblesTest {
             assertTrue("不许折回自己的框：$pts", !entersInterior(pts[i - 1], pts[i], bubble))
         }
         val end = pts.last()
-        val lastIsVertical = abs(pts[pts.size - 1].x - pts[pts.size - 2].x) < 0.01f
-        if (lastIsVertical) {
-            assertEquals("末段竖着落在文字底边", ink.bottom, end.y, 0.01f)
-            assertTrue("终点落在文字的横向范围里", end.x in ink.left..ink.right)
-        } else {
-            // 规则第 11 条（2026-10-28 定口）：这一段行间空档只有 12px，末折短到画不下箭头时
-            // 省掉末折，箭头直接画在那条横线上、**停在拐点**——不再拉长到选区边线（ink.right）。
-            assertTrue("末折停在拐点，不拉到选区边线：x=${end.x}", end.x < ink.right - 1f)
-            assertTrue("拐点要落在选区的横向范围里：x=${end.x}", end.x in ink.left..ink.right)
-            assertTrue("横线要落在两行之间：y=${end.y}", end.y in ink.bottom..rows[1].top)
-        }
+        // 四角的 L 是硬规定（2026-10-28 用户定口）：这一段行间空档只有 12px，
+        // 末折短到画不下箭头也照画——末段必须竖着落到文字底边，不许省成一条横线。
+        assertTrue(
+            "末段必须竖着落在文字底边：$pts",
+            abs(pts[pts.size - 1].x - pts[pts.size - 2].x) < 0.01f,
+        )
+        assertEquals("末段竖着落在文字底边", ink.bottom, end.y, 0.01f)
+        assertTrue("终点落在文字的横向范围里", end.x in ink.left..ink.right)
         // 文字在框的左边：第一段（竖线）之后第一段横线不许朝右（背离文字）跑。
         val firstHorizontal = pts.zipWithNext().first { (a, b) -> abs(a.y - b.y) < 0.01f }
         assertTrue("不许朝背离文字的方向起步：$pts", firstHorizontal.second.x <= firstHorizontal.first.x + 0.01f)
@@ -2173,31 +2170,34 @@ class NoteBubblesTest {
     }
 
     @Test
-    fun `below right arrow lands on the bottom edge near the end`() {
-        // 标注在右下方：终点在文字**下边靠末端**，而不是绕到最左那个字的下边。
+    fun `below right arrow keeps its L when the near end is under the note box`() {
+        // 标注在右下方，框宽到把整行的收角带都盖住，只露出选区开头那一头。
+        // L 是硬规定（2026-10-28）：近端画不成走廊时改指**同一选区的另一头**，
+        // 不再退成一条竖线——「短一点也是在保持这个 L 的前提下短一点」。
         val bubble = rect(140f, 150f, 420f, 190f)
         val start = rect(100f, 100f, 140f, 140f)
         val end = rect(260f, 100f, 300f, 140f)
         val arrow = routeNoteArrow(bubble, listOf(start, end), side = NoteSide.BELOW_RIGHT)
         assertTrue("应画得出箭头", arrow != null)
-        val tip = arrowPoints(arrow!!).last()
-        assertEquals("终点落在文字下边", 140f, tip.y, 0.5f)
-        // 引线规则第 4 条：离选区右下角至少 0.5em（正好是末字中心），所以不再压到 300 的角上。
-        assertTrue("终点要尽量靠末端（离角 0.5em），实际 x=${tip.x}", tip.x >= 280f)
+        val pts = arrowPoints(arrow!!)
+        assertEquals("必须是 L 形，不能退成一条竖线：$pts", 3, pts.size)
+        assertEquals("终点落在文字下边", 140f, pts.last().y, 0.5f)
+        // 引线规则第 4 条：离选区左下角至少 0.5em（em = 行高 40，所以最多到 120）。
+        assertEquals("近端被框盖住，改指选区另一头：x=${pts.last().x}", 120f, pts.last().x, 0.5f)
     }
 
     @Test
-    fun `above right arrow lands on the top edge near the end`() {
-        // 标注在右上方：终点在文字**上边靠末端**。
+    fun `above right arrow keeps its L when the near end is under the note box`() {
+        // 同上，框在上方。
         val bubble = rect(140f, 50f, 420f, 90f)
         val start = rect(100f, 100f, 140f, 140f)
         val end = rect(260f, 100f, 300f, 140f)
         val arrow = routeNoteArrow(bubble, listOf(start, end), side = NoteSide.ABOVE_RIGHT)
         assertTrue("应画得出箭头", arrow != null)
-        val tip = arrowPoints(arrow!!).last()
-        assertEquals("终点落在文字上边", 100f, tip.y, 0.5f)
-        // 同上：右上角要避开，末端一侧最多到末字中心。
-        assertTrue("终点要尽量靠末端（离角 0.5em），实际 x=${tip.x}", tip.x >= 280f)
+        val pts = arrowPoints(arrow!!)
+        assertEquals("必须是 L 形，不能退成一条竖线：$pts", 3, pts.size)
+        assertEquals("终点落在文字上边", 100f, pts.last().y, 0.5f)
+        assertEquals("近端被框盖住，改指选区另一头：x=${pts.last().x}", 120f, pts.last().x, 0.5f)
     }
 
     @Test
@@ -2385,19 +2385,53 @@ class NoteBubblesTest {
     }
 
     @Test
-    fun `a diagonal leader drops its tail when the vertical is too short for an arrow`() {
-        // 引线规则第 11 条同样适用于四个角（2026-10-28 定口，没有例外）：
-        // 走廊竖段只剩 9px、画不下箭头时，末折省掉——箭头落在拐点上，横着收尾，
-        // 既不退回「贴着框的短线」，也不把末段横着拉到选区边线（ink.right = 240）。
+    fun `a diagonal leader keeps its L even when the vertical is too short for an arrow`() {
+        // 2026-10-28 用户定口：四角的 L 是硬规定。走廊竖段只剩 9px（门槛 10px）时，
+        // 第 11 条也不许把末折删掉——竖段短就短，箭头尖按末段长度缩小，
+        // 但形状必须是「从框侧边横出去、再竖着进字」的 L，不能退化成一条横线。
         val glyph = rect(200f, 140f, 240f, 180f)
         val bubble = rect(320f, 185f, 420f, 193f)
         val arrow = routeNoteArrow(bubble, listOf(glyph), side = NoteSide.BELOW_RIGHT)
         assertTrue("应画得出箭头", arrow != null)
         val pts = arrowPoints(arrow!!)
-        assertEquals("末折省掉后只剩一条横线：$pts", 2, pts.size)
+        assertEquals("L 形不能被删成一条横线：$pts", 3, pts.size)
         val tip = pts.last()
-        assertEquals("箭头画在两行之间的横线上：$pts", 189f, tip.y, 0.01f)
-        assertTrue("停在拐点（走廊入口），不拉到选区边线：x=${tip.x}", tip.x in 200f..239f)
+        assertEquals("竖段末端指着字下缘", 180f, tip.y, 0.01f)
+        assertEquals("末折前面那一段仍是横的", pts[pts.size - 2].y, pts[0].y, 0.01f)
+        assertTrue("落点仍在选区横向范围里：x=${tip.x}", tip.x in 200f..239f)
+    }
+
+    @Test
+    fun `an underline note at a corner keeps its L shape across font sizes`() {
+        // 下划线标注的箭头要进到行盒里、停在划线下缘外 2px，竖段因此比高亮短一截；
+        // 但四角的 L 是硬规定：任何字号下都必须是「横段 + 竖段」三点折线（2026-10-28 用户定口）。
+        for (bodyEm in listOf(28f, 32f, 36f, 40f, 48f)) {
+            val noteEm = bodyEm * NOTE_BUBBLE_FONT_RATIO
+            val noteLineH = noteEm * NOTE_BUBBLE_LINE_RATIO
+            val baseline = 140f
+            val glyph = rect(260f, baseline - bodyEm * 0.85f, 300f, baseline)
+            val lineBox = rect(0f, baseline - bodyEm, 600f, baseline + bodyEm * 0.6f)
+            val underline = rect(
+                260f, baseline + bodyEm * 0.16f, 300f, baseline + bodyEm * 0.24f,
+            )
+            val bubbleTop = glyph.bottom + 2f
+            val arrow = routeNoteArrow(
+                bubble = rect(306f, bubbleTop, 406f, bubbleTop + noteLineH),
+                inkRects = listOf(glyph),
+                lineBoxes = listOf(lineBox),
+                lineH = noteLineH,
+                side = NoteSide.BELOW_RIGHT,
+                rowBoxEntry = true,
+                underlineBands = listOf(underline),
+            )
+            assertTrue("正文 ${bodyEm}px：应画得出箭头", arrow != null)
+            val pts = arrowPoints(arrow!!)
+            assertEquals("正文 ${bodyEm}px：L 形不能被删成一条横线：$pts", 3, pts.size)
+            assertEquals(
+                "正文 ${bodyEm}px：箭头停在下划线外 2px",
+                underline.bottom + 2f, pts.last().y, 0.01f,
+            )
+        }
     }
 
     @Test

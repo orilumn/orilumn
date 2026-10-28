@@ -225,6 +225,14 @@ private const val ARROW_MAX_BENDS: Int = 4
 /** 箭头最多考虑几个最近的锚点字：最近那个被围死时换下一个字。 */
 private const val ARROW_TARGET_LIMIT: Int = 4
 
+/**
+ * 四角 L 的两头都画不成干净路径时，在收角带里再扫几个落点（不含两头）。
+ *
+ * 规则第 2 条把 L 定成硬规定，而「一头被自己的框盖住、另一头那一竖又扎进下一行的字里」
+ * 是常见组合；扫字缝比退成一条直线强（2026-10-28 真机）。
+ */
+private const val ARROW_CORNER_SWEEP: Int = 5
+
 /** 两折 / 三折每个方向最多试几个折点坐标（再多的只是白算）。 */
 private const val ARROW_MAX_BEND_COORDS: Int = 8
 
@@ -3149,10 +3157,6 @@ private fun rectDistance(a: Rect, b: Rect): Float {
     return sqrt(dx * dx + dy * dy)
 }
 
-/** 矩形上离 [p] 最近的点。 */
-private fun nearestPointOn(r: Rect, p: Offset): Offset =
-    Offset(p.x.coerceIn(r.left, r.right), p.y.coerceIn(r.top, r.bottom))
-
 /**
  * 小图标落位（§2.1）：优先贴在锚点墨迹的**右下角外侧**，且保证不压锚点墨迹。
  *
@@ -3185,53 +3189,6 @@ private fun noteIconRect(ink: Rect, gap: Float, width: Float, height: Float, pag
     val x = candidates.first().left.coerceIn(page.left, max(page.left, page.right - width))
     val y = candidates.first().top.coerceIn(page.top, max(page.top, page.bottom - height))
     return Rect(x, y, x + width, y + height)
-}
-
-/**
- * 两个矩形之间是否被挡住：取两者最近点连成的线段，穿过任何障碍内部就算挡住。
- *
- * 这就是 §2.1 的「附近」判据——不按行数，按视线。贴边不算穿过（容差 [NOTE_GEOM_EPS]）。
- */
-internal fun sightLineBlocked(from: Rect, to: Rect, blockers: List<Rect>): Boolean {
-    if (blockers.isEmpty()) return false
-    val a = nearestPointOn(from, to.center)
-    val b = nearestPointOn(to, a)
-    val start = nearestPointOn(from, b)
-    val end = b
-    if (rectDistance(from, to) <= NOTE_GEOM_EPS) return false
-    return blockers.any { segmentCrossesInterior(start, end, it) }
-}
-
-/**
- * 线段是否穿过矩形**内部**（Liang–Barsky；先按 [NOTE_GEOM_EPS] 内缩，贴边不算）。
- */
-private fun segmentCrossesInterior(a: Offset, b: Offset, r: Rect): Boolean {
-    var t0 = 0f
-    var t1 = 1f
-    val dx = b.x - a.x
-    val dy = b.y - a.y
-    val left = r.left + NOTE_GEOM_EPS
-    val right = r.right - NOTE_GEOM_EPS
-    val top = r.top + NOTE_GEOM_EPS
-    val bottom = r.bottom - NOTE_GEOM_EPS
-    if (left >= right || top >= bottom) return false
-    val p = floatArrayOf(-dx, dx, -dy, dy)
-    val q = floatArrayOf(a.x - left, right - a.x, a.y - top, bottom - a.y)
-    for (i in 0..3) {
-        if (abs(p[i]) < 1e-6f) {
-            if (q[i] < 0f) return false
-        } else {
-            val t = q[i] / p[i]
-            if (p[i] < 0f) {
-                if (t > t1) return false
-                if (t > t0) t0 = t
-            } else {
-                if (t < t0) return false
-                if (t < t1) t1 = t
-            }
-        }
-    }
-    return t0 < t1
 }
 
 /** 估一句批注排成一行需要多宽（按字宽粗估，中文/全角按一个字宽，西文按 0.55）。 */
@@ -3854,13 +3811,21 @@ internal fun routeNoteArrow(
     }
 
     /**
-     * 四角走廊（规则第 2 条）：从**框的侧边**横着出去，沿「错开的那一个字」让出来的空隙
-     * 走到选区那一角的外侧，再竖着进字下 / 字上，箭头落在竖段末端。
-     * 斜向的框本来就挨着那一行（近侧只留 2px），竖着直出只剩几像素；错开一个字就是为了
-     * 腾出这条走廊。走廊画不成（框盖住走廊、宽度不足一个字的五分之一）时返回 null。
+     * 四角走廊（规则第 2 条：**四角一律 L 形两段折线**）：从**框的侧边**横着出去，
+     * 沿「错开的那一个字」让出来的空隙走到选区那一角的外侧，再竖着进字下 / 字上，
+     * 箭头落在竖段末端。斜向的框本来就挨着那一行（近侧只留 2px），竖着直出只剩几像素；
+     * 错开一个字就是为了腾出这条走廊。
+     *
+     * 落点按「近哪头 → 另一头 → 收角带里扫字缝」三档找：近端常常落在**框底下**（长批注的框
+     * 伸到正文下面，近侧那一头就被自己盖住），这时改指同一选区的另一头；两头都画不成干净的路
+     * （那一竖扎进下一行的字里）才退到收角带里扫几个点。只有整条带都被框盖住、一个字也扫不出
+     * 干净 L 时才返回 null，让调用方退回通畅路径（2026-10-28 真机：四角「很多个不是 L」）。
      */
     fun cornerRoute(): ArrowPath? {
         var nearBest: ArrowPath? = null
+        // 横段是「错开的那一个字」那段空隙：短到看不出来就不改道。
+        val minCorridor = max(4f, bubbleEm * 0.2f)
+
         for (t in targets) {
             val below = bubble.top >= t.glyph.bottom - NOTE_GEOM_EPS
             val above = bubble.bottom <= t.glyph.top + NOTE_GEOM_EPS
@@ -3873,37 +3838,36 @@ internal fun routeNoteArrow(
             val insetLo = cornerAnchor.left + em * 0.5f
             val insetHi = cornerAnchor.right - em * 0.5f
             // 先指**离框更近的那一头**（§6.1）：目标字在选区右半就取末端，否则取开头。
-            // 落点必须在框外，L 的横段才走得通；那一头被框自己盖住、缝又很窄时，
-            // 再改指另一头（见下面的 `wants`）。
             val nearEnd = t.glyph.center.x > cornerAnchor.center.x
             val near = clampInset(insetLo, insetHi, if (nearEnd) insetHi else insetLo)
             val far = clampInset(insetLo, insetHi, if (nearEnd) insetLo else insetHi)
-            // 近端被框自己盖住时，只有缝很窄（< 8px）才改指另一头：
-            // 缝宽够时原来那条引线已经指得对，横穿整个选区去指另一头反而更差。
             val gap = if (below) bubble.top - yEntry else yEntry - bubble.bottom
-            val wants = if (gap < 8f) floatArrayOf(near, far) else floatArrayOf(near)
-            for (want in wants) {
-                val xEntry = want.coerceIn(cornerAnchor.left + 1f, cornerAnchor.right - 1f)
-                // 走廊必须在框外：框盖住走廊时这个 L 就画不成了（横段会穿自己的框）。
+
+            // 竖段要够长：出口取**离正文最远**的位置（框底 / 框顶往里半个 em），
+            // 再从那儿横出去、竖回来，竖段≈框高。这里是框内偏移，按**框**的 em 算
+            // （[bubbleEm]），与选区的字高无关。
+            val edgeInset = min(bubbleEm * 0.5f, bubble.height * 0.5f)
+            val loY = bubble.top + edgeInset
+            val hiY = bubble.bottom - edgeInset
+            val ys = if (below) {
+                floatArrayOf(hiY, bubble.center.y, loY)
+            } else {
+                floatArrayOf(loY, bubble.center.y, hiY)
+            }
+
+            /**
+             * 这根入口 x 上的全部竖段候选：出口取上面那几条 y，横出去、竖回来。
+             * 这条 x 被框盖住（横段得穿自己的框）或走廊太窄时返回 null——那是**这根 x** 的问题，
+             * 换一头 / 换个字缝还能画。
+             */
+            fun attemptsAt(xEntry: Float): ArrowPath? {
                 val edgeX = when {
                     xEntry <= bubble.left - NOTE_GEOM_EPS -> bubble.left
                     xEntry >= bubble.right + NOTE_GEOM_EPS -> bubble.right
                     else -> null
-                }
-                // 横段是「错开的那一个字」那段空隙：短到看不出来就不改道。
-                val corridor = if (edgeX == null) 0f else abs(xEntry - edgeX)
-                if (edgeX == null || corridor < max(4f, bubbleEm * 0.2f)) continue
-                // 竖段要够长：出口取**离正文最远**的位置（框底 / 框顶往里半个 em），
-                // 再从那儿横出去、竖回来。这样竖段≈框高，箭头才画得下。
-                // 这里是框内偏移，按**框**的 em 算（[bubbleEm]），与选区的字高无关。
-                val edgeInset = min(bubbleEm * 0.5f, bubble.height * 0.5f)
-                val loY = bubble.top + edgeInset
-                val hiY = bubble.bottom - edgeInset
-                val ys = if (below) {
-                    floatArrayOf(hiY, bubble.center.y, loY)
-                } else {
-                    floatArrayOf(loY, bubble.center.y, hiY)
-                }
+                } ?: return null
+                if (abs(xEntry - edgeX) < minCorridor) return null
+                var out: ArrowPath? = null
                 for (y in ys) {
                     val y0 = clampInset(min(loY, hiY), max(loY, hiY), y)
                     rawX[0] = edgeX
@@ -3914,13 +3878,37 @@ internal fun routeNoteArrow(
                     rawY[2] = yEntry
                     val m = simplifyInto(rawX, rawY, 3, ptsX, ptsY)
                     if (m < 2 || !orthogonalShaped(ptsX, ptsY, m, true, false)) continue
-                    val nearRoute = measureArrowRoute(
+                    val route = measureArrowRoute(
                         ptsX, ptsY, m, order++, t.index, bubble, drawnIndex, hugDistance,
                         side = side, own = t.own,
                     ) ?: continue
-                    if (nearRoute.clear && nearRoute.betterThan(nearBest)) nearBest = nearRoute
+                    if (route.clear && route.betterThan(out)) out = route
+                }
+                return out
+            }
+
+            var bestOfTarget: ArrowPath? = null
+
+            fun tryAt(x: Float) {
+                val route = attemptsAt(x)
+                if (route != null && route.betterThan(bestOfTarget)) bestOfTarget = route
+            }
+
+            tryAt(near)
+            // 近端**画不成 L**（那一头落在框底下 / 走廊太窄）时，改指另一头——与缝宽无关：
+            // 真机上常见的正是「长批注的框伸到正文底下，近端被自己盖住」，而框离正文并不近，
+            // 旧判据（缝 < 8px 才换头）于是根本不试另一头，四角就没了 L（2026-10-28 真机）。
+            // 缝很窄时两头都试，挑更好的那条；缝宽够、近端又走得通时不动：横穿整个选区指另一头只会更长。
+            if (bestOfTarget == null || gap < 8f) tryAt(far)
+            // 两头都画不出**干净**的 L 时（那一竖扎进下一行的字里），在收角带里再扫几个点：
+            // 规则第 2 条是硬规定，宁可把落点挪到选区中段的字缝上，也不把四角退成一条直线。
+            if (bestOfTarget == null) {
+                for (i in 1..ARROW_CORNER_SWEEP) {
+                    val f = i.toFloat() / (ARROW_CORNER_SWEEP + 1)
+                    tryAt(insetLo + (insetHi - insetLo) * f)
                 }
             }
+            if (bestOfTarget != null && bestOfTarget.betterThan(nearBest)) nearBest = bestOfTarget
         }
         return nearBest
     }
@@ -3930,8 +3918,10 @@ internal fun routeNoteArrow(
      *
      * 两档的顺序不能反：第 11 条只作用在**已经选定的线型**上。若先拿通畅路径的末段长短
      * 去否决 L，四个角就全退成一条横线、箭头悬在选区外（2026-10-28 真机「L 型引线都没了」）。
-     * 走廊 L 的竖段取「框底 / 框顶往里半个 em」≈框高，本来就不会落进「画不下箭头」那一档，
-     * 所以四角的 L 照旧画得出来，第 11 条只在走廊本身也短到极点时才生效。
+     *
+     * **四角的 L 是硬规定**（2026-10-28 用户定口）：末折再短也照画，箭头按末段长度自己缩小，
+     * 不许为了「箭头画得下」把 L 删成一条横线——竖段短只是短，L 的形状必须留着。
+     * 所以四角族一律 [keepTail]，第 11 条只作用在其余方向。
      *
      * 其余方向：末段竖线短到画不下箭头时省掉末折，箭头落在倒数第二段的末端
      * （2026-10-24 用户反馈：讨论的引线 17px 快看不见了；
@@ -3941,7 +3931,7 @@ internal fun routeNoteArrow(
         val cornerFamily = side == NoteSide.BELOW_RIGHT || side == NoteSide.ABOVE_RIGHT ||
             side == NoteSide.BELOW_LEFT || side == NoteSide.ABOVE_LEFT
         val chosen = if (path.clear && cornerFamily) cornerRoute() ?: path else path
-        return chosen.withoutUndrawableTail(lineH).toNoteArrow()
+        return chosen.withoutUndrawableTail(lineH, keepTail = cornerFamily).toNoteArrow()
     }
 
     // 已经拿到**无条件最优**的引线（一条直线、且不交叉）就不必再试别的端点组合了。
@@ -4557,13 +4547,6 @@ private fun overlapBand(
     val pad = min(inset, (hi - lo) * 0.45f)
     return (lo + pad) to (hi - pad)
 }
-
-/**
- * 沿边按比例取点：区间反了（这条边短得放不下 1em，怎么取都挨着角）就退回中点。
- * 见引线规则第 4 条「至少向内偏移 0.5em」。
- */
-private fun insetAlong(lo: Float, hi: Float, f: Float): Float =
-    if (lo >= hi) (lo + hi) * 0.5f else lo + (hi - lo) * f
 
 /** 把沿边坐标夹进「离两角至少 0.5em」的区间；区间反了就取中点。 */
 private fun clampInset(lo: Float, hi: Float, v: Float): Float =
@@ -5526,11 +5509,12 @@ private fun ArrowPath.toNoteArrow(): NoteArrow =
  * 末端**，方向随那一段（第 12 条）。只缩短、不越界：拐点本来就在原来那条折线上，
  * 不再把末段拉到选区边线（2026-10-28 定口）。
  *
- * 四个角同样适用，没有例外；但只作用在**已经选定的线型**上（见 `finish`）：
- * 四角先按走廊走成 L，L 的竖段≈框高，落不进这一档。
+ * **四角例外，而且是硬的**：斜向摆法的 L 形是规则第 2 条定的线型，末折不许删——删掉就成了
+ * 一条横线、箭头横着悬在行里。竖段短就让它短，箭头尖按 [noteArrowHead] 的 `len * 0.9` 自动缩小
+ * （2026-10-28 用户定口「短一点也是在保持这个 L 的前提下短一点」）。
  */
-private fun ArrowPath.withoutUndrawableTail(lineH: Float): ArrowPath {
-    if (!clear || points.size < 3) return this
+private fun ArrowPath.withoutUndrawableTail(lineH: Float, keepTail: Boolean): ArrowPath {
+    if (keepTail || !clear || points.size < 3) return this
     val end = points[points.size - 1]
     val bend = points[points.size - 2]
     if (abs(end.x - bend.x) >= 0.01f) return this

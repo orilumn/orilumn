@@ -3284,6 +3284,8 @@ private data class ArrowPath(
     val tailLen: Float = Float.MAX_VALUE,
     /** 端点为了绕开障碍**突破了 0.5em 内缩**（规则第 4 条）：只在前面的项全打平时才让位。 */
     val breakout: Boolean = false,
+    /** 这个突破点直接怼在边的两头（见 [ArrowEdgePoint.corner]）：不进择优顺序，只做兜底判据。 */
+    val corner: Boolean = false,
 ) {
     val clear: Boolean get() = hits <= 1e-4f && !entersBubble && !entersInk
 
@@ -3660,11 +3662,18 @@ internal fun routeNoteArrow(
     val ptsX = FloatArray(ARROW_ROUTE_MAX_POINTS)
     val ptsY = FloatArray(ARROW_ROUTE_MAX_POINTS)
 
-    fun consider(xs: FloatArray, ys: FloatArray, count: Int, target: ArrowTarget, breakout: Boolean) {
+    fun consider(
+        xs: FloatArray,
+        ys: FloatArray,
+        count: Int,
+        target: ArrowTarget,
+        breakout: Boolean,
+        corner: Boolean = false,
+    ) {
         val path = measureArrowRoute(
             xs, ys, count, order++, target.index, bubble, drawnIndex, hugDistance,
             limitClear = best, limitFallback = fallback, side = side, own = target.own,
-            breakout = breakout,
+            breakout = breakout, corner = corner,
         ) ?: return
         if (path.clear) {
             if (path.betterThan(best)) best = path
@@ -3688,6 +3697,8 @@ internal fun routeNoteArrow(
         // 免得把上一组端点找到的折线当成「本组已达标」而过早收手。
         val orderBefore = order
         val breakout = exit.breakout || entry.breakout
+        // 「怼在边的两头」的突破：0.5em 可以突破到缝上，但不该突破到角上（见 [ArrowEdgePoint.corner]）。
+        val corner = (exit.breakout && exit.corner) || (entry.breakout && entry.corner)
         val straight = if (breakout) {
             true
         } else {
@@ -3731,7 +3742,7 @@ internal fun routeNoteArrow(
                         rawX[1] = entry.point.x
                         rawY[1] = shared
                         if (endpointsOutward(rawX, rawY, 2, exit.edge, entry.edge)) {
-                            consider(rawX, rawY, 2, target, breakout)
+                            consider(rawX, rawY, 2, target, breakout, corner)
                         }
                     }
                 } else {
@@ -3742,7 +3753,7 @@ internal fun routeNoteArrow(
                         rawX[1] = shared
                         rawY[1] = entry.point.y
                         if (endpointsOutward(rawX, rawY, 2, exit.edge, entry.edge)) {
-                            consider(rawX, rawY, 2, target, breakout)
+                            consider(rawX, rawY, 2, target, breakout, corner)
                         }
                     }
                 }
@@ -3767,7 +3778,7 @@ internal fun routeNoteArrow(
                         orthogonalShaped(ptsX, ptsY, m, exit.horizontal, entry.horizontal) &&
                         endpointsOutward(ptsX, ptsY, m, exit.edge, entry.edge)
                     ) {
-                        consider(ptsX, ptsY, m, target, breakout)
+                        consider(ptsX, ptsY, m, target, breakout, corner)
                     }
                 },
             )
@@ -3939,10 +3950,37 @@ internal fun routeNoteArrow(
         return null
     }
 
-    // 规则第 4 条的顺序：**先只在 0.5em 区间里取点**；这一遍一条通畅的路都没找到（只剩
-    // 穿字 / 穿引线的兜底）时，才允许突破到整条边（两端留护栏）再枚举一遍。
+    // 规则第 4 条的顺序：**先只在 0.5em 区间里取点**；这一遍没拿到一条干净直线时，再允许
+    // 突破到整条边（两端留护栏）枚举一遍。
+    //
+    // 这里的「没拿到」不能只算「一条通畅的路都没有」：0.5em 是**尽量**保持（第 4 条后半句
+    // 「空间不足时允许突破」），而第 1 / 6 条要的是直线、段越少越好。只为凑那半个字就把
+    // 一条直线掰成三段（真机「讨论」：竖线在另一条批注框边上错 7px，来回折了两下），
+    // 明显是本末倒置。择优顺序里「突破」本来就排在折数、穿字、长度之后，所以放开这一遍
+    // 只会把「为凑 0.5em 多折出来的 Z」换回直线，不会把已经够好的一条折线换成突破的。
     var done = enumerate(breakoutAllowed = false)
-    if (done == null && best == null) done = enumerate(breakoutAllowed = true)
+    if (done == null) {
+        val before = best
+        if (before == null || !before.clear || before.bends > 0) {
+            done = enumerate(breakoutAllowed = true)
+            val after = best
+            // 第二遍的结论要过一道闸，三条都过才认：
+            // 1. 通畅（第 8 条：突破 0.5em 换一条穿字的直线，不算改善）；
+            // 2. 折数真的更少（否则这一遍白跑，原样留着第一遍的）；
+            // 3. 没有「怼到边的两头」的突破点——0.5em 可以突破到字缝 / 框缝上，但不该
+            //    突破到角上：端点贴着行的角，比多折一下更难看（真机「左右被字挡住」两条
+            //    就是这么退化成一条贴着行角的直线的）。
+            val worse = after != null && before != null && after !== before && (
+                !after.clear ||
+                    after.bends >= before.bends ||
+                    (after.corner && !before.corner)
+                )
+            if (worse) {
+                best = before
+                done = null
+            }
+        }
+    }
     if (done != null) return done
     val chosen = best ?: fallback ?: return null
     if (best == null) {
@@ -4063,6 +4101,8 @@ private data class ArrowExit(
     val edge: Int = -1,
     /** 为了绕开障碍突破了框边 0.5em 内缩（规则第 4 条）。 */
     val breakout: Boolean = false,
+    /** 这个突破点直接怼在边的两头（见 [ArrowEdgePoint.corner]）。 */
+    val corner: Boolean = false,
 )
 
 /**
@@ -4083,6 +4123,8 @@ private data class ArrowEntry(
     val edge: Int = -1,
     /** 为了绕开障碍突破了行盒边 0.5em 内缩（规则第 4 条）。 */
     val breakout: Boolean = false,
+    /** 这个突破点直接怼在边的两头（见 [ArrowEdgePoint.corner]）。 */
+    val corner: Boolean = false,
 )
 
 /** 端点落在哪条边：0 左 / 1 右 / 2 上 / 3 下（-1 = 未知，不判方向）。 */
@@ -4107,7 +4149,12 @@ private fun cornerRowEm(anchor: Rect, glyph: Rect): Float {
  * 沿边的一个候选点：[at] 是坐标，[breakout] 表示它**突破了 0.5em 内缩**
  * （规则第 4 条后半句「空间不足时允许突破」）。
  */
-private data class ArrowEdgePoint(val at: Float, val breakout: Boolean)
+private data class ArrowEdgePoint(
+    val at: Float,
+    val breakout: Boolean,
+    /** 直接怼在边的两头（2px 护栏上）的突破点：规则第 4 条的「突破」不该落到这个位置。 */
+    val corner: Boolean = false,
+)
 
 /**
  * 沿一条边取候选坐标（**几何来源**，取代原来的 1/4、3/4、0.75 固定比例）。
@@ -4151,7 +4198,7 @@ private fun edgePoints(
     val bandLo = min(bandA, bandB)
     val bandHi = max(bandA, bandB)
     val mayBreak = breakoutAllowed || !hasBand
-    fun add(v: Float, breakout: Boolean) {
+    fun add(v: Float, breakout: Boolean, corner: Boolean = false) {
         if (breakout && !mayBreak) return
         // 2px 角部护栏只管「突破」到边端的点：它们本来就在边的两头。0.5em 区间的端点是
         // 规则第 4 条的首选位置，离的是**选区**的四角，不该被这条护栏再削掉一截
@@ -4160,7 +4207,7 @@ private fun edgePoints(
         val hi = if (breakout) guardHi else edgeHi
         if (v < lo - 0.01f || v > hi + 0.01f) return
         for (i in out.indices) if (abs(out[i].at - v) < 0.5f) return
-        out += ArrowEdgePoint(v, breakout)
+        out += ArrowEdgePoint(v, breakout, corner)
     }
     // 1) 首选区间：两头 + 对齐点 + 中点。
     if (hasBand) {
@@ -4182,12 +4229,21 @@ private fun edgePoints(
     }
     // 3) 整条边的两端与对齐点：内缩区间全被堵死时才用得上（规则第 4 条的「突破」）。
     if (guardLo <= guardHi) {
-        add(guardLo, true)
-        add(guardHi, true)
-        for (w in wants) add(w.coerceIn(guardLo, guardHi), true)
+        add(guardLo, true, corner = true)
+        add(guardHi, true, corner = true)
+        for (w in wants) {
+            val v = w.coerceIn(guardLo, guardHi)
+            add(v, true, corner = abs(v - guardLo) < 0.5f || abs(v - guardHi) < 0.5f)
+        }
     }
     // 就近取前 limit 个：离 wanted 越近，越可能直接连成一条直线。
-    return out.sortedBy { p -> wants.minOf { abs(p.at - it) } }.take(limit)
+    //
+    // 突破这一遍（[breakoutAllowed]）要放宽一倍：真正能救场的那条缝，常常是**两边里最靠外**的
+    // 那一条（另一头的出口被别的东西顶到边上，只有它俩能对齐），按「离框心远近」排序它偏偏
+    // 排最后，被 6 个一截就直接消失。真机「讨论」就是这样：出口只能走邻框右边的 1398，
+    // 入口候选里 1398 排第 7，被截掉 → 永远折那 7px。
+    val cap = if (breakoutAllowed) limit * 2 else limit
+    return out.sortedBy { p -> wants.minOf { abs(p.at - it) } }.take(cap)
 }
 
 /** 候选点在直线取交集时用的区间：突破点钉死在自己身上，内缩点才允许两端滑动对齐。 */
@@ -4278,6 +4334,7 @@ private fun arrowSideEntries(
                     edgeLo = glyph.top, edgeHi = glyph.bottom,
                     edge = if (rightFamily) ARROW_EDGE_RIGHT else ARROW_EDGE_LEFT,
                     breakout = p.breakout,
+                    corner = p.corner,
                 )
             }
         }
@@ -4313,6 +4370,7 @@ private fun arrowSideEntries(
                     edgeLo = glyph.left, edgeHi = glyph.right,
                     edge = if (above) ARROW_EDGE_TOP else ARROW_EDGE_BOTTOM,
                     breakout = p.breakout,
+                    corner = p.corner,
                 )
             }
         }
@@ -4357,6 +4415,7 @@ private fun arrowBelowEntries(
             lo = bandLow(p, bandA, bandB), hi = bandHigh(p, bandA, bandB),
             edgeLo = anchor.left, edgeHi = anchor.right, edge = edge,
             breakout = p.breakout,
+            corner = p.corner,
         )
     }
 }
@@ -4395,6 +4454,7 @@ private fun arrowBelowExits(
             edgeLo = bubble.left, edgeHi = bubble.right,
             edge = if (below) ARROW_EDGE_TOP else ARROW_EDGE_BOTTOM,
             breakout = p.breakout,
+            corner = p.corner,
         )
     }
     val sideX = if (bubble.center.x >= entry.point.x) bubble.left else bubble.right
@@ -4410,6 +4470,7 @@ private fun arrowBelowExits(
             edgeLo = bubble.top, edgeHi = bubble.bottom,
             edge = if (bubble.center.x >= entry.point.x) ARROW_EDGE_LEFT else ARROW_EDGE_RIGHT,
             breakout = p.breakout,
+            corner = p.corner,
         )
     }
     return out.toList()
@@ -4495,6 +4556,7 @@ private fun arrowSideExits(
                 edgeLo = bubble.top, edgeHi = bubble.bottom,
                 edge = if (x <= bubble.center.x) ARROW_EDGE_LEFT else ARROW_EDGE_RIGHT,
                 breakout = p.breakout,
+                corner = p.corner,
             )
         }
     }
@@ -4509,6 +4571,7 @@ private fun arrowSideExits(
                 edgeLo = bubble.left, edgeHi = bubble.right,
                 edge = if (y <= bubble.center.y) ARROW_EDGE_TOP else ARROW_EDGE_BOTTOM,
                 breakout = p.breakout,
+                corner = p.corner,
             )
         }
     }
@@ -4647,6 +4710,7 @@ private fun arrowEntries(
                 lo = bandLow(p, bandA, bandB), hi = bandHigh(p, bandA, bandB),
                 edgeLo = glyph.top, edgeHi = glyph.bottom, edge = edge,
                 breakout = p.breakout,
+                corner = p.corner,
             )
         }
     }
@@ -4665,6 +4729,7 @@ private fun arrowEntries(
             lo = bandLow(p, bandA, bandB), hi = bandHigh(p, bandA, bandB),
             edgeLo = glyph.left, edgeHi = glyph.right, edge = edge,
             breakout = p.breakout,
+            corner = p.corner,
         )
     }
 }
@@ -5094,6 +5159,8 @@ private fun measureArrowRoute(
     own: Rect? = null,
     /** 端点突破了 0.5em 内缩（规则第 4 条）：判据里排在前面的项全打平时才让位。 */
     breakout: Boolean = false,
+    /** 突破点是不是怼在边的两头（见 [ArrowEdgePoint.corner]）。 */
+    corner: Boolean = false,
 ): ArrowPath? {
     noteArrowRouteTries++
     if (count < 2) return null
@@ -5235,6 +5302,7 @@ private fun measureArrowRoute(
         form = form,
         tailLen = tailLen,
         breakout = breakout,
+        corner = corner,
     )
 }
 

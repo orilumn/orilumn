@@ -2262,6 +2262,29 @@ class NoteBubblesTest {
     }
 
     @Test
+    fun `a below note threads past another bubble without jogging for the half em inset`() {
+        // 真机「讨论」（2026-10-28）：正下方的批注，竖线本来一条直线就到；但通道被左边
+        // 另一条批注的框占到只差 2px，入口又被「离四角 0.5em」推到选区右边，于是为了
+        // 让出口和入口对齐，来回折了两下（横移 7px 的 Z）。规则第 4 条是「尽量」，
+        // 第 1 / 6 条要的是直线、段越少越好 ⇒ 入口突破那 6px，走一条竖线。
+        val ink = listOf(rect(1323f, 1640f, 1365f, 1681f), rect(1369f, 1640f, 1412f, 1681f))
+        val neighbour = rect(788f, 1750f, 1396f, 1796f)
+        val arrow = routeNoteArrow(
+            bubble = rect(788f, 1803f, 1823f, 1895f),
+            inkRects = ink,
+            lineBoxes = listOf(rect(0f, 1653f, 1920f, 1696f)),
+            targetInk = ink,
+            otherBubbles = listOf(neighbour),
+            lineH = 43f,
+            side = NoteSide.BELOW,
+        )
+        assertTrue("应画得出箭头", arrow != null)
+        val pts = arrowPoints(arrow!!)
+        assertEquals("一条竖线就到，不该为凑半个字折成三段：$pts", 2, pts.size)
+        assertTrue("竖线要走在邻框右边那条缝里：x=${pts.first().x}", pts.first().x >= 1396f)
+    }
+
+    @Test
     fun `a diagonal leader drops its tail when the vertical is too short for an arrow`() {
         // 引线规则第 11 条同样适用于四个角（2026-10-28 定口，没有例外）：
         // 走廊竖段只剩 9px、画不下箭头时，末折省掉——箭头落在拐点上，横着收尾，

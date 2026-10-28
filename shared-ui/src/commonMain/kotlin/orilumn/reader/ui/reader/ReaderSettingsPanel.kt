@@ -1200,8 +1200,8 @@ private fun setField(s: ReaderSettings, key: String, v: String) = when (key) {
     else -> s.copy(fontBody = v)
 }
 
-/** 批注字号滑条的步长（倍率）：0.05 一档，正文 18 号时约 0.6px 一跳。 */
-private const val NOTE_FONT_SCALE_STEP = 0.05
+/** 批注字号滑条的步长（倍率）：0.1 一档，正文 18 号时旁注约 13 号，一跳约 1.3px。 */
+private const val NOTE_FONT_SCALE_STEP = 0.1
 
 /**
  * 批注字号滑条的显示值：旁注实际字号（与「文字」页字号同口径）。

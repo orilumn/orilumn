@@ -359,6 +359,7 @@ fun ReaderView(
             // 面板打开时按键留给面板，阅读面不翻页；面板关闭回阅读面即重夺焦点。
             keysEnabled = !settingsOpen && panelPage == null,
             annotationsEpoch = annotationsEpoch,
+            fontEntries = fontEntries,
         )
 
         // 面板常驻组合、经 visible 驱动：关闭走面板内部退场动画（滑出+遮罩淡出后卸载）；

@@ -145,6 +145,22 @@ data class ReaderSettings(
     val annotationLastLineStyle: String = "straight",
 
     /**
+     * 批注（旁注）字体：空串 = 跟随界面默认（现状）；否则是字族名，与正文 / 标题 / 代码槽同源
+     * （系统字体或已导入字体都能选）。
+     *
+     * 只作用于旁注覆盖层的文字，**不碰正文排版**，所以不进版式比较（面板走无重排提交）。
+     * 与色槽一族同为「与书无关的读者偏好」：不进按书 overlay，直写全局。
+     */
+    val noteFont: String = "",
+    /**
+     * 批注（旁注）字号的**相对倍率**（1 = 默认：正文主字号 × 旁注比例）。
+     *
+     * 存倍率而不是绝对像素，正文字号一变旁注跟着等比变，不会出现「正文调大了旁注没动」。
+     * 面板显示的是换算后的实际字号。同样只影响旁注覆盖层，不进版式比较。
+     */
+    val noteFontScale: Float = 1f,
+
+    /**
      * 持久化结构版本（**只增不改**）：`[fromJson]` 用它识别「这份存档是哪个版本写的」，
      * 从而对**只影响本版本**的字段做一次性迁移。纯全局（[BookSettings] 无此字段，
      * 故不参与 [applyOverlay]/[mergeFrom] 的分层逻辑）。
@@ -297,6 +313,9 @@ data class ReaderSettings(
         underlineDefaultSlot = 0,
         annotationLastKind = "",
         annotationLastLineStyle = "",
+        // 批注字体 / 字号：只改旁注覆盖层，不进版式（面板走 onCommitLight）。
+        noteFont = "",
+        noteFontScale = 1f,
     )
 
     companion object {
@@ -308,6 +327,14 @@ data class ReaderSettings(
 
         /** 标注色槽数量（高亮 / 划线各自一组）。 */
         const val ANNOTATION_COLOR_SLOT_COUNT = 5
+
+        /**
+         * 批注字号倍率的上下限（[noteFontScale] 与笔记页滑条共用同一区间）。
+         *
+         * 下限 0.5 保证再小也还能读，上限 2.0 防止旁注大过正文把页面挤满。
+         */
+        const val MIN_NOTE_FONT_SCALE = 0.5f
+        const val MAX_NOTE_FONT_SCALE = 2.0f
 
         /**
          * 高亮默认色槽：琥珀荧光笔，约 45% 不透明度（`0x73`）。
@@ -479,6 +506,9 @@ data class ReaderSettings(
                         .coerceIn(0, d.underlineColorSlots.lastIndex),
                     annotationLastKind = SettingsJson.optString(o, "annotationLastKind", d.annotationLastKind),
                     annotationLastLineStyle = SettingsJson.optString(o, "annotationLastLineStyle", d.annotationLastLineStyle),
+                    noteFont = SettingsJson.optString(o, "noteFont", d.noteFont),
+                    noteFontScale = SettingsJson.optDouble(o, "noteFontScale", d.noteFontScale.toDouble())
+                        .toFloat().coerceIn(MIN_NOTE_FONT_SCALE, MAX_NOTE_FONT_SCALE),
                     cjkLatinSpacing = migrateCjkLatinSpacing(
                         SettingsJson.optDouble(o, "cjkLatinSpacing", d.cjkLatinSpacing),
                         SettingsJson.optInt(o, "schemaVersion", 0),

@@ -385,6 +385,7 @@ class ReaderActivity : ComponentActivity() {
                     fallbackPos = currentPos,
                     contentRevision = layoutRevision,
                     annotationsEpoch = annotationsEpoch,
+                    fontEntries = fontEntries,
                 )
             } else {
                 // 加载背页（打开的背色与正文一致）。

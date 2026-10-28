@@ -29,6 +29,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
@@ -5617,12 +5618,20 @@ private class ComposeNoteTextSizer(
     )
 }
 
-/** 一页取一次实测尺子：同一套字号 / 字体规则下测量结果稳定，不必每条批注重建。 */
+/**
+ * 一页取一次实测尺子：同一套字号 / 字体规则下测量结果稳定，不必每条批注重建。
+ *
+ * @param fontFamily 批注字体（`null` = 跟随界面默认）。**必须**与 [NoteBubbles] 里那条
+ *   `Text` 用同一个族：量宽和画字一旦不是同一套字形，摆位判「整句放得下」而画出来多折一行。
+ */
 @Composable
-internal fun rememberNoteTextSizer(): NoteTextSizer {
+internal fun rememberNoteTextSizer(fontFamily: FontFamily? = null): NoteTextSizer {
     val measurer = rememberTextMeasurer()
     val density = LocalDensity.current
-    val baseStyle = LocalTextStyle.current
+    val localStyle = LocalTextStyle.current
+    val baseStyle = remember(localStyle, fontFamily) {
+        if (fontFamily == null) localStyle else localStyle.merge(TextStyle(fontFamily = fontFamily))
+    }
     return remember(measurer, density, baseStyle) {
         CachingNoteTextSizer(ComposeNoteTextSizer(measurer, density, baseStyle))
     }
@@ -5640,6 +5649,8 @@ internal fun NoteBubbles(
     fgColor: Color,
     onOpen: (Long) -> Unit,
     modifier: Modifier = Modifier,
+    /** 批注字体（`null` = 跟随界面默认）：与实测尺子同一个族，见 [rememberNoteTextSizer]。 */
+    fontFamily: FontFamily? = null,
 ) {
     if (bubbles.isEmpty()) return
     val d = LocalDensity.current
@@ -5711,6 +5722,7 @@ internal fun NoteBubbles(
                 Text(
                     text = b.text,
                     color = fgColor,
+                    fontFamily = fontFamily,
                     fontSize = with(d) { b.fontPx.toSp() },
                     lineHeight = with(d) { (b.fontPx * NOTE_BUBBLE_LINE_RATIO).toSp() },
                     maxLines = b.maxLines,

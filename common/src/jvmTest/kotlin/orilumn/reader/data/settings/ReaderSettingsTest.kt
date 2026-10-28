@@ -126,6 +126,9 @@ class ReaderSettingsTest {
                 underlineDefaultSlot = 3,
                 annotationLastKind = "underline",
                 annotationLastLineStyle = "wavy",
+                // 批注字体 / 字号与色槽同族：只存全局，改完必须能读回来。
+                noteFont = "Noto Serif CJK SC",
+                noteFontScale = 1.35f,
             )
             persist.persist(7L, next)
             val saved = ReaderSettingsStore(dir.absolutePath).load()
@@ -133,6 +136,8 @@ class ReaderSettingsTest {
             assertEquals(3, saved.underlineDefaultSlot)
             assertEquals("underline", saved.annotationLastKind)
             assertEquals("wavy", saved.annotationLastLineStyle)
+            assertEquals("Noto Serif CJK SC", saved.noteFont)
+            assertEquals(1.35f, saved.noteFontScale, 0.0001f)
             // 只动标注偏好时 overlay 保持空白。
             assertEquals(BookSettings.EMPTY, BookSettingsStore(dir.absolutePath).load(7L))
             // 读回：本书生效值继承全局。
@@ -212,6 +217,7 @@ class ReaderSettingsTest {
             "highlightColorSlots", "underlineColorSlots",
             "highlightDefaultSlot", "underlineDefaultSlot",
             "annotationLastKind", "annotationLastLineStyle",
+            "noteFont", "noteFontScale",
         ).forEach { assertTrue("missing key $it", obj.containsKey(it)) }
         assertNotNull(obj.keys)
         assertFalse(ReaderSettings.DEFAULT.useOriginalStyle)

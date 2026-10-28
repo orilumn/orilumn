@@ -208,6 +208,9 @@ fun FontLibraryPanel(
     toggleFocused: Boolean = false,
     /** 系统字体扫描实时进度（方案 §2.4）：非 null 时在列表上方显示「已 N / 共 M 族」。 */
     scanProgress: FontScanProgress? = null,
+    /** 「跟随…」首行文案与副标题：正文 / 标题 / 代码槽是「跟随原书」，批注字体是「跟随界面」。 */
+    followLabel: String = "跟随原书",
+    followSubtitle: String = "使用原书字体",
 ) {
     // 同时只展开一行的滑动操作：新展开即收起旧行。
     var openKey by remember { mutableStateOf<String?>(null) }
@@ -271,8 +274,8 @@ fun FontLibraryPanel(
                         is FontPanelRow.FollowOriginal ->
                             // 跟随原书（用户层）：当作一个字体行——与 Entry 同规格（名字行 + 副标题 +
                             // 选中金点），稳坐导入区之下；不是字体，无左滑。
-                            FontManageRow("跟随原书", null, row.selected, null, null, nav, rowIndex, p,
-                                subtitle = "使用原书字体", swipeEnabled = false, sourceLabel = null,
+                            FontManageRow(followLabel, null, row.selected, null, null, nav, rowIndex, p,
+                                subtitle = followSubtitle, swipeEnabled = false, sourceLabel = null,
                                 onTap = { openKey = null; onSelect("") }, openKey = openKey,
                                 onOpenChange = { openKey = it })
                         is FontPanelRow.Entry -> {

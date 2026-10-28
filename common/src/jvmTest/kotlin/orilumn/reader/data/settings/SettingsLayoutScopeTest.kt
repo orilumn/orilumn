@@ -39,6 +39,8 @@ class SettingsLayoutScopeTest {
         "highlightDefaultSlot", "underlineDefaultSlot",
         // 浮动菜单记住的上次类别 / 划线线型：纯菜单偏好，不影响版面。
         "annotationLastKind", "annotationLastLineStyle",
+        // 批注字体 / 字号只作用于旁注覆盖层，不改正文排版。
+        "noteFont", "noteFontScale",
     )
 
     /** 进版式管线（进 [orilumn.reader.engine.text.LayoutParamKey] 或经 profile 影响版面）。 */
@@ -86,6 +88,8 @@ class SettingsLayoutScopeTest {
         "underlineDefaultSlot" -> s.copy(underlineDefaultSlot = if (s.underlineDefaultSlot == 0) 1 else 0)
         "annotationLastKind" -> s.copy(annotationLastKind = if (s.annotationLastKind == "underline") "highlight" else "underline")
         "annotationLastLineStyle" -> s.copy(annotationLastLineStyle = if (s.annotationLastLineStyle == "wavy") "straight" else "wavy")
+        "noteFont" -> s.copy(noteFont = if (s.noteFont == "TestFamily") "OtherFamily" else "TestFamily")
+        "noteFontScale" -> s.copy(noteFontScale = if (s.noteFontScale == 1.4f) 1.1f else 1.4f)
 
         "lineSpacing" -> s.copy(lineSpacing = s.lineSpacing + 0.13)
         "firstLineIndent" -> s.copy(firstLineIndent = s.firstLineIndent + 0.11)

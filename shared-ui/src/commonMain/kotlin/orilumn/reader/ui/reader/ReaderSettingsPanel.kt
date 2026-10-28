@@ -256,14 +256,27 @@ fun ReaderSettingsPanel(
             if (current == Sub.TextFont) buildFontRows(fontEntries, fieldOf(s, slotKey), canFontImport, showImportedSection, canFontWifiImport, s.showHiddenFonts)
             else emptyList()
         }
-        /** 字体行进入：多字重档下钻字重页，单一下钻直接写入槽位（渲染点按与键盘共用）。 */
+        /**
+         * 字体槽位提交：正文 / 标题 / 代码换字体要重新断行（排版提交）；
+         * 批注字体只改旁注覆盖层的字形（无重排提交，与色槽同口径）。
+         */
+        fun commitSlot(next: ReaderSettings) {
+            if (slotKey == "noteFont") onCommitLight(next) else onCommitTypography(next)
+        }
+        /**
+         * 字体行进入：多字重档下钻字重页，单一下钻直接写入槽位（渲染点按与键盘共用）。
+         *
+         * 批注字体**不设字重**（旁注固定常规字重，字重页对旁注无效）：即使该族有多个字重，
+         * 也直接写入槽位、不下钻，避免读者挑完粗体却发现旁注没变。
+         */
         fun enterFontRow(family: String) {
-            val multi = fontEntries.filter { it.family == family }.weightChoices().size > 1
+            val multi = slotKey != "noteFont" &&
+                fontEntries.filter { it.family == family }.weightChoices().size > 1
             if (multi) {
                 weightPickFamily = family
                 stack.add(Sub.WeightPicker)
             } else {
-                onCommitTypography(setField(s, slotKey, family))
+                commitSlot(setField(s, slotKey, family))
             }
         }
         // 无线下钻页可用性：能力位开且壳给了暂存目录。
@@ -292,6 +305,7 @@ fun ReaderSettingsPanel(
                 ItemKey(onEnter = { stack.add(Sub.Theme) }),
                 ItemKey(onEnter = { stack.add(Sub.Spacing) }),
                 ItemKey(onEnter = { stack.add(Sub.Text) }),
+                ItemKey(onEnter = { stack.add(Sub.AnnotationColors) }),
                 ItemKey(onEnter = { stack.add(Sub.ReadingTheme) }),
                 ItemKey(onEnter = { stack.add(Sub.Brightness) }),
                 // 以下四个开关不影响排版（翻页动画/封面拉伸/启动续读/页码）：
@@ -303,7 +317,6 @@ fun ReaderSettingsPanel(
                 ItemKey(onEnter = { onCommitLight(s.copy(coverStretch = !s.coverStretch)) }),
                 ItemKey(onEnter = { onCommitLight(s.copy(autoContinue = !s.autoContinue)) }),
                 ItemKey(onEnter = { onCommitLight(s.copy(pageNum = !s.pageNum)) }),
-                ItemKey(onEnter = { stack.add(Sub.AnnotationColors) }),
             )
             Sub.Text -> {
                 val px = s.fontSize * ReaderSettings.fontScaleToRatio(s.fontScale)
@@ -333,7 +346,7 @@ fun ReaderSettingsPanel(
                     is FontPanelRow.FollowOriginal ->
                         ItemKey(onEnter = {
                             val clearedSlotAnchors = s.fontWeightAnchorsBySlot.filterKeys { !it.startsWith("$slotKey|") }
-                            onCommitTypography(setField(s, slotKey, "").copy(fontWeightAnchorsBySlot = clearedSlotAnchors))
+                            commitSlot(setField(s, slotKey, "").copy(fontWeightAnchorsBySlot = clearedSlotAnchors))
                         })
                     is FontPanelRow.Import ->
                         // 双按钮同行：回车走主动作（本地导入优先；单开无线时进无线下钻页）。
@@ -351,7 +364,7 @@ fun ReaderSettingsPanel(
                     val opts = fontEntries.filter { it.family == fam }.weightChoices()
                     opts.map { (w, _) ->
                         ItemKey(onEnter = {
-                            onCommitTypography(setField(s, slotKey, fam).copy(
+                            commitSlot(setField(s, slotKey, fam).copy(
                                 fontWeightAnchors = s.fontWeightAnchors,
                                 fontWeightAnchorsBySlot = s.fontWeightAnchorsBySlot + ("$slotKey|$fam" to w),
                             ))
@@ -458,6 +471,18 @@ fun ReaderSettingsPanel(
                         fmt = { "${it.roundToInt()}%" },
                     ),
                     ItemKey(onEnter = { onCommitLight(withDefaultAnnotationColorSlots(s)) }),
+                    // 批注字体：复用正文那套字体下钻页（同一套系统 / 导入字体列表），
+                    // 写入的是旁注覆盖层自己的族，不影响正文。
+                    ItemKey(onEnter = { pickSlot = "noteFont"; stack.add(Sub.TextFont) }),
+                    // 批注字号：存的是相对正文旁注默认字号的倍率，显示换算后的实际字号。
+                    sliderKey(
+                        s.noteFontScale.toDouble(),
+                        ReaderSettings.MIN_NOTE_FONT_SCALE.toDouble(),
+                        ReaderSettings.MAX_NOTE_FONT_SCALE.toDouble(),
+                        NOTE_FONT_SCALE_STEP,
+                        apply = { v -> onCommitLight(s.copy(noteFontScale = v.toFloat())) },
+                        fmt = { noteFontSizeLabel(s, it) },
+                    ),
                 )
             }
             Sub.Theme -> listOf(
@@ -781,8 +806,12 @@ fun ReaderSettingsPanel(
                                 Text("‹", color = p.text, fontSize = 20.sp)
                             }
                         }
-                        Text(current.title, color = p.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.align(Alignment.Center))
+                        Text(
+                            // 字体页是四个槽位共用的：批注字体单独标题，别让读者以为在改正文字体。
+                            if (current == Sub.TextFont && slotKey == "noteFont") "批注字体" else current.title,
+                            color = p.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.align(Alignment.Center),
+                        )
                         val closeFocused = current == Sub.TextFont &&
                             fontButtonFocus?.let { fontButtonRing.getOrNull(it)?.first } == "close"
                         Text("✕", color = p.text, fontSize = 18.sp, modifier = Modifier
@@ -802,17 +831,22 @@ fun ReaderSettingsPanel(
                                 rows = fontRows,
                                 nav = nav,
                                 p = p,
-                                onSelect = { family -> onCommitTypography(setField(s, slotKey, family)) },
+                                onSelect = { family -> commitSlot(setField(s, slotKey, family)) },
                                 onHide = onFontHide,
                                 onUnhide = onFontUnhide,
                                 onDelete = onFontDelete,
                                 onImport = onFontImport,
                                 // 无线走面板内下钻（返回‹/Esc 即回字体列表），不经壳弹框。
                                 onImportWifi = { stack.add(Sub.WifiImport) },
-                                // 多字重行点按下钻字重页（与键盘共用 enterFontRow 口径）。
+                                // 多字重行点按下钻字重页（与键盘共用 enterFontRow 口径）；
+                                // 批注字体不设字重，直接写入槽位。
                                 onPickWeight = { family ->
-                                    weightPickFamily = family
-                                    stack.add(Sub.WeightPicker)
+                                    if (slotKey == "noteFont") {
+                                        commitSlot(setField(s, slotKey, family))
+                                    } else {
+                                        weightPickFamily = family
+                                        stack.add(Sub.WeightPicker)
+                                    }
                                 },
                                 showLocalButton = canFontImport,
                                 showWifiButton = wifiReady,
@@ -824,6 +858,9 @@ fun ReaderSettingsPanel(
                                 onMouseMove = onMove,
                                 listState = listState,
                                 scanProgress = fontScanProgress,
+                                // 批注字体槽位的「跟随」是跟界面默认字体（旁注不套书里的正文族）。
+                                followLabel = if (slotKey == "noteFont") "跟随界面" else "跟随原书",
+                                followSubtitle = if (slotKey == "noteFont") "使用界面默认字体" else "使用原书字体",
                             )
                             Sub.WeightPicker -> {
                                 val fam = weightPickFamily
@@ -879,6 +916,9 @@ fun ReaderSettingsPanel(
                                 onSelectSlot = { k, i ->
                                     annotationColorKind = k
                                     annotationColorSlot = i
+                                },
+                                noteFontLabel = fieldOf(s, "noteFont").let {
+                                    if (it.isEmpty()) "跟随界面" else fontDisplayByFamily[it] ?: genericFamilyLabel(it)
                                 },
                                 p = p,
                             )
@@ -1005,14 +1045,14 @@ private fun HomePage(
         item { SetRow("排版主题", ReaderThemeMath.layoutThemeLabel(s.layoutTheme), keys[0].onEnter, p, nav = nav, index = 0) }
         item { SetRow("间距", onTap = keys[1].onEnter, p = p, nav = nav, index = 1) }
         item { SetRow("文字", onTap = keys[2].onEnter, p = p, nav = nav, index = 2) }
-        item { SetRow("阅读主题", ReaderThemeMath.themeName(s, customs), keys[3].onEnter, p, nav = nav, index = 3) }
-        item { SetRow("亮度", if (s.brightnessFollowSystem) "跟随系统" else "自定义", keys[4].onEnter, p, nav = nav, index = 4) }
-        item { SetSwitch("翻页动画", s.pageAnim, { commitPlain(s.copy(pageAnim = it)) }, p, nav = nav, index = 5) }
-        item { SetRow("翻页动画模式", ReaderThemeMath.pageAnimationModeLabel(s.pageAnimationMode), keys[6].onEnter, p, nav = nav, index = 6) }
-        item { SetSwitch("封面拉伸全屏", s.coverStretch, { commitPlain(s.copy(coverStretch = it)) }, p, nav = nav, index = 7) }
-        item { SetSwitch("启动时继续阅读", s.autoContinue, { commitPlain(s.copy(autoContinue = it)) }, p, nav = nav, index = 8) }
-        item { SetSwitch("显示页码", s.pageNum, { commitPlain(s.copy(pageNum = it)) }, p, nav = nav, index = 9) }
-        item { SetRow("笔记", onTap = keys[10].onEnter, p = p, nav = nav, index = 10) }
+        item { SetRow("笔记", onTap = keys[3].onEnter, p = p, nav = nav, index = 3) }
+        item { SetRow("阅读主题", ReaderThemeMath.themeName(s, customs), keys[4].onEnter, p, nav = nav, index = 4) }
+        item { SetRow("亮度", if (s.brightnessFollowSystem) "跟随系统" else "自定义", keys[5].onEnter, p, nav = nav, index = 5) }
+        item { SetSwitch("翻页动画", s.pageAnim, { commitPlain(s.copy(pageAnim = it)) }, p, nav = nav, index = 6) }
+        item { SetRow("翻页动画模式", ReaderThemeMath.pageAnimationModeLabel(s.pageAnimationMode), keys[7].onEnter, p, nav = nav, index = 7) }
+        item { SetSwitch("封面拉伸全屏", s.coverStretch, { commitPlain(s.copy(coverStretch = it)) }, p, nav = nav, index = 8) }
+        item { SetSwitch("启动时继续阅读", s.autoContinue, { commitPlain(s.copy(autoContinue = it)) }, p, nav = nav, index = 9) }
+        item { SetSwitch("显示页码", s.pageNum, { commitPlain(s.copy(pageNum = it)) }, p, nav = nav, index = 10) }
         item { Spacer(modifier = Modifier.height(24.dp)) }
     }
 }
@@ -1142,16 +1182,37 @@ private fun ThemePage(
 }
 
 private val FONT_FIELDS = listOf("正文" to "fontBody", "标题" to "fontTitle", "代码" to "fontCode")
+
+/**
+ * 字体槽位读写：正文 / 标题 / 代码三槽之外，笔记页的「批注字体」也复用同一套字体下钻页
+ * （[FontLibraryPanel]），槽位键 `noteFont`。它的提交走无重排路径（见 `commitSlot`）。
+ */
 private fun fieldOf(s: ReaderSettings, key: String) = when (key) {
     "fontTitle" -> s.fontTitle
     "fontCode" -> s.fontCode
+    "noteFont" -> s.noteFont
     else -> s.fontBody
 }
 private fun setField(s: ReaderSettings, key: String, v: String) = when (key) {
     "fontTitle" -> s.copy(fontTitle = v)
     "fontCode" -> s.copy(fontCode = v)
+    "noteFont" -> s.copy(noteFont = v)
     else -> s.copy(fontBody = v)
 }
+
+/** 批注字号滑条的步长（倍率）：0.05 一档，正文 18 号时约 0.6px 一跳。 */
+private const val NOTE_FONT_SCALE_STEP = 0.05
+
+/**
+ * 批注字号滑条的显示值：旁注实际字号（与「文字」页字号同口径）。
+ *
+ * = 正文主字号 × 旁注比例 × 倍率。滑条编辑的是倍率，但读者想看的是「多大」——
+ * 这样正文字号一变，显示值跟着变，读者能直接看出旁注仍比正文小一号。
+ */
+private fun noteFontSizeLabel(s: ReaderSettings, scale: Double): String = String.format(
+    "%.1f",
+    s.fontSize * ReaderSettings.fontScaleToRatio(s.fontScale) * NOTE_BUBBLE_FONT_RATIO * scale,
+)
 
 /** CSS 通用族名（排版主题写进槽位的默认值）→ 中文标签；真正的字族展示由 [fontDisplayByFamily] 给出。 */
 private fun genericFamilyLabel(family: String): String = when (family) {
@@ -1430,6 +1491,13 @@ private fun AnimModePage(
  * 最下方的「恢复默认设置」把两类十格一起恢复出厂值。
  * 默认色槽不归本页管（新建标注用哪一格由浮动菜单决定），所以这里没有金点、也没有默认按钮。
  * 所有改动走 [commitLight]（只改像素，不触发重排）。
+ *
+ * 「恢复默认设置」之后还有两项**旁注自己的样式**（2026-10-28 用户定口）：
+ * - **批注字体**：与正文 / 标题 / 代码同一套字体下钻页，可挑任意系统或导入字体；
+ *   只挑字族、不设字重（旁注固定常规字重，字重页对旁注无效，故不进入）；
+ *   空槽 = 跟随界面默认（不是跟随原书——旁注不套书里的正文族）。
+ * - **批注字号**：滑条编辑倍率，右侧显示换算后的实际字号；旁注始终跟正文字号等比。
+ * 两项都只作用于覆盖层，与色槽同口径走无重排提交。
  */
 @Composable
 private fun AnnotationColorPage(
@@ -1444,6 +1512,8 @@ private fun AnnotationColorPage(
     previewLight: (ReaderSettings) -> Unit,
     onSelectKind: (AnnotationKind) -> Unit,
     onSelectSlot: (AnnotationKind, Int) -> Unit,
+    /** 「批注字体」行右侧的展示名（空槽 = 跟随界面；导入 / 系统族取本地化展示名）。 */
+    noteFontLabel: String,
     p: Palette,
 ) {
     val slots = annotationColorSlots(s, kind)
@@ -1468,7 +1538,7 @@ private fun AnnotationColorPage(
         blueDraft = annotationBlue(slotColor).toFloat()
         alphaDraft = annotationAlphaPercent(slotColor)
     }
-    val labelW = sliderLabelWidth(listOf("红", "绿", "蓝", "不透明度"), p)
+    val labelW = sliderLabelWidth(listOf("红", "绿", "蓝", "不透明度", "批注字号"), p)
 
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
         item {
@@ -1628,6 +1698,33 @@ private fun AnnotationColorPage(
                 onClick = keys[6].onEnter,
                 nav = nav,
                 index = 6,
+            )
+        }
+        item {
+            SetRow(
+                label = "批注字体",
+                value = noteFontLabel,
+                onTap = keys[7].onEnter,
+                p = p,
+                nav = nav,
+                index = 7,
+            )
+        }
+        item {
+            // 滑条编辑的是**倍率**（旁注字号始终跟正文等比），右侧显示换算后的实际字号。
+            UiSliderRow(
+                label = "批注字号",
+                min = ReaderSettings.MIN_NOTE_FONT_SCALE.toDouble(),
+                max = ReaderSettings.MAX_NOTE_FONT_SCALE.toDouble(),
+                step = NOTE_FONT_SCALE_STEP,
+                value = s.noteFontScale.toDouble(),
+                fmt = { noteFontSizeLabel(s, it) },
+                onPreview = { v -> previewLight(s.copy(noteFontScale = v.toFloat())) },
+                onCommit = { v -> commitLight(s.copy(noteFontScale = v.toFloat())) },
+                p = p,
+                labelWidth = labelW,
+                nav = nav,
+                index = 8,
             )
         }
         item { Spacer(modifier = Modifier.height(24.dp)) }

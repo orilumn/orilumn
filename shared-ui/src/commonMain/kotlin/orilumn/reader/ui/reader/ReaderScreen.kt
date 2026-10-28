@@ -51,6 +51,7 @@ import androidx.compose.ui.unit.sp
 import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.data.annotation.AnnotationKind
 import orilumn.reader.data.annotation.AnnotationLineStyle
+import orilumn.reader.data.font.FontEntry
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.engine.skia.LineWindowDrawer
 import orilumn.reader.engine.text.TypographicProfile
@@ -144,9 +145,20 @@ fun ReaderScreen(
      * 不会重读；它也不是版式修订号，不驱动重新分页。
      */
     annotationsEpoch: Int = 0,
+    /**
+     * 统一字体列表（系统 + 导入）：只用来把「批注字体」的字族名解析成可绘制的字形。
+     *
+     * 批注是盖在页面上的覆盖层，与正文分页无关；缺省空表 = 批注用界面默认字体。
+     */
+    fontEntries: List<FontEntry> = emptyList(),
 ) {
     val density = LocalDensity.current.density
     val profile = remember(settings, density) { TypographicProfile.build(settings, density) }
+    // 批注字体（渲染层解析）：字族名 → Compose 字体。空串 / 字体已删 = 界面默认。
+    // 只影响旁注覆盖层，不进版式（`noteFont` 在 withoutNonLayout 里，面板走无重排提交）。
+    val noteFontFamily = remember(settings.noteFont, fontEntries) {
+        noteFontFamilyOf(settings, fontEntries)
+    }
     val selectionHandleRadiusPx = SELECTION_HANDLE_RADIUS_DP * density
     val selectionHandleHitPx = SELECTION_HANDLE_HIT_RADIUS_DP * density
 
@@ -2058,11 +2070,11 @@ fun ReaderScreen(
             // 正文旁的批注文字（D-26）：批注是标注上的一句话，就显示在它旁边。
             // 纯覆盖层：只按行几何算空白，不改排版、不进栅格；翻页动画期间整层让位。
             // 文字尺寸用与绘制同源的实测尺子（不是字宽粗估）：差半像素就会被省略号截掉。
-            val noteTextSizer = rememberNoteTextSizer()
+            val noteTextSizer = rememberNoteTextSizer(noteFontFamily)
             val noteBubbles: List<NoteBubble> = remember(
                 pageContent, fromPos.chapter, fromPos.slice, annotationState.revision,
                 contentLeft, contentTop, contentRight, contentBottom, pxWidth, pxHeight,
-                noteTextSizer,
+                noteTextSizer, settings.noteFontScale,
             ) {
                 val content = pageContent
                 val lines = content?.lines.orEmpty()
@@ -2202,7 +2214,8 @@ fun ReaderScreen(
                         contentBottom = contentBottom,
                         pageRight = pxWidth,
                         // 旁注字号跟正文主字号走：页首是标题时不能跟着标题放大。
-                        fontPx = noteBodyFontPx(lines),
+                        // 读者在笔记页拖的倍率乘在这里（1 = 默认），布点 / 绘制 / 实测同一口径。
+                        fontPx = noteBodyFontPx(lines) * settings.noteFontScale,
                         pageBottom = pxHeight,
                         noteTextSizer = noteTextSizer,
                     )
@@ -2244,6 +2257,7 @@ fun ReaderScreen(
                         }
                     },
                     modifier = Modifier.fillMaxSize(),
+                    fontFamily = noteFontFamily,
                 )
             }
             // 选区覆盖层：轻量即时画，不参与页栅格；翻页动画期间隐藏，避免盖在滑动中的两页上。

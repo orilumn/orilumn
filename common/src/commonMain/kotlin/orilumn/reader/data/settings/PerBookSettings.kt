@@ -11,7 +11,8 @@ import kotlinx.serialization.json.JsonObject
  *   字体管理隐藏字体开关 `showHiddenFonts`、用户按槽位选的字重
  *   `fontWeightAnchorsBySlot`/`fontWeightAnchors`、标注家族
  *   （`highlightColorSlots`/`underlineColorSlots`/`highlightDefaultSlot`/
- *   `underlineDefaultSlot`/`annotationLastKind`/`annotationLastLineStyle`）
+ *   `underlineDefaultSlot`/`annotationLastKind`/`annotationLastLineStyle`）、
+ *   批注字体 / 字号（`noteFont`/`noteFontScale`）
  *   ——不出 overlay，直写全局；
  * - 其余（排版/字体/阅读主题覆盖等）按书私有：本书只钉住**本次实际改动的字段**
  *   （稀疏 overlay，没动过的字段永不快照）；改动项同时直写全局（传染给没有此项的书）。
@@ -76,6 +77,10 @@ class PerBookSettings(
                 underlineDefaultSlot = next.underlineDefaultSlot,
                 annotationLastKind = next.annotationLastKind,
                 annotationLastLineStyle = next.annotationLastLineStyle,
+                // 批注字体 / 字号：同样是「与书无关的读者偏好」，直写全局（不进 overlay）。
+                // 漏了这两行 = 面板能改、重启即丢（changedFrom 只认 BookSettings 的字段）。
+                noteFont = next.noteFont,
+                noteFontScale = next.noteFontScale,
             )
         }
         globalStore.save(global)

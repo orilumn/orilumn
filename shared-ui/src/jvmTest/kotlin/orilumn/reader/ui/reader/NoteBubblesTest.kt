@@ -2262,6 +2262,106 @@ class NoteBubblesTest {
     }
 
     @Test
+    fun `underline note enters the line box but stops outside the underline`() {
+        // 2026-10-28 用户定口：划线标注的箭头可以进行盒，但不得触及下划线或墨迹。
+        // 行盒下边在 170，下划线在 144~148；箭头应停在 150（下划线外 2px），不再退到 170。
+        val bubble = rect(140f, 220f, 420f, 260f)
+        val glyph = rect(260f, 100f, 300f, 140f)
+        val lineBox = rect(0f, 90f, 600f, 170f)
+        val underline = rect(260f, 144f, 300f, 148f)
+        val arrow = routeNoteArrow(
+            bubble = bubble,
+            inkRects = listOf(glyph),
+            lineBoxes = listOf(lineBox),
+            side = NoteSide.BELOW_RIGHT,
+            rowBoxEntry = true,
+            underlineBands = listOf(underline),
+        )
+        assertTrue("应画得出箭头", arrow != null)
+        val tip = arrowPoints(arrow!!).last()
+        assertEquals("箭头停在下划线外侧", 150f, tip.y, 0.01f)
+        assertTrue("箭头应已进入行盒：y=${tip.y}", tip.y < lineBox.bottom)
+    }
+
+    @Test
+    fun `underline note stops below the line even when the line is outside the line box`() {
+        // 行高很紧时划线会画到行盒下边之外：箭头必须停在线下，不能为了「留在行盒里」压到线上。
+        val bubble = rect(140f, 220f, 420f, 260f)
+        val glyph = rect(260f, 100f, 300f, 140f)
+        val lineBox = rect(0f, 90f, 600f, 145f)
+        val arrow = routeNoteArrow(
+            bubble = bubble,
+            inkRects = listOf(glyph),
+            lineBoxes = listOf(lineBox),
+            side = NoteSide.BELOW_RIGHT,
+            rowBoxEntry = true,
+            underlineBands = listOf(rect(260f, 144f, 300f, 148f)),
+        )
+        assertTrue("应画得出箭头", arrow != null)
+        val tip = arrowPoints(arrow!!).last()
+        assertEquals("箭头停在线下 2px", 150f, tip.y, 0.01f)
+        assertTrue("宁可停在行盒外，也不压线：y=${tip.y}", tip.y > lineBox.bottom)
+    }
+
+    @Test
+    fun `underline note from above stops just over the ink`() {
+        // 从上往下进：只避开墨迹（下划线在字下方，不挡上面），停在字顶外 2px = 98。
+        val bubble = rect(140f, 20f, 420f, 60f)
+        val glyph = rect(260f, 100f, 300f, 140f)
+        val lineBox = rect(0f, 90f, 600f, 170f)
+        val arrow = routeNoteArrow(
+            bubble = bubble,
+            inkRects = listOf(glyph),
+            lineBoxes = listOf(lineBox),
+            side = NoteSide.ABOVE_RIGHT,
+            rowBoxEntry = true,
+            underlineBands = listOf(rect(260f, 144f, 300f, 148f)),
+        )
+        assertTrue("应画得出箭头", arrow != null)
+        val tip = arrowPoints(arrow!!).last()
+        assertEquals("箭头停在字顶外侧", 98f, tip.y, 0.01f)
+        assertTrue("箭头应已进入行盒：y=${tip.y}", tip.y > lineBox.top)
+    }
+
+    @Test
+    fun `highlight note still stops at the line box edge even with underline geometry`() {
+        // 高亮标注没有「进行盒」的许可：即使传进来划线几何，也必须停在行盒边框上。
+        val bubble = rect(140f, 220f, 420f, 260f)
+        val glyph = rect(260f, 100f, 300f, 140f)
+        val lineBox = rect(0f, 90f, 600f, 170f)
+        val arrow = routeNoteArrow(
+            bubble = bubble,
+            inkRects = listOf(glyph),
+            lineBoxes = listOf(lineBox),
+            side = NoteSide.BELOW_RIGHT,
+            underlineBands = listOf(rect(260f, 144f, 300f, 148f)),
+        )
+        assertTrue("应画得出箭头", arrow != null)
+        val tip = arrowPoints(arrow!!).last()
+        assertEquals("高亮标注仍停在行盒下边", 170f, tip.y, 0.01f)
+    }
+
+    @Test
+    fun `underline note entering from the side still stops at the ink edge`() {
+        // 横着进的 y 被夹在字身中部，下划线在字下方、够不着：x 仍停在字墨迹的边上，
+        // 不必为了那条线再往外让（那样只会把箭头推远）。
+        val bubble = rect(340f, 100f, 620f, 140f)
+        val glyph = rect(260f, 100f, 300f, 140f)
+        val lineBox = rect(0f, 90f, 600f, 170f)
+        val arrow = routeNoteArrow(
+            bubble = bubble,
+            inkRects = listOf(glyph),
+            lineBoxes = listOf(lineBox),
+            side = NoteSide.RIGHT,
+            rowBoxEntry = true,
+            underlineBands = listOf(rect(260f, 144f, 300f, 148f)),
+        )
+        assertTrue("应画得出箭头", arrow != null)
+        val tip = arrowPoints(arrow!!).last()
+        assertEquals("箭头停在字墨迹右缘", 300f, tip.x, 0.01f)
+    }
+
+    @Test
     fun `a below note threads past another bubble without jogging for the half em inset`() {
         // 真机「讨论」（2026-10-28）：正下方的批注，竖线本来一条直线就到；但通道被左边
         // 另一条批注的框占到只差 2px，入口又被「离四角 0.5em」推到选区右边，于是为了

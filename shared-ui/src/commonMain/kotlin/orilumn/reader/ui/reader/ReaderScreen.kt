@@ -2176,6 +2176,19 @@ fun ReaderScreen(
                                         contentLeft = contentLeft,
                                         contentTop = contentTop,
                                     ),
+                                    // 划线标注：箭头进得行盒，但不得触及这条线（规则第 9 条）。
+                                    rowBoxEntry = a.kind == AnnotationKind.Underline,
+                                    underlineRects = pageAnnotationLineRects(
+                                        drawer = selectionDrawer,
+                                        lines = lines,
+                                        chapter = fromPos.chapter,
+                                        annotation = a,
+                                        pageImages = content.pageImages,
+                                        pageBackgrounds = content.pageBackgrounds,
+                                        frameLead = content.pageFrameLead,
+                                        contentLeft = contentLeft,
+                                        contentTop = contentTop,
+                                    ),
                                 )
                             }
                         }

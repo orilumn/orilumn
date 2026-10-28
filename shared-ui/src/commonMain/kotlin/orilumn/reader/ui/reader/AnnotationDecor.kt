@@ -19,18 +19,8 @@ import orilumn.reader.engine.skia.DecorStroke
  */
 internal fun annotationDecorRanges(annotations: List<Annotation>): List<DecorRange> =
     annotations.map { a ->
-        val kind = when (a.kind) {
-            AnnotationKind.Highlight -> DecorKind.BACKGROUND
-            AnnotationKind.Underline -> when (a.lineStyle) {
-                AnnotationLineStyle.Strike -> DecorKind.STRIKETHROUGH
-                else -> DecorKind.UNDERLINE
-            }
-        }
-        val stroke = when (a.lineStyle) {
-            AnnotationLineStyle.Wavy -> DecorStroke.Wavy
-            AnnotationLineStyle.Dashed -> DecorStroke.Dashed
-            else -> DecorStroke.Solid
-        }
+        val kind = annotationDecorKind(a.kind, a.lineStyle)
+        val stroke = annotationDecorStroke(a.lineStyle)
         val color = a.color ?: when (a.kind) {
             AnnotationKind.Highlight -> DEFAULT_HIGHLIGHT_ARGB
             AnnotationKind.Underline -> DEFAULT_UNDERLINE_ARGB
@@ -42,4 +32,22 @@ internal fun annotationDecorRanges(annotations: List<Annotation>): List<DecorRan
             argb = color,
             stroke = stroke,
         )
+    }
+
+/** 标注类别 + 线型 → 渲染层装饰类别（高亮垫底、划线 / 删除线画线）。 */
+internal fun annotationDecorKind(kind: AnnotationKind, lineStyle: AnnotationLineStyle): DecorKind =
+    when (kind) {
+        AnnotationKind.Highlight -> DecorKind.BACKGROUND
+        AnnotationKind.Underline -> when (lineStyle) {
+            AnnotationLineStyle.Strike -> DecorKind.STRIKETHROUGH
+            else -> DecorKind.UNDERLINE
+        }
+    }
+
+/** 标注线型 → 渲染层描边（实线 / 虚线 / 波浪）。 */
+internal fun annotationDecorStroke(lineStyle: AnnotationLineStyle): DecorStroke =
+    when (lineStyle) {
+        AnnotationLineStyle.Wavy -> DecorStroke.Wavy
+        AnnotationLineStyle.Dashed -> DecorStroke.Dashed
+        else -> DecorStroke.Solid
     }

@@ -9,6 +9,8 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.clipRect
+import orilumn.reader.data.annotation.Annotation
+import orilumn.reader.data.annotation.AnnotationKind
 import orilumn.reader.engine.paging.PageSlice
 import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.engine.skia.LineWindowDrawer
@@ -158,6 +160,47 @@ internal fun pageGlyphRects(
     val shift = readerPageShift(lines, pageImages, pageBackgrounds, frameLead, contentTop)
         ?: return emptyList()
     return drawer.inkRects(lines, chapter, charStart..(charEnd - 1)).map {
+        Rect(
+            left = contentLeft + it.left,
+            top = it.top - shift,
+            right = contentLeft + it.right,
+            bottom = it.bottom - shift,
+        )
+    }
+}
+
+/**
+ * 一条划线标注**自己的那条线**在本页的落墨矩形（页坐标，与 [pageInkRects] 同一套换算）。
+ *
+ * 旁注箭头进得行盒，但不得触及这条线（`docs/新版批注与引线规则.md` 第 9 条，2026-10-28 定口）。
+ * 高亮标注没有线，返回空。
+ */
+internal fun pageAnnotationLineRects(
+    drawer: LineWindowDrawer,
+    lines: List<DrawLine>,
+    chapter: Int,
+    annotation: Annotation,
+    pageImages: List<PageImage>?,
+    pageBackgrounds: List<PageBackground>?,
+    frameLead: Int,
+    contentLeft: Float,
+    contentTop: Float,
+): List<Rect> {
+    if (annotation.kind != AnnotationKind.Underline ||
+        annotation.charEnd <= annotation.charStart ||
+        lines.isEmpty()
+    ) {
+        return emptyList()
+    }
+    val shift = readerPageShift(lines, pageImages, pageBackgrounds, frameLead, contentTop)
+        ?: return emptyList()
+    return drawer.annotationLineRects(
+        lines = lines,
+        chapter = chapter,
+        range = annotation.charStart..(annotation.charEnd - 1),
+        kind = annotationDecorKind(annotation.kind, annotation.lineStyle),
+        stroke = annotationDecorStroke(annotation.lineStyle),
+    ).map {
         Rect(
             left = contentLeft + it.left,
             top = it.top - shift,

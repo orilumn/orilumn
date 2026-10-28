@@ -470,6 +470,72 @@ class LineWindowDrawer(
     }
 
     /**
+     * 一段章内区间上**标注划线本身**的落墨矩形（只算不画），供旁注箭头「不得触及下划线」用。
+     *
+     * 与 [paintDecorLines] 同一份几何：横向读落墨实走的轨（[glyphTrack]），纵向取
+     * [baselineY] + 标注划线的默认线心偏移与线宽；波浪线把波形半高也算进去
+     * （[decorWaveGeometry]），否则箭头尖会压到波峰上。
+     *
+     * 坐标口径同 [decorRects]：`x` 相对内容区左缘，`y` 为章内绝对 Y。
+     * 只读几何，不改排版、不写回任何状态。
+     *
+     * @param kind 只接受 [DecorKind.UNDERLINE] / [DecorKind.STRIKETHROUGH]，其余返回空。
+     */
+    @Suppress("UNUSED_PARAMETER")
+    fun annotationLineRects(
+        lines: List<DrawLine>,
+        chapter: Int,
+        range: IntRange,
+        kind: DecorKind,
+        stroke: DecorStroke,
+    ): List<Rect> {
+        if (range.isEmpty()) return emptyList()
+        val offsetEm = when (kind) {
+            DecorKind.UNDERLINE -> ANNOTATION_UNDERLINE_OFFSET_EM
+            DecorKind.STRIKETHROUGH -> -ANNOTATION_STRIKE_OFFSET_EM
+            else -> return emptyList()
+        }
+        val queryStart = range.first
+        val queryEnd = range.last + 1
+        val out = ArrayList<Rect>(lines.size)
+        for (line in lines) {
+            val start = line.range.first.coerceIn(0, line.text.length)
+            val endExcl = (line.range.last + 1).coerceIn(start, line.text.length)
+            if (endExcl <= start) continue
+            val lineStart = line.charBase + start
+            val lineEnd = line.charBase + endExcl
+            val s = maxOf(queryStart, lineStart)
+            val e = minOf(queryEnd, lineEnd)
+            if (e <= s) continue
+            val placement = placementFor(line, start, endExcl)
+            val ps = (s - line.charBase - start).coerceIn(0, endExcl - start)
+            val pe = (e - line.charBase - start).coerceIn(ps, endExcl - start)
+            val track = glyphTrack(line, placement, start, endExcl)?.xs ?: placement.xs
+            val (left, right) = spanOn(track, placement.advs, ps, pe) ?: continue
+            if (right <= left) continue
+            val lineExtra = line.rubyRuns
+                .filter { it.start < endExcl && it.endExclusive > start }
+                .maxOfOrNull { it.extraHeightPx() } ?: 0
+            val baseY = baselineY(line, lineExtra, start, endExcl)
+            val thickness = (line.fontSizePx * ANNOTATION_UNDERLINE_THICKNESS_EM).coerceAtLeast(1f)
+            val centerY = baseY + line.fontSizePx * offsetEm
+            val half = when (stroke) {
+                DecorStroke.Wavy -> decorWaveGeometry(thickness).halfHeight
+                else -> thickness / 2f
+            }
+            out.add(
+                Rect.makeLTRB(
+                    line.xLeft + left,
+                    centerY - half,
+                    line.xLeft + right,
+                    centerY + half,
+                ),
+            )
+        }
+        return out
+    }
+
+    /**
      * 算一段章内区间在当前页各行上的**逐字墨迹矩形**（只算不画），供旁注箭头避让（方案 §6.3）。
      *
      * 坐标口径与 [decorRects] 完全相同（`x` 相对内容区左缘、`y` 为章内绝对 Y），区别只在于粒度：

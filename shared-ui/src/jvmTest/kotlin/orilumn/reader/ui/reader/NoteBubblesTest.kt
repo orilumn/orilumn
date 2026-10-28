@@ -1243,10 +1243,10 @@ class NoteBubblesTest {
             ),
         ).single()
         assertTrue("末行放不下就该落到首行那一圈：$b", !b.compact && b.topPx < row1.top)
-        // 2026-10-25 用户定口（引线规则第 10 条）：位置由首行那一圈定下来，但框离**选区末尾**更近
+        // 2026-10-25 用户定口（引线规则第 6 条）：位置由首行那一圈定下来，但框离**选区末尾**更近
         // （末行右端），引线就指末尾那一行，不再跟着「决定落位的那一行」走。
         val tip = arrowPoints(b.arrow!!).last()
-        assertEquals("引线指向选区末尾（x≈200）", 200f, tip.x, 0.5f)
+        assertEquals("引线指向选区末尾（x≈200），实际 ${arrowPoints(b.arrow!!)}", 200f, tip.x, 0.5f)
         assertTrue("端点落在末行：$tip", tip.y >= row1.top - 0.5f)
     }
 
@@ -1296,7 +1296,7 @@ class NoteBubblesTest {
 
     @Test
     fun `multi line leader points at the nearer end of the selection`() {
-        // 引线规则第 10 条（2026-10-25 用户定口）：位置定下来后，框离开头近就指首行、离末尾近就指末行。
+        // 引线规则第 6 条（2026-10-25 用户定口）：位置定下来后，框离开头近就指首行、离末尾近就指末行。
         val lines = listOf(
             NoteTextLine(rect(100f, 0f, 500f, 40f), blockId = 0, index = 0),
             NoteTextLine(rect(100f, 40f, 300f, 80f), blockId = 0, index = 1),
@@ -1328,7 +1328,7 @@ class NoteBubblesTest {
         ).single()
         assertTrue("缩进让出的左边空档比右边小，应落在左侧：left=${b.leftPx}", b.leftPx < 160f)
         assertTrue("不该退成小图标：$b", !b.compact)
-        // 落在末行左侧，但框离选区开头更近 ⇒ 引线指首行（引线规则第 10 条）。
+        // 落在末行左侧，但框离选区开头更近 ⇒ 引线指首行（引线规则第 6 条）。
         val tip = arrowPoints(b.arrow!!).last()
         assertTrue("引线应指首行起点（x≈160），实际 $tip", tip.x < 200f)
         assertTrue("端点落在首行内：$tip", tip.y <= rows[0].bottom + 0.5f)
@@ -1797,7 +1797,7 @@ class NoteBubblesTest {
         assertEquals("挤在一起的短竖线要改走 L 形：$pts", 3, pts.size)
         assertEquals("第一段从框左边横着出去", bubble.left, pts[0].x, 0.01f)
         assertTrue("第一段必须是横线：$pts", abs(pts[0].y - pts[1].y) < 0.01f)
-        // 引线规则第 6 条：箭头末端不许落在选区的四个角点上，至少向内偏移 0.5em。
+        // 引线规则第 4 条：箭头末端不许落在选区的四个角点上，至少向内偏移 0.5em。
         // 起点字只有一个字宽，所以竖段落在它中心（左缘再往右半个字），不再压着左缘。
         assertEquals("竖段离选区左角 0.5em", ink.left + ink.height * 0.5f, pts[1].x, 0.01f)
         assertEquals("末端接住文字底边", ink.bottom, pts[2].y, 0.01f)
@@ -2076,7 +2076,7 @@ class NoteBubblesTest {
     }
 
     /**
-     * 引线规则第 9 条：**两个批注的引线不得交叉**。判据里交叉数排第一，
+     * 引线规则第 7 条：**两个批注的引线不得交叉**。判据里交叉数排第一，
      * 所以哪怕多折一次、多绕一段，也要绕开已经画好的那条引线。
      */
     @Test
@@ -2181,7 +2181,7 @@ class NoteBubblesTest {
         assertTrue("应画得出箭头", arrow != null)
         val tip = arrowPoints(arrow!!).last()
         assertEquals("终点落在文字下边", 140f, tip.y, 0.5f)
-        // 引线规则第 6 条：离选区右下角至少 0.5em（正好是末字中心），所以不再压到 300 的角上。
+        // 引线规则第 4 条：离选区右下角至少 0.5em（正好是末字中心），所以不再压到 300 的角上。
         assertTrue("终点要尽量靠末端（离角 0.5em），实际 x=${tip.x}", tip.x >= 280f)
     }
 
@@ -2243,7 +2243,7 @@ class NoteBubblesTest {
 
     @Test
     fun `arrow stops at the line box edge instead of the glyph edge`() {
-        // 引线规则第 4 条：引线和箭头画到**行盒边框**为止，不得侵入行盒内部。
+        // 引线规则第 9 条：引线和箭头画到**行盒边框**为止，不得侵入行盒内部。
         // 行盒上下一共比字多出 10px，箭头要停在行盒下边 150，而不是字的下边 140。
         val bubble = rect(140f, 220f, 420f, 260f)
         val glyph = rect(260f, 100f, 300f, 140f)
@@ -2301,7 +2301,7 @@ class NoteBubblesTest {
 
     @Test
     fun `leader endpoints keep half an em away from the corners`() {
-        // 引线规则第 6 条：起点与箭头末端不要画在框和文字选区的四个角点上，
+        // 引线规则第 4 条：起点与箭头末端不要画在框和文字选区的四个角点上，
         // 至少应向内偏移 0.5em。字高就是 1em，所以一个字的竖边只剩中点可用。
         val bubble = rect(400f, 100f, 500f, 200f)
         val glyph = rect(100f, 100f, 300f, 140f)
@@ -2447,7 +2447,7 @@ class NoteBubblesTest {
         }
         val end = pts.last()
         assertEquals("末段要落在文字下边", anchor.bottom, end.y)
-        // 引线规则第 6 条：末端落在所选文字的边上。2026-10-25 用户定口后斜向只偏一个字，
+        // 引线规则第 4 条：末端落在所选文字的边上。2026-10-25 用户定口后斜向只偏一个字，
         // 短选区的框会压住选区一段，此时引线就近从框的左边进来，落点仍在**选区范围内**、
         // 不再要求贴住右角——绕到右角反而是多走一截。
         assertTrue(

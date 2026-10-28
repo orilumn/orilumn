@@ -112,9 +112,9 @@ class ReaderSettingsTest {
     }
 
     @Test
-    fun `annotation settings persist global never overlay`() {
-        // 标注色槽 / 默认格 / 上次用的类别：纯全局。persist 必须直写全局，且不进按书 overlay
-        // （进了 overlay 就会被「本书只钉改动字段」的稀疏语义冻住，别的书看不到、全局也丢）。
+    fun `annotation settings pin per book and still write global`() {
+        // 笔记设置是书本级：本书改过就钉住（只钉本次改动的字段），同时直写全局——
+        // 没调过这一项的书（含未阅读的新书）继承最近一次选择。
         val dir = java.nio.file.Files.createTempDirectory("orilumn-annotation").toFile()
         try {
             val persist = PerBookSettings(
@@ -126,11 +126,11 @@ class ReaderSettingsTest {
                 underlineDefaultSlot = 3,
                 annotationLastKind = "underline",
                 annotationLastLineStyle = "wavy",
-                // 批注字体 / 字号与色槽同族：只存全局，改完必须能读回来。
                 noteFont = "Noto Serif CJK SC",
                 noteFontScale = 1.35f,
             )
             persist.persist(7L, next)
+            // 全局同步写入：新书继承。
             val saved = ReaderSettingsStore(dir.absolutePath).load()
             assertEquals(next.highlightColorSlots, saved.highlightColorSlots)
             assertEquals(3, saved.underlineDefaultSlot)
@@ -138,10 +138,83 @@ class ReaderSettingsTest {
             assertEquals("wavy", saved.annotationLastLineStyle)
             assertEquals("Noto Serif CJK SC", saved.noteFont)
             assertEquals(1.35f, saved.noteFontScale, 0.0001f)
-            // 只动标注偏好时 overlay 保持空白。
-            assertEquals(BookSettings.EMPTY, BookSettingsStore(dir.absolutePath).load(7L))
-            // 读回：本书生效值继承全局。
-            assertEquals("underline", persist.effectiveFor(7L).annotationLastKind)
+            // 本书 overlay 钉住本次改动；没动过的排版字段不得快照。
+            val overlay = BookSettingsStore(dir.absolutePath).load(7L)
+            assertEquals(next.highlightColorSlots, overlay.highlightColorSlots)
+            assertEquals(3, overlay.underlineDefaultSlot)
+            assertEquals("underline", overlay.annotationLastKind)
+            assertEquals("wavy", overlay.annotationLastLineStyle)
+            assertEquals("Noto Serif CJK SC", overlay.noteFont)
+            assertEquals(1.35, overlay.noteFontScale ?: 0.0, 0.0001)
+            assertNull("没动过的排版字段不得快照", overlay.fontSize)
+            // 读回：本书生效值 = 自己的 pin；没 pin 的书继承全局。
+            assertEquals("Noto Serif CJK SC", persist.effectiveFor(7L).noteFont)
+            assertEquals("Noto Serif CJK SC", persist.effectiveFor(8L).noteFont)
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `note settings are per book and survive theme switch`() {
+        // 用户定口（2026-10-28）：笔记的所有设置项都是书本级——本书改过之后一直有效，
+        // 换主题不带走；同时直写全局，传染给没调过这一项的书（含未阅读的新书）。
+        val (dir, persist, _) = persistInTemp()
+        try {
+            persist.persist(null, ReaderSettings.DEFAULT)
+            // 书 7 自己调批注字体 / 字号 / 默认色槽。
+            persist.persist(
+                7L,
+                persist.effectiveFor(7L).copy(
+                    noteFont = "Songti",
+                    noteFontScale = 1.5f,
+                    underlineDefaultSlot = 2,
+                ),
+            )
+            // 书 8 调成另一套值：两本书各用各的（书本级），互不覆盖。
+            persist.persist(
+                8L,
+                persist.effectiveFor(8L).copy(noteFont = "Heiti", noteFontScale = 0.8f),
+            )
+            assertEquals("Songti", persist.effectiveFor(7L).noteFont)
+            assertEquals(1.5f, persist.effectiveFor(7L).noteFontScale, 0.0001f)
+            assertEquals("Heiti", persist.effectiveFor(8L).noteFont)
+            assertEquals(0.8f, persist.effectiveFor(8L).noteFontScale, 0.0001f)
+            // 书 7 换主题：笔记设置不得被主题带走（也不因全局已被书 8 改过而跟着变）。
+            persist.persist(7L, persist.effectiveFor(7L).copy(layoutTheme = "traditional"))
+            assertEquals("traditional", persist.effectiveFor(7L).layoutTheme)
+            assertEquals("Songti", persist.effectiveFor(7L).noteFont)
+            assertEquals(1.5f, persist.effectiveFor(7L).noteFontScale, 0.0001f)
+            assertEquals(2, persist.effectiveFor(7L).underlineDefaultSlot)
+            // 书 9 从未调过：继承最近一次全局写入（书 8 的 Heiti / 0.8）。
+            assertEquals("Heiti", persist.effectiveFor(9L).noteFont)
+            assertEquals(0.8f, persist.effectiveFor(9L).noteFontScale, 0.0001f)
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `note pin survives theme switch then global change in another book`() {
+        // 用户场景：书 7 调完笔记设置 → 换主题 → 书 8 又改全局。
+        // 书 7 的值必须一直有效（不能因为换主题时它与全局相同就被当作陈旧 pin 清掉）。
+        val (dir, persist, _) = persistInTemp()
+        try {
+            persist.persist(null, ReaderSettings.DEFAULT)
+            persist.persist(
+                7L,
+                persist.effectiveFor(7L).copy(noteFont = "Songti", noteFontScale = 1.5f),
+            )
+            // 换主题时书 7 的 pin 与全局相同。
+            persist.persist(7L, persist.effectiveFor(7L).copy(layoutTheme = "modern"))
+            // 另一本书改全局。
+            persist.persist(
+                8L,
+                persist.effectiveFor(8L).copy(noteFont = "Heiti", noteFontScale = 0.8f),
+            )
+            assertEquals("Songti", persist.effectiveFor(7L).noteFont)
+            assertEquals(1.5f, persist.effectiveFor(7L).noteFontScale, 0.0001f)
+            assertEquals("Heiti", persist.effectiveFor(8L).noteFont)
         } finally {
             dir.deleteRecursively()
         }

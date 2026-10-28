@@ -1,7 +1,10 @@
 package orilumn.reader.data.settings
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 
 /**
@@ -56,6 +59,22 @@ data class BookSettings(
     val coverStretch: Boolean? = null,
     /** Show page numbers. */
     val pageNum: Boolean? = null,
+    /**
+     * 笔记（标注）偏好：高亮 / 划线各五格色槽、新建标注默认格、浮动菜单记住的上次类别 / 线型。
+     *
+     * 与排版字段同属「本书私有」：读者在本书改过就钉住，换主题 / 别处改全局都不动本书；
+     * 改动同时直写全局，让没调过这一项的书（含未阅读的新书）继承最近一次选择。
+     */
+    val highlightColorSlots: List<Int>? = null,
+    val underlineColorSlots: List<Int>? = null,
+    val highlightDefaultSlot: Int? = null,
+    val underlineDefaultSlot: Int? = null,
+    val annotationLastKind: String? = null,
+    val annotationLastLineStyle: String? = null,
+    /** 批注（旁注）字体：空串 = 跟随界面默认（同样是可钉住的值，不能用 null 表示）。 */
+    val noteFont: String? = null,
+    /** 批注（旁注）字号倍率（1 = 默认：正文主字号 × 旁注比例）。 */
+    val noteFontScale: Double? = null,
 ) {
     /** Serialize to JSON (only non-null fields output); `indentFactor > 0` produces indented output. */
     @JvmOverloads
@@ -107,6 +126,22 @@ data class BookSettings(
                     coverStretch = if (o.containsKey("coverStretch")) SettingsJson.optBoolean(o, "coverStretch", false)
                     else if (o.containsKey("coverProportional")) !SettingsJson.optBoolean(o, "coverProportional", false) else null,
                     pageNum = if (o.containsKey("pageNum")) SettingsJson.optBoolean(o, "pageNum", false) else null,
+                    highlightColorSlots = if (o.containsKey("highlightColorSlots")) {
+                        (o["highlightColorSlots"] as? JsonArray)
+                            ?.mapNotNull { (it as? JsonPrimitive)?.intOrNull }
+                            ?.takeIf { it.isNotEmpty() }
+                    } else null,
+                    underlineColorSlots = if (o.containsKey("underlineColorSlots")) {
+                        (o["underlineColorSlots"] as? JsonArray)
+                            ?.mapNotNull { (it as? JsonPrimitive)?.intOrNull }
+                            ?.takeIf { it.isNotEmpty() }
+                    } else null,
+                    highlightDefaultSlot = if (o.containsKey("highlightDefaultSlot")) SettingsJson.optInt(o, "highlightDefaultSlot", 0) else null,
+                    underlineDefaultSlot = if (o.containsKey("underlineDefaultSlot")) SettingsJson.optInt(o, "underlineDefaultSlot", 0) else null,
+                    annotationLastKind = if (o.containsKey("annotationLastKind")) SettingsJson.optString(o, "annotationLastKind", "") else null,
+                    annotationLastLineStyle = if (o.containsKey("annotationLastLineStyle")) SettingsJson.optString(o, "annotationLastLineStyle", "") else null,
+                    noteFont = if (o.containsKey("noteFont")) SettingsJson.optString(o, "noteFont", "") else null,
+                    noteFontScale = if (o.containsKey("noteFontScale")) SettingsJson.optDouble(o, "noteFontScale", 1.0) else null,
                 )
             } catch (_: Exception) {
                 EMPTY
@@ -157,6 +192,14 @@ data class BookSettings(
             pageAnimationMode = rs.pageAnimationMode,
             coverStretch = rs.coverStretch,
             pageNum = rs.pageNum,
+            highlightColorSlots = rs.highlightColorSlots,
+            underlineColorSlots = rs.underlineColorSlots,
+            highlightDefaultSlot = rs.highlightDefaultSlot,
+            underlineDefaultSlot = rs.underlineDefaultSlot,
+            annotationLastKind = rs.annotationLastKind,
+            annotationLastLineStyle = rs.annotationLastLineStyle,
+            noteFont = rs.noteFont,
+            noteFontScale = rs.noteFontScale.toDouble(),
         )
 
         /**
@@ -176,6 +219,14 @@ data class BookSettings(
                 useOriginalStyle = next.useOriginalStyle, pageAnim = next.pageAnim,
                 pageAnimationMode = next.pageAnimationMode, coverStretch = next.coverStretch,
                 pageNum = next.pageNum,
+                highlightColorSlots = next.highlightColorSlots,
+                underlineColorSlots = next.underlineColorSlots,
+                highlightDefaultSlot = next.highlightDefaultSlot,
+                underlineDefaultSlot = next.underlineDefaultSlot,
+                annotationLastKind = next.annotationLastKind,
+                annotationLastLineStyle = next.annotationLastLineStyle,
+                noteFont = next.noteFont,
+                noteFontScale = next.noteFontScale.toDouble(),
             )
             return o.copy(
                 layoutTheme = o.layoutTheme?.takeUnless { it == baseline.layoutTheme },
@@ -200,6 +251,14 @@ data class BookSettings(
                 pageAnimationMode = o.pageAnimationMode?.takeUnless { it == baseline.pageAnimationMode },
                 coverStretch = o.coverStretch?.takeUnless { it == baseline.coverStretch },
                 pageNum = o.pageNum?.takeUnless { it == baseline.pageNum },
+                highlightColorSlots = o.highlightColorSlots?.takeUnless { it == baseline.highlightColorSlots },
+                underlineColorSlots = o.underlineColorSlots?.takeUnless { it == baseline.underlineColorSlots },
+                highlightDefaultSlot = o.highlightDefaultSlot?.takeUnless { it == baseline.highlightDefaultSlot },
+                underlineDefaultSlot = o.underlineDefaultSlot?.takeUnless { it == baseline.underlineDefaultSlot },
+                annotationLastKind = o.annotationLastKind?.takeUnless { it == baseline.annotationLastKind },
+                annotationLastLineStyle = o.annotationLastLineStyle?.takeUnless { it == baseline.annotationLastLineStyle },
+                noteFont = o.noteFont?.takeUnless { it == baseline.noteFont },
+                noteFontScale = o.noteFontScale?.takeUnless { it == baseline.noteFontScale.toDouble() },
             )
         }
     }

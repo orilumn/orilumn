@@ -149,14 +149,16 @@ data class ReaderSettings(
      * （系统字体或已导入字体都能选）。
      *
      * 只作用于旁注覆盖层的文字，**不碰正文排版**，所以不进版式比较（面板走无重排提交）。
-     * 与色槽一族同为「与书无关的读者偏好」：不进按书 overlay，直写全局。
+     * 按书私有：本书改过就钉住（与排版字段同一套稀疏 overlay），改动同时直写全局，
+     * 传染给没调过这一项的书（含未阅读的新书）。
      */
     val noteFont: String = "",
     /**
      * 批注（旁注）字号的**相对倍率**（1 = 默认：正文主字号 × 旁注比例）。
      *
      * 存倍率而不是绝对像素，正文字号一变旁注跟着等比变，不会出现「正文调大了旁注没动」。
-     * 面板显示的是换算后的实际字号。同样只影响旁注覆盖层，不进版式比较。
+     * 面板显示的是换算后的实际字号。同样只影响旁注覆盖层，不进版式比较；落盘口径同
+     * [noteFont]（按书钉住 + 直写全局）。
      */
     val noteFontScale: Float = 1f,
 
@@ -220,6 +222,15 @@ data class ReaderSettings(
         pageAnimationMode = overlay.pageAnimationMode ?: pageAnimationMode,
         coverStretch = overlay.coverStretch ?: coverStretch,
         pageNum = overlay.pageNum ?: pageNum,
+        // 笔记偏好：与排版字段同一套稀疏 overlay 语义（本书改过就钉住，没改过跟随全局）。
+        highlightColorSlots = overlay.highlightColorSlots ?: highlightColorSlots,
+        underlineColorSlots = overlay.underlineColorSlots ?: underlineColorSlots,
+        highlightDefaultSlot = overlay.highlightDefaultSlot ?: highlightDefaultSlot,
+        underlineDefaultSlot = overlay.underlineDefaultSlot ?: underlineDefaultSlot,
+        annotationLastKind = overlay.annotationLastKind ?: annotationLastKind,
+        annotationLastLineStyle = overlay.annotationLastLineStyle ?: annotationLastLineStyle,
+        noteFont = overlay.noteFont ?: noteFont,
+        noteFontScale = overlay.noteFontScale?.toFloat() ?: noteFontScale,
     )
 
     /**
@@ -251,6 +262,14 @@ data class ReaderSettings(
         pageAnimationMode = overlay.pageAnimationMode ?: pageAnimationMode,
         coverStretch = overlay.coverStretch ?: coverStretch,
         pageNum = overlay.pageNum ?: pageNum,
+        highlightColorSlots = overlay.highlightColorSlots ?: highlightColorSlots,
+        underlineColorSlots = overlay.underlineColorSlots ?: underlineColorSlots,
+        highlightDefaultSlot = overlay.highlightDefaultSlot ?: highlightDefaultSlot,
+        underlineDefaultSlot = overlay.underlineDefaultSlot ?: underlineDefaultSlot,
+        annotationLastKind = overlay.annotationLastKind ?: annotationLastKind,
+        annotationLastLineStyle = overlay.annotationLastLineStyle ?: annotationLastLineStyle,
+        noteFont = overlay.noteFont ?: noteFont,
+        noteFontScale = overlay.noteFontScale?.toFloat() ?: noteFontScale,
     )
 
     /**

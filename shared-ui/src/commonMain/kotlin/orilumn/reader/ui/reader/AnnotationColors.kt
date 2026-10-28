@@ -20,23 +20,6 @@ internal val DEFAULT_HIGHLIGHT_ARGB: Int = ReaderSettings.DEFAULT_HIGHLIGHT_COLO
 /** 划线默认色槽（旧记录没有颜色时的兜底，也是默认色槽第一格）。 */
 internal val DEFAULT_UNDERLINE_ARGB: Int = ReaderSettings.DEFAULT_UNDERLINE_COLOR_SLOTS[0]
 
-/**
- * 设置面板里可直接套用的基础颜色（不透明 RGB；套用时保留当前槽的透明度）。
- * 十格刚好一行，高亮与划线共用。
- */
-internal val ANNOTATION_PRESET_COLORS: List<Int> = listOf(
-    0xFFE53935.toInt(), // 红
-    0xFFFB8C00.toInt(), // 橙
-    0xFFFDD835.toInt(), // 黄
-    0xFF43A047.toInt(), // 绿
-    0xFF00897B.toInt(), // 青
-    0xFF1E88E5.toInt(), // 蓝
-    0xFF3949AB.toInt(), // 靛
-    0xFF8E24AA.toInt(), // 紫
-    0xFFD81B60.toInt(), // 粉
-    0xFF6D4C41.toInt(), // 棕
-)
-
 /** 某一类标注的色槽列表（高亮 / 划线各一组，互不共用）。 */
 internal fun annotationColorSlots(settings: ReaderSettings, kind: AnnotationKind): List<Int> {
     val slots = when (kind) {
@@ -190,6 +173,17 @@ internal fun withAnnotationDefaultSlot(
         AnnotationKind.Underline -> settings.copy(underlineDefaultSlot = safe)
     }
 }
+
+/**
+ * 两类标注的色槽恢复出厂值（笔记页的「恢复默认设置」）。
+ *
+ * 只动十格颜色，不动默认格下标：新建标注用哪一格不归笔记页管（由浮动菜单决定），
+ * 这一页也不显示金点。
+ */
+internal fun withDefaultAnnotationColorSlots(settings: ReaderSettings): ReaderSettings = settings.copy(
+    highlightColorSlots = ReaderSettings.DEFAULT_HIGHLIGHT_COLOR_SLOTS,
+    underlineColorSlots = ReaderSettings.DEFAULT_UNDERLINE_COLOR_SLOTS,
+)
 
 /** 取 ARGB 的 alpha 通道 0..255。 */
 internal fun annotationAlpha(argb: Int): Int = (argb ushr 24) and 0xFF

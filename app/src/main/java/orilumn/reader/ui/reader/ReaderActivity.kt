@@ -444,6 +444,8 @@ class ReaderActivity : ComponentActivity() {
                 onCommitTypography = { commitSettings(it, typographyChanged = true) },
                 onCommitBookPrivate = { commitSettings(it.withBookStyle(), typographyChanged = true, bookOnly = true) },
                 onCommitLight = { commitSettings(it, typographyChanged = false) },
+                // 颜色滑条拖动中只应用不落盘：色槽与正文墨迹随手实时变，松手才写设置。
+                onPreviewLight = { liveApply(it) },
                 customThemes = customThemes,
                 onSaveTheme = { preset ->
                     val next = ReaderThemeMath.saveTheme(customThemes, preset.bg, preset.fg)

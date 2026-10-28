@@ -172,6 +172,22 @@ class AnnotationColorsTest {
     }
 
     @Test
+    fun `restoring panel colors resets both kinds and keeps the default slot`() {
+        val before = ReaderSettings.DEFAULT.copy(
+            highlightColorSlots = List(5) { 0xFF112233.toInt() },
+            underlineColorSlots = List(5) { 0xFF445566.toInt() },
+            highlightDefaultSlot = 3,
+            underlineDefaultSlot = 2,
+        )
+        val after = withDefaultAnnotationColorSlots(before)
+        assertEquals(ReaderSettings.DEFAULT_HIGHLIGHT_COLOR_SLOTS, after.highlightColorSlots)
+        assertEquals(ReaderSettings.DEFAULT_UNDERLINE_COLOR_SLOTS, after.underlineColorSlots)
+        // 新建标注用哪一格不归笔记页管：恢复颜色不动默认格。
+        assertEquals(3, after.highlightDefaultSlot)
+        assertEquals(2, after.underlineDefaultSlot)
+    }
+
+    @Test
     fun `rgb edit preserves alpha and alpha edit preserves rgb`() {
         val original = 0x73FFD54F
         val rgb = 0xFF1E88E5.toInt()
@@ -260,12 +276,5 @@ class AnnotationColorsTest {
             highlight[1],
             annotationSwatchColor(highlight, 9, underline, 9, AnnotationKind.Highlight, editingUnderline),
         )
-    }
-
-    @Test
-    fun `preset colors are opaque and unique`() {
-        assertEquals(10, ANNOTATION_PRESET_COLORS.size)
-        assertEquals(ANNOTATION_PRESET_COLORS.size, ANNOTATION_PRESET_COLORS.distinct().size)
-        assertTrue(ANNOTATION_PRESET_COLORS.all { annotationAlpha(it) == 0xFF })
     }
 }

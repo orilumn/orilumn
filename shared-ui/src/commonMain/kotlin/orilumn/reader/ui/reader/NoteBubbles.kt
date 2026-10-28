@@ -217,14 +217,6 @@ private const val ARROW_FORM_FIRST: Int = 1
 private const val ARROW_FORM_SECOND: Int = 2
 private const val ARROW_FORM_OTHER: Int = 3
 
-/**
- * 末段短于这个长度（px）时，箭头会盖到上一段上、看起来像是「横线的末端长了个竖箭头」。
- *
- * 不直接砍掉末段：太短时只把它当降权项（有别的形状能走就换），最后兜底照画，
- * 由绘制侧把箭头臂长夹到末段以内（见 `drawNoteArrow`）。
- */
-private const val ARROW_TAIL_MIN_PX: Float = 6f
-
 /** 折线找障碍时看两端连线附近多远（以旁注行高为单位，至少 8px）。 */
 private const val ARROW_BEND_WINDOW_LINES: Float = 2f
 
@@ -3266,48 +3258,43 @@ private data class ArrowPath(
     val entersInk: Boolean = false,
     /** 形状名次（[ARROW_FORM_STRAIGHT] …）：规则第 1 / 2 / 3 条先定线型。 */
     val form: Int = ARROW_FORM_OTHER,
-    /** 第一段朝着远离目标的方向走（左右侧「先横着出、再折回来」那種），见 [arrowRetreats]。 */
-    val retreats: Boolean = false,
-    /** 末段长度：短于 [ARROW_TAIL_MIN_PX] 时箭头会画到上一段上。 */
+    /** 末段长度：短于「画得下箭头」的门槛时按第 11 条省掉末折（见 `finish`）。 */
     val tailLen: Float = Float.MAX_VALUE,
 ) {
     val clear: Boolean get() = hits <= 1e-4f && !entersBubble && !entersInk
 
-    /** 末段短到画不下箭头：形状相同、折数相同的情况下先避开。 */
-    val tailShort: Boolean get() = tailLen < ARROW_TAIL_MIN_PX
-
     /**
-     * 通畅路径的择优顺序（引线规则第 11 / 1 / 2 / 3 / 4 / 8 / 9 条）：
-     * **交叉数（0 条优先）→ 不往反方向起步 → 形状名次 → 末段够长 → 折数少 → 穿字少 →
-     * 不贴着字（[hug]）→ 更短 → 候选顺序**。
+     * 通畅路径的择优顺序（引线规则第 7 / 1 / 3 / 2 / 6 / 8 条）：
+     * **交叉数（0 条优先）→ 形状名次 → 折数少 → 穿字少 → 更短 → 贴字 → 候选顺序**。
      *
      * 交叉仍然排第一（2026-10-25 用户定口）：两个批注的引线不得交叉，宁可多折一次
-     * 也要绕开已经画好的那条。形状名次排在折数之前，是因为「正右单段」「斜向 L 形」
+     * 也要绕开已经画好的那条。形状名次排在折数之前，是因为「正下一条竖线」「四角 L 形」
      * 「左右被字挡住走 下横上」这几种线型是规则直接点名的，不能因为多一折就丢掉。
+     *
+     * 2026-10-28 用户定口：**避开文字压过更短**（第 8 条在前），所以穿字量排在长度之前；
+     * 「不往反方向起步」与「末段够长」两条**没有规则依据**，整条删掉——前者会杀掉第 3 条
+     * 要的「上横下」，后者第 11 条已经给了出口。
      */
     fun betterThan(other: ArrowPath?): Boolean {
         if (other == null) return true
         if (crosses != other.crosses) return crosses < other.crosses
-        if (retreats != other.retreats) return !retreats
         if (form != other.form) return form < other.form
-        if (tailShort != other.tailShort) return !tailShort
         if (bends != other.bends) return bends < other.bends
         if (abs(hits - other.hits) > 0.5f) return hits < other.hits
-        if (abs(hug - other.hug) > 0.5f) return hug < other.hug
         if (abs(length - other.length) > 0.5f) return length < other.length
+        if (abs(hug - other.hug) > 0.5f) return hug < other.hug
         return order < other.order
     }
 
     /**
-     * 全撞时的兜底顺序：不穿自己的框 → **交叉最少** → 不往反方向起步 → 穿得少 → 更短 → 候选顺序。
-     * 照样画，不留空（规则第 8 条：实在没路时宁愿穿越，但要穿得少）。
+     * 全撞时的兜底顺序：不穿自己的框 → 不横穿自己那一行 → **交叉最少** → 形状 → 穿得少 →
+     * 更短 → 候选顺序。照样画，不留空（规则第 8 条：实在没路时宁愿穿越，但要穿得少）。
      */
     fun betterFallbackThan(other: ArrowPath?): Boolean {
         if (other == null) return true
         if (entersBubble != other.entersBubble) return !entersBubble
         if (entersInk != other.entersInk) return !entersInk
         if (crosses != other.crosses) return crosses < other.crosses
-        if (retreats != other.retreats) return !retreats
         if (form != other.form) return form < other.form
         if (abs(hits - other.hits) > 0.5f) return hits < other.hits
         if (abs(length - other.length) > 0.5f) return length < other.length
@@ -4878,29 +4865,6 @@ private fun arrowForm(
     }
 }
 
-/**
- * 第一段是不是**朝着远离目标的方向**起步（规则第 8 条：不走回头路）。
- *
- * 判据只看几何，不看布点在左还是右：第一段的方向与「起点 → 终点」在这一轴上的方向相反，
- * 就是先退出去再折回来。右下方批注「先从左边出去、再绕回右侧」正是这种形状
- * （框的左边已经越过目标字的右缘时，往左走其实是背离文字）。
- */
-private fun arrowRetreats(start: Offset, next: Offset, end: Offset): Boolean {
-    val dx = next.x - start.x
-    val dy = next.y - start.y
-    val toX = end.x - start.x
-    val toY = end.y - start.y
-    // 只判**主轴上真的往回走**：整体在横向跑三百像素、纵向只差 2px 时，
-    // 先竖着让开这一行不算回头路（真机「使用 var」的 上横下 就被这条误杀了，2026-10-26）。
-    val span = sqrt(toX * toX + toY * toY)
-    val minor = span * 0.2f
-    return if (abs(dx) >= abs(dy)) {
-        abs(dx) > 0.01f && abs(toX) > minor && dx * toX < 0f
-    } else {
-        abs(dy) > 0.01f && abs(toY) > minor && dy * toY < 0f
-    }
-}
-
 /** 量一条候选路径：长度、折数、已画引线交叉数、穿障碍的长度、有没有拐回自己的框。 */
 /** 候选路径的实测次数（真机排查用：一页引线慢的时候先看这个数）。 */
 internal var noteArrowRouteTries: Int = 0
@@ -4939,19 +4903,13 @@ private fun measureArrowRoute(
     noteArrowRouteTries++
     if (count < 2) return null
     val bends = max(0, count - 2)
-    // 形状名次 / 首段方向 / 末段长度都是「开局就定死」的：量到一半就能拿它们跟现有最优比。
+    // 形状名次 / 末段长度都是「开局就定死」的：量到一半就能拿它们跟现有最优比。
     val firstVertical = abs(xs[0] - xs[1]) < 0.01f
     val lastVertical = abs(xs[count - 2] - xs[count - 1]) < 0.01f
     val form = arrowForm(side, count, firstVertical, lastVertical)
-    val retreats = arrowRetreats(
-        start = Offset(xs[0], ys[0]),
-        next = Offset(xs[1], ys[1]),
-        end = Offset(xs[count - 1], ys[count - 1]),
-    )
     val tailDx = xs[count - 1] - xs[count - 2]
     val tailDy = ys[count - 1] - ys[count - 2]
     val tailLen = sqrt(tailDx * tailDx + tailDy * tailDy)
-    val tailShort = tailLen < ARROW_TAIL_MIN_PX
     var length = 0f
     var hits = 0f
     var crosses = 0
@@ -5033,9 +4991,7 @@ private fun measureArrowRoute(
                 true
             } else if (crosses == limitClear.crosses) {
                 when {
-                    retreats != limitClear.retreats -> retreats
                     form != limitClear.form -> form > limitClear.form
-                    tailShort != limitClear.tailShort -> tailShort
                     bends != limitClear.bends -> bends > limitClear.bends
                     hits > limitClear.hits + 0.5f -> true
                     abs(hits - limitClear.hits) <= 0.5f && hug > limitClear.hug + 0.5f -> true
@@ -5055,7 +5011,6 @@ private fun measureArrowRoute(
                 true
             } else if (crosses == limitFallback.crosses) {
                 when {
-                    retreats != limitFallback.retreats -> retreats
                     form != limitFallback.form -> form > limitFallback.form
                     hits > limitFallback.hits + 0.5f -> true
                     abs(hits - limitFallback.hits) <= 0.5f && length > limitFallback.length + 0.5f -> true
@@ -5081,7 +5036,6 @@ private fun measureArrowRoute(
         entersInk = entersInk,
         order = order,
         form = form,
-        retreats = retreats,
         tailLen = tailLen,
     )
 }

@@ -485,6 +485,14 @@ private fun coveringSideRank(side: NoteSide): Int = when (side) {
 private const val NOTE_SLIDE_STEPS: Int = 4
 
 /**
+ * 让位最多问到第几环（2026-10-29 用户定口）。
+ *
+ * 让位仍然排在「隔行」之前，但也不必只认本行：隔一行那块空白里如果能靠别人让一让就放下，
+ * 比「自己滑到隔两行」更近。再往外就让不起了——离得越远，挪别人的批注越像在拆东墙补西墙。
+ */
+private const val NOTE_ROOM_MAX_RING: Int = 1
+
+/**
  * 一条批注的一个候选框（纯几何）。
  *
  * 字段只服务两件事：**排序**（整句 → 就近 → 折行 → 环数 → 方向 / 留白）
@@ -591,6 +599,47 @@ internal data class NoteCandidate(
             other.rect.left < rect.right + marginX - NOTE_GEOM_EPS &&
             rect.top < other.rect.bottom + marginY - NOTE_GEOM_EPS &&
             other.rect.top < rect.bottom + marginY - NOTE_GEOM_EPS
+}
+
+/**
+ * 这个方向「贴着选区」时的自然距离：正侧是 1em（引线要从这段空档出去），
+ * 正上 / 正下同样是 1em（竖直引线的空档），四个斜向是「横向一个字走廊 + 2px 近侧」的合成。
+ *
+ * 生成候选（[noteCandidates] 的 `add`）与挪动之后重算名次（[NoteCandidate.movedTo]）共用这一个口径。
+ */
+internal fun noteNaturalDistance(side: NoteSide, metrics: NoteMetrics): Float = when (side) {
+    NoteSide.RIGHT, NoteSide.LEFT -> metrics.sideGap
+    NoteSide.ABOVE, NoteSide.BELOW -> metrics.preferredMargin
+    NoteSide.ABOVE_RIGHT, NoteSide.BELOW_RIGHT,
+    NoteSide.ABOVE_LEFT, NoteSide.BELOW_LEFT ->
+        sqrt(metrics.sideGap * metrics.sideGap + NOTE_MIN_MARGIN_PX * NOTE_MIN_MARGIN_PX)
+    NoteSide.OTHER -> 0f
+}
+
+/**
+ * 框被挪到 [rect] 之后，把「就近」三项（距离 / 额外引线 / 就近档）一起重算。
+ *
+ * 让位与自行挪开只改坐标；不同步这三个字段，排序就会拿**挪之前**的名次去比，
+ * 于是「被挤下去两行」的框仍然自称贴着正文，比真正贴着选区的候选先赢（2026-10-29 用户指出）。
+ */
+internal fun NoteCandidate.movedTo(
+    rect: Rect,
+    anchors: List<Rect>,
+    metrics: NoteMetrics,
+): NoteCandidate {
+    if (rect == this.rect) return this
+    val d = anchors.minOf { rectDistance(rect, it) }
+    val excess = d - noteNaturalDistance(side, metrics)
+    return copy(
+        rect = rect,
+        distance = d,
+        excessDistance = if (excess <= NOTE_GEOM_EPS) {
+            0f
+        } else {
+            (excess / NOTE_GEOM_EPS).roundToInt() * NOTE_GEOM_EPS
+        },
+        distanceBand = if (excess <= NOTE_GEOM_EPS) 0 else (excess / metrics.lineH).toInt(),
+    )
 }
 
 /**
@@ -1167,16 +1216,7 @@ internal fun noteCandidates(
         // 这个方向「贴着选区」时的自然距离：正侧是 1em，正上 / 正下同样是 1em（近侧空档），
         // 四个斜向是「横向 1em 引线走廊 + 2px 近侧」的合成（2026-10-27 用户定口）。
         // 排序先比**超出自然留白的那一段**，避免把 1em 的侧边箭头空档误当成「远」。
-        val cornerNatural = sqrt(
-            metrics.sideGap * metrics.sideGap + NOTE_MIN_MARGIN_PX * NOTE_MIN_MARGIN_PX,
-        )
-        val natural = when (side) {
-            NoteSide.RIGHT, NoteSide.LEFT -> metrics.sideGap
-            NoteSide.ABOVE, NoteSide.BELOW -> preferred
-            NoteSide.ABOVE_RIGHT, NoteSide.BELOW_RIGHT,
-            NoteSide.ABOVE_LEFT, NoteSide.BELOW_LEFT -> cornerNatural
-            NoteSide.OTHER -> 0f
-        }
+        val natural = noteNaturalDistance(side, metrics)
         // 亚像素差不算「更远」：浮点误差会让同距的正右输给右上 / 右下。
         // 按 0.5px 分桶，半像素以内的差视觉上分不出来，交给方向名次决胜。
         val excess = distance - natural
@@ -2299,7 +2339,7 @@ private fun assignNoteCandidates(
                     dead = true
                     break
                 }
-                cur = cur.copy(rect = r, distance = note.rects.minOf { rectDistance(r, it) })
+                cur = cur.movedTo(r, note.rects, metrics)
             }
             if (dead) continue
             if (fits(cur)) return if (cur.rect == c.rect) null else cur
@@ -2307,10 +2347,15 @@ private fun assignNoteCandidates(
         return null
     }
 
-    fun take(note: NoteInk, c: NoteCandidate): Boolean {
-        val spot = if (fits(c)) c else slideFree(note, c) ?: return false
+    /** 把这条批注直接放在 [spot]（已经腾好的位置）。 */
+    fun commitSpot(note: NoteInk, spot: NoteCandidate) {
         chosen[note.annotationId] = spot
         occupied += NoteChoice(note, spot)
+    }
+
+    fun take(note: NoteInk, c: NoteCandidate): Boolean {
+        val spot = if (fits(c)) c else slideFree(note, c) ?: return false
+        commitSpot(note, spot)
         return true
     }
 
@@ -2423,26 +2468,42 @@ private fun assignNoteCandidates(
         min(a.right, b.right) - max(a.left, b.left) > 1f &&
             min(a.bottom, b.bottom) - max(a.top, b.top) > 1f
 
+    /** 一个算好、还没落地的让位方案：挡路的几条挪到 [moved]，这条批注落在 [fresh]。 */
+    class RoomPlan(val moved: List<NoteChoice>, val fresh: NoteCandidate)
+
+    /**
+     * 一个算好、还没落地的落位：候选框 + 是不是**挪出来**的 + 让别人让位时的搬运清单。
+     *
+     * [order] 是它来自候选链上的第几条：两个落位按 [nearer] 的判据一样好时，
+     * 链上更靠前的那个赢——链序本身已经含了方向偏好，挪出来的位置不该凭「挪」这件事占先。
+     */
+    class Spot(
+        val candidate: NoteCandidate,
+        val pushed: Boolean,
+        val room: RoomPlan? = null,
+        val order: Int = 0,
+    )
+
     /**
      * 让占住同一块空白的既有批注**上下让一让**，给 [c] 腾出位置。
      *
      * 2026-10-24 用户定口：
      * - **让位排在「隔行」之前**：本行（环 0）的位置只要别人让一让就能放下，就先让别人让，
-     *   而不是直接跑去隔一行 / 隔两行的地方（调用方只在 `ring == 0` 时问这一句）。
+     *   而不是直接跑去隔一行 / 隔两行的地方。
      * - **让完要真能把新批注放下**，包括新批注**折行**与**不折行**两种：把挡路框推到这块空白的
      *   上缘或下缘（正上 / 正下则推到左缘或右缘），剩下的那条空档里重新折行夹取整句；
      *   实在夹不下就是「无路可让」。
-     * - 只认整句档；正右 / 正左 / 四角往上下让，正上 / 正下往左右让；上下让不动时，
-     *   正右 / 正左还可以在挡路框旁边找空（不搬动别人）。
+     * - 只认整句档；正右 / 正左 / 四角往上下让，正上 / 正下往左右让（左右让不出去再往上下让）；
+     *   上下让不动时，正右 / 正左还可以在挡路框旁边找空（不搬动别人）。
      * - 上 / 下两种排法都可行时取位移小的（一样大取上移），保证同一输入结果恒定。
      *
-     * @return 让位成功并放下 [c] 时为 `true`；让不出空间或让完仍放不下则为 `false`（不改任何位置）。
+     * @return 让位方案（**还没动任何框**，采信时交给 [commitRoomPlan]）；无路可让时为 `null`。
      */
-    fun makeRoom(note: NoteInk, c: NoteCandidate): Boolean {
-        if (!c.complete) return false
+    fun makeRoom(note: NoteInk, c: NoteCandidate): RoomPlan? {
+        if (!c.complete) return null
         // 规则第 8 条（2026-10-25 用户定口）：会遮住右侧文字区域的那条**自己是来让位的**，
         // 不许反过来把右侧那条挤走——它继续往远处找位置，直到不挡别人的选区。
-        if (note.annotationId in covering) return false
+        if (note.annotationId in covering) return null
         // 规则第 8 条：先让挡路的批注挪一挪。**上下 / 斜向**摆的框，挡路框是竖着排的，往上下让；
         // **正上 / 正下**摆的框，挡路框是横着排的，往左右让。
         // 2026-10-25 用户定口：斜向也让位——同一行左边那条被往上挤一点、右边那条占到它原来的格子，
@@ -2451,7 +2512,7 @@ private fun assignNoteCandidates(
         // 2026-10-25 用户定口：**不再要求挡路框和新框在同一块空白**——挡路框只要挪完还在
         // 它自己的空白里就行（下面的校验逐个检查），隔壁空白里那条也该让一让。
         val blockers = occupied.filter { c.conflicts(it.candidate, marginX, marginY) }
-        if (blockers.isEmpty()) return false
+        if (blockers.isEmpty()) return null
         val blockerIds = blockers.map { it.note.annotationId }.toSet()
         val f = c.freeRect
         val myRow = baseRow(note)
@@ -2460,13 +2521,7 @@ private fun assignNoteCandidates(
         fun shiftBlockers(dx: Float, dy: Float): List<NoteChoice> = blockers.map { b ->
             val r = b.candidate.rect
             val movedRect = Rect(r.left + dx, r.top + dy, r.right + dx, r.bottom + dy)
-            NoteChoice(
-                b.note,
-                b.candidate.copy(
-                    rect = movedRect,
-                    distance = b.note.rects.minOf { rectDistance(movedRect, it) },
-                ),
-            )
+            NoteChoice(b.note, b.candidate.movedTo(movedRect, b.note.rects, metrics))
         }
 
         /**
@@ -2558,8 +2613,7 @@ private fun assignNoteCandidates(
                 lines = size.lines,
                 complete = true,
                 shownChars = size.shownChars,
-                distance = note.rects.minOf { rectDistance(rect, it) },
-            )
+            ).movedTo(rect, note.rects, metrics)
             if (occupied.any { fresh.conflicts(it.candidate, marginX, marginY) }) return null
             // 名次排在所有「上下让位」之后：能让人家让就让，实在让不动才自己挪到旁边。
             return Float.MAX_VALUE / 2f to (emptyList<NoteChoice>() to fresh)
@@ -2570,18 +2624,110 @@ private fun assignNoteCandidates(
             val beside = if (c.side == NoteSide.RIGHT || c.side == NoteSide.LEFT) attemptBeside() else null
             listOfNotNull(attemptVertical(up = true), attemptVertical(up = false), beside)
         } else {
-            listOfNotNull(attemptHorizontal(toLeft = true), attemptHorizontal(toLeft = false))
+            // 正上 / 正下那一档，挡路框本来是横着排的，先往左右让。环 0 里还有别的方向可选，
+            // 就先别动「不该动的那条轴」；**隔行的候选**是这条批注贴着选区的最后一次机会，
+            // 左右都让不出去时连上下也试（2026-10-29 用户定口：让位以后要能落回更近的位置，
+            // 不能让「同行只能左右让」把本该贴在本行下方的批注推到隔两行去）。
+            listOfNotNull(
+                attemptHorizontal(toLeft = true),
+                attemptHorizontal(toLeft = false),
+                if (c.ring > 0) attemptVertical(up = true) else null,
+                if (c.ring > 0) attemptVertical(up = false) else null,
+            )
         }
-        val pick = tried.minWithOrNull(compareBy({ it.first })) ?: return false
-        // **先判后动**：让位失败时不能把已放批注挪到半路。
-        for (m in pick.second.first) {
+        val pick = tried.minWithOrNull(compareBy({ it.first })) ?: return null
+        // **先判后动**：让位结果只是一份搬运清单，采信时再由 [commitRoomPlan] 落地。
+        return RoomPlan(pick.second.first, pick.second.second)
+    }
+
+    /**
+     * 采信一份让位清单：把挡路的几条挪到位、这条批注落在 [RoomPlan.fresh]。
+     *
+     * 只改已放批注的坐标，不动候选池——所以「先算清单、后面又找到了更近的位置」时
+     * 直接丢掉清单就行，不需要回滚。
+     */
+    fun commitRoomPlan(note: NoteInk, plan: RoomPlan) {
+        for (m in plan.moved) {
             chosen[m.note.annotationId] = m.candidate
             val idx = occupied.indexOfFirst { it.note.annotationId == m.note.annotationId }
             if (idx >= 0) occupied[idx] = m
         }
-        chosen[note.annotationId] = pick.second.second
-        occupied += NoteChoice(note, pick.second.second)
-        return true
+        chosen[note.annotationId] = plan.fresh
+        occupied += NoteChoice(note, plan.fresh)
+    }
+
+    /**
+     * 两个落位谁更靠前：整句 → 就近档 → 折行数（越少越宽）。
+     *
+     * 与候选链的排序键同一套口径（[noteCandidateOrder]）——「更近」不是一个单独的判据，
+     * 而是这条链上排在前面。**同一档里的零头不比**：一个行高以内视觉上分不出远近，
+     * 交给链序（[Spot.order]）决胜，免得「滑开 10px」输给「换到另一侧」。
+     */
+    fun nearer(a: NoteCandidate, b: NoteCandidate): Boolean = when {
+        a.complete != b.complete -> a.complete
+        a.distanceBand != b.distanceBand -> a.distanceBand < b.distanceBand
+        a.lines != b.lines -> a.lines < b.lines
+        else -> false
+    }
+
+    /** 两个落位谁更该采信：[nearer] 的判据先比，同一方向上再比零头，最后按候选链的先后。 */
+    fun before(a: Spot, b: Spot): Boolean {
+        if (nearer(a.candidate, b.candidate)) return true
+        if (nearer(b.candidate, a.candidate)) return false
+        // 只有**同一方向**的两个落位才比那几十像素的零头：不同方向的「自然留白」本来就不一样长，
+        // 跨方向比零头没有意义（否则「滑开 10px」会输给「换到另一侧」）。
+        if (a.candidate.side == b.candidate.side) {
+            val diff = a.candidate.excessDistance - b.candidate.excessDistance
+            if (diff < -NOTE_GEOM_EPS) return true
+            if (diff > NOTE_GEOM_EPS) return false
+        }
+        return a.order < b.order
+    }
+
+    /** 候选链上第一个**原样就能放下**的位置。 */
+    fun freeSpot(note: NoteInk): Spot? {
+        chainFor(note).forEachIndexed { i, c ->
+            if (fits(c)) return Spot(c, pushed = false, order = i)
+        }
+        return null
+    }
+
+    /**
+     * 候选链上**挪出来的**位置里最近的一个：自己沿空白滑开，或让别人让位。
+     *
+     * 只留最近的那一份（整句优先、就近档更小）：滑开与让位都可能把框推到隔行去，
+     * 而链上后面还有真正贴着选区的空白时，当然选贴着的那个。
+     */
+    fun pushedSpot(note: NoteInk, allowRoom: Boolean): Spot? {
+        var best: Spot? = null
+        fun consider(spot: Spot) {
+            val cur = best
+            if (cur == null || before(spot, cur)) best = spot
+        }
+        for ((i, c) in chainFor(note).withIndex()) {
+            val cur = best
+            // 已经贴着自然留白、又是最窄的一行：没有更近的可能，不用再往下比。
+            if (cur != null && cur.candidate.complete &&
+                cur.candidate.distanceBand == 0 && cur.candidate.lines == 1 &&
+                cur.candidate.excessDistance <= NOTE_GEOM_EPS
+            ) {
+                break
+            }
+            if (cur?.candidate?.complete == true && !c.complete) continue
+            // 自己先沿空白挪开；实在挪不开才让别人让位（让位排在「自己挪开」之后）。
+            // 让位排在隔行之前，但也不必只认本行：隔一行那块空白里如果能靠别人让一让就放下，
+            // 比「自己滑到隔两行」更近（2026-10-29 用户定口）。最多问到隔一行。
+            val slid = slideFree(note, c)
+            if (slid != null) {
+                consider(Spot(slid, pushed = true, order = i))
+                continue
+            }
+            if (allowRoom && c.ring <= NOTE_ROOM_MAX_RING && roomTried.add(c)) {
+                val plan = makeRoom(note, c) ?: continue
+                consider(Spot(plan.fresh, pushed = true, room = plan, order = i))
+            }
+        }
+        return best
     }
 
     /**
@@ -2590,17 +2736,43 @@ private fun assignNoteCandidates(
      * 候选链已经按「整句 → 就近 → 折行数 → 环 → 方向」排好，所以一路扫下去就是规则顺序。
      * 截断候选因此只在整句都放不下时才会被取到——它是最后手段（2026-10-29 用户定口）。
      *
-     * @return 放好（或被让位成功）时为 `true`。
+     * 2026-10-29 用户定口（真机「函数就是功能呀！老外的词汇太贫乏了。」）：**让位 / 自己滑开
+     * 得到的位置不是定论**——它可能已经被挤出隔两行，而再往外一圈还有一条真正贴着选区的空白。
+     * 所以这里先把「挪出来的位置」记着，继续沿链（必要时再要下一圈候选）找更近的那个：
+     * 找到现成的、且明显更近的（整句优先、就近档更小）就用它，刚才那份挪动作废。
      */
-    fun placeBest(note: NoteInk, allowRoom: Boolean = true): Boolean {
-        for (c in chainFor(note)) {
-            if (take(note, c)) return true
-            // 让位排在隔行之前：本行（ring 0）只差别人让一让就先让别人让。
-            // 已经试过让不动的就别再试：逐圈补候选时同一批环 0 候选会被反复扫到，
-            // 而池子只会变长、已放批注只会变多，让不动的结论不会翻案。
-            if (allowRoom && c.ring == 0 && roomTried.add(c) && makeRoom(note, c)) return true
+    fun placeNote(note: NoteInk, allowRoom: Boolean = true): Boolean {
+        var best: Spot? = null
+        /** 还愿意往后看几圈：挪出来的位置被挤出去几档，就再往后看几圈。 */
+        var lookUntil = 0
+        var seenRing = 0
+        while (true) {
+            val free = freeSpot(note)
+            val pushed = pushedSpot(note, allowRoom)
+            val cand = when {
+                pushed == null -> free
+                free == null -> pushed
+                // 挪出来的位置只有确实更靠前才值得要（2026-10-29 用户定口：让位以后可以
+                // 另找更近的位置）；一样好时按候选链的先后，现成的那个不因为「没动别人」就吃亏。
+                before(pushed, free) -> pushed
+                else -> free
+            }
+            if (cand != null && (best == null || before(cand, best))) best = cand
+            val cur = best
+            if (cur != null) {
+                // 现成的位置就是这一带最合适的：直接落。
+                // 挪出来的位置还要再看几圈——它可能已经被挤出隔两行（下面是 [lookUntil] 的口径）。
+                if (!cur.pushed) break
+                lookUntil = cur.candidate.ring + max(1, cur.candidate.distanceBand)
+                if (seenRing > lookUntil) break
+            }
+            val batch = nextBatch(note) ?: break
+            addBatch(note, batch)
+            seenRing = max(seenRing, batch.maxOfOrNull { it.ring } ?: seenRing)
         }
-        return false
+        val spot = best ?: return false
+        if (spot.room != null) commitRoomPlan(note, spot.room) else commitSpot(note, spot.candidate)
+        return true
     }
 
     /**
@@ -2635,24 +2807,14 @@ private fun assignNoteCandidates(
             // 规则第 8 条：右侧被别人占了，先让别人上下让一让。
             if (!roomTriedHere) {
                 roomTriedHere = true
-                if (makeRoom(note, c)) return true
+                val plan = makeRoom(note, c)
+                if (plan != null) {
+                    commitRoomPlan(note, plan)
+                    return true
+                }
             }
         }
         return false
-    }
-
-    /**
-     * 按候选链取位：先试当前这批（环 0 / 已取到的圈），放不下再要下一批。
-     *
-     * 排序键已经是「整句 → 就近 → 折行数 → 环 → 方向」，所以一路扫下去就是规则顺序。
-     * 2026-10-29 用户定口：截断是最后手段，整句放得下就不会走到截断那一批。
-     */
-    fun placeNote(note: NoteInk, allowRoom: Boolean = true): Boolean {
-        while (true) {
-            if (placeBest(note, allowRoom)) return true
-            val batch = nextBatch(note) ?: return false
-            addBatch(note, batch)
-        }
     }
 
     // 先挑顺序：正文行自上而下 → 同一行从左到右 → 批注 id。

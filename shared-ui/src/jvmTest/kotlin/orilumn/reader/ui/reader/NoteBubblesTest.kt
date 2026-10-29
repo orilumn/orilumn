@@ -136,6 +136,7 @@ class NoteBubblesTest {
         textLines: List<NoteTextLine> = emptyList(),
         arrowInk: List<Rect> = emptyList(),
         sizer: NoteTextSizer = EstimatedNoteTextSizer,
+        fontPx: Float = 20f,
     ) = noteBubblePlacements(
         noteInk = notes,
         obstacles = NoteObstacles(
@@ -150,7 +151,7 @@ class NoteBubblesTest {
         contentRight = contentRight,
         contentBottom = contentBottom,
         pageRight = pageRight,
-        fontPx = 20f,
+        fontPx = fontPx,
         pageBottom = pageBottom,
         noteTextSizer = sizer,
     )
@@ -3882,5 +3883,97 @@ class NoteBubblesTest {
                 !short.candidate.conflicts(neighbor.candidate, noteMetrics.marginX, noteMetrics.marginY) &&
                 !long.candidate.conflicts(short.candidate, noteMetrics.marginX, noteMetrics.marginY),
         )
+    }
+
+    /**
+     * 真机复现（vivo PA2353，2026-10-29）：同一行四条批注，「函数就是功能呀！老外的词汇太贫乏了。」
+     * 因为会让出位置排在最后，落到本行右侧那一列时被「用几章来」「怎么讨论呢？」挡住，
+     * 自己一路往下滑到隔两行的地方（y≈1824），而本行下方那条空白里明明有一行高的整句位置
+     * （y≈1758）没人用。
+     *
+     * 2026-10-29 用户定口：让位 / 自己滑开得到的位置不是定论——挪出去以后还要沿候选链继续找，
+     * 找到真正贴着选区的那一块就换过去（长的那条去占左侧宽空白，短的那条留在本行下方）。
+     *
+     * 行几何与字号取自真机日志（旁注字号 40px、正文 55.6px），空白块也一致。
+     */
+    @Test
+    fun `note pushed down two rows re-searches a nearer blank`() {
+        val body = 55.5556f
+        val m = NoteMetrics.forBody(body)
+        val rows = listOf(
+            rect(125f, 343f, 497f, 482f),
+            rect(125f, 538f, 1008f, 607f),
+            rect(165f, 683f, 429f, 739f),
+            rect(165f, 739f, 781f, 795f),
+            rect(165f, 795f, 605f, 851f),
+            rect(165f, 851f, 187f, 907f),
+            rect(125f, 983f, 408f, 1052f),
+            rect(209f, 1098f, 585f, 1167f),
+            rect(209f, 1213f, 925f, 1282f),
+            rect(194f, 1328f, 701f, 1397f),
+            rect(209f, 1443f, 1309f, 1512f),
+            rect(125f, 1558f, 1689f, 1627f),
+            rect(125f, 1627f, 1689f, 1696f),
+            rect(125f, 1696f, 789f, 1765f),
+            rect(125f, 1840f, 291f, 1965f),
+            rect(125f, 2011f, 1696f, 2080f),
+            rect(125f, 2080f, 401f, 2149f),
+            rect(194f, 2195f, 642f, 2264f),
+            rect(194f, 2310f, 642f, 2379f),
+            rect(241f, 2494f, 1023f, 2563f),
+        )
+        val lines = rows.mapIndexed { i, r -> NoteTextLine(rect = r, blockId = 0, index = i) }
+        // 真机给的是**逐字墨迹**收紧后的障碍（行盒上下各有几像素行距是空白），
+        // 这里按真机日志反推的偏移把行盒收成字墨迹，空白块才能和真机一致。
+        val inkRows = rows.map { rect(it.left, it.top + 4f, it.right, it.bottom - 11f) }
+        val bubbles = place(
+            notes = listOf(
+                noteInk(112L, listOf(rect(861f, 1627f, 1045f, 1696f)), "用几章来"),
+                noteInk(
+                    118L,
+                    listOf(rect(1321f, 1627f, 1413f, 1696f)),
+                    "怎么讨论呢？讨论什么呢？以什么形式讨论呢？开个party可好？再长一点会怎样？折行呢？",
+                ),
+                noteInk(
+                    119L,
+                    listOf(rect(723f, 1627f, 815f, 1696f)),
+                    "函数就是功能呀！老外的词汇太贫乏了。",
+                ),
+                noteInk(128L, listOf(rect(1183f, 1627f, 1275f, 1696f)), "就是具体"),
+            ),
+            textInk = inkRows,
+            textLines = lines,
+            contentLeft = 125f,
+            contentRight = 1690f,
+            contentBottom = 2780f,
+            pageRight = 1840f,
+            pageBottom = 2800f,
+            fontPx = body,
+        )
+        val dbg = bubbles.joinToString(" | ") {
+            "${it.annotationId}@(${it.leftPx.toInt()},${it.topPx.toInt()}-" +
+                "${(it.leftPx + it.widthPx).toInt()},${(it.topPx + it.maxLines * m.lineH).toInt()})"
+        }
+        assertEquals(4, bubbles.size)
+        assertTrue("四条都要能整句读完：$dbg", bubbles.none { it.compact })
+        val note = bubbles.single { it.annotationId == 119L }
+        assertTrue(
+            "「函数」应落在本行下方那一条空白里，而不是被挤到隔两行：$dbg",
+            note.topPx < 1800f,
+        )
+        assertTrue(
+            "落位要贴着本行下方的空白（隔一行，y≈1758），实际 top=${note.topPx}：$dbg",
+            abs(note.topPx - 1758f) <= 4f,
+        )
+        for (i in bubbles.indices) {
+            for (j in i + 1 until bubbles.size) {
+                val a = boxOf(bubbles[i])
+                val b = boxOf(bubbles[j])
+                assertTrue(
+                    "两条框不能重叠：${bubbles[i].annotationId}=$a / ${bubbles[j].annotationId}=$b $dbg",
+                    !a.overlaps(b),
+                )
+            }
+        }
     }
 }

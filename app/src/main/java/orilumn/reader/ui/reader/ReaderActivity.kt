@@ -43,7 +43,6 @@ import orilumn.reader.data.font.FontRepository
 import orilumn.reader.data.font.FontEntry
 import orilumn.reader.data.epub.TocItem
 import orilumn.reader.data.epub.ZipEpubResourceReader
-import orilumn.reader.data.settings.BookSettings
 import orilumn.reader.data.settings.BookSettingsStore
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.data.settings.ReaderSettingsStore
@@ -61,6 +60,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okio.FileSystem
 import okio.Path.Companion.toPath
@@ -78,7 +79,7 @@ import org.json.JSONObject
  *    [ReaderAnnotationPanel]，R3 收敛；
  *    返回键/SAF 导入/WiFi 对话框/字库同步/系统亮度读值/主题预设持久化由本壳承载，不进面板）。
  *  - 环境：保留系统栏沉浸（show/hide chrome + WindowInsetsAnimationCompat 逐帧 statusInset）、
- *    Room 设置持久化（fork-on-first-customization + withBookStyle）、版式重排节流
+ *    Room 设置持久化（全局项 + 每书稀疏覆盖，见 `docs/设置模型整改计划.md`）、版式重排节流
  *    （deferCanonical / prepareRelayout 循环 / 关面板后 finalizeRelayoutAll 全书重排）；
  *  - 移除：BodyPageView/curl/FlipGestureDetector/AndroidReaderBars/BrightnessOverlayView 与
  *    亮度手势指示（shared-ui [BrightnessGestureIndicator] 已含，本文件不再重复声明）。
@@ -206,10 +207,9 @@ class ReaderActivity : ComponentActivity() {
             }
         }
 
-        effective = settingsStore.load()
-        if (bookId >= 0) {
-            effective = effective.applyOverlay(bookSettingsStore.load(bookId))
-        }
+        // 合成生效值走共享入口（全局 + 本书稀疏覆盖），与桌面开书同一条路；
+        // 归属与合成规则只在保存层一处，壳不再各写一份。
+        effective = settingsPersist.effectiveFor(bookId)
         profile = TypographicProfile.build(effective, dpDensity)
         Logger.w(TAG, "★ ReaderActivity onCreate path=${bookPath != null} bookId=$bookId")
 
@@ -352,20 +352,8 @@ class ReaderActivity : ComponentActivity() {
                     SnapshotReaderHost(it, { pos -> currentPos = pos }, { relayoutAnchor.release() })
                 }
             }
-            // 首次开书收口（与桌面同调，共享 probeOriginalOnOpen）：默认原书主题开书时，
-            // 落位即按落位章回填未钉的缩进/行距并 bookOnly 持久 + 轻刷；已钉/非原书直接跳过。
-            // 每本书一次（overlay 落 pin 后共享门控自停）。
-            var probedOpenBook by remember { mutableStateOf(-1L) }
-            LaunchedEffect(currentPos) {
-                val p = currentPos ?: return@LaunchedEffect
-                if (probedOpenBook == bookId) return@LaunchedEffect
-                probedOpenBook = bookId
-                val c = engine ?: return@LaunchedEffect
-                val probed = withContext(Dispatchers.Default) {
-                    c.probeOriginalOnOpen(p.chapter, profile.bodyPx, effective, bookSettingsStore.load(bookId), profile.density)
-                }
-                if (probed != effective) commitSettings(probed, typographyChanged = true, bookOnly = true)
-            }
+            // 首次开书不探测：新模型里「每本书先读原书」靠**没配就不发声明**让级联自己读，
+            // 开书路径零额外工作（原书实测读数只在打开设置面板时量一次，见 openSettingsPanel）。
             if (snapshot != null) {
                 ReaderScreen(
                     host = snapshot,
@@ -443,7 +431,6 @@ class ReaderActivity : ComponentActivity() {
                 onDismiss = { closeSettingsPanel() },
                 onPreview = { previewLive(it) },
                 onCommitTypography = { commitSettings(it, typographyChanged = true) },
-                onCommitBookPrivate = { commitSettings(it.withBookStyle(), typographyChanged = true, bookOnly = true) },
                 onCommitLight = { commitSettings(it, typographyChanged = false) },
                 // 颜色滑条拖动中只应用不落盘：色槽与正文墨迹随手实时变，松手才写设置。
                 onPreviewLight = { liveApply(it) },
@@ -501,12 +488,33 @@ class ReaderActivity : ComponentActivity() {
 
     // ---- Settings panel ----
 
+    /**
+     * 打开设置面板：先按当前章量一次原书实测读数（首行缩进 / 行高），只填空着的那几个滑块
+     * （读者没配的项显示书的真实值；书没写行高就显示 1.5）。读数**不落盘、不进版式**，
+     * 所以只更新面板状态，不触发重排。
+     */
     private fun openSettingsPanel() {
         panelPage = null
         panelSettings = effective
         settingsOpen = true
         loadPanelFonts()
         applySystemBars()
+        // 面板读数（两端同调，共享 BookDocumentController.bookStyleReadings）。
+        val c = engine
+        val ch = currentPos?.chapter
+        if (c != null && ch != null) {
+            val base = panelSettings
+            val px = profile.bodyPx
+            val dn = profile.density
+            lifecycleScope.launch {
+                val measured = withContext(Dispatchers.Default) { c.bookStyleReadings(ch, px, base, dn) }
+                // 只合并读数两项：读者已经拖过的值不能被一次迟到的读数覆盖。
+                if (settingsOpen) panelSettings = panelSettings.copy(
+                    probeIndent = measured.probeIndent,
+                    probeLineSpacing = measured.probeLineSpacing,
+                )
+            }
+        }
         // 面板开抑制 + 关门控走共享收口（PanelRelayoutGate，桌面同调）；关闭时若排版真实
         // 变化再整书重跑（门控内指纹判定）。
         panelGate?.onPanelOpen()
@@ -671,12 +679,12 @@ class ReaderActivity : ComponentActivity() {
     // ---- Settings commit / preview ----
 
     /** 统一入口：liveApply 后，排版变化走节流重排，否则重应用物理背光；随后持久化。 */
-    private fun commitSettings(next: ReaderSettings, typographyChanged: Boolean, bookOnly: Boolean = false) {
+    private fun commitSettings(next: ReaderSettings, typographyChanged: Boolean) {
         liveApply(next)
         // 排版提交先刷新字库池再重排：换选已导入字体只改槽，不断行也可能同分页，
         // 池不跟进则新族名无处解析、画出来只能回退（切字体无效的根因）。
         if (typographyChanged) refreshFontsThenRelayout() else applyPhysicalBrightness(next)
-        persistSettings(next, bookOnly)
+        persistSettings(next)
     }
 
     /** 拖拽实时应用（不落盘）：更新 effective/profile 与引擎持有 profile。排版由调用方节流重排。 */
@@ -707,16 +715,36 @@ class ReaderActivity : ComponentActivity() {
 
     /**
      * 持久化：双层语义收归共享 [orilumn.reader.data.settings.PerBookSettings]
-     * （平板为基准：全量快照 + 修改直写全局 + bookOnly 隔离 + 纯全局直写）。
+     * （全局项只写全局、私有项只写本书，两侧零交叉；私有项永不写全局）。
      */
     private val settingsPersist by lazy {
         orilumn.reader.data.settings.PerBookSettings(settingsStore, bookSettingsStore)
     }
 
-    private fun persistSettings(next: ReaderSettings, bookOnly: Boolean = false) {
+    /**
+     * 设置写入串行锁：每次提交都读「全局 + 本书 overlay」再整套写回，两次并发写会互相
+     * 覆盖（后落盘的旧快照把新改动顶掉，表现为「改完没存 / 设置互相串」）。
+     * 锁负责互斥，提交顺序由下面的序号保证。
+     */
+    private val settingsPersistMutex = Mutex()
+
+    /**
+     * 提交序号：`Mutex` 只保证互斥，不保证「先提交的先拿锁」（两个协程可能被不同 IO 线程
+     * 取走后反序到达锁）。序号在提交时（主线程）分配，锁内比较：晚到的旧快照直接丢弃，
+     * 不让它把新改动顶掉。
+     */
+    private var settingsPersistSubmitted = 0L
+    private var settingsPersistApplied = 0L
+
+    private fun persistSettings(next: ReaderSettings) {
+        val seq = ++settingsPersistSubmitted
+        val id = if (bookId >= 0) bookId else null
         lifecycleScope.launch(Dispatchers.IO) {
-            settingsPersist.persist(if (bookId >= 0) bookId else null, next, bookOnly)
-            Logger.d(TAG, "persist settings bookOnly=$bookOnly")
+            settingsPersistMutex.withLock {
+                if (seq <= settingsPersistApplied) return@withLock
+                settingsPersist.persist(id, next)
+                settingsPersistApplied = seq
+            }
         }
     }
 
@@ -746,9 +774,8 @@ class ReaderActivity : ComponentActivity() {
                 if (relayoutPending) delay(RELAYOUT_INTERVAL_MS)
             }
             relayoutScheduled = false
-            // 版式指纹真变（面板外提交——开书探针回填/原书设置
-            // 提交/字体回退）时清全书旧指纹磁盘表；指纹未变（夜间切换等
-            // 非版式提交）是空操作，不误删当前参数下的有效磁盘表。B2 随后
+            // 版式指纹真变（面板外提交——原书设置提交/字体回退）时清全书旧指纹磁盘表；
+            // 指纹未变（夜间切换等非版式提交）是空操作，不误删当前参数下的有效磁盘表。B2 随后
             // 按新指纹逐章重写。
             engine?.cleanStaleDiskTables()
             engine?.requestWholeBookRelayout()
@@ -978,18 +1005,6 @@ class ReaderActivity : ComponentActivity() {
         syncSkiaPool(orilumn.reader.engine.css.FontDemand.EMPTY)
     }
 
-
-    /**
-     * 切到原书设置时，把当前章节的真实排版（首行缩进/行距）快照进预设的滑块值
-     * （2em 缩进的书滑块就是 2），再走正常提交 + 增量排版。探测失败原样返回。
-     */
-    private fun ReaderSettings.withBookStyle(): ReaderSettings {
-        if (layoutTheme != "original") return this
-        val c = engine ?: return this
-        val p = currentPos ?: return this
-        // 共享收口（与桌面同调）：见 BookDocumentController.probeOriginalTheme。
-        return c.probeOriginalTheme(p.chapter, profile.bodyPx, this, profile.density)
-    }
 
     companion object {
         private const val TAG = "Orilumn.Reader"

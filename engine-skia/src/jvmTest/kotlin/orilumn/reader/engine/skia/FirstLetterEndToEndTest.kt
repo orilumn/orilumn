@@ -79,7 +79,7 @@ class FirstLetterEndToEndTest {
             themeSheetFromProfile(p),
             null,
             ReaderUiSheet.build(p),
-            paragraphScale = p.paragraphSpacingScale, gapScale = p.paragraphGapScale, pxScale = p.density,
+            paragraphEm = p.paragraphSpacingEm, gapScale = p.paragraphGapScale, pxScale = p.density,
         )
     }
 
@@ -191,7 +191,7 @@ class FirstLetterEndToEndTest {
     fun `绘制投影带同一条 2em run`() {
         val h = heavy(withRule)
         val lines = DrawLineBuilder.build(
-            h.result, h.styles, h.classify, HIDDEN_NONE, profile().letterSpacingEm,
+            h.result, h.styles, h.classify, HIDDEN_NONE, (profile().letterSpacingEm ?: 0f),
             firstLetterOf = h.fl,
         )
         val first = lines.toSortedMap().values.first()
@@ -202,7 +202,7 @@ class FirstLetterEndToEndTest {
 
         // 对照：没有该规则 ⇒ 投影零 run（老像素逐字节一致）。
         val base = heavy(withoutRule)
-        val baseLines = DrawLineBuilder.build(base.result, base.styles, base.classify, HIDDEN_NONE, profile().letterSpacingEm)
+        val baseLines = DrawLineBuilder.build(base.result, base.styles, base.classify, HIDDEN_NONE, (profile().letterSpacingEm ?: 0f))
         assertTrue("无规则时投影零 run", baseLines.values.all { it.fontRuns.isEmpty() })
     }
 
@@ -230,7 +230,7 @@ class FirstLetterEndToEndTest {
         assertTrue("整段必须真的断成多行（实际 ${leaf.lineHeights.size} 行）", leaf.lineHeights.size >= 2)
 
         val lines = DrawLineBuilder.build(
-            h.result, h.styles, h.classify, HIDDEN_NONE, profile().letterSpacingEm,
+            h.result, h.styles, h.classify, HIDDEN_NONE, (profile().letterSpacingEm ?: 0f),
             firstLetterOf = h.fl,
         ).toSortedMap()
         val first = lines.values.first()

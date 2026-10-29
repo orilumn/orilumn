@@ -47,7 +47,7 @@ class ChapterTextTest {
             styleMap = prepare.styleMap,
             classify = prepare.classify,
             hidden = prepare.hidden,
-            letterSpacingEm = profile().letterSpacingEm,
+            letterSpacingEm = (profile().letterSpacingEm ?: 0f),
             genOf = prepare.genOf,
             firstLetterOf = prepare.firstLetterOf,
         )

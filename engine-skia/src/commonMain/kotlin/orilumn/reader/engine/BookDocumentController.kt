@@ -13,6 +13,7 @@ import orilumn.reader.engine.css.CssBundle
 import orilumn.reader.engine.css.LightCssParser
 import orilumn.reader.engine.css.StyleComputer
 import orilumn.reader.engine.css.StyleSheet
+import orilumn.reader.engine.css.uaSheetFromProfile
 import orilumn.reader.engine.html.HEADING_TAGS
 import orilumn.reader.engine.html.HtmlTreeConverter
 import orilumn.reader.engine.html.MarkupElement
@@ -517,74 +518,43 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         orilumn.reader.data.read.ReadingLocatorCodec.decode(locator)
 
     /**
-     * 首次开书收口（两端宿主同调）：已是原书主题、且本书从未钉过缩进/行距时，
-     * 从落位章起找首个含 `<p>` 的章回填**缺的键**；否则原样返回。
-     * 调用方负责 bookOnly 持久化 + 一次轻刷（仅返回值与 base 不同时）。
-     * 已钉过的键永不再碰 —— 用户改过即尊重，不会重启又被书盖回去。
+     * **面板读数**（两端宿主同调，`docs/设置模型整改计划.md` §3.3 / §3.4）：打开设置面板时按当前章
+     * 量一次原书正文段落的缩进与行高，写进**只读读数** [ReaderSettings.probeIndent] /
+     * [ReaderSettings.probeLineSpacing] 供滑块显示（读者没配该项时显示书的真实值；书没写行高
+     * 就显示引擎初值 1.5，那本来就是生效值）。
+     *
+     * **只读**：不参与渲染、不进版式键、不落盘（`SettingsScope.SESSION_ONLY`）；读者一拖滑条才写
+     * 成本书的显式值。开书路径零测量 —— 开书探针已退役（§3.7），「每本书先读原书」靠
+     * 「没配就不发声明」让级联自己读，不靠量出来再回填。
+     *
+     * 读数口径是**书自己的**（UA + 作者样式裸级联），不含读者 UI 层与主题层，探测失败原样返回。
+     * 段间距读数含 UA 基线（`p { margin: 1em 0 }`）：书没写 margin 时引擎实际用的就是这 1em。
      */
-    suspend fun probeOriginalOnOpen(
-        startChapter: Int,
+    fun bookStyleReadings(
+        chapter: Int,
         bodyPx: Float,
         base: ReaderSettings,
-        overlay: BookSettings,
         density: Float = 1f,
     ): ReaderSettings {
-        if (base.layoutTheme != "original") return base
-        val needIndent = overlay.firstLineIndent == null
-        val needLine = overlay.lineSpacing == null
-        if (!needIndent && !needLine) return base
-        var ch = startChapter.coerceIn(0, (chapterCount - 1).coerceAtLeast(0))
-        while (ch < chapterCount) {
-            val markup = runCatching { ensureMarkup(ch) }.getOrNull()
-            if (markup != null && hasParagraph(markup)) {
-                val snap = snapshotTypography(ch, bodyPx, density) ?: return base
-                var out = base
-                if (needIndent) out = out.copy(firstLineIndent = snap.firstLineIndent)
-                if (needLine) out = out.copy(lineSpacing = snap.lineSpacing)
-                return out
-            }
-            ch++
-        }
-        return base
-    }
-
-    private fun hasParagraph(root: MarkupElement): Boolean =
-        root.tag == "p" || root.children.any(::hasParagraph)
-
-    /**
-     * 原书设置快照（Q2 下沉：原 `ReaderActivity.withBookStyle`）：切到原书设置时，
-     * 把当前章节的真实排版（首行缩进/行距）快照进设置值。探测失败原样返回。
-     * 纵边距不回填：段间距即疏密，书的 margin 原样参与折叠。
-     */
-    fun snapshotBookStyle(chapter: Int, bodyPx: Float, base: ReaderSettings, density: Float = 1f): ReaderSettings {
-        if (base.layoutTheme != "original") return base
         val snap = snapshotTypography(chapter, bodyPx, density) ?: return base
         return base.copy(
-            firstLineIndent = snap.firstLineIndent,
-            lineSpacing = snap.lineSpacing,
+            probeIndent = snap.firstLineIndent,
+            probeLineSpacing = snap.lineSpacing,
+            probeParagraphSpacing = snap.paragraphSpacing,
+            probeLetterSpacing = snap.letterSpacing,
         )
     }
 
-    /** 原书排版快照（缩进/行距）：UA+作者裸级联；失败回 null（调用方回退 base）。 */
+    /** 原书排版快照（缩进/行距/段距）：UA+作者裸级联；失败回 null（调用方回退 base）。 */
     private fun snapshotTypography(chapter: Int, bodyPx: Float, density: Float): BookStyleProbe.Snapshot? = runCatching {
         val unit = unitAt(chapter) ?: return@runCatching null
         val markup = unit.markup ?: return@runCatching null
         val sheets = (unit.cssBundle?.cssTexts ?: emptyList()).map { LightCssParser().parse(it) }
-        val styles = StyleComputer(bodyPx, StyleSheet(emptyList()), sheets, pxScale = density).compute(markup)
-        BookStyleProbe.snapshot(styles)
-    }.onFailure { Logger.w(logTag, "snapshotBookStyle probe FAIL ch=$chapter ${it.message} → fallback base") }
+        // UA 层必须真加载：段间距读的是「引擎实际生效的段距」，书没写 margin 时生效值来自 UA 的 1em。
+        val styles = StyleComputer(bodyPx, uaSheetFromProfile(profile), sheets, pxScale = density).compute(markup)
+        BookStyleProbe.snapshot(styles, root = markup)
+    }.onFailure { Logger.w(logTag, "bookStyleReadings FAIL ch=$chapter ${it.message} → 回退 base") }
         .getOrNull()
-
-    /**
-     * 用户层共享收口：原书主题提交探针（平板/桌面两端宿主同调，禁止各写一遍）。
-     *
-     * 背景：UI 层（tier 44）在原书模式下仍按存储滑块值渲染，而 `withLayoutTheme(original)`
-     * 只给中性默认；提交时不经此探针，三滑块就与书真实排版脱节 —— 桌面曾因此与平板
-     * 原书设置渲染不一致（桌面直透面板值、无探测）。
-     * 非 original / 探测失败一律原样返回（见 [snapshotBookStyle]）。
-     */
-    fun probeOriginalTheme(chapter: Int, bodyPx: Float, next: ReaderSettings, density: Float = 1f): ReaderSettings =
-        snapshotBookStyle(chapter, bodyPx, next, density)
 
     /** Start location after loading (null when there is no book/no chapter).
  *   Returns (chapter, page): starting from [startChapter], skips chapters with no laid-out

@@ -1,25 +1,32 @@
 package orilumn.reader.data.settings
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 
 /**
- * Global reading settings (single-layer full object).
+ * Reading settings object: carries the **global memory** (the only cross-book layer) and, after
+ * [applyOverlay], the **effective value for one book**.
  *
- * Holds **global** user preferences, consistent across books (font size / line spacing / font / theme...);
- * per-book data lives in `BookReadingState` (reading progress), not in this table.
+ * 两级归属见 [SettingsScope]（2026-10-29 定口）：
+ * - **全局**（`reader.json`）：亮度族、阅读主题、笔记族、续读/页码开关、字体列表隐藏过滤、
+ *   持久化元数据 —— 这些是「与某本书无关的阅读环境与读者印记」；
+ * - **私有**（`books/{bookId}.json`，稀疏覆盖）：字号/行距/字距/段距/页边距/字体族与字重/
+ *   排版主题/翻页开关/首行缩进 —— 每本书默认原书样式，读者没配的项一律不发声明。
+ *
+ * **私有项永不写全局**：本书改字号不会影响别的书，也不会被别的书改掉。
+ * 阅读进度在 `BookReadingState`，不在本表。
  *
  * Dual preset mechanism:
  *  - **Default set**: [Companion.DEFAULT] (built-in constants, never persisted);
- *  - **User set**: stored by [ReaderSettingsStore] at `filesDir/settings/reader.json`;
+ *  - **User set**: stored by [ReaderSettingsStore] at `filesDir/settings/reader.json`（只含全局项）；
  *  - **One-tap reset**: delete the user file → fall back to [Companion.DEFAULT].
  *
  * Font replacement is gated by "element type" into three tiers: `fontBody` body / `fontTitle` headings /
- * `fontCode` code, replacing the old M2 five-way split (fontBody/fontTitle/fontCode/fontBold/fontItalic,
- * where bold/italic no longer have their own slots). A slot stores a font alias and is forced globally —
- * all text of the corresponding type in the book uses the selected local font; empty string = that type
- * is not replaced and keeps the original book. All layout themes apply uniformly.
+ * `fontCode` code. A slot stores a font alias — all text of the corresponding type uses the selected
+ * local font; empty string = that type is not replaced and keeps the original book. **按书私有**
+ * （同一本书挑宋体不传染到别的书）。All layout themes apply uniformly.
  */
 @Serializable
 data class ReaderSettings(
@@ -27,19 +34,60 @@ data class ReaderSettings(
     val theme: String = "sepia",
     /** Body font size (px). */
     val fontSize: Int = 18,
-    /** Line spacing (number, 1.x times). */
-    val lineSpacing: Double = 1.5,
-    /** [Style system] First-line indent (em, 0..10): `text-indent` on body paragraphs (p/li), applied by the UI layer so it overrides the book. Absolute value: 0 = no first-line indent. Switching to 原书设置 probes the book's own indent into this slot (see BookStyleProbe), so a 2em book shows 2. */
-    val firstLineIndent: Double = 0.0,
-    /** [Style system] 段间距 (% scale 0..1000, default 100): p/li 纵边距乘算
-     *  (100 = 书/主题节奏，0 = p/li 边距清零；标题等结构块不受此值影响，看疏密)。
-     *  UI 滑块取值 0..100 = 本值 ÷10（10 = 100%），存档仍存本百分比 ⇒ 旧档 0..200 免迁移。 */
-    val paragraphSpacing: Double = 100.0,
+    /**
+     * 行距（倍数，0.5..2.5）。**本书私有、可空**：`null` = 读者没配过 ⇒ UI 层不发行距声明，
+     * 书自己的 `line-height` 生效（书没写时由引擎初值 1.5 兜底）；任何实数都照原样发（0 就是 0，
+     * 不拿 0 当「没配」哨兵）。面板未配时显示原书实测行高（[probeLineSpacing]），没写显示 1.5。
+     */
+    val lineSpacing: Double? = null,
+    /** [Style system] First-line indent (em, 0..10): `text-indent` on body paragraphs (p/li), applied by the UI layer so it overrides the book.
+     *  **本书私有、可空**：`null` = 读者没设过（不发声明，书自己的缩进原样，含悬挂缩进）；
+     *  `0` = 读者明确不要缩进（发 `text-indent:0em`，压掉书的缩进）；`N` = N em。
+     *  打开设置面板时按当前章量一次书的缩进，只进 [probeIndent] 供面板显示，不写本字段。 */
+    val firstLineIndent: Double? = null,
+    /** 首行缩进的**只读面板读数**（本次会话，不落盘）：读者没设值时滑条显示它。
+     *  它不参与渲染（渲染只看 [firstLineIndent]），所以量到了也不会改版式、不进分页键。 */
+    @Transient
+    val probeIndent: Double? = null,
+    /** 行距的**只读面板读数**（本次会话，不落盘）：读者没设值时滑条显示原书实际行高。
+     *  同 [probeIndent]：不参与渲染、不进分页键；打开面板时量一次（见 §3.3）。 */
+    @Transient
+    val probeLineSpacing: Double? = null,
+    /**
+     * [Style system] 段间距（**绝对值，em，0..2**，本书私有、可空）：`null` = 读者没配 ⇒ 引擎
+     * 不覆盖，p/li 的纵边距原样（书 / 主题 / UA 自己的段距生效，面板显示原书实测值）；`N` =
+     * p/li 的上下外边距**固定为 N em**，不随书放大或缩小（0 = 段落紧贴）。
+     *
+     * 2026-10-29 由百分比乘算改回绝对值：百分比是**乘书自己的 margin**，书里 0.3em 时
+     * 「50%」= 0.15em、「200%」= 0.6em，与书里 1.5em 时的同样两档（0.75em / 3em）完全不是
+     * 一个手感 —— 同一条滑块在不同书上代表不同的物理间距。绝对值下 N em 就是 N em。
+     *
+     * 旧档（百分比 0..1000）一次性迁移见 [BookSettings] / `BookSettingsStore` 的 legacy 读法
+     * （100 → null，其余 ÷100 后 clamp 到 0..2）。
+     */
+    val paragraphSpacing: Double? = null,
+    /** 段间距的**只读面板读数**（本次会话，不落盘）：读者没配时滑条显示原书实测段距
+     *  （含 UA 基线 1em；书自己写了 margin 就按书）。同 [probeIndent]：不参与渲染、不进分页键。 */
+    @Transient
+    val probeParagraphSpacing: Double? = null,
     /** [Style system] 疏密 (% scale 0..1000, default 100): p/li 之外一切块级纵边距乘算
      *  (100 = 原书节奏，0 = 结构块边距清零；p/li 看段间距)。滑块映射同 [paragraphSpacing]。 */
     val paragraphGap: Double = 100.0,
-    /** [Style system] Character spacing (letter-spacing) slot -100..100, mapped to -0.2em..0.2em (each slot unit = 0.002em); 0 = no extra spacing. */
-    val letterSpacing: Double = 0.0,
+    /**
+     * [Style system] 字间距槽 -100..100，映射到 -0.2em..0.2em（每档 0.002em）；**本书私有、可空**。
+     *
+     * `null` = 读者没配 ⇒ 引擎**按书**：用正文段落自己的 `letter-spacing`（书没写就是 0），
+     * 面板显示 [probeLetterSpacing] 实测值。`N` = 读者显式覆盖：全章按 N/500 em 排，
+     * 书的字距不再生效（`0` 就是「明确不加字距」，与「没配」是两回事）。
+     *
+     * 旧档里 `0` 是默认值且等于「不加字距」⇒ 读档时按没配处理（[fromJson]），
+     * 于是升级后书自带的字距立刻生效。
+     */
+    val letterSpacing: Double? = null,
+    /** 字间距的**只读面板读数**（本次会话，不落盘）：读者没配时滑条显示原书正文实测字距
+     *  （`letter-spacingPx / font-size`）。同 [probeIndent]：不参与渲染、不进分页键。 */
+    @Transient
+    val probeLetterSpacing: Double? = null,
     /**
      * [Style system] **混排字距** 0..100, mapped to 0..1.0em; 25 = 0.25em (CLREQ default).
      *
@@ -65,9 +113,6 @@ data class ReaderSettings(
     val fontBody: String = "",
     val fontTitle: String = "",
     val fontCode: String = "",
-    /** 原书设置 开关 (与 layoutTheme=="original" 同义): 关闭样式主题层, 只回落到书籍 CSS 层叠.
-     *  它不改变优先级 — UI 设置层仍永远生效且最高, 用户随时可调滑块覆盖。 */
-    val useOriginalStyle: Boolean = false,
     /** L2 user-imported stylesheet switch (M2). */
     val useUserScripts: Boolean = false,
     /** Page-turn animation (smooth swipe). */
@@ -110,7 +155,7 @@ data class ReaderSettings(
      * 用户在该族选的字重（族名 → CSS 字重 100..900）。**唯一消费者是 UI 层声明**：
      * `ReaderUiSheet.fontRules` 把它写成该槽规则的 `font-weight`（tier 44），在级联里赢过 UA/作者；
      * `FontPoolSync` 另用它决定池里要装哪几档面。空 = 未选 ⇒ 不发声明 ⇒ 原书 `font-weight` 原样生效。
-     * 纯全局（同 showHiddenFonts 待遇）；[fontWeightAnchorsBySlot] 优先，本表仅作旧档兜底。
+     * **按书私有**（2026-10-29 定口）：与字族一起按书，旧全局锚点不搬运；[fontWeightAnchorsBySlot] 优先，本表仅作旧档兜底。
      */
     val fontWeightAnchors: Map<String, Int> = emptyMap(),
     /**
@@ -149,8 +194,8 @@ data class ReaderSettings(
      * （系统字体或已导入字体都能选）。
      *
      * 只作用于旁注覆盖层的文字，**不碰正文排版**，所以不进版式比较（面板走无重排提交）。
-     * 按书私有：本书改过就钉住（与排版字段同一套稀疏 overlay），改动同时直写全局，
-     * 传染给没调过这一项的书（含未阅读的新书）。
+     * **纯全局**（[SettingsScope.GLOBAL]）：批注是读者自己的印记，与某本书无关，换书沿用
+     * 最近一次选择；本书文件里不会出现这一项。
      */
     val noteFont: String = "",
     /**
@@ -158,14 +203,14 @@ data class ReaderSettings(
      *
      * 存倍率而不是绝对像素，正文字号一变旁注跟着等比变，不会出现「正文调大了旁注没动」。
      * 面板显示的是换算后的实际字号。同样只影响旁注覆盖层，不进版式比较；落盘口径同
-     * [noteFont]（按书钉住 + 直写全局）。
+     * [noteFont]（纯全局，换书沿用）。
      */
     val noteFontScale: Float = 1f,
 
     /**
      * 持久化结构版本（**只增不改**）：`[fromJson]` 用它识别「这份存档是哪个版本写的」，
      * 从而对**只影响本版本**的字段做一次性迁移。纯全局（[BookSettings] 无此字段，
-     * 故不参与 [applyOverlay]/[mergeFrom] 的分层逻辑）。
+     * 故不参与 [applyOverlay] 的分层逻辑）。
      *
      * ## 为什么不按「值」判断而要一个版本号
      *
@@ -175,7 +220,7 @@ data class ReaderSettings(
      *
      * ## 版本号怎么加
      *
-     * **只加在数据类的最后一个字段**：中间插字段会改变 `toJson` 的字段顺序，
+     * **只加在数据类的最后一个字段**：中间插字段会改变序列化后的字段顺序，
      * 而老存档按**键名**解析（[fromJson] 走 `SettingsJson` 的 jsonObject），
      * 顺序变不影响读；写出去的顺序变了也没有读方依赖（唯一读方就是 [fromJson]）。
      * 真正的约束是**默认值必须等于当前版本**：缺该键 = 读到默认值 = 旧档。
@@ -183,20 +228,30 @@ data class ReaderSettings(
     val schemaVersion: Int = CURRENT_SCHEMA_VERSION,
 ) {
 
-    /** Serialize to a JSON string; `indentFactor > 0` produces indented output. */
-    @JvmOverloads
-    fun toJson(indentFactor: Int = 0): String {
-        val codec = if (indentFactor > 0) SettingsJson.pretty else SettingsJson.compact
-        return codec.encodeToString(serializer(), this)
-    }
-
     /** Serialize to a full [JsonObject] (all fields, including defaults). */
     fun toJsonObject(): JsonObject = SettingsJson.compact.encodeToJsonElement(serializer(), this).jsonObject
 
     /**
+     * 全局文件序列化：**剔除私有键**（归属见 [SettingsScope]），只留全局项与元数据。
+     *
+     * 为什么不是「写全量再靠读时抹」：全量 `encodeDefaults=true` 会把 `fontSize`/`lineSpacing`
+     * 这些私有键连默认值一起写进 `reader.json`，文件看上去像在管排版，下一处改预设的人
+     * 就会以为「全局有个字号」。键根本不出现，归属才没有歧义。
+     */
+    @JvmOverloads
+    fun toGlobalJson(indentFactor: Int = 0): String {
+        val kept = toJsonObject().filterKeys { it !in SettingsScope.PRIVATE && it !in SettingsScope.SESSION_ONLY }
+        val codec = if (indentFactor > 0) SettingsJson.pretty else SettingsJson.compact
+        return codec.encodeToString(JsonObject.serializer(), JsonObject(kept))
+    }
+
+    /**
      * Overlay a book's private override layer → returns the effective value.
      *
-     * Non-null fields in [overlay] override the global memory, null fields fall back to [this].
+     * **只叠加私有项**：全局项（亮度/主题色/笔记族/开关）只从全局记忆来，本书文件里即使
+     * 残留旧键也不参与（见 [SettingsScope]）。私有项里 `null` = 本书没配 ⇒ 用预设
+     * （不是「用全局」——全局已经没有私有项了）。
+     *
      * Never modifies [this].
      */
     fun applyOverlay(overlay: BookSettings): ReaderSettings = copy(
@@ -204,72 +259,26 @@ data class ReaderSettings(
         fontSize = overlay.fontSize ?: fontSize,
         fontScale = overlay.fontScale ?: fontScale,
         lineSpacing = overlay.lineSpacing ?: lineSpacing,
-        firstLineIndent = overlay.firstLineIndent ?: firstLineIndent,
-        paragraphSpacing = overlay.paragraphSpacing ?: paragraphSpacing,
+        cjkLatinSpacing = overlay.cjkLatinSpacing ?: cjkLatinSpacing,
+        // 首行缩进是**本书私有**：全局里即使有旧值也不参与（书没设过 = 不发声明，书自己生效）。
+        firstLineIndent = overlay.firstLineIndent,
+        paragraphSpacing = overlay.paragraphSpacing,
         paragraphGap = overlay.paragraphGap ?: paragraphGap,
-        letterSpacing = overlay.letterSpacing ?: letterSpacing,
+        // 字间距同为本书私有：没配（null）= 引擎按书的正文段落实测值，不落回全局记忆。
+        letterSpacing = overlay.letterSpacing,
         marginTop = overlay.marginTop ?: marginTop,
         marginBottom = overlay.marginBottom ?: marginBottom,
         marginLeft = overlay.marginLeft ?: marginLeft,
         marginRight = overlay.marginRight ?: marginRight,
-        bgOverride = overlay.bgOverride ?: bgOverride,
-        fgOverride = overlay.fgOverride ?: fgOverride,
         fontBody = overlay.fontBody ?: fontBody,
         fontTitle = overlay.fontTitle ?: fontTitle,
         fontCode = overlay.fontCode ?: fontCode,
-        useOriginalStyle = overlay.useOriginalStyle ?: useOriginalStyle,
+        useUserScripts = overlay.useUserScripts ?: useUserScripts,
         pageAnim = overlay.pageAnim ?: pageAnim,
         pageAnimationMode = overlay.pageAnimationMode ?: pageAnimationMode,
         coverStretch = overlay.coverStretch ?: coverStretch,
-        pageNum = overlay.pageNum ?: pageNum,
-        // 笔记偏好：与排版字段同一套稀疏 overlay 语义（本书改过就钉住，没改过跟随全局）。
-        highlightColorSlots = overlay.highlightColorSlots ?: highlightColorSlots,
-        underlineColorSlots = overlay.underlineColorSlots ?: underlineColorSlots,
-        highlightDefaultSlot = overlay.highlightDefaultSlot ?: highlightDefaultSlot,
-        underlineDefaultSlot = overlay.underlineDefaultSlot ?: underlineDefaultSlot,
-        annotationLastKind = overlay.annotationLastKind ?: annotationLastKind,
-        annotationLastLineStyle = overlay.annotationLastLineStyle ?: annotationLastLineStyle,
-        noteFont = overlay.noteFont ?: noteFont,
-        noteFontScale = overlay.noteFontScale?.toFloat() ?: noteFontScale,
-    )
-
-    /**
-     * Write a book's override layer **back** into the global memory.
-     *
-     * Non-null fields in [overlay] update [this]; null fields keep [this] unchanged.
-     * Returns a new [ReaderSettings] instance.
-     */
-    fun mergeFrom(overlay: BookSettings): ReaderSettings = copy(
-        layoutTheme = overlay.layoutTheme ?: layoutTheme,
-        fontSize = overlay.fontSize ?: fontSize,
-        fontScale = overlay.fontScale ?: fontScale,
-        lineSpacing = overlay.lineSpacing ?: lineSpacing,
-        firstLineIndent = overlay.firstLineIndent ?: firstLineIndent,
-        paragraphSpacing = overlay.paragraphSpacing ?: paragraphSpacing,
-        paragraphGap = overlay.paragraphGap ?: paragraphGap,
-        letterSpacing = overlay.letterSpacing ?: letterSpacing,
-        marginTop = overlay.marginTop ?: marginTop,
-        marginBottom = overlay.marginBottom ?: marginBottom,
-        marginLeft = overlay.marginLeft ?: marginLeft,
-        marginRight = overlay.marginRight ?: marginRight,
-        bgOverride = overlay.bgOverride ?: bgOverride,
-        fgOverride = overlay.fgOverride ?: fgOverride,
-        fontBody = overlay.fontBody ?: fontBody,
-        fontTitle = overlay.fontTitle ?: fontTitle,
-        fontCode = overlay.fontCode ?: fontCode,
-        useOriginalStyle = overlay.useOriginalStyle ?: useOriginalStyle,
-        pageAnim = overlay.pageAnim ?: pageAnim,
-        pageAnimationMode = overlay.pageAnimationMode ?: pageAnimationMode,
-        coverStretch = overlay.coverStretch ?: coverStretch,
-        pageNum = overlay.pageNum ?: pageNum,
-        highlightColorSlots = overlay.highlightColorSlots ?: highlightColorSlots,
-        underlineColorSlots = overlay.underlineColorSlots ?: underlineColorSlots,
-        highlightDefaultSlot = overlay.highlightDefaultSlot ?: highlightDefaultSlot,
-        underlineDefaultSlot = overlay.underlineDefaultSlot ?: underlineDefaultSlot,
-        annotationLastKind = overlay.annotationLastKind ?: annotationLastKind,
-        annotationLastLineStyle = overlay.annotationLastLineStyle ?: annotationLastLineStyle,
-        noteFont = overlay.noteFont ?: noteFont,
-        noteFontScale = overlay.noteFontScale?.toFloat() ?: noteFontScale,
+        fontWeightAnchors = overlay.fontWeightAnchors ?: fontWeightAnchors,
+        fontWeightAnchorsBySlot = overlay.fontWeightAnchorsBySlot ?: fontWeightAnchorsBySlot,
     )
 
     /**
@@ -335,6 +344,11 @@ data class ReaderSettings(
         // 批注字体 / 字号：只改旁注覆盖层，不进版式（面板走 onCommitLight）。
         noteFont = "",
         noteFontScale = 1f,
+        // 开书探针的只读读数：只给面板显示，永不参与渲染。
+        probeIndent = null,
+        probeLineSpacing = null,
+        probeParagraphSpacing = null,
+        probeLetterSpacing = null,
     )
 
     companion object {
@@ -476,11 +490,19 @@ data class ReaderSettings(
                 ReaderSettings(
                     theme = SettingsJson.optString(o, "theme", d.theme),
                     fontSize = SettingsJson.optInt(o, "fontSize", d.fontSize),
-                    lineSpacing = SettingsJson.optDouble(o, "lineSpacing", d.lineSpacing),
-                    paragraphSpacing = SettingsJson.optDouble(o, "paragraphSpacing", d.paragraphSpacing),
-                    firstLineIndent = SettingsJson.optDouble(o, "firstLineIndent", d.firstLineIndent),
+                    // 行距：旧档里必有值（旧默认 1.5），新模型「没配」= null；旧 1.5 视为没配（§5-3），
+                    // 否则升级瞬间会把所有书的行高压回 1.5、读不到书自己的行高。
+                    lineSpacing = SettingsJson.optDoubleOrNull(o, "lineSpacing")?.takeIf { it != 1.5 },
+                    // 首行缩进是本书私有：全局档里即使残留旧键也不读（书没设过 = 不发声明）。
+                    // 段间距：新模型存绝对值 em（0..2）；> 2 的值只可能是旧档百分比（0..1000，
+                    // 100 = 原书节奏），就地按旧口径迁移（100 → null，其余 ÷100 夹到 0..2）。
+                    paragraphSpacing = SettingsJson.optDoubleOrNull(o, "paragraphSpacing")?.let {
+                        if (it > 2.0) legacyParagraphSpacingPercentToEm(it) else it.coerceIn(0.0, 2.0)
+                    },
                     paragraphGap = SettingsJson.optDouble(o, "paragraphGap", d.paragraphGap),
-                    letterSpacing = SettingsJson.optDouble(o, "letterSpacing", d.letterSpacing),
+                    // 字间距：旧档的 0 就是「不加字距」（当时的默认值）⇒ 按没配处理，
+                    // 让书自带的 letter-spacing 生效；非 0 的显式档位原样保留。
+                    letterSpacing = SettingsJson.optDoubleOrNull(o, "letterSpacing")?.takeIf { it != 0.0 },
                     marginTop = marginTop,
                     marginBottom = marginBottom,
                     marginLeft = marginLeft,
@@ -488,7 +510,6 @@ data class ReaderSettings(
                     fontBody = SettingsJson.optString(o, "fontBody", d.fontBody),
                     fontTitle = SettingsJson.optString(o, "fontTitle", d.fontTitle),
                     fontCode = SettingsJson.optString(o, "fontCode", d.fontCode),
-                    useOriginalStyle = SettingsJson.optBoolean(o, "useOriginalStyle", d.useOriginalStyle),
                     useUserScripts = SettingsJson.optBoolean(o, "useUserScripts", d.useUserScripts),
                     pageAnim = SettingsJson.optBoolean(o, "pageAnim", d.pageAnim),
                     pageAnimationMode = SettingsJson.optString(o, "pageAnimationMode", d.pageAnimationMode),
@@ -506,7 +527,9 @@ data class ReaderSettings(
                     scheme = scheme,
                     bgOverride = bgOverride,
                     fgOverride = SettingsJson.optString(o, "fgOverride", d.fgOverride),
-                    layoutTheme = SettingsJson.optString(o, "layoutTheme", d.layoutTheme),
+                    // `useOriginalStyle` 已退役（P2）：旧档 true 等价于「原书设置」，直接折进 layoutTheme。
+                    layoutTheme = if (SettingsJson.optBoolean(o, "useOriginalStyle", false)) "original"
+                    else SettingsJson.optString(o, "layoutTheme", d.layoutTheme),
                     brightness = SettingsJson.optInt(o, "brightness", d.brightness),
                     brightnessFollowSystem = SettingsJson.optBoolean(o, "brightnessFollowSystem", d.brightnessFollowSystem),
                     brightnessOffset = SettingsJson.optInt(o, "brightnessOffset", d.brightnessOffset),
@@ -540,3 +563,12 @@ data class ReaderSettings(
         }
     }
 }
+/**
+ * 段间距旧档（百分比 0..1000，100 = 原书节奏）→ 新模型绝对值 em（0..2）。
+ *
+ * 只在**一次性迁移**（`legacy` / `books.version` 升级那一次）调用；之后存档里的数就是 em。
+ * 映射口径：100% 等于「不覆盖」⇒ `null`（书自己生效，面板显示原书实测值）；其余按 1% = 0.01em
+ * 折算后夹到滑块范围 0..2（旧档 150% → 1.5em，50% → 0.5em，300% 以上一律 2em）。
+ */
+internal fun legacyParagraphSpacingPercentToEm(percent: Double?): Double? =
+    percent?.let { if (it == 100.0) null else (it / 100.0).coerceIn(0.0, 2.0) }

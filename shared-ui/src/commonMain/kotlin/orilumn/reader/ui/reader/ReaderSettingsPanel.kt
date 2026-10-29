@@ -72,6 +72,7 @@ import androidx.compose.ui.unit.sp
 import orilumn.reader.data.annotation.AnnotationKind
 import orilumn.reader.data.font.FontEntry
 import orilumn.reader.data.settings.ReaderSettings
+import orilumn.reader.engine.css.CssDefaults
 import orilumn.reader.engine.text.TypographicProfile
 import orilumn.reader.io.Logger
 import orilumn.reader.net.FontUploadServer
@@ -135,9 +136,6 @@ fun ReaderSettingsPanel(
     onSaveTheme: (ThemePreset) -> Unit = {},
     onDeleteTheme: (ThemePreset) -> Unit = {},
     readSystemBrightness: () -> Int = { 50 },
-    /** 原书设置 专用提交: 只写本书私有设置, 不传染全局 (Android 有 per-book overlay 时传;
-     *  桌面单全局设置, 缺省回落到 [onCommitTypography]). */
-    onCommitBookPrivate: ((ReaderSettings) -> Unit)? = null,
     /** F4a 字体管理回调（隐藏/取消隐藏/删除/导入，宿主落库 + 刷新字库重排）。 */
     onFontHide: (List<Long>) -> Unit = {},
     onFontUnhide: (List<Long>) -> Unit = {},
@@ -249,7 +247,6 @@ fun ReaderSettingsPanel(
 
         // ---- 当前页键列表（click 与键盘共用同一回调） ----
         val s = settings
-        val commitBook = onCommitBookPrivate ?: onCommitTypography
         // F4a 字体行模型（键与渲染共用同一份，1:1 对齐 activeIdx）。
         val slotKey: String = pickSlot ?: "fontBody"
         val fontRows: List<FontPanelRow> = remember(current, fontEntries, s, pickSlot, canFontImport, canFontWifiImport, showImportedSection) {
@@ -327,7 +324,7 @@ fun ReaderSettingsPanel(
                     sliderKey(px, 9.0, 36.0, 0.1,
                         apply = { v -> val ns = ReaderThemeMath.pxToScale(v); onPreview(s.copy(fontScale = ns)); onCommitTypography(s.copy(fontScale = ns)) },
                         fmt = { String.format("%.1f", it) }),
-                    sliderKey(s.letterSpacing, -100.0, 100.0, 1.0,
+                    sliderKey(s.letterSpacingSlot(), -100.0, 100.0, 1.0,
                         apply = { v -> onPreview(s.copy(letterSpacing = v)); onCommitTypography(s.copy(letterSpacing = v)) },
                         fmt = { it.roundToInt().toString() }),
                     // 第 6 个滑块 = 混排字距（正文页渲染在 index 5，见同函数下方的行构造）。
@@ -375,17 +372,17 @@ fun ReaderSettingsPanel(
             // 无线下钻页是纯展示页（地址 + 说明）：键盘占一位空键，只保焦点计数不崩。
             Sub.WifiImport -> listOf(ItemKey())
             Sub.Spacing -> listOf(
-                sliderKey(s.firstLineIndent, 0.0, 10.0, 1.0,
+                sliderKey(s.firstLineIndent ?: s.probeIndent ?: 0.0, 0.0, 10.0, 1.0,
                     apply = { v -> onPreview(s.copy(firstLineIndent = v)); onCommitTypography(s.copy(firstLineIndent = v)) },
                     fmt = { "${it.roundToInt()}" }),
-                sliderKey(s.lineSpacing, 0.5, 2.5, 0.1,
+                sliderKey(s.lineSpacing ?: s.probeLineSpacing ?: CssDefaults.DEFAULT_LINE_HEIGHT.toDouble(), 0.5, 2.5, 0.1,
                     apply = { v -> onPreview(s.copy(lineSpacing = v)); onCommitTypography(s.copy(lineSpacing = v)) },
                     fmt = { String.format("%.1f", it) }),
-                // 段间距/疏密：滑块取值 0..100 映射存储百分比 0..1000（10 = 100% 原节奏），
-                // 存档仍存百分比 ⇒ 旧档 0..200 直接可读，无需迁移。
-                sliderKey(s.paragraphSpacing / 10.0, 0.0, 100.0, 1.0,
-                    apply = { v -> onPreview(s.copy(paragraphSpacing = v * 10.0)); onCommitTypography(s.copy(paragraphSpacing = v * 10.0)) },
-                    fmt = { "${it.roundToInt()}" }),
+                // 段间距是**绝对值 em**（0..2）：读者没配（null）时显示原书实测段距，拖动即写本书
+                // 显式值（书自己的 margin 从此不再参与）。疏密仍是百分比乘算（另一档语义）。
+                sliderKey(s.paragraphSpacing ?: s.probeParagraphSpacing ?: 0.0, 0.0, 2.0, 0.1,
+                    apply = { v -> onPreview(s.copy(paragraphSpacing = v)); onCommitTypography(s.copy(paragraphSpacing = v)) },
+                    fmt = { String.format("%.1f", it) }),
                 sliderKey(s.paragraphGap / 10.0, 0.0, 100.0, 1.0,
                     apply = { v -> onPreview(s.copy(paragraphGap = v * 10.0)); onCommitTypography(s.copy(paragraphGap = v * 10.0)) },
                     fmt = { "${it.roundToInt()}" }),
@@ -486,7 +483,7 @@ fun ReaderSettingsPanel(
                 )
             }
             Sub.Theme -> listOf(
-                ItemKey(onEnter = { commitBook(TypographicProfile.withLayoutTheme(s, "original")) }),
+                ItemKey(onEnter = { onCommitTypography(TypographicProfile.withLayoutTheme(s, "original")) }),
                 ItemKey(onEnter = { onCommitTypography(TypographicProfile.withLayoutTheme(s, "modern")) }),
                 ItemKey(onEnter = { onCommitTypography(TypographicProfile.withLayoutTheme(s, "traditional")) }),
             )
@@ -893,7 +890,7 @@ fun ReaderSettingsPanel(
                                 p = p,
                             )
                             Sub.Spacing -> SpacingPage(s, keys, nav, onMove, listState, p, onPreview, onCommitTypography)
-                            Sub.Theme -> ThemePage(s, keys, nav, onMove, listState, onCommitTypography, commitBook, p)
+                            Sub.Theme -> ThemePage(s, keys, nav, onMove, listState, onCommitTypography, p)
                             Sub.ReadingTheme -> ReadingThemePage(s, allThemes, keys, nav, onMove, listState, onPreview, onCommitTypography, onCommitLight, p)
                             Sub.ThemePresetMgr -> ThemePresetManagerPage(s, keys, nav, onMove, listState, onPreview, onCommitTypography, customs,
                                 onCustomsChanged = { customs = it },
@@ -1001,6 +998,11 @@ private data class ItemKey(
     val enabled: Boolean = true,
 )
 
+/** 字间距滑块的取值（档位 -100..100 = -0.2em..0.2em）：读者配了就用它的槽位，
+ *  没配（`null` = 按书）就用原书正文实测字距换算成槽位（与引擎实际排版同值）。 */
+private fun ReaderSettings.letterSpacingSlot(): Double =
+    letterSpacing ?: ((probeLetterSpacing ?: 0.0) * 500.0).coerceIn(-100.0, 100.0)
+
 /** 滑块项：←→ 按步长调值（与 −/+ 按钮同 snap 网格、同 preview/commit 口径）。 */
 private fun sliderKey(
     value: Double,
@@ -1085,7 +1087,9 @@ private fun TextPage(
             { px -> commit(s.copy(fontScale = ReaderThemeMath.pxToScale(px))) }, p, labelWidth = labelW,
             nav = nav, index = 3) }
         // Letter spacing: UI value range -100..100 (step 1), internally mapped to -0.2em..0.2em.
-        item { UiSliderRow("字间距", -100.0, 100.0, 1.0, s.letterSpacing, { it.roundToInt().toString() },
+        // 字间距：**em 语义**（-100..100 档 = -0.2em..0.2em）。读者没配（null）时滑条显示
+        // 原书正文实测字距（引擎就是按它排的，见 `BoxChapterLayouter.chapterLetterSpacingEm`）。
+        item { UiSliderRow("字间距", -100.0, 100.0, 1.0, s.letterSpacingSlot(), { it.roundToInt().toString() },
             { preview(s.copy(letterSpacing = it)) }, { commit(s.copy(letterSpacing = it)) }, p, labelWidth = labelW,
             nav = nav, index = 4) }
         // 混排字距（用户可见名 2026-10-03 由「中西字距」改名；内部标识符与 JSON 键仍是
@@ -1119,22 +1123,27 @@ private fun SpacingPage(
     val labelW = sliderLabelWidth(listOf("首行缩进", "行距", "段间距", "疏密", "上边距", "下边距", "左边距", "右边距"), p)
     // 排版量滑块永远可调 (用户最高优先级); 原书设置 只是把值重置为中性默认.
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
-        // 首行缩进 (em): UI 层在全局偏好里最高优先级 text-indent; 自定义样式可再覆盖; 0 = 无首行缩进.
-        item { UiSliderRow("首行缩进", 0.0, 10.0, 1.0, s.firstLineIndent,
+        // 首行缩进 (em): 读者设过就按读者值发声明（0 = 明确不缩进，压掉书的缩进）；
+        // 没设过（null）时滑条显示原书的实测读数，渲染仍由书自己的 CSS 生效。
+        item { UiSliderRow("首行缩进", 0.0, 10.0, 1.0, s.firstLineIndent ?: s.probeIndent ?: 0.0,
             { "${it.roundToInt()}" },
             { preview(s.copy(firstLineIndent = it)) }, { commit(s.copy(firstLineIndent = it)) }, p, labelWidth = labelW,
             nav = nav, index = 0) }
-        item { UiSliderRow("行距", 0.5, 2.5, 0.1, s.lineSpacing,
+        // 行距：读者设过就显示读者值；没设过（null）显示原书实测行高，书没写就显示引擎初值 1.5
+        // （面板显示的是**实际生效值**，不设「跟随原书」伪档位；拖动即写本书显式值）。
+        item { UiSliderRow("行距", 0.5, 2.5, 0.1, s.lineSpacing ?: s.probeLineSpacing ?: CssDefaults.DEFAULT_LINE_HEIGHT.toDouble(),
             { String.format("%.1f", it) },
             { preview(s.copy(lineSpacing = it)) }, { commit(s.copy(lineSpacing = it)) }, p, labelWidth = labelW,
             nav = nav, index = 1) }
-        // 段间距：p/li 纵边距乘算。滑块取值 0..100 映射存储百分比 0..1000（10 = 100% = 书/主题
-        // 节奏，0 = p/li 边距清零，100 = 1000%）。存档存百分比 ⇒ 旧档 0..200 读出来 ÷10 即滑块值。
-        item { UiSliderRow("段间距", 0.0, 100.0, 1.0, s.paragraphSpacing / 10.0,
-            { "${it.roundToInt()}" },
-            { preview(s.copy(paragraphSpacing = it * 10.0)) }, { commit(s.copy(paragraphSpacing = it * 10.0)) }, p, labelWidth = labelW,
+        // 段间距：**绝对值 em**（0..2）。读者没配（null）时滑条显示原书实测段距（含 UA 基线 1em），
+        // 渲染仍按书自己的 margin；拖动即写本书显式值，p/li 的上下外边距从此固定为该 em。
+        // 2026-10-29 由百分比乘算改回绝对值：百分比会让同一条滑块在不同书上代表不同物理间距。
+        item { UiSliderRow("段间距", 0.0, 2.0, 0.1, s.paragraphSpacing ?: s.probeParagraphSpacing ?: 0.0,
+            { String.format("%.1f", it) },
+            { preview(s.copy(paragraphSpacing = it)) }, { commit(s.copy(paragraphSpacing = it)) }, p, labelWidth = labelW,
             nav = nav, index = 2) }
-        // 疏密：p/li 之外一切块级纵边距乘算，同段间距的取值映射（10 = 100% = 原书节奏，0 = 结构块边距清零）。
+        // 疏密：p/li 之外一切块级纵边距**按比例乘算**（10 = 100% = 原书节奏，0 = 结构块边距清零）；
+        // 与段间距的绝对值不是同一档语义，滑块取值 0..100。
         item { UiSliderRow("疏密", 0.0, 100.0, 1.0, s.paragraphGap / 10.0,
             { "${it.roundToInt()}" },
             { preview(s.copy(paragraphGap = it * 10.0)) }, { commit(s.copy(paragraphGap = it * 10.0)) }, p, labelWidth = labelW,
@@ -1166,14 +1175,13 @@ private fun ThemePage(
     onMouseMove: () -> Unit,
     listState: LazyListState,
     commit: (ReaderSettings) -> Unit,
-    commitBook: (ReaderSettings) -> Unit,
     p: Palette,
 ) {
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
-        // 三个按钮都是一键重置样式的预设: 把自身的排版值写入 UI 设置 (滑块立刻跟随、值即实际值),
-        // 用户随后拖滑块是最高优先级. 现代/传统 写 缩进/段间距/字体族 (diff 传染全局);
-        // 原书设置 写全套中性默认 (字体不覆盖/字号基准/缩进与段间距默认/字距 行距归位),
-        // 只写本书私有 overlay 不传染全局.
+        // 三个按钮都只切 `layoutTheme` 这个开关：基线交给主题层（`modern.css` / `traditional.css`），
+        // 读者层不再把主题值钉进本书（写了反而盖掉主题层口径）。
+        // 「原书设置」= 清空本书的排版覆盖（字体槽/行距/字距/段距/疏密/缩进回预设），本书重新完全听书；
+        // 不动字号与页边距。见 `docs/设置模型整改计划.md` §3.5。
         item { ThemeOpt("原书设置", s.layoutTheme == "original", keys[0].onEnter, p, nav = nav, index = 0) }
         item { ThemeOpt("现代模式", s.layoutTheme == "modern", keys[1].onEnter, p, nav = nav, index = 1) }
         item { ThemeOpt("传统模式", s.layoutTheme == "traditional", keys[2].onEnter, p, nav = nav, index = 2) }

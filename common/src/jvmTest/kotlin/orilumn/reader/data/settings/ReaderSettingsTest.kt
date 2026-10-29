@@ -18,7 +18,7 @@ class ReaderSettingsTest {
 
     @Test
     fun `default round-trips through fromJson`() {
-        val parsed = ReaderSettings.fromJson(ReaderSettings.DEFAULT.toJson())
+        val parsed = ReaderSettings.fromJson(ReaderSettings.DEFAULT.fullJson())
         assertEquals(ReaderSettings.DEFAULT, parsed)
     }
 
@@ -32,32 +32,37 @@ class ReaderSettingsTest {
             fontBody = "Songti",
             fontTitle = "Heiti",
             fontCode = "Monaco",
-            useOriginalStyle = true,
+            layoutTheme = "traditional",
             useUserScripts = true,
             pageAnim = false,
             autoContinue = false,
             pageNum = true,
             coverStretch = true,
         )
-        assertEquals(custom, ReaderSettings.fromJson(custom.toJson()))
+        assertEquals(custom, ReaderSettings.fromJson(custom.fullJson()))
     }
 
     @Test
-    fun `paragraph spacing and gap persist through round-trip`() {
-        val parsed = ReaderSettings.fromJson("""{"paragraphSpacing":150,"paragraphGap":150}""")
-        assertEquals(150.0, parsed.paragraphSpacing, 0.0)
+    fun `paragraph spacing is absolute em and legacy percent migrates once`() {
+        // 新语义：绝对值 em（0..2），原样往返。
+        val parsed = ReaderSettings.fromJson("""{"paragraphSpacing":1.4,"paragraphGap":150}""")
+        assertEquals(1.4, parsed.paragraphSpacing!!, 1e-9)
         assertEquals(150.0, parsed.paragraphGap, 0.0)
-        val reread = ReaderSettings.fromJson(parsed.toJson())
+        val reread = ReaderSettings.fromJson(parsed.fullJson())
         assertEquals(parsed, reread)
-        assertEquals(150.0, reread.paragraphSpacing, 0.0)
+        assertEquals(1.4, reread.paragraphSpacing!!, 1e-9)
         assertEquals(150.0, reread.paragraphGap, 0.0)
+
+        // 旧档百分比（> 2 一定是旧口径）：100 = 原书节奏 → 不覆盖（null）；其余 ÷100 夹到 0..2。
+        assertNull(ReaderSettings.fromJson("""{"paragraphSpacing":100}""").paragraphSpacing)
+        assertEquals(1.5, ReaderSettings.fromJson("""{"paragraphSpacing":150}""").paragraphSpacing!!, 1e-9)
+        assertEquals(2.0, ReaderSettings.fromJson("""{"paragraphSpacing":900}""").paragraphSpacing!!, 1e-9)
     }
     fun `partial json falls back to defaults for missing fields`() {
         val parsed = ReaderSettings.fromJson("""{"fontSize":20}""")
         assertEquals(20, parsed.fontSize)          // the provided value takes effect
         assertEquals(ReaderSettings.DEFAULT.theme, parsed.theme)         // falls back to default when missing
-        assertEquals(ReaderSettings.DEFAULT.lineSpacing, parsed.lineSpacing, 0.0)
-        assertEquals(ReaderSettings.DEFAULT.useOriginalStyle, parsed.useOriginalStyle)
+        assertEquals(ReaderSettings.DEFAULT.lineSpacing, parsed.lineSpacing)
     }
 
     @Test
@@ -87,7 +92,7 @@ class ReaderSettingsTest {
         assertFalse(ReaderSettings.fromJson("""{"fontSize":20}""").showHiddenFonts)
         val on = ReaderSettings.fromJson("""{"showHiddenFonts":true}""")
         assertTrue(on.showHiddenFonts)
-        assertEquals(on, ReaderSettings.fromJson(on.toJson()))
+        assertEquals(on, ReaderSettings.fromJson(on.fullJson()))
     }
 
     @Test
@@ -112,9 +117,9 @@ class ReaderSettingsTest {
     }
 
     @Test
-    fun `annotation settings pin per book and still write global`() {
-        // 笔记设置是书本级：本书改过就钉住（只钉本次改动的字段），同时直写全局——
-        // 没调过这一项的书（含未阅读的新书）继承最近一次选择。
+    fun `笔记设置是全局项 只写全局 不写本书`() {
+        // 笔记族（色槽/默认格/上次类别线型/批注字体字号）是全局项：与书无关的读者印记，
+        // 任何一本书里改，所有书同步生效；本书 overlay 一个字节都不动。
         val dir = java.nio.file.Files.createTempDirectory("orilumn-annotation").toFile()
         try {
             val persist = PerBookSettings(
@@ -130,7 +135,7 @@ class ReaderSettingsTest {
                 noteFontScale = 1.35f,
             )
             persist.persist(7L, next)
-            // 全局同步写入：新书继承。
+            // 全局同步写入：所有书（含未阅读的新书）共享同一份。
             val saved = ReaderSettingsStore(dir.absolutePath).load()
             assertEquals(next.highlightColorSlots, saved.highlightColorSlots)
             assertEquals(3, saved.underlineDefaultSlot)
@@ -138,83 +143,37 @@ class ReaderSettingsTest {
             assertEquals("wavy", saved.annotationLastLineStyle)
             assertEquals("Noto Serif CJK SC", saved.noteFont)
             assertEquals(1.35f, saved.noteFontScale, 0.0001f)
-            // 本书 overlay 钉住本次改动；没动过的排版字段不得快照。
-            val overlay = BookSettingsStore(dir.absolutePath).load(7L)
-            assertEquals(next.highlightColorSlots, overlay.highlightColorSlots)
-            assertEquals(3, overlay.underlineDefaultSlot)
-            assertEquals("underline", overlay.annotationLastKind)
-            assertEquals("wavy", overlay.annotationLastLineStyle)
-            assertEquals("Noto Serif CJK SC", overlay.noteFont)
-            assertEquals(1.35, overlay.noteFontScale ?: 0.0, 0.0001)
-            assertNull("没动过的排版字段不得快照", overlay.fontSize)
-            // 读回：本书生效值 = 自己的 pin；没 pin 的书继承全局。
+            // 本书 overlay 保持空：全局项永不进本书。
+            assertEquals(BookSettings.EMPTY, BookSettingsStore(dir.absolutePath).load(7L))
+            // 读回：任何书都看到同一份全局笔记设置。
             assertEquals("Noto Serif CJK SC", persist.effectiveFor(7L).noteFont)
             assertEquals("Noto Serif CJK SC", persist.effectiveFor(8L).noteFont)
+            assertEquals(3, persist.effectiveFor(8L).underlineDefaultSlot)
         } finally {
             dir.deleteRecursively()
         }
     }
 
     @Test
-    fun `note settings are per book and survive theme switch`() {
-        // 用户定口（2026-10-28）：笔记的所有设置项都是书本级——本书改过之后一直有效，
-        // 换主题不带走；同时直写全局，传染给没调过这一项的书（含未阅读的新书）。
+    fun `笔记设置跨书共享 换主题不动它`() {
+        // 笔记是全局项：书 7 调完，书 8 看到同一份；书 8 再调，书 7 跟着变；
+        // 书 7 换排版主题（私有项）不会碰笔记，也不会把笔记写进本书。
         val (dir, persist, _) = persistInTemp()
         try {
-            persist.persist(null, ReaderSettings.DEFAULT)
-            // 书 7 自己调批注字体 / 字号 / 默认色槽。
-            persist.persist(
-                7L,
-                persist.effectiveFor(7L).copy(
-                    noteFont = "Songti",
-                    noteFontScale = 1.5f,
-                    underlineDefaultSlot = 2,
-                ),
-            )
-            // 书 8 调成另一套值：两本书各用各的（书本级），互不覆盖。
-            persist.persist(
-                8L,
-                persist.effectiveFor(8L).copy(noteFont = "Heiti", noteFontScale = 0.8f),
-            )
-            assertEquals("Songti", persist.effectiveFor(7L).noteFont)
-            assertEquals(1.5f, persist.effectiveFor(7L).noteFontScale, 0.0001f)
-            assertEquals("Heiti", persist.effectiveFor(8L).noteFont)
-            assertEquals(0.8f, persist.effectiveFor(8L).noteFontScale, 0.0001f)
-            // 书 7 换主题：笔记设置不得被主题带走（也不因全局已被书 8 改过而跟着变）。
+            persist.persist(7L, ReaderSettings.DEFAULT.copy(noteFont = "Songti", noteFontScale = 1.5f))
+            assertEquals("Songti", persist.effectiveFor(8L).noteFont)
+            persist.persist(8L, persist.effectiveFor(8L).copy(noteFont = "Heiti", noteFontScale = 0.8f))
+            assertEquals("Heiti", persist.effectiveFor(7L).noteFont)
             persist.persist(7L, persist.effectiveFor(7L).copy(layoutTheme = "traditional"))
             assertEquals("traditional", persist.effectiveFor(7L).layoutTheme)
-            assertEquals("Songti", persist.effectiveFor(7L).noteFont)
-            assertEquals(1.5f, persist.effectiveFor(7L).noteFontScale, 0.0001f)
-            assertEquals(2, persist.effectiveFor(7L).underlineDefaultSlot)
-            // 书 9 从未调过：继承最近一次全局写入（书 8 的 Heiti / 0.8）。
-            assertEquals("Heiti", persist.effectiveFor(9L).noteFont)
-            assertEquals(0.8f, persist.effectiveFor(9L).noteFontScale, 0.0001f)
-        } finally {
-            dir.deleteRecursively()
-        }
-    }
-
-    @Test
-    fun `note pin survives theme switch then global change in another book`() {
-        // 用户场景：书 7 调完笔记设置 → 换主题 → 书 8 又改全局。
-        // 书 7 的值必须一直有效（不能因为换主题时它与全局相同就被当作陈旧 pin 清掉）。
-        val (dir, persist, _) = persistInTemp()
-        try {
-            persist.persist(null, ReaderSettings.DEFAULT)
-            persist.persist(
-                7L,
-                persist.effectiveFor(7L).copy(noteFont = "Songti", noteFontScale = 1.5f),
-            )
-            // 换主题时书 7 的 pin 与全局相同。
-            persist.persist(7L, persist.effectiveFor(7L).copy(layoutTheme = "modern"))
-            // 另一本书改全局。
-            persist.persist(
-                8L,
-                persist.effectiveFor(8L).copy(noteFont = "Heiti", noteFontScale = 0.8f),
-            )
-            assertEquals("Songti", persist.effectiveFor(7L).noteFont)
-            assertEquals(1.5f, persist.effectiveFor(7L).noteFontScale, 0.0001f)
-            assertEquals("Heiti", persist.effectiveFor(8L).noteFont)
+            assertEquals("Heiti", persist.effectiveFor(7L).noteFont)
+            assertEquals(0.8f, persist.effectiveFor(7L).noteFontScale, 0.0001f)
+            // 主题是私有项：书 8 仍是原书主题。
+            assertEquals("original", persist.effectiveFor(8L).layoutTheme)
+            // 本书 overlay 里只有私有键，没有笔记键。
+            val overlay7 = BookSettingsStore(dir.absolutePath).load(7L)
+            assertEquals("traditional", overlay7.layoutTheme)
+            assertFalse(overlay7.toJsonObject().containsKey("noteFont"))
         } finally {
             dir.deleteRecursively()
         }
@@ -236,7 +195,7 @@ class ReaderSettingsTest {
             highlightDefaultSlot = 3,
             underlineDefaultSlot = 4,
         )
-        assertEquals(custom, ReaderSettings.fromJson(custom.toJson()))
+        assertEquals(custom, ReaderSettings.fromJson(custom.fullJson()))
 
         // 缺键 / 非数组 → 默认色槽；短列表用默认值补齐；长列表截断到固定槽数。
         assertEquals(ReaderSettings.DEFAULT.highlightColorSlots, ReaderSettings.fromJson("""{"fontSize":20}""").highlightColorSlots)
@@ -254,15 +213,15 @@ class ReaderSettingsTest {
     }
 
     @Test
-    fun `weight anchors round-trip and persist global never overlay`() {
+    fun `weight anchors are per book and never write global`() {
         assertTrue(ReaderSettings.DEFAULT.fontWeightAnchors.isEmpty())
         val parsed = ReaderSettings.fromJson(
             """{"fontWeightAnchors":{"F":700,"G":"x","H":50}}""",
         )
         // 合法 700 留下，非整数与越界丢弃。
         assertEquals(mapOf("F" to 700), parsed.fontWeightAnchors)
-        assertEquals(parsed, ReaderSettings.fromJson(parsed.toJson()))
-        // persist 直写全局，永不进按书 overlay。
+        assertEquals(parsed, ReaderSettings.fromJson(parsed.fullJson()))
+        // 私有项：只进本书 overlay，全局文件里没有（别的书回到预设字重）。
         val dir = java.nio.file.Files.createTempDirectory("orilumn-anchors").toFile()
         try {
             val persist = PerBookSettings(
@@ -270,9 +229,10 @@ class ReaderSettingsTest {
                 BookSettingsStore(dir.absolutePath),
             )
             persist.persist(7L, ReaderSettings.DEFAULT.copy(fontWeightAnchors = mapOf("F" to 700)))
-            assertEquals(mapOf("F" to 700), ReaderSettingsStore(dir.absolutePath).load().fontWeightAnchors)
-            assertEquals(BookSettings.EMPTY, BookSettingsStore(dir.absolutePath).load(7L))
+            assertEquals(mapOf("F" to 700), BookSettingsStore(dir.absolutePath).load(7L).fontWeightAnchors)
+            assertTrue(ReaderSettingsStore(dir.absolutePath).load().fontWeightAnchors.isEmpty())
             assertEquals(mapOf("F" to 700), persist.effectiveFor(7L).fontWeightAnchors)
+            assertTrue(persist.effectiveFor(8L).fontWeightAnchors.isEmpty())
         } finally {
             dir.deleteRecursively()
         }
@@ -285,7 +245,7 @@ class ReaderSettingsTest {
             "theme", "fontSize", "lineSpacing",
             "marginTop", "marginBottom", "marginLeft", "marginRight",
             "fontBody", "fontTitle", "fontCode",
-            "useOriginalStyle", "useUserScripts", "pageAnim", "autoContinue", "pageNum", "coverStretch",
+            "useUserScripts", "pageAnim", "autoContinue", "pageNum", "coverStretch",
             "fontScale", "scheme", "bgOverride", "fgOverride", "layoutTheme",
             "highlightColorSlots", "underlineColorSlots",
             "highlightDefaultSlot", "underlineDefaultSlot",
@@ -293,7 +253,6 @@ class ReaderSettingsTest {
             "noteFont", "noteFontScale",
         ).forEach { assertTrue("missing key $it", obj.containsKey(it)) }
         assertNotNull(obj.keys)
-        assertFalse(ReaderSettings.DEFAULT.useOriginalStyle)
     }
 
     @Test
@@ -367,7 +326,7 @@ class ReaderSettingsTest {
             fgOverride = "#abcdef",
             layoutTheme = "traditional",
         )
-        assertEquals(custom, ReaderSettings.fromJson(custom.toJson()))
+        assertEquals(custom, ReaderSettings.fromJson(custom.fullJson()))
     }
 
     @Test
@@ -437,7 +396,7 @@ class ReaderSettingsTest {
             migrated.schemaVersion,
         )
         // 再走一轮：已经是当前版本 ⇒ 值不再被改（幂等）。
-        val again = ReaderSettings.fromJson(migrated.toJson())
+        val again = ReaderSettings.fromJson(migrated.fullJson())
         assertEquals(ReaderSettings.DEFAULT.cjkLatinSpacing, again.cjkLatinSpacing, 0.0)
     }
 
@@ -448,10 +407,56 @@ class ReaderSettingsTest {
         assertEquals(25.0, migrated.cjkLatinSpacing, 0.0)
     }
 
-    // ---- 按书 overlay 稀疏化（标题字体 bug 根因）----
+    // ---- 迁移（§5-3）：旧档的行距 1.5 / 缩进 0 在**一次性迁移**时视为「没配」----
+
+    @Test
+    fun `旧本书档里行距 1_5 与缩进 0 迁移成没配`() {
+        // 旧模型两项必有值（行距默认 1.5、缩进默认 0）。迁移那一次按「没配」读，
+        // 否则升级瞬间会把本书行高压回 1.5、缩进按「明确不缩进」抹平（§5-3）。
+        val overlay = BookSettings.fromJson("""{"lineSpacing":1.5,"firstLineIndent":0.0}""", legacy = true)
+        assertNull(overlay.lineSpacing)
+        assertNull(overlay.firstLineIndent)
+    }
+
+    @Test
+    fun `旧本书档里行距与缩进的真值原样保留`() {
+        val overlay = BookSettings.fromJson("""{"lineSpacing":1.7,"firstLineIndent":2.0}""", legacy = true)
+        assertEquals(1.7, overlay.lineSpacing!!, 1e-9)
+        assertEquals(2.0, overlay.firstLineIndent!!, 1e-9)
+    }
+
+    @Test
+    fun `常规读档不改写 1_5 与 0 它们是读者的真值`() {
+        // 反向锁（用户实测回归）：迁移只做一次。读者把行距设成 1.5、缩进设成 0 之后，
+        // 每次重开书都必须原样读回，不能被当成「没配」打回原书的值。
+        val overlay = BookSettings.fromJson("""{"lineSpacing":1.5,"firstLineIndent":0.0}""")
+        assertEquals(1.5, overlay.lineSpacing!!, 1e-9)
+        assertEquals(0.0, overlay.firstLineIndent!!, 1e-9)
+    }
+
+    @Test
+    fun `行距设成 1_5 后关书重开仍是 1_5`() {
+        // 端到端半条链（真实落盘 + 重新读）：书本身行高 1.3，读者在本书把行距设成 1.5。
+        val dir = java.nio.file.Files.createTempDirectory("orilumn-ls15").toFile()
+        try {
+            val books = BookSettingsStore(dir.absolutePath)
+            // 旧档：整份快照写进来的 1.5（迁移那一次要按「没配」读，避免升级瞬间压掉书的行高）。
+            java.io.File(dir, "books").mkdirs()
+            java.io.File(dir, "books/7.json").writeText("""{"lineSpacing":1.5}""")
+            assertNull("迁移一次：旧档的 1.5 视为没配", books.load(7L).lineSpacing)
+
+            // 迁移之后读者真的把行距设成 1.5：重开书必须还是 1.5（不能被打回书的 1.3）。
+            books.save(7L, BookSettings(lineSpacing = 1.5))
+            assertEquals(1.5, books.load(7L).lineSpacing!!, 1e-9)
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    // ---- 按书稀疏覆盖层（2026-10-29 定口）----
 
     private fun persistInTemp(): Triple<java.io.File, PerBookSettings, ReaderSettingsStore> {
-        val dir = java.nio.file.Files.createTempDirectory("orilumn-sparse").toFile()
+        val dir = java.nio.file.Files.createTempDirectory("orilumn-perbook").toFile()
         val stores = PerBookSettings(
             ReaderSettingsStore(dir.absolutePath),
             BookSettingsStore(dir.absolutePath),
@@ -460,78 +465,123 @@ class ReaderSettingsTest {
     }
 
     @Test
-    fun `persist 只钉本次改动 没动过的槽位永不进 overlay`() {
-        // 回归“调标题影响正文”：以前任何一次提交都全量快照，别的书/全局的字体值被冻进本书。
+    fun `persist 只写与预设不同的私有项`() {
+        // 稀疏：只记读者真动过的项；预设值不落键（以后改预设能到达这本书）。
         val (dir, persist, _) = persistInTemp()
         try {
-            val global = ReaderSettings.DEFAULT.copy(fontBody = "A", fontTitle = "B")
-            persist.persist(null, global)
-            // 在某书只动字号：overlay 只能有 fontScale 一项。
-            val next = persist.effectiveFor(7L).copy(fontScale = 60.0)
-            persist.persist(7L, next)
+            persist.persist(7L, persist.effectiveFor(7L).copy(fontScale = 60.0, fontBody = "A"))
             val overlay = BookSettingsStore(dir.absolutePath).load(7L)
-            assertEquals(60.0, overlay.fontScale)
-            assertNull("没动过的正文槽不得快照", overlay.fontBody)
-            assertNull("没动过的标题槽不得快照", overlay.fontTitle)
-            assertNull("没动过的代码槽不得快照", overlay.fontCode)
-            // 生效值：字号用书的，字体跟全局。
-            val eff = persist.effectiveFor(7L)
-            assertEquals(60.0, eff.fontScale, 0.0)
-            assertEquals("A", eff.fontBody)
-            assertEquals("B", eff.fontTitle)
+            assertEquals(60.0, overlay.fontScale!!, 0.0)
+            assertEquals("A", overlay.fontBody)
+            // 没动过的项一个都不落键。
+            assertNull(overlay.lineSpacing)
+            assertNull(overlay.fontTitle)
+            assertNull(overlay.paragraphSpacing)
+            assertEquals(setOf("fontScale", "fontBody"), overlay.toJsonObject().keys)
         } finally {
             dir.deleteRecursively()
         }
     }
 
     @Test
-    fun `存量全量 overlay 的陈旧 pin 在下次提交时自愈`() {
-        // 设备实证：1000.json 曾是全量快照（body=title=普惠体），之后调全局标题该书不动。
+    fun `改一本书的字体不串到另一本`() {
+        // 私有项永不写全局：书 7 改字体，书 8 与新书 9 都不受影响。
         val (dir, persist, globals) = persistInTemp()
         try {
-            persist.persist(null, ReaderSettings.DEFAULT.copy(fontBody = "A", fontTitle = "B"))
-            // 模拟老版本的全量快照：body 与全局一致（陈旧 pin），title 是真正的按书覆盖。
-            BookSettingsStore(dir.absolutePath).save(
-                7L,
-                BookSettings(fontScale = 60.0, fontBody = "A", fontTitle = "C"),
-            )
-            // 本书再动一个无关项：陈旧 pin（body=A=全局）恢复跟随，真正的 pin（title=C）保留。
-            val next = persist.effectiveFor(7L).copy(pageNum = true)
-            persist.persist(7L, next)
-            val overlay = BookSettingsStore(dir.absolutePath).load(7L)
-            assertNull("与全局一致的陈旧 pin 必须恢复跟随", overlay.fontBody)
-            assertEquals("真正的按书覆盖必须保留", "C", overlay.fontTitle)
-            // 生效值不变：body 跟全局 A，title 用书的 C。
-            val eff = persist.effectiveFor(7L)
-            assertEquals("A", eff.fontBody)
-            assertEquals("C", eff.fontTitle)
-            assertEquals(globals.load().fontTitle, "B")
+            persist.persist(7L, persist.effectiveFor(7L).copy(fontBody = "A", fontTitle = "B"))
+            assertEquals("A", persist.effectiveFor(7L).fontBody)
+            assertEquals("B", persist.effectiveFor(7L).fontTitle)
+            assertEquals("", persist.effectiveFor(8L).fontBody)
+            assertEquals("", persist.effectiveFor(9L).fontBody)
+            // 全局文件里没有字体项（读到的是预设空槽）。
+            assertEquals("", globals.load().fontBody)
         } finally {
             dir.deleteRecursively()
         }
     }
 
     @Test
-    fun `本次刚改的字段即使与全局一致也保留为 pin`() {
-        // 用户在本书面显式选了与全局相同的值：那是明确意图，不得被自愈清掉。
+    fun `选回预设值即取消该项`() {
+        // 稀疏归一：把某项改回预设 ⇒ 该键消失（不是钉住一个与预设相同的值）。
         val (dir, persist, _) = persistInTemp()
         try {
-            persist.persist(null, ReaderSettings.DEFAULT.copy(fontTitle = "B"))
-            val next = persist.effectiveFor(7L).copy(fontTitle = "B", fontScale = 60.0)
-            // baseline 里 title 已是 B（跟全局），scale 60 是改动——为测豁免，先把 overlay 置空后显式提交 title。
-            persist.persist(7L, next)
-            // 此时 title 无 diff（=baseline），overlay 只有 scale。
-            var overlay = BookSettingsStore(dir.absolutePath).load(7L)
-            assertNull(overlay.fontTitle)
-            // 改全局标题后再在本书面显式选回 B：changed 含 title=B，必须钉住。
-            persist.persist(null, ReaderSettings.DEFAULT.copy(fontTitle = "D"))
-            val next2 = persist.effectiveFor(7L).copy(fontTitle = "B")
-            persist.persist(7L, next2)
-            overlay = BookSettingsStore(dir.absolutePath).load(7L)
-            assertEquals("B", overlay.fontTitle)
-            assertEquals("B", persist.effectiveFor(7L).fontTitle)
+            persist.persist(7L, persist.effectiveFor(7L).copy(fontTitle = "D", fontScale = 70.0))
+            assertEquals(
+                setOf("fontTitle", "fontScale"),
+                BookSettingsStore(dir.absolutePath).load(7L).toJsonObject().keys,
+            )
+            persist.persist(7L, persist.effectiveFor(7L).copy(fontTitle = ""))
+            assertEquals(
+                setOf("fontScale"),
+                BookSettingsStore(dir.absolutePath).load(7L).toJsonObject().keys,
+            )
+            // 全部改回预设 ⇒ 空层被删除，本书完全听书。
+            persist.persist(7L, persist.effectiveFor(7L).copy(fontScale = ReaderSettings.DEFAULT.fontScale))
+            assertFalse(java.io.File(dir, "books/7.json").exists())
         } finally {
             dir.deleteRecursively()
         }
     }
+
+    @Test
+    fun `混排字距按书 不写全局`() {
+        val (dir, persist, globals) = persistInTemp()
+        try {
+            persist.persist(7L, persist.effectiveFor(7L).copy(cjkLatinSpacing = 80.0))
+            assertEquals(80.0, BookSettingsStore(dir.absolutePath).load(7L).cjkLatinSpacing!!, 0.0)
+            assertEquals(80.0, persist.effectiveFor(7L).cjkLatinSpacing, 0.0)
+            // 书 8 再改：两本书各用各的。
+            persist.persist(8L, persist.effectiveFor(8L).copy(cjkLatinSpacing = 0.0))
+            assertEquals(80.0, persist.effectiveFor(7L).cjkLatinSpacing, 0.0)
+            assertEquals(0.0, persist.effectiveFor(8L).cjkLatinSpacing, 0.0)
+            // 全局文件里没有这个私有项（读到的是预设 25）。
+            assertEquals(ReaderSettings.DEFAULT.cjkLatinSpacing, globals.load().cjkLatinSpacing, 0.0)
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `纯全局字段只写全局 不写本书 overlay`() {
+        val (dir, persist, globals) = persistInTemp()
+        try {
+            // 先给书 7 建一个私有覆盖层。
+            persist.persist(7L, persist.effectiveFor(7L).copy(fontScale = 60.0))
+            val before = BookSettingsStore(dir.absolutePath).load(7L)
+            // 只改亮度：全局生效，overlay 一个字节都不动。
+            persist.persist(7L, persist.effectiveFor(7L).copy(brightness = 30))
+            assertEquals(30, globals.load().brightness)
+            assertEquals(before, BookSettingsStore(dir.absolutePath).load(7L))
+            assertEquals(30, persist.effectiveFor(7L).brightness)
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `首行缩进是本书私有 null 与 0 是两回事`() {
+        // 没设过（null）：不发声明，书自己的缩进原样。
+        assertNull(ReaderSettings.DEFAULT.copy(firstLineIndent = 4.0).applyOverlay(BookSettings.EMPTY).firstLineIndent)
+        // 设成 0：明确不缩进，必须原样保留（0 不是「没配」）。
+        assertEquals(0.0, ReaderSettings.DEFAULT.applyOverlay(BookSettings(firstLineIndent = 0.0)).firstLineIndent!!, 0.0)
+        assertEquals(3.0, ReaderSettings.DEFAULT.applyOverlay(BookSettings(firstLineIndent = 3.0)).firstLineIndent!!, 0.0)
+    }
+
+    @Test
+    fun `首行缩进不随全局继承到没动过的书`() {
+        val (dir, persist, _) = persistInTemp()
+        try {
+            persist.persist(7L, ReaderSettings.DEFAULT.copy(firstLineIndent = 5.0))
+            // 改过的那本：5 一直有效。
+            assertEquals(5.0, persist.effectiveFor(7L).firstLineIndent!!, 0.0)
+            // 没动过的书不继承：仍是 null（按自己的书排版）。
+            assertNull(persist.effectiveFor(8L).firstLineIndent)
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    /** 全量 JSON（含私有键）：只在测试里做往返用。生产不提供这条序列化出口 ——
+     *  全量写盘会把每本书私有的字号/行距/字体等写进全局存档。 */
+    private fun ReaderSettings.fullJson(): String = toJsonObject().toString()
 }

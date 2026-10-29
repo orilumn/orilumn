@@ -2,7 +2,6 @@
 
 package orilumn.reader.desktop
 
-import orilumn.reader.data.settings.BookSettings
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.data.settings.ReaderSettingsStore
 import orilumn.reader.data.settings.BookSettingsStore
@@ -58,6 +57,8 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 private const val PREF_SORT = "shelf_sort_name"
@@ -66,6 +67,27 @@ private const val PREF_WIN_W = "window_width_dp"
 private const val PREF_WIN_H = "window_height_dp"
 private const val PREF_WIN_X = "window_x_dp"
 private const val PREF_WIN_Y = "window_y_dp"
+
+/**
+ * 设置提交序号（平台层·桌面壳）：`Mutex` 只保证互斥，不保证「先提交的先拿锁」——
+ * 两个协程被不同 IO 线程取走后可能反序到达锁，后落盘的旧快照会把新改动顶掉。
+ * 序号在提交时（UI 线程）分配，锁内比较；晚到的旧快照直接丢弃。
+ */
+private class SettingsPersistOrder {
+    private var lastSubmitted = 0L
+    private var lastApplied = 0L
+
+    /** 提交时分配（仅 UI 线程调用）。 */
+    fun next(): Long = ++lastSubmitted
+
+    /** 锁内判定：该序号是否仍然是最新提交。 */
+    fun shouldApply(seq: Long): Boolean = seq > lastApplied
+
+    /** 锁内登记已落盘。 */
+    fun markApplied(seq: Long) {
+        lastApplied = seq
+    }
+}
 
 /**
  * 最小窗口**内容**尺寸（dp）。同时用作：`minimumSize` 下限 + 读存档时的钳制下限。
@@ -285,13 +307,15 @@ private fun DesktopRoot(
     val settingsPersist = remember {
         PerBookSettings(settingsStore, BookSettingsStore(DesktopPaths.settingsDir.absolutePath))
     }
+    // 设置写入串行锁（与平板同口径）：并发写会互相覆盖，后落盘的旧快照把新改动顶掉。
+    val settingsPersistMutex = remember { Mutex() }
+    // 提交序号：Mutex 只保证互斥，不保证「先提交的先拿锁」；晚到的旧快照必须在锁内丢弃。
+    val settingsPersistOrder = remember { SettingsPersistOrder() }
     val scope = rememberCoroutineScope()
     // 书架宿主单实例：启动开书（下方 LaunchedEffect）与书架界面走同一个（导入进度一致）。
     val shelfHost = remember(store) { DesktopShelfHost(store) }
 
     var settings by remember { mutableStateOf(settingsStore.load()) }
-    // 本书原始私有层（首次开书探针判“钉没钉过”用；随书加载，见下）。
-    var bookOverlay by remember { mutableStateOf(BookSettings.EMPTY) }
     var customs by remember { mutableStateOf(emptyList<ThemePreset>()) }
     var openBook by remember { mutableStateOf<ShelfBook?>(null) }
     // DB 打开是挂起调用：首帧组合先于 LaunchedEffect 执行，直接挂 App 会让
@@ -325,10 +349,17 @@ private fun DesktopRoot(
         return
     }
 
-    fun persistSettings(next: ReaderSettings, bookOnly: Boolean = false) {
+    fun persistSettings(next: ReaderSettings) {
         settings = next
+        val seq = settingsPersistOrder.next()
         val bookId = openBook?.id
-        scope.launch(Dispatchers.IO) { settingsPersist.persist(bookId, next, bookOnly) }
+        scope.launch(Dispatchers.IO) {
+            settingsPersistMutex.withLock {
+                if (!settingsPersistOrder.shouldApply(seq)) return@withLock
+                settingsPersist.persist(bookId, next)
+                settingsPersistOrder.markApplied(seq)
+            }
+        }
     }
 
     // 开书即套本书 overlay（无私设即纯全局）；回书架回到全局。
@@ -339,7 +370,6 @@ private fun DesktopRoot(
         topHover = false
         val b = openBook
         settings = withContext(Dispatchers.IO) { settingsPersist.effectiveFor(b?.id) }
-        bookOverlay = withContext(Dispatchers.IO) { settingsPersist.overlayFor(b?.id) }
     }
 
     // ---- 自绘标题栏编排（平台层·桌面壳） ----
@@ -413,11 +443,9 @@ private fun DesktopRoot(
                     book = book,
                     store = store,
                     settings = settings,
-                    bookOverlay = bookOverlay,
                     customs = customs,
                     onBack = { openBook = null },
                     onSettingsChange = { persistSettings(it) },
-                    onCommitBookPrivate = { persistSettings(it, bookOnly = true) },
                     onSaveTheme = { preset ->
                         scope.launch {
                             store.saveTheme(preset)

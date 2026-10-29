@@ -32,8 +32,8 @@ class ReaderSettingsStoreTest {
             eyeProtectionLevel = 60,
             autoContinue = true,
             pageNum = true,
-            fontSize = 21,
             scheme = "night",
+            noteFont = "NoteFace",
         )
         store.save(custom)
 
@@ -44,6 +44,37 @@ class ReaderSettingsStoreTest {
         // A fresh store instance (re-opened "later") must see the persisted global values.
         val reread = ReaderSettingsStore(dir).load()
         assertEquals(custom, reread)
+    }
+
+    @Test
+    fun `private fields never reach the global file`() {
+        // 私有项只写 books/{id}.json：save 时抹回预设，load 时旧档残留键也被抹掉。
+        val dir = tempDir()
+        val store = ReaderSettingsStore(dir)
+        store.save(
+            ReaderSettings.DEFAULT.copy(
+                fontSize = 24,
+                lineSpacing = 1.9,
+                fontBody = "BodyFace",
+                firstLineIndent = 2.0,
+                marginTop = 77,
+            ),
+        )
+        val text = File(dir, "reader.json").readText()
+        listOf("fontSize", "lineSpacing", "fontBody", "firstLineIndent", "marginTop").forEach {
+            assertFalse("全局文件里不得出现私有键 [$it]", text.contains("\"$it\""))
+        }
+        val loaded = store.load()
+        assertEquals(ReaderSettings.DEFAULT.fontSize, loaded.fontSize)
+        assertEquals(ReaderSettings.DEFAULT.fontBody, loaded.fontBody)
+        assertEquals(ReaderSettings.DEFAULT.marginTop, loaded.marginTop)
+        // 旧档残留：手写一份带私有键的全局文件，load 后私有项仍是预设。
+        File(dir, "reader.json").writeText("""{"brightness":30,"fontSize":26,"lineSpacing":2.0,"firstLineIndent":2.0}""")
+        val migrated = ReaderSettingsStore(dir).load()
+        assertEquals(30, migrated.brightness)
+        assertEquals(ReaderSettings.DEFAULT.fontSize, migrated.fontSize)
+        assertEquals(ReaderSettings.DEFAULT.lineSpacing, migrated.lineSpacing)
+        assertEquals(ReaderSettings.DEFAULT.firstLineIndent, migrated.firstLineIndent)
     }
 
     @Test

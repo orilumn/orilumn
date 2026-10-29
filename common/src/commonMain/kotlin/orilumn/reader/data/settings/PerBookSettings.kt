@@ -1,25 +1,19 @@
 package orilumn.reader.data.settings
 
-import kotlinx.serialization.json.JsonObject
-
 /**
  * 设置双层存储的共享实现（以平板逻辑为基准，双端共用）。
  *
- * 两类划分（用户层契约）：
- * - 纯全局：亮度族（brightness/brightnessFollowSystem/brightnessOffset/eyeProtectionLevel/
- *   brightnessGestureLeft/Right/Two）、夜间 `scheme`、打开书自动阅读 `autoContinue`、
- *   字体管理隐藏字体开关 `showHiddenFonts`、用户按槽位选的字重
- *   `fontWeightAnchorsBySlot`/`fontWeightAnchors`
- *   ——不出 overlay，直写全局；
- * - 其余（排版/字体/阅读主题覆盖、笔记页的色槽与批注字体 / 字号等）按书私有：本书只钉住
- *   **本次实际改动的字段**（稀疏 overlay，没动过的字段永不快照）；改动项同时直写全局
- *   （传染给没有此项的书，含未阅读的新书）。
- *   全量快照会把别处设的全局值冻进本书 → “这本书没调过但值变了”，以及
- *   “调了全局这本书不动”——两类标题/正文字体串扰即此（回归见 ReaderSettingsTest）。
- *   存量全量 overlay 在每次 persist 中自愈：与新全局一致、且本次没动的 pin 恢复跟随。
+ * 归属唯一来源是 [SettingsScope]（2026-10-29 定口）：
+ * - **全局**（`settings/reader.json`）：亮度族、阅读主题、笔记族、续读/页码开关、
+ *   字体列表隐藏过滤、持久化元数据 —— 与某本书无关的阅读环境与读者印记；
+ * - **私有**（`settings/books/{bookId}.json`，稀疏覆盖）：字号/行距/字距/段距/页边距/
+ *   字体族与字重/排版主题/翻页开关/首行缩进 —— 每本书默认原书样式。
  *
- * 读：`effectiveFor`——有私用私、无私用全局（稀疏兼容：后加字段老书没有即走全局）。
- * 写：`persist`——bookOnly（原书设置）只写本书，不传染。
+ * **私有项永不写全局**：本书改字号/行距/字体不传染给别的书，也不被别的书改掉。
+ * 这条纪律就是本类存在的理由——两侧各自独立落盘，**没有任何交叉写入**。
+ *
+ * 读：[effectiveFor] = 全局记忆 + 本书覆盖层（只叠私有项）。
+ * 写：[persist] 两条独立写——全局项只写全局，私有项只写本书（空层即删文件）。
  *
  * 平台缝只有三处，本类一概不碰（壳负责）：①系统字体发现；②亮度系统接口；
  * ③键绑定。调用方保证 IO 线程（与两侧 Store 注释一致）。
@@ -35,73 +29,27 @@ class PerBookSettings(
         return global.applyOverlay(bookStore.load(bookId))
     }
 
-    /** 打开某书时的原始私有层（首次开书探针判“钉没钉过”用；无书即空层）。 */
-    fun overlayFor(bookId: Long?): BookSettings =
-        if (bookId == null || bookId < 0) BookSettings.EMPTY else bookStore.load(bookId)
-
     /**
-     * 提交 next（调用方先把 next 作为生效值刷新 UI）。
-     * 返回写后全局（壳刷新基线用）。
+     * 提交 next（调用方先把 next 作为生效值刷新 UI）。返回写后的全局记忆。
+     *
+     * 两条独立写，互不影响：
+     * 1. **全局侧**：只把 [SettingsScope.GLOBAL] 里的字段写回全局文件；一个私有项都不带
+     *    （`withGlobalFrom` 只拷全局字段），所以改一本书的排版永远不会改到别的书；
+     * 2. **本书侧**：只把本书的私有层写进 `books/{id}.json`（预设差异 + 稀疏归一），
+     *    全局项一个都不带；层为空即删文件（`BookSettingsStore.save`）。
+     *
+     * 两侧都先比对再写：内容没变就不落盘（拖动滑条回到原值、开关点两下等）。
      */
-    fun persist(bookId: Long?, next: ReaderSettings, bookOnly: Boolean = false): ReaderSettings {
-        val storedGlobal = globalStore.load()
-        val storedOverlay =
-            if (bookId != null && bookId >= 0) bookStore.load(bookId) else BookSettings.EMPTY
-        val baseline = storedGlobal.applyOverlay(storedOverlay)
-        val changed = BookSettings.changedFrom(next, baseline)
-        val global = if (bookOnly) {
-            storedGlobal
-        } else {
-            storedGlobal.mergeFrom(changed).copy(
-                scheme = next.scheme,
-                brightness = next.brightness,
-                brightnessFollowSystem = next.brightnessFollowSystem,
-                brightnessOffset = next.brightnessOffset,
-                eyeProtectionLevel = next.eyeProtectionLevel,
-                brightnessGestureLeft = next.brightnessGestureLeft,
-                brightnessGestureRight = next.brightnessGestureRight,
-                brightnessGestureTwo = next.brightnessGestureTwo,
-                autoContinue = next.autoContinue,
-                showHiddenFonts = next.showHiddenFonts,
-                fontWeightAnchors = next.fontWeightAnchors,
-                fontWeightAnchorsBySlot = next.fontWeightAnchorsBySlot,
-                cjkLatinSpacing = next.cjkLatinSpacing,
-            )
-        }
-        globalStore.save(global)
+    fun persist(bookId: Long?, next: ReaderSettings): ReaderSettings {
+        val g0 = globalStore.load()
+        val g1 = g0.withGlobalFrom(next)
+        if (g1 != g0) globalStore.save(g1)
+
         if (bookId != null && bookId >= 0) {
-            // 稀疏 overlay：既有 pin + 本次改动（改动胜）；没动过的字段永不快照——全量快照
-            // 会把别处设的全局值冻进本书（“没调过但值变了”），也让本书从此不再跟随全局
-            // （“调了全局这本书不动”）。toJsonObject 只含非 null 键，changed 只含本次改动键。
-            val merged = JsonObject(storedOverlay.toJsonObject() + changed.toJsonObject())
-            // 自愈存量全量 overlay 的陈旧 pin：与新全局一致、且本次没动的字段恢复跟随
-            // （视觉无变化；本次刚改的字段必然与全局一致，豁免——那是用户的明确意图）。
-            val changedKeys = changed.toJsonObject().keys
-            val globalJson = global.toJsonObject()
-            // 笔记页字段是**书本级**（2026-10-28 用户定口：改过就一直有效，换主题 / 别的书
-            // 改全局都不动本书）：这一族是后加的，不存在老版本全量快照的陈旧 pin，因此不参与
-            // 上面的自愈——否则「改完换主题」这一步就会把 pin 当成与全局一致而清掉，
-            // 之后别的书一改全局，本书就跟着变了。
-            val cleaned = JsonObject(
-                merged.filter { (k, v) -> k in changedKeys || k in NOTE_PIN_KEYS || globalJson[k] != v },
-            )
-            bookStore.save(bookId, BookSettings.fromJson(cleaned.toString()))
+            val o0 = bookStore.load(bookId)
+            val o1 = BookSettings.fromReaderSettings(next)
+            if (o1 != o0) bookStore.save(bookId, o1)
         }
-        return global
+        return g1
     }
 }
-
-/**
- * 笔记页字段的 overlay 键：书本级语义要求「改过就一直有效」，不参与陈旧 pin 自愈。
- * 与 `BookSettings` 的对应字段同名，改字段名时两处必须同改。
- */
-private val NOTE_PIN_KEYS = setOf(
-    "highlightColorSlots",
-    "underlineColorSlots",
-    "highlightDefaultSlot",
-    "underlineDefaultSlot",
-    "annotationLastKind",
-    "annotationLastLineStyle",
-    "noteFont",
-    "noteFontScale",
-)

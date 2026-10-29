@@ -332,7 +332,7 @@ class FirstLineIndentSingleLineOverflowTest {
         themeSheetFromProfile(p),
         null,
         ReaderUiSheet.build(p),
-        paragraphScale = p.paragraphSpacingScale, gapScale = p.paragraphGapScale, pxScale = p.density,
+        paragraphEm = p.paragraphSpacingEm, gapScale = p.paragraphGapScale, pxScale = p.density,
     )
 
     /** 真书全链路扫版心：重路径断行 → [DrawLineBuilder] 投影 → 绘制侧真实整形，任一行右缘越版心即失败。 */
@@ -346,7 +346,7 @@ class FirstLineIndentSingleLineOverflowTest {
             // 命中窗口宽 = 2em 缩进；这里扫 320px，足以覆盖该字号下窗口的全部位置。
             for (w in (baseContentW(p) - 320)..(baseContentW(p) + 40)) {
                 val result = BoxLayouter(p.bodyPx, breaker).layoutBoxes(root, w, styles, classify)
-                for ((idx, dl) in DrawLineBuilder.build(result, styles, classify, HIDDEN_NONE, p.letterSpacingEm)) {
+                for ((idx, dl) in DrawLineBuilder.build(result, styles, classify, HIDDEN_NONE, p.letterSpacingEm ?: 0f)) {
                     val sub = dl.text.substring(dl.range)
                     val (n, right) = painted(
                         breaker, sub, dl.lineWidthPx, dl.alignment, dl.fontSizePx,

@@ -1,7 +1,6 @@
 package orilumn.reader.desktop
 
 import orilumn.reader.data.font.FontEntry
-import orilumn.reader.data.settings.BookSettings
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.ui.reader.FontScanProgress
 import orilumn.reader.ui.reader.ReaderAnnotationPanel
@@ -60,13 +59,9 @@ fun ReaderView(
     book: ShelfBook,
     store: DesktopShelfStore,
     settings: ReaderSettings,
-    /** 本书原始私有层（首次开书探针判“钉没钉过”用；与 settings 同时随书加载）。 */
-    bookOverlay: BookSettings,
     customs: List<ThemePreset>,
     onBack: () -> Unit,
     onSettingsChange: (ReaderSettings) -> Unit,
-    /** 原书设置专用提交（只写本书 overlay，共享持久化语义；与平板同口径）。 */
-    onCommitBookPrivate: (ReaderSettings) -> Unit,
     onSaveTheme: (ThemePreset) -> Unit,
     onDeleteTheme: (ThemePreset) -> Unit,
     modifier: Modifier = Modifier,
@@ -86,6 +81,12 @@ fun ReaderView(
     var currentPos by remember(book) { mutableStateOf<ReaderPos?>(null) }
     var settingsOpen by remember(book) { mutableStateOf(false) }
     /**
+     * 面板内设置（与平板 `panelSettings` 同口径）：打开面板时以当前生效值为底，叠加**只读读数**
+     * （原书实测缩进/行高，见 `DesktopReaderHost.bookStyleReadings`），让读者没配的滑块显示书的
+     * 真实值。读数只活在本状态里：**不落盘、不进 `settings`**（否则会白跑一次重排）。
+     */
+    var panelSettings by remember(book) { mutableStateOf<ReaderSettings?>(null) }
+    /**
      * 面板内调参的锚点（与平板同调，共享 [orilumn.reader.engine.RelayoutAnchor]）：
      * 开面板钉一次，拖动期间每次预览落位不换锚，关面板那次落位后松开。
      */
@@ -96,10 +97,6 @@ fun ReaderView(
     var panelLastPage by remember(book) { mutableStateOf(ReaderPanelPage.Toc) }
     /** 标注外部变更号：清单删除后 +1，阅读面重读当前章、屏幕装饰同步消失。 */
     var annotationsEpoch by remember(book) { mutableStateOf(0) }
-    // 首次开书收口（与平板同调，共享 probeOriginalOnOpen）：默认原书主题开书时，
-    // 落位即按落位章回填未钉的缩进/行距并 bookOnly 持久；已钉/非原书直接跳过。
-    // 每本书一次（overlay 落 pin 后共享门控自停）。
-    var probedOpen by remember(book) { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     fun commit(next: ReaderSettings) = onSettingsChange(next)
 
@@ -228,16 +225,6 @@ fun ReaderView(
             onDispose { (snapshot.delegate as? DesktopReaderHost)?.close() }
         }
         val desktopHost = snapshot.delegate as? DesktopReaderHost
-        // 首次开书探针落位（见上）：宿主就绪 + 首定位到达后跑一次，命中即 bookOnly 提交
-        // （设置状态更新 → 重排 effect 自动轻刷）。
-        LaunchedEffect(book, currentPos) {
-            if (probedOpen) return@LaunchedEffect
-            val pos = currentPos ?: return@LaunchedEffect
-            val host = desktopHost ?: return@LaunchedEffect
-            probedOpen = true
-            val next = host.probeOriginalOnOpen(settings, bookOverlay, pos.chapter)
-            if (next != settings) onCommitBookPrivate(next)
-        }
         // 引擎重排落位推送（设置两段式与视口重排共用）：刷版本号 + 定位到含锚字符的新页，
         // NonCancellable 保证已完成的重排不被 effect 重启吞掉。
         suspend fun pushLanding(landing: ReaderPos) {
@@ -300,6 +287,22 @@ fun ReaderView(
                 scan.onFamilyScanned = { _, _ -> }
                 fontScanProgress = null
             }
+        }
+        // 面板读数（与平板同调，共享 `controller.bookStyleReadings`）：打开面板时按当前章量一次
+        // 原书正文段落的缩进/行高，填进面板只读读数（读者没配的滑块显示书的真实值）。
+        // 不落盘、不进 `settings`，所以不触发重排；只合并读数两项，关面板即丢弃。
+        LaunchedEffect(book, settingsOpen, currentPos?.chapter) {
+            if (!settingsOpen) {
+                panelSettings = null
+                return@LaunchedEffect
+            }
+            val pos = currentPos ?: return@LaunchedEffect
+            val host = desktopHost ?: return@LaunchedEffect
+            val measured = host.bookStyleReadings(panelSettings ?: settings, pos.chapter)
+            panelSettings = (panelSettings ?: settings).copy(
+                probeIndent = measured.probeIndent,
+                probeLineSpacing = measured.probeLineSpacing,
+            )
         }
         // 扫描器是**进程级单例**：离开本视图（回书架/换书重建）时卸下回调，别让它持有已销毁的组合作用域。
         DisposableEffect(book) {
@@ -366,7 +369,8 @@ fun ReaderView(
         // 若用 if 条件组合会整棵拔掉，退场动画永远跑不到。
         ReaderSettingsPanel(
             visible = settingsOpen,
-            settings = settings,
+            // 面板读的是「生效值 + 只读读数」（见上）；读数为空时就是生效值。
+            settings = panelSettings ?: settings,
             // 内容与平板同口径：导入区 + 已导入区全开；
             // 导入经 FileKit（桌面 UI），WiFi 经桌面独写对话框（服务共享），发现链见上（macOS 独有，保留）。
             fontEntries = fontEntries,
@@ -410,12 +414,6 @@ fun ReaderView(
                     fallBackFontSlots(family, settings)
                 }
             },
-            onCommitBookPrivate = {
-                // 原书提交共享收口：先按当前章真实排版回填三滑块（与平板 withBookStyle 同调），
-                // 再进 Main.persistSettings；无定位时沿旧值直透。
-                val pos = currentPos
-                onCommitBookPrivate(if (pos != null) desktopHost?.probeOriginalTheme(it, pos.chapter) ?: it else it)
-            },
             onDismiss = {
                 settingsOpen = false
                 // 关面板门控全套（共享收口，平板同调）：版式真变才 finalize 并落位，不变只关面板。
@@ -427,9 +425,10 @@ fun ReaderView(
                 }
             },
             brightnessMax = if (ddcCapable == true) 100 else 0,
-            onPreview = { onSettingsChange(it) },
-            onCommitTypography = { commit(it) },
-            onCommitLight = { commit(it) },
+            // 面板本地状态先跟上（滑块/读数同源），再走壳的提交；两者合流到 Main.persistSettings。
+            onPreview = { panelSettings = it; onSettingsChange(it) },
+            onCommitTypography = { panelSettings = it; commit(it) },
+            onCommitLight = { panelSettings = it; commit(it) },
             customThemes = customs,
             onSaveTheme = onSaveTheme,
             onDeleteTheme = onDeleteTheme,

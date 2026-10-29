@@ -27,15 +27,11 @@ data class TypographicProfile(
     val quoteScale: Float,
     /** Code font size relative to the body. */
     val codeScale: Float,
-    /** Line-spacing multiplier (1.x). */
-    val lineSpacing: Float,
-    /** Line-spacing multiplier as consumed by the legacy Android StaticLayout mix path. The box
-     *  engine no longer reads it (uniform line heights, see the Android-side UniformLineHeightSpan),
-     *  so commonMain keeps the pure CSS value directly (CSS line-height / per-font kFont calibration
-     *  was a TextPaint measurement and lives on the engine-skia side if ever needed again). */
-    val lineSpacingMult: Float,
-    /** First-line indent in em (0..10, applied to body paragraphs p/li via the UI layer; 0 = none). */
-    val firstLineIndentEm: Float,
+    /** 行距倍数（CSS `line-height`）。**`null` = 读者没配** ⇒ UI 层不发行距声明，书自己的
+     *  `line-height` 生效（书没写时由引擎初值 1.5 兜底）；任何实数照原样发（0 就是 0）。 */
+    val lineSpacing: Float?,
+    /** 首行缩进（em）：`null` = 读者没设过（ReaderUiSheet 不发声明，书的缩进原样）；0 与 N 都发声明。 */
+    val firstLineIndentEm: Float?,
     /** Theme body-text color (ARGB). */
     val fgColor: Int,
     /** Theme background color (ARGB). */
@@ -65,13 +61,15 @@ data class TypographicProfile(
     val layoutTheme: String,
     /** Cover stretch switch (true = stretch fullscreen). */
     val coverStretch: Boolean,
-    /** 段间距：p/li 纵边距乘算 (1.0 = 书/主题节奏，0 = p/li 边距清零)。 */
-    val paragraphSpacingScale: Float,
+    /** 段间距（**绝对值 em，0..2**）：`null` = 读者没配 ⇒ 引擎不覆盖（书/主题/UA 的 p-li 边距原样）；
+     *  `N` = p/li 上下外边距固定 N em（绝对值，不随书放大缩小）。 */
+    val paragraphSpacingEm: Float?,
     /** 疏密：p/li 之外一切块级纵边距乘算 (1.0 = 原书节奏，0 = 结构块边距清零)。 */
     val paragraphGapScale: Float,
-    /** Character spacing in em (letterSpacing slot -100..100 / 500 = -0.2em..0.2em); 0 = no extra
-     * spacing. Applied to the base text paint in the shaping layer. */
-    val letterSpacingEm: Float,
+    /** 字间距（em）：`null` = 读者没配 ⇒ 引擎**按书**（正文段落自己的 `letter-spacing`，
+     *  书没写就是 0）；`N` = 读者覆盖，全章按 N em 排（-0.2..0.2，槽位 /500）。
+     *  由断行器与绘制侧同源消费（见 `BoxChapterLayouter.chapterLetterSpacingEm`）。 */
+    val letterSpacingEm: Float?,
     /** CJK–Latin automatic spacing in em (0..1.0). 用户设置的原始值（**不代表能不能生效**，见
      *  [cjkLatinSpacingEmApplied]）。 */
     val cjkLatinSpacingEm: Float = 0f,
@@ -131,10 +129,11 @@ data class TypographicProfile(
          * (View.getWidth); the whole lower engine works in physical pixels — both conventions match.
          */
         fun build(s: ReaderSettings, density: Float = 1f): TypographicProfile {
-            // 排版主题预设 (传统/现代) 由 withLayoutTheme 在提交时写进设置 (首行缩进/段间距/字体);
-            // 原书设置 也写入中性默认值 (无字体覆盖/无缩进/段距默认). 此处一律原样透传存储值,
-            // 滑块值即生效值; 用户拖滑块永远是最高优先级.
-            val original = s.layoutTheme == "original" || s.useOriginalStyle
+            // 排版主题预设（传统/现代）由 withLayoutTheme 在提交时只写「读者层要跟随的那几项」
+            // （段间距 + 正文字体族）；字数/缩进等基线交给主题层 `traditional.css` / `modern.css`。
+            // 此处一律原样透传存储值：滑块值即生效值，用户拖滑块永远是最高优先级。
+            // 原书设置 = `layoutTheme == "original"` ⇒ 主题层整张不加载，书自己的 CSS 说了算。
+            val original = s.layoutTheme == "original"
             val body = dpToPxF(s.fontSize.toDouble() * ReaderSettings.fontScaleToRatio(s.fontScale), density)
             val (bg, fg, quote) = colors(s)
             return TypographicProfile(
@@ -142,9 +141,8 @@ data class TypographicProfile(
                 headingScale = 1.4f,
                 quoteScale = 1.0f,
                 codeScale = 0.92f,
-                lineSpacing = s.lineSpacing.toFloat(),
-                lineSpacingMult = s.lineSpacing.toFloat(),
-                firstLineIndentEm = s.firstLineIndent.coerceIn(0.0, 10.0).toFloat(),
+                lineSpacing = s.lineSpacing?.toFloat(),
+                firstLineIndentEm = s.firstLineIndent?.coerceIn(0.0, 10.0)?.toFloat(),
                 fgColor = fg,
                 bgColor = bg,
                 quoteColor = withAlpha(fg, 0.72f),
@@ -162,24 +160,22 @@ data class TypographicProfile(
                 layoutTheme = s.layoutTheme,
                 coverStretch = s.coverStretch,
                 // 段间距/字距: 同样原样透传, 用户可随时调整.
-                paragraphSpacingScale = (s.paragraphSpacing / 100f).toFloat(),
+                paragraphSpacingEm = s.paragraphSpacing?.coerceIn(0.0, 2.0)?.toFloat(),
                 paragraphGapScale = (s.paragraphGap / 100f).toFloat(),
-                letterSpacingEm = Math.round(s.letterSpacing.coerceIn(-100.0, 100.0)) / 500f,
+                letterSpacingEm = s.letterSpacing?.let { Math.round(it.coerceIn(-100.0, 100.0)) / 500f },
                 cjkLatinSpacingEm = (s.cjkLatinSpacing.coerceIn(0.0, 100.0) / 100f).toFloat(),
                 density = density,
             )
         }
 
         /**
-         * 切排版主题: 把主题预设的排版值一次写入 UI 设置, 让滑块值立刻跟随主题,
-         * 避免滑块与实际值不一致. 主题预设只是"同步保存的 UI 设置", 用户仍可随时
-         * 调整滑块覆盖.
+         * 切排版主题：把主题的基线交给**主题层**（tier 42 的 `modern.css` / `traditional.css`），
+         * 这里只写该主题确实要让读者层跟随的那几项（见 `docs/设置模型整改计划.md` §3.5）。
          *
-         * 传统/现代: 写入首行缩进/段间距/正文字体族 (字体槽是 UI 优先级最高的覆盖层,
-         * 所以预设写入 = 直接生效).
-         * 原书设置: 写入全套中性默认值 (字体不覆盖 / 字号/段间距/字距/行距 / 缩进)
-         * 让书籍排版完全回到 CSS 原貌; 用户可随时重新调整. 持久化范围由调用方决定:
-         * 现代/传统 走 diff 传染全局; 原书设置 只写本书私有 overlay, 不传染.
+         * - 传统 / 现代：只写 `layoutTheme` + 段间距 + 正文字体族；**首行缩进不写**
+         *   （2em / 0 由主题层自己声明，写了等于把读者层显式值钉进本书，反而压掉主题层口径）；
+         * - 原书设置：等于「清空本书的排版覆盖」——字体槽、行距、字距、段距、疏密、首行缩进
+         *   全部回预设（`null` = 不声明），本书重新完全听书；**不动字号与页边距**（读者舒适度）。
          */
         @JvmStatic
         fun withLayoutTheme(s: ReaderSettings, theme: String): ReaderSettings {
@@ -187,32 +183,29 @@ data class TypographicProfile(
             return when (theme) {
                 "traditional" -> s.copy(
                     layoutTheme = theme,
-                    firstLineIndent = 2.0,
-                    // 传统节奏靠 1em 主题边距 × 段间距：p/li 归零（缩进区分段落），标题等结构块
-                    // 照常走疏密（预设 100），用户上调段间距即有间距。
+                    // 传统节奏靠主题层 1em 边距、缩进区分段落 ⇒ 段间距绝对 0em（p/li 边距清零）；
+                    // 标题等结构块照常走疏密（预设 100），用户上调段间距即有间距。
                     paragraphSpacing = 0.0,
                     paragraphGap = 100.0,
                     fontBody = "serif",
                 )
                 "modern" -> s.copy(
                     layoutTheme = theme,
-                    firstLineIndent = base.firstLineIndent,
-                    // 现代节奏同样走主题 1em 边距 × 段间距：预设回到 100%。
-                    paragraphSpacing = 100.0,
+                    // 现代节奏用主题层自己的 `p,li{margin:1em 0}` ⇒ 段间距不声明（null = 听书/主题），
+                    // 面板显示实测 1em；读者拖了滑块才以绝对 em 覆盖。
+                    paragraphSpacing = base.paragraphSpacing,
                     paragraphGap = 100.0,
                     fontBody = "sans-serif",
                 )
                 else -> s.copy(
-                    // 原书设置: 全套中性值 — 不替换字体、字号回到基准、行距/段间距/字距归位
-                    // (恒等), 缩进回到默认. Android 切后用书探测值替换首行缩进/行距
-                    // (见 ReaderActivity.withBookStyle)，用户可随时调整滑块覆盖.
+                    // 原书设置：清空本书排版覆盖（字体槽 / 行距 / 字距 / 段距 / 疏密 / 首行缩进）。
+                    // 全部回到预设的「不声明」状态，书的 CSS 重新说了算；字号与页边距不动。
                     layoutTheme = theme,
-                    fontSize = base.fontSize,
-                    fontScale = base.fontScale,
                     fontBody = "",
                     fontTitle = "",
                     fontCode = "",
                     lineSpacing = base.lineSpacing,
+                    cjkLatinSpacing = base.cjkLatinSpacing,
                     firstLineIndent = base.firstLineIndent,
                     paragraphSpacing = base.paragraphSpacing,
                     paragraphGap = base.paragraphGap,

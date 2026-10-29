@@ -376,7 +376,7 @@ class DesktopReaderHost(
                 return@withContext null
             }
             controller.bindReflow(r)
-            // 参数稳定点（面板外两段式提交，含开书探针回填）：版式指纹真变时
+            // 参数稳定点（面板外两段式提交）：版式指纹真变时
             // 清全书旧指纹磁盘表；指纹未变（夜间切换等非版式提交）是空操作，
             // 不误删当前参数下的有效磁盘表。
             controller.cleanStaleDiskTables()
@@ -420,27 +420,14 @@ class DesktopReaderHost(
         }
 
     /**
-     * 原书主题提交探针（用户层·壳，与平板 `withBookStyle` 同调共享收口）。
-     *
-     * 面板 `commitBook` 到达时已是 `withLayoutTheme(original)` 后的中性值，此处按当前章
-     * 真实排版回填首行缩进/行距后再持久化；非 original / 无定位一律原样返回。
+     * 面板读数（用户层·壳，与平板 `bookStyleReadings` 同调共享收口）：
+     * 打开设置面板时按当前章量一次原书正文段落的首行缩进与行高，只更新会话只读读数
+     * （面板滑块显示书的真实值），**不落盘、不进版式**。
      */
-    fun probeOriginalTheme(next: ReaderSettings, chapter: Int): ReaderSettings =
-        controller.probeOriginalTheme(chapter, profile.bodyPx, next, profile.density)
-
-    /**
-     * 首次开书探针（用户层·壳，与平板开书收口同调共享 `probeOriginalOnOpen`）。
-     *
-     * 默认原书主题开书时，按落位章回填本书未钉的缩进/行距；调用方（视图）负责 bookOnly
-     * 持久化 + 设置状态更新（重排 effect 随后自动轻刷）。已钉/非原书原样返回。
-     */
-    suspend fun probeOriginalOnOpen(
-        settings: ReaderSettings,
-        overlay: BookSettings,
-        chapter: Int,
-    ): ReaderSettings = withContext(Dispatchers.Default) {
-        controller.probeOriginalOnOpen(chapter, profile.bodyPx, settings, overlay, profile.density)
-    }
+    suspend fun bookStyleReadings(settings: ReaderSettings, chapter: Int): ReaderSettings =
+        withContext(Dispatchers.Default) {
+            controller.bookStyleReadings(chapter, profile.bodyPx, settings, profile.density)
+        }
 
     /**
      * F4b 用户字库追装（与平板 `topUpSkiaFonts` 同式，经共享 [FontPoolSync]）：

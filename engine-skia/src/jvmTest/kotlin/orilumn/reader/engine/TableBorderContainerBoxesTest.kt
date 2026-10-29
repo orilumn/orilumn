@@ -40,7 +40,7 @@ class TableBorderContainerBoxesTest {
 
     @Test
     fun `border-only table gets a border box spanning its rows`() {
-        val profile = TypographicProfile.build(ReaderSettings.DEFAULT.copy(useOriginalStyle = true))
+        val profile = TypographicProfile.build(ReaderSettings.DEFAULT.copy(layoutTheme = "original"))
         val layouter = BoxChapterLayouter()
         val root = HtmlTreeConverter().convert(html)!!
         val bundle = CssBundle(listOf(css))
@@ -71,7 +71,7 @@ class TableBorderContainerBoxesTest {
     fun `table with its own background is not duplicated`() {
         // 自带背景的表只出背景盒（画自身边框），不另出边框盒。
         val cssBg = css + "\ntable { background-color: #eeeeee; }"
-        val profile = TypographicProfile.build(ReaderSettings.DEFAULT.copy(useOriginalStyle = true))
+        val profile = TypographicProfile.build(ReaderSettings.DEFAULT.copy(layoutTheme = "original"))
         val layouter = BoxChapterLayouter()
         val root = HtmlTreeConverter().convert(html)!!
         val structure = ChapterStructureCache()

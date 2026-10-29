@@ -1200,6 +1200,28 @@ internal fun noteCandidates(
     }
 
     /**
+     * 正右 / 正左这一列的**竖坐标**。
+     *
+     * 本行就是垂直居中于本行。规则第 5 条的「上一行 / 下一行的左右两侧」不是那一行自己的位置，
+     * 而是本行相邻空间里的**同一块空白**——这一列要从**靠近锚点的那一端**用起，不能居中于那一行：
+     * 行距一大，框就被摆到离锚点一整行远（真机「使用 val」：上一行行尾短、右边整块空白，
+     * 批注却贴到了上一行文字旁边）。竖直近侧与四个斜向同口径，留 [NOTE_MIN_MARGIN_PX]。
+     *
+     * @return `NaN` = 这块空白连框高都放不下。
+     */
+    fun sideColumnTop(rowIndex: Int, row: NoteTextLine, f: Rect, size: NoteBoxSize): Float {
+        val lo = f.top
+        val hi = f.bottom - size.height
+        if (hi < lo - NOTE_GEOM_EPS) return Float.NaN
+        val y = when {
+            rowIndex == base -> row.rect.center.y - size.height / 2f
+            rowIndex < base -> firstRow.rect.top - NOTE_MIN_MARGIN_PX - size.height
+            else -> baseRow.rect.bottom + NOTE_MIN_MARGIN_PX
+        }
+        return y.coerceIn(lo, max(lo, hi))
+    }
+
+    /**
      * 正右：近侧固定 1em（水平引线要从这段空档出去），远侧按档位。
      *
      * 上下两条边不是「与正文的间距」，沿用空白自带的 0.1em 最小缝即可——
@@ -1225,10 +1247,8 @@ internal fun noteCandidates(
         if (maxW <= 1f || maxH <= 1f) return
         val size = noteBoxFit(text, metrics, maxW, maxH, sizer, completeOnly)
         if (!size.readable) return
-        val lo = f.top
-        val hi = f.bottom - size.height
-        if (hi < lo - NOTE_GEOM_EPS) return
-        val top = (row.rect.center.y - size.height / 2f).coerceIn(lo, max(lo, hi))
+        val top = sideColumnTop(rowIndex, row, f, size)
+        if (top.isNaN()) return
         add(rowIndex, ring, tier, f, left, top, size)
     }
 
@@ -1242,10 +1262,8 @@ internal fun noteCandidates(
         if (maxW <= 1f || maxH <= 1f) return
         val size = noteBoxFit(text, metrics, maxW, maxH, sizer, completeOnly)
         if (!size.readable) return
-        val lo = f.top
-        val hi = f.bottom - size.height
-        if (hi < lo - NOTE_GEOM_EPS) return
-        val top = (row.rect.center.y - size.height / 2f).coerceIn(lo, max(lo, hi))
+        val top = sideColumnTop(rowIndex, row, f, size)
+        if (top.isNaN()) return
         add(rowIndex, ring, tier, f, right - size.width, top, size)
     }
 

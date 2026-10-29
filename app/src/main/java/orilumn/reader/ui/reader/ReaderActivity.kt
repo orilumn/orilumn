@@ -191,6 +191,9 @@ class ReaderActivity : ComponentActivity() {
         settingsStore = ReaderSettingsStore(File(filesDir, "settings").absolutePath)
         bookSettingsStore = BookSettingsStore(File(filesDir, "settings").absolutePath)
         fontRepository = FontRepository(this, AndroidDb.library(this))
+        // 开书就直读一次字库（与桌面开书 `LaunchedEffect(book)` 同式）：批注字体是**全局设置**，
+        // 解析成可绘制字形要拿完整字库表；只在面板打开时读，冷启动直接开书时批注会退回界面默认字体。
+        loadPanelFonts()
         // P1 字体发现·层次二（方案 §2.2）：启动一次性检测，只在**指纹变**时进共享池 45 档扫。
         // 进程级单例：书架/阅读面重复调用由 `detected` 门闩收敛为一次。
         lifecycleScope.launch(Dispatchers.IO) {
@@ -568,9 +571,9 @@ class ReaderActivity : ComponentActivity() {
     // ---- Settings panel font/theme platform seams (shell-owned) ----
 
     /**
-     * 面板字库**只读 DB** 重载（与桌面 `refreshFonts` 同式，方案 §2.1 收口）：
+     * 字库**只读 DB** 重载（与桌面 `refreshFonts` 同式，方案 §2.1 收口）：
      * 系统行的枚举/落库由字体扫描任务负责（启动检测 / 面板提档），本函数不再触发任何扫描，
-     * 开面板与导入/隐藏/删除后重读列表都是同一个廉价的 DB 直读。
+     * **开书**、开面板与导入/隐藏/删除后重读列表都是同一个廉价的 DB 直读。
      */
     private fun loadPanelFonts() {
         lifecycleScope.launch {

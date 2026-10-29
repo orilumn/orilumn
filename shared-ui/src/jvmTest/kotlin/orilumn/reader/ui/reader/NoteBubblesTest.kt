@@ -1918,6 +1918,41 @@ class NoteBubblesTest {
     }
 
     @Test
+    fun `wide right note leaves from the end nearest the text, not its middle`() {
+        // 真机「函数体」（2026-10-30）：框在正文右侧、同一行，中间隔着「写在大括号内 {}」，
+        // 引线只能走「下横上」。框很宽，框心附近的字边又很多——它们曾把「0.5em 区间端头」
+        // 挤出候选池，引线只好从框中间出去，白走三百多像素（用户：方向定了就取最短）。
+        val row = rect(194f, 1328f, 701f, 1397f)
+        val glyphs = mutableListOf<Rect>()
+        var x = 194f
+        for (w in listOf(46f, 46f, 46f, 46f, 46f, 46f, 46f, 23f, 23f, 46f, 46f)) {
+            glyphs += rect(x, 1330f, x + w - 2f, 1395f)
+            x += w
+        }
+        // 下一行的字边，右缘正好落在框心附近：候选池里挤满它们。
+        var cx = 1100f
+        while (cx <= 1240f) {
+            glyphs += rect(cx - 200f, 1443f, cx, 1512f)
+            cx += 20f
+        }
+        val ink = glyphs.take(3)
+        val bubble = rect(740f, 1334f, 1656f, 1390f)
+        val arrow = routeNoteArrow(
+            bubble = bubble,
+            inkRects = ink,
+            glyphs = glyphs,
+            lineH = 56f,
+            side = NoteSide.RIGHT,
+            lineBoxes = listOf(row, rect(900f, 1443f, 1240f, 1512f)),
+            targetInk = ink,
+        )
+        val pts = arrowPoints(arrow!!)
+        assertEquals("起点要贴住框的左端（0.5em），不是框心：$pts", bubble.left + 28f, pts[0].x, 0.5f)
+        assertEquals("起点落在框的下边：$pts", bubble.bottom, pts[0].y, 0.5f)
+        assertEquals("终点落在目标字的下边：$pts", ink.last().bottom, pts.last().y, 0.5f)
+    }
+
+    @Test
     fun `leader takes the other side when another note blocks the middle of the gap`() {
         // 真机第 6 条 / 规则第 9 条：行间中线被别的批注占了，就走另一侧，不贴着字边抹过去。
         val anchorGlyph = rect(100f, 100f, 140f, 140f)

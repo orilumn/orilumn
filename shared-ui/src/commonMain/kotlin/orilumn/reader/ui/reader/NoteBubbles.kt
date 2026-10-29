@@ -4652,7 +4652,23 @@ private fun edgePoints(
     // 排最后，被 6 个一截就直接消失。真机「讨论」就是这样：出口只能走邻框右边的 1398，
     // 入口候选里 1398 排第 7，被截掉 → 永远折那 7px。
     val cap = if (breakoutAllowed) limit * 2 else limit
-    return out.sortedBy { p -> wants.minOf { abs(p.at - it) } }.take(cap)
+    val ranked = out.sortedBy { p -> wants.minOf { abs(p.at - it) } }
+    if (ranked.size <= cap) return ranked
+    // 0.5em 区间的两头是规则第 4 条的首选位置，也是「离目标最近」的那一头所在：
+    // 被「就近取前几个」截掉就等于把最短的起点 / 终点扔掉（真机「函数体」）。
+    // 先把这两头挑出来，再用离目标近的候选把名额填满。
+    val kept = LinkedHashSet<ArrowEdgePoint>(cap + 2)
+    if (hasBand) {
+        for (p in ranked) {
+            if (!p.breakout && (abs(p.at - bandLo) < 0.5f || abs(p.at - bandHi) < 0.5f)) kept += p
+        }
+    }
+    val target = max(cap, kept.size)
+    for (p in ranked) {
+        if (kept.size >= target) break
+        kept += p
+    }
+    return kept.toList()
 }
 
 /** 候选点在直线取交集时用的区间：突破点钉死在自己身上，内缩点才允许两端滑动对齐。 */
@@ -4969,8 +4985,12 @@ private fun arrowSideExits(
     val hiY = bubble.bottom - max(pad, eps)
     val loX = bubble.left + max(pad, eps)
     val hiX = bubble.right - max(pad, eps)
-    val wantY = floatArrayOf(entry.point.y, bubble.center.y)
-    val wantX = floatArrayOf(entry.point.x, bubble.center.x)
+    // 方向定下来以后「越短越好」（引线规则第 6 条）：出口沿边取点时，唯一的对齐目标是
+    // **另一端**（入口）。把框中心也算进对齐目标会把它挤下去——真机「函数体」就是这样：
+    // 框中心附近的几条字边占满了候选，离入口最近的那一头（0.5em 区间端头）反而被截掉，
+    // 引线只好从框中间出去，白白多走三百多像素。
+    val wantY = floatArrayOf(entry.point.y)
+    val wantX = floatArrayOf(entry.point.x)
     fun edgeY(x: Float) {
         for (p in edgePoints(
             bubble.top, bubble.bottom, loY, hiY, wantY, obstacles, vertical = false,

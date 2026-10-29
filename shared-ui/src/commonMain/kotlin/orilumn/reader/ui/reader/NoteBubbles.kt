@@ -7,7 +7,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -5713,7 +5712,10 @@ internal fun NoteBubbles(
                     // 布局位移（不是动画）：位置只跟页面几何走，翻页时整层一起让位。
                     .offset { IntOffset(b.leftPx.roundToInt(), b.topPx.roundToInt()) }
                     .width(with(d) { b.widthPx.toDp() })
-                    .heightIn(max = with(d) { (b.maxLines * b.fontPx * NOTE_BUBBLE_LINE_RATIO).toDp() })
+                    // 高度不另设上限：`maxLines` 已经把行数封顶，而这个上限是按**名义**行高
+                    // （字号 × 1.38 = 55.15px）算的，排版却把每行高度向上取整到整像素（56px）——
+                    // 2 行要 112px、上限只给 110，于是最后一行连同省略号一起被吃掉，
+                    // 明明有空地也显示成「折了但没折完」（2026-10-29 真机定位）。
                     .clip(RoundedCornerShape(3.dp))
                     .background(tint.copy(alpha = 0.16f))
                     .border(1.dp, tint.copy(alpha = 0.5f), RoundedCornerShape(3.dp))

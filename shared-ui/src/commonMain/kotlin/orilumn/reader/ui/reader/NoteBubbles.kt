@@ -261,6 +261,9 @@ private const val ARROW_BEND_WINDOW_LINES: Float = 2f
 /** 一条候选折线最多几个顶点（4 折 = 6 个）：暂存数组按它开，热路径上不再分配。 */
 private const val ARROW_ROUTE_MAX_POINTS: Int = 6
 
+/** 一条批注最多记多少条「已经量过的直线」（去重用，见 [ArrowTarget.markStraight]）。 */
+private const val ARROW_STRAIGHT_LINES: Int = 32
+
 /** 一行批注折行模拟的结果：比「宽 / 字宽」粗估准，用于完整性判定。 */
 internal data class NoteTextFit(
     /** 整句需要几行（不限行数时的折行结果）。 */
@@ -3359,6 +3362,45 @@ private class ArrowTarget(
 
     /** 障碍的空间索引：量线段时只扫「纵向可能碰到」的那几行（见 [ArrowObstacleIndex]）。 */
     val index: ArrowObstacleIndex = ArrowObstacleIndex(obstacles)
+
+    /**
+     * 本目标已经量过的直线：每 4 个 float 一条（两端点坐标），见 [markStraight]。
+     *
+     * 直线只由「两条可动区间的交集坐标 + 两端各自固定的那条边」定下来，跟沿边挑了哪个候选点
+     * 无关：同一条线量一次就够。旧实现只在**相邻两组**之间去重（一个 lastKey），
+     * 正下批注一页会把同一条竖线量上千遍。
+     */
+    private val straightLines: FloatArray = FloatArray(ARROW_STRAIGHT_LINES * 4)
+    private var straightCount: Int = 0
+
+    /**
+     * 记下这条直线，返回 true = 之前没量过。
+     *
+     * 比的是**坐标本身**而不是「出口边 × 入口边」：同一组边也可能量出不同的线（入口区间
+     * 来源不同、突破点把坐标钉死），按边去重会把没量过的线也跳掉。存满时按「没量过」处理，
+     * 宁可多量一条也不漏量。
+     */
+    fun markStraight(x0: Float, y0: Float, x1: Float, y1: Float): Boolean {
+        for (i in 0 until straightCount) {
+            val j = i * 4
+            if (abs(straightLines[j] - x0) <= 0.01f &&
+                abs(straightLines[j + 1] - y0) <= 0.01f &&
+                abs(straightLines[j + 2] - x1) <= 0.01f &&
+                abs(straightLines[j + 3] - y1) <= 0.01f
+            ) {
+                return false
+            }
+        }
+        if (straightCount < ARROW_STRAIGHT_LINES) {
+            val j = straightCount * 4
+            straightLines[j] = x0
+            straightLines[j + 1] = y0
+            straightLines[j + 2] = x1
+            straightLines[j + 3] = y1
+            straightCount++
+        }
+        return true
+    }
 }
 
 /**
@@ -3693,6 +3735,8 @@ internal fun routeNoteArrow(
     val rawY = FloatArray(ARROW_ROUTE_MAX_POINTS)
     val ptsX = FloatArray(ARROW_ROUTE_MAX_POINTS)
     val ptsY = FloatArray(ARROW_ROUTE_MAX_POINTS)
+    // 折点坐标池：一条批注只建一次（旧实现每生成一次就新开两个数组，见 [ArrowElbowScratch]）。
+    val elbowScratch = ArrowElbowScratch(obstacles.size)
 
     fun consider(
         xs: FloatArray,
@@ -3702,26 +3746,40 @@ internal fun routeNoteArrow(
         breakout: Boolean,
         corner: Boolean = false,
     ) {
+        val seq = order++
+        // 兜底顺序里「进了自己的框」「横穿自己那一行」排在最前面，而这两项只看两个矩形
+        // （见 [arrowEnterFlags]）。比现有兜底还差的候选：既赢不了兜底，也不可能是通畅路径
+        // ——通畅要求这两项都干净——直接跳过，省掉整条候选的字墨迹扫描。
+        val fb = fallback
+        if (fb != null) {
+            val enters = arrowEnterFlags(xs, ys, count, bubble, target.own)
+            val bubbleIn = (enters and 1) != 0
+            val inkIn = (enters and 2) != 0
+            // 逐项比：进了框比没进差；同样「进不进框」时，横穿自己那一行比没横穿差。
+            if (if (bubbleIn != fb.entersBubble) bubbleIn else (inkIn && !fb.entersInk)) return
+        }
+        // 先廉价判一句「这条候选就算量完也赢不了」：形状名次、折数、两端直线距离都由顶点直接
+        // 算出，不必碰障碍。已经有一条不交叉的通畅引线时，比它更远的「同形状同折数 / 更差形状」
+        // 候选在长度这一关必输（判据里交叉、形状、折数、穿字量都打平或更差才会轮到长度）。
+        // 真机上一条批注要量一千多条候选，绝大多数是这么白量的——每条都要扫几十个字墨迹。
+        val mark = best
+        if (mark != null && mark.clear && mark.crosses == 0 &&
+            !canStillWin(xs, ys, count, mark, side)
+        ) {
+            return
+        }
         val path = measureArrowRoute(
-            xs, ys, count, order++, target.index, bubble, drawnIndex, hugDistance,
+            xs, ys, count, seq, target.index, bubble, drawnIndex, hugDistance,
             limitClear = best, limitFallback = fallback, side = side, own = target.own,
             breakout = breakout, corner = corner,
-        ) ?: return
+        )
+        if (path == null) return
         if (path.clear) {
             if (path.betterThan(best)) best = path
         } else {
             if (path.betterFallbackThan(fallback)) fallback = path
         }
     }
-
-    /**
-     * 同一对边上的直线候选只量一次。
-     *
-     * 直线取的是「两段可动区间的交集」那个坐标，跟沿边挑了哪个候选点无关：几何候选把每条边
-     * 从 3 个点涨到 6 个之后，不去重就是四倍白量（[noteArrowRouteTries] 白涨、翻页变慢）。
-     * 突破点会把自己的坐标钉死（[bandLow]），那就不是同一条直线了，不参与去重。
-     */
-    var straightKey = Long.MIN_VALUE
 
     /** 一组「出口 × 入口」：直线能走就直线，走不通再按折数由少到多试正交折线。 */
     fun tryRoute(exit: ArrowExit, entry: ArrowEntry, target: ArrowTarget) {
@@ -3731,19 +3789,13 @@ internal fun routeNoteArrow(
         val breakout = exit.breakout || entry.breakout
         // 「怼在边的两头」的突破：0.5em 可以突破到缝上，但不该突破到角上（见 [ArrowEdgePoint.corner]）。
         val corner = (exit.breakout && exit.corner) || (entry.breakout && entry.corner)
-        val straight = if (breakout) {
-            true
-        } else {
-            val key = ((exit.edge + 2).toLong() shl 8) or (entry.edge + 2).toLong()
-            val fresh = key != straightKey
-            straightKey = key
-            fresh
-        }
+        // 突破点把自己的坐标钉死（[bandLow]），这一遍不做「同一条线只量一次」的去重。
+        val dedupeStraight = !breakout
         // 0) 两端同向 ⇒ 一条直线。两端的落点都在边上的可动区间里，
         //    取两段区间的交集：交点就是「两端各自滑到同一个坐标」的那条直线。
         //    （旧口径要求两端坐标严丝合缝地相等，框边按 0.5em 内缩后差一两像素就永远凑不齐，
         //    本来一条直线能解决的「正右批注」被迫走成两折 Z 形。）
-        if (straight && exit.horizontal == entry.horizontal) {
+        if (exit.horizontal == entry.horizontal) {
             val lo = max(exit.lo, entry.lo)
             val hi = min(exit.hi, entry.hi)
             val shared = when {
@@ -3773,7 +3825,10 @@ internal fun routeNoteArrow(
                         rawY[0] = shared
                         rawX[1] = entry.point.x
                         rawY[1] = shared
-                        if (endpointsOutward(rawX, rawY, 2, exit.edge, entry.edge)) {
+                        if (endpointsOutward(rawX, rawY, 2, exit.edge, entry.edge) &&
+                            (!dedupeStraight ||
+                                target.markStraight(rawX[0], rawY[0], rawX[1], rawY[1]))
+                        ) {
                             consider(rawX, rawY, 2, target, breakout, corner)
                         }
                     }
@@ -3784,7 +3839,10 @@ internal fun routeNoteArrow(
                         rawY[0] = exit.point.y
                         rawX[1] = shared
                         rawY[1] = entry.point.y
-                        if (endpointsOutward(rawX, rawY, 2, exit.edge, entry.edge)) {
+                        if (endpointsOutward(rawX, rawY, 2, exit.edge, entry.edge) &&
+                            (!dedupeStraight ||
+                                target.markStraight(rawX[0], rawY[0], rawX[1], rawY[1]))
+                        ) {
                             consider(rawX, rawY, 2, target, breakout, corner)
                         }
                     }
@@ -3793,7 +3851,37 @@ internal fun routeNoteArrow(
         }
         // 1) 折线：只用横 / 竖段，且第一段 ⊥ 框边、最后一段 ⊥ 文字框边。
         // 折数由少到多，一旦这个折数有通畅路径就不再试更多折（少折永远优先）。
+        //
+        // 已经有一条「不交叉、形状已是首选」的通畅引线时，**比它还远的端点组合只剩直线可能**：
+        // 折线长度 ≥ 两端直线距离 > 现有引线长度，交叉数 = 0 打平、形状名次不占优、
+        // 穿字量都是 0，这几条判据全打平或更差，长度这一关必输。直线有 form=0 的可能，
+        // 上面已经量过，这里跳过的只是白量的折线。
+        // （正下批注一页九条要问一千六百组端点、量一千四百多条候选，剪掉的正是这一批。）
+        //
+        // 折数这一关要留神：判据里折数排在长度**前面**，所以只有「折数比现有引线还多」
+        // 的档才一定输；折数更少的那几档哪怕更长，也可能靠少折翻盘，照样要生成。
+        val limit = best
+        val skipElbows = limit != null && limit.clear && limit.crosses == 0 &&
+            limit.form <= ARROW_FORM_FIRST &&
+            (exit.point.x - entry.point.x) * (exit.point.x - entry.point.x) +
+            (exit.point.y - entry.point.y) * (exit.point.y - entry.point.y) >
+            (limit.length + 0.5f) * (limit.length + 0.5f)
+        val skipAboveBends = if (limit != null && skipElbows) limit.bends else ARROW_MAX_BENDS
+        val exitSign = arrowOutwardSign(exit.edge)
+        val entrySign = arrowOutwardSign(entry.edge)
+        // 首 / 末段方向：出口边在左右 ⇒ 横着出，在上下 ⇒ 竖着出；未知时不预筛。
+        val firstNeed = when (exit.edge) {
+            ARROW_EDGE_LEFT, ARROW_EDGE_RIGHT -> ARROW_NEED_HORIZONTAL
+            ARROW_EDGE_TOP, ARROW_EDGE_BOTTOM -> ARROW_NEED_VERTICAL
+            else -> ARROW_NEED_ANY
+        }
+        val lastNeed = when (entry.edge) {
+            ARROW_EDGE_LEFT, ARROW_EDGE_RIGHT -> ARROW_NEED_HORIZONTAL
+            ARROW_EDGE_TOP, ARROW_EDGE_BOTTOM -> ARROW_NEED_VERTICAL
+            else -> ARROW_NEED_ANY
+        }
         for (bends in 1..ARROW_MAX_BENDS) {
+            if (bends > skipAboveBends) break
             emitElbowRoutes(
                 start = exit.point,
                 end = entry.point,
@@ -3803,6 +3891,11 @@ internal fun routeNoteArrow(
                 bendRects = target.bendRects,
                 px = rawX,
                 py = rawY,
+                firstNeed = firstNeed,
+                lastNeed = lastNeed,
+                exitSign = exitSign,
+                entrySign = entrySign,
+                scratch = elbowScratch,
                 emit = { xs, ys, n ->
                     // 先验形状再量：不合规矩的候选连障碍都不用看。
                     val m = simplifyInto(xs, ys, n, ptsX, ptsY)
@@ -4197,6 +4290,78 @@ private const val ARROW_EDGE_LEFT: Int = 0
 private const val ARROW_EDGE_RIGHT: Int = 1
 private const val ARROW_EDGE_TOP: Int = 2
 private const val ARROW_EDGE_BOTTOM: Int = 3
+
+/** 首 / 末段的方向要求：[ARROW_NEED_HORIZONTAL] 横段、[ARROW_NEED_VERTICAL] 竖段、[ARROW_NEED_ANY] 未知。 */
+private const val ARROW_NEED_HORIZONTAL: Int = 1
+private const val ARROW_NEED_VERTICAL: Int = 0
+private const val ARROW_NEED_ANY: Int = -1
+
+/**
+ * 折点 [bend] 是不是落在端点 [point] 的**外侧**（与 [endpointsOutward] 逐字同一条判据：
+ * 出口看「折点在起点外侧」、入口看「折点在终点外侧」，两边同一个式子）。
+ *
+ * [sign] 见 [arrowOutwardSign]；0 = 不判方向。
+ */
+private fun arrowBeyond(bend: Float, point: Float, sign: Int): Boolean =
+    sign == 0 || (bend - point) * sign > 0.01f
+
+/** 这条边对应的「朝外」方向：-1 = 坐标变小，+1 = 坐标变大，0 = 未知。 */
+private fun arrowOutwardSign(edge: Int): Int = when (edge) {
+    ARROW_EDGE_LEFT, ARROW_EDGE_TOP -> -1
+    ARROW_EDGE_RIGHT, ARROW_EDGE_BOTTOM -> 1
+    else -> 0
+}
+
+/**
+ * 这一端（首段 / 末段）**生成阶段**的预筛：模板这一段是横还是竖（[templateHorizontal]），
+ * 与边要求的 [need] 对不上时，这一段必须**退化成零长**（坐标落在端点上，下一段顶上），
+ * 否则这条候选一定过不了 [orthogonalShaped]，根本不必生成。
+ *
+ * 为什么值得单独判：一对端点能吐几百条候选，其中只有一两成首末段方向对得上；
+ * 真机上「正下批注」一对端点就白吐十几万条死候选（1.16M 条里只有 1.2% 活到量测），
+ * 生成阶段按方向跳过，是这一页引线从 2.2s 掉下来的关键。
+ *
+ * 退化分支不能一并跳过：六点模板在 `x1 == 起点` / `x2 == 终点` 时会化简成一条更少折的
+ * 合规折线（真机上最常赢的正是这种），所以这里放行，最终仍由形状判据裁决。
+ */
+private fun arrowEndAllowed(
+    bend: Float,
+    point: Float,
+    sign: Int,
+    templateHorizontal: Boolean,
+    need: Int,
+): Boolean = when (need) {
+    ARROW_NEED_ANY -> true
+    ARROW_NEED_HORIZONTAL -> if (templateHorizontal) {
+        arrowBeyond(bend, point, sign)
+    } else {
+        abs(bend - point) <= 0.01f
+    }
+    else -> if (templateHorizontal) {
+        abs(bend - point) <= 0.01f
+    } else {
+        arrowBeyond(bend, point, sign)
+    }
+}
+
+/**
+ * 折点坐标池的暂存区：一条批注只建一次。
+ *
+ * 旧实现**每次生成**（每对端点 × 每个折数档）都新开两个坐标数组再排序去重，一页九条批注
+ * 就是一万六千次分配（真机日志里这一页光折点池的垃圾就有十几兆）。数组尺寸取全页障碍数，
+ * 换目标字时不用重建。
+ */
+private class ArrowElbowScratch(maxObstacles: Int) {
+    val xs: FloatArray = FloatArray(maxObstacles * 2 + 2)
+    val ys: FloatArray = FloatArray(maxObstacles * 2 + 2)
+    val bendXs: FloatArray = FloatArray(ARROW_MAX_BEND_COORDS + 1)
+    val bendYs: FloatArray = FloatArray(ARROW_GAP_MID_LIMIT + ARROW_MAX_BEND_COORDS + 1)
+    val pickedYs: FloatArray = FloatArray(ARROW_MAX_BEND_COORDS)
+    val xsFromStart: FloatArray = FloatArray(4)
+    val xsFromEnd: FloatArray = FloatArray(4)
+    val ysFromStart: FloatArray = FloatArray(4)
+    val ysFromEnd: FloatArray = FloatArray(4)
+}
 
 /** 带宽区间统一成「下界 ≤ 上界」，供直线取交集。 */
 private fun bandOf(a: Float, b: Float): Pair<Float, Float> = min(a, b) to max(a, b)
@@ -4935,11 +5100,30 @@ private inline fun emitElbowRoutes(
     py: FloatArray,
     /** 横段折点（ys）能用的障碍边：缺省与 [obstacleRects] 相同，热路径传「不含文字墨迹」的那份。 */
     bendRects: List<Rect> = obstacleRects,
+    /**
+     * 首段 / 末段必须是横段还是竖段（[ARROW_NEED_HORIZONTAL] / [ARROW_NEED_VERTICAL] /
+     * [ARROW_NEED_ANY] = 未知，不做预筛）。见 [arrowEndAllowed]。
+     */
+    firstNeed: Int = ARROW_NEED_ANY,
+    lastNeed: Int = ARROW_NEED_ANY,
+    /** 首 / 末段必须朝哪边（[arrowOutwardSign]）：与 [endpointsOutward] 同一条判据，提前剔掉反方向的折点。 */
+    exitSign: Int = 0,
+    entrySign: Int = 0,
+    /** 折点坐标池的暂存区：一条批注只建一次，热路径不再每次生成都新开两个数组。 */
+    scratch: ArrowElbowScratch = ArrowElbowScratch(obstacleRects.size),
     emit: (FloatArray, FloatArray, Int) -> Unit,
 ) {
     if (bends !in 1..ARROW_MAX_BENDS) return
-    val xs = FloatArray(obstacleRects.size * 2 + 2)
-    val ys = FloatArray(bendRects.size * 2 + 2)
+    val xs = if (scratch.xs.size >= obstacleRects.size * 2 + 2) {
+        scratch.xs
+    } else {
+        FloatArray(obstacleRects.size * 2 + 2)
+    }
+    val ys = if (scratch.ys.size >= bendRects.size * 2 + 2) {
+        scratch.ys
+    } else {
+        FloatArray(bendRects.size * 2 + 2)
+    }
     var xn = 0
     var yn = 0
     xs[xn++] = start.x
@@ -4961,16 +5145,16 @@ private inline fun emitElbowRoutes(
     ys.sort(0, yn)
     xn = uniqueFloats(xs, xn)
     yn = uniqueFloats(ys, yn)
-    val bendXs = FloatArray(ARROW_MAX_BEND_COORDS + 1)
+    val bendXs = scratch.bendXs
     var bendXn = pickCoords(xs, xn, (start.x + end.x) * 0.5f, bendXs, ARROW_MAX_BEND_COORDS)
     // 纵向候选：行间中线排在前面（优先被取到），再补「离中点最近的坐标」，最后是两端中点。
-    val bendYs = FloatArray(ARROW_GAP_MID_LIMIT + ARROW_MAX_BEND_COORDS + 1)
+    val bendYs = scratch.bendYs
     var bendYn = 0
     for (y in extraYs) {
         if (bendYn >= ARROW_GAP_MID_LIMIT) break
         bendYs[bendYn++] = y
     }
-    val pickedYs = FloatArray(ARROW_MAX_BEND_COORDS)
+    val pickedYs = scratch.pickedYs
     val pickedYn = pickCoords(ys, yn, (start.y + end.y) * 0.5f, pickedYs)
     for (i in 0 until pickedYn) {
         val v = pickedYs[i]
@@ -5007,22 +5191,37 @@ private inline fun emitElbowRoutes(
         }
         if (!hasMidY) bendYs[bendYn++] = midY
     }
+    // 每一档折数都试「横先手（x 池）/ 竖先手（y 池）」两种模板；每一端能否用这一档的
+    // 模板，由 [arrowEndAllowed] 按「这段是横是竖」提前判掉（详见那边的注释）。
     when (bends) {
         1 -> {
-            emitPoints(
-                px, py, 3,
-                start.x, start.y, end.x, start.y, end.x, end.y,
-                0f, 0f, 0f, 0f, 0f, 0f, emit,
-            )
-            emitPoints(
-                px, py, 3,
-                start.x, start.y, start.x, end.y, end.x, end.y,
-                0f, 0f, 0f, 0f, 0f, 0f, emit,
-            )
+            // H,V：首段 x 从起点走到终点，末段 y 从起点走到终点。
+            if (arrowEndAllowed(end.x, start.x, exitSign, true, firstNeed) &&
+                arrowEndAllowed(start.y, end.y, entrySign, false, lastNeed)
+            ) {
+                emitPoints(
+                    px, py, 3,
+                    start.x, start.y, end.x, start.y, end.x, end.y,
+                    0f, 0f, 0f, 0f, 0f, 0f, emit,
+                )
+            }
+            // V,H：判据刚好换轴。
+            if (arrowEndAllowed(end.y, start.y, exitSign, false, firstNeed) &&
+                arrowEndAllowed(start.x, end.x, entrySign, true, lastNeed)
+            ) {
+                emitPoints(
+                    px, py, 3,
+                    start.x, start.y, start.x, end.y, end.x, end.y,
+                    0f, 0f, 0f, 0f, 0f, 0f, emit,
+                )
+            }
         }
         2 -> {
             for (i in 0 until bendXn) {
                 val x = bendXs[i]
+                // 两个端点都在 x 上：首段朝框外、末段朝字外，同一个折点必须同时满足。
+                if (!arrowEndAllowed(x, start.x, exitSign, true, firstNeed)) continue
+                if (!arrowEndAllowed(x, end.x, entrySign, true, lastNeed)) continue
                 emitPoints(
                     px, py, 4,
                     start.x, start.y, x, start.y, x, end.y, end.x, end.y,
@@ -5031,6 +5230,8 @@ private inline fun emitElbowRoutes(
             }
             for (i in 0 until bendYn) {
                 val y = bendYs[i]
+                if (!arrowEndAllowed(y, start.y, exitSign, false, firstNeed)) continue
+                if (!arrowEndAllowed(y, end.y, entrySign, false, lastNeed)) continue
                 emitPoints(
                     px, py, 4,
                     start.x, start.y, start.x, y, end.x, y, end.x, end.y,
@@ -5040,37 +5241,47 @@ private inline fun emitElbowRoutes(
         }
         3 -> for (i in 0 until bendXn) {
             val x = bendXs[i]
+            val firstX = arrowEndAllowed(x, start.x, exitSign, true, firstNeed)
+            val lastX = arrowEndAllowed(x, end.x, entrySign, true, lastNeed)
             for (j in 0 until bendYn) {
                 val y = bendYs[j]
-                emitPoints(
-                    px, py, 5,
-                    start.x, start.y, x, start.y, x, y, end.x, y, end.x, end.y,
-                    0f, 0f, emit,
-                )
-                emitPoints(
-                    px, py, 5,
-                    start.x, start.y, start.x, y, x, y, x, end.y, end.x, end.y,
-                    0f, 0f, emit,
-                )
+                // H,V,H,V / V,H,V,H：首段与末段不在同一根轴上，两个判据各管一头。
+                if (firstX && arrowEndAllowed(y, end.y, entrySign, false, lastNeed)) {
+                    emitPoints(
+                        px, py, 5,
+                        start.x, start.y, x, start.y, x, y, end.x, y, end.x, end.y,
+                        0f, 0f, emit,
+                    )
+                }
+                if (arrowEndAllowed(y, start.y, exitSign, false, firstNeed) && lastX) {
+                    emitPoints(
+                        px, py, 5,
+                        start.x, start.y, start.x, y, x, y, x, end.y, end.x, end.y,
+                        0f, 0f, emit,
+                    )
+                }
             }
         }
-        // 四折只做「绕开一整条竖带 / 横带」两族：两臂各一个自由坐标，够绕过图形与表格。
+        // 四折只做「绕开一整条竖带 / 横带」两种模板：两臂各一个自由坐标，够绕过图形与表格。
         // 竖 / 横那个「跨过去」的坐标取全部候选（绕过整块图形靠的就是它）；两臂的坐标则分别
         // **贴着起点 / 终点那一侧取**——只取离中点最近的几个会漏掉「先横到障碍之外、再竖过去」
         // 的那一对（真机第 5/6 条：从两行字之间横穿的绕行正是这种形状）。
         else -> {
-            val xsFromStart = FloatArray(4)
-            val xsFromEnd = FloatArray(4)
-            val ysFromStart = FloatArray(4)
-            val ysFromEnd = FloatArray(4)
+            val xsFromStart = scratch.xsFromStart
+            val xsFromEnd = scratch.xsFromEnd
+            val ysFromStart = scratch.ysFromStart
+            val ysFromEnd = scratch.ysFromEnd
             val xsn = pickCoords(xs, xn, start.x, xsFromStart)
             val xen = pickCoords(xs, xn, end.x, xsFromEnd)
             val ysn = pickCoords(ys, yn, start.y, ysFromStart)
             val yen = pickCoords(ys, yn, end.y, ysFromEnd)
             for (i in 0 until xsn) {
                 val x1 = xsFromStart[i]
+                // 两臂分别贴着起点 / 终点那一侧：反方向的那一整排循环直接跳过。
+                if (!arrowEndAllowed(x1, start.x, exitSign, true, firstNeed)) continue
                 for (j in 0 until xen) {
                     val x2 = xsFromEnd[j]
+                    if (!arrowEndAllowed(x2, end.x, entrySign, true, lastNeed)) continue
                     for (k in 0 until bendYn) {
                         val y = bendYs[k]
                         emitPoints(
@@ -5083,8 +5294,10 @@ private inline fun emitElbowRoutes(
             }
             for (i in 0 until ysn) {
                 val y1 = ysFromStart[i]
+                if (!arrowEndAllowed(y1, start.y, exitSign, false, firstNeed)) continue
                 for (j in 0 until yen) {
                     val y2 = ysFromEnd[j]
+                    if (!arrowEndAllowed(y2, end.y, entrySign, false, lastNeed)) continue
                     for (k in 0 until bendXn) {
                         val x = bendXs[k]
                         emitPoints(
@@ -5209,8 +5422,73 @@ private fun arrowForm(
     }
 }
 
+/**
+ * 这条候选还有没有可能赢过 [best]（只看顶点就能判的那几项）。
+ *
+ * 判据顺序是「交叉 → 形状名次 → 折数 → 穿字量 → 更短 → 贴字 → 是否突破 → 候选顺序」，
+ * 交叉数要靠障碍才知道，所以这里只在**形状名次已经更差、或形状相同而折数不少**时
+ * 用「两端直线距离」当长度下界判死它：路径长度永远不小于两端直线距离。
+ *
+ * 结果严格保守（返回 false 就一定赢不了），所以跳过量测不改变选择结果。
+ */
+private fun canStillWin(
+    xs: FloatArray,
+    ys: FloatArray,
+    count: Int,
+    best: ArrowPath,
+    side: NoteSide?,
+): Boolean {
+    if (count < 2) return false
+    val form = arrowForm(
+        side,
+        count,
+        abs(xs[0] - xs[1]) < 0.01f,
+        abs(xs[count - 2] - xs[count - 1]) < 0.01f,
+    )
+    val bends = max(0, count - 2)
+    if (form < best.form) return true
+    if (form == best.form && bends < best.bends) return true
+    val dx = xs[count - 1] - xs[0]
+    val dy = ys[count - 1] - ys[0]
+    val limit = best.length + 0.5f
+    return dx * dx + dy * dy <= limit * limit
+}
+
 /** 候选路径的实测次数（真机排查用：一页引线慢的时候先看这个数）。 */
 internal var noteArrowRouteTries: Int = 0
+
+/**
+ * 候选是否「进了自己的框」或「横穿自己锚点那一行」——兜底判据里排在最前面的两项，
+ * 只看两个矩形就能算出来（[measureArrowRoute] 里是同一套 `insideSpan` 与零长段口径）。
+ *
+ * 返回位图：1 = 进了框，2 = 横穿自己那一行。
+ */
+private fun arrowEnterFlags(
+    xs: FloatArray,
+    ys: FloatArray,
+    count: Int,
+    bubble: Rect,
+    own: Rect?,
+): Int {
+    var flags = 0
+    for (i in 1 until count) {
+        val dx = xs[i] - xs[i - 1]
+        val dy = ys[i] - ys[i - 1]
+        if (sqrt(dx * dx + dy * dy) < 0.01f) continue
+        if (flags and 1 == 0 &&
+            insideSpan(xs[i - 1], ys[i - 1], dx, dy, bubble, ARROW_OWN_BUBBLE_TOL_PX) > 1e-6f
+        ) {
+            flags = flags or 1
+        }
+        if (flags and 2 == 0 && own != null &&
+            insideSpan(xs[i - 1], ys[i - 1], dx, dy, own, 0f) > 1e-6f
+        ) {
+            flags = flags or 2
+        }
+        if (flags == 3) return flags
+    }
+    return flags
+}
 
 /**
  * 量一条候选折线（顶点已经去过零长段与共线拐点）。

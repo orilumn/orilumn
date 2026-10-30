@@ -1686,28 +1686,26 @@ class NoteBubblesTest {
     }
 
     @Test
-    fun `right side note bends when a word sits between`() {
+    fun `right side note slips over the word in one segment`() {
+        // 正右方向的一条横线被行间那个字挡住时，最近的路是从那个字**上方的行间空隙**穿过去
+        // （规则第 10 条），而不是绕到它外面再折回来。旧口径为了守住「离四角半个字」的
+        // 内缩，绕到 y=-7、来回四折；规则第 4 条的 0.5em 本来只是「尽量」，第 1 / 6 条
+        // 要的是一条直线、段越少越好 ⇒ 端点突破这半行，走一条直线（2026-10-30）。
         val bubble = rect(300f, 0f, 400f, 40f)
         val ink = rect(0f, 0f, 100f, 40f)
         val blocker = rect(150f, 10f, 250f, 60f)
-        val elbow = routeNoteArrow(
+        val arrow = routeNoteArrow(
             bubble = bubble,
             inkRects = listOf(ink),
             glyphs = listOf(blocker),
             lineH = 20f,
-        ) as NoteArrow.Elbow
-        // 两端仍接住：框左边中点 → 落在文字右边上（竖直进入文字右边，y 可在文字高度内挪动）。
-        assertEquals(Offset(300f, 20f), elbow.start)
-        val end = elbow.points.last()
-        assertEquals("终点要落在文字右边", ink.right, end.x)
-        assertTrue("终点 y 要落在文字高度里：$end", end.y in ink.top..ink.bottom)
-        val pts = elbow.points
-        for (i in 1 until pts.size) {
-            assertTrue(
-                "折线不该压住中间的字：${pts[i - 1]} → ${pts[i]}",
-                !segmentHits(pts[i - 1], pts[i], blocker),
-            )
-        }
+        )
+        assertTrue("应画得出箭头", arrow != null)
+        val pts = arrowPoints(arrow!!)
+        assertEquals("一条直线就够，不该为躲那个字折成四段：$pts", 2, pts.size)
+        assertEquals("起点仍落在框左边上", bubble.left, pts.first().x, 0.01f)
+        assertEquals("终点仍落在文字右边上", ink.right, pts.last().x, 0.01f)
+        assertTrue("整条线走那个字上方的缝里：$pts", pts.all { it.y <= blocker.top - 0.5f })
     }
 
     @Test
@@ -1720,27 +1718,23 @@ class NoteBubblesTest {
     }
 
     @Test
-    fun `left side note bends when the line is blocked`() {
+    fun `left side note slips under the word in one segment`() {
+        // 与上一条对称（2026-10-30）：正左的横线被行间的字挡住时，从字上方那条缝一条直线穿过去。
         val bubble = rect(0f, 0f, 100f, 40f)
         val ink = rect(300f, 0f, 400f, 40f)
         val blocker = rect(150f, 10f, 250f, 60f)
-        val elbow = routeNoteArrow(
+        val arrow = routeNoteArrow(
             bubble = bubble,
             inkRects = listOf(ink),
             glyphs = listOf(blocker),
             lineH = 20f,
-        ) as NoteArrow.Elbow
-        assertEquals(Offset(100f, 20f), elbow.start)
-        val end = elbow.points.last()
-        assertEquals("终点要落在文字左边", ink.left, end.x)
-        assertTrue("终点 y 要落在文字高度里：$end", end.y in ink.top..ink.bottom)
-        val pts = elbow.points
-        for (i in 1 until pts.size) {
-            assertTrue(
-                "折线不该压住中间的字：${pts[i - 1]} → ${pts[i]}",
-                !segmentHits(pts[i - 1], pts[i], blocker),
-            )
-        }
+        )
+        assertTrue("应画得出箭头", arrow != null)
+        val pts = arrowPoints(arrow!!)
+        assertEquals("一条直线就够，不该为躲那个字折成四段：$pts", 2, pts.size)
+        assertEquals("起点仍落在框右边上", bubble.right, pts.first().x, 0.01f)
+        assertEquals("终点仍落在文字左边上", ink.left, pts.last().x, 0.01f)
+        assertTrue("整条线走那个字上方的缝里：$pts", pts.all { it.y <= blocker.top - 0.5f })
     }
 
     @Test
@@ -2418,6 +2412,62 @@ class NoteBubblesTest {
         val pts = arrowPoints(arrow!!)
         assertEquals("一条竖线就到，不该为凑半个字折成三段：$pts", 2, pts.size)
         assertTrue("竖线要走在邻框右边那条缝里：x=${pts.first().x}", pts.first().x >= 1396f)
+    }
+
+    @Test
+    fun `a below note starts in the gap beside the neighbour bubble instead of looping round its own edge`() {
+        // 真机「讨论」（2026-10-30，1780 宽的平板）：正下方的批注框横跨整行（330..1784），
+        // 引线本来顺着 1545（左边那条批注框的右边 + 2px）就能上去，却从 1756（框右边内缩
+        // 半个字）出去，贴着框底横移两百多像素再绕回「讨论」，又长又难看。
+        // 两处原因：①出口候选按「离入口近」排，紧挨入口的那一串字边（入口那一行自己的字）
+        // 全排前面，可它们竖不上去——正下方那条批注框横在中间；真正能走的 1545 离入口远，
+        // 被六个名额截掉；②末折 6px 会被第 11 条删掉，择优却按模板折数算，
+        // 于是「多一折但近一半」的 1545 输给「少一折但绕远」的 1756。
+        // 改完以后：起点取最近的空白，而且离邻框的右边留出四分之一字的余量（不贴着框边抹过去，
+        // 2026-10-30 用户：「可以距离其他批注框稍远一点」），引线只剩「竖 + 横」两段。
+        val ink = listOf(rect(1321f, 1640f, 1365f, 1682f), rect(1369f, 1640f, 1412f, 1682f))
+        // 上下几整行的逐字墨迹：真机上入口附近有几十个字，每个字贡献两条「贴字边」的出口坐标，
+        // 6 / 12 个名额就是这样被占满的（这些字自己并不挡路，只是把候选挤掉）。
+        // 位置照抄真机那一页：入口上方两行铺满整行，下方那行只到 x≈760（再往右是空白，
+        // 引线正是从那片空白里上去的）。
+        val crowd = buildList {
+            for (i in 0 until 40) {
+                val x = 220f + i * 44f
+                if (x > 1700f) break
+                add(rect(x, 1571f, x + 42f, 1613f))
+                // 入口那一行在「讨论」这一段是空的（那是这条批注自己的字，不是障碍）
+                if (x <= 1310f || x >= 1450f) add(rect(x, 1641f, x + 42f, 1682f))
+                if (x <= 720f) add(rect(x, 1709f, x + 42f, 1751f))
+            }
+        }
+        val bubble = rect(330f, 1819f, 1784f, 1932f)
+        val others = listOf(
+            rect(1238f, 1697f, 1430f, 1754f),
+            rect(916f, 1697f, 1108f, 1754f),
+            rect(796f, 1755f, 1543f, 1814f),
+        )
+        val arrow = routeNoteArrow(
+            bubble = bubble,
+            inkRects = ink,
+            glyphs = crowd + ink,
+            otherBubbles = others,
+            lineH = 56f,
+            side = NoteSide.BELOW,
+            lineBoxes = listOf(rect(0f, 1653f, 1840f, 1696f)),
+            targetInk = ink,
+            rowBoxEntry = true,
+            underlineBands = listOf(rect(1321f, 1685f, 1412f, 1688f)),
+        )
+        assertTrue("应画得出箭头", arrow != null)
+        val pts = arrowPoints(arrow!!)
+        // 邻框（左边那条批注框）的右边是 1543，行高 56 ⇒ 余量 14px。
+        val clear = 56f * 0.25f
+        assertEquals("起点落在邻框右边留出余量的那条竖线上：$pts", 1543f + clear, pts.first().x, 1f)
+        assertEquals("从框朝正文的那条边（上边）竖着出去", bubble.top, pts.first().y, 0.01f)
+        assertEquals("竖 + 横两段就到，不该绕到框右端：$pts", 3, pts.size)
+        assertTrue("整条引线不往右绕：$pts", pts.all { it.x <= 1543f + clear + 1f })
+        assertTrue("箭头仍指着「讨论」那一头的下划线：$pts", pts.last().x in 1321f..1412f)
+        assertEquals("箭头停在行盒底边", 1696f, pts.last().y, 0.01f)
     }
 
     @Test

@@ -3447,8 +3447,19 @@ private fun isWideCodePoint(code: Int): Boolean =
         code in 0x1F300..0x1FAFF || // emoji
         code in 0x20000..0x3FFFD
 
-/** 箭头避让的一块障碍：矩形 + 它自己的容差（逐字墨迹小，图形 / 旁注框大）。 */
-private data class ArrowObstacle(val rect: Rect, val tol: Float, val text: Boolean = false)
+/**
+ * 箭头避让的一块障碍：矩形 + 它自己的容差（逐字墨迹小，图形 / 旁注框大）。
+ *
+ * [box] 标记「别人的框」——图形、表格、别的批注框。引线沿这种框的边抹过去不好看
+ * （[ARROW_SOLID_CLEAR_EM]），量路径时要单独记一笔（见 [ArrowPath.grip]）；
+ * 划线本身虽然也是非文字障碍，但箭头本来就停在它旁边，不算「贴别人的框」。
+ */
+private data class ArrowObstacle(
+    val rect: Rect,
+    val tol: Float,
+    val text: Boolean = false,
+    val box: Boolean = false,
+)
 
 /** 一条候选路径的度量：[clear] 是能否直接采用，[hits] 是全撞时比「穿得少」用的穿透长度。 */
 private data class ArrowPath(
@@ -3459,6 +3470,13 @@ private data class ArrowPath(
     val hits: Float,
     /** 平行段离字墨迹太近的累计量（越小越好）：见 [measureArrowRoute]。 */
     val hug: Float,
+    /**
+     * 平行段贴着别人的框（图形 / 表格 / 别的批注框）走的累计量（越小越好）。
+     *
+     * 比 [hug] 靠前、比长度更靠前：少走几十像素不值得贴着人家的框边抹过去
+     * （2026-10-30 用户：「可以距离其他批注框稍远一点」）。
+     */
+    val grip: Float = 0f,
     val entersBubble: Boolean,
     val order: Int,
     /** 横穿**自己锚点那一行的墨迹**（不是停在边上）：这种走法看着就像绕到字外面再扎回去。 */
@@ -3501,6 +3519,8 @@ private data class ArrowPath(
         if (form != other.form) return form < other.form
         if (bends != other.bends) return bends < other.bends
         if (abs(hits - other.hits) > 0.5f) return hits < other.hits
+        // 贴着别人的框走排在这儿：宁可多走几十像素，也别贴着框边抹过去（2026-10-30 用户定口）。
+        if (grip != other.grip) return grip < other.grip
         if (abs(length - other.length) > 0.5f) return length < other.length
         if (abs(hug - other.hug) > 0.5f) return hug < other.hug
         if (breakout != other.breakout) return !breakout
@@ -3855,8 +3875,8 @@ internal fun routeNoteArrow(
             if (inkRects.any { it.overlaps(g) }) continue
             add(ArrowObstacle(g, ARROW_GLYPH_TOL_PX, text = true))
         }
-        for (s in solids) add(ArrowObstacle(s, ARROW_SOLID_TOL_PX))
-        for (b in otherBubbles) add(ArrowObstacle(b, ARROW_SOLID_TOL_PX))
+        for (s in solids) add(ArrowObstacle(s, ARROW_SOLID_TOL_PX, box = true))
+        for (b in otherBubbles) add(ArrowObstacle(b, ARROW_SOLID_TOL_PX, box = true))
         // 划线本身也是硬障碍：箭头可以进它所在的行盒，但横着从线上压过去照样算「触及」。
         // 高亮标注不看这份几何（调用方本就不会传，这里再挡一道，免得旧数据影响旧行为）。
         if (rowBoxEntry) {
@@ -3873,6 +3893,8 @@ internal fun routeNoteArrow(
     val window = max(lineH, 8f) * ARROW_BEND_WINDOW_LINES
     // 引线贴字门槛：旁注行高的 0.3 倍（lineH 缺省时放宽到 0：单测不量贴字）。
     val hugDistance = if (lineH > 0f) lineH * ARROW_HUG_LINES else 0f
+    // 「贴着别人的框走」的门槛：与出口取点的余量同一把尺子（见 [ARROW_SOLID_CLEAR_EM]）。
+    val gripDistance = max(bubbleEm * ARROW_SOLID_CLEAR_EM, ARROW_EDGE_BREAK_PX * 2f)
     // 四角是规则第 2 条点名的 L 形：末折一律保留。其余方向末折短到画不下箭头时按第 11 条不画，
     // 择优时也要按「画出来」的段数算（见 [ArrowPath.rawBends]）。
     val cornerFamily = side == NoteSide.BELOW_RIGHT || side == NoteSide.ABOVE_RIGHT ||
@@ -3972,6 +3994,7 @@ internal fun routeNoteArrow(
         }
         val path = measureArrowRoute(
             xs, ys, count, seq, target.index, bubble, drawnIndex, hugDistance,
+            gripDistance = gripDistance,
             limitClear = best, limitFallback = fallback, side = side, own = target.own,
             breakout = breakout, corner = corner, shortTail = shortTail,
         )
@@ -5785,6 +5808,9 @@ private fun canStillWin(
     shortTail: Float = 0f,
 ): Boolean {
     if (count < 2) return false
+    // 「贴别人的框」（[ArrowPath.grip]）排在长度前面：只要现有最优还贴着谁，一条更长但离得开的
+    // 候选就有可能赢，此时不能拿长度把它判死。
+    if (best.grip > 0f) return true
     val lastVertical = abs(xs[count - 2] - xs[count - 1]) < 0.01f
     val tailDx = xs[count - 1] - xs[count - 2]
     val tailDy = ys[count - 1] - ys[count - 2]
@@ -5858,6 +5884,8 @@ private fun measureArrowRoute(
     bubble: Rect,
     drawn: DrawnSegmentIndex,
     hugDistance: Float = 0f,
+    /** 离别人的框（图形 / 表格 / 别的批注框）多远以内算「贴着走」（见 [ArrowPath.grip]）。 */
+    gripDistance: Float = 0f,
     /**
      * 现有的通畅路径 / 兜底路径：量到一半就已经**赢不了**它们时立刻放弃。
      *
@@ -5904,6 +5932,7 @@ private fun measureArrowRoute(
     var hits = 0f
     var crosses = 0
     var hug = 0f
+    var grip = 0f
     var enters = false
     var entersInk = false
     for (i in 1 until count) {
@@ -5948,9 +5977,7 @@ private fun measureArrowRoute(
                 vertical -> o.rect.top < segBottom - 1f && o.rect.bottom > segTop + 1f
                 else -> false
             }
-            if (hugDistance > 0f && crossesInterior && span <= 1e-6f &&
-                o.tol <= ARROW_GLYPH_TOL_PX + 1e-4f
-            ) {
+            if ((hugDistance > 0f || gripDistance > 0f) && crossesInterior && span <= 1e-6f) {
                 val d = when {
                     horizontal -> when {
                         ay <= o.rect.top -> o.rect.top - ay
@@ -5964,7 +5991,15 @@ private fun measureArrowRoute(
                     }
                     else -> Float.MAX_VALUE
                 }
-                if (d < hugDistance) hug += hugDistance - d
+                if (hugDistance > 0f && d < hugDistance &&
+                    o.tol <= ARROW_GLYPH_TOL_PX + 1e-4f
+                ) {
+                    hug += hugDistance - d
+                }
+                // 贴别人的框：不分文字 / 图形，只看它是不是「一块框」（见 [ArrowObstacle.box]）。
+                if (gripDistance > 0f && d < gripDistance && o.box) {
+                    grip += gripDistance - d
+                }
             }
         }
         // 已画引线走索引：横段只比「x 落在这段里」的竖段与同 y 的横段，竖段对称。
@@ -5984,10 +6019,14 @@ private fun measureArrowRoute(
                     form != limitClear.form -> form > limitClear.form
                     bends != limitClear.bends -> bends > limitClear.bends
                     hits > limitClear.hits + 0.5f -> true
-                    abs(hits - limitClear.hits) <= 0.5f && length > limitClear.length + 0.5f -> true
-                    abs(hits - limitClear.hits) <= 0.5f && abs(length - limitClear.length) <= 0.5f &&
+                    abs(hits - limitClear.hits) <= 0.5f && grip > limitClear.grip + 0.5f -> true
+                    abs(hits - limitClear.hits) <= 0.5f && abs(grip - limitClear.grip) <= 0.5f &&
+                        length > limitClear.length + 0.5f -> true
+                    abs(hits - limitClear.hits) <= 0.5f && abs(grip - limitClear.grip) <= 0.5f &&
+                        abs(length - limitClear.length) <= 0.5f &&
                         hug > limitClear.hug + 0.5f -> true
-                    abs(hits - limitClear.hits) <= 0.5f && abs(length - limitClear.length) <= 0.5f &&
+                    abs(hits - limitClear.hits) <= 0.5f && abs(grip - limitClear.grip) <= 0.5f &&
+                        abs(length - limitClear.length) <= 0.5f &&
                         abs(hug - limitClear.hug) <= 0.5f && breakout && !limitClear.breakout -> true
                     else -> false
                 }
@@ -6024,6 +6063,7 @@ private fun measureArrowRoute(
         crosses = crosses,
         hits = hits,
         hug = hug,
+        grip = grip,
         entersBubble = enters,
         entersInk = entersInk,
         order = order,

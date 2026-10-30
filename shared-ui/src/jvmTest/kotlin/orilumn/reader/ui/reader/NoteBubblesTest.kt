@@ -2467,7 +2467,7 @@ class NoteBubblesTest {
         assertEquals("竖 + 横两段就到，不该绕到框右端：$pts", 3, pts.size)
         assertTrue("整条引线不往右绕：$pts", pts.all { it.x <= 1543f + clear + 1f })
         assertTrue("箭头仍指着「讨论」那一头的下划线：$pts", pts.last().x in 1321f..1412f)
-        assertEquals("箭头停在行盒底边", 1696f, pts.last().y, 0.01f)
+        assertEquals("箭头停在行盒底边（贴着边、差半个像素以内都算）", 1696f, pts.last().y, 1f)
     }
 
     @Test

@@ -2120,6 +2120,29 @@ fun ReaderScreen(
                         contentLeft = contentLeft,
                         contentTop = contentTop,
                     )
+                    // 本页**所有**划线标注的落墨带（不只是有批注的那几条）：引线不得压在上面，
+                    // 行间中线也得按它们的下缘量——波浪线比字墨迹低一截，只按墨迹量，
+                    // 横穿的中线正好落在波峰上（2026-10-31 真机「函数体」）。
+                    val annotationLines = annotationState.annotations
+                        .filter {
+                            it.chapter == fromPos.chapter &&
+                                it.kind == AnnotationKind.Underline &&
+                                it.charEnd > slice.charStart &&
+                                it.charStart < slice.charEnd
+                        }
+                        .flatMap { a ->
+                            pageAnnotationLineRects(
+                                drawer = selectionDrawer,
+                                lines = lines,
+                                chapter = fromPos.chapter,
+                                annotation = a,
+                                pageImages = content.pageImages,
+                                pageBackgrounds = content.pageBackgrounds,
+                                frameLead = content.pageFrameLead,
+                                contentLeft = contentLeft,
+                                contentTop = contentTop,
+                            )
+                        }
                     val obstacles = noteObstacles(
                         textInk = pageInk,
                         pageImages = content.pageImages,
@@ -2152,6 +2175,7 @@ fun ReaderScreen(
                             contentLeft = contentLeft,
                             contentTop = contentTop,
                         ),
+                        arrowLines = annotationLines,
                     )
                     val noteLayoutMark = TimeSource.Monotonic.markNow()
                     val noteInkList = notes.mapNotNull { a ->

@@ -1930,14 +1930,15 @@ class NoteBubblesTest {
             assertTrue("不许折回自己的框：$pts", !entersInterior(pts[i - 1], pts[i], bubble))
         }
         val end = pts.last()
-        // 四角的 L 是硬规定（2026-10-28 用户定口）：这一段行间空档只有 12px，
-        // 末折短到画不下箭头也照画——末段必须竖着落到文字底边，不许省成一条横线。
+        // 2026-10-31 用户定口（撤销 2026-10-28 的「末折不得省略」）：这一段行间空档只有 12px，
+        // 竖段短到画不下箭头时按第 11 条省掉末折——箭头落在横段末端、方向随横段。
+        // 宁可画一根横着的箭头，也不画一根按比例缩到零点几像素、等于没有的箭头。
         assertTrue(
-            "末段必须竖着落在文字底边：$pts",
-            abs(pts[pts.size - 1].x - pts[pts.size - 2].x) < 0.01f,
+            "末折画不下时省成横段，箭头沿横段指：$pts",
+            abs(pts[pts.size - 1].y - pts[pts.size - 2].y) < 0.01f,
         )
-        assertEquals("末段竖着落在文字底边", ink.bottom, end.y, 0.01f)
-        assertTrue("终点落在文字的横向范围里", end.x in ink.left..ink.right)
+        assertTrue("横段落在两行文字之间：$pts", end.y > ink.bottom && end.y < rows[1].top)
+        assertEquals("横着收尾时停在选区右边框外 2px", ink.right + 2f, end.x, 1f)
         // 文字在框的左边：第一段（竖线）之后第一段横线不许朝右（背离文字）跑。
         val firstHorizontal = pts.zipWithNext().first { (a, b) -> abs(a.y - b.y) < 0.01f }
         assertTrue("不许朝背离文字的方向起步：$pts", firstHorizontal.second.x <= firstHorizontal.first.x + 0.01f)
@@ -2086,6 +2087,85 @@ class NoteBubblesTest {
             .firstOrNull { it > 140.5f && it < 151.5f }
         assertTrue("应在两行之间横穿，实际 $pts", crossing != null)
         assertEquals("横穿要走两行墨迹的正中间", 146f, crossing!!, 1.5f)
+    }
+
+    @Test
+    fun `leader stays clear of a wavy underline lying in the gap`() {
+        // 2026-10-31 真机「函数体」：波浪线比字墨迹低一截。按墨迹量出来的两行中线正好落在
+        // 波峰上，引线横穿时压着线走。划线带也是墨：引线不得压上去，横穿要走
+        // 「线带下缘 → 下一行字顶」这段的正中间（引线规则第 8 / 10 条）。
+        val xs = listOf(0f to 40f, 60f to 100f, 120f to 160f, 180f to 220f)
+        fun row(top: Float) = xs.map { rect(it.first, top, it.second, top + 40f) }
+        val rowOne = row(100f)
+        val rowTwo = row(160f)
+        val rowThree = row(220f)
+        val anchorGlyph = rowOne.first()
+        // 另一条批注的波浪线：挂在 rowOne 字底下方（比字墨迹低 12px）。
+        val wavy = rect(60f, 136f, 220f, 152f)
+        // 框挨着 rowThree：引线必须从下方穿上来，最近的那条缝就是 rowOne / rowTwo 之间。
+        val arrow = routeNoteArrow(
+            bubble = rect(260f, 220f, 360f, 260f),
+            inkRects = listOf(anchorGlyph),
+            glyphs = rowOne + rowTwo + rowThree,
+            lineH = 20f,
+            side = NoteSide.RIGHT,
+            pageLines = listOf(wavy),
+        )
+        val pts = arrowPoints(arrow!!)
+        for (i in 1 until pts.size) {
+            assertTrue(
+                "引线不该压到别人的波浪线：${pts[i - 1]} → ${pts[i]}",
+                !segmentHits(pts[i - 1], pts[i], wavy),
+            )
+        }
+        val crossing = pts.zipWithNext()
+            .filter { (a, b) -> abs(a.y - b.y) < 0.01f && abs(a.x - b.x) > 1f }
+            .map { (a, _) -> a.y }
+            .firstOrNull { it > 140.5f && it < 159.5f }
+        assertTrue("应在两行之间横穿，实际 $pts", crossing != null)
+        assertEquals("横穿要走线带下缘与下一行之间的正中间", 156f, crossing!!, 1.5f)
+    }
+
+    @Test
+    fun `underline note crossing the gap does not shave its own wavy underline`() {
+        // 同一条批注自己的波浪线也一样：它比字墨迹低，折点不能从线边 1px 处抹过去，
+        // 横段要落在「线带下缘 → 下一行」的正中间。
+        val xs = listOf(0f to 40f, 60f to 100f, 120f to 160f, 180f to 220f)
+        fun row(top: Float) = xs.map { rect(it.first, top, it.second, top + 40f) }
+        val rowOne = row(100f)
+        val rowTwo = row(160f)
+        val rowThree = row(220f)
+        val anchorGlyph = rowOne.first()
+        val wavy = rect(60f, 136f, 220f, 152f)
+        val arrow = routeNoteArrow(
+            bubble = rect(260f, 220f, 360f, 260f),
+            inkRects = listOf(anchorGlyph),
+            glyphs = rowOne + rowTwo + rowThree,
+            lineH = 20f,
+            side = NoteSide.BELOW_RIGHT,
+            lineBoxes = listOf(
+                rect(0f, 90f, 600f, 156f),
+                rect(0f, 156f, 600f, 216f),
+                rect(0f, 216f, 600f, 276f),
+            ),
+            targetInk = listOf(anchorGlyph),
+            rowBoxEntry = true,
+            underlineBands = listOf(wavy),
+            pageLines = listOf(wavy),
+        )
+        val pts = arrowPoints(arrow!!)
+        for (i in 1 until pts.size) {
+            assertTrue(
+                "引线不该压到自己的波浪线：${pts[i - 1]} → ${pts[i]}",
+                !segmentHits(pts[i - 1], pts[i], wavy),
+            )
+        }
+        val crossing = pts.zipWithNext()
+            .filter { (a, b) -> abs(a.y - b.y) < 0.01f && abs(a.x - b.x) > 1f }
+            .map { (a, _) -> a.y }
+            .firstOrNull { it > 140.5f && it < 159.5f }
+        assertTrue("应在两行之间横穿，实际 $pts", crossing != null)
+        assertEquals("横段不能贴着波浪线走：${pts}", 156f, crossing!!, 1.5f)
     }
 
     @Test
@@ -2528,31 +2608,37 @@ class NoteBubblesTest {
         assertEquals("从框朝正文的那条边（上边）竖着出去", bubble.top, pts.first().y, 0.01f)
         assertEquals("竖 + 横两段就到，不该绕到框右端：$pts", 3, pts.size)
         assertTrue("整条引线不往右绕：$pts", pts.all { it.x <= 1543f + clear + 1f })
-        assertTrue("箭头仍指着「讨论」那一头的下划线：$pts", pts.last().x in 1321f..1412f)
+        // 横着收尾（末折被省掉）时只走到最近那条选区边框外 2px：不伸到选区上方，
+        // 免得箭头叠在选区底色上（2026-10-31 用户定口）。
+        assertEquals("箭头停在「讨论」右边框外 2px：$pts", 1412f + 2f, pts.last().x, 1f)
         assertEquals("箭头停在行盒底边（贴着边、差半个像素以内都算）", 1696f, pts.last().y, 1f)
     }
 
     @Test
-    fun `a diagonal leader keeps its L even when the vertical is too short for an arrow`() {
-        // 2026-10-28 用户定口：四角的 L 是硬规定。走廊竖段只剩 9px（门槛 10px）时，
-        // 第 11 条也不许把末折删掉——竖段短就短，箭头尖按末段长度缩小，
-        // 但形状必须是「从框侧边横出去、再竖着进字」的 L，不能退化成一条横线。
+    fun `a diagonal leader drops the tail when the vertical is too short for an arrow`() {
+        // 2026-10-31 用户定口（撤销 2026-10-28 的「末折不得省略」）：走廊竖段只剩 9px（门槛 10px）时，
+        // 末折按第 11 条省掉，箭头落在横段末端、方向随横段——真机「函数体」就是这么一根
+        // 贴着波浪线的横线，末折 1px、箭头 0.9px，读者只看见线没有箭头。
         val glyph = rect(200f, 140f, 240f, 180f)
         val bubble = rect(320f, 185f, 420f, 193f)
         val arrow = routeNoteArrow(bubble, listOf(glyph), side = NoteSide.BELOW_RIGHT)
         assertTrue("应画得出箭头", arrow != null)
         val pts = arrowPoints(arrow!!)
-        assertEquals("L 形不能被删成一条横线：$pts", 3, pts.size)
+        assertEquals("末折画不下就省掉，只剩横段：$pts", 2, pts.size)
         val tip = pts.last()
-        assertEquals("竖段末端指着字下缘", 180f, tip.y, 0.01f)
-        assertEquals("末折前面那一段仍是横的", pts[pts.size - 2].y, pts[0].y, 0.01f)
-        assertTrue("落点仍在选区横向范围里：x=${tip.x}", tip.x in 200f..239f)
+        assertEquals("横段在框侧边的中线上横着走", pts[0].y, tip.y, 0.01f)
+        // 横着收尾时停在最近那条边框外，不伸到选区上方（否则箭头叠在选区底色上看不清）。
+        assertEquals("停在该字右边框外 2px：x=${tip.x}", 240f + 2f, tip.x, 0.01f)
+        // 箭头两臂夹在末段以内（规则 5 / 6）：横段 100px，臂长按 5dp、半宽 2.4dp 画得出来。
+        val (_, half) = noteArrowHead(tip, pts[pts.size - 2], headPx = 5f, halfPx = 2.4f)
+        assertTrue("箭头要画得出来：半宽 $half", half > 1f)
     }
 
     @Test
-    fun `an underline note at a corner keeps its L shape across font sizes`() {
-        // 下划线标注的箭头要进到行盒里、停在划线下缘外 2px，竖段因此比高亮短一截；
-        // 但四角的 L 是硬规定：任何字号下都必须是「横段 + 竖段」三点折线（2026-10-28 用户定口）。
+    fun `an underline note at a corner drops the tail when it cannot hold an arrow`() {
+        // 下划线标注的箭头要进到行盒里、停在划线下缘外 2px，竖段因此比高亮短一截。
+        // 2026-10-31 用户定口（撤销 2026-10-28 的「末折不得省略」）：竖段短到画不下箭头时
+        // 按第 11 条省掉，箭头落在横段末端——保持 L 换来的是「按比例缩到看不见的箭头」。
         for (bodyEm in listOf(28f, 32f, 36f, 40f, 48f)) {
             val noteEm = bodyEm * NOTE_BUBBLE_FONT_RATIO
             val noteLineH = noteEm * NOTE_BUBBLE_LINE_RATIO
@@ -2574,11 +2660,18 @@ class NoteBubblesTest {
             )
             assertTrue("正文 ${bodyEm}px：应画得出箭头", arrow != null)
             val pts = arrowPoints(arrow!!)
-            assertEquals("正文 ${bodyEm}px：L 形不能被删成一条横线：$pts", 3, pts.size)
-            assertEquals(
-                "正文 ${bodyEm}px：箭头停在下划线外 2px",
-                underline.bottom + 2f, pts.last().y, 0.01f,
-            )
+            val tip = pts.last()
+            if (pts.size >= 3) {
+                // 竖段够长（这一档字号下画得下箭头）：照旧是 L，箭头停在下划线外 2px。
+                assertEquals(
+                    "正文 ${bodyEm}px：箭头停在下划线外 2px",
+                    underline.bottom + 2f, tip.y, 0.01f,
+                )
+            } else {
+                // 竖段画不下箭头：省掉末折，箭头沿横段指，横段仍在行盒顶上那条缝里。
+                assertEquals("正文 ${bodyEm}px：只剩横段：$pts", 2, pts.size)
+                assertEquals("正文 ${bodyEm}px：横段横着走", pts[0].y, tip.y, 0.01f)
+            }
         }
     }
 

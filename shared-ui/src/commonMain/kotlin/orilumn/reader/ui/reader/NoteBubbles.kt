@@ -519,9 +519,9 @@ private const val NOTE_ROOM_MAX_RING: Int = 1
 /**
  * 一条批注的一个候选框（纯几何）。
  *
- * 字段只服务两件事：**排序**（整句 → 就近 → 折行 → 环数 → 方向 / 留白）
- * 与**落位**（[rect] 是最终框）。先保整句，再比就近（[distanceBand] / [excessDistance]），
- * 同样近才挑最宽的那块空白（[lines] 越少越优先），最后才比方向与留白档。
+ * 字段只服务两件事：**排序**（整句 → 环数 → 折行 → 就近 → 方向 / 留白）
+ * 与**落位**（[rect] 是最终框）。先保整句；同一环里折行最少的先（[lines]），
+ * 折行相同才比就近（[distanceBand] / [excessDistance]），最后才比方向与留白档。
  */
 internal data class NoteCandidate(
     val annotationId: Long,
@@ -1129,7 +1129,14 @@ internal fun noteCandidates(
      * 应该让后者参与竞争（整句优先），而不是先被薄空白截断。
      */
     fun bandRects(y: Float, xHint: Float, below: Boolean): List<Rect> {
-        val band = freeRects.filter { y >= it.top - NOTE_GEOM_EPS && y <= it.bottom + NOTE_GEOM_EPS }
+        // 障碍按 `marginY` 外扩，空白带的上 / 下缘会比「行盒边 + 2px」晚 / 早几像素：
+        // 斜向的 y 恰好落在带外 1~2px 时，整块宽空白就被漏掉，只剩页边距那条窄缝
+        // （真机「用 var 声明」：本行下方整带宽 1808px，却只找到左侧 198px 的窄列，
+        // 框被挤到页左、框右缘离选区右缘差了四个字）。这里按一个 marginY 容差认带，
+        // 落位时仍由 `top = max(row.rect.bottom + 2, f.top)` 把框顶推到真正的空白里。
+        val band = freeRects.filter {
+            y >= it.top - marginY - NOTE_GEOM_EPS && y <= it.bottom + marginY + NOTE_GEOM_EPS
+        }
         if (band.isEmpty()) return emptyList()
         fun depth(f: Rect) = if (below) f.bottom - y else y - f.top
         fun dx(f: Rect) = when {
@@ -1578,16 +1585,17 @@ internal fun noteCandidates(
 
 /**
  * 一条批注的候选链顺序（§1.1）：**字典序**比较
- * 「整句 → 越过行数 → 就近档 → 折行数 → 就近 → 环 → 首选侧 → 方向 → 留白」。
+ * 「整句 → 越过行数 → 环 → 折行数 → 就近档 → 首选侧 → 方向 → 留白」。
  *
  * **先保整句**（2026-10-27 / 2026-10-29 用户定口）：能整句放下的先于截断（规则 7：
  * 先换更宽的空白）；截断是最后手段。段的阶梯已删除，范围只由空白是否连成一片决定。
  *
- * **整句之后就近第一、宽度第二**（2026-10-29 用户定口，取代此前「环数绝对第一优先」）：
- * 同一片空白会被长短不一的行割成宽窄、高低不同的几块，先取离选区最近的那一块；
- * 差一个行高以内算「同样近」，这一档里挑最宽的那块（折行最少），再比精确的额外引线长度。
- * **环**（隔几行，越过别的批注也视同跨行）与**方向**退到后面：离得近永远比隔得远更该先占，
- * 哪怕隔行那块更宽。
+ * **同环内先比折行、再比就近**（2026-10-31 用户定口，取代 2026-10-29「就近第一、宽度第二」）：
+ * 先把环分开（上一行 / 下一行的左右也算 0 环），同一环里**折行最少的那块先**，
+ * 折行相同才比离选区多远（差一个行高以内算同样近，同档再比精确的额外引线长度）。
+ * 真机「用 val 声明」：左侧那格贴着字、只多 24px 却要折成两行，右上同环有一行放得下的空位、
+ * 只多走 80px——旧口径按「差 56px 跨了一个行高档」选了左边，读者看到「一行放得下却折了」。
+ * **方向**仍在距离之后。
  *
  * **四个斜向（右上 / 右下 / 左上 / 左下）近侧只留 2px、横向错开一个字**（2026-10-27
  * 用户定口）：那一个字不是摆放留白，而是给引线走廊留的——引线从框的侧边横着出来，
@@ -1638,10 +1646,11 @@ internal fun noteCandidateOrder(
     fun rankOf(c: NoteCandidate): Int =
         if (blocksExit(c)) coveringSideRank(c.side) else rank(c)
     // 2026-10-27 用户定口（规则 1 / 2 / 3）：先保整句（规则 7：换更宽的空白再截断）。
-    // 2026-10-29 用户定口：整句之后**就近第一、宽度第二**——同一片空白会被长短不一的行割成
-    // 宽窄、高低不同的几块，先取离选区最近的那一块；差一个行高以内算「同样近」，
-    // 这一档里挑最宽的那块（折行最少）。环数（隔几行）与方向退到后面：
-    // 离得近永远比隔得远更该先占，哪怕隔行那块更宽。
+    // 2026-10-31 用户定口（取代 2026-10-29「就近第一、宽度第二」）：**同环内先比折行、再比就近**。
+    // 环数提到就近档之前——本行（上一行 / 下一行的左右也算 0 环）那一圈里，先挑折行最少的，
+    // 折行相同才比离选区多远。真机「用 val 声明」：左侧那格几乎贴着字、只多 24px，却要折成
+    // 两行；右上同环有空位、一行放得下、只多走 80px——旧口径选了左边（24 与 80 差 56px 跨了
+    // 「一个行高」的档），读者看到的是「明明一行放得下却折了」。
     return compareBy<NoteCandidate> { if (it.complete) 0 else 1 }
         // 规则第 10 条仍是硬约束：框与锚点之间隔着别的批注，排在没隔的后面。
         .thenBy { it.crossed }
@@ -1650,11 +1659,13 @@ internal fun noteCandidateOrder(
         // 正右已经被占时，本行正右让到其他方向之后（排在正左、上下之前的那份名次只在
         // 「同样能放」时按 `rank` 比；这里先保证它不会凭「更靠右」抢先）。
         .thenBy { if (rightTaken && it.side == NoteSide.RIGHT && it.ring == 0) 1 else 0 }
-        // 就近：按一个行高分档，同档再挑最宽的（折行最少），然后才是精确距离。
-        .thenBy { it.distanceBand }
-        .thenBy { it.lines }
-        .thenBy { it.excessDistance }
+        // 环先分家：同环内再比折行与距离（2026-10-31 用户定口）。
         .thenBy { it.ring }
+        // 同环内**折行最少的先**（框最短、引线最短），折行相同才比就近档。
+        .thenBy { it.lines }
+        // 就近：按一个行高分档，同档再比精确距离。
+        .thenBy { it.distanceBand }
+        .thenBy { it.excessDistance }
         // 距离相同才看首选侧与方向（短行正右 / 有缩进的正左 → 四个角 → 正右 → 正左 → 上 → 下）。
         .thenBy { if (rankOf(it) == NOTE_SIDE_RANK_SIDE_FIRST) 0 else 1 }
         .thenBy { rankOf(it) }
@@ -1899,7 +1910,7 @@ internal sealed interface NoteArrow {
  * 流水线（`docs/旁注布点与引线-实施方案.md` §5）：
  * 1. 正文按行合并成行框，连同图形 / 表格 / 线条一起当障碍；
  * 2. [maximalFreeRects] 一次算出整页的极大空闲矩形（含四个页边距）；
- * 3. [noteCandidates] 按「整句 → 就近 → 折行 → 环 → 方向」的阶梯为每条批注生成候选框（§1.1）；
+ * 3. [noteCandidates] 按「整句 → 环 → 折行 → 就近 → 方向」的阶梯为每条批注生成候选框（§1.1）；
  * 4. [assignNoteCandidates] 全页分配：同行先成组占右侧，再逐条取整句，最后才开截断档，单向让位；
  * 5. 每条框再路由一条指向原文的箭头（小椭圆形态没有箭头）。
  *
@@ -2150,9 +2161,9 @@ internal fun noteBubblePlacements(
             .filter { !it.complete }
     }
 
-    // 逐条推进：每条按自己的候选链（整句 → 就近 → 折行 → 环 → 方向）取第一个能放下的位置。
+    // 逐条推进：每条按自己的候选链（整句 → 环 → 折行 → 就近 → 方向）取第一个能放下的位置。
     // 2026-10-29 用户定口：截断（加省略号）是最后手段——链上整句一律排在截断之前；
-    // 同一行里再按就近档、折行数、精确距离、环数、方向一路比下去。
+    // 同一行里再按环数、折行数、就近档、精确距离、方向一路比下去。
     val choices = assignNoteCandidates(
         ordered, lines, candidatesByNote, marginX, marginY, metrics, noteTextSizer,
         nextBatch = ::nextBatch,
@@ -2453,7 +2464,7 @@ private fun assignNoteCandidates(
     }
 
     /**
-     * 按「整句 → 就近档 → 折行数 → 精确距离 → 环 → 方向 → 留白档」取这条批注的候选链。
+     * 按「整句 → 环 → 折行数 → 就近档 → 精确距离 → 方向 → 留白档」取这条批注的候选链。
      *
      * 逐圈要候选时池子会一批批变大，这里只把**新进来的那批**排序，再线性并进已排好的链：
      * 每批都整池重排会让「一圈一圈试」比一次全量还慢。
@@ -2695,16 +2706,17 @@ private fun assignNoteCandidates(
     }
 
     /**
-     * 两个落位谁更靠前：整句 → 就近档 → 折行数（越少越宽）。
+     * 两个落位谁更靠前：整句 → 环 → 折行数（越少越宽）→ 就近档。
      *
-     * 与候选链的排序键同一套口径（[noteCandidateOrder]）——「更近」不是一个单独的判据，
-     * 而是这条链上排在前面。**同一档里的零头不比**：一个行高以内视觉上分不出远近，
+     * 与候选链的排序键同一套口径（[noteCandidateOrder]，2026-10-31 用户定口：同环内折行先于就近）。
+     * **同一档里的零头不比**：一个行高以内视觉上分不出远近，
      * 交给链序（[Spot.order]）决胜，免得「滑开 10px」输给「换到另一侧」。
      */
     fun nearer(a: NoteCandidate, b: NoteCandidate): Boolean = when {
         a.complete != b.complete -> a.complete
-        a.distanceBand != b.distanceBand -> a.distanceBand < b.distanceBand
+        a.ring != b.ring -> a.ring < b.ring
         a.lines != b.lines -> a.lines < b.lines
+        a.distanceBand != b.distanceBand -> a.distanceBand < b.distanceBand
         else -> false
     }
 
@@ -2771,7 +2783,7 @@ private fun assignNoteCandidates(
     /**
      * 从当前候选池里按顺序取一条能放下的位置。
      *
-     * 候选链已经按「整句 → 就近 → 折行数 → 环 → 方向」排好，所以一路扫下去就是规则顺序。
+     * 候选链已经按「整句 → 环 → 折行数 → 就近档 → 方向」排好，所以一路扫下去就是规则顺序。
      * 截断候选因此只在整句都放不下时才会被取到——它是最后手段（2026-10-29 用户定口）。
      *
      * 2026-10-29 用户定口（真机「函数就是功能呀！老外的词汇太贫乏了。」）：**让位 / 自己滑开

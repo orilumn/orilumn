@@ -3602,7 +3602,7 @@ class NoteBubblesTest {
 
     /**
      * 规则第 1 / 7 条（2026-10-29 用户定口，取代 2026-10-27 的「环数绝对第一」）：
-     * 截断是最后手段——整句的环 4 也排在折成省略号的环 0 之前；同为整句时才是就近、折行。
+     * 截断是最后手段——整句的环 4 也排在折成省略号的环 0 之前；同为整句时才比环、折行、就近。
      */
     @Test
     fun `a complete candidate beats a nearer truncated one`() {
@@ -3625,15 +3625,15 @@ class NoteBubblesTest {
         val ordered = orderedNoteCandidates(listOf(foldedNear, completeFar), rightTaken = false)
         assertEquals("整句先于截断：$ordered", completeFar, ordered.first())
 
-        // 同为整句时才是就近优先，其次折行少。
-        val completeNear = candidate(ring = 0, complete = true, lines = 4)
-            .copy(distanceBand = 1)
-        val completeFarFewer = candidate(ring = 1, complete = true, lines = 2)
-            .copy(distanceBand = 1)
+        // 同为整句时：**同环内先比折行、再比就近**（2026-10-31 用户定口）。
+        val nearMoreLines = candidate(ring = 0, complete = true, lines = 4)
+            .copy(distanceBand = 0, rect = rect(600f, 0f, 700f, 160f))
+        val farFewerLines = candidate(ring = 0, complete = true, lines = 2)
+            .copy(distanceBand = 1, rect = rect(600f, 200f, 700f, 280f))
         assertEquals(
-            "同档近、整句都成立时先挑折行少的",
-            completeFarFewer,
-            orderedNoteCandidates(listOf(completeNear, completeFarFewer), rightTaken = false).first(),
+            "同环里折行少的先于更近的",
+            farFewerLines,
+            orderedNoteCandidates(listOf(nearMoreLines, farFewerLines), rightTaken = false).first(),
         )
 
         // 同一环里仍是整句优先：先换更宽的空白，再截断（规则第 7 条）。
@@ -3831,30 +3831,43 @@ class NoteBubblesTest {
         assertEquals(0, empty.totalChars)
     }
 
-    /** 2026-10-29 规则：整句之后就近第一、宽度第二——同档里折行少的先排，环数退到最后。 */
+    /** 2026-10-31 规则：**同环内先比折行、再比就近**；跨环时环先分家。 */
     @Test
-    fun `line count decides before ring within the same distance band`() {
-        // 2026-10-29 用户定口：整句之后**就近第一、宽度第二**——差一个行高以内算同样近，
-        // 同档里挑最宽的那块（折行最少），环数退到最后。旧口径是「环数先于折行数」，已改。
-        fun candidate(ring: Int, lines: Int) = NoteCandidate(
+    fun `line count decides before distance within the same ring`() {
+        // 2026-10-31 用户定口（真机「用 val 声明」）：同一环里折行最少的那块先，
+        // 折行相同才比离选区多远。旧口径是「就近档先于折行数」，会让一行放得下的空位输给
+        // 更近却要折两行的那格，已改。
+        fun candidate(ring: Int, lines: Int, band: Int) = NoteCandidate(
             annotationId = 1,
-            rect = rect(0f, 100f + ring * 40f, 60f, 100f + ring * 40f + 24f * lines),
+            rect = rect(0f, 100f + ring * 40f + band * 8f, 60f, 100f + ring * 40f + band * 8f + 24f * lines),
             freeRect = rect(0f, 0f, 700f, 800f),
             lines = lines,
             complete = true,
             shownChars = 4,
             side = NoteSide.RIGHT,
             ring = ring,
-            distance = if (ring == 0) 2f else 1f,
+            distance = 2f + band * 40f,
+            distanceBand = band,
             sideRank = noteSideRank(NoteSide.RIGHT),
         )
-        val wrapped = candidate(ring = 0, lines = 3)
-        val oneLine = candidate(ring = 1, lines = 1)
-        val ordered = orderedNoteCandidates(listOf(oneLine, wrapped), rightTaken = false)
+        // 同环：更远但一行放得下的，先于更近却要折两行的。
+        val nearWrapped = candidate(ring = 0, lines = 2, band = 0)
+        val farOneLine = candidate(ring = 0, lines = 1, band = 1)
+        val ordered = orderedNoteCandidates(listOf(nearWrapped, farOneLine), rightTaken = false)
         assertEquals(
-            "同档里折行少的先排（环数退到最后）：${ordered.map { it.ring to it.lines }}",
+            "同环里折行少的先（环内折行先于就近）：${ordered.map { it.ring to it.lines }}",
             1,
             ordered.first().lines,
+        )
+
+        // 跨环：环先分家，本行那一圈排在隔行之前（哪怕它要折三行、隔行一行就放得下）。
+        val wrappedHere = candidate(ring = 0, lines = 3, band = 0)
+        val oneLineNextRing = candidate(ring = 1, lines = 1, band = 0)
+        val ordered2 = orderedNoteCandidates(listOf(oneLineNextRing, wrappedHere), rightTaken = false)
+        assertEquals(
+            "环先分家：本行那一圈排在隔行之前（2026-10-31 用户定口）",
+            0,
+            ordered2.first().ring,
         )
     }
 

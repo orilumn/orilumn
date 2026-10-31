@@ -228,6 +228,21 @@ private const val ARROW_BEND_CLEARANCE_PX: Float = 1f
  */
 private const val ARROW_SOLID_CLEAR_EM: Float = 0.25f
 
+/**
+ * 无布点方向的斜向引线把 L 收成弧线时，控制点沿两段折线外伸的比例。
+ *
+ * 0.55 ≈ 圆角：「起点垂直离开框、终点垂直扎向正文」（规则第 5 条）不变，中间不再走直角，
+ * 朝 L 的拐点那一侧（也就是布线挑出来的那条空走廊）鼓出去。走廊里有字 / 框挡住时按
+ * [ARROW_ARC_FALLOFFS] 一级级收小，最后收不住就照旧画 L。
+ */
+private const val ARROW_ARC_ELBOW: Float = 0.55f
+
+/** 弧线鼓不出来时依次试的控制点比例（越小越贴近原来那条斜向的弦）。 */
+private val ARROW_ARC_FALLOFFS = floatArrayOf(0.55f, 0.4f, 0.25f)
+
+/** 弧线采样成几段短弦（交叉判定、已画引线索引只认线段）。 */
+private const val ARROW_CURVE_SAMPLES: Int = 12
+
 /** 折线最多四个拐点（5 段，§6.2）：首末段必须各自垂直于框边，绕过整条图形带时要多一个折。 */
 private const val ARROW_MAX_BENDS: Int = 4
 
@@ -1862,6 +1877,20 @@ internal sealed interface NoteArrow {
         override val start: Offset get() = points.first()
         override val end: Offset get() = points.last()
     }
+
+    /**
+     * 一段三次曲线（只给**没有布点方向**的斜向引线用）。
+     *
+     * 两端切线仍是垂直的（规则第 5 条）：[c1] 沿「框边法线」外伸、[c2] 沿「行盒边法线」
+     * 回缩，所以起点垂直离开框、终点垂直扎向正文，和原来的 L 同一个口径，只是中间那段
+     * 不再走直角、改成朝空白那一侧鼓出去（见 `arrowArcFromElbow`）。
+     */
+    data class Curve(
+        override val start: Offset,
+        val c1: Offset,
+        val c2: Offset,
+        override val end: Offset,
+    ) : NoteArrow
 }
 
 /**
@@ -3951,6 +3980,8 @@ internal fun routeNoteArrow(
     var order = 0
     var fallback: ArrowPath? = null
     var best: ArrowPath? = null
+    // [best] 是从哪个目标字量出来的：收弧线时要拿它的障碍表验「这条弧鼓出来压不压东西」。
+    var bestTarget: ArrowTarget? = null
 
     // 热路径的暂存区：候选折线先写进这两对数组，量完就丢。
     // 真机上「一条候选 0.12ms」的大头就是每条候选一组短命对象（点列表 / 装箱的坐标），
@@ -4007,7 +4038,10 @@ internal fun routeNoteArrow(
             // 的那条确实最短，整遍否决会连带把「不怼角、起点已经贴到邻框边」的那条一起扔掉。
             val cur = best
             if (path.corner && cur != null && !cur.corner) return
-            if (path.betterThan(cur)) best = path
+            if (path.betterThan(cur)) {
+                best = path
+                bestTarget = target
+            }
         } else {
             if (path.betterFallbackThan(fallback)) fallback = path
         }
@@ -4271,9 +4305,17 @@ internal fun routeNoteArrow(
      * （2026-10-24 用户反馈：讨论的引线 17px 快看不见了；
      * 2026-10-25 补：末段一短，箭头两臂就退到上一段上，看着像「横线末端长了个竖箭头」）。
      */
-    fun finish(path: ArrowPath): NoteArrow {
+    fun finish(path: ArrowPath, target: ArrowTarget?): NoteArrow {
         val chosen = if (path.clear && cornerFamily) cornerRoute() ?: path else path
-        return chosen.withoutUndrawableTail(lineH, keepTail = cornerFamily).toNoteArrow()
+        val clipped = chosen.withoutUndrawableTail(lineH, keepTail = cornerFamily)
+        // 没有布点方向的斜向引线：一折的 L 收成弧线（2026-10-30 用户定口）。
+        // 四角 L（[cornerFamily]）与四个正向直线一律不动；收不住就照旧画 L。
+        if (!cornerFamily && (side == null || side == NoteSide.OTHER) &&
+            target != null && chosen.clear && clipped.points.size == 3
+        ) {
+            arrowArcFromElbow(chosen.points, bubbleEm, target.obstacles, drawnIndex)?.let { return it }
+        }
+        return clipped.toNoteArrow()
     }
 
     // 已经拿到**无条件最优**的引线（一条直线、且不交叉）就不必再试别的端点组合了。
@@ -4306,7 +4348,7 @@ internal fun routeNoteArrow(
                     )) {
                         tryRoute(exit, entry, t)
                     }
-                    if (optimal()) return finish(best!!)
+                    if (optimal()) return finish(best!!, bestTarget)
                 }
             }
         } else if (sideAware) {
@@ -4321,7 +4363,7 @@ internal fun routeNoteArrow(
                     )) {
                         tryRoute(exit, entry, t)
                     }
-                    if (optimal()) return finish(best!!)
+                    if (optimal()) return finish(best!!, bestTarget)
                 }
             }
         } else {
@@ -4335,7 +4377,7 @@ internal fun routeNoteArrow(
                 )) {
                     tryRoute(exit, entry, t)
                 }
-                if (optimal()) return finish(best!!)
+                if (optimal()) return finish(best!!, bestTarget)
             }
         }
         return null
@@ -4352,6 +4394,7 @@ internal fun routeNoteArrow(
     var done = enumerate(breakoutAllowed = false)
     if (done == null) {
         val before = best
+        val beforeTarget = bestTarget
         if (before == null || !before.clear || before.bends > 0) {
             done = enumerate(breakoutAllowed = true)
             val after = best
@@ -4364,6 +4407,7 @@ internal fun routeNoteArrow(
                 (!after.clear || !after.betterThan(before))
             if (worse) {
                 best = before
+                bestTarget = beforeTarget
                 done = null
             }
         }
@@ -4379,7 +4423,7 @@ internal fun routeNoteArrow(
                 "hits=${chosen.hits.toInt()} pts=${chosen.points.size}",
         )
     }
-    return finish(chosen)
+    return finish(chosen, bestTarget)
 }
 
 /**
@@ -6227,6 +6271,81 @@ private fun ArrowPath.withoutUndrawableTail(lineH: Float, keepTail: Boolean): Ar
 private fun arrowSegments(arrow: NoteArrow): List<Pair<Offset, Offset>> = when (arrow) {
     is NoteArrow.Straight -> listOf(arrow.start to arrow.end)
     is NoteArrow.Elbow -> arrow.points.zipWithNext()
+    // 曲线没有折点，按弧长拉直成几条短弦：交叉判定 / 已画引线索引只认线段。
+    is NoteArrow.Curve -> curvePoints(arrow).zipWithNext()
+}
+
+/** 曲线按 [ARROW_CURVE_SAMPLES] 等分取点（首尾都取，共 N+1 个）。 */private fun curvePoints(curve: NoteArrow.Curve, samples: Int = ARROW_CURVE_SAMPLES): List<Offset> =
+    (0..samples).map { i -> curvePointAt(curve, i / samples.toFloat()) }
+
+private fun curvePointAt(curve: NoteArrow.Curve, t: Float): Offset {
+    val u = 1f - t
+    val a = u * u * u
+    val b = 3f * u * u * t
+    val c = 3f * u * t * t
+    val d = t * t * t
+    return Offset(
+        a * curve.start.x + b * curve.c1.x + c * curve.c2.x + d * curve.end.x,
+        a * curve.start.y + b * curve.c1.y + c * curve.c2.y + d * curve.end.y,
+    )
+}
+
+/**
+ * 把一折的 L 收成一段三次曲线（只给**没有布点方向**的斜向引线用，2026-10-30 用户定口）。
+ *
+ * 形状：两端切线不动（规则第 5 条：起点垂直离开框、终点垂直扎向正文），中间朝 L 的
+ * **拐点那一侧**鼓出去。那个拐点是布线绕障碍时挑出来的空走廊，所以「鼓向没有障碍的那一侧」
+ * 与「鼓向拐点」是同一件事——另一侧就是框或者正文自己。
+ *
+ * 鼓出来压到字 / 框、或者压到已画的引线，就按 [ARROW_ARC_FALLOFFS] 一级级收小
+ * （越收越贴近原来那条斜弦）；收不住返回 null，调用方照旧画 L。
+ */
+private fun arrowArcFromElbow(
+    points: List<Offset>,
+    em: Float,
+    obstacles: List<ArrowObstacle>,
+    drawn: DrawnSegmentIndex,
+): NoteArrow.Curve? {
+    if (points.size != 3) return null
+    val a = points[0]
+    val b = points[1]
+    val c = points[2]
+    val len1 = abs(b.x - a.x) + abs(b.y - a.y)
+    val len2 = abs(c.x - b.x) + abs(c.y - b.y)
+    // 两段都够长才值得换形状：短得像一条直线的 L，收圆看不出区别，反而容易蹭到旁边的字。
+    val floorPx = if (em > 0f) em * 0.5f else 0f
+    if (min(len1, len2) < floorPx) return null
+    for (k in ARROW_ARC_FALLOFFS) {
+        val curve = NoteArrow.Curve(
+            start = a,
+            c1 = Offset(a.x + (b.x - a.x) * k, a.y + (b.y - a.y) * k),
+            c2 = Offset(c.x + (b.x - c.x) * k, c.y + (b.y - c.y) * k),
+            end = c,
+        )
+        if (arcClear(curve, obstacles, drawn)) return curve
+    }
+    return null
+}
+
+/** 弧线采样成短弦后逐段验：既不穿字 / 框，也不和已画的引线交叉。 */
+private fun arcClear(
+    curve: NoteArrow.Curve,
+    obstacles: List<ArrowObstacle>,
+    drawn: DrawnSegmentIndex,
+): Boolean {
+    val pts = curvePoints(curve)
+    for (i in 1 until pts.size) {
+        val p = pts[i - 1]
+        val q = pts[i]
+        val dx = q.x - p.x
+        val dy = q.y - p.y
+        if (abs(dx) < 0.01f && abs(dy) < 0.01f) continue
+        if (drawn.crossingsAll(p.x, p.y, q.x, q.y) > 0) return false
+        for (o in obstacles) {
+            if (insideSpan(p.x, p.y, dx, dy, o.rect, o.tol) > 1e-6f) return false
+        }
+    }
+    return true
 }
 
 /** 两条线段是否相交（含端点接触；用于引线交叉计费）。 */
@@ -6475,6 +6594,12 @@ private fun DrawScope.drawNoteArrow(arrow: NoteArrow, color: Color) {
             path.moveTo(arrow.points.first().x, arrow.points.first().y)
             for (p in arrow.points.drop(1)) path.lineTo(p.x, p.y)
             tail = arrow.points[arrow.points.size - 2]
+        }
+        is NoteArrow.Curve -> {
+            path.moveTo(arrow.start.x, arrow.start.y)
+            path.cubicTo(arrow.c1.x, arrow.c1.y, arrow.c2.x, arrow.c2.y, arrow.end.x, arrow.end.y)
+            // 箭头方向取**终点切线**：曲线的末段就是 c2 → end 这一截。
+            tail = arrow.c2
         }
     }
     drawPath(path, color = color, style = Stroke(width = stroke))

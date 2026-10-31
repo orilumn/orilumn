@@ -88,9 +88,30 @@ class NoteBubblesTest {
     }
 
     /** 箭头折线化：直线与折线都按点列出来，供断言「不压字 / 两端接住」。 */
+    /** 三次曲线在 [t] 处的点（与 `NoteBubbles.kt` 里的采样同一个公式）。 */
+    private fun curveAt(curve: NoteArrow.Curve, t: Float): Offset {
+        val u = 1f - t
+        val a = u * u * u
+        val b = 3f * u * u * t
+        val c = 3f * u * t * t
+        val d = t * t * t
+        return Offset(
+            a * curve.start.x + b * curve.c1.x + c * curve.c2.x + d * curve.end.x,
+            a * curve.start.y + b * curve.c1.y + c * curve.c2.y + d * curve.end.y,
+        )
+    }
+
+    private fun curveMidpoint(curve: NoteArrow.Curve): Offset = curveAt(curve, 0.5f)
+
+    /** 点是否落在矩形**内部**（边界不算：箭头本来就停在行盒 / 字墨迹的边上）。 */
+    private fun rectContains(r: Rect, p: Offset): Boolean =
+        p.x > r.left && p.x < r.right && p.y > r.top && p.y < r.bottom
+
+    /** 折线返回逐点；直线 / 曲线没有折点（曲线两端之间是弧），只给首尾。 */
     private fun arrowPoints(arrow: NoteArrow): List<Offset> = when (arrow) {
         is NoteArrow.Straight -> listOf(arrow.start, arrow.end)
         is NoteArrow.Elbow -> arrow.points
+        is NoteArrow.Curve -> listOf(arrow.start, arrow.end)
     }
 
     private val noteMetrics = NoteMetrics.forBody(20f)
@@ -1797,6 +1818,47 @@ class NoteBubblesTest {
         assertEquals("竖段离选区左角 0.5em", ink.left + ink.height * 0.5f, pts[1].x, 0.01f)
         assertEquals("末端接住文字底边", ink.bottom, pts[2].y, 0.01f)
         assertTrue("第一段要比短竖线长得多：$pts", abs(pts[1].x - pts[0].x) > 2 * abs(pts[2].y - pts[1].y))
+    }
+
+    @Test
+    fun `a diagonal leader with no layout direction curves instead of folding a corner`() {
+        // 2026-10-30 用户定口：没有布点方向的斜向引线（框斜对着正文）不再画直角折线，
+        // 改画一段朝空白侧鼓出去的弧线；两端切线仍垂直于框边 / 行盒边（规则第 5 条）。
+        val ink = rect(100f, 100f, 300f, 140f)
+        val bubble = rect(400f, 400f, 800f, 480f)
+        val arrow = routeNoteArrow(bubble, listOf(ink), lineH = 40f)
+        val curve = arrow as? NoteArrow.Curve
+        assertTrue("无方向的斜向引线要画成弧线：$arrow", curve != null)
+        curve!!
+        // 起点在框左边中点、横着出去；终点落在文字底边、竖着进来。
+        assertEquals("起点落在框左边", bubble.left, curve.start.x, 0.01f)
+        assertEquals("起点切线要横着", curve.start.y, curve.c1.y, 0.01f)
+        assertEquals("终点落在文字底边", ink.bottom, curve.end.y, 0.01f)
+        assertEquals("终点切线要竖着", curve.end.x, curve.c2.x, 0.01f)
+        // 鼓向拐点那一侧（空白），不能反向鼓到框上 / 正文里去。
+        val mid = curveMidpoint(curve)
+        assertTrue(
+            "弧线要落在 L 拐点的里侧（空白那一侧）：mid=$mid",
+            !rectContains(ink, mid) && mid.x < bubble.left && mid.y > ink.bottom,
+        )
+        // 弧线上每一点都不许压字。
+        for (i in 0..10) {
+            val p = curveAt(curve, i / 10f)
+            assertTrue("弧线不许压到正文：$p", !rectContains(ink, p))
+        }
+        // 和原来的 L 起点 / 终点是同一对端点，只是中间不再走直角。
+        assertTrue("弧线两端之间必须是斜的：$curve", abs(curve.end.x - curve.start.x) > 1f)
+    }
+
+    @Test
+    fun `a corner L keeps its right angle instead of becoming an arc`() {
+        // 四角摆法的 L 是规则第 2 条定的线型，弧线只换「没有布点方向」的斜向引线。
+        val ink = rect(1000f, 80f, 1160f, 116f)
+        val bubble = rect(1100f, 120f, 1500f, 160f)
+        val arrow = routeNoteArrow(bubble, listOf(ink), lineH = 20f, side = NoteSide.BELOW_RIGHT)
+        val pts = arrowPoints(arrow!!)
+        assertEquals("四角 L 不许收成弧线：$arrow", 3, pts.size)
+        assertTrue("四角 L 必须是折线：$arrow", arrow is NoteArrow.Elbow)
     }
 
     @Test

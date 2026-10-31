@@ -21,6 +21,8 @@ class NoteArrowFuzzProbe {
         null -> "-"
         is NoteArrow.Straight -> "S(" + pt(arrow.start) + "->" + pt(arrow.end) + ")"
         is NoteArrow.Elbow -> arrow.points.joinToString(",", "E(", ")") { pt(it) }
+        is NoteArrow.Curve ->
+            "C(" + pt(arrow.start) + "->" + pt(arrow.c1) + "," + pt(arrow.c2) + "->" + pt(arrow.end) + ")"
     }
 
     private fun rowGlyphs(y: Float, left: Float, count: Int, w: Float, h: Float): List<Rect> =

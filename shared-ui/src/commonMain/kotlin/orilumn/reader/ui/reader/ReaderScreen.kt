@@ -2061,13 +2061,13 @@ fun ReaderScreen(
             }
             // 布点结果按页留几页：同一次翻页里，目标页起手先当目标槽、落地又变成当前槽；
             // 留一份就不必算两遍（布点是本页最贵的一笔，几百毫秒量级）。
-            // 标注修订号**不进**这里的键：它一变就整只换新的话，换章时标注状态会连续两次 bump
-            // （清空 + 读回），刚看过的上一章也一起作废，翻回去只能重算。有效性由条目自己判。
+            // 有效性按「那一章的标注代数」判（见 PageNoteMemo），所以这里**不用**拿标注修订号
+            // 当键：修订号在换章时会连续 bump，整只换新会让刚看过的上一章一起作废。
             val noteMemo = remember(
                 noteTextSizer, settings.noteFontScale, hostRevision,
                 displayRevision, contentLeft, contentTop, contentRight, contentBottom,
-                pxWidth, pxHeight,
-            ) { PageNoteMemo() }
+                pxWidth, pxHeight, annotationState,
+            ) { PageNoteMemo(generationOf = annotationState::generationOf) }
             // 落定后预热前后邻页的旁注：车道是异步的，不预热的话冷页要等算完才出现
             //（真机 600~1600ms 的「页面先空着，旁注后冒出来」）。预热后翻过去是缓存命中，
             // 旁注跟着目标页一起滑进来。

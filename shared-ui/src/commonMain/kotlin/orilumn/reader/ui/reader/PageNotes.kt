@@ -28,37 +28,41 @@ import kotlin.time.TimeSource
  * 键由调用方给（页身份），失效由 [PageNoteMemo] 的持有者负责：`remember` 的键一变就整只换新。
  * **只在主线程读写**（后台车道算完交回主线程再写，见 [PageNoteLane]）。
  */
-internal class PageNoteMemo(private val capacity: Int = 6) {
+internal class PageNoteMemo(
+    private val capacity: Int = 6,
+    /** 章 → 标注代数（[AnnotationState.generationOf]）：判条目还有没有效。 */
+    private val generationOf: (chapter: Int) -> Int = { 0 },
+) {
 
-    /** 一条布点结果 + 它算出来时的标注修订号（跨章回来时据此判是否还有效）。 */
-    private data class Entry(val revision: Int, val bubbles: List<NoteBubble>)
+    /** 一条布点结果 + 它算出来时那一章的标注代数。 */
+    private data class Entry(val generation: Int, val bubbles: List<NoteBubble>)
 
     private val entries = LinkedHashMap<String, Entry>()
 
     /**
      * 取一页的结果；取到就算「刚用过」（挪到队尾，少被挤掉）。
      *
-     * [revision] 与条目里记的不等 ⇒ 视为没有（标注增删改后，旁注的落点就变了）。
-     * 判据放在条目上而不是「修订号一变就把整只缓存换新」：换章时标注状态会连续
-     * 两次 bump（清空 + 读回），整只换新会让**刚看过的上一章**也一起作废，
+     * 有效性按**这一章自己的标注代数**判，而不是「全局修订号一变就把整只缓存换新」：
+     * 换章时标注状态会连续两次 bump（清空 + 读回），整只换新会让刚看过的上一章一起作废，
      * 翻回去只能重算——那正是「回翻比正翻慢」的来源。
      */
-    fun get(key: String, revision: Int): List<NoteBubble>? {
+    fun get(key: String, chapter: Int): List<NoteBubble>? {
         val value = entries.remove(key) ?: return null
-        if (value.revision != revision) return null
+        if (value.generation != generationOf(chapter)) return null
         entries[key] = value
         return value.bubbles
     }
 
     /** 只问「有没有」，**不动**最近使用序（预热前判重，不该把冷页顶成热页）。 */
-    fun contains(key: String, revision: Int): Boolean = entries[key]?.revision == revision
+    fun contains(key: String, chapter: Int): Boolean =
+        entries[key]?.generation == generationOf(chapter)
 
-    fun put(key: String, revision: Int, value: List<NoteBubble>) {
+    fun put(key: String, chapter: Int, value: List<NoteBubble>) {
         entries.remove(key)
         if (entries.size >= capacity) {
             entries.keys.firstOrNull()?.let { entries.remove(it) }
         }
-        entries[key] = Entry(revision, value)
+        entries[key] = Entry(generationOf(chapter), value)
     }
 }
 
@@ -152,7 +156,7 @@ internal fun rememberPageNotes(
     fontScale: Float,
     lane: PageNoteLane,
     memo: PageNoteMemo,
-    /** 标注修订号（[AnnotationState.revision]）：缓存条目按它判有效性。 */
+    /** 标注修订号（[AnnotationState.revision]）：只当「这一页要重算一遍」的触发键，不进缓存判据。 */
     decorRevision: Int,
 ): List<NoteBubble> {
     // 页身份键：章 + 页区间（见 [pageNoteKey]）。预热方也只有 ReaderPos，必须能算出同一个键。
@@ -160,7 +164,7 @@ internal fun rememberPageNotes(
     var bubbles by remember(pageKey, memo, decorRevision) {
         // 命中缓存的那一页直接有结果（翻页的当前页、落地后的新页都走这里）：
         // 首帧就有旁注，不会先空一帧再冒出来。
-        mutableStateOf(memo.get(pageKey, decorRevision).orEmpty())
+        mutableStateOf(memo.get(pageKey, chapter).orEmpty())
     }
     // 输入一律走 `rememberUpdatedState`，**不进 effect 的键**：见下面的 KDoc。
     val contentNow by rememberUpdatedState(content)
@@ -178,7 +182,7 @@ internal fun rememberPageNotes(
             bubbles = emptyList()
             return@LaunchedEffect
         }
-        val cached = memo.get(pageKey, decorRevision)
+        val cached = memo.get(pageKey, chapter)
         if (cached != null) {
             bubbles = cached
             return@LaunchedEffect
@@ -203,7 +207,7 @@ internal fun rememberPageNotes(
                     fontScale = fontScale,
                 )
             }
-            memo.put(pageKey, decorRevision, computed)
+            memo.put(pageKey, chapter, computed)
             bubbles = computed
         }
     }
@@ -494,7 +498,7 @@ internal fun WarmAdjacentPageNotes(
                 continue
             }
             val key = pageNoteKey(target.chapter, target.slice.charStart, target.slice.charEnd)
-            if (memo.contains(key, decorRevision)) {
+            if (memo.contains(key, target.chapter)) {
                 Logger.d("Orilumn.NOTE", "NOTE-WARM skip d=$d key=$key reason=cached")
                 continue
             }
@@ -532,7 +536,7 @@ internal fun WarmAdjacentPageNotes(
                 }
                 // 写回也在 NonCancellable 里：否则「刚算完就被下一次翻页取消」，
                 // 结果算完却写不进缓存，白算一遍（快翻时每一页都重算）。
-                memo.put(key, decorRevision, bubbles)
+                memo.put(key, target.chapter, bubbles)
                 Logger.d(
                     "Orilumn.NOTE",
                     "NOTE-WARM done d=$d key=$key n=${bubbles.size} " +

@@ -30,6 +30,29 @@ class AnnotationState(private val host: ReaderHost) {
         private set
 
     /**
+     * 章 → 标注代数：**这一章的标注内容**每变一次 +1。
+     *
+     * 与 [revision] 的区别：进出章时 [revision] 会连续 bump（清空 + 读回），代数只在内容
+     * 真的变了时才变。旁注缓存（`PageNoteMemo`）按它判有效性——否则翻到下一章再翻回来，
+     * 上一章刚算好的旁注全部作废，只能重算（真机 2026-11-01：回翻的那一页旁注晚到近一秒）。
+     */
+    private val generations = mutableMapOf<Int, Int>()
+    /** 每章上一次见到的标注内容（判「真的变了没有」）。 */
+    private val snapshots = mutableMapOf<Int, List<Annotation>>()
+
+    /** [chapter] 这一章当前的标注代数（没变过就是 0）。 */
+    fun generationOf(chapter: Int): Int = generations[chapter] ?: 0
+
+    /** 记一笔：这一章的标注内容若与上次不同，代数 +1（进出章时是同一份，不白作废缓存）。 */
+    private fun noteContentChanged() {
+        val ch = chapter
+        if (ch < 0) return
+        if (snapshots[ch] == annotations) return
+        snapshots[ch] = annotations
+        generations[ch] = (generations[ch] ?: 0) + 1
+    }
+
+    /**
      * 进入 [chapter]：同一章直接返回（翻页不重读库），换章先清空再异步读。
      *
      * 读取失败按空表处理并保留 [chapter]，避免每帧重试；需要重试由调用方显式 [reload]。
@@ -50,6 +73,7 @@ class AnnotationState(private val host: ReaderHost) {
         if (this.chapter != chapter) return
         annotations = sort(loaded)
         revision++
+        noteContentChanged()
         backfillQuotes(chapter)
     }
 
@@ -67,6 +91,7 @@ class AnnotationState(private val host: ReaderHost) {
         if (chapter != ch) return
         annotations = sort(loaded)
         revision++
+        noteContentChanged()
     }
 
     /** 长按命中：包含 [charOffset] 的最后一条（同起点后加的优先），不查库。 */
@@ -82,6 +107,7 @@ class AnnotationState(private val host: ReaderHost) {
         val pending = annotation.copy(id = nextTempId())
         annotations = sort(annotations + pending)
         revision++
+        noteContentChanged()
         val saved = try {
             host.addAnnotation(annotation)
         } catch (c: kotlinx.coroutines.CancellationException) {
@@ -92,16 +118,19 @@ class AnnotationState(private val host: ReaderHost) {
         if (saved == null) {
             annotations = annotations.filterNot { it.id == pending.id }
             revision++
+            noteContentChanged()
             return null
         }
         // 落库期间可能已经换章（或离开阅读面）：旧章的记录不能混进新章列表。
         if (chapter != pending.chapter) {
             annotations = annotations.filterNot { it.id == pending.id }
             revision++
+            noteContentChanged()
             return saved
         }
         annotations = sort(annotations.filterNot { it.id == pending.id } + saved)
         revision++
+        noteContentChanged()
         return saved
     }
 
@@ -110,6 +139,7 @@ class AnnotationState(private val host: ReaderHost) {
         val old = annotations.firstOrNull { it.id == annotation.id } ?: return false
         annotations = sort(annotations.map { if (it.id == annotation.id) annotation else it })
         revision++
+        noteContentChanged()
         val ok = try {
             host.updateAnnotation(annotation)
         } catch (c: kotlinx.coroutines.CancellationException) {
@@ -120,6 +150,7 @@ class AnnotationState(private val host: ReaderHost) {
         if (!ok) {
             annotations = sort(annotations.map { if (it.id == old.id) old else it })
             revision++
+            noteContentChanged()
         }
         return ok
     }
@@ -129,6 +160,7 @@ class AnnotationState(private val host: ReaderHost) {
         val old = annotations.firstOrNull { it.id == id } ?: return false
         annotations = annotations.filterNot { it.id == id }
         revision++
+        noteContentChanged()
         val ok = try {
             host.deleteAnnotation(id)
         } catch (c: kotlinx.coroutines.CancellationException) {
@@ -139,6 +171,7 @@ class AnnotationState(private val host: ReaderHost) {
         if (!ok) {
             annotations = sort(annotations + old)
             revision++
+            noteContentChanged()
         }
         return ok
     }
@@ -173,6 +206,7 @@ class AnnotationState(private val host: ReaderHost) {
             if (this.chapter != chapter) return
             annotations = sort(annotations.map { if (it.id == filled.id) filled else it })
             revision++
+            noteContentChanged()
         }
     }
 

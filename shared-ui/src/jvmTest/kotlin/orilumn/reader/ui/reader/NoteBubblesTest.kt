@@ -2037,6 +2037,53 @@ class NoteBubblesTest {
     }
 
     @Test
+    fun `leader gives the upper gap to the note whose bubble is above`() {
+        // 真机「函数体」/「内 {}」（2026-11-01）：同一行两条批注，上方那条的框占住了行间空白，
+        // 两条引线平行挤在十几像素的缝里、只差 2px，看着像一条双线。上方那条先画、占住走廊，
+        // 后画的那条必须让到正文行下方，不许再贴着它平行走。
+        val row2 = listOf(rect(0f, 0f, 552f, 45f))
+        val row3 = listOf(rect(0f, 100f, 138f, 145f), rect(140f, 100f, 552f, 145f))
+        val row4 = listOf(rect(0f, 200f, 500f, 245f))
+        val bubble = rect(600f, 100f, 1400f, 148f)
+        // 上方那条批注的框：底边 60，它自己的引线横在 y=80。
+        val aboveBubble = rect(450f, 0f, 1400f, 60f)
+        // 上方那条已经画好的引线：竖着下到 y=80，再横到它自己的字上。
+        val aboveArrow = NoteArrow.Elbow(
+            listOf(Offset(820f, 60f), Offset(820f, 80f), Offset(470f, 80f)),
+        )
+        val arrow = routeNoteArrow(
+            bubble = bubble,
+            inkRects = listOf(row3.first()),
+            glyphs = row2 + row3 + row4,
+            otherBubbles = listOf(aboveBubble),
+            drawnArrows = listOf(aboveArrow),
+            lineH = 48f,
+            side = NoteSide.RIGHT,
+            lineBoxes = listOf(
+                rect(0f, 0f, 552f, 45f),
+                rect(0f, 100f, 552f, 145f),
+                rect(0f, 200f, 500f, 245f),
+            ),
+            targetInk = listOf(row3.first()),
+            cornerInk = listOf(row3.first()),
+        )
+        val pts = arrowPoints(arrow!!)
+        val clear = 48f * 0.2f
+        val parallelNear = pts.zipWithNext().any { (a, b) ->
+            if (abs(a.y - b.y) >= 0.01f) return@any false
+            if (abs(a.y - 80f) >= clear) return@any false
+            min(max(a.x, b.x), 820f) - max(min(a.x, b.x), 470f) >= 1f
+        }
+        assertTrue("上方走廊已经让给上面的批注，不能再贴着它平行走：$pts", !parallelNear)
+        assertTrue(
+            "让出来的结果就是改走正文行下方：$pts",
+            pts.zipWithNext().any { (a, b) ->
+                abs(a.y - b.y) < 0.01f && a.y > 145f && a.y < 200f
+            },
+        )
+    }
+
+    @Test
     fun `arrow head arms stay inside a short last segment`() {
         // 真机第 3 条：末段只剩几个像素时，箭头臂长还按死 5dp 画，臂根就退到上一段上，
         // 看上去像「横线末端长了个竖箭头」。臂长必须夹在末段以内，半宽随之等比缩小。

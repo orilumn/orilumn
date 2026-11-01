@@ -232,6 +232,15 @@ private const val ARROW_BEND_CLEARANCE_PX: Float = 1f
 private const val ARROW_SOLID_CLEAR_EM: Float = 0.25f
 
 /**
+ * 两条引线之间至少留的缝（以旁注行高为单位）。
+ *
+ * 两条引线平行挤在同一段行间空白里，相距两三像素，看着就是一条双线（2026-11-01 真机
+ * 「函数体」/「内 {}」）。它们并不相交，原来的「交叉数」判据看不见，所以平行且投影重叠、
+ * 距离小于这个值的，也按一次「交叉」记——先画的占住走廊，后画的要么让开、要么换一侧。
+ */
+private const val ARROW_LEADER_CLEAR_LINES: Float = 0.2f
+
+/**
  * 无布点方向的斜向引线把 L 收成弧线时，控制点沿两段折线外伸的比例。
  *
  * 0.55 ≈ 圆角：「起点垂直离开框、终点垂直扎向正文」（规则第 5 条）不变，中间不再走直角，
@@ -2270,10 +2279,22 @@ internal fun noteBubblePlacements(
         b.annotationId to Rect(b.leftPx, b.topPx, b.leftPx + b.widthPx, b.topPx + h)
     }
     // 逐条路由：先画的先占位置，后画的把已画引线当软障碍（尽量不交叉）。
+    //
+    // 谁先画：**框在上方的那几条先画**（2026-11-01 用户定口，真机「函数体」/「内 {}」）。
+    // 同一行的两条批注都要穿过同一段行间空白时，上方的框只有上方那条走廊可走，
+    // 下方的框上下都能绕；先画下方的，就会把上面的那条挤到与它叠在一起。
+    // 先把上方的路线留给上方的框，后画的看得见它，自然会往另一侧让。
+    val routeOrder = out.sortedBy { b ->
+        when (chosen[b.annotationId]?.candidate?.side) {
+            NoteSide.ABOVE, NoteSide.ABOVE_LEFT, NoteSide.ABOVE_RIGHT -> 0
+            else -> 1
+        }
+    }
     val drawn = ArrayList<NoteArrow>(out.size)
-    val routed = out.map { b ->
+    val arrowById = HashMap<Long, NoteArrow?>(out.size)
+    for (b in routeOrder) {
         // 小图标形态没有可指向的框，本来就不画箭头（§2.1）。
-        if (b.compact) return@map b
+        if (b.compact) continue
         // 箭头用逐字墨迹（能穿两字之间）；布点仍用行框。
         val ink = inkById[b.annotationId]?.arrowInk.orEmpty()
         val self = bubbleRects.getValue(b.annotationId)
@@ -2319,7 +2340,10 @@ internal fun noteBubblePlacements(
             cornerInk = cornerInk,
         )
         if (arrow != null) drawn += arrow
-        b.copy(arrow = arrow)
+        arrowById[b.annotationId] = arrow
+    }
+    val routed = out.map { b ->
+        if (b.compact) b else b.copy(arrow = arrowById[b.annotationId])
     }
     Logger.d(
         "Orilumn.NOTE",
@@ -3751,7 +3775,11 @@ private class ArrowObstacleIndex(obstacles: List<ArrowObstacle>) {
  * 斜段理论上不会出现（引线只有横平竖直）；万一出现，放一份到 [odd] 里逐条查，
  * 保证「宁可多查，也不漏判」。
  */
-private class DrawnSegmentIndex(segments: List<Pair<Offset, Offset>>) {
+private class DrawnSegmentIndex(
+    segments: List<Pair<Offset, Offset>>,
+    /** 同向平行段的最小间距：小于它且投影重叠，按一次交叉记（见 [ARROW_LEADER_CLEAR_LINES]）。 */
+    private val clear: Float = 0f,
+) {
     private val all: Array<Pair<Offset, Offset>> = segments.toTypedArray()
     private val hSegs: Array<Pair<Offset, Offset>>
     private val hAt: FloatArray
@@ -3792,10 +3820,15 @@ private class DrawnSegmentIndex(segments: List<Pair<Offset, Offset>>) {
                 if (segmentsIntersect(ax, ay, bx, by, s.first.x, s.first.y, s.second.x, s.second.y)) n++
                 i++
             }
-            i = firstAtLeast(hAt, ay - 0.01f)
-            while (i < hSegs.size && hAt[i] <= ay + 0.01f) {
+            // 同向横段：真重叠算交叉，平行且贴得太近也算一次（见 [clear]）。
+            i = firstAtLeast(hAt, ay - clear - 0.01f)
+            while (i < hSegs.size && hAt[i] <= ay + clear + 0.01f) {
                 val s = hSegs[i]
-                if (segmentsIntersect(ax, ay, bx, by, s.first.x, s.first.y, s.second.x, s.second.y)) n++
+                if (abs(hAt[i] - ay) <= 0.01f) {
+                    if (segmentsIntersect(ax, ay, bx, by, s.first.x, s.first.y, s.second.x, s.second.y)) n++
+                } else if (min(hi, max(s.first.x, s.second.x)) - max(lo, min(s.first.x, s.second.x)) >= 1f) {
+                    n++
+                }
                 i++
             }
         } else {
@@ -3805,10 +3838,14 @@ private class DrawnSegmentIndex(segments: List<Pair<Offset, Offset>>) {
                 if (segmentsIntersect(ax, ay, bx, by, s.first.x, s.first.y, s.second.x, s.second.y)) n++
                 i++
             }
-            i = firstAtLeast(vAt, ax - 0.01f)
-            while (i < vSegs.size && vAt[i] <= ax + 0.01f) {
+            i = firstAtLeast(vAt, ax - clear - 0.01f)
+            while (i < vSegs.size && vAt[i] <= ax + clear + 0.01f) {
                 val s = vSegs[i]
-                if (segmentsIntersect(ax, ay, bx, by, s.first.x, s.first.y, s.second.x, s.second.y)) n++
+                if (abs(vAt[i] - ax) <= 0.01f) {
+                    if (segmentsIntersect(ax, ay, bx, by, s.first.x, s.first.y, s.second.x, s.second.y)) n++
+                } else if (min(hi, max(s.first.y, s.second.y)) - max(lo, min(s.first.y, s.second.y)) >= 1f) {
+                    n++
+                }
                 i++
             }
         }
@@ -3996,7 +4033,7 @@ internal fun routeNoteArrow(
     val anyDrawn = drawnSegments.isNotEmpty()
     // 已画引线按横 / 竖分好桶：量候选段时只比「坐标落在这一段范围内」的那几条，
     // 不再对每条候选段逐条算包围盒（真机上一页九条批注要乘上四十来段已画引线）。
-    val drawnIndex = DrawnSegmentIndex(drawnSegments)
+    val drawnIndex = DrawnSegmentIndex(drawnSegments, lineH * ARROW_LEADER_CLEAR_LINES)
     val window = max(lineH, 8f) * ARROW_BEND_WINDOW_LINES
     // 引线贴字门槛：旁注行高的 0.3 倍（lineH 缺省时放宽到 0：单测不量贴字）。
     val hugDistance = if (lineH > 0f) lineH * ARROW_HUG_LINES else 0f
@@ -4274,9 +4311,11 @@ internal fun routeNoteArrow(
      * 错开一个字就是为了腾出这条走廊。
      *
      * 落点按「近哪头 → 另一头 → 收角带里扫字缝」三档找：近端常常落在**框底下**（长批注的框
-     * 伸到正文下面，近侧那一头就被自己盖住），这时改指同一选区的另一头；两头都画不成干净的路
-     * （那一竖扎进下一行的字里）才退到收角带里扫几个点。只有整条带都被框盖住、一个字也扫不出
-     * 干净 L 时才返回 null，让调用方退回通畅路径（2026-10-28 真机：四角「很多个不是 L」）。
+     * 伸到正文下面，近侧那一头就被自己盖住），这时先看**框边外侧半个字**能不能直接拐下去
+     * （整条选区都是文字，不必横穿到选区角上，2026-11-01 用户定口），再改指同一选区的另一头；
+     * 两头都画不成干净的路（那一竖扎进下一行的字里）才退到收角带里扫几个点。只有整条带都被框
+     * 盖住、一个字也扫不出干净 L 时才返回 null，让调用方退回通畅路径（2026-10-28 真机：
+     * 四角「很多个不是 L」）。
      */
     fun cornerRoute(): ArrowPath? {
         var nearBest: ArrowPath? = null
@@ -4352,6 +4391,23 @@ internal fun routeNoteArrow(
             }
 
             tryAt(near)
+            // 近端被框自己盖住时，别一下子跳到另一头：整条选区都是文字，横段只要走出半个字
+            // 就能拐下去，落点仍在**这一行选区**的字上，引线短得多（2026-11-01 用户定口，
+            // 真机「把握基本面」：横段横穿五个字，其实第一个字上方就有选区文字）。
+            if (bestOfTarget == null) {
+                val turnGap = max(bubbleEm * 0.5f, minCorridor)
+                val rowLo = max(insetLo, t.own.left + minCorridor)
+                val rowHi = min(insetHi, t.own.right - minCorridor)
+                if (rowLo <= rowHi) {
+                    for (x in floatArrayOf(bubble.left - turnGap, bubble.right + turnGap)) {
+                        if (x < rowLo - 0.01f || x > rowHi + 0.01f) continue
+                        // 和近端 / 另一头本来就在同一个位置时，交给那两个标准落点，
+                        // 免得同样的缩进因为框宽不同多偏出几像素。
+                        if (abs(x - near) < minCorridor || abs(x - far) < minCorridor) continue
+                        tryAt(x)
+                    }
+                }
+            }
             // 近端**画不成 L**（那一头落在框底下 / 走廊太窄）时，改指另一头——与缝宽无关：
             // 真机上常见的正是「长批注的框伸到正文底下，近端被自己盖住」，而框离正文并不近，
             // 旧判据（缝 < 8px 才换头）于是根本不试另一头，四角就没了 L（2026-10-28 真机）。
@@ -4451,7 +4507,17 @@ internal fun routeNoteArrow(
      * 2026-10-25 补：末段一短，箭头两臂就退到上一段上，看着像「横线末端长了个竖箭头」）。
      */
     fun finish(path: ArrowPath, target: ArrowTarget?): NoteArrow {
-        val chosen = if (path.clear && cornerFamily) cornerRoute() ?: path else path
+        // 四角 L 不再无条件强制：框被推远（与选区之间隔了一行）且横向罩住选区时，
+        // 一条竖直直线本来就更短、也照样指到字上（2026-11-01 用户定口，真机「函数」）。
+        // 斜向近侧只留 2px 的那种竖段画不下箭头，仍旧走 L。
+        val straightDown = path.points.size == 2 &&
+            abs(path.points[0].x - path.points[1].x) < 0.5f &&
+            abs(path.points[0].y - path.points[1].y) >= bubbleEm
+        val chosen = if (path.clear && cornerFamily && !straightDown) {
+            cornerRoute() ?: path
+        } else {
+            path
+        }
         val trimmed = chosen.withoutUndrawableTail(lineH)
         // 末折被省掉时，剩下的横段先离框边远一点（不然就是框底下一条平行的影子），
         // 再只走到最近那条选区边框外（箭头叠在选区底色上就看不见了）。

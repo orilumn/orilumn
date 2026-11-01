@@ -2306,8 +2306,13 @@ fun ReaderScreen(
             ) {
                 SelectionMagnifier(
                     content = pageContent,
-                    finger = fingerNow,
-                    bounds = Rect(0f, 0f, pxWidth, pxHeight),
+                    // 这一层被「卡片让位」上推了 shiftNow，指针给的却是屏幕坐标：两端都换算成
+                    // 层坐标，镜面才跟得住手指（少这一步，镜面会离手指差一整段顶推量）。
+                    finger = magnifierLayerFinger(fingerNow, shiftNow),
+                    bounds = magnifierLayerBounds(
+                        pxWidth, pxHeight, shiftNow,
+                        sheetTopPx = if (menuOn) sheetTopPx else pxHeight,
+                    ),
                     contentLeft = contentLeft,
                     contentTop = contentTop,
                     contentRight = contentRight,

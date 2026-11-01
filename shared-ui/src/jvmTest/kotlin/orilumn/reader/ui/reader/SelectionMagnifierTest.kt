@@ -54,6 +54,49 @@ class SelectionMagnifierTest {
         assertEquals(20f, c.y, 0.001f)
     }
 
+    /**
+     * 卡片让位（D-28）把整层上推了整整 H，而指针给的是屏幕坐标。
+     *
+     * 少换算这一下，镜面就会离手指差一整段顶推量 —— 手指在上、镜子留在下面，等于废掉。
+     * 判据：同一个手指、不同的顶推量，镜面在**屏幕上**的位置必须一模一样。
+     */
+    @Test
+    fun `card lift keeps the lens on the same screen spot`() {
+        val finger = Offset(500f, 700f)
+        val plain = magnifierCenter(finger, bounds, radius, offset, inset)
+        for (shift in listOf(0f, 120f, 620f)) {
+            val lifted = magnifierCenter(
+                magnifierLayerFinger(finger, shift),
+                magnifierLayerBounds(1000f, 800f, shift, sheetTopPx = 800f),
+                radius, offset, inset,
+            )
+            assertEquals("顶推 $shift px 后 x 走了：$lifted", plain.x, lifted.x, 0.001f)
+            assertEquals("顶推 $shift px 后镜面离手指远了：$lifted", plain.y, lifted.y - shift, 0.001f)
+        }
+    }
+
+    /**
+     * 上推之后的可见区跟着一起下移：贴屏幕顶时翻到手指下方的镜面，仍要整个留在屏幕里
+     * （按没上推的 0 去夹，圆会被顶出屏幕半截）。
+     */
+    @Test
+    fun `lifted viewport still keeps the lens on screen`() {
+        val shift = 620f
+        val b = magnifierLayerBounds(1000f, 800f, shift, sheetTopPx = 800f)
+        val c = magnifierCenter(magnifierLayerFinger(Offset(500f, 0f), shift), b, radius, offset, inset)
+        assertTrue("镜面上沿出屏了：$c（层坐标，屏幕顶在 $shift）", c.y - radius >= shift - 0.001f)
+    }
+
+    /** 卡片开着时可用范围让到卡片上沿：贴底翻不出去，镜面不会钻到卡片底下。 */
+    @Test
+    fun `lens never sinks under the note card`() {
+        val shift = 300f
+        val sheetTop = 500f
+        val b = magnifierLayerBounds(1000f, 800f, shift, sheetTopPx = sheetTop)
+        val c = magnifierCenter(magnifierLayerFinger(Offset(500f, sheetTop), shift), b, radius, offset, inset)
+        assertTrue("镜面下沿越过卡片上沿了：$c", c.y + radius <= shift + sheetTop + 0.001f)
+    }
+
     @Test
     fun `translation maps the finger point to the circle center`() {
         val center = Offset(500f, 300f)

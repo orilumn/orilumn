@@ -9,6 +9,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import orilumn.reader.data.annotation.Annotation
@@ -443,8 +444,8 @@ internal fun WarmAdjacentPageNotes(
     ) {
         val anchor = pos ?: return@LaunchedEffect
         val hostNow = hostRef.value
-        // 先让本次落定的结算动画与邻页栅格跑完：预热是「余量里的活」，不该和用户正在看的
-        // 那一帧抢 CPU（真机日志里 NOTE-LAYOUT 与 raster 叠在一起时两笔都变慢）。
+        // 让出起手那一帧：结算动画与邻页栅格优先（预热是「余量里的活」，不该和用户正在看的
+        // 那一帧抢 CPU）。但让路要短——预热跑得越早，下一次翻页越是缓存命中。
         delay(NOTE_WARM_DELAY_MS)
         val dir = dirRef.value().takeIf { it != 0 } ?: 1
         for (d in intArrayOf(dir, -dir)) {
@@ -464,7 +465,7 @@ internal fun WarmAdjacentPageNotes(
                 rasterKey = null,
                 pageFrameLead = runCatching { hostNow.pageFrameLead(target) }.getOrDefault(0),
             )
-            val bubbles = withContext(lane.dispatcher) {
+            val bubbles = withContext(lane.dispatcher + NonCancellable) {
                 lane.compute(
                     content = content,
                     chapter = target.chapter,
@@ -485,5 +486,5 @@ internal fun WarmAdjacentPageNotes(
     }
 }
 
-/** 预热前的让路时长：够翻页结算动画（300ms）与邻页栅格收尾。 */
-private const val NOTE_WARM_DELAY_MS = 400L
+/** 预热前的让路时长：够起手那一帧与邻页栅格先跑起来，又不至于拖到下一次翻页。 */
+private const val NOTE_WARM_DELAY_MS = 120L

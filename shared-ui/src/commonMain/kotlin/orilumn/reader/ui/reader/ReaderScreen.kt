@@ -2045,6 +2045,77 @@ fun ReaderScreen(
             // `ReaderPageCanvas` 里 remember 的渲染器（多页位图缓存宿主）连池丢弃重建，
             // 一轮翻页重栅格 3～5 次整页（真机 87ms/次）——就是「滑一点卡一下」的来源。
             // 现在目标槽恒在（target 为 null 时画空，见 FlipSlideLayer KDoc），结构稳定。
+            // 正文旁的批注文字（D-26）：批注是标注上的一句话，就显示在它旁边。
+            // 纯覆盖层：只按行几何算空白，不改排版、不进栅格；**跟着页走**——它被放进
+            // 滑动层的两个槽里，和页画布共用同一个平移量（见下面的 FlipSlideLayer）。
+            // 早先动画期间整层藏起来、落地才冒出来，观感是「字滑走了、旁注原地消失又出现」。
+            // 文字尺寸用与绘制同源的实测尺子（不是字宽粗估）：差半像素就会被省略号截掉。
+            val noteTextSizer = rememberNoteTextSizer(noteFontFamily)
+            // 布点结果按页留几页：同一次翻页里，目标页起手先当目标槽算一次、落地又当当前槽
+            // 算一次；留一份就不必算两遍（布点是本页最贵的一笔，几百毫秒量级）。
+            val noteMemo = remember(
+                noteTextSizer, settings.noteFontScale, annotationState.revision, hostRevision,
+                displayRevision, contentLeft, contentTop, contentRight, contentBottom,
+                pxWidth, pxHeight,
+            ) { PageNoteMemo() }
+            val noteBubbles: List<NoteBubble> = rememberPageNotes(
+                content = pageContent,
+                chapter = fromPos.chapter,
+                charStart = fromPos.slice.charStart,
+                charEnd = fromPos.slice.charEnd,
+                annotations = annotationState.annotations,
+                drawer = selectionDrawer,
+                contentLeft = contentLeft,
+                contentTop = contentTop,
+                contentRight = contentRight,
+                contentBottom = contentBottom,
+                pageWidth = pxWidth,
+                pageHeight = pxHeight,
+                textSizer = noteTextSizer,
+                fontScale = settings.noteFontScale,
+                memo = noteMemo,
+            )
+            // 目标页的旁注：翻页时跟着目标页一起滑进来，落地那一刻才不会「凭空冒出来」。
+            // 没有目标页时就是空表——不用 `if` 包起来，remember 的位置才稳定。
+            val targetPosNow = ctl.targetPos.value
+            val targetNoteBubbles: List<NoteBubble> = rememberPageNotes(
+                content = targetContent,
+                chapter = targetPosNow?.chapter ?: fromPos.chapter,
+                charStart = targetPosNow?.slice?.charStart ?: 0,
+                charEnd = targetPosNow?.slice?.charEnd ?: 0,
+                annotations = annotationState.annotations,
+                drawer = selectionDrawer,
+                contentLeft = contentLeft,
+                contentTop = contentTop,
+                contentRight = contentRight,
+                contentBottom = contentBottom,
+                pageWidth = pxWidth,
+                pageHeight = pxHeight,
+                textSizer = noteTextSizer,
+                fontScale = settings.noteFontScale,
+                memo = noteMemo,
+            )
+            val NoteBubblesFun: @Composable (List<NoteBubble>) -> Unit = { bubbles ->
+                if (bubbles.isNotEmpty()) {
+                    NoteBubbles(
+                        bubbles = bubbles,
+                        fgColor = Color(profile.fgColor),
+                        onOpen = { id ->
+                            // 点旁注 = 打开这条标注的操作栏与输入框（有文字就带出来，可改可删）。
+                            // 翻页动画进行中不响应（旁注现在跟着页走，滑动的页面上点一下不该弹编辑态）。
+                            // 顺手清掉选区：编辑态与选区不该同时挂着（两套手柄 + 两套绿框只会互相添乱）。
+                            val target = annotationState.annotations.firstOrNull { it.id == id }
+                            if (target != null && !ctl.isBusy()) {
+                                selection.clear()
+                                selectionMenuVisible = false
+                                editingAnnotation = target
+                            }
+                        },
+                        modifier = Modifier.fillMaxSize(),
+                        fontFamily = noteFontFamily,
+                    )
+                }
+            }
             // 卡片让位：整层（页画布 + 选区 + 旁注 + 放大镜）一起上推，顶部超出屏幕的部分直接截断。
             // 放在同一个 `graphicsLayer` 里 ⇒ 子层之间的相对位置不变，不可能出现「页动了字没动」。
             Box(modifier = Modifier.fillMaxSize().graphicsLayer { translationY = -shiftNow }) {
@@ -2058,232 +2129,25 @@ fun ReaderScreen(
                 modifier = Modifier.fillMaxSize(),
                 target = when {
                     slideToCover && coverComposable != null -> coverComposable
-                    targetContent != null -> { { PageCanvasFun(targetContent) } }
+                    targetContent != null -> {
+                        {
+                            PageCanvasFun(targetContent)
+                            // 旁注和目标页同一个槽 ⇒ 同一个平移量，跟着一起滑进来。
+                            NoteBubblesFun(targetNoteBubbles)
+                        }
+                    }
                     else -> null
                 },
                 current = if (slideFromCover && coverComposable != null) {
                     coverComposable
                 } else {
-                    { PageCanvasFun(pageContent) }
+                    {
+                        PageCanvasFun(pageContent)
+                        // 旁注和当前页同一个槽 ⇒ 一起滑出去，不会先「原地消失」再动画。
+                        NoteBubblesFun(noteBubbles)
+                    }
                 },
             )
-            // 正文旁的批注文字（D-26）：批注是标注上的一句话，就显示在它旁边。
-            // 纯覆盖层：只按行几何算空白，不改排版、不进栅格；翻页动画期间整层让位。
-            // 文字尺寸用与绘制同源的实测尺子（不是字宽粗估）：差半像素就会被省略号截掉。
-            val noteTextSizer = rememberNoteTextSizer(noteFontFamily)
-            val noteBubbles: List<NoteBubble> = remember(
-                pageContent, fromPos.chapter, fromPos.slice, annotationState.revision,
-                contentLeft, contentTop, contentRight, contentBottom, pxWidth, pxHeight,
-                noteTextSizer, settings.noteFontScale,
-            ) {
-                val content = pageContent
-                val lines = content?.lines.orEmpty()
-                val shift = if (content == null || lines.isEmpty()) {
-                    null
-                } else {
-                    readerPageShift(
-                        lines, content.pageImages, content.pageBackgrounds,
-                        content.pageFrameLead, contentTop,
-                    )
-                }
-                val notes = annotationState.annotations.filter {
-                    it.chapter == fromPos.chapter && !it.note.isNullOrBlank()
-                }
-                if (content == null || shift == null || lines.isEmpty() || notes.isEmpty()) {
-                    emptyList()
-                } else {
-                    // 墨迹矩形一律问测度引擎（与画出来的字同源）：自己拿行宽估算会把
-                    // 「整行排满」误判成「右侧还有空地」，也会把段内字符坐标与章内坐标比错。
-                    val slice = fromPos.slice
-                    // 四类障碍：文字逐字墨迹（与画出来的字同源）+ 列表圆点 / 编号 + 图形 + 线条。
-                    // 表格整体暂时没有只读几何入口（D-29 前置），先不传。
-                    val pageInk = pageInkRects(
-                        drawer = selectionDrawer,
-                        lines = lines,
-                        chapter = fromPos.chapter,
-                        charStart = slice.charStart,
-                        charEnd = slice.charEnd,
-                        pageImages = content.pageImages,
-                        pageBackgrounds = content.pageBackgrounds,
-                        frameLead = content.pageFrameLead,
-                        contentLeft = contentLeft,
-                        contentTop = contentTop,
-                    ) + pageMarkerRects(
-                        drawer = selectionDrawer,
-                        lines = lines,
-                        chapter = fromPos.chapter,
-                        charStart = slice.charStart,
-                        charEnd = slice.charEnd,
-                        pageImages = content.pageImages,
-                        pageBackgrounds = content.pageBackgrounds,
-                        frameLead = content.pageFrameLead,
-                        contentLeft = contentLeft,
-                        contentTop = contentTop,
-                    )
-                    // 本页**所有**划线标注的落墨带（不只是有批注的那几条）：引线不得压在上面，
-                    // 行间中线也得按它们的下缘量——波浪线比字墨迹低一截，只按墨迹量，
-                    // 横穿的中线正好落在波峰上（2026-10-31 真机「函数体」）。
-                    val annotationLines = annotationState.annotations
-                        .filter {
-                            it.chapter == fromPos.chapter &&
-                                it.kind == AnnotationKind.Underline &&
-                                it.charEnd > slice.charStart &&
-                                it.charStart < slice.charEnd
-                        }
-                        .flatMap { a ->
-                            pageAnnotationLineRects(
-                                drawer = selectionDrawer,
-                                lines = lines,
-                                chapter = fromPos.chapter,
-                                annotation = a,
-                                pageImages = content.pageImages,
-                                pageBackgrounds = content.pageBackgrounds,
-                                frameLead = content.pageFrameLead,
-                                contentLeft = contentLeft,
-                                contentTop = contentTop,
-                            )
-                        }
-                    val obstacles = noteObstacles(
-                        textInk = pageInk,
-                        pageImages = content.pageImages,
-                        pageBackgrounds = content.pageBackgrounds,
-                        shift = shift,
-                        contentLeft = contentLeft,
-                        // 箭头要能穿两字之间与标点前后：另给一份逐字墨迹（方案 §6.3）。
-                        arrowInk = pageGlyphRects(
-                            drawer = selectionDrawer,
-                            lines = lines,
-                            chapter = fromPos.chapter,
-                            charStart = slice.charStart,
-                            charEnd = slice.charEnd,
-                            pageImages = content.pageImages,
-                            pageBackgrounds = content.pageBackgrounds,
-                            frameLead = content.pageFrameLead,
-                            contentLeft = contentLeft,
-                            contentTop = contentTop,
-                        ),
-                        // 布点阶梯要「隔几行 / 本段」：带上每行的块序号与行序（方案 §1.5）。
-                        textLines = pageTextLines(
-                            drawer = selectionDrawer,
-                            lines = lines,
-                            chapter = fromPos.chapter,
-                            charStart = slice.charStart,
-                            charEnd = slice.charEnd,
-                            pageImages = content.pageImages,
-                            pageBackgrounds = content.pageBackgrounds,
-                            frameLead = content.pageFrameLead,
-                            contentLeft = contentLeft,
-                            contentTop = contentTop,
-                        ),
-                        arrowLines = annotationLines,
-                    )
-                    val noteLayoutMark = TimeSource.Monotonic.markNow()
-                    val noteInkList = notes.mapNotNull { a ->
-                            val rects = pageInkRects(
-                                drawer = selectionDrawer,
-                                lines = lines,
-                                chapter = fromPos.chapter,
-                                charStart = a.charStart,
-                                charEnd = a.charEnd,
-                                pageImages = content.pageImages,
-                                pageBackgrounds = content.pageBackgrounds,
-                                frameLead = content.pageFrameLead,
-                                contentLeft = contentLeft,
-                                contentTop = contentTop,
-                            )
-                            if (rects.isEmpty()) {
-                                null
-                            } else {
-                                NoteInk(
-                                    annotationId = a.id,
-                                    text = a.note.orEmpty(),
-                                    argb = a.color ?: annotationFallbackColor(a.kind),
-                                    rects = rects,
-                                    // 箭头指向与避让都按逐字墨迹，不把整行当一个黑块。
-                                    arrowRects = pageGlyphRects(
-                                        drawer = selectionDrawer,
-                                        lines = lines,
-                                        chapter = fromPos.chapter,
-                                        charStart = a.charStart,
-                                        charEnd = a.charEnd,
-                                        pageImages = content.pageImages,
-                                        pageBackgrounds = content.pageBackgrounds,
-                                        frameLead = content.pageFrameLead,
-                                        contentLeft = contentLeft,
-                                        contentTop = contentTop,
-                                    ),
-                                    // 划线标注：箭头进得行盒，但不得触及这条线（规则第 9 条）。
-                                    rowBoxEntry = a.kind == AnnotationKind.Underline,
-                                    underlineRects = pageAnnotationLineRects(
-                                        drawer = selectionDrawer,
-                                        lines = lines,
-                                        chapter = fromPos.chapter,
-                                        annotation = a,
-                                        pageImages = content.pageImages,
-                                        pageBackgrounds = content.pageBackgrounds,
-                                        frameLead = content.pageFrameLead,
-                                        contentLeft = contentLeft,
-                                        contentTop = contentTop,
-                                    ),
-                                )
-                            }
-                        }
-                    val inkMark = TimeSource.Monotonic.markNow()
-                    val placeMark = TimeSource.Monotonic.markNow()
-                    val placed = noteBubblePlacements(
-                        noteInk = noteInkList,
-                        obstacles = obstacles,
-                        contentLeft = contentLeft,
-                        contentRight = contentRight,
-                        contentBottom = contentBottom,
-                        pageRight = pxWidth,
-                        // 旁注字号跟正文主字号走：页首是标题时不能跟着标题放大。
-                        // 读者在笔记页拖的倍率乘在这里（1 = 默认），布点 / 绘制 / 实测同一口径。
-                        fontPx = noteBodyFontPx(lines) * settings.noteFontScale,
-                        pageBottom = pxHeight,
-                        noteTextSizer = noteTextSizer,
-                    )
-                    // 真机计时留档（P5）：只在按页缓存失效时打一行，翻页 / 改批注才出现。
-                    // geo = 本页整页几何（行 / 逐字墨迹 / 圆点），ink = 各条批注自己的墨迹，
-                    // place = 布点 + 引线。三者分开才好判断该优化哪一段。
-                    val totalMs = noteLayoutMark.elapsedNow().inWholeMilliseconds
-                    val inkAndPlaceMs = inkMark.elapsedNow().inWholeMilliseconds
-                    val placeMs = placeMark.elapsedNow().inWholeMilliseconds
-                    // 文字实测次数与耗时：布点里最贵的一笔，和总时长一起看才知道瓶颈在哪。
-                    val sizer = noteTextSizer as? CachingNoteTextSizer
-                    val fits = sizer?.realFits ?: 0
-                    val fitMs = (sizer?.realFitNanos ?: 0L) / 1_000_000
-                    sizer?.resetStats()
-                    Logger.d(
-                        "Orilumn.NOTE",
-                        "NOTE-LAYOUT notes=${notes.size}" +
-                            " placed=${placed.count { !it.compact }}" +
-                            " compact=${placed.count { it.compact }}" +
-                            " geo=${totalMs - inkAndPlaceMs}" +
-                            " ink=${inkAndPlaceMs - placeMs}" +
-                            " place=$placeMs fits=$fits fitMs=$fitMs total=$totalMs",
-                    )
-                    placed
-                }
-            }
-            if (noteBubbles.isNotEmpty() && !coverVisible && !ctl.isBusy()) {
-                NoteBubbles(
-                    bubbles = noteBubbles,
-                    fgColor = Color(profile.fgColor),
-                    onOpen = { id ->
-                        // 点旁注 = 打开这条标注的操作栏与输入框（有文字就带出来，可改可删）。
-                        // 顺手清掉选区：编辑态与选区不该同时挂着（两套手柄 + 两套绿框只会互相添乱）。
-                        val target = annotationState.annotations.firstOrNull { it.id == id }
-                        if (target != null) {
-                            selection.clear()
-                            selectionMenuVisible = false
-                            editingAnnotation = target
-                        }
-                    },
-                    modifier = Modifier.fillMaxSize(),
-                    fontFamily = noteFontFamily,
-                )
-            }
             // 选区覆盖层：轻量即时画，不参与页栅格；翻页动画期间隐藏，避免盖在滑动中的两页上。
             if (selection.hasSelection && pageContent != null && !coverVisible &&
                 !ctl.isBusy() && selection.chapter == fromPos.chapter

@@ -2006,7 +2006,9 @@ class NoteBubblesTest {
         val pts = arrowPoints(arrow!!)
         assertEquals("起点要贴住框的左端（0.5em），不是框心：$pts", bubble.left + 28f, pts[0].x, 0.5f)
         assertEquals("起点落在框的下边：$pts", bubble.bottom, pts[0].y, 0.5f)
-        assertEquals("终点落在目标字的下边：$pts", ink.last().bottom, pts.last().y, 0.5f)
+        // 引线规则第 9 条：高亮标注的箭头不得扎进行盒（高亮底色就是整行行盒 1328..1397）。
+        // 末折短于 0.25 行高时按第 11 条省掉，箭头停在行盒外侧的横线上，不能退回字边。
+        assertTrue("终点不得侵入行盒：$pts", pts.last().y >= row.bottom - 0.5f)
     }
 
     @Test

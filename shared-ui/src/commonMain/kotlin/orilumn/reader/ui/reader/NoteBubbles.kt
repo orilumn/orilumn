@@ -4326,7 +4326,7 @@ internal fun routeNoteArrow(
             val below = bubble.top >= t.glyph.bottom - NOTE_GEOM_EPS
             val above = bubble.bottom <= t.glyph.top + NOTE_GEOM_EPS
             if (!below && !above) continue
-            val yEntry = verticalEntryEdge(bubble, t.glyph, t.box, above = !below, noTouch = t.noTouch)
+            val yEntry = verticalEntryEdge(t.box, above = !below, noTouch = t.noTouch)
             // 走廊离选区角 0.5em = 半个字。**取整行的高**（[cornerRowEm]）：一行里「l」和「使」
             // 高矮差一截，取目标字自己的高会让同样缩进的批注画出不同长度的横段（引线规则第 4 条）。
             // 区间与端点算法和 [cornerEntryX] 完全一致，两条路径画出的落点才会是同一个。
@@ -5147,7 +5147,7 @@ private fun arrowSideEntries(
         }
         else -> {
             val above = bubble.bottom <= glyph.top + NOTE_GEOM_EPS
-            val y = verticalEntryEdge(bubble, glyph, box, above = above, noTouch = noTouch)
+            val y = verticalEntryEdge(box, above = above, noTouch = noTouch)
             val gap = if (above) y - bubble.bottom else bubble.top - y
             // 落点唯一确定（近端、离选区角 0.5em），不再交给路由器挑比例——
             // 同样缩进要画出同样的引线（2026-10-27）。斜向的「选区角」按选区矩形量（[xAnchor]）。
@@ -5165,7 +5165,7 @@ private fun arrowSideEntries(
     // 沿两行之间的空隙横穿，再竖着进目标字的上 / 下边。这里把上 / 下两条边也补成入口。
     if (side == NoteSide.RIGHT || side == NoteSide.LEFT) {
         for (above in booleanArrayOf(true, false)) {
-            val y = verticalEntryEdge(bubble, glyph, box, above = above, noTouch = noTouch)
+            val y = verticalEntryEdge(box, above = above, noTouch = noTouch)
             for (p in edgePoints(
                 glyph.left, glyph.right, alongLo, alongHi,
                 floatArrayOf(bubble.center.x), obstacles, vertical = true,
@@ -5205,7 +5205,7 @@ private fun arrowBelowEntries(
     /** 划线标注的禁触带（这一行的墨迹 + 这条线）：可以进得行盒，但停在它外侧。 */
     noTouch: Rect? = null,
 ): List<ArrowEntry> {
-    val y = verticalEntryEdge(bubble, glyph, box, above = !below, noTouch = noTouch)
+    val y = verticalEntryEdge(box, above = !below, noTouch = noTouch)
     val h = glyph.height
     val inset = max(h * 0.5f, 0.5f)
     val overlap = overlapBand(bubble.left, bubble.right, anchor.left, anchor.right, inset)
@@ -5404,15 +5404,14 @@ private fun clampInset(lo: Float, hi: Float, v: Float): Float =
 /**
  * 竖着进时箭头停在哪条边上（引线规则第 9 条，2026-10-28 用户定口）：
  *
- * - **高亮标注**（[noTouch] 为 null）：停在**行盒边框**，不得侵入行盒内部；行盒已经和批注框
- *   叠在一起时退回字边，免得箭头从框里长出来。
+ * - **高亮标注**（[noTouch] 为 null）：停在**行盒边框**，不得侵入行盒内部。高亮底色画的就是
+ *   整行行盒（`decorLineRects` 取 `line.yTop..yBottom`），所以无论批注框在哪一行，竖进端点
+ *   都取行盒边；框与行盒叠在一起时宁可让箭头尖被框盖住，也不能让箭头扎进高亮里。
  * - **划线标注**：可以进到行盒内部，但停在「墨迹 + 划线」这条禁触带外侧
  *   [ARROW_NO_TOUCH_GAP_PX]，不得触及下划线或墨迹。落点由禁触带决定、不再夹回行盒：
  *   线画得比行盒还靠下时（行高很紧），箭头就停在行盒外的那条线下方，否则会压到线上。
  */
 private fun verticalEntryEdge(
-    bubble: Rect,
-    glyph: Rect,
     box: Rect,
     above: Boolean,
     noTouch: Rect? = null,
@@ -5424,11 +5423,7 @@ private fun verticalEntryEdge(
             noTouch.bottom + ARROW_NO_TOUCH_GAP_PX
         }
     }
-    return if (above) {
-        if (box.top >= bubble.bottom - NOTE_GEOM_EPS) box.top else glyph.top
-    } else {
-        if (box.bottom <= bubble.top + NOTE_GEOM_EPS) box.bottom else glyph.bottom
-    }
+    return if (above) box.top else box.bottom
 }
 
 /**
@@ -5642,7 +5637,7 @@ private fun arrowEntries(
         }
     }
     val above = glyph.center.y > bubble.center.y
-    val y = verticalEntryEdge(bubble, glyph, box, above = above, noTouch = noTouch)
+    val y = verticalEntryEdge(box, above = above, noTouch = noTouch)
     val edge = if (above) ARROW_EDGE_TOP else ARROW_EDGE_BOTTOM
     val bandA = glyph.left + h * 0.5f
     val bandB = glyph.right - h * 0.5f

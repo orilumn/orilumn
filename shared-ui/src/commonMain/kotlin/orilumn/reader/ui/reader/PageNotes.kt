@@ -30,24 +30,35 @@ import kotlin.time.TimeSource
  */
 internal class PageNoteMemo(private val capacity: Int = 6) {
 
-    private val entries = LinkedHashMap<String, List<NoteBubble>>()
+    /** 一条布点结果 + 它算出来时的标注修订号（跨章回来时据此判是否还有效）。 */
+    private data class Entry(val revision: Int, val bubbles: List<NoteBubble>)
 
-    /** 取一页的结果；取到就算「刚用过」（挪到队尾，少被挤掉）。 */
-    fun get(key: String): List<NoteBubble>? {
+    private val entries = LinkedHashMap<String, Entry>()
+
+    /**
+     * 取一页的结果；取到就算「刚用过」（挪到队尾，少被挤掉）。
+     *
+     * [revision] 与条目里记的不等 ⇒ 视为没有（标注增删改后，旁注的落点就变了）。
+     * 判据放在条目上而不是「修订号一变就把整只缓存换新」：换章时标注状态会连续
+     * 两次 bump（清空 + 读回），整只换新会让**刚看过的上一章**也一起作废，
+     * 翻回去只能重算——那正是「回翻比正翻慢」的来源。
+     */
+    fun get(key: String, revision: Int): List<NoteBubble>? {
         val value = entries.remove(key) ?: return null
+        if (value.revision != revision) return null
         entries[key] = value
-        return value
+        return value.bubbles
     }
 
     /** 只问「有没有」，**不动**最近使用序（预热前判重，不该把冷页顶成热页）。 */
-    fun contains(key: String): Boolean = entries.containsKey(key)
+    fun contains(key: String, revision: Int): Boolean = entries[key]?.revision == revision
 
-    fun put(key: String, value: List<NoteBubble>) {
+    fun put(key: String, revision: Int, value: List<NoteBubble>) {
         entries.remove(key)
         if (entries.size >= capacity) {
             entries.keys.firstOrNull()?.let { entries.remove(it) }
         }
-        entries[key] = value
+        entries[key] = Entry(revision, value)
     }
 }
 
@@ -141,53 +152,73 @@ internal fun rememberPageNotes(
     fontScale: Float,
     lane: PageNoteLane,
     memo: PageNoteMemo,
+    /** 标注修订号（[AnnotationState.revision]）：缓存条目按它判有效性。 */
+    decorRevision: Int,
 ): List<NoteBubble> {
     // 页身份键：章 + 页区间（见 [pageNoteKey]）。预热方也只有 ReaderPos，必须能算出同一个键。
     val pageKey = pageNoteKey(chapter, charStart, charEnd)
-    var bubbles by remember(
-        pageKey, content, chapter, charStart, charEnd, annotations, memo, lane,
-        contentLeft, contentTop, contentRight, contentBottom,
-        pageWidth, pageHeight, fontScale,
-    ) {
+    var bubbles by remember(pageKey, memo, decorRevision) {
         // 命中缓存的那一页直接有结果（翻页的当前页、落地后的新页都走这里）：
         // 首帧就有旁注，不会先空一帧再冒出来。
-        mutableStateOf(memo.get(pageKey).orEmpty())
+        mutableStateOf(memo.get(pageKey, decorRevision).orEmpty())
     }
-    LaunchedEffect(
-        pageKey, content, chapter, charStart, charEnd, annotations, lane,
-        contentLeft, contentTop, contentRight, contentBottom,
-        pageWidth, pageHeight, fontScale,
-    ) {
-        if (content == null) {
+    // 输入一律走 `rememberUpdatedState`，**不进 effect 的键**：见下面的 KDoc。
+    val contentNow by rememberUpdatedState(content)
+    val annotationsNow by rememberUpdatedState(annotations)
+    val geomNow by rememberUpdatedState(
+        NoteGeom(contentLeft, contentTop, contentRight, contentBottom, pageWidth, pageHeight),
+    )
+    // 键只有「这一页是谁」+「这一页的内容到没到」+ 字体倍率（改倍率时 memo 也整只换新，
+    // 这里是兜底）。**不能**把 `content` 整个当键：`PageContent` 里的插图/背景位图是异步解出来的，
+    // 解完就是一次新值 ⇒ effect 重启、在途的布点被取消，而布点要几百毫秒，取消时结果还没
+    // 写进缓存 ⇒ 下一轮又从头算，同一页连算三遍还一直「没算完」（真机 2026-11-01：
+    // 同一页 3 秒内 NOTE-LAYOUT 三次，翻页进去旁注仍然晚到）。
+    LaunchedEffect(pageKey, memo, lane, content != null, fontScale, decorRevision) {
+        val c = contentNow ?: run {
             bubbles = emptyList()
             return@LaunchedEffect
         }
-        val cached = memo.get(pageKey)
+        val cached = memo.get(pageKey, decorRevision)
         if (cached != null) {
             bubbles = cached
             return@LaunchedEffect
         }
-        val computed = withContext(lane.dispatcher) {
-            lane.compute(
-                content = content,
-                chapter = chapter,
-                charStart = charStart,
-                charEnd = charEnd,
-                annotations = annotations,
-                contentLeft = contentLeft,
-                contentTop = contentTop,
-                contentRight = contentRight,
-                contentBottom = contentBottom,
-                pageWidth = pageWidth,
-                pageHeight = pageHeight,
-                fontScale = fontScale,
-            )
+        // 算完就写缓存，**不受取消影响**：快翻/重组打断这一轮时，这一页的结果照样留下，
+        // 下次进来是命中而不是重算（布点几百毫秒，白算一次就是肉眼可见的晚到）。
+        withContext(NonCancellable) {
+            val geom = geomNow
+            val computed = withContext(lane.dispatcher) {
+                lane.compute(
+                    content = c,
+                    chapter = chapter,
+                    charStart = charStart,
+                    charEnd = charEnd,
+                    annotations = annotationsNow,
+                    contentLeft = geom.left,
+                    contentTop = geom.top,
+                    contentRight = geom.right,
+                    contentBottom = geom.bottom,
+                    pageWidth = geom.pageWidth,
+                    pageHeight = geom.pageHeight,
+                    fontScale = fontScale,
+                )
+            }
+            memo.put(pageKey, decorRevision, computed)
+            bubbles = computed
         }
-        memo.put(pageKey, computed)
-        bubbles = computed
     }
     return bubbles
 }
+
+/** 布点用到的版面几何（一处打包，免得 effect 键里摊七个 float）。 */
+private data class NoteGeom(
+    val left: Float,
+    val top: Float,
+    val right: Float,
+    val bottom: Float,
+    val pageWidth: Float,
+    val pageHeight: Float,
+)
 
 /** [rememberPageNotes] 的实体：只在缓存未命中时跑一次（开一次 NOTE-LAYOUT 计时）。 */
 private fun computePageNotes(
@@ -383,7 +414,7 @@ private fun computePageNotes(
     sizer?.resetStats()
     Logger.d(
         "Orilumn.NOTE",
-        "NOTE-LAYOUT notes=${notes.size}" +
+        "NOTE-LAYOUT ch=$chapter page=$charStart-$charEnd notes=${notes.size}" +
             " placed=${placed.count { !it.compact }}" +
             " compact=${placed.count { it.compact }}" +
             " geo=${totalMs - inkAndPlaceMs}" +
@@ -449,12 +480,29 @@ internal fun WarmAdjacentPageNotes(
         delay(NOTE_WARM_DELAY_MS)
         val dir = dirRef.value().takeIf { it != 0 } ?: 1
         for (d in intArrayOf(dir, -dir)) {
-            val target = runCatching { hostNow.peekAdjacent(anchor, d) }.getOrNull() ?: continue
-            if (target.chapter != annotationChapter) continue
+            val t0 = TimeSource.Monotonic.markNow()
+            val target = runCatching { hostNow.peekAdjacent(anchor, d) }.getOrNull()
+            if (target == null) {
+                Logger.d("Orilumn.NOTE", "NOTE-WARM skip d=$d reason=no-adjacent")
+                continue
+            }
+            if (target.chapter != annotationChapter) {
+                Logger.d(
+                    "Orilumn.NOTE",
+                    "NOTE-WARM skip d=$d reason=chapter target=${target.chapter} cur=$annotationChapter",
+                )
+                continue
+            }
             val key = pageNoteKey(target.chapter, target.slice.charStart, target.slice.charEnd)
-            if (memo.contains(key)) continue
+            if (memo.contains(key, decorRevision)) {
+                Logger.d("Orilumn.NOTE", "NOTE-WARM skip d=$d key=$key reason=cached")
+                continue
+            }
             val rawLines = runCatching { hostNow.pageLines(target) }.getOrNull().orEmpty()
-            if (rawLines.isEmpty()) continue
+            if (rawLines.isEmpty()) {
+                Logger.d("Orilumn.NOTE", "NOTE-WARM skip d=$d key=$key reason=no-lines")
+                continue
+            }
             // 与 rememberPageContent 同一条投影口径（否则预热结果与翻页时那一页不是同一份几何）。
             val content = PageContent(
                 lines = projectDecor(rawLines, target.chapter, annotationDecorRanges(annotations)),
@@ -465,23 +513,32 @@ internal fun WarmAdjacentPageNotes(
                 rasterKey = null,
                 pageFrameLead = runCatching { hostNow.pageFrameLead(target) }.getOrDefault(0),
             )
-            val bubbles = withContext(lane.dispatcher + NonCancellable) {
-                lane.compute(
-                    content = content,
-                    chapter = target.chapter,
-                    charStart = target.slice.charStart,
-                    charEnd = target.slice.charEnd,
-                    annotations = annotations,
-                    contentLeft = contentLeft,
-                    contentTop = contentTop,
-                    contentRight = contentRight,
-                    contentBottom = contentBottom,
-                    pageWidth = pageWidth,
-                    pageHeight = pageHeight,
-                    fontScale = fontScale,
+            withContext(NonCancellable) {
+                val bubbles = withContext(lane.dispatcher) {
+                    lane.compute(
+                        content = content,
+                        chapter = target.chapter,
+                        charStart = target.slice.charStart,
+                        charEnd = target.slice.charEnd,
+                        annotations = annotations,
+                        contentLeft = contentLeft,
+                        contentTop = contentTop,
+                        contentRight = contentRight,
+                        contentBottom = contentBottom,
+                        pageWidth = pageWidth,
+                        pageHeight = pageHeight,
+                        fontScale = fontScale,
+                    )
+                }
+                // 写回也在 NonCancellable 里：否则「刚算完就被下一次翻页取消」，
+                // 结果算完却写不进缓存，白算一遍（快翻时每一页都重算）。
+                memo.put(key, decorRevision, bubbles)
+                Logger.d(
+                    "Orilumn.NOTE",
+                    "NOTE-WARM done d=$d key=$key n=${bubbles.size} " +
+                        "ms=${t0.elapsedNow().inWholeMilliseconds}",
                 )
             }
-            memo.put(key, bubbles)
         }
     }
 }

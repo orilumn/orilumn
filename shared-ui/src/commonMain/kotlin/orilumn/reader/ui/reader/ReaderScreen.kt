@@ -2061,8 +2061,10 @@ fun ReaderScreen(
             }
             // 布点结果按页留几页：同一次翻页里，目标页起手先当目标槽、落地又变成当前槽；
             // 留一份就不必算两遍（布点是本页最贵的一笔，几百毫秒量级）。
+            // 标注修订号**不进**这里的键：它一变就整只换新的话，换章时标注状态会连续两次 bump
+            // （清空 + 读回），刚看过的上一章也一起作废，翻回去只能重算。有效性由条目自己判。
             val noteMemo = remember(
-                noteTextSizer, settings.noteFontScale, annotationState.revision, hostRevision,
+                noteTextSizer, settings.noteFontScale, hostRevision,
                 displayRevision, contentLeft, contentTop, contentRight, contentBottom,
                 pxWidth, pxHeight,
             ) { PageNoteMemo() }
@@ -2101,6 +2103,7 @@ fun ReaderScreen(
                 fontScale = settings.noteFontScale,
                 lane = noteLane,
                 memo = noteMemo,
+                decorRevision = annotationState.revision,
             )
             // 目标页的旁注：翻页时跟着目标页一起滑进来，落地那一刻才不会「凭空冒出来」。
             // 没有目标页时就是空表——不用 `if` 包起来，remember 的位置才稳定。
@@ -2120,6 +2123,7 @@ fun ReaderScreen(
                 fontScale = settings.noteFontScale,
                 lane = noteLane,
                 memo = noteMemo,
+                decorRevision = annotationState.revision,
             )
             val NoteBubblesFun: @Composable (List<NoteBubble>) -> Unit = { bubbles ->
                 if (bubbles.isNotEmpty()) {

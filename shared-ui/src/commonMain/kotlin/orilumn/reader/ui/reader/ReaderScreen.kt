@@ -2049,30 +2049,57 @@ fun ReaderScreen(
             // 纯覆盖层：只按行几何算空白，不改排版、不进栅格；**跟着页走**——它被放进
             // 滑动层的两个槽里，和页画布共用同一个平移量（见下面的 FlipSlideLayer）。
             // 早先动画期间整层藏起来、落地才冒出来，观感是「字滑走了、旁注原地消失又出现」。
+            // 布点算得很慢（几十到几百毫秒，13 条批注时引线寻路一项就 300ms 上下），
+            // 所以整条流水线走后台车道：UI 帧只读缓存结果，算完再由状态推上来。
+            // **不能**在帧里同步算——目标页内容恰好在起手那一刻才出现，同步算就是
+            // 「手指把页面拉出一点点，画面卡住」的头号来源（2026-11-01 用户报）。
             // 文字尺寸用与绘制同源的实测尺子（不是字宽粗估）：差半像素就会被省略号截掉。
             val noteTextSizer = rememberNoteTextSizer(noteFontFamily)
-            // 布点结果按页留几页：同一次翻页里，目标页起手先当目标槽算一次、落地又当当前槽
-            // 算一次；留一份就不必算两遍（布点是本页最贵的一笔，几百毫秒量级）。
+            val noteLane = remember(noteTextSizer) {
+                // 车道独占的绘制器与尺子：前台那个 selectionDrawer 在别的线程手上用过就脏了。
+                PageNoteLane(drawer = LineWindowDrawer(), textSizer = noteTextSizer)
+            }
+            // 布点结果按页留几页：同一次翻页里，目标页起手先当目标槽、落地又变成当前槽；
+            // 留一份就不必算两遍（布点是本页最贵的一笔，几百毫秒量级）。
             val noteMemo = remember(
                 noteTextSizer, settings.noteFontScale, annotationState.revision, hostRevision,
                 displayRevision, contentLeft, contentTop, contentRight, contentBottom,
                 pxWidth, pxHeight,
             ) { PageNoteMemo() }
-            val noteBubbles: List<NoteBubble> = rememberPageNotes(
-                content = pageContent,
-                chapter = fromPos.chapter,
-                charStart = fromPos.slice.charStart,
-                charEnd = fromPos.slice.charEnd,
+            // 落定后预热前后邻页的旁注：车道是异步的，不预热的话冷页要等算完才出现
+            //（真机 600~1600ms 的「页面先空着，旁注后冒出来」）。预热后翻过去是缓存命中，
+            // 旁注跟着目标页一起滑进来。
+            WarmAdjacentPageNotes(
+                host = currentHost,
+                pos = openPos,
                 annotations = annotationState.annotations,
-                drawer = selectionDrawer,
+                annotationChapter = annotationState.chapter,
+                decorRevision = annotationState.revision,
                 contentLeft = contentLeft,
                 contentTop = contentTop,
                 contentRight = contentRight,
                 contentBottom = contentBottom,
                 pageWidth = pxWidth,
                 pageHeight = pxHeight,
-                textSizer = noteTextSizer,
                 fontScale = settings.noteFontScale,
+                lane = noteLane,
+                memo = noteMemo,
+                directionProvider = { ctl.session.direction },
+            )
+            val noteBubbles: List<NoteBubble> = rememberPageNotes(
+                content = pageContent,
+                chapter = fromPos.chapter,
+                charStart = fromPos.slice.charStart,
+                charEnd = fromPos.slice.charEnd,
+                annotations = annotationState.annotations,
+                contentLeft = contentLeft,
+                contentTop = contentTop,
+                contentRight = contentRight,
+                contentBottom = contentBottom,
+                pageWidth = pxWidth,
+                pageHeight = pxHeight,
+                fontScale = settings.noteFontScale,
+                lane = noteLane,
                 memo = noteMemo,
             )
             // 目标页的旁注：翻页时跟着目标页一起滑进来，落地那一刻才不会「凭空冒出来」。
@@ -2084,15 +2111,14 @@ fun ReaderScreen(
                 charStart = targetPosNow?.slice?.charStart ?: 0,
                 charEnd = targetPosNow?.slice?.charEnd ?: 0,
                 annotations = annotationState.annotations,
-                drawer = selectionDrawer,
                 contentLeft = contentLeft,
                 contentTop = contentTop,
                 contentRight = contentRight,
                 contentBottom = contentBottom,
                 pageWidth = pxWidth,
                 pageHeight = pxHeight,
-                textSizer = noteTextSizer,
                 fontScale = settings.noteFontScale,
+                lane = noteLane,
                 memo = noteMemo,
             )
             val NoteBubblesFun: @Composable (List<NoteBubble>) -> Unit = { bubbles ->

@@ -158,6 +158,13 @@ internal fun rememberPageNotes(
     memo: PageNoteMemo,
     /** 标注修订号（[AnnotationState.revision]）：只当「这一页要重算一遍」的触发键，不进缓存判据。 */
     decorRevision: Int,
+    /**
+     * 这一页所属章的标注**是否已从库里读回来**（[AnnotationState.loaded]）。
+     *
+     * 没读回来时列表是空表，算出来必然是「一页没有旁注」——这个空结果**不能存**：
+     * 存进去以后标注读回来也没人知道该作废它，整页批注就再也不显示了（真机 2026-11-01）。
+     */
+    notesReady: Boolean,
 ): List<NoteBubble> {
     // 页身份键：章 + 页区间（见 [pageNoteKey]）。预热方也只有 ReaderPos，必须能算出同一个键。
     val pageKey = pageNoteKey(chapter, charStart, charEnd)
@@ -177,14 +184,21 @@ internal fun rememberPageNotes(
     // 解完就是一次新值 ⇒ effect 重启、在途的布点被取消，而布点要几百毫秒，取消时结果还没
     // 写进缓存 ⇒ 下一轮又从头算，同一页连算三遍还一直「没算完」（真机 2026-11-01：
     // 同一页 3 秒内 NOTE-LAYOUT 三次，翻页进去旁注仍然晚到）。
-    LaunchedEffect(pageKey, memo, lane, content != null, fontScale, decorRevision) {
+    LaunchedEffect(pageKey, memo, lane, content != null, fontScale, decorRevision, notesReady) {
         val c = contentNow ?: run {
             bubbles = emptyList()
             return@LaunchedEffect
         }
+        // 缓存里有就直接用（含「这一章的标注还没读回来、但之前算过」的情形：那时算的才作数）。
         val cached = memo.get(pageKey, chapter)
         if (cached != null) {
             bubbles = cached
+            return@LaunchedEffect
+        }
+        // 标注没读回来：这一页的旁注无从算起，**不存空结果**（见参数 KDoc）。
+        // `notesReady` 是 effect 的键，读回来会重新进来一次。
+        if (!notesReady) {
+            bubbles = emptyList()
             return@LaunchedEffect
         }
         // 算完就写缓存，**不受取消影响**：快翻/重组打断这一轮时，这一页的结果照样留下，
@@ -470,14 +484,18 @@ internal fun WarmAdjacentPageNotes(
     memo: PageNoteMemo,
     /** 最近翻页方向（+1 前 / -1 后 / 0 无）：预热先排需求最大的一侧。 */
     directionProvider: () -> Int,
+    /** 当前章标注是否已读回来（[AnnotationState.loaded]）：没读回来预热出来的空结果不能存。 */
+    notesReady: Boolean,
 ) {
     val hostRef = rememberUpdatedState(host)
     val dirRef = rememberUpdatedState(directionProvider)
     LaunchedEffect(
-        pos, host, memo, lane, annotations, annotationChapter, decorRevision,
+        pos, host, memo, lane, annotations, annotationChapter, decorRevision, notesReady,
         contentLeft, contentTop, contentRight, contentBottom, pageWidth, pageHeight, fontScale,
     ) {
         val anchor = pos ?: return@LaunchedEffect
+        // 标注还没读回来：算出来是空的，存进去就把这一页的旁注永久抹掉了（见 rememberPageNotes）。
+        if (!notesReady) return@LaunchedEffect
         val hostNow = hostRef.value
         // 让出起手那一帧：结算动画与邻页栅格优先（预热是「余量里的活」，不该和用户正在看的
         // 那一帧抢 CPU）。但让路要短——预热跑得越早，下一次翻页越是缓存命中。

@@ -25,6 +25,17 @@ class AnnotationState(private val host: ReaderHost) {
     var annotations by mutableStateOf<List<Annotation>>(emptyList())
         private set
 
+    /**
+     * 当前章的标注**是否已经从库里读回来了**。
+     *
+     * `chapter` 在开读之前就先设好了，那段时间 [annotations] 是空表——空表既可能是「这章真的
+     * 没有标注」，也可能是「还没读回来」，**读的时候分不出来**。旁注布点按空表算出来就是
+     * 「一页没有旁注」，一旦被当成结果存进缓存，标注读回来以后也没人知道该作废它
+     * （真机 2026-11-01：翻章回来整页批注全都不见了）。所以布点方必须先看这个标志。
+     */
+    var loaded by mutableStateOf(false)
+        private set
+
     /** 装饰修订号：列表内容一变就 +1，供 `remember` / 栅格指纹刷新。 */
     var revision by mutableIntStateOf(0)
         private set
@@ -61,8 +72,9 @@ class AnnotationState(private val host: ReaderHost) {
         if (chapter == this.chapter) return
         this.chapter = chapter
         annotations = emptyList()
+        loaded = false
         revision++
-        val loaded = try {
+        val read = try {
             host.annotationsForChapter(chapter)
         } catch (c: kotlinx.coroutines.CancellationException) {
             throw c
@@ -71,7 +83,8 @@ class AnnotationState(private val host: ReaderHost) {
         }
         // 读库期间又换章：丢弃过期结果（LaunchedEffect 取消时这里通常也不会执行）。
         if (this.chapter != chapter) return
-        annotations = sort(loaded)
+        annotations = sort(read)
+        loaded = true
         revision++
         noteContentChanged()
         backfillQuotes(chapter)
@@ -81,7 +94,7 @@ class AnnotationState(private val host: ReaderHost) {
     suspend fun reload() {
         val ch = chapter
         if (ch < 0) return
-        val loaded = try {
+        val read = try {
             host.annotationsForChapter(ch)
         } catch (c: kotlinx.coroutines.CancellationException) {
             throw c
@@ -89,7 +102,8 @@ class AnnotationState(private val host: ReaderHost) {
             emptyList()
         }
         if (chapter != ch) return
-        annotations = sort(loaded)
+        annotations = sort(read)
+        loaded = true
         revision++
         noteContentChanged()
     }
@@ -180,6 +194,7 @@ class AnnotationState(private val host: ReaderHost) {
     fun clear() {
         chapter = -1
         annotations = emptyList()
+        loaded = false
         revision++
     }
 

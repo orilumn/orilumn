@@ -2087,6 +2087,7 @@ fun ReaderScreen(
                 lane = noteLane,
                 memo = noteMemo,
                 directionProvider = { ctl.session.direction },
+                notesReady = annotationState.loaded && annotationState.chapter == fromPos.chapter,
             )
             val noteBubbles: List<NoteBubble> = rememberPageNotes(
                 content = pageContent,
@@ -2104,6 +2105,7 @@ fun ReaderScreen(
                 lane = noteLane,
                 memo = noteMemo,
                 decorRevision = annotationState.revision,
+                notesReady = annotationState.loaded && annotationState.chapter == fromPos.chapter,
             )
             // 目标页的旁注：翻页时跟着目标页一起滑进来，落地那一刻才不会「凭空冒出来」。
             // 没有目标页时就是空表——不用 `if` 包起来，remember 的位置才稳定。
@@ -2124,6 +2126,8 @@ fun ReaderScreen(
                 lane = noteLane,
                 memo = noteMemo,
                 decorRevision = annotationState.revision,
+                notesReady = annotationState.loaded &&
+                    annotationState.chapter == (targetPosNow?.chapter ?: fromPos.chapter),
             )
             val NoteBubblesFun: @Composable (List<NoteBubble>) -> Unit = { bubbles ->
                 if (bubbles.isNotEmpty()) {

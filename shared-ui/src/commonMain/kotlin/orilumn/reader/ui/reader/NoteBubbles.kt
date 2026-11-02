@@ -7450,6 +7450,7 @@ internal fun NoteBubbles(
                 }
                 return@forEach
             }
+            val shape = RoundedCornerShape(3.dp)
             Box(
                 modifier = Modifier
                     // 布局位移（不是动画）：位置只跟页面几何走，翻页时整层一起让位。
@@ -7459,23 +7460,34 @@ internal fun NoteBubbles(
                     // （字号 × 1.38 = 55.15px）算的，排版却把每行高度向上取整到整像素（56px）——
                     // 2 行要 112px、上限只给 110，于是最后一行连同省略号一起被吃掉，
                     // 明明有空地也显示成「折了但没折完」（2026-10-29 真机定位）。
-                    .clip(RoundedCornerShape(3.dp))
-                    .then(
-                        if (showBackground) {
-                            Modifier.background(tint.copy(alpha = NOTE_BUBBLE_BG_ALPHA))
-                        } else {
-                            Modifier
-                        },
-                    )
-                    .then(
-                        if (showBorder) {
-                            Modifier.border(1.dp, tint.copy(alpha = 0.5f), RoundedCornerShape(3.dp))
-                        } else {
-                            Modifier
-                        },
-                    )
                     .clickable { onOpen(b.annotationId) },
             ) {
+                // 底色 / 描边单独一层，圆角裁剪只裁这一层，不裁文字：
+                // 行高（字号 × 1.38）是给排版的**名义**行距，比字体自身字高（手札体 hhea 1.4em）
+                // 还紧一点，最后一行字形的下伸部分（p / y 的尾巴、逗号）会落到行框外一两个像素。
+                // 以前底色、文字共用同一个 `clip`，这点下伸就被齐根切掉，看着像「底部被截掉一条」
+                // （2026-11-03 真机：手札体批注）。裁剪是给圆角服务的，与字无关，所以只留在这里。
+                if (showBackground || showBorder) {
+                    Box(
+                        modifier = Modifier
+                            .matchParentSize()
+                            .clip(shape)
+                            .then(
+                                if (showBackground) {
+                                    Modifier.background(tint.copy(alpha = NOTE_BUBBLE_BG_ALPHA))
+                                } else {
+                                    Modifier
+                                },
+                            )
+                            .then(
+                                if (showBorder) {
+                                    Modifier.border(1.dp, tint.copy(alpha = 0.5f), shape)
+                                } else {
+                                    Modifier
+                                },
+                            ),
+                    )
+                }
                 Text(
                     text = b.text,
                     color = if (textSameColor) {

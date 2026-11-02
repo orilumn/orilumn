@@ -471,21 +471,19 @@ private fun computePageNotes(
                     },
                     // 划线标注：箭头进得行盒，但不得触及这条线（规则第 9 条）。
                     rowBoxEntry = a.kind == AnnotationKind.Underline,
-                    underlineRects = if (collapseAll) {
-                        emptyList()
-                    } else {
-                        pageAnnotationLineRects(
-                            drawer = drawer,
-                            lines = lines,
-                            chapter = chapter,
-                            annotation = a,
-                            pageImages = content.pageImages,
-                            pageBackgrounds = content.pageBackgrounds,
-                            frameLead = content.pageFrameLead,
-                            contentLeft = contentLeft,
-                            contentTop = contentTop,
-                        )
-                    },
+                    // 划线自己的落墨带：引线要绕开它，折叠态下小图标还要**贴着它右端居中**
+                    // （§1.6）——只有划线类才有这段几何，高亮直接返回空，代价可忽略。
+                    underlineRects = pageAnnotationLineRects(
+                        drawer = drawer,
+                        lines = lines,
+                        chapter = chapter,
+                        annotation = a,
+                        pageImages = content.pageImages,
+                        pageBackgrounds = content.pageBackgrounds,
+                        frameLead = content.pageFrameLead,
+                        contentLeft = contentLeft,
+                        contentTop = contentTop,
+                    ),
                 )
             }
         }

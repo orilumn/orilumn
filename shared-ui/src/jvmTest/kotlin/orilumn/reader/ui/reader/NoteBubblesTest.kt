@@ -141,7 +141,14 @@ class NoteBubblesTest {
         rects: List<Rect>,
         text: String = "想法",
         argb: Int = 0xFF3366CC.toInt(),
-    ) = NoteInk(annotationId = id, text = text, argb = argb, rects = rects)
+        underline: List<Rect> = emptyList(),
+    ) = NoteInk(
+        annotationId = id,
+        text = text,
+        argb = argb,
+        rects = rects,
+        underlineRects = underline,
+    )
 
     private fun place(
         notes: List<NoteInk>,
@@ -538,7 +545,7 @@ class NoteBubblesTest {
         val b = bubbles.single()
         assertTrue("整页没空白时应退成小图标，实际=$b", b.compact)
         assertTrue("小图标不该有箭头", b.arrow == null)
-        assertTrue("小图标应贴在锚点右下角，实际 left=${b.leftPx} top=${b.topPx}",
+        assertTrue("页右缘放不下线右端时，应退到线下方，实际 left=${b.leftPx} top=${b.topPx}",
             b.leftPx > 500f && b.topPx >= 39f)
     }
 
@@ -3017,7 +3024,7 @@ class NoteBubblesTest {
 
     @Test
     fun `small icon keeps the small ellipse size`() {
-        // 兜底小椭圆：宽 0.5em、高 0.32em（热区另行放大，不改视觉尺寸）。
+        // 兜底小椭圆：宽 1em、高 0.64em（热区另行放大，不改视觉尺寸）。
         val anchor = rect(0f, 0f, 600f, 40f)
         val bubbles = place(
             notes = listOf(noteInk(1, listOf(anchor))),
@@ -3027,8 +3034,8 @@ class NoteBubblesTest {
         )
         val b = bubbles.single()
         assertTrue("应退成小椭圆：$b", b.compact)
-        assertEquals(noteFont * 0.5f, b.widthPx, 0.01f)
-        assertEquals(noteFont * 0.32f, b.heightPx, 0.01f)
+        assertEquals(noteFont * 1f, b.widthPx, 0.01f)
+        assertEquals(noteFont * 0.64f, b.heightPx, 0.01f)
     }
 
     @Test
@@ -4290,6 +4297,78 @@ class NoteBubblesTest {
             byId.getValue(2L).topPx + byId.getValue(2L).heightPx,
         )
         assertTrue("两个图标不该叠在一起", !r1.overlaps(r2))
+    }
+
+    /** 折叠态：划线标注的小图标贴在线右端外侧，且与那条线**垂直居中**。 */
+    @Test
+    fun `collapsed icon hugs the right end of the underline and centres on it`() {
+        val text = rect(100f, 200f, 400f, 240f)
+        val line = rect(100f, 239f, 400f, 242f)
+        val bubbles = place(
+            notes = listOf(noteInk(1, listOf(text), underline = listOf(line))),
+            textInk = listOf(text),
+            collapseAll = true,
+        )
+        val b = bubbles.single()
+        val box = rect(b.leftPx, b.topPx, b.leftPx + b.widthPx, b.topPx + b.heightPx)
+        assertEquals("图标左缘应正接在线尾、不留缝：box=$box line=$line",
+            line.right, box.left, 0.5f)
+        assertEquals(
+            "图标应与划线垂直居中",
+            (line.top + line.bottom) / 2f,
+            (box.top + box.bottom) / 2f,
+            0.5f,
+        )
+    }
+
+    /** 折叠态：背景高亮没有线，图标要挂在「线会长在的那个高度」——被标注文字的下缘，同样居中。 */
+    @Test
+    fun `collapsed highlight icon sits where the underline would be`() {
+        val text = rect(100f, 200f, 400f, 240f)
+        val bubbles = place(
+            notes = listOf(noteInk(1, listOf(text))),
+            textInk = listOf(text),
+            collapseAll = true,
+        )
+        val b = bubbles.single()
+        val box = rect(b.leftPx, b.topPx, b.leftPx + b.widthPx, b.topPx + b.heightPx)
+        assertEquals("高亮没有线，图标左缘应正接在文字右端：box=$box text=$text",
+            text.right, box.left, 0.5f)
+        assertEquals(
+            "高亮的等效划线就是文字下缘，图标应以它居中",
+            text.bottom,
+            (box.top + box.bottom) / 2f,
+            0.5f,
+        )
+        assertTrue("图标不该压住被标注的文字：box=$box text=$text", !box.overlaps(text))
+    }
+
+    /** 折叠态：跨行标注跟着**最后一行**那条线走，不会挂在第一行的线尾。 */
+    @Test
+    fun `collapsed icon follows the last underlined line of a wrapped annotation`() {
+        val line1 = rect(100f, 239f, 500f, 242f)
+        val line2 = rect(100f, 279f, 300f, 282f)
+        val bubbles = place(
+            notes = listOf(
+                noteInk(
+                    1,
+                    listOf(rect(100f, 200f, 500f, 240f), rect(100f, 240f, 300f, 280f)),
+                    underline = listOf(line1, line2),
+                ),
+            ),
+            textInk = listOf(rect(100f, 200f, 500f, 240f), rect(100f, 240f, 300f, 280f)),
+            collapseAll = true,
+        )
+        val b = bubbles.single()
+        val box = rect(b.leftPx, b.topPx, b.leftPx + b.widthPx, b.topPx + b.heightPx)
+        assertEquals("图标应接在最后一行那条线的线尾：box=$box line2=$line2",
+            line2.right, box.left, 0.5f)
+        assertEquals(
+            "图标应与最后一行那条线垂直居中",
+            (line2.top + line2.bottom) / 2f,
+            (box.top + box.bottom) / 2f,
+            0.5f,
+        )
     }
 
     /** 折叠态下多条批注压在同一个锚点时，图标沿右下角往下错开，不互相盖住。 */

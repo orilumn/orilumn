@@ -57,9 +57,10 @@ import orilumn.reader.engine.skia.PageImage
  *
  * **两种形态（§2.1）**，由 [compact] 区分：
  * - **文字框**（`compact = false`，常态）：按 [maxLines] 行显示批注正文，配 [arrow] 指向原文；
- * - **小图标**（`compact = true`）：在原文右下角画一个小椭圆省略号。两种来源——整页没有能读的
- *   空白时的**兜底**，以及读者打开「折叠所有批注」后的**常态**（[noteBubblePlacements] 的
- *   `collapseAll`）。[leftPx]/[topPx] 是椭圆左上角、[widthPx] 是直径、[maxLines] 恒为 1。
+ * - **小图标**（`compact = true`）：贴着划线右端画一个小椭圆省略号（与线垂直居中；高亮没有线，
+ *   就挂在被标注文字的右下沿，§1.6）。两种来源——整页没有能读的空白时的**兜底**，以及读者
+ *   打开「折叠所有批注」后的**常态**（[noteBubblePlacements] 的 `collapseAll`）。
+ *   [leftPx]/[topPx] 是椭圆左上角、[widthPx] 是直径、[maxLines] 恒为 1。
  *   这个形态**不画箭头**，也不参与其他旁注的避让；**不是文字**，底色与描边是自己的固定画法，
  *   不跟批注框的描边 / 底色两个开关走。
  *
@@ -117,8 +118,8 @@ private const val NOTE_GEOM_EPS: Float = 0.5f
 private const val MIN_SHOWN_CHARS: Int = 1
 
 /** 小椭圆宽 / 高（以旁注字号为单位）：只是「这里有一条批注」的记号，不抢正文。 */
-private const val NOTE_ICON_WIDTH_RATIO: Float = 0.5f
-private const val NOTE_ICON_HEIGHT_RATIO: Float = 0.32f
+private const val NOTE_ICON_WIDTH_RATIO: Float = 1f
+private const val NOTE_ICON_HEIGHT_RATIO: Float = 0.64f
 
 /** 小椭圆的点击热区边长（以旁注字号为单位）：视觉小，手指仍够得着。 */
 internal const val NOTE_ICON_HIT_RATIO: Float = 1.2f
@@ -2001,8 +2002,8 @@ internal fun noteBubblePlacements(
     noteStyle: NoteStyle = NoteStyle.forBody(fontPx),
     noteTextSizer: NoteTextSizer = EstimatedNoteTextSizer,
     /**
-     * 读者打开了「折叠所有批注」：每条批注都直接退成原文右下角的小图标，
-     * 不量空白、不排文字框、不画引线（`null` = 照常布点）。
+     * 读者打开了「折叠所有批注」：每条批注都直接退成小图标（贴着划线右端、垂直居中，§1.6），
+     * 不量空白、不排文字框、不画引线（`false` = 照常布点）。
      */
     collapseAll: Boolean = false,
 ): List<NoteBubble> {
@@ -2040,13 +2041,13 @@ internal fun noteBubblePlacements(
         .sortedWith(compareBy({ it.rects.minOf { r -> r.top } }, { it.annotationId }))
     if (ordered.isEmpty()) return emptyList()
 
-    // 一条都分不到位置的批注不再消失：在原文右下角退成小椭圆（§1.6）。
+    // 一条都分不到位置的批注不再消失：贴着划线右端退成小椭圆（§1.6）。
     val iconW = max(small * NOTE_ICON_WIDTH_RATIO, 4f)
     val iconH = max(small * NOTE_ICON_HEIGHT_RATIO, 3f)
-    // 同一个锚点掉出多个小椭圆时，沿右下角向下错开一个图标高（§1.6）。
+    // 同一个锚点掉出多个小椭圆时，向下错开一个图标高（§1.6），不叠成一摞。
     val icons = ArrayList<Rect>()
     fun iconBubble(note: NoteInk): NoteBubble {
-        var icon = noteIconRect(rectUnion(note.rects), gap * 0.4f, iconW, iconH, pageBounds)
+        var icon = noteIconRect(note, gap * 0.4f, iconW, iconH, pageBounds)
         var guard = 0
         while (icons.any { it.overlaps(icon) } && guard < 16) {
             // 整个图标一起下移：上下边必须同加，只抬下边会把矩形压成零高度，
@@ -3490,37 +3491,53 @@ private fun rectDistance(a: Rect, b: Rect): Float {
 }
 
 /**
- * 小图标落位（§2.1）：优先贴在锚点墨迹的**右下角外侧**，且保证不压锚点墨迹。
+ * 小图标落位（§1.6）：**接在划线的右端、与划线垂直居中**，且保证不压原文墨迹。
  *
- * 右下角放不下（贴到页面右下边界）时依次试右上、右下贴框、右上贴框、左下、左上；
- * 都不在页内才把首选位置夹回页面（此时只求有记号，不求不压）。
+ * - 划线类（下划线 / 波浪 / 删除线）：用这条标注自己的落墨带 [NoteInk.underlineRects]，
+ *   跨行时跟**最后一行**那条线走；
+ * - 背景高亮：没有线，就按「线会长在哪里」算 —— 被标注文字的下缘（最后一行行盒底），
+ *   图标与那个高度垂直居中，看起来就像挂在整段高亮的右下沿。
+ *
+ * 椭圆左缘与线尾**不留缝**（[gap] 只用于下方 / 左侧的退路）：椭圆最左一点正好落在线高的
+ * 那一行上，看上去就是从线尾长出来的。右端已经贴住页面右缘时依次退：线下方 → 原文右端内侧
+ * 的下缘之下 → 线上方 → 线左端外侧；都不在页内才把候选夹回页面（此时只求有记号，不求不压）。
  */
-private fun noteIconRect(ink: Rect, gap: Float, width: Float, height: Float, page: Rect): Rect {
-    val xRight = ink.right + gap
-    val xFlush = ink.right - width
+private fun noteIconRect(note: NoteInk, gap: Float, width: Float, height: Float, page: Rect): Rect {
+    val ink = rectUnion(note.rects)
+    // 跨行标注的有好几段线：图标跟着最后一行那条走（同高时取最靠右的一段）。
+    val line = note.underlineRects.maxWithOrNull(compareBy<Rect>({ it.top }, { it.right }))
+    val lineRight = line?.right ?: ink.right
+    // 高亮没有线：它的「线」就是这段高亮的下沿（文字墨迹的底边）。
+    val lineMid = line?.let { (it.top + it.bottom) / 2f } ?: ink.bottom
+    // 不留缝：椭圆左缘正接在线的右端（gap 只留给退路）。
+    val xRight = lineRight
     val yBelow = ink.bottom + gap
     val yAbove = ink.top - gap - height
-    // 顺序：右下角外侧 → 右下角内侧 → 右上 → 左下（§1.6：贴住原文右下角）。
+    // 顺序：线右端同高 → 线下方 → 原文下缘内侧 → 线上方 → 线左端同高。
     val candidates = listOf(
+        Rect(xRight, lineMid - height / 2f, xRight + width, lineMid + height / 2f),
         Rect(xRight, yBelow, xRight + width, yBelow + height),
-        Rect(xFlush, yBelow, xFlush + width, yBelow + height),
+        Rect(ink.right - width, yBelow, ink.right, yBelow + height),
         Rect(xRight, yAbove, xRight + width, yAbove + height),
-        Rect(xFlush, yAbove, xFlush + width, yAbove + height),
-        Rect(ink.left - gap - width, yBelow, ink.left - gap, yBelow + height),
+        Rect(ink.left - gap - width, lineMid - height / 2f, ink.left - gap, lineMid + height / 2f),
     )
     fun inside(r: Rect) = r.left >= page.left - NOTE_GEOM_EPS && r.top >= page.top - NOTE_GEOM_EPS &&
         r.right <= page.right + NOTE_GEOM_EPS && r.bottom <= page.bottom + NOTE_GEOM_EPS
-    val within = candidates.filter(::inside)
-    within.firstOrNull { !it.overlaps(ink) }?.let { return it }
-    candidates.firstOrNull { !it.overlaps(ink) }?.let { r ->
+    // 压不压原文只看**逐行墨迹**：跨行标注的并集是个大包围盒，拿它当障碍，
+    // 挂在末行线尾的图标会被自己第一行的字判成「压住了」。
+    fun coversInk(r: Rect) = note.rects.any { it.overlaps(r) }
+    fun clamp(r: Rect): Rect {
         val cx = r.left.coerceIn(page.left, max(page.left, page.right - width))
         val cy = r.top.coerceIn(page.top, max(page.top, page.bottom - height))
         return Rect(cx, cy, cx + width, cy + height)
     }
-    within.firstOrNull()?.let { return it }
-    val x = candidates.first().left.coerceIn(page.left, max(page.left, page.right - width))
-    val y = candidates.first().top.coerceIn(page.top, max(page.top, page.bottom - height))
-    return Rect(x, y, x + width, y + height)
+    candidates.firstOrNull { inside(it) && !coversInk(it) }?.let { return it }
+    // 没有完全在页内的：夹回页面内，仍要不压原文，按顺序取第一个；都压才认输。
+    candidates.forEach { c ->
+        val r = clamp(c)
+        if (!coversInk(r)) return r
+    }
+    return clamp(candidates.first())
 }
 
 /** 估一句批注排成一行需要多宽（按字宽粗估，中文/全角按一个字宽，西文按 0.55）。 */

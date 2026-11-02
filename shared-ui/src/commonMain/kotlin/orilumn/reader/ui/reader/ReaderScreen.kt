@@ -1211,24 +1211,16 @@ fun ReaderScreen(
             // 输入期间可能刚点过色槽换了颜色：按 id 取当前记录，别拿旧快照盖回去。
             val current = annotationState.annotations.firstOrNull { it.id == editing.id } ?: return
             val body = text.ifBlank { null }
-            // 线型 / 颜色都只选中、不落笔（D-28）：真改过才在提交时写回。
-            val restyle = kind == AnnotationKind.Underline &&
-                (current.kind != AnnotationKind.Underline || current.lineStyle != style)
-            val recolor = picked != null &&
-                picked != (current.color ?: annotationFallbackColor(current.kind))
-            if (!restyle && !recolor && body == current.note) return
-            val next = current.copy(
-                kind = if (restyle) AnnotationKind.Underline else current.kind,
-                lineStyle = if (restyle) style else current.lineStyle,
-                // 颜色跟着**墨迹所属的类别**走：本来就是划线时保留它自己的墨色；
-                // 从高亮转过来时不能把高亮那半透明的底色带进墨线（两套色槽体系完全独立）。
-                color = when {
-                    picked != null -> picked
-                    restyle -> annotationUnderlineInkColor(current, light)
-                    else -> current.color
-                },
+            // 线型 / 类别 / 颜色都只选中、不落笔（D-28）：真改过才在提交时写回。
+            // 换类别（高亮 ⇄ 划线）也算改样式，口径全在 [annotationAfterEdit] 里。
+            val next = annotationAfterEdit(
+                current = current,
+                kind = kind,
+                lineStyle = style,
+                pickedColor = picked,
                 note = body,
-            )
+                settings = light,
+            ) ?: return
             scope.launch {
                 if (!annotationState.update(next)) snackbar.show("保存失败")
             }

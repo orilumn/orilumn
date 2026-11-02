@@ -119,6 +119,16 @@ internal fun annotationUnderlineInkColor(editing: Annotation?, settings: ReaderS
         ?: annotationDefaultColor(settings, AnnotationKind.Underline)
 
 /**
+ * 由某条记录改型成高亮时用的**底色**（[annotationUnderlineInkColor] 的反向）。
+ *
+ * 同样是两套独立色槽：划线的墨色不透明，直接当高亮底色会糊住正文，
+ * 所以只有本来就是高亮的记录才保留自己原来的颜色，其余一律取高亮类别的默认色。
+ */
+internal fun annotationHighlightFillColor(editing: Annotation?, settings: ReaderSettings): Int =
+    editing?.color?.takeIf { editing.kind == AnnotationKind.Highlight }
+        ?: annotationDefaultColor(settings, AnnotationKind.Highlight)
+
+/**
  * 记录上该存哪种线型：**线型只属于划线**。
  *
  * 高亮侧一律存实线（不画线，仅作占位），免得高亮那行的点按把划线菜单记住的线型带歪，
@@ -128,6 +138,46 @@ internal fun annotationLineStyleFor(
     kind: AnnotationKind,
     style: AnnotationLineStyle,
 ): AnnotationLineStyle = if (kind == AnnotationKind.Underline) style else AnnotationLineStyle.Straight
+
+/**
+ * 编辑一条已有标注之后该写成什么样；`null` = 一个字都没改（调用方不必写盘）。
+ *
+ * 操作栏里「类别 / 线型 / 色槽」都只是**选中**，真正写回只在这里发生一次：
+ * - 换类别（高亮 ⇄ 划线）算改样式：记录必须真的换类别，否则点「高亮」只是把高亮的颜色
+ *   当成划线的墨色画一条线（2026-11-02 反馈的正是这个）；
+ * - 换类别时颜色一律换成**目标类别**的默认色（两套色槽完全独立：半透明的底色不能当墨线，
+ *   不透明的墨色也不能糊成底色）；
+ * - 刚点过色槽就用那一格的颜色（那是读者的明确意图）。
+ */
+internal fun annotationAfterEdit(
+    current: Annotation,
+    kind: AnnotationKind,
+    lineStyle: AnnotationLineStyle,
+    pickedColor: Int?,
+    note: String?,
+    settings: ReaderSettings,
+): Annotation? {
+    val kindChanged = kind != current.kind
+    val reline = kind == AnnotationKind.Underline && current.lineStyle != lineStyle
+    val restyled = kindChanged || reline
+    val recolor = pickedColor != null &&
+        pickedColor != (current.color ?: annotationFallbackColor(current.kind))
+    if (!restyled && !recolor && note == current.note) return null
+    return current.copy(
+        kind = kind,
+        lineStyle = annotationLineStyleFor(kind, if (restyled) lineStyle else current.lineStyle),
+        color = when {
+            pickedColor != null -> pickedColor
+            kindChanged -> when (kind) {
+                AnnotationKind.Highlight -> annotationHighlightFillColor(current, settings)
+                AnnotationKind.Underline -> annotationUnderlineInkColor(current, settings)
+            }
+            restyled -> annotationUnderlineInkColor(current, settings)
+            else -> current.color
+        },
+        note = note,
+    )
+}
 
 /**
  * 记住「上次用的线型」，同时把**上次用的类别**定为划线。

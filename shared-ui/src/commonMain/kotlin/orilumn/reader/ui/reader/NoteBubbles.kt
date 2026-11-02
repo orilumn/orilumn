@@ -3405,21 +3405,6 @@ private fun dedupeRects(rects: List<Rect>): List<Rect> {
     return out
 }
 
-
-/**
- * 本页正文主字号：按「行内非空白字数」加权，取字数最多的那一档字号。
- *
- * 页首是 h1 / h2 时首行字号可能是正文的两倍；旁注若跟着标题放大，页边距立刻塞不下几个字
- * （真机出现过只剩「用 / va…」）。整页都是标题时退回第一行，不返回 0。
- */
-internal fun noteBodyFontPx(lines: List<DrawLine>): Float {
-    if (lines.isEmpty()) return 0f
-    return lines
-        .groupBy { it.fontSizePx }
-        .maxByOrNull { (_, ls) -> ls.sumOf { l -> l.text.count { c -> !c.isWhitespace() } } }
-        ?.key ?: lines.first().fontSizePx
-}
-
 /**
  * 把逐字墨迹合并成**正文行框**（障碍物用）。
  *

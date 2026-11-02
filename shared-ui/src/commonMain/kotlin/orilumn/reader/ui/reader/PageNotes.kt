@@ -108,6 +108,7 @@ internal class PageNoteLane(
         contentBottom: Float,
         pageWidth: Float,
         pageHeight: Float,
+        bodyFontPx: Float,
         fontScale: Float,
     ): List<NoteBubble> = computePageNotes(
         content = content,
@@ -123,6 +124,7 @@ internal class PageNoteLane(
         pageWidth = pageWidth,
         pageHeight = pageHeight,
         textSizer = textSizer,
+        bodyFontPx = bodyFontPx,
         fontScale = fontScale,
     )
 }
@@ -146,6 +148,10 @@ internal fun rememberPageNotes(
     chapter: Int,
     charStart: Int,
     charEnd: Int,
+    /**
+     * **这一页所属章**的标注（`AnnotationState.annotationsFor(chapter).orEmpty()`）。
+     * 传别的章的列表不会串位（下面按 `chapter` 过滤），但这一页就没有自己那一章的批注了。
+     */
     annotations: List<Annotation>,
     contentLeft: Float,
     contentTop: Float,
@@ -153,15 +159,26 @@ internal fun rememberPageNotes(
     contentBottom: Float,
     pageWidth: Float,
     pageHeight: Float,
+    /**
+     * 正文主字号（物理像素，= 读者字号 × 字号缩放 × 密度，见 `TypographicProfile.bodyPx`）。
+     *
+     * 旁注字号**只认这个数**，不再从本页行几何里挑字号：早先按「本页字数最多的那一档字号」
+     * 算基数，同一本书不同页会因此抖 —— 代码页 `pre`（0.8em）字数占优时旁注直接小 20%，
+     * 切排版主题重新分页也会跟着变（2026-11-01 用户报「切传统后批注明显变小」）。
+     * 读者拖的是倍率，基数就该是读者自己那把尺子，而不是这一页碰巧排了什么。
+     */
+    bodyFontPx: Float,
+    /** 读者在面板上拖的旁注倍率（`ReaderSettings.noteFontScale`，1 = 默认 0.72 正文）。 */
     fontScale: Float,
     lane: PageNoteLane,
     memo: PageNoteMemo,
     /** 标注修订号（[AnnotationState.revision]）：只当「这一页要重算一遍」的触发键，不进缓存判据。 */
     decorRevision: Int,
     /**
-     * 这一页所属章的标注**是否已从库里读回来**（[AnnotationState.loaded]）。
+     * 这一页所属章的标注**是否已就位**（`AnnotationState.isReady(chapter)`：当前章已读回，
+     * 或已被相邻章预读）。
      *
-     * 没读回来时列表是空表，算出来必然是「一页没有旁注」——这个空结果**不能存**：
+     * 没就位时列表是空表，算出来必然是「一页没有旁注」——这个空结果**不能存**：
      * 存进去以后标注读回来也没人知道该作废它，整页批注就再也不显示了（真机 2026-11-01）。
      */
     notesReady: Boolean,
@@ -179,12 +196,14 @@ internal fun rememberPageNotes(
     val geomNow by rememberUpdatedState(
         NoteGeom(contentLeft, contentTop, contentRight, contentBottom, pageWidth, pageHeight),
     )
-    // 键只有「这一页是谁」+「这一页的内容到没到」+ 字体倍率（改倍率时 memo 也整只换新，
+    // 键只有「这一页是谁」+「这一页的内容到没到」+ 字号口径（改倍率/改正文字号时 memo 也整只换新，
     // 这里是兜底）。**不能**把 `content` 整个当键：`PageContent` 里的插图/背景位图是异步解出来的，
     // 解完就是一次新值 ⇒ effect 重启、在途的布点被取消，而布点要几百毫秒，取消时结果还没
     // 写进缓存 ⇒ 下一轮又从头算，同一页连算三遍还一直「没算完」（真机 2026-11-01：
     // 同一页 3 秒内 NOTE-LAYOUT 三次，翻页进去旁注仍然晚到）。
-    LaunchedEffect(pageKey, memo, lane, content != null, fontScale, decorRevision, notesReady) {
+    LaunchedEffect(
+        pageKey, memo, lane, content != null, bodyFontPx, fontScale, decorRevision, notesReady,
+    ) {
         val c = contentNow ?: run {
             bubbles = emptyList()
             return@LaunchedEffect
@@ -218,6 +237,7 @@ internal fun rememberPageNotes(
                     contentBottom = geom.bottom,
                     pageWidth = geom.pageWidth,
                     pageHeight = geom.pageHeight,
+                    bodyFontPx = bodyFontPx,
                     fontScale = fontScale,
                 )
             }
@@ -253,6 +273,7 @@ private fun computePageNotes(
     pageWidth: Float,
     pageHeight: Float,
     textSizer: NoteTextSizer,
+    bodyFontPx: Float,
     fontScale: Float,
 ): List<NoteBubble> {
     val lines = content.lines.orEmpty()
@@ -413,9 +434,10 @@ private fun computePageNotes(
         contentRight = contentRight,
         contentBottom = contentBottom,
         pageRight = pageWidth,
-        // 旁注字号跟正文主字号走：页首是标题时不能跟着标题放大。
-        // 读者在笔记页拖的倍率乘在这里（1 = 默认），布点 / 绘制 / 实测同一口径。
-        fontPx = noteBodyFontPx(lines) * fontScale,
+        // 旁注字号 = 读者字号口径的正文主字号 × 读者倍率（× 0.72 在 NoteStyle 里）。
+        // **不再**从本页行几何里挑「字数最多的那档字号」：那会让旁注随页内构成抖动
+        // （代码页 `pre` 占优就小 20%，切排版主题重新分页也跟着变）。
+        fontPx = bodyFontPx * fontScale,
         pageBottom = pageHeight,
         noteTextSizer = textSizer,
     )
@@ -463,39 +485,50 @@ internal fun pageNoteKey(chapter: Int, charStart: Int, charEnd: Int): String =
  * 翻页的栅格/动画）就把前后邻页的布点算进 [PageNoteMemo]，等用户真的翻过去时是缓存命中，
  * 首帧就跟着页面一起滑进来。
  *
- * 预热只跑**同章**邻页：跨章要另取那一章的标注（`annotationsForChapter`），
- * 那是开章该做的事，不在翻页热路径上做第二次 IO；跨章那一页仍走车道的按需路径。
+ * ## 跨章也预热（靠相邻章预读）
+ *
+ * 邻页在另一章时，这一页的布点要用**那一章**的标注。以前这里直接跳过（「跨章要另取标注，
+ * 不在翻页热路径上做第二次 IO」），于是每本书第一次翻进某章时旁注总要晚一小截。
+ * 现在那两章的标注已经由 `AnnotationState.prefetchNeighbors` 在**还读着当前章的时候**备好，
+ * 这里按页所属章取即可（[annotationsFor]）；取不到（还没读回来）才跳过——
+ * 绝不能拿空表算，那等于把「这页没有旁注」写进缓存。
  */
 @Composable
 internal fun WarmAdjacentPageNotes(
     host: ReaderHost,
     pos: ReaderPos?,
-    annotations: List<Annotation>,
-    annotationChapter: Int,
-    decorRevision: Int,
+    /**
+     * 某章可用的标注（`AnnotationState.annotationsFor`）；`null` = 还没读回来。
+     *
+     * 按**页所属章**问，不假定就是当前章：跨章邻页要的是目标章自己那一份，
+     * 传当前章列表过去会按错的字符偏移投影。
+     */
+    annotationsFor: (chapter: Int) -> List<Annotation>?,
+    /** 标注数据版本（`AnnotationState.dataVersion`）：当前章内容或预读快照一变就重排预热。 */
+    dataVersion: Any?,
     contentLeft: Float,
     contentTop: Float,
     contentRight: Float,
     contentBottom: Float,
     pageWidth: Float,
     pageHeight: Float,
+    /** 正文主字号（物理像素）：预热与翻页那次必须是同一个口径，否则预热出来的结果字号不对。 */
+    bodyFontPx: Float,
     fontScale: Float,
     lane: PageNoteLane,
     memo: PageNoteMemo,
     /** 最近翻页方向（+1 前 / -1 后 / 0 无）：预热先排需求最大的一侧。 */
     directionProvider: () -> Int,
-    /** 当前章标注是否已读回来（[AnnotationState.loaded]）：没读回来预热出来的空结果不能存。 */
-    notesReady: Boolean,
 ) {
     val hostRef = rememberUpdatedState(host)
     val dirRef = rememberUpdatedState(directionProvider)
+    val annotationsRef = rememberUpdatedState(annotationsFor)
     LaunchedEffect(
-        pos, host, memo, lane, annotations, annotationChapter, decorRevision, notesReady,
-        contentLeft, contentTop, contentRight, contentBottom, pageWidth, pageHeight, fontScale,
+        pos, host, memo, lane, dataVersion,
+        contentLeft, contentTop, contentRight, contentBottom, pageWidth, pageHeight,
+        bodyFontPx, fontScale,
     ) {
         val anchor = pos ?: return@LaunchedEffect
-        // 标注还没读回来：算出来是空的，存进去就把这一页的旁注永久抹掉了（见 rememberPageNotes）。
-        if (!notesReady) return@LaunchedEffect
         val hostNow = hostRef.value
         // 让出起手那一帧：结算动画与邻页栅格优先（预热是「余量里的活」，不该和用户正在看的
         // 那一帧抢 CPU）。但让路要短——预热跑得越早，下一次翻页越是缓存命中。
@@ -508,10 +541,13 @@ internal fun WarmAdjacentPageNotes(
                 Logger.d("Orilumn.NOTE", "NOTE-WARM skip d=$d reason=no-adjacent")
                 continue
             }
-            if (target.chapter != annotationChapter) {
+            // 这一页所属章的标注还没读回来：算出来是空的，存进去就把这一页的旁注永久抹掉了
+            // （见 rememberPageNotes）。当前章靠进章那次读，邻章靠预读。
+            val chapterAnnotations = annotationsRef.value(target.chapter)
+            if (chapterAnnotations == null) {
                 Logger.d(
                     "Orilumn.NOTE",
-                    "NOTE-WARM skip d=$d reason=chapter target=${target.chapter} cur=$annotationChapter",
+                    "NOTE-WARM skip d=$d reason=no-annotations ch=${target.chapter}",
                 )
                 continue
             }
@@ -527,7 +563,11 @@ internal fun WarmAdjacentPageNotes(
             }
             // 与 rememberPageContent 同一条投影口径（否则预热结果与翻页时那一页不是同一份几何）。
             val content = PageContent(
-                lines = projectDecor(rawLines, target.chapter, annotationDecorRanges(annotations)),
+                lines = projectDecor(
+                    rawLines,
+                    target.chapter,
+                    annotationDecorRanges(chapterAnnotations),
+                ),
                 pageImages = runCatching { hostNow.pageImages(target) }.getOrNull(),
                 imageBitmaps = emptyMap(),
                 pageBackgrounds = runCatching { hostNow.pageBackgrounds(target) }.getOrNull(),
@@ -542,13 +582,14 @@ internal fun WarmAdjacentPageNotes(
                         chapter = target.chapter,
                         charStart = target.slice.charStart,
                         charEnd = target.slice.charEnd,
-                        annotations = annotations,
+                        annotations = chapterAnnotations,
                         contentLeft = contentLeft,
                         contentTop = contentTop,
                         contentRight = contentRight,
                         contentBottom = contentBottom,
                         pageWidth = pageWidth,
                         pageHeight = pageHeight,
+                        bodyFontPx = bodyFontPx,
                         fontScale = fontScale,
                     )
                 }

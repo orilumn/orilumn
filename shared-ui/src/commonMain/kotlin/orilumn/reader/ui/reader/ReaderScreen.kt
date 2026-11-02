@@ -253,7 +253,14 @@ fun ReaderScreen(
     val selectionDrawer = remember { LineWindowDrawer() }
     LaunchedEffect(currentHost, openPos?.chapter) {
         val ch = openPos?.chapter
-        if (ch == null) annotationState.clear() else annotationState.load(ch)
+        if (ch == null) {
+            annotationState.clear()
+        } else {
+            // 相邻章的标注**与本章并行预读**：读者下一步几乎只会翻到这两章，趁现在（还在读本章）
+            // 把它们的标注备好，翻过去那一刻目标页的高亮/划线/旁注首帧就有，不必再等一次库往返。
+            launch { annotationState.prefetchNeighbors(ch) }
+            annotationState.load(ch)
+        }
         selection.clear()
         selectionMenuVisible = false
         magnifierFinger = null
@@ -262,7 +269,11 @@ fun ReaderScreen(
     }
     // 标注清单里删了当前章的标注：重读本章，屏幕上的装饰同步消失（与进章 effect 分离，见参数注释）。
     LaunchedEffect(currentHost, annotationsEpoch) {
-        if (annotationsEpoch > 0) annotationState.reload()
+        if (annotationsEpoch > 0) {
+            annotationState.reload()
+            // 清单删的可能是**别的章**的标注：reload 已把预读快照整批作废，这里顺手重备邻居。
+            launch { annotationState.prefetchNeighbors(annotationState.chapter) }
+        }
     }
     // 版式/参数变化后旧选区坐标不再成立（字符偏移没变，但端点所在行可能变），直接丢弃。
     LaunchedEffect(contentRevision, density) {
@@ -1833,8 +1844,10 @@ fun ReaderScreen(
                 inkColor = profile.fgColor,
                 imgCache = imgCache,
                 bgCache = bgCache,
-                annotations = annotationState.annotations,
-                annotationChapter = annotationState.chapter,
+                // 按**这一页所属章**取标注：跨章翻页时目标页也能带上自己那一章的装饰
+                //（相邻章的标注已预读，见 AnnotationState.prefetchNeighbors）。
+                annotations = annotationState.annotationsFor(fromPos.chapter).orEmpty(),
+                annotationChapter = fromPos.chapter,
                 decorRevision = annotationState.revision,
             )
 
@@ -1854,8 +1867,9 @@ fun ReaderScreen(
                     inkColor = profile.fgColor,
                     imgCache = imgCache,
                     bgCache = bgCache,
-                    annotations = annotationState.annotations,
-                    annotationChapter = annotationState.chapter,
+                    annotations = annotationState.annotationsFor(ctl.targetPos.value?.chapter ?: -1)
+                        .orEmpty(),
+                    annotationChapter = ctl.targetPos.value?.chapter ?: -1,
                     decorRevision = annotationState.revision,
                 )
             } else {
@@ -1939,9 +1953,7 @@ fun ReaderScreen(
                 hostRevision = hostRevision,
                 imgCache = imgCache,
                 bgCache = bgCache,
-                annotations = annotationState.annotations,
-                annotationChapter = annotationState.chapter,
-                decorRevision = annotationState.revision,
+                annotationsFor = annotationState::annotationsFor,
             )
             // 上面 `beforeCommit` 的「整页位图备齐」实现：与 PrerasterOnPrefill 同口径
             //（同一渲染器、同一缓存、同一条取数路径），只是针对**本次落位目标页**。
@@ -1964,8 +1976,8 @@ fun ReaderScreen(
                     contentRevision = liveRevision,
                     imgCache = imgCache,
                     bgCache = bgCache,
-                    annotations = annotationState.annotations,
-                    annotationChapter = annotationState.chapter,
+                    annotations = annotationState.annotationsFor(p.chapter).orEmpty(),
+                    annotationChapter = p.chapter,
                 )
             }
             SideEffect { rasterByRef.value = rasterPageNow }
@@ -2064,7 +2076,7 @@ fun ReaderScreen(
             // 有效性按「那一章的标注代数」判（见 PageNoteMemo），所以这里**不用**拿标注修订号
             // 当键：修订号在换章时会连续 bump，整只换新会让刚看过的上一章一起作废。
             val noteMemo = remember(
-                noteTextSizer, settings.noteFontScale, hostRevision,
+                noteTextSizer, profile.bodyPx, settings.noteFontScale, hostRevision,
                 displayRevision, contentLeft, contentTop, contentRight, contentBottom,
                 pxWidth, pxHeight, annotationState,
             ) { PageNoteMemo(generationOf = annotationState::generationOf) }
@@ -2074,38 +2086,39 @@ fun ReaderScreen(
             WarmAdjacentPageNotes(
                 host = currentHost,
                 pos = openPos,
-                annotations = annotationState.annotations,
-                annotationChapter = annotationState.chapter,
-                decorRevision = annotationState.revision,
+                // 按页所属章取标注：邻页在别的章时用那一章的预读快照（没有就跳过，不拿空表算）。
+                annotationsFor = annotationState::annotationsFor,
+                dataVersion = annotationState.dataVersion,
                 contentLeft = contentLeft,
                 contentTop = contentTop,
                 contentRight = contentRight,
                 contentBottom = contentBottom,
                 pageWidth = pxWidth,
                 pageHeight = pxHeight,
+                bodyFontPx = profile.bodyPx,
                 fontScale = settings.noteFontScale,
                 lane = noteLane,
                 memo = noteMemo,
                 directionProvider = { ctl.session.direction },
-                notesReady = annotationState.loaded && annotationState.chapter == fromPos.chapter,
             )
             val noteBubbles: List<NoteBubble> = rememberPageNotes(
                 content = pageContent,
                 chapter = fromPos.chapter,
                 charStart = fromPos.slice.charStart,
                 charEnd = fromPos.slice.charEnd,
-                annotations = annotationState.annotations,
+                annotations = annotationState.annotationsFor(fromPos.chapter).orEmpty(),
                 contentLeft = contentLeft,
                 contentTop = contentTop,
                 contentRight = contentRight,
                 contentBottom = contentBottom,
                 pageWidth = pxWidth,
                 pageHeight = pxHeight,
+                bodyFontPx = profile.bodyPx,
                 fontScale = settings.noteFontScale,
                 lane = noteLane,
                 memo = noteMemo,
                 decorRevision = annotationState.revision,
-                notesReady = annotationState.loaded && annotationState.chapter == fromPos.chapter,
+                notesReady = annotationState.isReady(fromPos.chapter),
             )
             // 目标页的旁注：翻页时跟着目标页一起滑进来，落地那一刻才不会「凭空冒出来」。
             // 没有目标页时就是空表——不用 `if` 包起来，remember 的位置才稳定。
@@ -2115,19 +2128,20 @@ fun ReaderScreen(
                 chapter = targetPosNow?.chapter ?: fromPos.chapter,
                 charStart = targetPosNow?.slice?.charStart ?: 0,
                 charEnd = targetPosNow?.slice?.charEnd ?: 0,
-                annotations = annotationState.annotations,
+                annotations = annotationState.annotationsFor(targetPosNow?.chapter ?: fromPos.chapter)
+                    .orEmpty(),
                 contentLeft = contentLeft,
                 contentTop = contentTop,
                 contentRight = contentRight,
                 contentBottom = contentBottom,
                 pageWidth = pxWidth,
                 pageHeight = pxHeight,
+                bodyFontPx = profile.bodyPx,
                 fontScale = settings.noteFontScale,
                 lane = noteLane,
                 memo = noteMemo,
                 decorRevision = annotationState.revision,
-                notesReady = annotationState.loaded &&
-                    annotationState.chapter == (targetPosNow?.chapter ?: fromPos.chapter),
+                notesReady = annotationState.isReady(targetPosNow?.chapter ?: fromPos.chapter),
             )
             val NoteBubblesFun: @Composable (List<NoteBubble>) -> Unit = { bubbles ->
                 if (bubbles.isNotEmpty()) {
@@ -2138,7 +2152,8 @@ fun ReaderScreen(
                             // 点旁注 = 打开这条标注的操作栏与输入框（有文字就带出来，可改可删）。
                             // 翻页动画进行中不响应（旁注现在跟着页走，滑动的页面上点一下不该弹编辑态）。
                             // 顺手清掉选区：编辑态与选区不该同时挂着（两套手柄 + 两套绿框只会互相添乱）。
-                            val target = annotationState.annotations.firstOrNull { it.id == id }
+                            val target = annotationState.annotationsFor(fromPos.chapter)
+                                ?.firstOrNull { it.id == id }
                             if (target != null && !ctl.isBusy()) {
                                 selection.clear()
                                 selectionMenuVisible = false
@@ -2251,7 +2266,7 @@ fun ReaderScreen(
             if (menuOn) {
                 // 选区场景：选中的字里已有高亮/划线时，删除作用于**相交的第一条**（列表按起点排序）。
                 val overlapping = if (editing == null) {
-                    annotationState.annotations.firstOrNull {
+                    annotationState.annotationsFor(fromPos.chapter)?.firstOrNull {
                         it.charStart < selection.endExclusive && selection.start < it.charEnd
                     }
                 } else {

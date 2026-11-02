@@ -471,14 +471,17 @@ fun ReaderSettingsPanel(
                     // 批注字体：复用正文那套字体下钻页（同一套系统 / 导入字体列表），
                     // 写入的是旁注覆盖层自己的族，不影响正文。
                     ItemKey(onEnter = { pickSlot = "noteFont"; stack.add(Sub.TextFont) }),
-                    // 批注字号：存的是相对正文旁注默认字号的倍率，显示换算后的实际字号。
+                    // 批注字号：滑条按**字号**走（0.1 一档），存的是相对正文旁注默认字号的倍率，
+                    // 这样正文字号一变旁注等比变，读者看到的读数也能真正细调。
                     sliderKey(
-                        s.noteFontScale.toDouble(),
-                        ReaderSettings.MIN_NOTE_FONT_SCALE.toDouble(),
-                        ReaderSettings.MAX_NOTE_FONT_SCALE.toDouble(),
-                        NOTE_FONT_SCALE_STEP,
-                        apply = { v -> onCommitLight(s.copy(noteFontScale = v.toFloat())) },
-                        fmt = { noteFontSizeLabel(s, it) },
+                        noteFontSizeValue(s),
+                        noteFontSizeMin(s),
+                        noteFontSizeMax(s),
+                        NOTE_FONT_SIZE_STEP,
+                        apply = { v ->
+                            onCommitLight(s.copy(noteFontScale = noteFontScaleFor(s, v)))
+                        },
+                        fmt = { noteFontSizeLabel(it) },
                     ),
                 )
             }
@@ -1208,19 +1211,42 @@ private fun setField(s: ReaderSettings, key: String, v: String) = when (key) {
     else -> s.copy(fontBody = v)
 }
 
-/** 批注字号滑条的步长（倍率）：0.1 一档，正文 18 号时旁注约 13 号，一跳约 1.3px。 */
-private const val NOTE_FONT_SCALE_STEP = 0.1
+/**
+ * 批注字号滑条的步长：**显示字号** 0.1 一档（不是存盘的倍率）。
+ *
+ * 存的是倍率（正文字号一变旁注等比变），但读者看的是右侧那个字号读数；若按「倍率 0.1 一档」
+ * 去走，读数一跳就是 `18 × 0.72 × 0.1 ≈ 1.3` 号，等于根本没有细档（读者报「每一档是 1.3」）。
+ * 所以滑条的值一律用**字号**表示，提交时才换算回倍率。
+ */
+private const val NOTE_FONT_SIZE_STEP = 0.1
+
+/** 批注字号的基准字号：正文主字号 × 旁注比例（倍率 = 1 时旁注多大）。 */
+private fun noteFontBase(s: ReaderSettings): Double =
+    s.fontSize * ReaderSettings.fontScaleToRatio(s.fontScale) * NOTE_BUBBLE_FONT_RATIO
+
+/** 滑条的当前值：旁注实际字号（与「文字」页字号同口径）。 */
+private fun noteFontSizeValue(s: ReaderSettings): Double = noteFontBase(s) * s.noteFontScale
 
 /**
- * 批注字号滑条的显示值：旁注实际字号（与「文字」页字号同口径）。
+ * 滑条值（字号）→ 落盘倍率。
  *
- * = 正文主字号 × 旁注比例 × 倍率。滑条编辑的是倍率，但读者想看的是「多大」——
- * 这样正文字号一变，显示值跟着变，读者能直接看出旁注仍比正文小一号。
+ * 上下限仍按倍率的 [ReaderSettings.MIN_NOTE_FONT_SCALE] / [ReaderSettings.MAX_NOTE_FONT_SCALE] 夹，
+ * 滑条的端点也用同一对边界换算（见 [noteFontSizeMin] / [noteFontSizeMax]）。
  */
-private fun noteFontSizeLabel(s: ReaderSettings, scale: Double): String = String.format(
-    "%.1f",
-    s.fontSize * ReaderSettings.fontScaleToRatio(s.fontScale) * NOTE_BUBBLE_FONT_RATIO * scale,
-)
+private fun noteFontScaleFor(s: ReaderSettings, size: Double): Float =
+    (size / noteFontBase(s)).toFloat()
+        .coerceIn(ReaderSettings.MIN_NOTE_FONT_SCALE, ReaderSettings.MAX_NOTE_FONT_SCALE)
+
+/** 滑条下限：倍率下限换算成字号，并落到 0.1 的整格上（否则每一档都带小数尾巴）。 */
+private fun noteFontSizeMin(s: ReaderSettings): Double =
+    ((noteFontBase(s) * ReaderSettings.MIN_NOTE_FONT_SCALE) * 10.0).roundToLong() / 10.0
+
+/** 滑条上限：倍率上限换算成字号，同样落到 0.1 的整格上。 */
+private fun noteFontSizeMax(s: ReaderSettings): Double =
+    ((noteFontBase(s) * ReaderSettings.MAX_NOTE_FONT_SCALE) * 10.0).roundToLong() / 10.0
+
+/** 滑条右侧读数：就是字号本身，0.1 一档老老实实显示成 0.1。 */
+private fun noteFontSizeLabel(size: Double): String = String.format("%.1f", size)
 
 /** CSS 通用族名（排版主题写进槽位的默认值）→ 中文标签；真正的字族展示由 [fontDisplayByFamily] 给出。 */
 private fun genericFamilyLabel(family: String): String = when (family) {
@@ -1719,16 +1745,16 @@ private fun AnnotationColorPage(
             )
         }
         item {
-            // 滑条编辑的是**倍率**（旁注字号始终跟正文等比），右侧显示换算后的实际字号。
+            // 滑条编辑的是**字号**（读数即所见，0.1 一档）；存盘仍按倍率，正文字号变了旁注等比跟着变。
             UiSliderRow(
                 label = "批注字号",
-                min = ReaderSettings.MIN_NOTE_FONT_SCALE.toDouble(),
-                max = ReaderSettings.MAX_NOTE_FONT_SCALE.toDouble(),
-                step = NOTE_FONT_SCALE_STEP,
-                value = s.noteFontScale.toDouble(),
-                fmt = { noteFontSizeLabel(s, it) },
-                onPreview = { v -> previewLight(s.copy(noteFontScale = v.toFloat())) },
-                onCommit = { v -> commitLight(s.copy(noteFontScale = v.toFloat())) },
+                min = noteFontSizeMin(s),
+                max = noteFontSizeMax(s),
+                step = NOTE_FONT_SIZE_STEP,
+                value = noteFontSizeValue(s),
+                fmt = { noteFontSizeLabel(it) },
+                onPreview = { v -> previewLight(s.copy(noteFontScale = noteFontScaleFor(s, v))) },
+                onCommit = { v -> commitLight(s.copy(noteFontScale = noteFontScaleFor(s, v))) },
                 p = p,
                 labelWidth = labelW,
                 nav = nav,

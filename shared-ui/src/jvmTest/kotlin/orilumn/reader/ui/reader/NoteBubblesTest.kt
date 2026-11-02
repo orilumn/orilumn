@@ -3125,37 +3125,6 @@ class NoteBubblesTest {
         assertTrue(abs(wide - 2) <= 1)
     }
 
-    /** 旁注字号跟**正文**走：本页行窗口以标题开头时（章首 h1 / 页顶 h2 约正文 2 倍），
-     * 取首行字号会把旁注放大到比正文还大（真机：窄页边距只塞得下「用 / va…」）。 */
-    @Test
-    fun `note font follows body text not the heading line`() {
-        fun line(text: String, size: Float) = DrawLine(
-            text = text,
-            range = 0 until text.length,
-            yTop = 0,
-            yBottom = 40,
-            alignment = TextAlign.LEFT,
-            fontSizePx = size,
-            lineHeightRatio = 1.5f,
-            tag = null,
-            families = emptyList(),
-            weight = 400,
-            italic = false,
-            monospace = false,
-            letterSpacingEm = 0f,
-            lineWidthPx = 300,
-        )
-        val page = listOf(
-            line("你好世界", 90f),
-            line("这是一个打印 Hello world 的简单程序：", 45f),
-            line("所有程序都需要能够存储数据，而变量可以帮助您做到这一点。", 45f),
-        )
-        assertEquals(45f, noteBodyFontPx(page), 0.01f)
-        // 整页只有一行（都是标题）时退回那一行的字号，不能返回 0。
-        assertEquals(90f, noteBodyFontPx(listOf(line("你好世界", 90f))), 0.01f)
-        assertEquals(0f, noteBodyFontPx(emptyList()), 0.01f)
-    }
-
     /** 旁注样式可脱离正文单独设置字号、字体与留白（批注样式落地时只换这里）。 */
     @Test
     fun `note style overrides font size family and spacing`() {

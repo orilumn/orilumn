@@ -2077,8 +2077,8 @@ fun ReaderScreen(
             // 有效性按「那一章的标注代数」判（见 PageNoteMemo），所以这里**不用**拿标注修订号
             // 当键：修订号在换章时会连续 bump，整只换新会让刚看过的上一章一起作废。
             val noteMemo = remember(
-                noteTextSizer, profile.bodyPx, settings.noteFontScale, hostRevision,
-                displayRevision, contentLeft, contentTop, contentRight, contentBottom,
+                noteTextSizer, profile.bodyPx, settings.noteFontScale, settings.noteCollapseAll,
+                hostRevision, displayRevision, contentLeft, contentTop, contentRight, contentBottom,
                 pxWidth, pxHeight, annotationState,
             ) { PageNoteMemo(generationOf = annotationState::generationOf) }
             // 换新表就把旧表作废：拖批注字号时每挪一格都会换表，旧表排队的布点请求若照跑，
@@ -2101,6 +2101,7 @@ fun ReaderScreen(
                 pageHeight = pxHeight,
                 bodyFontPx = profile.bodyPx,
                 fontScale = settings.noteFontScale,
+                collapseAll = settings.noteCollapseAll,
                 lane = noteLane,
                 memo = noteMemo,
                 directionProvider = { ctl.session.direction },
@@ -2119,6 +2120,7 @@ fun ReaderScreen(
                 pageHeight = pxHeight,
                 bodyFontPx = profile.bodyPx,
                 fontScale = settings.noteFontScale,
+                collapseAll = settings.noteCollapseAll,
                 lane = noteLane,
                 memo = noteMemo,
                 decorRevision = annotationState.revision,
@@ -2142,6 +2144,7 @@ fun ReaderScreen(
                 pageHeight = pxHeight,
                 bodyFontPx = profile.bodyPx,
                 fontScale = settings.noteFontScale,
+                collapseAll = settings.noteCollapseAll,
                 lane = noteLane,
                 memo = noteMemo,
                 decorRevision = annotationState.revision,

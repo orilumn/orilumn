@@ -39,8 +39,8 @@ object SettingsScope {
         "highlightDefaultSlot", "underlineDefaultSlot",
         "annotationLastKind", "annotationLastLineStyle",
         "noteFont", "noteFontScale",
-        // 旁注框的描边 / 底色 / 文字用色：只改覆盖层怎么画，不碰正文排版。
-        "noteBorder", "noteBackground", "noteTextSameColor",
+        // 旁注画法（折叠 / 描边 / 底色 / 文字用色）：只改覆盖层怎么画，不碰正文排版。
+        "noteCollapseAll", "noteBorder", "noteBackground", "noteTextSameColor",
         // 持久化元数据（只增不改，见 ReaderSettings.schemaVersion KDoc）。
         "schemaVersion",
     )
@@ -137,6 +137,7 @@ fun ReaderSettings.withGlobalFrom(next: ReaderSettings): ReaderSettings = copy(
     annotationLastLineStyle = next.annotationLastLineStyle,
     noteFont = next.noteFont,
     noteFontScale = next.noteFontScale,
+    noteCollapseAll = next.noteCollapseAll,
     noteBorder = next.noteBorder,
     noteBackground = next.noteBackground,
     noteTextSameColor = next.noteTextSameColor,

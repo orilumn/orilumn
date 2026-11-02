@@ -207,6 +207,13 @@ data class ReaderSettings(
      */
     val noteFontScale: Float = 1f,
     /**
+     * **折叠所有批注**（默认关）：整页的批注都退成原文右下角的小图标，不显示文字框。
+     *
+     * 读者想安静读正文时打开。折叠态下旁注框的描边 / 底色 / 同色字三个开关都不起作用
+     * （小图标不是文字，有自己的固定画法）。落盘口径同 [noteFont]（纯全局，换书沿用）。
+     */
+    val noteCollapseAll: Boolean = false,
+    /**
      * 旁注框的**描边**开关（默认开）。只作用于旁注覆盖层，与 [noteFont] 同口径：
      * 纯全局、不进版式比较、面板走无重排提交。
      */
@@ -361,6 +368,8 @@ data class ReaderSettings(
         // 批注字体 / 字号：只改旁注覆盖层，不进版式（面板走 onCommitLight）。
         noteFont = "",
         noteFontScale = 1f,
+        // 折叠所有批注：只改覆盖层怎么画（整页退成小图标），同样不进版式。
+        noteCollapseAll = false,
         // 旁注框的描边 / 底色 / 文字用色：同样只改覆盖层怎么画。
         noteBorder = true,
         noteBackground = true,
@@ -572,6 +581,7 @@ data class ReaderSettings(
                     noteFont = SettingsJson.optString(o, "noteFont", d.noteFont),
                     noteFontScale = SettingsJson.optDouble(o, "noteFontScale", d.noteFontScale.toDouble())
                         .toFloat().coerceIn(MIN_NOTE_FONT_SCALE, MAX_NOTE_FONT_SCALE),
+                    noteCollapseAll = SettingsJson.optBoolean(o, "noteCollapseAll", d.noteCollapseAll),
                     noteBorder = SettingsJson.optBoolean(o, "noteBorder", d.noteBorder),
                     noteBackground = SettingsJson.optBoolean(o, "noteBackground", d.noteBackground),
                     noteTextSameColor = SettingsJson.optBoolean(o, "noteTextSameColor", d.noteTextSameColor),

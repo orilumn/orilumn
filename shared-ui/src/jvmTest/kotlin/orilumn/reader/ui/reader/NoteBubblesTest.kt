@@ -158,6 +158,7 @@ class NoteBubblesTest {
         arrowInk: List<Rect> = emptyList(),
         sizer: NoteTextSizer = EstimatedNoteTextSizer,
         fontPx: Float = 20f,
+        collapseAll: Boolean = false,
     ) = noteBubblePlacements(
         noteInk = notes,
         obstacles = NoteObstacles(
@@ -175,6 +176,7 @@ class NoteBubblesTest {
         fontPx = fontPx,
         pageBottom = pageBottom,
         noteTextSizer = sizer,
+        collapseAll = collapseAll,
     )
 
     private fun boxOf(b: NoteBubble) = rect(
@@ -4244,6 +4246,70 @@ class NoteBubblesTest {
                     "两条框不能重叠：${bubbles[i].annotationId}=$a / ${bubbles[j].annotationId}=$b $dbg",
                     !a.overlaps(b),
                 )
+            }
+        }
+    }
+
+    /** 折叠所有批注：每条都退成小图标，不画文字框、不画引线，且仍贴着各自的原文右下角。 */
+    @Test
+    fun `collapse all turns every note into an icon at its own anchor`() {
+        val a = rect(0f, 0f, 200f, 40f)
+        val b = rect(0f, 300f, 500f, 340f)
+        val bubbles = place(
+            notes = listOf(
+                noteInk(1, listOf(a), text = "第一句批注"),
+                noteInk(2, listOf(b), text = "第二句批注"),
+            ),
+            textInk = listOf(a, b),
+            collapseAll = true,
+        )
+        assertEquals("每条批注都还在", 2, bubbles.size)
+        assertTrue("折叠态一律是小图标", bubbles.all { it.compact })
+        assertTrue("小图标没有引线", bubbles.all { it.arrow == null })
+        assertTrue("小图标只占一行", bubbles.all { it.maxLines == 1 })
+        val byId = bubbles.associateBy { it.annotationId }
+        listOf(1L to a, 2L to b).forEach { (id, anchor) ->
+            val icon = byId.getValue(id)
+            val iconRect = rect(icon.leftPx, icon.topPx, icon.leftPx + icon.widthPx, icon.topPx + icon.heightPx)
+            assertTrue("图标应贴在原文右下角：$iconRect vs $anchor", iconRect.left >= anchor.right - 0.01f)
+            assertTrue("图标应在原文下缘之下：$iconRect vs $anchor", iconRect.bottom >= anchor.bottom - 0.01f)
+            assertEquals(
+                "图标不该压住它标注的那段原文",
+                false,
+                iconRect.overlaps(rect(anchor.left, anchor.top, anchor.right, anchor.bottom)),
+            )
+        }
+        val r1 = rect(
+            byId.getValue(1L).leftPx, byId.getValue(1L).topPx,
+            byId.getValue(1L).leftPx + byId.getValue(1L).widthPx,
+            byId.getValue(1L).topPx + byId.getValue(1L).heightPx,
+        )
+        val r2 = rect(
+            byId.getValue(2L).leftPx, byId.getValue(2L).topPx,
+            byId.getValue(2L).leftPx + byId.getValue(2L).widthPx,
+            byId.getValue(2L).topPx + byId.getValue(2L).heightPx,
+        )
+        assertTrue("两个图标不该叠在一起", !r1.overlaps(r2))
+    }
+
+    /** 折叠态下多条批注压在同一个锚点时，图标沿右下角往下错开，不互相盖住。 */
+    @Test
+    fun `collapsed icons on the same anchor stagger downward`() {
+        val anchor = rect(0f, 0f, 200f, 40f)
+        val bubbles = place(
+            notes = listOf(
+                noteInk(1, listOf(anchor), text = "第一条"),
+                noteInk(2, listOf(anchor), text = "第二条"),
+                noteInk(3, listOf(anchor), text = "第三条"),
+            ),
+            textInk = listOf(anchor),
+            collapseAll = true,
+        )
+        assertEquals(3, bubbles.size)
+        val rects = bubbles.map { b -> rect(b.leftPx, b.topPx, b.leftPx + b.widthPx, b.topPx + b.heightPx) }
+        for (i in rects.indices) {
+            for (j in i + 1 until rects.size) {
+                assertTrue("图标 $i 与 $j 叠在一起了", !rects[i].overlaps(rects[j]))
             }
         }
     }

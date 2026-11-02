@@ -251,7 +251,7 @@ class ReaderSettingsTest {
             "highlightDefaultSlot", "underlineDefaultSlot",
             "annotationLastKind", "annotationLastLineStyle",
             "noteFont", "noteFontScale",
-            "noteBorder", "noteBackground", "noteTextSameColor",
+            "noteCollapseAll", "noteBorder", "noteBackground", "noteTextSameColor",
         ).forEach { assertTrue("missing key $it", obj.containsKey(it)) }
         assertNotNull(obj.keys)
     }

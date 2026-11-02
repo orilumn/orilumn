@@ -57,9 +57,11 @@ import orilumn.reader.engine.skia.PageImage
  *
  * **两种形态（§2.1）**，由 [compact] 区分：
  * - **文字框**（`compact = false`，常态）：按 [maxLines] 行显示批注正文，配 [arrow] 指向原文；
- * - **小图标**（`compact = true`，兜底）：整页没有能读的空白时才出现，在原文右下角画一个小椭圆
- *   省略号；[leftPx]/[topPx] 是椭圆左上角、[widthPx] 是直径、[maxLines] 恒为 1。
- *   这个形态**不画箭头**，也不参与其他旁注的避让。
+ * - **小图标**（`compact = true`）：在原文右下角画一个小椭圆省略号。两种来源——整页没有能读的
+ *   空白时的**兜底**，以及读者打开「折叠所有批注」后的**常态**（[noteBubblePlacements] 的
+ *   `collapseAll`）。[leftPx]/[topPx] 是椭圆左上角、[widthPx] 是直径、[maxLines] 恒为 1。
+ *   这个形态**不画箭头**，也不参与其他旁注的避让；**不是文字**，底色与描边是自己的固定画法，
+ *   不跟批注框的描边 / 底色两个开关走。
  *
  * @property annotationId 这条批注属于哪条标注（点它 = 回去改这句话）。
  * @property text 批注正文（完整文本，超出可用行数由 Text 自己省略）。
@@ -70,7 +72,7 @@ import orilumn.reader.engine.skia.PageImage
  * @property fontPx 批注字号（像素）：比正文小一号，读起来不抢正文。
  * @property arrow 指向原文的箭头：小图标形态恒为 `null`；文字框恒有箭头
  *   （只有框已经贴住原文、连一根线都画不下时才为 `null`）。
- * @property compact 小图标形态（见上）：只在一条都排不下时由调用方置位。
+ * @property compact 小图标形态（见上）：一条都排不下时由布点兜底置位，或读者折叠所有批注。
  */
 internal data class NoteBubble(
     val annotationId: Long,
@@ -1998,6 +2000,11 @@ internal fun noteBubblePlacements(
     pageBottom: Float = contentBottom,
     noteStyle: NoteStyle = NoteStyle.forBody(fontPx),
     noteTextSizer: NoteTextSizer = EstimatedNoteTextSizer,
+    /**
+     * 读者打开了「折叠所有批注」：每条批注都直接退成原文右下角的小图标，
+     * 不量空白、不排文字框、不画引线（`null` = 照常布点）。
+     */
+    collapseAll: Boolean = false,
 ): List<NoteBubble> {
     if (noteInk.isEmpty()) return emptyList()
     // 分阶段计时：真机上「一页十条批注」慢的时候，要知道是切空白、量候选、还是排位置慢。
@@ -2026,6 +2033,45 @@ internal fun noteBubblePlacements(
         pageBounds.right - metrics.edge,
         pageBounds.bottom - metrics.edge,
     )
+
+    // 固定顺序：锚点自上而下，同高按 id —— 布点结果只跟输入几何有关，可复现。
+    val ordered = noteInk
+        .filter { it.text.isNotBlank() && it.rects.isNotEmpty() }
+        .sortedWith(compareBy({ it.rects.minOf { r -> r.top } }, { it.annotationId }))
+    if (ordered.isEmpty()) return emptyList()
+
+    // 一条都分不到位置的批注不再消失：在原文右下角退成小椭圆（§1.6）。
+    val iconW = max(small * NOTE_ICON_WIDTH_RATIO, 4f)
+    val iconH = max(small * NOTE_ICON_HEIGHT_RATIO, 3f)
+    // 同一个锚点掉出多个小椭圆时，沿右下角向下错开一个图标高（§1.6）。
+    val icons = ArrayList<Rect>()
+    fun iconBubble(note: NoteInk): NoteBubble {
+        var icon = noteIconRect(rectUnion(note.rects), gap * 0.4f, iconW, iconH, pageBounds)
+        var guard = 0
+        while (icons.any { it.overlaps(icon) } && guard < 16) {
+            // 整个图标一起下移：上下边必须同加，只抬下边会把矩形压成零高度，
+            // 后面那条就再也判不出重叠（三条批注压在同一句上时会叠成一摞）。
+            val step = iconH + marginY
+            icon = Rect(icon.left, icon.top + step, icon.right, icon.bottom + step)
+            guard++
+        }
+        icons += icon
+        return NoteBubble(
+            annotationId = note.annotationId,
+            text = note.text.trim(),
+            leftPx = icon.left,
+            topPx = icon.top,
+            widthPx = iconW,
+            heightPx = iconH,
+            maxLines = 1,
+            argb = note.argb,
+            fontPx = small,
+            compact = true,
+        )
+    }
+    // 读者打开「折叠所有批注」：整页只留小图标，不量空白也不排文字框
+    //（省掉切空白 / 量候选两步，翻页时这一页的旁注几乎不花时间）。
+    if (collapseAll) return ordered.map { iconBubble(it) }
     // 正文行：优先用渲染层给的「行框 + 块序号」（§1.5）；缺失时退回按 y 合并行框、块号一律 0。
     val rawLines = obstacles.textLines.ifEmpty {        // 没有块序号时按「行距 > 行高 × 1.5」断段（§1.5 的退化路径）。
         val merged = mergeTextLineRects(obstacles.textInk, body)
@@ -2063,11 +2109,6 @@ internal fun noteBubblePlacements(
         minH = lineH,
     )
     val freeMs = placeMark.elapsedNow().inWholeMilliseconds
-    // 固定顺序：锚点自上而下，同高按 id —— 布点结果只跟输入几何有关，可复现。
-    val ordered = noteInk
-        .filter { it.text.isNotBlank() && it.rects.isNotEmpty() }
-        .sortedWith(compareBy({ it.rects.minOf { r -> r.top } }, { it.annotationId }))
-    if (ordered.isEmpty()) return emptyList()
 
     // 同一行有多条批注时，落在这一行上方 / 下方的框要让过**左侧那条**首字那一格
     // （2026-10-24 用户定口：第一个字的下方 / 上方要空着，好让它的引线接进去）。
@@ -2234,33 +2275,11 @@ internal fun noteBubblePlacements(
     )
     val assignMs = placeMark.elapsedNow().inWholeMilliseconds - freeMs - candMs
     val chosen = choices.associateBy { it.note.annotationId }
-    // 一条都分不到的批注不再消失：在原文右下角退成小椭圆（§1.6）。
-    val iconW = max(small * NOTE_ICON_WIDTH_RATIO, 4f)
-    val iconH = max(small * NOTE_ICON_HEIGHT_RATIO, 3f)
-    // 同一个锚点掉出多个小椭圆时，沿右下角向下错开一个图标高（§1.6）。
-    val icons = ArrayList<Rect>()
+    // 一条都分不到的批注退成小椭圆（[iconBubble]）。
     val out = ordered.map { note ->
         val choice = chosen[note.annotationId]
         if (choice == null) {
-            var icon = noteIconRect(rectUnion(note.rects), gap * 0.4f, iconW, iconH, pageBounds)
-            var guard = 0
-            while (icons.any { it.overlaps(icon) } && guard < 16) {
-                icon = Rect(icon.left, icon.top + iconH + marginY, icon.right, icon.bottom + marginY)
-                guard++
-            }
-            icons += icon
-            NoteBubble(
-                annotationId = note.annotationId,
-                text = note.text.trim(),
-                leftPx = icon.left,
-                topPx = icon.top,
-                widthPx = iconW,
-                heightPx = iconH,
-                maxLines = 1,
-                argb = note.argb,
-                fontPx = small,
-                compact = true,
-            )
+            iconBubble(note)
         } else {
             NoteBubble(
                 annotationId = note.annotationId,
@@ -6794,20 +6813,11 @@ internal fun NoteBubbles(
                             .width(with(d) { b.widthPx.toDp() })
                             .height(with(d) { h.toDp() })
                             .clip(RoundedCornerShape(50))
-                            .then(
-                                if (showBackground) {
-                                    Modifier.background(tint.copy(alpha = 0.12f))
-                                } else {
-                                    Modifier
-                                },
-                            )
-                            .then(
-                                if (showBorder) {
-                                    Modifier.border(1.dp, tint.copy(alpha = 0.75f), RoundedCornerShape(50))
-                                } else {
-                                    Modifier
-                                },
-                            ),
+                            // 小图标不是文字：底色与描边是它的**固定画法**，不跟
+                            // 「显示批注边框 / 显示批注背景色」两个开关走 —— 那两个开关管的是
+                            // 文字框，关掉它们不该把图标也弄成三颗孤零零的点（甚至看不见）。
+                            .background(tint.copy(alpha = 0.12f))
+                            .border(1.dp, tint.copy(alpha = 0.75f), RoundedCornerShape(50)),
                     ) {
                         Canvas(modifier = Modifier.fillMaxSize()) {
                             val dot = size.height * 0.11f

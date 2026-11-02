@@ -131,6 +131,7 @@ internal class PageNoteLane(
         pageHeight: Float,
         bodyFontPx: Float,
         fontScale: Float,
+        collapseAll: Boolean,
     ): List<NoteBubble> = computePageNotes(
         content = content,
         chapter = chapter,
@@ -147,6 +148,7 @@ internal class PageNoteLane(
         textSizer = textSizer,
         bodyFontPx = bodyFontPx,
         fontScale = fontScale,
+        collapseAll = collapseAll,
     )
 }
 
@@ -191,6 +193,8 @@ internal fun rememberPageNotes(
     bodyFontPx: Float,
     /** 读者在面板上拖的旁注倍率（`ReaderSettings.noteFontScale`，1 = 默认 0.72 正文）。 */
     fontScale: Float,
+    /** 读者打开了「折叠所有批注」（`ReaderSettings.noteCollapseAll`）：整页只留小图标。 */
+    collapseAll: Boolean,
     lane: PageNoteLane,
     memo: PageNoteMemo,
     /** 标注修订号（[AnnotationState.revision]）：只当「这一页要重算一遍」的触发键，不进缓存判据。 */
@@ -269,6 +273,7 @@ internal fun rememberPageNotes(
                         pageHeight = geom.pageHeight,
                         bodyFontPx = bodyFontPx,
                         fontScale = fontScale,
+                        collapseAll = collapseAll,
                     )
                 }
             } ?: return@withContext
@@ -309,6 +314,7 @@ private fun computePageNotes(
     textSizer: NoteTextSizer,
     bodyFontPx: Float,
     fontScale: Float,
+    collapseAll: Boolean,
 ): List<NoteBubble> {
     val lines = content.lines.orEmpty()
     val shift = if (lines.isEmpty()) {
@@ -328,86 +334,101 @@ private fun computePageNotes(
     // 「整行排满」误判成「右侧还有空地」，也会把段内字符坐标与章内坐标比错。
     // 四类障碍：文字逐字墨迹（与画出来的字同源）+ 列表圆点 / 编号 + 图形 + 线条。
     // 表格整体暂时没有只读几何入口（D-29 前置），先不传。
-    val pageInk = pageInkRects(
-        drawer = drawer,
-        lines = lines,
-        chapter = chapter,
-        charStart = charStart,
-        charEnd = charEnd,
-        pageImages = content.pageImages,
-        pageBackgrounds = content.pageBackgrounds,
-        frameLead = content.pageFrameLead,
-        contentLeft = contentLeft,
-        contentTop = contentTop,
-    ) + pageMarkerRects(
-        drawer = drawer,
-        lines = lines,
-        chapter = chapter,
-        charStart = charStart,
-        charEnd = charEnd,
-        pageImages = content.pageImages,
-        pageBackgrounds = content.pageBackgrounds,
-        frameLead = content.pageFrameLead,
-        contentLeft = contentLeft,
-        contentTop = contentTop,
-    )
+    // 折叠所有批注时整页只有小图标：图标只认「这段原文的右下角」，四类障碍、逐字墨迹、
+    // 行的块序号一概用不上 —— 全部跳过（这是本页最贵的一笔几何）。
+    val pageInk = if (collapseAll) {
+        emptyList()
+    } else {
+        pageInkRects(
+            drawer = drawer,
+            lines = lines,
+            chapter = chapter,
+            charStart = charStart,
+            charEnd = charEnd,
+            pageImages = content.pageImages,
+            pageBackgrounds = content.pageBackgrounds,
+            frameLead = content.pageFrameLead,
+            contentLeft = contentLeft,
+            contentTop = contentTop,
+        ) + pageMarkerRects(
+            drawer = drawer,
+            lines = lines,
+            chapter = chapter,
+            charStart = charStart,
+            charEnd = charEnd,
+            pageImages = content.pageImages,
+            pageBackgrounds = content.pageBackgrounds,
+            frameLead = content.pageFrameLead,
+            contentLeft = contentLeft,
+            contentTop = contentTop,
+        )
+    }
     // 本页**所有**划线标注的落墨带（不只是有批注的那几条）：引线不得压在上面，
     // 行间中线也得按它们的下缘量——波浪线比字墨迹低一截，只按墨迹量，
     // 横穿的中线正好落在波峰上（2026-10-31 真机「函数体」）。
-    val annotationLines = annotations
-        .filter {
-            it.chapter == chapter &&
-                it.kind == AnnotationKind.Underline &&
-                it.charEnd > charStart &&
-                it.charStart < charEnd
-        }
-        .flatMap { a ->
-            pageAnnotationLineRects(
+    val annotationLines = if (collapseAll) {
+        emptyList()
+    } else {
+        annotations
+            .filter {
+                it.chapter == chapter &&
+                    it.kind == AnnotationKind.Underline &&
+                    it.charEnd > charStart &&
+                    it.charStart < charEnd
+            }
+            .flatMap { a ->
+                pageAnnotationLineRects(
+                    drawer = drawer,
+                    lines = lines,
+                    chapter = chapter,
+                    annotation = a,
+                    pageImages = content.pageImages,
+                    pageBackgrounds = content.pageBackgrounds,
+                    frameLead = content.pageFrameLead,
+                    contentLeft = contentLeft,
+                    contentTop = contentTop,
+                )
+            }
+    }
+    // 折叠态不排文字框、不画引线：四类障碍与逐字墨迹一概不用。
+    val obstacles = if (collapseAll) {
+        NoteObstacles()
+    } else {
+        noteObstacles(
+            textInk = pageInk,
+            pageImages = content.pageImages,
+            pageBackgrounds = content.pageBackgrounds,
+            shift = shift,
+            contentLeft = contentLeft,
+            // 箭头要能穿两字之间与标点前后：另给一份逐字墨迹（方案 §6.3）。
+            arrowInk = pageGlyphRects(
                 drawer = drawer,
                 lines = lines,
                 chapter = chapter,
-                annotation = a,
+                charStart = charStart,
+                charEnd = charEnd,
                 pageImages = content.pageImages,
                 pageBackgrounds = content.pageBackgrounds,
                 frameLead = content.pageFrameLead,
                 contentLeft = contentLeft,
                 contentTop = contentTop,
-            )
-        }
-    val obstacles = noteObstacles(
-        textInk = pageInk,
-        pageImages = content.pageImages,
-        pageBackgrounds = content.pageBackgrounds,
-        shift = shift,
-        contentLeft = contentLeft,
-        // 箭头要能穿两字之间与标点前后：另给一份逐字墨迹（方案 §6.3）。
-        arrowInk = pageGlyphRects(
-            drawer = drawer,
-            lines = lines,
-            chapter = chapter,
-            charStart = charStart,
-            charEnd = charEnd,
-            pageImages = content.pageImages,
-            pageBackgrounds = content.pageBackgrounds,
-            frameLead = content.pageFrameLead,
-            contentLeft = contentLeft,
-            contentTop = contentTop,
-        ),
-        // 布点阶梯要「隔几行 / 本段」：带上每行的块序号与行序（方案 §1.5）。
-        textLines = pageTextLines(
-            drawer = drawer,
-            lines = lines,
-            chapter = chapter,
-            charStart = charStart,
-            charEnd = charEnd,
-            pageImages = content.pageImages,
-            pageBackgrounds = content.pageBackgrounds,
-            frameLead = content.pageFrameLead,
-            contentLeft = contentLeft,
-            contentTop = contentTop,
-        ),
-        arrowLines = annotationLines,
-    )
+            ),
+            // 布点阶梯要「隔几行 / 本段」：带上每行的块序号与行序（方案 §1.5）。
+            textLines = pageTextLines(
+                drawer = drawer,
+                lines = lines,
+                chapter = chapter,
+                charStart = charStart,
+                charEnd = charEnd,
+                pageImages = content.pageImages,
+                pageBackgrounds = content.pageBackgrounds,
+                frameLead = content.pageFrameLead,
+                contentLeft = contentLeft,
+                contentTop = contentTop,
+            ),
+            arrowLines = annotationLines,
+        )
+    }
     val noteLayoutMark = TimeSource.Monotonic.markNow()
     val noteInkList = notes.mapNotNull { a ->
             val rects = pageInkRects(
@@ -431,31 +452,40 @@ private fun computePageNotes(
                     argb = a.color ?: annotationFallbackColor(a.kind),
                     rects = rects,
                     // 箭头指向与避让都按逐字墨迹，不把整行当一个黑块。
-                    arrowRects = pageGlyphRects(
-                        drawer = drawer,
-                        lines = lines,
-                        chapter = chapter,
-                        charStart = a.charStart,
-                        charEnd = a.charEnd,
-                        pageImages = content.pageImages,
-                        pageBackgrounds = content.pageBackgrounds,
-                        frameLead = content.pageFrameLead,
-                        contentLeft = contentLeft,
-                        contentTop = contentTop,
-                    ),
+                    // 折叠态没有引线，这份逐字几何不用算。
+                    arrowRects = if (collapseAll) {
+                        emptyList()
+                    } else {
+                        pageGlyphRects(
+                            drawer = drawer,
+                            lines = lines,
+                            chapter = chapter,
+                            charStart = a.charStart,
+                            charEnd = a.charEnd,
+                            pageImages = content.pageImages,
+                            pageBackgrounds = content.pageBackgrounds,
+                            frameLead = content.pageFrameLead,
+                            contentLeft = contentLeft,
+                            contentTop = contentTop,
+                        )
+                    },
                     // 划线标注：箭头进得行盒，但不得触及这条线（规则第 9 条）。
                     rowBoxEntry = a.kind == AnnotationKind.Underline,
-                    underlineRects = pageAnnotationLineRects(
-                        drawer = drawer,
-                        lines = lines,
-                        chapter = chapter,
-                        annotation = a,
-                        pageImages = content.pageImages,
-                        pageBackgrounds = content.pageBackgrounds,
-                        frameLead = content.pageFrameLead,
-                        contentLeft = contentLeft,
-                        contentTop = contentTop,
-                    ),
+                    underlineRects = if (collapseAll) {
+                        emptyList()
+                    } else {
+                        pageAnnotationLineRects(
+                            drawer = drawer,
+                            lines = lines,
+                            chapter = chapter,
+                            annotation = a,
+                            pageImages = content.pageImages,
+                            pageBackgrounds = content.pageBackgrounds,
+                            frameLead = content.pageFrameLead,
+                            contentLeft = contentLeft,
+                            contentTop = contentTop,
+                        )
+                    },
                 )
             }
         }
@@ -474,6 +504,7 @@ private fun computePageNotes(
         fontPx = bodyFontPx * fontScale,
         pageBottom = pageHeight,
         noteTextSizer = textSizer,
+        collapseAll = collapseAll,
     )
     // 真机计时留档（P5）：只在按页缓存失效时打一行，翻页 / 改批注才出现。
     // geo = 本页整页几何（行 / 逐字墨迹 / 圆点），ink = 各条批注自己的墨迹，
@@ -549,6 +580,8 @@ internal fun WarmAdjacentPageNotes(
     /** 正文主字号（物理像素）：预热与翻页那次必须是同一个口径，否则预热出来的结果字号不对。 */
     bodyFontPx: Float,
     fontScale: Float,
+    /** 折叠所有批注（同 [rememberPageNotes]）：预热出来的也是小图标，翻过去直接命中。 */
+    collapseAll: Boolean,
     lane: PageNoteLane,
     memo: PageNoteMemo,
     /** 最近翻页方向（+1 前 / -1 后 / 0 无）：预热先排需求最大的一侧。 */
@@ -560,7 +593,7 @@ internal fun WarmAdjacentPageNotes(
     LaunchedEffect(
         pos, host, memo, lane, dataVersion,
         contentLeft, contentTop, contentRight, contentBottom, pageWidth, pageHeight,
-        bodyFontPx, fontScale,
+        bodyFontPx, fontScale, collapseAll,
     ) {
         val anchor = pos ?: return@LaunchedEffect
         val hostNow = hostRef.value
@@ -630,6 +663,7 @@ internal fun WarmAdjacentPageNotes(
                             pageHeight = pageHeight,
                             bodyFontPx = bodyFontPx,
                             fontScale = fontScale,
+                            collapseAll = collapseAll,
                         )
                     }
                 } ?: return@withContext

@@ -483,10 +483,22 @@ fun ReaderSettingsPanel(
                         },
                         fmt = { noteFontSizeLabel(it) },
                     ),
+                    // 折叠所有批注：整页只留原文右下角的小图标。纯像素开关，走无重排提交。
+                    ItemKey(onEnter = { onCommitLight(s.copy(noteCollapseAll = !s.noteCollapseAll)) }),
                     // 旁注框怎么画：描边 / 底色 / 文字用标注色。纯像素开关，走无重排提交。
-                    ItemKey(onEnter = { onCommitLight(s.copy(noteBorder = !s.noteBorder)) }),
-                    ItemKey(onEnter = { onCommitLight(s.copy(noteBackground = !s.noteBackground)) }),
-                    ItemKey(onEnter = { onCommitLight(s.copy(noteTextSameColor = !s.noteTextSameColor)) }),
+                    // 折叠态下小图标有自己的固定画法，这三个开关不生效（下面渲染时置灰）。
+                    ItemKey(
+                        enabled = !s.noteCollapseAll,
+                        onEnter = { onCommitLight(s.copy(noteBorder = !s.noteBorder)) },
+                    ),
+                    ItemKey(
+                        enabled = !s.noteCollapseAll,
+                        onEnter = { onCommitLight(s.copy(noteBackground = !s.noteBackground)) },
+                    ),
+                    ItemKey(
+                        enabled = !s.noteCollapseAll,
+                        onEnter = { onCommitLight(s.copy(noteTextSameColor = !s.noteTextSameColor)) },
+                    ),
                 )
             }
             Sub.Theme -> listOf(
@@ -1765,15 +1777,28 @@ private fun AnnotationColorPage(
                 index = 8,
             )
         }
+        // 折叠所有批注：整页退成原文右下角的小图标。只改覆盖层像素，走无重排提交。
+        item {
+            SetSwitch(
+                label = "折叠所有批注",
+                checked = s.noteCollapseAll,
+                onChange = { commitLight(s.copy(noteCollapseAll = it)) },
+                p = p,
+                nav = nav,
+                index = 9,
+            )
+        }
         // 旁注框的三种画法：只改覆盖层像素，走无重排提交（与上面两项同口径）。
+        // 折叠态下页面上只剩小图标，小图标不是文字、有自己的固定画法，这三项一并置灰。
         item {
             SetSwitch(
                 label = "显示批注边框",
                 checked = s.noteBorder,
                 onChange = { commitLight(s.copy(noteBorder = it)) },
                 p = p,
+                enabled = !s.noteCollapseAll,
                 nav = nav,
-                index = 9,
+                index = 10,
             )
         }
         item {
@@ -1782,8 +1807,9 @@ private fun AnnotationColorPage(
                 checked = s.noteBackground,
                 onChange = { commitLight(s.copy(noteBackground = it)) },
                 p = p,
+                enabled = !s.noteCollapseAll,
                 nav = nav,
-                index = 10,
+                index = 11,
             )
         }
         item {
@@ -1792,8 +1818,9 @@ private fun AnnotationColorPage(
                 checked = s.noteTextSameColor,
                 onChange = { commitLight(s.copy(noteTextSameColor = it)) },
                 p = p,
+                enabled = !s.noteCollapseAll,
                 nav = nav,
-                index = 11,
+                index = 12,
             )
         }
         item { Spacer(modifier = Modifier.height(24.dp)) }

@@ -40,6 +40,27 @@ internal class PageNoteMemo(
     private val entries = LinkedHashMap<String, Entry>()
 
     /**
+     * 这张表还归当前组合所有吗：换新表时旧表由宿主 [dispose]，排队中的布点请求随之作废。
+     *
+     * 布点车道是**单线程排队**，而读者拖批注字号时每挪一格都会换一张新表（字号是表的键）。
+     * 旧表的请求若不拦，就会把车道堵死几十秒——眼前这一页的批注看起来「再也不出来了」，
+     * 翻页也只能排在它们后面（真机 2026-11-02：拖 6 秒，车道堵了 94 秒才轮到当前页）。
+     * 车道起算前先看这个标志：表已换掉就直接空手退出。**只挡还没起算的那一笔**，
+     * 已经算起来的仍跑完并落表（快翻打断时结果不白算，见 [rememberPageNotes]）。
+     *
+     * 只在主线程写；车道线程只读，故 `@Volatile`。
+     */
+    @Volatile
+    var alive: Boolean = true
+        private set
+
+    /** 换新表时调用：旧表连同排队中的结果一起作废。 */
+    fun dispose() {
+        alive = false
+        entries.clear()
+    }
+
+    /**
      * 取一页的结果；取到就算「刚用过」（挪到队尾，少被挤掉）。
      *
      * 有效性按**这一章自己的标注代数**判，而不是「全局修订号一变就把整只缓存换新」：
@@ -185,7 +206,10 @@ internal fun rememberPageNotes(
 ): List<NoteBubble> {
     // 页身份键：章 + 页区间（见 [pageNoteKey]）。预热方也只有 ReaderPos，必须能算出同一个键。
     val pageKey = pageNoteKey(chapter, charStart, charEnd)
-    var bubbles by remember(pageKey, memo, decorRevision) {
+    // 键只有页身份：改字号 / 改版式会让 `memo` 整只换新，但**这一页还是这一页**——
+    // 此时保留旧结果先顶着，等新的布点算完再换（几百毫秒），页面不会先空一帧再冒出来。
+    // 换页才清空（否则会拿上一页的旁注摆在新页上）。
+    var bubbles by remember(pageKey) {
         // 命中缓存的那一页直接有结果（翻页的当前页、落地后的新页都走这里）：
         // 首帧就有旁注，不会先空一帧再冒出来。
         mutableStateOf(memo.get(pageKey, chapter).orEmpty())
@@ -222,25 +246,35 @@ internal fun rememberPageNotes(
         }
         // 算完就写缓存，**不受取消影响**：快翻/重组打断这一轮时，这一页的结果照样留下，
         // 下次进来是命中而不是重算（布点几百毫秒，白算一次就是肉眼可见的晚到）。
+        // 但**表已经换掉**（改字号 / 改版式）时结果没人要：起算前就退出，别占住单线程车道
+        // （见 [PageNoteMemo.alive]）。排队的请求在车道里再查一次，已经起算的照旧跑完。
         withContext(NonCancellable) {
+            if (!memo.alive) return@withContext
             val geom = geomNow
             val computed = withContext(lane.dispatcher) {
-                lane.compute(
-                    content = c,
-                    chapter = chapter,
-                    charStart = charStart,
-                    charEnd = charEnd,
-                    annotations = annotationsNow,
-                    contentLeft = geom.left,
-                    contentTop = geom.top,
-                    contentRight = geom.right,
-                    contentBottom = geom.bottom,
-                    pageWidth = geom.pageWidth,
-                    pageHeight = geom.pageHeight,
-                    bodyFontPx = bodyFontPx,
-                    fontScale = fontScale,
-                )
-            }
+                if (!memo.alive) {
+                    null
+                } else {
+                    lane.compute(
+                        content = c,
+                        chapter = chapter,
+                        charStart = charStart,
+                        charEnd = charEnd,
+                        annotations = annotationsNow,
+                        contentLeft = geom.left,
+                        contentTop = geom.top,
+                        contentRight = geom.right,
+                        contentBottom = geom.bottom,
+                        pageWidth = geom.pageWidth,
+                        pageHeight = geom.pageHeight,
+                        bodyFontPx = bodyFontPx,
+                        fontScale = fontScale,
+                    )
+                }
+            } ?: return@withContext
+            // 结果只写回还活着的那张表：旧的算完时表已经换掉，它的结果不能盖到新结果上
+            //（`bubbles` 这个状态跨表保留，见上面 remember 的注释）。
+            if (!memo.alive) return@withContext
             memo.put(pageKey, chapter, computed)
             bubbles = computed
         }
@@ -576,23 +610,30 @@ internal fun WarmAdjacentPageNotes(
                 pageFrameLead = runCatching { hostNow.pageFrameLead(target) }.getOrDefault(0),
             )
             withContext(NonCancellable) {
+                // 表已被换掉（改字号 / 改版式）：这份预热结果没人要，别占车道（见 PageNoteMemo.alive）。
+                if (!memo.alive) return@withContext
                 val bubbles = withContext(lane.dispatcher) {
-                    lane.compute(
-                        content = content,
-                        chapter = target.chapter,
-                        charStart = target.slice.charStart,
-                        charEnd = target.slice.charEnd,
-                        annotations = chapterAnnotations,
-                        contentLeft = contentLeft,
-                        contentTop = contentTop,
-                        contentRight = contentRight,
-                        contentBottom = contentBottom,
-                        pageWidth = pageWidth,
-                        pageHeight = pageHeight,
-                        bodyFontPx = bodyFontPx,
-                        fontScale = fontScale,
-                    )
-                }
+                    if (!memo.alive) {
+                        null
+                    } else {
+                        lane.compute(
+                            content = content,
+                            chapter = target.chapter,
+                            charStart = target.slice.charStart,
+                            charEnd = target.slice.charEnd,
+                            annotations = chapterAnnotations,
+                            contentLeft = contentLeft,
+                            contentTop = contentTop,
+                            contentRight = contentRight,
+                            contentBottom = contentBottom,
+                            pageWidth = pageWidth,
+                            pageHeight = pageHeight,
+                            bodyFontPx = bodyFontPx,
+                            fontScale = fontScale,
+                        )
+                    }
+                } ?: return@withContext
+                if (!memo.alive) return@withContext
                 // 写回也在 NonCancellable 里：否则「刚算完就被下一次翻页取消」，
                 // 结果算完却写不进缓存，白算一遍（快翻时每一页都重算）。
                 memo.put(key, target.chapter, bubbles)

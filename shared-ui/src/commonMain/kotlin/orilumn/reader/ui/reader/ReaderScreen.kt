@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -2080,6 +2081,9 @@ fun ReaderScreen(
                 displayRevision, contentLeft, contentTop, contentRight, contentBottom,
                 pxWidth, pxHeight, annotationState,
             ) { PageNoteMemo(generationOf = annotationState::generationOf) }
+            // 换新表就把旧表作废：拖批注字号时每挪一格都会换表，旧表排队的布点请求若照跑，
+            // 会把单线程车道堵住几十秒（2026-11-02 真机：拖 6 秒堵 94 秒，当前页批注久不出来）。
+            DisposableEffect(noteMemo) { onDispose { noteMemo.dispose() } }
             // 落定后预热前后邻页的旁注：车道是异步的，不预热的话冷页要等算完才出现
             //（真机 600~1600ms 的「页面先空着，旁注后冒出来」）。预热后翻过去是缓存命中，
             // 旁注跟着目标页一起滑进来。

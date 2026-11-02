@@ -623,6 +623,51 @@ class NoteBubblesTest {
     }
 
     @Test
+    fun `far side keeps half em and tightens to two pixels`() {
+        // 正右：近侧 1em 不动，远侧首选 0.5em，压缩档 2px（空白本身已按 2px 外扩）。
+        val free = rect(100f, 0f, 300f, 400f)
+        val list = candidates(
+            note = noteInk(1, listOf(rect(0f, 0f, 100f, 40f)), text = "这条批注要折成很多行才能把这块空白填满"),
+            freeRects = listOf(free),
+        )
+        val right = list.filter { it.side == NoteSide.RIGHT }
+        val preferred = right.single { it.marginTier == 0 }
+        val tight = right.single { it.marginTier == 1 }
+        assertEquals(
+            "首选档远侧应留 0.5em（减去空白已有的 2px 外扩）",
+            free.right - (noteMetrics.farGap - 2f),
+            preferred.rect.right,
+            0.5f,
+        )
+        assertEquals("压缩档远侧只剩 2px，框贴到空白外扩后的边缘", free.right, tight.rect.right, 0.5f)
+    }
+
+    @Test
+    fun `above and below keep half em on both sides`() {
+        // 正下：近侧（纵向）仍是 1em，左右两侧是非出线侧，首选 0.5em、压缩档 2px。
+        val free = rect(0f, 40f, 400f, 400f)
+        val list = candidates(
+            note = noteInk(1, listOf(rect(0f, 0f, 200f, 40f)), text = "这条批注要折成很多行才能把这块空白填满"),
+            freeRects = listOf(free),
+        )
+        val below = list.filter { it.side == NoteSide.BELOW }
+        val preferred = below.single { it.marginTier == 0 }
+        val tight = below.single { it.marginTier == 1 }
+        assertEquals("首选档左边应留 0.5em（减去 2px 外扩）", free.left + noteMetrics.farGap - 2f, preferred.rect.left, 0.5f)
+        assertEquals("压缩档左边只剩 2px", free.left, tight.rect.left, 0.5f)
+    }
+
+    @Test
+    fun `sentence punctuation trims the right padding`() {
+        // 同为 3 个全角字宽：句末标点那一版右内缩收到 2px，框应窄出 padX - 2px。
+        val plain = noteBoxFit("四字字", noteMetrics, 1000f, 1000f, EstimatedNoteTextSizer)
+        val punct = noteBoxFit("四字。", noteMetrics, 1000f, 1000f, EstimatedNoteTextSizer)
+        assertEquals(noteMetrics.padX - 2f, plain.width - punct.width, 0.01f)
+        assertTrue(noteEndsWithSentencePunctuation("四字。”"))
+        assertTrue(!noteEndsWithSentencePunctuation("四字"))
+    }
+
+    @Test
     fun `small icon never covers its anchor ink`() {
         // 锚点就在页面最后一行：右下角放不下时也要绕开锚点墨迹，不能糊在字上。
         val anchor = rect(0f, 760f, 600f, 800f)
@@ -1523,8 +1568,9 @@ class NoteBubblesTest {
 
     @Test
     fun `fewer lines wins even when the preferred side folds more`() {
-        // 2026-10-26 规则 2：同环内**折行数先于方向**。
+        // 2026-10-26 规则 2：同样近时**折行数先于方向**。
         // 正右是规则 3 的首选侧，但要折 3 行；正下只要 1 行，就取正下。
+        // （2026-11-02 起「同样近」是硬前提：差出一档就按就近走。）
         fun candidate(side: NoteSide, lines: Int, distance: Float) = NoteCandidate(
             annotationId = 1,
             rect = rect(0f, 100f, 60f, 100f + 24f * lines),
@@ -1537,8 +1583,8 @@ class NoteBubblesTest {
             distance = distance,
             sideRank = noteSideRank(side),
         )
-        val rightFolded = candidate(NoteSide.RIGHT, lines = 3, distance = 1f)
-        val belowOneLine = candidate(NoteSide.BELOW, lines = 1, distance = 50f)
+        val rightFolded = candidate(NoteSide.RIGHT, lines = 3, distance = 10f)
+        val belowOneLine = candidate(NoteSide.BELOW, lines = 1, distance = 10f)
         val ordered = orderedNoteCandidates(listOf(rightFolded, belowOneLine), rightTaken = false)
         assertEquals(
             "同环先比折行数：${ordered.map { it.side to it.lines }}",
@@ -3796,15 +3842,23 @@ class NoteBubblesTest {
         val ordered = orderedNoteCandidates(listOf(foldedNear, completeFar), rightTaken = false)
         assertEquals("整句先于截断：$ordered", completeFar, ordered.first())
 
-        // 同为整句时：**同环内先比折行、再比就近**（2026-10-31 用户定口）。
+        // 同为整句时：**先就近，同一就近档里再比折行**（2026-11-02 用户定口）。
         val nearMoreLines = candidate(ring = 0, complete = true, lines = 4)
             .copy(distanceBand = 0, rect = rect(600f, 0f, 700f, 160f))
         val farFewerLines = candidate(ring = 0, complete = true, lines = 2)
             .copy(distanceBand = 1, rect = rect(600f, 200f, 700f, 280f))
         assertEquals(
-            "同环里折行少的先于更近的",
-            farFewerLines,
+            "更近的那格先，哪怕要折更多行",
+            nearMoreLines,
             orderedNoteCandidates(listOf(nearMoreLines, farFewerLines), rightTaken = false).first(),
+        )
+        assertEquals(
+            "同一就近档里折行少的先",
+            farFewerLines.copy(distanceBand = 0),
+            orderedNoteCandidates(
+                listOf(nearMoreLines, farFewerLines.copy(distanceBand = 0)),
+                rightTaken = false,
+            ).first(),
         )
 
         // 同一环里仍是整句优先：先换更宽的空白，再截断（规则第 7 条）。
@@ -4004,10 +4058,10 @@ class NoteBubblesTest {
 
     /** 2026-10-31 规则：**同环内先比折行、再比就近**；跨环时环先分家。 */
     @Test
-    fun `line count decides before distance within the same ring`() {
-        // 2026-10-31 用户定口（真机「用 val 声明」）：同一环里折行最少的那块先，
-        // 折行相同才比离选区多远。旧口径是「就近档先于折行数」，会让一行放得下的空位输给
-        // 更近却要折两行的那格，已改。
+    fun `distance decides before line count within the same ring`() {
+        // 2026-11-02 用户定口（真机「详细」「boxes」「of」）：**先就近**。
+        // 2026-10-31 那条「折行少的先」只在同一个就近档里起作用——否则一行放得下的远处角落
+        // 会抢走近处要折两行的空位，读者看到的是一根横穿半行的长引线。
         fun candidate(ring: Int, lines: Int, band: Int) = NoteCandidate(
             annotationId = 1,
             rect = rect(0f, 100f + ring * 40f + band * 8f, 60f, 100f + ring * 40f + band * 8f + 24f * lines),
@@ -4021,14 +4075,21 @@ class NoteBubblesTest {
             distanceBand = band,
             sideRank = noteSideRank(NoteSide.RIGHT),
         )
-        // 同环：更远但一行放得下的，先于更近却要折两行的。
+        // 同环：更近却要折两行的，先于更远但一行放得下的。
         val nearWrapped = candidate(ring = 0, lines = 2, band = 0)
         val farOneLine = candidate(ring = 0, lines = 1, band = 1)
         val ordered = orderedNoteCandidates(listOf(nearWrapped, farOneLine), rightTaken = false)
         assertEquals(
-            "同环里折行少的先（环内折行先于就近）：${ordered.map { it.ring to it.lines }}",
-            1,
+            "就近先于折行数：${ordered.map { it.ring to it.lines }}",
+            2,
             ordered.first().lines,
+        )
+        // 同一个就近档里，折行少的先。
+        val sameBandOneLine = farOneLine.copy(distanceBand = 0, distance = 2f, excessDistance = 2f)
+        assertEquals(
+            "同一就近档里折行少的先",
+            1,
+            orderedNoteCandidates(listOf(nearWrapped, sameBandOneLine), rightTaken = false).first().lines,
         )
 
         // 跨环：环先分家，本行那一圈排在隔行之前（哪怕它要折三行、隔行一行就放得下）。
@@ -4202,18 +4263,23 @@ class NoteBubblesTest {
             "短的应换回内侧（上方）：long=${long.candidate.rect} short=${short.candidate.rect}",
             short.candidate.rect.top < 1800f,
         )
-        // 两条要贴在一起：中间只留 2 倍 margin（和让位一致），不能因为长框比短框高就空出一大截。
-        val gap = long.candidate.rect.top - short.candidate.rect.bottom
-        assertTrue(
-            "两条之间只应留 2 倍 margin，实际 gap=$gap：$dbg",
-            gap <= noteMetrics.marginY * 2f + 1f,
-        )
-        assertTrue(
-            "换完仍不能重叠",
-            !long.candidate.conflicts(neighbor.candidate, noteMetrics.marginX, noteMetrics.marginY) &&
-                !short.candidate.conflicts(neighbor.candidate, noteMetrics.marginX, noteMetrics.marginY) &&
-                !long.candidate.conflicts(short.candidate, noteMetrics.marginX, noteMetrics.marginY),
-        )
+        // 整列要挨着码：相邻两条之间只留 2 倍 margin（和让位一致），不许因为高低不同空出一大截。
+        val column = arranged.map { it.candidate.rect }.sortedBy { it.top }
+        for ((upper, lower) in column.zipWithNext()) {
+            val gap = lower.top - upper.bottom
+            assertTrue(
+                "相邻两条之间不许空出半行以上，实际 gap=$gap：$dbg",
+                gap <= noteLine * 0.5f,
+            )
+        }
+        for (i in arranged.indices) {
+            for (j in i + 1 until arranged.size) {
+                assertTrue(
+                    "换完仍不能重叠：$dbg",
+                    !arranged[i].candidate.conflicts(arranged[j].candidate, noteMetrics.marginX, noteMetrics.marginY),
+                )
+            }
+        }
     }
 
     /**
@@ -4267,11 +4333,64 @@ class NoteBubblesTest {
     }
 
     /**
-     * 规则 5 的另一半（2026-11-02 用户定口）：正文行**下方**的右下角反过来——
-     * 「越右侧的越上面」，最右那条贴着正文行，最左那条被推到最外面。
+     * 真机复现（vivo PA2353，2026-11-02）：`val popcorn = 5 // There are 5 boxes of popcorn`
+     * 这一行的四条批注。`boxes` 那条在整行里偏左、框却摆在选区右边，正好横在 `of` / `popcorn`
+     * 的引线出口上方（用户原话：「它会挡住右边的出线，不是明摆着应该放左上角吗」）——
+     * 必须翻到左上角，并且仍按「中心在外、两侧靠内」排在 `are` 与 `of` 之间。
      */
     @Test
-    fun `below right corner notes keep the rightmost next to the row`() {
+    fun `boxes note flips to the upper left so it stops blocking the right hand leaders`() {
+        // 坐标全部取自真机日志（设备像素）。
+        val rowLine = rect(130f, 622f, 1250f, 678f)
+        val sampleStart = rect(130f, 545f, 470f, 601f)
+        val blankAbove = rect(456f, 313f, 1817.5f, 630f)
+        fun cand(id: Long, r: Rect, free: Rect) = NoteCandidate(
+            annotationId = id,
+            rect = r,
+            freeRect = free,
+            lines = 1,
+            complete = true,
+            shownChars = 9,
+            side = NoteSide.ABOVE_LEFT,
+            ring = 0,
+            distance = 0f,
+        )
+        val are = NoteChoice(
+            noteInk(136L, listOf(rect(869f, 622f, 935f, 678f)), "这个会放哪里？"),
+            cand(136L, rect(515f, 557.9f, 872.5f, 620f), blankAbove),
+        )
+        val boxes = NoteChoice(
+            noteInk(127L, listOf(rect(1001f, 622f, 1111f, 678f)), "再加一个批注，看看放在哪里。"),
+            cand(127L, rect(1063.5f, 547.9f, 1745f, 610f), blankAbove),
+        )
+        val of = NoteChoice(
+            noteInk(130L, listOf(rect(1133f, 622f, 1177f, 678f)), "这里也有批注，会放在哪里？"),
+            cand(130L, rect(479f, 476.8f, 1114.5f, 538.9f), blankAbove),
+        )
+        val arranged = arrangeSharedBlankNotes(
+            occupied = listOf(are, boxes, of),
+            marginX = noteMetrics.marginX,
+            marginY = noteMetrics.marginY,
+            rowMidById = mapOf(136L to 1111f, 127L to 1111f, 130L to 1111f),
+            textRects = listOf(sampleStart, rowLine),
+        )
+        val dbg = arranged.joinToString(" | ") { "${it.note.annotationId}:${it.candidate.rect}" }
+        val e = arranged.single { it.note.annotationId == 136L }.candidate.rect
+        val b = arranged.single { it.note.annotationId == 127L }.candidate.rect
+        val o = arranged.single { it.note.annotationId == 130L }.candidate.rect
+        assertTrue("boxes 那条要翻到选区左边（左上角）：$dbg", b.right <= 1001f + 0.5f)
+        assertTrue("are 那条仍贴着正文行（最内）：$dbg", e.top > b.top && e.top > o.top)
+        assertTrue("of 那条在最外：$dbg", o.top < b.top)
+        // 三条的右缘要跟选区从左到右同一个顺序，引线才不会交叉。
+        assertTrue("右缘顺序要和选区顺序一致：$dbg", e.right < b.right && b.right < o.right)
+    }
+
+    /**
+     * 规则 5 的另一半（2026-11-02 用户定口）：正文行**下方**同一块空白里也是
+     * 「中心在外、两侧靠内」——行首、行尾两条贴着正文行，行中间那条被推到最外面。
+     */
+    @Test
+    fun `below the row the middle note is pushed outermost`() {
         val blank = rect(0f, 300f, 1200f, 600f)
         fun candidate(id: Long, top: Float) = NoteCandidate(
             annotationId = id,
@@ -4284,21 +4403,27 @@ class NoteBubblesTest {
             ring = 0,
             distance = 200f,
         )
-        val left = NoteChoice(noteInk(1L, listOf(rect(200f, 260f, 260f, 300f)), "短"), candidate(1L, 320f))
-        val right = NoteChoice(
+        val head = NoteChoice(noteInk(1L, listOf(rect(200f, 260f, 260f, 300f)), "短"), candidate(1L, 440f))
+        val middle = NoteChoice(
             noteInk(2L, listOf(rect(500f, 260f, 560f, 300f)), "很长很长很长很长的批注文字"),
-            candidate(2L, 380f),
+            candidate(2L, 320f),
+        )
+        val tail = NoteChoice(
+            noteInk(3L, listOf(rect(800f, 260f, 860f, 300f)), "行尾那条"),
+            candidate(3L, 380f),
         )
         val arranged = arrangeSharedBlankNotes(
-            occupied = listOf(left, right),
+            occupied = listOf(head, middle, tail),
             marginX = noteMetrics.marginX,
             marginY = noteMetrics.marginY,
+            rowMidById = mapOf(1L to 530f, 2L to 530f, 3L to 530f),
         )
         val dbg = arranged.joinToString(" | ") { "${it.note.annotationId}:${it.candidate.rect}" }
         val a = arranged.single { it.note.annotationId == 1L }.candidate.rect
         val b = arranged.single { it.note.annotationId == 2L }.candidate.rect
-        assertTrue("最右那条该贴着正文行（框最高）：$dbg", b.top < a.top - 1f)
-        assertTrue("最左那条被推到外侧：$dbg", a.top > b.bottom)
+        val c = arranged.single { it.note.annotationId == 3L }.candidate.rect
+        assertTrue("行首那条该贴着正文行（框最高）：$dbg", a.top < c.top - 1f)
+        assertTrue("行中那条该被推到最外（框最低）：$dbg", b.top > c.bottom)
     }
 
     /**

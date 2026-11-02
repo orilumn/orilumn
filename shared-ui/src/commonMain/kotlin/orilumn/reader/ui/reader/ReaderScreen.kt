@@ -2152,6 +2152,7 @@ fun ReaderScreen(
                     NoteBubbles(
                         bubbles = bubbles,
                         fgColor = Color(profile.fgColor),
+                        pageBgColor = profile.bgColor,
                         onOpen = { id ->
                             // 点旁注 = 打开这条标注的操作栏与输入框（有文字就带出来，可改可删）。
                             // 翻页动画进行中不响应（旁注现在跟着页走，滑动的页面上点一下不该弹编辑态）。

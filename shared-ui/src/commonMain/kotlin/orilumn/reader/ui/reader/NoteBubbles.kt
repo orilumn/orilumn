@@ -99,6 +99,9 @@ internal const val NOTE_BUBBLE_LINE_RATIO: Float = 1.38f
 /** 旁注文字单侧内缩相对自身字号的比例（两侧合计 [NOTE_BUBBLE_PAD_RATIO] × 2）：落位估宽与绘制同源。 */
 internal const val NOTE_BUBBLE_PAD_RATIO: Float = 0.35f
 
+/** 旁注框「显示批注背景色」时标底色的不透明度：铺底与同色字的实际底色都按这一个值算。 */
+internal const val NOTE_BUBBLE_BG_ALPHA: Float = 0.16f
+
 /** 框与原文近到这个距离以内（px）就没有可画的箭头：框已经贴住墨迹。 */
 private const val NOTE_ARROW_MIN_GAP_PX: Float = 0.5f
 
@@ -6740,6 +6743,8 @@ internal fun rememberNoteTextSizer(fontFamily: FontFamily? = null): NoteTextSize
 internal fun NoteBubbles(
     bubbles: List<NoteBubble>,
     fgColor: Color,
+    /** 纸面底色（旁注文字最终压着的颜色）：同色字体按它的明暗决定往哪边调。 */
+    pageBgColor: Int,
     onOpen: (Long) -> Unit,
     modifier: Modifier = Modifier,
     /** 批注字体（`null` = 跟随界面默认）：与实测尺子同一个族，见 [rememberNoteTextSizer]。 */
@@ -6831,7 +6836,7 @@ internal fun NoteBubbles(
                     .clip(RoundedCornerShape(3.dp))
                     .then(
                         if (showBackground) {
-                            Modifier.background(tint.copy(alpha = 0.16f))
+                            Modifier.background(tint.copy(alpha = NOTE_BUBBLE_BG_ALPHA))
                         } else {
                             Modifier
                         },
@@ -6847,7 +6852,17 @@ internal fun NoteBubbles(
             ) {
                 Text(
                     text = b.text,
-                    color = if (textSameColor) tint else fgColor,
+                    color = if (textSameColor) {
+                        // 开了背景色时字压在「纸面 + 16% 标底色」上，对比度按混色后的底算才准。
+                        val backdrop = if (showBackground) {
+                            blendOver(pageBgColor, b.argb or 0xFF000000.toInt(), NOTE_BUBBLE_BG_ALPHA)
+                        } else {
+                            pageBgColor
+                        }
+                        Color(noteInkColor(b.argb, backdrop))
+                    } else {
+                        fgColor
+                    },
                     fontFamily = fontFamily,
                     fontSize = with(d) { b.fontPx.toSp() },
                     lineHeight = with(d) { (b.fontPx * NOTE_BUBBLE_LINE_RATIO).toSp() },

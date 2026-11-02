@@ -2166,6 +2166,9 @@ fun ReaderScreen(
                         },
                         modifier = Modifier.fillMaxSize(),
                         fontFamily = noteFontFamily,
+                        showBorder = settings.noteBorder,
+                        showBackground = settings.noteBackground,
+                        textSameColor = settings.noteTextSameColor,
                     )
                 }
             }

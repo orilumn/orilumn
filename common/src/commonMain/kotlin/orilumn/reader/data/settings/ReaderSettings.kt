@@ -206,6 +206,23 @@ data class ReaderSettings(
      * [noteFont]（纯全局，换书沿用）。
      */
     val noteFontScale: Float = 1f,
+    /**
+     * 旁注框的**描边**开关（默认开）。只作用于旁注覆盖层，与 [noteFont] 同口径：
+     * 纯全局、不进版式比较、面板走无重排提交。
+     */
+    val noteBorder: Boolean = true,
+    /**
+     * 旁注框的**底色**开关（默认开 = 标注色 16% 铺底）。关掉后只有文字与引线，直接压在正文上。
+     * 落盘口径同 [noteBorder]。
+     */
+    val noteBackground: Boolean = true,
+    /**
+     * 旁注文字用**标注自身的颜色**（默认关 = 跟随正文墨色）。
+     *
+     * 标注色往往很浅（高亮 45% 透明度），压在白纸上是浅色字；读者要的就是「字也跟着那条
+     * 高亮/划线一个颜色」时才打开。落盘口径同 [noteBorder]。
+     */
+    val noteTextSameColor: Boolean = false,
 
     /**
      * 持久化结构版本（**只增不改**）：`[fromJson]` 用它识别「这份存档是哪个版本写的」，
@@ -344,6 +361,10 @@ data class ReaderSettings(
         // 批注字体 / 字号：只改旁注覆盖层，不进版式（面板走 onCommitLight）。
         noteFont = "",
         noteFontScale = 1f,
+        // 旁注框的描边 / 底色 / 文字用色：同样只改覆盖层怎么画。
+        noteBorder = true,
+        noteBackground = true,
+        noteTextSameColor = false,
         // 开书探针的只读读数：只给面板显示，永不参与渲染。
         probeIndent = null,
         probeLineSpacing = null,
@@ -551,6 +572,9 @@ data class ReaderSettings(
                     noteFont = SettingsJson.optString(o, "noteFont", d.noteFont),
                     noteFontScale = SettingsJson.optDouble(o, "noteFontScale", d.noteFontScale.toDouble())
                         .toFloat().coerceIn(MIN_NOTE_FONT_SCALE, MAX_NOTE_FONT_SCALE),
+                    noteBorder = SettingsJson.optBoolean(o, "noteBorder", d.noteBorder),
+                    noteBackground = SettingsJson.optBoolean(o, "noteBackground", d.noteBackground),
+                    noteTextSameColor = SettingsJson.optBoolean(o, "noteTextSameColor", d.noteTextSameColor),
                     cjkLatinSpacing = migrateCjkLatinSpacing(
                         SettingsJson.optDouble(o, "cjkLatinSpacing", d.cjkLatinSpacing),
                         SettingsJson.optInt(o, "schemaVersion", 0),

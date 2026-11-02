@@ -483,6 +483,10 @@ fun ReaderSettingsPanel(
                         },
                         fmt = { noteFontSizeLabel(it) },
                     ),
+                    // 旁注框怎么画：描边 / 底色 / 文字用标注色。纯像素开关，走无重排提交。
+                    ItemKey(onEnter = { onCommitLight(s.copy(noteBorder = !s.noteBorder)) }),
+                    ItemKey(onEnter = { onCommitLight(s.copy(noteBackground = !s.noteBackground)) }),
+                    ItemKey(onEnter = { onCommitLight(s.copy(noteTextSameColor = !s.noteTextSameColor)) }),
                 )
             }
             Sub.Theme -> listOf(
@@ -1759,6 +1763,37 @@ private fun AnnotationColorPage(
                 labelWidth = labelW,
                 nav = nav,
                 index = 8,
+            )
+        }
+        // 旁注框的三种画法：只改覆盖层像素，走无重排提交（与上面两项同口径）。
+        item {
+            SetSwitch(
+                label = "显示批注边框",
+                checked = s.noteBorder,
+                onChange = { commitLight(s.copy(noteBorder = it)) },
+                p = p,
+                nav = nav,
+                index = 9,
+            )
+        }
+        item {
+            SetSwitch(
+                label = "显示批注背景色",
+                checked = s.noteBackground,
+                onChange = { commitLight(s.copy(noteBackground = it)) },
+                p = p,
+                nav = nav,
+                index = 10,
+            )
+        }
+        item {
+            SetSwitch(
+                label = "使用标注同色字体",
+                checked = s.noteTextSameColor,
+                onChange = { commitLight(s.copy(noteTextSameColor = it)) },
+                p = p,
+                nav = nav,
+                index = 11,
             )
         }
         item { Spacer(modifier = Modifier.height(24.dp)) }

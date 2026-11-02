@@ -41,6 +41,7 @@ class SettingsLayoutScopeTest {
         "annotationLastKind", "annotationLastLineStyle",
         // 批注字体 / 字号只作用于旁注覆盖层，不改正文排版。
         "noteFont", "noteFontScale",
+        "noteBorder", "noteBackground", "noteTextSameColor",
         // 开书探针的只读读数：只给面板显示，不参与渲染。
         "probeIndent", "probeLineSpacing", "probeParagraphSpacing", "probeLetterSpacing",
     )
@@ -92,6 +93,9 @@ class SettingsLayoutScopeTest {
         "annotationLastLineStyle" -> s.copy(annotationLastLineStyle = if (s.annotationLastLineStyle == "wavy") "straight" else "wavy")
         "noteFont" -> s.copy(noteFont = if (s.noteFont == "TestFamily") "OtherFamily" else "TestFamily")
         "noteFontScale" -> s.copy(noteFontScale = if (s.noteFontScale == 1.4f) 1.1f else 1.4f)
+        "noteBorder" -> s.copy(noteBorder = !s.noteBorder)
+        "noteBackground" -> s.copy(noteBackground = !s.noteBackground)
+        "noteTextSameColor" -> s.copy(noteTextSameColor = !s.noteTextSameColor)
         "probeIndent" -> s.copy(probeIndent = if (s.probeIndent == null) 2.0 else null)
         "probeLineSpacing" -> s.copy(probeLineSpacing = if (s.probeLineSpacing == null) 1.7 else null)
         "probeParagraphSpacing" -> s.copy(probeParagraphSpacing = if (s.probeParagraphSpacing == null) 0.9 else null)

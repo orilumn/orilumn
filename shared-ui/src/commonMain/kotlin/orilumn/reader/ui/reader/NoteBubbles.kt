@@ -6744,6 +6744,12 @@ internal fun NoteBubbles(
     modifier: Modifier = Modifier,
     /** 批注字体（`null` = 跟随界面默认）：与实测尺子同一个族，见 [rememberNoteTextSizer]。 */
     fontFamily: FontFamily? = null,
+    /** 批注框描边（笔记面板「显示批注边框」）。关掉后只剩文字 / 省略号，不再圈一圈。 */
+    showBorder: Boolean = true,
+    /** 批注框底色（笔记面板「显示批注背景色」）。关掉后文字直接压在正文上，不铺标注色。 */
+    showBackground: Boolean = true,
+    /** 批注文字用标注自身的颜色（笔记面板「使用标注同色字体」）；默认跟随正文墨色。 */
+    textSameColor: Boolean = false,
 ) {
     if (bubbles.isEmpty()) return
     val d = LocalDensity.current
@@ -6783,8 +6789,20 @@ internal fun NoteBubbles(
                             .width(with(d) { b.widthPx.toDp() })
                             .height(with(d) { h.toDp() })
                             .clip(RoundedCornerShape(50))
-                            .background(tint.copy(alpha = 0.12f))
-                            .border(1.dp, tint.copy(alpha = 0.75f), RoundedCornerShape(50)),
+                            .then(
+                                if (showBackground) {
+                                    Modifier.background(tint.copy(alpha = 0.12f))
+                                } else {
+                                    Modifier
+                                },
+                            )
+                            .then(
+                                if (showBorder) {
+                                    Modifier.border(1.dp, tint.copy(alpha = 0.75f), RoundedCornerShape(50))
+                                } else {
+                                    Modifier
+                                },
+                            ),
                     ) {
                         Canvas(modifier = Modifier.fillMaxSize()) {
                             val dot = size.height * 0.11f
@@ -6811,13 +6829,25 @@ internal fun NoteBubbles(
                     // 2 行要 112px、上限只给 110，于是最后一行连同省略号一起被吃掉，
                     // 明明有空地也显示成「折了但没折完」（2026-10-29 真机定位）。
                     .clip(RoundedCornerShape(3.dp))
-                    .background(tint.copy(alpha = 0.16f))
-                    .border(1.dp, tint.copy(alpha = 0.5f), RoundedCornerShape(3.dp))
+                    .then(
+                        if (showBackground) {
+                            Modifier.background(tint.copy(alpha = 0.16f))
+                        } else {
+                            Modifier
+                        },
+                    )
+                    .then(
+                        if (showBorder) {
+                            Modifier.border(1.dp, tint.copy(alpha = 0.5f), RoundedCornerShape(3.dp))
+                        } else {
+                            Modifier
+                        },
+                    )
                     .clickable { onOpen(b.annotationId) },
             ) {
                 Text(
                     text = b.text,
-                    color = fgColor,
+                    color = if (textSameColor) tint else fgColor,
                     fontFamily = fontFamily,
                     fontSize = with(d) { b.fontPx.toSp() },
                     lineHeight = with(d) { (b.fontPx * NOTE_BUBBLE_LINE_RATIO).toSp() },

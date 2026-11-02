@@ -2281,8 +2281,20 @@ internal fun noteBubblePlacements(
             rowSpans[row] = rowSpans[row]?.let { rectUnion(listOf(it, r)) } ?: r
         }
     }
-    // 每条批注「基准行」的中线：堆叠先后按离它多远定（中心在外、两侧靠内）。
+    // 每条批注「基准行」的中线：**正文行框**的中点（2026-11-02 用户定口：堆叠先后按
+    // 「选区离这一行中线多远」定）。不能用「这一行批注墨迹的并集」：被批注的那几个词可能都挤在
+    // 行的同一头，并集中线会跟着偏（真机「of」：并集中线 1111，正文行中线约 690），于是真正
+    // 靠行尾的那条反而算成「离中线最近」，被推到最外面。
     val rowMids = ordered.associate { n ->
+        val own = n.rects.lastOrNull() ?: Rect.Zero
+        val row = nearestLineIndex(own, lines)
+        val lineRect = row?.let { lines.getOrNull(it)?.rect }
+        n.annotationId to (lineRect?.let { (it.left + it.right) / 2f }
+            ?: (row?.let { rowSpans[it] } ?: own).let { (it.left + it.right) / 2f })
+    }
+    // 「偏左 / 偏右」仍按**这一行批注墨迹的并集**算：那是「跟同排别的批注比谁更靠边」，
+    // 与上面「离整行中线多远」不是一回事（真机「boxes」就靠这条翻到左上）。
+    val rowSideMids = ordered.associate { n ->
         val own = n.rects.lastOrNull() ?: Rect.Zero
         val span = nearestLineIndex(own, lines)?.let { rowSpans[it] } ?: own
         n.annotationId to (span.left + span.right) / 2f
@@ -2433,6 +2445,7 @@ internal fun noteBubblePlacements(
         covering = coveringIds,
         rightmostOnRight = coveringRightmost,
         rowMidById = rowMids,
+        sideMidById = rowSideMids,
     )
     val assignMs = placeMark.elapsedNow().inWholeMilliseconds - freeMs - candMs
     val chosen = choices.associateBy { it.note.annotationId }
@@ -2585,8 +2598,10 @@ private fun assignNoteCandidates(
     covering: Set<Long> = emptySet(),
     /** 例外（规则第 8 条）：本条右侧只有本行最右那条；值 = 那条的 id，等它落在本行正右后回到右上优先。 */
     rightmostOnRight: Map<Long, Long> = emptyMap(),
-    /** 每条批注所在那一行「所有批注墨迹」的横向中点：堆叠先后按「离这条中线多远」定（规则 5）。 */
+    /** 每条批注所在那一行**正文行框**的横向中点：堆叠先后按「离这条中线多远」定（规则 5）。 */
     rowMidById: Map<Long, Float> = emptyMap(),
+    /** 「偏左 / 偏右」用的中线（这一行批注墨迹的并集）；不给就退回 [rowMidById]。 */
+    sideMidById: Map<Long, Float> = emptyMap(),
 ): List<NoteChoice> {
     if (notes.isEmpty() || lines.isEmpty()) return emptyList()
     val chosen = LinkedHashMap<Long, NoteCandidate>()
@@ -3184,6 +3199,7 @@ private fun assignNoteCandidates(
     // 每条引线都从自己那一侧就近出去，不会与同排别的引线交叉。
     val arranged = arrangeSharedBlankNotes(
         occupied, marginX, marginY, rowMidById,
+        sideMidById = sideMidById,
         textRects = lines.map { it.rect },
         // 规则第 8 条的**例外**那几条（等本行最右那条落位后回到右上）不翻面：那是用户
         // 2026-10-25 定死的行为，与「右边有批注就靠左」冲突时以例外为准。
@@ -3219,6 +3235,8 @@ internal fun arrangeSharedBlankNotes(
     marginX: Float,
     marginY: Float,
     rowMidById: Map<Long, Float> = emptyMap(),
+    /** 「偏左 / 偏右」用的中线（这一行批注墨迹的并集）；不给就退回 [rowMidById]。 */
+    sideMidById: Map<Long, Float> = emptyMap(),
     /** 正文行的矩形：翻面时用来判「翻过去那一片有没有字」（不给就不翻）。 */
     textRects: List<Rect> = emptyList(),
     /** 规则第 8 条那几条（会罩住右侧文字）：它们自己就是来让位的，不许再被翻面。 */
@@ -3340,6 +3358,9 @@ internal fun arrangeSharedBlankNotes(
 
     // 翻面 / 换层时的步长（横向范围按每条自己的空白算，见 [spotFree]）。
     val nudgeStep = (marginX * 2f).coerceAtLeast(2f)
+    // 让位 / 往里收最多走多远（约一页高），按步长换算成次数——步长是 2 倍 margin（很小），
+    // 固定 24 步只够挪一小截，真机上要跨过同组另一条时远远不够。
+    val maxSteps = (600f / nudgeStep).toInt().coerceAtLeast(24)
 
     /** 框是不是压在这块正文上（行矩形含行距，只搭到上沿一小截不算压字）。 */
     fun coversText(r: Rect): Boolean {
@@ -3356,7 +3377,9 @@ internal fun arrangeSharedBlankNotes(
 
     /** 这一条该用哪一侧：-1 左、1 右；这一行只有它自己时不判（0）。 */
     fun sideOf(c: NoteChoice): Int {
-        val mid = rowMidById[c.note.annotationId] ?: return 0
+        val mid = sideMidById[c.note.annotationId]
+            ?: rowMidById[c.note.annotationId]
+            ?: return 0
         val own = anchorMidX(c)
         if (abs(mid - own) < 1f) return 0
         return if (own < mid) -1 else 1
@@ -3512,11 +3535,6 @@ internal fun arrangeSharedBlankNotes(
         val ordered = members.sortedWith(
             compareByDescending<Int> { far(it) }.thenBy { textLength(out[it]) },
         )
-        val gap = when (outward) {
-            NoteOutward.UP, NoteOutward.DOWN -> marginY
-            NoteOutward.RIGHT, NoteOutward.LEFT -> marginX
-        } * 2f
-        // 从最里面那一格起，按顺序一条挨一条往外码，中间只留 2 倍 margin（与让位一致）。
         // 这一组几条批注各自的空白：整组重排后，某一条可能被推到「同组另一条的空白」里——
         // 那也是一块没有正文的空地（真机「boxes」那条正是被上方那条的空白挡住，只许动自己的
         // 空白就永远推不出去）。只要落在其中任一块空白里、且与别的框不打架就成立。
@@ -3532,22 +3550,26 @@ internal fun arrangeSharedBlankNotes(
         val blankRight = groupBlanks.maxOf { it.right }.let { blank ->
             if (textRects.isEmpty()) blank else max(blank, textRects.maxOf { it.right })
         }
-        fun spotFree(r: Rect, self: Int): Boolean {
+        /** 两个框有没有挤在一起（四周各留 [marginX] / [marginY]）。 */
+        fun clash(a: Rect, b: Rect): Boolean =
+            a.left < b.right + marginX - NOTE_GEOM_EPS && b.left < a.right + marginX - NOTE_GEOM_EPS &&
+                a.top < b.bottom + marginY - NOTE_GEOM_EPS && b.top < a.bottom + marginY - NOTE_GEOM_EPS
+
+        /**
+         * @param placed 本组**已经码好的新位置**：后面这几条要按真位置互不相撞
+         *   （旧位置已经不成立了，[members] 里那几条一律跳过）。
+         */
+        fun spotFree(r: Rect, self: Int, placed: List<Rect> = emptyList()): Boolean {
             if (r.left < blankLeft - NOTE_GEOM_EPS || r.right > blankRight + NOTE_GEOM_EPS) return false
             if (coversText(r)) return false
             // 没有正文数据时只能信空白；有正文数据就以「不压字」为准（见上面的横向范围说明）。
             if (textRects.isEmpty() && groupBlanks.none { inOwnBlank(out[self].candidate, r, blank = it) }) {
                 return false
             }
+            for (b in placed) if (clash(r, b)) return false
             for (o in out.indices) {
-                // 本组几条正在一起重排，旧位置不能当障碍（真正的互不重叠由游标间隔保证）。
                 if (o == self || o in members) continue
-                val b = out[o].candidate.rect
-                if (r.left < b.right + marginX - NOTE_GEOM_EPS && b.left < r.right + marginX - NOTE_GEOM_EPS &&
-                    r.top < b.bottom + marginY - NOTE_GEOM_EPS && b.top < r.bottom + marginY - NOTE_GEOM_EPS
-                ) {
-                    return false
-                }
+                if (clash(r, out[o].candidate.rect)) return false
             }
             // 不许横在**更外侧那条**的选区上方：那条的引线要从这里出去（用户原话：
             // 「不应该把左边 boxes 的批注放在 of 上面，除非 of 的批注不打算放上面」）。
@@ -3562,9 +3584,48 @@ internal fun arrangeSharedBlankNotes(
             }
             return true
         }
-        var cursor = members.minOf { depthOf(out[it].candidate.rect, outward) }
+
+        /**
+         * 靠内的极限：框与自家选区之间至少留出**这个方向需要的空档**——
+         * 正上 / 正下留 1em（竖直引线要从这段空档出去），正左 / 正右留 1em（横线引线），
+         * 四个斜向只留 [NOTE_MIN_MARGIN_PX]（斜向的走廊在横向，纵向本来就贴着行）。
+         */
+        fun atNaturalGap(r: Rect, c: NoteChoice): Boolean {
+            val ink = rectUnion(c.note.rects)
+            val side = c.candidate.side
+            // 1em ≈ marginY × 10（marginY 按 0.1em 定），不必再让调用方多传字号。
+            val oneEm = marginY * 10f
+            val minGap = when (outward) {
+                NoteOutward.UP -> if (side == NoteSide.ABOVE) oneEm else NOTE_MIN_MARGIN_PX
+                NoteOutward.DOWN -> if (side == NoteSide.BELOW) oneEm else NOTE_MIN_MARGIN_PX
+                NoteOutward.LEFT, NoteOutward.RIGHT -> oneEm
+            }
+            return when (outward) {
+                NoteOutward.UP -> r.bottom <= ink.top - minGap + NOTE_GEOM_EPS
+                NoteOutward.DOWN -> r.top >= ink.bottom + minGap - NOTE_GEOM_EPS
+                NoteOutward.LEFT -> r.right <= ink.left - minGap + NOTE_GEOM_EPS
+                NoteOutward.RIGHT -> r.left >= ink.right + minGap - NOTE_GEOM_EPS
+            }
+        }
+
+        /** 往里收只走深度轴，且不许收出它自己那块空白的这一侧（空白是算出来的障碍边界）。 */
+        fun inBlankDepth(r: Rect, c: NoteChoice): Boolean {
+            val b = c.candidate.freeRect
+            return when (outward) {
+                NoteOutward.UP, NoteOutward.DOWN ->
+                    r.top >= b.top - NOTE_GEOM_EPS && r.bottom <= b.bottom + NOTE_GEOM_EPS
+                NoteOutward.LEFT, NoteOutward.RIGHT ->
+                    r.left >= b.left - NOTE_GEOM_EPS && r.right <= b.right + NOTE_GEOM_EPS
+            }
+        }
+
+        /** 本组已经码好的新位置（后面的框按它判相撞，不再看旧位置）。 */
+        val placedRects = ArrayList<Rect>(members.size)
         val moved = LinkedHashMap<Int, NoteChoice>()
         var fits = true
+        // 左右排（页边距那一列）仍旧「一条挨一条往外码」：那几条本来就并排在行旁，
+        // 不按这一列排就会横着挤成两条。上下排改用「先占自己现在的位置」。
+        var cursor = members.minOf { depthOf(out[it].candidate.rect, outward) }
         for (k in ordered) {
             val choice = out[k]
             val w = choice.candidate.rect.width
@@ -3576,16 +3637,33 @@ internal fun arrangeSharedBlankNotes(
             } else {
                 choice.candidate.rect.left
             }.coerceIn(blankLeft, (blankRight - w).coerceAtLeast(blankLeft))
-            val base = rectAtDepth(choice.candidate.rect, outward, cursor)
+            // 上下排：起点是它**自己现在的位置**——靠外是不得已才靠外（2026-11-02 用户定口）。
+            // 早先是「从最里面那一格起一条挨一条往外码」，跟谁都不重叠的一条也被抬一个格子
+            // （真机「of」：明明横向错开、谁也不挡谁，仍被从 476 抬到 388）。
+            // 左右排仍取这一列的下一格：那几条是并排在行旁的，不按列走就会横着摊开。
+            val base = if (vertical) choice.candidate.rect else rectAtDepth(choice.candidate.rect, outward, cursor)
             var r = Rect(x, base.top, x + w, base.bottom)
             var guard = 0
-            // 这一层压着正文 / 别的框就整条往外让一层，让到空为止。
-            while (!spotFree(r, k) && guard++ < 24) r = shifted(outward, r, nudgeStep)
-            if (!spotFree(r, k)) {
+            // 真跟本组已经码好的框 / 正文 / 别的框撞了，才往外让，让到不撞为止。
+            while (!spotFree(r, k, placedRects) && guard++ < maxSteps) r = shifted(outward, r, nudgeStep)
+            if (!spotFree(r, k, placedRects)) {
                 fits = false
                 break
             }
-            // 游标按**真正落下的那个框**推进：重排可能把行数改了，只按原框高度推进会多留一道缝。
+            // 上下排再往里收：没必要靠外，就贴到最近能放的那一格（不越过引线需要的空档，
+            // 也不收出它自己那块空白）。
+            var inner = 0
+            if (vertical) {
+                while (inner++ < maxSteps) {
+                    val next = shifted(outward, r, -nudgeStep)
+                    if (!atNaturalGap(next, choice) || !inBlankDepth(next, choice) ||
+                        !spotFree(next, k, placedRects)
+                    ) {
+                        break
+                    }
+                    r = next
+                }
+            }
             val placed = reflowOne(choice, r)
             // 重排只在这一带调先后，不许把谁甩到另一个角落：挪出去超过两个行高就整组作废。
             // 真机「详细」：一条四个字的批注被重排推到下面一整行正文之外（离选区 367px），
@@ -3597,8 +3675,9 @@ internal fun arrangeSharedBlankNotes(
                 break
             }
             moved[k] = placed
+            placedRects += placed.candidate.rect
             cursor = depthOf(placed.candidate.rect, outward) +
-                extentOf(placed.candidate.rect, outward) + gap
+                extentOf(placed.candidate.rect, outward) + nudgeStep
         }
         if (!fits) continue
         var blocked = false

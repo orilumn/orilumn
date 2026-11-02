@@ -4371,7 +4371,10 @@ class NoteBubblesTest {
             occupied = listOf(are, boxes, of),
             marginX = noteMetrics.marginX,
             marginY = noteMetrics.marginY,
-            rowMidById = mapOf(136L to 1111f, 127L to 1111f, 130L to 1111f),
+            // 堆叠先后看**正文行框**的中线（130..1250 → 690）：行尾的 `of` 最贴行。
+            rowMidById = mapOf(136L to 690f, 127L to 690f, 130L to 690f),
+            // 偏左 / 偏右看这一行批注墨迹的并集（中线 1111）：`boxes` 在同排里偏左。
+            sideMidById = mapOf(136L to 1111f, 127L to 1111f, 130L to 1111f),
             textRects = listOf(sampleStart, rowLine),
         )
         val dbg = arranged.joinToString(" | ") { "${it.note.annotationId}:${it.candidate.rect}" }
@@ -4379,8 +4382,8 @@ class NoteBubblesTest {
         val b = arranged.single { it.note.annotationId == 127L }.candidate.rect
         val o = arranged.single { it.note.annotationId == 130L }.candidate.rect
         assertTrue("boxes 那条要翻到选区左边（左上角）：$dbg", b.right <= 1001f + 0.5f)
-        assertTrue("are 那条仍贴着正文行（最内）：$dbg", e.top > b.top && e.top > o.top)
-        assertTrue("of 那条在最外：$dbg", o.top < b.top)
+        assertTrue("of 那条贴着正文行（最内）：$dbg", o.top > b.top + 1f)
+        assertTrue("are 那条在最外：$dbg", e.top < b.top - 1f)
         // 三条的右缘要跟选区从左到右同一个顺序，引线才不会交叉。
         assertTrue("右缘顺序要和选区顺序一致：$dbg", e.right < b.right && b.right < o.right)
     }
@@ -4417,6 +4420,8 @@ class NoteBubblesTest {
             marginX = noteMetrics.marginX,
             marginY = noteMetrics.marginY,
             rowMidById = mapOf(1L to 530f, 2L to 530f, 3L to 530f),
+            // 这一组要在同一列里比先后，先不让它按「偏左 / 偏右」翻面（那是另一条规则）。
+            sideMidById = mapOf(1L to 230f, 2L to 530f, 3L to 830f),
         )
         val dbg = arranged.joinToString(" | ") { "${it.note.annotationId}:${it.candidate.rect}" }
         val a = arranged.single { it.note.annotationId == 1L }.candidate.rect
@@ -4424,6 +4429,51 @@ class NoteBubblesTest {
         val c = arranged.single { it.note.annotationId == 3L }.candidate.rect
         assertTrue("行首那条该贴着正文行（框最高）：$dbg", a.top < c.top - 1f)
         assertTrue("行中那条该被推到最外（框最低）：$dbg", b.top > c.bottom)
+    }
+
+    /**
+     * 2026-11-02 用户定口：「靠外是有必要才靠外，没必要时，当然是距离越近越好」。
+     *
+     * 同一个大空白里的两条，横向完全错开（谁也不挡谁的引线）——那就各就各位，
+     * 两条都贴到离正文最近的那一格，谁也不用给谁让。
+     */
+    @Test
+    fun `notes clear of each other in the row are not pushed outward`() {
+        val blank = rect(0f, 300f, 1200f, 600f)
+        fun candidate(id: Long, left: Float, top: Float) = NoteCandidate(
+            annotationId = id,
+            rect = rect(left, top, left + 200f, top + 40f),
+            freeRect = blank,
+            lines = 1,
+            complete = true,
+            shownChars = 9,
+            side = NoteSide.BELOW,
+            ring = 0,
+            distance = 200f,
+        )
+        // 行首那条（离行中线 600 更远，按规则该更贴正文行）反而摆得更低；
+        // 行中那条摆得更靠里——这在旧实现里要整组「一条挨一条往外码」。
+        // 两条一样长，「长的放外侧、短的放内侧」那条走廊规则不动它们，只看堆叠这一段。
+        val head = NoteChoice(noteInk(1L, listOf(rect(200f, 260f, 260f, 300f)), "短批注甲"), candidate(1L, 60f, 380f))
+        val middle = NoteChoice(
+            noteInk(2L, listOf(rect(500f, 260f, 560f, 300f)), "短批注乙"),
+            candidate(2L, 700f, 320f),
+        )
+        val arranged = arrangeSharedBlankNotes(
+            occupied = listOf(head, middle),
+            marginX = noteMetrics.marginX,
+            marginY = noteMetrics.marginY,
+            rowMidById = mapOf(1L to 600f, 2L to 600f),
+            sideMidById = mapOf(1L to 230f, 2L to 530f),
+        )
+        val dbg = arranged.joinToString(" | ") { "${it.note.annotationId}:${it.candidate.rect}" }
+        val a = arranged.single { it.note.annotationId == 1L }.candidate.rect
+        val b = arranged.single { it.note.annotationId == 2L }.candidate.rect
+        // 谁也没挡谁：两条都只往里收到「正下方留 1em 走竖直引线」为止，谁也不往外挪。
+        val nearest = 300f + noteMetrics.marginY * 10f
+        assertEquals("行首那条该贴到最近的一格：$dbg", nearest, a.top, noteMetrics.marginX * 4f)
+        assertEquals("行中那条该贴到最近的一格：$dbg", nearest, b.top, noteMetrics.marginX * 4f)
+        assertTrue("不许把谁往外推：$dbg", a.top <= 380f + 1f && b.top <= 320f + 1f)
     }
 
     /**

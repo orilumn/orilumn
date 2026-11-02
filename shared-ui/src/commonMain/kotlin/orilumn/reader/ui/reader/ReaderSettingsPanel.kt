@@ -1257,9 +1257,26 @@ private fun noteFontScaleFor(s: ReaderSettings, size: Double): Float =
 private fun noteFontSizeMin(s: ReaderSettings): Double =
     ((noteFontBase(s) * ReaderSettings.MIN_NOTE_FONT_SCALE) * 10.0).roundToLong() / 10.0
 
-/** 滑条上限：倍率上限换算成字号，同样落到 0.1 的整格上。 */
-private fun noteFontSizeMax(s: ReaderSettings): Double =
-    ((noteFontBase(s) * ReaderSettings.MAX_NOTE_FONT_SCALE) * 10.0).roundToLong() / 10.0
+/**
+ * 批注字号的**绝对上限**（与「文字」页字号同口径）：滑条右端最多停在这里。
+ *
+ * 存的仍是倍率（正文字号变了旁注等比变），但读者能拖到的最大值不再随正文字号一起飘到
+ * 二十几、三十几 —— 再大就不像一行旁注了。
+ */
+private const val NOTE_FONT_SIZE_MAX = 25.0
+
+/**
+ * 滑条上限：倍率上限换算成字号，但不超过 [NOTE_FONT_SIZE_MAX]，并落到 0.1 的整格上。
+ *
+ * 正文字号小的时候倍率上限先到（旁注不该比正文大一倍多），正文字号大的时候 25 先到。
+ * 极端情况下（正文字号 36 又拉到最大缩放）倍率下限换算出来已经超过 25，此时保住一格可拖动，
+ * 不让上下限反过来。
+ */
+private fun noteFontSizeMax(s: ReaderSettings): Double {
+    val byRatio = noteFontBase(s) * ReaderSettings.MAX_NOTE_FONT_SCALE
+    val cap = maxOf(minOf(byRatio, NOTE_FONT_SIZE_MAX), noteFontSizeMin(s) + NOTE_FONT_SIZE_STEP)
+    return (cap * 10.0).roundToLong() / 10.0
+}
 
 /** 滑条右侧读数：就是字号本身，0.1 一档老老实实显示成 0.1。 */
 private fun noteFontSizeLabel(size: Double): String = String.format("%.1f", size)

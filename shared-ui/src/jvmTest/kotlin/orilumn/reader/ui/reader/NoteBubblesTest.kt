@@ -166,6 +166,7 @@ class NoteBubblesTest {
         sizer: NoteTextSizer = EstimatedNoteTextSizer,
         fontPx: Float = 20f,
         collapseAll: Boolean = false,
+        iconEmPx: Float = NOTE_ICON_FONT_DP,
     ) = noteBubblePlacements(
         noteInk = notes,
         obstacles = NoteObstacles(
@@ -184,6 +185,7 @@ class NoteBubblesTest {
         pageBottom = pageBottom,
         noteTextSizer = sizer,
         collapseAll = collapseAll,
+        iconEmPx = iconEmPx,
     )
 
     private fun boxOf(b: NoteBubble) = rect(
@@ -3023,8 +3025,8 @@ class NoteBubblesTest {
     }
 
     @Test
-    fun `small icon keeps the small ellipse size`() {
-        // 兜底小椭圆：宽 1em、高 0.64em（热区另行放大，不改视觉尺寸）。
+    fun `small icon keeps the fixed size`() {
+        // 兜底小图标：固定 16.5 号（宽 1em、高 0.64em）；热区另行放大，不改视觉尺寸。
         val anchor = rect(0f, 0f, 600f, 40f)
         val bubbles = place(
             notes = listOf(noteInk(1, listOf(anchor))),
@@ -3034,8 +3036,30 @@ class NoteBubblesTest {
         )
         val b = bubbles.single()
         assertTrue("应退成小椭圆：$b", b.compact)
-        assertEquals(noteFont * 1f, b.widthPx, 0.01f)
-        assertEquals(noteFont * 0.64f, b.heightPx, 0.01f)
+        assertEquals(NOTE_ICON_FONT_DP, b.widthPx, 0.01f)
+        assertEquals(NOTE_ICON_FONT_DP * 0.64f, b.heightPx, 0.01f)
+    }
+
+    /** 小图标是固定大小的记号：批注字号被拖大拖小，图标尺寸一律不动。 */
+    @Test
+    fun `small icon size ignores the note font size`() {
+        val anchor = rect(0f, 0f, 600f, 40f)
+        fun sizeAt(notePx: Float): Pair<Float, Float> {
+            val b = place(
+                notes = listOf(noteInk(1, listOf(anchor))),
+                textInk = listOf(anchor, rect(0f, 40f, 600f, 80f)),
+                contentBottom = 80f,
+                pageRight = 604f,
+                fontPx = notePx,
+            ).single()
+            return b.widthPx to b.heightPx
+        }
+        val tiny = sizeAt(7f)
+        val huge = sizeAt(40f)
+        assertEquals(NOTE_ICON_FONT_DP, tiny.first, 0.01f)
+        assertEquals(NOTE_ICON_FONT_DP * 0.64f, tiny.second, 0.01f)
+        assertEquals("批注字号变了，图标宽度也不该变", tiny.first, huge.first, 0.01f)
+        assertEquals("批注字号变了，图标高度也不该变", tiny.second, huge.second, 0.01f)
     }
 
     @Test

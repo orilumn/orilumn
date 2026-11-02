@@ -468,9 +468,15 @@ fun ReaderSettingsPanel(
                         fmt = { "${it.roundToInt()}%" },
                     ),
                     ItemKey(onEnter = { onCommitLight(withDefaultAnnotationColorSlots(s)) }),
+                    // 折叠所有批注：整页只留贴着划线的小图标。纯像素开关，走无重排提交。
+                    // 放在这一组的最上面：它是「要不要看见批注」的总闸，打开后其余批注控件一律置灰。
+                    ItemKey(onEnter = { onCommitLight(s.copy(noteCollapseAll = !s.noteCollapseAll)) }),
                     // 批注字体：复用正文那套字体下钻页（同一套系统 / 导入字体列表），
                     // 写入的是旁注覆盖层自己的族，不影响正文。
-                    ItemKey(onEnter = { pickSlot = "noteFont"; stack.add(Sub.TextFont) }),
+                    ItemKey(
+                        enabled = !s.noteCollapseAll,
+                        onEnter = { pickSlot = "noteFont"; stack.add(Sub.TextFont) },
+                    ),
                     // 批注字号：滑条按**字号**走（0.1 一档），存的是相对正文旁注默认字号的倍率，
                     // 这样正文字号一变旁注等比变，读者看到的读数也能真正细调。
                     sliderKey(
@@ -482,9 +488,8 @@ fun ReaderSettingsPanel(
                             onCommitLight(s.copy(noteFontScale = noteFontScaleFor(s, v)))
                         },
                         fmt = { noteFontSizeLabel(it) },
+                        enabled = !s.noteCollapseAll,
                     ),
-                    // 折叠所有批注：整页只留原文右下角的小图标。纯像素开关，走无重排提交。
-                    ItemKey(onEnter = { onCommitLight(s.copy(noteCollapseAll = !s.noteCollapseAll)) }),
                     // 旁注框怎么画：描边 / 底色 / 文字用标注色。纯像素开关，走无重排提交。
                     // 折叠态下小图标有自己的固定画法，这三个开关不生效（下面渲染时置灰）。
                     ItemKey(
@@ -1767,14 +1772,27 @@ private fun AnnotationColorPage(
                 index = 6,
             )
         }
+        // 折叠所有批注：整页退成贴着划线的小图标。只改覆盖层像素，走无重排提交。
+        // 它是「要不要看见批注」的总闸：打开后下面的字体、字号、描边、底色、同色字一律置灰。
+        item {
+            SetSwitch(
+                label = "折叠所有批注",
+                checked = s.noteCollapseAll,
+                onChange = { commitLight(s.copy(noteCollapseAll = it)) },
+                p = p,
+                nav = nav,
+                index = 7,
+            )
+        }
         item {
             SetRow(
                 label = "批注字体",
                 value = noteFontLabel,
-                onTap = keys[7].onEnter,
+                onTap = keys[8].onEnter,
                 p = p,
+                enabled = !s.noteCollapseAll,
                 nav = nav,
-                index = 7,
+                index = 8,
             )
         }
         item {
@@ -1789,18 +1807,8 @@ private fun AnnotationColorPage(
                 onPreview = { v -> previewLight(s.copy(noteFontScale = noteFontScaleFor(s, v))) },
                 onCommit = { v -> commitLight(s.copy(noteFontScale = noteFontScaleFor(s, v))) },
                 p = p,
+                enabled = !s.noteCollapseAll,
                 labelWidth = labelW,
-                nav = nav,
-                index = 8,
-            )
-        }
-        // 折叠所有批注：整页退成原文右下角的小图标。只改覆盖层像素，走无重排提交。
-        item {
-            SetSwitch(
-                label = "折叠所有批注",
-                checked = s.noteCollapseAll,
-                onChange = { commitLight(s.copy(noteCollapseAll = it)) },
-                p = p,
                 nav = nav,
                 index = 9,
             )
@@ -2111,6 +2119,10 @@ private fun UiSlider(
             .height(26.dp)
             .alpha(if (enabled) 1f else 0.45f)
             .pointerInput(enabled) {
+                // `pointerInput(enabled)` 只是「enabled 变了就重开这个手势块」，**不会**关掉手势：
+                // 置灰的行以前照样能拖（真机反馈：折叠所有批注打开后，灰着的批注字号还被拖动）。
+                // 禁用时连手势都不挂，拖、点、滑一律不接。
+                if (!enabled) return@pointerInput
                 detectDragGestures(
                     onDrag = { change, _ ->
                         change.consume()

@@ -57,16 +57,16 @@ import orilumn.reader.engine.skia.PageImage
  *
  * **两种形态（§2.1）**，由 [compact] 区分：
  * - **文字框**（`compact = false`，常态）：按 [maxLines] 行显示批注正文，配 [arrow] 指向原文；
- * - **小图标**（`compact = true`）：贴着划线右端画一个小椭圆省略号（与线垂直居中；高亮没有线，
- *   就挂在被标注文字的右下沿，§1.6）。两种来源——整页没有能读的空白时的**兜底**，以及读者
- *   打开「折叠所有批注」后的**常态**（[noteBubblePlacements] 的 `collapseAll`）。
+ * - **小图标**（`compact = true`）：贴着划线右端画一个现成图标（对话气泡，与线垂直居中；
+ *   高亮没有线，就挂在被标注文字的右下沿，§1.6）。两种来源——整页没有能读的空白时的**兜底**，
+ *   以及读者打开「折叠所有批注」后的**常态**（[noteBubblePlacements] 的 `collapseAll`）。
  *   [leftPx]/[topPx] 是椭圆左上角、[widthPx] 是直径、[maxLines] 恒为 1。
- *   这个形态**不画箭头**，也不参与其他旁注的避让；**不是文字**，底色与描边是自己的固定画法，
- *   不跟批注框的描边 / 底色两个开关走。
+ *   这个形态**不画箭头**，也不参与其他旁注的避让；**不是文字**，颜色与图形是固定画法，
+ *   不跟批注框的描边 / 底色 / 同色字三个开关走。
  *
  * @property annotationId 这条批注属于哪条标注（点它 = 回去改这句话）。
  * @property text 批注正文（完整文本，超出可用行数由 Text 自己省略）。
- * @property leftPx/topPx 页面坐标（屏幕像素）；小图标形态下是椭圆左上角。
+ * @property leftPx/topPx 页面坐标（屏幕像素）；小图标形态下是图标左上角。
  * @property widthPx 文字框宽度（像素，由空白与整句宽取小）；小图标形态下是椭圆直径。
  * @property maxLines 文字框实际要用几行（1 起，已按「整句优先」与空白高度取小）；小图标形态恒为 1。
  * @property argb 所属标注的墨色：文字框用它做淡底与左侧色条，读者一眼看出是哪一条。
@@ -117,11 +117,18 @@ private const val NOTE_GEOM_EPS: Float = 0.5f
  */
 private const val MIN_SHOWN_CHARS: Int = 1
 
-/** 小椭圆宽 / 高（以旁注字号为单位）：只是「这里有一条批注」的记号，不抢正文。 */
-private const val NOTE_ICON_WIDTH_RATIO: Float = 1f
-private const val NOTE_ICON_HEIGHT_RATIO: Float = 0.64f
+/**
+ * 小图标的**固定**字号（dp）：它是「这里有一条批注」的记号，宽 1em、高 0.64em。
+ *
+ * 这个尺寸不跟批注字号滑块走，也不跟正文字号走——读者怎么调这两处，这颗记号都是约 16.5 号
+ * 那么大（2026-11-02 用户定口）。px 换算在调用方按当前密度做一次（[noteBubblePlacements] 收物理像素）。
+ */
+internal const val NOTE_ICON_FONT_DP: Float = 16.5f
 
-/** 小椭圆的点击热区边长（以旁注字号为单位）：视觉小，手指仍够得着。 */
+/** 小图标高 / 宽（em）：扁椭圆，里面一个「…」。 */
+private const val NOTE_ICON_ASPECT: Float = 0.64f
+
+/** 小图标的点击热区边长（以旁注字号为单位）：视觉小，手指仍够得着。 */
 internal const val NOTE_ICON_HIT_RATIO: Float = 1.2f
 
 /**
@@ -2006,6 +2013,11 @@ internal fun noteBubblePlacements(
      * 不量空白、不排文字框、不画引线（`false` = 照常布点）。
      */
     collapseAll: Boolean = false,
+    /**
+     * 小图标的 em 尺寸（**物理像素**，调用方按 [NOTE_ICON_FONT_DP] × 当前密度算好）。
+     * 图标是固定大小的记号，与批注字号、正文字号都无关；缺省用 [NOTE_ICON_FONT_DP]（纯几何单测口径）。
+     */
+    iconEmPx: Float = NOTE_ICON_FONT_DP,
 ): List<NoteBubble> {
     if (noteInk.isEmpty()) return emptyList()
     // 分阶段计时：真机上「一页十条批注」慢的时候，要知道是切空白、量候选、还是排位置慢。
@@ -2042,8 +2054,9 @@ internal fun noteBubblePlacements(
     if (ordered.isEmpty()) return emptyList()
 
     // 一条都分不到位置的批注不再消失：贴着划线右端退成小椭圆（§1.6）。
-    val iconW = max(small * NOTE_ICON_WIDTH_RATIO, 4f)
-    val iconH = max(small * NOTE_ICON_HEIGHT_RATIO, 3f)
+    // 图标尺寸是固定的一号（[NOTE_ICON_FONT_DP]）：批注字号、正文字号怎么调，这颗记号都不变。
+    val iconW = max(iconEmPx, 4f)
+    val iconH = max(iconEmPx * NOTE_ICON_ASPECT, 3f)
     // 同一个锚点掉出多个小椭圆时，向下错开一个图标高（§1.6），不叠成一摞。
     val icons = ArrayList<Rect>()
     fun iconBubble(note: NoteInk): NoteBubble {
@@ -6807,10 +6820,11 @@ internal fun NoteBubbles(
         bubbles.forEach { b ->
             val tint = Color(b.argb)
             if (b.compact) {
-                // 小椭圆（§1.6）：原文右下角一个 0.5em × 0.32em 的椭圆，点它同样打开批注。
-                // 视觉很小，热区单独放大到 1.2em：椭圆居中，透明边距一起接手势；这种形态没有箭头。
+                // 小椭圆（§1.6）：贴着划线右端的一个固定大小记号，点它同样打开批注。
+                // 视觉很小，热区单独放大：椭圆居中，透明边距一起接手势；这种形态没有箭头。
                 val h = if (b.heightPx > 0f) b.heightPx else b.widthPx * 0.64f
-                val hit = max(b.fontPx * NOTE_ICON_HIT_RATIO, max(b.widthPx, h))
+                // 热区至少按图标自身放大 1.6 倍，读者把批注字号调到最小时手指也够得着。
+                val hit = max(b.fontPx * NOTE_ICON_HIT_RATIO, max(b.widthPx, h) * 1.6f)
                 val padLeft = (hit - b.widthPx) / 2f
                 val padTop = (hit - h) / 2f
                 Box(
@@ -6831,8 +6845,7 @@ internal fun NoteBubbles(
                             .height(with(d) { h.toDp() })
                             .clip(RoundedCornerShape(50))
                             // 小图标不是文字：底色与描边是它的**固定画法**，不跟
-                            // 「显示批注边框 / 显示批注背景色」两个开关走 —— 那两个开关管的是
-                            // 文字框，关掉它们不该把图标也弄成三颗孤零零的点（甚至看不见）。
+                            // 「显示批注边框 / 显示批注背景色」两个开关走。
                             .background(tint.copy(alpha = 0.12f))
                             .border(1.dp, tint.copy(alpha = 0.75f), RoundedCornerShape(50)),
                     ) {

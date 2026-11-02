@@ -7,6 +7,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -132,6 +134,8 @@ internal class PageNoteLane(
         bodyFontPx: Float,
         fontScale: Float,
         collapseAll: Boolean,
+        /** 小图标的 em（物理像素）：固定大小，见 [NOTE_ICON_FONT_DP]。 */
+        iconEmPx: Float,
     ): List<NoteBubble> = computePageNotes(
         content = content,
         chapter = chapter,
@@ -149,6 +153,7 @@ internal class PageNoteLane(
         bodyFontPx = bodyFontPx,
         fontScale = fontScale,
         collapseAll = collapseAll,
+        iconEmPx = iconEmPx,
     )
 }
 
@@ -208,6 +213,9 @@ internal fun rememberPageNotes(
      */
     notesReady: Boolean,
 ): List<NoteBubble> {
+    // 小图标是固定的一号（[NOTE_ICON_FONT_DP]，约 16.5）：只按屏幕密度换算成物理像素一次，
+    // 与批注字号倍率、正文字号都无关 —— 读者怎么调，这颗记号都不变。
+    val iconEmPx = with(LocalDensity.current) { NOTE_ICON_FONT_DP.dp.toPx() }
     // 页身份键：章 + 页区间（见 [pageNoteKey]）。预热方也只有 ReaderPos，必须能算出同一个键。
     val pageKey = pageNoteKey(chapter, charStart, charEnd)
     // 键只有页身份：改字号 / 改版式会让 `memo` 整只换新，但**这一页还是这一页**——
@@ -274,6 +282,7 @@ internal fun rememberPageNotes(
                         bodyFontPx = bodyFontPx,
                         fontScale = fontScale,
                         collapseAll = collapseAll,
+                        iconEmPx = iconEmPx,
                     )
                 }
             } ?: return@withContext
@@ -315,6 +324,8 @@ private fun computePageNotes(
     bodyFontPx: Float,
     fontScale: Float,
     collapseAll: Boolean,
+    /** 小图标的 em（物理像素，[NOTE_ICON_FONT_DP] × 密度）：固定大小，与批注字号 / 正文字号无关。 */
+    iconEmPx: Float,
 ): List<NoteBubble> {
     val lines = content.lines.orEmpty()
     val shift = if (lines.isEmpty()) {
@@ -503,6 +514,8 @@ private fun computePageNotes(
         pageBottom = pageHeight,
         noteTextSizer = textSizer,
         collapseAll = collapseAll,
+        // 小图标是固定大小的记号（约 16.5 号）：批注字号、正文字号怎么调都不变。
+        iconEmPx = iconEmPx,
     )
     // 真机计时留档（P5）：只在按页缓存失效时打一行，翻页 / 改批注才出现。
     // geo = 本页整页几何（行 / 逐字墨迹 / 圆点），ink = 各条批注自己的墨迹，
@@ -585,6 +598,8 @@ internal fun WarmAdjacentPageNotes(
     /** 最近翻页方向（+1 前 / -1 后 / 0 无）：预热先排需求最大的一侧。 */
     directionProvider: () -> Int,
 ) {
+    // 与 [rememberPageNotes] 同一个口径：小图标固定约 16.5，只随密度换算。
+    val iconEmPx = with(LocalDensity.current) { NOTE_ICON_FONT_DP.dp.toPx() }
     val hostRef = rememberUpdatedState(host)
     val dirRef = rememberUpdatedState(directionProvider)
     val annotationsRef = rememberUpdatedState(annotationsFor)
@@ -662,6 +677,7 @@ internal fun WarmAdjacentPageNotes(
                             bodyFontPx = bodyFontPx,
                             fontScale = fontScale,
                             collapseAll = collapseAll,
+                            iconEmPx = iconEmPx,
                         )
                     }
                 } ?: return@withContext

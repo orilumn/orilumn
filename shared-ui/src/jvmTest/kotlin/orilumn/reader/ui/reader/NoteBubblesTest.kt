@@ -3062,6 +3062,30 @@ class NoteBubblesTest {
         assertEquals("批注字号变了，图标高度也不该变", tiny.second, huge.second, 0.01f)
     }
 
+    /**
+     * 折叠态小图标的底色必须是**实色**。
+     *
+     * 高亮色自带 45% 透明度（那是给正文铺底用的）。照原样铺记号，底下的划线 / 正文会透上来，
+     * 用户看到的就是「高亮压在图标上面」（2026-11-02 真机）。合成到纸面后与纸上所见一致，
+     * 但完全不透明；三点按**合成后**的明暗取色，否则浅底会挑出纸色三点（几乎看不见）。
+     */
+    @Test
+    fun `collapsed icon fill is opaque and dots follow the composited colour`() {
+        val paper = 0xFFFFFBF0.toInt()
+        val ink = 0xFF222222.toInt()
+
+        val pink = 0x73F48FB1.toInt()
+        val fill = noteIconFillArgb(paper, pink)
+        assertEquals("底色不能带透明度", 0xFF, (fill ushr 24) and 0xFF)
+        assertEquals("合成结果应与 45% 标注色压纸面一致", blendOver(paper, pink, 0x73 / 255f), fill)
+        assertEquals("浅粉底配正文墨色", ink, noteIconDotArgb(fill, ink, paper))
+
+        val red = 0xFFE53935.toInt()
+        val opaqueFill = noteIconFillArgb(paper, red)
+        assertEquals("不透明标注色原样落地", red, opaqueFill)
+        assertEquals("深红底配纸色", paper, noteIconDotArgb(opaqueFill, ink, paper))
+    }
+
     @Test
     fun `note text fit reports complete and truncated capacities`() {
         val width = noteFont * 4f
@@ -4302,13 +4326,15 @@ class NoteBubblesTest {
         listOf(1L to a, 2L to b).forEach { (id, anchor) ->
             val icon = byId.getValue(id)
             val iconRect = rect(icon.leftPx, icon.topPx, icon.leftPx + icon.widthPx, icon.topPx + icon.heightPx)
-            assertTrue("图标应贴在原文右下角：$iconRect vs $anchor", iconRect.left >= anchor.right - 0.01f)
-            assertTrue("图标应在原文下缘之下：$iconRect vs $anchor", iconRect.bottom >= anchor.bottom - 0.01f)
-            assertEquals(
-                "图标不该压住它标注的那段原文",
-                false,
-                iconRect.overlaps(rect(anchor.left, anchor.top, anchor.right, anchor.bottom)),
+            // 图标咬住原文右端：左缘最多压进 0.3em，不多不少。
+            val bite = icon.widthPx * 0.3f
+            assertTrue(
+                "图标应咬住原文右端（只许压进 0.3em）：$iconRect vs $anchor",
+                iconRect.left <= anchor.right + 0.01f && iconRect.left >= anchor.right - bite - 0.01f,
             )
+            assertTrue("图标应在原文下缘之下：$iconRect vs $anchor", iconRect.bottom >= anchor.bottom - 0.01f)
+            val covered = min(iconRect.right, anchor.right) - max(iconRect.left, anchor.left)
+            assertTrue("图标压住原文的部分只该是咬住的那 0.3em：$iconRect vs $anchor", covered <= bite + 0.01f)
         }
         val r1 = rect(
             byId.getValue(1L).leftPx, byId.getValue(1L).topPx,
@@ -4335,8 +4361,8 @@ class NoteBubblesTest {
         )
         val b = bubbles.single()
         val box = rect(b.leftPx, b.topPx, b.leftPx + b.widthPx, b.topPx + b.heightPx)
-        assertEquals("图标左缘应正接在线尾、不留缝：box=$box line=$line",
-            line.right, box.left, 0.5f)
+        assertEquals("图标应咬住线尾、左缘压进 0.3em：box=$box line=$line",
+            line.right - b.widthPx * 0.3f, box.left, 0.5f)
         assertEquals(
             "图标应与划线垂直居中",
             (line.top + line.bottom) / 2f,
@@ -4356,15 +4382,17 @@ class NoteBubblesTest {
         )
         val b = bubbles.single()
         val box = rect(b.leftPx, b.topPx, b.leftPx + b.widthPx, b.topPx + b.heightPx)
-        assertEquals("高亮没有线，图标左缘应正接在文字右端：box=$box text=$text",
-            text.right, box.left, 0.5f)
+        assertEquals("高亮没有线，图标左缘应咬住文字右端（压进 0.3em）：box=$box text=$text",
+            text.right - b.widthPx * 0.3f, box.left, 0.5f)
         assertEquals(
             "高亮的等效划线就是文字下缘，图标应以它居中",
             text.bottom,
             (box.top + box.bottom) / 2f,
             0.5f,
         )
-        assertTrue("图标不该压住被标注的文字：box=$box text=$text", !box.overlaps(text))
+        // 只有左端那 0.3em 压在高亮上（咬住线尾），其余不该盖住字。
+        val covered = min(box.right, text.right) - max(box.left, text.left)
+        assertTrue("图标最多只该压住文字右端 0.3em：box=$box text=$text", covered <= b.widthPx * 0.3f + 0.01f)
     }
 
     /** 折叠态：跨行标注跟着**最后一行**那条线走，不会挂在第一行的线尾。 */
@@ -4385,8 +4413,8 @@ class NoteBubblesTest {
         )
         val b = bubbles.single()
         val box = rect(b.leftPx, b.topPx, b.leftPx + b.widthPx, b.topPx + b.heightPx)
-        assertEquals("图标应接在最后一行那条线的线尾：box=$box line2=$line2",
-            line2.right, box.left, 0.5f)
+        assertEquals("图标应咬住最后一行那条线的线尾：box=$box line2=$line2",
+            line2.right - b.widthPx * 0.3f, box.left, 0.5f)
         assertEquals(
             "图标应与最后一行那条线垂直居中",
             (line2.top + line2.bottom) / 2f,

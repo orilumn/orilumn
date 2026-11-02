@@ -25,6 +25,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
@@ -128,8 +129,33 @@ internal const val NOTE_ICON_FONT_DP: Float = 16.5f
 /** 小图标高 / 宽（em）：扁椭圆，里面一个「…」。 */
 private const val NOTE_ICON_ASPECT: Float = 0.64f
 
+/**
+ * 小图标左缘比线尾再往左压进多少（以图标自身 em 计）：贴着线尾不等于「紧挨着线头」，
+ * 再咬进去一点才像从线上长出来的（2026-11-02 用户定口 0.3em）。
+ */
+private const val NOTE_ICON_OVERLAP_EM: Float = 0.3f
+
 /** 小图标的点击热区边长（以旁注字号为单位）：视觉小，手指仍够得着。 */
 internal const val NOTE_ICON_HIT_RATIO: Float = 1.2f
+
+/**
+ * 小图标的**底色**：标注色按自身透明度在纸面上合成一次，返回**不透明**结果。
+ *
+ * 高亮色自带 45% 透明度（那是给正文铺底用的），照原样铺在记号上，底下的划线 / 正文就会
+ * 透上来 —— 看上去像「高亮压在了图标上面」。合成后的颜色与纸面上看到的一模一样，
+ * 但实心：记号真正压在正文之上，不透字（2026-11-02 用户报）。
+ */
+internal fun noteIconFillArgb(pageBgArgb: Int, tintArgb: Int): Int =
+    blendOver(pageBgArgb, tintArgb, ((tintArgb ushr 24) and 0xFF) / 255f)
+
+/**
+ * 小图标三点颜色：实底色偏亮配正文墨色，偏暗配纸面底色。
+ *
+ * 明暗按**合成后**的底色判（[noteIconFillArgb]），不是标注色原值：高亮色原值是深色，
+ * 合成到纸上却是浅底，照原值判会挑出纸色三点，落在浅底上几乎看不见。
+ */
+internal fun noteIconDotArgb(fillArgb: Int, fgArgb: Int, pageBgArgb: Int): Int =
+    if (relativeLuminance(fillArgb) < 0.5) pageBgArgb else fgArgb
 
 /**
  * 标注与障碍、与另一条标注之间的**最小**距离（以旁注字号为单位）：四周 0.1em。
@@ -3522,8 +3548,9 @@ private fun noteIconRect(note: NoteInk, gap: Float, width: Float, height: Float,
     val lineRight = line?.right ?: ink.right
     // 高亮没有线：它的「线」就是这段高亮的下沿（文字墨迹的底边）。
     val lineMid = line?.let { (it.top + it.bottom) / 2f } ?: ink.bottom
-    // 不留缝：椭圆左缘正接在线的右端（gap 只留给退路）。
-    val xRight = lineRight
+    // 咬住线尾：左缘压在线的右端上（再往左 [NOTE_ICON_OVERLAP_EM]），gap 只留给退路。
+    val overlap = width * NOTE_ICON_OVERLAP_EM
+    val xRight = lineRight - overlap
     val yBelow = ink.bottom + gap
     val yAbove = ink.top - gap - height
     // 顺序：线右端同高 → 线下方 → 原文下缘内侧 → 线上方 → 线左端同高。
@@ -3538,7 +3565,9 @@ private fun noteIconRect(note: NoteInk, gap: Float, width: Float, height: Float,
         r.right <= page.right + NOTE_GEOM_EPS && r.bottom <= page.bottom + NOTE_GEOM_EPS
     // 压不压原文只看**逐行墨迹**：跨行标注的并集是个大包围盒，拿它当障碍，
     // 挂在末行线尾的图标会被自己第一行的字判成「压住了」。
-    fun coversInk(r: Rect) = note.rects.any { it.overlaps(r) }
+    // 左端那 [NOTE_ICON_OVERLAP_EM] 的压入是**有意的**（咬住线尾），判覆盖时把这一段排除；
+    // 不排除的话主选位置永远被自己判成「压住原文」，整页图标都会掉到线下方去。
+    fun coversInk(r: Rect) = note.rects.any { it.overlaps(Rect(r.left + overlap, r.top, r.right, r.bottom)) }
     fun clamp(r: Rect): Rect {
         val cx = r.left.coerceIn(page.left, max(page.left, page.right - width))
         val cy = r.top.coerceIn(page.top, max(page.top, page.bottom - height))
@@ -6807,6 +6836,8 @@ internal fun NoteBubbles(
 ) {
     if (bubbles.isEmpty()) return
     val d = LocalDensity.current
+    // 图标三点的对比色要跟正文墨色比明暗，用整数色（见 [noteIconDotArgb]）。
+    val fgArgb = fgColor.toArgb()
     Box(modifier = modifier) {
         // 箭头画在旁注框之下（同一覆盖层里先画线后画框，D-28）。
         if (bubbles.any { it.arrow != null }) {
@@ -6823,6 +6854,9 @@ internal fun NoteBubbles(
                 // 小椭圆（§1.6）：贴着划线右端的一个固定大小记号，点它同样打开批注。
                 // 视觉很小，热区单独放大：椭圆居中，透明边距一起接手势；这种形态没有箭头。
                 val h = if (b.heightPx > 0f) b.heightPx else b.widthPx * 0.64f
+                // 底色必须是**实色**（见 [noteIconFillArgb]）：高亮色自带 45% 透明度，
+                // 照原样铺在记号上，底下的划线 / 正文会透上来，看着像「高亮压在图标上面」。
+                val fillArgb = noteIconFillArgb(pageBgColor, b.argb)
                 // 热区至少按图标自身放大 1.6 倍，读者把批注字号调到最小时手指也够得着。
                 val hit = max(b.fontPx * NOTE_ICON_HIT_RATIO, max(b.widthPx, h) * 1.6f)
                 val padLeft = (hit - b.widthPx) / 2f
@@ -6844,17 +6878,20 @@ internal fun NoteBubbles(
                             .width(with(d) { b.widthPx.toDp() })
                             .height(with(d) { h.toDp() })
                             .clip(RoundedCornerShape(50))
-                            // 小图标不是文字：底色与描边是它的**固定画法**，不跟
-                            // 「显示批注边框 / 显示批注背景色」两个开关走。
-                            .background(tint.copy(alpha = 0.12f))
-                            .border(1.dp, tint.copy(alpha = 0.75f), RoundedCornerShape(50)),
+                            // 底色是标注色的**不透明版**（见上 [fillArgb]）：记号压在正文/划线之上时
+                            // 不透出底下的字，也不用再套一圈描边。它不跟「显示批注边框 /
+                            // 显示批注背景色」两个开关走 —— 那是文字框的画法，图标是记号。
+                            .background(Color(fillArgb)),
                     ) {
                         Canvas(modifier = Modifier.fillMaxSize()) {
+                            // 实底色上三点得自己找对比色（浅底配正文墨色，深底配纸面底色），
+                            // 判明暗用的是合成后的底色，见 [noteIconDotArgb]。
+                            val dotColor = Color(noteIconDotArgb(fillArgb, fgArgb, pageBgColor))
                             val dot = size.height * 0.11f
                             val step = size.width * 0.22f
                             for (k in -1..1) {
                                 drawCircle(
-                                    color = tint.copy(alpha = 0.85f),
+                                    color = dotColor,
                                     radius = dot,
                                     center = Offset(size.width / 2f + k * step, size.height / 2f),
                                 )

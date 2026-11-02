@@ -34,11 +34,11 @@ object SettingsScope {
         "autoContinue", "pageNum",
         // 字体管理列表的隐藏/显示过滤（与书无关，换书不复位）。
         "showHiddenFonts",
-        // 笔记族：色槽、新建默认格、浮动菜单上次类别/线型、批注字体与字号。
+        // 笔记族：色槽、新建默认格、浮动菜单上次类别/线型、批注字体/字重与字号。
         "highlightColorSlots", "underlineColorSlots",
         "highlightDefaultSlot", "underlineDefaultSlot",
         "annotationLastKind", "annotationLastLineStyle",
-        "noteFont", "noteFontScale",
+        "noteFont", "noteFontWeight", "noteFontScale",
         // 旁注画法（折叠 / 描边 / 底色 / 文字用色）：只改覆盖层怎么画，不碰正文排版。
         "noteCollapseAll", "noteBorder", "noteBackground", "noteTextSameColor",
         // 持久化元数据（只增不改，见 ReaderSettings.schemaVersion KDoc）。
@@ -136,6 +136,7 @@ fun ReaderSettings.withGlobalFrom(next: ReaderSettings): ReaderSettings = copy(
     annotationLastKind = next.annotationLastKind,
     annotationLastLineStyle = next.annotationLastLineStyle,
     noteFont = next.noteFont,
+    noteFontWeight = next.noteFontWeight,
     noteFontScale = next.noteFontScale,
     noteCollapseAll = next.noteCollapseAll,
     noteBorder = next.noteBorder,

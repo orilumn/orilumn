@@ -199,6 +199,13 @@ data class ReaderSettings(
      */
     val noteFont: String = "",
     /**
+     * 批注（旁注）字重：0 = 跟随该字族自身默认（常规），100..900 = 读者在字重页选的那一档。
+     *
+     * 与 [noteFont] 同口径：只作用于旁注覆盖层的字形，**不碰正文排版**，不进版式比较
+     * （面板走无重排提交）；纯全局、换书沿用。
+     */
+    val noteFontWeight: Int = 0,
+    /**
      * 批注（旁注）字号的**相对倍率**（1 = 默认：正文主字号 × 旁注比例）。
      *
      * 存倍率而不是绝对像素，正文字号一变旁注跟着等比变，不会出现「正文调大了旁注没动」。
@@ -365,8 +372,9 @@ data class ReaderSettings(
         underlineDefaultSlot = 0,
         annotationLastKind = "",
         annotationLastLineStyle = "",
-        // 批注字体 / 字号：只改旁注覆盖层，不进版式（面板走 onCommitLight）。
+        // 批注字体 / 字重 / 字号：只改旁注覆盖层，不进版式（面板走 onCommitLight）。
         noteFont = "",
+        noteFontWeight = 0,
         noteFontScale = 1f,
         // 折叠所有批注：只改覆盖层怎么画（整页退成小图标），同样不进版式。
         noteCollapseAll = false,
@@ -579,6 +587,9 @@ data class ReaderSettings(
                     annotationLastKind = SettingsJson.optString(o, "annotationLastKind", d.annotationLastKind),
                     annotationLastLineStyle = SettingsJson.optString(o, "annotationLastLineStyle", d.annotationLastLineStyle),
                     noteFont = SettingsJson.optString(o, "noteFont", d.noteFont),
+                    // 0 = 跟随字族默认；未知/越界值一律按「没选」处理，不让脏档把旁注画成怪字重。
+                    noteFontWeight = SettingsJson.optInt(o, "noteFontWeight", d.noteFontWeight)
+                        .takeIf { it in 100..900 } ?: 0,
                     noteFontScale = SettingsJson.optDouble(o, "noteFontScale", d.noteFontScale.toDouble())
                         .toFloat().coerceIn(MIN_NOTE_FONT_SCALE, MAX_NOTE_FONT_SCALE),
                     noteCollapseAll = SettingsJson.optBoolean(o, "noteCollapseAll", d.noteCollapseAll),

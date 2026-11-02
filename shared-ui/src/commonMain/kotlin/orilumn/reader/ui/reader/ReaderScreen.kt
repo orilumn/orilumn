@@ -155,9 +155,10 @@ fun ReaderScreen(
 ) {
     val density = LocalDensity.current.density
     val profile = remember(settings, density) { TypographicProfile.build(settings, density) }
-    // 批注字体（渲染层解析）：字族名 → Compose 字体。空串 / 字体已删 = 界面默认。
+    // 批注字体（渲染层解析）：字族名 + 字重 → Compose 字体。空串 / 字体已删 = 界面默认。
     // 只影响旁注覆盖层，不进版式（`noteFont` 在 withoutNonLayout 里，面板走无重排提交）。
-    val noteFontFamily = remember(settings.noteFont, fontEntries) {
+    // 字重直接解析进这个族（平台侧取对应字形面），Text 上不再另写字重，免得合成粗体叠一次。
+    val noteFontFamily = remember(settings.noteFont, settings.noteFontWeight, fontEntries) {
         noteFontFamilyOf(settings, fontEntries)
     }
     val selectionHandleRadiusPx = SELECTION_HANDLE_RADIUS_DP * density

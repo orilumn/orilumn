@@ -252,6 +252,7 @@ class SettingsPersistenceScopeTest {
         "annotationLastKind" -> s.copy(annotationLastKind = if (s.annotationLastKind == "underline") "highlight" else "underline")
         "annotationLastLineStyle" -> s.copy(annotationLastLineStyle = if (s.annotationLastLineStyle == "wavy") "straight" else "wavy")
         "noteFont" -> s.copy(noteFont = "NoteFace")
+        "noteFontWeight" -> s.copy(noteFontWeight = if (s.noteFontWeight == 700) 400 else 700)
         "noteFontScale" -> s.copy(noteFontScale = if (s.noteFontScale == 1.4f) 1.1f else 1.4f)
         "noteCollapseAll" -> s.copy(noteCollapseAll = !s.noteCollapseAll)
         "noteBorder" -> s.copy(noteBorder = !s.noteBorder)

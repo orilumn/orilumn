@@ -263,12 +263,10 @@ fun ReaderSettingsPanel(
         /**
          * 字体行进入：多字重档下钻字重页，单一下钻直接写入槽位（渲染点按与键盘共用）。
          *
-         * 批注字体**不设字重**（旁注固定常规字重，字重页对旁注无效）：即使该族有多个字重，
-         * 也直接写入槽位、不下钻，避免读者挑完粗体却发现旁注没变。
+         * 批注字体与正文三槽**同一套下钻口径**：该族有多档字重就进字重页，选完族 + 字重一起落盘。
          */
         fun enterFontRow(family: String) {
-            val multi = slotKey != "noteFont" &&
-                fontEntries.filter { it.family == family }.weightChoices().size > 1
+            val multi = fontEntries.filter { it.family == family }.weightChoices().size > 1
             if (multi) {
                 weightPickFamily = family
                 stack.add(Sub.WeightPicker)
@@ -342,8 +340,12 @@ fun ReaderSettingsPanel(
                         ItemKey(onEnter = { onCommitLight(s.copy(showHiddenFonts = !s.showHiddenFonts)) })
                     is FontPanelRow.FollowOriginal ->
                         ItemKey(onEnter = {
-                            val clearedSlotAnchors = s.fontWeightAnchorsBySlot.filterKeys { !it.startsWith("$slotKey|") }
-                            commitSlot(setField(s, slotKey, "").copy(fontWeightAnchorsBySlot = clearedSlotAnchors))
+                            if (slotKey == "noteFont") {
+                                commitSlot(setField(s, slotKey, "").copy(noteFontWeight = 0))
+                            } else {
+                                val clearedSlotAnchors = s.fontWeightAnchorsBySlot.filterKeys { !it.startsWith("$slotKey|") }
+                                commitSlot(setField(s, slotKey, "").copy(fontWeightAnchorsBySlot = clearedSlotAnchors))
+                            }
                         })
                     is FontPanelRow.Import ->
                         // 双按钮同行：回车走主动作（本地导入优先；单开无线时进无线下钻页）。
@@ -361,10 +363,7 @@ fun ReaderSettingsPanel(
                     val opts = fontEntries.filter { it.family == fam }.weightChoices()
                     opts.map { (w, _) ->
                         ItemKey(onEnter = {
-                            commitSlot(setField(s, slotKey, fam).copy(
-                                fontWeightAnchors = s.fontWeightAnchors,
-                                fontWeightAnchorsBySlot = s.fontWeightAnchorsBySlot + ("$slotKey|$fam" to w),
-                            ))
+                            commitSlot(withSlotWeight(s, slotKey, fam, w))
                         })
                     }
                 }
@@ -860,14 +859,10 @@ fun ReaderSettingsPanel(
                                 // 无线走面板内下钻（返回‹/Esc 即回字体列表），不经壳弹框。
                                 onImportWifi = { stack.add(Sub.WifiImport) },
                                 // 多字重行点按下钻字重页（与键盘共用 enterFontRow 口径）；
-                                // 批注字体不设字重，直接写入槽位。
+                                // 批注字体同样进字重页，选完族 + 字重一起落盘。
                                 onPickWeight = { family ->
-                                    if (slotKey == "noteFont") {
-                                        commitSlot(setField(s, slotKey, family))
-                                    } else {
-                                        weightPickFamily = family
-                                        stack.add(Sub.WeightPicker)
-                                    }
+                                    weightPickFamily = family
+                                    stack.add(Sub.WeightPicker)
                                 },
                                 showLocalButton = canFontImport,
                                 showWifiButton = wifiReady,
@@ -891,17 +886,11 @@ fun ReaderSettingsPanel(
                                     val isCurrent = fieldOf(s, slotKey) == fam
                                     WeightPickerPage(
                                         options = opts,
-                                        selectedWeight = if (isCurrent) {
-                                            val k = "$slotKey|$fam"
-                                            s.fontWeightAnchorsBySlot[k] ?: s.fontWeightAnchors[fam]
-                                        } else null,
+                                        selectedWeight = if (isCurrent) slotWeightOf(s, slotKey, fam) else null,
                                         nav = nav,
                                         p = p,
                                         onPickWeight = { w ->
-                                            onCommitTypography(setField(s, slotKey, fam).copy(
-                                                fontWeightAnchors = s.fontWeightAnchors,
-                                                fontWeightAnchorsBySlot = s.fontWeightAnchorsBySlot + ("$slotKey|$fam" to w),
-                                            ))
+                                            commitSlot(withSlotWeight(s, slotKey, fam, w))
                                         },
                                         onMouseMove = onMove,
                                         listState = listState,
@@ -1218,6 +1207,9 @@ private val FONT_FIELDS = listOf("正文" to "fontBody", "标题" to "fontTitle"
 /**
  * 字体槽位读写：正文 / 标题 / 代码三槽之外，笔记页的「批注字体」也复用同一套字体下钻页
  * （[FontLibraryPanel]），槽位键 `noteFont`。它的提交走无重排路径（见 `commitSlot`）。
+ *
+ * 批注换族时一并清掉旧字重：字重没按族记账（独立字段），留着上一个族的粗档会让新族
+ * 莫名其妙地变粗。字重页写入时是「先 setField 再填字重」，清掉不碍事。
  */
 private fun fieldOf(s: ReaderSettings, key: String) = when (key) {
     "fontTitle" -> s.fontTitle
@@ -1228,9 +1220,32 @@ private fun fieldOf(s: ReaderSettings, key: String) = when (key) {
 private fun setField(s: ReaderSettings, key: String, v: String) = when (key) {
     "fontTitle" -> s.copy(fontTitle = v)
     "fontCode" -> s.copy(fontCode = v)
-    "noteFont" -> s.copy(noteFont = v)
+    "noteFont" -> s.copy(noteFont = v, noteFontWeight = 0)
     else -> s.copy(fontBody = v)
 }
+
+/**
+ * 槽位当前字重：正文三槽读按槽锚点（旧全局表兜底），批注字体读自己的独立字段。
+ *
+ * 批注不是书本排版的一部分，不能把锚点塞进 `fontWeightAnchorsBySlot`：那张表按书私有
+ * 且进 [orilumn.reader.engine.text.LayoutParamKey]，会让旁注换字重误作废分页表。
+ */
+private fun slotWeightOf(s: ReaderSettings, key: String, family: String): Int? =
+    if (key == "noteFont") {
+        s.noteFontWeight.takeIf { it in 100..900 }
+    } else {
+        s.fontWeightAnchorsBySlot["$key|$family"] ?: s.fontWeightAnchors[family]
+    }
+
+/** 写入某个族的字重（与 [slotWeightOf] 对称），返回可交给 `commitSlot` 的新设置。 */
+private fun withSlotWeight(s: ReaderSettings, key: String, family: String, weight: Int): ReaderSettings =
+    if (key == "noteFont") {
+        setField(s, key, family).copy(noteFontWeight = weight)
+    } else {
+        setField(s, key, family).copy(
+            fontWeightAnchorsBySlot = s.fontWeightAnchorsBySlot + ("$key|$family" to weight),
+        )
+    }
 
 /**
  * 批注字号滑条的步长：**显示字号** 0.1 一档（不是存盘的倍率）。
@@ -1566,7 +1581,7 @@ private fun AnimModePage(
  *
  * 「恢复默认设置」之后还有两项**旁注自己的样式**（2026-10-28 用户定口）：
  * - **批注字体**：与正文 / 标题 / 代码同一套字体下钻页，可挑任意系统或导入字体；
- *   只挑字族、不设字重（旁注固定常规字重，字重页对旁注无效，故不进入）；
+ *   多字重的族同样进字重页（选完族与字重一起生效，换族回到该族默认字重）；
  *   空槽 = 跟随界面默认（不是跟随原书——旁注不套书里的正文族）。
  * - **批注字号**：滑条编辑倍率，右侧显示换算后的实际字号；旁注始终跟正文字号等比。
  * 两项都只作用于覆盖层，与色槽同口径走无重排提交。

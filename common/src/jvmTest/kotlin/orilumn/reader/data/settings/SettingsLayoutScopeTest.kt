@@ -39,8 +39,8 @@ class SettingsLayoutScopeTest {
         "highlightDefaultSlot", "underlineDefaultSlot",
         // 浮动菜单记住的上次类别 / 划线线型：纯菜单偏好，不影响版面。
         "annotationLastKind", "annotationLastLineStyle",
-        // 批注字体 / 字号只作用于旁注覆盖层，不改正文排版。
-        "noteFont", "noteFontScale",
+        // 批注字体 / 字重 / 字号只作用于旁注覆盖层，不改正文排版。
+        "noteFont", "noteFontWeight", "noteFontScale",
         "noteCollapseAll", "noteBorder", "noteBackground", "noteTextSameColor",
         // 开书探针的只读读数：只给面板显示，不参与渲染。
         "probeIndent", "probeLineSpacing", "probeParagraphSpacing", "probeLetterSpacing",
@@ -92,6 +92,7 @@ class SettingsLayoutScopeTest {
         "annotationLastKind" -> s.copy(annotationLastKind = if (s.annotationLastKind == "underline") "highlight" else "underline")
         "annotationLastLineStyle" -> s.copy(annotationLastLineStyle = if (s.annotationLastLineStyle == "wavy") "straight" else "wavy")
         "noteFont" -> s.copy(noteFont = if (s.noteFont == "TestFamily") "OtherFamily" else "TestFamily")
+        "noteFontWeight" -> s.copy(noteFontWeight = if (s.noteFontWeight == 700) 400 else 700)
         "noteFontScale" -> s.copy(noteFontScale = if (s.noteFontScale == 1.4f) 1.1f else 1.4f)
         "noteCollapseAll" -> s.copy(noteCollapseAll = !s.noteCollapseAll)
         "noteBorder" -> s.copy(noteBorder = !s.noteBorder)

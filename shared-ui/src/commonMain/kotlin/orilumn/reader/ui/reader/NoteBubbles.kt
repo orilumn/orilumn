@@ -7344,8 +7344,8 @@ private class ComposeNoteTextSizer(
 /**
  * 一页取一次实测尺子：同一套字号 / 字体规则下测量结果稳定，不必每条批注重建。
  *
- * @param fontFamily 批注字体（`null` = 跟随界面默认）。**必须**与 [NoteBubbles] 里那条
- *   `Text` 用同一个族：量宽和画字一旦不是同一套字形，摆位判「整句放得下」而画出来多折一行。
+ * @param fontFamily 批注字体（`null` = 跟随界面默认；字重已解析进这个族）。**必须**与 [NoteBubbles]
+ *   里那条 `Text` 用同一个族：量宽和画字一旦不是同一套字形，摆位判「整句放得下」而画出来多折一行。
  */
 @Composable
 internal fun rememberNoteTextSizer(fontFamily: FontFamily? = null): NoteTextSizer {
@@ -7374,7 +7374,7 @@ internal fun NoteBubbles(
     pageBgColor: Int,
     onOpen: (Long) -> Unit,
     modifier: Modifier = Modifier,
-    /** 批注字体（`null` = 跟随界面默认）：与实测尺子同一个族，见 [rememberNoteTextSizer]。 */
+    /** 批注字体（`null` = 跟随界面默认；字重已解析进这个族）：与实测尺子同一个族，见 [rememberNoteTextSizer]。 */
     fontFamily: FontFamily? = null,
     /** 批注框描边（笔记面板「显示批注边框」）。关掉后只剩文字 / 省略号，不再圈一圈。 */
     showBorder: Boolean = true,

@@ -132,6 +132,7 @@ class ReaderSettingsTest {
                 annotationLastKind = "underline",
                 annotationLastLineStyle = "wavy",
                 noteFont = "Noto Serif CJK SC",
+                noteFontWeight = 700,
                 noteFontScale = 1.35f,
             )
             persist.persist(7L, next)
@@ -142,6 +143,7 @@ class ReaderSettingsTest {
             assertEquals("underline", saved.annotationLastKind)
             assertEquals("wavy", saved.annotationLastLineStyle)
             assertEquals("Noto Serif CJK SC", saved.noteFont)
+            assertEquals(700, saved.noteFontWeight)
             assertEquals(1.35f, saved.noteFontScale, 0.0001f)
             // 本书 overlay 保持空：全局项永不进本书。
             assertEquals(BookSettings.EMPTY, BookSettingsStore(dir.absolutePath).load(7L))
@@ -250,7 +252,7 @@ class ReaderSettingsTest {
             "highlightColorSlots", "underlineColorSlots",
             "highlightDefaultSlot", "underlineDefaultSlot",
             "annotationLastKind", "annotationLastLineStyle",
-            "noteFont", "noteFontScale",
+            "noteFont", "noteFontWeight", "noteFontScale",
             "noteCollapseAll", "noteBorder", "noteBackground", "noteTextSameColor",
         ).forEach { assertTrue("missing key $it", obj.containsKey(it)) }
         assertNotNull(obj.keys)

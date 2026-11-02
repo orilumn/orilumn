@@ -825,14 +825,17 @@ class NoteBubblesTest {
     @Test
     fun `two notes on one row share the upper right by nudging`() {
         val row = rect(0f, 100f, 600f, 140f)
-        val right = rect(300f, 100f, 400f, 140f)
-        val left = rect(100f, 100f, 200f, 140f)
+        val right = rect(450f, 100f, 550f, 140f)
+        val left = rect(300f, 100f, 400f, 140f)
+        // 左侧整条被插图占死：左边那条虽然偏左，左侧却没有可用位置，
+        // 只能按「做不到就用另一侧」回到右边（2026-11-02 用户定口：同侧优先是软规则）。
         val bubbles = place(
             notes = listOf(
                 noteInk(1, listOf(left), "左边这条批注写得比较长一些再多几个字"),
                 noteInk(2, listOf(right), "右边这条也长"),
             ),
             textInk = listOf(row),
+            figures = listOf(rect(0f, 0f, 280f, 600f)),
             contentBottom = 600f,
             pageBottom = 600f,
         )
@@ -4211,6 +4214,91 @@ class NoteBubblesTest {
                 !short.candidate.conflicts(neighbor.candidate, noteMetrics.marginX, noteMetrics.marginY) &&
                 !long.candidate.conflicts(short.candidate, noteMetrics.marginX, noteMetrics.marginY),
         )
+    }
+
+    /**
+     * 规则 5（2026-11-02 用户定口）：同一行几条批注都摆在**同一个角**上时，
+     * **靠外的那条贴着正文行、靠中心的往外推**——左上「越左越靠下」，
+     * 也就是「中心在外、两侧靠内」。
+     * 这条比「长的放外侧」优先：这里最左边那条最短、最右边那条最长，按长度该反过来排。
+     */
+    @Test
+    fun `same corner notes stack by anchor position instead of length`() {
+        val blank = rect(0f, 0f, 1200f, 300f)
+        fun candidate(id: Long, top: Float) = NoteCandidate(
+            annotationId = id,
+            rect = rect(0f, top, 100f, top + 40f),
+            freeRect = blank,
+            lines = 1,
+            complete = true,
+            shownChars = 9,
+            side = NoteSide.ABOVE_LEFT,
+            ring = 0,
+            distance = 200f,
+        )
+        // 三条都摆在正文行上方、各自选区的左边（左上）：选区越靠左，框该越贴正文行。
+        val left = NoteChoice(noteInk(1L, listOf(rect(200f, 300f, 260f, 340f)), "短"), candidate(1L, 100f))
+        val middle = NoteChoice(
+            noteInk(2L, listOf(rect(450f, 300f, 510f, 340f)), "中等长度的批注"),
+            candidate(2L, 160f),
+        )
+        val right = NoteChoice(
+            noteInk(3L, listOf(rect(550f, 300f, 610f, 340f)), "很长很长很长很长的批注文字"),
+            candidate(3L, 220f),
+        )
+        val arranged = arrangeSharedBlankNotes(
+            occupied = listOf(left, middle, right),
+            marginX = noteMetrics.marginX,
+            marginY = noteMetrics.marginY,
+        )
+        val dbg = arranged.joinToString(" | ") { "${it.note.annotationId}:${it.candidate.rect}" }
+        val a = arranged.single { it.note.annotationId == 1L }.candidate.rect
+        val b = arranged.single { it.note.annotationId == 2L }.candidate.rect
+        val c = arranged.single { it.note.annotationId == 3L }.candidate.rect
+        assertTrue("最左那条该贴着正文行（框最低）：$dbg", a.bottom > b.bottom + 1f)
+        assertTrue("中间的排在外侧：$dbg", b.bottom > c.bottom + 1f)
+        assertTrue("最右那条该被推到最外面（框最高）：$dbg", c.top < 160f)
+        for ((innerBox, outerBox) in listOf(a to b, b to c, a to c)) {
+            assertTrue(
+                "三条不能重叠：$dbg",
+                innerBox.top - outerBox.bottom >= noteMetrics.marginY * 2f - 1f,
+            )
+        }
+    }
+
+    /**
+     * 规则 5 的另一半（2026-11-02 用户定口）：正文行**下方**的右下角反过来——
+     * 「越右侧的越上面」，最右那条贴着正文行，最左那条被推到最外面。
+     */
+    @Test
+    fun `below right corner notes keep the rightmost next to the row`() {
+        val blank = rect(0f, 300f, 1200f, 600f)
+        fun candidate(id: Long, top: Float) = NoteCandidate(
+            annotationId = id,
+            rect = rect(600f, top, 700f, top + 40f),
+            freeRect = blank,
+            lines = 1,
+            complete = true,
+            shownChars = 9,
+            side = NoteSide.BELOW_RIGHT,
+            ring = 0,
+            distance = 200f,
+        )
+        val left = NoteChoice(noteInk(1L, listOf(rect(200f, 260f, 260f, 300f)), "短"), candidate(1L, 320f))
+        val right = NoteChoice(
+            noteInk(2L, listOf(rect(500f, 260f, 560f, 300f)), "很长很长很长很长的批注文字"),
+            candidate(2L, 380f),
+        )
+        val arranged = arrangeSharedBlankNotes(
+            occupied = listOf(left, right),
+            marginX = noteMetrics.marginX,
+            marginY = noteMetrics.marginY,
+        )
+        val dbg = arranged.joinToString(" | ") { "${it.note.annotationId}:${it.candidate.rect}" }
+        val a = arranged.single { it.note.annotationId == 1L }.candidate.rect
+        val b = arranged.single { it.note.annotationId == 2L }.candidate.rect
+        assertTrue("最右那条该贴着正文行（框最高）：$dbg", b.top < a.top - 1f)
+        assertTrue("最左那条被推到外侧：$dbg", a.top > b.bottom)
     }
 
     /**

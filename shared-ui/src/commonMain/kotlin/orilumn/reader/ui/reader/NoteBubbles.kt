@@ -642,6 +642,14 @@ internal data class NoteCandidate(
      */
     val crossed: Int = 0,
     /**
+     * 这个框是不是落在批注**自己那一侧**（2026-11-02 用户定口）。
+     *
+     * 同一行有多条批注时，左边那几条用左边的位置（左上 / 左下 / 正左），右边的反过来：
+     * 摆到对面去，引线只能贴着正文横穿回来，一定与同排别的引线交叉。
+     * 左右按这一行所有批注的整体跨度分，这一行只有本条批注时不判（`true`）。
+     */
+    val nativeHalf: Boolean = true,
+    /**
      * 这个候选是不是来自**基准行**（多行选区取末行）。只作同距、同向时的最后决胜：
      * 首行 / 末行都够近时仍贴末行，保持「基准行」口径稳定；首行更近或更合适时照常赢。
      */
@@ -998,6 +1006,15 @@ internal fun noteCandidates(
     maxCandidates: Int = MAX_CANDIDATES_PER_NOTE,
     sizer: NoteTextSizer = EstimatedNoteTextSizer,
     charWidthPx: Float = metrics.em / NOTE_BUBBLE_FONT_RATIO,
+    /**
+     * 同一行上**这一行所有批注**墨迹的并集（含本条，按行号索引）。
+     *
+     * 2026-11-02 用户定口：同一行有多条批注时，左边的用左边的位置、右边的用右边的位置。
+     * 「左 / 右」按**这一行几条批注的整体跨度**分，不按版心中线——一行短句可能整条都落在
+     * 版心左半边，按版心分会让整行批注全被判成「左边」。
+     */
+    rowSpan: Map<Int, Rect> = emptyMap(),
+    /** 同一行上其他批注在这一行的最左墨迹（按行号）：本行不是最左那条时，左上 / 左下要让过首字。 */
     otherRowLeft: Map<Int, Float> = emptyMap(),
     rightInk: List<Rect> = emptyList(),
     covering: Boolean? = null,
@@ -1094,6 +1111,17 @@ internal fun noteCandidates(
         else -> false
     }
     val rightFirst = rightRoom && !leftFirst
+
+    // 同侧（2026-11-02 用户定口）：同一行有多条批注时，左边的用左边的位置（左上 / 左下 / 正左），
+    // 右边的用右边的位置。**按这一行几条批注的整体跨度分左右**，不按版心中线：一行短句可能
+    // 整条都落在版心左半边，按版心分会把整行批注都判成「左边」。这一行只有本条批注时不判
+    // （没有左右的分别，规则不适用）。
+    val anchorMidX = (anchor.left + anchor.right) / 2f
+    val rowInk = rowSpan[base]
+    val groupLeft = min(anchor.left, rowInk?.left ?: anchor.left)
+    val groupRight = max(anchor.right, rowInk?.right ?: anchor.right)
+    val groupMidX = (groupLeft + groupRight) / 2f
+    val aloneOnRow = groupRight - groupLeft <= anchor.right - anchor.left + NOTE_GEOM_EPS
 
     // 规则第 8 条（2026-10-25 用户定口）：整句宽会罩住右侧那条的选区 ⇒ 本条先走左侧。
     // 只在**这一条自己的基准行**上判；判据用整句一行的自然宽，不看某个候选碰巧折成多宽。
@@ -1329,6 +1357,8 @@ internal fun noteCandidates(
             sideRank = marginRank ?: sideRankOf(side),
             crossed = crossed,
             onBaseRow = rowIndex == base,
+            nativeHalf = aloneOnRow || coversRightText ||
+                ((rect.left + rect.right) / 2f <= groupMidX) == (anchorMidX <= groupMidX),
             anchorRow = rowIndex,
         )
     }
@@ -1745,6 +1775,10 @@ internal fun noteCandidateOrder(
         // 正右已经被占时，本行正右让到其他方向之后（排在正左、上下之前的那份名次只在
         // 「同样能放」时按 `rank` 比；这里先保证它不会凭「更靠右」抢先）。
         .thenBy { if (rightTaken && it.side == NoteSide.RIGHT && it.ring == 0) 1 else 0 }
+        // 同侧优先（2026-11-02 用户定口）：同一行多条批注里偏左的那几条先用左边的位置，
+        // 偏右的用右边的位置。排在环数之前——同侧远一圈也胜过摆到对面：摆到对面的引线
+        // 只能贴着正文横穿回来，一定与同排别的引线交叉。
+        .thenBy { if (it.nativeHalf) 0 else 1 }
         // 环先分家：同环内再比折行与距离（2026-10-31 用户定口）。
         .thenBy { it.ring }
         // 同环内**折行最少的先**（框最短、引线最短），折行相同才比就近档。
@@ -2169,6 +2203,14 @@ internal fun noteBubblePlacements(
         }
         n.annotationId to merged
     }
+    // 这一行**所有**批注墨迹的并集：判「本条在这行里偏左还是偏右」（2026-11-02 用户定口）。
+    val rowSpans = HashMap<Int, Rect>()
+    for (n in ordered) {
+        for (r in n.rects) {
+            val row = nearestLineIndex(r, lines) ?: continue
+            rowSpans[row] = rowSpans[row]?.let { rectUnion(listOf(it, r)) } ?: r
+        }
+    }
 
     // 同一行上**在本条右边**那些批注的墨迹（2026-10-25 用户定口，规则第 8 条）：
     // 本条的框横向把这几个字整个罩住时，右上 / 右下就要让给左侧——否则两条批注的引线
@@ -2257,6 +2299,8 @@ internal fun noteBubblePlacements(
         // 「一个汉字」按正文字号算：斜向摆法要据此把框挪开首 / 末字符。
         charWidthPx = body,
         otherRowLeft = otherRowLefts.getValue(note.annotationId),
+        // 同一行几条批注的墨迹并集：本条偏左就用左边的位置，偏右反过来（2026-11-02 用户定口）。
+        rowSpan = rowSpans,
         // 同一行右侧那几条的墨迹：本条整句宽会罩住它们时，先走左侧（规则 8）。
         rightInk = rightInks.getValue(note.annotationId),
         covering = note.annotationId in coveringIds,
@@ -3046,8 +3090,9 @@ private fun assignNoteCandidates(
         start = end
     }
 
-    // 规则 5（2026-10-27 用户定口）：同一个大空白区里的多条批注综合安排——
-    // 长的放外侧、短的放内侧，把靠近正文的走廊留给短批注的引线。
+    // 规则 5（2026-11-02 用户定口）：同一个大空白区里的多条批注综合安排——
+    // 同一个角上的几条按选区左右定堆叠先后（左边那组越左越贴正文、右边那组越右越贴正文），
+    // 每条引线都从自己那一侧就近出去，不会与同排别的引线交叉。
     val arranged = arrangeSharedBlankNotes(occupied, marginX, marginY)
     for (c in arranged) chosen[c.note.annotationId] = c.candidate
 
@@ -3055,24 +3100,23 @@ private fun assignNoteCandidates(
 }
 
 /**
- * 规则第 13 条：上下默认留白 = **当前正文行距让出来的纯空白**（行盒节距 − 行盒高）。
+ * 规则 5：同一块大空白里的多条批注要**综合安排**，不是先到先得。两件事，按顺序做：
  *
- * 取同段相邻行的节距中位数与行盒高中位数，避免一两个大标题把整页带偏；
- * 量不出来（单行页、行重叠）时退回 [fallback]，并且无论如何不小于 2px。
- */
-/**
- * 规则 5（2026-10-27 用户定口）：同一块大空白里的多条批注要**综合安排**，不是先到先得。
+ * 1. **走廊**（2026-10-27 定口）：长的放外侧、短的放内侧，把靠近正文的走廊留给短批注的引线；
+ * 2. **同角堆叠顺序**（2026-11-02 定口）：同一行几条批注都摆在同一侧时，
+ *    左边那组「越左越贴正文行」（左上越左越靠下、左下越左越靠上），
+ *    右边那组「越右越贴正文行」（右上越右越靠下、右下越右越靠上）——
+ *    也就是「中心在外、两侧靠内」。每条引线都从自己那一侧就近出去，不会与同排别的引线交叉。
+ *    **这条比第 1 条优先**：宁可折行，也不许排反。
  *
- * 长的批注放到外侧（远离正文），短的放内侧（贴近正文），把靠近正文的那条走廊留给
- * 短批注的引线，避免长框横在短批注与正文之间。
+ * 第 2 条只认**真的同一个角**：框整个落在选区左边（左上 / 左下）或整个落在右边（右上 /
+ * 右下），且这一组在同一个深度轴上真的叠在一起。正上 / 正下压着选区的那些不在此列——它们
+ * 没有「串到另一侧」的问题，仍按第 1 条排。
  *
- * **只按「同一个大的空白区」认**（2026-10-27 用户定口）：不按侧别分家，也不要求两条的
- * 文字位置相邻。两条的「内 / 外」沿**这块空白自己的朝外方向**量——锚点正文在空白上方就是
- * 「向下」、在下方就是「向上」、在左侧就是「向右」、在右侧就是「向左」，与候选名叫「正下」
- * 还是「右下」无关，所以右侧页边距里的正右与右上、右下也在同一个深度轴上。沿这个轴平移，
- * 不改变行、不改变方向，也不动别的批注；短的接长的那条原来的内缘，长的紧贴短的外缘
- * （留 2 倍 margin，与让位一致），不会因为两条高低不同而在中间空出一截。换完仍要满足各自的空白边界
- * 与所有已放框的间距；任何一步不满足就保持原样，最多迭代 4 轮直到稳定。
+ * 两条的「内 / 外」沿**这块空白自己的朝外方向**量：锚点正文在空白上方就是「向下」、
+ * 在下方就是「向上」、在左侧就是「向右」、在右侧就是「向左」，与候选名叫「正下」还是「右下」
+ * 无关，所以右侧页边距里的正右与右上、右下也在同一个深度轴上。沿这个轴平移，不改变行、
+ * 不改变方向；换完仍要满足各自的空白边界与所有已放框的间距，任何一步不满足就保持原样。
  */
 internal fun arrangeSharedBlankNotes(
     occupied: List<NoteChoice>,
@@ -3183,6 +3227,117 @@ internal fun arrangeSharedBlankNotes(
                 if (!applied) continue
             }
         }
+    }
+
+    // ---- 同一行多条批注的堆叠顺序（2026-11-02 用户定口）----
+    // 同一个角上的几条：**靠外的那条贴着正文行，靠中心的往外推**（中心在外、两侧靠内）——
+    // 左上 / 左下「越左边的越贴正文行」，右上 / 右下「越右边的越贴正文行」。
+    // 每条引线都从自己那一侧就近出去，不会与同排别的引线交叉。这条顺序比折行优先。
+    fun anchorMidX(c: NoteChoice): Float = rectUnion(c.note.rects).let { (it.left + it.right) / 2f }
+
+    /** 框在选区哪一侧：-1 = 整个在左（左上 / 左下），1 = 整个在右（右上 / 右下），0 = 压着选区。 */
+    fun cornerOf(c: NoteChoice): Int {
+        val ink = rectUnion(c.note.rects)
+        return when {
+            c.candidate.rect.right <= ink.left + NOTE_GEOM_EPS -> -1
+            c.candidate.rect.left >= ink.right - NOTE_GEOM_EPS -> 1
+            else -> 0
+        }
+    }
+
+    /** 两条框在堆叠轴上是不是真的叠在一起：上下排看横向有没有交集，左右排看纵向。 */
+    fun stacked(a: Rect, b: Rect, outward: NoteOutward): Boolean = when (outward) {
+        NoteOutward.UP, NoteOutward.DOWN -> min(a.right, b.right) - max(a.left, b.left) > 1f
+        NoteOutward.LEFT, NoteOutward.RIGHT -> min(a.bottom, b.bottom) - max(a.top, b.top) > 1f
+    }
+
+    val n = out.size
+    val parent = IntArray(n) { it }
+
+    fun rootOf(i: Int): Int {
+        var r = i
+        while (parent[r] != r) r = parent[r]
+        var c = i
+        while (parent[c] != c) {
+            val next = parent[c]
+            parent[c] = r
+            c = next
+        }
+        return r
+    }
+
+    // 只把「同一个角、同一个深度轴、真的叠在一起」的框归成一组；正上 / 正下压着选区的不算
+    // （它们没有串到另一侧的问题，仍按上面「长的放外侧」）。
+    for (i in 0 until n) {
+        for (j in i + 1 until n) {
+            val side = cornerOf(out[i])
+            if (side == 0 || side != cornerOf(out[j])) continue
+            if (!blanksOverlap(out[i].candidate.freeRect, out[j].candidate.freeRect)) continue
+            val outward = blankOutward(out[i], out[j]) ?: continue
+            if (!stacked(out[i].candidate.rect, out[j].candidate.rect, outward)) continue
+            val ri = rootOf(i)
+            val rj = rootOf(j)
+            if (ri != rj) parent[rj] = ri
+        }
+    }
+
+    for (members in (0 until n).groupBy { rootOf(it) }.values) {
+        if (members.size < 2) continue
+        val outward = blankOutward(out[members[0]], out[members[1]]) ?: continue
+        if (members.any { k -> members.any { o -> k != o && blankOutward(out[k], out[o]) != outward } }) {
+            continue
+        }
+        // -1 = 左边那组（左上 / 左下）：越左越贴正文；+1 = 右边那组：越右越贴正文。
+        val dir = cornerOf(out[members.first()])
+        val depth = { k: Int -> depthOf(out[k].candidate.rect, outward) }
+        // 已经在正确顺序上就整组不动：只修真的排错了的组，免得把别的组也挪一遍。
+        var violated = false
+        for (k in members) {
+            for (o in members) {
+                if (k == o) continue
+                // k 该比 o 更贴正文：左边那组 x 更小，右边那组 x 更大。
+                val kShouldBeInner = dir * (anchorMidX(out[k]) - anchorMidX(out[o])) > NOTE_GEOM_EPS
+                if (kShouldBeInner && depth(k) > depth(o) + NOTE_GEOM_EPS) violated = true
+            }
+        }
+        if (!violated) continue
+        // 靠内的在前：左边那组按选区从左到右，右边那组从右到左；一样靠边时短的靠内、长的往外
+        // （保留「把贴正文的走廊让给短批注」）。
+        val ordered = members.sortedWith(
+            compareBy<Int> { -dir * anchorMidX(out[it]) }.thenBy { textLength(out[it]) },
+        )
+        val gap = when (outward) {
+            NoteOutward.UP, NoteOutward.DOWN -> marginY
+            NoteOutward.RIGHT, NoteOutward.LEFT -> marginX
+        } * 2f
+        // 从最里面那一格起，按顺序一条挨一条往外码，中间只留 2 倍 margin（与让位一致）。
+        var cursor = members.minOf { depthOf(out[it].candidate.rect, outward) }
+        val moved = LinkedHashMap<Int, NoteChoice>()
+        var fits = true
+        for (k in ordered) {
+            val choice = out[k]
+            val r = rectAtDepth(choice.candidate.rect, outward, cursor)
+            if (!inOwnBlank(choice.candidate, r)) {
+                fits = false
+                break
+            }
+            moved[k] = reflowOne(choice, r)
+            cursor += extentOf(choice.candidate.rect, outward) + gap
+        }
+        if (!fits) continue
+        var blocked = false
+        for ((k, choice) in moved) {
+            for (o in out.indices) {
+                if (o == k || o in moved) continue
+                if (choice.candidate.conflicts(out[o].candidate, marginX, marginY)) {
+                    blocked = true
+                    break
+                }
+            }
+            if (blocked) break
+        }
+        if (blocked) continue
+        for ((k, choice) in moved) out[k] = choice
     }
     return out
 }

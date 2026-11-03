@@ -282,6 +282,9 @@ private fun ColorSlots(
 ) {
     val inUseSlot = colors.indexOfFirst { currentArgb != null && it == currentArgb }
         .takeIf { it >= 0 } ?: defaultSlot
+    // 色槽不要点按水波纹：默认那层是方形、还会在圆外闪一下灰块。
+    // 选中与否已经由双圈说清楚了，点下去不必再补一个动效。
+    val noRipple = remember { MutableInteractionSource() }
     Row(verticalAlignment = Alignment.CenterVertically) {
         colors.forEachIndexed { index, argb ->
             if (index > 0) Spacer(Modifier.width(COLOR_SLOT_GAP))
@@ -289,7 +292,7 @@ private fun ColorSlots(
                 modifier = Modifier
                     .size(COLOR_SLOT_BOX)
                     .inUseRing(argb, inUse = index == inUseSlot)
-                    .clickable { onPick(index) },
+                    .clickable(interactionSource = noRipple, indication = null) { onPick(index) },
                 contentAlignment = Alignment.Center,
             ) {
                 Box(

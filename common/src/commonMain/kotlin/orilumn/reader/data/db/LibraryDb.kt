@@ -170,6 +170,8 @@ class LibraryDb(private val db: OrilumnDb) : AnnotationStore {
 
     override suspend fun updateAnnotation(annotation: Annotation) = withContext(Dispatchers.IO) {
         annotations.updateAnnotation(
+            charStart = annotation.charStart.toLong(),
+            charEnd = annotation.charEnd.toLong(),
             kind = annotation.kind.wire,
             color = annotation.color?.toLong(),
             lineStyle = annotation.lineStyle.wire,

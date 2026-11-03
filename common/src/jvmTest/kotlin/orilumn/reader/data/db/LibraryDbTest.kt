@@ -251,9 +251,11 @@ class LibraryDbTest {
         assertEquals(first.id, db.annotationAt(book, 2, 8)?.id)
         assertNull(db.annotationAt(book, 2, 9))
 
-        // v1 只改颜色；批注文本先按可写验证，v2 界面再接。
+        // 编辑已有标注：范围（手柄拖过）、样式、批注文本、摘录一起写回。
         db.updateAnnotation(
             first.copy(
+                charStart = 4,
+                charEnd = 10,
                 kind = AnnotationKind.Underline,
                 color = 0xFF112233.toInt(),
                 lineStyle = AnnotationLineStyle.Strike,
@@ -263,6 +265,8 @@ class LibraryDbTest {
             ),
         )
         val updated = db.annotationsForChapter(book, 2).single { it.id == first.id }
+        assertEquals(4, updated.charStart)
+        assertEquals(10, updated.charEnd)
         assertEquals(AnnotationKind.Underline, updated.kind)
         assertEquals(0xFF112233.toInt(), updated.color)
         assertEquals(AnnotationLineStyle.Strike, updated.lineStyle)

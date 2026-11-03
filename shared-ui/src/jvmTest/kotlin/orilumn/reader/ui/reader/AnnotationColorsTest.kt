@@ -217,6 +217,39 @@ class AnnotationColorsTest {
     }
 
     @Test
+    fun `editing only the range writes the new range and quote`() {
+        val s = ReaderSettings.DEFAULT
+        val current = Annotation(
+            bookId = 1,
+            chapter = 0,
+            charStart = 0,
+            charEnd = 3,
+            kind = AnnotationKind.Highlight,
+            color = 0x73FFD54F,
+            note = "嗯",
+            quote = "旧摘录",
+        )
+        val next = annotationAfterEdit(
+            current = current,
+            kind = current.kind,
+            lineStyle = current.lineStyle,
+            pickedColor = null,
+            note = current.note,
+            settings = s,
+            charStart = 2,
+            charEnd = 7,
+            quote = "新摘录",
+        )!!
+        assertEquals(2, next.charStart)
+        assertEquals(7, next.charEnd)
+        assertEquals("新摘录", next.quote)
+        // 样式与批注文字没动。
+        assertEquals(current.kind, next.kind)
+        assertEquals(current.color, next.color)
+        assertEquals(current.note, next.note)
+    }
+
+    @Test
     fun `changing the line style keeps the underline ink`() {
         val s = ReaderSettings.DEFAULT.copy(underlineDefaultSlot = 3)
         val underline = Annotation(

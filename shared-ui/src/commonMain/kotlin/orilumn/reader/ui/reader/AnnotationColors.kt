@@ -157,14 +157,22 @@ internal fun annotationAfterEdit(
     pickedColor: Int?,
     note: String?,
     settings: ReaderSettings,
+    /** 编辑时读者拖手柄改过的范围；不传 = 保持原范围。 */
+    charStart: Int = current.charStart,
+    charEnd: Int = current.charEnd,
+    /** 范围变了要同步的摘录；不传 = 保持原摘录。 */
+    quote: String? = current.quote,
 ): Annotation? {
     val kindChanged = kind != current.kind
     val reline = kind == AnnotationKind.Underline && current.lineStyle != lineStyle
     val restyled = kindChanged || reline
     val recolor = pickedColor != null &&
         pickedColor != (current.color ?: annotationFallbackColor(current.kind))
-    if (!restyled && !recolor && note == current.note) return null
+    val rangeChanged = charStart != current.charStart || charEnd != current.charEnd
+    if (!restyled && !recolor && note == current.note && !rangeChanged) return null
     return current.copy(
+        charStart = charStart,
+        charEnd = charEnd,
         kind = kind,
         lineStyle = annotationLineStyleFor(kind, if (restyled) lineStyle else current.lineStyle),
         color = when {
@@ -177,6 +185,7 @@ internal fun annotationAfterEdit(
             else -> current.color
         },
         note = note,
+        quote = quote,
     )
 }
 

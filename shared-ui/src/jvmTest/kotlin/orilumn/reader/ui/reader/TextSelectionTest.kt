@@ -108,6 +108,24 @@ class TextSelectionTest {
     }
 
     @Test
+    fun `selectRange restores an annotation range without expanding to a word or sentence`() {
+        val s = TextSelectionState()
+        // 编辑已有标注：区间的中间一段，不能被 begin() 扩成整句。
+        assertTrue(s.selectRange(chapter = 2, text = "hello world", start = 1, endExclusive = 4))
+        assertTrue(s.hasSelection)
+        assertEquals(2, s.chapter)
+        assertEquals(1, s.start)
+        assertEquals(4, s.endExclusive)
+        assertEquals(1..3, s.range)
+
+        // 从恢复出来的选区继续拖右柄：仍按字符走。
+        s.beginHandleDrag(SelectionHandle.End)
+        s.extendTo(9)
+        assertEquals(1, s.start)
+        assertEquals(10, s.endExclusive)
+    }
+
+    @Test
     fun `clear drops the whole selection`() {
         val s = TextSelectionState()
         s.begin(chapter = 2, text = "hello", offset = 1)

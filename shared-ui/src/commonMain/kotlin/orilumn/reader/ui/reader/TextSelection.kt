@@ -59,6 +59,25 @@ class TextSelectionState {
     }
 
     /**
+     * 直接选中 `[start, endExclusive)`：编辑已有标注时把选区恢复成记录原来的范围。
+     *
+     * 与 [begin] 不同，这里不按整词 / 整句扩，只认记录自己的字符区间；之后读者再拖两端手柄
+     * 按字符微调。返回 false = 空章 / 范围不成立。
+     */
+    fun selectRange(chapter: Int, text: String, start: Int, endExclusive: Int): Boolean {
+        if (text.isEmpty()) return false
+        val lo = start.coerceIn(0, text.length - 1)
+        val hi = endExclusive.coerceIn(lo + 1, text.length)
+        if (hi <= lo) return false
+        this.chapter = chapter
+        textLength = text.length
+        anchor = lo
+        focus = hi - 1
+        publish()
+        return hasSelection
+    }
+
+    /**
      * 手柄起手：把锚点挪到另一端，之后 [extendTo] 只动被拖的那一端。
      *
      * 例如拖左柄时锚点固定在选区末尾，焦点向左走；拖右柄则相反。

@@ -314,9 +314,15 @@ fun ReaderScreen(
     LaunchedEffect(openPos) {
         if (!selection.hasSelection) selectionMenuVisible = false
         // 翻页后编辑菜单不跟到新页；它锚定的是旧页上的那条记录。
+        val wasEditing = editingAnnotation != null
         editingAnnotation = null
         // 批注输入条同理：它写的是旧页上的那条标注，翻页后不该继续挂着。
         noteText = ""
+        if (wasEditing) {
+            // 编辑时恢复出来的选区只服务于那张卡；卡收了就一起收掉，免得留下无主手柄。
+            selectionMenuVisible = false
+            if (selection.hasSelection) selection.clear()
+        }
     }
     // ---- 定位动作（host 为 suspend，统一挂到本组件作用域） ----
     /**
@@ -954,10 +960,30 @@ fun ReaderScreen(
     }
 
     /**
+     * 打开一条已有标注的编辑卡片，并把选区恢复成这条记录原来的字符范围。
+     *
+     * 编辑卡开着时选区不消失：读者可以先拖两端手柄改范围，再按 `确定` 把范围连同样式 / 批注
+     * 一起写回（2026-11-03 用户定口）。取不到本章原文就只开卡片、不画选区。
+     */
+    fun openAnnotationEdit(annotation: Annotation) {
+        val text = currentHost.textOf(annotation.chapter, 0, Int.MAX_VALUE)
+        val selected = text != null && selection.selectRange(
+            chapter = annotation.chapter,
+            text = text,
+            start = annotation.charStart,
+            endExclusive = annotation.charEnd,
+        )
+        if (!selected) selection.clear()
+        selectionMenuVisible = false
+        magnifierFinger = null
+        editingAnnotation = annotation
+    }
+
+    /**
      * 长按命中已有标注（D-14）：命中则打开该标注的编辑菜单并返回 true。
      *
      * 只看当前章内存列表的字符区间（`charStart <= off < charEnd`），不查库、不做几何反查；
-     * 页边距不参与命中，避免在空白边距上误开菜单。命中后清掉选区，避免两套菜单叠在一起。
+     * 页边距不参与命中，避免在空白边距上误开菜单。命中后选区恢复成这条标注的范围。
      */
     fun tryOpenAnnotationEdit(xPx: Float, yPx: Float, widthPx: Float, heightPx: Float): Boolean {
         val p = openPos ?: return false
@@ -971,10 +997,7 @@ fun ReaderScreen(
         if (xPx < left || xPx > right || pageY < top || pageY > bottom) return false
         val offset = charOffsetAt(p, xPx, yPx) ?: return false
         val hit = annotationState.annotationAt(offset) ?: return false
-        selection.clear()
-        selectionMenuVisible = false
-        magnifierFinger = null
-        editingAnnotation = hit
+        openAnnotationEdit(hit)
         return true
     }
 
@@ -1067,7 +1090,13 @@ fun ReaderScreen(
             return
         }
         // 编辑菜单开着时，正文点按只关菜单（卡片开着时点按已由手势层接住，这里是兜底）。
+        // 语义与 [cancelNote] 一致：写了一半的内容丢掉、原记录不动、编辑时恢复出来的选区收掉。
         if (editingAnnotation != null) {
+            focusManager.clearFocus()
+            noteText = ""
+            noteColorArgb = null
+            selectionMenuVisible = false
+            if (selection.hasSelection) selection.clear()
             closeAnnotationEdit()
             return
         }
@@ -1079,10 +1108,7 @@ fun ReaderScreen(
             charOffsetAt(p, xPx, yPx)?.let { annotationState.annotationAt(it) }
         }
         if (tappedAnnotation != null) {
-            selection.clear()
-            selectionMenuVisible = false
-            magnifierFinger = null
-            editingAnnotation = tappedAnnotation
+            openAnnotationEdit(tappedAnnotation)
             Logger.d("Orilumn.TAP", "tap x=${xPx.roundToInt()} y=${yPx.roundToInt()} → annotation card")
             return
         }
@@ -1155,6 +1181,7 @@ fun ReaderScreen(
     fun deleteAnnotation(annotation: Annotation) {
         closeAnnotationEdit()
         selectionMenuVisible = false
+        if (selection.hasSelection) selection.clear()
         scope.launch {
             val ok = annotationState.delete(annotation.id)
             if (!ok) snackbar.show("删除失败")
@@ -1224,8 +1251,27 @@ fun ReaderScreen(
         if (editing != null) {
             closeAnnotationEdit()
             // 输入期间可能刚点过色槽换了颜色：按 id 取当前记录，别拿旧快照盖回去。
-            val current = annotationState.annotations.firstOrNull { it.id == editing.id } ?: return
+            val current = annotationState.annotations.firstOrNull { it.id == editing.id } ?: run {
+                selectionMenuVisible = false
+                if (selection.hasSelection) selection.clear()
+                return
+            }
             val body = text.ifBlank { null }
+            // 编辑卡打开时选区已恢复成这条标注的范围；读者拖过手柄就以当前选区为准。
+            val range = if (selection.hasSelection && selection.chapter == current.chapter) {
+                selection.start to selection.endExclusive
+            } else {
+                null
+            }
+            val newStart = range?.first ?: current.charStart
+            val newEnd = range?.second ?: current.charEnd
+            val rangeChanged = newStart != current.charStart || newEnd != current.charEnd
+            // 范围变了就同步摘录：清单里那一行显示的是新选中的原文。
+            val quote = if (rangeChanged) {
+                currentHost.textOf(current.chapter, newStart, newEnd)?.take(200)
+            } else {
+                current.quote
+            }
             // 线型 / 类别 / 颜色都只选中、不落笔（D-28）：真改过才在提交时写回。
             // 换类别（高亮 ⇄ 划线）也算改样式，口径全在 [annotationAfterEdit] 里。
             val next = annotationAfterEdit(
@@ -1235,7 +1281,13 @@ fun ReaderScreen(
                 pickedColor = picked,
                 note = body,
                 settings = light,
-            ) ?: return
+                charStart = newStart,
+                charEnd = newEnd,
+                quote = quote,
+            )
+            selectionMenuVisible = false
+            if (selection.hasSelection) selection.clear()
+            if (next == null) return
             scope.launch {
                 if (!annotationState.update(next)) snackbar.show("保存失败")
             }
@@ -1266,6 +1318,9 @@ fun ReaderScreen(
         val editing = editingAnnotation
         if (editing != null) {
             closeAnnotationEdit()
+            // 编辑时恢复出来的选区只服务于这张卡：取消后一起收掉，不留没有卡片的手柄。
+            selectionMenuVisible = false
+            if (selection.hasSelection) selection.clear()
             return
         }
         selectionMenuVisible = false
@@ -1367,7 +1422,8 @@ fun ReaderScreen(
                     // 上下滑 = 在视口里滚页（视口 = 卡片上沿之上那一条），点按（没动过）= 取消。
                     if (currentNoteBarOpen && !barsOwned) {
                         if (down.isConsumed || downY >= sheetTopPxState) return@awaitEachGesture
-                        val handle = if (editingAnnotation == null && !coverVisible && !ctl.isBusy()) {
+                        // 编辑已有标注时同样允许拖手柄改范围：卡片开着不代表选区锁死（2026-11-03 用户定口）。
+                        val handle = if (!coverVisible && !ctl.isBusy()) {
                             selectionHandleAt(downX, downY, size.width.toFloat(), size.height.toFloat())
                         } else {
                             null
@@ -1546,7 +1602,8 @@ fun ReaderScreen(
                         val event = awaitPointerEvent()
                         val change = event.changes.firstOrNull { it.id == down.id } ?: break
                         // 长按标注刚打开编辑菜单：本次手势只负责收尾，不再翻页/拖选/调亮度。
-                        if (editingAnnotation != null) {
+                        // 例外：编辑卡开着时从手柄起手的那次拖动要一路更新选区，不能在这里被吞掉。
+                        if (editingAnnotation != null && !selecting) {
                             change.consume()
                             if (!change.pressed) break
                             continue
@@ -1576,7 +1633,10 @@ fun ReaderScreen(
                                 autoFlipSide = 0
                                 schedulePageScroll(0)
                                 magnifierFinger = null
-                                if (selection.hasSelection) selectionMenuVisible = true
+                                // 编辑卡片还开着时不要另开浮动菜单：这张卡就是操作栏。
+                                if (editingAnnotation == null && selection.hasSelection) {
+                                    selectionMenuVisible = true
+                                }
                                 change.consume()
                                 break
                             }
@@ -2007,22 +2067,25 @@ fun ReaderScreen(
             val sheetTopPx = (pxHeight - imeBottomPx - noteBarHeightPx * sheetReveal).coerceAtLeast(0f)
             // 视口 = 卡片上沿之上那一条：整页可以在里面上下滑，最多滑到「页底正好贴卡片上沿」。
             val maxShiftPx = (pxHeight - sheetTopPx).coerceAtLeast(0f)
-            val anchorBottomPx = if (editing != null) {
-                pageInkRects(
-                    drawer = selectionDrawer,
-                    lines = pageContent?.lines.orEmpty(),
-                    chapter = editing.chapter,
-                    charStart = editing.charStart,
-                    charEnd = editing.charEnd,
-                    pageImages = pageContent?.pageImages,
-                    pageBackgrounds = pageContent?.pageBackgrounds,
-                    frameLead = pageContent?.pageFrameLead ?: 0,
-                    contentLeft = contentLeft,
-                    contentTop = contentTop,
-                ).maxOfOrNull { it.bottom }
-            } else {
-                selectionGeo?.rects?.maxOfOrNull { it.bottom }
-            }
+            // 编辑时选区已经恢复成这条标注的范围；拖手柄改过以后也按当前选区让位。
+            // 只有在取不到原文、没有选区时才退回按原记录范围量。
+            val anchorBottomPx = selectionGeo?.rects?.maxOfOrNull { it.bottom }
+                ?: if (editing != null) {
+                    pageInkRects(
+                        drawer = selectionDrawer,
+                        lines = pageContent?.lines.orEmpty(),
+                        chapter = editing.chapter,
+                        charStart = editing.charStart,
+                        charEnd = editing.charEnd,
+                        pageImages = pageContent?.pageImages,
+                        pageBackgrounds = pageContent?.pageBackgrounds,
+                        frameLead = pageContent?.pageFrameLead ?: 0,
+                        contentLeft = contentLeft,
+                        contentTop = contentTop,
+                    ).maxOfOrNull { it.bottom }
+                } else {
+                    null
+                }
             // 会压住 ⇒ 一次推到「页底贴卡片上沿」（推满 H，用户定形）；不压 ⇒ 不动。
             // 读者自己上下滑过就以他滑的为准（[userShiftPx]），手柄拖到上下边界时也会滚。
             val baseShiftPx = if (menuOn && anchorBottomPx != null &&
@@ -2173,13 +2236,11 @@ fun ReaderScreen(
                         onOpen = { id ->
                             // 点旁注 = 打开这条标注的操作栏与输入框（有文字就带出来，可改可删）。
                             // 翻页动画进行中不响应（旁注现在跟着页走，滑动的页面上点一下不该弹编辑态）。
-                            // 顺手清掉选区：编辑态与选区不该同时挂着（两套手柄 + 两套绿框只会互相添乱）。
+                            // 选区恢复成这条标注的范围：编辑时两端手柄仍在，可以直接改范围。
                             val target = annotationState.annotationsFor(fromPos.chapter)
                                 ?.firstOrNull { it.id == id }
                             if (target != null && !ctl.isBusy()) {
-                                selection.clear()
-                                selectionMenuVisible = false
-                                editingAnnotation = target
+                                openAnnotationEdit(target)
                             }
                         },
                         modifier = Modifier.fillMaxSize(),

@@ -268,7 +268,7 @@ class AnnotationState(private val host: ReaderHost) {
         return saved
     }
 
-    /** 更新类型/颜色/批注文本：锚点不变，失败回滚。 */
+    /** 更新范围/类型/颜色/批注文本/摘录，失败回滚。 */
     suspend fun update(annotation: Annotation): Boolean {
         val old = annotations.firstOrNull { it.id == annotation.id } ?: return false
         annotations = sort(annotations.map { if (it.id == annotation.id) annotation else it })

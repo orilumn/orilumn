@@ -88,10 +88,13 @@ import java.awt.event.ComponentEvent
  *
  * ## 拖动
  *
- * Compose 1.11 只给到「无边框 + 缩放热区」（`UndecoratedWindowResizer`），**没有**窗口拖动
- * API（`windowDraggableArea` 已不在 1.11 的 `ui-desktop` 里），故拖动用 AWT 屏幕指针差值
- * 搬窗口（见 [draggableWindow]）。同时吃掉本区域所有按下事件：点标题栏不该落到阅读面的
- * 三区点按上（否则点顶栏会翻页）。
+ * **macOS**：窗口是系统窗口，顶部约 28pt 本来就由 AppKit 当标题栏拖动，壳只负责吃掉这里的
+ * 按下事件（点标题栏不该落到阅读面的三区点按上翻页），**不再自己搬窗口**——再写一次就是
+ * 两个写入者抢同一扇窗，表现为窗口整体高频来回跳（见 [draggableWindow] 的 KDoc）。
+ *
+ * **Win/Linux**：无边框窗口丢掉了系统标题栏热区，Compose 1.11 又只给「缩放热区」
+ * （`UndecoratedWindowResizer`）、**没有**窗口拖动 API（`windowDraggableArea` 已不在 1.11 的
+ * `ui-desktop` 里），故用 AWT 屏幕指针差值搬窗口（见 [draggableWindow]）。
  */
 internal val TitleBarHeight: Dp = 32.dp
 
@@ -646,12 +649,25 @@ private fun GlyphButton(
 }
 
 /**
- * 无边框窗口的拖动 + 「吃掉点按」+ 双击缩放。
+ * 标题栏的拖动 + 「吃掉点按」+ 双击缩放。
  *
- * 位移口径取**屏幕指针差**而不是 Compose 的 `dragAmount`：窗口一被搬动，本地坐标系就跟着动，
+ * ## macOS：不自己搬窗口
+ *
+ * macOS 是**系统窗口**（见 [applyMacSystemWindow]），窗口顶部约 28pt 由 AppKit 自己就是拖动标题栏
+ * 的热区。再叠一层自绘拖动就是**两个写入者抢同一扇窗**：两边各有各的抓点基准，差几像素，
+ * 于是每个指针事件窗口在两套坐标间跳一次，肉眼就是「整体相对桌面高频来回跳」
+ * （实测：光标匀速 +8px/步时，窗口在「光标−150」与「光标−158」之间以 5~13ms 周期摆动；
+ * 停掉自绘写入后同一手势全程干净跟手）。故 macOS 只吃这里的按下与拖动事件
+ * （否则点标题栏会落到阅读面的三区点按上翻页），搬窗口与双击缩放都交给系统。
+ *
+ * ## Win/Linux：自绘拖动
+ *
+ * 无边框窗口没有系统热区，`UndecoratedWindowResizer` 只给缩放，故自己搬：
+ * 位移口径取**屏幕指针差**而不是 Compose 的 `dragAmount`——窗口一被搬动，本地坐标系就跟着动，
  * 用 `dragAmount` 累积会自我抵消（拖不动或抖动）；屏幕坐标差值不受影响。
- * 起手即 `consume()`：本区域的按下不再落到阅读面的三区点按（点顶栏不翻页）。
  * 双击（两次按下间隔 ≤ [DoubleClickMs] 且都没拖动）走 [onDoubleClick]。
+ *
+ * 起手即 `consume()`：本区域的按下不再落到阅读面的三区点按（点顶栏不翻页）。
  */
 private fun Modifier.draggableWindow(
     window: Window,
@@ -661,6 +677,16 @@ private fun Modifier.draggableWindow(
     awaitEachGesture {
         val down = awaitFirstDown(requireUnconsumed = false)
         down.consume()
+        if (IS_MAC) {
+            // 见上方 KDoc「macOS：不自己搬窗口」：只吃到松手，不写窗口位置。
+            while (true) {
+                val event = awaitPointerEvent()
+                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                change.consume()
+                if (!change.pressed) break
+            }
+            return@awaitEachGesture
+        }
         val now = down.uptimeMillis
         val secondClick = now - lastDownAt <= DoubleClickMs
         lastDownAt = now

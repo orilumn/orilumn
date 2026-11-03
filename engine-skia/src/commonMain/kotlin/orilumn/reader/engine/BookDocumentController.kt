@@ -254,6 +254,22 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
     @Volatile
     private var activeChapter: Int = -1
 
+    /**
+     * 读者**眼前**那一章的章号（最近一次落位/翻页的目标章）。[evictFarChapters] 绕开它。
+     *
+     * 为什么不能拿 [activeChapter] 顶替：后者只在开书与调参时写，翻页全程不动。读者一口气翻出
+     * 30 章之后，`keep` 就落在读者身后很远的地方，于是后台 B2/`edge:` 任务收尾那次清扫把
+     * **正在显示的那一章**的解析态（含 `layout`）一起清掉——`pageLines` 读不到版式 ⇒ 整页空白，
+     * 且渲染路径只读不自愈，必须再翻一页（触发 ensure）才画得出来。真机日志指纹：
+     * `non-Readback layout ch=N ... blank content` 恰好出现在 `edge:N+1` 完成之后 ~200ms，
+     * 紧接着翻页日志里 `layoutLC=-1 pageSlices=7 laidOut=false`（= 只有 `evictParsedState`
+     * 能造出这个组合）。
+     *
+     * 与开书白屏（见 [firstContentChapter]）是同一类事故：驱逐必须永远让开「正在渲染的章」。
+     */
+    @Volatile
+    private var displayedChapter: Int = -1
+
     // ── 开书闸门（总则 §第一优先级：目标页出画面之前不启动任何整章重排）──
     //
     // 病根：开书时 [requestWholeBookRelayout]（宿主在 `open()` 之后立刻派）和
@@ -3262,10 +3278,17 @@ private fun finishCanonicalBackground(
      * （markup 重解析、结构重算，均幂等；磁盘命中章节只塑目标页）。
      * 跳过落位章与 live 会话章；B2 尾与落位尾各扫一次（O(chapters) 纯字段检查）。
      * 窗口 30 章 ≈ 数 MB 常驻；窗口外回翻付一次重解析（百 ms 级，远跳本就付排版费）。
+     *
+     * keep 默认取 [displayedChapter]（读者眼前那一章），**不是** [activeChapter]：后者只在开书/
+     * 调参时写，翻页不动，读远之后按它清就是把正在显示的那一章清掉（整页空白，见字段注释）。
+     * 循环里另按 [displayedChapter] / [keep] 双保险无条件跳过——调用方传错 keep 也不会清到眼前章。
      */
-    private suspend fun evictFarChapters(keep: Int = activeChapter, window: Int = 30) {
+    private suspend fun evictFarChapters(
+        keep: Int = if (displayedChapter >= 0) displayedChapter else activeChapter,
+        window: Int = 30,
+    ) {
         // keep 显式传落位章：跨章 sweep/跳转过程中 active 还是旧值，按 active 清会把刚建好的
-        // 目标章毒死。B2 尾传默认（active 稳定）；导航落位传 landed。
+        // 目标章毒死。B2 尾传默认（= 眼前章）；导航落位传 landed。
         // 与塑形侧同锁序（layoutMutex → structure 锁）：prepareLight 把整段 check-build-read
         // 包在 structure 锁里，清扫逐章同锁重置，无撕裂；从不反向持锁，无死锁。
         // 字段读写本身对并发读者 benign（引用原子 + 旧对象存活），锁只保 check-then-use 窗口
@@ -3273,6 +3296,8 @@ private fun finishCanonicalBackground(
         layoutMutex.withLock {
             for ((i, u) in chapters.withIndex()) {
                 if (i == keep) continue
+                // 眼前那一章永远不驱逐：它的版式就是屏幕上那一页的唯一绘制源，清掉即整页空白。
+                if (i == displayedChapter) continue
                 // 窗口内保留（回翻即时），之外才驱逐 —— 条件反了就是清近留远。
                 val dist = if (i >= keep) i - keep else keep - i
                 if (dist <= window) continue
@@ -3686,7 +3711,12 @@ private fun finishCanonicalBackground(
         }
         val rb = (unit.tempRenderLayout ?: unit.layout) as? PagedLayout ?: run {
             // 非 Readback 的 drawable（legacy/增量布局）静默空白：Q1-b interim 降级，记 w 可见。
-            Logger.w(logTag, "non-Readback layout ch=${unit.chapterIndex} kind=${slice.kind}, blank content")
+            // 带上 null 归属与切片区间：整页空白的现场只有这一行可查（页面显示不出来时
+            // `pageLines` 是本页唯一的绘制源，缺了它画布什么也不画，且只读不自愈）。
+            Logger.w(logTag, "non-Readback layout ch=${unit.chapterIndex} kind=${slice.kind} " +
+                "char=[${slice.charStart},${slice.charEnd}) lines=[${slice.firstLine},${slice.lastLineExclusive}) " +
+                "unitLayout=${unit.layout != null} tempLayout=${unit.tempRenderLayout != null} " +
+                "temp=${unit.inProgress != null}, blank content")
             return null
         }
         return rb to slice
@@ -3852,6 +3882,9 @@ private fun finishCanonicalBackground(
 
     /** R8 (S3/D4): jump-landing one-liner — PATH marker + current-params table hit. */
     private fun logJumpLanding(where: String, chapter: Int) {
+        // 落位即记账：所有导航落位（开书/目录/进度/邻章/标注）都经由这里记下「眼前那一章」，
+        // 远章清扫（[evictFarChapters]）据此绕开它。翻页落位另见 [navigateAdjacentPage]。
+        displayedChapter = chapter
         val u = unitAt(chapter) ?: return
         val cw = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
         val chh = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
@@ -4154,8 +4187,16 @@ private fun finishCanonicalBackground(
         return chapter to neighbour
     }
 
+    /**
+     * 翻页落位（章内 / 跨章 / 临时表 / 磁盘表全部经此）：先落位，落成即记下「眼前那一章」，
+     * 供远章清扫绕开（见 [displayedChapter]）。落位失败（返回 null，界面回滚原页）不改记账——
+     * 原页仍是眼前那一页，绝不能因为一次失败的翻页把它清掉。
+     */
+    private suspend fun navigateAdjacentPage(chapter: Int, slice: PageSlice, direction: Int): Pair<Int, PageSlice>? =
+        navigateAdjacentPageInner(chapter, slice, direction)?.also { displayedChapter = it.first }
+
     /** The actual adjacent-page navigation (direction already tracked by [findAdjacentPage] — see P12). */
-    private suspend fun navigateAdjacentPage(chapter: Int, slice: PageSlice, direction: Int): Pair<Int, PageSlice>? {
+    private suspend fun navigateAdjacentPageInner(chapter: Int, slice: PageSlice, direction: Int): Pair<Int, PageSlice>? {
         val unit = unitAt(chapter) ?: run {
             Logger.w(logTag, "flip: FAIL 源章不存在 ch=$chapter")
             return null

@@ -122,7 +122,6 @@ internal fun AnnotationActionBar(
             ColorSlots(
                 colors = colors,
                 defaultSlot = defaultSlot,
-                palette = palette,
                 currentArgb = currentColor,
                 onPick = { index -> onPickColor(kind, index) },
             )
@@ -267,37 +266,85 @@ private fun BarLayout(
 
 /* ---------------------------------------------------------------- 色槽 / 线型 / 按钮 */
 
-/** 一排色槽：默认格描金边，编辑时当前色描强调边；点一格即用该格颜色（回调带槽下标）。 */
+/**
+ * 一排色槽：正在用的那一格在外面套**互补色 + 灰半透明**两圈，其余格只描一道白色细边；
+ * 点一格即用该格颜色（回调带槽下标）。
+ *
+ * 「正在用」= 编辑时那条记录的颜色（能对上某一格时），否则是上次用的那一格。
+ * 全栏只有这一种选中标记——不再有金边那种第二套画法。
+ */
 @Composable
 private fun ColorSlots(
     colors: List<Int>,
     defaultSlot: Int,
-    palette: Palette,
     currentArgb: Int? = null,
     onPick: (Int) -> Unit,
 ) {
+    val inUseSlot = colors.indexOfFirst { currentArgb != null && it == currentArgb }
+        .takeIf { it >= 0 } ?: defaultSlot
     Row(verticalAlignment = Alignment.CenterVertically) {
         colors.forEachIndexed { index, argb ->
-            if (index > 0) Spacer(Modifier.width(6.dp))
-            val current = currentArgb != null && argb == currentArgb
+            if (index > 0) Spacer(Modifier.width(COLOR_SLOT_GAP))
             Box(
                 modifier = Modifier
-                    .size(28.dp)
-                    .background(Color(argb), CircleShape)
-                    .border(
-                        width = if (current) 3.dp else if (index == defaultSlot) 2.dp else 1.dp,
-                        color = when {
-                            current -> palette.text
-                            index == defaultSlot -> palette.selBorder
-                            else -> Color.White.copy(alpha = 0.85f)
-                        },
-                        shape = CircleShape,
-                    )
+                    .size(COLOR_SLOT_BOX)
+                    .inUseRing(argb, inUse = index == inUseSlot)
                     .clickable { onPick(index) },
-            )
+                contentAlignment = Alignment.Center,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(COLOR_SLOT_DOT)
+                        .background(Color(argb), CircleShape)
+                        .border(1.dp, Color.White.copy(alpha = 0.85f), CircleShape),
+                )
+            }
         }
     }
 }
+
+/**
+ * 正在用的那一格：颜色圆外先一圈互补色、再一圈灰色半透明。
+ *
+ * 色槽本身常常很浅（高亮约 45% 透明度），单描一道边在浅色卡片上看不出来；互补色圈跟这格
+ * 自己的颜色形成强对比，灰圈再把两圈与卡片底色隔开。不用金边，免得同一件事出现两种画法。
+ */
+private fun Modifier.inUseRing(argb: Int, inUse: Boolean): Modifier = drawBehind {
+    if (!inUse) return@drawBehind
+    val dotR = COLOR_SLOT_DOT.toPx() / 2f
+    val complementW = COMPLEMENT_RING_WIDTH.toPx()
+    val outerW = OUTER_RING_WIDTH.toPx()
+    val complementR = dotR + complementW / 2f
+    val outerR = complementR + complementW / 2f + outerW / 2f
+    drawCircle(
+        color = Color(annotationComplementRingColor(argb)),
+        radius = complementR,
+        style = Stroke(complementW),
+    )
+    drawCircle(
+        color = SlotOuterRing,
+        radius = outerR,
+        style = Stroke(outerW),
+    )
+}
+
+/** 色槽外框（含选中时外侧两圈的位置）；颜色圆本体见 [COLOR_SLOT_DOT]。 */
+private val COLOR_SLOT_BOX = 32.dp
+
+/** 色槽颜色圆本体：比外框小一圈，省出的空间给选中时的两圈。 */
+private val COLOR_SLOT_DOT = 24.dp
+
+/** 两个色槽之间的间距（外框之间；视觉上的圆间距 = 它 + 外框留白）。 */
+private val COLOR_SLOT_GAP = 2.dp
+
+/** 当前色外面的互补色圈线宽。 */
+private val COMPLEMENT_RING_WIDTH = 1.5.dp
+
+/** 最外侧那圈灰色半透明线宽。 */
+private val OUTER_RING_WIDTH = 1.25.dp
+
+/** 选中色槽最外侧的灰圈：把互补色圈与卡片底色隔开，深浅卡片上都留得住边界。 */
+private val SlotOuterRing = Color(0xFF9A9A9A).copy(alpha = 0.45f)
 
 /**
  * 划线线型行：只画线、不写字（实线 / 波浪 / 虚线 / 删除线），线色 = 当前划线色。

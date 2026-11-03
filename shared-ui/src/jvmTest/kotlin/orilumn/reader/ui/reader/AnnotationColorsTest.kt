@@ -404,4 +404,23 @@ class AnnotationColorsTest {
             annotationSwatchColor(highlight, 9, underline, 9, AnnotationKind.Highlight, editingUnderline),
         )
     }
+
+    @Test
+    fun `complement ring rotates hue and stays opaque`() {
+        // 正红 → 青：红通道压到最低，绿蓝抬起；圈不跟色槽的透明度走。
+        val cyan = annotationComplementRingColor(0x80FF0000.toInt())
+        assertEquals(0xFF, annotationAlpha(cyan))
+        assertTrue(annotationRed(cyan) < 40)
+        assertTrue(annotationGreen(cyan) > 180)
+        assertTrue(annotationBlue(cyan) > 180)
+
+        // 深藏青（划线墨色）→ 亮橙：暗色槽的圈要提亮，不能跟着一起暗下去。
+        val orange = annotationComplementRingColor(0xFF112233.toInt())
+        assertEquals(0xFF, annotationAlpha(orange))
+        assertTrue(annotationRed(orange) > 200)
+        assertTrue(annotationBlue(orange) < 80)
+
+        // 色槽的 alpha 不参与：同一 RGB、不同透明度给出同一圈色。
+        assertEquals(cyan, annotationComplementRingColor(0xFFFF0000.toInt()))
+    }
 }

@@ -4,6 +4,7 @@ import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.data.annotation.AnnotationKind
 import orilumn.reader.data.annotation.AnnotationLineStyle
 import orilumn.reader.data.settings.ReaderSettings
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /**
@@ -267,4 +268,47 @@ internal fun annotationWithChannel(argb: Int, shift: Int, value: Int): Int {
     val v = value.coerceIn(0, 255) shl shift
     val mask = 0xFF shl shift
     return (argb and mask.inv()) or v
+}
+
+/**
+ * 当前选中色槽外面那圈**互补色**（纯函数，便于单测）。
+ *
+ * 操作栏要回答「现在用的是哪一格」，可色槽本身往往很浅（高亮约 45% 透明度），
+ * 在浅色卡片上单描一道边看不出来。圈取该色在 HSV 里转 180° 的色相，并把饱和度提到
+ * 不透明的浓色：浅琥珀配明显的蓝、深藏青配亮黄，圈自己就能跟色槽拉开。
+ * 透明度不参与——圈要实心才压得住底下的卡片。
+ */
+internal fun annotationComplementRingColor(argb: Int): Int {
+    val r = annotationRed(argb) / 255f
+    val g = annotationGreen(argb) / 255f
+    val b = annotationBlue(argb) / 255f
+    val max = maxOf(r, g, b)
+    val min = minOf(r, g, b)
+    val delta = max - min
+    // RGB → HSV 的色相；灰色没有色相，按 0° 处理（转 180° 后是青色）。
+    val hue = when {
+        delta <= 0f -> 0f
+        max == r -> 60f * (((g - b) / delta) % 6f)
+        max == g -> 60f * ((b - r) / delta + 2f)
+        else -> 60f * ((r - g) / delta + 4f)
+    }
+    var complementHue = (hue + 180f) % 360f
+    if (complementHue < 0f) complementHue += 360f
+    // 提饱和到浓色；浅色槽（高亮）压到 0.85 免得刺眼，深色槽（划线墨色）留 1.0 提亮。
+    val s = 0.90f
+    val v = if (max >= 0.55f) 0.85f else 1f
+    val c = v * s
+    val hh = complementHue / 60f
+    val x = c * (1f - abs(hh % 2f - 1f))
+    val m = v - c
+    val (r1, g1, b1) = when {
+        hh < 1f -> Triple(c, x, 0f)
+        hh < 2f -> Triple(x, c, 0f)
+        hh < 3f -> Triple(0f, c, x)
+        hh < 4f -> Triple(0f, x, c)
+        hh < 5f -> Triple(x, 0f, c)
+        else -> Triple(c, 0f, x)
+    }
+    fun channel(value: Float): Int = ((value + m) * 255f).roundToInt().coerceIn(0, 255)
+    return (0xFF shl 24) or (channel(r1) shl 16) or (channel(g1) shl 8) or channel(b1)
 }

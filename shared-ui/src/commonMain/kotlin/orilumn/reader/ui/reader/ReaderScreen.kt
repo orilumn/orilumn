@@ -1470,8 +1470,9 @@ fun ReaderScreen(
                     var lastFingerX = downX
                     var lastFingerY = downY
                     val autoFlipEdgePx = SELECTION_AUTO_FLIP_EDGE_DP * density
-                    // D-9：按指针类型分流。鼠标拖拽只做文本选择，不拖页；点左右页边距才翻页。
-                    // 版心几何取自当前 profile，和绘制/命中同源；上下页边距不算翻页区。
+                    // 按指针类型分流：鼠标拖拽只做文本选择，不拖页；单击与平板同一个点按入口
+                    //（窗口左中右三分区同作用，含点中标注卡片 / 链接的同一优先级）。
+                    // 版心几何只用于判断「拖动起选」的落点，和绘制/命中同源。
                     val mouse = down.type == PointerType.Mouse
                     val contentLeftPx = profile.marginLeft.toFloat()
                     val contentTopPx = profile.marginTop.toFloat()
@@ -1481,14 +1482,6 @@ fun ReaderScreen(
                         !down.isConsumed &&
                         downX >= contentLeftPx && downX <= contentRightPx &&
                         downY >= contentTopPx && downY <= contentBottomPx
-                    val mouseMarginDir = if (mouse && !barsOwned && !ctl.isBusy() && !down.isConsumed) {
-                        ReaderMath.marginFlipDirection(
-                            downX, downY,
-                            contentLeftPx, contentRightPx, contentTopPx, contentBottomPx,
-                        )
-                    } else {
-                        0
-                    }
                     var mouseSelectingPending = mouseTextDown
                     var pageScrollJob: Job? = null
                     var pageScrollDir = 0
@@ -1660,7 +1653,8 @@ fun ReaderScreen(
                             change.consume()
                             continue
                         }
-                        // D-9：鼠标分流——拖拽才进入选区，点击正文无操作，点左右页边距才翻页。
+                        // 指针类型分流：鼠标拖拽才进入选区；单击与平板完全同一条路径
+                        //（见上面 `onTap`：标注卡片 → 清选区 → 链接 → 左/中/右三分区），
                         // 触摸仍走下面的三区点按/滑动/亮度，两套语义不抢同一个手势。
                         if (mouse) {
                             if (mouseSelectingPending && moved) {
@@ -1683,16 +1677,10 @@ fun ReaderScreen(
                                 }
                             }
                             if (!change.pressed) {
-                                // D-9：鼠标点正文 = 无操作（不翻页、不清选区、不触发链接）；
-                                // 只有左右页边距单击翻页。
-                                if (!moved && mouseMarginDir != 0) {
-                                    Logger.d(
-                                        "Orilumn.TAP",
-                                        "mouse margin x=${downX.roundToInt()} y=${downY.roundToInt()} " +
-                                            "dir=$mouseMarginDir",
-                                    )
-                                    currentFlipWithAnimation(mouseMarginDir)
-                                }
+                                // 鼠标单击 = 与平板三区点按同作用：左 1/3 上一页、右 1/3 下一页、
+                                // 中间切上下栏；点中标注或链接走同一优先级，不翻页。
+                                // 按下点已被上层消费（栏/遮罩）就不落到阅读面。
+                                if (!moved && !down.isConsumed) onTap(downX, downY, size.width.toFloat())
                                 change.consume()
                                 break
                             }

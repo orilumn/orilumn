@@ -165,6 +165,15 @@ class ReaderActivity : ComponentActivity() {
     /** 当前系统状态栏顶 inset（物理 px，随显隐动画逐帧更新）。 */
     private val statusInsetTopPx = mutableIntStateOf(0)
 
+    /**
+     * 键盘顶 inset（物理 px，随键盘进/出场动画逐帧更新，物理键盘不参与）。
+     *
+     * 这个窗口是 `adjustNothing`：系统**不派发静态 IME insets**（`WindowInsets.ime` 恒为 0，
+     * `imePadding()` 等于没写），只有这条动画回调拿得到键盘的真实高度。API 30 以下没有逐帧回调，
+     * 宿主改传 null，让共享层退回系统 insets（与旧行为一致）。
+     */
+    private val imeInsetBottomPx = mutableIntStateOf(0)
+
     /** 当前设备 dp→物理像素缩放（density）。 */
     private val dpDensity: Float get() = resources.displayMetrics.density
 
@@ -226,6 +235,7 @@ class ReaderActivity : ComponentActivity() {
         window.decorView.setBackgroundColor(Color.TRANSPARENT)
 
         // 系统栏显隐动画的逐帧回调：把状态栏 inset 写进状态，顶栏 translationY 与状态栏逐帧对齐。
+        // 键盘同理：标注卡片要贴着键盘上沿一起升/降，所以也在这里拿逐帧值（D-30）。
         ViewCompat.setWindowInsetsAnimationCallback(
             window.decorView,
             object : WindowInsetsAnimationCompat.Callback(
@@ -236,6 +246,12 @@ class ReaderActivity : ComponentActivity() {
                     runningAnimations: MutableList<WindowInsetsAnimationCompat>,
                 ): WindowInsetsCompat {
                     statusInsetTopPx.intValue = insets.getInsets(WindowInsetsCompat.Type.statusBars()).top
+                    // 只有键盘自己在动时才写这个值：顺带动画（如系统栏）里 getInsets(ime) 是静态值，
+                    // 而这个窗口 `adjustNothing` 根本不派发静态 IME insets（恒 0），写进去会把卡片打回屏幕底。
+                    if (runningAnimations.any { it.typeMask and WindowInsetsCompat.Type.ime() != 0 }) {
+                        imeInsetBottomPx.intValue =
+                            insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
+                    }
                     return insets
                 }
             },
@@ -362,6 +378,13 @@ class ReaderActivity : ComponentActivity() {
                     host = snapshot,
                     settings = effective,
                     statusBarInset = with(LocalDensity.current) { (statusInsetTopPx.intValue / density).dp },
+                    // 键盘高度只能从动画回调里拿（本窗口 adjustNothing，静态 IME insets 恒 0）。
+                    // API 30 以下系统不派发逐帧回调，交回共享层读系统 insets（与旧行为一致）。
+                    imeInset = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        with(LocalDensity.current) { (imeInsetBottomPx.intValue / density).dp }
+                    } else {
+                        null
+                    },
                     onBack = { finish() },
                     onNight = {
                         commitSettings(effective.copy(scheme = if (effective.scheme == "night") "day" else "night"), typographyChanged = true)

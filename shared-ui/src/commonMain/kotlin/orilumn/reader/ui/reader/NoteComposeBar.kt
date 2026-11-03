@@ -1,15 +1,16 @@
 package orilumn.reader.ui.reader
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -29,6 +30,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -38,10 +40,13 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
 import orilumn.reader.data.annotation.AnnotationKind
 import orilumn.reader.data.annotation.AnnotationLineStyle
+import kotlin.math.roundToInt
 
 /**
  * 标注卡片当前写的是哪一条（用户层，D-27）。
@@ -72,10 +77,22 @@ internal data class NoteBarTarget(
  * （[onCancel]）：写了一半的字与刚选的颜色一并不算数，原记录不动。
  *
  * 打字时正文仍看得见：卡片只占屏幕底部一条，不压暗（批注要一边看原文一边写）。
+ *
+ * **进出跟着键盘走**（D-30）：卡片自己不吃 `imePadding` 的系统 insets——那套 insets 只在键盘动画
+ * **结束**时才跳到终值，卡片会先弹在屏幕底下、等键盘升完再跳上去（读者看到的「先菜单、再键盘」）。
+ * 竖向位置由两个逐帧值合成：`−[imePx]（键盘高度）+ 卡片高 ×（1 − [reveal]）`。
+ * [reveal] 为 0 时整张卡片都在屏幕下沿之外，随键盘升起一点点冒头（下半截始终压在键盘下面），
+ * 看上去是「卡片 + 键盘」一整块从底下推上来；键盘落回去时 likewise 被键盘一口吞掉。
  */
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
 internal fun AnnotationSheet(
+    /** 卡片是否该在场：收起动画期间仍是 false，但内容要继续留着（不能中途换内容）。 */
+    visible: Boolean,
+    /** 键盘高度（像素，逐帧动画值）：卡片就贴它的上沿。0 = 没有软键盘（贴窗口下边）。 */
+    imePx: Float,
+    /** 卡片自己的升起度（0..1，见 [rememberSheetReveal]）：0 = 整卡在屏幕下沿之外。 */
+    reveal: Float,
     target: NoteBarTarget,
     text: String,
     palette: Palette,
@@ -100,6 +117,8 @@ internal fun AnnotationSheet(
     onCancel: () -> Unit,
     /** 汇报卡片自身高度（像素）：页面让位要用实测值，不能靠估。 */
     onHeightChange: (Int) -> Unit = {},
+    /** 放卡片的位置（外层 Box 的底边对齐）；默认铺满宽度、按 Box 的默认对齐。 */
+    modifier: Modifier = Modifier,
 ) {
     val p = palette
     // 输入框内部要光标与选区，所以持 TextFieldValue；外面只认纯文本（点色槽时要读它）。
@@ -109,88 +128,154 @@ internal fun AnnotationSheet(
     }
     val focus = remember { FocusRequester() }
 
-    // 打开即聚焦：移动端顺带把键盘顶起来，卡片自己贴到键盘上沿（imePadding）。
-    LaunchedEffect(target.annotationId) { focus.requestFocus() }
-    // Android 返回键 / 桌面 Esc = 取消（不是「保存后退出」，落笔只认完成与点卡片外）。
-    BackHandler(enabled = true) { onCancel() }
+    // 打开即聚焦：移动端顺带把键盘顶起来，卡片自己贴到键盘上沿（imePx 逐帧跟随）。
+    // 用 visible 当键：收起动画还在跑时卡片没卸载，光靠 annotationId 不会重新请求焦点。
+    LaunchedEffect(visible, target.annotationId) { if (visible) focus.requestFocus() }
+    // Android 返回键 / 桌面 Esc = 取消（不是「保存后退出」，落笔只认确定与点卡片外）。
+    BackHandler(enabled = visible) { onCancel() }
 
-    Box(modifier = Modifier.fillMaxSize().imePadding()) {
-        Column(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
+    // 卡片位置 = 屏幕底 − 键盘高 + 卡片高 × (1 − 升起度)：升起度 0 时整张卡片在屏幕下沿之外，
+    // 跟着键盘一帧一帧冒出来。位移在 layout 阶段算（这两个值每帧都变），不触发重组。
+    var cardHeightPx by remember { mutableStateOf(0) }
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .onSizeChanged {
+                cardHeightPx = it.height
+                onHeightChange(it.height)
+            }
+            .offset {
+                IntOffset(0, (-imePx + cardHeightPx * (1f - reveal)).roundToInt())
+            }
+            // 收起时先淡掉（卡面内容在这一刻已经清了，别让读者看见一张空卡往下滑）；
+            // 还没量到高度的那一帧卡片会暂时落在屏幕底边（位移要用实测高度算），也先藏起来。
+            .graphicsLayer {
+                alpha = when {
+                    cardHeightPx == 0 -> 0f
+                    visible -> 1f
+                    else -> reveal.coerceIn(0f, 1f)
+                }
+            }
+            .background(p.cardBg)
+            .onPreviewKeyEvent { event ->
+                if (event.type == KeyEventType.KeyDown && event.key == Key.Escape) {
+                    onCancel()
+                    true
+                } else {
+                    false
+                }
+            },
+    ) {
+        AnnotationActionBar(
+            palette = p,
+            kind = kind,
+            lineStyle = lineStyle,
+            highlightColors = highlightColors,
+            highlightDefaultSlot = highlightDefaultSlot,
+            underlineColors = underlineColors,
+            underlineDefaultSlot = underlineDefaultSlot,
+            currentColor = currentColor,
+            canDelete = canDelete,
+            onKindChange = onKindChange,
+            onPickColor = onPickColor,
+            onPickLineStyle = onPickLineStyle,
+            onCopy = onCopy,
+            onDelete = onDelete,
+            onDone = onDone,
+        )
+        // 与输入行之间的分隔：两段同属一张卡片，但操作与打字是两件事。
+        Box(
+            Modifier
                 .fillMaxWidth()
-                .onSizeChanged { onHeightChange(it.height) }
-                .background(p.cardBg)
-                .onPreviewKeyEvent { event ->
-                    if (event.type == KeyEventType.KeyDown && event.key == Key.Escape) {
-                        onCancel()
-                        true
-                    } else {
-                        false
-                    }
-                },
+                .heightIn(min = 1.dp)
+                .background(p.cardBorder),
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.Bottom,
         ) {
-            AnnotationActionBar(
-                palette = p,
-                kind = kind,
-                lineStyle = lineStyle,
-                highlightColors = highlightColors,
-                highlightDefaultSlot = highlightDefaultSlot,
-                underlineColors = underlineColors,
-                underlineDefaultSlot = underlineDefaultSlot,
-                currentColor = currentColor,
-                canDelete = canDelete,
-                onKindChange = onKindChange,
-                onPickColor = onPickColor,
-                onPickLineStyle = onPickLineStyle,
-                onCopy = onCopy,
-                onDelete = onDelete,
-                onDone = onDone,
-            )
-            // 与输入行之间的分隔：两段同属一张卡片，但操作与打字是两件事。
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 1.dp)
-                    .background(p.cardBorder),
-            )
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.Bottom,
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = 34.dp)
-                            .background(p.selBg, RoundedCornerShape(8.dp))
-                            .padding(horizontal = 10.dp, vertical = 7.dp),
-                    ) {
-                        if (value.text.isEmpty()) {
-                            Text(
-                                text = "写点批注（可不填）",
-                                color = p.muted2,
-                                fontSize = 14.sp,
-                            )
-                        }
-                        BasicTextField(
-                            value = value,
-                            onValueChange = {
-                                value = it
-                                onTextChange(it.text)
-                            },
-                            modifier = Modifier.fillMaxWidth().focusRequester(focus),
-                            textStyle = TextStyle(color = p.text, fontSize = 14.sp, lineHeight = 20.sp),
-                            cursorBrush = SolidColor(Color(target.accentArgb)),
-                            maxLines = 4,
+            Column(modifier = Modifier.weight(1f)) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 34.dp)
+                        .background(p.selBg, RoundedCornerShape(8.dp))
+                        .padding(horizontal = 10.dp, vertical = 7.dp),
+                ) {
+                    if (value.text.isEmpty()) {
+                        Text(
+                            text = "写点批注（可不填）",
+                            color = p.muted2,
+                            fontSize = 14.sp,
                         )
                     }
+                    BasicTextField(
+                        value = value,
+                        onValueChange = {
+                            value = it
+                            onTextChange(it.text)
+                        },
+                        modifier = Modifier.fillMaxWidth().focusRequester(focus),
+                        textStyle = TextStyle(color = p.text, fontSize = 14.sp, lineHeight = 20.sp),
+                        cursorBrush = SolidColor(Color(target.accentArgb)),
+                        maxLines = 4,
+                    )
                 }
-                // 这里不再有第二个「完成」：提交统一走操作栏右侧那一个（D-28）。
-                Spacer(Modifier.width(2.dp))
             }
-            // 键盘之外的最后一段留白：贴边太紧时手指不好点。
-            Spacer(Modifier.height(4.dp))
+            // 这里不再有第二个「完成」：提交统一走操作栏右侧那一个（D-28）。
+            Spacer(Modifier.width(2.dp))
         }
+        // 键盘之外的最后一段留白：贴边太紧时手指不好点。
+        Spacer(Modifier.height(4.dp))
     }
 }
+
+/**
+ * 卡片进 / 出场的位移时长（毫秒）：卡片从「整卡在屏幕下沿之外」走到「贴住键盘上沿」那一段。
+ * 贴着键盘的那一段由 [AnnotationSheet] 的 `imePx` 逐帧带着走（键盘升多快它就多快）。
+ */
+internal const val SHEET_SLIDE_MS = 200
+
+/**
+ * 等键盘起步的上限（毫秒）：光标落进输入框后宿主才去叫键盘，键盘窗口要过几十毫秒才开始升。
+ * 超过这个时限还没等到（外接实体键盘 / 系统压根不给逐帧值），卡片就自己走，不会卡在屏幕外。
+ */
+internal const val SHEET_IME_WAIT_MS = 200
+
+/**
+ * 卡片升起度（D-30）：0 = 整张卡片在屏幕下沿之外，1 = 卡片贴在键盘上沿。
+ *
+ * 关键在**起步时刻**：光标一落进输入框，宿主就去叫键盘，但键盘窗口要再过几十毫秒才开始升。
+ * 卡片如果这时已经自己往上滑，读者看到的就是「先弹卡片、再顶键盘」——两段（2026-11-03 用户复报）。
+ * 所以这里等 [imePx] 离开 0（= 键盘真的开始升）才放开闸门，两者同一时刻起步：键盘压在卡片下沿上，
+ * 卡片看着就是从键盘后面长出来的；键盘落回去时同理被它一口吞掉。
+ *
+ * [gateOnIme] 为 false 时（宿主压根没有逐帧 IME 值：桌面、Android 10 及以下）不等，立刻走。
+ * 等待也有上限（[SHEET_IME_WAIT_MS]），等不到就自己走——键盘真的不来时卡片不能永远藏在屏幕外。
+ */
+@Composable
+internal fun rememberSheetReveal(visible: Boolean, imePx: Float, gateOnIme: Boolean): Float {
+    var armed by remember { mutableStateOf(!gateOnIme) }
+    // 先声明「开闸前的复位 + 看门狗」，再声明「键盘一开始升就开闸」：同一帧里后者覆盖前者。
+    LaunchedEffect(visible, gateOnIme) {
+        if (!gateOnIme) {
+            armed = true
+            return@LaunchedEffect
+        }
+        if (!visible) {
+            armed = false
+            return@LaunchedEffect
+        }
+        delay(SHEET_IME_WAIT_MS.toLong())
+        armed = true
+    }
+    LaunchedEffect(visible, imePx > 0f) {
+        if (visible && imePx > 0f) armed = true
+    }
+    return animateFloatAsState(
+        targetValue = if (visible && armed) 1f else 0f,
+        animationSpec = tween(SHEET_SLIDE_MS),
+        label = "annotationSheetReveal",
+    ).value
+}
+

@@ -44,6 +44,7 @@ import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.Dp
@@ -112,6 +113,14 @@ fun ReaderScreen(
     onPrefillReady: (chapter: Int, direction: Int) -> Unit = { c, d -> host.onPrefillReady(c, d) },
     settings: ReaderSettings,
     statusBarInset: Dp = 0.dp,
+    /**
+     * 键盘高度（Dp）：宿主能逐帧报告就传值，传 null 表示「这里读不到，自己去问系统 insets」。
+     *
+     * Android 阅读页是 `adjustNothing`，系统**不派发静态 IME insets**（`WindowInsets.ime` 恒为 0），
+     * 只有 inset 动画回调拿得到键盘的真实高度，所以值由宿主逐帧喂进来（D-30）。
+     * 桌面没有软键盘、API 30 以下没有逐帧回调，都传 null → 退回 `WindowInsets.ime`（与旧行为一致）。
+     */
+    imeInset: Dp? = null,
     onBack: () -> Unit = {},
     onNight: () -> Unit = {},
     onSettings: () -> Unit = {},
@@ -154,6 +163,9 @@ fun ReaderScreen(
     fontEntries: List<FontEntry> = emptyList(),
 ) {
     val density = LocalDensity.current.density
+    // 卡片收起时主动让输入框失焦（D-30）：不主动收，键盘会等卡片卸载才开始降，
+    // 于是「卡片先滑走、键盘再落」——正是要消掉的两段式。失焦后键盘与卡片同一段时间里各自归位。
+    val focusManager = LocalFocusManager.current
     val profile = remember(settings, density) { TypographicProfile.build(settings, density) }
     // 批注字体（渲染层解析）：字族名 + 字重 → Compose 字体。空串 / 字体已删 = 界面默认。
     // 只影响旁注覆盖层，不进版式（`noteFont` 在 withoutNonLayout 里，面板走无重排提交）。
@@ -1200,6 +1212,8 @@ fun ReaderScreen(
      * 与 [cancelNote]（点卡片外 / 返回键 / Esc）严格分开：那一个什么都不写。
      */
     fun commitNote() {
+        // 落笔即收卡：先让输入框失焦，键盘与卡片才能同一段时间里一起退（D-30）。
+        focusManager.clearFocus()
         val text = noteText.trim()
         val picked = noteColorArgb
         val kind = noteKind
@@ -1245,6 +1259,8 @@ fun ReaderScreen(
      * 落笔只认操作栏的 `确定`。
      */
     fun cancelNote() {
+        // 同上：取消也先失焦，键盘跟着卡片一起落（D-30）。
+        focusManager.clearFocus()
         noteText = ""
         noteColorArgb = null
         val editing = editingAnnotation
@@ -1982,8 +1998,13 @@ fun ReaderScreen(
             val selectionMenuOn = editing == null && selectionMenuVisible && selection.hasSelection &&
                 selection.chapter == fromPos.chapter
             val menuOn = (editing != null || selectionMenuOn) && !coverVisible && !ctl.isBusy()
-            val imeBottomPx = WindowInsets.ime.getBottom(LocalDensity.current).toFloat()
-            val sheetTopPx = (pxHeight - imeBottomPx - noteBarHeightPx).coerceAtLeast(0f)
+            val imeBottomPx = imeInset?.let { with(LocalDensity.current) { it.toPx() } }
+                ?: WindowInsets.ime.getBottom(LocalDensity.current).toFloat()
+            // 卡片升起度（D-30）：0 = 整卡在屏幕外，1 = 贴住键盘上沿。它同时决定两件事：
+            // 卡片自己的位置（见 AnnotationSheet）和**这边要不要让位**——卡片还在屏幕外时页面不动，
+            // 否则先跳一下、再等卡片，又是一处「两段」。宿主没有逐帧 IME 值时不等键盘（gateOnIme = false）。
+            val sheetReveal = rememberSheetReveal(menuOn, imeBottomPx, gateOnIme = imeInset != null)
+            val sheetTopPx = (pxHeight - imeBottomPx - noteBarHeightPx * sheetReveal).coerceAtLeast(0f)
             // 视口 = 卡片上沿之上那一条：整页可以在里面上下滑，最多滑到「页底正好贴卡片上沿」。
             val maxShiftPx = (pxHeight - sheetTopPx).coerceAtLeast(0f)
             val anchorBottomPx = if (editing != null) {
@@ -2267,7 +2288,12 @@ fun ReaderScreen(
                     else -> noteText = ""
                 }
             }
-            if (menuOn) {
+            // 卡片**从屏幕下沿滑上来**、收起时再滑下去（D-30）。它自己已经按键盘高度上移（[AnnotationSheet]
+            // 里的 imePx），所以滑入这一段里卡片的下半截正被升起的键盘挡着——看上去是「卡片 + 键盘」
+            // 整整一块从底下推上来，而不是先弹一张卡片、再单独顶起键盘。
+            // 没收动画时卡片一瞬消失、键盘还在半空；现在两者同一段时间里各自归位。
+            // 在场由升起度决定：收起动画跑完才卸内容（降到 0 时卡片本来就已经在屏幕外面了）。
+            if (menuOn || sheetReveal > 0f) {
                 // 选区场景：选中的字里已有高亮/划线时，删除作用于**相交的第一条**（列表按起点排序）。
                 val overlapping = if (editing == null) {
                     annotationState.annotationsFor(fromPos.chapter)?.firstOrNull {
@@ -2278,6 +2304,10 @@ fun ReaderScreen(
                 }
                 val deleteTarget = editing ?: overlapping
                 AnnotationSheet(
+                    modifier = Modifier.align(Alignment.BottomCenter),
+                    visible = menuOn,
+                    imePx = imeBottomPx,
+                    reveal = sheetReveal,
                     target = NoteBarTarget(
                         annotationId = editing?.id,
                         accentArgb = if (editing != null) {
@@ -2306,7 +2336,7 @@ fun ReaderScreen(
                     onKindChange = { noteKind = it },
                     onPickColor = { kind, slot -> pickNoteColor(kind, slot) },
                     onPickLineStyle = { pickNoteLineStyle(it) },
-                    // 复制只进剪贴板：不动记录、也不关卡片（落笔只有「完成」与点卡片外两处）。
+                    // 复制只进剪贴板：不动记录、也不关卡片（落笔只有「确定」与点卡片外两处）。
                     onCopy = {
                         if (editing != null) copyAnnotation(editing) else copySelection()
                     },

@@ -1,5 +1,7 @@
 package orilumn.reader.desktop
 
+import orilumn.reader.data.annotation.Annotation
+import orilumn.reader.data.annotation.AnnotationKind
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.engine.PaginationCacheStore
 import orilumn.reader.engine.skia.DrawLine
@@ -287,6 +289,52 @@ class DesktopReaderHostTest {
             orilumn.reader.db.OrilumnDb.Schema.version,
             readUserVersion(dbFile),
         )
+    }
+
+    /**
+     * 回归：版本号盖过头 + 迁移里加过的**列**没补上（真实故障：桌面批注「保存失败」）。
+     *
+     * 历史自愈只看「表齐」就盖章，于是停在 v6 形态的 annotations（没有 v7 的 lineStyle、
+     * v8 的 quote）被盖成当前版本，之后任何插入 / 更新都撞 `no column named lineStyle`。
+     * 开库必须按列核对补齐。
+     */
+    @Test
+    fun desktopDbDriftWithMissingColumnsIsHealed() = kotlinx.coroutines.runBlocking {
+        val root = tmpRoot()
+        val dbFile = File(root, "orilumn.db")
+        val setup = app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver("jdbc:sqlite:${dbFile.absolutePath}")
+        orilumn.reader.db.OrilumnDb.Schema.create(setup)
+        // 退回 v6 形态：annotations 还没有 lineStyle / quote，版本号却已经盖到当前。
+        setup.execute(null, "DROP TABLE annotations;", 0)
+        setup.execute(
+            null,
+            "CREATE TABLE annotations(id INTEGER PRIMARY KEY AUTOINCREMENT, bookId INTEGER NOT NULL, " +
+                "chapter INTEGER NOT NULL, charStart INTEGER NOT NULL, charEnd INTEGER NOT NULL, " +
+                "kind TEXT NOT NULL, color INTEGER, note TEXT, createdAt INTEGER NOT NULL, " +
+                "updatedAt INTEGER NOT NULL, CHECK (charStart >= 0), CHECK (charEnd > charStart));",
+            0,
+        )
+        setup.execute(null, "PRAGMA user_version = ${orilumn.reader.db.OrilumnDb.Schema.version};", 0)
+        setup.close()
+
+        val store = DesktopShelfStore(root)
+        store.load()
+        // 能写进去 = 缺的列已补齐（旧实现在此抛 no column named lineStyle）。
+        val saved = store.addAnnotation(
+            Annotation(
+                bookId = 1,
+                chapter = 0,
+                charStart = 0,
+                charEnd = 2,
+                kind = AnnotationKind.Highlight,
+                note = "x",
+                quote = "ab",
+            ),
+        )
+        val back = store.annotationsForBook(1).single()
+        assertEquals(saved.id, back.id)
+        assertEquals("x", back.note)
+        assertEquals("ab", back.quote)
     }
 
     private fun readUserVersion(dbFile: File): Long {

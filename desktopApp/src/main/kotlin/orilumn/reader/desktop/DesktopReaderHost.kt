@@ -16,6 +16,7 @@ import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.engine.skia.ImageCodec
 import orilumn.reader.engine.skia.PageImage
 import orilumn.reader.engine.text.TypographicProfile
+import orilumn.reader.io.Logger
 import orilumn.reader.ui.reader.ReaderHost
 import orilumn.reader.ui.reader.ReaderPos
 import orilumn.reader.ui.imageBitmapOf
@@ -278,7 +279,9 @@ class DesktopReaderHost(
         )
     } catch (c: CancellationException) {
         throw c
-    } catch (_: Throwable) {
+    } catch (t: Throwable) {
+        // 失败原因不能只在界面上说「保存失败」：落一条日志，库里缺列 / 约束不满足才查得出来。
+        Logger.w(TAG, "addAnnotation failed: ${t.message}")
         null
     }
 
@@ -287,7 +290,8 @@ class DesktopReaderHost(
         true
     } catch (c: CancellationException) {
         throw c
-    } catch (_: Throwable) {
+    } catch (t: Throwable) {
+        Logger.w(TAG, "updateAnnotation failed: ${t.message}")
         false
     }
 
@@ -296,7 +300,8 @@ class DesktopReaderHost(
         true
     } catch (c: CancellationException) {
         throw c
-    } catch (_: Throwable) {
+    } catch (t: Throwable) {
+        Logger.w(TAG, "deleteAnnotation failed: ${t.message}")
         false
     }
 
@@ -475,5 +480,7 @@ class DesktopReaderHost(
     companion object {
         /** 磁盘分页表构建号：随桌面发版手动递增（职责同安卓 versionCode）。 */
         const val DISK_CACHE_VERSION = 1
+
+        private const val TAG = "Orilumn.Annotation"
     }
 }

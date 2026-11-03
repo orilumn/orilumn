@@ -53,6 +53,26 @@ data class ThemePresetEntry(val label: String, val bg: String, val fg: String) {
 private val json = Json { ignoreUnknownKeys = true; prettyPrint = true }
 
 /**
+ * 迁移脚本里 `ALTER TABLE ... ADD COLUMN` 加过的列（表 / 列名 / 补齐用的 DDL）。
+ *
+ * 只用于历史漂移自愈：版本号盖过头、迁移没跑过的库，插入时才会撞「no column named …」。
+ * 以后新增「加列」的迁移，这里要同步补一条（DDL 必须与对应 `.sqm` 等价）。
+ */
+private val AddedColumns = listOf(
+    AddedColumn("books", "coverPath", "ALTER TABLE books ADD COLUMN coverPath TEXT;"),
+    AddedColumn("books", "readTime", "ALTER TABLE books ADD COLUMN readTime INTEGER;"),
+    AddedColumn(
+        "font_faces",
+        "hidden",
+        "ALTER TABLE font_faces ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;",
+    ),
+    AddedColumn("annotations", "lineStyle", "ALTER TABLE annotations ADD COLUMN lineStyle TEXT;"),
+    AddedColumn("annotations", "quote", "ALTER TABLE annotations ADD COLUMN quote TEXT;"),
+)
+
+private data class AddedColumn(val table: String, val column: String, val ddl: String)
+
+/**
  * S33 桌面书架仓储：SQLDelight 实现 shared-ui [ShelfRepository]。
  *
  * 书目索引由 S32 的 `shelf.json` 迁入 `orilumn.db`（[load] 时一次性导入并删文件，
@@ -127,14 +147,43 @@ class DesktopShelfStore(root: File) : ShelfRepository {
                 runCatching { driver.execute(null, "PRAGMA user_version = $current;", 0) }
             }
         }
+        // 版本号对得上不代表列对得上：历史上「表齐就盖章」的自愈会把版本号盖过头，
+        // 迁移里 ADD COLUMN 的那几列就此漏掉，直到插入 / 更新时才炸（批注「保存失败」即此）。
+        // 每次开库按表核对一遍列，缺哪列补哪列；列齐时只是几条 PRAGMA 空查。
+        repairMissingColumns(driver)
         return LibraryDb(OrilumnDb(driver))
+    }
+
+    /**
+     * 迁移里加过的列：表在、列缺就补（见 [openDb] 注释）。表本身没有时不动——
+     * 那是建库 / 迁移分支的活，往不存在的表上加列只会报错。
+     */
+    private fun repairMissingColumns(driver: JdbcSqliteDriver) {
+        fun columnsOf(table: String): Set<String> = runCatching {
+            driver.executeQuery(
+                null,
+                "PRAGMA table_info($table);",
+                { cursor ->
+                    QueryResult.Value(buildSet { while (cursor.next().value) add(cursor.getString(1) ?: "") })
+                },
+                0,
+            ) { }.value
+        }.getOrDefault(emptySet())
+
+        val present = HashMap<String, Set<String>>()
+        for (added in AddedColumns) {
+            val columns = present.getOrPut(added.table) { columnsOf(added.table) }
+            if (columns.isEmpty() || added.column in columns) continue
+            Logger.w(TAG, "db drift healed: ${added.table}.${added.column} missing, add it")
+            runCatching { driver.execute(null, added.ddl, 0) }
+        }
     }
 
     /**
      * 库里是否已具备**全部**已知表（按 `sqlite_master` 查名）。
      *
-     * 只用于识别「表已建齐、user_version 却没跟上」的历史漂移（见 [openDb] 注释）；
-     * 判列完整性超出所需（漂移只发生在新增表这一档），故不比对列。
+     * 只用于识别「表已建齐、user_version 却没跟上」的历史漂移（见 [openDb] 注释）。
+     * 列完整性不在这里判：列是另一档漂移，统一由 [repairMissingColumns] 每次开库核对。
      */
     private fun allTablesPresent(driver: JdbcSqliteDriver): Boolean {
         val present = runCatching {

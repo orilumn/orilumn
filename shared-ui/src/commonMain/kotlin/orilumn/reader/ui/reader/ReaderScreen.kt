@@ -169,10 +169,12 @@ fun ReaderScreen(
     val profile = remember(settings, density) { TypographicProfile.build(settings, density) }
     // 批注字体（渲染层解析）：字族名 + 字重 → Compose 字体。空串 / 字体已删 = 界面默认。
     // 只影响旁注覆盖层，不进版式（`noteFont` 在 withoutNonLayout 里，面板走无重排提交）。
-    // 字重直接解析进这个族（平台侧取对应字形面），Text 上不再另写字重，免得合成粗体叠一次。
+    // 字重**不烤进字体族**：桌面端单面族没有第二档，Compose 仍按族名去系统字库取面、烤好的字重被丢，
+    // 所以族和字重分开给（族 → `fontFamily`，字重 → `fontWeight`），量宽与绘制两处都要带上。
     val noteFontFamily = remember(settings.noteFont, settings.noteFontWeight, fontEntries) {
         noteFontFamilyOf(settings, fontEntries)
     }
+    val noteFontWeight = remember(settings.noteFontWeight) { noteFontWeightOf(settings) }
     val selectionHandleRadiusPx = SELECTION_HANDLE_RADIUS_DP * density
     val selectionHandleHitPx = SELECTION_HANDLE_HIT_RADIUS_DP * density
 
@@ -2132,7 +2134,7 @@ fun ReaderScreen(
             // **不能**在帧里同步算——目标页内容恰好在起手那一刻才出现，同步算就是
             // 「手指把页面拉出一点点，画面卡住」的头号来源（2026-11-01 用户报）。
             // 文字尺寸用与绘制同源的实测尺子（不是字宽粗估）：差半像素就会被省略号截掉。
-            val noteTextSizer = rememberNoteTextSizer(noteFontFamily)
+            val noteTextSizer = rememberNoteTextSizer(noteFontFamily, noteFontWeight)
             val noteLane = remember(noteTextSizer) {
                 // 车道独占的绘制器与尺子：前台那个 selectionDrawer 在别的线程手上用过就脏了。
                 PageNoteLane(drawer = LineWindowDrawer(), textSizer = noteTextSizer)
@@ -2233,6 +2235,7 @@ fun ReaderScreen(
                         },
                         modifier = Modifier.fillMaxSize(),
                         fontFamily = noteFontFamily,
+                        fontWeight = noteFontWeight,
                         showBorder = settings.noteBorder,
                         showBackground = settings.noteBackground,
                         textSameColor = settings.noteTextSameColor,

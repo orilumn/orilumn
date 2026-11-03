@@ -30,6 +30,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
@@ -7372,20 +7373,33 @@ private class ComposeNoteTextSizer(
 /**
  * 一页取一次实测尺子：同一套字号 / 字体规则下测量结果稳定，不必每条批注重建。
  *
- * @param fontFamily 批注字体（`null` = 跟随界面默认；字重已解析进这个族）。**必须**与 [NoteBubbles]
+ * @param fontFamily 批注字体（`null` = 跟随界面默认）。**必须**与 [NoteBubbles]
  *   里那条 `Text` 用同一个族：量宽和画字一旦不是同一套字形，摆位判「整句放得下」而画出来多折一行。
+ * @param fontWeight 批注字重（`null` = 不写字重，跟随字体族默认）；桌面系统族靠它选字形面，
+ *   所以尺子也必须带上，否则量宽用常规面、画字用粗面，差半像素就会多折一行。
  */
 @Composable
-internal fun rememberNoteTextSizer(fontFamily: FontFamily? = null): NoteTextSizer {
+internal fun rememberNoteTextSizer(
+    fontFamily: FontFamily? = null,
+    fontWeight: FontWeight? = null,
+): NoteTextSizer {
     val measurer = rememberTextMeasurer()
     val density = LocalDensity.current
     val localStyle = LocalTextStyle.current
-    val baseStyle = remember(localStyle, fontFamily) {
-        if (fontFamily == null) localStyle else localStyle.merge(TextStyle(fontFamily = fontFamily))
+    val baseStyle = remember(localStyle, fontFamily, fontWeight) {
+        localStyle.withNoteFont(fontFamily, fontWeight)
     }
     return remember(measurer, density, baseStyle) {
         CachingNoteTextSizer(ComposeNoteTextSizer(measurer, density, baseStyle))
     }
+}
+
+/** 把批注字族 / 字重叠到基础样式上：读者没配的那一项不动（不发声明 = 跟随原样）。 */
+private fun TextStyle.withNoteFont(fontFamily: FontFamily?, fontWeight: FontWeight?): TextStyle {
+    var style = this
+    if (fontFamily != null) style = style.merge(TextStyle(fontFamily = fontFamily))
+    if (fontWeight != null) style = style.merge(TextStyle(fontWeight = fontWeight))
+    return style
 }
 
 /**
@@ -7402,8 +7416,10 @@ internal fun NoteBubbles(
     pageBgColor: Int,
     onOpen: (Long) -> Unit,
     modifier: Modifier = Modifier,
-    /** 批注字体（`null` = 跟随界面默认；字重已解析进这个族）：与实测尺子同一个族，见 [rememberNoteTextSizer]。 */
+    /** 批注字体（`null` = 跟随界面默认）：与实测尺子同一个族，见 [rememberNoteTextSizer]。 */
     fontFamily: FontFamily? = null,
+    /** 批注字重（`null` = 不写字重，跟随字体族默认）：桌面系统族靠它选字形面，必须与尺子一致。 */
+    fontWeight: FontWeight? = null,
     /** 批注框描边（笔记面板「显示批注边框」）。关掉后只剩文字 / 省略号，不再圈一圈。 */
     showBorder: Boolean = true,
     /** 批注框底色（笔记面板「显示批注背景色」）。关掉后文字直接压在正文上，不铺标注色。 */
@@ -7530,6 +7546,7 @@ internal fun NoteBubbles(
                         fgColor
                     },
                     fontFamily = fontFamily,
+                    fontWeight = fontWeight,
                     fontSize = with(d) { b.fontPx.toSp() },
                     lineHeight = with(d) { (b.fontPx * NOTE_BUBBLE_LINE_RATIO).toSp() },
                     maxLines = b.maxLines,

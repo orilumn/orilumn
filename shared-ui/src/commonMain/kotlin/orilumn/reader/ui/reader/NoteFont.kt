@@ -1,6 +1,7 @@
 package orilumn.reader.ui.reader
 
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import orilumn.reader.data.font.FontEntry
 import orilumn.reader.data.font.SubfamilyMetric
 import orilumn.reader.data.settings.ReaderSettings
@@ -14,7 +15,9 @@ import kotlin.math.abs
  *
  * @param family 字族名（系统族或导入族的族名）
  * @param filePath 导入字体的私有文件路径；系统族传 `null`
- * @param weight 读者在字重页选的那一档（100..900）；`null` = 跟随字族自身默认
+ * @param weight 读者在字重页选的那一档（100..900）；`null` = 跟随字族自身默认。
+ *   平台侧能落到真字形面就落（Android、导入字体文件）；桌面系统族落不到，由
+ *   [noteFontWeightOf] 另写进 `TextStyle`，两者合起来才等于读者选的那一档。
  * @return `null` = 解析失败（调用方回退界面默认字体：批注照样能读，不因缺字丢内容）
  */
 internal expect fun composeFontFamily(family: String, filePath: String?, weight: Int?): FontFamily?
@@ -43,3 +46,16 @@ internal fun noteFontFamilyOf(settings: ReaderSettings, entries: List<FontEntry>
     val path = (chosen as? FontEntry.Imported)?.face?.path
     return composeFontFamily(family, path, weight)
 }
+
+/**
+ * 设置里的批注字重 → 交给 Compose 文字样式的字重（`null` = 不写字重，跟随字体自身默认）。
+ *
+ * 为什么要单独交给 `TextStyle`：字重烤进字体族这条路在桌面端不成立——单面族没有第二档可选，
+ * Compose 桌面仍按族名去系统字库取面，烤好的字重被丢掉（400 / 700 量出来宽度一模一样）。
+ * 所以桌面系统族按「族名 + 这一档字重」解析（见 [composeFontFamily] 的 JVM actual），
+ * 字重由调用方写进 `TextStyle`；导入字体与 Android 侧已按字重挑定字形面，再写一次也无副作用。
+ *
+ * 没配字重（`0` / 越界）就不发声明，让字体族按自己的默认脸显示。
+ */
+internal fun noteFontWeightOf(settings: ReaderSettings): FontWeight? =
+    settings.noteFontWeight.takeIf { it in 100..900 }?.let { FontWeight(it) }

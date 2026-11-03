@@ -275,7 +275,13 @@ class DesktopReaderHostTest {
         setup.close()
 
         DesktopShelfStore(root).load()
-        assertEquals(9L, orilumn.reader.db.OrilumnDb.Schema.version) // 守卫：本断言口径
+        // 守卫只看口径，不写死数字：本用例的前提是「当前版本确实比伪装的 5 新」。
+        // 写死具体版本号的话，schema 每升一级这里都会红一次——那是测试在报自己过期，
+        // 不是产品坏了（10 升上来时就这么红过一次）。
+        assertTrue(
+            "当前 schema 版本必须比伪装的 5 新",
+            orilumn.reader.db.OrilumnDb.Schema.version > 5,
+        )
         assertEquals(
             "表齐 + 版本落后 ⇒ 直接盖章，不重跑迁移",
             orilumn.reader.db.OrilumnDb.Schema.version,

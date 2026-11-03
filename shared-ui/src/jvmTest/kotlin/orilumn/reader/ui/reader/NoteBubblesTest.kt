@@ -4283,10 +4283,12 @@ class NoteBubblesTest {
     }
 
     /**
-     * 规则 5（2026-11-02 用户定口）：同一行几条批注都摆在**同一个角**上时，
-     * **靠外的那条贴着正文行、靠中心的往外推**——左上「越左越靠下」，
-     * 也就是「中心在外、两侧靠内」。
-     * 这条比「长的放外侧」优先：这里最左边那条最短、最右边那条最长，按长度该反过来排。
+     * 规则 5（2026-11-02 用户定口，2026-11-03 修正口径）：同一行几条批注都摆在**同一个角**上时，
+     * **这一组里最靠两端的贴着正文行、夹在中间的往外推**，也就是「中心在外、两侧靠内」。
+     *
+     * 「两端 / 中间」只在这一组内部比，不拿正文行中线当基准：这里三条都挤在行的左半段，
+     * 按行中线会把最右那条（离中线最近）误判成「最靠中」推到最外。
+     * 这条比「长的放外侧」优先：最左那条最短、最右那条最长，按长度该反过来排。
      */
     @Test
     fun `same corner notes stack by anchor position instead of length`() {
@@ -4302,7 +4304,8 @@ class NoteBubblesTest {
             ring = 0,
             distance = 200f,
         )
-        // 三条都摆在正文行上方、各自选区的左边（左上）：选区越靠左，框该越贴正文行。
+        // 三条都摆在正文行上方、各自选区的左边（左上）：最左、最右两条是「两侧」，该贴正文行；
+        // 中间那条是「中间」，该被推到最外面。两条同靠边时短的更贴正文（这里正好是最左那条）。
         val left = NoteChoice(noteInk(1L, listOf(rect(200f, 300f, 260f, 340f)), "短"), candidate(1L, 100f))
         val middle = NoteChoice(
             noteInk(2L, listOf(rect(450f, 300f, 510f, 340f)), "中等长度的批注"),
@@ -4321,10 +4324,10 @@ class NoteBubblesTest {
         val a = arranged.single { it.note.annotationId == 1L }.candidate.rect
         val b = arranged.single { it.note.annotationId == 2L }.candidate.rect
         val c = arranged.single { it.note.annotationId == 3L }.candidate.rect
-        assertTrue("最左那条该贴着正文行（框最低）：$dbg", a.bottom > b.bottom + 1f)
-        assertTrue("中间的排在外侧：$dbg", b.bottom > c.bottom + 1f)
-        assertTrue("最右那条该被推到最外面（框最高）：$dbg", c.top < 160f)
-        for ((innerBox, outerBox) in listOf(a to b, b to c, a to c)) {
+        assertTrue("最左那条该贴着正文行（框最低）：$dbg", a.bottom > c.bottom + 1f)
+        assertTrue("最右那条也属于两侧，该在中间那条里面：$dbg", c.bottom > b.bottom + 1f)
+        assertTrue("中间那条该被推到最外面（框最高）：$dbg", b.top < c.top - 1f && b.top < a.top - 1f)
+        for ((innerBox, outerBox) in listOf(a to c, c to b, a to b)) {
             assertTrue(
                 "三条不能重叠：$dbg",
                 innerBox.top - outerBox.bottom >= noteMetrics.marginY * 2f - 1f,
@@ -4336,7 +4339,8 @@ class NoteBubblesTest {
      * 真机复现（vivo PA2353，2026-11-02）：`val popcorn = 5 // There are 5 boxes of popcorn`
      * 这一行的四条批注。`boxes` 那条在整行里偏左、框却摆在选区右边，正好横在 `of` / `popcorn`
      * 的引线出口上方（用户原话：「它会挡住右边的出线，不是明摆着应该放左上角吗」）——
-     * 必须翻到左上角，并且仍按「中心在外、两侧靠内」排在 `are` 与 `of` 之间。
+     * 必须翻到左上角，并且按「中心在外、两侧靠内」：`are` / `of` 在两端、贴正文行，
+     * 夹在中间的 `boxes` 推到最外面。
      */
     @Test
     fun `boxes note flips to the upper left so it stops blocking the right hand leaders`() {
@@ -4371,7 +4375,7 @@ class NoteBubblesTest {
             occupied = listOf(are, boxes, of),
             marginX = noteMetrics.marginX,
             marginY = noteMetrics.marginY,
-            // 堆叠先后看**正文行框**的中线（130..1250 → 690）：行尾的 `of` 最贴行。
+            // 两条同样靠边时，才拿正文行框的中线（130..1250 → 690）分先后。
             rowMidById = mapOf(136L to 690f, 127L to 690f, 130L to 690f),
             // 偏左 / 偏右看这一行批注墨迹的并集（中线 1111）：`boxes` 在同排里偏左。
             sideMidById = mapOf(136L to 1111f, 127L to 1111f, 130L to 1111f),
@@ -4383,7 +4387,8 @@ class NoteBubblesTest {
         val o = arranged.single { it.note.annotationId == 130L }.candidate.rect
         assertTrue("boxes 那条要翻到选区左边（左上角）：$dbg", b.right <= 1001f + 0.5f)
         assertTrue("of 那条贴着正文行（最内）：$dbg", o.top > b.top + 1f)
-        assertTrue("are 那条在最外：$dbg", e.top < b.top - 1f)
+        assertTrue("are 那条也在两侧，该在 boxes 里面：$dbg", e.top > b.top + 1f)
+        assertTrue("夹在中间的 boxes 该被推到最外面：$dbg", b.top < e.top - 1f && b.top < o.top - 1f)
         // 三条的右缘要跟选区从左到右同一个顺序，引线才不会交叉。
         assertTrue("右缘顺序要和选区顺序一致：$dbg", e.right < b.right && b.right < o.right)
     }

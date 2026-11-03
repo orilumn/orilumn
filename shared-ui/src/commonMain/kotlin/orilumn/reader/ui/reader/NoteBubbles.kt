@@ -2281,10 +2281,10 @@ internal fun noteBubblePlacements(
             rowSpans[row] = rowSpans[row]?.let { rectUnion(listOf(it, r)) } ?: r
         }
     }
-    // 每条批注「基准行」的中线：**正文行框**的中点（2026-11-02 用户定口：堆叠先后按
-    // 「选区离这一行中线多远」定）。不能用「这一行批注墨迹的并集」：被批注的那几个词可能都挤在
-    // 行的同一头，并集中线会跟着偏（真机「of」：并集中线 1111，正文行中线约 690），于是真正
-    // 靠行尾的那条反而算成「离中线最近」，被推到最外面。
+    // 每条批注「基准行」的中线：**正文行框**的中点，只作「偏左 / 偏右」的兜底中线
+    // （[rowSideMids] 才是主口径）。堆叠顺序自 2026-11-03 起改在**同一组内部**比两端与中间，
+    // 不再用这条中线：被批注的词可能只占行的一小段，行中线会把最靠边的那条误判成「最靠中」
+    // （真机「of」：并集中线 1111，正文行中线约 690）。
     val rowMids = ordered.associate { n ->
         val own = n.rects.lastOrNull() ?: Rect.Zero
         val row = nearestLineIndex(own, lines)
@@ -2598,7 +2598,10 @@ private fun assignNoteCandidates(
     covering: Set<Long> = emptySet(),
     /** 例外（规则第 8 条）：本条右侧只有本行最右那条；值 = 那条的 id，等它落在本行正右后回到右上优先。 */
     rightmostOnRight: Map<Long, Long> = emptyMap(),
-    /** 每条批注所在那一行**正文行框**的横向中点：堆叠先后按「离这条中线多远」定（规则 5）。 */
+    /**
+     * 每条批注所在那一行**正文行框**的横向中点：只作「偏左 / 偏右」的兜底中线
+     * （[sideMidById] 没给时）；堆叠顺序不再用它，见 [arrangeSharedBlankNotes] 规则 5。
+     */
     rowMidById: Map<Long, Float> = emptyMap(),
     /** 「偏左 / 偏右」用的中线（这一行批注墨迹的并集）；不给就退回 [rowMidById]。 */
     sideMidById: Map<Long, Float> = emptyMap(),
@@ -3194,8 +3197,8 @@ private fun assignNoteCandidates(
         start = end
     }
 
-    // 规则 5（2026-11-02 用户定口）：同一个大空白区里的多条批注综合安排——
-    // 堆在同一块空白里的几条按「选区离这一行中线多远」定先后（中心在外、两侧靠内），
+    // 规则 5（2026-11-02 用户定口，2026-11-03 修正口径）：同一个大空白区里的多条批注综合安排——
+    // 堆在同一块空白里的几条按「在这一组里靠两端还是靠中间」定先后（中心在外、两侧靠内），
     // 每条引线都从自己那一侧就近出去，不会与同排别的引线交叉。
     val arranged = arrangeSharedBlankNotes(
         occupied, marginX, marginY, rowMidById,
@@ -3215,10 +3218,11 @@ private fun assignNoteCandidates(
  * 规则 5：同一块大空白里的多条批注要**综合安排**，不是先到先得。两件事，按顺序做：
  *
  * 1. **走廊**（2026-10-27 定口）：长的放外侧、短的放内侧，把靠近正文的走廊留给短批注的引线；
- * 2. **同角堆叠顺序**（2026-11-02 定口）：同一行几条批注都摆在同一侧时，
- *    左边那组「越左越贴正文行」（左上越左越靠下、左下越左越靠上），
- *    右边那组「越右越贴正文行」（右上越右越靠下、右下越右越靠上）——
- *    也就是「中心在外、两侧靠内」。每条引线都从自己那一侧就近出去，不会与同排别的引线交叉。
+ * 2. **同角堆叠顺序**（2026-11-02 定口，2026-11-03 修正口径）：同一行几条批注都摆在同一侧时，
+ *    **这一组里最靠两端的贴正文行、夹在中间的往外推**——也就是「中心在外、两侧靠内」。
+ *    「两端 / 中间」只在这一组自己内部比：被批注的词常常只占行的一小段，拿正文行中线
+ *    会把最靠边的那条误判成「最靠中」，正好排反。
+ *    每条引线都从自己那一侧就近出去，不会与同排别的引线交叉。
  *    **这条比第 1 条优先**：宁可折行，也不许排反。
  *
  * 第 2 条只认**真的同一个角**：框整个落在选区左边（左上 / 左下）或整个落在右边（右上 /
@@ -3403,16 +3407,18 @@ internal fun arrangeSharedBlankNotes(
         return if (side < 0) ink.left - marginX - w else ink.right + marginX
     }
 
-    // ---- 同一行多条批注的堆叠顺序（2026-11-02 用户定口）----
-    // **中心在外、两侧靠内**：同一行几条第几条都堆在同一块空白里时，按**选区离这一行中线多远**
-    // 定先后——离得最远的那条（行首 / 行尾）贴正文行，越靠行中线的越往外推。
+    // ---- 同一行多条批注的堆叠顺序（2026-11-02 用户定口，2026-11-03 修正口径）----
+    // **中心在外、两侧靠内**：同一行几条都堆在同一块空白里时，**这一组里最靠两端的贴正文行、
+    // 夹在中间的往外推**。「两端 / 中间」只在这一组自己内部比，不能拿正文行中线当基准：
+    // 被批注的词常常挤在行的一头（真机当前页：are / boxes / of 全在半行右段），行中线会把
+    // 最靠边的 are 当成「最靠中」推到最外面，中间的 boxes 反而收进来——正好排反。
     // 每条引线都从自己那一侧就近出去，不会与同排别的引线交叉。这条顺序比折行优先。
     /**
      * 这个框是不是**斜向**摆在选区旁边（左上 / 左下 / 右上 / 右下）。
      *
      * 按**框心**判，不按「整块在选区左 / 右」判：真机「boxes」那条的框左缘压着选区末尾
      * 半个字，整块判就不算斜向、直接退出排序，于是与左侧那条挤在同一层
-     * （2026-11-02 用户定口：它靠中线，就该往外推）。
+     * （2026-11-02 用户定口：它靠着这一组的中间，就该往外推）。
      */
     fun cornerOf(c: NoteChoice): Boolean {
         val ink = rectUnion(c.note.rects)
@@ -3486,20 +3492,39 @@ internal fun arrangeSharedBlankNotes(
         if (members.size < 2) continue
         val outward = outwardOf(out[members[0]]) ?: continue
         if (members.any { outwardOf(out[it]) != outward }) continue
-        // 这一行的中线：优先用调用方量好的「这一行几条批注墨迹的中点」；没有就退回所在空白的中点。
+        // 这一组几条批注的选区跨度：只在这一组内部比「谁是两侧、谁是中间」。
+        // 不能拿正文行中线或这一行全部批注的并集当基准——它们会被行首的代码、行尾别的
+        // 空白里的批注拉偏，被批注的词实际上只占中间一小段（真机当前页 are / boxes / of）。
+        val anchorMids = members.map { anchorMidX(out[it]) }
+        val spanLeft = anchorMids.min()
+        val spanRight = anchorMids.max()
+        /** 离这一组最近一端有多远：0 = 这一组最靠边的那条（两侧），越大越靠中间。 */
+        fun centrality(k: Int): Float {
+            val x = anchorMidX(out[k])
+            return min(x - spanLeft, spanRight - x)
+        }
+        // 两条一样靠边（都在两端）时退回「离正文行中线越远越靠内」：那是同一档里的次序，
+        // 不参与「两端 / 中间」的判定，只决定两端那两条谁占最里面那一格。
         val mid = rowMidById[out[members.first()].note.annotationId] ?: run {
             val blank = out[members.first()].candidate.freeRect
             (blank.left + blank.right) / 2f
         }
         fun far(k: Int): Float = abs(anchorMidX(out[k]) - mid)
+        /** k 是不是比 o 更靠边（更该贴正文行）：先看组内两端，再看离行中线多远。 */
+        fun moreSide(k: Int, o: Int): Boolean {
+            val ck = centrality(k)
+            val co = centrality(o)
+            if (abs(ck - co) > NOTE_GEOM_EPS) return ck < co
+            return far(k) > far(o) + NOTE_GEOM_EPS
+        }
         val depth = { k: Int -> depthOf(out[k].candidate.rect, outward) }
         // 已经在正确顺序上就整组不动：只修真的排错了的组，免得把别的组也挪一遍。
         var violated = false
         for (k in members) {
             for (o in members) {
                 if (k == o) continue
-                if (far(k) <= far(o) + NOTE_GEOM_EPS) continue
-                // k 该比 o 更贴正文：k 离行中线更远（行首 / 行尾那条）。
+                if (!moreSide(k, o)) continue
+                // k 该比 o 更贴正文：k 在这一组里更靠边（两侧那条）。
                 // 判据是**深度区间完全分开**，不是只比内缘：两条并排、只差 10px 时，
                 // 内缘看着已经在外面，实际仍叠在同一层，引线照样与并排那条挤
                 // （2026-11-02 真机「boxes」那条正是这样被漏掉的）。
@@ -3531,9 +3556,12 @@ internal fun arrangeSharedBlankNotes(
             }
         }
         if (!violated) continue
-        // 靠内的在前：离行中线越远越靠内；一样远时短的靠内、长的往外（把走廊让给短批注）。
+        // 靠内的在前：这一组里越靠两端的越靠内；一样靠边时离行中线越远的靠内；
+        // 仍然一样时短的靠内、长的往外（把走廊让给短批注）。
         val ordered = members.sortedWith(
-            compareByDescending<Int> { far(it) }.thenBy { textLength(out[it]) },
+            compareBy<Int> { centrality(it) }
+                .thenByDescending { far(it) }
+                .thenBy { textLength(out[it]) },
         )
         // 这一组几条批注各自的空白：整组重排后，某一条可能被推到「同组另一条的空白」里——
         // 那也是一块没有正文的空地（真机「boxes」那条正是被上方那条的空白挡住，只许动自己的

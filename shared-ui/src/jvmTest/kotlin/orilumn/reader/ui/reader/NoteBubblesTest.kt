@@ -3688,6 +3688,62 @@ class NoteBubblesTest {
         )
     }
 
+    /**
+     * 2026-11-03 用户定口：本行上方那一格被同排右侧的框**压住十几像素**时，
+     * 请那条往下挪一点点就够，不必自己跳到隔行去。
+     *
+     * 版面按真机（Kotlin 中文文档「函数体」）缩排：左边那条整句比本行还宽（遮住右侧
+     * 那条的选区，规则第 8 条里的「来让位的那条」），以前它连请人让一让的资格都没有。
+     */
+    @Test
+    fun `a sliver of overlap nudges the neighbour instead of jumping rows`() {
+        val r0 = rect(100f, 783f, 322f, 839f)
+        val r1 = rect(168f, 876f, 470f, 932f)
+        val r2 = rect(168f, 969f, 744f, 1025f)
+        val row = rect(156f, 1062f, 563f, 1118f)
+        val below = rect(168f, 1155f, 1052f, 1211f)
+        val rows = listOf(r0, r1, r2, row, below)
+        val lines = rows.mapIndexed { i, r -> NoteTextLine(rect = r, blockId = 0, index = i) }
+        // 字墨迹比行框矮一截（上 6 / 下 13，取真机那一页的比例）：本行上方那一格正好 50px 高。
+        val ink = rows.map { rect(it.left, it.top + 6f, it.right, it.bottom - 13f) }
+        val notes = listOf(
+            noteInk(
+                1L,
+                listOf(rect(156f, 1062f, 267f, 1118f)),
+                "英文只用个 body，中文光说“体”怎么感觉都不对！",
+            ),
+            noteInk(
+                2L,
+                listOf(rect(452f, 1062f, 563f, 1118f)),
+                "交换。试着把这一行批注拉得很长很长很长很长，还不够长，现在够了。",
+            ),
+        )
+        fun page(ids: Set<Long>) = place(
+            notes = notes.filter { it.annotationId in ids },
+            textInk = rows,
+            textLines = lines,
+            arrowInk = ink,
+            contentRight = 1281f,
+            contentBottom = 1250f,
+            pageRight = 1300f,
+            pageBottom = 1250f,
+            fontPx = 44f,
+        )
+        val alone = page(setOf(2L)).single()
+        val both = page(setOf(1L, 2L))
+        assertEquals("两条都要留住：$both", 2, both.size)
+        val wide = both.first { it.annotationId == 1L }
+        assertTrue(
+            "应贴在本行正上方那一格（top≈1016），实际 top=${wide.topPx}；两条=$both alone=$alone",
+            wide.topPx > 1000f && wide.topPx < row.top,
+        )
+        val neighbour = both.first { it.annotationId == 2L }
+        assertTrue(
+            "右侧那条只需往下挪一点点（单独 top=${alone.topPx}，现在 ${neighbour.topPx}）；两条=$both",
+            neighbour.topPx > alone.topPx + 0.5f && neighbour.topPx < alone.topPx + 32f,
+        )
+    }
+
     /** 2026-10-24 用户定口：让位后新批注**折行**也要能放下（不是只认一行）。 */
     @Test
     fun `make room can place a note that needs several lines`() {

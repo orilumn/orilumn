@@ -225,6 +225,14 @@ private const val NOTE_MARGIN_TIER_FAR_MIN: Int = 1
 /** 留白压缩的下限（规则第 13 条：压到 2px 才算这个方向不可用）。 */
 private const val NOTE_MIN_MARGIN_PX: Float = 2f
 
+/**
+ * 「会遮住右侧文字」的那条批注请人让位时，挡路框**最多挪多少**（em）。
+ *
+ * 2026-11-03 用户定口：本行上方那一格被同排右侧的框压住十几像素时，不必让那条整体搬走，
+ * 往下挪一点点就够。超过这个量仍按原口径——这类批注自己是来让位的，继续往远处找。
+ */
+private const val NOTE_NUDGE_MAX_EM: Float = 1f
+
 /** 标注离屏幕边的距离：贴边会让框看起来像被裁掉一条。 */
 private const val NOTE_PAGE_EDGE_EM: Float = 0.5f
 
@@ -2840,8 +2848,9 @@ private fun assignNoteCandidates(
     fun makeRoom(note: NoteInk, c: NoteCandidate): RoomPlan? {
         if (!c.complete) return null
         // 规则第 8 条（2026-10-25 用户定口）：会遮住右侧文字区域的那条**自己是来让位的**，
-        // 不许反过来把右侧那条挤走——它继续往远处找位置，直到不挡别人的选区。
-        if (note.annotationId in covering) return null
+        // 不许反过来把右侧那条整体挤走。2026-11-03 用户定口：只差十几像素时允许**微调**——
+        // 挡路框上下挪一点点就够，不必整体搬走；超过 [NOTE_NUDGE_MAX_EM] 的量仍然不许
+        // （见 accept 的 delta 校验）。
         // 规则第 8 条：先让挡路的批注挪一挪。**上下 / 斜向**摆的框，挡路框是竖着排的，往上下让；
         // **正上 / 正下**摆的框，挡路框是横着排的，往左右让。
         // 2026-10-25 用户定口：斜向也让位——同一行左边那条被往上挤一点、右边那条占到它原来的格子，
@@ -2865,12 +2874,17 @@ private fun assignNoteCandidates(
         /**
          * 收尾校验：让位后每个框都要还在**它自己的空白**里、彼此不撞、不撞没让位的框、
          * 也不撞新框；新框同样不许和没让位的框相撞。
+         *
+         * 空白带是**障碍之外**的空白（出了带就可能落到图形 / 表格上），所以「微调」只压位移量，
+         * 不放开这条——能挪的那一点，本来就在它自己那块空白里。
          */
         fun accept(
             delta: Float,
             moved: List<NoteChoice>,
             fresh: NoteCandidate,
         ): Pair<Float, Pair<List<NoteChoice>, NoteCandidate>>? {
+            // 会遮住右侧文字的那条只许「微调」，不许把别人整体搬走（规则第 8 条）。
+            if (note.annotationId in covering && delta > metrics.em * NOTE_NUDGE_MAX_EM) return null
             for (m in moved) {
                 val mf = m.candidate.freeRect
                 val mr = m.candidate.rect

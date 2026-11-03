@@ -2,6 +2,7 @@ package orilumn.reader.ui.reader
 
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,6 +29,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.backhandler.BackHandler
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
@@ -37,6 +42,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.TextFieldValue
@@ -128,6 +134,25 @@ internal fun AnnotationSheet(
     }
     val focus = remember { FocusRequester() }
 
+    // 光标自己画（桌面复报：系统光标太浅，像没有光标）：
+    //  - 系统光标在桌面只有 1dp（`DefaultCursorThickness` 的 desktop actual），细线抗锯齿后发虚；
+    //  - 系统光标闪烁是 500ms 的透明度渐变，一半时间停在半透明上，看着更浅。
+    // 这里把系统光标设成透明，按文本布局算出的光标位置画一条 2dp 竖线，只做硬开关闪烁。
+    // 内容超过 4 行时字段内部会滚动，滚动位移拿不到，这时退回系统光标（位置一定对，只是细）。
+    var textLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
+    var fieldHeightPx by remember { mutableStateOf(0) }
+    var focused by remember { mutableStateOf(false) }
+    var caretOn by remember { mutableStateOf(true) }
+    val layout = textLayout
+    val selfCaret = layout == null || layout.size.height <= fieldHeightPx
+    LaunchedEffect(visible, value.text, value.selection) {
+        caretOn = true
+        while (true) {
+            delay(CARET_BLINK_MS)
+            caretOn = !caretOn
+        }
+    }
+
     // 打开即聚焦：移动端顺带把键盘顶起来，卡片自己贴到键盘上沿（imePx 逐帧跟随）。
     // 用 visible 当键：收起动画还在跑时卡片没卸载，光靠 annotationId 不会重新请求焦点。
     LaunchedEffect(visible, target.annotationId) { if (visible) focus.requestFocus() }
@@ -203,10 +228,13 @@ internal fun AnnotationSheet(
                         .padding(horizontal = 10.dp, vertical = 7.dp),
                 ) {
                     if (value.text.isEmpty()) {
+                        // 提示字必须和输入框用同一套行高：外面套着 MaterialTheme，
+                        // 只写 fontSize 会继承 bodyLarge 的 24sp 行高，空框比有字时高 4dp
+                        // （用户复报：一输入框子就变矮），卡片高度跟着跳、页面也跟着让位一次。
                         Text(
                             text = "写点批注（可不填）",
+                            style = NoteTextStyle,
                             color = p.muted2,
-                            fontSize = 14.sp,
                         )
                     }
                     BasicTextField(
@@ -215,11 +243,39 @@ internal fun AnnotationSheet(
                             value = it
                             onTextChange(it.text)
                         },
-                        modifier = Modifier.fillMaxWidth().focusRequester(focus),
-                        textStyle = TextStyle(color = p.text, fontSize = 14.sp, lineHeight = 20.sp),
-                        cursorBrush = SolidColor(Color(target.accentArgb)),
-                        maxLines = 4,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .focusRequester(focus)
+                            .onFocusChanged { focused = it.isFocused }
+                            .onSizeChanged { fieldHeightPx = it.height },
+                        textStyle = NoteTextStyle.copy(color = p.text),
+                        // 光标用正文墨色，不用批注色：高亮色槽是 45% 透明度的荧光笔底色（`0x73…`），
+                        // 拿它画光标压在卡片的浅底上几乎看不见。
+                        cursorBrush = if (selfCaret) SolidColor(Color.Transparent) else SolidColor(p.text),
+                        onTextLayout = { textLayout = it },
+                        maxLines = NOTE_MAX_LINES,
                     )
+                    // 自绘光标：只有「光标处在这一版里」时才画（选择一段文字时系统本来也不画光标）。
+                    if (selfCaret && focused && value.selection.collapsed) {
+                        Canvas(Modifier.matchParentSize()) {
+                            val l = textLayout ?: return@Canvas
+                            if (!caretOn) return@Canvas
+                            val rect = l.getCursorRect(
+                                value.selection.start.coerceIn(0, l.layoutInput.text.length),
+                            )
+                            // 光标已经落到底边之外（滚动态检测晚一帧）：这一帧宁可不画，
+                            // 也不要画在框外的错误位置。
+                            if (rect.top >= size.height) return@Canvas
+                            val w = CaretWidth.toPx()
+                            val h = rect.height.takeIf { it > 0f } ?: l.size.height.toFloat()
+                            drawRoundRect(
+                                color = p.text,
+                                topLeft = Offset(rect.left - w / 2f, rect.top),
+                                size = Size(w, h),
+                                cornerRadius = CornerRadius(w / 2f),
+                            )
+                        }
+                    }
                 }
             }
             // 这里不再有第二个「完成」：提交统一走操作栏右侧那一个（D-28）。
@@ -235,6 +291,16 @@ internal fun AnnotationSheet(
  * 贴着键盘的那一段由 [AnnotationSheet] 的 `imePx` 逐帧带着走（键盘升多快它就多快）。
  */
 internal const val SHEET_SLIDE_MS = 200
+
+/** 批注输入框最多显示几行（超出后字段内部滚动）。 */
+private const val NOTE_MAX_LINES = 4
+
+/** 输入框正文与提示字共用的字面（两者行高必须一致，否则空框和有字时高度不同）。 */
+private val NoteTextStyle = TextStyle(fontSize = 14.sp, lineHeight = 20.sp)
+
+/** 自绘光标的宽度与闪烁周期（毫秒）：硬开关，不做系统光标那种透明度渐变。 */
+private val CaretWidth = 2.dp
+private const val CARET_BLINK_MS = 500L
 
 /**
  * 等键盘起步的上限（毫秒）：光标落进输入框后宿主才去叫键盘，键盘窗口要过几十毫秒才开始升。

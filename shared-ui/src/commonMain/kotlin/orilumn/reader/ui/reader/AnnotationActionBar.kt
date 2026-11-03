@@ -48,12 +48,12 @@ import orilumn.reader.engine.skia.decorWaveGeometry
  * 它就是键盘上沿卡片的第一段，卡片自己不乱跑，所以选区在页面哪儿都不用管。
  *
  * 单行时从左到右：`高亮` `划线` `编辑`(占位) → 当前类别的 5 个色槽 → 4 个线型（仅划线）
- * → 贴右的 `复制` `删除` `完成`。装不下就换两行：第一行只放类别与右侧三键，第二行放色槽与线型；
+ * → 贴右的 `复制` `删除` `确定`。装不下就换两行：第一行只放类别与右侧三键，第二行放色槽与线型；
  * 再装不下（窄手机）就三行：类别一行、色槽一行、线型一行。判定全部来自**实测宽度**，
  * 不看屏幕 dp 阈值。
  *
  * 类别名本身就是样张：「高亮」二字垫当前高亮色，「划线」二字按当前**线型与线色**画一笔。
- * 线型行只画线不写字。点色槽 = 落笔（新建或改色）；点线型 = **只选中**，落笔交给色槽或 `完成`。
+ * 线型行只画线不写字。点色槽 = 落笔（新建或改色）；点线型 = **只选中**，落笔交给色槽或 `确定`。
  */
 @Composable
 internal fun AnnotationActionBar(
@@ -149,10 +149,11 @@ internal fun AnnotationActionBar(
                 onClick = onDelete,
             )
             MenuAction(
-                label = "完成",
-                textColor = PanelGold,
+                label = "确定",
+                textColor = palette.text,
                 palette = palette,
                 active = false,
+                fontWeight = FontWeight.Bold,
                 onClick = onDone,
             )
         },
@@ -351,7 +352,7 @@ private val SlotOuterRing = Color(0xFF9A9A9A).copy(alpha = 0.45f)
 
 /**
  * 划线线型行：只画线、不写字（实线 / 波浪 / 虚线 / 删除线），线色 = 当前划线色。
- * 选中的那条垫一层 [Palette.rowActive]：点它只是**选中**，落笔还要点色槽或 `完成`（D-28）。
+ * 选中的那条垫一层 [Palette.rowActive]：点它只是**选中**，落笔还要点色槽或 `确定`（D-28）。
  */
 @Composable
 private fun LineStyleRow(
@@ -475,6 +476,8 @@ private fun MenuAction(
     underlineArgb: Int? = null,
     /** 那条线**长什么样**：跟当前选定的线型走（实线/波浪/虚线/删除线），默认实线。 */
     underlineStyle: AnnotationLineStyle = AnnotationLineStyle.Straight,
+    /** 字重：普通项用 Medium，最右的落笔键加粗。 */
+    fontWeight: FontWeight = FontWeight.Medium,
     onClick: () -> Unit,
 ) {
     // 虚掉的项仍是操作栏的一部分：点它**吞掉**本次点按，只显「不可用」，
@@ -500,7 +503,7 @@ private fun MenuAction(
             text = label,
             color = textColor,
             fontSize = MENU_LABEL_FONT,
-            fontWeight = FontWeight.Medium,
+            fontWeight = fontWeight,
             maxLines = 1,
             modifier = Modifier
                 .then(

@@ -235,7 +235,7 @@ fun ReaderScreen(
     var noteText by remember { mutableStateOf("") }
     // 新建时用哪一类落笔：跟着操作栏顶部的 tab 走（读者切到「划线」，写下的批注就是划线的）。
     var noteKind by remember { mutableStateOf(AnnotationKind.Highlight) }
-    // 新建 / 改型时用哪一线型：线型按钮**只选中**（D-28），落笔由点色槽或 `完成` 触发。
+    // 新建 / 改型时用哪一线型：线型按钮**只选中**（D-28），落笔由点色槽或 `确定` 触发。
     var noteLineStyle by remember { mutableStateOf(AnnotationLineStyle.Straight) }
     // 卡片实测高度（像素）：页面让位要按它算，不能估（D-28 第 2 部分）。
     var noteBarHeightPx by remember { mutableStateOf(0) }
@@ -1192,7 +1192,7 @@ fun ReaderScreen(
     }
 
     /**
-     * 落笔（D-27 / D-28）：**只有操作栏的 `完成` 一个提交口**（点卡片外 / 返回键 / Esc 都是取消）。
+     * 落笔（D-27 / D-28）：**只有操作栏的 `确定` 一个提交口**（点卡片外 / 返回键 / Esc 都是取消）。
      *
      * - 编辑已有记录：把这一段选好的类别 / 线型 / 颜色与批注文字一次性写回（清空文字即去掉批注）。
      * - 新选区：按当前类别 / 线型 / 颜色新建一条（没写字也落一条，这是「先选样式再落笔」的落笔口）。
@@ -1242,7 +1242,7 @@ fun ReaderScreen(
      *
      * 写了一半的批注、刚选的颜色与线型全部丢掉；编辑态不动原记录；新选区连同选区一起清掉
      * （卡片都关了就没人再引用这块蓝底）。与 [commitNote] 的分工是硬的：这几条路都不是「保存后退出」，
-     * 落笔只认操作栏的 `完成`。
+     * 落笔只认操作栏的 `确定`。
      */
     fun cancelNote() {
         noteText = ""
@@ -1259,7 +1259,7 @@ fun ReaderScreen(
     /**
      * 同一格色槽：**只选中**（D-28），不落笔——点错颜色还有机会改，卡片也不会忽然关掉。
      *
-     * 落笔交给 `完成` 或点卡片外的正文（见 [commitNote]）。顺手把「这次用的类别 + 色槽」记住
+     * 落笔交给 `确定` 或点卡片外的正文（见 [commitNote]）。顺手把「这次用的类别 + 色槽」记住
      * （写盘，无重排提交）：下次打开卡片直接停在这一类、这一格上——色槽同时成为该类的新建默认格。
      */
     fun pickNoteColor(kind: AnnotationKind, slot: Int) {
@@ -1281,7 +1281,7 @@ fun ReaderScreen(
 
     /**
      * 线型行：**只选中**（D-28），不再一次点按即落笔——否则刚想换线型卡片就关了，批注也写不成。
-     * 落笔交给点色槽或 `完成`；收起卡片时按选中的线型落成划线（见 [commitNote]）。
+     * 落笔交给点色槽或 `确定`；收起卡片时按选中的线型落成划线（见 [commitNote]）。
      * 顺手记住这个线型，下次新建直接用。
      */
     fun pickNoteLineStyle(style: AnnotationLineStyle) {
@@ -1377,7 +1377,7 @@ fun ReaderScreen(
                                 }
                                 if (!change.pressed) break
                             }
-                            // 点卡片外 = 取消（D-28）：落笔只认操作栏的 `完成`，点外面不写任何东西
+                            // 点卡片外 = 取消（D-28）：落笔只认操作栏的 `确定`，点外面不写任何东西
                             // （免得「想收起卡片」被当成「那就按当前样式落一条」）。
                             if (!dragged) cancelNote()
                             return@awaitEachGesture

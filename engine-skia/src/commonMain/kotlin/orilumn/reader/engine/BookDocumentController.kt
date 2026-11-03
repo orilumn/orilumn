@@ -667,20 +667,31 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
 
     /** Injects the viewport size; returns whether it changed (a change requires relayout). */
     fun setViewport(width: Int, height: Int): Boolean {
-        val changed = width > 0 && height > 0 && (width != viewW || height != viewH)
-        if (changed) {
-            if (width > 0 && height > 0) {
-                viewW = width
-                viewH = height
-            }
-            // 视口尺寸变化（旋转屏幕/窗口调整）导致版面改变 → 指纹必变，走统一
-            // 收口清全书旧指纹磁盘表（守卫恒过；内容盒在边距补偿下恰不变时指纹
-            // 不变，旧表仍有效，不删才是对的）。
-            cleanStaleDiskTables()
-        } else if (width > 0 && height > 0) {
-            viewW = width
-            viewH = height
-        }
+        val changed = setViewportLight(width, height)
+        // 视口尺寸变化（旋转屏幕/开书/尺寸稳定点）导致版面改变 → 指纹必变，走统一
+        // 收口清全书旧指纹磁盘表（守卫恒过；内容盒在边距补偿下恰不变时指纹
+        // 不变，旧表仍有效，不删才是对的）。
+        if (changed) cleanStaleDiskTables()
+        return changed
+    }
+
+    /**
+     * 视口快速切换（拉窗口 / 拖分栏的**每一帧**）：只换 [viewW]/[viewH]，**不清磁盘表、
+     * 不动代际**；返回是否变化。
+     *
+     * 为什么与 [setViewport] 分开：拖一次窗口是几百帧，每帧尺寸都是一张新指纹 ⇒
+     * [cleanStaleDiskTables] 每帧把本书分页表目录整个预扫一遍再逐文件删，而下一帧的尺寸
+     * 又让这批表重新作废——净效果是把读者攒下的同书分页表（换字号来回即命中）全删干净。
+     * 故拖动期间只换尺寸 + 本章轻刷新（[prepareRelayoutLight]，第一优先级），尺寸稳定后
+     * 才由 [cleanStaleDiskTables] 与整书 B2 收口（第三优先级）。
+     *
+     * 期间旧指纹表按 [LayoutParamKey] 寻址永远命中不到，是纯孤儿，晚删不产生错误页。
+     */
+    fun setViewportLight(width: Int, height: Int): Boolean {
+        if (width <= 0 || height <= 0) return false
+        val changed = width != viewW || height != viewH
+        viewW = width
+        viewH = height
         return changed
     }
 

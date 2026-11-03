@@ -368,6 +368,9 @@ class DesktopReaderHost(
     /**
      * R15 设置两段式·第二段（用户层·壳，设置静默约 800ms 后调一次）：全套。`prepareRelayout`
      *（bump 代际废他章，B2 的 epoch 去重靠这一次续命）→ `bindReflow` → B2，与平板关面板全套同序。
+     *
+     * 桌面视口（拉窗口/拖分栏）的**停手收口**同走这里：拖动期间只 [applyViewportSize] 轻刷，
+     * 松手后这一次调用补做「废他章 + 清旧指纹磁盘表 + 整书 B2」。
      */
     suspend fun commitRelayout(chapter: Int, anchorChar: Int): ReaderPos? =
         withContext(Dispatchers.Default) {
@@ -385,12 +388,16 @@ class DesktopReaderHost(
         }
 
     /**
-     * 视口尺寸应用（窗口拉伸）：只换视口，返回是否变化。
-     * 调用方按调参与两段式推进（轻刷新即时落位 + 全套沉淀），与改参同序。
+     * 视口尺寸应用（**拉窗口/拖分栏的每一帧**）：只换视口，返回是否变化。
+     *
+     * 走控制器的 [BookDocumentController.setViewportLight]：**不清磁盘表**——那两件事
+     * （旧指纹表清理 + 整书重排）是第三优先级，留给尺寸稳定后的 [commitRelayout]，
+     * 否则拖一次窗口就是每帧把本书分页表整个删一遍。拖动期间的可见反馈由调用方的
+     * 本章轻刷新（[previewToSettings]）负责，与调参同序。
      */
     suspend fun applyViewportSize(viewW: Int, viewH: Int): Boolean =
         withContext(Dispatchers.Default) {
-            controller.setViewport(viewW.coerceAtLeast(16), viewH.coerceAtLeast(16))
+            controller.setViewportLight(viewW.coerceAtLeast(16), viewH.coerceAtLeast(16))
         }
 
     /** 换 profile（两段共用）：重建 profile（字重随 UI 层声明进级联）→ 控制器持有 → 追装字库池。 */

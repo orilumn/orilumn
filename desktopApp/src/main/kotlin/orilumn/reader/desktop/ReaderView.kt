@@ -37,6 +37,7 @@ import io.github.vinceglb.filekit.dialogs.compose.rememberFilePickerLauncher
 import io.github.vinceglb.filekit.name
 import io.github.vinceglb.filekit.readBytes
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -48,8 +49,10 @@ import okio.Path.Companion.toPath
  * S32 桌面阅读视图：窗口级组装（`ReaderScreen` + 设置抽屉 + 目录/标注侧边抽屉）。
  *
  * 状态机（最小壳口径）：
- * - 视口/换书/session 变化 → 重建 [DesktopReaderHost]（`remember` 键），`ReaderScreen` 经
+ * - 换书/session 变化 → 重建 [DesktopReaderHost]（`remember` 键），`ReaderScreen` 经
  *   `LaunchedEffect(host)` 重新 `open()` 并落到锚点（存档定位 / 目录跳转目标）；
+ * - 视口变化（拉窗口 / 拖分栏）→ **不重建宿主**：按帧换视口 + 本章轻刷新，松手后才清旧分页表
+ *   并整书重排（视图内「视口两段式」，与调参同构）；
  * - 排版设置变化 → 宿主两段式原位重排（R15：150ms 防抖轻刷新 + 800ms 静默全套），经 `externalPos` +
  *   `contentRevision` 推送阅读面（对齐平板 tick 轻刷新 + 关面板全套口径）；
  * - 设置面板拖拽是高频 `onPreview`：150ms 防抖后才进原位重排，避免逐帧重排
@@ -252,9 +255,11 @@ fun ReaderView(
             }
         }
         // 视口变化不断连重排：宿主只在换书/会话时重建，拉伸窗口只换视口，
-        // 与调参完全同序（轻刷新即时落位 + 全套沉淀），锚点取当页首字符
+        // 与调参完全同序（轻刷新即时落位 + 停手后全套沉淀），锚点取当页首字符
         //（slice.charStart 即页内首字符；封面/纯图页同样是字符定位，无字符页不存在）。
         // 旧页保持可画到新页落定（重建宿主的青黄不接即闪屏根因）。首帧跳过（构造已用该视口）。
+        //
+        // **第一段（每次尺寸变化）**：换视口 + 本章轻刷新 —— 拉窗口期间只跑这一件。
         var appliedViewport by remember(book, session) { mutableStateOf<Pair<Int, Int>?>(null) }
         LaunchedEffect(book, session, settledViewport) {
             val prev = appliedViewport
@@ -262,9 +267,8 @@ fun ReaderView(
             if (prev == null || prev == settledViewport) return@LaunchedEffect
             val host = desktopHost ?: return@LaunchedEffect
             if (!host.applyViewportSize(settledViewport.first, settledViewport.second)) return@LaunchedEffect
-            // 第一段：轻刷新即时落位（与 previewToSettings 同）；第二段全套沉淀（与 commitRelayout 同）。
-            // 两段共用**同一个锚点**：预览落位会把落位页首写回定位，第二段再取会多退一截。
-            // 连续拉伸/缩放同一口径：有钉子沿用，没钉子按当前页首钉住（松手才换锚）。
+            // 锚点：连续拉伸同一口径——有钉子沿用，没钉子按当前页首钉住（松手后也不换锚，
+            // 换锚只发生在用户真的导航时）。
             // 视口已先行生效（上面 `applyViewportSize`），等落位只推迟重排，不推迟尺寸。
             val anchor = awaitLandingPos()
             val fromChapter = anchor.chapter
@@ -272,7 +276,47 @@ fun ReaderView(
             relayoutAnchor.pin(fromChapter, fromChar)
             val a = relayoutAnchor.resolve(fromChapter, fromChar)
             host.previewToSettings(settings, a.chapter, a.char)?.let { pushLanding(it) }
-            host.commitRelayout(a.chapter, a.char)?.let { pushLanding(it) }
+        }
+        // **第二段（松手后一次）**：废他章 + 清全书旧指纹磁盘表 + 整书 B2 沉淀。
+        //
+        // 为什么必须等松手：拖一次窗口几百帧，每帧尺寸都是一张新指纹。旧口径两段都每帧跑，
+        // 于是每帧把本书分页表整个删一遍、再按这一帧的中间尺寸把整书重排一遍，下一帧又全部作废。
+        // 拖动期间旧指纹表按 `paramHash` 永远命中不到，是纯孤儿，晚删不产生错误页；
+        // 总则上这也正是「第三优先级让位给第一优先级」。
+        //
+        // 「松手」按系统鼠标键态判定（[MouseButtonProbe]）：窗口边框缩放不是我们的手势，
+        // AWT/Compose 收不到抬起事件；读得到键态的平台等同松手那一刻收口（≤25ms），
+        // 读不到的平台（Linux）退回「尺寸静默 [ViewportQuietFallbackMs]」。
+        suspend fun awaitResizeRelease() {
+            // 起步滞后：全屏动画 / 贴边吸附这类程序化连续尺寸先合流，别在动画中间收口。
+            delay(ViewportSettleMinMs)
+            if (MouseButtonProbe.isLeftDown() == null) {
+                delay(ViewportQuietFallbackMs)
+                return
+            }
+            // 按着就继续等；上限兜底（真按住拖了几十秒也不会把收口弄丢）。
+            var waited = 0L
+            while (MouseButtonProbe.isLeftDown() == true && waited < ViewportHoldCapMs) {
+                delay(MouseButtonProbe.PollMs)
+                waited += MouseButtonProbe.PollMs
+            }
+        }
+        var committedViewport by remember(book, session) { mutableStateOf(settledViewport) }
+        LaunchedEffect(book, session) {
+            // collectLatest：每来一个新尺寸就丢弃上一次等待 ⇒ 连续拖动期间一次都不收口。
+            snapshotFlow { settledViewport }.collectLatest { vp ->
+                // 拖出去又拖回原样：该指纹的磁盘表从没被删，不必再沉淀一次。
+                if (vp == committedViewport) return@collectLatest
+                awaitResizeRelease()
+                val host = desktopHost ?: return@collectLatest
+                val pos = currentPos ?: return@collectLatest
+                val a = relayoutAnchor.resolve(pos.chapter, pos.slice.charStart)
+                // 收口整段不可取消：半截的重排只剩浪费（他章已作废、当章还没绑新表）。
+                withContext(NonCancellable) {
+                    host.commitRelayout(a.chapter, a.char)?.let { pushLanding(it) }
+                }
+                committedViewport = vp
+            }
         }
         // 面板字库读 DB（R4 的枚举+中文名链已迁到 `DesktopFontScan` 的扫描任务，视图只收表）；
         // 键只跟书，视口 resize 重建宿主不重枚举。开书路径不触发扫描，改由面板可见性/启动检测驱动。
@@ -507,3 +551,12 @@ fun ReaderView(
         )
     }
 }
+
+/** 视口收口的起步滞后（见 `ReaderView` 视口第二段）：全屏动画/贴边吸附这类连续尺寸先合流。 */
+private const val ViewportSettleMinMs = 120L
+
+/** 读不到鼠标键态的平台（Linux）的回落判据：尺寸静默这么久即视为松手。 */
+private const val ViewportQuietFallbackMs = 500L
+
+/** 按着不放的兜底上限：超过这么久仍是「按下」就按中途停顿收口一次，别把收口弄丢。 */
+private const val ViewportHoldCapMs = 3_000L

@@ -24,6 +24,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
@@ -36,6 +37,8 @@ import io.github.vinceglb.filekit.dialogs.compose.rememberFilePickerLauncher
 import io.github.vinceglb.filekit.name
 import io.github.vinceglb.filekit.readBytes
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.NonCancellable
@@ -225,6 +228,18 @@ fun ReaderView(
             onDispose { (snapshot.delegate as? DesktopReaderHost)?.close() }
         }
         val desktopHost = snapshot.delegate as? DesktopReaderHost
+        // 重排锚点必须在**真实落位**之后取（用户层·桌面壳）。
+        //
+        // 桌面的「本书设置」是开书后才异步读出来的（书架点开 → 先挂阅读面 → 再套本书 overlay，
+        // 见壳里 `LaunchedEffect(openBook)`），这次设置变更正好和 `open()` 撞在一起。此时
+        // `currentPos` 还是 null，若按旧口径回退成 0/0 当锚点，两段式重排就会把落位钉在**首章
+        // 那张空页**上：整页空白（切片 charStart == charEnd），而且这个位置马上被存档成 0:0，
+        // 重开这本书依旧空白——用户看到的就是「打开书卡死」。锚点没有第二个合法来源，只能等。
+        //
+        // 等待不会漏排：本 effect 的键含 book/settings，换书或读者再改设置都会重启它；
+        // 开书真失败时阅读面自己显示失败态，这里挂着的那一个协程随宿主销毁一并取消。
+        suspend fun awaitLandingPos(): ReaderPos =
+            currentPos ?: snapshotFlow { currentPos }.filterNotNull().first()
         // 引擎重排落位推送（设置两段式与视口重排共用）：刷版本号 + 定位到含锚字符的新页，
         // NonCancellable 保证已完成的重排不被 effect 重启吞掉。
         suspend fun pushLanding(landing: ReaderPos) {
@@ -250,9 +265,10 @@ fun ReaderView(
             // 第一段：轻刷新即时落位（与 previewToSettings 同）；第二段全套沉淀（与 commitRelayout 同）。
             // 两段共用**同一个锚点**：预览落位会把落位页首写回定位，第二段再取会多退一截。
             // 连续拉伸/缩放同一口径：有钉子沿用，没钉子按当前页首钉住（松手才换锚）。
-            val anchor = currentPos
-            val fromChapter = anchor?.chapter ?: 0
-            val fromChar = anchor?.slice?.charStart ?: 0
+            // 视口已先行生效（上面 `applyViewportSize`），等落位只推迟重排，不推迟尺寸。
+            val anchor = awaitLandingPos()
+            val fromChapter = anchor.chapter
+            val fromChar = anchor.slice.charStart
             relayoutAnchor.pin(fromChapter, fromChar)
             val a = relayoutAnchor.resolve(fromChapter, fromChar)
             host.previewToSettings(settings, a.chapter, a.char)?.let { pushLanding(it) }
@@ -326,9 +342,10 @@ fun ReaderView(
             layoutSnapshot = settings
             val panelWasOpen = settingsOpen
             val host = desktopHost ?: return@LaunchedEffect
-            val anchor = currentPos
-            val fromChapter = anchor?.chapter ?: 0
-            val fromChar = anchor?.slice?.charStart ?: 0
+            // 锚点等真实落位（开书在途时 `currentPos` 还是 null，见 awaitLandingPos 注释）。
+            val anchor = awaitLandingPos()
+            val fromChapter = anchor.chapter
+            val fromChar = anchor.slice.charStart
             // 交互内只钉一次：拖动期间每次预览落位都会改写当前页首，拿它当下一轮锚点会一路退回。
             // 面板外的静默提交同用这次交互的锚点（预览 + 800ms 全套两段不各取一次）。
             relayoutAnchor.pin(fromChapter, fromChar)

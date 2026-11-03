@@ -1008,13 +1008,25 @@ fun ReaderScreen(
         editingAnnotation = null
     }
 
-    /** 长按起手：按 D-7 选整词 / 整句；返回 false 表示此处没有可选的章文本。 */
-    fun beginSelectionAt(xPx: Float, yPx: Float): Boolean {
+    /**
+     * 起选：把 (xPx, yPx) 处那个字变成选区锚点，返回该字在章内的偏移（`null` = 此处没有可选的章文本）。
+     *
+     * [selectUnit] 见 [TextSelectionState.begin]：长按入口按 D-7 展开整词 / 整句，
+     * 桌面鼠标拖选只要按下那一个字。
+     */
+    fun beginSelectionAt(xPx: Float, yPx: Float, selectUnit: Boolean = true): Int? {
         closeAnnotationEdit()
-        val p = openPos ?: return false
-        val offset = charOffsetAt(p, xPx, yPx) ?: return false
-        val text = currentHost.textOf(p.chapter, 0, Int.MAX_VALUE) ?: return false
-        return selection.begin(p.chapter, text, offset, currentHost.textBlockEndsOf(p.chapter))
+        val p = openPos ?: return null
+        val offset = charOffsetAt(p, xPx, yPx) ?: return null
+        val text = currentHost.textOf(p.chapter, 0, Int.MAX_VALUE) ?: return null
+        val ok = selection.begin(
+            chapter = p.chapter,
+            text = text,
+            offset = offset,
+            blockEnds = currentHost.textBlockEndsOf(p.chapter),
+            selectUnit = selectUnit,
+        )
+        return if (ok) offset else null
     }
 
     /** 拖动手柄/长按后移动：焦点按字符走；越出当前行时保持上一个焦点。 */
@@ -1485,6 +1497,10 @@ fun ReaderScreen(
                         downX >= contentLeftPx && downX <= contentRightPx &&
                         downY >= contentTopPx && downY <= contentBottomPx
                     var mouseSelectingPending = mouseTextDown
+                    // 长按起手展开的整词 / 整句只是「抬手不拖」时的样子：一旦开始拖，锚点就改成
+                    // 按下的那个字（见 TextSelectionState.anchorAt），否则从行中往右拖会变成
+                    // 「行首 → 手指」，读者看到的是选区从行首开始。
+                    var dragAnchor: Int? = null
                     var pageScrollJob: Job? = null
                     var pageScrollDir = 0
                     /**
@@ -1564,8 +1580,12 @@ fun ReaderScreen(
                                         downX, downY, size.width.toFloat(), size.height.toFloat(),
                                     )
                                     if (!editing && !mouse) {
-                                        selecting = beginSelectionAt(downX, downY)
-                                        if (selecting) magnifierFinger = Offset(downX, downY)
+                                        val pressOffset = beginSelectionAt(downX, downY)
+                                        selecting = pressOffset != null
+                                        if (selecting) {
+                                            magnifierFinger = Offset(downX, downY)
+                                            dragAnchor = pressOffset
+                                        }
                                     }
                                 }
                             }
@@ -1638,6 +1658,11 @@ fun ReaderScreen(
                             lastFingerX = change.position.x
                             lastFingerY = change.position.y
                             if (!mouse) magnifierFinger = Offset(lastFingerX, lastFingerY)
+                            // 第一次真的拖动：锚点从「整词/整句首」挪到按下那个字（只挪一次）。
+                            dragAnchor?.let {
+                                selection.anchorAt(it)
+                                dragAnchor = null
+                            }
                             extendSelectionAt(lastFingerX, lastFingerY)
                             autoFlipSide = selectionAutoFlipDirection(
                                 lastFingerX, size.width.toFloat(), autoFlipEdgePx,
@@ -1662,7 +1687,9 @@ fun ReaderScreen(
                             if (mouseSelectingPending && moved) {
                                 mouseSelectingPending = false
                                 selectionMenuVisible = false
-                                if (beginSelectionAt(downX, downY)) {
+                                // 鼠标拖选从按下那个字起，不扩成整词 / 整句（D-9）：桌面没有长按语义，
+                                // 扩成整句就是「选区从行首开始」。
+                                if (beginSelectionAt(downX, downY, selectUnit = false) != null) {
                                     selecting = true
                                     Logger.d(
                                         "Orilumn.SEL",

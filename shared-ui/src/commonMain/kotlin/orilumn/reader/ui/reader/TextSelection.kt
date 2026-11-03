@@ -40,15 +40,37 @@ class TextSelectionState {
         get() = if (endExclusive > start) start..(endExclusive - 1) else IntRange.EMPTY
 
     /**
+     * 拖动起手：把锚点挪到 [offset]（长按先展开的整词 / 整句就此让位给「从落点起」的拖动）。
+     *
+     * 长按抬手不拖时，仍然保留 D-7 的整词 / 整句；一旦开始拖，固定端就是读者按下的那个字，
+     * 而不是句首 / 词首——否则从行中往右拖，选区会变成「整行行首 → 手指」，读者看到的是
+     * 「选区从行首开始」。桌面鼠标拖选同理（见 [begin] 的 `selectUnit`）。
+     */
+    fun anchorAt(offset: Int) {
+        if (!hasSelection || textLength <= 0) return
+        anchor = offset.coerceIn(0, textLength - 1)
+        publish()
+    }
+
+    /**
      * 长按起手：在 [offset] 处按 D-7 选整词 / 整句。
      *
      * [text] 是整章原文（与标注同坐标）；[blockEnds] 是整章文本的累积块尾
      * （每个排版叶一段），用于把句子/英文词截在本块内。返回 false = 空章或偏移越界。
+     *
+     * @param selectUnit `false` = 只取按下那一个字，不扩成整词 / 整句：桌面鼠标拖选要的就是
+     *   「从鼠标按下的位置开始」（长按语义是另一个入口，那里仍按 D-7 展开）。
      */
-    fun begin(chapter: Int, text: String, offset: Int, blockEnds: IntArray? = null): Boolean {
+    fun begin(
+        chapter: Int,
+        text: String,
+        offset: Int,
+        blockEnds: IntArray? = null,
+        selectUnit: Boolean = true,
+    ): Boolean {
         if (text.isEmpty()) return false
         val i = offset.coerceIn(0, text.length - 1)
-        val unit = selectionUnitAt(text, i, blockEnds)
+        val unit = if (selectUnit) selectionUnitAt(text, i, blockEnds) else IntRange(i, i)
         if (unit.isEmpty()) return false
         this.chapter = chapter
         textLength = text.length

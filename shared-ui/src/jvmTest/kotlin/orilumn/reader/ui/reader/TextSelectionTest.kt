@@ -126,6 +126,53 @@ class TextSelectionTest {
     }
 
     @Test
+    fun `mouse drag starts at the pressed character, not the sentence start`() {
+        val s = TextSelectionState()
+        val text = "第一句。第二句。第三句。"
+        // 鼠标按在第二句中间（偏移 6）：不扩成整句，锚点就是按下那个字。
+        assertTrue(s.begin(chapter = 0, text = text, offset = 6, selectUnit = false))
+        assertEquals(6, s.start)
+        assertEquals(7, s.endExclusive)
+
+        // 往右拖：从按下那个字到手指，绝不是「行首 → 手指」。
+        s.extendTo(9)
+        assertEquals(6, s.start)
+        assertEquals(10, s.endExclusive)
+        // 往左拖回：同一锚点反向，仍不从句首起。
+        s.extendTo(2)
+        assertEquals(2, s.start)
+        assertEquals(7, s.endExclusive)
+    }
+
+    @Test
+    fun `long press keeps the unit until the finger really drags`() {
+        val s = TextSelectionState()
+        val text = "第一句。第二句。第三句。"
+        // 长按先按 D-7 给整句（抬手不拖就是这个样子）。
+        assertTrue(s.begin(chapter = 0, text = text, offset = 6))
+        assertEquals(4, s.start)
+        assertEquals(8, s.endExclusive)
+
+        // 一动就把锚点挪到按下那个字，再跟手指走。
+        s.anchorAt(6)
+        s.extendTo(9)
+        assertEquals(6, s.start)
+        assertEquals(10, s.endExclusive)
+    }
+
+    @Test
+    fun `anchorAt keeps the far end when the finger has not moved yet`() {
+        val s = TextSelectionState()
+        s.begin(chapter = 0, text = "hello world", offset = 6)
+        assertEquals(6, s.start)
+        assertEquals(11, s.endExclusive)
+        // 锚点挪到已选范围内的某个字：另一端仍是手指当前那一端，不会凭空扩大。
+        s.anchorAt(8)
+        assertEquals(8, s.start)
+        assertEquals(11, s.endExclusive)
+    }
+
+    @Test
     fun `clear drops the whole selection`() {
         val s = TextSelectionState()
         s.begin(chapter = 2, text = "hello", offset = 1)

@@ -26,6 +26,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -58,6 +59,7 @@ import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.engine.skia.LineWindowDrawer
 import orilumn.reader.engine.text.TypographicProfile
 import orilumn.reader.io.Logger
+import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.roundToInt
 import kotlin.time.TimeSource
@@ -261,6 +263,9 @@ fun ReaderScreen(
     var sheetTopPxState by remember { mutableStateOf(0f) }
     // 视口高度（卡片上沿之上那一条）：手动滑动与手柄拖到边界时用它夹范围。
     var maxShiftPxState by remember { mutableStateOf(0f) }
+    // 卡片让位时页面上下滚动的惯性动画：抬手后继续走、逐步减速（见 startPageFling）。
+    // 用不参与组合状态的壳持有，写它不该触发重组。
+    val pageFling = remember { JobSlot() }
     // 卡片开着时选中的颜色（null = 还没选，按默认色）：点色槽只记住，落笔还要等完成/点卡片外。
     var noteColorArgb by remember { mutableStateOf<Int?>(null) }
     // 旧的 ClipboardManager 仍是 CMP 唯一共享可用的同步写入口；新 LocalClipboard 只支持 suspend。
@@ -306,8 +311,10 @@ fun ReaderScreen(
             magnifierFinger = null
         }
     }
-    // 卡片换了一条（新建 ↔ 编辑、或换编辑对象）⇒ 读者自己滑过的位置作废，重新按「遮不遮住」决定。
+    // 卡片换了一条（新建 ↔ 编辑、或换编辑对象）⇒ 读者自己滑过的位置作废，重新按「遮不遮住」决定；
+    // 还在跑的惯性滚动一起收掉，免得它把刚清掉的位置又写回去。
     LaunchedEffect(editingAnnotation?.id, selectionMenuVisible) {
+        pageFling.job?.cancel()
         userShiftPx = null
     }
     // 翻页后浮动菜单不跟到新页（选区保留，各页只画交集；用户可再点选区/手柄）。
@@ -1438,6 +1445,35 @@ fun ReaderScreen(
         copyRange(annotation.chapter, annotation.charStart, annotation.charEnd)
     }
 
+    /**
+     * 键盘卡片开着时，页面上下滚动的惯性（D-28 键盘视口）：抬手后按当时的速度继续走，
+     * 按指数摩擦逐步减速，撞到视口上/下沿即停——读者把页面往上甩一把，它会自己滑到页底，
+     * 而不是抬手指就钉在原地。
+     *
+     * 驱动的是组合状态 [userShiftPx] 而不是 Animatable：上限 [maxShiftPxState] 跟着卡片高度 /
+     * 键盘高度变，每帧都得按当下上限夹一次（衰减动画本身不知道这个边界）。
+     */
+    fun startPageFling(velocityPxPerSec: Float) {
+        pageFling.job?.cancel()
+        if (abs(velocityPxPerSec) < PAGE_FLING_MIN_DP_S * density) return
+        pageFling.job = scope.launch {
+            var v = velocityPxPerSec
+            var last = withFrameNanos { it }
+            while (true) {
+                val now = withFrameNanos { it }
+                val dt = ((now - last) / 1_000_000_000f).coerceIn(0f, 0.05f)
+                last = now
+                val cur = userShiftPx ?: inputShiftPx
+                val next = (cur + v * dt).coerceIn(0f, maxShiftPxState)
+                userShiftPx = next
+                // 到顶 / 到底就收：继续衰减也只是原地不动。
+                if (next <= 0f || next >= maxShiftPxState) return@launch
+                v = pageFlingDecay(v, dt)
+                if (abs(v) < PAGE_FLING_STOP_DP_S * density) return@launch
+            }
+        }
+    }
+
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
@@ -1445,6 +1481,8 @@ fun ReaderScreen(
             .pointerInput(touchSlop) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
+                    // 新手势按下即打断上一次的惯性滚动（抬手后页面还在滑，读者又按下去）。
+                    pageFling.job?.cancel()
                     // 上一个手势要是没结算就消失了（抬起被吞 / 指针丢失 / 手势协程异常），
                     // 会话会永远停在 Dragging：批注层被藏、所有点按被 busy 墙挡住。
                     // 新的一轮按下说明上一根手指早已离开，正好在这里收尾（判据见下）。
@@ -1472,6 +1510,9 @@ fun ReaderScreen(
                         if (handle == null) {
                             val shiftAtDown = inputShiftPx
                             var dragged = false
+                            var upTime = 0L
+                            // 抬手速度样本（时间 → 手指 y）：只留回看窗口内的一段，算「甩」的那一下。
+                            val samples = ArrayDeque<Pair<Long, Float>>()
                             while (true) {
                                 val event = awaitPointerEvent()
                                 val change = event.changes.firstOrNull { it.id == down.id } ?: break
@@ -1487,12 +1528,28 @@ fun ReaderScreen(
                                     // 手指往上 ⇒ 页面往上走；最多滚到页底贴住卡片上沿。
                                     userShiftPx = (shiftAtDown - (change.position.y - downY))
                                         .coerceIn(0f, maxShiftPxState)
+                                    samples.addLast(change.uptimeMillis to change.position.y)
+                                    while (samples.size > 2 &&
+                                        change.uptimeMillis - samples.first().first > PAGE_FLING_SAMPLE_MS
+                                    ) {
+                                        samples.removeFirst()
+                                    }
                                 }
-                                if (!change.pressed) break
+                                if (!change.pressed) {
+                                    upTime = change.uptimeMillis
+                                    break
+                                }
                             }
-                            // 点卡片外 = 取消（D-28）：落笔只认操作栏的 `确定`，点外面不写任何东西
-                            // （免得「想收起卡片」被当成「那就按当前样式落一条」）。
-                            if (!dragged) cancelNote()
+                            // 手指停住再抬（最后一次移动已经超出回看窗口）不算甩：否则会凭空滑一大段。
+                            val velocity = if (upTime - (samples.lastOrNull()?.first ?: 0L) <= PAGE_FLING_SAMPLE_MS) {
+                                pageFlingVelocityPxPerSec(samples)
+                            } else {
+                                0f
+                            }
+                            // 没拖过 = 点卡片外：按 D-28 取消（落笔只认操作栏的 `确定`，点外面不写任何东西，
+                            // 免得「想收起卡片」被当成「那就按当前样式落一条」）。
+                            // 拖过 = 抬手后按当前速度继续滑、逐步减速（惯性）。
+                            if (!dragged) cancelNote() else startPageFling(velocity)
                             return@awaitEachGesture
                         }
                         // 落在手柄上：交给下面的手柄拖动路径（卡片保持打开，页面跟着上顶）。
@@ -1544,8 +1601,11 @@ fun ReaderScreen(
                     var pageScrollDir = 0
                     /**
                      * 手柄拖到视口上下边界时让**整页**跟着滚（D-28 补充）：视口 = 卡片上沿之上那一条，
-                     * 滚到「页底贴卡片上沿」为止。每滚一步就按手指位置重新延伸一次选区，
+                     * 滚到「页底贴卡片上沿」为止。每滚一小段就按手指位置重新延伸一次选区，
                      * 于是手指按在原地也能一路选下去。
+                     *
+                     * 按帧连续推进（早先是每 40ms 定步长挪 12dp，两步之间看得见一顿一顿），
+                     * 起手 [PAGE_SCROLL_RAMP_MS] 内从 0 线性加速，进带子那一刻不会整块跳出去。
                      */
                     fun schedulePageScroll(dir: Int) {
                         if (dir == pageScrollDir) return
@@ -1554,14 +1614,24 @@ fun ReaderScreen(
                         pageScrollJob = null
                         if (dir == 0) return
                         pageScrollJob = scope.launch {
+                            val speed = dir * PAGE_SCROLL_SPEED_DP_S * density
+                            val startNs = withFrameNanos { it }
+                            var last = startNs
+                            var lastExtendPx = userShiftPx ?: inputShiftPx
                             while (gestureActive && selecting && pageScrollDir == dir) {
-                                delay(PAGE_SCROLL_STEP_MS)
-                                val cur = inputShiftPx
-                                val next = (cur + dir * PAGE_SCROLL_STEP_DP * density)
-                                    .coerceIn(0f, maxShiftPxState)
+                                val now = withFrameNanos { it }
+                                val dt = ((now - last) / 1_000_000_000f).coerceIn(0f, 0.05f)
+                                last = now
+                                val ramp = ((now - startNs) / 1_000_000f / PAGE_SCROLL_RAMP_MS).coerceIn(0f, 1f)
+                                val cur = userShiftPx ?: inputShiftPx
+                                val next = (cur + speed * ramp * dt).coerceIn(0f, maxShiftPxState)
                                 if (next == cur) continue
                                 userShiftPx = next
-                                extendSelectionAt(lastFingerX, lastFingerY, size.width.toFloat())
+                                // 选区每挪够 2dp 才重算一次：命中测试本身不便宜，不必每帧都做。
+                                if (abs(next - lastExtendPx) >= 2f * density) {
+                                    lastExtendPx = next
+                                    extendSelectionAt(lastFingerX, lastFingerY, size.width.toFloat())
+                                }
                             }
                         }
                     }
@@ -2528,4 +2598,12 @@ fun ReaderScreen(
 
         } // 键盘入口内层盒
     }
+}
+
+/**
+ * 单个 Job 的持有壳（手势协程间共享）：不参与组合状态，写它不该触发重组。
+ * 用于「抬手后仍在跑的惯性滚动」这类动画句柄。
+ */
+private class JobSlot {
+    var job: Job? = null
 }

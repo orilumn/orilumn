@@ -1,6 +1,7 @@
 package orilumn.reader.ui.reader
 
 import orilumn.reader.engine.skia.DrawLine
+import kotlin.math.exp
 
 /**
  * 选区拖到页边后自动翻页的触发带（dp）。
@@ -34,12 +35,52 @@ internal const val SELECTION_AUTO_FLIP_FIRST_MS: Long = 350L
 /** 翻页没成（邻页未就绪 / 导航被丢弃）时的重试间隔（ms）；成功即停，不再连翻。 */
 internal const val SELECTION_AUTO_FLIP_RETRY_MS: Long = 200L
 
-/** 手柄拖到视口上下边界时整页自动滚动的步长（dp）与间隔（ms）：慢到看得清、快到不用等。 */
-internal const val PAGE_SCROLL_STEP_DP: Float = 12f
-internal const val PAGE_SCROLL_STEP_MS: Long = 40L
+/** 手柄拖到视口上下边界时整页自动滚动的目标速度（dp/s）与起速爬坡时间（ms）。
+ *
+ * 早先是「每 40ms 挪 12dp」的定步长（≈300dp/s），两步之间看得见一顿一顿；
+ * 现在按帧连续推进，并在 [PAGE_SCROLL_RAMP_MS] 内从 0 线性加速到目标速度，
+ * 进带那一刻不会整块跳出去。
+ */
+internal const val PAGE_SCROLL_SPEED_DP_S: Float = 600f
+internal const val PAGE_SCROLL_RAMP_MS: Float = 200f
 
 /** 卡片让位时「拖到视口上下边界」的判定带（dp，距视口上沿 / 卡片上沿）。 */
 internal const val PAGE_SCROLL_EDGE_DP: Float = 24f
+
+/**
+ * 页面上下滚动抬手后的惯性（D-28 键盘视口）：
+ * 按抬手那一刻的速度继续走，速度按 [PAGE_FLING_FRICTION_PER_S]（每秒的指数衰减率）逐帧衰减，
+ * 撞到视口两端就停。读者把页面往上甩一把，它会自己滑到页底，而不是抬手指就钉在原地。
+ */
+
+/** 抬手速度低于这个值（dp/s）就直接停：轻碰一下不算甩。 */
+internal const val PAGE_FLING_MIN_DP_S: Float = 120f
+
+/** 衰减到这个速度（dp/s）即认为滑完。 */
+internal const val PAGE_FLING_STOP_DP_S: Float = 20f
+
+/** 指数摩擦：每秒把速度乘上 e^-4.2（≈ 0.015），即甩出去约 0.25s 后基本停住。 */
+internal const val PAGE_FLING_FRICTION_PER_S: Float = 4.2f
+
+/** 惯性采样回看窗口（ms）：只取抬手前这一小段的位移，早先的移动不算「甩」的那一下。 */
+internal const val PAGE_FLING_SAMPLE_MS: Long = 100L
+
+/**
+ * 抬手速度（px/s，正 = 手指上移、页面往上滚）：按回看窗口内首末两点的位移算。
+ * 样本不足或时差为零返回 0（当作没甩）。
+ */
+internal fun pageFlingVelocityPxPerSec(samples: List<Pair<Long, Float>>): Float {
+    if (samples.size < 2) return 0f
+    val (t0, y0) = samples.first()
+    val (t1, y1) = samples.last()
+    val dtMs = (t1 - t0).toFloat()
+    if (dtMs <= 0f) return 0f
+    return (y0 - y1) / dtMs * 1000f
+}
+
+/** 惯性一帧的速度衰减（[dtSec] 秒后的速度）。 */
+internal fun pageFlingDecay(vPxPerSec: Float, dtSec: Float): Float =
+    vPxPerSec * exp(-PAGE_FLING_FRICTION_PER_S * dtSec)
 
 /**
  * 翻页触发带（屏幕坐标）：`x <= left` 或 `x >= right` 才算进带。

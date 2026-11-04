@@ -42,7 +42,7 @@ class BlockquoteBackgroundOwnerTest {
 
     @Test
     fun `border-only h2 inside blockquote is owned by the blockquote background`() {
-        val profile = TypographicProfile.build(ReaderSettings.DEFAULT.copy(useOriginalStyle = true))
+        val profile = TypographicProfile.build(ReaderSettings.DEFAULT.copy(layoutTheme = "original"))
         val root = converter.convert(chapterHtml()) ?: error("chapter parse failed")
         val bundle = CssBundle(listOf(chapterCss()))
         val structure = ChapterStructureCache()

@@ -9,6 +9,8 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.clipRect
+import orilumn.reader.data.annotation.Annotation
+import orilumn.reader.data.annotation.AnnotationKind
 import orilumn.reader.engine.paging.PageSlice
 import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.engine.skia.LineWindowDrawer
@@ -30,6 +32,183 @@ internal data class SelectionPageGeometry(
     val startHandle: Offset?,
     val endHandle: Offset?,
 )
+
+/**
+ * 一段章内字符区间在本页的墨迹矩形（页坐标，与 [selectionPageGeometry] 同一套换算）。
+ *
+ * 单源：选区覆盖层、旁注落位、卡片让位（判断选区/标注是否被卡片压住）都走这一口，
+ * 免得各自「行宽近似」——行宽近似会把整行排满的地方误判成右侧还有空地。
+ *
+ * @return 空 = 本页没有这段字的墨迹（在别的页上 / 几何未就绪）。
+ */
+internal fun pageInkRects(
+    drawer: LineWindowDrawer,
+    lines: List<DrawLine>,
+    chapter: Int,
+    charStart: Int,
+    charEnd: Int,
+    pageImages: List<PageImage>?,
+    pageBackgrounds: List<PageBackground>?,
+    frameLead: Int,
+    contentLeft: Float,
+    contentTop: Float,
+): List<Rect> {
+    if (charEnd <= charStart || lines.isEmpty()) return emptyList()
+    val shift = readerPageShift(lines, pageImages, pageBackgrounds, frameLead, contentTop)
+        ?: return emptyList()
+    return drawer.decorRects(lines, chapter, charStart..(charEnd - 1)).map {
+        Rect(
+            left = contentLeft + it.left,
+            top = it.top - shift,
+            right = contentLeft + it.right,
+            bottom = it.bottom - shift,
+        )
+    }
+}
+
+/**
+ * 一段章内区间在本页覆盖到的**正文行**（一行一个框 + 所属块序号），供旁注按行布点。
+ *
+ * 与 [pageInkRects] 同一套几何与换算，区别只是**保留行身份**：旁注布点要按行分组、
+ * 按块序号判段界（`docs/旁注布点与引线-实施方案.md` §1.5）。
+ */
+internal fun pageTextLines(
+    drawer: LineWindowDrawer,
+    lines: List<DrawLine>,
+    chapter: Int,
+    charStart: Int,
+    charEnd: Int,
+    pageImages: List<PageImage>?,
+    pageBackgrounds: List<PageBackground>?,
+    frameLead: Int,
+    contentLeft: Float,
+    contentTop: Float,
+): List<NoteTextLine> {
+    if (charEnd <= charStart || lines.isEmpty()) return emptyList()
+    val shift = readerPageShift(lines, pageImages, pageBackgrounds, frameLead, contentTop)
+        ?: return emptyList()
+    return drawer.decorLineRects(lines, chapter, charStart..(charEnd - 1))
+        .mapIndexed { index, item ->
+            NoteTextLine(
+                rect = Rect(
+                    left = contentLeft + item.rect.left,
+                    top = item.rect.top - shift,
+                    right = contentLeft + item.rect.right,
+                    bottom = item.rect.bottom - shift,
+                ),
+                blockId = item.line.blockId,
+                index = index,
+            )
+        }
+}
+
+/**
+ * 一段章内区间所覆盖各行**列表 marker（圆点 / 编号）**的占位矩形（页坐标）。
+ *
+ * 与 [pageInkRects] 同一套换算：`decorRects` 只从 `line.xLeft` 起算正文，OUTSIDE 的圆点悬在
+ * 它左边、INSIDE 的编号把正文推右，都不在行框里。旁注布点把这几块并进文字障碍，
+ * 否则会对着一个圆点安排「空白」。
+ *
+ * @return 空 = 本页没有 marker（或几何未就绪）。
+ */
+internal fun pageMarkerRects(
+    drawer: LineWindowDrawer,
+    lines: List<DrawLine>,
+    chapter: Int,
+    charStart: Int,
+    charEnd: Int,
+    pageImages: List<PageImage>?,
+    pageBackgrounds: List<PageBackground>?,
+    frameLead: Int,
+    contentLeft: Float,
+    contentTop: Float,
+): List<Rect> {
+    if (charEnd <= charStart || lines.isEmpty()) return emptyList()
+    val shift = readerPageShift(lines, pageImages, pageBackgrounds, frameLead, contentTop)
+        ?: return emptyList()
+    return drawer.markerRects(lines, chapter, charStart..(charEnd - 1)).map {
+        Rect(
+            left = contentLeft + it.left,
+            top = it.top - shift,
+            right = contentLeft + it.right,
+            bottom = it.bottom - shift,
+        )
+    }
+}
+
+/**
+ * 一段章内区间在本页的**逐字**墨迹矩形（页坐标，与 [pageInkRects] 同一套换算）。
+ *
+ * 与 [pageInkRects] 的区别只在粒度：那边一行一个框（布点用），这边一个字一个框
+ * （旁注箭头避让用，见 `docs/旁注布点与引线-实施方案.md` §6.3）——箭头因此能从两字之间、标点前后的空白穿过。
+ *
+ * @return 空 = 本页没有这段字的墨迹（在别的页上 / 几何未就绪）。
+ */
+internal fun pageGlyphRects(
+    drawer: LineWindowDrawer,
+    lines: List<DrawLine>,
+    chapter: Int,
+    charStart: Int,
+    charEnd: Int,
+    pageImages: List<PageImage>?,
+    pageBackgrounds: List<PageBackground>?,
+    frameLead: Int,
+    contentLeft: Float,
+    contentTop: Float,
+): List<Rect> {
+    if (charEnd <= charStart || lines.isEmpty()) return emptyList()
+    val shift = readerPageShift(lines, pageImages, pageBackgrounds, frameLead, contentTop)
+        ?: return emptyList()
+    return drawer.inkRects(lines, chapter, charStart..(charEnd - 1)).map {
+        Rect(
+            left = contentLeft + it.left,
+            top = it.top - shift,
+            right = contentLeft + it.right,
+            bottom = it.bottom - shift,
+        )
+    }
+}
+
+/**
+ * 一条划线标注**自己的那条线**在本页的落墨矩形（页坐标，与 [pageInkRects] 同一套换算）。
+ *
+ * 旁注箭头进得行盒，但不得触及这条线（`docs/新版批注与引线规则.md` 第 9 条，2026-10-28 定口）。
+ * 高亮标注没有线，返回空。
+ */
+internal fun pageAnnotationLineRects(
+    drawer: LineWindowDrawer,
+    lines: List<DrawLine>,
+    chapter: Int,
+    annotation: Annotation,
+    pageImages: List<PageImage>?,
+    pageBackgrounds: List<PageBackground>?,
+    frameLead: Int,
+    contentLeft: Float,
+    contentTop: Float,
+): List<Rect> {
+    if (annotation.kind != AnnotationKind.Underline ||
+        annotation.charEnd <= annotation.charStart ||
+        lines.isEmpty()
+    ) {
+        return emptyList()
+    }
+    val shift = readerPageShift(lines, pageImages, pageBackgrounds, frameLead, contentTop)
+        ?: return emptyList()
+    return drawer.annotationLineRects(
+        lines = lines,
+        chapter = chapter,
+        range = annotation.charStart..(annotation.charEnd - 1),
+        kind = annotationDecorKind(annotation.kind, annotation.lineStyle),
+        stroke = annotationDecorStroke(annotation.lineStyle),
+    ).map {
+        Rect(
+            left = contentLeft + it.left,
+            top = it.top - shift,
+            right = contentLeft + it.right,
+            bottom = it.bottom - shift,
+        )
+    }
+}
 
 /**
  * 把章内选区投到当前页（用户层轻量覆盖层，**不重烤栅格**）。

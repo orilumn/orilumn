@@ -81,8 +81,16 @@ private fun readCacheBytesDebug(context: android.content.Context): Long? = runCa
 actual fun skiaImageToImageBitmap(image: org.jetbrains.skia.Image): ImageBitmap? =
     skiaImageToAndroidBitmap(image, image.width, image.height)?.asImageBitmap()
 
-/** 页位图缓存预算（字节）：约 6 页（1200×1800 的页 ≈ 8.6MB）。低端机按内存调小。 */
-private const val PAGE_CACHE_BYTES = 56L * 1024 * 1024
+/**
+ * 页位图缓存预算（字节）。
+ *
+ * 一页像素 = 内容区宽×高×4（平板实测 1590×2400 ≈ 14.6MB），100MB 约合 6.8 页。
+ * 池里要同时放得下：**正在显示的两页**（翻页动画的两槽）+ **预栅格补进来的邻页**
+ * （方向侧一页，反侧常常还是上一刻的当前页）。56MB（≈3.8 页）时，预栅格一补就把
+ * 正在显示的那页挤掉，用户拖到一半又得现栅一页（真机 76~161ms，就是「拖动中途一顿」）。
+ * 6 页留出两页余量，覆盖「连翻两下」时还没来得及淘汰的那一页。低端机按内存调小。
+ */
+private const val PAGE_CACHE_BYTES = 100L * 1024 * 1024
 
 private class AndroidReaderPageRenderer(
     context: android.content.Context,

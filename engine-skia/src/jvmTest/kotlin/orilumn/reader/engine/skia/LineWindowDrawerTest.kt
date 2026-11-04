@@ -525,6 +525,58 @@ class LineWindowDrawerTest {
         assertTrue("INSIDE 后文本右移后的条带着墨", bandHasInk(bmp, 2, 30, contentLeft.toInt() + mw + gap + 2, contentLeft.toInt() + mw + gap + 60))
     }
 
+    @Test
+    fun outsideMarkerRectCoversTheGutterUpToText() {
+        // 旁注布点要避开的区域：圆点本身 + 它与正文之间的沟槽（右缘贴正文起点）。
+        val mk = ListMarkers.ListMarker(ListMarkers.Kind.DECIMAL, "1", ListMarkers.Position.OUTSIDE, 1, 1)
+        val line = sampleLine("alpha", TextAlign.LEFT).copy(listMarker = mk, xLeft = 40)
+        val rects = LineWindowDrawer().markerRects(listOf(line), 0, 0 until line.text.length)
+        assertEquals(1, rects.size)
+        val r = rects.single()
+        val w = measureMarker("1")
+        val gap = ListMarkers.markerGapPx(16f)
+        assertEquals((40 - w - gap).toFloat(), r.left, 0.01f)
+        assertEquals(40f, r.right, 0.01f)
+        assertEquals(0f, r.top, 0.01f)
+        assertEquals(line.yBottom.toFloat(), r.bottom, 0.01f)
+    }
+
+    @Test
+    fun shapeMarkerRectUsesTheVectorWidth() {
+        // 矢量圆点的占位宽跟着 shapeMarkerWidthPx，不跟字库 "•" 的字形宽走（量画同源）。
+        val mk = ListMarkers.ListMarker(ListMarkers.Kind.DISC, "•", ListMarkers.Position.OUTSIDE, 1, 1)
+        val line = sampleLine("alpha", TextAlign.LEFT).copy(listMarker = mk)
+        val r = LineWindowDrawer().markerRects(listOf(line), 0, 0 until line.text.length).single()
+        val w = ListMarkers.shapeMarkerWidthPx(16f)
+        val gap = ListMarkers.markerGapPx(16f)
+        assertEquals((-w - gap).toFloat(), r.left, 0.01f)
+        assertEquals(0f, r.right, 0.01f)
+    }
+
+    @Test
+    fun insideMarkerRectCoversTheInlineShift() {
+        // INSIDE marker 把正文推右 markerW+gap：占位矩形从正文起点一直覆盖到正文新位置。
+        val mk = ListMarkers.ListMarker(ListMarkers.Kind.DECIMAL, "1", ListMarkers.Position.INSIDE, 1, 1)
+        val line = sampleLine("alpha", TextAlign.LEFT).copy(listMarker = mk, xLeft = 40)
+        val r = LineWindowDrawer().markerRects(listOf(line), 0, 0 until line.text.length).single()
+        val w = measureMarker("1")
+        val gap = ListMarkers.markerGapPx(16f)
+        assertEquals(40f, r.left, 0.01f)
+        assertEquals((40 + w + gap).toFloat(), r.right, 0.01f)
+    }
+
+    @Test
+    fun markerRectSkipsLinesWithoutMarkerAndOutsideTheRange() {
+        val plain = sampleLine("alpha", TextAlign.LEFT)
+        assertEquals(0, LineWindowDrawer().markerRects(listOf(plain), 0, 0 until plain.text.length).size)
+        val mk = ListMarkers.ListMarker(ListMarkers.Kind.DISC, "•", ListMarkers.Position.OUTSIDE, 1, 1)
+        val marked = sampleLine("alpha", TextAlign.LEFT).copy(listMarker = mk, charBase = 100)
+        val drawer = LineWindowDrawer()
+        assertEquals(1, drawer.markerRects(listOf(marked), 0, 100 until 105).size)
+        assertEquals(0, drawer.markerRects(listOf(marked), 0, 0 until 5).size)
+        assertEquals(0, drawer.markerRects(listOf(marked), 0, IntRange.EMPTY).size)
+    }
+
     /** 有墨列的最大 x（无墨返回 Int.MIN_VALUE）。 */
     private fun maxInkX(bmp: Bitmap, yLo: Int, yHi: Int, xLo: Int, xHi: Int, height: Int): Int {
         val px = requireNotNull(bmp.peekPixels())

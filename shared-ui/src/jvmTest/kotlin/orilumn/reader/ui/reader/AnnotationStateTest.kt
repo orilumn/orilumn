@@ -17,6 +17,8 @@ class AnnotationStateTest {
 
     private class FakeHost : ReaderHost {
         val stored = ArrayList<Annotation>()
+        /** 每次 `annotationsForChapter` 的章号（判「进预读过的章不再读库」）。 */
+        val chapterReads = ArrayList<Int>()
         var failAdd = false
         var failUpdate = false
         var failDelete = false
@@ -38,8 +40,10 @@ class AnnotationStateTest {
         override suspend fun firstContentChapter(): Int? = null
         override fun onSaveProgress(pos: ReaderPos) = Unit
 
-        override suspend fun annotationsForChapter(chapter: Int): List<Annotation> =
-            stored.filter { it.chapter == chapter }
+        override suspend fun annotationsForChapter(chapter: Int): List<Annotation> {
+            chapterReads += chapter
+            return stored.filter { it.chapter == chapter }
+        }
 
         override suspend fun addAnnotation(annotation: Annotation): Annotation? {
             addStarted.complete(Unit)
@@ -176,5 +180,99 @@ class AnnotationStateTest {
 
         assertEquals(3, state.chapter)
         assertTrue(state.annotations.isEmpty())
+    }
+
+    @Test
+    fun `prefetched neighbours can be read before entering and are not read again on entry`() =
+        runBlocking {
+            val host = FakeHost()
+            host.stored += annotation(id = 2, chapter = 3, start = 0, end = 4)
+            val state = AnnotationState(host)
+            state.load(2)
+            host.chapterReads.clear()
+
+            state.prefetchNeighbors(2)
+            // 前后各一次（前章没有标注也照样算「读回来了」）。
+            assertEquals(listOf(3, 1), host.chapterReads)
+            assertTrue(state.isReady(3))
+            assertTrue(state.isReady(1))
+            assertTrue(!state.isReady(4))
+            assertEquals(listOf(2L), state.annotationsFor(3)?.map { it.id })
+
+            host.chapterReads.clear()
+            state.load(3)
+            // 预读命中：进章不再等一次库往返，装饰 / 旁注首帧就能布。
+            assertEquals(emptyList<Int>(), host.chapterReads)
+            assertEquals(3, state.chapter)
+            assertEquals(listOf(2L), state.annotations.map { it.id })
+            assertTrue(state.loaded)
+        }
+
+    @Test
+    fun `prefetched chapters stay out of the current chapter list`() = runBlocking {
+        val host = FakeHost()
+        host.stored += annotation(id = 1, chapter = 2)
+        host.stored += annotation(id = 2, chapter = 3, start = 0, end = 4)
+        val state = AnnotationState(host)
+        state.load(2)
+        state.prefetch(3)
+
+        assertEquals(listOf(1L), state.annotations.map { it.id })
+        assertEquals(listOf(1L), state.annotationsFor(2)?.map { it.id })
+        assertEquals(listOf(2L), state.annotationsFor(3)?.map { it.id })
+        assertNull(state.annotationsFor(4))
+    }
+
+    @Test
+    fun `entering a prefetched chapter keeps its note generation`() = runBlocking {
+        val host = FakeHost()
+        host.stored += annotation(id = 2, chapter = 3, start = 0, end = 4)
+        val state = AnnotationState(host)
+        state.load(2)
+        state.prefetch(3)
+        val before = state.generationOf(3)
+
+        state.load(3)
+        // 预读摆上去是同一份内容：代数不动，按代数存下的布点结果继续有效（否则预热白做）。
+        assertEquals(before, state.generationOf(3))
+
+        state.load(2)
+        state.prefetch(3)
+        state.load(3)
+        assertEquals(before, state.generationOf(3))
+    }
+
+    @Test
+    fun `prefetch after an external delete bumps the generation`() = runBlocking {
+        val host = FakeHost()
+        host.stored += annotation(id = 2, chapter = 3, start = 0, end = 4)
+        val state = AnnotationState(host)
+        state.load(3)
+        val before = state.generationOf(3)
+        state.load(2)
+
+        // 笔记清单里删掉那条 ⇒ 外部改动走 reload（预读快照同时作废），随后重备邻居。
+        host.stored.clear()
+        state.reload()
+        state.prefetch(3)
+
+        // 内容真的变了：旧布点结果必须作废，翻过去按新内容重算。
+        assertTrue(state.generationOf(3) > before)
+        assertTrue(state.annotationsFor(3).isNullOrEmpty())
+    }
+
+    @Test
+    fun `reload drops prefetched neighbours`() = runBlocking {
+        val host = FakeHost()
+        host.stored += annotation(id = 1, chapter = 2)
+        host.stored += annotation(id = 2, chapter = 3, start = 0, end = 4)
+        val state = AnnotationState(host)
+        state.load(2)
+        state.prefetch(3)
+        assertTrue(state.isReady(3))
+
+        // 笔记清单里删的可能是别的章的标注：预读快照整批作废，翻过去时重读。
+        state.reload()
+        assertTrue(!state.isReady(3))
     }
 }

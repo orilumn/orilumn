@@ -7,10 +7,11 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -28,6 +29,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusTarget
 import androidx.compose.ui.geometry.Offset
@@ -65,7 +67,8 @@ import orilumn.reader.engine.skia.decorWaveGeometry
  *
  * 入参只收「读 / 删 / 跳」三个动作与章标题表，加载逻辑自己管（平台壳不写）；
  * 按书内章序分组、章内按区间起点升序（与 `annotationsForChapter` 同序）。
- * 行内容 = 两行原文摘录（可空回退「（无摘录）」）+ 章标题分组头 + 行尾删除；
+ * 行内容 = 两行原文摘录（可空回退「（无摘录）」）+ 行尾删除；章标题分组行照旧算出来
+ * （将来导出笔记时用它当分组标题），但**不在清单里显示**，清单是一条接一条的平铺列表。
  * 摘录按标注本来的颜色与线型直接画在字上（与正文同口径），不另加类别图标。
  *
  * 键盘沿用面板共享的 [PanelNav]（↑↓ + Enter）；页签切换先只做点按（D-23 §9）。
@@ -83,6 +86,10 @@ fun ReaderAnnotationPanel(
     val p = paletteFor(scheme)
     var loaded by remember { mutableStateOf<List<Annotation>?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    // 类型筛选（v2）：null = 全部；批注一格包含「本身就是批注」和「高亮/划线附带了批注文字」两种。
+    var filter by remember { mutableStateOf(AnnotationFilter.All) }
+    // 左滑展开的行键：同时只展开一行（SwipeRevealRow 的手势物理与它共用一套口径）。
+    var openKey by remember { mutableStateOf<String?>(null) }
     val currentLoad by rememberUpdatedState(load)
 
     // 列表体随抽屉打开而组合，所以首次组合就是「打开」；只在点行进正文时卸载。
@@ -96,16 +103,21 @@ fun ReaderAnnotationPanel(
         }
     }
 
-    val rows = remember(loaded, chapterTitles) { buildAnnotationRows(loaded.orEmpty(), chapterTitles) }
-    val itemCount = remember(rows) { rows.count { it is AnnotationPanelRow.Item } }
+    val visible = remember(loaded, filter) { filterAnnotations(loaded.orEmpty(), filter) }
+    // 章标题分组行照旧算出来（章序分组与章标题是将来导出笔记时的标题来源），但**不在清单里画**：
+    // 笔记按书内顺序连排，读者不该被一行行「第 N 章」打断（2026-11-04 用户定口）。
+    val rows = remember(visible, chapterTitles) { buildAnnotationRows(visible, chapterTitles) }
+    val shown = remember(rows) { rows.filterIsInstance<AnnotationPanelRow.Item>() }
+    val itemCount = shown.size
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val nav = remember { PanelNav() }
     val bodyFr = remember { FocusRequester() }
     var positioned by remember { mutableStateOf(false) }
+    var positionedFilter by remember { mutableStateOf(AnnotationFilter.All) }
 
     fun displayIndexOfSeq(seq: Int): Int =
-        rows.indexOfFirst { it is AnnotationPanelRow.Item && it.seq == seq }
+        shown.indexOfFirst { it.seq == seq }
 
     fun clampActive() {
         val a = nav.activeIdx ?: return
@@ -120,19 +132,19 @@ fun ReaderAnnotationPanel(
         scope.ensureListVisible(listState, displayIndexOfSeq(it), dir)
     }
 
-    // 打开时滚到当前阅读章所在组（与目录「定位当前章」同口径）；只在首次拿到数据时做一次，
+    // 打开时滚到当前阅读章的第一条笔记（与目录「定位当前章」同口径）；切换筛选时重新定位一次，
     // 之后删一条引起的列表变化不再把滚动位置拽回来。
-    LaunchedEffect(loaded) {
-        if (loaded == null || positioned) return@LaunchedEffect
+    LaunchedEffect(loaded, filter) {
+        if (loaded == null) return@LaunchedEffect
+        if (positioned && positionedFilter == filter) return@LaunchedEffect
         positioned = true
-        val header = rows.indexOfFirst { it is AnnotationPanelRow.Header && it.chapter == currentChapter }
-        if (header >= 0) {
-            try { listState.scrollToItem((header - 1).coerceAtLeast(0)) } catch (_: Exception) {}
-            val firstItem = rows.drop(header).firstOrNull { it is AnnotationPanelRow.Item }
-            if (firstItem is AnnotationPanelRow.Item) nav.activeIdx = firstItem.seq
+        positionedFilter = filter
+        val firstInChapter = shown.indexOfFirst { it.annotation.chapter == currentChapter }
+        if (firstInChapter >= 0) {
+            try { listState.scrollToItem((firstInChapter - 1).coerceAtLeast(0)) } catch (_: Exception) {}
+            nav.activeIdx = shown[firstInChapter].seq
         } else {
-            nav.activeIdx = rows.firstOrNull { it is AnnotationPanelRow.Item }
-                ?.let { (it as AnnotationPanelRow.Item).seq }
+            nav.activeIdx = shown.firstOrNull()?.seq
         }
         nav.releaseHold()
         bodyFr.requestFocus()
@@ -169,15 +181,26 @@ fun ReaderAnnotationPanel(
                 onDown = { moveActive(1) },
                 onEnter = {
                     val a = nav.activeIdx
-                    if (a != null) rows.firstOrNull { it is AnnotationPanelRow.Item && it.seq == a }
-                        ?.let { onJump((it as AnnotationPanelRow.Item).annotation) }
+                    if (a != null) shown.firstOrNull { it.seq == a }?.let { onJump(it.annotation) }
                 },
                 onEscape = onDismiss,
             )
             // 点按消费：杂散点按不穿透到遮罩关闭层。
             .pointerInput(Unit) { detectTapGestures(onTap = {}) },
     ) {
-        Box(modifier = Modifier.fillMaxSize()) {
+        if (loaded != null) {
+            AnnotationFilterRow(
+                selected = filter,
+                palette = p,
+                onSelect = { next ->
+                    filter = next
+                    nav.activeIdx = null
+                    nav.releaseHold()
+                    bodyFr.requestFocus()
+                },
+            )
+        }
+        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
             when {
                 loaded == null -> Text(
                     "加载中…", color = p.muted2, fontSize = 14.sp,
@@ -185,7 +208,8 @@ fun ReaderAnnotationPanel(
                 )
 
                 rows.isEmpty() -> Text(
-                    "还没有高亮、划线或批注", color = p.muted2, fontSize = 14.sp,
+                    if (filter == AnnotationFilter.All) "还没有高亮、划线或批注" else "没有这一类标注",
+                    color = p.muted2, fontSize = 14.sp,
                     modifier = Modifier.padding(24.dp),
                 )
 
@@ -193,24 +217,22 @@ fun ReaderAnnotationPanel(
                     state = listState,
                     modifier = Modifier.fillMaxSize().clearKbHoldOnMove { nav.releaseHold() },
                 ) {
-                    items(rows.size, key = { i ->
-                        when (val r = rows[i]) {
-                            is AnnotationPanelRow.Header -> "h${r.chapter}"
-                            is AnnotationPanelRow.Item -> "a${r.annotation.id}"
-                        }
-                    }) { i ->
-                        when (val r = rows[i]) {
-                            is AnnotationPanelRow.Header -> ChapterHeader(r.title, p)
-                            is AnnotationPanelRow.Item -> AnnotationListRow(
-                                annotation = r.annotation,
-                                active = nav.activeIdx == r.seq,
-                                palette = p,
-                                nav = nav,
-                                index = r.seq,
-                                onJump = { onJump(r.annotation) },
-                                onDelete = { delete(r.annotation) },
-                            )
-                        }
+                    items(shown.size, key = { "a${shown[it].annotation.id}" }) { i ->
+                        val r = shown[i]
+                        AnnotationListRow(
+                            annotation = r.annotation,
+                            active = nav.activeIdx == r.seq,
+                            palette = p,
+                            nav = nav,
+                            index = r.seq,
+                            openKey = openKey,
+                            onOpenChange = { openKey = it },
+                            onJump = {
+                                openKey = null
+                                onJump(r.annotation)
+                            },
+                            onDelete = { delete(r.annotation) },
+                        )
                     }
                 }
             }
@@ -240,6 +262,10 @@ internal sealed interface AnnotationPanelRow {
 /**
  * 按书内章序把全书标注排成「分组头 + 行」的扁平表；[annotations] 已按章序、章内起点升序。
  * 章标题缺项回退「第 N 章」（章号 +1，与宿主 `unitTitle` 的回退同口径）。
+ *
+ * 分组头现在**不画在清单里**（2026-11-04 用户定口：笔记内容里不夹章标题），
+ * 但表格仍按章分组产出：分组的章号与标题是将来导出笔记时的标题来源，
+ * 清单只取其中的行（[AnnotationPanelRow.Item]），顺序与章节分组一致。
  */
 internal fun buildAnnotationRows(
     annotations: List<Annotation>,
@@ -264,6 +290,62 @@ internal fun buildAnnotationRows(
 }
 
 /**
+ * 清单的类型筛选。
+ *
+ * 「批注」**不是标注类型**（D-26）：批注是高亮 / 划线记录上附带的一段文字，
+ * 所以这一格按「有没有批注文字」判；带文字的高亮 / 划线在读者眼里同样是「一条笔记」，
+ * 不该在批注筛选里消失。
+ */
+internal enum class AnnotationFilter(val label: String) {
+    All("全部"),
+    Highlight("高亮"),
+    Underline("划线"),
+    Note("批注"),
+}
+
+/** 按筛选格过滤清单（纯函数，便于单测）。 */
+internal fun filterAnnotations(annotations: List<Annotation>, filter: AnnotationFilter): List<Annotation> =
+    when (filter) {
+        AnnotationFilter.All -> annotations
+        AnnotationFilter.Note -> annotations.filter { !it.note.isNullOrBlank() }
+        AnnotationFilter.Highlight -> annotations.filter { it.kind == AnnotationKind.Highlight }
+        AnnotationFilter.Underline -> annotations.filter { it.kind == AnnotationKind.Underline }
+    }
+
+/** 筛选行的四格，顺序固定（点按切换，不进键盘焦点链——与页签同口径，见 D-23 §9）。 */
+private val ANNOTATION_FILTERS: List<AnnotationFilter> = AnnotationFilter.entries.toList()
+
+@Composable
+private fun AnnotationFilterRow(
+    selected: AnnotationFilter,
+    palette: Palette,
+    onSelect: (AnnotationFilter) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        ANNOTATION_FILTERS.forEachIndexed { index, entry ->
+            if (index > 0) Spacer(Modifier.width(6.dp))
+            val on = entry == selected
+            Text(
+                text = entry.label,
+                color = if (on) PanelGold else palette.muted2,
+                fontSize = 13.sp,
+                fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(7.dp))
+                    .background(if (on) palette.rowActive else Color.Transparent, RoundedCornerShape(7.dp))
+                    .clickable { onSelect(entry) }
+                    .padding(horizontal = 10.dp, vertical = 5.dp),
+            )
+        }
+    }
+}
+
+/**
  * 目录树拍平成「章号 → 标题」（章标题 = 该章最先出现的目录项；子项不覆盖）。
  * 笔记清单的分组头与目录跳转共用同一份标题，缺项由面板回退「第 N 章」。
  */
@@ -281,60 +363,52 @@ fun chapterTitlesOf(toc: List<TocItem>): Map<Int, String> {
 }
 
 @Composable
-private fun ChapterHeader(title: String, palette: Palette) {
-    Text(
-        text = title,
-        color = palette.muted2,
-        fontSize = 12.sp,
-        fontWeight = FontWeight.Medium,
-        modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 14.dp, bottom = 6.dp),
-    )
-}
-
-@Composable
 private fun AnnotationListRow(
     annotation: Annotation,
     active: Boolean,
     palette: Palette,
     nav: PanelNav,
     index: Int,
+    /** 当前展开左滑按钮的行键（同时只展开一行，见 [SwipeRevealRow]）。 */
+    openKey: String?,
+    onOpenChange: (String?) -> Unit,
     onJump: () -> Unit,
     onDelete: () -> Unit,
 ) {
     val clickSrc = remember { MutableInteractionSource() }
-    Row(
+    SwipeRevealRow(
+        rowKey = "note:${annotation.id}",
+        openKey = openKey,
+        onOpenChange = onOpenChange,
         modifier = Modifier
-            .fillMaxWidth()
             .background(if (active) palette.rowActive else Color.Transparent)
-            .clickable(interactionSource = clickSrc, indication = null, onClick = onJump)
-            .panelHover(nav, index)
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.Top,
+            .panelHover(nav, index),
+        action = SwipeAction("删除", SwipeActionTone.Delete, onDelete),
     ) {
-        Column(modifier = Modifier.weight(1f)) {
-            QuoteText(annotation, palette)
-            val note = annotation.note?.takeIf { it.isNotBlank() }
-            if (annotation.kind == AnnotationKind.Note && note != null) {
-                Text(
-                    text = note,
-                    color = palette.muted2,
-                    fontSize = 12.sp,
-                    lineHeight = 17.sp,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(top = 3.dp),
-                )
-            }
-        }
-        Box(
-            contentAlignment = Alignment.Center,
+        Row(
             modifier = Modifier
-                .padding(start = 8.dp)
-                .size(30.dp)
-                .clip(RoundedCornerShape(6.dp))
-                .clickable(onClick = onDelete),
+                .fillMaxWidth()
+                .focusProperties { canFocus = false }
+                .clickable(interactionSource = clickSrc, indication = null, onClick = onJump)
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.Top,
         ) {
-            Text("✕", color = palette.muted2, fontSize = 14.sp)
+            Column(modifier = Modifier.weight(1f)) {
+                QuoteText(annotation, palette)
+                val note = annotation.note?.takeIf { it.isNotBlank() }
+                if (note != null) {
+                    // 批注正文：本身就是批注的记录、以及带批注的高亮 / 划线都显示（v2）。
+                    Text(
+                        text = note,
+                        color = palette.muted2,
+                        fontSize = 12.sp,
+                        lineHeight = 17.sp,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 3.dp),
+                    )
+                }
+            }
         }
     }
 }
@@ -342,7 +416,7 @@ private fun AnnotationListRow(
 /** 清单摘录的字号；装饰几何（线宽 / 线心偏移 / 波形）都按这个字号换算，与正文同一套口径。 */
 private val QuoteFontSize = 13.sp
 
-/** 一条标注在清单里该怎么画：高亮垫底色，划线按自己的线型与颜色画在字下/字中，批注不画装饰。 */
+/** 一条标注在清单里该怎么画：高亮垫底色，划线按自己的线型与颜色画在字下/字中，批注画虚线。 */
 internal class QuoteDecor(
     val kind: DecorKind,
     val color: Color,
@@ -351,7 +425,7 @@ internal class QuoteDecor(
 
 /**
  * 清单行的装饰**直接沿用正文那份投影**（[annotationDecorRanges]）：同一处颜色回退、
- * 同一处删除线换落墨位置、同一处批注不落墨。面板不再自己判一遍类型，
+ * 同一处删除线换落墨位置、同一处批注画虚线。面板不再自己判一遍类型，
  * 才不会出现「清单里是虚线、正文里是波浪」这种两套口径。
  */
 internal fun quoteDecorOf(annotation: Annotation): QuoteDecor? =

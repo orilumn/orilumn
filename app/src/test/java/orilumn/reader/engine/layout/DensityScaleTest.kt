@@ -14,13 +14,13 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /**
- * 双滑块语义（都是百分比），经真实管线一次钉死：
+ * 两个间距滑块的语义，经真实管线一次钉死（2026-10-29 段间距改回绝对值）：
  *
- *  段间距 (paragraphSpacingScale) = 只乘算 p/li 纵边距：100 = 书/主题节奏，
- *    0 = p/li 边距清零（标题等结构块不受影响）。
- *  疏密 (paragraphGapScale) = 乘算 p/li 之外一切块级纵边距：100 = 原书节奏，
+ *  段间距 (paragraphSpacingEm) = **绝对值 em（0..2）**：非 null 时 p/li 的上下外边距直接是该
+ *    em × 字号，不看书原来写多少；null = 不覆盖（书的 margin 原样）。标题等结构块不受影响。
+ *  疏密 (paragraphGapScale) = 按比例乘算 p/li 之外一切块级纵边距：100 = 原书节奏，
  *    0 = 结构块边距清零。作者/UA/主题值一律保留，UI 层纵边距零声明。
- *  水平 margin 永不缩放。
+ *  水平 margin 永不被段间距改写。（疏密只动垂直，见下。）
  *
  * 行距 (lineSpacing) -> line-height on all text blocks (NOT tested here).
  */
@@ -52,7 +52,7 @@ class DensityScaleTest {
             LightCssParser().parse(uaCss),
             author,
             ui = ui,
-            paragraphScale = profile.paragraphSpacingScale, gapScale = profile.paragraphGapScale,
+            paragraphEm = profile.paragraphSpacingEm, gapScale = profile.paragraphGapScale,
         ).compute(root)
         return map[el]!!.margin
     }
@@ -95,35 +95,35 @@ class DensityScaleTest {
         assertEquals(48f, m.left, 0.1f)   // 3.0em x 16 (NOT scaled)
     }
 
-    /** 段间距只乘算 p/li：100% 即书值，400% 即四倍；疏密动它不得。 */
+    /** 段间距是绝对值：1em → 16px、2em → 32px，与书自己写多少无关；疏密动它不得。 */
     @Test
-    fun `p and li margins follow spacing not density`() {
+    fun `p and li margins follow absolute paragraph spacing not density`() {
         for (tag in listOf("p", "li")) {
-            val a = margin(withSpacing(100.0), tag, authorCss = "$tag{margin:1em 0}").top
-            val b = margin(withSpacing(400.0), tag, authorCss = "$tag{margin:1em 0}").top
-            assertEquals("expected 1em $tag gap at 100%, got $a", 16f, a, 0.5f)
-            assertEquals("expected 4em $tag gap at 400%, got $b", 64f, b, 0.5f)
+            val a = margin(withSpacing(1.0), tag, authorCss = "$tag{margin:1em 0}").top
+            val b = margin(withSpacing(2.0), tag, authorCss = "$tag{margin:1em 0}").top
+            assertEquals("expected 1em $tag gap, got $a", 16f, a, 0.5f)
+            assertEquals("expected 2em $tag gap, got $b", 32f, b, 0.5f)
             val c = margin(withDensity(400.0), tag, authorCss = "$tag{margin:1em 0}").top
             assertEquals("疏密不得碰 p/li，got $c", 16f, c, 0.5f)
         }
     }
 
-    /** 段间距 0 即 p/li 清零（标题等结构块不受影响，见下条 h1 用例）。 */
+    /** 段间距 0 即 p/li 紧贴（标题等结构块不受影响，见下条 h1 用例）。 */
     @Test
     fun `zero spacing clears p margins but keeps headings`() {
         val author = "p{margin:1.8em 0 0.6em}"
-        assertEquals(1.8f * 16f, margin(withSpacing(100.0), "p", authorCss = author).top, 0.5f)
+        assertEquals(20f, margin(withSpacing(1.25), "p", authorCss = author).top, 0.5f)
         assertEquals(0f, margin(withSpacing(0.0), "p", authorCss = author).top, 0.001f)
         assertEquals(16f, margin(withSpacing(0.0), "h1", authorCss = "h1{margin:1em 0}").top, 0.5f)
     }
 
-    /** 书声明的 per-side p margin 不再被 UI 覆盖：作者赢（UI 纵边距零声明）。 */
+    /** 书里写的 p margin 大小不再影响绝对段间距：书 2em、读者 0.5em ⇒ 8px（不是 2em × 0.5）。 */
     @Test
-    fun `author per-side p margin wins over the reader`() {
-        val settings = ReaderSettings.DEFAULT.copy(paragraphSpacing = 400.0)
+    fun `reader absolute spacing overrides the book margin instead of scaling it`() {
+        val settings = ReaderSettings.DEFAULT.copy(paragraphSpacing = 0.5)
         val plain = margin(settings, "p").top
         val declared = margin(settings, "p", authorCss = "p{margin-top:2em}").top
-        assertEquals(0f, plain, 0.001f) // 无声明即 0（ua.css 未参与本用例），不注入基线
-        assertEquals(2f * 16f * 4f, declared, 1f) // 2em × 400%
+        assertEquals(8f, plain, 0.001f) // 0.5em × 16px，无声明也照样是这个值
+        assertEquals(8f, declared, 0.001f) // 书 2em 不参与，绝对值就是 0.5em
     }
 }

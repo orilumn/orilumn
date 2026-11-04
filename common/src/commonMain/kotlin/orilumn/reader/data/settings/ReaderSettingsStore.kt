@@ -27,19 +27,19 @@ class ReaderSettingsStore(settingsDir: String) {
     private val tmp: Path = settingsDir.toPath() / "$FILE_NAME.tmp"
 
     /** Read the currently effective settings (user set; default set when absent).
-     *  损坏回退保留（设置 best-effort），但损坏本身记 w——否则用户手改坏一行，
-     *  静默丢全部设置且无迹可查。 */
+     *  只保留全局项：旧档里的私有键（字号、行距、字体、边距…）读进来即抹回预设，
+     *  下一次提交把文件重写成纯全局 JSON。损坏回退保留（设置 best-effort），但损坏本身记 w。 */
     fun load(): ReaderSettings = runCatching {
         val text = if (fs.exists(file)) fs.source(file).buffer().use { it.readUtf8() } else null
-        if (text != null) ReaderSettings.fromJson(text) else ReaderSettings.DEFAULT
+        if (text != null) ReaderSettings.fromJson(text).onlyGlobal() else ReaderSettings.DEFAULT
     }.onFailure { Logger.w("Orilumn.SET", "settings load corrupt, fallback DEFAULT ${it.message}") }
         .getOrDefault(ReaderSettings.DEFAULT)
 
-    /** Persist the user set. */
+    /** Persist the user set（只写全局项；私有项归 `books/{id}.json`，全局文件里不出现私有键）。 */
     fun save(settings: ReaderSettings) {
         fs.createDirectories(file.parent!!)
         // Atomic write: write the temp file first, then replace, to avoid leaving a half-written JSON on interruption
-        fs.writeTextAtomic(file, settings.toJson(2))
+        fs.writeTextAtomic(file, settings.onlyGlobal().toGlobalJson(2))
     }
 
     /**

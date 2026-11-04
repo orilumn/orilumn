@@ -16,6 +16,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import orilumn.reader.io.Logger
 
 /**
@@ -70,10 +71,13 @@ fun PrerasterOnPrefill(
     hostRevision: Int,
     imgCache: PageImageCache<DecodedImage>,
     bgCache: PageImageCache<DecodedImage>,
-    /** 当前章标注内存态（只用于同章邻页；跨章目标不投影，等真正的 `rememberPageContent`）。 */
-    annotations: List<Annotation> = emptyList(),
-    annotationChapter: Int = -1,
-    decorRevision: Int = 0,
+    /**
+     * 按章取标注（`AnnotationState.annotationsFor`；`null` = 该章还没读回来）。
+     *
+     * 预栅格只补**当前章**的邻页，但页属于哪一章仍按 pos 问：拿别章的区间投影会错位，
+     * 而预栅格的指纹又必须与首帧绘制逐字相等，两边只能走同一条「按页所属章取标注」的口径。
+     */
+    annotationsFor: (chapter: Int) -> List<Annotation>? = { null },
 ) {
     val hostRef = rememberUpdatedState(host)
     val onPrefillRef = rememberUpdatedState<suspend (Int, Int) -> Unit>(onPrefillReady)
@@ -82,11 +86,12 @@ fun PrerasterOnPrefill(
     val rendererRef = rememberUpdatedState(renderer)
     val imgCacheRef = rememberUpdatedState(imgCache)
     val bgCacheRef = rememberUpdatedState(bgCache)
+    val annotationsRef = rememberUpdatedState(annotationsFor)
     // 闸 2：同一时刻只允许一张预栅格在跑，不排队（排队＝把成本推给用户）。
     val prerasterBusy = remember { mutableStateOf(false) }
 
     // 几何/颜色随设置与视口变化，重建即重挂信号订阅。
-    LaunchedEffect(contentLeft, contentTop, contentRight, contentBottom, pageBg, inkColor, contentRevision, hostRevision, annotationChapter, decorRevision) {
+    LaunchedEffect(contentLeft, contentTop, contentRight, contentBottom, pageBg, inkColor, contentRevision, hostRevision) {
         val hostNow = hostRef.value
         val rendererNow = rendererRef.value
         val imgCacheNow = imgCacheRef.value
@@ -141,8 +146,10 @@ fun PrerasterOnPrefill(
                         contentRevision = contentRevision,
                         imgCache = imgCacheNow,
                         bgCache = bgCacheNow,
-                        annotations = annotations,
-                        annotationChapter = annotationChapter,
+                        // 按**目标页所属章**取标注：跨章目标（邻居章）也要投影出它自己那一章的装饰，
+                        // 否则预栅出来的位图与首帧绘制不等，白栅一次。
+                        annotations = annotationsRef.value(target.chapter).orEmpty(),
+                        annotationChapter = target.chapter,
                     )
                 }
             } finally {
@@ -182,7 +189,8 @@ internal suspend fun prerasterPage(
     annotationChapter: Int = -1,
 ): Boolean {
     val rawLines: List<DrawLine> = runCatching { host.pageLines(pos) }.getOrNull().orEmpty()
-    // 与 rememberPageContent 同一条标注投影路径：跨章目标没有当前章列表 ⇒ 不投影（宁缺勿串）。
+    // 与 rememberPageContent 同一条标注投影路径。调用方按 pos 所属章传（相邻章由预读提供）；
+    // 章不匹配就**不投影**（宁缺勿串）——区间是章内偏移，拿别章的去投会画到错字上。
     val activeAnnotations =
         if (pos.chapter == annotationChapter) annotations else emptyList()
     val lines: List<DrawLine> = projectDecor(
@@ -297,16 +305,32 @@ private suspend fun warmImagesForPreraster(
     if (missImgs.isEmpty() && missBgs.isEmpty()) return true
 
     // 并行解，与 warmPageImages 同一并发口径（逐张串行会让摄影类一页多图等几秒）。
-    kotlinx.coroutines.coroutineScope {
-        val imgDeferred = missImgs.map { img -> this.async { img to runCatching { host.loadPageImage(img) }.getOrNull() } }
-        val bgDeferred = missBgs.map { ref -> this.async { ref to runCatching { host.loadBackgroundImage(ref.first, ref.second) }.getOrNull() } }
-        // 整批 putAll：同页多图必须一起留下，否则后一条会把前一条（同页仍在用）淘汰掉。
-        imgCache.putAll(imgDeferred.awaitAll().mapNotNull { (img, bmp) -> bmp?.let { imgKeyOf(img) to it } })
-        bgCache.putAll(
-            bgDeferred.awaitAll().mapNotNull { (ref, bmp) ->
-                bmp?.let { bgKeyOf(ref.first, ref.second) to it }
-            },
+    //
+    // **必须有界**：这段挂在 `AnchorFunnel.beforeCommit` 里，也就是漏斗锁内。某张图
+    // 永远解不出来时，落位链就永远不返回 ⇒ 会话停在 Dragging、批注层被藏、点按全被挡
+    // （真机症状「点一下，批注全消失、之后翻不动」的一种来源）。超时按「没备齐」处理：
+    // 调用方放弃预栅格，翻页照常提交，图由绘制路径异步补齐。
+    val warmed = withTimeoutOrNull(PAGE_IMAGE_WARM_TIMEOUT_MS) {
+        kotlinx.coroutines.coroutineScope {
+            val imgDeferred = missImgs.map { img -> this.async { img to runCatching { host.loadPageImage(img) }.getOrNull() } }
+            val bgDeferred = missBgs.map { ref -> this.async { ref to runCatching { host.loadBackgroundImage(ref.first, ref.second) }.getOrNull() } }
+            // 整批 putAll：同页多图必须一起留下，否则后一条会把前一条（同页仍在用）淘汰掉。
+            imgCache.putAll(imgDeferred.awaitAll().mapNotNull { (img, bmp) -> bmp?.let { imgKeyOf(img) to it } })
+            bgCache.putAll(
+                bgDeferred.awaitAll().mapNotNull { (ref, bmp) ->
+                    bmp?.let { bgKeyOf(ref.first, ref.second) to it }
+                },
+            )
+        }
+        true
+    } ?: false
+    if (!warmed) {
+        Logger.w(
+            "Orilumn.TAP",
+            "preraster warm timeout ch=${pos.chapter} char=${pos.slice.charStart} " +
+                "imgs=${missImgs.size} bgs=${missBgs.size}",
         )
+        return false
     }
 
     // 复核：解码失败/超时的图不算备齐（占位块入池就是闪烁的来源）。

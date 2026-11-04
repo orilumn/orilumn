@@ -10,7 +10,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** 标注 → 渲染装饰的用户层映射：类型、颜色快照、批注跳过、区间不改。 */
+/** 标注 → 渲染装饰的用户层映射：类型、颜色快照、批注虚线标记、区间不改。 */
 class AnnotationDecorTest {
 
     private fun annotation(
@@ -58,11 +58,6 @@ class AnnotationDecorTest {
         assertEquals(DEFAULT_UNDERLINE_ARGB, ranges[1].argb)
         // 默认高亮必须带透明度，否则会盖住文字。
         assertTrue((DEFAULT_HIGHLIGHT_ARGB ushr 24) in 1..254)
-    }
-
-    @Test
-    fun `note is not drawn in v1`() {
-        assertTrue(annotationDecorRanges(listOf(annotation(AnnotationKind.Note))).isEmpty())
     }
 
     @Test

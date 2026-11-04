@@ -34,7 +34,7 @@ class PersistedStructureRelinkTest {
 
     private fun profileOf(bodyPx: Float, fontBody: String, original: Boolean): TypographicProfile =
         TypographicProfile.build(
-            ReaderSettings.DEFAULT.copy(fontBody = fontBody, useOriginalStyle = original),
+            ReaderSettings.DEFAULT.copy(fontBody = fontBody, layoutTheme = if (original) "original" else "modern"),
             2f,
         ).copy(bodyPx = bodyPx)
 

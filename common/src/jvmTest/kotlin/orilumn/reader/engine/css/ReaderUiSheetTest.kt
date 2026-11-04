@@ -16,8 +16,8 @@ class ReaderUiSheetTest {
         "body,p,div,li,dd,dt,td,th,address,blockquote,pre,section,article,aside,header,footer,nav,figure,figcaption,h1,h2,h3,h4,h5,h6"
 
     private fun profile(
-        lineSpacing: Float = 1.3f,
-        firstLineIndentEm: Float = 2f,
+        lineSpacing: Float? = 1.3f,
+        firstLineIndentEm: Float? = 2f,
         bodyPx: Float = 18f,
         bgColor: Int = 0xFFF4F2EC.toInt(),
     ) = TypographicProfile(
@@ -26,7 +26,6 @@ class ReaderUiSheetTest {
         quoteScale = 1f,
         codeScale = 0.92f,
         lineSpacing = lineSpacing,
-        lineSpacingMult = lineSpacing,
         firstLineIndentEm = firstLineIndentEm,
         fgColor = 0xFF2B2B2B.toInt(),
         bgColor = bgColor,
@@ -36,7 +35,7 @@ class ReaderUiSheetTest {
         useOriginalStyle = false,
         layoutTheme = "modern",
         coverStretch = false,
-        paragraphSpacingScale = 1f, paragraphGapScale = 1f,
+        paragraphSpacingEm = null, paragraphGapScale = 1f,
         letterSpacingEm = 0f,
     )
 
@@ -51,6 +50,25 @@ class ReaderUiSheetTest {
         val sheet = ReaderUiSheet.build(p)
         val line = sheet.rules.single { it.selectors == textBlocks.split(",") }
         assertEquals(mapOf("line-height" to "1.35"), line.declarations.associate { it.property to it.value })
+    }
+
+    @Test
+    fun `unset line spacing emits no line-height anywhere so the book keeps its own`() {
+        // null = 读者没配 ⇒ UI 层一条行高声明都不发：书在 body/容器上声明的行高（段落靠继承）
+        // 也能原样读到；书没写时由引擎初值 1.5 兜底，不需要任何 CSS 声明。
+        val sheet = ReaderUiSheet.build(profile(lineSpacing = null))
+        assertFalse(
+            "未配行距时 UI 层不得发 line-height",
+            sheet.rules.any { r -> r.declarations.any { it.property == "line-height" } },
+        )
+    }
+
+    @Test
+    fun `zero line spacing is a real value and still emits a rule`() {
+        // 0 不是「没配」的哨兵，就是 0 倍行高（照原样发）。
+        val line = ReaderUiSheet.build(profile(lineSpacing = 0f))
+            .rules.single { it.selectors == textBlocks.split(",") }
+        assertEquals("0.0", line.declarations.single { it.property == "line-height" }.value)
     }
 
     @Test
@@ -76,14 +94,24 @@ class ReaderUiSheetTest {
     }
 
     @Test
-    fun `zero indent emits no text-indent rule so the book keeps its own`() {
-        // 0 = 读者未配（中性默认）⇒ 一条 text-indent 都不发：书的 `p{text-indent}`（含悬挂缩进的
-        // 负缩进）原样生效。wf: 读者层裸 `p{text-indent:0em}` 会凭 tier 44 压过书的一切缩进声明。
-        val sheet = ReaderUiSheet.build(profile(firstLineIndentEm = 0f))
+    fun `unset indent emits no text-indent rule so the book keeps its own`() {
+        // null = 读者没设过 ⇒ 一条 text-indent 都不发：书的 `p{text-indent}`（含悬挂缩进的
+        // 负缩进）原样生效。
+        val sheet = ReaderUiSheet.build(profile(firstLineIndentEm = null))
         assertFalse(
-            "读数 0 时 UI 层不得发 text-indent（含 li p 的归零规则）",
+            "未设缩进时 UI 层不得发 text-indent（含 li p 的归零规则）",
             sheet.rules.any { r -> r.declarations.any { it.property == "text-indent" } },
         )
+    }
+
+    @Test
+    fun `explicit zero indent clears the book indent`() {
+        // 0 是读者的明确选择：必须发 `text-indent:0em`，压掉书的 2em（旧实现把 0 当「没配」，
+        // 读者拖到 0 也抹不掉书的缩进，已废弃）。
+        val sheet = ReaderUiSheet.build(profile(firstLineIndentEm = 0f))
+        val p = declarations(profile(firstLineIndentEm = 0f), "p")
+        assertEquals(mapOf("text-indent" to "0em"), p)
+        assertEquals(mapOf("text-indent" to "0em"), declarations(profile(firstLineIndentEm = 0f), "li p"))
     }
 
     @Test
@@ -97,10 +125,10 @@ class ReaderUiSheetTest {
 
     @Test
     fun `hanging indent from the book survives when the reader has not configured one`() {
-        // 端到端：读者未配缩进（0）时，书里 `.hang{text-indent:-2em;margin-left:2em}` 的负缩进必须
-        // 原样到达计算样式（首行左移 2em）。这是 tier 口径的判据：UI 层不发声明 ⇒ 书 author 层赢。
+        // 端到端：读者没设过缩进（null）时，书里 `.hang{text-indent:-2em;margin-left:2em}` 的负缩进
+        // 必须原样到达计算样式（首行左移 2em）。这是 tier 口径的判据：UI 层不发声明 ⇒ 书 author 层赢。
         val author = LightCssParser().parse("p.hang{text-indent:-2em;margin-left:2em}")
-        val sheet = ReaderUiSheet.build(profile(firstLineIndentEm = 0f))
+        val sheet = ReaderUiSheet.build(profile(firstLineIndentEm = null))
         val root = orilumn.reader.engine.html.HtmlTreeConverter().convert(
             "<html><body><p class=\"hang\">悬挂缩进</p></body></html>",
         )!!
@@ -113,7 +141,7 @@ class ReaderUiSheetTest {
     @Test
     fun `author p margins flow through the UI tier untouched`() {
         // 书的 margin 不再被基线清零：h1+p 的 1.8em 原样到达计算样式，再由疏密乘算。
-        val p = profile(firstLineIndentEm = 0f, bodyPx = 18f)
+        val p = profile(firstLineIndentEm = null, bodyPx = 18f)
         val author = LightCssParser().parse("h1.tochead{margin:0.3em 0 0}p.co-summary-head{margin:1.8em 0 0.6em}")
         val sheet = ReaderUiSheet.build(p)
         val root = orilumn.reader.engine.html.HtmlTreeConverter().convert(

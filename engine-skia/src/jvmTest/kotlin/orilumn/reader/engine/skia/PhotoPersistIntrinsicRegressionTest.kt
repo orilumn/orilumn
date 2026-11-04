@@ -101,7 +101,7 @@ class PhotoPersistIntrinsicRegressionTest(private val variant: String) {
             orilumn.reader.engine.css.themeSheetFromProfile(profile),
             null,
             ReaderUiSheet.build(profile),
-            paragraphScale = profile.paragraphSpacingScale, gapScale = profile.paragraphGapScale,
+            paragraphEm = profile.paragraphSpacingEm, gapScale = profile.paragraphGapScale,
         )
     }
 

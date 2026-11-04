@@ -17,11 +17,17 @@ package orilumn.reader.engine.text
  */
 data class LayoutParamKey(
     val bodyPx: Float,
+    /** 行距倍数；**`null`（读者没配）用 NaN 编码**，与任何实数（含 0）区分——两者版面不同。 */
     val lineSpacing: Float,
+    /** 首行缩进 em；**`null`（读者没设）用 NaN 编码**，与 0（明确不缩进）区分——两者版面不同，
+     *  键必须能分开（NaN 的位模式稳定，不会和任何实数撞）。 */
     val firstLineIndentEm: Float,
+    /** 字间距 em；**`null`（读者没配 = 按书）用 NaN 编码**，与 0（明确不加字距）区分。
+     *  ⚠ 读者没配时实际生效的是**书自己的**字距，书的内容变化由章节内容/样式哈希另管。 */
     val letterSpacingEm: Float,
     val cjkLatinSpacingEm: Float = 0f,
-    val paragraphSpacingScale: Float,
+    /** 段间距绝对值 em；**`null`（读者没配）用 NaN 编码**，与 0（明确清零）区分——两者版面不同。 */
+    val paragraphSpacingEm: Float,
     val paragraphGapScale: Float,
     val fontBody: String,
     val fontTitle: String,
@@ -50,6 +56,12 @@ data class LayoutParamKey(
      * 两处默认值必须一致，否则会出现「键按一侧算、实际按另一侧跑」的静默错误。
      */
     val inhouseBreak: Boolean = true,
+    /**
+     * 排版主题 key（`original` / `modern` / `traditional`）：主题层（tier 42）按它决定加载哪张
+     * 样式表，字体族/缩进/段距/对齐都可能不同 ⇒ **必须进键**。以前靠 `withLayoutTheme`
+     * 顺带改字体槽/段距把键带变，现在主题只切样式表，裸切主题必须自己换键。
+     */
+    val layoutTheme: String = "original",
 ) {
     /** Deterministic 64-bit hash over all layout-affecting fields. */
     fun hash(): Long {
@@ -59,7 +71,7 @@ data class LayoutParamKey(
         crc = Crc32.update4(crc, lineSpacing.bits())
         crc = Crc32.update4(crc, firstLineIndentEm.bits())
         crc = Crc32.update4(crc, letterSpacingEm.bits())
-        crc = Crc32.update4(crc, paragraphSpacingScale.bits())
+        crc = Crc32.update4(crc, paragraphSpacingEm.bits())
         crc = Crc32.update4(crc, paragraphGapScale.bits())
         crc = Crc32.updateString(crc, fontBody)
         crc = Crc32.updateString(crc, fontTitle)
@@ -103,6 +115,8 @@ data class LayoutParamKey(
         // ⚠ 放在喂入序**最后**这一点仍保留：变长喂入在中间会真的产生歧义；此处虽已无条件喂，
         //   但新字段一律追加在末尾，未来再加字段仍照此办理。
         crc = Crc32.update4(crc, cjkLatinSpacingEm.bits())
+        // 排版主题（新字段一律追加在末尾，见上）。
+        crc = Crc32.updateString(crc, layoutTheme)
         return Crc32.finish(crc)
     }
 
@@ -121,15 +135,15 @@ data class LayoutParamKey(
             inhouseBreak: Boolean = orilumn.reader.engine.AbSwitch.inhouseBreak(),
         ): LayoutParamKey = LayoutParamKey(
             bodyPx = profile.bodyPx,
-            lineSpacing = profile.lineSpacing,
-            firstLineIndentEm = profile.firstLineIndentEm,
-            letterSpacingEm = profile.letterSpacingEm,
+            lineSpacing = profile.lineSpacing ?: Float.NaN,
+            firstLineIndentEm = profile.firstLineIndentEm ?: Float.NaN,
+            letterSpacingEm = profile.letterSpacingEm ?: Float.NaN,
             // **喂闸过的值，不是原始设置值**：键必须描述「实际被施加到版面上的那个值」。
             // 开关 off 时实测不施加间隙（否则溢出被裁），而键若还记着 25，回退期间就会按
             // 「有间隙」算行宽去命中磁盘表、却按「无间隙」画 ⇒ 量画失配（教训 ⑩）。
             // 本形参 `inhouseBreak` 的默认值已经读过开关，这里复用同一个闸门，两者恒一致。
             cjkLatinSpacingEm = if (inhouseBreak) profile.cjkLatinSpacingEm else 0f,
-            paragraphSpacingScale = profile.paragraphSpacingScale,
+            paragraphSpacingEm = profile.paragraphSpacingEm ?: Float.NaN,
             paragraphGapScale = profile.paragraphGapScale,
             fontBody = profile.fontBody,
             fontTitle = profile.fontTitle,
@@ -137,6 +151,7 @@ data class LayoutParamKey(
             fontWeightAnchors = profile.fontWeightAnchors,
             fontWeightAnchorsBySlot = profile.fontWeightAnchorsBySlot,
             useOriginalStyle = profile.useOriginalStyle,
+            layoutTheme = profile.layoutTheme,
             contentW = contentW,
             contentH = contentH,
             userCssHash = userCssHash,

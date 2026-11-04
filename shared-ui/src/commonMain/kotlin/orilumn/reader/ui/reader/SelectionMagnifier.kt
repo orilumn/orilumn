@@ -17,6 +17,7 @@ import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
+import kotlin.math.min
 
 /** 放大镜直径（D-10 / §3.4）。 */
 internal const val MAGNIFIER_DIAMETER_DP = 96f
@@ -62,6 +63,31 @@ internal fun magnifierCenter(
     }
     return Offset(x, y)
 }
+
+/**
+ * 卡片让位（D-28）把整层上推了 [shiftPx]，而指针事件给的是**屏幕坐标**（手感层没跟着平移，
+ * 命中侧是「屏幕 y + 同一个位移」换算回页坐标）。放大镜画在被上推的那一层里，
+ * 所以手指也要加上同一个位移，镜面才不会离手指差一整段顶推量。
+ */
+internal fun magnifierLayerFinger(finger: Offset, shiftPx: Float): Offset =
+    Offset(finger.x, finger.y + shiftPx)
+
+/**
+ * 放大镜可用范围（层坐标）：整版可见区跟着 [shiftPx] 整体下移，卡片开着时再让到卡片上沿
+ * [sheetTopPx] —— 贴顶翻到手指下方时，镜面才不会钻进卡片底下（也才不会按屏幕顶去夹，
+ * 让圆被裁掉半截）。
+ */
+internal fun magnifierLayerBounds(
+    pxWidth: Float,
+    pxHeight: Float,
+    shiftPx: Float,
+    sheetTopPx: Float,
+): Rect = Rect(
+    left = 0f,
+    top = shiftPx,
+    right = pxWidth,
+    bottom = shiftPx + min(pxHeight, sheetTopPx).coerceAtLeast(0f),
+)
 
 /**
  * 放大镜内容平移：把页面坐标 [finger] 映射到圆心 [center]。

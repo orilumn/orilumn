@@ -46,9 +46,9 @@ import kotlin.math.ceil
  * 3. **重轻等价**：同一段 HTML、同一版心，重路径（[BoxLayouter] + [DrawLineBuilder]）与
  *    轻路径（[BoxChapterLayouter.tempShape]）的断行区间逐项相同，且投影出的
  *    [DrawLine.firstLineIndentPx] 是**同一个负值**；
- * 4. **分层照旧**：读者**配了**首行缩进（UI 层 tier 44，值 > 0）才压过书的 `p` 缩进；读数 0 =
- *    读者未配 ⇒ UI 层一条 `text-indent` 都不发，书的缩进（含负值）原样生效。负缩进的可见范围也
- *    因此扩大：`p` 之外（`blockquote`/`dd`/`li` 等）本来就不在 UI 层射程内。
+ * 4. **分层照旧**：读者**配了**首行缩进（UI 层 tier 44，非 `null`）才压过书的 `p` 缩进；未配 = `null`
+ *    ⇒ UI 层一条 `text-indent` 都不发，书的缩进（含负值）原样生效；读者明确选 0 则发 `0em` 清零。
+ *    负缩进的可见范围也因此扩大：`p` 之外（`blockquote`/`dd`/`li` 等）本来就不在 UI 层射程内。
  */
 class NegativeTextIndentTest {
 
@@ -145,9 +145,9 @@ class NegativeTextIndentTest {
 
     // ---- 3. 端到端：重轻两路同值 + 绘制投影 ----
 
-    /** 默认档：原书样式（主题层不加载）、首行缩进 0 ⇒ 书的 `text-indent` 只受 UI 层 `p` 规则影响。 */
-    private fun profile(readerIndentEm: Float = 0f) = TypographicProfile.build(
-        ReaderSettings.DEFAULT.copy(firstLineIndent = readerIndentEm.toDouble()),
+    /** 默认档：原书样式（主题层不加载）、首行缩进**未配**（`null`）⇒ UI 层不发缩进声明，书原样。 */
+    private fun profile(readerIndentEm: Float? = null) = TypographicProfile.build(
+        ReaderSettings.DEFAULT.copy(firstLineIndent = readerIndentEm?.toDouble()),
         2f,
     )
 
@@ -161,7 +161,7 @@ class NegativeTextIndentTest {
 
     private fun html() = "<html><body><blockquote>$markupText</blockquote></body></html>"
 
-    private fun styleEngine(css: String, readerIndentEm: Float = 0f): StyleComputer {
+    private fun styleEngine(css: String, readerIndentEm: Float? = null): StyleComputer {
         val p = profile(readerIndentEm)
         return StyleComputer(
             p.bodyPx,
@@ -170,7 +170,7 @@ class NegativeTextIndentTest {
             themeSheetFromProfile(p),
             null,
             ReaderUiSheet.build(p),
-            paragraphScale = p.paragraphSpacingScale, gapScale = p.paragraphGapScale, pxScale = p.density,
+            paragraphEm = p.paragraphSpacingEm, gapScale = p.paragraphGapScale, pxScale = p.density,
         )
     }
 
@@ -212,7 +212,7 @@ class NegativeTextIndentTest {
         val styles = eng.compute(root)
         val classify = NormalFlowLayout.heavyClassify(styles, eng.hasDisplayDeclaration())
         val result = BoxLayouter(fsPx, variantBreaker()).layoutBoxes(root, w, styles, classify)
-        val lines = DrawLineBuilder.build(result, styles, classify, HIDDEN_NONE, profile().letterSpacingEm)
+        val lines = DrawLineBuilder.build(result, styles, classify, HIDDEN_NONE, (profile().letterSpacingEm ?: 0f))
         // 投影表按「章内行号」为键、每叶每行一条；本段单行 ⇒ 取唯一那条（按键排序口径稳定）。
         val first = lines.toSortedMap().values.first()
         assertEquals("[$v] 绘制侧首行缩进必须是同一个负值（量画同值）", -indentPx, first.firstLineIndentPx, 0.01f)
@@ -270,9 +270,9 @@ class NegativeTextIndentTest {
             return map[acc[0]]!!
         }
 
-        // 读者**未配**（0 = 中性默认）⇒ UI 层一条 `text-indent` 都不发 ⇒ 书的负缩进原样到达 `p`
-        // （悬挂缩进不再被裸 `p{text-indent:0em}` 静默吃掉）。
-        val unset = styleEngine(css, readerIndentEm = 0f).compute(root)
+        // 读者**未配**（`null`）⇒ UI 层一条 `text-indent` 都不发 ⇒ 书的负缩进原样到达 `p`
+        // （悬挂缩进不再被裸 `p{text-indent:0em}` 静默吃掉）。0 已不再是「没配」，它是「明确不缩进」。
+        val unset = styleEngine(css, readerIndentEm = null).compute(root)
         assertEquals(-2f * nth(unset, "p").fontSizePx, nth(unset, "p").textIndentPx, 0.01f)
 
         // 读者配了 2em ⇒ UI 层（tier 44）压过书的 `p`；`blockquote` 不在 UI 层射程内 ⇒ 书的负值原样

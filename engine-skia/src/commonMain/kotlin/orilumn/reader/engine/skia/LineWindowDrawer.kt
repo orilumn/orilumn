@@ -203,11 +203,26 @@ data class DrawLine(
      * 平移 Y 时**必须同时平移它**（[shiftedBy]），否则裁剪区错位。
      */
     val clip: orilumn.reader.engine.laying.ClipRect? = null,
+    /**
+     * 本行所属**块序号**（同一叶 / 同一块的各行同号，0 起，按文档序）。
+     *
+     * 只服务旁注布点的「本段 / 相邻段」判定（`docs/旁注布点与引线-实施方案.md` §1.5）：
+     * 用户层按它分组，不参与排版、分页与落墨。默认 0（旧构造 / 纯几何测试行为不变）。
+     */
+    val blockId: Int = 0,
 ) {
     /** 沿 Y 平移（页切片/离屏换算；裁剪区同步平移，漏了即错位）。 */
     fun shiftedBy(dy: Int): DrawLine =
         if (dy == 0) this else copy(yTop = yTop + dy, yBottom = yBottom + dy, clip = clip?.shifted(dy))
 }
+
+/**
+ * 一行文本在给定章内区间上的墨迹矩形，连同它所属的行（只读几何）。
+ *
+ * 旁注布点要「每行一个框 + 块序号」，而 [LineWindowDrawer.decorRects] 只回矩形、丢掉了行身份；
+ * 这里保留行，用户层就能给每个行框配上 `blockId` 与行序（§1.5），不用再按坐标反查。
+ */
+data class LineDecorRect(val rect: Rect, val line: DrawLine)
 
 /**
  * 行窗口绘制器：按**行**的绝对 Y 坐标用 SkParagraph 单行整形绘制。
@@ -407,11 +422,20 @@ class LineWindowDrawer(
      * [chapter] 只用于调用方表达作用域，函数不跨章。
      */
     @Suppress("UNUSED_PARAMETER")
-    fun decorRects(lines: List<DrawLine>, chapter: Int, range: IntRange): List<Rect> {
+    fun decorRects(lines: List<DrawLine>, chapter: Int, range: IntRange): List<Rect> =
+        decorLineRects(lines, chapter, range).map { it.rect }
+
+    /**
+     * 与 [decorRects] 同一套几何，但**保留行身份**：旁注布点要按行分组、按块序号判段界（§1.5）。
+     *
+     * 顺序与 [lines] 一致（自上而下），所以调用方拿到的下标就是行序。
+     */
+    @Suppress("UNUSED_PARAMETER")
+    fun decorLineRects(lines: List<DrawLine>, chapter: Int, range: IntRange): List<LineDecorRect> {
         if (range.isEmpty()) return emptyList()
         val queryStart = range.first
         val queryEnd = range.last + 1
-        val out = ArrayList<Rect>(lines.size)
+        val out = ArrayList<LineDecorRect>(lines.size)
         for (line in lines) {
             val start = line.range.first.coerceIn(0, line.text.length)
             val endExcl = (line.range.last + 1).coerceIn(start, line.text.length)
@@ -431,15 +455,261 @@ class LineWindowDrawer(
             val (left, right) = spanOn(track, placement.advs, ps, pe) ?: continue
             if (right <= left) continue
             out.add(
-                Rect.makeLTRB(
-                    line.xLeft + left,
-                    line.yTop.toFloat(),
-                    line.xLeft + right,
-                    line.yBottom.toFloat(),
+                LineDecorRect(
+                    Rect.makeLTRB(
+                        line.xLeft + left,
+                        line.yTop.toFloat(),
+                        line.xLeft + right,
+                        line.yBottom.toFloat(),
+                    ),
+                    line,
                 ),
             )
         }
         return out
+    }
+
+    /**
+     * 一段章内区间上**标注划线本身**的落墨矩形（只算不画），供旁注箭头「不得触及下划线」用。
+     *
+     * 与 [paintDecorLines] 同一份几何：横向读落墨实走的轨（[glyphTrack]），纵向取
+     * [baselineY] + 标注划线的默认线心偏移与线宽；波浪线把波形半高也算进去
+     * （[decorWaveGeometry]），否则箭头尖会压到波峰上。
+     *
+     * 坐标口径同 [decorRects]：`x` 相对内容区左缘，`y` 为章内绝对 Y。
+     * 只读几何，不改排版、不写回任何状态。
+     *
+     * @param kind 只接受 [DecorKind.UNDERLINE] / [DecorKind.STRIKETHROUGH]，其余返回空。
+     */
+    @Suppress("UNUSED_PARAMETER")
+    fun annotationLineRects(
+        lines: List<DrawLine>,
+        chapter: Int,
+        range: IntRange,
+        kind: DecorKind,
+        stroke: DecorStroke,
+    ): List<Rect> {
+        if (range.isEmpty()) return emptyList()
+        val offsetEm = when (kind) {
+            DecorKind.UNDERLINE -> ANNOTATION_UNDERLINE_OFFSET_EM
+            DecorKind.STRIKETHROUGH -> -ANNOTATION_STRIKE_OFFSET_EM
+            else -> return emptyList()
+        }
+        val queryStart = range.first
+        val queryEnd = range.last + 1
+        val out = ArrayList<Rect>(lines.size)
+        for (line in lines) {
+            val start = line.range.first.coerceIn(0, line.text.length)
+            val endExcl = (line.range.last + 1).coerceIn(start, line.text.length)
+            if (endExcl <= start) continue
+            val lineStart = line.charBase + start
+            val lineEnd = line.charBase + endExcl
+            val s = maxOf(queryStart, lineStart)
+            val e = minOf(queryEnd, lineEnd)
+            if (e <= s) continue
+            val placement = placementFor(line, start, endExcl)
+            val ps = (s - line.charBase - start).coerceIn(0, endExcl - start)
+            val pe = (e - line.charBase - start).coerceIn(ps, endExcl - start)
+            val track = glyphTrack(line, placement, start, endExcl)?.xs ?: placement.xs
+            val (left, right) = spanOn(track, placement.advs, ps, pe) ?: continue
+            if (right <= left) continue
+            val lineExtra = line.rubyRuns
+                .filter { it.start < endExcl && it.endExclusive > start }
+                .maxOfOrNull { it.extraHeightPx() } ?: 0
+            val baseY = baselineY(line, lineExtra, start, endExcl)
+            val thickness = (line.fontSizePx * ANNOTATION_UNDERLINE_THICKNESS_EM).coerceAtLeast(1f)
+            val centerY = baseY + line.fontSizePx * offsetEm
+            val half = when (stroke) {
+                DecorStroke.Wavy -> decorWaveGeometry(thickness).halfHeight
+                else -> thickness / 2f
+            }
+            out.add(
+                Rect.makeLTRB(
+                    line.xLeft + left,
+                    centerY - half,
+                    line.xLeft + right,
+                    centerY + half,
+                ),
+            )
+        }
+        return out
+    }
+
+    /**
+     * 算一段章内区间在当前页各行上的**逐字墨迹矩形**（只算不画），供旁注箭头避让（方案 §6.3）。
+     *
+     * 坐标口径与 [decorRects] 完全相同（`x` 相对内容区左缘、`y` 为章内绝对 Y），区别只在于粒度：
+     * - **逐字一个矩形**，不是整行一个框 —— 箭头才能从两字之间、标点前后的空白穿过；
+     * - 取**字形墨迹边界**（`Font.getBounds`），不是 advance 盒；
+     * - 空白、软连字符、代理对尾、隐藏字符（注音源文 / `visibility: hidden` / 图片占位）不产出；
+     * - 量不到字形（该面没有这个码本）时退回 advance 盒 —— 安全的一侧：宁可多挡，不可穿字。
+     *
+     * 与落墨**同源**：段样式走 [mergeBands]、字 x 走 [glyphTrack]、基线走 [baselineY]，
+     * 行内相对定位位移与首字下沉一并计入。只读几何，不改排版、不写回任何状态。
+     */
+    @Suppress("UNUSED_PARAMETER")
+    fun inkRects(lines: List<DrawLine>, chapter: Int, range: IntRange): List<Rect> {
+        if (range.isEmpty()) return emptyList()
+        val queryStart = range.first
+        val queryEnd = range.last + 1
+        val out = ArrayList<Rect>()
+        for (line in lines) {
+            val start = line.range.first.coerceIn(0, line.text.length)
+            val endExcl = (line.range.last + 1).coerceIn(start, line.text.length)
+            if (endExcl <= start) continue
+            val lineStart = line.charBase + start
+            val lineEnd = line.charBase + endExcl
+            val from = (maxOf(queryStart, lineStart) - line.charBase).coerceAtLeast(start)
+            val to = (minOf(queryEnd, lineEnd) - line.charBase).coerceAtMost(endExcl)
+            if (to <= from) continue
+            val visHidden = line.visibilityHiddenRuns.mapNotNull { r ->
+                val s = r.first.coerceIn(start, endExcl)
+                val e = (r.last + 1).coerceIn(start, endExcl)
+                if (e > s) s until e else null
+            }
+            val hidden = hiddenRunsOf(line, start, endExcl, visHidden)
+            fun isHidden(from: Int, to: Int): Boolean {
+                for (r in hidden) if (from >= r.first && to <= r.last + 1) return true
+                return false
+            }
+            val placement = placementFor(line, start, endExcl)
+            val xs = glyphTrack(line, placement, start, endExcl)?.xs ?: placement.xs
+            val lineExtra = line.rubyRuns
+                .filter { it.start < endExcl && it.endExclusive > start }
+                .maxOfOrNull { it.extraHeightPx() } ?: 0
+            val baseY = baselineY(line, lineExtra, start, endExcl)
+            val capRange = line.capFloat
+                ?.takeIf { line.range.first == 0 }
+                ?.let { 0 until it.endExclusive.coerceAtMost(endExcl) }
+            val capDy = capFloatDy(line, baseY, lineExtra)
+            val bands = mergeBands(line, start, endExcl)
+            var bandIdx = 0
+            var i = from
+            while (i < to) {
+                val at = codePointAt(line.text, i)
+                val units = at.units
+                if (at.isLowSurrogateTail || line.text[i] == SOFT_HYPHEN || isHidden(i, i + units) ||
+                    isBlankGlyph(at.cp)
+                ) {
+                    i += units
+                    continue
+                }
+                val local = i - start
+                val x = xs.getOrNull(local)
+                if (x == null) {
+                    i += units
+                    continue
+                }
+                while (bandIdx < bands.size && bands[bandIdx].end <= i) bandIdx++
+                val band = bands.getOrNull(bandIdx)?.takeIf { i >= it.start && i < it.end }
+                val run = band?.font
+                val sizePx = run?.fontPxOr(line.fontSizePx) ?: line.fontSizePx
+                // 取面与逐字落墨同一个出口（[GlyphPainter.baseGlyphStyle]），量画同源。
+                val font = glyphPainter.baseGlyphStyle(
+                    sizePx,
+                    run?.families ?: line.families,
+                    run?.weight ?: line.weight,
+                    run?.italic ?: line.italic,
+                    run?.monospace ?: line.monospace,
+                    0xFF000000.toInt(),
+                    at.cp,
+                    run?.tag ?: line.tag,
+                ).font
+                val rel = relOffsetFor(line, i)
+                val capShift = if (capRange != null && i in capRange) capDy else 0f
+                val baseline = baseY - (band?.shiftEm ?: 0f) * line.fontSizePx + rel.y + capShift
+                val penX = line.xLeft + x + rel.x
+                val gid = font.getUTF32Glyph(at.cp)
+                val bounds = if (gid.toInt() != 0) font.getBounds(shortArrayOf(gid)).firstOrNull() else null
+                val rect = if (bounds != null && bounds.right > bounds.left && bounds.bottom > bounds.top) {
+                    Rect.makeLTRB(
+                        penX + bounds.left,
+                        baseline + bounds.top,
+                        penX + bounds.right,
+                        baseline + bounds.bottom,
+                    )
+                } else {
+                    val adv = placement.advs.getOrNull(local) ?: 0f
+                    val fm = font.metrics
+                    Rect.makeLTRB(penX, baseline + fm.ascent, penX + adv, baseline + fm.descent)
+                }
+                if (rect.right > rect.left && rect.bottom > rect.top) out.add(rect)
+                i += units
+            }
+        }
+        return out
+    }
+
+    /**
+     * 算一段章内区间内各行**列表 marker（圆点 / 编号）**的占位矩形（只算不画）。
+     *
+     * 坐标口径与 [decorRects] 相同（`x` 相对内容区左缘、`y` 为章内绝对 Y），供旁注布点把
+     * marker 当障碍。矩形覆盖 marker 本身**以及它与正文之间的沟槽**：OUTSIDE 的右缘、
+     * INSIDE 的左缘贴住正文起点，调用方按行合并时自然并进行框，不会在沟槽里留下一条
+     * 能塞下旁注的假空白。
+     *
+     * 宽度与落墨同源：矢量圆点走 [ListMarkers.shapeMarkerWidthPx]，编号 / 字母 / 罗马数字
+     * 用同一 `paragraphStyle` 实测（[measureMarkerWidth]），不是另估一个 em 值。
+     */
+    @Suppress("UNUSED_PARAMETER")
+    fun markerRects(lines: List<DrawLine>, chapter: Int, range: IntRange): List<Rect> {
+        if (range.isEmpty()) return emptyList()
+        val queryStart = range.first
+        val queryEnd = range.last + 1
+        val out = ArrayList<Rect>()
+        var collection: FontCollection? = null
+        for (line in lines) {
+            val marker = line.listMarker ?: continue
+            val start = line.range.first.coerceIn(0, line.text.length)
+            val endExcl = (line.range.last + 1).coerceIn(start, line.text.length)
+            if (endExcl <= start) continue
+            val lineStart = line.charBase + start
+            val lineEnd = line.charBase + endExcl
+            if (minOf(queryEnd, lineEnd) <= maxOf(queryStart, lineStart)) continue
+            val gap = ListMarkers.markerGapPx(line.fontSizePx)
+            val markerW = if (marker.isShapeKind) {
+                ListMarkers.shapeMarkerWidthPx(line.fontSizePx)
+            } else {
+                val fc = collection ?: collections().also { collection = it }
+                val style = SkParagraphFactory.paragraphStyle(
+                    line.alignment,
+                    line.fontSizePx,
+                    line.lineHeightRatio,
+                    line.tag,
+                    line.families,
+                    line.weight,
+                    line.italic,
+                    line.monospace,
+                    line.letterSpacingEm,
+                    inkColor = withAlpha(line.inkColor, line.alpha),
+                    forceStrut = line.baselineShifts.isNotEmpty(),
+                )
+                measureMarkerWidth(style, ListMarkers.markerText(marker.kind, marker.order), fc)
+            }
+            val (left, right) = if (marker.position == ListMarkers.Position.INSIDE) {
+                line.xLeft.toFloat() to (line.xLeft + markerW + gap).toFloat()
+            } else {
+                (line.xLeft - markerW - gap).toFloat() to line.xLeft.toFloat()
+            }
+            if (right > left) {
+                out += Rect.makeLTRB(left, line.yTop.toFloat(), right, line.yBottom.toFloat())
+            }
+        }
+        return out
+    }
+
+    /** 行内相对定位（`position: relative`）在字符 [i] 上的累积位移（嵌套盒自然叠加）。 */
+    private fun relOffsetFor(line: DrawLine, i: Int): Point {
+        var dx = 0f
+        var dy = 0f
+        for (r in line.inlineBoxRuns) {
+            if (r.relDx == 0 && r.relDy == 0) continue
+            if (i in r.start until r.endExclusive) {
+                dx += r.relDx.toFloat()
+                dy += r.relDy.toFloat()
+            }
+        }
+        return Point(dx, dy)
     }
 
     /**
@@ -529,19 +799,7 @@ class LineWindowDrawer(
             if (e > s) s until e else null
         }
         // 表格图占位隐藏（与注音源文同法：占宽保留，字符流/断行不变）。
-        val hiddenRuns = buildList {
-            for (run in rubyHits) {
-                val s = run.rtStart.coerceIn(start, endExcl)
-                val e = run.rtEndExclusive.coerceIn(start, endExcl)
-                if (e > s && run.rtStart >= 0) add(s until e)
-            }
-            for (r in line.imgHidden) {
-                val s = r.first.coerceIn(start, endExcl)
-                val e = (r.last + 1).coerceIn(start, endExcl)
-                if (e > s) add(s until e)
-            }
-            addAll(visHidden)
-        }
+        val hiddenRuns = hiddenRunsOf(line, start, endExcl, visHidden)
         // 子段 [from,to) 被隐藏 ⟺ 其末字符 to-1 落在区间内（区间按 `until` 存，last = 排外末端-1）。
         fun isHidden(from: Int, to: Int): Boolean {
             for (r in hiddenRuns) if (from >= r.first && to <= r.last + 1) return true
@@ -649,6 +907,35 @@ class LineWindowDrawer(
         for (r in hidden) if (from >= r.first && to <= r.last + 1) return true
         return false
     }
+
+    /**
+     * 本行「占宽但不落墨」的字符区间：注音源文、图片占位、`visibility: hidden`。
+     *
+     * 绘制（[paintText]）与逐字墨迹（[inkRects]）共用这一份，避免两处各判一套（教训 11）。
+     */
+    private fun hiddenRunsOf(
+        line: DrawLine,
+        start: Int,
+        endExcl: Int,
+        visHidden: List<IntRange>,
+    ): List<IntRange> = buildList {
+        for (run in line.rubyRuns) {
+            if (run.rtStart < 0) continue
+            val s = run.rtStart.coerceIn(start, endExcl)
+            val e = run.rtEndExclusive.coerceIn(start, endExcl)
+            if (e > s) add(s until e)
+        }
+        for (r in line.imgHidden) {
+            val s = r.first.coerceIn(start, endExcl)
+            val e = (r.last + 1).coerceIn(start, endExcl)
+            if (e > s) add(s until e)
+        }
+        addAll(visHidden)
+    }
+
+    /** 不落墨的码本：空白、不换行空格、零宽空格、BOM（都不产生墨迹矩形）。 */
+    private fun isBlankGlyph(cp: Int): Boolean =
+        cp <= 0xFFFF && (cp.toChar().isWhitespace() || cp == 0x00A0 || cp == 0x200B || cp == 0xFEFF)
 
     /**
      * 从装饰段里挖掉隐藏区间（E10）：隐藏字符的 `text-decoration` 与字形同隐，其余片段照画

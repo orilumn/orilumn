@@ -32,10 +32,16 @@
             </intent-filter>
         </activity>
 
+        <!--
+          批注输入框（v2）需要键盘弹出时**不改窗口尺寸**：阅读面的视口一变就会整书重排，
+          键盘顶一下就是一次全量重排版。批注框自己用 imePadding 把可用高度收到键盘上方，
+          卡片贴上半屏、整卡可滚，旧系统拿不到键盘高度时也不会被盖住。
+        -->
         <activity
             android:name=".ui.reader.ReaderActivity"
             android:exported="false"
             android:screenOrientation="unspecified"
+            android:windowSoftInputMode="adjustNothing"
             android:configChanges="keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|density|layoutDirection" />
     </application>
 

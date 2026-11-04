@@ -72,6 +72,7 @@ import androidx.compose.ui.unit.sp
 import orilumn.reader.data.annotation.AnnotationKind
 import orilumn.reader.data.font.FontEntry
 import orilumn.reader.data.settings.ReaderSettings
+import orilumn.reader.engine.css.CssDefaults
 import orilumn.reader.engine.text.TypographicProfile
 import orilumn.reader.io.Logger
 import orilumn.reader.net.FontUploadServer
@@ -125,13 +126,16 @@ fun ReaderSettingsPanel(
     onPreview: (ReaderSettings) -> Unit,
     onCommitTypography: (ReaderSettings) -> Unit,
     onCommitLight: (ReaderSettings) -> Unit,
+    /**
+     * 只改像素的**拖动中**预览（不落盘、不重排）：笔记页四条颜色滑条每挪一格就发一次，
+     * 让色槽与正文墨迹随手实时变，松手再由 [onCommitLight] 落盘。
+     * 缺省等于 [onCommitLight]（没有预览通道的宿主仍按旧行为）。
+     */
+    onPreviewLight: (ReaderSettings) -> Unit = onCommitLight,
     customThemes: List<ThemePreset> = emptyList(),
     onSaveTheme: (ThemePreset) -> Unit = {},
     onDeleteTheme: (ThemePreset) -> Unit = {},
     readSystemBrightness: () -> Int = { 50 },
-    /** 原书设置 专用提交: 只写本书私有设置, 不传染全局 (Android 有 per-book overlay 时传;
-     *  桌面单全局设置, 缺省回落到 [onCommitTypography]). */
-    onCommitBookPrivate: ((ReaderSettings) -> Unit)? = null,
     /** F4a 字体管理回调（隐藏/取消隐藏/删除/导入，宿主落库 + 刷新字库重排）。 */
     onFontHide: (List<Long>) -> Unit = {},
     onFontUnhide: (List<Long>) -> Unit = {},
@@ -150,10 +154,11 @@ fun ReaderSettingsPanel(
     /** 已导入区是否显示（平板=true；桌面=false，仅系统字体）。 */
     showImportedSection: Boolean = true,
     /**
-     * 亮度滑块上限（真背光可用时 100；仅遮罩时壳传 0，上限钳到遮罩段 -50..0，
-     * 调亮物理不可达也不给滑。缺省 100，所有现调用方零改动）。
+     * 本机能不能调屏幕亮度（默认能，平板走系统背光）。桌面版没有背光控制通路，壳传 false：
+     * 首页的「亮度」入口整行不出现，亮度页（跟随系统 / 偏移 / 滑块 / 三个手势开关）也就不可达。
+     * 键位索引保持 11 项不变（第 5 项置为不可用），键盘遍历会自动跳过。
      */
-    brightnessMax: Int = 100,
+    brightnessSupported: Boolean = true,
     /**
      * 设备是否有物理键盘：无键盘时焦点行背景（`rowActive`）置透明——键盘/悬停共用的
      * active 高亮只在有键盘时有意义。选中值指示（金色边框/开关）不受影响。
@@ -167,10 +172,23 @@ fun ReaderSettingsPanel(
     val current = stack.last()
     // Which typography slot (body/heading/code) the current font sub-panel selects for.
     var pickSlot by remember { mutableStateOf<String?>(null) }
-    // 标注颜色页：当前编辑的类别 / 色槽 / 预设色。只在本面板内记忆，关面板复位。
+    // 笔记页：当前编辑的类别 / 色槽。只在本面板内记忆，关面板复位。
     var annotationColorKind by remember { mutableStateOf(AnnotationKind.Highlight) }
     var annotationColorSlot by remember { mutableStateOf(0) }
-    var annotationColorPreset by remember { mutableStateOf(0) }
+    /**
+     * 笔记页「恢复默认颜色池」的按下反馈（[ColorPoolResetFlashMs] 内按钮换成「已恢复」并高亮）。
+     *
+     * 色槽本来就可能就是默认值，只靠色块变化读者分不清「按上了但没变」和「根本没按到」；
+     * 计数而非布尔：连按两次也要重新计时。
+     */
+    var colorPoolResetCount by remember { mutableStateOf(0) }
+    var colorPoolResetFlash by remember { mutableStateOf(false) }
+    LaunchedEffect(colorPoolResetCount) {
+        if (colorPoolResetCount == 0) return@LaunchedEffect
+        colorPoolResetFlash = true
+        delay(ColorPoolResetFlashMs.toLong())
+        colorPoolResetFlash = false
+    }
     // 自定义主题预设（内存态）：Seed 自宿主列表；保存/删除经 onSaveTheme/onDeleteTheme 上报宿主。
     var customs by remember(customThemes) { mutableStateOf(customThemes) }
 
@@ -182,7 +200,6 @@ fun ReaderSettingsPanel(
             pickSlot = null
             annotationColorKind = AnnotationKind.Highlight
             annotationColorSlot = 0
-            annotationColorPreset = 0
         }
     }
 
@@ -245,21 +262,31 @@ fun ReaderSettingsPanel(
 
         // ---- 当前页键列表（click 与键盘共用同一回调） ----
         val s = settings
-        val commitBook = onCommitBookPrivate ?: onCommitTypography
         // F4a 字体行模型（键与渲染共用同一份，1:1 对齐 activeIdx）。
         val slotKey: String = pickSlot ?: "fontBody"
         val fontRows: List<FontPanelRow> = remember(current, fontEntries, s, pickSlot, canFontImport, canFontWifiImport, showImportedSection) {
             if (current == Sub.TextFont) buildFontRows(fontEntries, fieldOf(s, slotKey), canFontImport, showImportedSection, canFontWifiImport, s.showHiddenFonts)
             else emptyList()
         }
-        /** 字体行进入：多字重档下钻字重页，单一下钻直接写入槽位（渲染点按与键盘共用）。 */
+        /**
+         * 字体槽位提交：正文 / 标题 / 代码换字体要重新断行（排版提交）；
+         * 批注字体只改旁注覆盖层的字形（无重排提交，与色槽同口径）。
+         */
+        fun commitSlot(next: ReaderSettings) {
+            if (slotKey == "noteFont") onCommitLight(next) else onCommitTypography(next)
+        }
+        /**
+         * 字体行进入：多字重档下钻字重页，单一下钻直接写入槽位（渲染点按与键盘共用）。
+         *
+         * 批注字体与正文三槽**同一套下钻口径**：该族有多档字重就进字重页，选完族 + 字重一起落盘。
+         */
         fun enterFontRow(family: String) {
             val multi = fontEntries.filter { it.family == family }.weightChoices().size > 1
             if (multi) {
                 weightPickFamily = family
                 stack.add(Sub.WeightPicker)
             } else {
-                onCommitTypography(setField(s, slotKey, family))
+                commitSlot(setField(s, slotKey, family))
             }
         }
         // 无线下钻页可用性：能力位开且壳给了暂存目录。
@@ -275,6 +302,9 @@ fun ReaderSettingsPanel(
         // flat idx → LazyColumn 位置（阅读主题网格每 3 格并一行；亮度页手势开关同行；
         // 字体页按钮区在列表外，懒索引 = 行号 - fixedCount）。
         val listPosOf: (Int) -> Int = when (current) {
+            Sub.Home ->
+                // 「亮度」行在不能调亮度的平台（桌面）不渲染：其后各行在 LazyColumn 里前移一格。
+                if (brightnessSupported) { idx -> idx } else { idx -> if (idx < 5) idx else idx - 1 }
             Sub.TextFont -> { idx -> idx - fontFixedCount }            Sub.ReadingTheme -> { idx ->
                 val n = allThemes.size
                 val chunks = (n + GridCols - 1) / GridCols
@@ -288,8 +318,12 @@ fun ReaderSettingsPanel(
                 ItemKey(onEnter = { stack.add(Sub.Theme) }),
                 ItemKey(onEnter = { stack.add(Sub.Spacing) }),
                 ItemKey(onEnter = { stack.add(Sub.Text) }),
+                ItemKey(onEnter = { stack.add(Sub.AnnotationColors) }),
                 ItemKey(onEnter = { stack.add(Sub.ReadingTheme) }),
-                ItemKey(onEnter = { stack.add(Sub.Brightness) }),
+                // 第 5 项对应「亮度」：桌面没有亮度调节通路，留一个不可用占位，
+                // 行不渲染、键盘遍历自动跳过，其后各项索引不挪位。
+                if (brightnessSupported) ItemKey(onEnter = { stack.add(Sub.Brightness) })
+                else ItemKey(enabled = false),
                 // 以下四个开关不影响排版（翻页动画/封面拉伸/启动续读/页码）：
                 // 走无重排提交（纯 UI 设置，与 showHiddenFonts 同口径）——
                 // 走排版提交会触发重排绑定并推落位，与开书封面解析竞态
@@ -299,7 +333,6 @@ fun ReaderSettingsPanel(
                 ItemKey(onEnter = { onCommitLight(s.copy(coverStretch = !s.coverStretch)) }),
                 ItemKey(onEnter = { onCommitLight(s.copy(autoContinue = !s.autoContinue)) }),
                 ItemKey(onEnter = { onCommitLight(s.copy(pageNum = !s.pageNum)) }),
-                ItemKey(onEnter = { stack.add(Sub.AnnotationColors) }),
             )
             Sub.Text -> {
                 val px = s.fontSize * ReaderSettings.fontScaleToRatio(s.fontScale)
@@ -310,7 +343,7 @@ fun ReaderSettingsPanel(
                     sliderKey(px, 9.0, 36.0, 0.1,
                         apply = { v -> val ns = ReaderThemeMath.pxToScale(v); onPreview(s.copy(fontScale = ns)); onCommitTypography(s.copy(fontScale = ns)) },
                         fmt = { String.format("%.1f", it) }),
-                    sliderKey(s.letterSpacing, -100.0, 100.0, 1.0,
+                    sliderKey(s.letterSpacingSlot(), -100.0, 100.0, 1.0,
                         apply = { v -> onPreview(s.copy(letterSpacing = v)); onCommitTypography(s.copy(letterSpacing = v)) },
                         fmt = { it.roundToInt().toString() }),
                     // 第 6 个滑块 = 混排字距（正文页渲染在 index 5，见同函数下方的行构造）。
@@ -328,8 +361,12 @@ fun ReaderSettingsPanel(
                         ItemKey(onEnter = { onCommitLight(s.copy(showHiddenFonts = !s.showHiddenFonts)) })
                     is FontPanelRow.FollowOriginal ->
                         ItemKey(onEnter = {
-                            val clearedSlotAnchors = s.fontWeightAnchorsBySlot.filterKeys { !it.startsWith("$slotKey|") }
-                            onCommitTypography(setField(s, slotKey, "").copy(fontWeightAnchorsBySlot = clearedSlotAnchors))
+                            if (slotKey == "noteFont") {
+                                commitSlot(setField(s, slotKey, "").copy(noteFontWeight = 0))
+                            } else {
+                                val clearedSlotAnchors = s.fontWeightAnchorsBySlot.filterKeys { !it.startsWith("$slotKey|") }
+                                commitSlot(setField(s, slotKey, "").copy(fontWeightAnchorsBySlot = clearedSlotAnchors))
+                            }
                         })
                     is FontPanelRow.Import ->
                         // 双按钮同行：回车走主动作（本地导入优先；单开无线时进无线下钻页）。
@@ -347,10 +384,7 @@ fun ReaderSettingsPanel(
                     val opts = fontEntries.filter { it.family == fam }.weightChoices()
                     opts.map { (w, _) ->
                         ItemKey(onEnter = {
-                            onCommitTypography(setField(s, slotKey, fam).copy(
-                                fontWeightAnchors = s.fontWeightAnchors,
-                                fontWeightAnchorsBySlot = s.fontWeightAnchorsBySlot + ("$slotKey|$fam" to w),
-                            ))
+                            commitSlot(withSlotWeight(s, slotKey, fam, w))
                         })
                     }
                 }
@@ -358,17 +392,17 @@ fun ReaderSettingsPanel(
             // 无线下钻页是纯展示页（地址 + 说明）：键盘占一位空键，只保焦点计数不崩。
             Sub.WifiImport -> listOf(ItemKey())
             Sub.Spacing -> listOf(
-                sliderKey(s.firstLineIndent, 0.0, 10.0, 1.0,
+                sliderKey(s.firstLineIndent ?: s.probeIndent ?: 0.0, 0.0, 10.0, 1.0,
                     apply = { v -> onPreview(s.copy(firstLineIndent = v)); onCommitTypography(s.copy(firstLineIndent = v)) },
                     fmt = { "${it.roundToInt()}" }),
-                sliderKey(s.lineSpacing, 0.5, 2.5, 0.1,
+                sliderKey(s.lineSpacing ?: s.probeLineSpacing ?: CssDefaults.DEFAULT_LINE_HEIGHT.toDouble(), 0.5, 2.5, 0.1,
                     apply = { v -> onPreview(s.copy(lineSpacing = v)); onCommitTypography(s.copy(lineSpacing = v)) },
                     fmt = { String.format("%.1f", it) }),
-                // 段间距/疏密：滑块取值 0..100 映射存储百分比 0..1000（10 = 100% 原节奏），
-                // 存档仍存百分比 ⇒ 旧档 0..200 直接可读，无需迁移。
-                sliderKey(s.paragraphSpacing / 10.0, 0.0, 100.0, 1.0,
-                    apply = { v -> onPreview(s.copy(paragraphSpacing = v * 10.0)); onCommitTypography(s.copy(paragraphSpacing = v * 10.0)) },
-                    fmt = { "${it.roundToInt()}" }),
+                // 段间距是**绝对值 em**（0..2）：读者没配（null）时显示原书实测段距，拖动即写本书
+                // 显式值（书自己的 margin 从此不再参与）。疏密仍是百分比乘算（另一档语义）。
+                sliderKey(s.paragraphSpacing ?: s.probeParagraphSpacing ?: 0.0, 0.0, 2.0, 0.1,
+                    apply = { v -> onPreview(s.copy(paragraphSpacing = v)); onCommitTypography(s.copy(paragraphSpacing = v)) },
+                    fmt = { String.format("%.1f", it) }),
                 sliderKey(s.paragraphGap / 10.0, 0.0, 100.0, 1.0,
                     apply = { v -> onPreview(s.copy(paragraphGap = v * 10.0)); onCommitTypography(s.copy(paragraphGap = v * 10.0)) },
                     fmt = { "${it.roundToInt()}" }),
@@ -390,26 +424,26 @@ fun ReaderSettingsPanel(
                 val slotCount = slots.size.coerceAtLeast(1)
                 val selected = annotationColorSlot.coerceIn(0, slotCount - 1)
                 val slotColor = annotationSlotColor(s, annotationColorKind, selected)
-                val presetCount = ANNOTATION_PRESET_COLORS.size
-                val preset = annotationColorPreset.coerceIn(0, presetCount - 1)
+                // 键盘：两行标签各自用 ←→ 挪色槽（挪动同时切到那一类），之后是红 / 绿 / 蓝 /
+                // 不透明度四条滑条，最后是恢复默认颜色池（只恢复两类色槽，不动下面的批注样式）。
+                // 行序号必须与页面里的 index 逐项对齐。
+                fun tabKey(tab: AnnotationKind): ItemKey {
+                    val tabSlots = annotationColorSlots(s, tab)
+                    val n = tabSlots.size.coerceAtLeast(1)
+                    val sel = if (annotationColorKind == tab) annotationColorSlot.coerceIn(0, n - 1) else 0
+                    fun pick(next: Int) {
+                        annotationColorKind = tab
+                        annotationColorSlot = next
+                    }
+                    return ItemKey(
+                        onEnter = { pick(sel) },
+                        onLeft = { pick((sel - 1 + n) % n) },
+                        onRight = { pick((sel + 1) % n) },
+                    )
+                }
                 listOf(
-                    ItemKey(onEnter = { annotationColorKind = AnnotationKind.Highlight }),
-                    ItemKey(onEnter = { annotationColorKind = AnnotationKind.Underline }),
-                    ItemKey(
-                        // 色槽行本身没有「整行动作」：左右键移动当前槽，具体槽由各自的色点接收点击。
-                        onEnter = {},
-                        onLeft = { annotationColorSlot = (selected - 1 + slotCount) % slotCount },
-                        onRight = { annotationColorSlot = (selected + 1) % slotCount },
-                    ),
-                    ItemKey(onEnter = { onCommitLight(withAnnotationDefaultSlot(s, annotationColorKind, selected)) }),
-                    ItemKey(
-                        onEnter = {
-                            val next = annotationWithRgb(slotColor, ANNOTATION_PRESET_COLORS[preset])
-                            onCommitLight(withAnnotationColorSlot(s, annotationColorKind, selected, next))
-                        },
-                        onLeft = { annotationColorPreset = (preset - 1 + presetCount) % presetCount },
-                        onRight = { annotationColorPreset = (preset + 1) % presetCount },
-                    ),
+                    tabKey(AnnotationKind.Highlight),
+                    tabKey(AnnotationKind.Underline),
                     sliderKey(
                         annotationRed(slotColor).toDouble(),
                         0.0,
@@ -454,10 +488,50 @@ fun ReaderSettingsPanel(
                         },
                         fmt = { "${it.roundToInt()}%" },
                     ),
+                    ItemKey(onEnter = {
+                        onCommitLight(withDefaultAnnotationColorSlots(s))
+                        colorPoolResetCount++
+                    }),
+                    // 折叠所有批注：整页只留贴着划线的小图标。纯像素开关，走无重排提交。
+                    // 放在这一组的最上面：它是「要不要看见批注」的总闸，打开后其余批注控件一律置灰。
+                    ItemKey(onEnter = { onCommitLight(s.copy(noteCollapseAll = !s.noteCollapseAll)) }),
+                    // 批注字体：复用正文那套字体下钻页（同一套系统 / 导入字体列表），
+                    // 写入的是旁注覆盖层自己的族，不影响正文。
+                    ItemKey(
+                        enabled = !s.noteCollapseAll,
+                        onEnter = { pickSlot = "noteFont"; stack.add(Sub.TextFont) },
+                    ),
+                    // 批注字号：滑条按**字号**走（0.1 一档），存的是相对正文旁注默认字号的倍率，
+                    // 这样正文字号一变旁注等比变，读者看到的读数也能真正细调。
+                    sliderKey(
+                        noteFontSizeValue(s),
+                        noteFontSizeMin(s),
+                        noteFontSizeMax(s),
+                        NOTE_FONT_SIZE_STEP,
+                        apply = { v ->
+                            onCommitLight(s.copy(noteFontScale = noteFontScaleFor(s, v)))
+                        },
+                        fmt = { noteFontSizeLabel(it) },
+                        enabled = !s.noteCollapseAll,
+                    ),
+                    // 旁注框怎么画：描边 / 底色 / 文字用标注色。纯像素开关，走无重排提交。
+                    // 折叠态下小图标有自己的固定画法，这三个开关不生效（下面渲染时置灰）。
+                    ItemKey(
+                        enabled = !s.noteCollapseAll,
+                        onEnter = { onCommitLight(s.copy(noteBorder = !s.noteBorder)) },
+                    ),
+                    ItemKey(
+                        enabled = !s.noteCollapseAll,
+                        onEnter = { onCommitLight(s.copy(noteBackground = !s.noteBackground)) },
+                    ),
+                    ItemKey(
+                        enabled = !s.noteCollapseAll,
+                        onEnter = { onCommitLight(s.copy(noteTextSameColor = !s.noteTextSameColor)) },
+                    ),
                 )
             }
             Sub.Theme -> listOf(
-                ItemKey(onEnter = { commitBook(TypographicProfile.withLayoutTheme(s, "original")) }),
+                ItemKey(onEnter = { onCommitTypography(TypographicProfile.withLayoutTheme(s, "original")) }),
                 ItemKey(onEnter = { onCommitTypography(TypographicProfile.withLayoutTheme(s, "modern")) }),
                 ItemKey(onEnter = { onCommitTypography(TypographicProfile.withLayoutTheme(s, "traditional")) }),
             )
@@ -519,14 +593,14 @@ fun ReaderSettingsPanel(
                         else {
                             val sysPct = readSystemBrightness()
                             onCommitLight(s.copy(brightnessFollowSystem = false,
-                                brightness = (sysPct + s.brightnessOffset).coerceIn(-50, brightnessMax)))
+                                brightness = (sysPct + s.brightnessOffset).coerceIn(-50, 100)))
                         }
                     }),
                     sliderKey(s.brightnessOffset.toDouble(), -20.0, 20.0, 1.0,
                         apply = { v -> onCommitLight(s.copy(brightnessOffset = v.roundToInt())) },
                         fmt = { v -> if (v > 0) "+${v.roundToInt()}" else "${v.roundToInt()}" },
                         enabled = follow),
-                    sliderKey(s.brightness.toDouble(), -50.0, brightnessMax.toDouble(), 1.0,
+                    sliderKey(s.brightness.toDouble(), -50.0, 100.0, 1.0,
                         apply = { v -> onCommitLight(s.copy(brightness = v.roundToInt())) },
                         fmt = { "${it.roundToInt()}%" },
                         enabled = !follow),
@@ -777,8 +851,12 @@ fun ReaderSettingsPanel(
                                 Text("‹", color = p.text, fontSize = 20.sp)
                             }
                         }
-                        Text(current.title, color = p.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.align(Alignment.Center))
+                        Text(
+                            // 字体页是四个槽位共用的：批注字体单独标题，别让读者以为在改正文字体。
+                            if (current == Sub.TextFont && slotKey == "noteFont") "批注字体" else current.title,
+                            color = p.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.align(Alignment.Center),
+                        )
                         val closeFocused = current == Sub.TextFont &&
                             fontButtonFocus?.let { fontButtonRing.getOrNull(it)?.first } == "close"
                         Text("✕", color = p.text, fontSize = 18.sp, modifier = Modifier
@@ -792,20 +870,24 @@ fun ReaderSettingsPanel(
                     Box(modifier = Modifier.weight(1f)) {
                         val onMove: () -> Unit = { nav.releaseHold() }
                         when (current) {
-                            Sub.Home -> HomePage(s, keys, nav, onMove, listState, onCommitTypography, onCommitLight, customs, p)
+                            Sub.Home -> HomePage(
+                                s, keys, nav, onMove, listState, onCommitTypography, onCommitLight,
+                                customs, p, brightnessSupported,
+                            )
                             Sub.Text -> TextPage(s, keys, nav, onMove, listState, p, onPreview, onCommitTypography, fontDisplayByFamily)
                             Sub.TextFont -> FontLibraryPanel(
                                 rows = fontRows,
                                 nav = nav,
                                 p = p,
-                                onSelect = { family -> onCommitTypography(setField(s, slotKey, family)) },
+                                onSelect = { family -> commitSlot(setField(s, slotKey, family)) },
                                 onHide = onFontHide,
                                 onUnhide = onFontUnhide,
                                 onDelete = onFontDelete,
                                 onImport = onFontImport,
                                 // 无线走面板内下钻（返回‹/Esc 即回字体列表），不经壳弹框。
                                 onImportWifi = { stack.add(Sub.WifiImport) },
-                                // 多字重行点按下钻字重页（与键盘共用 enterFontRow 口径）。
+                                // 多字重行点按下钻字重页（与键盘共用 enterFontRow 口径）；
+                                // 批注字体同样进字重页，选完族 + 字重一起落盘。
                                 onPickWeight = { family ->
                                     weightPickFamily = family
                                     stack.add(Sub.WeightPicker)
@@ -820,6 +902,9 @@ fun ReaderSettingsPanel(
                                 onMouseMove = onMove,
                                 listState = listState,
                                 scanProgress = fontScanProgress,
+                                // 批注字体槽位的「跟随」是跟界面默认字体（旁注不套书里的正文族）。
+                                followLabel = if (slotKey == "noteFont") "跟随界面" else "跟随原书",
+                                followSubtitle = if (slotKey == "noteFont") "使用界面默认字体" else "使用原书字体",
                             )
                             Sub.WeightPicker -> {
                                 val fam = weightPickFamily
@@ -829,17 +914,11 @@ fun ReaderSettingsPanel(
                                     val isCurrent = fieldOf(s, slotKey) == fam
                                     WeightPickerPage(
                                         options = opts,
-                                        selectedWeight = if (isCurrent) {
-                                            val k = "$slotKey|$fam"
-                                            s.fontWeightAnchorsBySlot[k] ?: s.fontWeightAnchors[fam]
-                                        } else null,
+                                        selectedWeight = if (isCurrent) slotWeightOf(s, slotKey, fam) else null,
                                         nav = nav,
                                         p = p,
                                         onPickWeight = { w ->
-                                            onCommitTypography(setField(s, slotKey, fam).copy(
-                                                fontWeightAnchors = s.fontWeightAnchors,
-                                                fontWeightAnchorsBySlot = s.fontWeightAnchorsBySlot + ("$slotKey|$fam" to w),
-                                            ))
+                                            commitSlot(withSlotWeight(s, slotKey, fam, w))
                                         },
                                         onMouseMove = onMove,
                                         listState = listState,
@@ -852,27 +931,35 @@ fun ReaderSettingsPanel(
                                 p = p,
                             )
                             Sub.Spacing -> SpacingPage(s, keys, nav, onMove, listState, p, onPreview, onCommitTypography)
-                            Sub.Theme -> ThemePage(s, keys, nav, onMove, listState, onCommitTypography, commitBook, p)
+                            Sub.Theme -> ThemePage(s, keys, nav, onMove, listState, onCommitTypography, p)
                             Sub.ReadingTheme -> ReadingThemePage(s, allThemes, keys, nav, onMove, listState, onPreview, onCommitTypography, onCommitLight, p)
                             Sub.ThemePresetMgr -> ThemePresetManagerPage(s, keys, nav, onMove, listState, onPreview, onCommitTypography, customs,
                                 onCustomsChanged = { customs = it },
                                 onSaveTheme = onSaveTheme,
                                 onDeleteTheme = onDeleteTheme,
                                 p)
-                            Sub.Brightness -> BrightnessPage(s, keys, nav, onMove, listState, onCommitLight, readSystemBrightness, p, brightnessMax)
+                            Sub.Brightness -> BrightnessPage(s, keys, nav, onMove, listState, onCommitLight, readSystemBrightness, p)
                             Sub.AnimMode -> AnimModePage(s, keys, nav, onMove, listState, onCommitLight, p)
                             Sub.AnnotationColors -> AnnotationColorPage(
                                 s = s,
                                 kind = annotationColorKind,
                                 selectedSlot = annotationColorSlot,
-                                selectedPreset = annotationColorPreset,
                                 keys = keys,
                                 nav = nav,
                                 onMouseMove = onMove,
                                 listState = listState,
                                 commitLight = onCommitLight,
-                                onSelectSlot = { annotationColorSlot = it },
-                                onSelectPreset = { annotationColorPreset = it },
+                                previewLight = onPreviewLight,
+                                onSelectKind = { annotationColorKind = it },
+                                onSelectSlot = { k, i ->
+                                    annotationColorKind = k
+                                    annotationColorSlot = i
+                                },
+                                /** 刚才按过「恢复默认颜色池」：按钮短暂换成「已恢复」并金色高亮。 */
+                                resetFlash = colorPoolResetFlash,
+                                noteFontLabel = fieldOf(s, "noteFont").let {
+                                    if (it.isEmpty()) "跟随界面" else fontDisplayByFamily[it] ?: genericFamilyLabel(it)
+                                },
                                 p = p,
                             )
                         }
@@ -943,7 +1030,7 @@ private fun WifiImportPage(
 private enum class Sub(val title: String) {
     Home("设置"), Text("文字"), TextFont("字体管理"), WeightPicker("字重"), WifiImport("WIFI 导入"), Spacing("间距"),
     Theme("排版主题"), ReadingTheme("阅读主题"), ThemePresetMgr("预设管理"),
-    Brightness("亮度"), AnimMode("翻页动画模式"), AnnotationColors("标注颜色"),
+    Brightness("亮度"), AnimMode("翻页动画模式"), AnnotationColors("笔记"),
 }
 
 /** 键盘项：click 与键盘共用同一回调；网格格的左右由调用方配成步进，滑块的左右配成调值。 */
@@ -953,6 +1040,11 @@ private data class ItemKey(
     val onRight: () -> Unit = {},
     val enabled: Boolean = true,
 )
+
+/** 字间距滑块的取值（档位 -100..100 = -0.2em..0.2em）：读者配了就用它的槽位，
+ *  没配（`null` = 按书）就用原书正文实测字距换算成槽位（与引擎实际排版同值）。 */
+private fun ReaderSettings.letterSpacingSlot(): Double =
+    letterSpacing ?: ((probeLetterSpacing ?: 0.0) * 500.0).coerceIn(-100.0, 100.0)
 
 /** 滑块项：←→ 按步长调值（与 −/+ 按钮同 snap 网格、同 preview/commit 口径）。 */
 private fun sliderKey(
@@ -993,19 +1085,23 @@ private fun HomePage(
     commitPlain: (ReaderSettings) -> Unit,
     customs: List<ThemePreset>,
     p: Palette,
+    /** 不能调亮度的平台（桌面）：不渲染「亮度」行。 */
+    showBrightness: Boolean = true,
 ) {
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
         item { SetRow("排版主题", ReaderThemeMath.layoutThemeLabel(s.layoutTheme), keys[0].onEnter, p, nav = nav, index = 0) }
         item { SetRow("间距", onTap = keys[1].onEnter, p = p, nav = nav, index = 1) }
         item { SetRow("文字", onTap = keys[2].onEnter, p = p, nav = nav, index = 2) }
-        item { SetRow("阅读主题", ReaderThemeMath.themeName(s, customs), keys[3].onEnter, p, nav = nav, index = 3) }
-        item { SetRow("亮度", if (s.brightnessFollowSystem) "跟随系统" else "自定义", keys[4].onEnter, p, nav = nav, index = 4) }
-        item { SetSwitch("翻页动画", s.pageAnim, { commitPlain(s.copy(pageAnim = it)) }, p, nav = nav, index = 5) }
-        item { SetRow("翻页动画模式", ReaderThemeMath.pageAnimationModeLabel(s.pageAnimationMode), keys[6].onEnter, p, nav = nav, index = 6) }
-        item { SetSwitch("封面拉伸全屏", s.coverStretch, { commitPlain(s.copy(coverStretch = it)) }, p, nav = nav, index = 7) }
-        item { SetSwitch("启动时继续阅读", s.autoContinue, { commitPlain(s.copy(autoContinue = it)) }, p, nav = nav, index = 8) }
-        item { SetSwitch("显示页码", s.pageNum, { commitPlain(s.copy(pageNum = it)) }, p, nav = nav, index = 9) }
-        item { SetRow("标注颜色", onTap = keys[10].onEnter, p = p, nav = nav, index = 10) }
+        item { SetRow("笔记", onTap = keys[3].onEnter, p = p, nav = nav, index = 3) }
+        item { SetRow("阅读主题", ReaderThemeMath.themeName(s, customs), keys[4].onEnter, p, nav = nav, index = 4) }
+        if (showBrightness) {
+            item { SetRow("亮度", if (s.brightnessFollowSystem) "跟随系统" else "自定义", keys[5].onEnter, p, nav = nav, index = 5) }
+        }
+        item { SetSwitch("翻页动画", s.pageAnim, { commitPlain(s.copy(pageAnim = it)) }, p, nav = nav, index = 6) }
+        item { SetRow("翻页动画模式", ReaderThemeMath.pageAnimationModeLabel(s.pageAnimationMode), keys[7].onEnter, p, nav = nav, index = 7) }
+        item { SetSwitch("封面拉伸全屏", s.coverStretch, { commitPlain(s.copy(coverStretch = it)) }, p, nav = nav, index = 8) }
+        item { SetSwitch("启动时继续阅读", s.autoContinue, { commitPlain(s.copy(autoContinue = it)) }, p, nav = nav, index = 9) }
+        item { SetSwitch("显示页码", s.pageNum, { commitPlain(s.copy(pageNum = it)) }, p, nav = nav, index = 10) }
         item { Spacer(modifier = Modifier.height(24.dp)) }
     }
 }
@@ -1038,7 +1134,9 @@ private fun TextPage(
             { px -> commit(s.copy(fontScale = ReaderThemeMath.pxToScale(px))) }, p, labelWidth = labelW,
             nav = nav, index = 3) }
         // Letter spacing: UI value range -100..100 (step 1), internally mapped to -0.2em..0.2em.
-        item { UiSliderRow("字间距", -100.0, 100.0, 1.0, s.letterSpacing, { it.roundToInt().toString() },
+        // 字间距：**em 语义**（-100..100 档 = -0.2em..0.2em）。读者没配（null）时滑条显示
+        // 原书正文实测字距（引擎就是按它排的，见 `BoxChapterLayouter.chapterLetterSpacingEm`）。
+        item { UiSliderRow("字间距", -100.0, 100.0, 1.0, s.letterSpacingSlot(), { it.roundToInt().toString() },
             { preview(s.copy(letterSpacing = it)) }, { commit(s.copy(letterSpacing = it)) }, p, labelWidth = labelW,
             nav = nav, index = 4) }
         // 混排字距（用户可见名 2026-10-03 由「中西字距」改名；内部标识符与 JSON 键仍是
@@ -1072,22 +1170,27 @@ private fun SpacingPage(
     val labelW = sliderLabelWidth(listOf("首行缩进", "行距", "段间距", "疏密", "上边距", "下边距", "左边距", "右边距"), p)
     // 排版量滑块永远可调 (用户最高优先级); 原书设置 只是把值重置为中性默认.
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
-        // 首行缩进 (em): UI 层在全局偏好里最高优先级 text-indent; 自定义样式可再覆盖; 0 = 无首行缩进.
-        item { UiSliderRow("首行缩进", 0.0, 10.0, 1.0, s.firstLineIndent,
+        // 首行缩进 (em): 读者设过就按读者值发声明（0 = 明确不缩进，压掉书的缩进）；
+        // 没设过（null）时滑条显示原书的实测读数，渲染仍由书自己的 CSS 生效。
+        item { UiSliderRow("首行缩进", 0.0, 10.0, 1.0, s.firstLineIndent ?: s.probeIndent ?: 0.0,
             { "${it.roundToInt()}" },
             { preview(s.copy(firstLineIndent = it)) }, { commit(s.copy(firstLineIndent = it)) }, p, labelWidth = labelW,
             nav = nav, index = 0) }
-        item { UiSliderRow("行距", 0.5, 2.5, 0.1, s.lineSpacing,
+        // 行距：读者设过就显示读者值；没设过（null）显示原书实测行高，书没写就显示引擎初值 1.5
+        // （面板显示的是**实际生效值**，不设「跟随原书」伪档位；拖动即写本书显式值）。
+        item { UiSliderRow("行距", 0.5, 2.5, 0.1, s.lineSpacing ?: s.probeLineSpacing ?: CssDefaults.DEFAULT_LINE_HEIGHT.toDouble(),
             { String.format("%.1f", it) },
             { preview(s.copy(lineSpacing = it)) }, { commit(s.copy(lineSpacing = it)) }, p, labelWidth = labelW,
             nav = nav, index = 1) }
-        // 段间距：p/li 纵边距乘算。滑块取值 0..100 映射存储百分比 0..1000（10 = 100% = 书/主题
-        // 节奏，0 = p/li 边距清零，100 = 1000%）。存档存百分比 ⇒ 旧档 0..200 读出来 ÷10 即滑块值。
-        item { UiSliderRow("段间距", 0.0, 100.0, 1.0, s.paragraphSpacing / 10.0,
-            { "${it.roundToInt()}" },
-            { preview(s.copy(paragraphSpacing = it * 10.0)) }, { commit(s.copy(paragraphSpacing = it * 10.0)) }, p, labelWidth = labelW,
+        // 段间距：**绝对值 em**（0..2）。读者没配（null）时滑条显示原书实测段距（含 UA 基线 1em），
+        // 渲染仍按书自己的 margin；拖动即写本书显式值，p/li 的上下外边距从此固定为该 em。
+        // 2026-10-29 由百分比乘算改回绝对值：百分比会让同一条滑块在不同书上代表不同物理间距。
+        item { UiSliderRow("段间距", 0.0, 2.0, 0.1, s.paragraphSpacing ?: s.probeParagraphSpacing ?: 0.0,
+            { String.format("%.1f", it) },
+            { preview(s.copy(paragraphSpacing = it)) }, { commit(s.copy(paragraphSpacing = it)) }, p, labelWidth = labelW,
             nav = nav, index = 2) }
-        // 疏密：p/li 之外一切块级纵边距乘算，同段间距的取值映射（10 = 100% = 原书节奏，0 = 结构块边距清零）。
+        // 疏密：p/li 之外一切块级纵边距**按比例乘算**（10 = 100% = 原书节奏，0 = 结构块边距清零）；
+        // 与段间距的绝对值不是同一档语义，滑块取值 0..100。
         item { UiSliderRow("疏密", 0.0, 100.0, 1.0, s.paragraphGap / 10.0,
             { "${it.roundToInt()}" },
             { preview(s.copy(paragraphGap = it * 10.0)) }, { commit(s.copy(paragraphGap = it * 10.0)) }, p, labelWidth = labelW,
@@ -1119,14 +1222,13 @@ private fun ThemePage(
     onMouseMove: () -> Unit,
     listState: LazyListState,
     commit: (ReaderSettings) -> Unit,
-    commitBook: (ReaderSettings) -> Unit,
     p: Palette,
 ) {
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
-        // 三个按钮都是一键重置样式的预设: 把自身的排版值写入 UI 设置 (滑块立刻跟随、值即实际值),
-        // 用户随后拖滑块是最高优先级. 现代/传统 写 缩进/段间距/字体族 (diff 传染全局);
-        // 原书设置 写全套中性默认 (字体不覆盖/字号基准/缩进与段间距默认/字距 行距归位),
-        // 只写本书私有 overlay 不传染全局.
+        // 三个按钮都只切 `layoutTheme` 这个开关：基线交给主题层（`modern.css` / `traditional.css`），
+        // 读者层不再把主题值钉进本书（写了反而盖掉主题层口径）。
+        // 「原书设置」= 清空本书的排版覆盖（字体槽/行距/字距/段距/疏密/缩进回预设），本书重新完全听书；
+        // 不动字号与页边距。见 `docs/设置模型整改计划.md` §3.5。
         item { ThemeOpt("原书设置", s.layoutTheme == "original", keys[0].onEnter, p, nav = nav, index = 0) }
         item { ThemeOpt("现代模式", s.layoutTheme == "modern", keys[1].onEnter, p, nav = nav, index = 1) }
         item { ThemeOpt("传统模式", s.layoutTheme == "traditional", keys[2].onEnter, p, nav = nav, index = 2) }
@@ -1135,16 +1237,103 @@ private fun ThemePage(
 }
 
 private val FONT_FIELDS = listOf("正文" to "fontBody", "标题" to "fontTitle", "代码" to "fontCode")
+
+/**
+ * 字体槽位读写：正文 / 标题 / 代码三槽之外，笔记页的「批注字体」也复用同一套字体下钻页
+ * （[FontLibraryPanel]），槽位键 `noteFont`。它的提交走无重排路径（见 `commitSlot`）。
+ *
+ * 批注换族时一并清掉旧字重：字重没按族记账（独立字段），留着上一个族的粗档会让新族
+ * 莫名其妙地变粗。字重页写入时是「先 setField 再填字重」，清掉不碍事。
+ */
 private fun fieldOf(s: ReaderSettings, key: String) = when (key) {
     "fontTitle" -> s.fontTitle
     "fontCode" -> s.fontCode
+    "noteFont" -> s.noteFont
     else -> s.fontBody
 }
 private fun setField(s: ReaderSettings, key: String, v: String) = when (key) {
     "fontTitle" -> s.copy(fontTitle = v)
     "fontCode" -> s.copy(fontCode = v)
+    "noteFont" -> s.copy(noteFont = v, noteFontWeight = 0)
     else -> s.copy(fontBody = v)
 }
+
+/**
+ * 槽位当前字重：正文三槽读按槽锚点（旧全局表兜底），批注字体读自己的独立字段。
+ *
+ * 批注不是书本排版的一部分，不能把锚点塞进 `fontWeightAnchorsBySlot`：那张表按书私有
+ * 且进 [orilumn.reader.engine.text.LayoutParamKey]，会让旁注换字重误作废分页表。
+ */
+private fun slotWeightOf(s: ReaderSettings, key: String, family: String): Int? =
+    if (key == "noteFont") {
+        s.noteFontWeight.takeIf { it in 100..900 }
+    } else {
+        s.fontWeightAnchorsBySlot["$key|$family"] ?: s.fontWeightAnchors[family]
+    }
+
+/** 写入某个族的字重（与 [slotWeightOf] 对称），返回可交给 `commitSlot` 的新设置。 */
+private fun withSlotWeight(s: ReaderSettings, key: String, family: String, weight: Int): ReaderSettings =
+    if (key == "noteFont") {
+        setField(s, key, family).copy(noteFontWeight = weight)
+    } else {
+        setField(s, key, family).copy(
+            fontWeightAnchorsBySlot = s.fontWeightAnchorsBySlot + ("$key|$family" to weight),
+        )
+    }
+
+/**
+ * 批注字号滑条的步长：**显示字号** 0.1 一档（不是存盘的倍率）。
+ *
+ * 存的是倍率（正文字号一变旁注等比变），但读者看的是右侧那个字号读数；若按「倍率 0.1 一档」
+ * 去走，读数一跳就是 `18 × 0.72 × 0.1 ≈ 1.3` 号，等于根本没有细档（读者报「每一档是 1.3」）。
+ * 所以滑条的值一律用**字号**表示，提交时才换算回倍率。
+ */
+private const val NOTE_FONT_SIZE_STEP = 0.1
+
+/** 批注字号的基准字号：正文主字号 × 旁注比例（倍率 = 1 时旁注多大）。 */
+private fun noteFontBase(s: ReaderSettings): Double =
+    s.fontSize * ReaderSettings.fontScaleToRatio(s.fontScale) * NOTE_BUBBLE_FONT_RATIO
+
+/** 滑条的当前值：旁注实际字号（与「文字」页字号同口径）。 */
+private fun noteFontSizeValue(s: ReaderSettings): Double = noteFontBase(s) * s.noteFontScale
+
+/**
+ * 滑条值（字号）→ 落盘倍率。
+ *
+ * 上下限仍按倍率的 [ReaderSettings.MIN_NOTE_FONT_SCALE] / [ReaderSettings.MAX_NOTE_FONT_SCALE] 夹，
+ * 滑条的端点也用同一对边界换算（见 [noteFontSizeMin] / [noteFontSizeMax]）。
+ */
+private fun noteFontScaleFor(s: ReaderSettings, size: Double): Float =
+    (size / noteFontBase(s)).toFloat()
+        .coerceIn(ReaderSettings.MIN_NOTE_FONT_SCALE, ReaderSettings.MAX_NOTE_FONT_SCALE)
+
+/** 滑条下限：倍率下限换算成字号，并落到 0.1 的整格上（否则每一档都带小数尾巴）。 */
+private fun noteFontSizeMin(s: ReaderSettings): Double =
+    ((noteFontBase(s) * ReaderSettings.MIN_NOTE_FONT_SCALE) * 10.0).roundToLong() / 10.0
+
+/**
+ * 批注字号的**绝对上限**（与「文字」页字号同口径）：滑条右端最多停在这里。
+ *
+ * 存的仍是倍率（正文字号变了旁注等比变），但读者能拖到的最大值不再随正文字号一起飘到
+ * 二十几、三十几 —— 再大就不像一行旁注了。
+ */
+private const val NOTE_FONT_SIZE_MAX = 25.0
+
+/**
+ * 滑条上限：倍率上限换算成字号，但不超过 [NOTE_FONT_SIZE_MAX]，并落到 0.1 的整格上。
+ *
+ * 正文字号小的时候倍率上限先到（旁注不该比正文大一倍多），正文字号大的时候 25 先到。
+ * 极端情况下（正文字号 36 又拉到最大缩放）倍率下限换算出来已经超过 25，此时保住一格可拖动，
+ * 不让上下限反过来。
+ */
+private fun noteFontSizeMax(s: ReaderSettings): Double {
+    val byRatio = noteFontBase(s) * ReaderSettings.MAX_NOTE_FONT_SCALE
+    val cap = maxOf(minOf(byRatio, NOTE_FONT_SIZE_MAX), noteFontSizeMin(s) + NOTE_FONT_SIZE_STEP)
+    return (cap * 10.0).roundToLong() / 10.0
+}
+
+/** 滑条右侧读数：就是字号本身，0.1 一档老老实实显示成 0.1。 */
+private fun noteFontSizeLabel(size: Double): String = String.format("%.1f", size)
 
 /** CSS 通用族名（排版主题写进槽位的默认值）→ 中文标签；真正的字族展示由 [fontDisplayByFamily] 给出。 */
 private fun genericFamilyLabel(family: String): String = when (family) {
@@ -1310,17 +1499,23 @@ private fun PingButton(
     p: Palette,
     modifier: Modifier = Modifier,
     red: Boolean = false,
+    /** 按下反馈：整块换成金色描边 + 高亮底，和「只是聚焦」区分开（见 [ColorPoolResetFlashMs]）。 */
+    flash: Boolean = false,
     onClick: () -> Unit,
     nav: PanelNav,
     index: Int,
 ) {
     val clickSrc = remember { MutableInteractionSource() }
     Text(
-        label, color = if (red) CancelRed else p.text, fontSize = 14.sp,
+        label, color = when {
+            flash -> PanelGold
+            red -> CancelRed
+            else -> p.text
+        }, fontSize = 14.sp,
         modifier = modifier
             .clip(RoundedCornerShape(6.dp))
-            .background(if (nav.activeIdx == index) p.rowActive else p.cardBg)
-            .border(1.dp, p.cardBorder, RoundedCornerShape(6.dp))
+            .background(if (flash || nav.activeIdx == index) p.rowActive else p.cardBg)
+            .border(1.dp, if (flash) PanelGold else p.cardBorder, RoundedCornerShape(6.dp))
             .clickable(onClick = onClick, interactionSource = clickSrc, indication = null)
             .panelHover(nav, index)
             .kbRing()
@@ -1341,7 +1536,6 @@ private fun BrightnessPage(
     commit: (ReaderSettings) -> Unit,
     readSystemBrightness: () -> Int,
     p: Palette,
-    brightnessMax: Int = 100,
 ) {
     val follow = s.brightnessFollowSystem
     val labelW = sliderLabelWidth(listOf("亮度偏移", "亮度"), p)
@@ -1355,7 +1549,7 @@ private fun BrightnessPage(
                         // When turning off follow-system, avoid a brightness jump: reset the main brightness slider with "current system brightness + brightness offset".
                         val sysPct = readSystemBrightness()
                         commit(s.copy(brightnessFollowSystem = false,
-                            brightness = (sysPct + s.brightnessOffset).coerceIn(-50, brightnessMax)))
+                            brightness = (sysPct + s.brightnessOffset).coerceIn(-50, 100)))
                     }
                 }, p, nav = nav, index = 0)
         }
@@ -1365,7 +1559,7 @@ private fun BrightnessPage(
             nav = nav, index = 1) }
         // Main "brightness" slider: 0..100 writes system brightness as a percentage; -50..0 uses a black overlay to dim below the system minimum.
         // When follow-system is on, the main slider is greyed out; the "brightness offset" then adds/subtracts a percentage around system brightness.
-        item { UiSliderRow("亮度", -50.0, brightnessMax.toDouble(), 1.0, s.brightness.toDouble(), { "${it.roundToInt()}%" },
+        item { UiSliderRow("亮度", -50.0, 100.0, 1.0, s.brightness.toDouble(), { "${it.roundToInt()}%" },
             { commit(s.copy(brightness = it.roundToInt())) }, { commit(s.copy(brightness = it.roundToInt())) }, p, enabled = !follow, labelWidth = labelW,
             nav = nav, index = 2) }
         item {
@@ -1412,33 +1606,50 @@ private fun AnimModePage(
 // ================= Annotation colors page =================
 
 /**
- * 标注颜色页（D-13 / D-21）：高亮 / 划线各自一组五格色槽。
+ * 笔记页（D-13 / D-21）：高亮 / 划线各一行标签，每行右侧是本类的五格色槽。
  *
- * 交互：先选类别，再点一格色槽选中编辑；十格基础色只换 RGB、保留该槽透明度；
- * 红/绿/蓝滑条可调到任意颜色，透明度滑条只改 alpha；「设为默认色槽」决定新建标注用哪一格。
+ * 批注**没有自己的色系**：它只是高亮 / 划线记录上附带的一段文字，墨色跟随所属记录（D-26），
+ * 所以这里只有两类。
+ *
+ * 交互：点标签切类别；点任一行里的色槽既切到那一类、又选中那格；下方红/绿/蓝与不透明度
+ * 只改选中那一格（不透明度 100% = 完全盖住文字，0% = 全透明看不见），**拖动中即时生效**
+ * （走 [previewLight]，只应用不落盘），松手再由 [commitLight] 落盘。
+ * 最下方的「恢复默认颜色池」把两类十格一起恢复出厂值——**只恢复色槽**，不动下面那几项
+ * 批注自己的样式（2026-11-04 用户定口：按钮名与作用范围要一致）；按完按钮会短暂变成
+ * 「已恢复」并金色高亮，因为色槽本来就是出厂值时色块不会变，没有反馈就看不出按上了。
+ * 默认色槽不归本页管（新建标注用哪一格由浮动菜单决定），所以这里没有金点、也没有默认按钮。
  * 所有改动走 [commitLight]（只改像素，不触发重排）。
+ *
+ * 「恢复默认颜色池」之后还有两项**旁注自己的样式**（2026-10-28 用户定口）：
+ * - **批注字体**：与正文 / 标题 / 代码同一套字体下钻页，可挑任意系统或导入字体；
+ *   多字重的族同样进字重页（选完族与字重一起生效，换族回到该族默认字重）；
+ *   空槽 = 跟随界面默认（不是跟随原书——旁注不套书里的正文族）。
+ * - **批注字号**：滑条编辑倍率，右侧显示换算后的实际字号；旁注始终跟正文字号等比。
+ * 两项都只作用于覆盖层，与色槽同口径走无重排提交。
  */
 @Composable
 private fun AnnotationColorPage(
     s: ReaderSettings,
     kind: AnnotationKind,
     selectedSlot: Int,
-    selectedPreset: Int,
     keys: List<ItemKey>,
     nav: PanelNav,
     onMouseMove: () -> Unit,
     listState: LazyListState,
     commitLight: (ReaderSettings) -> Unit,
-    onSelectSlot: (Int) -> Unit,
-    onSelectPreset: (Int) -> Unit,
+    previewLight: (ReaderSettings) -> Unit,
+    onSelectKind: (AnnotationKind) -> Unit,
+    onSelectSlot: (AnnotationKind, Int) -> Unit,
+    /** 「恢复默认颜色池」的按下反馈：true 时按钮文字换成「已恢复」并金色高亮。 */
+    resetFlash: Boolean,
+    /** 「批注字体」行右侧的展示名（空槽 = 跟随界面；导入 / 系统族取本地化展示名）。 */
+    noteFontLabel: String,
     p: Palette,
 ) {
     val slots = annotationColorSlots(s, kind)
     val slotCount = slots.size.coerceAtLeast(1)
     val selected = selectedSlot.coerceIn(0, slotCount - 1)
-    val defaultSlot = annotationDefaultSlot(s, kind)
     val slotColor = annotationSlotColor(s, kind, selected)
-    val preset = selectedPreset.coerceIn(0, ANNOTATION_PRESET_COLORS.lastIndex)
     var redDraft by remember(kind, selected, slotColor) {
         mutableFloatStateOf(annotationRed(slotColor).toFloat())
     }
@@ -1457,85 +1668,35 @@ private fun AnnotationColorPage(
         blueDraft = annotationBlue(slotColor).toFloat()
         alphaDraft = annotationAlphaPercent(slotColor)
     }
-    val labelW = sliderLabelWidth(listOf("红", "绿", "蓝", "透明度"), p)
+    val labelW = sliderLabelWidth(listOf("红", "绿", "蓝", "不透明度", "批注字号"), p)
 
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
-        item { ThemeOpt("高亮", kind == AnnotationKind.Highlight, keys[0].onEnter, p, nav = nav, index = 0) }
-        item { ThemeOpt("划线", kind == AnnotationKind.Underline, keys[1].onEnter, p, nav = nav, index = 1) }
         item {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(if (nav.activeIdx == 2) p.rowActive else Color.Transparent)
-                    .panelHover(nav, 2)
-                    .padding(horizontal = 16.dp, vertical = 10.dp),
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("色槽", color = p.text, fontSize = 15.sp)
-                    Spacer(Modifier.weight(1f))
-                    slots.forEachIndexed { index, argb ->
-                        if (index > 0) Spacer(Modifier.width(8.dp))
-                        AnnotationSlotSwatch(
-                            argb = argb,
-                            selected = index == selected,
-                            isDefault = index == defaultSlot,
-                            p = p,
-                            onClick = { onSelectSlot(index) },
-                        )
-                    }
-                }
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    "金点 = 新建标注默认色；点选色槽后可在下方改色",
-                    color = p.muted2,
-                    fontSize = 12.sp,
-                )
-            }
+            AnnotationKindTabRow(
+                label = "高亮",
+                active = kind == AnnotationKind.Highlight,
+                slots = annotationColorSlots(s, AnnotationKind.Highlight),
+                selectedSlot = if (kind == AnnotationKind.Highlight) selected else -1,
+                p = p,
+                nav = nav,
+                index = 0,
+                onActivate = { onSelectKind(AnnotationKind.Highlight) },
+                onSelectSlot = { onSelectSlot(AnnotationKind.Highlight, it) },
+            )
             HLine(p, modifier = Modifier.padding(start = 16.dp, end = 16.dp))
         }
         item {
-            PingButton(
-                label = if (selected == defaultSlot) "已是默认色槽" else "设为默认色槽",
+            AnnotationKindTabRow(
+                label = "划线",
+                active = kind == AnnotationKind.Underline,
+                slots = annotationColorSlots(s, AnnotationKind.Underline),
+                selectedSlot = if (kind == AnnotationKind.Underline) selected else -1,
                 p = p,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 5.dp),
-                onClick = keys[3].onEnter,
                 nav = nav,
-                index = 3,
+                index = 1,
+                onActivate = { onSelectKind(AnnotationKind.Underline) },
+                onSelectSlot = { onSelectSlot(AnnotationKind.Underline, it) },
             )
-        }
-        item {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(if (nav.activeIdx == 4) p.rowActive else Color.Transparent)
-                    .panelHover(nav, 4)
-                    .padding(horizontal = 16.dp, vertical = 10.dp),
-            ) {
-                Text("颜色", color = p.text, fontSize = 15.sp)
-                Spacer(Modifier.height(8.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    ANNOTATION_PRESET_COLORS.forEachIndexed { index, rgb ->
-                        AnnotationPresetSwatch(
-                            // 快捷色只代表 RGB；不跟当前槽的透明度走，否则 alpha=0 时整行看不见。
-                            color = Color(rgb),
-                            selected = index == preset,
-                            p = p,
-                            onClick = {
-                                onSelectPreset(index)
-                                commitLight(
-                                    withAnnotationColorSlot(
-                                        s, kind, selected,
-                                        annotationWithRgb(slotColor, rgb),
-                                    ),
-                                )
-                            },
-                        )
-                    }
-                }
-            }
             HLine(p, modifier = Modifier.padding(start = 16.dp, end = 16.dp))
         }
         item {
@@ -1546,7 +1707,14 @@ private fun AnnotationColorPage(
                 step = 1.0,
                 value = redDraft.toDouble(),
                 fmt = { "${it.roundToInt()}" },
-                onPreview = { redDraft = it.toFloat() },
+                onPreview = { v ->
+                    redDraft = v.toFloat()
+                    // 拖动中就走一遍预览：色槽与正文墨迹随手实时变，松手再落盘。
+                    previewLight(withAnnotationColorSlot(
+                        s, kind, selected,
+                        annotationWithChannel(slotColor, 16, v.roundToInt()),
+                    ))
+                },
                 onCommit = { v ->
                     redDraft = v.toFloat()
                     commitLight(
@@ -1559,7 +1727,7 @@ private fun AnnotationColorPage(
                 p = p,
                 labelWidth = labelW,
                 nav = nav,
-                index = 5,
+                index = 2,
             )
         }
         item {
@@ -1570,7 +1738,13 @@ private fun AnnotationColorPage(
                 step = 1.0,
                 value = greenDraft.toDouble(),
                 fmt = { "${it.roundToInt()}" },
-                onPreview = { greenDraft = it.toFloat() },
+                onPreview = { v ->
+                    greenDraft = v.toFloat()
+                    previewLight(withAnnotationColorSlot(
+                        s, kind, selected,
+                        annotationWithChannel(slotColor, 8, v.roundToInt()),
+                    ))
+                },
                 onCommit = { v ->
                     greenDraft = v.toFloat()
                     commitLight(
@@ -1583,7 +1757,7 @@ private fun AnnotationColorPage(
                 p = p,
                 labelWidth = labelW,
                 nav = nav,
-                index = 6,
+                index = 3,
             )
         }
         item {
@@ -1594,7 +1768,13 @@ private fun AnnotationColorPage(
                 step = 1.0,
                 value = blueDraft.toDouble(),
                 fmt = { "${it.roundToInt()}" },
-                onPreview = { blueDraft = it.toFloat() },
+                onPreview = { v ->
+                    blueDraft = v.toFloat()
+                    previewLight(withAnnotationColorSlot(
+                        s, kind, selected,
+                        annotationWithChannel(slotColor, 0, v.roundToInt()),
+                    ))
+                },
                 onCommit = { v ->
                     blueDraft = v.toFloat()
                     commitLight(
@@ -1607,18 +1787,24 @@ private fun AnnotationColorPage(
                 p = p,
                 labelWidth = labelW,
                 nav = nav,
-                index = 7,
+                index = 4,
             )
         }
         item {
             UiSliderRow(
-                label = "透明度",
+                label = "不透明度",
                 min = 0.0,
                 max = 100.0,
                 step = 1.0,
                 value = alphaDraft.toDouble(),
                 fmt = { "${it.roundToInt()}%" },
-                onPreview = { alphaDraft = it.toFloat() },
+                onPreview = { v ->
+                    alphaDraft = v.toFloat()
+                    previewLight(withAnnotationColorSlot(
+                        s, kind, selected,
+                        annotationWithAlpha(slotColor, annotationAlphaFromPercent(v.toFloat())),
+                    ))
+                },
                 onCommit = { v ->
                     alphaDraft = v.toFloat()
                     commitLight(
@@ -1631,10 +1817,146 @@ private fun AnnotationColorPage(
                 p = p,
                 labelWidth = labelW,
                 nav = nav,
+                index = 5,
+            )
+        }
+        item {
+            PingButton(
+                label = if (resetFlash) "已恢复" else "恢复默认颜色池",
+                p = p,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+                flash = resetFlash,
+                onClick = keys[6].onEnter,
+                nav = nav,
+                index = 6,
+            )
+        }
+        // 折叠所有批注：整页退成贴着划线的小图标。只改覆盖层像素，走无重排提交。
+        // 它是「要不要看见批注」的总闸：打开后下面的字体、字号、描边、底色、同色字一律置灰。
+        item {
+            SetSwitch(
+                label = "折叠所有批注",
+                checked = s.noteCollapseAll,
+                onChange = { commitLight(s.copy(noteCollapseAll = it)) },
+                p = p,
+                nav = nav,
+                index = 7,
+            )
+        }
+        item {
+            SetRow(
+                label = "批注字体",
+                value = noteFontLabel,
+                onTap = keys[8].onEnter,
+                p = p,
+                enabled = !s.noteCollapseAll,
+                nav = nav,
                 index = 8,
             )
         }
+        item {
+            // 滑条编辑的是**字号**（读数即所见，0.1 一档）；存盘仍按倍率，正文字号变了旁注等比跟着变。
+            UiSliderRow(
+                label = "批注字号",
+                min = noteFontSizeMin(s),
+                max = noteFontSizeMax(s),
+                step = NOTE_FONT_SIZE_STEP,
+                value = noteFontSizeValue(s),
+                fmt = { noteFontSizeLabel(it) },
+                onPreview = { v -> previewLight(s.copy(noteFontScale = noteFontScaleFor(s, v))) },
+                onCommit = { v -> commitLight(s.copy(noteFontScale = noteFontScaleFor(s, v))) },
+                p = p,
+                enabled = !s.noteCollapseAll,
+                labelWidth = labelW,
+                nav = nav,
+                index = 9,
+            )
+        }
+        // 旁注框的三种画法：只改覆盖层像素，走无重排提交（与上面两项同口径）。
+        // 折叠态下页面上只剩小图标，小图标不是文字、有自己的固定画法，这三项一并置灰。
+        item {
+            SetSwitch(
+                label = "显示批注边框",
+                checked = s.noteBorder,
+                onChange = { commitLight(s.copy(noteBorder = it)) },
+                p = p,
+                enabled = !s.noteCollapseAll,
+                nav = nav,
+                index = 10,
+            )
+        }
+        item {
+            SetSwitch(
+                label = "显示批注背景色",
+                checked = s.noteBackground,
+                onChange = { commitLight(s.copy(noteBackground = it)) },
+                p = p,
+                enabled = !s.noteCollapseAll,
+                nav = nav,
+                index = 11,
+            )
+        }
+        item {
+            SetSwitch(
+                label = "使用标注同色字体",
+                checked = s.noteTextSameColor,
+                onChange = { commitLight(s.copy(noteTextSameColor = it)) },
+                p = p,
+                enabled = !s.noteCollapseAll,
+                nav = nav,
+                index = 12,
+            )
+        }
         item { Spacer(modifier = Modifier.height(24.dp)) }
+    }
+}
+
+/**
+ * 笔记页的一行标签：左边类别名，右边本类的五格色槽。
+ *
+ * 点标签只切类别；点色槽既切到这一类、又选中那格（跨行点色槽不必先点标签）。
+ * 选中描边只出现在当前类别那一行。
+ */
+@Composable
+private fun AnnotationKindTabRow(
+    label: String,
+    active: Boolean,
+    slots: List<Int>,
+    selectedSlot: Int,
+    p: Palette,
+    nav: PanelNav,
+    index: Int,
+    onActivate: () -> Unit,
+    onSelectSlot: (Int) -> Unit,
+) {
+    val clickSrc = remember { MutableInteractionSource() }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 60.dp)
+            .background(if (nav.activeIdx == index) p.rowActive else Color.Transparent)
+            .clickable(interactionSource = clickSrc, indication = null, onClick = onActivate)
+            .panelHover(nav, index)
+            .kbRing()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            label,
+            color = if (active) PanelGold else p.muted,
+            fontSize = 15.sp,
+            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+        )
+        Spacer(Modifier.weight(1f))
+        slots.forEachIndexed { i, argb ->
+            if (i > 0) Spacer(Modifier.width(8.dp))
+            AnnotationSlotSwatch(
+                argb = argb,
+                selected = active && i == selectedSlot,
+                p = p,
+                onClick = { onSelectSlot(i) },
+            )
+        }
     }
 }
 
@@ -1642,7 +1964,6 @@ private fun AnnotationColorPage(
 private fun AnnotationSlotSwatch(
     argb: Int,
     selected: Boolean,
-    isDefault: Boolean,
     p: Palette,
     onClick: () -> Unit,
 ) {
@@ -1651,39 +1972,8 @@ private fun AnnotationSlotSwatch(
             .size(36.dp)
             .background(Color(argb), CircleShape)
             .border(
-                width = if (selected) 3.dp else if (isDefault) 2.dp else 1.dp,
-                color = if (selected) p.text else if (isDefault) p.selBorder else p.cardBorder,
-                shape = CircleShape,
-            )
-            .clickable(onClick = onClick),
-    ) {
-        if (isDefault) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(6.dp)
-                    .size(8.dp)
-                    .background(p.selBorder, CircleShape)
-                    .border(1.dp, Color.White, CircleShape),
-            )
-        }
-    }
-}
-
-@Composable
-private fun AnnotationPresetSwatch(
-    color: Color,
-    selected: Boolean,
-    p: Palette,
-    onClick: () -> Unit,
-) {
-    Box(
-        modifier = Modifier
-            .size(24.dp)
-            .background(color, CircleShape)
-            .border(
-                width = if (selected) 2.dp else 1.dp,
-                color = if (selected) p.selBorder else p.cardBorder,
+                width = if (selected) 3.dp else 1.dp,
+                color = if (selected) p.text else p.cardBorder,
                 shape = CircleShape,
             )
             .clickable(onClick = onClick),
@@ -1818,7 +2108,7 @@ private fun UiSliderRow(
             onPreview(v)
             onCommit(v)
         }
-        Box(Modifier.weight(1f).padding(horizontal = 8.dp)) {
+        Box(Modifier.weight(1f).padding(start = 8.dp, end = 12.dp)) {
             UiSlider(
                 fraction = fr, enabled = enabled, p = p,
                 onFraction = { f -> onPreview(snap(min + f * (max - min))) },
@@ -1879,16 +2169,24 @@ private fun UiSlider(
     // OTHER slider's value back to what it was when this slider was first composed.
     val currentOnFraction by rememberUpdatedState(onFraction)
     val currentOnFinish by rememberUpdatedState(onFinish)
+    // 滑钮圆的直径（px）：拖动换算要按「滑钮心能走的那一段」算，
+    // 滑钮两端各留一个半径，才不会越出行边界。
+    val thumbPx = with(LocalDensity.current) { SliderThumbSize.toPx() }
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxWidth()
             .height(26.dp)
             .alpha(if (enabled) 1f else 0.45f)
             .pointerInput(enabled) {
+                // `pointerInput(enabled)` 只是「enabled 变了就重开这个手势块」，**不会**关掉手势：
+                // 置灰的行以前照样能拖（真机反馈：折叠所有批注打开后，灰着的批注字号还被拖动）。
+                // 禁用时连手势都不挂，拖、点、滑一律不接。
+                if (!enabled) return@pointerInput
                 detectDragGestures(
                     onDrag = { change, _ ->
                         change.consume()
-                        last = (change.position.x / size.width.coerceAtLeast(1)).coerceIn(0f, 1f)
+                        val travel = (size.width - thumbPx).coerceAtLeast(1f)
+                        last = ((change.position.x - thumbPx / 2f) / travel).coerceIn(0f, 1f)
                         currentOnFraction(last)
                     },
                     onDragEnd = { currentOnFinish(last) },
@@ -1898,10 +2196,14 @@ private fun UiSlider(
     ) {
         val frac = fraction.coerceIn(0f, 1f)
         val railColor = if (enabled) p.sliderTrack else p.sliderTrack.copy(alpha = 0.4f)
+        // 轨道两端各让出一个滑钮半径：滑钮跑到 0 / 100% 时整颗都还在行内，
+        // 不会被右侧的「+」按钮压住一角（那一角画在按钮底色下面 = 看起来被挡）。
+        val railW = (maxWidth - SliderThumbSize).coerceAtLeast(0.dp)
         // Thin rail
         Box(
             modifier = Modifier
-                .fillMaxWidth().height(4.dp)
+                .offset(x = SliderThumbR)
+                .width(railW).height(4.dp)
                 .align(Alignment.CenterStart)
                 .clip(RoundedCornerShape(2.dp))
                 .background(railColor),
@@ -1909,7 +2211,8 @@ private fun UiSlider(
         // Gold fill
         Box(
             modifier = Modifier
-                .fillMaxWidth(frac).height(4.dp)
+                .offset(x = SliderThumbR)
+                .width(railW * frac).height(4.dp)
                 .align(Alignment.CenterStart)
                 .clip(RoundedCornerShape(2.dp))
                 .background(if (enabled) PanelGold else PanelGold.copy(alpha = 0.4f)),
@@ -1918,7 +2221,7 @@ private fun UiSlider(
         Box(
             modifier = Modifier
                 .align(Alignment.CenterStart)
-                .offset(x = maxWidth * frac - SliderThumbR)
+                .offset(x = (maxWidth - SliderThumbSize) * frac)
                 .size(SliderThumbSize)
                 .background(if (enabled) PanelGold else PanelGold.copy(alpha = 0.4f), CircleShape),
         )
@@ -1952,6 +2255,13 @@ private const val PanelMaskAlpha = 0.4f
 
 /** Panel slide and mask dim/lighten share this duration so they stay synchronized. */
 private const val PanelAnimMs = 280
+
+/**
+ * 笔记页「恢复默认颜色池」按下后保持高亮反馈的时长（ms）。
+ *
+ * 色槽本来就可能是出厂值，恢复后色块毫无变化：没有反馈读者分不清「按到了」和「没按到」。
+ */
+private const val ColorPoolResetFlashMs = 900
 
 /** 字体列表整页翻连发节流窗口（桌面 PgDn/PgUp 按住连发，一次按压只认一次）。 */
 private const val PageThrottleMs = 300

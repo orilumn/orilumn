@@ -36,6 +36,9 @@ kotlin {
             implementation(compose.material3)
             implementation(compose.material)
             implementation(compose.ui)
+            // CMP 跨平台返回键（androidx.compose.ui.backhandler.BackHandler）：
+            // 批注输入框打开时，Android 返回键 / 桌面返回键都走同一条「取消」路径。
+            implementation(libs.compose.backhandler)
             implementation(compose.components.resources)
             implementation(compose.components.uiToolingPreview)
             implementation(libs.compose.material.icons.core)

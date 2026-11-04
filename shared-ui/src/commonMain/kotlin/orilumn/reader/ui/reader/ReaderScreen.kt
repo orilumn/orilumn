@@ -6,13 +6,16 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -23,6 +26,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -31,15 +35,18 @@ import androidx.compose.ui.focus.focusTarget
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.Dp
@@ -48,12 +55,15 @@ import androidx.compose.ui.unit.sp
 import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.data.annotation.AnnotationKind
 import orilumn.reader.data.annotation.AnnotationLineStyle
+import orilumn.reader.data.font.FontEntry
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.engine.skia.LineWindowDrawer
 import orilumn.reader.engine.text.TypographicProfile
 import orilumn.reader.io.Logger
+import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.roundToInt
+import kotlin.time.TimeSource
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -64,8 +74,11 @@ import kotlinx.coroutines.withTimeoutOrNull
 /**
  * 落位前等图超时（ms）：目标页缺图时最多等这一拍再提交定位，超时按缺图提交（老的异步补齐照常）。
  * 以后翻页动画截图直接复用预热好的位图，故预热是必经之路，不是可选优化。
+ *
+ * 预栅格那条等图路径（[prerasterPage]）也用这个上限：它同样挂在漏斗锁内，
+ * 一旦某张图永远解不出来，整条落位链就永远不返回。
  */
-private const val PAGE_IMAGE_WARM_TIMEOUT_MS = 800L
+internal const val PAGE_IMAGE_WARM_TIMEOUT_MS = 800L
 
 // 跨页缓存键 imgKeyOf / bgKeyOf 已搬到 PageContent.kt（P1-2：页内容成模块后它们有两个用户）。
 
@@ -103,6 +116,14 @@ fun ReaderScreen(
     onPrefillReady: (chapter: Int, direction: Int) -> Unit = { c, d -> host.onPrefillReady(c, d) },
     settings: ReaderSettings,
     statusBarInset: Dp = 0.dp,
+    /**
+     * 键盘高度（Dp）：宿主能逐帧报告就传值，传 null 表示「这里读不到，自己去问系统 insets」。
+     *
+     * Android 阅读页是 `adjustNothing`，系统**不派发静态 IME insets**（`WindowInsets.ime` 恒为 0），
+     * 只有 inset 动画回调拿得到键盘的真实高度，所以值由宿主逐帧喂进来（D-30）。
+     * 桌面没有软键盘、API 30 以下没有逐帧回调，都传 null → 退回 `WindowInsets.ime`（与旧行为一致）。
+     */
+    imeInset: Dp? = null,
     onBack: () -> Unit = {},
     onNight: () -> Unit = {},
     onSettings: () -> Unit = {},
@@ -111,6 +132,11 @@ fun ReaderScreen(
     onNote: (() -> Unit)? = null,
     onLightChange: (ReaderSettings) -> Unit = {},
     onLightCommit: (ReaderSettings) -> Unit = {},
+    /**
+     * 本机能不能调屏幕亮度（默认能，平板走系统背光）。桌面版没有背光控制通路，壳传 false：
+     * 三组亮度手势整组禁用，且旧存档里残留的负亮度不再画压暗遮罩（否则读者无从调回）。
+     */
+    brightnessAdjustable: Boolean = true,
     /** Q1-b：顶/底栏显隐同步（Android 宿主据此显隐系统栏 chrome；桌面/其它平台可忽略）。 */
     onBarsVisibleChanged: (Boolean) -> Unit = {},
     /** Q1-b：外部推送的落位（版式重排绑定 / 目录跳转落地后同步）。非空即采用为当前定位并防抖
@@ -137,9 +163,26 @@ fun ReaderScreen(
      * 不会重读；它也不是版式修订号，不驱动重新分页。
      */
     annotationsEpoch: Int = 0,
+    /**
+     * 统一字体列表（系统 + 导入）：只用来把「批注字体」的字族名解析成可绘制的字形。
+     *
+     * 批注是盖在页面上的覆盖层，与正文分页无关；缺省空表 = 批注用界面默认字体。
+     */
+    fontEntries: List<FontEntry> = emptyList(),
 ) {
     val density = LocalDensity.current.density
+    // 卡片收起时主动让输入框失焦（D-30）：不主动收，键盘会等卡片卸载才开始降，
+    // 于是「卡片先滑走、键盘再落」——正是要消掉的两段式。失焦后键盘与卡片同一段时间里各自归位。
+    val focusManager = LocalFocusManager.current
     val profile = remember(settings, density) { TypographicProfile.build(settings, density) }
+    // 批注字体（渲染层解析）：字族名 + 字重 → Compose 字体。空串 / 字体已删 = 界面默认。
+    // 只影响旁注覆盖层，不进版式（`noteFont` 在 withoutNonLayout 里，面板走无重排提交）。
+    // 字重**不烤进字体族**：桌面端单面族没有第二档，Compose 仍按族名去系统字库取面、烤好的字重被丢，
+    // 所以族和字重分开给（族 → `fontFamily`，字重 → `fontWeight`），量宽与绘制两处都要带上。
+    val noteFontFamily = remember(settings.noteFont, settings.noteFontWeight, fontEntries) {
+        noteFontFamilyOf(settings, fontEntries)
+    }
+    val noteFontWeight = remember(settings.noteFontWeight) { noteFontWeightOf(settings) }
     val selectionHandleRadiusPx = SELECTION_HANDLE_RADIUS_DP * density
     val selectionHandleHitPx = SELECTION_HANDLE_HIT_RADIUS_DP * density
 
@@ -169,6 +212,11 @@ fun ReaderScreen(
     // 设置面板/外部 commit 驱动的亮度与护眼修改同步进本地工作快照（亮度手势期间 live 值由
     // onLightChange 直达宿主，此 effect 在宿主回写 settings 后收敛，二者同值不冲突）。
     LaunchedEffect(settings) { light = settings }
+    // 不提供亮度调节的平台（桌面）：压暗遮罩一律按 0 画——亮度手势既然禁用，
+    // 旧存档里残留的负值就没有任何出口，留在屏上等于永久压暗。
+    val maskLight = remember(light, brightnessAdjustable) {
+        if (brightnessAdjustable) light else light.copy(brightness = 0)
+    }
     var brightnessUi by remember { mutableStateOf<BrightnessGestureUi?>(null) }
     var saveJob by remember { mutableStateOf<Job?>(null) }
 
@@ -207,27 +255,63 @@ fun ReaderScreen(
     var selectionMenuVisible by remember { mutableStateOf(false) }
     // 移动端放大镜的手指位置（null = 不显示）。桌面鼠标不显示（D-10）。
     var magnifierFinger by remember { mutableStateOf<Offset?>(null) }
-    // 长按已有标注时打开的编辑菜单（D-14）；锚点是长按位置，菜单作用于整条记录。
+    // 长按已有标注 / 单击旁注时打开的那一条（D-14 / D-28）；卡片不再需要锚点。
     var editingAnnotation by remember { mutableStateOf<Annotation?>(null) }
-    var editingAnchor by remember { mutableStateOf<Rect?>(null) }
-    // 编辑菜单的透明遮罩：点菜单外任意处只关菜单，不再翻页/改选区。
-    val editScrimInteraction = remember { MutableInteractionSource() }
+    // 批注输入条的内容（D-27）：它与浮动菜单**同开同关**，所以不需要自己的「打开」状态。
+    // 文字提到这里（而不是留在输入框里），是因为点色槽落笔时要把它一起写进新记录。
+    var noteText by remember { mutableStateOf("") }
+    // 新建时用哪一类落笔：跟着操作栏顶部的 tab 走（读者切到「划线」，写下的批注就是划线的）。
+    var noteKind by remember { mutableStateOf(AnnotationKind.Highlight) }
+    // 新建 / 改型时用哪一线型：线型按钮**只选中**（D-28），落笔由点色槽或 `确定` 触发。
+    var noteLineStyle by remember { mutableStateOf(AnnotationLineStyle.Straight) }
+    // 卡片实测高度（像素）：页面让位要按它算，不能估（D-28 第 2 部分）。
+    var noteBarHeightPx by remember { mutableStateOf(0) }
+    // 卡片让位时整页上推的像素（屏幕坐标）：绘制与命中**共用这一个数**（单一来源）。
+    var inputShiftPx by remember { mutableStateOf(0f) }
+    // 读者自己上下滑过的页面偏移（null = 还没滑过，按「会遮住就推满」自动决定）。
+    var userShiftPx by remember { mutableStateOf<Float?>(null) }
+    // 卡片上沿（屏幕 px，含键盘让位）：手势侧用它判断「这一下是不是点在卡片里」。
+    var sheetTopPxState by remember { mutableStateOf(0f) }
+    // 视口高度（卡片上沿之上那一条）：手动滑动与手柄拖到边界时用它夹范围。
+    var maxShiftPxState by remember { mutableStateOf(0f) }
+    // 卡片让位时页面上下滚动的惯性动画：抬手后继续走、逐步减速（见 startPageFling）。
+    // 用不参与组合状态的壳持有，写它不该触发重组。
+    val pageFling = remember { JobSlot() }
+    // 桌面滚动翻页：横滑判据（只有横向算数、一次连续横滑最多翻一页）与
+    // 「动画在飞时攒一次、落地补翻」的槽，见 ScrollFlip.kt。
+    val scrollFlip = remember { ScrollFlipArbiter() }
+    val pendingScrollFlip = remember { PendingScrollFlip() }
+    // 滚轮那一串的断流计时器（见 ScrollFlip.kt 的 WheelBurstTimer）。
+    val wheelBurstTimer = remember { WheelBurstTimer() }
+    // 卡片开着时选中的颜色（null = 还没选，按默认色）：点色槽只记住，落笔还要等完成/点卡片外。
+    var noteColorArgb by remember { mutableStateOf<Int?>(null) }
     // 旧的 ClipboardManager 仍是 CMP 唯一共享可用的同步写入口；新 LocalClipboard 只支持 suspend。
     @Suppress("DEPRECATION")
     val clipboard = LocalClipboardManager.current
     val selectionDrawer = remember { LineWindowDrawer() }
     LaunchedEffect(currentHost, openPos?.chapter) {
         val ch = openPos?.chapter
-        if (ch == null) annotationState.clear() else annotationState.load(ch)
+        if (ch == null) {
+            annotationState.clear()
+        } else {
+            // 相邻章的标注**与本章并行预读**：读者下一步几乎只会翻到这两章，趁现在（还在读本章）
+            // 把它们的标注备好，翻过去那一刻目标页的高亮/划线/旁注首帧就有，不必再等一次库往返。
+            launch { annotationState.prefetchNeighbors(ch) }
+            annotationState.load(ch)
+        }
         selection.clear()
         selectionMenuVisible = false
         magnifierFinger = null
         editingAnnotation = null
-        editingAnchor = null
+        noteText = ""
     }
     // 标注清单里删了当前章的标注：重读本章，屏幕上的装饰同步消失（与进章 effect 分离，见参数注释）。
     LaunchedEffect(currentHost, annotationsEpoch) {
-        if (annotationsEpoch > 0) annotationState.reload()
+        if (annotationsEpoch > 0) {
+            annotationState.reload()
+            // 清单删的可能是**别的章**的标注：reload 已把预读快照整批作废，这里顺手重备邻居。
+            launch { annotationState.prefetchNeighbors(annotationState.chapter) }
+        }
     }
     // 版式/参数变化后旧选区坐标不再成立（字符偏移没变，但端点所在行可能变），直接丢弃。
     LaunchedEffect(contentRevision, density) {
@@ -235,7 +319,7 @@ fun ReaderScreen(
         selectionMenuVisible = false
         magnifierFinger = null
         editingAnnotation = null
-        editingAnchor = null
+        noteText = ""
     }
     // 选区被任何路径清空时，菜单必须同步收起（避免留下指向空选区的浮层）。
     LaunchedEffect(selection.hasSelection) {
@@ -244,14 +328,27 @@ fun ReaderScreen(
             magnifierFinger = null
         }
     }
+    // 卡片换了一条（新建 ↔ 编辑、或换编辑对象）⇒ 读者自己滑过的位置作废，重新按「遮不遮住」决定；
+    // 还在跑的惯性滚动一起收掉，免得它把刚清掉的位置又写回去。
+    LaunchedEffect(editingAnnotation?.id, selectionMenuVisible) {
+        pageFling.job?.cancel()
+        userShiftPx = null
+    }
     // 翻页后浮动菜单不跟到新页（选区保留，各页只画交集；用户可再点选区/手柄）。
     // 但跨页自动翻页可能在抬手瞬间仍在飞行：抬手已把菜单置 true，此时不能再无条件抹掉，
     // 否则「拖到页边松手」永远看不到菜单。无选区时照旧收起。
     LaunchedEffect(openPos) {
         if (!selection.hasSelection) selectionMenuVisible = false
         // 翻页后编辑菜单不跟到新页；它锚定的是旧页上的那条记录。
+        val wasEditing = editingAnnotation != null
         editingAnnotation = null
-        editingAnchor = null
+        // 批注输入条同理：它写的是旧页上的那条标注，翻页后不该继续挂着。
+        noteText = ""
+        if (wasEditing) {
+            // 编辑时恢复出来的选区只服务于那张卡；卡收了就一起收掉，免得留下无主手柄。
+            selectionMenuVisible = false
+            if (selection.hasSelection) selection.clear()
+        }
     }
     // ---- 定位动作（host 为 suspend，统一挂到本组件作用域） ----
     /**
@@ -452,7 +549,7 @@ fun ReaderScreen(
     fun markPositionChanged(next: ReaderPos) {
         openPos = next
         // 封面解析未完成时 isBookStart 恒 false（缺 bmp/首章号）——那是"未知"而非
-        // "非书首"：开书探针重排/调参重排的落位推送先于封面解析到达时（启动继续阅读、
+        // "非书首"：调参重排的落位推送先于封面解析到达时（启动继续阅读、
         // 开书后立即调参），会误记 dismissed，封面解析完成后 coverVisible 恒 false、
         // 封面永不再弹（封面跳正文首页根因）。仅在封面已解析且确实离开首位时记离开；
         // 未知则不动，由封面 effect 按落定后的解析结果结算显隐。
@@ -819,7 +916,8 @@ fun ReaderScreen(
             shift = shift,
             contentLeft = profile.marginLeft.toFloat(),
             xPx = xPx,
-            yPx = yPx,
+            // 卡片让位时整页上推了 inputShiftPx：屏幕 y 换算回页坐标要加回同一个数（D-28）。
+            yPx = yPx + inputShiftPx,
         )
     }
 
@@ -842,7 +940,7 @@ fun ReaderScreen(
             frameLead = frameLead,
             contentTop = profile.marginTop.toFloat(),
         ) ?: return null
-        return selectionSideOffset(lines, shift, yPx, direction)
+        return selectionSideOffset(lines, shift, yPx + inputShiftPx, direction)
     }
 
     /** 当前页上的选区几何；无选区/跨章/页无行时 null。 */
@@ -876,8 +974,10 @@ fun ReaderScreen(
     fun selectionHandleAt(xPx: Float, yPx: Float, widthPx: Float, heightPx: Float): SelectionHandle? {
         val p = openPos ?: return null
         val g = selectionGeometryAt(p, widthPx, heightPx) ?: return null
+        // 几何是页坐标；卡片让位时整页上推了 inputShiftPx，屏幕 y 加回同一个数再比（D-28）。
+        val pageY = yPx + inputShiftPx
         fun hit(center: Offset?): Boolean =
-            center != null && hypot(xPx - center.x, yPx - center.y) <= selectionHandleHitPx
+            center != null && hypot(xPx - center.x, pageY - center.y) <= selectionHandleHitPx
         return when {
             hit(g.startHandle) -> SelectionHandle.Start
             hit(g.endHandle) -> SelectionHandle.End
@@ -886,10 +986,30 @@ fun ReaderScreen(
     }
 
     /**
+     * 打开一条已有标注的编辑卡片，并把选区恢复成这条记录原来的字符范围。
+     *
+     * 编辑卡开着时选区不消失：读者可以先拖两端手柄改范围，再按 `确定` 把范围连同样式 / 批注
+     * 一起写回（2026-11-03 用户定口）。取不到本章原文就只开卡片、不画选区。
+     */
+    fun openAnnotationEdit(annotation: Annotation) {
+        val text = currentHost.textOf(annotation.chapter, 0, Int.MAX_VALUE)
+        val selected = text != null && selection.selectRange(
+            chapter = annotation.chapter,
+            text = text,
+            start = annotation.charStart,
+            endExclusive = annotation.charEnd,
+        )
+        if (!selected) selection.clear()
+        selectionMenuVisible = false
+        magnifierFinger = null
+        editingAnnotation = annotation
+    }
+
+    /**
      * 长按命中已有标注（D-14）：命中则打开该标注的编辑菜单并返回 true。
      *
      * 只看当前章内存列表的字符区间（`charStart <= off < charEnd`），不查库、不做几何反查；
-     * 页边距不参与命中，避免在空白边距上误开菜单。命中后清掉选区，避免两套菜单叠在一起。
+     * 页边距不参与命中，避免在空白边距上误开菜单。命中后选区恢复成这条标注的范围。
      */
     fun tryOpenAnnotationEdit(xPx: Float, yPx: Float, widthPx: Float, heightPx: Float): Boolean {
         val p = openPos ?: return false
@@ -898,36 +1018,67 @@ fun ReaderScreen(
         val top = profile.marginTop.toFloat()
         val right = (widthPx - profile.marginRight).coerceAtLeast(left)
         val bottom = (heightPx - profile.marginBottom).coerceAtLeast(top)
-        if (xPx < left || xPx > right || yPx < top || yPx > bottom) return false
+        // 屏幕 y 换算回页坐标（卡片让位时整页上推了 inputShiftPx，与 charOffsetAt 同口径）。
+        val pageY = yPx + inputShiftPx
+        if (xPx < left || xPx > right || pageY < top || pageY > bottom) return false
         val offset = charOffsetAt(p, xPx, yPx) ?: return false
-        val hit = annotationState.annotationAt(offset)?.takeIf { it.isDrawable() } ?: return false
-        selection.clear()
-        selectionMenuVisible = false
-        magnifierFinger = null
-        editingAnnotation = hit
-        editingAnchor = Rect(xPx, yPx, xPx, yPx)
+        val hit = annotationState.annotationAt(offset) ?: return false
+        openAnnotationEdit(hit)
         return true
     }
 
     /** 收起已有标注的编辑菜单（不改数据）。 */
     fun closeAnnotationEdit() {
         editingAnnotation = null
-        editingAnchor = null
     }
 
-    /** 长按起手：按 D-7 选整词 / 整句；返回 false 表示此处没有可选的章文本。 */
-    fun beginSelectionAt(xPx: Float, yPx: Float): Boolean {
+    /**
+     * 起选：把 (xPx, yPx) 处那个字变成选区锚点，返回该字在章内的偏移（`null` = 此处没有可选的章文本）。
+     *
+     * [selectUnit] 见 [TextSelectionState.begin]：长按入口按 D-7 展开整词 / 整句，
+     * 桌面鼠标拖选只要按下那一个字。
+     */
+    fun beginSelectionAt(xPx: Float, yPx: Float, selectUnit: Boolean = true): Int? {
         closeAnnotationEdit()
-        val p = openPos ?: return false
-        val offset = charOffsetAt(p, xPx, yPx) ?: return false
-        val text = currentHost.textOf(p.chapter, 0, Int.MAX_VALUE) ?: return false
-        return selection.begin(p.chapter, text, offset, currentHost.textBlockEndsOf(p.chapter))
+        val p = openPos ?: return null
+        val offset = charOffsetAt(p, xPx, yPx) ?: return null
+        val text = currentHost.textOf(p.chapter, 0, Int.MAX_VALUE) ?: return null
+        val ok = selection.begin(
+            chapter = p.chapter,
+            text = text,
+            offset = offset,
+            blockEnds = currentHost.textBlockEndsOf(p.chapter),
+            selectUnit = selectUnit,
+        )
+        return if (ok) offset else null
     }
 
-    /** 拖动手柄/长按后移动：焦点按字符走；越出当前行时保持上一个焦点。 */
-    fun extendSelectionAt(xPx: Float, yPx: Float) {
+    /**
+     * 手指落在正文左右边距里时的接续偏移：越过右缘取该行末字、越过左缘取行首字。
+     *
+     * 上下超出正文时不接管（仍按原来的 miss 处理）：手指划出页面上下不该一下选中整页。
+     */
+    fun marginSideOffsetAt(p: ReaderPos, xPx: Float, yPx: Float, widthPx: Float): Int? {
+        val left = profile.marginLeft.toFloat()
+        val right = (widthPx - profile.marginRight).coerceAtLeast(left)
+        val direction = when {
+            xPx > right -> 1
+            xPx < left -> -1
+            else -> return null
+        }
+        return charOffsetAtPageSide(p, yPx, direction)
+    }
+
+    /**
+     * 拖动手柄 / 长按后移动：焦点按字符走。
+     *
+     * 手指落到正文左右边距里时，[charOffsetAt] 会 miss（`LineHitTest` 的口径是「行尾空区不算命中」），
+     * 于是选区冻在上一个字、直到自动翻页一次性跳过去——读者看到的是「选区不跟手，然后突然多一页」。
+     * 这里补一条拖选专用出口：先贴到该行靠边的字，再按触发带翻页。
+     */
+    fun extendSelectionAt(xPx: Float, yPx: Float, widthPx: Float) {
         val p = openPos ?: return
-        val offset = charOffsetAt(p, xPx, yPx) ?: return
+        val offset = charOffsetAt(p, xPx, yPx) ?: marginSideOffsetAt(p, xPx, yPx, widthPx) ?: return
         selection.extendTo(offset)
     }
 
@@ -944,7 +1095,11 @@ fun ReaderScreen(
      * [ReaderHost.peekAdjacent] 只读探路，确认同章后才交给漏斗；落位后按手指 y
      * 把焦点接到新页最近行的靠边字（手柄接力）。
      *
-     * @return true = 已翻页并接续选区；false = 到章边界 / 邻页未就绪 / 导航被 BUSY-DROP。
+     * @return true = 本次**已经翻过页**（不必再试，哪怕选区没接上）；false = 没翻成
+     *   （到章边界 / 邻页未就绪 / 导航被 BUSY-DROP），调用方按重试间隔再试。
+     *
+     * 注意别把「翻成了但选区没接上」报成 false：调用方的重试循环会把它当成没翻，
+     * 隔 200ms 再翻一页，读者一次拖进页边就看到跳了两三页。
      */
     suspend fun autoFlipSelection(direction: Int, fingerY: Float): Boolean {
         val p = openPos ?: return false
@@ -952,8 +1107,9 @@ fun ReaderScreen(
         val peek = runCatching { currentHost.peekAdjacent(p, direction) }.getOrNull() ?: return false
         if (peek.chapter != p.chapter) return false
         val landed = flipAwait(direction, action = "selection-auto-flip") ?: return false
-        if (landed.chapter != p.chapter) return false
-        val offset = charOffsetAtPageSide(landed, fingerY, direction) ?: return false
+        // 已经翻过去了：从这里开始无论接力成不成都要停（见上面的返回值说明）。
+        if (landed.chapter != p.chapter) return true
+        val offset = charOffsetAtPageSide(landed, fingerY, direction) ?: return true
         selection.extendTo(offset)
         Logger.d(
             "Orilumn.SEL",
@@ -978,7 +1134,7 @@ fun ReaderScreen(
         return true
     }
 
-    fun onTap(xPx: Float, yPx: Float, widthPx: Float) {
+    fun onTap(xPx: Float, yPx: Float, widthPx: Float, allowFlip: Boolean = true) {
         // 动画播放期间不响应点按：会话在飞时画面正被动画独占（`slideFromPos`/
         // `slideTargetPos` 锁着两页），此时翻页/切栏/跳链接会让像素与数据错位。
         // 早先只有 `flipWithAnimation` 自己挡（beginProgrammatic 返回 false 即丢弃），
@@ -993,14 +1149,32 @@ fun ReaderScreen(
         // 中部切栏，后退区无操作（封面已是第一页；退出走顶栏返回键）。
         if (coverVisible) {
             when (ReaderMath.tapZone(xPx, widthPx)) {
-                1 -> flipWithAnimation(1)
+                1 -> if (allowFlip) flipWithAnimation(1)
                 else -> barsVisible = !barsVisible
             }
             return
         }
-        // 编辑菜单开着时，正文点按只关菜单（菜单外的透明遮罩通常已先接住，这里是兜底）。
+        // 编辑菜单开着时，正文点按只关菜单（卡片开着时点按已由手势层接住，这里是兜底）。
+        // 语义与 [cancelNote] 一致：写了一半的内容丢掉、原记录不动、编辑时恢复出来的选区收掉。
         if (editingAnnotation != null) {
+            focusManager.clearFocus()
+            noteText = ""
+            noteColorArgb = null
+            selectionMenuVisible = false
+            if (selection.hasSelection) selection.clear()
             closeAnnotationEdit()
+            return
+        }
+        // 点按已有标注 = 打开卡片（D-28）：先于清选区、链接与翻页区判定——
+        // 点在高亮/划线上不会翻页，也不会把「想改这条」当成「想翻页」。
+        // 只看字符区间（与长按同一套命中），页边距上按不到任何行，自然也不会误开。
+        val tappedAnnotation = openPos?.let { p ->
+            if (annotationState.chapter != p.chapter) return@let null
+            charOffsetAt(p, xPx, yPx)?.let { annotationState.annotationAt(it) }
+        }
+        if (tappedAnnotation != null) {
+            openAnnotationEdit(tappedAnnotation)
+            Logger.d("Orilumn.TAP", "tap x=${xPx.roundToInt()} y=${yPx.roundToInt()} → annotation card")
             return
         }
         // D-11：有选区时，正文点按只清除选区，不翻页也不开链接。
@@ -1020,8 +1194,10 @@ fun ReaderScreen(
         Logger.d("Orilumn.TAP", "tap x=${xPx.roundToInt()} y=${yPx.roundToInt()} w=${widthPx.roundToInt()} zone=$zone bars=${currentBarsVisible}")
         when (zone) {
             // 点按翻页与拖动松手走同一条动画路径（见 flipWithAnimation）。
-            -1 -> flipWithAnimation(-1)
-            1 -> flipWithAnimation(1)
+            // 桌面鼠标单击不翻页（2026-11-04 用户定口）：翻页只走滚轮 / 触控板双指，
+            // 左右 1/3 单击因此什么都不做，中部照旧切上下栏。
+            -1 -> if (allowFlip) flipWithAnimation(-1)
+            1 -> if (allowFlip) flipWithAnimation(1)
             else -> barsVisible = !barsVisible
         }
     }
@@ -1044,8 +1220,16 @@ fun ReaderScreen(
     // 面板打开时 keysEnabled=false，不夺回也不处理（按键留给面板）。
     val focusRequester = remember { FocusRequester() }
     val currentKeysEnabled by rememberUpdatedState(keysEnabled)
+    // 批注输入框开着时：正文手势与键盘翻页都不响应（字打在框里，页面不许动）。
+    // 输入条与菜单同开同关（D-27）：放在这里给「关掉后把焦点还给正文」用。
+    val currentNoteBarOpen by rememberUpdatedState(selectionMenuVisible || editingAnnotation != null)
     LaunchedEffect(openPos, barsVisible, keysEnabled) {
         if (keysEnabled) focusRequester.requestFocus()
+    }
+    // 批注输入条关掉后把焦点还给正文：输入框卸载时焦点随之消失，不还回来就得先点一下正文，
+    // 方向键才会恢复翻页（桌面手上习惯键盘的人会以为「卡住了」）。
+    LaunchedEffect(selectionMenuVisible, editingAnnotation) {
+        if (!currentNoteBarOpen && keysEnabled) focusRequester.requestFocus()
     }
 
     // L1 滑动的引用包装（必须在上面几个局部函数声明之后——Kotlin 局部函数不可前向引用）。
@@ -1060,24 +1244,11 @@ fun ReaderScreen(
     // S29：Toast → CMP Snackbar；书签/笔记占位动作未接线（null）时给出提示。
     val snackbar = rememberReaderSnackbar()
 
-    /**
-     * 改已有标注的颜色（顺带可换类别，D-14 合并菜单后同一格色槽既改色也定型）：
-     * 先改内存（立即出图），再异步落库；成功不弹提示（画面本身就是反馈），失败回滚并提示。
-     */
-    fun recolorAnnotation(annotation: Annotation, kind: AnnotationKind, color: Int, lineStyle: AnnotationLineStyle) {
-        closeAnnotationEdit()
-        scope.launch {
-            val ok = annotationState.update(
-                annotation.copy(kind = kind, color = color, lineStyle = annotationLineStyleFor(kind, lineStyle)),
-            )
-            if (!ok) snackbar.show("改色失败")
-        }
-    }
-
     /** 删除已有标注：先移出内存（立即消失），再异步落库；成功不弹提示，失败回滚并提示。 */
     fun deleteAnnotation(annotation: Annotation) {
         closeAnnotationEdit()
         selectionMenuVisible = false
+        if (selection.hasSelection) selection.clear()
         scope.launch {
             val ok = annotationState.delete(annotation.id)
             if (!ok) snackbar.show("删除失败")
@@ -1085,7 +1256,12 @@ fun ReaderScreen(
     }
 
     /** 把当前选区落成一条高亮/划线：先内存出图，再异步存库；成功不弹提示，失败回滚并提示。 */
-    fun createSelectionAnnotation(kind: AnnotationKind, color: Int, lineStyle: AnnotationLineStyle) {
+    fun createSelectionAnnotation(
+        kind: AnnotationKind,
+        color: Int,
+        lineStyle: AnnotationLineStyle,
+        note: String? = null,
+    ) {
         val ch = selection.chapter
         val s = selection.start
         val e = selection.endExclusive
@@ -1104,6 +1280,8 @@ fun ReaderScreen(
                     color = color,
                     // 线型只属于划线：高亮记录不存线型，免得与划线菜单的偏好串味。
                     lineStyle = annotationLineStyleFor(kind, lineStyle),
+                    // 批注是这条记录的附件（D-27）：与墨迹同一次写入，不分两步。
+                    note = note?.trim()?.ifBlank { null },
                     quote = quote,
                 ),
             )
@@ -1120,63 +1298,137 @@ fun ReaderScreen(
     }
 
     /**
-     * 同一格色槽：编辑中（长按已有标注）就改它，否则用当前选区新建一条。
+     * 落笔（D-27 / D-28）：**只有操作栏的 `确定` 一个提交口**（点卡片外 / 返回键 / Esc 都是取消）。
      *
-     * 顺手把「这次用的类别 + 色槽」记住（写盘，无重排提交）：下次打开菜单直接停在这一类、
-     * 这一格上——色槽同时成为该类的新建默认格，故菜单里金边所指即是下次落笔的颜色。
+     * - 编辑已有记录：把这一段选好的类别 / 线型 / 颜色与批注文字一次性写回（清空文字即去掉批注）。
+     * - 新选区：按当前类别 / 线型 / 颜色新建一条（没写字也落一条，这是「先选样式再落笔」的落笔口）。
+     *
+     * 与 [cancelNote]（点卡片外 / 返回键 / Esc）严格分开：那一个什么都不写。
      */
-    fun applyAnnotationColor(kind: AnnotationKind, slot: Int, lineStyle: AnnotationLineStyle) {
-        val color = annotationSlotColor(light, kind, slot)
+    fun commitNote() {
+        // 落笔即收卡：先让输入框失焦，键盘与卡片才能同一段时间里一起退（D-30）。
+        focusManager.clearFocus()
+        val text = noteText.trim()
+        val picked = noteColorArgb
+        val kind = noteKind
+        val style = noteLineStyle
+        noteText = ""
+        noteColorArgb = null
+        val editing = editingAnnotation
+        if (editing != null) {
+            closeAnnotationEdit()
+            // 输入期间可能刚点过色槽换了颜色：按 id 取当前记录，别拿旧快照盖回去。
+            val current = annotationState.annotations.firstOrNull { it.id == editing.id } ?: run {
+                selectionMenuVisible = false
+                if (selection.hasSelection) selection.clear()
+                return
+            }
+            val body = text.ifBlank { null }
+            // 编辑卡打开时选区已恢复成这条标注的范围；读者拖过手柄就以当前选区为准。
+            val range = if (selection.hasSelection && selection.chapter == current.chapter) {
+                selection.start to selection.endExclusive
+            } else {
+                null
+            }
+            val newStart = range?.first ?: current.charStart
+            val newEnd = range?.second ?: current.charEnd
+            val rangeChanged = newStart != current.charStart || newEnd != current.charEnd
+            // 范围变了就同步摘录：清单里那一行显示的是新选中的原文。
+            val quote = if (rangeChanged) {
+                currentHost.textOf(current.chapter, newStart, newEnd)?.take(200)
+            } else {
+                current.quote
+            }
+            // 线型 / 类别 / 颜色都只选中、不落笔（D-28）：真改过才在提交时写回。
+            // 换类别（高亮 ⇄ 划线）也算改样式，口径全在 [annotationAfterEdit] 里。
+            val next = annotationAfterEdit(
+                current = current,
+                kind = kind,
+                lineStyle = style,
+                pickedColor = picked,
+                note = body,
+                settings = light,
+                charStart = newStart,
+                charEnd = newEnd,
+                quote = quote,
+            )
+            selectionMenuVisible = false
+            if (selection.hasSelection) selection.clear()
+            if (next == null) return
+            scope.launch {
+                if (!annotationState.update(next)) snackbar.show("保存失败")
+            }
+            return
+        }
+        selectionMenuVisible = false
+        if (!selection.hasSelection) return
+        createSelectionAnnotation(
+            kind = kind,
+            color = picked ?: annotationDefaultColor(light, kind),
+            lineStyle = style,
+            note = text.ifBlank { null },
+        )
+    }
+
+    /**
+     * 取消（点卡片外 / 返回键 / Esc）：**什么都不改**。
+     *
+     * 写了一半的批注、刚选的颜色与线型全部丢掉；编辑态不动原记录；新选区连同选区一起清掉
+     * （卡片都关了就没人再引用这块蓝底）。与 [commitNote] 的分工是硬的：这几条路都不是「保存后退出」，
+     * 落笔只认操作栏的 `确定`。
+     */
+    fun cancelNote() {
+        // 同上：取消也先失焦，键盘跟着卡片一起落（D-30）。
+        focusManager.clearFocus()
+        noteText = ""
+        noteColorArgb = null
+        val editing = editingAnnotation
+        if (editing != null) {
+            closeAnnotationEdit()
+            // 编辑时恢复出来的选区只服务于这张卡：取消后一起收掉，不留没有卡片的手柄。
+            selectionMenuVisible = false
+            if (selection.hasSelection) selection.clear()
+            return
+        }
+        selectionMenuVisible = false
+        if (selection.hasSelection) selection.clear()
+    }
+
+    /**
+     * 同一格色槽：**只选中**（D-28），不落笔——点错颜色还有机会改，卡片也不会忽然关掉。
+     *
+     * 落笔交给 `确定` 或点卡片外的正文（见 [commitNote]）。顺手把「这次用的类别 + 色槽」记住
+     * （写盘，无重排提交）：下次打开卡片直接停在这一类、这一格上——色槽同时成为该类的新建默认格。
+     */
+    fun pickNoteColor(kind: AnnotationKind, slot: Int) {
+        noteKind = kind
+        noteColorArgb = annotationSlotColor(light, kind, slot)
         // 落盘一律小写（`highlight` / `underline`，见 ReaderSettings 的约定），
         // 解析侧 annotationLastKindOf 再另行 lowercase，双向容错。
         var next = withAnnotationDefaultSlot(light, kind, slot)
             .copy(annotationLastKind = kind.name.lowercase())
         // 线型只属于划线：在高亮那一行点色，不能顺手改掉划线菜单记住的线型（两套偏好各自独立）。
         if (kind == AnnotationKind.Underline) {
-            next = next.copy(annotationLastLineStyle = lineStyle.wire)
+            next = next.copy(annotationLastLineStyle = noteLineStyle.wire)
         }
         if (next != light) {
             light = next
             currentOnLightCommit(next)
-        }
-        val editing = editingAnnotation
-        if (editing != null) {
-            recolorAnnotation(editing, kind, color, lineStyle)
-        } else {
-            createSelectionAnnotation(kind, color, lineStyle)
         }
     }
 
     /**
-     * 线型行：记住它，下次新建直接用；并且**一次点按即落笔**——
-     * 选区场景下直接用当前划线色按这个线型画上去（不必再点一次颜色），
-     * 编辑已有标注时把它改成这个线型（高亮没有线型，顺手换成划线）。
+     * 线型行：**只选中**（D-28），不再一次点按即落笔——否则刚想换线型卡片就关了，批注也写不成。
+     * 落笔交给点色槽或 `确定`；收起卡片时按选中的线型落成划线（见 [commitNote]）。
+     * 顺手记住这个线型，下次新建直接用。
      */
-    fun applyAnnotationLineStyle(style: AnnotationLineStyle) {
+    fun pickNoteLineStyle(style: AnnotationLineStyle) {
+        noteKind = AnnotationKind.Underline
+        noteLineStyle = style
         val next = withAnnotationLastLineStyle(light, style)
         if (next != light) {
             light = next
             currentOnLightCommit(next)
-        }
-        val editing = editingAnnotation
-        if (editing != null) {
-            if (editing.kind == AnnotationKind.Underline && editing.lineStyle == style) return
-            // 颜色跟着**线型所属的类别**走：本来就是划线时保留它自己的墨色；
-            // 从高亮转过来时不能把高亮那半透明的底色带进墨线（两个色槽体系是完全独立的）。
-            val color = annotationUnderlineInkColor(editing, light)
-            closeAnnotationEdit()
-            scope.launch {
-                val ok = annotationState.update(
-                    editing.copy(kind = AnnotationKind.Underline, lineStyle = style, color = color),
-                )
-                if (!ok) snackbar.show("改线型失败")
-            }
-        } else if (selection.hasSelection) {
-            createSelectionAnnotation(
-                kind = AnnotationKind.Underline,
-                color = annotationDefaultColor(light, AnnotationKind.Underline),
-                lineStyle = style,
-            )
         }
     }
 
@@ -1203,23 +1455,141 @@ fun ReaderScreen(
 
     /** 复制选区原文（复制后保留选区）。 */
     fun copySelection() {
-        if (copyRange(selection.chapter, selection.start, selection.endExclusive)) {
-            selectionMenuVisible = false
-        }
+        // 复制不改记录、也不关卡片：落笔只有「完成」与点卡片外两处（D-28）。
+        copyRange(selection.chapter, selection.start, selection.endExclusive)
     }
 
     /** 复制一条已有标注覆盖的原文：长按命中后没有选区，复制对象就是这条记录。 */
     fun copyAnnotation(annotation: Annotation) {
-        if (copyRange(annotation.chapter, annotation.charStart, annotation.charEnd)) closeAnnotationEdit()
+        copyRange(annotation.chapter, annotation.charStart, annotation.charEnd)
+    }
+
+    /**
+     * 键盘卡片开着时，页面上下滚动的惯性（D-28 键盘视口）：抬手后按当时的速度继续走，
+     * 按指数摩擦逐步减速，撞到视口上/下沿即停——读者把页面往上甩一把，它会自己滑到页底，
+     * 而不是抬手指就钉在原地。
+     *
+     * 驱动的是组合状态 [userShiftPx] 而不是 Animatable：上限 [maxShiftPxState] 跟着卡片高度 /
+     * 键盘高度变，每帧都得按当下上限夹一次（衰减动画本身不知道这个边界）。
+     */
+    fun startPageFling(velocityPxPerSec: Float) {
+        pageFling.job?.cancel()
+        if (abs(velocityPxPerSec) < PAGE_FLING_MIN_DP_S * density) return
+        pageFling.job = scope.launch {
+            var v = velocityPxPerSec
+            var last = withFrameNanos { it }
+            while (true) {
+                val now = withFrameNanos { it }
+                val dt = ((now - last) / 1_000_000_000f).coerceIn(0f, 0.05f)
+                last = now
+                val cur = userShiftPx ?: inputShiftPx
+                val next = (cur + v * dt).coerceIn(0f, maxShiftPxState)
+                userShiftPx = next
+                // 到顶 / 到底就收：继续衰减也只是原地不动。
+                if (next <= 0f || next >= maxShiftPxState) return@launch
+                v = pageFlingDecay(v, dt)
+                if (abs(v) < PAGE_FLING_STOP_DP_S * density) return@launch
+            }
+        }
+    }
+
+    /**
+     * 滚动翻页（桌面）：横滑 / 横向滚轮 / 鼠标滚轮一格出来的翻页请求都走这里。
+     *
+     * 触控板的**上下滑不翻页**（2026-11-04 用户定口：那是误触）；鼠标滚轮照旧拨一格翻一页
+     * （判据见 [ScrollFlipArbiter]）。翻页动画在飞时先攒一次、等落地补翻，不当场丢掉。
+     */
+    fun requestScrollFlip(direction: Int) {
+        if (direction == 0) return
+        // 封面只能往前走（与点按同一口径）；往回滚在封面上不响应。
+        if (coverVisible && direction < 0) {
+            Logger.d("Orilumn.SCROLL", "flip dir=$direction dropped (cover)")
+            return
+        }
+        if (!ctl.isBusy()) {
+            pendingScrollFlip.clear()
+            Logger.d("Orilumn.SCROLL", "flip dir=$direction")
+            flipWithAnimation(direction)
+            return
+        }
+        Logger.d("Orilumn.SCROLL", "flip dir=$direction queued (busy)")
+        pendingScrollFlip.offer(direction, scope, { ctl.isBusy() }) { d ->
+            if (!(coverVisible && d < 0)) {
+                Logger.d("Orilumn.SCROLL", "flip dir=$d queued")
+                flipWithAnimation(d)
+            }
+        }
     }
 
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .background(Color(profile.bgColor))
+            // 桌面滚动通道（滚轮 / 触控板双指），分两套语义：
+            //  - 标注卡片开着：在本页视口里上下滚页（2026-11-04 用户定口，不用鼠标拖拽滚页）；
+            //  - 卡片关着：横滑与**鼠标滚轮一格**翻页，触控板双指上下滑不翻页
+            //    （2026-11-04 用户定口；判据见 [ScrollFlipArbiter]，一次连续横滑最多翻一页）。
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        if (event.type != PointerEventType.Scroll) continue
+                        val change = event.changes.firstOrNull() ?: continue
+                        if (change.isConsumed) continue
+                        if (currentNoteBarOpen) {
+                            // 指针压在卡片上：让给卡片自己（卡片里的滚动区 / 输入框）。
+                            if (change.position.y >= sheetTopPxState) continue
+                            // 指针压在栏上：那是栏自己的滚动区（列表等），不替它滚页。
+                            val inBars = ReaderMath.downInBars(
+                                currentBarsVisible, change.position.y, size.height.toFloat(),
+                                currentTopBarH.toFloat(), currentBotBarH.toFloat(),
+                            )
+                            if (inBars) continue
+                            val dy = change.scrollDelta.y
+                            if (dy == 0f) continue
+                            // 滚轮接管：先把还没停的惯性停掉，再按读者滚的量走。
+                            pageFling.job?.cancel()
+                            val cur = userShiftPx ?: inputShiftPx
+                            userShiftPx = (cur + dy * PAGE_WHEEL_DP_PER_UNIT * density)
+                                .coerceIn(0f, maxShiftPxState)
+                            change.consume()
+                            continue
+                        }
+                        val inBars = ReaderMath.downInBars(
+                            currentBarsVisible, change.position.y, size.height.toFloat(),
+                            currentTopBarH.toFloat(), currentBotBarH.toFloat(),
+                        )
+                        if (inBars) continue
+                        val dx = change.scrollDelta.x
+                        val dy = change.scrollDelta.y
+                        val dir = scrollFlip.onScroll(change.uptimeMillis, dx, dy)
+                        // 滚轮的一格被 macOS 摊成一串小数事件，得等这串**断流**才能判
+                        //（末尾是不是收在峰值上，见 ScrollFlipArbiter）。每来一条竖向事件
+                        // 就把计时推后；判出是滚轮再翻页。
+                        if (dx == 0f && dy != 0f) {
+                            val token = scrollFlip.wheelBurstVersion
+                            wheelBurstTimer.restart(scope) {
+                                if (scrollFlip.wheelBurstVersion != token) return@restart
+                                val wheelDir = scrollFlip.finishWheelBurst()
+                                if (wheelDir != 0) requestScrollFlip(wheelDir)
+                            }
+                        }
+                        if (dir != 0) {
+                            change.consume()
+                            requestScrollFlip(dir)
+                        }
+                    }
+                }
+            }
             .pointerInput(touchSlop) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
+                    // 新手势按下即打断上一次的惯性滚动（抬手后页面还在滑，读者又按下去）。
+                    pageFling.job?.cancel()
+                    // 上一个手势要是没结算就消失了（抬起被吞 / 指针丢失 / 手势协程异常），
+                    // 会话会永远停在 Dragging：批注层被藏、所有点按被 busy 墙挡住。
+                    // 新的一轮按下说明上一根手指早已离开，正好在这里收尾（判据见下）。
+                    ctl.recoverStuckDrag()
                     val downX = down.position.x
                     val downY = down.position.y
                     val downTime = down.uptimeMillis
@@ -1229,6 +1599,70 @@ fun ReaderScreen(
                         currentBarsVisible, downY, size.height.toFloat(),
                         currentTopBarH.toFloat(), currentBotBarH.toFloat(),
                     )
+                    // 标注卡片开着（D-28）：点在卡片上归卡片（按钮/输入框自己消费），
+                    // 手柄照旧可拖（否则选区改不了）；其余手势做两件事——
+                    // 触摸上下滑 = 在视口里滚页（视口 = 卡片上沿之上那一条），点按（没动过）= 取消。
+                    // 桌面鼠标拖拽不滚页（2026-11-04 用户定口）：上下滚交给滚轮 / 触控板双指，
+                    // 见上面的滚动分支；鼠标在这儿只认「点按 = 取消」，拖动什么也不做。
+                    if (currentNoteBarOpen && !barsOwned) {
+                        if (down.isConsumed || downY >= sheetTopPxState) return@awaitEachGesture
+                        // 编辑已有标注时同样允许拖手柄改范围：卡片开着不代表选区锁死（2026-11-03 用户定口）。
+                        val handle = if (!coverVisible && !ctl.isBusy()) {
+                            selectionHandleAt(downX, downY, size.width.toFloat(), size.height.toFloat())
+                        } else {
+                            null
+                        }
+                        if (handle == null) {
+                            val fingerScroll = down.type != PointerType.Mouse
+                            val shiftAtDown = inputShiftPx
+                            var dragged = false
+                            var upTime = 0L
+                            // 抬手速度样本（时间 → 手指 y）：只留回看窗口内的一段，算「甩」的那一下。
+                            val samples = ArrayDeque<Pair<Long, Float>>()
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                if (!dragged &&
+                                    ReaderMath.movedBeyondTapSlop(
+                                        change.position.x - downX,
+                                        change.position.y - downY,
+                                    )
+                                ) {
+                                    dragged = true
+                                }
+                                if (dragged && fingerScroll) {
+                                    // 手指往上 ⇒ 页面往上走；最多滚到页底贴住卡片上沿。
+                                    userShiftPx = (shiftAtDown - (change.position.y - downY))
+                                        .coerceIn(0f, maxShiftPxState)
+                                    samples.addLast(change.uptimeMillis to change.position.y)
+                                    while (samples.size > 2 &&
+                                        change.uptimeMillis - samples.first().first > PAGE_FLING_SAMPLE_MS
+                                    ) {
+                                        samples.removeFirst()
+                                    }
+                                }
+                                if (!change.pressed) {
+                                    upTime = change.uptimeMillis
+                                    break
+                                }
+                            }
+                            // 手指停住再抬（最后一次移动已经超出回看窗口）不算甩：否则会凭空滑一大段。
+                            val velocity = if (upTime - (samples.lastOrNull()?.first ?: 0L) <= PAGE_FLING_SAMPLE_MS) {
+                                pageFlingVelocityPxPerSec(samples)
+                            } else {
+                                0f
+                            }
+                            // 没拖过 = 点卡片外：按 D-28 取消（落笔只认操作栏的 `确定`，点外面不写任何东西，
+                            // 免得「想收起卡片」被当成「那就按当前样式落一条」）。
+                            // 触摸拖过 = 抬手后按当前速度继续滑、逐步减速（惯性）；鼠标拖动到此为止。
+                            when {
+                                !dragged -> cancelNote()
+                                fingerScroll -> startPageFling(velocity)
+                            }
+                            return@awaitEachGesture
+                        }
+                        // 落在手柄上：交给下面的手柄拖动路径（卡片保持打开，页面跟着上顶）。
+                    }
                     // D-11：长按是进入选区的唯一入口；手柄按下则直接进入拖动。
                     // 动画/封面/栏区都不参与选区；选区已存在时点按由 onTap 清除。
                     var selecting = false
@@ -1239,56 +1673,120 @@ fun ReaderScreen(
                     var gestureActive = true
                     var autoFlipJob: Job? = null
                     var autoFlipSide = 0
+                    // 上膛状态：一次进入只翻一页，退回正文区才重新上膛（见 scheduleAutoFlip）。
+                    var autoFlipArmed = true
                     var boundaryHintShown = false
                     var lastFingerX = downX
                     var lastFingerY = downY
-                    val autoFlipEdgePx = SELECTION_AUTO_FLIP_EDGE_DP * density
-                    // D-9：按指针类型分流。鼠标拖拽只做文本选择，不拖页；点左右页边距才翻页。
-                    // 版心几何取自当前 profile，和绘制/命中同源；上下页边距不算翻页区。
+                    // 按指针类型分流：鼠标拖拽只做文本选择，不拖页；单击与平板同一个点按入口
+                    //（窗口左中右三分区同作用，含点中标注卡片 / 链接的同一优先级）。
+                    // 版心几何只用于判断「拖动起选」的落点，和绘制/命中同源。
                     val mouse = down.type == PointerType.Mouse
                     val contentLeftPx = profile.marginLeft.toFloat()
                     val contentTopPx = profile.marginTop.toFloat()
                     val contentRightPx = (size.width - profile.marginRight).toFloat().coerceAtLeast(contentLeftPx)
                     val contentBottomPx = (size.height - profile.marginBottom).toFloat().coerceAtLeast(contentTopPx)
+                    // 自动翻页触发带按**正文缘**算：越过正文再往外 8dp 才算进带，边距小的书
+                    // 不会「拖到行末就翻页」；边距窄到放不下时退回屏幕最外 12dp 的保底带。
+                    val autoFlipZone = selectionFlipZone(
+                        widthPx = size.width.toFloat(),
+                        contentLeftPx = contentLeftPx,
+                        contentRightPx = contentRightPx,
+                        pastTextPx = SELECTION_AUTO_FLIP_PAST_TEXT_DP * density,
+                        edgePx = SELECTION_AUTO_FLIP_EDGE_DP * density,
+                    )
+                    val autoFlipRearmPx = SELECTION_AUTO_FLIP_REARM_DP * density
+                    val pageScrollEdgePx = PAGE_SCROLL_EDGE_DP * density
                     val mouseTextDown = mouse && !barsOwned && !coverVisible && !ctl.isBusy() &&
                         !down.isConsumed &&
                         downX >= contentLeftPx && downX <= contentRightPx &&
                         downY >= contentTopPx && downY <= contentBottomPx
-                    val mouseMarginDir = if (mouse && !barsOwned && !ctl.isBusy() && !down.isConsumed) {
-                        ReaderMath.marginFlipDirection(
-                            downX, downY,
-                            contentLeftPx, contentRightPx, contentTopPx, contentBottomPx,
-                        )
-                    } else {
-                        0
-                    }
                     var mouseSelectingPending = mouseTextDown
+                    // 长按起手展开的整词 / 整句只是「抬手不拖」时的样子：一旦开始拖，锚点就改成
+                    // 按下的那个字（见 TextSelectionState.anchorAt），否则从行中往右拖会变成
+                    // 「行首 → 手指」，读者看到的是选区从行首开始。
+                    var dragAnchor: Int? = null
+                    var pageScrollJob: Job? = null
+                    var pageScrollDir = 0
+                    /**
+                     * 手柄拖到视口上下边界时让**整页**跟着滚（D-28 补充）：视口 = 卡片上沿之上那一条，
+                     * 滚到「页底贴卡片上沿」为止。每滚一小段就按手指位置重新延伸一次选区，
+                     * 于是手指按在原地也能一路选下去。
+                     *
+                     * 按帧连续推进（早先是每 40ms 定步长挪 12dp，两步之间看得见一顿一顿），
+                     * 起手 [PAGE_SCROLL_RAMP_MS] 内从 0 线性加速，进带子那一刻不会整块跳出去。
+                     */
+                    fun schedulePageScroll(dir: Int) {
+                        if (dir == pageScrollDir) return
+                        pageScrollDir = dir
+                        pageScrollJob?.cancel()
+                        pageScrollJob = null
+                        if (dir == 0) return
+                        pageScrollJob = scope.launch {
+                            val speed = dir * PAGE_SCROLL_SPEED_DP_S * density
+                            val startNs = withFrameNanos { it }
+                            var last = startNs
+                            var lastExtendPx = userShiftPx ?: inputShiftPx
+                            while (gestureActive && selecting && pageScrollDir == dir) {
+                                val now = withFrameNanos { it }
+                                val dt = ((now - last) / 1_000_000_000f).coerceIn(0f, 0.05f)
+                                last = now
+                                val ramp = ((now - startNs) / 1_000_000f / PAGE_SCROLL_RAMP_MS).coerceIn(0f, 1f)
+                                val cur = userShiftPx ?: inputShiftPx
+                                val next = (cur + speed * ramp * dt).coerceIn(0f, maxShiftPxState)
+                                if (next == cur) continue
+                                userShiftPx = next
+                                // 选区每挪够 2dp 才重算一次：命中测试本身不便宜，不必每帧都做。
+                                if (abs(next - lastExtendPx) >= 2f * density) {
+                                    lastExtendPx = next
+                                    extendSelectionAt(lastFingerX, lastFingerY, size.width.toFloat())
+                                }
+                            }
+                        }
+                    }
+                    /**
+                     * 进带 [SELECTION_AUTO_FLIP_FIRST_MS] 后翻**一页**就停：翻完置 [autoFlipArmed] = false，
+                     * 手指要退回正文区（[autoFlipRearmPx] 回差）再进带才会翻下一页。
+                     *
+                     * 早先是「按住不放每 400ms 再翻」：读者停在页边等选区跟过来、或只是沿着页边
+                     * 往下拖，就会被连翻两三页（真机反馈）。翻页没成（邻页未就绪 / 导航被丢弃）时
+                     * 按 [SELECTION_AUTO_FLIP_RETRY_MS] 重试，成功即停。
+                     */
                     fun scheduleAutoFlip(side: Int) {
-                        if (side == 0 || boundaryHintShown || autoFlipJob?.isActive == true) return
+                        if (side == 0 || !autoFlipArmed || boundaryHintShown ||
+                            autoFlipJob?.isActive == true
+                        ) {
+                            return
+                        }
                         autoFlipJob = scope.launch {
                             var wait = SELECTION_AUTO_FLIP_FIRST_MS
-                            while (gestureActive && selecting && autoFlipSide == side) {
+                            while (true) {
                                 delay(wait)
-                                if (!gestureActive || !selecting || autoFlipSide != side) return@launch
+                                if (!gestureActive || !selecting || !autoFlipArmed ||
+                                    autoFlipSide != side
+                                ) {
+                                    return@launch
+                                }
                                 val p = openPos
                                 if (p == null || selection.chapter != p.chapter) return@launch
-                                val ok = autoFlipSelection(side, lastFingerY)
-                                if (!ok) {
-                                    if (isSelectionChapterBoundary(p, side)) {
-                                        // 封顶到章首/章末：不再跨章，但选区要吃到边界字。
-                                        selection.extendTo(if (side > 0) Int.MAX_VALUE else 0)
-                                        boundaryHintShown = true
-                                        Logger.d(
-                                            "Orilumn.SEL",
-                                            "auto-flip boundary dir=$side ch=${p.chapter} " +
-                                                "sel=${selection.start}-${selection.endExclusive}",
-                                        )
-                                        snackbar.show(if (side > 0) "已到章末" else "已到章首")
-                                        return@launch
-                                    }
-                                    if (!selection.hasSelection) return@launch
+                                if (autoFlipSelection(side, lastFingerY)) {
+                                    autoFlipArmed = false
+                                    return@launch
                                 }
-                                wait = SELECTION_AUTO_FLIP_REPEAT_MS
+                                if (isSelectionChapterBoundary(p, side)) {
+                                    // 封顶到章首/章末：不再跨章，但选区要吃到边界字。
+                                    selection.extendTo(if (side > 0) Int.MAX_VALUE else 0)
+                                    boundaryHintShown = true
+                                    Logger.d(
+                                        "Orilumn.SEL",
+                                        "auto-flip boundary dir=$side ch=${p.chapter} " +
+                                            "sel=${selection.start}-${selection.endExclusive}",
+                                    )
+                                    snackbar.show(if (side > 0) "已到章末" else "已到章首")
+                                    return@launch
+                                }
+                                if (!selection.hasSelection) return@launch
+                                wait = SELECTION_AUTO_FLIP_RETRY_MS
                             }
                         }
                     }
@@ -1297,8 +1795,12 @@ fun ReaderScreen(
                             downX, downY, size.width.toFloat(), size.height.toFloat(),
                         )
                         if (handle != null) {
-                            closeAnnotationEdit()
-                            selectionMenuVisible = false
+                            // 卡片开着时先不改卡片状态：拖手柄期间卡片留在原位、字继续可写（D-28），
+                            // 松手后选区还是这份，批注接着写就行。
+                            if (!currentNoteBarOpen) {
+                                closeAnnotationEdit()
+                                selectionMenuVisible = false
+                            }
                             mouseSelectingPending = false
                             selection.beginHandleDrag(handle)
                             selecting = true
@@ -1313,8 +1815,12 @@ fun ReaderScreen(
                                         downX, downY, size.width.toFloat(), size.height.toFloat(),
                                     )
                                     if (!editing && !mouse) {
-                                        selecting = beginSelectionAt(downX, downY)
-                                        if (selecting) magnifierFinger = Offset(downX, downY)
+                                        val pressOffset = beginSelectionAt(downX, downY)
+                                        selecting = pressOffset != null
+                                        if (selecting) {
+                                            magnifierFinger = Offset(downX, downY)
+                                            dragAnchor = pressOffset
+                                        }
                                     }
                                 }
                             }
@@ -1323,8 +1829,15 @@ fun ReaderScreen(
                     var axis = ReaderMath.Axis.NONE
                     var dragDir = 0
                     var slideActive = false
+                    // 这次滑动是否已经结算过（抬起时正常结算后置 true，见下面的 finally：
+                    // 手势以**任何**方式结束，只要还没结算就必须补一次 endSlide）。
+                    var slideEnded = false
                     var brightnessActive = false
                     var brightnessBase = ReaderMath.MAX_BRIGHTNESS
+                    // 双指上下滑调亮度（brightnessGestureTwo）：第二根手指落下就接管本手势，
+                    // 按两指平均纵向位移算（两指各自动也不算「一起滑」）；期间不翻页、不选字。
+                    var twoFingerBrightness = false
+                    var twoFingerBaseY = 0f
                     // 抬手速度样本（两次采样的位移/时差）：滑动判定要「快甩过阈即翻」，
                     // 只看位移会把快速轻扫吃掉。
                     var lastDx = 0f
@@ -1343,7 +1856,8 @@ fun ReaderScreen(
                         val event = awaitPointerEvent()
                         val change = event.changes.firstOrNull { it.id == down.id } ?: break
                         // 长按标注刚打开编辑菜单：本次手势只负责收尾，不再翻页/拖选/调亮度。
-                        if (editingAnnotation != null) {
+                        // 例外：编辑卡开着时从手柄起手的那次拖动要一路更新选区，不能在这里被吞掉。
+                        if (editingAnnotation != null && !selecting) {
                             change.consume()
                             if (!change.pressed) break
                             continue
@@ -1362,6 +1876,58 @@ fun ReaderScreen(
                             if (!change.pressed) break
                             continue
                         }
+                        // 双指上下滑调亮度（任意位置，见设置里的「任意位置双指上下滑」）。
+                        // 原实现只把开关存下来、渲染出来，手势层从没读过它 ⇒ 开了也没反应。
+                        // 判定用「按下的指针数 ≥ 2」，不要求第二根手指也过 slop：
+                        // 两指按住再一起上下滑即可，接管的时机是**第二根手指落下那一帧**。
+                        val pressedPointers = event.changes.filter { it.pressed }
+                        if (!mouse && !selecting && brightnessAdjustable &&
+                            ReaderMath.twoFingerBrightnessAllowed(
+                                light.brightnessGestureTwo, light.brightnessFollowSystem,
+                            ) &&
+                            pressedPointers.size >= 2
+                        ) {
+                            if (!twoFingerBrightness) {
+                                twoFingerBrightness = true
+                                brightnessActive = true
+                                brightnessBase = light.brightness
+                                // 起手位置取两指平均 y，之后按平均位移算：单看一根手指会漏掉
+                                // 「另一根手指在动、这根不动」。
+                                twoFingerBaseY = ReaderMath.averagePressedY(
+                                    pressedPointers.map { it.position.y },
+                                )
+                                // 双指常被系统/自身当成「长按再移动」：撤掉还没起手的长按计时，
+                                // 已经起手的单指翻页滑动就地结算，别让页面一边翻一边变亮。
+                                longPressJob?.cancel()
+                                autoFlipSide = 0
+                                if (slideActive && !slideEnded) {
+                                    currentEndSlide(vx, size.width.toFloat())
+                                    slideEnded = true
+                                }
+                                Logger.d(
+                                    "Orilumn.BRIGHT",
+                                    "two-finger start fingers=${pressedPointers.size} " +
+                                        "y=${twoFingerBaseY.roundToInt()} b=$brightnessBase",
+                                )
+                            }
+                            val avgY = ReaderMath.averagePressedY(pressedPointers.map { it.position.y })
+                            applyBrightnessDelta(
+                                brightnessBase,
+                                ReaderMath.brightnessFrac(avgY - twoFingerBaseY, size.height.toFloat()),
+                            )
+                            // 全消费：翻页/选字/联动的手指都别再从这次手势里捞事件。
+                            event.changes.forEach { it.consume() }
+                            continue
+                        }
+                        if (twoFingerBrightness) {
+                            // 两指只剩一根（或一起抬起）：本次亮度手势到此为止。
+                            // 不降级成单指翻页/选字——那会让读者抬一根手指就被翻页。
+                            Logger.d("Orilumn.BRIGHT", "two-finger end b=${light.brightness}")
+                            endBrightnessGesture()
+                            twoFingerBrightness = false
+                            brightnessActive = false
+                            break
+                        }
                         val dx = change.position.x - downX
                         val dy = change.position.y - downY
                         if (!moved && ReaderMath.movedBeyondTapSlop(dx, dy)) moved = true
@@ -1371,29 +1937,53 @@ fun ReaderScreen(
                             if (!change.pressed) {
                                 gestureActive = false
                                 autoFlipSide = 0
+                                schedulePageScroll(0)
                                 magnifierFinger = null
-                                if (selection.hasSelection) selectionMenuVisible = true
+                                // 编辑卡片还开着时不要另开浮动菜单：这张卡就是操作栏。
+                                if (editingAnnotation == null && selection.hasSelection) {
+                                    selectionMenuVisible = true
+                                }
                                 change.consume()
                                 break
                             }
                             lastFingerX = change.position.x
                             lastFingerY = change.position.y
                             if (!mouse) magnifierFinger = Offset(lastFingerX, lastFingerY)
-                            extendSelectionAt(lastFingerX, lastFingerY)
-                            autoFlipSide = selectionAutoFlipDirection(
-                                lastFingerX, size.width.toFloat(), autoFlipEdgePx,
-                            )
+                            // 第一次真的拖动：锚点从「整词/整句首」挪到按下那个字（只挪一次）。
+                            dragAnchor?.let {
+                                selection.anchorAt(it)
+                                dragAnchor = null
+                            }
+                            extendSelectionAt(lastFingerX, lastFingerY, size.width.toFloat())
+                            // 一次进入只翻一页：退回正文区（回差）才重新上膛。
+                            if (autoFlipZone.hasLeftBand(lastFingerX, autoFlipRearmPx)) {
+                                autoFlipArmed = true
+                            }
+                            autoFlipSide = autoFlipZone.directionOf(lastFingerX)
                             scheduleAutoFlip(autoFlipSide)
+                            // 手柄拖到视口上下边界 ⇒ 整页滚（卡片开着时视口只到卡片上沿）。
+                            val scrollDir = when {
+                                currentNoteBarOpen && lastFingerY > sheetTopPxState - pageScrollEdgePx &&
+                                    inputShiftPx < maxShiftPxState -> 1
+                                currentNoteBarOpen && lastFingerY < pageScrollEdgePx &&
+                                    inputShiftPx > 0f -> -1
+                                else -> 0
+                            }
+                            schedulePageScroll(scrollDir)
                             change.consume()
                             continue
                         }
-                        // D-9：鼠标分流——拖拽才进入选区，点击正文无操作，点左右页边距才翻页。
+                        // 指针类型分流：鼠标拖拽才进入选区；单击只做与翻页无关的动作
+                        //（见上面 `onTap` 的 allowFlip = false：标注卡片 → 清选区 → 链接 → 中部切栏），
+                        // 桌面翻页交给滚轮 / 触控板双指（见上面的滚动通道）；
                         // 触摸仍走下面的三区点按/滑动/亮度，两套语义不抢同一个手势。
                         if (mouse) {
                             if (mouseSelectingPending && moved) {
                                 mouseSelectingPending = false
                                 selectionMenuVisible = false
-                                if (beginSelectionAt(downX, downY)) {
+                                // 鼠标拖选从按下那个字起，不扩成整词 / 整句（D-9）：桌面没有长按语义，
+                                // 扩成整句就是「选区从行首开始」。
+                                if (beginSelectionAt(downX, downY, selectUnit = false) != null) {
                                     selecting = true
                                     Logger.d(
                                         "Orilumn.SEL",
@@ -1402,23 +1992,21 @@ fun ReaderScreen(
                                     )
                                     lastFingerX = change.position.x
                                     lastFingerY = change.position.y
-                                    extendSelectionAt(lastFingerX, lastFingerY)
-                                    autoFlipSide = selectionAutoFlipDirection(
-                                        lastFingerX, size.width.toFloat(), autoFlipEdgePx,
-                                    )
+                                    extendSelectionAt(lastFingerX, lastFingerY, size.width.toFloat())
+                                    if (autoFlipZone.hasLeftBand(lastFingerX, autoFlipRearmPx)) {
+                                        autoFlipArmed = true
+                                    }
+                                    autoFlipSide = autoFlipZone.directionOf(lastFingerX)
                                     scheduleAutoFlip(autoFlipSide)
                                 }
                             }
                             if (!change.pressed) {
-                                // D-9：鼠标点正文 = 无操作（不翻页、不清选区、不触发链接）；
-                                // 只有左右页边距单击翻页。
-                                if (!moved && mouseMarginDir != 0) {
-                                    Logger.d(
-                                        "Orilumn.TAP",
-                                        "mouse margin x=${downX.roundToInt()} y=${downY.roundToInt()} " +
-                                            "dir=$mouseMarginDir",
-                                    )
-                                    currentFlipWithAnimation(mouseMarginDir)
+                                // 鼠标单击：桌面不翻页（2026-11-04 用户定口），只保留
+                                // 「点中标注 / 链接 / 中部切栏」这些与翻页无关的动作；
+                                // 左右 1/3 因此什么都不做（allowFlip = false）。
+                                // 按下点已被上层消费（栏/遮罩）就不落到阅读面。
+                                if (!moved && !down.isConsumed) {
+                                    onTap(downX, downY, size.width.toFloat(), allowFlip = false)
                                 }
                                 change.consume()
                                 break
@@ -1432,7 +2020,10 @@ fun ReaderScreen(
                             val upDx = upX - downX
                             val upDy = change.position.y - downY
                             if (brightnessActive) endBrightnessGesture()
-                            else if (slideActive) currentEndSlide(vx, size.width.toFloat())
+                            else if (slideActive) {
+                                currentEndSlide(vx, size.width.toFloat())
+                                slideEnded = true
+                            }
                             // 走 flipWithAnimation（同点按）而非 flip()：flip() 是**瞬切**——直接
                             // flipAwait 硬换数据、不播动画、也不经过 FlipController，于是会话
                             // 状态与渲染层不同步。真机症状：快速翻页时同一内容"快速闪一下"
@@ -1492,14 +2083,16 @@ fun ReaderScreen(
                                 // L1 跟手：起手那一次 beginSlide（预取目标页），其后逐帧 updateSlide。
                                 if (currentSlideEnabled) {
                                     if (!slideActive) {
-                                        currentBeginSlide(dragDir)
+                                        // 先立旗再起手：起手这一步若抛异常，finally 仍能把会话收掉
+                                        // （否则会话停在 Dragging，批注层被 isBusy 藏起、手势全被吞）。
                                         slideActive = true
+                                        currentBeginSlide(dragDir)
                                     }
                                     currentUpdateSlide(dx, size.width.toFloat())
                                     if (tMove == 0L) tMove = System.nanoTime()
                                 }
                             }
-                            ReaderMath.Axis.VERTICAL -> if (!brightnessActive) {
+                            ReaderMath.Axis.VERTICAL -> if (!brightnessActive && brightnessAdjustable) {
                                 val s = light
                                 if (!s.brightnessFollowSystem &&
                                     ReaderMath.verticalBrightnessAllowed(
@@ -1521,11 +2114,26 @@ fun ReaderScreen(
                         }
                     }
                     } finally {
+                        // 手势以任何方式结束都必须把这次滑动结算掉：抬起事件被上层消费、
+                        // 指针 change 丢失、组合离场、循环里抛异常——这些路径原先直接 break/抛出，
+                        // `endSlide` 不再被调用，会话就永远停在 Dragging。后果是批注层被
+                        // `isBusy()` 藏起来（真机症状：**所有批注突然全部消失**）且后续手势
+                        // 全被挡（**页面翻不动**），只有返回键能退出去。
+                        if (slideActive && !slideEnded) {
+                            Logger.w("Orilumn.TAP", "slide gesture ended without up ⇒ settle")
+                            currentEndSlide(vx, size.width.toFloat())
+                            slideEnded = true
+                        }
                         // 手势被取消/组合离场也必须撤掉长按计时，避免手指离开后凭空起选区。
                         gestureActive = false
                         autoFlipSide = 0
                         longPressJob?.cancel()
                         magnifierFinger = null
+                        // 双指调亮度期间指针丢失/手势被取消：指示条与落库都收掉，别留在屏上。
+                        if (twoFingerBrightness) {
+                            twoFingerBrightness = false
+                            endBrightnessGesture()
+                        }
                     }
                 }
             },
@@ -1545,6 +2153,7 @@ fun ReaderScreen(
                 .focusTarget()
                 .onKeyEvent { event ->
                     if (!currentKeysEnabled) return@onKeyEvent false
+                    if (currentNoteBarOpen) return@onKeyEvent false
                     if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
                     val action = ReaderMath.keyAction(event.key)
                     // TODO: 状态栏打开时左右键在栏按键之间切换焦点（未实现）。
@@ -1578,7 +2187,7 @@ fun ReaderScreen(
                 bgColor = Color(profile.bgColor),
                 modifier = Modifier.fillMaxSize(),
             )
-            ReaderLightMask(light = light, modifier = Modifier.fillMaxSize())
+            ReaderLightMask(light = maskLight, modifier = Modifier.fillMaxSize())
             ReaderBars(
                 visible = barsVisible,
                 statusBarInset = statusBarInset,
@@ -1625,8 +2234,10 @@ fun ReaderScreen(
                 inkColor = profile.fgColor,
                 imgCache = imgCache,
                 bgCache = bgCache,
-                annotations = annotationState.annotations,
-                annotationChapter = annotationState.chapter,
+                // 按**这一页所属章**取标注：跨章翻页时目标页也能带上自己那一章的装饰
+                //（相邻章的标注已预读，见 AnnotationState.prefetchNeighbors）。
+                annotations = annotationState.annotationsFor(fromPos.chapter).orEmpty(),
+                annotationChapter = fromPos.chapter,
                 decorRevision = annotationState.revision,
             )
 
@@ -1646,8 +2257,9 @@ fun ReaderScreen(
                     inkColor = profile.fgColor,
                     imgCache = imgCache,
                     bgCache = bgCache,
-                    annotations = annotationState.annotations,
-                    annotationChapter = annotationState.chapter,
+                    annotations = annotationState.annotationsFor(ctl.targetPos.value?.chapter ?: -1)
+                        .orEmpty(),
+                    annotationChapter = ctl.targetPos.value?.chapter ?: -1,
                     decorRevision = annotationState.revision,
                 )
             } else {
@@ -1703,17 +2315,6 @@ fun ReaderScreen(
                     handleRadiusPx = selectionHandleRadiusPx,
                 )
             }
-            // 菜单锚点只在选区抬手后需要；几何本身覆盖层与放大镜一直在用。
-            val selectionGeometry = selectionGeo.takeIf { selectionMenuVisible }
-            val selectionMenuAnchor = selectionGeometry?.rects?.takeIf { it.isNotEmpty() }?.let { rects ->
-                Rect(
-                    left = rects.minOf { it.left },
-                    top = rects.minOf { it.top },
-                    right = rects.maxOf { it.right },
-                    bottom = rects.maxOf { it.bottom },
-                )
-            }
-
             // 画布渲染器（栅格 + 多页位图缓存的宿主）在**此处** remember 一份，注入给 current/target
             // 两张画布：否则两个组合位置各自 remember，各得一池，当前页位图在 target 侧永远查不到
             // （真机日志：动画期间每页每轮各栅格一次，`hit=false`）。
@@ -1742,9 +2343,7 @@ fun ReaderScreen(
                 hostRevision = hostRevision,
                 imgCache = imgCache,
                 bgCache = bgCache,
-                annotations = annotationState.annotations,
-                annotationChapter = annotationState.chapter,
-                decorRevision = annotationState.revision,
+                annotationsFor = annotationState::annotationsFor,
             )
             // 上面 `beforeCommit` 的「整页位图备齐」实现：与 PrerasterOnPrefill 同口径
             //（同一渲染器、同一缓存、同一条取数路径），只是针对**本次落位目标页**。
@@ -1767,11 +2366,67 @@ fun ReaderScreen(
                     contentRevision = liveRevision,
                     imgCache = imgCache,
                     bgCache = bgCache,
-                    annotations = annotationState.annotations,
-                    annotationChapter = annotationState.chapter,
+                    annotations = annotationState.annotationsFor(p.chapter).orEmpty(),
+                    annotationChapter = p.chapter,
                 )
             }
             SideEffect { rasterByRef.value = rasterPageNow }
+            // ---- 卡片让位（D-28 第 2 部分）：卡片会压到选区 / 这条标注的墨迹时，整页上顶 ----
+            // 卡片上沿 = 窗口高 − 键盘高 − 卡片高（adjustNothing：窗口不缩，键盘高度只能自己量）。
+            // 只算一个平移量：绘制、命中、手柄、放大镜、旁注全部读同一个数，不重排、不重烤栅格。
+            val editing = editingAnnotation
+            val selectionMenuOn = editing == null && selectionMenuVisible && selection.hasSelection &&
+                selection.chapter == fromPos.chapter
+            val menuOn = (editing != null || selectionMenuOn) && !coverVisible && !ctl.isBusy()
+            val imeBottomPx = imeInset?.let { with(LocalDensity.current) { it.toPx() } }
+                ?: WindowInsets.ime.getBottom(LocalDensity.current).toFloat()
+            // 卡片升起度（D-30）：0 = 整卡在屏幕外，1 = 贴住键盘上沿。它同时决定两件事：
+            // 卡片自己的位置（见 AnnotationSheet）和**这边要不要让位**——卡片还在屏幕外时页面不动，
+            // 否则先跳一下、再等卡片，又是一处「两段」。宿主没有逐帧 IME 值时不等键盘（gateOnIme = false）。
+            val sheetReveal = rememberSheetReveal(menuOn, imeBottomPx, gateOnIme = imeInset != null)
+            val sheetTopPx = (pxHeight - imeBottomPx - noteBarHeightPx * sheetReveal).coerceAtLeast(0f)
+            // 视口 = 卡片上沿之上那一条：整页可以在里面上下滑，最多滑到「页底正好贴卡片上沿」。
+            val maxShiftPx = (pxHeight - sheetTopPx).coerceAtLeast(0f)
+            // 编辑时选区已经恢复成这条标注的范围；拖手柄改过以后也按当前选区让位。
+            // 只有在取不到原文、没有选区时才退回按原记录范围量。
+            val anchorBottomPx = selectionGeo?.rects?.maxOfOrNull { it.bottom }
+                ?: if (editing != null) {
+                    pageInkRects(
+                        drawer = selectionDrawer,
+                        lines = pageContent?.lines.orEmpty(),
+                        chapter = editing.chapter,
+                        charStart = editing.charStart,
+                        charEnd = editing.charEnd,
+                        pageImages = pageContent?.pageImages,
+                        pageBackgrounds = pageContent?.pageBackgrounds,
+                        frameLead = pageContent?.pageFrameLead ?: 0,
+                        contentLeft = contentLeft,
+                        contentTop = contentTop,
+                    ).maxOfOrNull { it.bottom }
+                } else {
+                    null
+                }
+            // 会压住 ⇒ 一次推到「页底贴卡片上沿」（推满 H，用户定形）；不压 ⇒ 不动。
+            // 读者自己上下滑过就以他滑的为准（[userShiftPx]），手柄拖到上下边界时也会滚。
+            val baseShiftPx = if (menuOn && anchorBottomPx != null &&
+                anchorBottomPx + INPUT_SHIFT_GAP_DP * density > sheetTopPx
+            ) {
+                maxShiftPx
+            } else {
+                0f
+            }
+            val shiftNow = if (menuOn) {
+                (userShiftPx ?: baseShiftPx).coerceIn(0f, maxShiftPx)
+            } else {
+                0f
+            }
+            // 命中侧读这一份（事件处理发生在组合之后，读到的是最新值）。
+            SideEffect {
+                inputShiftPx = shiftNow
+                sheetTopPxState = if (menuOn) sheetTopPx else pxHeight
+                maxShiftPxState = maxShiftPx
+            }
+
             // 画布本体（当前页 / 目标页同形，只是位移不同）。
             val PageCanvasFun: @Composable (PageContent?) -> Unit = { content ->
                 ReaderPageCanvas(
@@ -1800,6 +2455,126 @@ fun ReaderScreen(
             // `ReaderPageCanvas` 里 remember 的渲染器（多页位图缓存宿主）连池丢弃重建，
             // 一轮翻页重栅格 3～5 次整页（真机 87ms/次）——就是「滑一点卡一下」的来源。
             // 现在目标槽恒在（target 为 null 时画空，见 FlipSlideLayer KDoc），结构稳定。
+            // 正文旁的批注文字（D-26）：批注是标注上的一句话，就显示在它旁边。
+            // 纯覆盖层：只按行几何算空白，不改排版、不进栅格；**跟着页走**——它被放进
+            // 滑动层的两个槽里，和页画布共用同一个平移量（见下面的 FlipSlideLayer）。
+            // 早先动画期间整层藏起来、落地才冒出来，观感是「字滑走了、旁注原地消失又出现」。
+            // 布点算得很慢（几十到几百毫秒，13 条批注时引线寻路一项就 300ms 上下），
+            // 所以整条流水线走后台车道：UI 帧只读缓存结果，算完再由状态推上来。
+            // **不能**在帧里同步算——目标页内容恰好在起手那一刻才出现，同步算就是
+            // 「手指把页面拉出一点点，画面卡住」的头号来源（2026-11-01 用户报）。
+            // 文字尺寸用与绘制同源的实测尺子（不是字宽粗估）：差半像素就会被省略号截掉。
+            val noteTextSizer = rememberNoteTextSizer(noteFontFamily, noteFontWeight)
+            val noteLane = remember(noteTextSizer) {
+                // 车道独占的绘制器与尺子：前台那个 selectionDrawer 在别的线程手上用过就脏了。
+                PageNoteLane(drawer = LineWindowDrawer(), textSizer = noteTextSizer)
+            }
+            // 布点结果按页留几页：同一次翻页里，目标页起手先当目标槽、落地又变成当前槽；
+            // 留一份就不必算两遍（布点是本页最贵的一笔，几百毫秒量级）。
+            // 有效性按「那一章的标注代数」判（见 PageNoteMemo），所以这里**不用**拿标注修订号
+            // 当键：修订号在换章时会连续 bump，整只换新会让刚看过的上一章一起作废。
+            val noteMemo = remember(
+                noteTextSizer, profile.bodyPx, settings.noteFontScale, settings.noteCollapseAll,
+                hostRevision, displayRevision, contentLeft, contentTop, contentRight, contentBottom,
+                pxWidth, pxHeight, annotationState,
+            ) { PageNoteMemo(generationOf = annotationState::generationOf) }
+            // 换新表就把旧表作废：拖批注字号时每挪一格都会换表，旧表排队的布点请求若照跑，
+            // 会把单线程车道堵住几十秒（2026-11-02 真机：拖 6 秒堵 94 秒，当前页批注久不出来）。
+            DisposableEffect(noteMemo) { onDispose { noteMemo.dispose() } }
+            // 落定后预热前后邻页的旁注：车道是异步的，不预热的话冷页要等算完才出现
+            //（真机 600~1600ms 的「页面先空着，旁注后冒出来」）。预热后翻过去是缓存命中，
+            // 旁注跟着目标页一起滑进来。
+            WarmAdjacentPageNotes(
+                host = currentHost,
+                pos = openPos,
+                // 按页所属章取标注：邻页在别的章时用那一章的预读快照（没有就跳过，不拿空表算）。
+                annotationsFor = annotationState::annotationsFor,
+                dataVersion = annotationState.dataVersion,
+                contentLeft = contentLeft,
+                contentTop = contentTop,
+                contentRight = contentRight,
+                contentBottom = contentBottom,
+                pageWidth = pxWidth,
+                pageHeight = pxHeight,
+                bodyFontPx = profile.bodyPx,
+                fontScale = settings.noteFontScale,
+                collapseAll = settings.noteCollapseAll,
+                lane = noteLane,
+                memo = noteMemo,
+                directionProvider = { ctl.session.direction },
+            )
+            val noteBubbles: List<NoteBubble> = rememberPageNotes(
+                content = pageContent,
+                chapter = fromPos.chapter,
+                charStart = fromPos.slice.charStart,
+                charEnd = fromPos.slice.charEnd,
+                annotations = annotationState.annotationsFor(fromPos.chapter).orEmpty(),
+                contentLeft = contentLeft,
+                contentTop = contentTop,
+                contentRight = contentRight,
+                contentBottom = contentBottom,
+                pageWidth = pxWidth,
+                pageHeight = pxHeight,
+                bodyFontPx = profile.bodyPx,
+                fontScale = settings.noteFontScale,
+                collapseAll = settings.noteCollapseAll,
+                lane = noteLane,
+                memo = noteMemo,
+                decorRevision = annotationState.revision,
+                notesReady = annotationState.isReady(fromPos.chapter),
+            )
+            // 目标页的旁注：翻页时跟着目标页一起滑进来，落地那一刻才不会「凭空冒出来」。
+            // 没有目标页时就是空表——不用 `if` 包起来，remember 的位置才稳定。
+            val targetPosNow = ctl.targetPos.value
+            val targetNoteBubbles: List<NoteBubble> = rememberPageNotes(
+                content = targetContent,
+                chapter = targetPosNow?.chapter ?: fromPos.chapter,
+                charStart = targetPosNow?.slice?.charStart ?: 0,
+                charEnd = targetPosNow?.slice?.charEnd ?: 0,
+                annotations = annotationState.annotationsFor(targetPosNow?.chapter ?: fromPos.chapter)
+                    .orEmpty(),
+                contentLeft = contentLeft,
+                contentTop = contentTop,
+                contentRight = contentRight,
+                contentBottom = contentBottom,
+                pageWidth = pxWidth,
+                pageHeight = pxHeight,
+                bodyFontPx = profile.bodyPx,
+                fontScale = settings.noteFontScale,
+                collapseAll = settings.noteCollapseAll,
+                lane = noteLane,
+                memo = noteMemo,
+                decorRevision = annotationState.revision,
+                notesReady = annotationState.isReady(targetPosNow?.chapter ?: fromPos.chapter),
+            )
+            val NoteBubblesFun: @Composable (List<NoteBubble>) -> Unit = { bubbles ->
+                if (bubbles.isNotEmpty()) {
+                    NoteBubbles(
+                        bubbles = bubbles,
+                        fgColor = Color(profile.fgColor),
+                        pageBgColor = profile.bgColor,
+                        onOpen = { id ->
+                            // 点旁注 = 打开这条标注的操作栏与输入框（有文字就带出来，可改可删）。
+                            // 翻页动画进行中不响应（旁注现在跟着页走，滑动的页面上点一下不该弹编辑态）。
+                            // 选区恢复成这条标注的范围：编辑时两端手柄仍在，可以直接改范围。
+                            val target = annotationState.annotationsFor(fromPos.chapter)
+                                ?.firstOrNull { it.id == id }
+                            if (target != null && !ctl.isBusy()) {
+                                openAnnotationEdit(target)
+                            }
+                        },
+                        modifier = Modifier.fillMaxSize(),
+                        fontFamily = noteFontFamily,
+                        fontWeight = noteFontWeight,
+                        showBorder = settings.noteBorder,
+                        showBackground = settings.noteBackground,
+                        textSameColor = settings.noteTextSameColor,
+                    )
+                }
+            }
+            // 卡片让位：整层（页画布 + 选区 + 旁注 + 放大镜）一起上推，顶部超出屏幕的部分直接截断。
+            // 放在同一个 `graphicsLayer` 里 ⇒ 子层之间的相对位置不变，不可能出现「页动了字没动」。
+            Box(modifier = Modifier.fillMaxSize().graphicsLayer { translationY = -shiftNow }) {
             FlipSlideLayer(
                 direction = ctl.direction.value,
                 // **不要在这里读 ctl.progress.value**：一旦在组合里读，动画每帧都会让整个
@@ -1810,13 +2585,23 @@ fun ReaderScreen(
                 modifier = Modifier.fillMaxSize(),
                 target = when {
                     slideToCover && coverComposable != null -> coverComposable
-                    targetContent != null -> { { PageCanvasFun(targetContent) } }
+                    targetContent != null -> {
+                        {
+                            PageCanvasFun(targetContent)
+                            // 旁注和目标页同一个槽 ⇒ 同一个平移量，跟着一起滑进来。
+                            NoteBubblesFun(targetNoteBubbles)
+                        }
+                    }
                     else -> null
                 },
                 current = if (slideFromCover && coverComposable != null) {
                     coverComposable
                 } else {
-                    { PageCanvasFun(pageContent) }
+                    {
+                        PageCanvasFun(pageContent)
+                        // 旁注和当前页同一个槽 ⇒ 一起滑出去，不会先「原地消失」再动画。
+                        NoteBubblesFun(noteBubbles)
+                    }
                 },
             )
             // 选区覆盖层：轻量即时画，不参与页栅格；翻页动画期间隐藏，避免盖在滑动中的两页上。
@@ -1841,8 +2626,13 @@ fun ReaderScreen(
             ) {
                 SelectionMagnifier(
                     content = pageContent,
-                    finger = fingerNow,
-                    bounds = Rect(0f, 0f, pxWidth, pxHeight),
+                    // 这一层被「卡片让位」上推了 shiftNow，指针给的却是屏幕坐标：两端都换算成
+                    // 层坐标，镜面才跟得住手指（少这一步，镜面会离手指差一整段顶推量）。
+                    finger = magnifierLayerFinger(fingerNow, shiftNow),
+                    bounds = magnifierLayerBounds(
+                        pxWidth, pxHeight, shiftNow,
+                        sheetTopPx = if (menuOn) sheetTopPx else pxHeight,
+                    ),
                     contentLeft = contentLeft,
                     contentTop = contentTop,
                     contentRight = contentRight,
@@ -1858,53 +2648,88 @@ fun ReaderScreen(
                     modifier = Modifier.fillMaxSize(),
                 )
             }
-            // 标注浮动菜单（D-13 / D-14）：**一个弹窗服务两种入口**——选区抬手是新建，
-            // 长按已有标注是编辑（色槽预展开、删除可用）。没有「取消」项：点菜单外面即关。
-            val editing = editingAnnotation
-            val editingAt = editingAnchor
-            val selectionMenuOn = editing == null && selectionMenuVisible && selection.hasSelection &&
-                selectionMenuAnchor != null && selection.chapter == fromPos.chapter
-            val menuAnchor = if (editing != null) editingAt else if (selectionMenuOn) selectionMenuAnchor else null
-            if (menuAnchor != null && !coverVisible && !ctl.isBusy()) {
-                // 长按场景没有选区可清：透明遮罩接住菜单外的点按，只关菜单，不翻页/不改选区。
-                if (editing != null) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .clickable(
-                                interactionSource = editScrimInteraction,
-                                indication = null,
-                            ) { closeAnnotationEdit() },
-                    )
+            } // 结束「卡片让位」的整层平移
+            // 标注卡片（D-28）：操作栏 + 输入行合成一张卡，贴键盘上沿。它不再跟选区锚点走，
+            // 所以选区在页面任何位置都不用担心「菜单跑出屏幕」；被遮住时整页上顶（第 2 部分）。
+            // 输入框与操作栏跟着「这一次写哪条」重置：编辑带出它的文字 / 类别 / 线型，新选区从空白开始。
+            LaunchedEffect(editing?.id, selectionMenuOn) {
+                // 换一条（新建 ↔ 编辑、或换编辑对象）就清掉「临时选过的颜色」：那是上一次的意图。
+                noteColorArgb = null
+                when {
+                    editing != null -> {
+                        noteText = editing.note.orEmpty()
+                        noteKind = editing.kind
+                        noteLineStyle = editing.lineStyle.takeIf { editing.kind == AnnotationKind.Underline }
+                            ?: annotationLastLineStyleOf(light)
+                    }
+                    selectionMenuOn -> {
+                        noteText = ""
+                        noteKind = annotationLastKindOf(light)
+                        noteLineStyle = annotationLastLineStyleOf(light)
+                    }
+                    else -> noteText = ""
                 }
+            }
+            // 卡片**从屏幕下沿滑上来**、收起时再滑下去（D-30）。它自己已经按键盘高度上移（[AnnotationSheet]
+            // 里的 imePx），所以滑入这一段里卡片的下半截正被升起的键盘挡着——看上去是「卡片 + 键盘」
+            // 整整一块从底下推上来，而不是先弹一张卡片、再单独顶起键盘。
+            // 没收动画时卡片一瞬消失、键盘还在半空；现在两者同一段时间里各自归位。
+            // 在场由升起度决定：收起动画跑完才卸内容（降到 0 时卡片本来就已经在屏幕外面了）。
+            if (menuOn || sheetReveal > 0f) {
                 // 选区场景：选中的字里已有高亮/划线时，删除作用于**相交的第一条**（列表按起点排序）。
                 val overlapping = if (editing == null) {
-                    annotationState.annotations.firstOrNull {
-                        it.isDrawable() && it.charStart < selection.endExclusive && selection.start < it.charEnd
+                    annotationState.annotationsFor(fromPos.chapter)?.firstOrNull {
+                        it.charStart < selection.endExclusive && selection.start < it.charEnd
                     }
                 } else {
                     null
                 }
-                AnnotationMenu(
-                    anchor = menuAnchor,
-                    bounds = Rect(contentLeft, contentTop, contentRight, contentBottom),
+                val deleteTarget = editing ?: overlapping
+                AnnotationSheet(
+                    modifier = Modifier.align(Alignment.BottomCenter),
+                    visible = menuOn,
+                    imePx = imeBottomPx,
+                    reveal = sheetReveal,
+                    target = NoteBarTarget(
+                        annotationId = editing?.id,
+                        accentArgb = if (editing != null) {
+                            editing.color ?: annotationFallbackColor(editing.kind)
+                        } else {
+                            annotationSlotColor(light, noteKind, annotationDefaultSlot(light, noteKind))
+                        },
+                    ),
+                    text = noteText,
                     palette = paletteFor(light.scheme),
+                    kind = noteKind,
+                    lineStyle = noteLineStyle,
                     highlightColors = annotationColorSlots(light, AnnotationKind.Highlight),
                     highlightDefaultSlot = annotationDefaultSlot(light, AnnotationKind.Highlight),
                     underlineColors = annotationColorSlots(light, AnnotationKind.Underline),
                     underlineDefaultSlot = annotationDefaultSlot(light, AnnotationKind.Underline),
-                    initialKind = annotationLastKindOf(light),
-                    initialLineStyle = annotationLastLineStyleOf(light),
-                    editing = editing,
-                    deleteTarget = editing ?: overlapping,
-                    onPickColor = { kind, slot, style -> applyAnnotationColor(kind, slot, style) },
-                    onPickLineStyle = { style -> applyAnnotationLineStyle(style) },
-                    onCopy = { if (editing != null) copyAnnotation(editing) else copySelection() },
-                    onDelete = { annotation -> deleteAnnotation(annotation) },
+                    // 编辑时只在本类色槽行里给这条记录描圈。
+                    // 编辑时只在本类色槽行里给这条记录描圈；刚点过的那一格优先（还没落笔也看得见）。
+                    currentColor = noteColorArgb ?: if (editing != null && editing.kind == noteKind) {
+                        editing.color ?: annotationFallbackColor(editing.kind)
+                    } else {
+                        null
+                    },
+                    canDelete = deleteTarget != null,
+                    onTextChange = { noteText = it },
+                    onKindChange = { noteKind = it },
+                    onPickColor = { kind, slot -> pickNoteColor(kind, slot) },
+                    onPickLineStyle = { pickNoteLineStyle(it) },
+                    // 复制只进剪贴板：不动记录、也不关卡片（落笔只有「确定」与点卡片外两处）。
+                    onCopy = {
+                        if (editing != null) copyAnnotation(editing) else copySelection()
+                    },
+                    onDelete = { deleteTarget?.let { annotation -> deleteAnnotation(annotation) } },
+                    onDone = { commitNote() },
+                    onCancel = { cancelNote() },
+                    onHeightChange = { noteBarHeightPx = it },
                 )
             }
             // 亮度/护眼遮罩：纯绘制于画布之上、栏之下。
-            ReaderLightMask(light = light, modifier = Modifier.fillMaxSize())
+            ReaderLightMask(light = maskLight, modifier = Modifier.fillMaxSize())
             // 顶/底栏：中部点按切换；条外点击收起。
             // 进面板先退栏：工具栏滑出（BarsAnim）后再开面板，避免面板盖在晾着的工具栏上。
             ReaderBars(
@@ -1944,6 +2769,15 @@ fun ReaderScreen(
                 )
             }
         }
+
         } // 键盘入口内层盒
     }
+}
+
+/**
+ * 单个 Job 的持有壳（手势协程间共享）：不参与组合状态，写它不该触发重组。
+ * 用于「抬手后仍在跑的惯性滚动」这类动画句柄。
+ */
+private class JobSlot {
+    var job: Job? = null
 }

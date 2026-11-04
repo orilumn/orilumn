@@ -1,7 +1,6 @@
 package orilumn.reader.desktop
 
 import orilumn.reader.data.font.FontEntry
-import orilumn.reader.data.settings.BookSettings
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.ui.reader.FontScanProgress
 import orilumn.reader.ui.reader.ReaderAnnotationPanel
@@ -25,6 +24,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
@@ -37,6 +37,9 @@ import io.github.vinceglb.filekit.dialogs.compose.rememberFilePickerLauncher
 import io.github.vinceglb.filekit.name
 import io.github.vinceglb.filekit.readBytes
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.NonCancellable
@@ -46,8 +49,10 @@ import okio.Path.Companion.toPath
  * S32 桌面阅读视图：窗口级组装（`ReaderScreen` + 设置抽屉 + 目录/标注侧边抽屉）。
  *
  * 状态机（最小壳口径）：
- * - 视口/换书/session 变化 → 重建 [DesktopReaderHost]（`remember` 键），`ReaderScreen` 经
+ * - 换书/session 变化 → 重建 [DesktopReaderHost]（`remember` 键），`ReaderScreen` 经
  *   `LaunchedEffect(host)` 重新 `open()` 并落到锚点（存档定位 / 目录跳转目标）；
+ * - 视口变化（拉窗口 / 拖分栏）→ **不重建宿主**：按帧换视口 + 本章轻刷新，松手后才清旧分页表
+ *   并整书重排（视图内「视口两段式」，与调参同构）；
  * - 排版设置变化 → 宿主两段式原位重排（R15：150ms 防抖轻刷新 + 800ms 静默全套），经 `externalPos` +
  *   `contentRevision` 推送阅读面（对齐平板 tick 轻刷新 + 关面板全套口径）；
  * - 设置面板拖拽是高频 `onPreview`：150ms 防抖后才进原位重排，避免逐帧重排
@@ -60,13 +65,9 @@ fun ReaderView(
     book: ShelfBook,
     store: DesktopShelfStore,
     settings: ReaderSettings,
-    /** 本书原始私有层（首次开书探针判“钉没钉过”用；与 settings 同时随书加载）。 */
-    bookOverlay: BookSettings,
     customs: List<ThemePreset>,
     onBack: () -> Unit,
     onSettingsChange: (ReaderSettings) -> Unit,
-    /** 原书设置专用提交（只写本书 overlay，共享持久化语义；与平板同口径）。 */
-    onCommitBookPrivate: (ReaderSettings) -> Unit,
     onSaveTheme: (ThemePreset) -> Unit,
     onDeleteTheme: (ThemePreset) -> Unit,
     modifier: Modifier = Modifier,
@@ -86,6 +87,12 @@ fun ReaderView(
     var currentPos by remember(book) { mutableStateOf<ReaderPos?>(null) }
     var settingsOpen by remember(book) { mutableStateOf(false) }
     /**
+     * 面板内设置（与平板 `panelSettings` 同口径）：打开面板时以当前生效值为底，叠加**只读读数**
+     * （原书实测缩进/行高，见 `DesktopReaderHost.bookStyleReadings`），让读者没配的滑块显示书的
+     * 真实值。读数只活在本状态里：**不落盘、不进 `settings`**（否则会白跑一次重排）。
+     */
+    var panelSettings by remember(book) { mutableStateOf<ReaderSettings?>(null) }
+    /**
      * 面板内调参的锚点（与平板同调，共享 [orilumn.reader.engine.RelayoutAnchor]）：
      * 开面板钉一次，拖动期间每次预览落位不换锚，关面板那次落位后松开。
      */
@@ -96,10 +103,6 @@ fun ReaderView(
     var panelLastPage by remember(book) { mutableStateOf(ReaderPanelPage.Toc) }
     /** 标注外部变更号：清单删除后 +1，阅读面重读当前章、屏幕装饰同步消失。 */
     var annotationsEpoch by remember(book) { mutableStateOf(0) }
-    // 首次开书收口（与平板同调，共享 probeOriginalOnOpen）：默认原书主题开书时，
-    // 落位即按落位章回填未钉的缩进/行距并 bookOnly 持久；已钉/非原书直接跳过。
-    // 每本书一次（overlay 落 pin 后共享门控自停）。
-    var probedOpen by remember(book) { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     fun commit(next: ReaderSettings) = onSettingsChange(next)
 
@@ -159,27 +162,6 @@ fun ReaderView(
     var layoutSnapshot by remember(book) { mutableStateOf(settings) }
     var externalPos by remember(book) { mutableStateOf<ReaderPos?>(null) }
     var contentRevision by remember(book) { mutableStateOf(0) }
-    // 真背光（macOS DDC；scan 一次常驻；非 mac 平台由 currentOs() 回落
-    // 无 DDC 实现）：支持时亮度滑块 -50..100（>0 下发硬件），
-    // 不支持时钳到 -50..0（纯遮罩，物理调亮不可达也不给滑）。
-    val displayBrightness = remember { orilumn.reader.desktop.brightness.DisplayBrightness.currentOs() }
-    var ddcCapable by remember(book) { mutableStateOf<Boolean?>(null) }
-    LaunchedEffect(book) {
-        ddcCapable = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            runCatching { displayBrightness.ddcCapable() }.getOrDefault(false)
-        }
-    }
-    // 亮度 >0 下发真背光（150ms 防抖合流；≤0 只画遮罩，不碰硬件；跟随系统 onmacOS 不动作）。
-    LaunchedEffect(settings.brightness, settings.brightnessFollowSystem, ddcCapable) {
-        if (settings.brightnessFollowSystem) return@LaunchedEffect
-        if (ddcCapable != true) return@LaunchedEffect
-        val v = settings.brightness.coerceIn(1, 100)
-        if (settings.brightness <= 0) return@LaunchedEffect
-        kotlinx.coroutines.delay(150)
-        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            runCatching { displayBrightness.set(v) }
-        }
-    }
 
     BoxWithConstraints(modifier = modifier) {
         val density = LocalDensity.current.density
@@ -228,16 +210,18 @@ fun ReaderView(
             onDispose { (snapshot.delegate as? DesktopReaderHost)?.close() }
         }
         val desktopHost = snapshot.delegate as? DesktopReaderHost
-        // 首次开书探针落位（见上）：宿主就绪 + 首定位到达后跑一次，命中即 bookOnly 提交
-        // （设置状态更新 → 重排 effect 自动轻刷）。
-        LaunchedEffect(book, currentPos) {
-            if (probedOpen) return@LaunchedEffect
-            val pos = currentPos ?: return@LaunchedEffect
-            val host = desktopHost ?: return@LaunchedEffect
-            probedOpen = true
-            val next = host.probeOriginalOnOpen(settings, bookOverlay, pos.chapter)
-            if (next != settings) onCommitBookPrivate(next)
-        }
+        // 重排锚点必须在**真实落位**之后取（用户层·桌面壳）。
+        //
+        // 桌面的「本书设置」是开书后才异步读出来的（书架点开 → 先挂阅读面 → 再套本书 overlay，
+        // 见壳里 `LaunchedEffect(openBook)`），这次设置变更正好和 `open()` 撞在一起。此时
+        // `currentPos` 还是 null，若按旧口径回退成 0/0 当锚点，两段式重排就会把落位钉在**首章
+        // 那张空页**上：整页空白（切片 charStart == charEnd），而且这个位置马上被存档成 0:0，
+        // 重开这本书依旧空白——用户看到的就是「打开书卡死」。锚点没有第二个合法来源，只能等。
+        //
+        // 等待不会漏排：本 effect 的键含 book/settings，换书或读者再改设置都会重启它；
+        // 开书真失败时阅读面自己显示失败态，这里挂着的那一个协程随宿主销毁一并取消。
+        suspend fun awaitLandingPos(): ReaderPos =
+            currentPos ?: snapshotFlow { currentPos }.filterNotNull().first()
         // 引擎重排落位推送（设置两段式与视口重排共用）：刷版本号 + 定位到含锚字符的新页，
         // NonCancellable 保证已完成的重排不被 effect 重启吞掉。
         suspend fun pushLanding(landing: ReaderPos) {
@@ -250,9 +234,11 @@ fun ReaderView(
             }
         }
         // 视口变化不断连重排：宿主只在换书/会话时重建，拉伸窗口只换视口，
-        // 与调参完全同序（轻刷新即时落位 + 全套沉淀），锚点取当页首字符
+        // 与调参完全同序（轻刷新即时落位 + 停手后全套沉淀），锚点取当页首字符
         //（slice.charStart 即页内首字符；封面/纯图页同样是字符定位，无字符页不存在）。
         // 旧页保持可画到新页落定（重建宿主的青黄不接即闪屏根因）。首帧跳过（构造已用该视口）。
+        //
+        // **第一段（每次尺寸变化）**：换视口 + 本章轻刷新 —— 拉窗口期间只跑这一件。
         var appliedViewport by remember(book, session) { mutableStateOf<Pair<Int, Int>?>(null) }
         LaunchedEffect(book, session, settledViewport) {
             val prev = appliedViewport
@@ -260,16 +246,56 @@ fun ReaderView(
             if (prev == null || prev == settledViewport) return@LaunchedEffect
             val host = desktopHost ?: return@LaunchedEffect
             if (!host.applyViewportSize(settledViewport.first, settledViewport.second)) return@LaunchedEffect
-            // 第一段：轻刷新即时落位（与 previewToSettings 同）；第二段全套沉淀（与 commitRelayout 同）。
-            // 两段共用**同一个锚点**：预览落位会把落位页首写回定位，第二段再取会多退一截。
-            // 连续拉伸/缩放同一口径：有钉子沿用，没钉子按当前页首钉住（松手才换锚）。
-            val anchor = currentPos
-            val fromChapter = anchor?.chapter ?: 0
-            val fromChar = anchor?.slice?.charStart ?: 0
+            // 锚点：连续拉伸同一口径——有钉子沿用，没钉子按当前页首钉住（松手后也不换锚，
+            // 换锚只发生在用户真的导航时）。
+            // 视口已先行生效（上面 `applyViewportSize`），等落位只推迟重排，不推迟尺寸。
+            val anchor = awaitLandingPos()
+            val fromChapter = anchor.chapter
+            val fromChar = anchor.slice.charStart
             relayoutAnchor.pin(fromChapter, fromChar)
             val a = relayoutAnchor.resolve(fromChapter, fromChar)
             host.previewToSettings(settings, a.chapter, a.char)?.let { pushLanding(it) }
-            host.commitRelayout(a.chapter, a.char)?.let { pushLanding(it) }
+        }
+        // **第二段（松手后一次）**：废他章 + 清全书旧指纹磁盘表 + 整书 B2 沉淀。
+        //
+        // 为什么必须等松手：拖一次窗口几百帧，每帧尺寸都是一张新指纹。旧口径两段都每帧跑，
+        // 于是每帧把本书分页表整个删一遍、再按这一帧的中间尺寸把整书重排一遍，下一帧又全部作废。
+        // 拖动期间旧指纹表按 `paramHash` 永远命中不到，是纯孤儿，晚删不产生错误页；
+        // 总则上这也正是「第三优先级让位给第一优先级」。
+        //
+        // 「松手」按系统鼠标键态判定（[MouseButtonProbe]）：窗口边框缩放不是我们的手势，
+        // AWT/Compose 收不到抬起事件；读得到键态的平台等同松手那一刻收口（≤25ms），
+        // 读不到的平台（Linux）退回「尺寸静默 [ViewportQuietFallbackMs]」。
+        suspend fun awaitResizeRelease() {
+            // 起步滞后：全屏动画 / 贴边吸附这类程序化连续尺寸先合流，别在动画中间收口。
+            delay(ViewportSettleMinMs)
+            if (MouseButtonProbe.isLeftDown() == null) {
+                delay(ViewportQuietFallbackMs)
+                return
+            }
+            // 按着就继续等；上限兜底（真按住拖了几十秒也不会把收口弄丢）。
+            var waited = 0L
+            while (MouseButtonProbe.isLeftDown() == true && waited < ViewportHoldCapMs) {
+                delay(MouseButtonProbe.PollMs)
+                waited += MouseButtonProbe.PollMs
+            }
+        }
+        var committedViewport by remember(book, session) { mutableStateOf(settledViewport) }
+        LaunchedEffect(book, session) {
+            // collectLatest：每来一个新尺寸就丢弃上一次等待 ⇒ 连续拖动期间一次都不收口。
+            snapshotFlow { settledViewport }.collectLatest { vp ->
+                // 拖出去又拖回原样：该指纹的磁盘表从没被删，不必再沉淀一次。
+                if (vp == committedViewport) return@collectLatest
+                awaitResizeRelease()
+                val host = desktopHost ?: return@collectLatest
+                val pos = currentPos ?: return@collectLatest
+                val a = relayoutAnchor.resolve(pos.chapter, pos.slice.charStart)
+                // 收口整段不可取消：半截的重排只剩浪费（他章已作废、当章还没绑新表）。
+                withContext(NonCancellable) {
+                    host.commitRelayout(a.chapter, a.char)?.let { pushLanding(it) }
+                }
+                committedViewport = vp
+            }
         }
         // 面板字库读 DB（R4 的枚举+中文名链已迁到 `DesktopFontScan` 的扫描任务，视图只收表）；
         // 键只跟书，视口 resize 重建宿主不重枚举。开书路径不触发扫描，改由面板可见性/启动检测驱动。
@@ -301,6 +327,22 @@ fun ReaderView(
                 fontScanProgress = null
             }
         }
+        // 面板读数（与平板同调，共享 `controller.bookStyleReadings`）：打开面板时按当前章量一次
+        // 原书正文段落的缩进/行高，填进面板只读读数（读者没配的滑块显示书的真实值）。
+        // 不落盘、不进 `settings`，所以不触发重排；只合并读数两项，关面板即丢弃。
+        LaunchedEffect(book, settingsOpen, currentPos?.chapter) {
+            if (!settingsOpen) {
+                panelSettings = null
+                return@LaunchedEffect
+            }
+            val pos = currentPos ?: return@LaunchedEffect
+            val host = desktopHost ?: return@LaunchedEffect
+            val measured = host.bookStyleReadings(panelSettings ?: settings, pos.chapter)
+            panelSettings = (panelSettings ?: settings).copy(
+                probeIndent = measured.probeIndent,
+                probeLineSpacing = measured.probeLineSpacing,
+            )
+        }
         // 扫描器是**进程级单例**：离开本视图（回书架/换书重建）时卸下回调，别让它持有已销毁的组合作用域。
         DisposableEffect(book) {
             onDispose { DesktopFontScan.scanner(fontLibrary).onFamilyScanned = { _, _ -> } }
@@ -323,9 +365,10 @@ fun ReaderView(
             layoutSnapshot = settings
             val panelWasOpen = settingsOpen
             val host = desktopHost ?: return@LaunchedEffect
-            val anchor = currentPos
-            val fromChapter = anchor?.chapter ?: 0
-            val fromChar = anchor?.slice?.charStart ?: 0
+            // 锚点等真实落位（开书在途时 `currentPos` 还是 null，见 awaitLandingPos 注释）。
+            val anchor = awaitLandingPos()
+            val fromChapter = anchor.chapter
+            val fromChar = anchor.slice.charStart
             // 交互内只钉一次：拖动期间每次预览落位都会改写当前页首，拿它当下一轮锚点会一路退回。
             // 面板外的静默提交同用这次交互的锚点（预览 + 800ms 全套两段不各取一次）。
             relayoutAnchor.pin(fromChapter, fromChar)
@@ -354,18 +397,22 @@ fun ReaderView(
             onNote = { panelPage = ReaderPanelPage.Annotations; panelLastPage = ReaderPanelPage.Annotations },
             onLightChange = { onSettingsChange(it) },
             onLightCommit = { commit(it) },
+            // 桌面不提供亮度调节（没有背光控制通路）：手势整组禁用，设置面板也不出现亮度页。
+            brightnessAdjustable = false,
             externalPos = externalPos,
             contentRevision = contentRevision,
             // 面板打开时按键留给面板，阅读面不翻页；面板关闭回阅读面即重夺焦点。
             keysEnabled = !settingsOpen && panelPage == null,
             annotationsEpoch = annotationsEpoch,
+            fontEntries = fontEntries,
         )
 
         // 面板常驻组合、经 visible 驱动：关闭走面板内部退场动画（滑出+遮罩淡出后卸载）；
         // 若用 if 条件组合会整棵拔掉，退场动画永远跑不到。
         ReaderSettingsPanel(
             visible = settingsOpen,
-            settings = settings,
+            // 面板读的是「生效值 + 只读读数」（见上）；读数为空时就是生效值。
+            settings = panelSettings ?: settings,
             // 内容与平板同口径：导入区 + 已导入区全开；
             // 导入经 FileKit（桌面 UI），WiFi 经桌面独写对话框（服务共享），发现链见上（macOS 独有，保留）。
             fontEntries = fontEntries,
@@ -409,12 +456,6 @@ fun ReaderView(
                     fallBackFontSlots(family, settings)
                 }
             },
-            onCommitBookPrivate = {
-                // 原书提交共享收口：先按当前章真实排版回填三滑块（与平板 withBookStyle 同调），
-                // 再进 Main.persistSettings；无定位时沿旧值直透。
-                val pos = currentPos
-                onCommitBookPrivate(if (pos != null) desktopHost?.probeOriginalTheme(it, pos.chapter) ?: it else it)
-            },
             onDismiss = {
                 settingsOpen = false
                 // 关面板门控全套（共享收口，平板同调）：版式真变才 finalize 并落位，不变只关面板。
@@ -425,10 +466,11 @@ fun ReaderView(
                     if (landed != null) pushLanding(landed)
                 }
             },
-            brightnessMax = if (ddcCapable == true) 100 else 0,
-            onPreview = { onSettingsChange(it) },
-            onCommitTypography = { commit(it) },
-            onCommitLight = { commit(it) },
+            brightnessSupported = false,
+            // 面板本地状态先跟上（滑块/读数同源），再走壳的提交；两者合流到 Main.persistSettings。
+            onPreview = { panelSettings = it; onSettingsChange(it) },
+            onCommitTypography = { panelSettings = it; commit(it) },
+            onCommitLight = { panelSettings = it; commit(it) },
             customThemes = customs,
             onSaveTheme = onSaveTheme,
             onDeleteTheme = onDeleteTheme,
@@ -490,3 +532,12 @@ fun ReaderView(
         )
     }
 }
+
+/** 视口收口的起步滞后（见 `ReaderView` 视口第二段）：全屏动画/贴边吸附这类连续尺寸先合流。 */
+private const val ViewportSettleMinMs = 120L
+
+/** 读不到鼠标键态的平台（Linux）的回落判据：尺寸静默这么久即视为松手。 */
+private const val ViewportQuietFallbackMs = 500L
+
+/** 按着不放的兜底上限：超过这么久仍是「按下」就按中途停顿收口一次，别把收口弄丢。 */
+private const val ViewportHoldCapMs = 3_000L

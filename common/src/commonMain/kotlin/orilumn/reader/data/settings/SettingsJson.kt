@@ -14,7 +14,7 @@ import kotlinx.serialization.json.intOrNull
  * kotlinx.serialization codecs for settings persistence (S17：org.json → kotlinx.serialization).
  *
  * - [compact] / [pretty]: full-object codec for [ReaderSettings] — encodes **all** fields including
- *   defaults so `toJsonObject()`/`toJson()` of a default set still emits every key (round-trip safe).
+ *   defaults so `toJsonObject()` of a default set still emits every key (round-trip safe).
  * - [bookCompact] / [bookPretty]: overlay codec for [BookSettings] — omits null fields
  *   (`encodeDefaults=false`), matching the old "only non-null fields output" semantics.
  *
@@ -58,6 +58,10 @@ internal object SettingsJson {
     /** org.json.optDouble(key, default) equivalent. */
     fun optDouble(o: JsonObject, key: String, default: Double): Double =
         (o[key] as? JsonPrimitive)?.doubleOrNull ?: default
+
+    /** 可空读数：缺键 / `null` / 非数值 → null（不回落默认，调用方自己决定语义）。 */
+    fun optDoubleOrNull(o: JsonObject, key: String): Double? =
+        (o[key] as? JsonPrimitive)?.doubleOrNull
 
     /** org.json.optBoolean(key, default) equivalent. */
     fun optBoolean(o: JsonObject, key: String, default: Boolean): Boolean =

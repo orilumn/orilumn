@@ -14,8 +14,8 @@ import kotlin.math.roundToInt
  *
  * 双滑块分工（`docs/KMP迁移-功能架构.md` §6 覆盖层）：没有绝对值替换，没有基线清零。
  *
- * 原书设置 只是把预览值重置为中性默认，启动 UI 层照常按存储值渲染（滑块值绝对；0 = 读者未配 ⇒ 不发
- * `text-indent`，首行缩进全听书，与「空字体槽跟随原书」同一纪律）。
+ * 原书设置 只是切回「主题层整张不加载」，UI 层照常按存储值渲染（滑块值绝对；`null` = 读者没配
+ * ⇒ 不发 `text-indent`/`line-height`，全听书，与「空字体槽跟随原书」同一纪律）。
  * 两 scale 都在 StyleComputer 里统一乘算作者/UA 计算后的外边距，这里写固定基线会"替换"
  * 作者/UA 的间距，违背调节语义。
  *
@@ -29,23 +29,23 @@ object ReaderUiSheet {
     /** 构建 UI 层样式表。 */
     fun build(profile: TypographicProfile): StyleSheet {
         // 行距 (line-height) 覆盖所有含文本的块级元素 (含标题/引用/代码/表格/列表文字等).
-        val lineHeight = profile.lineSpacing
+        // **null = 读者没配 ⇒ 一条行高声明都不发**，书的 `line-height` 原样生效（书没写时落到
+        // 引擎初值 1.5，见 `CssDefaults.DEFAULT_LINE_HEIGHT`）。0 是合法的 0 倍行高，照原样发。
+        val lineHeight = profile.lineSpacing?.let { "$textBlockSelectors{line-height:$it}\n" } ?: ""
         // 首行缩进只作用于正文段落 p 的 text-indent; li 由列表自身的沟槽缩进表达, 绝不套用.
         // 纵边距无声明（段间距即疏密，版式侧乘算）：p/li 的 margin 全听书（作者/UA/主题）折叠。
         //
-        // **0 = 读者没配（中性默认）⇒ 一条声明都不发**，书的 `text-indent` 原样生效（与字体槽
-        // 「空槽跟随原书」同一条纪律）。否则读者层的裸 `p{text-indent:0em}`（特异度 0,0,1）会凭
-        // tier 44 压过书里任何 `text-indent`——包括**悬挂缩进**（`.hang{text-indent:-2em;
-        // margin-left:2em}`）：书的负缩进被清零，首行不左移，等于把书的排版意图抹掉。
-        // 读者真配了（>0，或现代/传统主题把预设写进设置）才发声明，那时它就该压过书。
-        val paraRule = if (profile.firstLineIndentEm != 0f) {
-            "p{text-indent:${fmtEm(profile.firstLineIndentEm)}em}\n" +
+        // **null = 读者没设过 ⇒ 一条声明都不发**，书的 `text-indent` 原样生效（含悬挂缩进的负缩进）。
+        // **0 与 N 都发声明**：0 就是「明确不缩进」——读者选 0 必须能压掉书的 2em，这是 0 的语义，
+        // 不是「没配」（旧实现用 `!= 0f` 把两者挤在同一个 0，读者选 0 反而压不掉书，已废弃）。
+        val indentEm = profile.firstLineIndentEm
+        val paraRule = if (indentEm != null) {
+            "p{text-indent:${fmtEm(indentEm)}em}\n" +
                 "li p{text-indent:0em}"
         } else {
             ""
         }
-        val textBlocks = textBlockSelectors
-        return LightCssParser().parse("$textBlocks{line-height:$lineHeight}\n$paraRule\n${fontRules(profile)}")
+        return LightCssParser().parse("$lineHeight$paraRule\n${fontRules(profile)}")
     }
 
     /**

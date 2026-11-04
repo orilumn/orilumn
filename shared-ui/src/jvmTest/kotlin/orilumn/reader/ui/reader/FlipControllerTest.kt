@@ -275,4 +275,61 @@ class FlipControllerTest {
         gate.complete(pos(0))
         ctl.clear()
     }
+
+    @Test
+    fun `手势没结算就消失时兜底收场——否则会话永远停在 Dragging`() = runBlocking {
+        // 真机事故：点屏幕翻页时抬起事件被上层消费，手势循环直接 break，endDrag 不再被调用。
+        // 会话永远停在 Dragging ⇒ 渲染层 isBusy() 把批注层整个藏起来（所有批注突然消失），
+        // 之后的点按也全被 busy 墙挡掉（页面翻不动），只有返回键能退出去。
+        val ctl = controller({ pos(100) }, mutableListOf(), this)
+        ctl.beginDrag(pos(0), direction = 1, enabled = true, coverVisible = false)
+        // 已经拖出去一段（progress 非 0）：兜底不能把「位移非零」当成「手还在拖」——
+        // 兜底只在新一轮按下时调用，那一刻上一根手指早已离开（见 recoverStuckDrag KDoc）。
+        ctl.updateDrag(dx = -600f, pageW = 2560f, enabled = true)
+        // 落位已收场（目标页就绪），但没人来 endDrag。
+        repeat(100) { if (!ctl.targetReady()) kotlinx.coroutines.delay(5) }
+        assertTrue("前提：落位已收场（目标页就绪）", ctl.targetReady())
+        assertTrue("前提：会话仍停在 Dragging", ctl.isBusy())
+
+        ctl.recoverStuckDrag()
+
+        assertFalse("兜底之后必须回到空闲，批注层与点按才不会一直被挡住", ctl.isBusy())
+        assertEquals(0f, ctl.progress.value, 0f)
+    }
+
+    @Test
+    fun `结算停在半路、动画协程已不在时兜底清场`() = runBlocking {
+        // 另一种卡死：会话已进结算态，推进它的动画协程却没了（被别处 cancel 掉）。
+        // 没人再调 onSettleProgress ⇒ phase 永远停在 Settling ⇒ 同样是「批注全消失 + 翻不动」。
+        val ctl = controller({ pos(100) }, mutableListOf(), this)
+        ctl.beginDrag(pos(0), direction = 1, enabled = true, coverVisible = false)
+        ctl.updateDrag(dx = -300f, pageW = 2560f, enabled = true)
+        ctl.session.beginSettle(FlipSession.Decision.COMMIT)
+        assertTrue("前提：会话停在 Settling", ctl.isBusy())
+
+        ctl.recoverStuckDrag()
+
+        assertFalse("兜底之后必须回到空闲", ctl.isBusy())
+    }
+
+    @Test
+    fun `落位在途时兜底不插手`() = runBlocking {
+        // 落位协程在途时 endDrag/兜底都不该抢跑：数据还没落定，
+        // 收场会与协程回来设置的 targetPos 打架（见 endDrag 的白屏注释）。
+        val gate = kotlinx.coroutines.CompletableDeferred<ReaderPos?>()
+        val ctl = FlipController(
+            flipAwait = { gate.await() },
+            forceOpenPos = {},
+            scope = this,
+            log = {},
+            allowAnimation = false,
+        )
+        ctl.beginDrag(pos(0), direction = 1, enabled = true, coverVisible = false)
+        ctl.updateDrag(dx = -300f, pageW = 2560f, enabled = true)
+        kotlinx.coroutines.yield()
+        ctl.recoverStuckDrag()
+        assertEquals("落位在途时不得收场", FlipSession.Phase.Dragging, ctl.session.phase)
+        gate.complete(pos(100))
+        ctl.clear()
+    }
 }

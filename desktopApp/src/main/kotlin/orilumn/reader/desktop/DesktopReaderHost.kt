@@ -16,6 +16,7 @@ import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.engine.skia.ImageCodec
 import orilumn.reader.engine.skia.PageImage
 import orilumn.reader.engine.text.TypographicProfile
+import orilumn.reader.io.Logger
 import orilumn.reader.ui.reader.ReaderHost
 import orilumn.reader.ui.reader.ReaderPos
 import orilumn.reader.ui.imageBitmapOf
@@ -278,7 +279,9 @@ class DesktopReaderHost(
         )
     } catch (c: CancellationException) {
         throw c
-    } catch (_: Throwable) {
+    } catch (t: Throwable) {
+        // 失败原因不能只在界面上说「保存失败」：落一条日志，库里缺列 / 约束不满足才查得出来。
+        Logger.w(TAG, "addAnnotation failed: ${t.message}")
         null
     }
 
@@ -287,7 +290,8 @@ class DesktopReaderHost(
         true
     } catch (c: CancellationException) {
         throw c
-    } catch (_: Throwable) {
+    } catch (t: Throwable) {
+        Logger.w(TAG, "updateAnnotation failed: ${t.message}")
         false
     }
 
@@ -296,7 +300,8 @@ class DesktopReaderHost(
         true
     } catch (c: CancellationException) {
         throw c
-    } catch (_: Throwable) {
+    } catch (t: Throwable) {
+        Logger.w(TAG, "deleteAnnotation failed: ${t.message}")
         false
     }
 
@@ -368,6 +373,9 @@ class DesktopReaderHost(
     /**
      * R15 设置两段式·第二段（用户层·壳，设置静默约 800ms 后调一次）：全套。`prepareRelayout`
      *（bump 代际废他章，B2 的 epoch 去重靠这一次续命）→ `bindReflow` → B2，与平板关面板全套同序。
+     *
+     * 桌面视口（拉窗口/拖分栏）的**停手收口**同走这里：拖动期间只 [applyViewportSize] 轻刷，
+     * 松手后这一次调用补做「废他章 + 清旧指纹磁盘表 + 整书 B2」。
      */
     suspend fun commitRelayout(chapter: Int, anchorChar: Int): ReaderPos? =
         withContext(Dispatchers.Default) {
@@ -376,7 +384,7 @@ class DesktopReaderHost(
                 return@withContext null
             }
             controller.bindReflow(r)
-            // 参数稳定点（面板外两段式提交，含开书探针回填）：版式指纹真变时
+            // 参数稳定点（面板外两段式提交）：版式指纹真变时
             // 清全书旧指纹磁盘表；指纹未变（夜间切换等非版式提交）是空操作，
             // 不误删当前参数下的有效磁盘表。
             controller.cleanStaleDiskTables()
@@ -385,12 +393,16 @@ class DesktopReaderHost(
         }
 
     /**
-     * 视口尺寸应用（窗口拉伸）：只换视口，返回是否变化。
-     * 调用方按调参与两段式推进（轻刷新即时落位 + 全套沉淀），与改参同序。
+     * 视口尺寸应用（**拉窗口/拖分栏的每一帧**）：只换视口，返回是否变化。
+     *
+     * 走控制器的 [BookDocumentController.setViewportLight]：**不清磁盘表**——那两件事
+     * （旧指纹表清理 + 整书重排）是第三优先级，留给尺寸稳定后的 [commitRelayout]，
+     * 否则拖一次窗口就是每帧把本书分页表整个删一遍。拖动期间的可见反馈由调用方的
+     * 本章轻刷新（[previewToSettings]）负责，与调参同序。
      */
     suspend fun applyViewportSize(viewW: Int, viewH: Int): Boolean =
         withContext(Dispatchers.Default) {
-            controller.setViewport(viewW.coerceAtLeast(16), viewH.coerceAtLeast(16))
+            controller.setViewportLight(viewW.coerceAtLeast(16), viewH.coerceAtLeast(16))
         }
 
     /** 换 profile（两段共用）：重建 profile（字重随 UI 层声明进级联）→ 控制器持有 → 追装字库池。 */
@@ -420,27 +432,14 @@ class DesktopReaderHost(
         }
 
     /**
-     * 原书主题提交探针（用户层·壳，与平板 `withBookStyle` 同调共享收口）。
-     *
-     * 面板 `commitBook` 到达时已是 `withLayoutTheme(original)` 后的中性值，此处按当前章
-     * 真实排版回填首行缩进/行距后再持久化；非 original / 无定位一律原样返回。
+     * 面板读数（用户层·壳，与平板 `bookStyleReadings` 同调共享收口）：
+     * 打开设置面板时按当前章量一次原书正文段落的首行缩进与行高，只更新会话只读读数
+     * （面板滑块显示书的真实值），**不落盘、不进版式**。
      */
-    fun probeOriginalTheme(next: ReaderSettings, chapter: Int): ReaderSettings =
-        controller.probeOriginalTheme(chapter, profile.bodyPx, next, profile.density)
-
-    /**
-     * 首次开书探针（用户层·壳，与平板开书收口同调共享 `probeOriginalOnOpen`）。
-     *
-     * 默认原书主题开书时，按落位章回填本书未钉的缩进/行距；调用方（视图）负责 bookOnly
-     * 持久化 + 设置状态更新（重排 effect 随后自动轻刷）。已钉/非原书原样返回。
-     */
-    suspend fun probeOriginalOnOpen(
-        settings: ReaderSettings,
-        overlay: BookSettings,
-        chapter: Int,
-    ): ReaderSettings = withContext(Dispatchers.Default) {
-        controller.probeOriginalOnOpen(chapter, profile.bodyPx, settings, overlay, profile.density)
-    }
+    suspend fun bookStyleReadings(settings: ReaderSettings, chapter: Int): ReaderSettings =
+        withContext(Dispatchers.Default) {
+            controller.bookStyleReadings(chapter, profile.bodyPx, settings, profile.density)
+        }
 
     /**
      * F4b 用户字库追装（与平板 `topUpSkiaFonts` 同式，经共享 [FontPoolSync]）：
@@ -481,5 +480,7 @@ class DesktopReaderHost(
     companion object {
         /** 磁盘分页表构建号：随桌面发版手动递增（职责同安卓 versionCode）。 */
         const val DISK_CACHE_VERSION = 1
+
+        private const val TAG = "Orilumn.Annotation"
     }
 }

@@ -12,7 +12,7 @@ CREATE TABLE annotations(
   chapter INTEGER NOT NULL,
   charStart INTEGER NOT NULL,      -- 含
   charEnd INTEGER NOT NULL,        -- 不含
-  kind TEXT NOT NULL,              -- highlight / underline / note（AnnotationKind.wire）
+  kind TEXT NOT NULL,              -- highlight / underline（AnnotationKind.wire；批注是 note 列）
   color INTEGER,                   -- ARGB（含 alpha）
   lineStyle TEXT,                  -- 划线线型 straight / wavy / dashed / strike（空 = straight）
   note TEXT,                       -- 批注文本（v2）
@@ -55,10 +55,11 @@ annotationById:
 SELECT * FROM annotations
 WHERE id = ?;
 
--- 锚点（书/章/区间）创建后不变；改颜色/线型、补批注文本、回填原文摘录都走这里。
+-- 书/章创建后不变；编辑已有标注时范围（charStart / charEnd）也可能被手柄拖过而改，
+-- 连同颜色/线型、批注文本、原文摘录一起走这里。
 updateAnnotation:
 UPDATE annotations
-SET kind = ?, color = ?, lineStyle = ?, note = ?, quote = ?, updatedAt = ?
+SET charStart = ?, charEnd = ?, kind = ?, color = ?, lineStyle = ?, note = ?, quote = ?, updatedAt = ?
 WHERE id = ?;
 
 deleteAnnotation:

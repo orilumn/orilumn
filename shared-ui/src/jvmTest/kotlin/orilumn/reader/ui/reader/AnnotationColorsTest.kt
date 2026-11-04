@@ -113,11 +113,170 @@ class AnnotationColorsTest {
     }
 
     @Test
+    fun `underline to highlight conversion never carries the ink color`() {
+        val s = ReaderSettings.DEFAULT.copy(highlightDefaultSlot = 1)
+        val underline = Annotation(
+            bookId = 1,
+            chapter = 0,
+            charStart = 0,
+            charEnd = 3,
+            kind = AnnotationKind.Underline,
+            color = 0xFF1E88E5.toInt(),
+        )
+        val highlight = underline.copy(kind = AnnotationKind.Highlight, color = 0x73FFD54F)
+        assertEquals(annotationDefaultColor(s, AnnotationKind.Highlight), annotationHighlightFillColor(underline, s))
+        assertEquals(0x73FFD54F, annotationHighlightFillColor(highlight, s))
+        assertEquals(annotationDefaultColor(s, AnnotationKind.Highlight), annotationHighlightFillColor(null, s))
+    }
+
+    @Test
+    fun `switching an underline to highlight really changes the kind`() {
+        val s = ReaderSettings.DEFAULT.copy(highlightDefaultSlot = 1)
+        val underline = Annotation(
+            bookId = 1,
+            chapter = 0,
+            charStart = 0,
+            charEnd = 3,
+            kind = AnnotationKind.Underline,
+            color = 0xFF1E88E5.toInt(),
+            lineStyle = AnnotationLineStyle.Wavy,
+            note = "嗯",
+        )
+        val next = annotationAfterEdit(
+            current = underline,
+            kind = AnnotationKind.Highlight,
+            lineStyle = AnnotationLineStyle.Wavy,
+            pickedColor = null,
+            note = "嗯",
+            settings = s,
+        )!!
+        // 记录必须真的换成高亮：只换颜色的话，高亮那半透明的底色会被当成墨线画出一条线。
+        assertEquals(AnnotationKind.Highlight, next.kind)
+        assertEquals(annotationDefaultColor(s, AnnotationKind.Highlight), next.color)
+        assertEquals(AnnotationLineStyle.Straight, next.lineStyle)
+        assertEquals("嗯", next.note)
+    }
+
+    @Test
+    fun `switching kind uses the colour slot the reader just tapped`() {
+        val s = ReaderSettings.DEFAULT
+        val underline = Annotation(
+            bookId = 1,
+            chapter = 0,
+            charStart = 0,
+            charEnd = 3,
+            kind = AnnotationKind.Underline,
+            color = 0xFF1E88E5.toInt(),
+        )
+        val next = annotationAfterEdit(
+            current = underline,
+            kind = AnnotationKind.Highlight,
+            lineStyle = AnnotationLineStyle.Straight,
+            pickedColor = 0x73FFEB3B,
+            note = null,
+            settings = s,
+        )!!
+        assertEquals(0x73FFEB3B, next.color)
+    }
+
+    @Test
+    fun `editing a record without changes writes nothing`() {
+        val s = ReaderSettings.DEFAULT
+        val current = Annotation(
+            bookId = 1,
+            chapter = 0,
+            charStart = 0,
+            charEnd = 3,
+            kind = AnnotationKind.Highlight,
+            color = 0x73FFD54F,
+            note = "嗯",
+        )
+        assertEquals(
+            null,
+            annotationAfterEdit(
+                current = current,
+                kind = current.kind,
+                lineStyle = current.lineStyle,
+                pickedColor = null,
+                note = current.note,
+                settings = s,
+            ),
+        )
+        // 只改文字也是改动。
+        assertEquals(
+            "嗯嗯",
+            annotationAfterEdit(
+                current = current,
+                kind = current.kind,
+                lineStyle = current.lineStyle,
+                pickedColor = null,
+                note = "嗯嗯",
+                settings = s,
+            )?.note,
+        )
+    }
+
+    @Test
+    fun `editing only the range writes the new range and quote`() {
+        val s = ReaderSettings.DEFAULT
+        val current = Annotation(
+            bookId = 1,
+            chapter = 0,
+            charStart = 0,
+            charEnd = 3,
+            kind = AnnotationKind.Highlight,
+            color = 0x73FFD54F,
+            note = "嗯",
+            quote = "旧摘录",
+        )
+        val next = annotationAfterEdit(
+            current = current,
+            kind = current.kind,
+            lineStyle = current.lineStyle,
+            pickedColor = null,
+            note = current.note,
+            settings = s,
+            charStart = 2,
+            charEnd = 7,
+            quote = "新摘录",
+        )!!
+        assertEquals(2, next.charStart)
+        assertEquals(7, next.charEnd)
+        assertEquals("新摘录", next.quote)
+        // 样式与批注文字没动。
+        assertEquals(current.kind, next.kind)
+        assertEquals(current.color, next.color)
+        assertEquals(current.note, next.note)
+    }
+
+    @Test
+    fun `changing the line style keeps the underline ink`() {
+        val s = ReaderSettings.DEFAULT.copy(underlineDefaultSlot = 3)
+        val underline = Annotation(
+            bookId = 1,
+            chapter = 0,
+            charStart = 0,
+            charEnd = 3,
+            kind = AnnotationKind.Underline,
+            color = 0xFF1E88E5.toInt(),
+        )
+        val next = annotationAfterEdit(
+            current = underline,
+            kind = AnnotationKind.Underline,
+            lineStyle = AnnotationLineStyle.Wavy,
+            pickedColor = null,
+            note = null,
+            settings = s,
+        )!!
+        assertEquals(AnnotationLineStyle.Wavy, next.lineStyle)
+        assertEquals(0xFF1E88E5.toInt(), next.color)
+    }
+
+    @Test
     fun `line style is only stored on underlines`() {
         assertEquals(AnnotationLineStyle.Wavy, annotationLineStyleFor(AnnotationKind.Underline, AnnotationLineStyle.Wavy))
         // 高亮不画线：存进去也没意义，还会污染划线菜单的初始值。
         assertEquals(AnnotationLineStyle.Straight, annotationLineStyleFor(AnnotationKind.Highlight, AnnotationLineStyle.Wavy))
-        assertEquals(AnnotationLineStyle.Straight, annotationLineStyleFor(AnnotationKind.Note, AnnotationLineStyle.Dashed))
     }
 
     @Test
@@ -170,6 +329,22 @@ class AnnotationColorsTest {
         val after = withAnnotationDefaultSlot(before, AnnotationKind.Underline, 99)
         assertEquals(before.underlineColorSlots.lastIndex, after.underlineDefaultSlot)
         assertEquals(before.underlineColorSlots, after.underlineColorSlots)
+    }
+
+    @Test
+    fun `restoring panel colors resets both kinds and keeps the default slot`() {
+        val before = ReaderSettings.DEFAULT.copy(
+            highlightColorSlots = List(5) { 0xFF112233.toInt() },
+            underlineColorSlots = List(5) { 0xFF445566.toInt() },
+            highlightDefaultSlot = 3,
+            underlineDefaultSlot = 2,
+        )
+        val after = withDefaultAnnotationColorSlots(before)
+        assertEquals(ReaderSettings.DEFAULT_HIGHLIGHT_COLOR_SLOTS, after.highlightColorSlots)
+        assertEquals(ReaderSettings.DEFAULT_UNDERLINE_COLOR_SLOTS, after.underlineColorSlots)
+        // 新建标注用哪一格不归笔记页管：恢复颜色不动默认格。
+        assertEquals(3, after.highlightDefaultSlot)
+        assertEquals(2, after.underlineDefaultSlot)
     }
 
     @Test
@@ -264,9 +439,21 @@ class AnnotationColorsTest {
     }
 
     @Test
-    fun `preset colors are opaque and unique`() {
-        assertEquals(10, ANNOTATION_PRESET_COLORS.size)
-        assertEquals(ANNOTATION_PRESET_COLORS.size, ANNOTATION_PRESET_COLORS.distinct().size)
-        assertTrue(ANNOTATION_PRESET_COLORS.all { annotationAlpha(it) == 0xFF })
+    fun `complement ring rotates hue and stays opaque`() {
+        // 正红 → 青：红通道压到最低，绿蓝抬起；圈不跟色槽的透明度走。
+        val cyan = annotationComplementRingColor(0x80FF0000.toInt())
+        assertEquals(0xFF, annotationAlpha(cyan))
+        assertTrue(annotationRed(cyan) < 40)
+        assertTrue(annotationGreen(cyan) > 180)
+        assertTrue(annotationBlue(cyan) > 180)
+
+        // 深藏青（划线墨色）→ 亮橙：暗色槽的圈要提亮，不能跟着一起暗下去。
+        val orange = annotationComplementRingColor(0xFF112233.toInt())
+        assertEquals(0xFF, annotationAlpha(orange))
+        assertTrue(annotationRed(orange) > 200)
+        assertTrue(annotationBlue(orange) < 80)
+
+        // 色槽的 alpha 不参与：同一 RGB、不同透明度给出同一圈色。
+        assertEquals(cyan, annotationComplementRingColor(0xFFFF0000.toInt()))
     }
 }

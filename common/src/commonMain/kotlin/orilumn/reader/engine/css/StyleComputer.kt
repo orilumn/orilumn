@@ -24,9 +24,9 @@ import orilumn.reader.engine.html.MarkupElement
  * @param theme the modern/traditional/user theme stylesheet (reader layer, above the book; empty/null = off).
  * @param custom the reader's custom-style rulesheet (above UI; empty/null = off).
  * @param ui the reader-app stylesheet (above theme, below custom styles; carries line-height / paragraph spacing).
- * @param paragraphScale 段间距 (paragraphSpacingScale): scales the computed top/bottom margin of
- *   `p`/`li` only (author css / UA / theme values kept, only ratio-adjusted;
- *   100 = book/theme rhythm, 0 = p/li margins cleared).
+ * @param paragraphEm 段间距（**绝对值 em，0..2**）：非 null 时 `p`/`li` 的上下外边距**直接设为**
+ *   N em（书 / UA / 主题的段距被覆盖，绝对值不随书放大缩小，0 = 段落紧贴）；`null` = 不覆盖，
+ *   书的 margin 原样参与折叠（2026-10-29 由百分比乘算改回绝对值）。
  * @param gapScale 疏密 (paragraphGapScale): scales the computed top/bottom margin of every OTHER
  *   block (author css / UA defaults kept; 1.0 = original rhythm).
  * @param pxScale **CSS px → 画布物理 px** 的倍率（= 设备密度，见 `TypographicProfile.density`）。
@@ -41,7 +41,7 @@ class StyleComputer(
     theme: StyleSheet? = null,
     custom: StyleSheet? = null,
     ui: StyleSheet? = null,
-    private val paragraphScale: Float = 1f,
+    private val paragraphEm: Float? = null,
     private val gapScale: Float = 1f,
     private val pxScale: Float = 1f,
 ) {
@@ -362,10 +362,18 @@ class StyleComputer(
         val rawMargin = parseEdges(w, "margin", "margin-top", "margin-right", "margin-bottom", "margin-left", fontSize, parent.fontSizePx)
         // 段间距 (spacingScale): 调节语义 —— 在 cascade 结果之上按比例缩放 (作者 css / UA 默认值保留, 不替换).
         // 只动垂直 (top/bottom)；p/li 吃段间距，其余吃疏密。
-        val scale = if (tag.lowercase() in PARAGRAPH_TAGS) paragraphScale else gapScale
-        val margin = if (scale != 1f) {
-            rawMargin.copy(top = rawMargin.top * scale, bottom = rawMargin.bottom * scale)
-        } else rawMargin
+        val isParagraph = tag.lowercase() in PARAGRAPH_TAGS
+        val margin = when {
+            // 段间距：绝对值（em × 本元素字号）直接定 p/li 的上下外边距，不看书原来写多少。
+            isParagraph && paragraphEm != null -> rawMargin.copy(
+                top = paragraphEm * fontSize,
+                bottom = paragraphEm * fontSize,
+            )
+            isParagraph -> rawMargin
+            // 疏密：p/li 之外的块仍按比例缩放（书 / UA 的节奏保留，只调倍率）。
+            gapScale != 1f -> rawMargin.copy(top = rawMargin.top * gapScale, bottom = rawMargin.bottom * gapScale)
+            else -> rawMargin
+        }
 
         val width = parseBoxSize(w["width"])
         val maxWidth = parseBoxSize(w["max-width"])

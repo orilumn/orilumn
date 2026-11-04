@@ -208,6 +208,9 @@ fun FontLibraryPanel(
     toggleFocused: Boolean = false,
     /** 系统字体扫描实时进度（方案 §2.4）：非 null 时在列表上方显示「已 N / 共 M 族」。 */
     scanProgress: FontScanProgress? = null,
+    /** 「跟随…」首行文案与副标题：正文 / 标题 / 代码槽是「跟随原书」，批注字体是「跟随界面」。 */
+    followLabel: String = "跟随原书",
+    followSubtitle: String = "使用原书字体",
 ) {
     // 同时只展开一行的滑动操作：新展开即收起旧行。
     var openKey by remember { mutableStateOf<String?>(null) }
@@ -271,8 +274,8 @@ fun FontLibraryPanel(
                         is FontPanelRow.FollowOriginal ->
                             // 跟随原书（用户层）：当作一个字体行——与 Entry 同规格（名字行 + 副标题 +
                             // 选中金点），稳坐导入区之下；不是字体，无左滑。
-                            FontManageRow("跟随原书", null, row.selected, null, null, nav, rowIndex, p,
-                                subtitle = "使用原书字体", swipeEnabled = false, sourceLabel = null,
+                            FontManageRow(followLabel, null, row.selected, null, null, nav, rowIndex, p,
+                                subtitle = followSubtitle, swipeEnabled = false, sourceLabel = null,
                                 onTap = { openKey = null; onSelect("") }, openKey = openKey,
                                 onOpenChange = { openKey = it })
                         is FontPanelRow.Entry -> {
@@ -500,15 +503,8 @@ internal fun List<FontEntry>.weightChoices(): List<Pair<Int, String>> =
 fun subtitleGapPx(nameHeightPx: Int, minPx: Float, maxPx: Float): Float =
     (nameHeightPx * 0.08f).coerceIn(minPx, maxPx)
 
-/** 左滑操作配色（删除红沿旧口径；隐藏/恢复另取 hues）。 */
-private enum class SwipeActionTone(val color: Color) {
-    Delete(Color(0xFFD9534F)),
-    Hide(Color(0xFFE67E22)),
-    Restore(Color(0xFF9C27B0)),
-}
-
 /**
- * 管理行：真字形族名 + 副标题 + 选中金点 + iOS 式左滑（沿旧 `FontSwipeRow` 物理）：
+ * 管理行：真字形族名 + 副标题 + 选中金点 + iOS 式左滑（物理与手感见 [SwipeRevealRow]）：
  * 文本与按钮一起滑，左滑至多露出按钮宽（橡皮筋超限），松手按方向惯性吸附开/合；
  * 同时只展开一行（[openKey] 仲裁，切换即弹簧收回）。
  * 点行 = 选择（隐藏组点行 = 取消隐藏）；鼠标拖拽同式。
@@ -534,73 +530,21 @@ private fun FontManageRow(
     sourceLabel: String? = null,
 ) {
     val rowKey = "font:$family:${actionLabel ?: "pick"}"
-    // 按钮宽 = 文本左滑行程（旧口径 88dp）；右滑橡皮筋 72dp，左超限橡皮筋 56dp。
-    val yDp = 88.dp
-    val yPx = with(LocalDensity.current) { yDp.toPx() }
-    val rightPx = with(LocalDensity.current) { 72.dp.toPx() }
-    val leftPx = with(LocalDensity.current) { 56.dp.toPx() }
-    val scope = rememberCoroutineScope()
-    val offsetX = remember { Animatable(0f) }
-    val overBest = remember { Animatable(0f) }
-    val dragDir = remember { mutableFloatStateOf(0f) }
-    val dragAccum = remember { mutableFloatStateOf(0f) }
-    //  latch 到共享 openKey：本行不再是展开行即弹簧收回；展开只由手指驱动，
-    // 切换行不在同一 offset 上叠动画（旧版几秒才收完的根因）。
-    LaunchedEffect(openKey) {
-        if (openKey != rowKey) {
-            offsetX.animateTo(0f, spring(stiffness = Spring.StiffnessMedium, dampingRatio = 0.7f))
-            overBest.animateTo(0f, spring())
-        }
-    }
     val clickSrc = remember { MutableInteractionSource() }
-    Box(
+    SwipeRevealRow(
+        rowKey = rowKey,
+        openKey = openKey,
+        onOpenChange = onOpenChange,
         modifier = Modifier
-            .fillMaxWidth()
-            .height(IntrinsicSize.Min)
-            .clipToBounds()
             .background(if (nav.activeIdx == index) p.rowActive else Color.Transparent)
             .panelHover(nav, index),
+        action = if (swipeEnabled) actionLabel?.let { label ->
+            tone?.let { SwipeAction(label, it) { onAction?.invoke() } }
+        } else null,
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .then(if (swipeEnabled) Modifier
-                    .offset { IntOffset(offsetX.value.roundToInt(), 0) }
-                    .pointerInput(yPx, rightPx, leftPx) {
-                        detectHorizontalDragGestures(
-                            onDragStart = {
-                                dragDir.value = 0f
-                                dragAccum.value = offsetX.value
-                                // 触碰即认领：其他展开行立刻开始收（不 lingering 第二个按钮）。
-                                onOpenChange(rowKey)
-                            },
-                            onDragEnd = {
-                                scope.launch {
-                                    val target = if (offsetX.value < 0f) {
-                                        if (dragDir.value < 0f) -yPx else 0f
-                                    } else 0f
-                                    offsetX.animateTo(target, spring(stiffness = Spring.StiffnessMediumLow, dampingRatio = 0.5f))
-                                    overBest.animateTo(0f, spring())
-                                    // 落位展开即认领，其他行收起。
-                                    if (target < 0f) onOpenChange(rowKey)
-                                }
-                            },
-                            onDragCancel = { scope.launch { offsetX.snapTo(0f); overBest.snapTo(0f) } },
-                        ) { change, dragAmount ->
-                            change.consume()
-                            if (dragAmount != 0f) dragDir.value = if (dragAmount > 0f) 1f else -1f
-                            dragAccum.value += dragAmount
-                            val d = dragAccum.value
-                            if (d < -yPx) {
-                                val over = -d - yPx
-                                val best = leftPx * (1f - exp(-over / leftPx))
-                                scope.launch { overBest.snapTo(best); offsetX.snapTo(-yPx - overBest.value) }
-                            } else {
-                                val shown = if (d <= 0f) d else rightPx * (1f - exp(-d / rightPx))
-                                scope.launch { offsetX.snapTo(shown); overBest.snapTo(0f) }
-                            }
-                        }
-                    } else Modifier)
                 // 点行体选择（无水平拖拽的点按才落到这里）。
                 // 行不抢焦点（面板按键走 activeIdx 状态机，与焦点遍历无关）：
                 // 点过的行若留着焦点，回车会被行当"再点一次"吃掉，抽屉导航就再也收不到回车。
@@ -652,28 +596,6 @@ private fun FontManageRow(
             }
             if (selected) Text("●", color = PanelGold, fontSize = 12.sp,
                 modifier = Modifier.padding(start = 8.dp))
-        }
-        if (swipeEnabled && actionLabel != null && tone != null) {
-            val overDp = with(LocalDensity.current) { overBest.value.toDp() }
-            Box(
-                modifier = Modifier
-                    .matchParentSize()
-                    .offset { IntOffset((offsetX.value + yPx + overBest.value).roundToInt(), 0) },
-            ) {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.CenterEnd)
-                        .width(yDp + overDp)
-                        .fillMaxHeight()
-                        .background(tone.color)
-                        .clickable { onAction?.invoke(); onOpenChange(null) },
-                    contentAlignment = Alignment.CenterStart,
-                ) {
-                    Text(actionLabel, color = Color.White, fontSize = 15.sp,
-                        fontWeight = FontWeight.Medium,
-                        modifier = Modifier.padding(start = 28.dp, end = 0.dp))
-                }
-            }
         }
     }
 }

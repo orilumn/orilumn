@@ -5,6 +5,7 @@ import orilumn.reader.collections.identityMap
 import orilumn.reader.collections.withLock
 import orilumn.reader.engine.EngineDiag
 import orilumn.reader.engine.css.CssBundle
+import orilumn.reader.engine.css.BookStyleProbe
 import orilumn.reader.engine.css.FloatSide
 import orilumn.reader.engine.css.cssHexToArgb
 import orilumn.reader.engine.css.FontDemand
@@ -115,6 +116,8 @@ data class ChapterPrepareResult(
     val genOf: orilumn.reader.engine.laying.GenOf = orilumn.reader.engine.laying.EmptyGen,
     /** `::first-letter` 伪元素查找（章节无该伪规则即 null，塑形侧零开销）。 */
     val firstLetterOf: ((MarkupElement) -> orilumn.reader.engine.css.ComputedStyle?)? = null,
+    /** 本章实际生效的字间距（em）：断行、塑形、绘制、命中四处共用的唯一值。 */
+    val letterSpacingEm: Float = 0f,
 ) {
     /** Locates the block index that contains the given chapter-wide char offset. */
     fun blockIndexForChar(charOffset: Int): Int {
@@ -201,15 +204,44 @@ class BoxChapterLayouter(
      * `SkiaRunMeasurer.naturalWidth` 解除 —— 实测 CJK/URL/code/混排 **0.0000%**、
      * 含 kern 对的 Latin **+1.104%**（恒为一个 kern 对的像素量），方向**永不反向**。
      */
-    private var cachedBreaker: Triple<TypographicProfile, Boolean, orilumn.reader.engine.laying.ParagraphBreaker>? = null
+    private var cachedBreaker: Pair<BreakerKey, orilumn.reader.engine.laying.ParagraphBreaker>? = null
 
-    private fun breakerFor(profile: TypographicProfile): orilumn.reader.engine.laying.ParagraphBreaker {
+    /** 断行器缓存键：profile + 变体 + **本章实际生效的字距**（读者没配时它来自书）。 */
+    private class BreakerKey(
+        val profile: TypographicProfile,
+        val inhouse: Boolean,
+        val letterSpacingEm: Float,
+    )
+
+    private fun breakerFor(
+        profile: TypographicProfile,
+        letterSpacingEm: Float,
+    ): orilumn.reader.engine.laying.ParagraphBreaker {
         val inhouse = orilumn.reader.engine.AbSwitch.inhouseBreak()
-        cachedBreaker?.takeIf { it.first == profile && it.second == inhouse }?.let { return it.third }
-        val made = orilumn.reader.engine.skia.bodyParagraphBreaker(profile.letterSpacingEm, profile.cjkLatinSpacingEmApplied)
-        cachedBreaker = Triple(profile, inhouse, made)
+        val key = BreakerKey(profile, inhouse, letterSpacingEm)
+        cachedBreaker?.let { if (it.first == key) return it.second }
+        val made = orilumn.reader.engine.skia.bodyParagraphBreaker(letterSpacingEm, profile.cjkLatinSpacingEmApplied)
+        cachedBreaker = key to made
         return made
     }
+
+    /**
+     * 本章**实际生效**的字间距（em）—— 断行、塑形、绘制、命中四处共用的唯一取值。
+     *
+     * 读者配了就按读者的（`profile.letterSpacingEm`，覆盖书）；没配（`null`）就按**书的**：
+     * 正文段落自己的 `letter-spacing`（[BookStyleProbe.bodyLetterSpacingEm]，与设置面板的
+     * 读数同一边取样，所以「面板显示的数」就是「实际排版的数」）；书也没写就是 0。
+     *
+     * 章内共用**一个**值：断行器（[orilumn.reader.engine.laying.ParagraphBreaker]）是按实例
+     * 携带字距的，盒流、塑形、绘制必须拿同一个数才不会量画分叉（见 `docs/自建断行引擎-测试计划.md`）。
+     */
+    private fun chapterLetterSpacingEm(
+        profile: TypographicProfile,
+        root: MarkupElement,
+        styleOf: (MarkupElement) -> orilumn.reader.engine.css.ComputedStyle?,
+    ): Float = profile.letterSpacingEm
+        ?: BookStyleProbe.bodyLetterSpacingEm(root, styleOf).takeIf { it.isFinite() }
+        ?: 0f
 
     // ─────────────────────────────────────────────────────────────────
     // Two-phase public surface
@@ -238,7 +270,9 @@ class BoxChapterLayouter(
             authorSheets,
         )
         val styleMap = engine.compute(markup)
-        val breaker = breakerFor(profile)
+        // 字间距：读者没配时按书的正文段落（与面板读数同一边取样）；章内共用这一个值。
+        val letterSpacingEm = chapterLetterSpacingEm(profile, markup) { styleMap[it] }
+        val breaker = breakerFor(profile, letterSpacingEm)
         val boxLayouter = BoxLayouter(profile.bodyPx, breaker, profile.density)
         // Heavy: full-chapter line shaping (real skia break per leaf). Only needed for line-level
         // pagination — small-chapter foreground and large-chapter background canonical. The display gate
@@ -255,7 +289,7 @@ class BoxChapterLayouter(
         val firstLetterOf = firstLetterOfFor(engine) { styleMap[it] }
         val structure = boxLayouter.layoutBoxes(markup, contentW, styleMap, classify, imageLoader, chapterHref, genOf = genOf, firstLetterOf = firstLetterOf, contentH = contentH)
         val leaves = collectLeaves(structure.boxes)
-        return buildPrepareResult(markup, styleMap, structure, leaves, classify, hidden, genOf, firstLetterOf)
+        return buildPrepareResult(markup, styleMap, structure, leaves, classify, hidden, genOf, firstLetterOf, letterSpacingEm)
     }
 
     /**
@@ -374,7 +408,7 @@ class BoxChapterLayouter(
         // check-build-read so no caller ever sees a half-assembled cache (double parse is benign).
         val cssTexts = cssBundle?.cssTexts ?: emptyList()
         val cssHash = ChapterStructureCodec.cssHashOf(cssTexts)
-        val structureKey = structureKeyOf(cssBundle, profile.useOriginalStyle, contentW, contentH)
+        val structureKey = structureKeyOf(cssBundle, profile.layoutTheme, contentW, contentH)
         val keyChanged = structure.key != structureKey
         val needSheets = keyChanged || structure.parsedAuthorSheets == null
         if (needSheets) {
@@ -402,7 +436,10 @@ class BoxChapterLayouter(
         // `hidden` is a cheap closure; it is only exercised later, lazily, during per-block materialization
         // and its display decisions are typography-invariant, so the cached leaf set stays valid.
         val hidden = hiddenCheckFor(engine)
-        val prepare = LightPrepare(markup, profile, contentW, engine, structure.leaves, structure.globalCharStarts, hidden, imageLoader, chapterHref, structure.leafToBackgroundOwner, structure.leafToBreakInsideAvoidOwner, structure.genStrings, structure.anyFloat, breakerFor(profile), contentH)
+        // 字间距：读者没配时按书的正文段落（与重路径、面板读数同一边取样）。
+        val letterStyleCache = HashMap<MarkupElement, orilumn.reader.engine.css.ComputedStyle>()
+        val letterSpacingEm = chapterLetterSpacingEm(profile, markup) { engine.resolve(it, letterStyleCache) }
+        val prepare = LightPrepare(markup, profile, contentW, engine, structure.leaves, structure.globalCharStarts, hidden, imageLoader, chapterHref, structure.leafToBackgroundOwner, structure.leafToBreakInsideAvoidOwner, structure.genStrings, structure.anyFloat, breakerFor(profile, letterSpacingEm), contentH, letterSpacingEm = letterSpacingEm)
         // P3：预算的测量回调（块自身 border-box 高）。预算定在塑形之前，故这里量出的自然尺寸
         // 不会被后续按预算的塑形污染（见 `LightPrepare.clusterBlockOwnHeight`）。
         prepare.clusterBlockOwnHeight = { i -> clusterBlockOwnHeight(prepare, i) }
@@ -453,13 +490,17 @@ class BoxChapterLayouter(
     }
 
     /** Fingerprint of the structural inputs that determine the block order/leaf set
-     *  (P2: 作者 CSS 文本＋`@media` 求值视口宽高——旋转/尺寸变化即重解）。 */
-    private fun structureKeyOf(cssBundle: CssBundle?, useOriginalStyle: Boolean, contentW: Int, contentH: Int): Long {
+     *  (P2: 作者 CSS 文本＋`@media` 求值视口宽高——旋转/尺寸变化即重解).
+     *
+     *  排版主题也在这里：主题层（tier 42）换一张样式表，字体/缩进/段距/对齐都可能变，
+     *  裸切主题必须重建结构树（以前靠 `withLayoutTheme` 顺带改字体槽/段距把键带变）。 */
+    private fun structureKeyOf(cssBundle: CssBundle?, layoutTheme: String, contentW: Int, contentH: Int): Long {
         var h = 0L
         cssBundle?.cssTexts?.forEach { h = h * 31 + it.hashCode() }
         h = h * 31 + contentW
         h = h * 31 + contentH
-        return (h shl 1) or (if (useOriginalStyle) 1L else 0L)
+        h = h * 31 + layoutTheme.hashCode()
+        return h
     }
 
     /** Lazily-built `display:none` check bound to [engine], matching the heavy path's hidden-ness. */
@@ -590,7 +631,7 @@ class BoxChapterLayouter(
             else -> themeSheetFromProfile(profile)
         }
         val custom = customStyleSheet
-        return StyleComputer(profile.bodyPx, ua, sheets, theme, custom, ui, paragraphScale = profile.paragraphSpacingScale, gapScale = profile.paragraphGapScale, pxScale = profile.density)
+        return StyleComputer(profile.bodyPx, ua, sheets, theme, custom, ui, paragraphEm = profile.paragraphSpacingEm, gapScale = profile.paragraphGapScale, pxScale = profile.density)
     }
 
     /** Assembles a [ChapterPrepareResult] from a cascade + box tree, computing global char starts. */
@@ -603,6 +644,9 @@ class BoxChapterLayouter(
         hidden: orilumn.reader.engine.laying.HiddenCheck,
         genOf: orilumn.reader.engine.laying.GenOf = orilumn.reader.engine.laying.EmptyGen,
         firstLetterOf: ((MarkupElement) -> orilumn.reader.engine.css.ComputedStyle?)? = null,
+        /** 本章实际生效的字距（em）：断行/塑形/绘制/命中同源，见 [chapterLetterSpacingEm]。
+         *  生产唯一调用点 [prepare] 必传；默认 0 只给不带字距的测试/直调。 */
+        letterSpacingEm: Float = 0f,
     ): ChapterPrepareResult {
         // Compute global char start for each leaf by walking in chapter order and accumulating textLength.
         val starts = NormalFlowLayout.accumulateCharStarts(leaves.map { it.textLength.toLong() })
@@ -618,6 +662,7 @@ class BoxChapterLayouter(
             hidden = hidden,
             genOf = genOf,
             firstLetterOf = firstLetterOf,
+            letterSpacingEm = letterSpacingEm,
         )
     }
 
@@ -648,7 +693,8 @@ class BoxChapterLayouter(
             firstLetterOf = prepare.firstLetterOf,
                 floatLead = leaf.floatLead, classify = prepare.classify, hidden = prepare.hidden,
                 // P3：重路径的预算已写在盒上（含量画同值）。
-                replaceableFitH = leaf.replaceableFitH)
+                replaceableFitH = leaf.replaceableFitH,
+                letterSpacingEm = prepare.letterSpacingEm)
         }
         return completeFullLayout(prepare, shapes, contentH, profile)
     }
@@ -671,7 +717,7 @@ class BoxChapterLayouter(
             prepare.styleMap,
             prepare.classify,
             prepare.hidden,
-            profile.letterSpacingEm,
+            prepare.letterSpacingEm,
             profile.cjkLatinSpacingEmApplied,
             profile.fgColor,
             prepare.genOf,
@@ -699,7 +745,7 @@ class BoxChapterLayouter(
                 )
             }
             val tableWin = orilumn.reader.engine.skia.TableCellLines.expandTable(
-                frames, { prepare.styleMap[it] }, profile.letterSpacingEm, profile.fgColor,
+                frames, { prepare.styleMap[it] }, prepare.letterSpacingEm, profile.fgColor,
                 imageLoader, chapterHref, profile.cjkLatinSpacingEmApplied, profile.density,
             )
             BoxDrawableLayout(
@@ -1143,7 +1189,7 @@ class BoxChapterLayouter(
         val tBox1 = orilumn.reader.time.platformNowMs()
         val clipOf: (MarkupElement) -> ClipRect? = { boxes.clip[it] }
         val tSkia0 = orilumn.reader.time.platformNowMs()
-        val skiaLines = buildPartialSkiaWindow(prepare, leavesForDraw, localFirst, localShapes, localLines, profile.letterSpacingEm, profile.cjkLatinSpacingEmApplied, profile.fgColor, clipOf, deviceScale = profile.density)
+        val skiaLines = buildPartialSkiaWindow(prepare, leavesForDraw, localFirst, localShapes, localLines, prepare.letterSpacingEm, profile.cjkLatinSpacingEmApplied, profile.fgColor, clipOf, deviceScale = profile.density)
         val tSkia1 = orilumn.reader.time.platformNowMs()
         // 表格行展开进窗口（与 canonical/临时页同源 helper；行顶/行首取本窗 FlowedLine，char 章内；
         // 相邻同表行成组，rowspan 格边框跨行）。
@@ -1169,7 +1215,7 @@ class BoxChapterLayouter(
         }
         val tTbl0 = orilumn.reader.time.platformNowMs()
         val incrWin = orilumn.reader.engine.skia.TableCellLines.expandTable(
-            incrFrames, prepare::resolveStyle, profile.letterSpacingEm, profile.fgColor,
+            incrFrames, prepare::resolveStyle, prepare.letterSpacingEm, profile.fgColor,
             imageLoader, chapterHref, profile.cjkLatinSpacingEmApplied, profile.density,
         )
         val tTbl1 = orilumn.reader.time.platformNowMs()
@@ -2533,6 +2579,8 @@ class BoxChapterLayouter(
         hidden = prepare.hidden,
         // P3：分页层高度预算来自盒（`LightPrepare.applyReplacedFits` 写入），塑形只是读它。
         replaceableFitH = leaf.replaceableFitH,
+        // 字间距与轻路径断行器同值（读者没配 ⇒ 按书），否则量宽与断点分叉。
+        letterSpacingEm = prepare.letterSpacingEm,
     )
 
     /** 无 [classify] 时的块判据回退（与 [shapeLeaf] 的 `BLOCK_TAGS` 同规则）。 */
@@ -2559,6 +2607,8 @@ class BoxChapterLayouter(
         hidden: orilumn.reader.engine.laying.HiddenCheck = orilumn.reader.engine.laying.HIDDEN_NONE,
         /** `::first-letter` 伪元素查找（格内块同样吃首字规则的放大/着色）。 */
         firstLetterOf: ((MarkupElement) -> orilumn.reader.engine.css.ComputedStyle?)? = null,
+        /** 本章实际生效的字间距（em）：与盒流、绘制同值（见 `chapterLetterSpacingEm`）。 */
+        letterSpacingEm: Float = profile.letterSpacingEm ?: 0f,
     ): Int {
         // 行高只取本行「rowspan==1」格的最大外高：跨行格的高度由其跨越的各行**分摊**
         // （[TableGridModel.resolveRowHeights]，浏览器实测口径），故此处不把跨行格整体压进
@@ -2583,7 +2633,7 @@ class BoxChapterLayouter(
                 // classify（重路径整章表、轻路径 `lightClassify()`），与排版侧同口径。
                 val bCls = if (b.outsideSiblings.isEmpty()) (classify ?: BLOCK_TAG_CLASSIFY)
                 else BlockClassify { it in b.outsideSiblings || (classify ?: BLOCK_TAG_CLASSIFY).isBlock(it) }
-                val sh = shapeGeometry(b.el, b.style, styles, profile, bw, imageLoader = imageLoader, chapterHref = chapterHref, ancestorStyleOf = ancestorStyleOf, genOf = genOf, classify = bCls, hidden = hidden, isBlock = { bCls.isBlock(it) }, firstLetterOf = firstLetterOf)
+                val sh = shapeGeometry(b.el, b.style, styles, profile, bw, imageLoader = imageLoader, chapterHref = chapterHref, ancestorStyleOf = ancestorStyleOf, genOf = genOf, classify = bCls, hidden = hidden, isBlock = { bCls.isBlock(it) }, firstLetterOf = firstLetterOf, letterSpacingEm = letterSpacingEm)
                 b.shape = sh
                 val contentH = if (sh.lineCount > 0) (sh.lineBottom(sh.lineCount - 1) - sh.lineTop(0)) else 0
                 b.height = contentH + b.edgeV
@@ -2620,10 +2670,12 @@ class BoxChapterLayouter(
         replaceableFitH: Int? = null,
         /** `::first-letter` 伪元素查找（null = 章节无该伪规则 / 未命中）。 */
         firstLetterOf: ((MarkupElement) -> orilumn.reader.engine.css.ComputedStyle?)? = null,
+        /** 本章实际生效的字间距（em）：与盒流、绘制同值（见 `chapterLetterSpacingEm`）。 */
+        letterSpacingEm: Float = profile.letterSpacingEm ?: 0f,
     ): ParagraphShapeRef {
         val t = leaf.table
         if (t != null) {
-            val rowH = fillTableRowCells(t = t, leaf = leaf, styles = styles, profile = profile, ancestorStyleOf = ancestorStyleOf, genOf = genOf, classify = classify, hidden = hidden, firstLetterOf = firstLetterOf)
+            val rowH = fillTableRowCells(t = t, leaf = leaf, styles = styles, profile = profile, ancestorStyleOf = ancestorStyleOf, genOf = genOf, classify = classify, hidden = hidden, firstLetterOf = firstLetterOf, letterSpacingEm = letterSpacingEm)
             return ShapedGeometry(isReplaceable = true, replaceableBottom = rowH.coerceAtLeast(1), replaceableCharEnd = leaf.textLength.coerceAtLeast(1))
         }
         return shapeGeometry(
@@ -2632,6 +2684,7 @@ class BoxChapterLayouter(
             imageLoader = imageLoader, chapterHref = chapterHref, ancestorStyleOf = ancestorStyleOf, genOf = genOf,
             floatLead = floatLead, classify = classify, hidden = hidden, isBlock = { it.tag in BLOCK_TAGS },
             replaceableFitH = replaceableFitH, firstLetterOf = firstLetterOf,
+            letterSpacingEm = letterSpacingEm,
         )
     }
 
@@ -2678,7 +2731,7 @@ class BoxChapterLayouter(
             val leaf = prepare.block(i)
             val t = leaf.table
             if (t != null) {
-                fillTableRowCells(t = t, leaf = leaf, styles = prepare.inlineStyles(i), profile = profile, ancestorStyleOf = prepare::resolveStyle, genOf = prepare.genOf, classify = prepare.lightClassify(), hidden = prepare.hidden, firstLetterOf = prepare.firstLetterOf)
+                fillTableRowCells(t = t, leaf = leaf, styles = prepare.inlineStyles(i), profile = profile, ancestorStyleOf = prepare::resolveStyle, genOf = prepare.genOf, classify = prepare.lightClassify(), hidden = prepare.hidden, firstLetterOf = prepare.firstLetterOf, letterSpacingEm = prepare.letterSpacingEm)
             }
             return hit
         }
@@ -2739,7 +2792,7 @@ class BoxChapterLayouter(
         val clipOf: (MarkupElement) -> ClipRect? = { boxes.clip[it] }
         // Q1-b：临时页同样投影 skia 窗口（页内局部行序，行 y 已归一化到页首行 = 0）——
         // ReaderScreen 合流绘制，不再回落旧 StaticLayout 画法。
-        val skiaLines = buildPartialSkiaWindow(prepare, leavesForDraw, localFirst, shapes, lines, prepare.profile.letterSpacingEm, prepare.profile.cjkLatinSpacingEmApplied, prepare.profile.fgColor, clipOf, deviceScale = prepare.profile.density)
+        val skiaLines = buildPartialSkiaWindow(prepare, leavesForDraw, localFirst, shapes, lines, prepare.letterSpacingEm, prepare.profile.cjkLatinSpacingEmApplied, prepare.profile.fgColor, clipOf, deviceScale = prepare.profile.density)
         // 表格行展开进窗口（与 canonical 同源 helper；行顶/行首取本窗 FlowedLine，char 章内；
         // 相邻同表行成组，rowspan 格边框跨行）。
         val tempFrames = ArrayList<orilumn.reader.engine.skia.TableCellLines.RowFrame>()
@@ -2762,7 +2815,7 @@ class BoxChapterLayouter(
             )
         }
         val tempWin = orilumn.reader.engine.skia.TableCellLines.expandTable(
-            tempFrames, prepare::resolveStyle, prepare.profile.letterSpacingEm, prepare.profile.fgColor,
+            tempFrames, prepare::resolveStyle, prepare.letterSpacingEm, prepare.profile.fgColor,
             imageLoader, chapterHref, prepare.profile.cjkLatinSpacingEmApplied, prepare.profile.density,
         )
         val tempEdgeGaps = windowLeadTop(prepare, blockStart, shapes)
@@ -3729,6 +3782,11 @@ class LightPrepare(
      * 的 shape 留在那儿）。null = 不施加预算（旧调用方/测试）。
      */
     internal var clusterBlockOwnHeight: ((Int) -> Int)? = null,
+    /**
+     * 本章实际生效的字间距（em）：[breaker] 就是按它构造的，塑形/绘制/命中同值。
+     * 由 [BoxChapterLayouter.prepareLight] 与重路径同一判据算出（读者没配 ⇒ 按书）。
+     */
+    val letterSpacingEm: Float = 0f,
 ) {
     val totalBlocks: Int get() = markupLeaves.size
 
@@ -3956,7 +4014,7 @@ class LightPrepare(
         }
         if (!anyFloat) return FloatEager(List(n) { null }, List(n) { null }, List(n) { 0 }, List(n) { true })
         // S3：与重路径同一单源（浮动 lead 的宽度决定其宿主块宽，必须与正文同变体）。
-        val breaker = orilumn.reader.engine.skia.bodyParagraphBreaker(profile.letterSpacingEm, profile.cjkLatinSpacingEmApplied)
+        val breaker = orilumn.reader.engine.skia.bodyParagraphBreaker(letterSpacingEm, profile.cjkLatinSpacingEmApplied)
         val pending = NormalFlowLayout.FloatPending()
         val out = ArrayList<orilumn.reader.engine.laying.FloatLead?>(n)
         val widths = ArrayList<Int?>(n)

@@ -2,7 +2,6 @@
 
 package orilumn.reader.desktop
 
-import orilumn.reader.data.settings.BookSettings
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.data.settings.ReaderSettingsStore
 import orilumn.reader.data.settings.BookSettingsStore
@@ -58,6 +57,8 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 private const val PREF_SORT = "shelf_sort_name"
@@ -66,6 +67,27 @@ private const val PREF_WIN_W = "window_width_dp"
 private const val PREF_WIN_H = "window_height_dp"
 private const val PREF_WIN_X = "window_x_dp"
 private const val PREF_WIN_Y = "window_y_dp"
+
+/**
+ * 设置提交序号（平台层·桌面壳）：`Mutex` 只保证互斥，不保证「先提交的先拿锁」——
+ * 两个协程被不同 IO 线程取走后可能反序到达锁，后落盘的旧快照会把新改动顶掉。
+ * 序号在提交时（UI 线程）分配，锁内比较；晚到的旧快照直接丢弃。
+ */
+private class SettingsPersistOrder {
+    private var lastSubmitted = 0L
+    private var lastApplied = 0L
+
+    /** 提交时分配（仅 UI 线程调用）。 */
+    fun next(): Long = ++lastSubmitted
+
+    /** 锁内判定：该序号是否仍然是最新提交。 */
+    fun shouldApply(seq: Long): Boolean = seq > lastApplied
+
+    /** 锁内登记已落盘。 */
+    fun markApplied(seq: Long) {
+        lastApplied = seq
+    }
+}
 
 /**
  * 最小窗口**内容**尺寸（dp）。同时用作：`minimumSize` 下限 + 读存档时的钳制下限。
@@ -90,6 +112,21 @@ private fun onAnyScreen(xDp: Int, yDp: Int): Boolean = runCatching {
         x in b.x - 200..b.x + b.width && y in b.y - 200..b.y + b.height
     }
 }.getOrDefault(true)
+
+/**
+ * 「启动时继续阅读」要打开的那一本（平台层·桌面壳）：读过、且文件还在的书里，
+ * 取最近一次打开的那本；一本都没有（全没读过 / 文件都被删了）返回 null，调用方留在书架。
+ *
+ * 判据只看**书架记录**，不另存「上次那本」：删书即从书架消失，不会留下指不到任何书的存档。
+ *
+ * @param fileExists 书文件是否还在（默认查真实文件系统；测试注入以便构造场景）
+ */
+internal fun lastReadBook(
+    books: List<ShelfBook>,
+    fileExists: (String) -> Boolean = { File(it).isFile },
+): ShelfBook? = books
+    .filter { it.readTime != null && fileExists(it.filePath) }
+    .maxByOrNull { it.readTime ?: 0L }
 
 /**
  * S32 桌面最小壳：JVM `main` 起窗口挂 shared-ui。
@@ -285,13 +322,15 @@ private fun DesktopRoot(
     val settingsPersist = remember {
         PerBookSettings(settingsStore, BookSettingsStore(DesktopPaths.settingsDir.absolutePath))
     }
+    // 设置写入串行锁（与平板同口径）：并发写会互相覆盖，后落盘的旧快照把新改动顶掉。
+    val settingsPersistMutex = remember { Mutex() }
+    // 提交序号：Mutex 只保证互斥，不保证「先提交的先拿锁」；晚到的旧快照必须在锁内丢弃。
+    val settingsPersistOrder = remember { SettingsPersistOrder() }
     val scope = rememberCoroutineScope()
     // 书架宿主单实例：启动开书（下方 LaunchedEffect）与书架界面走同一个（导入进度一致）。
     val shelfHost = remember(store) { DesktopShelfHost(store) }
 
     var settings by remember { mutableStateOf(settingsStore.load()) }
-    // 本书原始私有层（首次开书探针判“钉没钉过”用；随书加载，见下）。
-    var bookOverlay by remember { mutableStateOf(BookSettings.EMPTY) }
     var customs by remember { mutableStateOf(emptyList<ThemePreset>()) }
     var openBook by remember { mutableStateOf<ShelfBook?>(null) }
     // DB 打开是挂起调用：首帧组合先于 LaunchedEffect 执行，直接挂 App 会让
@@ -310,10 +349,26 @@ private fun DesktopRoot(
         customs = store.loadThemes()
         // 启动参数开书（平台层·桌面壳）：放在就绪前，导入期间维持加载占位，就绪即直达
         // 阅读面（不闪书架）；失败留书架，日志留痕。
-        startupPath?.let { path ->
+        val fromArgs = startupPath?.let { path ->
             val entry = runCatching { shelfHost.openFromPath(path) }.getOrNull()
-            if (entry != null) openBook = entry
-            else orilumn.reader.io.Logger.w("Orilumn.Shelf", "startup open FAIL $path")
+            if (entry == null) orilumn.reader.io.Logger.w("Orilumn.Shelf", "startup open FAIL $path")
+            entry
+        }
+        // 「启动时继续阅读」（平台层·桌面壳）：与平板同口径——开关打开且书库里有读过记录，
+        // 启动即直达上次读的那本（定位/续读位由阅读面自己按存档恢复），不先闪一下书架。
+        // 启动参数给了书就以参数为准（双击文件打开不该被上次那本顶掉）；
+        // 没有读过记录、或开关关着，照旧停在书架。文件被删掉的那本不算（读不了，别开进去）。
+        val lastRead = if (fromArgs == null && startupPath == null && settings.autoContinue) {
+            runCatching { lastReadBook(store.allBooks()) }.getOrNull()
+        } else {
+            null
+        }
+        openBook = fromArgs ?: lastRead
+        if (lastRead != null) {
+            orilumn.reader.io.Logger.i(
+                "Orilumn.Shelf",
+                "auto-continue last book id=${lastRead.id} title=${lastRead.title}",
+            )
         }
         ready = true
     }
@@ -325,10 +380,17 @@ private fun DesktopRoot(
         return
     }
 
-    fun persistSettings(next: ReaderSettings, bookOnly: Boolean = false) {
+    fun persistSettings(next: ReaderSettings) {
         settings = next
+        val seq = settingsPersistOrder.next()
         val bookId = openBook?.id
-        scope.launch(Dispatchers.IO) { settingsPersist.persist(bookId, next, bookOnly) }
+        scope.launch(Dispatchers.IO) {
+            settingsPersistMutex.withLock {
+                if (!settingsPersistOrder.shouldApply(seq)) return@withLock
+                settingsPersist.persist(bookId, next)
+                settingsPersistOrder.markApplied(seq)
+            }
+        }
     }
 
     // 开书即套本书 overlay（无私设即纯全局）；回书架回到全局。
@@ -339,7 +401,6 @@ private fun DesktopRoot(
         topHover = false
         val b = openBook
         settings = withContext(Dispatchers.IO) { settingsPersist.effectiveFor(b?.id) }
-        bookOverlay = withContext(Dispatchers.IO) { settingsPersist.overlayFor(b?.id) }
     }
 
     // ---- 自绘标题栏编排（平台层·桌面壳） ----
@@ -413,11 +474,9 @@ private fun DesktopRoot(
                     book = book,
                     store = store,
                     settings = settings,
-                    bookOverlay = bookOverlay,
                     customs = customs,
                     onBack = { openBook = null },
                     onSettingsChange = { persistSettings(it) },
-                    onCommitBookPrivate = { persistSettings(it, bookOnly = true) },
                     onSaveTheme = { preset ->
                         scope.launch {
                             store.saveTheme(preset)

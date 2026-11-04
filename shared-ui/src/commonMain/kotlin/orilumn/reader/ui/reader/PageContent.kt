@@ -81,8 +81,9 @@ fun rememberPageContent(
     imgCache: PageImageCache<DecodedImage>,
     bgCache: PageImageCache<DecodedImage>,
     /**
-     * 当前章标注（D-19 内存态）。只有 `pos.chapter == annotationChapter` 时才投影；
-     * 传入上一章的列表不会串到目标章。
+     * **这一页所属章**的标注（`AnnotationState.annotationsFor(pos.chapter).orEmpty()`）。
+     * 只有 `pos.chapter == annotationChapter` 时才投影：区间是章内偏移，
+     * 拿别章的列表去投会画到错字上（宁缺勿串）。
      */
     annotations: List<Annotation> = emptyList(),
     annotationChapter: Int = -1,

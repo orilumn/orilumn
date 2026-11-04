@@ -25,24 +25,6 @@ class ReaderLogicTest {
             lineWidthPx = 300,
         )
 
-    // ---- 桌面鼠标页边距翻页 ----
-
-    @Test
-    fun marginFlipDirection_usesContentGeometryNotScreenThirds() {
-        val left = 100f
-        val right = 800f
-        val top = 100f
-        val bottom = 700f
-        assertEquals(-1, ReaderMath.marginFlipDirection(10f, 400f, left, right, top, bottom))
-        assertEquals(1, ReaderMath.marginFlipDirection(900f, 400f, left, right, top, bottom))
-        assertEquals(0, ReaderMath.marginFlipDirection(100f, 400f, left, right, top, bottom))
-        assertEquals(0, ReaderMath.marginFlipDirection(500f, 400f, left, right, top, bottom))
-        assertEquals(0, ReaderMath.marginFlipDirection(800f, 400f, left, right, top, bottom))
-        // 上下页边距不算翻页区。
-        assertEquals(0, ReaderMath.marginFlipDirection(10f, 50f, left, right, top, bottom))
-        assertEquals(0, ReaderMath.marginFlipDirection(900f, 750f, left, right, top, bottom))
-    }
-
     // ---- 三区点按 ----
 
     @Test
@@ -137,6 +119,22 @@ class ReaderLogicTest {
         assertEquals(false, ReaderMath.verticalBrightnessAllowed(-1, leftEnabled = false, rightEnabled = true))
         assertEquals(false, ReaderMath.verticalBrightnessAllowed(0, leftEnabled = true, rightEnabled = true))
         assertEquals(false, ReaderMath.verticalBrightnessAllowed(1, leftEnabled = false, rightEnabled = false))
+    }
+
+    @Test
+    fun twoFingerBrightnessAllowed_needsSwitchAndNoSystemFollow() {
+        assertEquals(true, ReaderMath.twoFingerBrightnessAllowed(twoEnabled = true, followSystem = false))
+        // 开关没开：双指不接管（单指左右两侧的老规矩照旧）。
+        assertEquals(false, ReaderMath.twoFingerBrightnessAllowed(twoEnabled = false, followSystem = false))
+        // 跟随系统时整组亮度手势都禁用，双指也不例外。
+        assertEquals(false, ReaderMath.twoFingerBrightnessAllowed(twoEnabled = true, followSystem = true))
+    }
+
+    @Test
+    fun averagePressedY_usesBothFingers() {
+        assertEquals(300f, ReaderMath.averagePressedY(listOf(200f, 400f)), 1e-6f)
+        assertEquals(250f, ReaderMath.averagePressedY(listOf(100f, 200f, 450f)), 1e-6f)
+        assertEquals(0f, ReaderMath.averagePressedY(emptyList()), 1e-6f)
     }
 
     @Test

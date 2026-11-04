@@ -13,6 +13,7 @@ import orilumn.reader.engine.css.CssBundle
 import orilumn.reader.engine.css.LightCssParser
 import orilumn.reader.engine.css.StyleComputer
 import orilumn.reader.engine.css.StyleSheet
+import orilumn.reader.engine.css.uaSheetFromProfile
 import orilumn.reader.engine.html.HEADING_TAGS
 import orilumn.reader.engine.html.HtmlTreeConverter
 import orilumn.reader.engine.html.MarkupElement
@@ -252,6 +253,22 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
      *  canonical pass). */
     @Volatile
     private var activeChapter: Int = -1
+
+    /**
+     * 读者**眼前**那一章的章号（最近一次落位/翻页的目标章）。[evictFarChapters] 绕开它。
+     *
+     * 为什么不能拿 [activeChapter] 顶替：后者只在开书与调参时写，翻页全程不动。读者一口气翻出
+     * 30 章之后，`keep` 就落在读者身后很远的地方，于是后台 B2/`edge:` 任务收尾那次清扫把
+     * **正在显示的那一章**的解析态（含 `layout`）一起清掉——`pageLines` 读不到版式 ⇒ 整页空白，
+     * 且渲染路径只读不自愈，必须再翻一页（触发 ensure）才画得出来。真机日志指纹：
+     * `non-Readback layout ch=N ... blank content` 恰好出现在 `edge:N+1` 完成之后 ~200ms，
+     * 紧接着翻页日志里 `layoutLC=-1 pageSlices=7 laidOut=false`（= 只有 `evictParsedState`
+     * 能造出这个组合）。
+     *
+     * 与开书白屏（见 [firstContentChapter]）是同一类事故：驱逐必须永远让开「正在渲染的章」。
+     */
+    @Volatile
+    private var displayedChapter: Int = -1
 
     // ── 开书闸门（总则 §第一优先级：目标页出画面之前不启动任何整章重排）──
     //
@@ -517,74 +534,43 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         orilumn.reader.data.read.ReadingLocatorCodec.decode(locator)
 
     /**
-     * 首次开书收口（两端宿主同调）：已是原书主题、且本书从未钉过缩进/行距时，
-     * 从落位章起找首个含 `<p>` 的章回填**缺的键**；否则原样返回。
-     * 调用方负责 bookOnly 持久化 + 一次轻刷（仅返回值与 base 不同时）。
-     * 已钉过的键永不再碰 —— 用户改过即尊重，不会重启又被书盖回去。
+     * **面板读数**（两端宿主同调，`docs/设置模型整改计划.md` §3.3 / §3.4）：打开设置面板时按当前章
+     * 量一次原书正文段落的缩进与行高，写进**只读读数** [ReaderSettings.probeIndent] /
+     * [ReaderSettings.probeLineSpacing] 供滑块显示（读者没配该项时显示书的真实值；书没写行高
+     * 就显示引擎初值 1.5，那本来就是生效值）。
+     *
+     * **只读**：不参与渲染、不进版式键、不落盘（`SettingsScope.SESSION_ONLY`）；读者一拖滑条才写
+     * 成本书的显式值。开书路径零测量 —— 开书探针已退役（§3.7），「每本书先读原书」靠
+     * 「没配就不发声明」让级联自己读，不靠量出来再回填。
+     *
+     * 读数口径是**书自己的**（UA + 作者样式裸级联），不含读者 UI 层与主题层，探测失败原样返回。
+     * 段间距读数含 UA 基线（`p { margin: 1em 0 }`）：书没写 margin 时引擎实际用的就是这 1em。
      */
-    suspend fun probeOriginalOnOpen(
-        startChapter: Int,
+    fun bookStyleReadings(
+        chapter: Int,
         bodyPx: Float,
         base: ReaderSettings,
-        overlay: BookSettings,
         density: Float = 1f,
     ): ReaderSettings {
-        if (base.layoutTheme != "original") return base
-        val needIndent = overlay.firstLineIndent == null
-        val needLine = overlay.lineSpacing == null
-        if (!needIndent && !needLine) return base
-        var ch = startChapter.coerceIn(0, (chapterCount - 1).coerceAtLeast(0))
-        while (ch < chapterCount) {
-            val markup = runCatching { ensureMarkup(ch) }.getOrNull()
-            if (markup != null && hasParagraph(markup)) {
-                val snap = snapshotTypography(ch, bodyPx, density) ?: return base
-                var out = base
-                if (needIndent) out = out.copy(firstLineIndent = snap.firstLineIndent)
-                if (needLine) out = out.copy(lineSpacing = snap.lineSpacing)
-                return out
-            }
-            ch++
-        }
-        return base
-    }
-
-    private fun hasParagraph(root: MarkupElement): Boolean =
-        root.tag == "p" || root.children.any(::hasParagraph)
-
-    /**
-     * 原书设置快照（Q2 下沉：原 `ReaderActivity.withBookStyle`）：切到原书设置时，
-     * 把当前章节的真实排版（首行缩进/行距）快照进设置值。探测失败原样返回。
-     * 纵边距不回填：段间距即疏密，书的 margin 原样参与折叠。
-     */
-    fun snapshotBookStyle(chapter: Int, bodyPx: Float, base: ReaderSettings, density: Float = 1f): ReaderSettings {
-        if (base.layoutTheme != "original") return base
         val snap = snapshotTypography(chapter, bodyPx, density) ?: return base
         return base.copy(
-            firstLineIndent = snap.firstLineIndent,
-            lineSpacing = snap.lineSpacing,
+            probeIndent = snap.firstLineIndent,
+            probeLineSpacing = snap.lineSpacing,
+            probeParagraphSpacing = snap.paragraphSpacing,
+            probeLetterSpacing = snap.letterSpacing,
         )
     }
 
-    /** 原书排版快照（缩进/行距）：UA+作者裸级联；失败回 null（调用方回退 base）。 */
+    /** 原书排版快照（缩进/行距/段距）：UA+作者裸级联；失败回 null（调用方回退 base）。 */
     private fun snapshotTypography(chapter: Int, bodyPx: Float, density: Float): BookStyleProbe.Snapshot? = runCatching {
         val unit = unitAt(chapter) ?: return@runCatching null
         val markup = unit.markup ?: return@runCatching null
         val sheets = (unit.cssBundle?.cssTexts ?: emptyList()).map { LightCssParser().parse(it) }
-        val styles = StyleComputer(bodyPx, StyleSheet(emptyList()), sheets, pxScale = density).compute(markup)
-        BookStyleProbe.snapshot(styles)
-    }.onFailure { Logger.w(logTag, "snapshotBookStyle probe FAIL ch=$chapter ${it.message} → fallback base") }
+        // UA 层必须真加载：段间距读的是「引擎实际生效的段距」，书没写 margin 时生效值来自 UA 的 1em。
+        val styles = StyleComputer(bodyPx, uaSheetFromProfile(profile), sheets, pxScale = density).compute(markup)
+        BookStyleProbe.snapshot(styles, root = markup)
+    }.onFailure { Logger.w(logTag, "bookStyleReadings FAIL ch=$chapter ${it.message} → 回退 base") }
         .getOrNull()
-
-    /**
-     * 用户层共享收口：原书主题提交探针（平板/桌面两端宿主同调，禁止各写一遍）。
-     *
-     * 背景：UI 层（tier 44）在原书模式下仍按存储滑块值渲染，而 `withLayoutTheme(original)`
-     * 只给中性默认；提交时不经此探针，三滑块就与书真实排版脱节 —— 桌面曾因此与平板
-     * 原书设置渲染不一致（桌面直透面板值、无探测）。
-     * 非 original / 探测失败一律原样返回（见 [snapshotBookStyle]）。
-     */
-    fun probeOriginalTheme(chapter: Int, bodyPx: Float, next: ReaderSettings, density: Float = 1f): ReaderSettings =
-        snapshotBookStyle(chapter, bodyPx, next, density)
 
     /** Start location after loading (null when there is no book/no chapter).
  *   Returns (chapter, page): starting from [startChapter], skips chapters with no laid-out
@@ -681,20 +667,31 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
 
     /** Injects the viewport size; returns whether it changed (a change requires relayout). */
     fun setViewport(width: Int, height: Int): Boolean {
-        val changed = width > 0 && height > 0 && (width != viewW || height != viewH)
-        if (changed) {
-            if (width > 0 && height > 0) {
-                viewW = width
-                viewH = height
-            }
-            // 视口尺寸变化（旋转屏幕/窗口调整）导致版面改变 → 指纹必变，走统一
-            // 收口清全书旧指纹磁盘表（守卫恒过；内容盒在边距补偿下恰不变时指纹
-            // 不变，旧表仍有效，不删才是对的）。
-            cleanStaleDiskTables()
-        } else if (width > 0 && height > 0) {
-            viewW = width
-            viewH = height
-        }
+        val changed = setViewportLight(width, height)
+        // 视口尺寸变化（旋转屏幕/开书/尺寸稳定点）导致版面改变 → 指纹必变，走统一
+        // 收口清全书旧指纹磁盘表（守卫恒过；内容盒在边距补偿下恰不变时指纹
+        // 不变，旧表仍有效，不删才是对的）。
+        if (changed) cleanStaleDiskTables()
+        return changed
+    }
+
+    /**
+     * 视口快速切换（拉窗口 / 拖分栏的**每一帧**）：只换 [viewW]/[viewH]，**不清磁盘表、
+     * 不动代际**；返回是否变化。
+     *
+     * 为什么与 [setViewport] 分开：拖一次窗口是几百帧，每帧尺寸都是一张新指纹 ⇒
+     * [cleanStaleDiskTables] 每帧把本书分页表目录整个预扫一遍再逐文件删，而下一帧的尺寸
+     * 又让这批表重新作废——净效果是把读者攒下的同书分页表（换字号来回即命中）全删干净。
+     * 故拖动期间只换尺寸 + 本章轻刷新（[prepareRelayoutLight]，第一优先级），尺寸稳定后
+     * 才由 [cleanStaleDiskTables] 与整书 B2 收口（第三优先级）。
+     *
+     * 期间旧指纹表按 [LayoutParamKey] 寻址永远命中不到，是纯孤儿，晚删不产生错误页。
+     */
+    fun setViewportLight(width: Int, height: Int): Boolean {
+        if (width <= 0 || height <= 0) return false
+        val changed = width != viewW || height != viewH
+        viewW = width
+        viewH = height
         return changed
     }
 
@@ -3292,10 +3289,17 @@ private fun finishCanonicalBackground(
      * （markup 重解析、结构重算，均幂等；磁盘命中章节只塑目标页）。
      * 跳过落位章与 live 会话章；B2 尾与落位尾各扫一次（O(chapters) 纯字段检查）。
      * 窗口 30 章 ≈ 数 MB 常驻；窗口外回翻付一次重解析（百 ms 级，远跳本就付排版费）。
+     *
+     * keep 默认取 [displayedChapter]（读者眼前那一章），**不是** [activeChapter]：后者只在开书/
+     * 调参时写，翻页不动，读远之后按它清就是把正在显示的那一章清掉（整页空白，见字段注释）。
+     * 循环里另按 [displayedChapter] / [keep] 双保险无条件跳过——调用方传错 keep 也不会清到眼前章。
      */
-    private suspend fun evictFarChapters(keep: Int = activeChapter, window: Int = 30) {
+    private suspend fun evictFarChapters(
+        keep: Int = if (displayedChapter >= 0) displayedChapter else activeChapter,
+        window: Int = 30,
+    ) {
         // keep 显式传落位章：跨章 sweep/跳转过程中 active 还是旧值，按 active 清会把刚建好的
-        // 目标章毒死。B2 尾传默认（active 稳定）；导航落位传 landed。
+        // 目标章毒死。B2 尾传默认（= 眼前章）；导航落位传 landed。
         // 与塑形侧同锁序（layoutMutex → structure 锁）：prepareLight 把整段 check-build-read
         // 包在 structure 锁里，清扫逐章同锁重置，无撕裂；从不反向持锁，无死锁。
         // 字段读写本身对并发读者 benign（引用原子 + 旧对象存活），锁只保 check-then-use 窗口
@@ -3303,6 +3307,8 @@ private fun finishCanonicalBackground(
         layoutMutex.withLock {
             for ((i, u) in chapters.withIndex()) {
                 if (i == keep) continue
+                // 眼前那一章永远不驱逐：它的版式就是屏幕上那一页的唯一绘制源，清掉即整页空白。
+                if (i == displayedChapter) continue
                 // 窗口内保留（回翻即时），之外才驱逐 —— 条件反了就是清近留远。
                 val dist = if (i >= keep) i - keep else keep - i
                 if (dist <= window) continue
@@ -3716,7 +3722,12 @@ private fun finishCanonicalBackground(
         }
         val rb = (unit.tempRenderLayout ?: unit.layout) as? PagedLayout ?: run {
             // 非 Readback 的 drawable（legacy/增量布局）静默空白：Q1-b interim 降级，记 w 可见。
-            Logger.w(logTag, "non-Readback layout ch=${unit.chapterIndex} kind=${slice.kind}, blank content")
+            // 带上 null 归属与切片区间：整页空白的现场只有这一行可查（页面显示不出来时
+            // `pageLines` 是本页唯一的绘制源，缺了它画布什么也不画，且只读不自愈）。
+            Logger.w(logTag, "non-Readback layout ch=${unit.chapterIndex} kind=${slice.kind} " +
+                "char=[${slice.charStart},${slice.charEnd}) lines=[${slice.firstLine},${slice.lastLineExclusive}) " +
+                "unitLayout=${unit.layout != null} tempLayout=${unit.tempRenderLayout != null} " +
+                "temp=${unit.inProgress != null}, blank content")
             return null
         }
         return rb to slice
@@ -3882,6 +3893,9 @@ private fun finishCanonicalBackground(
 
     /** R8 (S3/D4): jump-landing one-liner — PATH marker + current-params table hit. */
     private fun logJumpLanding(where: String, chapter: Int) {
+        // 落位即记账：所有导航落位（开书/目录/进度/邻章/标注）都经由这里记下「眼前那一章」，
+        // 远章清扫（[evictFarChapters]）据此绕开它。翻页落位另见 [navigateAdjacentPage]。
+        displayedChapter = chapter
         val u = unitAt(chapter) ?: return
         val cw = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
         val chh = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
@@ -4184,8 +4198,16 @@ private fun finishCanonicalBackground(
         return chapter to neighbour
     }
 
+    /**
+     * 翻页落位（章内 / 跨章 / 临时表 / 磁盘表全部经此）：先落位，落成即记下「眼前那一章」，
+     * 供远章清扫绕开（见 [displayedChapter]）。落位失败（返回 null，界面回滚原页）不改记账——
+     * 原页仍是眼前那一页，绝不能因为一次失败的翻页把它清掉。
+     */
+    private suspend fun navigateAdjacentPage(chapter: Int, slice: PageSlice, direction: Int): Pair<Int, PageSlice>? =
+        navigateAdjacentPageInner(chapter, slice, direction)?.also { displayedChapter = it.first }
+
     /** The actual adjacent-page navigation (direction already tracked by [findAdjacentPage] — see P12). */
-    private suspend fun navigateAdjacentPage(chapter: Int, slice: PageSlice, direction: Int): Pair<Int, PageSlice>? {
+    private suspend fun navigateAdjacentPageInner(chapter: Int, slice: PageSlice, direction: Int): Pair<Int, PageSlice>? {
         val unit = unitAt(chapter) ?: run {
             Logger.w(logTag, "flip: FAIL 源章不存在 ch=$chapter")
             return null

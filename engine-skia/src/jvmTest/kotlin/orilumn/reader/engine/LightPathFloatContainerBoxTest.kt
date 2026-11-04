@@ -37,7 +37,7 @@ class LightPathFloatContainerBoxTest {
 
     @Test
     fun `只装浮动的容器在轻路径也出底色边框盒且排在浮动之前`() {
-        val profile = TypographicProfile.build(ReaderSettings.DEFAULT.copy(useOriginalStyle = true))
+        val profile = TypographicProfile.build(ReaderSettings.DEFAULT.copy(layoutTheme = "original"))
         val layouter = BoxChapterLayouter()
         val root = HtmlTreeConverter().convert(html)!!
         val prepare = layouter.prepareLight(root, CssBundle(listOf(css)), profile, 500, ChapterStructureCache(), 800)

@@ -35,9 +35,15 @@ class SettingsLayoutScopeTest {
         "pageAnim", "pageAnimationMode", "autoContinue", "pageNum", "coverStretch",
         "showHiddenFonts",
         // 标注色槽只改像素，不影响分页。
-        "highlightColorSlots", "underlineColorSlots", "highlightDefaultSlot", "underlineDefaultSlot",
+        "highlightColorSlots", "underlineColorSlots",
+        "highlightDefaultSlot", "underlineDefaultSlot",
         // 浮动菜单记住的上次类别 / 划线线型：纯菜单偏好，不影响版面。
         "annotationLastKind", "annotationLastLineStyle",
+        // 批注字体 / 字重 / 字号只作用于旁注覆盖层，不改正文排版。
+        "noteFont", "noteFontWeight", "noteFontScale",
+        "noteCollapseAll", "noteBorder", "noteBackground", "noteTextSameColor",
+        // 开书探针的只读读数：只给面板显示，不参与渲染。
+        "probeIndent", "probeLineSpacing", "probeParagraphSpacing", "probeLetterSpacing",
     )
 
     /** 进版式管线（进 [orilumn.reader.engine.text.LayoutParamKey] 或经 profile 影响版面）。 */
@@ -45,7 +51,7 @@ class SettingsLayoutScopeTest {
         "lineSpacing", "firstLineIndent", "paragraphSpacing", "paragraphGap",
         "letterSpacing", "cjkLatinSpacing",
         "marginTop", "marginBottom", "marginLeft", "marginRight",
-        "fontBody", "fontTitle", "fontCode", "useOriginalStyle", "useUserScripts",
+        "fontBody", "fontTitle", "fontCode", "useUserScripts",
         "fontScale", "layoutTheme", "fontSize",
         "fontWeightAnchors", "fontWeightAnchorsBySlot",
     )
@@ -85,12 +91,23 @@ class SettingsLayoutScopeTest {
         "underlineDefaultSlot" -> s.copy(underlineDefaultSlot = if (s.underlineDefaultSlot == 0) 1 else 0)
         "annotationLastKind" -> s.copy(annotationLastKind = if (s.annotationLastKind == "underline") "highlight" else "underline")
         "annotationLastLineStyle" -> s.copy(annotationLastLineStyle = if (s.annotationLastLineStyle == "wavy") "straight" else "wavy")
+        "noteFont" -> s.copy(noteFont = if (s.noteFont == "TestFamily") "OtherFamily" else "TestFamily")
+        "noteFontWeight" -> s.copy(noteFontWeight = if (s.noteFontWeight == 700) 400 else 700)
+        "noteFontScale" -> s.copy(noteFontScale = if (s.noteFontScale == 1.4f) 1.1f else 1.4f)
+        "noteCollapseAll" -> s.copy(noteCollapseAll = !s.noteCollapseAll)
+        "noteBorder" -> s.copy(noteBorder = !s.noteBorder)
+        "noteBackground" -> s.copy(noteBackground = !s.noteBackground)
+        "noteTextSameColor" -> s.copy(noteTextSameColor = !s.noteTextSameColor)
+        "probeIndent" -> s.copy(probeIndent = if (s.probeIndent == null) 2.0 else null)
+        "probeLineSpacing" -> s.copy(probeLineSpacing = if (s.probeLineSpacing == null) 1.7 else null)
+        "probeParagraphSpacing" -> s.copy(probeParagraphSpacing = if (s.probeParagraphSpacing == null) 0.9 else null)
+        "probeLetterSpacing" -> s.copy(probeLetterSpacing = if (s.probeLetterSpacing == null) 0.05 else null)
 
-        "lineSpacing" -> s.copy(lineSpacing = s.lineSpacing + 0.13)
-        "firstLineIndent" -> s.copy(firstLineIndent = s.firstLineIndent + 0.11)
-        "paragraphSpacing" -> s.copy(paragraphSpacing = s.paragraphSpacing + 0.17)
+        "lineSpacing" -> s.copy(lineSpacing = (s.lineSpacing ?: 1.5) + 0.13)
+        "firstLineIndent" -> s.copy(firstLineIndent = (s.firstLineIndent ?: 0.0) + 0.11)
+        "paragraphSpacing" -> s.copy(paragraphSpacing = (s.paragraphSpacing ?: 0.0) + 0.17)
         "paragraphGap" -> s.copy(paragraphGap = s.paragraphGap + 0.19)
-        "letterSpacing" -> s.copy(letterSpacing = s.letterSpacing + 0.23)
+        "letterSpacing" -> s.copy(letterSpacing = (s.letterSpacing ?: 0.0) + 0.23)
         "cjkLatinSpacing" -> s.copy(cjkLatinSpacing = s.cjkLatinSpacing + 1.0)
         "marginTop" -> s.copy(marginTop = s.marginTop + 7)
         "marginBottom" -> s.copy(marginBottom = s.marginBottom + 7)
@@ -99,7 +116,6 @@ class SettingsLayoutScopeTest {
         "fontBody" -> s.copy(fontBody = if (s.fontBody.isEmpty()) "ZZProbe" else "")
         "fontTitle" -> s.copy(fontTitle = if (s.fontTitle.isEmpty()) "ZZProbe" else "")
         "fontCode" -> s.copy(fontCode = if (s.fontCode.isEmpty()) "ZZProbe" else "")
-        "useOriginalStyle" -> s.copy(useOriginalStyle = !s.useOriginalStyle)
         "useUserScripts" -> s.copy(useUserScripts = !s.useUserScripts)
         "fontScale" -> s.copy(fontScale = s.fontScale + 3.0)
         "fontSize" -> s.copy(fontSize = s.fontSize + 3)

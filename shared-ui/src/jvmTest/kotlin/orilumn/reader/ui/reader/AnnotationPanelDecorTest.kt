@@ -4,13 +4,14 @@ import androidx.compose.ui.graphics.toArgb
 import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.data.annotation.AnnotationKind
 import orilumn.reader.data.annotation.AnnotationLineStyle
+import orilumn.reader.engine.skia.DecorKind
+import orilumn.reader.engine.skia.DecorStroke
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
  * 笔记清单里的摘录装饰必须与正文那一处**同一份投影**：同样的类别（含删除线换落墨位置）、
- * 同样的颜色快照（含缺色回退）、批注同样不落墨。面板自己另判一套口径就会两边不一致。
+ * 同样的颜色快照（含缺色回退）、批注同样画虚线。面板自己另判一套口径就会两边不一致。
  */
 class AnnotationPanelDecorTest {
 
@@ -37,7 +38,6 @@ class AnnotationPanelDecorTest {
             annotation(AnnotationKind.Underline, 0xFF112233.toInt(), AnnotationLineStyle.Wavy),
             annotation(AnnotationKind.Underline, 0xFF112233.toInt(), AnnotationLineStyle.Dashed),
             annotation(AnnotationKind.Underline, 0xFF112233.toInt(), AnnotationLineStyle.Strike),
-            annotation(AnnotationKind.Note, 0xFF112233.toInt(), AnnotationLineStyle.Wavy),
         )
         for (a in cases) {
             val body = annotationDecorRanges(listOf(a)).firstOrNull()
@@ -46,10 +46,5 @@ class AnnotationPanelDecorTest {
             assertEquals("stroke: $a", body?.stroke, panel?.stroke)
             assertEquals("color: $a", body?.argb, panel?.color?.toArgb())
         }
-    }
-
-    @Test
-    fun `note has no decoration in panel`() {
-        assertNull(quoteDecorOf(annotation(AnnotationKind.Note)))
     }
 }

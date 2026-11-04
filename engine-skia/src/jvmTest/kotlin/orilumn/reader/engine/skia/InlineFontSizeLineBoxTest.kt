@@ -71,7 +71,7 @@ class InlineFontSizeLineBoxTest {
         themeSheetFromProfile(p),
         null,
         ReaderUiSheet.build(p),
-        paragraphScale = p.paragraphSpacingScale, gapScale = p.paragraphGapScale, pxScale = p.density,
+        paragraphEm = p.paragraphSpacingEm, gapScale = p.paragraphGapScale, pxScale = p.density,
     )
 
     private class Heavy(
@@ -177,7 +177,7 @@ class InlineFontSizeLineBoxTest {
     @Test
     fun `绘制侧行内大字不出本行框`() {
         val h = heavy(html)
-        val lines = DrawLineBuilder.build(h.result, h.styles, h.classify, HIDDEN_NONE, profile().letterSpacingEm)
+        val lines = DrawLineBuilder.build(h.result, h.styles, h.classify, HIDDEN_NONE, (profile().letterSpacingEm ?: 0f))
         val all = lines.toSortedMap().values.toList()
         assertTrue("前提：必须有行窗行", all.size >= 2)
 

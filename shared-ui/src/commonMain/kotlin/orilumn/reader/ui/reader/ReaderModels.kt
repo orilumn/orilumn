@@ -53,26 +53,6 @@ object ReaderMath {
     }
 
     /**
-     * 鼠标点左右页边距翻页（D-9）：只认**版心左右之外**的页边距，上下页边距不算。
-     *
-     * 与 [tapZone] 的屏宽三等分不同：桌面宽屏下三等分会把正文也算进翻页区，
-     * 这里必须按版心几何分流。落在正文内或上下边距一律返回 0（不翻页）。
-     */
-    fun marginFlipDirection(
-        x: Float,
-        y: Float,
-        contentLeft: Float,
-        contentRight: Float,
-        contentTop: Float,
-        contentBottom: Float,
-    ): Int = when {
-        y < contentTop || y > contentBottom -> 0
-        x < contentLeft -> -1
-        x > contentRight -> 1
-        else -> 0
-    }
-
-    /**
      * 手势主轴判定。
      *
      * ## 两条路径：快速通道（手指一动就响应）+ slop 通道（防抖）
@@ -162,6 +142,22 @@ object ReaderMath {
     /** 垂直亮度手势是否允许：仅屏幕左/右 1/3 且对应开关打开（单指），与旧逻辑一致。 */
     fun verticalBrightnessAllowed(zone: Int, leftEnabled: Boolean, rightEnabled: Boolean): Boolean =
         (zone == -1 && leftEnabled) || (zone == 1 && rightEnabled)
+
+    /**
+     * 双指上下滑调亮度是否可用：**任意位置**，只要「双指」开关开着且没有跟随系统
+     * （跟随系统时整组亮度手势全禁，单指左右两侧也一样）。
+     */
+    fun twoFingerBrightnessAllowed(twoEnabled: Boolean, followSystem: Boolean): Boolean =
+        twoEnabled && !followSystem
+
+    /**
+     * 双指手势的起手基准：按下指针（≥2 根）的平均纵向位置。
+     *
+     * 取平均而不是盯某一根手指：两指各自动一点也算「一起滑」，某根手指抖一下也不会让亮度跳。
+     * 没有按下指针时返回 0（调用方本来就不该在这时用）。
+     */
+    fun averagePressedY(pressedYs: List<Float>): Float =
+        if (pressedYs.isEmpty()) 0f else pressedYs.average().toFloat()
 
     /** 累计纵向位移 → 亮度比例（相对屏高，向上为正，约 -1..1）。 */
     fun brightnessFrac(dy: Float, viewportHeight: Float): Float =

@@ -72,6 +72,12 @@ fun shapeGeometry(
      * 与盒流测量同值 —— 量画同源的唯一渠道（见 `docs/分页高度约束与断页规则-方案.md` §5）。
      */
     replaceableFitH: Int? = null,
+    /**
+     * 本章**实际生效**的字间距（em）：由 [orilumn.reader.engine.BoxChapterLayouter] 与盒流按同一
+     * 判据算出（读者没配 ⇒ 书的正文段落实测值）。缺省 = 读者设置（测试/直调）。
+     * ⚠ 不能按叶自己去读样式：盒流全章共用一个断行器，塑形必须与它同值，否则量画分叉。
+     */
+    letterSpacingEm: Float = profile.letterSpacingEm ?: 0f,
     isBlock: (MarkupElement) -> Boolean,
 ): ShapedGeometry {
     // Replaceable (img) leaf: no text to shape — a synthetic single line whose height is the
@@ -132,7 +138,7 @@ fun shapeGeometry(
     // Whole-paragraph single-style break (canonical semantics): code-like mono 解析走
     // 级联 monospace 标志（与盒流 `style.monospace || tag == "pre"` 同式）。
     // S3：正文断行变体单源（与 BoxChapterLayouter 的两处接线同口，默认 Skia）。
-    val bodyBreaker = bodyParagraphBreaker(profile.letterSpacingEm, profile.cjkLatinSpacingEmApplied)
+    val bodyBreaker = bodyParagraphBreaker(letterSpacingEm, profile.cjkLatinSpacingEmApplied)
     // E21 残留修复：`::first-letter{float:left}` 首字下沉（与盒流 `NormalFlowLayout` 同一份推算）。
     val capFloat = if (el.isText) {
         null

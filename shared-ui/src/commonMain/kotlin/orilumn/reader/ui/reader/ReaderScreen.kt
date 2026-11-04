@@ -132,6 +132,11 @@ fun ReaderScreen(
     onNote: (() -> Unit)? = null,
     onLightChange: (ReaderSettings) -> Unit = {},
     onLightCommit: (ReaderSettings) -> Unit = {},
+    /**
+     * 本机能不能调屏幕亮度（默认能，平板走系统背光）。桌面版没有背光控制通路，壳传 false：
+     * 三组亮度手势整组禁用，且旧存档里残留的负亮度不再画压暗遮罩（否则读者无从调回）。
+     */
+    brightnessAdjustable: Boolean = true,
     /** Q1-b：顶/底栏显隐同步（Android 宿主据此显隐系统栏 chrome；桌面/其它平台可忽略）。 */
     onBarsVisibleChanged: (Boolean) -> Unit = {},
     /** Q1-b：外部推送的落位（版式重排绑定 / 目录跳转落地后同步）。非空即采用为当前定位并防抖
@@ -207,6 +212,11 @@ fun ReaderScreen(
     // 设置面板/外部 commit 驱动的亮度与护眼修改同步进本地工作快照（亮度手势期间 live 值由
     // onLightChange 直达宿主，此 effect 在宿主回写 settings 后收敛，二者同值不冲突）。
     LaunchedEffect(settings) { light = settings }
+    // 不提供亮度调节的平台（桌面）：压暗遮罩一律按 0 画——亮度手势既然禁用，
+    // 旧存档里残留的负值就没有任何出口，留在屏上等于永久压暗。
+    val maskLight = remember(light, brightnessAdjustable) {
+        if (brightnessAdjustable) light else light.copy(brightness = 0)
+    }
     var brightnessUi by remember { mutableStateOf<BrightnessGestureUi?>(null) }
     var saveJob by remember { mutableStateOf<Job?>(null) }
 
@@ -1871,7 +1881,7 @@ fun ReaderScreen(
                         // 判定用「按下的指针数 ≥ 2」，不要求第二根手指也过 slop：
                         // 两指按住再一起上下滑即可，接管的时机是**第二根手指落下那一帧**。
                         val pressedPointers = event.changes.filter { it.pressed }
-                        if (!mouse && !selecting &&
+                        if (!mouse && !selecting && brightnessAdjustable &&
                             ReaderMath.twoFingerBrightnessAllowed(
                                 light.brightnessGestureTwo, light.brightnessFollowSystem,
                             ) &&
@@ -2082,7 +2092,7 @@ fun ReaderScreen(
                                     if (tMove == 0L) tMove = System.nanoTime()
                                 }
                             }
-                            ReaderMath.Axis.VERTICAL -> if (!brightnessActive) {
+                            ReaderMath.Axis.VERTICAL -> if (!brightnessActive && brightnessAdjustable) {
                                 val s = light
                                 if (!s.brightnessFollowSystem &&
                                     ReaderMath.verticalBrightnessAllowed(
@@ -2177,7 +2187,7 @@ fun ReaderScreen(
                 bgColor = Color(profile.bgColor),
                 modifier = Modifier.fillMaxSize(),
             )
-            ReaderLightMask(light = light, modifier = Modifier.fillMaxSize())
+            ReaderLightMask(light = maskLight, modifier = Modifier.fillMaxSize())
             ReaderBars(
                 visible = barsVisible,
                 statusBarInset = statusBarInset,
@@ -2719,7 +2729,7 @@ fun ReaderScreen(
                 )
             }
             // 亮度/护眼遮罩：纯绘制于画布之上、栏之下。
-            ReaderLightMask(light = light, modifier = Modifier.fillMaxSize())
+            ReaderLightMask(light = maskLight, modifier = Modifier.fillMaxSize())
             // 顶/底栏：中部点按切换；条外点击收起。
             // 进面板先退栏：工具栏滑出（BarsAnim）后再开面板，避免面板盖在晾着的工具栏上。
             ReaderBars(

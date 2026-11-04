@@ -162,27 +162,6 @@ fun ReaderView(
     var layoutSnapshot by remember(book) { mutableStateOf(settings) }
     var externalPos by remember(book) { mutableStateOf<ReaderPos?>(null) }
     var contentRevision by remember(book) { mutableStateOf(0) }
-    // 真背光（macOS DDC；scan 一次常驻；非 mac 平台由 currentOs() 回落
-    // 无 DDC 实现）：支持时亮度滑块 -50..100（>0 下发硬件），
-    // 不支持时钳到 -50..0（纯遮罩，物理调亮不可达也不给滑）。
-    val displayBrightness = remember { orilumn.reader.desktop.brightness.DisplayBrightness.currentOs() }
-    var ddcCapable by remember(book) { mutableStateOf<Boolean?>(null) }
-    LaunchedEffect(book) {
-        ddcCapable = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            runCatching { displayBrightness.ddcCapable() }.getOrDefault(false)
-        }
-    }
-    // 亮度 >0 下发真背光（150ms 防抖合流；≤0 只画遮罩，不碰硬件；跟随系统 onmacOS 不动作）。
-    LaunchedEffect(settings.brightness, settings.brightnessFollowSystem, ddcCapable) {
-        if (settings.brightnessFollowSystem) return@LaunchedEffect
-        if (ddcCapable != true) return@LaunchedEffect
-        val v = settings.brightness.coerceIn(1, 100)
-        if (settings.brightness <= 0) return@LaunchedEffect
-        kotlinx.coroutines.delay(150)
-        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            runCatching { displayBrightness.set(v) }
-        }
-    }
 
     BoxWithConstraints(modifier = modifier) {
         val density = LocalDensity.current.density
@@ -418,6 +397,8 @@ fun ReaderView(
             onNote = { panelPage = ReaderPanelPage.Annotations; panelLastPage = ReaderPanelPage.Annotations },
             onLightChange = { onSettingsChange(it) },
             onLightCommit = { commit(it) },
+            // 桌面不提供亮度调节（没有背光控制通路）：手势整组禁用，设置面板也不出现亮度页。
+            brightnessAdjustable = false,
             externalPos = externalPos,
             contentRevision = contentRevision,
             // 面板打开时按键留给面板，阅读面不翻页；面板关闭回阅读面即重夺焦点。
@@ -485,7 +466,7 @@ fun ReaderView(
                     if (landed != null) pushLanding(landed)
                 }
             },
-            brightnessMax = if (ddcCapable == true) 100 else 0,
+            brightnessSupported = false,
             // 面板本地状态先跟上（滑块/读数同源），再走壳的提交；两者合流到 Main.persistSettings。
             onPreview = { panelSettings = it; onSettingsChange(it) },
             onCommitTypography = { panelSettings = it; commit(it) },

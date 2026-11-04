@@ -154,10 +154,11 @@ fun ReaderSettingsPanel(
     /** 已导入区是否显示（平板=true；桌面=false，仅系统字体）。 */
     showImportedSection: Boolean = true,
     /**
-     * 亮度滑块上限（真背光可用时 100；仅遮罩时壳传 0，上限钳到遮罩段 -50..0，
-     * 调亮物理不可达也不给滑。缺省 100，所有现调用方零改动）。
+     * 本机能不能调屏幕亮度（默认能，平板走系统背光）。桌面版没有背光控制通路，壳传 false：
+     * 首页的「亮度」入口整行不出现，亮度页（跟随系统 / 偏移 / 滑块 / 三个手势开关）也就不可达。
+     * 键位索引保持 11 项不变（第 5 项置为不可用），键盘遍历会自动跳过。
      */
-    brightnessMax: Int = 100,
+    brightnessSupported: Boolean = true,
     /**
      * 设备是否有物理键盘：无键盘时焦点行背景（`rowActive`）置透明——键盘/悬停共用的
      * active 高亮只在有键盘时有意义。选中值指示（金色边框/开关）不受影响。
@@ -301,6 +302,9 @@ fun ReaderSettingsPanel(
         // flat idx → LazyColumn 位置（阅读主题网格每 3 格并一行；亮度页手势开关同行；
         // 字体页按钮区在列表外，懒索引 = 行号 - fixedCount）。
         val listPosOf: (Int) -> Int = when (current) {
+            Sub.Home ->
+                // 「亮度」行在不能调亮度的平台（桌面）不渲染：其后各行在 LazyColumn 里前移一格。
+                if (brightnessSupported) { idx -> idx } else { idx -> if (idx < 5) idx else idx - 1 }
             Sub.TextFont -> { idx -> idx - fontFixedCount }            Sub.ReadingTheme -> { idx ->
                 val n = allThemes.size
                 val chunks = (n + GridCols - 1) / GridCols
@@ -316,7 +320,10 @@ fun ReaderSettingsPanel(
                 ItemKey(onEnter = { stack.add(Sub.Text) }),
                 ItemKey(onEnter = { stack.add(Sub.AnnotationColors) }),
                 ItemKey(onEnter = { stack.add(Sub.ReadingTheme) }),
-                ItemKey(onEnter = { stack.add(Sub.Brightness) }),
+                // 第 5 项对应「亮度」：桌面没有亮度调节通路，留一个不可用占位，
+                // 行不渲染、键盘遍历自动跳过，其后各项索引不挪位。
+                if (brightnessSupported) ItemKey(onEnter = { stack.add(Sub.Brightness) })
+                else ItemKey(enabled = false),
                 // 以下四个开关不影响排版（翻页动画/封面拉伸/启动续读/页码）：
                 // 走无重排提交（纯 UI 设置，与 showHiddenFonts 同口径）——
                 // 走排版提交会触发重排绑定并推落位，与开书封面解析竞态
@@ -586,14 +593,14 @@ fun ReaderSettingsPanel(
                         else {
                             val sysPct = readSystemBrightness()
                             onCommitLight(s.copy(brightnessFollowSystem = false,
-                                brightness = (sysPct + s.brightnessOffset).coerceIn(-50, brightnessMax)))
+                                brightness = (sysPct + s.brightnessOffset).coerceIn(-50, 100)))
                         }
                     }),
                     sliderKey(s.brightnessOffset.toDouble(), -20.0, 20.0, 1.0,
                         apply = { v -> onCommitLight(s.copy(brightnessOffset = v.roundToInt())) },
                         fmt = { v -> if (v > 0) "+${v.roundToInt()}" else "${v.roundToInt()}" },
                         enabled = follow),
-                    sliderKey(s.brightness.toDouble(), -50.0, brightnessMax.toDouble(), 1.0,
+                    sliderKey(s.brightness.toDouble(), -50.0, 100.0, 1.0,
                         apply = { v -> onCommitLight(s.copy(brightness = v.roundToInt())) },
                         fmt = { "${it.roundToInt()}%" },
                         enabled = !follow),
@@ -863,7 +870,10 @@ fun ReaderSettingsPanel(
                     Box(modifier = Modifier.weight(1f)) {
                         val onMove: () -> Unit = { nav.releaseHold() }
                         when (current) {
-                            Sub.Home -> HomePage(s, keys, nav, onMove, listState, onCommitTypography, onCommitLight, customs, p)
+                            Sub.Home -> HomePage(
+                                s, keys, nav, onMove, listState, onCommitTypography, onCommitLight,
+                                customs, p, brightnessSupported,
+                            )
                             Sub.Text -> TextPage(s, keys, nav, onMove, listState, p, onPreview, onCommitTypography, fontDisplayByFamily)
                             Sub.TextFont -> FontLibraryPanel(
                                 rows = fontRows,
@@ -928,7 +938,7 @@ fun ReaderSettingsPanel(
                                 onSaveTheme = onSaveTheme,
                                 onDeleteTheme = onDeleteTheme,
                                 p)
-                            Sub.Brightness -> BrightnessPage(s, keys, nav, onMove, listState, onCommitLight, readSystemBrightness, p, brightnessMax)
+                            Sub.Brightness -> BrightnessPage(s, keys, nav, onMove, listState, onCommitLight, readSystemBrightness, p)
                             Sub.AnimMode -> AnimModePage(s, keys, nav, onMove, listState, onCommitLight, p)
                             Sub.AnnotationColors -> AnnotationColorPage(
                                 s = s,
@@ -1075,6 +1085,8 @@ private fun HomePage(
     commitPlain: (ReaderSettings) -> Unit,
     customs: List<ThemePreset>,
     p: Palette,
+    /** 不能调亮度的平台（桌面）：不渲染「亮度」行。 */
+    showBrightness: Boolean = true,
 ) {
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
         item { SetRow("排版主题", ReaderThemeMath.layoutThemeLabel(s.layoutTheme), keys[0].onEnter, p, nav = nav, index = 0) }
@@ -1082,7 +1094,9 @@ private fun HomePage(
         item { SetRow("文字", onTap = keys[2].onEnter, p = p, nav = nav, index = 2) }
         item { SetRow("笔记", onTap = keys[3].onEnter, p = p, nav = nav, index = 3) }
         item { SetRow("阅读主题", ReaderThemeMath.themeName(s, customs), keys[4].onEnter, p, nav = nav, index = 4) }
-        item { SetRow("亮度", if (s.brightnessFollowSystem) "跟随系统" else "自定义", keys[5].onEnter, p, nav = nav, index = 5) }
+        if (showBrightness) {
+            item { SetRow("亮度", if (s.brightnessFollowSystem) "跟随系统" else "自定义", keys[5].onEnter, p, nav = nav, index = 5) }
+        }
         item { SetSwitch("翻页动画", s.pageAnim, { commitPlain(s.copy(pageAnim = it)) }, p, nav = nav, index = 6) }
         item { SetRow("翻页动画模式", ReaderThemeMath.pageAnimationModeLabel(s.pageAnimationMode), keys[7].onEnter, p, nav = nav, index = 7) }
         item { SetSwitch("封面拉伸全屏", s.coverStretch, { commitPlain(s.copy(coverStretch = it)) }, p, nav = nav, index = 8) }
@@ -1522,7 +1536,6 @@ private fun BrightnessPage(
     commit: (ReaderSettings) -> Unit,
     readSystemBrightness: () -> Int,
     p: Palette,
-    brightnessMax: Int = 100,
 ) {
     val follow = s.brightnessFollowSystem
     val labelW = sliderLabelWidth(listOf("亮度偏移", "亮度"), p)
@@ -1536,7 +1549,7 @@ private fun BrightnessPage(
                         // When turning off follow-system, avoid a brightness jump: reset the main brightness slider with "current system brightness + brightness offset".
                         val sysPct = readSystemBrightness()
                         commit(s.copy(brightnessFollowSystem = false,
-                            brightness = (sysPct + s.brightnessOffset).coerceIn(-50, brightnessMax)))
+                            brightness = (sysPct + s.brightnessOffset).coerceIn(-50, 100)))
                     }
                 }, p, nav = nav, index = 0)
         }
@@ -1546,7 +1559,7 @@ private fun BrightnessPage(
             nav = nav, index = 1) }
         // Main "brightness" slider: 0..100 writes system brightness as a percentage; -50..0 uses a black overlay to dim below the system minimum.
         // When follow-system is on, the main slider is greyed out; the "brightness offset" then adds/subtracts a percentage around system brightness.
-        item { UiSliderRow("亮度", -50.0, brightnessMax.toDouble(), 1.0, s.brightness.toDouble(), { "${it.roundToInt()}%" },
+        item { UiSliderRow("亮度", -50.0, 100.0, 1.0, s.brightness.toDouble(), { "${it.roundToInt()}%" },
             { commit(s.copy(brightness = it.roundToInt())) }, { commit(s.copy(brightness = it.roundToInt())) }, p, enabled = !follow, labelWidth = labelW,
             nav = nav, index = 2) }
         item {

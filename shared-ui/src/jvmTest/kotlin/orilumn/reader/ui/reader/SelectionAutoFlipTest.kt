@@ -34,15 +34,63 @@ class SelectionAutoFlipTest {
     )
 
     @Test
-    fun `edge band is 24dp on both sides`() {
-        val edge = 24f
-        assertEquals(-1, selectionAutoFlipDirection(0f, 1000f, edge))
-        assertEquals(-1, selectionAutoFlipDirection(24f, 1000f, edge))
-        assertEquals(0, selectionAutoFlipDirection(25f, 1000f, edge))
-        assertEquals(0, selectionAutoFlipDirection(500f, 1000f, edge))
-        assertEquals(0, selectionAutoFlipDirection(975f, 1000f, edge))
-        assertEquals(1, selectionAutoFlipDirection(976f, 1000f, edge))
-        assertEquals(1, selectionAutoFlipDirection(1000f, 1000f, edge))
+    fun `flip band starts past the text column not at the screen edge`() {
+        // 正文 100..900，触发带从正文缘再往外 16px（左右各一条），屏幕保底带 24px。
+        val zone = selectionFlipZone(
+            widthPx = 1000f,
+            contentLeftPx = 100f,
+            contentRightPx = 900f,
+            pastTextPx = 16f,
+            edgePx = 24f,
+        )
+        assertEquals(-1, zone.directionOf(0f))
+        assertEquals(-1, zone.directionOf(84f))
+        assertEquals(0, zone.directionOf(85f))
+        assertEquals(0, zone.directionOf(500f))
+        assertEquals(0, zone.directionOf(915f))
+        assertEquals(1, zone.directionOf(916f))
+        assertEquals(1, zone.directionOf(1000f))
+    }
+
+    @Test
+    fun `line end stays out of the band with default margins`() {
+        // 默认边距 50dp、屏宽 1200px、密度 2 ⇒ 正文右缘在 1100px；行末的字不该落进触发带。
+        val zone = selectionFlipZone(
+            widthPx = 1200f,
+            contentLeftPx = 100f,
+            contentRightPx = 1100f,
+            pastTextPx = 8f * 2f,
+            edgePx = 12f * 2f,
+        )
+        assertEquals(0, zone.directionOf(1100f))
+        assertEquals(0, zone.directionOf(1090f))
+        assertEquals(1, zone.directionOf(1116f))
+    }
+
+    @Test
+    fun `zero margins fall back to a screen edge band`() {
+        val zone = selectionFlipZone(
+            widthPx = 1000f,
+            contentLeftPx = 0f,
+            contentRightPx = 1000f,
+            pastTextPx = 16f,
+            edgePx = 24f,
+        )
+        assertEquals(24f, zone.left)
+        assertEquals(976f, zone.right)
+        assertEquals(-1, zone.directionOf(10f))
+        assertEquals(1, zone.directionOf(990f))
+    }
+
+    @Test
+    fun `re-arming needs the finger back inside the text column`() {
+        val zone = selectionFlipZone(1000f, 100f, 900f, 16f, 24f)
+        // 带里（含边界）不算退回正文区。
+        assertEquals(false, zone.hasLeftBand(84f, 6f))
+        assertEquals(false, zone.hasLeftBand(90f, 6f))
+        assertEquals(true, zone.hasLeftBand(91f, 6f))
+        assertEquals(true, zone.hasLeftBand(909f, 6f))
+        assertEquals(false, zone.hasLeftBand(910f, 6f))
     }
 
     @Test

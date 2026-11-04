@@ -1029,10 +1029,32 @@ fun ReaderScreen(
         return if (ok) offset else null
     }
 
-    /** 拖动手柄/长按后移动：焦点按字符走；越出当前行时保持上一个焦点。 */
-    fun extendSelectionAt(xPx: Float, yPx: Float) {
+    /**
+     * 手指落在正文左右边距里时的接续偏移：越过右缘取该行末字、越过左缘取行首字。
+     *
+     * 上下超出正文时不接管（仍按原来的 miss 处理）：手指划出页面上下不该一下选中整页。
+     */
+    fun marginSideOffsetAt(p: ReaderPos, xPx: Float, yPx: Float, widthPx: Float): Int? {
+        val left = profile.marginLeft.toFloat()
+        val right = (widthPx - profile.marginRight).coerceAtLeast(left)
+        val direction = when {
+            xPx > right -> 1
+            xPx < left -> -1
+            else -> return null
+        }
+        return charOffsetAtPageSide(p, yPx, direction)
+    }
+
+    /**
+     * 拖动手柄 / 长按后移动：焦点按字符走。
+     *
+     * 手指落到正文左右边距里时，[charOffsetAt] 会 miss（`LineHitTest` 的口径是「行尾空区不算命中」），
+     * 于是选区冻在上一个字、直到自动翻页一次性跳过去——读者看到的是「选区不跟手，然后突然多一页」。
+     * 这里补一条拖选专用出口：先贴到该行靠边的字，再按触发带翻页。
+     */
+    fun extendSelectionAt(xPx: Float, yPx: Float, widthPx: Float) {
         val p = openPos ?: return
-        val offset = charOffsetAt(p, xPx, yPx) ?: return
+        val offset = charOffsetAt(p, xPx, yPx) ?: marginSideOffsetAt(p, xPx, yPx, widthPx) ?: return
         selection.extendTo(offset)
     }
 
@@ -1480,10 +1502,11 @@ fun ReaderScreen(
                     var gestureActive = true
                     var autoFlipJob: Job? = null
                     var autoFlipSide = 0
+                    // 上膛状态：一次进入只翻一页，退回正文区才重新上膛（见 scheduleAutoFlip）。
+                    var autoFlipArmed = true
                     var boundaryHintShown = false
                     var lastFingerX = downX
                     var lastFingerY = downY
-                    val autoFlipEdgePx = SELECTION_AUTO_FLIP_EDGE_DP * density
                     // 按指针类型分流：鼠标拖拽只做文本选择，不拖页；单击与平板同一个点按入口
                     //（窗口左中右三分区同作用，含点中标注卡片 / 链接的同一优先级）。
                     // 版心几何只用于判断「拖动起选」的落点，和绘制/命中同源。
@@ -1492,6 +1515,17 @@ fun ReaderScreen(
                     val contentTopPx = profile.marginTop.toFloat()
                     val contentRightPx = (size.width - profile.marginRight).toFloat().coerceAtLeast(contentLeftPx)
                     val contentBottomPx = (size.height - profile.marginBottom).toFloat().coerceAtLeast(contentTopPx)
+                    // 自动翻页触发带按**正文缘**算：越过正文再往外 8dp 才算进带，边距小的书
+                    // 不会「拖到行末就翻页」；边距窄到放不下时退回屏幕最外 12dp 的保底带。
+                    val autoFlipZone = selectionFlipZone(
+                        widthPx = size.width.toFloat(),
+                        contentLeftPx = contentLeftPx,
+                        contentRightPx = contentRightPx,
+                        pastTextPx = SELECTION_AUTO_FLIP_PAST_TEXT_DP * density,
+                        edgePx = SELECTION_AUTO_FLIP_EDGE_DP * density,
+                    )
+                    val autoFlipRearmPx = SELECTION_AUTO_FLIP_REARM_DP * density
+                    val pageScrollEdgePx = PAGE_SCROLL_EDGE_DP * density
                     val mouseTextDown = mouse && !barsOwned && !coverVisible && !ctl.isBusy() &&
                         !down.isConsumed &&
                         downX >= contentLeftPx && downX <= contentRightPx &&
@@ -1522,36 +1556,53 @@ fun ReaderScreen(
                                     .coerceIn(0f, maxShiftPxState)
                                 if (next == cur) continue
                                 userShiftPx = next
-                                extendSelectionAt(lastFingerX, lastFingerY)
+                                extendSelectionAt(lastFingerX, lastFingerY, size.width.toFloat())
                             }
                         }
                     }
+                    /**
+                     * 进带 [SELECTION_AUTO_FLIP_FIRST_MS] 后翻**一页**就停：翻完置 [autoFlipArmed] = false，
+                     * 手指要退回正文区（[autoFlipRearmPx] 回差）再进带才会翻下一页。
+                     *
+                     * 早先是「按住不放每 400ms 再翻」：读者停在页边等选区跟过来、或只是沿着页边
+                     * 往下拖，就会被连翻两三页（真机反馈）。翻页没成（邻页未就绪 / 导航被丢弃）时
+                     * 按 [SELECTION_AUTO_FLIP_RETRY_MS] 重试，成功即停。
+                     */
                     fun scheduleAutoFlip(side: Int) {
-                        if (side == 0 || boundaryHintShown || autoFlipJob?.isActive == true) return
+                        if (side == 0 || !autoFlipArmed || boundaryHintShown ||
+                            autoFlipJob?.isActive == true
+                        ) {
+                            return
+                        }
                         autoFlipJob = scope.launch {
                             var wait = SELECTION_AUTO_FLIP_FIRST_MS
-                            while (gestureActive && selecting && autoFlipSide == side) {
+                            while (true) {
                                 delay(wait)
-                                if (!gestureActive || !selecting || autoFlipSide != side) return@launch
+                                if (!gestureActive || !selecting || !autoFlipArmed ||
+                                    autoFlipSide != side
+                                ) {
+                                    return@launch
+                                }
                                 val p = openPos
                                 if (p == null || selection.chapter != p.chapter) return@launch
-                                val ok = autoFlipSelection(side, lastFingerY)
-                                if (!ok) {
-                                    if (isSelectionChapterBoundary(p, side)) {
-                                        // 封顶到章首/章末：不再跨章，但选区要吃到边界字。
-                                        selection.extendTo(if (side > 0) Int.MAX_VALUE else 0)
-                                        boundaryHintShown = true
-                                        Logger.d(
-                                            "Orilumn.SEL",
-                                            "auto-flip boundary dir=$side ch=${p.chapter} " +
-                                                "sel=${selection.start}-${selection.endExclusive}",
-                                        )
-                                        snackbar.show(if (side > 0) "已到章末" else "已到章首")
-                                        return@launch
-                                    }
-                                    if (!selection.hasSelection) return@launch
+                                if (autoFlipSelection(side, lastFingerY)) {
+                                    autoFlipArmed = false
+                                    return@launch
                                 }
-                                wait = SELECTION_AUTO_FLIP_REPEAT_MS
+                                if (isSelectionChapterBoundary(p, side)) {
+                                    // 封顶到章首/章末：不再跨章，但选区要吃到边界字。
+                                    selection.extendTo(if (side > 0) Int.MAX_VALUE else 0)
+                                    boundaryHintShown = true
+                                    Logger.d(
+                                        "Orilumn.SEL",
+                                        "auto-flip boundary dir=$side ch=${p.chapter} " +
+                                            "sel=${selection.start}-${selection.endExclusive}",
+                                    )
+                                    snackbar.show(if (side > 0) "已到章末" else "已到章首")
+                                    return@launch
+                                }
+                                if (!selection.hasSelection) return@launch
+                                wait = SELECTION_AUTO_FLIP_RETRY_MS
                             }
                         }
                     }
@@ -1663,16 +1714,18 @@ fun ReaderScreen(
                                 selection.anchorAt(it)
                                 dragAnchor = null
                             }
-                            extendSelectionAt(lastFingerX, lastFingerY)
-                            autoFlipSide = selectionAutoFlipDirection(
-                                lastFingerX, size.width.toFloat(), autoFlipEdgePx,
-                            )
+                            extendSelectionAt(lastFingerX, lastFingerY, size.width.toFloat())
+                            // 一次进入只翻一页：退回正文区（回差）才重新上膛。
+                            if (autoFlipZone.hasLeftBand(lastFingerX, autoFlipRearmPx)) {
+                                autoFlipArmed = true
+                            }
+                            autoFlipSide = autoFlipZone.directionOf(lastFingerX)
                             scheduleAutoFlip(autoFlipSide)
                             // 手柄拖到视口上下边界 ⇒ 整页滚（卡片开着时视口只到卡片上沿）。
                             val scrollDir = when {
-                                currentNoteBarOpen && lastFingerY > sheetTopPxState - autoFlipEdgePx &&
+                                currentNoteBarOpen && lastFingerY > sheetTopPxState - pageScrollEdgePx &&
                                     inputShiftPx < maxShiftPxState -> 1
-                                currentNoteBarOpen && lastFingerY < autoFlipEdgePx &&
+                                currentNoteBarOpen && lastFingerY < pageScrollEdgePx &&
                                     inputShiftPx > 0f -> -1
                                 else -> 0
                             }
@@ -1698,10 +1751,11 @@ fun ReaderScreen(
                                     )
                                     lastFingerX = change.position.x
                                     lastFingerY = change.position.y
-                                    extendSelectionAt(lastFingerX, lastFingerY)
-                                    autoFlipSide = selectionAutoFlipDirection(
-                                        lastFingerX, size.width.toFloat(), autoFlipEdgePx,
-                                    )
+                                    extendSelectionAt(lastFingerX, lastFingerY, size.width.toFloat())
+                                    if (autoFlipZone.hasLeftBand(lastFingerX, autoFlipRearmPx)) {
+                                        autoFlipArmed = true
+                                    }
+                                    autoFlipSide = autoFlipZone.directionOf(lastFingerX)
                                     scheduleAutoFlip(autoFlipSide)
                                 }
                             }

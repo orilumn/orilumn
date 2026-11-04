@@ -1071,7 +1071,11 @@ fun ReaderScreen(
      * [ReaderHost.peekAdjacent] 只读探路，确认同章后才交给漏斗；落位后按手指 y
      * 把焦点接到新页最近行的靠边字（手柄接力）。
      *
-     * @return true = 已翻页并接续选区；false = 到章边界 / 邻页未就绪 / 导航被 BUSY-DROP。
+     * @return true = 本次**已经翻过页**（不必再试，哪怕选区没接上）；false = 没翻成
+     *   （到章边界 / 邻页未就绪 / 导航被 BUSY-DROP），调用方按重试间隔再试。
+     *
+     * 注意别把「翻成了但选区没接上」报成 false：调用方的重试循环会把它当成没翻，
+     * 隔 200ms 再翻一页，读者一次拖进页边就看到跳了两三页。
      */
     suspend fun autoFlipSelection(direction: Int, fingerY: Float): Boolean {
         val p = openPos ?: return false
@@ -1079,8 +1083,9 @@ fun ReaderScreen(
         val peek = runCatching { currentHost.peekAdjacent(p, direction) }.getOrNull() ?: return false
         if (peek.chapter != p.chapter) return false
         val landed = flipAwait(direction, action = "selection-auto-flip") ?: return false
-        if (landed.chapter != p.chapter) return false
-        val offset = charOffsetAtPageSide(landed, fingerY, direction) ?: return false
+        // 已经翻过去了：从这里开始无论接力成不成都要停（见上面的返回值说明）。
+        if (landed.chapter != p.chapter) return true
+        val offset = charOffsetAtPageSide(landed, fingerY, direction) ?: return true
         selection.extendTo(offset)
         Logger.d(
             "Orilumn.SEL",

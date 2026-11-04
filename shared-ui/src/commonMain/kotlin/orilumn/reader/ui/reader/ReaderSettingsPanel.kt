@@ -174,6 +174,20 @@ fun ReaderSettingsPanel(
     // 笔记页：当前编辑的类别 / 色槽。只在本面板内记忆，关面板复位。
     var annotationColorKind by remember { mutableStateOf(AnnotationKind.Highlight) }
     var annotationColorSlot by remember { mutableStateOf(0) }
+    /**
+     * 笔记页「恢复默认颜色池」的按下反馈（[ColorPoolResetFlashMs] 内按钮换成「已恢复」并高亮）。
+     *
+     * 色槽本来就可能就是默认值，只靠色块变化读者分不清「按上了但没变」和「根本没按到」；
+     * 计数而非布尔：连按两次也要重新计时。
+     */
+    var colorPoolResetCount by remember { mutableStateOf(0) }
+    var colorPoolResetFlash by remember { mutableStateOf(false) }
+    LaunchedEffect(colorPoolResetCount) {
+        if (colorPoolResetCount == 0) return@LaunchedEffect
+        colorPoolResetFlash = true
+        delay(ColorPoolResetFlashMs.toLong())
+        colorPoolResetFlash = false
+    }
     // 自定义主题预设（内存态）：Seed 自宿主列表；保存/删除经 onSaveTheme/onDeleteTheme 上报宿主。
     var customs by remember(customThemes) { mutableStateOf(customThemes) }
 
@@ -404,7 +418,8 @@ fun ReaderSettingsPanel(
                 val selected = annotationColorSlot.coerceIn(0, slotCount - 1)
                 val slotColor = annotationSlotColor(s, annotationColorKind, selected)
                 // 键盘：两行标签各自用 ←→ 挪色槽（挪动同时切到那一类），之后是红 / 绿 / 蓝 /
-                // 不透明度四条滑条，最后是恢复默认设置。行序号必须与页面里的 index 逐项对齐。
+                // 不透明度四条滑条，最后是恢复默认颜色池（只恢复两类色槽，不动下面的批注样式）。
+                // 行序号必须与页面里的 index 逐项对齐。
                 fun tabKey(tab: AnnotationKind): ItemKey {
                     val tabSlots = annotationColorSlots(s, tab)
                     val n = tabSlots.size.coerceAtLeast(1)
@@ -466,7 +481,10 @@ fun ReaderSettingsPanel(
                         },
                         fmt = { "${it.roundToInt()}%" },
                     ),
-                    ItemKey(onEnter = { onCommitLight(withDefaultAnnotationColorSlots(s)) }),
+                    ItemKey(onEnter = {
+                        onCommitLight(withDefaultAnnotationColorSlots(s))
+                        colorPoolResetCount++
+                    }),
                     // 折叠所有批注：整页只留贴着划线的小图标。纯像素开关，走无重排提交。
                     // 放在这一组的最上面：它是「要不要看见批注」的总闸，打开后其余批注控件一律置灰。
                     ItemKey(onEnter = { onCommitLight(s.copy(noteCollapseAll = !s.noteCollapseAll)) }),
@@ -927,6 +945,8 @@ fun ReaderSettingsPanel(
                                     annotationColorKind = k
                                     annotationColorSlot = i
                                 },
+                                /** 刚才按过「恢复默认颜色池」：按钮短暂换成「已恢复」并金色高亮。 */
+                                resetFlash = colorPoolResetFlash,
                                 noteFontLabel = fieldOf(s, "noteFont").let {
                                     if (it.isEmpty()) "跟随界面" else fontDisplayByFamily[it] ?: genericFamilyLabel(it)
                                 },
@@ -1465,17 +1485,23 @@ private fun PingButton(
     p: Palette,
     modifier: Modifier = Modifier,
     red: Boolean = false,
+    /** 按下反馈：整块换成金色描边 + 高亮底，和「只是聚焦」区分开（见 [ColorPoolResetFlashMs]）。 */
+    flash: Boolean = false,
     onClick: () -> Unit,
     nav: PanelNav,
     index: Int,
 ) {
     val clickSrc = remember { MutableInteractionSource() }
     Text(
-        label, color = if (red) CancelRed else p.text, fontSize = 14.sp,
+        label, color = when {
+            flash -> PanelGold
+            red -> CancelRed
+            else -> p.text
+        }, fontSize = 14.sp,
         modifier = modifier
             .clip(RoundedCornerShape(6.dp))
-            .background(if (nav.activeIdx == index) p.rowActive else p.cardBg)
-            .border(1.dp, p.cardBorder, RoundedCornerShape(6.dp))
+            .background(if (flash || nav.activeIdx == index) p.rowActive else p.cardBg)
+            .border(1.dp, if (flash) PanelGold else p.cardBorder, RoundedCornerShape(6.dp))
             .clickable(onClick = onClick, interactionSource = clickSrc, indication = null)
             .panelHover(nav, index)
             .kbRing()
@@ -1575,11 +1601,13 @@ private fun AnimModePage(
  * 交互：点标签切类别；点任一行里的色槽既切到那一类、又选中那格；下方红/绿/蓝与不透明度
  * 只改选中那一格（不透明度 100% = 完全盖住文字，0% = 全透明看不见），**拖动中即时生效**
  * （走 [previewLight]，只应用不落盘），松手再由 [commitLight] 落盘。
- * 最下方的「恢复默认设置」把两类十格一起恢复出厂值。
+ * 最下方的「恢复默认颜色池」把两类十格一起恢复出厂值——**只恢复色槽**，不动下面那几项
+ * 批注自己的样式（2026-11-04 用户定口：按钮名与作用范围要一致）；按完按钮会短暂变成
+ * 「已恢复」并金色高亮，因为色槽本来就是出厂值时色块不会变，没有反馈就看不出按上了。
  * 默认色槽不归本页管（新建标注用哪一格由浮动菜单决定），所以这里没有金点、也没有默认按钮。
  * 所有改动走 [commitLight]（只改像素，不触发重排）。
  *
- * 「恢复默认设置」之后还有两项**旁注自己的样式**（2026-10-28 用户定口）：
+ * 「恢复默认颜色池」之后还有两项**旁注自己的样式**（2026-10-28 用户定口）：
  * - **批注字体**：与正文 / 标题 / 代码同一套字体下钻页，可挑任意系统或导入字体；
  *   多字重的族同样进字重页（选完族与字重一起生效，换族回到该族默认字重）；
  *   空槽 = 跟随界面默认（不是跟随原书——旁注不套书里的正文族）。
@@ -1599,6 +1627,8 @@ private fun AnnotationColorPage(
     previewLight: (ReaderSettings) -> Unit,
     onSelectKind: (AnnotationKind) -> Unit,
     onSelectSlot: (AnnotationKind, Int) -> Unit,
+    /** 「恢复默认颜色池」的按下反馈：true 时按钮文字换成「已恢复」并金色高亮。 */
+    resetFlash: Boolean,
     /** 「批注字体」行右侧的展示名（空槽 = 跟随界面；导入 / 系统族取本地化展示名）。 */
     noteFontLabel: String,
     p: Palette,
@@ -1779,9 +1809,10 @@ private fun AnnotationColorPage(
         }
         item {
             PingButton(
-                label = "恢复默认设置",
+                label = if (resetFlash) "已恢复" else "恢复默认颜色池",
                 p = p,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+                flash = resetFlash,
                 onClick = keys[6].onEnter,
                 nav = nav,
                 index = 6,
@@ -2211,6 +2242,13 @@ private const val PanelMaskAlpha = 0.4f
 
 /** Panel slide and mask dim/lighten share this duration so they stay synchronized. */
 private const val PanelAnimMs = 280
+
+/**
+ * 笔记页「恢复默认颜色池」按下后保持高亮反馈的时长（ms）。
+ *
+ * 色槽本来就可能是出厂值，恢复后色块毫无变化：没有反馈读者分不清「按到了」和「没按到」。
+ */
+private const val ColorPoolResetFlashMs = 900
 
 /** 字体列表整页翻连发节流窗口（桌面 PgDn/PgUp 按住连发，一次按压只认一次）。 */
 private const val PageThrottleMs = 300

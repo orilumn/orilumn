@@ -114,6 +114,21 @@ private fun onAnyScreen(xDp: Int, yDp: Int): Boolean = runCatching {
 }.getOrDefault(true)
 
 /**
+ * 「启动时继续阅读」要打开的那一本（平台层·桌面壳）：读过、且文件还在的书里，
+ * 取最近一次打开的那本；一本都没有（全没读过 / 文件都被删了）返回 null，调用方留在书架。
+ *
+ * 判据只看**书架记录**，不另存「上次那本」：删书即从书架消失，不会留下指不到任何书的存档。
+ *
+ * @param fileExists 书文件是否还在（默认查真实文件系统；测试注入以便构造场景）
+ */
+internal fun lastReadBook(
+    books: List<ShelfBook>,
+    fileExists: (String) -> Boolean = { File(it).isFile },
+): ShelfBook? = books
+    .filter { it.readTime != null && fileExists(it.filePath) }
+    .maxByOrNull { it.readTime ?: 0L }
+
+/**
  * S32 桌面最小壳：JVM `main` 起窗口挂 shared-ui。
  *
  * 薄壳契约（与 S31 Android 壳同口径）：
@@ -334,10 +349,26 @@ private fun DesktopRoot(
         customs = store.loadThemes()
         // 启动参数开书（平台层·桌面壳）：放在就绪前，导入期间维持加载占位，就绪即直达
         // 阅读面（不闪书架）；失败留书架，日志留痕。
-        startupPath?.let { path ->
+        val fromArgs = startupPath?.let { path ->
             val entry = runCatching { shelfHost.openFromPath(path) }.getOrNull()
-            if (entry != null) openBook = entry
-            else orilumn.reader.io.Logger.w("Orilumn.Shelf", "startup open FAIL $path")
+            if (entry == null) orilumn.reader.io.Logger.w("Orilumn.Shelf", "startup open FAIL $path")
+            entry
+        }
+        // 「启动时继续阅读」（平台层·桌面壳）：与平板同口径——开关打开且书库里有读过记录，
+        // 启动即直达上次读的那本（定位/续读位由阅读面自己按存档恢复），不先闪一下书架。
+        // 启动参数给了书就以参数为准（双击文件打开不该被上次那本顶掉）；
+        // 没有读过记录、或开关关着，照旧停在书架。文件被删掉的那本不算（读不了，别开进去）。
+        val lastRead = if (fromArgs == null && startupPath == null && settings.autoContinue) {
+            runCatching { lastReadBook(store.allBooks()) }.getOrNull()
+        } else {
+            null
+        }
+        openBook = fromArgs ?: lastRead
+        if (lastRead != null) {
+            orilumn.reader.io.Logger.i(
+                "Orilumn.Shelf",
+                "auto-continue last book id=${lastRead.id} title=${lastRead.title}",
+            )
         }
         ready = true
     }

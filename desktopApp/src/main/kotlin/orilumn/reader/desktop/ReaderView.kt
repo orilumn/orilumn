@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -38,6 +39,7 @@ import io.github.vinceglb.filekit.name
 import io.github.vinceglb.filekit.readBytes
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -180,13 +182,17 @@ fun ReaderView(
         //    要么整块留底色（用户实测：右边界反复重画、字被压扁）。那是拿观感换性能，
         //    与总则「哪个有利用哪个」相悖：单页栅格已从 1674ms 降到 5ms，排版侧负担得起。
         //
-        // 实现：每次尺寸变化都**重启**本 effect，`withFrameNanos` 等到下一帧才提交 ⇒
-        // 同帧内的后续变化取消前一次提交，每帧至多排一次，中间尺寸丢弃（conflate 语义），
-        // 且松手后下一帧即完成，不再额外等 400ms。
+        // 实现：视口先落进一个状态（[SideEffect]，每次组合应用后跑 ⇒ 天然按帧合并，同帧多次
+        // 变化只留最后一次），订阅它的调度循环再串行、取最新地重排。
+        //
+        // **不要改回** `LaunchedEffect(viewportW, viewportH) { withFrameNanos { }; settled = … }`：
+        // 那个写法在「每帧都变尺寸」时会把自己取消在半路——effect 每次重启都要等**下一帧**，
+        // 而下一帧来之前尺寸又变了，于是永远等不到那次赋值。实测拖窗一整秒里一次都没提交，
+        // 重排全堆到松手之后（正文在整段拖动里都用旧行宽画，正是「拉了半天字不跟」）。
         var settledViewport by remember(book) { mutableStateOf(viewportW to viewportH) }
-        LaunchedEffect(book, viewportW, viewportH) {
-            androidx.compose.runtime.withFrameNanos { }
-            settledViewport = viewportW to viewportH
+        SideEffect {
+            val vp = viewportW to viewportH
+            if (settledViewport != vp) settledViewport = vp
         }
 
         val snapshot = remember(book, session) {
@@ -239,22 +245,38 @@ fun ReaderView(
         // 旧页保持可画到新页落定（重建宿主的青黄不接即闪屏根因）。首帧跳过（构造已用该视口）。
         //
         // **第一段（每次尺寸变化）**：换视口 + 本章轻刷新 —— 拉窗口期间只跑这一件。
+        //
+        // 串行 + 合并（conflate），**不取消**上一趟：轻刷新实测一章 6–63 ms（162 块），而拖窗时
+        // 尺寸每帧都在变。旧口径（effect 重启）等于每帧起一趟、前一趟被取消在半路——形状器是
+        // 纯 CPU 循环，取消检查不到就白跑完，一秒钟能白烧十趟。现在只保证「跑的时候永远用最新
+        // 尺寸」：跑的过程中来的尺寸只在跑完后取最后那个（中间尺寸本来也没人看得见，与上面
+        // 视口按帧合并同一口径）。
         var appliedViewport by remember(book, session) { mutableStateOf<Pair<Int, Int>?>(null) }
-        LaunchedEffect(book, session, settledViewport) {
-            val prev = appliedViewport
-            appliedViewport = settledViewport
-            if (prev == null || prev == settledViewport) return@LaunchedEffect
-            val host = desktopHost ?: return@LaunchedEffect
-            if (!host.applyViewportSize(settledViewport.first, settledViewport.second)) return@LaunchedEffect
-            // 锚点：连续拉伸同一口径——有钉子沿用，没钉子按当前页首钉住（松手后也不换锚，
-            // 换锚只发生在用户真的导航时）。
-            // 视口已先行生效（上面 `applyViewportSize`），等落位只推迟重排，不推迟尺寸。
-            val anchor = awaitLandingPos()
-            val fromChapter = anchor.chapter
-            val fromChar = anchor.slice.charStart
-            relayoutAnchor.pin(fromChapter, fromChar)
-            val a = relayoutAnchor.resolve(fromChapter, fromChar)
-            host.previewToSettings(settings, a.chapter, a.char)?.let { pushLanding(it) }
+        LaunchedEffect(book, session) {
+            snapshotFlow { settledViewport }
+                .conflate()
+                .collect { vp ->
+                    val prev = appliedViewport
+                    appliedViewport = vp
+                    if (prev == null || prev == vp) return@collect
+                    val host = desktopHost ?: return@collect
+                    // 视口先落地（不重排）：尺寸跟手是「拉窗口」的第一观感，重排慢一步只慢内容。
+                    if (!host.applyViewportSize(vp.first, vp.second)) return@collect
+                    // 手势闸门：整个拉伸过程里后台 canonical（B1/B2/邻页预排）一律让路，
+                    // 否则每帧的锚页重排都要跟整书 B2 抢同一把排版锁（实测饿到 1.9 s）。
+                    // 放在 `applyViewportSize` 之后：真正的尺寸变化才开闸，开闸必然有对应的收口
+                    // （第二段按 `committedViewport` 收，见下）。
+                    host.beginViewportGesture()
+                    // 锚点：连续拉伸同一口径——有钉子沿用，没钉子按当前页首钉住（松手后也不换锚，
+                    // 换锚只发生在用户真的导航时）。
+                    // 视口已先行生效（上面 `applyViewportSize`），等落位只推迟重排，不推迟尺寸。
+                    val anchor = awaitLandingPos()
+                    val fromChapter = anchor.chapter
+                    val fromChar = anchor.slice.charStart
+                    relayoutAnchor.pin(fromChapter, fromChar)
+                    val a = relayoutAnchor.resolve(fromChapter, fromChar)
+                    host.previewViewport(a.chapter, a.char)?.let { pushLanding(it) }
+                }
         }
         // **第二段（松手后一次）**：废他章 + 清全书旧指纹磁盘表 + 整书 B2 沉淀。
         //
@@ -269,7 +291,9 @@ fun ReaderView(
         suspend fun awaitResizeRelease() {
             // 起步滞后：全屏动画 / 贴边吸附这类程序化连续尺寸先合流，别在动画中间收口。
             delay(ViewportSettleMinMs)
-            if (MouseButtonProbe.isLeftDown() == null) {
+            val readable = MouseButtonProbe.isLeftDown()
+            orilumn.reader.io.Logger.w("Orilumn.Desktop", "viewport settle wait: probe=$readable")
+            if (readable == null) {
                 delay(ViewportQuietFallbackMs)
                 return
             }
@@ -284,12 +308,23 @@ fun ReaderView(
         LaunchedEffect(book, session) {
             // collectLatest：每来一个新尺寸就丢弃上一次等待 ⇒ 连续拖动期间一次都不收口。
             snapshotFlow { settledViewport }.collectLatest { vp ->
-                // 拖出去又拖回原样：该指纹的磁盘表从没被删，不必再沉淀一次。
-                if (vp == committedViewport) return@collectLatest
+                // 尺寸回到已收口的那一档（或还没真正变过）：没东西可沉淀，解开闸门就走。
+                if (vp == committedViewport) {
+                    desktopHost?.endViewportGesture()
+                    return@collectLatest
+                }
                 awaitResizeRelease()
-                val host = desktopHost ?: return@collectLatest
-                val pos = currentPos ?: return@collectLatest
+                val host = desktopHost
+                val pos = currentPos
+                // 闸门必须解：开闸在第一段每帧都调，收口只有这里。缺了锚点（开书在途）就跳过
+                // 重排，但不能把闸门关死——否则后台 canonical 永久停摆，整书再也不沉淀。
+                if (host == null || pos == null) {
+                    host?.endViewportGesture()
+                    return@collectLatest
+                }
                 val a = relayoutAnchor.resolve(pos.chapter, pos.slice.charStart)
+                // 收口前解闸：这一次重排要的就是 canonical（B1 派发 + 落盘），后台让路到此为止。
+                host.endViewportGesture()
                 // 收口整段不可取消：半截的重排只剩浪费（他章已作废、当章还没绑新表）。
                 withContext(NonCancellable) {
                     host.commitRelayout(a.chapter, a.char)?.let { pushLanding(it) }

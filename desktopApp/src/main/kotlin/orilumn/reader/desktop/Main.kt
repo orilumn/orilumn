@@ -19,11 +19,10 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -38,8 +37,8 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.onPointerEvent
@@ -149,41 +148,35 @@ fun main(args: Array<String>) {
         // 三端同一 JVM 壳：窗口尺寸+位置经 prefs 持久化，下次启动原地恢复
         // （Win/macOS/Linux 同口径；显示器变更致越界时回居中，不开到屏外）。
         val store = remember { DesktopShelfStore(DesktopPaths.root) }
-        // 逐像素透明是自绘圆角/投影的前提（四角与边缘透出桌面），只给无边框的 Win/Linux 用：
-        // macOS 走系统窗口（透明标题栏 + 全窗口内容，见 WindowChrome.applyMacSystemWindow），
-        // 圆角/阴影/全屏全由系统给，用不到透明。不支持透明的平台（部分未开合成器的 Linux）
-        // 设透明背景会直接抛 UnsupportedOperationException 让窗口起不来，故先探测：不支持就
-        // 退回「不透明 + 直角 + 无投影」，功能一项不少，只是和原生窗口不一致。
-        val canTransparent = !IS_MAC && runCatching {
-            java.awt.GraphicsEnvironment.getLocalGraphicsEnvironment()
-                .defaultScreenDevice
-                .isWindowTranslucencySupported(
-                    java.awt.GraphicsDevice.WindowTranslucency.PERPIXEL_TRANSLUCENT,
-                )
-        }.getOrDefault(false)
-        // 浮动窗口要在窗口**内部**四边留出投影的位置（见 [WindowShadowMargin]）：故 prefs 里存的是
-        // **内容**尺寸与内容左上角，窗口尺寸/位置 = 内容 ± 留边。留边之前的存档存的正是「窗口 =
-        // 内容」，按内容读入即天然兼容——升级后内容尺寸、屏幕位置都原地不变，不会看着窗口变小。
-        // macOS 系统窗口 = 内容的窗口（无留边，见 applyMacSystemWindow），同一把换算在
-        // inset = 0 时即「窗口 = 内容」，与旧存档口径一致。
-        val shadowInsetDp = if (canTransparent) WindowShadowMargin.value * 2f else 0f
-        val shadowOffsetDp = if (canTransparent) WindowShadowMargin.value else 0f
+        // 窗口底子（平台层·桌面壳，Win/Linux）：**不透明 + 直角**。
+        //
+        // 早先这里是「逐像素半透明 + 内容自绘投影」。半透明窗口在**没有硬件加速**的环境里
+        // （虚拟机 / XWayland / 4K 高 DPI）贴屏只能走 CPU 逐像素合成：同一扇 1600×1800 窗口、
+        // 同一份内容实测 193–2216 ms/帧（一次拖动只出 7 帧），而内容重排本身只要 10–60 ms。
+        // 于是读者看到的是「窗口先拉出一条黑边、正文要等一两秒才跟上」，拉左边时旧画面整体
+        // 右移（X11 把已有内容钉在左上角）更像「拉左边右边跟着动」。不透明窗口同一场景
+        // 54–130 ms/帧（17 帧）。故底子改回**不透明**：尺寸跟手、新露出的区域立刻被内容填上。
+        //
+        // **不要再改用 `Window.setShape` 裁圆角**（试过，已撤）：XWayland 下窗口形状与缓冲区
+        // 尺寸不同步，而形状原先跟 `windowState.size` 每变一帧就重设一次 —— 缩小窗口后旧窗口
+        // 矩形那块残留上一帧的画面、合成器在两份缓冲之间来回贴，肉眼就是「原位残留 + 快速频闪」。
+        // 圆角纯属观感，不值得拿这个换；Win/Linux 取直角，用内容边缘一条极细描边代偿边界感，
+        // 没有系统投影也就没有别的代价。macOS 走系统窗口，圆角/投影/全屏全由系统给，不走这里。
+        // 窗口 = 内容（不再有投影留边）：prefs 里存的就是内容尺寸与内容左上角，直接当窗口用。
+        // 旧存档同理——它存的本来就是内容口径，升级后可见区域大小与位置原地不变。
         fun contentDp(key: String, def: Int, lo: Int, hi: Int): Float =
             (store.loadPref(key, def.toString()).toIntOrNull() ?: def).coerceIn(lo, hi).toFloat()
         // 默认/钳制下限同「最小窗口」口径（下方 `minimumSize` 一处定，两处引用同一常量）：
         // 550×400 是桌面阅读的舒服尺寸（小屏/高分屏上不至于占满），240×300 是能读的版心下限
         // （版心 = 内容尺寸 − 上100/下60/左右50dp 的页边距；再小就一行字都放不下）。
         val windowState = rememberWindowState(
-            width = (contentDp(PREF_WIN_W, 550, MinContentW, 2560) + shadowInsetDp).dp,
-            height = (contentDp(PREF_WIN_H, 400, MinContentH, 1600) + shadowInsetDp).dp,
+            width = contentDp(PREF_WIN_W, 550, MinContentW, 2560).dp,
+            height = contentDp(PREF_WIN_H, 400, MinContentH, 1600).dp,
             position = remember {
                 val x = store.loadPref(PREF_WIN_X, "").toIntOrNull()
                 val y = store.loadPref(PREF_WIN_Y, "").toIntOrNull()
                 if (x != null && y != null && onAnyScreen(x, y)) {
-                    androidx.compose.ui.window.WindowPosition.Absolute(
-                        (x - shadowOffsetDp).dp,
-                        (y - shadowOffsetDp).dp,
-                    )
+                    androidx.compose.ui.window.WindowPosition.Absolute(x.dp, y.dp)
                 } else {
                     androidx.compose.ui.window.WindowPosition.PlatformDefault
                 }
@@ -194,7 +187,7 @@ fun main(args: Array<String>) {
         val chrome = remember { DesktopWindowChrome() }
         // 移动/调整完 500ms 落盘（IO 线程，不挡 UI；下次启动即原地恢复）。
         // 全屏期间不落盘：那时 windowState.size 已是整屏尺寸，落盘会把用户原来的窗口大小冲掉。
-        LaunchedEffect(windowState, chrome, canTransparent) {
+        LaunchedEffect(windowState, chrome) {
             snapshotFlow {
                 Triple(chrome.fullscreen, windowState.size, windowState.position)
             }
@@ -203,15 +196,13 @@ fun main(args: Array<String>) {
                     // 只记**浮动**几何：全屏时 size 已是整屏、最大化时是工作区，都不是用户调出来的
                     // 窗口大小/位置，落盘会把用户原来的浮动几何冲掉。
                     if (fullscreen || windowState.placement != WindowPlacement.Floating) return@collect
-                    // 存的是**内容**尺寸与内容左上角（见上面 rememberWindowState 的注释）：
-                    // 只有「浮动 + 支持透明」时窗口里才有留边，别的态窗口 = 内容。
-                    val inset = if (canTransparent) WindowShadowMargin.value else 0f
+                    // 窗口 = 内容，直接存，不做任何换算。
                     withContext(Dispatchers.IO) {
-                        store.savePref(PREF_WIN_W, (size.width.value - inset * 2f).toInt().toString())
-                        store.savePref(PREF_WIN_H, (size.height.value - inset * 2f).toInt().toString())
+                        store.savePref(PREF_WIN_W, size.width.value.toInt().toString())
+                        store.savePref(PREF_WIN_H, size.height.value.toInt().toString())
                         (pos as? androidx.compose.ui.window.WindowPosition.Absolute)?.let {
-                            store.savePref(PREF_WIN_X, (it.x.value + inset).toInt().toString())
-                            store.savePref(PREF_WIN_Y, (it.y.value + inset).toInt().toString())
+                            store.savePref(PREF_WIN_X, it.x.value.toInt().toString())
+                            store.savePref(PREF_WIN_Y, it.y.value.toInt().toString())
                         }
                     }
                 }
@@ -225,27 +216,23 @@ fun main(args: Array<String>) {
             state = windowState,
             title = "Orilumn",
             icon = appIcon,
-            // 窗口装饰（平台层·桌面壳）：Win/Linux 无边框 + 自绘标题栏/圆角/投影（原生装饰
-            // 三件事都做不到——阅读模式下隐藏、透明不画底色、跟阅读顶栏一起滑入滑出）；
+            // 窗口装饰（平台层·桌面壳）：Win/Linux 无边框 + 自绘标题栏（原生装饰三件事
+            // 都做不到——阅读模式下隐藏、跟阅读顶栏一起滑入滑出、自绘窗口控制区）；
             // macOS 保留系统装饰换原生圆角/阴影/resize 热区/全屏 Space——透明标题栏 + 全窗内容
             // 的无边框观感（见 WindowChrome.applyMacSystemWindow），自绘那套在 mac 上进不了
             // 真全屏（AppKit 拒绝给透明窗口开全屏 Space）。
-            // 无边框窗口没有系统缩放热区，CMP 只能自绘，且恒定贴在 **AWT 窗口边缘**往内
-            // `resizerThickness`（默认 8dp，见 `WindowDecoration.Undecorated`）。
-            // 自绘阴影把可视内容整体内缩 `WindowShadowMargin`，那 8dp 热区于是整条陷进不可见的
-            // 透明环 —— 指针不变缩放光标、也抓不到，表现为「能拖不能缩」。
             //
-            // 热区厚度直接从**同一个** `shadowInsetDp` 导出（= 单侧留边 + 默认热区），与窗口尺寸、
-            // 内容 padding 共用一把尺 ⇒ 留边为 0 的平台（macOS 走系统窗口 / 不支持透明的 Linux）
-            // 自动退回 8dp，无需按平台分叉。这是共享机制的一次修复，不是 Win/Linux 的特例。
-            // 历史：ff7d9de 记录过 macOS 撞的是同一个病根（「resize 热区与视觉边缘错位」），
-            // 但当时选择退回系统窗口绕开；此处补上机制层的修法。
+            // 无边框窗口没有系统缩放热区，CMP 只能自绘，且恒定贴在 **AWT 窗口边缘**往内
+            // `resizerThickness`。窗口现在 = 内容（不再有投影留边），热区就贴真实窗口边缘，
+            // 与视觉边界重合；默认 8dp 是 CMP 自己的手感值，Windows 系统的边框热区也是这个量级。
             decoration = if (IS_MAC) {
                 WindowDecoration.SystemDefault
             } else {
-                WindowDecoration.Undecorated((shadowInsetDp / 2f + 8f).dp)
+                WindowDecoration.Undecorated(8.dp)
             },
-            transparent = canTransparent,
+            // 不透明（见上面窗口底子的注释）：半透明窗口在这类无加速环境下贴屏要 CPU 逐像素
+            // 合成，拉窗 0.2–2 秒一帧。圆角也不再走窗口形状——那会在缩小窗口后留下原位残影与频闪。
+            transparent = false,
             // 平台惯例全屏快捷键：F11 三平台通吃，macOS 另加 ⌃⌘F（见 WindowChrome.isFullscreenShortcut）。
             onPreviewKeyEvent = { event ->
                 if (isFullscreenShortcut(event)) {
@@ -257,51 +244,58 @@ fun main(args: Array<String>) {
             },
         ) {
             SideEffect { chrome.attach(window, windowState) }
-            // 最小窗口尺寸兜底：防止拖到比阴影留边还小导致 contentH ≤ 0。
+            // 最小窗口尺寸兜底：防止拖到比版心下限还小导致 contentH ≤ 0。
             // 取值见 [MinContentW]/[MinContentH]（与上方读存档的钳制下限同源）。
             val densityMin = LocalDensity.current
             val awtWin = window as? java.awt.Window
             SideEffect {
                 val w = awtWin ?: return@SideEffect
                 with(densityMin) {
-                    val minW = (MinContentW.dp + shadowInsetDp.dp * 2).roundToPx()
-                    val minH = (MinContentH.dp + shadowInsetDp.dp * 2).roundToPx()
+                    val minW = MinContentW.dp.roundToPx()
+                    val minH = MinContentH.dp.roundToPx()
                     if (w.minimumSize.width != minW || w.minimumSize.height != minH) {
                         w.minimumSize = Dimension(minW, minH)
                     }
                 }
             }
             MaterialTheme {
-                // 无边框窗口（Win/Linux）丢掉了系统圆角与投影，靠内容自绘补回
-                //（[WindowCornerRadius] / [windowShadow]）：四角裁掉、投影画在留边上，
-                // 都靠透明像素透出桌面。macOS 是系统窗口（canTransparent 恒 false），不走这里。
-                // 只在「浮动」态圆角+投影：全屏/最大化取直角（原生 Windows 最大化就是直角贴满工作区）。
-                val rounded = canTransparent && !chrome.fullscreen &&
+                // 窗口底子（Windows/Linux 自绘壳）：不透明 + 直角；macOS 是系统窗口，圆角由系统给。
+                // 浮动时留一条极细描边代偿没有系统投影的边界感（最大化/全屏贴边，不需要）。
+                val bordered = !IS_MAC && !chrome.fullscreen &&
                     windowState.placement == WindowPlacement.Floating
-                val shadowed = rounded
-                // 打底：透明窗口下「没画到的地方 = 桌面」，这里补一层不透明底，
-                // 书架 Scaffold / 阅读面各自的面板照常盖在上面（四角仍在裁切外）。
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(if (shadowed) WindowShadowMargin else 0.dp),
+                        .background(MaterialTheme.colorScheme.background)
+                        .then(
+                            if (bordered) {
+                                Modifier.border(1.dp, Color(0x14000000), RectangleShape)
+                            } else {
+                                Modifier
+                            },
+                        ),
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .windowShadow(enabled = shadowed)
-                            .clip(if (rounded) RoundedCornerShape(WindowCornerRadius) else RectangleShape)
-                            .background(MaterialTheme.colorScheme.background),
-                    ) {
-                        DesktopRoot(
-                            store = store,
-                            windowState = windowState,
-                            awtWindow = window,
-                            chrome = chrome,
-                            onRequestClose = ::exitApplication,
-                            startupPath = startupPath,
-                        )
+                    // 新露出来的那条区域交给 X11 立刻填成页面底色（而不是默认的黑）：窗口被拉大
+                    // 的那一瞬间，这一条还没被任何一帧画到，读者看到的就是「先拉出一条黑线」。
+                    // 给窗口和它的绘制面都设上同一个不透明底色，X11 在 expose 时按它填充 —— 于是
+                    // 就算这一帧还没画完，露出来的也是纸色，不是黑色。
+                    val pageBg = MaterialTheme.colorScheme.background
+                    SideEffect {
+                        val w = awtWin ?: return@SideEffect
+                        val fill = java.awt.Color(pageBg.toArgb(), true)
+                        if (w.background != fill) w.background = fill
+                        for (c in w.components) {
+                            if (c.background != fill) c.background = fill
+                        }
                     }
+                    DesktopRoot(
+                        store = store,
+                        windowState = windowState,
+                        awtWindow = window,
+                        chrome = chrome,
+                        onRequestClose = ::exitApplication,
+                        startupPath = startupPath,
+                    )
                 }
             }
         }

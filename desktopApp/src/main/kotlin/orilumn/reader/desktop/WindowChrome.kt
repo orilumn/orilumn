@@ -24,14 +24,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
-import androidx.compose.ui.graphics.skiaCanvas
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEvent
 import androidx.compose.ui.input.key.KeyEventType
@@ -59,8 +56,9 @@ import java.awt.event.ComponentEvent
  * 桌面原生窗口装饰是一条常亮系统标题栏，三件事都做不到：阅读模式下隐藏、透明不画底色、
  * 跟阅读顶栏一起滑入滑出。故标题栏自绘；窗口底子按平台分流（见 [DesktopWindowChrome]）：
  *
- * - **Windows/Linux**：无边框窗口（`WindowDecoration.Undecorated`），圆角/投影也自绘
- *   （[windowShadow] / [WindowShadowMargin]）；
+ * - **Windows/Linux**：无边框窗口（`WindowDecoration.Undecorated`），直角 + 内容边缘一条
+ *   极细描边，无投影（**不用** `Window.setShape` 裁圆角：XWayland 下会残留旧画面并频闪，见
+ *   `Main.kt` 窗口底子处的注释）；
  * - **macOS**：系统窗口底子（[applyMacSystemWindow]：透明标题栏 + 全窗口内容），系统红绿灯
  *   浮在左上（本类让出 [MacTrafficLightReserve] 空白），圆角/阴影/resize 热区/全屏全由系统给。
  *
@@ -101,34 +99,6 @@ internal val TitleBarHeight: Dp = 32.dp
 /** 标题栏与阅读栏同一拍（对齐 `ReaderBars.BarsAnim = 240`，跨模块不能直接引用 internal）。 */
 internal const val ChromeAnimMs = 240
 
-/** 自绘窗口圆角半径（无边框窗口丢掉了系统圆角，靠内容自绘补回来）。 */
-internal val WindowCornerRadius: Dp = 10.dp
-
-/**
- * 投影两层：`alpha` 不透明度、`sigma` 模糊半径（dp）、`dy` 下垂（dp）。
- * 「大柔光」撑范围、「近边缘」补贴边一圈，避免投影浮在空中；
- * 两层都带一点向下偏移（光从上方来），与原生窗口投影方向一致。
- */
-private val ShadowLayers = listOf(
-    ShadowLayer(alpha = 0.18f, sigma = 7f, dy = 4f),
-    ShadowLayer(alpha = 0.12f, sigma = 2.5f, dy = 1f),
-)
-
-private data class ShadowLayer(val alpha: Float, val sigma: Float, val dy: Float)
-
-/**
- * 自绘窗口投影的留边（无边框窗口没有系统投影，见 [DesktopWindowChrome]）。
- *
- * 透明窗口里投影只能画在**内容之外**的透明像素上，故窗口四边各留这么多边距给投影；
- * 不留就没地方画，画在内容里面就是给界面加一圈黑边。
- *
- * 数值由 [ShadowLayers] 直接推出：Skia 的模糊核在 3σ 处截断，最外层那一圈
- * 下垂 dy 后再向外 3σ，故 `margin(dp) = max(3σ + dy) + 1dp` 余量。
- * 单位取 dp（不留 px）：按 dp 折算后投影粗细与屏幕密度无关，1× 屏和 2× 屏一个观感。
- */
-internal val WindowShadowMargin: Dp =
-    (ShadowLayers.maxOf { it.sigma * 3f + it.dy } + 1f).dp
-
 /** 真 macOS：系统窗口 + 系统红绿灯（见 [applyMacSystemWindow]）；其余平台无边框 + 自绘按钮。 */
 internal val IS_MAC: Boolean =
     System.getProperty("os.name")?.contains("Mac", ignoreCase = true) == true
@@ -150,45 +120,6 @@ private val CloseHoverBg = Color(0xFFE81123)
 
 /** 双击判定窗口（与各平台系统口径同量级）。 */
 private const val DoubleClickMs = 400L
-
-/**
- * 自绘窗口投影（平台层·桌面壳，只给无边框 + 透明窗口用）。
- *
- * 无边框窗口在 macOS/Windows 上都没有系统投影；透明窗口里投影又只能画在内容之外的透明像素上，
- * 故壳在窗口四边留 [WindowShadowMargin]，这里把投影画进那块留边。
- *
- * 实现走 Skia 的模糊蒙版（两层「大柔光 + 近边缘」叠加），而不是 `Modifier.shadow`：
- * 后者在桌面端给的是 Android 口径的 elevation 阴影，边距短、颜色不对 macOS 观感。
- * 两层都带一点点向下的偏移（光从上方来），与原生投影方向一致。
- */
-internal fun Modifier.windowShadow(enabled: Boolean, radius: Dp = WindowCornerRadius): Modifier =
-    if (!enabled) {
-        this
-    } else {
-        drawBehind {
-            val r = radius.toPx()
-            val w = size.width
-            val h = size.height
-            drawIntoCanvas { canvas ->
-                val skia = canvas.skiaCanvas
-                ShadowLayers.forEach { layer ->
-                    val paint = org.jetbrains.skia.Paint().apply {
-                        color = 0xFF000000.toInt()
-                        this.alpha = (layer.alpha * 255f).toInt().coerceIn(0, 255)
-                        maskFilter = org.jetbrains.skia.MaskFilter.makeBlur(
-                            org.jetbrains.skia.FilterBlurMode.NORMAL,
-                            layer.sigma.dp.toPx(),
-                        )
-                    }
-                    skia.drawRRect(
-                        org.jetbrains.skia.RRect.makeXYWH(0f, layer.dy.dp.toPx(), w, h, r),
-                        paint,
-                    )
-                    paint.close()
-                }
-            }
-        }
-    }
 
 /**
  * 一条自绘标题栏。
@@ -357,7 +288,7 @@ internal fun zoomWindow(windowState: WindowState) {
  *
  * ## 全屏按平台分流
  *
- * **Win/Linux**（无边框 + 自绘圆角/投影）：[GraphicsDevice.setFullScreenWindow]（skiko 在
+ * **Win/Linux**（无边框 + 自绘外壳）：[GraphicsDevice.setFullScreenWindow]（skiko 在
  * Win/Linux 上用的也是这条，三平台口径一致）。JDK 自己把窗口拉到整屏并收起任务栏，退出后
  * 原样还原。
  *
@@ -369,7 +300,7 @@ internal fun zoomWindow(windowState: WindowState) {
  *
  * 两条路殊途同归后，CMP 在 `componentResized` 里回读系统全屏态（CMP 源码注释：全屏变化不触发
  * windowStateChanged、只触发 componentResized），[fullscreen] 与 `windowState.placement`
- * 双向镜像，自绘标题栏的图标与圆角/投影开关不会卡在旧态。
+ * 双向镜像，自绘标题栏的图标与外壳描边不会卡在旧态。
  */
 internal class DesktopWindowChrome {
     /** 是否处于全屏（自绘标题栏按钮靠它切「全屏 ↔ 还原」图标）。 */
@@ -393,7 +324,7 @@ internal class DesktopWindowChrome {
         this.window = window
         this.windowState = windowState
         // 只挂一次监听：全屏状态可能被**外部**改掉（macOS 系统 ⌃⌘F / 切换 Space 时 AWT 会自己
-        // 进出全屏，窗口几何随之变化），必须回读真值，否则自绘按钮图标与圆角/投影会卡在旧态。
+        // 进出全屏，窗口几何随之变化），必须回读真值，否则自绘按钮图标与外壳描边会卡在旧态。
         if (watched !== window) {
             watched?.let { it.removeComponentListener(geometryWatcher) }
             window.addComponentListener(geometryWatcher)

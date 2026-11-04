@@ -125,8 +125,11 @@ private fun styleNameOf(s: FontStyle): String = buildString {
  * v1 → v2：指纹第二分量由「纯族名哈希」变为「族名哈希 ⊕ 平台字体文件环境哈希
  * （见 `SystemFontSource.environmentHash` / `fontFilesEnvironmentHash`）」，以检测
  * 「同族名换文件」（§8-2 加固）。老库存的是 v1 ⇒ 首次启动指纹不匹配、重扫一次。
+ *
+ * v2 → v3：Linux 桌面改用 fontconfig 枚举（别名族折回基族、字重名只取本族字形），
+ * 与 skiko `matchFamily` 口径落库的旧行不兼容（旧行每族挂着全库两百多个假字重名）⇒ 主动作废重扫。
  */
-const val FONT_SCAN_CACHE_VERSION = 2L
+const val FONT_SCAN_CACHE_VERSION = 3L
 
 /** 计算系统字体族名集合的哈希（用于判定系统字体是否变化） */
 fun systemFontFamilyHash(): Long = systemFontFamilyHashOf(systemFontFamilies())

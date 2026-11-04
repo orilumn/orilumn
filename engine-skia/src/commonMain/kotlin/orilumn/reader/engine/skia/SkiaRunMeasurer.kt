@@ -212,14 +212,16 @@ class SkiaRunMeasurer(
         for (font in seg.fonts) {
             if (font.getUTF32Glyph(cp) != NOTDEF) return font
         }
-        // 族栈全灭 ⇒ 保底面表（与 [universalPass] 同一张、同一条「第一个覆盖者即采用」规则 ⇒ 量画同源）。
+        // 不可见控制符（换行/回车一类）：没有字形可画，也**绝不能**为它去扫全族（见 [isInvisibleControl]）。
+        // 与量宽侧同口径（宽度 0 / 不落墨）。
+        if (isInvisibleControl(cp)) return null
+        // 族栈全灭 ⇒ 保底取面（[fallbackTypeface]，与 [universalPass] 同一出口、同一缓存 ⇒ 量画同源）。
         // 仍无 ⇒ 与 [measure] 同口径用首面 notdef（画出来也是 .notdef，量画一致）。
         val reqItalic = seg.style.slant == FontSlant.ITALIC
-        for (tf in universalTypefaces(seg.mono, seg.style.weight, reqItalic, seg.mgrs)) {
-            val font = SkParagraphFactory.synthFont(tf, seg.sizePx, seg.style.weight, reqItalic)
-            if (font.getUTF32Glyph(cp) != NOTDEF) return font
+        fallbackTypeface(cp, seg.mono, seg.style, seg.mgrs)?.let { tf ->
+            return SkParagraphFactory.synthFont(tf, seg.sizePx, seg.style.weight, reqItalic)
         }
-        // 保底表也没有 ⇒ **系统回退链**（旧 Skia 路径靠的就是它，见 [systemFallbackFace]）。
+        // 保底取面也解不出 ⇒ **系统回退链**（旧 Skia 路径靠的就是它，见 [systemFallbackFace]）。
         // 枚举表按族名建，看不到 emoji 这类「宿主链能到、族名里没有」的面。
         systemFallbackFace(cp, seg.style, families.firstOrNull(), sizePx)?.let { return it }
         logUnresolvableCp(cp, seg)
@@ -357,7 +359,7 @@ class SkiaRunMeasurer(
         val stack: Array<String>,
         val style: FontStyle,
         val mgrs: List<FontMgr>,
-        /** 等宽语境（保底表按它定序：等宽 CJK 面优先），见 [universalTypefaces]。 */
+        /** 等宽语境（保底表按它定序：等宽 CJK 面优先），见 [genericTypefaces]。 */
         val mono: Boolean,
     )
 
@@ -427,10 +429,15 @@ class SkiaRunMeasurer(
             // 后续字位全体右移。真机症状：书里 emoji 少 ⇒「只有没几个字符乱码」。
             if (at.isLowSurrogateTail) continue
             val cp = at.cp
-            // **软连字符不进面表**（零宽占位符，见 [SOFT_HYPHEN]）：它不占宽度也不绘制，
+            // 软连字符不进面表**（零宽占位符，见 [SOFT_HYPHEN]）：它不占宽度也不绘制，
             // 真去查面只会拿到 STSong 的 glyph 271 并算出一个 1em 的全宽（实测 42.18 @fs=42.18）。
             // 它的「可见性」由断点判定决定：行若断在它之后，那里画一个 [HYPHEN_GLYPH]。
             if (cp == SOFT_HYPHEN_CODE) continue
+            // 换行/回车一类不可见控制符同样不进面表：任何字体的 cmap 里都没有它们的字形，
+            // 逐面探覆盖必然全灭 ⇒ 掉进保底通道 ⇒ 逐码本问「谁画得出 U+000A」，谁也画不出，
+            // 最后触发**全族扫描**。Linux 桌面 386 族 × 十余毫秒 = 单次 8 秒，
+            // 实测就花在一个 LF 上（开书 7.1s，见 2026-11-04 日志 DBG tier3 cp=U+000A）。
+            if (isInvisibleControl(cp)) continue
             if (slotOf.putIfAbsent(cp, nCp) == null) {
                 cps[nCp] = cp
                 nCp++
@@ -444,7 +451,7 @@ class SkiaRunMeasurer(
         var nPending = nCp
         // 逐面把「本面覆盖了的」定宽并从待定集里剔除，`pending[0 until nPending)` 始终是**尚未覆盖**的那批。
         //
-        // `fonts` **只含 CSS 族栈的面**：保底面表（[universalTypefaces]，数百面）刻意**不进这个循环**。
+        // `fonts` **只含 CSS 族栈的面**：保底面表（[genericTypefaces]/[installedTypefaces]，数百面）刻意**不进这个循环**。
         // 每个面要付 2 次 native 调用（`getUTF32Glyphs` + `getWidths`），把数百个保底面混进来
         // 等于给**每一段**都加几百次 native 调用 —— 实测正文段 0.017ms → 整书 5000 段要 85s，
         // 直接把 `:app:testDebugUnitTest` 的 15 秒预算探针顶爆。保底改走下面的 [universalPass]，
@@ -495,13 +502,13 @@ class SkiaRunMeasurer(
             // 软连字符**严格 0 宽**（连 `lsPx` 也不给）：它是「不占位」的占位符。
             // 给 letterSpacing 会凭空多出一个幽灵间隙 → 行内出现看不见的洞。
             out[i] =
-                if (at.cp == SOFT_HYPHEN_CODE) 0f
+                if (at.cp == SOFT_HYPHEN_CODE || isInvisibleControl(at.cp)) 0f
                 else width[slotOf.getValue(at.cp)] + ls
         }
     }
 
     /**
-     * **保底通道**（渲染层·几何测量）：族栈全灭时扫 [universalTypefaces] 给 `pending[0 until n)`
+     * **保底通道**（渲染层·几何测量）：族栈全灭时按码本问 [fallbackTypeface] 给 `pending[0 until n)`
      * 定宽，**返回仍未定宽的个数**。
      *
      * ## 为什么单独一条通道，而不是把保底面并进 [measure] 的主循环
@@ -514,7 +521,7 @@ class SkiaRunMeasurer(
      *
      * ## 量画同源
      *
-     * 落墨侧的 [faceForCp] 走**同一张** [universalTypefaces]、**同一条**「第一个
+     * 落墨侧的 [faceForCp] 走**同一个** [fallbackTypeface]、**同一条**「第一个
      * `getUTF32Glyph(cp) != 0` 即采用」规则，故这里量到的宽就是那里画的面，**不会量画失配**。
      */
     private fun universalPass(
@@ -524,26 +531,87 @@ class SkiaRunMeasurer(
         slotOf: HashMap<Int, Int>,
         width: FloatArray,
     ): Int {
-        var remain = IntArray(nPending) { pending[it] }
-        var n = nPending
-        for (tf in universalTypefaces(seg.mono, seg.style.weight, seg.style.slant == FontSlant.ITALIC, seg.mgrs)) {
-            if (n == 0) break
-            val font = SkParagraphFactory.synthFont(tf, seg.sizePx, seg.style.weight, seg.style.slant == FontSlant.ITALIC)
-            val glyphs = font.getUTF32Glyphs(remain)
-            val w = font.getWidths(glyphs)
-            var keep = 0
-            for (p in 0 until n) {
-                val cp = remain[p]
-                if (glyphs[p] != NOTDEF) {
-                    width[slotOf.getValue(cp)] = w[p]
-                } else {
-                    remain[keep++] = cp
-                }
+        val reqItalic = seg.style.slant == FontSlant.ITALIC
+        val fontOf = HashMap<Typeface, Font>()
+        var n = 0
+        for (p in 0 until nPending) {
+            val cp = pending[p]
+            val tf = fallbackTypeface(cp, seg.mono, seg.style, seg.mgrs)
+            if (tf == null) {
+                pending[n++] = cp
+                continue
             }
-            n = keep
+            val font = fontOf.getOrPut(tf) {
+                SkParagraphFactory.synthFont(tf, seg.sizePx, seg.style.weight, reqItalic)
+            }
+            width[slotOf.getValue(cp)] = font.getWidths(shortArrayOf(font.getUTF32Glyph(cp)))[0]
         }
-        for (p in 0 until n) pending[p] = remain[p]
         return n
+    }
+
+    /**
+     * **保底取面**（渲染层·字体解析，逐码本）：[universalPass]（量宽）与 [faceForCp]（落墨）共用的
+     * **唯一出口**，故量画恒同源（同一条解析顺序、同一张逐码本缓存）。
+     *
+     * 三级顺序按「代价 × 命中率」排：
+     * 1. **通用候选面**（[genericTypefaces]）：几十个族名，定序稳定（mono 时等宽 CJK 优先）；
+     * 2. **宿主字面链**（[systemChainTypeface]）：问宿主「谁覆盖这个码本」，一次 native 调用；
+     *    按族名枚举够不到的（emoji 一类）在这里；
+     * 3. **全部已装族**（[installedTypefaces]）：**最贵**，只有 1、2 都解不出时才付。
+     *
+     * 第 3 级从「每次保底都做」降为「最后一道」正是开书慢的修因：旧实现把全族扫描放在通用候选
+     * 之后、宿主链之前，于是**每一个**族栈覆盖不到的码本（代码块里的 CJK 就是）都要等一次
+     * 全族 `matchFamilyStyle`（Linux 桌面 400+ 族 ≈ 十秒级）。Linux 恰好是**宿主链便宜、枚举贵**
+     * 的宿主 —— 平板反之，但平板本来就只花毫秒级，顺序在这儿只影响「谁先答对」，不影响代价量级。
+     *
+     * 结果按码本缓存（解不出的也缓存），故一本书里同一个码本只解析一次；池换代时整清。
+     */
+    private fun fallbackTypeface(
+        cp: Int,
+        monospace: Boolean,
+        style: FontStyle,
+        mgrs: List<FontMgr>,
+    ): Typeface? {
+        syncPoolGen()
+        val key = CoverageKey(mgrs, monospace, style.weight, style.slant.ordinal, cp)
+        val cached = synchronized(lock) { coverageCache[key] }
+        if (cached != null) return cached.firstOrNull()
+        val tf = runCatching {
+            val g = firstCovering(genericTypefaces(monospace, style, mgrs), cp, style)
+            if (g != null) g else {
+                val c = systemChainTypeface(cp, style, mgrs)
+                if (c != null) c else firstCovering(installedTypefaces(monospace, style, mgrs), cp, style)
+            }
+        }.getOrNull()
+        synchronized(lock) { coverageCache[key] = if (tf == null) EMPTY_TYPES else arrayOf(tf) }
+        return tf
+    }
+
+    /** 面表里**第一个** `getUTF32Glyph(cp) != 0` 的面（与 [universalPass] 同一条规则）。 */
+    private fun firstCovering(tfs: Array<Typeface>, cp: Int, style: FontStyle): Typeface? {
+        val italic = style.slant == FontSlant.ITALIC
+        for (tf in tfs) {
+            if (SkParagraphFactory.synthFont(tf, 1f, style.weight, italic).getUTF32Glyph(cp) != NOTDEF) return tf
+        }
+        return null
+    }
+
+    /**
+     * **宿主字面链**（逐码本一次 native 调用）：`matchFamilyStyleCharacter(null, …)` 直接问
+     * 「这台机器上谁画得出来这个码本」。
+     *
+     * 与 [universalPass] 的枚举表互补：枚举表按**族名**建（`Last Resort` 一类诊断字体也在族名里，
+     * 故 [DENIED_FAMILIES] 要挡），宿主链按**码本覆盖**答，答案可能落在族名表里根本没有的面上。
+     * 只认「答案面真的含该字形」（`defaultFallback` 同款再验）。
+     */
+    private fun systemChainTypeface(cp: Int, style: FontStyle, mgrs: List<FontMgr>): Typeface? {
+        val italic = style.slant == FontSlant.ITALIC
+        for (mgr in mgrs) {
+            val tf = runCatching { mgr.matchFamilyStyleCharacter(null, style, null, cp) }.getOrNull() ?: continue
+            if (runCatching { tf.familyName }.getOrNull() in DENIED_FAMILIES) continue
+            if (SkParagraphFactory.synthFont(tf, 1f, style.weight, italic).getUTF32Glyph(cp) != NOTDEF) return tf
+        }
+        return null
     }
 
     private fun notdefWidth(font: Font): Float = font.getWidths(shortArrayOf(NOTDEF))[0]
@@ -563,7 +631,7 @@ class SkiaRunMeasurer(
     }
 
     /**
-     * **系统回退链**（渲染层·字体解析）：[universalTypefaces] 也解不出时的**最后一道**通道。
+     * **系统回退链**（渲染层·字体解析）：枚举表与宿主链都解不出时的**最后一道**通道。
      *
      * ## 为什么必须有它（这是「之前用 skia 是好的」那句话的直接兑现）
      *
@@ -571,7 +639,7 @@ class SkiaRunMeasurer(
      * SkParagraph 内部靠 `FontCollection` 的**系统级回退链**（`defaultFallback(character, style, family)`）
      * 逐码本找面。那条链**不靠族名枚举**，它直接问宿主「哪个字体覆盖这个码本」。
      *
-     * 我的 [universalTypefaces] 是**按族名枚举**建表的（平板 63 族），
+     * 枚举表（[installedTypefaces]）是**按族名**建的（平板 63 族），
      * 而**枚举能到的严格窄于系统回退链**。现场证据（vivo 平板，日志实证）：
      *
      * - 设备 `/system/fonts/NotoColorEmoji.ttf` **存在**，`U+1F44D`（👍）有字形；
@@ -620,8 +688,8 @@ class SkiaRunMeasurer(
      *
      * 每个码本新建一个集合 ⇒ 无界的 native 对象 churn。第一版就是这么写的，
      * `WholeBookRelayoutEpochProbeTest`（15 秒预算的整书重排探针）在全量跑时**超时**。
-     * 与 [universalTypefaces] 的缓存键踩的是同一类坑（教训 ⑩：缓存键/缓存粒度要按**代价**算，不是按调用次数）。
-     * 作用域同 [universalTypefaces]：**进程级**（原为实例字段 ⇒ 每个新实例重建一次重量级集合）。
+     * 与保底面表的缓存键踩的是同一类坑（教训 ⑩：缓存键/缓存粒度要按**代价**算，不是按调用次数）。
+     * 作用域同保底面表：**进程级**（原为实例字段 ⇒ 每个新实例重建一次重量级集合）。
      */
     private fun systemFallbackCollection(): org.jetbrains.skia.paragraph.FontCollection =
         fallbackCollection ?: synchronized(lock) {
@@ -648,12 +716,23 @@ class SkiaRunMeasurer(
         val sizeBits: Int,
     )
 
-    /** 保底面表缓存键：**刻意不含字号与 CSS 族栈** —— 见 [universalTypefaces] 的踩坑记录。 */
+    /** 保底面表缓存键：**刻意不含字号与 CSS 族栈** —— 见 [genericTypefaces] 的踩坑记录。 */
     private data class UniversalKey(
         val mgrs: List<FontMgr>,
         val monospace: Boolean,
         val weight: Int,
         val slant: Int,
+    ) {
+        fun style(): FontStyle = SkParagraphFactory.runFontStyle(weight, slant == FontSlant.ITALIC.ordinal)
+    }
+
+    /** 保底取面的**逐码本**缓存键（[fallbackTypeface]）：解不出的码本也记（否则每次都重问一遍）。 */
+    private data class CoverageKey(
+        val mgrs: List<FontMgr>,
+        val monospace: Boolean,
+        val weight: Int,
+        val slant: Int,
+        val cp: Int,
     )
 
     /** 系统回退链的结果缓存（**缓存 [Typeface] 而非 [Font]**：值与字号无关，见 [systemFallbackFace]）。 */
@@ -666,8 +745,16 @@ class SkiaRunMeasurer(
         /** 族栈 + 字号 → Font（廉价：只是给上一层的面按字号包一层）。 */
         private val faceFontCache = HashMap<FontKey, Array<Font>>()
 
-        /** 通用/保底面表（最贵：扫全部已装族）。 */
-        private val universalCache = HashMap<UniversalKey, Array<Typeface>>()
+        /** 通用候选面表（保底第一级：几十个族名）。 */
+        private val genericCache = HashMap<UniversalKey, Array<Typeface>>()
+
+        /** 全部已装族面表（保底第三级：**最贵**，扫全部已装族）。 */
+        private val installedCache = HashMap<UniversalKey, Array<Typeface>>()
+
+        /** 保底取面结果（逐码本；空数组 = 该码本在此宿主上真的没有面）。 */
+        private val coverageCache = HashMap<CoverageKey, Array<Typeface>>()
+
+        private val EMPTY_TYPES = emptyArray<Typeface>()
 
         /** 系统回退链（按码本问宿主链）。 */
         private val systemFallbackCache = HashMap<SystemFallbackKey, Typeface?>()
@@ -684,7 +771,8 @@ class SkiaRunMeasurer(
     }
 
     /**
-     * 池代次水位：[stackTypefaceCache]/[faceFontCache]/[universalCache] 的键里没有池身份
+     * 池代次水位：[stackTypefaceCache]/[faceFontCache]/[genericCache]/[installedCache]/
+     * [coverageCache] 的键里没有池身份
      * （只有 mgrs 链与族栈字重字号），池内容一变旧条目即错面——长驻实例（绘制侧
      * `LineWindowDrawer` 的 painter、断行侧 breaker）跨越多次换字体，旧面一直用到退出重进。
      * 每次取面前对一次水位，落后即整清（只清 map，不重扫；重扫发生在真正 miss 时，
@@ -697,7 +785,9 @@ class SkiaRunMeasurer(
             synchronized(lock) {
                 stackTypefaceCache.clear()
                 faceFontCache.clear()
-                universalCache.clear()
+                genericCache.clear()
+                installedCache.clear()
+                coverageCache.clear()
             }
             poolGen = g
         }
@@ -770,9 +860,9 @@ class SkiaRunMeasurer(
     }
 
     /**
-     * **通用面表**（渲染层·字体解析）——「CSS 族栈一个都覆盖不到时，最后还能去哪」的单源答案。
+     * **通用候选面表**（渲染层·字体解析）—— 保底第一级：「CSS 族栈一个都覆盖不到时，先去哪」。
      *
-     * ## 为什么必须有它（这不是锦上添花，是逐字路径的必需品）
+     * ## 为什么必须有保底（这不是锦上添花，是逐字路径的必需品）
      *
      * SkParagraph 侧有系统级逐字形回退（[SkParagraphFactory.defaultCollection] 把系统 FontMgr
      * 挂成 default manager），**族栈覆盖不到的码本它照样画得出来**。自建断行引擎把落墨换成
@@ -782,92 +872,107 @@ class SkiaRunMeasurer(
      * 族栈无人覆盖 ⇒ 落墨拿到 `.notdef` ⇒ 豆腐块；而 `─│├└` 与 `U+00A0` 恰好在等宽面里有字形，
      * 所以「有的显示、有的不显示」，与真机「要么不显示、要么显示乱码」的症状一致。
      *
-     * ## 修法为什么是「接在末尾」而不是「另写一条兜底分支」
+     * ## 三级保底的定序（代价 × 命中率；见 [fallbackTypeface]）
      *
-     * [measure]（量宽）与 [faceForCp]（落墨）都已实现同一条规则：**逐面走，第一个
-     * `getUTF32Glyph(cp) != 0` 的即采用**。所以只要把保底面**追加到同一张面表末尾**，两条路径
-     * 同时被修好，且**不必在两处各写一份兜底** —— 也就不会发生「量取到保底面、画还在用 notdef」
-     * 的量画失配（教训 ⑩）。接末尾还保证**当前能正常显示的码本逐值不变**（前面的族先命中）。
+     * ① 本方法：按 [SkParagraphFactory.genericFallbackFamilyNames] 的候选顺序（mono 时
+     * `monospace` 候选提前，代码块里的 CJK 落到等宽 CJK 面而非无衬线面）。几十个族名，便宜，
+     * 且**定序稳定** ⇒ 同一码本在量宽与落墨侧取到同一张面。
+     * ② 宿主字面链：[systemChainTypeface]，一次 native 调用问「谁覆盖该码本」。
+     * ③ [installedTypefaces]：全部已装族（真·保底），代价十秒级，只在 ①② 都解不出时才建。
      *
-     * ## 定序：通用候选优先，其余已装族兜底
-     *
-     * 先按 [SkParagraphFactory.genericFallbackFamilyNames] 的候选顺序（mono 时 `monospace` 候选提前，
-     * 代码块里的 CJK 落到等宽 CJK 面而非无衬线面），再把系统里**其余**已装族按
-     * [FontMgr.getFamilyName] 顺序补齐 —— 后者是「真·保底」：只要**任何**已装字体有该字形就找得到。
      * 各平台字体名与覆盖集不同，故一律用 `getUTF32Glyph(cp) != 0` 自建覆盖判定（同 §2.2(d) 第 3 条）。
      *
-     * ## 缓存与代价（**这里踩过一次性能坑，键的取法有讲究**）
+     * ## 缓存与代价（**这里踩过两次性能坑，键与作用域都别改回去**）
      *
-     * 昂贵的那一步是 `matchFamilyStyle`（系统字体匹配，326 族 ≈ 毫秒级 native 调用），
-     * 而它**与字号无关** ⇒ 缓存**只按 (mono, 字重, 斜体)** 分桶，存的是 `Typeface`（不是 `Font`）。
-     * 拼进 [faceTable] 时才按当次字号 `Font(tf, sizePx)` 包一层，那只是 SkFont 分配，可忽略。
+     * 昂贵的那一步是 `matchFamilyStyle`（系统字体匹配，Linux 桌面实测 13.7ms/次，737 条目），
+     * 而它**与字号无关** ⇒ 缓存只按 (mono, 字重, 斜体, mgrs 链) 分桶，存 `Typeface`（不是 `Font`）。
+     * 拼进 [faceTable] 时才按当次字号包一层 `Font`，那只是 SkFont 分配，可忽略。
+     * 键里**绝不能**放 `sizePx`：真书里 `pre code{font-size:0.8em}`、行内 `font-size`、上下标各自成
+     * 尺寸桶 ⇒ 每桶重扫一遍全族，把 `:app:testDebugUnitTest` 里两个 15 秒预算的探针顶到超时。
+     * 教训：**给缓存键做减法**——每个分量都得回答「它变了，昂贵的那一步真的要重做吗」。
      *
-     * **踩坑记录（务必别改回去）**：第一版把 `sizePx.toRawBits()` 也放进了缓存键，
-     * 于是**每遇到一个新的 font-size 就重扫一遍全部 326 个已装族**。真书里 `pre code{font-size:0.8em}`、
-     * 行内 `font-size`、上下标各自成尺寸 ⇒ 一本书几十个尺寸桶 ⇒ 几十次全量扫描，
-     * 直接把 `:app:testDebugUnitTest` 里两个 15 秒预算的跨章调度探针
-     * （`CrossChapterPreflightProbeTest` / `WholeBookCanonicalQueueProbeTest`）**顶到超时**。
-     * 教训：**给缓存键做减法**——键里每一个分量都得回答「它变了，昂贵的那一步真的需要重做吗」。
-     *
-     * 与 CSS 族栈无关 ⇒ 各条规则共用一张，不重复付扫描代价。
-     * 遍历侧 [measure] 在 `nPending == 0` 时提前退出，故**只有真正落到保底的码本**才会多走几次批量
-     * native 调用，正常文本（首族即覆盖）零成本。
-     *
-     * ⚠ **未销的缺陷（教训 ⑰）**：`universalCache` 是**本类的实例字段**，
-     * 而 `SkiaRunMeasurer()` 在生产路径上是 `GlyphPainter` / `KerningClusterTable` /
-     * `InhouseParagraphBreaker` / `LineAligner` 四处的**默认实参** ⇒ 每个新实例都要重扫一遍
-     * 全部已装族（平板 59 族、每族一次 `matchFamilyStyle` native），而扫出来的结果对所有实例**完全相同**。
-     * 平板实测一次运行 39 秒内至少新建 **214 个实例**（按已删诊断 `logUniversalTableOnce` 那 641 行折算）。
-     * **作用域已于 2026-10-08 收口为进程级**（[universalCache] 移入 companion，与
-     * `systemFallbackCollection` 同一模式；键加 mgrs 链）。收口的触发事件即本段
-     * 「平板 59 族毫秒级」的假设被推翻：Linux 桌面 1981 族 × ~6ms = 单次 11.4 秒，
-     * 乘上「每段落一个新实例」的开书/翻页成本（实测单章布局 25 秒）。
-     * 教训仍在：**缓存键/作用域都按「代价」算**——同一个「先记账」的判断，
-     * 在便宜平台上无害、在贵平台上就是十秒。
+     * 作用域是**进程级**（companion）：`SkiaRunMeasurer()` 是 `GlyphPainter` / `KerningClusterTable` /
+     * `InhouseParagraphBreaker` / `LineAligner` 的默认实参，平板实测 39 秒内新建 214 个实例；
+     * 一旦降到实例级，每个实例都重扫一遍全族（Linux 桌面单次扫描曾达 11.4 秒，实测单章布局 25 秒）。
+     * 教训：**缓存键/作用域都按「代价」算**——同一个「先记账」的判断，在便宜平台上无害，
+     * 在贵平台上就是十秒。
      */
-    private fun universalTypefaces(
+    private fun genericTypefaces(
         monospace: Boolean,
-        weight: Int,
-        italic: Boolean,
+        style: FontStyle,
         mgrs: List<FontMgr>,
     ): Array<Typeface> {
         syncPoolGen()
-        val style = SkParagraphFactory.runFontStyle(weight, italic)
         val key = UniversalKey(mgrs, monospace, style.weight, style.slant.ordinal)
-        synchronized(lock) { universalCache[key] }?.let { return it }
-        // 首个 miss 在锁内构建：并发 miss 者排队，胜过各扫一遍全族（下面②段的代价是
-        // 「已装族数 × 单次 matchFamilyStyle」——字体多的机器上是十秒级）。
+        synchronized(lock) { genericCache[key] }?.let { return it }
+        // 首个 miss 在锁内构建：并发 miss 者排队，胜过各扫一遍全族。
         return synchronized(lock) {
-            universalCache[key] ?: buildUniversalTypefaces(key, style)
-                .also { universalCache[key] = it }
+            genericCache[key] ?: buildGenericTypefaces(key)
+                .also { genericCache[key] = it }
         }
     }
 
-    private fun buildUniversalTypefaces(key: UniversalKey, style: FontStyle): Array<Typeface> {
-        val mgrs = key.mgrs
-        val monospace = key.monospace
-        val seen = HashSet<Typeface>()
+    /** ① 段：通用候选定序（书里常见的 CJK / 等宽 CJK / 符号面先试）。几十个族名，**便宜**。 */
+    private fun buildGenericTypefaces(key: UniversalKey): Array<Typeface> {
         val out = ArrayList<Typeface>()
-        fun add(mgr: FontMgr, family: String) {
-            if (family in DENIED_FAMILIES) return
-            val tf = runCatching { mgr.matchFamilyStyle(family, style) }.getOrNull() ?: return
+        val seen = HashSet<Typeface>()
+        for (family in SkParagraphFactory.genericFallbackFamilyNames(key.monospace)) {
+            for (mgr in key.mgrs) addFamily(mgr, family, key.style(), seen, out)
+        }
+        return out.toTypedArray()
+    }
+
+    /**
+     * ② 段：**全部已装族**（真·保底：谁有字形谁上，哪怕名字完全陌生）。
+     *
+     * ## 为什么它必须是「最后一道」而不是「保底第一步」
+     *
+     * 代价是 `已装族数 × matchFamilyStyle`：Linux 桌面 400+ 族 × 十余毫秒 = **十秒级**。
+     * 旧顺序把它排在通用候选之后、宿主链之前 ⇒ 每个族栈覆盖不到的码本（代码块里的 CJK 正是）
+     * 都要等一次全族扫描，开书实测 13.3 秒全花在这里（`asm … shape=13294ms`）。
+     * 现在只有 [genericTypefaces] 与 [systemChainTypeface] 都解不出才建，且建一次即进程级缓存。
+     */
+    private fun installedTypefaces(
+        monospace: Boolean,
+        style: FontStyle,
+        mgrs: List<FontMgr>,
+    ): Array<Typeface> {
+        syncPoolGen()
+        val key = UniversalKey(mgrs, monospace, style.weight, style.slant.ordinal)
+        synchronized(lock) { installedCache[key] }?.let { return it }
+        return synchronized(lock) {
+            installedCache[key] ?: buildInstalledTypefaces(key)
+                .also { installedCache[key] = it }
+        }
+    }
+
+    private fun buildInstalledTypefaces(key: UniversalKey): Array<Typeface> {
+        val out = ArrayList<Typeface>()
+        val seen = HashSet<Typeface>()
+        // 通用候选排在前：即便走到全族表，定序与 ① 段一致（量画同源、CJK 面色不变）。
+        for (tf in genericTypefaces(key.monospace, key.style(), key.mgrs)) {
             if (seen.add(tf)) out.add(tf)
         }
-        // ① 通用候选定序（书里常见的 CJK / 等宽 CJK / 符号面先试）。
-        for (family in SkParagraphFactory.genericFallbackFamilyNames(monospace)) {
-            for (mgr in mgrs) add(mgr, family)
-        }
-        // ② 真·保底：系统里其余已装族。谁有字形谁上，哪怕名字完全陌生。
-        for (mgr in mgrs) {
+        for (mgr in key.mgrs) {
             val n = runCatching { mgr.familiesCount }.getOrDefault(0)
             for (i in 0 until n) {
                 val family = runCatching { mgr.getFamilyName(i) }.getOrNull() ?: continue
-                add(mgr, family)
+                addFamily(mgr, family, key.style(), seen, out)
             }
         }
-        val arr = out.toTypedArray()
-        synchronized(lock) { universalCache[key] = arr }
-        return arr
+        return out.toTypedArray()
+    }
+
+    private fun addFamily(
+        mgr: FontMgr,
+        family: String,
+        style: FontStyle,
+        seen: HashSet<Typeface>,
+        out: ArrayList<Typeface>,
+    ) {
+        if (family in DENIED_FAMILIES) return
+        val tf = runCatching { mgr.matchFamilyStyle(family, style) }.getOrNull() ?: return
+        if (seen.add(tf)) out.add(tf)
     }
 
     /**
@@ -921,5 +1026,20 @@ private val DENIED_FAMILIES = setOf("Last Resort")
 
 /** [SOFT_HYPHEN] 的码本（取宽路径的热路径判定，用 Int 常量免去 Char→Int 装箱）。 */
 private const val SOFT_HYPHEN_CODE = 0x00AD
+
+/**
+ * **不可见控制符**（渲染层·几何测量）：没有任何字体为它们提供「字形」这回事 ——
+ * cmap 里查 U+000A 一律 notdef，而**保底通道**（[SkiaRunMeasurer.universalPass]）会把
+ * 「族栈全灭」当成「需要找一张覆盖面」来处理，于是逐码本去问「谁画得出 U+000A」。
+ *
+ * 代价是**全族扫描**（保底第三级）：Linux 桌面 386 族 × 十余毫秒 ≈ 8 秒，而它由**一个换行**
+ * 触发（2026-11-04 实测 `DBG tier3 cp=U+000A … ms=8180`，开书 7.1s 全在这一笔上，且发生在
+ * 临时表预排的锁内 ⇒ 开书落位一并被拖住）。
+ *
+ * 故：**不进面表、不落墨、宽度 0**，与 [SOFT_HYPHEN] 同一条「零宽占位」规则。
+ * TAB（U+0009）不在此列 —— 它的宽度语义由上层制表位决定，这里不越权清零。
+ */
+private fun isInvisibleControl(cp: Int): Boolean =
+    (cp in 0x00..0x1F && cp != 0x09) || cp == 0x7F || cp in 0x80..0x9F || cp == 0x2028 || cp == 0x2029
 
 /** 码本：代理对取整个代理对的值（`text[i]` 为高位时读低位），否则原样。 */

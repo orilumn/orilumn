@@ -393,6 +393,16 @@ private fun DesktopRoot(
         }
     }
 
+    /**
+     * 当前 `openBook` 的生效设置是否已落定（值为书 id）。
+     *
+     * **必须先等它再建阅读宿主**：宿主按 `settings` 算 `paramHash`（分页缓存键）。若先用全局设置
+     * 建一遍、再把本书 overlay 换进来，就会按全局键查表（查不到）→ 整章重排一次 → overlay 到齐
+     * 后再整章重排一次，且磁盘表是按 overlay 的键写的，下次开书照样查不到（永久双排）。
+     * 这里只多等一次本地设置读取（毫秒级），换开书直接命中磁盘表。
+     */
+    var readerSettingsBook by remember { mutableStateOf<Long?>(null) }
+
     // 开书即套本书 overlay（无私设即纯全局）；回书架回到全局。
     LaunchedEffect(openBook) {
         // 换书/回书架即清标题栏的两个瞬时状态：阅读栏回抛与悬停都不会跨书残留
@@ -401,6 +411,7 @@ private fun DesktopRoot(
         topHover = false
         val b = openBook
         settings = withContext(Dispatchers.IO) { settingsPersist.effectiveFor(b?.id) }
+        readerSettingsBook = b?.id
     }
 
     // ---- 自绘标题栏编排（平台层·桌面壳） ----
@@ -456,6 +467,11 @@ private fun DesktopRoot(
                     onOpenBook = { openBook = it },
                     modifier = Modifier.weight(1f),
                 )
+            }
+        } else if (readerSettingsBook != openBook!!.id) {
+            // 生效设置还没到齐（见 readerSettingsBook 注释）：先占位，别用全局设置建宿主。
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("正在加载…", style = MaterialTheme.typography.bodyLarge)
             }
         } else {
             val book = openBook!!

@@ -184,8 +184,12 @@ class SystemFontScannerProbeTest {
             val scanner = SystemFontScanner(lib, TaskScheduler(scope, Dispatchers.Default, 1), source = fake.asSource())
 
             scanner.onPanelVisibility(true)
-            awaitTrue("panel demand must scan all families") { lib.list().size == 6 }
-            assertEquals("fresh fingerprint written after completion", version to fake.families.joinToString("|").hashCode().toLong(), lib.fontScanState())
+            val expectedFingerprint = version to fake.families.joinToString("|").hashCode().toLong()
+            // 族行先落库、指纹在收尾时写：只等 lib.list() 会与收尾写指纹竞态（曾偶发红）。
+            awaitTrue("panel demand must scan all families and write the fingerprint") {
+                lib.list().size == 6 && lib.fontScanState() == expectedFingerprint
+            }
+            assertEquals("fresh fingerprint written after completion", expectedFingerprint, lib.fontScanState())
         } finally {
             scope.cancel()
             dir.deleteRecursively()

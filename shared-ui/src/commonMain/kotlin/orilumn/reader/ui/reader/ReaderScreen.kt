@@ -1725,6 +1725,10 @@ fun ReaderScreen(
                     var slideEnded = false
                     var brightnessActive = false
                     var brightnessBase = ReaderMath.MAX_BRIGHTNESS
+                    // 双指上下滑调亮度（brightnessGestureTwo）：第二根手指落下就接管本手势，
+                    // 按两指平均纵向位移算（两指各自动也不算「一起滑」）；期间不翻页、不选字。
+                    var twoFingerBrightness = false
+                    var twoFingerBaseY = 0f
                     // 抬手速度样本（两次采样的位移/时差）：滑动判定要「快甩过阈即翻」，
                     // 只看位移会把快速轻扫吃掉。
                     var lastDx = 0f
@@ -1762,6 +1766,58 @@ fun ReaderScreen(
                         if (change.isConsumed) {
                             if (!change.pressed) break
                             continue
+                        }
+                        // 双指上下滑调亮度（任意位置，见设置里的「任意位置双指上下滑」）。
+                        // 原实现只把开关存下来、渲染出来，手势层从没读过它 ⇒ 开了也没反应。
+                        // 判定用「按下的指针数 ≥ 2」，不要求第二根手指也过 slop：
+                        // 两指按住再一起上下滑即可，接管的时机是**第二根手指落下那一帧**。
+                        val pressedPointers = event.changes.filter { it.pressed }
+                        if (!mouse && !selecting &&
+                            ReaderMath.twoFingerBrightnessAllowed(
+                                light.brightnessGestureTwo, light.brightnessFollowSystem,
+                            ) &&
+                            pressedPointers.size >= 2
+                        ) {
+                            if (!twoFingerBrightness) {
+                                twoFingerBrightness = true
+                                brightnessActive = true
+                                brightnessBase = light.brightness
+                                // 起手位置取两指平均 y，之后按平均位移算：单看一根手指会漏掉
+                                // 「另一根手指在动、这根不动」。
+                                twoFingerBaseY = ReaderMath.averagePressedY(
+                                    pressedPointers.map { it.position.y },
+                                )
+                                // 双指常被系统/自身当成「长按再移动」：撤掉还没起手的长按计时，
+                                // 已经起手的单指翻页滑动就地结算，别让页面一边翻一边变亮。
+                                longPressJob?.cancel()
+                                autoFlipSide = 0
+                                if (slideActive && !slideEnded) {
+                                    currentEndSlide(vx, size.width.toFloat())
+                                    slideEnded = true
+                                }
+                                Logger.d(
+                                    "Orilumn.BRIGHT",
+                                    "two-finger start fingers=${pressedPointers.size} " +
+                                        "y=${twoFingerBaseY.roundToInt()} b=$brightnessBase",
+                                )
+                            }
+                            val avgY = ReaderMath.averagePressedY(pressedPointers.map { it.position.y })
+                            applyBrightnessDelta(
+                                brightnessBase,
+                                ReaderMath.brightnessFrac(avgY - twoFingerBaseY, size.height.toFloat()),
+                            )
+                            // 全消费：翻页/选字/联动的手指都别再从这次手势里捞事件。
+                            event.changes.forEach { it.consume() }
+                            continue
+                        }
+                        if (twoFingerBrightness) {
+                            // 两指只剩一根（或一起抬起）：本次亮度手势到此为止。
+                            // 不降级成单指翻页/选字——那会让读者抬一根手指就被翻页。
+                            Logger.d("Orilumn.BRIGHT", "two-finger end b=${light.brightness}")
+                            endBrightnessGesture()
+                            twoFingerBrightness = false
+                            brightnessActive = false
+                            break
                         }
                         val dx = change.position.x - downX
                         val dy = change.position.y - downY
@@ -1960,6 +2016,11 @@ fun ReaderScreen(
                         autoFlipSide = 0
                         longPressJob?.cancel()
                         magnifierFinger = null
+                        // 双指调亮度期间指针丢失/手势被取消：指示条与落库都收掉，别留在屏上。
+                        if (twoFingerBrightness) {
+                            twoFingerBrightness = false
+                            endBrightnessGesture()
+                        }
                     }
                 }
             },

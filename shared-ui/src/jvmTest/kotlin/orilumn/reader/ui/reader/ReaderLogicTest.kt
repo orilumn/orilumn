@@ -122,6 +122,22 @@ class ReaderLogicTest {
     }
 
     @Test
+    fun twoFingerBrightnessAllowed_needsSwitchAndNoSystemFollow() {
+        assertEquals(true, ReaderMath.twoFingerBrightnessAllowed(twoEnabled = true, followSystem = false))
+        // 开关没开：双指不接管（单指左右两侧的老规矩照旧）。
+        assertEquals(false, ReaderMath.twoFingerBrightnessAllowed(twoEnabled = false, followSystem = false))
+        // 跟随系统时整组亮度手势都禁用，双指也不例外。
+        assertEquals(false, ReaderMath.twoFingerBrightnessAllowed(twoEnabled = true, followSystem = true))
+    }
+
+    @Test
+    fun averagePressedY_usesBothFingers() {
+        assertEquals(300f, ReaderMath.averagePressedY(listOf(200f, 400f)), 1e-6f)
+        assertEquals(250f, ReaderMath.averagePressedY(listOf(100f, 200f, 450f)), 1e-6f)
+        assertEquals(0f, ReaderMath.averagePressedY(emptyList()), 1e-6f)
+    }
+
+    @Test
     fun brightnessFrac_upIsPositive_scaledByViewHeight() {
         assertEquals(0.1f, ReaderMath.brightnessFrac(-100f, 1000f), 1e-6f)
         assertEquals(-0.25f, ReaderMath.brightnessFrac(250f, 1000f), 1e-6f)

@@ -143,6 +143,22 @@ object ReaderMath {
     fun verticalBrightnessAllowed(zone: Int, leftEnabled: Boolean, rightEnabled: Boolean): Boolean =
         (zone == -1 && leftEnabled) || (zone == 1 && rightEnabled)
 
+    /**
+     * 双指上下滑调亮度是否可用：**任意位置**，只要「双指」开关开着且没有跟随系统
+     * （跟随系统时整组亮度手势全禁，单指左右两侧也一样）。
+     */
+    fun twoFingerBrightnessAllowed(twoEnabled: Boolean, followSystem: Boolean): Boolean =
+        twoEnabled && !followSystem
+
+    /**
+     * 双指手势的起手基准：按下指针（≥2 根）的平均纵向位置。
+     *
+     * 取平均而不是盯某一根手指：两指各自动一点也算「一起滑」，某根手指抖一下也不会让亮度跳。
+     * 没有按下指针时返回 0（调用方本来就不该在这时用）。
+     */
+    fun averagePressedY(pressedYs: List<Float>): Float =
+        if (pressedYs.isEmpty()) 0f else pressedYs.average().toFloat()
+
     /** 累计纵向位移 → 亮度比例（相对屏高，向上为正，约 -1..1）。 */
     fun brightnessFrac(dy: Float, viewportHeight: Float): Float =
         if (viewportHeight > 0f) -dy / viewportHeight else 0f

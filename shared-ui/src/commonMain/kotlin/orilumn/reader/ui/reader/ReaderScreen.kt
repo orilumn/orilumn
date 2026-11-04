@@ -267,6 +267,12 @@ fun ReaderScreen(
     // 卡片让位时页面上下滚动的惯性动画：抬手后继续走、逐步减速（见 startPageFling）。
     // 用不参与组合状态的壳持有，写它不该触发重组。
     val pageFling = remember { JobSlot() }
+    // 桌面滚动翻页：横滑判据（只有横向算数、一次连续横滑最多翻一页）与
+    // 「动画在飞时攒一次、落地补翻」的槽，见 ScrollFlip.kt。
+    val scrollFlip = remember { ScrollFlipArbiter() }
+    val pendingScrollFlip = remember { PendingScrollFlip() }
+    // 滚轮那一串的断流计时器（见 ScrollFlip.kt 的 WheelBurstTimer）。
+    val wheelBurstTimer = remember { WheelBurstTimer() }
     // 卡片开着时选中的颜色（null = 还没选，按默认色）：点色槽只记住，落笔还要等完成/点卡片外。
     var noteColorArgb by remember { mutableStateOf<Int?>(null) }
     // 旧的 ClipboardManager 仍是 CMP 唯一共享可用的同步写入口；新 LocalClipboard 只支持 suspend。
@@ -1118,7 +1124,7 @@ fun ReaderScreen(
         return true
     }
 
-    fun onTap(xPx: Float, yPx: Float, widthPx: Float) {
+    fun onTap(xPx: Float, yPx: Float, widthPx: Float, allowFlip: Boolean = true) {
         // 动画播放期间不响应点按：会话在飞时画面正被动画独占（`slideFromPos`/
         // `slideTargetPos` 锁着两页），此时翻页/切栏/跳链接会让像素与数据错位。
         // 早先只有 `flipWithAnimation` 自己挡（beginProgrammatic 返回 false 即丢弃），
@@ -1133,7 +1139,7 @@ fun ReaderScreen(
         // 中部切栏，后退区无操作（封面已是第一页；退出走顶栏返回键）。
         if (coverVisible) {
             when (ReaderMath.tapZone(xPx, widthPx)) {
-                1 -> flipWithAnimation(1)
+                1 -> if (allowFlip) flipWithAnimation(1)
                 else -> barsVisible = !barsVisible
             }
             return
@@ -1178,8 +1184,10 @@ fun ReaderScreen(
         Logger.d("Orilumn.TAP", "tap x=${xPx.roundToInt()} y=${yPx.roundToInt()} w=${widthPx.roundToInt()} zone=$zone bars=${currentBarsVisible}")
         when (zone) {
             // 点按翻页与拖动松手走同一条动画路径（见 flipWithAnimation）。
-            -1 -> flipWithAnimation(-1)
-            1 -> flipWithAnimation(1)
+            // 桌面鼠标单击不翻页（2026-11-04 用户定口）：翻页只走滚轮 / 触控板双指，
+            // 左右 1/3 单击因此什么都不做，中部照旧切上下栏。
+            -1 -> if (allowFlip) flipWithAnimation(-1)
+            1 -> if (allowFlip) flipWithAnimation(1)
             else -> barsVisible = !barsVisible
         }
     }
@@ -1475,35 +1483,91 @@ fun ReaderScreen(
         }
     }
 
+    /**
+     * 滚动翻页（桌面）：横滑 / 横向滚轮 / 鼠标滚轮一格出来的翻页请求都走这里。
+     *
+     * 触控板的**上下滑不翻页**（2026-11-04 用户定口：那是误触）；鼠标滚轮照旧拨一格翻一页
+     * （判据见 [ScrollFlipArbiter]）。翻页动画在飞时先攒一次、等落地补翻，不当场丢掉。
+     */
+    fun requestScrollFlip(direction: Int) {
+        if (direction == 0) return
+        // 封面只能往前走（与点按同一口径）；往回滚在封面上不响应。
+        if (coverVisible && direction < 0) {
+            Logger.d("Orilumn.SCROLL", "flip dir=$direction dropped (cover)")
+            return
+        }
+        if (!ctl.isBusy()) {
+            pendingScrollFlip.clear()
+            Logger.d("Orilumn.SCROLL", "flip dir=$direction")
+            flipWithAnimation(direction)
+            return
+        }
+        Logger.d("Orilumn.SCROLL", "flip dir=$direction queued (busy)")
+        pendingScrollFlip.offer(direction, scope, { ctl.isBusy() }) { d ->
+            if (!(coverVisible && d < 0)) {
+                Logger.d("Orilumn.SCROLL", "flip dir=$d queued")
+                flipWithAnimation(d)
+            }
+        }
+    }
+
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .background(Color(profile.bgColor))
-            // 桌面：卡片开着时页面上下滚交给滚轮 / 触控板双指（2026-11-04 用户定口：
-            // 不用鼠标拖拽滚页，见下面手势分支）。滚动量按 [PAGE_WHEEL_DP_PER_UNIT] 折成位移，
-            // 指针压在卡片上时让给卡片自己，不替它滚页。
+            // 桌面滚动通道（滚轮 / 触控板双指），分两套语义：
+            //  - 标注卡片开着：在本页视口里上下滚页（2026-11-04 用户定口，不用鼠标拖拽滚页）；
+            //  - 卡片关着：横滑与**鼠标滚轮一格**翻页，触控板双指上下滑不翻页
+            //    （2026-11-04 用户定口；判据见 [ScrollFlipArbiter]，一次连续横滑最多翻一页）。
             .pointerInput(Unit) {
                 awaitPointerEventScope {
                     while (true) {
                         val event = awaitPointerEvent()
                         if (event.type != PointerEventType.Scroll) continue
-                        if (!currentNoteBarOpen) continue
                         val change = event.changes.firstOrNull() ?: continue
-                        if (change.isConsumed || change.position.y >= sheetTopPxState) continue
-                        // 指针压在栏上：那是栏自己的滚动区（列表等），不替它滚页。
+                        if (change.isConsumed) continue
+                        if (currentNoteBarOpen) {
+                            // 指针压在卡片上：让给卡片自己（卡片里的滚动区 / 输入框）。
+                            if (change.position.y >= sheetTopPxState) continue
+                            // 指针压在栏上：那是栏自己的滚动区（列表等），不替它滚页。
+                            val inBars = ReaderMath.downInBars(
+                                currentBarsVisible, change.position.y, size.height.toFloat(),
+                                currentTopBarH.toFloat(), currentBotBarH.toFloat(),
+                            )
+                            if (inBars) continue
+                            val dy = change.scrollDelta.y
+                            if (dy == 0f) continue
+                            // 滚轮接管：先把还没停的惯性停掉，再按读者滚的量走。
+                            pageFling.job?.cancel()
+                            val cur = userShiftPx ?: inputShiftPx
+                            userShiftPx = (cur + dy * PAGE_WHEEL_DP_PER_UNIT * density)
+                                .coerceIn(0f, maxShiftPxState)
+                            change.consume()
+                            continue
+                        }
                         val inBars = ReaderMath.downInBars(
                             currentBarsVisible, change.position.y, size.height.toFloat(),
                             currentTopBarH.toFloat(), currentBotBarH.toFloat(),
                         )
                         if (inBars) continue
+                        val dx = change.scrollDelta.x
                         val dy = change.scrollDelta.y
-                        if (dy == 0f) continue
-                        // 滚轮接管：先把还没停的惯性停掉，再按读者滚的量走。
-                        pageFling.job?.cancel()
-                        val cur = userShiftPx ?: inputShiftPx
-                        userShiftPx = (cur + dy * PAGE_WHEEL_DP_PER_UNIT * density)
-                            .coerceIn(0f, maxShiftPxState)
-                        change.consume()
+                        val dir = scrollFlip.onScroll(change.uptimeMillis, dx, dy)
+                        // 滚轮的一格被 macOS 摊成一串小数事件，得等这串**断流**才能判
+                        //（末尾是不是收在峰值上，见 ScrollFlipArbiter）。每来一条竖向事件
+                        // 就把计时推后；判出是滚轮再翻页。
+                        if (dx == 0f && dy != 0f) {
+                            val token = scrollFlip.wheelBurstVersion
+                            wheelBurstTimer.restart(scope) {
+                                if (scrollFlip.wheelBurstVersion != token) return@restart
+                                val wheelDir = scrollFlip.finishWheelBurst()
+                                if (wheelDir != 0) requestScrollFlip(wheelDir)
+                            }
+                        }
+                        if (dir != 0) {
+                            change.consume()
+                            requestScrollFlip(dir)
+                        }
                     }
                 }
             }
@@ -1899,8 +1963,9 @@ fun ReaderScreen(
                             change.consume()
                             continue
                         }
-                        // 指针类型分流：鼠标拖拽才进入选区；单击与平板完全同一条路径
-                        //（见上面 `onTap`：标注卡片 → 清选区 → 链接 → 左/中/右三分区），
+                        // 指针类型分流：鼠标拖拽才进入选区；单击只做与翻页无关的动作
+                        //（见上面 `onTap` 的 allowFlip = false：标注卡片 → 清选区 → 链接 → 中部切栏），
+                        // 桌面翻页交给滚轮 / 触控板双指（见上面的滚动通道）；
                         // 触摸仍走下面的三区点按/滑动/亮度，两套语义不抢同一个手势。
                         if (mouse) {
                             if (mouseSelectingPending && moved) {
@@ -1926,10 +1991,13 @@ fun ReaderScreen(
                                 }
                             }
                             if (!change.pressed) {
-                                // 鼠标单击 = 与平板三区点按同作用：左 1/3 上一页、右 1/3 下一页、
-                                // 中间切上下栏；点中标注或链接走同一优先级，不翻页。
+                                // 鼠标单击：桌面不翻页（2026-11-04 用户定口），只保留
+                                // 「点中标注 / 链接 / 中部切栏」这些与翻页无关的动作；
+                                // 左右 1/3 因此什么都不做（allowFlip = false）。
                                 // 按下点已被上层消费（栏/遮罩）就不落到阅读面。
-                                if (!moved && !down.isConsumed) onTap(downX, downY, size.width.toFloat())
+                                if (!moved && !down.isConsumed) {
+                                    onTap(downX, downY, size.width.toFloat(), allowFlip = false)
+                                }
                                 change.consume()
                                 break
                             }

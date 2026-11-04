@@ -56,6 +56,8 @@ internal const val PAGE_SCROLL_EDGE_DP: Float = 24f
  */
 internal const val PAGE_WHEEL_DP_PER_UNIT: Float = 40f
 
+// 翻页那套滚动判据（只有横滑算数、一次连续滚动最多翻一页）见 ScrollFlip.kt。
+
 /**
  * 页面上下滚动抬手后的惯性（D-28 键盘视口）：
  * 按抬手那一刻的速度继续走，速度按 [PAGE_FLING_FRICTION_PER_S]（每秒的指数衰减率）逐帧衰减，

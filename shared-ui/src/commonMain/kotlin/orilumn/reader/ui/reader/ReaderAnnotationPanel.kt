@@ -67,7 +67,8 @@ import orilumn.reader.engine.skia.decorWaveGeometry
  *
  * 入参只收「读 / 删 / 跳」三个动作与章标题表，加载逻辑自己管（平台壳不写）；
  * 按书内章序分组、章内按区间起点升序（与 `annotationsForChapter` 同序）。
- * 行内容 = 两行原文摘录（可空回退「（无摘录）」）+ 章标题分组头 + 行尾删除；
+ * 行内容 = 两行原文摘录（可空回退「（无摘录）」）+ 行尾删除；章标题分组行照旧算出来
+ * （将来导出笔记时用它当分组标题），但**不在清单里显示**，清单是一条接一条的平铺列表。
  * 摘录按标注本来的颜色与线型直接画在字上（与正文同口径），不另加类别图标。
  *
  * 键盘沿用面板共享的 [PanelNav]（↑↓ + Enter）；页签切换先只做点按（D-23 §9）。
@@ -101,8 +102,11 @@ fun ReaderAnnotationPanel(
     }
 
     val visible = remember(loaded, filter) { filterAnnotations(loaded.orEmpty(), filter) }
+    // 章标题分组行照旧算出来（章序分组与章标题是将来导出笔记时的标题来源），但**不在清单里画**：
+    // 笔记按书内顺序连排，读者不该被一行行「第 N 章」打断（2026-11-04 用户定口）。
     val rows = remember(visible, chapterTitles) { buildAnnotationRows(visible, chapterTitles) }
-    val itemCount = remember(rows) { rows.count { it is AnnotationPanelRow.Item } }
+    val shown = remember(rows) { rows.filterIsInstance<AnnotationPanelRow.Item>() }
+    val itemCount = shown.size
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val nav = remember { PanelNav() }
@@ -111,7 +115,7 @@ fun ReaderAnnotationPanel(
     var positionedFilter by remember { mutableStateOf(AnnotationFilter.All) }
 
     fun displayIndexOfSeq(seq: Int): Int =
-        rows.indexOfFirst { it is AnnotationPanelRow.Item && it.seq == seq }
+        shown.indexOfFirst { it.seq == seq }
 
     fun clampActive() {
         val a = nav.activeIdx ?: return
@@ -126,21 +130,19 @@ fun ReaderAnnotationPanel(
         scope.ensureListVisible(listState, displayIndexOfSeq(it), dir)
     }
 
-    // 打开时滚到当前阅读章所在组（与目录「定位当前章」同口径）；切换筛选时重新定位一次，
+    // 打开时滚到当前阅读章的第一条笔记（与目录「定位当前章」同口径）；切换筛选时重新定位一次，
     // 之后删一条引起的列表变化不再把滚动位置拽回来。
     LaunchedEffect(loaded, filter) {
         if (loaded == null) return@LaunchedEffect
         if (positioned && positionedFilter == filter) return@LaunchedEffect
         positioned = true
         positionedFilter = filter
-        val header = rows.indexOfFirst { it is AnnotationPanelRow.Header && it.chapter == currentChapter }
-        if (header >= 0) {
-            try { listState.scrollToItem((header - 1).coerceAtLeast(0)) } catch (_: Exception) {}
-            val firstItem = rows.drop(header).firstOrNull { it is AnnotationPanelRow.Item }
-            if (firstItem is AnnotationPanelRow.Item) nav.activeIdx = firstItem.seq
+        val firstInChapter = shown.indexOfFirst { it.annotation.chapter == currentChapter }
+        if (firstInChapter >= 0) {
+            try { listState.scrollToItem((firstInChapter - 1).coerceAtLeast(0)) } catch (_: Exception) {}
+            nav.activeIdx = shown[firstInChapter].seq
         } else {
-            nav.activeIdx = rows.firstOrNull { it is AnnotationPanelRow.Item }
-                ?.let { (it as AnnotationPanelRow.Item).seq }
+            nav.activeIdx = shown.firstOrNull()?.seq
         }
         nav.releaseHold()
         bodyFr.requestFocus()
@@ -177,8 +179,7 @@ fun ReaderAnnotationPanel(
                 onDown = { moveActive(1) },
                 onEnter = {
                     val a = nav.activeIdx
-                    if (a != null) rows.firstOrNull { it is AnnotationPanelRow.Item && it.seq == a }
-                        ?.let { onJump((it as AnnotationPanelRow.Item).annotation) }
+                    if (a != null) shown.firstOrNull { it.seq == a }?.let { onJump(it.annotation) }
                 },
                 onEscape = onDismiss,
             )
@@ -214,24 +215,17 @@ fun ReaderAnnotationPanel(
                     state = listState,
                     modifier = Modifier.fillMaxSize().clearKbHoldOnMove { nav.releaseHold() },
                 ) {
-                    items(rows.size, key = { i ->
-                        when (val r = rows[i]) {
-                            is AnnotationPanelRow.Header -> "h${r.chapter}"
-                            is AnnotationPanelRow.Item -> "a${r.annotation.id}"
-                        }
-                    }) { i ->
-                        when (val r = rows[i]) {
-                            is AnnotationPanelRow.Header -> ChapterHeader(r.title, p)
-                            is AnnotationPanelRow.Item -> AnnotationListRow(
-                                annotation = r.annotation,
-                                active = nav.activeIdx == r.seq,
-                                palette = p,
-                                nav = nav,
-                                index = r.seq,
-                                onJump = { onJump(r.annotation) },
-                                onDelete = { delete(r.annotation) },
-                            )
-                        }
+                    items(shown.size, key = { "a${shown[it].annotation.id}" }) { i ->
+                        val r = shown[i]
+                        AnnotationListRow(
+                            annotation = r.annotation,
+                            active = nav.activeIdx == r.seq,
+                            palette = p,
+                            nav = nav,
+                            index = r.seq,
+                            onJump = { onJump(r.annotation) },
+                            onDelete = { delete(r.annotation) },
+                        )
                     }
                 }
             }
@@ -261,6 +255,10 @@ internal sealed interface AnnotationPanelRow {
 /**
  * 按书内章序把全书标注排成「分组头 + 行」的扁平表；[annotations] 已按章序、章内起点升序。
  * 章标题缺项回退「第 N 章」（章号 +1，与宿主 `unitTitle` 的回退同口径）。
+ *
+ * 分组头现在**不画在清单里**（2026-11-04 用户定口：笔记内容里不夹章标题），
+ * 但表格仍按章分组产出：分组的章号与标题是将来导出笔记时的标题来源，
+ * 清单只取其中的行（[AnnotationPanelRow.Item]），顺序与章节分组一致。
  */
 internal fun buildAnnotationRows(
     annotations: List<Annotation>,
@@ -355,17 +353,6 @@ fun chapterTitlesOf(toc: List<TocItem>): Map<Int, String> {
     }
     walk(toc)
     return out
-}
-
-@Composable
-private fun ChapterHeader(title: String, palette: Palette) {
-    Text(
-        text = title,
-        color = palette.muted2,
-        fontSize = 12.sp,
-        fontWeight = FontWeight.Medium,
-        modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 14.dp, bottom = 6.dp),
-    )
 }
 
 @Composable

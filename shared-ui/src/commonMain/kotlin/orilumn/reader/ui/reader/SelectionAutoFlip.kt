@@ -48,6 +48,15 @@ internal const val PAGE_SCROLL_RAMP_MS: Float = 200f
 internal const val PAGE_SCROLL_EDGE_DP: Float = 24f
 
 /**
+ * 桌面版：卡片开着时用滚轮 / 触控板双指滚页的灵敏度（dp / 每个滚动单位）。
+ *
+ * 桌面没有「手指压在页面上拖」这条通道（2026-11-04 用户定口：不用鼠标拖拽滚页），
+ * 页面的上下滚改由滚轮与触控板负责：鼠标滚轮一格约报 1 个单位 ⇒ 40dp；
+ * 触控板两指滑动每次只报零点几个单位，系统自带惯性事件，不需要我们再补动画。
+ */
+internal const val PAGE_WHEEL_DP_PER_UNIT: Float = 40f
+
+/**
  * 页面上下滚动抬手后的惯性（D-28 键盘视口）：
  * 按抬手那一刻的速度继续走，速度按 [PAGE_FLING_FRICTION_PER_S]（每秒的指数衰减率）逐帧衰减，
  * 撞到视口两端就停。读者把页面往上甩一把，它会自己滑到页底，而不是抬手指就钉在原地。

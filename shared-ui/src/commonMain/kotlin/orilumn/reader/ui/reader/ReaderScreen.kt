@@ -41,6 +41,7 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -1478,6 +1479,34 @@ fun ReaderScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(Color(profile.bgColor))
+            // 桌面：卡片开着时页面上下滚交给滚轮 / 触控板双指（2026-11-04 用户定口：
+            // 不用鼠标拖拽滚页，见下面手势分支）。滚动量按 [PAGE_WHEEL_DP_PER_UNIT] 折成位移，
+            // 指针压在卡片上时让给卡片自己，不替它滚页。
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        if (event.type != PointerEventType.Scroll) continue
+                        if (!currentNoteBarOpen) continue
+                        val change = event.changes.firstOrNull() ?: continue
+                        if (change.isConsumed || change.position.y >= sheetTopPxState) continue
+                        // 指针压在栏上：那是栏自己的滚动区（列表等），不替它滚页。
+                        val inBars = ReaderMath.downInBars(
+                            currentBarsVisible, change.position.y, size.height.toFloat(),
+                            currentTopBarH.toFloat(), currentBotBarH.toFloat(),
+                        )
+                        if (inBars) continue
+                        val dy = change.scrollDelta.y
+                        if (dy == 0f) continue
+                        // 滚轮接管：先把还没停的惯性停掉，再按读者滚的量走。
+                        pageFling.job?.cancel()
+                        val cur = userShiftPx ?: inputShiftPx
+                        userShiftPx = (cur + dy * PAGE_WHEEL_DP_PER_UNIT * density)
+                            .coerceIn(0f, maxShiftPxState)
+                        change.consume()
+                    }
+                }
+            }
             .pointerInput(touchSlop) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
@@ -1498,7 +1527,9 @@ fun ReaderScreen(
                     )
                     // 标注卡片开着（D-28）：点在卡片上归卡片（按钮/输入框自己消费），
                     // 手柄照旧可拖（否则选区改不了）；其余手势做两件事——
-                    // 上下滑 = 在视口里滚页（视口 = 卡片上沿之上那一条），点按（没动过）= 取消。
+                    // 触摸上下滑 = 在视口里滚页（视口 = 卡片上沿之上那一条），点按（没动过）= 取消。
+                    // 桌面鼠标拖拽不滚页（2026-11-04 用户定口）：上下滚交给滚轮 / 触控板双指，
+                    // 见上面的滚动分支；鼠标在这儿只认「点按 = 取消」，拖动什么也不做。
                     if (currentNoteBarOpen && !barsOwned) {
                         if (down.isConsumed || downY >= sheetTopPxState) return@awaitEachGesture
                         // 编辑已有标注时同样允许拖手柄改范围：卡片开着不代表选区锁死（2026-11-03 用户定口）。
@@ -1508,6 +1539,7 @@ fun ReaderScreen(
                             null
                         }
                         if (handle == null) {
+                            val fingerScroll = down.type != PointerType.Mouse
                             val shiftAtDown = inputShiftPx
                             var dragged = false
                             var upTime = 0L
@@ -1524,7 +1556,7 @@ fun ReaderScreen(
                                 ) {
                                     dragged = true
                                 }
-                                if (dragged) {
+                                if (dragged && fingerScroll) {
                                     // 手指往上 ⇒ 页面往上走；最多滚到页底贴住卡片上沿。
                                     userShiftPx = (shiftAtDown - (change.position.y - downY))
                                         .coerceIn(0f, maxShiftPxState)
@@ -1548,8 +1580,11 @@ fun ReaderScreen(
                             }
                             // 没拖过 = 点卡片外：按 D-28 取消（落笔只认操作栏的 `确定`，点外面不写任何东西，
                             // 免得「想收起卡片」被当成「那就按当前样式落一条」）。
-                            // 拖过 = 抬手后按当前速度继续滑、逐步减速（惯性）。
-                            if (!dragged) cancelNote() else startPageFling(velocity)
+                            // 触摸拖过 = 抬手后按当前速度继续滑、逐步减速（惯性）；鼠标拖动到此为止。
+                            when {
+                                !dragged -> cancelNote()
+                                fingerScroll -> startPageFling(velocity)
+                            }
                             return@awaitEachGesture
                         }
                         // 落在手柄上：交给下面的手柄拖动路径（卡片保持打开，页面跟着上顶）。

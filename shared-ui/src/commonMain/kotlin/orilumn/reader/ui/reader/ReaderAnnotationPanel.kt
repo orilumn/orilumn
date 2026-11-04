@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -30,6 +29,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusTarget
 import androidx.compose.ui.geometry.Offset
@@ -88,6 +88,8 @@ fun ReaderAnnotationPanel(
     var error by remember { mutableStateOf<String?>(null) }
     // 类型筛选（v2）：null = 全部；批注一格包含「本身就是批注」和「高亮/划线附带了批注文字」两种。
     var filter by remember { mutableStateOf(AnnotationFilter.All) }
+    // 左滑展开的行键：同时只展开一行（SwipeRevealRow 的手势物理与它共用一套口径）。
+    var openKey by remember { mutableStateOf<String?>(null) }
     val currentLoad by rememberUpdatedState(load)
 
     // 列表体随抽屉打开而组合，所以首次组合就是「打开」；只在点行进正文时卸载。
@@ -223,7 +225,12 @@ fun ReaderAnnotationPanel(
                             palette = p,
                             nav = nav,
                             index = r.seq,
-                            onJump = { onJump(r.annotation) },
+                            openKey = openKey,
+                            onOpenChange = { openKey = it },
+                            onJump = {
+                                openKey = null
+                                onJump(r.annotation)
+                            },
                             onDelete = { delete(r.annotation) },
                         )
                     }
@@ -362,44 +369,46 @@ private fun AnnotationListRow(
     palette: Palette,
     nav: PanelNav,
     index: Int,
+    /** 当前展开左滑按钮的行键（同时只展开一行，见 [SwipeRevealRow]）。 */
+    openKey: String?,
+    onOpenChange: (String?) -> Unit,
     onJump: () -> Unit,
     onDelete: () -> Unit,
 ) {
     val clickSrc = remember { MutableInteractionSource() }
-    Row(
+    SwipeRevealRow(
+        rowKey = "note:${annotation.id}",
+        openKey = openKey,
+        onOpenChange = onOpenChange,
         modifier = Modifier
-            .fillMaxWidth()
             .background(if (active) palette.rowActive else Color.Transparent)
-            .clickable(interactionSource = clickSrc, indication = null, onClick = onJump)
-            .panelHover(nav, index)
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.Top,
+            .panelHover(nav, index),
+        action = SwipeAction("删除", SwipeActionTone.Delete, onDelete),
     ) {
-        Column(modifier = Modifier.weight(1f)) {
-            QuoteText(annotation, palette)
-            val note = annotation.note?.takeIf { it.isNotBlank() }
-            if (note != null) {
-                // 批注正文：本身就是批注的记录、以及带批注的高亮 / 划线都显示（v2）。
-                Text(
-                    text = note,
-                    color = palette.muted2,
-                    fontSize = 12.sp,
-                    lineHeight = 17.sp,
-                    maxLines = 3,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(top = 3.dp),
-                )
-            }
-        }
-        Box(
-            contentAlignment = Alignment.Center,
+        Row(
             modifier = Modifier
-                .padding(start = 8.dp)
-                .size(30.dp)
-                .clip(RoundedCornerShape(6.dp))
-                .clickable(onClick = onDelete),
+                .fillMaxWidth()
+                .focusProperties { canFocus = false }
+                .clickable(interactionSource = clickSrc, indication = null, onClick = onJump)
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.Top,
         ) {
-            Text("✕", color = palette.muted2, fontSize = 14.sp)
+            Column(modifier = Modifier.weight(1f)) {
+                QuoteText(annotation, palette)
+                val note = annotation.note?.takeIf { it.isNotBlank() }
+                if (note != null) {
+                    // 批注正文：本身就是批注的记录、以及带批注的高亮 / 划线都显示（v2）。
+                    Text(
+                        text = note,
+                        color = palette.muted2,
+                        fontSize = 12.sp,
+                        lineHeight = 17.sp,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 3.dp),
+                    )
+                }
+            }
         }
     }
 }

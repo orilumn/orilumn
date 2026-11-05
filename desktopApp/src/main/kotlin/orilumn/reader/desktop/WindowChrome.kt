@@ -56,9 +56,11 @@ import java.awt.event.ComponentEvent
  * 桌面原生窗口装饰是一条常亮系统标题栏，三件事都做不到：阅读模式下隐藏、透明不画底色、
  * 跟阅读顶栏一起滑入滑出。故标题栏自绘；窗口底子按平台分流（见 [DesktopWindowChrome]）：
  *
- * - **Windows/Linux**：无边框窗口（`WindowDecoration.Undecorated`），直角 + 内容边缘一条
- *   极细描边，无投影（**不用** `Window.setShape` 裁圆角：XWayland 下会残留旧画面并频闪，见
- *   `Main.kt` 窗口底子处的注释）；
+ * - **Windows/Linux**：无边框窗口（`WindowDecoration.Undecorated`），底子两种——真机走
+ *   逐像素透明 + 圆角/投影（[WindowCornerRadius] + `Modifier.shadow`，官方 Transparent windows
+ *   示例的写法）；虚拟机与纯软件渲染环境走不透明直角 + 内容边缘一条极细描边
+ *   （判据见 [roundedWindowEnabled]）。
+ *   **不用** `Window.setShape` 裁圆角：XWayland 下会残留旧画面并频闪，见 `Main.kt` 窗口底子处的注释；
  * - **macOS**：系统窗口底子（[applyMacSystemWindow]：透明标题栏 + 全窗口内容），系统红绿灯
  *   浮在左上（本类让出 [MacTrafficLightReserve] 空白），圆角/阴影/resize 热区/全屏全由系统给。
  *
@@ -98,6 +100,22 @@ internal val TitleBarHeight: Dp = 32.dp
 
 /** 标题栏与阅读栏同一拍（对齐 `ReaderBars.BarsAnim = 240`，跨模块不能直接引用 internal）。 */
 internal const val ChromeAnimMs = 240
+
+/** 自绘窗口圆角半径（无边框窗口丢掉了系统圆角，靠内容自绘补回来）。 */
+internal val WindowCornerRadius: Dp = 10.dp
+
+/**
+ * 圆角窗口的投影留边（平台层·桌面壳）。
+ *
+ * 官方做法（Kotlin 文档《Top-level windows management》的 Transparent windows 示例）：
+ * `Window(transparent = true, undecorated = true)`，内容 `padding(5.dp).shadow(3.dp, RoundedCornerShape)`。
+ * 投影只能画在内容之外的透明像素上，故窗口四边各留 **5dp** 给投影——**不要加大**：
+ * 留边越大，窗口的实际矩形离看得见的边缘越远，贴到屏幕边也总差一圈，缩放热区还落在看不见的地方。
+ */
+internal val WindowShadowPadding: Dp = 5.dp
+
+/** 投影高度（官方示例的 3dp）：交给 `Modifier.shadow`，不自己画 Skia 模糊。 */
+internal val WindowShadowElevation: Dp = 3.dp
 
 /** 真 macOS：系统窗口 + 系统红绿灯（见 [applyMacSystemWindow]）；其余平台无边框 + 自绘按钮。 */
 internal val IS_MAC: Boolean =

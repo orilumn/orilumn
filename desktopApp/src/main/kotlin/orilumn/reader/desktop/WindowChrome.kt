@@ -104,6 +104,26 @@ internal val IS_MAC: Boolean =
     System.getProperty("os.name")?.contains("Mac", ignoreCase = true) == true
 
 /**
+ * 悬浮标题栏此刻是否出现（平台层·桌面壳）。
+ *
+ * - 书架：常亮；
+ * - 阅读：默认隐藏，鼠标压到窗口顶部或阅读栏切出时滑入；
+ * - **设置面板打开期间不因悬停弹条**：面板从右侧贴顶滑出，Win/Linux 的自绘窗口按钮
+ *   （右上角最小化/最大化/全屏/关闭）正压在面板标题行上。macOS 的按钮是系统红绿灯
+ *   （左上角），与面板不重叠，仍按原口径显隐。
+ */
+internal fun titleBarStripVisible(
+    reading: Boolean,
+    readingBarsVisible: Boolean,
+    topHover: Boolean,
+    settingsPanelOpen: Boolean,
+    isMac: Boolean = IS_MAC,
+): Boolean {
+    val windowButtonsYield = settingsPanelOpen && !isMac
+    return !reading || readingBarsVisible || (topHover && !windowButtonsYield)
+}
+
+/**
  * macOS 系统红绿灯预留区（平台层·桌面壳）：三键从窗口左缘约 20dp 起、各 12dp、键距 8dp，
  * 总宽约 72dp。全屏 Space 里系统自动隐藏红绿灯，这时不留空（标题栏照常铺开）。
  */

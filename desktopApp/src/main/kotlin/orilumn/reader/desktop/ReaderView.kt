@@ -80,6 +80,12 @@ fun ReaderView(
     statusBarInset: Dp = 0.dp,
     /** 顶/底栏显隐回抛（壳据此让系统标题栏与阅读栏同拍滑入/滑出）。 */
     onBarsVisibleChanged: (Boolean) -> Unit = {},
+    /**
+     * 设置面板显隐回抛（平台层·桌面壳）：面板从窗口右侧贴顶滑出，会与自绘窗口按钮
+     * （右上角最小化/最大化/全屏/关闭）抢同一块地方，壳据此在面板打开期间不弹出标题栏
+     * （见 `Main.kt` 的 `stripVisible`）。
+     */
+    onSettingsPanelOpenChanged: (Boolean) -> Unit = {},
 ) {
     var anchorOverride by remember(book) { mutableStateOf<Pair<Int, Int>?>(null) }
     var session by remember(book) { mutableStateOf(0) }
@@ -332,6 +338,9 @@ fun ReaderView(
                 committedViewport = vp
             }
         }
+        // 设置面板显隐回抛壳（平台层·桌面壳）：面板贴顶从右侧滑出，窗口按钮（右上角）会压在
+        // 面板标题行上，故壳在面板打开期间不弹标题栏（见 Main.kt 的 stripVisible）。
+        LaunchedEffect(settingsOpen) { onSettingsPanelOpenChanged(settingsOpen) }
         // 面板字库读 DB（R4 的枚举+中文名链已迁到 `DesktopFontScan` 的扫描任务，视图只收表）；
         // 键只跟书，视口 resize 重建宿主不重枚举。开书路径不触发扫描，改由面板可见性/启动检测驱动。
         LaunchedEffect(book) {

@@ -331,9 +331,11 @@ private fun DesktopRoot(
     // ShelfScreen 首帧即调 books() 撞上 requireDb()（DesktopShelfStore 未 load）。
     // 以 ready 门控首帧，未就绪只画加载占位。
     var ready by remember { mutableStateOf(false) }
-    // 自绘标题栏的两个瞬时状态（平台层·桌面壳）：阅读栏显隐回抛 / 指针是否压在窗口顶部。
+    // 自绘标题栏的三个瞬时状态（平台层·桌面壳）：阅读栏显隐回抛 / 指针是否压在窗口顶部 /
+    // 设置面板是否打开（面板贴顶从右侧滑出，Win/Linux 的窗口按钮会让位，见 stripVisible）。
     var readingBarsVisible by remember { mutableStateOf(false) }
     var topHover by remember { mutableStateOf(false) }
+    var settingsPanelOpen by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         store.load()
@@ -399,10 +401,11 @@ private fun DesktopRoot(
 
     // 开书即套本书 overlay（无私设即纯全局）；回书架回到全局。
     LaunchedEffect(openBook) {
-        // 换书/回书架即清标题栏的两个瞬时状态：阅读栏回抛与悬停都不会跨书残留
+        // 换书/回书架即清标题栏的瞬时状态：阅读栏回抛、悬停与设置面板都不会跨书残留
         //（否则回书架后 readingBarsVisible 还是旧书的 true，阅读模式下条不隐藏）。
         readingBarsVisible = false
         topHover = false
+        settingsPanelOpen = false
         val b = openBook
         settings = withContext(Dispatchers.IO) { settingsPersist.effectiveFor(b?.id) }
         readerSettingsBook = b?.id
@@ -413,7 +416,15 @@ private fun DesktopRoot(
     // 阅读模式：默认隐藏；鼠标压到窗口顶部 → 滑入且**不画底色**（内容透出来，Apple Reader 观感），
     //           移开 → 滑出；阅读顶栏切出/收起时同拍滑入/滑出（与 ReaderBars 同长 ChromeAnimMs）。
     val reading = openBook != null
-    val stripVisible = !reading || readingBarsVisible || topHover
+    // 设置面板从**右侧贴顶**滑出（见 ReaderSettingsPanel），与 Win/Linux 自绘窗口按钮（右上角）
+    // 抢同一块地方：面板打开期间不再因悬停顶部滑出标题栏，否则面板一开、鼠标还在顶部，
+    // 最小化/最大化/全屏/关闭就压在面板标题行上（判据见 [titleBarStripVisible]）。
+    val stripVisible = titleBarStripVisible(
+        reading = reading,
+        readingBarsVisible = readingBarsVisible,
+        topHover = topHover,
+        settingsPanelOpen = settingsPanelOpen,
+    )
     val hoverZonePx = with(LocalDensity.current) { (TitleBarHeight + 8.dp).toPx() }
     // 阅读模式把标题栏高度当顶栏 inset 传给阅读面：窗口标题栏区（Win/Linux 自绘按钮区、
     // macOS 系统红绿灯区）与阅读顶栏拼成一条整栏，而不是两块互相盖住。同一时长动画，避免错位。
@@ -501,6 +512,7 @@ private fun DesktopRoot(
                     },
                     statusBarInset = readerTopInset,
                     onBarsVisibleChanged = { readingBarsVisible = it },
+                    onSettingsPanelOpenChanged = { settingsPanelOpen = it },
                 )
                 // 悬浮标题栏：与阅读栏同拍滑入/滑出；不画底色，内容从下面透出来。
                 AnimatedVisibility(

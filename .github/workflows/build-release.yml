@@ -110,8 +110,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      # 运行时用 JetBrains Runtime（JBR）：Linux 原生的窗口拖动要靠它的 WindowMove，
-      # 由窗口管理器搬窗口（能拖出屏幕、贴边吸附）。详见 docs/桌面版切换JBR运行时方案.md。
+      # 运行时用 JetBrains Runtime（JBR）：JetBrains 自家的 JDK 发行版（IDEA 同款），
+      # 带一套上游没有的渲染/字体补丁。详见 docs/桌面版切换JBR运行时方案.md。
       - name: Set up JDK 21 (JetBrains Runtime)
         uses: actions/setup-java@v6
         with:
@@ -126,8 +126,8 @@ jobs:
       - name: Build DMG (unsigned)
         run: ./gradlew :desktopApp:packageDmg --no-daemon
 
-      # 断言包内运行时是 JBR：换运行时是为了 Linux 原生窗口拖动（JBR WindowMove），
-      # 哪天悄悄退回 Temurin，拖动会静默降级成自绘，不会报错，所以必须在这里失败。
+      # 断言包内运行时是 JBR：哪天 CI 悄悄退回 Temurin 不会报错、只是换成另一套 JDK，
+      # 所以必须在这里失败，免得「以为发的是 JBR」变成一厢情愿。
       - name: Verify bundled runtime is JetBrains Runtime
         run: |
           JAVA_BIN=$(find desktopApp/build/compose/binaries/main/app -type f \( -name java -o -name java.exe \) -path "*runtime*" | head -1)

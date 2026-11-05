@@ -30,9 +30,6 @@ sqldelight = "2.4.0"
 ktor = "3.6.0"
 # JNA：桌面 macOS CoreText 桥（F5 中文名方案A，本地化族名）；仅 desktopApp 引用
 jna = "5.19.1"
-# JBR API（JetBrains Runtime）：桌面 Linux 的原生窗口拖动（WindowMove → _NET_WM_MOVERESIZE）。
-# 版本与 compose 传递进来的那份保持一致（1.9.0），避免同一 API 出现两套类。
-jbr-api = "1.9.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -109,9 +106,6 @@ ktor-server-core = { group = "io.ktor", name = "ktor-server-core", version.ref =
 ktor-server-cio = { group = "io.ktor", name = "ktor-server-cio", version.ref = "ktor" }
 # JNA：桌面 macOS CoreText 桥（F5 中文名方案A）；只 desktopApp JVM 引用，KMP 模块不引
 jna = { group = "net.java.dev.jna", name = "jna", version.ref = "jna" }
-# JBR API：Linux 原生窗口拖动（JBR.getWindowMove()）。非 JBR 运行时上 isAvailable()=false，
-# 调用方自动回落到自绘拖动；compose 已把它带进 runtimeClasspath，这里显式声明是为了编译期可见。
-jbr-api = { group = "org.jetbrains.runtime", name = "jbr-api", version.ref = "jbr-api" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

@@ -1,4 +1,4 @@
-# 桌面版切换 JBR 运行时 + 原生窗口拖动（方案 B）
+# 桌面版切换 JBR 运行时（原生窗口拖动已撤，方案 B）
 
 > 依据：`AGENTS.md`（层级边界 / 发版流程 / CHANGELOG 规则）、`docs/平台一致性整改方案.md`
 > （平台壳边界）、`docs/架构分层与共享边界.md`。
@@ -8,13 +8,21 @@
 >
 > 本文是**续接依据**：中断后先看 §0 进度表与 §8 接手命令，再继续。
 
+> **2026-11-06 变更**：桌面壳改回**系统默认窗口装饰**（标题栏、圆角、阴影、缩放热区、
+> 缩放光标、贴边吸附、全屏全归窗口管理器 / AppKit），自绘无边框壳整体退役。
+> 随之退掉的还有 JBR `WindowMove`（它只为自绘壳的拖动服务）：`SystemWindowMove`、
+> `jbr-api` 依赖与本文件 §P2 的交接代码均已删除。**JBR 运行时本身保留**（CI 仍打包 JBR，
+> 包内运行时断言照旧），但理由只剩「JetBrains 的渲染/字体补丁」，与窗口拖动无关。
+> 下文 §P2 / §11 中涉及 `WindowMove`、自绘标题栏、透明圆角投影的内容仅作历史记录，
+> 不再是当前实现。
+
 ## 0. 进度
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | P0 | 采集基线（字体列表、窗口行为、启动/渲染日志、包体积） | ⬜ 未开始（三端字体回归仍缺） |
 | P1 | 只换运行时（CI 与本地都改 JBR），业务代码一行不动 | ✅ CI 三个桌面 job 已改完并加断言；本机用 JBR 21 跑通 |
-| P2 | Linux 拖动交给窗口管理器（JBR `WindowMove`），保留自绘回落 | ✅ 代码落地，真鼠标连续拖动实测通过；出屏一项待人工确认 |
+| P2 | ~~Linux 拖动交给窗口管理器（JBR `WindowMove`）~~ | ❌ 已撤（2026-11-06 改回系统默认窗口装饰，`WindowMove` 不再需要） |
 | P3 | 收尾（KDoc / 文档 / CHANGELOG / 发版） | 🔄 KDoc 与文档已更新，发版待做 |
 | P4 | 可选：JBR 17 ↔ 21 的版本回退或升级 | ⬜ |
 
@@ -232,7 +240,7 @@ JAVA_HOME="$JAVA_HOME" ./gradlew :desktopApp:run
 
 # 3) 确认跑的是不是 JBR
 "$JAVA_HOME/bin/java" -version        # 应含 "JetBrains"
-# 应用启动日志里应有 JBR available=... windowMove=...
+# 应用启动日志里的 Orilumn.Desktop 行会打 jvm vendor=... version=...（应含 JetBrains）
 
 # 4) 构建便携目录并确认包内运行时
 JAVA_HOME="$JAVA_HOME" ./gradlew :desktopApp:createDistributable
@@ -244,10 +252,10 @@ desktopApp/build/compose/binaries/main/app/Orilumn/lib/runtime/bin/java -version
 
 ## 9. 断点记录（中断时填）
 
-- 当前阶段：P2 代码已落地并实测；P3 收尾（发版 / 三端字体回归）未做
+- 当前阶段：P3 收尾（发版 / 三端字体回归）未做；P2 的 `WindowMove` 已随自绘窗口壳一起退役
 - 已完成：`build-release.yml` 三个桌面 job 换 `jetbrains`/21 + 包内运行时断言；
-  `SystemWindowMove` + `jbr-api` 依赖 + `draggableWindow` 交接；本机 JBR 21 实跑，
-  真鼠标连续拖动 4 次全部交接成功（见 §11.3）
+  桌面壳改回系统默认窗口装饰，`SystemWindowMove` / `jbr-api` / 自绘标题栏与透明圆角投影全部删除
+  （JBR 运行时保留，理由改为渲染/字体补丁）
 - 未完成 / 下一步：拖到屏幕外的人工确认；Windows / macOS 冒烟；三端字体回归
 - 已知异常：见 §11 的实测结论
 

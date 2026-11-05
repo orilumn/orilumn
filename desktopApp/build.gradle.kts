@@ -53,11 +53,6 @@ dependencies {
     // 非 mac 平台 MacFamilyNames 内部有 isMac 门控（非 mac 恒空表），JNA 库本身跨平台。
     implementation(libs.jna)
 
-    // JBR API：Linux 原生窗口拖动（WindowMove 把拖动交给窗口管理器，见 SystemWindowMove）。
-    // 只在 JetBrains Runtime 上有实现，非 JBR 上 isAvailable()=false 并自动回落到自绘拖动，
-    // 故三端都可以带上这个 jar（Windows/macOS 上同样返回 false）。
-    implementation(libs.jbr.api)
-
     // Skiko JVM 原生库（与 engine-skia jvmMain 同口径）：按当前 OS 选择，
     // 唯一映射在 gradle/skiko-jvm-runtime.gradle.kts。
     // 嵌套块里必须显式 project.extra（裸 extra 解析到脚本自身容器）。

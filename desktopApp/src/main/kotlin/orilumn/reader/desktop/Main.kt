@@ -149,6 +149,9 @@ fun main(args: Array<String>) {
         !it.startsWith("-") && runCatching { File(it).isFile }.getOrDefault(false)
     }
     application {
+        // 运行时口径先落一行日志：读者反馈「窗口拖不出屏幕」时，一眼看出发行包内置的是不是
+        // JetBrains Runtime（只有它有 WindowMove，见 SystemWindowMove）。
+        SystemWindowMove.logRuntime()
         // 三端同一 JVM 壳：窗口尺寸+位置经 prefs 持久化，下次启动原地恢复
         // （Win/macOS/Linux 同口径；显示器变更致越界时回居中，不开到屏外）。
         val store = remember { DesktopShelfStore(DesktopPaths.root) }
@@ -298,7 +301,9 @@ fun main(args: Array<String>) {
                 // macOS 是系统窗口，圆角由系统给。圆角/投影只在浮动态给，全屏/最大化取直角贴边。
                 val rounded = roundedWindow && !chrome.fullscreen &&
                     windowState.placement == WindowPlacement.Floating
-                val bordered = !roundedWindow && !chrome.fullscreen &&
+                // 描边只给 Win/Linux 的直角底子：macOS 是系统窗口，圆角和边都由系统画，
+                // 这里再来一条 1dp 描边就是重影。
+                val bordered = !IS_MAC && !roundedWindow && !chrome.fullscreen &&
                     windowState.placement == WindowPlacement.Floating
                 if (!roundedWindow) {
                     // 新露出来的那条区域交给 X11 立刻填成页面底色（而不是默认的黑）：窗口被拉大

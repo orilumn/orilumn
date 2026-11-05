@@ -92,9 +92,14 @@ import java.awt.event.ComponentEvent
  * 按下事件（点标题栏不该落到阅读面的三区点按上翻页），**不再自己搬窗口**——再写一次就是
  * 两个写入者抢同一扇窗，表现为窗口整体高频来回跳（见 [draggableWindow] 的 KDoc）。
  *
- * **Win/Linux**：无边框窗口丢掉了系统标题栏热区，Compose 1.11 又只给「缩放热区」
- * （`UndecoratedWindowResizer`）、**没有**窗口拖动 API（`windowDraggableArea` 已不在 1.11 的
- * `ui-desktop` 里），故用 AWT 屏幕指针差值搬窗口（见 [draggableWindow]）。
+ * **Win/Linux**：无边框窗口丢掉了系统标题栏热区。Compose 1.11 只给「缩放热区」
+ * （`UndecoratedWindowResizer`）；官方的 `WindowDraggableArea` 还在（在
+ * `androidx.compose.foundation.window`，不在 `ui-desktop`），但它的标准实现同样是用
+ * `window.location` 自己搬窗口，只有跑在 JetBrains Runtime 上才把拖动交给窗口管理器。
+ * 它也不管双击缩放、不管「点顶栏不翻页」，故拖动仍由自己这套手势驱动，
+ * 只是**搬运窗口这一步优先交给 WM**（[SystemWindowMove]，JBR 的 `WindowMove`）：
+ * 自己改坐标会被 Mutter 钳在屏内（拖不出屏幕、贴边也不吸附），交给 WM 才有原生手感；
+ * 运行时/平台不支持时原样回落到自绘（见 [draggableWindow]）。
  */
 internal val TitleBarHeight: Dp = 32.dp
 
@@ -349,6 +354,12 @@ internal class DesktopWindowChrome {
     private var windowState: WindowState? = null
     private var placementBeforeFullscreen: WindowPlacement = WindowPlacement.Floating
 
+    /**
+     * 进全屏前的窗口底色（半透明），退出全屏后 [restoreTranslucency] 用它还原。
+     * 见 [restoreTranslucency] 的 KDoc：JDK 只把底色改实、不负责改回来。
+     */
+    private var backgroundBeforeFullscreen: java.awt.Color? = null
+
     private var watched: Window? = null
 
     /** 阅读界面里系统红绿灯当前是否该隐藏（Apple Books 式：平时隐藏、悬停顶部才浮出）。 */
@@ -463,7 +474,11 @@ internal class DesktopWindowChrome {
         }
         val w = window ?: return
         val dev = runCatching { w.graphicsConfiguration.device }.getOrNull() ?: return
-        fullscreen = dev.fullScreenWindow === w
+        val nowFullscreen = dev.fullScreenWindow === w
+        // 全屏 → 窗口态的转换在这里补还原半透明底子：外部（WM / 系统快捷键）退全屏时
+        // [toggleFullscreen] 根本不会被调到，只有 componentResized 回读能发现。
+        if (fullscreen && !nowFullscreen) restoreTranslucency(w)
+        fullscreen = nowFullscreen
     }
 
     /**
@@ -489,6 +504,9 @@ internal class DesktopWindowChrome {
         if (!dev.isFullScreenSupported) return
         if (dev.fullScreenWindow === w) {
             dev.fullScreenWindow = null
+            // JDK 进全屏时会把窗口底色改成不透明、且退出后不还原（见 [restoreTranslucency]），
+            // 不补这一步，投影留边露出的是窗口底色 —— 读者看到的就是「阴影变成一圈黑边」。
+            restoreTranslucency(w)
             // AWT 退出全屏会把窗口降成不活跃（本机实测 active: true → false），补一次置前，
             // 免得读者从全屏出来还得先点一下窗口，快捷键/滚轮才有反应。
             runCatching { w.toFront() }
@@ -497,6 +515,7 @@ internal class DesktopWindowChrome {
             fullscreen = false
         } else {
             placementBeforeFullscreen = windowState?.placement ?: WindowPlacement.Floating
+            backgroundBeforeFullscreen = w.background
             // 全屏里没有「最大化」可言：先退回浮动，免得 Compose 与 AWT 争同一份窗口几何。
             if (windowState?.placement == WindowPlacement.Maximized) {
                 windowState?.placement = WindowPlacement.Floating
@@ -509,6 +528,52 @@ internal class DesktopWindowChrome {
     /** 全屏中先退全屏（双击标题栏 / 缩放按钮的统一入口）。 */
     fun exitFullscreen() {
         if (fullscreen) toggleFullscreen()
+    }
+
+    /**
+     * 退出全屏后把窗口底色还原成半透明（投影/圆角的前提）。
+     *
+     * [GraphicsDevice.setFullScreenWindow] 的文档写得很明确：
+     * 「When entering full-screen mode, all the translucency effects are reset for the window.
+     * Its shape is set to null, the opacity value is set to 1.0f, and the background color
+     * alpha is set to 255 (completely opaque). **These values are not restored when returning
+     * to windowed mode.**」
+     *
+     * 所以进全屏那一刻 JDK 就把底色从 alpha=0 改成 alpha=255；AWT 随之换回不透明
+     * graphics configuration（X11 上窗口被重建成 depth 24），而 Compose 内容在投影留边里
+     * 什么都不画 —— 露出来的就是窗口底色（黑），读者看到「阴影变成一圈黑边」。
+     *
+     * 还原只能走 [Window.setBackground]：alpha < 255 时它会把窗口换回
+     * translucency-capable 的 graphics configuration（官方口径，见该方法 javadoc
+     * 「Enabling the per-pixel translucency mode may change the graphics configuration of this
+     * window due to the native platform requirements」）。窗口不在全屏态时才允许调，
+     * 否则 JDK 抛 IllegalComponentStateException。
+     */
+    private fun restoreTranslucency(w: Window) {
+        val bg = backgroundBeforeFullscreen ?: return
+        if (w.background == bg) return
+        runCatching { w.background = bg }
+            .onSuccess {
+                // 换回透明底 = AWT 换 graphics configuration = **换一扇本地窗口**（X11 上 depth
+                // 24 → 32）。新窗口的尺寸是回来了，可 JFrame 里的内容面板还停在全屏尺寸
+                // （实测：窗口 873×716，JRootPane 仍是 1280×800），Compose 于是照整屏版面出图、
+                // 被窗口裁在右下，投影留边也只重画了左上那一块 —— 读者看到的就是「除了左上角，
+                // 其他三个角都成了直角」，拖一下窗口（带来一次真正的尺寸事件）才恢复。
+                // 故这里显式让窗口重新布局 + 整窗重画一次，把尺寸事件补齐。
+                w.invalidate()
+                w.validate()
+                w.repaint()
+                orilumn.reader.io.Logger.i(
+                    "Orilumn.Window",
+                    "fullscreen exit: restored translucent background alpha=${bg.alpha}",
+                )
+            }
+            .onFailure {
+                orilumn.reader.io.Logger.w(
+                    "Orilumn.Window",
+                    "fullscreen exit: restore background FAILED ${it.message}",
+                )
+            }
     }
 }
 
@@ -629,11 +694,21 @@ private fun GlyphButton(
  * 停掉自绘写入后同一手势全程干净跟手）。故 macOS 只吃这里的按下与拖动事件
  * （否则点标题栏会落到阅读面的三区点按上翻页），搬窗口与双击缩放都交给系统。
  *
- * ## Win/Linux：自绘拖动
+ * ## Win/Linux：拖动交给 WM，回落到自绘
  *
- * 无边框窗口没有系统热区，`UndecoratedWindowResizer` 只给缩放，故自己搬：
- * 位移口径取**屏幕指针差**而不是 Compose 的 `dragAmount`——窗口一被搬动，本地坐标系就跟着动，
- * 用 `dragAmount` 累积会自我抵消（拖不动或抖动）；屏幕坐标差值不受影响。
+ * 无边框窗口没有系统热区，`UndecoratedWindowResizer` 只给缩放，故拖动的手势判定自己做；
+ * **搬窗口这一步优先交给 WM**（[SystemWindowMove]）：自己发 configure request 会被 Mutter
+ * 钳在屏内（实测请求 -200 落 0、5000 落 2160），只有 WM 自己搬才允许移出屏幕、贴边吸附。
+ *
+ * 交接时机：指针移动超过起手抖动门限（约 4px）的那一帧——此时按键已按下、指针仍在窗口内，
+ * 正是 `_NET_WM_MOVERESIZE` 的前置条件。**交接成功后一次都不再写 `window.location`**：
+ * 两个写入者各有各的抓点基准，差几像素就会每帧互相纠正一次，表现与 macOS 那条老坑一模一样。
+ * 交接失败（非 JBR 运行时、非 X11）就沿用旧的自绘拖动——
+ * 位移口径取**屏幕指针差**而不是 Compose 的 `dragAmount`（窗口一被搬动，本地坐标系跟着动，
+ * 用 `dragAmount` 累积会自我抵消，拖不动或抖动）。
+ *
+ * 两种路径下事件都照常 `consume()` 到松手：本区域的按下不能漏到阅读面的三区点按上（点顶栏不翻页）。
+ *
  * 双击（两次按下间隔 ≤ [DoubleClickMs] 且都没拖动）走 [onDoubleClick]。
  *
  * 起手即 `consume()`：本区域的按下不再落到阅读面的三区点按（点顶栏不翻页）。
@@ -662,6 +737,8 @@ private fun Modifier.draggableWindow(
         val startPointer = runCatching { MouseInfo.getPointerInfo().location }.getOrNull()
         val startWindow = window.location
         var moved = false
+        // 本次拖动是否已交给 WM（交出去之后禁止再写 window.location，见上方 KDoc）。
+        var delegated = false
         while (true) {
             val event = awaitPointerEvent()
             val change = event.changes.firstOrNull { it.id == down.id } ?: break
@@ -672,8 +749,13 @@ private fun Modifier.draggableWindow(
             val dx = pointer.x - startPointer.x
             val dy = pointer.y - startPointer.y
             // 起手抖动门限（约 4px）：没动够就不算拖动，纯点一下不搬窗口。
-            if (!moved && dx * dx + dy * dy > 16) moved = true
-            if (moved) window.location = Point(startWindow.x + dx, startWindow.y + dy)
+            if (!moved && dx * dx + dy * dy > 16) {
+                moved = true
+                // 越过门限的这一帧交接给 WM：按键已按下、指针还在窗口内，正好满足
+                // _NET_WM_MOVERESIZE 的前置条件。失败就继续自绘。
+                delegated = SystemWindowMove.start(window)
+            }
+            if (moved && !delegated) window.location = Point(startWindow.x + dx, startWindow.y + dy)
         }
         if (moved) {
             // 拖过就不算双击（下一次按下重新计数），否则「拖一下再快点一下」会误触发缩放。

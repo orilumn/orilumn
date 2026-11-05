@@ -110,11 +110,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up JDK 17
+      # 运行时用 JetBrains Runtime（JBR）：Linux 原生的窗口拖动要靠它的 WindowMove，
+      # 由窗口管理器搬窗口（能拖出屏幕、贴边吸附）。详见 docs/桌面版切换JBR运行时方案.md。
+      - name: Set up JDK 21 (JetBrains Runtime)
         uses: actions/setup-java@v6
         with:
-          distribution: temurin
-          java-version: '17'
+          distribution: jetbrains
+          java-version: '21'
+          java-package: jdk
           cache: gradle
 
       - name: Grant gradlew execute permission
@@ -122,6 +125,21 @@ jobs:
 
       - name: Build DMG (unsigned)
         run: ./gradlew :desktopApp:packageDmg --no-daemon
+
+      # 断言包内运行时是 JBR：换运行时是为了 Linux 原生窗口拖动（JBR WindowMove），
+      # 哪天悄悄退回 Temurin，拖动会静默降级成自绘，不会报错，所以必须在这里失败。
+      - name: Verify bundled runtime is JetBrains Runtime
+        run: |
+          JAVA_BIN=$(find desktopApp/build/compose/binaries/main/app -type f \( -name java -o -name java.exe \) -path "*runtime*" | head -1)
+          if [ -z "$JAVA_BIN" ]; then
+            echo "::error::找不到包内运行时 java"
+            find desktopApp/build/compose/binaries/main/app -maxdepth 4 | head -40
+            exit 1
+          fi
+          echo "bundled java: $JAVA_BIN"
+          OUT=$("$JAVA_BIN" -XshowSettings:properties -version 2>&1)
+          echo "$OUT" | grep -E "java\.vendor" || true
+          echo "$OUT" | grep -q "JetBrains" || { echo "::error::包内运行时不是 JetBrains Runtime"; exit 1; }
 
       # DMG 文件名里的 jpackage 版本（macOS 强制 MAJOR>0，如 2.0）与发版版本（0.2.0）不一致：
       # 按 app versionName + 架构重命名后再上传（如 Orilumn-0.2.0-macos-arm64.dmg）。
@@ -155,11 +173,12 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up JDK 17
+      - name: Set up JDK 21 (JetBrains Runtime)
         uses: actions/setup-java@v6
         with:
-          distribution: temurin
-          java-version: '17'
+          distribution: jetbrains
+          java-version: '21'
+          java-package: jdk
           cache: gradle
 
       - name: Grant gradlew execute permission
@@ -172,6 +191,20 @@ jobs:
 
       - name: Build DEB and RPM
         run: ./gradlew :desktopApp:packageDeb :desktopApp:packageRpm --no-daemon
+
+      # 断言包内运行时是 JBR（理由同 macOS job）。
+      - name: Verify bundled runtime is JetBrains Runtime
+        run: |
+          JAVA_BIN=$(find desktopApp/build/compose/binaries/main/app -type f \( -name java -o -name java.exe \) -path "*runtime*" | head -1)
+          if [ -z "$JAVA_BIN" ]; then
+            echo "::error::找不到包内运行时 java"
+            find desktopApp/build/compose/binaries/main/app -maxdepth 4 | head -40
+            exit 1
+          fi
+          echo "bundled java: $JAVA_BIN"
+          OUT=$("$JAVA_BIN" -XshowSettings:properties -version 2>&1)
+          echo "$OUT" | grep -E "java\.vendor" || true
+          echo "$OUT" | grep -q "JetBrains" || { echo "::error::包内运行时不是 JetBrains Runtime"; exit 1; }
 
       # 两个安装包的文件名里 jpackage 版本与发版版本（versionName）不同，
       # 按 app versionName 重命名后再上传（与 DMG 同口径）。
@@ -257,11 +290,12 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up JDK 17
+      - name: Set up JDK 21 (JetBrains Runtime)
         uses: actions/setup-java@v6
         with:
-          distribution: temurin
-          java-version: '17'
+          distribution: jetbrains
+          java-version: '21'
+          java-package: jdk
           cache: gradle
 
       - name: Grant gradlew execute permission
@@ -270,6 +304,20 @@ jobs:
       # jpackage 打 msi 依赖 WiX Toolset；windows-latest 已预装（WiX 3.14），无需 choco。
       - name: Build MSI
         run: ./gradlew :desktopApp:packageMsi --no-daemon
+
+      # 断言包内运行时是 JBR（理由同 macOS job）。
+      - name: Verify bundled runtime is JetBrains Runtime
+        run: |
+          JAVA_BIN=$(find desktopApp/build/compose/binaries/main/app -type f \( -name java -o -name java.exe \) -path "*runtime*" | head -1)
+          if [ -z "$JAVA_BIN" ]; then
+            echo "::error::找不到包内运行时 java"
+            find desktopApp/build/compose/binaries/main/app -maxdepth 4 | head -40
+            exit 1
+          fi
+          echo "bundled java: $JAVA_BIN"
+          OUT=$("$JAVA_BIN" -XshowSettings:properties -version 2>&1)
+          echo "$OUT" | grep -E "java\.vendor" || true
+          echo "$OUT" | grep -q "JetBrains" || { echo "::error::包内运行时不是 JetBrains Runtime"; exit 1; }
 
       - name: Rename MSI with version
         run: |

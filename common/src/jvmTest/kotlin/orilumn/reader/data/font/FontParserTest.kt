@@ -86,6 +86,20 @@ class FontParserTest {
     }
 
     @Test
+    fun `cmapCoverage reads a standalone cmap table`() {
+        // 系统字体没有整字体字节可解析，只能从 typeface 单独取 cmap 表（skiko getTableData）：
+        // 单独一段表喂进同一段计数，结果必须与整字体解析一致。
+        val cmap = cmapTable(fmt4(arrayOf(intArrayOf(0x0020, 0x007A), intArrayOf(0x4E00, 0x9FFF))), 3, 1)
+        val cov = parser.cmapCoverage(cmap)
+        assertEquals(20992, cov?.cjk) // U+4E00..U+9FFF
+        assertEquals(91, cov?.latin)  // U+0020..U+007A
+        assertEquals(FontClassifier.LANG_GENERIC, cov?.let { FontClassifier.classify(it.cjk, it.latin) })
+        // 无 format 4/12 子表 / 字节不足 ⇒ 判不出（调用方按「未知」保留，不剔除）。
+        assertNull(parser.cmapCoverage(byteArrayOf(0, 1, 0, 0)))
+        assertNull(parser.cmapCoverage(byteArrayOf(1, 2, 3)))
+    }
+
+    @Test
     fun `mixed latin+CJK windows-unicode name keeps byte order`() {
         // 真机回归：TypeLand 康熙字典體（platform 3 / encoding 1 = UTF-16BE）。
         // 旧启发式里 ASCII 占比 0.69 差一格过 0.7 线，误判成 LE 乱码。

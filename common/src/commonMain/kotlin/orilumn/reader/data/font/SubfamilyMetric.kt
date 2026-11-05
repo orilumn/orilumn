@@ -50,4 +50,53 @@ object SubfamilyMetric {
         val s = (subfamily ?: "").trim().lowercase()
         return s.contains("italic") || s.contains("oblique") || s.contains("kursiv") || s.contains("斜")
     }
+
+    /**
+     * 宽度词（CSS `font-stretch` 的字面词），长词在前：`SemiCondensed`/`ExtraCondensed` 都含 `Condensed`。
+     * 名字里的写法不统一（`ExtraCondensed` / `Extra Condensed`），故按「去空格后包含」判定。
+     */
+    private val WidthWords = listOf(
+        "ultracondensed", "extracondensed", "semicondensed", "ultraexpanded", "extraexpanded",
+        "semiexpanded", "condensed", "expanded",
+    )
+
+    /** 宽度词前缀（用于生成允许空格的匹配式：`semicondensed` → `semi\s*condensed`）。 */
+    private val WidthPrefixes = listOf("ultra", "extra", "semi")
+
+    /**
+     * 名字里的宽度词（规范写法，如 `Condensed` / `SemiExpanded`）；不带宽度词返回 null。
+     *
+     * 宽度是**与字重正交的第二根轴**，而本仓只把族名与数字字重交给字体匹配
+     * （`SkParagraphFactory.runFontStyle` 恒发 `FontWidth.NORMAL`）——宽度变体只能靠
+     * 「族名就是那一族」（如 `Noto Sans Gurmukhi Condensed`）才选得到。所以名字里带宽度词时，
+     * 它是这一族还是「别族混进来的档」，得先认出来（见 `weightChoices`）。
+     */
+    fun width(name: String?): String? {
+        val squashed = (name ?: "").filterNot { it.isWhitespace() }.lowercase()
+        if (squashed.isEmpty()) return null
+        val hit = WidthWords.firstOrNull { squashed.contains(it) } ?: return null
+        return displayWidth(hit)
+    }
+
+    /** 去掉名字里的宽度词（只剩字重/风格），未命中返回原名。 */
+    fun withoutWidth(name: String?): String {
+        var s = (name ?: "").trim()
+        if (s.isEmpty()) return s
+        for (key in WidthWords) {
+            s = widthPattern(key).replace(s, " ")
+        }
+        return s.split(' ').filter { it.isNotEmpty() }.joinToString(" ")
+    }
+
+    private fun displayWidth(key: String): String {
+        val prefix = WidthPrefixes.firstOrNull { key.startsWith(it) } ?: ""
+        return prefix.replaceFirstChar { it.uppercase() } +
+            key.removePrefix(prefix).replaceFirstChar { it.uppercase() }
+    }
+
+    private fun widthPattern(key: String): Regex {
+        val prefix = WidthPrefixes.firstOrNull { key.startsWith(it) && key.length > it.length } ?: ""
+        val body = if (prefix.isEmpty()) key else prefix + "\\s*" + key.removePrefix(prefix)
+        return Regex("(?<![A-Za-z])$body(?![A-Za-z])", RegexOption.IGNORE_CASE)
+    }
 }

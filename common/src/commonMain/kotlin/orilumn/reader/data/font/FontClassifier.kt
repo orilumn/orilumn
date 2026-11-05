@@ -31,10 +31,18 @@ object FontClassifier {
      * Classify by a parse result.
      * @param result result of [FontParser.parse]; [valid]==false is classified directly as [LANG_INVALID].
      */
-    fun classify(result: FontParser.Result): String {
-        if (!result.valid) return LANG_INVALID
-        val cjk = result.cjkCoverage >= CJK_THRESHOLD
-        val latin = result.latinCoverage >= LATIN_THRESHOLD
+    fun classify(result: FontParser.Result): String =
+        if (!result.valid) LANG_INVALID else classify(result.cjkCoverage, result.latinCoverage)
+
+    /**
+     * Classify by directly measured coverage — the **only** judgment for both imported and system
+     * fonts. System fonts have no file bytes to parse, but their `cmap` table can be read off the
+     * typeface ([FontParser.cmapCoverage]); feeding the same numbers through here keeps the two paths
+     * on one ruler (no platform-specific language lists).
+     */
+    fun classify(cjkCoverage: Int, latinCoverage: Int): String {
+        val cjk = cjkCoverage >= CJK_THRESHOLD
+        val latin = latinCoverage >= LATIN_THRESHOLD
         return when {
             cjk && latin -> LANG_GENERIC
             cjk -> LANG_CJK

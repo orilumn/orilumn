@@ -239,6 +239,43 @@ class FontPanelRowsTest {
     }
 
     @Test
+    fun weightChoicesDropsWidthVariantsTheFamilyCannotReach() {
+        // 宽度是正交的第二根轴，选字只发族名 + 数字字重（宽度恒 normal）：
+        // 族名不带宽度词时，落在里面的 Condensed 档**选不到**（点了只会得到同字重的正常宽度面），
+        // 所以不许列出来（Noto Sans Arabic 这类上游把 4 种宽度塞进一族的样式表）。
+        val members = listOf(
+            imported("Noto Sans Arabic", subfamily = "Regular"),
+            imported("Noto Sans Arabic", subfamily = "Bold"),
+            imported("Noto Sans Arabic", subfamily = "Condensed"),
+            imported("Noto Sans Arabic", subfamily = "Condensed Bold"),
+        )
+        assertEquals(
+            listOf(400 to "Regular", 700 to "Bold"),
+            members.weightChoices(),
+        )
+    }
+
+    @Test
+    fun weightChoicesStripsWidthInsideItsOwnWidthFamily() {
+        // 族名本身就是那一族（… Condensed）时，字重名里的宽度词是冗余的：剥掉后按字重排。
+        val members = listOf(
+            imported("F Condensed", subfamily = "Condensed"),
+            imported("F Condensed", subfamily = "Condensed Light"),
+            imported("F Condensed", subfamily = "Condensed Bold"),
+            // 长宽度词先剥：SemiCondensed 不许只剥掉后半截留下 "Semi"。
+            imported("F SemiCondensed", subfamily = "SemiCondensed Bold"),
+        )
+        assertEquals(
+            listOf(300 to "Light", 400 to "默认", 700 to "Bold"),
+            members.filter { it.family == "F Condensed" }.weightChoices(),
+        )
+        assertEquals(
+            listOf(700 to "Bold"),
+            members.filter { it.family == "F SemiCondensed" }.weightChoices(),
+        )
+    }
+
+    @Test
     fun rowSubtitleDropsGenericKeepsItalicAndCanonical() {
         // generic 语种不展示；同数值 upright 只留最常用一名；斜体组保留在字体列表。
         val members = listOf(

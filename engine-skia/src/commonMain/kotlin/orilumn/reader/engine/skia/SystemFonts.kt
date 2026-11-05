@@ -128,8 +128,15 @@ private fun styleNameOf(s: FontStyle): String = buildString {
  *
  * v2 → v3：Linux 桌面改用 fontconfig 枚举（别名族折回基族、字重名只取本族字形），
  * 与 skiko `matchFamily` 口径落库的旧行不兼容（旧行每族挂着全库两百多个假字重名）⇒ 主动作废重扫。
+ *
+ * v3 → v4：系统字体引入共享语种判据（[orilumn.reader.engine.skia.systemFamilyLang]：读 typeface 的
+ * `cmap` 覆盖率，与导入同一 [orilumn.reader.data.font.FontClassifier]）。只保留中文/英文/通用族，
+ * 旧库里的按脚本 Noto 族（数百行）要靠一次重扫的收尾清理才会消失 ⇒ 主动作废重扫。
+ *
+ * v4 → v5：Linux 桌面把「宽度变体」（Condensed/SemiCondensed/ExtraCondensed）按族归位——只要
+ * fontconfig 里真有那一族就单列一行，同一族的字重名里不再重复宽度词。落库的族名与字重名都变了 ⇒ 重扫。
  */
-const val FONT_SCAN_CACHE_VERSION = 3L
+const val FONT_SCAN_CACHE_VERSION = 5L
 
 /** 计算系统字体族名集合的哈希（用于判定系统字体是否变化） */
 fun systemFontFamilyHash(): Long = systemFontFamilyHashOf(systemFontFamilies())

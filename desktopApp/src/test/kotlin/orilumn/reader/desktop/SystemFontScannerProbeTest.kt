@@ -11,6 +11,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import orilumn.reader.data.db.LibraryDb
+import orilumn.reader.data.font.FontClassifier
 import orilumn.reader.data.font.FontLibrary
 import orilumn.reader.data.font.SystemFontFace
 import orilumn.reader.db.OrilumnDb
@@ -40,6 +41,7 @@ import java.util.concurrent.atomic.AtomicInteger
  *  5. 收尾清孤儿：本次枚举里不存在的族残留行删除；
  *  6. 开书/换书带的 `onPanelVisibility(false)` **不得**重启在途扫描（同档去重）；
  *  7. 空族集（平台枚举失败）不写指纹、也不空转。
+ *  8. 共享语种判据：符号族（只覆盖按脚本语言，无中英文）不进库、残行随收尾清掉，指纹仍按枚举全集算。
  */
 class SystemFontScannerProbeTest {
 
@@ -66,6 +68,10 @@ class SystemFontScannerProbeTest {
         /** 族名枚举次数：续跑看门狗空转（无成果的反复补跑）会把它推高。 */
         val familiesCalls = java.util.concurrent.atomic.AtomicInteger(0)
 
+        /** 每族语种（共享判据 [orilumn.reader.data.font.FontClassifier] 的替身）：默认全按拉丁（可作候选）。 */
+        @Volatile
+        var langOf: (String) -> String = { FontClassifier.LANG_LATIN }
+
         fun asSource(): SystemFontSource = SystemFontSource(
             families = {
                 familiesCalls.incrementAndGet()
@@ -75,6 +81,7 @@ class SystemFontScannerProbeTest {
                 facesCalls.add(f)
                 listOf(SystemFontFace(f, "Regular"), SystemFontFace(f, "Bold"))
             },
+            langOf = { f -> langOf(f) },
             familyHash = { families.joinToString("|").hashCode().toLong() },
             familyHashOf = { list -> list.joinToString("|").hashCode().toLong() },
             environmentHash = { environmentHash },
@@ -378,6 +385,82 @@ class SystemFontScannerProbeTest {
 
             awaitTrue("queued-drop must be healed by the idle resume") { lib.list().size == 4 }
             assertEquals(listOf("FamA", "FamB"), fake.facesCalls.toList())
+        } finally {
+            scope.cancel()
+            dir.deleteRecursively()
+        }
+    }
+
+    /**
+     * **共享语种判据**（[FontClassifier]，与导入同一把尺子）：确知既无中文也无英文覆盖的族
+     * （Noto 按脚本分发的族是典型）不进库；上一轮扫进去的残行由收尾清理带走。
+     * 指纹仍按**枚举全集**算 ⇒ 过滤不会让下次启动白扫一遍。
+     */
+    @Test
+    fun `symbol-only families are filtered out and their stale rows pruned`() = runBlocking {
+        val (lib, dir) = freshLib()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            // 预置上一轮（还没有语种判据时）扫进来的 symbol 族行。
+            lib.syncSystemFamily(listOf(SystemFontFace("Noto Sans Tamil", "Regular")))
+            assertEquals(1, lib.list().size)
+
+            val all = listOf("FamA", "Noto Sans Tamil", "FamB")
+            val fake = FakeSource(all)
+            fake.langOf = { f -> if (f == "Noto Sans Tamil") FontClassifier.LANG_SYMBOL else FontClassifier.LANG_LATIN }
+            SystemFontScanner(lib, TaskScheduler(scope, Dispatchers.Default, 1), source = fake.asSource())
+                .detectOnStart()
+
+            val allHash = all.joinToString("|").hashCode().toLong()
+            awaitTrue("scan must land usable families and the full-set fingerprint") {
+                lib.fontScanState() == (version to allHash)
+            }
+            assertEquals("symbol family must not be enumerated", listOf("FamA", "FamB"), fake.facesCalls.toList())
+            assertTrue("stale symbol rows must be pruned", lib.list().none { it.familyName == "Noto Sans Tamil" })
+            assertEquals("FamA/B × 2 styles", 4, lib.list().size)
+
+            // 指纹按枚举全集算：换一台扫描器（同样的全集）不得因过滤而重扫。
+            val fake2 = FakeSource(all).also { it.langOf = fake.langOf }
+            SystemFontScanner(lib, TaskScheduler(scope, Dispatchers.Default, 1), source = fake2.asSource())
+                .detectOnStart()
+            delay(300)
+            assertTrue("filtered scan must still store a stable fingerprint", fake2.facesCalls.isEmpty())
+        } finally {
+            scope.cancel()
+            dir.deleteRecursively()
+        }
+    }
+
+    /** 判不出来（[FontClassifier.LANG_INVALID]）按未知保留；全部判成符号（判据整体失效）则退回全量。 */
+    @Test
+    fun `unknown language keeps the family and an all-symbol result falls back to all`() = runBlocking {
+        val (lib, dir) = freshLib()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val fake = FakeSource(listOf("FamA", "FamB", "FamC"))
+            fake.langOf = { f ->
+                when (f) {
+                    "FamA" -> FontClassifier.LANG_SYMBOL
+                    "FamB" -> FontClassifier.LANG_INVALID // 平台给不出 cmap：未知不剔除
+                    else -> FontClassifier.LANG_GENERIC
+                }
+            }
+            SystemFontScanner(lib, TaskScheduler(scope, Dispatchers.Default, 1), source = fake.asSource())
+                .detectOnStart()
+            awaitTrue("unknown-language family must be kept") { lib.list().size == 4 }
+            assertEquals(listOf("FamB", "FamC"), fake.facesCalls.toList())
+            assertTrue("unknown must not be dropped", lib.list().any { it.familyName == "FamB" })
+
+            // 判据整体失效（全部判成符号）⇒ 宁可多列也不清空字体列表。
+            val (lib2, dir2) = freshLib()
+            try {
+                val allSymbol = FakeSource(listOf("FamX", "FamY")).also { it.langOf = { FontClassifier.LANG_SYMBOL } }
+                SystemFontScanner(lib2, TaskScheduler(scope, Dispatchers.Default, 1), source = allSymbol.asSource())
+                    .detectOnStart()
+                awaitTrue("all-symbol result must fall back to the full set") { lib2.list().size == 4 }
+            } finally {
+                dir2.deleteRecursively()
+            }
         } finally {
             scope.cancel()
             dir.deleteRecursively()

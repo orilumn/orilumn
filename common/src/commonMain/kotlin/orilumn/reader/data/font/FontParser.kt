@@ -86,19 +86,50 @@ class FontParser {
         val cmapRec = findTable(bytes, base, numTables, "cmap")
         val nameRec = findTable(bytes, base, numTables, "name")
         if (cmapRec == null) return Result.INVALID // without cmap, even glyph coverage cannot be decided
+        val coverage = countCoverage(bytes, cmapRec.offset) ?: return Result.INVALID
 
         val familyName = nameRec?.let { readPriorityName(bytes, it, listOf(ID_TYPOGRAPHIC_FAMILY, ID_FAMILY)) }
         val subfamily = nameRec?.let { readPriorityName(bytes, it, listOf(ID_TYPOGRAPHIC_SUBFAMILY, ID_SUBFAMILY)) }
+        return Result(
+            familyName = familyName,
+            subfamily = subfamily,
+            cjkCoverage = coverage.cjk,
+            latinCoverage = coverage.latin,
+            valid = true,
+        )
+    }
+
+    /**
+     * 单独一段 `cmap` 表（**不是**整个字体文件）的覆盖率 —— 系统字体没有字节可读时，
+     * 平台只能给出 typeface；`cmap` 表能单独取出（skiko `Typeface.getTableData("cmap")`），
+     * 用它走与导入**同一段**计数代码，中英文/符号的判定口径才不会两端漂移。
+     *
+     * @return 无 format 4/12 子表可解析时 null（与 [parse] 的"无 cmap 即 invalid"同义）。
+     */
+    fun cmapCoverage(cmapTable: ByteArray): Coverage? = runCatching {
+        if (cmapTable.size < 4) null else countCoverage(cmapTable, 0)
+    }.getOrNull()
+
+    /** cmap 覆盖率：CJK（U+4E00–9FFF）与拉丁（U+0000–02FF）内被编码的码位数。 */
+    data class Coverage(val cjk: Int, val latin: Int)
+
+    /**
+     * cmap 表计数（[cmapBase] 为 cmap 表在 [bytes] 内的起点；整字体文件传表偏移，
+     * 单表传 [cmapCoverage] 的 0）。
+     */
+    private fun countCoverage(bytes: ByteArray, cmapBase: Int): Coverage? {
+        if (cmapBase < 0 || cmapBase + 4 > bytes.size) return null
         val cjk = CjkCollector("cjk", cjkLo, cjkHi)
         val latin = CjkCollector("latin", latinLo, latinHi)
         var anySubtable = false
         // Iterate cmap subtables, accumulate parsable format4/12 coverage (duplicate code points not deduped; interval addition is an approximation)
-        val cmapNumTables = u16(bytes, cmapRec.offset + 2)
+        val cmapNumTables = u16(bytes, cmapBase + 2)
         for (i in 0 until cmapNumTables) {
-            val recOff = cmapRec.offset + 4 + i * 8
+            val recOff = cmapBase + 4 + i * 8
+            if (recOff + 8 > bytes.size) continue
             val subOff = i32(bytes, recOff + 4)
             if (subOff < 0) continue
-            val abs = cmapRec.offset + subOff
+            val abs = cmapBase + subOff
             if (abs + 2 > bytes.size) continue
             val format = u16(bytes, abs)
             when (format) {
@@ -107,14 +138,7 @@ class FontParser {
                 else -> Unit // other formats do not affect classification
             }
         }
-        if (!anySubtable) return Result.INVALID
-        return Result(
-            familyName = familyName,
-            subfamily = subfamily,
-            cjkCoverage = cjk.total,
-            latinCoverage = latin.total,
-            valid = true,
-        )
+        return if (anySubtable) Coverage(cjk.total, latin.total) else null
     }
 
     private fun countFormat4(bytes: ByteArray, off: Int, cjk: CjkCollector, latin: CjkCollector) {

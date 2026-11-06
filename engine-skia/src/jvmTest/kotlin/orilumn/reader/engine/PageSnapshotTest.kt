@@ -75,6 +75,7 @@ class PageSnapshotTest {
         slice: orilumn.reader.engine.paging.PageSlice,
         pageIndex: Int,
         paramHash: Long = 4242L,
+        fontSig: String = "17:482123|29:12040#书体:91234",
     ): PageSnapshot = requireNotNull(
         buildPageSnapshot(
             layout = layout,
@@ -87,6 +88,7 @@ class PageSnapshotTest {
             contentWidth = contentW,
             contentHeight = contentH,
             cssHash = 0x5EEDL,
+            fontSig = fontSig,
         ),
     ) { "真实排版的一页必须能抓成快照" }
 
@@ -169,6 +171,7 @@ class PageSnapshotTest {
             cssHash: Long = 0x5EEDL,
             layoutVersion: Int = PaginationCacheCodec.LAYOUT_VERSION,
             appVersion: Int = 7,
+            fontSig: String = "17:482123|29:12040#书体:91234",
         ) = snap.matches(
             layoutVersion = layoutVersion,
             appVersion = appVersion,
@@ -179,6 +182,7 @@ class PageSnapshotTest {
             contentWidth = contentWidth,
             contentHeight = contentHeight,
             cssHash = cssHash,
+            fontSig = fontSig,
         )
 
         assertTrue("同键必须命中", ok())
@@ -189,6 +193,11 @@ class PageSnapshotTest {
         assertTrue("样式变了必须 miss", !ok(cssHash = 0x5EEDL + 1))
         assertTrue("引擎版本变了必须 miss", !ok(layoutVersion = PaginationCacheCodec.LAYOUT_VERSION + 1))
         assertTrue("构建号变了必须 miss", !ok(appVersion = 8))
+        // 字库环境：同一族名但文件被删/换（签名不同）⇒ 旧行几何不作数。
+        assertTrue("字体文件变了必须 miss", !ok(fontSig = "17:482123#书体:91234"))
+        assertTrue("书内字体没了必须 miss", !ok(fontSig = "17:482123|29:12040#"))
+        // 宿主没提供签名（未接线/测试）⇒ 不做这项校验，绝不因缺签名而宁可作废。
+        assertTrue("无签名不做该维校验", ok(fontSig = ""))
     }
 
     @Test

@@ -461,6 +461,58 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
     private fun chapterCssHash(unit: ChapterUnit): Long? =
         unit.cssBundle?.let { ChapterStructureCodec.cssHashOf(it.cssTexts) }
 
+    // ─────────────────────────────────────────────────────────────────
+    // 字体需求清单（章号 → 该章作者 CSS 声明的族/字重/斜体）
+    // ─────────────────────────────────────────────────────────────────
+    //
+    // 整形**之前**要先知道本章要用哪些字体（命中的导入面先进池，否则开屏后追装必见跳变）。
+    // 清单只由作者 CSS 决定，落盘后开章直接查表，省掉每章一次重复解析；清单一律由
+    // `ChapterFontDemandEntry.cssHash` 逐章校验，不符即当没存过（现算并覆盖）。
+
+    /** 本书记忆中的清单（开书时载入，解析出来的新条目就地补齐并防抖落盘）。 */
+    private val fontDemandByChapter = HashMap<Int, ChapterFontDemandEntry>()
+
+    /** 清单落盘防抖：开一本书会逐章补齐，攒一小段再写一次。 */
+    private var fontDemandWriteJob: kotlinx.coroutines.Job? = null
+
+    private fun fontDemandStore(): ChapterFontDemandStore? =
+        cacheRoot?.let { ChapterFontDemandStore(okio.FileSystem.SYSTEM, it) }
+
+    /**
+     * 本章字体需求：先查落盘清单（命中零解析），未命中才解析作者 CSS 并排队补写。
+     *
+     * @param unit 章单元（`cssBundle` 已绑定；为 null 即无作者样式，需求为空）。
+     */
+    private fun fontDemandFor(unit: ChapterUnit, bc: BoxChapterLayouter): orilumn.reader.engine.css.FontDemand {
+        val bundle = unit.cssBundle ?: return orilumn.reader.engine.css.FontDemand.EMPTY
+        val cssHash = ChapterStructureCodec.cssHashOf(bundle.cssTexts)
+        val cached = fontDemandByChapter[unit.chapterIndex]
+        if (cached != null && cached.cssHash == cssHash) {
+            Logger.d(logTag, "FONT-DEMAND hit ch=${unit.chapterIndex} families=${cached.families.size}")
+            return cached.toDemand()
+        }
+        val t0 = platformNowMs()
+        val demand = bc.fontDemandFor(bundle)
+        val cost = platformNowMs() - t0
+        fontDemandByChapter[unit.chapterIndex] = ChapterFontDemandEntry.of(cssHash, demand)
+        Logger.d(logTag, "FONT-DEMAND miss ch=${unit.chapterIndex} t=${cost}ms families=${demand.families.size}")
+        scheduleFontDemandWrite()
+        return demand
+    }
+
+    private fun scheduleFontDemandWrite() {
+        val store = fontDemandStore() ?: return
+        if (bookId < 0) return
+        // 在**调用线程**上先拷一份：后台协程不再碰这张表（塑形线程仍在往里补条目，
+        // 后台去读就是并发改 HashMap —— 拷出来的这份才是要写盘的快照）。
+        val snapshot = HashMap(fontDemandByChapter)
+        fontDemandWriteJob?.cancel()
+        fontDemandWriteJob = bgScope.launch {
+            delay(FONT_DEMAND_WRITE_DEBOUNCE_MS)
+            store.write(bookId, diskCacheVersion, snapshot)
+        }
+    }
+
     /** 落盘防抖：读者连翻几页只写最后一页（写盘是后台活，但不该为每一格都写一次）。 */
     private var pageSnapshotJob: kotlinx.coroutines.Job? = null
 
@@ -491,6 +543,9 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         clearFlipDir("open-book")
         this.bookId = bookId
         val t0 = platformNowMs()
+        // 字体需求清单：一本书读一次（几 KB），开章时按章查表，省掉重复解析作者 CSS。
+        fontDemandByChapter.clear()
+        fontDemandStore()?.read(bookId, diskCacheVersion)?.let { fontDemandByChapter.putAll(it) }
         // 先试落盘骨架：书脊 + 目录只随书文件变化，命中就不必再读 container.xml / OPF / nav。
         // 判据（版本 / 构建号 / 资源身份）任一不符即 miss，重新解析并覆盖——宁可多解析一次，
         // 不可用旧骨架冒充新书。identity 为 null（非文件型 reader）时两侧都不缓存。
@@ -802,7 +857,18 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         if (bookId < 0) return
         runCatching { cacheStore()?.cleanBookAll(bookId.toString()) }
             .onFailure { Logger.w(logTag, "cleanAllDiskTables FAIL ${it.message}") }
+        // 页面快照与分页表是同一份版式的两种落盘物：字体集合一变（度量变），表清了快照也必须清，
+        // 否则下次开书会命中"按旧字形算出来的行几何"（参数键里只有族名，认不出这种变化）。
+        runCatching { pageSnapshotStore()?.clear(bookId) }
+            .onFailure { Logger.w(logTag, "cleanAllDiskTables snapshot FAIL ${it.message}") }
     }
+
+    /**
+     * 宿主字库池当前的环境签名（[orilumn.reader.engine.skia.FontPoolSync] 的 `sig`）。
+     * 由宿主每次同步池后回填；进 [PageSnapshot] 的键，字体文件被删/换后旧快照即不认。
+     * null = 宿主没提供（测试/未接线），此时快照不做这项校验。
+     */
+    var fontPoolSignature: String? = null
 
     // ---- Layout ----
 
@@ -948,6 +1014,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                 contentWidth = contentWidth,
                 contentHeight = contentHeight,
                 cssHash = cssHash,
+                fontSig = fontPoolSignature ?: "",
             ) ||
             // 同一页首字：分页表是正典，快照必须锚在同一页上（换表/换页序即不认）。
             table.pages.getOrNull(pageIndex)?.charStart != snap.charStart
@@ -955,6 +1022,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
             Logger.d(logTag, "PAGE-SNAP miss ch=${unit.chapterIndex} page=$pageIndex " +
                 "(have ch=${snap.chapterIndex} page=${snap.pageIndex} params=${snap.paramHash == paramHash} " +
                 "view=${snap.contentWidth}x${snap.contentHeight} css=${snap.cssHash == cssHash} " +
+                "fonts=${snap.fontSig == (fontPoolSignature ?: "")} " +
                 "lv=${snap.layoutVersion == PaginationCacheCodec.LAYOUT_VERSION})")
             return false
         }
@@ -1028,6 +1096,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
             contentWidth = contentWidth,
             contentHeight = contentHeight,
             cssHash = cssHash,
+            fontSig = fontPoolSignature ?: "",
         )
     }
 
@@ -1110,7 +1179,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         // 首绘即对，开屏后不再跳变。
         if (unit.markup != null) {
             val bc = layouter as? BoxChapterLayouter
-            if (bc != null && onDemandFonts(bc.fontDemandFor(unit.cssBundle))) {
+            if (bc != null && onDemandFonts(fontDemandFor(unit, bc))) {
                 unit.invalidateLayout()
             }
             // P2-b: 书内字体先行入池（整形前；池变即旧版式作废，同用户字库语义）。
@@ -1424,6 +1493,12 @@ private val B2_DISPATCH_QUIET_MS = 1_200L
  * 还没写下去"。0 也可用（每次落位都写），但翻页连击时会做几十次几十 KB 的无用写。
  */
 private val PAGE_SNAPSHOT_DEBOUNCE_MS = 700L
+
+/**
+ * 字体需求清单的落盘防抖（ms）。开一本书会逐章补齐条目，攒 1.2s 再写一次；
+ * 清单是纯缓存，进程被杀丢几条只是下次多解析一次，不影响正确性。
+ */
+private val FONT_DEMAND_WRITE_DEBOUNCE_MS = 1200L
 
 /**
  * Header-lift threshold. When a large chapter's anchor block lies within the first
@@ -3459,7 +3534,7 @@ private fun finishCanonicalBackground(
         activeChapter = chapter
         // 整形前先备字体（同 prepareRelayout；新字体预览依赖池跟进）。
         (layouter as? BoxChapterLayouter)?.let { bc ->
-            onDemandFonts(bc.fontDemandFor(unit.cssBundle))
+            onDemandFonts(fontDemandFor(unit, bc))
             onBookFonts(bookFontsFor(chapter))
         }
         val contentWidth = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
@@ -3526,7 +3601,7 @@ private fun finishCanonicalBackground(
         bindChapterFor(unit)
         // 整形前先备字体（同 ensureChapterLayout；本函数产物必重建，无需作废）。
         (layouter as? BoxChapterLayouter)?.let { bc ->
-            onDemandFonts(bc.fontDemandFor(unit.cssBundle))
+            onDemandFonts(fontDemandFor(unit, bc))
             onBookFonts(bookFontsFor(chapter))
         }
         for ((i, u) in chapters.withIndex()) if (i != chapter) u.invalidateLayout()

@@ -24,10 +24,11 @@ import orilumn.reader.io.Logger
  *
  * ## 为什么可以这么存
  *
- * 一本书关闭后，它的分页结果只会被三件事改变：排版参数（字号/行距/边距/字体/主题…）、
- * 版心尺寸、引擎版本。三者全在键里（[paramHash] + [contentWidth]/[contentHeight] +
- * [layoutVersion]/[appVersion]）；书的内容本身不会变（bookId 换书即换 id）。任一不符即视为
- * miss（[matches]），退回正常排版路径——**绝不拿旧快照去画新参数**。
+ * 一本书关闭后，它的分页结果只会被四件事改变：排版参数（字号/行距/边距/字体/主题…）、
+ * 版心尺寸、引擎版本、**字库环境**（装着的字体文件本身变了）。四者全在键里
+ * （[paramHash] + [contentWidth]/[contentHeight] + [layoutVersion]/[appVersion] + [fontSig]）；
+ * 书的内容本身不会变（bookId 换书即换 id）。任一不符即视为 miss（[matches]），
+ * 退回正常排版路径——**绝不拿旧快照去画新参数**。
  *
  * ## 为什么是"绘制模型"而不是"位图"
  *
@@ -51,6 +52,17 @@ data class PageSnapshot(
     val contentHeight: Int = 0,
     /** 本章作者 CSS 的哈希（书没换、样式没换才可能命中）。 */
     val cssHash: Long = 0L,
+    /**
+     * 产生这一页时**字库池的环境签名**（[orilumn.reader.engine.skia.FontPoolSync] 的 `sig`：
+     * 本章需求命中的每个面的 `id:文件长度` + 书内字体 `族:字节数`）。
+     *
+     * **为什么必须进键**：行几何（每个字画在哪、够不够宽换行）是**具体字形度量**的产物。
+     * 读者删掉一个导入字体、或读另一本书时本书内字体条目被逐出池，族名不变但实际取到的面
+     * 变了——版式参数键（[paramHash]）里只有族名，认不出这种变化。凭旧快照画新字库
+     * 就是"按旧字形算宽度、拿新字形去画"：溢出、错位、断行对不上。空串 = 宿主没提供
+     * 签名（测试/未接线的宿主），此时不做这项校验。
+     */
+    val fontSig: String = "",
 
     // ---- 页切片（`PageSlice` 的持久化形状；与分页表同源）----
     val charStart: Int = 0,
@@ -99,6 +111,7 @@ data class PageSnapshot(
         contentWidth: Int,
         contentHeight: Int,
         cssHash: Long,
+        fontSig: String = "",
     ): Boolean =
         schema == SCHEMA &&
             this.layoutVersion == layoutVersion &&
@@ -110,13 +123,15 @@ data class PageSnapshot(
             this.contentWidth == contentWidth &&
             this.contentHeight == contentHeight &&
             this.cssHash == cssHash &&
+            // 任一侧没提供签名（未接线/测试）就不做这项校验，绝不因缺签名而放过已知变化。
+            (fontSig.isEmpty() || this.fontSig == fontSig) &&
             firstLine >= 0 &&
             lastLineExclusive > firstLine &&
             lineTop.size >= lastLineExclusive
 
     companion object {
         /** 字节布局版本：字段形状变化时递增（与 [PaginationCacheCodec.LAYOUT_VERSION] 各管一头）。 */
-        const val SCHEMA = 1
+        const val SCHEMA = 2 // 2: 键里加了字库环境签名（fontSig）
     }
 }
 
@@ -142,6 +157,7 @@ fun buildPageSnapshot(
     contentWidth: Int,
     contentHeight: Int,
     cssHash: Long,
+    fontSig: String = "",
 ): PageSnapshot? {
     if (slice.firstLine < 0 || slice.lastLineExclusive <= slice.firstLine) return null
     val window = layout.skiaLineWindow() ?: return null
@@ -187,6 +203,7 @@ fun buildPageSnapshot(
         contentWidth = contentWidth,
         contentHeight = contentHeight,
         cssHash = cssHash,
+        fontSig = fontSig,
         charStart = slice.charStart,
         charEnd = slice.charEnd,
         blockStart = slice.blockStart,

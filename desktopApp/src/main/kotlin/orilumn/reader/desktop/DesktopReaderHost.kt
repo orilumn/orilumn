@@ -486,6 +486,8 @@ class DesktopReaderHost(
                 logTag = "Orilumn.Desktop",
             )
             lastPoolFaceSig = sig
+            // 池环境签名回填引擎：页面快照的键要比它（字体文件被删/换后旧快照不认）。
+            controller.fontPoolSignature = sig
             changed
         }
 

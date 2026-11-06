@@ -293,6 +293,8 @@ class ReaderActivity : ComponentActivity() {
                     sharedScheduler = orilumn.reader.engine.AppTaskScheduler.scheduler,
                 )
                 c.cacheRoot = this@ReaderActivity.cacheDir.absolutePath.toPath()
+                // 开书前那次池同步发生在控制器创建之前，签名在这里补上（页面快照键的一部分）。
+                c.fontPoolSignature = lastPoolFaceSig
                 // 磁盘分页表构建号：发版即 versionCode 递增 → 旧构建的表统一失效（见 PaginationCacheCodec）。
                 c.diskCacheVersion = orilumn.reader.BuildConfig.VERSION_CODE
                 c.setViewport(w, h)
@@ -1015,6 +1017,8 @@ class ReaderActivity : ComponentActivity() {
             logTag = TAG,
         )
         lastPoolFaceSig = sig
+        // 池环境签名回填引擎：页面快照的键要比它（字体文件被删/换后旧快照不认）。
+        engine?.fontPoolSignature = sig
         changed
     }
 

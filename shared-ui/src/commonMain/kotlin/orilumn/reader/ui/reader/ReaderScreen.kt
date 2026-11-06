@@ -20,6 +20,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -283,8 +284,10 @@ fun ReaderScreen(
     val pendingScrollFlip = remember { PendingScrollFlip() }
     // 滚轮那一串的断流计时器（见 ScrollFlip.kt 的 WheelBurstTimer）。
     val wheelBurstTimer = remember { WheelBurstTimer() }
-    // 卡片开着时选中的颜色（null = 还没选，按默认色）：点色槽只记住，落笔还要等完成/点卡片外。
-    var noteColorArgb by remember { mutableStateOf<Int?>(null) }
+    // 卡片开着时**按类别分开**记住选过的颜色：点色槽只记住，落笔还要等完成 / 点卡片外。
+    // 高亮与划线是两套互不相通的色槽（半透明底色 vs 不透明墨色），所以颜色必须跟类别一起记；
+    // 只存一个不分类别的颜色，切到另一类就会把上一类刚点的颜色带进落笔（实测的串色就是这个）。
+    val notePickedColors = remember { mutableStateMapOf<AnnotationKind, Int>() }
     // 旧的 ClipboardManager 仍是 CMP 唯一共享可用的同步写入口；新 LocalClipboard 只支持 suspend。
     @Suppress("DEPRECATION")
     val clipboard = LocalClipboardManager.current
@@ -1159,7 +1162,7 @@ fun ReaderScreen(
         if (editingAnnotation != null) {
             focusManager.clearFocus()
             noteText = ""
-            noteColorArgb = null
+            notePickedColors.clear()
             selectionMenuVisible = false
             if (selection.hasSelection) selection.clear()
             closeAnnotationEdit()
@@ -1309,11 +1312,13 @@ fun ReaderScreen(
         // 落笔即收卡：先让输入框失焦，键盘与卡片才能同一段时间里一起退（D-30）。
         focusManager.clearFocus()
         val text = noteText.trim()
-        val picked = noteColorArgb
         val kind = noteKind
+        // 只认**本类别**刚点的那一格：切类别后，上一类的颜色绝不能当这一类的墨色 / 底色落笔。
+        val pickedByKind = notePickedColors.toMap()
+        val picked = pickedByKind[kind]
         val style = noteLineStyle
         noteText = ""
-        noteColorArgb = null
+        notePickedColors.clear()
         val editing = editingAnnotation
         if (editing != null) {
             closeAnnotationEdit()
@@ -1364,7 +1369,7 @@ fun ReaderScreen(
         if (!selection.hasSelection) return
         createSelectionAnnotation(
             kind = kind,
-            color = picked ?: annotationDefaultColor(light, kind),
+            color = annotationCommitColor(light, kind, pickedByKind),
             lineStyle = style,
             note = text.ifBlank { null },
         )
@@ -1381,7 +1386,7 @@ fun ReaderScreen(
         // 同上：取消也先失焦，键盘跟着卡片一起落（D-30）。
         focusManager.clearFocus()
         noteText = ""
-        noteColorArgb = null
+        notePickedColors.clear()
         val editing = editingAnnotation
         if (editing != null) {
             closeAnnotationEdit()
@@ -1402,11 +1407,10 @@ fun ReaderScreen(
      */
     fun pickNoteColor(kind: AnnotationKind, slot: Int) {
         noteKind = kind
-        noteColorArgb = annotationSlotColor(light, kind, slot)
+        notePickedColors[kind] = annotationSlotColor(light, kind, slot)
         // 落盘一律小写（`highlight` / `underline`，见 ReaderSettings 的约定），
         // 解析侧 annotationLastKindOf 再另行 lowercase，双向容错。
-        var next = withAnnotationDefaultSlot(light, kind, slot)
-            .copy(annotationLastKind = kind.name.lowercase())
+        var next = withAnnotationLastKind(withAnnotationDefaultSlot(light, kind, slot), kind)
         // 线型只属于划线：在高亮那一行点色，不能顺手改掉划线菜单记住的线型（两套偏好各自独立）。
         if (kind == AnnotationKind.Underline) {
             next = next.copy(annotationLastLineStyle = noteLineStyle.wire)
@@ -2654,7 +2658,7 @@ fun ReaderScreen(
             // 输入框与操作栏跟着「这一次写哪条」重置：编辑带出它的文字 / 类别 / 线型，新选区从空白开始。
             LaunchedEffect(editing?.id, selectionMenuOn) {
                 // 换一条（新建 ↔ 编辑、或换编辑对象）就清掉「临时选过的颜色」：那是上一次的意图。
-                noteColorArgb = null
+                notePickedColors.clear()
                 when {
                     editing != null -> {
                         noteText = editing.note.orEmpty()
@@ -2708,14 +2712,23 @@ fun ReaderScreen(
                     underlineDefaultSlot = annotationDefaultSlot(light, AnnotationKind.Underline),
                     // 编辑时只在本类色槽行里给这条记录描圈。
                     // 编辑时只在本类色槽行里给这条记录描圈；刚点过的那一格优先（还没落笔也看得见）。
-                    currentColor = noteColorArgb ?: if (editing != null && editing.kind == noteKind) {
+                    currentColor = notePickedColors[noteKind] ?: if (editing != null && editing.kind == noteKind) {
                         editing.color ?: annotationFallbackColor(editing.kind)
                     } else {
                         null
                     },
                     canDelete = deleteTarget != null,
                     onTextChange = { noteText = it },
-                    onKindChange = { noteKind = it },
+                    // 切类别就记住：不点色、不点线型直接「确定」也要把默认停到这一类
+                    // （否则用过一次划线后，切回高亮落笔也改不回来）。
+                    onKindChange = { pickedKind ->
+                        noteKind = pickedKind
+                        val next = withAnnotationLastKind(light, pickedKind)
+                        if (next != light) {
+                            light = next
+                            currentOnLightCommit(next)
+                        }
+                    },
                     onPickColor = { kind, slot -> pickNoteColor(kind, slot) },
                     onPickLineStyle = { pickNoteLineStyle(it) },
                     // 复制只进剪贴板：不动记录、也不关卡片（落笔只有「确定」与点卡片外两处）。

@@ -64,6 +64,41 @@ class AnnotationColorsTest {
     }
 
     @Test
+    fun `remembering a kind changes only the last kind`() {
+        val s = ReaderSettings.DEFAULT.copy(annotationLastKind = "underline", highlightDefaultSlot = 2)
+        val next = withAnnotationLastKind(s, AnnotationKind.Highlight)
+        assertEquals(AnnotationKind.Highlight, annotationLastKindOf(next))
+        // 只记类别：两套色槽与默认格、线型偏好一概不动。
+        assertEquals(s.highlightColorSlots, next.highlightColorSlots)
+        assertEquals(s.underlineColorSlots, next.underlineColorSlots)
+        assertEquals(s.highlightDefaultSlot, next.highlightDefaultSlot)
+        assertEquals(s.underlineDefaultSlot, next.underlineDefaultSlot)
+        assertEquals(s.annotationLastLineStyle, next.annotationLastLineStyle)
+    }
+
+    @Test
+    fun `commit color never borrows the other kind's pick`() {
+        val s = ReaderSettings.DEFAULT
+        val highlightPick = mapOf(AnnotationKind.Highlight to ReaderSettings.DEFAULT_HIGHLIGHT_COLOR_SLOTS[2])
+        // 高亮那一行点过色、随后切到划线落笔：只能取划线默认色，
+        // 不能把半透明的高亮底色当成墨线（反方向则会把不透明墨色糊成底色）。
+        assertEquals(
+            annotationDefaultColor(s, AnnotationKind.Underline),
+            annotationCommitColor(s, AnnotationKind.Underline, highlightPick),
+        )
+        // 本类别点过的颜色优先。
+        assertEquals(
+            ReaderSettings.DEFAULT_HIGHLIGHT_COLOR_SLOTS[2],
+            annotationCommitColor(s, AnnotationKind.Highlight, highlightPick),
+        )
+        val underlinePick = mapOf(AnnotationKind.Underline to 0xFF112233.toInt())
+        assertEquals(
+            annotationDefaultColor(s, AnnotationKind.Highlight),
+            annotationCommitColor(s, AnnotationKind.Highlight, underlinePick),
+        )
+    }
+
+    @Test
     fun `swatch of each kind ignores the other kind`() {
         val highlight = ReaderSettings.DEFAULT_HIGHLIGHT_COLOR_SLOTS
         val underline = ReaderSettings.DEFAULT_UNDERLINE_COLOR_SLOTS

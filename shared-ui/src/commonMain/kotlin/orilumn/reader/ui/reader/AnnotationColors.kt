@@ -52,6 +52,19 @@ internal fun annotationDefaultColor(settings: ReaderSettings, kind: AnnotationKi
     return slots[annotationDefaultSlot(settings, kind)]
 }
 
+/**
+ * 新建标注落笔用哪一格色：只认**这一类别**刚点过的颜色，否则取该类默认色。
+ *
+ * 高亮与划线是两套互不相通的色槽（半透明底色 vs 不透明墨色），卡片里的临时选色必须按类别
+ * 分开存；只存一格颜色的话，读者先点高亮色、再切到划线落笔，就会把半透明的底色当墨线画出来
+ * （反向则是把不透明墨色糊成一大块底色）。
+ */
+internal fun annotationCommitColor(
+    settings: ReaderSettings,
+    kind: AnnotationKind,
+    pickedByKind: Map<AnnotationKind, Int>,
+): Int = pickedByKind[kind] ?: annotationDefaultColor(settings, kind)
+
 /** 取指定色槽的颜色；越界回退到该类默认色。 */
 internal fun annotationSlotColor(settings: ReaderSettings, kind: AnnotationKind, index: Int): Int {
     val slots = annotationColorSlots(settings, kind)
@@ -190,6 +203,16 @@ internal fun annotationAfterEdit(
 }
 
 /**
+ * 记住「上次用的类别」（新建 / 改色 / 改型都算一次明确选择）。
+ *
+ * 只影响下次打开卡片停在哪个类别，不参与排版指纹；未知值由 [annotationLastKindOf] 兜回高亮。
+ * **两个方向都要记得**：曾经只在点色槽 / 点线型时写，读者切到「高亮」后直接落笔
+ * （不点色）就一直改不回高亮——默认状态卡在划线。
+ */
+internal fun withAnnotationLastKind(settings: ReaderSettings, kind: AnnotationKind): ReaderSettings =
+    settings.copy(annotationLastKind = kind.name.lowercase())
+
+/**
  * 记住「上次用的线型」，同时把**上次用的类别**定为划线。
  *
  * 线型只属于划线：读者点线型就是一次划线动作，所以下次打开菜单要停回划线，
@@ -198,10 +221,8 @@ internal fun annotationAfterEdit(
 internal fun withAnnotationLastLineStyle(
     settings: ReaderSettings,
     style: AnnotationLineStyle,
-): ReaderSettings = settings.copy(
-    annotationLastKind = AnnotationKind.Underline.name.lowercase(),
-    annotationLastLineStyle = style.wire,
-)
+): ReaderSettings = withAnnotationLastKind(settings, AnnotationKind.Underline)
+    .copy(annotationLastLineStyle = style.wire)
 
 /** 改某一格颜色（保留其它槽与默认槽）。 */
 internal fun withAnnotationColorSlot(

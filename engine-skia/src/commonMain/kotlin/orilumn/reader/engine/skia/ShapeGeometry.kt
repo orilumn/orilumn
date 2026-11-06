@@ -28,6 +28,7 @@ import orilumn.reader.engine.laying.collectBaselineShifts
 import orilumn.reader.engine.laying.collectColorRuns
 import orilumn.reader.engine.laying.collectFontRuns
 import orilumn.reader.engine.laying.collectInlineBoxRuns
+import orilumn.reader.engine.laying.inlineImageEls
 import orilumn.reader.engine.laying.collectRubyRuns
 import orilumn.reader.engine.laying.collectTextDecorationRuns
 import orilumn.reader.engine.laying.collectVisibilityHiddenRuns
@@ -161,6 +162,12 @@ fun shapeGeometry(
     val grownHeights = adjustLineHeightsForRuby(broken, broken.map { it.heightPx }, rubyRuns)
     // 行内图行高（渲染内核单源 laying/ImageLineHeights）：shape 自带终高，行窗/分页/格高同源。
     // 注音增量先合入 broken 副本再算图高，两者取高（与盒流 breakLeafLines 同口径）。
+    // 图元素表与文本抽取同一遍历 → 与 U+FFFC 出现序一一对应；算一次存进 shape，绘制侧共用。
+    val inlineImgs = if (text.indexOf('\uFFFC') >= 0) {
+        inlineImageEls(el, classify ?: BlockClassify(isBlock), hidden)
+    } else {
+        emptyList()
+    }
     val imageHeights = adjustLineHeightsForInlineImages(
         text,
         broken.mapIndexed { i, b ->
@@ -171,6 +178,7 @@ fun shapeGeometry(
         profile.density,
         // 轻路径窗口化表缺块级子树后代（表格内图）：经级联懒算真样式，不崩。
         resolveStyle = ancestorStyleOf,
+        images = inlineImgs,
     )
     // Whole-paragraph single-style break (canonical semantics): code-like blocks resolve mono
     // exactly like the skia font stack ([SkParagraphFactory] CODE_TAGS rule).
@@ -214,6 +222,8 @@ fun shapeGeometry(
         ),
         // 行内盒（背景/边框；无装饰回空表零回归）。样式回退同 alpha：表外祖先按懒级联取。
         inlineBoxRuns = inlineBoxes,
+        // 叶内行内 `<img>`（U+FFFC 序）：页面图几何/占位隐藏共用（见 ParagraphShapeRef）。
+        inlineImages = inlineImgs,
         // E10 `visibility: hidden` 覆盖区间（与叶文本同一段表；无隐藏声明的子树回空表零开销）。
         visibilityHiddenRuns = if (styles.any { it.value.visibilityHidden } || rootStyle.visibilityHidden) {
             collectVisibilityHiddenRuns(

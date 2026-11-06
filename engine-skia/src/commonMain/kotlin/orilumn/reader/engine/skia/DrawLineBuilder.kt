@@ -15,6 +15,7 @@ import orilumn.reader.engine.laying.NormalFlowLayout
 import orilumn.reader.engine.laying.contentClip
 import orilumn.reader.engine.laying.effectiveOpacity
 import orilumn.reader.engine.laying.inlineBoxLeadInsetPx
+import orilumn.reader.engine.laying.inlineImageEls
 import kotlin.math.roundToInt
 
 /**
@@ -59,6 +60,12 @@ object DrawLineBuilder {
         firstLetterOf: orilumn.reader.engine.laying.FirstLetterOf? = null,
         /** 显示密度（只影响虚线边框的段/隙比例，见 [DrawLine.deviceScale]）。 */
         deviceScale: Float = 1f,
+        /**
+         * 行内图占位隐藏判据（null = 不隐，占位字形照旧）：只有真能贴出来的槽位才隐
+         * U+FFFC 字形，缺 loader/href/src 时保留占位，避免「字没了图也没有」。
+         */
+        imageLoader: ImageBoundsReader? = null,
+        chapterHref: String = "",
     ): Map<Int, DrawLine> {
         val out = HashMap<Int, DrawLine>()
         val leaves = ArrayList<LayoutBox>()
@@ -100,6 +107,10 @@ object DrawLineBuilder {
             } else {
                 emptyList()
             }
+            // 行内图槽位（U+FFFC）：与页面图几何同一份文档序（叶内行内 `<img>`）。
+            // 只有真能贴图的槽位才把占位字形隐掉（见 [inlineImageHiddenRanges]）。
+            val imgPositions = if (text.indexOf('\uFFFC') >= 0) inlineImagePositions(text) else IntArray(0)
+            val inlineImgs = if (imgPositions.isNotEmpty()) inlineImageEls(el, classify, hidden) else emptyList()
             // 首行缩进只给叶首行（断行侧同值已减宽，绘制侧右移同值）。
             //
             // **有符号**（E8）：负值是悬挂缩进（CSS 2.1 §16.1）—— 首行**左移** `|indent|`，
@@ -197,6 +208,17 @@ object DrawLineBuilder {
                     inlineBoxRuns = inlineBoxes,
                     deviceScale = deviceScale,
                     visibilityHiddenRuns = visHidden,
+                    imgHidden = if (inlineImgs.isEmpty()) {
+                        emptyList()
+                    } else {
+                        inlineImageHiddenRanges(
+                            imgPositions, r, inlineImgs,
+                            styleOf = { styleMap[it] }, leafStyle = style,
+                            breakW = w,
+                            imageLoader = imageLoader, chapterHref = chapterHref,
+                            density = deviceScale,
+                        )
+                    },
                     clip = contentClip,
                     // 旁注布点按块序号判「本段 / 相邻段」（方案 §1.5）：一叶即一块，文档序 0 起。
                     blockId = leafIndex,

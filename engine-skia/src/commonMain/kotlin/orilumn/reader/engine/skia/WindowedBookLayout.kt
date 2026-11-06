@@ -8,6 +8,7 @@ import orilumn.reader.engine.laying.ClipRect
 import orilumn.reader.engine.laying.LayoutBox
 import orilumn.reader.engine.laying.NormalFlowLayout
 import orilumn.reader.engine.laying.ParagraphShapeRef
+import orilumn.reader.engine.laying.contentClip
 import orilumn.reader.engine.paging.BookLayout
 import orilumn.reader.engine.paging.BreakAwareBookLayout
 import kotlin.math.roundToInt
@@ -48,6 +49,9 @@ abstract class WindowedBookLayout : PagedLayout, BreakAwareBookLayout {
     protected abstract val tableBorders: List<PageBackground>
 
     override fun skiaLineWindow(): Map<Int, DrawLine>? = skiaLines
+
+    /** 行内图槽位定位用（与落墨同一个 [LineAligner]，量画同源）。按需创建，无行内图的章节零开销。 */
+    private val inlineAligner by lazy { LineAligner() }
 
     /** Line → owning leaf index, so readback resolves a line's leaf without a per-line scan. */
     protected val leavesByShape: IntArray by lazy {
@@ -271,6 +275,77 @@ abstract class WindowedBookLayout : PagedLayout, BreakAwareBookLayout {
                     clip = elementClip(el),
                 ),
             )
+        }
+        // 行内图（文本叶里的 U+FFFC 槽位）：此前只有字体画出的「虚线 obj」占位，图本身没有
+        // 像素管线 —— 书里的 GUI 图标（`<p>字<img width=16>字</p>`）因此全是空框。
+        // 槽位 x 与文本落墨同源（[linePlacement]），宽高与正文替换图同口径
+        // （[NormalFlowLayout.replacedUsedSize]）；占位字形由行窗的 `imgHidden` 隐掉
+        // （[inlineImageHiddenRanges]，与这里的可贴判据同一份）。
+        val win = skiaLines
+        if (win != null) {
+            for (si in leaves.indices) {
+                val shape = shapes[si]
+                if (shape.isReplaceable) continue
+                val leaf = leaves[si]
+                if (leaf.table != null) continue
+                val imgs = shape.shapeInlineImages
+                if (imgs.isEmpty()) continue
+                val text = shape.shapeText
+                if (text.indexOf('\uFFFC') < 0) continue
+                val firstLocal = leafLocalFirstLine[si]
+                if (firstLocal < 0) continue
+                val positions = inlineImagePositions(text)
+                val leafBreakW = NormalFlowLayout.innerBreakWidth(leaf.style, leaf.contentWidth)
+                for (k in 0 until shape.shapeLineCount) {
+                    val g = firstLocal + k
+                    if (g < firstLine || g >= pageEnd) continue
+                    val line = win[g] ?: continue
+                    // 槽位必须同时落在塑形行界与这条 DrawLine 的行界里：图片 x 由
+                    // `p - line.range.first` 求槽位下标，两侧行界不一致时会取错槽位（图贴到别的字上）。
+                    val s = maxOf(shape.shapeLineStart(k), line.range.first)
+                    val e = minOf(shape.shapeLineEnd(k), line.range.last + 1)
+                    if (s >= e) continue
+                    var placement: LineAligner.Placement? = null
+                    for (idx in positions.indices) {
+                        val p = positions[idx]
+                        if (p < s || p >= e) continue
+                        val img = imgs.getOrNull(idx) ?: break
+                        // 样式：行内元素不在盒表里 ⇒ 重路径吃整章级联表（BoxDrawableLayout），
+                        // 轻路径吃懒级联；都缺时退回叶样式（attr 宽高不受影响）。
+                        val st = elementStyle(img) ?: leaf.style
+                        // 与占位隐藏（imgHidden）同一份「可贴」判据：贴不出就不隐占位。
+                        val used = inlineImageUsedSize(img, st, leafBreakW, imageLoader, chapterHref, density)
+                            ?: continue
+                        val src = img.attrs["src"] ?: continue
+                        val placed = placement
+                            ?: linePlacement(inlineAligner, line, line.range.first, line.range.last + 1)
+                                .also { placement = it }
+                        val slot = p - line.range.first
+                        if (slot !in placed.xs.indices) continue
+                        val h = used.second
+                        val yTop = when (st.verticalAlign) {
+                            orilumn.reader.engine.css.VerticalAlign.TOP -> line.yTop
+                            orilumn.reader.engine.css.VerticalAlign.BOTTOM -> line.yBottom - h
+                            // BASELINE/MIDDLE/SUB/SUPER：行盒内居中。CSS 的 middle 是「基线 + 半 x-height」，
+                            // 与行盒居中在常规字体度量下差 <1px；行高已被塑形期按图高抬过（§10.8），
+                            // 高图自然贴行顶。绝对基线值在布局层拿不到（字体度量在渲染层）。
+                            else -> line.yTop + (line.yBottom - line.yTop - h) / 2
+                        }
+                        out.add(
+                            PageImage(
+                                src = src,
+                                chapterHref = chapterHref,
+                                xLeft = line.xLeft + placed.xs[slot].roundToInt(),
+                                yTop = yTop,
+                                yBottom = yTop + h,
+                                widthPx = used.first,
+                                heightPx = h,
+                                clip = leaf.contentClip(),
+                            ),
+                        )
+                    }
+                }
+            }
         }
         // 表格图（与表行文本同窗；行下标键与 tableCells 一致）。
         for ((idx, imgs) in tableCellImages.entries) {

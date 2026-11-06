@@ -22,6 +22,8 @@ import orilumn.reader.engine.layout.ListMarkers
 import orilumn.reader.engine.laying.ParagraphShapeRef
 import orilumn.reader.engine.laying.ShapedGeometry
 import orilumn.reader.engine.laying.adjustLineHeightsForInlineImages
+import orilumn.reader.engine.skia.inlineImageHiddenRanges
+import orilumn.reader.engine.skia.inlineImagePositions
 import orilumn.reader.engine.skia.shapeGeometry
 import orilumn.reader.io.Logger
 import orilumn.reader.engine.laying.BoxLayoutResult
@@ -723,6 +725,9 @@ class BoxChapterLayouter(
             prepare.genOf,
             prepare.firstLetterOf,
             deviceScale = profile.density,
+            // 行内图占位隐藏判据（缺 loader/href 时保留占位字形）。
+            imageLoader = imageLoader,
+            chapterHref = chapterHref,
         )
         val drawable = run {
             // 表格行展开进窗口（Compose 面随行窗绘制单元格文本 + 边框；legacy drawTableRow 不动）。
@@ -753,6 +758,8 @@ class BoxChapterLayouter(
                 imageLoader, chapterHref, skiaLines = skiaLines,
                 tableCells = tableWin.lines, tableCellImages = tableWin.images, tableBorders = tableWin.borders,
                 density = profile.density,
+                // 行内图样式源（盒表里没有行内 `<img>` 的盒）。
+                cascadeStyles = prepare.styleMap,
             )
         }
         val rawSlices = Paginator.paginate(drawable, contentH)
@@ -904,6 +911,14 @@ class BoxChapterLayouter(
             val shapeBase = if (firstFl != null && shape.lineCount > 0) {
                 firstFl.charStart - shape.lineStart(0)
             } else 0
+            // 行内图槽位（U+FFFC）：图元素表由塑形期算好随 shape 透传（与页面图几何同一份
+            // 文档序）。只有真能贴图的槽位才隐占位字形（见 skia/InlineImages.kt）。
+            val imgPositions = if (text.indexOf('\uFFFC') >= 0) {
+                inlineImagePositions(text)
+            } else {
+                IntArray(0)
+            }
+            val inlineImgs = shape.shapeInlineImages
             // P4-a3: 环绕前导行按收缩宽整形、x 右移悬浮偏移（与 DrawLineBuilder 重路径同式）。
             val lead = leaf.floatLead
             // E21 残留修复：首字下沉盒（塑形侧已按它断行，见 `shapeGeometry`；此处同式落位）。
@@ -984,6 +999,15 @@ class BoxChapterLayouter(
                     decorationRuns = shape.decorationRuns,
                     // E10：`visibility: hidden` 覆盖区间随形透传（与 canonical 同源）。
                     visibilityHiddenRuns = shape.visibilityHiddenRuns,
+                    // 行内图占位字形隐藏（与页面图几何同源；缺 loader/href 时保留占位）。
+                    imgHidden = if (inlineImgs.isEmpty()) emptyList() else
+                        inlineImageHiddenRanges(
+                            imgPositions, s until e, inlineImgs,
+                            styleOf = { prepare.resolveStyle(it) }, leafStyle = style,
+                            breakW = w,
+                            imageLoader = imageLoader, chapterHref = chapterHref,
+                            density = deviceScale,
+                        ),
                     // **Q20**：断词收尾随行读 **shape**（增量/临时页手里没有 `LayoutBox`；值与盒流
                     // `leaf.hyphenAtEnd` 同断行器同宽逐项一致）。漏传取默认 `false` ⇒
                     // `LineAligner.hyphenW == 0` ⇒ `LineWindowDrawer` 整块跳过 ⇒ 连字符画不出来。

@@ -38,6 +38,11 @@ class BoxDrawableLayout(
     /** 表格单元格边框（章节绝对 Y；随背景绘制）。 */
     protected override val tableBorders: List<orilumn.reader.engine.skia.PageBackground> = emptyList(),
     protected override val density: Float = 1f,
+    /**
+     * 整章级联样式表（含**行内元素**；盒表里没有它们的盒）。行内图取宽高/visibility/
+     * vertical-align 用——只查 [styleByElement] 会漏掉 `<p>字<img>字</p>` 的图。
+     */
+    private val cascadeStyles: Map<MarkupElement, ComputedStyle> = emptyMap(),
 ) : WindowedBookLayout() {
 
     private val lines: List<FlowedLine> = result.lines
@@ -72,7 +77,8 @@ class BoxDrawableLayout(
         out
     }
 
-    override fun elementStyle(el: MarkupElement): ComputedStyle? = styleByElement[el]
+    override fun elementStyle(el: MarkupElement): ComputedStyle? =
+        styleByElement[el] ?: cascadeStyles[el]
 
     /**
      * E11：`overflow` 祖先裁剪源 —— 整章盒树上每个裁剪盒元素的 padding box（章节绝对 Y，与

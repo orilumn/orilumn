@@ -719,39 +719,7 @@ class LineWindowDrawer(
      * 文字错位（本仓头号禁忌「量画同源」）。
      */
     private fun placementFor(line: DrawLine, start: Int, endExcl: Int): LineAligner.Placement =
-        aligner.align(
-            text = line.text,
-            range = start until endExcl,
-            fontSizePx = line.fontSizePx,
-            lineWidthPx = if (line.nowrap) Float.MAX_VALUE else line.lineWidthPx.coerceAtLeast(1).toFloat(),
-            letterSpacingEm = line.letterSpacingEm,
-            tag = line.tag,
-            families = line.families,
-            weight = line.weight,
-            italic = line.italic,
-            monospace = line.monospace,
-            fontRuns = line.fontRuns,
-            align = line.alignment,
-            // 首行缩进**必须交给 Aligner**，不能画完再整体右移（用户报缺陷①的修法）。
-            //
-            // Aligner 的 `natural` 本来就以 `x0 = firstLineIndentPx` 起算（`natural = x0 + Σadv`），
-            // 所以 `slack = lineWidthPx − natural` 已经把缩进扣掉了，拉伸后右缘正好落在版心。
-            // 旧写法传 `0f` 再 `paintX += indent`：拉伸基数**少了缩进** ⇒ JUSTIFY 首行被拉到
-            // 版心宽之后又整体右移 indent ⇒ **右溢出一个缩进**。实测（Rust 书 22 章）：
-            // `p { text-align: justify; text-indent: 2em }` 的**每一个**正文段首行都如此，
-            // 溢出量恒等于缩进（`2em` = 84.36px @fs=42.18），22 章里 555 行，末两个字被页面裁掉。
-            firstLineIndentPx = line.firstLineIndentPx,
-            // 末行不拉伸：两端对齐的定义本身。
-            isLastLine = isLastLineOf(line, endExcl),
-            // 行尾连字符：进拉伸基数与可见右缘（连字符占版心，否则 JUSTIFY 会少算一个字位）。
-            hyphenAtEnd = line.hyphenAtEnd,
-            // 标点挤压：断行侧定断点时用的比例（量画同源，教训 ⑩）。
-            squeezeRatio = line.squeezeRatio,
-            // 混排字距：与断行侧同一个 em（间隙进 `adv` ⇒ 逐字 x、JUSTIFY 基数、可见右缘同源）。
-            cjkLatinSpacingEm = line.cjkLatinSpacingEm,
-            // 行内盒横向推进：与断行侧同一份（同 `cjkLatinSpacingEm` 的理由 —— 量画同源）。
-            inlineBoxRuns = line.inlineBoxRuns,
-        )
+        linePlacement(aligner, line, start, endExcl)
 
     /** 主文本行绘制（S5 逐字路径）：几何由 [LineAligner] 给、落墨由 [GlyphPainter] 逐字做。 */
     /**
@@ -2193,17 +2161,6 @@ private interface FontResolver {
         flushBatch()
     }
 
-    /**
-     * 该行是否为段落末行（末行不拉伸，两端对齐的定义本身）。
-     *
-     * 绘制侧只看本 [DrawLine] 无法知道段末，故取 `DrawLine` 已携带的判据：
-     * [DrawLine.listMarker] 只挂首行 ⇒ 不能用；`range.last` 覆盖到叶文本末即末行。
-     * 叶文本末由 [orilumn.reader.engine.skia.DrawLineBuilder] 传入的 range 全文本坐标决定，
-     * 这里用「行区间右端 == 该行所属叶的文本长度」近似 —— 不精确时会退化为多拉伸末行，
-     * 故判据保守：仅当整行右端 == 全文本长度时才算末行。
-     */
-    private fun isLastLineOf(line: DrawLine, endExcl: Int): Boolean = endExcl >= line.text.length
-
     /** 行区间内三套 runs（色 + face + 基线位移）合并后的 [lo, hi) 段序列：每段的肤色/face/位移恒定，供逐段渲染。 */
     private data class Band(val start: Int, val end: Int, val argb: Int?, val font: orilumn.reader.engine.css.FontRun?, val shiftEm: Float)
 
@@ -2300,6 +2257,52 @@ private interface FontResolver {
 // ── 文本装饰（第三刀）的绘制常量 ──────────────────────────────────────────────
 // 线宽由解析期定值（`auto`/初始值 = 字号/10；显式长度按声明；仅 `from-font` 落到字体度量），
 // 这里只放兜底值，或本身即 UA 自定值（点线/虚线/波浪的节距、双线比例）。
+
+/**
+ * 一行文本的逐字几何（[LineAligner.Placement] 的完整入参集中在这里）。
+ *
+ * 之所以提成顶层函数：落墨（[LineWindowDrawer.paintText] / 装饰 / 选区）与**行内图槽位定位**必须
+ * 走同一个入口——任何只改一侧的「修法」都会让图片与文字错位（本仓头号禁忌「量画同源」）。
+ */
+internal fun linePlacement(
+    aligner: LineAligner,
+    line: DrawLine,
+    start: Int,
+    endExcl: Int,
+): LineAligner.Placement = aligner.align(
+    text = line.text,
+    range = start until endExcl,
+    fontSizePx = line.fontSizePx,
+    lineWidthPx = if (line.nowrap) Float.MAX_VALUE else line.lineWidthPx.coerceAtLeast(1).toFloat(),
+    letterSpacingEm = line.letterSpacingEm,
+    tag = line.tag,
+    families = line.families,
+    weight = line.weight,
+    italic = line.italic,
+    monospace = line.monospace,
+    fontRuns = line.fontRuns,
+    align = line.alignment,
+    // 首行缩进**必须交给 Aligner**，不能画完再整体右移（用户报缺陷①的修法）。
+    //
+    // Aligner 的 `natural` 本来就以 `x0 = firstLineIndentPx` 起算（`natural = x0 + Σadv`），
+    // 所以 `slack = lineWidthPx − natural` 已经把缩进扣掉了，拉伸后右缘正好落在版心。
+    // 旧写法传 `0f` 再 `paintX += indent`：拉伸基数**少了缩进** ⇒ JUSTIFY 首行被拉到
+    // 版心宽之后又整体右移 indent ⇒ **右溢出一个缩进**。实测（Rust 书 22 章）：
+    // `p { text-align: justify; text-indent: 2em }` 的**每一个**正文段首行都如此，
+    // 溢出量恒等于缩进（`2em` = 84.36px @fs=42.18），22 章里 555 行，末两个字被页面裁掉。
+    firstLineIndentPx = line.firstLineIndentPx,
+    // 末行不拉伸：两端对齐的定义本身。
+    isLastLine = endExcl >= line.text.length,
+    // 行尾连字符：进拉伸基数与可见右缘（连字符占版心，否则 JUSTIFY 会少算一个字位）。
+    hyphenAtEnd = line.hyphenAtEnd,
+    // 标点挤压：断行侧定断点时用的比例（量画同源，教训 ⑩）。
+    squeezeRatio = line.squeezeRatio,
+    // 混排字距：与断行侧同一个 em（间隙进 `adv` ⇒ 逐字 x、JUSTIFY 基数、可见右缘同源）。
+    cjkLatinSpacingEm = line.cjkLatinSpacingEm,
+    // 行内盒横向推进：与断行侧同一份（同 `cjkLatinSpacingEm` 的理由 —— 量画同源）。
+    inlineBoxRuns = line.inlineBoxRuns,
+)
+
 
 /** 取装饰度量用的码本（拉丁大写 H）：字体度量与码本无关，固定一个即可命中缓存。 */
 private const val DECORATION_METRIC_CP = 'H'.code

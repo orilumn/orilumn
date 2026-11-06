@@ -5,6 +5,7 @@ import orilumn.reader.engine.css.EmphasisStyle
 import orilumn.reader.engine.css.FontRun
 import orilumn.reader.engine.css.TextAlign
 import orilumn.reader.engine.css.TextShadow
+import orilumn.reader.engine.html.MarkupElement
 import orilumn.reader.engine.layout.ListMarkers
 
 /**
@@ -86,6 +87,14 @@ interface ParagraphShapeRef {
     val shapeCapFloat: CapFloat? get() = null
     /** E10 `visibility: hidden` 覆盖区间（叶文本坐标系；空 = 全叶可见）。见 [visibilityHiddenRuns]。 */
     val shapeVisibilityHiddenRuns: List<IntRange> get() = emptyList()
+    /**
+     * 叶内行内 `<img>`（文档序 = [shapeText] 里 U+FFFC 的出现序；空 = 无）。
+     *
+     * 塑形期按与文本抽取**同一次遍历**算出（`inlineImageEls`），行高抬升、占位隐藏、
+     * 页面图几何三处共用这一份 → 不会出现「行高按图算、图却贴到别的字上」。
+     * 默认空表 = 旧行为零改动（哑实现/替换块/旧桩不必实现）。
+     */
+    val shapeInlineImages: List<MarkupElement> get() = emptyList()
     /** Ancestor-chain opacity product (1 = legacy path). */
     val shapeAlpha: Float
     /** Emphasis marks (NONE = none). */

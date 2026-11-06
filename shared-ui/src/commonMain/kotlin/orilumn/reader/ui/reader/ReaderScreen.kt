@@ -1594,6 +1594,10 @@ fun ReaderScreen(
                     // 会话会永远停在 Dragging：批注层被藏、所有点按被 busy 墙挡住。
                     // 新的一轮按下说明上一根手指早已离开，正好在这里收尾（判据见下）。
                     ctl.recoverStuckDrag()
+                    // 同理补收亮度指示条：上一轮亮度手势若在「抬手之外」的路径上结束
+                    //（指针丢失 / 手势被系统取消），收尾已由 settleBrightness 兜住；
+                    // 这里再加一道新手势兜底——只要读者再碰屏幕，屏底就不会留着旧条。
+                    if (brightnessUi != null) endBrightnessGesture()
                     val downX = down.position.x
                     val downY = down.position.y
                     val downTime = down.uptimeMillis
@@ -1842,6 +1846,22 @@ fun ReaderScreen(
                     // 按两指平均纵向位移算（两指各自动也不算「一起滑」）；期间不翻页、不选字。
                     var twoFingerBrightness = false
                     var twoFingerBaseY = 0f
+                    /**
+                     * 亮度手势收尾（单指/双指共用，幂等）：抬手、事件被上层吞掉、开工指针丢失、
+                     * 手势协程被取消（系统返回手势 / 切后台 / 掌心误触）——任何一条退出路径
+                     * 都要把底部指示条收掉并落库。
+                     *
+                     * 早先只有 finally 里的双指分支会收，单指的 `brightnessActive` 一旦不走
+                     * 「抬手」那条路就再没人清 `brightnessUi`，指示条永久留在屏底（真机反馈
+                     * 「调节亮度的进度条经常不消失」）。
+                     */
+                    fun settleBrightness() {
+                        if (!brightnessActive) return
+                        brightnessActive = false
+                        twoFingerBrightness = false
+                        Logger.d("Orilumn.BRIGHT", "settle b=${light.brightness}")
+                        endBrightnessGesture()
+                    }
                     // 抬手速度样本（两次采样的位移/时差）：滑动判定要「快甩过阈即翻」，
                     // 只看位移会把快速轻扫吃掉。
                     var lastDx = 0f
@@ -1927,9 +1947,7 @@ fun ReaderScreen(
                             // 两指只剩一根（或一起抬起）：本次亮度手势到此为止。
                             // 不降级成单指翻页/选字——那会让读者抬一根手指就被翻页。
                             Logger.d("Orilumn.BRIGHT", "two-finger end b=${light.brightness}")
-                            endBrightnessGesture()
-                            twoFingerBrightness = false
-                            brightnessActive = false
+                            settleBrightness()
                             break
                         }
                         val dx = change.position.x - downX
@@ -2023,7 +2041,7 @@ fun ReaderScreen(
                             val upX = change.position.x
                             val upDx = upX - downX
                             val upDy = change.position.y - downY
-                            if (brightnessActive) endBrightnessGesture()
+                            if (brightnessActive) settleBrightness()
                             else if (slideActive) {
                                 currentEndSlide(vx, size.width.toFloat())
                                 slideEnded = true
@@ -2133,11 +2151,9 @@ fun ReaderScreen(
                         autoFlipSide = 0
                         longPressJob?.cancel()
                         magnifierFinger = null
-                        // 双指调亮度期间指针丢失/手势被取消：指示条与落库都收掉，别留在屏上。
-                        if (twoFingerBrightness) {
-                            twoFingerBrightness = false
-                            endBrightnessGesture()
-                        }
+                        // 亮度手势期间指针丢失 / 手势被取消（返回手势、切后台、掌心误触）：
+                        // 指示条与落库都收掉，别留在屏上（单指、双指同一条路）。
+                        settleBrightness()
                     }
                 }
             },

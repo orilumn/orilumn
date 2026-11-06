@@ -1,5 +1,6 @@
 package orilumn.reader.engine.laying
 
+import kotlinx.serialization.Serializable
 import orilumn.reader.engine.css.BorderColorEdges
 import orilumn.reader.engine.css.BorderStyleEdges
 import orilumn.reader.engine.css.ComputedStyle
@@ -52,6 +53,7 @@ import orilumn.reader.engine.html.MarkupElement
  *   （与 `display:none` 相反）。横向推进量不受影响（隐藏元素的 padding/border 仍占宽，浏览器如此），
  *   只有绘制侧跳过本 run 的背景与边框。
  */
+@Serializable
 data class InlineBoxRun(
     val start: Int,
     val endExclusive: Int,

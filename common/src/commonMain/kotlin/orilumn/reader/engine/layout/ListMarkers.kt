@@ -1,5 +1,6 @@
 package orilumn.reader.engine.layout
 
+import kotlinx.serialization.Serializable
 import orilumn.reader.engine.css.ComputedStyle
 import orilumn.reader.engine.html.MarkupElement
 import orilumn.reader.engine.laying.HIDDEN_NONE
@@ -40,6 +41,7 @@ object ListMarkers {
     enum class Position { INSIDE, OUTSIDE }
 
     /** A resolved marker for one `<li>`: what to draw and how to reserve its gutter. */
+    @Serializable
     data class ListMarker(
         val kind: Kind,
         /** Rendered label for text kinds ("1"/"i"/"a"…); ignored by the shape kinds (disc/circle/square). */

@@ -449,6 +449,17 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
     private fun structureStore(): ChapterStructureStore? =
         cacheRoot?.let { ChapterStructureStore(okio.FileSystem.SYSTEM, it) }
 
+    /** 当前页快照存储（每本一份、翻页覆盖）。Null = 关（无缓存目录）。 */
+    private fun pageSnapshotStore(): PageSnapshotStore? =
+        cacheRoot?.let { PageSnapshotStore(okio.FileSystem.SYSTEM, it) }
+
+    /** 本章作者样式哈希：快照键的一部分（书/样式换了，旧页面的行文本与盒子就都不作数）。 */
+    private fun chapterCssHash(unit: ChapterUnit): Long? =
+        unit.cssBundle?.let { ChapterStructureCodec.cssHashOf(it.cssTexts) }
+
+    /** 落盘防抖：读者连翻几页只写最后一页（写盘是后台活，但不该为每一格都写一次）。 */
+    private var pageSnapshotJob: kotlinx.coroutines.Job? = null
+
     /** Current book's id, used as the disk-cache namespace. Set by [open]. */
     var bookId: Long = -1L
         private set
@@ -876,6 +887,154 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         if (!ok) Logger.w(logTag, "structure save SKIP ch=${unit.chapterIndex} (inconsistent)")
     }
 
+    // ─────────────────────────────────────────────────────────────────
+    // 当前页快照（"这一页排好之后长什么样"落盘）
+    // ─────────────────────────────────────────────────────────────────
+    //
+    // 目标：**冷开书不再为已经排过的同一页重付一次塑形**。分页表只记住"页在哪"，页面长什么样
+    // （每行画什么字/画在哪/什么字号颜色装饰/盒子背景/插图槽位）此前只活在进程内存里，
+    // 每次开书随 `ChapterUnit` 一起被丢弃 ⇒ 同样 21 块、同样参数，每次都要重新塑形一遍。
+    //
+    // 只存当前页、每本一份、异步覆盖（[schedulePageSnapshot]）：一本书关掉之后排版不会再变
+    // （参数/版心/引擎版本任一变，键就变，直接判 miss），所以"上次那页"永远是对的。
+    // 真正失效的判据只有一处：`PageSnapshot.matches`。
+
+    /**
+     * 目标页快照命中则直接绑定，跳过 `prepareLight` + 塑形。返回 true = 已绑定。
+     *
+     * 与磁盘表同一套幂等语义：切片列表按分页表铺开（未塑形页 firstLine=-1），
+     * 只把**目标页**那条换成快照里的真实行号/块区间——和一次正常增量排版绑出来的形状完全一致。
+     */
+    private fun restorePageSnapshot(
+        unit: ChapterUnit,
+        table: ChapterPaginationTable,
+        pageIndex: Int,
+        paramHash: Long,
+        contentWidth: Int,
+        contentHeight: Int,
+    ): Boolean {
+        if (bookId < 0) return false
+        val store = pageSnapshotStore() ?: return false
+        val t0 = platformNowMs()
+        val snap = store.read(bookId) ?: return false
+        val cssHash = chapterCssHash(unit) ?: return false
+        if (!snap.matches(
+                layoutVersion = PaginationCacheCodec.LAYOUT_VERSION,
+                appVersion = diskCacheVersion,
+                bookId = bookId,
+                chapterIndex = unit.chapterIndex,
+                pageIndex = pageIndex,
+                paramHash = paramHash,
+                contentWidth = contentWidth,
+                contentHeight = contentHeight,
+                cssHash = cssHash,
+            ) ||
+            // 同一页首字：分页表是正典，快照必须锚在同一页上（换表/换页序即不认）。
+            table.pages.getOrNull(pageIndex)?.charStart != snap.charStart
+        ) {
+            Logger.d(logTag, "PAGE-SNAP miss ch=${unit.chapterIndex} page=$pageIndex " +
+                "(have ch=${snap.chapterIndex} page=${snap.pageIndex} params=${snap.paramHash == paramHash} " +
+                "view=${snap.contentWidth}x${snap.contentHeight} css=${snap.cssHash == cssHash} " +
+                "lv=${snap.layoutVersion == PaginationCacheCodec.LAYOUT_VERSION})")
+            return false
+        }
+        val layout = PersistedPageLayout(snap)
+        val slices = ArrayList<PageSlice>(table.pages.size)
+        table.pages.forEachIndexed { i, rec ->
+            slices += if (i == pageIndex) {
+                PageSlice(
+                    charStart = snap.charStart,
+                    charEnd = snap.charEnd,
+                    firstLine = snap.firstLine,
+                    lastLineExclusive = snap.lastLineExclusive,
+                    kind = PageSlice.Kind.TEXT,
+                    blockStart = snap.blockStart,
+                    blockEndExclusive = snap.blockEndExclusive,
+                )
+            } else {
+                PageSlice(
+                    charStart = rec.charStart,
+                    charEnd = rec.charEnd,
+                    firstLine = -1,
+                    lastLineExclusive = -1,
+                    kind = PageSlice.Kind.TEXT,
+                    blockStart = rec.blockStart,
+                    blockEndExclusive = rec.blockEndExclusive,
+                )
+            }
+        }
+        unit.bind(layout, slices)
+        unit.shapedPageFrom = pageIndex
+        unit.shapedPageTo = (pageIndex + 1).coerceAtMost(table.pages.size)
+        unit.pageCache[pageIndex] = ChapterUnit.PageProduct(layout, slices, paramHash)
+        Logger.w(logTag, "PAGE-SNAP hit ch=${unit.chapterIndex} page=$pageIndex " +
+            "lines=${snap.lines.size} t=${platformNowMs() - t0}ms")
+        return true
+    }
+
+    /**
+     * 从**当前绑定的绘制布局**抓一份快照（调用方须持有 [layoutMutex]：布局/切片都在锁内换）。
+     *
+     * 只抓"确实来自分页表的那一页"：临时表会话（`inProgress != null`）的页切点与磁盘表不同，
+     * 存下来会在下次开书冒充"第 N 页"——宁可这一轮不存。
+     */
+    private fun capturePageSnapshot(
+        unit: ChapterUnit,
+        charStart: Int,
+        contentWidth: Int,
+        contentHeight: Int,
+    ): PageSnapshot? {
+        if (bookId < 0) return null
+        if (unit.inProgress != null) return null
+        val layout = (unit.tempRenderLayout ?: unit.layout) as? PagedLayout ?: return null
+        val table = unit.paginationTable ?: return null
+        val pageIndex = unit.pageSlices.indexOfFirst {
+            it.firstLine >= 0 && it.lastLineExclusive > it.firstLine &&
+                it.charStart <= charStart && charStart < it.charEnd
+        }
+        if (pageIndex < 0) return null
+        val slice = unit.pageSlices[pageIndex]
+        // 分页表是正典：页首字与表不符说明这一页不是按表塑出来的（临时页/漂移），不存。
+        if (table.pages.getOrNull(pageIndex)?.charStart != slice.charStart) return null
+        val cssHash = chapterCssHash(unit) ?: return null
+        return buildPageSnapshot(
+            layout = layout,
+            slice = slice,
+            pageIndex = pageIndex,
+            bookId = bookId,
+            chapterIndex = unit.chapterIndex,
+            paramHash = table.paramHash,
+            appVersion = diskCacheVersion,
+            contentWidth = contentWidth,
+            contentHeight = contentHeight,
+            cssHash = cssHash,
+        )
+    }
+
+    /**
+     * 请求把"包含 [charStart] 的那一页"存成当前页快照。**异步 + 防抖**，读者连翻只写最后一页。
+     *
+     * 调用点在"这一页真的落位了"之后（开书落位 / 翻页落位）。写盘在 [bgScope] 上，
+     * 不占前台；失败只记 w（快照是加速手段，永远不该让开书失败）。
+     */
+    fun schedulePageSnapshot(chapter: Int, charStart: Int) {
+        if (bookId < 0 || cacheRoot == null) return
+        pageSnapshotJob?.cancel()
+        pageSnapshotJob = bgScope.launch {
+            delay(PAGE_SNAPSHOT_DEBOUNCE_MS)
+            val unit = unitAt(chapter) ?: return@launch
+            if (viewW <= 0 || viewH <= 0) return@launch
+            val contentWidth = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
+            val contentHeight = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
+            val snap = layoutMutex.withLock { capturePageSnapshot(unit, charStart, contentWidth, contentHeight) }
+                ?: return@launch
+            val t0 = platformNowMs()
+            pageSnapshotStore()?.write(bookId, snap)
+            Logger.w(logTag, "PAGE-SNAP write ch=$chapter page=${snap.pageIndex} " +
+                "lines=${snap.lines.size} t=${platformNowMs() - t0}ms")
+        }
+    }
+
     /**
      * 整章文本投影（长按选区用）**移出开书关键路径**：先把目标页画出来，绑定完成后在后台算完回填。
      *
@@ -1104,9 +1263,24 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                 // boundaries; foreground only shapes the target page's block range, never re-paginates.
                 unit.bindPaginationTable(cached)
                 val boxLayouter = layouter as? BoxChapterLayouter
+                val startPage = pageIndexForChar(cached.pages, targetChar)
                 if (boxLayouter != null) {
+                    // 先试"上次那一页"的绘制模型：命中就一步到位（不建 prepare、不塑形）。
+                    // 用 runCatching 兜住：快照是加速手段，它自己出任何岔子都不许把开书拖下水。
+                    val snapHit = runCatching {
+                        restorePageSnapshot(unit, cached, startPage, paramHash, contentWidth, contentHeight)
+                    }.getOrElse {
+                        Logger.w(logTag, "PAGE-SNAP restore FAIL ch=${unit.chapterIndex}: ${it::class.simpleName}")
+                        false
+                    }
+                    if (snapHit) {
+                        Logger.w(logTag, "layout ${ctx(unit)} PAGE-SNAPSHOT page=$startPage t=${platformNowMs() - t0}ms")
+                        // 选区用的整章文本投影照旧转后台：快照只解决"画出来"，
+                        // 长按选区的整章切句不在这条路上。
+                        scheduleChapterTextProjection(unit, profile, contentWidth, contentHeight)
+                        return@runCatching
+                    }
                     // Light prepare only (box tree, no shaping) — the table tells us which blocks to shape.
-                    val startPage = pageIndexForChar(cached.pages, targetChar)
                     val prep = boxLayouter.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h, cw, chh -> saveUnitStructure(unit, h, cw, chh) })
                     val sp = platformNowMs()
                     val product = boxLayouter.incrementalLayoutForPage(
@@ -1222,6 +1396,14 @@ private val SMALL_CHAPTER_BLOCKS = 120
  * （翻到下一章前通常还有几百 ms）——1.2 s 是两者的折中。
  */
 private val B2_DISPATCH_QUIET_MS = 1_200L
+
+/**
+ * 当前页快照的写盘防抖（ms）：落位后静置这么久才写，读者连翻只写最后那一页。
+ *
+ * 取值只需大于"一次翻页动画 + 落位"的间隔（真机 300–600ms），又不能大到"翻一页就切走应用
+ * 还没写下去"。0 也可用（每次落位都写），但翻页连击时会做几十次几十 KB 的无用写。
+ */
+private val PAGE_SNAPSHOT_DEBOUNCE_MS = 700L
 
 /**
  * Header-lift threshold. When a large chapter's anchor block lies within the first
@@ -4097,6 +4279,13 @@ private fun finishCanonicalBackground(
                 " ab=${AbSwitch.describe()} ctl=${"%.2f".format(AbSwitch.controlMs())}ms"
         } else ""
         Logger.w(logTag, "jump: $where -> ch=$chapter path=${u.pathMarker} tableHit=$hit temp=${u.inProgress != null}$tail")
+        // 落位成功后把"这一页排好的结果"存盘（异步防抖）：下次开书直接拿来画，不再塑形。
+        // 落位页取"当前绑定的那一页"（窗口成形记录的首个成形页）；临时表会话的页切点与磁盘表
+        // 不同，`capturePageSnapshot` 会自行拒绝。
+        val landed = u.inProgress?.currentSlice
+            ?: u.pageSlices.getOrNull(u.shapedPageFrom)?.takeIf { it.firstLine >= 0 }
+            ?: u.firstPage()
+        landed?.let { schedulePageSnapshot(chapter, it.charStart) }
     }
 
     /** Locates the first content page of (or after) [index], skipping blank/cover chapters.
@@ -4313,11 +4502,13 @@ private fun finishCanonicalBackground(
         notifyFlip()
         // P4: a flip that lands in [chapter] prewarms both neighbors (the chapters a next out-of-bounds
         // flip can enter) on the background P track — so the crossing's parse leaves the flip thread.
-        return navigateAdjacentPage(chapter, slice, direction)?.also { (ch, _) ->
+        return navigateAdjacentPage(chapter, slice, direction)?.also { (ch, landed) ->
             preflightNeighbors(ch)
             // R7: belt-and-braces B2 dispatch (epoch-deduped no-op unless nothing dispatched yet,
             // e.g. open-prewarm still in flight) — navigation never cancels in-flight work (S7).
             requestWholeBookRelayout()
+            // 翻页落位后同上：把新的当前页存成快照（异步防抖，连翻只写最后一页）。
+            schedulePageSnapshot(ch, landed.charStart)
         }
     }
 

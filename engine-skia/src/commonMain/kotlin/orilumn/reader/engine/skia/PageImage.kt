@@ -1,5 +1,7 @@
 package orilumn.reader.engine.skia
 
+import kotlinx.serialization.Serializable
+
 /**
  * 章节插图绘制指令（与 [DrawLine] 同源：盒流几何 + 章节绝对 Y）。
  *
@@ -13,6 +15,7 @@ package orilumn.reader.engine.skia
  * @property widthPx/heightPx 解码目标尺寸（盒流已经算好的 used 尺寸，宿主按此解码即贴）。
  * @property clip E11：祖先链 `overflow` 裁剪（null = 不裁），与 [yTop] 同坐标系。
  */
+@Serializable
 data class PageImage(
     val src: String,
     val chapterHref: String,

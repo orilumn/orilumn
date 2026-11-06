@@ -1,5 +1,7 @@
 package orilumn.reader.engine.skia
 
+import kotlinx.serialization.Serializable
+
 /**
  * 标注装饰类型（渲染层）。
  *
@@ -33,6 +35,7 @@ enum class DecorStroke {
  * **区间是章内全局字符偏移**，不是某一行的局部下标；[projectDecor] 会按行裁切，
  * 绘制侧再用 [DrawLine.charBase] 换算回行文本坐标。
  */
+@Serializable
 data class DecorRange(
     val start: Int,
     val endExclusive: Int,

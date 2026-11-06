@@ -1,5 +1,6 @@
 package orilumn.reader.engine.laying
 
+import kotlinx.serialization.Serializable
 import orilumn.reader.engine.css.ComputedStyle
 import orilumn.reader.engine.css.OverflowValue
 import orilumn.reader.engine.html.MarkupElement
@@ -15,6 +16,7 @@ import kotlin.math.roundToInt
  * 坐标口径与 [LayoutBox] / [DrawRect] 一致（章节绝对 Y；轻路径是窗口局部 Y，与行流同一平移）。
  * 本文件只算「谁裁、裁成什么样」，落墨侧（canvas.clipRect / DrawLine.clip / PageImage.clip）负责施加。
  */
+@Serializable
 data class ClipRect(val left: Int, val top: Int, val right: Int, val bottom: Int) {
     val isEmpty: Boolean get() = right <= left || bottom <= top
 

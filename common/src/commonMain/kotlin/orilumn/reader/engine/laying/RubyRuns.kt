@@ -1,5 +1,6 @@
 package orilumn.reader.engine.laying
 
+import kotlinx.serialization.Serializable
 import orilumn.reader.engine.css.ComputedStyle
 import orilumn.reader.engine.css.WhiteSpace
 import orilumn.reader.engine.html.MarkupElement
@@ -19,6 +20,7 @@ import kotlin.math.roundToInt
  * - 无 base 的 rt（非法输入）：丢弃 run（回退行内上标旧路径，不崩版式）；
  * - `rp` 永不配对（`display:none` 下根本不在字符流里；无 UA 时按普通文本顺排）。
  */
+@Serializable
 data class RubyRun(
     /** 基字区间（叶文本坐标，半开）。 */
     val start: Int,

@@ -11,8 +11,10 @@ import orilumn.reader.io.Logger
  * When the layout key (font size, line spacing, width/height, ...) changes, a new hash is
  * produced and the old file becomes orphaned.
  *
- * **Only the pagination table is persisted — never the shaping results.** The table is pure,
- * deterministic geometry (char offsets + block ranges) that can be regenerated from scratch.
+ * **本表只回答"页在哪"——不保存塑形结果。** 表是纯确定性的几何（字符偏移 + 块区间），随时可重算。
+ * 至于"这一页画什么"（行文本/行几何/盒背景/插图槽位），由**当前页快照**单独保存：一本书只有
+ * 一份、翻页即覆盖（`PageSnapshot` / `PageSnapshotStore`，在 `:engine-skia`）。两者分工明确：
+ * 本表按（章 × 参数）多份存档，快照按书一份、只记最后那一页。
  *
  * C1-1: moved verbatim from the app shell into common — the single source both the Android
  * adapter (`orilumn.reader.engine.PaginationCacheStore`) and the shared [PaginationCacheStore]

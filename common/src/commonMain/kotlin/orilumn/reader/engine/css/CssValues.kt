@@ -1,5 +1,6 @@
 package orilumn.reader.engine.css
 
+import kotlinx.serialization.Serializable
 import kotlin.math.roundToInt
 
 /**
@@ -73,6 +74,7 @@ fun Length.resolve(
  *
  * Coordinates are full-text (same space as the leaf text); the drawer clips them to each line range.
  */
+@Serializable
 data class ColorRun(
     val start: Int,
     val endExclusive: Int,
@@ -100,6 +102,7 @@ data class ColorRun(
  * Coordinates are full-text (same space as the leaf text); the breaker shapes them and the drawer
  * clips per line.
  */
+@Serializable
 data class FontRun(
     val start: Int,
     val endExclusive: Int,

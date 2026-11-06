@@ -1,5 +1,6 @@
 package orilumn.reader.engine.laying
 
+import kotlinx.serialization.Serializable
 import orilumn.reader.engine.css.ComputedStyle
 import orilumn.reader.engine.css.VerticalAlign
 import orilumn.reader.engine.css.WhiteSpace
@@ -17,6 +18,7 @@ import orilumn.reader.engine.html.MarkupElement
  *  - TOP +0.30em / BOTTOM −0.30em（行盒顶/底近似；完整行内布局是后续工作）。
  * 嵌套时内层覆盖外层（CSS 基线上下文组成在此简化为覆盖，EPUB 实测罕见嵌套）。
  */
+@Serializable
 data class BaselineShift(
     val start: Int,
     val endExclusive: Int,

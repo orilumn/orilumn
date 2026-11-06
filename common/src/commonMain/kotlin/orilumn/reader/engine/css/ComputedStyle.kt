@@ -1,5 +1,7 @@
 package orilumn.reader.engine.css
 
+import kotlinx.serialization.Serializable
+
 /**
  * The final, per-element computed style (flat, resolved to concrete values, pure JVM).
  *
@@ -11,6 +13,7 @@ package orilumn.reader.engine.css
  * The 8 box edges; kept on one object so the vertical spacing ([top] + [bottom]) is easy to sum
  * and the horizontal one ([left] + [right]) trims the line-breaking width.
  */
+@Serializable
 data class Edges(
     val top: Float = 0f,
     val right: Float = 0f,
@@ -44,6 +47,7 @@ enum class BreakRule { AUTO, AVOID, ALWAYS }
 enum class BorderStyle { NONE, SOLID, DASHED, DOTTED }
 
 /** Per-edge `border-style`; each edge defaults to [BorderStyle.NONE]. */
+@Serializable
 data class BorderStyleEdges(
     val top: BorderStyle = BorderStyle.NONE,
     val right: BorderStyle = BorderStyle.NONE,
@@ -57,6 +61,7 @@ data class BorderStyleEdges(
 }
 
 /** Per-edge resolved border colors (`#aarrggbb` hex); a null row value → currentColor (text color). */
+@Serializable
 data class BorderColorEdges(
     val top: String?,
     val right: String?,
@@ -67,6 +72,7 @@ data class BorderColorEdges(
 }
 
 /** Border corner radii (px). Consumed at draw time (P3); `%` lives in [ComputedStyle.borderRadiusPct]. */
+@Serializable
 data class CornerRadius(
     val topLeft: Float = 0f,
     val topRight: Float = 0f,
@@ -119,6 +125,7 @@ data class CornerRadius(
 }
 
 /** CSS `box-shadow` (none when null; blur/offset in px; null color = currentColor). */
+@Serializable
 data class BoxShadow(
     val dx: Float,
     val dy: Float,
@@ -127,6 +134,7 @@ data class BoxShadow(
 )
 
 /** CSS `text-shadow` (none when null; blur/offset in px; null color = currentColor). */
+@Serializable
 data class TextShadow(
     val dx: Float,
     val dy: Float,
@@ -145,6 +153,7 @@ enum class BackgroundRepeat { REPEAT, REPEAT_X, REPEAT_Y, NO_REPEAT }
  * at compute time (em/rem/unitless → px). Single-keyword shorthands default the other axis
  * to `center` per spec.
  */
+@Serializable
 data class BackgroundPosition(
     val xPct: Float = 0f,
     val yPct: Float = 0f,

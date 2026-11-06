@@ -1,5 +1,7 @@
 package orilumn.reader.engine.skia
 
+import kotlinx.serialization.Serializable
+
 /**
  * 一页可视窗口内的盒背景/边框绘制指令（与 [DrawLine]/[PageImage] 同一章节绝对 Y 坐标系，
  * 阅读面做同一平移；顺序即绘制顺序，祖先后代子——父背景永远在子内容之下）。
@@ -16,6 +18,7 @@ package orilumn.reader.engine.skia
  * @property shadow 盒阴影（颜色已解；null 即无）。
  * @property strokeWidthPx 边框环描边宽（>0 即均匀边框圆角环描边；0 即填充带）。
  */
+@Serializable
 data class PageBackground(
     val left: Int,
     val yTop: Int,

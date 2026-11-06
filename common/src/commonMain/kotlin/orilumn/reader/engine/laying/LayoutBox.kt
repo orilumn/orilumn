@@ -1,5 +1,6 @@
 package orilumn.reader.engine.laying
 
+import kotlinx.serialization.Serializable
 import orilumn.reader.engine.css.BreakRule
 import orilumn.reader.engine.css.ComputedStyle
 import orilumn.reader.engine.css.FontRun
@@ -338,6 +339,7 @@ data class FloatLead(val lines: Int, val widthPx: Int, val xOffPx: Float)
  * @property endExclusive 首字在叶文本里的结束下标（开区间）：行高账与基线账把这段字号剔除。
  * @property heightPx 下沉盒高（px）= 首字那行的行高（`字号 × 行高比例`，比例继承）。
  */
+@Serializable
 data class CapFloat(
     val widthPx: Int,
     val lines: Int,

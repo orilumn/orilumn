@@ -1,5 +1,6 @@
 package orilumn.reader.engine.skia
 
+import kotlinx.serialization.Serializable
 import orilumn.reader.engine.css.BorderStyle
 import orilumn.reader.engine.css.CornerRadius
 import orilumn.reader.engine.css.DecorationLine
@@ -62,9 +63,10 @@ import kotlin.math.roundToInt
  * @property nowrap 本行来自 `white-space: pre/nowrap` 不换行段：整形不限宽（单行溢出绘制），
  *   与断行侧 `breakLeafLines` 不换行语义一致（P1-2）。
  */
+@Serializable
 data class DrawLine(
     val text: String,
-    val range: IntRange,
+    @Serializable(with = IntRangeSerializer::class) val range: IntRange,
     val yTop: Int,
     val yBottom: Int,
     val alignment: TextAlign,
@@ -178,6 +180,7 @@ data class DrawLine(
      * [TableCellLines] 为已进 [PageImage] 的 U+FFFC 占位记录本区间；绘制以透明墨隐藏
      *（占宽保留，与 P6-b 注音源文同法），字符流/断行/点按坐标不变。
      */
+    @Serializable(with = IntRangeListSerializer::class)
     val imgHidden: List<IntRange> = emptyList(),
     /**
      * E10：`visibility: hidden` 覆盖区间（[text] 全文本坐标系，空 = 全叶可见）。
@@ -186,6 +189,7 @@ data class DrawLine(
      * 一并跳过，advances 与断行不变（与 [imgHidden] 同一份「占宽不画」机制）。
      * 由 [DrawLineBuilder] / 塑形 shape 从与 [text] 同构的遍历产出。
      */
+    @Serializable(with = IntRangeListSerializer::class)
     val visibilityHiddenRuns: List<IntRange> = emptyList(),
     /**
      * 混排字距（em，0 = 关，[orilumn.reader.engine.text.TypographicProfile.cjkLatinSpacingEmApplied]

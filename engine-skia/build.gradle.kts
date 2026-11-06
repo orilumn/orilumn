@@ -3,6 +3,10 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 plugins {
     alias(libs.plugins.kotlin.multiplatform)
     alias(libs.plugins.android.kmp.library)
+    // 页面快照落盘：绘制模型（DrawLine/盒/图）本身是纯数据，沿用 :common 已有的
+    // kotlinx.serialization 口径序列化，避免手写几十个字段的编解码器（漏一个字段＝画错一格，
+    // 且编译器不会提醒）。
+    alias(libs.plugins.kotlin.serialization)
 }
 
 // Skiko JVM 原生库按当前 OS 选择（jvmMain runtimeOnly 读 project.extra，
@@ -35,6 +39,7 @@ kotlin {
             // 经 :common 透传（均为其 api/implementation 依赖，此处显式声明防悬空）。
             api(libs.kotlinx.coroutines.core)
             api(libs.okio)
+            implementation(libs.kotlinx.serialization.json)
         }
 
         // jvmMain 的桌面 runtime（skiko-awt so/dylib）仅 JVM 可见：android 有独立

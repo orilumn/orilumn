@@ -1,5 +1,6 @@
 package orilumn.reader.engine.laying
 
+import kotlinx.serialization.Serializable
 import orilumn.reader.engine.css.ComputedStyle
 import orilumn.reader.engine.css.DecorationLine
 import orilumn.reader.engine.css.DecorationStyle
@@ -25,6 +26,7 @@ import orilumn.reader.engine.html.MarkupElement
  * @property fontSizePx 声明元素**自身字号**：em 口径的装饰线位置/粗细与 `auto` 粗细的度量基准。
  * @property families / weight / italic / monospace 声明元素自身字体（取度量用）。
  */
+@Serializable
 data class DecorationPaint(
     val lines: Set<DecorationLine>,
     val colorHex: String?,
@@ -45,6 +47,7 @@ data class DecorationPaint(
  * 从而三种线型 / 颜色 / 粗细 / 线型样式 / skip-ink 都能表达。`paints` 为空即不发本 run
  * （无装饰叶回空表，绘制零开销）。
  */
+@Serializable
 data class TextDecorationRun(
     val start: Int,
     val endExclusive: Int,

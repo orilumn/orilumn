@@ -5,6 +5,7 @@ import orilumn.reader.engine.css.EmphasisStyle
 import orilumn.reader.engine.css.FontRun
 import orilumn.reader.engine.css.TextAlign
 import orilumn.reader.engine.css.TextShadow
+import orilumn.reader.engine.html.MarkupElement
 import orilumn.reader.engine.layout.ListMarkers
 
 /**
@@ -54,6 +55,8 @@ data class ShapedGeometry(
      * 隐藏字符不落墨但保留占位（见 [ParagraphShapeRef.shapeVisibilityHiddenRuns]）。
      */
     override val visibilityHiddenRuns: List<IntRange> = emptyList(),
+    /** 叶内行内 `<img>`（文档序 = [text] 里 U+FFFC 的出现序；空 = 无）。 */
+    val inlineImages: List<MarkupElement> = emptyList(),
     override val fontRequest: ShapeFontRequest = ShapeFontRequest(null, emptyList(), 400, false, false),
 ) : ParagraphShapeRef {
     override val shapeText: String get() = text
@@ -76,6 +79,7 @@ data class ShapedGeometry(
     override val shapeInlineBoxRuns: List<InlineBoxRun> get() = inlineBoxRuns
     override val shapeCapFloat: CapFloat? get() = capFloat
     override val shapeVisibilityHiddenRuns: List<IntRange> get() = visibilityHiddenRuns
+    override val shapeInlineImages: List<MarkupElement> get() = inlineImages
     override val shapeAlpha: Float get() = alpha
     override val shapeEmphasis: EmphasisStyle get() = emphasis
     override val shapeEmphasisUnder: Boolean get() = emphasisUnder

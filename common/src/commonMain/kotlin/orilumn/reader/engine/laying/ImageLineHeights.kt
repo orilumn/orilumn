@@ -21,7 +21,13 @@ import orilumn.reader.engine.html.MarkupElement
  */
 private val FALLBACK_STYLE = ComputedStyle(fontSizePx = 16f, lineHeightRatio = 1.5f)
 
-internal fun inlineImageEls(
+/**
+ * 叶内行内 `<img>`（文档序 = 叶文本里 U+FFFC 的出现序）。
+ *
+ * 断行/塑形（行高）、绘制占位隐藏、页面图几何三处必须共用这一份顺序：
+ * 各自重扫子树会在 `display:none`/块级兄弟的边界上分叉，表现为「图贴到别的字上」。
+ */
+fun inlineImageEls(
     root: MarkupElement,
     classify: BlockClassify,
     hidden: HiddenCheck = HIDDEN_NONE,
@@ -72,10 +78,15 @@ fun adjustLineHeightsForInlineImages(
      * and falls through to [FALLBACK_STYLE], the old behavior).
      */
     resolveStyle: ((MarkupElement) -> ComputedStyle?)? = null,
+    /**
+     * 已算好的行内图队列（与 [text] 的 U+FFFC 同序；null = 本函数现扫 [root]）。
+     * 塑形层把同一份表存进 `ShapedGeometry`，绘制侧不再重扫子树。
+     */
+    images: List<MarkupElement>? = null,
 ): List<Int> {
     if (broken.isEmpty() || text.indexOf('\uFFFC') < 0) return broken.map { it.heightPx }
     // Queue of images in U+FFFC order; consumed as their slots appear line by line.
-    val imgs = ArrayDeque(inlineImageEls(root, classify, hidden))
+    val imgs = ArrayDeque(images ?: inlineImageEls(root, classify, hidden))
     if (imgs.isEmpty()) return broken.map { it.heightPx }
     // Index of the k-th U+FFFC in [text] → image lookup without re-scanning per line.
     val fffcAt = ArrayList<Int>()

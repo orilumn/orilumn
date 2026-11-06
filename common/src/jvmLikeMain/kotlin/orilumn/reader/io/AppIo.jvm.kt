@@ -43,6 +43,8 @@ private val queueDepth = AtomicInteger(0)
 /** 拥塞时丢掉的行数（drain 到水位线下时记一条 marker，不断证据链）。 */
 private val droppedLines = AtomicInteger(0)
 private val workerRef = AtomicReference<Thread?>(null)
+/** 起 drain 线程的互斥（查活-建线程-记账三步不可分；见 `ensureWorker`）。 */
+private val workerLock = Any()
 private const val MAX_LINE_BYTES = 4000
 /** 内存队列上限（条）。行均 ~200B，2000 条 ≈ 0.5MB —— 突发再大堆也不涨。 */
 private const val MAX_QUEUE = 2000
@@ -85,11 +87,23 @@ public actual object Logger {
         ensureWorker()
     }
 
+    /**
+     * 保证有一个 drain 线程在跑。
+     *
+     * **不能只看引用非空**：线程【先 start、后记账】（`thread(...)` 立即启动），它可能在
+     * `workerRef.set(t)` 之前就把队列排空并退出；随后记账把**已死线程**存进 `workerRef`，
+     * 于是此后每次 `ensureWorker` 都判定「有线程」直接返回 —— 全场再无线程落盘，
+     * 队列无限积压（实测一次运行积压 1052 条后日志彻底静音，现场看起来像「开书卡死」）。
+     * 故判「活着」必须问 `isAlive`，并把「查-建-记账」放进锁里，避免两个入队者各起一条线程。
+     */
     private fun ensureWorker() {
-        if (workerRef.get() != null) return
-        // kotlin.concurrent.thread 默认【立即 start】；CAS 胜出者直接复用该线程（CAS 失败者让出，无二次 start）
-        val t = thread(name = "orilumn-log", isDaemon = true, block = ::drain)
-        workerRef.compareAndSet(null, t)
+        val cur = workerRef.get()
+        if (cur != null && cur.isAlive) return
+        synchronized(workerLock) {
+            val now = workerRef.get()
+            if (now != null && now.isAlive) return
+            workerRef.set(thread(name = "orilumn-log", isDaemon = true, block = ::drain))
+        }
     }
 
     private fun drain() {
@@ -104,7 +118,8 @@ public actual object Logger {
                 write(entry)
             }
         } finally {
-            workerRef.set(null)
+            // 只清自己：新 worker 可能已由并发的 ensureWorker 起好，别把它抹掉。
+            workerRef.compareAndSet(Thread.currentThread(), null)
         }
     }
 

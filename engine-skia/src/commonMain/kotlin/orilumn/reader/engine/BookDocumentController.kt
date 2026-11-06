@@ -34,6 +34,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
@@ -228,6 +229,41 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
      *  On panel close, [finalizeRelayoutAll] re-runs the canonical/full relayout wholesale. */
     var deferCanonical: Boolean = false
 
+    /**
+     * 拉窗口 / 拖分栏手势在途（与 [deferCanonical] 同义、来源不同）：几何每帧都在变，整章 B1 /
+     * 整书 B2 / 邻页预排产出的表下一帧就作废（纯孤儿），却会和第一优先级的锚页重排抢同一把
+     * `layoutMutex` 与 CPU——实测拖窗时锚页重排被饿到 0.5–1.9 秒，肉眼就是「窗口先拉开、内容好久
+     * 才出现」。故手势期间只跑锚页重排，其余一律让路（总则第三优先级让位第一优先级）。
+     *
+     * 生命周期归用户层（桌面壳）：尺寸开始变 → [beginViewportGesture]；收口那次重排前 →
+     * [endViewportGesture]。与面板互不干扰（两者可同时成立）。
+     */
+    private var deferCanonicalForViewport: Boolean = false
+
+    /** canonical（B1/B2/整书）此刻是否该让路：面板打开 **或** 视口手势在途。 */
+    private val canonicalDeferred: Boolean get() = deferCanonical || deferCanonicalForViewport
+
+    /**
+     * 视口手势开始（第一优先级接管）：钳住后台 canonical，并就地砍掉已经派出去的低档活。
+     *
+     * 为什么必须砍而不是等它自己跑完：它们全都按**旧视口指纹**在排，几何一变就是废活；
+     * 而锚页重排要跟同一把 `layoutMutex` 与同一批 CPU 争，等它跑完等于让读者盯着黑窗。
+     * 幂等：手势内每帧都会调，只有第一次真正生效。
+     */
+    fun beginViewportGesture() {
+        if (deferCanonicalForViewport) return
+        deferCanonicalForViewport = true
+        scheduler.cancelForRaster(TaskScheduler.PRIO_FLIP)
+        Logger.w(logTag, "viewport gesture begin: background cancelled")
+    }
+
+    /** 视口手势结束（收口提交之前解抑）：后续 B1/B2 照常派发（B2 自己还有静默合并）。 */
+    fun endViewportGesture() {
+        if (!deferCanonicalForViewport) return
+        deferCanonicalForViewport = false
+        Logger.w(logTag, "viewport gesture end")
+    }
+
     /** Global layout epoch (P2): monotonically increasing; incremented on every [prepareRelayout].
      *  Every background job carries the epoch it was launched under and skips when it is stale
      *  (a newer params/target cycle superseded it). */
@@ -248,6 +284,9 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
      *
      *  与 skip-fresh 的分工：一个挡派发、一个挡执行。两者都要。 */
     private var lastDispatchEpoch: Long = -1L
+
+    /** 整书 B2 的静默合并计时（见 [requestWholeBookRelayout]）：新请求取消旧计时，只留最后一趟。 */
+    private var b2DispatchJob: Job? = null
 
     /** The chapter most recently prepared by [prepareRelayout]; the B2 scan skips it (B1 owns its
      *  canonical pass). */
@@ -1109,6 +1148,15 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
 private val SMALL_CHAPTER_BLOCKS = 120
 
 /**
+ * 整书 B2 派发前的静默窗口（ms，第三优先级）。
+ *
+ * 见 [BookDocumentController.requestWholeBookRelayout]：请求只登记，静默这么久才真派。
+ * 取值只需大于「一次拖窗/连点调参的抖动间隔」，又不能让开书后的整书预热慢到读者察觉
+ * （翻到下一章前通常还有几百 ms）——1.2 s 是两者的折中。
+ */
+private val B2_DISPATCH_QUIET_MS = 1_200L
+
+/**
  * Header-lift threshold. When a large chapter's anchor block lies within the first
  * [HEAD_START_BLOCK_LIMIT] blocks (~5 pages at ~20 blocks/page), the anchor is *lifted to the
  * chapter head* (anchorChar = 0) and the temp table is streamed from block 0. This is nearly as fast
@@ -1276,7 +1324,8 @@ private fun startAnchorStream(
     // Background pre-shape (P10/§6.2): the temp session is a bounded sliding window ±1 from the
     // CURRENT pointer — keep the immediate forward AND backward neighbor shaped so the first flips in
     // either direction are served instantly. Each flip re-dispatches the prefill for the new pointer.
-    scheduleTempPrefill(unit, ip)
+    // 视口手势期间跳过：±1 预排按**当前**几何塑形，下一帧尺寸变了就是废活，还和锚页抢槽。
+    if (!deferCanonicalForViewport) scheduleTempPrefill(unit, ip)
 
     // Background: full-canonical layout from the chapter head (LINE_DISK), then persist. The passed-in
     // [prepare] is the light (unshaped) one used by the foreground temp pages, so the canonical pass
@@ -1285,7 +1334,7 @@ private fun startAnchorStream(
     // is live — and [finalizeRelayoutAll] (panel close) re-runs it, so live slider tweaks never contend
     // with a full-chapter shape. Runs on the dedicated canonicalDispatcher (single thread) so it never
     // competes with the foreground flip thread.
-    if (!deferCanonical) {
+    if (!canonicalDeferred) {
         // 原则 §3.4：档位由「目标页距章首 d」决定。birth 这一刻通常还判不出（锚点页的前驱页
         // 尚未成形）→ 第 6 档；等 fillBackward 塑出前驱页后由 maybeBoostB1ForHeadProximity 升档。
         // B1 没派（表已新鲜）则不重扫整书——否则每次落位都把收敛中的 B2 打散重来，
@@ -1387,7 +1436,7 @@ private fun dispatchB1(
  *  大概率还没排完，等它排完等于交接时手上没有表。只在 d 判定为 1 时才派；d 为 0（已在
  *  交接点，同步承接）/ 2（更深）/ null（判不出）一律不动。 */
 private fun maybeBoostB1ForHeadProximity(unit: ChapterUnit, ip: InProgressPagination) {
-    if (deferCanonical) return
+    if (canonicalDeferred) return
     val d = tempHeadDistancePages(ip) ?: return
     if (d != 1) return
     val bc = layouter as? BoxChapterLayouter ?: return
@@ -3241,7 +3290,7 @@ private fun finishCanonicalBackground(
     fun requestWholeBookRelayout(force: Boolean = false) {
         val epoch = layoutEpoch
         if (!force && epoch <= lastDispatchEpoch) return
-        if (deferCanonical) return
+        if (canonicalDeferred) return
         // 开书闸门：整书章扫描是最低档的投机活，绝不能和锚页抢 `layoutMutex`（总则 §第一优先级）。
         // 记账后返回；[releaseOpenGate] 在锚页排完时补派。放在 deferCanonical 之后：面板开着
         // 的时候本来就不扫整书，没必要记账。
@@ -3261,20 +3310,29 @@ private fun finishCanonicalBackground(
         // function; correctness never depends on it (every non-current chapter still completes
         // its full pass + persist).
         val order = remainingScanOrder(current)
-        Logger.w(logTag, "whole-book B2 start epoch=$epoch paramHash=$paramHash skipCh=$current order=${order.take(8)}…")
-        var submitted = 0
-        for (i in order) {
-            if (i == current) continue // B1 owns the active chapter's canonical pass
-            scheduler.submit(TaskScheduler.Task(
-                key = scanKey(i),
-                priority = TaskScheduler.PRIO_B2_CHAPTER,
-                block = { b2ChapterTask(i, bc, contentWidth, contentHeight, paramHash) },
-            ))
-            submitted++
-        }
-        // P1a: pass-completion visibility (the producer rewrite dropped the old done-log).
-        // Best-effort: a newer dispatch superseding this pass silences it.
-        bgScope.launch {
+        // 派发**静默合并**：整书 B2 是第三优先级的最低档，一次拖窗/连点会连来好几趟请求，
+        // 每趟都立刻撒 24 个整章任务 ⇒ 满槽后台把第一优先级的锚页重排挤到 0.5–1.9 秒
+        // （真机日志：拖窗期每 1 秒就有一趟 B2 起跑，锚页重排全程在等锁）。故请求只登记，
+        // 等**最后一次**请求之后静默 [B2_DISPATCH_QUIET_MS] 再真派；期间来的新请求直接
+        // 取消旧计时（几何/参数又变了，上一趟已经没意义）。任务体里的 skip-fresh 挡执行，
+        // 这里挡派发——两件事不重样。
+        b2DispatchJob?.cancel()
+        b2DispatchJob = bgScope.launch {
+            delay(B2_DISPATCH_QUIET_MS)
+            if (layoutEpoch != epoch || canonicalDeferred) return@launch
+            Logger.w(logTag, "whole-book B2 start epoch=$epoch paramHash=$paramHash skipCh=$current order=${order.take(8)}…")
+            var submitted = 0
+            for (i in order) {
+                if (i == current) continue // B1 owns the active chapter's canonical pass
+                scheduler.submit(TaskScheduler.Task(
+                    key = scanKey(i),
+                    priority = TaskScheduler.PRIO_B2_CHAPTER,
+                    block = { b2ChapterTask(i, bc, contentWidth, contentHeight, paramHash) },
+                ))
+                submitted++
+            }
+            // P1a: pass-completion visibility (the producer rewrite dropped the old done-log).
+            // Best-effort: a newer dispatch superseding this pass silences it.
             scheduler.awaitIdle()
             if (layoutEpoch == epoch) {
                 Logger.w(logTag, "whole-book B2 pass drained epoch=$epoch submitted=$submitted")

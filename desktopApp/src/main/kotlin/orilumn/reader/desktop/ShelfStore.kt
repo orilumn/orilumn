@@ -24,6 +24,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import okio.Path.Companion.toPath
 import java.io.File
+import java.util.Properties
 
 /** S33 前的书目索引行（JSON）：仅导入期读取，导入后删除文件（见 [DesktopShelfStore.load]）。 */
 @Serializable
@@ -111,7 +112,23 @@ class DesktopShelfStore(root: File) : ShelfRepository {
     private fun openDb(): LibraryDb {
         dbFile.parentFile.mkdirs()
         val fresh = !dbFile.exists()
-        val driver = JdbcSqliteDriver("jdbc:sqlite:${dbFile.absolutePath}")
+        // 文件库不能用默认驱动参数（「导入图书报 database is locked」的真因）：
+        // SQLDelight 2.4 的 JdbcSqliteDriver 对**文件**库选 ThreadedConnectionManager ——
+        // **每条线程一条 JDBC 连接**（不是共有一条）。于是字体扫描批量写 font_faces 与
+        // 导入回填封面（updateBook）各在自己线程/连接上写同一个文件。默认参数下只能干等
+        // xerial 自带的 3s：等不到就抛 SQLITE_BUSY，界面报「数据库被锁定」（字体扫描那边
+        // 持锁稍久、或查表时正撞上提交，3s 就不够）。
+        // 对策两条都必须在**建连接时**下发（busy_timeout 是每条连接自己的设置，
+        // 开库后 execute 一次只作用于当前那条）：
+        // - journal_mode=WAL：读写互不阻塞，写只跟写抢；
+        // - busy_timeout=5s：写写相撞时排队等待，而不是干等到 3s 就失败。
+        // 实测 Properties 会被 ThreadedConnectionManager 的每条新连接继承（PRAGMA 回读一致）。
+        val driverProps = Properties().apply {
+            setProperty("journal_mode", "WAL")
+            setProperty("busy_timeout", "5000")
+            setProperty("synchronous", "NORMAL")
+        }
+        val driver = JdbcSqliteDriver("jdbc:sqlite:${dbFile.absolutePath}", driverProps)
         val current = OrilumnDb.Schema.version
         if (fresh) {
             OrilumnDb.Schema.create(driver)

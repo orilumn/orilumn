@@ -63,14 +63,45 @@ class FirstLineIndentSingleLineOverflowTest {
     private val ratio = 1.5f
 
     /**
-     * 真机字体栈（真书 `p { font-family: STSong, serif }`）。
+     * 真书字体栈（真书 `p { font-family: STSong, serif }`）经**生产同源解析**后，取第一张
+     * **真的能画中文的面**。
      *
-     * 必须带上：本 bug 是 SkParagraph 的**字体相关**行为——实测同一段字在真机字体栈下
-     * 「整段单行」只看 `nat ≤ 版心`（缩进完全不参与，故障复现），而在无族（`emptyList()`）
-     * 的回退字体下缩进却被算进去了（不复现）。所以回归必须钉在真机字体栈上，否则测了个寂寞。
-     * 族名缺失时 Skia 按字形回退，仍按「不溢出」不变量断言，绝不会假绿。
+     * ## 为什么不能写死 `STSong`
+     *
+     * `STSong` 是 macOS 自带族，Linux / Android 上并不存在。写死它等于让本用例在非 macOS 主机上
+     * 拿「查无此族」去撞 Skia 的**全库字形回退**：既没测到「真书衬线面」这个前提，单次 layout
+     * 还要付整库扫描 —— 本机（442 族 / 737 面）实测一段 26 字中文 `STSong,serif` = **1927ms/次**、
+     * 空栈 = 140ms/次；本用例按像素扫窗口要几百次 layout，2026-11-04 实测 **924 秒仍未跑完**
+     * （整轮 195 例其余加起来不到 25 秒）。根因是族名不可移植，不是用例要测的性质慢。
+     *
+     * ## 为什么解析后还要挑「能画中文」的那一张
+     *
+     * 生产 [SkParagraphFactory.resolveFamilies] 的语义是「拉丁实族打头、CJK 候选随后」（渲染顺序，
+     * 对拉丁正文是对的）；但本用例的被测性质是**衬线 CJK 面的单行缩进**，所以取解析链里第一个
+     * 真正覆盖中文的面。macOS 上它仍是 `STSong`（原口径一字不变），Linux 上落到本机装着的宋体
+     * （实测 142ms/次，`nat` 与断行结果和 STSong 链逐值相同）。
+     *
+     * 一张都挑不到时退回解析结果：断言仍按「不溢出 / 必须折行」不变量生效，不会假绿。
      */
-    private val families = listOf("STSong", "serif")
+    private val families: List<String> = run {
+        val resolved = SkParagraphFactory.resolveFamilies("p", listOf("STSong", "serif"), false)
+        val mgr = SkParagraphFactory.defaultFontMgr()
+        val cjkSerif = resolved.firstOrNull { name ->
+            val face = runCatching { mgr.matchFamilyStyle(name, org.jetbrains.skia.FontStyle.NORMAL) }.getOrNull()
+            face != null && runCatching { face.getUTF32Glyph('中'.code).toInt() }.getOrDefault(0) != 0
+        }
+        listOfNotNull(cjkSerif).ifEmpty { resolved.toList() }
+    }
+
+    /**
+     * 本类共用的 [FontCollection]：**建一次、反复用**（生产就是宿主建一次反复用）。
+     *
+     * `SkParagraphFactory.defaultCollection()` 每次调用都新建一个 `FontCollection` 并重设
+     * default manager，**字体匹配要在那一次调用里重做**。本类按像素扫命中窗口要跑上千次
+     * layout，每次新建的代价远大于排版本身（实测同一段 26 字中文：每次新建 164ms/次，
+     * 复用同一实例 0.0ms/次 —— 30 次合计不足 1ms）。
+     */
+    private val collection = SkParagraphFactory.defaultCollection()
 
     /** 断行度量/绘制共用的亚像素余量（同 [SkiaParagraphBreakerTest] 既有口径）。 */
     private val slack = 1f
@@ -85,7 +116,7 @@ class FirstLineIndentSingleLineOverflowTest {
     private fun naturalWidth(sub: String, fontSizePx: Float = fs): Float {
         val p = org.jetbrains.skia.paragraph.ParagraphBuilder(
             SkParagraphFactory.paragraphStyle(TextAlign.LEFT, fontSizePx, ratio, "p", families, 400, false, false, letterSpacingEm = 0f),
-            SkParagraphFactory.defaultCollection(),
+            collection,
         ).addText(sub).build()
         return try {
             p.layout(Float.MAX_VALUE)
@@ -110,7 +141,7 @@ class FirstLineIndentSingleLineOverflowTest {
         val style = SkParagraphFactory.paragraphStyle(
             alignment, fontSizePx, ratio, "p", families, weight, italic, monospace, letterSpacingEm,
         )
-        val p = org.jetbrains.skia.paragraph.ParagraphBuilder(style, SkParagraphFactory.defaultCollection())
+        val p = org.jetbrains.skia.paragraph.ParagraphBuilder(style, collection)
             .addText(sub).build()
         return try {
             p.layout(layoutWidth.coerceAtLeast(1).toFloat())
@@ -285,9 +316,14 @@ class FirstLineIndentSingleLineOverflowTest {
 
     // ---- 真书端到端（重路径 + 绘制侧投影）与重轻等价 ----
 
-    /** 真书 `stylesheet.css` 里对 `p` 生效的规则。 */
+    /**
+     * 真书 `stylesheet.css` 里对 `p` 生效的规则。
+     *
+     * 族名取 [families]（生产解析后的衬线 CJK 面），**不写死 `STSong`** —— 同 [families] 的理由：
+     * 非 macOS 主机上查无此族，每次 layout 都要撞一遍全库回退（实测 1.9s/次，本条因此要跑 17 分钟）。
+     */
     private val authorCss = """
-        p { display: block; font-family: STSong, serif; font-size: 1em; line-height: 1.2;
+        p { display: block; font-family: ${families.joinToString(", ")}; font-size: 1em; line-height: 1.2;
             text-align: justify; text-indent: 2em; margin: 0; padding: 0; border: currentColor none 0; }
     """.trimIndent()
 

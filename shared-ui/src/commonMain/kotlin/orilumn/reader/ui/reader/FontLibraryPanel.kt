@@ -60,6 +60,7 @@ import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import orilumn.reader.data.font.FontEntry
+import orilumn.reader.data.font.SubfamilyMetric
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlin.math.exp
@@ -475,24 +476,33 @@ private val CanonicalSubfamilyTokens = listOf(
  * 成员字重经 SubfamilyMetric 归一化后按数值合档排序；空白字重名展示为"默认"。
  * 斜体面不进列表——锚点本就是数值粒度（见 SkParagraphFactory.anchoredWeight），
  * 分开展示会误导（选了斜体面也不会让正文变斜）；斜体只在字体列表副标题出现。
+ *
+ * **宽度词同理（这条不是展示问题，是可不可用）：** 本仓选字只发族名 + 数字字重，宽度恒为
+ * normal（`SkParagraphFactory.runFontStyle` 的 `FontWidth.NORMAL`），所以「宽度」只有两种可能——
+ * 1. 族名本身就是那一族（`… Condensed`）：档直接可用，字重名里的宽度词是冗余的，剥掉后按字重排；
+ * 2. 族名不带宽度词、字重名却带（上游把 4 种宽度塞进一族的样式表，如 `Noto Sans Arabic` 的
+ *    `Condensed Bold`）：**这一档选不到**（选了只会落到同字重的正常宽度面），故不进列表，
+ *    免得"看得见、点得动、却不是那个字形"。
+ *
  * 点按分流（多档下钻字重页）与字重页共用同一口径。纯函数（行模型同一文件可测）。
  */
-internal fun List<FontEntry>.weightChoices(): List<Pair<Int, String>> =
-    filter { e ->
+internal fun List<FontEntry>.weightChoices(): List<Pair<Int, String>> {
+    val familyWidth = SubfamilyMetric.width(firstOrNull()?.family)
+    return map { e ->
         val raw = when (e) {
             is FontEntry.Imported -> e.face.subfamily
             is FontEntry.System -> e.subfamily
         }.trim()
-        !orilumn.reader.data.font.SubfamilyMetric.italic(raw)
-    }.map { e ->
-        val raw = when (e) {
-            is FontEntry.Imported -> e.face.subfamily
-            is FontEntry.System -> e.subfamily
-        }.trim()
-        orilumn.reader.data.font.SubfamilyMetric.weight(raw) to raw.ifBlank { "默认" }
+        raw to SubfamilyMetric.width(raw)
+    }.filter { (raw, width) ->
+        !SubfamilyMetric.italic(raw) && (width == null || width == familyWidth)
+    }.map { (raw, _) ->
+        val stripped = SubfamilyMetric.withoutWidth(raw)
+        SubfamilyMetric.weight(stripped) to stripped.ifBlank { "默认" }
     }.groupBy({ it.first }, { it.second })
         .map { (w, names) -> w to canonicalSubfamilyName(names) }
         .sortedBy { it.first }
+}
 
 /**
  * 名字行与字重副标题的间隙：行盒已是真字形墨迹高度（栅格真值），字形越高只微量加气口

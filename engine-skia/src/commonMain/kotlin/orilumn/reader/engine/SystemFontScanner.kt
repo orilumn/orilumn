@@ -8,9 +8,11 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import orilumn.reader.collections.SyncLock
 import orilumn.reader.collections.withLock
+import orilumn.reader.data.font.FontClassifier
 import orilumn.reader.data.font.FontLibrary
 import orilumn.reader.data.font.SystemFontFace
 import orilumn.reader.engine.skia.FONT_SCAN_CACHE_VERSION
+import orilumn.reader.engine.skia.systemFamilyLang
 import orilumn.reader.engine.skia.systemFontFacesFor
 import orilumn.reader.engine.skia.systemFontFamilies
 import orilumn.reader.engine.skia.systemFontFamilyHash
@@ -32,6 +34,11 @@ class SystemFontSource(
     val families: () -> List<String> = ::systemFontFamilies,
     /** ②单族字形枚举（贵；`matchFamily` + name 表）。 */
     val facesFor: (String) -> List<SystemFontFace> = ::systemFontFacesFor,
+    /**
+     * ③族语种判定（共享 [orilumn.reader.engine.skia.systemFamilyLang]，与导入同一 [FontClassifier] 口径）。
+     * 扫描只收中文/英文/通用族；判不出（[FontClassifier.LANG_INVALID]）按「未知」保留。
+     */
+    val langOf: (String) -> String = ::systemFamilyLang,
     /** 族名集合哈希（指纹的一半）。 */
     val familyHash: () -> Long = ::systemFontFamilyHash,
     /** 对**已枚举的族名快照**算哈希：扫描体用它写与自己数据配对的指纹。 */
@@ -257,17 +264,18 @@ class SystemFontScanner(
     }
 
     private suspend fun scanBody() {
-        val families = source.families()
+        val enumerated = source.families()
         // 指纹必须描述**这次实际扫描的族集**：中途系统字体变化时，收尾再读一次会把旧数据
         // 贴上新手印，下次检测误判「已最新」而跳过，已卸载族的残留行也再没人清。
         val environmentHash = source.environmentHash()
-        if (families.isEmpty()) {
+        if (enumerated.isEmpty()) {
             // 平台枚举失败：不落成果、不写指纹（否则空指纹会被当成"已扫完"，永久跳过）；同时停摆
             // 续跑看门狗，否则会「补跑又空 ⇒ 再补」空转（等下一次外部触发再试）。
             resumeSuppressed = true
             Logger.w(logTag, "scan aborted: no families enumerated (platform failure)")
             return
         }
+        val families = usableFamilies(enumerated)
         for (family in families) {
             // 被抢占（翻页/栅格/同键重提）时在此抛出；让位后由 [armResume] 的看门狗补回来。
             currentCoroutineContext().ensureActive()
@@ -281,10 +289,33 @@ class SystemFontScanner(
             notifyFamilyScanned(done, families.size)
         }
         // 收尾：删除本次全量枚举里已不存在的族残留行（空集合短路，平台失败不清库）+ 写指纹。
+        // 被语种判据剔除的族同样不在 [families] 里 ⇒ 残行随这次收尾一起清掉。
         library.pruneMissingSystemFamilies(families)
-        val fp = source.cacheVersion to (source.familyHashOf(families) xor environmentHash)
+        val fp = source.cacheVersion to (source.familyHashOf(enumerated) xor environmentHash)
         library.saveFontScanState(fp.first, fp.second)
-        Logger.w(logTag, "scan done families=${families.size}")
+        Logger.w(logTag, "scan done families=${families.size}/${enumerated.size}")
+    }
+
+    /**
+     * **系统字体过滤（共享）**：只保留中文/英文/通用族，剔除确知既无中文也无英文覆盖的
+     * 符号/按脚本分发的族（Noto 各语种族是典型），免得面板被几百个用不上的族淹没。
+     *
+     * - 判据是 [FontClassifier]（与导入同一把尺子），语言判定由 [SystemFontSource.langOf] 提供；
+     * - [FontClassifier.LANG_INVALID] 表示**判不出来**（平台不给 cmap 表），按未知保留，不丢字体；
+     * - 过滤结果为空（判据整体失效）⇒ 退回全量，宁可多列也不把字体列表清空。
+     *
+     * 指纹仍按**枚举全集**算（见 [scanBody]）：检测阶段只比族名，不必为了指纹先把每族 cmap 读一遍。
+     */
+    private fun usableFamilies(all: List<String>): List<String> {
+        val kept = all.filter { source.langOf(it) != FontClassifier.LANG_SYMBOL }
+        if (kept.isEmpty()) {
+            Logger.w(logTag, "font filter kept nothing (${all.size} families), falling back to all")
+            return all
+        }
+        if (kept.size != all.size) {
+            Logger.i(logTag, "font filter kept ${kept.size}/${all.size} families (dropped ${all.size - kept.size} symbol-only)")
+        }
+        return kept
     }
 
     /** 面板增量刷新/进度回调：UI 回调自身不该中断扫描，但要放行取消（否则吞掉抢占）。 */

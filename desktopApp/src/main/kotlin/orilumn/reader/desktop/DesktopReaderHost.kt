@@ -393,6 +393,31 @@ class DesktopReaderHost(
         }
 
     /**
+     * 视口两段式·第一段（拉窗口/拖分栏的每一帧）：只换视口 + 本章轻刷新，**不重建排版档案、
+     * 不重同步字库池**。
+     *
+     * 为什么不能直接复用 [previewToSettings]：那条是**调参**路径，第一件事 `applyProfile` 会
+     * 重建 profile 并把字库池按「槽位面」重装一遍（无按需档 ⇒ 池从 9 族缩到 6 族），
+     * 紧接着锚页重排又按章需求把 3 族装回来 —— 一帧两趟全池重装（真机每趟 48–81 MB）。
+     * 视口变化不动任何排版参数，profile 一个字节都没变，这趟纯属自伤：拖窗期日志里
+     * 每帧两条 `skia fonts refreshed` 就是它。
+     */
+    suspend fun previewViewport(chapter: Int, anchorChar: Int): ReaderPos? =
+        withContext(Dispatchers.Default) {
+            val r = controller.prepareRelayoutLight(chapter, anchorChar) ?: run {
+                Logger.w("Orilumn.Desktop", "previewViewport NULL (stale/empty) ch=$chapter")
+                return@withContext null
+            }
+            controller.bindReflow(r)
+            ReaderPos(r.chapter, r.page, atCover = false)
+        }
+
+    /** 视口手势开始/结束（见 `BookDocumentController.beginViewportGesture`）：手势期间后台让路。 */
+    fun beginViewportGesture() = controller.beginViewportGesture()
+
+    fun endViewportGesture() = controller.endViewportGesture()
+
+    /**
      * 视口尺寸应用（**拉窗口/拖分栏的每一帧**）：只换视口，返回是否变化。
      *
      * 走控制器的 [BookDocumentController.setViewportLight]：**不清磁盘表**——那两件事

@@ -10,7 +10,7 @@ import com.sun.jna.NativeLibrary
  * 拉窗口边缘 / 拖分栏缩放**不是我们的手势**，按下与抬起都轮不到内容区收：
  *  - **macOS**：窗口带系统装饰，边框缩放由 AppKit 在窗口边框的跟踪循环里直接取事件
  *    （`nextEventMatchingMask`），压根不派发给内容视图；
- *  - **Win/Linux**：走 Compose 自己的 `UndecoratedWindowResizer`。
+ *  - **Win/Linux**：窗口装饰（含缩放热区）已交回系统默认，缩放同样由窗口管理器接管。
  *
  * 而 AWT **没有**「resize 结束」回调——`componentResized` 只在尺寸**变化**那一刻发，
  * 松手那一下没有任何事件。所以「松手」只能问系统状态：左键还按着吗。
@@ -21,8 +21,8 @@ import com.sun.jna.NativeLibrary
  * ## 各平台
  *
  * - **macOS**：`[NSEvent pressedMouseButtons]`（类方法，位掩码，bit0 = 左键）。纯读全局状态，
- *   不碰窗口几何，任意线程可调（与 [MacTrafficLights] 同一套 JNA/ObjC 桥，见其「线程」一节：
- *   那条禁令针对的是**改窗口几何**，这里一次消息都不改）。
+ *   不碰窗口几何，任意线程可调（JNA/ObjC 桥的线程口径同 `MacFamilyNames`：那条禁令针对的是
+ *   **改窗口几何**，这里一次消息都不改）。
  * - **Windows**：`GetAsyncKeyState(VK_LBUTTON)`，返回值最高位置位 = 按下。
  * - **其他**：null。Linux 的 X11 要单开一条 Display 连接且 Wayland 下行为不一，
  *   暂无实机可验，宁可让调用方走「静默判据」这条已成立的回落，也不塞一段测不了的探测。

@@ -57,6 +57,29 @@ class Cascade(
 
     private val matchers: List<Matcher>
 
+    /**
+     * Per-rightmost-tag candidate lists, in **the same relative order** as [matchers].
+     *
+     * Motivation (measured 2026-11 on the GIMP book, 367-block chapter): the flat scan below cost
+     * ~0.5–1 ms **per element** because it walked every rule in the book's (large) stylesheet even
+     * with the tag prefilter. The whole-chapter structures did that thousands of times per open —
+     * seconds of the open time. Bucketing by rightmost tag keeps the exact same subsequence (so
+     * `order`/specificity tie-breaks are untouched), it just skips rules that could never match.
+     *
+     * A tag absent from the index still has candidates: every rule with an untagged rightmost
+     * compound ([anyTagMatchers]) — identical to what the flat scan would keep for it.
+     */
+    private val anyTagMatchers: List<Matcher> by lazy { matchers.filter { it.anyTag } }
+
+    /** Built lazily on first cascade: `distinct rightTags × matchers`, a one-off per engine. */
+    private val byRightTag: Map<String, List<Matcher>> by lazy {
+        val tags = HashSet<String>()
+        for (m in matchers) tags.addAll(m.rightTags)
+        val out = HashMap<String, List<Matcher>>(tags.size * 2)
+        for (t in tags) out[t] = matchers.filter { it.anyTag || t in it.rightTags }
+        out
+    }
+
     /** 含 font-family 声明的作者层规则（[authorFontFamily] 专用，构造后惰性过滤）。 */
     private val fontFamilyMatchers: List<Matcher> by lazy {
         matchers.filter { m ->
@@ -110,9 +133,8 @@ class Cascade(
         val probe = CascadeProbe.sink
         val t0 = if (probe != null) orilumn.reader.time.platformNowMs() else 0L
         val winners = HashMap<String, Winner>()
-        for (m in matchers) {
-            // Cheap tag prefilter: skip whole rules whose rightmost tags can't include this element.
-            if (!m.anyTag && el.tag !in m.rightTags) continue
+        val candidates = byRightTag[el.tag] ?: anyTagMatchers
+        for (m in candidates) {
             var matched: Selector? = null
             for (sel in m.matchers) {
                 if (sel.pseudoElement == pseudo && sel.matches(el, ancestors)) { matched = sel; break }

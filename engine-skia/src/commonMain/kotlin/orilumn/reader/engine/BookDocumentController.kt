@@ -41,6 +41,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import okio.Path
 import okio.Path.Companion.toPath
@@ -379,6 +380,9 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         openAnchorGate = false
         openGateWantsB1 = false
         openGateWantsB2 = false
+        // B1 续跑看门狗活到共享池的 scope 上（不是 bgScope），键域取消清不到它——必须显式作废代号，
+        // 否则控制器关掉之后它还会补派整章全量。清表即让所有在途看门狗下一轮自行退场。
+        b1ResumeLock.withLock { b1ResumeTokens.clear() }
         rollingLaneLock.withLock { rollingLanes.clear() }
         // 键域取消要先于 bgScope.cancel()：共享池的任务体不在 bgScope 上，不受后者影响。
         if (sharedScheduler != null) scheduler.cancelMatchingPrefixes(CONTROLLER_KEY_PREFIXES)
@@ -813,8 +817,18 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         val sheets = runCatching { store.readSheets(ns) }.getOrNull() ?: return null
         val texts = file.sheetHashes.map { sheets[it] ?: return null }
         if (texts.size != file.baseHrefs.size) return null
-        if (ChapterStructurePersist.hasMediaRules(texts)) return null
         if (ChapterStructureCodec.cssHashOf(texts) != file.cssHash) return null
+        // 视口口径：与视口无关的结构（键 0）任何版心都能用；带视口键的结构只在同一版心下成立
+        // （作者 CSS 含视口相关媒体查询时，块/叶集合随版心变化）。版心未知时宁可不复用。
+        val storedKey = file.structure.viewportKey
+        if (storedKey == 0L) {
+            if (ChapterStructurePersist.hasMediaRules(texts)) return null
+        } else {
+            if (viewW <= 0 || viewH <= 0) return null
+            val contentW = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
+            val contentH = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
+            if (storedKey != ChapterStructurePersist.viewportKeyOf(contentW, contentH)) return null
+        }
         if (!ChapterStructurePersist.apply(file.tree, file.structure, file.cssHash, unit.structureCache)) {
             return null
         }
@@ -843,18 +857,65 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         (layouter as? BoxChapterLayouter)?.bindChapterContext(href)
     }
 
-    /** Persists a freshly computed media-free chapter file (import/open backfill converge in
-     *  `ImportStructures.persistChapter`). Called with the cssHash of the just-computed cascade. */
-    private fun saveUnitStructure(unit: ChapterUnit, cssHash: Long) {
+    /** Persists a freshly computed chapter structure so the next cold open relinks instead of
+     *  re-walking the whole tree (`computeStructure` costs seconds on large chapters). Called with
+     *  the cssHash + the viewport the cascade ran at; media-affected chapters are stored tagged
+     *  with that viewport and only reused when it matches (see `ChapterStructurePersist`). */
+    private fun saveUnitStructure(unit: ChapterUnit, cssHash: Long, contentW: Int, contentH: Int) {
         if (bookId < 0) return
         val store = structureStore() ?: return
         val tree = unit.markup ?: return
         val bundle = unit.cssBundle ?: return
         if (ChapterStructureCodec.cssHashOf(bundle.cssTexts) != cssHash) return
+        val viewportKey = ChapterStructurePersist.viewportKeyOf(contentW, contentH)
         val ok = runCatching {
-            ImportStructures.persistChapter(store, "book_$bookId", unit.chapterIndex, tree, bundle, unit.structureCache)
+            ImportStructures.persistChapter(store, "book_$bookId", unit.chapterIndex, tree, bundle, unit.structureCache, viewportKey = viewportKey)
+        }.onFailure {
+            Logger.w(logTag, "structure save FAILED ch=${unit.chapterIndex}: ${it::class.simpleName}: ${it.message}")
         }.getOrDefault(false)
-        if (!ok) Logger.w(logTag, "structure save SKIP ch=${unit.chapterIndex} (media or inconsistent)")
+        if (!ok) Logger.w(logTag, "structure save SKIP ch=${unit.chapterIndex} (inconsistent)")
+    }
+
+    /**
+     * 整章文本投影（长按选区用）**移出开书关键路径**：先把目标页画出来，绑定完成后在后台算完回填。
+     *
+     * 投影本身要跑一遍整章级联（实测大章 2444 元素 × ≈1ms ≈ 5s，占当时开书 6s 的绝大部分），
+     * 但目标页渲染根本不需要它——它只服务长按选区的整章切句。开书该等的是排版，不是它。
+     *
+     * 后台**自建**一个轻 prepare（结构已绑定，组装百毫秒级）再投影：临时表会话持有的那个
+     * `LightPrepare` 带着自己的懒级联缓存、且被塑形线程共用，不能跨线程拿来算。
+     * 回填前用 [ChapterUnit.layoutEpoch] 确认版式没变过；期间读者若长按，[chapterText] 的
+     * 同步兜底照旧现算（行为与改造前一致）。
+     */
+    private fun scheduleChapterTextProjection(
+        unit: ChapterUnit,
+        profile: TypographicProfile,
+        contentW: Int,
+        contentH: Int,
+    ) {
+        if (unit.chapterTextCache != null || unit.textProjectionInFlight) return
+        val epoch = unit.layoutEpoch
+        unit.textProjectionInFlight = true
+        bgScope.launch {
+            try {
+                // 先让锚页/首批预填把 CPU 拿走：这一笔是"读者接下来才可能用到"的工作。
+                kotlinx.coroutines.delay(1200)
+                val markup = unit.markup ?: return@launch
+                val bundle = unit.cssBundle
+                val bc = layouter as? BoxChapterLayouter ?: return@launch
+                val t0 = platformNowMs()
+                val light = bc.prepareLight(markup, bundle, profile, contentW, unit.structureCache, contentH)
+                val projection = light.chapterTextProjection()
+                if (unit.layoutEpoch == epoch && unit.chapterTextCache == null) unit.putTextProjection(projection)
+                Logger.d(logTag, "text projection bg ch=${unit.chapterIndex} t=${platformNowMs() - t0}ms chars=${projection.text.length}")
+            } catch (c: kotlinx.coroutines.CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                Logger.w(logTag, "text projection failed ch=${unit.chapterIndex}: ${t::class.simpleName}")
+            } finally {
+                unit.textProjectionInFlight = false
+            }
+        }
     }
 
     /** Ensures a chapter is laid out (lazy): on first need, parses the body (ensureMarkup) then
@@ -967,8 +1028,9 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         val contentWidth = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
         val contentHeight = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
         val t0 = platformNowMs()
-        val prepare = boxLayouter.prepareLight(unit.markup!!, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h -> saveUnitStructure(unit, h) })
-        unit.cacheChapterTextFrom(prepare)
+        val prepare = boxLayouter.prepareLight(unit.markup!!, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h, cw, chh -> saveUnitStructure(unit, h, cw, chh) })
+        // 整章文本投影转后台：翻页路径更不能为长按选区这一笔（大章 ~5s）让读者等。
+        scheduleChapterTextProjection(unit, profile, contentWidth, contentHeight)
         val tPrep = platformNowMs()
         val pagesToShape = 1
         val newProduct = boxLayouter.incrementalLayoutForPage(
@@ -1045,8 +1107,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                 if (boxLayouter != null) {
                     // Light prepare only (box tree, no shaping) — the table tells us which blocks to shape.
                     val startPage = pageIndexForChar(cached.pages, targetChar)
-                    val prep = boxLayouter.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h -> saveUnitStructure(unit, h) })
-                    unit.cacheChapterTextFrom(prep)
+                    val prep = boxLayouter.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h, cw, chh -> saveUnitStructure(unit, h, cw, chh) })
                     val sp = platformNowMs()
                     val product = boxLayouter.incrementalLayoutForPage(
                         prepare = prep,
@@ -1069,6 +1130,9 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                     // R9: honest window — only 1 page is shaped here (pagesToShape=1 above).
                     unit.shapedPageTo = (startPage + 1).coerceAtMost(cached.pages.size)
                     Logger.w(logTag, "layout ${ctx(unit)} DISK-HIT+INCREMENTAL page=$startPage t=${platformNowMs() - t0}ms")
+                    // 选区用的整章文本投影转后台（见 scheduleChapterTextProjection）：目标页已绑定，
+                    // 开书不必再等这一笔整章级联。
+                    scheduleChapterTextProjection(unit, profile, contentWidth, contentHeight)
                 } else {
                     // Legacy layouter: still full layout.
                     val product = layouter.layout(markup, unit.cssBundle, profile, contentWidth, contentHeight)
@@ -1084,8 +1148,11 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                     // PaginationMode.BLOCK_TEMP: decide large/small via a cheap light prepare (no
                     // shaping). A large chapter's foreground threads only the current page's blocks
                     // through the temp table — never a full-chapter line-level layout.
-                    val light = bc.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h -> saveUnitStructure(unit, h) })
-                    unit.cacheChapterTextFrom(light)
+                    val light = bc.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h, cw, chh -> saveUnitStructure(unit, h, cw, chh) })
+                    // 选区用的整章文本投影转后台（见 scheduleChapterTextProjection）：此刻最要紧的是
+                    // 锚页流，整章级联（大章 ~5s）不该挡在这里。临时表在途用的是 `light` 自己的懒缓存，
+                    // 后台另建一个轻 prepare 算，互不共享。
+                    scheduleChapterTextProjection(unit, profile, contentWidth, contentHeight)
                     if (light.totalBlocks > SMALL_CHAPTER_BLOCKS) {
                         // anchorChar stays at the user's actual position — startAnchorStream anchors the
                         // temp stream there. A head-proximity lift (anchor to block 0) is designed but
@@ -1426,7 +1493,71 @@ private fun dispatchB1(
         }
         },
     ))
+    // 让位后**能回来**：第 6 档低于第 1 档，栅格/翻页一刀就把它砍掉，而 B2 章扫描显式跳过
+    // 锚页章（"B1 owns the active chapter"）——没人补派，本章就永远攒不出磁盘表。
+    armB1Resume(unit.chapterIndex, epoch, paramHash)
     return true
+}
+
+// ── 本章全量（B1）的续跑看门狗 ────────────────────────────────────────────────
+//
+// 为什么必须有（原则 `docs/线程调度原则.md` §3.6 的缺省实现）：
+//   第 6 档「本章全量」低于第 1 档，`notifyFlip()` / `onForegroundRaster()` 的
+//   `cancelLowerThan(0)` / `cancelForRaster(0)` 会把它整趟砍掉；而整书 B2 **显式跳过锚页章**
+//   （"B1 owns the active chapter"），于是没有任何补派路径。结果：读者正在读的那一章永远
+//   落不了盘 → 下次开书落到该章恒走临时表 → 大章要整章重排（GIMP ch4 实测 LARGE-ANCHOR 10.0s）。
+//   正确性不依赖后台（第 1 档兜底），但**下次开书的耗时**依赖这张表。
+//
+// 修法照抄 `SystemFontScanner.armResume` 的既有先例（`docs/字体发现与开书调度方案.md` §3.3
+// 「光可续跑不够，还得能回来」）：挂 `TaskScheduler.submitWhenIdle`——它不在队列里，抢占清不到；
+// 队列真空时再看一眼：表已新鲜就收工，仍在队/在跑就接着等，被砍掉了就补派一次。
+
+/** 每章一份「在途 B1」的代号：新的派发换新代号 ⇒ 旧看门狗下一轮自行退场，不会叠加成多份。 */
+private val b1ResumeTokens = HashMap<Int, Long>()
+private val b1ResumeLock = SyncLock()
+private var b1ResumeSeq = 0L
+
+/** 为刚派出去的本章 B1 布防一次续跑看门狗（同一章重复派发 = 换代号，旧的作废）。 */
+private fun armB1Resume(chapterIndex: Int, epoch: Long, paramHash: Long) {
+    val token = b1ResumeLock.withLock {
+        b1ResumeSeq += 1
+        b1ResumeTokens[chapterIndex] = b1ResumeSeq
+        b1ResumeSeq
+    }
+    armB1ResumeLoop(chapterIndex, epoch, paramHash, token)
+}
+
+private fun b1ResumeAlive(chapterIndex: Int, token: Long): Boolean =
+    b1ResumeLock.withLock { b1ResumeTokens[chapterIndex] == token }
+
+/**
+ * 看门狗本体。**只在队列真空时**动手（`submitWhenIdle`），故不会与前台翻页/栅格抢槽。
+ *
+ * 每一轮都重新读取表与在途键：这是「状态表即 done 登记」的直接消费，不另存一份视图
+ * （原则 §4：派发守卫各自就地判据）。
+ */
+private fun armB1ResumeLoop(chapterIndex: Int, epoch: Long, paramHash: Long, token: Long) {
+    scheduler.submitWhenIdle {
+        withContext(Dispatchers.Default) {
+            if (!b1ResumeAlive(chapterIndex, token)) return@withContext
+            if (layoutEpoch != epoch) return@withContext
+            if (canonicalDeferred) return@withContext
+            // 开书闸门仍关着 ⇒ 出闸时 [releaseOpenGate] 自己会派 B1 并重新布防，此处不得抢跑。
+            if (openAnchorGate) return@withContext
+            val unit = unitAt(chapterIndex) ?: return@withContext
+            if (unit.paginationTable?.paramHash == paramHash) return@withContext // 已落盘：收工
+            if (scheduler.pendingPriority("b1:$chapterIndex") != null) {
+                // 还在队里/在跑：接着看。它一动队列就不再真空，本轮等待是免费的。
+                armB1ResumeLoop(chapterIndex, epoch, paramHash, token)
+                return@withContext
+            }
+            // 临时会话已结束（读者离章/重锚）：不再越俎代庖，章外整章属第 7 档 B2 的活。
+            val ip = unit.inProgress ?: return@withContext
+            val bc = layouter as? BoxChapterLayouter ?: return@withContext
+            Logger.w(logTag, "b1 resume on idle ch=$chapterIndex (preempted before persist)")
+            dispatchB1(unit, ip, epoch, bc, ip.contentW, ip.contentH, paramHash, tempHeadDistancePages(ip))
+        }
+    }
 }
 
 /** 原则 §3.4 的**再评估**钩子：临时表侧的前驱页塑出之后，才知道锚点页是不是第 2 页。
@@ -2474,7 +2605,7 @@ private suspend fun prefillPageTask(chapterIdx: Int, page: Int, anchor: Int, ass
     // 组装用的第二次 prepareLight 与此处同参，一并复用（原代码重复计算）。
     val prepKey = WindowPrepKey(chapterIdx, hash, profileSnap)
     val lp = windowPrepCache?.takeIf { it.first == prepKey }?.second
-        ?: bc.prepareLight(markup, css, profileSnap, cw, u0.structureCache, chh, onStructureComputed = { h -> saveUnitStructure(u0, h) })
+        ?: bc.prepareLight(markup, css, profileSnap, cw, u0.structureCache, chh, onStructureComputed = { h, cw, chh -> saveUnitStructure(u0, h, cw, chh) })
             .also { windowPrepCache = prepKey to it }
     val local = HashMap<Int, ParagraphShapeRef>()
     for (b in lo until rec.blockEndExclusive) {
@@ -3137,7 +3268,7 @@ private fun finishCanonicalBackground(
             val bc = layouter as? BoxChapterLayouter
             if (bc != null) {
                 val paramHash = LayoutParamKey.fromProfile(profile, contentWidth, contentHeight).hash()
-                val light = bc.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h -> saveUnitStructure(unit, h) })
+                val light = bc.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h, cw, chh -> saveUnitStructure(unit, h, cw, chh) })
                 val tLight = platformNowMs()
                 if (light.totalBlocks > SMALL_CHAPTER_BLOCKS) {
                     startAnchorStream(unit, anchorChar, light, bc, paramHash, contentWidth, contentHeight, headLift = false)
@@ -3207,7 +3338,7 @@ private fun finishCanonicalBackground(
             val bc = layouter as? BoxChapterLayouter
             if (bc != null) {
                 val paramHash = LayoutParamKey.fromProfile(profile, contentWidth, contentHeight).hash()
-                val light = bc.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h -> saveUnitStructure(unit, h) })
+                val light = bc.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h, cw, chh -> saveUnitStructure(unit, h, cw, chh) })
                 val tLight = platformNowMs()
                 if (light.totalBlocks > SMALL_CHAPTER_BLOCKS) {
                     // Large chapter (or any chapter above the threshold): anchor-anchored immediate
@@ -3470,7 +3601,7 @@ private fun finishCanonicalBackground(
                     ensureMarkup(index)
                     val bc = layouter as? BoxChapterLayouter
                     if (bc != null && unit.markup != null) {
-                        bc.prepareLight(unit.markup!!, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h -> saveUnitStructure(unit, h) })
+                        bc.prepareLight(unit.markup!!, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h, cw, chh -> saveUnitStructure(unit, h, cw, chh) })
                     }
                     preflightReadiness[index] = paramHash
                 } catch (_: CancellationException) {
@@ -3535,7 +3666,7 @@ private fun finishCanonicalBackground(
                 val contentHeight = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
                 if (contentHeight <= 16) return // viewport not laid out yet — nothing meaningful to warm
                 val paramHash = LayoutParamKey.fromProfile(profile, contentWidth, contentHeight).hash()
-                val prepLight = bc.prepareLight(unit.markup!!, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h -> saveUnitStructure(unit, h) })
+                val prepLight = bc.prepareLight(unit.markup!!, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h, cw, chh -> saveUnitStructure(unit, h, cw, chh) })
                 preflightReadiness[index] = paramHash
                 // Disk table ready under the current params → bind + pre-shape the FIRST page window so
                 // the first screen is served without re-parsing/re-paginating (P10 "promote the full
@@ -4037,7 +4168,7 @@ private fun finishCanonicalBackground(
         if (viewW <= 0 || viewH <= 0) return null
         val contentWidth = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
         val contentHeight = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
-        val prepare = bc.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h -> saveUnitStructure(unit, h) })
+        val prepare = bc.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h, cw, chh -> saveUnitStructure(unit, h, cw, chh) })
         if (prepare.totalBlocks <= 0) return null
         val idx = prepare.blockIndexForChar(charOffset.coerceAtLeast(0))
         // 同一 prepare 的块表自查：blockIndexForChar 给出的 idx 必在 globalCharStarts 内；
@@ -4087,7 +4218,7 @@ private fun finishCanonicalBackground(
         if (viewW <= 0 || viewH <= 0) return null
         val contentWidth = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
         val contentHeight = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
-        val prepare = bc.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h -> saveUnitStructure(unit, h) })
+        val prepare = bc.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h, cw, chh -> saveUnitStructure(unit, h, cw, chh) })
         if (prepare.totalBlocks <= 0) return null
         return prepare.anchorCharStart(fragment)
     }

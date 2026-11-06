@@ -46,15 +46,11 @@ fun ChapterUnit.chapterTextBlockEnds(): IntArray? {
 }
 
 /**
- * 大章临时表在途时的文本落盘：`buildLayout` 已经拿到 `LightPrepare`，顺手把整章文本算好，
- * 避免长按那一刻再扫整章；文本只与叶子/样式有关，参数变化由 `invalidateLayout` 统一清空。
+ * 整章文本投影回填（选区用）。算的人可能已经不是开书线程——投影被
+ * `BookDocumentController.scheduleChapterTextProjection` 挪到后台，开书路径只等排版，不等它。
+ * 文本只与叶子/样式有关，版式变化由 `invalidateLayout` 统一清空。
  */
-internal fun ChapterUnit.cacheChapterTextFrom(light: LightPrepare): String {
-    chapterTextCache?.let { return it }
-    return putTextProjection(light.chapterTextProjection())
-}
-
-private fun ChapterUnit.putTextProjection(projection: ChapterTextProjection): String {
+internal fun ChapterUnit.putTextProjection(projection: ChapterTextProjection): String {
     chapterTextCache = projection.text
     chapterTextBlockEndsCache = projection.blockEnds
     return projection.text
@@ -84,12 +80,16 @@ internal fun ChapterPrepareResult.chapterTextProjection(): ChapterTextProjection
  * （重路径整章表里匿名文本叶会回查父容器，轻路径的 `inlineStyles` 对 `#text` 返回空表）。
  */
 internal fun LightPrepare.chapterTextProjection(): ChapterTextProjection {
+    val t0 = orilumn.reader.time.platformNowMs()
     val out = StringBuilder(totalChars.coerceAtLeast(0))
     val ends = IntArray(totalBlocks)
     val classify = lightClassify()
     val drift = StreamDrift()
+    var tInline = 0L
+    var tStream = 0L
     for (i in 0 until totalBlocks) {
         val el = leafElement(i)
+        val ta = orilumn.reader.time.platformNowMs()
         var styles = inlineStyles(i)
         if (el.isText) {
             val parent = el.parent
@@ -97,6 +97,7 @@ internal fun LightPrepare.chapterTextProjection(): ChapterTextProjection {
                 styles = styles + (parent to resolveStyle(parent))
             }
         }
+        val tb = orilumn.reader.time.platformNowMs()
         val leafStr = NormalFlowLayout.leafStreamText(
             el = el,
             styles = styles,
@@ -105,9 +106,17 @@ internal fun LightPrepare.chapterTextProjection(): ChapterTextProjection {
             genOf = genOf,
             resolveStyle = ::resolveStyle,
         )
+        val tc = orilumn.reader.time.platformNowMs()
+        tInline += tb - ta
+        tStream += tc - tb
         ends[i] = appendLeaf(out, i, leafStr, globalCharStarts, totalChars.toLong(), drift)
     }
     drift.report("light", out.length, totalChars)
+    Logger.d(
+        "Orilumn.TXT",
+        "text-projection blocks=$totalBlocks inline=${tInline}ms stream=${tStream}ms " +
+            "total=${orilumn.reader.time.platformNowMs() - t0}ms resolved=${resolvedStyleCount}",
+    )
     return ChapterTextProjection(out.toString(), ends)
 }
 

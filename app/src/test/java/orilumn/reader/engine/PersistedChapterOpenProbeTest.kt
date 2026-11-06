@@ -102,7 +102,7 @@ class PersistedChapterOpenProbeTest {
         // Direct signal: the unit's cache was bound media-free (no cascade on this open).
         val field = c.javaClass.getDeclaredMethod("unitAt", Int::class.java).apply { isAccessible = true }
         val unit = field.invoke(c, chapter) as ChapterUnit
-        return unit.structureCache.loadedMediaFree && unit.structureCache.leaves.isNotEmpty()
+        return unit.structureCache.structureBound && unit.structureCache.leaves.isNotEmpty()
     }
 
     @Test

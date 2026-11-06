@@ -399,8 +399,8 @@ class BoxChapterLayouter(
         /** P2: 版心高（与 contentW 共同组成 `@media` 求值视口；与重路径同值）。 */
         contentH: Int,
         /** Fires only when the cascade actually ran (first touch per CSS): the caller persists the
-         *  media-free result for import/open reuse. Null = compute without persisting. */
-        onStructureComputed: ((cssHash: Long) -> Unit)? = null,
+         *  result (with the viewport it was evaluated at) for later reuse. Null = no persistence. */
+        onStructureComputed: ((cssHash: Long, contentW: Int, contentH: Int) -> Unit)? = null,
     ): LightPrepare = structure.lock.withLock {
         // prepareLight runs concurrently for the same chapter's cache: the open thread's DISK/ANCHOR
         // pass races prewarmForOpen (backgroundDispatcher) and the canonical pass. `key` and
@@ -408,6 +408,7 @@ class BoxChapterLayouter(
         // observe it already matching while `parsedAuthorSheets` is still null and crash on the
         // force-unwrap below. Guard on the payload too, and hold the per-chapter lock across the whole
         // check-build-read so no caller ever sees a half-assembled cache (double parse is benign).
+        val t0 = orilumn.reader.time.platformNowMs()
         val cssTexts = cssBundle?.cssTexts ?: emptyList()
         val cssHash = ChapterStructureCodec.cssHashOf(cssTexts)
         val structureKey = structureKeyOf(cssBundle, profile.layoutTheme, contentW, contentH)
@@ -421,18 +422,28 @@ class BoxChapterLayouter(
                 orilumn.reader.engine.css.CssViewport(contentW.coerceAtLeast(1), contentH.coerceAtLeast(1)),
             )
         }
-        // Media-free bound structure (import-built or previously computed) survives viewport and
-        // typography changes while the CSS matches: the cascade properties it encodes (display,
-        // white-space, background, break-inside, visibility) never come from reader sheets.
+        // Bound structure (import-built, another process's first touch, or this process's) survives
+        // viewport and typography changes while the CSS matches: the cascade properties it encodes
+        // (display, white-space, background, break-inside, visibility) never come from reader sheets.
+        // The ONE exception is `@media`: the tree walk was evaluated at a viewport, so a structure
+        // built under a viewport query is only reusable at that same viewport ([boundViewportKey]).
         // Sheets above still re-parse when the viewport moves (the shaping cascade needs them);
         // only the whole-tree walk is skipped.
-        val boundHit = structure.loadedMediaFree && structure.boundCssHash == cssHash
+        val viewportKey = ChapterStructurePersist.viewportKeyOf(contentW, contentH)
+        val boundHit = structure.structureBound && structure.boundCssHash == cssHash &&
+            (structure.boundViewportKey == 0L || structure.boundViewportKey == viewportKey)
+        val tSheets = orilumn.reader.time.platformNowMs()
         if (!boundHit && keyChanged) {
             computeStructure(markup, styleComputerFor(cssBundle, profile, structure.parsedAuthorSheets!!), structure)
             structure.boundCssHash = cssHash
-            structure.loadedMediaFree = !ChapterStructurePersist.hasMediaRules(cssTexts)
-            onStructureComputed?.invoke(cssHash)
+            structure.structureBound = true
+            // 没有视口相关媒体查询 ⇒ 结构与视口无关，记 0（跨旋转/改版心仍可复用、
+            // 持久化也不再要求版心一致）；有 ⇒ 记下这次求值用的版心，换个版心就重算。
+            structure.boundViewportKey =
+                if (ChapterStructurePersist.hasMediaRules(cssTexts)) viewportKey else 0L
+            onStructureComputed?.invoke(cssHash, contentW, contentH)
         }
+        val tStruct = orilumn.reader.time.platformNowMs()
         // styleComputerFor reuses the cached parsed author sheets on a hit, so no CSS re-tokenize.
         val engine = styleComputerFor(cssBundle, profile, structure.parsedAuthorSheets!!)
         // `hidden` is a cheap closure; it is only exercised later, lazily, during per-block materialization
@@ -445,6 +456,12 @@ class BoxChapterLayouter(
         // P3：预算的测量回调（块自身 border-box 高）。预算定在塑形之前，故这里量出的自然尺寸
         // 不会被后续按预算的塑形污染（见 `LightPrepare.clusterBlockOwnHeight`）。
         prepare.clusterBlockOwnHeight = { i -> clusterBlockOwnHeight(prepare, i) }
+        val tEnd = orilumn.reader.time.platformNowMs()
+        Logger.d(
+            "Orilumn.Layout",
+            "prepareLight sheets=${tSheets - t0} structure=${tStruct - tSheets} assemble=${tEnd - tStruct} " +
+                "total=${tEnd - t0} leaves=${structure.leaves.size} boundHit=$boundHit keyChanged=$keyChanged",
+        )
         prepare
     }
 
@@ -4612,5 +4629,8 @@ class LightPrepare(
 
     /** Lazily resolves any element's computed style along its ancestor chain (containers included). */
     fun resolveStyle(el: MarkupElement): orilumn.reader.engine.css.ComputedStyle = styleComputer().resolve(el, styleCache)
+
+    /** 诊断：本 prepare 已经过级联的元素数（用于判断整章投影的级联规模）。 */
+    internal val resolvedStyleCount: Int get() = styleCache.size
 }
 

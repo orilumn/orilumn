@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import okio.FileSystem
 import okio.Path.Companion.toPath
+import orilumn.reader.data.epub.EpubBookStore
 import orilumn.reader.data.epub.EpubFormatException
 import orilumn.reader.data.epub.ZipEpubResourceReader
 import orilumn.reader.data.epub.parseEpubBytes
@@ -107,6 +108,9 @@ class BookImporter(
                             reader, parsed.spine.map { it.href }, store, "book_$id",
                         )
                         Logger.w("Orilumn.Import", "structure prebuilt book=$id $stats")
+                        // 开书骨架（书脊 + 目录）导入时就写：第一次开书也不必再解析一遍 OPF/目录。
+                        EpubBookStore(FileSystem.SYSTEM, context.cacheDir.absolutePath.toPath())
+                            .write(id, reader.identity(), orilumn.reader.BuildConfig.VERSION_CODE, parsed)
                     }
                 }.onFailure { Logger.w("Orilumn.Import", "structure prebuild FAIL book=$id ${it.message}") }
             }

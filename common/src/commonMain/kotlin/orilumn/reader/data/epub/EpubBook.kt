@@ -1,11 +1,14 @@
 package orilumn.reader.data.epub
 
+import kotlinx.serialization.Serializable
+
 /**
  * The parsed e-book model, the core data structure of the reader.
  *
  * @property spine the list of reading-order chapters (book body).
  * @property toc the table-of-contents tree, whose nodes link to spine chapters via [TocItem.index].
  */
+@Serializable
 data class EpubBook(
     val title: String,
     val author: String?,
@@ -35,6 +38,7 @@ data class EpubBook(
  * @property href the as-is path relative to the OPF directory (case preserved), used to read the body.
  * @property fragment anchor within the chapter (e.g. `#sec1`), null when absent.
  */
+@Serializable
 data class SpineItem(
     val index: Int,
     val href: String,
@@ -48,6 +52,7 @@ data class SpineItem(
  * @property index the spine chapter index matched; null when there is no matching chapter (e.g. only links to a resource).
  * @property fragment table-of-contents target anchor.
  */
+@Serializable
 data class TocItem(
     val label: String,
     val index: Int?,

@@ -24,6 +24,14 @@ interface EpubResourceReader : AutoCloseable {
     /** Read a binary entry (image/font); null when absent. */
     fun readBytes(path: String): ByteArray?
 
+    /**
+     * 这份资源的**身份**（路径 + 体积 + 最后修改时间之类），供「按资源内容缓存解析结果」的调用方
+     * 判定缓存还认不认。默认 null = 无法判定 ⇒ 调用方不得缓存（宁可不缓存，不可用旧骨架开新书）。
+     *
+     * 只描述"哪份文件"，不读内容：算它必须远比重解析便宜。
+     */
+    fun identity(): String? = null
+
     /** Unified path normalization: backslashes to forward slashes, strip leading/trailing slashes, lowercase. */
     fun normalizePath(p: String): String = p.replace('\\', '/').trim('/').lowercase()
 
@@ -64,6 +72,9 @@ interface EpubResourceReader : AutoCloseable {
  * case-sensitive; looking up a lowercase name would miss uppercase entries).
  */
 class ZipEpubResourceReader(path: String) : EpubResourceReader {
+    /** 书文件路径（[identity] 用；也保留给日志）。 */
+    private val filePath: String = path
+
     /** Read-only file system view over the zip archive (JVM/Android both include the zip variant). */
     private val zip: FileSystem = FileSystem.SYSTEM.openZip(path.toPath())
 
@@ -85,6 +96,16 @@ class ZipEpubResourceReader(path: String) : EpubResourceReader {
 
     override fun readText(path: String): String? =
         readBytes(path)?.toString(Charsets.UTF_8)
+
+    /**
+     * 路径 + 体积 + 最后修改时间：书被重新导入/替换/同名覆盖时三者至少变一项，
+     * 旧骨架（书脊 + 目录）随之作废。取不到元数据（文件丢了/无权限）⇒ null（不缓存）。
+     */
+    override fun identity(): String? {
+        val meta = runCatching { FileSystem.SYSTEM.metadataOrNull(filePath.toPath()) }.getOrNull() ?: return null
+        val size = meta.size ?: return null
+        return "$filePath|$size|${meta.lastModifiedAtMillis ?: 0L}"
+    }
 
     override fun readBytes(path: String): ByteArray? {
         val entry = normalized[normalizePath(path)] ?: return null

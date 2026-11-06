@@ -453,6 +453,10 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
     private fun pageSnapshotStore(): PageSnapshotStore? =
         cacheRoot?.let { PageSnapshotStore(okio.FileSystem.SYSTEM, it) }
 
+    /** 开书骨架存储（书脊 + 目录；只随书文件变化）。Null = 关（无缓存目录）。 */
+    private fun bookIndexStore(): orilumn.reader.data.epub.EpubBookStore? =
+        cacheRoot?.let { orilumn.reader.data.epub.EpubBookStore(okio.FileSystem.SYSTEM, it) }
+
     /** 本章作者样式哈希：快照键的一部分（书/样式换了，旧页面的行文本与盒子就都不作数）。 */
     private fun chapterCssHash(unit: ChapterUnit): Long? =
         unit.cssBundle?.let { ChapterStructureCodec.cssHashOf(it.cssTexts) }
@@ -487,9 +491,17 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         clearFlipDir("open-book")
         this.bookId = bookId
         val t0 = platformNowMs()
-        val parsedBook = runCatching { parser.parse(reader) }
-            .onFailure { Logger.e(logTag, "open parse FAIL bookId=$bookId ${it.message}") }
-            .getOrNull() ?: return false
+        // 先试落盘骨架：书脊 + 目录只随书文件变化，命中就不必再读 container.xml / OPF / nav。
+        // 判据（版本 / 构建号 / 资源身份）任一不符即 miss，重新解析并覆盖——宁可多解析一次，
+        // 不可用旧骨架冒充新书。identity 为 null（非文件型 reader）时两侧都不缓存。
+        val indexStore = bookIndexStore()
+        val identity = reader.identity()
+        val cachedBook = indexStore?.read(bookId, identity, diskCacheVersion)
+        val parsedBook = cachedBook ?: (
+            runCatching { parser.parse(reader) }
+                .onFailure { Logger.e(logTag, "open parse FAIL bookId=$bookId ${it.message}") }
+                .getOrNull() ?: return false
+            )
         val t1 = platformNowMs()
         if (parsedBook.isEmpty) return false
         book = parsedBook
@@ -506,7 +518,15 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         val t2 = platformNowMs()
         coverHref = parsedBook.cover
         Logger.w(logTag, "open: chapters=${chapters.size} " +
-            "parse=${t1 - t0}ms skeleton=${t2 - t1}ms spine0=${ctx(0)}")
+            "parse=${t1 - t0}ms skeleton=${t2 - t1}ms spine0=${ctx(0)}" +
+            (if (cachedBook != null) " src=index" else " src=epub"))
+        // 骨架只写一次：解析出来的那一趟在后台落盘（前台不等）；命中时显然不用再写。
+        if (cachedBook == null && indexStore != null && identity != null) {
+            val parsed = parsedBook
+            bgScope.launch {
+                runCatching { indexStore.write(bookId, identity, diskCacheVersion, parsed) }
+            }
+        }
         // R20：开书墙钟基线，落位时随 `jump: open ->` 一起报，方便对齐开书总时长与其中排版那一段。
         openT0 = platformNowMs()
         // Version-stale disk tables (older build) can never hit again — sweep them now on a

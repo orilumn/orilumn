@@ -69,6 +69,15 @@ class ChapterUnit(
     @Volatile
     internal var chapterTextCache: String? = null
 
+    /** 版式代号：每次 [invalidateLayout] 自增。后台补算（整章文本投影）用它在回填前确认
+     *  「算的时候的版式仍是当前版式」，避免把旧结果写回重排后的章。 */
+    @Volatile
+    internal var layoutEpoch: Long = 0L
+
+    /** 后台整章文本投影是否在算：避免开书/翻页路径重复排同一个任务（重复只是白烧 CPU）。 */
+    @Volatile
+    internal var textProjectionInFlight: Boolean = false
+
     /**
      * 整章文本的**块尾偏移**（每个排版叶一段，cumulative endExclusive，长度 = 块数）。
      *
@@ -215,6 +224,7 @@ class ChapterUnit(
 
     /** Relayout invalidation (settings changed): clear caches to rebuild. */
     fun invalidateLayout() {
+        layoutEpoch++
         layout = null
         pageSlices = emptyList()
         prepareResult = null
@@ -319,10 +329,14 @@ class ChapterStructureCache {
     /** Author-CSS hash the bound leaves/starts/owners were built from (loaded or computed). */
     var boundCssHash: Long? = null
 
-    /** True only for media-free content (no `@media`/media-`@import`): the bound structure stays
-     *  valid across viewport/typography changes while the CSS still matches. Never set for
-     *  media-affected chapters — those always recompute via [key]. */
-    var loadedMediaFree: Boolean = false
+    /** True once [leaves]/[globalCharStarts]/owners are bound (loaded from persist or computed in
+     *  this process) and may be reused while [boundCssHash] matches and the viewport still agrees
+     *  with [boundViewportKey]. Reset by [reset] (远章驱逐) so the next `prepareLight` recomputes. */
+    var structureBound: Boolean = false
+
+    /** `0` = 绑定的结构与视口无关（作者 CSS 没有视口相关媒体查询）；非 0 = 求值时的版心键
+     *  （[orilumn.reader.engine.ChapterStructurePersist.viewportKeyOf]），只有同版心才能复用。 */
+    var boundViewportKey: Long = 0L
 
     /**
      * R26：本章是否存在 `float`（块级，非 NONE）。由 [orilumn.reader.reader.engine.BoxChapterLayouter]
@@ -331,8 +345,8 @@ class ChapterStructureCache {
      * 用来省掉 `LightPrepare.computeFloatLeads` 开头那次**全章** `blockStyleFor` 扫描
      * （Rust 书 ch7 169 叶实测 275ms，且被第一次 `block(i)` 触发而落在开书关键路径上）。
      *
-     * 有效性：`float` 与字号/行高无关（排版非变量），而结构持久化读写两侧都被
-     * [orilumn.reader.engine.ChapterStructurePersist.hasMediaRules] 门住，故不会被 `@media`
+     * 有效性：`float` 与字号/行高无关（排版非变量），结构持久化读回时要么与视口无关
+     * （`viewportKey = 0`）、要么要求求值版心一致（见 [boundViewportKey]），故不会被 `@media`
      * 的视口查询翻转——与同批持久化的 [leaves] / [globalCharStarts] 同等安全。
      */
     var anyFloat: Boolean = true
@@ -350,7 +364,8 @@ class ChapterStructureCache {
         leafToBreakInsideAvoidOwner = emptyMap()
         genStrings = emptyMap()
         boundCssHash = null
-        loadedMediaFree = false
+        structureBound = false
+        boundViewportKey = 0L
         anyFloat = true
     }
 }

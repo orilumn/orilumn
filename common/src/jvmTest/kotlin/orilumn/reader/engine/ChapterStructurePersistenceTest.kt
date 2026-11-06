@@ -28,7 +28,7 @@ class ChapterStructurePersistenceTest {
         charStarts = longArrayOf(0L, 406L, 1167L),
         bgOwners = mapOf(1 to LeafRef(intArrayOf(0), null)),
         avoidOwners = mapOf(2 to LeafRef(intArrayOf(2, 0), null)),
-        genStrings = mapOf(0 to ("«" to null), 2 to (null to "»")),
+        genStrings = listOf(LeafRef(intArrayOf(0, 1), null) to ("«" to null), LeafRef(intArrayOf(2), null) to (null to "»")),
     )
 
     @Test
@@ -43,8 +43,11 @@ class ChapterStructurePersistenceTest {
         assertArrayEquals(longArrayOf(0L, 406L, 1167L), p.charStarts)
         assertArrayEquals(intArrayOf(0), p.bgOwners[1]!!.path)
         assertArrayEquals(intArrayOf(2, 0), p.avoidOwners[2]!!.path)
-        assertEquals("«" to null, p.genStrings[0])
-        assertEquals(null to "»", p.genStrings[2])
+        assertEquals(2, p.genStrings.size)
+        assertArrayEquals(intArrayOf(0, 1), p.genStrings[0].first.path)
+        assertEquals("«" to null, p.genStrings[0].second)
+        assertArrayEquals(intArrayOf(2), p.genStrings[1].first.path)
+        assertEquals(null to "»", p.genStrings[1].second)
     }
 
     @Test

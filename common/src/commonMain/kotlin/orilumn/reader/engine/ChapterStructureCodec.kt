@@ -35,7 +35,7 @@ object ChapterStructureCodec {
     private const val MAGIC = 0x43485354 // "CHST"
 
     /** File/layout version. Bump only when these bytes change shape. */
-    private const val VERSION = 3 // 3: payload gains the anyFloat flag (was 2: synthetic leaf refs)
+    private const val VERSION = 4 // 4: payload gains the evaluation-viewport key (was 3: anyFloat flag)
 
     /**
      * Cascade-semantics version. Bump on ANY change to what the structure means: the converter
@@ -95,12 +95,13 @@ object ChapterStructureCodec {
             writeLeafRef(buf, ref)
         }
         buf.writeInt(p.genStrings.size)
-        for ((leafIdx, pair) in p.genStrings) {
-            buf.writeInt(leafIdx)
+        for ((ref, pair) in p.genStrings) {
+            writeLeafRef(buf, ref)
             writeNullableString(buf, pair.first)
             writeNullableString(buf, pair.second)
         }
         buf.writeInt(if (p.anyFloat) 1 else 0)
+        buf.writeLong(p.viewportKey)
         return buf.readByteArray()
     }
 
@@ -125,16 +126,16 @@ object ChapterStructureCodec {
             val avoidOwners = readOwnerMap(buf) ?: return decodeNull("avoidOwners")
             val genCount = buf.readInt()
             if (genCount < 0 || genCount > 100_000) return decodeNull("genCount=$genCount")
-            val genStrings = HashMap<Int, Pair<String?, String?>>(genCount)
+            val genStrings = ArrayList<Pair<LeafRef, Pair<String?, String?>>>(genCount)
             repeat(genCount) {
-                val leafIdx = buf.readInt()
-                if (leafIdx < 0 || leafIdx >= leafCount) return decodeNull("genLeafIdx=$leafIdx")
-                genStrings[leafIdx] = readNullableString(buf) to readNullableString(buf)
+                val ref = readLeafRef(buf) ?: return decodeNull("genRef")
+                genStrings.add(ref to (readNullableString(buf) to readNullableString(buf)))
             }
             val anyFloatFlag = buf.readInt()
             if (anyFloatFlag != 0 && anyFloatFlag != 1) return decodeNull("anyFloat=$anyFloatFlag")
+            val viewportKey = buf.readLong()
             if (!buf.exhausted()) return decodeNull("trailing-bytes")
-            PersistedChapterStructure(chapterIndex, cssHash, leafRefs, charStarts, bgOwners, avoidOwners, genStrings, anyFloatFlag == 1)
+            PersistedChapterStructure(chapterIndex, cssHash, leafRefs, charStarts, bgOwners, avoidOwners, genStrings, anyFloatFlag == 1, viewportKey)
         } catch (e: Exception) {
             decodeNull("exception ${e.message}")
         }
@@ -373,8 +374,11 @@ object ChapterStructureCodec {
 /**
  * Import-built, open-relinked block structure for one chapter. Leaves are [LeafRef]s (tree members
  * by path, or `flowChildren` synthetic anonymous runs by owner path + text); [bgOwners]/
- * [avoidOwners]/[genStrings] key leaves by index into [leafRefs]. Parallel arrays:
+ * [avoidOwners] key leaves by index into [leafRefs]. Parallel arrays:
  * `charStarts[i]` belongs to `leafRefs[i]`.
+ *
+ * [genStrings] is keyed by a [LeafRef] (not a leaf index): generated content belongs to the
+ * element carrying it, which is not necessarily a leaf (e.g. a `tbody` with `::before`).
  */
 data class PersistedChapterStructure(
     val chapterIndex: Int,
@@ -383,7 +387,7 @@ data class PersistedChapterStructure(
     val charStarts: LongArray,
     val bgOwners: Map<Int, LeafRef>,
     val avoidOwners: Map<Int, LeafRef>,
-    val genStrings: Map<Int, Pair<String?, String?>>,
+    val genStrings: List<Pair<LeafRef, Pair<String?, String?>>> = emptyList(),
     /**
      * R26: does the chapter contain any block-level `float`? Persisted alongside the leaf set so
      * the light path can skip a whole-chapter style scan that only answers this question
@@ -391,6 +395,13 @@ data class PersistedChapterStructure(
      * scan") so a payload built without it keeps the old, always-correct behavior.
      */
     val anyFloat: Boolean = true,
+    /**
+     * 求值视口键（`ChapterStructurePersist.viewportKeyOf`）：`0` = 与视口无关
+     * （CSS 里没有视口相关的 `@media`/`@import`，结构在任何版心下都成立）；
+     * 非 0 = 这份 `leaves`/`charStarts` 是在该版心下求值的，只在同版心复用时才成立。
+     * 默认为 0（"与视口无关"），仅当作者 CSS 含视口查询时由 open 回填写入。
+     */
+    val viewportKey: Long = 0L,
 )
 
 /**

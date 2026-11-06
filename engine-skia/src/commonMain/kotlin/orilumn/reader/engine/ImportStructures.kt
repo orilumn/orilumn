@@ -15,9 +15,11 @@ import orilumn.reader.engine.text.TypographicProfile
  * structure once per chapter and persists it via [ChapterStructureStore], so open/flip/relayout
  * never re-runs the per-element display cascade for media-free chapters.
  *
- * Only media-free chapters (no `@media`, no media-conditioned `@import`) are persisted —
- * [ChapterStructurePersist.hasMediaRules] gates both writing here and relinking at open. Media
- * chapters always compute at open, exactly as before.
+ * Import only knows a canonical viewport ([IMPORT_VIEWPORT]), so only media-free chapters
+ * ([ChapterStructurePersist.hasMediaRules]) are written here; media chapters are written by the
+ * **open-time backfill** instead, tagged with the device viewport they were evaluated at
+ * (`ImportStructures.persistChapter`'s `viewportKey`). Either way a cold open relinks instead of
+ * re-walking every element — which on a large chapter costs seconds.
  *
  * Blocking pure logic: the caller runs it on IO (import post-step, open backfill happens
  * lazily through `prepareLight` instead). Fail-closed per chapter: one bad chapter never aborts
@@ -98,9 +100,16 @@ object ImportStructures {
     data class BuildStats(val chapters: Int, val persisted: Int, val skippedMedia: Int, val failed: Int, val firstError: String? = null)
 
     /**
-     * Persists one chapter's import/open artifact: post-process tree + deduped sheet refs +
-     * structure. Shared by the import job and the open-time backfill (same bytes either way).
-     * Returns false when there is nothing persistable (media-affected CSS or any inconsistency).
+     * Persists one chapter's artifact: post-process tree + deduped sheet refs + structure.
+     * Shared by the import job and the open-time backfill (same bytes either way).
+     *
+     * [viewportKey] = the viewport the structure was evaluated at (`0` = "与视口无关", i.e. the
+     * author CSS carries no viewport-variant media query). Import passes 0 because it has no device
+     * viewport and media-affected chapters are skipped there; the open backfill passes the real
+     * one, which is what lets media chapters stop recomputing on every cold open.
+     *
+     * Returns false when there is nothing persistable (media-affected CSS without a viewport key,
+     * or any inconsistency).
      */
     fun persistChapter(
         store: ChapterStructureStore,
@@ -109,10 +118,12 @@ object ImportStructures {
         tree: MarkupElement,
         bundle: CssBundle,
         structure: ChapterStructureCache,
+        viewportKey: Long = 0L,
     ): Boolean {
-        if (ChapterStructurePersist.hasMediaRules(bundle.cssTexts)) return false
+        // 视口键为 0 = 「与视口无关」的承诺：作者 CSS 里一旦有视口查询，这个承诺就不成立。
+        if (viewportKey == 0L && ChapterStructurePersist.hasMediaRules(bundle.cssTexts)) return false
         val cssHash = ChapterStructureCodec.cssHashOf(bundle.cssTexts)
-        val payload = ChapterStructurePersist.extract(index, cssHash, tree, structure) ?: return false
+        val payload = ChapterStructurePersist.extract(index, cssHash, tree, structure, viewportKey) ?: return false
         val sheets = HashMap<Long, String>()
         val sheetHashes = bundle.cssTexts.map { text ->
             var h = cssHashOfText(text)

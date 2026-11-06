@@ -123,23 +123,30 @@ jobs:
       - name: Grant gradlew execute permission
         run: chmod +x gradlew
 
+      # 打包任务只出安装包，不把 app-image 留在 build 里；下面要查包内运行时，所以显式产出。
       - name: Build DMG (unsigned)
-        run: ./gradlew :desktopApp:packageDmg --no-daemon
+        run: ./gradlew :desktopApp:createDistributable :desktopApp:packageDmg --no-daemon
 
       # 断言包内运行时是 JBR：哪天 CI 悄悄退回 Temurin 不会报错、只是换成另一套 JDK，
       # 所以必须在这里失败，免得「以为发的是 JBR」变成一厢情愿。
       - name: Verify bundled runtime is JetBrains Runtime
         run: |
-          JAVA_BIN=$(find desktopApp/build/compose/binaries/main/app -type f \( -name java -o -name java.exe \) -path "*runtime*" | head -1)
-          if [ -z "$JAVA_BIN" ]; then
-            echo "::error::找不到包内运行时 java"
-            find desktopApp/build/compose/binaries/main/app -maxdepth 4 | head -40
+          APP_DIR=desktopApp/build/compose/binaries/main/app
+          if [ ! -d "$APP_DIR" ]; then
+            echo "::error::找不到应用映像目录（打包任务本身不落 app/，需先跑 createDistributable）"
+            find desktopApp/build/compose -maxdepth 5 | head -40
             exit 1
           fi
-          echo "bundled java: $JAVA_BIN"
-          OUT=$("$JAVA_BIN" -XshowSettings:properties -version 2>&1)
-          echo "$OUT" | grep -E "java\.vendor" || true
-          echo "$OUT" | grep -q "JetBrains" || { echo "::error::包内运行时不是 JetBrains Runtime"; exit 1; }
+          # jpackage 的 app-image 会裁掉 runtime/bin 下的可执行文件（java 不在），
+          # 没法再用 java -version 问厂商；改从 libjvm 内嵌的厂商字符串认（JBR 是 "JetBrains s.r.o."）。
+          JVM_LIB=$(find "$APP_DIR" -type f \( -name libjvm.so -o -name libjvm.dylib -o -name jvm.dll \) | head -1)
+          if [ -z "$JVM_LIB" ]; then
+            echo "::error::找不到包内 JVM 动态库"
+            find "$APP_DIR" -maxdepth 6 -type d | head -40
+            exit 1
+          fi
+          echo "bundled jvm: $JVM_LIB"
+          grep -aq "JetBrains" "$JVM_LIB" || { echo "::error::包内运行时不是 JetBrains Runtime"; exit 1; }
 
       # DMG 文件名里的 jpackage 版本（macOS 强制 MAJOR>0，如 2.0）与发版版本（0.2.0）不一致：
       # 按 app versionName + 架构重命名后再上传（如 Orilumn-0.2.0-macos-arm64.dmg）。
@@ -189,22 +196,29 @@ jobs:
       - name: Install RPM build tooling
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends rpm
 
+      # 打包任务只出安装包，不把 app-image 留在 build 里；下面要查包内运行时，所以显式产出。
       - name: Build DEB and RPM
-        run: ./gradlew :desktopApp:packageDeb :desktopApp:packageRpm --no-daemon
+        run: ./gradlew :desktopApp:createDistributable :desktopApp:packageDeb :desktopApp:packageRpm --no-daemon
 
       # 断言包内运行时是 JBR（理由同 macOS job）。
       - name: Verify bundled runtime is JetBrains Runtime
         run: |
-          JAVA_BIN=$(find desktopApp/build/compose/binaries/main/app -type f \( -name java -o -name java.exe \) -path "*runtime*" | head -1)
-          if [ -z "$JAVA_BIN" ]; then
-            echo "::error::找不到包内运行时 java"
-            find desktopApp/build/compose/binaries/main/app -maxdepth 4 | head -40
+          APP_DIR=desktopApp/build/compose/binaries/main/app
+          if [ ! -d "$APP_DIR" ]; then
+            echo "::error::找不到应用映像目录（打包任务本身不落 app/，需先跑 createDistributable）"
+            find desktopApp/build/compose -maxdepth 5 | head -40
             exit 1
           fi
-          echo "bundled java: $JAVA_BIN"
-          OUT=$("$JAVA_BIN" -XshowSettings:properties -version 2>&1)
-          echo "$OUT" | grep -E "java\.vendor" || true
-          echo "$OUT" | grep -q "JetBrains" || { echo "::error::包内运行时不是 JetBrains Runtime"; exit 1; }
+          # jpackage 的 app-image 会裁掉 runtime/bin 下的可执行文件（java 不在），
+          # 没法再用 java -version 问厂商；改从 libjvm 内嵌的厂商字符串认（JBR 是 "JetBrains s.r.o."）。
+          JVM_LIB=$(find "$APP_DIR" -type f \( -name libjvm.so -o -name libjvm.dylib -o -name jvm.dll \) | head -1)
+          if [ -z "$JVM_LIB" ]; then
+            echo "::error::找不到包内 JVM 动态库"
+            find "$APP_DIR" -maxdepth 6 -type d | head -40
+            exit 1
+          fi
+          echo "bundled jvm: $JVM_LIB"
+          grep -aq "JetBrains" "$JVM_LIB" || { echo "::error::包内运行时不是 JetBrains Runtime"; exit 1; }
 
       # 两个安装包的文件名里 jpackage 版本与发版版本（versionName）不同，
       # 按 app versionName 重命名后再上传（与 DMG 同口径）。
@@ -302,22 +316,29 @@ jobs:
         run: chmod +x gradlew
 
       # jpackage 打 msi 依赖 WiX Toolset；windows-latest 已预装（WiX 3.14），无需 choco。
+      # 打包任务只出安装包，不把 app-image 留在 build 里；下面要查包内运行时，所以显式产出。
       - name: Build MSI
-        run: ./gradlew :desktopApp:packageMsi --no-daemon
+        run: ./gradlew :desktopApp:createDistributable :desktopApp:packageMsi --no-daemon
 
       # 断言包内运行时是 JBR（理由同 macOS job）。
       - name: Verify bundled runtime is JetBrains Runtime
         run: |
-          JAVA_BIN=$(find desktopApp/build/compose/binaries/main/app -type f \( -name java -o -name java.exe \) -path "*runtime*" | head -1)
-          if [ -z "$JAVA_BIN" ]; then
-            echo "::error::找不到包内运行时 java"
-            find desktopApp/build/compose/binaries/main/app -maxdepth 4 | head -40
+          APP_DIR=desktopApp/build/compose/binaries/main/app
+          if [ ! -d "$APP_DIR" ]; then
+            echo "::error::找不到应用映像目录（打包任务本身不落 app/，需先跑 createDistributable）"
+            find desktopApp/build/compose -maxdepth 5 | head -40
             exit 1
           fi
-          echo "bundled java: $JAVA_BIN"
-          OUT=$("$JAVA_BIN" -XshowSettings:properties -version 2>&1)
-          echo "$OUT" | grep -E "java\.vendor" || true
-          echo "$OUT" | grep -q "JetBrains" || { echo "::error::包内运行时不是 JetBrains Runtime"; exit 1; }
+          # jpackage 的 app-image 会裁掉 runtime/bin 下的可执行文件（java 不在），
+          # 没法再用 java -version 问厂商；改从 libjvm 内嵌的厂商字符串认（JBR 是 "JetBrains s.r.o."）。
+          JVM_LIB=$(find "$APP_DIR" -type f \( -name libjvm.so -o -name libjvm.dylib -o -name jvm.dll \) | head -1)
+          if [ -z "$JVM_LIB" ]; then
+            echo "::error::找不到包内 JVM 动态库"
+            find "$APP_DIR" -maxdepth 6 -type d | head -40
+            exit 1
+          fi
+          echo "bundled jvm: $JVM_LIB"
+          grep -aq "JetBrains" "$JVM_LIB" || { echo "::error::包内运行时不是 JetBrains Runtime"; exit 1; }
 
       - name: Rename MSI with version
         run: |

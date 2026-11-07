@@ -442,10 +442,10 @@ if not, "should-invalidate-but-hits"; (c) no book-version dimension.
    (:31,:49). No user-CSS feature exists (all `fromProfile` call sites pass `userCssHash=0`), so the slot is dormant. Author CSS is per-chapter and
    invariant per book file; re-imports insert a NEW `bookId` row (new `book_<id>` namespace), so changed content cannot stale-hit.
    `PaginationCacheStore.LAYOUT_VERSION` separately guards engine-geometry changes. → No code change needed for this item.
-4. **Disk housekeeping**: LRU-clean old-hash files (add a size/count cap). *Landed: `PaginationCacheStore` trims `write` to
-   `MAX_TABLES_PER_BOOK = 32` files per book (least-recently-USED by last-modified; each table ≤ ~32 KB ⇒ ≤ ~1 MB/book at the cap);
-   a successful `read` refreshes the file's last-modified time so eviction tracks last used, not last written. Idempotent, metadata-only, thread-safe by
-   construction. The book-level key is the `book_<id>` directory namespace itself — re-imports get a fresh `bookId` so changed content can never
+4. **Disk housekeeping**: LRU-clean old-hash files. *Landed, then revised: an early count cap (32, later 256) is retired — measured tables
+   are only tens to ~200 bytes (a 762-chapter book stays under 120 KB), and the cap truncated long books' page-number prefix. Orphans from other
+   parameter hashes are removed by fingerprint at parameter-settle points (`cleanStaleParams`); corrupt/old-build files are swept on open.
+   A successful `read` still refreshes last-modified time (last USED, not last written). The book-level key is the `book_<id>` directory namespace itself — re-imports get a fresh `bookId` so changed content can never
    stale-hit (recorded in item 3); `clearBook` remains the delete/eviction path.*
 
 **Abandon/re-deploy**: discard-then-rebuild; file cleanup idempotent.

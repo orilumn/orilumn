@@ -67,17 +67,6 @@ object PaginationCacheCodec {
      */
     const val LAYOUT_VERSION = LayoutGeometryStamp.VALUE
 
-    /** Per-book cap on persisted table files. Old-parameter-hash tables are orphaned when the layout
-     *  key changes; version-stale orphans (older build) are swept by [PaginationCacheStore.sweepStale]
-     *  on book open, the rest are LRU-evicted here. Keep the most recently used and evict the rest
-     *  (each file ≤ ~32 KB ⇒ ≤ ~8 MB per book at the cap). R7 raised this from 32: a whole-book B2
-     *  pass must be able to record every chapter (the in-memory skip-fresh registry keys off these
-     *  files' presence), and 256 chapters covers virtually all books.
-     *
-     *  超帽的长书（762 章那种）表会被这本帽 LRU 掉，**全书页码不再依赖这些表**：页数另有
-     *  [countsFilename] 一份清单（几十字节/章，不入帽），重开书照常立刻出页码。 */
-    const val MAX_TABLES_PER_BOOK = 256
-
     /** Filename convention: `<chapterIndex>_<paramHash>.bin`. */
     fun filename(chapterIndex: Int, paramHash: Long): String =
         "${chapterIndex}_${paramHash}.bin"
@@ -85,11 +74,11 @@ object PaginationCacheCodec {
     /**
      * 全书各章页数快照的文件名：`counts_<paramHash>.idx`（与分页表同目录）。
      *
-     * 为什么单独存一份「页数」而不是靠扫表：`MAX_TABLES_PER_BOOK` 会把长书的表 LRU 掉
-     * （762 章的大书只留 256 张），而全书累计页码要的是**前面每一章**的页数——少一张表，
-     * 那之后的页码与目录页码就全是空白。页数是**换不掉的小事实**（同参数下分页是确定的），
-     * 记一份几十字节/章的清单，开书即得，不必等整书重排。
-     * `.idx` 后缀刻意与表文件区分：不受表的 LRU 帽与修剪影响。
+     * 为什么单独存一份「页数」而不是靠扫表：全书累计页码要的是**前面每一章**的页数，
+     * 扫表得逐章开文件读表头（七百多章 = 七百多次 IO，每次几十字节）；而表本身也会因
+     * 换构建、坏文件被清掉。页数是**换不掉的小事实**（同参数下分页是确定的），记一份
+     * 几十字节/章的清单，一次读几 KB 就拿到全书页数，不必等整书重排。
+     * `.idx` 后缀刻意与表文件区分：它不参与表文件的任何维护动作，只随参数指纹整份作废。
      */
     fun countsFilename(paramHash: Long): String = "counts_$paramHash.idx"
 

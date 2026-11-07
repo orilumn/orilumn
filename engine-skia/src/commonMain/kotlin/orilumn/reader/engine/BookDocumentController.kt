@@ -391,9 +391,6 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         // 页数快照的防抖落盘可能还挂着：关书前补一次，别把这一轮学到的章页数丢掉。
         countsWriteJob?.cancel()
         if (diskPageCountsHash != Long.MIN_VALUE) writePageCountsNow(diskPageCountsHash)
-        // 眼前这一章的表刷成最新（见 [pinCurrentChapterTable]）：下次开书磁盘命中，页码当拍就有。
-        val shown = if (displayedChapter >= 0) displayedChapter else activeChapter
-        if (shown >= 0) pinCurrentChapterTable(shown, currentParamHash())
         // 键域取消要先于 bgScope.cancel()：共享池的任务体不在 bgScope 上，不受后者影响。
         if (sharedScheduler != null) scheduler.cancelMatchingPrefixes(CONTROLLER_KEY_PREFIXES)
         bgScope.cancel()
@@ -3808,7 +3805,7 @@ private fun finishCanonicalBackground(
             // 页数（762 章实测每趟稳定缺 1 章，先后是 ch426、ch348），全书页码前缀从此断掉。
             //
             // 判据只看**页数是否已知**（[chapterPageCountAt]，含页数清单），不是「内存里有没有表」：
-            // 表和页数是两件事——表会被 per-book LRU 挪走、也会被 [evictFarChapters] 丢掉引用，
+            // 表和页数是两件事——表会被 [evictFarChapters] 丢掉引用、也可能被清缓存删掉，
             // 拿表当判据会把「已经算过、只是表不在了」的章当成缺章，一趟补派就变成重跑整本书。
             // 冷却 [B2_RETRY_COOLDOWN_MS]：整批任务被一次跳章/翻页清空时，立刻重派只会马上再被
             // 清一次（真机 13:19:40 一次 jump 清掉 526 章）；等读者停手、池子真空之后再补。
@@ -3841,34 +3838,10 @@ private fun finishCanonicalBackground(
                 scheduler.awaitIdle()
             }
             if (layoutEpoch == epoch) {
-                // 收尾把眼前这一章的表现在重写一遍（字节完全相同，只刷新 mtime）：整趟要写几百张表，
-                // 表帽按 mtime 只留最新的 256 张，而当前章被 B2 跳过、它的表正好是最旧的那一批 ⇒
-                // 下次开书落点变成磁盘未命中，页码要等本章正典排完才出得来。重写一次让它成为最新，
-                // 开书直接磁盘命中，页码当拍就有。
-                pinCurrentChapterTable(current, paramHash)
                 Logger.w(logTag, "whole-book B2 pass drained epoch=$epoch submitted=$submitted rounds=$round")
                 logMemoryBreakdown("b2-drained")
             }
         }
-    }
-
-    /**
-     * 把 [chapter] 的表文件重写一遍（内容不变，只刷新 mtime）。
-     *
-     * 用途：表帽 LRU 按 mtime 只留最新的 [PaginationCacheCodec.MAX_TABLES_PER_BOOK] 张，而整书
-     * 扫描会连续写几百张新表，把「眼前这一章」挤出帽外。那一章的页码恰恰是读者最常看、开书最先
-     * 要用的一张：表在，开书磁盘命中、页码当拍就有；表没了就要退临时表，等本章正典排完才有页码。
-     * 所以在整趟扫描收尾与关书前各刷一次，让它保持为最新的一张。
-     *
-     * 只刷新文件时间，不改内容、不改调度状态；表不在内存（临时会话未完成正典排版）时什么也不做。
-     */
-    private fun pinCurrentChapterTable(chapter: Int, hash: Long) {
-        val store = cacheStore() ?: return
-        if (bookId < 0 || chapter < 0) return
-        val table = unitAt(chapter)?.paginationTable
-            ?.takeIf { it.paramHash == hash && it.pages.isNotEmpty() } ?: return
-        runCatching { store.write(table, store.file("book_$bookId", chapter, hash)) }
-            .onFailure { Logger.w(logTag, "PIN table FAIL ch=$chapter ${it.message}") }
     }
 
     /**
@@ -3957,7 +3930,7 @@ private fun finishCanonicalBackground(
         // already completed under these params; shaping it again is pure waste.
         //
         // 但仍要把页数**记进快照**：这张表可能是别的路径绑上来的（prewarm / 上一次控制器留下的
-        // unit），它的文件也可能早被 per-book LRU 清掉了。不记就等于给全书页码前缀留一个永久缺口
+        // unit），它的文件也可能早被清缓存删掉了。不记就等于给全书页码前缀留一个永久缺口
         // ——真机见过整整一章（762 章里的一章）因此从快照里消失。
         u.paginationTable?.takeIf { it.paramHash == paramHash }?.let { table ->
             notePageCountKnown(index, paramHash, table.totalPages)
@@ -3987,7 +3960,7 @@ private fun finishCanonicalBackground(
      * B2 补派扫描：本参数下**页数还未知**的章，就是这一趟漏掉的章。
      *
      * 判据是 [chapterPageCountAt]（内存表 / 正典切片 / 页数清单任一已知即可），**不是**「内存里
-     * 有没有表」：表只是页数的来源之一，per-book LRU 与 [evictFarChapters] 都会让表离开内存，
+     * 有没有表」：表只是页数的来源之一，[evictFarChapters] 就会让表离开内存，
      * 而页数仍留在清单里。拿表当判据会把「算过但表不在了」的章误判成缺章，补派立刻退化成
      * 重跑整本书（真机一次补派 526 章）。
      *
@@ -4517,8 +4490,8 @@ private fun finishCanonicalBackground(
             val t0 = platformNowMs()
             val found = HashMap(mem)
             // 先吃「上一轮同参数下记下的页数清单」（`counts_<hash>.idx`）。为什么必须靠它：
-            // 表文件有 per-book LRU 上限（长书 762 章只留 256 张），扫表永远凑不齐前缀；
-            // 而页数是同参数下确定不变的小事实，清单在，开书立刻就有全书页码。
+            // 扫表要逐章开文件读表头（七百多章 = 七百多次 IO），而表文件还会因清缓存、
+            // 坏文件被删掉。页数是同参数下确定不变的小事实，清单在，开书立刻就有全书页码。
             val stored = runCatching { store.readPageCounts(bookKey, hash) }.getOrNull()
             if (stored != null) {
                 for ((chapter, pages) in stored) if (chapter in 0 until n) found[chapter] = pages
@@ -4538,7 +4511,7 @@ private fun finishCanonicalBackground(
             if (diskPageCountsHash != hash) return@launch
             diskPageCounts = merged
             Logger.w(logTag, "PAGE-COUNT hash=$hash chapters=$n known=${merged.size} stored=${stored?.size ?: 0} t=${platformNowMs() - t0}ms")
-            // 这一趟学到的结论顺手落成清单：下次开书（哪怕表已被 LRU 掉）直接可用。
+            // 这一趟学到的结论顺手落成清单：下次开书（哪怕表文件被清掉）直接可用。
             if (merged.size > (stored?.size ?: 0)) writePageCountsNow(hash, merged)
             if (merged.size > mem.size) onPageCountsChanged?.invoke()
         }

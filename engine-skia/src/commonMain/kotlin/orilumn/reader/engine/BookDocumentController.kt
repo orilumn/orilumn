@@ -23,6 +23,7 @@ import orilumn.reader.engine.paging.BookPageNumber
 import orilumn.reader.engine.paging.PageSlice
 import orilumn.reader.engine.paging.bookPageNumberOf
 import orilumn.reader.engine.paging.bookTotalPagesOf
+import orilumn.reader.engine.paging.chapterPageAtBookPage
 import orilumn.reader.engine.paging.chapterStartPagesOf
 import orilumn.reader.engine.paging.Paginator
 import orilumn.reader.engine.skia.DrawLine
@@ -4273,10 +4274,18 @@ private fun finishCanonicalBackground(
     }
 
     fun pageProgress(chapter: Int, slice: PageSlice): Double {
-        // After lazy loading the whole-book character total is unknown, so progress is converted
-        // with "equal chapter weights": chapter start 0, chapter end 1, whole book = cumulative/chapters.
         val total = chapters.size
         if (total <= 0) return 0.0
+        // 有完整页码时**按页**：滑块位置 = 本页在全书里的中点位置（页码 1 起）。
+        // 取中点而不是页首，和 [pageAtFraction] 的 floor 反查互为逆运算，且第一页不会正好
+        // 落在 0（滑块拉到 0 是「进封面」的既有语义，别让首页误触）。
+        val pn = bookPageNumber(chapter, slice)
+        val pages = pn?.total
+        if (pn != null && pages != null && pages > 0) {
+            return ((pn.index - 0.5) / pages).coerceIn(0.0, 1.0)
+        }
+        // 页码不完整（换参数刚清空 / 还在排）时退回**按章**等权：
+        // 章首 0、章末 1，全书 = 累计/章数。重排清空快照后这里自动回到这一支。
         val c = chapter.coerceIn(0, total - 1)
         return ((c + 1.0) / total).coerceIn(0.0, 1.0)
     }
@@ -4713,15 +4722,44 @@ private fun finishCanonicalBackground(
     fun title(): String = book?.title.orEmpty()
 
     /**
-     * Locates the first page of the chapter at a given whole-book equal-weight progress (skips
-     * blank/opening chapters).
-     * @param fraction 0..1.
+     * 进度条落位，两种口径（与 [pageProgress] 互为逆运算）：
+     *  1. **有完整页码 ⇒ 按页**：0..1 先换成全书页下标（floor），反查章与章内页号，
+     *     再把该页的页首字符交给落位排版——手指停在哪一页就落在哪一页；
+     *  2. **页码不完整（换参数刚清空 / 整书还在排）⇒ 按章**：原有等权映射（章首 0、章末 1），
+     *     落在该章第一张有正文的页。
+     * @param fraction 0..1。
      */
     suspend fun pageAtFraction(fraction: Double): Pair<Int, PageSlice>? {
         clearFlipDir("seek")
         preemptForNavigation()
         val n = chapters.size
         if (n <= 0) return null
+        val hash = currentParamHash()
+        // 有完整页码（每一章都已知，含 0 页空章）才走按页；缺一章都不估，直接按章。
+        val totalPages = bookTotalPages()
+        if (totalPages != null && totalPages > 0) {
+            val targetPage = (fraction.coerceIn(0.0, 1.0) * totalPages).toInt()
+                .coerceIn(0, totalPages - 1)
+            val hit = chapterPageAtBookPage(n, targetPage) { chapterPageCountAt(it, hash) }
+            if (hit != null) {
+                val (c, pageIdx) = hit
+                Logger.w(logTag, "seek map fraction=$fraction page=${targetPage + 1}/$totalPages ch=$c pageInCh=$pageIdx")
+                // 页首字符是落位排版的锚：有了它，磁盘命中路径只塑形这一页。
+                val targetChar = pageCharStart(c, pageIdx, hash)
+                val u = ensureChapterLayout(c, targetChar = targetChar ?: 0)
+                val p = u?.pageSlices?.getOrNull(pageIdx)?.takeIf { it.firstLine >= 0 }
+                    ?: u?.inProgress?.currentSlice
+                    ?: u?.firstPage()
+                if (p != null) {
+                    logJumpLanding("seek", c)
+                    // 落位成功后才驱逐，且按刚落的章保窗口（同下方按章路径）。
+                    evictFarChapters(keep = c)
+                    return c to p
+                }
+                Logger.w(logTag, "seek PAGE fallback to chapter: ch=$c page=$pageIdx no slice")
+            }
+        }
+        // 按章：等权映射（页码不全时的唯一口径）。
         val target = (fraction.coerceIn(0.0, 1.0) * n).toInt().coerceIn(0, n - 1)
         // 诊断常驻：手指值→目标章，W 级防 PGAP flood 吞行（D 级 seek start 已被吞过）。
         Logger.w(logTag, "seek map fraction=$fraction target=$target")
@@ -4753,6 +4791,25 @@ private fun finishCanonicalBackground(
         // 落位成功后才驱逐，且按刚落的章保窗口 —— active 还是旧值，按它清等于毒死刚落的章。
         evictFarChapters(keep = c)
         return c to p
+    }
+
+    /** 全书页码定位用：第 [chapter] 章第 [pageIdx] 页的章内首字符；拿不到回 null（调用方退章首）。 */
+    private fun pageCharStart(chapter: Int, pageIdx: Int, hash: Long): Int? {
+        val unit = unitAt(chapter)
+        if (unit != null) {
+            // 小章整章已排：切片本身就是正典分页。
+            if (unit.inProgress == null && unit.layout != null) {
+                unit.pageSlices.getOrNull(pageIdx)?.takeIf { it.firstLine >= 0 }?.let { return it.charStart }
+            }
+            unit.paginationTable?.takeIf { it.paramHash == hash }
+                ?.pages?.getOrNull(pageIdx)?.let { return it.charStart }
+        }
+        // 远章内存里没有表：读盘拿这一页的页首字符（几十到几百字节，落位前只读一次）。
+        val store = cacheStore() ?: return null
+        val table = runCatching { store.read(store.file("book_$bookId", chapter, hash)) }.getOrNull()
+            ?: return null
+        if (table.paramHash != hash) return null
+        return table.pages.getOrNull(pageIdx)?.charStart
     }
 
     /**

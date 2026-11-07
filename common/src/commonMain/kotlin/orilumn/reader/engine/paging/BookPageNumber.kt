@@ -78,3 +78,25 @@ fun bookPageNumberOf(
     }
     return BookPageNumber(index = before + pageInChapter + 1, total = if (complete) total else null)
 }
+
+/**
+ * 全书第 [bookPageIndex] 页（0 起）落在哪一章、章内第几页（0 起）。
+ *
+ * 进度条「有完整页码时按页」用：先把手指的 0..1 换成全书页下标，再反查章与章内页号。
+ * 目标页**之前**的任一章页数未知、或下标越界，返回 null——调用方应先确认整本页数齐全
+ * （缺章时按章定位）。0 页的空章不占页号，自然跳过。
+ */
+fun chapterPageAtBookPage(
+    chapterCount: Int,
+    bookPageIndex: Int,
+    pageCountOf: (Int) -> Int?,
+): Pair<Int, Int>? {
+    if (bookPageIndex < 0) return null
+    var acc = 0
+    for (i in 0 until chapterCount) {
+        val n = pageCountOf(i) ?: return null
+        if (bookPageIndex < acc + n) return i to (bookPageIndex - acc)
+        acc += n
+    }
+    return null
+}

@@ -2234,7 +2234,10 @@ fun ReaderScreen(
                 modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 56.dp),
             )
         } else if (pos != null) {
-            val fraction = remember(pos) {
+            // 进度条口径随页数完整度切换（按页 ↔ 按章）：页数补齐、换参数清空都要立刻反映，
+            // 只认 pos 的 remember 会停在旧口径上，所以把页数代际也当键。
+            val progressRev = currentHost.pageNumberRevision()
+            val fraction = remember(pos, progressRev) {
                 currentHost.pageProgress(pos).toFloat().coerceIn(0f, 1f)
             }
             val chapterTitle = remember(pos) { currentHost.unitTitle(pos.chapter) }

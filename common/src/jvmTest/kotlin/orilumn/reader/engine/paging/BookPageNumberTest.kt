@@ -87,6 +87,38 @@ class BookPageNumberTest {
         assertEquals(12, bookTotalPagesOf(3) { counts[it] })
     }
 
+    // ---- 进度条按页定位：全书页下标 → 章 + 章内页 ----
+
+    @Test
+    fun `book page index maps to chapter and page in chapter`() {
+        assertEquals(0 to 0, chapterPageAtBookPage(3, 0) { threeChapters[it] })
+        assertEquals(0 to 9, chapterPageAtBookPage(3, 9) { threeChapters[it] })
+        assertEquals(1 to 0, chapterPageAtBookPage(3, 10) { threeChapters[it] })
+        assertEquals(1 to 19, chapterPageAtBookPage(3, 29) { threeChapters[it] })
+        assertEquals(2 to 0, chapterPageAtBookPage(3, 30) { threeChapters[it] })
+        assertEquals(2 to 29, chapterPageAtBookPage(3, 59) { threeChapters[it] })
+        assertNull("越界（总页数 60，下标 60）", chapterPageAtBookPage(3, 60) { threeChapters[it] })
+        assertNull("负下标", chapterPageAtBookPage(3, -1) { threeChapters[it] })
+    }
+
+    @Test
+    fun `book page mapping skips zero-page chapters`() {
+        val counts = mapOf(0 to 5, 1 to 0, 2 to 7)
+        assertEquals(0 to 4, chapterPageAtBookPage(3, 4) { counts[it] })
+        assertEquals(2 to 0, chapterPageAtBookPage(3, 5) { counts[it] })
+        assertEquals(2 to 6, chapterPageAtBookPage(3, 11) { counts[it] })
+        assertNull(chapterPageAtBookPage(3, 12) { counts[it] })
+    }
+
+    @Test
+    fun `book page mapping refuses when a preceding chapter is unknown`() {
+        val counts = mapOf(0 to 10)
+        // 目标落在第 0 章内：前面的章都已知，照给。
+        assertEquals(0 to 3, chapterPageAtBookPage(3, 3) { counts[it] })
+        // 目标落在第 1 章：第 0 章已知，但第 1 章页数未知，无法判断下标落在哪一章 ⇒ null。
+        assertNull(chapterPageAtBookPage(3, 12) { counts[it] })
+    }
+
     @Test
     fun `nothing known still knows the first chapter starts at page one`() {
         // 第 0 章首页 = 全书第一页，这是定义，不依赖任何页数；后面的章才不可算。

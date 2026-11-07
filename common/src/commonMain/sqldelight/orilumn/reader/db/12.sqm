@@ -1,0 +1,3 @@
+-- 正文修订（12→13）：审阅清单改成「原文一行 / 新文字一行」，补存整段新文字。
+-- 旧行没有这一列的数据（回退空串），清单对旧行只显示改后文字。
+ALTER TABLE text_revisions ADD COLUMN editedText TEXT NOT NULL DEFAULT '';

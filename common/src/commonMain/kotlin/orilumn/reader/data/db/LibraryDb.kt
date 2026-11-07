@@ -10,6 +10,8 @@ import orilumn.reader.data.book.Book
 import orilumn.reader.data.book.BookReadingState
 import orilumn.reader.data.font.FontFace
 import orilumn.reader.data.font.SystemFontFace
+import orilumn.reader.data.revision.TextRevision
+import orilumn.reader.data.revision.TextRevisionStore
 import orilumn.reader.db.OrilumnDb
 import orilumn.reader.io.Logger
 import kotlinx.coroutines.Dispatchers
@@ -28,12 +30,13 @@ enum class BookSort { Added, Read, Name }
  * - 查询走 IO 线程；书目流经 `asFlow().mapToList()` 随库变化推送（替代 Room `observe*`）；
  * - 驱动由各壳提供（Android `AndroidSqliteDriver` / 桌面 `JdbcSqliteDriver`），本类无平台绑定。
  */
-class LibraryDb(private val db: OrilumnDb) : AnnotationStore {
+class LibraryDb(private val db: OrilumnDb) : AnnotationStore, TextRevisionStore {
     private val books = db.booksQueries
     private val progress = db.readingStatesQueries
     private val fonts = db.fontFacesQueries
     private val fontScan = db.fontScanStateQueries
     private val annotations = db.annotationsQueries
+    private val revisions = db.textRevisionsQueries
 
     fun observeBooks(sort: BookSort = BookSort.Added): Flow<List<Book>> {
         val flow = when (sort) {
@@ -94,11 +97,12 @@ class LibraryDb(private val db: OrilumnDb) : AnnotationStore {
     }
 
     /**
-     * 删书并在**同一事务**里清掉阅读进度与标注（没有外键级联，必须一起删）。
+     * 删书并在**同一事务**里清掉阅读进度、标注与正文修订（没有外键级联，必须一起删）。
      * 两个平台都走这一条，避免「删了书、留了孤儿」。
      */
     suspend fun removeBookAndData(id: Long) = withContext(Dispatchers.IO) {
         db.transaction {
+            revisions.deleteTextRevisionsForBook(id)
             annotations.deleteAnnotationsForBook(id)
             progress.clearReadingState(id)
             books.deleteBook(id)
@@ -190,6 +194,65 @@ class LibraryDb(private val db: OrilumnDb) : AnnotationStore {
 
     override suspend fun deleteAnnotationsForBook(bookId: Long) = withContext(Dispatchers.IO) {
         annotations.deleteAnnotationsForBook(bookId)
+        Unit
+    }
+
+    // ---- 正文修订（schema v11 起，v12/v13 补审阅清单两行；锚点为原书章内字符区间，见方案 D-31～D-33） ----
+
+    override suspend fun textRevisionsForChapter(bookId: Long, chapter: Int): List<TextRevision> =
+        withContext(Dispatchers.IO) {
+            revisions.textRevisionsForChapter(bookId, chapter.toLong())
+                .executeAsList()
+                .map { it.toTextRevision() }
+        }
+
+    override suspend fun textRevisionsForBook(bookId: Long): List<TextRevision> =
+        withContext(Dispatchers.IO) {
+            revisions.textRevisionsForBook(bookId)
+                .executeAsList()
+                .map { it.toTextRevision() }
+        }
+
+    override suspend fun replaceTextRevisions(
+        deletedIds: List<Long>,
+        inserted: List<TextRevision>,
+    ): List<TextRevision> = withContext(Dispatchers.IO) {
+        db.transactionWithResult {
+            deletedIds.forEach { revisions.deleteTextRevision(it) }
+            inserted.map { revision ->
+                revisions.insertTextRevision(
+                    bookId = revision.bookId,
+                    chapter = revision.chapter.toLong(),
+                    charStart = revision.charStart.toLong(),
+                    charEnd = revision.charEnd.toLong(),
+                    text = revision.text,
+                    originalText = revision.originalText,
+                    editedText = revision.editedText,
+                    delta = revision.delta.toLong(),
+                    groupId = revision.groupId,
+                    createdAt = revision.createdAt,
+                    updatedAt = revision.updatedAt,
+                )
+                val id = revisions.lastInsertTextRevisionId().executeAsOneOrNull()?.max
+                    ?: error("insertTextRevision 未返回新行 id")
+                revision.copy(id = id)
+            }
+        }
+    }
+
+    override suspend fun fillLegacyRevisionSnapshot(id: Long, originalText: String, editedText: String) =
+        withContext(Dispatchers.IO) {
+            revisions.fillLegacyRevisionSnapshot(originalText, editedText, id)
+            Unit
+        }
+
+    override suspend fun deleteTextRevision(id: Long) = withContext(Dispatchers.IO) {
+        revisions.deleteTextRevision(id)
+        Unit
+    }
+
+    override suspend fun deleteTextRevisionsForBook(bookId: Long) = withContext(Dispatchers.IO) {
+        revisions.deleteTextRevisionsForBook(bookId)
         Unit
     }
 
@@ -387,6 +450,21 @@ class LibraryDb(private val db: OrilumnDb) : AnnotationStore {
         lineStyle = AnnotationLineStyle.fromWire(lineStyle),
         note = note,
         quote = quote,
+        createdAt = createdAt,
+        updatedAt = updatedAt,
+    )
+
+    private fun orilumn.reader.db.Text_revisions.toTextRevision(): TextRevision = TextRevision(
+        id = id,
+        bookId = bookId,
+        chapter = chapter.toInt(),
+        charStart = charStart.toInt(),
+        charEnd = charEnd.toInt(),
+        text = text,
+        originalText = originalText,
+        editedText = editedText,
+        delta = delta.toInt(),
+        groupId = groupId,
         createdAt = createdAt,
         updatedAt = updatedAt,
     )

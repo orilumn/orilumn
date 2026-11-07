@@ -653,6 +653,156 @@ class BoxChapterLayouter(
         return StyleComputer(profile.bodyPx, ua, sheets, theme, custom, ui, paragraphEm = profile.paragraphSpacingEm, gapScale = profile.paragraphGapScale, pxScale = profile.density)
     }
 
+    /**
+     * 载入重放（正文修改 v3）：用**与排版同一套级联**取每叶的样式化文本，把修订套到章树上，
+     * 并修正后续叶的字符起点（方案 §8.5）。只在内存里做，返回新树与修正后的叶表/起点；
+     * 调用方负责把结果写回 `unit.markup` 与结构缓存，**绝不落盘**。
+     *
+     * 之所以放在排版层：修订的叶内偏移必须与 `styledSegments` 的字符流同尺（空白归一、
+     * 边界空格合并、生成内容、`<br>` 槽位），自己另写一套必然与排版漂移。
+     *
+     * 只对**被改到的叶**做级联与重建；没改到的叶零成本（不解析样式）。
+     */
+    internal fun replayRevisions(
+        markup: MarkupElement,
+        cssBundle: CssBundle?,
+        profile: TypographicProfile,
+        contentW: Int,
+        contentH: Int,
+        structure: ChapterStructureCache,
+        leafPaths: List<IntArray?>,
+        editsForLeaf: (leafIndex: Int, leafStart: Int) -> List<orilumn.reader.engine.revision.LeafTextEditor.Edit>,
+        merges: List<orilumn.reader.engine.revision.ChapterRevisionReplay.Merge> = emptyList(),
+    ): orilumn.reader.engine.revision.ChapterRevisionReplay.Result {
+        val styling = leafStyling(cssBundle, profile, contentW, contentH, structure)
+        return orilumn.reader.engine.revision.ChapterRevisionReplay.replay(
+            root = markup,
+            leaves = structure.leaves,
+            leafPaths = leafPaths,
+            charStarts = structure.globalCharStarts,
+            editsForLeaf = editsForLeaf,
+            segmentsOf = styling.segmentsOf,
+            wsOf = styling.wsOf,
+            styleOf = styling.styleOf,
+            merges = merges,
+        )
+    }
+
+    /**
+     * 只投影指定叶的文本（原书空间、与排版同尺），不重放、不排版。
+     *
+     * 老修订补录「原文」用：修订区间落在原书空间，按叶起点定位后直接从这条叶文本里切片。
+     * 与 `chapterText` 走同一套级联（空白归一、生成内容、隐藏元素），不会因另写一套而错位。
+     */
+    internal fun originalLeafTexts(
+        cssBundle: CssBundle?,
+        profile: TypographicProfile,
+        contentW: Int,
+        contentH: Int,
+        structure: ChapterStructureCache,
+        leafIndices: Collection<Int>,
+    ): Map<Int, String> {
+        if (leafIndices.isEmpty()) return emptyMap()
+        val styling = leafStyling(cssBundle, profile, contentW, contentH, structure)
+        val out = HashMap<Int, String>(leafIndices.size)
+        for (i in leafIndices) {
+            val leaf = structure.leaves.getOrNull(i) ?: continue
+            out[i] = styling.segmentsOf(leaf).text
+        }
+        return out
+    }
+
+    /**
+     * 重放与「只读原文」共用的叶级级联：叶文本、`white-space` 与完整样式一次建好，
+     * 调用方只消费，不各自再写一套（两处规则一旦漂移，补录的原文就会与排版错位）。
+     */
+    private class LeafStyling(
+        val segmentsOf: (MarkupElement) -> orilumn.reader.engine.laying.StyledSegments,
+        val wsOf: (MarkupElement) -> orilumn.reader.engine.css.WhiteSpace,
+        val styleOf: (MarkupElement) -> orilumn.reader.engine.css.ComputedStyle,
+    )
+
+    private fun leafStyling(
+        cssBundle: CssBundle?,
+        profile: TypographicProfile,
+        contentW: Int,
+        contentH: Int,
+        structure: ChapterStructureCache,
+    ): LeafStyling {
+        val viewport = orilumn.reader.engine.css.CssViewport(contentW.coerceAtLeast(1), contentH.coerceAtLeast(1))
+        val sheets = structure.parsedAuthorSheets ?: parseAuthorSheets(cssBundle, viewport).also {
+            structure.parsedAuthorSheets = it
+        }
+        val engine = styleComputerFor(cssBundle, profile, sheets)
+        val classify = if (engine.hasDisplayDeclaration()) {
+            val displayCache = identityMap<MarkupElement, Boolean>()
+            BlockClassify { el ->
+                orilumn.reader.engine.laying.NormalFlowLayout.defaultBlock(el) ||
+                    engine.resolveDisplayOnly(el, displayCache)
+            }
+        } else {
+            orilumn.reader.engine.laying.NormalFlowLayout.DEFAULT_CLASSIFY
+        }
+        val hidden = hiddenCheckFor(engine)
+        val styleCache = HashMap<MarkupElement, orilumn.reader.engine.css.ComputedStyle>()
+        val styleOf: (MarkupElement) -> orilumn.reader.engine.css.ComputedStyle = { el ->
+            engine.resolve(el, styleCache)
+        }
+        val wsOf: (MarkupElement) -> orilumn.reader.engine.css.WhiteSpace = { el ->
+            engine.resolve(el, styleCache).whiteSpace
+        }
+        val genOf: orilumn.reader.engine.laying.GenOf = if (structure.genStrings.isEmpty()) {
+            orilumn.reader.engine.laying.EmptyGen
+        } else {
+            val pseudoCache = HashMap<Pair<MarkupElement, String>, orilumn.reader.engine.css.ComputedStyle?>()
+            orilumn.reader.engine.laying.GeneratedContent.genOf(structure.genStrings) { el, p ->
+                pseudoCache.getOrPut(el to p) {
+                    engine.pseudoStyle(
+                        el,
+                        orilumn.reader.engine.laying.ancestorsOf(el),
+                        engine.resolve(el, styleCache),
+                        p,
+                    )
+                }
+            }
+        }
+        // ::first-letter 只切段、不改文字长度；重放不需要它（少一次伪元素级联）。
+        val segmentsOf: (MarkupElement) -> orilumn.reader.engine.laying.StyledSegments = { leaf ->
+            orilumn.reader.engine.laying.styledSegments(
+                root = leaf,
+                wsOf = wsOf,
+                isExcluded = hidden::isHidden,
+                isBlock = classify::isBlock,
+                leafWs = wsOf(leaf),
+                genOf = genOf,
+                styleOf = styleOf,
+            )
+        }
+        return LeafStyling(segmentsOf, wsOf, styleOf)
+    }
+
+    /**
+     * 正文修改提交前的空白归一需要每叶的 `white-space`：与载入重放同一套级联，按需解析。
+     *
+     * 返回的 lambda 内部带样式缓存，一次提交里多次取叶不会重复级联；`parsedAuthorSheets` 与
+     * 重放共用（同一份 CSS 只 tokenize 一次）。属于排版层（上）。
+     */
+    internal fun whiteSpaceResolver(
+        cssBundle: CssBundle?,
+        profile: TypographicProfile,
+        contentW: Int,
+        contentH: Int,
+        structure: ChapterStructureCache,
+    ): (MarkupElement) -> orilumn.reader.engine.css.WhiteSpace {
+        val viewport = orilumn.reader.engine.css.CssViewport(contentW.coerceAtLeast(1), contentH.coerceAtLeast(1))
+        val sheets = structure.parsedAuthorSheets ?: parseAuthorSheets(cssBundle, viewport).also {
+            structure.parsedAuthorSheets = it
+        }
+        val engine = styleComputerFor(cssBundle, profile, sheets)
+        val styleCache = HashMap<MarkupElement, orilumn.reader.engine.css.ComputedStyle>()
+        return { el -> engine.resolve(el, styleCache).whiteSpace }
+    }
+
     /** Assembles a [ChapterPrepareResult] from a cascade + box tree, computing global char starts. */
     private fun buildPrepareResult(
         markup: MarkupElement,

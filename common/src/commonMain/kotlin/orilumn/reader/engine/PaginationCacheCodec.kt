@@ -33,7 +33,7 @@ object PaginationCacheCodec {
     private const val MAGIC = 0x43505442
 
     /** File/schema version. Bump only when the on-disk byte layout changes. */
-    private const val VERSION = 3 // 3: header gains appVersion (build-number backstop; v2 files miss on read)
+    private const val VERSION = 4 // 4: header gains contentRev (text-revision fingerprint; v3 files miss on read)
 
     /**
      * **行几何版本 = 引擎源码指纹**（[LayoutGeometryStamp]），**不靠人手动 bump**。
@@ -87,23 +87,29 @@ object PaginationCacheCodec {
     /** 页数快照的 magic（与表文件的 MAGIC 故意不同：两者永不被彼此的解析器接受）。 */
     private const val COUNTS_MAGIC = 0x43504E43 // "CPNC"
 
-    /** 页数快照表头字节数：magic/version/layoutVersion/appVersion 四个 Int + paramHash 一个 Long + count 一个 Int。 */
-    const val COUNTS_HEADER_BYTES = 28
+    /** 页数快照表头字节数：四个 Int + paramHash/contentRev 两个 Long + count 一个 Int。 */
+    const val COUNTS_HEADER_BYTES = 36
 
     /**
      * 序列化整本「章号 → 页数」快照（含排完是 0 页的空章）。
      *
-     * 布局：[magic][VERSION][LAYOUT_VERSION][appVersion][paramHash: Long][count][(chapter, pages) × count]。
+     * 布局：[magic][VERSION][LAYOUT_VERSION][appVersion][paramHash: Long][contentRev: Long][count][(chapter, pages) × count]。
      * 校验口径与表文件**同序同判**：源码几何指纹 + 构建号 + 参数指纹任一不符即整份作废
      * （宁可重扫一遍表头，也不拿旧结论凑页码）。0 页合法（`pages >= 0`）。
      */
-    fun encodePageCounts(paramHash: Long, counts: Map<Int, Int>, appVersion: Int): ByteArray {
+    fun encodePageCounts(
+        paramHash: Long,
+        counts: Map<Int, Int>,
+        appVersion: Int,
+        contentRev: Long = 0L,
+    ): ByteArray {
         val buf = Buffer()
         buf.writeInt(COUNTS_MAGIC)
         buf.writeInt(VERSION)
         buf.writeInt(LAYOUT_VERSION)
         buf.writeInt(appVersion)
         buf.writeLong(paramHash)
+        buf.writeLong(contentRev)
         buf.writeInt(counts.size)
         for ((chapter, pages) in counts) {
             buf.writeInt(chapter)
@@ -117,6 +123,7 @@ object PaginationCacheCodec {
         bytes: ByteArray,
         expectedAppVersion: Int,
         expectedParamHash: Long,
+        expectedContentRev: Long = 0L,
     ): Map<Int, Int>? {
         if (bytes.size < COUNTS_HEADER_BYTES) return null
         return try {
@@ -126,6 +133,7 @@ object PaginationCacheCodec {
             if (buf.readInt() != LAYOUT_VERSION) return null
             if (buf.readInt() != expectedAppVersion) return null
             if (buf.readLong() != expectedParamHash) return null
+            if (buf.readLong() != expectedContentRev) return null
             val count = buf.readInt()
             if (count < 0 || bytes.size.toLong() != COUNTS_HEADER_BYTES + count * 8L) return null
             val out = LinkedHashMap<Int, Int>(count)
@@ -141,9 +149,9 @@ object PaginationCacheCodec {
         }
     }
 
-    /** 表头固定字节数（见上面的文件格式：magic/version/layoutVersion/appVersion/chapterIndex 五个
-     *  Int + paramHash 一个 Long + totalBlocks/totalChars/pageCount 三个 Int = 40）。 */
-    const val HEADER_BYTES = 40
+    /** 表头固定字节数（见上面的文件格式：五个 Int + paramHash/contentRev 两个 Long
+     *  + totalBlocks/totalChars/pageCount 三个 Int = 48）。 */
+    const val HEADER_BYTES = 48
 
     /**
      * 只解表头取页数（全书累计页码求和用）：命中条件与 [decode] **同序同判**（magic、schema、
@@ -160,6 +168,7 @@ object PaginationCacheCodec {
         expectedAppVersion: Int,
         expectedChapterIndex: Int,
         expectedParamHash: Long,
+        expectedContentRev: Long = 0L,
     ): Int? {
         if (bytes.size < HEADER_BYTES) return null
         return try {
@@ -170,6 +179,7 @@ object PaginationCacheCodec {
             if (buf.readInt() != expectedAppVersion) return null
             if (buf.readInt() != expectedChapterIndex) return null
             if (buf.readLong() != expectedParamHash) return null
+            if (buf.readLong() != expectedContentRev) return null
             buf.readInt() // totalBlocks
             buf.readInt() // totalChars
             buf.readInt().takeIf { it >= 0 }
@@ -188,6 +198,7 @@ object PaginationCacheCodec {
         buf.writeInt(appVersion)
         buf.writeInt(table.chapterIndex)
         buf.writeLong(table.paramHash)
+        buf.writeLong(table.contentRev)
         buf.writeInt(table.totalBlocks)
         buf.writeInt(table.totalChars)
         buf.writeInt(table.pages.size)
@@ -205,7 +216,11 @@ object PaginationCacheCodec {
      *  still usable.
      *  Null 原因逐条落盘：版本不匹配（预期失效）/损坏/解析异常三者不可再压成同一个哑 null，
      *  否则 DISK-HIT 跟踪无法区分 miss、损坏与 codec 自身 bug。 */
-    fun decode(bytes: ByteArray, expectedAppVersion: Int): ChapterPaginationTable? {
+    fun decode(
+        bytes: ByteArray,
+        expectedAppVersion: Int,
+        expectedContentRev: Long? = 0L,
+    ): ChapterPaginationTable? {
         if (bytes.isEmpty()) return null
         return try {
             val buf = Buffer().write(bytes)
@@ -218,6 +233,11 @@ object PaginationCacheCodec {
             if (buf.readInt() != expectedAppVersion) return decodeNull("app-version")
             val chapterIndex = buf.readInt()
             val paramHash = buf.readLong()
+            val contentRev = buf.readLong()
+            // null = 不校验内容版本（扫盘清理用：它只关心「这份字节在当前构建下还解得开吗」）。
+            if (expectedContentRev != null && contentRev != expectedContentRev) {
+                return decodeNull("content-rev have=$contentRev want=$expectedContentRev")
+            }
             val totalBlocks = buf.readInt()
             val totalChars = buf.readInt()
             val pageCount = buf.readInt()
@@ -236,6 +256,7 @@ object PaginationCacheCodec {
             ChapterPaginationTable(
                 chapterIndex = chapterIndex,
                 paramHash = paramHash,
+                contentRev = contentRev,
                 totalBlocks = totalBlocks,
                 totalChars = totalChars,
                 pages = pages,

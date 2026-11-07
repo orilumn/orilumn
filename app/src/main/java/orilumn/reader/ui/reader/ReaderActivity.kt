@@ -43,6 +43,7 @@ import orilumn.reader.data.font.FontRepository
 import orilumn.reader.data.font.FontEntry
 import orilumn.reader.data.epub.TocItem
 import orilumn.reader.data.epub.ZipEpubResourceReader
+import orilumn.reader.data.revision.TextRevision
 import orilumn.reader.data.settings.BookSettingsStore
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.data.settings.ReaderSettingsStore
@@ -450,6 +451,30 @@ class ReaderActivity : ComponentActivity() {
                         onDismiss = { closePanel() },
                     )
                 },
+                revisionsContent = {
+                    ReaderRevisionPanel(
+                        scheme = effective.scheme,
+                        load = { tabletHost?.textRevisionsForBook() ?: emptyList() },
+                        onDelete = { revision ->
+                            when (val outcome = tabletHost?.deleteTextRevision(revision)) {
+                                is TextRevisionDeleteOutcome.Success -> {
+                                    // 正文变了：版式号 +1 强制当前页重取；删的是当前章时按宿主给的新落位走。
+                                    relayoutAnchor.release()
+                                    layoutRevision++
+                                    outcome.pos?.let { target ->
+                                        currentPos = target
+                                        externalPos = target
+                                    }
+                                    true
+                                }
+                                else -> false
+                            }
+                        },
+                        currentChapter = currentPos?.chapter ?: 0,
+                        onJump = { revision -> revisionJump(revision) },
+                        onDismiss = { closePanel() },
+                    )
+                },
             )
 
             // 设置抽屉用共享实现（R3 同口径）；返回键由壳承载，直接关面板。
@@ -681,6 +706,24 @@ class ReaderActivity : ComponentActivity() {
             withContext(Dispatchers.Main) {
                 if (target != null) {
                     // 标注跳转是导航：改参锚点作废，下一次改参按新的当前页首取。
+                    relayoutAnchor.release()
+                    currentPos = target
+                    externalPos = target
+                }
+            }
+        }
+    }
+
+    /** 编辑清单跳转：落到包含该修订起点的页（与标注清单同一跳转口径，原书→渲染由宿主换算）。 */
+    private fun revisionJump(revision: TextRevision) {
+        panelPage = null
+        applySystemBars()
+        val host = tabletHost ?: return
+        lifecycleScope.launch(Dispatchers.IO) {
+            val target = host.jumpToChar(revision.chapter, revision.charStart)
+            withContext(Dispatchers.Main) {
+                if (target != null) {
+                    // 清单跳转是导航：改参锚点作废，下一次改参按新的当前页首取。
                     relayoutAnchor.release()
                     currentPos = target
                     externalPos = target

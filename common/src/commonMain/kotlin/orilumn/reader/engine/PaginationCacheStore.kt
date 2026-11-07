@@ -42,14 +42,14 @@ class PaginationCacheStore(
      *  still usable. A successful read re-writes the identical bytes so the file's last-modified
      *  time tracks last USED, not last written (okio's common `FileSystem` exposes no mtime-touch;
      *  the rewrite is tens to a few hundred bytes, idempotent). */
-    fun read(f: Path): ChapterPaginationTable? {
+    fun read(f: Path, contentRev: Long = 0L): ChapterPaginationTable? {
         if (fs.metadataOrNull(f)?.isRegularFile != true) return null
         // IO 异常（权限/磁盘满/并发删）此前静默——读失败即重建是对的，但原因要留痕。
         val bytes = runCatching { fs.read(f) { readByteArray() } }
             .onFailure { Logger.w("Orilumn.DISK", "pagination read IO FAIL $f ${it.message}") }
             .getOrNull() ?: return null
         // decode==null 的原因由 codec 逐条落盘，此处透传。
-        val table = PaginationCacheCodec.decode(bytes, appVersion) ?: return null
+        val table = PaginationCacheCodec.decode(bytes, appVersion, contentRev) ?: return null
         // 刷新「最后使用」时间的重写失败此前静默——调不到只能记 w。
         runCatching { fs.write(f) { write(bytes) } }
             .onFailure { Logger.w("Orilumn.DISK", "pagination touch FAIL $f ${it.message}") }
@@ -67,13 +67,13 @@ class PaginationCacheStore(
      *
      * 命中判据与 [read] 完全同源（当前构建 + 当前参数 + 该章号确有表），只是不落日志。
      */
-    fun readPageCount(bookId: String, chapterIndex: Int, paramHash: Long): Int? {
+    fun readPageCount(bookId: String, chapterIndex: Int, paramHash: Long, contentRev: Long = 0L): Int? {
         val f = file(bookId, chapterIndex, paramHash)
         if (fs.metadataOrNull(f)?.isRegularFile != true) return null
         val bytes = runCatching {
             fs.read(f) { readByteArray(PaginationCacheCodec.HEADER_BYTES.toLong()) }
         }.getOrNull() ?: return null
-        return PaginationCacheCodec.decodeHeaderPageCount(bytes, appVersion, chapterIndex, paramHash)
+        return PaginationCacheCodec.decodeHeaderPageCount(bytes, appVersion, chapterIndex, paramHash, contentRev)
     }
 
     /** 全书各章页数快照的落点（`.idx`，与表文件同目录，但只随参数指纹整份作废）。 */
@@ -87,20 +87,26 @@ class PaginationCacheStore(
      * 单独存它的理由是**一次读盘**（762 章 6 KB vs 逐章开 762 个文件读表头）；
      * 表文件丢了它还能读只是附带性质——参数/几何/构建任一不符仍整份作废，跨不过「排版改了」。
      */
-    fun readPageCounts(bookId: String, paramHash: Long): Map<Int, Int>? {
+    fun readPageCounts(bookId: String, paramHash: Long, contentRev: Long = 0L): Map<Int, Int>? {
         val f = countsFile(bookId, paramHash)
         if (fs.metadataOrNull(f)?.isRegularFile != true) return null
         val bytes = runCatching { fs.read(f) { readByteArray() } }
             .onFailure { Logger.w("Orilumn.DISK", "pagination counts read IO FAIL $f ${it.message}") }
             .getOrNull() ?: return null
-        return PaginationCacheCodec.decodePageCounts(bytes, appVersion, paramHash)
+        return PaginationCacheCodec.decodePageCounts(bytes, appVersion, paramHash, contentRev)
     }
 
     /** 写全书页数快照（整份覆盖；几百 KB 以内的小文件，几十字节/章）。 */
-    fun writePageCounts(bookId: String, paramHash: Long, counts: Map<Int, Int>) {
+    fun writePageCounts(bookId: String, paramHash: Long, counts: Map<Int, Int>, contentRev: Long = 0L) {
         val f = countsFile(bookId, paramHash)
-        runCatching { fs.write(f) { write(PaginationCacheCodec.encodePageCounts(paramHash, counts, appVersion)) } }
+        runCatching { fs.write(f) { write(PaginationCacheCodec.encodePageCounts(paramHash, counts, appVersion, contentRev)) } }
             .onFailure { Logger.w("Orilumn.DISK", "pagination counts write FAIL $f ${it.message}") }
+    }
+
+    /** Deletes one cache file (a chapter's table for a specific param hash, or a counts snapshot). */
+    fun delete(f: Path) {
+        runCatching { fs.delete(f) }
+            .onFailure { Logger.w("Orilumn.DISK", "pagination delete FAIL $f ${it.message}") }
     }
 
     /** Writes a pagination table to disk. Overwrites any existing file at that location.
@@ -163,7 +169,8 @@ class PaginationCacheStore(
         var deleted = 0
         for (f in files) {
             val bytes = runCatching { fs.read(f) { readByteArray() } }.getOrNull() ?: continue
-            if (PaginationCacheCodec.decode(bytes, appVersion) == null) {
+            // null = 不校验 contentRev：扫盘只关心字节在当前构建下还解得开，修订版本由各章自己认。
+            if (PaginationCacheCodec.decode(bytes, appVersion, expectedContentRev = null) == null) {
                 if (runCatching { fs.delete(f) }.isSuccess) deleted++
             }
         }

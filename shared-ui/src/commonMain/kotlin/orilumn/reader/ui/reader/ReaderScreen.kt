@@ -57,6 +57,7 @@ import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.data.annotation.AnnotationKind
 import orilumn.reader.data.annotation.AnnotationLineStyle
 import orilumn.reader.data.font.FontEntry
+import orilumn.reader.data.revision.TextRevision
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.engine.paging.BookPageNumber
 import orilumn.reader.engine.skia.LineWindowDrawer
@@ -268,6 +269,24 @@ fun ReaderScreen(
     var noteLineStyle by remember { mutableStateOf(AnnotationLineStyle.Straight) }
     // 卡片实测高度（像素）：页面让位要按它算，不能估（D-28 第 2 部分）。
     var noteBarHeightPx by remember { mutableStateOf(0) }
+    // 正文修改（v3）：与批注卡片共用同一张卡（模式不同）。打开时把选区冻成下面三个数，
+    // 输入区内容单独持一份（不与批注文字串味）。
+    var textEditOpen by remember { mutableStateOf(false) }
+    var textEditChapter by remember { mutableIntStateOf(-1) }
+    var textEditStart by remember { mutableIntStateOf(0) }
+    var textEditEnd by remember { mutableIntStateOf(0) }
+    var textEditText by remember { mutableStateOf("") }
+    var textEditBusy by remember { mutableStateOf(false) }
+    // 修改成功后 +1：同一 pos 的页面也要重取行/图/栅格（contentRevision 由壳传入，这里改不到）。
+    var textEditRevision by remember { mutableIntStateOf(0) }
+    val effectiveRevision = contentRevision + textEditRevision
+    // 本章正文修订（**渲染坐标**）：正文修改卡用它判「这段字改过没有」——
+    // 有修订时「删除」才可点（删除 = 撤掉这条修改、把那段字恢复成原文）。
+    var chapterRevisions by remember { mutableStateOf<List<TextRevision>>(emptyList()) }
+    LaunchedEffect(currentHost, openPos?.chapter, selectionMenuVisible, effectiveRevision) {
+        val ch = openPos?.chapter
+        chapterRevisions = if (ch == null) emptyList() else currentHost.textRevisionsForChapter(ch)
+    }
     // 卡片让位时整页上推的像素（屏幕坐标）：绘制与命中**共用这一个数**（单一来源）。
     var inputShiftPx by remember { mutableStateOf(0f) }
     // 读者自己上下滑过的页面偏移（null = 还没滑过，按「会遮住就推满」自动决定）。
@@ -324,6 +343,8 @@ fun ReaderScreen(
         magnifierFinger = null
         editingAnnotation = null
         noteText = ""
+        textEditOpen = false
+        textEditText = ""
     }
     // 选区被任何路径清空时，菜单必须同步收起（避免留下指向空选区的浮层）。
     LaunchedEffect(selection.hasSelection) {
@@ -590,11 +611,11 @@ fun ReaderScreen(
     // 版本号（旧页位图原样命中、画面不动）；漏斗 push 一结束（commit 或 BUSY-DROP 丢弃）
     // 立即开闸，位置与新版本号同帧下发，只发生一次重栅格。
     var settledExternalPos by remember { mutableStateOf<ReaderPos?>(null) }
-    var heldRevision by remember { mutableIntStateOf(contentRevision) }
+    var heldRevision by remember { mutableIntStateOf(effectiveRevision) }
     val externalInFlight = externalPos != null && externalPos != settledExternalPos
     // 不在途时随手跟上最新（同值不触发重组，且不在途分支不读它 ⇒ 无额外重组）；在途时不动。
-    SideEffect { if (!externalInFlight) heldRevision = contentRevision }
-    val displayRevision = if (externalInFlight) heldRevision else contentRevision
+    SideEffect { if (!externalInFlight) heldRevision = effectiveRevision }
+    val displayRevision = if (externalInFlight) heldRevision else effectiveRevision
 
     // Q1-b：外部推送落位（键 = externalPos，值变化即认领；重排绑定/TOC 落地后 activity 推送）。
     // 经锚页漏斗：与在途导航互斥，值在锁内重取（取落定后的最新推送）。
@@ -824,7 +845,7 @@ fun ReaderScreen(
      * 也不是起手那一页」才算被外部改写。两者都用 [samePage] 比——`ReaderPos.slice`
      * 是排版侧对象，两次查询不同实例，`==` 恒不等（见 [samePage] 的 KDoc）。
      */
-    LaunchedEffect(openPos, hostRevision, contentRevision) {
+    LaunchedEffect(openPos, hostRevision, effectiveRevision) {
         if (!ctl.isBusy()) return@LaunchedEffect
         val tgt = ctl.targetPos.value
         val from = ctl.fromPos.value
@@ -1158,6 +1179,16 @@ fun ReaderScreen(
             }
             return
         }
+        // 正文修改卡片开着时同理：点卡片 / 键盘以外的正文 = 取消本次修改（与批注一致）。
+        // 这里是手势层没接住时的兜底；`cancelTextEdit` 定义在后面，局部函数不能前向引用，故就地展开。
+        if (textEditOpen) {
+            focusManager.clearFocus()
+            textEditOpen = false
+            textEditText = ""
+            textEditBusy = false
+            if (selection.hasSelection) selection.clear()
+            return
+        }
         // 编辑菜单开着时，正文点按只关菜单（卡片开着时点按已由手势层接住，这里是兜底）。
         // 语义与 [cancelNote] 一致：写了一半的内容丢掉、原记录不动、编辑时恢复出来的选区收掉。
         if (editingAnnotation != null) {
@@ -1226,7 +1257,7 @@ fun ReaderScreen(
     val currentKeysEnabled by rememberUpdatedState(keysEnabled)
     // 批注输入框开着时：正文手势与键盘翻页都不响应（字打在框里，页面不许动）。
     // 输入条与菜单同开同关（D-27）：放在这里给「关掉后把焦点还给正文」用。
-    val currentNoteBarOpen by rememberUpdatedState(selectionMenuVisible || editingAnnotation != null)
+    val currentNoteBarOpen by rememberUpdatedState(selectionMenuVisible || editingAnnotation != null || textEditOpen)
     LaunchedEffect(openPos, barsVisible, keysEnabled) {
         if (keysEnabled) focusRequester.requestFocus()
     }
@@ -1398,6 +1429,157 @@ fun ReaderScreen(
         }
         selectionMenuVisible = false
         if (selection.hasSelection) selection.clear()
+    }
+
+    /**
+     * 选区菜单的「编辑」：把选区文字放进同一张底部卡片（正文修改 v3，方案 §8.8）。
+     *
+     * 跨段时用 `\n` 分隔各段：**结果段数 = 输入里的换行符数 + 1**（删光中间的字就把几段并成一段）；
+     * 单叶选区里的 `\n` 仍是叶内 `<br>`。
+     */
+    fun beginTextEdit() {
+        val p = openPos ?: return
+        if (!selection.hasSelection || selection.chapter != p.chapter) return
+        val ch = selection.chapter
+        val s = selection.start
+        val e = selection.endExclusive
+        val text = currentHost.textOf(ch, 0, Int.MAX_VALUE)
+        if (text == null) {
+            snackbar.show("本章内容尚未就绪")
+            return
+        }
+        closeAnnotationEdit()
+        noteText = ""
+        textEditChapter = ch
+        textEditStart = s
+        textEditEnd = e
+        textEditText = selectionTextForEdit(text, currentHost.textBlockEndsOf(ch), s, e)
+        textEditOpen = true
+        textEditBusy = false
+        selectionMenuVisible = false
+    }
+
+    /** 取消正文修改：卡片关掉、正文不动、选区一并收掉（与批注取消同口径）。 */
+    fun cancelTextEdit() {
+        focusManager.clearFocus()
+        textEditOpen = false
+        textEditText = ""
+        textEditBusy = false
+        if (selection.hasSelection) selection.clear()
+    }
+
+    /**
+     * 提交正文修改：纯计算 + 落库 + 单章重排都在宿主里完成；这里只管卡片、提示与选区恢复。
+     *
+     * 成功：关卡片、清旧选区、落位到修改起点、把替换后的文字重新选起来（看得见改了哪儿）。
+     * 失败 / 校验拒绝：**卡片不关、正文不动**，就地提示。
+     */
+    fun commitTextEdit() {
+        if (textEditBusy) return
+        val ch = textEditChapter
+        val s = textEditStart
+        val e = textEditEnd
+        val body = textEditText
+        if (ch < 0 || e <= s) return
+        focusManager.clearFocus()
+        textEditBusy = true
+        scope.launch {
+            var outcome: TextEditOutcome? = null
+            anchorFunnel.push("text-edit", ::markPositionChanged) {
+                val o = currentHost.commitTextEdit(ch, s, e, body)
+                outcome = o
+                (o as? TextEditOutcome.Success)?.pos
+            }
+            textEditBusy = false
+            when (val o = outcome) {
+                is TextEditOutcome.Success -> {
+                    textEditOpen = false
+                    textEditText = ""
+                    textEditRevision++
+                    val newText = currentHost.textOf(ch, 0, Int.MAX_VALUE)
+                    if (newText != null && o.selEnd > o.selStart) {
+                        selection.selectRange(ch, newText, o.selStart, o.selEnd)
+                    } else {
+                        selection.clear()
+                    }
+                    selectionMenuVisible = false
+                    // 正文变了，本章标注的渲染坐标要按新修订表重算（落库仍是原书坐标）。
+                    annotationState.reload()
+                }
+                is TextEditOutcome.Rejected -> snackbar.show(o.reason)
+                is TextEditOutcome.Failed -> snackbar.show(o.message)
+                null -> snackbar.show("正在处理，请稍后再试")
+            }
+        }
+    }
+
+    /**
+     * 正文修改卡的「删除」：撤掉覆盖这段字的修订，**恢复原文**（与删高亮 / 划线 / 批注同一语义）。
+     *
+     * 只删与**当前选区相交**的修订：跨段一次提交会落多条，整组都相交时一起撤掉。
+     * 没有相交修订时按钮本来就是虚的，这里再挡一次（不改正文、不关卡片）。
+     */
+    fun deleteTextEdit() {
+        if (textEditBusy) return
+        val ch = textEditChapter
+        val s = textEditStart
+        val e = textEditEnd
+        if (ch < 0 || e <= s) return
+        val targets = chapterRevisions.filter { r ->
+            (r.charStart < e && s < r.charEnd) ||
+                (r.charStart == r.charEnd && r.charStart in s..e)
+        }
+        if (targets.isEmpty()) return
+        focusManager.clearFocus()
+        textEditBusy = true
+        scope.launch {
+            var newPos: ReaderPos? = null
+            var failed = false
+            for (r in targets) {
+                when (val o = currentHost.deleteTextRevision(r)) {
+                    is TextRevisionDeleteOutcome.Success -> o.pos?.let { newPos = it }
+                    else -> {
+                        failed = true
+                        break
+                    }
+                }
+            }
+            textEditBusy = false
+            if (failed) {
+                snackbar.show("删除失败，请稍后再试")
+                return@launch
+            }
+            textEditOpen = false
+            textEditText = ""
+            textEditRevision++
+            chapterRevisions = emptyList()
+            selection.clear()
+            selectionMenuVisible = false
+            // 正文变了：本章标注的渲染坐标要按新修订表重算（落库仍是原书坐标）。
+            annotationState.reload()
+            newPos?.let { openPos = it }
+        }
+    }
+
+    /**
+     * 正文修改卡上点「高亮 / 划线」：**切回该类别的批注**（同一根操作栏，不另起一套）。
+     *
+     * 与取消的区别：这里**保留选区**（切过去就是要落这一笔），只丢掉还没提交的输入。
+     */
+    fun switchTextEditToAnnotation(kind: AnnotationKind) {
+        textEditOpen = false
+        textEditText = ""
+        textEditBusy = false
+        noteText = ""
+        noteKind = kind
+        noteLineStyle = annotationLastLineStyleOf(light)
+        val next = withAnnotationLastKind(light, kind)
+        if (next != light) {
+            light = next
+            currentOnLightCommit(next)
+        }
+        // 选区还在：把批注卡重新露出来（`selectionMenuOn` 由它 + 选区共同决定）。
+        selectionMenuVisible = true
     }
 
     /**
@@ -1663,9 +1845,11 @@ fun ReaderScreen(
                             }
                             // 没拖过 = 点卡片外：按 D-28 取消（落笔只认操作栏的 `确定`，点外面不写任何东西，
                             // 免得「想收起卡片」被当成「那就按当前样式落一条」）。
+                            // 正文修改卡片同口径：点卡片与键盘以外的正文 = 取消本次修改（写了一半的内容作废、
+                            // 正文不动、选区收掉），与批注的取消路径完全一致。
                             // 触摸拖过 = 抬手后按当前速度继续滑、逐步减速（惯性）；鼠标拖动到此为止。
                             when {
-                                !dragged -> cancelNote()
+                                !dragged -> if (textEditOpen) cancelTextEdit() else cancelNote()
                                 fingerScroll -> startPageFling(velocity)
                             }
                             return@awaitEachGesture
@@ -2363,7 +2547,7 @@ fun ReaderScreen(
                 contentBottom = contentBottom,
                 pageBg = profile.bgColor,
                 inkColor = profile.fgColor,
-                contentRevision = contentRevision,
+                contentRevision = effectiveRevision,
                 hostRevision = hostRevision,
                 imgCache = imgCache,
                 bgCache = bgCache,
@@ -2375,7 +2559,7 @@ fun ReaderScreen(
             // 提交即命中——翻页动画不再在 UI 线程同步栅格（0.5–0.9s 冻帧的来源）。
             // 预栅格备的是**闸开后那一次**重栅格的位图 ⇒ 取调用时刻的最新版本号：在途途中
             // 后续 tick 还会再 bump，用构造时捕获的旧值会让这笔预栅格白做（画的那下还得重栅格）。
-            val liveRevision by rememberUpdatedState(contentRevision)
+            val liveRevision by rememberUpdatedState(effectiveRevision)
             val rasterPageNow: suspend (ReaderPos) -> Unit = { p ->
                 prerasterPage(
                     host = currentHost,
@@ -2401,7 +2585,10 @@ fun ReaderScreen(
             val editing = editingAnnotation
             val selectionMenuOn = editing == null && selectionMenuVisible && selection.hasSelection &&
                 selection.chapter == fromPos.chapter
-            val menuOn = (editing != null || selectionMenuOn) && !coverVisible && !ctl.isBusy()
+            // 正文修改卡与批注卡共用同一张卡：打开期间保持选中（让位要按选区量），
+            // 但不显示选区浮动菜单。
+            val textEditOn = textEditOpen && !coverVisible && !ctl.isBusy()
+            val menuOn = (editing != null || selectionMenuOn || textEditOn) && !coverVisible && !ctl.isBusy()
             val imeBottomPx = imeInset?.let { with(LocalDensity.current) { it.toPx() } }
                 ?: WindowInsets.ime.getBottom(LocalDensity.current).toFloat()
             // 卡片升起度（D-30）：0 = 整卡在屏幕外，1 = 贴住键盘上沿。它同时决定两件事：
@@ -2729,7 +2916,7 @@ fun ReaderScreen(
             // 在场由升起度决定：收起动画跑完才卸内容（降到 0 时卡片本来就已经在屏幕外面了）。
             if (menuOn || sheetReveal > 0f) {
                 // 选区场景：选中的字里已有高亮/划线时，删除作用于**相交的第一条**（列表按起点排序）。
-                val overlapping = if (editing == null) {
+                val overlapping = if (editing == null && !textEditOn) {
                     annotationState.annotationsFor(fromPos.chapter)?.firstOrNull {
                         it.charStart < selection.endExclusive && selection.start < it.charEnd
                     }
@@ -2737,9 +2924,21 @@ fun ReaderScreen(
                     null
                 }
                 val deleteTarget = editing ?: overlapping
+                // 正文修改：删除的对象是**这条修改本身**（覆盖选区的修订），不是标注——
+                // 删掉就把那段字恢复成原文，与删高亮/划线/批注同一语义（D-36）。
+                // 用**冻住的**修改范围判（与 [deleteTextEdit] 同一口径），不受拖手柄影响。
+                val revisionTarget = if (textEditOn) {
+                    chapterRevisions.firstOrNull { r ->
+                        (r.charStart < textEditEnd && textEditStart < r.charEnd) ||
+                            (r.charStart == r.charEnd && r.charStart in textEditStart..textEditEnd)
+                    }
+                } else {
+                    null
+                }
                 AnnotationSheet(
                     modifier = Modifier.align(Alignment.BottomCenter),
                     visible = menuOn,
+                    mode = if (textEditOn) NoteSheetMode.TextEdit else NoteSheetMode.Annotation,
                     imePx = imeBottomPx,
                     reveal = sheetReveal,
                     target = NoteBarTarget(
@@ -2750,7 +2949,7 @@ fun ReaderScreen(
                             annotationSlotColor(light, noteKind, annotationDefaultSlot(light, noteKind))
                         },
                     ),
-                    text = noteText,
+                    text = if (textEditOn) textEditText else noteText,
                     palette = paletteFor(light.scheme),
                     kind = noteKind,
                     lineStyle = noteLineStyle,
@@ -2765,16 +2964,22 @@ fun ReaderScreen(
                     } else {
                         null
                     },
-                    canDelete = deleteTarget != null,
-                    onTextChange = { noteText = it },
+                    // 正文修改：有修订才可删（删的是那条修改本身）；批注：有记录才可删。
+                    canDelete = if (textEditOn) revisionTarget != null else deleteTarget != null,
+                    onTextChange = { if (textEditOn) textEditText = it else noteText = it },
                     // 切类别就记住：不点色、不点线型直接「确定」也要把默认停到这一类
                     // （否则用过一次划线后，切回高亮落笔也改不回来）。
+                    // 正文修改模式下点「高亮 / 划线」= 切回该类别批注（同一根操作栏，保留选区）。
                     onKindChange = { pickedKind ->
-                        noteKind = pickedKind
-                        val next = withAnnotationLastKind(light, pickedKind)
-                        if (next != light) {
-                            light = next
-                            currentOnLightCommit(next)
+                        if (textEditOn) {
+                            switchTextEditToAnnotation(pickedKind)
+                        } else {
+                            noteKind = pickedKind
+                            val next = withAnnotationLastKind(light, pickedKind)
+                            if (next != light) {
+                                light = next
+                                currentOnLightCommit(next)
+                            }
                         }
                     },
                     onPickColor = { kind, slot -> pickNoteColor(kind, slot) },
@@ -2783,9 +2988,13 @@ fun ReaderScreen(
                     onCopy = {
                         if (editing != null) copyAnnotation(editing) else copySelection()
                     },
-                    onDelete = { deleteTarget?.let { annotation -> deleteAnnotation(annotation) } },
-                    onDone = { commitNote() },
-                    onCancel = { cancelNote() },
+                    onDelete = {
+                        if (textEditOn) deleteTextEdit() else deleteTarget?.let { annotation -> deleteAnnotation(annotation) }
+                    },
+                    onDone = { if (textEditOn) commitTextEdit() else commitNote() },
+                    onCancel = { if (textEditOn) cancelTextEdit() else cancelNote() },
+                    onEdit = { beginTextEdit() },
+                    editEnabled = selection.hasSelection,
                     onHeightChange = { noteBarHeightPx = it },
                 )
             }
@@ -2843,4 +3052,36 @@ fun ReaderScreen(
  */
 private class JobSlot {
     var job: Job? = null
+}
+
+/**
+ * 选区文字 → 正文修改输入区的初始内容（方案 §8.8）。
+ *
+ * 单叶：原样放进去（叶内 `\n` 就是 `<br>`）。
+ * 跨叶：各叶之间插 `\n`，于是初始内容行数 = 叶数；读者删光行间文字就减少行数，
+ * 提交时**结果段数 = 输入里的换行符数 + 1**（方案 D-34 修订版），少则并段、多则拆段。
+ */
+internal fun selectionTextForEdit(
+    chapterText: String,
+    blockEnds: IntArray?,
+    start: Int,
+    endExclusive: Int,
+): String {
+    val s = start.coerceIn(0, chapterText.length)
+    val e = endExclusive.coerceIn(s, chapterText.length)
+    val ends = blockEnds?.takeIf { it.isNotEmpty() && it.last() == chapterText.length } ?: return chapterText.substring(s, e)
+    val out = StringBuilder(e - s + 8)
+    var from = s
+    var first = true
+    for (end in ends) {
+        if (end <= from) continue
+        if (from >= e) break
+        val segEnd = minOf(end, e)
+        if (!first) out.append('\n')
+        out.append(chapterText, from, segEnd)
+        first = false
+        from = segEnd
+    }
+    if (first) out.append(chapterText, s, e)
+    return out.toString()
 }

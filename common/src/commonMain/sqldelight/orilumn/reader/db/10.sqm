@@ -1,0 +1,18 @@
+-- 正文修订（10→11）：v3 正文修改的落库表。见 TextRevisions.sq 与方案 D-31～D-33。
+-- 区间是原书坐标，与标注同口径；同章互不重叠由引擎保证。
+CREATE TABLE text_revisions(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bookId INTEGER NOT NULL,
+  chapter INTEGER NOT NULL,
+  charStart INTEGER NOT NULL,
+  charEnd INTEGER NOT NULL,
+  text TEXT NOT NULL,
+  delta INTEGER NOT NULL,
+  groupId INTEGER NOT NULL,
+  createdAt INTEGER NOT NULL,
+  updatedAt INTEGER NOT NULL,
+  CHECK (charStart >= 0),
+  CHECK (charEnd >= charStart)
+);
+
+CREATE INDEX text_revisions_by_book_chapter ON text_revisions(bookId, chapter, charStart);

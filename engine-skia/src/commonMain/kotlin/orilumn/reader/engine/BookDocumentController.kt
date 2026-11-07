@@ -17,6 +17,12 @@ import orilumn.reader.engine.css.uaSheetFromProfile
 import orilumn.reader.engine.html.HEADING_TAGS
 import orilumn.reader.engine.html.HtmlTreeConverter
 import orilumn.reader.engine.html.MarkupElement
+import orilumn.reader.engine.html.MarkupPaths
+import orilumn.reader.engine.revision.ChapterRevisionMap
+import orilumn.reader.engine.revision.LeafTextEditor
+import orilumn.reader.engine.revision.MeasuredDeltaFix
+import orilumn.reader.engine.revision.TextEditPlan
+import orilumn.reader.engine.revision.TextEditPlanner
 import orilumn.reader.engine.html.ParsedChapter
 import orilumn.reader.engine.paging.BookLayout
 import orilumn.reader.engine.paging.BookPageNumber
@@ -136,6 +142,272 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
      * 与 [onDemandFonts] 同在整形前调用，变化即作废本章版式（字体度量一变几何全变）。
      */
     var onBookFonts: suspend (List<orilumn.reader.engine.css.BookFont>) -> Boolean = { false }
+
+    /**
+     * 正文修订来源（宿主注入；null = 本宿主不支持正文修改，行为与以前完全一致）。
+     *
+     * 开书时**整本读一次**并按章分组缓存（[revisionMaps]）：章树载入、分页表/页数/页快照的
+     * 失效判据都要用到它，逐章现查既慢又容易在热路径上引入 suspend 点。
+     * 修订提交后宿主调 [reloadTextRevisions] + [invalidateChapterContent]，本控制器自己重读，
+     * 不需要宿主维护第二份缓存。
+     */
+    var textRevisionStore: orilumn.reader.data.revision.TextRevisionStore? = null
+
+    /** 章号 → 本章修订表（含 `contentRev`）；空 = 全书无修订。 */
+    private var revisionMaps: Map<Int, ChapterRevisionMap> = emptyMap()
+
+    /** 全书修订指纹：页数清单是「整本一份」，任何一章的修订变了它就得整份作废。 */
+    private var bookContentRev: Long = 0L
+
+    /** 本章内容版本（0 = 无修订）：分页表 / 页数 / 页快照的**章级**失效判据。 */
+    private fun chapterContentRev(chapter: Int): Long = revisionMaps[chapter]?.contentRev ?: 0L
+
+    private fun computeBookContentRev(): Long {
+        if (revisionMaps.isEmpty()) return 0L
+        var h = -3750763034362895579L // FNV offset
+        for (ch in revisionMaps.keys.sorted()) {
+            var x = (ch.toLong() shl 32) or (revisionMaps[ch]?.contentRev ?: 0L)
+            repeat(8) {
+                h = (h xor (x and 0xFF)) * 1099511628211L
+                x = x ushr 8
+            }
+        }
+        return h
+    }
+
+    /**
+     * 重读全书修订（开书 / 宿主提交修订后调用）。
+     *
+     * 只改本控制器的修订表与页数清单基线；**章树与分页表的作废由宿主显式调
+     * [invalidateChapterContent]**（一次提交可能只改一章，没必要动别的章）。
+     */
+    suspend fun reloadTextRevisions() {
+        val store = textRevisionStore
+        if (store == null || bookId < 0) {
+            revisionMaps = emptyMap()
+            bookContentRev = 0L
+            return
+        }
+        val t0 = platformNowMs()
+        revisionMaps = runCatching {
+            store.textRevisionsForBook(bookId)
+                .groupBy { it.chapter }
+                .mapValues { (_, list) -> ChapterRevisionMap(list) }
+        }.onFailure {
+            Logger.w(logTag, "revisions load FAIL book=$bookId ${it::class.simpleName}: ${it.message}")
+        }.getOrElse { emptyMap() }
+        bookContentRev = computeBookContentRev()
+        Logger.w(logTag, "revisions loaded book=$bookId chapters=${revisionMaps.size} " +
+            "total=${revisionMaps.values.sumOf { it.revisions.size }} t=${platformNowMs() - t0}ms")
+    }
+
+    /**
+     * 给「加清单快照之前写下的老修订」补回原文（一次性迁移，可反复调用）。
+     *
+     * 修订一直是**外挂**在章树副本上的：原书文件与持久化章树一个字节都没动过，老行缺的只是
+     * 提交时「选中的那一段」这份快照，不是原文本身。所以区间非空的旧行，原书文本仍在
+     * `[charStart, charEnd)`，这里按与排版同尺的叶文本切出来写回库。
+     *
+     * 只读持久化的章树 + 结构文件，**不要求本章排过版**；没有结构文件（或结构失配）的章跳过，
+     * 清单仍显示「（原文未记录）」。改文行退回当时存下的替换文字（老行本来就这么显示），
+     * 两列都只在仍为空时写入，绝不覆盖读者刚提交的新快照。
+     *
+     * 区间为空的老行（只加字，公共前后缀被裁光）不再尝试：提交时就没记选区，
+     * 无法分辨「在光标处插入」和「选中一句话改成更长的句子」，凭空猜会造假。
+     *
+     * @return 实际补上的行数。
+     */
+    suspend fun backfillLegacyRevisionTexts(): Int = withContext(Dispatchers.Default) {
+        val store = textRevisionStore ?: return@withContext 0
+        if (bookId < 0) return@withContext 0
+        val all = runCatching { store.textRevisionsForBook(bookId) }.getOrNull() ?: return@withContext 0
+        val legacy = all.filter {
+            it.originalText.isEmpty() && it.editedText.isEmpty() && it.originalLength > 0
+        }
+        if (legacy.isEmpty()) return@withContext 0
+        val bc = layouter as? BoxChapterLayouter ?: return@withContext 0
+        val structures = structureStore() ?: return@withContext 0
+        if (viewW <= 0 || viewH <= 0) return@withContext 0
+        val contentW = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
+        val contentH = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
+        val ns = "book_$bookId"
+        val sheets = runCatching { structures.readSheets(ns) }.getOrNull() ?: return@withContext 0
+        var filled = 0
+        outer@ for ((chapter, rows) in legacy.groupBy { it.chapter }) {
+            val file = runCatching { structures.readChapter(ns, chapter) }.getOrNull() ?: continue
+            val texts = ArrayList<String>(file.sheetHashes.size)
+            for (h in file.sheetHashes) {
+                texts.add(sheets[h] ?: continue@outer)
+            }
+            if (texts.size != file.baseHrefs.size) continue
+            val cache = ChapterStructureCache()
+            if (!ChapterStructurePersist.apply(file.tree, file.structure, file.cssHash, cache)) continue
+            val starts = cache.globalCharStarts
+            val byLeaf = LinkedHashMap<Int, MutableList<orilumn.reader.data.revision.TextRevision>>()
+            for (r in rows) {
+                val li = leafOfOriginalStart(starts, r.charStart)
+                if (li < 0) continue
+                val leafEnd = if (li + 1 < starts.size) starts[li + 1] else Long.MAX_VALUE
+                // 提交侧按叶拆段，老行也不该跨叶；真跨了就不猜，留给「原文未记录」。
+                if (r.charEnd > leafEnd) continue
+                byLeaf.getOrPut(li) { ArrayList() }.add(r)
+            }
+            if (byLeaf.isEmpty()) continue
+            val leafTexts = bc.originalLeafTexts(
+                cssBundle = CssBundle(texts, file.baseHrefs),
+                profile = profile,
+                contentW = contentW,
+                contentH = contentH,
+                structure = cache,
+                leafIndices = byLeaf.keys,
+            )
+            var chapterFilled = 0
+            for ((li, leafRows) in byLeaf) {
+                val leafText = leafTexts[li] ?: continue
+                val leafStart = starts[li].toInt()
+                for (r in leafRows) {
+                    val s = r.charStart - leafStart
+                    val e = r.charEnd - leafStart
+                    if (s < 0 || e > leafText.length) continue
+                    val original = leafText.substring(s, e)
+                    if (original.isEmpty()) continue
+                    runCatching { store.fillLegacyRevisionSnapshot(r.id, original, r.text) }
+                        .onSuccess {
+                            filled++
+                            chapterFilled++
+                        }
+                        .onFailure {
+                            Logger.w(logTag, "revision backfill FAIL id=${r.id} ${it::class.simpleName}")
+                        }
+                }
+            }
+            Logger.d(logTag, "revision backfill ch=$chapter rows=${rows.size} filled=$chapterFilled")
+        }
+        if (filled > 0) {
+            // 只补了清单快照：区间/替换文字未变，contentRev 不变，不触发任何重排。
+            reloadTextRevisions()
+        }
+        filled
+    }
+
+    /** 原书偏移所在的叶下标（第一个「叶尾 > offset」）；空叶表返回 -1。 */
+    private fun leafOfOriginalStart(starts: LongArray, offset: Int): Int {
+        if (starts.isEmpty()) return -1
+        var lo = 0
+        var hi = starts.size - 1
+        while (lo < hi) {
+            val mid = (lo + hi + 1) / 2
+            if (starts[mid] <= offset) lo = mid else hi = mid - 1
+        }
+        return if (starts[lo] <= offset) lo else -1
+    }
+
+    /**
+     * 作废一章的**内容派生状态**（正文修订提交后调用）：章树 / 结构 / 版式 / 分页表 / 页缓存全丢，
+     * 下次落位按新内容重新载入重放并重排。别的章一概不动（修订只影响本章）。
+     *
+     * 调用前宿主必须已经 `reloadTextRevisions()`（或至少让数据库里能读到新表）。
+     */
+    fun invalidateChapterContent(chapter: Int) {
+        // 本章当前参数指纹的分页表文件直接删掉：contentRev 已能挡住旧表，但提交是低频事件，
+        // 顺手删掉省得后台 sweep 再去认一次；别的参数指纹的表留着（回退参数时还有用）。
+        if (bookId >= 0) {
+            runCatching {
+                val store = cacheStore() ?: return@runCatching
+                val hash = currentParamHash()
+                val f = store.file("book_$bookId", chapter, hash)
+                store.delete(f)
+            }.onFailure {
+                Logger.w(logTag, "revisions delete table FAIL ch=$chapter ${it.message}")
+            }
+        }
+        // 页数清单是整本一份：本章页数已不可信，整份基线退回未扫描，下次开页码重扫。
+        pageCountsLock.withLock {
+            diskPageCounts = diskPageCounts - chapter
+        }
+        diskPageCountsHash = Long.MIN_VALUE
+        val unit = unitAt(chapter) ?: return
+        unit.evictParsedState()
+        unit.invalidateLayout()
+        Logger.w(logTag, "revisions invalidate ch=$chapter rev=${chapterContentRev(chapter)}")
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 正文修改 v3：提交计划与坐标换算（方案 §8.8 / §8.9 第 5～7 步）
+    // ─────────────────────────────────────────────────────────────────
+
+    /**
+     * 纯计算一次正文修改：校验 + 按叶拆段 + 与旧修订合并 + 公共前后缀裁剪。
+     *
+     * 入参 [start] / [endExclusive] 是**渲染空间**（与 `chapterText` / 选区 / `PageSlice` 同尺），
+     * [text] 是输入区文字（跨段时用 `\n` 分隔，结果段数 = 换行符数 + 1）。不落库、不改内存。
+     */
+    fun planTextEdit(chapter: Int, start: Int, endExclusive: Int, text: String): TextEditPlan {
+        if (bookId < 0) return TextEditPlan.Rejected("书还没打开")
+        val unit = unitAt(chapter) ?: return TextEditPlan.Rejected("本章尚未载入")
+        val chapterText = unit.chapterText() ?: return TextEditPlan.Rejected("本章内容尚未就绪")
+        val blockEnds = unit.chapterTextBlockEnds()
+        val map = revisionMaps[chapter] ?: ChapterRevisionMap.EMPTY
+        val now = platformNowMs()
+        // 预归一要每叶的 `white-space`：拿不到（尚未绑定结构 / 非盒式排版）就退回普通模式。
+        val leaves = unit.structureCache.leaves
+        val wsOf: ((orilumn.reader.engine.html.MarkupElement) -> orilumn.reader.engine.css.WhiteSpace)? =
+            (layouter as? BoxChapterLayouter)?.let { bc ->
+                if (leaves.isEmpty()) null else runCatching {
+                    bc.whiteSpaceResolver(
+                        cssBundle = unit.cssBundle,
+                        profile = profile,
+                        contentW = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16),
+                        contentH = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16),
+                        structure = unit.structureCache,
+                    )
+                }.getOrNull()
+            }
+        return TextEditPlanner.plan(
+            bookId = bookId,
+            chapter = chapter,
+            chapterText = chapterText,
+            blockEnds = blockEnds,
+            start = start,
+            endExclusive = endExclusive,
+            replacement = text,
+            map = map,
+            groupId = now,
+            now = now,
+            wsOfLeaf = { i ->
+                val leaf = leaves.getOrNull(i)
+                if (leaf != null && wsOf != null) {
+                    wsOf(leaf)
+                } else {
+                    orilumn.reader.engine.css.WhiteSpace.NORMAL
+                }
+            },
+            mergeableLeaf = { i ->
+                val leaf = leaves.getOrNull(i)
+                leaf != null && orilumn.reader.engine.revision.RevisionBlocks.mergeableLeaf(leaf)
+            },
+        )
+    }
+
+    /** 本章内容版本（0 = 无修订）：宿主 / 分页表 / 页数 / 快照的失效判据。 */
+    fun contentRevOf(chapter: Int): Long = chapterContentRev(chapter)
+
+    /** 原书偏移 → 渲染偏移（无修订时原样返回）。 */
+    fun renderedOffset(chapter: Int, original: Int): Int =
+        revisionMaps[chapter]?.toRendered(original) ?: original
+
+    /** 渲染偏移 → 原书偏移（无修订时原样返回）。 */
+    fun originalOffset(chapter: Int, rendered: Int): Int =
+        revisionMaps[chapter]?.toOriginal(rendered) ?: rendered
+
+    /** 原书区间 → 渲染区间（无修订时原样返回）。 */
+    fun renderedRange(chapter: Int, start: Int, endExclusive: Int): IntRange =
+        revisionMaps[chapter]?.toRenderedRange(start, endExclusive) ?: (start until endExclusive)
+
+    /** 渲染区间 → 原书区间（无修订时原样返回）。 */
+    fun originalRange(chapter: Int, start: Int, endExclusive: Int): IntRange =
+        revisionMaps[chapter]?.toOriginalRange(start, endExclusive) ?: (start until endExclusive)
+
 
     /** 书内字体字节缓存（归一化 href → 去混淆后字节；null＝不可用，记得住不再试）。 */
     private val bookFontBytesCache = HashMap<String, ByteArray?>()
@@ -552,6 +824,8 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         clearFlipDir("open-book")
         this.bookId = bookId
         val t0 = platformNowMs()
+        // 正文修订：一本书读一次，按章分组；章树载入与所有内容派生缓存都以它为准。
+        reloadTextRevisions()
         // 字体需求清单：一本书读一次（几 KB），开章时按章查表，省掉重复解析作者 CSS。
         fontDemandByChapter.clear()
         fontDemandStore()?.read(bookId, diskCacheVersion)?.let { fontDemandByChapter.putAll(it) }
@@ -602,7 +876,9 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         // Restore progress (equal chapter weights)
         if (bookId >= 0 && saved != null) parseLocator(saved.locator)?.let { (ch, char) ->
             startChapter = ch.coerceIn(0, chapterCount - 1)
-            startChar = char.coerceAtLeast(0)
+            // 存档的锚点是**原书空间**；排版 / 落位要的是应用修订后的渲染空间。
+            val original = char.coerceAtLeast(0)
+            startChar = (revisionMaps[startChapter]?.toRendered(original) ?: original).coerceAtLeast(0)
             Logger.w(logTag, "open: restore -> startCh=$startChapter char=$startChar ${ctx(startChapter)}")
         }
         // R28：A/B 的可比性第一要件——把本次开书的锚点钉在日志里。
@@ -902,7 +1178,14 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
     /** Epub fallback for [ensureMarkup] (the pre-persist path, unchanged). */
     private fun readChapterInto(unit: ChapterUnit, index: Int) {
         val tree = readChapter(index)
-        if (tree != null) unit.ensureMarkup(tree, chapterTitle(tree))
+        if (tree != null) {
+            if (revisionMaps[unit.chapterIndex]?.isEmpty == false) {
+                // 无持久化结构（含视口媒体查询的章 / 导入未覆盖）：重放需要结构里的叶表，
+                // 本路径拿不到，只能先按原文显示。改动仍留在库里，等结构落盘后生效。
+                Logger.w(logTag, "revision: ch=$index has no persisted structure, revisions skipped")
+            }
+            unit.ensureMarkup(tree, chapterTitle(tree))
+        }
     }
 
     /**
@@ -915,7 +1198,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
      * `markup`; `cssBundle`/`ensureMarkup` are assigned only after it succeeds — a null return
      * always leaves the unit pristine for the epub fallback (which asserts first-bind).
      */
-    private fun loadPersistedChapter(unit: ChapterUnit): MarkupElement? {
+    private suspend fun loadPersistedChapter(unit: ChapterUnit): MarkupElement? {
         if (bookId < 0) return null
         val store = structureStore() ?: return null
         val ns = "book_$bookId"
@@ -939,9 +1222,169 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
             return null
         }
         unit.cssBundle = CssBundle(texts, file.baseHrefs)
-        unit.ensureMarkup(file.tree, chapterTitle(file.tree))
+        val tree = applyTextRevisions(unit, file.tree)
+        unit.ensureMarkup(tree, chapterTitle(tree))
         Logger.w(logTag, "open: ch=${unit.chapterIndex} chapter loaded from persist leaves=${file.structure.leafRefs.size}")
-        return file.tree
+        return tree
+    }
+
+    /**
+     * 把本章修订套到刚载入的章树上（正文修改 v3，方案 §8.5）。
+     *
+     * **只改内存**：结构缓存同步改成渲染空间（叶表 / 起点 / owner / 生成内容），章树换成重放后的副本；
+     * 磁盘上的原树与结构一个字节都不动（[ChapterUnit.hasTextRevisions] 让 `saveUnitStructure` 跳过）。
+     *
+     * 失败（修订表非法、重放抛错）一律退回原树：宁可显示原文，也不能排出半套修订。
+     */
+    private fun applyTextRevisions(unit: ChapterUnit, tree: MarkupElement): MarkupElement {
+        val map = revisionMaps[unit.chapterIndex] ?: return tree
+        if (map.isEmpty) return tree
+        val bc = layouter as? BoxChapterLayouter ?: return tree
+        val cache = unit.structureCache
+        val contentW = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
+        val contentH = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
+        val leafPaths = cache.leaves.map { MarkupPaths.nodePath(tree, it) }
+        val starts = cache.globalCharStarts
+        val t0 = platformNowMs()
+
+        // 跨叶修订（段数变了）：按叶边界找首末叶，交给重放做合并 / 拆分（方案 D-34 修订版）。
+        fun leafOfOffset(offset: Int): Int {
+            var lo = 0
+            var hi = starts.size - 1
+            while (lo < hi) {
+                val mid = (lo + hi + 1) ushr 1
+                if (starts[mid] <= offset) lo = mid else hi = mid - 1
+            }
+            return lo
+        }
+        val merges = ArrayList<orilumn.reader.engine.revision.ChapterRevisionReplay.Merge>()
+        val mergeIds = HashSet<Long>()
+        if (starts.isNotEmpty()) {
+            for (r in map.revisions) {
+                if (r.isInsertion) continue
+                val a = leafOfOffset(r.charStart)
+                val b = leafOfOffset(r.charEnd - 1)
+                if (a == b) continue
+                val base = starts[a].toInt()
+                merges += orilumn.reader.engine.revision.ChapterRevisionReplay.Merge(
+                    firstLeaf = a,
+                    lastLeaf = b,
+                    start = r.charStart - base,
+                    endExclusive = r.charEnd - base,
+                    text = r.text,
+                    revisionId = r.id,
+                )
+                mergeIds += r.id
+            }
+        }
+
+        // 只在内存里修正 delta 用：叶下标 → 这一叶上真正被应用的修订。
+        val revisionsByLeaf = LinkedHashMap<Int, MutableList<orilumn.reader.data.revision.TextRevision>>()
+        val result = runCatching {
+            bc.replayRevisions(
+                markup = tree,
+                cssBundle = unit.cssBundle,
+                profile = profile,
+                contentW = contentW,
+                contentH = contentH,
+                structure = cache,
+                leafPaths = leafPaths,
+                editsForLeaf = { leafIndex, leafStart ->
+                    // 叶的原书区间 = 本叶起点到下一叶起点（末叶到章尾）。跨叶修订走合并路径，
+                    // 这里跳过；叶内修订不该越界，真出现就跳过并记日志，不猜。
+                    val leafEnd = if (leafIndex + 1 < cache.leaves.size) {
+                        cache.globalCharStarts[leafIndex + 1].toInt()
+                    } else {
+                        Int.MAX_VALUE
+                    }
+                    map.revisionsTouching(leafStart, leafEnd).mapNotNull { r ->
+                        when {
+                            r.id in mergeIds -> null
+                            r.charEnd > leafEnd -> {
+                                Logger.w(
+                                    logTag,
+                                    "revision crosses leaf boundary ch=${unit.chapterIndex} leaf=$leafIndex " +
+                                        "range=[${r.charStart}, ${r.charEnd}) leafEnd=$leafEnd",
+                                )
+                                null
+                            }
+                            else -> {
+                                revisionsByLeaf.getOrPut(leafIndex) { ArrayList() }.add(r)
+                                LeafTextEditor.Edit(
+                                    start = r.charStart - leafStart,
+                                    endExclusive = r.charEnd - leafStart,
+                                    text = r.text,
+                                )
+                            }
+                        }
+                    }
+                },
+                merges = merges,
+            )
+        }.getOrElse {
+            Logger.w(logTag, "revision replay failed ch=${unit.chapterIndex}: ${it::class.simpleName}")
+            return tree
+        }
+
+        // 重放实测长度 vs 库里的 delta：存储的 delta 是提交时按预归一算的，节点边界空白折叠
+        // 仍可能差一两个字（方案 §8.10 最大风险）。换算以实测为准，只改内存、不静默改库。
+        val fixedRevisions = MeasuredDeltaFix.apply(
+            revisions = map.revisions,
+            revisionsByLeaf = revisionsByLeaf,
+            measuredLeafDeltas = result.measuredLeafDeltas,
+            measuredById = result.measuredRevisionDeltas,
+        ) { leaf, stored, measured, revisionId ->
+            Logger.w(
+                logTag,
+                "revision delta drift ch=${unit.chapterIndex} leaf=$leaf stored=$stored " +
+                    "measured=$measured rev=$revisionId",
+            )
+        }
+        if (fixedRevisions != null) {
+            revisionMaps = revisionMaps + (unit.chapterIndex to ChapterRevisionMap(fixedRevisions))
+        }
+
+        // 结构重链：叶按同序换成新树上的节点；owner / 生成内容的键都是**元素**，
+        // 用重放给出的「旧节点 → 新节点」对照表换过去（合并 / 拆分后叶数会变，不能再按路径猜）。
+        val bg = HashMap<MarkupElement, MarkupElement>(cache.leafToBackgroundOwner.size)
+        val avoid = HashMap<MarkupElement, MarkupElement>(cache.leafToBreakInsideAvoidOwner.size)
+        for (n in result.leaves.indices) {
+            val oldIdx = result.leafOrigin.getOrNull(n) ?: continue
+            val oldLeaf = cache.leaves.getOrNull(oldIdx) ?: continue
+            val newLeaf = result.leaves[n]
+            cache.leafToBackgroundOwner[oldLeaf]?.let { owner ->
+                val mapped = if (owner === oldLeaf) newLeaf else result.elementMap[owner]
+                if (mapped != null) bg[newLeaf] = mapped
+            }
+            cache.leafToBreakInsideAvoidOwner[oldLeaf]?.let { owner ->
+                val mapped = if (owner === oldLeaf) newLeaf else result.elementMap[owner]
+                if (mapped != null) avoid[newLeaf] = mapped
+            }
+        }
+        val gen = HashMap<MarkupElement, Pair<String?, String?>>(cache.genStrings.size)
+        for ((el, pair) in cache.genStrings) {
+            val target = result.elementMap[el] ?: continue
+            gen[target] = pair
+        }
+        // 重建 / 合并出来的叶沿用来源叶的生成内容（同一 tag/class，::before/::after 不变）。
+        for (n in result.leaves.indices) {
+            val oldIdx = result.leafOrigin.getOrNull(n) ?: continue
+            val pair = cache.genStrings[cache.leaves.getOrNull(oldIdx) ?: continue] ?: continue
+            gen[result.leaves[n]] = pair
+        }
+        cache.leaves = result.leaves
+        cache.globalCharStarts = result.charStarts
+        cache.leafToBackgroundOwner = bg
+        cache.leafToBreakInsideAvoidOwner = avoid
+        cache.genStrings = gen
+        unit.hasTextRevisions = true
+        Logger.w(
+            logTag,
+            "open: ch=${unit.chapterIndex} revisions=${map.revisions.size} merges=${merges.size} " +
+                "degraded=${result.degradedLeaves} recompute=${result.needsRecompute} " +
+                "t=${platformNowMs() - t0}ms",
+        )
+        return result.root
     }
 
     /** Binds the layouter's per-chapter href for [unit] before ANY layout/shape work that may touch
@@ -969,6 +1412,11 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
      *  with that viewport and only reused when it matches (see `ChapterStructurePersist`). */
     private fun saveUnitStructure(unit: ChapterUnit, cssHash: Long, contentW: Int, contentH: Int) {
         if (bookId < 0) return
+        // 有正文修订的章，内存里的树是重放后的副本：落盘会把修订烧进原树，下次开书再套一遍。
+        if (unit.hasTextRevisions) {
+            Logger.w(logTag, "structure save SKIP ch=${unit.chapterIndex} (has text revisions)")
+            return
+        }
         val store = structureStore() ?: return
         val tree = unit.markup ?: return
         val bundle = unit.cssBundle ?: return
@@ -1023,6 +1471,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                 contentWidth = contentWidth,
                 contentHeight = contentHeight,
                 cssHash = cssHash,
+                contentRev = chapterContentRev(unit.chapterIndex),
                 fontSig = fontPoolSignature ?: "",
             ) ||
             // 同一页首字：分页表是正典，快照必须锚在同一页上（换表/换页序即不认）。
@@ -1105,6 +1554,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
             contentWidth = contentWidth,
             contentHeight = contentHeight,
             cssHash = cssHash,
+            contentRev = chapterContentRev(unit.chapterIndex),
             fontSig = fontPoolSignature ?: "",
         )
     }
@@ -1141,8 +1591,15 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
      *
      * 后台**自建**一个轻 prepare（结构已绑定，组装百毫秒级）再投影：临时表会话持有的那个
      * `LightPrepare` 带着自己的懒级联缓存、且被塑形线程共用，不能跨线程拿来算。
-     * 回填前用 [ChapterUnit.layoutEpoch] 确认版式没变过；期间读者若长按，[chapterText] 的
-     * 同步兜底照旧现算（行为与改造前一致）。
+     * 回填前用 [ChapterUnit.layoutEpoch] 确认版式没变过。
+     *
+     * 延迟只给大章：小章整章投影实测 60~120ms，落位后立刻算，读者按住 500ms 触发长按时
+     * 已经就绪（否则「刚从清单跳过来就选不了」会有一段空窗）。大章级联可达数秒，仍先让
+     * 锚页/首批预填把 CPU 拿走。
+     *
+     * 「在算」标记按版式代号记：在途期间版式换过代（[ChapterUnit.invalidateLayout]）时这一笔
+     * 注定被丢弃，**不能继续占位**，要让紧随其后的重排按新代号另起一笔，否则本章会永远没有
+     * 整章文本，长按选区静默失效。
      */
     private fun scheduleChapterTextProjection(
         unit: ChapterUnit,
@@ -1150,13 +1607,22 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         contentW: Int,
         contentH: Int,
     ) {
-        if (unit.chapterTextCache != null || unit.textProjectionInFlight) return
+        if (unit.chapterTextCache != null) return
         val epoch = unit.layoutEpoch
+        // 同一版式下已经在算就不重复排；版式换过代则必须另起一笔（旧结果注定被丢弃）。
+        if (unit.textProjectionInFlight && unit.textProjectionEpoch == epoch) return
+        // 结构还没绑（页快照命中路径）时用磁盘表的末页块号估章的大小；两者都没有就按大章处理：
+        // 宁可晚 1.2s，也不和开书抢 CPU。
+        val blocks = if (unit.structureCache.structureBound) unit.structureCache.leaves.size
+        else unit.paginationTable?.pages?.lastOrNull()?.blockEndExclusive ?: 0
+        val small = blocks in 1..SMALL_CHAPTER_BLOCKS
         unit.textProjectionInFlight = true
+        unit.textProjectionEpoch = epoch
         bgScope.launch {
             try {
                 // 先让锚页/首批预填把 CPU 拿走：这一笔是"读者接下来才可能用到"的工作。
-                kotlinx.coroutines.delay(1200)
+                // 小章不必等：整章级联只要百毫秒内，等 1.2s 反而制造「刚跳过来选不了」的空窗。
+                if (!small) kotlinx.coroutines.delay(1200)
                 val markup = unit.markup ?: return@launch
                 val bundle = unit.cssBundle
                 val bc = layouter as? BoxChapterLayouter ?: return@launch
@@ -1170,7 +1636,8 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
             } catch (t: Throwable) {
                 Logger.w(logTag, "text projection failed ch=${unit.chapterIndex}: ${t::class.simpleName}")
             } finally {
-                unit.textProjectionInFlight = false
+                // 只有"当前那一笔"才能清在算标记：版式换代后已经另起了一笔，别把它一起清掉。
+                if (unit.textProjectionEpoch == epoch) unit.textProjectionInFlight = false
             }
         }
     }
@@ -1353,8 +1820,11 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
             val cacheFile = if (cache != null && bookId >= 0) {
                 cache.file("book_$bookId", unit.chapterIndex, paramHash)
             } else null
-            val cached = (if (cache != null) cacheFile?.let { cache.read(it) } else null)
-                ?: unit.paginationTable?.takeIf { it.paramHash == paramHash }
+            val contentRev = chapterContentRev(unit.chapterIndex)
+            val cached = (if (cache != null) cacheFile?.let { cache.read(it, contentRev) } else null)
+                ?: unit.paginationTable?.takeIf {
+                    it.paramHash == paramHash && it.contentRev == contentRev
+                }
 
             if (cached != null) {
                 // PaginationMode.LINE_DISK: the disk CFI table holds the authoritative line-level page
@@ -1460,6 +1930,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                         slices = slices,
                         totalBlocks = slices.maxOf { it.blockEndExclusive },
                         totalChars = totalChars,
+                        contentRev = contentRev,
                     )
                     runCatching { cache.write(table, cacheFile) }
                         .onFailure { Logger.e(logTag, "cache write FAIL ch=${unit.chapterIndex} ${it.message}") }
@@ -3446,6 +3917,7 @@ private fun finishCanonicalBackground(
             slices = slices,
             totalBlocks = slices.maxOf { it.blockEndExclusive },
             totalChars = totalChars,
+            contentRev = chapterContentRev(unit.chapterIndex),
         )
         runCatching { cache.write(table, cacheFile) }
             .onFailure { Logger.e(logTag, "canonical WRITE FAIL ch=${unit.chapterIndex} ${it.message}") }
@@ -3575,6 +4047,7 @@ private fun finishCanonicalBackground(
             slices = slices,
             totalBlocks = slices.maxOf { it.blockEndExclusive },
             totalChars = slices.last().charEnd,
+            contentRev = chapterContentRev(unit.chapterIndex),
         ))
     }
 
@@ -3943,7 +4416,7 @@ private fun finishCanonicalBackground(
         // 只读 40 字节表头，判据与 `read` 同源（构建号 / 引擎几何 / 章号 / 参数指纹），
         // 换参数、换构建、坏表被清之后自然不命中，该重排的仍然重排。
         val diskPages = runCatching {
-            cacheStore()?.readPageCount("book_$bookId", index, paramHash)
+            cacheStore()?.readPageCount("book_$bookId", index, paramHash, chapterContentRev(index))
         }.getOrNull()
         if (diskPages != null) {
             notePageCountKnown(index, paramHash, diskPages)
@@ -4095,7 +4568,9 @@ private fun finishCanonicalBackground(
                 val cacheFile = if (cache != null && bookId >= 0) {
                     cache.file("book_$bookId", index, paramHash)
                 } else null
-                val cached = if (cache != null) cacheFile?.let { cache.read(it) } else null
+                val cached = if (cache != null) {
+                    cacheFile?.let { cache.read(it, chapterContentRev(index)) }
+                } else null
                 if (cached != null && unit.paginationTable == null) {
                     unit.bindPaginationTable(cached)
                     // 表可以绑（它是本章交接点的权威，且不改变当前显示）；但**窗口预塑 `bind(layout,
@@ -4167,6 +4642,7 @@ private fun finishCanonicalBackground(
                 slices = slices,
                 totalBlocks = slices.maxOf { it.blockEndExclusive },
                 totalChars = slices.last().charEnd,
+                contentRev = chapterContentRev(unit.chapterIndex),
             )
             runCatching { cache.write(table, cacheFile) }
                 .onFailure { Logger.e(logTag, "full prelim WRITE FAIL ch=${unit.chapterIndex} ${it.message}") }
@@ -4420,7 +4896,9 @@ private fun finishCanonicalBackground(
     private fun chapterPageCountAt(chapter: Int, hash: Long): Int? {
         val unit = unitAt(chapter)
         if (unit != null) {
-            unit.paginationTable?.takeIf { it.paramHash == hash }?.let { return it.totalPages }
+            unit.paginationTable?.takeIf {
+                it.paramHash == hash && it.contentRev == chapterContentRev(chapter)
+            }?.let { return it.totalPages }
             // 整章全量版式（小章前台全排、大章磁盘命中窗口）= 正典分页，可当页数（含空章 0 页）；
             // 临时会话期间 `pageSlices` 是临时表，不能数。
             if (unit.inProgress == null && unit.layout != null) return unit.pageSlices.size
@@ -4454,7 +4932,7 @@ private fun finishCanonicalBackground(
             }
         }
         if (snapshot.isEmpty()) return
-        store.writePageCounts("book_$bookId", hash, snapshot)
+        store.writePageCounts("book_$bookId", hash, snapshot, bookContentRev)
     }
 
     /**
@@ -4524,7 +5002,7 @@ private fun finishCanonicalBackground(
             // 先吃「上一轮同参数下记下的页数清单」（`counts_<hash>.idx`）。为什么必须靠它：
             // 扫表要逐章开文件读表头（七百多章 = 七百多次 IO），而表文件还会因清缓存、
             // 坏文件被删掉。页数是同参数下确定不变的小事实，清单在，开书立刻就有全书页码。
-            val stored = runCatching { store.readPageCounts(bookKey, hash) }.getOrNull()
+            val stored = runCatching { store.readPageCounts(bookKey, hash, bookContentRev) }.getOrNull()
             if (stored != null) {
                 for ((chapter, pages) in stored) if (chapter in 0 until n) found[chapter] = pages
             }
@@ -4533,7 +5011,9 @@ private fun finishCanonicalBackground(
             if (found.size < n) {
                 for (i in 0 until n) {
                     if (found.containsKey(i)) continue
-                    val pages = runCatching { store.readPageCount(bookKey, i, hash) }.getOrNull() ?: continue
+                    val pages = runCatching {
+                        store.readPageCount(bookKey, i, hash, chapterContentRev(i))
+                    }.getOrNull() ?: continue
                     found[i] = pages
                 }
             }

@@ -7,6 +7,7 @@ import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.data.annotation.AnnotationKind
 import orilumn.reader.data.annotation.AnnotationLineStyle
+import orilumn.reader.data.revision.TextRevision
 import orilumn.reader.db.OrilumnDb
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -352,6 +353,7 @@ class LibraryDbTest {
         val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
         OrilumnDb.Schema.create(driver)
         driver.execute(null, "DROP TABLE annotations;", 0)
+        driver.execute(null, "DROP TABLE text_revisions;", 0)
         driver.execute(null, "PRAGMA user_version = 6;", 0)
 
         OrilumnDb.Schema.migrate(driver, 6, OrilumnDb.Schema.version)
@@ -384,6 +386,7 @@ class LibraryDbTest {
         OrilumnDb.Schema.create(driver)
         driver.execute(null, "ALTER TABLE annotations DROP COLUMN lineStyle;", 0)
         driver.execute(null, "ALTER TABLE annotations DROP COLUMN quote;", 0)
+        driver.execute(null, "DROP TABLE text_revisions;", 0)
         driver.execute(null, "PRAGMA user_version = 7;", 0)
 
         OrilumnDb.Schema.migrate(driver, 7, OrilumnDb.Schema.version)
@@ -426,6 +429,7 @@ class LibraryDbTest {
         val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
         OrilumnDb.Schema.create(driver)
         driver.execute(null, "ALTER TABLE annotations DROP COLUMN quote;", 0)
+        driver.execute(null, "DROP TABLE text_revisions;", 0)
         driver.execute(null, "PRAGMA user_version = 8;", 0)
 
         OrilumnDb.Schema.migrate(driver, 8, OrilumnDb.Schema.version)
@@ -455,6 +459,263 @@ class LibraryDbTest {
                 ),
             )
             assertEquals("摘录", db.annotationsForBook(book).first { it.charStart == 5 }.quote)
+        }
+    }
+
+    // ---- 正文修订（schema v11） ----
+
+    @Test
+    fun textRevisionsRoundTripAndOrdering() = runBlocking {
+        val db = freshDb()
+        val book = db.addBook("T", null, "/b.epub", addedAt = 1L)
+        val other = db.addBook("U", null, "/u.epub", addedAt = 2L)
+
+        // 同一次提交（跨段）：两章内两条，共用一个组号；写入顺序故意倒过来。
+        val saved = db.replaceTextRevisions(
+            deletedIds = emptyList(),
+            inserted = listOf(
+                TextRevision(
+                    bookId = book,
+                    chapter = 3,
+                    charStart = 20,
+                    charEnd = 24,
+                    text = "改后",
+                    originalText = "原句四个",
+                    editedText = "改后的整段",
+                    delta = -2,
+                    groupId = 777L,
+                    createdAt = 10L,
+                    updatedAt = 10L,
+                ),
+                TextRevision(
+                    bookId = book,
+                    chapter = 3,
+                    charStart = 2,
+                    charEnd = 2,
+                    text = "插入",
+                    delta = 2,
+                    groupId = 777L,
+                    createdAt = 10L,
+                    updatedAt = 10L,
+                ),
+            ),
+        )
+        assertEquals(2, saved.size)
+        assertTrue(saved.all { it.id > 0 })
+        assertTrue(saved.all { it.groupId == 777L })
+
+        // 章内按起点排序；纯插入（charStart == charEnd）原样读回。
+        val chapter = db.textRevisionsForChapter(book, 3)
+        assertEquals(listOf(2, 20), chapter.map { it.charStart })
+        assertEquals(2, chapter.first().charEnd)
+        assertTrue(chapter.first().isInsertion)
+        assertEquals(-2, chapter.last().delta)
+        // 审阅清单两行原样读回（整段原文 / 整段新文字）。
+        assertEquals("原句四个", chapter.last().originalText)
+        assertEquals("改后的整段", chapter.last().editedText)
+        assertEquals("", chapter.first().originalText)
+        assertEquals("", chapter.first().editedText)
+
+        // 别的书 / 别的章读不到。
+        assertTrue(db.textRevisionsForChapter(other, 3).isEmpty())
+        assertTrue(db.textRevisionsForChapter(book, 4).isEmpty())
+
+        // 替换：删一条、插一条，仍在同一事务里。
+        val replaced = db.replaceTextRevisions(
+            deletedIds = listOf(chapter.first().id),
+            inserted = listOf(
+                TextRevision(
+                    bookId = book,
+                    chapter = 3,
+                    charStart = 10,
+                    charEnd = 11,
+                    text = "",
+                    delta = -1,
+                    groupId = 888L,
+                    createdAt = 20L,
+                    updatedAt = 20L,
+                ),
+            ),
+        )
+        assertEquals(1, replaced.size)
+        val after = db.textRevisionsForChapter(book, 3)
+        assertEquals(listOf(10, 20), after.map { it.charStart })
+        assertEquals("", after.first().text)
+
+        // 全书查询按章序、章内起点排序。
+        db.replaceTextRevisions(
+            deletedIds = emptyList(),
+            inserted = listOf(
+                TextRevision(bookId = book, chapter = 1, charStart = 5, charEnd = 6, text = "A", groupId = 1L),
+            ),
+        )
+        assertEquals(listOf(1, 3, 3), db.textRevisionsForBook(book).map { it.chapter })
+    }
+
+    @Test
+    fun legacyRevisionSnapshotBackfillOnlyFillsEmptyRows() = runBlocking {
+        val db = freshDb()
+        val book = db.addBook("T", null, "/b.epub", addedAt = 1L)
+        val saved = db.replaceTextRevisions(
+            deletedIds = emptyList(),
+            inserted = listOf(
+                TextRevision(bookId = book, chapter = 1, charStart = 3, charEnd = 4, text = "新", groupId = 1L),
+                TextRevision(
+                    bookId = book,
+                    chapter = 1,
+                    charStart = 8,
+                    charEnd = 9,
+                    text = "改",
+                    originalText = "旧",
+                    editedText = "改",
+                    groupId = 2L,
+                ),
+            ),
+        )
+
+        // 老行（两列都空）补上原文与退回的改文。
+        db.fillLegacyRevisionSnapshot(saved[0].id, originalText = "原", editedText = "新")
+        val first = db.textRevisionsForChapter(book, 1).first { it.id == saved[0].id }
+        assertEquals("原", first.originalText)
+        assertEquals("新", first.editedText)
+
+        // 再补一次不能覆盖已经写好的快照（读者新提交的数据优先）。
+        db.fillLegacyRevisionSnapshot(saved[0].id, originalText = "别的", editedText = "别的")
+        val again = db.textRevisionsForChapter(book, 1).first { it.id == saved[0].id }
+        assertEquals("原", again.originalText)
+        assertEquals("新", again.editedText)
+
+        // 本来就有快照的新行一个字节都不动。
+        db.fillLegacyRevisionSnapshot(saved[1].id, originalText = "别的", editedText = "别的")
+        val fresh = db.textRevisionsForChapter(book, 1).first { it.id == saved[1].id }
+        assertEquals("旧", fresh.originalText)
+        assertEquals("改", fresh.editedText)
+    }
+
+    @Test
+    fun deleteTextRevisionRemovesOnlyThatRow() = runBlocking {
+        val db = freshDb()
+        val book = db.addBook("T", null, "/b.epub", addedAt = 1L)
+        val saved = db.replaceTextRevisions(
+            deletedIds = emptyList(),
+            inserted = listOf(
+                TextRevision(bookId = book, chapter = 1, charStart = 3, charEnd = 4, text = "甲", groupId = 1L),
+                TextRevision(bookId = book, chapter = 1, charStart = 8, charEnd = 9, text = "乙", groupId = 1L),
+                TextRevision(bookId = book, chapter = 2, charStart = 1, charEnd = 2, text = "丙", groupId = 2L),
+            ),
+        )
+
+        // 只删被点的那一行：同组另一段、别的章都不受影响。
+        db.deleteTextRevision(saved[0].id)
+        assertEquals(listOf(8), db.textRevisionsForChapter(book, 1).map { it.charStart })
+        assertEquals(listOf(1), db.textRevisionsForChapter(book, 2).map { it.charStart })
+
+        // 再删一次是空操作，不会顺手删掉别人。
+        db.deleteTextRevision(saved[0].id)
+        assertEquals(2, db.textRevisionsForBook(book).size)
+    }
+
+    @Test
+    fun removeBookAndDataClearsTextRevisions() = runBlocking {
+        val db = freshDb()
+        val removed = db.addBook("T", null, "/b.epub", addedAt = 1L)
+        val kept = db.addBook("U", null, "/u.epub", addedAt = 2L)
+        db.replaceTextRevisions(
+            deletedIds = emptyList(),
+            inserted = listOf(
+                TextRevision(bookId = removed, chapter = 1, charStart = 0, charEnd = 3, text = "x", groupId = 1L),
+                TextRevision(bookId = kept, chapter = 1, charStart = 0, charEnd = 3, text = "y", groupId = 2L),
+            ),
+        )
+
+        db.removeBookAndData(removed)
+
+        assertTrue(db.textRevisionsForBook(removed).isEmpty())
+        assertEquals("y", db.textRevisionsForChapter(kept, 1).single().text)
+    }
+
+    @Test
+    fun migrate10to11AddsTextRevisionsTable() {
+        // 用最新 schema 建库后删掉修订表、把版本退回 10，模拟真实的 10→11 升级。
+        val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        OrilumnDb.Schema.create(driver)
+        driver.execute(null, "DROP TABLE text_revisions;", 0)
+        driver.execute(null, "PRAGMA user_version = 10;", 0)
+
+        OrilumnDb.Schema.migrate(driver, 10, OrilumnDb.Schema.version)
+
+        val db = LibraryDb(OrilumnDb(driver))
+        runBlocking {
+            val book = db.addBook("T", null, "/b.epub", addedAt = 1L)
+            val row = db.replaceTextRevisions(
+                deletedIds = emptyList(),
+                inserted = listOf(
+                    TextRevision(
+                        bookId = book, chapter = 1, charStart = 1, charEnd = 4,
+                        text = "新", originalText = "旧三字", editedText = "新", delta = -2,
+                        groupId = 5L,
+                    ),
+                ),
+            ).single()
+            assertEquals("旧三字", row.originalText)
+            assertEquals("新", row.editedText)
+            assertEquals(listOf(row), db.textRevisionsForChapter(book, 1))
+        }
+    }
+
+    @Test
+    fun migrate12to13AddsEditedTextColumn() {
+        // 用最新 schema 建库后删掉新列（重建旧表）、把版本退回 12，模拟真实的 12→13 升级。
+        val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        OrilumnDb.Schema.create(driver)
+        driver.execute(
+            null,
+            """
+            CREATE TABLE text_revisions_old(
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              bookId INTEGER NOT NULL,
+              chapter INTEGER NOT NULL,
+              charStart INTEGER NOT NULL,
+              charEnd INTEGER NOT NULL,
+              text TEXT NOT NULL,
+              originalText TEXT NOT NULL DEFAULT '',
+              delta INTEGER NOT NULL,
+              groupId INTEGER NOT NULL,
+              createdAt INTEGER NOT NULL,
+              updatedAt INTEGER NOT NULL,
+              CHECK (charStart >= 0),
+              CHECK (charEnd >= charStart)
+            );
+            """.trimIndent(),
+            0,
+        )
+        driver.execute(
+            null,
+            "INSERT INTO text_revisions_old SELECT id, bookId, chapter, charStart, charEnd, text, originalText, delta, groupId, createdAt, updatedAt FROM text_revisions;",
+            0,
+        )
+        driver.execute(null, "DROP TABLE text_revisions;", 0)
+        driver.execute(null, "ALTER TABLE text_revisions_old RENAME TO text_revisions;", 0)
+        driver.execute(null, "PRAGMA user_version = 12;", 0)
+
+        OrilumnDb.Schema.migrate(driver, 12, OrilumnDb.Schema.version)
+
+        val db = LibraryDb(OrilumnDb(driver))
+        runBlocking {
+            val book = db.addBook("T", null, "/b.epub", addedAt = 1L)
+            val row = db.replaceTextRevisions(
+                deletedIds = emptyList(),
+                inserted = listOf(
+                    TextRevision(
+                        bookId = book, chapter = 1, charStart = 1, charEnd = 4,
+                        text = "新", originalText = "旧三字", editedText = "旧三字改成新",
+                        delta = -2, groupId = 5L,
+                    ),
+                ),
+            ).single()
+            assertEquals("旧三字", row.originalText)
+            assertEquals("旧三字改成新", row.editedText)
+            assertEquals(listOf(row), db.textRevisionsForChapter(book, 1))
         }
     }
 

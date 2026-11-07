@@ -41,6 +41,14 @@ class ChapterUnit(
      * [markup]; null until the body is parsed. */
     var cssBundle: CssBundle? = null
 
+    /**
+     * 本章是否有正文修订（载入重放已套到 [markup] 的**内存副本**上）。
+     *
+     * 有修订的章**禁止**回写结构缓存：磁盘上的树是原书，结构缓存若按改后的树重算并落盘，
+     * 下次开书会把修订套到已改的树上（双重修改，方案 §8.10 第二风险）。
+     */
+    var hasTextRevisions: Boolean = false
+
     /** Chapter name (taken from the first paragraph/title text, for log locating); empty when
      * markup isn't loaded. */
     var title: String = ""
@@ -77,6 +85,11 @@ class ChapterUnit(
     /** 后台整章文本投影是否在算：避免开书/翻页路径重复排同一个任务（重复只是白烧 CPU）。 */
     @Volatile
     internal var textProjectionInFlight: Boolean = false
+
+    /** 在算的那一笔对应的 [layoutEpoch]。版式换过代后旧结果注定被丢弃，此时必须允许按新代号
+     *  另起一笔，否则这一章会永远停在「没有整章文本」——长按选区静默失效。 */
+    @Volatile
+    internal var textProjectionEpoch: Long = -1L
 
     /**
      * 整章文本的**块尾偏移**（每个排版叶一段，cumulative endExclusive，长度 = 块数）。
@@ -278,6 +291,7 @@ class ChapterUnit(
         shapedPageFrom = -1
         shapedPageTo = -1
         laidOut = false
+        hasTextRevisions = false
         structureCache.reset()
     }
 }

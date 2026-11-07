@@ -3,6 +3,7 @@ package orilumn.reader.ui.reader
 import androidx.compose.ui.graphics.ImageBitmap
 import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.data.epub.TocItem
+import orilumn.reader.data.revision.TextRevision
 import orilumn.reader.engine.LinkTarget
 import orilumn.reader.engine.paging.BookPageNumber
 import orilumn.reader.engine.paging.PageSlice
@@ -210,6 +211,32 @@ interface ReaderHost {
     suspend fun deleteAnnotation(id: Long): Boolean = false
 
     /**
+     * 全书正文修订（编辑清单用）：按章序、章内起点升序；读取失败返回空表。
+     *
+     * 和 [annotationsForBook] 一样只读库，不要求任何章就绪。坐标是原书空间，
+     * 跳转时由宿主换算成渲染空间再落位（与标注清单同一口径）。
+     */
+    suspend fun textRevisionsForBook(): List<TextRevision> = emptyList()
+
+    /**
+     * 本章正文修订，**渲染坐标**（与选区 / `textOf` / `PageSlice` 同尺）：按起点升序。
+     *
+     * 阅读面判「这段字改过没有 / 删除该删哪条」要用它——[textRevisionsForBook] 是原书坐标，
+     * 只适合清单与跳转。默认空表 = 宿主尚未实现，正文修改卡的「删除」保持虚掉。
+     */
+    suspend fun textRevisionsForChapter(chapter: Int): List<TextRevision> = emptyList()
+
+    /**
+     * 删除一条正文修订（编辑清单行左滑删除）：宿主落库 + 重读修订 + 只作废该章。
+     *
+     * [TextRevisionDeleteOutcome.Success.pos] 非空表示删的是**当前阅读章**：该章版式已作废，
+     * 阅读面必须按这个新落位重新取页（否则页面空白）；null 表示删的是别的章，当前页不动。
+     * 默认失败 = 宿主尚未支持。
+     */
+    suspend fun deleteTextRevision(revision: TextRevision): TextRevisionDeleteOutcome =
+        TextRevisionDeleteOutcome.Failed
+
+    /**
      * 本页**页首缺口**：页首行行顶之下到本页绘制帧顶的距离（px，≥0，见
      * [orilumn.reader.engine.paging.BookLayout.getPageFrameTop]）。
      *
@@ -292,6 +319,63 @@ interface ReaderHost {
      * 时会逐出正在渲染的远章 → 白屏）。
      */
     suspend fun firstContentChapter(): Int?
+
+    // ---- 正文修改 v3（方案 §8.8） ----
+
+    /**
+     * 提交一次正文修改：引擎算修订 + 宿主落库 + 该章重排。返回新落位与替换后的选区。
+     *
+     * [start] / [endExclusive] 是**渲染空间**（与 [textOf] / 选区同尺）；[text] 是输入区文字，
+     * 跨段时用 `\n` 分隔，**结果段数 = 换行符数 + 1**（删光中间的字就把几段并成一段）。
+     * 默认失败 = 宿主尚未支持，阅读面就地提示。
+     */
+    suspend fun commitTextEdit(
+        chapter: Int,
+        start: Int,
+        endExclusive: Int,
+        text: String,
+    ): TextEditOutcome = TextEditOutcome.Failed("当前版本不支持正文修改")
+
+    /**
+     * 渲染区间 → 原书区间（建标注 / 存进度用）。无修订时原样返回；默认 null = 宿主未实现，
+     * 调用方按「同一坐标」处理。
+     */
+    fun originalRangeOf(chapter: Int, start: Int, endExclusive: Int): IntRange? = null
+
+    /**
+     * 原书区间 → 渲染区间（画标注 / 标注清单跳转用）。无修订时原样返回；默认 null = 宿主未实现。
+     */
+    fun renderedRangeOf(chapter: Int, start: Int, endExclusive: Int): IntRange? = null
+}
+
+/**
+ * 一次正文修改的结果（方案 §8.8）。
+ *
+ * [Success.pos] 为 null 表示新文字与旧文字相同（无需重排，保持当前页）；
+ * [Success.selStart] / [selEnd] 是替换后文字在**渲染空间**的区间，阅读面据此重新选中。
+ */
+sealed interface TextEditOutcome {
+    data class Success(
+        val pos: ReaderPos?,
+        val selStart: Int,
+        val selEnd: Int,
+    ) : TextEditOutcome
+
+    /** 校验失败（选区跨到图片 / 表格等不能合并的块）：卡片不关、正文不动。 */
+    data class Rejected(val reason: String) : TextEditOutcome
+
+    /** 落库 / 重排失败：卡片不关、正文不动。 */
+    data class Failed(val message: String) : TextEditOutcome
+}
+
+/**
+ * 删除一条正文修订的结果（编辑清单行左滑删除）。
+ *
+ * [Success.pos] 非空 = 删的是当前阅读章，阅读面落到这个新位置；null = 删的是别的章，当前页不动。
+ */
+sealed interface TextRevisionDeleteOutcome {
+    data class Success(val pos: ReaderPos?) : TextRevisionDeleteOutcome
+    data object Failed : TextRevisionDeleteOutcome
 }
 
 /**

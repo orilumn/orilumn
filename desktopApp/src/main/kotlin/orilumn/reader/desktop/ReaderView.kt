@@ -7,11 +7,13 @@ import orilumn.reader.ui.reader.ReaderAnnotationPanel
 import orilumn.reader.ui.reader.ReaderHost
 import orilumn.reader.ui.reader.ReaderPanelPage
 import orilumn.reader.ui.reader.ReaderPos
+import orilumn.reader.ui.reader.ReaderRevisionPanel
 import orilumn.reader.ui.reader.ReaderScreen
 import orilumn.reader.ui.reader.ReaderSettingsPanel
 import orilumn.reader.ui.reader.ReaderSidePanel
 import orilumn.reader.ui.reader.ReaderTocBody
 import orilumn.reader.ui.reader.SnapshotReaderHost
+import orilumn.reader.ui.reader.TextRevisionDeleteOutcome
 import orilumn.reader.ui.reader.ThemePreset
 import orilumn.reader.ui.reader.chapterTitlesOf
 import orilumn.reader.ui.shelf.ShelfBook
@@ -502,6 +504,7 @@ fun ReaderView(
         )
 
         val panelToc = desktopHost?.toc ?: emptyList()
+        val panelChapterTitles = remember(panelToc) { chapterTitlesOf(panelToc) }
         ReaderSidePanel(
             visible = panelPage != null,
             page = panelPage ?: panelLastPage,
@@ -552,8 +555,36 @@ fun ReaderView(
                             pushLanding(target)
                         }
                     },
-                    chapterTitles = remember(panelToc) { chapterTitlesOf(panelToc) },
+                    chapterTitles = panelChapterTitles,
                     currentChapter = currentPos?.chapter ?: 0,
+                    onDismiss = { panelPage = null },
+                )
+            },
+            revisionsContent = {
+                ReaderRevisionPanel(
+                    scheme = settings.scheme,
+                    load = { desktopHost?.textRevisionsForBook() ?: emptyList() },
+                    onDelete = { revision ->
+                        when (val outcome = desktopHost?.deleteTextRevision(revision)) {
+                            is TextRevisionDeleteOutcome.Success -> {
+                                // 删的是当前章：落到宿主给的新页（pushLanding 已 +1 版式号）；
+                                // 别的章只让当前页重取（页码/目录跟着刷新）。
+                                outcome.pos?.let { pushLanding(it) } ?: run { contentRevision++ }
+                                true
+                            }
+                            else -> false
+                        }
+                    },
+                    currentChapter = currentPos?.chapter ?: 0,
+                    onJump = { revision ->
+                        panelPage = null
+                        relayoutAnchor.release()
+                        scope.launch {
+                            val target = desktopHost?.jumpToChar(revision.chapter, revision.charStart)
+                                ?: return@launch
+                            pushLanding(target)
+                        }
+                    },
                     onDismiss = { panelPage = null },
                 )
             },

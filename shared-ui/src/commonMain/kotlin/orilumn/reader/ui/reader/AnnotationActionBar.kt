@@ -73,6 +73,19 @@ internal fun AnnotationActionBar(
     onCopy: () -> Unit,
     onDelete: () -> Unit,
     onDone: () -> Unit,
+    /** 选区菜单的「编辑」：有选区时可点（正文修改 v3）。 */
+    onEdit: (() -> Unit)? = null,
+    editEnabled: Boolean = false,
+    /**
+     * 正文修改模式（方案 §8.8 / D-36）：**和高亮、划线共用同一根操作栏**，不另起一套。
+     *
+     * - 「编辑」标为当前项（垫底、不再响应点按）；
+     * - 左边的「高亮 / 划线」**照样可点**：点它就是切回该类别的批注（[onKindChange] 由调用方解释）；
+     * - 色槽与线型虚掉（点按被吞掉）；
+     * - 「删除」与批注同义，删的是**覆盖这段字的修订**（[canDelete] 由调用方按有没有修订给）；
+     * - 「复制」「确定」照旧；取消仍是点卡片外 / 返回键 / Esc（落笔只认 `确定`）。
+     */
+    editMode: Boolean = false,
 ) {
     val colors = if (kind == AnnotationKind.Underline) underlineColors else highlightColors
     val defaultSlot = (if (kind == AnnotationKind.Underline) underlineDefaultSlot else highlightDefaultSlot)
@@ -91,11 +104,13 @@ internal fun AnnotationActionBar(
     BarLayout(
         modifier = Modifier.fillMaxWidth().padding(start = 6.dp, end = 6.dp, top = 2.dp, bottom = 2.dp),
         lead = {
+            // 正文修改模式下这两个**照样可点**：点它就是切回该类别的批注（用户定口）。
+            // 只是「当前项」是右边的「编辑」，所以两者都不垫底。
             MenuAction(
                 label = "高亮",
                 textColor = palette.text,
                 palette = palette,
-                active = kind == AnnotationKind.Highlight,
+                active = !editMode && kind == AnnotationKind.Highlight,
                 swatch = swatchOf(AnnotationKind.Highlight),
                 onClick = { onKindChange(AnnotationKind.Highlight) },
             )
@@ -103,30 +118,36 @@ internal fun AnnotationActionBar(
                 label = "划线",
                 textColor = palette.text,
                 palette = palette,
-                active = kind == AnnotationKind.Underline,
+                active = !editMode && kind == AnnotationKind.Underline,
                 underlineArgb = underlineSwatch,
                 underlineStyle = lineStyle,
                 onClick = { onKindChange(AnnotationKind.Underline) },
             )
-            // 占位：v3 的内容修改还没做，虚掉且点了没反应（吞掉点按，不漏到正文）。
+            // 正文修改（v3）：有选区才可点；点了把选区文字放进同一张底部卡片。
+            // 进了修改模式后这一项就是**当前项**：垫底、不再响应点按（不会自己再点自己一次）。
             MenuAction(
                 label = "编辑",
-                textColor = palette.muted,
+                textColor = if (editMode || editEnabled) palette.text else palette.muted,
                 palette = palette,
-                active = false,
-                enabled = false,
-                onClick = {},
+                active = editMode,
+                enabled = !editMode && editEnabled && onEdit != null,
+                onClick = { onEdit?.invoke() },
             )
         },
-        colors = {
-            ColorSlots(
-                colors = colors,
-                defaultSlot = defaultSlot,
-                currentArgb = currentColor,
-                onPick = { index -> onPickColor(kind, index) },
-            )
+        // 正文修改模式不显示色槽（用户定口）：这一段直接不出现，操作栏少一截、也不留空位。
+        colors = if (editMode) {
+            null
+        } else {
+            {
+                ColorSlots(
+                    colors = colors,
+                    defaultSlot = defaultSlot,
+                    currentArgb = currentColor,
+                    onPick = { index -> onPickColor(kind, index) },
+                )
+            }
         },
-        styles = if (kind == AnnotationKind.Underline) {
+        styles = if (!editMode && kind == AnnotationKind.Underline) {
             {
                 LineStyleRow(
                     current = lineStyle,
@@ -140,6 +161,7 @@ internal fun AnnotationActionBar(
         },
         trail = {
             MenuAction("复制", palette.text, palette, active = false, onClick = onCopy)
+            // 删除两种模式共用：批注模式删这条标注，正文修改模式删这条修改（恢复原文）。
             MenuAction(
                 label = "删除",
                 textColor = if (canDelete) palette.text else palette.muted,
@@ -183,7 +205,8 @@ private val BAR_ROW_GAP = 2.dp
 private fun BarLayout(
     modifier: Modifier = Modifier,
     lead: @Composable () -> Unit,
-    colors: @Composable () -> Unit,
+    /** null = 这一段整段不出现（正文修改模式没有色槽）。 */
+    colors: (@Composable () -> Unit)?,
     styles: (@Composable () -> Unit)?,
     trail: @Composable () -> Unit,
 ) {
@@ -193,8 +216,10 @@ private fun BarLayout(
             Row(Modifier.layoutId(PART_LEAD), verticalAlignment = Alignment.CenterVertically) {
                 lead()
             }
-            Row(Modifier.layoutId(PART_COLORS), verticalAlignment = Alignment.CenterVertically) {
-                colors()
+            if (colors != null) {
+                Row(Modifier.layoutId(PART_COLORS), verticalAlignment = Alignment.CenterVertically) {
+                    colors()
+                }
             }
             if (styles != null) {
                 Row(Modifier.layoutId(PART_STYLES), verticalAlignment = Alignment.CenterVertically) {

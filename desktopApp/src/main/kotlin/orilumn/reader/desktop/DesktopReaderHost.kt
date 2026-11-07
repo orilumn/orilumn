@@ -5,9 +5,11 @@ import orilumn.reader.data.book.BookReadingState
 import orilumn.reader.data.epub.EpubResourceReader
 import orilumn.reader.data.epub.TocItem
 import orilumn.reader.data.epub.ZipEpubResourceReader
+import orilumn.reader.data.revision.TextRevision
 import orilumn.reader.data.settings.BookSettings
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.engine.BookDocumentController
+import orilumn.reader.engine.revision.TextEditPlan
 import orilumn.reader.engine.BoxChapterLayouter
 import orilumn.reader.engine.ImageLoader
 import orilumn.reader.engine.LinkTarget
@@ -20,6 +22,8 @@ import orilumn.reader.engine.text.TypographicProfile
 import orilumn.reader.io.Logger
 import orilumn.reader.ui.reader.ReaderHost
 import orilumn.reader.ui.reader.ReaderPos
+import orilumn.reader.ui.reader.TextEditOutcome
+import orilumn.reader.ui.reader.TextRevisionDeleteOutcome
 import orilumn.reader.ui.imageBitmapOf
 import orilumn.reader.ui.reader.flattenTocItems
 import androidx.compose.runtime.getValue
@@ -91,6 +95,8 @@ class DesktopReaderHost(
         it.cacheRoot = cacheRoot?.absolutePath?.toPath()
         it.diskCacheVersion = diskCacheVersion
         it.setViewport(viewportW.coerceAtLeast(16), viewportH.coerceAtLeast(16))
+        // 正文修订（与平板同一共享表）：开书整本读一次，章树载入与缓存失效都以它为准。
+        it.textRevisionStore = store
         // F4b：用户字库追装（与平板 `topUpSkiaFonts` 同式；桌面无系统衬线补装，
         // CoreText 经系统集合自行回退）；书内字体见 `onBookFonts`。
         it.onDemandFonts = { demand -> topUpSkiaFonts(demand) }
@@ -173,7 +179,11 @@ class DesktopReaderHost(
                 ioScope.launch {
                     store.saveProgress(
                         bookId,
-                        ReadingLocator(landing.chapter, landing.slice.charStart, atCover = false),
+                        ReadingLocator(
+                            landing.chapter,
+                            controller.originalOffset(landing.chapter, landing.slice.charStart),
+                            atCover = false,
+                        ),
                     )
                 }
                 return@withContext ReaderPos(landing.chapter, landing.slice, atCover = false)
@@ -220,8 +230,77 @@ class DesktopReaderHost(
     suspend fun jumpToChar(chapter: Int, charOffset: Int): ReaderPos? = withContext(Dispatchers.Default) {
         val from = controller.locateStart()?.first ?: chapter
         controller.finalizeOnLeave(from)
-        controller.openAtChar(chapter, charOffset)?.let { ReaderPos(it.first, it.second, atCover = false) }
+        // 标注清单的锚点是原书空间；落位要的是渲染空间。
+        controller.openAtChar(chapter, controller.renderedOffset(chapter, charOffset))
+            ?.let { ReaderPos(it.first, it.second, atCover = false) }
     }
+
+    override fun originalRangeOf(chapter: Int, start: Int, endExclusive: Int): IntRange =
+        controller.originalRange(chapter, start, endExclusive)
+
+    override fun renderedRangeOf(chapter: Int, start: Int, endExclusive: Int): IntRange =
+        controller.renderedRange(chapter, start, endExclusive)
+
+    override suspend fun commitTextEdit(
+        chapter: Int,
+        start: Int,
+        endExclusive: Int,
+        text: String,
+    ): TextEditOutcome = withContext(Dispatchers.Default) {
+        val plan = controller.planTextEdit(chapter, start, endExclusive, text)
+        when (plan) {
+            is TextEditPlan.Rejected -> return@withContext TextEditOutcome.Rejected(plan.reason)
+            is TextEditPlan.Ready -> {
+                if (plan.noop) {
+                    return@withContext TextEditOutcome.Success(null, plan.renderedStart, plan.renderedEndExclusive)
+                }
+                val saved = runCatching {
+                    store.replaceTextRevisions(plan.deletedIds, plan.inserted)
+                }.getOrNull()
+                if (saved == null || (plan.inserted.isNotEmpty() && saved.size != plan.inserted.size)) {
+                    return@withContext TextEditOutcome.Failed("保存失败")
+                }
+                controller.reloadTextRevisions()
+                controller.invalidateChapterContent(chapter)
+                val pos = runCatching { controller.openAtChar(chapter, plan.renderedStart) }.getOrNull()
+                    ?: return@withContext TextEditOutcome.Failed("重排失败")
+                // 本章页数变了：页脚页码 / 目录页码跟着刷新（页码清单已在本章作废）。
+                pageNumberTick++
+                TextEditOutcome.Success(
+                    ReaderPos(pos.first, pos.second, atCover = false),
+                    plan.renderedStart,
+                    plan.renderedEndExclusive,
+                )
+            }
+        }
+    }
+
+    /**
+     * 删除一条正文修订（编辑清单行左滑删除）：落库 → 重读修订 → 只作废该章。
+     * 删的是当前阅读章时按**当前页首**重新落位，并把新落位交给阅读面；别的章不动当前页。
+     */
+    override suspend fun deleteTextRevision(revision: TextRevision): TextRevisionDeleteOutcome =
+        withContext(Dispatchers.Default) {
+            // 先记当前页首（**原书**空间）：删除后按同一处内容重新落位，不把读者拽到清单行处。
+            // 页首 slice 是渲染坐标，先换回原书坐标，删除后再换算成新的渲染坐标。
+            val keepOriginal = runCatching { controller.locateStart() }
+                .getOrNull()
+                ?.takeIf { it.first == revision.chapter }
+                ?.second?.charStart
+                ?.let { controller.originalOffset(revision.chapter, it) }
+            val removed = runCatching { store.deleteTextRevision(revision.id) }.isSuccess
+            if (!removed) return@withContext TextRevisionDeleteOutcome.Failed
+            controller.reloadTextRevisions()
+            controller.invalidateChapterContent(revision.chapter)
+            // 本章页数可能变了：页脚 / 目录页码跟着刷新。
+            pageNumberTick++
+            val pos = keepOriginal?.let { char ->
+                val rendered = controller.renderedOffset(revision.chapter, char)
+                runCatching { controller.openAtChar(revision.chapter, rendered) }.getOrNull()
+                    ?.let { ReaderPos(it.first, it.second, atCover = false) }
+            }
+            TextRevisionDeleteOutcome.Success(pos)
+        }
 
     /** P4-c2u: 点按命中的链接查表（控制器轻路径样式化区间，同步廉价）。 */
     override fun linkTargetAt(chapter: Int, charOffset: Int): LinkTarget? =
@@ -274,7 +353,7 @@ class DesktopReaderHost(
     // ---- 文本标注：转手给桌面 ShelfStore → 共享 LibraryDb（与平板同一条 CRUD 语义） ----
 
     override suspend fun annotationsForChapter(chapter: Int): List<Annotation> = try {
-        store.annotationsForChapter(bookId, chapter)
+        store.annotationsForChapter(bookId, chapter).map(::toRenderedRange)
     } catch (c: CancellationException) {
         throw c
     } catch (_: Throwable) {
@@ -282,6 +361,7 @@ class DesktopReaderHost(
     }
 
     override suspend fun annotationsForBook(): List<Annotation> = try {
+        // 清单只显示原文摘录，不画装饰；坐标保持原书空间，跳转时再换算。
         store.annotationsForBook(bookId)
     } catch (c: CancellationException) {
         throw c
@@ -289,15 +369,54 @@ class DesktopReaderHost(
         emptyList()
     }
 
+    /** 阅读面判「这段字改过没有」用：本章修订换成**渲染坐标**（与选区同尺）。 */
+    override suspend fun textRevisionsForChapter(chapter: Int): List<TextRevision> = try {
+        store.textRevisionsForChapter(bookId, chapter).map { r ->
+            val rr = controller.renderedRange(chapter, r.charStart, r.charEnd)
+            val end = if (rr.isEmpty()) rr.first else rr.last + 1
+            if (rr.first == r.charStart && end == r.charEnd) r else r.copy(charStart = rr.first, charEnd = end)
+        }
+    } catch (c: CancellationException) {
+        throw c
+    } catch (_: Throwable) {
+        emptyList()
+    }
+
+    /** 编辑清单：全书正文修订（原书坐标），跳转时再由 [jumpToChar] 换算。 */
+    override suspend fun textRevisionsForBook(): List<TextRevision> = try {
+        // 快照两列上线前写下的老行：区间还在原书空间，先按持久化章树把原文补回库再读清单。
+        controller.backfillLegacyRevisionTexts()
+        store.textRevisionsForBook(bookId)
+    } catch (c: CancellationException) {
+        throw c
+    } catch (_: Throwable) {
+        emptyList()
+    }
+
+    private fun toRenderedRange(annotation: Annotation): Annotation {
+        val r = controller.renderedRange(annotation.chapter, annotation.charStart, annotation.charEnd)
+        val end = if (r.isEmpty()) r.first else r.last + 1
+        return if (r.first == annotation.charStart && end == annotation.charEnd) annotation
+        else annotation.copy(charStart = r.first, charEnd = end)
+    }
+
+    private fun toOriginalRange(annotation: Annotation): Annotation {
+        val r = controller.originalRange(annotation.chapter, annotation.charStart, annotation.charEnd)
+        val end = if (r.isEmpty()) r.first else r.last + 1
+        return if (r.first == annotation.charStart && end == annotation.charEnd) annotation
+        else annotation.copy(charStart = r.first, charEnd = end)
+    }
+
     override suspend fun addAnnotation(annotation: Annotation): Annotation? = try {
         val now = System.currentTimeMillis()
-        store.addAnnotation(
-            annotation.copy(
+        val saved = store.addAnnotation(
+            toOriginalRange(annotation).copy(
                 bookId = bookId,
                 createdAt = if (annotation.createdAt == 0L) now else annotation.createdAt,
                 updatedAt = now,
             ),
         )
+        toRenderedRange(saved)
     } catch (c: CancellationException) {
         throw c
     } catch (t: Throwable) {
@@ -307,7 +426,7 @@ class DesktopReaderHost(
     }
 
     override suspend fun updateAnnotation(annotation: Annotation): Boolean = try {
-        store.updateAnnotation(annotation.copy(updatedAt = System.currentTimeMillis()))
+        store.updateAnnotation(toOriginalRange(annotation).copy(updatedAt = System.currentTimeMillis()))
         true
     } catch (c: CancellationException) {
         throw c
@@ -355,7 +474,12 @@ class DesktopReaderHost(
             if (bookId < 0) return@launch
             store.saveProgress(
                 bookId,
-                ReadingLocator(pos.chapter, pos.slice.charStart, atCover = pos.atCover),
+                // 存档的锚点是**原书空间**：渲染空间的位置不能直接写进 locator。
+                ReadingLocator(
+                    pos.chapter,
+                    controller.originalOffset(pos.chapter, pos.slice.charStart),
+                    atCover = pos.atCover,
+                ),
             )
         }
     }

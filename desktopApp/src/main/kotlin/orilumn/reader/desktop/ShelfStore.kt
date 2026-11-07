@@ -79,7 +79,7 @@ private data class AddedColumn(val table: String, val column: String, val ddl: S
  * 书目索引由 S32 的 `shelf.json` 迁入 `orilumn.db`（[load] 时一次性导入并删文件，
  * id 延续以保进度关联）；轻量偏好与主题预设仍走文件（非关系数据）。
  */
-class DesktopShelfStore(root: File) : ShelfRepository {
+class DesktopShelfStore(root: File) : ShelfRepository, orilumn.reader.data.revision.TextRevisionStore {
     private val dbFile = File(root, "orilumn.db")
     private val legacyIndex = File(root, "shelf.json")
     private val progressDir = File(root, "progress")
@@ -361,6 +361,27 @@ class DesktopShelfStore(root: File) : ShelfRepository {
     suspend fun updateAnnotation(annotation: Annotation) = requireDb().updateAnnotation(annotation)
 
     suspend fun deleteAnnotation(id: Long) = requireDb().deleteAnnotation(id)
+
+    // ---- 正文修订（与平板同一共享表；方案 §8.9 第 1 步） ----
+
+    override suspend fun textRevisionsForChapter(bookId: Long, chapter: Int) =
+        requireDb().textRevisionsForChapter(bookId, chapter)
+
+    override suspend fun textRevisionsForBook(bookId: Long) =
+        requireDb().textRevisionsForBook(bookId)
+
+    override suspend fun replaceTextRevisions(
+        deletedIds: List<Long>,
+        inserted: List<orilumn.reader.data.revision.TextRevision>,
+    ) = requireDb().replaceTextRevisions(deletedIds, inserted)
+
+    override suspend fun fillLegacyRevisionSnapshot(id: Long, originalText: String, editedText: String) =
+        requireDb().fillLegacyRevisionSnapshot(id, originalText, editedText)
+
+    override suspend fun deleteTextRevision(id: Long) = requireDb().deleteTextRevision(id)
+
+    override suspend fun deleteTextRevisionsForBook(bookId: Long) =
+        requireDb().deleteTextRevisionsForBook(bookId)
 
     /** S32 `progress/{id}.json` 一次性导入，随后逐个删除旧文件。 */
     private suspend fun importLegacyProgressIfNeeded(library: LibraryDb) {

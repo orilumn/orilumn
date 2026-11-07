@@ -2,6 +2,7 @@ package orilumn.reader.engine
 
 import orilumn.reader.engine.css.CssBundle
 import orilumn.reader.engine.html.MarkupElement
+import orilumn.reader.engine.html.MarkupPaths
 
 /**
  * Import-built chapter structure: extract + relink (open-time), media gating.
@@ -110,39 +111,19 @@ object ChapterStructurePersist {
         return false
     }
 
-    /** Assigns parent pointers through the whole tree (idempotent; the converter may not set them). */
-    fun assignParents(root: MarkupElement) {
-        for (child in root.children) {
-            child.parent = root
-            assignParents(child)
-        }
-    }
+    /**
+     * 路径三件套直接转调共享实现（[MarkupPaths]）：正文修订重放也要用同一套路径规则，
+     * 两处各写一份迟早会漂移。签名保持不变，调用方零改动。
+     */
+    fun assignParents(root: MarkupElement) = MarkupPaths.assignParents(root)
 
     /** Child-index path from [root] to [node], or null when [node] isn't under [root]. */
-    fun nodePath(root: MarkupElement, node: MarkupElement): IntArray? {
-        val rev = ArrayList<Int>()
-        var cur: MarkupElement? = node
-        while (cur != null && cur !== root) {
-            val p = cur.parent ?: return null
-            val idx = p.children.indexOf(cur)
-            if (idx < 0) return null
-            rev.add(idx)
-            cur = p
-        }
-        if (cur !== root) return null
-        rev.reverse()
-        return rev.toIntArray()
-    }
+    fun nodePath(root: MarkupElement, node: MarkupElement): IntArray? =
+        MarkupPaths.nodePath(root, node)
 
     /** Walks [path] from [root]; null on any out-of-bounds step. */
-    fun resolvePath(root: MarkupElement, path: IntArray): MarkupElement? {
-        var cur = root
-        for (idx in path) {
-            if (idx < 0 || idx >= cur.children.size) return null
-            cur = cur.children[idx]
-        }
-        return cur
-    }
+    fun resolvePath(root: MarkupElement, path: IntArray): MarkupElement? =
+        MarkupPaths.resolvePath(root, path)
 
     /** Extracts a persistable payload from a freshly computed [structure] (import or first touch). */
     fun extract(

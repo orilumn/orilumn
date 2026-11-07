@@ -1,0 +1,65 @@
+-- 正文修订（schema v13；迁移见 10.sqm / 11.sqm / 12.sqm）。
+--
+-- 一条修订 = 原书坐标里的一个区间 [charStart, charEnd) 换成 text。
+-- 与标注（Annotations.sq）/ PageSlice / ReadingLocator 同一个坐标空间：章号 + 章内原书字符偏移，
+-- 不含任何已经应用的修订（渲染空间见方案 D-32）。
+--
+-- - 同章内区间互不重叠、按 charStart 排序，由引擎在提交时保证；
+-- - charStart == charEnd 表示纯插入；text 为空串表示删除；
+-- - originalText / editedText 是审阅清单的两行：提交时选区的原文、读者输入的新文字。
+--   两行都是**整段选区**（渲染空间），不是裁剪后的最小修订——裁剪掉的公共前后缀仍会显示，
+--   读者才看得出「改之前是什么、改之后是什么」。旧行没有这两列数据时回退空串。
+-- - delta 是提交时实测的「渲染后长度 − 原区间长度」，用于不载入章树也能换算坐标；
+-- - groupId：同一次提交产生的多条修订共用（跨段时一段一条），审阅视图以后按组显示；
+-- - 没有外键级联：删书由 LibraryDb.removeBookAndData 在同一事务里清理本表（方案 D-17）。
+
+CREATE TABLE text_revisions(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bookId INTEGER NOT NULL,
+  chapter INTEGER NOT NULL,
+  charStart INTEGER NOT NULL,      -- 原书空间，含
+  charEnd INTEGER NOT NULL,        -- 原书空间，不含（= charStart 表示纯插入）
+  text TEXT NOT NULL,              -- 替换文本（空串 = 删除）
+  originalText TEXT NOT NULL DEFAULT '', -- 审阅清单「原文」行（整段选区）
+  editedText TEXT NOT NULL DEFAULT '',   -- 审阅清单「新文字」行（整段输入）
+  delta INTEGER NOT NULL,          -- 渲染后长度 − (charEnd − charStart)
+  groupId INTEGER NOT NULL,        -- 同一次提交的多条修订共用
+  createdAt INTEGER NOT NULL,
+  updatedAt INTEGER NOT NULL,
+  CHECK (charStart >= 0),
+  CHECK (charEnd >= charStart)
+);
+
+CREATE INDEX text_revisions_by_book_chapter ON text_revisions(bookId, chapter, charStart);
+
+insertTextRevision:
+INSERT INTO text_revisions(bookId, chapter, charStart, charEnd, text, originalText, editedText, delta, groupId, createdAt, updatedAt)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+-- 新增行的 id：与 books.lastInsertId 同因（Jdbc 驱动按语句取连接，last_insert_rowid 不可靠）。
+lastInsertTextRevisionId:
+SELECT max(id) FROM text_revisions;
+
+-- 一章的修订，按起点排序（同起点时先写的在前）。载入重放与坐标换算都用这一条。
+textRevisionsForChapter:
+SELECT * FROM text_revisions
+WHERE bookId = ? AND chapter = ?
+ORDER BY charStart ASC, id ASC;
+
+-- 全书修订（开书灌入控制器 / 审阅视图用）。
+textRevisionsForBook:
+SELECT * FROM text_revisions
+WHERE bookId = ?
+ORDER BY chapter ASC, charStart ASC, id ASC;
+
+deleteTextRevision:
+DELETE FROM text_revisions WHERE id = ?;
+
+-- 老修订补快照（一次性迁移）：只在两列都还是空串时写，绝不覆盖读者刚提交的新快照。
+fillLegacyRevisionSnapshot:
+UPDATE text_revisions
+SET originalText = ?, editedText = ?
+WHERE id = ? AND originalText = '' AND editedText = '';
+
+deleteTextRevisionsForBook:
+DELETE FROM text_revisions WHERE bookId = ?;

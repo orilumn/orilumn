@@ -1,0 +1,55 @@
+package orilumn.reader.data.revision
+
+/**
+ * 正文修订：把原书章内区间 [charStart, charEnd) 换成 [text]。
+ *
+ * 坐标与标注（`Annotation`）/ `PageSlice` / `ReadingLocator` 同源，都是**原书空间**：
+ * 不含任何已经应用的修订。渲染空间（应用修订之后的文字）由排版层换算，落盘的锚点一律用本空间
+ * （方案 D-32）。
+ *
+ * - [charStart] == [charEnd] 表示纯插入；[text] 为空串表示删除；
+ * - [originalText] / [editedText] 是**审阅清单的两行文字**：前者 = 提交时选区的原文，
+ *   后者 = 读者输入的新文字（都是渲染空间、按段各存一份）。它们只用于显示，
+ *   与 [charStart]/[charEnd]/[text] 这套「最小修订」互不影响——裁剪掉的公共前后缀
+ *   仍会出现在这两行里，读者才能看出「改之前是什么、改之后是什么」；
+ * - [text] 里可能含段界字符 `U+E000`（`RevisionBlocks.SEPARATOR`）：一条跨叶修订按它切块，
+ *   结果段数 = 段界数 + 1，段界本身不占字符；`\n` 仍只表示叶内 `<br>`（方案 D-34 修订版）；
+ * - [delta] 是提交时实测的「渲染后长度 − 原区间长度」，用于不载入章树也能换算坐标；
+ *   载入重放时会再量一次，不一致以重放值为准（只记日志，不静默改库）；
+ * - [groupId] 让同一次提交产生的多条修订（段数不变时一段一条）归为一组，审阅视图以后按组显示。
+ *
+ * 同章内区间互不重叠、按起点排序，由排版层在提交时保证（`ChapterRevisionMap`）。
+ */
+data class TextRevision(
+    val id: Long = 0,
+    val bookId: Long,
+    val chapter: Int,
+    val charStart: Int,
+    val charEnd: Int,
+    val text: String,
+    /** 审阅清单「原文」行：提交时这段选区的文字（渲染空间）。 */
+    val originalText: String = "",
+    /** 审阅清单「新文字」行：提交时这段输入的文字（渲染空间）。 */
+    val editedText: String = "",
+    val delta: Int = 0,
+    val groupId: Long = 0,
+    val createdAt: Long = 0,
+    val updatedAt: Long = 0,
+) {
+    init {
+        require(charStart >= 0) { "charStart 不能为负：$charStart" }
+        require(charEnd >= charStart) { "charEnd 不能小于 charStart：[$charStart, $charEnd)" }
+    }
+
+    /** 纯插入（区间为空）。 */
+    val isInsertion: Boolean get() = charStart == charEnd
+
+    /** 原书区间长度（被替换掉的字符数）。 */
+    val originalLength: Int get() = charEnd - charStart
+
+    /** 渲染后的长度（替换文本长度）。 */
+    val renderedLength: Int get() = text.length
+
+    /** 落在本修订之后的偏移量修正量（换算用，见 `ChapterRevisionMap`）。 */
+    val shift: Int get() = renderedLength - originalLength
+}

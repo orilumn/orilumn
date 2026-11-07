@@ -20,6 +20,19 @@ package orilumn.reader.engine.css
  */
 object WhiteSpaceNormalize {
 
+    /**
+     * 归一化结果 + 每个输出字符的原文区间（编辑正文时把归一化偏移映射回原始文本节点用）。
+     *
+     * [rawStart]/[rawEnd] 与 [text] 等长：一个字符可能来自原文的一段（折叠空白时整段空白映射成
+     * 一个空格，[rawStart] 是空白段起点、[rawEnd] 是空白段终点），普通字符恒为 `[i, i+1)`。
+     * 删除一个归一化空格时要连带删掉整段原文空白，否则「删了看不见变化」。
+     */
+    class NormalizedText(
+        val text: String,
+        val rawStart: IntArray,
+        val rawEnd: IntArray,
+    )
+
     /** 是否换行（false = PRE/NOWRAP：不断行，只在 `\n` 硬换行处分段）。 */
     fun wraps(ws: WhiteSpace): Boolean = when (ws) {
         WhiteSpace.NORMAL, WhiteSpace.PRE_WRAP, WhiteSpace.PRE_LINE -> true
@@ -33,6 +46,21 @@ object WhiteSpaceNormalize {
             WhiteSpace.NORMAL, WhiteSpace.NOWRAP -> collapseWhitespace(text)
             WhiteSpace.PRE, WhiteSpace.PRE_WRAP -> expandTabs(text)
             WhiteSpace.PRE_LINE -> collapseSpacesKeepNewlines(text)
+        }
+    }
+
+    /**
+     * 与 [normalizeNode] 同规则，额外给出每个输出字符对应的原文区间（[NormalizedText]）。
+     *
+     * 只给编辑正文用（把归一化偏移映射回原始文本节点）；**渲染路径仍走 [normalizeNode]**，
+     * 两条规则必须逐字一致，单测 `WhiteSpaceNormalizeMapTest` 交叉校验。
+     */
+    fun normalizeNodeWithMap(text: String, ws: WhiteSpace): NormalizedText {
+        if (text.isEmpty()) return NormalizedText("", IntArray(0), IntArray(0))
+        return when (ws) {
+            WhiteSpace.NORMAL, WhiteSpace.NOWRAP -> collapseWhitespaceWithMap(text)
+            WhiteSpace.PRE, WhiteSpace.PRE_WRAP -> expandTabsWithMap(text)
+            WhiteSpace.PRE_LINE -> collapseSpacesKeepNewlinesWithMap(text)
         }
     }
 
@@ -110,5 +138,91 @@ object WhiteSpaceNormalize {
         }
         if (pending) sb.append(' ')
         return sb.toString()
+    }
+
+    // ---- 归一化 + 原文位置映射（编辑正文用；与上面的渲染函数同规则） ----
+
+    private fun isWsChar(c: Char): Boolean =
+        c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\u000C'
+
+    private fun collapseWhitespaceWithMap(s: String): NormalizedText {
+        val sb = StringBuilder(s.length)
+        val starts = ArrayList<Int>(s.length)
+        val ends = ArrayList<Int>(s.length)
+        var runStart = -1
+        for (i in s.indices) {
+            val c = s[i]
+            if (isWsChar(c)) {
+                if (runStart < 0) runStart = i
+            } else {
+                if (runStart >= 0) {
+                    sb.append(' ')
+                    starts.add(runStart)
+                    ends.add(i)
+                    runStart = -1
+                }
+                sb.append(c)
+                starts.add(i)
+                ends.add(i + 1)
+            }
+        }
+        if (runStart >= 0) {
+            sb.append(' ')
+            starts.add(runStart)
+            ends.add(s.length)
+        }
+        return NormalizedText(sb.toString(), starts.toIntArray(), ends.toIntArray())
+    }
+
+    private fun expandTabsWithMap(s: String): NormalizedText {
+        val sb = StringBuilder(s.length)
+        val starts = ArrayList<Int>(s.length)
+        val ends = ArrayList<Int>(s.length)
+        for (i in s.indices) {
+            if (s[i] == '\t') {
+                repeat(8) {
+                    sb.append(' ')
+                    starts.add(i)
+                    ends.add(i + 1)
+                }
+            } else {
+                sb.append(s[i])
+                starts.add(i)
+                ends.add(i + 1)
+            }
+        }
+        return NormalizedText(sb.toString(), starts.toIntArray(), ends.toIntArray())
+    }
+
+    private fun collapseSpacesKeepNewlinesWithMap(s: String): NormalizedText {
+        val sb = StringBuilder(s.length)
+        val starts = ArrayList<Int>(s.length)
+        val ends = ArrayList<Int>(s.length)
+        var runStart = -1
+        for (i in s.indices) {
+            val c = s[i]
+            when (c) {
+                ' ', '\t' -> {
+                    if (runStart < 0) runStart = i
+                }
+                else -> {
+                    if (runStart >= 0) {
+                        sb.append(' ')
+                        starts.add(runStart)
+                        ends.add(i)
+                        runStart = -1
+                    }
+                    sb.append(c)
+                    starts.add(i)
+                    ends.add(i + 1)
+                }
+            }
+        }
+        if (runStart >= 0) {
+            sb.append(' ')
+            starts.add(runStart)
+            ends.add(s.length)
+        }
+        return NormalizedText(sb.toString(), starts.toIntArray(), ends.toIntArray())
     }
 }

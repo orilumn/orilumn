@@ -23,6 +23,8 @@ import orilumn.reader.io.Logger
  * @property chapterIndex Index in the spine.
  * @property paramHash Stable hash of the layout params that produced this table. Used both as
  *   part of the filename and as an integrity check at read time.
+ * @property contentRev 本章正文修订的内容版本（`ChapterRevisionMap.contentRev`；0 = 无修订）。
+ *   修订只影响被改的那一章，所以它是**章级**失效判据：别的章的表照常命中。
  * @property totalBlocks Number of block-level leaf elements in the chapter (pre-computed).
  * @property totalChars Total character count of the chapter body text.
  * @property pages One entry per output page. Index == page number within the chapter.
@@ -33,6 +35,8 @@ data class ChapterPaginationTable(
     val totalBlocks: Int,
     val totalChars: Int,
     val pages: List<PageRecord>,
+    /** 本章正文修订的内容版本（0 = 无修订）；见类 KDoc。 */
+    val contentRev: Long = 0L,
 ) {
     val totalPages: Int get() = pages.size
 
@@ -64,6 +68,7 @@ data class ChapterPaginationTable(
             slices: List<PageSlice>,
             totalBlocks: Int,
             totalChars: Int,
+            contentRev: Long = 0L,
         ): ChapterPaginationTable {
             // 写盘前契约（fail-fast）：调用方四处全部前查 isNotEmpty，空表/负数/非单调
             // 进来即上游 bug。以往照写坏表落盘，现在出生即炸。
@@ -84,6 +89,7 @@ data class ChapterPaginationTable(
                 totalBlocks = totalBlocks,
                 totalChars = totalChars,
                 pages = pages,
+                contentRev = contentRev,
             )
         }
     }

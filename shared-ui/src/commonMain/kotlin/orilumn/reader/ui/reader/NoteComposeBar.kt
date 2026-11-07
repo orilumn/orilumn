@@ -69,6 +69,14 @@ internal data class NoteBarTarget(
 )
 
 /**
+ * 底部输入卡当前是哪种模式（方案 §8.8）：批注 / 正文修改。
+ *
+ * 两种模式共用同一张卡、同一根操作栏、同一套键盘逐帧高度与升起度、同一个返回键取消机制；
+ * 正文修改只是把输入区换成多行、把 `确定` 的含义换成提交修订（D-36）。
+ */
+internal enum class NoteSheetMode { Annotation, TextEdit }
+
+/**
  * 标注卡片（用户层，D-28 第 1 部分）：**贴着键盘上沿的一张卡片**，桌面没有键盘就贴窗口下边框。
  *
  * 自上而下两段：
@@ -119,12 +127,20 @@ internal fun AnnotationSheet(
     onDelete: () -> Unit,
     /** 操作栏的 `确定`：显式落笔（新建时即便没写字也按当前类别 / 线型 / 默认色落一条）。 */
     onDone: () -> Unit,
+    /** 选区菜单的「编辑」：有选区时可点（正文修改 v3）。 */
+    onEdit: (() -> Unit)? = null,
+    editEnabled: Boolean = false,
     /** 点卡片外 / 返回键 / Esc：**取消**（什么都不写，原记录不动；落笔只认 `确定`）。 */
     onCancel: () -> Unit,
     /** 汇报卡片自身高度（像素）：页面让位要用实测值，不能靠估。 */
     onHeightChange: (Int) -> Unit = {},
     /** 放卡片的位置（外层 Box 的底边对齐）；默认铺满宽度、按 Box 的默认对齐。 */
     modifier: Modifier = Modifier,
+    /**
+     * 批注 / 正文修改（方案 §8.8 / D-36）：两者**共用同一根操作栏**，只有输入区与落笔含义不同。
+     * 正文修改时输入框换成多行、`确定` 提交修订；取消仍是点卡片外 / 返回键。
+     */
+    mode: NoteSheetMode = NoteSheetMode.Annotation,
 ) {
     val p = palette
     // 输入框内部要光标与选区，所以持 TextFieldValue；外面只认纯文本（点色槽时要读它）。
@@ -191,6 +207,9 @@ internal fun AnnotationSheet(
                 }
             },
     ) {
+        // 正文修改**不另起一套**：与高亮、划线共用同一根操作栏（D-36）。
+        // 修改模式下批注专属项虚掉、`编辑` 标为当前项，`复制` / `删除` / `确定` 照旧；
+        // 取消仍是点卡片外 / 返回键 / Esc（落笔只认 `确定`）。
         AnnotationActionBar(
             palette = p,
             kind = kind,
@@ -207,6 +226,9 @@ internal fun AnnotationSheet(
             onCopy = onCopy,
             onDelete = onDelete,
             onDone = onDone,
+            onEdit = onEdit,
+            editEnabled = editEnabled,
+            editMode = mode == NoteSheetMode.TextEdit,
         )
         // 与输入行之间的分隔：两段同属一张卡片，但操作与打字是两件事。
         Box(
@@ -223,7 +245,9 @@ internal fun AnnotationSheet(
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(min = 34.dp)
+                        // 与批注输入框同高：默认**一行**；正文修改有多行内容时才跟着长高
+                        // （最多 TEXT_EDIT_MAX_LINES 行，超出字段内部滚动）。
+                        .heightIn(min = NOTE_FIELD_MIN_HEIGHT)
                         .background(p.selBg, RoundedCornerShape(8.dp))
                         .padding(horizontal = 10.dp, vertical = 7.dp),
                 ) {
@@ -232,7 +256,11 @@ internal fun AnnotationSheet(
                         // 只写 fontSize 会继承 bodyLarge 的 24sp 行高，空框比有字时高 4dp
                         // （用户复报：一输入框子就变矮），卡片高度跟着跳、页面也跟着让位一次。
                         Text(
-                            text = "写点批注（可不填）",
+                            text = if (mode == NoteSheetMode.TextEdit) {
+                                "修改正文（跨段用换行分隔）"
+                            } else {
+                                "写点批注（可不填）"
+                            },
                             style = NoteTextStyle,
                             color = p.muted2,
                         )
@@ -253,7 +281,7 @@ internal fun AnnotationSheet(
                         // 拿它画光标压在卡片的浅底上几乎看不见。
                         cursorBrush = if (selfCaret) SolidColor(Color.Transparent) else SolidColor(p.text),
                         onTextLayout = { textLayout = it },
-                        maxLines = NOTE_MAX_LINES,
+                        maxLines = if (mode == NoteSheetMode.TextEdit) TEXT_EDIT_MAX_LINES else NOTE_MAX_LINES,
                     )
                     // 自绘光标：只有「光标处在这一版里」时才画（选择一段文字时系统本来也不画光标）。
                     if (selfCaret && focused && value.selection.collapsed) {
@@ -292,8 +320,14 @@ internal fun AnnotationSheet(
  */
 internal const val SHEET_SLIDE_MS = 200
 
+/** 输入框的最小高度（一行）：批注与正文修改同高，内容多行时才一起长高。 */
+private val NOTE_FIELD_MIN_HEIGHT = 34.dp
+
 /** 批注输入框最多显示几行（超出后字段内部滚动）。 */
 private const val NOTE_MAX_LINES = 4
+
+/** 正文修改输入框最多显示几行（跨段时每段一行，超出后字段内部滚动）。 */
+private const val TEXT_EDIT_MAX_LINES = 8
 
 /** 输入框正文与提示字共用的字面（两者行高必须一致，否则空框和有字时高度不同）。 */
 private val NoteTextStyle = TextStyle(fontSize = 14.sp, lineHeight = 20.sp)
@@ -344,4 +378,6 @@ internal fun rememberSheetReveal(visible: Boolean, imePx: Float, gateOnIme: Bool
         label = "annotationSheetReveal",
     ).value
 }
+
+
 

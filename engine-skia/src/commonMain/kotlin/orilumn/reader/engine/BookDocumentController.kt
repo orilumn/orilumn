@@ -3936,6 +3936,17 @@ private fun finishCanonicalBackground(
             notePageCountKnown(index, paramHash, table.totalPages)
             return
         }
+        // 磁盘表同样算「已排过」：开书时内存里只有落位章附近才绑表，远章一律没有内存表，
+        // 不查盘就会把整本书重新排一遍（762 章实测每趟 40–80 秒后台满负荷，表内容一字不变）。
+        // 只读 40 字节表头，判据与 `read` 同源（构建号 / 引擎几何 / 章号 / 参数指纹），
+        // 换参数、换构建、坏表被清之后自然不命中，该重排的仍然重排。
+        val diskPages = runCatching {
+            cacheStore()?.readPageCount("book_$bookId", index, paramHash)
+        }.getOrNull()
+        if (diskPages != null) {
+            notePageCountKnown(index, paramHash, diskPages)
+            return
+        }
         // R7: bodies parse lazily — an unparsed chapter has no markup to shape. Parse here.
         // (Parse itself carries no checkpoint: a task cancelled mid-parse drains it, then the
         // suspend checkpoint below aborts before shaping a whole chapter for nothing.)

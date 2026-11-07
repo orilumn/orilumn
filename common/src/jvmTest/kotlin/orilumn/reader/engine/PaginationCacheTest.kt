@@ -168,6 +168,46 @@ class PaginationCacheTest {
     }
 
     @Test
+    fun `readPageCount reads only the header and honours the same gates as read`() {
+        // 全书累计页码要按「章 → 页数」扫全书的表头。判据必须与 read 同源（构建号/引擎指纹/
+        // 章号/参数指纹），否则会把别人的表当成自己的页数，加出一个错的总页数。
+        val s = store()
+        val ns = "book_hdr"
+        val f = s.file(ns, 7, 0x1234567890abL)
+        s.write(sampleTable(), f)
+        assertEquals(3, s.readPageCount(ns, 7, 0x1234567890abL))
+        assertNull("章号对不上 = 别人的表", s.readPageCount(ns, 8, 0x1234567890abL))
+        assertNull("参数指纹对不上 = 旧版式的表", s.readPageCount(ns, 7, 0x1L))
+        assertNull("没有文件", s.readPageCount(ns, 0, 1L))
+
+        // 另一构建写的表：页数读不到；该构建自己读得到。
+        val oldStore = PaginationCacheStore(FileSystem.SYSTEM, tmp.root.absolutePath.toPath(), 17)
+        val ns2 = "book_hdr_old"
+        oldStore.write(
+            ChapterPaginationTable.fromSlices(1, 5L, sampleTable().pages.map {
+                PageSlice(it.charStart, it.charEnd, 0, 0, kind = PageSlice.Kind.TEXT, blockStart = it.blockStart, blockEndExclusive = it.blockEndExclusive)
+            }, 9, 340),
+            oldStore.file(ns2, 1, 5L),
+        )
+        assertNull(s.readPageCount(ns2, 1, 5L))
+        assertEquals(3, oldStore.readPageCount(ns2, 1, 5L))
+    }
+
+    @Test
+    fun `readPageCount does not rewrite the file so LRU recency is untouched`() {
+        // read() 会重写整份文件来刷新「最后使用」时间；表头扫描绝不能在后台把全书每章都标成刚用过。
+        val s = store()
+        val ns = "book_hdr_lru"
+        val f = s.file(ns, 3, 42L)
+        s.write(ChapterPaginationTable.fromSlices(3, 42L, sampleTable().pages.map {
+            PageSlice(it.charStart, it.charEnd, 0, 0, kind = PageSlice.Kind.TEXT, blockStart = it.blockStart, blockEndExclusive = it.blockEndExclusive)
+        }, 9, 340), f)
+        java.io.File(f.toString()).setLastModified(1_234_000L)
+        assertEquals(3, s.readPageCount(ns, 3, 42L))
+        assertEquals(1_234_000L, FileSystem.SYSTEM.metadataOrNull(f)?.lastModifiedAtMillis)
+    }
+
+    @Test
     fun `store clearBook removes all entries`() {
         val s = store()
         val ns = "book_11"

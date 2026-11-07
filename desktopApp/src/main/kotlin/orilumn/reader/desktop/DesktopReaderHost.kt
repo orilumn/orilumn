@@ -11,6 +11,7 @@ import orilumn.reader.engine.BookDocumentController
 import orilumn.reader.engine.BoxChapterLayouter
 import orilumn.reader.engine.ImageLoader
 import orilumn.reader.engine.LinkTarget
+import orilumn.reader.engine.paging.BookPageNumber
 import orilumn.reader.engine.skia.DecodedImage
 import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.engine.skia.ImageCodec
@@ -21,6 +22,9 @@ import orilumn.reader.ui.reader.ReaderHost
 import orilumn.reader.ui.reader.ReaderPos
 import orilumn.reader.ui.imageBitmapOf
 import orilumn.reader.ui.reader.flattenTocItems
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.ImageBitmap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -69,6 +73,11 @@ class DesktopReaderHost(
 
     /** zip 常驻打开（控制器解析/取字节/字体全走它；[close] 时关闭）。 */
     private val reader: EpubResourceReader = ZipEpubResourceReader(bookFile)
+
+    /** 全书页码数据的代际（Compose 快照状态；后台线程写、组合期读，快照系统负责可见性与重组）。
+     *  声明在 controller 之前：controller 构造时就挂回调（回调体运行在之后，顺序只是让依赖关系直白）。 */
+    private var pageNumberTick by mutableIntStateOf(0)
+
     private val controller = BookDocumentController(
         reader = reader,
         layouter = BoxChapterLayouter(imageLoader = ImageLoader(reader)),
@@ -86,6 +95,8 @@ class DesktopReaderHost(
         // CoreText 经系统集合自行回退）；书内字体见 `onBookFonts`。
         it.onDemandFonts = { demand -> topUpSkiaFonts(demand) }
         it.onBookFonts = { fonts -> syncBookFonts(fonts) }
+        // 全书页码代际（见 [pageNumberRevision]）：引擎后台补齐章页数时推一拍。
+        it.onPageCountsChanged = { pageNumberTick++ }
     }
 
     private var opened = false
@@ -114,6 +125,11 @@ class DesktopReaderHost(
     }
 
     override fun pageCount(chapter: Int): Int = controller.unitAt(chapter)?.pageSlices?.size ?: 0
+
+    override fun bookPageNumber(pos: ReaderPos): BookPageNumber? =
+        controller.bookPageNumber(pos.chapter, pos.slice)
+
+    override fun pageNumberRevision(): Int = pageNumberTick
 
     override fun tocIndex(chapter: Int): Int {
         flatToc().indexOfFirst { it.index == chapter }.takeIf { it >= 0 }?.let { return it }

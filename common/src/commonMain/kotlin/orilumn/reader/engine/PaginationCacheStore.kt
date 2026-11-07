@@ -57,6 +57,26 @@ class PaginationCacheStore(
         return table
     }
 
+    /**
+     * 只读表头拿本章页数（全书累计页码求和用，见 [PaginationCacheCodec.decodeHeaderPageCount]）。
+     *
+     * 与 [read] 的两处刻意差别：
+     *  - **只读 40 字节**，不整份解码：一次全书扫描要碰几十上百个文件，页记录（每页 16 字节 ×
+     *    几百页）对「数页数」是纯浪费；
+     *  - **不 LRU 重写**：`read` 的重写是为了刷新「最后使用」时间，但同参数扫描是后台搭车，
+     *    不该把全书每章的表都标成「刚用过」而挤掉读者真正在用的那几章。
+     *
+     * 命中判据与 [read] 完全同源（当前构建 + 当前参数 + 该章号确有表），只是不落日志。
+     */
+    fun readPageCount(bookId: String, chapterIndex: Int, paramHash: Long): Int? {
+        val f = file(bookId, chapterIndex, paramHash)
+        if (fs.metadataOrNull(f)?.isRegularFile != true) return null
+        val bytes = runCatching {
+            fs.read(f) { readByteArray(PaginationCacheCodec.HEADER_BYTES.toLong()) }
+        }.getOrNull() ?: return null
+        return PaginationCacheCodec.decodeHeaderPageCount(bytes, appVersion, chapterIndex, paramHash)
+    }
+
     /** Writes a pagination table to disk. Overwrites any existing file at that location, then
      *  LRU-trims the book's table directory so orphaned parameter-hash files stay bounded. */
     fun write(table: ChapterPaginationTable, f: Path) {

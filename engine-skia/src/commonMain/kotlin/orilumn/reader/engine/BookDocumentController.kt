@@ -19,7 +19,9 @@ import orilumn.reader.engine.html.HtmlTreeConverter
 import orilumn.reader.engine.html.MarkupElement
 import orilumn.reader.engine.html.ParsedChapter
 import orilumn.reader.engine.paging.BookLayout
+import orilumn.reader.engine.paging.BookPageNumber
 import orilumn.reader.engine.paging.PageSlice
+import orilumn.reader.engine.paging.bookPageNumberOf
 import orilumn.reader.engine.paging.Paginator
 import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.engine.skia.PagedLayout
@@ -1439,6 +1441,8 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                 val layout = product.layout
                 val slices = product.slices
                 unit.bindFull(layout, slices)
+                // 空章（纯封面页/全空白）不落表，但页数是已知的 0 —— 全书页码要靠它凑齐。
+                if (slices.isEmpty()) noteZeroPageChapter(unit.chapterIndex, paramHash)
 
                 // Persist pagination table (with block ranges backfilled by BoxChapterLayouter).
                 if (cache != null && cacheFile != null && slices.isNotEmpty() && slices[0].blockStart >= 0) {
@@ -1454,6 +1458,8 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                         .onFailure { Logger.e(logTag, "cache write FAIL ch=${unit.chapterIndex} ${it.message}") }
                     unit.bindPaginationTable(table)
                     Logger.w(logTag, "layout ${ctx(unit)} DISK-WRITE pages=${table.totalPages} totalChars=$totalChars")
+                    // 全书页码：本章页数从「未知」变已知（可能凑齐全书），记进快照并推一拍。
+                    notePageCountKnown(unit.chapterIndex, paramHash, table.totalPages)
                 }
 
                 val totalH = if (layout.lineCount > 0) layout.getLineBottom(layout.lineCount - 1) else 0
@@ -3399,6 +3405,8 @@ private fun finishCanonicalBackground(
             .onFailure { Logger.e(logTag, "canonical WRITE FAIL ch=${unit.chapterIndex} ${it.message}") }
         unit.bindPaginationTable(table)
         Logger.w(logTag, "layout ${ctx(unit)} CANONICAL-DISK-WRITE pages=${table.totalPages} totalChars=$totalChars")
+        // 全书页码：本章正典页数落定（临时会话期间也能凭它给号），记进快照并推一拍。
+        notePageCountKnown(unit.chapterIndex, paramHash, table.totalPages)
         // 不在单章写入后清空全书缓存；全局失效由专门时机处理
     }
     // 发布序（[InProgressPagination.canonicalLayout] 的规则）：先 slices 后 layout——layout 非空即
@@ -4012,6 +4020,8 @@ private fun finishCanonicalBackground(
             Logger.w(logTag, "layout ${ctx(unit)} FULL-PRELIM-STALE-DROP ch=${unit.chapterIndex}")
             return
         }
+        // 空章（纯封面页/全空白）不落表，但页数是已知的 0 —— 全书页码要靠它凑齐。
+        if (slices.isEmpty()) noteZeroPageChapter(unit.chapterIndex, paramHash)
         val cache = cacheStore()
         val cacheFile = if (cache != null && bookId >= 0) {
             cache.file("book_$bookId", unit.chapterIndex, paramHash)
@@ -4028,6 +4038,8 @@ private fun finishCanonicalBackground(
                 .onFailure { Logger.e(logTag, "full prelim WRITE FAIL ch=${unit.chapterIndex} ${it.message}") }
             unit.bindPaginationTable(table)
             Logger.w(logTag, "layout ${ctx(unit)} FULL-PRELIM pages=${table.totalPages} blocks=${slices.maxOf { it.blockEndExclusive }}")
+            // 全书页码：B2 每扫完一章就多一个已知页数，全书总数随之逼近「齐」。
+            notePageCountKnown(unit.chapterIndex, paramHash, table.totalPages)
             // 不在每章写入后清空全书缓存：B2 是逐章后台计算，整本清空会破坏其他章尚未写入的新表
             // 只在参数变化等全局失效时机清理（如 finalizeRelayoutAll 后由调用方决定，或通过 sweepStale/trim 处理）
         }
@@ -4135,6 +4147,188 @@ private fun finishCanonicalBackground(
         if (total <= 0) return 0.0
         val c = chapter.coerceIn(0, total - 1)
         return ((c + 1.0) / total).coerceIn(0.0, 1.0)
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 全书累计页码（用户层「显示页码」）
+    //
+    // 排版层只回答「各章分页事实」，不认这个开关（开关是 ReaderSettings 的纯 UI 项）。
+    // 本节的三个口径：
+    //  1) 页数只取**正典分页**（当前参数下的章表 / 整章全量版式），没有就说不认识，**绝不估**；
+    //  2) 全书总页数 = 各章页数之和，缺一章就整体置 null（半本书的和不是「共几页」）；
+    //  3) 本页页号只表达「这页字在正典里的位置」：临时表会话期间若正典表已在，按本页首字符
+    //     落在表里哪一页给号；**不承诺临时页与正典页界一一对应**（两表互斥，禁止对比）。
+    // ─────────────────────────────────────────────────────────────────
+
+    /** 各章页数快照（章号 → 页数），只装**磁盘上**当前参数下的那部分；还活在内存里的章以
+     *  [ChapterUnit.paginationTable] / 整章页切片为准（见 [chapterPageCountAt]）。后台扫描整体
+     *  换引用，读者线程只读，无需锁。 */
+    @Volatile
+    private var diskPageCounts: Map<Int, Int> = emptyMap()
+
+    /** [diskPageCounts] 的写锁：扫描收尾整体换引用，与逐章落表时的补记互斥（读侧不加锁）。 */
+    private val pageCountsLock = SyncLock()
+
+    /** [diskPageCounts] 属于哪个参数指纹；指纹一变（调参/旋转/字体集合变更）整份作废重扫。 */
+    @Volatile
+    private var diskPageCountsHash: Long = Long.MIN_VALUE
+    private var diskPageCountsJob: Job? = null
+
+    /**
+     * 本参数下**排完是 0 页**的章（纯封面页 / 只有 svg / 全空白）。
+     *
+     * 这类章永远不会落表，若按「没有表 = 未知」处理，全书总页数就永远凑不齐——一个空章能把
+     * 整本书的页码全废掉。0 页是**已知事实**，不是未知。写少读多：后台排版线程记录，组合期
+     * 逐章读，故用「整体换引用」的不可变集合，读侧不加锁。
+     */
+    @Volatile
+    private var zeroPageChapters: Set<Int> = emptySet()
+
+    /** [zeroPageChapters] 属于哪个参数指纹（指纹变了，上一轮的「0 页」结论不再作数）。 */
+    @Volatile
+    private var zeroPageHash: Long = Long.MIN_VALUE
+
+    /**
+     * 「全书页码所需数据变了」的信号：后台扫描补齐章页数、或某一章的正典表刚落（B1/B2/小章
+     * 前台全排）时触发。
+     *
+     * 页码是**组合期**读的（同步、廉价），读者坐在第一页不动时没有任何重组由头——没有这一拍，
+     * 页码要等下一次翻页才冒出来。宿主接这个信号推一次重组（跨线程安全，由宿主自行切线程）。
+     */
+    var onPageCountsChanged: (() -> Unit)? = null
+
+    /**
+     * 全书累计页码（用户层「第 n 页 / 共 m 页」的唯一数据源）。
+     *
+     * **同步、廉价**（O(章数) 加和 + 两次查表，不读盘）：只在阅读面组合期调用。磁盘扫描由
+     * [ensureDiskPageCounts] 在后台搭车，本方法不等它。
+     *
+     * @return null = 本页暂时给不出页码（本章还没有当前参数下的正典分页 / 本页不在本章表里 /
+     *   本章之前的某一章页数未知）。调用方应当**留白**，不要拿估算值凑。
+     */
+    fun bookPageNumber(chapter: Int, slice: PageSlice): BookPageNumber? {
+        val hash = currentParamHash()
+        ensureDiskPageCounts(hash)
+        val unit = unitAt(chapter) ?: return null
+        val idx = shownPageIndex(unit, slice, hash)
+        if (idx < 0) return null
+        return bookPageNumberOf(chapter, idx, chapters.size) { i -> chapterPageCountAt(i, hash) }
+    }
+
+    /** 屏幕上这一页在本章**正典分页**里的下标；给不出返回 -1。 */
+    private fun shownPageIndex(unit: ChapterUnit, slice: PageSlice, hash: Long): Int {
+        // 无临时会话时 `pageSlices` 就是本章正典分页的整表（磁盘表全量切片 / 整章全量版式），
+        // 按页首字符定位最贴近屏幕上这张页。临时会话期间它是临时表，不能用来数正典页号。
+        if (unit.inProgress == null && unit.pageSlices.isNotEmpty()) {
+            val i = unit.pageSlices.indexOfFirst { it.charStart == slice.charStart }
+            if (i >= 0) return i
+        }
+        val table = unit.paginationTable?.takeIf { it.paramHash == hash && it.pages.isNotEmpty() }
+            ?: return -1
+        val i = pageIndexForChar(table.pages, slice.charStart)
+        return if (table.pages.getOrNull(i)?.charStart == slice.charStart) i else -1
+    }
+
+    /** 第 [chapter] 章在当前参数下的页数；未知返回 null（全书页码不估）。 */
+    private fun chapterPageCountAt(chapter: Int, hash: Long): Int? {
+        val unit = unitAt(chapter)
+        if (unit != null) {
+            unit.paginationTable?.takeIf { it.paramHash == hash }?.let { return it.totalPages }
+            // 整章全量版式（小章前台全排、大章磁盘命中窗口）= 正典分页，可当页数（含空章 0 页）；
+            // 临时会话期间 `pageSlices` 是临时表，不能数。
+            if (unit.inProgress == null && unit.layout != null) return unit.pageSlices.size
+        }
+        if (zeroPageHash == hash && chapter in zeroPageChapters) return 0
+        return diskPageCounts[chapter]
+    }
+
+    /** 记下「本章排完是 0 页」：0 是已知页数，见 [zeroPageChapters]。 */
+    private fun noteZeroPageChapter(chapter: Int, hash: Long) {
+        val added = pageCountsLock.withLock {
+            if (zeroPageHash != hash) {
+                zeroPageHash = hash
+                zeroPageChapters = emptySet()
+            }
+            if (chapter in zeroPageChapters) {
+                false
+            } else {
+                zeroPageChapters = zeroPageChapters + chapter
+                true
+            }
+        }
+        if (added) notifyPageCountsChanged()
+    }
+
+    /**
+     * 确保「各章页数」快照属于 [hash]：换指纹即重扫。先按内存里已有的表给一份初值（当拍即可
+     * 显示），再把磁盘上缺的章补齐——每章只读 40 字节表头，整书几十到几百个小读，放后台。
+     *
+     * 幂等：同一指纹只扫一次；扫描期间参数又变（读者拖字号）则结果整体作废（不写回）。
+     */
+    private fun ensureDiskPageCounts(hash: Long) {
+        if (diskPageCountsHash == hash) return
+        diskPageCountsHash = hash
+        val mem = HashMap<Int, Int>()
+        for (i in chapters.indices) {
+            val t = chapters[i].paginationTable
+            if (t != null && t.paramHash == hash) mem[i] = t.totalPages
+        }
+        pageCountsLock.withLock {
+            if (zeroPageHash != hash) {
+                zeroPageHash = hash
+                zeroPageChapters = emptySet()
+            }
+            diskPageCounts = mem
+        }
+        val store = cacheStore() ?: return
+        if (bookId < 0 || chapters.isEmpty()) return
+        val n = chapters.size
+        val bookKey = "book_$bookId"
+        diskPageCountsJob?.cancel()
+        diskPageCountsJob = bgScope.launch {
+            val t0 = platformNowMs()
+            val found = HashMap(mem)
+            for (i in 0 until n) {
+                if (found.containsKey(i)) continue
+                val pages = runCatching { store.readPageCount(bookKey, i, hash) }.getOrNull() ?: continue
+                found[i] = pages
+            }
+            if (diskPageCountsHash != hash) return@launch
+            // 扫描期间又有章落表（[notePageCountKnown]）→ 并进去，别把新结论盖回「未知」。
+            val merged = pageCountsLock.withLock { diskPageCounts + found }
+            if (diskPageCountsHash != hash) return@launch
+            diskPageCounts = merged
+            Logger.w(logTag, "PAGE-COUNT hash=$hash chapters=$n known=${merged.size} t=${platformNowMs() - t0}ms")
+            if (merged.size > mem.size) onPageCountsChanged?.invoke()
+        }
+    }
+
+    /**
+     * 「本章正典页数落定」——把 [pages] 补记进页数快照，并按需推一拍给阅读面。
+     *
+     * 为什么不能只推信号：磁盘扫描（[ensureDiskPageCounts]）**每个参数指纹只扫一次**，之后
+     * B2/B1 才落盘的表它不会再读；而 B2 落完会驱逐远章，[chapterPageCountAt] 的「内存表」
+     * 快路径也随之消失。只推信号的话，全书总数会永远停在「未知」——表明明都在盘上。
+     *
+     * 快照还没建立（读者没开页码、或这一版还没扫过盘）时什么都不做：让扫描从盘上一次性补齐，
+     * 别先造一份只有几章的基线（那会让扫描跳过其余章）。
+     */
+    private fun notePageCountKnown(chapter: Int, hash: Long, pages: Int) {
+        if (hash != currentParamHash()) return
+        val changed = pageCountsLock.withLock {
+            if (diskPageCountsHash != hash || diskPageCounts[chapter] == pages) {
+                false
+            } else {
+                diskPageCounts = diskPageCounts + (chapter to pages)
+                true
+            }
+        }
+        if (changed) notifyPageCountsChanged()
+    }
+
+    /** 章表新落 → 全书页码可能从「缺章」变成「齐了」，推一拍给宿主（见 [onPageCountsChanged]）。 */
+    private fun notifyPageCountsChanged() {
+        onPageCountsChanged?.invoke()
     }
 
     /**

@@ -79,6 +79,43 @@ object PaginationCacheCodec {
     fun filename(chapterIndex: Int, paramHash: Long): String =
         "${chapterIndex}_${paramHash}.bin"
 
+    /** 表头固定字节数（见上面的文件格式：magic/version/layoutVersion/appVersion/chapterIndex 五个
+     *  Int + paramHash 一个 Long + totalBlocks/totalChars/pageCount 三个 Int = 40）。 */
+    const val HEADER_BYTES = 40
+
+    /**
+     * 只解表头取页数（全书累计页码求和用）：命中条件与 [decode] **同序同判**（magic、schema、
+     * 引擎几何指纹、构建号、章号、参数指纹），只额外少读页记录本身。
+     *
+     * 刻意**不落日志**：整书扫描一次要读几十上百个文件，「当前参数下这一章还没表」是常态而非
+     * 异常，逐条打日志只会把真正的 miss（[decode]）淹掉。
+     *
+     * @param bytes 文件前 [HEADER_BYTES] 字节（多传无妨，只读表头）。
+     * @return 页数（≥ 0）；任何一项校验不过或字节不足返回 null。
+     */
+    fun decodeHeaderPageCount(
+        bytes: ByteArray,
+        expectedAppVersion: Int,
+        expectedChapterIndex: Int,
+        expectedParamHash: Long,
+    ): Int? {
+        if (bytes.size < HEADER_BYTES) return null
+        return try {
+            val buf = Buffer().write(bytes)
+            if (buf.readInt() != MAGIC) return null
+            if (buf.readInt() != VERSION) return null
+            if (buf.readInt() != LAYOUT_VERSION) return null
+            if (buf.readInt() != expectedAppVersion) return null
+            if (buf.readInt() != expectedChapterIndex) return null
+            if (buf.readLong() != expectedParamHash) return null
+            buf.readInt() // totalBlocks
+            buf.readInt() // totalChars
+            buf.readInt().takeIf { it >= 0 }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     /** Serializes [table] to its on-disk bytes, stamped with [appVersion] (the platform's
      *  monotonic build number). Tables stamped with a different build are rejected on read. */
     fun encode(table: ChapterPaginationTable, appVersion: Int): ByteArray {

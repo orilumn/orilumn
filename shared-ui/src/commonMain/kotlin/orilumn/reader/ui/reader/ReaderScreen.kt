@@ -58,6 +58,7 @@ import orilumn.reader.data.annotation.AnnotationKind
 import orilumn.reader.data.annotation.AnnotationLineStyle
 import orilumn.reader.data.font.FontEntry
 import orilumn.reader.data.settings.ReaderSettings
+import orilumn.reader.engine.paging.BookPageNumber
 import orilumn.reader.engine.skia.LineWindowDrawer
 import orilumn.reader.engine.text.TypographicProfile
 import orilumn.reader.io.Logger
@@ -2592,6 +2593,29 @@ fun ReaderScreen(
                     )
                 }
             }
+            // 全书页码（用户层「显示页码」）：引擎在章分页未就绪时给 null → 页脚留白。
+            // 代际 `pageNumberRevision()` 是宿主里的 Compose 快照状态：后台把各章页数补齐、
+            // 或本章正典表刚落时它一变，读者静置不翻页也能让页码自己出现（不读就订阅不到）。
+            val pageNoRev = currentHost.pageNumberRevision()
+            val fromPageNumber = remember(fromPos, currentHost, pageNoRev, settings.pageNum, pageContent) {
+                if (settings.pageNum && pageContent != null) currentHost.bookPageNumber(fromPos) else null
+            }
+            val targetPageNumber = remember(targetPosNow, currentHost, pageNoRev, settings.pageNum, targetContent) {
+                if (settings.pageNum && targetContent != null) {
+                    targetPosNow?.let { currentHost.bookPageNumber(it) }
+                } else {
+                    null
+                }
+            }
+            val PageNumberFun: @Composable (BookPageNumber?) -> Unit = { number ->
+                PageNumberLabel(
+                    number = number,
+                    contentBottomPx = contentBottom,
+                    pageHeightPx = pxHeight,
+                    bodyFontPx = profile.bodyPx,
+                    inkColor = Color(profile.fgColor),
+                )
+            }
             // 卡片让位：整层（页画布 + 选区 + 旁注 + 放大镜）一起上推，顶部超出屏幕的部分直接截断。
             // 放在同一个 `graphicsLayer` 里 ⇒ 子层之间的相对位置不变，不可能出现「页动了字没动」。
             Box(modifier = Modifier.fillMaxSize().graphicsLayer { translationY = -shiftNow }) {
@@ -2610,6 +2634,8 @@ fun ReaderScreen(
                             PageCanvasFun(targetContent)
                             // 旁注和目标页同一个槽 ⇒ 同一个平移量，跟着一起滑进来。
                             NoteBubblesFun(targetNoteBubbles)
+                            // 页码也跟页走：目标页的号随页滑进来，落地即接上。
+                            PageNumberFun(targetPageNumber)
                         }
                     }
                     else -> null
@@ -2621,6 +2647,7 @@ fun ReaderScreen(
                         PageCanvasFun(pageContent)
                         // 旁注和当前页同一个槽 ⇒ 一起滑出去，不会先「原地消失」再动画。
                         NoteBubblesFun(noteBubbles)
+                        PageNumberFun(fromPageNumber)
                     }
                 },
             )

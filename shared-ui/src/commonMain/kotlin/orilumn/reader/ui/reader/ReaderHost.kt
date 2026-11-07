@@ -4,6 +4,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.data.epub.TocItem
 import orilumn.reader.engine.LinkTarget
+import orilumn.reader.engine.paging.BookPageNumber
 import orilumn.reader.engine.paging.PageSlice
 import orilumn.reader.engine.skia.DecodedImage
 import orilumn.reader.engine.skia.DrawLine
@@ -124,6 +125,44 @@ interface ReaderHost {
 
     /** 当前定位的整书比例 0..1（进度条/百分比）。 */
     fun pageProgress(pos: ReaderPos): Double
+
+    /**
+     * 进度条某个位置（0..1）对应的全书页码（1 起）；页数不全返回 null（底栏退回百分比）。
+     *
+     * 与 [pageAtFraction] 的按页落位**同一换算**：拖动时标签上写的页，就是松手后落到的页。
+     * **同步、廉价**（引擎侧是 O(章数) 加和），拖动中每帧调用。
+     *
+     * 默认 null = 宿主尚未实现（桌面等壳按可缺省处理），底栏就一直显示百分比。
+     */
+    fun bookPageNumberAtFraction(fraction: Double): Int? = null
+
+    /**
+     * 全书累计页码（用户层「显示页码」开关的消费者）：本页在全书中的页码（1 起）+ 全书总页数。
+     *
+     * **同步、廉价**（引擎侧是 O(章数) 加和）：阅读面在组合期直接调。null = 这一页暂时给不出
+     * 页码（本章还没有当前参数下的正典分页表 / 全书章页数还没补齐），此时页脚留白。
+     *
+     * 默认 null = 宿主尚未实现（桌面等壳按可缺省处理），阅读面就当没有页码。
+     */
+    fun bookPageNumber(pos: ReaderPos): BookPageNumber? = null
+
+    /**
+     * 各章首页在全书的页码（章号下标 → 1 起的页码；0 = 暂不可算），目录面板用。
+     *
+     * **同步、廉价**；与 [bookPageNumber] 同一份快照，同一口径：能算的都给，遇到第一个未知章就停
+     * （后面的章依赖它，不估）。换版式参数后整份作废，这里自然从空表重新长出来。
+     *
+     * 默认空数组 = 宿主尚未实现（目录不显示页码）。
+     */
+    fun chapterStartPages(): IntArray = IntArray(0)
+
+    /**
+     * 全书页码数据的代际。宿主用 **Compose 快照状态**实现它，阅读面在组合期读——后台把各章页数
+     * 补齐（或本章正典表刚落）时它一变，页码才能在**读者静置不翻页**时也自己出现/更新。
+     *
+     * 默认 0 = 不变：页码只在别的由头触发重组时重取（不实现也不算错，只是更新慢一拍）。
+     */
+    fun pageNumberRevision(): Int = 0
 
     /** 当前页可视窗口的行绘制指令（章节绝对 Y，见上），null/空 = 暂不可画。 */
     fun pageLines(pos: ReaderPos): List<DrawLine>?

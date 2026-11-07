@@ -493,8 +493,9 @@ regression suites (`:common:jvmTest`, `:app:testDebugUnitTest`).
   `WinUnit.{Fwd,Bwd,Pair}` torn-pair atomicity; window-outside = discard-and-restart; exposed two latent
   bugs (`locateTempPosition` (blockStart,charStart) key; `stepTempPrefill` neighbor liveness/trim).
   Probe T7 `WindowSlideDiscardProbeTest`.
-- **P14 cache lifecycle + LRU** — `PaginationCacheStore` trims each book's directory to 32
-  least-recently-used tables; `paramHash` completeness verified (useOriginalStyle + userCssHash slot).
+- **P14 cache lifecycle** — `PaginationCacheStore` keeps every chapter's table (the early 32/256-file
+  LRU cap is retired: files are tens of bytes, and the cap cut long books' page-number prefix);
+  `paramHash` completeness verified (useOriginalStyle + userCssHash slot).
 - **P12 scan ordering** — B2 follows reading direction × distance (`orderRemainingChapters`).
 - **P4/P5 preflight** — neighbor chapters parse + light-prepare off the flip thread; open-book first
   screen becomes a promote. Probes `CrossChapterPreflightProbeTest`/`OpenBookPreflightProbeTest`.

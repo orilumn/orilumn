@@ -19,7 +19,13 @@ import orilumn.reader.engine.html.HtmlTreeConverter
 import orilumn.reader.engine.html.MarkupElement
 import orilumn.reader.engine.html.ParsedChapter
 import orilumn.reader.engine.paging.BookLayout
+import orilumn.reader.engine.paging.BookPageNumber
 import orilumn.reader.engine.paging.PageSlice
+import orilumn.reader.engine.paging.bookPageAtFraction
+import orilumn.reader.engine.paging.bookPageNumberOf
+import orilumn.reader.engine.paging.bookTotalPagesOf
+import orilumn.reader.engine.paging.chapterPageAtBookPage
+import orilumn.reader.engine.paging.chapterStartPagesOf
 import orilumn.reader.engine.paging.Paginator
 import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.engine.skia.PagedLayout
@@ -384,6 +390,9 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         // 否则控制器关掉之后它还会补派整章全量。清表即让所有在途看门狗下一轮自行退场。
         b1ResumeLock.withLock { b1ResumeTokens.clear() }
         rollingLaneLock.withLock { rollingLanes.clear() }
+        // 页数快照的防抖落盘可能还挂着：关书前补一次，别把这一轮学到的章页数丢掉。
+        countsWriteJob?.cancel()
+        if (diskPageCountsHash != Long.MIN_VALUE) writePageCountsNow(diskPageCountsHash)
         // 键域取消要先于 bgScope.cancel()：共享池的任务体不在 bgScope 上，不受后者影响。
         if (sharedScheduler != null) scheduler.cancelMatchingPrefixes(CONTROLLER_KEY_PREFIXES)
         bgScope.cancel()
@@ -1439,6 +1448,8 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                 val layout = product.layout
                 val slices = product.slices
                 unit.bindFull(layout, slices)
+                // 空章（纯封面页/全空白）不落表，但页数是已知的 0 —— 全书页码要靠它凑齐。
+                if (slices.isEmpty()) noteZeroPageChapter(unit.chapterIndex, paramHash)
 
                 // Persist pagination table (with block ranges backfilled by BoxChapterLayouter).
                 if (cache != null && cacheFile != null && slices.isNotEmpty() && slices[0].blockStart >= 0) {
@@ -1454,6 +1465,8 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                         .onFailure { Logger.e(logTag, "cache write FAIL ch=${unit.chapterIndex} ${it.message}") }
                     unit.bindPaginationTable(table)
                     Logger.w(logTag, "layout ${ctx(unit)} DISK-WRITE pages=${table.totalPages} totalChars=$totalChars")
+                    // 全书页码：本章页数从「未知」变已知（可能凑齐全书），记进快照并推一拍。
+                    notePageCountKnown(unit.chapterIndex, paramHash, table.totalPages)
                 }
 
                 val totalH = if (layout.lineCount > 0) layout.getLineBottom(layout.lineCount - 1) else 0
@@ -1485,6 +1498,23 @@ private val SMALL_CHAPTER_BLOCKS = 120
  * （翻到下一章前通常还有几百 ms）——1.2 s 是两者的折中。
  */
 private val B2_DISPATCH_QUIET_MS = 1_200L
+
+/**
+ * 整书 B2 一趟最多补派几轮缺章（见 [BookDocumentController.requestWholeBookRelayout]）。
+ *
+ * 缺章的唯一成因是「整章任务被前台抢占后没人再派」：正常一趟扫完不该有缺章，所以第 2 轮起
+ * 只在异常路径上跑。3 轮足够覆盖「补派途中又被翻页砍掉」的连续抢占，又不至于在真正的 bug
+ * （每轮都失败）上无限打转。
+ */
+private val B2_RETRY_ROUNDS = 3
+
+/**
+ * 每轮补派前的冷却（ms）。
+ *
+ * 整章任务被一次跳章/翻页整批清空时（真机一次 jump 清掉 526 章），立刻重派只会马上再被清一次，
+ * 白烧 CPU 还和前台抢锁。等读者停手、池子真空这么久之后再补，才补得上。
+ */
+private val B2_RETRY_COOLDOWN_MS = 1_500L
 
 /**
  * 当前页快照的写盘防抖（ms）：落位后静置这么久才写，读者连翻只写最后那一页。
@@ -1817,10 +1847,19 @@ private fun armB1ResumeLoop(chapterIndex: Int, epoch: Long, paramHash: Long, tok
     scheduler.submitWhenIdle {
         withContext(Dispatchers.Default) {
             if (!b1ResumeAlive(chapterIndex, token)) return@withContext
-            if (layoutEpoch != epoch) return@withContext
-            if (canonicalDeferred) return@withContext
+            if (layoutEpoch != epoch) {
+                Logger.w(logTag, "b1 resume skip ch=$chapterIndex reason=epoch $epoch->$layoutEpoch")
+                return@withContext
+            }
+            if (canonicalDeferred) {
+                Logger.w(logTag, "b1 resume skip ch=$chapterIndex reason=deferred")
+                return@withContext
+            }
             // 开书闸门仍关着 ⇒ 出闸时 [releaseOpenGate] 自己会派 B1 并重新布防，此处不得抢跑。
-            if (openAnchorGate) return@withContext
+            if (openAnchorGate) {
+                Logger.w(logTag, "b1 resume skip ch=$chapterIndex reason=open-gate")
+                return@withContext
+            }
             val unit = unitAt(chapterIndex) ?: return@withContext
             if (unit.paginationTable?.paramHash == paramHash) return@withContext // 已落盘：收工
             if (scheduler.pendingPriority("b1:$chapterIndex") != null) {
@@ -1829,7 +1868,11 @@ private fun armB1ResumeLoop(chapterIndex: Int, epoch: Long, paramHash: Long, tok
                 return@withContext
             }
             // 临时会话已结束（读者离章/重锚）：不再越俎代庖，章外整章属第 7 档 B2 的活。
-            val ip = unit.inProgress ?: return@withContext
+            val ip = unit.inProgress
+            if (ip == null) {
+                Logger.w(logTag, "b1 resume skip ch=$chapterIndex reason=no-temp")
+                return@withContext
+            }
             val bc = layouter as? BoxChapterLayouter ?: return@withContext
             Logger.w(logTag, "b1 resume on idle ch=$chapterIndex (preempted before persist)")
             dispatchB1(unit, ip, epoch, bc, ip.contentW, ip.contentH, paramHash, tempHeadDistancePages(ip))
@@ -3357,6 +3400,15 @@ private suspend fun crossChapterLanding(fromChapter: Int, direction: Int): Pair<
         return LayoutParamKey.fromProfile(profile, cw, chh).hash()
     }
 
+    /**
+     * 当前版式指纹（与磁盘分页表的 `paramHash` 同源，**含版心尺寸**）。
+     *
+     * 设置面板门控用：边距、字号、行距……任何一项变了都算换版面，必须整书重来。
+     * 以前门控只看「不带宽高的 `LayoutParamKey`」，改边距时指纹不变 → 关面板不整书重排，
+     * 旧表被清、新表没人排，页面页码（与目录页码）就从此停在半截。
+     */
+    fun layoutParamHash(): Long = currentParamHash()
+
 /**
  * P2.6 状态表落点决议（替代 P1f 的计算式状态视图）：`ChapterStatus`/`PageState` 视图对已删——
  * 它们零消费者，只是三处派发守卫各自判据的第四份拷贝。三处守卫即状态表：
@@ -3399,6 +3451,8 @@ private fun finishCanonicalBackground(
             .onFailure { Logger.e(logTag, "canonical WRITE FAIL ch=${unit.chapterIndex} ${it.message}") }
         unit.bindPaginationTable(table)
         Logger.w(logTag, "layout ${ctx(unit)} CANONICAL-DISK-WRITE pages=${table.totalPages} totalChars=$totalChars")
+        // 全书页码：本章正典页数落定（临时会话期间也能凭它给号），记进快照并推一拍。
+        notePageCountKnown(unit.chapterIndex, paramHash, table.totalPages)
         // 不在单章写入后清空全书缓存；全局失效由专门时机处理
     }
     // 发布序（[InProgressPagination.canonicalLayout] 的规则）：先 slices 后 layout——layout 非空即
@@ -3406,6 +3460,12 @@ private fun finishCanonicalBackground(
     if (unit.inProgress === ip) {
         ip.canonicalSlices = slices
         ip.canonicalLayout = layout
+        // 全书页码：本章正典页数/页号从「未知」变「已知」了（上面落表被跳过时磁盘上并没有表，
+        // 读侧用的就是这份切片）。页数必须同时记进快照——这一章若只活在这份会话切片里，
+        // 离开章节后就再也数不到它，全书页码前缀会永远缺一块。
+        if (slices.isNotEmpty()) notePageCountKnown(unit.chapterIndex, paramHash, slices.size)
+        // 推一拍让页脚与目录立刻出数，不必等下一次翻页。
+        notifyPageCountsChanged()
     } else {
         // 会话已换代（读者离开本章又回来）：ip 对象已作废，副本无处可读——交接点的权威是 unit 上的
         // 磁盘表（上面的 bindPaginationTable 已落），[finalizeTempOnLeave]/[resolveHeadArrival] 直接读它。
@@ -3742,8 +3802,45 @@ private fun finishCanonicalBackground(
             // P1a: pass-completion visibility (the producer rewrite dropped the old done-log).
             // Best-effort: a newer dispatch superseding this pass silences it.
             scheduler.awaitIdle()
+            // 补派轮次：整章任务在首个挂起点被前台抢占（`cancelLowerThan` / `cancelForRaster`
+            // 会把 B2 任务从 running 里 cancel）时，同一 epoch 不会再派它 —— 这一章就永远拿不到
+            // 页数（762 章实测每趟稳定缺 1 章，先后是 ch426、ch348），全书页码前缀从此断掉。
+            //
+            // 判据只看**页数是否已知**（[chapterPageCountAt]，含页数清单），不是「内存里有没有表」：
+            // 表和页数是两件事——表会被 [evictFarChapters] 丢掉引用、也可能被清缓存删掉，
+            // 拿表当判据会把「已经算过、只是表不在了」的章当成缺章，一趟补派就变成重跑整本书。
+            // 冷却 [B2_RETRY_COOLDOWN_MS]：整批任务被一次跳章/翻页清空时，立刻重派只会马上再被
+            // 清一次（真机 13:19:40 一次 jump 清掉 526 章）；等读者停手、池子真空之后再补。
+            // 有界：[B2_RETRY_ROUNDS] 轮，之后放手，交给下一次派发（开书 / 调参 / B1 看门狗）。
+            var round = 0
+            while (layoutEpoch == epoch && !canonicalDeferred) {
+                val missingNow = b2MissingPageCounts(current, paramHash)
+                if (missingNow.isEmpty()) break
+                if (round >= B2_RETRY_ROUNDS) {
+                    Logger.w(logTag, "whole-book B2 give up epoch=$epoch rounds=$round missing=${missingNow.size}")
+                    break
+                }
+                delay(B2_RETRY_COOLDOWN_MS)
+                if (layoutEpoch != epoch || canonicalDeferred) break
+                val missing = b2MissingPageCounts(current, paramHash).toHashSet()
+                if (missing.isEmpty()) break
+                // 仍按章距交错次序补派（离锚页近的先齐），不是按章号。
+                val rescan = order.filter { it in missing }
+                if (rescan.isEmpty()) break
+                round++
+                Logger.w(logTag, "whole-book B2 retry round=$round epoch=$epoch missing=${rescan.size} ch=${rescan.take(8)}…")
+                for (i in rescan) {
+                    scheduler.submit(TaskScheduler.Task(
+                        key = scanKey(i),
+                        priority = TaskScheduler.PRIO_B2_CHAPTER,
+                        block = { b2ChapterTask(i, bc, contentWidth, contentHeight, paramHash) },
+                    ))
+                    submitted++
+                }
+                scheduler.awaitIdle()
+            }
             if (layoutEpoch == epoch) {
-                Logger.w(logTag, "whole-book B2 pass drained epoch=$epoch submitted=$submitted")
+                Logger.w(logTag, "whole-book B2 pass drained epoch=$epoch submitted=$submitted rounds=$round")
                 logMemoryBreakdown("b2-drained")
             }
         }
@@ -3833,20 +3930,65 @@ private fun finishCanonicalBackground(
         if (u.inProgress != null) return // a live temp session owns that chapter
         // R7: the disk table itself is the done-registry — a fresh table means this chapter
         // already completed under these params; shaping it again is pure waste.
-        if (u.paginationTable?.paramHash == paramHash) return
+        //
+        // 但仍要把页数**记进快照**：这张表可能是别的路径绑上来的（prewarm / 上一次控制器留下的
+        // unit），它的文件也可能早被清缓存删掉了。不记就等于给全书页码前缀留一个永久缺口
+        // ——真机见过整整一章（762 章里的一章）因此从快照里消失。
+        u.paginationTable?.takeIf { it.paramHash == paramHash }?.let { table ->
+            notePageCountKnown(index, paramHash, table.totalPages)
+            return
+        }
+        // 磁盘表同样算「已排过」：开书时内存里只有落位章附近才绑表，远章一律没有内存表，
+        // 不查盘就会把整本书重新排一遍（762 章实测每趟 40–80 秒后台满负荷，表内容一字不变）。
+        // 只读 40 字节表头，判据与 `read` 同源（构建号 / 引擎几何 / 章号 / 参数指纹），
+        // 换参数、换构建、坏表被清之后自然不命中，该重排的仍然重排。
+        val diskPages = runCatching {
+            cacheStore()?.readPageCount("book_$bookId", index, paramHash)
+        }.getOrNull()
+        if (diskPages != null) {
+            notePageCountKnown(index, paramHash, diskPages)
+            return
+        }
         // R7: bodies parse lazily — an unparsed chapter has no markup to shape. Parse here.
         // (Parse itself carries no checkpoint: a task cancelled mid-parse drains it, then the
         // suspend checkpoint below aborts before shaping a whole chapter for nothing.)
         if (u.markup == null) ensureMarkup(index)
         currentCoroutineContext().ensureActive()
         val ctx = currentCoroutineContext()
-        runCatching { fullLayoutAndPersist(u, bc, contentW, contentH, paramHash) { ctx.ensureActive() } }
-            .onFailure { e ->
-                // P7: a between-blocks cancel is a timely abandon, not a FAIL.
-                if (e !is CancellationException) Logger.e(logTag, "whole-book ch=${u.chapterIndex} FAIL ${e.message}")
-            }
+        try {
+            fullLayoutAndPersist(u, bc, contentW, contentH, paramHash) { ctx.ensureActive() }
+        } catch (e: CancellationException) {
+            // 取消**必须冒泡**，不能当成「本章已排完」吞掉：同 epoch 不会再派这一章（派发只按
+            // epoch 去重），吞掉就是给页数清单留一个永久缺口。留一行痕，方便对账补派轮次。
+            Logger.w(logTag, "whole-book ch=${u.chapterIndex} CANCEL (preempted before pass done)")
+            throw e
+        } catch (e: Exception) {
+            Logger.e(logTag, "whole-book ch=${u.chapterIndex} FAIL ${e.message}")
+        }
         // 本章落定（无论成败）后清扫远章：B2 自己就是堆积源，清扫频率与 B2 同步最省事。
         evictFarChapters()
+    }
+
+    /**
+     * B2 补派扫描：本参数下**页数还未知**的章，就是这一趟漏掉的章。
+     *
+     * 判据是 [chapterPageCountAt]（内存表 / 正典切片 / 页数清单任一已知即可），**不是**「内存里
+     * 有没有表」：表只是页数的来源之一，[evictFarChapters] 就会让表离开内存，
+     * 而页数仍留在清单里。拿表当判据会把「算过但表不在了」的章误判成缺章，补派立刻退化成
+     * 重跑整本书（真机一次补派 526 章）。
+     *
+     * 眼前章（B1 管）、活着的临时会话章（会话自己管）不抢。
+     */
+    private fun b2MissingPageCounts(current: Int, hash: Long): List<Int> {
+        val missing = ArrayList<Int>()
+        for (u in chapters) {
+            val i = u.chapterIndex
+            if (i == current) continue
+            if (u.inProgress != null) continue
+            if (chapterPageCountAt(i, hash) != null) continue
+            missing.add(i)
+        }
+        return missing
     }
 
     /** P4: once a flip lands in [chapter], pre-warm BOTH neighbors (the chapters a next out-of-bounds
@@ -4012,6 +4154,8 @@ private fun finishCanonicalBackground(
             Logger.w(logTag, "layout ${ctx(unit)} FULL-PRELIM-STALE-DROP ch=${unit.chapterIndex}")
             return
         }
+        // 空章（纯封面页/全空白）不落表，但页数是已知的 0 —— 全书页码要靠它凑齐。
+        if (slices.isEmpty()) noteZeroPageChapter(unit.chapterIndex, paramHash)
         val cache = cacheStore()
         val cacheFile = if (cache != null && bookId >= 0) {
             cache.file("book_$bookId", unit.chapterIndex, paramHash)
@@ -4028,6 +4172,8 @@ private fun finishCanonicalBackground(
                 .onFailure { Logger.e(logTag, "full prelim WRITE FAIL ch=${unit.chapterIndex} ${it.message}") }
             unit.bindPaginationTable(table)
             Logger.w(logTag, "layout ${ctx(unit)} FULL-PRELIM pages=${table.totalPages} blocks=${slices.maxOf { it.blockEndExclusive }}")
+            // 全书页码：B2 每扫完一章就多一个已知页数，全书总数随之逼近「齐」。
+            notePageCountKnown(unit.chapterIndex, paramHash, table.totalPages)
             // 不在每章写入后清空全书缓存：B2 是逐章后台计算，整本清空会破坏其他章尚未写入的新表
             // 只在参数变化等全局失效时机清理（如 finalizeRelayoutAll 后由调用方决定，或通过 sweepStale/trim 处理）
         }
@@ -4129,12 +4275,309 @@ private fun finishCanonicalBackground(
     }
 
     fun pageProgress(chapter: Int, slice: PageSlice): Double {
-        // After lazy loading the whole-book character total is unknown, so progress is converted
-        // with "equal chapter weights": chapter start 0, chapter end 1, whole book = cumulative/chapters.
         val total = chapters.size
         if (total <= 0) return 0.0
+        // 有完整页码时**按页**：滑块位置 = 本页在全书里的中点位置（页码 1 起）。
+        // 取中点而不是页首，和 [pageAtFraction] 的 floor 反查互为逆运算，且第一页不会正好
+        // 落在 0（滑块拉到 0 是「进封面」的既有语义，别让首页误触）。
+        val pn = bookPageNumber(chapter, slice)
+        val pages = pn?.total
+        if (pn != null && pages != null && pages > 0) {
+            return ((pn.index - 0.5) / pages).coerceIn(0.0, 1.0)
+        }
+        // 页码不完整（换参数刚清空 / 还在排）时退回**按章**等权：
+        // 章首 0、章末 1，全书 = 累计/章数。重排清空快照后这里自动回到这一支。
         val c = chapter.coerceIn(0, total - 1)
         return ((c + 1.0) / total).coerceIn(0.0, 1.0)
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 全书累计页码（用户层「显示页码」）
+    //
+    // 排版层只回答「各章分页事实」，不认这个开关（开关是 ReaderSettings 的纯 UI 项）。
+    // 本节的三个口径：
+    //  1) 页数只取**正典分页**（当前参数下的章表 / 整章全量版式），没有就说不认识，**绝不估**；
+    //  2) 全书总页数 = 各章页数之和，缺一章就整体置 null（半本书的和不是「共几页」）；
+    //  3) 本页页号只表达「这页字在正典里的位置」：临时表会话期间若正典表已在，按本页首字符
+    //     落在表里哪一页给号；**不承诺临时页与正典页界一一对应**（两表互斥，禁止对比）。
+    // ─────────────────────────────────────────────────────────────────
+
+    /** 各章页数快照（章号 → 页数），只装**磁盘上**当前参数下的那部分；还活在内存里的章以
+     *  [ChapterUnit.paginationTable] / 整章页切片为准（见 [chapterPageCountAt]）。后台扫描整体
+     *  换引用，读者线程只读，无需锁。 */
+    @Volatile
+    private var diskPageCounts: Map<Int, Int> = emptyMap()
+
+    /** [diskPageCounts] 的写锁：扫描收尾整体换引用，与逐章落表时的补记互斥（读侧不加锁）。 */
+    private val pageCountsLock = SyncLock()
+
+    /** [diskPageCounts] 属于哪个参数指纹；指纹一变（调参/旋转/字体集合变更）整份作废重扫。 */
+    @Volatile
+    private var diskPageCountsHash: Long = Long.MIN_VALUE
+    private var diskPageCountsJob: Job? = null
+
+    /** 页数快照的防抖落盘（见 [schedulePageCountsWrite]）。 */
+    private var countsWriteJob: Job? = null
+
+    /**
+     * 本参数下**排完是 0 页**的章（纯封面页 / 只有 svg / 全空白）。
+     *
+     * 这类章永远不会落表，若按「没有表 = 未知」处理，全书总页数就永远凑不齐——一个空章能把
+     * 整本书的页码全废掉。0 页是**已知事实**，不是未知。写少读多：后台排版线程记录，组合期
+     * 逐章读，故用「整体换引用」的不可变集合，读侧不加锁。
+     */
+    @Volatile
+    private var zeroPageChapters: Set<Int> = emptySet()
+
+    /** [zeroPageChapters] 属于哪个参数指纹（指纹变了，上一轮的「0 页」结论不再作数）。 */
+    @Volatile
+    private var zeroPageHash: Long = Long.MIN_VALUE
+
+    /**
+     * 「全书页码所需数据变了」的信号：后台扫描补齐章页数、或某一章的正典表刚落（B1/B2/小章
+     * 前台全排）时触发。
+     *
+     * 页码是**组合期**读的（同步、廉价），读者坐在第一页不动时没有任何重组由头——没有这一拍，
+     * 页码要等下一次翻页才冒出来。宿主接这个信号推一次重组（跨线程安全，由宿主自行切线程）。
+     */
+    var onPageCountsChanged: (() -> Unit)? = null
+
+    /**
+     * 全书累计页码（用户层「第 n 页 / 共 m 页」的唯一数据源）。
+     *
+     * **同步、廉价**（O(章数) 加和 + 两次查表，不读盘）：只在阅读面组合期调用。磁盘扫描由
+     * [ensureDiskPageCounts] 在后台搭车，本方法不等它。
+     *
+     * @return null = 本页暂时给不出页码（本章还没有当前参数下的正典分页 / 本页不在本章表里 /
+     *   本章之前的某一章页数未知）。调用方应当**留白**，不要拿估算值凑。
+     */
+    fun bookPageNumber(chapter: Int, slice: PageSlice): BookPageNumber? {
+        val hash = currentParamHash()
+        ensureDiskPageCounts(hash)
+        val unit = unitAt(chapter) ?: return null
+        val idx = shownPageIndex(unit, slice, hash)
+        if (idx < 0) return null
+        return bookPageNumberOf(chapter, idx, chapters.size) { i -> chapterPageCountAt(i, hash) }
+    }
+
+    /**
+     * 各章首页在全书的页码（章号 → 1 起；0 = 还不可算），目录面板用。
+     *
+     * 与 [bookPageNumber] 同一份页数快照、同一条口径：**能算的都给，遇到第一个未知章就停**
+     * （它后面的章依赖它，不估）。换版式参数后快照按指纹整体作废，这里自然从空表重新长出来。
+     */
+    fun chapterStartPages(): IntArray {
+        val hash = currentParamHash()
+        ensureDiskPageCounts(hash)
+        return chapterStartPagesOf(chapters.size) { i -> chapterPageCountAt(i, hash) }
+    }
+
+    /** 全书总页数；有一章页数未知就 null（页脚暂不显示总数，留给后续决定）。 */
+    fun bookTotalPages(): Int? {
+        val hash = currentParamHash()
+        ensureDiskPageCounts(hash)
+        return bookTotalPagesOf(chapters.size) { i -> chapterPageCountAt(i, hash) }
+    }
+
+    /**
+     * 进度条某个位置（0..1）对应的全书页码（1 起）；页数不全返回 null（底栏退回百分比）。
+     *
+     * 与 [pageAtFraction] 的按页落位**同一换算**（[bookPageAtFraction]）：拖动时标签上写的页，
+     * 就是松手后落到的页。同步、廉价（O(章数) 加和），拖动中每帧调用。
+     */
+    fun bookPageNumberAtFraction(fraction: Double): Int? {
+        val total = bookTotalPages() ?: return null
+        return bookPageAtFraction(total, fraction)
+    }
+
+    /** 屏幕上这一页在本章**正典分页**里的下标；给不出返回 -1。 */
+    private fun shownPageIndex(unit: ChapterUnit, slice: PageSlice, hash: Long): Int {
+        // 无临时会话时 `pageSlices` 就是本章正典分页的整表（磁盘表全量切片 / 整章全量版式），
+        // 按页首字符定位最贴近屏幕上这张页。临时会话期间它是临时表，不能用来数正典页号。
+        if (unit.inProgress == null && unit.pageSlices.isNotEmpty()) {
+            val i = unit.pageSlices.indexOfFirst { it.charStart == slice.charStart }
+            if (i >= 0) return i
+        }
+        // 临时会话期间：后台正典整章可能已经算完并发布到会话上（`canonicalSlices`）。它就本章正典
+        // 分页本身，可用来回答「这段字落在正典第几页」——只认同参数的会话；这是同一张正典表的
+        // 定位，不是拿临时页跟正典页对比（两表互斥，禁止对比）。
+        val ip = unit.inProgress?.takeIf { it.paramHash == hash }
+        if (ip != null) {
+            val canon = ip.canonicalSlices
+            if (canon.isNotEmpty()) {
+                val i = canon.indexOfLast { it.charStart <= slice.charStart }
+                if (i >= 0 && slice.charStart < canon[i].charEnd) return i
+            }
+        }
+        val table = unit.paginationTable?.takeIf { it.paramHash == hash && it.pages.isNotEmpty() }
+            ?: return -1
+        // 「本页首字符落在正典第几页」：落在页中（临时页界与正典页界不同）也给该页号，
+        // 不给会算成整段留白。与文档口径一致（临时会话期间的页号 = 这段字在正典分页里的位置）。
+        return pageIndexForChar(table.pages, slice.charStart)
+    }
+
+    /** 第 [chapter] 章在当前参数下的页数；未知返回 null（全书页码不估）。 */
+    private fun chapterPageCountAt(chapter: Int, hash: Long): Int? {
+        val unit = unitAt(chapter)
+        if (unit != null) {
+            unit.paginationTable?.takeIf { it.paramHash == hash }?.let { return it.totalPages }
+            // 整章全量版式（小章前台全排、大章磁盘命中窗口）= 正典分页，可当页数（含空章 0 页）；
+            // 临时会话期间 `pageSlices` 是临时表，不能数。
+            if (unit.inProgress == null && unit.layout != null) return unit.pageSlices.size
+            // 临时会话期间：后台正典整章算完后会把切片发布到会话上（落表被跳过时磁盘上没有表，
+            // 这份切片就是本章唯一一份正典分页）。只认同参数的会话。
+            val ip = unit.inProgress
+            if (ip != null && ip.paramHash == hash && ip.canonicalSlices.isNotEmpty()) {
+                return ip.canonicalSlices.size
+            }
+        }
+        if (zeroPageHash == hash && chapter in zeroPageChapters) return 0
+        return diskPageCounts[chapter]
+    }
+
+    /**
+     * 页数快照的落盘（整份覆盖）。快照里同时带上「排完是 0 页」的章：空章永远不落表，
+     * 不记进清单的话，重开之后它又变回未知，前缀照样断在它身上。
+     */
+    private fun writePageCountsNow(hash: Long, merged: Map<Int, Int>? = null) {
+        val store = cacheStore() ?: return
+        if (bookId < 0) return
+        if (hash != diskPageCountsHash) return
+        val base = merged ?: diskPageCounts
+        val snapshot = pageCountsLock.withLock {
+            if (zeroPageHash != hash) {
+                base
+            } else {
+                val m = base.toMutableMap()
+                for (c in zeroPageChapters) m[c] = 0
+                m
+            }
+        }
+        if (snapshot.isEmpty()) return
+        store.writePageCounts("book_$bookId", hash, snapshot)
+    }
+
+    /**
+     * 防抖落盘：整书 B2 一趟会连推几百次页数，逐次写盘纯属浪费；停手 700ms 后整份覆盖一次即可。
+     * 进程被强杀最多丢最后一次增量——下次开书由表头扫描补齐，不会错，只是多花一点时间。
+     */
+    private fun schedulePageCountsWrite(hash: Long) {
+        if (cacheStore() == null || bookId < 0 || diskPageCountsHash != hash) return
+        // 已在队里就不重复排：那一趟落盘时取的是当时的整份快照，天然带上期间的新增量。
+        // （每 700ms 最多写一次：B2 一趟几百次更新也只落几次盘。）
+        if (countsWriteJob?.isActive == true) return
+        countsWriteJob = bgScope.launch {
+            delay(700)
+            writePageCountsNow(hash)
+        }
+    }
+
+    /** 记下「本章排完是 0 页」：0 是已知页数，见 [zeroPageChapters]。 */
+    private fun noteZeroPageChapter(chapter: Int, hash: Long) {
+        val added = pageCountsLock.withLock {
+            if (zeroPageHash != hash) {
+                zeroPageHash = hash
+                zeroPageChapters = emptySet()
+            }
+            if (chapter in zeroPageChapters) {
+                false
+            } else {
+                zeroPageChapters = zeroPageChapters + chapter
+                true
+            }
+        }
+        if (added) {
+            schedulePageCountsWrite(hash)
+            notifyPageCountsChanged()
+        }
+    }
+
+    /**
+     * 确保「各章页数」快照属于 [hash]：换指纹即重扫。先按内存里已有的表给一份初值（当拍即可
+     * 显示），再把磁盘上缺的章补齐——每章只读 40 字节表头，整书几十到几百个小读，放后台。
+     *
+     * 幂等：同一指纹只扫一次；扫描期间参数又变（读者拖字号）则结果整体作废（不写回）。
+     */
+    private fun ensureDiskPageCounts(hash: Long) {
+        if (diskPageCountsHash == hash) return
+        diskPageCountsHash = hash
+        val mem = HashMap<Int, Int>()
+        for (i in chapters.indices) {
+            val t = chapters[i].paginationTable
+            if (t != null && t.paramHash == hash) mem[i] = t.totalPages
+        }
+        pageCountsLock.withLock {
+            if (zeroPageHash != hash) {
+                zeroPageHash = hash
+                zeroPageChapters = emptySet()
+            }
+            diskPageCounts = mem
+        }
+        val store = cacheStore() ?: return
+        if (bookId < 0 || chapters.isEmpty()) return
+        val n = chapters.size
+        val bookKey = "book_$bookId"
+        diskPageCountsJob?.cancel()
+        diskPageCountsJob = bgScope.launch {
+            val t0 = platformNowMs()
+            val found = HashMap(mem)
+            // 先吃「上一轮同参数下记下的页数清单」（`counts_<hash>.idx`）。为什么必须靠它：
+            // 扫表要逐章开文件读表头（七百多章 = 七百多次 IO），而表文件还会因清缓存、
+            // 坏文件被删掉。页数是同参数下确定不变的小事实，清单在，开书立刻就有全书页码。
+            val stored = runCatching { store.readPageCounts(bookKey, hash) }.getOrNull()
+            if (stored != null) {
+                for ((chapter, pages) in stored) if (chapter in 0 until n) found[chapter] = pages
+            }
+            if (diskPageCountsHash != hash) return@launch
+            // 清单已覆盖全书 ⇒ 不必再逐章读表头（大书那一趟是秒级的小读扫描）。
+            if (found.size < n) {
+                for (i in 0 until n) {
+                    if (found.containsKey(i)) continue
+                    val pages = runCatching { store.readPageCount(bookKey, i, hash) }.getOrNull() ?: continue
+                    found[i] = pages
+                }
+            }
+            if (diskPageCountsHash != hash) return@launch
+            // 扫描期间又有章落表（[notePageCountKnown]）→ 并进去，别把新结论盖回「未知」。
+            val merged = pageCountsLock.withLock { diskPageCounts + found }
+            if (diskPageCountsHash != hash) return@launch
+            diskPageCounts = merged
+            Logger.w(logTag, "PAGE-COUNT hash=$hash chapters=$n known=${merged.size} stored=${stored?.size ?: 0} t=${platformNowMs() - t0}ms")
+            // 这一趟学到的结论顺手落成清单：下次开书只读一次盘就有全书页数，不必逐章读表头。
+            if (merged.size > (stored?.size ?: 0)) writePageCountsNow(hash, merged)
+            if (merged.size > mem.size) onPageCountsChanged?.invoke()
+        }
+    }
+
+    /**
+     * 「本章正典页数落定」——把 [pages] 补记进页数快照，并按需推一拍给阅读面。
+     *
+     * 为什么不能只推信号：磁盘扫描（[ensureDiskPageCounts]）**每个参数指纹只扫一次**，之后
+     * B2/B1 才落盘的表它不会再读；而 B2 落完会驱逐远章，[chapterPageCountAt] 的「内存表」
+     * 快路径也随之消失。只推信号的话，全书总数会永远停在「未知」——表明明都在盘上。
+     *
+     * 快照还没建立（读者没开页码、或这一版还没扫过盘）时什么都不做：让扫描从盘上一次性补齐，
+     * 别先造一份只有几章的基线（那会让扫描跳过其余章）。
+     */
+    private fun notePageCountKnown(chapter: Int, hash: Long, pages: Int) {
+        if (hash != currentParamHash()) return
+        val changed = pageCountsLock.withLock {
+            if (diskPageCountsHash != hash || diskPageCounts[chapter] == pages) {
+                false
+            } else {
+                diskPageCounts = diskPageCounts + (chapter to pages)
+                true
+            }
+        }
+        if (changed) {
+            schedulePageCountsWrite(hash)
+            notifyPageCountsChanged()
+        }
+    }
+
+    /** 章表新落 → 全书页码可能从「缺章」变成「齐了」，推一拍给宿主（见 [onPageCountsChanged]）。 */
+    private fun notifyPageCountsChanged() {
+        onPageCountsChanged?.invoke()
     }
 
     /**
@@ -4291,15 +4734,44 @@ private fun finishCanonicalBackground(
     fun title(): String = book?.title.orEmpty()
 
     /**
-     * Locates the first page of the chapter at a given whole-book equal-weight progress (skips
-     * blank/opening chapters).
-     * @param fraction 0..1.
+     * 进度条落位，两种口径（与 [pageProgress] 互为逆运算）：
+     *  1. **有完整页码 ⇒ 按页**：0..1 先换成全书页下标（floor），反查章与章内页号，
+     *     再把该页的页首字符交给落位排版——手指停在哪一页就落在哪一页；
+     *  2. **页码不完整（换参数刚清空 / 整书还在排）⇒ 按章**：原有等权映射（章首 0、章末 1），
+     *     落在该章第一张有正文的页。
+     * @param fraction 0..1。
      */
     suspend fun pageAtFraction(fraction: Double): Pair<Int, PageSlice>? {
         clearFlipDir("seek")
         preemptForNavigation()
         val n = chapters.size
         if (n <= 0) return null
+        val hash = currentParamHash()
+        // 有完整页码（每一章都已知，含 0 页空章）才走按页；缺一章都不估，直接按章。
+        val totalPages = bookTotalPages()
+        if (totalPages != null && totalPages > 0) {
+            // 与 [bookPageNumberAtFraction]（底栏标签）同一换算：标签写第几页，松手就落第几页。
+            val targetPage = (bookPageAtFraction(totalPages, fraction) ?: 1) - 1
+            val hit = chapterPageAtBookPage(n, targetPage) { chapterPageCountAt(it, hash) }
+            if (hit != null) {
+                val (c, pageIdx) = hit
+                Logger.w(logTag, "seek map fraction=$fraction page=${targetPage + 1}/$totalPages ch=$c pageInCh=$pageIdx")
+                // 页首字符是落位排版的锚：有了它，磁盘命中路径只塑形这一页。
+                val targetChar = pageCharStart(c, pageIdx, hash)
+                val u = ensureChapterLayout(c, targetChar = targetChar ?: 0)
+                val p = u?.pageSlices?.getOrNull(pageIdx)?.takeIf { it.firstLine >= 0 }
+                    ?: u?.inProgress?.currentSlice
+                    ?: u?.firstPage()
+                if (p != null) {
+                    logJumpLanding("seek", c)
+                    // 落位成功后才驱逐，且按刚落的章保窗口（同下方按章路径）。
+                    evictFarChapters(keep = c)
+                    return c to p
+                }
+                Logger.w(logTag, "seek PAGE fallback to chapter: ch=$c page=$pageIdx no slice")
+            }
+        }
+        // 按章：等权映射（页码不全时的唯一口径）。
         val target = (fraction.coerceIn(0.0, 1.0) * n).toInt().coerceIn(0, n - 1)
         // 诊断常驻：手指值→目标章，W 级防 PGAP flood 吞行（D 级 seek start 已被吞过）。
         Logger.w(logTag, "seek map fraction=$fraction target=$target")
@@ -4331,6 +4803,25 @@ private fun finishCanonicalBackground(
         // 落位成功后才驱逐，且按刚落的章保窗口 —— active 还是旧值，按它清等于毒死刚落的章。
         evictFarChapters(keep = c)
         return c to p
+    }
+
+    /** 全书页码定位用：第 [chapter] 章第 [pageIdx] 页的章内首字符；拿不到回 null（调用方退章首）。 */
+    private fun pageCharStart(chapter: Int, pageIdx: Int, hash: Long): Int? {
+        val unit = unitAt(chapter)
+        if (unit != null) {
+            // 小章整章已排：切片本身就是正典分页。
+            if (unit.inProgress == null && unit.layout != null) {
+                unit.pageSlices.getOrNull(pageIdx)?.takeIf { it.firstLine >= 0 }?.let { return it.charStart }
+            }
+            unit.paginationTable?.takeIf { it.paramHash == hash }
+                ?.pages?.getOrNull(pageIdx)?.let { return it.charStart }
+        }
+        // 远章内存里没有表：读盘拿这一页的页首字符（几十到几百字节，落位前只读一次）。
+        val store = cacheStore() ?: return null
+        val table = runCatching { store.read(store.file("book_$bookId", chapter, hash)) }.getOrNull()
+            ?: return null
+        if (table.paramHash != hash) return null
+        return table.pages.getOrNull(pageIdx)?.charStart
     }
 
     /**

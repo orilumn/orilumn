@@ -5,10 +5,14 @@ import orilumn.reader.data.book.BookReadingState
 import orilumn.reader.data.book.BookRepository
 import orilumn.reader.data.epub.TocItem
 import orilumn.reader.engine.BookDocumentController
+import orilumn.reader.engine.paging.BookPageNumber
 import orilumn.reader.engine.skia.DecodedImage
 import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.engine.skia.ImageCodec
 import orilumn.reader.ui.imageBitmapOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.setValue
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -48,6 +52,16 @@ class TabletReaderHost(
     private var opened = false
     private var openedAtCover = true
 
+    /**
+     * 全书页码数据的代际（Compose 快照状态）：引擎在后台补齐各章页数、或某章正典表刚落时回调，
+     * 这里 +1 —— 阅读面在组合期读 [pageNumberRevision]，静置不翻页也能让页码自己出现。
+     */
+    private var pageNumberTick by mutableIntStateOf(0)
+
+    init {
+        controller.onPageCountsChanged = { pageNumberTick++ }
+    }
+
     // ---- ReaderHost ----
 
     /** R13: 停掉 controller 名下所有后台塑形（落盘不受影响，调用方保证先落盘）。 */
@@ -82,6 +96,13 @@ class TabletReaderHost(
     }
 
     override fun pageCount(chapter: Int): Int = controller.unitAt(chapter)?.pageSlices?.size ?: 0
+
+    override fun bookPageNumber(pos: ReaderPos): BookPageNumber? =
+        controller.bookPageNumber(pos.chapter, pos.slice)
+
+    override fun chapterStartPages(): IntArray = controller.chapterStartPages()
+
+    override fun pageNumberRevision(): Int = pageNumberTick
 
     override fun tocIndex(chapter: Int): Int =
         flatToc().indexOfFirst { it.index == chapter }.takeIf { it >= 0 } ?: chapter
@@ -155,6 +176,9 @@ class TabletReaderHost(
     }
 
     override fun pageProgress(pos: ReaderPos): Double = controller.pageProgress(pos.chapter, pos.slice)
+
+    override fun bookPageNumberAtFraction(fraction: Double): Int? =
+        controller.bookPageNumberAtFraction(fraction)
 
     /** 全书封面（书库 coverPath 原字节直解；无/失败回 null）。 */
     override suspend fun coverImage(): androidx.compose.ui.graphics.ImageBitmap? = withContext(Dispatchers.IO) {

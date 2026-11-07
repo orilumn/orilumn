@@ -67,17 +67,116 @@ object PaginationCacheCodec {
      */
     const val LAYOUT_VERSION = LayoutGeometryStamp.VALUE
 
-    /** Per-book cap on persisted table files. Old-parameter-hash tables are orphaned when the layout
-     *  key changes; version-stale orphans (older build) are swept by [PaginationCacheStore.sweepStale]
-     *  on book open, the rest are LRU-evicted here. Keep the most recently used and evict the rest
-     *  (each file ≤ ~32 KB ⇒ ≤ ~8 MB per book at the cap). R7 raised this from 32: a whole-book B2
-     *  pass must be able to record every chapter (the in-memory skip-fresh registry keys off these
-     *  files' presence), and 256 chapters covers virtually all books. */
-    const val MAX_TABLES_PER_BOOK = 256
-
     /** Filename convention: `<chapterIndex>_<paramHash>.bin`. */
     fun filename(chapterIndex: Int, paramHash: Long): String =
         "${chapterIndex}_${paramHash}.bin"
+
+    /**
+     * 全书各章页数快照的文件名：`counts_<paramHash>.idx`（与分页表同目录）。
+     *
+     * 为什么单独存一份「页数」而不是靠扫表：全书累计页码要的是**前面每一章**的页数，
+     * 扫表得逐章开文件读表头（七百多章 = 七百多次 IO，每次几十字节，实测补齐一次 1.2 s 起）；
+     * 记一份几十字节/章的清单，一次读几 KB（762 章 6.1 KB）就拿到全书页数。
+     *
+     * **失效口径与表完全相同**（见 [decodePageCounts]）：参数指纹 / 引擎几何指纹 / 构建号
+     * 任一不符即整份作废。所以「排版改了还拿旧页码」不会发生——清单不会比表活得更久。
+     * 单张表文件损坏/丢失不影响它，只是附带性质（同参数下页数是确定的事实），不是存它的理由。
+     */
+    fun countsFilename(paramHash: Long): String = "counts_$paramHash.idx"
+
+    /** 页数快照的 magic（与表文件的 MAGIC 故意不同：两者永不被彼此的解析器接受）。 */
+    private const val COUNTS_MAGIC = 0x43504E43 // "CPNC"
+
+    /** 页数快照表头字节数：magic/version/layoutVersion/appVersion 四个 Int + paramHash 一个 Long + count 一个 Int。 */
+    const val COUNTS_HEADER_BYTES = 28
+
+    /**
+     * 序列化整本「章号 → 页数」快照（含排完是 0 页的空章）。
+     *
+     * 布局：[magic][VERSION][LAYOUT_VERSION][appVersion][paramHash: Long][count][(chapter, pages) × count]。
+     * 校验口径与表文件**同序同判**：源码几何指纹 + 构建号 + 参数指纹任一不符即整份作废
+     * （宁可重扫一遍表头，也不拿旧结论凑页码）。0 页合法（`pages >= 0`）。
+     */
+    fun encodePageCounts(paramHash: Long, counts: Map<Int, Int>, appVersion: Int): ByteArray {
+        val buf = Buffer()
+        buf.writeInt(COUNTS_MAGIC)
+        buf.writeInt(VERSION)
+        buf.writeInt(LAYOUT_VERSION)
+        buf.writeInt(appVersion)
+        buf.writeLong(paramHash)
+        buf.writeInt(counts.size)
+        for ((chapter, pages) in counts) {
+            buf.writeInt(chapter)
+            buf.writeInt(pages)
+        }
+        return buf.readByteArray()
+    }
+
+    /** 解页数快照；任何校验不过（含截断）返回 null。刻意不落日志：扫不到的常态不该刷屏。 */
+    fun decodePageCounts(
+        bytes: ByteArray,
+        expectedAppVersion: Int,
+        expectedParamHash: Long,
+    ): Map<Int, Int>? {
+        if (bytes.size < COUNTS_HEADER_BYTES) return null
+        return try {
+            val buf = Buffer().write(bytes)
+            if (buf.readInt() != COUNTS_MAGIC) return null
+            if (buf.readInt() != VERSION) return null
+            if (buf.readInt() != LAYOUT_VERSION) return null
+            if (buf.readInt() != expectedAppVersion) return null
+            if (buf.readLong() != expectedParamHash) return null
+            val count = buf.readInt()
+            if (count < 0 || bytes.size.toLong() != COUNTS_HEADER_BYTES + count * 8L) return null
+            val out = LinkedHashMap<Int, Int>(count)
+            repeat(count) {
+                val chapter = buf.readInt()
+                val pages = buf.readInt()
+                if (chapter < 0 || pages < 0) return null
+                out[chapter] = pages
+            }
+            out
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** 表头固定字节数（见上面的文件格式：magic/version/layoutVersion/appVersion/chapterIndex 五个
+     *  Int + paramHash 一个 Long + totalBlocks/totalChars/pageCount 三个 Int = 40）。 */
+    const val HEADER_BYTES = 40
+
+    /**
+     * 只解表头取页数（全书累计页码求和用）：命中条件与 [decode] **同序同判**（magic、schema、
+     * 引擎几何指纹、构建号、章号、参数指纹），只额外少读页记录本身。
+     *
+     * 刻意**不落日志**：整书扫描一次要读几十上百个文件，「当前参数下这一章还没表」是常态而非
+     * 异常，逐条打日志只会把真正的 miss（[decode]）淹掉。
+     *
+     * @param bytes 文件前 [HEADER_BYTES] 字节（多传无妨，只读表头）。
+     * @return 页数（≥ 0）；任何一项校验不过或字节不足返回 null。
+     */
+    fun decodeHeaderPageCount(
+        bytes: ByteArray,
+        expectedAppVersion: Int,
+        expectedChapterIndex: Int,
+        expectedParamHash: Long,
+    ): Int? {
+        if (bytes.size < HEADER_BYTES) return null
+        return try {
+            val buf = Buffer().write(bytes)
+            if (buf.readInt() != MAGIC) return null
+            if (buf.readInt() != VERSION) return null
+            if (buf.readInt() != LAYOUT_VERSION) return null
+            if (buf.readInt() != expectedAppVersion) return null
+            if (buf.readInt() != expectedChapterIndex) return null
+            if (buf.readLong() != expectedParamHash) return null
+            buf.readInt() // totalBlocks
+            buf.readInt() // totalChars
+            buf.readInt().takeIf { it >= 0 }
+        } catch (_: Exception) {
+            null
+        }
+    }
 
     /** Serializes [table] to its on-disk bytes, stamped with [appVersion] (the platform's
      *  monotonic build number). Tables stamped with a different build are rejected on read. */

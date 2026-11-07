@@ -22,6 +22,8 @@ import orilumn.reader.engine.paging.BookLayout
 import orilumn.reader.engine.paging.BookPageNumber
 import orilumn.reader.engine.paging.PageSlice
 import orilumn.reader.engine.paging.bookPageNumberOf
+import orilumn.reader.engine.paging.bookTotalPagesOf
+import orilumn.reader.engine.paging.chapterStartPagesOf
 import orilumn.reader.engine.paging.Paginator
 import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.engine.skia.PagedLayout
@@ -1823,10 +1825,19 @@ private fun armB1ResumeLoop(chapterIndex: Int, epoch: Long, paramHash: Long, tok
     scheduler.submitWhenIdle {
         withContext(Dispatchers.Default) {
             if (!b1ResumeAlive(chapterIndex, token)) return@withContext
-            if (layoutEpoch != epoch) return@withContext
-            if (canonicalDeferred) return@withContext
+            if (layoutEpoch != epoch) {
+                Logger.w(logTag, "b1 resume skip ch=$chapterIndex reason=epoch $epoch->$layoutEpoch")
+                return@withContext
+            }
+            if (canonicalDeferred) {
+                Logger.w(logTag, "b1 resume skip ch=$chapterIndex reason=deferred")
+                return@withContext
+            }
             // 开书闸门仍关着 ⇒ 出闸时 [releaseOpenGate] 自己会派 B1 并重新布防，此处不得抢跑。
-            if (openAnchorGate) return@withContext
+            if (openAnchorGate) {
+                Logger.w(logTag, "b1 resume skip ch=$chapterIndex reason=open-gate")
+                return@withContext
+            }
             val unit = unitAt(chapterIndex) ?: return@withContext
             if (unit.paginationTable?.paramHash == paramHash) return@withContext // 已落盘：收工
             if (scheduler.pendingPriority("b1:$chapterIndex") != null) {
@@ -1835,7 +1846,11 @@ private fun armB1ResumeLoop(chapterIndex: Int, epoch: Long, paramHash: Long, tok
                 return@withContext
             }
             // 临时会话已结束（读者离章/重锚）：不再越俎代庖，章外整章属第 7 档 B2 的活。
-            val ip = unit.inProgress ?: return@withContext
+            val ip = unit.inProgress
+            if (ip == null) {
+                Logger.w(logTag, "b1 resume skip ch=$chapterIndex reason=no-temp")
+                return@withContext
+            }
             val bc = layouter as? BoxChapterLayouter ?: return@withContext
             Logger.w(logTag, "b1 resume on idle ch=$chapterIndex (preempted before persist)")
             dispatchB1(unit, ip, epoch, bc, ip.contentW, ip.contentH, paramHash, tempHeadDistancePages(ip))
@@ -3363,6 +3378,15 @@ private suspend fun crossChapterLanding(fromChapter: Int, direction: Int): Pair<
         return LayoutParamKey.fromProfile(profile, cw, chh).hash()
     }
 
+    /**
+     * 当前版式指纹（与磁盘分页表的 `paramHash` 同源，**含版心尺寸**）。
+     *
+     * 设置面板门控用：边距、字号、行距……任何一项变了都算换版面，必须整书重来。
+     * 以前门控只看「不带宽高的 `LayoutParamKey`」，改边距时指纹不变 → 关面板不整书重排，
+     * 旧表被清、新表没人排，页面页码（与目录页码）就从此停在半截。
+     */
+    fun layoutParamHash(): Long = currentParamHash()
+
 /**
  * P2.6 状态表落点决议（替代 P1f 的计算式状态视图）：`ChapterStatus`/`PageState` 视图对已删——
  * 它们零消费者，只是三处派发守卫各自判据的第四份拷贝。三处守卫即状态表：
@@ -3414,6 +3438,9 @@ private fun finishCanonicalBackground(
     if (unit.inProgress === ip) {
         ip.canonicalSlices = slices
         ip.canonicalLayout = layout
+        // 全书页码：本章正典页数/页号从「未知」变「已知」了（上面落表被跳过时磁盘上并没有表，
+        // 读侧用的就是这份切片），推一拍让页脚与目录立刻出数，不必等下一次翻页。
+        notifyPageCountsChanged()
     } else {
         // 会话已换代（读者离开本章又回来）：ip 对象已作废，副本无处可读——交接点的权威是 unit 上的
         // 磁盘表（上面的 bindPaginationTable 已落），[finalizeTempOnLeave]/[resolveHeadArrival] 直接读它。
@@ -4215,6 +4242,25 @@ private fun finishCanonicalBackground(
         return bookPageNumberOf(chapter, idx, chapters.size) { i -> chapterPageCountAt(i, hash) }
     }
 
+    /**
+     * 各章首页在全书的页码（章号 → 1 起；0 = 还不可算），目录面板用。
+     *
+     * 与 [bookPageNumber] 同一份页数快照、同一条口径：**能算的都给，遇到第一个未知章就停**
+     * （它后面的章依赖它，不估）。换版式参数后快照按指纹整体作废，这里自然从空表重新长出来。
+     */
+    fun chapterStartPages(): IntArray {
+        val hash = currentParamHash()
+        ensureDiskPageCounts(hash)
+        return chapterStartPagesOf(chapters.size) { i -> chapterPageCountAt(i, hash) }
+    }
+
+    /** 全书总页数；有一章页数未知就 null（页脚暂不显示总数，留给后续决定）。 */
+    fun bookTotalPages(): Int? {
+        val hash = currentParamHash()
+        ensureDiskPageCounts(hash)
+        return bookTotalPagesOf(chapters.size) { i -> chapterPageCountAt(i, hash) }
+    }
+
     /** 屏幕上这一页在本章**正典分页**里的下标；给不出返回 -1。 */
     private fun shownPageIndex(unit: ChapterUnit, slice: PageSlice, hash: Long): Int {
         // 无临时会话时 `pageSlices` 就是本章正典分页的整表（磁盘表全量切片 / 整章全量版式），
@@ -4223,10 +4269,22 @@ private fun finishCanonicalBackground(
             val i = unit.pageSlices.indexOfFirst { it.charStart == slice.charStart }
             if (i >= 0) return i
         }
+        // 临时会话期间：后台正典整章可能已经算完并发布到会话上（`canonicalSlices`）。它就本章正典
+        // 分页本身，可用来回答「这段字落在正典第几页」——只认同参数的会话；这是同一张正典表的
+        // 定位，不是拿临时页跟正典页对比（两表互斥，禁止对比）。
+        val ip = unit.inProgress?.takeIf { it.paramHash == hash }
+        if (ip != null) {
+            val canon = ip.canonicalSlices
+            if (canon.isNotEmpty()) {
+                val i = canon.indexOfLast { it.charStart <= slice.charStart }
+                if (i >= 0 && slice.charStart < canon[i].charEnd) return i
+            }
+        }
         val table = unit.paginationTable?.takeIf { it.paramHash == hash && it.pages.isNotEmpty() }
             ?: return -1
-        val i = pageIndexForChar(table.pages, slice.charStart)
-        return if (table.pages.getOrNull(i)?.charStart == slice.charStart) i else -1
+        // 「本页首字符落在正典第几页」：落在页中（临时页界与正典页界不同）也给该页号，
+        // 不给会算成整段留白。与文档口径一致（临时会话期间的页号 = 这段字在正典分页里的位置）。
+        return pageIndexForChar(table.pages, slice.charStart)
     }
 
     /** 第 [chapter] 章在当前参数下的页数；未知返回 null（全书页码不估）。 */
@@ -4237,6 +4295,12 @@ private fun finishCanonicalBackground(
             // 整章全量版式（小章前台全排、大章磁盘命中窗口）= 正典分页，可当页数（含空章 0 页）；
             // 临时会话期间 `pageSlices` 是临时表，不能数。
             if (unit.inProgress == null && unit.layout != null) return unit.pageSlices.size
+            // 临时会话期间：后台正典整章算完后会把切片发布到会话上（落表被跳过时磁盘上没有表，
+            // 这份切片就是本章唯一一份正典分页）。只认同参数的会话。
+            val ip = unit.inProgress
+            if (ip != null && ip.paramHash == hash && ip.canonicalSlices.isNotEmpty()) {
+                return ip.canonicalSlices.size
+            }
         }
         if (zeroPageHash == hash && chapter in zeroPageChapters) return 0
         return diskPageCounts[chapter]

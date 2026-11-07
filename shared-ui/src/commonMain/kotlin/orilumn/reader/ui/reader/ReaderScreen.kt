@@ -2614,6 +2614,8 @@ fun ReaderScreen(
                     pageHeightPx = pxHeight,
                     bodyFontPx = profile.bodyPx,
                     inkColor = Color(profile.fgColor),
+                    // 右下角：右沿对齐正文右沿（页宽 - 版心右沿），不贴屏幕边。
+                    endInsetPx = (pxWidth - contentRight).coerceAtLeast(0f),
                 )
             }
             // 卡片让位：整层（页画布 + 选区 + 旁注 + 放大镜）一起上推，顶部超出屏幕的部分直接截断。

@@ -54,11 +54,24 @@ fun ReaderTocBody(
     currentFragments: Set<String> = emptySet(),
     onSelect: (TocItem) -> Unit,
     onDismiss: () -> Unit,
+    /**
+     * 各章首页的全书页码（章号 → 1 起；0/缺 = 暂不可算）。目录右侧的页码列，**能算的才显示**：
+     * 第 0 章排完就出第 0 章，前两章排完就出前两章……
+     *
+     * 默认空表 = 不显示页码（宿主未接这份数据）。
+     */
+    chapterStartPages: () -> IntArray = { IntArray(0) },
+    /** 页数数据代际：磁盘表逐章补齐时它会变，目录开着也能看着页码一个个填上（默认不变）。 */
+    pageNumberRevision: () -> Int = { 0 },
 ) {
     val p = paletteFor(scheme)
     var collapsed by remember { mutableStateOf(setOf<Int>()) }
 
     val rows = remember(toc) { flattenToc(toc) }
+    // 目录页码（用户层）：随「页数代际」重取一次。引擎只回答「算得出来的那些章」，
+    // 这里不做任何估算；还没轮到的章留白。
+    val pageRev = pageNumberRevision()
+    val chapterStarts = remember(rows, pageRev) { chapterStartPages() }
     fun isVisible(rowIndex: Int): Boolean {
         var a = rows[rowIndex].parentIndex
         while (a >= 0) {
@@ -136,12 +149,22 @@ fun ReaderTocBody(
                 items(rows.size, key = { i -> i }) { rowIndex ->
                     if (!isVisible(rowIndex)) return@items
                     val row = rows[rowIndex]
+                    // 页码只标在「这一章的第一行」：同章的子标题共享章首页码，重复标一列相同的数
+                    // 没有信息量，还容易让读者以为那是子标题的页码。
+                    val firstRowOfChapter = rowIndex == 0 ||
+                        rows[rowIndex - 1].item.index != row.item.index
+                    val pageNo = if (firstRowOfChapter) {
+                        chapterStarts.getOrNull(row.item.index ?: -1) ?: 0
+                    } else {
+                        0
+                    }
                     TocRow(
                         // 当前项 = 打开时定位到的那一行（章内优先当页子标题，
                         // 无命中回退章首——比逐行 fragment 比对覆盖更全）。
                         row = row,
                         current = rowIndex == targetRow,
                         palette = p,
+                        pageNumber = pageNo,
                         hasChildren = row.item.children.isNotEmpty(),
                         expanded = row.idx !in collapsed,
                         onToggle = {
@@ -243,6 +266,7 @@ private fun TocRow(
     row: TocRowData,
     current: Boolean,
     palette: Palette,
+    pageNumber: Int,
     hasChildren: Boolean,
     expanded: Boolean,
     onToggle: () -> Unit,
@@ -310,6 +334,19 @@ private fun TocRow(
                 softWrap = true,
                 modifier = Modifier.padding(start = 6.dp).weight(1f),
             )
+            // 页码列（用户层）：只在「这一章的第一行」出现；算不出来就整列留白（不估、不占位）。
+            if (pageNumber > 0) {
+                Text(
+                    text = pageNumber.toString(),
+                    color = palette.muted2,
+                    fontSize = 12.sp,
+                    // 与标题单行同高：数字和标题首行同基线，长标题换行时也不掉到中间。
+                    lineHeight = titleLine,
+                    textAlign = TextAlign.End,
+                    maxLines = 1,
+                    modifier = Modifier.padding(start = 10.dp),
+                )
+            }
         }
     }
 }

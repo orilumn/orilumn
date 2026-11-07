@@ -528,6 +528,9 @@ fun ReaderView(
                         }
                     },
                     onDismiss = { panelPage = null },
+                    // 目录页码（用户层）：与平板同一份数据，能算的才显示。
+                    chapterStartPages = { desktopHost?.chapterStartPages() ?: IntArray(0) },
+                    pageNumberRevision = { desktopHost?.pageNumberRevision() ?: 0 },
                 )
             },
             annotationsContent = {

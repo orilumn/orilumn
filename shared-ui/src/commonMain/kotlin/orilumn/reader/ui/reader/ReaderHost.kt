@@ -137,6 +137,16 @@ interface ReaderHost {
     fun bookPageNumber(pos: ReaderPos): BookPageNumber? = null
 
     /**
+     * 各章首页在全书的页码（章号下标 → 1 起的页码；0 = 暂不可算），目录面板用。
+     *
+     * **同步、廉价**；与 [bookPageNumber] 同一份快照，同一口径：能算的都给，遇到第一个未知章就停
+     * （后面的章依赖它，不估）。换版式参数后整份作废，这里自然从空表重新长出来。
+     *
+     * 默认空数组 = 宿主尚未实现（目录不显示页码）。
+     */
+    fun chapterStartPages(): IntArray = IntArray(0)
+
+    /**
      * 全书页码数据的代际。宿主用 **Compose 快照状态**实现它，阅读面在组合期读——后台把各章页数
      * 补齐（或本章正典表刚落）时它一变，页码才能在**读者静置不翻页**时也自己出现/更新。
      *

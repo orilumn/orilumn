@@ -18,6 +18,36 @@ data class BookPageNumber(
 }
 
 /**
+ * 各章首页在全书中的页码（章号 → 1 起的页码；0 = 还不可算）。
+ *
+ * 目录面板用：**只要能算就显示**——第 0 章排完就能给出第 0 章；第 1 章也排完就再给出第 1 章……
+ * 一旦遇到第一个「页数未知」的章就停：它后面的章首页页码依赖它，算了也是错的（不估）。
+ *
+ * 注意停的位置：**未知的那一章自己的首页仍是算得出来的**（它只需要前面各章的页数），所以先写
+ * 首页页码、再判页数停表；只有它后面的章才不可算。
+ *
+ * @param chapterCount 全书章数。
+ * @param pageCountOf 章号 → 该章页数；null = 当前参数下还没有正典分页。
+ */
+fun chapterStartPagesOf(chapterCount: Int, pageCountOf: (Int) -> Int?): IntArray {
+    val out = IntArray(chapterCount)
+    var acc = 0
+    for (i in 0 until chapterCount) {
+        out[i] = acc + 1
+        val n = pageCountOf(i) ?: break
+        acc += n
+    }
+    return out
+}
+
+/** 全书总页数；有一章页数未知就返回 null（半本书的和不是「共几页」）。 */
+fun bookTotalPagesOf(chapterCount: Int, pageCountOf: (Int) -> Int?): Int? {
+    var acc = 0
+    for (i in 0 until chapterCount) acc += pageCountOf(i) ?: return null
+    return acc
+}
+
+/**
  * 由「本章页下标 + 各章页数」合成全书页码。
  *
  * 拆成纯函数是为了能脱离引擎单测：页数从哪来（磁盘表头 / 内存表 / 临时表）是引擎控制器

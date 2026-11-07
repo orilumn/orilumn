@@ -23,9 +23,12 @@ import orilumn.reader.engine.paging.BookPageNumber
  *  - 页码要跟着页一起翻：放进 `FlipSlideLayer` 的两个槽里，与页画布共用同一个平移量，
  *    滑动时和正文一起走，而不是「字滑走了、页码原地不动」。
  *
- * ## 落点与字号
+ * ## 形态与落点
  *
- * 落在**版心下方那条页边距**里（正文最后一行之下、屏幕下沿之上），水平居中——纸书页脚的位置。
+ * 形态 `. 12 .`（点数夹页码，纸书页脚的老写法），落在**版心下方那条页边距**里、
+ * **右下角**：水平右沿对齐正文右沿，竖直在页边距带里居中。
+ * 全书总页数暂不显示（`BookPageNumber.total` 仍然保留，留给「要不要显示总数」的后续决定）。
+ *
  * 字号取正文的 ~0.62，并夹在页边距高度的一半以内：读者把下边距调到很窄时先缩字号，
  * 缩到看不清就不画，绝不压到正文上。
  *
@@ -35,6 +38,7 @@ import orilumn.reader.engine.paging.BookPageNumber
  * @param pageHeightPx 页高（px）。
  * @param bodyFontPx 正文字号（px），页脚据此缩字号。
  * @param inkColor 正文墨色；页脚用同一色降透明度，与主题/背景自动保持同一套配色。
+ * @param endInsetPx 右侧内缩（px）：让页码右沿对齐正文右沿，而不是贴屏幕边。
  */
 @Composable
 internal fun PageNumberLabel(
@@ -43,9 +47,10 @@ internal fun PageNumberLabel(
     pageHeightPx: Float,
     bodyFontPx: Float,
     inkColor: Color,
+    endInsetPx: Float = 0f,
     modifier: Modifier = Modifier,
 ) {
-    val label = number?.label ?: return
+    val index = number?.index ?: return
     val bandPx = (pageHeightPx - contentBottomPx).coerceAtLeast(0f)
     val fontPx = minOf(bodyFontPx * PAGE_NUMBER_SCALE, bandPx * 0.5f)
     if (fontPx < PAGE_NUMBER_MIN_PX) return
@@ -55,16 +60,19 @@ internal fun PageNumberLabel(
     val density = LocalDensity.current
     Box(modifier.fillMaxSize()) {
         Text(
-            text = label,
+            text = ". $index .",
             modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(bottom = with(density) { bottomPx.toDp() }),
+                .align(Alignment.BottomEnd)
+                .padding(
+                    end = with(density) { endInsetPx.coerceAtLeast(0f).toDp() },
+                    bottom = with(density) { bottomPx.toDp() },
+                ),
             style = TextStyle(
                 color = inkColor.copy(alpha = PAGE_NUMBER_ALPHA),
                 // px → sp 要除以 fontScale（`toSp` 自带）：页脚跟正文同尺，不随系统字体缩放跳号。
                 fontSize = with(density) { fontPx.toSp() },
                 lineHeight = with(density) { linePx.toSp() },
-                textAlign = TextAlign.Center,
+                textAlign = TextAlign.End,
             ),
             maxLines = 1,
             softWrap = false,

@@ -100,6 +100,8 @@ class TabletReaderHost(
     override fun bookPageNumber(pos: ReaderPos): BookPageNumber? =
         controller.bookPageNumber(pos.chapter, pos.slice)
 
+    override fun chapterStartPages(): IntArray = controller.chapterStartPages()
+
     override fun pageNumberRevision(): Int = pageNumberTick
 
     override fun tocIndex(chapter: Int): Int =

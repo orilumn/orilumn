@@ -1,6 +1,5 @@
 package orilumn.reader.engine
 
-import orilumn.reader.engine.text.LayoutParamKey
 import orilumn.reader.io.Logger
 
 /**
@@ -13,7 +12,9 @@ import orilumn.reader.io.Logger
  *    调用方在主线程绑定落位），不变回 null。指纹消费一次：重入的第二次关闭看到无 diff，
  *    不再跑整书（遮罩连点双关事故即此）。
  *
- * 指纹 = [LayoutParamKey]（纯版式参数；亮度等非版式不进，拖完它们关面板零重排）。
+ * 指纹 = 磁盘分页表的 `paramHash`（[BookDocumentController.layoutParamHash]，**含版心尺寸**；
+ * 亮度等非版式不进）。边距也是版式：只改边距同样换版面，必须整书重排，否则新指纹下没有任何
+ * 磁盘表，页数与页码会一直缺章。
  */
 class PanelRelayoutGate(
     private val controller: BookDocumentController,
@@ -43,6 +44,6 @@ class PanelRelayoutGate(
         return controller.finalizeRelayoutAll(chapter, anchorChar)
     }
 
-    /** 当前版式指纹（宽高固定 0 输入，只看排版参数是否变化）。 */
-    fun typographHash(): Long = LayoutParamKey.fromProfile(controller.profile, 0, 0).hash()
+    /** 当前版式指纹（与磁盘分页表同源，含版心尺寸：边距变化也算换版面）。 */
+    fun typographHash(): Long = controller.layoutParamHash()
 }

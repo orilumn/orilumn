@@ -181,6 +181,38 @@ class TaskSchedulerTest {
         fun runAt(i: Int) {
             queued.removeAt(i).run()
         }
+
+        fun pending(): Int = queued.size
+    }
+
+    @Test
+    fun `task cancelled before its body starts releases the slot`() = runBlocking {
+        // 起跑前被取消的 job：函数体一行都不跑 ⇒ 任务体里的 `finally` 也不跑。若只靠它回收
+        // `running` 表，这条记录会永久残留，`running` 永不判空 ⇒ `awaitIdle` 永不返回
+        // （整书 B2 的 drained 日志消失、B1 续跑看门狗再也不动）。
+        val hops = ManualHopDispatcher()
+        val workers = ManualHopDispatcher()
+        val scope = CoroutineScope(SupervisorJob() + hops)
+        val sched = TaskScheduler(scope, workers, 2)
+        try {
+            sched.submit(TaskScheduler.Task("a", 10) { })
+            sched.submit(TaskScheduler.Task("b", 20) { })
+            hops.runAt(0) // install a → its worker body queues but never runs yet
+            hops.runAt(0) // install b
+            assertEquals("both slots taken by not-yet-started bodies", 2, sched.runningCount())
+
+            sched.cancelKey("b") // b dies before `task.block()` ever runs
+            withTimeout(5_000) {
+                while (hops.pending() > 0 || workers.pending() > 0) {
+                    if (hops.pending() > 0) hops.runAt(0) else workers.runAt(0)
+                    delay(5)
+                }
+            }
+            withTimeout(5_000) { while (sched.runningCount() > 0) delay(10) }
+            withTimeout(5_000) { sched.awaitIdle() } // 池必须真的回得到「真空」
+        } finally {
+            scope.cancel()
+        }
     }
 
     @Test

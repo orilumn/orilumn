@@ -304,6 +304,25 @@ class TaskScheduler(
             runningPrio[task.key] = task.priority
             runningSeq[task.key] = task.seq
             syncKeysLocked()
+            // 活性兜底：任务体被取消时靠上面的 `finally` 回收，但**「已入 running、调度器还没轮到它
+            // 起跑就被 cancel 掉」的 job 根本不会执行任务体**（Kotlin 协程：取消在起跑前 ⇒ 函数体
+            // 一行都不跑，`finally` 自然也不跑）。那条 `running` 记录会永久残留，`running` 永不判空，
+            // 于是 `awaitIdle` 永不返回：整书 B2 的 drained 日志从此消失、B1 续跑看门狗也再也不动
+            // （真机现象：大书整章 B1 被栅格砍掉后再也没人补派，页数永远缺锚页那一章）。
+            // 完成回调对「起跑前取消」同样触发，两条路径共用同一个幂等清理。
+            job.invokeOnCompletion {
+                scope.launch {
+                    mutex.withLock {
+                        if (running[task.key] === job) {
+                            running.remove(task.key)
+                            runningPrio.remove(task.key)
+                            runningSeq.remove(task.key)
+                            syncKeysLocked()
+                            pumpLocked()
+                        }
+                    }
+                }
+            }
         }
     }
 

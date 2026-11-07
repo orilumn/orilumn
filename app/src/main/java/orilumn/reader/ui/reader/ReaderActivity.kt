@@ -429,6 +429,9 @@ class ReaderActivity : ComponentActivity() {
                         currentFragments = fragments,
                         onSelect = { item -> tocJump(item) },
                         onDismiss = { closePanel() },
+                        // 目录页码：只给「算得出来」的章；磁盘表逐章补齐时代际变化，目录跟着刷新。
+                        chapterStartPages = { tabletHost?.chapterStartPages() ?: IntArray(0) },
+                        pageNumberRevision = { tabletHost?.pageNumberRevision() ?: 0 },
                     )
                 },
                 annotationsContent = {

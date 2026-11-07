@@ -51,4 +51,49 @@ class BookPageNumberTest {
         assertNull(bookPageNumberOf(0, -1, 3) { threeChapters[it] })
         assertNull(bookPageNumberOf(0, 0, 0) { null })
     }
+
+    // ---- 目录页码：各章首页（能算的都给，遇未知即停） ----
+
+    @Test
+    fun `chapter starts accumulate from page one`() {
+        val starts = chapterStartPagesOf(3) { threeChapters[it] }
+        assertEquals(1, starts[0])
+        assertEquals(11, starts[1])
+        assertEquals(31, starts[2])
+        assertEquals(60, bookTotalPagesOf(3) { threeChapters[it] })
+    }
+
+    @Test
+    fun `chapter starts stop at the first unknown chapter`() {
+        // 前两章排完、第三章在排：前两章首页照给，第三章首页也能算（只要前面各章页数），
+        // 再往后的章依赖第三章的页数，不可算 → 0。
+        val counts = mapOf(0 to 10, 1 to 20)
+        val starts = chapterStartPagesOf(4) { counts[it] }
+        assertEquals(1, starts[0])
+        assertEquals(11, starts[1])
+        assertEquals(31, starts[2])
+        assertEquals(0, starts[3])
+        assertNull("缺章不估总数", bookTotalPagesOf(4) { counts[it] })
+    }
+
+    @Test
+    fun `empty chapter counts as known zero pages`() {
+        // 空章从不落表，但它是「0 页」，不能当成未知把后面全掐掉。
+        val counts = mapOf(0 to 5, 1 to 0, 2 to 7)
+        val starts = chapterStartPagesOf(3) { counts[it] }
+        assertEquals(1, starts[0])
+        assertEquals(6, starts[1])
+        assertEquals(6, starts[2])
+        assertEquals(12, bookTotalPagesOf(3) { counts[it] })
+    }
+
+    @Test
+    fun `nothing known still knows the first chapter starts at page one`() {
+        // 第 0 章首页 = 全书第一页，这是定义，不依赖任何页数；后面的章才不可算。
+        val starts = chapterStartPagesOf(3) { null }
+        assertEquals(1, starts[0])
+        assertEquals(0, starts[1])
+        assertEquals(0, starts[2])
+        assertNull(bookTotalPagesOf(3) { null })
+    }
 }

@@ -213,7 +213,7 @@ class PaginationCacheTest {
 
     @Test
     fun `page counts snapshot round-trips and is gated like tables`() {
-        // 全书页码要的是「前面每一章几页」。表文件会被清掉，页数不会变——于是单独存一份清单，
+        // 全书页码要的是「前面每一章几页」。逐章读表头太贵，于是单独存一份清单；
         // 校验口径必须与表一致：引擎几何指纹 + 构建号 + 参数指纹，任一不符整份作废。
         val counts = linkedMapOf(0 to 1, 1 to 0, 2 to 6, 3 to 12) // 第 1 章排完是 0 页：合法
         val bytes = PaginationCacheCodec.encodePageCounts(77L, counts, 18)
@@ -230,8 +230,9 @@ class PaginationCacheTest {
     }
 
     @Test
-    fun `page counts snapshot survives table file loss`() {
-        // 页数清单不靠表文件存活：表会被清缓存/坏文件删掉，页数是同参数下不变的小事实。
+    fun `page counts snapshot is independent of table files`() {
+        // 清单不依赖表文件本身（同参数下页数是确定的事实）；这只是附带性质，不是存它的理由：
+        // 跨参数 / 跨构建仍整份作废（见上一个用例）。
         val s = store()
         val ns = "book_counts"
         val onePage = listOf(PageSlice(0, 50, 0, 7, kind = PageSlice.Kind.TEXT, blockStart = 0, blockEndExclusive = 2))

@@ -4543,7 +4543,7 @@ private fun finishCanonicalBackground(
             if (diskPageCountsHash != hash) return@launch
             diskPageCounts = merged
             Logger.w(logTag, "PAGE-COUNT hash=$hash chapters=$n known=${merged.size} stored=${stored?.size ?: 0} t=${platformNowMs() - t0}ms")
-            // 这一趟学到的结论顺手落成清单：下次开书（哪怕表文件被清掉）直接可用。
+            // 这一趟学到的结论顺手落成清单：下次开书只读一次盘就有全书页数，不必逐章读表头。
             if (merged.size > (stored?.size ?: 0)) writePageCountsNow(hash, merged)
             if (merged.size > mem.size) onPageCountsChanged?.invoke()
         }

@@ -119,6 +119,35 @@ class BookPageNumberTest {
         assertNull(chapterPageAtBookPage(3, 12) { counts[it] })
     }
 
+    // ---- 进度条：0..1 进度 → 全书页码（松手落位与右端标签同一换算） ----
+
+    @Test
+    fun `fraction maps to the page it will land on`() {
+        assertEquals(1, bookPageAtFraction(5895, 0.0))
+        assertEquals(2918, bookPageAtFraction(5895, 0.4949592351913452))
+        assertEquals(51, bookPageAtFraction(100, 0.5))
+        // 拉到最右仍是最后一页（不越界）。
+        assertEquals(5895, bookPageAtFraction(5895, 1.0))
+        assertEquals(5895, bookPageAtFraction(5895, 2.0))
+        assertEquals(1, bookPageAtFraction(5895, -1.0))
+    }
+
+    @Test
+    fun `fraction gives no page when the total is unknown`() {
+        assertNull(bookPageAtFraction(null, 0.5))
+        assertNull(bookPageAtFraction(0, 0.5))
+    }
+
+    @Test
+    fun `fraction and page progress are inverse`() {
+        // pageProgress 的口径：(页码-0.5)/总页数；反查必须回到同一页。
+        val total = 5895
+        for (page in intArrayOf(1, 2, 2918, 5894, 5895)) {
+            val fraction = (page - 0.5) / total
+            assertEquals(page, bookPageAtFraction(total, fraction))
+        }
+    }
+
     @Test
     fun `nothing known still knows the first chapter starts at page one`() {
         // 第 0 章首页 = 全书第一页，这是定义，不依赖任何页数；后面的章才不可算。

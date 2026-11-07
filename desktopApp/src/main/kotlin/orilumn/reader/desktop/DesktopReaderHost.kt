@@ -236,6 +236,9 @@ class DesktopReaderHost(
 
     override fun pageProgress(pos: ReaderPos): Double = controller.pageProgress(pos.chapter, pos.slice)
 
+    override fun bookPageNumberAtFraction(fraction: Double): Int? =
+        controller.bookPageNumberAtFraction(fraction)
+
     /** 全书封面（ covers/ 私有缓存；无/失败回 null）。 */
     override suspend fun coverImage(): ImageBitmap? = withContext(Dispatchers.IO) {
         runCatching {

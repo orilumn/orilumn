@@ -177,6 +177,9 @@ class TabletReaderHost(
 
     override fun pageProgress(pos: ReaderPos): Double = controller.pageProgress(pos.chapter, pos.slice)
 
+    override fun bookPageNumberAtFraction(fraction: Double): Int? =
+        controller.bookPageNumberAtFraction(fraction)
+
     /** 全书封面（书库 coverPath 原字节直解；无/失败回 null）。 */
     override suspend fun coverImage(): androidx.compose.ui.graphics.ImageBitmap? = withContext(Dispatchers.IO) {
         runCatching {

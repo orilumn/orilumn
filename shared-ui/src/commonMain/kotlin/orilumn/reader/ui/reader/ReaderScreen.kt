@@ -2804,6 +2804,8 @@ fun ReaderScreen(
                 onPrev = { jumpChapter(-1) },
                 onNext = { jumpChapter(1) },
                 onSeek = ::seek,
+                // 有完整页码就写页码（与落位同一换算），否则右端退回百分比。
+                pageOfFraction = { f -> currentHost.bookPageNumberAtFraction(f.toDouble()) },
                 onNight = currentOnNight,
                 onSettings = { hideBarsThen { currentOnSettings() } },
                 onToc = { hideBarsThen { currentOnToc() } },

@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -34,6 +35,7 @@ import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -57,6 +59,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import kotlin.math.abs
 import kotlin.math.cos
@@ -82,6 +85,11 @@ fun ReaderBars(
     onPrev: () -> Unit,
     onNext: () -> Unit,
     onSeek: (Float) -> Unit,
+    /**
+     * 进度条某个位置（0..1）对应的全书页码（1 起）；返回 null = 全书页数不全，右端显示百分比。
+     * 与松手落位同一换算（宿主侧 [ReaderHost.bookPageNumberAtFraction]）。
+     */
+    pageOfFraction: (Float) -> Int? = { null },
     onNight: () -> Unit,
     onSettings: () -> Unit,
     onToc: () -> Unit,
@@ -91,6 +99,11 @@ fun ReaderBars(
     onTopBarSize: (androidx.compose.ui.unit.IntSize) -> Unit = {},
     onBottomBarSize: (androidx.compose.ui.unit.IntSize) -> Unit = {},
 ) {
+    // 拖动中的位置（松手后先保留，等外部进度追上来再交还）：右端数字/页码实时跟手。
+    var seekPreview by remember { mutableStateOf<Float?>(null) }
+    // 上下栏收起时清掉，免得下次打开还挂着上一次没落成的预览值。
+    LaunchedEffect(visible) { if (!visible) seekPreview = null }
+
     Box(modifier = Modifier.fillMaxSize()) {
         // 条外空白：吃掉点按 → 收起上下栏（中部点按语义）。
         AnimatedVisibility(visible = visible, enter = fadeIn(tween(160)), exit = fadeOut(tween(200))) {
@@ -158,12 +171,25 @@ fun ReaderBars(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     BarTextBtn("上一章", onPrev)
+                    // 拖动中显示手指位置；松手后与圆点同口径：等外部进度追到附近再交还。
+                    val shown = seekPreview?.takeIf { abs(it - fraction) > 0.02f } ?: fraction
                     ThinSlider(
                         fraction = fraction.coerceIn(0f, 1f),
                         onSeek = onSeek,
+                        onDragFraction = { seekPreview = it },
                         modifier = Modifier.weight(1f).padding(horizontal = 6.dp),
                     )
-                    Text("${ReaderMath.progressPercent(fraction)}%", color = BarFg, fontSize = 12.sp)
+                    // 有完整页码就写页码（与落位同一换算），否则退回百分比。
+                    // 定宽右对齐：数字位数变化时滑块长度不跟着抖。
+                    Text(
+                        text = pageOfFraction(shown)?.toString()
+                            ?: "${ReaderMath.progressPercent(shown)}%",
+                        color = BarFg,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        textAlign = TextAlign.End,
+                        modifier = Modifier.widthIn(min = 42.dp),
+                    )
                     BarTextBtn("下一章", onNext)
                 }
                 Row(
@@ -329,7 +355,12 @@ internal const val BarsAnim = 240
  * 底部阅读进度条（细轨 4dp + 金色实心圆点，同设置面板滑块风格）：点按/拖动定位，[onSeek] 仅在释放/离屏时回调一次。
  */
 @Composable
-private fun ThinSlider(fraction: Float, onSeek: (Float) -> Unit, modifier: Modifier = Modifier) {
+private fun ThinSlider(
+    fraction: Float,
+    onSeek: (Float) -> Unit,
+    onDragFraction: (Float) -> Unit = {},
+    modifier: Modifier = Modifier,
+) {
     // 拖动中的本地位置：圆点实时跟手；onSeek 释放/离屏才回调。
     var dragValue by remember { mutableFloatStateOf(fraction.coerceIn(0f, 1f)) }
     var dragging by remember { mutableStateOf(false) }
@@ -351,6 +382,7 @@ private fun ThinSlider(fraction: Float, onSeek: (Float) -> Unit, modifier: Modif
                         change.consume()
                         dragging = true
                         dragValue = (change.position.x / size.width.coerceAtLeast(1)).coerceIn(0f, 1f)
+                        onDragFraction(dragValue)
                     },
                     onDragEnd = {
                         dragging = false

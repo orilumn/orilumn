@@ -21,6 +21,7 @@ import orilumn.reader.engine.html.ParsedChapter
 import orilumn.reader.engine.paging.BookLayout
 import orilumn.reader.engine.paging.BookPageNumber
 import orilumn.reader.engine.paging.PageSlice
+import orilumn.reader.engine.paging.bookPageAtFraction
 import orilumn.reader.engine.paging.bookPageNumberOf
 import orilumn.reader.engine.paging.bookTotalPagesOf
 import orilumn.reader.engine.paging.chapterPageAtBookPage
@@ -4378,6 +4379,17 @@ private fun finishCanonicalBackground(
         return bookTotalPagesOf(chapters.size) { i -> chapterPageCountAt(i, hash) }
     }
 
+    /**
+     * 进度条某个位置（0..1）对应的全书页码（1 起）；页数不全返回 null（底栏退回百分比）。
+     *
+     * 与 [pageAtFraction] 的按页落位**同一换算**（[bookPageAtFraction]）：拖动时标签上写的页，
+     * 就是松手后落到的页。同步、廉价（O(章数) 加和），拖动中每帧调用。
+     */
+    fun bookPageNumberAtFraction(fraction: Double): Int? {
+        val total = bookTotalPages() ?: return null
+        return bookPageAtFraction(total, fraction)
+    }
+
     /** 屏幕上这一页在本章**正典分页**里的下标；给不出返回 -1。 */
     private fun shownPageIndex(unit: ChapterUnit, slice: PageSlice, hash: Long): Int {
         // 无临时会话时 `pageSlices` 就是本章正典分页的整表（磁盘表全量切片 / 整章全量版式），
@@ -4738,8 +4750,8 @@ private fun finishCanonicalBackground(
         // 有完整页码（每一章都已知，含 0 页空章）才走按页；缺一章都不估，直接按章。
         val totalPages = bookTotalPages()
         if (totalPages != null && totalPages > 0) {
-            val targetPage = (fraction.coerceIn(0.0, 1.0) * totalPages).toInt()
-                .coerceIn(0, totalPages - 1)
+            // 与 [bookPageNumberAtFraction]（底栏标签）同一换算：标签写第几页，松手就落第几页。
+            val targetPage = (bookPageAtFraction(totalPages, fraction) ?: 1) - 1
             val hit = chapterPageAtBookPage(n, targetPage) { chapterPageCountAt(it, hash) }
             if (hit != null) {
                 val (c, pageIdx) = hit

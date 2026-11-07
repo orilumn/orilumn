@@ -100,3 +100,15 @@ fun chapterPageAtBookPage(
     }
     return null
 }
+
+/**
+ * 0..1 的进度换算成全书页码（1 起）；总页数未知或非正返回 null。
+ *
+ * 进度条「松手落哪一页」与「右端标签写哪一页」共用这一条换算（floor），
+ * 保证标签上看到的页就是松手后落到的页。
+ */
+fun bookPageAtFraction(totalPages: Int?, fraction: Double): Int? {
+    if (totalPages == null || totalPages <= 0) return null
+    val idx = (fraction.coerceIn(0.0, 1.0) * totalPages).toInt().coerceIn(0, totalPages - 1)
+    return idx + 1
+}

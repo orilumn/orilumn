@@ -127,6 +127,16 @@ interface ReaderHost {
     fun pageProgress(pos: ReaderPos): Double
 
     /**
+     * 进度条某个位置（0..1）对应的全书页码（1 起）；页数不全返回 null（底栏退回百分比）。
+     *
+     * 与 [pageAtFraction] 的按页落位**同一换算**：拖动时标签上写的页，就是松手后落到的页。
+     * **同步、廉价**（引擎侧是 O(章数) 加和），拖动中每帧调用。
+     *
+     * 默认 null = 宿主尚未实现（桌面等壳按可缺省处理），底栏就一直显示百分比。
+     */
+    fun bookPageNumberAtFraction(fraction: Double): Int? = null
+
+    /**
      * 全书累计页码（用户层「显示页码」开关的消费者）：本页在全书中的页码（1 起）+ 全书总页数。
      *
      * **同步、廉价**（引擎侧是 O(章数) 加和）：阅读面在组合期直接调。null = 这一页暂时给不出

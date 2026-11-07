@@ -72,12 +72,83 @@ object PaginationCacheCodec {
      *  on book open, the rest are LRU-evicted here. Keep the most recently used and evict the rest
      *  (each file ≤ ~32 KB ⇒ ≤ ~8 MB per book at the cap). R7 raised this from 32: a whole-book B2
      *  pass must be able to record every chapter (the in-memory skip-fresh registry keys off these
-     *  files' presence), and 256 chapters covers virtually all books. */
+     *  files' presence), and 256 chapters covers virtually all books.
+     *
+     *  超帽的长书（762 章那种）表会被这本帽 LRU 掉，**全书页码不再依赖这些表**：页数另有
+     *  [countsFilename] 一份清单（几十字节/章，不入帽），重开书照常立刻出页码。 */
     const val MAX_TABLES_PER_BOOK = 256
 
     /** Filename convention: `<chapterIndex>_<paramHash>.bin`. */
     fun filename(chapterIndex: Int, paramHash: Long): String =
         "${chapterIndex}_${paramHash}.bin"
+
+    /**
+     * 全书各章页数快照的文件名：`counts_<paramHash>.idx`（与分页表同目录）。
+     *
+     * 为什么单独存一份「页数」而不是靠扫表：`MAX_TABLES_PER_BOOK` 会把长书的表 LRU 掉
+     * （762 章的大书只留 256 张），而全书累计页码要的是**前面每一章**的页数——少一张表，
+     * 那之后的页码与目录页码就全是空白。页数是**换不掉的小事实**（同参数下分页是确定的），
+     * 记一份几十字节/章的清单，开书即得，不必等整书重排。
+     * `.idx` 后缀刻意与表文件区分：不受表的 LRU 帽与修剪影响。
+     */
+    fun countsFilename(paramHash: Long): String = "counts_$paramHash.idx"
+
+    /** 页数快照的 magic（与表文件的 MAGIC 故意不同：两者永不被彼此的解析器接受）。 */
+    private const val COUNTS_MAGIC = 0x43504E43 // "CPNC"
+
+    /** 页数快照表头字节数：magic/version/layoutVersion/appVersion 四个 Int + paramHash 一个 Long + count 一个 Int。 */
+    const val COUNTS_HEADER_BYTES = 28
+
+    /**
+     * 序列化整本「章号 → 页数」快照（含排完是 0 页的空章）。
+     *
+     * 布局：[magic][VERSION][LAYOUT_VERSION][appVersion][paramHash: Long][count][(chapter, pages) × count]。
+     * 校验口径与表文件**同序同判**：源码几何指纹 + 构建号 + 参数指纹任一不符即整份作废
+     * （宁可重扫一遍表头，也不拿旧结论凑页码）。0 页合法（`pages >= 0`）。
+     */
+    fun encodePageCounts(paramHash: Long, counts: Map<Int, Int>, appVersion: Int): ByteArray {
+        val buf = Buffer()
+        buf.writeInt(COUNTS_MAGIC)
+        buf.writeInt(VERSION)
+        buf.writeInt(LAYOUT_VERSION)
+        buf.writeInt(appVersion)
+        buf.writeLong(paramHash)
+        buf.writeInt(counts.size)
+        for ((chapter, pages) in counts) {
+            buf.writeInt(chapter)
+            buf.writeInt(pages)
+        }
+        return buf.readByteArray()
+    }
+
+    /** 解页数快照；任何校验不过（含截断）返回 null。刻意不落日志：扫不到的常态不该刷屏。 */
+    fun decodePageCounts(
+        bytes: ByteArray,
+        expectedAppVersion: Int,
+        expectedParamHash: Long,
+    ): Map<Int, Int>? {
+        if (bytes.size < COUNTS_HEADER_BYTES) return null
+        return try {
+            val buf = Buffer().write(bytes)
+            if (buf.readInt() != COUNTS_MAGIC) return null
+            if (buf.readInt() != VERSION) return null
+            if (buf.readInt() != LAYOUT_VERSION) return null
+            if (buf.readInt() != expectedAppVersion) return null
+            if (buf.readLong() != expectedParamHash) return null
+            val count = buf.readInt()
+            if (count < 0 || bytes.size.toLong() != COUNTS_HEADER_BYTES + count * 8L) return null
+            val out = LinkedHashMap<Int, Int>(count)
+            repeat(count) {
+                val chapter = buf.readInt()
+                val pages = buf.readInt()
+                if (chapter < 0 || pages < 0) return null
+                out[chapter] = pages
+            }
+            out
+        } catch (_: Exception) {
+            null
+        }
+    }
 
     /** 表头固定字节数（见上面的文件格式：magic/version/layoutVersion/appVersion/chapterIndex 五个
      *  Int + paramHash 一个 Long + totalBlocks/totalChars/pageCount 三个 Int = 40）。 */

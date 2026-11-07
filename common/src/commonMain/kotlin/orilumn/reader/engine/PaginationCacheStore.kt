@@ -77,6 +77,32 @@ class PaginationCacheStore(
         return PaginationCacheCodec.decodeHeaderPageCount(bytes, appVersion, chapterIndex, paramHash)
     }
 
+    /** 全书各章页数快照的落点（`.idx`，与表文件同目录但不参与表的 LRU 修剪）。 */
+    fun countsFile(bookId: String, paramHash: Long): Path =
+        dirFor(bookId).resolve(PaginationCacheCodec.countsFilename(paramHash))
+
+    /**
+     * 读全书页数快照（章号 → 页数）。参数指纹 / 引擎几何指纹 / 构建号任一不符即 null。
+     *
+     * 它只在**同一套版式参数**下有意义：同参数下分页是确定的，页数不会变，所以「表被 LRU 掉了」
+     * 不影响这份结论——这正是长书重开还能立刻出页码的依据。
+     */
+    fun readPageCounts(bookId: String, paramHash: Long): Map<Int, Int>? {
+        val f = countsFile(bookId, paramHash)
+        if (fs.metadataOrNull(f)?.isRegularFile != true) return null
+        val bytes = runCatching { fs.read(f) { readByteArray() } }
+            .onFailure { Logger.w("Orilumn.DISK", "pagination counts read IO FAIL $f ${it.message}") }
+            .getOrNull() ?: return null
+        return PaginationCacheCodec.decodePageCounts(bytes, appVersion, paramHash)
+    }
+
+    /** 写全书页数快照（整份覆盖；几百 KB 以内的小文件，几十字节/章）。 */
+    fun writePageCounts(bookId: String, paramHash: Long, counts: Map<Int, Int>) {
+        val f = countsFile(bookId, paramHash)
+        runCatching { fs.write(f) { write(PaginationCacheCodec.encodePageCounts(paramHash, counts, appVersion)) } }
+            .onFailure { Logger.w("Orilumn.DISK", "pagination counts write FAIL $f ${it.message}") }
+    }
+
     /** Writes a pagination table to disk. Overwrites any existing file at that location, then
      *  LRU-trims the book's table directory so orphaned parameter-hash files stay bounded. */
     fun write(table: ChapterPaginationTable, f: Path) {
@@ -122,12 +148,15 @@ class PaginationCacheStore(
         val files = runCatching { fs.list(dir) }
             .onFailure { Logger.w("Orilumn.DISK", "pagination clean-stale list FAIL $dir ${it.message}") }
             .getOrNull()
-            ?.filter { it.name.endsWith(".bin") }
+            ?.filter { it.name.endsWith(".bin") || it.name.endsWith(".idx") }
             ?: return 0
         val suffix = "_$keepHash.bin"
+        val countsSuffix = "_$keepHash.idx"
         var deleted = 0
         for (f in files) {
             if (f.name.endsWith(suffix)) continue
+            // 页数快照同样是「换参数即作废」：留着不删只会在目录里攒出一堆同构清单。
+            if (f.name.startsWith("counts_") && f.name.endsWith(countsSuffix)) continue
             if (runCatching { fs.delete(f) }.isSuccess) deleted++
         }
         if (deleted > 0) Logger.w("Orilumn.DISK", "pagination clean-stale book=$bookId keepHash=$keepHash deleted=$deleted")
@@ -153,6 +182,19 @@ class PaginationCacheStore(
                 if (runCatching { fs.delete(f) }.isSuccess) deleted++
             }
         }
+        // 页数快照同受「换构建/换引擎几何」影响：解不开的（含旧构建写的）一并清掉，
+        // 免得留一堆永远读不中的 `.idx`。参数指纹从文件名里读回，指纹变了不算「坏」。
+        val countsFiles = runCatching { fs.list(dir) }
+            .getOrNull()
+            ?.filter { it.name.startsWith("counts_") && it.name.endsWith(".idx") && fs.metadataOrNull(it)?.isRegularFile == true }
+            ?: emptyList()
+        for (f in countsFiles) {
+            val hash = f.name.removePrefix("counts_").removeSuffix(".idx").toLongOrNull() ?: continue
+            val bytes = runCatching { fs.read(f) { readByteArray() } }.getOrNull() ?: continue
+            if (PaginationCacheCodec.decodePageCounts(bytes, appVersion, hash) == null) {
+                if (runCatching { fs.delete(f) }.isSuccess) deleted++
+            }
+        }
         if (deleted > 0) Logger.w("Orilumn.DISK", "pagination sweep book=$bookId deleted=$deleted kept=${files.size - deleted}")
         return deleted
     }
@@ -163,7 +205,7 @@ class PaginationCacheStore(
         val files = runCatching { fs.list(dir) }
             .onFailure { Logger.w("Orilumn.DISK", "pagination clean list FAIL $dir ${it.message}") }
             .getOrNull()
-            ?.filter { it.name.endsWith(".bin") }
+            ?.filter { it.name.endsWith(".bin") || it.name.endsWith(".idx") }
             ?: return
         for (f in files) {
             runCatching { fs.delete(f) }

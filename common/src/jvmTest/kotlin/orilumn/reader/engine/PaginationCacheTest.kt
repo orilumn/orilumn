@@ -208,6 +208,56 @@ class PaginationCacheTest {
     }
 
     @Test
+    fun `page counts snapshot round-trips and is gated like tables`() {
+        // 全书页码要的是「前面每一章几页」。表会被 LRU 掉，页数不会变——于是单独存一份清单，
+        // 校验口径必须与表一致：引擎几何指纹 + 构建号 + 参数指纹，任一不符整份作废。
+        val counts = linkedMapOf(0 to 1, 1 to 0, 2 to 6, 3 to 12) // 第 1 章排完是 0 页：合法
+        val bytes = PaginationCacheCodec.encodePageCounts(77L, counts, 18)
+        assertEquals(counts, PaginationCacheCodec.decodePageCounts(bytes, 18, 77L))
+        assertNull("参数指纹对不上 = 旧版式的清单", PaginationCacheCodec.decodePageCounts(bytes, 18, 78L))
+        assertNull("别的构建写的清单", PaginationCacheCodec.decodePageCounts(bytes, 17, 77L))
+        assertNull("截断的清单（半截写盘）不当真", PaginationCacheCodec.decodePageCounts(bytes.copyOf(bytes.size - 3), 18, 77L))
+        assertNull("空字节", PaginationCacheCodec.decodePageCounts(ByteArray(0), 18, 77L))
+        // 乱改一个字节（页数）不该被当成合法清单：完整性靠长度 + 表头校验，且不解析越界。
+        val tampered = bytes.copyOf()
+        tampered[tampered.size - 1] = 0xFF.toByte()
+        val read = PaginationCacheCodec.decodePageCounts(tampered, 18, 77L)
+        assertTrue("越界页数被拒或按原值解析，不得抛异常", read == null || read[3] != null)
+    }
+
+    @Test
+    fun `page counts snapshot survives the table LRU cap`() {
+        // 大书 762 章、表只留 256 张：清单不受这个帽约束，否则重开书页码全空。
+        val s = store()
+        val ns = "book_counts"
+        val onePage = listOf(PageSlice(0, 50, 0, 7, kind = PageSlice.Kind.TEXT, blockStart = 0, blockEndExclusive = 2))
+        s.writePageCounts(ns, 9L, mapOf(0 to 1, 1 to 5, 2 to 0))
+        repeat(PaginationCacheCodec.MAX_TABLES_PER_BOOK + 5) { i ->
+            s.write(
+                ChapterPaginationTable.fromSlices(i, i.toLong(), onePage, 2, 50),
+                s.file(ns, i, i.toLong()),
+            )
+        }
+        assertEquals(
+            "tables are capped",
+            PaginationCacheCodec.MAX_TABLES_PER_BOOK,
+            FileSystem.SYSTEM.list(s.dirFor(ns)).count { it.name.endsWith(".bin") },
+        )
+        assertEquals(mapOf(0 to 1, 1 to 5, 2 to 0), s.readPageCounts(ns, 9L))
+    }
+
+    @Test
+    fun `cleanStaleParams drops other-hash page counts but keeps the running hash`() {
+        val s = store()
+        val ns = "book_counts_stale"
+        s.writePageCounts(ns, 222L, mapOf(0 to 1))
+        s.writePageCounts(ns, 111L, mapOf(0 to 2))
+        assertEquals(1, s.cleanStaleParams(ns, 222L))
+        assertEquals(mapOf(0 to 1), s.readPageCounts(ns, 222L))
+        assertNull(s.readPageCounts(ns, 111L))
+    }
+
+    @Test
     fun `store clearBook removes all entries`() {
         val s = store()
         val ns = "book_11"

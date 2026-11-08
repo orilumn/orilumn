@@ -345,8 +345,9 @@ class ChapterRevisionMap(
     companion object {
         /** 重放 / 预归一算法版本：进 `contentRev`。规则一改就要 +1。
          *  2 = 跨叶修订（段数由输入换行数决定，段界见 `RevisionBlocks.SEPARATOR`）。
-         *  3 = 只改段界的跨叶修订在审阅视图里也按合并落结构（不再排两遍同一段字）。 */
-        const val ALGORITHM_VERSION = 3
+         *  3 = 只改段界的跨叶修订在审阅视图里也按合并落结构（不再排两遍同一段字）。
+         *  4 = 合并段之后的叶只按增量平移（4 以前多算了一整段，字符流与正文投影错位）。 */
+        const val ALGORITHM_VERSION = 4
 
         private const val FNV_OFFSET = -3750763034362895579L // 14695981039346656037
         private const val FNV_PRIME = 1099511628211L

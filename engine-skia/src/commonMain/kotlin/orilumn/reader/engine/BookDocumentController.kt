@@ -684,8 +684,13 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                 // 未落库的新修订 id 都是 0：只有单独一条跨叶修订时才按 0 认它。
                 (map.structureOnly - absorbedSet) + if (freshStructureOnly) setOf(0L) else emptySet(),
             )
-            base.inserted.firstOrNull()?.let { newMap.reviewInsertedRange(it) }
-                ?: (newMap.toReview(originalSel.first) until newMap.toReview(originalSel.first))
+            val fresh = base.inserted.firstOrNull()
+            when {
+                fresh == null -> newMap.toReview(originalSel.first) until newMap.toReview(originalSel.first)
+                // 只挪段界没有「新文字副本」（`reviewInsertedRange` 是空的），选区就是合并后的那一段。
+                freshStructureOnly -> newMap.reviewInterval(fresh)
+                else -> newMap.reviewInsertedRange(fresh)
+            }
         }.getOrNull() ?: (map.toReview(originalSel.first) until map.toReview(originalSel.first))
         return base.copy(
             deletedIds = absorbedIds + base.deletedIds,

@@ -139,6 +139,61 @@ class ChapterRevisionReplayTest {
         assertEquals(0, r.measuredRevisionDeltas[7L])
     }
 
+    /**
+     * 合并段**后面的叶**只能按增量平移，不能按合并段自身长度再推一遍。
+     *
+     * 真机回归（ch=173 并段后选区整体错位）：`shift` 当时累加的是每个新块的长度，
+     * 于是并段之后所有叶的字符起点都多算了整整一段（53 字），排版偏移与正文投影错位，
+     * 长按/点按取到的是后面几十个字——编辑卡里的文字自然与屏幕上选中的不是一处。
+     */
+    @Test
+    fun mergeShiftsFollowingLeavesByDeltaOnly() {
+        // 并段前后字数相同（delta = 0）：后面那叶必须原地不动。
+        val root = el("body", el("p", txt("ab")), el("p", txt("cd")), el("p", txt("ef")))
+        val r = ChapterRevisionReplay.replay(
+            root = root,
+            leaves = listOf(root.children[0], root.children[1], root.children[2]),
+            leafPaths = listOf(intArrayOf(0), intArrayOf(1), intArrayOf(2)),
+            charStarts = longArrayOf(0, 2, 4),
+            editsForLeaf = { _, _ -> emptyList() },
+            segmentsOf = ::seg,
+            wsOf = { WhiteSpace.NORMAL },
+            styleOf = null,
+            merges = listOf(ChapterRevisionReplay.Merge(0, 1, 1, 3, "bc", 7L)),
+        )
+        assertEquals(listOf("abcd", "ef"), r.leaves.map { seg(it).text })
+        assertArrayEquals(longArrayOf(0, 4), r.charStarts)
+        assertStartsMatchLeafTexts(r)
+        assertEquals(0, r.measuredRevisionDeltas[7L])
+
+        // 并段顺带删字（delta = -2）：后面那叶跟着前移 2，不多不少。
+        val root2 = el("body", el("p", txt("abcd")), el("p", txt("efgh")), el("p", txt("ij")))
+        val r2 = ChapterRevisionReplay.replay(
+            root = root2,
+            leaves = listOf(root2.children[0], root2.children[1], root2.children[2]),
+            leafPaths = listOf(intArrayOf(0), intArrayOf(1), intArrayOf(2)),
+            charStarts = longArrayOf(0, 4, 8),
+            editsForLeaf = { _, _ -> emptyList() },
+            segmentsOf = ::seg,
+            wsOf = { WhiteSpace.NORMAL },
+            styleOf = null,
+            merges = listOf(ChapterRevisionReplay.Merge(0, 1, 2, 6, "XY", 7L)),
+        )
+        assertEquals(listOf("abXYgh", "ij"), r2.leaves.map { seg(it).text })
+        assertArrayEquals(longArrayOf(0, 6), r2.charStarts)
+        assertStartsMatchLeafTexts(r2)
+        assertEquals(-2, r2.measuredRevisionDeltas[7L])
+    }
+
+    /** 叶起点必须与叶文本首尾相接：差一个字，之后所有偏移都会取到别的段落。 */
+    private fun assertStartsMatchLeafTexts(r: ChapterRevisionReplay.Result) {
+        var expected = 0L
+        for ((i, leaf) in r.leaves.withIndex()) {
+            assertEquals("叶 $i 的起点错位", expected, r.charStarts[i])
+            expected += seg(leaf).text.length
+        }
+    }
+
     @Test
     fun mergeWithTwoLinesKeepsBothParagraphs() {
         val root = body()

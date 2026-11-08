@@ -121,12 +121,17 @@ object ChapterRevisionReplay {
                         newStarts += charStarts[k] + shift
                     }
                 } else {
+                    // 块内偏移累积在 blocks 自己的区间里；`shift` 只记**增量**（新长度 − 旧长度），
+                    // 不能把合并后这一整段的长度也加进去：那会让合并段之后的所有叶各多算一整段，
+                    // 整章字符流与正文投影从此错位（实测 53 字的并段把后面每个偏移都推后 53）。
+                    var blockOffset = 0L
                     for (b in out.blocks) {
-                        newStarts += charStarts[merge.firstLeaf] + shift
+                        newStarts += charStarts[merge.firstLeaf] + shift + blockOffset
                         newLeaves += b.element
                         origins += merge.firstLeaf
-                        shift += b.textLength
+                        blockOffset += b.textLength
                     }
+                    shift += out.delta
                     replacements[leaves[merge.firstLeaf]] = out.blocks.map { it.element }
                     for (k in merge.firstLeaf..merge.lastLeaf) {
                         if (k !in out.usedLeaves) removed += leaves[k]

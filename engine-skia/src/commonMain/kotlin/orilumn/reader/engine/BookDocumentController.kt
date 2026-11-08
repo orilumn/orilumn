@@ -673,8 +673,17 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         val absorbedIds = absorbed.map { it.id }
         val absorbedSet = absorbedIds.toHashSet()
         // 改完重选哪一段：按**审阅空间**给回新添的那段（旧修订已删、新修订刚加，得按新表算）。
+        // 刚落的这条若「只挪段界」（把两段并成一段），正文里不会多出一份副本，选区就是合并后的那段。
+        val freshStructureOnly = base.inserted.singleOrNull()?.let { r ->
+            r.charEnd in (r.charStart + 1)..originalText.length &&
+                RevisionBlocks.textOf(r.text) == originalText.substring(r.charStart, r.charEnd)
+        } == true
         val sel = runCatching {
-            val newMap = ChapterRevisionMap(map.revisions.filter { it.id !in absorbedSet } + base.inserted)
+            val newMap = ChapterRevisionMap(
+                map.revisions.filter { it.id !in absorbedSet } + base.inserted,
+                // 未落库的新修订 id 都是 0：只有单独一条跨叶修订时才按 0 认它。
+                (map.structureOnly - absorbedSet) + if (freshStructureOnly) setOf(0L) else emptySet(),
+            )
             base.inserted.firstOrNull()?.let { newMap.reviewInsertedRange(it) }
                 ?: (newMap.toReview(originalSel.first) until newMap.toReview(originalSel.first))
         }.getOrNull() ?: (map.toReview(originalSel.first) until map.toReview(originalSel.first))
@@ -1615,14 +1624,35 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         }
         val merges = ArrayList<orilumn.reader.engine.revision.ChapterRevisionReplay.Merge>()
         val mergeIds = HashSet<Long>()
-        // 审阅视图不合并块：原文的段落结构原样保留，新文字插在选区末尾之后（跨段时落在末叶），
-        // 段界换成段内换行，读者看到的是「原段 + 新内容」而不是重排后的段数。
-        if (starts.isNotEmpty() && !reviewMode) {
+        // 只挪段界的跨叶修订（删掉两段之间的换行）：替换文字与它盖住的原书文字逐字相同。
+        // 这类修订在**两种视图**里都要按合并落结构，否则审阅视图会把同一段字排两遍
+        // （原文照排 + 新文字接在选区末尾）。审阅视图的其余跨叶修订仍不合并块：
+        // 原文的段落结构原样保留，新文字插在选区末尾之后，读者看到的是「原段 + 新内容」。
+        val structureOnly = HashSet<Long>()
+        if (starts.isNotEmpty()) {
+            val crossLeaf = ArrayList<Triple<orilumn.reader.data.revision.TextRevision, Int, Int>>(2)
             for (r in map.revisions) {
                 if (r.isInsertion) continue
                 val a = leafOfOffset(r.charStart)
                 val b = leafOfOffset(r.charEnd - 1)
-                if (a == b) continue
+                if (a != b) crossLeaf += Triple(r, a, b)
+            }
+            // 判「只挪段界」要拿原书叶文本：只投影涉及的那几叶（一章最多一两条跨叶修订）。
+            val originalTexts = if (reviewMode && crossLeaf.isNotEmpty()) {
+                bc.originalLeafTexts(
+                    cssBundle = unit.cssBundle,
+                    profile = profile,
+                    contentW = contentW,
+                    contentH = contentH,
+                    structure = cache,
+                    leafIndices = crossLeaf.flatMap { listOf(it.second, it.third) }.toSet(),
+                )
+            } else {
+                emptyMap()
+            }
+            for ((r, a, b) in crossLeaf) {
+                val structural = reviewMode && isStructureOnlyRevision(r, a, b, originalTexts, starts)
+                if (reviewMode && !structural) continue
                 val base = starts[a].toInt()
                 merges += orilumn.reader.engine.revision.ChapterRevisionReplay.Merge(
                     firstLeaf = a,
@@ -1633,6 +1663,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                     revisionId = r.id,
                 )
                 mergeIds += r.id
+                if (structural) structureOnly += r.id
             }
         }
 
@@ -1657,6 +1688,8 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                     }
                     map.revisionsTouching(leafStart, leafEnd).mapNotNull { r ->
                         when {
+                            // 跨叶修订（含只挪段界的那种）由合并路径整段处理，这里一律跳过。
+                            r.id in mergeIds -> null
                             reviewMode -> {
                                 // 审阅视图：原文不删，新文字插在原区间末尾之后；段界换成段内换行。
                                 if (r.charEnd > leafEnd) {
@@ -1674,7 +1707,6 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                                     )
                                 }
                             }
-                            r.id in mergeIds -> null
                             r.charEnd > leafEnd -> {
                                 Logger.w(
                                     logTag,
@@ -1720,8 +1752,11 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                 )
             }
         }
-        if (fixedRevisions != null) {
-            revisionMaps = revisionMaps + (unit.chapterIndex to ChapterRevisionMap(fixedRevisions))
+        if (fixedRevisions != null || reviewMode) {
+            revisionMaps = revisionMaps + (
+                unit.chapterIndex to
+                    ChapterRevisionMap(fixedRevisions ?: map.revisions, structureOnly)
+                )
         }
 
         // 结构重链：叶按同序换成新树上的节点；owner / 生成内容的键都是**元素**，
@@ -1765,6 +1800,34 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                 "t=${platformNowMs() - t0}ms",
         )
         return result.root
+    }
+
+    /**
+     * 这条跨叶修订是不是「只挪段界、一个字没改」：把段界（`U+E000`）去掉后，替换文字与它
+     * 盖住的原书文字逐字相同。
+     *
+     * 只有这种修订在审阅空间里没有红绿可标（删掉的是块边界，不是一个字），可以按真正的合并
+     * 落结构；改了字的跨叶修订仍走审阅视图的「原段 + 新内容」。判定要用**原书**叶文本
+     * （`originalLeafTexts` 与排版同一套级联），不能拿审阅空间那一串去比——那里本来就多着
+     * 旧修订的新文字副本。
+     */
+    private fun isStructureOnlyRevision(
+        r: orilumn.reader.data.revision.TextRevision,
+        firstLeaf: Int,
+        lastLeaf: Int,
+        leafTexts: Map<Int, String>,
+        starts: LongArray,
+    ): Boolean {
+        if (r.originalLength == 0) return false
+        val old = StringBuilder(r.originalLength)
+        for (k in firstLeaf..lastLeaf) {
+            val text = leafTexts[k] ?: return false
+            val from = if (k == firstLeaf) r.charStart - starts[k].toInt() else 0
+            val to = if (k == lastLeaf) r.charEnd - starts[k].toInt() else text.length
+            if (from < 0 || to > text.length || from > to) return false
+            old.append(text, from, to)
+        }
+        return RevisionBlocks.textOf(r.text) == old.toString()
     }
 
     /** Binds the layouter's per-chapter href for [unit] before ANY layout/shape work that may touch

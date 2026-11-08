@@ -111,6 +111,35 @@ class ChapterRevisionReplayTest {
     }
 
     @Test
+    fun mergeThatOnlyDropsParagraphBreakKeepsTextOnce() {
+        // 真机回归：「论心细，我不如你。」+「以后还是要…」两段，读者把段间换行删掉。
+        // 修订文字与它盖住的原书文字逐字相同（只少了块边界）⇒ 必须并成一段，且这段字只出现一次。
+        val p1 = el("p", txt("“论心细，我不如你。"))
+        val p2 = el("p", txt("以后还是要将这些心思。"))
+        val root = el("body", p1, p2)
+        val r = ChapterRevisionReplay.replay(
+            root = root,
+            leaves = listOf(p1, p2),
+            leafPaths = listOf(intArrayOf(0), intArrayOf(1)),
+            charStarts = longArrayOf(0, 10),
+            editsForLeaf = { _, _ -> emptyList() },
+            segmentsOf = ::seg,
+            wsOf = { WhiteSpace.NORMAL },
+            styleOf = null,
+            // 选区从「如」到「以后还是要」（跨两叶），替换文字就是原书那两个半截拼起来的一串。
+            merges = listOf(
+                ChapterRevisionReplay.Merge(0, 1, 7, 15, "如你。以后还是要", 7L),
+            ),
+        )
+        assertFalse(r.needsRecompute)
+        assertEquals(1, r.leaves.size)
+        assertEquals("“论心细，我不如你。以后还是要将这些心思。", seg(r.leaves[0]).text)
+        assertEquals(1, r.root.children.size)
+        // 一个字没多、一个字没少：实测增量必须为 0。
+        assertEquals(0, r.measuredRevisionDeltas[7L])
+    }
+
+    @Test
     fun mergeWithTwoLinesKeepsBothParagraphs() {
         val root = body()
         val r = ChapterRevisionReplay.replay(

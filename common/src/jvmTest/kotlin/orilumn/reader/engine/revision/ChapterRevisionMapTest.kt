@@ -209,6 +209,40 @@ class ChapterRevisionMapTest {
     }
 
     @Test
+    fun structureOnlyRevisionTakesNoReviewCopy() {
+        // 「甲乙丙丁」里把 [1,3)「乙丙」换回「乙丙」（只删段间换行）：审阅空间与渲染空间逐字相同。
+        val r = rev(1, 3, "乙丙", id = 1)
+        val map = ChapterRevisionMap(listOf(r), structureOnly = setOf(1L))
+        // 原文原位排，后面不再多一份「新文字」副本。
+        assertEquals(0, map.toReview(0))
+        assertEquals(3, map.toReview(3, crossInsertions = false))
+        assertEquals(4, map.toReview(4))
+        assertEquals(4, map.toOriginalFromReview(4))
+        // 没有红绿两半：删掉的是块边界，不是一个字。
+        assertTrue(map.reviewDeletedRange(r).isEmpty())
+        assertTrue(map.reviewInsertedRange(r).isEmpty())
+        // 点按合并后的那一段仍要认得出这条修订（开卡改它 / 删它）。
+        assertEquals(1 until 3, map.reviewInterval(r))
+        assertEquals(listOf(1L), map.revisionsTouchingReview(1, 3).map { it.id })
+        assertEquals(1 until 3, map.originalEditRangeFromReview(1, 3))
+        // 审阅文本剪新文字这一步不受影响（本来就没副本）。
+        assertEquals("甲乙丙丁", map.originalTextFromReview("甲乙丙丁"))
+    }
+
+    @Test
+    fun structureOnlyRevisionKeepsLaterReviewsInRenderedSpace() {
+        // [1,3) 只挪段界（无副本），[3,4) 把「丁」换成「XY」：审阅空间 = 「甲乙丙丁XY」。
+        val shape = rev(1, 3, "乙丙", id = 1, group = 1)
+        val edit = rev(3, 4, "XY", id = 2, group = 2)
+        val map = ChapterRevisionMap(listOf(shape, edit), structureOnly = setOf(1L))
+        assertEquals(3, map.toReview(3, crossInsertions = false))
+        assertEquals(6, map.toReview(4))
+        assertEquals(4 until 6, map.reviewInsertedRange(edit))
+        assertEquals(4, map.toOriginalFromReview(5))
+        assertEquals("甲乙丙丁", map.originalTextFromReview("甲乙丙丁XY"))
+    }
+
+    @Test
     fun contentRevIsStableAndSensitive() {
         val a = ChapterRevisionMap(listOf(rev(1, 3, "X")))
         val b = ChapterRevisionMap(listOf(rev(1, 3, "X")))

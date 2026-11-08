@@ -48,6 +48,15 @@ object RevisionBlocks {
     fun renderedLength(text: String): Int = text.length - separatorCount(text)
 
     /**
+     * 去掉段界后的文字（跨叶修订的「纯字符」）。
+     *
+     * 用来判「这条修订是不是只挪了段界」：把两段之间的换行删掉，结果文字与它盖住的原书文字
+     * 逐字相同，只是块边界少了一道。这种修订在审阅视图里没有红绿可标，按真正的合并落结构。
+     */
+    fun textOf(text: String): String =
+        if (text.indexOf(SEPARATOR) < 0) text else split(text).joinToString("")
+
+    /**
      * 能不能参与跨段合并：只支持**文字块**。
      * 图片、表格行、匿名文本叶（不在树里的合成叶）没有可合并的块结构，提交侧直接拒绝。
      */

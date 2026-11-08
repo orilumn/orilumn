@@ -19,6 +19,17 @@ import orilumn.reader.data.revision.TextRevision
  */
 class ChapterRevisionMap(
     source: List<TextRevision>,
+    /**
+     * 「只挪段界、一个字没动」的修订 id（把两段之间的换行删掉 ⇒ 两段并成一段）。
+     *
+     * 这类修订的替换文字与它盖住的原书文字逐字相同，删掉的是**块边界**、不是一个字，
+     * 所以审阅空间里没有红绿可标：它既不产生「新文字」副本（[reviewCopyLength] = 0），
+     * 也不进 [reviewDeletedRange] / [reviewInsertedRange]。载入重放照常按合并落结构
+     * （见 `BookDocumentController.applyTextRevisions`），两种视图看到的都是合并后的那一段。
+     *
+     * 由重放侧按「替换文字 == 覆盖的原书文字」判定后塞回来；不是落库字段。
+     */
+    val structureOnly: Set<Long> = emptySet(),
 ) {
     val revisions: List<TextRevision> = source.sortedWith(compareBy({ it.charStart }, { it.id }))
 
@@ -92,6 +103,14 @@ class ChapterRevisionMap(
     /** 整章渲染后的长度。 */
     fun renderedLength(originalLength: Int): Int =
         revisions.fold(originalLength) { acc, r -> acc + r.delta }
+
+    /**
+     * 这条修订在**审阅空间**里多占的长度（= 排在原文之后的那份「新文字」副本）。
+     *
+     * 只改段界的修订没有副本：原书文字就是改后的文字，多排一份只会把同一段字显示两遍。
+     */
+    private fun reviewCopyLength(r: TextRevision): Int =
+        if (r.id in structureOnly) 0 else r.renderedLength
 
     /** 原书偏移 → 渲染偏移。单点不区分纯插入，一律按「越过」处理（调用处注明）。 */
     fun toRendered(original: Int): Int = toRendered(original, crossInsertions = true)
@@ -173,13 +192,14 @@ class ChapterRevisionMap(
     fun toReview(original: Int, crossInsertions: Boolean = true): Int {
         var shift = 0
         for (r in revisions) {
+            val copy = reviewCopyLength(r)
             if (r.charEnd < original) {
-                shift += r.renderedLength
+                shift += copy
                 continue
             }
             if (r.charEnd == original) {
                 // 正好在该修订末尾：插入排在原区间之后，默认不越过（= 停在插入之前）。
-                if (crossInsertions) shift += r.renderedLength
+                if (crossInsertions) shift += copy
                 continue
             }
             if (r.charStart > original) break
@@ -193,19 +213,22 @@ class ChapterRevisionMap(
     fun toOriginalFromReview(review: Int): Int {
         var shift = 0
         for (r in revisions) {
+            val copy = reviewCopyLength(r)
             val rs = r.charStart + shift
             val re = rs + r.originalLength
-            val insertedEnd = re + r.renderedLength
+            val insertedEnd = re + copy
             if (review < rs) return review - shift
             if (review < re) return r.charStart + (review - rs)
             if (review < insertedEnd) return r.charEnd
-            shift += r.renderedLength
+            shift += copy
         }
         return review - shift
     }
 
     /** 被替换掉的原区间在审阅空间的位置（红字 + 红色删除线）；纯插入为空区间。 */
     fun reviewDeletedRange(r: TextRevision): IntRange {
+        // 只改段界的修订：原文一个字都没删，红字删除线无处可画。
+        if (r.id in structureOnly) return IntRange.EMPTY
         val s = toReview(r.charStart, crossInsertions = true)
         val e = toReview(r.charEnd, crossInsertions = false)
         return s until maxOf(s, e)
@@ -213,6 +236,8 @@ class ChapterRevisionMap(
 
     /** 新文字在审阅空间的位置（绿字）；纯插入同样有区间。 */
     fun reviewInsertedRange(r: TextRevision): IntRange {
+        // 只改段界的修订没有「新文字」副本，也就没有绿字。
+        if (r.id in structureOnly) return IntRange.EMPTY
         val s = toReview(r.charEnd, crossInsertions = false)
         return s until (s + r.renderedLength)
     }
@@ -224,6 +249,13 @@ class ChapterRevisionMap(
      * 修改的提交与「删除这条修改」的判定都用它，免得只选到新文字时看不到任何修订。
      */
     fun reviewInterval(r: TextRevision): IntRange {
+        // 只改段界的修订：审阅空间里它就占合并后的那一段（没有红绿两半），
+        // 点按这段文字照样要能把它认出来（开卡改它 / 删它）。
+        if (r.id in structureOnly) {
+            val s = toReview(r.charStart, crossInsertions = true)
+            val e = toReview(r.charEnd, crossInsertions = false)
+            return s until maxOf(s, e)
+        }
         val del = reviewDeletedRange(r)
         val ins = reviewInsertedRange(r)
         if (del.isEmpty() && ins.isEmpty()) {
@@ -312,8 +344,9 @@ class ChapterRevisionMap(
 
     companion object {
         /** 重放 / 预归一算法版本：进 `contentRev`。规则一改就要 +1。
-         *  2 = 跨叶修订（段数由输入换行数决定，段界见 `RevisionBlocks.SEPARATOR`）。 */
-        const val ALGORITHM_VERSION = 2
+         *  2 = 跨叶修订（段数由输入换行数决定，段界见 `RevisionBlocks.SEPARATOR`）。
+         *  3 = 只改段界的跨叶修订在审阅视图里也按合并落结构（不再排两遍同一段字）。 */
+        const val ALGORITHM_VERSION = 3
 
         private const val FNV_OFFSET = -3750763034362895579L // 14695981039346656037
         private const val FNV_PRIME = 1099511628211L

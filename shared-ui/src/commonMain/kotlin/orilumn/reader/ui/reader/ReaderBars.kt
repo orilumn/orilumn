@@ -103,6 +103,12 @@ fun ReaderBars(
     reviewActive: Boolean = false,
     /** 夜间（深色）模式是否开着（「夜间」按钮跟「审阅」同一套高亮）。 */
     nightActive: Boolean = false,
+    /** 底栏按钮显隐（设置 → 工具栏）：false 时该按钮不出现。「目录」「设置」始终显示。 */
+    showBookmark: Boolean = true,
+    showNote: Boolean = true,
+    showRevision: Boolean = true,
+    showReview: Boolean = true,
+    showNight: Boolean = true,
     /** 顶/底栏实测高度回抛（px）：阅读面据此把栏区落点的手势让给栏，不进翻页层。默认空实现。 */
     onTopBarSize: (androidx.compose.ui.unit.IntSize) -> Unit = {},
     onBottomBarSize: (androidx.compose.ui.unit.IntSize) -> Unit = {},
@@ -207,12 +213,13 @@ fun ReaderBars(
                     horizontalArrangement = Arrangement.SpaceAround,
                 ) {
                     BarTool(BarIcon.Menu, "目录", onToc)
-                    BarTool(BarIcon.Star, "书签", onBookmark)
-                    BarTool(BarIcon.Pencil, "笔记", onNote)
+                    // 书签 / 笔记 / 修改 / 审阅 / 夜间：读者可在设置 → 工具栏里逐个收起。
+                    if (showBookmark) BarTool(BarIcon.Star, "书签", onBookmark)
+                    if (showNote) BarTool(BarIcon.Pencil, "笔记", onNote)
                     // 修改紧挨笔记（两者同属「记录」），审阅再往右：点开才有改动痕迹。
-                    onRevision?.let { BarTool(BarIcon.Edit, "修改", it) }
-                    onReview?.let { BarTool(BarIcon.Review, "审阅", it, active = reviewActive) }
-                    BarTool(BarIcon.Moon, "夜间", onNight, active = nightActive)
+                    if (showRevision) onRevision?.let { BarTool(BarIcon.Edit, "修改", it) }
+                    if (showReview) onReview?.let { BarTool(BarIcon.Review, "审阅", it, active = reviewActive) }
+                    if (showNight) BarTool(BarIcon.Moon, "夜间", onNight, active = nightActive)
                     BarTool(BarIcon.Gear, "设置", onSettings)
                 }
             }

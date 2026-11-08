@@ -123,6 +123,17 @@ data class ReaderSettings(
     val autoContinue: Boolean = true,
     /** Show page numbers. */
     val pageNum: Boolean = false,
+    /**
+     * 底栏按钮显隐（设置 → 工具栏）：true = 显示对应按钮，false = 收进设置里不占位置。
+     *
+     * 纯读者偏好、与某本书无关（纯全局，换书沿用）；只改工具栏怎么画，不进版式比较，
+     * 面板走无重排提交。「目录」「设置」始终显示，不在这里。
+     */
+    val showToolbarBookmark: Boolean = true,
+    val showToolbarNote: Boolean = true,
+    val showToolbarRevision: Boolean = true,
+    val showToolbarReview: Boolean = true,
+    val showToolbarNight: Boolean = true,
     /** Body first-screen cover stretch switch: on = stretch to fill the whole screen (may distort); off = keep aspect ratio (no distortion, reading bg shown around). */
     val coverStretch: Boolean = true,
     /** [Style system] Font size relative to default: 0..100 slider, 50 = default 1.0 (see COMPANION mapping). */
@@ -363,6 +374,12 @@ data class ReaderSettings(
         pageAnimationMode = "",
         autoContinue = false,
         pageNum = false,
+        // 底栏按钮显隐：只改工具栏画什么，不进版式（面板走 onCommitLight）。
+        showToolbarBookmark = false,
+        showToolbarNote = false,
+        showToolbarRevision = false,
+        showToolbarReview = false,
+        showToolbarNight = false,
         coverStretch = false,
         showHiddenFonts = false,
         // 标注色槽族：只改像素，不影响分页；清空后比较相等（面板走 onCommitLight）。
@@ -553,6 +570,11 @@ data class ReaderSettings(
                     pageAnimationMode = SettingsJson.optString(o, "pageAnimationMode", d.pageAnimationMode),
                     autoContinue = SettingsJson.optBoolean(o, "autoContinue", d.autoContinue),
                     pageNum = SettingsJson.optBoolean(o, "pageNum", d.pageNum),
+                    showToolbarBookmark = SettingsJson.optBoolean(o, "showToolbarBookmark", d.showToolbarBookmark),
+                    showToolbarNote = SettingsJson.optBoolean(o, "showToolbarNote", d.showToolbarNote),
+                    showToolbarRevision = SettingsJson.optBoolean(o, "showToolbarRevision", d.showToolbarRevision),
+                    showToolbarReview = SettingsJson.optBoolean(o, "showToolbarReview", d.showToolbarReview),
+                    showToolbarNight = SettingsJson.optBoolean(o, "showToolbarNight", d.showToolbarNight),
                     // Old-key migration: coverProportional(false=stretch) → coverStretch(true=stretch), inverted.
                     coverStretch = if (o.containsKey("coverStretch")) {
                         SettingsJson.optBoolean(o, "coverStretch", d.coverStretch)

@@ -34,6 +34,9 @@ class SettingsLayoutScopeTest {
         "brightnessGestureLeft", "brightnessGestureRight", "brightnessGestureTwo",
         "pageAnim", "pageAnimationMode", "autoContinue", "pageNum", "coverStretch",
         "showHiddenFonts",
+        // 底栏按钮显隐：只改工具栏画什么，不进版式。
+        "showToolbarBookmark", "showToolbarNote", "showToolbarRevision",
+        "showToolbarReview", "showToolbarNight",
         // 标注色槽只改像素，不影响分页。
         "highlightColorSlots", "underlineColorSlots",
         "highlightDefaultSlot", "underlineDefaultSlot",
@@ -85,6 +88,11 @@ class SettingsLayoutScopeTest {
         "pageNum" -> s.copy(pageNum = !s.pageNum)
         "coverStretch" -> s.copy(coverStretch = !s.coverStretch)
         "showHiddenFonts" -> s.copy(showHiddenFonts = !s.showHiddenFonts)
+        "showToolbarBookmark" -> s.copy(showToolbarBookmark = !s.showToolbarBookmark)
+        "showToolbarNote" -> s.copy(showToolbarNote = !s.showToolbarNote)
+        "showToolbarRevision" -> s.copy(showToolbarRevision = !s.showToolbarRevision)
+        "showToolbarReview" -> s.copy(showToolbarReview = !s.showToolbarReview)
+        "showToolbarNight" -> s.copy(showToolbarNight = !s.showToolbarNight)
         "highlightColorSlots" -> s.copy(highlightColorSlots = s.highlightColorSlots + 0x01020304)
         "underlineColorSlots" -> s.copy(underlineColorSlots = s.underlineColorSlots + 0x01020304)
         "highlightDefaultSlot" -> s.copy(highlightDefaultSlot = if (s.highlightDefaultSlot == 0) 1 else 0)

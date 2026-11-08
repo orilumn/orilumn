@@ -340,6 +340,8 @@ fun ReaderSettingsPanel(
                 ItemKey(onEnter = { onCommitLight(s.copy(coverStretch = !s.coverStretch)) }),
                 ItemKey(onEnter = { onCommitLight(s.copy(autoContinue = !s.autoContinue)) }),
                 ItemKey(onEnter = { onCommitLight(s.copy(pageNum = !s.pageNum)) }),
+                // 工具栏按钮显隐（书签 / 笔记 / 修改 / 审阅 / 夜间）：纯 UI 开关，同样无重排。
+                ItemKey(onEnter = { stack.add(Sub.Toolbar) }),
             )
             Sub.Text -> {
                 val px = s.fontSize * ReaderSettings.fontScaleToRatio(s.fontScale)
@@ -542,6 +544,14 @@ fun ReaderSettingsPanel(
                     },
                 )
             }
+            // 工具栏按钮显隐：五项各一个开关，纯 UI（无重排提交）。
+            Sub.Toolbar -> listOf(
+                ItemKey(onEnter = { onCommitLight(s.copy(showToolbarBookmark = !s.showToolbarBookmark)) }),
+                ItemKey(onEnter = { onCommitLight(s.copy(showToolbarNote = !s.showToolbarNote)) }),
+                ItemKey(onEnter = { onCommitLight(s.copy(showToolbarRevision = !s.showToolbarRevision)) }),
+                ItemKey(onEnter = { onCommitLight(s.copy(showToolbarReview = !s.showToolbarReview)) }),
+                ItemKey(onEnter = { onCommitLight(s.copy(showToolbarNight = !s.showToolbarNight)) }),
+            )
             Sub.Theme -> listOf(
                 ItemKey(onEnter = { onCommitTypography(TypographicProfile.withLayoutTheme(s, "original")) }),
                 ItemKey(onEnter = { onCommitTypography(TypographicProfile.withLayoutTheme(s, "modern")) }),
@@ -942,6 +952,7 @@ fun ReaderSettingsPanel(
                                 onUploadFile = onWifiUpload,
                                 p = p,
                             )
+                            Sub.Toolbar -> ToolbarPage(s, keys, nav, onMove, listState, onCommitLight, p)
                             Sub.Spacing -> SpacingPage(s, keys, nav, onMove, listState, p, onPreview, onCommitTypography)
                             Sub.Theme -> ThemePage(s, keys, nav, onMove, listState, onCommitTypography, p)
                             Sub.ReadingTheme -> ReadingThemePage(s, allThemes, keys, nav, onMove, listState, onPreview, onCommitTypography, onCommitLight, p)
@@ -1044,7 +1055,7 @@ private fun WifiImportPage(
 private enum class Sub(val title: String) {
     Home("设置"), Text("文字"), TextFont("字体管理"), WeightPicker("字重"), WifiImport("WIFI 导入"), Spacing("间距"),
     Theme("排版主题"), ReadingTheme("阅读主题"), ThemePresetMgr("预设管理"),
-    Brightness("亮度"), AnimMode("翻页动画模式"), AnnotationColors("笔记"),
+    Brightness("亮度"), AnimMode("翻页动画模式"), AnnotationColors("笔记"), Toolbar("工具栏"),
 }
 
 /** 键盘项：click 与键盘共用同一回调；网格格的左右由调用方配成步进，滑块的左右配成调值。 */
@@ -1116,6 +1127,34 @@ private fun HomePage(
         item { SetSwitch("封面拉伸全屏", s.coverStretch, { commitPlain(s.copy(coverStretch = it)) }, p, nav = nav, index = 8) }
         item { SetSwitch("启动时继续阅读", s.autoContinue, { commitPlain(s.copy(autoContinue = it)) }, p, nav = nav, index = 9) }
         item { SetSwitch("显示页码", s.pageNum, { commitPlain(s.copy(pageNum = it)) }, p, nav = nav, index = 10) }
+        // 工具栏显隐：哪些按钮出现在底栏，读者自己定。
+        item { SetRow("工具栏", onTap = keys[11].onEnter, p = p, nav = nav, index = 11) }
+        item { Spacer(modifier = Modifier.height(24.dp)) }
+    }
+}
+
+/**
+ * 工具栏设置页：底栏每颗可选按钮一个开关，关掉就不在底栏出现。
+ *
+ * 「目录」「设置」不参与：它们是进退出的固定入口，藏掉容易把自己关在门口。
+ * 纯 UI 开关（无重排提交）——只改底栏画什么，与正文排版无关。
+ */
+@Composable
+private fun ToolbarPage(
+    s: ReaderSettings,
+    keys: List<ItemKey>,
+    nav: PanelNav,
+    onMouseMove: () -> Unit,
+    listState: LazyListState,
+    commitPlain: (ReaderSettings) -> Unit,
+    p: Palette,
+) {
+    LazyColumn(state = listState, modifier = Modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
+        item { SetSwitch("书签", s.showToolbarBookmark, { commitPlain(s.copy(showToolbarBookmark = it)) }, p, nav = nav, index = 0) }
+        item { SetSwitch("笔记", s.showToolbarNote, { commitPlain(s.copy(showToolbarNote = it)) }, p, nav = nav, index = 1) }
+        item { SetSwitch("修改", s.showToolbarRevision, { commitPlain(s.copy(showToolbarRevision = it)) }, p, nav = nav, index = 2) }
+        item { SetSwitch("审阅", s.showToolbarReview, { commitPlain(s.copy(showToolbarReview = it)) }, p, nav = nav, index = 3) }
+        item { SetSwitch("夜间模式", s.showToolbarNight, { commitPlain(s.copy(showToolbarNight = it)) }, p, nav = nav, index = 4) }
         item { Spacer(modifier = Modifier.height(24.dp)) }
     }
 }

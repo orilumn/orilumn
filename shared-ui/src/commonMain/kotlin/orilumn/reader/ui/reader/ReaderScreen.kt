@@ -2432,6 +2432,11 @@ fun ReaderScreen(
                 onReview = currentOnReview,
                 reviewActive = reviewActive,
                 nightActive = nightActive,
+                showBookmark = settings.showToolbarBookmark,
+                showNote = settings.showToolbarNote,
+                showRevision = settings.showToolbarRevision,
+                showReview = settings.showToolbarReview,
+                showNight = settings.showToolbarNight,
                 onTopBarSize = { topBarH = it.height },
                 onBottomBarSize = { botBarH = it.height },
             )
@@ -3054,6 +3059,11 @@ fun ReaderScreen(
                 onReview = currentOnReview,
                 reviewActive = reviewActive,
                 nightActive = nightActive,
+                showBookmark = settings.showToolbarBookmark,
+                showNote = settings.showToolbarNote,
+                showRevision = settings.showToolbarRevision,
+                showReview = settings.showToolbarReview,
+                showNight = settings.showToolbarNight,
                 onTopBarSize = { topBarH = it.height },
                 onBottomBarSize = { botBarH = it.height },
             )

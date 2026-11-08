@@ -410,7 +410,8 @@ object TextEditPlanner {
         }
         val finalText = newText.substring(prefix, newText.length - suffix)
         val finalStart = uStart + prefix
-        val finalEnd = uEnd - suffix        // 审阅清单两行：整段选区改之前 / 改之后的文字（渲染空间，按叶各存一份）。
+        val finalEnd = uEnd - suffix
+        // 审阅清单两行：整段选区改之前 / 改之后的文字（渲染空间，按叶各存一份）。
         // 与上面的「最小修订」无关：公共前后缀照裁不误，但清单里仍显示整段，
         // 读者才看得出「改之前是什么、改之后是什么」（纯插入也显示被选中的那段原文）。
         val selected = chapterText.substring(segStart, segEnd)

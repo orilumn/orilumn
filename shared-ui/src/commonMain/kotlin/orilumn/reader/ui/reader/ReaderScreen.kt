@@ -1184,6 +1184,9 @@ fun ReaderScreen(
      * 命中口径与长按标注同一套：只看本章内存修订表（`chapterRevisions` 已是当前文字空间），
      * 按字符区间判，不做几何反查；页边距上按不到行，自然也不会误开。
      *
+     * 命中范围是这条修订的**整段**（原文 + 新文字），不是只认画出来的红绿字——段里保留下来的
+     * 那些字也属于这条修订，点它同样算命中，落到同一条修订上。
+     *
      * 命中后选区恢复成这条修订的**整段**（审阅空间：原文 + 新文字），输入区带出改后的文字——
      * 点红字或点绿字落到的是同一条修订，改的就是它（与 D-36「改过 = 改后的内容」同口径）。
      *
@@ -1194,12 +1197,12 @@ fun ReaderScreen(
         val p = openPos ?: return false
         if (chapterRevisions.isEmpty()) return false
         val offset = charOffsetAt(p, xPx, yPx) ?: return false
-        // 必须按在**画出来的**痕迹上（红字 / 绿字）：本章有修订、但正文没套上审阅空间时
-        // 一个痕迹都不画，这时按审阅空间的区间命中会框错字，宁可不开。
-        val onMark = reviewMarksFor(p.chapter).any { offset >= it.start && offset < it.endExclusive }
-        if (!onMark) return false
+        // 本章有修订、但正文没套上审阅空间时一个痕迹都不画，这时按审阅空间的区间命中会框错字，宁可不开。
+        if (reviewMarksFor(p.chapter).isEmpty()) return false
+        // 命中口径是**整条修订**（原文 + 新文字），不是只认画出来的那几个红绿字：段里保留下来的
+        // 那些字也属于这条修订，点它同样进整体编辑（红绿只是标出真正改动的位置）。
         val revision = chapterRevisions.firstOrNull { r ->
-            r.charStart <= offset && offset < r.charEnd
+            offset >= r.charStart && offset < r.charEnd
         } ?: return false
         val text = currentHost.textOf(p.chapter, 0, Int.MAX_VALUE) ?: return false
         closeAnnotationEdit()

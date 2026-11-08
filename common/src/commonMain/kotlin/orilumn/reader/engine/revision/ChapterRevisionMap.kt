@@ -41,6 +41,15 @@ class ChapterRevisionMap(
      * 此时审阅视图也不会用到这些换算。
      */
     val originalBlockEnds: IntArray = IntArray(0),
+    /**
+     * 修订 id → 它盖住的**原书文字**（原书空间；段与段之间直接相连，不含段界字符）。
+     *
+     * 只服务于审阅视图的**上色精度**：拿它和替换文字对齐一次，就知道哪几个字是真正被删掉 /
+     * 新写进去的，不必把整段原文标红、整段副本标绿（原文里本来就有的字标红是错的）。
+     * 没给（或对齐退化）时 [paintedDeleted] / [paintedInserted] 为空，宿主退回「整段」口径，
+     * 与以前的行为一致。不参与任何坐标换算，也不是落库字段。
+     */
+    val originalTexts: Map<Long, String> = emptyMap(),
 ) {
     val revisions: List<TextRevision> = source.sortedWith(compareBy({ it.charStart }, { it.id }))
 
@@ -189,6 +198,99 @@ class ChapterRevisionMap(
         if (out.isEmpty()) return@lazy IntArray(0)
         out.sort()
         out.toIntArray()
+    }
+
+    /**
+     * 审阅空间里**真正**被删掉的字（红字 + 删除线），按修订 id：
+     * 每项是升序的 `[start0, end0, start1, end1, …]` 字符位对。
+     *
+     * 与 [reviewDeletedRange] 分工不同：那个是「这条修订盖住的整段」（交互判定要用它），
+     * 这里是「其中确实被替换掉的那几个字」（上色用它）。原件里保留下来的字不标红。
+     * 拿不到原文时为空 ⇒ 宿主退回整段口径。
+     */
+    val paintedDeleted: Map<Long, IntArray> by lazy { paintedSpans(deleted = true) }
+
+    /**
+     * 审阅空间里**真正**新写进去的字（绿字），升序字符位对，口径同 [paintedDeleted]。
+     * 副本里每个新插段界前那个 ¶ 也算新写的（段界是读者敲进去的，不是原文里的）。
+     */
+    val paintedInserted: Map<Long, IntArray> by lazy { paintedSpans(deleted = false) }
+
+    private fun paintedSpans(deleted: Boolean): Map<Long, IntArray> {
+        if (originalTexts.isEmpty()) return emptyMap()
+        val out = HashMap<Long, IntArray>(4)
+        for (r in revisions) {
+            if (r.id in structureOnly) continue
+            val old = originalTexts[r.id] ?: continue
+            val new = RevisionBlocks.textOf(r.text)
+            val spans = ArrayList<Int>(4)
+            if (deleted) {
+                // 原文在审阅空间里照原位排（这些修订区间里没有段界痕迹），起点平移一下即可。
+                val base = toReview(r.charStart, crossInsertions = false)
+                for (op in CharDiff.diff(old, new)) {
+                    if (op !is CharDiff.Op.Delete) continue
+                    val s = base + op.oldStart.coerceIn(0, r.originalLength)
+                    val e = base + (op.oldStart + op.length).coerceIn(0, r.originalLength)
+                    if (e > s) {
+                        spans += s
+                        spans += e
+                    }
+                }
+            } else {
+                val base = toReview(r.charEnd, crossInsertions = false)
+                val copy = copyIndex(r)
+                for (p in copy.marks) {
+                    spans += base + p
+                    spans += base + p + 1
+                }
+                var plain = 0
+                for (op in CharDiff.diff(old, new)) {
+                    when (op) {
+                        is CharDiff.Op.Keep -> plain += op.length
+                        is CharDiff.Op.Delete -> Unit
+                        is CharDiff.Op.Insert -> {
+                            val s = base + copy.at(plain)
+                            val e = base + copy.at(plain + op.text.length)
+                            if (e > s) {
+                                spans += s
+                                spans += e
+                            }
+                            plain += op.text.length
+                        }
+                    }
+                }
+            }
+            if (spans.isNotEmpty()) out[r.id] = spans.toIntArray()
+        }
+        return out
+    }
+
+    /**
+     * 替换文字的「字符下标 → 审阅空间副本里的字符位」映射。
+     *
+     * 副本里的段界排成**真块边界 + 一个 ¶**（见 [reviewCopyLength]）：每个段界前那格 ¶
+     * 占一个字符位、段界本身不占，所以字符下标不能直接当副本下标用（文字中间插段界时会错位）。
+     */
+    private class CopyIndex(val slots: IntArray, val marks: IntArray) {
+        fun at(plain: Int): Int = slots[plain.coerceIn(0, slots.size - 1)]
+    }
+
+    private fun copyIndex(r: TextRevision): CopyIndex {
+        val plainLen = RevisionBlocks.renderedLength(r.text)
+        val slots = IntArray(plainLen + 1)
+        val marks = ArrayList<Int>(2)
+        var plain = 0
+        var copy = 0
+        for (c in r.text) {
+            if (c == RevisionBlocks.SEPARATOR) {
+                marks += copy
+                copy++
+            } else {
+                slots[plain++] = copy++
+            }
+        }
+        slots[plainLen] = copy
+        return CopyIndex(slots, marks.toIntArray())
     }
 
     /**

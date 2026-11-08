@@ -387,4 +387,68 @@ class ChapterRevisionMapTest {
         assertEquals(3, map.toRendered(3, crossInsertions = false))
         assertEquals(5, map.toRendered(3, crossInsertions = true))
     }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 上色收窄：整段原文照排，但只有真正改动的那几个字标红 / 标绿
+    // ─────────────────────────────────────────────────────────────────
+
+    /** `[start0, end0, start1, end1, …]` → 便于断言的区间表。 */
+    private fun pairs(spans: IntArray?): List<IntRange> {
+        if (spans == null) return emptyList()
+        val out = ArrayList<IntRange>(spans.size / 2)
+        var i = 0
+        while (i + 1 < spans.size) {
+            out += spans[i] until spans[i + 1]
+            i += 2
+        }
+        return out
+    }
+
+    @Test
+    fun paintedSpansKeepUntouchedTextPlain() {
+        // 原书「甲乙略微一攥，然后」，读者把 [2,7)「略微一攥，」改成「¶略微一攥，¶然后」：
+        // 原文那五个字一个都没删，只是前后各插了一个段界、末尾加了「然后」。
+        val r = rev(2, 7, "${RevisionBlocks.SEPARATOR}略微一攥，${RevisionBlocks.SEPARATOR}然后", id = 1)
+        val map = ChapterRevisionMap(listOf(r), originalTexts = mapOf(1L to "略微一攥，"))
+        // 一个红字都没有：原文里本来就有的字不该标红。
+        assertTrue(map.paintedDeleted.isEmpty())
+        // 副本 = 「¶略微一攥，¶然后」（7 起）：两个绿 ¶ + 绿「然后」，中间那五个字是原样文字。
+        assertEquals(
+            listOf(7 until 8, 13 until 14, 14 until 16),
+            pairs(map.paintedInserted[1L]),
+        )
+        // 交互口径不动：整段（原文 + 新文字）仍然属于同一条修订。
+        assertEquals(2 until 16, map.reviewInterval(r))
+    }
+
+    @Test
+    fun paintedSpansMarkOnlyChangedChars() {
+        // 「甲乙丙丁」把 [1,4)「乙丙丁」改成「乙X丁」：只有「丙」被删、只有「X」是新写的。
+        val r = rev(1, 4, "乙X丁", id = 1)
+        val map = ChapterRevisionMap(listOf(r), originalTexts = mapOf(1L to "乙丙丁"))
+        assertEquals(listOf(2 until 3), pairs(map.paintedDeleted[1L]))
+        // 副本从 4 起排：「乙X丁」，新写的只有中间那格。
+        assertEquals(listOf(5 until 6), pairs(map.paintedInserted[1L]))
+    }
+
+    @Test
+    fun paintedSpansForPlainReplacementAndDeletion() {
+        val replace = rev(1, 3, "X", id = 1)
+        val map = ChapterRevisionMap(listOf(replace), originalTexts = mapOf(1L to "乙丙"))
+        assertEquals(listOf(1 until 3), pairs(map.paintedDeleted[1L]))
+        assertEquals(listOf(3 until 4), pairs(map.paintedInserted[1L]))
+
+        val deletion = rev(1, 3, "", id = 1)
+        val del = ChapterRevisionMap(listOf(deletion), originalTexts = mapOf(1L to "乙丙"))
+        assertEquals(listOf(1 until 3), pairs(del.paintedDeleted[1L]))
+        assertTrue(del.paintedInserted.isEmpty())
+    }
+
+    @Test
+    fun paintedSpansFallBackToWholeRangeWithoutOriginalText() {
+        // 没给原文（老数据 / 取不到原书叶文本）时不上色收窄，宿主退回整段口径。
+        val map = ChapterRevisionMap(listOf(rev(1, 3, "X")))
+        assertTrue(map.paintedDeleted.isEmpty())
+        assertTrue(map.paintedInserted.isEmpty())
+    }
 }

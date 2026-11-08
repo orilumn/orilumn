@@ -758,10 +758,31 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         if (unitAt(chapter)?.hasTextRevisions != true) return emptyList()
         val out = ArrayList<Pair<IntRange, Boolean>>(map.revisions.size * 2)
         for (r in map.revisions) {
-            val del = map.reviewDeletedRange(r)
-            if (!del.isEmpty()) out += del to true
-            val ins = map.reviewInsertedRange(r)
-            if (!ins.isEmpty()) out += ins to false
+            // 收窄口径：只有真正被删掉 / 新写进去的字才标色（原文里保留下来的字不标红）。
+            // 没有原文可比（老数据 / 对齐退化）时退回整段，行为与以前一致。
+            val del = map.paintedDeleted[r.id]
+            val ins = map.paintedInserted[r.id]
+            if (del == null && ins == null) {
+                val d = map.reviewDeletedRange(r)
+                if (!d.isEmpty()) out += d to true
+                val i = map.reviewInsertedRange(r)
+                if (!i.isEmpty()) out += i to false
+                continue
+            }
+            del?.let { spans ->
+                var k = 0
+                while (k + 1 < spans.size) {
+                    if (spans[k + 1] > spans[k]) out += (spans[k] until spans[k + 1]) to true
+                    k += 2
+                }
+            }
+            ins?.let { spans ->
+                var k = 0
+                while (k + 1 < spans.size) {
+                    if (spans[k + 1] > spans[k]) out += (spans[k] until spans[k + 1]) to false
+                    k += 2
+                }
+            }
         }
         // 被删掉的段界：合并段中间那个 ¶ 也是痕迹（红字 + 删除线），只是它不是「字」而是「段界」。
         for (m in map.reviewDeletedBreakMarkers) out += (m until m + 1) to true
@@ -1652,6 +1673,8 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         // 跨叶修订仍不合并块：原文的段落结构原样保留，新文字插在选区末尾之后。
         val structureOnly = HashSet<Long>()
         val claimedLeaves = HashSet<Int>()
+        // 审阅视图的上色精度要的「原书那一串」：修订 id → 它盖住的原书文字（只有 reviewMode 才取）。
+        var rangeTexts: Map<Long, String> = emptyMap()
         if (starts.isNotEmpty()) {
             val crossLeaf = ArrayList<Triple<orilumn.reader.data.revision.TextRevision, Int, Int>>(2)
             for (r in map.revisions) {
@@ -1669,21 +1692,29 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                 // 带段界的单叶修订同样要拆块：读者在段内新敲的换行是段界，不是 `<br>`。
                 if (a != b || hasBreak) crossLeaf += Triple(r, a, b)
             }
-            // 判「只挪段界」要拿原书叶文本：只投影涉及的那几叶（一章最多一两条跨叶修订）。
-            val originalTexts = if (reviewMode && crossLeaf.isNotEmpty()) {
+            // 原书叶文本：判「只挪段界」要用它比对，审阅视图把红绿收窄到真正改动的字也要它。
+            // 只投影涉及的那几叶（一章就一两条修订）。
+            val leafTexts = if (reviewMode) {
+                val indices = HashSet<Int>(map.revisions.size * 2)
+                for (r in map.revisions) {
+                    val a = leafOfOffset(r.charStart)
+                    val b = if (r.originalLength == 0) a else leafOfOffset(r.charEnd - 1)
+                    for (k in a..b) indices += k
+                }
                 bc.originalLeafTexts(
                     cssBundle = unit.cssBundle,
                     profile = profile,
                     contentW = contentW,
                     contentH = contentH,
                     structure = cache,
-                    leafIndices = crossLeaf.flatMap { listOf(it.second, it.third) }.toSet(),
+                    leafIndices = indices,
                 )
             } else {
                 emptyMap()
             }
             for ((r, a, b) in crossLeaf) {
-                val structural = reviewMode && isStructureOnlyRevision(r, a, b, originalTexts, starts)
+                val structural = reviewMode && isStructureOnlyRevision(r, a, b, leafTexts, starts)
+
                 if (reviewMode && !structural) {
                     // 改了字、又插了段界的修订：审阅视图里原文照排，新文字副本接在选区末尾。
                     // 副本里的段界也要落成**真块**（上一行末尾留绿 ¶），不能退化成 `¶` + `<br>`
@@ -1743,6 +1774,19 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                 )
                 mergeIds += r.id
                 if (structural) structureOnly += r.id
+            }
+            if (leafTexts.isNotEmpty()) {
+                // 审阅视图：把每条修订盖住的原书文字交给修订表，它自己对齐出「真正改了哪几个字」，
+                // 上色就不必整段标红 / 整段标绿（原文里本来就有的字标红是错的）。取不到就退回整段。
+                val texts = HashMap<Long, String>(map.revisions.size * 2)
+                for (r in map.revisions) {
+                    if (r.id in structureOnly) continue
+                    val a = leafOfOffset(r.charStart)
+                    val b = if (r.originalLength == 0) a else leafOfOffset(r.charEnd - 1)
+                    val t = originalRangeText(r, a, b, leafTexts, starts) ?: continue
+                    texts[r.id] = t
+                }
+                rangeTexts = texts
             }
         }
 
@@ -1858,6 +1902,8 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                         } else {
                             IntArray(0)
                         },
+                        // 审阅视图的红绿收窄：修订 id → 它盖住的原书文字（正常视图为空）。
+                        originalTexts = rangeTexts,
                     )
                 )
         }
@@ -1926,15 +1972,33 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         if (r.originalLength == 0) {
             return r.text.indexOf(RevisionBlocks.SEPARATOR) >= 0 && RevisionBlocks.textOf(r.text).isEmpty()
         }
+        val old = originalRangeText(r, firstLeaf, lastLeaf, leafTexts, starts) ?: return false
+        return RevisionBlocks.textOf(r.text) == old
+    }
+
+    /**
+     * 修订盖住的**原书文字**（原书空间；跨叶时各叶按顺序相连，段界不算字）。
+     *
+     * 零长度修订（纯插入）返回空串；叶文本缺项 / 越界（重放前的结构与库里的修订对不上）
+     * 返回 null——调用方据此退回「不猜」的路径。
+     */
+    private fun originalRangeText(
+        r: orilumn.reader.data.revision.TextRevision,
+        firstLeaf: Int,
+        lastLeaf: Int,
+        leafTexts: Map<Int, String>,
+        starts: LongArray,
+    ): String? {
+        if (r.originalLength == 0) return ""
         val old = StringBuilder(r.originalLength)
         for (k in firstLeaf..lastLeaf) {
-            val text = leafTexts[k] ?: return false
+            val text = leafTexts[k] ?: return null
             val from = if (k == firstLeaf) r.charStart - starts[k].toInt() else 0
             val to = if (k == lastLeaf) r.charEnd - starts[k].toInt() else text.length
-            if (from < 0 || to > text.length || from > to) return false
+            if (from < 0 || to > text.length || from > to) return null
             old.append(text, from, to)
         }
-        return RevisionBlocks.textOf(r.text) == old.toString()
+        return old.toString()
     }
 
     /**

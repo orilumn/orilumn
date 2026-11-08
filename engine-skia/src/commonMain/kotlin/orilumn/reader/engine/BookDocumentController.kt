@@ -1781,11 +1781,12 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                                         start = at,
                                         endExclusive = at,
                                         text = if (r.text.indexOf(RevisionBlocks.SEPARATOR) >= 0) {
-                                            // 降级路径：换行前仍加一个绿 ¶，与拆分路径一致
-                                            // （用户 2026-11-08 定口：绿 ¶ 放在上一行末尾，像普通字符一样排）。
+                                            // 降级路径：这段副本留在叶内，段界拆不成块，只留一个绿 ¶
+                                            // 顶在断行处（不能连换行一起插：一个段界在审阅空间里只占
+                                            // 一格，多占一格会把后面每个字都推偏一位）。
                                             r.text.replace(
                                                 RevisionBlocks.SEPARATOR.toString(),
-                                                ChapterRevisionMap.BREAK_MARK_CHAR.toString() + "\n",
+                                                ChapterRevisionMap.BREAK_MARK_CHAR.toString(),
                                             )
                                         } else {
                                             r.text

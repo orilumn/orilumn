@@ -323,15 +323,18 @@ class ChapterRevisionMapTest {
 
     @Test
     fun insertedParagraphBreakCountsGreenMarkInReviewCopy() {
-        // 在 2 处插入「甲[段界]乙」：审阅空间的副本是「甲¶\n乙」（段界落成换行，行尾多一个绿 ¶）。
+        // 在 2 处插入「甲[段界]乙」：审阅空间的副本是「甲¶乙」——段界排成真块边界（不占字符），
+        // 断行处留一个绿 ¶（占一格），所以副本三个字。
         val r = rev(2, 2, "甲${RevisionBlocks.SEPARATOR}乙")
         val map = ChapterRevisionMap(listOf(r))
-        assertEquals(2 until 6, map.reviewInsertedRange(r))
-        // 副本里那 4 个字符都夹回插入点。
+        assertEquals(2 until 5, map.reviewInsertedRange(r))
+        // 副本里那 3 个字符都夹回插入点；副本之后紧挨着的原书字从 5 开始（一个段界只占一格）。
         assertEquals(2, map.toOriginalFromReview(2))
+        assertEquals(2, map.toOriginalFromReview(4))
         assertEquals(2, map.toOriginalFromReview(5))
+        assertEquals(5, map.toReview(2))
         // 剪掉副本又是原书那一串。
-        assertEquals("甲乙", map.originalTextFromReview("甲乙甲¶\n乙"))
+        assertEquals("甲乙", map.originalTextFromReview("甲乙甲¶乙"))
         // 副本里那个绿 ¶ 也要能被「取文字」跳过（摘录 / 复制 / 修改卡初值）。
         assertEquals(listOf(3), map.reviewMarkOffsets.toList())
     }

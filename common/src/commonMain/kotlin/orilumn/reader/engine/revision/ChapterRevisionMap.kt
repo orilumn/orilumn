@@ -119,22 +119,13 @@ class ChapterRevisionMap(
      * 这条修订在**审阅空间**里多占的长度（= 排在原文之后的那份「新文字」副本）。
      *
      * 只改段界的修订没有副本：原书文字就是改后的文字，多排一份只会把同一段字显示两遍。
+     *
+     * 副本里的段界落成**真块边界**（不占字符），每个段界前补一个绿 ¶（占一格）⇒ 副本长度正好
+     * 等于替换文字的长度（段界与 ¶ 一对一）。别再按「¶ + 换行」两格算，那会让插入区间多吞掉
+     * 后面一个字（实测：确认修改后紧跟的那个原文字变成绿色）。
      */
     private fun reviewCopyLength(r: TextRevision): Int =
-        if (r.id in structureOnly) 0 else r.renderedLength + reviewBreakCount(r)
-
-    /**
-     * 这条修订的替换文字里插了几个「换行痕迹」（绿 ¶）。
-     *
-     * 审阅视图把替换文字原样接在原文之后展示，其中的段界（[RevisionBlocks.SEPARATOR]）落成
-     * 换行，换行前再插一个绿 ¶ —— 于是「这里插了个段界」也看得见（用户 2026-11-08 定口：
-     * 在两段之间插入换行，就在上一行末尾加一个绿 ¶）。绿 ¶ 也是字符，副本长度要一起算。
-     */
-    private fun reviewBreakCount(r: TextRevision): Int {
-        var n = 0
-        for (c in r.text) if (c == RevisionBlocks.SEPARATOR) n++
-        return n
-    }
+        if (r.id in structureOnly) 0 else r.renderedLength
 
     /**
      * 段界痕迹在**审阅空间**占的位置（一个字符位一个痕迹），按原书偏移升序。
@@ -524,8 +515,9 @@ class ChapterRevisionMap(
          *  4 = 合并段之后的叶只按增量平移（4 以前多算了一整段，字符流与正文投影错位）。
          *  5 = 审阅空间在段界处多排一个 ¶ 痕迹（删掉的段界 / 插入的段界），章文字变了。
          *  6 = 段内新敲的换行也落成真块（单叶拆段）；同一片叶上的几处段界改动合成一次拆块。
-         *  7 = 审阅视图的「新文字副本」里的段界也落成真块（不再排成 `¶` + `<br>`）。 */
-        const val ALGORITHM_VERSION = 7
+         *  7 = 审阅视图的「新文字副本」里的段界也落成真块（不再排成 `¶` + `<br>`）。
+         *  8 = 副本里的段界只占一格（¶），不再按「¶ + 换行」两格算长度。 */
+        const val ALGORITHM_VERSION = 8
 
         private const val FNV_OFFSET = -3750763034362895579L // 14695981039346656037
         private const val FNV_PRIME = 1099511628211L

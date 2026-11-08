@@ -460,23 +460,46 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         val originalText = map.originalTextFromReview(chapterText)
         val originalEnds = blockEnds?.let { ends -> IntArray(ends.size) { map.toOriginalFromReview(ends[it]) } }
         val originalSel = map.originalEditRangeFromReview(start, endExclusive)
-        if (originalSel.isEmpty()) return TextEditPlan.Rejected("请先选择要修改的文字")
         val absorbed = map.revisionsTouchingReview(start, endExclusive)
-        val base = TextEditPlanner.plan(
-            bookId = bookId,
-            chapter = chapter,
-            chapterText = originalText,
-            blockEnds = originalEnds,
-            start = originalSel.first,
-            endExclusive = originalSel.last + 1,
-            replacement = text,
-            // 旧修订单独删（见下）：这里给空表，让算法按「改原书这一段」算最小修订。
-            map = ChapterRevisionMap.EMPTY,
-            groupId = now,
-            now = now,
-            wsOfLeaf = wsOfLeaf,
-            mergeableLeaf = mergeableLeaf,
-        )
+        // 只选中「新添的文字」、而那条修订本来就是纯插入时，原书那一处一个字都没有（原区间是空的）：
+        // 换算是等价的，按替换提交会被当成「没选字」拒掉。这一处改的是「插入什么」，
+        // 按纯插入提交（撤掉旧插入、在原位置落一条新插入，方案 v3.1）。
+        val insertionAt = if (originalSel.isEmpty()) {
+            val point = absorbed.firstOrNull { it.isInsertion }?.charStart
+                ?: return TextEditPlan.Rejected("请先选择要修改的文字")
+            point
+        } else {
+            null
+        }
+        val base = if (insertionAt != null) {
+            TextEditPlanner.planInsertion(
+                bookId = bookId,
+                chapter = chapter,
+                chapterText = originalText,
+                at = insertionAt,
+                replacement = text,
+                blockEnds = originalEnds,
+                groupId = now,
+                now = now,
+                wsOfLeaf = wsOfLeaf,
+            )
+        } else {
+            TextEditPlanner.plan(
+                bookId = bookId,
+                chapter = chapter,
+                chapterText = originalText,
+                blockEnds = originalEnds,
+                start = originalSel.first,
+                endExclusive = originalSel.last + 1,
+                replacement = text,
+                // 旧修订单独删（见下）：这里给空表，让算法按「改原书这一段」算最小修订。
+                map = ChapterRevisionMap.EMPTY,
+                groupId = now,
+                now = now,
+                wsOfLeaf = wsOfLeaf,
+                mergeableLeaf = mergeableLeaf,
+            )
+        }
         if (base !is TextEditPlan.Ready) return base
         val absorbedIds = absorbed.map { it.id }
         val absorbedSet = absorbedIds.toHashSet()

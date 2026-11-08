@@ -144,6 +144,40 @@ object TextEditPlanner {
     }
 
     /**
+     * 审阅空间的纯插入提交（方案 v3.1「添加文字」的最小落地）：在**原书** [at] 处插入 [replacement]，
+     * 原位置一个字都不替换。
+     *
+     * 为什么需要单独一条：[plan] 的选区必须非空（替换语义），而审阅视图里改「一条纯插入的修订」
+     * 时选区只盖得住新添的那几个字——换算回原书空间是空区间，按替换提交会被当成「没选字」拒掉。
+     * 这里给的正是这条修订的本义：在原位置落一条新插入（旧插入由调用方一并作废）。
+     *
+     * 叶归属按插入点算（`leafOf` 取「块尾 > offset」的第一个叶），空白预归一与公共前后缀裁剪
+     * 仍走 [planSegment] 同一条路径，`\n` 在叶内是 `<br>`（与 [plan] 一致）。
+     */
+    fun planInsertion(
+        bookId: Long,
+        chapter: Int,
+        chapterText: String,
+        at: Int,
+        replacement: String,
+        blockEnds: IntArray?,
+        groupId: Long,
+        now: Long = 0L,
+        wsOfLeaf: (Int) -> WhiteSpace = { WhiteSpace.NORMAL },
+    ): TextEditPlan {
+        if (at < 0 || at > chapterText.length) return TextEditPlan.Rejected("选区超出本章范围")
+        val ends = blockEnds?.takeIf { it.isNotEmpty() && it.last() == chapterText.length }
+        val leaf = if (ends == null) 0 else leafOf(ends, at)
+        val leafStart = if (ends == null || leaf == 0) 0 else ends[leaf - 1]
+        val leafEnd = if (ends == null) chapterText.length else ends[leaf]
+        return planSegments(
+            bookId, chapter, chapterText, ChapterRevisionMap.EMPTY, groupId, now, wsOfLeaf,
+            { it }, { r -> r.charStart until r.charEnd },
+            listOf(Segment(at, at, replacement, leaf, leafStart, leafEnd)),
+        )
+    }
+
+    /**
      * 段数变了（输入行数 ≠ 选区跨的叶数）：落**一条跨叶修订**，段界用 [RevisionBlocks.SEPARATOR]。
      *
      * 吸收旧修订后区间可能扩到更多叶，首末叶按扩张后的区间重新定位。跨段改段数**不做公共

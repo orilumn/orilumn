@@ -291,7 +291,9 @@ fun ReaderScreen(
     // 本章正文修订（**渲染坐标**）：正文修改卡用它判「这段字改过没有」——
     // 有修订时「删除」才可点（删除 = 撤掉这条修改、把那段字恢复成原文）。
     var chapterRevisions by remember { mutableStateOf<List<TextRevision>>(emptyList()) }
-    LaunchedEffect(currentHost, openPos?.chapter, selectionMenuVisible, effectiveRevision) {
+    // 审阅开关也是键：修订区间是「当前文字空间」的（审阅 = 原区间 + 紧随其后的新文字），
+    // 切视图后同一章要重读一遍，否则点按命中还按旧空间的区间算。
+    LaunchedEffect(currentHost, openPos?.chapter, selectionMenuVisible, effectiveRevision, reviewActive) {
         val ch = openPos?.chapter
         chapterRevisions = if (ch == null) emptyList() else currentHost.textRevisionsForChapter(ch)
     }
@@ -1176,6 +1178,44 @@ fun ReaderScreen(
         return true
     }
 
+    /**
+     * 审阅视图里点按改动痕迹（红字 = 删掉的原文、绿字 = 新添的文字）：打开正文修改卡、弹出键盘。
+     *
+     * 命中口径与长按标注同一套：只看本章内存修订表（`chapterRevisions` 已是当前文字空间），
+     * 按字符区间判，不做几何反查；页边距上按不到行，自然也不会误开。
+     *
+     * 命中后选区恢复成这条修订的**整段**（审阅空间：原文 + 新文字），输入区带出改后的文字——
+     * 点红字或点绿字落到的是同一条修订，改的就是它（与 D-36「改过 = 改后的内容」同口径）。
+     *
+     * @return true = 已经打开修改卡（本次点按不再翻页 / 开链接 / 切栏）
+     */
+    fun tryOpenReviewEditAt(xPx: Float, yPx: Float): Boolean {
+        if (!reviewActive) return false
+        val p = openPos ?: return false
+        if (chapterRevisions.isEmpty()) return false
+        val offset = charOffsetAt(p, xPx, yPx) ?: return false
+        // 必须按在**画出来的**痕迹上（红字 / 绿字）：本章有修订、但正文没套上审阅空间时
+        // 一个痕迹都不画，这时按审阅空间的区间命中会框错字，宁可不开。
+        val onMark = reviewMarksFor(p.chapter).any { offset >= it.start && offset < it.endExclusive }
+        if (!onMark) return false
+        val revision = chapterRevisions.firstOrNull { r ->
+            r.charStart <= offset && offset < r.charEnd
+        } ?: return false
+        val text = currentHost.textOf(p.chapter, 0, Int.MAX_VALUE) ?: return false
+        closeAnnotationEdit()
+        magnifierFinger = null
+        if (!selection.selectRange(p.chapter, text, revision.charStart, revision.charEnd)) selection.clear()
+        noteText = ""
+        textEditChapter = p.chapter
+        textEditStart = revision.charStart
+        textEditEnd = revision.charEnd
+        textEditText = revision.editedText
+        textEditOpen = true
+        textEditBusy = false
+        selectionMenuVisible = false
+        return true
+    }
+
     fun onTap(xPx: Float, yPx: Float, widthPx: Float, allowFlip: Boolean = true) {
         // 动画播放期间不响应点按：会话在飞时画面正被动画独占（`slideFromPos`/
         // `slideTargetPos` 锁着两页），此时翻页/切栏/跳链接会让像素与数据错位。
@@ -1227,6 +1267,12 @@ fun ReaderScreen(
         if (tappedAnnotation != null) {
             openAnnotationEdit(tappedAnnotation)
             Logger.d("Orilumn.TAP", "tap x=${xPx.roundToInt()} y=${yPx.roundToInt()} → annotation card")
+            return
+        }
+        // 审阅视图：点按改动痕迹（红字 / 绿字）同样直接开卡 + 弹键盘（与点按标注同一套字符区间命中）。
+        // 放在标注之后：同一段字上既有标注又有修订时先按老规矩开标注卡；要改这段字可长按起选再点「编辑」。
+        if (tryOpenReviewEditAt(xPx, yPx)) {
+            Logger.d("Orilumn.TAP", "tap x=${xPx.roundToInt()} y=${yPx.roundToInt()} → review edit card")
             return
         }
         // D-11：有选区时，正文点按只清除选区，不翻页也不开链接。

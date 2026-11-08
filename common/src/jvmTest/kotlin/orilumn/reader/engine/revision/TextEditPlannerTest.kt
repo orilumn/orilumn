@@ -245,6 +245,53 @@ class TextEditPlannerTest {
     }
 
     @Test
+    fun planInsertionAddsTextWithoutReplacingAnything() {
+        // 纯插入（v3.1）：原书那一点一个字都不替换——审阅视图里改「一条纯插入的修订」走这条，
+        // 因为只选中新添的文字时换算回原书空间是空区间，按替换提交会被当成「没选字」。
+        val p = ready(
+            TextEditPlanner.planInsertion(
+                bookId = 1,
+                chapter = 1,
+                chapterText = "abcdef",
+                at = 3,
+                replacement = "XY",
+                blockEnds = intArrayOf(6),
+                groupId = 99,
+                now = 1234,
+            ),
+        )
+        val r = p.inserted.single()
+        assertEquals(3, r.charStart)
+        assertEquals(3, r.charEnd)
+        assertEquals("XY", r.text)
+        assertEquals(2, r.delta)
+        // 清单两行：原文行是空的（没有字被替换掉），新文字行是输入的内容。
+        assertEquals("", r.originalText)
+        assertEquals("XY", r.editedText)
+        assertEquals(3, p.renderedStart)
+        assertEquals(5, p.renderedEndExclusive)
+    }
+
+    @Test
+    fun planInsertionOfBlankTextIsNoop() {
+        // 新文字为空 = 旧插入被撤掉：本身不落修订，但也不算「什么都没改」（调用方要删旧行）。
+        val p = ready(
+            TextEditPlanner.planInsertion(
+                bookId = 1,
+                chapter = 1,
+                chapterText = "abcdef",
+                at = 3,
+                replacement = "",
+                blockEnds = intArrayOf(6),
+                groupId = 99,
+                now = 1234,
+            ),
+        )
+        assertTrue(p.inserted.isEmpty())
+        assertTrue(p.noop)
+    }
+
+    @Test
     fun outOfRangeIsRejected() {
         val p = plan("abcdef", intArrayOf(6), 2, 99, "X")
         assertTrue(p is TextEditPlan.Rejected)

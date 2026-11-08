@@ -451,6 +451,11 @@ class InProgressPagination(
     /** Structured (lazy) prepare result — leaf order/char starts + on-demand block style materialization —
      *  reused for all on-demand shaping in this phase. */
     val prepare: LightPrepare,
+    /**
+     * 会话出生时本章的内容版本（正文修订指纹）。正文改动后版本一换，这个会话在途算出来的
+     * 整章结果就是**上一份文字**的分页，绝不许再落表（`finishCanonicalBackground` 据此丢弃）。
+     */
+    val contentRev: Long = 0L,
 ) {
     /**
      * C2-P2b-4: temp-stream identity for prefill dispatch dedup (was `System.identityHashCode`,

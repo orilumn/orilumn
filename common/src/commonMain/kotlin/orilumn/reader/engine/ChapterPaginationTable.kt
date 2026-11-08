@@ -57,6 +57,32 @@ data class ChapterPaginationTable(
         val blockEndExclusive: Int,
     )
 
+    /**
+     * 正文只换了字、**没有增减行**时，把表的字符偏移整体平移 [delta]（内容版本另行换新）。
+     *
+     * 前提是改动落在第 [pageIndex] 页之内（该页页首之前的字一个没动）：页界由「行」决定，
+     * 每段行数没变 ⇒ 每页装的还是同一批行、页数也不变，只是改动之后的字整体挪了地方。
+     * 于是：
+     * - 第 `pageIndex` 页**页首不动**（改动在它之后），页尾平移 [delta]；
+     * - 之后再每一页的页首 / 页尾都平移 [delta]；
+     * - 之前的页一个字都不动。
+     *
+     * 用法见 `BookDocumentController.reflowAfterContentChange`：平移后的表要与「重塑出来的页界」
+     * 逐页对得上才会被留用，对不上就整章重排。
+     */
+    fun shiftCharsFrom(pageIndex: Int, delta: Int): ChapterPaginationTable {
+        if (delta == 0 || pages.isEmpty()) return this
+        val at = pageIndex.coerceIn(0, pages.lastIndex)
+        val shifted = pages.mapIndexed { i, p ->
+            when {
+                i < at -> p
+                i == at -> p.copy(charEnd = p.charEnd + delta)
+                else -> p.copy(charStart = p.charStart + delta, charEnd = p.charEnd + delta)
+            }
+        }
+        return copy(pages = shifted, totalChars = totalChars + delta)
+    }
+
     /** Converts a list of [PageSlice] (the engine's runtime page representation) into this
      *  persistable table, computing the chapter-level totals and block ranges. */
     companion object {

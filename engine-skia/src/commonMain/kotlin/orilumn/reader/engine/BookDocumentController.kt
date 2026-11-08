@@ -365,6 +365,18 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
      * 调用前宿主必须已经 `reloadTextRevisions()`（或至少让数据库里能读到新表）。
      */
     fun invalidateChapterContent(chapter: Int) {
+        dropChapterContentCaches(chapter)
+        val unit = unitAt(chapter)
+        unit?.evictParsedState()
+        unit?.invalidateLayout()
+        Logger.w(logTag, "revisions invalidate ch=$chapter rev=${chapterContentRev(chapter)}")
+    }
+
+    /**
+     * 只丢一章的**磁盘侧**内容派生物：当前参数指纹的分页表文件、页数清单里本章的结论，
+     * 再派一趟定点补排。不动内存里的解析态与版式（调用方按需自己清）。
+     */
+    private fun dropChapterContentCaches(chapter: Int) {
         // 本章当前参数指纹的分页表文件直接删掉：contentRev 已能挡住旧表，但提交是低频事件，
         // 顺手删掉省得后台 sweep 再去认一次；别的参数指纹的表留着（回退参数时还有用）。
         if (bookId >= 0) {
@@ -384,13 +396,170 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                 diskPageCounts = diskPageCounts.filterKeys { it.chapter != chapter }
             }
         }
-        val unit = unitAt(chapter)
-        unit?.evictParsedState()
-        unit?.invalidateLayout()
-        Logger.w(logTag, "revisions invalidate ch=$chapter rev=${chapterContentRev(chapter)}")
         // 本章页数已作废：不在眼前时没人会替它重排，全书页码就会一直缺这一章（页脚退成百分比）。
         // 定点补排把它排回磁盘（在眼前时 B1/落位自己管，[repairMissingPageCounts] 会跳过）。
         repairMissingPageCounts("revision")
+    }
+
+    /**
+     * 正文改动（提交一次修改 / 撤销一条修改）之后的落位。**先试「不重排」**（2026-11-08 用户定口）：
+     *
+     * 1. **页界没变就不重排**：读者只是换掉 / 删掉几个字，本章每一段的**行数都没增减**
+     *    ⇒ 每页装的还是同一批行、页数也不变，只是改动之后的字符偏移整体平移了。
+     *    这里只重塑当前页那一窗（反正重画也要塑），拿「重塑出来的页界 == 平移后的表」当判据：
+     *    成立就把表原样留用（内容版本换新、写回磁盘），读者停在原页原位，页面不跳。
+     * 2. 页界变了（增减了行 / 跨段并拆 / 改动跨了页 / 本章还在临时表会话里）就正式重排，
+     *    锚点是**改动前的当前页页首**——与开关审阅模式同一条路：长章照常起临时表（页首那一行
+     *    就是锚页的首行），短章整章排完落在含页首的那一页。绝不按「改到哪儿」落位：那会把读者
+     *    拽到改动所在的页，看着就是乱跳（本函数存在的原因）。
+     *
+     * 调用前宿主必须已经 [reloadTextRevisions]（新修订表已可读），并且**用改动前的修订表**把
+     * 落位锚点换算成原书坐标再传进来。
+     *
+     * @param chapter 改的是哪一章。
+     * @param prevPageCharStart 改动前当前页的页首（**旧渲染空间**）；null = 读者不在这一章。
+     * @param prevPageOriginalStart 同一处内容的**原书坐标**（落位用）。
+     * @param changeOldStart / changeOldEndExclusive 改前选区（或撤掉的那条修订）在旧渲染空间的
+     *   区间；只有整段落在当前页之内才可能「不重排」。
+     * @return 新的落位（章 + 页）；null = 不在当前章，或重排失败。
+     */
+    suspend fun reflowAfterContentChange(
+        chapter: Int,
+        prevPageCharStart: Int?,
+        prevPageOriginalStart: Int?,
+        changeOldStart: Int,
+        changeOldEndExclusive: Int,
+    ): Pair<Int, PageSlice>? {
+        val unit = unitAt(chapter) ?: return null
+        if (prevPageCharStart == null || prevPageOriginalStart == null) {
+            invalidateChapterContent(chapter)
+            return null
+        }
+        val bc = layouter as? BoxChapterLayouter
+        val oldTable = unit.paginationTable
+        val oldPageIndex = oldTable?.let { pageIndexForChar(it.pages, prevPageCharStart) } ?: -1
+        val oldPage = oldTable?.pages?.getOrNull(oldPageIndex)
+        val canTryFast = bc != null && oldTable != null && oldPage != null &&
+            unit.inProgress == null && oldTable.paramHash == currentParamHash() &&
+            viewW > 0 && viewH > 0 &&
+            changeOldStart >= prevPageCharStart &&
+            changeOldEndExclusive <= oldPage.charEnd
+
+        // 内容变了：解析态与版式一律作废。磁盘表先留着——快路径判成功后才换成平移后的新表；
+        // 判失败再走 [dropChapterContentCaches] 把它删掉重排。
+        unit.evictParsedState()
+        unit.invalidateLayout()
+        ensureMarkup(chapter)
+        // 有修订却没能重放（没有持久化结构的章）时不许走快路径：那时树还是原文，比出来必然「没变」。
+        val revisionsApplied = unit.hasTextRevisions || (revisionMaps[chapter]?.isEmpty != false)
+
+        if (canTryFast && unit.markup != null && revisionsApplied) {
+            fastReflowPreservingPage(unit, bc!!, oldTable!!, oldPageIndex)?.let { return it }
+        }
+
+        // 正式重排：按改前页首锚定。
+        dropChapterContentCaches(chapter)
+        Logger.w(logTag, "revisions reflow ch=$chapter rev=${chapterContentRev(chapter)} page=$oldPageIndex")
+        val target = renderedOffset(chapter, prevPageOriginalStart).coerceAtLeast(0)
+        clearFlipDir("content-change")
+        preemptForNavigation()
+        val rebuilt = ensureChapterLayout(chapter, target, headLift = false) ?: return null
+        rebuilt.inProgress?.let { ip ->
+            val p = ip.currentSlice ?: return@let
+            logJumpLanding("content-change", chapter)
+            evictFarChapters(keep = chapter)
+            return chapter to p
+        }
+        val page = pageForChar(rebuilt, target, nearestStart = true) ?: rebuilt.firstPage() ?: return null
+        logJumpLanding("content-change", chapter)
+        evictFarChapters(keep = chapter)
+        return chapter to page
+    }
+
+    /**
+     * 「页界没变」快路径：把改动后的内容只按当前页那一窗重塑一次，验证页界确实与平移后的表一致。
+     *
+     * 成立时：表原样留用（字符偏移平移、内容版本换新、写回磁盘），读者停在原页原位。
+     * 不成立时回 null，不写表、不绑定任何显示态（由调用方删表重排）；这一窗顺带算出来的
+     * 结构与块形状都是**新文字**的，重排时照常复用，不是白算。
+     */
+    private suspend fun fastReflowPreservingPage(
+        unit: ChapterUnit,
+        bc: BoxChapterLayouter,
+        table: ChapterPaginationTable,
+        pageIndex: Int,
+    ): Pair<Int, PageSlice>? {
+        val contentWidth = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
+        val contentHeight = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
+        val paramHash = currentParamHash()
+        val t0 = platformNowMs()
+        return layoutMutex.withLock {
+            val markup = unit.markup ?: return@withLock null
+            if (viewW <= 0 || viewH <= 0) return@withLock null
+            bindChapterFor(unit)
+            val prepare = bc.prepareLight(
+                markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight,
+                onStructureComputed = { h, cw, chh -> saveUnitStructure(unit, h, cw, chh) },
+            )
+            // 段数变了（并段 / 拆段）⇒ 块下标整体错位，表一个字符偏移都不能按「平移」算。
+            if (prepare.totalBlocks != table.totalBlocks) {
+                Logger.w(logTag, "content-change fast miss ch=${unit.chapterIndex} blocks=${prepare.totalBlocks}/${table.totalBlocks}")
+                return@withLock null
+            }
+            val delta = prepare.totalChars - table.totalChars
+            val rec = table.pages[pageIndex]
+            // 版本号必须换成新的：字符偏移尽管没动（delta=0 时表原样返回），内容版本也变了。
+            val shifted = table.shiftCharsFrom(pageIndex, delta)
+                .copy(contentRev = chapterContentRev(unit.chapterIndex))
+            // 按**平移后的表**塑这一窗：当前页页首仍被钉在原页首（改动在它之后），页尾则是本地
+            // 重新分页算出来的。拿它与「旧页尾 + 本章字数差」比，就是「每段行数有没有变」的硬判据
+            // ——行数没变，页还是断在原来那一行，字符自然只挪了 delta；行数变了它就对不上。
+            val product = bc.incrementalLayoutForPage(
+                prepare = prepare,
+                profile = profile,
+                contentW = contentWidth,
+                contentH = contentHeight,
+                table = shifted,
+                targetPage = pageIndex,
+                pagesToShape = FAST_REFLOW_VERIFY_PAGES,
+                cache = unitShapeCache(unit),
+                // 预填的形状是**旧文字**塑出来的，内容版本一变就不许用（见 WindowPrefillShapes）。
+                prefillL2 = windowPrefillShapesFor(unit, shifted),
+            )
+            val shaped = product.slices.getOrNull(pageIndex)
+            val ok = shaped != null && shaped.firstLine >= 0 &&
+                shaped.charStart == rec.charStart &&
+                shaped.charEnd == rec.charEnd + delta
+            if (!ok) {
+                Logger.w(logTag, "content-change fast miss ch=${unit.chapterIndex} page=$pageIndex delta=$delta " +
+                    "shaped=${shaped?.let { "[${it.charStart},${it.charEnd}) l=${it.firstLine}..${it.lastLineExclusive}" }} " +
+                    "table=[${rec.charStart},${rec.charEnd})")
+                return@withLock null
+            }
+            val upto = minOf(pageIndex + FAST_REFLOW_VERIFY_PAGES, shifted.pages.size)
+            unit.bindPaginationTable(shifted)
+            unit.bind(product.layout, product.slices)
+            unit.shapedPageFrom = pageIndex
+            unit.shapedPageTo = upto
+            unit.pageCache[pageIndex] = ChapterUnit.PageProduct(product.layout, product.slices, paramHash)
+            // 表跟着换新：内容版本变了，旧表文件读不回来；趁手上这份是对的，直接写回。
+            val cache = cacheStore()
+            if (cache != null && bookId >= 0) {
+                val file = cache.file("book_$bookId", unit.chapterIndex, paramHash)
+                runCatching { cache.write(shifted, file) }
+                    .onFailure { Logger.e(logTag, "content-change write FAIL ch=${unit.chapterIndex} ${it.message}") }
+            }
+            notePageCountKnown(unit.chapterIndex, paramHash, shifted.totalPages)
+            // 提交后 UI 要立刻把改后的文字重新选起来（靠整章文本）。小章顺手算出来（百毫秒级），
+            // 大章这一笔太贵，仍交给后台投影——选不中只是少一次高亮，页面本身已经对了。
+            if (prepare.totalBlocks in 1..SMALL_CHAPTER_BLOCKS) {
+                runCatching { unit.putTextProjection(prepare.chapterTextProjection()) }
+            }
+            scheduleChapterTextProjection(unit, profile, contentWidth, contentHeight)
+            Logger.w(logTag, "content-change kept pagination ch=${unit.chapterIndex} page=$pageIndex delta=$delta " +
+                "pages=${shifted.totalPages} t=${platformNowMs() - t0}ms")
+            unit.chapterIndex to product.slices[pageIndex]
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -2173,6 +2342,17 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
 private val SMALL_CHAPTER_BLOCKS = 120
 
 /**
+ * 「页界没变」快路径要重塑几页（[BookDocumentController.reflowAfterContentChange]）。
+ *
+ * 当前页本身是要重画的，多塑一页是为了让**当前页的页尾不再落在窗口边上**：增量塑形会把
+ * 窗口末页的页尾钉到下一页表首（好让下一个窗口接上），只塑 1 页时当前页的页尾就被钉死、
+ * 变成恒等式，什么都判不出来。塑 2 页 ⇒ 当前页页尾由本地重新分页算出，拿它与
+ * 「旧页尾 + 本章字数差」比，就是「每段行数有没有变」的硬判据；它若变了，当前页页尾立刻对不上。
+ * 2 页的代价比整章重排便宜一个数量级。
+ */
+private val FAST_REFLOW_VERIFY_PAGES = 2
+
+/**
  * 整书 B2 派发前的静默窗口（ms，第三优先级）。
  *
  * 见 [BookDocumentController.requestWholeBookRelayout]：请求只登记，静默这么久才真派。
@@ -2290,7 +2470,8 @@ private fun startAnchorStream(
     // tune outside tempStateLock, so temp shaping must read THIS snapshot uniformly. Immutable data
     // class, so a reference IS the snapshot (no copy needed).
     val snapshot = profile
-    val ip = InProgressPagination(unit.chapterIndex, paramHash, anchorBlock, contentW, contentH, snapshot, prepare)
+    val ip = InProgressPagination(unit.chapterIndex, paramHash, anchorBlock, contentW, contentH, snapshot, prepare,
+        contentRev = chapterContentRev(unit.chapterIndex))
     // This anchor stream is a NEW layout-parameter cycle. The per-block shape cache is keyed only by
     // leaf index, so a reused map would serve stale shapes shaped under the previous 行距/字号 —
     // Line-height changes (行距) would then never reflow live (paragraph margins don't live in the
@@ -3233,6 +3414,8 @@ private var windowPrefillL2: WindowPrefillShapes? = null
 private data class WindowPrefillShapes(
     val chapterIndex: Int,
     val paramHash: Long,
+    /** 这些形状是按**哪一版文字**塑出来的（见 [publishPrefillShapes]）。 */
+    val contentRev: Long,
     val shapes: Map<Int, ParagraphShapeRef>,
 )
 
@@ -3587,7 +3770,13 @@ private fun scheduleTempEdgePrefill(unit: ChapterUnit, ip: InProgressPagination)
  *  cascade（去 16 截断后放量，池槽会被 cascade 淹没）。同（章，表 hash，profile）
  *  inputs 相同 → 首个任务计算并发布，后续复用。last-writer-wins + 不可变结果，
  *  竞态 benign；参数/视口一变 key 即失配，回落重算（正确性仍由各任务既有守卫兜底）。 */
-private data class WindowPrepKey(val chapter: Int, val hash: Long, val profile: TypographicProfile)
+private data class WindowPrepKey(
+    val chapter: Int,
+    val hash: Long,
+    /** 本章内容版本：正文改过（提交 / 撤销修订）后旧 prepare 里是旧文字，绝不许复用。 */
+    val contentRev: Long,
+    val profile: TypographicProfile,
+)
 @Volatile
 private var windowPrepCache: Pair<WindowPrepKey, LightPrepare>? = null
 
@@ -3617,7 +3806,7 @@ private suspend fun prefillPageTask(chapterIdx: Int, page: Int, anchor: Int, ass
     if (rec.blockEndExclusive <= lo) return
     // 同一落位的任务共享 light prepare（见 windowPrepCache）：各跑一次 cascade 是纯浪费。
     // 组装用的第二次 prepareLight 与此处同参，一并复用（原代码重复计算）。
-    val prepKey = WindowPrepKey(chapterIdx, hash, profileSnap)
+    val prepKey = WindowPrepKey(chapterIdx, hash, chapterContentRev(chapterIdx), profileSnap)
     val lp = windowPrepCache?.takeIf { it.first == prepKey }?.second
         ?: bc.prepareLight(markup, css, profileSnap, cw, u0.structureCache, chh, onStructureComputed = { h, cw, chh -> saveUnitStructure(u0, h, cw, chh) })
             .also { windowPrepCache = prepKey to it }
@@ -3628,7 +3817,7 @@ private suspend fun prefillPageTask(chapterIdx: Int, page: Int, anchor: Int, ass
         if (!local.containsKey(b)) local[b] = bc.tempShape(local, lp, b, profileSnap)
     }
     if (local.isEmpty()) return
-    publishPrefillShapes(chapterIdx, hash, local)
+    publishPrefillShapes(chapterIdx, hash, chapterContentRev(chapterIdx), local)
     // Non-priority side stays L2-warmed (shaping covered); assembly is priority-side only —
     // doubling it per landing cost more (device-measured) than the backward-hit rate covers.
     if (!assemble) return
@@ -3681,14 +3870,21 @@ private suspend fun prefillPageTask(chapterIdx: Int, page: Int, anchor: Int, ass
 /** P2.1: merge warmed blocks into the published L2 snapshot (copy-on-write replace). */
 private val prefillPublishMutex = Mutex()
 
-private suspend fun publishPrefillShapes(chapterIdx: Int, hash: Long, extra: Map<Int, ParagraphShapeRef>) {
+private suspend fun publishPrefillShapes(
+    chapterIdx: Int,
+    hash: Long,
+    contentRev: Long,
+    extra: Map<Int, ParagraphShapeRef>,
+) {
     if (extra.isEmpty()) return
     prefillPublishMutex.withLock {
         val cur = windowPrefillL2
-        val merged = if (cur != null && cur.chapterIndex == chapterIdx && cur.paramHash == hash) {
+        val merged = if (cur != null && cur.chapterIndex == chapterIdx && cur.paramHash == hash &&
+            cur.contentRev == contentRev
+        ) {
             HashMap(cur.shapes).also { it.putAll(extra) }
         } else HashMap(extra)
-        windowPrefillL2 = WindowPrefillShapes(chapterIdx, hash, merged)
+        windowPrefillL2 = WindowPrefillShapes(chapterIdx, hash, contentRev, merged)
     }
     Logger.w(logTag, "win-prefill ch=$chapterIdx +${extra.size} blocks")
 }
@@ -3697,6 +3893,8 @@ private suspend fun publishPrefillShapes(chapterIdx: Int, hash: Long, extra: Map
 private fun windowPrefillShapesFor(unit: ChapterUnit, table: ChapterPaginationTable): Map<Int, ParagraphShapeRef>? {
     val s = windowPrefillL2 ?: return null
     if (s.chapterIndex != unit.chapterIndex || s.paramHash != table.paramHash) return null
+    // 正文改过：表的内容版本一换，旧形状就是上一份文字的行几何，取来画就是「旧字新页」。
+    if (s.contentRev != table.contentRev) return null
     return s.shapes
 }
 
@@ -4128,6 +4326,13 @@ private fun finishCanonicalBackground(
         Logger.w(logTag, "layout ${ctx(unit)} CANONICAL-STALE-DROP ch=${unit.chapterIndex}")
         return
     }
+    // 正文改过（内容版本换了）：这份整章结果是**上一份文字**排出来的，字符偏移全错，落表即毒。
+    val rev = chapterContentRev(unit.chapterIndex)
+    if (ip.contentRev != rev) {
+        Logger.w(logTag, "layout ${ctx(unit)} CANONICAL-CONTENT-STALE-DROP ch=${unit.chapterIndex} " +
+            "rev=${ip.contentRev}->$rev")
+        return
+    }
     val cache = cacheStore()
     val cacheFile = if (cache != null && bookId >= 0) {
         cache.file("book_$bookId", unit.chapterIndex, paramHash)
@@ -4140,7 +4345,7 @@ private fun finishCanonicalBackground(
             slices = slices,
             totalBlocks = slices.maxOf { it.blockEndExclusive },
             totalChars = totalChars,
-            contentRev = chapterContentRev(unit.chapterIndex),
+            contentRev = rev,
         )
         runCatching { cache.write(table, cacheFile) }
             .onFailure { Logger.e(logTag, "canonical WRITE FAIL ch=${unit.chapterIndex} ${it.message}") }
@@ -4920,6 +5125,8 @@ private fun finishCanonicalBackground(
     private fun fullLayoutAndPersist(unit: ChapterUnit, bc: BoxChapterLayouter, contentW: Int, contentH: Int, paramHash: Long, checkpoint: () -> Unit = {}) {
         bindChapterFor(unit)
         val markup = unit.markup ?: return
+        // 进函数先钉住内容版本：整章排完可能已经是几秒后，中途读者改了正文就不能落表（见下的判据）。
+        val rev = chapterContentRev(unit.chapterIndex)
         val prep = prepareFor(unit, bc, markup, contentW, contentH, paramHash)
         // P1: chunk workers deleted (P13) — sequential canonical for all sizes.
         val product = bc.fullLayout(prep, profile, contentW, contentH, checkpoint) ?: return
@@ -4927,6 +5134,12 @@ private fun finishCanonicalBackground(
         // P1f: completion gate (same as canonical-background above) — stale product dropped.
         if (paramHash != currentParamHash()) {
             Logger.w(logTag, "layout ${ctx(unit)} FULL-PRELIM-STALE-DROP ch=${unit.chapterIndex}")
+            return
+        }
+        // 正文改过（内容版本换了）：这一份是上一份文字排的，字符偏移全错，落表即毒。
+        if (rev != chapterContentRev(unit.chapterIndex)) {
+            Logger.w(logTag, "layout ${ctx(unit)} FULL-PRELIM-CONTENT-STALE-DROP ch=${unit.chapterIndex} " +
+                "rev=$rev->${chapterContentRev(unit.chapterIndex)}")
             return
         }
         // 空章（纯封面页/全空白）不落表，但页数是已知的 0 —— 全书页码要靠它凑齐。
@@ -4942,7 +5155,7 @@ private fun finishCanonicalBackground(
                 slices = slices,
                 totalBlocks = slices.maxOf { it.blockEndExclusive },
                 totalChars = slices.last().charEnd,
-                contentRev = chapterContentRev(unit.chapterIndex),
+                contentRev = rev,
             )
             runCatching { cache.write(table, cacheFile) }
                 .onFailure { Logger.e(logTag, "full prelim WRITE FAIL ch=${unit.chapterIndex} ${it.message}") }

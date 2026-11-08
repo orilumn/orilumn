@@ -200,6 +200,8 @@ class TabletReaderHost(
                         selEnd = plan.renderedEndExclusive,
                     )
                 }
+                // 改前页首（坐标用**旧**修订表算）：改完按同一处内容落位，不按「改到哪儿」落位。
+                val anchor = currentPageAnchor(chapter)
                 val saved = runCatching {
                     repository.replaceTextRevisions(plan.deletedIds, plan.inserted)
                 }.getOrNull()
@@ -207,9 +209,20 @@ class TabletReaderHost(
                     return@withContext TextEditOutcome.Failed("保存失败")
                 }
                 controller.reloadTextRevisions()
-                controller.invalidateChapterContent(chapter)
-                val pos = runCatching { controller.openAtChar(chapter, plan.renderedStart) }.getOrNull()
-                    ?: return@withContext TextEditOutcome.Failed("重排失败")
+                val pos = if (anchor != null) {
+                    controller.reflowAfterContentChange(
+                        chapter = chapter,
+                        prevPageCharStart = anchor.first,
+                        prevPageOriginalStart = anchor.second,
+                        changeOldStart = start,
+                        changeOldEndExclusive = endExclusive,
+                    ) ?: return@withContext TextEditOutcome.Failed("重排失败")
+                } else {
+                    // 拿不到改前页首（不在这一章 / 还没落位）：退回旧口径，按改动起点落位。
+                    controller.invalidateChapterContent(chapter)
+                    runCatching { controller.openAtChar(chapter, plan.renderedStart) }.getOrNull()
+                        ?: return@withContext TextEditOutcome.Failed("重排失败")
+                }
                 // 本章页数变了：页脚页码 / 目录页码跟着刷新（页码清单已在本章作废）。
                 pageNumberTick++
                 TextEditOutcome.Success(
@@ -223,31 +236,45 @@ class TabletReaderHost(
 
     /**
      * 删除一条正文修订（编辑清单行左滑删除）：落库 → 重读修订 → 只作废该章。
-     * 删的是当前阅读章时按**当前页首**重新落位（删除可能让前面的文字回退），
+     * 删的是当前阅读章时按**删除前的当前页首**重新落位（删除可能让前面的文字回退），
      * 并把新落位交给阅读面；别的章只作废缓存，不动当前页。
      */
     override suspend fun deleteTextRevision(revision: TextRevision): TextRevisionDeleteOutcome =
         withContext(Dispatchers.IO) {
             // 先记当前页首（**原书**空间）：删除后按同一处内容重新落位，不把读者拽到清单行处。
             // 页首 slice 是渲染坐标，先换回原书坐标，删除后再换算成新的渲染坐标。
-            val keepOriginal = runCatching { controller.locateStart() }
-                .getOrNull()
-                ?.takeIf { it.first == revision.chapter }
-                ?.second?.charStart
-                ?.let { controller.originalOffset(revision.chapter, it) }
+            val anchor = currentPageAnchor(revision.chapter)
+            // 被删的那条修订在**旧**渲染空间占的区间（判「改掉的是不是只在当前页之内」）。
+            val changeRange = controller.textRevisionRange(revision.chapter, revision)
             val removed = runCatching { repository.deleteTextRevision(revision.id) }.isSuccess
             if (!removed) return@withContext TextRevisionDeleteOutcome.Failed
             controller.reloadTextRevisions()
-            controller.invalidateChapterContent(revision.chapter)
             // 本章页数可能变了：页脚 / 目录页码跟着刷新。
             pageNumberTick++
-            val pos = keepOriginal?.let { char ->
-                val rendered = controller.renderedOffset(revision.chapter, char)
-                runCatching { controller.openAtChar(revision.chapter, rendered) }.getOrNull()
-                    ?.let { ReaderPos(it.first, it.second, atCover = false) }
+            val pos = if (anchor != null) {
+                controller.reflowAfterContentChange(
+                    chapter = revision.chapter,
+                    prevPageCharStart = anchor.first,
+                    prevPageOriginalStart = anchor.second,
+                    changeOldStart = changeRange.first,
+                    changeOldEndExclusive = changeRange.last + 1,
+                )?.let { ReaderPos(it.first, it.second, atCover = false) }
+            } else {
+                controller.invalidateChapterContent(revision.chapter)
+                null
             }
             TextRevisionDeleteOutcome.Success(pos)
         }
+
+    /**
+     * 改前当前页的落位锚点：([旧渲染空间页首], [同一处的原书坐标])。
+     * 不在这一章 / 还没落位时回 null（调用方退回旧口径）。
+     */
+    private suspend fun currentPageAnchor(chapter: Int): Pair<Int, Int>? {
+        val (ch, slice) = runCatching { controller.locateStart() }.getOrNull() ?: return null
+        if (ch != chapter) return null
+        return slice.charStart to controller.originalOffset(chapter, slice.charStart)
+    }
 
     /**
      * 审阅视图开关（排版前的另一份预处理）：有修订的章按「原文全保留 + 新文字插在后面」重排，

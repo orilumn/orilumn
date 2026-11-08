@@ -51,3 +51,49 @@ internal fun annotationDecorStroke(lineStyle: AnnotationLineStyle): DecorStroke 
         AnnotationLineStyle.Dashed -> DecorStroke.Dashed
         else -> DecorStroke.Solid
     }
+
+/** 审阅视图的改动色：删除用红、新增用绿（2026-11-08 用户定口）。 */
+internal const val REVIEW_DELETED_ARGB: Int = 0xFFE53935.toInt()
+internal const val REVIEW_INSERTED_ARGB: Int = 0xFF2E7D32.toInt()
+
+/**
+ * 审阅视图的改动痕迹 → 渲染层装饰区间（用户层投影输入）。
+ *
+ * 删除：整段原文换成**红字 + 红色删除线**（原文在审阅空间里仍排出来，所以划得着）；
+ * 新增：新文字换成**绿字**。不画框 —— 痕迹只落在字上（字色 + 删除线），版面不多一圈墨。
+ * 两条都走 [DecorKind.TEXT_COLOR]（改字色）/ [DecorKind.STRIKETHROUGH]（划线），不改字形与断行。
+ * 区间由宿主给出，已经是审阅空间坐标。
+ */
+internal fun reviewDecorRanges(marks: List<ReviewMark>): List<DecorRange> {
+    if (marks.isEmpty()) return emptyList()
+    val out = ArrayList<DecorRange>(marks.size * 2)
+    for (m in marks) {
+        if (m.endExclusive <= m.start) continue
+        // 优先级压过标注（标注是 0）：审阅痕迹得压在读者自己的高亮/划线之上，不被糊住。
+        if (m.deleted) {
+            out += DecorRange(
+                start = m.start,
+                endExclusive = m.endExclusive,
+                kind = DecorKind.STRIKETHROUGH,
+                argb = REVIEW_DELETED_ARGB,
+                priority = 1,
+            )
+            out += DecorRange(
+                start = m.start,
+                endExclusive = m.endExclusive,
+                kind = DecorKind.TEXT_COLOR,
+                argb = REVIEW_DELETED_ARGB,
+                priority = 1,
+            )
+        } else {
+            out += DecorRange(
+                start = m.start,
+                endExclusive = m.endExclusive,
+                kind = DecorKind.TEXT_COLOR,
+                argb = REVIEW_INSERTED_ARGB,
+                priority = 1,
+            )
+        }
+    }
+    return out
+}

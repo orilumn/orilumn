@@ -78,6 +78,8 @@ fun PrerasterOnPrefill(
      * 而预栅格的指纹又必须与首帧绘制逐字相等，两边只能走同一条「按页所属章取标注」的口径。
      */
     annotationsFor: (chapter: Int) -> List<Annotation>? = { null },
+    /** 按章取审阅视图的改动痕迹（[ReaderHost.reviewMarks]）；空表 = 正常视图，不投影任何痕迹。 */
+    reviewMarksFor: (chapter: Int) -> List<ReviewMark> = { emptyList() },
 ) {
     val hostRef = rememberUpdatedState(host)
     val onPrefillRef = rememberUpdatedState<suspend (Int, Int) -> Unit>(onPrefillReady)
@@ -87,6 +89,7 @@ fun PrerasterOnPrefill(
     val imgCacheRef = rememberUpdatedState(imgCache)
     val bgCacheRef = rememberUpdatedState(bgCache)
     val annotationsRef = rememberUpdatedState(annotationsFor)
+    val reviewMarksRef = rememberUpdatedState(reviewMarksFor)
     // 闸 2：同一时刻只允许一张预栅格在跑，不排队（排队＝把成本推给用户）。
     val prerasterBusy = remember { mutableStateOf(false) }
 
@@ -150,6 +153,7 @@ fun PrerasterOnPrefill(
                         // 否则预栅出来的位图与首帧绘制不等，白栅一次。
                         annotations = annotationsRef.value(target.chapter).orEmpty(),
                         annotationChapter = target.chapter,
+                        reviewMarks = reviewMarksRef.value(target.chapter),
                     )
                 }
             } finally {
@@ -187,16 +191,23 @@ internal suspend fun prerasterPage(
     bgCache: PageImageCache<DecodedImage>,
     annotations: List<Annotation> = emptyList(),
     annotationChapter: Int = -1,
+    /** 审阅视图的改动痕迹（审阅空间）：删掉的字变红划红线、新添的字变绿。空表 = 正常视图。 */
+    reviewMarks: List<ReviewMark> = emptyList(),
 ): Boolean {
     val rawLines: List<DrawLine> = runCatching { host.pageLines(pos) }.getOrNull().orEmpty()
     // 与 rememberPageContent 同一条标注投影路径。调用方按 pos 所属章传（相邻章由预读提供）；
     // 章不匹配就**不投影**（宁缺勿串）——区间是章内偏移，拿别章的去投会画到错字上。
     val activeAnnotations =
         if (pos.chapter == annotationChapter) annotations else emptyList()
+    val decorRanges = if (reviewMarks.isEmpty()) {
+        annotationDecorRanges(activeAnnotations)
+    } else {
+        annotationDecorRanges(activeAnnotations) + reviewDecorRanges(reviewMarks)
+    }
     val lines: List<DrawLine> = projectDecor(
         rawLines,
         pos.chapter,
-        annotationDecorRanges(activeAnnotations),
+        decorRanges,
     )
     val pageImages: List<PageImage> = runCatching { host.pageImages(pos) }.getOrNull().orEmpty()
     val pageBackgrounds: List<PageBackground> = runCatching { host.pageBackgrounds(pos) }.getOrNull().orEmpty()

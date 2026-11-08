@@ -132,6 +132,13 @@ fun ReaderSettingsPanel(
      * 缺省等于 [onCommitLight]（没有预览通道的宿主仍按旧行为）。
      */
     onPreviewLight: (ReaderSettings) -> Unit = onCommitLight,
+    /**
+     * 笔记面板「显示审阅模式」：与底栏「审阅」按钮**同一个状态**（壳自己持有，不进 [ReaderSettings]），
+     * 默认打开。null = 本宿主没有审阅视图（桌面），这一行不出现。
+     */
+    onToggleReview: (() -> Unit)? = null,
+    /** 「显示审阅模式」的勾选态（与底栏「审阅」高亮同源）。 */
+    reviewActive: Boolean = false,
     customThemes: List<ThemePreset> = emptyList(),
     onSaveTheme: (ThemePreset) -> Unit = {},
     onDeleteTheme: (ThemePreset) -> Unit = {},
@@ -441,7 +448,7 @@ fun ReaderSettingsPanel(
                         onRight = { pick((sel + 1) % n) },
                     )
                 }
-                listOf(
+                listOfNotNull(
                     tabKey(AnnotationKind.Highlight),
                     tabKey(AnnotationKind.Underline),
                     sliderKey(
@@ -528,6 +535,11 @@ fun ReaderSettingsPanel(
                         enabled = !s.noteCollapseAll,
                         onEnter = { onCommitLight(s.copy(noteTextSameColor = !s.noteTextSameColor)) },
                     ),
+                    // 显示审阅模式：不在 ReaderSettings 里（它与底栏「审阅」共用一个壳状态），
+                    // 按下去交给壳的切换入口，开关的勾选态由 reviewActive 回灌。
+                    onToggleReview?.let { toggle ->
+                        ItemKey(onEnter = { toggle() })
+                    },
                 )
             }
             Sub.Theme -> listOf(
@@ -960,6 +972,8 @@ fun ReaderSettingsPanel(
                                 noteFontLabel = fieldOf(s, "noteFont").let {
                                     if (it.isEmpty()) "跟随界面" else fontDisplayByFamily[it] ?: genericFamilyLabel(it)
                                 },
+                                reviewActive = reviewActive,
+                                onToggleReview = onToggleReview,
                                 p = p,
                             )
                         }
@@ -1644,6 +1658,9 @@ private fun AnnotationColorPage(
     resetFlash: Boolean,
     /** 「批注字体」行右侧的展示名（空槽 = 跟随界面；导入 / 系统族取本地化展示名）。 */
     noteFontLabel: String,
+    /** 「显示审阅模式」的勾选态；null 回调 = 本宿主没有审阅视图，这一行不画。 */
+    reviewActive: Boolean,
+    onToggleReview: (() -> Unit)?,
     p: Palette,
 ) {
     val slots = annotationColorSlots(s, kind)
@@ -1906,6 +1923,21 @@ private fun AnnotationColorPage(
                 nav = nav,
                 index = 12,
             )
+        }
+        // 显示审阅模式：与底栏「审阅」是同一个状态（默认打开），切换会重排有修订的章，不是纯像素开关。
+        // 放在最后一行：它管的是阅读面，不属于上面那组批注样式。
+        val toggleReview = onToggleReview
+        if (toggleReview != null) {
+            item {
+                SetSwitch(
+                    label = "显示审阅模式",
+                    checked = reviewActive,
+                    onChange = { toggleReview() },
+                    p = p,
+                    nav = nav,
+                    index = 13,
+                )
+            }
         }
         item { Spacer(modifier = Modifier.height(24.dp)) }
     }

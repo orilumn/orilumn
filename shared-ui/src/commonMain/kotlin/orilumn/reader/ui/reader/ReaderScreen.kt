@@ -133,6 +133,14 @@ fun ReaderScreen(
     onToc: () -> Unit = {},
     onBookmark: (() -> Unit)? = null,
     onNote: (() -> Unit)? = null,
+    /** 底栏「修改」：打开正文修改清单（编辑面板）。null = 宿主尚未支持，点了给提示。 */
+    onRevision: (() -> Unit)? = null,
+    /** 底栏「审阅」：切换审阅视图（删掉的字变红划红线、新添的字变绿）。null = 宿主尚未支持。 */
+    onReview: (() -> Unit)? = null,
+    /** 审阅视图是否开着（栏上按钮高亮）。 */
+    reviewActive: Boolean = false,
+    /** 夜间（深色）模式是否开着（栏上「夜间」按钮与「审阅」同一套高亮）。 */
+    nightActive: Boolean = false,
     onLightChange: (ReaderSettings) -> Unit = {},
     onLightCommit: (ReaderSettings) -> Unit = {},
     /**
@@ -448,6 +456,15 @@ fun ReaderScreen(
     val currentOnToc by rememberUpdatedState(onToc)
     val currentOnBookmark by rememberUpdatedState(onBookmark)
     val currentOnNote by rememberUpdatedState(onNote)
+    val currentOnRevision by rememberUpdatedState(onRevision)
+    val currentOnReview by rememberUpdatedState(onReview)
+    /**
+     * 审阅视图的改动痕迹（章 → 审阅空间区间）。关着恒为空表：正常视图一帧也不多投。
+     *
+     * 每次重组现取，`remember` 的键比较按值（区间表相等即不失效），不会白重投影。
+     */
+    val reviewMarksFor: (Int) -> List<ReviewMark> =
+        if (reviewActive) { ch -> currentHost.reviewMarks(ch) } else { { emptyList() } }
     val currentOnLightChange by rememberUpdatedState(onLightChange)
     val currentOnLightCommit by rememberUpdatedState(onLightCommit)
     val currentOnBarsVisibleChanged by rememberUpdatedState(onBarsVisibleChanged)
@@ -2409,6 +2426,12 @@ fun ReaderScreen(
                 onToc = { hideBarsThen { currentOnToc() } },
                 onBookmark = { currentOnBookmark?.invoke() ?: snackbar.show("书签（规划中）") },
                 onNote = { currentOnNote?.invoke() ?: snackbar.show("笔记（规划中）") },
+                // 修改：先收栏再开清单（与设置/目录同序，别让抽屉盖在晾着的工具栏上）。
+                onRevision = currentOnRevision?.let { cb -> { hideBarsThen { cb() } } },
+                // 审阅：切换后栏要留着（按钮高亮本身就是「现在看的是改动痕迹」的指示）。
+                onReview = currentOnReview,
+                reviewActive = reviewActive,
+                nightActive = nightActive,
                 onTopBarSize = { topBarH = it.height },
                 onBottomBarSize = { botBarH = it.height },
             )
@@ -2447,6 +2470,8 @@ fun ReaderScreen(
                 annotations = annotationState.annotationsFor(fromPos.chapter).orEmpty(),
                 annotationChapter = fromPos.chapter,
                 decorRevision = annotationState.revision,
+                // 审阅视图的改动痕迹（审阅空间）：关着就是空表，正常视图零成本。
+                reviewMarks = reviewMarksFor(fromPos.chapter),
             )
 
             // P1 L1：目标页内容（落位未回 ⇒ null，此时只画当前页，那一帧不动画）。
@@ -2469,6 +2494,7 @@ fun ReaderScreen(
                         .orEmpty(),
                     annotationChapter = ctl.targetPos.value?.chapter ?: -1,
                     decorRevision = annotationState.revision,
+                    reviewMarks = reviewMarksFor(ctl.targetPos.value?.chapter ?: -1),
                 )
             } else {
                 null
@@ -2552,6 +2578,7 @@ fun ReaderScreen(
                 imgCache = imgCache,
                 bgCache = bgCache,
                 annotationsFor = annotationState::annotationsFor,
+                reviewMarksFor = reviewMarksFor,
             )
             // 上面 `beforeCommit` 的「整页位图备齐」实现：与 PrerasterOnPrefill 同口径
             //（同一渲染器、同一缓存、同一条取数路径），只是针对**本次落位目标页**。
@@ -2576,6 +2603,7 @@ fun ReaderScreen(
                     bgCache = bgCache,
                     annotations = annotationState.annotationsFor(p.chapter).orEmpty(),
                     annotationChapter = p.chapter,
+                    reviewMarks = reviewMarksFor(p.chapter),
                 )
             }
             SideEffect { rasterByRef.value = rasterPageNow }
@@ -3020,6 +3048,12 @@ fun ReaderScreen(
                 onToc = { hideBarsThen { currentOnToc() } },
                 onBookmark = { currentOnBookmark?.invoke() ?: snackbar.show("书签（规划中）") },
                 onNote = { currentOnNote?.invoke() ?: snackbar.show("笔记（规划中）") },
+                // 修改：先收栏再开清单（与设置/目录同序，别让抽屉盖在晾着的工具栏上）。
+                onRevision = currentOnRevision?.let { cb -> { hideBarsThen { cb() } } },
+                // 审阅：切换后栏要留着（按钮高亮本身就是「现在看的是改动痕迹」的指示）。
+                onReview = currentOnReview,
+                reviewActive = reviewActive,
+                nightActive = nightActive,
                 onTopBarSize = { topBarH = it.height },
                 onBottomBarSize = { botBarH = it.height },
             )

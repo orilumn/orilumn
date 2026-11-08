@@ -15,7 +15,7 @@ package orilumn.reader.engine.revision
  */
 object CharDiff {
     /** 对齐算法版本：进 `contentRev`。改了并列解规则或退路阈值必须 +1（旧修订要重放）。 */
-    const val VERSION = 1
+    const val VERSION = 2
 
     /** 编辑距离上限（超过即退化；段落级文本远达不到）。 */
     private const val MAX_COST = 4000
@@ -128,9 +128,13 @@ object CharDiff {
             }
             val prevX = v[prevK + offset]
             val prevY = prevX - prevK
+            // 蛇身（两串相同的连续字符）必须逐字落成 Keep：回溯是从后往前走的，
+            // 这里先按逆序记下，最后统一 reverse。少记这一段会把蛇外的两次插入拼成一次，
+            // 例如 "abcd"→"XabcdY" 只得到 [Insert("XY")]（文字直接坏掉）。
             while (x > prevX && y > prevY) {
                 x--
                 y--
+                ops.add(Op.Keep(oldBase + x, 1))
             }
             if (x == prevX) {
                 // 插入：b[prevY, y)

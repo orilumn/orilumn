@@ -44,6 +44,8 @@ class TabletReaderHost(
     private val controller: BookDocumentController,
     private val bookId: Long,
     private val repository: BookRepository,
+    /** 开书即进审阅视图（底栏「审阅」与笔记面板「显示审阅模式」同一状态，默认打开）。 */
+    private val initialReviewMode: Boolean = false,
 ) : ReaderHost {
 
     private val scopeJob = SupervisorJob()
@@ -114,7 +116,7 @@ class TabletReaderHost(
     override suspend fun open(): ReaderPos? = withContext(Dispatchers.IO) {
         if (!opened) {
             val state = repository.readingState(bookId)
-            if (!controller.open(bookId, state)) return@withContext null
+            if (!controller.open(bookId, state, reviewMode = initialReviewMode)) return@withContext null
             // 注：open 后默认 prewarm 恒跳过落位章（open 同步塑形，一次为准），此处不再调用。
             // R7: open-book B2 dispatch (epoch-deduped; defer-gated inside) — far chapters get laid
             // without waiting for a settings change. Host-owned orchestration; prewarm stays single-chapter.
@@ -247,6 +249,37 @@ class TabletReaderHost(
             TextRevisionDeleteOutcome.Success(pos)
         }
 
+    /**
+     * 审阅视图开关（排版前的另一份预处理）：有修订的章按「原文全保留 + 新文字插在后面」重排，
+     * 没修订的章不动。分页表 / 页数 / 页快照照常按新内容版本读写（页码照常算）。
+     *
+     * 重读/重排是同步的状态清理（清解析态 + 版式），调用方在 IO 线程调；**切换 + 落位**请走
+     * [switchReviewMode]，那一条把两个空间的换算顺序也一起管住了。
+     */
+    override fun setReviewMode(on: Boolean): Boolean = controller.setReviewMode(on)
+
+    override fun isReviewMode(): Boolean = controller.reviewMode
+
+    override fun reviewMarks(chapter: Int): List<ReviewMark> =
+        controller.reviewMarks(chapter).mapNotNull { (range, deleted) ->
+            if (range.isEmpty()) null else ReviewMark(range.first, range.last + 1, deleted)
+        }
+
+    /**
+     * 切换到审阅视图（或切回）并按「同一处内容」重新落位，一步完成。
+     *
+     * [renderedCharStart] 是**切换前**当前页的页首（旧空间）；先换回原书坐标、再翻模式、再按新空间
+     * 换算落位——顺序在控制器里管住。落位按「新空间里页首最接近的那一页」选，不看「包含」，
+     * 否则两套分页页界一错位，读者就会被送回上一页。
+     *
+     * 模式没变（重复点按 / 本来就没有修订可切）回 null，调用方据此跳过重绘。
+     */
+    suspend fun switchReviewMode(on: Boolean, chapter: Int, renderedCharStart: Int): ReaderPos? =
+        withContext(Dispatchers.IO) {
+            controller.switchReviewMode(on, chapter, renderedCharStart)
+                ?.let { ReaderPos(it.first, it.second, atCover = false) }
+        }
+
     /** P4-c2u: 点按命中的链接查表（控制器轻路径样式化区间，同步廉价）。 */
     override fun linkTargetAt(chapter: Int, charOffset: Int): orilumn.reader.engine.LinkTarget? =
         controller.linkTargetAt(chapter, charOffset)
@@ -332,16 +365,17 @@ class TabletReaderHost(
     }
 
     /**
-     * 阅读面判「这段字改过没有」用：本章修订换成**渲染坐标**（与选区同尺）。
+     * 阅读面判「这段字改过没有」用：本章修订换成**当前文字空间**的坐标（与选区同尺）。
      *
-     * 换算走控制器的修订表（纯算术，不需要排版就绪）；读取失败按空表处理——
-     * 卡片上的「删除」会虚掉，但不会误删。
+     * 正常视图 = 渲染空间（替换后的区间）；审阅视图 = 原区间 + 紧随其后的新文字
+     * （两半都算同一条修订，选到删掉的原文或新添的文字都判得到）。换算走控制器的修订表（纯算术，
+     * 不需要排版就绪）；读取失败按空表处理——卡片上的「删除」会虚掉，但不会误删。
      */
     override suspend fun textRevisionsForChapter(chapter: Int): List<TextRevision> = try {
         repository.textRevisionsForChapter(bookId, chapter).map { r ->
-            val rr = controller.renderedRange(chapter, r.charStart, r.charEnd)
-            val end = if (rr.isEmpty()) rr.first else rr.last + 1
-            if (rr.first == r.charStart && end == r.charEnd) r else r.copy(charStart = rr.first, charEnd = end)
+            val rr = controller.textRevisionRange(chapter, r)
+            if (rr.first == r.charStart && rr.last + 1 == r.charEnd) r
+            else r.copy(charStart = rr.first, charEnd = maxOf(rr.first, rr.last + 1))
         }
     } catch (c: CancellationException) {
         throw c

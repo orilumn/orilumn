@@ -1,5 +1,6 @@
 package orilumn.reader.engine.skia
 
+import orilumn.reader.engine.css.ColorRun
 import orilumn.reader.engine.css.TextAlign
 import org.jetbrains.skia.Bitmap
 import org.jetbrains.skia.Canvas
@@ -93,6 +94,46 @@ class DecorProjectionTest {
         )
         val out = projectDecor(listOf(withDecor), chapter = 0, ranges = emptyList())
         assertTrue(out.single().decorRuns.isEmpty())
+    }
+
+    // ---- 改字色（审阅视图的增删标记）：进 colorRuns，不进 decorRuns ----
+
+    @Test
+    fun `text color ranges become color runs clipped to each line`() {
+        val lines = listOf(
+            line("abcdef", 0..5, charBase = 100),
+            line("ghij", 0..3, charBase = 106),
+        )
+        val out = projectDecor(
+            lines,
+            chapter = 3,
+            ranges = listOf(DecorRange(103, 108, DecorKind.TEXT_COLOR, 0xFFE53935.toInt())),
+        )
+        // 第一行 [103,106) → 行内文本坐标 [3,6)；第二行 [106,108) → [0,2)。
+        assertEquals(listOf(3 to 6), out[0].colorRuns.map { it.start to it.endExclusive })
+        assertEquals(listOf(0 to 2), out[1].colorRuns.map { it.start to it.endExclusive })
+        assertEquals(0xFFE53935.toInt(), out[0].colorRuns.single().argb)
+        // 改字色不额外落墨：装饰通道里一条都不该有。
+        assertTrue(out[0].decorRuns.isEmpty())
+        assertTrue(out[1].decorRuns.isEmpty())
+    }
+
+    @Test
+    fun `text color outranks book color on the same chars`() {
+        val book = ColorRun(0, 6, 0xFF0000FF.toInt())
+        val lines = listOf(line("abcdef", 0..5).copy(colorRuns = listOf(book)))
+        val out = projectDecor(
+            lines,
+            chapter = 0,
+            ranges = listOf(DecorRange(2, 4, DecorKind.TEXT_COLOR, 0xFF2E7D32.toInt())),
+        ).single()
+        // 审阅标记排在前面：mergeBands 取第一条覆盖该字的 run ⇒ 覆盖到的字用绿色。
+        assertEquals(
+            listOf(0xFF2E7D32.toInt(), 0xFF0000FF.toInt()),
+            out.colorRuns.map { it.argb },
+        )
+        // 书内那条 run 原样保留，覆盖范围不变。
+        assertEquals(listOf(0 to 6), out.colorRuns.drop(1).map { it.start to it.endExclusive })
     }
 
     // ---- 几何：区间 → 每行矩形，x 相对内容区、y 用行框 ----

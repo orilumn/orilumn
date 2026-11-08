@@ -163,6 +163,37 @@ class ChapterRevisionReplayTest {
     }
 
     @Test
+    fun longReplacementKeepsInsertedTailAtEnd() {
+        // 单叶内「尾段整体重写 + 末尾再添几个字」：新文字必须按原位置落在叶里，
+        // 不能把最后一截插到最前面（真机审阅改字后正常视图错位的回归用例）。
+        val para = "还好，自家师父没起疑，还颇为关切的问李长寿何时有了这般病症，并握住李长寿的手腕细细查看了下。"
+        val root = el("body", el("p", txt(para)))
+        val r = ChapterRevisionReplay.replay(
+            root = root,
+            leaves = listOf(root.children[0]),
+            leafPaths = listOf(intArrayOf(0)),
+            charStarts = longArrayOf(0),
+            editsForLeaf = { _, _ ->
+                listOf(
+                    LeafTextEditor.Edit(
+                        17,
+                        46,
+                        "地问李长寿何时有了这般病症，并握住李长寿的手腕细细查看了下。ABC",
+                    ),
+                )
+            },
+            segmentsOf = ::seg,
+            wsOf = { WhiteSpace.NORMAL },
+            styleOf = null,
+        )
+        assertEquals(
+            "还好，自家师父没起疑，还颇为关切的" +
+                "地问李长寿何时有了这般病症，并握住李长寿的手腕细细查看了下。ABC",
+            seg(r.leaves[0]).text,
+        )
+    }
+
+    @Test
     fun replaceAtKeepsSiblingsAndAttributes() {
         val p = MarkupElement("p", mapOf("class" to "x"), listOf(txt("a"), txt("b")))
         val root = el("body", p, txt("tail"))

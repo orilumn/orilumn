@@ -70,6 +70,10 @@ object TextEditPlanner {
      * @param now 写入 `createdAt` / `updatedAt` 的时间戳（测试可传固定值）；
      * @param wsOfLeaf 取某叶的 `white-space`（提交前的替换文本预归一用；缺省按普通模式）。
      * @param mergeableLeaf 该叶能不能参与跨段合并（图片 / 表格行 / 匿名叶不能）。
+     * @param toOriginal 当前文字空间 → 原书空间的单点换算。默认按**渲染空间**；审阅视图传入
+     *   [ChapterRevisionMap.toOriginalFromReview]——审阅空间里原文与新增文字并列，换算口径不同。
+     * @param renderedInterval 某条修订在**当前文字空间**占的区间。默认按渲染空间；审阅视图传入
+     *   [ChapterRevisionMap.reviewInterval]（原区间 + 紧随其后的新文字，两半都算碰到）。
      */
     fun plan(
         bookId: Long,
@@ -84,6 +88,8 @@ object TextEditPlanner {
         now: Long = 0L,
         wsOfLeaf: (Int) -> WhiteSpace = { WhiteSpace.NORMAL },
         mergeableLeaf: (Int) -> Boolean = { true },
+        toOriginal: (Int) -> Int = map::toOriginal,
+        renderedInterval: (TextRevision) -> IntRange = map::renderedInterval,
     ): TextEditPlan {
         if (start < 0 || endExclusive > chapterText.length || start > endExclusive) {
             return TextEditPlan.Rejected("选区超出本章范围")
@@ -94,7 +100,7 @@ object TextEditPlanner {
         val ends = blockEnds?.takeIf { it.isNotEmpty() && it.last() == chapterText.length }
         if (ends == null) {
             return planSegments(
-                bookId, chapter, chapterText, map, groupId, now, wsOfLeaf,
+                bookId, chapter, chapterText, map, groupId, now, wsOfLeaf, toOriginal, renderedInterval,
                 listOf(Segment(start, endExclusive, replacement, 0, 0, chapterText.length)),
             )
         }
@@ -102,7 +108,7 @@ object TextEditPlanner {
         val lastLeaf = leafOf(ends, endExclusive - 1)
         if (firstLeaf == lastLeaf) {
             return planSegments(
-                bookId, chapter, chapterText, map, groupId, now, wsOfLeaf,
+                bookId, chapter, chapterText, map, groupId, now, wsOfLeaf, toOriginal, renderedInterval,
                 listOf(
                     Segment(
                         start, endExclusive, replacement, firstLeaf,
@@ -120,7 +126,7 @@ object TextEditPlanner {
                 return TextEditPlan.Rejected("选区跨到图片或表格，不能合并段落")
             }
             return planMerge(
-                bookId, chapter, chapterText, map, groupId, now, wsOfLeaf,
+                bookId, chapter, chapterText, map, groupId, now, wsOfLeaf, toOriginal, renderedInterval,
                 start, endExclusive, replacement, ends,
             )
         }
@@ -132,7 +138,9 @@ object TextEditPlanner {
             val segEnd = minOf(endExclusive, leafEnd)
             segments.add(Segment(segStart, segEnd, lines[i - firstLeaf], i, leafStart, leafEnd))
         }
-        return planSegments(bookId, chapter, chapterText, map, groupId, now, wsOfLeaf, segments)
+        return planSegments(
+            bookId, chapter, chapterText, map, groupId, now, wsOfLeaf, toOriginal, renderedInterval, segments,
+        )
     }
 
     /**
@@ -149,25 +157,27 @@ object TextEditPlanner {
         groupId: Long,
         now: Long,
         wsOfLeaf: (Int) -> WhiteSpace,
+        toOriginal: (Int) -> Int,
+        renderedInterval: (TextRevision) -> IntRange,
         start: Int,
         endExclusive: Int,
         replacement: String,
         ends: IntArray,
     ): TextEditPlan {
         val absorbed = map.revisions.filter { r ->
-            val rr = map.renderedInterval(r)
+            val rr = renderedInterval(r)
             if (r.isInsertion) {
                 rr.first > start && rr.first < endExclusive
             } else {
                 rr.first < endExclusive && rr.last + 1 > start
             }
         }
-        val uRenderStart = minOf(start, absorbed.minOfOrNull { map.renderedInterval(it).first } ?: start)
-        val uRenderEnd = maxOf(endExclusive, absorbed.maxOfOrNull { map.renderedInterval(it).last + 1 } ?: endExclusive)
+        val uRenderStart = minOf(start, absorbed.minOfOrNull { renderedInterval(it).first } ?: start)
+        val uRenderEnd = maxOf(endExclusive, absorbed.maxOfOrNull { renderedInterval(it).last + 1 } ?: endExclusive)
         val uFirstLeaf = leafOf(ends, uRenderStart)
         val uLastLeaf = leafOf(ends, uRenderEnd - 1)
-        val uStart = map.toOriginal(uRenderStart)
-        val uEnd = map.toOriginal(uRenderEnd)
+        val uStart = toOriginal(uRenderStart)
+        val uEnd = toOriginal(uRenderEnd)
         val oldText = chapterText.substring(uRenderStart, uRenderEnd)
         val relStart = start - uRenderStart
         val relEnd = endExclusive - uRenderStart
@@ -257,13 +267,17 @@ object TextEditPlanner {
         groupId: Long,
         now: Long,
         wsOfLeaf: (Int) -> WhiteSpace,
+        toOriginal: (Int) -> Int,
+        renderedInterval: (TextRevision) -> IntRange,
         segments: List<Segment>,
     ): TextEditPlan {
         val deleted = LinkedHashSet<Long>()
         val inserted = ArrayList<TextRevision>(segments.size)
         var renderedLen = 0
         for (seg in segments) {
-            val built = planSegment(bookId, chapter, chapterText, map, seg, groupId, now, wsOfLeaf)
+            val built = planSegment(
+                bookId, chapter, chapterText, map, seg, groupId, now, wsOfLeaf, toOriginal, renderedInterval,
+            )
             renderedLen += built.renderedLength
             deleted.addAll(built.absorbedIds)
             built.revision?.let { inserted.add(it) }
@@ -299,11 +313,13 @@ object TextEditPlanner {
         groupId: Long,
         now: Long,
         wsOfLeaf: (Int) -> WhiteSpace,
+        toOriginal: (Int) -> Int,
+        renderedInterval: (TextRevision) -> IntRange,
     ): Built {
         val segStart = seg.start
         val segEnd = seg.endExclusive
         val absorbed = map.revisions.filter { r ->
-            val rr = map.renderedInterval(r)
+            val rr = renderedInterval(r)
             if (r.isInsertion) {
                 if (segStart == segEnd) rr.first == segStart
                 else rr.first > segStart && rr.first < segEnd
@@ -311,12 +327,12 @@ object TextEditPlanner {
                 rr.first < segEnd && rr.last + 1 > segStart
             }
         }
-        val origStart = map.toOriginal(segStart)
-        val origEnd = map.toOriginal(segEnd)
+        val origStart = toOriginal(segStart)
+        val origEnd = toOriginal(segEnd)
         val uStart = minOf(origStart, absorbed.minOfOrNull { it.charStart } ?: origStart)
         val uEnd = maxOf(origEnd, absorbed.maxOfOrNull { it.charEnd } ?: origEnd)
-        val uRenderStart = minOf(segStart, absorbed.minOfOrNull { map.renderedInterval(it).first } ?: segStart)
-        val uRenderEnd = maxOf(segEnd, absorbed.maxOfOrNull { map.renderedInterval(it).last + 1 } ?: segEnd)
+        val uRenderStart = minOf(segStart, absorbed.minOfOrNull { renderedInterval(it).first } ?: segStart)
+        val uRenderEnd = maxOf(segEnd, absorbed.maxOfOrNull { renderedInterval(it).last + 1 } ?: segEnd)
         val oldText = chapterText.substring(uRenderStart, uRenderEnd)
         val relStart = segStart - uRenderStart
         val relEnd = segEnd - uRenderStart
@@ -339,8 +355,8 @@ object TextEditPlanner {
 
         // 只能裁「没有被旧修订覆盖」的两端：那一段渲染文字与原文逐字相同，裁掉才不会丢旧替换。
         // 没有旧修订时整段都可裁（改一个字只落一个字，方案 §8.4）。
-        val firstRevised = absorbed.minOfOrNull { map.renderedInterval(it).first } ?: uRenderEnd
-        val lastRevisedEnd = absorbed.maxOfOrNull { map.renderedInterval(it).last + 1 } ?: uRenderStart
+        val firstRevised = absorbed.minOfOrNull { renderedInterval(it).first } ?: uRenderEnd
+        val lastRevisedEnd = absorbed.maxOfOrNull { renderedInterval(it).last + 1 } ?: uRenderStart
         val maxPrefix = (firstRevised - uRenderStart)
             .coerceIn(0, minOf(oldText.length, newText.length))
         var prefix = 0

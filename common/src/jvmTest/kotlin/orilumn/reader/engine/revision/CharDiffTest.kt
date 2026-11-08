@@ -75,6 +75,31 @@ class CharDiffTest {
     }
 
     @Test
+    fun insertionsOnBothEndsKeepTheMiddle() {
+        // 蛇（两串共同的中段）两侧各插一段：中段必须原样 Keep，两个插入各就各位。
+        // 曾经只把最后一个插入留下、并与前一个插入拼到一起（"abcd"→"XabcdY" 得到 [Insert("XY")]），
+        // 直接把渲染文字改坏。
+        assertEquals(
+            listOf(
+                CharDiff.Op.Insert("X"),
+                CharDiff.Op.Keep(0, 4),
+                CharDiff.Op.Insert("Y"),
+            ),
+            assertAligned("abcd", "XabcdY"),
+        )
+        val old = "问李长寿何时有了这般病症，并握住李长寿的手腕细细查看了下。"
+        val new = "地问李长寿何时有了这般病症，并握住李长寿的手腕细细查看了下。ABC"
+        assertEquals(
+            listOf(
+                CharDiff.Op.Insert("地"),
+                CharDiff.Op.Keep(0, old.length),
+                CharDiff.Op.Insert("ABC"),
+            ),
+            assertAligned(old, new),
+        )
+    }
+
+    @Test
     fun keepsAreOrderedAndNonOverlapping() {
         val ops = assertAligned("0123456789", "01ab456789")
         val keeps = ops.filterIsInstance<CharDiff.Op.Keep>()

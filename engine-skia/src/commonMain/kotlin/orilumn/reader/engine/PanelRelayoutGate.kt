@@ -35,6 +35,9 @@ class PanelRelayoutGate(
      */
     suspend fun onPanelClose(chapter: Int, anchorChar: Int): BookDocumentController.ReflowResult? {
         controller.deferCanonical = false
+        // 面板期间被抑制的页数补排（如面板里切「显示审阅模式」）在这里补派；版式没变也要补，
+        // 否则读者关掉面板后页脚会一直停在百分比。
+        controller.resumeDeferredPageCounts()
         val before = baseHash
         val after = typographHash()
         baseHash = after

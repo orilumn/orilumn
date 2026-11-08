@@ -152,6 +152,145 @@ class ChapterRevisionMap(
         return s until maxOf(s, e)
     }
 
+    // ─────────────────────────────────────────────────────────────────
+    // 审阅空间（v3.2 审阅视图）：原文一字不删，新文字插在原区间之后
+    // ─────────────────────────────────────────────────────────────────
+
+    /**
+     * 原书偏移 → **审阅空间**偏移。
+     *
+     * 审阅空间与渲染空间只差一件事：修订不再替换原区间，而是把新文字**插在原区间末尾之后**，
+     * 原文照排（删除的部分仍在版面上，画删除线）。于是「删了什么、加了什么」都看得见，
+     * 代价是这一版排版更长、页码与正常模式不同（只存在于内存，不落分页表）。
+     *
+     * **边界口径与 [toRendered] 不同**：渲染空间里替换是「原地换掉」，边界点必然越过整段新文字；
+     * 审阅空间里新文字排在原区间**之后**，所以边界点默认停在插入之前。于是：
+     * 区间终点用 `crossInsertions = false` ⇒ 删除线只划原文、绿色只染新文字；
+     * 区间起点用 `true` ⇒ 紧贴在起点处的插入算进后面那段。
+     *
+     * @param crossInsertions true = 越过正好落在该点的插入（原文写法：边界之前的修订整段算在前）。
+     */
+    fun toReview(original: Int, crossInsertions: Boolean = true): Int {
+        var shift = 0
+        for (r in revisions) {
+            if (r.charEnd < original) {
+                shift += r.renderedLength
+                continue
+            }
+            if (r.charEnd == original) {
+                // 正好在该修订末尾：插入排在原区间之后，默认不越过（= 停在插入之前）。
+                if (crossInsertions) shift += r.renderedLength
+                continue
+            }
+            if (r.charStart > original) break
+            // 落在原区间内部：原文仍按原位排，不夹到边界（新文字排在区间末尾之后）。
+            return original + shift
+        }
+        return original + shift
+    }
+
+    /** 审阅空间偏移 → 原书偏移；落在新文字里时夹回原区间末尾。 */
+    fun toOriginalFromReview(review: Int): Int {
+        var shift = 0
+        for (r in revisions) {
+            val rs = r.charStart + shift
+            val re = rs + r.originalLength
+            val insertedEnd = re + r.renderedLength
+            if (review < rs) return review - shift
+            if (review < re) return r.charStart + (review - rs)
+            if (review < insertedEnd) return r.charEnd
+            shift += r.renderedLength
+        }
+        return review - shift
+    }
+
+    /** 被替换掉的原区间在审阅空间的位置（红字 + 红色删除线）；纯插入为空区间。 */
+    fun reviewDeletedRange(r: TextRevision): IntRange {
+        val s = toReview(r.charStart, crossInsertions = true)
+        val e = toReview(r.charEnd, crossInsertions = false)
+        return s until maxOf(s, e)
+    }
+
+    /** 新文字在审阅空间的位置（绿字）；纯插入同样有区间。 */
+    fun reviewInsertedRange(r: TextRevision): IntRange {
+        val s = toReview(r.charEnd, crossInsertions = false)
+        return s until (s + r.renderedLength)
+    }
+
+    /**
+     * 某条修订在审阅空间里**整段**占的区间（原区间 + 紧随其后的新文字）。
+     *
+     * 审阅视图里这两段是同一处改动的两半：选到删掉的原文、选到新添的文字、或跨过两者，都算「碰到这条修订」。
+     * 修改的提交与「删除这条修改」的判定都用它，免得只选到新文字时看不到任何修订。
+     */
+    fun reviewInterval(r: TextRevision): IntRange {
+        val del = reviewDeletedRange(r)
+        val ins = reviewInsertedRange(r)
+        if (del.isEmpty() && ins.isEmpty()) {
+            val p = toReview(r.charStart, crossInsertions = false)
+            return p until p
+        }
+        val s = when {
+            del.isEmpty() -> ins.first
+            ins.isEmpty() -> del.first
+            else -> minOf(del.first, ins.first)
+        }
+        val e = when {
+            del.isEmpty() -> ins.last + 1
+            ins.isEmpty() -> del.last + 1
+            else -> maxOf(del.last, ins.last) + 1
+        }
+        return s until e
+    }
+
+    /** 审阅空间 [start, endExclusive) 碰到的修订（删掉的原文、新添的文字任一相交都算）。 */
+    fun revisionsTouchingReview(start: Int, endExclusive: Int): List<TextRevision> =
+        revisions.filter { r ->
+            val rr = reviewInterval(r)
+            rr.first < endExclusive && rr.last + 1 > start
+        }
+
+    /**
+     * 审阅空间的选区 → 可提交的**原书区间**（审阅视图里改字用）。
+     *
+     * 审阅视图原文一字不删，所以「改这段」只能表达成「把原书这段换成新文字」：端点各自换算回
+     * 原书空间，再与撞上的修订（[revisionsTouchingReview]）的原区间取并集——只选到新添的文字
+     * 时端点会夹在原区间末尾，区间是空的，必须抬到那条修订的原区间，否则等于在原地加字、
+     * 旧的新文字还留着。
+     */
+    fun originalEditRangeFromReview(start: Int, endExclusive: Int): IntRange {
+        val a = toOriginalFromReview(start)
+        val b = toOriginalFromReview(endExclusive)
+        var s = minOf(a, b)
+        var e = maxOf(a, b)
+        for (r in revisionsTouchingReview(start, endExclusive)) {
+            s = minOf(s, r.charStart)
+            e = maxOf(e, r.charEnd)
+        }
+        return s until maxOf(s, e)
+    }
+
+    /**
+     * 审阅空间文本 → 原书文本：把每条修订插进来的新文字剪掉。
+     *
+     * 审阅视图里改字要在**原书空间**算（新文字替换的是原区间，不是「原文 + 新文字」的展示串），
+     * 而章文本缓存只有审阅版；剪掉新文字就还原出原书这一串，块尾同理按 [toOriginalFromReview] 换算。
+     */
+    fun originalTextFromReview(reviewText: String): String {
+        if (revisions.isEmpty()) return reviewText
+        val out = StringBuilder(reviewText.length)
+        var pos = 0
+        for (r in revisions) {
+            val ins = reviewInsertedRange(r)
+            if (ins.isEmpty()) continue
+            if (ins.first > pos) out.append(reviewText, pos, minOf(ins.first, reviewText.length))
+            pos = maxOf(pos, ins.last + 1)
+            if (pos >= reviewText.length) break
+        }
+        if (pos < reviewText.length) out.append(reviewText, pos, reviewText.length)
+        return out.toString()
+    }
+
     /** 落在原书 [start, endExclusive) 内（含边界插入）的修订。 */
     fun revisionsTouching(start: Int, endExclusive: Int): List<TextRevision> =
         revisions.filter { r ->

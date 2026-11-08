@@ -237,6 +237,25 @@ interface ReaderHost {
         TextRevisionDeleteOutcome.Failed
 
     /**
+     * 审阅视图开关：打开后本章按「原文全保留 + 新文字插在后面」重排，改动的痕迹看得见
+     * （删掉的字变红划红线、新添的字变绿）。返回 true 表示真的变了，调用方必须重排并重新落位。
+     *
+     * 审阅是排版前的另一份预处理结果：有修订的章照常重排、照常落分页表与页数（页码照常算），
+     * 没有修订的章两种视图文字相同、不必重排。默认 false = 宿主尚未实现。
+     */
+    fun setReviewMode(on: Boolean): Boolean = false
+
+    /** 当前是否处于审阅视图（栏上「审阅」按钮的高亮状态）。 */
+    fun isReviewMode(): Boolean = false
+
+    /**
+     * 本章在审阅视图里的改动痕迹（审阅空间、章内偏移，按起点升序）。
+     *
+     * 只有审阅视图打开、且本章有修订时才非空；正常视图返回空表。
+     */
+    fun reviewMarks(chapter: Int): List<ReviewMark> = emptyList()
+
+    /**
      * 本页**页首缺口**：页首行行顶之下到本页绘制帧顶的距离（px，≥0，见
      * [orilumn.reader.engine.paging.BookLayout.getPageFrameTop]）。
      *
@@ -377,6 +396,17 @@ sealed interface TextRevisionDeleteOutcome {
     data class Success(val pos: ReaderPos?) : TextRevisionDeleteOutcome
     data object Failed : TextRevisionDeleteOutcome
 }
+
+/**
+ * 审阅视图里的一处改动痕迹（章内偏移，**审阅空间**）。
+ *
+ * @property deleted true = 被删掉的原文（红字 + 红色删除线）；false = 新增的文字（绿字）。
+ */
+data class ReviewMark(
+    val start: Int,
+    val endExclusive: Int,
+    val deleted: Boolean,
+)
 
 /**
  * 目录扁平化（Q1-2 收敛：原平板 `TabletReaderHost.flatToc` 与桌面

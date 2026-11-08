@@ -415,6 +415,7 @@ fun ReaderView(
         ReaderScreen(
             host = snapshot,
             settings = settings,
+            nightActive = settings.scheme == "night",
             onBack = onBack,
             onNight = {
                 commit(settings.copy(scheme = if (settings.scheme == "night") "day" else "night"))

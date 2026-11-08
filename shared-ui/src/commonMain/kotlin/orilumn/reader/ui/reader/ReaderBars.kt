@@ -95,6 +95,14 @@ fun ReaderBars(
     onToc: () -> Unit,
     onBookmark: () -> Unit,
     onNote: () -> Unit,
+    /** 底栏「修改」：直接打开正文修改清单（编辑面板）。默认不出现该按钮。 */
+    onRevision: (() -> Unit)? = null,
+    /** 底栏「审阅」：切换审阅视图（删掉的字变红划红线、新添的字变绿）。默认不出现该按钮。 */
+    onReview: (() -> Unit)? = null,
+    /** 审阅视图是否开着（「审阅」按钮高亮）。 */
+    reviewActive: Boolean = false,
+    /** 夜间（深色）模式是否开着（「夜间」按钮跟「审阅」同一套高亮）。 */
+    nightActive: Boolean = false,
     /** 顶/底栏实测高度回抛（px）：阅读面据此把栏区落点的手势让给栏，不进翻页层。默认空实现。 */
     onTopBarSize: (androidx.compose.ui.unit.IntSize) -> Unit = {},
     onBottomBarSize: (androidx.compose.ui.unit.IntSize) -> Unit = {},
@@ -201,7 +209,10 @@ fun ReaderBars(
                     BarTool(BarIcon.Menu, "目录", onToc)
                     BarTool(BarIcon.Star, "书签", onBookmark)
                     BarTool(BarIcon.Pencil, "笔记", onNote)
-                    BarTool(BarIcon.Moon, "夜间", onNight)
+                    // 修改紧挨笔记（两者同属「记录」），审阅再往右：点开才有改动痕迹。
+                    onRevision?.let { BarTool(BarIcon.Edit, "修改", it) }
+                    onReview?.let { BarTool(BarIcon.Review, "审阅", it, active = reviewActive) }
+                    BarTool(BarIcon.Moon, "夜间", onNight, active = nightActive)
                     BarTool(BarIcon.Gear, "设置", onSettings)
                 }
             }
@@ -246,13 +257,15 @@ private fun BarTextBtn(label: String, onClick: () -> Unit) {
 /** 底栏工具图标：不用 Unicode 字形（☰ ☆ ✎ ☾ ⚙），它们走系统字体回退，
  *  同一排里字面高低/大小各不相同、平台间还会换字体 —— 图标会自己「站不齐」。
  *  Material Outlined 是项目已有的图标库（`material-icons-core`），月牙库里没有，自己画。 */
-private enum class BarIcon { Menu, Star, Pencil, Moon, Gear }
+private enum class BarIcon { Menu, Star, Pencil, Edit, Review, Moon, Gear }
 
 private val BarIcon.imageVector: ImageVector?
     get() = when (this) {
         BarIcon.Menu -> Icons.Outlined.Menu
         BarIcon.Star -> null
         BarIcon.Pencil -> Icons.Outlined.Create
+        BarIcon.Edit -> null
+        BarIcon.Review -> null
         BarIcon.Moon -> null
         BarIcon.Gear -> Icons.Outlined.Settings
     }
@@ -260,7 +273,7 @@ private val BarIcon.imageVector: ImageVector?
 /** 底栏工具按钮：上图标/下文字（对应旧 .tool ic20/lb10，按下圆角高亮）。
  *
  * 图标与文字各占**固定槽位**：图标一律缩放到同一边长、在槽内居中；文字行由槽位高度决定。
- * 五个按钮因此列高一致，图标墨迹中心与文字基线都落在同一条线上，与平台字体无关。
+ * 一排按钮因此列高一致，图标墨迹中心与文字基线都落在同一条线上，与平台字体无关。
  */
 @Composable
 private fun BarTool(icon: BarIcon, label: String, onClick: () -> Unit, active: Boolean = false) {
@@ -296,16 +309,52 @@ private fun BarTool(icon: BarIcon, label: String, onClick: () -> Unit, active: B
     }
 }
 
-/** 五个按钮共用的图标槽位与图标边长：图标在槽内居中，槽高决定下方文字行的位置。 */
+/** 每个按钮共用的图标槽位与图标边长：图标在槽内居中，槽高决定下方文字行的位置。 */
 private val BarToolIconSlot = 24.dp
 private val BarToolIconSize = 20.dp
 
 /** 自己画的两个图标（图标库里没有合用的）：月牙 = 两圆求差；空心五角星 = 十点闭合路径。
- *  与 Material 图标同一条规矩：按墨迹外框居中，所以五个图标共用同一视觉中心。 */
+ *  与 Material 图标同一条规矩：按墨迹外框居中，所以一排图标共用同一视觉中心。 */
 @Composable
 private fun HandDrawnBarIcon(kind: BarIcon, color: Color, modifier: Modifier) {
     Canvas(modifier) {
         val k = size.minDimension / 24f
+        // 修改：一截斜放的笔 + 笔下那条基线（「在正文上动笔」）。与「笔记」的现成铅笔区分开：
+        // 那支是纯铅笔，这支带正文行，读作「改字」。
+        if (kind == BarIcon.Edit) {
+            val w = 1.9f * k
+            val stroke = Stroke(width = w, cap = StrokeCap.Round, join = StrokeJoin.Round)
+            val body = Path().apply {
+                moveTo(10.6f * k, 9.6f * k)
+                lineTo(16.4f * k, 3.8f * k)
+                lineTo(19.0f * k, 6.4f * k)
+                lineTo(13.2f * k, 12.2f * k)
+                close()
+            }
+            drawPath(path = body, color = color, style = stroke)
+            val nib = Path().apply {
+                moveTo(10.6f * k, 9.6f * k)
+                lineTo(13.2f * k, 12.2f * k)
+                lineTo(9.3f * k, 13.0f * k)
+                close()
+            }
+            drawPath(path = nib, color = color, style = stroke)
+            drawLine(color, Offset(3.2f * k, 18.6f * k), Offset(20.4f * k, 18.6f * k), w, StrokeCap.Round)
+            return@Canvas
+        }
+        // 审阅：放大镜（「查看改动痕迹」）。描边、不填充，与其它图标同一墨量。
+        if (kind == BarIcon.Review) {
+            val w = 1.9f * k
+            val stroke = Stroke(width = w, cap = StrokeCap.Round, join = StrokeJoin.Round)
+            drawCircle(
+                color = color,
+                radius = 6.2f * k,
+                center = Offset(10.4f * k, 10.4f * k),
+                style = stroke,
+            )
+            drawLine(color, Offset(15.0f * k, 15.0f * k), Offset(20.6f * k, 20.6f * k), w, StrokeCap.Round)
+            return@Canvas
+        }
         val path = when (kind) {
             BarIcon.Moon -> {
                 val outer = Path().apply { addOval(Rect(center = Offset(12f * k, 12f * k), radius = 8.6f * k)) }

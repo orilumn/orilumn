@@ -89,6 +89,8 @@ fun rememberPageContent(
     annotationChapter: Int = -1,
     /** 装饰修订号（增删改 +1），与标注列表一起作为投影的刷新键。 */
     decorRevision: Int = 0,
+    /** 审阅视图的改动痕迹（审阅空间、章内偏移）：删掉的字变红划红线、新添的字变绿。空表 = 正常视图。 */
+    reviewMarks: List<ReviewMark> = emptyList(),
 ): PageContent? {
     val currentHost by rememberUpdatedState(host)
     // 不用 `if (pos == null) return null` 提前返回：那样 remember 的调用次数会随 pos
@@ -103,8 +105,12 @@ fun rememberPageContent(
     // 这里只负责取内存态并调用纯函数。
     val activeAnnotations =
         if (pos != null && pos.chapter == annotationChapter) annotations else emptyList()
-    val decorRanges = remember(activeAnnotations, decorRevision) {
-        annotationDecorRanges(activeAnnotations)
+    val decorRanges = remember(activeAnnotations, decorRevision, reviewMarks) {
+        if (reviewMarks.isEmpty()) {
+            annotationDecorRanges(activeAnnotations)
+        } else {
+            annotationDecorRanges(activeAnnotations) + reviewDecorRanges(reviewMarks)
+        }
     }
     val lines = remember(rawLines, decorRanges, pos?.chapter) {
         rawLines?.let { projectDecor(it, pos?.chapter ?: 0, decorRanges) }

@@ -375,6 +375,8 @@ class DesktopReaderHost(
 
     override fun textBlockEndsOf(chapter: Int): IntArray? = controller.chapterTextBlockEnds(chapter)
 
+    override fun reviewBreakOffsets(chapter: Int): IntArray = controller.reviewBreakMarkers(chapter)
+
     // ---- 文本标注：转手给桌面 ShelfStore → 共享 LibraryDb（与平板同一条 CRUD 语义） ----
 
     override suspend fun annotationsForChapter(chapter: Int): List<Annotation> = try {

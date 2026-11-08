@@ -1366,7 +1366,9 @@ fun ReaderScreen(
         if (ch < 0 || e <= s) return
         selectionMenuVisible = false
         // 创建当时的原文快照（D-24）：清单行显示用；章节文本已在缓存里，取不到就留空。
-        val quote = currentHost.textOf(ch, s, e)?.take(200)
+        // 审阅视图里选区可能跨过「段界痕迹」¶，摘录是给人看的，摘掉它。
+        val quote = currentHost.textOf(ch, 0, Int.MAX_VALUE)
+            ?.let { currentHost.reviewBreakText(ch).slice(it, s, e).take(200) }
         scope.launch {
             val saved = annotationState.add(
                 Annotation(
@@ -1433,9 +1435,10 @@ fun ReaderScreen(
             val newStart = range?.first ?: current.charStart
             val newEnd = range?.second ?: current.charEnd
             val rangeChanged = newStart != current.charStart || newEnd != current.charEnd
-            // 范围变了就同步摘录：清单里那一行显示的是新选中的原文。
+            // 范围变了就同步摘录：清单里那一行显示的是新选中的原文（同样摘掉 ¶ 痕迹）。
             val quote = if (rangeChanged) {
-                currentHost.textOf(current.chapter, newStart, newEnd)?.take(200)
+                currentHost.textOf(current.chapter, 0, Int.MAX_VALUE)
+                    ?.let { currentHost.reviewBreakText(current.chapter).slice(it, newStart, newEnd).take(200) }
             } else {
                 current.quote
             }
@@ -1511,12 +1514,16 @@ fun ReaderScreen(
             snackbar.show("本章内容尚未就绪")
             return
         }
+        // 卡片里给人看的是书里的字：审阅视图的「段界痕迹」¶ 一并摘掉（偏移自己回缩到同一口径），
+        // 否则确认时会把 ¶ 当成字写进正文。分页 / 选区 / 修订换算仍走原样文字。
+        val brk = currentHost.reviewBreakText(ch)
+        val body = brk.plainChapterText(text)
         closeAnnotationEdit()
         noteText = ""
         textEditChapter = ch
         textEditStart = s
         textEditEnd = e
-        textEditText = selectionTextForEdit(text, currentHost.textBlockEndsOf(ch), s, e)
+        textEditText = selectionTextForEdit(body, brk.plainBlockEnds(currentHost.textBlockEndsOf(ch)), brk.plain(s), brk.plain(e))
         textEditOpen = true
         textEditBusy = false
         selectionMenuVisible = false
@@ -1689,7 +1696,14 @@ fun ReaderScreen(
             snackbar.show("复制失败：本章内容尚未就绪")
             return false
         }
-        val copied = copyTextOf(text, s, e, currentHost.textBlockEndsOf(ch))
+        // 剪贴板里只该有书里的字：审阅视图的「段界痕迹」¶ 摘掉，偏移与块尾同步回缩。
+        val brk = currentHost.reviewBreakText(ch)
+        val copied = copyTextOf(
+            brk.plainChapterText(text),
+            brk.plain(s),
+            brk.plain(e),
+            brk.plainBlockEnds(currentHost.textBlockEndsOf(ch)),
+        )
         if (copied.isEmpty()) {
             snackbar.show("复制失败：选区为空")
             return false

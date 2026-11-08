@@ -683,6 +683,8 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                 map.revisions.filter { it.id !in absorbedSet } + base.inserted,
                 // 未落库的新修订 id 都是 0：只有单独一条跨叶修订时才按 0 认它。
                 (map.structureOnly - absorbedSet) + if (freshStructureOnly) setOf(0L) else emptySet(),
+                // 段界痕迹要用**原书**块尾定位：这里给的是剪回原书空间的块尾。
+                originalBlockEnds = originalEnds ?: map.originalBlockEnds,
             )
             val fresh = base.inserted.firstOrNull()
             when {
@@ -761,7 +763,22 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
             val ins = map.reviewInsertedRange(r)
             if (!ins.isEmpty()) out += ins to false
         }
+        // 被删掉的段界：合并段中间那个 ¶ 也是痕迹（红字 + 删除线），只是它不是「字」而是「段界」。
+        for (m in map.reviewDeletedBreakMarkers) out += (m until m + 1) to true
+        // 新插进去的段界：断行处上一行末尾的 ¶（绿字），同样不是书里的字。
+        for (m in map.reviewInsertedBreakMarkers) out += (m until m + 1) to false
         return out
+    }
+
+    /**
+     * 审阅空间里「段界痕迹」¶ 的字符偏移（升序；本章没有段界改动也没有多段新文字时为空）。
+     *
+     * UI 取文字时（修改卡初值、复制、摘录）要跳过这些字符：¶ 是排版用的痕迹，不是书里的字。
+     * 既含被删 / 新插段界处的那一个，也含新文字副本里每段末尾那个绿 ¶（[ChapterRevisionMap.reviewMarkOffsets]）。
+     */
+    fun reviewBreakMarkers(chapter: Int): IntArray {
+        if (!reviewMode) return IntArray(0)
+        return revisionMaps[chapter]?.reviewMarkOffsets ?: IntArray(0)
     }
 
 
@@ -1629,18 +1646,28 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         }
         val merges = ArrayList<orilumn.reader.engine.revision.ChapterRevisionReplay.Merge>()
         val mergeIds = HashSet<Long>()
-        // 只挪段界的跨叶修订（删掉两段之间的换行）：替换文字与它盖住的原书文字逐字相同。
-        // 这类修订在**两种视图**里都要按合并落结构，否则审阅视图会把同一段字排两遍
-        // （原文照排 + 新文字接在选区末尾）。审阅视图的其余跨叶修订仍不合并块：
-        // 原文的段落结构原样保留，新文字插在选区末尾之后，读者看到的是「原段 + 新内容」。
+        // 「只挪段界」的修订（删掉两段之间的换行 / 在段内新插一个换行）：替换文字与它盖住的
+        // 原书文字逐字相同（段界不算字）。这类修订在**两种视图**里都要按合并 / 拆分落结构，
+        // 否则审阅视图会把同一段字排两遍（原文照排 + 新文字接在选区末尾）。审阅视图的其余
+        // 跨叶修订仍不合并块：原文的段落结构原样保留，新文字插在选区末尾之后。
         val structureOnly = HashSet<Long>()
+        val claimedLeaves = HashSet<Int>()
         if (starts.isNotEmpty()) {
             val crossLeaf = ArrayList<Triple<orilumn.reader.data.revision.TextRevision, Int, Int>>(2)
             for (r in map.revisions) {
-                if (r.isInsertion) continue
+                val hasBreak = r.text.indexOf(RevisionBlocks.SEPARATOR) >= 0
+                if (r.isInsertion) {
+                    // 纯插入没有选区：段界落成「从插入点起拆块」，首末叶就是插入点所在那一叶。
+                    if (hasBreak) {
+                        val k = leafOfOffset(r.charStart)
+                        crossLeaf += Triple(r, k, k)
+                    }
+                    continue
+                }
                 val a = leafOfOffset(r.charStart)
                 val b = leafOfOffset(r.charEnd - 1)
-                if (a != b) crossLeaf += Triple(r, a, b)
+                // 带段界的单叶修订同样要拆块：读者在段内新敲的换行是段界，不是 `<br>`。
+                if (a != b || hasBreak) crossLeaf += Triple(r, a, b)
             }
             // 判「只挪段界」要拿原书叶文本：只投影涉及的那几叶（一章最多一两条跨叶修订）。
             val originalTexts = if (reviewMode && crossLeaf.isNotEmpty()) {
@@ -1657,14 +1684,61 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
             }
             for ((r, a, b) in crossLeaf) {
                 val structural = reviewMode && isStructureOnlyRevision(r, a, b, originalTexts, starts)
-                if (reviewMode && !structural) continue
+                if (reviewMode && !structural) {
+                    // 改了字、又插了段界的修订：审阅视图里原文照排，新文字副本接在选区末尾。
+                    // 副本里的段界也要落成**真块**（上一行末尾留绿 ¶），不能退化成 `¶` + `<br>`
+                    // ——否则读者看到的新文字没有段落缩进与段距，与「真的拆了段」对不上。
+                    // 整叶重塑只认得这一条修订，同一片叶上还有别的改动时会把它们丢掉，所以
+                    // 有一片叶被两条修订碰到就退回叶内落字（段界降级成段内换行，文字不丢）。
+                    if (b in claimedLeaves || hasOtherRevisionOnLeaf(map, b, starts, cache.leaves.size, r)) {
+                        continue
+                    }
+                    // 只有文字块能拆：`<br>` / 图片 / 表格行 / 不在树里的合成叶拆不了，
+                    // 交给叶内落字的降级路径，别让副本凭空消失。
+                    val leaf = cache.leaves.getOrNull(b) ?: continue
+                    if (leafPaths.getOrNull(b) == null || !RevisionBlocks.mergeableLeaf(leaf)) continue
+                    claimedLeaves += b
+                    val at = r.charEnd - starts[b].toInt()
+                    merges += orilumn.reader.engine.revision.ChapterRevisionReplay.Merge(
+                        firstLeaf = b,
+                        lastLeaf = b,
+                        start = at,
+                        endExclusive = at,
+                        text = markCopyBreaks(r.text),
+                        revisionId = r.id,
+                    )
+                    mergeIds += r.id
+                    continue
+                }
+                // 一叶只能被一条合并占用（重放按首叶归组，组里跨叶与单叶混在一起就拼不成）。
+                // 真撞上（两处改动恰好贴着同一片叶）就退回叶内落字：段界降级成段内换行，
+                // 文字不会丢，只是这一段不拆块。
+                if ((a..b).any { it in claimedLeaves }) {
+                    Logger.w(
+                        logTag,
+                        "revision merge conflict ch=${unit.chapterIndex} range=[${r.charStart}, ${r.charEnd}) " +
+                            "leaves=[$a, $b]",
+                    )
+                    continue
+                }
+                claimedLeaves += a..b
                 val base = starts[a].toInt()
                 merges += orilumn.reader.engine.revision.ChapterRevisionReplay.Merge(
                     firstLeaf = a,
                     lastLeaf = b,
                     start = r.charStart - base,
                     endExclusive = r.charEnd - base,
-                    text = r.text,
+                    // 审阅视图里要把段界改动显示出来：被删掉的段界插一个红 ¶（原文断行处），
+                    // 新插的段界在断行处上一行末尾插一个绿 ¶（普通字符，占一格，按区间上色）。
+                    // 正常视图看的是结果，不插。
+                    text = if (structural) {
+                        insertBreakMarks(
+                            r.text,
+                            (a + 1..b).map { starts[it].toInt() - r.charStart },
+                        )
+                    } else {
+                        r.text
+                    },
                     revisionId = r.id,
                 )
                 mergeIds += r.id
@@ -1696,7 +1770,9 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                             // 跨叶修订（含只挪段界的那种）由合并路径整段处理，这里一律跳过。
                             r.id in mergeIds -> null
                             reviewMode -> {
-                                // 审阅视图：原文不删，新文字插在原区间末尾之后；段界换成段内换行。
+                                // 审阅视图：原文不删，新文字插在原区间末尾之后；带段界的副本
+                                // 正常会走合并路径拆成真块，走到这里说明那一叶被别的修订占了，
+                                // 只能降级：段界换成段内换行（文字不丢，只是不拆段）。
                                 if (r.charEnd > leafEnd) {
                                     null // 跨叶修订落在末叶那一侧处理（那里 charEnd 在叶内）
                                 } else {
@@ -1705,7 +1781,12 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                                         start = at,
                                         endExclusive = at,
                                         text = if (r.text.indexOf(RevisionBlocks.SEPARATOR) >= 0) {
-                                            r.text.replace(RevisionBlocks.SEPARATOR, '\n')
+                                            // 降级路径：换行前仍加一个绿 ¶，与拆分路径一致
+                                            // （用户 2026-11-08 定口：绿 ¶ 放在上一行末尾，像普通字符一样排）。
+                                            r.text.replace(
+                                                RevisionBlocks.SEPARATOR.toString(),
+                                                ChapterRevisionMap.BREAK_MARK_CHAR.toString() + "\n",
+                                            )
                                         } else {
                                             r.text
                                         },
@@ -1725,7 +1806,13 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                                 LeafTextEditor.Edit(
                                     start = r.charStart - leafStart,
                                     endExclusive = r.charEnd - leafStart,
-                                    text = r.text,
+                                    // 段界本该由合并路径拆块；走到这里说明这一叶被占用了，
+                                    // 降级成段内换行（`<br>`）：文字不丢，只是不拆段。
+                                    text = if (r.text.indexOf(RevisionBlocks.SEPARATOR) >= 0) {
+                                        r.text.replace(RevisionBlocks.SEPARATOR, '\n')
+                                    } else {
+                                        r.text
+                                    },
                                 )
                             }
                         }
@@ -1760,7 +1847,17 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         if (fixedRevisions != null || reviewMode) {
             revisionMaps = revisionMaps + (
                 unit.chapterIndex to
-                    ChapterRevisionMap(fixedRevisions ?: map.revisions, structureOnly)
+                    ChapterRevisionMap(
+                        fixedRevisions ?: map.revisions,
+                        structureOnly,
+                        // 原书空间的块尾：并段时「被删掉的段界」就落在这些偏移上。
+                        // 用重放**前**的叶起点，重放后它已换成审阅空间（那时就不能再拿来定位段界了）。
+                        originalBlockEnds = if (starts.size > 1) {
+                            IntArray(starts.size - 1) { starts[it + 1].toInt() }
+                        } else {
+                            IntArray(0)
+                        },
+                    )
                 )
         }
 
@@ -1823,7 +1920,11 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         leafTexts: Map<Int, String>,
         starts: LongArray,
     ): Boolean {
-        if (r.originalLength == 0) return false
+        // 零长度修订（段内新插一个段界的单叶拆段会被裁成 `[p, p)`）没有原书文字可比：
+        // 它只可能是「纯段界」——一个真字都没有，就是拆块。
+        if (r.originalLength == 0) {
+            return r.text.indexOf(RevisionBlocks.SEPARATOR) >= 0 && RevisionBlocks.textOf(r.text).isEmpty()
+        }
         val old = StringBuilder(r.originalLength)
         for (k in firstLeaf..lastLeaf) {
             val text = leafTexts[k] ?: return false
@@ -1833,6 +1934,70 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
             old.append(text, from, to)
         }
         return RevisionBlocks.textOf(r.text) == old.toString()
+    }
+
+    /**
+     * 在替换文字里按原书偏移插「段界痕迹」¶（审阅视图用）。
+     *
+     * [at] 是**原书空间**（不含段界字符）的偏移，即可能被挪掉的段界落在哪里。换算成 [text] 里的
+     * 下标要把文字里还留着的段界（U+E000）算进去：该处**还有**段界 ⇒ 那个换行没被删，
+     * 不画痕迹；**没有**段界 ⇒ 读者把这里并成一行了，插一个 ¶ 顶在原来断行的位置（红字）。
+     *
+     * 反过来，替换文字里**原书这里没有段界**的那些段界字符，是读者新插进去的换行：
+     * 在它前面插一个 ¶，落在断行处上一行的末尾（绿字）——用户 2026-11-08 定口。
+     */
+    private fun insertBreakMarks(text: String, at: List<Int>): String {
+        val ends = at.toHashSet()
+        val out = StringBuilder(text.length + ends.size + 4)
+        var plain = 0
+        for (c in text) {
+            if (c == RevisionBlocks.SEPARATOR) {
+                // 原书这里本来就有段界：¶ 不画，段界本身照旧落成新段；否则是新插的段界。
+                if (!ends.remove(plain)) out.append(ChapterRevisionMap.BREAK_MARK_CHAR)
+                out.append(c)
+                continue
+            }
+            if (ends.remove(plain)) out.append(ChapterRevisionMap.BREAK_MARK_CHAR)
+            out.append(c)
+            plain++
+        }
+        // 段界落在末段之后（末段没有后缀文字）时，痕迹只能补在末尾。
+        for (m in ends.sorted()) if (m <= plain) out.append(ChapterRevisionMap.BREAK_MARK_CHAR)
+        return out.toString()
+    }
+
+    /**
+     * 「新文字副本」里的段界痕迹：每个段界前插一个 ¶（绿字），再按段界拆成真块。
+     *
+     * 副本整段都是读者新写的字，段界不可能来自原书（原书那几段还在原文里排着），
+     * 所以每个段界都算「这里新插了一个换行」——用户 2026-11-08 定口：¶ 落在断行处上一行末尾。
+     */
+    private fun markCopyBreaks(text: String): String {
+        if (text.indexOf(RevisionBlocks.SEPARATOR) < 0) return text
+        val out = StringBuilder(text.length + 8)
+        for (c in text) {
+            if (c == RevisionBlocks.SEPARATOR) out.append(ChapterRevisionMap.BREAK_MARK_CHAR)
+            out.append(c)
+        }
+        return out.toString()
+    }
+
+    /**
+     * 这一叶上除了 [self] 还有别的修订吗。
+     *
+     * 合并 / 拆块走的是「整叶重塑」：只把本组那几条替换文字拼回原叶文字，叶上别的修订会被
+     * 拼丢。所以叶上不止一条修订时宁可不合并（退回叶内落字），文字永远不会丢。
+     */
+    private fun hasOtherRevisionOnLeaf(
+        map: ChapterRevisionMap,
+        leafIndex: Int,
+        starts: LongArray,
+        leafCount: Int,
+        self: orilumn.reader.data.revision.TextRevision,
+    ): Boolean {
+        val start = starts.getOrNull(leafIndex)?.toInt() ?: return true
+        val end = if (leafIndex + 1 < leafCount) starts[leafIndex + 1].toInt() else Int.MAX_VALUE
+        return map.revisionsTouching(start, end).any { it.id != self.id }
     }
 
     /** Binds the layouter's per-chapter href for [unit] before ANY layout/shape work that may touch

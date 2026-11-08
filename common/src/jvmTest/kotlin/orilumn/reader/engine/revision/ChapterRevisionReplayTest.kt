@@ -278,6 +278,115 @@ class ChapterRevisionReplayTest {
     }
 
     @Test
+    fun singleLeafSplitCreatesSiblingBlockWithSameTag() {
+        // 一段之内新插一个段界（读者在段内敲回车）：原叶承载前缀 + 第一行，后半截复制一份做末块。
+        val root = el("body", el("p", txt("abcdef")))
+        val r = ChapterRevisionReplay.replay(
+            root = root,
+            leaves = listOf(root.children[0]),
+            leafPaths = listOf(intArrayOf(0)),
+            charStarts = longArrayOf(0),
+            editsForLeaf = { _, _ -> emptyList() },
+            segmentsOf = ::seg,
+            wsOf = { WhiteSpace.NORMAL },
+            styleOf = null,
+            merges = listOf(
+                ChapterRevisionReplay.Merge(0, 0, 3, 3, RevisionBlocks.SEPARATOR.toString(), 7L),
+            ),
+        )
+        assertEquals(2, r.leaves.size)
+        assertEquals("abc", seg(r.leaves[0]).text)
+        assertEquals("def", seg(r.leaves[1]).text)
+        // 拆出来的块与原块同 tag / 同属性（补的就是「插入点所在的标签」）。
+        assertEquals("p", r.leaves[0].tag)
+        assertEquals("p", r.leaves[1].tag)
+        assertArrayEquals(longArrayOf(0, 3), r.charStarts)
+        assertEquals(2, r.root.children.size)
+    }
+
+    @Test
+    fun reviewCopyWithBreaksSplitsIntoRealBlocks() {
+        // 审阅视图：原文照排，带段界的新文字副本接在选区末尾。副本里的是**真段界**，
+        // 要落成真块（上一行末尾带绿 ¶），不能退化成 `¶` + `<br>`。
+        val root = el("body", el("p", txt("abcdef")))
+        val r = ChapterRevisionReplay.replay(
+            root = root,
+            leaves = listOf(root.children[0]),
+            leafPaths = listOf(intArrayOf(0)),
+            charStarts = longArrayOf(0),
+            editsForLeaf = { _, _ -> emptyList() },
+            segmentsOf = ::seg,
+            wsOf = { WhiteSpace.NORMAL },
+            styleOf = null,
+            merges = listOf(
+                // 在 3 处插入副本「XY¶<段界>Z」。
+                ChapterRevisionReplay.Merge(
+                    0,
+                    0,
+                    3,
+                    3,
+                    "XY${ChapterRevisionMap.BREAK_MARK_CHAR}${RevisionBlocks.SEPARATOR}Z",
+                    7L,
+                ),
+            ),
+        )
+        assertEquals(2, r.leaves.size)
+        assertEquals("abcXY${ChapterRevisionMap.BREAK_MARK_CHAR}", seg(r.leaves[0]).text)
+        assertEquals("Zdef", seg(r.leaves[1]).text)
+        // 副本拆出来的块与插入点所在的块同 tag。
+        assertEquals("p", r.leaves[1].tag)
+        assertArrayEquals(longArrayOf(0, 6), r.charStarts)
+        assertEquals(2, r.root.children.size)
+    }
+
+    @Test
+    fun twoSplitsInOneLeafBothLand() {
+        // 同一段里分两次插段界：两处都要落成块，不能后一条把前一条顶掉。
+        val root = el("body", el("p", txt("abcdef")))
+        val r = ChapterRevisionReplay.replay(
+            root = root,
+            leaves = listOf(root.children[0]),
+            leafPaths = listOf(intArrayOf(0)),
+            charStarts = longArrayOf(0),
+            editsForLeaf = { _, _ -> emptyList() },
+            segmentsOf = ::seg,
+            wsOf = { WhiteSpace.NORMAL },
+            styleOf = null,
+            merges = listOf(
+                ChapterRevisionReplay.Merge(0, 0, 2, 2, RevisionBlocks.SEPARATOR.toString(), 7L),
+                ChapterRevisionReplay.Merge(0, 0, 4, 4, RevisionBlocks.SEPARATOR.toString(), 8L),
+            ),
+        )
+        assertEquals(3, r.leaves.size)
+        assertEquals(listOf("ab", "cd", "ef"), r.leaves.map { seg(it).text })
+        assertArrayEquals(longArrayOf(0, 2, 4), r.charStarts)
+        assertEquals(3, r.root.children.size)
+    }
+
+    @Test
+    fun singleLeafSplitKeepsInlineMarkupInSuffix() {
+        // 后缀里的行内元素要跟着走：`<p>a<em>bc</em>def</p>` 在 2 处拆开 ⇒ 末块仍是 `<em>c</em>def`。
+        val root = el("body", el("p", txt("a"), el("em", txt("bc")), txt("def")))
+        val r = ChapterRevisionReplay.replay(
+            root = root,
+            leaves = listOf(root.children[0]),
+            leafPaths = listOf(intArrayOf(0)),
+            charStarts = longArrayOf(0),
+            editsForLeaf = { _, _ -> emptyList() },
+            segmentsOf = ::seg,
+            wsOf = { WhiteSpace.NORMAL },
+            styleOf = null,
+            merges = listOf(
+                ChapterRevisionReplay.Merge(0, 0, 2, 2, RevisionBlocks.SEPARATOR.toString(), 7L),
+            ),
+        )
+        assertEquals(2, r.leaves.size)
+        assertEquals("ab", seg(r.leaves[0]).text)
+        assertEquals("cdef", seg(r.leaves[1]).text)
+        assertTrue(r.leaves[1].children.any { it.tag == "em" })
+    }
+
+    @Test
     fun replaceAtKeepsSiblingsAndAttributes() {
         val p = MarkupElement("p", mapOf("class" to "x"), listOf(txt("a"), txt("b")))
         val root = el("body", p, txt("tail"))

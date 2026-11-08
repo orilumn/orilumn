@@ -186,6 +186,14 @@ interface ReaderHost {
     fun textBlockEndsOf(chapter: Int): IntArray? = null
 
     /**
+     * 审阅视图里「段界痕迹」¶ 在 [textOf] 同尺空间里的字符偏移（升序；没有则空表）。
+     *
+     * ¶ 是审阅空间专有的排版字符（被删掉的段界 / 新插的段界），不是书里的字：
+     * 取文字给读者看（修改卡初值、复制）时要跳过这些位。
+     */
+    fun reviewBreakOffsets(chapter: Int): IntArray = IntArray(0)
+
+    /**
      * 本章全部标注（D-19）：按起点、id 升序；读取失败返回空表。
      *
      * `shared-ui` 进章时读一次，之后增删改先改内存并递增装饰修订号，再异步落库；

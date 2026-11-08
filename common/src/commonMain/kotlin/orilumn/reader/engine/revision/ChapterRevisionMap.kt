@@ -28,8 +28,19 @@ class ChapterRevisionMap(
      * （见 `BookDocumentController.applyTextRevisions`），两种视图看到的都是合并后的那一段。
      *
      * 由重放侧按「替换文字 == 覆盖的原书文字」判定后塞回来；不是落库字段。
+     *
+     * 审阅空间里这类修订的改动痕迹是**段界本身**：被删掉的段界在合并后的段落中间留一个
+     * ¶（见 [reviewBreakMarkers]），红字 + 删除线由宿主按区间上色。
      */
     val structureOnly: Set<Long> = emptySet(),
+    /**
+     * 原书空间的**块尾**（每段结束处的原书偏移，升序；末块可以不给）。
+     *
+     * 只用来定位「被删掉的段界」：落在 [structureOnly] 修订区间**内部**的块尾就是那个段界。
+     * 不传（默认空）时审阅空间里不插 ¶ —— 那只会发生在修订表还没参与重放的时候，
+     * 此时审阅视图也不会用到这些换算。
+     */
+    val originalBlockEnds: IntArray = IntArray(0),
 ) {
     val revisions: List<TextRevision> = source.sortedWith(compareBy({ it.charStart }, { it.id }))
 
@@ -110,7 +121,138 @@ class ChapterRevisionMap(
      * 只改段界的修订没有副本：原书文字就是改后的文字，多排一份只会把同一段字显示两遍。
      */
     private fun reviewCopyLength(r: TextRevision): Int =
-        if (r.id in structureOnly) 0 else r.renderedLength
+        if (r.id in structureOnly) 0 else r.renderedLength + reviewBreakCount(r)
+
+    /**
+     * 这条修订的替换文字里插了几个「换行痕迹」（绿 ¶）。
+     *
+     * 审阅视图把替换文字原样接在原文之后展示，其中的段界（[RevisionBlocks.SEPARATOR]）落成
+     * 换行，换行前再插一个绿 ¶ —— 于是「这里插了个段界」也看得见（用户 2026-11-08 定口：
+     * 在两段之间插入换行，就在上一行末尾加一个绿 ¶）。绿 ¶ 也是字符，副本长度要一起算。
+     */
+    private fun reviewBreakCount(r: TextRevision): Int {
+        var n = 0
+        for (c in r.text) if (c == RevisionBlocks.SEPARATOR) n++
+        return n
+    }
+
+    /**
+     * 段界痕迹在**审阅空间**占的位置（一个字符位一个痕迹），按原书偏移升序。
+     *
+     * 位置 = 该段界之前的原书字数 + 之前各条修订插进来的副本长度 + 之前已有的痕迹数。
+     * ¶ 是排版里的普通字符（占一格）：被删掉的段界画成红字 + 删除线，
+     * 新插进去的段界画成绿字（见 [reviewInsertedBreakMarkers]），宿主按区间上色。
+     */
+    val reviewBreakMarkers: IntArray by lazy { markerPositions.keys.toIntArray() }
+
+    /** 被删掉的段界所在的痕迹位（红 ¶），升序。 */
+    val reviewDeletedBreakMarkers: IntArray by lazy {
+        markerPositions.filterValues { !it }.keys.toIntArray()
+    }
+
+    /** 新插进去的段界所在的痕迹位（绿 ¶），升序。 */
+    val reviewInsertedBreakMarkers: IntArray by lazy {
+        markerPositions.filterValues { it }.keys.toIntArray()
+    }
+
+    /** 痕迹位 → 是否「新插进去的段界」（true = 绿 ¶，false = 被删掉的段界 = 红 ¶）。 */
+    private val markerPositions: Map<Int, Boolean> by lazy {
+        val kinds = markerKinds
+        if (kinds.isEmpty()) return@lazy emptyMap()
+        val out = LinkedHashMap<Int, Boolean>(kinds.size * 2)
+        var i = 0
+        for ((b, inserted) in kinds) {
+            out[b + copiesBefore(b) + i] = inserted
+            i++
+        }
+        out
+    }
+
+    /**
+     * 审阅空间里**所有** ¶ 的字符偏移（升序）：段界痕迹 + 新文字副本里那几个绿 ¶。
+     *
+     * 只给「取文字」用（摘录 / 复制 / 修改卡初值要跳过痕迹）。**不参与坐标换算**：
+     * 副本里的 ¶ 已经算进 [reviewCopyLength]，再当痕迹数一遍就重复了。
+     */
+    val reviewMarkOffsets: IntArray by lazy {
+        if (revisions.isEmpty()) return@lazy IntArray(0)
+        val out = ArrayList<Int>(markerKinds.size + 4)
+        out += markerPositions.keys
+        for (r in revisions) {
+            if (r.id in structureOnly) continue
+            var seps = 0
+            for (c in r.text) if (c == RevisionBlocks.SEPARATOR) seps++
+            if (seps == 0) continue
+            val start = toReview(r.charEnd, crossInsertions = false)
+            var plain = 0
+            var j = 0
+            for (c in r.text) {
+                if (c == RevisionBlocks.SEPARATOR) {
+                    out += start + plain + j
+                    j++
+                } else {
+                    plain++
+                }
+            }
+        }
+        if (out.isEmpty()) return@lazy IntArray(0)
+        out.sort()
+        out.toIntArray()
+    }
+
+    /**
+     * 段界改动（原书偏移 → 是否新插的），升序去重。
+     *
+     * 只有落在 [structureOnly] 修订区间里的才参与：原书块尾里**替换文字里已经没有段界**的
+     * 是「删掉的段界」（红 ¶）；替换文字里**原书这里本来没有块尾**的段界字符是「新插的段界」
+     * （绿 ¶，排在断行处上一行末尾）。还留着的换行两边都不算。
+     */
+    private val markerKinds: List<Pair<Int, Boolean>> by lazy {
+        if (structureOnly.isEmpty() || originalBlockEnds.isEmpty()) return@lazy emptyList()
+        val ends = originalBlockEnds.toHashSet()
+        val out = LinkedHashMap<Int, Boolean>(4)
+        for (r in revisions) {
+            if (r.id !in structureOnly) continue
+            val kept = HashSet<Int>(4)
+            var plain = r.charStart
+            for (c in r.text) {
+                if (c == RevisionBlocks.SEPARATOR) {
+                    // 原文这里本来就有段界（且落在选区内部）：读者没动它，不留痕迹。
+                    if (plain in ends && plain > r.charStart && plain < r.charEnd) {
+                        kept += plain
+                    } else {
+                        // 否则是读者新插的段界（绿 ¶，排在断行处上一行末尾）。落在区间两端也算：
+                        // 单叶拆段的修订会被裁成 `[p, p)` 只留一个段界字符。
+                        if (plain >= r.charStart && plain <= r.charEnd) out[plain] = true
+                    }
+                } else {
+                    plain++
+                }
+            }
+            // 原书的块尾：替换文字里该点没有段界 ⇒ 这个换行被删掉了（红 ¶）。
+            for (e in originalBlockEnds) {
+                if (e > r.charStart && e < r.charEnd && e !in kept) out[e] = false
+            }
+        }
+        out.entries.sortedBy { it.key }.map { it.key to it.value }
+    }
+
+    /** 原书偏移之前已经插进来的副本总长（与 [toReview] 的 `shift` 同口径）。 */
+    private fun copiesBefore(original: Int): Int {
+        var c = 0
+        for (r in revisions) if (r.charEnd <= original) c += reviewCopyLength(r)
+        return c
+    }
+
+    /** 原书偏移之前有几个段界痕迹（每个占一格）；[cross] 时含正好落在该点的那个。 */
+    private fun markersBefore(original: Int, cross: Boolean): Int {
+        var n = 0
+        for ((b, _) in markerKinds) {
+            if (b < original || (cross && b == original)) n++
+            else if (b > original) break
+        }
+        return n
+    }
 
     /** 原书偏移 → 渲染偏移。单点不区分纯插入，一律按「越过」处理（调用处注明）。 */
     fun toRendered(original: Int): Int = toRendered(original, crossInsertions = true)
@@ -204,25 +346,32 @@ class ChapterRevisionMap(
             }
             if (r.charStart > original) break
             // 落在原区间内部：原文仍按原位排，不夹到边界（新文字排在区间末尾之后）。
-            return original + shift
+            // 段界痕迹与「插在这个点上的新文字」同一口径：起点越过、终点停在它之前。
+            return original + shift + markersBefore(original, crossInsertions)
         }
-        return original + shift
+        return original + shift + markersBefore(original, crossInsertions)
     }
 
     /** 审阅空间偏移 → 原书偏移；落在新文字里时夹回原区间末尾。 */
     fun toOriginalFromReview(review: Int): Int {
+        // 先摘掉段界痕迹占的字符位：¶ 不对应任何原书字符，落在它上面就夹到段界本身。
+        var slots = 0
+        for (m in reviewBreakMarkers) {
+            if (m < review) slots++ else break
+        }
+        val rv = review - slots
         var shift = 0
         for (r in revisions) {
             val copy = reviewCopyLength(r)
             val rs = r.charStart + shift
             val re = rs + r.originalLength
             val insertedEnd = re + copy
-            if (review < rs) return review - shift
-            if (review < re) return r.charStart + (review - rs)
-            if (review < insertedEnd) return r.charEnd
+            if (rv < rs) return rv - shift
+            if (rv < re) return r.charStart + (rv - rs)
+            if (rv < insertedEnd) return r.charEnd
             shift += copy
         }
-        return review - shift
+        return rv - shift
     }
 
     /** 被替换掉的原区间在审阅空间的位置（红字 + 红色删除线）；纯插入为空区间。 */
@@ -239,7 +388,7 @@ class ChapterRevisionMap(
         // 只改段界的修订没有「新文字」副本，也就没有绿字。
         if (r.id in structureOnly) return IntRange.EMPTY
         val s = toReview(r.charEnd, crossInsertions = false)
-        return s until (s + r.renderedLength)
+        return s until (s + reviewCopyLength(r))
     }
 
     /**
@@ -254,7 +403,10 @@ class ChapterRevisionMap(
         if (r.id in structureOnly) {
             val s = toReview(r.charStart, crossInsertions = true)
             val e = toReview(r.charEnd, crossInsertions = false)
-            return s until maxOf(s, e)
+            // 零长度（段内新插一个段界）：charStart == charEnd，被删 / 新插的 ¶ 就落在这一点上，
+            // 区间要把这个字符本身算进来，点它才认得出来。
+            val to = maxOf(s, e)
+            return minOf(s, e) until (if (to > minOf(s, e)) to else to + 1)
         }
         val del = reviewDeletedRange(r)
         val ins = reviewInsertedRange(r)
@@ -310,16 +462,29 @@ class ChapterRevisionMap(
      */
     fun originalTextFromReview(reviewText: String): String {
         if (revisions.isEmpty()) return reviewText
+        val markers = reviewBreakMarkers
         val out = StringBuilder(reviewText.length)
+        var mi = 0
+        // 追加一段审阅空间文字，跳过段界痕迹（¶）占的字符位。
+        fun append(from: Int, to: Int) {
+            var p = from
+            while (mi < markers.size && markers[mi] < p) mi++
+            while (mi < markers.size && markers[mi] < to) {
+                out.append(reviewText, p, markers[mi])
+                p = markers[mi] + 1
+                mi++
+            }
+            out.append(reviewText, p, to)
+        }
         var pos = 0
         for (r in revisions) {
             val ins = reviewInsertedRange(r)
             if (ins.isEmpty()) continue
-            if (ins.first > pos) out.append(reviewText, pos, minOf(ins.first, reviewText.length))
+            if (ins.first > pos) append(pos, minOf(ins.first, reviewText.length))
             pos = maxOf(pos, ins.last + 1)
             if (pos >= reviewText.length) break
         }
-        if (pos < reviewText.length) out.append(reviewText, pos, reviewText.length)
+        if (pos < reviewText.length) append(pos, reviewText.length)
         return out.toString()
     }
 
@@ -343,11 +508,24 @@ class ChapterRevisionMap(
         }
 
     companion object {
+        /**
+         * 审阅视图里「段界痕迹」用的字符：被删掉的段界显示成红色带删除线的 ¶，
+         * 新插入的段界在换行前显示成绿色 ¶（用户 2026-11-08 定口：像普通字符一样排在行内）。
+         *
+         * 它就是排版里的一个普通字符（占一格），不是覆盖层：审阅空间的换算里把它算进去，
+         * 谁都不必为它另开几何通道。取 U+00B6 是因为各字体都有这个字形；
+         * 正文里真有 ¶ 的书极少，只有审阅视图的「取文字」路径会把它当痕迹跳过。
+         */
+        const val BREAK_MARK_CHAR: Char = '\u00B6'
+
         /** 重放 / 预归一算法版本：进 `contentRev`。规则一改就要 +1。
          *  2 = 跨叶修订（段数由输入换行数决定，段界见 `RevisionBlocks.SEPARATOR`）。
          *  3 = 只改段界的跨叶修订在审阅视图里也按合并落结构（不再排两遍同一段字）。
-         *  4 = 合并段之后的叶只按增量平移（4 以前多算了一整段，字符流与正文投影错位）。 */
-        const val ALGORITHM_VERSION = 4
+         *  4 = 合并段之后的叶只按增量平移（4 以前多算了一整段，字符流与正文投影错位）。
+         *  5 = 审阅空间在段界处多排一个 ¶ 痕迹（删掉的段界 / 插入的段界），章文字变了。
+         *  6 = 段内新敲的换行也落成真块（单叶拆段）；同一片叶上的几处段界改动合成一次拆块。
+         *  7 = 审阅视图的「新文字副本」里的段界也落成真块（不再排成 `¶` + `<br>`）。 */
+        const val ALGORITHM_VERSION = 7
 
         private const val FNV_OFFSET = -3750763034362895579L // 14695981039346656037
         private const val FNV_PRIME = 1099511628211L

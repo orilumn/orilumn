@@ -228,14 +228,26 @@ class TextEditPlannerTest {
     }
 
     @Test
-    fun singleLeafMayInsertLineBreak() {
-        // 叶内 \n = <br>：原样作为替换文字落进修订。
+    fun singleLeafTypedLineBreakSplitsTheBlock() {
+        // 叶内**新敲**的换行是段界：落成真块（拆段），不是 `<br>`。
         val p = ready(plan("abcdef", intArrayOf(6), 2, 4, "X\nY"))
         val r = p.inserted.single()
         assertEquals(2, r.charStart)
         assertEquals(4, r.charEnd)
-        assertEquals("X\nY", r.text)
-        assertEquals(1, r.delta)
+        assertEquals("X${RevisionBlocks.SEPARATOR}Y", r.text)
+        // 段界不占字：2 个字换 2 个字，delta 为 0。
+        assertEquals(0, r.delta)
+    }
+
+    @Test
+    fun singleLeafKeptLineBreakStaysBr() {
+        // 原文里本来就有的 `\n`（`<br>`）对齐后仍是 `<br>`：选区盖住它、输入区原样留着。
+        val p = ready(plan("ab\ncd", intArrayOf(5), 1, 4, "B\nC"))
+        val r = p.inserted.single()
+        assertEquals(1, r.charStart)
+        assertEquals(4, r.charEnd)
+        assertEquals("B\nC", r.text)
+        assertEquals(0, r.delta)
     }
 
     @Test
@@ -346,10 +358,10 @@ class TextEditPlannerTest {
 
     @Test
     fun lineBreakInReplacementSurvivesNormalization() {
-        // 叶内 `\n` 是 <br>，不能被普通模式的空白折叠吃掉。
+        // 叶内新敲的 `\n` 是段界：空白归一不能把它吃掉，但它也不占字（`<br>` 才会占）。
         val p = ready(plan("abcdef", intArrayOf(6), 2, 4, "X  Y\nZ"))
         val r = p.inserted.single()
-        assertEquals("X Y\nZ", r.text)
+        assertEquals("X Y${RevisionBlocks.SEPARATOR}Z", r.text)
         assertEquals(2, r.charStart)
         assertEquals(4, r.charEnd)
     }

@@ -380,11 +380,14 @@ object TextEditPlanner {
         // 前后邻字符取叶内、扩张区间之外的真实字符；叶边界为 null（CSS 丢弃边界空白）。
         val before = if (uRenderStart <= seg.leafRenderStart) null else chapterText.getOrNull(uRenderStart - 1)
         val after = if (uRenderEnd >= seg.leafRenderEnd) null else chapterText.getOrNull(uRenderEnd)
-        val newText = LeafTextEditor.preNormalize(rawText, wsOfLeaf(seg.leaf), before, after)
+        val normalized = LeafTextEditor.preNormalize(rawText, wsOfLeaf(seg.leaf), before, after)
+        // 读者**新敲**的换行是段界（拆成真块），原文里本来就有的 `\n` 仍是 `<br>`：
+        // 字符级对齐一眼就能分开「留下来的换行」与「新添的换行」（方案 D-34 修订版）。
+        val newText = promoteTypedBreaks(oldText, normalized)
 
         if (newText == oldText) {
             // 输入的文字与旧渲染文字逐字相同（或只差会被空白归一吃掉的空白）：不写库。
-            return Built(emptyList(), null, newText.length)
+            return Built(emptyList(), null, RevisionBlocks.renderedLength(newText))
         }
 
         // 只能裁「没有被旧修订覆盖」的两端：那一段渲染文字与原文逐字相同，裁掉才不会丢旧替换。
@@ -407,8 +410,7 @@ object TextEditPlanner {
         }
         val finalText = newText.substring(prefix, newText.length - suffix)
         val finalStart = uStart + prefix
-        val finalEnd = uEnd - suffix
-        // 审阅清单两行：整段选区改之前 / 改之后的文字（渲染空间，按叶各存一份）。
+        val finalEnd = uEnd - suffix        // 审阅清单两行：整段选区改之前 / 改之后的文字（渲染空间，按叶各存一份）。
         // 与上面的「最小修订」无关：公共前后缀照裁不误，但清单里仍显示整段，
         // 读者才看得出「改之前是什么、改之后是什么」（纯插入也显示被选中的那段原文）。
         val selected = chapterText.substring(segStart, segEnd)
@@ -422,13 +424,47 @@ object TextEditPlanner {
                 text = finalText,
                 originalText = selected,
                 editedText = seg.text,
-                delta = finalText.length - (finalEnd - finalStart),
+                delta = RevisionBlocks.renderedLength(finalText) - (finalEnd - finalStart),
                 groupId = groupId,
                 createdAt = now,
                 updatedAt = now,
             ),
-            renderedLength = newText.length,
+            renderedLength = RevisionBlocks.renderedLength(newText),
         )
+    }
+
+    /**
+     * 把读者**新敲**的换行升成段界（[RevisionBlocks.SEPARATOR]）。
+     *
+     * 输入框里两种换行长得一样：原书本来就有的 `<br>`（字符流里就是 `\n`）与读者刚按下的回车。
+     * 用字符级对齐分开：能对上前一个字面量（[CharDiff.Op.Keep]）的 `\n` 是留下来的 `<br>`，
+     * 对不上的就是新添的换行 ⇒ 段界，重放时按它拆出真正的块（`</p><p>` 或插入点所在的那个标签）。
+     *
+     * 对齐退化（整段换新字）时会把选区里的 `\n` 全当新换行，代价是原有的 `<br>` 变成段界；
+     * 只影响超长段落（[CharDiff] 的长度上限）里的情形。
+     */
+    internal fun promoteTypedBreaks(oldText: String, newText: String): String {
+        if (newText.indexOf('\n') < 0) return newText
+        val kept = BooleanArray(newText.length)
+        var ni = 0
+        for (op in CharDiff.diff(oldText, newText)) {
+            when (op) {
+                is CharDiff.Op.Keep -> {
+                    repeat(op.length) {
+                        if (ni < kept.size) kept[ni] = true
+                        ni++
+                    }
+                }
+                is CharDiff.Op.Delete -> Unit
+                is CharDiff.Op.Insert -> ni += op.text.length
+            }
+        }
+        val out = StringBuilder(newText.length)
+        for (i in newText.indices) {
+            val c = newText[i]
+            out.append(if (c == '\n' && !kept[i]) RevisionBlocks.SEPARATOR else c)
+        }
+        return out.toString()
     }
 
     /** 累计块尾 → 偏移所在的叶下标（第一个「块尾 > offset」）。 */

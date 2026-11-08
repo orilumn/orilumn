@@ -355,6 +355,8 @@ class TabletReaderHost(
 
     override fun textBlockEndsOf(chapter: Int): IntArray? = controller.chapterTextBlockEnds(chapter)
 
+    override fun reviewBreakOffsets(chapter: Int): IntArray = controller.reviewBreakMarkers(chapter)
+
     // ---- 文本标注：转手给共享 BookRepository/LibraryDb（平台侧只做壳） ----
     //
     // 坐标口径（方案 §8.8）：标注落库一律是**原书空间**；阅读面（选区 / 装饰 / 命中）

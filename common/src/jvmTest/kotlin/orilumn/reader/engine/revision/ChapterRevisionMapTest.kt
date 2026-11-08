@@ -230,6 +230,113 @@ class ChapterRevisionMapTest {
     }
 
     @Test
+    fun deletedParagraphBreakLeavesMarkInReviewSpace() {
+        // 原书两段「甲乙」「丙丁」，段界在原书偏移 2；删掉段间换行 ⇒ [0,4) 换回「甲乙丙丁」。
+        val r = rev(0, 4, "甲乙丙丁", id = 1)
+        val map = ChapterRevisionMap(
+            listOf(r),
+            structureOnly = setOf(1L),
+            originalBlockEnds = intArrayOf(2),
+        )
+        // 审阅空间 = 「甲乙¶丙丁」：¶ 占原段界那一格。
+        assertEquals(listOf(2), map.reviewBreakMarkers.toList())
+        assertEquals(3, map.toReview(2))
+        assertEquals(4, map.toReview(3, crossInsertions = false))
+        // ¶ 自己不对应原书的字，落在它上面就夹回段界。
+        assertEquals(2, map.toOriginalFromReview(2))
+        assertEquals(2, map.toOriginalFromReview(3))
+        assertEquals(3, map.toOriginalFromReview(4))
+        // 取原书文字时痕迹要剪掉（修改卡 / 复制 / 摘录都走这条）。
+        assertEquals("甲乙丙丁", map.originalTextFromReview("甲乙¶丙丁"))
+        // 正常视图（渲染空间）不受影响：一个字都没变，也不多痕迹。
+        assertTrue(map.reviewDeletedRange(r).isEmpty())
+        assertTrue(map.reviewInsertedRange(r).isEmpty())
+        assertEquals(4, map.toRendered(4))
+    }
+
+    @Test
+    fun mergingThreeParagraphsLeavesTwoMarks() {
+        // 「甲乙」「丙丁」「戊己」两处段界（2、4）都删掉 ⇒ [0,6) 换回一整段。
+        val r = rev(0, 6, "甲乙丙丁戊己", id = 1)
+        val map = ChapterRevisionMap(
+            listOf(r),
+            structureOnly = setOf(1L),
+            originalBlockEnds = intArrayOf(2, 4),
+        )
+        assertEquals(listOf(2, 5), map.reviewBreakMarkers.toList())
+        assertEquals("甲乙丙丁戊己", map.originalTextFromReview("甲乙¶丙丁¶戊己"))
+        // 「戊」在审阅空间是 6、原书是 4；章尾 8 对回 6。
+        assertEquals(4, map.toOriginalFromReview(6))
+        assertEquals(6, map.toOriginalFromReview(8))
+    }
+
+    @Test
+    fun insertedParagraphBreakInsideOneLeafLeavesGreenMark() {
+        // 读者在一段之内敲回车：修订被裁成 [2, 2) 只留一个段界字符（原书这里没有块尾）。
+        val r = TextRevision(
+            id = 1,
+            bookId = 1,
+            chapter = 1,
+            charStart = 2,
+            charEnd = 2,
+            text = RevisionBlocks.SEPARATOR.toString(),
+            // 段界不占字：delta 为 0（提交侧按 renderedLength 算，就是这个值）。
+            delta = 0,
+        )
+        val map = ChapterRevisionMap(
+            listOf(r),
+            structureOnly = setOf(1L),
+            originalBlockEnds = intArrayOf(4),
+        )
+        // 审阅空间 = 「甲乙¶丙丁」：绿 ¶ 顶在断行处上一行末尾，占一格。
+        assertEquals(listOf(2), map.reviewBreakMarkers.toList())
+        assertEquals(listOf(2), map.reviewInsertedBreakMarkers.toList())
+        assertTrue(map.reviewDeletedBreakMarkers.isEmpty())
+        assertEquals(2, map.toReview(2, crossInsertions = false))
+        assertEquals(3, map.toReview(2))
+        // 原来 2 之后的字整体后移一格（¶ 占一格）。
+        assertEquals(4, map.toReview(3, crossInsertions = false))
+        // 零长度修订：点那个 ¶ 也要认得出来（开卡改它 / 删它）。
+        assertEquals(2 until 3, map.reviewInterval(r))
+        assertEquals(listOf(1L), map.revisionsTouchingReview(2, 3).map { it.id })
+        // 取原书文字时绿 ¶ 一样要剪掉。
+        assertEquals("甲乙丙丁", map.originalTextFromReview("甲乙¶丙丁"))
+        // 正常视图不受痕迹影响：段界不占字，一个字都没变。
+        assertEquals(2, map.toRendered(2))
+        assertEquals(4, map.toRendered(4))
+    }
+
+    @Test
+    fun keptParagraphBreakLeavesNoMark() {
+        // 三段的选区里只删掉了第一处段界，第二处换行还留着（替换文字里还有 U+E000）。
+        val r = rev(0, 6, "甲乙丙丁${RevisionBlocks.SEPARATOR}戊己", id = 1)
+        val map = ChapterRevisionMap(
+            listOf(r),
+            structureOnly = setOf(1L),
+            originalBlockEnds = intArrayOf(2, 4),
+        )
+        // 只有真被删掉的那一处留 ¶；留着的换行照旧分段，不留痕迹。
+        assertEquals(listOf(2), map.reviewBreakMarkers.toList())
+        assertEquals(5, map.toReview(4))
+        assertEquals(6, map.toReview(5))
+    }
+
+    @Test
+    fun insertedParagraphBreakCountsGreenMarkInReviewCopy() {
+        // 在 2 处插入「甲[段界]乙」：审阅空间的副本是「甲¶\n乙」（段界落成换行，行尾多一个绿 ¶）。
+        val r = rev(2, 2, "甲${RevisionBlocks.SEPARATOR}乙")
+        val map = ChapterRevisionMap(listOf(r))
+        assertEquals(2 until 6, map.reviewInsertedRange(r))
+        // 副本里那 4 个字符都夹回插入点。
+        assertEquals(2, map.toOriginalFromReview(2))
+        assertEquals(2, map.toOriginalFromReview(5))
+        // 剪掉副本又是原书那一串。
+        assertEquals("甲乙", map.originalTextFromReview("甲乙甲¶\n乙"))
+        // 副本里那个绿 ¶ 也要能被「取文字」跳过（摘录 / 复制 / 修改卡初值）。
+        assertEquals(listOf(3), map.reviewMarkOffsets.toList())
+    }
+
+    @Test
     fun structureOnlyRevisionKeepsLaterReviewsInRenderedSpace() {
         // [1,3) 只挪段界（无副本），[3,4) 把「丁」换成「XY」：审阅空间 = 「甲乙丙丁XY」。
         val shape = rev(1, 3, "乙丙", id = 1, group = 1)

@@ -93,8 +93,10 @@ object ChapterRevisionReplay {
         }
         // 级联取样式要沿 parent 走；持久化树可能还没重链过（幂等）。
         MarkupPaths.assignParents(root)
-        val mergeByFirst = HashMap<Int, Merge>(merges.size)
-        for (m in merges) mergeByFirst[m.firstLeaf] = m
+        // 同一片叶上可能落着几处改动（一段里插了两次段界、或者又改了字）：按首叶归组，
+        // 由 [mergeLeaves] 合成一次拆块，别让后一条把前一条顶掉。
+        val mergeByFirst = HashMap<Int, MutableList<Merge>>(merges.size)
+        for (m in merges) mergeByFirst.getOrPut(m.firstLeaf) { ArrayList(1) }.add(m)
         val replacements = HashMap<MarkupElement, List<MarkupElement>>()
         val removed = HashSet<MarkupElement>()
         val newLeaves = ArrayList<MarkupElement>(leaves.size)
@@ -108,14 +110,16 @@ object ChapterRevisionReplay {
 
         var i = 0
         while (i < leaves.size) {
-            val merge = mergeByFirst[i]
-            if (merge != null) {
-                val out = mergeLeaves(merge, leaves, leafPaths, charStarts, segmentsOf, wsOf, styleOf)
+            val group = mergeByFirst[i]
+            if (group != null) {
+                val out = mergeLeaves(group, leaves, leafPaths, charStarts, segmentsOf, wsOf, styleOf)
                 if (out.needsRecompute) needsRecompute = true
                 degraded += out.degraded
+                val firstLeaf = group.minOf { it.firstLeaf }
+                val lastLeaf = group.maxOf { it.lastLeaf }
                 if (out.blocks.isEmpty()) {
                     // 不能合并（匿名叶 / 图片 / 表格）：整段原样保留，交给调用方放弃结构重算。
-                    for (k in merge.firstLeaf..merge.lastLeaf) {
+                    for (k in firstLeaf..lastLeaf) {
                         origins += k
                         newLeaves += leaves[k]
                         newStarts += charStarts[k] + shift
@@ -126,19 +130,20 @@ object ChapterRevisionReplay {
                     // 整章字符流与正文投影从此错位（实测 53 字的并段把后面每个偏移都推后 53）。
                     var blockOffset = 0L
                     for (b in out.blocks) {
-                        newStarts += charStarts[merge.firstLeaf] + shift + blockOffset
+                        newStarts += charStarts[firstLeaf] + shift + blockOffset
                         newLeaves += b.element
-                        origins += merge.firstLeaf
+                        origins += firstLeaf
                         blockOffset += b.textLength
                     }
                     shift += out.delta
-                    replacements[leaves[merge.firstLeaf]] = out.blocks.map { it.element }
-                    for (k in merge.firstLeaf..merge.lastLeaf) {
+                    replacements[leaves[firstLeaf]] = out.blocks.map { it.element }
+                    for (k in firstLeaf..lastLeaf) {
                         if (k !in out.usedLeaves) removed += leaves[k]
                     }
-                    measuredRev[merge.revisionId] = out.delta
+                    // 合成的组（同一片叶上几处改动）量不出逐条的增量，跳过修正、沿用库里的值。
+                    if (group.size == 1) measuredRev[group[0].revisionId] = out.delta
                 }
-                i = merge.lastLeaf + 1
+                i = lastLeaf + 1
                 continue
             }
 
@@ -199,6 +204,24 @@ object ChapterRevisionReplay {
     /** 一块的节点与实测文本长度（渲染空间）。 */
     private class Block(val element: MarkupElement, val textLength: Int)
 
+    /**
+     * 把同一片叶上的几处改动拼成一串文字：按起点把各自的替换文字替换进去（区间互不重叠），
+     * 段界字符原样保留，交给 [RevisionBlocks.split] 一次拆块。
+     */
+    private fun composeLeaf(base: String, group: List<Merge>): String {
+        val out = StringBuilder(base.length + 16)
+        var pos = 0
+        for (m in group.sortedBy { it.start }) {
+            val s = m.start.coerceIn(0, base.length)
+            val e = m.endExclusive.coerceIn(s, base.length)
+            if (s > pos) out.append(base, pos, s)
+            out.append(m.text)
+            pos = e
+        }
+        if (pos < base.length) out.append(base, pos, base.length)
+        return out.toString()
+    }
+
     private class MergeOut(
         val blocks: List<Block>,
         val usedLeaves: Set<Int>,
@@ -212,7 +235,7 @@ object ChapterRevisionReplay {
      * 对不上（拆分）就新建同 tag 的块；末块用末叶承载，后缀原样留在里面。
      */
     private fun mergeLeaves(
-        merge: Merge,
+        group: List<Merge>,
         leaves: List<MarkupElement>,
         leafPaths: List<IntArray?>,
         charStarts: LongArray,
@@ -220,12 +243,28 @@ object ChapterRevisionReplay {
         wsOf: (MarkupElement) -> WhiteSpace,
         styleOf: ((MarkupElement) -> ComputedStyle?)?,
     ): MergeOut {
-        val first = merge.firstLeaf
-        val last = merge.lastLeaf
+        val first = group.minOf { it.firstLeaf }
+        val last = group.maxOf { it.lastLeaf }
         val simple = (first..last).all { k ->
             leafPaths[k] != null && RevisionBlocks.mergeableLeaf(leaves[k])
         }
         if (!simple) return MergeOut(emptyList(), emptySet(), 0, 0, needsRecompute = true)
+
+        // 同一片叶上的几处改动：按起点把它们各自的替换文字拼回原叶文字（段界原样留着），
+        // 合成一条「整叶重塑」，再照常按段界拆块。跨叶修订一组只会有一条。
+        val merge = if (group.size == 1) {
+            group[0]
+        } else {
+            val base = segmentsOf(leaves[first]).text
+            Merge(
+                firstLeaf = first,
+                lastLeaf = last,
+                start = 0,
+                endExclusive = base.length,
+                text = composeLeaf(base, group),
+                revisionId = group[0].revisionId,
+            )
+        }
 
         val lines = RevisionBlocks.split(merge.text)
         val n = last - first + 1
@@ -273,6 +312,34 @@ object ChapterRevisionReplay {
             // 并成一段：首叶承载前缀 + 新文字 + 末叶后缀，中间的叶全删。
             val suffix = if (last == first) "" else lastText.substring(selEndInLast)
             emitRebuilt(first, LeafTextEditor.Edit(selStartInFirst, firstLen, lines[0] + suffix))
+        } else if (first == last) {
+            // 单叶拆块：选区在一段之内，却输入了段界（读者新插的换行）。前缀 + 第一行留在原叶，
+            // 中间各行新建同 tag / 同属性的兄弟块，最后一行 + 后缀交给「原叶的另一份重建」——
+            // 一片叶只能承载一块，前缀和后缀要分两处，就只能各复制一份（复制的那份去掉 id）。
+            val at = selStartInFirst
+            val end = selEndInLast
+            emitRebuilt(first, LeafTextEditor.Edit(at, firstLen, lines.first()))
+            for (j in 1 until lines.size - 1) emitNew(lines[j])
+            val tail = LeafTextEditor.rebuild(
+                leaf = lastLeaf,
+                segments = segmentsOf(lastLeaf),
+                edits = listOf(LeafTextEditor.Edit(0, end, lines.last())),
+                wsOf = wsOf,
+                styleOf = styleOf,
+                rebuildSegments = segmentsOf,
+            )
+            if (tail.degraded) degraded++
+            val tailLeaf = if ("id" in lastLeaf.attrs) {
+                MarkupElement(
+                    tag = tail.leaf.tag,
+                    attrs = tail.leaf.attrs - "id",
+                    children = tail.leaf.children,
+                    text = tail.leaf.text,
+                ).also { it.parent = lastLeaf.parent }
+            } else {
+                tail.leaf
+            }
+            blocks += Block(tailLeaf, tail.text.length)
         } else {
             // 前 m-1 行：能对上叶的复用原叶，多出来的行新建块。
             for (j in 0 until lines.size - 1) {

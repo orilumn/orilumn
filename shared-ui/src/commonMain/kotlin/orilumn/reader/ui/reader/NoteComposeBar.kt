@@ -16,8 +16,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.selection.LocalTextSelectionColors
+import androidx.compose.foundation.text.selection.TextSelectionColors
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -273,43 +276,74 @@ internal fun AnnotationSheet(
                             color = p.muted2,
                         )
                     }
-                    BasicTextField(
-                        value = value,
-                        onValueChange = {
-                            value = it
-                            onTextChange(it.text)
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .focusRequester(focus)
-                            .onFocusChanged { focused = it.isFocused }
-                            .onSizeChanged { fieldHeightPx = it.height },
-                        textStyle = NoteTextStyle.copy(color = p.text),
-                        // 光标用正文墨色，不用批注色：高亮色槽是 45% 透明度的荧光笔底色（`0x73…`），
-                        // 拿它画光标压在卡片的浅底上几乎看不见。
-                        cursorBrush = if (selfCaret) SolidColor(Color.Transparent) else SolidColor(p.text),
-                        onTextLayout = { textLayout = it },
-                        maxLines = if (mode == NoteSheetMode.TextEdit) TEXT_EDIT_MAX_LINES else NOTE_MAX_LINES,
-                    )
-                    // 自绘光标：只有「光标处在这一版里」时才画（选择一段文字时系统本来也不画光标）。
-                    if (selfCaret && focused && value.selection.collapsed) {
+                    // 选区手柄也自绘（与正文同一套圆点）：系统那对水滴形手柄由字段自己的弹出层画，
+                    // 没有公开 API 换样式，只能把它的墨色设成透明，再按同一份文本布局画我们的圆点。
+                    // 命中仍由那个隐形手柄接管，拖动照旧改选区，只是看不见系统外观。
+                    // 字段内部滚动时拿不到行位置（与自绘光标同一限制），手柄退回系统那套。
+                    val baseSelection = LocalTextSelectionColors.current
+                    CompositionLocalProvider(
+                        LocalTextSelectionColors provides TextSelectionColors(
+                            handleColor = if (selfCaret) Color.Transparent else baseSelection.handleColor,
+                            backgroundColor = baseSelection.backgroundColor,
+                        ),
+                    ) {
+                        BasicTextField(
+                            value = value,
+                            onValueChange = {
+                                value = it
+                                onTextChange(it.text)
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .focusRequester(focus)
+                                .onFocusChanged { focused = it.isFocused }
+                                .onSizeChanged { fieldHeightPx = it.height },
+                            textStyle = NoteTextStyle.copy(color = p.text),
+                            // 光标用正文墨色，不用批注色：高亮色槽是 45% 透明度的荧光笔底色（`0x73…`），
+                            // 拿它画光标压在卡片的浅底上几乎看不见。
+                            cursorBrush = if (selfCaret) SolidColor(Color.Transparent) else SolidColor(p.text),
+                            onTextLayout = { textLayout = it },
+                            maxLines = if (mode == NoteSheetMode.TextEdit) TEXT_EDIT_MAX_LINES else NOTE_MAX_LINES,
+                        )
+                    }
+                    // 自绘光标 / 选区手柄：只有「位置处在这一版里」时才画。
+                    // 光标（选区收拢）走正文墨色；选中一段时改画两端圆点，位置与正文里的手柄同口径
+                    // （贴着行下缘、白边蓝芯），读者在输入区与正文看到的是同一套东西。
+                    if (selfCaret && focused) {
                         Canvas(Modifier.matchParentSize()) {
                             val l = textLayout ?: return@Canvas
-                            if (!caretOn) return@Canvas
-                            val rect = l.getCursorRect(
-                                value.selection.start.coerceIn(0, l.layoutInput.text.length),
-                            )
-                            // 光标已经落到底边之外（滚动态检测晚一帧）：这一帧宁可不画，
-                            // 也不要画在框外的错误位置。
-                            if (rect.top >= size.height) return@Canvas
-                            val w = CaretWidth.toPx()
-                            val h = rect.height.takeIf { it > 0f } ?: l.size.height.toFloat()
-                            drawRoundRect(
-                                color = p.text,
-                                topLeft = Offset(rect.left - w / 2f, rect.top),
-                                size = Size(w, h),
-                                cornerRadius = CornerRadius(w / 2f),
-                            )
+                            val sel = value.selection
+                            val len = l.layoutInput.text.length
+                            if (sel.collapsed) {
+                                if (!caretOn) return@Canvas
+                                val rect = l.getCursorRect(sel.start.coerceIn(0, len))
+                                // 光标已经落到底边之外（滚动态检测晚一帧）：这一帧宁可不画，
+                                // 也不要画在框外的错误位置。
+                                if (rect.top >= size.height) return@Canvas
+                                val w = CaretWidth.toPx()
+                                val h = rect.height.takeIf { it > 0f } ?: l.size.height.toFloat()
+                                drawRoundRect(
+                                    color = p.text,
+                                    topLeft = Offset(rect.left - w / 2f, rect.top),
+                                    size = Size(w, h),
+                                    cornerRadius = CornerRadius(w / 2f),
+                                )
+                            } else {
+                                val r = SELECTION_HANDLE_RADIUS_DP.dp.toPx()
+                                val white = Color.White
+                                val ink = Color(SELECTION_HANDLE_ARGB)
+                                for (rect in listOf(
+                                    l.getCursorRect(sel.start.coerceIn(0, len)),
+                                    l.getCursorRect(sel.end.coerceIn(0, len)),
+                                )) {
+                                    val c = Offset(
+                                        x = rect.left.coerceIn(r, (size.width - r).coerceAtLeast(r)),
+                                        y = rect.bottom.coerceIn(r, (size.height - r).coerceAtLeast(r)),
+                                    )
+                                    drawCircle(color = white, radius = r + 2f, center = c)
+                                    drawCircle(color = ink, radius = r, center = c)
+                                }
+                            }
                         }
                     }
                 }

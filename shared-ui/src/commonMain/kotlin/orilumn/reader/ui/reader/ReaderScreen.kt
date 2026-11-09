@@ -284,6 +284,10 @@ fun ReaderScreen(
     var textEditStart by remember { mutableIntStateOf(0) }
     var textEditEnd by remember { mutableIntStateOf(0) }
     var textEditText by remember { mutableStateOf("") }
+    // 读者动过输入区里的字没有：没动过时，拖正文手柄改选区要把输入区一起换过去（用户定口）；
+    // 动过之后一律以输入区为准，选区只当落笔范围，不再回写输入框（免得吞掉改写）。
+    // 打开旧修改（审阅视图点红字 / 绿字）时输入区带的是已经改过的字，一律按「动过」算。
+    var textEditDirty by remember { mutableStateOf(false) }
     var textEditBusy by remember { mutableStateOf(false) }
     // 修改成功后 +1：同一 pos 的页面也要重取行/图/栅格（contentRevision 由壳传入，这里改不到）。
     var textEditRevision by remember { mutableIntStateOf(0) }
@@ -355,6 +359,7 @@ fun ReaderScreen(
         noteText = ""
         textEditOpen = false
         textEditText = ""
+        textEditDirty = false
     }
     // 选区被任何路径清空时，菜单必须同步收起（避免留下指向空选区的浮层）。
     LaunchedEffect(selection.hasSelection) {
@@ -1220,6 +1225,9 @@ fun ReaderScreen(
         textEditStart = revision.charStart
         textEditEnd = revision.charEnd
         textEditText = revision.editedText
+        // 输入区带出来的是**已经改过的字**，按「已动过」算：之后拖手柄只挪落笔范围，
+        // 不会把读者上次的改写换成新选区的原文（那等于悄悄丢掉上一次修改）。
+        textEditDirty = true
         textEditOpen = true
         textEditBusy = false
         selectionMenuVisible = false
@@ -1252,6 +1260,7 @@ fun ReaderScreen(
             focusManager.clearFocus()
             textEditOpen = false
             textEditText = ""
+            textEditDirty = false
             textEditBusy = false
             if (selection.hasSelection) selection.clear()
             return
@@ -1508,6 +1517,25 @@ fun ReaderScreen(
     }
 
     /**
+     * 把正文修改的目标区间与输入区**一起**换成某一章的一段文字（[s, e) 是当前文字空间的偏移）。
+     *
+     * 打开卡片时用一次；之后读者还没动过输入区时，拖手柄改选区也走这里（用户定口）——
+     * 输入区与目标区间必须同进同退，否则确定时会把旧文字写进新范围。
+     */
+    fun setTextEditTarget(ch: Int, s: Int, e: Int): Boolean {
+        val text = currentHost.textOf(ch, 0, Int.MAX_VALUE) ?: return false
+        // 卡片里给人看的是书里的字：审阅视图的「段界痕迹」¶ 一并摘掉（偏移自己回缩到同一口径），
+        // 否则确认时会把 ¶ 当成字写进正文。分页 / 选区 / 修订换算仍走原样文字。
+        val brk = currentHost.reviewBreakText(ch)
+        val body = brk.plainChapterText(text)
+        textEditChapter = ch
+        textEditStart = s
+        textEditEnd = e
+        textEditText = selectionTextForEdit(body, brk.plainBlockEnds(currentHost.textBlockEndsOf(ch)), brk.plain(s), brk.plain(e))
+        return true
+    }
+
+    /**
      * 选区菜单的「编辑」：把选区文字放进同一张底部卡片（正文修改 v3，方案 §8.8）。
      *
      * 跨段时用 `\n` 分隔各段：**结果段数 = 输入里的换行符数 + 1**（删光中间的字就把几段并成一段）；
@@ -1519,21 +1547,13 @@ fun ReaderScreen(
         val ch = selection.chapter
         val s = selection.start
         val e = selection.endExclusive
-        val text = currentHost.textOf(ch, 0, Int.MAX_VALUE)
-        if (text == null) {
+        if (!setTextEditTarget(ch, s, e)) {
             snackbar.show("本章内容尚未就绪")
             return
         }
-        // 卡片里给人看的是书里的字：审阅视图的「段界痕迹」¶ 一并摘掉（偏移自己回缩到同一口径），
-        // 否则确认时会把 ¶ 当成字写进正文。分页 / 选区 / 修订换算仍走原样文字。
-        val brk = currentHost.reviewBreakText(ch)
-        val body = brk.plainChapterText(text)
         closeAnnotationEdit()
         noteText = ""
-        textEditChapter = ch
-        textEditStart = s
-        textEditEnd = e
-        textEditText = selectionTextForEdit(body, brk.plainBlockEnds(currentHost.textBlockEndsOf(ch)), brk.plain(s), brk.plain(e))
+        textEditDirty = false
         textEditOpen = true
         textEditBusy = false
         selectionMenuVisible = false
@@ -1551,6 +1571,7 @@ fun ReaderScreen(
         focusManager.clearFocus()
         textEditOpen = false
         textEditText = ""
+        textEditDirty = false
         textEditBusy = false
         if (selection.hasSelection) selection.clear()
     }
@@ -1582,6 +1603,7 @@ fun ReaderScreen(
                 is TextEditOutcome.Success -> {
                     textEditOpen = false
                     textEditText = ""
+                    textEditDirty = false
                     textEditRevision++
                     // 确认即收选区：改后的字已经落库，再留一圈蓝底只会挡住刚改过的正文。
                     selection.clear()
@@ -1640,6 +1662,7 @@ fun ReaderScreen(
             }
             textEditOpen = false
             textEditText = ""
+            textEditDirty = false
             textEditRevision++
             chapterRevisions = emptyList()
             selection.clear()
@@ -1658,6 +1681,7 @@ fun ReaderScreen(
     fun switchTextEditToAnnotation(kind: AnnotationKind) {
         textEditOpen = false
         textEditText = ""
+        textEditDirty = false
         textEditBusy = false
         noteText = ""
         noteKind = kind
@@ -3039,6 +3063,34 @@ fun ReaderScreen(
                     else -> noteText = ""
                 }
             }
+            // 输入区跟着选区走（用户定口）：正文修改卡开着时，拖两端手柄换一段选区——
+            // 读者还没动过输入区里的字：输入区与落笔范围**一起**换成新选区的文字（否则确定时会把
+            //   旧文字写进新范围）；
+            // 动过字以后：输入区保留读者写的内容，只把落笔范围挪到当前选区——所见即所得，
+            //   确定写的就是看得见的这一段，不必再重开卡片。
+            // 区间没变就什么都不做：开卡那一刻选区本来就等于落笔范围，这条守卫让点按旧修改打开时
+            // 保留它带出来的改后文字，不会被原文顶掉。
+            LaunchedEffect(
+                textEditOpen,
+                textEditDirty,
+                selection.chapter,
+                selection.start,
+                selection.endExclusive,
+            ) {
+                if (!textEditOpen) return@LaunchedEffect
+                if (!selection.hasSelection) return@LaunchedEffect
+                val ch = selection.chapter
+                if (ch != textEditChapter) return@LaunchedEffect
+                val s = selection.start
+                val e = selection.endExclusive
+                if (s == textEditStart && e == textEditEnd) return@LaunchedEffect
+                if (textEditDirty) {
+                    textEditStart = s
+                    textEditEnd = e
+                } else {
+                    setTextEditTarget(ch, s, e)
+                }
+            }
             // 卡片**从屏幕下沿滑上来**、收起时再滑下去（D-30）。它自己已经按键盘高度上移（[AnnotationSheet]
             // 里的 imePx），所以滑入这一段里卡片的下半截正被升起的键盘挡着——看上去是「卡片 + 键盘」
             // 整整一块从底下推上来，而不是先弹一张卡片、再单独顶起键盘。
@@ -3096,7 +3148,14 @@ fun ReaderScreen(
                     },
                     // 正文修改：有修订才可删（删的是那条修改本身）；批注：有记录才可删。
                     canDelete = if (textEditOn) revisionTarget != null else deleteTarget != null,
-                    onTextChange = { if (textEditOn) textEditText = it else noteText = it },
+                    onTextChange = {
+                        if (textEditOn) {
+                            textEditText = it
+                            textEditDirty = true
+                        } else {
+                            noteText = it
+                        }
+                    },
                     // 切类别就记住：不点色、不点线型直接「确定」也要把默认停到这一类
                     // （否则用过一次划线后，切回高亮落笔也改不回来）。
                     // 正文修改模式下点「高亮 / 划线」= 切回该类别批注（同一根操作栏，保留选区）。

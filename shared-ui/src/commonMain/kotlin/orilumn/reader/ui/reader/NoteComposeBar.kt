@@ -148,6 +148,14 @@ internal fun AnnotationSheet(
     LaunchedEffect(text) {
         if (text != value.text) value = TextFieldValue(text, TextRange(text.length))
     }
+    // 进入正文修改状态（卡片新开、或从批注切到「编辑」）默认全选输入框里的文字：
+    // 读者直接打字就是整段替换，不用先手动全选（用户定口）。键只取 visible / mode，
+    // 打字时两者不变，所以不会每敲一个字就重新全选。
+    LaunchedEffect(visible, mode) {
+        if (visible && mode == NoteSheetMode.TextEdit) {
+            value = TextFieldValue(text, TextRange(0, text.length))
+        }
+    }
     val focus = remember { FocusRequester() }
 
     // 光标自己画（桌面复报：系统光标太浅，像没有光标）：

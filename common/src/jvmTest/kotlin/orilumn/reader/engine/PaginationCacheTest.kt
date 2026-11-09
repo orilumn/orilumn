@@ -309,4 +309,92 @@ class PaginationCacheTest {
         // 书目录不存在时安全空转。
         assertEquals(0, s.cleanStaleParams("book_absent", 222L))
     }
+
+    @Test
+    fun `content versions are distinct files so normal and review tables coexist`() {
+        // 正常视图与审阅视图是两套文字：同一章、同一套版式参数下各有一张正典表。
+        // 内容版本必须进文件名，否则后落盘的那张会覆盖前一张，切回另一空间永远读不到磁盘表。
+        val s = store()
+        val ns = "book_rev"
+        val normal = sampleTable()
+        val review = sampleTable().copy(contentRev = 1234L)
+        val fNormal = s.file(ns, 7, 0x1234567890abL, 0L)
+        val fReview = s.file(ns, 7, 0x1234567890abL, 1234L)
+        assertFalse("两套文字不能落在同一个文件上", fNormal == fReview)
+        s.write(normal, fNormal)
+        s.write(review, fReview)
+        assertEquals(0L, s.read(fNormal, 0L)?.contentRev ?: -1L)
+        assertEquals(1234L, s.read(fReview, 1234L)?.contentRev ?: -1L)
+        assertNull("版本对不上 = 另一空间的表，不得当成自己的", s.read(fNormal, 1234L))
+        assertEquals("页数表头同样按版本寻址", 3, s.readPageCount(ns, 7, 0x1234567890abL, 1234L))
+    }
+
+    @Test
+    fun `page counts snapshots are kept per content version and survive sweep`() {
+        // 页数快照同理：两个空间各一份。sweepStale 以前按内容版本 0 去解，
+        // 非零版本的清单一律解不开 → 被当成坏文件误删（页脚因此掉成百分比）。
+        val s = store()
+        val ns = "book_counts_rev"
+        val rev = 987654321L
+        s.writePageCounts(ns, 9L, mapOf(0 to 1, 1 to 5), 0L)
+        s.writePageCounts(ns, 9L, mapOf(0 to 1, 1 to 7), rev)
+        assertEquals(mapOf(0 to 1, 1 to 5), s.readPageCounts(ns, 9L, 0L))
+        assertEquals(mapOf(0 to 1, 1 to 7), s.readPageCounts(ns, 9L, rev))
+
+        assertEquals("两份都是当前构建的合法清单，不该被扫掉", 0, s.sweepStale(ns))
+        assertEquals(mapOf(0 to 1, 1 to 5), s.readPageCounts(ns, 9L, 0L))
+        assertEquals(mapOf(0 to 1, 1 to 7), s.readPageCounts(ns, 9L, rev))
+    }
+
+    @Test
+    fun `cleanStaleParams keeps every content version of the running hash`() {
+        val s = store()
+        val ns = "book_stale_rev"
+        s.write(sampleTable(), s.file(ns, 1, 222L, 0L))
+        s.write(sampleTable().copy(contentRev = 55L), s.file(ns, 1, 222L, 55L))
+        s.writePageCounts(ns, 222L, mapOf(0 to 1), 0L)
+        s.writePageCounts(ns, 222L, mapOf(0 to 1), 55L)
+        s.write(sampleTable(), s.file(ns, 2, 111L, 0L))
+        s.writePageCounts(ns, 111L, mapOf(0 to 2))
+
+        assertEquals("只删别的参数指纹（表 1 + 清单 1）", 2, s.cleanStaleParams(ns, 222L))
+        assertTrue(FileSystem.SYSTEM.exists(s.file(ns, 1, 222L, 0L)))
+        assertTrue(FileSystem.SYSTEM.exists(s.file(ns, 1, 222L, 55L)))
+        assertTrue(FileSystem.SYSTEM.exists(s.countsFile(ns, 222L, 0L)))
+        assertTrue(FileSystem.SYSTEM.exists(s.countsFile(ns, 222L, 55L)))
+    }
+
+    @Test
+    fun `deleteChapterTables removes every content version of one chapter`() {
+        // 正文改过之后，旧文字排出来的表（两个空间都算）全部作废；别的章、别的参数指纹不动。
+        val s = store()
+        val ns = "book_delete_rev"
+        val keepOther = s.file(ns, 2, 222L, 0L)
+        val keepOtherHash = s.file(ns, 1, 111L, 0L)
+        s.write(sampleTable(), s.file(ns, 1, 222L, 0L))
+        s.write(sampleTable().copy(contentRev = 55L), s.file(ns, 1, 222L, 55L))
+        s.write(sampleTable(), keepOther)
+        s.write(sampleTable(), keepOtherHash)
+
+        assertEquals(2, s.deleteChapterTables(ns, 1, 222L))
+        assertFalse(FileSystem.SYSTEM.exists(s.file(ns, 1, 222L, 0L)))
+        assertFalse(FileSystem.SYSTEM.exists(s.file(ns, 1, 222L, 55L)))
+        assertTrue(FileSystem.SYSTEM.exists(keepOther))
+        assertTrue(FileSystem.SYSTEM.exists(keepOtherHash))
+    }
+
+    @Test
+    fun `filename parsing round-trips chapter hash and content version`() {
+        assertEquals(7 to 42L, PaginationCacheCodec.parseFilename(PaginationCacheCodec.filename(7, 42L)))
+        assertEquals(7 to 42L, PaginationCacheCodec.parseFilename(PaginationCacheCodec.filename(7, 42L, 99L)))
+        assertEquals(7 to -42L, PaginationCacheCodec.parseFilename(PaginationCacheCodec.filename(7, -42L, -99L)))
+        assertNull(PaginationCacheCodec.parseFilename("counts_42.idx"))
+        assertNull(PaginationCacheCodec.parseFilename("7_42"))
+
+        assertEquals(42L to 0L, PaginationCacheCodec.parseCountsFilename(PaginationCacheCodec.countsFilename(42L)))
+        assertEquals(42L to 99L, PaginationCacheCodec.parseCountsFilename(PaginationCacheCodec.countsFilename(42L, 99L)))
+        assertEquals(-42L to -99L, PaginationCacheCodec.parseCountsFilename(PaginationCacheCodec.countsFilename(-42L, -99L)))
+        assertNull(PaginationCacheCodec.parseCountsFilename("7_42.bin"))
+        assertNull(PaginationCacheCodec.parseCountsFilename("counts_42_r.bin"))
+    }
 }

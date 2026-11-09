@@ -6,10 +6,10 @@ import orilumn.reader.io.Logger
 /**
  * Persisted pagination table for a single chapter under a single layout parameter combination.
  *
- * Stored on disk at `<cache>/pagination/<bookId>/<chapterIndex>_<paramHash>.bin` (see
- * [PaginationCacheCodec.filename]). Reading is a plain deserialization (a few KB, < 1ms).
+ * Stored on disk at `<cache>/pagination/<bookId>/<chapterIndex>_<paramHash>[_r<contentRev>].bin`
+ * (see [PaginationCacheCodec.filename]). Reading is a plain deserialization (a few KB, < 1ms).
  * When the layout key (font size, line spacing, width/height, ...) changes, a new hash is
- * produced and the old file becomes orphaned.
+ * produced and the old file becomes orphaned; 正文修订（含审阅空间）换的是内容版本，落在另一个文件名上。
  *
  * **本表只回答"页在哪"——不保存塑形结果。** 表是纯确定性的几何（字符偏移 + 块区间），随时可重算。
  * 至于"这一页画什么"（行文本/行几何/盒背景/插图槽位），由**当前页快照**单独保存：一本书只有

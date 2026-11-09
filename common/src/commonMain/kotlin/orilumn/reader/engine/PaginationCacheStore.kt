@@ -33,9 +33,9 @@ class PaginationCacheStore(
                 .onFailure { Logger.w("Orilumn.DISK", "pagination dirFor FAIL $it ${it.message}") }
         }
 
-    /** Full cache file path. */
-    fun file(bookId: String, chapterIndex: Int, paramHash: Long): Path =
-        dirFor(bookId).resolve(PaginationCacheCodec.filename(chapterIndex, paramHash))
+    /** Full cache file path. 内容版本进文件名（见 [PaginationCacheCodec.filename]）：正常/审阅两套文字各一张表。 */
+    fun file(bookId: String, chapterIndex: Int, paramHash: Long, contentRev: Long = 0L): Path =
+        dirFor(bookId).resolve(PaginationCacheCodec.filename(chapterIndex, paramHash, contentRev))
 
     /** Reads a pagination table from disk. Returns null on miss, schema/geometry-version mismatch,
      *  build-number mismatch, or corruption — the single authority for whether a cached table is
@@ -68,7 +68,7 @@ class PaginationCacheStore(
      * 命中判据与 [read] 完全同源（当前构建 + 当前参数 + 该章号确有表），只是不落日志。
      */
     fun readPageCount(bookId: String, chapterIndex: Int, paramHash: Long, contentRev: Long = 0L): Int? {
-        val f = file(bookId, chapterIndex, paramHash)
+        val f = file(bookId, chapterIndex, paramHash, contentRev)
         if (fs.metadataOrNull(f)?.isRegularFile != true) return null
         val bytes = runCatching {
             fs.read(f) { readByteArray(PaginationCacheCodec.HEADER_BYTES.toLong()) }
@@ -76,9 +76,9 @@ class PaginationCacheStore(
         return PaginationCacheCodec.decodeHeaderPageCount(bytes, appVersion, chapterIndex, paramHash, contentRev)
     }
 
-    /** 全书各章页数快照的落点（`.idx`，与表文件同目录，但只随参数指纹整份作废）。 */
-    fun countsFile(bookId: String, paramHash: Long): Path =
-        dirFor(bookId).resolve(PaginationCacheCodec.countsFilename(paramHash))
+    /** 全书各章页数快照的落点（`.idx`，与表文件同目录，但只随参数指纹 + 内容版本整份作废）。 */
+    fun countsFile(bookId: String, paramHash: Long, contentRev: Long = 0L): Path =
+        dirFor(bookId).resolve(PaginationCacheCodec.countsFilename(paramHash, contentRev))
 
     /**
      * 读全书页数快照（章号 → 页数）。参数指纹 / 引擎几何指纹 / 构建号任一不符即 null。
@@ -88,7 +88,7 @@ class PaginationCacheStore(
      * 表文件丢了它还能读只是附带性质——参数/几何/构建任一不符仍整份作废，跨不过「排版改了」。
      */
     fun readPageCounts(bookId: String, paramHash: Long, contentRev: Long = 0L): Map<Int, Int>? {
-        val f = countsFile(bookId, paramHash)
+        val f = countsFile(bookId, paramHash, contentRev)
         if (fs.metadataOrNull(f)?.isRegularFile != true) return null
         val bytes = runCatching { fs.read(f) { readByteArray() } }
             .onFailure { Logger.w("Orilumn.DISK", "pagination counts read IO FAIL $f ${it.message}") }
@@ -98,7 +98,7 @@ class PaginationCacheStore(
 
     /** 写全书页数快照（整份覆盖；几百 KB 以内的小文件，几十字节/章）。 */
     fun writePageCounts(bookId: String, paramHash: Long, counts: Map<Int, Int>, contentRev: Long = 0L) {
-        val f = countsFile(bookId, paramHash)
+        val f = countsFile(bookId, paramHash, contentRev)
         runCatching { fs.write(f) { write(PaginationCacheCodec.encodePageCounts(paramHash, counts, appVersion, contentRev)) } }
             .onFailure { Logger.w("Orilumn.DISK", "pagination counts write FAIL $f ${it.message}") }
     }
@@ -128,12 +128,13 @@ class PaginationCacheStore(
     }
 
     /** Deletes the book's pagination-table files orphaned by a layout-parameter
-     *  change: every `<chapterIndex>_<paramHash>.bin` whose hash differs from
-     *  [keepHash] (the running params' [LayoutParamKey] fingerprint). Pure
-     *  filename filter — no table reads, so it is cheap and idempotent.
-     *  Files matching [keepHash] **stay**: they are valid for the running params
-     *  (a previous session with identical params is a disk hit, and a settings
-     *  revert re-hits them) — unlike [cleanBookAll], which wipes those too. */
+     *  change: every table / counts file whose param hash differs from [keepHash] (the running
+     *  params' [LayoutParamKey] fingerprint). Pure filename filter — no table reads, so it is
+     *  cheap and idempotent.
+     *  Files matching [keepHash] **stay**: they are valid for the running params (a previous
+     *  session with identical params is a disk hit, and a settings revert re-hits them) — unlike
+     *  [cleanBookAll], which wipes those too. 内容版本不参与筛选：同一参数指纹下正常/审阅两份
+     *  表都算「当前参数」的合法缓存，切回另一空间要能直接命中。 */
     fun cleanStaleParams(bookId: String, keepHash: Long): Int {
         val dir = rootDir.resolve("pagination/$bookId")
         val files = runCatching { fs.list(dir) }
@@ -141,16 +142,34 @@ class PaginationCacheStore(
             .getOrNull()
             ?.filter { it.name.endsWith(".bin") || it.name.endsWith(".idx") }
             ?: return 0
-        val suffix = "_$keepHash.bin"
-        val countsSuffix = "_$keepHash.idx"
         var deleted = 0
         for (f in files) {
-            if (f.name.endsWith(suffix)) continue
+            val keep = if (f.name.startsWith("counts_")) {
+                PaginationCacheCodec.parseCountsFilename(f.name)?.first == keepHash
+            } else {
+                PaginationCacheCodec.parseFilename(f.name)?.second == keepHash
+            }
             // 页数快照同样是「换参数即作废」：留着不删只会在目录里攒出一堆同构清单。
-            if (f.name.startsWith("counts_") && f.name.endsWith(countsSuffix)) continue
+            if (keep) continue
             if (runCatching { fs.delete(f) }.isSuccess) deleted++
         }
         if (deleted > 0) Logger.w("Orilumn.DISK", "pagination clean-stale book=$bookId keepHash=$keepHash deleted=$deleted")
+        return deleted
+    }
+
+    /**
+     * 删除某章在某参数指纹下的**所有内容版本**表文件：正文改过之后，旧版本排出来的表全部作废
+     * （页界/字符偏移都对不上新文字）。参数指纹不同的表不动（回退参数时还有用）。
+     */
+    fun deleteChapterTables(bookId: String, chapterIndex: Int, paramHash: Long): Int {
+        val dir = rootDir.resolve("pagination/$bookId")
+        val files = runCatching { fs.list(dir) }.getOrNull() ?: return 0
+        var deleted = 0
+        for (f in files) {
+            val parsed = PaginationCacheCodec.parseFilename(f.name) ?: continue
+            if (parsed.first != chapterIndex || parsed.second != paramHash) continue
+            if (runCatching { fs.delete(f) }.isSuccess) deleted++
+        }
         return deleted
     }
 
@@ -181,9 +200,11 @@ class PaginationCacheStore(
             ?.filter { it.name.startsWith("counts_") && it.name.endsWith(".idx") && fs.metadataOrNull(it)?.isRegularFile == true }
             ?: emptyList()
         for (f in countsFiles) {
-            val hash = f.name.removePrefix("counts_").removeSuffix(".idx").toLongOrNull() ?: continue
+            // 内容版本是文件身份的一部分：必须按文件名里的版本去解，否则非零版本的清单
+            // （有修订的书 / 审阅空间）一律解不开，会被当成坏文件误删。
+            val (hash, rev) = PaginationCacheCodec.parseCountsFilename(f.name) ?: continue
             val bytes = runCatching { fs.read(f) { readByteArray() } }.getOrNull() ?: continue
-            if (PaginationCacheCodec.decodePageCounts(bytes, appVersion, hash) == null) {
+            if (PaginationCacheCodec.decodePageCounts(bytes, appVersion, hash, rev) == null) {
                 if (runCatching { fs.delete(f) }.isSuccess) deleted++
             }
         }

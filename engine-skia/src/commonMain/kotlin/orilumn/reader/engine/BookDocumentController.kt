@@ -170,6 +170,25 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         private set
 
     /**
+     * 本次「审阅切换」往返共用的页首锚。
+     *
+     * 不能每次都用「当前页首页首 → 换空间 → 取该字所在行行首」重新推：两套文字的行界不同，
+     * 行首取整在往返中会一次次往下落一行，反复开关页面就一路往回爬。这里把第一次切过去时的
+     * 原文坐标和两个空间各自的页首记下来；只要读者没翻页 / 跳转（当前页首仍是记录值），
+     * 切回来和再切过去都复用同一个锚，两个方向都回到第一次选定的页首。
+     *
+     * 任何翻页、跳转、字符滚动之外的版面变化（改字、调参、旋转）都会让记录作废，
+     * 下一次切换按当时的页首重新取锚。
+     */
+    private data class ReviewSwitchAnchor(
+        val chapter: Int,
+        val originalChar: Int,
+        val normalStart: Int,
+        val reviewStart: Int,
+    )
+    private var reviewSwitchAnchor: ReviewSwitchAnchor? = null
+
+    /**
      * 切换审阅视图；返回 true 表示真的变了（调用方必须重排并重新落位）。
      *
      * 只作废**有修订**的章（解析态 + 版式）：没修订的章在两种视图里文字完全一样，重排纯属浪费。
@@ -179,6 +198,8 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
     fun setReviewMode(on: Boolean): Boolean {
         if (on == reviewMode) return false
         reviewMode = on
+        // 模式变了，往返锚的「当前页首」语义也换了；由 switchReviewMode 落位后重新写入。
+        reviewSwitchAnchor = null
         for (unit in chapters) {
             if ((revisionMaps[unit.chapterIndex]?.contentRev ?: 0L) == 0L) continue
             unit.evictParsedState()
@@ -238,6 +259,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
      * [invalidateChapterContent]**（一次提交可能只改一章，没必要动别的章）。
      */
     suspend fun reloadTextRevisions() {
+        reviewSwitchAnchor = null
         val store = textRevisionStore
         if (store == null || bookId < 0) {
             revisionMaps = emptyMap()
@@ -369,6 +391,8 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         val unit = unitAt(chapter)
         unit?.evictParsedState()
         unit?.invalidateLayout()
+        // 文字区间变了，旧锚的页首已不对应同一处内容。
+        if (reviewSwitchAnchor?.chapter == chapter) reviewSwitchAnchor = null
         Logger.w(logTag, "revisions invalidate ch=$chapter rev=${chapterContentRev(chapter)}")
     }
 
@@ -377,14 +401,14 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
      * 再派一趟定点补排。不动内存里的解析态与版式（调用方按需自己清）。
      */
     private fun dropChapterContentCaches(chapter: Int) {
-        // 本章当前参数指纹的分页表文件直接删掉：contentRev 已能挡住旧表，但提交是低频事件，
-        // 顺手删掉省得后台 sweep 再去认一次；别的参数指纹的表留着（回退参数时还有用）。
+        // 本章当前参数指纹的分页表文件直接删掉：**两个内容版本都删**（正常/审阅各一份，正文改过
+        // 之后旧文字排出来的表页界/字符偏移全对不上）；别的参数指纹的表留着（回退参数时还有用）。
         if (bookId >= 0) {
             runCatching {
                 val store = cacheStore() ?: return@runCatching
                 val hash = currentParamHash()
-                val f = store.file("book_$bookId", chapter, hash)
-                store.delete(f)
+                val deleted = store.deleteChapterTables("book_$bookId", chapter, hash)
+                Logger.w(logTag, "revisions delete tables ch=$chapter hash=$hash deleted=$deleted")
             }.onFailure {
                 Logger.w(logTag, "revisions delete table FAIL ch=$chapter ${it.message}")
             }
@@ -545,7 +569,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
             // 表跟着换新：内容版本变了，旧表文件读不回来；趁手上这份是对的，直接写回。
             val cache = cacheStore()
             if (cache != null && bookId >= 0) {
-                val file = cache.file("book_$bookId", unit.chapterIndex, paramHash)
+                val file = cache.file("book_$bookId", unit.chapterIndex, paramHash, shifted.contentRev)
                 runCatching { cache.write(shifted, file) }
                     .onFailure { Logger.e(logTag, "content-change write FAIL ch=${unit.chapterIndex} ${it.message}") }
             }
@@ -2249,6 +2273,8 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         headLift: Boolean = true,
         /** 锚在章末时是否倒包临时页；见 [relayoutTo]（审阅切换要求页首不动，传 false）。 */
         tailBackfill: Boolean = true,
+        /** 审阅切换：大章强制先建临时锚页，跳过磁盘命中；见 [buildLayout]。 */
+        forceTemp: Boolean = false,
     ): ChapterUnit? {
         val unit = unitAt(index) ?: return null
         bindChapterFor(unit)
@@ -2282,7 +2308,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                     // falls outside the range of pages currently shaped.
                     ensurePageRangeShaped(unit, targetChar)
                 } else if (!unit.laidOut) {
-                    buildLayout(unit, targetChar, headLift, tailBackfill)
+                    buildLayout(unit, targetChar, headLift, tailBackfill, forceTemp)
                 }
             }
         }
@@ -2411,6 +2437,17 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         headLift: Boolean = true,
         /** 锚在章末时是否倒包临时页；见 [relayoutTo]。 */
         tailBackfill: Boolean = true,
+        /**
+         * 审阅切换专用：**大章必须先给临时锚页**，不许一上来吃磁盘表/正典表（见 [switchReviewMode]）。
+         *
+         * 普通跳转的优先级是「磁盘表已就绪 → 直接用磁盘表」；切审阅不是普通跳转：它换的是本章
+         * 文字，两套分页页界本来就不一样，落在一张正典页上会让页首跳掉。先按锚点行起一张临时页，
+         * 读者看到的页首就停在原处；随后后台照常排本章正典（B1）并落盘，章内翻页一直留在临时表，
+         * 只有跳转/离开本章/回到章首页才切到磁盘表（S5 口径）。
+         *
+         * 短章仍走磁盘/整章：短章整章重排本来就快，且整章表就是它的正典，没有「页首乱跳」问题。
+         */
+        forceTemp: Boolean = false,
     ) {
         // ensureChapterLayout 已在锁外备好 markup；到这里为 null 即锁间隙状态矛盾，抛而不吞。
         val markup = checkNotNull(unit.markup) { "buildLayout without markup ch=${unit.chapterIndex}" }
@@ -2419,26 +2456,38 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
             val contentWidth = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
             val contentHeight = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
             val paramHash = LayoutParamKey.fromProfile(profile, contentWidth, contentHeight).hash()
+            val boxLayouter = layouter as? BoxChapterLayouter
+
+            // 审阅切换要先知道章的大小才能决定走哪条路（大章临时表 / 短章磁盘整章）：做一次轻准备
+            // （只建盒树、不塑形），磁盘命中分支本来也要建它，这里顺带复用，不重复劳动。
+            val probe = if (forceTemp && boxLayouter != null) {
+                boxLayouter.prepareLight(
+                    markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight,
+                    onStructureComputed = { h, cw, chh -> saveUnitStructure(unit, h, cw, chh) },
+                )
+            } else null
+            val forceTempLarge = probe != null && probe.totalBlocks > SMALL_CHAPTER_BLOCKS
 
             // 磁盘命中判据（总则 1：命中磁盘表 → 同步渲染目标页）：先读缓存文件，再退回**内存里已
             // 绑定的本章表**——同一 paramHash 的表与文件同源（同一产者），有它就等于命中：不必回读
             // 缓存，更不该退回临时表。覆盖两种文件读不到的情形：缓存写入失败、bookId<0 / 无 store
             //（那时内存表就是唯一副本）。write-only 的 prewarm/B2 路径也正靠它「直接晋级整表」。
             val cache = cacheStore()
-            val cacheFile = if (cache != null && bookId >= 0) {
-                cache.file("book_$bookId", unit.chapterIndex, paramHash)
-            } else null
             val contentRev = chapterContentRev(unit.chapterIndex)
-            val cached = (if (cache != null) cacheFile?.let { cache.read(it, contentRev) } else null)
-                ?: unit.paginationTable?.takeIf {
-                    it.paramHash == paramHash && it.contentRev == contentRev
-                }
+            val cacheFile = if (cache != null && bookId >= 0) {
+                cache.file("book_$bookId", unit.chapterIndex, paramHash, contentRev)
+            } else null
+            val cached = if (forceTempLarge) null else {
+                (if (cache != null) cacheFile?.let { cache.read(it, contentRev) } else null)
+                    ?: unit.paginationTable?.takeIf {
+                        it.paramHash == paramHash && it.contentRev == contentRev
+                    }
+            }
 
             if (cached != null) {
                 // PaginationMode.LINE_DISK: the disk CFI table holds the authoritative line-level page
                 // boundaries; foreground only shapes the target page's block range, never re-paginates.
                 unit.bindPaginationTable(cached)
-                val boxLayouter = layouter as? BoxChapterLayouter
                 val startPage = pageIndexForChar(cached.pages, targetChar)
                 if (boxLayouter != null) {
                     // 先试"上次那一页"的绘制模型：命中就一步到位（不建 prepare、不塑形）。
@@ -2457,7 +2506,8 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                         return@runCatching
                     }
                     // Light prepare only (box tree, no shaping) — the table tells us which blocks to shape.
-                    val prep = boxLayouter.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h, cw, chh -> saveUnitStructure(unit, h, cw, chh) })
+                    // 审阅切换（短章）已经量过章大小（probe），直接复用，不重复建盒树。
+                    val prep = probe ?: boxLayouter.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h, cw, chh -> saveUnitStructure(unit, h, cw, chh) })
                     val sp = platformNowMs()
                     val product = boxLayouter.incrementalLayoutForPage(
                         prepare = prep,
@@ -2493,12 +2543,12 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
             } else {
                 // Disk miss. Try the anchor-based incremental path first for large chapters, so the
                 // reader sees the target page immediately instead of blocking on a full-chapter shape.
-                val bc = layouter as? BoxChapterLayouter
-                if (bc != null) {
+                if (boxLayouter != null) {
                     // PaginationMode.BLOCK_TEMP: decide large/small via a cheap light prepare (no
                     // shaping). A large chapter's foreground threads only the current page's blocks
                     // through the temp table — never a full-chapter line-level layout.
-                    val light = bc.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h, cw, chh -> saveUnitStructure(unit, h, cw, chh) })
+                    // 审阅切换已经量过章大小（probe），直接复用，不重复建盒树。
+                    val light = probe ?: boxLayouter.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h, cw, chh -> saveUnitStructure(unit, h, cw, chh) })
                     // 选区用的整章文本投影转后台（见 scheduleChapterTextProjection）：此刻最要紧的是
                     // 锚页流，整章级联（大章 ~5s）不该挡在这里。临时表在途用的是 `light` 自己的懒缓存，
                     // 后台另建一个轻 prepare 算，互不共享。
@@ -2510,10 +2560,10 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                         // block/line (P10 head-edge), so correctness never depends on it. The lift only
                         // affects how closely the leading temp pages match the eventual canonical table.
                         val anchorBlock = light.blockIndexForChar(targetChar).coerceIn(0, light.totalBlocks - 1)
-                        startAnchorStream(unit, targetChar, light, bc, paramHash, contentWidth, contentHeight, headLift = headLift, tailBackfill = tailBackfill)
+                        startAnchorStream(unit, targetChar, light, boxLayouter, paramHash, contentWidth, contentHeight, headLift = headLift, tailBackfill = tailBackfill)
                         Logger.w(logTag, "layout ${ctx(unit)} LARGE-ANCHOR anchorBlock=" +
                             "$anchorBlock blocks=${light.totalBlocks} " +
-                            "t=${platformNowMs() - t0}ms")
+                            "forceTemp=$forceTempLarge t=${platformNowMs() - t0}ms")
                         return
                     }
                 }
@@ -4588,7 +4638,7 @@ private fun finishCanonicalBackground(
     }
     val cache = cacheStore()
     val cacheFile = if (cache != null && bookId >= 0) {
-        cache.file("book_$bookId", unit.chapterIndex, paramHash)
+        cache.file("book_$bookId", unit.chapterIndex, paramHash, rev)
     } else null
     if (cache != null && cacheFile != null && slices.isNotEmpty() && slices[0].blockStart >= 0) {
         val totalChars = slices.last().charEnd
@@ -4702,6 +4752,13 @@ private fun finishCanonicalBackground(
          * 页首就是锚点所在行，和正常视图的小尾页同形）。
          */
         tailBackfill: Boolean = true,
+        /**
+         * 审阅切换：**不许走磁盘表/正典表**，大章直接按锚点行建临时表（见 [buildLayout]）。
+         *
+         * 普通跳转命中磁盘表就落磁盘表（总则 1）；切审阅换的是本章文字，两套分页页界不同，
+         * 落到正典页上页首就跳了。这里跳过快路径与临时表晋级，先给一张页首不动的临时锚页。
+         */
+        forceTemp: Boolean = false,
     ): Pair<Int, PageSlice>? {
         clearFlipDir("mid-jump")
         // 章内跳转：**磁盘表已就绪就必须落到磁盘表上**（总则 1）。跳转不是翻页，没有「章内恒走
@@ -4717,7 +4774,7 @@ private fun finishCanonicalBackground(
             )
         // 要求「页首不动」时不能走快路径：已成形窗口里那一页可能是章末倒包页，锚点落在页中，
         // 直接挪指针还是把页首留在几百字之前——必须从头按前向锚页重排一次。
-        if (tailBackfill && (liveTemp == null || !canonicalReady)) {
+        if (!forceTemp && tailBackfill && (liveTemp == null || !canonicalReady)) {
             // R12: fast path — target inside an already-shaped valid window: just move the pointer,
             // no nuke. Structural misses fall through to the full path below.
             fastRelocate(chapter, anchorChar, nearestPageStart)?.let { return it }
@@ -4729,11 +4786,20 @@ private fun finishCanonicalBackground(
         // 目标章唯一需要整体重来的情形：临时表会话还活着、锚点却落在它的窗口外——那张表的
         // 页界从旧锚点起算，只能从新锚点重开。其余失配（参数变了、内容版本变了、落点页不在
         // 成形窗口）由 ensureChapterLayout / buildLayout 按章处理，已排好的部分能留则留。
-        if (targetUnit?.inProgress != null) {
+        if (forceTemp) {
+            // 审阅切换：本章文字换了空间，旧空间的表/版式/临时会话一律作废（临时表只保留当前
+            // 空间的一份活会话；切回按锚重建）。随后 buildLayout 大章起临时锚页、短章整章排。
+            targetUnit?.invalidateLayout()
+        } else if (targetUnit?.inProgress != null) {
             if (canonicalReady && liveTemp != null) promoteTempToCanonical(targetUnit, liveTemp)
             else targetUnit.invalidateLayout()
         }
-        val unit = ensureChapterLayout(chapter, anchorChar, headLift = false, tailBackfill = tailBackfill) ?: return null
+        val unit = ensureChapterLayout(
+            chapter, anchorChar,
+            headLift = false,
+            tailBackfill = tailBackfill,
+            forceTemp = forceTemp,
+        ) ?: return null
         // Anchor temp streaming: return the anchor page directly.
         unit.inProgress?.let { ip ->
             val p = ip.currentSlice
@@ -4763,6 +4829,7 @@ private fun finishCanonicalBackground(
      * new [profile] first. */
     fun invalidateAllLayouts() {
         for (u in chapters) u.invalidateLayout()
+        reviewSwitchAnchor = null
         Logger.w(logTag, "relayout: invalidated ${chapters.size} chapter layout(s)")
     }
 
@@ -4807,7 +4874,7 @@ private fun finishCanonicalBackground(
         }
         val cache = cacheStore() ?: return
         if (bookId < 0) return
-        val file = cache.file("book_$bookId", unit.chapterIndex, paramHash)
+        val file = cache.file("book_$bookId", unit.chapterIndex, paramHash, table.contentRev)
         runCatching { cache.write(table, file) }
             .onFailure { Logger.e(logTag, "small-table write FAIL ch=${unit.chapterIndex} ${it.message}") }
         Logger.w(logTag, "layout ${ctx(unit)} SMALL-TABLE-WRITE pages=${table.totalPages} totalChars=${table.totalChars}")
@@ -5183,7 +5250,7 @@ private fun finishCanonicalBackground(
             if (diskPages == null) {
                 val cache = cacheStore()
                 if (cache != null && bookId >= 0) {
-                    val file = cache.file("book_$bookId", index, paramHash)
+                    val file = cache.file("book_$bookId", index, paramHash, table.contentRev)
                     runCatching { cache.write(table, file) }
                         .onSuccess { Logger.w(logTag, "layout ${ctx(u)} FULL-PRELIM-BACKFILL pages=${table.totalPages}") }
                         .onFailure { Logger.e(logTag, "full prelim backfill WRITE FAIL ch=$index ${it.message}") }
@@ -5413,7 +5480,7 @@ private fun finishCanonicalBackground(
                 // pageSlices, so ensurePageRangeShaped alone would early-return).
                 val cache = cacheStore()
                 val cacheFile = if (cache != null && bookId >= 0) {
-                    cache.file("book_$bookId", index, paramHash)
+                    cache.file("book_$bookId", index, paramHash, chapterContentRev(index))
                 } else null
                 val cached = if (cache != null) {
                     cacheFile?.let { cache.read(it, chapterContentRev(index)) }
@@ -5488,7 +5555,7 @@ private fun finishCanonicalBackground(
         if (slices.isEmpty()) noteZeroPageChapter(unit.chapterIndex, paramHash)
         val cache = cacheStore()
         val cacheFile = if (cache != null && bookId >= 0) {
-            cache.file("book_$bookId", unit.chapterIndex, paramHash)
+            cache.file("book_$bookId", unit.chapterIndex, paramHash, rev)
         } else null
         if (cache != null && cacheFile != null && slices.isNotEmpty() && slices[0].blockStart >= 0) {
             val table = ChapterPaginationTable.fromSlices(
@@ -6210,7 +6277,9 @@ private fun finishCanonicalBackground(
         }
         // 远章内存里没有表：读盘拿这一页的页首字符（几十到几百字节，落位前只读一次）。
         val store = cacheStore() ?: return null
-        val table = runCatching { store.read(store.file("book_$bookId", chapter, hash)) }.getOrNull()
+        val table = runCatching {
+            store.read(store.file("book_$bookId", chapter, hash, chapterContentRev(chapter)), chapterContentRev(chapter))
+        }.getOrNull()
             ?: return null
         if (table.paramHash != hash) return null
         return table.pages.getOrNull(pageIdx)?.charStart
@@ -6307,33 +6376,71 @@ private fun finishCanonicalBackground(
     /**
      * 切换审阅视图并按「同一处内容」重新落位，一步完成（底栏「审阅」）。
      *
-     * 两件事的顺序是硬性的：
+     * 三件事的顺序是硬性的：
      * 1. **先**在旧空间里把页首换回原书坐标——模式一翻，[originalOffset]/[renderedOffset] 的换算
      *    规则就跟着换，拿新规则去解释旧空间的偏移必然错位；
-     * 2. 再按新空间的换算换回来，并按「页首最接近」选页（[pageForChar] 的 `nearestStart`）。
-     *    正常视图与审阅视图是两套各自独立的分页，页界不保证对齐：按「包含锚点的那一页」落位时，
-     *    旧页首只要落在新页末尾一点点，读者就会被送回上一页。按「页首最接近」才是同一处内容。
+     * 2. 再翻模式，并按新空间的换算换回锚点；
+     * 3. 最后**按锚点行起一张临时页**（大章）或整章重排（短章）落位。切审阅不是普通跳转：
+     *    不能一上来优先磁盘表——两套文字的分页页界本来就不同，落到正典页上页首就跳了。大章先给
+     *    一张页首不动的临时锚页，随后后台照常排本章正典；章内翻页一直留在临时表，只有跳转、
+     *    离开本章、回到章首页才切到磁盘表（S5 口径）。
      *
-     * 没有修订可切（模式没变）回 null；调用方据此判断要不要重绘。
+     * 没修订的章两种视图逐字相同：不重排、不动位置（返回 null，调用方只重绘痕迹）。
+     * 模式本来就没变也返回 null。
      */
     suspend fun switchReviewMode(
         on: Boolean,
         chapter: Int,
         renderedCharStart: Int,
     ): Pair<Int, PageSlice>? {
-        val original = originalOffset(chapter, renderedCharStart)
+        if (on == reviewMode) return null
+        // 往返复用同一个原文锚：当前页首仍是上次落位的那一页（读者没翻页 / 跳转）时，
+        // 不再从新空间的页首重新换算——行首取整会让两套空间来回各退一行，反复开关一路往回爬。
+        val cached = reviewSwitchAnchor?.takeIf { it.chapter == chapter }
+        val samePage = cached != null &&
+            (if (on) cached.normalStart else cached.reviewStart) == renderedCharStart
+        val original = if (samePage) {
+            cached!!.originalChar
+        } else {
+            originalOffset(chapter, renderedCharStart)
+        }
         if (!setReviewMode(on)) return null
+        // 本章文字两个空间逐字相同（无修订）：版面与页界都不变，重排只会白刷一次。
+        val revised = (revisionMaps[chapter]?.contentRev ?: 0L) != 0L
+        if (!revised) {
+            reviewSwitchAnchor = null
+            // 但**别的章**可能改过：换空间后它们的页数在这一版里还未知，全书页码会整体缺一段
+            // （页脚掉成百分比）。补排与本章有没有修订无关，不能跟着早退一起跳过。
+            repairMissingPageCounts("review-switch")
+            return null
+        }
         val target = renderedOffset(chapter, original)
         clearFlipDir("review-switch")
         preemptForNavigation()
         if (chapter !in chapters.indices) return null
-        val landed = relayoutTo(
+        val relocated = relayoutTo(
             chapter,
             target.coerceAtLeast(0),
+            // 临时锚页从锚点行起排，页首就是锚点所在行；nearestPageStart 只在磁盘/整章路径选页，
+            // 短章整章重排时仍按「页首最接近」选，避免退到上一页。
             nearestPageStart = true,
             // 页首不动：章末倒包会把临时页的页首退到前面几百字，切个视图就像跳了页。
             tailBackfill = false,
-        ) ?: openChapterStart(chapter)
+            // 大章跳过磁盘命中/快进，先建临时锚页；短章仍整章排（磁盘表就是它的正典）。
+            forceTemp = true,
+        )
+        val landed = relocated ?: openChapterStart(chapter)
+        if (relocated != null && landed != null) {
+            val landedStart = landed.second.charStart
+            reviewSwitchAnchor = ReviewSwitchAnchor(
+                chapter = landed.first,
+                originalChar = original,
+                normalStart = if (on) renderedCharStart else landedStart,
+                reviewStart = if (on) landedStart else renderedCharStart,
+            )
+        } else {
+            reviewSwitchAnchor = null
+        }
         // 有修订的那几章在**新空间**里页数还未知（旧空间的结论版本对不上）：只补它们，别整书重扫。
         // 放在落位之后：眼前这一章此刻已经有当前空间的表，补排会跳过它。
         repairMissingPageCounts("review-switch")

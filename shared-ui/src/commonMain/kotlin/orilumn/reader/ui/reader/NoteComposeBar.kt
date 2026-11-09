@@ -284,7 +284,8 @@ internal fun AnnotationSheet(
                     CompositionLocalProvider(
                         LocalTextSelectionColors provides TextSelectionColors(
                             handleColor = if (selfCaret) Color.Transparent else baseSelection.handleColor,
-                            backgroundColor = baseSelection.backgroundColor,
+                            // 选中底色与正文同一块蓝（同常量，不做第二套配色）。
+                            backgroundColor = Color(SELECTION_FILL_ARGB),
                         ),
                     ) {
                         BasicTextField(

@@ -188,9 +188,10 @@ data class ReaderSettings(
     val highlightDefaultSlot: Int = 0,
     val underlineDefaultSlot: Int = 0,
     /**
-     * 上次用于新建 / 改色标注的类别（`highlight` / `underline`，见 `annotationLastKind()`）。
+     * 上次选字后用的操作（`highlight` / `underline` / `edit`，见 `selectionActionOf()`）。
      *
-     * 浮动菜单因此**一步到位**：打开就停在这个类别的色槽行上，不必先点一次「高亮 / 划线」。
+     * 选区操作栏因此**一步到位**：上次用的是高亮 / 划线就停在对应色槽行，上次用的是「编辑」
+     * 就直接进正文修改卡。只是打开旧标注 / 旧修改去看一眼或改样式**不算**，不会把默认项带跑。
      * 纯读者偏好（纯 UI，不进版式比较、不影响分页）；未知值按高亮处理。
      */
     val annotationLastKind: String = "highlight",

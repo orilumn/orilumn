@@ -77,6 +77,40 @@ class AnnotationColorsTest {
     }
 
     @Test
+    fun `selection action remembers edit as a third choice`() {
+        // 默认高亮；划线 / 编辑各自解析回来；未知值按高亮。
+        assertEquals(SelectionAction.Highlight, selectionActionOf(ReaderSettings.DEFAULT))
+        assertEquals(
+            SelectionAction.Underline,
+            selectionActionOf(ReaderSettings.DEFAULT.copy(annotationLastKind = "underline")),
+        )
+        assertEquals(
+            SelectionAction.Edit,
+            selectionActionOf(ReaderSettings.DEFAULT.copy(annotationLastKind = "edit")),
+        )
+        assertEquals(
+            SelectionAction.Highlight,
+            selectionActionOf(ReaderSettings.DEFAULT.copy(annotationLastKind = "note")),
+        )
+    }
+
+    @Test
+    fun `remembering edit writes the third action and nothing else`() {
+        val s = ReaderSettings.DEFAULT.copy(annotationLastKind = "underline", underlineDefaultSlot = 3)
+        val next = withSelectionAction(s, SelectionAction.Edit)
+        assertEquals("edit", next.annotationLastKind)
+        assertEquals(SelectionAction.Edit, selectionActionOf(next))
+        // 编辑不是标注类别：批注卡仍按高亮兜底，不会停在没有色槽的类别上。
+        assertEquals(AnnotationKind.Highlight, annotationLastKindOf(next))
+        // 只记操作：色槽 / 线型一概不动。
+        assertEquals(s.highlightColorSlots, next.highlightColorSlots)
+        assertEquals(s.underlineColorSlots, next.underlineColorSlots)
+        assertEquals(s.highlightDefaultSlot, next.highlightDefaultSlot)
+        assertEquals(s.underlineDefaultSlot, next.underlineDefaultSlot)
+        assertEquals(s.annotationLastLineStyle, next.annotationLastLineStyle)
+    }
+
+    @Test
     fun `commit color never borrows the other kind's pick`() {
         val s = ReaderSettings.DEFAULT
         val highlightPick = mapOf(AnnotationKind.Highlight to ReaderSettings.DEFAULT_HIGHLIGHT_COLOR_SLOTS[2])

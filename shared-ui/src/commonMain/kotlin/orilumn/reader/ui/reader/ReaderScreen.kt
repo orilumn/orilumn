@@ -1537,6 +1537,13 @@ fun ReaderScreen(
         textEditOpen = true
         textEditBusy = false
         selectionMenuVisible = false
+        // 这次是「新用一次编辑」：下次选字直接停到编辑。打开旧修改走 tryOpenReviewEditAt，
+        // 不经过这里，所以「只是修改原有编辑」不会把默认项带跑（用户定口）。
+        val remembered = withSelectionAction(light, SelectionAction.Edit)
+        if (remembered != light) {
+            light = remembered
+            currentOnLightCommit(remembered)
+        }
     }
 
     /** 取消正文修改：卡片关掉、正文不动、选区一并收掉（与批注取消同口径）。 */
@@ -1679,7 +1686,11 @@ fun ReaderScreen(
         notePickedColors[kind] = annotationSlotColor(light, kind, slot)
         // 落盘一律小写（`highlight` / `underline`，见 ReaderSettings 的约定），
         // 解析侧 annotationLastKindOf 再另行 lowercase，双向容错。
-        var next = withAnnotationLastKind(withAnnotationDefaultSlot(light, kind, slot), kind)
+        var next = withAnnotationDefaultSlot(light, kind, slot)
+        // 只在新建时把「上次用的操作」改成这一类：给旧标注改颜色不算（用户定口）。
+        if (editingAnnotation == null) {
+            next = withAnnotationLastKind(next, kind)
+        }
         // 线型只属于划线：在高亮那一行点色，不能顺手改掉划线菜单记住的线型（两套偏好各自独立）。
         if (kind == AnnotationKind.Underline) {
             next = next.copy(annotationLastLineStyle = noteLineStyle.wire)
@@ -1698,7 +1709,12 @@ fun ReaderScreen(
     fun pickNoteLineStyle(style: AnnotationLineStyle) {
         noteKind = AnnotationKind.Underline
         noteLineStyle = style
-        val next = withAnnotationLastLineStyle(light, style)
+        // 新建时算「用了一次划线」；给旧标注改线型只记住线型偏好，不把默认操作带成划线。
+        val next = if (editingAnnotation == null) {
+            withAnnotationLastLineStyle(light, style)
+        } else {
+            light.copy(annotationLastLineStyle = style.wire)
+        }
         if (next != light) {
             light = next
             currentOnLightCommit(next)
@@ -2242,6 +2258,11 @@ fun ReaderScreen(
                                 // 编辑卡片还开着时不要另开浮动菜单：这张卡就是操作栏。
                                 if (editingAnnotation == null && selection.hasSelection) {
                                     selectionMenuVisible = true
+                                    // 上次选字用的是「编辑」：新选区直接进正文修改卡（与点操作栏的
+                                    // 「编辑」同一条路）。正在改的修改卡不再重开，否则会冲掉刚输入的字。
+                                    if (!textEditOpen && selectionActionOf(light) == SelectionAction.Edit) {
+                                        beginTextEdit()
+                                    }
                                 }
                                 change.consume()
                                 break
@@ -3084,10 +3105,13 @@ fun ReaderScreen(
                             switchTextEditToAnnotation(pickedKind)
                         } else {
                             noteKind = pickedKind
-                            val next = withAnnotationLastKind(light, pickedKind)
-                            if (next != light) {
-                                light = next
-                                currentOnLightCommit(next)
+                            // 只有新建时才算「用了一次」；给旧标注改类别不算（用户定口）。
+                            if (editingAnnotation == null) {
+                                val next = withAnnotationLastKind(light, pickedKind)
+                                if (next != light) {
+                                    light = next
+                                    currentOnLightCommit(next)
+                                }
                             }
                         }
                     },

@@ -259,7 +259,7 @@ class LibraryDbTest {
                 charEnd = 10,
                 kind = AnnotationKind.Underline,
                 color = 0xFF112233.toInt(),
-                lineStyle = AnnotationLineStyle.Strike,
+                lineStyle = AnnotationLineStyle.Dashed,
                 note = "批注",
                 quote = "摘录一改",
                 updatedAt = 20L,
@@ -270,7 +270,7 @@ class LibraryDbTest {
         assertEquals(10, updated.charEnd)
         assertEquals(AnnotationKind.Underline, updated.kind)
         assertEquals(0xFF112233.toInt(), updated.color)
-        assertEquals(AnnotationLineStyle.Strike, updated.lineStyle)
+        assertEquals(AnnotationLineStyle.Dashed, updated.lineStyle)
         assertEquals("批注", updated.note)
         assertEquals("摘录一改", updated.quote)
         assertEquals(20L, updated.updatedAt)

@@ -35,7 +35,6 @@ class AnnotationColorsTest {
         listOf(
             AnnotationLineStyle.Wavy,
             AnnotationLineStyle.Dashed,
-            AnnotationLineStyle.Strike,
         ).forEach { style ->
             assertEquals(
                 style,
@@ -46,6 +45,11 @@ class AnnotationColorsTest {
         assertEquals(
             AnnotationLineStyle.Straight,
             annotationLastLineStyleOf(ReaderSettings.DEFAULT.copy(annotationLastLineStyle = "dotted")),
+        )
+        // 已移除的删除线（老存档里可能还留着 "strike"）同样落回实线。
+        assertEquals(
+            AnnotationLineStyle.Straight,
+            annotationLastLineStyleOf(ReaderSettings.DEFAULT.copy(annotationLastLineStyle = "strike")),
         )
     }
 

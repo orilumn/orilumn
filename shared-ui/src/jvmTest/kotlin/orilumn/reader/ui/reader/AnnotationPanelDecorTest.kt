@@ -37,7 +37,6 @@ class AnnotationPanelDecorTest {
             annotation(AnnotationKind.Underline, 0xFF112233.toInt()),
             annotation(AnnotationKind.Underline, 0xFF112233.toInt(), AnnotationLineStyle.Wavy),
             annotation(AnnotationKind.Underline, 0xFF112233.toInt(), AnnotationLineStyle.Dashed),
-            annotation(AnnotationKind.Underline, 0xFF112233.toInt(), AnnotationLineStyle.Strike),
         )
         for (a in cases) {
             val body = annotationDecorRanges(listOf(a)).firstOrNull()

@@ -1963,7 +1963,7 @@ internal data class NoteInk(
     val rects: List<Rect>,
     val arrowRects: List<Rect> = emptyList(),
     /**
-     * 这条标注是**划线类**（下划线 / 删除线）：箭头可以进目标行的行盒，
+     * 这条标注是**划线类**（各种线型的划线）：箭头可以进目标行的行盒，
      * 但不得触及 [underlineRects] 或文字墨迹（`docs/新版批注与引线规则.md` 第 9 条，2026-10-28 定口）。
      *
      * 高亮标注恒为 false：箭头停在行盒边框上，不侵入行盒。
@@ -2003,7 +2003,7 @@ internal data class NoteObstacles(
      */
     val textLines: List<NoteTextLine> = emptyList(),
     /**
-     * 本页**所有读者标注划线**的落墨带（下划线 / 波浪线 / 删除线，页坐标）。
+     * 本页**所有读者标注划线**的落墨带（下划线 / 波浪线 / 虚线，页坐标）。
      *
      * 引线不得压在这些线上（引线规则第 8 条「尽量不穿越文字」）；更要紧的是它们比字墨迹
      * 低一截，行间中线必须按它们的下缘量，否则中线正好落在波浪的波峰上
@@ -4124,7 +4124,7 @@ private fun rectDistance(a: Rect, b: Rect): Float {
 /**
  * 小图标落位（§1.6）：**接在划线的右端、与划线垂直居中**，且保证不压原文墨迹。
  *
- * - 划线类（下划线 / 波浪 / 删除线）：用这条标注自己的落墨带 [NoteInk.underlineRects]，
+ * - 划线类（下划线 / 波浪 / 虚线）：用这条标注自己的落墨带 [NoteInk.underlineRects]，
  *   跨行时跟**最后一行**那条线走；
  * - 背景高亮：没有线，就按「线会长在哪里」算 —— 被标注文字的下缘（最后一行行盒底），
  *   图标与那个高度垂直居中，看起来就像挂在整段高亮的右下沿。
@@ -5401,8 +5401,8 @@ private fun arrowGapMidYs(obstacles: List<ArrowObstacle>): List<Float> {
  * 把逐字墨迹并成**视觉上的行**（上缘排序）：纵向重叠过半的字算同一行，行框取整行的并集。
  *
  * 若这一行挂着**划线带**，行底下移到线带的下缘：波浪线画在字墨迹下面一截，读者看到的
- * 「这一行到哪儿为止」是波浪线，不是字底。只认「挂在本行下方」的线带——删除线穿在字身中部
- * （不改行底），下一行的划线隔着一整行，都不算这一行的。
+ * 「这一行到哪儿为止」是波浪线，不是字底。只认「挂在本行下方」的线带——
+ * 下一行的划线隔着一整行，不算这一行的。
  */
 private fun visualRows(glyphs: List<Rect>, bands: List<Rect>): List<Rect> {
     val sorted = glyphs.sortedWith(compareBy({ it.top }, { it.left }))

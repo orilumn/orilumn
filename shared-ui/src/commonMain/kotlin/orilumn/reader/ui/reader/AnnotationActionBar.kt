@@ -47,7 +47,7 @@ import orilumn.reader.engine.skia.decorWaveGeometry
  * 取代原来贴着选区浮动的 [AnnotationMenu]：**没有锚点、没有翻边、没有左右收边**，
  * 它就是键盘上沿卡片的第一段，卡片自己不乱跑，所以选区在页面哪儿都不用管。
  *
- * 单行时从左到右：`高亮` `划线` `编辑`(占位) → 当前类别的 5 个色槽 → 4 个线型（仅划线）
+ * 单行时从左到右：`高亮` `划线` `编辑`(占位) → 当前类别的 5 个色槽 → 3 个线型（仅划线）
  * → 贴右的 `复制` `删除` `确定`。装不下就换两行：第一行只放类别与右侧三键，第二行放色槽与线型；
  * 再装不下（窄手机）就三行：类别一行、色槽一行、线型一行。判定全部来自**实测宽度**，
  * 不看屏幕 dp 阈值。
@@ -376,7 +376,7 @@ private val OUTER_RING_WIDTH = 1.25.dp
 private val SlotOuterRing = Color(0xFF9A9A9A).copy(alpha = 0.45f)
 
 /**
- * 划线线型行：只画线、不写字（实线 / 波浪 / 虚线 / 删除线），线色 = 当前划线色。
+ * 划线线型行：只画线、不写字（实线 / 波浪 / 虚线），线色 = 当前划线色。
  * 选中的那条垫一层 [Palette.rowActive]：点它只是**选中**，落笔还要点色槽或 `确定`（D-28）。
  */
 @Composable
@@ -408,12 +408,12 @@ private fun LineStyleRow(
 /** 菜单按钮文字字号：线样张的粗细也按它算，样张才与真迹同比例。 */
 private val MENU_LABEL_FONT = 14.sp
 
-/** 线型样张：与正文里落墨的位置对齐（下划线靠下、删除线过中）。 */
+/** 线型样张：与正文里落墨的位置对齐（线画在字的下沿）。 */
 private fun DrawScope.drawLineStyleGlyph(
     style: AnnotationLineStyle,
     color: Color,
     /**
-     * 线所在高度；`null` = 按样张行的默认（删除线过字中 0.5、其余贴下沿 0.68）。
+     * 线所在高度；`null` = 按样张行的默认（贴字的下沿 0.68）。
      *
      * 类别名「划线」的样张要把线画在**字的下沿**，故显式传入。
      */
@@ -427,9 +427,8 @@ private fun DrawScope.drawLineStyleGlyph(
     strokeWidth: Float = MENU_LABEL_FONT.toPx() * ANNOTATION_UNDERLINE_THICKNESS_EM,
 ) {
     val stroke = strokeWidth
-    // 一条线画在哪里：样张行里删除线过字中、其余贴下沿；调用方也可显式指定（类别名样张用）。
-    val y = lineY
-        ?: if (style == AnnotationLineStyle.Strike) size.height * 0.5f else size.height * 0.68f
+    // 一条线画在哪里：样张行里贴下沿；调用方也可显式指定（类别名样张用）。
+    val y = lineY ?: size.height * 0.68f
     when (style) {
         AnnotationLineStyle.Straight -> drawLine(
             color = color,
@@ -468,18 +467,11 @@ private fun DrawScope.drawLineStyleGlyph(
                 0f,
             ),
         )
-        AnnotationLineStyle.Strike -> drawLine(
-            color = color,
-            start = Offset(from, y),
-            end = Offset(to, y),
-            strokeWidth = stroke,
-        )
     }
 }
 
-/** 类别名样张那条线的线心：下划线贴字底并给波浪留出振幅，删除线过字中。 */
+/** 类别名样张那条线的线心：贴字底并给波浪留出振幅。 */
 private fun DrawScope.sampleLineY(style: AnnotationLineStyle, strokeWidth: Float): Float {
-    if (style == AnnotationLineStyle.Strike) return size.height * 0.5f
     val half = if (style == AnnotationLineStyle.Wavy) {
         decorWaveGeometry(strokeWidth).halfHeight
     } else {
@@ -499,7 +491,7 @@ private fun MenuAction(
     swatch: Int? = null,
     /** 非空：在文字下沿画一条该颜色的线（划线的样子）。 */
     underlineArgb: Int? = null,
-    /** 那条线**长什么样**：跟当前选定的线型走（实线/波浪/虚线/删除线），默认实线。 */
+    /** 那条线**长什么样**：跟当前选定的线型走（实线 / 波浪 / 虚线），默认实线。 */
     underlineStyle: AnnotationLineStyle = AnnotationLineStyle.Straight,
     /** 字重：普通项用 Medium，最右的落笔键加粗。 */
     fontWeight: FontWeight = FontWeight.Medium,

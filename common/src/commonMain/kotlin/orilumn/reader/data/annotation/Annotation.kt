@@ -28,14 +28,15 @@ enum class AnnotationKind(val wire: String) {
  *
  * - [Straight]：基线下方的实线（默认，也是老数据缺列时的取值）；
  * - [Wavy]：基线下方的波浪线；
- * - [Dashed]：基线下方的虚线；
- * - [Strike]：穿过字身的删除线（位置更高，与下划线共用颜色）。
+ * - [Dashed]：基线下方的虚线。
+ *
+ * 曾经有过「删除线」一档，因为和审阅视图里表示删字的红色删除线撞脸，已整体移除；
+ * 老数据里的 `"strike"` 按未知值落回实线。
  */
 enum class AnnotationLineStyle(val wire: String) {
     Straight("straight"),
     Wavy("wavy"),
     Dashed("dashed"),
-    Strike("strike"),
     ;
 
     companion object {
@@ -59,7 +60,7 @@ data class Annotation(
     val charEnd: Int,
     val kind: AnnotationKind,
     val color: Int? = null,
-    /** 划线线型（实线 / 波浪 / 删除线）；高亮忽略。老数据缺列 = 实线。 */
+    /** 划线线型（实线 / 波浪 / 虚线）；高亮忽略。老数据缺列 = 实线。 */
     val lineStyle: AnnotationLineStyle = AnnotationLineStyle.Straight,
     val note: String? = null,
     /**

@@ -196,7 +196,7 @@ data class ReaderSettings(
      */
     val annotationLastKind: String = "highlight",
     /**
-     * 上次用于新建 / 改线型的划线线型（`straight` / `wavy` / `dashed` / `strike`，
+     * 上次用于新建 / 改线型的划线线型（`straight` / `wavy` / `dashed`，
      * 见 `annotationLastLineStyle()`）。纯读者偏好（不影响分页）；未知值按实线处理。
      */
     val annotationLastLineStyle: String = "straight",

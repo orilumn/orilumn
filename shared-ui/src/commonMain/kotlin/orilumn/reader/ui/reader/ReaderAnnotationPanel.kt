@@ -425,7 +425,7 @@ internal class QuoteDecor(
 
 /**
  * 清单行的装饰**直接沿用正文那份投影**（[annotationDecorRanges]）：同一处颜色回退、
- * 同一处删除线换落墨位置、同一处批注画虚线。面板不再自己判一遍类型，
+ * 同一处线型样张也一模一样。面板不再自己判一遍类型，
  * 才不会出现「清单里是虚线、正文里是波浪」这种两套口径。
  */
 internal fun quoteDecorOf(annotation: Annotation): QuoteDecor? =
@@ -476,7 +476,7 @@ private fun DrawScope.drawQuoteHighlight(lr: TextLayoutResult, color: Color) {
     }
 }
 
-/** 划线 / 删除线：线宽与线的位置按正文字号口径换算（[ANNOTATION_UNDERLINE_THICKNESS_EM] 等）。 */
+/** 划线：线宽与线的位置按正文字号口径换算（[ANNOTATION_UNDERLINE_THICKNESS_EM] 等）。 */
 private fun DrawScope.drawQuoteLines(
     lr: TextLayoutResult,
     kind: DecorKind,

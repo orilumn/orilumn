@@ -389,7 +389,8 @@ interface ReaderHost {
  * 一次正文修改的结果（方案 §8.8）。
  *
  * [Success.pos] 为 null 表示新文字与旧文字相同（无需重排，保持当前页）；
- * [Success.selStart] / [selEnd] 是替换后文字在**渲染空间**的区间，阅读面据此重新选中。
+ * [Success.selStart] / [selEnd] 是替换后文字在**渲染空间**的区间，供调用方需要时定位改后的文字
+ * （阅读面确认后不再据此保留选区）。
  */
 sealed interface TextEditOutcome {
     data class Success(

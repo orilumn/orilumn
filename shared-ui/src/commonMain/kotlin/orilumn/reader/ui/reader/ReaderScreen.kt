@@ -1556,9 +1556,9 @@ fun ReaderScreen(
     }
 
     /**
-     * 提交正文修改：纯计算 + 落库 + 单章重排都在宿主里完成；这里只管卡片、提示与选区恢复。
+     * 提交正文修改：纯计算 + 落库 + 单章重排都在宿主里完成；这里只管卡片、提示与选区收尾。
      *
-     * 成功：关卡片、清旧选区、落位到修改起点、把替换后的文字重新选起来（看得见改了哪儿）。
+     * 成功：关卡片、落位到修改起点、**收掉选区**（改已落库，蓝底与手柄不再留在正文上）。
      * 失败 / 校验拒绝：**卡片不关、正文不动**，就地提示。
      */
     fun commitTextEdit() {
@@ -1583,12 +1583,8 @@ fun ReaderScreen(
                     textEditOpen = false
                     textEditText = ""
                     textEditRevision++
-                    val newText = currentHost.textOf(ch, 0, Int.MAX_VALUE)
-                    if (newText != null && o.selEnd > o.selStart) {
-                        selection.selectRange(ch, newText, o.selStart, o.selEnd)
-                    } else {
-                        selection.clear()
-                    }
+                    // 确认即收选区：改后的字已经落库，再留一圈蓝底只会挡住刚改过的正文。
+                    selection.clear()
                     selectionMenuVisible = false
                     // 正文变了，本章标注的渲染坐标要按新修订表重算（落库仍是原书坐标）。
                     annotationState.reload()

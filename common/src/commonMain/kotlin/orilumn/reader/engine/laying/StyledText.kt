@@ -95,7 +95,9 @@ fun styledSegments(
 ): StyledSegments {
     if (root.tag == "table" || root.tag == "img") return StyledSegments(emptyList())
     if (root.isText) {
-        val t0 = WhiteSpaceNormalize.normalizeNode(root.text, wsOf(root))
+        // 合成匿名 run 叶：整段按容器 white-space 一次归一 + 收尾，与轻/重两路排版、字符投影
+        // （[normalizeAnonymousRun]）同一串文字。少了叶级收尾，首尾空白会让编辑区间与排版错位。
+        val t0 = normalizeAnonymousRun(root.text, leafWs)
         if (t0.isEmpty()) return StyledSegments(emptyList())
         val out = ArrayList<StyledSegment>()
         addTextSeg(out, root, t0, styleOf)

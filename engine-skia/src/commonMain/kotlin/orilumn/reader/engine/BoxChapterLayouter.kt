@@ -42,6 +42,7 @@ import orilumn.reader.engine.laying.paddingBox
 import orilumn.reader.engine.laying.FlowedLine
 import orilumn.reader.engine.laying.LayoutBox
 import orilumn.reader.engine.laying.NormalFlowLayout
+import orilumn.reader.engine.laying.normalizeAnonymousRun
 import orilumn.reader.engine.laying.TableGridModel
 import orilumn.reader.engine.paging.BookLayout
 import orilumn.reader.engine.paging.BreakAwareBookLayout
@@ -54,6 +55,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
+
+/**
+ * 匿名 run 重建时的临时包装 tag：不是真实 HTML 标签，作者 CSS 命中不了它，
+ * 级联只从 `parent`（属主）继承，拆回 children 后不留痕迹。
+ */
+private const val ANON_RUN_WRAPPER_TAG = "#anonrun"
 
 /**
  * How a chapter's pages are cut, and — critically — **which pagination table the result feeds**.
@@ -685,6 +692,82 @@ class BoxChapterLayouter(
             wsOf = styling.wsOf,
             styleOf = styling.styleOf,
             merges = merges,
+            anonymousEdit = anonymousRunEditor(styling),
+        )
+    }
+
+    /**
+     * 匿名 run 叶的叶内重建：把该 run 的来源子节点 span 包成临时包装元素，交给
+     * [orilumn.reader.engine.revision.LeafTextEditor.rebuild] 逐段保留行内样式重建，再拆回属主
+     * 的 children。文本口径与排版严格同源（[normalizeAnonymousRun] / `styledSegments`）：
+     * 切点落在行内包装内部、run 含 `<br>` 等对不上原文本时返回 null，调用方保持原样、不猜。
+     */
+    private fun anonymousRunEditor(styling: LeafStyling): orilumn.reader.engine.revision.ChapterRevisionReplay.AnonymousRunEditor {
+        return { leaf, ordinal, edits ->
+            runCatching { rebuildAnonymousRun(leaf, ordinal, edits, styling) }
+                .onFailure {
+                    Logger.w(
+                        "Orilumn.Revision",
+                        "anon run edit failed: ${it::class.simpleName} ${it.message}",
+                    )
+                }
+                .getOrNull()
+        }
+    }
+
+    private fun rebuildAnonymousRun(
+        leaf: MarkupElement,
+        ordinal: Int,
+        edits: List<orilumn.reader.engine.revision.LeafTextEditor.Edit>,
+        styling: LeafStyling,
+    ): orilumn.reader.engine.revision.ChapterRevisionReplay.AnonymousRun? {
+        // 匿名叶是结构里合成的 #text，不在树里；属主是它的 parent（容器或行内包装）。
+        val owner = leaf.parent ?: return null
+        val oldText = styling.segmentsOf(leaf).text
+        val ws = styling.wsOf(leaf)
+        val spans = NormalFlowLayout.anonymousRunSpans(owner, styling.classify, styling.hidden)
+        val span = spans.getOrNull(ordinal) ?: return null
+        if (normalizeAnonymousRun(span.raw, ws) != oldText) return null
+        if (span.start < 0 || span.start >= span.endExclusive || span.endExclusive > owner.children.size) {
+            return null
+        }
+        val wrapper = MarkupElement(
+            tag = ANON_RUN_WRAPPER_TAG,
+            children = owner.children.subList(span.start, span.endExclusive).toList(),
+        )
+        // 包装不进树，只借 parent 链做级联（继承属主的字号 / white-space / 颜色等）。
+        wrapper.parent = owner
+        val before = styling.segmentsOf(wrapper)
+        // 逐节点归一必须与 run 整段归一同一串文字，否则下面按段重建的偏移会漂。
+        if (before.text != oldText) return null
+        val r = orilumn.reader.engine.revision.LeafTextEditor.rebuild(
+            leaf = wrapper,
+            segments = before,
+            edits = edits,
+            wsOf = styling.wsOf,
+            styleOf = styling.styleOf,
+            rebuildSegments = styling.segmentsOf,
+        )
+        // rebuild 内部量长度时包装还没有父节点；接回属主后按真实级联再量一次。
+        r.leaf.parent = owner
+        val after = styling.segmentsOf(r.leaf).text
+        if (after != orilumn.reader.engine.revision.LeafTextEditor.applyEdits(oldText, edits)) return null
+        // 拼原文只看 run 的孩子们（包装 tag 本身可能是 `*{display:block}` 之类规则的靶子，
+        // 不能把它当行内子树根再走一遍判定）。
+        val raw = buildString {
+            for (c in r.leaf.children) append(NormalFlowLayout.inlineRunText(c, styling.classify, styling.hidden))
+        }
+        // 合成叶落回结构后走的是 run 整段归一（[normalizeAnonymousRun]），长度以它为准。
+        val length = normalizeAnonymousRun(raw, ws).length
+        if (length != after.length) return null
+        return orilumn.reader.engine.revision.ChapterRevisionReplay.AnonymousRun(
+            owner = owner,
+            start = span.start,
+            endExclusive = span.endExclusive,
+            nodes = r.leaf.children,
+            rawText = raw,
+            textLength = length,
+            oldTextLength = oldText.length,
         )
     }
 
@@ -720,6 +803,8 @@ class BoxChapterLayouter(
         val segmentsOf: (MarkupElement) -> orilumn.reader.engine.laying.StyledSegments,
         val wsOf: (MarkupElement) -> orilumn.reader.engine.css.WhiteSpace,
         val styleOf: (MarkupElement) -> orilumn.reader.engine.css.ComputedStyle,
+        val classify: orilumn.reader.engine.laying.BlockClassify,
+        val hidden: orilumn.reader.engine.laying.HiddenCheck,
     )
 
     private fun leafStyling(
@@ -778,7 +863,7 @@ class BoxChapterLayouter(
                 styleOf = styleOf,
             )
         }
-        return LeafStyling(segmentsOf, wsOf, styleOf)
+        return LeafStyling(segmentsOf, wsOf, styleOf, classify, hidden)
     }
 
     /**

@@ -983,6 +983,56 @@ object NormalFlowLayout {
         }
     }
 
+    /** 行内子树的原文（[flowChildren] 的 run 拼法：`<br>`→'\n'、`<img>`→U+FFFC，块/隐藏子树跳过）。 */
+    fun inlineRunText(
+        el: MarkupElement,
+        classify: BlockClassify,
+        hidden: HiddenCheck = HIDDEN_NONE,
+    ): String {
+        val sb = StringBuilder()
+        appendInlineText(el, classify, sb, hidden)
+        return sb.toString()
+    }
+
+    /**
+     * [el] 自己的行内内容在 `children` 里形成的匿名 run：下标区间 + 原文。
+     *
+     * 与 [flowChildren] **同一套切分**（块 / 替换叶 / 行内子树埋块处断开，其余吸收），
+     * 供正文修订重放定位「这一段 stray 文字来自哪几个真实子节点」。行内子树埋块时 run 的
+     * 母节点是行内包装而不是 [el]，不会出现在这里（那些叶的属主是包装节点）。
+     */
+    fun anonymousRunSpans(
+        el: MarkupElement,
+        classify: BlockClassify,
+        hidden: HiddenCheck = HIDDEN_NONE,
+    ): List<AnonymousRunSpan> {
+        val out = ArrayList<AnonymousRunSpan>()
+        val sb = StringBuilder()
+        var start = -1
+        fun flush(endExclusive: Int) {
+            if (start >= 0 && sb.isNotBlank()) out.add(AnonymousRunSpan(start, endExclusive, sb.toString()))
+            sb.setLength(0)
+            start = -1
+        }
+        for ((i, c) in el.children.withIndex()) {
+            if (hidden.isHidden(c)) continue
+            when {
+                classify.isBlock(c) -> flush(i)
+                isReplaceable(c) -> flush(i)
+                hasInlineWrappedBlock(c, classify, hidden) -> flush(i)
+                else -> {
+                    if (start < 0) start = i
+                    appendInlineText(c, classify, sb, hidden)
+                }
+            }
+        }
+        flush(el.children.size)
+        return out
+    }
+
+    /** [anonymousRunSpans] 的一项：`el.children[start, endExclusive)` 拼出的匿名 run。 */
+    class AnonymousRunSpan(val start: Int, val endExclusive: Int, val raw: String)
+
     /**
      * E19（CSS 2.1 §9.2.1 block-in-inline）：[el] 的**行内子树**里是否埋着块级后代（经任意深度的
      * 行内祖先可达）。行内盒一旦包住块级盒，行内盒必须在块级盒处**断开**（前后内联内容各成匿名块、

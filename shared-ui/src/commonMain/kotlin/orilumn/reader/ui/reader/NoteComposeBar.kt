@@ -149,7 +149,23 @@ internal fun AnnotationSheet(
     // 输入框内部要光标与选区，所以持 TextFieldValue；外面只认纯文本（点色槽时要读它）。
     var value by remember { mutableStateOf(TextFieldValue(text, TextRange(text.length))) }
     LaunchedEffect(text) {
-        if (text != value.text) value = TextFieldValue(text, TextRange(text.length))
+        if (text == value.text) return@LaunchedEffect
+        // 换文字不等于丢选区（用户定口）：调正文选区时输入区里已经选好的那一段要留着，
+        // 否则读者刚全选（开卡默认）或手选了一段，一拖正文手柄就退回一个光标。
+        val old = value
+        val sel = when {
+            // 新开卡时原来还是空的：光标落在末尾（随后由下面的 TextEdit 规则整段全选）。
+            old.text.isEmpty() -> TextRange(text.length)
+            // 之前是整段全选（开卡默认，或上一次跟着正文选区换过来的）⇒ 新文字照样整段全选。
+            old.selection.start == 0 && old.selection.end == old.text.length ->
+                TextRange(0, text.length)
+            // 手选的某一段：偏移照旧，只把越界的那头收进新文字里。
+            else -> TextRange(
+                old.selection.start.coerceIn(0, text.length),
+                old.selection.end.coerceIn(0, text.length),
+            )
+        }
+        value = TextFieldValue(text, sel)
     }
     // 进入正文修改状态（卡片新开、或从批注切到「编辑」）默认全选输入框里的文字：
     // 读者直接打字就是整段替换，不用先手动全选（用户定口）。键只取 visible / mode，

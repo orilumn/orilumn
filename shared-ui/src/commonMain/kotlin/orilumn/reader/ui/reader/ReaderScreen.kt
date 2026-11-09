@@ -2517,8 +2517,12 @@ fun ReaderScreen(
                 onNight = currentOnNight,
                 onSettings = { hideBarsThen { currentOnSettings() } },
                 onToc = { hideBarsThen { currentOnToc() } },
-                onBookmark = { currentOnBookmark?.invoke() ?: snackbar.show("书签（规划中）") },
-                onNote = { currentOnNote?.invoke() ?: snackbar.show("笔记（规划中）") },
+                // 书签 / 笔记：与设置 / 目录 / 修改同序——**先收栏，再开清单**。清单里点一条就是
+                // 跳转；跳转一律从「工具栏已退出」的状态发起，落位后读者看到的是干净的一页。
+                onBookmark = currentOnBookmark?.let { cb -> { hideBarsThen { cb() } } }
+                    ?: { snackbar.show("书签（规划中）") },
+                onNote = currentOnNote?.let { cb -> { hideBarsThen { cb() } } }
+                    ?: { snackbar.show("笔记（规划中）") },
                 // 修改：先收栏再开清单（与设置/目录同序，别让抽屉盖在晾着的工具栏上）。
                 onRevision = currentOnRevision?.let { cb -> { hideBarsThen { cb() } } },
                 // 审阅：切换后栏要留着（按钮高亮本身就是「现在看的是改动痕迹」的指示）。
@@ -3147,8 +3151,12 @@ fun ReaderScreen(
                 onNight = currentOnNight,
                 onSettings = { hideBarsThen { currentOnSettings() } },
                 onToc = { hideBarsThen { currentOnToc() } },
-                onBookmark = { currentOnBookmark?.invoke() ?: snackbar.show("书签（规划中）") },
-                onNote = { currentOnNote?.invoke() ?: snackbar.show("笔记（规划中）") },
+                // 书签 / 笔记：与设置 / 目录 / 修改同序——**先收栏，再开清单**。清单里点一条就是
+                // 跳转；跳转一律从「工具栏已退出」的状态发起，落位后读者看到的是干净的一页。
+                onBookmark = currentOnBookmark?.let { cb -> { hideBarsThen { cb() } } }
+                    ?: { snackbar.show("书签（规划中）") },
+                onNote = currentOnNote?.let { cb -> { hideBarsThen { cb() } } }
+                    ?: { snackbar.show("笔记（规划中）") },
                 // 修改：先收栏再开清单（与设置/目录同序，别让抽屉盖在晾着的工具栏上）。
                 onRevision = currentOnRevision?.let { cb -> { hideBarsThen { cb() } } },
                 // 审阅：切换后栏要留着（按钮高亮本身就是「现在看的是改动痕迹」的指示）。

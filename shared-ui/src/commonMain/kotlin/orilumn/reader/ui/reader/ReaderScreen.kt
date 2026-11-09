@@ -1203,7 +1203,14 @@ fun ReaderScreen(
         // 那些字也属于这条修订，点它同样进整体编辑（红绿只是标出真正改动的位置）。
         val revision = chapterRevisions.firstOrNull { r ->
             offset >= r.charStart && offset < r.charEnd
-        } ?: return false
+        } ?: run {
+            Logger.d(
+                "Orilumn.TAP",
+                "review hit miss offset=$offset ranges=" +
+                    chapterRevisions.joinToString(",") { "${it.charStart}-${it.charEnd}" },
+            )
+            return false
+        }
         val text = currentHost.textOf(p.chapter, 0, Int.MAX_VALUE) ?: return false
         closeAnnotationEdit()
         magnifierFinger = null

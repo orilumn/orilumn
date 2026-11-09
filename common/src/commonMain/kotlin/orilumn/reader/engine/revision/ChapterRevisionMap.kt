@@ -355,13 +355,28 @@ class ChapterRevisionMap(
      * 前一处的长度——同一段里相邻的两处修改就是这样错位的。
      * 审阅空间里每条修订的正文都是「原书那一段 + 它的插入」按顺序首尾相接，所以本条的起点
      * = 原书起点 + 排在它前面所有修订的插入长度（[reviewExtra]）。
+     *
+     * 「是不是同一条」按**值**认，不能按引用：宿主点按命中 / 卡片用的修订来自另一次读库，
+     * 与本章修订表里的是两个实例。按引用找不到自己就会一路累加到底，把排在**后面**的插入
+     * 也算进来，整段右移——点按落空、选区框错字（审阅视图下这两处都用本函数）。
      */
     private fun reviewStart(r: TextRevision): Int {
-        var shift = 0
-        for (x in revisions) {
-            if (x === r) break
-            shift += reviewExtra(x)
+        val idx = revisions.indexOfFirst { it === r || it == r }
+        if (idx < 0) {
+            // 不是本章这一版修订表里的条目（旧快照 / 别的空间）：退回按位置口径，
+            // 只累加严格排在它前面的那些。
+            var shift = 0
+            for (x in revisions) {
+                if (x.charStart < r.charStart || (x.charStart == r.charStart && x.id < r.id)) {
+                    shift += reviewExtra(x)
+                } else {
+                    break
+                }
+            }
+            return r.charStart + shift
         }
+        var shift = 0
+        for (i in 0 until idx) shift += reviewExtra(revisions[i])
         return r.charStart + shift
     }
 

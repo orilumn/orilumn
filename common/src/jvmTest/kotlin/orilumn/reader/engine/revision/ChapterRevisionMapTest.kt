@@ -396,6 +396,24 @@ class ChapterRevisionMapTest {
     }
 
     @Test
+    fun reviewIntervalAcceptsEqualInstanceFromAnotherRead() {
+        // 宿主点按命中 / 打开修改卡拿到的修订是**另一次读库**的实例（值相等、引用不同）：
+        // 起点必须按「排在它前面的修订」累加，不能因为认不出自己就把后面的插入也算进来，
+        // 否则整段右移——点按落空、选区框错字。
+        val r1 = rev(1, 3, "X", id = 1)
+        val r2 = rev(5, 7, "Y", id = 2)
+        val map = ChapterRevisionMap(
+            listOf(r1, r2),
+            originalTexts = mapOf(r1 to "bc", r2 to "fg"),
+        )
+        assertEquals(map.reviewInterval(r1), map.reviewInterval(r1.copy()))
+        assertEquals(map.reviewInterval(r2), map.reviewInterval(r2.copy()))
+        // 首条不欠任何前序插入；后一条只欠首条那一段的差（原文 2 字 + 新写 1 字 = +1）。
+        assertEquals(1 until 4, map.reviewInterval(r1.copy()))
+        assertEquals(6 until 9, map.reviewInterval(r2.copy()))
+    }
+
+    @Test
     fun samePointInsertionsStackInReviewSpace() {
         // 同一处两次加字（提交侧通常会合并，表侧也要按先后排好）：审阅空间 = 「abABcd」。
         val first = rev(2, 2, "A", id = 1)

@@ -393,6 +393,86 @@ class ChapterRevisionMap(
         return s until (s + maxOf(len, 1))
     }
 
+    /**
+     * 某条修订在审阅视图里**整段**占的区间：提交时那段选区的原文 + 读者新写的字
+     * （D-36 补记「点按改动痕迹 = 直接开卡改它」）。
+     *
+     * 与 [reviewInterval] 的差别只在**被裁掉的公共前后缀**：[TextEditPlanner] 落库的是
+     * 「最小修订」（改一个字只动一个字），两端没改的字不在区间里；但修改卡里带出的是
+     * `editedText`（整段改后的文字），点按也该认整段——否则「关」→「关系」之后再点「关」
+     * 命不中，在卡里删掉「关」时那段字又落在冻结区间之外，提交自然是空操作。
+     *
+     * 整段范围由修订自己存的两行快照反推：`originalText` / `editedText` 是整段，
+     * [originalTexts] 给的最小原文与 [TextRevision.text] 是最小修订，两侧之差就是被裁掉的
+     * 公共前后缀。对不上（老数据没有快照、跨叶不裁剪、空白归一后长度不符）时返回最小修订，
+     * 行为与修复前一致；候选整段会碰到别的修订时同样退回最小修订（那条快照的选区里还有
+     * 别人的改动，按整段开卡会误伤邻条）。
+     */
+    fun reviewSegmentInterval(r: TextRevision): IntRange {
+        val minimal = reviewInterval(r)
+        val sides = segmentSides(r) ?: return minimal
+        val (prefixLen, suffixLen) = sides
+        if (prefixLen == 0 && suffixLen == 0) return minimal
+        val origStart = r.charStart - prefixLen
+        val origEnd = r.charEnd + suffixLen
+        if (origStart < 0 || origEnd < origStart) return minimal
+        // 邻条按各自反推的整段判（两条都只是「原文里的一个区间」，半开）。
+        for (other in revisions) {
+            if (other === r || other == r) continue
+            val oSides = segmentSides(other)
+            val oStart = other.charStart - (oSides?.first ?: 0)
+            val oEnd = other.charEnd + (oSides?.second ?: 0)
+            val hits = if (other.isInsertion) {
+                // 插入点落在整段里（含两端）都会让两段在审阅空间里重叠，保守退回。
+                other.charStart in origStart..origEnd
+            } else {
+                oStart < origEnd && origStart < oEnd
+            }
+            if (hits) return minimal
+        }
+        val start = toReview(origStart, crossInsertions = false)
+        val end = toReview(origEnd, crossInsertions = true)
+        if (end <= start) return minimal
+        // 换算后再按审阅空间核一次：边界上的邻条插入不能被整段吞进来。
+        for (other in revisions) {
+            if (other === r || other == r) continue
+            val oi = reviewInterval(other)
+            if (oi.first < end && start < oi.last + 1) return minimal
+        }
+        return start until end
+    }
+
+    /**
+     * 这条修订两端被裁掉的公共字各有多少（原书空间字符数），反推不出来时 null。
+     *
+     * 依据：`originalText` = 前缀 + 最小原文 + 后缀，`editedText` = 前缀 + [TextRevision.text] + 后缀。
+     * 用最小原文与替换文字在各自那一行里对位，要求两侧公共字逐字相同；对位有多解时取最靠前的一处
+     * （纯插入同一串重复字时，整段范围本身自洽，读者看到与提交结果一致）。
+     */
+    private fun segmentSides(r: TextRevision): Pair<Int, Int>? {
+        val old = r.originalText
+        val new = r.editedText
+        if (old.isEmpty() && new.isEmpty()) return null
+        val minimalOld = originalTexts[r] ?: return null
+        val minimalNew = r.text
+        val kept = old.length - minimalOld.length
+        // 跨叶不裁剪的修订里 originalText 按段插了 `\n`、text 里是段界字符，两边长度差不同 —— 不反推。
+        if (kept <= 0 || new.length - minimalNew.length != kept) return null
+        for (p in 0..kept) {
+            if (old.length < p + minimalOld.length || new.length < p + minimalNew.length) continue
+            if (
+                old.substring(p, p + minimalOld.length) != minimalOld ||
+                new.substring(p, p + minimalNew.length) != minimalNew ||
+                old.substring(0, p) != new.substring(0, p) ||
+                old.substring(p + minimalOld.length) != new.substring(p + minimalNew.length)
+            ) {
+                continue
+            }
+            return p to (kept - p)
+        }
+        return null
+    }
+
     /** 审阅空间 [start, endExclusive) 碰到的修订（删掉的原文、新添的文字任一相交都算）。 */
     fun revisionsTouchingReview(start: Int, endExclusive: Int): List<TextRevision> =
         revisions.filter { r ->

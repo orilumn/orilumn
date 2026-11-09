@@ -108,6 +108,31 @@ class TextEditPlannerTest {
     }
 
     @Test
+    fun trimmedAppendReconfirmsWithoutDuplicatingKeptText() {
+        // 库里已落成「在 3 处插『系』」；按整段（原书「关」）原样再提交「关系」，还是裁回同一条插入，
+        // 不会变成「关关系」（打开旧修订直接按确定曾会这样）。
+        val p = ready(plan("ab关cd", intArrayOf(5), 2, 3, "关系"))
+        val r = p.inserted.single()
+        assertTrue(r.isInsertion)
+        assertEquals(3, r.charStart)
+        assertEquals("系", r.text)
+        assertEquals("关系", r.editedText)
+    }
+
+    @Test
+    fun deletingKeptOriginalOfTrimmedAppendReplacesIt() {
+        // 同上，但读者把卡片里保留的原文「关」删掉、只剩「系」：应把原书「关」换成「系」，
+        // 不能因为改动落在最小修订之外就当成空操作。
+        val p = ready(plan("ab关cd", intArrayOf(5), 2, 3, "系"))
+        val r = p.inserted.single()
+        assertEquals(2, r.charStart)
+        assertEquals(3, r.charEnd)
+        assertEquals("系", r.text)
+        assertEquals("关", r.originalText)
+        assertEquals("系", r.editedText)
+    }
+
+    @Test
     fun reeditingSameSpotShowsPreEditSelection() {
         // 原书「abcdef」把 [2,4)「cd」换成「XY」→ 渲染「abXYef」；再把「X」改成「Z」。
         // 清单两行是这次提交前后读者看到的字：「X」→「Z」，不是书上原文「cd」。

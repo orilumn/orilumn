@@ -712,6 +712,20 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         return rr
     }
 
+    /**
+     * 点按 / 开卡用的修订区间：审阅视图下是这条修订的**整段**（提交时那段选区的原文 + 新文字），
+     * 正常视图不受影响（同 [textRevisionRange]）。
+     *
+     * 修改卡带出的是「改后的整段文字」（`editedText`），冻结区间必须与它同尺：只给最小修订
+     * （裁掉公共前后缀之后的那几个字）会出现「卡里有多出来的原文、选区里没有」，删原文 / 改旧内容
+     * 提交无效（D-36 补记）。
+     */
+    fun textRevisionEditRange(chapter: Int, revision: orilumn.reader.data.revision.TextRevision): IntRange {
+        val map = revisionMaps[chapter] ?: return revision.charStart until revision.charEnd
+        if (reviewMode) return map.reviewSegmentInterval(revision)
+        return map.renderedInterval(revision)
+    }
+
     /** 本章内容版本（0 = 无修订）：宿主 / 分页表 / 页数 / 快照的失效判据。 */
     fun contentRevOf(chapter: Int): Long = chapterContentRev(chapter)
 

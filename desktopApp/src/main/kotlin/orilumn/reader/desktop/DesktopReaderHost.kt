@@ -422,12 +422,13 @@ class DesktopReaderHost(
         emptyList()
     }
 
-    /** 阅读面判「这段字改过没有」用：本章修订换成**渲染坐标**（与选区同尺）。 */
+    /** 阅读面判「这段字改过没有」用：本章修订换成**当前文字空间**（与选区同尺）。 */
     override suspend fun textRevisionsForChapter(chapter: Int): List<TextRevision> = try {
         store.textRevisionsForChapter(bookId, chapter).map { r ->
-            val rr = controller.renderedRange(chapter, r.charStart, r.charEnd)
-            val end = if (rr.isEmpty()) rr.first else rr.last + 1
-            if (rr.first == r.charStart && end == r.charEnd) r else r.copy(charStart = rr.first, charEnd = end)
+            // 审阅视图里点按 / 开卡认「整段」（原文 + 新文字），与修改卡带出的改后文字同尺。
+            val rr = controller.textRevisionEditRange(chapter, r)
+            if (rr.first == r.charStart && rr.last + 1 == r.charEnd) r
+            else r.copy(charStart = rr.first, charEnd = maxOf(rr.first, rr.last + 1))
         }
     } catch (c: CancellationException) {
         throw c

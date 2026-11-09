@@ -396,6 +396,49 @@ class ChapterRevisionMapTest {
     }
 
     @Test
+    fun reviewSegmentIntervalCoversKeptOriginalForTrimmedAppend() {
+        // 原书「关」改成「关系」：最小修订裁成在 3 处插「系」，快照两行仍是整段的「关」/「关系」。
+        val r = rev(3, 3, "系", id = 1).copy(originalText = "关", editedText = "关系")
+        val map = ChapterRevisionMap(listOf(r), originalTexts = mapOf(r to ""))
+        // 最小修订只盖绿色「系」；整段要连前面留着的原文「关」一起框住（点按命中也按它）。
+        assertEquals(3 until 4, map.reviewInterval(r))
+        assertEquals(2 until 4, map.reviewSegmentInterval(r))
+        // 从整段换回原书区间，提交「系」才是「删掉原文的关」；只按最小修订换回去是空区间。
+        assertEquals(2 until 3, map.originalEditRangeFromReview(2, 4))
+        assertEquals(3 until 3, map.originalEditRangeFromReview(3, 4))
+    }
+
+    @Test
+    fun reviewSegmentIntervalCoversKeptPrefixOfTrimmedReplacement() {
+        // 原书「关系了」把 [1,2)「系」改成「联」：最小修订是「系」→「联」，快照整段是「关系」/「关联」。
+        val r = rev(1, 2, "联", id = 1).copy(originalText = "关系", editedText = "关联")
+        val map = ChapterRevisionMap(listOf(r), originalTexts = mapOf(r to "系"))
+        // 审阅空间 = 原书「关系了」+ 就地插「联」=「关系联了」，最小区间只是红「系」+ 绿「联」。
+        assertEquals(1 until 3, map.reviewInterval(r))
+        assertEquals(0 until 3, map.reviewSegmentInterval(r))
+        assertEquals(0 until 2, map.originalEditRangeFromReview(0, 3))
+    }
+
+    @Test
+    fun reviewSegmentIntervalFallsBackWhenKeptTextTouchesAnotherRevision() {
+        // A 把「关」改成「关系」，B 又把同一处「关」改成「开」：A 的整段反推会盖住 B，
+        // 只能退回最小修订，免得点开 A 的卡片把 B 也一起删掉。
+        val a = rev(3, 3, "系", id = 1).copy(originalText = "关", editedText = "关系")
+        val b = rev(2, 3, "开", id = 2).copy(originalText = "关", editedText = "开")
+        val map = ChapterRevisionMap(listOf(a, b), originalTexts = mapOf(a to "", b to "关"))
+        assertEquals(map.reviewInterval(a), map.reviewSegmentInterval(a))
+        assertEquals(map.reviewInterval(b), map.reviewSegmentInterval(b))
+    }
+
+    @Test
+    fun reviewSegmentIntervalWithoutSnapshotsStaysMinimal() {
+        // 老数据没有 originalText / editedText：反推不出整段，行为和以前一样（最小修订）。
+        val r = rev(1, 2, "X", id = 1)
+        val map = ChapterRevisionMap(listOf(r), originalTexts = mapOf(r to "b"))
+        assertEquals(map.reviewInterval(r), map.reviewSegmentInterval(r))
+    }
+
+    @Test
     fun reviewIntervalAcceptsEqualInstanceFromAnotherRead() {
         // 宿主点按命中 / 打开修改卡拿到的修订是**另一次读库**的实例（值相等、引用不同）：
         // 起点必须按「排在它前面的修订」累加，不能因为认不出自己就把后面的插入也算进来，

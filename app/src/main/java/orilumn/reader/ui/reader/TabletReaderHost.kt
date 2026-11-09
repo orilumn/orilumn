@@ -432,7 +432,8 @@ class TabletReaderHost(
      */
     override suspend fun textRevisionsForChapter(chapter: Int): List<TextRevision> = try {
         repository.textRevisionsForChapter(bookId, chapter).map { r ->
-            val rr = controller.textRevisionRange(chapter, r)
+            // 审阅视图里点按 / 开卡认「整段」（原文 + 新文字），与修改卡带出的改后文字同尺。
+            val rr = controller.textRevisionEditRange(chapter, r)
             if (rr.first == r.charStart && rr.last + 1 == r.charEnd) r
             else r.copy(charStart = rr.first, charEnd = maxOf(rr.first, rr.last + 1))
         }

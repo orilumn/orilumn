@@ -1656,16 +1656,12 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         }
         val merges = ArrayList<orilumn.reader.engine.revision.ChapterRevisionReplay.Merge>()
         val mergeIds = HashSet<Long>()
-        val claimedLeaves = HashSet<Int>()
         // 原书空间的块尾（重放**之前**的叶起点）：并段 / 拆段时「哪几道段界在这一段里」要靠它。
         val blockEndsBefore = if (starts.size > 1) {
             IntArray(starts.size - 1) { starts[it + 1].toInt() }
         } else {
             IntArray(0)
         }
-        // 审阅视图：修订 id → 它盖住的原书文字。就地插入（见 ReviewOverlay）要拿它做字符级对齐，
-        // 红绿区间与坐标换算也从同一份对齐结果走。只投影涉及的那几叶（一章就一两条修订）。
-        var rangeTexts: Map<orilumn.reader.data.revision.TextRevision, String> = emptyMap()
         // 审阅视图的修订表要在**重放之前**建好：排版（拆块 / 就地插入）与上色 / 换算必须是同一份。
         var reviewMap: ChapterRevisionMap? = null
         if (starts.isNotEmpty()) {
@@ -1693,90 +1689,100 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                         val t = originalRangeText(r, a, b, leafTexts, starts) ?: continue
                         texts[r] = t
                     }
-                    rangeTexts = texts
                     reviewMap = ChapterRevisionMap(
                         map.revisions,
                         originalBlockEnds = blockEndsBefore,
                         originalTexts = texts,
                     )
                 }
-                // 段界要动的那几条走整叶重塑：原文照排 + 改动就地插入后，块结构变了才需要重排块。
-                for (r in map.revisions) {
-                    val plan = reviewMap?.overlay(r) ?: continue
-                    if (!plan.needsBlocks) continue
-                    val a = leafOfOffset(r.charStart)
-                    val b = if (r.originalLength == 0) a else leafOfOffset(r.charEnd - 1)
-                    if ((a..b).any { it in claimedLeaves }) {
-                        Logger.w(
-                            logTag,
-                            "revision merge conflict ch=${unit.chapterIndex} range=[${r.charStart}, ${r.charEnd}) " +
-                                "leaves=[$a, $b]",
-                        )
-                        continue
+            }
+
+            // 段界要动（并段 / 拆段）的那几条走整叶重塑。重塑只认得**本组**那几条修订，
+            // 所以同一片叶上的其他改动必须一起拼进这一组：重放会把各自的替换文字按原位拼回
+            // 原叶文字，再按段界一次性拆块（见 ChapterRevisionReplay.composeLeaf）。
+            // 早先只把撞车的那条踢回叶内落字，但重放处理合并组时不再走叶内落字，
+            // 于是「同一段里两处修改」会被整组覆盖掉，只保住其中一处。
+            val aOf = HashMap<orilumn.reader.data.revision.TextRevision, Int>(map.revisions.size)
+            val bOf = HashMap<orilumn.reader.data.revision.TextRevision, Int>(map.revisions.size)
+            for (r in map.revisions) {
+                val a = leafOfOffset(r.charStart)
+                aOf[r] = a
+                bOf[r] = if (r.originalLength == 0) a else leafOfOffset(r.charEnd - 1)
+            }
+            val needsBlocks = HashMap<orilumn.reader.data.revision.TextRevision, Boolean>(map.revisions.size)
+            for (r in map.revisions) {
+                needsBlocks[r] = if (reviewMode) {
+                    reviewMap?.overlay(r)?.needsBlocks == true
+                } else {
+                    // 跨叶，或带段界（读者在段内新敲的换行）。段界不占字符，单看区间长度认不出来。
+                    aOf.getValue(r) != bOf.getValue(r) ||
+                        r.text.indexOf(RevisionBlocks.SEPARATOR) >= 0
+                }
+            }
+
+            // 叶区间相交的修订归成一组：不分先后、也不分是合并还是叶内落字，一次性交给重放。
+            val parent = IntArray(map.revisions.size) { it }
+            fun find(i: Int): Int {
+                var x = i
+                while (parent[x] != x) {
+                    parent[x] = parent[parent[x]]
+                    x = parent[x]
+                }
+                return x
+            }
+            fun union(i: Int, j: Int) {
+                val x = find(i)
+                val y = find(j)
+                if (x != y) parent[y] = x
+            }
+            for (i in map.revisions.indices) {
+                for (j in i + 1 until map.revisions.size) {
+                    val ri = map.revisions[i]
+                    val rj = map.revisions[j]
+                    if (aOf.getValue(ri) <= bOf.getValue(rj) && aOf.getValue(rj) <= bOf.getValue(ri)) {
+                        union(i, j)
                     }
-                    // 整叶重塑只认得这一条修订：同一片叶上还有别的改动时会把它们丢掉，
-                    // 所以有一片叶被两条修订碰到就退回叶内落字（段界降级成段内换行，文字不丢）。
-                    if (hasOtherRevisionOnLeaf(map, b, starts, cache.leaves.size, r)) continue
-                    val leaf = cache.leaves.getOrNull(b) ?: continue
-                    if (leafPaths.getOrNull(b) == null || !RevisionBlocks.mergeableLeaf(leaf)) continue
-                    if ((a..b).any {
-                            val k = cache.leaves.getOrNull(it)
-                            k == null || leafPaths.getOrNull(it) == null || !RevisionBlocks.mergeableLeaf(k)
-                        }
-                    ) {
-                        continue
+                }
+            }
+            val groups = LinkedHashMap<Int, MutableList<orilumn.reader.data.revision.TextRevision>>()
+            for ((i, r) in map.revisions.withIndex()) {
+                groups.getOrPut(find(i)) { ArrayList() }.add(r)
+            }
+
+            for (group in groups.values) {
+                if (group.none { needsBlocks[it] == true }) continue
+                val first = group.minOf { aOf.getValue(it) }
+                val last = group.maxOf { bOf.getValue(it) }
+                // 不能合并的叶（图片 / 表格行 / 匿名叶）整组退回叶内落字；计划侧本就拒绝
+                // 跨到这些块的选区，走到这里只可能是老数据，记一笔、不猜。
+                if ((first..last).any {
+                        val k = cache.leaves.getOrNull(it)
+                        k == null || leafPaths.getOrNull(it) == null || !RevisionBlocks.mergeableLeaf(k)
                     }
-                    claimedLeaves += a..b
-                    merges += orilumn.reader.engine.revision.ChapterRevisionReplay.Merge(
-                        firstLeaf = a,
-                        lastLeaf = b,
-                        start = r.charStart - starts[a].toInt(),
-                        endExclusive = r.charEnd - starts[a].toInt(),
-                        // 这一段在审阅空间的模样：原文各字原样在内，新写的字插在原位，
-                        // 段界改成 ¶ + 块边界（见 ReviewOverlay）。重放照它拆块 / 并块。
-                        text = plan.text,
-                        revisionId = r.id,
+                ) {
+                    Logger.w(
+                        logTag,
+                        "revision merge conflict ch=${unit.chapterIndex} leaves=[$first, $last] " +
+                            "ranges=${group.map { "[${it.charStart}, ${it.charEnd})" }}",
                     )
-                    mergeIds += r.id
+                    continue
                 }
-            } else {
-                // 正常视图：段数变了才跨叶合并 / 拆段（审阅视图另有就地插入那一套）。
-                val crossLeaf = ArrayList<Triple<orilumn.reader.data.revision.TextRevision, Int, Int>>(2)
-                for (r in map.revisions) {
-                    val hasBreak = r.text.indexOf(RevisionBlocks.SEPARATOR) >= 0
-                    if (r.isInsertion) {
-                        // 纯插入没有选区：段界落成「从插入点起拆块」，首末叶就是插入点所在那一叶。
-                        if (hasBreak) {
-                            val k = leafOfOffset(r.charStart)
-                            crossLeaf += Triple(r, k, k)
-                        }
-                        continue
-                    }
-                    val a = leafOfOffset(r.charStart)
-                    val b = leafOfOffset(r.charEnd - 1)
-                    // 带段界的单叶修订同样要拆块：读者在段内新敲的换行是段界，不是 `<br>`。
-                    if (a != b || hasBreak) crossLeaf += Triple(r, a, b)
-                }
-                for ((r, a, b) in crossLeaf) {
-                    // 一叶只能被一条合并占用（重放按首叶归组，组里跨叶与单叶混在一起就拼不成）。
-                    // 真撞上（两处改动恰好贴着同一片叶）就退回叶内落字：段界降级成段内换行，
-                    // 文字不会丢，只是这一段不拆块。
-                    if ((a..b).any { it in claimedLeaves }) {
-                        Logger.w(
-                            logTag,
-                            "revision merge conflict ch=${unit.chapterIndex} range=[${r.charStart}, ${r.charEnd}) " +
-                                "leaves=[$a, $b]",
-                        )
-                        continue
-                    }
-                    claimedLeaves += a..b
-                    val base = starts[a].toInt()
+                for (r in group) {
+                    val base = starts[first].toInt()
                     merges += orilumn.reader.engine.revision.ChapterRevisionReplay.Merge(
-                        firstLeaf = a,
-                        lastLeaf = b,
+                        // 同组共用「组的首叶」：重放按首叶归组，各条若各报自己的首叶，
+                        // 跨叶那条后面的叶内修订会落进另一个组、被整组覆盖掉。
+                        firstLeaf = first,
+                        lastLeaf = bOf.getValue(r),
                         start = r.charStart - base,
                         endExclusive = r.charEnd - base,
-                        text = r.text,
+                        // 审阅视图：这一段在审阅空间的模样（原文各字原样在内，新写的字插在原位，
+                        // 段界改成 ¶ + 块边界）。正常视图：修订文字本身就是整段替换。
+                        text = if (reviewMode) {
+                            reviewMap?.overlay(r)?.text ?: r.text.replace(RevisionBlocks.SEPARATOR, '\n')
+                        } else {
+                            r.text
+                        },
                         revisionId = r.id,
                     )
                     mergeIds += r.id
@@ -1963,24 +1969,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
     }
 
     /**
-     * 这一叶上除了 [self] 还有别的修订吗。
-     *
-     * 合并 / 拆块走的是「整叶重塑」：只把本组那几条替换文字拼回原叶文字，叶上别的修订会被
-     * 拼丢。所以叶上不止一条修订时宁可不合并（退回叶内落字），文字永远不会丢。
-     */
-    private fun hasOtherRevisionOnLeaf(
-        map: ChapterRevisionMap,
-        leafIndex: Int,
-        starts: LongArray,
-        leafCount: Int,
-        self: orilumn.reader.data.revision.TextRevision,
-    ): Boolean {
-        val start = starts.getOrNull(leafIndex)?.toInt() ?: return true
-        val end = if (leafIndex + 1 < leafCount) starts[leafIndex + 1].toInt() else Int.MAX_VALUE
-        return map.revisionsTouching(start, end).any { it.id != self.id }
-    }
-
-    /** Binds the layouter's per-chapter href for [unit] before ANY layout/shape work that may touch
+     * Binds the layouter's per-chapter href for [unit] before ANY layout/shape work that may touch
      *  `<img>` blocks (see [BoxChapterLayouter.bindChapterContext]).
      *
      *  Why: [readChapter] (the epub-fallback path) was the only caller of `bindChapterContext`, so

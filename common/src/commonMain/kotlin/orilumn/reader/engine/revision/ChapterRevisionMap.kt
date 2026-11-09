@@ -169,7 +169,7 @@ class ChapterRevisionMap(
         for (r in revisions) {
             val plan = overlay(r) ?: continue
             if (plan.marks.isEmpty()) continue
-            val base = toReview(r.charStart, crossInsertions = false)
+            val base = reviewStart(r)
             for ((pos, isNew) in plan.marks) if (isNew == inserted) out += base + pos
         }
         if (out.isEmpty()) return IntArray(0)
@@ -188,7 +188,7 @@ class ChapterRevisionMap(
         for (r in revisions) {
             val plan = overlay(r) ?: continue
             if (plan.marks.isEmpty()) continue
-            val base = toReview(r.charStart, crossInsertions = false)
+            val base = reviewStart(r)
             for (p in plan.marks.keys) out += base + p
         }
         if (out.isEmpty()) return@lazy IntArray(0)
@@ -221,7 +221,7 @@ class ChapterRevisionMap(
             val plan = overlay(r) ?: continue
             val local = if (deleted) plan.deleted else plan.inserted
             if (local.isEmpty()) continue
-            val base = toReview(r.charStart, crossInsertions = false)
+            val base = reviewStart(r)
             out[r] = IntArray(local.size) { base + local[it] }
         }
         return out
@@ -347,13 +347,32 @@ class ChapterRevisionMap(
     }
 
     /**
+     * 这条修订在审阅空间里的**起点**。
+     *
+     * 不能直接用 `toReview(r.charStart, crossInsertions = false)`：那条口径是给「区间终点」用的
+     * （新字不算进旧区间），当前一条修订正好在这一处结束、并且它的新文字就排在这个边界之前时，
+     * 它会把前一处的插入也排除掉，于是后一条修订的整段（红绿上色、点按命中、取文字）都前移了
+     * 前一处的长度——同一段里相邻的两处修改就是这样错位的。
+     * 审阅空间里每条修订的正文都是「原书那一段 + 它的插入」按顺序首尾相接，所以本条的起点
+     * = 原书起点 + 排在它前面所有修订的插入长度（[reviewExtra]）。
+     */
+    private fun reviewStart(r: TextRevision): Int {
+        var shift = 0
+        for (x in revisions) {
+            if (x === r) break
+            shift += reviewExtra(x)
+        }
+        return r.charStart + shift
+    }
+
+    /**
      * 某条修订在审阅空间里**整段**占的区间（原文 + 就地插进去的字）。
      *
      * 修订在审阅空间里就是这一段：选到哪一处都算「碰到这条修订」，点按、修改的提交、
      * 「删除这条修改」的判定都用它。
      */
     fun reviewInterval(r: TextRevision): IntRange {
-        val s = toReview(r.charStart, crossInsertions = false)
+        val s = reviewStart(r)
         val len = overlay(r)?.length ?: (r.originalLength + r.delta)
         // 空区间（退化修订）也给一格：点得中才删得掉。
         return s until (s + maxOf(len, 1))
@@ -448,8 +467,9 @@ class ChapterRevisionMap(
          *  6 = 段内新敲的换行也落成真块（单叶拆段）；同一片叶上的几处段界改动合成一次拆块。
          *  7 = 审阅视图的「新文字副本」里的段界也落成真块（不再排成 `¶` + `<br>`）。
          *  8 = 副本里的段界只占一格（¶），不再按「¶ + 换行」两格算长度。
-         *  9 = 审阅视图改成「原文照排 + 改动就地插入」，不再另排新文字副本（章文字变了）。 */
-        const val ALGORITHM_VERSION = 9
+         *  9 = 审阅视图改成「原文照排 + 改动就地插入」，不再另排新文字副本（章文字变了）。
+         * 10 = 落在同一片叶 / 同一组上的多处修改一起重塑，不再只保住其中一条（章文字变了）。 */
+        const val ALGORITHM_VERSION = 10
 
         private const val FNV_OFFSET = -3750763034362895579L // 14695981039346656037
         private const val FNV_PRIME = 1099511628211L

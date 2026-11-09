@@ -375,6 +375,43 @@ class ChapterRevisionMapTest {
     }
 
     @Test
+    fun adjacentRevisionsShareOneBoundary() {
+        // 同一段里两处修改首尾相接（前一处结束的位置正好是后一处开始的位置）：
+        // 审阅空间 = 「bcX」+「deY」，后一处的起点必须越过前一处的插入，否则红绿与命中都前移一格。
+        val r1 = rev(1, 3, "X", id = 1)
+        val r2 = rev(3, 5, "Y", id = 2)
+        val map = ChapterRevisionMap(
+            listOf(r1, r2),
+            originalTexts = mapOf(r1 to "bc", r2 to "de"),
+        )
+        assertEquals(1 until 4, map.reviewInterval(r1))
+        assertEquals(4 until 7, map.reviewInterval(r2))
+        assertEquals(listOf(3 until 4), pairs(map.paintedInserted[r1]))
+        assertEquals(listOf(6 until 7), pairs(map.paintedInserted[r2]))
+        assertEquals("abcdef", map.originalTextFromReview("abcXdeYf"))
+        // 后一处的选区仍能换回自己的原书区间，不会把前一处的插入算进去。
+        assertEquals(3 until 5, map.originalEditRangeFromReview(4, 7))
+        // 前一处的插入不算进「终点在这一处」的区间（§8.3）。
+        assertEquals(1 until 3, map.originalEditRangeFromReview(1, 3))
+    }
+
+    @Test
+    fun samePointInsertionsStackInReviewSpace() {
+        // 同一处两次加字（提交侧通常会合并，表侧也要按先后排好）：审阅空间 = 「abABcd」。
+        val first = rev(2, 2, "A", id = 1)
+        val second = rev(2, 2, "B", id = 2)
+        val map = ChapterRevisionMap(
+            listOf(first, second),
+            originalTexts = mapOf(first to "", second to ""),
+        )
+        assertEquals(2 until 3, map.reviewInterval(first))
+        assertEquals(3 until 4, map.reviewInterval(second))
+        assertEquals(listOf(2 until 3), pairs(map.paintedInserted[first]))
+        assertEquals(listOf(3 until 4), pairs(map.paintedInserted[second]))
+        assertEquals("abcd", map.originalTextFromReview("abABcd"))
+    }
+
+    @Test
     fun contentRevIsStableAndSensitive() {
         val a = ChapterRevisionMap(listOf(rev(1, 3, "X")))
         val b = ChapterRevisionMap(listOf(rev(1, 3, "X")))

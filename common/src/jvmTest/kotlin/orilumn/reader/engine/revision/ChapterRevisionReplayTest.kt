@@ -387,6 +387,54 @@ class ChapterRevisionReplayTest {
     }
 
     @Test
+    fun splitAndEditOnOneLeafBothLand() {
+        // 同一段里一处敲回车、另一处改字：两条修订必须一起拼进重塑，不能后一条把前一条顶掉。
+        val root = el("body", el("p", txt("abcdef")))
+        val r = ChapterRevisionReplay.replay(
+            root = root,
+            leaves = listOf(root.children[0]),
+            leafPaths = listOf(intArrayOf(0)),
+            charStarts = longArrayOf(0),
+            editsForLeaf = { _, _ -> emptyList() },
+            segmentsOf = ::seg,
+            wsOf = { WhiteSpace.NORMAL },
+            styleOf = null,
+            merges = listOf(
+                ChapterRevisionReplay.Merge(0, 0, 2, 2, RevisionBlocks.SEPARATOR.toString(), 7L),
+                ChapterRevisionReplay.Merge(0, 0, 4, 5, "E", 8L),
+            ),
+        )
+        assertEquals(listOf("ab", "cdEf"), r.leaves.map { seg(it).text })
+        assertArrayEquals(longArrayOf(0, 2), r.charStarts)
+        assertEquals(2, r.root.children.size)
+    }
+
+    @Test
+    fun crossLeafMergeAndTailEditShareOneGroup() {
+        // 跨叶并段 + 末叶后缀里另有一处改字：两处都在同一组里按自己的起点拼回整段文字。
+        val root = el("body", el("p", txt("abc")), el("p", txt("def")))
+        val r = ChapterRevisionReplay.replay(
+            root = root,
+            leaves = listOf(root.children[0], root.children[1]),
+            leafPaths = listOf(intArrayOf(0), intArrayOf(1)),
+            charStarts = longArrayOf(0, 3),
+            editsForLeaf = { _, _ -> emptyList() },
+            segmentsOf = ::seg,
+            wsOf = { WhiteSpace.NORMAL },
+            styleOf = null,
+            merges = listOf(
+                // [1,5)「bcde」换成「X」；末叶那个「f」还在，另外把 [5,6) 的 f 改成 F。
+                // 同组共用首叶 0，两处起点都按组的首叶算（调用方的约定）。
+                ChapterRevisionReplay.Merge(0, 1, 1, 5, "X", 7L),
+                ChapterRevisionReplay.Merge(0, 1, 5, 6, "F", 8L),
+            ),
+        )
+        assertEquals(listOf("aXF"), r.leaves.map { seg(it).text })
+        assertArrayEquals(longArrayOf(0), r.charStarts)
+        assertEquals(1, r.root.children.size)
+    }
+
+    @Test
     fun replaceAtKeepsSiblingsAndAttributes() {
         val p = MarkupElement("p", mapOf("class" to "x"), listOf(txt("a"), txt("b")))
         val root = el("body", p, txt("tail"))

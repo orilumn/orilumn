@@ -32,8 +32,10 @@ object ChapterRevisionReplay {
      * - 末块 = 最后一行 + 末叶后缀（用末叶承载，保住后缀的行内样式）；
      * - 没被用到的叶整块删掉。
      *
-     * @property start / [endExclusive] 选区在本段虚拟叶里的区间（原书偏移，相对
-     *   `charStarts[firstLeaf]`）。
+     * @property start / [endExclusive] 选区在本段虚拟叶里的区间（原书偏移）。单独一条时相对
+     *   `charStarts[firstLeaf]`；同一片叶 / 同一组上的几处改动要**共用组的首叶**（`firstLeaf`
+     *   都填组的最小叶号），起点统一相对 `charStarts[组首叶]`——重放按 [firstLeaf] 归组，
+     *   各报各的首叶会让后面那条落进另一个组、被整组覆盖。
      */
     data class Merge(
         val firstLeaf: Int,
@@ -205,8 +207,8 @@ object ChapterRevisionReplay {
     private class Block(val element: MarkupElement, val textLength: Int)
 
     /**
-     * 把同一片叶上的几处改动拼成一串文字：按起点把各自的替换文字替换进去（区间互不重叠），
-     * 段界字符原样保留，交给 [RevisionBlocks.split] 一次拆块。
+     * 把同一组（同一片叶，或首末叶之间）的几处改动拼成一串文字：按起点把各自的替换文字
+     * 替换进去（区间互不重叠），段界字符原样保留，交给 [RevisionBlocks.split] 一次拆块。
      */
     private fun composeLeaf(base: String, group: List<Merge>): String {
         val out = StringBuilder(base.length + 16)
@@ -250,18 +252,30 @@ object ChapterRevisionReplay {
         }
         if (!simple) return MergeOut(emptyList(), emptySet(), 0, 0, needsRecompute = true)
 
-        // 同一片叶上的几处改动：按起点把它们各自的替换文字拼回原叶文字（段界原样留着），
-        // 合成一条「整叶重塑」，再照常按段界拆块。跨叶修订一组只会有一条。
+        // 同一片叶（或首末叶之间）上的几处改动：按起点把它们各自的替换文字拼回**整段**原叶文字
+        // （段界原样留着），合成一条「整段重塑」，再照常按段界拆块。跨叶修订与旁边的叶内修订
+        // 落在同一组时，各条修订的起点都要先换算到「组的首叶起点」这把尺上（本组共用一份 base）。
         val merge = if (group.size == 1) {
             group[0]
         } else {
-            val base = segmentsOf(leaves[first]).text
+            val base = StringBuilder()
+            for (k in first..last) base.append(segmentsOf(leaves[k]).text)
+            val baseText = base.toString()
+            val rebased = group.map { m ->
+                val offset = (charStarts[m.firstLeaf] - charStarts[first]).toInt()
+                m.copy(
+                    firstLeaf = first,
+                    lastLeaf = last,
+                    start = m.start + offset,
+                    endExclusive = m.endExclusive + offset,
+                )
+            }
             Merge(
                 firstLeaf = first,
                 lastLeaf = last,
                 start = 0,
-                endExclusive = base.length,
-                text = composeLeaf(base, group),
+                endExclusive = baseText.length,
+                text = composeLeaf(baseText, rebased),
                 revisionId = group[0].revisionId,
             )
         }

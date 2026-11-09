@@ -2243,7 +2243,13 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
      * @param targetChar Optional character offset within the chapter that we want to land on. Used
      *   by the incremental (disk-cache hit) path to shape only the page containing this offset
      *   instead of shaping the entire chapter. */
-    suspend fun ensureChapterLayout(index: Int, targetChar: Int = 0, headLift: Boolean = true): ChapterUnit? {
+    suspend fun ensureChapterLayout(
+        index: Int,
+        targetChar: Int = 0,
+        headLift: Boolean = true,
+        /** 锚在章末时是否倒包临时页；见 [relayoutTo]（审阅切换要求页首不动，传 false）。 */
+        tailBackfill: Boolean = true,
+    ): ChapterUnit? {
         val unit = unitAt(index) ?: return null
         bindChapterFor(unit)
         if (unit.markup == null) ensureMarkup(index)
@@ -2276,7 +2282,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                     // falls outside the range of pages currently shaped.
                     ensurePageRangeShaped(unit, targetChar)
                 } else if (!unit.laidOut) {
-                    buildLayout(unit, targetChar, headLift)
+                    buildLayout(unit, targetChar, headLift, tailBackfill)
                 }
             }
         }
@@ -2399,7 +2405,13 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         }
     }
 
-    private fun buildLayout(unit: ChapterUnit, targetChar: Int = 0, headLift: Boolean = true) {
+    private fun buildLayout(
+        unit: ChapterUnit,
+        targetChar: Int = 0,
+        headLift: Boolean = true,
+        /** 锚在章末时是否倒包临时页；见 [relayoutTo]。 */
+        tailBackfill: Boolean = true,
+    ) {
         // ensureChapterLayout 已在锁外备好 markup；到这里为 null 即锁间隙状态矛盾，抛而不吞。
         val markup = checkNotNull(unit.markup) { "buildLayout without markup ch=${unit.chapterIndex}" }
         val t0 = platformNowMs()
@@ -2498,7 +2510,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                         // block/line (P10 head-edge), so correctness never depends on it. The lift only
                         // affects how closely the leading temp pages match the eventual canonical table.
                         val anchorBlock = light.blockIndexForChar(targetChar).coerceIn(0, light.totalBlocks - 1)
-                        startAnchorStream(unit, targetChar, light, bc, paramHash, contentWidth, contentHeight, headLift = headLift)
+                        startAnchorStream(unit, targetChar, light, bc, paramHash, contentWidth, contentHeight, headLift = headLift, tailBackfill = tailBackfill)
                         Logger.w(logTag, "layout ${ctx(unit)} LARGE-ANCHOR anchorBlock=" +
                             "$anchorBlock blocks=${light.totalBlocks} " +
                             "t=${platformNowMs() - t0}ms")
@@ -2666,6 +2678,8 @@ private fun startAnchorStream(
      *  reflow preserves the reader's current position. Only [openChapterLayout] sets it true so a
      *  near-head anchor is lifted to the chapter head (P8/R2). */
     headLift: Boolean = true,
+    /** 锚在章末时是否倒包成满页。见 [relayoutTo]：审阅切换要求页首不动，传 false。 */
+    tailBackfill: Boolean = true,
 ) {
     bindChapterFor(unit)
     val last = (prepare.totalBlocks - 1).coerceAtLeast(0)
@@ -2717,7 +2731,7 @@ private fun startAnchorStream(
         //   - 倒包抛异常（tempShape/rebuildLocalLines 遇畸形内容）：记 e 回退——
         //     不包的话异常穿透 birth 直达 buildLayout 的 catch（ERROR + 空白章），
         //     回退接不住真正的失败模式。
-        val tailAnchored = anchorBlock >= prepare.totalBlocks - 1
+        val tailAnchored = tailBackfill && anchorBlock >= prepare.totalBlocks - 1
         val anchorFwd = if (!tailAnchored) {
             bc.shapeAnchorPageForward(prepare, snapshot, contentW, contentH, anchorCharAt, cache)
         } else null
@@ -2732,7 +2746,7 @@ private fun startAnchorStream(
         // 前向能塑的块倒包必能塑，没有倒包特有的失败理由）——一旦失败必是底层回归，
         // 必须抛出来，不许静默回退藏掉。total<=0、返回 null、抛异常三条路都不吞：
         // null 在此抛，异常自然上抛（buildLayout 记 ERROR）。
-        val tailPage: TempPage? = if (tailAnchored || (anchorFwd != null && anchorFwd.nextBlock >= prepare.totalBlocks)) {
+        val tailPage: TempPage? = if (tailBackfill && (tailAnchored || (anchorFwd != null && anchorFwd.nextBlock >= prepare.totalBlocks))) {
             bc.shapeTempPageBackward(prepare, snapshot, contentW, contentH, prepare.totalBlocks, -1, cache)
                 ?.also { page -> Logger.w(logTag, "anchor TAIL-BACKWARD ch=${unit.chapterIndex} blocks=[${page.slice.blockStart},${page.slice.blockEndExclusive}) chars=[${page.slice.charStart},${page.slice.charEnd})") }
                 ?: error("anchor TAIL-BACKWARD null ch=${unit.chapterIndex} totalBlocks=${prepare.totalBlocks} anchorChar=$anchorCharAt")
@@ -4680,6 +4694,14 @@ private fun finishCanonicalBackground(
         chapter: Int,
         anchorChar: Int,
         nearestPageStart: Boolean = false,
+        /**
+         * 锚在章末时是否允许「倒包」：临时页从章尾往前灌满，避免最后一页只剩一两行。
+         *
+         * 跳转要的是「看到这一处」，倒包没问题；**审阅切换**要的是「页首不动」，
+         * 倒包会把页首一下退到前几百字，读者看着像跳页，故切换传 false（前向锚页，
+         * 页首就是锚点所在行，和正常视图的小尾页同形）。
+         */
+        tailBackfill: Boolean = true,
     ): Pair<Int, PageSlice>? {
         clearFlipDir("mid-jump")
         // 章内跳转：**磁盘表已就绪就必须落到磁盘表上**（总则 1）。跳转不是翻页，没有「章内恒走
@@ -4693,7 +4715,9 @@ private fun finishCanonicalBackground(
             targetUnit.paginationTable?.paramHash == currentHash ||
                 (liveTemp != null && liveTemp.canonicalLayout != null && liveTemp.canonicalSlices.isNotEmpty())
             )
-        if (liveTemp == null || !canonicalReady) {
+        // 要求「页首不动」时不能走快路径：已成形窗口里那一页可能是章末倒包页，锚点落在页中，
+        // 直接挪指针还是把页首留在几百字之前——必须从头按前向锚页重排一次。
+        if (tailBackfill && (liveTemp == null || !canonicalReady)) {
             // R12: fast path — target inside an already-shaped valid window: just move the pointer,
             // no nuke. Structural misses fall through to the full path below.
             fastRelocate(chapter, anchorChar, nearestPageStart)?.let { return it }
@@ -4709,7 +4733,7 @@ private fun finishCanonicalBackground(
             if (canonicalReady && liveTemp != null) promoteTempToCanonical(targetUnit, liveTemp)
             else targetUnit.invalidateLayout()
         }
-        val unit = ensureChapterLayout(chapter, anchorChar, headLift = false) ?: return null
+        val unit = ensureChapterLayout(chapter, anchorChar, headLift = false, tailBackfill = tailBackfill) ?: return null
         // Anchor temp streaming: return the anchor page directly.
         unit.inProgress?.let { ip ->
             val p = ip.currentSlice
@@ -6303,8 +6327,13 @@ private fun finishCanonicalBackground(
         clearFlipDir("review-switch")
         preemptForNavigation()
         if (chapter !in chapters.indices) return null
-        val landed = relayoutTo(chapter, target.coerceAtLeast(0), nearestPageStart = true)
-            ?: openChapterStart(chapter)
+        val landed = relayoutTo(
+            chapter,
+            target.coerceAtLeast(0),
+            nearestPageStart = true,
+            // 页首不动：章末倒包会把临时页的页首退到前面几百字，切个视图就像跳了页。
+            tailBackfill = false,
+        ) ?: openChapterStart(chapter)
         // 有修订的那几章在**新空间**里页数还未知（旧空间的结论版本对不上）：只补它们，别整书重扫。
         // 放在落位之后：眼前这一章此刻已经有当前空间的表，补排会跳过它。
         repairMissingPageCounts("review-switch")

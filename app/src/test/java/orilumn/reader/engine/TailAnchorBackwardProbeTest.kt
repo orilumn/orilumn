@@ -73,6 +73,31 @@ class TailAnchorBackwardProbeTest {
         assertEquals("backward chain must tile exactly at the tail page start", tail.charStart, prev.charEnd)
     }
 
+    @Test
+    fun `review-style relayout keeps the page top at the tail anchor instead of back-filling`() = runBlocking {
+        assertTrue(controller.open(31L, saved = null))
+        controller.setViewport(viewW, viewH)
+
+        val (_, head) = controller.openChapterStart(1) ?: error("no ch1 head")
+        val (ch, tail) = controller.findAdjacentPage(1, head, -1) ?: error("no cross landing")
+        assertEquals(0, ch)
+
+        // 审阅切换：旧页首落在章末倒包页的**中间**。切空间后必须让同一处内容留在页首，
+        // 不能又把临时页从章尾倒包（那样页首会退到前面几百字，看着像跳页）。
+        val anchor = tail.charEnd - 40
+        controller.invalidateChapterContent(0)
+        val (landedCh, landed) = controller.relayoutTo(
+            0, anchor, nearestPageStart = true, tailBackfill = false,
+        ) ?: error("no tail relayout")
+
+        assertEquals(0, landedCh)
+        assertTrue("landed page must contain the anchor", landed.charStart <= anchor && anchor < landed.charEnd)
+        assertTrue(
+            "page top must stay at the anchor line (start=${landed.charStart}, anchor=$anchor)",
+            landed.charStart >= anchor - 200,
+        )
+    }
+
     private fun epubFiles(): Map<String, ByteArray> {
         val container = """<?xml version="1.0"?>
             <container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0">

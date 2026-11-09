@@ -389,7 +389,7 @@ private const val NOTE_MAX_LINES = 4
 private const val TEXT_EDIT_MAX_LINES = 8
 
 /** 输入框正文与提示字共用的字面（两者行高必须一致，否则空框和有字时高度不同）。 */
-private val NoteTextStyle = TextStyle(fontSize = 14.sp, lineHeight = 20.sp)
+private val NoteTextStyle = TextStyle(fontSize = 16.sp, lineHeight = 23.sp)
 
 /** 自绘光标的宽度与闪烁周期（毫秒）：硬开关，不做系统光标那种透明度渐变。 */
 private val CaretWidth = 2.dp

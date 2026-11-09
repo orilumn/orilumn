@@ -466,12 +466,13 @@ fun ReaderScreen(
     val currentOnRevision by rememberUpdatedState(onRevision)
     val currentOnReview by rememberUpdatedState(onReview)
     /**
-     * 审阅视图的改动痕迹（章 → 审阅空间区间）。关着恒为空表：正常视图一帧也不多投。
+     * 审阅视图的改动痕迹**以宿主当前文字空间为准**（[ReaderHost.reviewMarks]），不跟 UI 的
+     * [reviewActive] 走：开关状态与引擎换空间不是同一拍，按 UI 状态取会在切换中途拿到
+     * 「新文字 + 旧痕迹表」⇒ 先看到黑色的 ¶、下一帧才上色或消失。
      *
-     * 每次重组现取，`remember` 的键比较按值（区间表相等即不失效），不会白重投影。
+     * 每次重组现取；只在宿主真的处于审阅空间且文字已套上修订时才有值，正常视图恒空。
      */
-    val reviewMarksFor: (Int) -> List<ReviewMark> =
-        if (reviewActive) { ch -> currentHost.reviewMarks(ch) } else { { emptyList() } }
+    val reviewMarksFor: (Int) -> List<ReviewMark> = { ch -> currentHost.reviewMarks(ch) }
     val currentOnLightChange by rememberUpdatedState(onLightChange)
     val currentOnLightCommit by rememberUpdatedState(onLightCommit)
     val currentOnBarsVisibleChanged by rememberUpdatedState(onBarsVisibleChanged)
@@ -2596,8 +2597,6 @@ fun ReaderScreen(
                 annotations = annotationState.annotationsFor(fromPos.chapter).orEmpty(),
                 annotationChapter = fromPos.chapter,
                 decorRevision = annotationState.revision,
-                // 审阅视图的改动痕迹（审阅空间）：关着就是空表，正常视图零成本。
-                reviewMarks = reviewMarksFor(fromPos.chapter),
             )
 
             // P1 L1：目标页内容（落位未回 ⇒ null，此时只画当前页，那一帧不动画）。
@@ -2620,7 +2619,6 @@ fun ReaderScreen(
                         .orEmpty(),
                     annotationChapter = ctl.targetPos.value?.chapter ?: -1,
                     decorRevision = annotationState.revision,
-                    reviewMarks = reviewMarksFor(ctl.targetPos.value?.chapter ?: -1),
                 )
             } else {
                 null
@@ -2704,7 +2702,6 @@ fun ReaderScreen(
                 imgCache = imgCache,
                 bgCache = bgCache,
                 annotationsFor = annotationState::annotationsFor,
-                reviewMarksFor = reviewMarksFor,
             )
             // 上面 `beforeCommit` 的「整页位图备齐」实现：与 PrerasterOnPrefill 同口径
             //（同一渲染器、同一缓存、同一条取数路径），只是针对**本次落位目标页**。
@@ -2729,7 +2726,6 @@ fun ReaderScreen(
                     bgCache = bgCache,
                     annotations = annotationState.annotationsFor(p.chapter).orEmpty(),
                     annotationChapter = p.chapter,
-                    reviewMarks = reviewMarksFor(p.chapter),
                 )
             }
             SideEffect { rasterByRef.value = rasterPageNow }

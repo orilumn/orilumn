@@ -1873,9 +1873,16 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                             }
                             // 就地插入：原文一个字都不动，只把新写的字（含 ¶）插在原位。
                             // 只落本叶那几处；同一段跨几叶时各叶各落自己那几处。
+                            //
+                            // 叶尾（`at == leafEnd`）那一处默认归**下一叶**（下一叶的 `at >= leafStart`
+                            // 会收下它）；但这条修订若也正好在本叶结束，下一叶的 `revisionsTouching`
+                            // 看不到它（判据是 `charEnd > leafStart`），两叶都不落就把字吞了。
+                            // 实测整段引用句的收尾引号就是这样消失的：审阅正文比换算表少两格，
+                            // 切回正常视图时页首错一行。
                             for (ins in plan.insertions) {
                                 val at = r.charStart + ins.at
-                                if (at < leafStart || at >= leafEnd) continue
+                                if (at < leafStart || at > leafEnd) continue
+                                if (at == leafEnd && r.charEnd != leafEnd) continue
                                 val p = at - leafStart
                                 out += LeafTextEditor.Edit(start = p, endExclusive = p, text = ins.text)
                             }

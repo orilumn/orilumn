@@ -237,12 +237,19 @@ interface ReaderHost {
     /**
      * 删除一条正文修订（编辑清单行左滑删除）：宿主落库 + 重读修订 + 只作废该章。
      *
+     * [currentPage] 是阅读面**正在显示的那一页**（调用方传自己手里的 `openPos` / `currentPos`）。
+     * 宿主只能用它判断「删的是不是当前章」并取改前页首——不能拿开书锚点（`locateStart`）顶替：
+     * 读者翻走以后开书锚点仍停在旧章，会把当前章的锚点判成 null，于是只作废不重排，
+     * 眼前这一章既没版式也没人补排，整页空白。
+     *
      * [TextRevisionDeleteOutcome.Success.pos] 非空表示删的是**当前阅读章**：该章版式已作废，
      * 阅读面必须按这个新落位重新取页（否则页面空白）；null 表示删的是别的章，当前页不动。
      * 默认失败 = 宿主尚未支持。
      */
-    suspend fun deleteTextRevision(revision: TextRevision): TextRevisionDeleteOutcome =
-        TextRevisionDeleteOutcome.Failed
+    suspend fun deleteTextRevision(
+        revision: TextRevision,
+        currentPage: ReaderPos? = null,
+    ): TextRevisionDeleteOutcome = TextRevisionDeleteOutcome.Failed
 
     /**
      * 审阅视图开关：打开后本章按「原文全保留 + 新文字插在后面」重排，改动的痕迹看得见
@@ -353,7 +360,9 @@ interface ReaderHost {
      * 提交一次正文修改：引擎算修订 + 宿主落库 + 该章重排。返回新落位与替换后的选区。
      *
      * [start] / [endExclusive] 是**渲染空间**（与 [textOf] / 选区同尺）；[text] 是输入区文字，
-     * 跨段时用 `\n` 分隔，**结果段数 = 换行符数 + 1**（删光中间的字就把几段并成一段）。
+     * 跨段时用 `\n` 分隔，**结果段数 = 输入里的换行符数 + 1**（删光中间的字就把几段并成一段）。
+     * [currentPage] 同 [deleteTextRevision]：阅读面正在显示的那一页，宿主据此取改前页首；
+     * null 时退回开书锚点（兼容旧调用方）。
      * 默认失败 = 宿主尚未支持，阅读面就地提示。
      */
     suspend fun commitTextEdit(
@@ -361,6 +370,7 @@ interface ReaderHost {
         start: Int,
         endExclusive: Int,
         text: String,
+        currentPage: ReaderPos? = null,
     ): TextEditOutcome = TextEditOutcome.Failed("当前版本不支持正文修改")
 
     /**

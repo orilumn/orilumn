@@ -468,7 +468,7 @@ class ReaderActivity : ComponentActivity() {
                         scheme = effective.scheme,
                         load = { tabletHost?.textRevisionsForBook() ?: emptyList() },
                         onDelete = { revision ->
-                            when (val outcome = tabletHost?.deleteTextRevision(revision)) {
+                            when (val outcome = tabletHost?.deleteTextRevision(revision, currentPos)) {
                                 is TextRevisionDeleteOutcome.Success -> {
                                     // 正文变了：版式号 +1 强制当前页重取；删的是当前章时按宿主给的新落位走。
                                     relayoutAnchor.release()

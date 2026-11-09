@@ -566,7 +566,7 @@ fun ReaderView(
                     scheme = settings.scheme,
                     load = { desktopHost?.textRevisionsForBook() ?: emptyList() },
                     onDelete = { revision ->
-                        when (val outcome = desktopHost?.deleteTextRevision(revision)) {
+                        when (val outcome = desktopHost?.deleteTextRevision(revision, currentPos)) {
                             is TextRevisionDeleteOutcome.Success -> {
                                 // 删的是当前章：落到宿主给的新页（pushLanding 已 +1 版式号）；
                                 // 别的章只让当前页重取（页码/目录跟着刷新）。

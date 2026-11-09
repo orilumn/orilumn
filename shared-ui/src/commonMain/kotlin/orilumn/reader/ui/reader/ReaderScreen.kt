@@ -1559,7 +1559,7 @@ fun ReaderScreen(
         scope.launch {
             var outcome: TextEditOutcome? = null
             anchorFunnel.push("text-edit", ::markPositionChanged) {
-                val o = currentHost.commitTextEdit(ch, s, e, body)
+                val o = currentHost.commitTextEdit(ch, s, e, body, openPos)
                 outcome = o
                 (o as? TextEditOutcome.Success)?.pos
             }
@@ -1608,9 +1608,15 @@ fun ReaderScreen(
         scope.launch {
             var newPos: ReaderPos? = null
             var failed = false
+            // 逐条删除时，当前页在**新文字空间**里的页首也跟着换：第一条删完用宿主返回的
+            // 新落位给第二条当锚点，别拿删除前的旧页首去算下一条（偏移已经平移过了）。
+            var page = openPos
             for (r in targets) {
-                when (val o = currentHost.deleteTextRevision(r)) {
-                    is TextRevisionDeleteOutcome.Success -> o.pos?.let { newPos = it }
+                when (val o = currentHost.deleteTextRevision(r, page)) {
+                    is TextRevisionDeleteOutcome.Success -> o.pos?.let {
+                        newPos = it
+                        page = it
+                    }
                     else -> {
                         failed = true
                         break

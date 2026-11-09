@@ -4643,7 +4643,11 @@ private fun finishCanonicalBackground(
         if (t == null || t.paramHash != currentHash) return null
         return layoutMutex.withLock {
             val page = pageForChar(unit, anchorChar, nearestPageStart)
-            if (page != null && page.firstLine >= 0 && page.lastLineExclusive > page.firstLine) {
+            // 行窗只成形本页：nearest 选中的相邻页若不在窗口内，回读读不到它的行（整页空白），
+            // 交给整章路径重新成形。firstLine 有效不代表窗口内有这一页。
+            val idx = page?.let { p -> unit.pageSlices.indexOfFirst { it.charStart == p.charStart } } ?: -1
+            val inWindow = idx >= unit.shapedPageFrom && idx < unit.shapedPageTo
+            if (page != null && inWindow && page.firstLine >= 0 && page.lastLineExclusive > page.firstLine) {
                 logJumpLanding("jump", chapter)
                 chapter to page
             } else null
@@ -4671,9 +4675,19 @@ private fun finishCanonicalBackground(
             }
         }
         val page = pageForChar(unit, anchorChar, nearestPageStart) ?: unit.firstPage() ?: return null
+        // 换空间落位按「页首最接近」选页：锚点贴着新空间页尾时，选中的是**锚点所在页的下一页**，
+        // 而上面成形的只是锚点所在页。落点页不在行窗里，阅读面回读就是一整页空白，要等翻一页
+        // 重新成形才恢复。这里按落点页再成形一次，并回读成形后的新切片（旧对象可能还带着
+        // firstLine = -1 的占位值）。
+        val landed = if (nearestPageStart) {
+            ensurePageRangeShaped(unit, page.charStart)
+            unit.pageSlices.firstOrNull { it.charStart == page.charStart } ?: page
+        } else {
+            page
+        }
         logJumpLanding("jump", chapter)
         evictFarChapters(keep = chapter)
-        return chapter to page
+        return chapter to landed
     }
 
     /** Clears layout caches for all laid-out chapters (markup is kept). The caller must set the

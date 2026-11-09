@@ -119,7 +119,9 @@ class WholeBookRelayoutEpochProbeTest {
 
         // The active chapter (ch1, small: foreground full reflow) carries the LAST hash too —
         // bound in-memory by prepareRelayout-small (R5 rebind, step-4 foreground completion), complete.
-        // B2 still skips it structurally: no background pass writes its disk file (asserted below).
+        // Its disk file also exists: the settled relayout persists it (small chapters have no
+        // background owner — no temp session ⇒ no B1, and B2 skips the active chapter), so the
+        // write has to happen right there.
         val ch1 = controller.unitAt(1) ?: error("no ch1")
         assertEquals("active chapter must carry the last hash", h2, ch1.paginationTable?.paramHash)
         assertTrue("active table must have pages", ch1.paginationTable?.pages?.isNotEmpty() == true)
@@ -129,10 +131,15 @@ class WholeBookRelayoutEpochProbeTest {
             val disk = PaginationCacheStore(FileSystem.SYSTEM, cacheDir.absolutePath.toPath())
             val c0 = disk.file("book_$bookId", 0, h2)
             assertTrue("B2 must persist chapter 0 on disk with the last hash", FileSystem.SYSTEM.exists(c0))
-            // B2 skips the active chapter: no background pass writes its disk file under the last
-            // hash (its in-memory table above comes from the foreground rebind only, which never writes).
+            // The active chapter's file comes from the foreground settled relayout (not B2): it must
+            // be there, and must match the in-memory table page for page.
             val c1 = disk.file("book_$bookId", 1, h2)
-            assertTrue("B2 must not persist the active chapter", !FileSystem.SYSTEM.exists(c1))
+            assertTrue("settled small-chapter relayout must persist the active chapter", FileSystem.SYSTEM.exists(c1))
+            assertEquals(
+                "persisted active table must match the in-memory one",
+                ch1.paginationTable?.pages?.size,
+                disk.read(c1)?.pages?.size,
+            )
     }
 
     private fun epubFiles(): Map<String, ByteArray> {

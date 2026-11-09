@@ -75,6 +75,33 @@ class RelocateProbeTest {
         assertSame("fast path must not nuke the table", tableBefore, unit.paginationTable)
     }
 
+    /**
+     * 未命中快路径时只允许重建**目标章**：别的章已排好的版式和分页表必须原样保留。
+     * 以前这里会把全书作废（调参重排的遗留），后台预排与内存表被一并扔掉。
+     */
+    @Test
+    fun `relayout miss keeps other chapters' tables`() = runBlocking {
+        assertTrue(controller.open(12L, saved = null))
+        controller.setViewport(viewW, viewH)
+        assertNotNull(controller.ensureChapterLayout(0, 0))
+        val unit0 = controller.unitAt(0) ?: error("no unit 0")
+        val tableBefore = unit0.paginationTable ?: error("ch0 has no table")
+        assertNotNull("ch0 must stay laid out", unit0.layout)
+        // ch1 还没排过（无表、无版式）：落位必然走「未命中」全路径，不是快路径。
+        val unit1 = controller.unitAt(1) ?: error("no unit 1")
+        assertEquals("ch1 must start unlaid", null, unit1.paginationTable)
+
+        val hit = controller.relayoutTo(1, 0)
+        assertNotNull("miss path must still land", hit)
+        assertEquals(1, hit!!.first)
+
+        assertSame(
+            "miss path must not drop another chapter's table",
+            tableBefore, unit0.paginationTable,
+        )
+        assertNotNull("miss path must not drop another chapter's layout", unit0.layout)
+    }
+
     private fun epubFiles(): Map<String, ByteArray> {
         val container = """<?xml version="1.0"?>
             <container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0">
@@ -85,8 +112,11 @@ class RelocateProbeTest {
                 <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
                     <dc:title>R12</dc:title><dc:identifier id="bookid">urn:test:r12</dc:identifier>
                 </metadata>
-                <manifest><item id="c1" href="Text/c1.xhtml" media-type="application/xhtml+xml"/></manifest>
-                <spine><itemref idref="c1"/></spine>
+                <manifest>
+                    <item id="c1" href="Text/c1.xhtml" media-type="application/xhtml+xml"/>
+                    <item id="c2" href="Text/c2.xhtml" media-type="application/xhtml+xml"/>
+                </manifest>
+                <spine><itemref idref="c1"/><itemref idref="c2"/></spine>
             </package>"""
         val body = (1..90).joinToString("\n") { p ->
             "<p>Paragraph $p. " +
@@ -96,6 +126,7 @@ class RelocateProbeTest {
             "META-INF/container.xml" to container.toByteArray(),
             "OEBPS/package.opf" to opf.toByteArray(),
             "OEBPS/Text/c1.xhtml" to ("<html><body><h1>Chapter 1</h1>" + body + "</body></html>").toByteArray(),
+            "OEBPS/Text/c2.xhtml" to ("<html><body><h1>Chapter 2</h1>" + body + "</body></html>").toByteArray(),
         )
     }
 }

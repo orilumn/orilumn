@@ -4428,6 +4428,29 @@ private fun finalizeTempOnLeave(unit: ChapterUnit, ip: InProgressPagination) {
     }
 }
 
+/**
+ * 章内跳转命中磁盘表：把活着的临时会话收掉，改由磁盘表接住（同 S5 离章口径）。
+ *  - 会话已拿到正典副本 ⇒ 绑正典整章、清会话（[finalizeTempOnLeave]）；
+ *  - 只有 unit 上的表（本会话没拿到副本 / B1 被 skip-fresh）⇒ 保住这张表，其余作废，
+ *    由随后的 [ensureChapterLayout] 从表里塑目标页。
+ *
+ * 不加 [layoutMutex]：这里只动会话与表引用，随后 ensure 路径自己持锁；与离章同序，不会与
+ * [tempNav] 的锁序交叉（tempStateLock 是最内层）。
+ */
+private fun promoteTempToCanonical(unit: ChapterUnit, ip: InProgressPagination) {
+    tempStateLock.withLock {
+        if (unit.inProgress !== ip) return@withLock
+        if (ip.canonicalLayout != null && ip.canonicalSlices.isNotEmpty()) {
+            finalizeTempOnLeave(unit, ip)
+            return@withLock
+        }
+        val keep = unit.paginationTable?.takeIf { it.paramHash == ip.paramHash }
+        unit.invalidateLayout()
+        if (keep != null) unit.bindPaginationTable(keep)
+        Logger.w(logTag, "temp 作废→磁盘 ${ctx(unit)} pages=${keep?.pages?.size ?: 0} (章内跳转命中磁盘表)")
+    }
+}
+
 /** P11 (S5 leave): finalize [unit]'s temp session if one is still present, serialized with in-session
  *  temp navigation — [tempNav]/[stepTempPrefill]/the anchor-commit all hold [tempStateLock]. Idempotent:
  *  a no-op once the session has been cleared. The flip leave path and the reader's jump paths route here. */
@@ -4591,22 +4614,11 @@ private fun finishCanonicalBackground(
     // the reader leaves the temp session (head/tail/cross-chapter), so it is never re-rendered in place.
 }
 
-/**
-     * Relayout after a settings change, keeping the position:
-     *  - clears layout caches for all laid-out chapters (keeps the semantic tree
-     *    [ChapterUnit.markup], so bodies need not be re-parsed);
-     *  - rebuilds [chapter] with the current new [profile];
-     *  - anchors to the page after relayout by [anchorChar] (falls back to the first page when
-     *    there is no exact page).
-     *
-     * The caller must capture anchorChar **before** relayout (the old [PageSlice] is unusable
-     * afterwards).
-     * @return (chapter, relaid-out page); null when the chapter doesn't exist.
-     */
     /** R12: same-chapter fast relocate — the target char already lives in a shaped-valid window
      *  page (live temp session or disk window with real line indexes): move the pointer there and
-     *  return it, skipping the [invalidateAllLayouts] nuke. Anything else (unshaped stub, stale
-     *  params, no session/table) returns null for the full path. Pointer moves run under
+     *  return it, skipping the target-chapter rebuild. Anything else (unshaped stub, stale
+     *  params, no session/table) returns null for the full path, which stays chapter-scoped too.
+     *  Pointer moves run under
      *  [tempStateLock] (temp branch) / [layoutMutex] (disk read) so a concurrent flip can't tear them. */
     private suspend fun fastRelocate(
         chapter: Int,
@@ -4654,16 +4666,49 @@ private fun finishCanonicalBackground(
         }
     }
 
+    /**
+     * 导航落位（目录 / 标注 / 修改清单 / 审阅切换 / 邻章）：把 [chapter] 排到 [anchorChar] 所在
+     * （或页首最接近 [anchorChar]，见 [nearestPageStart]）的页并返回它。
+     *
+     * 只碰目标章：跳转不改版面，别的章已排好的版式与分页表原地保留；目标章在已成形窗口内命中时
+     * 连它自己也不重排（[fastRelocate]）。调参后的整书重排走 [prepareRelayout]，不在这里。
+     *
+     * 调用方必须**在重排前**取好 anchorChar（旧的 [PageSlice] 重排后不可再用）。
+     * @return (chapter, 落位页)；章不存在或排不出来时为 null。
+     */
     suspend fun relayoutTo(
         chapter: Int,
         anchorChar: Int,
         nearestPageStart: Boolean = false,
     ): Pair<Int, PageSlice>? {
         clearFlipDir("mid-jump")
-        // R12: fast path — target inside an already-shaped valid window: just move the pointer,
-        // no nuke. Structural misses fall through to the full path below.
-        fastRelocate(chapter, anchorChar, nearestPageStart)?.let { return it }
-        invalidateAllLayouts()
+        // 章内跳转：**磁盘表已就绪就必须落到磁盘表上**（总则 1）。跳转不是翻页，没有「章内恒走
+        // 临时表」的豁免——临时表只是磁盘表就绪前的占位，就绪了还留在占位上，等于让读者看一张
+        // 随时会被抛弃的分页。判据与会话结束（[finalizeTempOnLeave]）同源：本参数下 unit 上已有表，
+        // 或本会话已拿到正典副本。
+        val currentHash = currentParamHash()
+        val targetUnit = unitAt(chapter)
+        val liveTemp = targetUnit?.inProgress?.takeIf { it.paramHash == currentHash }
+        val canonicalReady = targetUnit != null && (
+            targetUnit.paginationTable?.paramHash == currentHash ||
+                (liveTemp != null && liveTemp.canonicalLayout != null && liveTemp.canonicalSlices.isNotEmpty())
+            )
+        if (liveTemp == null || !canonicalReady) {
+            // R12: fast path — target inside an already-shaped valid window: just move the pointer,
+            // no nuke. Structural misses fall through to the full path below.
+            fastRelocate(chapter, anchorChar, nearestPageStart)?.let { return it }
+        }
+        // 只清目标章，不再整书作废。跳转不改版面，别的章的版式和分页表照样有效；这里原来整书
+        // 作废，是本入口早先兼作「调参后按原位置重排」留下的（那时全书几何都变了，整书作废才
+        // 对）。调参早已有 prepareRelayout 负责，导航再整书作废只会把后台预排的成果成批扔掉，
+        // 连内存里那张本来能命中的表也一起丢掉（缓存文件读不出来时就会退化成临时表）。
+        // 目标章唯一需要整体重来的情形：临时表会话还活着、锚点却落在它的窗口外——那张表的
+        // 页界从旧锚点起算，只能从新锚点重开。其余失配（参数变了、内容版本变了、落点页不在
+        // 成形窗口）由 ensureChapterLayout / buildLayout 按章处理，已排好的部分能留则留。
+        if (targetUnit?.inProgress != null) {
+            if (canonicalReady && liveTemp != null) promoteTempToCanonical(targetUnit, liveTemp)
+            else targetUnit.invalidateLayout()
+        }
         val unit = ensureChapterLayout(chapter, anchorChar, headLift = false) ?: return null
         // Anchor temp streaming: return the anchor page directly.
         unit.inProgress?.let { ip ->
@@ -4701,23 +4746,47 @@ private fun finishCanonicalBackground(
 
     /**
      * R5: rebinds a fresh in-memory pagination table from a small-chapter full product.
-     * No disk write (writes belong to background canonical per S5 §3.5); only fixes the
-     * table + paramHash so the R6 reuse guard passes on subsequent flips.
+     * Always fixes the table + paramHash so the R6 reuse guard passes on subsequent flips.
      * Also drops the per-block shape cache: shapes are keyed by leaf without a param dimension
      * and fullLayout never populates this cache, so any entries predate this param cycle and would
      * poison later flips once the rebound hash lets the R6 guard pass. Pure memo loss.
+     *
+     * **[persist] 的判据是「参数周期是否稳定」，不是「谁在跑」**（紧急度与写盘归属是两根轴，
+     * 见 `线程调度原则.md` §0）。预览路径参数每 16ms 一换，写下的表下一帧就作废，纯写放大 ⇒ false；
+     * 关面板/尺寸稳定那一刻，这张表就是本参数周期的正典 ⇒ true。
+     *
+     * 小章**没有**后台正典可接手：它不建临时会话 ⇒ 没有 B1；B2 又按 skip-fresh（内存表新鲜）
+     * 直接跳过。所以稳定点不写，磁盘就停在上一个指纹，且没人补（代价是重开书这一章重排一次）。
      */
-    private fun rebindSmallTable(unit: ChapterUnit, slices: List<PageSlice>, paramHash: Long) {
+    private fun rebindSmallTable(
+        unit: ChapterUnit,
+        slices: List<PageSlice>,
+        paramHash: Long,
+        persist: Boolean,
+    ) {
         unit.blockShapeCache = null
         if (slices.isEmpty() || slices[0].blockStart < 0) return
-        unit.bindPaginationTable(ChapterPaginationTable.fromSlices(
+        val table = ChapterPaginationTable.fromSlices(
             chapterIndex = unit.chapterIndex,
             paramHash = paramHash,
             slices = slices,
             totalBlocks = slices.maxOf { it.blockEndExclusive },
             totalChars = slices.last().charEnd,
             contentRev = chapterContentRev(unit.chapterIndex),
-        ))
+        )
+        unit.bindPaginationTable(table)
+        if (!persist) return
+        // 完成门（同 [finishCanonicalBackground] P1f）：晚一步的参数变更会让这张表作废，不写。
+        if (paramHash != currentParamHash()) {
+            Logger.w(logTag, "small-table write skipped (param moved on) ch=${unit.chapterIndex}")
+            return
+        }
+        val cache = cacheStore() ?: return
+        if (bookId < 0) return
+        val file = cache.file("book_$bookId", unit.chapterIndex, paramHash)
+        runCatching { cache.write(table, file) }
+            .onFailure { Logger.e(logTag, "small-table write FAIL ch=${unit.chapterIndex} ${it.message}") }
+        Logger.w(logTag, "layout ${ctx(unit)} SMALL-TABLE-WRITE pages=${table.totalPages} totalChars=${table.totalChars}")
     }
 
     /**
@@ -4763,10 +4832,9 @@ private fun finishCanonicalBackground(
                         ?: return@runCatching null
                     Logger.w(logTag, "relayout-light ch=$chapter SMALL-FULL prepareLight=${tLight - t0}ms fullLayout=${platformNowMs() - tLight}ms total=${platformNowMs() - t0}ms blocks=${light.totalBlocks}")
                     // R5: small chapters never enter the temp path, so rebind a fresh in-memory
-                    // table here (writes still belong to background canonical). Otherwise the stale
-                    // table + stale paramHash trip the R6 guard on the next flip and the fresh
-                    // layout is discarded for a redundant rebuild.
-                    rebindSmallTable(unit, product.slices, paramHash)
+                    // table here so the R6 guard passes on the next flip. No disk write: this is
+                    // the drag-preview path and the params are still moving (see [rebindSmallTable]).
+                    rebindSmallTable(unit, product.slices, paramHash, persist = false)
                     ReflowResult(chapter, product.layout, product.slices, slice)
                 }
             } else {
@@ -4841,15 +4909,19 @@ private fun finishCanonicalBackground(
                     Logger.w(logTag, "relayout ch=$chapter LARGE-ANCHOR prepareLight=${tLight - t0}ms anchorShape=${tAnchor - tA0}ms total=${platformNowMs() - t0}ms blocks=${light.totalBlocks}")
                     ReflowResult(chapter, null, emptyList(), page)
                 } else {
-                    // Small chapter: full line-level relayout (also no write here).
+                    // Small chapter: full line-level relayout; the settled path (panel close /
+                    // viewport settled) is the canonical table for this param cycle, so persist it
+                    // — nothing in the background will do it for a small chapter (no temp session ⇒
+                    // no B1, and B2 skip-fresh returns early on a fresh in-memory table).
                     val prep = prepareFor(unit, bc, markup, contentWidth, contentHeight, paramHash)
                     val product = bc.fullLayout(prep, profile, contentWidth, contentHeight)
                         ?: return@runCatching null
                     val slice = anchoredDiskPage(product.layout, product.slices, anchorChar)
                         ?: return@runCatching null
                     Logger.w(logTag, "relayout ch=$chapter SMALL-FULL prepareLight=${tLight - t0}ms fullLayout=${platformNowMs() - tLight}ms total=${platformNowMs() - t0}ms blocks=${light.totalBlocks}")
-                    // R5: same in-memory table rebind as the light path (see above).
-                    rebindSmallTable(unit, product.slices, paramHash)
+                    // R5: same in-memory table rebind as the light path, but this is the settled
+                    // param cycle ⇒ persist it (see [rebindSmallTable]).
+                    rebindSmallTable(unit, product.slices, paramHash, persist = true)
                     ReflowResult(chapter, product.layout, product.slices, slice)
                 }
             } else {
@@ -5077,6 +5149,22 @@ private fun finishCanonicalBackground(
         // unit），它的文件也可能早被清缓存删掉了。不记就等于给全书页码前缀留一个永久缺口
         // ——真机见过整整一章（762 章里的一章）因此从快照里消失。
         u.paginationTable?.takeIf { it.paramHash == paramHash }?.let { table ->
+            // 补齐存档：内存表新鲜，但盘上可能没有可读文件——小章的稳定点重排现在会写盘（见
+            // [rebindSmallTable]），可写盘失败、进程在写到一半时被杀、或旧版本留下的内存表都只
+            // 活在内存里，而**没有任何后台路径会替它们补**（B2 一看见新鲜表就 return，B1 不服务
+            // 小章）。这里顺手写一次，代价是一次几十字节的 IO；不补，下次开书这一章就要整章重排。
+            val diskPages = runCatching {
+                cacheStore()?.readPageCount("book_$bookId", index, paramHash, chapterContentRev(index))
+            }.getOrNull()
+            if (diskPages == null) {
+                val cache = cacheStore()
+                if (cache != null && bookId >= 0) {
+                    val file = cache.file("book_$bookId", index, paramHash)
+                    runCatching { cache.write(table, file) }
+                        .onSuccess { Logger.w(logTag, "layout ${ctx(u)} FULL-PRELIM-BACKFILL pages=${table.totalPages}") }
+                        .onFailure { Logger.e(logTag, "full prelim backfill WRITE FAIL ch=$index ${it.message}") }
+                }
+            }
             notePageCountKnown(index, paramHash, table.totalPages)
             return
         }

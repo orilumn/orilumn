@@ -451,6 +451,8 @@ class ReaderActivity : ComponentActivity() {
                     ReaderAnnotationPanel(
                         scheme = effective.scheme,
                         load = { tabletHost?.annotationsForBook() ?: emptyList() },
+                        // 开书后台预读的快照：抽屉第一帧就有清单，不再「先空白后填充」。
+                        initial = tabletHost?.cachedAnnotations(),
                         onDelete = { annotation ->
                             val ok = tabletHost?.deleteAnnotation(annotation.id) ?: false
                             // 删当前章的标注后，屏幕上的装饰也要同时消失（epoch 由阅读面单独重读）。
@@ -467,6 +469,8 @@ class ReaderActivity : ComponentActivity() {
                     ReaderRevisionPanel(
                         scheme = effective.scheme,
                         load = { tabletHost?.textRevisionsForBook() ?: emptyList() },
+                        // 开书后台预读的快照：抽屉第一帧就有清单，不再「先空白后填充」。
+                        initial = tabletHost?.cachedTextRevisions(),
                         onDelete = { revision ->
                             when (val outcome = tabletHost?.deleteTextRevision(revision, currentPos)) {
                                 is TextRevisionDeleteOutcome.Success -> {

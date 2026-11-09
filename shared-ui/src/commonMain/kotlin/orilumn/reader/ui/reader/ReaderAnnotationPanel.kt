@@ -13,7 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -82,9 +82,11 @@ fun ReaderAnnotationPanel(
     chapterTitles: Map<Int, String>,
     currentChapter: Int,
     onDismiss: () -> Unit,
+    /** 宿主缓存的整本标注快照：给了就**首帧**直接排列表，抽屉不会先滑出半屏空白。 */
+    initial: List<Annotation>? = null,
 ) {
     val p = paletteFor(scheme)
-    var loaded by remember { mutableStateOf<List<Annotation>?>(null) }
+    var loaded by remember { mutableStateOf(initial) }
     var error by remember { mutableStateOf<String?>(null) }
     // 类型筛选（v2）：null = 全部；批注一格包含「本身就是批注」和「高亮/划线附带了批注文字」两种。
     var filter by remember { mutableStateOf(AnnotationFilter.All) }
@@ -93,14 +95,16 @@ fun ReaderAnnotationPanel(
     val currentLoad by rememberUpdatedState(load)
 
     // 列表体随抽屉打开而组合，所以首次组合就是「打开」；只在点行进正文时卸载。
+    // 已有快照时（首帧就有内容）照样对齐一次库里的最新结果，只是不再让抽屉空着等它。
     LaunchedEffect(Unit) {
-        loaded = try {
+        val fresh = try {
             currentLoad()
         } catch (c: CancellationException) {
             throw c
         } catch (_: Throwable) {
-            emptyList()
+            loaded ?: emptyList()
         }
+        if (fresh != loaded) loaded = fresh
     }
 
     val visible = remember(loaded, filter) { filterAnnotations(loaded.orEmpty(), filter) }
@@ -109,7 +113,14 @@ fun ReaderAnnotationPanel(
     val rows = remember(visible, chapterTitles) { buildAnnotationRows(visible, chapterTitles) }
     val shown = remember(rows) { rows.filterIsInstance<AnnotationPanelRow.Item>() }
     val itemCount = shown.size
-    val listState = rememberLazyListState()
+    // 打开就落在当前阅读章的第一条笔记：LazyColumn 从目标位起排，不再先排一屏第 0 条再跳
+    //（那一屏白排是打开清单最主要的卡顿来源）。换筛选时下标重算，与原「筛选后重新定位」同效。
+    val firstInChapter = remember(shown, currentChapter) {
+        shown.indexOfFirst { it.annotation.chapter == currentChapter }
+    }
+    val listState = remember(loaded != null, filter) {
+        LazyListState(firstVisibleItemIndex = (firstInChapter - 1).coerceAtLeast(0))
+    }
     val scope = rememberCoroutineScope()
     val nav = remember { PanelNav() }
     val bodyFr = remember { FocusRequester() }
@@ -139,13 +150,7 @@ fun ReaderAnnotationPanel(
         if (positioned && positionedFilter == filter) return@LaunchedEffect
         positioned = true
         positionedFilter = filter
-        val firstInChapter = shown.indexOfFirst { it.annotation.chapter == currentChapter }
-        if (firstInChapter >= 0) {
-            try { listState.scrollToItem((firstInChapter - 1).coerceAtLeast(0)) } catch (_: Exception) {}
-            nav.activeIdx = shown[firstInChapter].seq
-        } else {
-            nav.activeIdx = shown.firstOrNull()?.seq
-        }
+        nav.activeIdx = if (firstInChapter >= 0) shown[firstInChapter].seq else shown.firstOrNull()?.seq
         nav.releaseHold()
         bodyFr.requestFocus()
     }
@@ -416,6 +421,9 @@ private fun AnnotationListRow(
 /** 清单摘录的字号；装饰几何（线宽 / 线心偏移 / 波形）都按这个字号换算，与正文同一套口径。 */
 private val QuoteFontSize = 13.sp
 
+/** 摘录在清单里最多画两行：截到这个长度后，再长的部分本来也只是省略号。 */
+private const val QuoteExcerptMaxChars = 120
+
 /** 一条标注在清单里该怎么画：高亮垫底色，划线按自己的线型与颜色画在字下/字中，批注画虚线。 */
 internal class QuoteDecor(
     val kind: DecorKind,
@@ -439,7 +447,11 @@ internal fun quoteDecorOf(annotation: Annotation): QuoteDecor? =
  */
 @Composable
 private fun QuoteText(annotation: Annotation, palette: Palette) {
-    val quote = annotation.quote?.takeIf { it.isNotBlank() }
+    // 摘录只画两行，按可见长度截断后再排：整段几千字的原文也会被省略号吞掉，
+    // 全量整形却要在打开清单时逐行付账（长段落下尤其明显）。
+    val quote = annotation.quote?.takeIf { it.isNotBlank() }?.let {
+        if (it.length > QuoteExcerptMaxChars) it.take(QuoteExcerptMaxChars) + "…" else it
+    }
     var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
     val decor = remember(annotation) { quoteDecorOf(annotation) }
     val em = with(LocalDensity.current) { QuoteFontSize.toPx() }

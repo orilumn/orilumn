@@ -58,6 +58,22 @@ class TabletReaderHost(
     private var openedAtCover = true
 
     /**
+     * 清单快照（编辑 / 笔记）：面板**第一帧**就要有数据。
+     *
+     * 以前清单是「抽屉先滑出半屏空白 → 下一帧数据读完才填列表」，读者看到的是分两段打开，
+     * 而且中间那一帧还压在抽屉动画上。开书后在 IO 线程预读一次存这里，增删改后作废；
+     * 面板首帧直接用快照，随后再静默对齐一次库里的最新结果。
+     */
+    private var revisionsSnapshot: List<TextRevision>? = null
+    private var annotationsSnapshot: List<Annotation>? = null
+
+    /** 编辑清单的同步快照（null = 还没预读到，面板退回异步加载）。 */
+    fun cachedTextRevisions(): List<TextRevision>? = revisionsSnapshot
+
+    /** 笔记清单的同步快照（同上）。 */
+    fun cachedAnnotations(): List<Annotation>? = annotationsSnapshot
+
+    /**
      * 全书页码数据的代际（Compose 快照状态）：引擎在后台补齐各章页数、或某章正典表刚落时回调，
      * 这里 +1 —— 阅读面在组合期读 [pageNumberRevision]，静置不翻页也能让页码自己出现。
      */
@@ -124,6 +140,11 @@ class TabletReaderHost(
             openedAtCover = (state == null) || orilumn.reader.data.read.ReadingLocatorCodec.decodeAtCover(state.locator)
             controller.requestWholeBookRelayout()
             opened = true
+            // 清单快照预读：开书后台做，读者点「编辑 / 笔记」时抽屉里已经有内容。
+            ioScope.launch {
+                runCatching { textRevisionsForBook() }
+                runCatching { annotationsForBook() }
+            }
         }
         controller.locateStart()?.let { ReaderPos(it.first, it.second, atCover = openedAtCover) }
     }
@@ -211,6 +232,7 @@ class TabletReaderHost(
                     return@withContext TextEditOutcome.Failed("保存失败")
                 }
                 controller.reloadTextRevisions()
+                revisionsSnapshot = null
                 val pos = if (anchor != null) {
                     controller.reflowAfterContentChange(
                         chapter = chapter,
@@ -255,6 +277,7 @@ class TabletReaderHost(
             val removed = runCatching { repository.deleteTextRevision(revision.id) }.isSuccess
             if (!removed) return@withContext TextRevisionDeleteOutcome.Failed
             controller.reloadTextRevisions()
+            revisionsSnapshot = null
             // 本章页数可能变了：页脚 / 目录页码跟着刷新。
             pageNumberTick++
             val pos = if (anchor != null) {
@@ -416,7 +439,7 @@ class TabletReaderHost(
 
     override suspend fun annotationsForBook(): List<Annotation> = try {
         // 清单只显示原文摘录，不画装饰；坐标保持原书空间，跳转时再换算。
-        repository.annotationsForBook(bookId)
+        repository.annotationsForBook(bookId).also { annotationsSnapshot = it }
     } catch (c: CancellationException) {
         throw c
     } catch (_: Throwable) {
@@ -447,7 +470,7 @@ class TabletReaderHost(
     override suspend fun textRevisionsForBook(): List<TextRevision> = try {
         // 快照两列上线前写下的老行：区间还在原书空间，先按持久化章树把原文补回库再读清单。
         controller.backfillLegacyRevisionTexts()
-        repository.textRevisionsForBook(bookId)
+        repository.textRevisionsForBook(bookId).also { revisionsSnapshot = it }
     } catch (c: CancellationException) {
         throw c
     } catch (_: Throwable) {
@@ -464,6 +487,7 @@ class TabletReaderHost(
             ),
         )
         // 返回给阅读面的是渲染空间（内存列表与装饰都按它画）。
+        annotationsSnapshot = null
         saved?.let(::toRenderedRange)
     } catch (c: CancellationException) {
         throw c
@@ -475,6 +499,7 @@ class TabletReaderHost(
         repository.updateAnnotation(
             toOriginalRange(annotation).copy(updatedAt = System.currentTimeMillis()),
         )
+        annotationsSnapshot = null
         true
     } catch (c: CancellationException) {
         throw c
@@ -484,6 +509,7 @@ class TabletReaderHost(
 
     override suspend fun deleteAnnotation(id: Long): Boolean = try {
         repository.deleteAnnotation(id)
+        annotationsSnapshot = null
         true
     } catch (c: CancellationException) {
         throw c

@@ -10,7 +10,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -61,28 +61,39 @@ fun ReaderRevisionPanel(
     currentChapter: Int,
     onJump: (TextRevision) -> Unit,
     onDismiss: () -> Unit,
+    /** 宿主缓存的整本修订快照：给了就**首帧**直接排列表，抽屉不会先滑出半屏空白。 */
+    initial: List<TextRevision>? = null,
 ) {
     val p = paletteFor(scheme)
-    var loaded by remember { mutableStateOf<List<TextRevision>?>(null) }
+    var loaded by remember { mutableStateOf(initial) }
     var error by remember { mutableStateOf<String?>(null) }
     // 左滑展开的行键：同时只展开一行（SwipeRevealRow 的手势物理与它共用一套口径）。
     var openKey by remember { mutableStateOf<String?>(null) }
     val currentLoad by rememberUpdatedState(load)
 
     // 列表体随抽屉打开而组合，所以首次组合就是「打开」；切到别的页签会卸载，切回来重新读。
+    // 已有快照时（首帧就有内容）照样对齐一次库里的最新结果，只是不再让抽屉空着等它。
     LaunchedEffect(Unit) {
-        loaded = try {
+        val fresh = try {
             currentLoad()
         } catch (c: CancellationException) {
             throw c
         } catch (_: Throwable) {
-            emptyList()
+            loaded ?: emptyList()
         }
+        if (fresh != loaded) loaded = fresh
     }
 
     val shown = remember(loaded) { loaded.orEmpty() }
     val itemCount = shown.size
-    val listState = rememberLazyListState()
+    // 打开就落在当前阅读章的第一条：LazyColumn 直接从目标位起排，不再先排一屏第 0 条、
+    // 再 scrollToItem 跳过去——那屏白排是打开清单最主要的卡顿来源（行高固定，跳过完全等价）。
+    val firstInChapter = remember(shown, currentChapter) {
+        shown.indexOfFirst { it.chapter == currentChapter }
+    }
+    val listState = remember(loaded != null) {
+        LazyListState(firstVisibleItemIndex = (firstInChapter - 1).coerceAtLeast(0))
+    }
     val scope = rememberCoroutineScope()
     val nav = remember { PanelNav() }
     val bodyFr = remember { FocusRequester() }
@@ -126,17 +137,11 @@ fun ReaderRevisionPanel(
         }
     }
 
-    // 打开时滚到当前阅读章的第一条修改（与笔记清单同口径）。
+    // 打开时把高亮落到当前阅读章的第一条修改（滚动位置已由初始下标就位，与笔记清单同口径）。
     LaunchedEffect(loaded) {
         if (loaded == null || positioned) return@LaunchedEffect
         positioned = true
-        val firstInChapter = shown.indexOfFirst { it.chapter == currentChapter }
-        if (firstInChapter >= 0) {
-            try { listState.scrollToItem((firstInChapter - 1).coerceAtLeast(0)) } catch (_: Exception) {}
-            nav.activeIdx = firstInChapter
-        } else {
-            nav.activeIdx = shown.indices.firstOrNull()
-        }
+        nav.activeIdx = if (firstInChapter >= 0) firstInChapter else shown.indices.firstOrNull()
         nav.releaseHold()
         bodyFr.requestFocus()
     }
@@ -214,8 +219,15 @@ fun ReaderRevisionPanel(
  * 一条修订的摘录：换行与连续空白折成单个空格（清单每行只显示一行，不撑成多段）。
  * 原文与改文用同一套折叠，保证上下两行口径一致。
  */
-internal fun revisionExcerpt(text: String): String =
-    text.replace(Regex("[\\s\\u00A0]+"), " ").trim()
+internal fun revisionExcerpt(text: String): String {
+    val flat = text.replace(WhitespaceRun, " ").trim()
+    return if (flat.length > ExcerptMaxChars) flat.take(ExcerptMaxChars) + "…" else flat
+}
+
+private val WhitespaceRun = Regex("[\\s\\u00A0]+")
+
+/** 清单每行只画一行字，摘录截到这么长就够：再长也只是被省略号吞掉，白白多排几千个字。 */
+private const val ExcerptMaxChars = 80
 
 /** 清单一行的内容：上行原文可为空（不画这一行），下行改文空串表示纯删除。 */
 internal data class RevisionRowLines(

@@ -133,7 +133,7 @@ fun ReaderScreen(
     onToc: () -> Unit = {},
     onBookmark: (() -> Unit)? = null,
     onNote: (() -> Unit)? = null,
-    /** 底栏「修改」：打开正文修改清单（编辑面板）。null = 宿主尚未支持，点了给提示。 */
+    /** 底栏「编辑」：打开正文修改清单（编辑面板）。null = 宿主尚未支持，点了给提示。 */
     onRevision: (() -> Unit)? = null,
     /** 底栏「审阅」：切换审阅视图（删掉的字变红划红线、新添的字变绿）。null = 宿主尚未支持。 */
     onReview: (() -> Unit)? = null,
@@ -1320,13 +1320,16 @@ fun ReaderScreen(
         }
     }
 
-    /** 进目录/设置面板：工具栏先退场（BarsAnim），再开面板（按钮只在栏可见时能点到）。 */
+    /**
+     * 进目录/笔记/编辑/设置面板：点下就开面板，工具栏同时在面板遮罩后退场。
+     *
+     * 以前是「先收栏、等 BarsAnim 走完再开面板」，读者会先看到约 240ms 的「点了没反应」，
+     * 抽屉才开始滑入；现在两步同一帧发起，面板不会盖在晾着的工具栏上（抽屉在栏之上），
+     * 而清单里点一条跳转时 `barsVisible` 早已是 false，落到的仍是干净的一页。
+     */
     fun hideBarsThen(action: () -> Unit) {
         barsVisible = false
-        scope.launch {
-            delay(BarsAnim.toLong())
-            action()
-        }
+        action()
     }
 
     val touchSlop = LocalViewConfiguration.current.touchSlop
@@ -2542,13 +2545,14 @@ fun ReaderScreen(
                 onNight = currentOnNight,
                 onSettings = { hideBarsThen { currentOnSettings() } },
                 onToc = { hideBarsThen { currentOnToc() } },
-                // 书签 / 笔记：与设置 / 目录 / 修改同序——**先收栏，再开清单**。清单里点一条就是
-                // 跳转；跳转一律从「工具栏已退出」的状态发起，落位后读者看到的是干净的一页。
+                // 书签 / 笔记：与设置 / 目录 / 编辑同一拍——收栏与开清单同时发起（栏在抽屉之下
+                // 退场）。清单里点一条就是跳转；跳转一律从「工具栏已退出」的状态发起，
+                // 落位后读者看到的是干净的一页。
                 onBookmark = currentOnBookmark?.let { cb -> { hideBarsThen { cb() } } }
                     ?: { snackbar.show("书签（规划中）") },
                 onNote = currentOnNote?.let { cb -> { hideBarsThen { cb() } } }
                     ?: { snackbar.show("笔记（规划中）") },
-                // 修改：先收栏再开清单（与设置/目录同序，别让抽屉盖在晾着的工具栏上）。
+                // 编辑：收栏与开清单同一帧发起（栏在抽屉之下退场，不会盖在晾着的工具栏上）。
                 onRevision = currentOnRevision?.let { cb -> { hideBarsThen { cb() } } },
                 // 审阅：切换后栏要留着（按钮高亮本身就是「现在看的是改动痕迹」的指示）。
                 onReview = currentOnReview,
@@ -3189,7 +3193,7 @@ fun ReaderScreen(
             // 亮度/护眼遮罩：纯绘制于画布之上、栏之下。
             ReaderLightMask(light = maskLight, modifier = Modifier.fillMaxSize())
             // 顶/底栏：中部点按切换；条外点击收起。
-            // 进面板先退栏：工具栏滑出（BarsAnim）后再开面板，避免面板盖在晾着的工具栏上。
+            // 进面板：收栏与开面板同一帧发起；工具栏在抽屉之下退场，不会晾在面板边上。
             ReaderBars(
                 visible = barsVisible,
                 statusBarInset = statusBarInset,
@@ -3206,13 +3210,14 @@ fun ReaderScreen(
                 onNight = currentOnNight,
                 onSettings = { hideBarsThen { currentOnSettings() } },
                 onToc = { hideBarsThen { currentOnToc() } },
-                // 书签 / 笔记：与设置 / 目录 / 修改同序——**先收栏，再开清单**。清单里点一条就是
-                // 跳转；跳转一律从「工具栏已退出」的状态发起，落位后读者看到的是干净的一页。
+                // 书签 / 笔记：与设置 / 目录 / 编辑同一拍——收栏与开清单同时发起（栏在抽屉之下
+                // 退场）。清单里点一条就是跳转；跳转一律从「工具栏已退出」的状态发起，
+                // 落位后读者看到的是干净的一页。
                 onBookmark = currentOnBookmark?.let { cb -> { hideBarsThen { cb() } } }
                     ?: { snackbar.show("书签（规划中）") },
                 onNote = currentOnNote?.let { cb -> { hideBarsThen { cb() } } }
                     ?: { snackbar.show("笔记（规划中）") },
-                // 修改：先收栏再开清单（与设置/目录同序，别让抽屉盖在晾着的工具栏上）。
+                // 编辑：收栏与开清单同一帧发起（栏在抽屉之下退场，不会盖在晾着的工具栏上）。
                 onRevision = currentOnRevision?.let { cb -> { hideBarsThen { cb() } } },
                 // 审阅：切换后栏要留着（按钮高亮本身就是「现在看的是改动痕迹」的指示）。
                 onReview = currentOnReview,

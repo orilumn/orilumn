@@ -8,7 +8,7 @@ package orilumn.reader.data.revision
  * （方案 D-32）。
  *
  * - [charStart] == [charEnd] 表示纯插入；[text] 为空串表示删除；
- * - [originalText] / [editedText] 是**审阅清单的两行文字**：前者 = 提交时选区的原文，
+ * - [originalText] / [editedText] 是**审阅清单那一行摘要的两端**：前者 = 提交时选区的原文，
  *   后者 = 读者输入的新文字（都是渲染空间、按段各存一份）。它们只用于显示，
  *   与 [charStart]/[charEnd]/[text] 这套「最小修订」互不影响——裁剪掉的公共前后缀
  *   仍会出现在这两行里，读者才能看出「改之前是什么、改之后是什么」；

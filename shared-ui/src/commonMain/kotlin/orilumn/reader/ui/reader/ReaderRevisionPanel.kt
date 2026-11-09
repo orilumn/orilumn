@@ -29,25 +29,28 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusTarget
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import orilumn.reader.data.revision.TextRevision
+import orilumn.reader.engine.revision.CharDiff
 
 /**
  * 编辑清单的列表体（用户层，v3.2 的清单形态）：由 [ReaderSidePanel] 的抽屉壳承载，
  * 与目录 / 笔记同一个抽屉的第三页「编辑」。
  *
- * 按书内章序、章内起点升序平铺（不画章标题）：一条修订两行——上行是**改之前的整段选区**
- * （红色删除线），下行是**改之后的整段文字**。每行只占一行，超出用省略号。
- * 两行取提交时存下的原文 / 新文字，与内部「最小修订」无关：就算只加了几个字，
- * 上行也照样显示被选中的那段原文（加了删除线，读者不会误会）。纯删除没有下行。
- * 加两列之前写下的老修订会在首次打开清单时按原书补回原文（区间非空的行）；
- * 补不回的只可能是「只剩纯插入」的老行——提交时选区已被裁光，清单没有原文行，
- * 只显示当时改成的文字。
+ * 按书内章序、章内起点升序平铺（不画章标题）：一条修订**一行**，就是它在正文审阅视图里
+ * 长的那一段——原文照排，删掉的字红字 + 删除线，新写的字绿字，中间没动的字照常。
+ * 一行排不下就折到第二行，再多用省略号收住。
+ * 文字取提交时存下的整段原文 / 新文字，与内部「最小修订」无关：就算只加了几个字，
+ * 被选中的那段原文也照样在行首照排。老修订会在首次打开清单时按原书补回原文（区间非空的行）；
+ * 补不回的只可能是提交时选区已被裁光的老行，这时显示当时改成的文字。
  * 点行跳到该修订的起点（宿主负责原书→渲染换算）；每行左滑露出「删除」按钮，删掉的
  * 是那一条修订本身，该区间随即恢复原书文字（与笔记清单同一套手势物理）。
  *
@@ -98,8 +101,6 @@ fun ReaderRevisionPanel(
     val nav = remember { PanelNav() }
     val bodyFr = remember { FocusRequester() }
     var positioned by remember { mutableStateOf(false) }
-    // 原文行：白天用深红、夜间用浅红，保证在两种底色上都看得清。
-    val strike = if (scheme == "night") Color(0xFFE07364) else Color(0xFFC0392B)
 
     fun moveActive(dir: Int) = nav.move(dir, 1, itemCount, { true }) {
         scope.ensureListVisible(listState, it, dir)
@@ -184,7 +185,6 @@ fun ReaderRevisionPanel(
                             revision = revision,
                             active = nav.activeIdx == i,
                             palette = p,
-                            strike = strike,
                             nav = nav,
                             index = i,
                             openKey = openKey,
@@ -216,60 +216,100 @@ fun ReaderRevisionPanel(
 }
 
 /**
- * 一条修订的摘录：换行与连续空白折成单个空格（清单每行只显示一行，不撑成多段）。
- * 原文与改文用同一套折叠，保证上下两行口径一致。
+ * 一条修订的摘录：换行与连续空白折成单个空格（清单是一条流式文字，不撑成多段）；
+ * 段界痕迹字符（`U+E000`）在正文里不显字，这里也折成空格。
  */
-internal fun revisionExcerpt(text: String): String {
-    val flat = text.replace(WhitespaceRun, " ").trim()
-    return if (flat.length > ExcerptMaxChars) flat.take(ExcerptMaxChars) + "…" else flat
-}
+internal fun revisionExcerpt(text: String): String =
+    text.replace(WhitespaceRun, " ").trim()
 
-private val WhitespaceRun = Regex("[\\s\\u00A0]+")
+private val WhitespaceRun = Regex("[\\s\\u00A0\\uE000]+")
 
-/** 清单每行只画一行字，摘录截到这么长就够：再长也只是被省略号吞掉，白白多排几千个字。 */
-private const val ExcerptMaxChars = 80
+/** 清单一行最多排两行字，摘录截到这么长就够：再长也只是被省略号吞掉，白白多排几千个字。 */
+private const val ExcerptMaxChars = 200
 
-/** 清单一行的内容：上行原文可为空（不画这一行），下行改文空串表示纯删除。 */
-internal data class RevisionRowLines(
-    /** 上行：改之前的整段选区；`null` 表示这条修订没有原文行。 */
-    val original: String?,
-    /** 下行：改之后的整段文字；空串表示纯删除，不画这一行。 */
-    val updated: String,
-)
+/** 摘要里一段字的身份：没动的原文 / 被删掉的原文 / 新写进去的字。 */
+internal enum class ReviewSpanKind { Kept, Deleted, Inserted }
+
+/** 摘要里连续同身份的一段字。 */
+internal data class ReviewSpan(val text: String, val kind: ReviewSpanKind)
 
 /**
- * 清单两行怎么取：优先用提交时存下的整段前后快照。
+ * 一条修订在清单里的单行审阅摘要：与正文审阅视图同口径——原文照排，只有**真正变了**的字
+ * 才上色（删掉的字红字 + 删除线，新写的字绿字），中间没动的字照常。
  *
- * 老修订（加快照之前写的）由宿主在打开清单时按原书补回原文；仍补不上的（只剩纯插入、
- * 或该章没有持久化结构）只要它确实替换过原书文字，就占着上行显示「（原文未记录）」，
- * 下行退回当时的替换文字。这样清单的形状一致，不会忽然少一行。
+ * 比对的两端取自提交时存下的整段原文 / 新文字（[TextRevision.originalText] /
+ * [TextRevision.editedText]），按字符对齐后拼成一串。加快照之前写下的老修订没有这两列，
+ * 退回当时的替换文字（[TextRevision.text]）：区间非空的行补一句「（原文未记录）」占位，
+ * 补不回选区的纯插入只显示新文字。
  */
-internal fun revisionRowLines(revision: TextRevision): RevisionRowLines {
-    // 只有两列都为空才是「加快照之前写的老修订」；新修订的改文为空就是纯删除，
-    // 不能退回最小修订的替换文字（那可能只是没被删掉的旧改文）。
+internal fun revisionReviewSpans(revision: TextRevision): List<ReviewSpan> {
+    // 只有两列都为空才是「加快照之前写的老修订」；新修订的改文为空就是纯删除。
     val legacy = revision.originalText.isEmpty() && revision.editedText.isEmpty()
-    val original = revisionExcerpt(revision.originalText)
-    val updated = revisionExcerpt(if (legacy) revision.text else revision.editedText)
-    val originalLine = when {
-        original.isNotEmpty() -> original
-        // 选区里只有空白（空格 / 换行）：有快照，只是折叠后看不见。
-        revision.originalText.isNotEmpty() -> "（空白）"
-        revision.originalLength > 0 -> "（原文未记录）"
-        else -> null
+    // 两端各自先截到摘要长度再对齐：被截掉的尾巴注定排不出来，不必让对齐算法为它多跑。
+    val oldFlat = revisionExcerpt(revision.originalText).take(ExcerptMaxChars)
+    val newFlat = revisionExcerpt(if (legacy) revision.text else revision.editedText)
+        .take(ExcerptMaxChars)
+
+    val out = ArrayList<ReviewSpan>(3)
+    if (oldFlat.isEmpty()) {
+        when {
+            // 选区里只有空白（空格 / 换行）：有快照，只是折叠后看不见。
+            revision.originalText.isNotEmpty() -> out += ReviewSpan("（空白）", ReviewSpanKind.Kept)
+            // 区间非空却没有原文快照：正文里那块字也是被换掉的，照样写成删除。
+            revision.originalLength > 0 -> out += ReviewSpan("（原文未记录）", ReviewSpanKind.Deleted)
+        }
     }
-    return RevisionRowLines(originalLine, updated)
+    for (op in CharDiff.diff(oldFlat, newFlat)) {
+        val span = when (op) {
+            is CharDiff.Op.Keep -> ReviewSpan(
+                oldFlat.substring(op.oldStart, op.oldStart + op.length),
+                ReviewSpanKind.Kept,
+            )
+            is CharDiff.Op.Delete -> ReviewSpan(
+                oldFlat.substring(op.oldStart, op.oldStart + op.length),
+                ReviewSpanKind.Deleted,
+            )
+            is CharDiff.Op.Insert -> ReviewSpan(op.text, ReviewSpanKind.Inserted)
+        }
+        if (span.text.isEmpty()) continue
+        val last = out.lastOrNull()
+        // 相邻同身份的字并成一段：减少文本样式区间，也让「整段删除」只有一段。
+        if (last != null && last.kind == span.kind) {
+            out[out.lastIndex] = last.copy(text = last.text + span.text)
+        } else {
+            out += span
+        }
+    }
+    return truncateSpans(out)
 }
 
+/** 只留前 [ExcerptMaxChars] 个字：两行排不下，多出来的注定被省略号吞掉。 */
+private fun truncateSpans(spans: List<ReviewSpan>): List<ReviewSpan> {
+    var left = ExcerptMaxChars
+    val out = ArrayList<ReviewSpan>(spans.size)
+    for (s in spans) {
+        if (left <= 0) break
+        if (s.text.length <= left) {
+            out += s
+            left -= s.text.length
+        } else {
+            out += s.copy(text = s.text.take(left))
+            left = 0
+        }
+    }
+    return out
+}
+
+
 /**
- * 一条修订：上行原文（红色删除线）、下行改文；两行都只占一行，超出省略。
- * 原文行按「整段选区」画删除线（只加字也照画，不去算纯插入）；纯删除没有改文行。
+ * 一条修订：一行审阅摘要——原文照排，删掉的字红字 + 删除线，新写的字绿字。
+ * 最多折两行，再多用省略号；与正文审阅视图同一套颜色。
  */
 @Composable
 private fun RevisionListRow(
     revision: TextRevision,
     active: Boolean,
     palette: Palette,
-    strike: Color,
     nav: PanelNav,
     index: Int,
     /** 当前展开左滑按钮的行键（同时只展开一行，见 [SwipeRevealRow]）。 */
@@ -279,7 +319,25 @@ private fun RevisionListRow(
     onDelete: () -> Unit,
 ) {
     val clickSrc = remember { MutableInteractionSource() }
-    val lines = remember(revision) { revisionRowLines(revision) }
+    val spans = remember(revision) { revisionReviewSpans(revision) }
+    val line = remember(spans) {
+        buildAnnotatedString {
+            for (span in spans) {
+                when (span.kind) {
+                    ReviewSpanKind.Kept -> append(span.text)
+                    ReviewSpanKind.Deleted -> withStyle(
+                        SpanStyle(
+                            color = Color(REVIEW_DELETED_ARGB),
+                            textDecoration = TextDecoration.LineThrough,
+                        ),
+                    ) { append(span.text) }
+                    ReviewSpanKind.Inserted -> withStyle(
+                        SpanStyle(color = Color(REVIEW_INSERTED_ARGB)),
+                    ) { append(span.text) }
+                }
+            }
+        }
+    }
     SwipeRevealRow(
         rowKey = "rev:${revision.id}",
         openKey = openKey,
@@ -289,34 +347,17 @@ private fun RevisionListRow(
             .panelHover(nav, index),
         action = SwipeAction("删除", SwipeActionTone.Delete, onDelete),
     ) {
-        Column(
+        Text(
+            text = line,
+            color = palette.text,
+            fontSize = 13.sp,
+            lineHeight = 18.sp,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
             modifier = Modifier
                 .fillMaxWidth()
                 .clickable(interactionSource = clickSrc, indication = null, onClick = onJump)
                 .padding(horizontal = 12.dp, vertical = 10.dp),
-        ) {
-            lines.original?.let { original ->
-                Text(
-                    text = original,
-                    color = strike,
-                    fontSize = 13.sp,
-                    lineHeight = 18.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    textDecoration = TextDecoration.LineThrough,
-                )
-            }
-            if (lines.updated.isNotEmpty()) {
-                Text(
-                    text = lines.updated,
-                    color = palette.text,
-                    fontSize = 13.sp,
-                    lineHeight = 18.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(top = if (lines.original == null) 0.dp else 2.dp),
-                )
-            }
-        }
+        )
     }
 }

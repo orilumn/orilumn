@@ -205,11 +205,18 @@ object CjkLatinSpacing {
      * 凡是「读者要看 / 要带走」的文字（复制、摘录）都得按本表把它们摘掉，否则
      * 「汉字和字母之间还夹着一个空格」会漏进剪贴板。
      *
-     * 选区**不用另改**：零宽字位的 x 与它后一个字相同，命中（`LineHitTest` 的二分）取的是
-     * 「最后一个 x ≤ 触点的字」，所以触点落在接缝上得到的是后一个字，手柄不会在接缝上多停一下。
+     * ## 选区必须另改（2026-11-10 真机纠正）
+     *
+     * 原以为「零宽字位的 x 与它后一个字相同 ⇒ 二分永远落到后一个字，手柄不会在接缝上多停一下」。
+     * **这个前提是错的**：行内盒推进量记在「空格 → 后一个字」之间（`判断出 <code>customers</code>`
+     * 的 17px 框内边距就是记在空格字位上的），于是 `xs[空白]` 与 `xs[后字]` 之间多出一段
+     * **没有墨的 x 区间**，触点落在里面会二分成那个空白字位 ⇒ 读者拖手柄能选中一段纯空白
+     * （真机反馈原话：「拖动选区手柄可以选到单独的空白字符」）。字间距、JUSTIFY 余量同理。
+     * 命中侧现在用 [isEatenSpaceSlot] 跳过这些字位（`LineHitTest.hit`）。
      *
      * **不另立一套判据**：直接从 [gaps] 的 `spaceCount` 展开 —— 间隙检出一处，这里就摘一处，
-     * 两处永远同源（同一条规则写成两份实现是本仓最贵的教训）。
+     * 两处永远同源（同一条规则写成两份实现是本仓最贵的教训）。[isEatenSpaceSlot] 是同一个判据的
+     * 「只判一位」形式（命中每帧都问一次，整段扫一遍太贵），一致性由测试钉住。
      */
     fun eatenSpaceSlots(text: CharSequence): IntArray {
         val gaps = gaps(text)
@@ -222,6 +229,27 @@ object CjkLatinSpacing {
             for (s in 1..g.spaceCount) out[k++] = g.leftIndex + s
         }
         return out
+    }
+
+    /**
+     * [index] 这个字位是不是接缝上被吃成零宽的分隔空白（**命中侧判据：这些字位不可选**）。
+     *
+     * 与 [eatenSpaceSlots] 同源同判（[seamKind] + [isSeparatingSpace] + [opposite]），只是不展开
+     * 整张表、只判一个位：拖选手柄时每帧都要问一次，整段扫一遍太贵（大章 / `<pre>` 叶上万字）。
+     * 两条实现的一致性由 `CjkLatinSpacingTest` 的锁用例钉住 —— 改判据必须两处一起改。
+     *
+     * 判定：字位本身是分隔空白，且它所在的**整串**空白两侧（跳过整串）恰好是一对中西接缝；
+     * 串头/串尾落在段首段尾（另一头没有码本）不算 —— 与 [gaps] 的 `after < n` 守卫同判。
+     */
+    fun isEatenSpaceSlot(text: CharSequence, index: Int): Boolean {
+        if (index !in 0 until text.length) return false
+        if (!isSeparatingSpace(text[index])) return false
+        var from = index
+        while (from > 0 && isSeparatingSpace(text[from - 1])) from--
+        var to = index + 1
+        while (to < text.length && isSeparatingSpace(text[to])) to++
+        if (from == 0 || to >= text.length) return false
+        return opposite(seamKind(codePointBefore(text, from)), seamKind(codePointAt(text, to)))
     }
 
     /**
@@ -519,4 +547,19 @@ object CjkLatinSpacing {
 
     /** 码本占用的 UTF-16 码元数（代理对 2、其余 1）。 */
     private fun charCountOf(cp: Int): Int = if (cp > 0xFFFF) 2 else 1
+
+    /**
+     * 读 [i] **之前**那个码本（代理对感知），与 [codePointAt] 反向配对。
+     *
+     * [isEatenSpaceSlot] 要判「空白串左边那个字」是不是中西接缝的一侧；扩展 B 的表意字是代理对，
+     * 直接读 `s[i - 1]` 会读到低代理（判成 [KIND_NONE]）⇒ 接缝漏判 ⇒ 那个空白又变成可选。
+     */
+    private fun codePointBefore(s: CharSequence, i: Int): Int {
+        val last = s[i - 1].code
+        if (last in 0xDC00..0xDFFF && i >= 2) {
+            val first = s[i - 2].code
+            if (first in 0xD800..0xDBFF) return 0x10000 + ((first - 0xD800) shl 10) + (last - 0xDC00)
+        }
+        return last
+    }
 }

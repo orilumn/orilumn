@@ -4,6 +4,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import orilumn.reader.engine.text.preprocess.CjkLatinSpacing
 
 /** 选区两端的拖动柄方向。 */
 enum class SelectionHandle { Start, End }
@@ -156,13 +157,30 @@ internal fun selectionUnitAt(text: String, offset: Int, blockEnds: IntArray? = n
     val i = offset.coerceIn(0, text.length - 1)
     val block = blockRangeAt(text.length, i, blockEnds)
     val c = text[i]
-    return when {
+    val unit = when {
         isCjk(c) || isSentenceTerminator(c) -> sentenceRange(text, i, block)
         isClosingPunctuation(c) ->
             if (i > block.first) sentenceRange(text, i - 1, block) else codePointRange(text, i, block)
         isWordChar(c) -> wordRange(text, i, block)
         else -> codePointRange(text, i, block)
     }
+    return trimEatenSeamSpaces(text, unit)
+}
+
+/**
+ * 选区单位的两端不落在**被画成零宽的接缝空白**上（`Int。 Kotlin` 的整句会从那个空格起手）。
+ *
+ * 那个字位没有墨，留着它不会多画字，但会让选区**左缘/右缘多出一段纯空白**（行内盒推进量
+ * 记在「空格 → 后一个字」之间，`判断出 <code>customers</code>` 就是 6px 框内边距那一段）
+ * —— 读者看到的是「选区里选中了一个空白字符」。命中侧同判据（`LineHitTest`），这里补齐长按入口。
+ */
+private fun trimEatenSeamSpaces(text: String, unit: IntRange): IntRange {
+    if (unit.isEmpty()) return unit
+    var s = unit.first
+    var e = unit.last + 1
+    while (s < e && CjkLatinSpacing.isEatenSpaceSlot(text, s)) s++
+    while (e > s && CjkLatinSpacing.isEatenSpaceSlot(text, e - 1)) e--
+    return if (e > s) s..(e - 1) else unit
 }
 
 /** 落点所在的排版叶区间 `[start, endExclusive)`；无块表时是整章。 */

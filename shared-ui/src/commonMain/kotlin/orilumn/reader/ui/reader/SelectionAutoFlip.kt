@@ -1,6 +1,7 @@
 package orilumn.reader.ui.reader
 
 import orilumn.reader.engine.skia.DrawLine
+import orilumn.reader.engine.text.preprocess.CjkLatinSpacing
 import kotlin.math.exp
 
 /**
@@ -172,6 +173,14 @@ internal fun selectionSideOffset(
                 else -> 0f
             }
         } ?: return null
-    val index = if (direction < 0) line.range.first else line.range.last
+    // 靠边字可能正好是接缝上被画成零宽的分隔空白（`Int。 Kotlin` 那个空格挂在行首/行尾时）：
+    // 落上去等于给选区接一段纯空白，往内挪到第一个有墨的字（与 `LineHitTest` / 长按入口同判据）。
+    var index = if (direction < 0) line.range.first else line.range.last
+    if (direction < 0) {
+        while (index <= line.range.last && CjkLatinSpacing.isEatenSpaceSlot(line.text, index)) index++
+    } else {
+        while (index >= line.range.first && CjkLatinSpacing.isEatenSpaceSlot(line.text, index)) index--
+    }
+    if (index !in line.range) return null
     return line.charBase + index
 }

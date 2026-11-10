@@ -165,6 +165,46 @@ class CjkLatinSpacingTest {
     }
 
     @Test
+    fun `isEatenSpaceSlot agrees with the eaten slot table on every position`() {
+        // 命中侧（`LineHitTest`）用「只判一位」的 O(空白串长) 形式跳过不可选的接缝空白，
+        // 复制/摘录用整张表。两条实现必须逐位一致 —— 改判据漏改一处，症状是「复制干净了、
+        // 但拖手柄又能选中那段空白」这种只在真机上看得见的半修。
+        val corpus = listOf(
+            "中文 Rust 的",
+            "Int。 Kotlin",
+            "中  A",
+            "中 \u00A0A",
+            "中文English",
+            "中\tA",
+            "中\u3000A",
+            "中 A中文",
+            "中文 ",
+            " 中文A",
+            "A 中文",
+            "中文 — A",
+            "中文, A",
+            "中，A",
+            "Rust 的所有权",
+            "\uD840\uDC00 A",
+            "中 A\uD840\uDC00",
+            "",
+        )
+        for (text in corpus) {
+            val eaten = CjkLatinSpacing.eatenSpaceSlots(text).toHashSet()
+            for (i in text.indices) {
+                assertEquals(
+                    "text=<$text> index=$i",
+                    i in eaten,
+                    CjkLatinSpacing.isEatenSpaceSlot(text, i),
+                )
+            }
+            // 越界位置一律 false（命中侧会拿 endExcl 之类问一句）。
+            assertTrue(!CjkLatinSpacing.isEatenSpaceSlot(text, -1))
+            assertTrue(!CjkLatinSpacing.isEatenSpaceSlot(text, text.length))
+        }
+    }
+
+    @Test
     fun `half-width space and nbsp are one and the same run`() {
         // 两种分隔空格不分类，连续计数（否则 `中 \u00A0A` 会在 NBSP 处断链、少算一个）。
         assertEquals(listOf(CjkLatinGap(0, 0.25f, spaceCount = 2)), gapsOf("中 \u00A0A"))

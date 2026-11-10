@@ -8,6 +8,8 @@ import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.time.platformNowMs
 import orilumn.reader.data.epub.EpubResourceReader
 import orilumn.reader.data.epub.EpubParser
+import orilumn.reader.data.revision.RevisionStyleSpan
+import orilumn.reader.data.revision.TextRevision
 import orilumn.reader.engine.css.BookStyleProbe
 import orilumn.reader.engine.css.CssBundle
 import orilumn.reader.engine.css.LightCssParser
@@ -258,6 +260,11 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
      *
      * 只改本控制器的修订表与页数清单基线；**章树与分页表的作废由宿主显式调
      * [invalidateChapterContent]**（一次提交可能只改一章，没必要动别的章）。
+     *
+     * 重读只换「库里那份表」：本章的**原文快照**（[ChapterRevisionMap.originalTexts] /
+     * `originalBlockEnds`）是载入章树时按该章结构补出来的，库给不出来。整本替换成裸表会把
+     * 其余各章打回「只有区间、没有原文」——它们随后不会重排（改的是别的章），审阅痕迹于是
+     * 一条都给不出来：翻回前一页，红字绿字全变黑。内容没变的章因此沿用旧表的补齐结果。
      */
     suspend fun reloadTextRevisions() {
         reviewSwitchAnchor = null
@@ -268,16 +275,53 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
             return
         }
         val t0 = platformNowMs()
+        val previous = revisionMaps
         revisionMaps = runCatching {
             store.textRevisionsForBook(bookId)
                 .groupBy { it.chapter }
-                .mapValues { (_, list) -> ChapterRevisionMap(list) }
+                .mapValues { (chapter, list) -> carryOverOverlay(previous[chapter], list) }
         }.onFailure {
             Logger.w(logTag, "revisions load FAIL book=$bookId ${it::class.simpleName}: ${it.message}")
         }.getOrElse { emptyMap() }
         bookContentRev = computeBookContentRev()
         Logger.w(logTag, "revisions loaded book=$bookId chapters=${revisionMaps.size} " +
             "total=${revisionMaps.values.sumOf { it.revisions.size }} t=${platformNowMs() - t0}ms")
+    }
+
+    /**
+     * 库里的本章修订 → 本章修订表；内容与上一版相同（[ChapterRevisionMap.contentRev]）时
+     * 把旧表的**原文快照**按修订内容逐条搬过来（见 [reloadTextRevisions]）。
+     *
+     * 判据用内容版本而不是「表实例相等」：清单两端的摘要（[TextRevision.originalText] /
+     * [TextRevision.editedText]）与 id / 时间戳会变，却不进内容版本——它们不影响排版，
+     * 不该因为一次清单回填就把全章的审阅痕迹抹掉。
+     */
+    private fun carryOverOverlay(
+        previous: ChapterRevisionMap?,
+        list: List<TextRevision>,
+    ): ChapterRevisionMap {
+        val fresh = ChapterRevisionMap(list)
+        if (previous == null || previous.originalTexts.isEmpty()) return fresh
+        if (fresh.contentRev != previous.contentRev) return fresh
+        // 按内容认修订（区间 + 替换文字 + 样式 + 组号），不按位置 / id：两份表的排序键里
+        // 有 id，删除后再加一条同内容的修订会让顺序换位，按位搬就会张冠李戴。
+        val texts = HashMap<TextRevision, String>(list.size * 2)
+        val known = HashMap<RevisionContentKey, String>(previous.originalTexts.size * 2)
+        for ((r, text) in previous.originalTexts) known[RevisionContentKey(r)] = text
+        for (r in fresh.revisions) known[RevisionContentKey(r)]?.let { texts[r] = it }
+        if (texts.isEmpty()) return fresh
+        return ChapterRevisionMap(list, previous.originalBlockEnds, texts)
+    }
+
+    /** 修订的**排版内容**身份：决定原文快照能不能从上一版搬过来（见 [carryOverOverlay]）。 */
+    private data class RevisionContentKey(
+        val charStart: Int,
+        val charEnd: Int,
+        val text: String,
+        val groupId: Long,
+        val styles: List<RevisionStyleSpan>?,
+    ) {
+        constructor(r: TextRevision) : this(r.charStart, r.charEnd, r.text, r.groupId, r.styles)
     }
 
     /**

@@ -72,6 +72,32 @@ class CjkLatinSpacingTest {
     }
 
     @Test
+    fun `closing bracket glued to latin counts as the western side`() {
+        // 真机 2026-11-10：同页两个 `main()` 长成两种宽度——`main()函数` 只剩盒内边距，
+        // `main() 函数` 多出一整格作者手打的空格（`)` 判 NONE ⇒ 接缝断在这里，空格吃不掉）。
+        // 收尾括号紧贴西文字母/数字时并入西文侧，两处得到同一道间隙。
+        assertEquals(listOf(CjkLatinGap(5, 0.25f)), gapsOf("main()函数"))
+        assertEquals(listOf(CjkLatinGap(5, 0.25f, spaceCount = 1)), gapsOf("main() 函数"))
+        assertEquals(listOf(CjkLatinGap(2, 0.25f)), gapsOf("x()中"))
+        assertEquals(listOf(CjkLatinGap(8, 0.25f, spaceCount = 1)), gapsOf("println()\u00A0和"))
+        // 方括号 / 花括号 / 右尖括号同理。
+        assertEquals(listOf(CjkLatinGap(5, 0.25f)), gapsOf("arr[0]中"))
+        assertEquals(listOf(CjkLatinGap(4, 0.25f)), gapsOf("map{}中"))
+        assertEquals(listOf(CjkLatinGap(6, 0.25f)), gapsOf("List<T>中"))
+    }
+
+    @Test
+    fun `opening brackets and cjk-attached brackets stay out of the seam`() {
+        // 与收尾括号相反的三条边界：开括号不推开后文、括号左边是汉字时不算西文、
+        // 逗号这类句读仍按「作者已给出间隔」隔断（2026-10-03 口径不变）。
+        assertTrue(gapsOf("中文(English)").isEmpty())
+        assertTrue(gapsOf("main(参数)").isEmpty())
+        assertTrue(gapsOf("函数()").isEmpty())
+        assertTrue(gapsOf("中文,English").isEmpty())
+        assertTrue(gapsOf("中文 。").isEmpty())
+    }
+
+    @Test
     fun `real letters and digits still get gaps on both sides`() {
         // 收紧判据不能把真边界一起收掉：相邻、空格分隔、两侧反向都要照旧。
         assertEquals(listOf(CjkLatinGap(0, 0.25f)), gapsOf("中A"))
@@ -185,6 +211,10 @@ class CjkLatinSpacingTest {
             "中文, A",
             "中，A",
             "Rust 的所有权",
+            "main() 函数",
+            "main()函数",
+            "中文(English)",
+            "函数()",
             "\uD840\uDC00 A",
             "中 A\uD840\uDC00",
             "",

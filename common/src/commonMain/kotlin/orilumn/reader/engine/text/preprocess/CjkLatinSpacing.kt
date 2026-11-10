@@ -109,6 +109,22 @@ data class CjkLatinGap(
  * - Latin-1 里的 `± × ÷ ° © « » ¢ £ ¥ § ¶ ·` 都是符号，却被当成「西方字母」⇒ 符号两侧也插间隙。
  *
  * 收紧后的具体范围与逐条理由见 [isCjk] / [isWestern] 的 KDoc。
+ *
+ * ## 唯一的例外：紧贴拉丁字母的**收尾括号**并入西文侧（2026-11-10 真机）
+ *
+ * 「标点天然隔断」这条对逗号、句号成立 —— 作者写 `中文,English` 时标点自己就是间隔。
+ * 但对**收尾括号**不成立：`main()` 后面紧跟汉字时，作者没有、也不该在 `)` 与汉字之间
+ * 再打空格，而括号本身并不提供任何视觉间隔（它紧贴着字母）。旧口径下 `main()函数`
+ * 与 `main() 函数` 于是长成两种宽度：前者只剩盒内边距，后者多出一整格作者手打的空格
+ * （那格不是接缝空白，吃不掉）—— 同一个短语在同一页上两种距离，读者一眼就看出来。
+ *
+ * ⇒ 判据：`)` `]` `}` `>` 若**向左紧贴**拉丁字母/数字（中间只隔着 ASCII 标点，不跨空白），
+ * 就按西文侧参与接缝：`main()函数` 得到间隙，`main() 函数` 的空白被吃掉换成同一道间隙。
+ * **只收收尾括号**，且只认「左边贴着西文」这个方向：
+ * - `(` `[` `{` 不算（`main(参数)` 的开括号后面不该被推开一段）；
+ * - `中文,English` 的逗号左边是汉字 ⇒ 不算（标点隔断的语义保持原样）；
+ * - `函数()` 的右括号左边是汉字 ⇒ 不算（`数` 与 `(` 之间照旧无间隙）。
+ *
  * **已知不覆盖**：假名（`U+3041..U+30FF`）与谚文等仍判 NONE ⇒ 日文/韩文与拉丁之间没有间隙。
  * 那是本项目语料（中译技术书）之外的形态，本轮**未裁决**，不在此处凭空定死。
  *
@@ -143,9 +159,9 @@ object CjkLatinSpacing {
         while (i < n) {
             val cp = codePointAt(text, i)
             val iNext = i + charCountOf(cp)
-            // 接缝判据用 [seamKind]（表意文字**或中文标点**）：标点那一侧只吃空白、不发间隙
-            // （产品口径 2026-11-10，宽度与条目由 [emitGap] 决定）。
-            val ciKind = seamKind(cp)
+            // 接缝判据用 [seamKindAt]（表意文字**或中文标点**，外加紧贴西文的收尾括号）：
+            // 标点那一侧只吃空白、不发间隙（产品口径 2026-11-10，宽度与条目由 [emitGap] 决定）。
+            val ciKind = seamKindAt(text, i)
             // ⚠ 后继存在与否必须按 `iNext < n` 判，**不能**用旧写法的 `i + 1 < n`：
             //   边界字是代理对（U+20000 起的 CJK 扩展 B）时 `iNext == i + 2`，
             //   旧判据在「该字位于段末」时会放行到 `text[i + 2]` → **越界崩排版线程**
@@ -185,11 +201,11 @@ object CjkLatinSpacing {
                     //   **仍在行区间内**，于是几乎每行以空格收尾的正文都会走到这里）。
                     if (after < n) {
                         val afterCp = codePointAt(text, after)
-                        if (opposite(ciKind, seamKind(afterCp))) {
+                        if (opposite(ciKind, seamKindAt(text, after))) {
                             emitGap(out, iNext - 1, cp, afterCp, gapEm, spaces)
                         }
                     }
-                } else if (opposite(ciKind, seamKind(nextChar.code))) {
+                } else if (opposite(ciKind, seamKindAt(text, iNext))) {
                     emitGap(out, iNext - 1, cp, nextChar.code, gapEm, 0)
                 }
             }
@@ -249,7 +265,7 @@ object CjkLatinSpacing {
         var to = index + 1
         while (to < text.length && isSeparatingSpace(text[to])) to++
         if (from == 0 || to >= text.length) return false
-        return opposite(seamKind(codePointBefore(text, from)), seamKind(codePointAt(text, to)))
+        return opposite(seamKindBefore(text, from), seamKindAt(text, to))
     }
 
     /**
@@ -446,6 +462,48 @@ object CjkLatinSpacing {
         isWestern(cp) -> KIND_WESTERN
         else -> KIND_NONE
     }
+
+    /**
+     * [seamKind] 的**带上下文**形式：紧贴在拉丁字母/数字后面的收尾括号 `) ] } >` 并入西文侧。
+     *
+     * 为什么需要上下文：`)` 算不算「西文那一头」取决于它**左边**贴着的是什么，光看这个字符
+     * 本身分不出来（见类 KDoc「唯一的例外」）。判据只有这一条方向：向左跳过连续的 ASCII
+     * 标点，看第一个字是不是字母/数字；跨过空白或汉字就不算（`中文,English` 的逗号、
+     * `函数()` 的右括号都留在 NONE）。
+     *
+     * [gaps] 与 [isEatenSpaceSlot] 共用本函数 —— 复制/选区摘空格、绘制落间隙必须是同一份判据。
+     */
+    private fun seamKindAt(text: CharSequence, i: Int): Int {
+        if (i !in 0 until text.length) return KIND_NONE
+        val cp = codePointAt(text, i)
+        val base = seamKind(cp)
+        if (base != KIND_NONE) return base
+        if (isAsciiClosingBracket(cp) && gluedToWestern(text, i)) return KIND_WESTERN
+        return KIND_NONE
+    }
+
+    /** [endExcl] **之前**那个字的接缝类别（代理对感知的下标回溯）。 */
+    private fun seamKindBefore(text: CharSequence, endExcl: Int): Int {
+        if (endExcl <= 0 || endExcl > text.length) return KIND_NONE
+        val cp = codePointBefore(text, endExcl)
+        return seamKindAt(text, endExcl - charCountOf(cp))
+    }
+
+    /** 收尾括号族（只收右半边；开括号不参与，见类 KDoc）。 */
+    private fun isAsciiClosingBracket(cp: Int): Boolean =
+        cp == 0x29 || cp == 0x5D || cp == 0x7D || cp == 0x3E
+
+    /** 从 [i] 向左跳过连续的 ASCII 标点/符号，看紧邻的是不是西文字母或数字（不跨空白）。 */
+    private fun gluedToWestern(text: CharSequence, i: Int): Boolean {
+        var j = i - 1
+        while (j >= 0 && isAsciiPunct(text[j].code)) j--
+        if (j < 0) return false
+        return isWestern(codePointBefore(text, j + 1))
+    }
+
+    /** ASCII 标点/符号（不含空格与换行：`0x20`/`0x09`/`0x0A` 都不在里面）。 */
+    private fun isAsciiPunct(c: Int): Boolean =
+        c in 0x21..0x2F || c in 0x3A..0x40 || c in 0x5B..0x60 || c in 0x7B..0x7E
 
     /**
      * 记一条接缝：**中文标点那一侧只吃空白、不注入间隙**（产品口径 2026-11-10）。

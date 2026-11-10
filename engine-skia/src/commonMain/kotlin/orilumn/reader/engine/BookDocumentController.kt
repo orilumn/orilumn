@@ -6710,6 +6710,14 @@ private fun finishCanonicalBackground(
     /** D-18 伴生：与 [chapterText] 同尺的块尾偏移；选区据此不跨块。 */
     fun chapterTextBlockEnds(index: Int): IntArray? = unitAt(index)?.chapterTextBlockEnds()
 
+    /**
+     * 本章「中西接缝上被画成零宽的空白字位」（升序，整章偏移）；未就绪返回空表。
+     *
+     * 文本模型里这些字**还在**（标注 / 进度 / 下标全按原文算），只是排版画成 0 宽。
+     * 复制与摘录这类「带走文字」的路径按它摘掉。
+     */
+    fun chapterTextSeamSpaces(index: Int): IntArray = unitAt(index)?.chapterTextSeamSpaces() ?: IntArray(0)
+
     /** One page forward within a chapter. A line-anchored slice (not a canonical page) snaps to the
  *  canonical page after the one containing its char, avoiding content skips. */
     fun nextPageInChapter(unit: ChapterUnit, slice: PageSlice): PageSlice? {

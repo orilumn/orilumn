@@ -1,5 +1,6 @@
 package orilumn.reader.engine.text.preprocess
 
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -130,6 +131,37 @@ class CjkLatinSpacingTest {
         // 「滑块完全不起作用」。现在：连续空格全部计入 spaceCount，只留一个注入的间隙。
         assertEquals(listOf(CjkLatinGap(0, 0.25f, spaceCount = 2)), gapsOf("中  A"))
         assertEquals(listOf(CjkLatinGap(0, 0.25f, spaceCount = 5)), gapsOf("A     中"))
+    }
+
+    // ---- 中文标点接缝：吃空白、不发间隙（产品口径 2026-11-10）----
+
+    @Test
+    fun `punctuation seam eats the space but injects no gap`() {
+        // 用户原话：「中文标点与英文字符之间不要有额外的混排字距」。
+        // 全角标点的字身里本就带着半个字身的留白，再叠一道 0.25em 就成了一个空格宽的空档
+        // （真机 `Int。 Kotlin` 的实测缺陷）。所以：空白照吃（spaceCount），间隙宽 0。
+        assertEquals(listOf(CjkLatinGap(3, 0f, spaceCount = 1)), gapsOf("Int。 Kotlin"))
+        assertEquals(listOf(CjkLatinGap(2, 0f, spaceCount = 1)), gapsOf("中文， English"))
+        assertEquals(listOf(CjkLatinGap(0, 0f, spaceCount = 1)), gapsOf("。 Rust"))
+        // 相邻（没有空白可吃）= 无事可做，一条都不发（标点旁不插缝）。
+        assertTrue(gapsOf("Int。Kotlin").isEmpty())
+        assertTrue(gapsOf("中文，English").isEmpty())
+    }
+
+    @Test
+    fun `dash and ellipsis are not punctuation seams`() {
+        // 刻意不收 `—`/`―`/`…`：两侧留不留空白是作者的排版选择（`Rust — 中文` 很常见）。
+        assertTrue(gapsOf("Rust — 中文").isEmpty())
+        assertTrue(gapsOf("Rust…中文").isEmpty())
+    }
+
+    @Test
+    fun `eaten space slots are exactly the spaces gaps swallow`() {
+        // 复制 / 摘录按这张表摘字（原文与下标一个不动，只在「带走文字」时处理）。
+        assertArrayEquals(intArrayOf(2, 7), CjkLatinSpacing.eatenSpaceSlots("中文 Rust 的"))
+        assertArrayEquals(intArrayOf(4), CjkLatinSpacing.eatenSpaceSlots("Int。 Kotlin"))
+        assertArrayEquals(intArrayOf(1), CjkLatinSpacing.eatenSpaceSlots("中  A").copyOf(1))
+        assertArrayEquals(IntArray(0), CjkLatinSpacing.eatenSpaceSlots("中文English"))
     }
 
     @Test

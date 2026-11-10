@@ -48,9 +48,49 @@ class AnnotationStateQuoteTest {
         assertNull(host.lastUpdate)
     }
 
+    @Test
+    fun loadStripsEatenSeamSpacesFromQuote() = runBlocking {
+        // 中西接缝上那个空格**还在正文里**（原文一个字不动，下标照它算），只是排版画成零宽。
+        // 摘录是「带走文字」⇒ 必须摘掉，否则清单里会看到「判断出 customers」。
+        val old = Annotation(
+            id = 7,
+            bookId = 1,
+            chapter = 3,
+            charStart = 0,
+            charEnd = 13,
+            kind = AnnotationKind.Highlight,
+        )
+        val host = FakeHost(listOf(old), chapterText = "判断出 customers", seamSpaces = intArrayOf(3))
+        val state = AnnotationState(host)
+
+        state.load(3)
+
+        assertEquals("判断出customers", state.annotations.single().quote)
+    }
+
+    @Test
+    fun loadRemapsOffsetsPastEatenSeamSpaces() = runBlocking {
+        // 选区起点落在接缝之后：摘掉空白后偏移要跟着回缩，不能错位。
+        val old = Annotation(
+            id = 7,
+            bookId = 1,
+            chapter = 3,
+            charStart = 3,
+            charEnd = 7,
+            kind = AnnotationKind.Highlight,
+        )
+        val host = FakeHost(listOf(old), chapterText = "中文 Rust 的", seamSpaces = intArrayOf(2, 7))
+        val state = AnnotationState(host)
+
+        state.load(3)
+
+        assertEquals("Rust", state.annotations.single().quote)
+    }
+
     private class FakeHost(
         private val chapterAnnotations: List<Annotation>,
         private val chapterText: String?,
+        private val seamSpaces: IntArray = IntArray(0),
     ) : ReaderHost {
         var lastUpdate: Annotation? = null
 
@@ -73,6 +113,8 @@ class AnnotationStateQuoteTest {
             val e = endExclusive.coerceIn(s, text.length)
             return text.substring(s, e)
         }
+
+        override fun seamSpaceOffsets(chapter: Int): IntArray = seamSpaces
 
         override suspend fun annotationsForChapter(chapter: Int): List<Annotation> = chapterAnnotations
         override suspend fun updateAnnotation(annotation: Annotation): Boolean {

@@ -416,6 +416,8 @@ class TabletReaderHost(
 
     override fun reviewBreakOffsets(chapter: Int): IntArray = controller.reviewBreakMarkers(chapter)
 
+    override fun seamSpaceOffsets(chapter: Int): IntArray = controller.chapterTextSeamSpaces(chapter)
+
     // ---- 文本标注：转手给共享 BookRepository/LibraryDb（平台侧只做壳） ----
     //
     // 坐标口径（方案 §8.8）：标注落库一律是**原书空间**；阅读面（选区 / 装饰 / 命中）

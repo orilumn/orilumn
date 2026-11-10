@@ -8,10 +8,11 @@ import orilumn.reader.engine.css.FontRun
  * @property leftIndex index of the boundary char's last UTF-16 unit (the gap sits between
  *   `text[leftIndex]` and `text[leftIndex] + 1`).
  * @property gapEm gap advance in em (0.25 = 1/4 em by default).
- * @property spaceCount 该边界上被**一律删除**的连续**空白字符**个数（0 = 边界直接相邻，没有空白可吃）。
+ * @property spaceCount 该边界上被**一律吃掉（画成零宽）**的连续**空白字符**个数（0 = 边界直接相邻，没有空白可吃）。
  *   空白 = 半角空格 / 制表 / NBSP / 窄空格 / 表意空格（U+3000）等**除换行符以外的一切空白**
  *   （判据见 [isSeparatingSpace]）；换行是硬断行，不在「可吃的分隔空白」之列。
- *   整形层把这 [spaceCount] 个字位画成零宽（字符本身留在文本模型里，选中/检索/索引不受影响）。
+ *   整形层把这 [spaceCount] 个字位画成零宽（字符本身留在文本模型里，选中/检索/索引不受影响），
+ *   但「读者要看 / 要带走」的文字会按 [eatenSpaceSlots] 把它们摘掉（复制、摘录）。
  */
 data class CjkLatinGap(
     val leftIndex: Int,
@@ -142,7 +143,9 @@ object CjkLatinSpacing {
         while (i < n) {
             val cp = codePointAt(text, i)
             val iNext = i + charCountOf(cp)
-            val ciKind = kindOf(cp)
+            // 接缝判据用 [seamKind]（表意文字**或中文标点**）：标点那一侧只吃空白、不发间隙
+            // （产品口径 2026-11-10，宽度与条目由 [emitGap] 决定）。
+            val ciKind = seamKind(cp)
             // ⚠ 后继存在与否必须按 `iNext < n` 判，**不能**用旧写法的 `i + 1 < n`：
             //   边界字是代理对（U+20000 起的 CJK 扩展 B）时 `iNext == i + 2`，
             //   旧判据在「该字位于段末」时会放行到 `text[i + 2]` → **越界崩排版线程**
@@ -180,11 +183,14 @@ object CjkLatinSpacing {
                     //   ⇒ 不成边界、不发 gap。这个守卫同时**消掉了越界读** `text[after]`：
                     //   触发形态极常见（文本以分隔空格结尾 `"中 "`；生产里行尾悬挂的文档空白
                     //   **仍在行区间内**，于是几乎每行以空格收尾的正文都会走到这里）。
-                    if (after < n && opposite(ciKind, kindOf(codePointAt(text, after)))) {
-                        out += CjkLatinGap(iNext - 1, gapEm, spaces)
+                    if (after < n) {
+                        val afterCp = codePointAt(text, after)
+                        if (opposite(ciKind, seamKind(afterCp))) {
+                            emitGap(out, iNext - 1, cp, afterCp, gapEm, spaces)
+                        }
                     }
-                } else if (opposite(ciKind, kindOf(nextChar.code))) {
-                    out += CjkLatinGap(iNext - 1, gapEm, 0)
+                } else if (opposite(ciKind, seamKind(nextChar.code))) {
+                    emitGap(out, iNext - 1, cp, nextChar.code, gapEm, 0)
                 }
             }
             i = iNext
@@ -192,6 +198,31 @@ object CjkLatinSpacing {
         return out
     }
 
+    /**
+     * 接缝上被**吃成零宽**的分隔空白字位（升序；`text` 坐标系）。
+     *
+     * 这些字位**仍在文本模型里**（下标、批注、进度照常按含空白的原文算），只是画出来宽度为 0。
+     * 凡是「读者要看 / 要带走」的文字（复制、摘录）都得按本表把它们摘掉，否则
+     * 「汉字和字母之间还夹着一个空格」会漏进剪贴板。
+     *
+     * 选区**不用另改**：零宽字位的 x 与它后一个字相同，命中（`LineHitTest` 的二分）取的是
+     * 「最后一个 x ≤ 触点的字」，所以触点落在接缝上得到的是后一个字，手柄不会在接缝上多停一下。
+     *
+     * **不另立一套判据**：直接从 [gaps] 的 `spaceCount` 展开 —— 间隙检出一处，这里就摘一处，
+     * 两处永远同源（同一条规则写成两份实现是本仓最贵的教训）。
+     */
+    fun eatenSpaceSlots(text: CharSequence): IntArray {
+        val gaps = gaps(text)
+        var n = 0
+        for (g in gaps) n += g.spaceCount
+        if (n == 0) return IntArray(0)
+        val out = IntArray(n)
+        var k = 0
+        for (g in gaps) {
+            for (s in 1..g.spaceCount) out[k++] = g.leftIndex + s
+        }
+        return out
+    }
 
     /**
      * 本行 `[start, endExcl)` 要施加的间隙，**下标已平移成行内局部**（0 = `text[start]`）。
@@ -359,6 +390,64 @@ object CjkLatinSpacing {
      */
     fun isWestern(cp: Int): Boolean =
         cp in 0x0030..0x024F && cp.toChar().isLetterOrDigit()
+
+    /**
+     * 中文标点：**只在「删接缝空白」时算 CJK 侧**（[seamKind]），**永不参与混排间隙**
+     * （[kindOf] 里它仍是 [KIND_NONE]，`gaps` 不会在标点旁边插间隙）。
+     *
+     * 收的是句读与括号引号这两族——它们与拉丁字母之间出现的空白，一律按「接缝空白」删掉；
+     * **刻意不收**破折号 `—`/`―` 与省略号 `…`：这两个符号两侧留不留空白是作者的排版选择
+     * （`Rust — 中文` 这种写法很常见），吃掉会改变作者意图，而它们本来也不会触发间隙。
+     */
+    private fun isCjkPunctuation(cp: Int): Boolean =
+        cp in 0x3001..0x3003 || cp in 0x3008..0x3011 || cp in 0x3014..0x301F ||
+            cp == 0x30FB || cp in 0x2018..0x201D ||
+            cp == 0xFF01 || cp == 0xFF08 || cp == 0xFF09 || cp == 0xFF0C || cp == 0xFF0E ||
+            cp == 0xFF1A || cp == 0xFF1B || cp == 0xFF1F || cp == 0xFF3B || cp == 0xFF3D ||
+            cp == 0xFF5B || cp == 0xFF5D
+
+    /**
+     * 接缝判据（[gaps] / [eatenSpaceSlots] 共用）：CJK 侧 = 表意文字 **或中文标点**。
+     *
+     * 与 [kindOf] 的差别只有「标点算不算 CJK 侧」这一条。标点必须算进来，否则
+     * `Int。 Kotlin` 里 `。` 与 `K` 之间的那个空格永远吃不掉；但**宽度另算** ——
+     * 标点接缝只吃空白、不注入间隙（[emitGap]），因为全角标点的字身里本就带着半个字身的留白。
+     */
+    private fun seamKind(cp: Int): Int = when {
+        isCjk(cp) || isCjkPunctuation(cp) -> KIND_CJK
+        isWestern(cp) -> KIND_WESTERN
+        else -> KIND_NONE
+    }
+
+    /**
+     * 记一条接缝：**中文标点那一侧只吃空白、不注入间隙**（产品口径 2026-11-10）。
+     *
+     * 用户原话：「中文标点与英文字符之间不要有额外的混排字距」。全角标点的字身里本就带着
+     * 半个字身的留白（`。` 的墨在字身左下、右侧空着），作者在它后面打的空格照吃（[spaceCount]），
+     * 但不再叠一道间隙 —— 否则 `Int。 Kotlin` 会变成一个空格宽的空档。
+     *
+     * 两条不同的口径，别合并：
+     * - **表意文字**接缝：间隙宽就是 `gapEm`，**哪怕是 0 也要记**。下游拿的是**位置**不是宽度 ——
+     *   `InlineBoxRuns` 按 `em = 0` 调 [gaps] 判「这一侧是不是接缝」，据此决定吃不吃行内盒
+     *   的内边距/外边距。少记一条，那一侧的白就白留了（`中<span>A</span>文` 的框内边距）。
+     * - **中文标点**接缝：`A，B`、`Kotlin：` 这种「标点两侧本来就挨着」的形态本来就无事可做，
+     *   记一条 0 宽 0 空的条目只会让下游以为这里有一道边界（测试
+     *   `punctuation and symbols never participate` 钉的就是这个）。只有真吃了空白才记。
+     */
+    private fun emitGap(
+        out: MutableList<CjkLatinGap>,
+        leftIndex: Int,
+        a: Int,
+        b: Int,
+        gapEm: Float,
+        spaces: Int,
+    ) {
+        if (isCjkPunctuation(a) || isCjkPunctuation(b)) {
+            if (spaces > 0) out += CjkLatinGap(leftIndex, 0f, spaces)
+        } else {
+            out += CjkLatinGap(leftIndex, gapEm, spaces)
+        }
+    }
 
     private fun kindOf(cp: Int): Int = when {
         isCjk(cp) -> KIND_CJK

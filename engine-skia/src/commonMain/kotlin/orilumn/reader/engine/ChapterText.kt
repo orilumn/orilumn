@@ -1,12 +1,20 @@
 package orilumn.reader.engine
 
 import orilumn.reader.engine.laying.NormalFlowLayout
+import orilumn.reader.engine.text.preprocess.CjkLatinSpacing
 import orilumn.reader.io.Logger
 
-/** 整章文本投影：文本本体 + 每个排版叶的累计块尾偏移（选区用来截断句子/英文词）。 */
+/**
+ * 整章文本投影：文本本体 + 每个排版叶的累计块尾偏移（选区用来截断句子/英文词）
+ * + 中西接缝上被画成零宽的那些空白字位。
+ *
+ * [seamSpaces] 是「读者看得到、但模型里还在」的字位：排版把它们画成零宽、由混排间隙取代，
+ * 而**文本本体一个字都没删**（下标、批注、进度照常按原文算）。复制、摘录要按它把这些位摘掉。
+ */
 internal class ChapterTextProjection(
     val text: String,
     val blockEnds: IntArray,
+    val seamSpaces: IntArray,
 )
 
 /**
@@ -46,6 +54,17 @@ fun ChapterUnit.chapterTextBlockEnds(): IntArray? {
 }
 
 /**
+ * 中西接缝上被画成零宽的空白字位（整章偏移，升序）；与 [chapterText] 同时就绪。
+ *
+ * 这些字位在文本模型里**还在**（选区、标注、进度的下标照常按含空白的原文算），
+ * 只是画出来宽度 0。复制 / 摘录这类「带走文字」的路径按它摘掉，读者才看不到那个空格。
+ */
+fun ChapterUnit.chapterTextSeamSpaces(): IntArray? {
+    chapterText()
+    return chapterTextSeamSpacesCache
+}
+
+/**
  * 整章文本投影回填（选区用）。算的人可能已经不是开书线程——投影被
  * `BookDocumentController.scheduleChapterTextProjection` 挪到后台，开书路径只等排版，不等它。
  * 文本只与叶子/样式有关，版式变化由 `invalidateLayout` 统一清空。
@@ -53,12 +72,14 @@ fun ChapterUnit.chapterTextBlockEnds(): IntArray? {
 internal fun ChapterUnit.putTextProjection(projection: ChapterTextProjection): String {
     chapterTextCache = projection.text
     chapterTextBlockEndsCache = projection.blockEnds
+    chapterTextSeamSpacesCache = projection.seamSpaces
     return projection.text
 }
 
 internal fun ChapterPrepareResult.chapterTextProjection(): ChapterTextProjection {
     val out = StringBuilder(totalChars.coerceAtLeast(0))
     val ends = IntArray(leaves.size)
+    val seam = ArrayList<Int>()
     val drift = StreamDrift()
     for ((i, leaf) in leaves.withIndex()) {
         val leafStr = NormalFlowLayout.leafStreamText(
@@ -68,10 +89,10 @@ internal fun ChapterPrepareResult.chapterTextProjection(): ChapterTextProjection
             hidden = hidden,
             genOf = genOf,
         )
-        ends[i] = appendLeaf(out, i, leafStr, globalCharStarts, totalChars.toLong(), drift)
+        ends[i] = appendLeaf(out, i, leafStr, globalCharStarts, totalChars.toLong(), drift, seam)
     }
     drift.report("heavy", out.length, totalChars)
-    return ChapterTextProjection(out.toString(), ends)
+    return ChapterTextProjection(out.toString(), ends, seam.toIntArray())
 }
 
 /**
@@ -83,6 +104,7 @@ internal fun LightPrepare.chapterTextProjection(): ChapterTextProjection {
     val t0 = orilumn.reader.time.platformNowMs()
     val out = StringBuilder(totalChars.coerceAtLeast(0))
     val ends = IntArray(totalBlocks)
+    val seam = ArrayList<Int>()
     val classify = lightClassify()
     val drift = StreamDrift()
     var tInline = 0L
@@ -109,7 +131,7 @@ internal fun LightPrepare.chapterTextProjection(): ChapterTextProjection {
         val tc = orilumn.reader.time.platformNowMs()
         tInline += tb - ta
         tStream += tc - tb
-        ends[i] = appendLeaf(out, i, leafStr, globalCharStarts, totalChars.toLong(), drift)
+        ends[i] = appendLeaf(out, i, leafStr, globalCharStarts, totalChars.toLong(), drift, seam)
     }
     drift.report("light", out.length, totalChars)
     Logger.d(
@@ -117,7 +139,7 @@ internal fun LightPrepare.chapterTextProjection(): ChapterTextProjection {
         "text-projection blocks=$totalBlocks inline=${tInline}ms stream=${tStream}ms " +
             "total=${orilumn.reader.time.platformNowMs() - t0}ms resolved=${resolvedStyleCount}",
     )
-    return ChapterTextProjection(out.toString(), ends)
+    return ChapterTextProjection(out.toString(), ends, seam.toIntArray())
 }
 
 /** 投影构建中的「叶文本长度 ≠ 该叶字符格数」计数（每章构建一次，只记首例，不刷屏）。 */
@@ -153,10 +175,17 @@ private fun appendLeaf(
     starts: LongArray,
     totalChars: Long,
     drift: StreamDrift,
+    /** 接缝空白字位的收集器（整章偏移）；[leafText] 里的字位加上本叶起点。 */
+    seam: MutableList<Int>,
 ): Int {
     val start = starts.getOrElse(index) { totalChars }
     val end = starts.getOrElse(index + 1) { totalChars }
     drift.check(index, (end - start).toInt(), leafText.length, start)
+    val base = out.length
     out.append(leafText)
+    // 接缝空白：**逐叶**检测（叶文本首尾已 trim，跨叶拼出来的接缝不是真接缝），
+    // 命中就记进整章偏移 —— 复制 / 摘录按它摘字，排版与下标一个都不动。
+    val eaten = CjkLatinSpacing.eatenSpaceSlots(leafText)
+    for (slot in eaten) seam.add(base + slot)
     return out.length
 }

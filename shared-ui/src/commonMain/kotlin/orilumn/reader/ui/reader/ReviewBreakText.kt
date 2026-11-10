@@ -71,3 +71,30 @@ internal fun ReaderHost.reviewBreakText(chapter: Int): ReviewBreakText {
     val marks = reviewBreakOffsets(chapter)
     return if (marks.isEmpty()) ReviewBreakText.NONE else ReviewBreakText(marks)
 }
+
+/**
+ * 本章「读者读的文字」投影：**¶ 痕迹 + 中西接缝上被画成零宽的空白**一起摘掉。
+ *
+ * 接缝空白在文本模型里还在（下标、标注、进度照常按含空白的原文算，用户口径：原文一个字不动），
+ * 只是排版把它画成 0 宽、由混排字距取代。复制、摘录是「带走文字」，必须摘掉，
+ * 否则汉字和字母之间会多出一个空格。
+ *
+ * ⚠ **正文修改卡不用这一口**：那张卡里放的是书里的原文，空格是原文的一部分，
+ * 摘掉会让确认时凭空多出一条「删了一个空格」的修改。卡里继续用 [reviewBreakText]。
+ */
+internal fun ReaderHost.plainTextOf(chapter: Int): ReviewBreakText {
+    val a = reviewBreakOffsets(chapter)
+    val b = seamSpaceOffsets(chapter)
+    if (b.isEmpty()) return if (a.isEmpty()) ReviewBreakText.NONE else ReviewBreakText(a)
+    if (a.isEmpty()) return ReviewBreakText(b)
+    // 两表各自升序，合并去重（同一位置既是 ¶ 又是接缝空白时只摘一次）。
+    val out = IntArray(a.size + b.size)
+    var i = 0
+    var j = 0
+    var k = 0
+    while (i < a.size || j < b.size) {
+        val v = if (j >= b.size) a[i++] else if (i >= a.size) b[j++] else if (a[i] <= b[j]) a[i++] else b[j++]
+        if (k == 0 || out[k - 1] != v) out[k++] = v
+    }
+    return ReviewBreakText(if (k == out.size) out else out.copyOf(k))
+}

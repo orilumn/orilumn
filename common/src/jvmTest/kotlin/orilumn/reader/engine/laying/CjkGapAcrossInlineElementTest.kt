@@ -115,6 +115,32 @@ class CjkGapAcrossInlineElementTest {
     }
 
     @Test
+    fun `punctuation seam across a tag eats the space and injects nothing`() {
+        // 真机原文（Kotlin 书「基本类型」）：
+        // `…的类型为<a href=…><code>Int</code></a>。 Kotlin 推断…`
+        // 用户报的缺陷：`。` 与 `K` 之间多出一个空格宽的空档。原文一个字不动（叶文本里那个空格
+        // 仍在，下标/标注/进度照常按它算），只是：空白吃掉（spaceCount = 1）、间隙宽 0
+        // （全角标点自带半个字身留白，再叠 0.25em 就是一个空格宽）。
+        val p = node(
+            "p",
+            listOf(
+                text("的类型为"),
+                node("a", listOf(node("code", listOf(text("Int"))))),
+                text("。 Kotlin"),
+            ),
+        )
+        val (t, gaps) = leafGaps(p)
+        assertEquals("原文一个字不动（空格仍在文本里）", "的类型为Int。 Kotlin", t)
+        assertEquals(
+            listOf(
+                CjkLatinGap(3, 0.25f, spaceCount = 0), // 为|Int：表意文字接缝，照旧 0.25em
+                CjkLatinGap(7, 0f, spaceCount = 1), // 。|空格|K：吃空白、不发间隙
+            ),
+            gaps,
+        )
+    }
+
+    @Test
     fun `latin-first seam across a tag is eaten too`() {
         val p = node(
             "p",

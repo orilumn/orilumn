@@ -195,6 +195,15 @@ interface ReaderHost {
     fun reviewBreakOffsets(chapter: Int): IntArray = IntArray(0)
 
     /**
+     * 本章「中西接缝上被画成零宽的空白字位」（升序，与 [textOf] 同尺）。
+     *
+     * 这些字**在文本模型里还在**：排版把它们画成 0 宽、由混排字距取代，标注、进度、选区下标
+     * 照常按含空白的原文算（用户口径：原文一个字都不动，只在显示与选区里处理）。
+     * 所以凡是「读者要看 / 要带走」的文字（复制、摘录）都得按本表把它们摘掉。
+     */
+    fun seamSpaceOffsets(chapter: Int): IntArray = IntArray(0)
+
+    /**
      * 本章全部标注（D-19）：按起点、id 升序；读取失败返回空表。
      *
      * `shared-ui` 进章时读一次，之后增删改先改内存并递增装饰修订号，再异步落库；

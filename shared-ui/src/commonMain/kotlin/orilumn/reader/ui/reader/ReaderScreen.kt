@@ -1406,9 +1406,10 @@ fun ReaderScreen(
         if (ch < 0 || e <= s) return
         selectionMenuVisible = false
         // 创建当时的原文快照（D-24）：清单行显示用；章节文本已在缓存里，取不到就留空。
-        // 审阅视图里选区可能跨过「段界痕迹」¶，摘录是给人看的，摘掉它。
+        // 摘录是给人看的：审阅视图的「段界痕迹」¶ 与中西接缝上被画成零宽的空白都要摘掉
+        // （原文与下标一个不动，只在「带走文字」这一口处理）。
         val quote = currentHost.textOf(ch, 0, Int.MAX_VALUE)
-            ?.let { currentHost.reviewBreakText(ch).slice(it, s, e).take(200) }
+            ?.let { currentHost.plainTextOf(ch).slice(it, s, e).take(200) }
         scope.launch {
             val saved = annotationState.add(
                 Annotation(
@@ -1475,10 +1476,10 @@ fun ReaderScreen(
             val newStart = range?.first ?: current.charStart
             val newEnd = range?.second ?: current.charEnd
             val rangeChanged = newStart != current.charStart || newEnd != current.charEnd
-            // 范围变了就同步摘录：清单里那一行显示的是新选中的原文（同样摘掉 ¶ 痕迹）。
+            // 范围变了就同步摘录：清单里那一行显示的是新选中的原文（同样摘掉 ¶ 痕迹与接缝空白）。
             val quote = if (rangeChanged) {
                 currentHost.textOf(current.chapter, 0, Int.MAX_VALUE)
-                    ?.let { currentHost.reviewBreakText(current.chapter).slice(it, newStart, newEnd).take(200) }
+                    ?.let { currentHost.plainTextOf(current.chapter).slice(it, newStart, newEnd).take(200) }
             } else {
                 current.quote
             }
@@ -1839,8 +1840,9 @@ fun ReaderScreen(
             snackbar.show("复制失败：本章内容尚未就绪")
             return false
         }
-        // 剪贴板里只该有书里的字：审阅视图的「段界痕迹」¶ 摘掉，偏移与块尾同步回缩。
-        val brk = currentHost.reviewBreakText(ch)
+        // 剪贴板里只该有书里的字：审阅视图的「段界痕迹」¶ 与中西接缝上被画成零宽的空白一并摘掉，
+        // 偏移与块尾同步回缩（原文与下标不动，只在「带走文字」这一口处理）。
+        val brk = currentHost.plainTextOf(ch)
         val copied = copyTextOf(
             brk.plainChapterText(text),
             brk.plain(s),
@@ -3412,7 +3414,10 @@ internal fun splitAmbientSpans(
     val visible = ArrayList<InlineMarkup.StyleSpan>()
     val open = ArrayList<InlineMarkup.StyleSpan>(4)
     for (sp in spans.sortedWith(compareBy({ it.start }, { -it.endExclusive }))) {
-        while (open.isNotEmpty() && open.last().endExclusive <= sp.start) open.removeLast()
+        // ⚠ 用 `removeAt(size - 1)`，**不要**写 `removeLast()`：`ArrayList` 没有自己的 `removeLast`，
+        //   解析到的是 JDK 21 的 `SequencedCollection.removeLast`（API 35 起才有），
+        //   真机（Android 14 / API 34）一进这个函数就 `NoSuchMethodError` 闪退。
+        while (open.isNotEmpty() && open.last().endExclusive <= sp.start) open.removeAt(open.size - 1)
         val parentAmbient = open.isEmpty() || ambient.contains(open.last())
         val coversAll = sp.start <= 0 && sp.endExclusive >= length
         if (coversAll && parentAmbient) ambient.add(sp) else visible.add(sp)

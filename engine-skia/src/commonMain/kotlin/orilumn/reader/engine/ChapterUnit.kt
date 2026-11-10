@@ -100,6 +100,15 @@ class ChapterUnit(
     @Volatile
     internal var chapterTextBlockEndsCache: IntArray? = null
 
+    /**
+     * 整章文本里**中西接缝上被画成零宽的空白字位**（升序；整章偏移）。
+     *
+     * 文本本体一个字都没删（下标、标注、进度照常按含空白的原文算），这些位只是画成 0 宽。
+     * 复制 / 摘录按它摘掉，读者才不会在汉字与字母之间看到、带走一个空格。
+     */
+    @Volatile
+    internal var chapterTextSeamSpacesCache: IntArray? = null
+
     /** Disk-backed pagination table. Null when the table hasn't been computed yet (first open, or
      *  after a param change). Read by callers to determine which blocks to shape for a target page. */
     var paginationTable: ChapterPaginationTable? = null
@@ -226,6 +235,7 @@ class ChapterUnit(
         this.prepareResult = prepare
         this.chapterTextCache = null
         this.chapterTextBlockEndsCache = null
+        this.chapterTextSeamSpacesCache = null
         this.paramHash = hash
     }
 
@@ -243,6 +253,7 @@ class ChapterUnit(
         prepareResult = null
         chapterTextCache = null
         chapterTextBlockEndsCache = null
+        chapterTextSeamSpacesCache = null
         paginationTable = null
         inProgress = null
         tempRenderLayout = null
@@ -283,6 +294,7 @@ class ChapterUnit(
         prepareResult = null
         chapterTextCache = null
         chapterTextBlockEndsCache = null
+        chapterTextSeamSpacesCache = null
         markup = null
         blockShapeCache = null
         pageCache.clear()

@@ -44,7 +44,40 @@ object ReviewOverlay {
         val needsBlocks: Boolean,
         /** 这一段在审阅空间的长度（段界不占字符）。 */
         val length: Int,
+        /** 修订文字（去掉段界后）第 i 个字在审阅空间的偏移；-1 = 兜底（不该出现）。 */
+        private val newToReview: IntArray,
     ) {
+        /**
+         * 修订文字 [text] 上的行内样式区间 → 本段审阅空间的区间（相对 [text] 起点）。
+         *
+         * 样式区间按 [text]（含段界）量，段界不占审阅空间的位置，先折成「第几个正文文字」，
+         * 再落到审阅偏移。落在被保留的字上的样式自然收窄，落在段界上的部分被丢掉。
+         */
+        fun stylesInReview(
+            text: String,
+            styles: List<InlineMarkup.StyleSpan>,
+        ): List<InlineMarkup.StyleSpan> {
+            if (styles.isEmpty()) return emptyList()
+            val bodyOf = IntArray(text.length + 1)
+            var k = 0
+            for (i in text.indices) {
+                bodyOf[i] = k
+                if (text[i] != RevisionBlocks.SEPARATOR) k++
+            }
+            bodyOf[text.length] = k
+            val out = ArrayList<InlineMarkup.StyleSpan>(styles.size)
+            for (sp in styles) {
+                val a = bodyOf[sp.start.coerceIn(0, text.length)]
+                val b = bodyOf[sp.endExclusive.coerceIn(0, text.length)]
+                if (b <= a) continue
+                val from = newToReview.getOrElse(a) { -1 }
+                val last = newToReview.getOrElse(b - 1) { -1 }
+                if (from < 0 || last < from) continue
+                out.add(InlineMarkup.StyleSpan(from, last + 1, sp.sig))
+            }
+            return out
+        }
+
         /** 原书局部偏移 → 审阅空间局部偏移（该点插入**之前**）。 */
         fun beforeOf(oldLocal: Int): Int = before[oldLocal.coerceIn(0, before.size - 1)]
 
@@ -87,6 +120,8 @@ object ReviewOverlay {
         val insText = ArrayList<StringBuilder>(2)
         val kept = HashSet<Int>(2)
         val marks = LinkedHashMap<Int, Boolean>(2)
+        // 修订文字（去段界）第几个字 → 审阅空间偏移：样式区间靠它换算（见 [Plan.stylesInReview]）。
+        val newToReview = IntArray(new.length) { -1 }
 
         var o = 0
         var n = 0
@@ -159,6 +194,7 @@ object ReviewOverlay {
                 }
                 is CharDiff.Op.Insert -> for (c in op.text) {
                     flushSeps()
+                    if (n < newToReview.size) newToReview[n] = at
                     pushInserted(c.toString(), 2)
                     n++
                 }
@@ -214,6 +250,7 @@ object ReviewOverlay {
             marks = marks,
             needsBlocks = ends.isNotEmpty() || seps.isNotEmpty(),
             length = at,
+            newToReview = newToReview,
         )
     }
 }

@@ -772,6 +772,53 @@ class BoxChapterLayouter(
     }
 
     /**
+     * 选区上的行内结构（渲染空间）：返回**相对选区起点**的样式区间（规格 §3.1「取结构」）。
+     *
+     * 与重放、排版同一套级联（`leafStyling`），逐字归属跟着 `StyledSegments` 走；
+     * 选区跨叶时各叶的区间按叶起点平移，自然拼成一条。正文修改卡把它序列化成标记文字，
+     * 提交时再拿它当「原选区结构」做属性补回。属于排版层（上）。
+     */
+    internal fun inlineSpansOfRange(
+        cssBundle: CssBundle?,
+        profile: TypographicProfile,
+        contentW: Int,
+        contentH: Int,
+        structure: ChapterStructureCache,
+        from: Int,
+        to: Int,
+    ): List<orilumn.reader.engine.revision.InlineMarkup.StyleSpan> {
+        if (to <= from) return emptyList()
+        val styling = leafStyling(cssBundle, profile, contentW, contentH, structure)
+        val leaves = structure.leaves
+        val starts = structure.globalCharStarts
+        val out = ArrayList<orilumn.reader.engine.revision.InlineMarkup.StyleSpan>()
+        for (i in leaves.indices) {
+            val leafStart = starts.getOrElse(i) { 0L }.toInt()
+            val leafEnd = if (i + 1 < leaves.size) starts[i + 1].toInt() else Int.MAX_VALUE
+            if (leafEnd <= from || leafStart >= to) continue
+            val leaf = leaves[i]
+            val segments = styling.segmentsOf(leaf)
+            val localFrom = (from - leafStart).coerceIn(0, segments.text.length)
+            val localTo = (to - leafStart).coerceIn(0, segments.text.length)
+            if (localTo <= localFrom) continue
+            for (sp in orilumn.reader.engine.revision.InlineSpans.ofLeaf(
+                leaf = leaf,
+                segments = segments,
+                wsOf = styling.wsOf,
+                styleOf = styling.styleOf,
+                from = localFrom,
+                to = localTo,
+            )) {
+                // `InlineSpans.ofLeaf` 的区间已经相对传进去的 `from`（= 本叶的 localFrom），
+                // 而 localFrom 本身就是「选区起点在本叶内的位置」；两把尺的差正好抵消，
+                // 这里原样搬即可。再补一次 `leafStart - from` 会把偏移推到选区外（负值）。
+                out.add(sp)
+            }
+        }
+        return out
+    }
+
+    /**
      * 只投影指定叶的文本（原书空间、与排版同尺），不重放、不排版。
      *
      * 老修订补录「原文」用：修订区间落在原书空间，按叶起点定位后直接从这条叶文本里切片。

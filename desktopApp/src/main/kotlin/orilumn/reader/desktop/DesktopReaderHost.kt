@@ -9,6 +9,7 @@ import orilumn.reader.data.revision.TextRevision
 import orilumn.reader.data.settings.BookSettings
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.engine.BookDocumentController
+import orilumn.reader.engine.revision.InlineMarkup
 import orilumn.reader.engine.revision.TextEditPlan
 import orilumn.reader.engine.BoxChapterLayouter
 import orilumn.reader.engine.ImageLoader
@@ -242,14 +243,19 @@ class DesktopReaderHost(
     override fun renderedRangeOf(chapter: Int, start: Int, endExclusive: Int): IntRange =
         controller.renderedRange(chapter, start, endExclusive)
 
+    /** 选区上的行内结构（渲染空间，相对选区起点）：卡片回显标记文字用。 */
+    override fun textEditSpans(chapter: Int, start: Int, endExclusive: Int): List<InlineMarkup.StyleSpan>? =
+        controller.textEditSpans(chapter, start, endExclusive)
+
     override suspend fun commitTextEdit(
         chapter: Int,
         start: Int,
         endExclusive: Int,
         text: String,
+        styles: List<InlineMarkup.StyleSpan>?,
         currentPage: ReaderPos?,
     ): TextEditOutcome = withContext(Dispatchers.Default) {
-        val plan = controller.planTextEdit(chapter, start, endExclusive, text)
+        val plan = controller.planTextEdit(chapter, start, endExclusive, text, styles)
         when (plan) {
             is TextEditPlan.Rejected -> return@withContext TextEditOutcome.Rejected(plan.reason)
             is TextEditPlan.Ready -> {

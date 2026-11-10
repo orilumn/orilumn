@@ -10,6 +10,7 @@ import orilumn.reader.data.book.Book
 import orilumn.reader.data.book.BookReadingState
 import orilumn.reader.data.font.FontFace
 import orilumn.reader.data.font.SystemFontFace
+import orilumn.reader.data.revision.RevisionStyles
 import orilumn.reader.data.revision.TextRevision
 import orilumn.reader.data.revision.TextRevisionStore
 import orilumn.reader.db.OrilumnDb
@@ -228,6 +229,7 @@ class LibraryDb(private val db: OrilumnDb) : AnnotationStore, TextRevisionStore 
                     text = revision.text,
                     originalText = revision.originalText,
                     editedText = revision.editedText,
+                    styles = revision.styles?.let(RevisionStyles::encode) ?: "",
                     delta = revision.delta.toLong(),
                     groupId = revision.groupId,
                     createdAt = revision.createdAt,
@@ -463,6 +465,7 @@ class LibraryDb(private val db: OrilumnDb) : AnnotationStore, TextRevisionStore 
         text = text,
         originalText = originalText,
         editedText = editedText,
+        styles = RevisionStyles.decode(styles),
         delta = delta.toInt(),
         groupId = groupId,
         createdAt = createdAt,

@@ -31,6 +31,11 @@ data class TextRevision(
     val originalText: String = "",
     /** 审阅清单「新文字」行：提交时这段输入的文字（渲染空间）。 */
     val editedText: String = "",
+    /**
+     * 显式行内样式区间（作用于 [text]，含段界字符）：`null` = 老修订 / 没有样式信息，
+     * 重放沿用「新字挂左邻」的旧规则；非 null（可以是空表）= 读者明确声明过这段文字的行内结构。
+     */
+    val styles: List<RevisionStyleSpan>? = null,
     val delta: Int = 0,
     val groupId: Long = 0,
     val createdAt: Long = 0,

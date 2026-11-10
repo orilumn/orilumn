@@ -60,6 +60,7 @@ import orilumn.reader.data.font.FontEntry
 import orilumn.reader.data.revision.TextRevision
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.engine.paging.BookPageNumber
+import orilumn.reader.engine.revision.InlineMarkup
 import orilumn.reader.engine.skia.LineWindowDrawer
 import orilumn.reader.engine.text.TypographicProfile
 import orilumn.reader.io.Logger
@@ -284,6 +285,17 @@ fun ReaderScreen(
     var textEditStart by remember { mutableIntStateOf(0) }
     var textEditEnd by remember { mutableIntStateOf(0) }
     var textEditText by remember { mutableStateOf("") }
+    // 开卡时选区的**行内结构**（已换算到输入区那把尺）与纯文字：提交时原样没变就直接短路，
+    // 不白落一条修订；属性补回（读者没写的 class / id）也拿它当模板。
+    var textEditOriginalSpans by remember {
+        mutableStateOf<List<InlineMarkup.StyleSpan>?>(null)
+    }
+    var textEditBaseText by remember { mutableStateOf("") }
+    // 整段都包着选区的行内元素（选区完全落在元素内部）：卡片里**不显示标记**——读者看不出
+    // 边界在哪，写了标记反而会把它挪位置；提交时按「整段仍然属于这个元素」原样套回。
+    var textEditAmbientSpans by remember {
+        mutableStateOf<List<InlineMarkup.StyleSpan>>(emptyList())
+    }
     // 读者动过输入区里的字没有：没动过时，拖正文手柄改选区要把输入区一起换过去（用户定口）；
     // 动过之后一律以输入区为准，选区只当落笔范围，不再回写输入框（免得吞掉改写）。
     // 打开旧修改（审阅视图点红字 / 绿字）时输入区带的是已经改过的字，一律按「动过」算。
@@ -1226,6 +1238,11 @@ fun ReaderScreen(
         textEditStart = revision.charStart
         textEditEnd = revision.charEnd
         textEditText = revision.editedText
+        // 审阅空间点开的是「改后的字」，不是选区的行内结构：不套标记、不补属性（styles 传 null，
+        // 重放走老规则）；没有改动时按「原文」短路，不白落一条修订。
+        textEditOriginalSpans = null
+        textEditAmbientSpans = emptyList()
+        textEditBaseText = revision.editedText
         // 输入区带出来的是**已经改过的字**，按「已动过」算：之后拖手柄只挪落笔范围，
         // 不会把读者上次的改写换成新选区的原文（那等于悄悄丢掉上一次修改）。
         textEditDirty = true
@@ -1535,7 +1552,37 @@ fun ReaderScreen(
         textEditChapter = ch
         textEditStart = s
         textEditEnd = e
-        textEditText = selectionTextForEdit(body, brk.plainBlockEnds(currentHost.textBlockEndsOf(ch)), brk.plain(s), brk.plain(e))
+        val blockEnds = brk.plainBlockEnds(currentHost.textBlockEndsOf(ch))
+        val plain = selectionTextForEdit(body, blockEnds, brk.plain(s), brk.plain(e))
+        // 选区上的行内元素摊成标记文字（`*斜体*`、`[文字](地址)`）：看得见、也改得动。
+        // 宿主给不出结构（尚未就绪 / 非盒式排版）就按纯文本，行为与引入标记之前一致。
+        // 宿主给的是**相对选区起点**的区间，先换成章文本绝对偏移；审阅视图另有 ¶ 痕迹，
+        // 一并按同一把尺剥掉，输入区才与正文逐字对得上。
+        val rawSpans = currentHost.textEditSpans(ch, s, e)
+        val spans = rawSpans?.let { list ->
+            spansToEditText(
+                spans = list.map {
+                    InlineMarkup.StyleSpan(
+                        brk.plain(s + it.start),
+                        brk.plain(s + it.endExclusive),
+                        it.sig,
+                    )
+                },
+                blockEnds = blockEnds,
+                start = brk.plain(s),
+                endExclusive = brk.plain(e),
+            )
+        }
+        // 整段都包着选区的元素不算「读者要改的结构」：选区完全在元素内部时，标记只是噪音
+        // （读者看不见边界，写了反而会把元素挪位或截断）。这类元素单独记下，提交时原样套回
+        // 整段；只有**边界切在选区里**的元素才摊成标记给读者看。
+        // 例外：外层元素是局部的，内层就不能隐形——否则补回时会落到外层之外。
+        val (ambient, visible) = splitAmbientSpans(spans.orEmpty(), plain.length)
+        textEditBaseText = plain
+        // 原件仍记**完整**结构：no-op 比较和属性补回都要拿它当模板。
+        textEditOriginalSpans = spans
+        textEditAmbientSpans = ambient
+        textEditText = if (visible.isEmpty()) plain else InlineMarkup.show(plain, visible)
         return true
     }
 
@@ -1576,6 +1623,8 @@ fun ReaderScreen(
         textEditOpen = false
         textEditText = ""
         textEditDirty = false
+        textEditOriginalSpans = null
+        textEditAmbientSpans = emptyList()
         textEditBusy = false
         if (selection.hasSelection) selection.clear()
     }
@@ -1591,14 +1640,50 @@ fun ReaderScreen(
         val ch = textEditChapter
         val s = textEditStart
         val e = textEditEnd
-        val body = textEditText
         if (ch < 0 || e <= s) return
+        // 输入区里的标记**只活在卡片里**：先解析回「纯文本 + 样式区间」，写进正文的一律是纯文本。
+        // 解析失败（非白名单标签、非法链接之类）就地提示，卡片不关、正文不动。
+        val parsed = InlineMarkup.parse(textEditText)
+        if (!parsed.ok) {
+            snackbar.show(parsed.errors.first())
+            return
+        }
+        // 读者没写的属性（`class` / `id` / `style`）从原选区补回来；没有原结构（宿主给不出、
+        // 比如审阅视图）就整套按读者写的来——标记是读者明确写的，不能因为拿不到原结构就丢掉。
+        // 补回要在 no-op 比较**之前**做：解析出来的 `code` 本来就没有 class，补回后才是原样。
+        val body = parsed.text
+        val originalSpans = textEditOriginalSpans
+        val ambient = textEditAmbientSpans
+        // 隐形元素（整段都在元素内、卡片里没显示标记）不进属性补回的模板：读者在它内部新写的
+        // 同名标记是**新元素**，不能把外围那层的 class / id 借过来，否则同一层会套两遍。
+        val template = originalSpans?.filterNot { it in ambient }
+        val restored = if (template != null) InlineMarkup.restore(template, parsed.spans) else parsed.spans
+        val styles: List<InlineMarkup.StyleSpan>? = if (ambient.isEmpty()) {
+            // 原结构拿得到 ⇒ 补回后的结果就是全部结构（空表＝读者把标记删光了，要真删）。
+            if (originalSpans != null) restored else parsed.spans.ifEmpty { null }
+        } else {
+            // 原文没变时与原区间逐字段相等，no-op 短路照样成立。
+            ambient.map { InlineMarkup.StyleSpan(0, body.length, it.sig) } + restored
+        }
+        // 一个字没改、结构也没变：直接收卡，不白落一条修订（少了这一句，开卡直接确定也会写库）。
+        val original = originalSpans.orEmpty()
+        if (body == textEditBaseText && styles.orEmpty() == original) {
+            focusManager.clearFocus()
+            textEditOpen = false
+            textEditText = ""
+            textEditDirty = false
+            textEditOriginalSpans = null
+            textEditAmbientSpans = emptyList()
+            selection.clear()
+            selectionMenuVisible = false
+            return
+        }
         focusManager.clearFocus()
         textEditBusy = true
         scope.launch {
             var outcome: TextEditOutcome? = null
             anchorFunnel.push("text-edit", ::markPositionChanged) {
-                val o = currentHost.commitTextEdit(ch, s, e, body, openPos)
+                val o = currentHost.commitTextEdit(ch, s, e, body, styles, openPos)
                 outcome = o
                 (o as? TextEditOutcome.Success)?.pos
             }
@@ -1608,6 +1693,8 @@ fun ReaderScreen(
                     textEditOpen = false
                     textEditText = ""
                     textEditDirty = false
+                    textEditOriginalSpans = null
+                    textEditAmbientSpans = emptyList()
                     textEditRevision++
                     // 确认即收选区：改后的字已经落库，再留一圈蓝底只会挡住刚改过的正文。
                     selection.clear()
@@ -3132,6 +3219,7 @@ fun ReaderScreen(
                         },
                     ),
                     text = if (textEditOn) textEditText else noteText,
+                    dimMarkup = textEditOn,
                     palette = paletteFor(light.scheme),
                     kind = noteKind,
                     lineStyle = noteLineStyle,
@@ -3269,6 +3357,70 @@ private class JobSlot {
  * 跨叶：各叶之间插 `\n`，于是初始内容行数 = 叶数；读者删光行间文字就减少行数，
  * 提交时**结果段数 = 输入里的换行符数 + 1**（方案 D-34 修订版），少则并段、多则拆段。
  */
+/**
+ * 把行内样式区间从「平铺章文本」坐标换算到「输入区文字」坐标。
+ *
+ * 入参 [spans] 是**章文本绝对偏移**（与 [blockEnds]、[start] 同一把尺），返回相对
+ * [start] 的输入区偏移。输入区在块与块之间插了 `\n`（见 [selectionTextForEdit]），
+ * 所以块边界之后的偏移整体后移一位；段内 `<br>` 的换行本来就在章文本里，不用动。
+ *
+ * 边界上的两个端点口径不同：区间**起点**落在块边界上时属于后一块（在换行之后），
+ * 区间**终点**落在边界上时属于前一块（在换行之前）。
+ */
+internal fun spansToEditText(
+    spans: List<InlineMarkup.StyleSpan>,
+    blockEnds: IntArray?,
+    start: Int,
+    endExclusive: Int,
+): List<InlineMarkup.StyleSpan> {
+    val ends = blockEnds?.takeIf { it.isNotEmpty() && it.last() >= endExclusive }
+    val insertAt = ArrayList<Int>(4)
+    if (ends != null) {
+        for (end in ends) {
+            if (end <= start) continue
+            if (end >= endExclusive) break
+            insertAt.add(end)
+        }
+    }
+    fun starts(off: Int): Int {
+        var n = 0
+        for (position in insertAt) if (position <= off) n++
+        return off - start + n
+    }
+    fun ends(off: Int): Int {
+        var n = 0
+        for (position in insertAt) if (position < off) n++
+        return off - start + n
+    }
+    return spans.map { InlineMarkup.StyleSpan(starts(it.start), ends(it.endExclusive), it.sig) }
+}
+
+/**
+ * 把选区上的行内结构分成「隐形」与「看得见」两份（输入区文字的偏移，长度为 [length]）。
+ *
+ * 整段都包着选区的元素（起点 ≤ 0 且终点 ≥ 全长）是**隐形**的：读者看不出边界在哪，
+ * 卡片里摆一串 `` ` `` 或 `*` 只会让他以为结构是自己写的，提交时按整段套回更稳。
+ * 只有边界切在选区内（元素露出半截）的元素才摊成标记。
+ *
+ * 隐形不能越级：外层是局部的，内层即使整段覆盖也要显示——否则补回时会落到外层之外。
+ */
+internal fun splitAmbientSpans(
+    spans: List<InlineMarkup.StyleSpan>,
+    length: Int,
+): Pair<List<InlineMarkup.StyleSpan>, List<InlineMarkup.StyleSpan>> {
+    val ambient = ArrayList<InlineMarkup.StyleSpan>()
+    val visible = ArrayList<InlineMarkup.StyleSpan>()
+    val open = ArrayList<InlineMarkup.StyleSpan>(4)
+    for (sp in spans.sortedWith(compareBy({ it.start }, { -it.endExclusive }))) {
+        while (open.isNotEmpty() && open.last().endExclusive <= sp.start) open.removeLast()
+        val parentAmbient = open.isEmpty() || ambient.contains(open.last())
+        val coversAll = sp.start <= 0 && sp.endExclusive >= length
+        if (coversAll && parentAmbient) ambient.add(sp) else visible.add(sp)
+        open.add(sp)
+    }
+    return ambient to visible
+}
+
 internal fun selectionTextForEdit(
     chapterText: String,
     blockEnds: IntArray?,

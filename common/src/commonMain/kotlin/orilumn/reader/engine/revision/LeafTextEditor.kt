@@ -26,8 +26,20 @@ import orilumn.reader.engine.laying.StyledSegments
  */
 object LeafTextEditor {
 
-    /** 一次叶内替换：`[start, endExclusive)` → [text]（叶内原书偏移，已预归一）。 */
-    data class Edit(val start: Int, val endExclusive: Int, val text: String)
+    /**
+     * 一次叶内替换：`[start, endExclusive)` → [text]（叶内原书偏移，已预归一）。
+     *
+     * @param styles 显式行内样式区间，偏移相对 [text]（含段界字符）。
+     *   `null` = 没有样式信息（老修订 / 规划器没给），沿用「新字挂左邻」的旧规则；
+     *   非 null（可以是空表）= 读者声明过这段文字的行内结构，**整段按区间重建**：
+     *   区间里套着的字落在对应元素里，没套着的落在叶级（不会被左边那个元素吞掉）。
+     */
+    data class Edit(
+        val start: Int,
+        val endExclusive: Int,
+        val text: String,
+        val styles: List<InlineMarkup.StyleSpan>? = null,
+    )
 
     /**
      * @property leaf 重建后的叶（未改动的子树按原样复制，parent 已重链）；
@@ -100,34 +112,65 @@ object LeafTextEditor {
         }
 
         // 2) 应用修订：保留的字符沿用归属；删掉的记下原文区间；新字符先记为 New。
+        //    带显式样式的修订不走字符级对齐：整段文字都由区间重建（§4.4 的「没写标记沿用旧规则」
+        //    只对**没有**样式信息的修订成立）。
         val out = ArrayList<OutChar>(oldText.length + 16)
         val deleted = LinkedHashMap<MarkupElement, MutableList<IntRange>>()
+        val regions = ArrayList<ExplicitRegion>()
+        val regionOf = ArrayList<Int>(oldText.length + 16)
         var cursor = 0
         for (e in sorted) {
-            for (i in cursor until e.start) out.add(OutChar.Kept(owners[i]))
-            val old = oldText.substring(e.start, e.endExclusive)
-            for (op in CharDiff.diff(old, e.text)) {
-                when (op) {
-                    is CharDiff.Op.Keep -> {
-                        for (i in op.oldStart until op.oldStart + op.length) {
-                            out.add(OutChar.Kept(owners[e.start + i]))
-                        }
+            for (i in cursor until e.start) {
+                out.add(OutChar.Kept(owners[i]))
+                regionOf.add(-1)
+            }
+            if (e.styles != null) {
+                // 整段旧字全部让位：它们的原文区间记为删除，新字由样式区间重建。
+                for (i in e.start until e.endExclusive) {
+                    val owner = owners[i]
+                    if (owner is Owner.Text) {
+                        deleted.getOrPut(owner.node) { ArrayList() }
+                            .add(owner.rawStart until owner.rawEnd)
                     }
-                    is CharDiff.Op.Delete -> {
-                        for (i in op.oldStart until op.oldStart + op.length) {
-                            val owner = owners[e.start + i]
-                            if (owner is Owner.Text) {
-                                deleted.getOrPut(owner.node) { ArrayList() }
-                                    .add(owner.rawStart until owner.rawEnd)
+                }
+                val first = out.size
+                e.text.forEach {
+                    out.add(OutChar.New(it))
+                    regionOf.add(regions.size)
+                }
+                regions.add(ExplicitRegion(first, out.size, e.styles))
+            } else {
+                val old = oldText.substring(e.start, e.endExclusive)
+                for (op in CharDiff.diff(old, e.text)) {
+                    when (op) {
+                        is CharDiff.Op.Keep -> {
+                            for (i in op.oldStart until op.oldStart + op.length) {
+                                out.add(OutChar.Kept(owners[e.start + i]))
+                                regionOf.add(-1)
                             }
                         }
+                        is CharDiff.Op.Delete -> {
+                            for (i in op.oldStart until op.oldStart + op.length) {
+                                val owner = owners[e.start + i]
+                                if (owner is Owner.Text) {
+                                    deleted.getOrPut(owner.node) { ArrayList() }
+                                        .add(owner.rawStart until owner.rawEnd)
+                                }
+                            }
+                        }
+                        is CharDiff.Op.Insert -> op.text.forEach {
+                            out.add(OutChar.New(it))
+                            regionOf.add(-1)
+                        }
                     }
-                    is CharDiff.Op.Insert -> op.text.forEach { out.add(OutChar.New(it)) }
                 }
             }
             cursor = e.endExclusive
         }
-        for (i in cursor until owners.size) out.add(OutChar.Kept(owners[i]))
+        for (i in cursor until owners.size) {
+            out.add(OutChar.Kept(owners[i]))
+            regionOf.add(-1)
+        }
 
         // 3) 新字符归属：前一个字符所在的文本节点；叶首挂到后一个文本节点；都没有就新建一个。
         val prevTextNode = arrayOfNulls<MarkupElement>(out.size)
@@ -143,6 +186,14 @@ object LeafTextEditor {
             if (o is OutChar.Kept && o.owner is Owner.Text) next = o.owner.node
             if (prevTextNode[i] == null) prevTextNode[i] = next
         }
+        // 每个位置之后最近的一个「保留字」所在文本节点（显式样式区间定位锚点用）。
+        val nextKeptText = arrayOfNulls<MarkupElement>(out.size)
+        var nextKept: MarkupElement? = null
+        for (i in out.indices.reversed()) {
+            val o = out[i]
+            if (o is OutChar.Kept && o.owner is Owner.Text) nextKept = o.owner.node
+            nextKeptText[i] = nextKept
+        }
         // 整段换新字（没有任何保留字）时退化：全部落在中段起点那个文本节点（§8.5）。
         val fallbackText = owners.firstOrNull { it is Owner.Text }?.node
         var synthetic: MarkupElement? = null
@@ -150,7 +201,48 @@ object LeafTextEditor {
         val siblingMarkers = ArrayList<MarkupElement>()
         val markerAnchors = HashMap<MarkupElement, MarkupElement?>()
         val prependNodes = ArrayList<MarkupElement>()
-        for (i in out.indices) {
+        val insertAfter = HashMap<MarkupElement, MutableList<MarkupElement>>()
+
+        // 显式样式区间先切成「同链连续段」：一段新字落一次，位置在下面按锚点定。
+        val runs = explicitRuns(out, regionOf, regions)
+
+        /** 一段带样式的新字落地：能复用多深的祖先就复用多深，剩下的包新元素。 */
+        fun placeRun(run: ExplicitRun) {
+            val sb = StringBuilder(run.endExclusive - run.start)
+            for (k in run.start until run.endExclusive) sb.append((out[k] as OutChar.New).ch)
+            val prevText = if (run.start > 0) prevTextNode[run.start] else null
+            val nextText = if (run.endExclusive < out.size) nextKeptText[run.endExclusive] else null
+            val chainEls = chainWithin(leaf, prevText ?: nextText)
+            var p = 0
+            while (
+                p < chainEls.size && p < run.chain.size &&
+                InlineSpans.sigOf(chainEls[p]) == run.chain[p]
+            ) {
+                p++
+            }
+            val nodes = materializeRun(sb.toString(), run.chain.drop(p))
+            if (nodes.isEmpty()) return
+            when {
+                // 叶首：前置到叶最前。
+                prevText == null -> prependNodes.addAll(nodes)
+                // 链已完全对上：接在锚点字之后（同一个文本节点里按字符位置切开）。
+                p >= chainEls.size -> nodeItems.getOrPut(prevText) { ArrayList() }
+                    .add(NodeItem.Elements(nodes))
+                // 只能复用前 p 层：挂到第 p 层的元素之后。
+                else -> insertAfter.getOrPut(chainEls[p]) { ArrayList() }.addAll(nodes)
+            }
+        }
+
+        var runIndex = 0
+        var i = 0
+        while (i < out.size) {
+            val run = runs.getOrNull(runIndex)
+            if (run != null && run.start == i) {
+                placeRun(run)
+                runIndex++
+                i = run.endExclusive
+                continue
+            }
             when (val o = out[i]) {
                 is OutChar.Kept -> {
                     val owner = o.owner
@@ -177,6 +269,7 @@ object LeafTextEditor {
                     }
                 }
             }
+            i++
         }
         synthetic?.let { s ->
             val nodes = materialize(s, nodeItems[s].orEmpty(), deleted[s].orEmpty())
@@ -184,7 +277,6 @@ object LeafTextEditor {
         }
 
         // 4) 重链：文本节点按字符归属重建（可能被 <br> 切成多段）、br 删/增、其余子树原样复制。
-        val insertAfter = HashMap<MarkupElement, MutableList<MarkupElement>>()
         for (br in siblingMarkers) {
             val anchor = markerAnchors[br]
             if (anchor != null) insertAfter.getOrPut(anchor) { ArrayList() }.add(br)
@@ -237,7 +329,7 @@ object LeafTextEditor {
 
     // ---- 内部模型 ----
 
-    private sealed interface Owner {
+    internal sealed interface Owner {
         val node: MarkupElement
 
         class Text(override val node: MarkupElement, val rawStart: Int, val rawEnd: Int) : Owner
@@ -250,10 +342,116 @@ object LeafTextEditor {
         class New(val ch: Char) : OutChar
     }
 
+    /** 带显式样式的一条修订在输出流里占的区间（[start] / [endExclusive] 是 out 下标）。 */
+    private class ExplicitRegion(
+        val start: Int,
+        val endExclusive: Int,
+        val spans: List<InlineMarkup.StyleSpan>,
+    )
+
+    /** 输出流里一段「同一条修订、同一条元素链」的新字。 */
+    private class ExplicitRun(
+        val start: Int,
+        val endExclusive: Int,
+        val chain: List<InlineMarkup.StyleSig>,
+    )
+
+    /** 把显式区间切成连续段：链一变就断（没套元素的字自成一段）。 */
+    private fun explicitRuns(
+        out: List<OutChar>,
+        regionOf: List<Int>,
+        regions: List<ExplicitRegion>,
+    ): List<ExplicitRun> {
+        if (regions.isEmpty()) return emptyList()
+        val runs = ArrayList<ExplicitRun>()
+        var start = -1
+        var region = -1
+        var chain: List<InlineMarkup.StyleSig> = emptyList()
+        for (i in out.indices) {
+            val r = regionOf[i]
+            val c = if (r < 0) {
+                emptyList()
+            } else {
+                val reg = regions[r]
+                val off = i - reg.start
+                reg.spans.filter { off >= it.start && off < it.endExclusive }.map { it.sig }
+            }
+            if (start >= 0 && (r != region || c != chain)) {
+                runs.add(ExplicitRun(start, i, chain))
+                start = -1
+            }
+            if (r >= 0 && start < 0) {
+                start = i
+                region = r
+                chain = c
+            }
+        }
+        if (start >= 0) runs.add(ExplicitRun(start, out.size, chain))
+        return runs
+    }
+
+    /** 从 [node] 起到叶（不含叶）的元素链，外层在前。 */
+    private fun chainWithin(leaf: MarkupElement, node: MarkupElement?): List<MarkupElement> {
+        if (node == null) return emptyList()
+        val out = ArrayList<MarkupElement>(4)
+        var p = node.parent
+        while (p != null && p !== leaf) {
+            out.add(p)
+            p = p.parent
+        }
+        out.reverse()
+        return out
+    }
+
+    /**
+     * 一段纯文本 + 样式区间 → 行内节点（块内新建 / 跨段重放用）。
+     *
+     * 相邻同链的字合成一个元素；链一变就断开成兄弟（视觉等价，不追求合并成一层）。
+     */
+    internal fun inlineNodes(text: String, spans: List<InlineMarkup.StyleSpan>): List<MarkupElement> {
+        if (text.isEmpty()) return emptyList()
+        if (spans.isEmpty()) return materializeRun(text, emptyList())
+        val out = ArrayList<MarkupElement>(4)
+        var i = 0
+        while (i < text.length) {
+            val chain = spans.filter { i >= it.start && i < it.endExclusive }.map { it.sig }
+            var j = i + 1
+            while (j < text.length) {
+                val next = spans.filter { j >= it.start && j < it.endExclusive }.map { it.sig }
+                if (next != chain) break
+                j++
+            }
+            out.addAll(materializeRun(text.substring(i, j), chain))
+            i = j
+        }
+        return out
+    }
+
+    /** 把一段新文字按元素链套起来：`\n` 落成 `<br>`，[wrap] 由外到内（外层在前）。 */
+    private fun materializeRun(text: String, wrap: List<InlineMarkup.StyleSig>): List<MarkupElement> {
+        val inner = ArrayList<MarkupElement>(2)
+        var from = 0
+        for (i in text.indices) {
+            if (text[i] == '\n') {
+                if (i > from) inner.add(MarkupElement("#text", text = text.substring(from, i)))
+                inner.add(MarkupElement("br"))
+                from = i + 1
+            }
+        }
+        if (from < text.length) inner.add(MarkupElement("#text", text = text.substring(from)))
+        if (inner.isEmpty()) return emptyList()
+        var nodes: List<MarkupElement> = inner
+        for (sig in wrap.asReversed()) nodes = listOf(MarkupElement(sig.tag, sig.attrs, nodes))
+        return nodes
+    }
+
     private sealed interface NodeItem {
         class KeptRaw(val rawStart: Int, val rawEnd: Int) : NodeItem
         class Text(val text: Char) : NodeItem
         object Newline : NodeItem
+
+        /** 显式样式区间重建出来的整段节点（按锚点插进文本流，见 [materialize]）。 */
+        class Elements(val nodes: List<MarkupElement>) : NodeItem
     }
 
     /** 单个文本节点的归一化 + 变换结果，供段文本反查原文下标。 */
@@ -283,7 +481,7 @@ object LeafTextEditor {
         }
     }
 
-    private fun ownersOf(
+    internal fun ownersOf(
         segments: StyledSegments,
         leaf: MarkupElement,
         wsOf: (MarkupElement) -> WhiteSpace,
@@ -364,6 +562,10 @@ object LeafTextEditor {
                         flush()
                         out.add(MarkupElement("br"))
                     }
+                    is NodeItem.Elements -> {
+                        flush()
+                        out.addAll(it.nodes)
+                    }
                     is NodeItem.KeptRaw -> Unit
                 }
             }
@@ -377,7 +579,7 @@ object LeafTextEditor {
         for ((idx, it) in items.withIndex()) {
             when (it) {
                 is NodeItem.KeptRaw -> lastEnd = it.rawEnd
-                is NodeItem.Text, NodeItem.Newline -> {
+                is NodeItem.Text, NodeItem.Newline, is NodeItem.Elements -> {
                     val anchor = if (lastEnd >= 0) lastEnd else nextKeptStart(items, idx)
                     events.add(anchor to it)
                 }
@@ -396,6 +598,10 @@ object LeafTextEditor {
                     NodeItem.Newline -> {
                         flush()
                         out.add(MarkupElement("br"))
+                    }
+                    is NodeItem.Elements -> {
+                        flush()
+                        out.addAll(it.nodes)
                     }
                     is NodeItem.KeptRaw -> Unit
                 }

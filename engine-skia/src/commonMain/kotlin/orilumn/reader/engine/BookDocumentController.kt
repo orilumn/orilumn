@@ -19,6 +19,7 @@ import orilumn.reader.engine.html.HtmlTreeConverter
 import orilumn.reader.engine.html.MarkupElement
 import orilumn.reader.engine.html.MarkupPaths
 import orilumn.reader.engine.revision.ChapterRevisionMap
+import orilumn.reader.engine.revision.InlineMarkup
 import orilumn.reader.engine.revision.LeafTextEditor
 import orilumn.reader.engine.revision.MeasuredDeltaFix
 import orilumn.reader.engine.revision.RevisionBlocks
@@ -591,12 +592,45 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
     // ─────────────────────────────────────────────────────────────────
 
     /**
+     * 选区上的行内结构（渲染空间，相对选区起点）：正文修改卡回显标记文字、提交时补回属性用。
+     *
+     * 审阅视图也能取：那里的叶子（`structureCache`）就是审阅空间的，区间与 `textOf` 同尺；
+     * 卡片那侧再按 ¶ 痕迹把偏移剥成读者读的文字（`ReviewBreakText`）。
+     */
+    fun textEditSpans(chapter: Int, start: Int, endExclusive: Int): List<InlineMarkup.StyleSpan>? {
+        val unit = unitAt(chapter) ?: return null
+        val bc = layouter as? BoxChapterLayouter ?: return null
+        val contentW = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
+        val contentH = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
+        return runCatching {
+            bc.inlineSpansOfRange(
+                cssBundle = unit.cssBundle,
+                profile = profile,
+                contentW = contentW,
+                contentH = contentH,
+                structure = unit.structureCache,
+                from = start,
+                to = endExclusive,
+            )
+        }.onFailure {
+            // 取不到结构就按纯文本开卡（行为与引入标记之前一致），失败本身记一条，方便日后查。
+            Logger.w(logTag, "textEditSpans failed ch=$chapter [$start,$endExclusive) review=$reviewMode: ${it::class.simpleName}")
+        }.getOrNull()
+    }
+
+    /**
      * 纯计算一次正文修改：校验 + 按叶拆段 + 与旧修订合并 + 公共前后缀裁剪。
      *
      * 入参 [start] / [endExclusive] 是**渲染空间**（与 `chapterText` / 选区 / `PageSlice` 同尺），
      * [text] 是输入区文字（跨段时用 `\n` 分隔，结果段数 = 换行符数 + 1）。不落库、不改内存。
      */
-    fun planTextEdit(chapter: Int, start: Int, endExclusive: Int, text: String): TextEditPlan {
+    fun planTextEdit(
+        chapter: Int,
+        start: Int,
+        endExclusive: Int,
+        text: String,
+        styles: List<InlineMarkup.StyleSpan>? = null,
+    ): TextEditPlan {
         if (bookId < 0) return TextEditPlan.Rejected("书还没打开")
         val unit = unitAt(chapter) ?: return TextEditPlan.Rejected("本章尚未载入")
         val chapterText = unit.chapterText() ?: return TextEditPlan.Rejected("本章内容尚未就绪")
@@ -629,6 +663,9 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
             val leaf = leaves.getOrNull(i)
             leaf != null && orilumn.reader.engine.revision.RevisionBlocks.mergeableLeaf(leaf)
         }
+        // 读者解析出来的样式区间（相对输入文字，属性已由调用方按原选区结构补回）：
+        // 随修订一起落库。null = 这次提交没有样式信息（老路径：新字挂左邻）。
+        val replacementStyles = styles
         if (!reviewMode) {
             return TextEditPlanner.plan(
                 bookId = bookId,
@@ -641,6 +678,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                 map = map,
                 groupId = now,
                 now = now,
+                replacementStyles = replacementStyles,
                 wsOfLeaf = wsOfLeaf,
                 mergeableLeaf = mergeableLeaf,
             )
@@ -674,6 +712,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                 blockEnds = originalEnds,
                 groupId = now,
                 now = now,
+                replacementStyles = replacementStyles,
                 wsOfLeaf = wsOfLeaf,
             )
         } else {
@@ -689,6 +728,9 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                 map = ChapterRevisionMap.EMPTY,
                 groupId = now,
                 now = now,
+                // 读者写出的行内标记同样要跟着落库：这一条修订的文字就是卡里的文字，
+                // 区间本来就以它为尺，审阅视图也不例外。
+                replacementStyles = replacementStyles,
                 wsOfLeaf = wsOfLeaf,
                 mergeableLeaf = mergeableLeaf,
             )
@@ -1822,6 +1864,9 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                             r.text
                         },
                         revisionId = r.id,
+                        // 审阅视图的文字是「原文 + 新字」的拼合空间，与样式区间不是同一把尺，
+                        // 那里不套样式（老行为：新字挂左邻）。
+                        styles = if (reviewMode) null else r.styles?.let(InlineMarkup::fromStored),
                     )
                     mergeIds += r.id
                 }
@@ -1879,12 +1924,33 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                             // 看不到它（判据是 `charEnd > leafStart`），两叶都不落就把字吞了。
                             // 实测整段引用句的收尾引号就是这样消失的：审阅正文比换算表少两格，
                             // 切回正常视图时页首错一行。
+                            // 新字带不带行内样式：修订有显式样式时按区间落（新字落在元素外），
+                            // 没有（老修订）就沿用「挂左邻」。区间先换算到审阅空间的偏移。
+                            val reviewStyles = r.styles?.let { stored ->
+                                plan.stylesInReview(r.text, InlineMarkup.fromStored(stored))
+                            }
                             for (ins in plan.insertions) {
                                 val at = r.charStart + ins.at
                                 if (at < leafStart || at > leafEnd) continue
                                 if (at == leafEnd && r.charEnd != leafEnd) continue
                                 val p = at - leafStart
-                                out += LeafTextEditor.Edit(start = p, endExclusive = p, text = ins.text)
+                                val spans = reviewStyles?.let { all ->
+                                    val from = ins.at
+                                    val to = ins.at + ins.text.length
+                                    all.filter { it.start < to && it.endExclusive > from }.map {
+                                        InlineMarkup.StyleSpan(
+                                            (it.start - from).coerceAtLeast(0),
+                                            (it.endExclusive - from).coerceAtMost(ins.text.length),
+                                            it.sig,
+                                        )
+                                    }
+                                }
+                                out += LeafTextEditor.Edit(
+                                    start = p,
+                                    endExclusive = p,
+                                    text = ins.text,
+                                    styles = spans,
+                                )
                             }
                             continue
                         }
@@ -1900,6 +1966,11 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                         out += LeafTextEditor.Edit(
                             start = r.charStart - leafStart,
                             endExclusive = r.charEnd - leafStart,
+                            styles = if (reviewMode || r.text.indexOf(RevisionBlocks.SEPARATOR) >= 0) {
+                                null
+                            } else {
+                                r.styles?.let(InlineMarkup::fromStored)
+                            },
                             // 段界本该由合并路径拆块；走到这里说明这一叶被占用了，
                             // 降级成段内换行（`<br>`）：文字不丢，只是不拆段。
                             text = if (r.text.indexOf(RevisionBlocks.SEPARATOR) >= 0) {

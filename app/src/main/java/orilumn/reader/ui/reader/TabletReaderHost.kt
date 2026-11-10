@@ -6,6 +6,7 @@ import orilumn.reader.data.book.BookRepository
 import orilumn.reader.data.epub.TocItem
 import orilumn.reader.data.revision.TextRevision
 import orilumn.reader.engine.BookDocumentController
+import orilumn.reader.engine.revision.InlineMarkup
 import orilumn.reader.engine.revision.TextEditPlan
 import orilumn.reader.engine.paging.BookPageNumber
 import orilumn.reader.engine.paging.PageSlice
@@ -201,6 +202,10 @@ class TabletReaderHost(
     override fun renderedRangeOf(chapter: Int, start: Int, endExclusive: Int): IntRange =
         controller.renderedRange(chapter, start, endExclusive)
 
+    /** 选区上的行内结构（渲染空间，相对选区起点）：卡片回显标记文字用。 */
+    override fun textEditSpans(chapter: Int, start: Int, endExclusive: Int): List<InlineMarkup.StyleSpan>? =
+        controller.textEditSpans(chapter, start, endExclusive)
+
     /**
      * 提交一次正文修改（方案 §8.8）：纯计算计划 → 一个事务落库 → 重读修订 → 只作废本章 →
      * 重新载入重放并落位到修改起点。
@@ -210,9 +215,10 @@ class TabletReaderHost(
         start: Int,
         endExclusive: Int,
         text: String,
+        styles: List<InlineMarkup.StyleSpan>?,
         currentPage: ReaderPos?,
     ): TextEditOutcome = withContext(Dispatchers.IO) {
-        val plan = controller.planTextEdit(chapter, start, endExclusive, text)
+        val plan = controller.planTextEdit(chapter, start, endExclusive, text, styles)
         when (plan) {
             is TextEditPlan.Rejected -> return@withContext TextEditOutcome.Rejected(plan.reason)
             is TextEditPlan.Ready -> {

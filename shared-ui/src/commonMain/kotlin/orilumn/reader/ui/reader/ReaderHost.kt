@@ -7,6 +7,7 @@ import orilumn.reader.data.revision.TextRevision
 import orilumn.reader.engine.LinkTarget
 import orilumn.reader.engine.paging.BookPageNumber
 import orilumn.reader.engine.paging.PageSlice
+import orilumn.reader.engine.revision.InlineMarkup
 import orilumn.reader.engine.skia.DecodedImage
 import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.engine.skia.PageBackground
@@ -370,8 +371,18 @@ interface ReaderHost {
         start: Int,
         endExclusive: Int,
         text: String,
+        styles: List<InlineMarkup.StyleSpan>? = null,
         currentPage: ReaderPos? = null,
     ): TextEditOutcome = TextEditOutcome.Failed("当前版本不支持正文修改")
+
+    /**
+     * 选区上的行内结构（渲染空间，**相对选区起点**）：正文修改卡用它回显标记文字
+     * （`*斜体*`、`` `代码` ``、`[文字](地址)`、`<span class="x">`）。
+     *
+     * 默认 null = 宿主没实现（或这一处没有显式结构）：卡片按纯文本显示，行为与引入标记之前一致。
+     * 提交时同一份结构用于补回元素属性（`class` / `id` 之类读者没写的部分）。
+     */
+    fun textEditSpans(chapter: Int, start: Int, endExclusive: Int): List<InlineMarkup.StyleSpan>? = null
 
     /**
      * 渲染区间 → 原书区间（建标注 / 存进度用）。无修订时原样返回；默认 null = 宿主未实现，

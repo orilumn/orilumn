@@ -86,6 +86,7 @@ object TextEditPlanner {
         map: ChapterRevisionMap,
         groupId: Long,
         now: Long = 0L,
+        replacementStyles: List<InlineMarkup.StyleSpan>? = null,
         wsOfLeaf: (Int) -> WhiteSpace = { WhiteSpace.NORMAL },
         mergeableLeaf: (Int) -> Boolean = { true },
         toOriginal: (Int) -> Int = map::toOriginal,
@@ -97,11 +98,13 @@ object TextEditPlanner {
         if (endExclusive <= start) {
             return TextEditPlan.Rejected("请先选择要修改的文字")
         }
+        val lines = splitLines(replacement)
+        val perLine = lineSpans(replacementStyles, lines)
         val ends = blockEnds?.takeIf { it.isNotEmpty() && it.last() == chapterText.length }
         if (ends == null) {
             return planSegments(
                 bookId, chapter, chapterText, map, groupId, now, wsOfLeaf, toOriginal, renderedInterval,
-                listOf(Segment(start, endExclusive, replacement, 0, 0, chapterText.length)),
+                listOf(Segment(start, endExclusive, replacement, 0, 0, chapterText.length, perLine?.first())),
             )
         }
         val firstLeaf = leafOf(ends, start)
@@ -114,12 +117,12 @@ object TextEditPlanner {
                         start, endExclusive, replacement, firstLeaf,
                         if (firstLeaf == 0) 0 else ends[firstLeaf - 1],
                         ends[firstLeaf],
+                        perLine?.first(),
                     ),
                 ),
             )
         }
         // 跨段：结果段数由输入里的换行符决定（方案 D-34 修订版）。
-        val lines = splitLines(replacement)
         val leafCount = lastLeaf - firstLeaf + 1
         if (lines.size != leafCount) {
             if ((firstLeaf..lastLeaf).any { !mergeableLeaf(it) }) {
@@ -127,7 +130,7 @@ object TextEditPlanner {
             }
             return planMerge(
                 bookId, chapter, chapterText, map, groupId, now, wsOfLeaf, toOriginal, renderedInterval,
-                start, endExclusive, replacement, ends,
+                start, endExclusive, replacement, ends, perLine,
             )
         }
         val segments = ArrayList<Segment>(leafCount)
@@ -136,7 +139,9 @@ object TextEditPlanner {
             val leafEnd = ends[i]
             val segStart = maxOf(start, leafStart)
             val segEnd = minOf(endExclusive, leafEnd)
-            segments.add(Segment(segStart, segEnd, lines[i - firstLeaf], i, leafStart, leafEnd))
+            segments.add(
+                Segment(segStart, segEnd, lines[i - firstLeaf], i, leafStart, leafEnd, perLine?.get(i - firstLeaf)),
+            )
         }
         return planSegments(
             bookId, chapter, chapterText, map, groupId, now, wsOfLeaf, toOriginal, renderedInterval, segments,
@@ -163,6 +168,7 @@ object TextEditPlanner {
         blockEnds: IntArray?,
         groupId: Long,
         now: Long = 0L,
+        replacementStyles: List<InlineMarkup.StyleSpan>? = null,
         wsOfLeaf: (Int) -> WhiteSpace = { WhiteSpace.NORMAL },
     ): TextEditPlan {
         if (at < 0 || at > chapterText.length) return TextEditPlan.Rejected("选区超出本章范围")
@@ -173,7 +179,17 @@ object TextEditPlanner {
         return planSegments(
             bookId, chapter, chapterText, ChapterRevisionMap.EMPTY, groupId, now, wsOfLeaf,
             { it }, { r -> r.charStart until r.charEnd },
-            listOf(Segment(at, at, replacement, leaf, leafStart, leafEnd)),
+            listOf(
+                Segment(
+                    at, at, replacement, leaf, leafStart, leafEnd,
+                    // 纯插入只带一段样式：多行（并段 / 拆段）留给整段重放去按叶切，这里不猜。
+                    if (splitLines(replacement).size == 1) {
+                        lineSpans(replacementStyles, splitLines(replacement))?.firstOrNull()
+                    } else {
+                        null
+                    },
+                ),
+            ),
         )
     }
 
@@ -197,6 +213,7 @@ object TextEditPlanner {
         endExclusive: Int,
         replacement: String,
         ends: IntArray,
+        perLine: List<List<InlineMarkup.StyleSpan>>?,
     ): TextEditPlan {
         val absorbed = map.revisions.filter { r ->
             val rr = renderedInterval(r)
@@ -240,6 +257,25 @@ object TextEditPlanner {
             )
         }
         val newText = prefix + normLines.joinToString(RevisionBlocks.SEPARATOR.toString()) + suffix
+        // 样式区间按行搬进合并后的文字（段界占一位；每行各自夹到自己那一段）。
+        val mergedStyles = if (perLine == null) {
+            null
+        } else {
+            val out = ArrayList<InlineMarkup.StyleSpan>()
+            var cursor = prefix.length
+            for (j in normLines.indices) {
+                val lineSpans = perLine.getOrNull(j).orEmpty()
+                if (lineSpans.isNotEmpty()) {
+                    for (sp in lineSpans) {
+                        val s0 = cursor + sp.start
+                        val e0 = cursor + sp.endExclusive
+                        if (e0 > s0) out.add(InlineMarkup.StyleSpan(s0, e0, sp.sig))
+                    }
+                }
+                cursor += normLines[j].length + 1
+            }
+            out
+        }
         val renderedLen = RevisionBlocks.renderedLength(newText)
         val insertedLen = normLines.sumOf { it.length }
         return TextEditPlan.Ready(
@@ -255,6 +291,7 @@ object TextEditPlanner {
                     // 清单「原文」行按段断行显示（正文投影里段间没有分隔符）。
                     originalText = selectionLines(chapterText, ends, start, endExclusive),
                     editedText = replacement,
+                    styles = mergedStyles?.let(InlineMarkup::toStored),
                     delta = renderedLen - (uEnd - uStart),
                     groupId = groupId,
                     createdAt = now,
@@ -291,6 +328,8 @@ object TextEditPlanner {
         val leaf: Int,
         val leafRenderStart: Int,
         val leafRenderEnd: Int,
+        /** 这段新文字的行内样式区间（相对 [text]）；null = 没有样式信息（老路径）。 */
+        val styles: List<InlineMarkup.StyleSpan>?,
     )
 
     private fun planSegments(
@@ -380,12 +419,23 @@ object TextEditPlanner {
         // 前后邻字符取叶内、扩张区间之外的真实字符；叶边界为 null（CSS 丢弃边界空白）。
         val before = if (uRenderStart <= seg.leafRenderStart) null else chapterText.getOrNull(uRenderStart - 1)
         val after = if (uRenderEnd >= seg.leafRenderEnd) null else chapterText.getOrNull(uRenderEnd)
-        val normalized = LeafTextEditor.preNormalize(rawText, wsOfLeaf(seg.leaf), before, after)
+        val ws = wsOfLeaf(seg.leaf)
+        val normalized = LeafTextEditor.preNormalize(rawText, ws, before, after)
+        // 样式区间：先按同一套空白规则映射到预归一后的新文字，再随公共前后缀裁剪平移。
+        val beforeSeg = if (relStart == 0) null else oldText.getOrNull(relStart - 1)
+        val afterSeg = if (relEnd >= oldText.length) null else oldText.getOrNull(relEnd)
+        val segSpans = if (seg.styles == null) {
+            null
+        } else {
+            val normSeg = LeafTextEditor.preNormalize(seg.text, ws, beforeSeg, afterSeg)
+            remapSpans(seg.styles, seg.text, normSeg)
+                .map { InlineMarkup.StyleSpan(relStart + it.start, relStart + it.endExclusive, it.sig) }
+        }
         // 读者**新敲**的换行是段界（拆成真块），原文里本来就有的 `\n` 仍是 `<br>`：
         // 字符级对齐一眼就能分开「留下来的换行」与「新添的换行」（方案 D-34 修订版）。
         val newText = promoteTypedBreaks(oldText, normalized)
 
-        if (newText == oldText) {
+        if (newText == oldText && segSpans.isNullOrEmpty()) {
             // 输入的文字与旧渲染文字逐字相同（或只差会被空白归一吃掉的空白）：不写库。
             return Built(emptyList(), null, RevisionBlocks.renderedLength(newText))
         }
@@ -394,12 +444,21 @@ object TextEditPlanner {
         // 没有旧修订时整段都可裁（改一个字只落一个字，方案 §8.4）。
         val firstRevised = absorbed.minOfOrNull { renderedInterval(it).first } ?: uRenderEnd
         val lastRevisedEnd = absorbed.maxOfOrNull { renderedInterval(it).last + 1 } ?: uRenderStart
-        val maxPrefix = (firstRevised - uRenderStart)
-            .coerceIn(0, minOf(oldText.length, newText.length))
+        // 文字一个字都没改、只是改了行内结构：整段重写（两头一裁，样式就只剩个空壳）。
+        val restructureOnly = newText == oldText
+        val maxPrefix = if (restructureOnly) {
+            0
+        } else {
+            (firstRevised - uRenderStart).coerceIn(0, minOf(oldText.length, newText.length))
+        }
         var prefix = 0
         while (prefix < maxPrefix && oldText[prefix] == newText[prefix]) prefix++
-        val maxSuffix = (uRenderEnd - lastRevisedEnd)
-            .coerceIn(0, minOf(oldText.length - prefix, newText.length - prefix))
+        val maxSuffix = if (restructureOnly) {
+            0
+        } else {
+            (uRenderEnd - lastRevisedEnd)
+                .coerceIn(0, minOf(oldText.length - prefix, newText.length - prefix))
+        }
         var suffix = 0
         while (
             suffix < maxSuffix &&
@@ -411,6 +470,11 @@ object TextEditPlanner {
         val finalText = newText.substring(prefix, newText.length - suffix)
         val finalStart = uStart + prefix
         val finalEnd = uEnd - suffix
+        val finalStyles = segSpans?.mapNotNull { sp ->
+            val s0 = (sp.start - prefix).coerceAtLeast(0)
+            val e0 = (sp.endExclusive - prefix).coerceAtMost(finalText.length)
+            if (e0 > s0) InlineMarkup.StyleSpan(s0, e0, sp.sig) else null
+        }
         // 审阅清单那一行摘要的两端：整段选区改之前 / 改之后的文字（渲染空间，按叶各存一份）。
         // 与上面的「最小修订」无关：公共前后缀照裁不误，但清单里仍按整段比对，
         // 读者才看得出「改之前是什么、改之后是什么」（纯插入也显示被选中的那段原文）。
@@ -425,6 +489,7 @@ object TextEditPlanner {
                 text = finalText,
                 originalText = selected,
                 editedText = seg.text,
+                styles = finalStyles?.let(InlineMarkup::toStored),
                 delta = RevisionBlocks.renderedLength(finalText) - (finalEnd - finalStart),
                 groupId = groupId,
                 createdAt = now,
@@ -473,6 +538,70 @@ object TextEditPlanner {
         var i = 0
         while (i < ends.size && ends[i] <= offset) i++
         return i.coerceIn(0, ends.size - 1)
+    }
+
+    /**
+     * 每行的样式区间（相对该行文字）。[spans] 为 null（没有样式信息）时整表返回 null，
+     * 让下游走「老路径」（新字挂左邻），老修订 / 纯文本编辑的行为一个字节都不变。
+     */
+    private fun lineSpans(
+        spans: List<InlineMarkup.StyleSpan>?,
+        lines: List<String>,
+    ): List<List<InlineMarkup.StyleSpan>>? {
+        if (spans == null) return null
+        val out = ArrayList<List<InlineMarkup.StyleSpan>>(lines.size)
+        var cursor = 0
+        for (line in lines) {
+            val from = cursor
+            val to = from + line.length
+            out.add(
+                spans.filter { it.start < to && it.endExclusive > from }.map {
+                    InlineMarkup.StyleSpan(
+                        maxOf(0, it.start - from),
+                        minOf(line.length, it.endExclusive - from),
+                        it.sig,
+                    )
+                },
+            )
+            cursor = to + 1
+        }
+        return out
+    }
+
+    /** 把区间从 [from] 文字映射到 [to] 文字（对齐保留的字跟着走；被空白归一吃掉的字丢掉）。 */
+    private fun remapSpans(
+        spans: List<InlineMarkup.StyleSpan>,
+        from: String,
+        to: String,
+    ): List<InlineMarkup.StyleSpan> {
+        if (from == to) return spans
+        val map = IntArray(from.length) { -1 }
+        var oi = 0
+        var ni = 0
+        for (op in CharDiff.diff(from, to)) {
+            when (op) {
+                is CharDiff.Op.Keep -> {
+                    for (k in 0 until op.length) {
+                        if (oi < map.size) map[oi] = ni
+                        oi++
+                        ni++
+                    }
+                }
+                is CharDiff.Op.Delete -> oi += op.length
+                is CharDiff.Op.Insert -> ni += op.text.length
+            }
+        }
+        return spans.mapNotNull { sp ->
+            var ns = -1
+            var ne = -1
+            for (k in sp.start.coerceAtLeast(0) until sp.endExclusive.coerceAtMost(map.size)) {
+                val m = map[k]
+                if (m < 0) continue
+                if (ns < 0) ns = m
+                ne = m + 1
+            }
+            if (ns < 0 || ne <= ns) null else InlineMarkup.StyleSpan(ns, ne, sp.sig)
+        }
     }
 
     /** 保留空行的 `\n` 切分（`String.split` 的尾部空串行为在跨平台实现里不够直观）。 */

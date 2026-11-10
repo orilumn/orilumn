@@ -50,6 +50,31 @@ class TextEditPlannerTest {
         now = 1234,
     )
 
+    private fun planStyled(
+        text: String,
+        ends: IntArray?,
+        start: Int,
+        endExclusive: Int,
+        replacement: String,
+        styles: List<InlineMarkup.StyleSpan>,
+        revisions: List<TextRevision> = emptyList(),
+    ): TextEditPlan = TextEditPlanner.plan(
+        bookId = 1,
+        chapter = 1,
+        chapterText = text,
+        blockEnds = ends,
+        start = start,
+        endExclusive = endExclusive,
+        replacement = replacement,
+        map = ChapterRevisionMap(revisions),
+        groupId = 99,
+        now = 1234,
+        replacementStyles = styles,
+    )
+
+    private fun span(s: Int, e: Int, tag: String) =
+        InlineMarkup.StyleSpan(s, e, InlineMarkup.StyleSig(tag))
+
     private fun ready(p: TextEditPlan): TextEditPlan.Ready {
         assertTrue("expected Ready but was $p", p is TextEditPlan.Ready)
         return p as TextEditPlan.Ready
@@ -389,5 +414,56 @@ class TextEditPlannerTest {
         assertEquals("X Y${RevisionBlocks.SEPARATOR}Z", r.text)
         assertEquals(2, r.charStart)
         assertEquals(4, r.charEnd)
+    }
+
+    @Test
+    fun stylesRideAlongWithTrimmedRevision() {
+        // 「abcdef」→「ab*X*ef」：标记只圈住新写的 X，裁剪后区间要跟着平移。
+        val p = ready(planStyled("abcdef", intArrayOf(6), 0, 6, "abXef", listOf(span(2, 3, "em"))))
+        val r = p.inserted.single()
+        assertEquals(2, r.charStart)
+        assertEquals(4, r.charEnd)
+        assertEquals("X", r.text)
+        val stored = r.styles
+        assertEquals(1, stored?.size)
+        assertEquals(0 to 1, stored!!.single().start to stored.single().endExclusive)
+        assertEquals("em", stored.single().style.tag)
+    }
+
+    @Test
+    fun clippedSpanIsDroppedWhenItsCharsAreTrimmedAway() {
+        // 标记圈住的是与原文相同的字（会被当成公共前后缀裁掉）：区间跟着消失，不留空修订片段。
+        val p = ready(planStyled("abcdef", intArrayOf(6), 0, 6, "abXef", listOf(span(0, 2, "em"))))
+        assertEquals(null, p.inserted.single().styles?.firstOrNull())
+    }
+
+    @Test
+    fun styleOnlyChangeStillWritesARevision() {
+        // 一个字都没改、只加了粗：文字不变也要落一条（否则「选中加粗」会被当成没改）。
+        val p = ready(planStyled("abcdef", intArrayOf(6), 1, 4, "bcd", listOf(span(0, 3, "strong"))))
+        val r = p.inserted.single()
+        assertEquals(1, r.charStart)
+        assertEquals(4, r.charEnd)
+        assertEquals("bcd", r.text)
+        assertEquals(0, r.delta)
+        assertEquals("strong", r.styles?.single()?.style?.tag)
+    }
+
+    @Test
+    fun crossParagraphStylesLandOnTheirOwnLine() {
+        // 两段各改一个字，标记只圈第一段：第二段的修订不带样式，第一段带。
+        val text = "甲乙丙丁"
+        val ends = intArrayOf(2, 4)
+        val p = ready(
+            planStyled(text, ends, 0, 4, "甲X\n丙Y", listOf(span(0, 2, "em"))),
+        )
+        assertEquals(2, p.inserted.size)
+        val first = p.inserted[0]
+        val second = p.inserted[1]
+        assertEquals("X", first.text)
+        assertEquals("em", first.styles?.single()?.style?.tag)
+        assertEquals(0 to 1, first.styles!!.single().start to first.styles.single().endExclusive)
+        assertEquals("Y", second.text)
+        assertEquals(null, second.styles?.firstOrNull())
     }
 }

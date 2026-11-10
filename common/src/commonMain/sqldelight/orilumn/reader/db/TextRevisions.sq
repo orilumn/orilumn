@@ -1,4 +1,4 @@
--- 正文修订（schema v13；迁移见 10.sqm / 11.sqm / 12.sqm）。
+-- 正文修订（schema v14；迁移见 10.sqm / 11.sqm / 12.sqm / 13.sqm）。
 --
 -- 一条修订 = 原书坐标里的一个区间 [charStart, charEnd) 换成 text。
 -- 与标注（Annotations.sq）/ PageSlice / ReadingLocator 同一个坐标空间：章号 + 章内原书字符偏移，
@@ -11,6 +11,8 @@
 --   读者才看得出「改之前是什么、改之后是什么」。旧行没有这两列数据时回退空串。
 -- - delta 是提交时实测的「渲染后长度 − 原区间长度」，用于不载入章树也能换算坐标；
 -- - groupId：同一次提交产生的多条修订共用（跨段时一段一条），审阅视图以后按组显示；
+-- - styles：行内样式区间（JSON，作用于 text，含段界字符）。空串 = 老修订没有样式信息，
+--   重放按「新字挂左邻」的旧规则；`[]` = 读者明确声明过这段文字没有行内元素（规格 §7）；
 -- - 没有外键级联：删书由 LibraryDb.removeBookAndData 在同一事务里清理本表（方案 D-17）。
 
 CREATE TABLE text_revisions(
@@ -22,6 +24,7 @@ CREATE TABLE text_revisions(
   text TEXT NOT NULL,              -- 替换文本（空串 = 删除）
   originalText TEXT NOT NULL DEFAULT '', -- 审阅清单「原文」行（整段选区）
   editedText TEXT NOT NULL DEFAULT '',   -- 审阅清单「新文字」行（整段输入）
+  styles TEXT NOT NULL DEFAULT '',       -- 行内样式区间（JSON；空串 = 老修订没有样式信息）
   delta INTEGER NOT NULL,          -- 渲染后长度 − (charEnd − charStart)
   groupId INTEGER NOT NULL,        -- 同一次提交的多条修订共用
   createdAt INTEGER NOT NULL,
@@ -33,8 +36,8 @@ CREATE TABLE text_revisions(
 CREATE INDEX text_revisions_by_book_chapter ON text_revisions(bookId, chapter, charStart);
 
 insertTextRevision:
-INSERT INTO text_revisions(bookId, chapter, charStart, charEnd, text, originalText, editedText, delta, groupId, createdAt, updatedAt)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+INSERT INTO text_revisions(bookId, chapter, charStart, charEnd, text, originalText, editedText, styles, delta, groupId, createdAt, updatedAt)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 -- 新增行的 id：与 books.lastInsertId 同因（Jdbc 驱动按语句取连接，last_insert_rowid 不可靠）。
 lastInsertTextRevisionId:

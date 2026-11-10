@@ -1,0 +1,3 @@
+-- 正文修订（13→14）：修订携带行内样式区间，重放时按区间套元素（规格 `docs/正文修改-行内标记语法.md` §7）。
+-- 老修订这一列是空串（= 没有样式信息），重放沿用「新字挂左邻」的旧规则，行为与升级前完全一致。
+ALTER TABLE text_revisions ADD COLUMN styles TEXT NOT NULL DEFAULT '';

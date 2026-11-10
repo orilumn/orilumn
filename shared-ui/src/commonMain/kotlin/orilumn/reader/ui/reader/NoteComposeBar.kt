@@ -45,7 +45,12 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.input.OffsetMapping
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.TextFieldValue
@@ -55,6 +60,7 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import orilumn.reader.data.annotation.AnnotationKind
 import orilumn.reader.data.annotation.AnnotationLineStyle
+import orilumn.reader.engine.revision.InlineMarkup
 import kotlin.math.roundToInt
 
 /**
@@ -144,6 +150,13 @@ internal fun AnnotationSheet(
      * 正文修改时输入框换成多行、`确定` 提交修订；取消仍是点卡片外 / 返回键。
      */
     mode: NoteSheetMode = NoteSheetMode.Annotation,
+    /**
+     * 正文修改：把输入区里的标记字符（`*`、`` ` ``、`<em>`、链接括号）**淡化显示**。
+     *
+     * 只改显示、不改内容：变换后文字长度不变（`OffsetMapping.Identity`），光标 / 选区 / 手柄
+     * 都还是原来那套位置，控件持有的仍是纯文本。
+     */
+    dimMarkup: Boolean = false,
 ) {
     val p = palette
     // 输入框内部要光标与选区，所以持 TextFieldValue；外面只认纯文本（点色槽时要读它）。
@@ -176,6 +189,27 @@ internal fun AnnotationSheet(
         }
     }
     val focus = remember { FocusRequester() }
+
+    // 标记字符淡化：只是给它们换一种墨色，文字长度不变（所以光标 / 选区不用换算）。
+    val markupDim = p.muted2
+    val visual = remember(dimMarkup, markupDim) {
+        if (!dimMarkup) {
+            VisualTransformation.None
+        } else {
+            VisualTransformation { text ->
+                val ranges = InlineMarkup.markerRanges(text.text)
+                if (ranges.isEmpty()) {
+                    TransformedText(text, OffsetMapping.Identity)
+                } else {
+                    val dimmed = buildAnnotatedString {
+                        append(text)
+                        for (r in ranges) addStyle(SpanStyle(color = markupDim), r.first, r.last + 1)
+                    }
+                    TransformedText(dimmed, OffsetMapping.Identity)
+                }
+            }
+        }
+    }
 
     // 光标自己画（桌面复报：系统光标太浅，像没有光标）：
     //  - 系统光标在桌面只有 1dp（`DefaultCursorThickness` 的 desktop actual），细线抗锯齿后发虚；
@@ -316,6 +350,7 @@ internal fun AnnotationSheet(
                                 .onFocusChanged { focused = it.isFocused }
                                 .onSizeChanged { fieldHeightPx = it.height },
                             textStyle = NoteTextStyle.copy(color = p.text),
+                            visualTransformation = visual,
                             // 光标用正文墨色，不用批注色：高亮色槽是 45% 透明度的荧光笔底色（`0x73…`），
                             // 拿它画光标压在卡片的浅底上几乎看不见。
                             cursorBrush = if (selfCaret) SolidColor(Color.Transparent) else SolidColor(p.text),

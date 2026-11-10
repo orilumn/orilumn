@@ -58,7 +58,7 @@ class ChapterRevisionMap(
      * 内容版本：本章修订表 + 重放算法版本号的稳定哈希（0 = 无修订）。
      *
      * 分页表头、页数清单、当前页快照都拿它做失效判据：只改一章就只作废那一章。
-     * 必须覆盖**所有会影响重放结果**的输入（区间、替换文本、组号与顺序），
+     * 必须覆盖**所有会影响重放结果**的输入（区间、替换文本、行内样式、组号与顺序），
      * 以及对齐 / 预归一算法的版本（见 [ALGORITHM_VERSION]、[CharDiff.VERSION]）。
      *
      * 刻意**不含 `delta`**：重放结果只由区间与替换文本决定，`delta` 是提交时算的换算缓存，
@@ -84,6 +84,23 @@ class ChapterRevisionMap(
             mix(r.groupId)
             for (c in r.text) mix(c.code.toLong())
             mix(-1L) // 文本分隔，避免 ["ab","c"] 与 ["a","bc"] 撞哈希
+            // 行内样式也进版本：只改结构不改字（加粗 / 去斜体）同样会改变这一章的排版。
+            val styles = r.styles
+            mix(if (styles == null) -7L else styles.size.toLong())
+            if (styles != null) {
+                for (s in styles) {
+                    mix(s.start.toLong())
+                    mix(s.endExclusive.toLong())
+                    for (c in s.style.tag) mix(c.code.toLong())
+                    mix(-3L) // 标签与属性分隔
+                    for ((k, v) in s.style.attrs) {
+                        for (c in k) mix(c.code.toLong())
+                        mix(-4L) // 属性名与值分隔
+                        for (c in v) mix(c.code.toLong())
+                        mix(-5L) // 属性分隔
+                    }
+                }
+            }
         }
         h
     }
@@ -564,8 +581,9 @@ class ChapterRevisionMap(
          *  8 = 副本里的段界只占一格（¶），不再按「¶ + 换行」两格算长度。
          *  9 = 审阅视图改成「原文照排 + 改动就地插入」，不再另排新文字副本（章文字变了）。
          * 10 = 落在同一片叶 / 同一组上的多处修改一起重塑，不再只保住其中一条（章文字变了）。
-         * 11 = 叶尾那一格插入也落进本叶（整段引用句的收尾引号以前会被吞掉，章文字变了）。 */
-        const val ALGORITHM_VERSION = 11
+         * 11 = 叶尾那一格插入也落进本叶（整段引用句的收尾引号以前会被吞掉，章文字变了）。
+         * 12 = 修订可带显式行内样式（`*斜体*` / `<em>` 这类标记落地后按区间重建叶内容）。 */
+        const val ALGORITHM_VERSION = 12
 
         private const val FNV_OFFSET = -3750763034362895579L // 14695981039346656037
         private const val FNV_PRIME = 1099511628211L

@@ -45,6 +45,11 @@ object ChapterRevisionReplay {
         val endExclusive: Int,
         val text: String,
         val revisionId: Long,
+        /**
+         * 显式行内样式区间（偏移相对 [text]，含段界字符）。null = 没有样式信息。
+         * 块与块之间按段界切开后各自保留自己那一段。
+         */
+        val styles: List<InlineMarkup.StyleSpan>? = null,
     )
 
     /**
@@ -381,6 +386,24 @@ object ChapterRevisionReplay {
         val selEndInLast = (merge.endExclusive - (charStarts[last] - charStarts[first]).toInt())
             .coerceIn(0, lastText.length)
 
+        // 每行在 merge.text 里的起点，用来把样式区间切到块内。
+        val lineStarts = IntArray(lines.size)
+        run {
+            var cursor = 0
+            for (j in lines.indices) {
+                lineStarts[j] = cursor
+                cursor += lines[j].length + 1
+            }
+        }
+
+        fun blockStyles(j: Int): List<InlineMarkup.StyleSpan>? {
+            val all = merge.styles ?: return null
+            val from = lineStarts[j]
+            val to = from + lines[j].length
+            return all.filter { it.start < to && it.endExclusive > from }
+                .map { InlineMarkup.StyleSpan(maxOf(0, it.start - from), minOf(lines[j].length, it.endExclusive - from), it.sig) }
+        }
+
         val used = LinkedHashSet<Int>()
         val blocks = ArrayList<Block>(lines.size)
         var degraded = 0
@@ -400,11 +423,11 @@ object ChapterRevisionReplay {
             blocks += Block(r.leaf, r.text.length)
         }
 
-        fun emitNew(text: String) {
+        fun emitNew(text: String, spans: List<InlineMarkup.StyleSpan>? = null) {
             val el = MarkupElement(
                 tag = firstLeaf.tag,
                 attrs = firstLeaf.attrs - "id",
-                children = if (text.isEmpty()) emptyList() else listOf(MarkupElement("#text", text = text)),
+                children = LeafTextEditor.inlineNodes(text, spans.orEmpty()),
             )
             // 量长度要按同一套级联（继承父容器的字体 / white-space）；重链在最后统一做。
             el.parent = firstLeaf.parent
@@ -414,19 +437,22 @@ object ChapterRevisionReplay {
         if (lines.size == 1) {
             // 并成一段：首叶承载前缀 + 新文字 + 末叶后缀，中间的叶全删。
             val suffix = if (last == first) "" else lastText.substring(selEndInLast)
-            emitRebuilt(first, LeafTextEditor.Edit(selStartInFirst, firstLen, lines[0] + suffix))
+            emitRebuilt(
+                first,
+                LeafTextEditor.Edit(selStartInFirst, firstLen, lines[0] + suffix, blockStyles(0)),
+            )
         } else if (first == last) {
             // 单叶拆块：选区在一段之内，却输入了段界（读者新插的换行）。前缀 + 第一行留在原叶，
             // 中间各行新建同 tag / 同属性的兄弟块，最后一行 + 后缀交给「原叶的另一份重建」——
             // 一片叶只能承载一块，前缀和后缀要分两处，就只能各复制一份（复制的那份去掉 id）。
             val at = selStartInFirst
             val end = selEndInLast
-            emitRebuilt(first, LeafTextEditor.Edit(at, firstLen, lines.first()))
-            for (j in 1 until lines.size - 1) emitNew(lines[j])
+            emitRebuilt(first, LeafTextEditor.Edit(at, firstLen, lines.first(), blockStyles(0)))
+            for (j in 1 until lines.size - 1) emitNew(lines[j], blockStyles(j))
             val tail = LeafTextEditor.rebuild(
                 leaf = lastLeaf,
                 segments = segmentsOf(lastLeaf),
-                edits = listOf(LeafTextEditor.Edit(0, end, lines.last())),
+                edits = listOf(LeafTextEditor.Edit(0, end, lines.last(), blockStyles(lines.lastIndex))),
                 wsOf = wsOf,
                 styleOf = styleOf,
                 rebuildSegments = segmentsOf,
@@ -454,14 +480,15 @@ object ChapterRevisionReplay {
                             start = if (j == 0) selStartInFirst else 0,
                             endExclusive = oldTexts[j],
                             text = lines[j],
+                            styles = blockStyles(j),
                         ),
                     )
                 } else {
-                    emitNew(lines[j])
+                    emitNew(lines[j], blockStyles(j))
                 }
             }
             // 末行接末叶后缀：用末叶承载，后缀的行内样式不动。
-            emitRebuilt(last, LeafTextEditor.Edit(0, selEndInLast, lines.last()))
+            emitRebuilt(last, LeafTextEditor.Edit(0, selEndInLast, lines.last(), blockStyles(lines.lastIndex)))
         }
         return MergeOut(
             blocks = blocks,

@@ -58,7 +58,7 @@ class NegativeTextIndentTest {
     /** 真机字体栈（Skia 的 `TextIndent` 行为与字体相关，见 [FirstLineIndentSingleLineOverflowTest]）。 */
     private val families = listOf("STSong", "serif")
 
-    /** 亚像素余量（同 [SkiaParagraphBreakerTest] 既有口径）。 */
+    /** 亚像素余量（沿用仓库既有 `+1f` 口径）。 */
     private val slack = 1f
 
     /** `text-indent: 2em` 的绝对值；负号即悬挂缩进。 */
@@ -84,7 +84,7 @@ class NegativeTextIndentTest {
     // ---- 1. 断行侧：负缩进加宽首行可用宽（两个变体） ----
 
     @Test
-    fun `悬挂缩进让首行多容纳一个字距`() = forEachBreakerVariant { breaker, v ->
+    fun `悬挂缩进让首行多容纳一个字距`() = withBodyBreaker { breaker, v ->
         val nat = naturalWidth(cjk)
         // 窗口 = 「缩进为 0 时放不下（≥2 行）、负缩进后放得下（1 行）」的那段版心：`nat − |indent| < 版心 < nat`。
         // 两端各收 2px，避开「恰好等于」的浮点边界。
@@ -189,7 +189,7 @@ class NegativeTextIndentTest {
     }
 
     @Test
-    fun `悬挂缩进端到端：重轻两路同值且绘制侧同缩进`() = forEachBreakerVariant { _, v ->
+    fun `悬挂缩进端到端：重轻两路同值且绘制侧同缩进`() = withBodyBreaker { _, v ->
         val fsPx = profile().bodyPx
         val indentPx = 2f * fsPx
         // 版心取「整段恰好放不下」：`nat − |indent| < 版心 < nat`。

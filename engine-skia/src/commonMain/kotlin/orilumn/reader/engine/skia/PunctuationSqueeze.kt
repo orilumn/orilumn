@@ -1,6 +1,5 @@
 package orilumn.reader.engine.skia
 
-import orilumn.reader.engine.AbSwitch
 import orilumn.reader.engine.css.FontRun
 import orilumn.reader.engine.laying.SOFT_HYPHEN
 import orilumn.reader.engine.laying.isSqueezableClosingPunct
@@ -59,27 +58,15 @@ import orilumn.reader.engine.laying.isSqueezableClosingPunct
  *
  * ## 上界
  *
- * [appliedMaxEm] 在 [AbSwitch.inhouseBreak] 关（回退到 Skia 断行器）时返 **0**。
- * **这一条不是溢出防护，是回退保真**：Skia 断行器按未挤的宽度决定断点，
- * 照挤只会让它的每一行都短掉一截（LEFT 对齐时右缘提前）。挤压**只减不增**，
- * 所以最坏也只是排得松一点，**不可能超出版心**（与 [orilumn.reader.engine.text.preprocess.CjkLatinSpacing]
- * 那种「注入宽度」的相反性质 —— 那个必须两侧同进同退，这个只需要两侧同进）。
+ * 上限是产品裁决的 0.5em（[DEFAULT_MAX_EM]）：全角收尾标点最多收到半角。
+ * 挤压**只减不增**，最坏也只是行末留白多一点，**不可能超出版心**（与
+ * [orilumn.reader.engine.text.preprocess.CjkLatinSpacing] 那种「注入宽度」的相反性质 ——
+ * 那个必须两侧同进同退，这个只需要两侧同进）。
  */
 internal object PunctuationSqueeze {
 
     /** 上限（em）—— 产品裁决 0.5em：全角收尾标点最多收到半角。 */
     const val DEFAULT_MAX_EM: Float = 0.5f
-
-    /**
-     * **真正施加到版面上的上限**（em）：回退阀关时为 0。
-     *
-     * 与 [orilumn.reader.engine.text.TypographicProfile.cjkLatinSpacingEmApplied] 同一个闸门
-     * （[AbSwitch.inhouseBreak]），但**不需要进 `paramHash`**：本值是编译期常量，
-     * 不随设置变化 ⇒ 断点集合不随它变 ⇒ 磁盘表键不必含它。
-     * ⚠ 一旦它变成滑块（用户可调），**必须**同时进 [orilumn.reader.engine.text.LayoutParamKey]，
-     * 否则拨滑块会命中按另一个额度算出的旧磁盘表。
-     */
-    fun appliedMaxEm(): Float = if (AbSwitch.inhouseBreak()) DEFAULT_MAX_EM else 0f
 
     /**
      * **逐字位的挤压额度**（px，数组与 `[from, to)` 同长且同坐标；不可压的位置恒 `0f`）。

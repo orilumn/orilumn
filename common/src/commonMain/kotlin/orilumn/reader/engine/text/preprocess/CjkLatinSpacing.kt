@@ -8,7 +8,9 @@ import orilumn.reader.engine.css.FontRun
  * @property leftIndex index of the boundary char's last UTF-16 unit (the gap sits between
  *   `text[leftIndex]` and `text[leftIndex] + 1`).
  * @property gapEm gap advance in em (0.25 = 1/4 em by default).
- * @property spaceCount 该边界上被**一律删除**的连续分隔空格个数（0 = 边界直接相邻，没有空格可吃）。
+ * @property spaceCount 该边界上被**一律删除**的连续**空白字符**个数（0 = 边界直接相邻，没有空白可吃）。
+ *   空白 = 半角空格 / 制表 / NBSP / 窄空格 / 表意空格（U+3000）等**除换行符以外的一切空白**
+ *   （判据见 [isSeparatingSpace]）；换行是硬断行，不在「可吃的分隔空白」之列。
  *   整形层把这 [spaceCount] 个字位画成零宽（字符本身留在文本模型里，选中/检索/索引不受影响）。
  */
 data class CjkLatinGap(
@@ -26,15 +28,20 @@ data class CjkLatinGap(
  * layer to advance by `gapEm × fontSize` between the two glyphs, keeping the underlying text
  * untouched for selection/search/indexing.
  *
- * At a boundary where the author already typed half-width (or NBSP) spaces, those spaces are
- * treated as the "surplus half-width space" of the document model: [CjkLatinGap.spaceCount]>0 tells
- * the shaping layer to render them zero-width and absorb them into the fixed gap (删除多余半角空格，
- * 注入固定间隙). **一律删除**（产品口径 2026-10-03）：边界上**连续的全部**分隔空格都被吃掉，
- * 只留一个注入的固定间隙；旧实现「只吃一个、两个空格就一个间隙都不给」的例外已删 ——
- * 那条例外本身就是一处「滑块完全不起作用」。
+ * At a boundary where the author already typed whitespace (half-width space, tab, NBSP, thin space,
+ * 表意空格 U+3000 …), that whitespace is treated as the "surplus separation" of the document model:
+ * [CjkLatinGap.spaceCount]>0 tells the shaping layer to render those slots zero-width and absorb them
+ * into the fixed gap (删除多余空白，注入固定间隙). **一律删除**（产品口径 2026-10-03，
+ * 2026-11-10 扩到**一切空白**）：边界上**连续的整串空白**都被吃掉，只留一个注入的固定间隙；
+ * 旧实现「只吃一个、两个空格就一个间隙都不给」的例外已删 —— 那条例外本身就是一处「滑块完全不起作用」。
+ *
+ * 空白判据只看**字符本身是不是空白**（[isSeparatingSpace]），**与它夹在哪个行内元素里无关**：
+ * 文本在下游被摊平成**叶文本**（`NormalFlowLayout.leafText` / `styledSegments`），
+ * `中文 <a>Rust</a>` 与 `中文<a> Rust</a>` 摊平后都是 `中文 Rust`，边界照检、空格照吃。
+ * **换行符不吃**：那是硬断行（`<br>` / `<pre>` 的 `\n`），两侧的字本来就不在同一行。
  *
  * > ⚠ 一律删除的**已知代价**：`<pre>` 等宽块里靠多空格对齐的字符画（ASCII art）若含中文字符，
- * > 中西两侧的连续空格会被折叠成一个固定间隙而错位。真书《Rust 程序设计语言》全书
+ * > 中西两侧的连续空白会被折叠成一个固定间隙而错位。真书《Rust 程序设计语言》全书
  * > 中西边界上的多空格**出现 0 次**（25 章 28123 处边界全部是「相邻」或「单空格」），
  * > 故按散文口径执行；等宽块要保对齐时得单独裁决（不是本轮范围）。
  *
@@ -310,8 +317,12 @@ object CjkLatinSpacing {
      * CJK 侧，于是混排字距插到了**标点**旁边（真机实测《Kotlin 程序设计语言》）：
      * - `Kotlin：` → `：`(U+FF1A) 被判 CJK ⇒ `n`与`：`之间插了一个间隙（用户报「冒号受影响」）；
      * - `Rust。` → `。`(U+3002) 同理 ⇒ 句号前凭空多半个身位；
-     * - `中　A` → U+3000 **表意空格**被判 CJK ⇒ 间隙插在**空格后面**，空格本身还在
-     *   （全角空格是作者有意留的版式空格，不该被动）。
+     * - `中　A` → U+3000 **表意空格**被判 CJK ⇒ 间隙插在**空格后面**，空格本身还在；
+     *   现在 U+3000 判 [KIND_NONE]（不是 CJK 侧），但它作为**空白**在接缝处被吃掉
+     *   （2026-11-10 口径「所有空白字符均删除」，见 [isSeparatingSpace]）⇒ 只剩一个注入的间隙。
+     *   全角空格是**中文内部 / 段首**的版式留白（空一格、代替首行缩进），夹在**中英文之间**
+     *   本就没有正当理由 —— 那里要的是「两种文字分开」，而这正是混排字距的职责，
+     *   故接缝上照删、不回退。
      *
      * ⇒ 判据从「落在 CJK 码位段」收紧为「**是表意文字**」。全角拉丁 `Ａ-Ｚ`（0xFF21..0xFF3A）
      * 一并不再参与：它本身是等宽的刻意字形，与半角拉丁之间再加间隙只会更难读。
@@ -358,8 +369,47 @@ object CjkLatinSpacing {
     private fun opposite(a: Int, b: Int): Boolean =
         (a == KIND_CJK && b == KIND_WESTERN) || (a == KIND_WESTERN && b == KIND_CJK)
 
-    /** 半角空格 / NBSP：作者手打的那个「多余半角空格」（**用码点写死**，不可见字符写成字面量会被 IDE 吃掉）。 */
-    private fun isSeparatingSpace(c: Char): Boolean = c == ' ' || c.code == 0x00A0
+    /**
+     * 「分隔空白」= 中西接缝上要被**吃成零宽**的那一串字符：**Unicode 空白，换行符除外**
+     * （产品口径 2026-11-10，用户原话「中间的所有空白字符（不包括换行符）均删除，
+     * 由混排字距统一来做隔离」）。
+     *
+     * ## 为什么不用 `Char.isWhitespace()`
+     *
+     * 这是 KMP 共享代码，三个平台的「空白」口径并不完全一致（JVM 的
+     * `Character.isWhitespace` 把 NBSP / U+2007 / U+202F 判成**非**空白，而
+     * `Character.isSpaceChar` 又判成空白；native 走的是另一套表）⇒ 同一本书在平板与
+     * 桌面会排成两个版面。空白是**排版几何**的输入，必须逐码点写死、三端同值。
+     *
+     * ## 收哪些（Unicode `Zs` 全集 + 制表）
+     *
+     * | 码本 | 名字 | 典型来源 |
+     * |---|---|---|
+     * | U+0009 | TAB | 散文里的制表（NORMAL 会先折叠成空格；`<pre>` 会展开成空格） |
+     * | U+0020 | SPACE | 作者手打的半角空格（主战场） |
+     * | U+00A0 | NBSP | HTML `&nbsp;`、EPUB 转换产物（中西之间「不该断行」的间隔） |
+     * | U+1680 | OGHAM SPACE MARK | 极罕见，按 `Zs` 归类并入 |
+     * | U+2000..U+200A | EN QUAD … HAIR SPACE | 西文书排版的精细空格，`&thinsp;`(U+2009)、`&ensp;`、`&emsp;`、U+2007 数字空格 |
+     * | U+202F | NARROW NBSP | 法文标点旁、部分 EPUB 的「细不断行空格」 |
+     * | U+205F | MEDIUM MATHEMATICAL SPACE | 公式排版 |
+     * | U+3000 | IDEOGRAPHIC SPACE | 全角空格（中文内部 / 段首的版式留白；夹在**中英文之间**没有正当理由，接缝上照删） |
+     *
+     * ## 不收哪些
+     *
+     * - **换行符**：`\n`(LF) / `\r`(CR) / `\u000B`(VT) / `\u000C`(FF) / `\u0085`(NEL) /
+     *   `\u2028`(LS) / `\u2029`(PS) —— 两边本来就不在同一行，没有「中间」可吃；
+     *   而且把换行吃掉会让行界与字形错位（`<br>` 的硬换行尤其）。
+     * - **零宽字符**（U+200B ZWSP / U+FEFF BOM / U+2060 WJ）：它们本来就不占宽，
+     *   吃不吃版面完全一样，收进来只会让 `spaceCount` 多算而**把后文的字一起置零**
+     *   （`applyCjkLatinGaps` 按 `spaceCount` 逐槽置 0）—— 这是会造成丢字的坑，故明确不收。
+     * - 全角逗号、全角字母这类**全角字形族**（U+FF00..U+FFEF）仍在 [isCjk] 之外：
+     *   它们是**字形**不是空白，收进来会把标点一起吃掉。
+     */
+    private fun isSeparatingSpace(c: Char): Boolean {
+        val cp = c.code
+        return cp == 0x0009 || cp == 0x0020 || cp == 0x00A0 || cp == 0x1680 ||
+            (cp in 0x2000..0x200A) || cp == 0x202F || cp == 0x205F || cp == 0x3000
+    }
 
     /**
      * Reads the code point starting at [i] (surrogate-pair aware), so CJK Extension B code points

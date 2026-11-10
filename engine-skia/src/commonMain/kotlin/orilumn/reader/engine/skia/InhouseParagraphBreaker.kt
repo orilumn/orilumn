@@ -34,14 +34,15 @@ import orilumn.reader.engine.text.preprocess.CjkLatinSpacing
  *     实测「3 汉字 + 3 空格」@350 断在 `[0,6)`，即那 3 个空格入了行区间却只按 300 判定。
  *  2. **无空白折叠 / 无行首裁剪**：`"a  b"` 自然宽 = `"a b"` + 1 个空格宽；行首空格照算。
  *     SkParagraph 不做浏览器那套空白处理（实测锁死），故本类也不做。
- *  3. **`\n` 硬断**：行区间不含 `\n`（归一化与 [SkiaParagraphBreaker] 同口径），行首若「预领」了
- *     `\n` 则跳过；纯换行产生的空行丢弃，故 `"a\n\nb"` 得 2 行而非 3 行。
+ *  3. **`\n` 硬断**：行区间不含 `\n`（归一化沿用旧 SkParagraph 断行器口径），行首若「预领」了
+ *     `\n` 则跳过。**连续空行保留为真实行盒**（CSS 口径，`"a\n\nb"` 得 3 行；Q16 修复），
+ *     但末尾一个未终结的换行不产幻影行。
  *
  * **R1 core**（长串/URL 断行，S2(c) 不接线 F11/F12 时的兜底语义）：无可用断点且该单元放不下时，
  * **每个位置都算断点 + 贪心填满**（不是「塞不下就溢出」）。规格见 §2.2 的 R1 core 行为表。
  *
  * **量宽同源**（S2(a)）：宽度全部来自 [SkiaRunMeasurer]，与 S4 Aligner、S5 逐字绘制同一个取宽口。
- * 与 [SkiaParagraphBreaker] 的关系是「同输入两套实现」：后者保留作 T1 逐值等价性对照的基线与回退开关。
+ * 本类是生产**唯一**的断行实现：历史上与 SkParagraph 实现做过 T1 逐值等价对照，那套实现已随运行期开关一并删除。
  */
 class InhouseParagraphBreaker(
     private val letterSpacingEm: Float,
@@ -49,33 +50,22 @@ class InhouseParagraphBreaker(
      * CJK–Latin 自动间距（em）—— **断行侧的量宽必须把它算进版心**（[SkiaRunMeasurer.advances]
      * 的单一出口，见该方法 KDoc）。
      *
-     * 由 [bodyParagraphBreaker] 按 [orilumn.reader.engine.AbSwitch.inhouseBreak] 闸门传入。
+     * 由 [bodyParagraphBreaker] 传入。
      *
      * ## ⚠ 0 **不是**「关」——它是零间隙档（产品口径 2026-10-03 改）
      *
      * 本形参默认值 0，但 0 与其它档**同规则**：边界照检、作者手打的分隔空格**照吃**（画成零宽）、
      * 注入的间隙宽 = 0。见 [orilumn.reader.engine.text.preprocess.CjkLatinSpacing] 类 KDoc。
-     *
-     * **这条让「拿 0 当回退口径」的老构造点全部失真**：Skia 断行器那条路**保得住**作者手打的
-     * 空格（`SkParagraph` 原样排），而本类的 0 档会把它们吃掉 ⇒ 两侧行宽差 `边界数 × 空格宽`，
-     * 断点随之不同（实测《Rust 程序设计语言》语料 `Skia=688.38 / 自建=655.08`，差 33.30
-     * = 3 个 11.10px 的空格）。
-     *
-     * ⇒ **与 Skia 做逐值比对时必须显式传「关」，而「关」现在只有一个入口**：
-     *   [CjkLatinSpacing.gaps] 拿到的 `spaceCount` 为 0，也就是**语料本身没有分隔空格**。
-     *   换句话说：**比断点就别拿带分隔空格的语料**，或者比之前先确认 `spaceCount` 全为 0。
-     *   这不是可以「顺手补一个开关」的事 —— 那正是本轮删掉的那个特例。
      */
     private val cjkLatinSpacingEm: Float = 0f,
     /**
-     * 标点挤压上限（em，0 = 关）—— 默认读 [PunctuationSqueeze.appliedMaxEm]（回退阀闸门后的单源值）。
+     * 标点挤压上限（em，0 = 关）—— 单源常量 [PunctuationSqueeze.DEFAULT_MAX_EM]。
      *
      * 与 [cjkLatinSpacingEm] 的方向**相反**（那个是**注入**宽度、本项是**让出**宽度）：
      * 注入宽度必须两侧同进同退否则溢出裁字，让出宽度只可能让行变短 ⇒ 最坏是排得松一点，
-     * **不可能超出版心**。所以闸门关掉时即使照挤也不违反 [NoLineExceedsContentWidthTest]，
-     * 但那会让回退到 Skia 断点的那一侧排得比基线松 ⇒ 仍按闸门关掉，理由是**回退保真**。
+     * **不可能超出版心**。
      */
-    private val punctuationSqueezeMaxEm: Float = PunctuationSqueeze.appliedMaxEm(),
+    private val punctuationSqueezeMaxEm: Float = PunctuationSqueeze.DEFAULT_MAX_EM,
     private val measurer: SkiaRunMeasurer = SkiaRunMeasurer(),
     /** 断点增强器（顺序无关，S2(b) 冻结的形状）。本轮只接禁则表一个 source；S7 只加 source。 */
     private val breakSources: List<BreakOpportunitySource> = listOf(KinsokuBreakSource),
@@ -235,7 +225,7 @@ class InhouseParagraphBreaker(
      *
      * ## `tag` 传 `null` 而不是原样传下去
      *
-     * 与 [SkiaParagraphBreaker.preferredWidth] 同口径（那里 `paragraphStyle(..., tag = null, ...)`）。
+     * 与旧 SkParagraph 实现同口径（那里 `paragraphStyle(..., tag = null, ...)`）。
      * 表格格子的 `mono` 已由调用方 `NormalFlowLayout.tableCellPref` 算成
      * `style.monospace || tag == "pre"` 并**显式传进 `monospace` 形参**，
      * 此处再按 `tag` 二次判定会让 `pre` 格被重复施加。
@@ -349,10 +339,10 @@ class InhouseParagraphBreaker(
         val n = text.length
         if (n == 0) return emptyList()
         if (widthPx <= 0) {
-            // 退化路径：与 SkiaParagraphBreaker 同口径 —— 整段一行（零宽/非法版心护栏）。
+            // 退化路径：与旧 SkParagraph 实现同口径 —— 整段一行（零宽/非法版心护栏）。
             return listOf(BrokenLine(0 until n, lineHeightPx(fontSizePx, lineHeightRatio)))
         }
-        // 基线位移不改宽度/断行（探针锁定，SkiaParagraphBreaker 同一口径）：形参收下不参与，
+        // 基线位移不改宽度/断行（探针锁定，与旧 SkParagraph 实现同一口径）：形参收下不参与，
         // 保证 S1-2 的 forceStrut 语义在自建侧天然成立（行盒基线由 S4/S5 侧固定）。
         @Suppress("UNUSED_EXPRESSION")
         baselineShifts
@@ -364,7 +354,7 @@ class InhouseParagraphBreaker(
             text, fontSizePx, letterSpacingEm, tag, families, weight, italic, monospace, fontRuns, gaps,
             inlineBoxEdges,
         )
-        // 首行可用宽直接扣缩进 —— SkiaParagraphBreaker 那段「TextIndent 整段单行快捷路径」的
+        // 首行可用宽直接扣缩进 —— 旧 SkParagraph 实现那段「TextIndent 整段单行快捷路径」的
         // R1 补偿在新实现下自然消失（本类没有那条快捷路径，首行从一开始就按 CSS 语义排）。
         val headPx = widthPx - firstLineIndentPx
         if (headPx <= 0f) {
@@ -548,7 +538,7 @@ class InhouseParagraphBreaker(
             // **唯一例外**：最后两个字符都是 `'\n'` 时（`a\n\n`），末尾那个换行终止的是**一个真实空行**
             // （CSS：段「a」「」「」三行，去掉未终结的末行仍是两行），必须保留。
             // 门槛写这么长是因为两侧要逐条一致 —— Skia 侧把这个空行与末尾幻影行**合并成同一条非零宽指标**
-            // （实测 `[0..1, 2..3, 2..3]`），归一化剔掉幻影行后要靠字符补回来，见 [SkiaParagraphBreaker.layoutOnce]。
+            // （实测 `[0..1, 2..3, 2..3]`），归一化剔掉幻影行后要靠字符补回来，见旧 SkParagraph 实现的 `layoutOnce`。
             if (text[s] == '\n') {
                 val trailingTerminator = s + 1 == n && (s == 0 || text[s - 1] != '\n')
                 if (!trailingTerminator) out.add(BrokenLine(s until s, targetLh))

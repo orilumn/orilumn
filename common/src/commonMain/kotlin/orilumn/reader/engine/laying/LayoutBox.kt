@@ -364,7 +364,7 @@ fun capFloatOf(
     if (capStyle.floatSide == orilumn.reader.engine.css.FloatSide.NONE) return null
     val size = if (capStyle.fontSizePx > 0f) capStyle.fontSizePx else baseStyle.fontSizePx
     if (size <= 0f) return null
-    // 断行器内部已按 profile 的字距整形（`SkiaParagraphBreaker.preferredWidth` 走
+    // 断行器内部已按 profile 的字距整形（`InhouseParagraphBreaker.preferredWidth` 走
     // `SkParagraphFactory.paragraphStyle(letterSpacingEm)`）⇒ 这里不再补。
     val adv = breaker.preferredWidth(
         capText, size, capStyle.fontFamilies, capStyle.fontWeight, capStyle.italic, capStyle.monospace,

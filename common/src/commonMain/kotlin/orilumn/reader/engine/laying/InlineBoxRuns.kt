@@ -8,6 +8,7 @@ import orilumn.reader.engine.css.CornerRadius
 import orilumn.reader.engine.css.Edges
 import orilumn.reader.engine.css.WhiteSpace
 import orilumn.reader.engine.html.MarkupElement
+import orilumn.reader.engine.text.preprocess.CjkLatinSpacing
 
 /**
  * 一个行内元素的「行内盒」在其叶文本上的字符区间 `[start, endExclusive)`
@@ -31,12 +32,16 @@ import orilumn.reader.engine.html.MarkupElement
  *
  * ## 产出纪律
  *
- * **只对有可见物的元素发 run**（有背景色或有边框宽）⇒ `<em>` / `<a>` 这类无装饰行内元素**零开销**。
+ * **只对「有可见物或横向内外边距」的元素发 run**（有背景色 / 有边框宽 / 有水平 padding 或 margin）
+ * ⇒ `<em>` / `<a>` 这类无装饰行内元素**零开销**。
  * 不参与 CSS 级联、不依赖 `text-decoration`（装饰走专用通道，见标注方案 D-2）。
  *
  * @property bgHex 背景色（`#rrggbb` / `#aarrggbb`，与 [ComputedStyle.colorHex] 同形）；null = 无。
  *   **`background-image` 在行内不绘制** —— 记录在案的缺口（见引擎欠账 §4.3）。
  * @property padding 内边距（px，已解 em/%）。
+ * @property margin 外边距（px，已解 em/%；`auto` 对行内元素按 0 解）。**不绘制**（浏览器语义：
+ *   背景与边框只到 border-box），但**横向推进后续文字**（参与断行宽度，与 [padding] 同一条推进规则）。
+ *   纵向与 [padding] 同口径：不撑高行框。
  * @property border 四边边框宽度（px）；只画**宽 > 0 且 style 非 none** 的边。
  * @property borderColors 每边解析后的边框色（null 行值 = `currentColor`）；整体 null = 全未声明。
  * @property borderStyles 每边 `border-style`；null = 未声明（**按实线画**，与 [ComputedStyle.borderStyles]
@@ -59,6 +64,7 @@ data class InlineBoxRun(
     val endExclusive: Int,
     val bgHex: String? = null,
     val padding: Edges = Edges(),
+    val margin: Edges = Edges(),
     val border: Edges = Edges(),
     val borderColors: BorderColorEdges? = null,
     val borderStyles: BorderStyleEdges? = null,
@@ -90,6 +96,16 @@ data class InlineBoxRun(
 
     /** 这个 run 有没有东西要画（背景色或任一非零边框宽）。 */
     val visible: Boolean get() = bgHex != null || hasBorderWidth
+
+    /**
+     * 有没有**横向推进量**要记：可见装饰（背景/边框）或**水平内/外边距**（`padding` 与 `margin`
+     * 不出现在画面上，但把后面的字推开 —— CSS 2.1 §8.6 行内盒横向参与行内排版）。
+     *
+     * 与 [visible] 分开：只有 margin 的 `<span style="margin:0 4px">` 要推开文字、却什么都不画；
+     * 只有 padding 的 `<span style="padding:0 4px">` 同理（浏览器里它照样占位）。
+     */
+    val advancesHorizontally: Boolean
+        get() = visible || padding.horizontal > 0f || margin.horizontal > 0f
 }
 
 /**
@@ -150,7 +166,11 @@ fun collectInlineBoxRuns(
             while (node != null && node !== root) {
                 if (!isExcluded(node) && !isBlock(node)) {
                     val st = resolve(node)
-                    if (st != null && (st.backgroundColorHex != null || st.hasBorderEdges() || !relativeSelfOffset(st).isZero)) {
+                    if (st != null &&
+                        (st.backgroundColorHex != null || st.hasBorderEdges() ||
+                            st.padding.horizontal != 0f || st.margin.horizontal != 0f ||
+                            !relativeSelfOffset(st).isZero)
+                    ) {
                         val e = extents.getOrPut(node) { intArrayOf(pos, pos + n) }
                         if (pos < e[0]) e[0] = pos
                         if (pos + n > e[1]) e[1] = pos + n
@@ -185,6 +205,7 @@ fun collectInlineBoxRuns(
                 endExclusive = e[1],
                 bgHex = st.backgroundColorHex,
                 padding = st.padding,
+                margin = st.margin,
                 border = st.border,
                 borderColors = st.borderColors,
                 borderStyles = st.borderStyles,
@@ -204,7 +225,114 @@ fun collectInlineBoxRuns(
     }
     // 文档序；同起点时外层盒（end 大）在前 —— 绘制外层背景先落。
     out.sortWith(compareBy({ it.start }, { -it.endExclusive }))
-    return out
+    // 混排字距吃掉边界侧的 margin/padding（产品口径：间隙取代它们，有背景色的 padding 除外）。
+    // ⚠ **只在这里改 run**：收集之后的一切消费方（[inlineBoxEdges] 的推进、断行器预留版心、
+    //   绘制侧的背景/边框落墨、表格列宽测量）拿到的都是同一份，量画不会分叉。
+    return eatMixedBoundarySides(StyledSegments(segs).text, out)
+}
+
+/**
+ * 混排字距**吃掉**行内盒在 CJK↔Latin 边界那一侧的水平 `margin` / `padding`（产品口径 2026-11-10）。
+ *
+ * ## 一句话规则
+ *
+ * 中西接缝上本来就有间隙（[orilumn.reader.engine.text.preprocess.CjkLatinSpacing]），行内元素在这一侧
+ * 再自带一段 `margin` / `padding` 就是**两份留白叠在一起** ⇒ 把那一侧的 margin/padding **归零**，
+ * 由间隙取代（与「作者手打的分隔空格一律吃成零宽、只留注入的间隙」同一条产品口径）。
+ *
+ * **例外：有背景色的 `padding` 不吃。** 背景铺满 border-box（[InlineBoxRun.padding] 那一段也在其中），
+ * 把 padding 归零等于把背景框掐窄到字形上，看起来就像「底色贴着字」—— 那种盒子的 padding 原样保留，
+ * 间隙照旧画在框**外**（绘制侧由 `LineWindowDrawer.trailingCjkGapPx` 从 border-box 右缘扣掉）。
+ * 「有没有背景色」按**盒自己或它的行内祖先**判：`<mark style="background">` 里面那个无背景的
+ * `<span style="padding">` 的 padding **也是画在别人的底色上的**，同样不能吃。
+ *
+ * `border` 一律不吃：那是**看得见的墨**，不是留白。`margin` 一律吃：margin 不绘制，任何层级都不画。
+ *
+ * ## 判据：只吃「落在边界跨度里」的那一侧
+ *
+ * 边界跨度 = `[CjkLatinGap.leftIndex, leftIndex + spaceCount]`（与 [inlineBoxEdges] 的记账字位
+ * 同一坐标系：盒的**左**侧记在 `start - 1`、**右**侧记在 `endExclusive - 1`）。两种接缝都覆盖：
+ *
+ * | 形状 | 盒的哪一侧被吃 | 记账字位 |
+ * |---|---|---|
+ * | `中<code>R</code>` | 右 / 左（两个盒各一侧） | `leftIndex`（= 左盒末字 = 右盒 `start - 1`） |
+ * | `<code>中</code> R`（空格在盒外） | 右 | `leftIndex` |
+ * | `<code>中 </code>R`（空格在盒内被吃） | 右 | 跨度包含盒末的空格字位 |
+ * | `中 <code>R</code>`（空格在盒外） | 左 | 跨度含 `start - 1` |
+ *
+ * 盒**内部**的中西边界（`<code>中R</code>`）没有盒边落在跨度里 ⇒ 不动：盒是一个整体，盒内的
+ * 中西分隔照旧由底色/边框圈着（那是盒自身的内容，见 `LineWindowDrawer.trailingCjkGapPx` 同一判据）。
+ *
+ * ## 为什么改 run 而不是只扣推进量
+ *
+ * 盒子是**一个整体**：padding 被吃的那一侧，背景 / 边框 / 圆角 / slice 片段必须与推进量**同时**变窄，
+ * 否则「画 > 量」—— 盒边压到后文的字上（验收样书 V1 样例1.2 的老账，见 `inlineBoxEdges` KDoc）。
+ * 改 run 之后，[inlineBoxEdges] 与 `LineWindowDrawer.paintInlineBoxes` 自然同源。
+ *
+ * ## 0 档照样吃
+ *
+ * 与「0 档照吃作者的空格」同一条：0 档只把**注入的间隙宽**压到 0，边界照检、该吃的照吃
+ * （见 `CjkLatinSpacing` 类 KDoc「`gapEm = 0` 是参数为 0 的那一档」）。故这里按 0f 检测位置 ——
+ * 吃的只是**边界在哪**，与档位无关。
+ */
+internal fun eatMixedBoundarySides(text: CharSequence, runs: List<InlineBoxRun>): List<InlineBoxRun> {
+    if (runs.isEmpty() || text.isEmpty()) return runs
+    val gaps = CjkLatinSpacing.gaps(text, 0f)
+    if (gaps.isEmpty()) return runs
+
+    /** [slot] 是否落在某个边界跨度 `[leftIndex, leftIndex + spaceCount]` 里（gaps 按 leftIndex 升序）。 */
+    fun onBoundary(slot: Int): Boolean {
+        var lo = 0
+        var hi = gaps.size - 1
+        var hit = -1
+        while (lo <= hi) {
+            val mid = (lo + hi) ushr 1
+            if (gaps[mid].leftIndex <= slot) {
+                hit = mid
+                lo = mid + 1
+            } else {
+                hi = mid - 1
+            }
+        }
+        return hit >= 0 && slot <= gaps[hit].leftIndex + gaps[hit].spaceCount
+    }
+
+    /** 该盒那一侧的 padding **画在底色上**吗（盒自己或其行内祖先有背景色 ⇒ 不能吃）。 */
+    fun padsOnPaintedBackground(r: InlineBoxRun): Boolean =
+        runs.any { a ->
+            a.start <= r.start && r.endExclusive <= a.endExclusive &&
+                a.bgHex != null && !a.visibilityHidden
+        }
+
+    var changed = false
+    val out = ArrayList<InlineBoxRun>(runs.size)
+    for (r in runs) {
+        val left = r.start > 0 && onBoundary(r.start - 1)
+        val right = onBoundary(r.endExclusive - 1)
+        if (!left && !right) {
+            out.add(r)
+            continue
+        }
+        val painted = padsOnPaintedBackground(r)
+        out.add(
+            r.copy(
+                padding = Edges(
+                    top = r.padding.top,
+                    right = if (right && !painted) 0f else r.padding.right,
+                    bottom = r.padding.bottom,
+                    left = if (left && !painted) 0f else r.padding.left,
+                ),
+                margin = Edges(
+                    top = r.margin.top,
+                    right = if (right) 0f else r.margin.right,
+                    bottom = r.margin.bottom,
+                    left = if (left) 0f else r.margin.left,
+                ),
+            ),
+        )
+        changed = true
+    }
+    return if (changed) out else runs
 }
 
 /**
@@ -220,43 +348,31 @@ fun collectInlineBoxRuns(
 data class InlineBoxEdge(val index: Int, val px: Float)
 
 /**
- * 行内盒横向推进的**总闸**：与混排字距同一套回退纪律 —— 断行侧与落墨侧必须「一致地退干净」。
- *
- * [orilumn.reader.engine.AbSwitch.inhouseBreak] 关时用的是 `SkiaParagraphBreaker`，它拿
- * `SkParagraph` 自量版心，本仓**无法让它为注入的推进量预留宽度**（与混排间隙同一限制）；
- * 若只关断行侧、落墨侧照旧施加 ⇒ **画比量宽 ⇒ 右溢被裁**（分页阅读器无横向滚动条，溢出即丢内容）。
- * 故关闸时两侧同为「零推进」：此时行内盒**只画不推**（即 1a 行为），字不会丢。
- *
- * 闸门放在**推导处**（[inlineBoxEdges] / [inlineBoxLeadInsetPx]）而非各处调用点：三个消费方
- * （断行器预留版心、落墨落位、簇位轨）都经这两个函数拿到推进量，只有一处也就只有一种口径。
- *
- * 绘制侧另有一处**读**（不改推导）：盒的右缘要判断「末字符的 advance 里是不是已经含了
- * `padding.right + border.right`」，含了就不能再补一次（否则画比量宽、盒边压在后文上）。
- */
-fun inlineBoxAdvanceEnabled(): Boolean = orilumn.reader.engine.AbSwitch.inhouseBreak()
-
-/**
  * 行内盒横向推进单源（pure JVM）：把叶文本坐标系的 [runs] 折算成逐字位推进量（[textLength] = 叶文本长度）。
  *
- *  - **左边** = `padding.left + border.left` → 记在 `start - 1`（`start == 0` 时无处可记 ⇒ 走
+ * ## 两侧各算什么
+ *
+ *  - **左边** = `margin.left + padding.left + border.left` → 记在 `start - 1`（`start == 0` 时无处可记 ⇒ 走
  *    [inlineBoxLeadInsetPx]，**不在此表**，避免与首行缩进双算）；
- *  - **右边** = `padding.right + border.right` → 记在 `endExclusive - 1`（末字符位)：既推开后续文字，
- *    也计入本行宽（末字符在行尾时体现为「行尾多出一段留白」）。
+ *  - **右边** = `margin.right + padding.right + border.right` → 记在 `endExclusive - 1`（末字符位)：既推开
+ *    后续文字，也计入本行宽（末字符在行尾时体现为「行尾多出一段留白」）。
+ *
+ * `margin` 也在内：它**不画**（背景/边框到 border-box 为止），但横向推进后续文字（CSS 2.1 §8.6）。
  *
  * 横向边距为 0 的盒（`<mark>` 只有底色、`border-bottom` 只有下边框）**产出空表 ⇒ 零推进、像素与
- * 「只画」完全一致**：本机制只对显式设了行内横向内边距/边框的书生效。
+ * 「只画」完全一致**：本机制只对显式设了行内横向内边距/边框/外边距的书生效。
  *
- * ⚠ **只认 `padding` + `border` 宽度**：与绘制侧（`paintInlineBoxes`）同一对量，量画同源。
- * 只追加**可见**的盒（[InlineBoxRun.visible]）。
+ * ⚠ **只认 `margin` + `padding` + `border` 宽度**：与绘制侧（`paintInlineBoxes`）同一组量，量画同源。
+ * 只追加**要推进**的盒（[InlineBoxRun.advancesHorizontally]）。
  */
 fun inlineBoxEdges(textLength: Int, runs: List<InlineBoxRun>): List<InlineBoxEdge> {
-    if (runs.isEmpty() || !inlineBoxAdvanceEnabled()) return emptyList()
+    if (runs.isEmpty()) return emptyList()
     val out = ArrayList<InlineBoxEdge>(runs.size * 2)
     for (r in runs) {
-        if (!r.visible) continue
-        val left = r.padding.left + r.border.left
+        if (!r.advancesHorizontally) continue
+        val left = r.margin.left + r.padding.left + r.border.left
         if (left > 0f && r.start > 0 && r.start - 1 < textLength) out.add(InlineBoxEdge(r.start - 1, left))
-        val right = r.padding.right + r.border.right
+        val right = r.margin.right + r.padding.right + r.border.right
         val last = r.endExclusive - 1
         if (right > 0f && last in 0 until textLength) out.add(InlineBoxEdge(last, right))
     }
@@ -264,17 +380,17 @@ fun inlineBoxEdges(textLength: Int, runs: List<InlineBoxRun>): List<InlineBoxEdg
 }
 
 /**
- * 行内盒横向内边距 + 边框的**总量**（px）：`shrink-to-fit` 首选宽度
+ * 行内盒横向外边距 + 内边距 + 边框的**总量**（px）：`shrink-to-fit` 首选宽度
  * （[ParagraphBreaker.preferredWidth]）的增量。与 [inlineBoxEdges] 逐字位之和 + [inlineBoxLeadInsetPx]
- * **恒等**（每条边各计一次：左 `padding.left + border.left`、右 `padding.right + border.right`），
- * 只是这里不需要位置、只要总量。同受 [inlineBoxAdvanceEnabled] 闸门。
+ * **恒等**（每条边各计一次），只是这里不需要位置、只要总量。
  */
 fun inlineBoxInsetTotalPx(runs: List<InlineBoxRun>): Float {
-    if (runs.isEmpty() || !inlineBoxAdvanceEnabled()) return 0f
+    if (runs.isEmpty()) return 0f
     var sum = 0f
     for (r in runs) {
-        if (!r.visible) continue
-        sum += r.padding.left + r.border.left + r.padding.right + r.border.right
+        if (!r.advancesHorizontally) continue
+        sum += r.margin.left + r.padding.left + r.border.left +
+            r.margin.right + r.padding.right + r.border.right
     }
     return sum
 }
@@ -299,17 +415,19 @@ fun sliceInlineBoxRuns(runs: List<InlineBoxRun>, from: Int, to: Int): List<Inlin
 }
 
 /**
- * **起始于叶首字符**（`start == 0`）的盒的左边内边距 + 左边框之和（px）。
+ * **起始于叶首字符**（`start == 0`）的盒的左边外边距 + 内边距 + 边框之和（px）。
  *
  * 这一段几何上是「首行起始位移 + 首行可用宽减少」，正是 `text-indent` 的语义 ⇒ 折入首行缩进
  * （measure 侧 [breakLeafLines] / `breakWrappedLines`，落墨侧 `DrawLineBuilder` 的 `indent`，
  * **各一处、共用本函数**）。嵌套盒自然按「外+内」求和叠出正确层级。
+ *
+ * `margin.left` 与右边同理计入（见 [inlineBoxEdges]）：它把首字推开，却不画。
  */
 fun inlineBoxLeadInsetPx(runs: List<InlineBoxRun>): Float {
-    if (runs.isEmpty() || !inlineBoxAdvanceEnabled()) return 0f
+    if (runs.isEmpty()) return 0f
     var sum = 0f
     for (r in runs) {
-        if (r.visible && r.start == 0) sum += r.padding.left + r.border.left
+        if (r.advancesHorizontally && r.start == 0) sum += r.margin.left + r.padding.left + r.border.left
     }
     return sum
 }

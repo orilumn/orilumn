@@ -61,7 +61,9 @@ class CjkLatinSpacingTest {
             "中文°C",      // °U+00B0
             "中文©",      // ©U+00A9
             "中文«»",      // «»U+00AB/BB
-            "中　A",       // U+3000 表意空格（旧口径在 index 1 发间隙，插在空格**后面**）
+            // ⚠ `中　A`（U+3000 表意空格）2026-11-10 起**移出**本列表：它不再是「不参与」，
+            //   而是作为**空白**被吃掉并发出一条 `spaceCount = 1` 的间隙
+            //   （产品口径「接缝上一切空白一律删除」）。见下面 `all whitespace ... eaten`。
             "AＢ",         // ＢU+FF22 全角拉丁（旧口径判 CJK 侧）
         )) {
             assertEquals("'$s' 里没有任何一个标点/符号该参与混排", emptyList<CjkLatinGap>(), gapsOf(s))
@@ -134,6 +136,69 @@ class CjkLatinSpacingTest {
     fun `half-width space and nbsp are one and the same run`() {
         // 两种分隔空格不分类，连续计数（否则 `中 \u00A0A` 会在 NBSP 处断链、少算一个）。
         assertEquals(listOf(CjkLatinGap(0, 0.25f, spaceCount = 2)), gapsOf("中 \u00A0A"))
+    }
+
+    // ---- 「接缝上的一切空白（换行除外）一律删除」（产品口径 2026-11-10）----
+    //
+    // 用户原话：「中英文边界（包括夹着一个html标签的情况），中间的所有空白字符
+    // （不包括换行符）均删除，由混排字距统一来做隔离」。
+    // 旧判据只认半角空格与 NBSP ⇒ 细空格/窄不断行空格/全角空格**既不被吃、也不成边界**
+    // （它们本身不是 CJK 也不是西文），接缝处于是留下一个**与滑块无关**的固定宽度 —— 滑块失灵。
+
+    @Test
+    fun `all whitespace kinds are eaten at the seam`() {
+        // 逐码点写死的那张表（见 [CjkLatinSpacing] 的 isSeparatingSpace KDoc）逐个验一遍。
+        val kinds = mapOf(
+            0x0009 to "TAB",
+            0x0020 to "SPACE",
+            0x00A0 to "NBSP",
+            0x1680 to "OGHAM SPACE MARK",
+            0x2002 to "EN SPACE",
+            0x2003 to "EM SPACE",
+            0x2007 to "FIGURE SPACE",
+            0x2009 to "THIN SPACE",
+            0x200A to "HAIR SPACE",
+            0x202F to "NARROW NBSP",
+            0x205F to "MEDIUM MATH SPACE",
+            0x3000 to "IDEOGRAPHIC SPACE 全角空格",
+        )
+        for ((cp, name) in kinds) {
+            val sp = cp.toChar()
+            assertEquals(
+                "$name(U+%04X) 该被吃成零宽并只留一条间隙".format(cp),
+                listOf(CjkLatinGap(0, 0.25f, spaceCount = 1)),
+                gapsOf("中${sp}A"),
+            )
+            // 反向也一样（西文在前，空白在中间）
+            assertEquals(
+                "$name(U+%04X) 反向".format(cp),
+                listOf(CjkLatinGap(0, 0.25f, spaceCount = 1)),
+                gapsOf("A${sp}中"),
+            )
+        }
+    }
+
+    @Test
+    fun `mixed whitespace kinds count as one run`() {
+        // 种类不分类，连续计数：半角空格 + 全角空格 + 细空格 = 3 个零宽槽。
+        assertEquals(listOf(CjkLatinGap(0, 0.25f, spaceCount = 3)), gapsOf("中 \u3000\u2009A"))
+        assertEquals(listOf(CjkLatinGap(0, 0.25f, spaceCount = 2)), gapsOf("中\u202F\u00A0A"))
+    }
+
+    @Test
+    fun `line breaks are never eaten`() {
+        // 「不包括换行符」：换行是硬断行（`<br>` / `<pre>` 的 `\n`），两侧的字不在同一行，
+        // 既不成边界、也不进 spaceCount。
+        for (nl in listOf('\n', '\r', '\u000B', '\u000C', '\u0085', '\u2028', '\u2029')) {
+            val code = nl.code
+            assertTrue("U+%04X 是换行，不得被吃".format(code), gapsOf("中${nl}A").isEmpty())
+            // 换行**夹在**空白串中间时，空白串在换行处断链 ⇒ 那一串空白成了行尾悬挂空白，
+            // 两端不在同一行，**一条间隙都不发**（吃了它反而会让下一行凭空缩进）。
+            assertTrue(
+                "U+%04X 把空白串断成两半后不该再成边界".format(code),
+                gapsOf("中 ${nl}A").isEmpty(),
+            )
+        }
     }
 
     @Test

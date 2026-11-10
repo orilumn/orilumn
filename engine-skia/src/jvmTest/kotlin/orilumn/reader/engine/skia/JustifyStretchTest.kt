@@ -35,7 +35,7 @@ import org.junit.Test
  *   首行宽必须**严格大于**自然宽且**等于**版心；不生效时逐值等于自然宽。这个基准必须取自
  *   LEFT 整形而非推算——否则测试会在"两边都没拉伸"时也绿（此前 R1 探针栽过同样的坑）。
  * - **段末行不拉**：CSS 规定段末行左对齐。末行自然宽 < 版心时**必须保持不拉**。
- * - **亚像素余量**沿用仓库既有口径（`SkiaParagraphBreakerTest` 的 `+1f`）。
+ * - **亚像素余量**沿用仓库既有口径（`+1f`）。
  */
 class JustifyStretchTest {
 
@@ -67,7 +67,7 @@ class JustifyStretchTest {
         shape(text, width, Alignment.LEFT).lineMetrics.getOrNull(0)?.width?.toFloat() ?: -1f
 
     private fun firstLineRange(text: String, width: Float): IntRange {
-        val breaker = SkiaParagraphBreaker(letterSpacingEm = 0f)
+        val breaker = bodyParagraphBreaker(letterSpacingEm = 0f)
         val lines = breaker.breakLines(
             text, fs, ratio, width.toInt(),
             orilumn.reader.engine.css.TextAlign.JUSTIFY, "p", families, 400, false, false,

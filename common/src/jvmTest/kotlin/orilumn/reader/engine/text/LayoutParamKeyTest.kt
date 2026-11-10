@@ -68,82 +68,6 @@ class LayoutParamKeyTest {
         assertEquals(b, c)
     }
 
-    /**
-     * S3 接线锁：断行器变体必须进 `paramHash`。
-     *
-     * 这条不是「顺手加的」——T2f 实测发现 `paramHash` 也不含禁则表身份，
-     * 于是真机 A/B 若不清 `cache/pagination` 就会命中按另一侧规则算出的旧表，
-     * 读到「改动没生效」的假零差异。断行器变体是同一类坑的第二例，
-     * 故在接线当刻就把这条钉死（教训 28）。
-     */
-    @Test
-    fun `line breaker variant changes the param hash`() {
-        val p = TypographicProfile.build(ReaderSettings.DEFAULT)
-        val skia = LayoutParamKey.fromProfile(p, 1920, 2400, inhouseBreak = false).hash()
-        val inhouse = LayoutParamKey.fromProfile(p, 1920, 2400, inhouseBreak = true).hash()
-        assertNotEquals(
-            "断行器变体换 ⇒ 断点换 ⇒ 页切点换；不进键则拨开关会命中按另一侧断点算出的旧磁盘表",
-            skia, inhouse,
-        )
-        // 同侧稳定：同一变体两次构造必须同键，否则缓存会无谓抖动。
-        assertEquals(skia, LayoutParamKey.fromProfile(p, 1920, 2400, inhouseBreak = false).hash())
-        assertEquals(inhouse, LayoutParamKey.fromProfile(p, 1920, 2400, inhouseBreak = true).hash())
-    }
-
-    /**
- * 默认值必须**跟着运行期开关**走（`fromProfile` 的形参默认 = `AbSwitch.inhouseBreak()`），
- * 否则 18 个调用点会各自钉死一个常量，真机拨 `ab="inhouseBreak=0"` 时
- * 布局换了、缓存键没换 ⇒ 又一次假零差异。
- *
- * 变体默认已是 on（2026-10-01），故「默认侧」= 自建侧；Skia 侧要用**显式关**去取。
- */
-@Test
-    fun `fromProfile default follows the runtime AbSwitch`() {
-        val p = TypographicProfile.build(ReaderSettings.DEFAULT)
-        orilumn.reader.engine.AbSwitch.resetForTest()
-        val defaultHash = LayoutParamKey.fromProfile(p, 1920, 2400).hash()
-        val onExplicit = LayoutParamKey.fromProfile(p, 1920, 2400, inhouseBreak = true).hash()
-        val offExplicit = LayoutParamKey.fromProfile(p, 1920, 2400, inhouseBreak = false).hash()
-        try {
-            // 默认 = 自建（复位回的是各自默认值，不是全关）。
-            assertEquals(
-                "默认无参调用必须产出与显式 true 相同的键（默认变体为自建）",
-                onExplicit, defaultHash,
-            )
-            // 显式关：键必须跟着换，否则真机上一拨开关就命中另一侧的旧磁盘表。
-            orilumn.reader.engine.AbSwitch.apply("inhouseBreak=0")
-            assertTrue(
-                "ab=\"inhouseBreak=0\" 必须真的关得掉（回退阀的静态前提）",
-                !orilumn.reader.engine.AbSwitch.inhouseBreak(),
-            )
-            assertEquals(
-                "开关关闭时，无参调用必须产出与显式 false 相同的键",
-                offExplicit, LayoutParamKey.fromProfile(p, 1920, 2400).hash(),
-            )
-            // 显式开必须能覆盖先前的显式关（三态表优先级：显式开 > 显式关 > 默认开）。
-            orilumn.reader.engine.AbSwitch.apply("inhouseBreak=1")
-            assertEquals(
-                "显式 1 必须能覆盖显式 0，且键随之回到自建侧",
-                onExplicit, LayoutParamKey.fromProfile(p, 1920, 2400).hash(),
-            )
-        } finally {
-            // 必须复位：不复位会污染同 JVM 里后续每一个走 fromProfile 默认值的用例
-            //（失败面貌与本次改动无关）。
-            orilumn.reader.engine.AbSwitch.resetForTest()
-        }
-        // 复位 = 回默认（= 自建），**不是**回全关 —— 后者会让测试拿到与生产不同的静止位。
-        assertEquals(
-            "复位后必须回到默认变体（自建），而不是全关",
-            "inhouseBreak", orilumn.reader.engine.AbSwitch.describe(),
-        )
-        assertEquals(
-            "复位后无参调用必须回到默认侧的键",
-            defaultHash, LayoutParamKey.fromProfile(p, 1920, 2400).hash(),
-        )
-        // 显式 false 仍是权威（不依赖全局状态）。
-        assertEquals(offExplicit, LayoutParamKey.fromProfile(p, 1920, 2400, inhouseBreak = false).hash())
-    }
-
     @Test
     fun `portable crc32 is byte-identical to java util zip crc32`() {
         val base = LayoutParamKey(
@@ -161,15 +85,8 @@ class LayoutParamKeyTest {
         val flipped = base.copy(useOriginalStyle = true, contentW = 0, userCssHash = 0)
         assertEquals(javaCrc32(flipped), flipped.hash())
 
-        // S3：两个变体都要过参考实现（否则这条锁只覆盖默认侧，新字段的喂入序无人看守）。
-        assertEquals(javaCrc32(base.copy(inhouseBreak = true)), base.copy(inhouseBreak = true).hash())
-        // 混排字距非 0：走的是**另一条喂入分支**，同样必须过参考实现。
+        // 混排字距非 0：同样必须过参考实现（喂入值不同，喂入序不变）。
         assertEquals(javaCrc32(base.copy(cjkLatinSpacingEm = 0.25f)), base.copy(cjkLatinSpacingEm = 0.25f).hash())
-        // 两个变长哨兵同时非默认（最容易被写错的一组：两个追加都触发）。
-        assertEquals(
-            javaCrc32(base.copy(inhouseBreak = true, cjkLatinSpacingEm = 0.25f)),
-            base.copy(inhouseBreak = true, cjkLatinSpacingEm = 0.25f).hash(),
-        )
     }
 
     /**
@@ -209,7 +126,6 @@ class LayoutParamKeyTest {
             paragraphSpacingEm = 0.5f, paragraphGapScale = 1f,
             fontBody = "", fontTitle = "", fontCode = "",
             useOriginalStyle = true, contentW = 1200, contentH = 1600, userCssHash = 0,
-            inhouseBreak = false,
         )
         // 0 侧的喂入流金标准（本 profile 专属，非上面那条的那个数）。
         // 2026-10-06：`2078022158` → **`1533737463**。`paragraphSpacingPx` 退役（段间距即疏密），
@@ -240,38 +156,29 @@ class LayoutParamKeyTest {
             gap.hash() and 0xFFFFFFFFL,
         )
         // 位置敏感：与别的字段**同值**也必须换键（否则两个版面共用一份表）。
-        // 这两条是「不能把中文字距塞进 `letterSpacingEm` 或 `inhouseBreak` 的喂入槽」的守卫。
+        // 这条是「不能把中文字距塞进 `letterSpacingEm` 的喂入槽」的守卫。
         assertNotEquals(
             "混排字距不得与 letterSpacingEm 混用同一个喂入槽",
             base.copy(letterSpacingEm = 0.25f).hash(),
             gap.hash(),
         )
-        assertNotEquals(
-            "混排字距不得与 inhouseBreak 混用同一个喂入槽",
-            base.copy(inhouseBreak = true).hash(),
-            gap.hash(),
-        )
     }
 
     /**
-     * S3 接线锁（**喂入流金标准**）：回退侧（`inhouseBreak=false`）的 `paramHash` 必须**逐字节**
-     * 等于参考喂入序算出的值。
+     * **喂入流金标准**：`paramHash` 必须**逐字节**等于参考喂入序算出的值。
      *
      * ## 为什么单独钉一条金标准
      *
      * `paramHash` 是分页缓存的**文件名**。喂入序任何一处改动（哪怕只对某些键生效）都会让
      * 所有老用户的分页缓存一次性全废，必须靠**金标准数字**而不是「跑通了」来抓。
      *
-     * `inhouseBreak` 那一项仍是「变长喂入」（末尾、只在 true 时追加 4 字节）。
      * 混排字距那一项自 2026-10-03 起是**无条件喂入**（0 档也会改版面，见
-     * [orilumn.reader.engine.text.preprocess.CjkLatinSpacing] 类 KDoc），
-     * 故本锁的金标准在那天随之后移。
+     * [orilumn.reader.engine.text.preprocess.CjkLatinSpacing] 类 KDoc），故金标准在那天随之后移。
      *
      * ## 数字怎么来的
      *
-     * 由 Python 独立复刻旧喂入序算出（112 字节 + 混排字距 4 字节，`zlib.crc32` 与
-     * `java.util.zip.CRC32` 同算法），与本文件 `javaCrc32` 参考实现、以及生产 `Crc32`
-     * 三方独立算出同一个值，才敢当金标准。
+     * 由 Python 独立复刻喂入序算出（`zlib.crc32` 与 `java.util.zip.CRC32` 同算法），
+     * 与本文件 `javaCrc32` 参考实现、以及生产 `Crc32` 三方独立算出同一个值，才敢当金标准。
      *
      * （第一次算成 `3740307646` 是 Python 复刻写错：把 4 字节字符串终止符写进了 per-char 循环里，
      * 导致每字多喂 4 个零字节。这个坑本身也说明「手写喂入序」的参考实现必须逐字节对照着写。）
@@ -282,35 +189,23 @@ class LayoutParamKeyTest {
      * 沿用旧键会让键与它描述的版面互相矛盾。
      */
     @Test
-    fun `回退侧（inhouseBreak=false）param hash 逐字节等于参考喂入流`() {
-        // **必须显式写 `inhouseBreak = false`**，不能靠字段默认值：
-        // 变体默认已改成 on（2026-10-01），靠默认值的话本锁会跟着一起漂，
-        // 于是金标准就变成了自建侧的值 —— 锁还在，但它守着的东西变了。
-        //
-        // 这条锁守的是**回退侧**（真机 `inhouseBreak=0` 那条路）与**喂入序本身**：
-        // 回退必须落在当前 schema 算出的那个键上。
+    fun `param hash 逐字节等于参考喂入流`() {
         val base = LayoutParamKey(
             bodyPx = 18.5f, lineSpacing = 1.5f, firstLineIndentEm = 2f, letterSpacingEm = 0f,
             // 本锁守的是喂入序本身，取 1f 保持与历史上「段间距 = 1.0 倍」的字节流一致。
             paragraphSpacingEm = 1f, paragraphGapScale = 1f,
             fontBody = "霞鹜文楷", fontTitle = "LXGW WenKai", fontCode = "",
             useOriginalStyle = false, contentW = 1080, contentH = 1920, userCssHash = 123456789,
-            inhouseBreak = false,
         )
         assertEquals(
-            "回退侧 paramHash 必须等于当前喂入序的金标准（308717619）",
+            "paramHash 必须等于当前喂入序的金标准（308717619）",
             308717619L,
             base.hash() and 0xFFFFFFFFL,
         )
         assertEquals(
-            "回退侧必须与显式 false 构造出的键逐字节相同",
+            "同一输入必须逐字节同键（确定性）",
             base.hash(),
-            base.copy(inhouseBreak = false).hash(),
-        )
-        assertNotEquals(
-            "自建变体必须换键，否则拨开关会命中按 Skia 断点算出的旧表",
-            base.hash(),
-            base.copy(inhouseBreak = true).hash(),
+            base.copy().hash(),
         )
     }
 
@@ -354,12 +249,6 @@ class LayoutParamKeyTest {
             j.update((v and 0xFF).toInt())
         }
         k.contentW.feed4(); k.contentH.feed4(); k.userCssHash.feed4()
-        // S3 追加字段：断行器变体。**变长喂入——只在 true 时追加**，与 `hash()` 同式。
-        // 参考实现必须逐字节跟着 schema 走：这条锁的全部意义就是「手写喂入序 == 生产喂入序」，
-        // 少喂一轮（或多喂一轮）它就名存实亡了。
-        if (k.inhouseBreak) {
-            j.update(0); j.update(0); j.update(0); j.update(1)
-        }
         // 混排字距：**无条件**喂 4 字节（2026-10-03 起；原为「非 0 才喂」的变长哨兵，
         // 因 0 档改成「照吃分隔空格、只是间隙宽 0」而作废），位置仍在喂入序最后。
         // 参考实现必须逐字节跟着 schema 走：少喂一轮它就名存实亡了。

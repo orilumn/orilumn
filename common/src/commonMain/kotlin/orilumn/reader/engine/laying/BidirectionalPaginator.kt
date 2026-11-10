@@ -9,7 +9,7 @@ import orilumn.reader.engine.html.MarkupElement
  * across pages, so a [BlockMeasure] is the atomic unit of bidirectional paging.
  *
  * Construction needs exactly one [ParagraphBreaker] call for the block's text (a JVM fake in tests,
- * the engine-skia `SkiaParagraphBreaker` in production), which is what keeps "layout one page first, then back-fill
+ * the engine-skia `InhouseParagraphBreaker` in production), which is what keeps "layout one page first, then back-fill
  * and stream forward" from ever needing the whole chapter shaped at once.
  */
 data class BlockMeasure(

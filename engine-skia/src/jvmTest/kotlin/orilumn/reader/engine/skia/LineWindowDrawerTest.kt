@@ -2,7 +2,6 @@ package orilumn.reader.engine.skia
 
 import orilumn.reader.engine.css.TextAlign
 import orilumn.reader.engine.layout.ListMarkers
-import orilumn.reader.engine.skia.SkiaParagraphBreaker
 import orilumn.reader.engine.skia.SkParagraphFactory
 import org.jetbrains.skia.Bitmap
 import org.jetbrains.skia.Canvas
@@ -144,7 +143,7 @@ class LineWindowDrawerTest {
         val adv = m.advances(text, fs, 0f, "p", fam, 400, false, false, emptyList(), emptyList())
         val caps = PunctuationSqueeze.widths(
             text, 0, text.length, adv, 0, m, fs, 0f, "p", fam, 400, false, false, emptyList(),
-            PunctuationSqueeze.appliedMaxEm(),
+            PunctuationSqueeze.DEFAULT_MAX_EM,
         )
         val expectedShrink = caps.sumOf { PunctuationSqueeze.slotSqueeze(it, ratio).toDouble() }.toFloat()
         assertTrue("语料必须真的能挤（额度 ${caps.toList()}）", expectedShrink > 1f)
@@ -292,9 +291,9 @@ class LineWindowDrawerTest {
 
     @Test
     fun stackAbsoluteYFromBreakerRanges() {
-        // 由 SkiaParagraphBreaker 的区间堆成绝对 Y 窗口，逐带检查落墨，且窗口下无越界墨迹。
+        // 由断行器给出的区间堆成绝对 Y 窗口，逐带检查落墨，且窗口下无越界墨迹。
         val text = "line one\nline two\nline three"
-        val breaker = SkiaParagraphBreaker(0.02f)
+        val breaker = bodyParagraphBreaker(0.02f)
         val broken = breaker.breakLines(text, 16f, 2f, contentWidth, TextAlign.LEFT, "p", emptyList(), 400, false, false)
         assertEquals(3, broken.size)
         val lineHeight = lineHeightPx(16f, 2f)

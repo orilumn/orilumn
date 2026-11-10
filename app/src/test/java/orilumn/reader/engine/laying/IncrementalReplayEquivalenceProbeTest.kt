@@ -22,8 +22,8 @@ import org.robolectric.annotation.Config
 /**
  * Device 侧分页路径回归（Q1-c 退役 G 行后保留的用例）：
  *
- * - 增量/临时路径与 canonical 同走 skia 单源塑形（C1-0 起 `shapeGeometry`/`emitPlainText`
- *   即 `SkiaParagraphBreaker` 断行）——此处只守不依赖 shaper 等价的几何不变量
+ * - 增量/临时路径与 canonical 同走单源塑形（C1-0 起 `shapeGeometry`/`emitPlainText`
+ *   即自建断行器断行）——此处只守不依赖 shaper 等价的几何不变量
  *   （增量页不溢出、canonical 与磁盘表字节级一致、页边距调试辅助）。
  * - 原「disk-hit 增量回放 ≡ canonical 页高」等价用例（StaticLayoutBreaker 公式行高 vs
  *   实塑形）随 StaticLayoutBreaker 一并退役（G 行）；该等价守则由

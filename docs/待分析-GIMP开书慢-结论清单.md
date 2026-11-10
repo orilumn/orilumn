@@ -380,6 +380,10 @@ cBuild 50ms
   （R29 踩过，纯配对错位，不是变体效应）。
 - **只取 `sBlocks>0` 的 `asm`**：DISK-HIT 命中后后台还会发一批 `sBlocks=0` 的
   预排 `asm`，各字段全 0，混进来中位数就废了（R29 踩过）。
+> ⚠ **2026-11-10：以下三个采样脚本（`ab_families.py` / `ab_probe.py` / `ab_detail.py`）已随运行期
+> A/B 开关一起删除** —— 它们解析的 `ab=` / `warm=` / `ctl=` 字段已不存在。保留下面这段是因为
+> 「配对方向 / 只取 `sBlocks>0` / 期望自报值归一化 / 缺席即 0」这四条教训对**任何**日志采样都成立。
+
 - 家族级对比（`eBox`/`eWid`/`eCol`/`eSty`/`eRad`）用 `tools/ab_families.py`；
   端到端与三段配对用 `tools/ab_probe.py` / `tools/ab_detail.py`。口径不同、校验不同，
   别混进同一个脚本。

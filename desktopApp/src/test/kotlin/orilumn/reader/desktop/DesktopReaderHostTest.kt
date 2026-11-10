@@ -248,9 +248,12 @@ class DesktopReaderHostTest {
         val dbFile = File(root, "orilumn.db")
         val setup = app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver("jdbc:sqlite:${dbFile.absolutePath}")
         orilumn.reader.db.OrilumnDb.Schema.create(setup)
-        // 伪装成「P1 之前的 v5 库」：v6/v7 的新表尚未存在，版本停在 5。
+        // 伪装成「P1 之前的 v5 库」：v5 之后建的表（font_scan_state / annotations / text_revisions）
+        // 尚未存在，版本停在 5。漏删一张，迁移就会撞 "table ... already exists"——
+        // v11 加 text_revisions 时这里就是这么红的（测试在报自己过期，不是产品坏了）。
         setup.execute(null, "DROP TABLE font_scan_state;", 0)
         setup.execute(null, "DROP TABLE annotations;", 0)
+        setup.execute(null, "DROP TABLE text_revisions;", 0)
         setup.execute(null, "PRAGMA user_version = 5;", 0)
         setup.close()
 

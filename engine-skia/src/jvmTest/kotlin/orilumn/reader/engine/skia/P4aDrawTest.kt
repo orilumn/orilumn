@@ -23,7 +23,7 @@ class P4aDrawTest {
         val engine = StyleComputer(16f, LightCssParser().parse(""), emptyList())
         val styleMap = engine.compute(root)
         val classify = NormalFlowLayout.heavyClassify(styleMap, engine.hasDisplayDeclaration())
-        val result = BoxLayouter(16f, SkiaParagraphBreaker(0f)).layoutBoxes(root, widthPx, styleMap, classify)
+        val result = BoxLayouter(16f, bodyParagraphBreaker(0f)).layoutBoxes(root, widthPx, styleMap, classify)
         return Triple(DrawLineBuilder.build(result, styleMap, classify, HIDDEN_NONE, 0f), styleMap, root)
     }
 

@@ -237,9 +237,12 @@ class InlineBoxRunsTest {
     }
 
     @Test
-    fun `不可见盒不计入首选宽度增量`() {
-        val runs = listOf(InlineBoxRun(0, 3, bgHex = null, padding = Edges(left = 9f)))
-        assertEquals(0f, inlineBoxInsetTotalPx(runs), 1e-6f)
+    fun `全零盒不计入首选宽度增量`() {
+        // 无底色、无边框、无内/外边距 ⇒ 不该出现的 run，推进量恒 0。
+        assertEquals(0f, inlineBoxInsetTotalPx(listOf(InlineBoxRun(0, 3, bgHex = null))), 1e-6f)
+        // 反过来：**只有内边距**（无底色无边框）的盒照样推进 —— 浏览器里它就是占位的空白
+        // （`<span style="padding:0 4px">`），不推就等于把作者的内边距吞掉。
+        assertEquals(9f, inlineBoxInsetTotalPx(listOf(InlineBoxRun(0, 3, bgHex = null, padding = Edges(left = 9f)))), 1e-6f)
     }
 
     @Test
@@ -439,5 +442,120 @@ class InlineBoxRunsTest {
         val r = runs(p).single()
         assertEquals(CornerRadius(), r.borderRadius)
         assertEquals(CornerRadius(0.1f, 0.1f, 0.1f, 0.1f), r.borderRadiusPct)
+    }
+
+    // ── 行内水平外边距（margin 不画，但横向推进、参与断行宽度） ──────────────────
+
+    @Test
+    fun `水平外边距同样推进后续文字`() {
+        val runs = listOf(InlineBoxRun(1, 3, bgHex = null, margin = Edges(left = 5f, right = 7f)))
+        assertEquals(listOf(InlineBoxEdge(0, 5f), InlineBoxEdge(2, 7f)), inlineBoxEdges(10, runs))
+        assertFalse("margin 不绘制，盒仍不可见", runs.single().visible)
+        assertTrue("但它要推进", runs.single().advancesHorizontally)
+        assertEquals(12f, inlineBoxInsetTotalPx(runs), 1e-6f)
+    }
+
+    @Test
+    fun `起始于叶首的外边距走首行缩进`() {
+        val runs = listOf(InlineBoxRun(0, 3, bgHex = null, margin = Edges(left = 6f)))
+        assertTrue("首字之前无处记账 ⇒ 只走首行缩进", inlineBoxEdges(10, runs).isEmpty())
+        assertEquals(6f, inlineBoxLeadInsetPx(runs), 1e-6f)
+    }
+
+    // ── 混排字距吃掉边界侧的内边距 / 外边距（有底色的 padding 除外） ─────────────
+
+    @Test
+    fun `中西边界上无底色的内边距被间隙吃掉`() {
+        val s = node(
+            "span",
+            mapOf("style" to "padding-left:6px;padding-right:6px"),
+            listOf(text("A")),
+        )
+        val p = node("p", children = listOf(text("中"), s, text("文")))
+        node("body", children = listOf(p))
+        val r = runs(p).single()
+        assertEquals(0f, r.padding.left, 1e-6f)
+        assertEquals(0f, r.padding.right, 1e-6f)
+        // 吃掉之后边界两侧不再额外推进：留白只剩混排字距注入的那道间隙。
+        assertTrue("边界两侧的盒推进量必须归零", inlineBoxEdges(3, listOf(r)).isEmpty())
+    }
+
+    @Test
+    fun `有底色的内边距不被吃（否则底色贴字）`() {
+        val s = node(
+            "span",
+            mapOf("style" to "background-color:#ffcc00;padding-left:6px;padding-right:6px"),
+            listOf(text("A")),
+        )
+        val p = node("p", children = listOf(text("中"), s, text("文")))
+        node("body", children = listOf(p))
+        val r = runs(p).single()
+        assertEquals(6f, r.padding.left, 1e-6f)
+        assertEquals(6f, r.padding.right, 1e-6f)
+        assertEquals(
+            listOf(InlineBoxEdge(0, 6f), InlineBoxEdge(1, 6f)),
+            inlineBoxEdges(3, listOf(r)),
+        )
+    }
+
+    @Test
+    fun `盒内部的中西边界不吃内边距`() {
+        val s = node("span", mapOf("style" to "padding-left:6px"), listOf(text("中A")))
+        val p = node("p", children = listOf(s))
+        node("body", children = listOf(p))
+        val r = runs(p).single()
+        assertEquals("盒是一个整体，盒内的中西分隔照旧由盒子圈着", 6f, r.padding.left, 1e-6f)
+    }
+
+    @Test
+    fun `被吃掉的分隔空格在盒内时也吃那一侧`() {
+        // 空格落在盒内（`中<span> A </span>文`）：边界跨度覆盖盒末的空格字位 ⇒ 右侧照样吃。
+        val s = node(
+            "span",
+            mapOf("style" to "padding-left:6px;padding-right:6px"),
+            listOf(text(" A ")),
+        )
+        val p = node("p", children = listOf(text("中"), s, text("文")))
+        node("body", children = listOf(p))
+        val r = runs(p).single()
+        assertEquals(0f, r.padding.left, 1e-6f)
+        assertEquals(0f, r.padding.right, 1e-6f)
+    }
+
+    @Test
+    fun `外边距任何情况下都吃（它不画）`() {
+        val s = node(
+            "span",
+            mapOf("style" to "background-color:#ffcc00;margin-left:8px;margin-right:9px;padding-left:4px;padding-right:4px"),
+            listOf(text("A")),
+        )
+        val p = node("p", children = listOf(text("中"), s, text("文")))
+        node("body", children = listOf(p))
+        val r = runs(p).single()
+        assertEquals("有底色只护 padding", 4f, r.padding.left, 1e-6f)
+        assertEquals(0f, r.margin.left, 1e-6f)
+        assertEquals(0f, r.margin.right, 1e-6f)
+    }
+
+    @Test
+    fun `背景祖先护住内层盒的内边距`() {
+        // `<mark>` 的底色会把内层 `<span>` 的 padding 一起涂上 ⇒ 吃掉它就是「底色吞掉间隙」。
+        val inner = node("span", mapOf("style" to "padding-left:6px;padding-right:6px"), listOf(text("A")))
+        val mark = node("mark", children = listOf(inner))
+        val p = node("p", children = listOf(text("中"), mark, text("文")))
+        node("body", children = listOf(p))
+        val r = runs(p).first { it.bgHex == null }
+        assertEquals(6f, r.padding.left, 1e-6f)
+        assertEquals(6f, r.padding.right, 1e-6f)
+    }
+
+    @Test
+    fun `不在边界上的那一侧内边距原样保留`() {
+        val s = node("span", mapOf("style" to "padding-left:6px;padding-right:6px"), listOf(text("A")))
+        val p = node("p", children = listOf(text("中"), s))
+        node("body", children = listOf(p))
+        val r = runs(p).single()
+        assertEquals("左侧是中西接缝 ⇒ 吃", 0f, r.padding.left, 1e-6f)
+        assertEquals("右侧是段尾、没有邻字 ⇒ 照旧", 6f, r.padding.right, 1e-6f)
     }
 }

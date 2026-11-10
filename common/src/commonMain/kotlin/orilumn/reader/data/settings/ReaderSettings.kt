@@ -97,8 +97,10 @@ data class ReaderSettings(
      *
      * 0 是**合法档位**，且**不是特例档**（产品口径 2026-10-03 改）：0 = 注入的间隙宽正好 0，
      * 中西之间**只**由 [letterSpacing]（字间距）分隔 —— 字面意义上的「距离 0」。
-     * 边界照检、作者为了让中英分开而手打的那串半角空格**照吃**（画成零宽，
-     * CLREQ 4.1「删除多余半角空格，注入固定间隙」的删除动作与间隙宽无关）。
+     * 边界照检、作者为了让中英分开而手打的那串空白**照吃**（画成零宽，含半角空格 / 制表 /
+     * 不换行空格 / 细空格 / 全角空格，换行除外；2026-11-10 起扩到「一切空白」，
+     * 见 [orilumn.reader.engine.text.preprocess.CjkLatinSpacing] 的 `isSeparatingSpace`）。
+     * CLREQ 4.1「删除多余半角空格，注入固定间隙」的删除动作与间隙宽无关。
      * 于是 `Rust 的所有权` 在 0 档排成 `Rust的所有权`；档位之间只有间隙宽这一个数在变。
      * 详细口径见 [orilumn.reader.engine.text.preprocess.CjkLatinSpacing] 类 KDoc。
      */

@@ -42,7 +42,7 @@ import orilumn.reader.engine.text.TypographicProfile
 /**
  * C2-P2b-2: 段落纯几何整形（无画笔、无字体池）—— 断行与落墨几何的**单源**。
  *
- * 同样的文本抽取、同样的伴生 runs、同一个 `SkiaParagraphBreaker` 断行、同样的注音行高增量；
+ * 同样的文本抽取、同样的伴生 runs、同一个 `InhouseParagraphBreaker` 断行、同样的注音行高增量；
  * 不建 `TextPaint`、不碰平台类型。重路径（`BoxChapterLayouter.shapeLeaf`）、轻路径与临时页
  * 都经本函数塑形 ⇒ 两端几何逐字节同源。
  *
@@ -138,8 +138,8 @@ fun shapeGeometry(
     // P1-2: white-space 断行单源（NOWRAP/PRE 不换行；与盒流同式）。
     // Whole-paragraph single-style break (canonical semantics): code-like mono 解析走
     // 级联 monospace 标志（与盒流 `style.monospace || tag == "pre"` 同式）。
-    // S3：正文断行变体单源（与 BoxChapterLayouter 的两处接线同口，默认 Skia）。
-    val bodyBreaker = bodyParagraphBreaker(letterSpacingEm, profile.cjkLatinSpacingEmApplied)
+    // 正文断行单源（与 BoxChapterLayouter 的两处接线同口）。
+    val bodyBreaker = bodyParagraphBreaker(letterSpacingEm, profile.cjkLatinSpacingEm)
     // E21 残留修复：`::first-letter{float:left}` 首字下沉（与盒流 `NormalFlowLayout` 同一份推算）。
     val capFloat = if (el.isText) {
         null

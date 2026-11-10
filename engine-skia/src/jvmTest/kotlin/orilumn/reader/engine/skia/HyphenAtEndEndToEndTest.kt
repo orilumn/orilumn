@@ -42,12 +42,7 @@ class HyphenAtEndEndToEndTest {
         val eng = StyleComputer(44.4f, LightCssParser().parse(css), emptyList())
         val styles = eng.compute(root)
         val cls = NormalFlowLayout.heavyClassify(styles, eng.hasDisplayDeclaration())
-        applyBreakerVariant("inhouse")
-        val res = try {
-            BoxLayouter(44.4f, bodyParagraphBreaker(0f)).layoutBoxes(root, measure, styles, cls)
-        } finally {
-            resetBreakerVariant()
-        }
+        val res = BoxLayouter(44.4f, bodyParagraphBreaker(0f)).layoutBoxes(root, measure, styles, cls)
         val out = ArrayList<Triple<Boolean, Int, Int>>()
         for ((_, dl) in DrawLineBuilder.build(res, styles, cls, HIDDEN_NONE, 0f).toList()) {
             out.add(Triple(dl.hyphenAtEnd, dl.range.first, dl.range.last))
@@ -81,18 +76,13 @@ class HyphenAtEndEndToEndTest {
         var withHyphen = 0
         var sawNonZeroFirstLine = false
         for (w in listOf(150, 190, 240, 300)) {
-            applyBreakerVariant("inhouse")
             val css = "html{font-size:18px} body{font-family:serif;font-size:0.95rem} p{text-align:justify}"
             val html = "<html><body>" + ps.joinToString("") { "<p>$it</p>" } + "</body></html>"
             val root = HtmlTreeConverter().convert(html)!!
             val eng = StyleComputer(44.4f, LightCssParser().parse(css), emptyList())
             val styles = eng.compute(root)
             val cls = NormalFlowLayout.heavyClassify(styles, eng.hasDisplayDeclaration())
-            val res = try {
-                BoxLayouter(44.4f, bodyParagraphBreaker(0f)).layoutBoxes(root, w, styles, cls)
-            } finally {
-                resetBreakerVariant()
-            }
+            val res = BoxLayouter(44.4f, bodyParagraphBreaker(0f)).layoutBoxes(root, w, styles, cls)
             val leaves = ArrayList<orilumn.reader.engine.laying.LayoutBox>()
             fun collect(bs: List<orilumn.reader.engine.laying.LayoutBox>) {
                 for (b in bs) if (b.isContainer) collect(b.childBoxes) else leaves.add(b)
@@ -134,12 +124,7 @@ class HyphenAtEndEndToEndTest {
             val eng = StyleComputer(44.4f, LightCssParser().parse(css), emptyList())
             val styles = eng.compute(root)
             val cls = NormalFlowLayout.heavyClassify(styles, eng.hasDisplayDeclaration())
-            applyBreakerVariant("inhouse")
-            val res = try {
-                BoxLayouter(44.4f, bodyParagraphBreaker(0f)).layoutBoxes(root, w, styles, cls)
-            } finally {
-                resetBreakerVariant()
-            }
+            val res = BoxLayouter(44.4f, bodyParagraphBreaker(0f)).layoutBoxes(root, w, styles, cls)
             for ((_, dl) in DrawLineBuilder.build(res, styles, cls, HIDDEN_NONE, 0f).toList()) {
                 if (dl.tag in setOf("pre", "code", "kbd", "samp", "tt")) continue
                 if (!isLatinSplit(dl)) continue
@@ -184,12 +169,7 @@ class HyphenAtEndEndToEndTest {
             val eng = StyleComputer(44.4f, LightCssParser().parse(css), emptyList())
             val styles = eng.compute(root)
             val cls = NormalFlowLayout.heavyClassify(styles, eng.hasDisplayDeclaration())
-            applyBreakerVariant("inhouse")
-            val res = try {
-                BoxLayouter(44.4f, bodyParagraphBreaker(0f)).layoutBoxes(root, w, styles, cls)
-            } finally {
-                resetBreakerVariant()
-            }
+            val res = BoxLayouter(44.4f, bodyParagraphBreaker(0f)).layoutBoxes(root, w, styles, cls)
             val lines = DrawLineBuilder.build(res, styles, cls, HIDDEN_NONE, 0f).size
             // 贪心上界：整段宽 / 版心 + 1（最后一行放不满）+ 1（首行缩进）
             val whole = 44.4f * text.length
@@ -205,12 +185,7 @@ class HyphenAtEndEndToEndTest {
         val eng = StyleComputer(44.4f, LightCssParser().parse(css), emptyList())
         val styles = eng.compute(root)
         val cls = NormalFlowLayout.heavyClassify(styles, eng.hasDisplayDeclaration())
-        applyBreakerVariant("inhouse")
-        val res = try {
-            BoxLayouter(44.4f, bodyParagraphBreaker(0f)).layoutBoxes(root, 100000, styles, cls)
-        } finally {
-            resetBreakerVariant()
-        }
+        val res = BoxLayouter(44.4f, bodyParagraphBreaker(0f)).layoutBoxes(root, 100000, styles, cls)
         assertEquals("整段装下必须恰好 1 行", 1, DrawLineBuilder.build(res, styles, cls, HIDDEN_NONE, 0f).size)
     }
 }

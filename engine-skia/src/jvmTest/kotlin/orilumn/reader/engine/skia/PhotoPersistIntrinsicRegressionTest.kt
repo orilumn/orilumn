@@ -41,25 +41,10 @@ import org.junit.runners.Parameterized
  *
  * 另加一条 P3a 契约断言：两个主题都**不得**再给独图注入 `width`。
  */
-@RunWith(Parameterized::class)
-class PhotoPersistIntrinsicRegressionTest(private val variant: String) {
+class PhotoPersistIntrinsicRegressionTest {
 
-    companion object {
-        /**
-         * S3：两个变体都要成立。
-         *
-         * 本类锁的是「persist 探图 + 盒高按标准尺寸」这条不变式，断行器只是同页文本的**邻居**：
-         * 断点一变，图片所在段的宽度就可能变，进而动到盒高。所以它不是「与断行无关」，
-         * 但也不是主题 —— 两侧都跑一遍即可，不为它单开断行专属断言。
-         */
-        @JvmStatic
-        @Parameterized.Parameters(name = "breaker={0}")
-        fun variants() = breakerVariantParams()
-    }
 
-    @Before fun applyVariant() = applyBreakerVariant(variant)
 
-    @After fun resetVariant() = resetBreakerVariant()
 
 
     /** 真实版心宽：设备 view 1840，左右边距各 125 → 1590（与旧实测几何同）。 */
@@ -125,7 +110,7 @@ class PhotoPersistIntrinsicRegressionTest(private val variant: String) {
         val engine = styleEngine(profile)
         val styles = engine.compute(root)
         val classify = NormalFlowLayout.heavyClassify(styles, engine.hasDisplayDeclaration())
-        val result = BoxLayouter(profile.bodyPx, variantBreaker())
+        val result = BoxLayouter(profile.bodyPx, bodyParagraphBreaker())
             .layoutBoxes(root, contentW, styles, classify, imageLoader = imgLoader, chapterHref = href)
         var boxHeight = -1
         fun walkBox(b: LayoutBox) {

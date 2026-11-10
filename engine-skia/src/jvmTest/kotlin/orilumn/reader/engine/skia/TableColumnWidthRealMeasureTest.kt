@@ -4,7 +4,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import orilumn.reader.engine.AbSwitch
 import orilumn.reader.engine.css.LightCssParser
 import orilumn.reader.engine.css.StyleComputer
 import orilumn.reader.engine.html.HtmlTreeConverter
@@ -55,29 +54,16 @@ import orilumn.reader.engine.text.preprocess.CjkLatinSpacing
  * 锁 3 把这一个变量**隔离**（两侧同为未挤口径，判据一字不改），
  * 锁 3b 单独立锁把「窄的量 == 挤压总额度」逐值钉死。
  *
- * ## 判据为什么用「方向 + 界」而不是「绝对像素」
+ * ## 判据为什么钉「与桩差一个数量级」而不是「绝对像素」
  *
  * 本类跑在 **JVM（macOS）**，字体与平板不同 ⇒ 绝对像素值跨宿主不可移植。
- * 可移植的是**同宿主两侧的比值**与**方向**。故锁 3/4 钉比值与方向，锁 1/2 钉「与桩差一个数量级」。
+ * 可移植的是「真测量远窄于接口默认桩」这一条比值。
  *
- * ## 锁 5 是本类真正的接线锁
+ * ## 曾经与另一套断行器逐值对照的锁已随那套实现删除
  *
- * 前身那句「若哪天有人把 `tableBreaker` 也接进单源工厂，这里立刻炸」如今**方向倒过来了**：
- * 现在必须**已经**接进单源工厂。锁 5 断言「拨 `inhouseBreak` 开关，表格列宽**会变**」——
- * 若有人把 `BoxChapterLayouter.tableBreaker` 改回 `SkiaParagraphBreaker`（或把重路径的
- * `bodyParagraphBreaker(...)` 换回别的对象），锁 5 立刻红。
- *
- * **变异验证（实测逐条跑过，括号内是实际点红的锁）**：
- *
- * | 变异 | 内容 | 结果 |
- * |---|---|---|
- * | MUT-I | `BoxChapterLayouter.breakerFor` 改调 `SkiaParagraphBreaker` | 锁 7 RED（锁 5 仍绿 —— 它不走 `BoxChapterLayouter`） |
- * | MUT-J | 删掉 [InhouseParagraphBreaker.preferredWidth] 覆写 | 锁 1/2/3/4 RED |
- * | MUT-K | `naturalWidth` 结果 ×1.05（偏宽） | 锁 1/2/3/4 RED |
- * | MUT-L | `naturalWidth` 结果 ×0.95（偏窄） | 锁 2/3/4 RED（**锁 1 不红** —— 它不测方向） |
- *
- * 锁 5/7 在 MUT-J/K/L 下仍绿是**正确**的分工：它们测的是「接线有没有生效」，
- * 测量侧的错它们本就不该管；反之 MUT-I 只红锁 7 也说明两把锁真的在看两条不同的路。
+ * 早年这里有一组「同口径逐值相等 / kern 方向锁」：拿 SkParagraph 实现当基线，证明两套实现
+ * 在同一宿主上量出同一个宽。那套实现（以及拨开关的双臂夹具）已整体删除，对照基线不存在了，
+ * 故那组锁一并删掉；留下的是**只依赖自己**的判据（真测量、min-content 随之变真、E15 内边距记账）。
  */
 class TableColumnWidthRealMeasureTest {
 
@@ -104,7 +90,6 @@ class TableColumnWidthRealMeasureTest {
      */
     @Test
     fun `自建侧 preferredWidth 是真测量而不是段长乘字号`() {
-        val skia = SkiaParagraphBreaker(0f)
         val inhouse = InhouseParagraphBreaker(0f)
         val stub = latin.length * fs
         assertNotEquals(
@@ -120,12 +105,6 @@ class TableColumnWidthRealMeasureTest {
                 "自建=${pref(inhouse, latin)} 桩=$stub",
             pref(inhouse, latin) < stub * 0.6f,
         )
-        // 与 Skia 侧同量级（同一宿主两侧对照，这是可移植的比值）。
-        assertTrue(
-            "自建侧应与 Skia 侧同量级（实测差 <=1.104%）；实测 自建=${pref(inhouse, latin)} " +
-                "Skia=${pref(skia, latin)}",
-            pref(inhouse, latin) <= pref(skia, latin) * 1.03f,
-        )
     }
 
     /** 锁 2：`minContentWidth` **无需另写**——接口默认实现逐段调 `preferredWidth`，故随锁 1 自动变真。 */
@@ -140,71 +119,6 @@ class TableColumnWidthRealMeasureTest {
             longest * fs,
             minc(inhouse, latin),
         )
-        // 与 Skia 侧逐值同量级：实测 37 字 Latin 上 181.6404 vs 181.6404（完全相等）。
-        val skia = SkiaParagraphBreaker(0f)
-        assertEquals(
-            "minContentWidth 应与 Skia 侧逐值相等（实测完全相等）",
-            minc(skia, latin),
-            minc(inhouse, latin),
-            0.001f * maxOf(1f, minc(skia, latin)) / fs,
-        )
-    }
-
-    /**
-     * 锁 3：**同口径下**无 kern 对的文本两侧逐值相等（CJK / URL / 混排实测 0.0000%）。
-     *
-     * 这是本类最硬的一条：它说明自建侧与 Skia 侧**不是「差不多」，而是同一个量** ——
-     * 差值只可能来自整形（kern/liga），而这些类别没有 kern 对。
-     *
-     * ## 口径对齐（2026-10-03 标点挤压落地时补的一行构造参数）
-     *
-     * 本锁的被试是**「量测差异只可能来自整形」**，而标点挤压是另一条**有意**的宽度差异。
-     * 两者混在一起测 ⇒ 锁红的不是被试性质，是**口径没对齐**。
-     * ⇒ 自建侧显式 `punctuationSqueezeMaxEm = 0f` 把这一个变量**隔离出去**，
-     * 原判据（0.0000% 逐值相等）一字不改地保留。
-     * 挤压本身与 `preferredWidth` 的关系由**紧邻的锁 3b** 单独立锁 —— 那条锁得更死（逐值等于总额度）。
-     *
-     * ## ⚠ 混排语料在 0 档下**不再**与 Skia 相等（2026-10-03 混排字距改口径，这是真差不是回归）
-     *
-     * 混排字距的 0 档现在与其它档同规则：**作者手打的分隔空格照吃**（画成零宽）。
-     * 而 Skia 那条路（`SkParagraph`）保得住那些空格 ⇒ 两侧行宽差 `边界数 × 空格宽`。
-     * [mixed] = `"Skia Paragraph 的 defaultFallback 链"` 正好 3 个分隔空格（11.10px 每个）
-     * ⇒ 实测 `Skia=688.38 / 自建=655.08`，差 **33.30 = 3 × 11.10**，一分不差。
-     *
-     * ⇒ 本锁对 `mixed` 的判据必须**排除吃空格那一份**，只比「注入间隙」那一份：
-     * 断言 `自建 = Skia − 被吃空格的 advance 总和`。这样锁守的仍是「整形之外逐值相等」，
-     * 且把「0 档吃空格」这个**已知差异**钉成了公式而不是豁免。
-     *
-     * ⚠ **别改成「让 0 档不���空格」来把这把锁弄绿** —— 那正是本轮删掉的特例，
-     *   需求原话是「混排字距滑块为 0 时不要做特殊操作，就让距离为 0 就可以了」。
-     */
-    @Test
-    fun `同口径下无 kern 对的文本两侧逐值相等`() {
-        val skia = SkiaParagraphBreaker(0f)
-        val inhouse = InhouseParagraphBreaker(0f, 0f, punctuationSqueezeMaxEm = 0f)
-        val measurer = SkiaRunMeasurer()
-        for ((s, label) in listOf(cjk to "CJK", url to "URL", mixed to "混排")) {
-            val a = pref(skia, s)
-            val b = pref(inhouse, s)
-            // 0 档吃掉的作者分隔空格（Skia 那侧保住了它们，见类 KDoc）。CJK / URL 语料
-            // 一个都没有 ⇒ 这一项为 0，判据自动退化成「逐值相等」，不必分叉成两把锁。
-            val adv = measurer.advances(s, fs, 0f, null, families, 400, false, false, emptyList(), emptyList())
-            var eaten = 0f
-            var spaceSlots = 0
-            for (g in CjkLatinSpacing.gaps(s, 0f)) {
-                for (k in 1..g.spaceCount) {
-                    eaten += adv[g.leftIndex + k]
-                    spaceSlots++
-                }
-            }
-            assertEquals(
-                "$label 两侧应逐值相等（除 0 档吃掉的分隔空格外，实测 0.0000%）：" +
-                    "Skia=$a 自建=$b 被吃空格 $spaceSlots 个共 $eaten",
-                a - eaten,
-                b,
-                0.001f * maxOf(1f, a) / fs,
-            )
-        }
     }
 
     /**
@@ -268,158 +182,6 @@ class TableColumnWidthRealMeasureTest {
     }
 
     /**
-     * 锁 4：含 kern 对的 Latin —— **方向锁 + 界**。
-     *
-     * 方向（自建永不窄于 Skia）是可移植的硬事实：整形缺口全为负（kern/liga 只让字形更近）。
-     * 界（<=3%）防止将来有人在测量里塞进第二个偏差源。
-     */
-    @Test
-    fun `含 kern 对的 Latin 偏宽但不超过三个百分点`() {
-        val skia = SkiaParagraphBreaker(0f)
-        val inhouse = InhouseParagraphBreaker(0f)
-        for (s in listOf("Office of the Future", "AVATAR Wayfinding WA")) {
-            val a = pref(skia, s)
-            val b = pref(inhouse, s)
-            assertTrue(
-                "自建侧永不窄于 Skia 侧（整形缺口全为负）：「$s」 Skia=$a 自建=$b",
-                b >= a - 0.001f,
-            )
-            assertTrue(
-                "自建侧应不宽出 3%（实测 +1.104% / +0.838%）：「$s」 Skia=$a 自建=$b",
-                b <= a * 1.03f,
-            )
-        }
-    }
-
-    /**
-     * 锁 5（**接线锁**）：拨 `inhouseBreak` 开关，表格列宽**必须变**。
-     *
-     * 这一条取代了前身那句「若有人把 `tableBreaker` 接进单源工厂，这里立刻炸」——
-     * 现在方向倒过来：**必须已经接进**。
-     *
-     * **注意本锁只管重路径**：`cellColumnWidths` 直接构造 `BoxLayouter`，不经过
-     * [orilumn.reader.engine.BoxChapterLayouter]，所以改 `breakerFor` 它照样绿（MUT-I 实测）。
-     * 轻路径由锁 7 管。两把缺一不可。
-     *
-     * ## 表的形态是被试的一部分，不是随手写的（第一版就栽在这）
-     *
-     * 第一版这张表用「47 字 Latin + 47 字 URL + 23 字 CJK」@fs=44.4。三列 `pref` 之和 ≈ 5300px
-     * ≫ 版心 1740px ⇒ 落进 `autoColumnLayout` 的**受限段**，列宽被**夹成等分** `[1334,1334,1334]`，
-     * 两侧一模一样 ⇒ 锁红。**红的原因不是接线没生效，是量错了段**
-     * ——正是本文件 KDoc 里「错误 1：量错对象」的同一类。
-     *
-     * ⇒ 换成三列都很短的表（`sum(pref) ≪ contentW`）落 `avail>=totalMax` 直通段，实测
-     * fs=44.4/w=1740：Skia `[264,254,135]` vs 自建 `[266,254,135]`（Latin 列宽出 2px，即一个 kern 对）。
-     * ⇒ 并**在本锁里断言这个前提**：全列等宽即说明被夹成等分了，量的是夹取结果不是 `pref`。
-     */
-    @Test
-    fun `表格列宽真的响应断行器变体（接线已生效）`() {
-        val html = """
-            <html><body><div class="tbl"><div><table>
-            <tr><td>Office WA</td><td>AVATAR</td><td>名称</td></tr>
-            <tr><td>Wayfinding</td><td>Paragraph</td><td>值</td></tr>
-            </table></div></div></body></html>
-        """.trimIndent()
-        val ua = "table { table-layout: auto; border-collapse: collapse; border-spacing: 0; }" +
-            ".tbl table td { padding: .5em; border: 1px solid #c0c0c0; }"
-
-        // 两侧都要显式写，不靠默认值 —— 默认已是自建，复位回的是 on 不是 Skia。
-        AbSwitch.resetForTest()
-        AbSwitch.apply("inhouseBreak=0")
-        val skiaCols = cellColumnWidths(html, ua)
-        assertTrue("应至少有 1 列", skiaCols.isNotEmpty())
-        assertTrue(
-            "本锁的前提：必须落在 `avail>=totalMax` 直通段（`w[i]=pref[i]`）。" +
-                "若全列等宽，说明 `sum(pref) > contentW` 落进了受限段、列宽被夹成等分，" +
-                "此时量到的是夹取结果不是 pref，拨开关当然不动。换更短的单元格文本，别换判据。" +
-                "实测=$skiaCols",
-            skiaCols.distinct().size > 1,
-        )
-        AbSwitch.apply("inhouseBreak=1")
-        try {
-            val inhouseCols = cellColumnWidths(html, ua)
-            assertNotEquals(
-                "表格列宽必须响应断行器变体：若两侧相等，说明表格度量又被钉回 Skia 了。" +
-                    "（Q6 后两侧都经 `bodyParagraphBreaker`；重路径由本锁看、" +
-                    "轻路径由锁 7 看，谁被换回 `SkiaParagraphBreaker` 谁就是元凶）" +
-                    "实测 Skia=$skiaCols 自建=$inhouseCols",
-                skiaCols,
-                inhouseCols,
-            )
-        } finally {
-            AbSwitch.resetForTest()
-        }
-    }
-
-    /**
-     * 锁 7（**轻路径接线锁**）：走 [orilumn.reader.engine.BoxChapterLayouter.prepareLight] 真接线取列宽。
-     *
-     * ## 为什么锁 5 抓不到 MUT-I，必须另加这一把
-     *
-     * 锁 5 的 `cellColumnWidths` 直接 `BoxLayouter(fs, bodyParagraphBreaker(0f))`，
-     * **压根不经过 `BoxChapterLayouter`** —— 于是改 `BoxChapterLayouter.breakerFor` 它照样绿。
-     * 这就是本文件 KDoc 里「错误 3：绕过接线」，第一版又踩了一次（变异验证才发现：
-     * MUT-I 两轮都是 BUILD SUCCESSFUL）。
-     *
-     * 而表格测宽在**轻路径**（`LightPrepare`）里被消费，重路径压根不经过它 ——
-     * 所以要钉住轻路径的断行器来源，就必须**真的走轻路径**。
-     *
-     * 判据与锁 5 同形（拨开关列宽必须变），只是取的盒子来自 [LightPrepare.block]。
-     *
-     * ## 这把锁当场抓到一个真 bug（不是预演出来的）
-     *
-     * 第一版写出来时**当场红**：`breakerFor` 当时只按 `profile` 缓存，而实例的**类**由
-     * `AbSwitch.inhouseBreak()` 决定。`BoxChapterLayouter` 寿命是整本书、跨多次排版参数变更，
-     * 于是拨开关之后仍按 profile 命中缓存、继续发旧变体的实例 ——
-     * **「回退阀」在缓存命中时静默失效**（且 `paramHash` 变了会重排、重排却拿到同一套断行器）。
-     * 缓存键已改成 `(profile, 变体)` 两个分量。
-     *
-     * 这条也是「接线锁必须真走接线」的第二个理由：绕过去测就测不到这类跨状态的缓存错。
-     */
-    @Test
-    fun `轻路径表格列宽也响应变体（走 BoxChapterLayouter 真接线）`() {
-        val html = """
-            <html><body><div><table>
-            <tr><td>Office WA</td><td>AVATAR</td><td>名称</td></tr>
-            <tr><td>Wayfinding</td><td>Paragraph</td><td>值</td></tr>
-            </table></div></body></html>
-        """.trimIndent()
-        val markup = HtmlTreeConverter().convert(html)!!
-        val bc = orilumn.reader.engine.BoxChapterLayouter()
-        val profile = TypographicProfile(
-            bodyPx = 44.4f, headingScale = 1.4f, quoteScale = 1f, codeScale = 0.92f,
-            lineSpacing = 1f, firstLineIndentEm = 2f,
-            fgColor = 0xFF000000.toInt(), bgColor = 0xFFFFFFFF.toInt(), quoteColor = 0xFF808080.toInt(),
-            marginLeft = 0, marginRight = 0, marginTop = 0, marginBottom = 0,
-            fontBody = "", fontTitle = "", fontCode = "", useOriginalStyle = true,
-            layoutTheme = "original", coverStretch = true, paragraphSpacingEm = null, paragraphGapScale = 1f, letterSpacingEm = 0f,
-        )
-
-        AbSwitch.resetForTest()
-        AbSwitch.apply("inhouseBreak=0")
-        val skiaCols = lightColumns(bc, markup, profile)
-        assertTrue("轻路径应至少取到 1 列", skiaCols.isNotEmpty())
-        assertTrue(
-            "前提：轻路径这张表也必须落在 `avail>=totalMax` 直通段（全列等宽=被夹成等分）。实测=$skiaCols",
-            skiaCols.distinct().size > 1,
-        )
-        AbSwitch.apply("inhouseBreak=1")
-        try {
-            val inhouseCols = lightColumns(bc, markup, profile)
-            assertNotEquals(
-                "轻路径表格列宽也必须响应变体。轻路径的 breaker 由 `BoxChapterLayouter.breakerFor` " +
-                    "传入 `LightPrepare`（与重路径共用同一实例）；若两侧相等，说明有人给轻路径 " +
-                    "另接了一个断行器，或 `breakerFor` 绕过了单源工厂。" +
-                    "实测 Skia=$skiaCols 自建=$inhouseCols",
-                skiaCols,
-                inhouseCols,
-            )
-        } finally {
-            AbSwitch.resetForTest()
-        }
-    }
-
-    /**
      * E15（度量侧）：格内行内盒的横向 `padding`/`border` 计入 auto 分列的 max/min-content，
      * **重轻双路**同账（两路都经 `NormalFlowLayout.tableCellPref` 单源）。
      *
@@ -440,34 +202,29 @@ class TableColumnWidthRealMeasureTest {
         """.trimIndent()
         val ua = "table { table-layout: auto; border-collapse: collapse; border-spacing: 0; }"
 
-        AbSwitch.resetForTest()
-        try {
-            val heavyPad = cellColumnWidths(doc(padSpan), ua)
-            val heavyBare = cellColumnWidths(doc(bareSpan), ua)
-            assertEquals("重路径应有两列", 2, heavyPad.size)
-            assertTrue(
-                "前提：直通段（全列等宽=被夹成等分，量到的是夹取结果）。实测=$heavyBare",
-                heavyBare[0] != heavyBare[1],
-            )
-            assertEquals("重路径首列增量 = 2×30px 内边距", 60, heavyPad[0] - heavyBare[0])
-            assertEquals("次列不受影响", heavyBare[1], heavyPad[1])
+        val heavyPad = cellColumnWidths(doc(padSpan), ua)
+        val heavyBare = cellColumnWidths(doc(bareSpan), ua)
+        assertEquals("重路径应有两列", 2, heavyPad.size)
+        assertTrue(
+            "前提：直通段（全列等宽=被夹成等分，量到的是夹取结果）。实测=$heavyBare",
+            heavyBare[0] != heavyBare[1],
+        )
+        assertEquals("重路径首列增量 = 2×30px 内边距", 60, heavyPad[0] - heavyBare[0])
+        assertEquals("次列不受影响", heavyBare[1], heavyPad[1])
 
-            val profile = TypographicProfile(
-                bodyPx = 44.4f, headingScale = 1.4f, quoteScale = 1f, codeScale = 0.92f,
-                lineSpacing = 1f, firstLineIndentEm = 2f,
-                fgColor = 0xFF000000.toInt(), bgColor = 0xFFFFFFFF.toInt(), quoteColor = 0xFF808080.toInt(),
-                marginLeft = 0, marginRight = 0, marginTop = 0, marginBottom = 0,
-                fontBody = "", fontTitle = "", fontCode = "", useOriginalStyle = true,
-                layoutTheme = "original", coverStretch = true, paragraphSpacingEm = null, paragraphGapScale = 1f, letterSpacingEm = 0f,
-            )
-            val bc = orilumn.reader.engine.BoxChapterLayouter()
-            val lightPad = lightColumns(bc, HtmlTreeConverter().convert(doc(padSpan))!!, profile)
-            val lightBare = lightColumns(bc, HtmlTreeConverter().convert(doc(bareSpan))!!, profile)
-            assertEquals("轻路径首列增量 = 2×30px 内边距", 60, lightPad[0] - lightBare[0])
-            assertEquals("轻路径次列不受影响", lightBare[1], lightPad[1])
-        } finally {
-            AbSwitch.resetForTest()
-        }
+        val profile = TypographicProfile(
+            bodyPx = 44.4f, headingScale = 1.4f, quoteScale = 1f, codeScale = 0.92f,
+            lineSpacing = 1f, firstLineIndentEm = 2f,
+            fgColor = 0xFF000000.toInt(), bgColor = 0xFFFFFFFF.toInt(), quoteColor = 0xFF808080.toInt(),
+            marginLeft = 0, marginRight = 0, marginTop = 0, marginBottom = 0,
+            fontBody = "", fontTitle = "", fontCode = "", useOriginalStyle = true,
+            layoutTheme = "original", coverStretch = true, paragraphSpacingEm = null, paragraphGapScale = 1f, letterSpacingEm = 0f,
+        )
+        val bc = orilumn.reader.engine.BoxChapterLayouter()
+        val lightPad = lightColumns(bc, HtmlTreeConverter().convert(doc(padSpan))!!, profile)
+        val lightBare = lightColumns(bc, HtmlTreeConverter().convert(doc(bareSpan))!!, profile)
+        assertEquals("轻路径首列增量 = 2×30px 内边距", 60, lightPad[0] - lightBare[0])
+        assertEquals("轻路径次列不受影响", lightBare[1], lightPad[1])
     }
 }
 
@@ -491,10 +248,10 @@ private fun lightColumns(
  * ## 四个曾经把这把锁测废的错误（都记在这儿，因为都会让人拿到假绿灯）
  *
  * 1. **量错对象**：量 `table` 盒的 `contentWidth`。表盒宽是被流撑满版心的，**与列宽无关**，
- *    拨开关当然纹丝不动。要量的是 `columnWidths`。
+ *    怎么改断行器都纹丝不动。要量的是 `columnWidths`。
  * 2. **走错路径**：`tableBreaker` 只在**轻路径**被消费，重路径压根不经过它。
  *    测重路径时把 `tableBreaker` 改掉，本锁不会响。
- * 3. **绕过接线**：直接 `new SkiaParagraphBreaker` 喂 `BoxLayouter`，等于没接开关。
+ * 3. **绕过接线**：直接自己 `new` 一个断行器喂 `BoxLayouter`，等于没接生产接线。
  * 4. **在测试里重写生产接线**：更隐蔽的一种——第一版直接调
  *    `autoColumnMeasurePinnedToSkia(bodyParagraphBreaker(...))` 自己拼了一遍，
  *    于是把生产接线整段删掉，锁**照样绿**（变异验证才发现）。

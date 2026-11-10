@@ -29,18 +29,10 @@ import org.junit.runners.Parameterized
  * 3. **落墨平移**：文本行 xLeft/yTop 与盒底色矩形整体平移同值，且沿祖先链累积；
  * 4. **反空跑**：`position: static`（或没写 `position`）上的 `top/left` 一律不生效（对照必须为零偏移）。
  */
-@RunWith(Parameterized::class)
-class RelativeOffsetTest(private val variant: String) {
+class RelativeOffsetTest {
 
-    companion object {
-        @JvmStatic
-        @Parameterized.Parameters(name = "breaker={0}")
-        fun variants() = breakerVariantParams()
-    }
 
-    @Before fun applyVariant() = applyBreakerVariant(variant)
 
-    @After fun resetVariant() = resetBreakerVariant()
 
     private class Run(
         val result: BoxLayoutResult,
@@ -55,7 +47,7 @@ class RelativeOffsetTest(private val variant: String) {
         val engine = StyleComputer(16f, LightCssParser().parse(""), emptyList())
         val styleMap = engine.compute(root)
         val classify = NormalFlowLayout.heavyClassify(styleMap, engine.hasDisplayDeclaration())
-        val result = BoxLayouter(16f, variantBreaker()).layoutBoxes(root, 600, styleMap, classify)
+        val result = BoxLayouter(16f, bodyParagraphBreaker()).layoutBoxes(root, 600, styleMap, classify)
         return Run(result, styleMap, classify)
     }
 

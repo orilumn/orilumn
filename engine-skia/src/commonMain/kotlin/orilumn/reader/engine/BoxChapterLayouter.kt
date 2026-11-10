@@ -184,30 +184,26 @@ class BoxChapterLayouter(
      * ## 为什么必须是**同一个对象**而不是两处各调一次工厂（2026-10-02，Q6 消解）
      *
      * 接线期是两个独立入口：重路径 `BoxLayouter(fs, heavyPathBreaker(...))`，
-     * 轻路径 `tableBreaker = SkiaParagraphBreaker(...)`。两处要维持一致就得长期维护两处接线 ——
-     * 而**两处接线正是当初重轻分叉的真正来源**（正文一接线，重路径的表格列宽跟着变体走，
-     * 轻路径却还钉在 Skia）。
+     * 轻路径 `tableBreaker = ...`。两处要维持一致就得长期维护两处接线 ——
+     * 而**两处接线正是当初重轻分叉的真正来源**（正文一接线，重路径的表格列宽跟着变，
+     * 轻路径却还钉在另一套实现）。
      *
      * 更要紧的是**它让锁打不出牙齿**：只走重路径的回归锁改轻路径的 `tableBreaker` **照样绿**
      * （轻路径的 breaker 只被 `LightPrepare` 消费，重路径压根不经过它 —— 这正是变异 MUT-I
      * 打不死锁的原因）。合实例之后，任何对断行器来源的改动都**同时**打到两条路。
      *
-     * ## 缓存键为什么是 `(profile, 变体)` 两个分量
+     * ## 缓存键为什么是 `(profile, 字距)` 两个分量
      *
      * `prepare()` 与 `prepareLight()` 是两个函数，各自拿到 [TypographicProfile] 形参，
-     * 而 [TypographicProfile.letterSpacingEm] 参与断行器构造 ⇒ **profile 变了必须重建**。
-     * 但**只按 profile 缓存是不够的**：断行器实例的**类**由 [orilumn.reader.engine.AbSwitch.inhouseBreak]
-     * 决定，而 layouter 的寿命是**整本书**、跨多次排版参数变更。拨一次 `ab="inhouseBreak=0/1"`
-     * 之后若还按 profile 命中缓存，就会继续发**旧变体**的实例 —— 于是「回退阀」在缓存命中时
-     * 静默失效，且 `paramHash` 变了会重排、重排却拿到同一套断行器。
-     * （这个缺陷是锁 7「轻路径也响应变体」当场抓出来的：两侧列宽完全相同。）
+     * 而 [TypographicProfile.letterSpacingEm] 参与断行器构造 ⇒ **profile 变了必须重建**；
+     * 本章实际生效的字距可能来自书（读者没配时）⇒ 单独进键，免得跨章串用。
      *
      * 判据同 `docs/自建断行引擎-测试计划.md` 教训 ⑩：键的每个分量都要能回答
      * 「它变了，那步昂贵操作真的需要重做吗」。`TypographicProfile` 是值对象，`equals` 可用。
      *
-     * ## 敢用变体量列宽的前提
+     * ## 敢用自建断行器量列宽的前提
      *
-     * 此前表格测宽恒为 Skia，理由是自建侧 `preferredWidth` 是接口默认桩
+     * 此前表格测宽恒为另一套实现，理由是自建侧 `preferredWidth` 是接口默认桩
      * `text.length * fontSizePx`（fs=44.4 下 Latin/URL 高估 2.0~2.6 倍）。该前提已由
      * [orilumn.reader.engine.skia.InhouseParagraphBreaker.preferredWidth] 接
      * `SkiaRunMeasurer.naturalWidth` 解除 —— 实测 CJK/URL/code/混排 **0.0000%**、
@@ -215,10 +211,9 @@ class BoxChapterLayouter(
      */
     private var cachedBreaker: Pair<BreakerKey, orilumn.reader.engine.laying.ParagraphBreaker>? = null
 
-    /** 断行器缓存键：profile + 变体 + **本章实际生效的字距**（读者没配时它来自书）。 */
+    /** 断行器缓存键：profile + **本章实际生效的字距**（读者没配时它来自书）。 */
     private class BreakerKey(
         val profile: TypographicProfile,
-        val inhouse: Boolean,
         val letterSpacingEm: Float,
     )
 
@@ -226,10 +221,9 @@ class BoxChapterLayouter(
         profile: TypographicProfile,
         letterSpacingEm: Float,
     ): orilumn.reader.engine.laying.ParagraphBreaker {
-        val inhouse = orilumn.reader.engine.AbSwitch.inhouseBreak()
-        val key = BreakerKey(profile, inhouse, letterSpacingEm)
+        val key = BreakerKey(profile, letterSpacingEm)
         cachedBreaker?.let { if (it.first == key) return it.second }
-        val made = orilumn.reader.engine.skia.bodyParagraphBreaker(letterSpacingEm, profile.cjkLatinSpacingEmApplied)
+        val made = orilumn.reader.engine.skia.bodyParagraphBreaker(letterSpacingEm, profile.cjkLatinSpacingEm)
         cachedBreaker = key to made
         return made
     }
@@ -1019,7 +1013,7 @@ class BoxChapterLayouter(
             prepare.classify,
             prepare.hidden,
             prepare.letterSpacingEm,
-            profile.cjkLatinSpacingEmApplied,
+            profile.cjkLatinSpacingEm,
             profile.fgColor,
             prepare.genOf,
             prepare.firstLetterOf,
@@ -1050,7 +1044,7 @@ class BoxChapterLayouter(
             }
             val tableWin = orilumn.reader.engine.skia.TableCellLines.expandTable(
                 frames, { prepare.styleMap[it] }, prepare.letterSpacingEm, profile.fgColor,
-                imageLoader, chapterHref, profile.cjkLatinSpacingEmApplied, profile.density,
+                imageLoader, chapterHref, profile.cjkLatinSpacingEm, profile.density,
             )
             BoxDrawableLayout(
                 BoxLayoutResult(lines, prepare.structure.boxes), shapes,
@@ -1352,8 +1346,6 @@ class BoxChapterLayouter(
         pagesToShape: Int = 4,
         cache: MutableMap<Int, ParagraphShapeRef>? = null,
         prefillL2: Map<Int, ParagraphShapeRef>? = null,
-        /** R20：锚页前先塑章首这么多块做暖机（0 = 关）。开书路径显式传，别的调用点不动。 */
-        warmupBlocks: Int = 0,
     ): ChapterLayouter.ChapterLayoutProduct {
         val totalPages = table.pages.size
         val startIdx = targetPage.coerceAtLeast(0)
@@ -1405,34 +1397,8 @@ class BoxChapterLayouter(
         // R3: l2hits counts published-neighbor hits (diagnostic for prefill effectiveness).
         var l2hits = 0
 
-        // R20 预热：开书锚页是冷进程里的**第一次** shape，先在章首塑 [0, warmupBlocks) 一小块，
-        // 两笔分别计时，锚页净变快才算赚。warmupBlocks=0 即完全关闭（默认），由调用方显式开。
-        //
-        // 【未证实，勿当定论】原注释写"付掉 class-load / JIT / 字体段落初始化这些固定项"——已被数据否证：
-        // 同一进程内相隔 0.7s 的两次开书，warmup 代码路径与块数完全相同，耗时却是
-        // ch4 warm(3 块)=346~419ms 对 ch0 warm(3 块)=30~37ms，差 11 倍。
-        // 固定成本模型（warm=F+3p、anchor=F+np）解出 p<0，自身就不成立。
-        // 也就是说这 350ms 是 ch4 自身前 3 块（章标题 h1 + 首段）的真实排版开销，
-        // 不是"暖机"。它是否换来锚页变快尚未做过 warmB=0 的冷开书 A/B，
-        // 在那之前这段预热只能算对锚页有利的一种猜测，见 docs/待分析-GIMP开书慢-结论清单.md。
-        var tWarm0 = 0L
-        var tWarm1 = 0L
-        var warmBlocks = 0
-        if (warmupBlocks > 0) {
-            val warmHi = warmupBlocks.coerceAtMost(prepare.totalBlocks)
-            if (warmHi > 0) {
-                tWarm0 = orilumn.reader.time.platformNowMs()
-                for (i in 0 until warmHi) tempShape(cache, prepare, i, profile, prefillL2)
-                tWarm1 = orilumn.reader.time.platformNowMs()
-                warmBlocks = warmHi
-            }
-        }
-
         val probe = ShapeProbe()
         val outerProbe = shapeProbe
-        // 注意置位点在暖机**之后**：probe 只统计锚页自己那几块（sBlocks 等于 blocks 数），
-        // 暖机的 3 块不计入，故 warm 的 CSS/Skia 成分目前无数据。
-        // 要拆 warm 需把这两行上移到暖机之前并分成两个 probe，届时 sBlocks 会出现 3+n。
         shapeProbe = probe
         // R26：block(i) 物化在 tempShape 里、在 shapeBlock 之外，原先两笔都盖不到它。
         // 实测它就是那 ~500ms 未归因的大头嫌疑（textLength 的 styledCharAdvance 是子集）。
@@ -1512,7 +1478,7 @@ class BoxChapterLayouter(
         val tBox1 = orilumn.reader.time.platformNowMs()
         val clipOf: (MarkupElement) -> ClipRect? = { boxes.clip[it] }
         val tSkia0 = orilumn.reader.time.platformNowMs()
-        val skiaLines = buildPartialSkiaWindow(prepare, leavesForDraw, localFirst, localShapes, localLines, prepare.letterSpacingEm, profile.cjkLatinSpacingEmApplied, profile.fgColor, clipOf, deviceScale = profile.density)
+        val skiaLines = buildPartialSkiaWindow(prepare, leavesForDraw, localFirst, localShapes, localLines, prepare.letterSpacingEm, profile.cjkLatinSpacingEm, profile.fgColor, clipOf, deviceScale = profile.density)
         val tSkia1 = orilumn.reader.time.platformNowMs()
         // 表格行展开进窗口（与 canonical/临时页同源 helper；行顶/行首取本窗 FlowedLine，char 章内；
         // 相邻同表行成组，rowspan 格边框跨行）。
@@ -1539,7 +1505,7 @@ class BoxChapterLayouter(
         val tTbl0 = orilumn.reader.time.platformNowMs()
         val incrWin = orilumn.reader.engine.skia.TableCellLines.expandTable(
             incrFrames, prepare::resolveStyle, prepare.letterSpacingEm, profile.fgColor,
-            imageLoader, chapterHref, profile.cjkLatinSpacingEmApplied, profile.density,
+            imageLoader, chapterHref, profile.cjkLatinSpacingEm, profile.density,
         )
         val tTbl1 = orilumn.reader.time.platformNowMs()
         val frameLeadTop = windowLeadTop(prepare, blockLo, localShapes)
@@ -1632,8 +1598,8 @@ class BoxChapterLayouter(
         )
         val tPg1 = orilumn.reader.time.platformNowMs()
         // R19: assembly segment breakdown (permanent diagnostic) — shape/lines/skia/tbl/box/pg.
-        // R20 附加：sStyles/sSkia 把 shape 段拆成 CSS 级联与 Skia 断行，sDepth 记被塑块最大嵌套深度，
-        // warm 记锚页前那笔暖机。**不要**往这里加堆/CPU 采样——已实测两者探针自身比被测对象贵
+        // R20 附加：sStyles/sSkia 把 shape 段拆成 CSS 级联与 Skia 断行，sDepth 记被塑块最大嵌套深度。
+        // **不要**往这里加堆/CPU 采样——已实测两者探针自身比被测对象贵
         // （见 [backfillBlockRanges] 里 R21 诊断注释），会把这一行自己变成瓶颈。
         Logger.w("Orilumn.Engine", "asm ch=${table.chapterIndex} page=$targetPage " +
             "shape=${tShape1 - tShape0}ms lines=${tLines1 - tLines0}ms skia=${tSkia1 - tSkia0}ms " +
@@ -1649,7 +1615,6 @@ class BoxChapterLayouter(
             "eBox=${probe.eBoxMs}ms eWid=${probe.eWidthMs}ms eCol=${probe.eColorMs}ms " +
             "eSty=${probe.eStyleMs}ms eRad=${probe.eRadiusMs}ms eBrd=${probe.eAnyBorder} " +
             "sBlocks=${probe.blocks} sEls=${probe.elements} sDepth=${probe.maxDepth} " +
-            "warm=${tWarm1 - tWarm0}ms warmB=$warmBlocks " +
             "linesN=${localLines.size} pagesN=${table.pages.size} " +
             "l2hits=$l2hits/${blockHi - blockLo}")
 
@@ -3115,7 +3080,7 @@ class BoxChapterLayouter(
         val clipOf: (MarkupElement) -> ClipRect? = { boxes.clip[it] }
         // Q1-b：临时页同样投影 skia 窗口（页内局部行序，行 y 已归一化到页首行 = 0）——
         // ReaderScreen 合流绘制，不再回落旧 StaticLayout 画法。
-        val skiaLines = buildPartialSkiaWindow(prepare, leavesForDraw, localFirst, shapes, lines, prepare.letterSpacingEm, prepare.profile.cjkLatinSpacingEmApplied, prepare.profile.fgColor, clipOf, deviceScale = prepare.profile.density)
+        val skiaLines = buildPartialSkiaWindow(prepare, leavesForDraw, localFirst, shapes, lines, prepare.letterSpacingEm, prepare.profile.cjkLatinSpacingEm, prepare.profile.fgColor, clipOf, deviceScale = prepare.profile.density)
         // 表格行展开进窗口（与 canonical 同源 helper；行顶/行首取本窗 FlowedLine，char 章内；
         // 相邻同表行成组，rowspan 格边框跨行）。
         val tempFrames = ArrayList<orilumn.reader.engine.skia.TableCellLines.RowFrame>()
@@ -3139,7 +3104,7 @@ class BoxChapterLayouter(
         }
         val tempWin = orilumn.reader.engine.skia.TableCellLines.expandTable(
             tempFrames, prepare::resolveStyle, prepare.letterSpacingEm, prepare.profile.fgColor,
-            imageLoader, chapterHref, prepare.profile.cjkLatinSpacingEmApplied, prepare.profile.density,
+            imageLoader, chapterHref, prepare.profile.cjkLatinSpacingEm, prepare.profile.density,
         )
         val tempEdgeGaps = windowLeadTop(prepare, blockStart, shapes)
         val layout = PartialDrawableLayout(
@@ -4336,8 +4301,8 @@ class LightPrepare(
             }
         }
         if (!anyFloat) return FloatEager(List(n) { null }, List(n) { null }, List(n) { 0 }, List(n) { true })
-        // S3：与重路径同一单源（浮动 lead 的宽度决定其宿主块宽，必须与正文同变体）。
-        val breaker = orilumn.reader.engine.skia.bodyParagraphBreaker(letterSpacingEm, profile.cjkLatinSpacingEmApplied)
+        // 与重路径同一单源（浮动 lead 的宽度决定其宿主块宽，必须与正文同一套度量）。
+        val breaker = orilumn.reader.engine.skia.bodyParagraphBreaker(letterSpacingEm, profile.cjkLatinSpacingEm)
         val pending = NormalFlowLayout.FloatPending()
         val out = ArrayList<orilumn.reader.engine.laying.FloatLead?>(n)
         val widths = ArrayList<Int?>(n)

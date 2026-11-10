@@ -44,7 +44,7 @@ object CascadeProbe {
      * 前两层已经否证了三个假设：
      *  1. `cBuild` 是不是"重复查表" → 重复查表只有 14 处，省不下 87ms，否；
      *  2. 是不是 `Pattern.compile` 现场编译 → 预编译臂 `cEdge=34ms` vs 原样臂 `34ms`，
-     *     零差别，否（见 `AbSwitch.regexHoist`）；
+     *     零差别，否；
      *  3. 是不是切分开销本身 → 手工扫描替代 `Pattern.split` **慢 8ms**，否。
      *
      * 所以那 34ms 在**边家族的实际解析工作**里。这一层按家族分笔：

@@ -2641,10 +2641,6 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                         pagesToShape = 1,
                         cache = unitShapeCache(unit),
                         prefillL2 = windowPrefillShapesFor(unit, cached),
-                        // 开书路径专属的锚页预热，实测净亏，默认 0（数据见 AbSwitch.warmupBlocks 的 KDoc）。
-                        // R28 搬到运行期开关：顺序装机 A/B 无法排除慢时段整段落在一侧，
-                        // 且本开关有**已知答案**（+50ms），正好用来先验证量法本身。
-                        warmupBlocks = AbSwitch.warmupBlocks,
                     )
                     Logger.w(logTag, "DISK-HIT shape t=${platformNowMs() - sp}ms shapedPages=${product.slices.count { it.firstLine >= 0 }} blocks=[${product.slices[startPage].blockStart},${product.slices[startPage].blockEndExclusive}) target=$startPage")
                     unit.bind(product.layout, product.slices)
@@ -6441,11 +6437,10 @@ private fun finishCanonicalBackground(
         val chh = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
         val hit = u.paginationTable?.paramHash == LayoutParamKey.fromProfile(profile, cw, chh).hash()
         // R20：`where == "open"` 时带上整段 open 的墙钟（`open:` 那行到落位）。
-        // R28：开书行另带三项可比性要件——锚点（分组用）、A/B 变体（自解释）、控制量（离群标记）。
-        // 非 open 落位不测控制量：那是用户翻页的关键路径，不该塞任何测量负载。
+        // 开书行另带锚点（分组用）：那是可比性要件。
+        // 非 open 落位不加任何额外标记：那是用户翻页的关键路径，不该塞任何测量负载。
         val tail = if (where == "open" && openT0 > 0L) {
-            " openT=${platformNowMs() - openT0}ms anchor=$openAnchor" +
-                " ab=${AbSwitch.describe()} ctl=${"%.2f".format(AbSwitch.controlMs())}ms"
+            " openT=${platformNowMs() - openT0}ms anchor=$openAnchor"
         } else ""
         Logger.w(logTag, "jump: $where -> ch=$chapter path=${u.pathMarker} tableHit=$hit temp=${u.inProgress != null}$tail")
         // 落位成功后把"这一页排好的结果"存盘（异步防抖）：下次开书直接拿来画，不再塑形。

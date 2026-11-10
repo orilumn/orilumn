@@ -1,6 +1,5 @@
 package orilumn.reader.engine.skia
 
-import orilumn.reader.engine.AbSwitch
 import orilumn.reader.engine.css.LightCssParser
 import orilumn.reader.engine.css.StyleComputer
 import orilumn.reader.engine.css.TextAlign
@@ -29,10 +28,10 @@ import org.junit.Test
  *    这是硬约束：断行/绘制拼行靠 range 相接，破了就出无主字符。
  * 3. **尾随空白零宽且不影响拉伸基数** —— 与断行侧 `greedy` 的 `hang` 记账一致。
  *
- * ## 必须两侧都跑（[BreakerVariantFixture] 的理由）
+ * ## 断行器只有一套
  *
- * 断行器换侧会改断点，而本类吃的是断行器产出的 range。**只在一侧跑**，
- * 「重轻/两侧一致」这类不变量会假失败或假通过。故用现成夹具拨开关。
+ * 断行器换实现会改断点，而本类吃的是断行器产出的 range。生产只剩自建断行器，
+ * 故一律经单源夹具取实例（不自己 `new`），保证与生产接线不可能分家。
  *
  * ## 语料对 fontRuns 敏感（必须断言，教训 29 的汉字 1em 巧合）
  *
@@ -132,10 +131,8 @@ class LineAlignerTest {
 
     @Test
     fun `JUSTIFY 中部行可见右边界铺满版心`() {
-        forEachBreakerVariant { breaker, label ->
-            AbSwitch.resetForTest()
-            applyBreakerVariant(label)
-            try {
+        withBodyBreaker { breaker, label ->
+            run {
                 // ⚠ **`StyleComputer` 的根字号**（决定 CSS 解析后的真实字号），**不是**测量用的字号。
                 //   [align] 的 `fs` 实参必须喂 [DrawLine.fontSizePx]（绘制侧量的那个）——
                 //   两者在 `body { font-size: 0.95rem }` 下**不相等**（实测 44.4 vs 42.18），
@@ -198,8 +195,6 @@ class LineAlignerTest {
                     checked >= 2,
                 )
                 assertEquals("全部能装下的中部行都应铺满", checked, filled)
-            } finally {
-                AbSwitch.resetForTest()
             }
         }
     }
@@ -208,9 +203,8 @@ class LineAlignerTest {
 
     @Test
     fun `逐字 x 严格相接且与 range 等长`() {
-        forEachBreakerVariant { breaker, label ->
-            applyBreakerVariant(label)
-            try {
+        withBodyBreaker { breaker, label ->
+            run {
                 val rootFs = 44.4f
                 val root = HtmlTreeConverter().convert("<html><body>$realPara</body></html>")!!
                 val engine = StyleComputer(rootFs, LightCssParser().parse(realCss), emptyList())
@@ -240,8 +234,6 @@ class LineAlignerTest {
                     }
                     assertTrue("lsPx 占位避免未用告警 ${lsPx + rootFs}", p.xs.isNotEmpty())
                 }
-            } finally {
-                AbSwitch.resetForTest()
             }
         }
     }

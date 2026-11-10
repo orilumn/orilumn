@@ -46,7 +46,7 @@ object NormalFlowLayout {
      *
      * @param root the body tree.
      * @param styles per-node computed styles from the cascade.
-     * @param breaker the text shaper (the engine-skia `SkiaParagraphBreaker` in production, a fake in tests).
+     * @param breaker the text shaper (the engine-skia `InhouseParagraphBreaker` in production, a fake in tests).
      * @param widthPx content width (px) available to the root.
      * @param imageLoader optional EPUB image loader so block `<img>` replaceables can resolve real
      *   intrinsic aspect ratios instead of falling back to [DEFAULT_IMG_RATIO].

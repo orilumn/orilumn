@@ -75,7 +75,8 @@ class CjkLatinSpacingTest {
     fun `closing bracket glued to latin counts as the western side`() {
         // 真机 2026-11-10：同页两个 `main()` 长成两种宽度——`main()函数` 只剩盒内边距，
         // `main() 函数` 多出一整格作者手打的空格（`)` 判 NONE ⇒ 接缝断在这里，空格吃不掉）。
-        // 收尾括号紧贴西文字母/数字时并入西文侧，两处得到同一道间隙。
+        // 2026-11-11 起判据换成「看括号内侧装什么」（见下一个用例），下面这些形状的 `)`
+        // 内侧是 `(` 或西文，结论不变，留作回归。
         assertEquals(listOf(CjkLatinGap(5, 0.25f)), gapsOf("main()函数"))
         assertEquals(listOf(CjkLatinGap(5, 0.25f, spaceCount = 1)), gapsOf("main() 函数"))
         assertEquals(listOf(CjkLatinGap(2, 0.25f)), gapsOf("x()中"))
@@ -87,14 +88,43 @@ class CjkLatinSpacingTest {
     }
 
     @Test
-    fun `opening brackets and cjk-attached brackets stay out of the seam`() {
-        // 与收尾括号相反的三条边界：开括号不推开后文、括号左边是汉字时不算西文、
-        // 逗号这类句读仍按「作者已给出间隔」隔断（2026-10-03 口径不变）。
-        assertTrue(gapsOf("中文(English)").isEmpty())
+    fun `brackets wrapping western content join the western side`() {
+        // 2026-11-11 产品裁决：括号按**内侧内容**判，装西文的整对并入西文侧。
+        // 真机（交换「内」与 `{}`）：`大括号{}内` 两侧都没有混排字距，只剩 code 盒的内边距 ——
+        // 括号的字身里没有留白，「标点天然隔断」这条对它不成立。
+        assertEquals(
+            listOf(CjkLatinGap(2, 0.25f), CjkLatinGap(4, 0.25f)),
+            gapsOf("大括号{}内"),
+        )
+        assertEquals(listOf(CjkLatinGap(1, 0.25f)), gapsOf("函数()"))
+        assertEquals(listOf(CjkLatinGap(1, 0.25f)), gapsOf("名称(FQN)"))
+        assertEquals(
+            listOf(CjkLatinGap(1, 0.25f), CjkLatinGap(10, 0.25f)),
+            gapsOf("中文(English)后"),
+        )
+        // 作者手打的分隔空格照旧被吃掉、换成同一道间隙（与 `main() 函数` 同一条口径）。
+        assertEquals(
+            listOf(CjkLatinGap(2, 0.25f, spaceCount = 1), CjkLatinGap(5, 0.25f)),
+            gapsOf("大括号 {}内"),
+        )
+        // 内侧带空白的括号对装的是同一个东西（`( a )` 与 `(a)` 同判）。
+        assertEquals(listOf(CjkLatinGap(1, 0.25f)), gapsOf("函数( )"))
+        // 括号前作者手打的空格同样被吃掉、换成同一道间隙（左开括号那一侧）。
+        assertEquals(listOf(CjkLatinGap(1, 0.25f, spaceCount = 1)), gapsOf("中文 (English)"))
+    }
+
+    @Test
+    fun `brackets wrapping cjk content stay out of the seam`() {
+        // 内侧是汉字 ⇒ 括号属于中文那段，不该把汉字推开。
         assertTrue(gapsOf("main(参数)").isEmpty())
-        assertTrue(gapsOf("函数()").isEmpty())
+        assertTrue(gapsOf("中文(中文)").isEmpty())
+        // 句读仍按「作者已给出间隔」隔断（2026-10-03 口径不变）。
         assertTrue(gapsOf("中文,English").isEmpty())
         assertTrue(gapsOf("中文 。").isEmpty())
+        // 尖括号不按内侧内容判：正文里它们同时是数学比较符号，作者手打的两侧空格要留住。
+        assertTrue(gapsOf("中文<目标名称>").isEmpty())
+        assertTrue(gapsOf("值 < 3").isEmpty())
+        assertTrue(gapsOf("3 > 值").isEmpty())
     }
 
     @Test
@@ -214,7 +244,9 @@ class CjkLatinSpacingTest {
             "main() 函数",
             "main()函数",
             "中文(English)",
+            "中文 (English)",
             "函数()",
+            "大括号 {}内",
             "\uD840\uDC00 A",
             "中 A\uD840\uDC00",
             "",

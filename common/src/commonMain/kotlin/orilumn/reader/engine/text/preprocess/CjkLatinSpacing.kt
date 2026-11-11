@@ -98,7 +98,7 @@ data class CjkLatinGap(
  *
  * 两侧各取一个类别（[KIND_CJK] / [KIND_WESTERN] / 其它），异类即成边界。关键是**谁才算
  * CJK、谁才算 Western**，判据只有一条：**必须是表意文字 / 字母 / 数字**。
- * 标点、符号、空白一律 [KIND_NONE]，于是它们**天然隔断邻接** ——
+ * 标点、符号、空白一律 [KIND_NONE]（括号是例外，见下节），于是它们**天然隔断邻接** ——
  * `中文,English` 里 `,` 两侧各是一个「CJK↔NONE」「NONE↔Western」，一处都不成边界
  * （这正是要的行为：作者已经用标点给出了视觉间隔，不必再插间隙）。
  *
@@ -110,20 +110,28 @@ data class CjkLatinGap(
  *
  * 收紧后的具体范围与逐条理由见 [isCjk] / [isWestern] 的 KDoc。
  *
- * ## 唯一的例外：紧贴拉丁字母的**收尾括号**并入西文侧（2026-11-10 真机）
+ * ## 括号：并入西文侧（2026-11-10 收尾括号 → 2026-11-11 按内侧内容判整对）
  *
  * 「标点天然隔断」这条对逗号、句号成立 —— 作者写 `中文,English` 时标点自己就是间隔。
- * 但对**收尾括号**不成立：`main()` 后面紧跟汉字时，作者没有、也不该在 `)` 与汉字之间
- * 再打空格，而括号本身并不提供任何视觉间隔（它紧贴着字母）。旧口径下 `main()函数`
- * 与 `main() 函数` 于是长成两种宽度：前者只剩盒内边距，后者多出一整格作者手打的空格
- * （那格不是接缝空白，吃不掉）—— 同一个短语在同一页上两种距离，读者一眼就看出来。
+ * 但对**括号**不成立：括号的字身里没有留白，它紧贴着里面的内容，本身不提供任何视觉间隔。
+ * 旧口径下 `main()函数` 与 `main() 函数` 于是长成两种宽度：前者只剩盒内边距，后者多出
+ * 一整格作者手打的空格（那格不是接缝空白，吃不掉）—— 同一个短语在同一页上两种距离。
  *
- * ⇒ 判据：`)` `]` `}` `>` 若**向左紧贴**拉丁字母/数字（中间只隔着 ASCII 标点，不跨空白），
- * 就按西文侧参与接缝：`main()函数` 得到间隙，`main() 函数` 的空白被吃掉换成同一道间隙。
- * **只收收尾括号**，且只认「左边贴着西文」这个方向：
- * - `(` `[` `{` 不算（`main(参数)` 的开括号后面不该被推开一段）；
- * - `中文,English` 的逗号左边是汉字 ⇒ 不算（标点隔断的语义保持原样）；
- * - `函数()` 的右括号左边是汉字 ⇒ 不算（`数` 与 `(` 之间照旧无间隙）。
+ * ⇒ 判据只看括号**内侧**那一个字（跳过内侧空白）：
+ * - 开括号 `(` `[` `{` 看右边，收尾括号 `)` `]` `}` 看左边；
+ * - 内侧是**字母 / 数字 / ASCII 标点**（含另一个括号，即空括号对 `()` `{}`）⇒ 这一侧的括号
+ *   并入西文侧；
+ * - 内侧是汉字或中文标点（`main(参数)`、`(中文)`）⇒ 保持 [KIND_NONE]，汉字不被推开。
+ *
+ * 为什么看「内侧装什么」而不是「外侧贴什么」：括号是一对，视觉上属于它包住的那段内容。
+ * 内侧是西文 ⇒ 整对是西文的一部分，汉字与它相邻就该有间隙（`大括号{}内`、`函数()`、
+ * `名称(FQN)` 两侧都有）；内侧是汉字 ⇒ 括号属于中文那段，推开反而错。
+ * 这条同时覆盖 2026-11-10 那条「收尾括号紧贴西文」：`main()函数` 的 `)` 内侧是 `(`，
+ * `main() 函数` 的空白照旧被吃掉换成同一道间隙。
+ *
+ * **尖括号 `<` `>` 不在其中**：正文里它们同时是数学比较符号（`值 < 3`），按内侧内容判会把
+ * 作者手打的两侧空格一起吃掉。`>` 只保留 2026-11-10 那条（紧贴西文才算），
+ * `<T>`、`List<T>中` 的呈现不变。
  *
  * **已知不覆盖**：假名（`U+3041..U+30FF`）与谚文等仍判 NONE ⇒ 日文/韩文与拉丁之间没有间隙。
  * 那是本项目语料（中译技术书）之外的形态，本轮**未裁决**，不在此处凭空定死。
@@ -464,12 +472,15 @@ object CjkLatinSpacing {
     }
 
     /**
-     * [seamKind] 的**带上下文**形式：紧贴在拉丁字母/数字后面的收尾括号 `) ] } >` 并入西文侧。
+     * [seamKind] 的**带上下文**形式：圆/方/花括号按**内侧内容**并入西文侧；
+     * 收尾尖括号 `>` 紧贴西文时并入西文侧。
      *
-     * 为什么需要上下文：`)` 算不算「西文那一头」取决于它**左边**贴着的是什么，光看这个字符
-     * 本身分不出来（见类 KDoc「唯一的例外」）。判据只有这一条方向：向左跳过连续的 ASCII
-     * 标点，看第一个字是不是字母/数字；跨过空白或汉字就不算（`中文,English` 的逗号、
-     * `函数()` 的右括号都留在 NONE）。
+     * 为什么需要上下文：括号算不算「西文那一头」取决于它**包着的是什么**，光看这个字符
+     * 本身分不出来（见类 KDoc「括号：并入西文侧」）。判据只有这一条方向：内侧（开括号看右、
+     * 收尾括号看左，跳过内侧空白）是字母/数字/ASCII 标点才算；汉字、中文标点、段末都不算。
+     *
+     * `>` 例外单独一条（[gluedToWestern]）：正文里 `<` `>` 还是数学比较符号，
+     * 按内侧内容判会把 `值 < 3` 两侧作者手打的空格吃掉。
      *
      * [gaps] 与 [isEatenSpaceSlot] 共用本函数 —— 复制/选区摘空格、绘制落间隙必须是同一份判据。
      */
@@ -478,7 +489,8 @@ object CjkLatinSpacing {
         val cp = codePointAt(text, i)
         val base = seamKind(cp)
         if (base != KIND_NONE) return base
-        if (isAsciiClosingBracket(cp) && gluedToWestern(text, i)) return KIND_WESTERN
+        if (isPairedBracket(cp) && bracketInnerIsWestern(text, i, isOpeningBracket(cp))) return KIND_WESTERN
+        if (cp == 0x3E && gluedToWestern(text, i)) return KIND_WESTERN
         return KIND_NONE
     }
 
@@ -489,9 +501,33 @@ object CjkLatinSpacing {
         return seamKindAt(text, endExcl - charCountOf(cp))
     }
 
-    /** 收尾括号族（只收右半边；开括号不参与，见类 KDoc）。 */
-    private fun isAsciiClosingBracket(cp: Int): Boolean =
-        cp == 0x29 || cp == 0x5D || cp == 0x7D || cp == 0x3E
+    /**
+     * 括号**内侧**紧贴的那个字是不是「西文内容」（跳过内侧空白：`( a )` 与 `(a)` 装的是同一个东西）。
+     *
+     * 内侧是 ASCII 标点也算 —— 空括号对 `()` `{}`、`(-1)`、`(#id)` 这类整对都是代码片段，
+     * 与 `(English)` 没有区别。汉字、中文标点、全角符号都不算（`main(参数)`、`(中文)`）。
+     */
+    private fun bracketInnerIsWestern(text: CharSequence, i: Int, opening: Boolean): Boolean {
+        var j = if (opening) i + 1 else i - 1
+        if (opening) {
+            while (j < text.length && isSeparatingSpace(text[j])) j++
+            if (j >= text.length) return false
+            val cp = codePointAt(text, j)
+            return isWestern(cp) || isAsciiPunct(cp)
+        }
+        while (j >= 0 && isSeparatingSpace(text[j])) j--
+        if (j < 0) return false
+        val cp = codePointBefore(text, j + 1)
+        return isWestern(cp) || isAsciiPunct(cp)
+    }
+
+    /** 参与「按内侧内容并入西文侧」的括号：圆、方、花（尖括号见 [seamKindAt]）。 */
+    private fun isPairedBracket(cp: Int): Boolean =
+        cp == 0x28 || cp == 0x29 || cp == 0x5B || cp == 0x5D || cp == 0x7B || cp == 0x7D
+
+    /** 上一条里的开括号半边：`(` `[` `{`。 */
+    private fun isOpeningBracket(cp: Int): Boolean =
+        cp == 0x28 || cp == 0x5B || cp == 0x7B
 
     /** 从 [i] 向左跳过连续的 ASCII 标点/符号，看紧邻的是不是西文字母或数字（不跨空白）。 */
     private fun gluedToWestern(text: CharSequence, i: Int): Boolean {

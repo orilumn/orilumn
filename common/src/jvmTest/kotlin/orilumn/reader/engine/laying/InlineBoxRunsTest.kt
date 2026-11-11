@@ -523,6 +523,23 @@ class InlineBoxRunsTest {
     }
 
     @Test
+    fun `装西文的括号贴中文时盒的两侧内边距都被吃掉`() {
+        // 真机报的原形状：`大括号<code>{}</code>内` —— 括号按内侧内容并入西文侧后，两侧都成接缝，
+        // code 盒那一侧的 padding 由间隙取代（原先两处只剩盒的内边距，比旁边的正文窄一截）。
+        val code = node(
+            "code",
+            mapOf("style" to "padding-left:6px;padding-right:6px"),
+            listOf(text("{}")),
+        )
+        val p = node("p", children = listOf(text("大括号"), code, text("内")))
+        node("body", children = listOf(p))
+        val r = runs(p).single()
+        assertEquals(0f, r.padding.left, 1e-6f)
+        assertEquals(0f, r.padding.right, 1e-6f)
+        assertTrue("两侧都成接缝 ⇒ 盒推进量归零", inlineBoxEdges(6, listOf(r)).isEmpty())
+    }
+
+    @Test
     fun `外边距任何情况下都吃（它不画）`() {
         val s = node(
             "span",

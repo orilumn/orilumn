@@ -2,6 +2,7 @@ package orilumn.reader.engine.revision
 
 import orilumn.reader.data.revision.TextRevision
 import orilumn.reader.engine.css.WhiteSpace
+import orilumn.reader.engine.text.preprocess.CjkLatinSpacing
 
 /**
  * 一次正文修改的提交计划（方案 §8.4 / §8.9 第 5、7 步）。
@@ -98,23 +99,29 @@ object TextEditPlanner {
         if (endExclusive <= start) {
             return TextEditPlan.Rejected("请先选择要修改的文字")
         }
+        // 选区两端贴着「接缝上被吃成零宽的分隔空白」时，先把它们吃进替换区间。
+        // 否则读者看不见的那半个空格会在新文字把接缝改没之后突然现形（`val 的` → `声明 的`）。
+        // 只有真的改了可见文字、且新接缝不再吃它时才吃；纯改样式 / 原样确认不动它。
+        val edit = absorbVisibleSeamSpaces(chapterText, start, endExclusive, replacement)
+        val editStart = edit.first
+        val editEnd = edit.second
         val lines = splitLines(replacement)
         val perLine = lineSpans(replacementStyles, lines)
         val ends = blockEnds?.takeIf { it.isNotEmpty() && it.last() == chapterText.length }
         if (ends == null) {
             return planSegments(
                 bookId, chapter, chapterText, map, groupId, now, wsOfLeaf, toOriginal, renderedInterval,
-                listOf(Segment(start, endExclusive, replacement, 0, 0, chapterText.length, perLine?.first())),
+                listOf(Segment(editStart, editEnd, replacement, 0, 0, chapterText.length, perLine?.first())),
             )
         }
-        val firstLeaf = leafOf(ends, start)
-        val lastLeaf = leafOf(ends, endExclusive - 1)
+        val firstLeaf = leafOf(ends, editStart)
+        val lastLeaf = leafOf(ends, editEnd - 1)
         if (firstLeaf == lastLeaf) {
             return planSegments(
                 bookId, chapter, chapterText, map, groupId, now, wsOfLeaf, toOriginal, renderedInterval,
                 listOf(
                     Segment(
-                        start, endExclusive, replacement, firstLeaf,
+                        editStart, editEnd, replacement, firstLeaf,
                         if (firstLeaf == 0) 0 else ends[firstLeaf - 1],
                         ends[firstLeaf],
                         perLine?.first(),
@@ -130,15 +137,15 @@ object TextEditPlanner {
             }
             return planMerge(
                 bookId, chapter, chapterText, map, groupId, now, wsOfLeaf, toOriginal, renderedInterval,
-                start, endExclusive, replacement, ends, perLine,
+                editStart, editEnd, replacement, ends, perLine, replacementStyles,
             )
         }
         val segments = ArrayList<Segment>(leafCount)
         for (i in firstLeaf..lastLeaf) {
             val leafStart = if (i == 0) 0 else ends[i - 1]
             val leafEnd = ends[i]
-            val segStart = maxOf(start, leafStart)
-            val segEnd = minOf(endExclusive, leafEnd)
+            val segStart = maxOf(editStart, leafStart)
+            val segEnd = minOf(editEnd, leafEnd)
             segments.add(
                 Segment(segStart, segEnd, lines[i - firstLeaf], i, leafStart, leafEnd, perLine?.get(i - firstLeaf)),
             )
@@ -214,6 +221,7 @@ object TextEditPlanner {
         replacement: String,
         ends: IntArray,
         perLine: List<List<InlineMarkup.StyleSpan>>?,
+        replacementStyles: List<InlineMarkup.StyleSpan>?,
     ): TextEditPlan {
         val absorbed = map.revisions.filter { r ->
             val rr = renderedInterval(r)
@@ -292,6 +300,8 @@ object TextEditPlanner {
                     originalText = selectionLines(chapterText, ends, start, endExclusive),
                     editedText = replacement,
                     styles = mergedStyles?.let(InlineMarkup::toStored),
+                    // 合并后的 styles 是「前缀 + 新文字 + 后缀」的坐标；卡片要的是输入区原文的坐标。
+                    editedStyles = replacementStyles?.let(InlineMarkup::toStored),
                     delta = renderedLen - (uEnd - uStart),
                     groupId = groupId,
                     createdAt = now,
@@ -490,6 +500,8 @@ object TextEditPlanner {
                 originalText = selected,
                 editedText = seg.text,
                 styles = finalStyles?.let(InlineMarkup::toStored),
+                // 卡片再打开时要看到**整段输入文字**的结构，不能只有裁剩的最小改动那截。
+                editedStyles = segSpans?.let(InlineMarkup::toStored),
                 delta = RevisionBlocks.renderedLength(finalText) - (finalEnd - finalStart),
                 groupId = groupId,
                 createdAt = now,
@@ -531,6 +543,59 @@ object TextEditPlanner {
             out.append(if (c == '\n' && !kept[i]) RevisionBlocks.SEPARATOR else c)
         }
         return out.toString()
+    }
+
+    /**
+     * 选区两端若紧贴**接缝上被吃成零宽的分隔空白**，判断替换后它会不会「现形」；会的话把它吃进替换区间。
+     *
+     * 书里 `使用 <code>val</code> 的只读变量` 在 `val` 与 `的` 之间有一个分隔空格，排版时按中西接缝
+     * 吃成零宽。读者把 `使用 val` 改成 `用 val 声明` 后，这个空格夹在 `明` 与 `的` 之间，
+     * 不再命中接缝，于是渲染成一个肉眼可见的空格。它本来就在原文里，不是多打的字，
+     * 但读者从来看不见它，编辑也不该让它凭空出现 —— 所以这里把它并入替换区间（等价于删掉）。
+     *
+     * 判据不另写一份：先把这次替换落成结果文字，再拿 [CjkLatinSpacing.isEatenSpaceSlot] 问那串空白
+     * **在结果里**还会不会被吃掉。不猜左右邻字是必要的：纯删除时两端空白会并成一串，左右邻字要跨过
+     * 整段选区去取（曾经按邻字猜，把「删除后仍被吃掉」的空格也一并删了）。
+     *
+     * 只做两件收窄：
+     * - 输入文字与选区文字完全相同（原样确认 / 纯改样式）时不动，免得凭空多一条「删空格」修订；
+     * - 结果里那串空白仍被吃掉时不动（如 `val` 改成 `values`，仍是西文贴中文），一个字节都不改。
+     *
+     * @return 调整后的 `[start, endExclusive)`；没有可吃 / 不该吃时原样返回。
+     */
+    private fun absorbVisibleSeamSpaces(
+        text: String,
+        start: Int,
+        endExclusive: Int,
+        replacement: String,
+    ): Pair<Int, Int> {
+        if (start >= endExclusive) return start to endExclusive
+        // 跨段替换的边界是块界，不在这里处理；单行替换才是本规则的对象。
+        if (replacement.indexOf('\n') >= 0) return start to endExclusive
+        if (replacement == text.substring(start, endExclusive)) return start to endExclusive
+        // 两端各看**当前就被吃掉**的那一串空白；本来就看得见的不归本规则管。
+        var headStart = -1
+        if (start > 0 && CjkLatinSpacing.isEatenSpaceSlot(text, start - 1)) {
+            headStart = start
+            while (headStart > 0 && CjkLatinSpacing.isEatenSpaceSlot(text, headStart - 1)) headStart--
+        }
+        var tailEnd = -1
+        if (endExclusive < text.length && CjkLatinSpacing.isEatenSpaceSlot(text, endExclusive)) {
+            tailEnd = endExclusive
+            while (tailEnd < text.length && CjkLatinSpacing.isEatenSpaceSlot(text, tailEnd)) tailEnd++
+        }
+        if (headStart < 0 && tailEnd < 0) return start to endExclusive
+        val result = buildString(text.length - (endExclusive - start) + replacement.length) {
+            append(text, 0, start)
+            append(replacement)
+            append(text, endExclusive, text.length)
+        }
+        var s = start
+        var e = endExclusive
+        // 结果里这两串空白的位置：尾端隔着替换文字，首端不动（替换从 start 起写）。
+        if (tailEnd >= 0 && !CjkLatinSpacing.isEatenSpaceSlot(result, start + replacement.length)) e = tailEnd
+        if (headStart >= 0 && !CjkLatinSpacing.isEatenSpaceSlot(result, headStart)) s = headStart
+        return s to e
     }
 
     /** 累计块尾 → 偏移所在的叶下标（第一个「块尾 > offset」）。 */

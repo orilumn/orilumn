@@ -34,44 +34,70 @@ data class RevisionStyleSpan(val start: Int, val endExclusive: Int, val style: R
 /**
  * [RevisionStyleSpan] 的 JSON 编解码。
  *
- * 落库形态：`{"v":1,"s":[[start,end,"tag",{attrs}],...]}`；老修订该列为空串，[decode] 返回
- * `null`（= 没有显式样式，行为与引入本列之前完全一致）；新修订一律写 `[]` 或实际区间，
- * 因此「显式声明为空」与「老数据」分得开。
+ * 落库形态：`{"v":1,"s":[[start,end,"tag",{attrs}],...],"e":[...]}`。`s` 作用于最小修订文字、
+ * 重放时套回元素；`e` 作用于输入区全文、打开旧修改时回显结构（可选，老数据没有）。
+ * 老修订该列为空串，[decode] 返回 `null`（= 没有显式样式，行为与引入本列之前完全一致）；
+ * 新修订一律写 `[]` 或实际区间，因此「显式声明为空」与「老数据」分得开。
  */
 object RevisionStyles {
 
-    /** 编解码版本（改格式时 +1；解析规则版本另见排版层的 `InlineMarkup.VERSION`）。 */
+    /**
+     * 编解码版本（改格式时 +1；解析规则版本另见排版层的 `InlineMarkup.VERSION`）。
+     *
+     * **不因新增可选字段而 +1**：`s` 仍是 [TextRevision.text] 的区间，老版本只读它，
+     * 新增的 `e` 被忽略；这样新数据回退到老版本也不会把行内结构读坏。
+     */
     const val VERSION = 1
 
     private val json = Json { ignoreUnknownKeys = true }
 
-    fun encode(spans: List<RevisionStyleSpan>): String {
-        val array = JsonArray(
-            spans.map { s ->
-                JsonArray(
-                    listOf(
-                        JsonPrimitive(s.start),
-                        JsonPrimitive(s.endExclusive),
-                        JsonPrimitive(s.style.tag),
-                        JsonObject(s.style.attrs.mapValues { JsonPrimitive(it.value) }),
-                    ),
-                )
-            },
-        )
+    /**
+     * @param spans 相对 [TextRevision.text]（最小修订，含段界）的区间，重放用；
+     * @param edited 相对 [TextRevision.editedText]（输入区全文）的区间，修改卡回显用。
+     *   两者可以不同：公共前后缀裁掉的那截只在 [edited] 里有结构。
+     */
+    fun encode(
+        spans: List<RevisionStyleSpan>?,
+        edited: List<RevisionStyleSpan>? = null,
+    ): String {
+        if (spans == null && edited == null) return ""
         return buildJsonObject {
             put("v", JsonPrimitive(VERSION))
-            put("s", array)
+            spans?.let { put("s", toArray(it)) }
+            edited?.let { put("e", toArray(it)) }
         }.toString()
     }
 
-    /** 解析；空串 / 坏数据返回 null（当老修订处理，宁可退回旧行为也不排错页）。 */
-    fun decode(raw: String): List<RevisionStyleSpan>? {
+    private fun toArray(spans: List<RevisionStyleSpan>): JsonArray = JsonArray(
+        spans.map { s ->
+            JsonArray(
+                listOf(
+                    JsonPrimitive(s.start),
+                    JsonPrimitive(s.endExclusive),
+                    JsonPrimitive(s.style.tag),
+                    JsonObject(s.style.attrs.mapValues { JsonPrimitive(it.value) }),
+                ),
+            )
+        },
+    )
+
+    /** 解析最小修订文字上的区间；空串 / 坏数据返回 null（当老修订处理，宁可退回旧行为也不排错页）。 */
+    fun decode(raw: String): List<RevisionStyleSpan>? = decodeArray(raw, "s")
+
+    /**
+     * 解析**输入区全文**上的区间（修改卡回显用）。
+     *
+     * 老修订只有 `s`（甚至完全没有样式信息），这里返回 null；调用方按老行为开纯文本卡。
+     */
+    fun decodeEdited(raw: String): List<RevisionStyleSpan>? = decodeArray(raw, "e")
+
+    private fun decodeArray(raw: String, key: String): List<RevisionStyleSpan>? {
         if (raw.isBlank()) return null
         return runCatching {
             val root = json.parseToJsonElement(raw).jsonObject
             val version = root["v"]?.jsonPrimitive?.intOrNull ?: 0
             if (version > VERSION) return null
-            root["s"]?.jsonArray?.mapNotNull { el ->
+            root[key]?.jsonArray?.mapNotNull { el ->
                 val a = el.jsonArray
                 if (a.size < 4) return@mapNotNull null
                 val start = a[0].jsonPrimitive.intOrNull ?: return@mapNotNull null

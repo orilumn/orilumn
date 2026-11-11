@@ -465,6 +465,54 @@ class LibraryDbTest {
     // ---- 正文修订（schema v11） ----
 
     @Test
+    fun textRevisionEditedStylesRoundTrip() = runBlocking {
+        // 两份区间一起落库：`styles` 相对最小修订文字、`editedStyles` 相对输入区全文。
+        // 老修订（没存过输入区结构）读回来是 null，不是空表 —— 两者在卡片上行为不同。
+        val db = freshDb()
+        val book = db.addBook("T", null, "/b.epub", addedAt = 1L)
+        val code = orilumn.reader.data.revision.RevisionStyle(
+            "code",
+            mapOf("class" to "code", "id" to "x1"),
+        )
+        val saved = db.replaceTextRevisions(
+            deletedIds = emptyList(),
+            inserted = listOf(
+                TextRevision(
+                    bookId = book,
+                    chapter = 1,
+                    charStart = 2,
+                    charEnd = 5,
+                    text = "val",
+                    editedText = "用 val 声明",
+                    styles = listOf(orilumn.reader.data.revision.RevisionStyleSpan(2, 5, code)),
+                    editedStyles = listOf(orilumn.reader.data.revision.RevisionStyleSpan(2, 5, code)),
+                    delta = 1,
+                    groupId = 5L,
+                ),
+                TextRevision(
+                    bookId = book,
+                    chapter = 1,
+                    charStart = 20,
+                    charEnd = 21,
+                    text = "Z",
+                    editedText = "Z",
+                    delta = 0,
+                    groupId = 5L,
+                ),
+            ),
+        )
+        assertEquals(2, saved.size)
+        val rows = db.textRevisionsForChapter(book, 1)
+        val withStructure = rows.first { it.charStart == 2 }
+        assertEquals(listOf(orilumn.reader.data.revision.RevisionStyleSpan(2, 5, code)), withStructure.styles)
+        assertEquals(listOf(orilumn.reader.data.revision.RevisionStyleSpan(2, 5, code)), withStructure.editedStyles)
+        // 没有样式信息的老路径：两份都是 null。
+        val plain = rows.first { it.charStart == 20 }
+        assertNull(plain.styles)
+        assertNull(plain.editedStyles)
+    }
+
+    @Test
     fun textRevisionsRoundTripAndOrdering() = runBlocking {
         val db = freshDb()
         val book = db.addBook("T", null, "/b.epub", addedAt = 1L)

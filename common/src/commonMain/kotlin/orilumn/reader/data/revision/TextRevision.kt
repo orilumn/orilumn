@@ -36,6 +36,13 @@ data class TextRevision(
      * 重放沿用「新字挂左邻」的旧规则；非 null（可以是空表）= 读者明确声明过这段文字的行内结构。
      */
     val styles: List<RevisionStyleSpan>? = null,
+    /**
+     * 显式行内样式区间（作用于 [editedText]，含输入区里的 `\n`）：审阅视图打开旧修改时
+     * 按它回显标记、补回属性。`null` = 老修订没存过（按纯文本开卡，重放仍只看 [styles]）。
+     *
+     * 与 [styles] 的差别只在**公共前后缀**：落库的最小修订裁掉的两端，这一段结构只在这里。
+     */
+    val editedStyles: List<RevisionStyleSpan>? = null,
     val delta: Int = 0,
     val groupId: Long = 0,
     val createdAt: Long = 0,

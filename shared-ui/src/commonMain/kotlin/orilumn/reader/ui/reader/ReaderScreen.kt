@@ -1237,11 +1237,12 @@ fun ReaderScreen(
         textEditChapter = p.chapter
         textEditStart = revision.charStart
         textEditEnd = revision.charEnd
-        textEditText = revision.editedText
-        // 审阅空间点开的是「改后的字」，不是选区的行内结构：不套标记、不补属性（styles 传 null，
-        // 重放走老规则）；没有改动时按「原文」短路，不白落一条修订。
-        textEditOriginalSpans = null
-        textEditAmbientSpans = emptyList()
+        // 打开旧修改时按**落库的输入区结构**回显标记、补回属性（`editedStyles`）。落库的最小修订
+        // 两头被公共前后缀裁过，那截结构只剩输入区这一份；老修订没存过 ⇒ 退回纯文本开卡。
+        val card = editCardOf(revision.editedText, revision.editedStyles)
+        textEditText = card.text
+        textEditOriginalSpans = card.originalSpans
+        textEditAmbientSpans = card.ambientSpans
         textEditBaseText = revision.editedText
         // 输入区带出来的是**已经改过的字**，按「已动过」算：之后拖手柄只挪落笔范围，
         // 不会把读者上次的改写换成新选区的原文（那等于悄悄丢掉上一次修改）。
@@ -3424,6 +3425,36 @@ internal fun splitAmbientSpans(
         open.add(sp)
     }
     return ambient to visible
+}
+
+/** 打开一条已有修订时输入区的三件套：文字（带标记）、原件结构、隐形结构。 */
+internal class EditCard(
+    val text: String,
+    val originalSpans: List<InlineMarkup.StyleSpan>?,
+    val ambientSpans: List<InlineMarkup.StyleSpan>,
+)
+
+/**
+ * 按落库的**输入区全文结构**重建修改卡内容（打开旧修改 / 点审阅痕迹）。
+ *
+ * 落库有两份区间：`TextRevision.styles` 是最小修订上的（重放用），`TextRevision.editedStyles`
+ * 是输入区全文上的（回显用）。公共前后缀被裁掉的那一截只有后者还带着结构 —— 只读前者会把
+ * `<code>` 之类的元素丢掉，读者再确认一次就真的把它们删了。
+ *
+ * [stored] 为 null = 老修订没存过输入区结构（或这次提交本来就没有结构）：按纯文本开卡，
+ * 与引入标记之前一致。
+ */
+internal fun editCardOf(
+    editedText: String,
+    stored: List<orilumn.reader.data.revision.RevisionStyleSpan>?,
+): EditCard {
+    val spans = stored?.let(InlineMarkup::fromStored)
+    val (ambient, visible) = splitAmbientSpans(spans.orEmpty(), editedText.length)
+    return EditCard(
+        text = if (visible.isEmpty()) editedText else InlineMarkup.show(editedText, visible),
+        originalSpans = spans,
+        ambientSpans = ambient,
+    )
 }
 
 internal fun selectionTextForEdit(

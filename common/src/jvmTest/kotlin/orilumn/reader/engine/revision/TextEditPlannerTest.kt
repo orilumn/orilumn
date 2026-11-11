@@ -466,4 +466,71 @@ class TextEditPlannerTest {
         assertEquals("Y", second.text)
         assertEquals(null, second.styles?.firstOrNull())
     }
+
+    @Test
+    fun editingUpToSeamSpaceAbsorbsItWhenItWouldBecomeVisible() {
+        // 书里 `使用 <code>val</code> 的只读变量`：`val` 与 `的` 之间那个空格按中西接缝吃成零宽。
+        // 把「使用 val」改成「用 val 声明」后，它夹在「明」与「的」之间会现形 ⇒ 并进替换区间。
+        val text = "使用 val 的只读变量"
+        val p = ready(plan(text, intArrayOf(text.length), 0, 6, "用 val 声明"))
+        val r = p.inserted.single()
+        assertEquals(0, r.charStart)
+        // 6 个字 + 被吃掉的那个空格：落库的区间确实把它删掉了。
+        assertEquals(7, r.charEnd)
+        assertEquals("用 val 声明", r.text)
+        assertEquals("使用 val ", r.originalText)
+        assertEquals(1, r.delta)
+        assertEquals(0, p.renderedStart)
+        assertEquals(8, p.renderedEndExclusive)
+    }
+
+    @Test
+    fun seamSpaceStaysWhenNewSeamStillEatsIt() {
+        // 「使用 val」→「使用 values」：新接缝仍是「s|的」（西文贴中文），那个空格照样零宽，
+        // 一个字节都不该动（否则平白多一条「删空格」修订）。
+        val text = "使用 val 的只读变量"
+        val p = ready(plan(text, intArrayOf(text.length), 0, 6, "使用 values"))
+        val r = p.inserted.single()
+        assertEquals(6, r.charStart)
+        assertEquals(6, r.charEnd)
+        assertEquals("ues", r.text)
+        // 重新选中的是「使用 values」这 9 个字，空格仍在区间外。
+        assertEquals(9, p.renderedEndExclusive)
+    }
+
+    @Test
+    fun seamSpacesOnBothSidesAreAbsorbed() {
+        // 选中中间的「val」改成「值」：两侧各有一个被吃掉的接缝空格，改完都会现形 ⇒ 一起吃掉。
+        val text = "使用 val 的只读变量"
+        val p = ready(plan(text, intArrayOf(text.length), 3, 6, "值"))
+        val r = p.inserted.single()
+        assertEquals(2, r.charStart)
+        assertEquals(7, r.charEnd)
+        assertEquals("值", r.text)
+        // 结果就是「使用值的只读变量」：两侧都不再夹空格（重新选中的只有新写的「值」）。
+        assertEquals(1, p.renderedEndExclusive - p.renderedStart)
+    }
+
+    @Test
+    fun styleOnlyEditDoesNotTouchSeamSpace() {
+        // 只给「val」加代码样式、一个字没改：不写「删空格」修订，也不凭空多出一条。
+        val text = "使用 val 的只读变量"
+        val p = ready(planStyled(text, intArrayOf(text.length), 0, 6, "使用 val", listOf(span(3, 6, "code"))))
+        val r = p.inserted.single()
+        assertEquals(0, r.charStart)
+        assertEquals(6, r.charEnd)
+        assertEquals("使用 val", r.text)
+        assertEquals("code", r.styles?.single()?.style?.tag)
+    }
+
+    @Test
+    fun ordinarySpaceNextToSelectionIsLeftAlone() {
+        // 西文之间的普通空格不是接缝空白（本来就看得见），不归本规则管。
+        val text = "abc def ghi"
+        val p = ready(plan(text, intArrayOf(text.length), 4, 7, "xyz"))
+        val r = p.inserted.single()
+        assertEquals(4, r.charStart)
+        assertEquals(7, r.charEnd)
+        assertEquals("xyz", r.text)
+    }
 }

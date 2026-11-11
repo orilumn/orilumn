@@ -637,6 +637,8 @@ object InlineMarkup {
         '&' -> "&amp;"
         // 反引号只在整体转义时才转义：成对的 `` 会被当成代码，单打独斗的不会。
         '`' -> if (escapeMarkerChars) "\\`" else "`"
-        else -> if (escapeMarkerChars && c in "*~^[]()") "\\$c" else c.toString()
+        // `(` `)` 自身不是语法（链接必须由 `[` 起头），整体转义时不加反斜杠：
+        // `函数()` 不必写成 `函数\(\)`，读者看着干净。`]` 仍要转义——它会截断链接名里的括号配对。
+        else -> if (escapeMarkerChars && c in "*~^[]") "\\$c" else c.toString()
     }
 }

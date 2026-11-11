@@ -51,10 +51,24 @@ class EditCardTest {
 
     @Test
     fun oldRevisionWithoutEditedStylesOpensAsPlainText() {
-        // 老数据没存过输入区结构：按纯文本开卡，一个标记都不凭空加。
+        // 老数据没存过输入区结构：结构按纯文本开卡，一个标记都不凭空加（文字仍按原文转义）。
         val card = editCardOf("用 val 声明", null)
         assertEquals("用 val 声明", card.text)
         assertNull(card.originalSpans)
         assertTrue(card.ambientSpans.isEmpty())
+    }
+
+    @Test
+    fun bookLiteralMarkdownIsEscapedSoConfirmChangesNothing() {
+        // EPUB 不是 markdown：书里字面写着 `**加粗**` 是普通文字。进卡要原样带上、按普通文字转义，
+        // 确认时反斜杠去掉，落进书里的还是那几个字，不会变成粗体（规格 §2.5 / §3.1）。
+        val original = "**加粗** 与 10~20"
+        val card = editCardOf(original, null)
+        // 这一段里已经有真标记，整体转义模式下短横线一类的标记字符也一并加反斜杠（§2.5）。
+        assertEquals("\\*\\*加粗\\*\\* 与 10\\~20", card.text)
+        val parsed = InlineMarkup.parse(card.text)
+        assertTrue(parsed.ok)
+        assertEquals(original, parsed.text)
+        assertTrue(parsed.spans.isEmpty())
     }
 }

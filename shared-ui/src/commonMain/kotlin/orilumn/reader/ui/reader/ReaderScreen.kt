@@ -1584,7 +1584,11 @@ fun ReaderScreen(
         // 原件仍记**完整**结构：no-op 比较和属性补回都要拿它当模板。
         textEditOriginalSpans = spans
         textEditAmbientSpans = ambient
-        textEditText = if (visible.isEmpty()) plain else InlineMarkup.show(plain, visible)
+        // 书是 EPUB，不是 markdown：原文里的 `*` `~` `[` `<` `&` 都是**普通文字**。输入区是
+        // markdown 编辑区，所以**永远**走一遍序列化把标记字符转义（`*` → `\*`），不然读者一确认
+        // 就会被解析成粗体 / 斜体、标签或实体，原文被悄悄改掉。没有行内结构时也一样。
+        // 确认时 [InlineMarkup.parse] 把反斜杠去掉，落进书里的仍是原来那几个字。
+        textEditText = InlineMarkup.show(plain, visible)
         return true
     }
 
@@ -3441,8 +3445,8 @@ internal class EditCard(
  * 是输入区全文上的（回显用）。公共前后缀被裁掉的那一截只有后者还带着结构 —— 只读前者会把
  * `<code>` 之类的元素丢掉，读者再确认一次就真的把它们删了。
  *
- * [stored] 为 null = 老修订没存过输入区结构（或这次提交本来就没有结构）：按纯文本开卡，
- * 与引入标记之前一致。
+ * [stored] 为 null = 老修订没存过输入区结构（或这次提交本来就没有结构）：结构按纯文本开卡，
+ * 文字仍要转义——原文里的 `*` `~` `<` 是普通文字，不转义就会被输入区当成标记解析。
  */
 internal fun editCardOf(
     editedText: String,
@@ -3451,7 +3455,7 @@ internal fun editCardOf(
     val spans = stored?.let(InlineMarkup::fromStored)
     val (ambient, visible) = splitAmbientSpans(spans.orEmpty(), editedText.length)
     return EditCard(
-        text = if (visible.isEmpty()) editedText else InlineMarkup.show(editedText, visible),
+        text = InlineMarkup.show(editedText, visible),
         originalSpans = spans,
         ambientSpans = ambient,
     )

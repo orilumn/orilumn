@@ -119,6 +119,43 @@ class InlineMarkupTest {
     }
 
     @Test
+    fun bookLiteralMarkersAreEscapedAndComeBackVerbatim() {
+        // EPUB 原文不是 markdown：书里字面写着的 `**加粗**`、`~~删~~` 都是普通文字。
+        // 进输入区必须转义，否则一确认就被解析成样式，原文被悄悄改掉。
+        val needEscape = listOf("**加粗**", "*斜体*", "~~删~~", "x^2^", "H~2~O", "[注1](p1)")
+        for (t in needEscape) {
+            val markup = InlineMarkup.show(t, emptyList())
+            assertTrue("标记字符应转义：$t → $markup", markup != t && markup.contains('\\'))
+            val back = InlineMarkup.parse(markup)
+            assertEquals("标记：$markup", t, back.text)
+            assertTrue("不应多出样式：$markup", back.spans.isEmpty())
+        }
+        // 单个、成不了对的标记本来就不会被吃，显示时不必加反斜杠。
+        for (t in listOf("1990~2000", "3 * 4 * 5", "AT&T", "<b>字</b>", "函数(a)")) {
+            val markup = InlineMarkup.show(t, emptyList())
+            val back = InlineMarkup.parse(markup)
+            assertEquals("标记：$markup", t, back.text)
+            assertTrue("不应多出样式：$markup", back.spans.isEmpty())
+        }
+        // `]` `(` `)` 自身不构成语法：同一段里有真标记时也不该被加反斜杠。
+        val mixed = InlineMarkup.show("**重点**(a)", emptyList())
+        assertFalse(mixed, mixed.contains("\\("))
+        assertEquals("**重点**(a)", InlineMarkup.parse(mixed).text)
+    }
+
+    @Test
+    fun linkNameMayContainBrackets() {
+        // 链接名里有 `]`：整体转义时必须把它转掉，否则配对断在第一处、链接被还原成字面文字。
+        val text = "见 a]b"
+        val spans = listOf(span(2, 5, "a", "href" to "x.html"))
+        val markup = show(text, *spans.toTypedArray())
+        val back = InlineMarkup.parse(markup)
+        assertEquals("标记：$markup", text, back.text)
+        assertEquals(listOf(2 to 5), back.spans.map { it.start to it.endExclusive })
+        assertEquals("a", back.spans.single().sig.tag)
+    }
+
+    @Test
     fun showIsIdempotentOnMixedText() {
         val text = "他说：*好*，用 `code` 和 [注1]，1~2 之间 <b> 没有闭合 & 3 * 4"
         val emAt = text.indexOf("好")

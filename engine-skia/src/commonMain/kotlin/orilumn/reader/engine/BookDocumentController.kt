@@ -693,7 +693,16 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         val unit = unitAt(chapter) ?: return null
         val bc = layouter as? BoxChapterLayouter ?: return null
         return runCatching {
-            bc.blockKindsOfRange(unit.structureCache, unit.chapterTextBlockEnds(), start, endExclusive)
+            bc.blockKindsOfRange(
+                cssBundle = unit.cssBundle,
+                profile = profile,
+                contentW = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16),
+                contentH = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16),
+                structure = unit.structureCache,
+                blockEnds = unit.chapterTextBlockEnds(),
+                from = start,
+                to = endExclusive,
+            )
         }
             .onFailure {
                 Logger.w(logTag, "textEditBlocks failed ch=$chapter [$start,$endExclusive): ${it::class.simpleName}")
@@ -768,6 +777,32 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                 mergeableLeaf = mergeableLeaf,
                 blocks = blocks,
                 currentKindOf = { i -> leaves.getOrNull(i)?.let { BlockKind.ofElement(it) } },
+                imageLeaf = { i -> leaves.getOrNull(i)?.tag == "img" },
+                tableOfLeaf = { i ->
+                    val row = leaves.getOrNull(i)
+                    val bc = layouter as? BoxChapterLayouter
+                    if (row?.tag != "tr" || bc == null) {
+                        null
+                    } else {
+                        bc.tableRowInfoOf(
+                            cssBundle = unit.cssBundle,
+                            profile = profile,
+                            contentW = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16),
+                            contentH = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16),
+                            structure = unit.structureCache,
+                            row = row,
+                        )
+                    }
+                },
+                // 整表修改：卡片把选区扩到整张表，规划层据此判断「这次改的是不是一整张表」。
+                tableRangeOf = { i ->
+                    val bc = layouter as? BoxChapterLayouter
+                    if (leaves.getOrNull(i)?.tag != "tr" || bc == null) {
+                        null
+                    } else {
+                        bc.tableRangeOf(unit.structureCache, blockEnds, i)
+                    }
+                },
             )
         }
         // 审阅空间里改字：页面文字是「原文 + 新文字」的展示版，但落库的修订必须按**原书空间**算
@@ -824,6 +859,37 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                 // 文字换成「原文 + 新字」），所以叶下标仍按同一份结构取形态。
                 blocks = blocks,
                 currentKindOf = { i -> leaves.getOrNull(i)?.let { BlockKind.ofElement(it) } },
+                imageLeaf = { i -> leaves.getOrNull(i)?.tag == "img" },
+                tableOfLeaf = { i ->
+                    val row = leaves.getOrNull(i)
+                    val bc = layouter as? BoxChapterLayouter
+                    if (row?.tag != "tr" || bc == null) {
+                        null
+                    } else {
+                        bc.tableRowInfoOf(
+                            cssBundle = unit.cssBundle,
+                            profile = profile,
+                            contentW = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16),
+                            contentH = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16),
+                            structure = unit.structureCache,
+                            row = row,
+                        )
+                    }
+                },
+                // 审阅视图里改整表：选区 / 块尾都按原书空间算，叶起点也要换回原书空间
+                // （审阅空间的起点被前面的修订撑开过），否则整表区间会错位。
+                tableRangeOf = { i ->
+                    val bc = layouter as? BoxChapterLayouter
+                    val structure = unit.structureCache
+                    if (leaves.getOrNull(i)?.tag != "tr" || bc == null) {
+                        null
+                    } else {
+                        val originalStarts = LongArray(structure.globalCharStarts.size) {
+                            map.toOriginalFromReview(structure.globalCharStarts[it].toInt()).toLong()
+                        }
+                        bc.tableRangeOf(structure, originalEnds, i, starts = originalStarts)
+                    }
+                },
             )
         }
         if (base !is TextEditPlan.Ready) return base
@@ -1841,6 +1907,15 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         }
         val merges = ArrayList<orilumn.reader.engine.revision.ChapterRevisionReplay.Merge>()
         val mergeIds = HashSet<Long>()
+        // 整表结构修订：重放走专用通道（整表重建），绝不按叶分段落字。
+        val tableEdits = ArrayList<orilumn.reader.engine.revision.ChapterRevisionReplay.TableEdit>()
+        val tableEditIds = HashSet<Long>()
+        // 整表结构修订的 id：审阅视图据此不按「原文 + 就地插入」展开，而是直接按结果整表重建
+        // （见 `ChapterRevisionMap.structuralIds`）；正常视图不看这一项。
+        val structuralIds = map.revisions
+            .filter { it.editedBlocks.firstOrNull()?.startsWith("T") == true }
+            .map { it.id }
+            .toSet()
         // 原书空间的块尾（重放**之前**的叶起点）：并段 / 拆段时「哪几道段界在这一段里」要靠它。
         val blockEndsBefore = if (starts.size > 1) {
             IntArray(starts.size - 1) { starts[it + 1].toInt() }
@@ -1896,6 +1971,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                         originalTexts = texts,
                         originalKinds = kinds,
                         originalSpans = spans,
+                        structuralIds = structuralIds,
                     )
                 }
             }
@@ -1911,6 +1987,42 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                 val a = leafOfOffset(r.charStart)
                 aOf[r] = a
                 bOf[r] = if (r.originalLength == 0) a else leafOfOffset(r.charEnd - 1)
+            }
+            // 整表结构修订（`editedBlocks` 首码大写 `T`）：走专用通道整表重建，绝不按叶分段落字
+            // ——那会把整张表的文字塞进每一行。审阅视图同样落结构，只是不在表上画红绿 ¶。
+            for (r in map.revisions) {
+                if (r.editedBlocks.firstOrNull()?.startsWith("T") != true) continue
+                val rows = r.editedBlocks.mapNotNull {
+                    orilumn.reader.engine.revision.TableRowInfo.fromWire(it)
+                }
+                var ok = true
+                when {
+                    rows.isEmpty() && r.text.isNotEmpty() -> ok = false
+                    rows.isNotEmpty() && rows.sumOf { it.textLength } != r.text.length -> ok = false
+                }
+                val a = aOf.getValue(r)
+                val b = bOf.getValue(r)
+                val leaf = cache.leaves.getOrNull(a)
+                if (!ok || leaf == null || leaf.tag != "tr") {
+                    Logger.w(
+                        logTag,
+                        "whole-table revision skipped ch=${unit.chapterIndex} rev=${r.id} " +
+                            "range=[${r.charStart}, ${r.charEnd}) leaves=[$a, $b]",
+                    )
+                    tableEditIds += r.id
+                    continue
+                }
+                tableEdits += orilumn.reader.engine.revision.ChapterRevisionReplay.TableEdit(
+                    firstLeaf = a,
+                    lastLeaf = b,
+                    start = r.charStart - starts[a].toInt(),
+                    endExclusive = r.charEnd - starts[a].toInt(),
+                    text = r.text,
+                    rows = rows,
+                    revisionId = r.id,
+                    styles = r.styles?.let(InlineMarkup::fromStored),
+                )
+                tableEditIds += r.id
             }
             val needsBlocks = HashMap<orilumn.reader.data.revision.TextRevision, Boolean>(map.revisions.size)
             for (r in map.revisions) {
@@ -1930,7 +2042,9 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
             }
 
             // 叶区间相交的修订归成一组：不分先后、也不分是合并还是叶内落字，一次性交给重放。
-            val parent = IntArray(map.revisions.size) { it }
+            // 整表结构修订走自己的通道，不参与合并分组（它的文字不是按段切的）。
+            val grouped = map.revisions.filter { it.id !in tableEditIds }
+            val parent = IntArray(grouped.size) { it }
             fun find(i: Int): Int {
                 var x = i
                 while (parent[x] != x) {
@@ -1944,17 +2058,17 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                 val y = find(j)
                 if (x != y) parent[y] = x
             }
-            for (i in map.revisions.indices) {
-                for (j in i + 1 until map.revisions.size) {
-                    val ri = map.revisions[i]
-                    val rj = map.revisions[j]
+            for (i in grouped.indices) {
+                for (j in i + 1 until grouped.size) {
+                    val ri = grouped[i]
+                    val rj = grouped[j]
                     if (aOf.getValue(ri) <= bOf.getValue(rj) && aOf.getValue(rj) <= bOf.getValue(ri)) {
                         union(i, j)
                     }
                 }
             }
             val groups = LinkedHashMap<Int, MutableList<orilumn.reader.data.revision.TextRevision>>()
-            for ((i, r) in map.revisions.withIndex()) {
+            for ((i, r) in grouped.withIndex()) {
                 groups.getOrPut(find(i)) { ArrayList() }.add(r)
             }
 
@@ -2013,6 +2127,8 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
 
         // 只在内存里修正 delta 用：叶下标 → 这一叶上真正被应用的修订。
         val revisionsByLeaf = LinkedHashMap<Int, MutableList<orilumn.reader.data.revision.TextRevision>>()
+        // 表格行叶 → 卡片提交时落库的目标格结构（重放按它把新文字分回各格）。
+        val rowTargets = HashMap<MarkupElement, orilumn.reader.engine.revision.TableRowInfo>()
         val result = runCatching {
             bc.replayRevisions(
                 markup = tree,
@@ -2032,8 +2148,9 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                     }
                     val out = ArrayList<LeafTextEditor.Edit>(2)
                     for (r in map.revisionsTouching(leafStart, leafEnd)) {
-                        // 走合并路径的（段界要并 / 要拆）整段由重放处理，这里一律跳过。
-                        if (r.id in mergeIds) continue
+                        // 走合并路径的（段界要并 / 要拆）整段由重放处理，这里一律跳过；
+                        // 整表结构修订同理（由 `tableEdits` 整表重建）。
+                        if (r.id in mergeIds || r.id in tableEditIds) continue
                         if (reviewMode) {
                             val plan = reviewMap?.overlay(r)
                             if (plan == null) {
@@ -2142,10 +2259,25 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                             },
                         )
                     }
+                    // 表格行：目标格结构取本叶**最新**那条修订落库的形状（它的卡片看到的是
+                    // 之前所有修订之后的整行文字）。审阅空间的文字与它不同尺，不给。
+                    if (!reviewMode) {
+                        val leaf = cache.leaves.getOrNull(leafIndex)
+                        if (leaf != null && leaf.tag == "tr") {
+                            val latest = map.revisionsTouching(leafStart, leafEnd)
+                                .filter { it.id !in mergeIds && it.id !in tableEditIds }
+                                .maxByOrNull { it.id }
+                            latest?.editedBlocks
+                                ?.firstNotNullOfOrNull { orilumn.reader.engine.revision.TableRowInfo.fromWire(it) }
+                                ?.let { rowTargets[leaf] = it }
+                        }
+                    }
                     out
                 },
                 merges = merges,
                 blockOfLeaf = { index -> blockOfLeaf[index] },
+                tableOfRow = { leaf -> rowTargets[leaf] },
+                tableEdits = tableEdits,
             )
         }.getOrElse {
             Logger.w(logTag, "revision replay failed ch=${unit.chapterIndex}: ${it::class.simpleName}")
@@ -2173,7 +2305,11 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         }
         // 审阅视图用「重放前」就建好的那份表（排版与换算必须是同一份）；正常视图换成实测修正过的。
         val nextMap = if (reviewMode) {
-            reviewMap ?: ChapterRevisionMap(map.revisions, originalBlockEnds = blockEndsBefore)
+            reviewMap ?: ChapterRevisionMap(
+                map.revisions,
+                originalBlockEnds = blockEndsBefore,
+                structuralIds = structuralIds,
+            )
         } else {
             fixedRevisions?.let { ChapterRevisionMap(it, originalBlockEnds = blockEndsBefore) }
         }

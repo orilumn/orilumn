@@ -126,17 +126,16 @@ object FormatTraces {
      *
      * 一个几百字的地址排进正文会把整段撑烂，读者要看的只是「这里原来有个链接」；
      * 地址本身在卡片里看得见。`](…)` 里的省略号是排版记号，不是地址的一部分。
+     * 标签形式里本来就只有标签名（属性不进标记，见 [InlineMarkup]），没什么可省的。
      */
     private fun tracePair(
         sig: InlineMarkup.StyleSig,
         content: String,
     ): Pair<String, String> {
         val (open, close) = InlineMarkup.markerPair(sig, content)
-        if (sig.tag != "a") return open to close
-        // 语法糖形式 `](地址)` 只留 `](…)`；地址自带 `)` 时卡片退回标签形式，那里同样省掉 href。
-        if (close.startsWith("](")) return open to "](…)"
-        val short = open.replace(Regex("href=\"[^\"]*\""), "href=\"…\"")
-        return short to close
+        // 语法糖形式 `](地址)` 只留 `](…)`。
+        if (sig.tag == "a" && close.startsWith("](")) return open to "](…)"
+        return open to close
     }
 
     private val InlineMarkup.StyleSpan.key: Triple<Int, Int, String>

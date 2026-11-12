@@ -59,6 +59,32 @@ object ChapterRevisionReplay {
     )
 
     /**
+     * 一条**整表结构修订**（读者改了这张表的行 / 列 / 合并方式，见 `TextEditPlanner.planTable`）。
+     *
+     * 与 [Merge] 的区别：它不按段界拆块，而是按 [rows] 的格结构重建一整张 `table`：
+     * - `rows` 为空 = 删掉整张表；
+     * - 否则按 `text` 依次切出每一行的文字（行界由 [rows] 的 `textLength` 累加给出），
+     *   在原位建新的 `tr` / `td` / `th`，旧的整行叶全部撤掉；
+     * - 旧格的 `class` / `style` 等属性按位置尽量沿用（`id` 去掉），合并属性按新结构写。
+     *
+     * @property firstLeaf / [lastLeaf] 被替换的旧行叶（连续的叶号，首末都含）；
+     * @property start / [endExclusive] 修订区间，相对 `charStarts[firstLeaf]`；
+     * @property text 各行文字**直接相接**（没有段界字符）；
+     * @property rows 新表的格结构（`textLength` 之和必须等于 `text.length`）。
+     */
+    data class TableEdit(
+        val firstLeaf: Int,
+        val lastLeaf: Int,
+        val start: Int,
+        val endExclusive: Int,
+        val text: String,
+        val rows: List<TableRowInfo>,
+        val revisionId: Long,
+        /** 行内样式区间（偏移相对 [text]）。null = 没有样式信息。 */
+        val styles: List<InlineMarkup.StyleSpan>? = null,
+    )
+
+    /**
      * 一次匿名 run 的叶内重建（方案 §8.5 第 3 步的落地）：匿名 run 叶是结构里合成的
      * `#text`（不在章树 children 里），改字时由调用方把它对应的**真实**子节点 span
      * `[start, endExclusive)` 换成一串重建后的行内节点 [nodes]，并给出新的 run 原文与实测长度。
@@ -83,6 +109,19 @@ object ChapterRevisionReplay {
      * 返回 null = 这次不猜（保留原叶，[Result.needsRecompute] 置真）。
      */
     typealias AnonymousRunEditor = (MarkupElement, Int, List<LeafTextEditor.Edit>) -> AnonymousRun?
+
+    /**
+     * 表格行叶的一次重建结果。
+     *
+     * @property leaf 重建后的 `tr`（各格原样保留、格内文字按修订改过）；
+     * @property textLength 重建后行文本的格数（各格文本之和，与字符流同尺）；
+     * @property degraded 实测与应有文本不等（结构复杂 / 修订跨格；调用方记日志）。
+     */
+    class RowEdit(
+        val leaf: MarkupElement,
+        val textLength: Int,
+        val degraded: Boolean = false,
+    )
 
     /**
      * @property root 重放后的章树（未改动的子树原样复制；parent 已重链）；
@@ -116,6 +155,7 @@ object ChapterRevisionReplay {
      * @param editsForLeaf 返回该叶的叶内修订（叶内原书偏移）。空表 = 这一叶没被改到；
      * @param anonymousEdit 匿名 run 叶被改到时的重建回调（null = 保持旧行为，放弃结构重算）；
      * @param merges 跨叶修订（段数变了）；与 [editsForLeaf] 不重叠；
+     * @param tableEdits 整表结构修订；与 [editsForLeaf] 不重叠；
      * @param segmentsOf 取叶的 [StyledSegments]（必须与排版同一组 wsOf/styleOf/genOf 输入）。
      */
     fun replay(
@@ -128,7 +168,20 @@ object ChapterRevisionReplay {
         wsOf: (MarkupElement) -> WhiteSpace,
         styleOf: ((MarkupElement) -> ComputedStyle?)?,
         merges: List<Merge> = emptyList(),
+        tableEdits: List<TableEdit> = emptyList(),
         anonymousEdit: AnonymousRunEditor? = null,
+        /**
+         * 表格行叶被改到时的重建回调（null = 保持旧行为，放弃结构重算）。
+         *
+         * 表格行的文字是「各格文字按序拼接」，格是结构边界：通用的叶内重建会把新字插到
+         * `td` 外面。宿主按格拆开重建（见 `BoxChapterLayouter`），这里只认结果与长度。
+         *
+         * @param target 卡片提交时落库的**目标格结构**（含新文字的各格长度；null = 拿不到，
+         *   按旧格界推断）。重放据此把新文字落回它该在的格子，边界插入才不会被塞进前一格。
+         */
+        rowEdit: ((MarkupElement, List<LeafTextEditor.Edit>, TableRowInfo?) -> RowEdit?)? = null,
+        /** 取某一行叶的目标格结构（[rowEdit] 的第三个参数）。 */
+        tableOfRow: (MarkupElement) -> TableRowInfo? = { null },
         /**
          * 叶的目标块形态（[BlockKind]；null = 这一叶不改块级形态）。只在与当前形态不同时才动结构，
          * 见 [BlockRestructure]。
@@ -144,6 +197,8 @@ object ChapterRevisionReplay {
         // 由 [mergeLeaves] 合成一次拆块，别让后一条把前一条顶掉。
         val mergeByFirst = HashMap<Int, MutableList<Merge>>(merges.size)
         for (m in merges) mergeByFirst.getOrPut(m.firstLeaf) { ArrayList(1) }.add(m)
+        val tableByFirst = HashMap<Int, TableEdit>(tableEdits.size)
+        for (t in tableEdits) tableByFirst[t.firstLeaf] = t
         val replacements = HashMap<MarkupElement, List<MarkupElement>>()
         val removed = HashSet<MarkupElement>()
         // 匿名 run 的源节点 span 要等所有叶跑完再一次性换（同一属主可能有多个 run，
@@ -188,6 +243,46 @@ object ChapterRevisionReplay {
 
         var i = 0
         while (i < leaves.size) {
+            val tableEdit = tableByFirst[i]
+            if (tableEdit != null) {
+                val lastIndex = tableEdit.lastLeaf.coerceAtMost(leaves.size - 1)
+                val oldRows = (i..lastIndex).map { leaves[it] }
+                val oldLength = (i..lastIndex).sumOf { segmentsOf(leaves[it]).text.length }
+                val table = oldRows.firstOrNull()?.let { ancestorTable(it) }
+                val rebuilt = if (table == null) null else buildTableRows(tableEdit, oldRows, table, segmentsOf)
+                if (table == null || rebuilt == null) {
+                    // 结构对不上（不是同一张表的连续行 / 行码与文字不等）：不猜，原样保留。
+                    needsRecompute = true
+                    for (k in i..lastIndex) {
+                        origins += k
+                        newLeaves += leaves[k]
+                        newStarts += charStarts[k] + shift
+                    }
+                    i = lastIndex + 1
+                    continue
+                }
+                // 树：第一行原地换成新行，其余旧行撤掉；新行数为 0 时整张表删掉。
+                if (rebuilt.rows.isEmpty()) {
+                    removed += table
+                } else {
+                    replacements[oldRows.first()] = rebuilt.rows
+                    for (k in 1 until oldRows.size) removed += oldRows[k]
+                }
+                var rowOffset = 0L
+                for (k in rebuilt.rows.indices) {
+                    newStarts += charStarts[i] + shift + rowOffset
+                    newLeaves += rebuilt.rows[k]
+                    origins += i
+                    rowOffset += rebuilt.lengths[k]
+                }
+                if (rebuilt.lengths.sum() != tableEdit.text.length) degraded++
+                val delta = rebuilt.lengths.sum() - oldLength
+                measured[i] = delta
+                shift += delta
+                measuredRev[tableEdit.revisionId] = delta
+                i = lastIndex + 1
+                continue
+            }
             val group = mergeByFirst[i]
             if (group != null) {
                 val out = mergeLeaves(group, leaves, leafPaths, charStarts, segmentsOf, wsOf, styleOf)
@@ -286,6 +381,45 @@ object ChapterRevisionReplay {
                 continue
             }
             val before = segmentsOf(leaf)
+            // 整块图片：字符流里只有一个 U+FFFC 占位。占位被删 = 整张图删掉（叶不再存在）；
+            // 占位留着 = 图原样保留。换成普通文字在提交侧已被拒绝，这里不猜。
+            if (leaf.tag == "img") {
+                val after = LeafTextEditor.applyEdits(before.text, edits)
+                if (after.isEmpty()) {
+                    // 整张图删掉：叶从树里去掉，刚计入的起点收回。
+                    removed += leaf
+                    newStarts.removeAt(newStarts.size - 1)
+                    measured[i] = -before.text.length
+                    shift -= before.text.length
+                } else {
+                    origins += i
+                    newLeaves += leaf
+                }
+                i++
+                continue
+            }
+            // 表格行：格是结构边界，按格重建（宿主回调）。回调给不出结果就保持原样、
+            // 叫调用方放弃结构重算——绝不把新字写到 `td` 外面。
+            if (leaf.tag == "tr" && rowEdit != null) {
+                val rr = rowEdit(leaf, edits, tableOfRow(leaf))
+                if (rr == null) {
+                    needsRecompute = true
+                    origins += i
+                    newLeaves += leaf
+                    i++
+                    continue
+                }
+                if (rr.degraded) degraded++
+                val leafDelta = rr.textLength - before.text.length
+                measured[i] = leafDelta
+                shift += leafDelta
+                replacements[leaf] = listOf(rr.leaf)
+                origins += i
+                newLeaves += rr.leaf
+                pendingKinds.remove(leaf)?.let { wantBlocks[rr.leaf] = it }
+                i++
+                continue
+            }
             val r = LeafTextEditor.rebuild(
                 leaf = leaf,
                 segments = before,
@@ -407,6 +541,80 @@ object ChapterRevisionReplay {
         if (want == null) return null
         val cur = BlockKind.ofElement(leaf) ?: return null
         return want.takeIf { it != cur }
+    }
+
+    /** 离 [el] 最近的 `table` 祖先（`tr` 所在的表）；没有返回 null。 */
+    private fun ancestorTable(el: MarkupElement): MarkupElement? =
+        generateSequence(el.parent) { it.parent }.firstOrNull { it.tag == "table" }
+
+    /** [buildTableRows] 的结果：新行节点 + 每行重放后的实测长度（与字符流同尺）。 */
+    private class RebuiltTable(val rows: List<MarkupElement>, val lengths: IntArray)
+
+    /**
+     * 按 [TableEdit] 的格结构重建整张表的行节点：旧格属性按位置沿用（`id` / 合并属性除外），
+     * 格内文字从 [TableEdit.text] 按格界切出来，`<br>` 落成行内换行。
+     *
+     * 行码与文字对不上（长度之和不等 / 不是同一张表的行）返回 null —— 调用方保持原样、不猜。
+     */
+    private fun buildTableRows(
+        edit: TableEdit,
+        oldRows: List<MarkupElement>,
+        table: MarkupElement,
+        segmentsOf: (MarkupElement) -> StyledSegments,
+    ): RebuiltTable? {
+        if (oldRows.isEmpty()) return null
+        if (oldRows.any { it.tag != "tr" || ancestorTable(it) !== table }) return null
+        val anchor = oldRows.first().parent ?: return null
+        val spans = edit.styles
+        var cursor = 0
+        val rows = ArrayList<MarkupElement>(edit.rows.size)
+        val lengths = IntArray(edit.rows.size)
+        for ((ri, row) in edit.rows.withIndex()) {
+            val rowLength = row.textLength
+            if (rowLength < 0 || cursor + rowLength > edit.text.length) return null
+            val rowText = edit.text.substring(cursor, cursor + rowLength)
+            val oldRow = oldRows.getOrNull(ri)
+            val oldCells = oldRow?.children.orEmpty().filter { it.tag == "td" || it.tag == "th" }
+            val cells = ArrayList<MarkupElement>(row.cells.size)
+            for ((ci, cell) in row.cells.withIndex()) {
+                val from = cell.start.coerceIn(0, rowText.length)
+                val to = cell.endExclusive.coerceIn(from, rowText.length)
+                val cellText = rowText.substring(from, to)
+                val cellSpans = spans?.mapNotNull { sp ->
+                    val s = maxOf(sp.start, cursor + from)
+                    val e = minOf(sp.endExclusive, cursor + to)
+                    if (e <= s) {
+                        null
+                    } else {
+                        InlineMarkup.StyleSpan(s - cursor - from, e - cursor - from, sp.sig)
+                    }
+                } ?: emptyList()
+                // 沿用旧格的书自己的样式 / 属性；合并属性按新结构重写，`id` 不复制（会撞）。
+                val attrs = LinkedHashMap<String, String>()
+                oldCells.getOrNull(ci)?.attrs?.forEach { (k, v) ->
+                    if (k != "id" && k != "rowspan" && k != "colspan") attrs[k] = v
+                }
+                if (cell.rowspan > 1) attrs["rowspan"] = cell.rowspan.toString()
+                if (cell.colspan > 1) attrs["colspan"] = cell.colspan.toString()
+                cells += MarkupElement(
+                    tag = if (cell.header) "th" else "td",
+                    attrs = attrs,
+                    children = LeafTextEditor.inlineNodes(cellText, cellSpans),
+                )
+            }
+            val rowEl = MarkupElement(
+                tag = "tr",
+                attrs = (oldRow?.attrs ?: emptyMap()).filterKeys { it != "id" },
+                children = cells,
+            )
+            // 量长度要按真实父链级联（格继承表 / 行的字体与 white-space）。
+            rowEl.parent = anchor
+            rows += rowEl
+            lengths[ri] = segmentsOf(rowEl).text.length
+            cursor += rowLength
+        }
+        if (cursor != edit.text.length) return null
+        return RebuiltTable(rows, lengths)
     }
 
     /** 合并时能整层替换的「纯包装」标签：里面只装这一片叶，拆成多项时跟着复制。 */

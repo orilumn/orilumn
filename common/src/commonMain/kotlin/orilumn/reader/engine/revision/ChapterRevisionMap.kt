@@ -55,6 +55,14 @@ class ChapterRevisionMap(
      * （空表表示「原来就没有行内结构」，那时读者新写的标记会画成绿字）。
      */
     val originalSpans: Map<TextRevision, List<InlineMarkup.StyleSpan>> = emptyMap(),
+    /**
+     * **整表结构修订**的 id（首行短码大写 `T`，见 `TableRowInfo.wire`）。
+     *
+     * 这类修订在审阅空间里**不按「原文 + 就地插入」展开**：整张表按结果直接重建，红绿痕迹不画。
+     * 于是它在审阅空间里占的长度就是「新表长度」= 原区间长度 + [TextRevision.delta]，
+     * 与渲染空间同一把尺——坐标换算、点按命中、删改判定都照常成立。
+     */
+    val structuralIds: Set<Long> = emptySet(),
 ) {
     val revisions: List<TextRevision> = source.sortedWith(compareBy({ it.charStart }, { it.id }))
 
@@ -123,6 +131,12 @@ class ChapterRevisionMap(
                 for (c in b) mix(c.code.toLong())
                 mix(-6L)
             }
+            // 每行短码也参与重放：整表修订按它决定行数 / 每行列数（文字相同、结构不同同样改版面）。
+            mix(r.editedBlocks.size.toLong())
+            for (b in r.editedBlocks) {
+                for (c in b) mix(c.code.toLong())
+                mix(-8L)
+            }
         }
         h
     }
@@ -173,6 +187,8 @@ class ChapterRevisionMap(
         if (originalTexts.isEmpty()) return@lazy emptyMap()
         val out = HashMap<TextRevision, ReviewOverlay.Plan>(4)
         for (r in revisions) {
+            // 整表结构修订按结果整表重建，不在审阅空间里展开原文 + 插入（见 [structuralIds]）。
+            if (r.id in structuralIds) continue
             val old = originalTexts[r] ?: continue
             val plan = ReviewOverlay.plan(old, r.text, blockEndsIn(r), tracesOf(r, old)) ?: continue
             out[r] = plan

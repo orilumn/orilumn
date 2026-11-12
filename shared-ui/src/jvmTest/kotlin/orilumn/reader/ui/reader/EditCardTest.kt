@@ -4,6 +4,8 @@ import orilumn.reader.data.revision.RevisionStyle
 import orilumn.reader.data.revision.RevisionStyleSpan
 import orilumn.reader.engine.revision.BlockKind
 import orilumn.reader.engine.revision.InlineMarkup
+import orilumn.reader.engine.revision.TableCellInfo
+import orilumn.reader.engine.revision.TableRowInfo
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -214,5 +216,110 @@ class EditCardTest {
         // 只转义行首那一个 `#` 就够（`\##` 不是标记），读者确认后落进书里的还是原文。
         assertEquals("\\## 书里本来就有的井号", card.text)
         assertEquals("## 书里本来就有的井号", InlineMarkup.parse(card.text).text)
+    }
+
+    // ------------------------------------------------ 特殊叶的形状校验（图片 / 表格）
+
+    private fun table(vararg lengths: Int, colspan: Int = 1): TableRowInfo {
+        var at = 0
+        return TableRowInfo(
+            lengths.mapIndexed { i, len ->
+                TableCellInfo(at, at + len, header = false, colspan = if (i == 0) colspan else 1)
+                    .also { at += len }
+            },
+        )
+    }
+
+    @Test
+    fun imageCanOnlyBeDeletedOrKept() {
+        val original = listOf<TableRowInfo?>(null)
+        val image = listOf(true)
+        assertNull(textEditShapeError(listOf(InlineMarkup.Segment("\uFFFC")), original, image))
+        assertNull(textEditShapeError(listOf(InlineMarkup.Segment("")), original, image))
+        assertEquals(
+            "图片只能整张删除，不能改成文字",
+            textEditShapeError(listOf(InlineMarkup.Segment("图")), original, image),
+        )
+    }
+
+    @Test
+    fun tableAllowsShorterCellsButNotAChangedShape() {
+        val original = table(2, 2)
+        val tables = listOf(original)
+
+        // 格里的字变短（「ab」→「a」）：允许。
+        val shorter = TableRowInfo(
+            listOf(TableCellInfo(0, 1, header = false), TableCellInfo(1, 3, header = false)),
+        )
+        assertNull(
+            textEditShapeError(
+                listOf(InlineMarkup.Segment("acd", null, shorter)),
+                tables,
+                emptyList(),
+            ),
+        )
+
+        // 合并方式变了（第一格 colspan 2）：拒绝。
+        val merged = table(2, 1, colspan = 2)
+        assertEquals(
+            "表格只能改格子里的字，不能改列数或合并方式（要改请只选中这张表）",
+            textEditShapeError(
+                listOf(InlineMarkup.Segment("aXc", null, merged)),
+                tables,
+                emptyList(),
+            ),
+        )
+
+        // 列数变了（两格并成一格）：拒绝。
+        assertEquals(
+            "表格只能改格子里的字，不能改列数或合并方式（要改请只选中这张表）",
+            textEditShapeError(
+                listOf(InlineMarkup.Segment("abcd", null, table(4))),
+                tables,
+                emptyList(),
+            ),
+        )
+    }
+
+    @Test
+    fun deletingTheWholeTableRowIsRejected() {
+        assertEquals(
+            "表格只能改格子里的字（改整张表请只选中它）",
+            textEditShapeError(emptyList(), listOf(table(2, 2)), emptyList()),
+        )
+    }
+
+    @Test
+    fun wholeTableAllowsRowChangesButChecksTheGrid() {
+        // 整表选法：少一行可以（0 行 = 删整表）。
+        assertNull(
+            textEditShapeError(
+                listOf(InlineMarkup.Segment("abcd", null, table(2, 2))),
+                listOf(table(2, 2), table(2, 2)),
+                emptyList(),
+                wholeTable = true,
+            ),
+        )
+        assertNull(
+            textEditShapeError(
+                listOf(InlineMarkup.Segment("")),
+                listOf(table(2, 2), table(2, 2)),
+                emptyList(),
+                wholeTable = true,
+            ),
+        )
+        // 整表选法：两行的列数对不上，拒绝。
+        assertEquals(
+            "表格的行列对不上：每一行的列数必须与整张表一致（合并格也不能重叠或留空）",
+            textEditShapeError(
+                listOf(
+                    InlineMarkup.Segment("abcd", null, table(2, 2)),
+                    InlineMarkup.Segment("ab", null, table(2)),
+                ),
+                listOf(table(2, 2), table(2, 2)),
+                emptyList(),
+                wholeTable = true,
+            ),
+        )
     }
 }

@@ -369,7 +369,13 @@ object LeafTextEditor {
             // 字被删光的行内元素整个走掉，不留空壳（规格 §4.3「元素整个消失」）。整段换字时新字
             // 落在别处，旧元素只剩空壳；`code` 这类带内边距的元素留空会渲染成一小块灰底。
             // 只剪「原来有内容、现在空了」的：书里本来就写成空的元素（没有子节点）不碰，那是原样。
-            if (node !== leaf && node.children.isNotEmpty() && children.isEmpty()) return emptyList()
+            // 表格格（`td` / `th`）是结构边界：格子被改空也要留着，剪掉就是偷偷改了列数。
+            if (
+                node !== leaf && node.tag != "td" && node.tag != "th" &&
+                node.children.isNotEmpty() && children.isEmpty()
+            ) {
+                return emptyList()
+            }
             return listOf(MarkupElement(node.tag, node.attrs, children))
         }
 

@@ -11,7 +11,8 @@ import orilumn.reader.engine.html.MarkupElement
  * （与行内标记同一条铁律，见 [InlineMarkup]）。
  *
  * 只认 markdown 有的块：段落、一至六级标题、引用、无序 / 有序列表项、代码块。
- * 表格、图片、水平线不在其中（表格行叶与整块图片仍按 D-33 拒绝编辑）。
+ * 表格行与整块图片不进这一层（卡片只显示格界 / 占位，表格只许改格里的字、图片只许整张删除，
+ * 见 [TextEditBlock.table] / [TextEditBlock.image]）。
  *
  * 属于排版层（上）：纯逻辑，可 JVM 单测。
  */
@@ -148,8 +149,27 @@ enum class BlockKind(val wire: String) {
  *   卡片里不写块标记，也不许改它的块级形态。
  * @property startsAtBlockStart 选区起点是否正好落在这块的开头：只有块首那一行能写块标记
  *   （第一行从段中间开始时，读者看到的半截文字承载不了「这一块该长成什么样」）。
+ * @property start 这块（叶）在章字符流里的起点。
+ * @property endExclusive 这块（叶）在章字符流里的终点（不含）。
  */
 data class TextEditBlock(
     val kind: BlockKind?,
     val startsAtBlockStart: Boolean,
+    /** 这一块是表格行时的格结构（卡片按它把格内文字排成管道行 / 基本 HTML 行）。 */
+    val table: TableRowInfo? = null,
+    /** 这一块是**整块图片**（正文里只有一个 `U+FFFC` 占位，只能整张删除）。 */
+    val image: Boolean = false,
+    /**
+     * 叶在章字符流里的区间。表格行要整行呈现（格界得看得见），卡片会把选区扩到
+     * 这个区间；图片整块只有一个占位字符，不需要扩。
+     */
+    val start: Int = 0,
+    val endExclusive: Int = 0,
+    /**
+     * 这一块是表格行时，它所属**整张表**在章字符流里的区间（渲染空间）。
+     *
+     * 卡片按它把选区扩到整张表：整表修改（删行 / 加行 / 删表 / 每行增删列）需要看到所有行，
+     * 提交时也按这个区间判断「这次改的是不是一整张表」。
+     */
+    val tableRange: IntRange? = null,
 )

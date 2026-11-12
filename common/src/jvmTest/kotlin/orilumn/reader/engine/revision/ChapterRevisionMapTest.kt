@@ -746,6 +746,26 @@ class ChapterRevisionMapTest {
     }
 
     @Test
+    fun structuralRevisionTakesResultLengthInReviewSpace() {
+        // 整表结构修订（删掉两行）：审阅空间不展开「原文 + 插入」，直接按结果占长度。
+        val r = rev(4, 12, "甲乙", id = 7)
+        val map = ChapterRevisionMap(
+            listOf(r),
+            originalTexts = mapOf(r to "甲乙丙丁戊己庚辛"),
+            structuralIds = setOf(7L),
+        )
+        assertTrue(map.overlay(r) == null)
+        assertTrue(map.paintedDeleted.isEmpty())
+        assertTrue(map.paintedInserted.isEmpty())
+        // 审阅空间长度 = 新表长度 = 原区间长度 + delta（与渲染空间同一把尺）。
+        assertEquals(6, map.reviewInterval(r).last + 1)
+        assertEquals(4 until 6, map.reviewInterval(r))
+        // 换回原书空间仍然落到这张表的起点。
+        assertEquals(4, map.toOriginalFromReview(4))
+        assertEquals(12, map.toOriginalFromReview(6))
+    }
+
+    @Test
     fun paintedSpansEmptyWithoutOriginalText() {
         // 没给原文（老数据 / 取不到原书叶文本）：这一段按正常视图落字，没有红绿可画，
         // 坐标换算也退回渲染口径（审阅空间 = 渲染空间）。

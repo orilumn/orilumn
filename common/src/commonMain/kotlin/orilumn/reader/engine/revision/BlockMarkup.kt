@@ -22,6 +22,10 @@ object BlockMarkup {
         /** 这一块的形态；null = 这一行没写块标记。 */
         val kind: BlockKind?,
         val content: String,
+        /** 表格行结构；null = 不是表格行。 */
+        val table: TableRowInfo? = null,
+        /** 表格行的各格原始文字（与 [content] 按序拼接；非表格行为空）。 */
+        val tableCells: List<String> = emptyList(),
     )
 
     /** 切分结果：块表 + 块标记在原文里的位置（输入框淡显用）+ 有没有没闭合的围栏。 */
@@ -64,6 +68,21 @@ object BlockMarkup {
                     i = j + 1
                 }
                 blocks.add(Block(BlockKind.Pre, content.toString()))
+                continue
+            }
+            // 表格行：markdown 管道行（`| a | b |`）或基本 HTML 行（`<tr><td>…</td></tr>`）。
+            // 普通正文以 `|` 开头时序列化会先转义（见 [InlineMarkup] 的 `escapeLineStart`），
+            // 所以这里见到未转义的 `|` 就是表格。
+            tableRow(line.text)?.let { row ->
+                blocks.add(
+                    Block(
+                        kind = null,
+                        content = row.cells.joinToString(""),
+                        table = row.info,
+                        tableCells = row.cells,
+                    ),
+                )
+                i++
                 continue
             }
             val marker = markerAt(line.text)
@@ -124,6 +143,97 @@ object BlockMarkup {
             return BlockKind.Ordered to n + 2
         }
         return null
+    }
+
+    /** 表格行：格文字 + 结构（格偏移在 [InlineMarkup.parse] 里按解析后的文字重算）。 */
+    private class TableLine(val cells: List<String>, val info: TableRowInfo)
+
+    /**
+     * 认一行表格：markdown 管道行或基本 HTML 行。
+     *
+     * 管道行要求以 `|` 起、以 `|` 收（普通正文的行首 `|` 在序列化时会被转义）；
+     * HTML 行只认 `<tr>` + `<td>` / `<th>`，属性只保留 `rowspan` / `colspan`。
+     */
+    private fun tableRow(line: String): TableLine? {
+        if (line.startsWith("|")) return pipeTableRow(line)
+        if (line.startsWith("<tr", ignoreCase = true)) return htmlTableRow(line)
+        return null
+    }
+
+    private fun pipeTableRow(line: String): TableLine? {
+        if (line.indexOf('\\') >= 0 && line.startsWith("\\|")) return null
+        val raw = ArrayList<String>(4)
+        val sb = StringBuilder()
+        var i = 0
+        while (i < line.length) {
+            val c = line[i]
+            if (c == '\\' && i + 1 < line.length) {
+                sb.append(c).append(line[i + 1])
+                i += 2
+                continue
+            }
+            if (c == '|') {
+                raw.add(sb.toString())
+                sb.setLength(0)
+            } else {
+                sb.append(c)
+            }
+            i++
+        }
+        raw.add(sb.toString())
+        // 至少「| 格 |」三截；首尾两截必须是空的（只允许空白）。
+        if (raw.size < 3) return null
+        if (raw.first().isNotBlank() || raw.last().isNotBlank()) return null
+        val cells = ArrayList<String>(raw.size - 2)
+        for (k in 1 until raw.size - 1) cells.add(trimCellPadding(raw[k]))
+        if (cells.isEmpty()) return null
+        var at = 0
+        val infos = cells.map { t ->
+            val end = at + t.length
+            TableCellInfo(at, end, header = false).also { at = end }
+        }
+        val info = TableRowInfo(infos, html = cells.any { it.indexOf('\n') >= 0 })
+        return TableLine(cells, info)
+    }
+
+    /** markdown 行两边的 `| ` / ` |` 是分隔符，不算格内文字（各吃掉一个空格）。 */
+    private fun trimCellPadding(s: String): String {
+        var a = 0
+        var b = s.length
+        if (a < b && s[a] == ' ') a++
+        if (b > a && s[b - 1] == ' ') b--
+        return s.substring(a, b)
+    }
+
+    private val CELL_TAG = Regex("""<(td|th)\b([^>]*)>(.*?)</\1\s*>""", setOf(RegexOption.IGNORE_CASE))
+    private val SPAN_ATTR = Regex("""(rowspan|colspan)\s*=\s*["']?(\d+)""", RegexOption.IGNORE_CASE)
+    private val BR_TAG = Regex("""<br\s*/?>""", RegexOption.IGNORE_CASE)
+
+    private fun htmlTableRow(line: String): TableLine? {
+        val t = line.trim()
+        if (!t.startsWith("<tr", ignoreCase = true)) return null
+        if (!t.endsWith("</tr>", ignoreCase = true)) return null
+        val cells = ArrayList<String>(4)
+        val infos = ArrayList<TableCellInfo>(4)
+        var at = 0
+        for (m in CELL_TAG.findAll(t)) {
+            val tag = m.groupValues[1].lowercase()
+            val attrs = m.groupValues[2]
+            val content = BR_TAG.replace(m.groupValues[3], "\n")
+            val header = tag == "th"
+            var rowspan = 1
+            var colspan = 1
+            for (a in SPAN_ATTR.findAll(attrs)) {
+                val n = a.groupValues[2].toIntOrNull()?.coerceAtLeast(1) ?: 1
+                if (a.groupValues[1].equals("rowspan", ignoreCase = true)) rowspan = n else colspan = n
+            }
+            val end = at + content.length
+            cells.add(content)
+            infos.add(TableCellInfo(at, end, header, rowspan, colspan))
+            at = end
+        }
+        if (cells.isEmpty()) return null
+        return TableLine(cells, TableRowInfo(infos, html = true))
     }
 
     /** 这一行以块标记开头吗（序列化时要转义）。围栏也算。 */

@@ -711,4 +711,131 @@ class TextEditPlannerTest {
         )
         assertEquals("ab" + RevisionBlocks.SEPARATOR + "cd" + RevisionBlocks.SEPARATOR + "ef", r.text)
     }
+
+    // ------------------------------------------------ 整块图片 / 表格行（特殊叶）
+
+    private fun tableOf(vararg lengths: Int, colspan: Int = 1): TableRowInfo {
+        var at = 0
+        return TableRowInfo(
+            lengths.mapIndexed { i, len ->
+                TableCellInfo(at, at + len, header = false, colspan = if (i == 0) colspan else 1)
+                    .also { at += len }
+            },
+        )
+    }
+
+    private fun planShapes(
+        text: String,
+        ends: IntArray,
+        start: Int,
+        endExclusive: Int,
+        blocks: List<InlineMarkup.Segment>,
+        imageLeaf: (Int) -> Boolean = { false },
+        tableLeaf: (Int) -> TableRowInfo? = { null },
+    ): TextEditPlan = TextEditPlanner.plan(
+        bookId = 1,
+        chapter = 1,
+        chapterText = text,
+        blockEnds = ends,
+        start = start,
+        endExclusive = endExclusive,
+        replacement = InlineMarkup.joinSegments(blocks),
+        map = ChapterRevisionMap.EMPTY,
+        groupId = 99,
+        now = 1234,
+        blocks = blocks,
+        imageLeaf = imageLeaf,
+        tableOfLeaf = tableLeaf,
+    )
+
+    @Test
+    fun deletingAWholeBlockImageIsAllowed() {
+        // 章文字「▯abc」：第一叶是整块图片（只有一个占位符），读者把占位删掉 = 整张删除。
+        val p = ready(
+            planShapes(
+                text = "\uFFFCabc",
+                ends = intArrayOf(1, 4),
+                start = 0,
+                endExclusive = 1,
+                blocks = listOf(InlineMarkup.Segment("")),
+                imageLeaf = { it == 0 },
+            ),
+        )
+        val r = p.inserted.single()
+        assertEquals(0, r.charStart)
+        assertEquals(1, r.charEnd)
+        assertEquals("", r.text)
+    }
+
+    @Test
+    fun turningAnImageIntoTextIsRejected() {
+        // 图片不能被「改写成文字」：那等于把一张图悄悄换成正文。
+        val p = planShapes(
+            text = "\uFFFCabc",
+            ends = intArrayOf(1, 4),
+            start = 0,
+            endExclusive = 1,
+            blocks = listOf(InlineMarkup.Segment("图")),
+            imageLeaf = { it == 0 },
+        )
+        assertTrue("expected Rejected but was $p", p is TextEditPlan.Rejected)
+    }
+
+    @Test
+    fun editingTextInsideACellKeepsTheTableShape() {
+        // 「abcd」是两格「ab」「cd」；读者把 b 改成 X：格数、合并方式都没变，允许。
+        val original = tableOf(2, 2)
+        val edited = TableRowInfo(
+            listOf(TableCellInfo(0, 2, header = false), TableCellInfo(2, 4, header = false)),
+        )
+        val p = ready(
+            planShapes(
+                text = "abcd",
+                ends = intArrayOf(4),
+                start = 0,
+                endExclusive = 4,
+                blocks = listOf(InlineMarkup.Segment("aXcd", null, edited)),
+                tableLeaf = { original },
+            ),
+        )
+        val r = p.inserted.single()
+        assertEquals(1, r.charStart)
+        assertEquals(2, r.charEnd)
+        assertEquals("X", r.text)
+        val shape = TableRowInfo.fromWire(r.editedBlocks.single())
+        assertEquals(2, shape!!.cells.size)
+        assertEquals(2, shape.cells[1].start)
+    }
+
+    @Test
+    fun addingAColumnToTheTableIsRejected() {
+        val p = planShapes(
+            text = "abcd",
+            ends = intArrayOf(4),
+            start = 0,
+            endExclusive = 4,
+            blocks = listOf(InlineMarkup.Segment("aXcd", null, tableOf(2, 2))),
+            tableLeaf = { tableOf(2, 2) },
+        )
+        // 格数一样、合并方式不一样（第一格 colspan 2）：不是这张卡能做的事。
+        val changed = planShapes(
+            text = "abcd",
+            ends = intArrayOf(4),
+            start = 0,
+            endExclusive = 4,
+            blocks = listOf(InlineMarkup.Segment("aXc", null, tableOf(2, 1, colspan = 2))),
+            tableLeaf = { tableOf(2, 2) },
+        )
+        assertTrue("格数不变也要拒绝合并方式的改动", changed is TextEditPlan.Rejected)
+        val fewer = planShapes(
+            text = "abcd",
+            ends = intArrayOf(4),
+            start = 0,
+            endExclusive = 4,
+            blocks = listOf(InlineMarkup.Segment("abcd", null, tableOf(4))),
+            tableLeaf = { tableOf(2, 2) },
+        )
+        assertTrue("改列数要拒绝", fewer is TextEditPlan.Rejected)
+        assertTrue("原样改字不被拒绝", p is TextEditPlan.Ready)
+    }
 }

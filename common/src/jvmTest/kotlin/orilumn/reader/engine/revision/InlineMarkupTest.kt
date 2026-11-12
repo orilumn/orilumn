@@ -74,13 +74,16 @@ class InlineMarkupTest {
     }
 
     @Test
-    fun tagFormForElementsWithoutSugar() {
-        val spans = listOf(span(0, 1, "span", "style" to "color:#c00"))
+    fun tagFormShowsOnlyTheTagName() {
+        // 卡片里只有标签名：`class` / `style` / `id` 是书自己的样式，读者看着是噪音（规格 §2.2）。
+        val spans = listOf(span(0, 1, "span", "style" to "color:#c00", "class" to "test", "id" to "s1"))
         val markup = show("红", *spans.toTypedArray())
-        assertEquals("<span style=\"color:#c00\">红</span>", markup)
+        assertEquals("<span>红</span>", markup)
         val parsed = InlineMarkup.parse(markup)
         assertEquals("红", parsed.text)
-        assertEquals(spans.map { it.sig }, parsed.spans.map { it.sig })
+        assertEquals(listOf(sig("span")), parsed.spans.map { it.sig })
+        // 确定时由原结构补回：属性一个都不丢。
+        assertEquals(spans.map { it.sig }, InlineMarkup.restore(spans, parsed.spans).map { it.sig })
     }
 
     @Test
@@ -212,25 +215,31 @@ class InlineMarkupTest {
     }
 
     @Test
-    fun dropsDisallowedAttributesButKeepsAllowed() {
+    fun readerWrittenAttributesAreIgnored() {
+        // 读者写下的属性一律不生效，也不报错：卡片里根本写不出属性来（规格 §2.2）。
         val parsed = InlineMarkup.parse("<span onclick=\"x()\" class=\"a\" data-k=\"v\">红</span>")
-        assertTrue(parsed.ok)
-        assertEquals(mapOf("class" to "a"), parsed.spans.single().sig.attrs)
+        assertTrue(parsed.errors.toString(), parsed.ok)
+        assertEquals("红", parsed.text)
+        assertEquals(emptyMap<String, String>(), parsed.spans.single().sig.attrs)
     }
 
     @Test
-    fun filtersStyleToDecorationOnly() {
-        val parsed = InlineMarkup.parse("<span style=\"color:red;position:fixed;display:none\">a</span>")
-        assertTrue(parsed.ok)
-        assertEquals("color:red", parsed.spans.single().sig.attrs["style"])
+    fun styleDeclarationsNeverReachTheCard() {
+        // 会跳出正常流的声明照样不会漏到卡片里：属性整个不写（书里那份由原结构补回、由 filterStyle 过滤）。
+        val markup = show("a", span(0, 1, "span", "style" to "color:red;position:fixed;display:none"))
+        assertEquals("<span>a</span>", markup)
     }
 
     @Test
     fun rejectsJavascriptHref() {
-        val parsed = InlineMarkup.parse("<a href=\"javascript:alert(1)\">x</a>")
-        assertFalse(parsed.ok)
-        assertTrue(InlineMarkup.parse("<a href=\"https://a.b\">x</a>").ok)
-        assertTrue(InlineMarkup.parse("<a href=\"../x.html\">x</a>").ok)
+        // 链接地址是内容不是属性，仍走语法糖，照常校验。
+        assertFalse(InlineMarkup.parse("[x](javascript:boom)").ok)
+        assertTrue(InlineMarkup.parse("[x](https://a.b)").ok)
+        assertTrue(InlineMarkup.parse("[x](../x.html)").ok)
+        // 标签形式里的 href 不生效（属性一律忽略），不会变成一条 javascript 链接。
+        val tagged = InlineMarkup.parse("<a href=\"javascript:boom\">x</a>")
+        assertTrue(tagged.ok)
+        assertEquals(emptyMap<String, String>(), tagged.spans.single().sig.attrs)
     }
 
     // ------------------------------------------------------------------ 属性补回
@@ -300,18 +309,22 @@ class InlineMarkupTest {
 
     @Test
     fun linkWithClosingParenFallsBackToTagForm() {
-        val markup = show("维基", span(0, 2, "a", "href" to "https://x/Foo_(bar)"))
-        assertEquals("<a href=\"https://x/Foo_(bar)\">维基</a>", markup)
+        val original = listOf(span(0, 2, "a", "href" to "https://x/Foo_(bar)"))
+        val markup = show("维基", *original.toTypedArray())
+        // 地址自带 `)`，语法糖写不回去：退回标签形式，地址本身也不写进卡片（§2.2）。
+        assertEquals("<a>维基</a>", markup)
+        val restored = InlineMarkup.restore(original, InlineMarkup.parse(markup).spans)
+        assertEquals("https://x/Foo_(bar)", restored.single().sig.attrs["href"])
     }
 
     @Test
-    fun attributeValuesRoundTripWithEntities() {
-        val original = listOf(span(0, 1, "span", "title" to "a&amp;b", "class" to "x"))
+    fun attributeValuesNeverNeedEscapingInTheCard() {
+        // 属性值里带引号 / 实体也不影响卡片：它压根不写出去，原样从原结构补回。
+        val original = listOf(span(0, 1, "span", "title" to "a\"&amp;b", "class" to "x"))
         val markup = show("红", *original.toTypedArray())
-        val parsed = InlineMarkup.parse(markup)
-        assertEquals("红", parsed.text)
-        // 原文里的 `&amp;` 是「已编码」的字面值：写出去再读回来必须还是它，不能被解一层。
-        assertEquals("a&amp;b", parsed.spans.single().sig.attrs["title"])
+        assertEquals("<span>红</span>", markup)
+        val restored = InlineMarkup.restore(original, InlineMarkup.parse(markup).spans)
+        assertEquals("a\"&amp;b", restored.single().sig.attrs["title"])
     }
 
     // ------------------------------------------------- 小 bug 回归
@@ -357,11 +370,11 @@ class InlineMarkupTest {
     }
 
     @Test
-    fun readerWrittenIdIsAlwaysDropped() {
+    fun readerWrittenIdIsIgnored() {
+        // `id` 只用于原位保留：读者抄一遍不算数，原位的由原结构补回，新写的元素一律没有。
         val parsed = InlineMarkup.parse("<span id=\"dup\" class=\"x\">红</span>")
         assertTrue(parsed.ok)
-        assertFalse(parsed.spans.single().sig.attrs.containsKey("id"))
-        assertEquals("x", parsed.spans.single().sig.attrs["class"])
+        assertEquals(emptyMap<String, String>(), parsed.spans.single().sig.attrs)
     }
 
     // ------------------------------------------------- 新写标记继承同段样式 / 标记生效与否的颜色
@@ -378,11 +391,12 @@ class InlineMarkupTest {
     }
 
     @Test
-    fun explicitAttributesAreNeverOverwrittenByTheTemplate() {
-        // 读者写了属性就是显式意图，模板只补空位。
+    fun readerWrittenAttributesDoNotOverrideTheTemplate() {
+        // 读者写的 `class="b"` 不算数（§2.2）：新元素一样按同段模板补，卡片里看不出差别。
         val template = InlineMarkup.StyleSpan(0, 2, InlineMarkup.StyleSig("span", mapOf("class" to "a")))
         val parsed = InlineMarkup.parse("<span class=\"b\">字</span>").spans
-        assertEquals("b", InlineMarkup.inheritTemplateAttrs(parsed, listOf(template)).single().sig.attrs["class"])
+        assertEquals(emptyMap<String, String>(), parsed.single().sig.attrs)
+        assertEquals("a", InlineMarkup.inheritTemplateAttrs(parsed, listOf(template)).single().sig.attrs["class"])
     }
 
     @Test
@@ -472,10 +486,11 @@ class InlineMarkupTest {
     @Test
     fun rubyInsideSelectionKeepsItsAttributes() {
         // 书里的注音元素常带 class（样式表按它给读音缩小字号），补回时不能丢。
-        val parsed = InlineMarkup.parse("<ruby class=\"r\">漢<rt>かん</rt></ruby>")
-        assertTrue(parsed.ok)
-        assertEquals("ruby", parsed.spans.first().sig.tag)
-        assertEquals("r", parsed.spans.first().sig.attrs["class"])
+        val original = listOf(span(0, 1, "ruby", "class" to "r"))
+        val markup = show("漢", *original.toTypedArray())
+        assertEquals("<ruby>漢</ruby>", markup)
+        val restored = InlineMarkup.restore(original, InlineMarkup.parse(markup).spans)
+        assertEquals(mapOf("class" to "r"), restored.single().sig.attrs)
     }
 
     /**
@@ -506,5 +521,89 @@ class InlineMarkupTest {
             parsed.spans.map { it.start to it.endExclusive to it.sig.shapeKey },
         )
         assertEquals(spans.map { it.sig }, InlineMarkup.restore(spans, parsed.spans).map { it.sig })
+    }
+
+    // ------------------------------------------------------------ 表格行 / 行首管道符
+
+    private fun table(vararg lengths: Int, html: Boolean = false): TableRowInfo {
+        var at = 0
+        return TableRowInfo(
+            lengths.map { len ->
+                TableCellInfo(at, at + len, header = false).also { at += len }
+            },
+            html,
+        )
+    }
+
+    @Test
+    fun tableRowShowsAsMarkdownPipesAndRoundTrips() {
+        val info = table(2, 2)
+        val markup = InlineMarkup.show(listOf(InlineMarkup.Segment("abcd", null, info)), emptyList())
+        assertEquals("| ab | cd |", markup)
+
+        val back = InlineMarkup.parse(markup)
+        assertTrue(back.errors.toString(), back.ok)
+        assertEquals("abcd", back.text)
+        val row = back.segments.single().table
+        assertTrue("格结构往返不变", info.sameStructure(row))
+    }
+
+    @Test
+    fun mergedCellsFallBackToBasicHtmlAndRoundTrip() {
+        // 合并格 + 格内硬换行：管道行装不下，退回只带合并属性的基本标签。
+        val info = TableRowInfo(
+            listOf(
+                TableCellInfo(0, 3, header = false, rowspan = 2),
+                TableCellInfo(3, 4, header = true, colspan = 2),
+            ),
+        )
+        val markup = InlineMarkup.show(listOf(InlineMarkup.Segment("a\nbc", null, info)), emptyList())
+        assertEquals("<tr><td rowspan=\"2\">a<br>b</td><th colspan=\"2\">c</th></tr>", markup)
+
+        val back = InlineMarkup.parse(markup)
+        assertTrue(back.errors.toString(), back.ok)
+        assertEquals("a\nbc", back.text)
+        val row = back.segments.single().table
+        assertTrue(info.sameStructure(row))
+        assertEquals(2, row!!.cells[0].rowspan)
+        assertTrue(row.cells[1].header)
+        assertEquals(2, row.cells[1].colspan)
+    }
+
+    @Test
+    fun pipeInsideACellIsEscapedAndComesBackVerbatim() {
+        val info = table(3, 1)
+        val markup = InlineMarkup.show(listOf(InlineMarkup.Segment("a|bc", null, info)), emptyList())
+        assertEquals("| a\\|b | c |", markup)
+
+        val back = InlineMarkup.parse(markup)
+        assertTrue(back.errors.toString(), back.ok)
+        assertEquals("a|bc", back.text)
+        assertTrue(info.sameStructure(back.segments.single().table))
+    }
+
+    @Test
+    fun cellTextWithEdgeSpacesFallsBackToHtmlSoTheySurvive() {
+        // 管道行两边的空格是分隔符，格内的首尾空格会被吃掉：这类格子退回基本 HTML。
+        val info = table(2, 2)
+        val markup = InlineMarkup.show(listOf(InlineMarkup.Segment("a bc", null, info)), emptyList())
+        assertEquals("<tr><td>a </td><td>bc</td></tr>", markup)
+
+        val back = InlineMarkup.parse(markup)
+        assertTrue(back.errors.toString(), back.ok)
+        assertEquals("a bc", back.text)
+        assertTrue(info.sameStructure(back.segments.single().table))
+    }
+
+    @Test
+    fun paragraphStartingWithAPipeIsNotATableRow() {
+        // 普通段落以 `|` 开头：序列化转义，回来仍是普通段落（不是单行表格）。
+        val markup = InlineMarkup.show("| 开头", emptyList())
+        assertEquals("\\| 开头", markup)
+
+        val back = InlineMarkup.parse(markup)
+        assertTrue(back.errors.toString(), back.ok)
+        assertEquals("| 开头", back.text)
+        assertEquals(null, back.segments.single().table)
     }
 }

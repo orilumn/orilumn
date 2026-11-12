@@ -53,14 +53,15 @@ object InlineMarkup {
     /** 行内元素签名：标签 + 允许的属性（顺序无关）。 */
     data class StyleSig(val tag: String, val attrs: Map<String, String> = emptyMap()) {
         /**
-         * 结构比较用的键：有语法糖的标签只看标签（属性在回写时补回，不影响前后缀对齐）。
+         * 结构比较用的键：**只看标签**。
          *
-         * **`id` 不参与**：它是身份不是形状。解析侧一律剥掉读者手写的 `id`（[parse]），
-         * 原位保留的那条由 [restore] 从原文补回；若把 `id` 算进键，带 id 的元素每次都被判成
-         * 「结构变了」，回验失败后卡片退化成全标签形式。
+         * 卡片里只写标签名（`<span>`），属性一个都不显示（规格 §2.2）：`class` / `style` / `id`
+         * 这些是书自己的样式，读者看着是噪音、改了还容易把正文弄坏，写回时由 [restore] 从原结构
+         * 补回。所以属性不参与「结构是不是同一条」的判断，否则回验一失败，卡片就退化成能写属性的
+         * 老形式。
          */
         val shapeKey: String
-            get() = if (tag in SUGAR_TAGS) tag else tag + (attrs - "id").toSortedMap()
+            get() = tag
     }
 
     /** 一段行内样式：作用于纯文本 `[start, endExclusive)`，可嵌套。 */
@@ -72,7 +73,17 @@ object InlineMarkup {
      * [text] 里的 `\n` 是**书里真正的换行**（代码块内部换行，或叶内 `<br>`），不是块边界：
      * 块边界只在 [Segment] 与 [Segment] 之间。
      */
-    data class Segment(val text: String, val block: BlockKind? = null)
+    data class Segment(
+        val text: String,
+        val block: BlockKind? = null,
+        /**
+         * 表格行结构（表格行的 [text] 是格内文字按序拼接）。
+         *
+         * 非 null 时卡片把它显示成 markdown 管道行 / 基本 HTML 行（见 [TableRowInfo]）；
+         * [block] 恒 null——表格行不归 markdown 块形态管。
+         */
+        val table: TableRowInfo? = null,
+    )
 
     /** 若干块拼成输入区全文（块之间一个 `\n`，与修订文字的段界一一对应）。 */
     fun joinSegments(segments: List<Segment>): String =
@@ -295,6 +306,9 @@ object InlineMarkup {
      * 每块再走行内解析（块与块之间不共享行内元素）。
      *
      * 块级的错误（围栏没收尾）也进 [Parsed.errors]：卡片就地提示，正文不动。
+     *
+     * 标签里写的属性**直接丢掉**（规格 §2.2）：卡片里只写标签名，属性由 [restore] 从原结构补回；
+     * 读者写了 `class` / `style` 之类也不报错，就等于没写（不让他改书自己的样式）。
      */
     fun parse(markup: String): Parsed {
         val split = BlockMarkup.split(markup)
@@ -312,6 +326,40 @@ object InlineMarkup {
                 // 代码块内容原样：不解析行内标记、不转义（反引号 / 星号都是代码本身）。
                 sb.append(block.content)
                 segments.add(Segment(block.content, BlockKind.Pre))
+            } else if (block.table != null) {
+                // 表格行：逐格解析行内标记，再按新文字长度重算格边界。
+                // 不能拿整行一次解析——行内标记不该跨格配对。
+                val parsedCells = ArrayList<TableCellInfo>(block.tableCells.size)
+                val ty = StringBuilder(block.content.length)
+                var cellStart = 0
+                for (raw in block.tableCells) {
+                    val cell = parseInline(raw)
+                    errors.addAll(cell.errors)
+                    for (s in cell.spans) {
+                        spans.add(StyleSpan(s.start + at + cellStart, s.endExclusive + at + cellStart, s.sig))
+                    }
+                    val old = block.table.cells.getOrNull(parsedCells.size)
+                    val end = cellStart + cell.text.length
+                    parsedCells.add(
+                        TableCellInfo(
+                            start = cellStart,
+                            endExclusive = end,
+                            header = old?.header ?: false,
+                            rowspan = old?.rowspan ?: 1,
+                            colspan = old?.colspan ?: 1,
+                        ),
+                    )
+                    ty.append(cell.text)
+                    cellStart = end
+                }
+                sb.append(ty)
+                segments.add(
+                    Segment(
+                        text = ty.toString(),
+                        block = null,
+                        table = TableRowInfo(parsedCells, html = block.table.html),
+                    ),
+                )
             } else {
                 val p = parseInline(block.content)
                 errors.addAll(p.errors)
@@ -428,13 +476,13 @@ object InlineMarkup {
                                     val end = sb.length
                                     if (end > start) {
                                         spans.add(
-                                            StyleSpan(start, end, StyleSig(openTag.name, filtered(openTag.attrs))),
+                                            StyleSpan(start, end, StyleSig(openTag.name)),
                                         )
                                     }
                                 }
                             } else if (sb.isNotEmpty()) {
                                 // 孤立的闭标签 = 元素在选区外继续：从这段文字开头起。
-                                spans.add(StyleSpan(0, sb.length, StyleSig(tag.name, filtered(tag.attrs))))
+                                spans.add(StyleSpan(0, sb.length, StyleSig(tag.name)))
                             }
                         }
                     }
@@ -456,12 +504,12 @@ object InlineMarkup {
         for (k in openTags.indices.reversed()) {
             val (tag, start) = openTags[k]
             val end = sb.length
-            if (end > start) spans.add(StyleSpan(start, end, StyleSig(tag.name, filtered(tag.attrs))))
+            if (end > start) spans.add(StyleSpan(start, end, StyleSig(tag.name)))
         }
 
         val invalid = validate(spans)
         errors.addAll(invalid)
-        return Parsed(sb.toString(), stripIds(nest(outerFirst(normalize(spans)))), errors.distinct())
+        return Parsed(sb.toString(), nest(outerFirst(normalize(spans))), errors.distinct())
     }
 
     /**
@@ -492,22 +540,6 @@ object InlineMarkup {
         }
         return out
     }
-
-    /**
-     * 读者手写的 `id` 一律丢弃（规格 §5.2：`id` 只用于**原位保留**）。
-     *
-     * 原位保留的那条走 [restore]：它按原区间补回属性，`id` 从原文那一侧带回来。这里先统一剥掉，
-     * 于是「拿不到原结构、不经过 restore」的路径（宿主给不出行内结构时）也不会把读者抄来的
-     * 重复 `id` 写进正文，破坏锚点。
-     */
-    private fun stripIds(spans: List<StyleSpan>): List<StyleSpan> =
-        spans.map { s ->
-            if (s.sig.attrs.containsKey("id")) {
-                s.copy(sig = s.sig.copy(attrs = s.sig.attrs - "id"))
-            } else {
-                s
-            }
-        }
 
     /**
      * 标记文本里**属于语法**的字符区间（只给输入框把标记淡显用，不参与解析）。
@@ -894,6 +926,7 @@ object InlineMarkup {
         if (parsed.segments.size != segments.size) return false
         for (i in segments.indices) {
             if (!sameBlock(parsed.segments[i].block, segments[i].block)) return false
+            if (!sameTable(parsed.segments[i].table, segments[i].table)) return false
         }
         val got = parsed.spans.map { (it.start to it.endExclusive) to it.sig.shapeKey }
         return got == expected
@@ -912,6 +945,10 @@ object InlineMarkup {
             (parsed == null && wanted == BlockKind.Paragraph) ||
             (parsed == BlockKind.Paragraph && wanted == null)
 
+    /** 表格行结构同样的口径：格数、表头、合并数与各格长度一致。 */
+    private fun sameTable(parsed: TableRowInfo?, wanted: TableRowInfo?): Boolean =
+        if (wanted == null) parsed == null else wanted.sameStructure(parsed)
+
     private class Marker(val tag: String, val open: String, val close: String)
 
     /**
@@ -921,15 +958,14 @@ object InlineMarkup {
      * （见 `FormatTraces`）。与 [show] 同一套写法，读者在卡片里看到什么，痕迹就长什么样。
      *
      * 有语法糖的标签给糖；写不回去的（代码里带反引号、链接地址自带 `)`）与没有语法糖的标签
-     * 退回标签形式 `<tag …>` / `</tag>`（`id` 不算形状，写出来时剥掉，与 [parse] 同一口径）。
+     * 退回标签形式 `<tag>` / `</tag>`（只有标签名，属性由 [restore] 补回，与 [show] 同一口径）。
      *
      * @param content 这段文字本身（`code` 带反引号时写不回语法糖，要退回标签形式）。
      */
     fun markerPair(sig: StyleSig, content: String): Pair<String, String> {
         val m = markerOf(sig, content)
         if (m != null) return m.open to m.close
-        val clean = if ("id" in sig.attrs) sig.copy(attrs = sig.attrs - "id") else sig
-        return tagMarkup(clean, closing = false) to tagMarkup(clean, closing = true)
+        return tagMarkup(sig.tag, closing = false) to tagMarkup(sig.tag, closing = true)
     }
 
     private fun markerOf(sig: StyleSig, content: String): Marker? = when (sig.tag) {
@@ -946,31 +982,14 @@ object InlineMarkup {
         else -> null
     }
 
-    private fun tagMarkup(sig: StyleSig, closing: Boolean): String {
-        if (closing) return "</${sig.tag}>"
-        val sb = StringBuilder("<").append(sig.tag)
-        for ((k, v) in sig.attrs.toSortedMap()) {
-            sb.append(' ').append(k).append("=\"").append(escapeAttr(v)).append('"')
-        }
-        return sb.append('>').toString()
-    }
-
     /**
-     * 属性值写出：与 [readTag] 的解码严格对称（`&` 必须第一个换，否则会把后面换出来的实体再解一层）。
-     * 只转这四个就够：`"` 是定界符，`&` / `<` / `>` 是解析侧会解码的实体。
+     * 标签形式的写法：**只有标签名**（`<span>` / `</span>`）。
+     *
+     * 属性（`class` / `id` / `style` / `title` …）是书自己的样式，卡片里一律不写：读者改不到、
+     * 也不该改——写了下次一定被覆盖。确定时由 [restore] 从原结构补回（规格 §2.2 / §4.3）。
      */
-    private fun escapeAttr(v: String): String {
-        if (v.none { it == '&' || it == '<' || it == '>' || it == '"' }) return v
-        val sb = StringBuilder(v.length + 8)
-        for (c in v) when (c) {
-            '&' -> sb.append("&amp;")
-            '<' -> sb.append("&lt;")
-            '>' -> sb.append("&gt;")
-            '"' -> sb.append("&quot;")
-            else -> sb.append(c)
-        }
-        return sb.toString()
-    }
+    private fun tagMarkup(tag: String, closing: Boolean): String =
+        if (closing) "</$tag>" else "<$tag>"
 
     private fun renderSegments(
         segments: List<Segment>,
@@ -987,9 +1006,14 @@ object InlineMarkup {
             val local = spans.filter { it.start >= from && it.endExclusive <= to }
                 .map { StyleSpan(it.start - from, it.endExclusive - from, it.sig) }
             if (seg.block == BlockKind.Pre) {
-                // 围栏长度比内容里最长的行首反引号还长一位，内容随便写也不会把围栏提前关上。
+                // 围栏长度比内容里最长的反引号还长一位，内容随便写也不会把围栏提前关上。
                 val fence = "`".repeat(fenceFor(seg.text))
                 out.append(fence).append('\n').append(seg.text).append('\n').append(fence)
+                continue
+            }
+            val table = seg.table?.takeIf { it.covers(seg.text) }
+            if (table != null) {
+                out.append(renderTableRow(table, seg.text, local, escapeMarkerChars, forceTags))
                 continue
             }
             // 段内换行（`<br>`）写成硬断行：行尾一个 `\`，解析时并回同一块。
@@ -1004,6 +1028,62 @@ object InlineMarkup {
             )
         }
         return out.toString()
+    }
+
+    /**
+     * 表格行 → 卡片文字。
+     *
+     * - 普通表：`| 格 | 格 |`（格内 `|` 转义成 `\|`）；
+     * - 有合并格 / 格内硬换行：基本 HTML 行 `<tr><td>…</td><th>…</th></tr>`，
+     *   属性只写 `rowspan` / `colspan`，其余一律不写（读者改不到书自己的样式）。
+     */
+    private fun renderTableRow(
+        table: TableRowInfo,
+        text: String,
+        spans: List<StyleSpan>,
+        escapeMarkerChars: Boolean,
+        forceTags: Boolean,
+    ): String {
+        val cells = table.cells.map { text.substring(it.start, it.endExclusive) }
+        // 管道行的格两边各吃一个空格（markdown 的分隔留白），格内文字又要以空格开头 / 结尾时
+        // 会被吃掉 ⇒ 这类格退回基本 HTML（那里空格原样保留）。
+        val html = table.html || cells.any {
+            it.indexOf('\n') >= 0 || it.startsWith(" ") || it.endsWith(" ")
+        }
+        if (!html) {
+            val sb = StringBuilder(text.length + table.cells.size * 3 + 4)
+            sb.append("| ")
+            for ((i, cell) in cells.withIndex()) {
+                if (i > 0) sb.append(" | ")
+                val from = table.cells[i].start
+                val to = table.cells[i].endExclusive
+                val local = spans.filter { it.start >= from && it.endExclusive <= to }
+                    .map { StyleSpan(it.start - from, it.endExclusive - from, it.sig) }
+                sb.append(renderText(cell, local, escapeMarkerChars, forceTags, escapePipes = true))
+            }
+            sb.append(" |")
+            return sb.toString()
+        }
+        val sb = StringBuilder(text.length + table.cells.size * 12 + 8)
+        sb.append("<tr>")
+        for ((i, c) in table.cells.withIndex()) {
+            val tag = if (c.header) "th" else "td"
+            sb.append('<').append(tag)
+            if (c.rowspan > 1) sb.append(" rowspan=\"").append(c.rowspan).append('"')
+            if (c.colspan > 1) sb.append(" colspan=\"").append(c.colspan).append('"')
+            sb.append('>')
+            val from = c.start
+            val to = c.endExclusive
+            val local = spans.filter { it.start >= from && it.endExclusive <= to }
+                .map { StyleSpan(it.start - from, it.endExclusive - from, it.sig) }
+            sb.append(
+                renderText(cells[i], local, escapeMarkerChars, forceTags)
+                    .replace("\n", "<br>"),
+            )
+            sb.append("</").append(tag).append('>')
+        }
+        sb.append("</tr>")
+        return sb.toString()
     }
 
     /** 代码块围栏长度：内容里任何一行开头的反引号串都不能把围栏提前关上。 */
@@ -1027,6 +1107,8 @@ object InlineMarkup {
         if (body.isEmpty()) return body
         val lineEnd = body.indexOf('\n').let { if (it < 0) body.length else it }
         val line = body.substring(0, lineEnd)
+        // 行首的 `|` 会被当成 markdown 表格行（见 [BlockMarkup.split]）：普通段落以它开头时先转义。
+        if (line.startsWith("|")) return "\\" + body
         if (!BlockMarkup.startsLikeMarker(line)) return body
         val ticks = BlockMarkup.fenceOpen(line)
         if (ticks > 0) {
@@ -1042,6 +1124,8 @@ object InlineMarkup {
         spans: List<StyleSpan>,
         escapeMarkerChars: Boolean,
         forceTags: Boolean,
+        /** 表格行里格内的 `|` 是分隔符，按字面渲染时必须转义（`\|`）。 */
+        escapePipes: Boolean = false,
     ): String {
         val sorted = nest(spans)
         val sb = StringBuilder(text.length + 16)
@@ -1051,28 +1135,33 @@ object InlineMarkup {
             while (open.isNotEmpty() && open.last().endExclusive <= i) {
                 val s = open.removeAt(open.size - 1)
                 val m = markers.removeAt(markers.size - 1)
-                sb.append(m?.close ?: tagMarkup(s.sig, true))
+                sb.append(m?.close ?: tagMarkup(s.sig.tag, true))
             }
             if (i < text.length) {
                 for (s in sorted) if (s.start == i) {
                     val m = if (forceTags) null else markerOf(s.sig, text.substring(s.start, s.endExclusive))
-                    sb.append(m?.open ?: tagMarkup(s.sig, false))
+                    sb.append(m?.open ?: tagMarkup(s.sig.tag, false))
                     open.add(s)
                     markers.add(m)
                 }
                 val inCode = markers.lastOrNull()?.tag == "code"
-                sb.append(if (inCode) text[i].toString() else escapeChar(text[i], escapeMarkerChars))
+                sb.append(
+                    if (inCode) text[i].toString()
+                    else escapeChar(text[i], escapeMarkerChars, escapePipes),
+                )
             }
         }
         return sb.toString()
     }
 
-    private fun escapeChar(c: Char, escapeMarkerChars: Boolean): String = when (c) {
+    private fun escapeChar(c: Char, escapeMarkerChars: Boolean, escapePipes: Boolean): String = when (c) {
         '\\' -> "\\\\"
         '<' -> "\\<"
         '&' -> "&amp;"
         // 反引号只在整体转义时才转义：成对的 `` 会被当成代码，单打独斗的不会。
         '`' -> if (escapeMarkerChars) "\\`" else "`"
+        // 表格行里的 `|` 是格分隔符：格内文字里的竖线必须转义，否则会被切成两格。
+        '|' -> if (escapePipes) "\\|" else "|"
         // `(` `)` 自身不是语法（链接必须由 `[` 起头），整体转义时不加反斜杠：
         // `函数()` 不必写成 `函数\(\)`，读者看着干净。`]` 仍要转义——它会截断链接名里的括号配对。
         else -> if (escapeMarkerChars && c in "*~^[]") "\\$c" else c.toString()

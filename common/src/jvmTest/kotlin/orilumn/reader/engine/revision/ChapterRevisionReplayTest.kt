@@ -87,6 +87,42 @@ class ChapterRevisionReplayTest {
     }
 
     @Test
+    fun deletingAWholeBlockImageRemovesTheLeafAndPullsStartsBack() {
+        // 整块图片在字符流里只占一个 U+FFFC：占位删掉 = 整张图删掉，后面的叶起点回退。
+        val img = MarkupElement("img", mapOf("src" to "a.png"))
+        val p = el("p", txt("abc"))
+        val root = el("body", img, p)
+        fun segOf(e: MarkupElement) = if (e.tag == "img") {
+            styledSegments(
+                root = txt("\uFFFC"),
+                wsOf = { WhiteSpace.NORMAL },
+                isExcluded = { false },
+                isBlock = { false },
+                leafWs = WhiteSpace.NORMAL,
+            )
+        } else {
+            seg(e)
+        }
+        val r = ChapterRevisionReplay.replay(
+            root = root,
+            leaves = listOf(img, p),
+            leafPaths = listOf(intArrayOf(0), intArrayOf(1)),
+            charStarts = longArrayOf(0, 1),
+            editsForLeaf = { i, _ ->
+                if (i == 0) listOf(LeafTextEditor.Edit(0, 1, "")) else emptyList()
+            },
+            segmentsOf = ::segOf,
+            wsOf = { WhiteSpace.NORMAL },
+            styleOf = null,
+        )
+        assertFalse(r.needsRecompute)
+        assertEquals(1, r.leaves.size)
+        assertEquals("p", r.leaves.single().tag)
+        assertEquals(listOf(0L), r.charStarts.toList())
+        assertTrue("整张图删掉后树里不能还挂着 img", r.root.children.none { it.tag == "img" })
+    }
+
+    @Test
     fun mergeCollapsesMiddleBlocks() {
         // 两段「abc」「def」；把 [1,4)（"bc" + "d"）换成一段 "X" → 只剩一段「aXef」。
         val root = body()

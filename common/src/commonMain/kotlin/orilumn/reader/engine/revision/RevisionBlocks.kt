@@ -38,6 +38,8 @@ object RevisionBlocks {
         if (blocks.isEmpty()) return null
         val lines = InlineMarkup.splitLines(text)
         val out = ArrayList<InlineMarkup.Segment>(blocks.size)
+        // 每一段是由哪条短码起的（续行并入上一段，但短码仍属于第一行）。
+        val codes = ArrayList<String>(blocks.size)
         for ((i, line) in lines.withIndex()) {
             val code = blocks.getOrNull(i).orEmpty()
             if (code == CONTINUATION && out.isNotEmpty()) {
@@ -45,9 +47,20 @@ object RevisionBlocks {
                 out.add(last.copy(text = last.text + "\n" + line))
             } else {
                 out.add(InlineMarkup.Segment(line, BlockKind.fromWire(code)))
+                codes.add(code)
             }
         }
-        return out
+        // 表格行的短码（`t…`；整表修订的首行是大写 `T…`）在文字拼回整段之后才能解码：
+        // 格长度按整行文字校验，续行拼回去之前长度不够，`fromWire` 会正确地拒绝。
+        return out.mapIndexed { i, seg ->
+            val code = codes.getOrNull(i).orEmpty()
+            val table = if (code.startsWith("t") || code.startsWith("T")) {
+                TableRowInfo.fromWire(code, seg.text.length)
+            } else {
+                null
+            }
+            if (table == null) seg else seg.copy(block = null, table = table)
+        }
     }
 
     /** 按段界切块；没有段界时返回单元素表（保留空串）。 */

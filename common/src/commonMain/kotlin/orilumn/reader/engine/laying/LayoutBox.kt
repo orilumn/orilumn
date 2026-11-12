@@ -84,6 +84,16 @@ class TableCellBlock(
     val imageRoot: MarkupElement = el,
     /** 匿名块要排掉的 run 外原始兄弟节点（见 @property）；命名块恒空集。 */
     val outsideSiblings: Set<MarkupElement> = emptySet(),
+    /**
+     * 本块的 [text] 与行内结构（与 [text] 同一份段表）。正文修改卡要按格取行内标记，
+     * 不能只拿字符串；字符流仍只用 [text]。
+     */
+    val segments: StyledSegments = StyledSegments(emptyList()),
+    /**
+     * 匿名块在容器 `children` 里的原始区间（命名块为 null）：正文修改按它把这一段 run
+     * 换回单元格，不碰同一格里别的块。见 [orilumn.reader.engine.revision.LeafTextEditor]。
+     */
+    val sourceSpan: IntRange? = null,
     val gapBefore: Int = 0,
     val edgeH: Int = 0,
     var edgeV: Int = 0,

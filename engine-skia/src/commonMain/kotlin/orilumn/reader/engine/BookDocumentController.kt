@@ -308,11 +308,25 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         // 按内容认修订（区间 + 替换文字 + 样式 + 组号），不按位置 / id：两份表的排序键里
         // 有 id，删除后再加一条同内容的修订会让顺序换位，按位搬就会张冠李戴。
         val texts = HashMap<TextRevision, String>(list.size * 2)
+        val kinds = HashMap<TextRevision, List<BlockKind>>(list.size * 2)
         val known = HashMap<RevisionContentKey, String>(previous.originalTexts.size * 2)
         for ((r, text) in previous.originalTexts) known[RevisionContentKey(r)] = text
-        for (r in fresh.revisions) known[RevisionContentKey(r)]?.let { texts[r] = it }
+        // 原书块形态与原文快照同源、同样不落库：不搬过来，翻回前一页时「只改了标记」的
+        // 那几条修订就没痕迹了（红绿字同理，见上一段注释）。
+        val knownKinds = HashMap<RevisionContentKey, List<BlockKind>>(previous.originalKinds.size * 2)
+        for ((r, k) in previous.originalKinds) knownKinds[RevisionContentKey(r)] = k
+        val spans = HashMap<TextRevision, List<InlineMarkup.StyleSpan>>(list.size * 2)
+        val knownSpans =
+            HashMap<RevisionContentKey, List<InlineMarkup.StyleSpan>>(previous.originalSpans.size * 2)
+        for ((r, v) in previous.originalSpans) knownSpans[RevisionContentKey(r)] = v
+        for (r in fresh.revisions) {
+            val key = RevisionContentKey(r)
+            known[key]?.let { texts[r] = it }
+            knownKinds[key]?.let { kinds[r] = it }
+            knownSpans[key]?.let { spans[r] = it }
+        }
         if (texts.isEmpty()) return fresh
-        return ChapterRevisionMap(list, previous.originalBlockEnds, texts)
+        return ChapterRevisionMap(list, previous.originalBlockEnds, texts, kinds, spans)
     }
 
     /** 修订的**排版内容**身份：决定原文快照能不能从上一版搬过来（见 [carryOverOverlay]）。 */
@@ -820,7 +834,17 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
             val fresh = base.inserted
             // 对齐用的「原书那一串」：旧修订沿用打开时投影出来的那份，新落的那几条按原书文本截。
             val texts = HashMap<orilumn.reader.data.revision.TextRevision, String>(kept.size * 2)
-            for (r in kept) map.originalTexts[r]?.let { texts[r] = it }
+            val kinds =
+                HashMap<orilumn.reader.data.revision.TextRevision, List<BlockKind>>(kept.size * 2)
+            val spans = HashMap<
+                orilumn.reader.data.revision.TextRevision,
+                List<InlineMarkup.StyleSpan>,
+                >(kept.size * 2)
+            for (r in kept) {
+                map.originalTexts[r]?.let { texts[r] = it }
+                map.originalKinds[r]?.let { kinds[r] = it }
+                map.originalSpans[r]?.let { spans[r] = it }
+            }
             for (r in fresh) {
                 if (r.charEnd <= originalText.length) texts[r] = originalText.substring(r.charStart, r.charEnd)
             }
@@ -829,6 +853,8 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                 // 段界痕迹要用**原书**块尾定位：这里给的是剪回原书空间的块尾。
                 originalBlockEnds = originalEnds ?: map.originalBlockEnds,
                 originalTexts = texts,
+                originalKinds = kinds,
+                originalSpans = spans,
             )
             val first = fresh.firstOrNull()
             if (first == null) {
@@ -1829,7 +1855,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                     val b = if (r.originalLength == 0) a else leafOfOffset(r.charEnd - 1)
                     for (k in a..b) indices += k
                 }
-                val leafTexts = bc.originalLeafTexts(
+                val projections = bc.originalLeafProjections(
                     cssBundle = unit.cssBundle,
                     profile = profile,
                     contentW = contentW,
@@ -1837,19 +1863,37 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                     structure = cache,
                     leafIndices = indices,
                 )
-                if (leafTexts.isNotEmpty()) {
+                if (projections.isNotEmpty()) {
+                    val leafTexts = projections.mapValues { it.value.text }
                     val texts =
                         HashMap<orilumn.reader.data.revision.TextRevision, String>(map.revisions.size * 2)
+                    // 修订起点那一块**原来**的形态：只改标记的修订要把被删掉的标记排出来
+                    // （`## 你好世界` 删掉 `## ` 时留一个红 `## `），见 `FormatTraces`。
+                    val kinds = HashMap<orilumn.reader.data.revision.TextRevision, List<BlockKind>>(
+                        map.revisions.size * 2,
+                    )
+                    // 这一段**原来**盖着哪些行内元素：只删掉 `**` / 反引号 / 链接这类标记的修订，
+                    // 要把标记本身排进版面（同上，见 `FormatTraces`）。
+                    val spans = HashMap<
+                        orilumn.reader.data.revision.TextRevision,
+                        List<InlineMarkup.StyleSpan>,
+                        >(map.revisions.size * 2)
                     for (r in map.revisions) {
                         val a = leafOfOffset(r.charStart)
                         val b = if (r.originalLength == 0) a else leafOfOffset(r.charEnd - 1)
                         val t = originalRangeText(r, a, b, leafTexts, starts) ?: continue
                         texts[r] = t
+                        cache.leaves.getOrNull(a)?.let { leaf ->
+                            BlockKind.ofElement(leaf)?.let { kinds[r] = listOf(it) }
+                        }
+                        originalRangeSpans(r, a, b, projections, starts)?.let { spans[r] = it }
                     }
                     reviewMap = ChapterRevisionMap(
                         map.revisions,
                         originalBlockEnds = blockEndsBefore,
                         originalTexts = texts,
+                        originalKinds = kinds,
+                        originalSpans = spans,
                     )
                 }
             }
@@ -2026,15 +2070,20 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                                 if (at < leafStart || at > leafEnd) continue
                                 if (at == leafEnd && r.charEnd != leafEnd) continue
                                 val p = at - leafStart
-                                val spans = reviewStyles?.let { all ->
-                                    val from = ins.at
-                                    val to = ins.at + ins.text.length
-                                    all.filter { it.start < to && it.endExclusive > from }.map {
-                                        InlineMarkup.StyleSpan(
-                                            (it.start - from).coerceAtLeast(0),
-                                            (it.endExclusive - from).coerceAtMost(ins.text.length),
-                                            it.sig,
-                                        )
+                                val spans = if (ins.isTrace) {
+                                    // 格式痕迹只是标记本身，不套修订的行内样式。
+                                    null
+                                } else {
+                                    reviewStyles?.let { all ->
+                                        val from = ins.at
+                                        val to = ins.at + ins.text.length
+                                        all.filter { it.start < to && it.endExclusive > from }.map {
+                                            InlineMarkup.StyleSpan(
+                                                (it.start - from).coerceAtLeast(0),
+                                                (it.endExclusive - from).coerceAtMost(ins.text.length),
+                                                it.sig,
+                                            )
+                                        }
                                     }
                                 }
                                 out += LeafTextEditor.Edit(
@@ -2175,6 +2224,43 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
             old.append(text, from, to)
         }
         return old.toString()
+    }
+
+    /**
+     * 修订区间**原来**盖着哪些行内元素（坐标相对 [TextRevision.charStart]）。
+     *
+     * 与 [originalRangeText] 同一套叶投影：跨叶的按叶界拼起来，裁到修订区间以内。
+     * 取不到任何一片叶的投影时返回 null（调用方据此「行内痕迹不画」），
+     * 而不是空表（空表的意思是「原来就没有行内结构」，读者新写的标记会画成绿字）。
+     */
+    private fun originalRangeSpans(
+        r: orilumn.reader.data.revision.TextRevision,
+        firstLeaf: Int,
+        lastLeaf: Int,
+        projections: Map<Int, BoxChapterLayouter.LeafProjection>,
+        starts: LongArray,
+    ): List<InlineMarkup.StyleSpan>? {
+        if (r.originalLength == 0) return emptyList()
+        val out = ArrayList<InlineMarkup.StyleSpan>(4)
+        var seen = false
+        for (k in firstLeaf..lastLeaf) {
+            val p = projections[k] ?: continue
+            seen = true
+            val leafStart = starts[k].toInt()
+            val from = if (k == firstLeaf) r.charStart - leafStart else 0
+            val to = if (k == lastLeaf) r.charEnd - leafStart else p.text.length
+            if (from < 0 || to > p.text.length || from > to) continue
+            val base = leafStart - r.charStart
+            for (s in p.spans) {
+                val a = maxOf(s.start, from)
+                val b = minOf(s.endExclusive, to)
+                if (b <= a) continue
+                out += InlineMarkup.StyleSpan(base + a, base + b, s.sig)
+            }
+        }
+        if (!seen) return null
+        // 与 `InlineSpans.ofLeaf` 同序（起点升序、外层在前），痕迹的先后才稳定。
+        return out.sortedWith(compareBy({ it.start }, { -it.endExclusive }))
     }
 
     /**

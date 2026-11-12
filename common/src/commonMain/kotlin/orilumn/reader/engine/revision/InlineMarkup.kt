@@ -914,6 +914,24 @@ object InlineMarkup {
 
     private class Marker(val tag: String, val open: String, val close: String)
 
+    /**
+     * 这条行内元素在卡片里的写法：开标记 / 闭标记（`*` / `**` / `` ` `` / `[` + `](地址)`）。
+     *
+     * 审阅视图的**格式痕迹**用它：字一个没改、只删掉 / 加上了行内标记时，把标记本身排进版面
+     * （见 `FormatTraces`）。与 [show] 同一套写法，读者在卡片里看到什么，痕迹就长什么样。
+     *
+     * 有语法糖的标签给糖；写不回去的（代码里带反引号、链接地址自带 `)`）与没有语法糖的标签
+     * 退回标签形式 `<tag …>` / `</tag>`（`id` 不算形状，写出来时剥掉，与 [parse] 同一口径）。
+     *
+     * @param content 这段文字本身（`code` 带反引号时写不回语法糖，要退回标签形式）。
+     */
+    fun markerPair(sig: StyleSig, content: String): Pair<String, String> {
+        val m = markerOf(sig, content)
+        if (m != null) return m.open to m.close
+        val clean = if ("id" in sig.attrs) sig.copy(attrs = sig.attrs - "id") else sig
+        return tagMarkup(clean, closing = false) to tagMarkup(clean, closing = true)
+    }
+
     private fun markerOf(sig: StyleSig, content: String): Marker? = when (sig.tag) {
         "em" -> Marker("em", "*", "*")
         "strong" -> Marker("strong", "**", "**")

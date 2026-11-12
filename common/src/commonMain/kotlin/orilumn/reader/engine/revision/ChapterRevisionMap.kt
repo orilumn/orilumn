@@ -39,6 +39,22 @@ class ChapterRevisionMap(
      * 不是落库字段。
      */
     val originalTexts: Map<TextRevision, String> = emptyMap(),
+    /**
+     * 修订 → 它盖住的那些块**原来**的形态（按段对齐，与 [TextRevision.blockKinds] 同序）。
+     *
+     * 与 [originalTexts] 一样是从书里投影出来的，不落库：审阅视图要把「被删掉的标记」
+     * 排出来（`## 你好世界` 删掉 `## ` 时留一个红 `## `），就得知道它原来是标题。
+     * 取不到（老宿主 / 结构未就绪）时这一段不画标记痕迹。
+     */
+    val originalKinds: Map<TextRevision, List<BlockKind>> = emptyMap(),
+    /**
+     * 修订 → 它盖住的那段文字**原来**的行内结构（坐标相对 [TextRevision.charStart]）。
+     *
+     * 同上，从书里投影、不落库：只删掉 `**` / `` ` `` / 链接这类行内标记的修订，
+     * 要把标记本身排进审阅空间。**不在表里**（不是空表）= 取不到，行内痕迹一律不画
+     * （空表表示「原来就没有行内结构」，那时读者新写的标记会画成绿字）。
+     */
+    val originalSpans: Map<TextRevision, List<InlineMarkup.StyleSpan>> = emptyMap(),
 ) {
     val revisions: List<TextRevision> = source.sortedWith(compareBy({ it.charStart }, { it.id }))
 
@@ -158,10 +174,33 @@ class ChapterRevisionMap(
         val out = HashMap<TextRevision, ReviewOverlay.Plan>(4)
         for (r in revisions) {
             val old = originalTexts[r] ?: continue
-            val plan = ReviewOverlay.plan(old, r.text, blockEndsIn(r)) ?: continue
+            val plan = ReviewOverlay.plan(old, r.text, blockEndsIn(r), tracesOf(r, old)) ?: continue
             out[r] = plan
         }
         out
+    }
+
+    /**
+     * 这条修订的**格式痕迹**：字一个没改、只改了标记时，把被删 / 新写的标记排进审阅空间
+     * （见 [FormatTraces]）。改了字的修订不画——红绿已经标在字上了。
+     *
+     * 块标记只认「一段一条」的修订（`blockKinds` 恰好一项、文字里没有段界）：一次改好几段的
+     * 形态时「哪一段长成哪一块」本身就不唯一，宁可不画也不猜。行内标记按样式区间的差集算，
+     * 没有这个限制。
+     */
+    private fun tracesOf(r: TextRevision, old: String): List<ReviewOverlay.Trace> {
+        if (r.text.indexOf(RevisionBlocks.SEPARATOR) >= 0) return emptyList()
+        val single = r.blockKinds.size == 1
+        val oldKind = if (single) originalKinds[r]?.firstOrNull() else null
+        val newKind = if (single) BlockKind.fromWire(r.blockKinds[0]) else null
+        return FormatTraces.traces(
+            oldText = old,
+            newText = RevisionBlocks.textOf(r.text),
+            oldKind = oldKind,
+            newKind = newKind,
+            oldSpans = originalSpans[r],
+            newSpans = r.styles?.let(InlineMarkup::fromStored),
+        )
     }
 
     /** 原书段界里落在 [r] 区间**内部**的那几个（局部偏移，升序）。 */
@@ -201,7 +240,7 @@ class ChapterRevisionMap(
     }
 
     /**
-     * 审阅空间里**所有** ¶ 的字符偏移（升序）。
+     * 审阅空间里**所有** 痕迹字符的偏移（升序）：段界痕迹 ¶ 与格式痕迹（`## ` / `**` …）。
      *
      * 只给「取文字」用（摘录 / 复制 / 修改卡初值要跳过痕迹）；坐标换算已经把它们算进
      * [ReviewOverlay.Plan.length]，这里只管给宿主一份要跳过的位置表。
@@ -210,16 +249,21 @@ class ChapterRevisionMap(
         val out = ArrayList<Int>(4)
         for (r in revisions) {
             val plan = overlay(r) ?: continue
-            if (plan.marks.isEmpty()) continue
+            if (plan.marks.isEmpty() && plan.traces.isEmpty()) continue
             val base = reviewStart(r)
             for (p in plan.marks.keys) out += base + p
+            for (p in plan.traces) out += base + p
         }
         if (out.isEmpty()) return@lazy IntArray(0)
         out.sort()
         out.toIntArray()
     }
 
-    /** 审阅空间里段界痕迹 ¶ 的位置（升序）；与 [reviewMarkOffsets] 同一份。 */
+    /**
+     * 审阅空间里**所有**痕迹字符的位置（升序）：段界痕迹 ¶ 与格式痕迹（`## ` / `**` …）。
+     *
+     * 与 [reviewMarkOffsets] 同一份；名字保留给「宿主按它跳过痕迹」的那条老通道。
+     */
     val reviewBreakMarkers: IntArray get() = reviewMarkOffsets
 
     /**
@@ -589,8 +633,9 @@ class ChapterRevisionMap(
          * 10 = 落在同一片叶 / 同一组上的多处修改一起重塑，不再只保住其中一条（章文字变了）。
          * 11 = 叶尾那一格插入也落进本叶（整段引用句的收尾引号以前会被吞掉，章文字变了）。
          * 12 = 修订可带显式行内样式（`*斜体*` / `<em>` 这类标记落地后按区间重建叶内容）。
-         * 13 = 修订可带块级形态（标题 / 引用 / 列表 / 代码块），重放时换标签、增删包裹层。 */
-        const val ALGORITHM_VERSION = 13
+         * 13 = 修订可带块级形态（标题 / 引用 / 列表 / 代码块），重放时换标签、增删包裹层。
+         * 14 = 只改标记（字一个没改）的修订在审阅空间里排出标记痕迹（`## ` / `**`），章文字变了。 */
+        const val ALGORITHM_VERSION = 14
 
         private const val FNV_OFFSET = -3750763034362895579L // 14695981039346656037
         private const val FNV_PRIME = 1099511628211L

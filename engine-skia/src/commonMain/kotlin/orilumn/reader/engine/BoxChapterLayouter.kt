@@ -877,6 +877,46 @@ class BoxChapterLayouter(
         return out
     }
 
+    /** 一片叶的**原书投影**：文字 + 行内结构（都是原书空间、与排版同尺）。 */
+    internal class LeafProjection(
+        val text: String,
+        val spans: List<orilumn.reader.engine.revision.InlineMarkup.StyleSpan>,
+    )
+
+    /**
+     * 只投影指定叶的文本**与行内结构**，不重放、不排版。
+     *
+     * 审阅视图的格式痕迹要用：字一个没改、只删掉 / 加上 `**`、`` ` ``、链接这类标记的修订，
+     * 得先知道这一段原来盖着哪些行内元素（见 `FormatTraces`）。与 [originalLeafTexts]
+     * 同一套级联、同一份 `LeafTextEditor.ownersOf` 归属，所以屏幕上的字和这里的区间一一对应。
+     */
+    internal fun originalLeafProjections(
+        cssBundle: CssBundle?,
+        profile: TypographicProfile,
+        contentW: Int,
+        contentH: Int,
+        structure: ChapterStructureCache,
+        leafIndices: Collection<Int>,
+    ): Map<Int, LeafProjection> {
+        if (leafIndices.isEmpty()) return emptyMap()
+        val styling = leafStyling(cssBundle, profile, contentW, contentH, structure)
+        val out = HashMap<Int, LeafProjection>(leafIndices.size)
+        for (i in leafIndices) {
+            val leaf = structure.leaves.getOrNull(i) ?: continue
+            val segments = styling.segmentsOf(leaf)
+            out[i] = LeafProjection(
+                text = segments.text,
+                spans = orilumn.reader.engine.revision.InlineSpans.ofLeaf(
+                    leaf = leaf,
+                    segments = segments,
+                    wsOf = styling.wsOf,
+                    styleOf = styling.styleOf,
+                ),
+            )
+        }
+        return out
+    }
+
     /**
      * 重放与「只读原文」共用的叶级级联：叶文本、`white-space` 与完整样式一次建好，
      * 调用方只消费，不各自再写一套（两处规则一旦漂移，补录的原文就会与排版错位）。

@@ -17,8 +17,25 @@ package orilumn.reader.engine.revision
  */
 object ReviewOverlay {
 
-    /** 一处就地插入：原书局部偏移 [at] 处插进 [text]（绿字；段界痕迹 ¶ 也在里面）。 */
-    class Insertion(val at: Int, val text: String)
+    /**
+     * 一处就地插入：原书局部偏移 [at] 处插进 [text]（绿字；段界痕迹 ¶ 也在里面）。
+     *
+     * @property isTrace true = 这一处是**格式痕迹**（标记本身），不是读者写的字：
+     *   排版时它不带修订的行内样式（绿 `*` 不该被它自己标出来的斜体带歪）。
+     */
+    class Insertion(val at: Int, val text: String, val isTrace: Boolean = false)
+
+    /**
+     * 一处**格式痕迹**：字一个没改、只改了标记时，把被删掉 / 新写上的标记按普通字符排进来。
+     *
+     * 与 ¶ 同一套口径（读者 2026-11-12 定口）：删掉的 `## ` 排成红字 + 删除线、新写的排成绿字，
+     * 读者在卡片里删了什么，审阅视图里就看到什么。红绿的字义不变——它们是**标记**，不是正文。
+     *
+     * @property at 原书局部偏移：痕迹排在这个字**之前**（0 = 这一段最前面）。
+     * @property text 标记本身（`## ` / `> ` / `**` / `` ` `` …）。
+     * @property isNew true = 读者新写的（绿），false = 被删掉的（红 + 删除线）。
+     */
+    class Trace(val at: Int, val text: String, val isNew: Boolean)
 
     /**
      * 一条修订在审阅空间里的形态。
@@ -26,9 +43,12 @@ object ReviewOverlay {
      * @property text 这一段在审阅空间的文字：原文各字原样在内，新写的字插在原位，
      *   段界仍是 [RevisionBlocks.SEPARATOR]（不占字符，排版时拆块用）。
      * @property insertions 就地插入的几处（局部偏移升序；[text] 里除原文与段界之外的字符都在这里）。
-     * @property deleted 红字区间（审阅空间局部坐标，升序的 `[start0, end0, …]`），含被删段界的红 ¶。
-     * @property inserted 绿字区间（同上），含新插段界的绿 ¶。
+     * @property deleted 红字区间（审阅空间局部坐标，升序的 `[start0, end0, …]`），含被删段界的红 ¶
+     *   与被删掉的标记痕迹。
+     * @property inserted 绿字区间（同上），含新插段界的绿 ¶ 与新写上的标记痕迹。
      * @property marks 段界痕迹 ¶ 的位置 → 是否新插的（true = 绿，false = 红）。
+     * @property traces 标记痕迹（`## ` / `**` …）每个字符在 [text] 里的下标（升序）：
+     *   取文字给读者看时要跳过这些位（与 ¶ 同一份跳过表）。
      * @property needsBlocks 这一段有没有块边界要动（有原书段界要并、或新插了段界要拆）：
      *   要动就得走「整叶重塑」的重放，不能只做叶内插入。
      */
@@ -41,6 +61,7 @@ object ReviewOverlay {
         val deleted: IntArray,
         val inserted: IntArray,
         val marks: Map<Int, Boolean>,
+        val traces: IntArray,
         val needsBlocks: Boolean,
         /** 这一段在审阅空间的长度（段界不占字符）。 */
         val length: Int,
@@ -128,9 +149,15 @@ object ReviewOverlay {
      * @param old 这条修订盖住的**原书**文字（不含段界；跨叶时各叶顺序相连）。
      * @param text 修订文字（可能含段界）。
      * @param blockEnds 原书段界落在**这一段内部**的局部偏移（0 < e < old.length；升序）。
+     * @param traces 格式痕迹（字没改、只改了标记）：按 [Trace.at] 排进审阅空间。
      * @return null = 对不上（纯插入以外的空文本等退化情形），调用方按渲染空间落字。
      */
-    fun plan(old: String, text: String, blockEnds: IntArray): Plan? {
+    fun plan(
+        old: String,
+        text: String,
+        blockEnds: IntArray,
+        traces: List<Trace> = emptyList(),
+    ): Plan? {
         val new = RevisionBlocks.textOf(text)
         val ops = CharDiff.diff(old, new)
         // 修订文字里每个段界落在「第几个正文文字之前」（段界不占字符）。
@@ -144,7 +171,10 @@ object ReviewOverlay {
         val ends = blockEnds.filter { it > 0 && it < old.length }.toHashSet()
 
         val out = StringBuilder(old.length + new.length / 2 + 8)
-        /** 每个字符位属于谁：0 原文保留、1 原文被删、2 新写的字、3 被删段界的 ¶、4 新插段界的 ¶。 */
+        /**
+         * 每个字符位属于谁：0 原文保留、1 原文被删、2 新写的字、3 被删段界的 ¶、4 新插段界的 ¶、
+         * 5 被删掉的标记痕迹、6 新写上的标记痕迹。
+         */
         val kinds = ArrayList<Int>(out.length + 8)
         val reviewToOld = ArrayList<Int>(old.length + 8)
         val before = IntArray(old.length + 1) { -1 }
@@ -152,8 +182,10 @@ object ReviewOverlay {
         val insertions = ArrayList<Insertion>(2)
         val insAt = ArrayList<Int>(2)
         val insText = ArrayList<StringBuilder>(2)
+        val insTrace = ArrayList<Boolean>(2)
         val kept = HashSet<Int>(2)
         val marks = LinkedHashMap<Int, Boolean>(2)
+        val tracePos = ArrayList<Int>(4)
         // 修订文字（去段界）第几个字 → 审阅空间偏移：样式区间靠它换算（见 [Plan.stylesInReview]）。
         val newToReview = IntArray(new.length) { -1 }
         // 修订文字（去段界）第几个字 → [out] 里的下标（含 ¶ 与段界）：整段重放按它切块。
@@ -176,7 +208,7 @@ object ReviewOverlay {
             at++
         }
 
-        fun pushInserted(chars: CharSequence, kind: Int) {
+        fun pushInserted(chars: CharSequence, kind: Int, trace: Boolean = false) {
             for (c in chars) {
                 open(o)
                 push(c, kind)
@@ -184,9 +216,12 @@ object ReviewOverlay {
                 after[o] = at
                 if (insAt.isNotEmpty() && insAt.last() == o) {
                     insText.last().append(c)
+                    // 与读者写的字拼在同一处时按「有正文」算：这一处不再是纯痕迹。
+                    if (!trace) insTrace[insTrace.size - 1] = false
                 } else {
                     insAt += o
                     insText += StringBuilder().append(c)
+                    insTrace += trace
                 }
             }
         }
@@ -208,7 +243,19 @@ object ReviewOverlay {
             }
         }
 
+        /** 把排在这个原文位置之前的格式痕迹吐出来（与 ¶ 一样是占格的普通字符）。 */
+        var ti = 0
+        fun flushTraces() {
+            while (ti < traces.size && traces[ti].at <= o) {
+                val t = traces[ti++]
+                val from = out.length
+                pushInserted(t.text, if (t.isNew) 6 else 5, trace = true)
+                for (i in from until out.length) tracePos += i
+            }
+        }
+
         fun emitOrig(deletedChar: Boolean) {
+            flushTraces()
             open(o)
             if (after[o] < 0) after[o] = at
             if (o in ends && o !in kept) {
@@ -231,6 +278,7 @@ object ReviewOverlay {
                 }
                 is CharDiff.Op.Insert -> for (c in op.text) {
                     flushSeps()
+                    flushTraces()
                     if (n < newToReview.size) newToReview[n] = at
                     pushInserted(c.toString(), 2)
                     if (n < newToOut.size) newToOut[n] = out.length - 1
@@ -239,6 +287,7 @@ object ReviewOverlay {
             }
         }
         flushSeps()
+        flushTraces()
         open(old.length)
         after[old.length] = at
         reviewToOld += old.length
@@ -249,8 +298,8 @@ object ReviewOverlay {
         var insStart = -1
         for (i in kinds.indices) {
             val k = kinds[i]
-            val del = k == 1 || k == 3
-            val ins = k == 2 || k == 4
+            val del = k == 1 || k == 3 || k == 5
+            val ins = k == 2 || k == 4 || k == 6
             if (del && delStart < 0) delStart = i
             if (!del && delStart >= 0) {
                 deleted += delStart
@@ -274,7 +323,7 @@ object ReviewOverlay {
         }
 
         val list = ArrayList<Insertion>(insAt.size)
-        for (i in insAt.indices) list += Insertion(insAt[i], insText[i].toString())
+        for (i in insAt.indices) list += Insertion(insAt[i], insText[i].toString(), insTrace[i])
         val beforeOut = IntArray(old.length + 1) { if (before[it] >= 0) before[it] else 0 }
         val afterOut = IntArray(old.length + 1) { if (after[it] >= 0) after[it] else beforeOut[it] }
         return Plan(
@@ -286,6 +335,7 @@ object ReviewOverlay {
             deleted = deleted.toIntArray(),
             inserted = inserted.toIntArray(),
             marks = marks,
+            traces = tracePos.toIntArray(),
             needsBlocks = ends.isNotEmpty() || seps.isNotEmpty(),
             length = at,
             newToReview = newToReview,

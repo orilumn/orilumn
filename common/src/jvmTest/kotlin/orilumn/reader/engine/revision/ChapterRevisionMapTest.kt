@@ -1,5 +1,7 @@
 package orilumn.reader.engine.revision
 
+import orilumn.reader.data.revision.RevisionStyle
+import orilumn.reader.data.revision.RevisionStyleSpan
 import orilumn.reader.data.revision.TextRevision
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
@@ -240,6 +242,200 @@ class ChapterRevisionMapTest {
         val inserted = ChapterRevisionMap(listOf(ins), originalTexts = mapOf(ins to ""))
         assertEquals("甲乙丙丁", inserted.originalTextFromReview("甲乙XY丙丁"))
         assertEquals("甲乙", ChapterRevisionMap.EMPTY.originalTextFromReview("甲乙"))
+    }
+
+    @Test
+    fun formatOnlyRevisionShowsDeletedMarker() {
+        // 用户的原例：`## 你好世界` 删掉 `## ` 变回正文——字一个没改，只改了块标记。
+        // 审阅空间 = 红 `## ` + 原文照排：读者看得见被删掉的标记，正文一个字都不红。
+        val r = TextRevision(
+            id = 1,
+            bookId = 1,
+            chapter = 1,
+            charStart = 0,
+            charEnd = 4,
+            text = "你好世界",
+            blockKinds = listOf("p"),
+        )
+        val map = ChapterRevisionMap(
+            listOf(r),
+            originalTexts = mapOf(r to "你好世界"),
+            originalKinds = mapOf(r to listOf(BlockKind.Heading2)),
+        )
+        assertEquals(0 until 7, map.reviewInterval(r))
+        // 三个痕迹字符各自登记（取文字时逐位跳过），不是段界痕迹。
+        assertEquals(listOf(0, 1, 2), map.reviewMarkOffsets.toList())
+        assertTrue(map.reviewDeletedBreakMarkers.isEmpty())
+        assertTrue(map.reviewInsertedBreakMarkers.isEmpty())
+        assertEquals(listOf(0 until 3), pairs(map.paintedDeleted[r]))
+        assertTrue(map.paintedInserted.isEmpty())
+        // 痕迹自己不对应原书的字：落在上面就夹回段首。
+        assertEquals(0, map.toOriginalFromReview(0))
+        assertEquals(0, map.toOriginalFromReview(3))
+        assertEquals(1, map.toOriginalFromReview(4))
+        // 取文字（摘录 / 复制 / 修改卡初值）要跳过痕迹。
+        assertEquals("你好世界", map.originalTextFromReview("## 你好世界"))
+        // 正常视图（渲染空间）不受影响：这一段还是那四个字。
+        assertEquals(4, map.toRendered(4))
+    }
+
+    @Test
+    fun addedHeadingMarkerIsGreen() {
+        // 反方向：正文改成标题，绿 `## ` 排在段首。
+        val r = TextRevision(
+            id = 1,
+            bookId = 1,
+            chapter = 1,
+            charStart = 0,
+            charEnd = 4,
+            text = "你好世界",
+            blockKinds = listOf("h2"),
+        )
+        val map = ChapterRevisionMap(
+            listOf(r),
+            originalTexts = mapOf(r to "你好世界"),
+            originalKinds = mapOf(r to listOf(BlockKind.Paragraph)),
+        )
+        assertEquals(0 until 7, map.reviewInterval(r))
+        assertEquals(listOf(0, 1, 2), map.reviewMarkOffsets.toList())
+        assertTrue(map.paintedDeleted.isEmpty())
+        assertEquals(listOf(0 until 3), pairs(map.paintedInserted[r]))
+    }
+
+    @Test
+    fun markerTraceNeedsOriginalKind() {
+        // 取不到原书形态时宁可不画：没有痕迹，审阅空间与原文等长。
+        val r = TextRevision(
+            id = 1,
+            bookId = 1,
+            chapter = 1,
+            charStart = 0,
+            charEnd = 4,
+            text = "你好世界",
+            blockKinds = listOf("p"),
+        )
+        val map = ChapterRevisionMap(listOf(r), originalTexts = mapOf(r to "你好世界"))
+        assertEquals(0 until 4, map.reviewInterval(r))
+        assertTrue(map.reviewMarkOffsets.isEmpty())
+        assertTrue(map.paintedDeleted.isEmpty())
+    }
+
+    @Test
+    fun markerTraceSkippedWhenTextChanged() {
+        // 改了字的修订不画标记痕迹（红绿已经在字上）。
+        val r = TextRevision(
+            id = 1,
+            bookId = 1,
+            chapter = 1,
+            charStart = 0,
+            charEnd = 2,
+            text = "丙丁",
+            blockKinds = listOf("p"),
+        )
+        val map = ChapterRevisionMap(
+            listOf(r),
+            originalTexts = mapOf(r to "甲乙"),
+            originalKinds = mapOf(r to listOf(BlockKind.Heading2)),
+        )
+        assertTrue(map.reviewMarkOffsets.isEmpty())
+        assertEquals(listOf(0 until 2), pairs(map.paintedDeleted[r]))
+        assertEquals(listOf(2 until 4), pairs(map.paintedInserted[r]))
+    }
+
+    @Test
+    fun markerTraceCarriedAcrossPages() {
+        // 前一条修订在别处、这一条在段首：痕迹的位置要跟着审阅空间的位移走。
+        val before = rev(0, 1, "XY", id = 1)
+        val r = TextRevision(
+            id = 2,
+            bookId = 1,
+            chapter = 1,
+            charStart = 4,
+            charEnd = 8,
+            text = "你好世界",
+            blockKinds = listOf("p"),
+        )
+        val map = ChapterRevisionMap(
+            listOf(before, r),
+            originalTexts = mapOf(before to "甲", r to "你好世界"),
+            originalKinds = mapOf(r to listOf(BlockKind.Heading2)),
+        )
+        // 前一条修订多出两个字（「甲」→「XY」：原文留在原位，新字插在后面），痕迹整体后移两格。
+        assertEquals(listOf(6, 7, 8), map.reviewMarkOffsets.toList())
+        assertEquals(listOf(6 until 9), pairs(map.paintedDeleted[r]))
+    }
+
+    @Test
+    fun formatOnlyItalicShowsGreenStars() {
+        // 字一个没改，只给整段加上了斜体：审阅空间在段首段尾各多一个绿 `*`。
+        val text = "函数是执行特定任务的一组指令。"
+        val r = TextRevision(
+            id = 1,
+            bookId = 1,
+            chapter = 1,
+            charStart = 0,
+            charEnd = text.length,
+            text = text,
+            styles = listOf(RevisionStyleSpan(0, text.length, RevisionStyle("em"))),
+        )
+        val map = ChapterRevisionMap(
+            listOf(r),
+            originalTexts = mapOf(r to text),
+            originalSpans = mapOf(r to emptyList()),
+        )
+        assertEquals(0 until text.length + 2, map.reviewInterval(r))
+        assertEquals(listOf(0, text.length + 1), map.reviewMarkOffsets.toList())
+        assertEquals(
+            listOf(0 until 1, text.length + 1 until text.length + 2),
+            pairs(map.paintedInserted[r]),
+        )
+        assertTrue(map.paintedDeleted.isEmpty())
+        // 取文字时两个 `*` 都要剪掉。
+        assertEquals(text, map.originalTextFromReview("*$text*"))
+    }
+
+    @Test
+    fun formatOnlyItalicRemovalShowsRedStars() {
+        val text = "函数是执行特定任务的一组指令。"
+        val r = TextRevision(
+            id = 1,
+            bookId = 1,
+            chapter = 1,
+            charStart = 0,
+            charEnd = text.length,
+            text = text,
+            styles = emptyList(),
+        )
+        val map = ChapterRevisionMap(
+            listOf(r),
+            originalTexts = mapOf(r to text),
+            originalSpans = mapOf(
+                r to listOf(InlineMarkup.StyleSpan(0, text.length, InlineMarkup.StyleSig("em"))),
+            ),
+        )
+        assertEquals(listOf(0, text.length + 1), map.reviewMarkOffsets.toList())
+        assertEquals(
+            listOf(0 until 1, text.length + 1 until text.length + 2),
+            pairs(map.paintedDeleted[r]),
+        )
+    }
+
+    @Test
+    fun inlineTraceNeedsOriginalSpans() {
+        // 原书行内结构取不到（表里没有这一条）：行内痕迹不画，审阅空间与原文等长。
+        val text = "函数是执行特定任务的一组指令。"
+        val r = TextRevision(
+            id = 1,
+            bookId = 1,
+            chapter = 1,
+            charStart = 0,
+            charEnd = text.length,
+            text = text,
+            styles = listOf(RevisionStyleSpan(0, text.length, RevisionStyle("em"))),
+        )
+        val map = ChapterRevisionMap(listOf(r), originalTexts = mapOf(r to text))
+        assertEquals(0 until text.length, map.reviewInterval(r))
+        assertTrue(map.reviewMarkOffsets.isEmpty())
     }
 
     @Test

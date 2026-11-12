@@ -1,12 +1,15 @@
 package orilumn.reader.ui.reader
 
 /**
- * 审阅空间文字里「段界痕迹」¶ 的剥离工具（用户层：只负责把排版字符还原成读者读的文字）。
+ * 审阅空间文字里**痕迹字符**的剥离工具（用户层：只负责把排版字符还原成读者读的文字）。
  *
- * ¶ 是审阅视图专有的**普通排版字符**（被删掉的段界在合并段中间、新插的段界在上一行末尾，
- * 见 `ChapterRevisionMap.BREAK_MARK_CHAR`）。分页、选区、标注偏移都要算它，所以
- * [ReaderHost.textOf] 原样带着它返回。凡是读者要**看**或**带走**的文字（摘录、复制、
- * 修改卡初值）都得按本类摘掉，并把偏移一起回缩，免得 ¶ 漏进剪贴板、书签与正文。
+ * 痕迹是审阅视图专有的**普通排版字符**，有两类（见 `ChapterRevisionMap.reviewMarkOffsets`）：
+ * - 段界痕迹 ¶：被删掉的段界在合并段中间、新插的段界在上一行末尾（`BREAK_MARK_CHAR`）；
+ * - 格式痕迹：字一个没改、只改了标记时，被删 / 新写的标记按普通字符排在段首（`## ` / `**` …）。
+ *
+ * 分页、选区、标注偏移都要算它们，所以 [ReaderHost.textOf] 原样带着返回。凡是读者要**看**
+ * 或**带走**的文字（摘录、复制、修改卡初值）都得按本类摘掉，并把偏移一起回缩，
+ * 免得痕迹漏进剪贴板、书签与正文。
  *
  * 层的边界：这里不碰排版、不改偏移的可信度，只是一次纯文本投影；
  * 排版空间（分页表、选区、装饰）永远用 [ReaderHost.textOf] 的原样文字。
@@ -66,14 +69,14 @@ internal class ReviewBreakText(private val marks: IntArray) {
     }
 }
 
-/** 本章的 ¶ 剥离器（正常视图下痕迹表为空，直接返回 [ReviewBreakText.NONE] 的等价物）。 */
+/** 本章的痕迹剥离器（正常视图下痕迹表为空，直接返回 [ReviewBreakText.NONE] 的等价物）。 */
 internal fun ReaderHost.reviewBreakText(chapter: Int): ReviewBreakText {
     val marks = reviewBreakOffsets(chapter)
     return if (marks.isEmpty()) ReviewBreakText.NONE else ReviewBreakText(marks)
 }
 
 /**
- * 本章「读者读的文字」投影：**¶ 痕迹 + 中西接缝上被画成零宽的空白**一起摘掉。
+ * 本章「读者读的文字」投影：**审阅痕迹 + 中西接缝上被画成零宽的空白**一起摘掉。
  *
  * 接缝空白在文本模型里还在（下标、标注、进度照常按含空白的原文算，用户口径：原文一个字不动），
  * 只是排版把它画成 0 宽、由混排字距取代。复制、摘录是「带走文字」，必须摘掉，

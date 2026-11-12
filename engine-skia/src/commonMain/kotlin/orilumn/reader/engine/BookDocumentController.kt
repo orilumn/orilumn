@@ -2060,9 +2060,28 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                             // 看不到它（判据是 `charEnd > leafStart`），两叶都不落就把字吞了。
                             // 实测整段引用句的收尾引号就是这样消失的：审阅正文比换算表少两格，
                             // 切回正常视图时页首错一行。
+                            //
+                            // 例外（读者 2026-11-12 复报）：整条修订都在本叶、这一段又没有段界要动时，
+                            // 整段重建一次，**保留字也套上修订后的行内结构**——读者给整段加斜体 /
+                            // 粗体，审阅视图里就得看见斜体 / 粗体，不能只剩两个绿 `*`。
+                            // 老修订没存样式（null）就仍走下面的就地插入，保持「新字挂左邻」的旧行为。
+                            val storedStyles = r.styles
+                            if (storedStyles != null &&
+                                r.charStart >= leafStart &&
+                                r.charEnd <= leafEnd &&
+                                plan.text.indexOf(RevisionBlocks.SEPARATOR) < 0
+                            ) {
+                                out += LeafTextEditor.Edit(
+                                    start = r.charStart - leafStart,
+                                    endExclusive = r.charEnd - leafStart,
+                                    text = plan.text,
+                                    styles = plan.stylesInText(r.text, InlineMarkup.fromStored(storedStyles)),
+                                )
+                                continue
+                            }
                             // 新字带不带行内样式：修订有显式样式时按区间落（新字落在元素外），
                             // 没有（老修订）就沿用「挂左邻」。区间先换算到审阅空间的偏移。
-                            val reviewStyles = r.styles?.let { stored ->
+                            val reviewStyles = storedStyles?.let { stored ->
                                 plan.stylesInReview(r.text, InlineMarkup.fromStored(stored))
                             }
                             for (ins in plan.insertions) {

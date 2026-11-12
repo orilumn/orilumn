@@ -120,6 +120,7 @@ class FormatTracesTest {
 
     @Test
     fun removedLinkShowsBothSides() {
+        // 地址不排进版面：闭标记只留 `](…)`（几百字的地址会把整段撑烂）。
         val traces = FormatTraces.inline(
             "点这里",
             oldSpans = listOf(
@@ -131,7 +132,7 @@ class FormatTracesTest {
             ),
             newSpans = emptyList(),
         )
-        assertEquals(listOf("[" to false, "](https://example.com)" to false), traces.map { it.text to it.isNew })
+        assertEquals(listOf("[" to false, "](…)" to false), traces.map { it.text to it.isNew })
     }
 
     @Test

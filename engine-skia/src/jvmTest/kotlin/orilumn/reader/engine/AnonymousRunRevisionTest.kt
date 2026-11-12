@@ -127,7 +127,8 @@ class AnonymousRunRevisionTest {
         assertTrue(texts.contains("起云涌"))
         assertFalse(texts.contains("风"))
         val h2 = res.root.children[0]
-        assertEquals("行内元素保留（删空的 em 也不剪枝）", listOf("span", "em", "strong"), h2.children.map { it.tag })
+        // 字被删光的 `em` 整个走掉（本就空的元素才保留）；剩下 `<strong>` 的结构原样不动。
+        assertEquals("行内元素保留（删空的 em 整个走掉）", listOf("span", "strong"), h2.children.map { it.tag })
     }
 
     @Test

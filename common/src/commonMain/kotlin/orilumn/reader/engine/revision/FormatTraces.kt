@@ -111,14 +111,32 @@ object FormatTraces {
         if (spans.isEmpty()) return
         val opens = spans.sortedWith(compareBy({ it.start }, { -it.endExclusive }))
         for (s in opens) {
-            val (open, _) = InlineMarkup.markerPair(s.sig, text.substring(s.start, s.endExclusive))
+            val (open, _) = tracePair(s.sig, text.substring(s.start, s.endExclusive))
             out += ReviewOverlay.Trace(s.start, open, isNew)
         }
         val closes = spans.sortedWith(compareBy({ it.endExclusive }, { -it.start }))
         for (s in closes) {
-            val (_, close) = InlineMarkup.markerPair(s.sig, text.substring(s.start, s.endExclusive))
+            val (_, close) = tracePair(s.sig, text.substring(s.start, s.endExclusive))
             out += ReviewOverlay.Trace(s.endExclusive, close, isNew)
         }
+    }
+
+    /**
+     * 痕迹里怎么写这个标记：与卡片同一套写法（[InlineMarkup.markerPair]），只把**链接地址**省掉。
+     *
+     * 一个几百字的地址排进正文会把整段撑烂，读者要看的只是「这里原来有个链接」；
+     * 地址本身在卡片里看得见。`](…)` 里的省略号是排版记号，不是地址的一部分。
+     */
+    private fun tracePair(
+        sig: InlineMarkup.StyleSig,
+        content: String,
+    ): Pair<String, String> {
+        val (open, close) = InlineMarkup.markerPair(sig, content)
+        if (sig.tag != "a") return open to close
+        // 语法糖形式 `](地址)` 只留 `](…)`；地址自带 `)` 时卡片退回标签形式，那里同样省掉 href。
+        if (close.startsWith("](")) return open to "](…)"
+        val short = open.replace(Regex("href=\"[^\"]*\""), "href=\"…\"")
+        return short to close
     }
 
     private val InlineMarkup.StyleSpan.key: Triple<Int, Int, String>

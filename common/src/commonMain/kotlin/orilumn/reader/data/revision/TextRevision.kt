@@ -62,6 +62,14 @@ data class TextRevision(
      * 空表 = 老修订（重开时没有块标记）。
      */
     val editedBlocks: List<String> = emptyList(),
+    /**
+     * 整表结构修订的「新行来自旧表哪一行」，与 [editedBlocks] 里的表格行按序对齐：
+     * 0 起下标；`-1` = 读者新加的行。`null` = 老修订 / 非整表修订（重放按行内容自己对齐）。
+     *
+     * 重放靠它把**没选中的行原样留下**（连行 / 格属性、格内行内元素都不动），
+     * 删掉一行后同一位置的行也不会错拿前一行的样式。
+     */
+    val rowSources: List<Int>? = null,
     val delta: Int = 0,
     val groupId: Long = 0,
     val createdAt: Long = 0,

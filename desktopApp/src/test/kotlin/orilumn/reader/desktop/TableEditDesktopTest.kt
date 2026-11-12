@@ -308,6 +308,41 @@ class TableEditDesktopTest {
         }
     }
 
+    /**
+     * 只选中**一行**、把这一行删掉：卡片里只有这一行，提交时把未选中的行一起拼回整张表
+     * 再校验 / 重建。这是真机复报「只选一行删不掉」的回归。
+     */
+    @Test
+    fun deletingOneSelectedRowThroughCard() {
+        val root = Files.createTempDirectory("orilumn-table-one-row").toFile()
+        val host = openHost(writeBook(root), root)
+        try {
+            val pos = runBlocking { host.open() }!!
+            val chapter = pos.chapter
+            val before = body(host, chapter)
+            assertTrue(before.contains("甲二"))
+            val hit = before.indexOf("甲二")
+            val row = host.textEditBlocks(chapter, hit, hit + 1)?.firstOrNull { it.table != null }
+            assertNotNull("选区应命中表格行", row)
+            // 只给这一行的区间（不是整张表）：卡片只列这一行。
+            val rowRange = row!!.start until row.endExclusive
+            val card = cardText(before, listOf(row))
+            assertEquals("卡片只应有一行", 1, lines(card).size)
+
+            val outcome = commit(host, chapter, rowRange, "", pos)
+            assertTrue("只选一行删行应成功：$outcome", outcome is TextEditOutcome.Success)
+            val after = body(host, chapter)
+            assertFalse("被删的行应从正文消失", after.contains("甲二"))
+            assertTrue("其余行仍在", after.contains("甲一") && after.contains("甲三") && after.contains("甲四"))
+            assertTrue("表外段落不受影响", after.contains("表格前面的段落"))
+            val landed = (outcome as TextEditOutcome.Success).pos
+            val page = landed?.let { host.pageLines(it)?.joinToString("") { l -> l.text } }
+            assertFalse("页面上也不应再画出被删的行", page?.contains("甲二") == true)
+        } finally {
+            host.close()
+        }
+    }
+
     /** 合并单元格：卡片走基本 HTML 行，改字照常；删行时 rowspan 越过末行必须拒绝。 */
     @Test
     fun mergedCellsRoundTripAndRowspanGuard() {        val root = Files.createTempDirectory("orilumn-table-merged").toFile()
@@ -403,14 +438,13 @@ class TableEditDesktopTest {
     }
 
     /**
-     * 审阅视图（默认阅读视图在平板）下整表结构同样按结果重建。
+     * 审阅视图（默认阅读视图在平板）里，整表结构修订必须**显示被删掉的内容**。
      *
-     * 桌面壳没有审阅入口，这里直接从宿主拿共享控制器切换，验证的是同一份引擎：
-     * 切到审阅空间后正文与正常视图逐字相同（整表修订按结果占位，不展开「原文 + 插入」），
-     * 且整表改动不画红绿痕迹。
+     * 删掉一行后切到审阅空间：被删的那一行仍留在表里（红字 + 删除线），没改的行照旧，
+     * 整表在审阅空间里比正常视图多出被删文字——与其他文字的审阅显示完全同一套口径。
      */
     @Test
-    fun reviewModeKeepsWholeTableResult() {
+    fun reviewModeKeepsDeletedTableContent() {
         val root = Files.createTempDirectory("orilumn-table-review").toFile()
         val host = openHost(writeBook(root), root)
         try {
@@ -422,13 +456,81 @@ class TableEditDesktopTest {
             val deleted = lines(card).filterNot { it.contains("乙二") }.joinToString("\n")
             assertTrue(commit(host, chapter, range, deleted, pos) is TextEditOutcome.Success)
             val normalText = body(host, chapter)
+            assertFalse("正常视图里被删的行已经不在", normalText.contains("乙二"))
 
             val landed = runBlocking { host.switchReviewMode(true, chapter, 0) }
             assertNotNull("应能切到审阅空间", landed)
             assertTrue(host.isReviewMode())
-            assertEquals("审阅空间与正常视图对整表修改应同尺", normalText, body(host, chapter))
-            assertTrue("整表修改不画红绿痕迹", host.reviewMarks(chapter).isEmpty())
-            assertFalse("审阅空间里也不该出现被删的行", body(host, chapter).contains("甲二"))
+            val reviewText = body(host, chapter)
+            assertTrue("审阅空间里被删的行要留在原处：$reviewText", reviewText.contains("乙二"))
+            assertTrue("其余行照旧在", reviewText.contains("甲二") && reviewText.contains("甲四"))
+            assertTrue("审阅空间比正常视图长（原文一字不删）", reviewText.length > normalText.length)
+            val marks = host.reviewMarks(chapter)
+            assertTrue("被删的表内容应标红（红字 + 删除线）", marks.any { it.deleted })
+            assertFalse("这次只删了内容，没有新增", marks.any { !it.deleted })
+        } finally {
+            host.close()
+        }
+    }
+
+    /**
+     * 审阅视图里整表结构修订只作对照：点表上任何一行都不能把整张表改没。
+     *
+     * 真机复报：先删过一行（表上压着一条整表结构修订），进审阅视图再清空一行，
+     * 整张表连同其余行都没了。现在审阅空间里同一张表同时有旧行与新行，直接编辑分不清
+     * 改的是哪一份，所以这类表在审阅视图里明确拒绝，并提示切回普通视图。
+     */
+    @Test
+    fun reviewModeRejectsEditingStructurallyChangedTable() {
+        val root = Files.createTempDirectory("orilumn-table-review-row").toFile()
+        val host = openHost(writeBook(root), root)
+        try {
+            val pos = runBlocking { host.open() }!!
+            val chapter = pos.chapter
+            val before = body(host, chapter)
+            val (range, blocks) = tableBlocks(host, chapter, before)
+            val card = cardText(before, blocks)
+            val deleted = lines(card).filterNot { it.contains("乙二") }.joinToString("\n")
+            assertTrue(commit(host, chapter, range, deleted, pos) is TextEditOutcome.Success)
+
+            val landedReview = runBlocking { host.switchReviewMode(true, chapter, 0) }
+            assertNotNull("应能切到审阅空间", landedReview)
+            assertTrue(host.isReviewMode())
+            val reviewText = body(host, chapter)
+            assertTrue("其余行还在", reviewText.contains("甲三") && reviewText.contains("甲四"))
+
+            // 审阅视图里只选中一行（甲三行），清空卡片。
+            val hit = reviewText.indexOf("甲三")
+            assertTrue(hit >= 0)
+            val row = host.textEditBlocks(chapter, hit, hit + 1)?.firstOrNull { it.table != null }
+            assertNotNull("选区应命中表格行", row)
+            val rowRange = row!!.start until row.endExclusive
+            val outcome = commit(host, chapter, rowRange, "", landedReview)
+            assertTrue("审阅视图里这类表应明确拒绝：$outcome", outcome is TextEditOutcome.Rejected)
+            assertTrue(
+                "拒绝原因要告诉读者切回普通视图",
+                (outcome as TextEditOutcome.Rejected).reason.contains("普通视图"),
+            )
+
+            val after = body(host, chapter)
+            assertTrue("整张表不能消失", after.contains("甲一"))
+            assertTrue("被删的旧行仍作对照", after.contains("乙二"))
+            assertTrue("其他行仍在", after.contains("甲三") && after.contains("甲四"))
+            assertTrue("表外段落不受影响", after.contains("表格前面的段落"))
+            val back = runBlocking { host.switchReviewMode(false, chapter, 0) }
+            assertNotNull("应能切回正常视图", back)
+            host.pageLines(back!!)
+            // 文本投影在后台回填，刚切完可能还没就绪（与上面普通改字那条一样等一拍）。
+            var normalText = body(host, chapter)
+            var waited = 0
+            while (normalText.isEmpty() && waited < 2_000) {
+                Thread.sleep(20)
+                waited += 20
+                host.pageLines(back)
+                normalText = body(host, chapter)
+            }
+            assertTrue("正常视图里表也在", normalText.contains("甲一") && normalText.contains("甲四"))
+            assertFalse("正常视图里被删的行仍不在", normalText.contains("乙二"))
         } finally {
             host.close()
         }
@@ -436,8 +538,7 @@ class TableEditDesktopTest {
 
     /** 开书即审阅（桌面默认走这里）：首屏就已经在审阅空间，不用先排正常视图再切。 */
     @Test
-    fun opensDirectlyInReviewMode() {
-        val root = Files.createTempDirectory("orilumn-review-open").toFile()
+    fun opensDirectlyInReviewMode() {        val root = Files.createTempDirectory("orilumn-review-open").toFile()
         val host = openHost(writeBook(root), root, reviewMode = true)
         try {
             val pos = runBlocking { host.open() }

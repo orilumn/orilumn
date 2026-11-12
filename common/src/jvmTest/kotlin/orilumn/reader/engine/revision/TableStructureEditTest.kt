@@ -1,6 +1,7 @@
 package orilumn.reader.engine.revision
 
 import orilumn.reader.data.revision.TextRevision
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -36,6 +37,7 @@ class TableStructureEditTest {
         revisions: List<TextRevision> = emptyList(),
         start: Int = 0,
         endExclusive: Int = 8,
+        replacementStyles: List<InlineMarkup.StyleSpan>? = null,
         tableOfLeaf: (Int) -> TableRowInfo? = { i ->
             when (i) {
                 0 -> row0
@@ -52,6 +54,7 @@ class TableStructureEditTest {
         endExclusive = endExclusive,
         replacement = replacement,
         blocks = pieces,
+        replacementStyles = replacementStyles,
         map = ChapterRevisionMap(revisions),
         groupId = 99,
         now = 1234,
@@ -182,6 +185,143 @@ class TableStructureEditTest {
         assertEquals("X", r.text)
         assertEquals("单行修订带自己的格短码", 1, r.editedBlocks.size)
         assertTrue(r.editedBlocks.first().startsWith("t"))
+    }
+
+    @Test
+    fun `clearing one selected row deletes only that row`() {
+        // 只选中第一行、把这一行清空：未选中的第二行要原样留在表里，整张表仍然自洽。
+        val p = ready(plan(listOf(InlineMarkup.Segment("")), "", start = 0, endExclusive = 4))
+        val r = p.inserted.single()
+        assertEquals(0, r.charStart)
+        assertEquals(8, r.charEnd)
+        assertEquals("efgh", r.text)
+        assertEquals(-4, r.delta)
+        assertEquals("删掉第一行后只剩第二行", 1, r.editedBlocks.size)
+        assertTrue("整表修订首行仍用大写 T", r.editedBlocks.first().startsWith("T"))
+        assertEquals("abcdefgh", r.originalText)
+        assertEquals("efgh", r.editedText)
+        assertEquals("剩下的一行来自旧表第 2 行", listOf(1), r.rowSources)
+    }
+
+    @Test
+    fun `row alignment keeps the rows after a deleted middle row`() {
+        // 整表卡片里删掉中间一行：后面的行不能因为位置前移就被当成「改了字」。
+        val oldRows = listOf(cells(2, 2), cells(2, 2), cells(2, 2), cells(2, 2))
+        val oldTexts = listOf("甲一乙一", "甲二乙二", "甲三乙三", "甲四乙四")
+        val newRows = listOf(oldRows[0], oldRows[2], oldRows[3])
+        val newTexts = listOf(oldTexts[0], oldTexts[2], oldTexts[3])
+        assertArrayEquals(
+            intArrayOf(0, 2, 3),
+            alignTableRows(oldTexts, oldRows, newTexts, newRows),
+        )
+    }
+
+    @Test
+    fun `deleting the last selected row keeps the first row`() {
+        val p = ready(plan(listOf(InlineMarkup.Segment("")), "", start = 4, endExclusive = 8))
+        val r = p.inserted.single()
+        assertEquals(0, r.charStart)
+        assertEquals(8, r.charEnd)
+        assertEquals("abcd", r.text)
+        assertEquals(-4, r.delta)
+        assertEquals("abcd", r.editedText)
+        assertEquals("剩下的第一行仍是旧表第一行", listOf(0), r.rowSources)
+    }
+
+    @Test
+    fun `adding a row after the selected row rewrites the whole table`() {
+        val p = ready(
+            plan(
+                listOf(row("efgh"), row("ijkl")),
+                "efghijkl",
+                start = 4,
+                endExclusive = 8,
+            ),
+        )
+        val r = p.inserted.single()
+        assertEquals(0, r.charStart)
+        assertEquals(8, r.charEnd)
+        assertEquals("abcdefghijkl", r.text)
+        assertEquals(4, r.delta)
+        assertEquals(3, r.editedBlocks.count { it.startsWith("t") || it.startsWith("T") })
+        assertTrue(r.editedBlocks.first().startsWith("T"))
+        assertEquals("未选中的首行 + 改过的行 + 新加的行", listOf(0, 1, -1), r.rowSources)
+    }
+
+    @Test
+    fun `changing one row shape is allowed when the whole table stays consistent`() {
+        // 第一行两格合成一格（colspan=2），第二行仍是两格：整张表还是 2 列。
+        val wide = InlineMarkup.Segment(
+            "abcd",
+            table = TableRowInfo(listOf(TableCellInfo(0, 4, header = false, colspan = 2))),
+        )
+        val p = ready(plan(listOf(wide), "abcd", start = 0, endExclusive = 4))
+        val r = p.inserted.single()
+        assertEquals("abcdefgh", r.text)
+        assertEquals(0, r.delta)
+        assertTrue(r.editedBlocks.first().startsWith("T"))
+    }
+
+    @Test
+    fun `styles on a later selected row are shifted into the whole-table card`() {
+        val sig = InlineMarkup.StyleSig("em")
+        val p = ready(
+            plan(
+                pieces = listOf(row("efgh"), row("ijkl")),
+                replacement = "efghijkl",
+                start = 4,
+                endExclusive = 8,
+                replacementStyles = listOf(InlineMarkup.StyleSpan(0, 1, sig)),
+            ),
+        )
+        val r = p.inserted.single()
+        assertEquals("重放样式落在整表文字里的这一格", 4, r.styles!!.single().start)
+        assertEquals("重开卡片的样式按输入区（abcd\\nefgh）算", 5, r.editedStyles!!.single().start)
+    }
+
+    @Test
+    fun `changing a header row by pipe still restores the header`() {
+        // 管道行写不出 `<th>`：只改表头行的字也要按整表重建，把表头补回去。
+        val header0 = TableRowInfo(
+            listOf(TableCellInfo(0, 2, header = true), TableCellInfo(2, 4, header = true)),
+        )
+        val p = ready(
+            plan(
+                pieces = listOf(InlineMarkup.Segment("abXd", table = cells(2, 2))),
+                replacement = "abXd",
+                start = 0,
+                endExclusive = 4,
+                tableOfLeaf = { i -> if (i == 0) header0 else row1 },
+            ),
+        )
+        val r = p.inserted.single()
+        assertEquals("abXdefgh", r.text)
+        assertEquals("Tm;2,1,1,1;2,1,1,1", r.editedBlocks.first())
+    }
+
+    @Test
+    fun `deleting a row that a rowspan still needs is rejected`() {
+        // 第一行的格往下占两行：删掉第二行会让 rowspan 越过末行，整张表不自洽。
+        val tall = TableRowInfo(
+            listOf(
+                TableCellInfo(0, 2, header = false, rowspan = 2),
+                TableCellInfo(2, 4, header = false),
+            ),
+        )
+        val second = TableRowInfo(listOf(TableCellInfo(0, 4, header = false)))
+        rejected(
+            plan(
+                pieces = listOf(InlineMarkup.Segment("")),
+                replacement = "",
+                start = 4,
+                endExclusive = 8,
+                tableOfLeaf = { i -> when (i) {
+                    0 -> tall
+                    1 -> second
+                    else -> null
+                } },
+            ),
+        )
     }
 
     @Test

@@ -61,8 +61,9 @@ object RevisionStyles {
         edited: List<RevisionStyleSpan>? = null,
         blocks: List<String>? = null,
         editedBlocks: List<String>? = null,
+        rowSources: List<Int>? = null,
     ): String {
-        if (spans == null && edited == null && blocks == null && editedBlocks == null) return ""
+        if (spans == null && edited == null && blocks == null && editedBlocks == null && rowSources == null) return ""
         return buildJsonObject {
             put("v", JsonPrimitive(VERSION))
             spans?.let { put("s", toArray(it)) }
@@ -70,6 +71,8 @@ object RevisionStyles {
             // 块级形态：可选键（老版本忽略），不因新增而 +1。
             blocks?.takeIf { it.isNotEmpty() }?.let { put("b", toStrings(it)) }
             editedBlocks?.takeIf { it.isNotEmpty() }?.let { put("eb", toStrings(it)) }
+            // 整表修订的行来源（与 `eb` 的表格行对齐）：可选键，老数据没有就按内容对齐。
+            rowSources?.let { put("rs", JsonArray(it.map { n -> JsonPrimitive(n) })) }
         }.toString()
     }
 
@@ -104,6 +107,23 @@ object RevisionStyles {
 
     /** 解析输入区每行的块形态（重开卡片用）；老修订返回空表。 */
     fun decodeEditedBlocks(raw: String): List<String> = decodeStrings(raw, "eb")
+
+    /**
+     * 解析整表修订的「行来源」（与 `eb` 的表格行对齐）；老修订 / 非整表修订返回 null。
+     *
+     * `-1` 保留（读者新加的行），其余为非负下标；坏数据整段当没有，重放退回按内容对齐。
+     */
+    fun decodeRowSources(raw: String): List<Int>? {
+        if (raw.isBlank()) return null
+        return runCatching {
+            val root = json.parseToJsonElement(raw).jsonObject
+            val version = root["v"]?.jsonPrimitive?.intOrNull ?: 0
+            if (version > VERSION) return null
+            val array = root["rs"]?.jsonArray ?: return null
+            val out = array.map { it.jsonPrimitive.intOrNull ?: return null }
+            out.takeIf { it.isNotEmpty() && it.all { n -> n >= -1 } }
+        }.getOrNull()
+    }
 
     private fun decodeStrings(raw: String, key: String): List<String> {
         if (raw.isBlank()) return emptyList()

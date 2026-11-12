@@ -243,7 +243,7 @@ class EditCardTest {
     }
 
     @Test
-    fun tableAllowsShorterCellsButNotAChangedShape() {
+    fun tableShapeChangesAreLeftToTheWholeTableGridCheck() {
         val original = table(2, 2)
         val tables = listOf(original)
 
@@ -259,20 +259,17 @@ class EditCardTest {
             ),
         )
 
-        // 合并方式变了（第一格 colspan 2）：拒绝。
+        // 只选中几行时也可能改合并方式 / 列数：本层不拦，提交时把未选中的行一起拼回
+        // 整张表再按网格校验（能铺成矩形就放行）。
         val merged = table(2, 1, colspan = 2)
-        assertEquals(
-            "表格只能改格子里的字，不能改列数或合并方式（要改请只选中这张表）",
+        assertNull(
             textEditShapeError(
                 listOf(InlineMarkup.Segment("aXc", null, merged)),
                 tables,
                 emptyList(),
             ),
         )
-
-        // 列数变了（两格并成一格）：拒绝。
-        assertEquals(
-            "表格只能改格子里的字，不能改列数或合并方式（要改请只选中这张表）",
+        assertNull(
             textEditShapeError(
                 listOf(InlineMarkup.Segment("abcd", null, table(4))),
                 tables,
@@ -282,10 +279,25 @@ class EditCardTest {
     }
 
     @Test
-    fun deletingTheWholeTableRowIsRejected() {
+    fun deletingSelectedTableRowsIsLeftToTheWholeTableGridCheck() {
+        // 空卡片 = 删掉选中的行；未选中的行原样保留，提交侧按整表网格校验。
+        assertNull(textEditShapeError(emptyList(), listOf(table(2, 2)), emptyList()))
+    }
+
+    @Test
+    fun tableMixedWithOtherParagraphsStillCannotChangeShape() {
+        val original = table(2, 2)
+        val merged = table(2, 1, colspan = 2)
         assertEquals(
-            "表格只能改格子里的字（改整张表请只选中它）",
-            textEditShapeError(emptyList(), listOf(table(2, 2)), emptyList()),
+            "要改列数或合并方式，请只选中表格的整行（不夹别的段落）",
+            textEditShapeError(
+                listOf(
+                    InlineMarkup.Segment("aXc", null, merged),
+                    InlineMarkup.Segment("段落"),
+                ),
+                listOf(original, null),
+                emptyList(),
+            ),
         )
     }
 

@@ -201,3 +201,108 @@ object TableGrid {
     /** 网格是否自洽（0 行 = 删表，合法）。 */
     fun consistent(rows: List<TableRowInfo>): Boolean = columns(rows) >= 0
 }
+
+/**
+ * 卡片里的新行 → 旧表行下标（`-1` = 读者新加的行）。
+ *
+ * 先按「行文字 + 形状（格数 / 合并方式，表头不参与）」求最长公共子序列，完全相同的行
+ * 一定对上；两段相同行之间的缺口再按数量配对：新行更少就从后往前配（前面多出来的是删行），
+ * 新行更多就从前往后配（后面多出来的是加行），一样多就按位置配（改字）。
+ *
+ * 整表结构修订靠它把「删了一行」与「改了一行」分开：只按位置配会把删行后面的行全部
+ * 当成改字，审阅视图里就会多出一堆不该有的绿字。
+ */
+internal fun alignTableRows(
+    oldTexts: List<String>,
+    oldRows: List<TableRowInfo>,
+    newTexts: List<String>,
+    newRows: List<TableRowInfo>,
+): IntArray = alignRowsByKey(
+    oldTexts.mapIndexed { i, t -> rowKey(t, oldRows[i]) },
+    newTexts.mapIndexed { i, t -> rowKey(t, newRows[i]) },
+)
+
+/**
+ * 两串行键的最长公共子序列对齐：返回新行 → 旧行下标（`-1` = 新加的行）。
+ *
+ * 键完全相同的行一定对上；两段相同行之间的缺口再按数量配对：新行更少就从后往前配
+ * （前面多出来的是删行），新行更多就从前往后配（后面多出来的是加行），一样多就按位置配
+ * （改字）。只按位置配会把删行后面的行全部当成改字。
+ */
+internal fun alignRowsByKey(oldKeys: List<String>, newKeys: List<String>): IntArray {
+    val n = oldKeys.size
+    val m = newKeys.size
+    val sources = IntArray(m) { -1 }
+    if (n == 0 || m == 0) return sources
+    // 行数通常很少；真遇到超大表（上万行）就退回线性对齐，别为一张表吃掉几百 MB。
+    if (n.toLong() * m > 1_000_000L) {
+        var prefix = 0
+        while (prefix < n && prefix < m && oldKeys[prefix] == newKeys[prefix]) prefix++
+        var suffix = 0
+        while (suffix < n - prefix && suffix < m - prefix &&
+            oldKeys[n - 1 - suffix] == newKeys[m - 1 - suffix]
+        ) {
+            suffix++
+        }
+        for (i in 0 until prefix) sources[i] = i
+        for (i in 0 until suffix) sources[m - 1 - i] = n - 1 - i
+        val middle = minOf(n - prefix - suffix, m - prefix - suffix)
+        for (i in 0 until middle) sources[prefix + i] = prefix + i
+        return sources
+    }
+    // 行数通常很少，平方复杂度可以接受。
+    val dp = Array(n + 1) { IntArray(m + 1) }
+    for (i in n - 1 downTo 0) {
+        for (j in m - 1 downTo 0) {
+            dp[i][j] = if (oldKeys[i] == newKeys[j]) {
+                dp[i + 1][j + 1] + 1
+            } else {
+                maxOf(dp[i + 1][j], dp[i][j + 1])
+            }
+        }
+    }
+    val matches = ArrayList<IntArray>(minOf(n, m) + 1)
+    var i = 0
+    var j = 0
+    while (i < n && j < m) {
+        when {
+            oldKeys[i] == newKeys[j] -> {
+                matches += intArrayOf(i, j)
+                i++
+                j++
+            }
+            dp[i + 1][j] >= dp[i][j + 1] -> i++
+            else -> j++
+        }
+    }
+    matches += intArrayOf(n, m)
+    var oi = 0
+    var nj = 0
+    for (match in matches) {
+        val mi = match[0]
+        val mj = match[1]
+        val oldCount = mi - oi
+        val newCount = mj - nj
+        if (newCount > 0) {
+            if (oldCount > newCount) {
+                val from = oi + (oldCount - newCount)
+                for (k in 0 until newCount) sources[nj + k] = from + k
+            } else {
+                val pair = minOf(oldCount, newCount)
+                for (k in 0 until pair) sources[nj + k] = oi + k
+            }
+        }
+        if (mi < n) sources[mj] = mi
+        oi = mi + 1
+        nj = mj + 1
+    }
+    return sources
+}
+
+private fun rowKey(text: String, row: TableRowInfo): String = buildString {
+    append(text)
+    append('\u0000')
+    for (c in row.cells) {
+        append(c.rowspan).append(':').append(c.colspan).append(';')
+    }
+}

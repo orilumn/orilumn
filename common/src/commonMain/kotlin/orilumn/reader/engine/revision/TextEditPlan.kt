@@ -59,10 +59,10 @@ sealed interface TextEditPlan {
  */
 object TextEditPlanner {
 
-    /** 整块图片 / 表格行那类叶的编辑边界：只允许整张删图、改格里的字。 */
+    /** 逐叶校验时的提示：图片只能整张删；表格行不能和段落混着一起改。 */
     private const val SPECIAL_LEAF_REASON =
-        "图片只能整张删除、不能改成文字；表格只能改格子里的字" +
-            "（要改行列或合并方式，请只选中这张表）"
+        "图片只能整张删除、不能改成文字；表格行不能和别的段落混在一起改，" +
+            "要改行列或合并方式请只选中表格的整行"
 
     /** 表格行列不自洽时的提示（整表修改只在网格能铺成矩形时放行）。 */
     private const val TABLE_GRID_REASON =
@@ -190,8 +190,42 @@ object TextEditPlanner {
             return planTable(
                 bookId, chapter, chapterText, map, groupId, now, toOriginal, renderedInterval,
                 editStart, editEnd, pieces, replacementStyles,
-                firstLeaf, lastLeaf, tableOfLeaf,
+                firstLeaf, lastLeaf, tableOfLeaf, wholeTable, tableRangeOf,
             )
+        }
+        // 选区**整段落在同一张表里**（不要求覆盖整张表）：只选中其中几行也能删行 / 加行 / 改格数。
+        // 纯改格里的字且不涉及表头时仍走下面的逐行小修订；结构一变就按**整张表**重建并校验网格。
+        val tableRange = tableRangeOf(firstLeaf)?.takeIf { tableRangeOf(lastLeaf) == it }
+        val tableOnly = tableRange != null && tableish &&
+            editStart >= tableRange.first && editEnd <= tableRange.last + 1
+        if (tableOnly) {
+            val table = tableRange
+            val selectedRows = (firstLeaf..lastLeaf).mapNotNull(tableOfLeaf)
+            val deletingRows = pieces.all { it.text.isEmpty() } && pieces.none { it.table != null }
+            val shapeChanged = deletingRows || pieces.size != selectedRows.size ||
+                pieces.indices.any { i ->
+                    val now = pieces[i].table ?: return@any true
+                    val original = selectedRows.getOrNull(i) ?: return@any true
+                    !original.sameShape(now, ignoreHeader = !now.html)
+                }
+            // 管道行写不出 `<th>`：表头行只改字也要走整表重建，按原位把表头补回去。
+            val pipeHeader = !deletingRows && pieces.indices.any { i ->
+                val now = pieces[i].table
+                now != null && !now.html && selectedRows.getOrNull(i)?.cells?.any { it.header } == true
+            }
+            // 表上已经压着一处整表修订时，连只改字也按整表重写（旧修订整段吸收）。
+            val hasWholeTableRevision = map.revisions.any { r ->
+                isWholeTableRevision(r) && renderedInterval(r).let { rr ->
+                    rr.first < table.last + 1 && rr.last + 1 > table.first
+                }
+            }
+            if (shapeChanged || pipeHeader || hasWholeTableRevision) {
+                return planTable(
+                    bookId, chapter, chapterText, map, groupId, now, toOriginal, renderedInterval,
+                    editStart, editEnd, pieces, replacementStyles,
+                    firstLeaf, lastLeaf, tableOfLeaf, table, tableRangeOf,
+                )
+            }
         }
         // 这张表上已经压着一处**整表修订**时，本次编辑必须也正好是这张表：否则吸收 / 分段落字
         // 都拿不准该按哪把尺（整表修订的文字不是逐行可切的）。
@@ -454,12 +488,13 @@ object TextEditPlanner {
     }
 
     /**
-     * **整张表**一次改：行数、每行格数、合并方式都可以与原来不同，只要 [TableGrid] 判它们
+     * **一整张表**一次改：行数、每行格数、合并方式都可以与原来不同，只要 [TableGrid] 判它们
      * 能铺成一个矩形网格就放行。0 行 = 删掉整张表。
      *
-     * 落库是一条修订：区间 = 整张表的字符区间（不裁公共前后缀——行界不是普通文字），
-     * `text` = 各行文字**直接相接**（行界由 `editedBlocks` 的 `t…` 短码长度给出，不用
-     * [RevisionBlocks.SEPARATOR]）；首行短码用大写 `T` 标记「这是整表结构修订」。
+     * 选区可以覆盖整张表，也可以只覆盖其中连续几行：未选中的行原样保留，和卡片里的新行拼成
+     * 整张表后再校验。落库仍是一条修订：区间 = **整张表**的字符区间（不裁公共前后缀——行界
+     * 不是普通文字），`text` = 各行文字**直接相接**（行界由 `editedBlocks` 的 `t…` 短码长度
+     * 给出，不用 [RevisionBlocks.SEPARATOR]）；首行短码用大写 `T` 标记「这是整表结构修订」。
      * 重放按它整表重建（见 `ChapterRevisionReplay.TableEdit`）。
      */
     private fun planTable(
@@ -478,6 +513,8 @@ object TextEditPlanner {
         firstLeaf: Int,
         lastLeaf: Int,
         tableOfLeaf: (Int) -> TableRowInfo?,
+        tableRange: IntRange,
+        tableRangeOf: (Int) -> IntRange?,
     ): TextEditPlan {
         // 整张表被删空：输入区一个表格行都不剩（读者把行全删了）。留着空 `<tr>` 标签不算删表。
         val deleting = pieces.all { it.text.isEmpty() } && pieces.none { it.table != null }
@@ -485,31 +522,33 @@ object TextEditPlanner {
         if (!deleting && rows.size != pieces.size) {
             return TextEditPlan.Rejected("表格里混进了非表格行；一行要么是表格行，要么整张表一起删掉")
         }
-        if (!TableGrid.consistent(rows)) return TextEditPlan.Rejected(TABLE_GRID_REASON)
-        // 表内已有修订整段吸收：整表重写之后，按行落字的旧修订不再有意义。
-        val absorbed = map.revisions.filter { r ->
-            val rr = renderedInterval(r)
-            if (r.isInsertion) {
-                rr.first > start && rr.first < endExclusive
-            } else {
-                rr.first < endExclusive && rr.last + 1 > start
-            }
+        // 结构修订必须覆盖整张表：向两侧扩到同一张表的所有行。重放按区间整表重建，
+        // 漏掉任何一行都会把未选中的行重复 / 丢掉。
+        var firstRowLeaf = firstLeaf
+        while (firstRowLeaf > 0 && tableRangeOf(firstRowLeaf - 1) == tableRange) firstRowLeaf--
+        var lastRowLeaf = lastLeaf
+        while (tableRangeOf(lastRowLeaf + 1) == tableRange) lastRowLeaf++
+        val originalRows = (firstRowLeaf..lastRowLeaf).mapNotNull(tableOfLeaf)
+        if (originalRows.size != lastRowLeaf - firstRowLeaf + 1) {
+            return TextEditPlan.Rejected("表格结构尚未就绪，请稍后再试")
         }
-        val uRenderStart = minOf(start, absorbed.minOfOrNull { renderedInterval(it).first } ?: start)
-        val uRenderEnd = maxOf(endExclusive, absorbed.maxOfOrNull { renderedInterval(it).last + 1 } ?: endExclusive)
-        if (uRenderStart != start || uRenderEnd != endExclusive) {
-            return TextEditPlan.Rejected("表格边界上压着另一处修改，请先撤掉它再改这张表")
+        val selFirst = firstLeaf - firstRowLeaf
+        val selLast = lastLeaf - firstRowLeaf
+        if (selFirst < 0 || selLast < selFirst || selLast >= originalRows.size) {
+            return TextEditPlan.Rejected("表格边界对不上，请重新选中后再改")
         }
-        val uStart = toOriginal(uRenderStart)
-        val uEnd = toOriginal(uRenderEnd)
-        val oldText = chapterText.substring(start, endExclusive)
-        val newText = pieces.joinToString("") { it.text }
-        val originalRows = (firstLeaf..lastLeaf).mapNotNull(tableOfLeaf)
-        // 管道行写不出「哪一格是 `<th>`」：按原位把原表的表头补回（读者改过的 `<th>` / `<td>`
-        // 形式自己带着，不动）。行按位置对齐 —— 删行 / 加行后，同一位置沿用原行的表头口径。
+        val selectedOriginal = originalRows.subList(selFirst, selLast + 1)
+        // 新行 → 选中旧行的真实来源：删了一行时不能按位置配，否则删行后面的行全被当成改字。
+        val selectedTexts = rowSegments(chapterText, start, selectedOriginal).map { it.text }
+        val newTexts = if (deleting) emptyList() else pieces.map { it.text }
+        val newSources = alignTableRows(selectedTexts, selectedOriginal, newTexts, rows)
+        // 管道行写不出「哪一格是 `<th>`」：按**来源行**把原表的表头补回（读者改过的
+        // `<th>` / `<td>` 形式自己带着，不动）。
         val restoredRows = rows.mapIndexed { i, row ->
             if (row.html) return@mapIndexed row
-            val original = originalRows.getOrNull(i) ?: return@mapIndexed row
+            val src = newSources.getOrNull(i) ?: -1
+            if (src < 0) return@mapIndexed row
+            val original = selectedOriginal.getOrNull(src) ?: return@mapIndexed row
             if (original.cells.size != row.cells.size) return@mapIndexed row
             row.copy(
                 cells = row.cells.mapIndexed { k, cell ->
@@ -517,15 +556,77 @@ object TextEditPlanner {
                 },
             )
         }
-        val sameRows = originalRows.size == restoredRows.size &&
-            restoredRows.indices.all { originalRows[it].sameStructure(restoredRows[it]) }
+        val beforeRows = originalRows.subList(0, selFirst)
+        val afterRows = originalRows.subList(selLast + 1, originalRows.size)
+        val combined = beforeRows + restoredRows + afterRows
+        if (!TableGrid.consistent(combined)) return TextEditPlan.Rejected(TABLE_GRID_REASON)
+        // 未选中的行按原样拼回去；选区必须正好贴住这几行的整行文字，前缀 / 后缀才切得开。
+        val prefix = chapterText.substring(tableRange.first, start)
+        val suffix = chapterText.substring(endExclusive, tableRange.last + 1)
+        if (prefix.length != beforeRows.sumOf { it.textLength } ||
+            suffix.length != afterRows.sumOf { it.textLength }
+        ) {
+            return TextEditPlan.Rejected("表格边界对不上，请重新选中后再改")
+        }
+        val beforeSegments = rowSegments(chapterText, tableRange.first, beforeRows)
+        val afterSegments = rowSegments(chapterText, endExclusive, afterRows)
+        val newSegments = if (deleting) {
+            emptyList()
+        } else {
+            pieces.mapIndexed { i, p ->
+                InlineMarkup.Segment(p.text, p.block, restoredRows.getOrNull(i) ?: p.table)
+            }
+        }
+        val allSegments = beforeSegments + newSegments + afterSegments
+        val oldText = chapterText.substring(tableRange.first, tableRange.last + 1)
+        val newText = allSegments.joinToString("") { it.text }
+        // 表内已有修订整段吸收：整表重写之后，按行落字的旧修订不再有意义。
+        val absorbed = map.revisions.filter { r ->
+            val rr = renderedInterval(r)
+            if (r.isInsertion) {
+                rr.first > tableRange.first && rr.first < tableRange.last + 1
+            } else {
+                rr.first < tableRange.last + 1 && rr.last + 1 > tableRange.first
+            }
+        }
+        // 每行来自旧表哪一行（`-1` = 读者新加）：重放按它原样留下没选中的行，
+        // 删行后同一位置也不会错拿前一行的样式。
+        // 序号是**当前渲染表**的行号；若这张表上还压着一条整表修订（本次要吸收它），
+        // 重放却是从原书那棵树起排的，得按那条修订自己的行来源再折算回原书。
+        val renderedSources = ArrayList<Int>(allSegments.size)
+        beforeSegments.indices.forEach { renderedSources += it }
+        newSegments.indices.forEach { i ->
+            val src = newSources.getOrNull(i) ?: -1
+            renderedSources += if (src >= 0) selFirst + src else -1
+        }
+        afterSegments.indices.forEach { i -> renderedSources += selLast + 1 + i }
+        val prevWhole = absorbed.firstOrNull(::isWholeTableRevision)
+        val prevSources = prevWhole?.rowSources
+        val rowSources: List<Int>? = when {
+            prevWhole == null -> renderedSources
+            prevSources == null -> null
+            prevSources.size != originalRows.size -> null
+            else -> renderedSources.map { r -> if (r < 0) -1 else prevSources[r] }
+        }
+        val uRenderStart = minOf(tableRange.first, absorbed.minOfOrNull { renderedInterval(it).first } ?: tableRange.first)
+        val uRenderEnd = maxOf(
+            tableRange.last + 1,
+            absorbed.maxOfOrNull { renderedInterval(it).last + 1 } ?: (tableRange.last + 1),
+        )
+        if (uRenderStart != tableRange.first || uRenderEnd != tableRange.last + 1) {
+            return TextEditPlan.Rejected("表格边界上压着另一处修改，请先撤掉它再改这张表")
+        }
+        val uStart = toOriginal(uRenderStart)
+        val uEnd = toOriginal(uRenderEnd)
+        val sameRows = originalRows.size == combined.size &&
+            combined.indices.all { originalRows[it].sameStructure(combined[it]) }
         if (newText == oldText && sameRows && absorbed.isEmpty()) {
             return TextEditPlan.Ready(
                 chapter = chapter,
                 deletedIds = emptyList(),
                 inserted = emptyList(),
-                renderedStart = start,
-                renderedEndExclusive = start + newText.length,
+                renderedStart = tableRange.first,
+                renderedEndExclusive = tableRange.first + newText.length,
                 noop = true,
             )
         }
@@ -535,7 +636,8 @@ object TextEditPlanner {
         } else {
             val out = ArrayList<InlineMarkup.StyleSpan>()
             var cursor = 0
-            var rowStart = 0
+            // 未选中的前行在整表文字里占的偏移：卡片样式只落在选中行上，整体后移这一段。
+            var rowStart = prefix.length
             for (p in pieces) {
                 val lineEnd = cursor + p.text.length
                 for (sp in replacementStyles) {
@@ -554,10 +656,10 @@ object TextEditPlanner {
         }
         // 每行一个 `t…` 短码，首行大写 `T`；格内硬换行（`<br>`）的续行照常记上，
         // 重开卡片时才能把行文字原样拼回去。
-        val blocks = ArrayList<String>(pieces.size + 2)
-        pieces.forEachIndexed { i, p ->
-            val row = restoredRows.getOrNull(i) ?: p.table
-            if (row != null && !deleting) {
+        val blocks = ArrayList<String>(allSegments.size + 2)
+        allSegments.forEachIndexed { i, p ->
+            val row = p.table
+            if (row != null) {
                 blocks.add(row.wire(wholeTable = i == 0))
             } else if (i == 0) {
                 // 删表：只留一个标记，没有行可描述。
@@ -567,6 +669,12 @@ object TextEditPlanner {
         }
         if (blocks.isEmpty()) blocks.add("T")
         val renderedLen = newText.length
+        // `editedStyles` 是**输入区**坐标（行与行之间有 `\n`）：未选中的前行整体后移
+        // （文字 + 每行一个换行）。不后移的话，重开这张整表修订时样式会落到别的行上。
+        val cardShift = prefix.length + beforeRows.size
+        val editedStyles = replacementStyles?.map { sp ->
+            InlineMarkup.StyleSpan(sp.start + cardShift, sp.endExclusive + cardShift, sp.sig)
+        }
         return TextEditPlan.Ready(
             chapter = chapter,
             deletedIds = absorbed.map { it.id },
@@ -578,22 +686,39 @@ object TextEditPlanner {
                     charEnd = uEnd,
                     text = newText,
                     originalText = oldText,
-                    editedText = InlineMarkup.joinSegments(pieces),
+                    editedText = InlineMarkup.joinSegments(allSegments),
                     editedBlocks = blocks,
                     // 表格结构走自己的通道（`editedBlocks` 的大写 `T`），不混 markdown 块形态。
                     blockKinds = emptyList(),
                     styles = mappedStyles?.let(InlineMarkup::toStored),
-                    editedStyles = replacementStyles?.let(InlineMarkup::toStored),
+                    editedStyles = editedStyles?.let(InlineMarkup::toStored),
+                    rowSources = rowSources,
                     delta = renderedLen - (uEnd - uStart),
                     groupId = groupId,
                     createdAt = now,
                     updatedAt = now,
                 ),
             ),
-            renderedStart = start,
-            renderedEndExclusive = start + renderedLen,
+            renderedStart = tableRange.first,
+            renderedEndExclusive = tableRange.first + renderedLen,
             noop = false,
         )
+    }
+
+    /** 把整表里未选中的行按各自文字长度切成卡片分段（一行一段）。 */
+    private fun rowSegments(
+        chapterText: String,
+        from: Int,
+        rows: List<TableRowInfo>,
+    ): List<InlineMarkup.Segment> {
+        val out = ArrayList<InlineMarkup.Segment>(rows.size)
+        var at = from
+        for (row in rows) {
+            val end = at + row.textLength
+            out.add(InlineMarkup.Segment(chapterText.substring(at, end), table = row))
+            at = end
+        }
+        return out
     }
 
     /**

@@ -82,6 +82,18 @@ object ChapterRevisionReplay {
         val revisionId: Long,
         /** 行内样式区间（偏移相对 [text]）。null = 没有样式信息。 */
         val styles: List<InlineMarkup.StyleSpan>? = null,
+        /**
+         * 每行来自旧表哪一行（与 [rows] 按序对齐；`-1` = 读者新加的行）。
+         * null = 老修订没存过，重放按行文字 / 格结构自己对齐。
+         */
+        val rowSources: List<Int>? = null,
+        /**
+         * 审阅视图的行级对照（见 [TableReviewPlan]）；null = 正常视图，按结果整表重建。
+         *
+         * 给了它时，删掉的行留在原处、新加的行插在原位、改过的格就地插入新字——重放出来的
+         * 行序与文字必须与 [TableReviewPlan.overlay] 逐字一致，修订表才能按同一把尺换算。
+         */
+        val review: TableReviewPlan? = null,
     )
 
     /**
@@ -249,7 +261,11 @@ object ChapterRevisionReplay {
                 val oldRows = (i..lastIndex).map { leaves[it] }
                 val oldLength = (i..lastIndex).sumOf { segmentsOf(leaves[it]).text.length }
                 val table = oldRows.firstOrNull()?.let { ancestorTable(it) }
-                val rebuilt = if (table == null) null else buildTableRows(tableEdit, oldRows, table, segmentsOf)
+                val rebuilt = if (table == null) {
+                    null
+                } else {
+                    buildTableRows(tableEdit, oldRows, table, segmentsOf, wsOf, styleOf)
+                }
                 if (table == null || rebuilt == null) {
                     // 结构对不上（不是同一张表的连续行 / 行码与文字不等）：不猜，原样保留。
                     needsRecompute = true
@@ -261,18 +277,20 @@ object ChapterRevisionReplay {
                     i = lastIndex + 1
                     continue
                 }
-                // 树：第一行原地换成新行，其余旧行撤掉；新行数为 0 时整张表删掉。
+                // 树：没改的行原样留在原位；改过的行原地换掉，删掉的行撤掉，新加的行挂到相邻行。
                 if (rebuilt.rows.isEmpty()) {
                     removed += table
                 } else {
-                    replacements[oldRows.first()] = rebuilt.rows
-                    for (k in 1 until oldRows.size) removed += oldRows[k]
+                    applyTableRowEdits(replacements, removed, oldRows, rebuilt)
                 }
                 var rowOffset = 0L
                 for (k in rebuilt.rows.indices) {
                     newStarts += charStarts[i] + shift + rowOffset
                     newLeaves += rebuilt.rows[k]
-                    origins += i
+                    val src = rebuilt.sources[k]
+                    // 装饰（背景 / break-inside / 生成内容）按**这一行自己**的来源叶继承，
+                    // 不能一律指向表首行。
+                    origins += if (src in oldRows.indices) i + src else i
                     rowOffset += rebuilt.lengths[k]
                 }
                 if (rebuilt.lengths.sum() != tableEdit.text.length) degraded++
@@ -547,12 +565,20 @@ object ChapterRevisionReplay {
     private fun ancestorTable(el: MarkupElement): MarkupElement? =
         generateSequence(el.parent) { it.parent }.firstOrNull { it.tag == "table" }
 
-    /** [buildTableRows] 的结果：新行节点 + 每行重放后的实测长度（与字符流同尺）。 */
-    private class RebuiltTable(val rows: List<MarkupElement>, val lengths: IntArray)
+    /** [buildTableRows] 的结果：新行节点 + 每行重放后的实测长度（与字符流同尺）+ 每行来自旧表哪一行。 */
+    private class RebuiltTable(
+        val rows: List<MarkupElement>,
+        val lengths: IntArray,
+        /** 与 [rows] 按序对齐：0 起旧行下标；`-1` = 读者新加的行。 */
+        val sources: IntArray,
+    )
 
     /**
-     * 按 [TableEdit] 的格结构重建整张表的行节点：旧格属性按位置沿用（`id` / 合并属性除外），
-     * 格内文字从 [TableEdit.text] 按格界切出来，`<br>` 落成行内换行。
+     * 按 [TableEdit] 的格结构重建整张表的行节点。
+     *
+     * **没被改到的行原样留下**（同一个 `tr` 节点）：行 / 格属性、格内行内元素、格内块结构、
+     * `thead` / `tbody` 分组一个都不动 —— 删掉一行不会连累其余行的样式。改过的行只重建
+     * 真正变了的格：格里的字没变就整格沿用，变了才重建内容（[LeafTextEditor] 保住行内元素）。
      *
      * 行码与文字对不上（长度之和不等 / 不是同一张表的行）返回 null —— 调用方保持原样、不猜。
      */
@@ -561,46 +587,74 @@ object ChapterRevisionReplay {
         oldRows: List<MarkupElement>,
         table: MarkupElement,
         segmentsOf: (MarkupElement) -> StyledSegments,
+        wsOf: (MarkupElement) -> WhiteSpace,
+        styleOf: ((MarkupElement) -> ComputedStyle?)?,
     ): RebuiltTable? {
         if (oldRows.isEmpty()) return null
         if (oldRows.any { it.tag != "tr" || ancestorTable(it) !== table }) return null
         val anchor = oldRows.first().parent ?: return null
+        // 先按行码切出每行的新文字（行与行直接相接）。
+        val newTexts = splitRowTexts(edit) ?: return null
+        edit.review?.let { review ->
+            return buildReviewTableRows(edit, review, newTexts, oldRows, anchor, segmentsOf, wsOf, styleOf)
+        }
+        val sources = rowSourcesOf(edit, oldRows, newTexts, segmentsOf)
         val spans = edit.styles
-        var cursor = 0
+        val rowStarts = IntArray(newTexts.size)
+        run {
+            var at = 0
+            for (i in newTexts.indices) {
+                rowStarts[i] = at
+                at += newTexts[i].length
+            }
+        }
         val rows = ArrayList<MarkupElement>(edit.rows.size)
         val lengths = IntArray(edit.rows.size)
-        for ((ri, row) in edit.rows.withIndex()) {
-            val rowLength = row.textLength
-            if (rowLength < 0 || cursor + rowLength > edit.text.length) return null
-            val rowText = edit.text.substring(cursor, cursor + rowLength)
-            val oldRow = oldRows.getOrNull(ri)
+        for (ri in edit.rows.indices) {
+            val row = edit.rows[ri]
+            val rowText = newTexts[ri]
+            val oldRow = oldRows.getOrNull(sources[ri])
+            // 没改到的行：整行原样留下，连节点身份都不换（祖先不复制，分组与继承都不动）。
+            if (oldRow != null) {
+                val oldRowText = segmentsOf(oldRow).text
+                if (oldRowText == rowText && rowShapeOf(oldRow) == rowShapeOf(row)) {
+                    rows += oldRow
+                    lengths[ri] = oldRowText.length
+                    continue
+                }
+            }
             val oldCells = oldRow?.children.orEmpty().filter { it.tag == "td" || it.tag == "th" }
             val cells = ArrayList<MarkupElement>(row.cells.size)
             for ((ci, cell) in row.cells.withIndex()) {
                 val from = cell.start.coerceIn(0, rowText.length)
                 val to = cell.endExclusive.coerceIn(from, rowText.length)
                 val cellText = rowText.substring(from, to)
+                val tag = if (cell.header) "th" else "td"
+                val oldCell = oldCells.getOrNull(ci)
+                // 格里的字没变：整格沿用（连属性、行内元素、格内块结构）。
+                if (oldCell != null && oldCell.tag == tag && segmentsOf(oldCell).text == cellText) {
+                    cells += oldCell
+                    continue
+                }
                 val cellSpans = spans?.mapNotNull { sp ->
-                    val s = maxOf(sp.start, cursor + from)
-                    val e = minOf(sp.endExclusive, cursor + to)
+                    val s = maxOf(sp.start, rowStarts[ri] + from)
+                    val e = minOf(sp.endExclusive, rowStarts[ri] + to)
                     if (e <= s) {
                         null
                     } else {
-                        InlineMarkup.StyleSpan(s - cursor - from, e - cursor - from, sp.sig)
+                        InlineMarkup.StyleSpan(s - rowStarts[ri] - from, e - rowStarts[ri] - from, sp.sig)
                     }
-                } ?: emptyList()
+                }
                 // 沿用旧格的书自己的样式 / 属性；合并属性按新结构重写，`id` 不复制（会撞）。
                 val attrs = LinkedHashMap<String, String>()
-                oldCells.getOrNull(ci)?.attrs?.forEach { (k, v) ->
+                oldCell?.attrs?.forEach { (k, v) ->
                     if (k != "id" && k != "rowspan" && k != "colspan") attrs[k] = v
                 }
                 if (cell.rowspan > 1) attrs["rowspan"] = cell.rowspan.toString()
                 if (cell.colspan > 1) attrs["colspan"] = cell.colspan.toString()
-                cells += MarkupElement(
-                    tag = if (cell.header) "th" else "td",
-                    attrs = attrs,
-                    children = LeafTextEditor.inlineNodes(cellText, cellSpans),
-                )
+                val children = rebuildCellContent(oldCell, cellText, cellSpans, segmentsOf, wsOf, styleOf)
+                    ?: LeafTextEditor.inlineNodes(cellText, cellSpans.orEmpty())
+                cells += MarkupElement(tag = tag, attrs = attrs, children = children)
             }
             val rowEl = MarkupElement(
                 tag = "tr",
@@ -608,13 +662,264 @@ object ChapterRevisionReplay {
                 children = cells,
             )
             // 量长度要按真实父链级联（格继承表 / 行的字体与 white-space）。
-            rowEl.parent = anchor
+            rowEl.parent = oldRow?.parent ?: anchor
             rows += rowEl
             lengths[ri] = segmentsOf(rowEl).text.length
+        }
+        return RebuiltTable(rows, lengths, sources)
+    }
+
+    /** 按行码把修订文字切成每行的新文字；行码与文字对不上返回 null。 */
+    private fun splitRowTexts(edit: TableEdit): List<String>? {
+        val out = ArrayList<String>(edit.rows.size)
+        var cursor = 0
+        for (row in edit.rows) {
+            val rowLength = row.textLength
+            if (rowLength < 0 || cursor + rowLength > edit.text.length) return null
+            out += edit.text.substring(cursor, cursor + rowLength)
             cursor += rowLength
         }
-        if (cursor != edit.text.length) return null
-        return RebuiltTable(rows, lengths)
+        return out.takeIf { cursor == edit.text.length }
+    }
+
+    /**
+     * 审阅视图的整表重建：按 [TableReviewPlan] 把旧行 / 新行排成「原文照排 + 改动就地插入」。
+     *
+     * 删掉的行用**原来的 `tr` 节点**留在原处（红字由修订表按区间上色）；新加的行建新节点；
+     * 改过字的行在旧格上就地插入新字（[LeafTextEditor] 保住 class / style / 嵌套元素）。
+     * 行序必须与 [TableReviewPlan.rows] 一致，文字长度必须与 [TableReviewPlan.overlay] 同尺。
+     */
+    private fun buildReviewTableRows(
+        edit: TableEdit,
+        review: TableReviewPlan,
+        newTexts: List<String>,
+        oldRows: List<MarkupElement>,
+        anchor: MarkupElement,
+        segmentsOf: (MarkupElement) -> StyledSegments,
+        wsOf: (MarkupElement) -> WhiteSpace,
+        styleOf: ((MarkupElement) -> ComputedStyle?)?,
+    ): RebuiltTable? {
+        if (review.rows.sumOf { it.textLength } != review.overlay.length) return null
+        val reviewStyles = edit.styles
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { review.overlay.stylesInText(edit.text, it) }
+            .orEmpty()
+        val rows = ArrayList<MarkupElement>(review.rows.size)
+        val lengths = IntArray(review.rows.size)
+        val sources = IntArray(review.rows.size) { -1 }
+        var reviewAt = 0
+        for ((pi, part) in review.rows.withIndex()) {
+            when (part.kind) {
+                TableReviewPlan.Kind.KEEP, TableReviewPlan.Kind.DELETE -> {
+                    val oldRow = oldRows.getOrNull(part.oldIndex) ?: return null
+                    rows += oldRow
+                    lengths[pi] = part.textLength
+                    sources[pi] = part.oldIndex
+                }
+                TableReviewPlan.Kind.ADD -> {
+                    val ni = part.newIndex
+                    val info = edit.rows.getOrNull(ni) ?: return null
+                    val text = newTexts.getOrNull(ni) ?: return null
+                    val rowEl = buildReviewNewRow(info, text, reviewAt, reviewStyles, anchor)
+                    rows += rowEl
+                    lengths[pi] = part.textLength
+                    sources[pi] = -1
+                }
+                TableReviewPlan.Kind.CHANGE -> {
+                    val oldRow = oldRows.getOrNull(part.oldIndex) ?: return null
+                    val info = edit.rows.getOrNull(part.newIndex) ?: return null
+                    val cellTexts = part.cellTexts ?: return null
+                    val oldCells = oldRow.children.filter { it.tag == "td" || it.tag == "th" }
+                    if (oldCells.size != cellTexts.size || info.cells.size != cellTexts.size) return null
+                    val cells = ArrayList<MarkupElement>(cellTexts.size)
+                    var cellAt = reviewAt
+                    for (ci in cellTexts.indices) {
+                        val oldCell = oldCells[ci]
+                        val infoCell = info.cells[ci]
+                        val target = cellTexts[ci]
+                        if (segmentsOf(oldCell).text == target) {
+                            cells += oldCell
+                        } else {
+                            val spans = sliceSpans(reviewStyles, cellAt, cellAt + target.length)
+                            val children = rebuildCellContent(oldCell, target, spans, segmentsOf, wsOf, styleOf)
+                                ?: LeafTextEditor.inlineNodes(target, spans)
+                            val attrs = LinkedHashMap<String, String>(oldCell.attrs)
+                            attrs.remove("id")
+                            if (infoCell.rowspan > 1) {
+                                attrs["rowspan"] = infoCell.rowspan.toString()
+                            } else {
+                                attrs.remove("rowspan")
+                            }
+                            if (infoCell.colspan > 1) {
+                                attrs["colspan"] = infoCell.colspan.toString()
+                            } else {
+                                attrs.remove("colspan")
+                            }
+                            val tag = if (infoCell.header) "th" else "td"
+                            cells += MarkupElement(tag, attrs, children)
+                        }
+                        cellAt += target.length
+                    }
+                    val rowEl = MarkupElement("tr", oldRow.attrs.filterKeys { it != "id" }, cells)
+                    rowEl.parent = oldRow.parent
+                    rows += rowEl
+                    lengths[pi] = part.textLength
+                    sources[pi] = part.oldIndex
+                }
+            }
+            reviewAt += part.textLength
+        }
+        if (reviewAt != review.overlay.length) return null
+        return RebuiltTable(rows, lengths, sources)
+    }
+
+    /** 审阅视图里新加的一行：按格结构建节点，文字直接用修订文字（绿字由修订表上色）。 */
+    private fun buildReviewNewRow(
+        info: TableRowInfo,
+        text: String,
+        reviewStart: Int,
+        styles: List<InlineMarkup.StyleSpan>,
+        anchor: MarkupElement,
+    ): MarkupElement {
+        val cells = ArrayList<MarkupElement>(info.cells.size)
+        for (cell in info.cells) {
+            val from = cell.start.coerceIn(0, text.length)
+            val to = cell.endExclusive.coerceIn(from, text.length)
+            val cellText = text.substring(from, to)
+            val spans = sliceSpans(styles, reviewStart + from, reviewStart + to)
+            val attrs = LinkedHashMap<String, String>()
+            if (cell.rowspan > 1) attrs["rowspan"] = cell.rowspan.toString()
+            if (cell.colspan > 1) attrs["colspan"] = cell.colspan.toString()
+            val tag = if (cell.header) "th" else "td"
+            cells += MarkupElement(tag, attrs, LeafTextEditor.inlineNodes(cellText, spans))
+        }
+        return MarkupElement("tr", children = cells).also { it.parent = anchor }
+    }
+
+    /** 把审阅空间的样式区间裁到一格里（[from] / [to] 是相对整段审阅文字的偏移）。 */
+    private fun sliceSpans(
+        spans: List<InlineMarkup.StyleSpan>,
+        from: Int,
+        to: Int,
+    ): List<InlineMarkup.StyleSpan> {
+        if (spans.isEmpty() || to <= from) return emptyList()
+        val out = ArrayList<InlineMarkup.StyleSpan>(2)
+        for (sp in spans) {
+            val s = maxOf(sp.start, from)
+            val e = minOf(sp.endExclusive, to)
+            if (e > s) out += InlineMarkup.StyleSpan(s - from, e - from, sp.sig)
+        }
+        return out
+    }
+
+    /** 改过的格：在旧格上**就地替换文字**（[LeafTextEditor] 保住 `class` / `style` / 嵌套元素），
+     * 拿不到旧格或结构对不上时返回 null，由调用方退回按文字重建。
+     */
+    private fun rebuildCellContent(
+        oldCell: MarkupElement?,
+        newText: String,
+        spans: List<InlineMarkup.StyleSpan>?,
+        segmentsOf: (MarkupElement) -> StyledSegments,
+        wsOf: (MarkupElement) -> WhiteSpace,
+        styleOf: ((MarkupElement) -> ComputedStyle?)?,
+    ): List<MarkupElement>? {
+        if (oldCell == null) return null
+        val seg = segmentsOf(oldCell)
+        if (seg.text == newText) return null
+        return runCatching {
+            LeafTextEditor.rebuild(
+                leaf = oldCell,
+                segments = seg,
+                edits = listOf(LeafTextEditor.Edit(0, seg.text.length, newText, spans)),
+                wsOf = wsOf,
+                styleOf = styleOf,
+                rebuildSegments = segmentsOf,
+            ).leaf.children
+        }.getOrNull()
+    }
+
+    /**
+     * 每行来自旧表哪一行（[TableEdit.rowSources]；老修订没存过就按内容对齐）。
+     *
+     * 老修订的对齐规则：行文字 + 形状相同的行一定对上，缺口再按数量配对
+     * （见 [alignRowsByKey]）；没改过的行一定完全相同。
+     */
+    private fun rowSourcesOf(
+        edit: TableEdit,
+        oldRows: List<MarkupElement>,
+        newTexts: List<String>,
+        segmentsOf: (MarkupElement) -> StyledSegments,
+    ): IntArray {
+        val stored = edit.rowSources
+        if (stored != null && stored.size == newTexts.size) {
+            var prev = -1
+            var ok = true
+            for (s in stored) {
+                if (s < -1 || s >= oldRows.size || (s >= 0 && s <= prev)) {
+                    ok = false
+                    break
+                }
+                if (s >= 0) prev = s
+            }
+            if (ok) return IntArray(stored.size) { stored[it] }
+        }
+        val oldKeys = oldRows.map { rowKey(segmentsOf(it).text, rowShapeOf(it)) }
+        val newKeys = newTexts.mapIndexed { i, t -> rowKey(t, rowShapeOf(edit.rows[i])) }
+        return alignRowsByKey(oldKeys, newKeys)
+    }
+
+    private fun rowKey(text: String, shape: String): String = text + "\u0000" + shape
+
+    private fun rowShapeOf(row: MarkupElement): String =
+        row.children.filter { it.tag == "td" || it.tag == "th" }.joinToString("|") {
+            "${it.tag}:${it.attrs["rowspan"]?.toIntOrNull() ?: 1}:${it.attrs["colspan"]?.toIntOrNull() ?: 1}"
+        }
+
+    private fun rowShapeOf(row: TableRowInfo): String =
+        row.cells.joinToString("|") {
+            "${if (it.header) "th" else "td"}:${it.rowspan}:${it.colspan}"
+        }
+
+    /**
+     * 把重建结果落到树上：没改的行原地不动，改过的行原地换掉，新加的行挂到相邻行旁边，
+     * 删掉的行撤掉。行节点留在它原来的 `thead` / `tbody` 里，不整表搬进第一行那一组。
+     */
+    private fun applyTableRowEdits(
+        replacements: MutableMap<MarkupElement, List<MarkupElement>>,
+        removed: MutableSet<MarkupElement>,
+        oldRows: List<MarkupElement>,
+        rebuilt: RebuiltTable,
+    ) {
+        val slot = arrayOfNulls<MutableList<MarkupElement>>(oldRows.size)
+        val leading = ArrayList<MarkupElement>()
+        var lastUsed = -1
+        for (ri in rebuilt.rows.indices) {
+            val src = rebuilt.sources[ri]
+            if (src !in oldRows.indices) {
+                if (lastUsed >= 0) slot[lastUsed]!!.add(rebuilt.rows[ri]) else leading += rebuilt.rows[ri]
+                continue
+            }
+            val list = ArrayList<MarkupElement>(1 + leading.size)
+            list.addAll(leading)
+            leading.clear()
+            list += rebuilt.rows[ri]
+            slot[src] = list
+            lastUsed = src
+        }
+        if (leading.isNotEmpty()) {
+            // 旧行一个都没留下（整表换成读者新写的行）：占第一行的位置，其余旧行撤掉。
+            slot[0] = leading
+        }
+        for (idx in oldRows.indices) {
+            val s = slot[idx]
+            if (s == null) {
+                removed += oldRows[idx]
+                continue
+            }
+            // 原样留下的行不进替换表：树里还是同一个节点（属性与分组都不动）。
+            if (s.size == 1 && s[0] === oldRows[idx]) continue
+            replacements[oldRows[idx]] = s
+        }
     }
 
     /** 合并时能整层替换的「纯包装」标签：里面只装这一片叶，拆成多项时跟着复制。 */

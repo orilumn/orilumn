@@ -61,8 +61,18 @@ class ChapterRevisionMap(
      * 这类修订在审阅空间里**不按「原文 + 就地插入」展开**：整张表按结果直接重建，红绿痕迹不画。
      * 于是它在审阅空间里占的长度就是「新表长度」= 原区间长度 + [TextRevision.delta]，
      * 与渲染空间同一把尺——坐标换算、点按命中、删改判定都照常成立。
+     *
+     * 给不出 [structuralPlans] 的老宿主 / 对不上的数据走这条退路；能给出时以计划为准。
      */
     val structuralIds: Set<Long> = emptySet(),
+    /**
+     * 整表结构修订 → 它在审阅视图里的**行级对照**（见 [TableReviewPlan]）。
+     *
+     * 键是修订本身（同 [originalTexts]，不能用 id：还没落库的修订 id 都是 0）。
+     * 给了计划的整表修订按「原文照排 + 新字就地插入」展开：删掉的行留在原处标红、
+     * 新加的行标绿、改过的格红删绿增。没给的退回 [structuralIds] 的老口径（直接显示新表）。
+     */
+    val structuralPlans: Map<TextRevision, ReviewOverlay.Plan> = emptyMap(),
 ) {
     val revisions: List<TextRevision> = source.sortedWith(compareBy({ it.charStart }, { it.id }))
 
@@ -137,6 +147,10 @@ class ChapterRevisionMap(
                 for (c in b) mix(c.code.toLong())
                 mix(-8L)
             }
+            // 行来源决定哪些行原样保留 / 属性取哪一行（样式随结构走），同样参与版本号。
+            val sources = r.rowSources
+            mix(sources?.size?.toLong() ?: -1L)
+            sources?.forEach { mix(it.toLong()) }
         }
         h
     }
@@ -187,7 +201,12 @@ class ChapterRevisionMap(
         if (originalTexts.isEmpty()) return@lazy emptyMap()
         val out = HashMap<TextRevision, ReviewOverlay.Plan>(4)
         for (r in revisions) {
-            // 整表结构修订按结果整表重建，不在审阅空间里展开原文 + 插入（见 [structuralIds]）。
+            // 有行级对照的整表修订：按「原文照排 + 新字就地插入」展开（删掉的行 / 字留在原处）。
+            structuralPlans[r]?.let {
+                out[r] = it
+                continue
+            }
+            // 给不出对照的整表修订仍按结果整表重建，不在审阅空间里展开原文 + 插入。
             if (r.id in structuralIds) continue
             val old = originalTexts[r] ?: continue
             val plan = ReviewOverlay.plan(old, r.text, blockEndsIn(r), tracesOf(r, old)) ?: continue

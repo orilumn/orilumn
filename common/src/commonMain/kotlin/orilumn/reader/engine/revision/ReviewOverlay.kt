@@ -55,9 +55,9 @@ object ReviewOverlay {
     class Plan(
         val text: String,
         val insertions: List<Insertion>,
-        private val before: IntArray,
-        private val after: IntArray,
-        private val reviewToOld: IntArray,
+        internal val before: IntArray,
+        internal val after: IntArray,
+        internal val reviewToOld: IntArray,
         val deleted: IntArray,
         val inserted: IntArray,
         val marks: Map<Int, Boolean>,
@@ -66,9 +66,9 @@ object ReviewOverlay {
         /** 这一段在审阅空间的长度（段界不占字符）。 */
         val length: Int,
         /** 修订文字（去掉段界后）第 i 个字在审阅空间的偏移；-1 = 兜底（不该出现）。 */
-        private val newToReview: IntArray,
+        internal val newToReview: IntArray,
         /** 修订文字（去段界）第 i 个字在 [text] 里的下标（含 ¶ 与段界）；-1 = 兜底。 */
-        private val newToOut: IntArray,
+        internal val newToOut: IntArray,
     ) {
         /**
          * 修订文字 [text] 上的行内样式区间 → 本段审阅空间的区间（相对 [text] 起点）。
@@ -340,6 +340,79 @@ object ReviewOverlay {
             length = at,
             newToReview = newToReview,
             newToOut = newToOut,
+        )
+    }
+
+    /**
+     * 把几段**首尾相接**的对齐结果拼成一段（表格逐格对照用：旧格 + 新格依次相接）。
+     *
+     * 每一段自己的「原文局部坐标」在拼接后整体后移；相邻两段边界上的插入按先后顺序
+     * 合成一处（前一段末尾的插入排在前面，后一段开头的插入紧跟其后）。段内没有段界字符，
+     * 所以审阅空间长度 = 各段 [Plan.length] 之和。
+     */
+    fun concat(parts: List<Plan>): Plan {
+        if (parts.isEmpty()) return plan("", "", IntArray(0))!!
+        if (parts.size == 1) return parts[0]
+        val totalOld = parts.sumOf { it.before.size - 1 }
+        val text = StringBuilder(parts.sumOf { it.text.length })
+        val insertions = ArrayList<Insertion>()
+        val before = IntArray(totalOld + 1)
+        val after = IntArray(totalOld + 1)
+        val reviewToOld = ArrayList<Int>(parts.sumOf { it.reviewToOld.size })
+        val deleted = ArrayList<Int>()
+        val inserted = ArrayList<Int>()
+        val marks = LinkedHashMap<Int, Boolean>()
+        val traces = ArrayList<Int>()
+        val newToReview = ArrayList<Int>()
+        val newToOut = ArrayList<Int>()
+        var oldBase = 0
+        var textBase = 0
+        var reviewBase = 0
+        var needsBlocks = false
+        for ((pi, p) in parts.withIndex()) {
+            val oldLen = p.before.size - 1
+            if (pi == 0) {
+                for (j in 0..oldLen) {
+                    before[j] = p.before[j]
+                    after[j] = p.after[j]
+                }
+            } else {
+                // 上一段末尾与本段开头对着**同一个原文位置**：两处插入合在一起。
+                before[oldBase] = minOf(before[oldBase], reviewBase + p.before[0])
+                after[oldBase] = maxOf(after[oldBase], reviewBase + p.after[0])
+                for (j in 1..oldLen) {
+                    before[oldBase + j] = reviewBase + p.before[j]
+                    after[oldBase + j] = reviewBase + p.after[j]
+                }
+            }
+            for (ins in p.insertions) insertions += Insertion(ins.at + oldBase, ins.text, ins.isTrace)
+            text.append(p.text)
+            for (v in p.reviewToOld) reviewToOld += v + oldBase
+            for (v in p.deleted) deleted += v + textBase
+            for (v in p.inserted) inserted += v + textBase
+            for ((k, v) in p.marks) marks[reviewBase + k] = v
+            for (v in p.traces) traces += v + textBase
+            for (v in p.newToReview) newToReview += v + reviewBase
+            for (v in p.newToOut) newToOut += v + textBase
+            needsBlocks = needsBlocks || p.needsBlocks
+            oldBase += oldLen
+            textBase += p.text.length
+            reviewBase += p.length
+        }
+        return Plan(
+            text = text.toString(),
+            insertions = insertions,
+            before = before,
+            after = after,
+            reviewToOld = reviewToOld.toIntArray(),
+            deleted = deleted.toIntArray(),
+            inserted = inserted.toIntArray(),
+            marks = marks,
+            traces = traces.toIntArray(),
+            needsBlocks = needsBlocks,
+            length = reviewBase,
+            newToReview = newToReview.toIntArray(),
+            newToOut = newToOut.toIntArray(),
         )
     }
 }

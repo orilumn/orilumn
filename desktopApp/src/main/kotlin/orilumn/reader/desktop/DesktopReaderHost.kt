@@ -287,9 +287,12 @@ class DesktopReaderHost(
                         prevPageOriginalStart = anchor.second,
                         changeOldStart = start,
                         changeOldEndExclusive = endExclusive,
-                        // 换了块形态（段落 ⇄ 标题 / 引用 / 列表 / 代码块）：同样的文字会排成不同的
-                        // 行数，「页界没变」快路径按形态猜不准，一律正式重排。
-                        structureChanged = plan.inserted.any { r -> r.blockKinds.any { it.isNotEmpty() } },
+                        // 换了块形态（段落 ⇄ 标题 / 引用 / 列表 / 代码块）或改了整张表的行 / 列：
+                        // 同样的文字会排成不同的行数，「页界没变」快路径按形态猜不准，一律正式重排。
+                        structureChanged = plan.inserted.any { r ->
+                            r.blockKinds.any { it.isNotEmpty() } ||
+                                r.editedBlocks.firstOrNull()?.startsWith("T") == true
+                        },
                     ) ?: reflowFallback(chapter, anchor.second)
                     ?: return@withContext TextEditOutcome.Failed("重排失败")
                 } else {

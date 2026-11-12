@@ -1598,8 +1598,8 @@ fun ReaderScreen(
         val blockEnds = brk.plainBlockEnds(rawBlockEnds)
         // 表格行整行呈现：格偏移是按**整行文字**算的，选区只碰到半行时，片段文字与格界对不上
         // （管道行会错位）。所以卡片与提交区间只扩到**碰到的那几行**的整行 —— 读者选两行就只
-        // 列两行，不把整张表都塞进卡片。要改整张表的结构（删行 / 加行 / 删表 / 增删列），
-        // 得把整张表都选上（表首到表尾），提交侧按「选区正好等于整表区间」认整表结构修订。
+        // 列两行，不把整张表都塞进卡片。删行 / 加行 / 删表 / 增删列都放行：提交侧把未选中的
+        // 行一起拼回**整张表**，按网格自洽校验后再落一条整表修订。
         // 整块图片只有一个占位字符，不存在半块选中，不扩。
         var from = s
         var to = e
@@ -3624,6 +3624,14 @@ internal fun textEditShapeError(
         }
         return null
     }
+    // 选区全落在表格行上（可能只是其中连续几行，没覆盖整张表）：行列结构也放行，
+    // 由提交侧把未选中的行一起拼回**整张表**、按 HTML 表格的铺格规则校验。
+    // 这里只看卡片本身：全是表格行，或者空卡片（读者把选中的行删了）。
+    if (images.none { it } && tables.isNotEmpty() && tables.all { it != null } &&
+        (segments.isEmpty() || segments.all { it.table != null || it.text.isEmpty() })
+    ) {
+        return null
+    }
     val n = maxOf(tables.size, images.size, segments.size)
     for (i in 0 until n) {
         val image = images.getOrNull(i) == true
@@ -3636,11 +3644,11 @@ internal fun textEditShapeError(
             }
             continue
         }
-        if (text == null) return "表格只能改格子里的字（改整张表请只选中它）"
+        if (text == null) return "表格行不能和别的段落混在一起改；请只选中表格的整行（可以只选其中几行）"
         val now = segments[i].table
-            ?: return "表格只能改格子里的字（改整张表请只选中它）"
+            ?: return "表格行不能和别的段落混在一起改；请只选中表格的整行（可以只选其中几行）"
         if (!table!!.sameShape(now, ignoreHeader = !now.html)) {
-            return "表格只能改格子里的字，不能改列数或合并方式（要改请只选中这张表）"
+            return "要改列数或合并方式，请只选中表格的整行（不夹别的段落）"
         }
     }
     return null

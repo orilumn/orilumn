@@ -59,4 +59,18 @@ class RevisionStylesTest {
         assertNull(RevisionStyles.decodeEdited("""{"v":1}"""))
         assertTrue(RevisionStyles.decode("""{"v":1,"s":[]}""").isNullOrEmpty())
     }
+
+    @Test
+    fun rowSourcesRoundTripAndOldPayloadHasNone() {
+        // 整表修订的「新行来自旧表哪一行」随样式列一起落库；老数据没有这个键 ⇒ null（按内容对齐）。
+        val raw = RevisionStyles.encode(
+            spans = emptyList(),
+            editedBlocks = listOf("Tm;2,1,1,1;2,0,1,1"),
+            rowSources = listOf(2, -1, 0),
+        )
+        assertEquals(listOf(2, -1, 0), RevisionStyles.decodeRowSources(raw))
+        assertNull(RevisionStyles.decodeRowSources(RevisionStyles.encode(emptyList())))
+        assertNull("坏数据不能当成映射", RevisionStyles.decodeRowSources("""{"v":1,"rs":[1,"x"]}"""))
+        assertNull("负数只允许 -1", RevisionStyles.decodeRowSources("""{"v":1,"rs":[-2]}"""))
+    }
 }

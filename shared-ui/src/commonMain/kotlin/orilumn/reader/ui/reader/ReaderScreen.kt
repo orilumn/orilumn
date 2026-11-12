@@ -3650,7 +3650,7 @@ internal fun textEditShapeError(
         if (text == null) return "表格只能改格子里的字（改整张表请只选中它）"
         val now = segments[i].table
             ?: return "表格只能改格子里的字（改整张表请只选中它）"
-        if (!table!!.sameShape(now)) {
+        if (!table!!.sameShape(now, ignoreHeader = !now.html)) {
             return "表格只能改格子里的字，不能改列数或合并方式（要改请只选中这张表）"
         }
     }

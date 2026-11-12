@@ -947,7 +947,12 @@ object InlineMarkup {
 
     /** 表格行结构同样的口径：格数、表头、合并数与各格长度一致。 */
     private fun sameTable(parsed: TableRowInfo?, wanted: TableRowInfo?): Boolean =
-        if (wanted == null) parsed == null else wanted.sameStructure(parsed)
+        if (wanted == null) {
+            parsed == null
+        } else {
+            // 管道行写不出「哪一格是 `<th>`」：表头不参与回验（提交时按原位补回）。
+            wanted.sameStructure(parsed, ignoreHeader = !wanted.html)
+        }
 
     private class Marker(val tag: String, val open: String, val close: String)
 
@@ -1045,9 +1050,13 @@ object InlineMarkup {
         forceTags: Boolean,
     ): String {
         val cells = table.cells.map { text.substring(it.start, it.endExclusive) }
+        // 管道行写不出「哪一格是表头」：整行都是表头时仍写成普通管道行，提交时按原位补回；
+        // 只有一部分格是表头时退回基本 HTML，`<th>` / `<td>` 各归各格，不丢表头。
+        val allHeader = table.cells.isNotEmpty() && table.cells.all { it.header }
+        val mixedHeader = table.cells.any { it.header } && !allHeader
         // 管道行的格两边各吃一个空格（markdown 的分隔留白），格内文字又要以空格开头 / 结尾时
         // 会被吃掉 ⇒ 这类格退回基本 HTML（那里空格原样保留）。
-        val html = table.html || cells.any {
+        val html = table.html || mixedHeader || cells.any {
             it.indexOf('\n') >= 0 || it.startsWith(" ") || it.endsWith(" ")
         }
         if (!html) {

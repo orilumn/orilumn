@@ -505,8 +505,20 @@ object TextEditPlanner {
         val oldText = chapterText.substring(start, endExclusive)
         val newText = pieces.joinToString("") { it.text }
         val originalRows = (firstLeaf..lastLeaf).mapNotNull(tableOfLeaf)
-        val sameRows = originalRows.size == rows.size &&
-            rows.indices.all { originalRows[it].sameStructure(rows[it]) }
+        // 管道行写不出「哪一格是 `<th>`」：按原位把原表的表头补回（读者改过的 `<th>` / `<td>`
+        // 形式自己带着，不动）。行按位置对齐 —— 删行 / 加行后，同一位置沿用原行的表头口径。
+        val restoredRows = rows.mapIndexed { i, row ->
+            if (row.html) return@mapIndexed row
+            val original = originalRows.getOrNull(i) ?: return@mapIndexed row
+            if (original.cells.size != row.cells.size) return@mapIndexed row
+            row.copy(
+                cells = row.cells.mapIndexed { k, cell ->
+                    if (cell.header) cell else cell.copy(header = original.cells[k].header)
+                },
+            )
+        }
+        val sameRows = originalRows.size == restoredRows.size &&
+            restoredRows.indices.all { originalRows[it].sameStructure(restoredRows[it]) }
         if (newText == oldText && sameRows && absorbed.isEmpty()) {
             return TextEditPlan.Ready(
                 chapter = chapter,
@@ -544,7 +556,7 @@ object TextEditPlanner {
         // 重开卡片时才能把行文字原样拼回去。
         val blocks = ArrayList<String>(pieces.size + 2)
         pieces.forEachIndexed { i, p ->
-            val row = p.table
+            val row = restoredRows.getOrNull(i) ?: p.table
             if (row != null && !deleting) {
                 blocks.add(row.wire(wholeTable = i == 0))
             } else if (i == 0) {

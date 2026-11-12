@@ -571,6 +571,48 @@ class InlineMarkupTest {
     }
 
     @Test
+    fun headerRowStaysPipeFormAndKeepsInlineSugar() {
+        // 管道行写不出「哪一格是 `<th>`」：表头不参与回验（提交时按原位补回），卡片仍按管道行写。
+        // 格内的行内标记必须摊成语法糖 —— 不能因为表头对不上就整卡退回标签形式。
+        val info = TableRowInfo(
+            listOf(
+                TableCellInfo(0, 1, header = true),
+                TableCellInfo(1, 4, header = true),
+            ),
+        )
+        val markup = InlineMarkup.show(
+            listOf(InlineMarkup.Segment("abcd", null, info)),
+            listOf(span(0, 1, "code")),
+        )
+        assertEquals("| `a` | bcd |", markup)
+
+        val back = InlineMarkup.parse(markup)
+        assertTrue(back.errors.toString(), back.ok)
+        assertEquals("abcd", back.text)
+        assertTrue(
+            "管道行的表头在回验里忽略",
+            info.sameStructure(back.segments.single().table, ignoreHeader = true),
+        )
+        assertEquals(listOf("code"), back.spans.map { it.sig.tag })
+    }
+
+    @Test
+    fun mixedHeaderCellsFallBackToHtml() {
+        // 只有一部分格是表头：管道行 + 分隔行表达不了，整行退回基本 HTML（`<th>` 各归各格）。
+        val info = TableRowInfo(
+            listOf(
+                TableCellInfo(0, 2, header = true),
+                TableCellInfo(2, 4, header = false),
+            ),
+        )
+        val markup = InlineMarkup.show(listOf(InlineMarkup.Segment("abcd", null, info)), emptyList())
+        assertTrue(markup, markup.startsWith("<tr><th>"))
+        val back = InlineMarkup.parse(markup)
+        assertTrue(back.errors.toString(), back.ok)
+        assertTrue(info.sameStructure(back.segments.single().table))
+    }
+
+    @Test
     fun pipeInsideACellIsEscapedAndComesBackVerbatim() {
         val info = table(3, 1)
         val markup = InlineMarkup.show(listOf(InlineMarkup.Segment("a|bc", null, info)), emptyList())

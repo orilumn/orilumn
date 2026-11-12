@@ -40,14 +40,17 @@ data class TableRowInfo(
      *
      * 显示方式（[html]）不参与比较：它是从格结构**推出来**的（有合并格 / 格内有硬换行才走
      * HTML），同一份格结构两次显示本来就该得到同一个结果，拿它当判据只会把相等判成不等。
+     *
+     * @param ignoreHeader 不比较表头。markdown 管道行写不出「哪一格是 `<th>`」，卡片回验时
+     *   表头只能忽略（提交时由 [orilumn.reader.engine.revision.TextEditPlan] 按原位补回）。
      */
-    fun sameStructure(other: TableRowInfo?): Boolean {
+    fun sameStructure(other: TableRowInfo?, ignoreHeader: Boolean = false): Boolean {
         if (other == null) return false
         if (cells.size != other.cells.size) return false
         return cells.indices.all { i ->
             val a = cells[i]
             val b = other.cells[i]
-            a.header == b.header &&
+            (ignoreHeader || a.header == b.header) &&
                 a.rowspan == b.rowspan &&
                 a.colspan == b.colspan &&
                 (a.endExclusive - a.start) == (b.endExclusive - b.start)
@@ -59,14 +62,16 @@ data class TableRowInfo(
      *
      * 提交时按它校验（读者就是在格子里改字，长度当然会变）；长度只用来在重放时
      * 把新文字落回各自的格。列数、表头、合并方式一变就不是这张卡能做的事了。
+     *
+     * @param ignoreHeader 同 [sameStructure]：管道行不写表头。
      */
-    fun sameShape(other: TableRowInfo?): Boolean {
+    fun sameShape(other: TableRowInfo?, ignoreHeader: Boolean = false): Boolean {
         if (other == null) return false
         if (cells.size != other.cells.size) return false
         return cells.indices.all { i ->
             val a = cells[i]
             val b = other.cells[i]
-            a.header == b.header && a.rowspan == b.rowspan && a.colspan == b.colspan
+            (ignoreHeader || a.header == b.header) && a.rowspan == b.rowspan && a.colspan == b.colspan
         }
     }
 

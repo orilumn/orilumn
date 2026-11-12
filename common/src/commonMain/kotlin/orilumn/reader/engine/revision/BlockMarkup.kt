@@ -162,6 +162,27 @@ object BlockMarkup {
 
     private fun pipeTableRow(line: String): TableLine? {
         if (line.indexOf('\\') >= 0 && line.startsWith("\\|")) return null
+        val raw = pipeCells(line) ?: return null
+        // 至少「| 格 |」三截；首尾两截必须是空的（只允许空白）。
+        if (raw.size < 3) return null
+        if (raw.first().isNotBlank() || raw.last().isNotBlank()) return null
+        val cells = ArrayList<String>(raw.size - 2)
+        for (k in 1 until raw.size - 1) cells.add(trimCellPadding(raw[k]))
+        if (cells.isEmpty()) return null
+        var at = 0
+        val infos = cells.map { t ->
+            val end = at + t.length
+            TableCellInfo(at, end, header = false).also { at = end }
+        }
+        val info = TableRowInfo(infos, html = cells.any { it.indexOf('\n') >= 0 })
+        return TableLine(cells, info)
+    }
+
+    /**
+     * 管道行按未转义的 `|` 切片（保留两侧空片，由调用方判首尾）；不是管道行返回 null。
+     */
+    private fun pipeCells(line: String): List<String>? {
+        if (!line.startsWith("|")) return null
         val raw = ArrayList<String>(4)
         val sb = StringBuilder()
         var i = 0
@@ -181,19 +202,7 @@ object BlockMarkup {
             i++
         }
         raw.add(sb.toString())
-        // 至少「| 格 |」三截；首尾两截必须是空的（只允许空白）。
-        if (raw.size < 3) return null
-        if (raw.first().isNotBlank() || raw.last().isNotBlank()) return null
-        val cells = ArrayList<String>(raw.size - 2)
-        for (k in 1 until raw.size - 1) cells.add(trimCellPadding(raw[k]))
-        if (cells.isEmpty()) return null
-        var at = 0
-        val infos = cells.map { t ->
-            val end = at + t.length
-            TableCellInfo(at, end, header = false).also { at = end }
-        }
-        val info = TableRowInfo(infos, html = cells.any { it.indexOf('\n') >= 0 })
-        return TableLine(cells, info)
+        return raw
     }
 
     /** markdown 行两边的 `| ` / ` |` 是分隔符，不算格内文字（各吃掉一个空格）。 */

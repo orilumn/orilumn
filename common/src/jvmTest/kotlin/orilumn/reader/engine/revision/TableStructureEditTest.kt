@@ -36,6 +36,13 @@ class TableStructureEditTest {
         revisions: List<TextRevision> = emptyList(),
         start: Int = 0,
         endExclusive: Int = 8,
+        tableOfLeaf: (Int) -> TableRowInfo? = { i ->
+            when (i) {
+                0 -> row0
+                1 -> row1
+                else -> null
+            }
+        },
     ): TextEditPlan = TextEditPlanner.plan(
         bookId = 1,
         chapter = 1,
@@ -48,13 +55,7 @@ class TableStructureEditTest {
         map = ChapterRevisionMap(revisions),
         groupId = 99,
         now = 1234,
-        tableOfLeaf = { i ->
-            when (i) {
-                0 -> row0
-                1 -> row1
-                else -> null
-            }
-        },
+        tableOfLeaf = tableOfLeaf,
         tableRangeOf = { i -> if (i == 0 || i == 1) 0..7 else null },
     )
 
@@ -119,6 +120,40 @@ class TableStructureEditTest {
         val r = p.inserted.single()
         assertEquals("abcdefghijkl", r.text)
         assertEquals(4, r.delta)
+    }
+
+    @Test
+    fun `pipe card restores header cells from the original table`() {
+        // 卡片里的管道行写不出 `<th>`：回验与提交都按原位从原表补回表头。
+        val header0 = TableRowInfo(
+            listOf(TableCellInfo(0, 2, header = true), TableCellInfo(2, 4, header = true)),
+        )
+        val p = ready(
+            plan(
+                pieces = listOf(row("abcd"), row("efGh")),
+                replacement = "abcdefGh",
+                tableOfLeaf = { i -> if (i == 0) header0 else row1 },
+            ),
+        )
+        val r = p.inserted.single()
+        assertEquals("Tm;2,1,1,1;2,1,1,1", r.editedBlocks[0])
+        assertEquals("tm;2,0,1,1;2,0,1,1", r.editedBlocks[1])
+    }
+
+    @Test
+    fun `confirming an unchanged pipe card after header restore is a no-op`() {
+        // 表头补回后与原文逐项一致：原样确认不该白落一条修订。
+        val header0 = TableRowInfo(
+            listOf(TableCellInfo(0, 2, header = true), TableCellInfo(2, 4, header = true)),
+        )
+        val p = ready(
+            plan(
+                pieces = listOf(row("abcd"), row("efgh")),
+                replacement = "abcdefgh",
+                tableOfLeaf = { i -> if (i == 0) header0 else row1 },
+            ),
+        )
+        assertTrue("原样确认应是无操作，实际 ${p.inserted.size} 条修订", p.inserted.isEmpty())
     }
 
     @Test

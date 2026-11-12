@@ -51,6 +51,17 @@ private const val MERGED_BODY = """
 <p>合并表格后面的段落。</p>
 """
 
+private const val MARKUP_BODY = """
+<h1>表格标记</h1>
+<p>表格前面的段落。</p>
+<table>
+  <tr><th>功能</th><th>通过访问</th></tr>
+  <tr><td><code>let</code></td><td><code>it</code></td></tr>
+  <tr><td><code>run</code></td><td>初始化<em>AND</em>计算结果</td></tr>
+</table>
+<p>表格后面的段落。</p>
+"""
+
 class TableEditDesktopTest {
 
     private val viewportW = 760
@@ -144,6 +155,35 @@ class TableEditDesktopTest {
             InlineMarkup.Segment(text.substring(b.start, b.endExclusive), null, b.table)
         }
         return InlineMarkup.show(segments, emptyList())
+    }
+
+    /**
+     * 带行内结构的卡片文字：与 `ReaderScreen.setTextEditTarget` 同一条换算（选区上的 span
+     * 相对选区起点，块之间要多算一个 `\n`）。
+     */
+    private fun cardText(
+        text: String,
+        blocks: List<TextEditBlock>,
+        from: Int,
+        spans: List<InlineMarkup.StyleSpan>,
+    ): String {
+        val segments = blocks.map { b ->
+            InlineMarkup.Segment(text.substring(b.start, b.endExclusive), null, b.table)
+        }
+        val innerEnds = blocks.dropLast(1).map { it.endExclusive }
+        fun shift(off: Int, atEnd: Boolean): Int {
+            var n = 0
+            for (end in innerEnds) if (if (atEnd) end < off else end <= off) n++
+            return off - from + n
+        }
+        val mapped = spans.map {
+            InlineMarkup.StyleSpan(
+                shift(from + it.start, atEnd = false),
+                shift(from + it.endExclusive, atEnd = true),
+                it.sig,
+            )
+        }
+        return InlineMarkup.show(segments, mapped)
     }
 
     private fun commit(
@@ -312,6 +352,51 @@ class TableEditDesktopTest {
             val page = (outcome as TextEditOutcome.Success).pos
                 ?.let { host.pageLines(it)?.joinToString("") { l -> l.text } }
             assertFalse("页面上也不应再有末行", page?.contains("乙三") == true)
+        } finally {
+            host.close()
+        }
+    }
+
+    /**
+     * 表头 + 格内行内标记：卡片走管道行时要把 `<code>` / `<em>` 摊成 markdown 语法糖，
+     * 表头用 markdown 分隔行往返（提交后仍是 `<th>`），整表区间一直盖到最后一格。
+     */
+    @Test
+    fun tableHeaderAndInlineMarkupRoundTripThroughCard() {
+        val root = Files.createTempDirectory("orilumn-table-markup").toFile()
+        val host = openHost(writeBook(root, MARKUP_BODY), root)
+        try {
+            val pos = runBlocking { host.open() }!!
+            val chapter = pos.chapter
+            val before = body(host, chapter)
+            val (range, blocks) = tableBlocks(host, chapter, before, expectedRows = 3, probe = "计算结果")
+            assertEquals("整表区间应盖到最后一格的最后一个字", range.last + 1, blocks.last().endExclusive)
+            assertTrue("最后一格应完整落在整表区间里", blocks.last().endExclusive - blocks.last().start >= "初始化AND计算结果".length)
+
+            val spans = host.textEditSpans(chapter, range.first, range.last + 1)
+            assertNotNull("表格行的行内结构应拿得到", spans)
+            val card = cardText(before, blocks, range.first, spans!!)
+            val cardLines = lines(card)
+            assertEquals("表头应是管道行", "| 功能 | 通过访问 |", cardLines[0])
+            assertEquals("格内代码应摊成反引号", "| `let` | `it` |", cardLines[1])
+            assertTrue("格内斜体应摊成星号：$card", card.contains("初始化*AND*计算结果"))
+            assertFalse("不应退回标签形式：$card", card.contains("<code>") || card.contains("<em>"))
+            assertTrue("表头格应带 `<th>` 信息", blocks.first().table!!.cells.all { it.header })
+
+            // 改一格的字并提交：表头在管道行里看不见，但提交时按原位补回，`<th>` 不会悄悄变成普通格。
+            val edited = card.replace("计算结果", "计算结果改")
+            val outcome = commit(host, chapter, range, edited, pos)
+            assertTrue("改字应成功：$outcome", outcome is TextEditOutcome.Success)
+            val after = body(host, chapter)
+            assertTrue("新写的字应落进正文", after.contains("计算结果改"))
+
+            val (range2, blocks2) = tableBlocks(host, chapter, after, expectedRows = 3, probe = "计算结果改")
+            val reopened = cardText(after, blocks2)
+            assertTrue("改过的字应回显", reopened.contains("计算结果改"))
+            assertTrue("表头文字仍在", reopened.startsWith("| 功能 | 通过访问 |"))
+            assertTrue("重开卡片仍是管道行（没有多余的分隔行）", lines(reopened).size == 3)
+            assertTrue("提交后表头仍是 `<th>`", blocks2.first().table!!.cells.all { it.header })
+            assertEquals("整表区间应仍盖到最后一格", range2.last + 1, blocks2.last().endExclusive)
         } finally {
             host.close()
         }

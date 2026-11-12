@@ -50,6 +50,12 @@ object ChapterRevisionReplay {
          * 块与块之间按段界切开后各自保留自己那一段。
          */
         val styles: List<InlineMarkup.StyleSpan>? = null,
+        /**
+         * 每块的**目标块形态**（对齐 [text] 按段界切开后的每一块；null = 这一块不改）。
+         *
+         * 与 [styles] 同一把尺：段界数 + 1 个元素。数量对不上时按「没有块信息」处理。
+         */
+        val kinds: List<BlockKind?>? = null,
     )
 
     /**
@@ -123,6 +129,11 @@ object ChapterRevisionReplay {
         styleOf: ((MarkupElement) -> ComputedStyle?)?,
         merges: List<Merge> = emptyList(),
         anonymousEdit: AnonymousRunEditor? = null,
+        /**
+         * 叶的目标块形态（[BlockKind]；null = 这一叶不改块级形态）。只在与当前形态不同时才动结构，
+         * 见 [BlockRestructure]。
+         */
+        blockOfLeaf: (leafIndex: Int) -> BlockKind? = { null },
     ): Result {
         require(leaves.size == charStarts.size && leafPaths.size == charStarts.size) {
             "叶表 / 路径 / 起点长度不一致：${leaves.size} / ${leafPaths.size} / ${charStarts.size}"
@@ -160,6 +171,17 @@ object ChapterRevisionReplay {
         val origins = ArrayList<Int>(leaves.size)
         val measured = LinkedHashMap<Int, Int>()
         val measuredRev = LinkedHashMap<Long, Int>()
+        // 需要改块级形态的叶（新叶 → 目标形态）：只收「与现在不同」的，相同的块一个节点都不动。
+        val wantBlocks = LinkedHashMap<MarkupElement, BlockKind>()
+        // 还没落到 wantBlocks 的目标形态：叶可能在主循环里被换掉 / 被合并组撤掉，按节点跟过去。
+        // 只在主循环里现算是不行的——审阅视图里「只改块形态、文字一字未动」的修订不产生任何
+        // 文字编辑，主循环整片叶直接跳过（`edits.isEmpty()`），现算就漏了。
+        val pendingKinds = LinkedHashMap<MarkupElement, BlockKind>()
+        for (index in leaves.indices) {
+            val leaf = leaves[index]
+            val kind = blockOfLeaf(index) ?: continue
+            wantKindOf(leaf, kind)?.let { pendingKinds[leaf] = it }
+        }
         var degraded = 0
         var needsRecompute = false
         var shift = 0L
@@ -190,11 +212,31 @@ object ChapterRevisionReplay {
                         newLeaves += b.element
                         origins += firstLeaf
                         blockOffset += b.textLength
+                        b.kind?.let { wantBlocks[b.element] = it }
                     }
                     shift += out.delta
-                    replacements[leaves[firstLeaf]] = out.blocks.map { it.element }
-                    for (k in firstLeaf..lastLeaf) {
-                        if (k !in out.usedLeaves) removed += leaves[k]
+                    // 组里的叶整段换成新块：第一片叶原地换成一串块，其余叶撤掉
+                    // （它们的内容已经由那串块承载；留着就是原文重复一遍）。
+                    //
+                    // 叶各自住在一层纯包装里（`ul > li > p`：列表项的文字挂在 `li` 下的 `p`）时，
+                    // 换的必须是**包装**：只换第一片叶的话，几块会全塞进第一个列表项，剩下的
+                    // 列表项被撤掉内容变成空壳（读者复报：补一项列表，其余项全成了普通段落）。
+                    val units = mergeUnits(leaves, firstLeaf, lastLeaf)
+                    if (units == null) {
+                        replacements[leaves[firstLeaf]] = out.blocks.map { it.element }
+                        for (k in firstLeaf + 1..lastLeaf) removed += leaves[k]
+                    } else {
+                        replacements[units[0]] = out.blocks.mapIndexed { j, b ->
+                            // 复用的包装沿用自己的属性（class / id 都不会撞）；多出来的块
+                            // （读者新加的行）照第一个包装的样子造，去掉 id。
+                            val host = units.getOrNull(j) ?: units[0]
+                            MarkupElement(
+                                tag = host.tag,
+                                attrs = if (j < units.size) host.attrs else host.attrs - "id",
+                                children = listOf(b.element),
+                            )
+                        }
+                        for (k in 1 until units.size) removed += units[k]
                     }
                     // 合成的组（同一片叶上几处改动）量不出逐条的增量，跳过修正、沿用库里的值。
                     if (group.size == 1) measuredRev[group[0].revisionId] = out.delta
@@ -259,6 +301,8 @@ object ChapterRevisionReplay {
             replacements[leaf] = listOf(r.leaf)
             origins += i
             newLeaves += r.leaf
+            // 块级形态：这一叶换成了新节点，形态跟着新节点走。
+            pendingKinds.remove(leaf)?.let { wantBlocks[r.leaf] = it }
             i++
         }
 
@@ -277,12 +321,36 @@ object ChapterRevisionReplay {
             }
         }
 
+        // 没被替换、也没被合并组撤掉的叶：目标形态直接挂原节点（见 pendingKinds 的说明）。
+        for ((leaf, kind) in pendingKinds) {
+            if (leaf in replacements || leaf in removed) continue
+            wantBlocks[leaf] = kind
+        }
         val rebuilt = rebuildTree(root, replacements, removed, childOverrides)
-        val tree = rebuilt.root
+        var tree = rebuilt.root
         MarkupPaths.assignParents(tree)
-        // 合成匿名叶不在 children 里，assignParents 够不到：按重建后的属主补 parent。
+        // 块级重塑（标题 / 引用 / 列表 / 代码块）：树形状会变，必须在重链之后做——它按父链认容器。
+        var nodeMap: Map<MarkupElement, MarkupElement> = emptyMap()
+        if (wantBlocks.isNotEmpty()) {
+            val restructured = BlockRestructure.apply(tree, wantBlocks)
+            nodeMap = restructured.nodeMap
+            if (restructured.changed) {
+                tree = restructured.root
+                MarkupPaths.assignParents(tree)
+                for (n in newLeaves.indices) newLeaves[n] = nodeMap[newLeaves[n]] ?: newLeaves[n]
+            }
+        }
+        // 合成匿名叶不在 children 里，assignParents 够不到：按重建后的属主补 parent；
+        // 属主若在重塑里被换掉（容器拆分 / 重新成组），跟着换到新节点。
         for ((leaf, owner) in anonymousLeafOwner) {
-            leaf.parent = rebuilt.map[owner] ?: owner
+            val mapped = rebuilt.map[owner] ?: owner
+            leaf.parent = nodeMap[mapped] ?: mapped
+        }
+        // 旧树 → 新树：重塑换掉 / 复制过的节点按重塑表再换一道。
+        val elementMap = if (nodeMap.isEmpty()) {
+            rebuilt.map
+        } else {
+            rebuilt.map.mapValues { nodeMap[it.value] ?: it.value }
         }
         return Result(
             root = tree,
@@ -293,12 +361,16 @@ object ChapterRevisionReplay {
             needsRecompute = needsRecompute,
             leafOrigin = origins.toIntArray(),
             measuredRevisionDeltas = measuredRev,
-            elementMap = rebuilt.map,
+            elementMap = elementMap,
         )
     }
 
-    /** 一块的节点与实测文本长度（渲染空间）。 */
-    private class Block(val element: MarkupElement, val textLength: Int)
+    /** 一块的节点、实测文本长度（渲染空间）与目标块形态（null = 不改块级形态）。 */
+    private class Block(
+        val element: MarkupElement,
+        val textLength: Int,
+        val kind: BlockKind? = null,
+    )
 
     /**
      * 把同一组（同一片叶，或首末叶之间）的几处改动拼成一串文字：按起点把各自的替换文字
@@ -320,11 +392,49 @@ object ChapterRevisionReplay {
 
     private class MergeOut(
         val blocks: List<Block>,
-        val usedLeaves: Set<Int>,
         val delta: Int,
         val degraded: Int,
         val needsRecompute: Boolean,
     )
+
+    /**
+     * 一块的目标形态（null = 不动结构）。
+     *
+     * 两个不动的口径：目标与现在相同（块一个节点都不换），或者这一块**不归 markdown 管**
+     * （`div` / 表格行这类叶没有对应的块标记，卡片也就不该改它的形态——哪怕提交里带了什么）。
+     */
+    private fun wantKindOf(leaf: MarkupElement, want: BlockKind?): BlockKind? {
+        if (want == null) return null
+        val cur = BlockKind.ofElement(leaf) ?: return null
+        return want.takeIf { it != cur }
+    }
+
+    /** 合并时能整层替换的「纯包装」标签：里面只装这一片叶，拆成多项时跟着复制。 */
+    private val PURE_WRAPPERS = setOf("li", "dd", "dt")
+
+    /**
+     * 合并组里各叶的「替换单位」：叶是同一个父节点下的兄弟就一叶一个单位（返回 null，走老路）；
+     * 每片叶各住在一层纯包装里（`ul > li > p`、`dl > dd > p`）就返回那层包装 —— 换单位时
+     * 连包装一起换，拆出来的几块才能各占一个列表项。
+     *
+     * 包装里只要还装着别的东西（项目标签、脚注），复制一份就等于把那东西也抄上几遍；
+     * 这种情形宁可按老路走，也不凭空造出重复内容。
+     */
+    private fun mergeUnits(
+        leaves: List<MarkupElement>,
+        first: Int,
+        last: Int,
+    ): List<MarkupElement>? {
+        val units = ArrayList<MarkupElement>(last - first + 1)
+        for (k in first..last) {
+            val parent = leaves[k].parent ?: return null
+            if (parent.tag !in PURE_WRAPPERS) return null
+            if (parent.children.size != 1 || parent.children[0] !== leaves[k]) return null
+            if (units.isNotEmpty() && (parent.tag != units[0].tag || parent.parent !== units[0].parent)) return null
+            units.add(parent)
+        }
+        return units.takeIf { it.isNotEmpty() }
+    }
 
     /**
      * 把一条跨叶修订落成若干块：能对上叶的复用原叶（保住行内样式与 `class`），
@@ -344,7 +454,7 @@ object ChapterRevisionReplay {
         val simple = (first..last).all { k ->
             leafPaths[k] != null && RevisionBlocks.mergeableLeaf(leaves[k])
         }
-        if (!simple) return MergeOut(emptyList(), emptySet(), 0, 0, needsRecompute = true)
+        if (!simple) return MergeOut(emptyList(), 0, 0, needsRecompute = true)
 
         // 同一片叶（或首末叶之间）上的几处改动：按起点把它们各自的替换文字拼回**整段**原叶文字
         // （段界原样留着），合成一条「整段重塑」，再照常按段界拆块。跨叶修订与旁边的叶内修订
@@ -404,11 +514,12 @@ object ChapterRevisionReplay {
                 .map { InlineMarkup.StyleSpan(maxOf(0, it.start - from), minOf(lines[j].length, it.endExclusive - from), it.sig) }
         }
 
-        val used = LinkedHashSet<Int>()
         val blocks = ArrayList<Block>(lines.size)
         var degraded = 0
+        // 每块的目标形态（数量对不上就当没带块信息，宁可不动结构也不猜）。
+        val kinds = merge.kinds?.takeIf { it.size == lines.size }
 
-        fun emitRebuilt(index: Int, edit: LeafTextEditor.Edit) {
+        fun emitRebuilt(index: Int, edit: LeafTextEditor.Edit, kind: BlockKind?) {
             val leaf = leaves[index]
             val r = LeafTextEditor.rebuild(
                 leaf = leaf,
@@ -419,11 +530,11 @@ object ChapterRevisionReplay {
                 rebuildSegments = segmentsOf,
             )
             if (r.degraded) degraded++
-            used += index
-            blocks += Block(r.leaf, r.text.length)
+            // 只记「与来源叶不同」的目标形态：相同的块一个节点都不动。
+            blocks += Block(r.leaf, r.text.length, wantKindOf(leaf, kind))
         }
 
-        fun emitNew(text: String, spans: List<InlineMarkup.StyleSpan>? = null) {
+        fun emitNew(text: String, spans: List<InlineMarkup.StyleSpan>? = null, kind: BlockKind?) {
             val el = MarkupElement(
                 tag = firstLeaf.tag,
                 attrs = firstLeaf.attrs - "id",
@@ -431,7 +542,7 @@ object ChapterRevisionReplay {
             )
             // 量长度要按同一套级联（继承父容器的字体 / white-space）；重链在最后统一做。
             el.parent = firstLeaf.parent
-            blocks += Block(el, segmentsOf(el).text.length)
+            blocks += Block(el, segmentsOf(el).text.length, wantKindOf(firstLeaf, kind))
         }
 
         if (lines.size == 1) {
@@ -440,6 +551,7 @@ object ChapterRevisionReplay {
             emitRebuilt(
                 first,
                 LeafTextEditor.Edit(selStartInFirst, firstLen, lines[0] + suffix, blockStyles(0)),
+                kinds?.getOrNull(0),
             )
         } else if (first == last) {
             // 单叶拆块：选区在一段之内，却输入了段界（读者新插的换行）。前缀 + 第一行留在原叶，
@@ -447,8 +559,8 @@ object ChapterRevisionReplay {
             // 一片叶只能承载一块，前缀和后缀要分两处，就只能各复制一份（复制的那份去掉 id）。
             val at = selStartInFirst
             val end = selEndInLast
-            emitRebuilt(first, LeafTextEditor.Edit(at, firstLen, lines.first(), blockStyles(0)))
-            for (j in 1 until lines.size - 1) emitNew(lines[j], blockStyles(j))
+            emitRebuilt(first, LeafTextEditor.Edit(at, firstLen, lines.first(), blockStyles(0)), kinds?.getOrNull(0))
+            for (j in 1 until lines.size - 1) emitNew(lines[j], blockStyles(j), kinds?.getOrNull(j))
             val tail = LeafTextEditor.rebuild(
                 leaf = lastLeaf,
                 segments = segmentsOf(lastLeaf),
@@ -468,7 +580,7 @@ object ChapterRevisionReplay {
             } else {
                 tail.leaf
             }
-            blocks += Block(tailLeaf, tail.text.length)
+            blocks += Block(tailLeaf, tail.text.length, kinds?.getOrNull(lines.lastIndex))
         } else {
             // 前 m-1 行：能对上叶的复用原叶，多出来的行新建块。
             for (j in 0 until lines.size - 1) {
@@ -482,17 +594,21 @@ object ChapterRevisionReplay {
                             text = lines[j],
                             styles = blockStyles(j),
                         ),
+                        kinds?.getOrNull(j),
                     )
                 } else {
-                    emitNew(lines[j], blockStyles(j))
+                    emitNew(lines[j], blockStyles(j), kinds?.getOrNull(j))
                 }
             }
             // 末行接末叶后缀：用末叶承载，后缀的行内样式不动。
-            emitRebuilt(last, LeafTextEditor.Edit(0, selEndInLast, lines.last(), blockStyles(lines.lastIndex)))
+            emitRebuilt(
+                last,
+                LeafTextEditor.Edit(0, selEndInLast, lines.last(), blockStyles(lines.lastIndex)),
+                kinds?.getOrNull(lines.lastIndex),
+            )
         }
         return MergeOut(
             blocks = blocks,
-            usedLeaves = used,
             delta = blocks.sumOf { it.textLength } - oldLength,
             degraded = degraded,
             needsRecompute = false,

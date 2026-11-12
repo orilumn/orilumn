@@ -4,8 +4,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -59,40 +61,54 @@ import orilumn.reader.engine.revision.CharDiff
 @Composable
 fun ReaderRevisionPanel(
     scheme: String,
-    load: suspend () -> List<TextRevision>,
+    /** 读全书修订：**null = 读取失败**（与「真没有修改」必须分开显示）。 */
+    load: suspend () -> List<TextRevision>?,
     onDelete: suspend (TextRevision) -> Boolean,
     currentChapter: Int,
     onJump: (TextRevision) -> Unit,
     onDismiss: () -> Unit,
     /** 宿主缓存的整本修订快照：给了就**首帧**直接排列表，抽屉不会先滑出半屏空白。 */
     initial: List<TextRevision>? = null,
+    /** 「全部恢复原文」：成功返回 true。null = 宿主不支持，按钮不出现。 */
+    onRestoreAll: (suspend () -> Boolean)? = null,
 ) {
     val p = paletteFor(scheme)
     var loaded by remember { mutableStateOf(initial) }
+    // 读取失败是**独立状态**：以前回退成空表，读者看到「还没有修改过正文」，以为记录丢了。
+    var loadFailed by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var reloadTick by remember { mutableStateOf(0) }
+    // 「全部恢复」是破坏性操作：点一下只展开确认条，再点「恢复」才真删。
+    var confirmRestoreAll by remember { mutableStateOf(false) }
     // 左滑展开的行键：同时只展开一行（SwipeRevealRow 的手势物理与它共用一套口径）。
     var openKey by remember { mutableStateOf<String?>(null) }
     val currentLoad by rememberUpdatedState(load)
 
     // 列表体随抽屉打开而组合，所以首次组合就是「打开」；切到别的页签会卸载，切回来重新读。
     // 已有快照时（首帧就有内容）照样对齐一次库里的最新结果，只是不再让抽屉空着等它。
-    LaunchedEffect(Unit) {
+    LaunchedEffect(reloadTick) {
+        loadFailed = false
         val fresh = try {
             currentLoad()
         } catch (c: CancellationException) {
             throw c
         } catch (_: Throwable) {
-            loaded ?: emptyList()
+            null
         }
-        if (fresh != loaded) loaded = fresh
+        if (fresh == null) {
+            // 手里有旧快照就继续用（失败只是没刷新）；手里什么都没有才是真失败。
+            loadFailed = loaded == null
+        } else {
+            if (fresh != loaded) loaded = fresh
+        }
     }
 
-    val shown = remember(loaded) { loaded.orEmpty() }
-    val itemCount = shown.size
+    val all = loaded.orEmpty()
+    val itemCount = all.size
     // 打开就落在当前阅读章的第一条：LazyColumn 直接从目标位起排，不再先排一屏第 0 条、
     // 再 scrollToItem 跳过去——那屏白排是打开清单最主要的卡顿来源（行高固定，跳过完全等价）。
-    val firstInChapter = remember(shown, currentChapter) {
-        shown.indexOfFirst { it.chapter == currentChapter }
+    val firstInChapter = remember(all, currentChapter) {
+        all.indexOfFirst { it.chapter == currentChapter }
     }
     val listState = remember(loaded != null) {
         LazyListState(firstVisibleItemIndex = (firstInChapter - 1).coerceAtLeast(0))
@@ -105,6 +121,8 @@ fun ReaderRevisionPanel(
     fun moveActive(dir: Int) = nav.move(dir, 1, itemCount, { true }) {
         scope.ensureListVisible(listState, it, dir)
     }
+
+    fun activeRevision(): TextRevision? = nav.activeIdx?.let { all.getOrNull(it) }
 
     /**
      * 删一条修订：宿主删库并重排后，清单里同步移除；失败就地提示（行不消失）。
@@ -138,11 +156,38 @@ fun ReaderRevisionPanel(
         }
     }
 
+    /**
+     * 全部恢复原文：宿主一次删光并重排，清单随即清空。失败保留列表、就地提示。
+     * 删完把焦点还给列表体（此时是空态，↑↓ 不再动作，Esc 照旧可关）。
+     */
+    fun restoreAll() {
+        val action = onRestoreAll ?: return
+        error = null
+        confirmRestoreAll = false
+        scope.launch {
+            val ok = try {
+                action()
+            } catch (c: CancellationException) {
+                throw c
+            } catch (_: Throwable) {
+                false
+            }
+            if (ok) {
+                loaded = emptyList()
+                nav.activeIdx = null
+                openKey = null
+                error = null
+            } else {
+                error = "恢复失败"
+            }
+        }
+    }
+
     // 打开时把高亮落到当前阅读章的第一条修改（滚动位置已由初始下标就位，与笔记清单同口径）。
     LaunchedEffect(loaded) {
         if (loaded == null || positioned) return@LaunchedEffect
         positioned = true
-        nav.activeIdx = if (firstInChapter >= 0) firstInChapter else shown.indices.firstOrNull()
+        nav.activeIdx = if (firstInChapter >= 0) firstInChapter else all.indices.firstOrNull()
         nav.releaseHold()
         bodyFr.requestFocus()
     }
@@ -155,23 +200,59 @@ fun ReaderRevisionPanel(
             .panelKeyEvents(
                 onUp = { moveActive(-1) },
                 onDown = { moveActive(1) },
-                onEnter = {
-                    nav.activeIdx?.let { i -> shown.getOrNull(i)?.let(onJump) }
-                },
+                onEnter = { activeRevision()?.let(onJump) },
                 onEscape = onDismiss,
             )
             // 点按消费：杂散点按不穿透到遮罩关闭层。
             .pointerInput(Unit) { detectTapGestures(onTap = {}) },
     ) {
+        // 「全部恢复」只在真有修改、且宿主支持时出现；破坏性操作先展开确认条。
+        if (onRestoreAll != null && all.isNotEmpty() && !confirmRestoreAll) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 4.dp),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "全部恢复",
+                    color = PanelGold,
+                    fontSize = 13.sp,
+                    modifier = Modifier.clickable { confirmRestoreAll = true },
+                )
+            }
+        }
+        if (confirmRestoreAll) {
+            RevisionRestoreAllConfirm(
+                palette = p,
+                count = all.size,
+                onConfirm = ::restoreAll,
+                onCancel = { confirmRestoreAll = false },
+            )
+        }
         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
             when {
+                loadFailed && loaded == null -> Column(modifier = Modifier.padding(24.dp)) {
+                    Text("读取失败", color = p.muted, fontSize = 14.sp)
+                    Text(
+                        "点这里重试",
+                        color = PanelGold,
+                        fontSize = 14.sp,
+                        modifier = Modifier
+                            .padding(top = 8.dp)
+                            .clickable { reloadTick++ },
+                    )
+                }
+
                 loaded == null -> Text(
                     "加载中…", color = p.muted2, fontSize = 14.sp,
                     modifier = Modifier.padding(24.dp),
                 )
 
-                shown.isEmpty() -> Text(
-                    "还没有修改过正文", color = p.muted2, fontSize = 14.sp,
+                all.isEmpty() -> Text(
+                    "还没有修改过正文",
+                    color = p.muted2, fontSize = 14.sp,
                     modifier = Modifier.padding(24.dp),
                 )
 
@@ -179,8 +260,8 @@ fun ReaderRevisionPanel(
                     state = listState,
                     modifier = Modifier.fillMaxSize().clearKbHoldOnMove { nav.releaseHold() },
                 ) {
-                    items(shown.size, key = { "r${shown[it].id}" }) { i ->
-                        val revision = shown[i]
+                    items(all.size, key = { "r${all[it].id}" }) { i ->
+                        val revision = all[i]
                         RevisionListRow(
                             revision = revision,
                             active = nav.activeIdx == i,
@@ -212,6 +293,42 @@ fun ReaderRevisionPanel(
                 )
             }
         }
+    }
+}
+
+/** 「全部恢复」的确认条：破坏性操作不给一键误触的机会。 */
+@Composable
+private fun RevisionRestoreAllConfirm(
+    palette: Palette,
+    count: Int,
+    onConfirm: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(palette.rowActive)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            "把 $count 条修改全部恢复成原文？",
+            color = palette.text,
+            fontSize = 13.sp,
+            modifier = Modifier.weight(1f),
+        )
+        Text(
+            "恢复",
+            color = Color(REVIEW_DELETED_ARGB),
+            fontSize = 13.sp,
+            modifier = Modifier.padding(start = 12.dp).clickable(onClick = onConfirm),
+        )
+        Text(
+            "取消",
+            color = palette.muted,
+            fontSize = 13.sp,
+            modifier = Modifier.padding(start = 12.dp).clickable(onClick = onCancel),
+        )
     }
 }
 

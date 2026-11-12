@@ -8,6 +8,7 @@ import orilumn.reader.engine.LinkTarget
 import orilumn.reader.engine.paging.BookPageNumber
 import orilumn.reader.engine.paging.PageSlice
 import orilumn.reader.engine.revision.InlineMarkup
+import orilumn.reader.engine.revision.TextEditBlock
 import orilumn.reader.engine.skia.DecodedImage
 import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.engine.skia.PageBackground
@@ -229,12 +230,14 @@ interface ReaderHost {
     suspend fun deleteAnnotation(id: Long): Boolean = false
 
     /**
-     * 全书正文修订（编辑清单用）：按章序、章内起点升序；读取失败返回空表。
+     * 全书正文修订（编辑清单用）：按章序、章内起点升序。**读取失败返回 null**（不是空表）。
      *
      * 和 [annotationsForBook] 一样只读库，不要求任何章就绪。坐标是原书空间，
      * 跳转时由宿主换算成渲染空间再落位（与标注清单同一口径）。
+     *
+     * 失败与「真没有修改」必须分开：编辑清单要按这个区分显示「读取失败，点此重试」还是空态。
      */
-    suspend fun textRevisionsForBook(): List<TextRevision> = emptyList()
+    suspend fun textRevisionsForBook(): List<TextRevision>? = null
 
     /**
      * 本章正文修订，**渲染坐标**（与选区 / `textOf` / `PageSlice` 同尺）：按起点升序。
@@ -260,6 +263,16 @@ interface ReaderHost {
         revision: TextRevision,
         currentPage: ReaderPos? = null,
     ): TextRevisionDeleteOutcome = TextRevisionDeleteOutcome.Failed
+
+    /**
+     * 编辑清单的「全部恢复原文」：把全书修订一次删光，返回结果（口径同 [deleteTextRevision]）。
+     *
+     * 删的是当前阅读章时，[TextRevisionDeleteOutcome.Success.pos] 给出按「删除前页首」重新落位的
+     * 新位置；别的章只作废版式，当前页不动（那时 pos 为 null）。
+     * 默认失败 = 宿主尚未支持。
+     */
+    suspend fun restoreAllTextRevisions(currentPage: ReaderPos? = null): TextRevisionDeleteOutcome =
+        TextRevisionDeleteOutcome.Failed
 
     /**
      * 审阅视图开关：打开后本章按「原文全保留 + 新文字插在后面」重排，改动的痕迹看得见
@@ -382,6 +395,7 @@ interface ReaderHost {
         text: String,
         styles: List<InlineMarkup.StyleSpan>? = null,
         currentPage: ReaderPos? = null,
+        blocks: List<InlineMarkup.Segment>? = null,
     ): TextEditOutcome = TextEditOutcome.Failed("当前版本不支持正文修改")
 
     /**
@@ -392,6 +406,15 @@ interface ReaderHost {
      * 提交时同一份结构用于补回元素属性（`class` / `id` 之类读者没写的部分）。
      */
     fun textEditSpans(chapter: Int, start: Int, endExclusive: Int): List<InlineMarkup.StyleSpan>? = null
+
+    /**
+     * 选区涉及的各**块**（渲染空间 [start, endExclusive)）：正文修改卡按它给每一行加块标记
+     * （`# ` / `> ` / `- ` / `1. ` / 围栏），读者也靠删改标记来换块形态。
+     *
+     * 顺序与 [commitTextEdit] 的 `\n` 分段一一对应；第一项带「选区起点是否在块首」。
+     * 默认 null = 宿主没实现（或这一处拿不到排版叶）：卡片不显示块标记，行为与引入块标记之前一致。
+     */
+    fun textEditBlocks(chapter: Int, start: Int, endExclusive: Int): List<TextEditBlock>? = null
 
     /**
      * 渲染区间 → 原书区间（建标注 / 存进度用）。无修订时原样返回；默认 null = 宿主未实现，

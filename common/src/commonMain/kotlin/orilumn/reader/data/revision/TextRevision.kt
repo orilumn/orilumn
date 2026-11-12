@@ -43,6 +43,25 @@ data class TextRevision(
      * 与 [styles] 的差别只在**公共前后缀**：落库的最小修订裁掉的两端，这一段结构只在这里。
      */
     val editedStyles: List<RevisionStyleSpan>? = null,
+    /**
+     * 块级形态（markdown 块标记的落库形态，见 `BlockKind`）：**按段**对齐，
+     * 段 = [text] 用 [RevisionBlocks.SEPARATOR] 切开后的每一块。
+     *
+     * - 空表 = 这条修订没带块级信息（老修订）：重放只按文字走，块形态沿用原样；
+     * - `""` 表示这一段不改块形态；
+     * - `"p"` / `"h1"`…`"h6"` / `"quote"` / `"ul"` / `"ol"` / `"pre"` = 这一段应该长成的块。
+     *
+     * 重放时若与这一块现在的形态不同，才换标签 / 增删包裹层（相同就一个字节都不动）。
+     */
+    val blockKinds: List<String> = emptyList(),
+    /**
+     * 卡片输入区**每一行**的块形态（重开卡片时按它把行拼回块）。
+     *
+     * 与 [blockKinds] 的区别：这是「读者当时看到的输入区」，含被公共前后缀裁掉的两端；
+     * 行序对齐 [editedText] 按 `\n` 切开的每一行，块内换行的后续行记 [RevisionBlocks.CONTINUATION]。
+     * 空表 = 老修订（重开时没有块标记）。
+     */
+    val editedBlocks: List<String> = emptyList(),
     val delta: Int = 0,
     val groupId: Long = 0,
     val createdAt: Long = 0,

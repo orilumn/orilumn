@@ -65,6 +65,32 @@ object InlineSpans {
             .sortedWith(compareBy({ it.start }, { -it.endExclusive }))
     }
 
+    /**
+     * 把「本叶内、相对 [localFrom]」的区间搬到**选区起点**坐标系（正文修改卡要的那把尺）。
+     *
+     * [ofLeaf] 返回的区间是相对传进去的 `from`（= 本叶的 [localFrom]）算的：
+     * 叶内绝对位置 `p` 变成 `p - localFrom`。卡片要的是相对**选区起点** `selectionStart`，
+     * 也就是 `leafStart + localFrom + p'`（`p'` 是 ofLeaf 给的值）再减去 `selectionStart`。
+     *
+     * 两段抵消关系不同，**不能只看叶首**：
+     * - 第一叶：选区就在这一叶里（或从这里起），`localFrom = selectionStart - leafStart`，位移为 0；
+     * - 第二叶起：选区从上一叶开始，`localFrom` 被夹到 0，位移是 `leafStart - selectionStart`。
+     * 早先按 `leafStart - selectionStart` 一刀切，第一叶只要不是从叶首起选就会把区间**往前挪**
+     * （读者复报的「第二段的标记挪到第一段上」就是这条）。
+     */
+    fun toSelectionSpace(
+        spans: List<InlineMarkup.StyleSpan>,
+        leafStart: Int,
+        localFrom: Int,
+        selectionStart: Int,
+    ): List<InlineMarkup.StyleSpan> {
+        val shift = leafStart + localFrom - selectionStart
+        if (shift == 0) return spans
+        return spans.map {
+            it.copy(start = it.start + shift, endExclusive = it.endExclusive + shift)
+        }
+    }
+
     internal fun sigOf(el: MarkupElement): InlineMarkup.StyleSig {
         val attrs = LinkedHashMap<String, String>()
         for ((k, v) in el.attrs) {

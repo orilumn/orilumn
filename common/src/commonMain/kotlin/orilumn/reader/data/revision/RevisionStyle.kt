@@ -59,14 +59,22 @@ object RevisionStyles {
     fun encode(
         spans: List<RevisionStyleSpan>?,
         edited: List<RevisionStyleSpan>? = null,
+        blocks: List<String>? = null,
+        editedBlocks: List<String>? = null,
     ): String {
-        if (spans == null && edited == null) return ""
+        if (spans == null && edited == null && blocks == null && editedBlocks == null) return ""
         return buildJsonObject {
             put("v", JsonPrimitive(VERSION))
             spans?.let { put("s", toArray(it)) }
             edited?.let { put("e", toArray(it)) }
+            // 块级形态：可选键（老版本忽略），不因新增而 +1。
+            blocks?.takeIf { it.isNotEmpty() }?.let { put("b", toStrings(it)) }
+            editedBlocks?.takeIf { it.isNotEmpty() }?.let { put("eb", toStrings(it)) }
         }.toString()
     }
+
+    private fun toStrings(values: List<String>): JsonArray =
+        JsonArray(values.map { JsonPrimitive(it) })
 
     private fun toArray(spans: List<RevisionStyleSpan>): JsonArray = JsonArray(
         spans.map { s ->
@@ -90,6 +98,22 @@ object RevisionStyles {
      * 老修订只有 `s`（甚至完全没有样式信息），这里返回 null；调用方按老行为开纯文本卡。
      */
     fun decodeEdited(raw: String): List<RevisionStyleSpan>? = decodeArray(raw, "e")
+
+    /** 解析块级形态（按段，对齐 `RevisionBlocks.split(text)`）；老修订返回空表。 */
+    fun decodeBlocks(raw: String): List<String> = decodeStrings(raw, "b")
+
+    /** 解析输入区每行的块形态（重开卡片用）；老修订返回空表。 */
+    fun decodeEditedBlocks(raw: String): List<String> = decodeStrings(raw, "eb")
+
+    private fun decodeStrings(raw: String, key: String): List<String> {
+        if (raw.isBlank()) return emptyList()
+        return runCatching {
+            val root = json.parseToJsonElement(raw).jsonObject
+            val version = root["v"]?.jsonPrimitive?.intOrNull ?: 0
+            if (version > VERSION) return emptyList()
+            root[key]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull }.orEmpty()
+        }.getOrDefault(emptyList())
+    }
 
     private fun decodeArray(raw: String, key: String): List<RevisionStyleSpan>? {
         if (raw.isBlank()) return null

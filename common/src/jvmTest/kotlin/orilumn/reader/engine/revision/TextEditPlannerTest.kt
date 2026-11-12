@@ -524,6 +524,28 @@ class TextEditPlannerTest {
     }
 
     @Test
+    fun codeSpanAfterALeadingSpaceStaysOnItsOwnChars() {
+        // 真机复报：列表项「函数体写在大括号内 {}」把 `{}` 挪到「内」前面，输入区是
+        // 「 `{}`内」（段首空格 + 代码 + 内）。段首空格前面是段内的「号」，不是叶边界，
+        // 归一不会吃掉它；样式区间必须照旧圈住「{}」，不能整体前移一格盖住空格与 `{`。
+        val text = "函数体写在大括号内 {}"
+        val from = text.indexOf("内")
+        val p = ready(
+            planStyled(
+                text, intArrayOf(text.length), from, text.length, " {}内",
+                listOf(span(1, 3, "code")),
+            ),
+        )
+        val r = p.inserted.single()
+        assertEquals(" {}内", r.text)
+        val rendered = r.styles?.single()
+        assertEquals(1 to 3, rendered!!.start to rendered.endExclusive)
+        // 卡片回显的那一份按输入区原文（含段首空格）记，重开卡才不会把标记挪位。
+        val card = r.editedStyles?.single()
+        assertEquals(1 to 3, card!!.start to card.endExclusive)
+    }
+
+    @Test
     fun ordinarySpaceNextToSelectionIsLeftAlone() {
         // 西文之间的普通空格不是接缝空白（本来就看得见），不归本规则管。
         val text = "abc def ghi"
@@ -532,5 +554,161 @@ class TextEditPlannerTest {
         assertEquals(4, r.charStart)
         assertEquals(7, r.charEnd)
         assertEquals("xyz", r.text)
+    }
+
+    @Test
+    fun selectionCoveringAnImageSlotIsAllowed() {
+        // 行内图片在正文里是一个 U+FFFC 占位：读者选中它一起删，图就跟着删（重放侧按占位去留决定，
+        // 见 LeafTextEditorTest）。以前这里整次拒绝，读者只能干看着「这里不能改」。
+        val p = plan("前\uFFFC后", intArrayOf(3), 0, 3, "改")
+        val r = ready(p).inserted.single()
+        assertEquals(0, r.charStart)
+        assertEquals(3, r.charEnd)
+        assertEquals("改", r.text)
+    }
+
+    @Test
+    fun selectionAfterAnImageSlotIsStillEditable() {
+        // 只碰到图片**之外**的字照常能改。
+        val p = plan("前\uFFFC后", intArrayOf(3), 2, 3, "尾")
+        assertTrue("expected Ready but was $p", p is TextEditPlan.Ready)
+    }
+
+    @Test
+    fun selectionAcrossAWholeImageBlockIsRejected() {
+        // 整块图片（`img` 单独成叶）属于块结构，选区跨过去仍是拒绝。
+        val text = "前\uFFFC后"
+        val p = TextEditPlanner.plan(
+            bookId = 1,
+            chapter = 2,
+            chapterText = text,
+            blockEnds = intArrayOf(1, 2, 3),
+            start = 0,
+            endExclusive = 3,
+            replacement = "改",
+            map = ChapterRevisionMap.EMPTY,
+            groupId = 1L,
+            mergeableLeaf = { it != 1 },
+        )
+        assertTrue("expected Rejected but was $p", p is TextEditPlan.Rejected)
+    }
+
+    // ---------------------------------------------------------------- 块级形态
+
+    private fun planBlocks(
+        text: String,
+        ends: IntArray?,
+        start: Int,
+        endExclusive: Int,
+        blocks: List<InlineMarkup.Segment>,
+        current: (Int) -> BlockKind? = { null },
+    ): TextEditPlan = TextEditPlanner.plan(
+        bookId = 1,
+        chapter = 1,
+        chapterText = text,
+        blockEnds = ends,
+        start = start,
+        endExclusive = endExclusive,
+        replacement = InlineMarkup.joinSegments(blocks),
+        map = ChapterRevisionMap.EMPTY,
+        groupId = 99,
+        now = 1234,
+        blocks = blocks,
+        currentKindOf = current,
+    )
+
+    @Test
+    fun cardBlockMarkerBecomesItsOwnRevision() {
+        // 卡片第一行写了 `## `：文字一个字没改，也要落一条修订把这一段改成二级标题。
+        val r = ready(
+            planBlocks(
+                text = "标题",
+                ends = intArrayOf(2),
+                start = 0,
+                endExclusive = 2,
+                blocks = listOf(InlineMarkup.Segment("标题", BlockKind.Heading2)),
+                current = { BlockKind.Paragraph },
+            ),
+        ).inserted.single()
+        assertEquals("标题", r.text)
+        assertEquals(listOf("h2"), r.blockKinds)
+        // 卡片那一行带的是**绝对**形态：重开卡片还要看见 `## `。
+        assertEquals(listOf("h2"), r.editedBlocks)
+    }
+
+    @Test
+    fun sameBlockKindWritesNothing() {
+        // 目标形态与现在相同：卡片每行都带形态，不能因此白落一条「什么也没改」的修订。
+        val p = planBlocks(
+            text = "正文",
+            ends = intArrayOf(2),
+            start = 0,
+            endExclusive = 2,
+            blocks = listOf(InlineMarkup.Segment("正文", BlockKind.Paragraph)),
+            current = { BlockKind.Paragraph },
+        )
+        assertTrue("expected noop but was $p", (p as TextEditPlan.Ready).noop)
+    }
+
+    @Test
+    fun removingTheMarkerTurnsHeadingBackIntoParagraph() {
+        val r = ready(
+            planBlocks(
+                text = "标题",
+                ends = intArrayOf(2),
+                start = 0,
+                endExclusive = 2,
+                blocks = listOf(InlineMarkup.Segment("标题", BlockKind.Paragraph)),
+                current = { BlockKind.Heading3 },
+            ),
+        ).inserted.single()
+        assertEquals(listOf("p"), r.blockKinds)
+        assertEquals("标题", r.text)
+    }
+
+    @Test
+    fun mergeKeepsPerLineBlockKinds() {
+        // 两段并成两段（文字变了、段数没变）：形态按行各带一份。
+        val r = ready(
+            planBlocks(
+                text = "abcdef",
+                ends = intArrayOf(3, 6),
+                start = 0,
+                endExclusive = 6,
+                blocks = listOf(
+                    InlineMarkup.Segment("aXc", BlockKind.Quote),
+                    InlineMarkup.Segment("dYf", BlockKind.Bullet),
+                ),
+                current = { BlockKind.Paragraph },
+            ),
+        )
+        assertEquals(2, r.inserted.size)
+        assertEquals(listOf("quote"), r.inserted[0].blockKinds)
+        assertEquals(listOf("ul"), r.inserted[1].blockKinds)
+        assertEquals(listOf("quote"), r.inserted[0].editedBlocks)
+    }
+
+    @Test
+    fun splitIntoMoreBlocksCarriesKindsPerLine() {
+        val r = ready(
+            planBlocks(
+                text = "abcdef",
+                ends = intArrayOf(6),
+                start = 0,
+                endExclusive = 6,
+                blocks = listOf(
+                    InlineMarkup.Segment("ab", BlockKind.Heading1),
+                    InlineMarkup.Segment("cd", BlockKind.Quote),
+                    InlineMarkup.Segment("ef", BlockKind.Bullet),
+                ),
+                current = { BlockKind.Paragraph },
+            ),
+        ).inserted.single()
+        assertEquals(listOf("h1", "quote", "ul"), r.blockKinds)
+        assertEquals(
+            listOf("h1", "quote", "ul"),
+            r.editedBlocks,
+        )
+        assertEquals("ab" + RevisionBlocks.SEPARATOR + "cd" + RevisionBlocks.SEPARATOR + "ef", r.text)
     }
 }

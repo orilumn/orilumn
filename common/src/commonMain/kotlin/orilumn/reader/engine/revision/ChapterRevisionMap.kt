@@ -101,6 +101,12 @@ class ChapterRevisionMap(
                     }
                 }
             }
+            // 块级形态同样改版面（标题字号 / 引用缩进 / 列表项目符号），必须进版本号。
+            mix(r.blockKinds.size.toLong())
+            for (b in r.blockKinds) {
+                for (c in b) mix(c.code.toLong())
+                mix(-6L)
+            }
         }
         h
     }
@@ -582,8 +588,9 @@ class ChapterRevisionMap(
          *  9 = 审阅视图改成「原文照排 + 改动就地插入」，不再另排新文字副本（章文字变了）。
          * 10 = 落在同一片叶 / 同一组上的多处修改一起重塑，不再只保住其中一条（章文字变了）。
          * 11 = 叶尾那一格插入也落进本叶（整段引用句的收尾引号以前会被吞掉，章文字变了）。
-         * 12 = 修订可带显式行内样式（`*斜体*` / `<em>` 这类标记落地后按区间重建叶内容）。 */
-        const val ALGORITHM_VERSION = 12
+         * 12 = 修订可带显式行内样式（`*斜体*` / `<em>` 这类标记落地后按区间重建叶内容）。
+         * 13 = 修订可带块级形态（标题 / 引用 / 列表 / 代码块），重放时换标签、增删包裹层。 */
+        const val ALGORITHM_VERSION = 13
 
         private const val FNV_OFFSET = -3750763034362895579L // 14695981039346656037
         private const val FNV_PRIME = 1099511628211L

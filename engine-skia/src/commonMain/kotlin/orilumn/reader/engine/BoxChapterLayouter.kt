@@ -674,6 +674,7 @@ class BoxChapterLayouter(
         leafPaths: List<IntArray?>,
         editsForLeaf: (leafIndex: Int, leafStart: Int) -> List<orilumn.reader.engine.revision.LeafTextEditor.Edit>,
         merges: List<orilumn.reader.engine.revision.ChapterRevisionReplay.Merge> = emptyList(),
+        blockOfLeaf: (leafIndex: Int) -> orilumn.reader.engine.revision.BlockKind? = { null },
     ): orilumn.reader.engine.revision.ChapterRevisionReplay.Result {
         val styling = leafStyling(cssBundle, profile, contentW, contentH, structure)
         return orilumn.reader.engine.revision.ChapterRevisionReplay.replay(
@@ -687,6 +688,7 @@ class BoxChapterLayouter(
             styleOf = styling.styleOf,
             merges = merges,
             anonymousEdit = anonymousRunEditor(styling),
+            blockOfLeaf = blockOfLeaf,
         )
     }
 
@@ -803,11 +805,50 @@ class BoxChapterLayouter(
                 from = localFrom,
                 to = localTo,
             )) {
-                // `InlineSpans.ofLeaf` 的区间已经相对传进去的 `from`（= 本叶的 localFrom），
-                // 而 localFrom 本身就是「选区起点在本叶内的位置」；两把尺的差正好抵消，
-                // 这里原样搬即可。再补一次 `leafStart - from` 会把偏移推到选区外（负值）。
-                out.add(sp)
+                // `InlineSpans.ofLeaf` 的区间相对**传进去的 localFrom**，卡片要的是「相对选区起点」。
+                // 两段口径不同：第一叶 localFrom = from - leafStart（位移为 0），第 2 叶起 localFrom
+                // 被夹到 0（位移 leafStart - from）。换算收在 [InlineSpans.toSelectionSpace] 一处，
+                // 免得「只补 leafStart - from」把第一叶的区间往前挪（读者复报的错位）。
+                out.addAll(
+                    orilumn.reader.engine.revision.InlineSpans.toSelectionSpace(
+                        spans = listOf(sp),
+                        leafStart = leafStart,
+                        localFrom = localFrom,
+                        selectionStart = from,
+                    ),
+                )
             }
+        }
+        return out
+    }
+
+    /**
+     * 选区涉及的各块（渲染空间）：正文修改卡按它决定每行显示哪个块标记（`# ` / `> ` / `- `…）。
+     *
+     * 顺序与 `chapterTextBlockEnds()` 切出的块一一对应（第一项是选区起点所在块）。
+     * 块形态只看**当前排版树**：重放之后的叶就是改后的形态，卡片回显的自然是书里现在的样子。
+     * 属于排版层（上）。
+     */
+    internal fun blockKindsOfRange(
+        structure: ChapterStructureCache,
+        from: Int,
+        to: Int,
+    ): List<orilumn.reader.engine.revision.TextEditBlock> {
+        if (to <= from) return emptyList()
+        val leaves = structure.leaves
+        val starts = structure.globalCharStarts
+        val out = ArrayList<orilumn.reader.engine.revision.TextEditBlock>()
+        for (i in leaves.indices) {
+            val leafStart = starts.getOrElse(i) { 0L }.toInt()
+            val leafEnd = if (i + 1 < leaves.size) starts[i + 1].toInt() else Int.MAX_VALUE
+            if (leafEnd <= from || leafStart >= to) continue
+            out.add(
+                orilumn.reader.engine.revision.TextEditBlock(
+                    kind = orilumn.reader.engine.revision.BlockKind.ofElement(leaves[i]),
+                    // 选区起点在这块开头（第一块）或之前（后面各块，按叶界切出来就是从块首起）。
+                    startsAtBlockStart = from <= leafStart,
+                ),
+            )
         }
         return out
     }

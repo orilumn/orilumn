@@ -22,6 +22,34 @@ object RevisionBlocks {
     /** 修订文字里的段界（U+E000，私用区；正文里不会出现）。 */
     const val SEPARATOR: Char = '\uE000'
 
+    /**
+     * 卡片「每行块形态」里表示**续行**：这一行属于上一块（块内换行：`<br>` 或代码块内部换行）。
+     *
+     * 只活在修订表的 `editedBlocks` 里（重开卡片时把行拼回块），不进正文、不进 [SEPARATOR] 那套编码。
+     */
+    const val CONTINUATION: String = "-"
+
+    /**
+     * 重开卡片时按「每行块形态」把文字拼回块：`[CONTINUATION]` 并进上一块，其余各起一块。
+     *
+     * @return null = 没有块信息（老修订）：调用方按空行切、块形态一律 null。
+     */
+    fun cardSegments(text: String, blocks: List<String>): List<InlineMarkup.Segment>? {
+        if (blocks.isEmpty()) return null
+        val lines = InlineMarkup.splitLines(text)
+        val out = ArrayList<InlineMarkup.Segment>(blocks.size)
+        for ((i, line) in lines.withIndex()) {
+            val code = blocks.getOrNull(i).orEmpty()
+            if (code == CONTINUATION && out.isNotEmpty()) {
+                val last = out.removeAt(out.size - 1)
+                out.add(last.copy(text = last.text + "\n" + line))
+            } else {
+                out.add(InlineMarkup.Segment(line, BlockKind.fromWire(code)))
+            }
+        }
+        return out
+    }
+
     /** 按段界切块；没有段界时返回单元素表（保留空串）。 */
     fun split(text: String): List<String> {
         if (text.indexOf(SEPARATOR) < 0) return listOf(text)
@@ -58,7 +86,11 @@ object RevisionBlocks {
 
     /**
      * 能不能参与跨段合并：只支持**文字块**。
-     * 图片、表格行、匿名文本叶（不在树里的合成叶）没有可合并的块结构，提交侧直接拒绝。
+     * 整块图片（`img` 单独成叶）、表格行、匿名文本叶（不在树里的合成叶）没有可合并的块结构，
+     * 提交侧直接拒绝。
+     *
+     * 行内图片（`img` 在文字块内部，正文里是一个 `U+FFFC` 占位）不算：它随所在的文字块一起改，
+     * 删掉占位就是删掉那张图（见 `LeafTextEditor.rebuild`）。
      */
     fun mergeableLeaf(el: MarkupElement): Boolean =
         !el.isText && el.tag != "br" && el.tag != "img" && el.tag != "tr" && el.tag != "table"

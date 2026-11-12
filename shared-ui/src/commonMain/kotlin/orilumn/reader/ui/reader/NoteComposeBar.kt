@@ -45,6 +45,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.buildAnnotatedString
@@ -157,6 +158,17 @@ internal fun AnnotationSheet(
      * 都还是原来那套位置，控件持有的仍是纯文本。
      */
     dimMarkup: Boolean = false,
+    /**
+     * 输入区里的标记错在哪（规格 §5）：非空就**写在卡片里**、输入框上方，卡片不关、正文不动。
+     * 底部提示离输入框太远，而且只显示得下第一条，读者不知道该改哪儿。
+     */
+    errorText: String? = null,
+    /**
+     * 卡片最多能有多高（像素，= 窗口高 − 键盘高）。正文修改的输入框据此长高：
+     * 一直长到卡片上沿贴近屏幕顶，**上方留 [SHEET_CANCEL_RESERVE_LINES] 行**给读者点卡外取消
+     * （这张卡没有「取消」按钮）。0 = 不知道可用高度，按 [TEXT_EDIT_MAX_LINES] 行封顶。
+     */
+    maxCardHeightPx: Float = 0f,
 ) {
     val p = palette
     // 输入框内部要光标与选区，所以持 TextFieldValue；外面只认纯文本（点色槽时要读它）。
@@ -191,19 +203,24 @@ internal fun AnnotationSheet(
     val focus = remember { FocusRequester() }
 
     // 标记字符淡化：只是给它们换一种墨色，文字长度不变（所以光标 / 选区不用换算）。
+    // 两档颜色**必须分得开**（规格 §3.6）：成对的标记（真的会生效）淡化；
+    // 没配上对的标记（解析时按字面落进正文）用强调色——读者一眼看出「这个写了不生效」。
     val markupDim = p.muted2
-    val visual = remember(dimMarkup, markupDim) {
+    val markupWarn = PanelGold
+    val visual = remember(dimMarkup, markupDim, markupWarn) {
         if (!dimMarkup) {
             VisualTransformation.None
         } else {
             VisualTransformation { text ->
-                val ranges = InlineMarkup.markerRanges(text.text)
-                if (ranges.isEmpty()) {
+                val paired = InlineMarkup.markerRanges(text.text)
+                val unpaired = InlineMarkup.unpairedMarkerRanges(text.text)
+                if (paired.isEmpty() && unpaired.isEmpty()) {
                     TransformedText(text, OffsetMapping.Identity)
                 } else {
                     val dimmed = buildAnnotatedString {
                         append(text)
-                        for (r in ranges) addStyle(SpanStyle(color = markupDim), r.first, r.last + 1)
+                        for (r in paired) addStyle(SpanStyle(color = markupDim), r.first, r.last + 1)
+                        for (r in unpaired) addStyle(SpanStyle(color = markupWarn), r.first, r.last + 1)
                     }
                     TransformedText(dimmed, OffsetMapping.Identity)
                 }
@@ -271,26 +288,30 @@ internal fun AnnotationSheet(
         // 正文修改**不另起一套**：与高亮、划线共用同一根操作栏（D-36）。
         // 修改模式下批注专属项虚掉、`编辑` 标为当前项，`复制` / `删除` / `确定` 照旧；
         // 取消仍是点卡片外 / 返回键 / Esc（落笔只认 `确定`）。
-        AnnotationActionBar(
-            palette = p,
-            kind = kind,
-            lineStyle = lineStyle,
-            highlightColors = highlightColors,
-            highlightDefaultSlot = highlightDefaultSlot,
-            underlineColors = underlineColors,
-            underlineDefaultSlot = underlineDefaultSlot,
-            currentColor = currentColor,
-            canDelete = canDelete,
-            onKindChange = onKindChange,
-            onPickColor = onPickColor,
-            onPickLineStyle = onPickLineStyle,
-            onCopy = onCopy,
-            onDelete = onDelete,
-            onDone = onDone,
-            onEdit = onEdit,
-            editEnabled = editEnabled,
-            editMode = mode == NoteSheetMode.TextEdit,
-        )
+        // 操作栏实测高度是给输入框算「还能长几行」用的（换行排布时它自己会变高）。
+        var barHeightPx by remember { mutableStateOf(0) }
+        Box(Modifier.fillMaxWidth().onSizeChanged { barHeightPx = it.height }) {
+            AnnotationActionBar(
+                palette = p,
+                kind = kind,
+                lineStyle = lineStyle,
+                highlightColors = highlightColors,
+                highlightDefaultSlot = highlightDefaultSlot,
+                underlineColors = underlineColors,
+                underlineDefaultSlot = underlineDefaultSlot,
+                currentColor = currentColor,
+                canDelete = canDelete,
+                onKindChange = onKindChange,
+                onPickColor = onPickColor,
+                onPickLineStyle = onPickLineStyle,
+                onCopy = onCopy,
+                onDelete = onDelete,
+                onDone = onDone,
+                onEdit = onEdit,
+                editEnabled = editEnabled,
+                editMode = mode == NoteSheetMode.TextEdit,
+            )
+        }
         // 与输入行之间的分隔：两段同属一张卡片，但操作与打字是两件事。
         Box(
             Modifier
@@ -298,11 +319,37 @@ internal fun AnnotationSheet(
                 .heightIn(min = 1.dp)
                 .background(p.cardBorder),
         )
+        // 输入框能长到几行：卡片可用高 − 操作栏 − 内边距 − 上方留给「点卡外取消」的三行。
+        val density = LocalDensity.current
+        val lineHeightPx = with(density) { NoteTextLineHeight.toPx() }
+        val chromePx = with(density) { NoteFieldChrome.toPx() }
+        val fieldMaxLines = remember(mode, maxCardHeightPx, barHeightPx, lineHeightPx, chromePx, errorText) {
+            if (mode != NoteSheetMode.TextEdit) {
+                NOTE_MAX_LINES
+            } else if (maxCardHeightPx <= 0f || barHeightPx <= 0) {
+                TEXT_EDIT_MAX_LINES
+            } else {
+                // 提示行也占高（有错时输入框让出一行，卡片上沿才不会顶出屏幕）。
+                val errorPx = if (errorText != null) lineHeightPx + with(density) { 4.dp.toPx() } else 0f
+                val room = maxCardHeightPx - barHeightPx - chromePx - errorPx -
+                    lineHeightPx * SHEET_CANCEL_RESERVE_LINES
+                (room / lineHeightPx).toInt().coerceIn(NOTE_MAX_LINES, TEXT_EDIT_MAX_LINES)
+            }
+        }
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.Bottom,
         ) {
             Column(modifier = Modifier.weight(1f)) {
+                // 就地提示（规格 §5）：解析错误 / 提交被拒写成一行红字，贴在输入框正上方。
+                errorText?.let {
+                    Text(
+                        text = it,
+                        style = NoteTextStyle,
+                        color = Color(REVIEW_DELETED_ARGB),
+                        modifier = Modifier.padding(start = 2.dp, bottom = 4.dp),
+                    )
+                }
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -355,7 +402,7 @@ internal fun AnnotationSheet(
                             // 拿它画光标压在卡片的浅底上几乎看不见。
                             cursorBrush = if (selfCaret) SolidColor(Color.Transparent) else SolidColor(p.text),
                             onTextLayout = { textLayout = it },
-                            maxLines = if (mode == NoteSheetMode.TextEdit) TEXT_EDIT_MAX_LINES else NOTE_MAX_LINES,
+                            maxLines = if (mode == NoteSheetMode.TextEdit) fieldMaxLines else NOTE_MAX_LINES,
                         )
                     }
                     // 自绘光标 / 选区手柄：只有「位置处在这一版里」时才画。
@@ -420,11 +467,18 @@ private val NOTE_FIELD_MIN_HEIGHT = 34.dp
 /** 批注输入框最多显示几行（超出后字段内部滚动）。 */
 private const val NOTE_MAX_LINES = 4
 
-/** 正文修改输入框最多显示几行（跨段时每段一行，超出后字段内部滚动）。 */
-private const val TEXT_EDIT_MAX_LINES = 8
+/** 正文修改输入框最多显示几行：**只是兜底上界**，实际按可用高度算（见 [AnnotationSheet]）。 */
+private const val TEXT_EDIT_MAX_LINES = 60
+
+/** 卡片上方留给「点卡外取消」的行数：这张卡没有取消按钮，那一块必须点得到正文。 */
+private const val SHEET_CANCEL_RESERVE_LINES = 3
+
+/** 输入行与输入框自身的固定占高（上下内边距 + 分隔线 + 卡片底部留白）。 */
+private val NoteFieldChrome = 16.dp + 14.dp + 1.dp + 4.dp
 
 /** 输入框正文与提示字共用的字面（两者行高必须一致，否则空框和有字时高度不同）。 */
-private val NoteTextStyle = TextStyle(fontSize = 16.sp, lineHeight = 23.sp)
+private val NoteTextLineHeight = 23.sp
+private val NoteTextStyle = TextStyle(fontSize = 16.sp, lineHeight = NoteTextLineHeight)
 
 /** 自绘光标的宽度与闪烁周期（毫秒）：硬开关，不做系统光标那种透明度渐变。 */
 private val CaretWidth = 2.dp

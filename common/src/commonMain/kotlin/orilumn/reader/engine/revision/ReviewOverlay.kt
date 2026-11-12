@@ -46,6 +46,8 @@ object ReviewOverlay {
         val length: Int,
         /** 修订文字（去掉段界后）第 i 个字在审阅空间的偏移；-1 = 兜底（不该出现）。 */
         private val newToReview: IntArray,
+        /** 修订文字（去段界）第 i 个字在 [text] 里的下标（含 ¶ 与段界）；-1 = 兜底。 */
+        private val newToOut: IntArray,
     ) {
         /**
          * 修订文字 [text] 上的行内样式区间 → 本段审阅空间的区间（相对 [text] 起点）。
@@ -72,6 +74,38 @@ object ReviewOverlay {
                 if (b <= a) continue
                 val from = newToReview.getOrElse(a) { -1 }
                 val last = newToReview.getOrElse(b - 1) { -1 }
+                if (from < 0 || last < from) continue
+                out.add(InlineMarkup.StyleSpan(from, last + 1, sp.sig))
+            }
+            return out
+        }
+
+        /**
+         * 修订文字上的行内样式区间 → **本段审阅文字**（[text] 那一串，含 ¶ 与段界）上的区间。
+         *
+         * 与 [stylesInReview] 的分工：那个只给「叶内就地插入」用（只有新写的字有位置、
+         * 坐标不含段界）；这个给**整段重放**用 —— 保留字也有位置，偏移直接能在 [text] 上切块。
+         * 提交侧的样式区间按块切好、不跨段界，所以段界不必进区间。
+         */
+        fun stylesInText(
+            text: String,
+            styles: List<InlineMarkup.StyleSpan>,
+        ): List<InlineMarkup.StyleSpan> {
+            if (styles.isEmpty()) return emptyList()
+            val bodyOf = IntArray(text.length + 1)
+            var k = 0
+            for (i in text.indices) {
+                bodyOf[i] = k
+                if (text[i] != RevisionBlocks.SEPARATOR) k++
+            }
+            bodyOf[text.length] = k
+            val out = ArrayList<InlineMarkup.StyleSpan>(styles.size)
+            for (sp in styles) {
+                val a = bodyOf[sp.start.coerceIn(0, text.length)]
+                val b = bodyOf[sp.endExclusive.coerceIn(0, text.length)]
+                if (b <= a) continue
+                val from = newToOut.getOrElse(a) { -1 }
+                val last = newToOut.getOrElse(b - 1) { -1 }
                 if (from < 0 || last < from) continue
                 out.add(InlineMarkup.StyleSpan(from, last + 1, sp.sig))
             }
@@ -122,6 +156,8 @@ object ReviewOverlay {
         val marks = LinkedHashMap<Int, Boolean>(2)
         // 修订文字（去段界）第几个字 → 审阅空间偏移：样式区间靠它换算（见 [Plan.stylesInReview]）。
         val newToReview = IntArray(new.length) { -1 }
+        // 修订文字（去段界）第几个字 → [out] 里的下标（含 ¶ 与段界）：整段重放按它切块。
+        val newToOut = IntArray(new.length) { -1 }
 
         var o = 0
         var n = 0
@@ -190,12 +226,14 @@ object ReviewOverlay {
                 is CharDiff.Op.Keep -> repeat(op.length) {
                     flushSeps()
                     emitOrig(deletedChar = false)
+                    if (n < newToOut.size) newToOut[n] = out.length - 1
                     n++
                 }
                 is CharDiff.Op.Insert -> for (c in op.text) {
                     flushSeps()
                     if (n < newToReview.size) newToReview[n] = at
                     pushInserted(c.toString(), 2)
+                    if (n < newToOut.size) newToOut[n] = out.length - 1
                     n++
                 }
             }
@@ -251,6 +289,7 @@ object ReviewOverlay {
             needsBlocks = ends.isNotEmpty() || seps.isNotEmpty(),
             length = at,
             newToReview = newToReview,
+            newToOut = newToOut,
         )
     }
 }

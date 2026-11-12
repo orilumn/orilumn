@@ -10,6 +10,7 @@ import orilumn.reader.data.settings.BookSettings
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.engine.BookDocumentController
 import orilumn.reader.engine.revision.InlineMarkup
+import orilumn.reader.engine.revision.TextEditBlock
 import orilumn.reader.engine.revision.TextEditPlan
 import orilumn.reader.engine.BoxChapterLayouter
 import orilumn.reader.engine.ImageLoader
@@ -247,6 +248,10 @@ class DesktopReaderHost(
     override fun textEditSpans(chapter: Int, start: Int, endExclusive: Int): List<InlineMarkup.StyleSpan>? =
         controller.textEditSpans(chapter, start, endExclusive)
 
+    /** 选区涉及的各块（卡片每行的块标记用）。 */
+    override fun textEditBlocks(chapter: Int, start: Int, endExclusive: Int): List<TextEditBlock>? =
+        controller.textEditBlocks(chapter, start, endExclusive)
+
     override suspend fun commitTextEdit(
         chapter: Int,
         start: Int,
@@ -254,8 +259,9 @@ class DesktopReaderHost(
         text: String,
         styles: List<InlineMarkup.StyleSpan>?,
         currentPage: ReaderPos?,
+        blocks: List<InlineMarkup.Segment>?,
     ): TextEditOutcome = withContext(Dispatchers.Default) {
-        val plan = controller.planTextEdit(chapter, start, endExclusive, text, styles)
+        val plan = controller.planTextEdit(chapter, start, endExclusive, text, styles, blocks)
         when (plan) {
             is TextEditPlan.Rejected -> return@withContext TextEditOutcome.Rejected(plan.reason)
             is TextEditPlan.Ready -> {
@@ -278,6 +284,9 @@ class DesktopReaderHost(
                         prevPageOriginalStart = anchor.second,
                         changeOldStart = start,
                         changeOldEndExclusive = endExclusive,
+                        // 换了块形态（段落 ⇄ 标题 / 引用 / 列表 / 代码块）：同样的文字会排成不同的
+                        // 行数，「页界没变」快路径按形态猜不准，一律正式重排。
+                        structureChanged = plan.inserted.any { r -> r.blockKinds.any { it.isNotEmpty() } },
                     ) ?: reflowFallback(chapter, anchor.second)
                     ?: return@withContext TextEditOutcome.Failed("重排失败")
                 } else {
@@ -326,6 +335,46 @@ class DesktopReaderHost(
             } else {
                 // 删的是别的章：只作废它的缓存，眼前这一页不动。
                 controller.invalidateChapterContent(revision.chapter)
+                null
+            }
+            TextRevisionDeleteOutcome.Success(pos)
+        }
+
+    /**
+     * 编辑清单的「全部恢复原文」：一次删光全书修订。
+     *
+     * 与单条删除同一口径：先记当前页首，删完整本重读修订表，**把有修订的每一章都作废**，
+     * 当前章再按改前页首重新落位。
+     */
+    override suspend fun restoreAllTextRevisions(currentPage: ReaderPos?): TextRevisionDeleteOutcome =
+        withContext(Dispatchers.Default) {
+            val all = runCatching { store.textRevisionsForBook(bookId) }.getOrNull()
+                ?: return@withContext TextRevisionDeleteOutcome.Failed
+            if (all.isEmpty()) return@withContext TextRevisionDeleteOutcome.Success(null)
+            val ch = currentPage?.chapter
+            val anchor = ch?.let { currentPageAnchor(it, currentPage) }
+            val ranges = if (ch != null) {
+                all.filter { it.chapter == ch }.map { controller.textRevisionRange(ch, it) }
+            } else {
+                emptyList()
+            }
+            val deleted = runCatching { store.deleteTextRevisionsForBook(bookId) }.isSuccess
+            if (!deleted) return@withContext TextRevisionDeleteOutcome.Failed
+            controller.reloadTextRevisions()
+            pageNumberTick++
+            for (chapter in all.map { it.chapter }.distinct()) {
+                if (chapter != ch) controller.invalidateChapterContent(chapter)
+            }
+            val pos = if (ch != null && anchor != null) {
+                val landed = controller.reflowAfterContentChange(
+                    chapter = ch,
+                    prevPageCharStart = anchor.first,
+                    prevPageOriginalStart = anchor.second,
+                    changeOldStart = ranges.minOfOrNull { it.first } ?: 0,
+                    changeOldEndExclusive = ranges.maxOfOrNull { it.last + 1 } ?: 0,
+                ) ?: reflowFallback(ch, anchor.second)
+                landed?.let { ReaderPos(it.first, it.second, atCover = false) }
+            } else {
                 null
             }
             TextRevisionDeleteOutcome.Success(pos)
@@ -445,14 +494,15 @@ class DesktopReaderHost(
     }
 
     /** 编辑清单：全书正文修订（原书坐标），跳转时再由 [jumpToChar] 换算。 */
-    override suspend fun textRevisionsForBook(): List<TextRevision> = try {
+    override suspend fun textRevisionsForBook(): List<TextRevision>? = try {
         // 快照两列上线前写下的老行：区间还在原书空间，先按持久化章树把原文补回库再读清单。
         controller.backfillLegacyRevisionTexts()
         store.textRevisionsForBook(bookId)
     } catch (c: CancellationException) {
         throw c
     } catch (_: Throwable) {
-        emptyList()
+        // 读失败**不能**报成空表：编辑清单要显示「读取失败，点此重试」而不是「还没有修改过正文」。
+        null
     }
 
     private fun toRenderedRange(annotation: Annotation): Annotation {

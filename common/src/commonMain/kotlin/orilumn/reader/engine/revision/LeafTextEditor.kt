@@ -16,7 +16,9 @@ import orilumn.reader.engine.laying.StyledSegments
  * - 被改到的节点只改文字，`class` / `style` / 其他属性一个都不动；
  * - 中段与旧中段做字符级对齐（[CharDiff]）：没变的字留在原节点，新字挂到**前一个字**所在节点，
  *   删掉的字从原节点移除；`\n` 落成 `<br>`（插在同一文本节点的字符之间时会把该节点切开）；
- * - 元素本身永不剪枝：文字被删光时元素留空，伪元素 / 边框照旧。
+ * - 元素本身永不剪枝：文字被删光时元素留空，伪元素 / 边框照旧。**两个例外**是 `br` 与行内 `img`：
+ *   它们的占位字（`\n` / `U+FFFC`）被删掉、新文字里也没留住，节点就跟着走
+ *   （读者删掉图那一格就是要删这张图，不能「字没了、图还在」）。
  *
  * 输入坐标是**叶内原书偏移**（不含修订；与 `StyledSegments.text` 同一串文字）。
  * [rebuildSegments] 用于重建后再取一次段做校验：若结果与「原文本按区间替换」不等
@@ -172,6 +174,10 @@ object LeafTextEditor {
             regionOf.add(-1)
         }
 
+        // 2.5) 行内图：新文字里还留着 `U+FFFC` 占位（读者没删那一格）就把原图节点绑回这个位置。
+        //      不绑的话，这一格会落成一个只有占位符、没有图的字符，等于把图弄丢了。
+        bindKeptImages(out, owners)
+
         // 3) 新字符归属：前一个字符所在的文本节点；叶首挂到后一个文本节点；都没有就新建一个。
         val prevTextNode = arrayOfNulls<MarkupElement>(out.size)
         var last: MarkupElement? = null
@@ -202,6 +208,46 @@ object LeafTextEditor {
         val markerAnchors = HashMap<MarkupElement, MarkupElement?>()
         val prependNodes = ArrayList<MarkupElement>()
         val insertAfter = HashMap<MarkupElement, MutableList<MarkupElement>>()
+        // 新字符落点：前面紧挨着一个保留的替换元素（行内图 / `<br>`）时，在**它后面**新开一个
+        // 文本节点。否则新字会跨过它落进更靠后的文本节点里，图片就从两个字之间跳到了前面。
+        val afterMarkerText = HashMap<MarkupElement, MarkupElement>()
+        val prevKeptIdx = IntArray(out.size) { -1 }
+        run {
+            var last = -1
+            for (k in out.indices) {
+                prevKeptIdx[k] = last
+                if (out[k] is OutChar.Kept) last = k
+            }
+        }
+        val nextKeptIdx = IntArray(out.size) { -1 }
+        run {
+            var next = -1
+            for (k in out.indices.reversed()) {
+                nextKeptIdx[k] = next
+                if (out[k] is OutChar.Kept) next = k
+            }
+        }
+
+        /** 一个新增字 / 换行该落进哪个文本节点；null = 叶首那一串（[synthetic] / 兄弟节点）。 */
+        fun nodeForNewChar(index: Int): MarkupElement? {
+            val p = prevKeptIdx[index]
+            if (p >= 0) {
+                val owner = (out[p] as OutChar.Kept).owner
+                if (owner is Owner.Text) return owner.node
+                val marker = owner.node
+                return afterMarkerText.getOrPut(marker) {
+                    MarkupElement("#text").also { insertAfter.getOrPut(marker) { ArrayList() }.add(it) }
+                }
+            }
+            val n = nextKeptIdx[index]
+            if (n >= 0) {
+                val owner = (out[n] as OutChar.Kept).owner
+                if (owner is Owner.Text) return owner.node
+                // 后面先碰到的是替换元素：新字要排在它前面，只能走叶首那一串。
+                return null
+            }
+            return fallbackText
+        }
 
         // 显式样式区间先切成「同链连续段」：一段新字落一次，位置在下面按锚点定。
         val runs = explicitRuns(out, regionOf, regions)
@@ -223,8 +269,16 @@ object LeafTextEditor {
             val nodes = materializeRun(sb.toString(), run.chain.drop(p))
             if (nodes.isEmpty()) return
             when {
-                // 叶首：前置到叶最前。
-                prevText == null -> prependNodes.addAll(nodes)
+                // 叶首（或前面只剩一个保留的替换元素）：前者前置到叶最前；后者接在**那个元素之后**，
+                // 不能一律前置——否则图片 / `<br>` 后面的新字会跑到它前面去（整段重写时图夹在中间）。
+                prevText == null -> {
+                    val anchor = previousAnchor(out, run.start)
+                    if (anchor != null) {
+                        insertAfter.getOrPut(anchor) { ArrayList() }.addAll(nodes)
+                    } else {
+                        prependNodes.addAll(nodes)
+                    }
+                }
                 // 链已完全对上：接在锚点字之后（同一个文本节点里按字符位置切开）。
                 p >= chainEls.size -> nodeItems.getOrPut(prevText) { ArrayList() }
                     .add(NodeItem.Elements(nodes))
@@ -252,7 +306,7 @@ object LeafTextEditor {
                     }
                 }
                 is OutChar.New -> {
-                    val textNode = prevTextNode[i] ?: fallbackText
+                    val textNode = nodeForNewChar(i)
                     if (textNode != null) {
                         nodeItems.getOrPut(textNode) { ArrayList() }
                             .add(if (o.ch == '\n') NodeItem.Newline else NodeItem.Text(o.ch))
@@ -271,6 +325,16 @@ object LeafTextEditor {
             }
             i++
         }
+        // 贴着替换元素新开的文本节点：字符收齐了才落成节点（新字里的换行会把它切成几段），
+        // 就地替换占位节点，位置仍是当初插进去的那一处。
+        for ((marker, slot) in afterMarkerText) {
+            val nodes = materialize(slot, nodeItems.remove(slot).orEmpty(), emptyList())
+            val list = insertAfter[marker] ?: continue
+            val at = list.indexOfFirst { it === slot }
+            if (at < 0) continue
+            list.removeAt(at)
+            list.addAll(at, nodes)
+        }
         synthetic?.let { s ->
             val nodes = materialize(s, nodeItems[s].orEmpty(), deleted[s].orEmpty())
             if (nodes.isNotEmpty()) prependNodes.addAll(nodes)
@@ -281,15 +345,19 @@ object LeafTextEditor {
             val anchor = markerAnchors[br]
             if (anchor != null) insertAfter.getOrPut(anchor) { ArrayList() }.add(br)
         }
-        val dropped = visibleBrNodes(owners) - keptBrNodes(out)
+        val droppedBrs = visibleBrNodes(owners) - keptBrNodes(out)
+        val droppedImages = visibleImageNodes(owners) - keptImageNodes(out)
 
         fun rebuildNodes(node: MarkupElement): List<MarkupElement> {
             if (node.isText) {
                 if (node !in nodeItems && node !in deleted) return listOf(MarkupElement("#text", text = node.text))
                 return materialize(node, nodeItems[node].orEmpty(), deleted[node].orEmpty())
             }
-            if (node.tag == "br") return if (node in dropped) emptyList() else listOf(MarkupElement("br"))
-            if (node.tag == "img") return listOf(MarkupElement("img", node.attrs))
+            if (node.tag == "br") return if (node in droppedBrs) emptyList() else listOf(MarkupElement("br"))
+            // 行内图在叶文本里是一个 U+FFFC 占位：占位被删 ⇒ 图跟着删（读者选中的就是它）。
+            if (node.tag == "img") {
+                return if (node in droppedImages) emptyList() else listOf(MarkupElement("img", node.attrs))
+            }
             val children = ArrayList<MarkupElement>(node.children.size + 2)
             if (node === leaf) children.addAll(prependNodes)
             for (c in node.children) {
@@ -368,7 +436,8 @@ object LeafTextEditor {
         var region = -1
         var chain: List<InlineMarkup.StyleSig> = emptyList()
         for (i in out.indices) {
-            val r = regionOf[i]
+            // 被绑回来的行内图占住这一格：它有自己的节点，不能并进新字那一段（新字要在它两侧断开）。
+            val r = if (out[i] is OutChar.New) regionOf[i] else -1
             val c = if (r < 0) {
                 emptyList()
             } else {
@@ -522,18 +591,52 @@ object LeafTextEditor {
         return null
     }
 
-    /** 参与叶文本的 `<br>` 节点（只这些才可能被删；排除/块外的 br 不参与）。 */
-    private fun visibleBrNodes(owners: List<Owner>): Set<MarkupElement> =
+    /** 参与叶文本的替换元素节点（`<br>` / `<img>`：只这些才可能被删；不参与的不动）。 */
+    private fun visibleMarkerNodes(owners: List<Owner>, tag: String): Set<MarkupElement> =
         owners.mapNotNullTo(HashSet()) {
             val node = (it as? Owner.Marker)?.node
-            if (node?.tag == "br") node else null
+            if (node?.tag == tag) node else null
         }
 
-    private fun keptBrNodes(out: List<OutChar>): Set<MarkupElement> =
+    private fun keptMarkerNodes(out: List<OutChar>, tag: String): Set<MarkupElement> =
         out.mapNotNullTo(HashSet()) {
             val node = ((it as? OutChar.Kept)?.owner as? Owner.Marker)?.node
-            if (node?.tag == "br") node else null
+            if (node?.tag == tag) node else null
         }
+
+    /** 参与叶文本的 `<br>` 节点（只这些才可能被删；排除/块外的 br 不参与）。 */
+    private fun visibleBrNodes(owners: List<Owner>): Set<MarkupElement> = visibleMarkerNodes(owners, "br")
+
+    private fun keptBrNodes(out: List<OutChar>): Set<MarkupElement> = keptMarkerNodes(out, "br")
+
+    /** 参与叶文本的行内 `<img>` 节点（同上）。 */
+    private fun visibleImageNodes(owners: List<Owner>): Set<MarkupElement> = visibleMarkerNodes(owners, "img")
+
+    private fun keptImageNodes(out: List<OutChar>): Set<MarkupElement> = keptMarkerNodes(out, "img")
+
+    /**
+     * 新文字里仍带着 `U+FFFC` 占位的那些位置，把原文里的行内图节点绑回去（按文档序一一对应）。
+     *
+     * 读者在卡片里看得见这个占位字：没删它就是「这张图留着」，删掉它才是「连图一起删」。
+     * 多出来的旧图（读者删掉了那一格）不绑，随后按「没保留」处理。
+     */
+    private fun bindKeptImages(out: MutableList<OutChar>, owners: List<Owner>) {
+        val images = ArrayList<MarkupElement>(2)
+        for (o in owners) {
+            val node = (o as? Owner.Marker)?.node ?: continue
+            if (node.tag == "img" && images.lastOrNull() !== node) images.add(node)
+        }
+        if (images.isEmpty()) return
+        var next = 0
+        for (i in out.indices) {
+            if (next >= images.size) return
+            val o = out[i]
+            if (o is OutChar.New && o.ch == '\uFFFC') {
+                out[i] = OutChar.Kept(Owner.Marker(images[next]))
+                next++
+            }
+        }
+    }
 
     /**
      * 把一个文本节点的新内容落成节点列表：保留的原文区间原样拼回、删掉的区间跳过、

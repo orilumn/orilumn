@@ -124,9 +124,38 @@ class InlineSpansTest {
         assertEquals(0 to 3, spans.single().start to spans.single().endExclusive)
 
         val markup = InlineMarkup.show(segments.text, spans)
-        assertEquals("*a\nb*", markup)
+        // 标记**不跨行**（规格 §2.3 / §4.5）：跨着 `<br>` 的元素语法糖写不回去，改用标签形式。
+        // 两种写法解析结果相同，所以这里只认「往返等价」，不再固定成 `*a\nb*`。
+        // 段内换行写成硬断行（行尾 `\`），所以块里仍然是一行（块边界与 `<br>` 分得开）。
+        assertEquals("<em>a\\\nb</em>", markup)
         val parsed = InlineMarkup.parse(markup)
         assertEquals("a\nb", parsed.text)
         assertEquals(0 to 3, parsed.spans.single().start to parsed.spans.single().endExclusive)
+    }
+
+    @Test
+    fun spansAreMeasuredFromTheSelectionStartNotFromTheLeafStart() {
+        // 跨段选区的第 2 段：选区从上一段开始，这一叶的 localFrom 被夹到 0，
+        // 区间以**叶首**为零点，要整体平移到选区坐标系（读者复报的「第二段的标记挪到第一段上」）。
+        val later = InlineSpans.toSelectionSpace(
+            spans = listOf(InlineMarkup.StyleSpan(1, 3, InlineMarkup.StyleSig("code"))),
+            leafStart = 200,
+            localFrom = 0,
+            selectionStart = 105,
+        )
+        assertEquals(96 to 98, later.single().start to later.single().endExclusive)
+    }
+
+    @Test
+    fun firstLeafOfASelectionIsNotShifted() {
+        // 第一叶：选区从叶中起（localFrom = 5），ofLeaf 的区间本来就相对 localFrom，位移必须是 0。
+        // 早先按「叶首 − 选区起点」一刀切，会把这一叶的区间往前挪（负位移）。
+        val first = InlineSpans.toSelectionSpace(
+            spans = listOf(InlineMarkup.StyleSpan(2, 4, InlineMarkup.StyleSig("em"))),
+            leafStart = 100,
+            localFrom = 5,
+            selectionStart = 105,
+        )
+        assertEquals(2 to 4, first.single().start to first.single().endExclusive)
     }
 }

@@ -23,7 +23,7 @@ import orilumn.reader.engine.text.preprocess.CjkLatinSpacing
  */
 sealed interface TextEditPlan {
 
-    /** 校验失败（选区跨到图片 / 表格等不能合并的块）：卡片不关、正文不动，就地提示 [reason]。 */
+    /** 校验失败（选区跨到表格 / 整块图片这类不能合并的块）：卡片不关、正文不动，就地提示 [reason]。 */
     data class Rejected(val reason: String) : TextEditPlan
 
     /**
@@ -66,15 +66,22 @@ object TextEditPlanner {
      * @param blockEnds 每个排版叶的累计块尾（`textBlockEndsOf` 同尺）；null/长度不符 = 单叶；
      * @param start / [endExclusive] 选区（渲染空间，`[start, endExclusive)`）；
      * @param replacement 输入区文字（跨段时以 `\n` 分隔；结果段数 = 换行符数 + 1）；
+     * @param blocks 输入区**按块切好**的分段（正文修改卡：一行一块，块自带块级形态）；
+     *   null = 老调用方，按 [replacement] 里的 `\n` 切，且把新敲的换行当段界（[promoteTypedBreaks]）。
+     *   给了它就以它为准：块内的 `\n` 一律是书里本来就有的换行（`<br>` / 代码块内换行）。
      * @param map 本章现有修订；
      * @param groupId 本次提交的组号（段数不变时跨段多条共用）；
      * @param now 写入 `createdAt` / `updatedAt` 的时间戳（测试可传固定值）；
      * @param wsOfLeaf 取某叶的 `white-space`（提交前的替换文本预归一用；缺省按普通模式）。
-     * @param mergeableLeaf 该叶能不能参与跨段合并（图片 / 表格行 / 匿名叶不能）。
+     * @param mergeableLeaf 该叶能不能参与跨段合并（整块图片 / 表格行 / 匿名叶不能）。
      * @param toOriginal 当前文字空间 → 原书空间的单点换算。默认按**渲染空间**；审阅视图传入
      *   [ChapterRevisionMap.toOriginalFromReview]——审阅空间里原文与新增文字并列，换算口径不同。
      * @param renderedInterval 某条修订在**当前文字空间**占的区间。默认按渲染空间；审阅视图传入
      *   [ChapterRevisionMap.reviewInterval]（原区间 + 紧随其后的新文字，两半都算碰到）。
+     * @param currentKindOf 某一叶**现在**的块形态（卡片提交时由宿主给；null = 调用方不给，
+     *   按老口径照写）。目标形态与它相同时不写进修订——否则每一块都会白落一条「什么也没改」的
+     *   修订，编辑清单里全是空条目；这一叶**没有**块形态（`div` / 表格行）时也不写：它不归
+     *   markdown 管，卡片也就不该改它。
      */
     fun plan(
         bookId: Long,
@@ -92,6 +99,8 @@ object TextEditPlanner {
         mergeableLeaf: (Int) -> Boolean = { true },
         toOriginal: (Int) -> Int = map::toOriginal,
         renderedInterval: (TextRevision) -> IntRange = map::renderedInterval,
+        blocks: List<InlineMarkup.Segment>? = null,
+        currentKindOf: ((leafIndex: Int) -> BlockKind?)? = null,
     ): TextEditPlan {
         if (start < 0 || endExclusive > chapterText.length || start > endExclusive) {
             return TextEditPlan.Rejected("选区超出本章范围")
@@ -105,39 +114,58 @@ object TextEditPlanner {
         val edit = absorbVisibleSeamSpaces(chapterText, start, endExclusive, replacement)
         val editStart = edit.first
         val editEnd = edit.second
-        val lines = splitLines(replacement)
+        val explicit = blocks != null && blocks.isNotEmpty()
+        val pieces = blocks?.takeIf { it.isNotEmpty() }
+            ?: splitLines(replacement).map { InlineMarkup.Segment(it) }
+        val lines = pieces.map { it.text }
         val perLine = lineSpans(replacementStyles, lines)
+        // 老调用方只有一整串文字：段界只能靠「新敲的换行」去猜，单叶内多行仍按一整段交给
+        // [planSegment]，由它用字符级对齐把 `\n` 升成段界（[promoteTypedBreaks]）。
+        val legacySolo = !explicit && pieces.size > 1
+        val solo = if (legacySolo) {
+            InlineMarkup.Segment(InlineMarkup.joinSegments(pieces))
+        } else {
+            pieces.first()
+        }
         val ends = blockEnds?.takeIf { it.isNotEmpty() && it.last() == chapterText.length }
         if (ends == null) {
             return planSegments(
                 bookId, chapter, chapterText, map, groupId, now, wsOfLeaf, toOriginal, renderedInterval,
-                listOf(Segment(editStart, editEnd, replacement, 0, 0, chapterText.length, perLine?.first())),
+                listOf(
+                    Segment(
+                        editStart, editEnd, solo, !legacySolo, 0, 0, chapterText.length, perLine?.first(),
+                    ),
+                ),
+                currentKindOf,
             )
         }
         val firstLeaf = leafOf(ends, editStart)
         val lastLeaf = leafOf(ends, editEnd - 1)
-        if (firstLeaf == lastLeaf) {
+        // 图片叶、表格行叶、匿名文本叶没有可编辑的块结构：不管段数变不变，碰到就拒绝
+        // （原先只在「段数 ≠ 叶数」时查，单叶编辑会漏过去）。
+        if ((firstLeaf..lastLeaf).any { !mergeableLeaf(it) }) {
+            return TextEditPlan.Rejected("选区跨到整块图片或表格，不能修改")
+        }
+        if (firstLeaf == lastLeaf && (legacySolo || pieces.size == 1)) {
             return planSegments(
                 bookId, chapter, chapterText, map, groupId, now, wsOfLeaf, toOriginal, renderedInterval,
                 listOf(
                     Segment(
-                        editStart, editEnd, replacement, firstLeaf,
+                        editStart, editEnd, solo, !legacySolo, firstLeaf,
                         if (firstLeaf == 0) 0 else ends[firstLeaf - 1],
                         ends[firstLeaf],
                         perLine?.first(),
                     ),
                 ),
+                currentKindOf,
             )
         }
-        // 跨段：结果段数由输入里的换行符决定（方案 D-34 修订版）。
+        // 跨段：结果段数由输入区分成了几块决定（方案 D-34 修订版）。
         val leafCount = lastLeaf - firstLeaf + 1
-        if (lines.size != leafCount) {
-            if ((firstLeaf..lastLeaf).any { !mergeableLeaf(it) }) {
-                return TextEditPlan.Rejected("选区跨到图片或表格，不能合并段落")
-            }
+        if (pieces.size != leafCount) {
             return planMerge(
                 bookId, chapter, chapterText, map, groupId, now, wsOfLeaf, toOriginal, renderedInterval,
-                editStart, editEnd, replacement, ends, perLine, replacementStyles,
+                editStart, editEnd, pieces, ends, perLine, replacementStyles,
             )
         }
         val segments = ArrayList<Segment>(leafCount)
@@ -147,11 +175,15 @@ object TextEditPlanner {
             val segStart = maxOf(editStart, leafStart)
             val segEnd = minOf(editEnd, leafEnd)
             segments.add(
-                Segment(segStart, segEnd, lines[i - firstLeaf], i, leafStart, leafEnd, perLine?.get(i - firstLeaf)),
+                Segment(
+                    segStart, segEnd, pieces[i - firstLeaf], true, i, leafStart, leafEnd,
+                    perLine?.get(i - firstLeaf),
+                ),
             )
         }
         return planSegments(
             bookId, chapter, chapterText, map, groupId, now, wsOfLeaf, toOriginal, renderedInterval, segments,
+            currentKindOf,
         )
     }
 
@@ -177,26 +209,36 @@ object TextEditPlanner {
         now: Long = 0L,
         replacementStyles: List<InlineMarkup.StyleSpan>? = null,
         wsOfLeaf: (Int) -> WhiteSpace = { WhiteSpace.NORMAL },
+        blocks: List<InlineMarkup.Segment>? = null,
+        currentKindOf: ((leafIndex: Int) -> BlockKind?)? = null,
     ): TextEditPlan {
         if (at < 0 || at > chapterText.length) return TextEditPlan.Rejected("选区超出本章范围")
         val ends = blockEnds?.takeIf { it.isNotEmpty() && it.last() == chapterText.length }
         val leaf = if (ends == null) 0 else leafOf(ends, at)
         val leafStart = if (ends == null || leaf == 0) 0 else ends[leaf - 1]
         val leafEnd = if (ends == null) chapterText.length else ends[leaf]
+        val pieces = blocks?.takeIf { it.isNotEmpty() }
+            ?: splitLines(replacement).map { InlineMarkup.Segment(it) }
+        val solo = if (pieces.size == 1) {
+            pieces.first()
+        } else {
+            InlineMarkup.Segment(InlineMarkup.joinSegments(pieces))
+        }
         return planSegments(
             bookId, chapter, chapterText, ChapterRevisionMap.EMPTY, groupId, now, wsOfLeaf,
             { it }, { r -> r.charStart until r.charEnd },
             listOf(
                 Segment(
-                    at, at, replacement, leaf, leafStart, leafEnd,
+                    at, at, solo, pieces.size == 1, leaf, leafStart, leafEnd,
                     // 纯插入只带一段样式：多行（并段 / 拆段）留给整段重放去按叶切，这里不猜。
-                    if (splitLines(replacement).size == 1) {
-                        lineSpans(replacementStyles, splitLines(replacement))?.firstOrNull()
+                    if (pieces.size == 1) {
+                        lineSpans(replacementStyles, listOf(solo.text))?.firstOrNull()
                     } else {
                         null
                     },
                 ),
             ),
+            currentKindOf,
         )
     }
 
@@ -218,7 +260,7 @@ object TextEditPlanner {
         renderedInterval: (TextRevision) -> IntRange,
         start: Int,
         endExclusive: Int,
-        replacement: String,
+        pieces: List<InlineMarkup.Segment>,
         ends: IntArray,
         perLine: List<List<InlineMarkup.StyleSpan>>?,
         replacementStyles: List<InlineMarkup.StyleSpan>?,
@@ -253,10 +295,12 @@ object TextEditPlanner {
             uRenderEnd >= ends[uLastLeaf] -> null
             else -> chapterText.getOrNull(uRenderEnd)
         }
-        val lines = splitLines(replacement)
-        val ws = wsOfLeaf(uFirstLeaf)
-        // 逐行预归一：段界就是块边界，两侧空格由 CSS 丢弃（首行看前缀、末行看后缀）。
+        val lines = pieces.map { it.text }
+        val leafCount = uLastLeaf - uFirstLeaf + 1
+        // 逐块预归一：段界就是块边界，两侧空格由 CSS 丢弃（首块看前缀、末块看后缀）。
+        // 块数正好对得上叶数时逐叶取空白模式 —— 代码块里的空格 / 换行不能被并成普通段落那套。
         val normLines = lines.mapIndexed { i, line ->
+            val ws = if (lines.size == leafCount) wsOfLeaf(uFirstLeaf + i) else wsOfLeaf(uFirstLeaf)
             LeafTextEditor.preNormalize(
                 line,
                 ws,
@@ -298,7 +342,9 @@ object TextEditPlanner {
                     text = newText,
                     // 清单「原文」行按段断行显示（正文投影里段间没有分隔符）。
                     originalText = selectionLines(chapterText, ends, start, endExclusive),
-                    editedText = replacement,
+                    editedText = InlineMarkup.joinSegments(pieces),
+                    editedBlocks = editedBlocksOf(pieces),
+                    blockKinds = pieces.map { it.block?.wire ?: "" },
                     styles = mergedStyles?.let(InlineMarkup::toStored),
                     // 合并后的 styles 是「前缀 + 新文字 + 后缀」的坐标；卡片要的是输入区原文的坐标。
                     editedStyles = replacementStyles?.let(InlineMarkup::toStored),
@@ -312,6 +358,20 @@ object TextEditPlanner {
             renderedEndExclusive = start + insertedLen,
             noop = false,
         )
+    }
+
+    /**
+     * 卡片输入区每**行**的块形态（重开卡片时按它把行拼回块）。
+     *
+     * 一行一块，块内换行（`<br>` / 代码块）的后续行记 `[CONTINUATION]`：重开时按它并回上一块。
+     */
+    private fun editedBlocksOf(pieces: List<InlineMarkup.Segment>): List<String> {
+        val out = ArrayList<String>(pieces.size)
+        for (p in pieces) {
+            out.add(p.block?.wire ?: "")
+            repeat(p.text.count { it == '\n' }) { out.add(RevisionBlocks.CONTINUATION) }
+        }
+        return out
     }
 
     /** 选区原文按段断行（只用于审阅清单显示）。 */
@@ -333,14 +393,33 @@ object TextEditPlanner {
     private data class Segment(
         val start: Int,
         val endExclusive: Int,
+        /** 这一段的新文字（多块时按 `\n` 拼；[literalBreaks] 决定这些 `\n` 怎么算）。 */
         val text: String,
+        /** 这一段该长成什么块（null = 不改块级形态）。 */
+        val block: BlockKind?,
+        /** true = [text] 里的 `\n` 是书里本来就有的换行（`<br>` / 代码块内换行），不是段界。 */
+        val literalBreaks: Boolean,
         /** 该段所在叶（`wsOfLeaf` 的键）与该叶在渲染空间的边界（边界空格按 CSS 丢弃）。 */
         val leaf: Int,
         val leafRenderStart: Int,
         val leafRenderEnd: Int,
         /** 这段新文字的行内样式区间（相对 [text]）；null = 没有样式信息（老路径）。 */
         val styles: List<InlineMarkup.StyleSpan>?,
-    )
+    ) {
+        constructor(
+            start: Int,
+            endExclusive: Int,
+            piece: InlineMarkup.Segment,
+            literalBreaks: Boolean,
+            leaf: Int,
+            leafRenderStart: Int,
+            leafRenderEnd: Int,
+            styles: List<InlineMarkup.StyleSpan>?,
+        ) : this(
+            start, endExclusive, piece.text, piece.block, literalBreaks,
+            leaf, leafRenderStart, leafRenderEnd, styles,
+        )
+    }
 
     private fun planSegments(
         bookId: Long,
@@ -353,6 +432,7 @@ object TextEditPlanner {
         toOriginal: (Int) -> Int,
         renderedInterval: (TextRevision) -> IntRange,
         segments: List<Segment>,
+        currentKindOf: ((leafIndex: Int) -> BlockKind?)?,
     ): TextEditPlan {
         val deleted = LinkedHashSet<Long>()
         val inserted = ArrayList<TextRevision>(segments.size)
@@ -360,6 +440,7 @@ object TextEditPlanner {
         for (seg in segments) {
             val built = planSegment(
                 bookId, chapter, chapterText, map, seg, groupId, now, wsOfLeaf, toOriginal, renderedInterval,
+                currentKindOf,
             )
             renderedLen += built.renderedLength
             deleted.addAll(built.absorbedIds)
@@ -398,6 +479,7 @@ object TextEditPlanner {
         wsOfLeaf: (Int) -> WhiteSpace,
         toOriginal: (Int) -> Int,
         renderedInterval: (TextRevision) -> IntRange,
+        currentKindOf: ((leafIndex: Int) -> BlockKind?)?,
     ): Built {
         val segStart = seg.start
         val segEnd = seg.endExclusive
@@ -432,8 +514,11 @@ object TextEditPlanner {
         val ws = wsOfLeaf(seg.leaf)
         val normalized = LeafTextEditor.preNormalize(rawText, ws, before, after)
         // 样式区间：先按同一套空白规则映射到预归一后的新文字，再随公共前后缀裁剪平移。
-        val beforeSeg = if (relStart == 0) null else oldText.getOrNull(relStart - 1)
-        val afterSeg = if (relEnd >= oldText.length) null else oldText.getOrNull(relEnd)
+        // 段首 / 段尾的邻字必须与 [normalized] 用**同一套**：段起点落在叶中间时，前面那个
+        // 真实的字决定段首空白会不会被吃掉；拿 null 当叶边界会把 ` {}内` 段首那个空格误当成
+        // 边界吃掉，样式区间整体前移一格（代码段盖住空格与 `{`、`}` 掉出代码）。
+        val beforeSeg = if (relStart == 0) before else oldText.getOrNull(relStart - 1)
+        val afterSeg = if (relEnd >= oldText.length) after else oldText.getOrNull(relEnd)
         val segSpans = if (seg.styles == null) {
             null
         } else {
@@ -441,12 +526,23 @@ object TextEditPlanner {
             remapSpans(seg.styles, seg.text, normSeg)
                 .map { InlineMarkup.StyleSpan(relStart + it.start, relStart + it.endExclusive, it.sig) }
         }
-        // 读者**新敲**的换行是段界（拆成真块），原文里本来就有的 `\n` 仍是 `<br>`：
-        // 字符级对齐一眼就能分开「留下来的换行」与「新添的换行」（方案 D-34 修订版）。
-        val newText = promoteTypedBreaks(oldText, normalized)
+        // 读者**新敲**的换行是段界（拆成真块），原文里本来就有的 `\n` 仍是 `<br>`。
+        // 卡片按块切好交上来时（[Segment.literalBreaks]）这条已经由切分保证，不再猜；
+        // 老调用方只有一整串文字，只能靠字符级对齐分开（方案 D-34 修订版）。
+        val newText = if (seg.literalBreaks) normalized else promoteTypedBreaks(oldText, normalized)
 
-        if (newText == oldText && segSpans.isNullOrEmpty()) {
-            // 输入的文字与旧渲染文字逐字相同（或只差会被空白归一吃掉的空白）：不写库。
+        // 目标形态与现在相同 = 没改块形态（卡片每行都带形态，不筛掉的话每块都会白落一条修订）。
+        // 这一叶没有块形态（`div` / 表格行）时也不改：它不归 markdown 管。
+        val changedBlock = if (seg.block == null) {
+            null
+        } else if (currentKindOf == null) {
+            seg.block
+        } else {
+            val cur = currentKindOf(seg.leaf)
+            if (cur == null) null else seg.block.takeIf { it != cur }
+        }
+        if (newText == oldText && segSpans.isNullOrEmpty() && changedBlock == null) {
+            // 输入的文字与旧渲染文字逐字相同（或只差会被空白归一吃掉的空白）、块形态也没改：不写库。
             return Built(emptyList(), null, RevisionBlocks.renderedLength(newText))
         }
 
@@ -454,7 +550,7 @@ object TextEditPlanner {
         // 没有旧修订时整段都可裁（改一个字只落一个字，方案 §8.4）。
         val firstRevised = absorbed.minOfOrNull { renderedInterval(it).first } ?: uRenderEnd
         val lastRevisedEnd = absorbed.maxOfOrNull { renderedInterval(it).last + 1 } ?: uRenderStart
-        // 文字一个字都没改、只是改了行内结构：整段重写（两头一裁，样式就只剩个空壳）。
+        // 文字一个字都没改、只是改了行内结构或块形态：整段重写（两头一裁，样式就只剩个空壳）。
         val restructureOnly = newText == oldText
         val maxPrefix = if (restructureOnly) {
             0
@@ -499,9 +595,24 @@ object TextEditPlanner {
                 text = finalText,
                 originalText = selected,
                 editedText = seg.text,
+                // 卡片那一行（含块内换行的续行）的形态：重开卡片时按它把行拼回块。
+                editedBlocks = if (seg.block != null) {
+                    editedBlocksOf(listOf(InlineMarkup.Segment(seg.text, seg.block)))
+                } else {
+                    emptyList()
+                },
+                // 块级形态随修订落库：重放时按它换叶子标签 / 增删包裹层。
+                blockKinds = if (changedBlock != null) {
+                    listOf(changedBlock.wire) + List(RevisionBlocks.split(finalText).size - 1) { "" }
+                } else {
+                    emptyList()
+                },
                 styles = finalStyles?.let(InlineMarkup::toStored),
                 // 卡片再打开时要看到**整段输入文字**的结构，不能只有裁剩的最小改动那截。
-                editedStyles = segSpans?.let(InlineMarkup::toStored),
+                // 坐标必须按**输入区原文**（[seg].text）记，不能拿空白归一之后的那版：两者在段首 /
+                // 连续空白处可能差字，重开卡片会把标记整体挪一格。跨段那条（[planMerge]）一直
+                // 就是这么记的，这里跟上。
+                editedStyles = seg.styles?.let(InlineMarkup::toStored),
                 delta = RevisionBlocks.renderedLength(finalText) - (finalEnd - finalStart),
                 groupId = groupId,
                 createdAt = now,
@@ -669,17 +780,6 @@ object TextEditPlanner {
         }
     }
 
-    /** 保留空行的 `\n` 切分（`String.split` 的尾部空串行为在跨平台实现里不够直观）。 */
-    internal fun splitLines(text: String): List<String> {
-        val out = ArrayList<String>()
-        var from = 0
-        for (i in text.indices) {
-            if (text[i] == '\n') {
-                out.add(text.substring(from, i))
-                from = i + 1
-            }
-        }
-        out.add(text.substring(from))
-        return out
-    }
+    /** 保留空行的 `\n` 切分（与卡片同一套，见 [InlineMarkup.splitLines]）。 */
+    internal fun splitLines(text: String): List<String> = InlineMarkup.splitLines(text)
 }

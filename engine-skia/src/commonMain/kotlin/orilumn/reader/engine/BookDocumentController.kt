@@ -20,6 +20,8 @@ import orilumn.reader.engine.html.HEADING_TAGS
 import orilumn.reader.engine.html.HtmlTreeConverter
 import orilumn.reader.engine.html.MarkupElement
 import orilumn.reader.engine.html.MarkupPaths
+import orilumn.reader.engine.revision.BlockKind
+import orilumn.reader.engine.revision.TextEditBlock
 import orilumn.reader.engine.revision.ChapterRevisionMap
 import orilumn.reader.engine.revision.InlineMarkup
 import orilumn.reader.engine.revision.LeafTextEditor
@@ -490,6 +492,9 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
      * @param prevPageOriginalStart 同一处内容的**原书坐标**（落位用）。
      * @param changeOldStart / changeOldEndExclusive 改前选区（或撤掉的那条修订）在旧渲染空间的
      *   区间；只有整段落在当前页之内才可能「不重排」。
+     * @param structureChanged 这次改动换了块形态（段落 / 标题 / 引用 / 列表 / 代码块）。形态一变，
+     *   同样的文字也会排成不同的行数，**不能走「页界没变」快路径**——那一条只验页界平移是否成立，
+     *   按形态变化去猜「没变」就是猜错；一律正式重排。
      * @return 新的落位（章 + 页）；null = 不在当前章，或重排失败。
      */
     suspend fun reflowAfterContentChange(
@@ -498,6 +503,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         prevPageOriginalStart: Int?,
         changeOldStart: Int,
         changeOldEndExclusive: Int,
+        structureChanged: Boolean = false,
     ): Pair<Int, PageSlice>? {
         val unit = unitAt(chapter) ?: return null
         if (prevPageCharStart == null || prevPageOriginalStart == null) {
@@ -508,7 +514,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         val oldTable = unit.paginationTable
         val oldPageIndex = oldTable?.let { pageIndexForChar(it.pages, prevPageCharStart) } ?: -1
         val oldPage = oldTable?.pages?.getOrNull(oldPageIndex)
-        val canTryFast = bc != null && oldTable != null && oldPage != null &&
+        val canTryFast = !structureChanged && bc != null && oldTable != null && oldPage != null &&
             unit.inProgress == null && oldTable.paramHash == currentParamHash() &&
             viewW > 0 && viewH > 0 &&
             changeOldStart >= prevPageCharStart &&
@@ -663,10 +669,28 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
     }
 
     /**
+     * 选区涉及的各块（渲染空间）：正文修改卡按它回显每行的块标记。
+     *
+     * 审阅视图照给：块形态是**元素**的属性（`p` / `h1` / `li` / `pre`），与文字是哪把尺无关；
+     * 排版叶也还是同一批（审阅只是把叶的文字换成「原文 + 新字」）。读者就在审阅视图里改字，
+     * 形态不跟着走，那一排块标记等于白写。
+     */
+    fun textEditBlocks(chapter: Int, start: Int, endExclusive: Int): List<TextEditBlock>? {
+        val unit = unitAt(chapter) ?: return null
+        val bc = layouter as? BoxChapterLayouter ?: return null
+        return runCatching { bc.blockKindsOfRange(unit.structureCache, start, endExclusive) }
+            .onFailure {
+                Logger.w(logTag, "textEditBlocks failed ch=$chapter [$start,$endExclusive): ${it::class.simpleName}")
+            }
+            .getOrNull()
+    }
+
+    /**
      * 纯计算一次正文修改：校验 + 按叶拆段 + 与旧修订合并 + 公共前后缀裁剪。
      *
      * 入参 [start] / [endExclusive] 是**渲染空间**（与 `chapterText` / 选区 / `PageSlice` 同尺），
-     * [text] 是输入区文字（跨段时用 `\n` 分隔，结果段数 = 换行符数 + 1）。不落库、不改内存。
+     * [text] 是输入区文字（跨段时用 `\n` 分隔，结果段数 = 换行符数 + 1）。
+     * [blocks] 是卡片**按块切好**的分段（一块形态 + 一块文字）；null = 老调用方。不落库、不改内存。
      */
     fun planTextEdit(
         chapter: Int,
@@ -674,6 +698,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         endExclusive: Int,
         text: String,
         styles: List<InlineMarkup.StyleSpan>? = null,
+        blocks: List<InlineMarkup.Segment>? = null,
     ): TextEditPlan {
         if (bookId < 0) return TextEditPlan.Rejected("书还没打开")
         val unit = unitAt(chapter) ?: return TextEditPlan.Rejected("本章尚未载入")
@@ -725,9 +750,10 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                 replacementStyles = replacementStyles,
                 wsOfLeaf = wsOfLeaf,
                 mergeableLeaf = mergeableLeaf,
+                blocks = blocks,
+                currentKindOf = { i -> leaves.getOrNull(i)?.let { BlockKind.ofElement(it) } },
             )
         }
-
         // 审阅空间里改字：页面文字是「原文 + 新文字」的展示版，但落库的修订必须按**原书空间**算
         // ——新文字替换的是原区间，不是「原文 + 新文字」那一串。所以先把章文本 / 块尾剪回原书空间
         // （剪掉新文字），选区换成原书区间（只选到新添的文字时抬到那条修订的原区间），再按普通规则提交；
@@ -777,6 +803,11 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                 replacementStyles = replacementStyles,
                 wsOfLeaf = wsOfLeaf,
                 mergeableLeaf = mergeableLeaf,
+                // 块级形态在这一支同样要落：读者就在审阅视图里改字，形态不跟着走等于白改。
+                // 这里给的是「原书空间」的区间与块尾，但块的下标与排版叶一一对应（审阅只是把叶的
+                // 文字换成「原文 + 新字」），所以叶下标仍按同一份结构取形态。
+                blocks = blocks,
+                currentKindOf = { i -> leaves.getOrNull(i)?.let { BlockKind.ofElement(it) } },
             )
         }
         if (base !is TextEditPlan.Ready) return base
@@ -1767,6 +1798,8 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         val leafPaths = cache.leaves.map { MarkupPaths.nodePath(tree, it) }
         val starts = cache.globalCharStarts
         val t0 = platformNowMs()
+        // 叶内修订带的块级形态（叶下标 → 目标形态）；合并修订的形态随 Merge 走，不在这里。
+        val blockOfLeaf = HashMap<Int, BlockKind>(map.revisions.size)
 
         // 跨叶修订（段数变了）：按叶边界找首末叶，交给重放做合并 / 拆分（方案 D-34 修订版）。
         fun leafOfOffset(offset: Int): Int {
@@ -1843,6 +1876,12 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                         r.text.indexOf(RevisionBlocks.SEPARATOR) >= 0
                 }
             }
+            // 块级形态：叶内修订带的形态落在它起点的叶上（合并修订随 Merge 走）。
+            for (r in map.revisions) {
+                if (r.id in mergeIds || r.blockKinds.isEmpty()) continue
+                val kind = BlockKind.fromWire(r.blockKinds.first()) ?: continue
+                blockOfLeaf[aOf.getValue(r)] = kind
+            }
 
             // 叶区间相交的修订归成一组：不分先后、也不分是合并还是叶内落字，一次性交给重放。
             val parent = IntArray(map.revisions.size) { it }
@@ -1893,6 +1932,9 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                 }
                 for (r in group) {
                     val base = starts[first].toInt()
+                    // 审阅视图：这一段在审阅空间的模样（原文各字原样在内，新写的字插在原位，
+                    // 段界改成 ¶ + 块边界）。正常视图：修订文字本身就是整段替换。
+                    val review = if (reviewMode) reviewMap?.overlay(r) else null
                     merges += orilumn.reader.engine.revision.ChapterRevisionReplay.Merge(
                         // 同组共用「组的首叶」：重放按首叶归组，各条若各报自己的首叶，
                         // 跨叶那条后面的叶内修订会落进另一个组、被整组覆盖掉。
@@ -1900,17 +1942,23 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                         lastLeaf = bOf.getValue(r),
                         start = r.charStart - base,
                         endExclusive = r.charEnd - base,
-                        // 审阅视图：这一段在审阅空间的模样（原文各字原样在内，新写的字插在原位，
-                        // 段界改成 ¶ + 块边界）。正常视图：修订文字本身就是整段替换。
-                        text = if (reviewMode) {
-                            reviewMap?.overlay(r)?.text ?: r.text.replace(RevisionBlocks.SEPARATOR, '\n')
+                        text = review?.text ?: if (reviewMode) {
+                            r.text.replace(RevisionBlocks.SEPARATOR, '\n')
                         } else {
                             r.text
                         },
                         revisionId = r.id,
-                        // 审阅视图的文字是「原文 + 新字」的拼合空间，与样式区间不是同一把尺，
-                        // 那里不套样式（老行为：新字挂左邻）。
-                        styles = if (reviewMode) null else r.styles?.let(InlineMarkup::fromStored),
+                        // 样式跟着文字走：审阅空间的文字不是修订文字那把尺，得先换算过去
+                        // （保留字也有位置，见 ReviewOverlay.Plan.stylesInText），否则新字
+                        // 不知道该落在哪，会粘进段首那个行内元素里（读者复报：新加的行成了代码样式）。
+                        // 老修订没存样式（null）就保持「新字挂左邻」的老行为。
+                        styles = r.styles?.let { stored ->
+                            val spans = InlineMarkup.fromStored(stored)
+                            review?.stylesInText(r.text, spans) ?: spans
+                        },
+                        // 块级形态按段对齐（数量对不上时重放自己会丢弃，宁可不改结构也不猜）。
+                        // 审阅视图同样要带：读者就在审阅视图里改字，形态不跟着走等于白写。
+                        kinds = r.blockKinds.takeIf { it.isNotEmpty() }?.map { BlockKind.fromWire(it) },
                     )
                     mergeIds += r.id
                 }
@@ -2027,6 +2075,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                     out
                 },
                 merges = merges,
+                blockOfLeaf = { index -> blockOfLeaf[index] },
             )
         }.getOrElse {
             Logger.w(logTag, "revision replay failed ch=${unit.chapterIndex}: ${it::class.simpleName}")

@@ -26,6 +26,14 @@ object InlineMarkup {
     /** 有语法糖的标签（其余用标签形式）。 */
     val SUGAR_TAGS: Set<String> = setOf("em", "strong", "code", "sup", "sub", "s", "a")
 
+    /**
+     * 空元素（void）：**没有结束标签**，也就没有内容（HTML 规范）。
+     *
+     * `</br>` / `</wbr>` 因此是无效写法：浏览器容错地当 `<br>` 处理，作者却以为自己
+     * 「闭合了某个东西」。卡片里一律拒绝并提示，别让读者打的那几个字悄悄消失。
+     */
+    private val VOID_TAGS: Set<String> = setOf("br", "wbr")
+
     /** 允许保留的属性名（规格 §5.2）。`id` 只在原位保留时使用。 */
     val ALLOWED_ATTRS: Set<String> = setOf(
         "class", "style", "id", "title", "lang", "dir", "href", "target", "datetime",
@@ -44,12 +52,56 @@ object InlineMarkup {
 
     /** 行内元素签名：标签 + 允许的属性（顺序无关）。 */
     data class StyleSig(val tag: String, val attrs: Map<String, String> = emptyMap()) {
-        /** 结构比较用的键：有语法糖的标签只看标签（属性在回写时补回，不影响前后缀对齐）。 */
-        val shapeKey: String get() = if (tag in SUGAR_TAGS) tag else tag + attrs.toSortedMap()
+        /**
+         * 结构比较用的键：有语法糖的标签只看标签（属性在回写时补回，不影响前后缀对齐）。
+         *
+         * **`id` 不参与**：它是身份不是形状。解析侧一律剥掉读者手写的 `id`（[parse]），
+         * 原位保留的那条由 [restore] 从原文补回；若把 `id` 算进键，带 id 的元素每次都被判成
+         * 「结构变了」，回验失败后卡片退化成全标签形式。
+         */
+        val shapeKey: String
+            get() = if (tag in SUGAR_TAGS) tag else tag + (attrs - "id").toSortedMap()
     }
 
     /** 一段行内样式：作用于纯文本 `[start, endExclusive)`，可嵌套。 */
     data class StyleSpan(val start: Int, val endExclusive: Int, val sig: StyleSig)
+
+    /**
+     * 输入区里的一块：文字 + 块形态（`# 标题`、`> 引用`、`- 列表`、代码块…）。
+     *
+     * [text] 里的 `\n` 是**书里真正的换行**（代码块内部换行，或叶内 `<br>`），不是块边界：
+     * 块边界只在 [Segment] 与 [Segment] 之间。
+     */
+    data class Segment(val text: String, val block: BlockKind? = null)
+
+    /** 若干块拼成输入区全文（块之间一个 `\n`，与修订文字的段界一一对应）。 */
+    fun joinSegments(segments: List<Segment>): String =
+        segments.joinToString("\n") { it.text }
+
+    /** 保留空行的 `\n` 切分（`String.split` 的尾部空串行为在跨平台实现里不够直观）。 */
+    fun splitLines(text: String): List<String> {
+        val out = ArrayList<String>()
+        var from = 0
+        for (i in text.indices) {
+            if (text[i] == '\n') {
+                out.add(text.substring(from, i))
+                from = i + 1
+            }
+        }
+        out.add(text.substring(from))
+        return out
+    }
+
+    /** 每个块在拼接文字里的起点（块之间占一个 `\n`）。 */
+    fun segmentStarts(segments: List<Segment>): IntArray {
+        val out = IntArray(segments.size)
+        var cursor = 0
+        for (i in segments.indices) {
+            out[i] = cursor
+            cursor += segments[i].text.length + 1
+        }
+        return out
+    }
 
     /** 转成数据层的落库形态（`TextRevision.styles`）。 */
     fun toStored(spans: List<StyleSpan>): List<orilumn.reader.data.revision.RevisionStyleSpan> =
@@ -73,6 +125,8 @@ object InlineMarkup {
         val text: String,
         val spans: List<StyleSpan>,
         val errors: List<String> = emptyList(),
+        /** 每块的块形态与文字（块与块之间用 `\n` 拼成 [text]）。 */
+        val segments: List<Segment> = listOf(Segment(text)),
     ) {
         val ok: Boolean get() = errors.isEmpty()
     }
@@ -84,24 +138,77 @@ object InlineMarkup {
      *
      * 有语法糖的标签一律用语法糖（属性在 [restore] 里补回），其余用标签形式；
      * 文字里的标记字符**只在会被误解析时转义**：先按最少转义出一版，解析回来结构不等就整体转义。
+     *
+     * **每一版都要解析回验**（规格 §6：`显示 → 解析` 必须逐字逐元素等价）。只验第一版是不够的：
+     * 全转义版遇到极端内容仍可能不等（`<em>` 里只有一个 `*`、链接地址自带 `)`），那时确认就会
+     * 悄悄改掉正文。所以第三版把**所有元素都写成标签形式**（标签不参与 markdown 配对，最稳）；
+     * 它再不等只能说明 `sanitize` 之外还有 bug，返回它仍是当下最接近原样的一版。
      */
-    fun show(text: String, spans: List<StyleSpan>): String {
-        val clean = sanitize(text, spans)
+    fun show(text: String, spans: List<StyleSpan>): String =
+        show(listOf(Segment(text)), spans)
+
+    /**
+     * 多块版本：每块按自己的形态写块标记，块内的换行落成硬断行（`\` + 换行），
+     * 代码块落成围栏。块的顺序与 [Segment] 一一对应。
+     */
+    fun show(segments: List<Segment>, spans: List<StyleSpan>): String {
+        val joined = joinSegments(segments)
+        val starts = segmentStarts(segments)
+        val clean = clampToSegments(sanitize(joined, spans), starts, segments)
         val expected = clean.map { it.start to it.endExclusive to it.sig.shapeKey }
-        val naive = render(text, clean, escapeMarkerChars = false)
-        val naiveParsed = parse(naive)
-        if (naiveParsed.ok && sameShape(naiveParsed, text, expected)) return naive
-        return render(text, clean, escapeMarkerChars = true)
+        fun ok(markup: String): Boolean {
+            val p = parse(markup)
+            return p.ok && sameShape(p, segments, expected)
+        }
+        val naive = renderSegments(segments, clean, escapeMarkerChars = false, forceTags = false)
+        if (ok(naive)) return naive
+        val escaped = renderSegments(segments, clean, escapeMarkerChars = true, forceTags = false)
+        if (ok(escaped)) return escaped
+        return renderSegments(segments, clean, escapeMarkerChars = true, forceTags = true)
+    }
+
+    /**
+     * 区间按块切开：跨块的那条在每块里各留一段（块与块之间不共享行内元素）。
+     *
+     * 返回值仍是**拼接后文字**（[joinSegments]）的坐标，只是夹到各块之内 —— [sameShape] 要拿它
+     * 跟 [parse] 出来的区间逐条比。块内坐标由 [renderSegments] 自己换算，别在这里提前减。
+     */
+    private fun clampToSegments(
+        spans: List<StyleSpan>,
+        starts: IntArray,
+        segments: List<Segment>,
+    ): List<StyleSpan> {
+        if (spans.isEmpty()) return spans
+        val out = ArrayList<StyleSpan>(spans.size + 2)
+        for ((i, seg) in segments.withIndex()) {
+            val from = starts[i]
+            val to = from + seg.text.length
+            for (s in spans) {
+                val s0 = maxOf(s.start, from)
+                val s1 = minOf(s.endExclusive, to)
+                if (s1 > s0) out.add(StyleSpan(s0, s1, s.sig))
+            }
+        }
+        return normalize(out)
     }
 
     /**
      * 提交前的属性补回（规格 §4.3）：按「同标签 + 同嵌套顺序」把解析出的区间对回原选区的区间，
      * 补回原元素的属性（读者写出的属性优先；新增元素丢 `id`，原位保留的保留 `id`）。
+     *
+     * [templates] 是**同段**的行内结构（可以比选区更宽）：读者新写的裸标记（`*新*`）从同标签的
+     * 模板元素抄属性，免得新写的斜体跟同段其它斜体长得不一样（规格 §4.3「读者新写的标记」）。
+     * 只补读者一个属性都没写的那些——写了属性就是显式意图，模板不许改。
      */
-    fun restore(original: List<StyleSpan>, parsed: List<StyleSpan>): List<StyleSpan> {
+    fun restore(
+        original: List<StyleSpan>,
+        parsed: List<StyleSpan>,
+        templates: List<StyleSpan> = emptyList(),
+    ): List<StyleSpan> {
         if (parsed.isEmpty()) return emptyList()
         val used = BooleanArray(original.size)
         val out = arrayOfNulls<StyleSig>(parsed.size)
+        val isNew = BooleanArray(parsed.size) { true }
         // 第一轮：结构与属性都对得上的（标签形式原样没改）。
         for ((i, p) in parsed.withIndex()) {
             val j = original.indices.firstOrNull {
@@ -109,6 +216,7 @@ object InlineMarkup {
             } ?: continue
             used[j] = true
             out[i] = merge(original[j].sig, p.sig)
+            isNew[i] = false
         }
         // 第二轮：同标签、同顺序（语法糖形式，属性在上一轮对不上）。
         for ((i, p) in parsed.withIndex()) {
@@ -116,18 +224,52 @@ object InlineMarkup {
             val j = original.indices.firstOrNull { !used[it] && original[it].sig.tag == p.sig.tag }
             out[i] = if (j != null) {
                 used[j] = true
+                isNew[i] = false
                 merge(original[j].sig, p.sig)
             } else {
                 // 读者新写的标记：属性照用，但 id 会撞号，一律不要。
                 StyleSig(p.sig.tag, p.sig.attrs - "id")
             }
         }
-        return parsed.mapIndexed { i, p -> StyleSpan(p.start, p.endExclusive, out[i]!!) }
+        val restored = parsed.mapIndexed { i, p -> StyleSpan(p.start, p.endExclusive, out[i]!!) }
+        if (templates.isEmpty()) return restored
+        // 只有**新写**的区间按模板补空属性：原位保留的那份以原文为准（原文没有的 class 不该凭空长出来）。
+        val templated = inheritTemplateAttrs(restored, templates)
+        return restored.mapIndexed { i, s -> if (isNew[i]) templated[i] else s }
     }
 
     /** 原位保留：补回原属性，读者写出的覆盖原值；原 id 保留（`id` 不在读者写法里就沿用原值）。 */
     private fun merge(src: StyleSig, parsed: StyleSig): StyleSig =
         StyleSig(src.tag, src.attrs + parsed.attrs)
+
+    /**
+     * 读者**新写**的标记按模板继承属性（规格 §4.3）：模板优先级是「同段已有的同标签元素」。
+     *
+     * 只补**读者一个属性都没写**的那些区间（`*新*` 解析出来是裸 `<em>`）：同段里有一个
+     * `<em class="a" id="x">`，读者写的 `*新*` 就该长得跟它一样，而不是一个没有 class 的裸 em。
+     * `id` 一律不带过去——新元素带原 id 会撞号（摘录锚点、脚注锚点都靠 id）。
+     *
+     * 读者写了属性的（`<span class="b">`、`[字](新地址)`）一个字都不动：模板只补空位，不改显式意图。
+     */
+    fun inheritTemplateAttrs(
+        spans: List<StyleSpan>,
+        templates: List<StyleSpan>,
+    ): List<StyleSpan> {
+        if (spans.isEmpty() || templates.isEmpty()) return spans
+        // 同标签取第一个模板：模板列表已按 (起点升序、外层在前) 排好，同段的「第一个」就是它。
+        val byTag = LinkedHashMap<String, Map<String, String>>()
+        for (t in templates) {
+            val attrs = t.sig.attrs - "id"
+            if (attrs.isEmpty()) continue
+            if (!byTag.containsKey(t.sig.tag)) byTag[t.sig.tag] = attrs
+        }
+        if (byTag.isEmpty()) return spans
+        return spans.map { s ->
+            if (s.sig.attrs.isNotEmpty()) return@map s
+            val attrs = byTag[s.sig.tag] ?: return@map s
+            s.copy(sig = s.sig.copy(attrs = attrs))
+        }
+    }
 
     // ---------------------------------------------------------------- 解析
 
@@ -149,17 +291,58 @@ object InlineMarkup {
     }
 
     /**
-     * 解析标记文本（规格 §2 / §5）。
+     * 解析标记文本（规格 §2 / §5）：先按块切（[BlockMarkup]：行首块标记、代码块围栏、硬断行），
+     * 每块再走行内解析（块与块之间不共享行内元素）。
+     *
+     * 块级的错误（围栏没收尾）也进 [Parsed.errors]：卡片就地提示，正文不动。
+     */
+    fun parse(markup: String): Parsed {
+        val split = BlockMarkup.split(markup)
+        val errors = ArrayList<String>(2)
+        if (split.unterminatedFence) {
+            errors.add("代码块没有收尾：结尾再写一行 ``` 把这段代码关上")
+        }
+        val segments = ArrayList<Segment>(split.blocks.size)
+        val spans = ArrayList<StyleSpan>()
+        val sb = StringBuilder(markup.length)
+        for ((i, block) in split.blocks.withIndex()) {
+            if (i > 0) sb.append('\n')
+            val at = sb.length
+            if (block.kind == BlockKind.Pre) {
+                // 代码块内容原样：不解析行内标记、不转义（反引号 / 星号都是代码本身）。
+                sb.append(block.content)
+                segments.add(Segment(block.content, BlockKind.Pre))
+            } else {
+                val p = parseInline(block.content)
+                errors.addAll(p.errors)
+                for (s in p.spans) spans.add(StyleSpan(s.start + at, s.endExclusive + at, s.sig))
+                sb.append(p.text)
+                segments.add(Segment(p.text, block.kind))
+            }
+        }
+        return Parsed(sb.toString(), spans, errors.distinct(), segments)
+    }
+
+    /**
+     * 行内解析（不含块层）：未配对的标签 / 成对标记 / 链接 / 转义在这里落地。
      *
      * 配对口径：markdown 标记**必须成对**，不成对按字面（CommonMark；`3 * 4 * 5`、`1~2` 因此安全）；
      * **标签**可以不配对——未闭合的开标签延伸到这段文字末尾、孤立的闭标签从这段文字开头起
      * （「元素在选区外继续」，规格 §2.4）。
      */
-    fun parse(markup: String): Parsed {
+    private fun parseInline(markup: String): Parsed {
         val errors = ArrayList<String>()
         val toks = tokenize(markup, errors)
 
-        // 1) markdown 标记配对（同标记、同长度；就近配对）。
+        // 1) markdown 标记配对（同标记、同长度；就近配对，**不跨行**：规格 §2.3）。
+        // 行号按字符偏移预算一次，配对时只比两个标记所在行。
+        val lineOf = IntArray(markup.length + 1)
+        var ln = 0
+        for (idx in markup.indices) {
+            lineOf[idx] = ln
+            if (markup[idx] == '\n') ln++
+        }
+        lineOf[markup.length] = ln
         val openers = ArrayList<Int>()
         val closeOf = HashMap<Int, Int>()
         val closerSet = HashSet<Int>()
@@ -168,7 +351,7 @@ object InlineMarkup {
             if (t.canClose) {
                 val k = openers.indexOfLast { j ->
                     val o = toks[j] as Tok.Marker
-                    o.marker == t.marker && o.len == t.len
+                    o.marker == t.marker && o.len == t.len && lineOf[o.at] == lineOf[t.at]
                 }
                 if (k >= 0) {
                     val o = openers.removeAt(k)
@@ -223,11 +406,18 @@ object InlineMarkup {
                 is Tok.TagTok -> {
                     val tag = t.tag
                     when {
+                        // 空元素没有结束标签（HTML 规范）：`</br>`、`</wbr>` 是无效写法。
+                        // 不能悄悄吃掉——读者打了这几个字，确认后凭空消失（或凭空多一个换行）
+                        // 都是「正文被偷偷改掉」，宁可拒绝并告诉他正确写法。
+                        tag.closing && tag.name in VOID_TAGS ->
+                            errors.add(
+                                "「</${tag.name}>」不合法：${tag.name} 是没有内容的空元素、" +
+                                    "不写结束标签" + if (tag.name == "br") "，断行直接写 `<br>`" else "",
+                            )
                         tag.name == "br" -> sb.append('\n')
                         tag.name == "wbr" -> Unit
                         tag.name !in ALLOWED_TAGS -> errors.add("「<${tag.name}>」不是支持的行内标记")
                         !tag.closing -> openTags.add(tag to sb.length)
-                        tag.name == "br" || tag.name == "wbr" -> Unit
                         else -> {
                             val idx = openTags.indexOfLast { it.first.name == tag.name }
                             if (idx >= 0) {
@@ -271,8 +461,24 @@ object InlineMarkup {
 
         val invalid = validate(spans)
         errors.addAll(invalid)
-        return Parsed(sb.toString(), nest(normalize(spans)), errors.distinct())
+        return Parsed(sb.toString(), stripIds(nest(normalize(spans))), errors.distinct())
     }
+
+    /**
+     * 读者手写的 `id` 一律丢弃（规格 §5.2：`id` 只用于**原位保留**）。
+     *
+     * 原位保留的那条走 [restore]：它按原区间补回属性，`id` 从原文那一侧带回来。这里先统一剥掉，
+     * 于是「拿不到原结构、不经过 restore」的路径（宿主给不出行内结构时）也不会把读者抄来的
+     * 重复 `id` 写进正文，破坏锚点。
+     */
+    private fun stripIds(spans: List<StyleSpan>): List<StyleSpan> =
+        spans.map { s ->
+            if (s.sig.attrs.containsKey("id")) {
+                s.copy(sig = s.sig.copy(attrs = s.sig.attrs - "id"))
+            } else {
+                s
+            }
+        }
 
     /**
      * 标记文本里**属于语法**的字符区间（只给输入框把标记淡显用，不参与解析）。
@@ -284,24 +490,8 @@ object InlineMarkup {
         if (markup.isEmpty()) return emptyList()
         val errors = ArrayList<String>()
         val toks = tokenize(markup, errors)
-        val openers = ArrayList<Int>()
-        val paired = HashSet<Int>()
-        for (i in toks.indices) {
-            val t = toks[i] as? Tok.Marker ?: continue
-            if (t.canClose) {
-                val k = openers.indexOfLast { j ->
-                    val o = toks[j] as Tok.Marker
-                    o.marker == t.marker && o.len == t.len
-                }
-                if (k >= 0) {
-                    paired.add(openers.removeAt(k))
-                    paired.add(i)
-                    continue
-                }
-            }
-            if (t.canOpen) openers.add(i)
-        }
-        val out = ArrayList<IntRange>()
+        val paired = pairedMarkers(markup, toks)
+        val out = ArrayList<IntRange>(BlockMarkup.split(markup).markerRanges)
         for ((i, t) in toks.withIndex()) {
             when (t) {
                 is Tok.Marker -> if (i in paired) out.add(t.at until t.at + t.len)
@@ -330,6 +520,62 @@ object InlineMarkup {
             }
         }
         return merged
+    }
+
+    /**
+     * 输入区里**写了、但不会生效**的 markdown 标记（`*a` 里那个孤零零的 `*`）。
+     *
+     * [parse] 把没配上对的标记当**普通文字**落进正文，可卡片里它和真标记长得一样，
+     * 读者分不出「这写的是斜体」还是「这就是一个星号」。所以输入框把它们染成另一种颜色
+     * （规格 §3.6）：真标记淡化，字面标记保持正常墨色、另加一条虚下划线。
+     */
+    fun unpairedMarkerRanges(markup: String): List<IntRange> {
+        if (markup.isEmpty()) return emptyList()
+        val errors = ArrayList<String>()
+        val toks = tokenize(markup, errors)
+        val paired = pairedMarkers(markup, toks)
+        val blockMarkers = BlockMarkup.split(markup).markerRanges
+        val out = ArrayList<IntRange>()
+        for ((i, t) in toks.withIndex()) {
+            if (t !is Tok.Marker || i in paired) continue
+            val r = t.at until t.at + t.len
+            // 行首的块标记（`* 列表项`、`- `）不是「没生效的行内标记」：它已经生效了，只是不是行内。
+            if (blockMarkers.any { it.first <= r.first && it.last >= r.last }) continue
+            out.add(r)
+        }
+        return out
+    }
+
+    /**
+     * 与 [parse] 同一套配对口径：同标记、同长度、就近配对，**不跨行**（规格 §2.3）。
+     * 返回成对标记在 token 表里的下标。
+     */
+    private fun pairedMarkers(markup: String, toks: List<Tok>): Set<Int> {
+        val lineOf = IntArray(markup.length + 1)
+        var ln = 0
+        for (idx in markup.indices) {
+            lineOf[idx] = ln
+            if (markup[idx] == '\n') ln++
+        }
+        lineOf[markup.length] = ln
+        val openers = ArrayList<Int>()
+        val paired = HashSet<Int>()
+        for (i in toks.indices) {
+            val t = toks[i] as? Tok.Marker ?: continue
+            if (t.canClose) {
+                val k = openers.indexOfLast { j ->
+                    val o = toks[j] as Tok.Marker
+                    o.marker == t.marker && o.len == t.len && lineOf[o.at] == lineOf[t.at]
+                }
+                if (k >= 0) {
+                    paired.add(openers.removeAt(k))
+                    paired.add(i)
+                    continue
+                }
+            }
+            if (t.canOpen) openers.add(i)
+        }
+        return paired
     }
 
     // ---------------------------------------------------------------- 工具
@@ -524,18 +770,54 @@ object InlineMarkup {
         return out
     }
 
-    /** `style` 只留装饰类声明：影响版面的一律剔除（规格 §5.2）。 */
-    internal fun filterStyle(css: String): String =
-        css.split(';').mapNotNull { decl ->
-            val i = decl.indexOf(':')
-            if (i <= 0) return@mapNotNull null
-            val name = decl.substring(0, i).trim().lowercase()
-            val value = decl.substring(i + 1).trim()
-            if (name.isEmpty() || value.isEmpty()) return@mapNotNull null
-            if (STYLE_DROP.any { name == it || name.startsWith("$it-") }) return@mapNotNull null
-            if (STYLE_KEEP.none { name == it.replace("-", "") || name.startsWith(it) }) return@mapNotNull null
-            "$name:$value"
-        }.joinToString(";")
+    /**
+     * `style` 只留装饰类声明：影响版面的一律剔除（规格 §5.2）。
+     *
+     * 按**声明**切分而不是裸切 `;`：`font-family:"a;b"` 里的分号属于值，切开会落库半截非法 CSS
+     * （`font-family:"a`）。引号内、`url(...)` 的括号内都不切。
+     */
+    internal fun filterStyle(css: String): String {
+        val out = ArrayList<String>()
+        val cur = StringBuilder()
+        var quote = ' '
+        var depth = 0
+        fun flush() {
+            val raw = cur.toString()
+            cur.clear()
+            val i = raw.indexOf(':')
+            if (i <= 0) return
+            val name = raw.substring(0, i).trim().lowercase()
+            val value = raw.substring(i + 1).trim()
+            if (name.isEmpty() || value.isEmpty()) return
+            if (STYLE_DROP.any { name == it || name.startsWith("$it-") }) return
+            if (STYLE_KEEP.none { name == it || name.startsWith(it) }) return
+            out.add("$name:$value")
+        }
+        for (c in css) {
+            when {
+                quote != ' ' -> {
+                    cur.append(c)
+                    if (c == quote) quote = ' '
+                }
+                c == '"' || c == '\'' -> {
+                    quote = c
+                    cur.append(c)
+                }
+                c == '(' -> {
+                    depth++
+                    cur.append(c)
+                }
+                c == ')' -> {
+                    if (depth > 0) depth--
+                    cur.append(c)
+                }
+                c == ';' && depth == 0 -> flush()
+                else -> cur.append(c)
+            }
+        }
+        flush()
+        return out.joinToString(";")
+    }
 
     private fun validate(spans: List<StyleSpan>): List<String> {
         val errs = ArrayList<String>()
@@ -576,10 +858,14 @@ object InlineMarkup {
 
     private fun sameShape(
         parsed: Parsed,
-        text: String,
+        segments: List<Segment>,
         expected: List<Pair<Pair<Int, Int>, String>>,
     ): Boolean {
-        if (parsed.text != text) return false
+        if (parsed.text != joinSegments(segments)) return false
+        if (parsed.segments.size != segments.size) return false
+        for (i in segments.indices) {
+            if (parsed.segments[i].block != segments[i].block) return false
+        }
         val got = parsed.spans.map { (it.start to it.endExclusive) to it.sig.shapeKey }
         return got == expected
     }
@@ -593,7 +879,10 @@ object InlineMarkup {
         "sup" -> Marker("sup", "^", "^")
         "sub" -> Marker("sub", "~", "~")
         "s" -> Marker("s", "~~", "~~")
-        "a" -> Marker("a", "[", "](${sig.attrs["href"].orEmpty()})")
+        // 链接地址自带 `)` 时语法糖写不回去（`](${href})` 会在第一个 `)` 截断），直接走标签形式。
+        "a" -> sig.attrs["href"].orEmpty().let { href ->
+            if (href.contains(')')) null else Marker("a", "[", "]($href)")
+        }
         else -> null
     }
 
@@ -601,12 +890,99 @@ object InlineMarkup {
         if (closing) return "</${sig.tag}>"
         val sb = StringBuilder("<").append(sig.tag)
         for ((k, v) in sig.attrs.toSortedMap()) {
-            sb.append(' ').append(k).append("=\"").append(v.replace("\"", "&quot;")).append('"')
+            sb.append(' ').append(k).append("=\"").append(escapeAttr(v)).append('"')
         }
         return sb.append('>').toString()
     }
 
-    private fun render(text: String, spans: List<StyleSpan>, escapeMarkerChars: Boolean): String {
+    /**
+     * 属性值写出：与 [readTag] 的解码严格对称（`&` 必须第一个换，否则会把后面换出来的实体再解一层）。
+     * 只转这四个就够：`"` 是定界符，`&` / `<` / `>` 是解析侧会解码的实体。
+     */
+    private fun escapeAttr(v: String): String {
+        if (v.none { it == '&' || it == '<' || it == '>' || it == '"' }) return v
+        val sb = StringBuilder(v.length + 8)
+        for (c in v) when (c) {
+            '&' -> sb.append("&amp;")
+            '<' -> sb.append("&lt;")
+            '>' -> sb.append("&gt;")
+            '"' -> sb.append("&quot;")
+            else -> sb.append(c)
+        }
+        return sb.toString()
+    }
+
+    private fun renderSegments(
+        segments: List<Segment>,
+        spans: List<StyleSpan>,
+        escapeMarkerChars: Boolean,
+        forceTags: Boolean,
+    ): String {
+        val starts = segmentStarts(segments)
+        val out = StringBuilder(joinSegments(segments).length + 16)
+        for ((i, seg) in segments.withIndex()) {
+            if (i > 0) out.append('\n')
+            val from = starts[i]
+            val to = from + seg.text.length
+            val local = spans.filter { it.start >= from && it.endExclusive <= to }
+                .map { StyleSpan(it.start - from, it.endExclusive - from, it.sig) }
+            if (seg.block == BlockKind.Pre) {
+                // 围栏长度比内容里最长的行首反引号还长一位，内容随便写也不会把围栏提前关上。
+                val fence = "`".repeat(fenceFor(seg.text))
+                out.append(fence).append('\n').append(seg.text).append('\n').append(fence)
+                continue
+            }
+            // 段内换行（`<br>`）写成硬断行：行尾一个 `\`，解析时并回同一块。
+            val body = renderText(seg.text, local, escapeMarkerChars, forceTags)
+                .replace("\n", "\\\n")
+            val marker = seg.block?.marker
+            out.append(
+                when {
+                    marker != null -> marker + body
+                    else -> escapeLineStart(body)
+                },
+            )
+        }
+        return out.toString()
+    }
+
+    /** 代码块围栏长度：内容里任何一行开头的反引号串都不能把围栏提前关上。 */
+    private fun fenceFor(text: String): Int {
+        var max = 0
+        for (line in text.split('\n')) {
+            var n = 0
+            while (n < line.length && line[n] == '`') n++
+            if (n > max) max = n
+        }
+        return maxOf(3, max + 1)
+    }
+
+    /**
+     * 没有块标记的文字，行首若长得像块标记（`# `、`> `、`- `、`1. `、```` ``` ````）就转义，
+     * 免得读者确认后那段字被当成标题 / 列表 / 代码块。
+     *
+     * 围栏要逐个反引号转义：只转第一个的话，剩下的 ` `` ` 会自己配成一段行内代码。
+     */
+    private fun escapeLineStart(body: String): String {
+        if (body.isEmpty()) return body
+        val lineEnd = body.indexOf('\n').let { if (it < 0) body.length else it }
+        val line = body.substring(0, lineEnd)
+        if (!BlockMarkup.startsLikeMarker(line)) return body
+        val ticks = BlockMarkup.fenceOpen(line)
+        if (ticks > 0) {
+            val sb = StringBuilder(body.length + ticks)
+            repeat(ticks) { sb.append('\\').append('`') }
+            return sb.append(body, ticks, body.length).toString()
+        }
+        return "\\" + body
+    }
+
+    private fun renderText(
+        text: String,
+        spans: List<StyleSpan>,
+        escapeMarkerChars: Boolean,
+        forceTags: Boolean,
+    ): String {
         val sorted = nest(spans)
         val sb = StringBuilder(text.length + 16)
         val open = ArrayList<StyleSpan>()
@@ -619,7 +995,7 @@ object InlineMarkup {
             }
             if (i < text.length) {
                 for (s in sorted) if (s.start == i) {
-                    val m = markerOf(s.sig, text.substring(s.start, s.endExclusive))
+                    val m = if (forceTags) null else markerOf(s.sig, text.substring(s.start, s.endExclusive))
                     sb.append(m?.open ?: tagMarkup(s.sig, false))
                     open.add(s)
                     markers.add(m)

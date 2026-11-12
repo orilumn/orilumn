@@ -2,6 +2,7 @@ package orilumn.reader.engine.revision
 
 import orilumn.reader.engine.css.WhiteSpace
 import orilumn.reader.engine.html.MarkupElement
+import orilumn.reader.engine.html.MarkupPaths
 import orilumn.reader.engine.laying.styledSegments
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -214,6 +215,10 @@ class ChapterRevisionReplayTest {
         assertEquals("aX", seg(r.leaves[0]).text)
         assertEquals("Yef", seg(r.leaves[1]).text)
         assertArrayEquals(longArrayOf(0, 2), r.charStarts)
+        // 章树里只剩这两块：组里的其余叶必须撤掉，否则原文会在后面再显示一遍。
+        assertEquals(2, r.root.children.size)
+        assertEquals("p", r.root.children[1].tag)
+        assertEquals("Yef", seg(r.root.children[1]).text)
     }
 
     @Test
@@ -302,6 +307,41 @@ class ChapterRevisionReplayTest {
         assertEquals("p", r.leaves[1].tag)
         assertArrayEquals(longArrayOf(0, 3), r.charStarts)
         assertEquals(2, r.root.children.size)
+    }
+
+    @Test
+    fun singleListItemSplitYieldsTwoListItems() {
+        // 读者只改一个列表项、在卡片里敲回车补一行 `- …`：拆出来的两块要各占一个列表项，
+        // 不能把第二块塞进同一个 `li`（那样屏幕上是一项里两段字）。
+        fun item(text: String) = MarkupElement("li", mapOf("class" to "list__item"), listOf(el("p", txt(text))))
+        val root = el("body", MarkupElement("ul", emptyMap(), listOf(item("abcdef"))))
+        MarkupPaths.assignParents(root)
+        val leaf = root.children[0].children[0].children[0]
+        val r = ChapterRevisionReplay.replay(
+            root = root,
+            leaves = listOf(leaf),
+            leafPaths = listOf(intArrayOf(0, 0, 0)),
+            charStarts = longArrayOf(0),
+            editsForLeaf = { _, _ -> emptyList() },
+            segmentsOf = ::seg,
+            wsOf = { WhiteSpace.NORMAL },
+            styleOf = null,
+            merges = listOf(
+                ChapterRevisionReplay.Merge(
+                    firstLeaf = 0,
+                    lastLeaf = 0,
+                    start = 0,
+                    endExclusive = 6,
+                    text = "abc${RevisionBlocks.SEPARATOR}def",
+                    revisionId = 7L,
+                    kinds = listOf(BlockKind.Bullet, BlockKind.Bullet),
+                ),
+            ),
+        )
+        val ul = r.root.children.single()
+        assertEquals("ul", ul.tag)
+        assertEquals(listOf("li", "li"), ul.children.map { it.tag })
+        assertEquals(listOf("abc", "def"), ul.children.map { seg(it).text })
     }
 
     @Test
@@ -446,5 +486,236 @@ class ChapterRevisionReplayTest {
         assertSame(replacement, out.children[0].children[1])
         // 原树不被改动。
         assertEquals("b", root.children[0].children[1].text)
+    }
+
+    @Test
+    fun replayDropsInlineImageWhenItsSlotIsDeleted() {
+        // 一段夹着行内图（`U+FFFC` 占位）的文字整段改写：重放后这张图要跟着删掉，
+        // 不能留下「字换了、图还挂在那儿」。
+        val p = el("p", txt("前"), MarkupElement("img", mapOf("src" to "a.png")), txt("后"))
+        val root = el("body", p)
+        val r = ChapterRevisionReplay.replay(
+            root = root,
+            leaves = listOf(p),
+            leafPaths = listOf(intArrayOf(0)),
+            charStarts = longArrayOf(0),
+            editsForLeaf = { _, _ -> listOf(LeafTextEditor.Edit(0, 3, "改")) },
+            segmentsOf = ::seg,
+            wsOf = { WhiteSpace.NORMAL },
+            styleOf = null,
+        )
+        assertEquals("改", seg(r.leaves[0]).text)
+        assertTrue("图片要跟着删", r.leaves[0].children.none { it.tag == "img" })
+    }
+
+    @Test
+    fun replayKeepsInlineImageWhenItsSlotSurvives() {
+        // 反过来：占位字还在，图就留在前后两截字中间。
+        val p = el("p", txt("前"), MarkupElement("img", mapOf("src" to "a.png")), txt("后"))
+        val root = el("body", p)
+        val r = ChapterRevisionReplay.replay(
+            root = root,
+            leaves = listOf(p),
+            leafPaths = listOf(intArrayOf(0)),
+            charStarts = longArrayOf(0),
+            editsForLeaf = { _, _ -> listOf(LeafTextEditor.Edit(0, 3, "先\uFFFC尾")) },
+            segmentsOf = ::seg,
+            wsOf = { WhiteSpace.NORMAL },
+            styleOf = null,
+        )
+        assertEquals("先\uFFFC尾", seg(r.leaves[0]).text)
+        assertEquals(1, r.leaves[0].children.count { it.tag == "img" })
+    }
+
+    // ---------------------------------------------------------------- 块级形态
+
+    @Test
+    fun blockKindTurnsParagraphIntoHeading() {
+        val root = body()
+        val r = ChapterRevisionReplay.replay(
+            root = root,
+            leaves = listOf(root.children[0], root.children[1]),
+            leafPaths = listOf(intArrayOf(0), intArrayOf(1)),
+            charStarts = longArrayOf(0, 3),
+            editsForLeaf = { i, _ -> if (i == 0) listOf(LeafTextEditor.Edit(0, 3, "ABC")) else emptyList() },
+            segmentsOf = ::seg,
+            wsOf = { WhiteSpace.NORMAL },
+            styleOf = null,
+            blockOfLeaf = { i -> if (i == 0) BlockKind.Heading2 else null },
+        )
+        assertEquals("h2", r.root.children[0].tag)
+        assertEquals("h2", r.leaves[0].tag)
+        assertEquals("ABC", seg(r.leaves[0]).text)
+        // 没改块形态的那一段原样保留。
+        assertSame(root.children[1], r.root.children[1])
+    }
+
+    @Test
+    fun unchangedBlockKindTouchesNothing() {
+        val root = body()
+        val p = root.children[0]
+        val r = ChapterRevisionReplay.replay(
+            root = root,
+            leaves = listOf(p, root.children[1]),
+            leafPaths = listOf(intArrayOf(0), intArrayOf(1)),
+            charStarts = longArrayOf(0, 3),
+            editsForLeaf = { i, _ -> if (i == 0) listOf(LeafTextEditor.Edit(0, 3, "ABC")) else emptyList() },
+            segmentsOf = ::seg,
+            wsOf = { WhiteSpace.NORMAL },
+            styleOf = null,
+            blockOfLeaf = { BlockKind.Paragraph },
+        )
+        // 目标形态 = 现在形态：一个块容器都不该多出来。
+        assertEquals("body", r.root.tag)
+        assertEquals("p", r.root.children[0].tag)
+        assertEquals(2, r.root.children.size)
+    }
+
+    /**
+     * 审阅视图里「只改块形态、文字一字未动」的修订：文字那一侧没有任何编辑（只有新字才产生编辑），
+     * 主循环会整片叶跳过——块形态不能跟着一起丢掉。
+     */
+    @Test
+    fun blockKindAppliesEvenWithoutTextEdits() {
+        val root = el("body", el("h1", txt("abc")), el("p", txt("def")))
+        val r = ChapterRevisionReplay.replay(
+            root = root,
+            leaves = listOf(root.children[0], root.children[1]),
+            leafPaths = listOf(intArrayOf(0), intArrayOf(1)),
+            charStarts = longArrayOf(0, 3),
+            editsForLeaf = { _, _ -> emptyList() },
+            segmentsOf = ::seg,
+            wsOf = { WhiteSpace.NORMAL },
+            styleOf = null,
+            blockOfLeaf = { i -> if (i == 0) BlockKind.Paragraph else null },
+        )
+        assertEquals("p", r.root.children[0].tag)
+        assertEquals("p", r.leaves[0].tag)
+        assertEquals("abc", seg(r.leaves[0]).text)
+        // 没要求改形态的那一段原样留着。
+        assertSame(root.children[1], r.root.children[1])
+    }
+
+    @Test
+    fun mergeKindsWrapBothLinesIntoOneBlockquote() {
+        val root = body()
+        val r = ChapterRevisionReplay.replay(
+            root = root,
+            leaves = listOf(root.children[0], root.children[1]),
+            leafPaths = listOf(intArrayOf(0), intArrayOf(1)),
+            charStarts = longArrayOf(0, 3),
+            editsForLeaf = { _, _ -> emptyList() },
+            segmentsOf = ::seg,
+            wsOf = { WhiteSpace.NORMAL },
+            styleOf = null,
+            merges = listOf(
+                ChapterRevisionReplay.Merge(
+                    firstLeaf = 0,
+                    lastLeaf = 1,
+                    start = 1,
+                    endExclusive = 4,
+                    text = "X${RevisionBlocks.SEPARATOR}Y",
+                    revisionId = 7L,
+                    kinds = listOf(BlockKind.Quote, BlockKind.Quote),
+                ),
+            ),
+        )
+        assertEquals(2, r.leaves.size)
+        assertEquals("aX", seg(r.leaves[0]).text)
+        assertEquals("Yef", seg(r.leaves[1]).text)
+        val quote = r.root.children.single()
+        assertEquals("blockquote", quote.tag)
+        assertEquals(listOf("p", "p"), quote.children.map { it.tag })
+        assertEquals("aX", seg(quote.children[0]).text)
+    }
+
+    /**
+     * 跨叶合并时，叶各自住在一层列表项里（`ul > li > p`）：拆出来的每一块都必须各占一个列表项。
+     *
+     * 回归：只换第一片叶时，新块全塞进第一个 `li`，其余 `li` 被撤掉内容，读者补一行列表
+     * 就看到「第一项还在、后面几项变成普通段落」。
+     */
+    @Test
+    fun mergeAcrossListItemLeavesKeepsEachBlockAListItem() {
+        fun item(text: String, id: String) = MarkupElement(
+            "li",
+            mapOf("class" to "list__item", "id" to id),
+            listOf(el("p", txt(text))),
+        )
+        val root = el(
+            "body",
+            MarkupElement(
+                "ul",
+                mapOf("class" to "list _bullet"),
+                listOf(item("abc", "l1"), item("def", "l2")),
+            ),
+        )
+        MarkupPaths.assignParents(root)
+        val leaves = listOf(
+            root.children[0].children[0].children[0],
+            root.children[0].children[1].children[0],
+        )
+        val r = ChapterRevisionReplay.replay(
+            root = root,
+            leaves = leaves,
+            leafPaths = listOf(intArrayOf(0, 0, 0), intArrayOf(0, 1, 0)),
+            charStarts = longArrayOf(0, 3),
+            editsForLeaf = { _, _ -> emptyList() },
+            segmentsOf = ::seg,
+            wsOf = { WhiteSpace.NORMAL },
+            styleOf = null,
+            merges = listOf(
+                ChapterRevisionReplay.Merge(
+                    firstLeaf = 0,
+                    lastLeaf = 1,
+                    start = 1,
+                    endExclusive = 4,
+                    text = "X${RevisionBlocks.SEPARATOR}Y${RevisionBlocks.SEPARATOR}Z",
+                    revisionId = 7L,
+                    kinds = listOf(BlockKind.Bullet, BlockKind.Bullet, BlockKind.Bullet),
+                ),
+            ),
+        )
+        val ul = r.root.children.single()
+        assertEquals("ul", ul.tag)
+        assertEquals("list _bullet", ul.attrs["class"])
+        // 三项 = 三个列表项，不是一个列表项里塞三段。
+        assertEquals(listOf("li", "li", "li"), ul.children.map { it.tag })
+        assertEquals(listOf("aX", "Y", "Zef"), ul.children.map { seg(it).text })
+        assertTrue(ul.children.all { it.children.size == 1 && it.children[0].tag == "p" })
+        // 复用的列表项保住自己的属性；多出来的那一项抄样式但不抄 `id`。
+        assertEquals("l1", ul.children[0].attrs["id"])
+        assertEquals("l2", ul.children[1].attrs["id"])
+        assertEquals("list__item", ul.children[2].attrs["class"])
+        assertFalse(ul.children[2].attrs.containsKey("id"))
+    }
+
+    @Test
+    fun mergeKindsWithShortListFallBackToNoBlockChange() {
+        val root = body()
+        val r = ChapterRevisionReplay.replay(
+            root = root,
+            leaves = listOf(root.children[0], root.children[1]),
+            leafPaths = listOf(intArrayOf(0), intArrayOf(1)),
+            charStarts = longArrayOf(0, 3),
+            editsForLeaf = { _, _ -> emptyList() },
+            segmentsOf = ::seg,
+            wsOf = { WhiteSpace.NORMAL },
+            styleOf = null,
+            merges = listOf(
+                ChapterRevisionReplay.Merge(
+                    firstLeaf = 0,
+                    lastLeaf = 1,
+                    start = 1,
+                    endExclusive = 4,
+                    text = "X${RevisionBlocks.SEPARATOR}Y",
+                    revisionId = 7L,
+                    kinds = listOf(BlockKind.Quote),
+                ),
+            ),
+        )
+        // 数量对不上：宁可不动结构，也不能猜着套一半。
+        assertEquals(2, r.root.children.size)
+        assertEquals(listOf("p", "p"), r.root.children.map { it.tag })
     }
 }

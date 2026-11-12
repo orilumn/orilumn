@@ -564,7 +564,16 @@ fun ReaderView(
             revisionsContent = {
                 ReaderRevisionPanel(
                     scheme = settings.scheme,
-                    load = { desktopHost?.textRevisionsForBook() ?: emptyList() },
+                    load = { desktopHost?.textRevisionsForBook() },
+                    onRestoreAll = {
+                        when (val outcome = desktopHost?.restoreAllTextRevisions(currentPos)) {
+                            is TextRevisionDeleteOutcome.Success -> {
+                                outcome.pos?.let { pushLanding(it) } ?: run { contentRevision++ }
+                                true
+                            }
+                            else -> false
+                        }
+                    },
                     onDelete = { revision ->
                         when (val outcome = desktopHost?.deleteTextRevision(revision, currentPos)) {
                             is TextRevisionDeleteOutcome.Success -> {

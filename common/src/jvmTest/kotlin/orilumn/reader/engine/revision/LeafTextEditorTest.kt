@@ -219,4 +219,71 @@ class LeafTextEditorTest {
         assertEquals("XbcY", r.text)
         assertEquals("XbcY", textOf(child(r.leaf, 0)))
     }
+
+    // ------------------------------------------------- 行内图片（U+FFFC 占位）
+
+    private fun img(attrs: Map<String, String>) = MarkupElement("img", attrs)
+
+    @Test
+    fun deletingTheImageSlotDeletesTheImage() {
+        // 选一段夹着图片的字删掉：字没了，图也要跟着走（不能只剩个字、图留在原处）。
+        val p = el("p", txt("前"), img(mapOf("src" to "a.png")), txt("后"))
+        val r = rebuild(p, LeafTextEditor.Edit(0, 3, "改"))
+
+        assertFalse(r.degraded)
+        assertEquals("改", r.text)
+        assertTrue("图片要跟着删", r.leaf.children.none { it.tag == "img" })
+    }
+
+    @Test
+    fun imageOutsideTheEditStaysPut() {
+        val p = el("p", txt("前"), img(mapOf("src" to "a.png", "class" to "fig")), txt("后"))
+        val r = rebuild(p, LeafTextEditor.Edit(0, 1, "先"))
+
+        assertFalse(r.degraded)
+        assertEquals("先\uFFFC后", r.text)
+        val image = r.leaf.children.firstOrNull { it.tag == "img" }
+        assertNotNull(image)
+        assertEquals(mapOf("src" to "a.png", "class" to "fig"), image!!.attrs)
+    }
+
+    @Test
+    fun rewrittenRangeWithTheSlotStillThereKeepsTheImage() {
+        // 图两侧的字一起改（修订区跨过占位），读者没删那一格：图留着，位置也在原处。
+        val p = el("p", txt("前"), img(mapOf("src" to "a.png")), txt("后"))
+        val r = rebuild(p, LeafTextEditor.Edit(0, 3, "先\uFFFC尾"))
+
+        assertFalse(r.degraded)
+        assertEquals("先\uFFFC尾", r.text)
+        assertEquals(1, r.leaf.children.count { it.tag == "img" })
+    }
+
+    @Test
+    fun styledRewriteKeepsTheImageBetweenTheTwoHalves() {
+        // 只改行内结构（文字没变）时整段都由样式区间重建：占位字跟着新文字走，
+        // 图必须仍排在前后两截字**中间**，不能掉到叶首或叶尾。
+        val p = el("p", txt("前"), img(mapOf("src" to "a.png")), txt("后"))
+        val r = rebuild(
+            p,
+            LeafTextEditor.Edit(0, 3, "前\uFFFC后", styles = emptyList()),
+        )
+
+        assertFalse("不应退化：${r.expected} vs ${r.text}", r.degraded)
+        assertEquals("前\uFFFC后", r.text)
+        assertEquals(listOf("#text", "img", "#text"), r.leaf.children.map { it.tag })
+    }
+
+    @Test
+    fun styledRewriteWithoutTheSlotDropsTheImage() {
+        // 反过来：整段重写时读者把那一格删了，图也跟着删（哪怕文字看着没变）。
+        val p = el("p", txt("前"), img(mapOf("src" to "a.png")), txt("后"))
+        val r = rebuild(
+            p,
+            LeafTextEditor.Edit(0, 3, "前后", styles = emptyList()),
+        )
+
+        assertFalse(r.degraded)
+        assertEquals("前后", r.text)
+        assertTrue(r.leaf.children.none { it.tag == "img" })
+    }
 }

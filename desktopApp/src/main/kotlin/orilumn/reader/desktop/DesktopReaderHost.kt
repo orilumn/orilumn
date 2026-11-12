@@ -25,6 +25,7 @@ import orilumn.reader.engine.text.TypographicProfile
 import orilumn.reader.io.Logger
 import orilumn.reader.ui.reader.ReaderHost
 import orilumn.reader.ui.reader.ReaderPos
+import orilumn.reader.ui.reader.ReviewMark
 import orilumn.reader.ui.reader.TextEditOutcome
 import orilumn.reader.ui.reader.TextRevisionDeleteOutcome
 import orilumn.reader.ui.imageBitmapOf
@@ -64,6 +65,8 @@ class DesktopReaderHost(
     private val viewportH: Int,
     /** 打开锚点（章，章内字符）：目录跳转/设置重排的落位；null = 存档定位 → 章首。 */
     private val initialAnchor: Pair<Int, Int>? = null,
+    /** 开书即进审阅视图（与平板同默认）：首屏直接按审阅空间排版，不必先排正常视图再切。 */
+    private val initialReviewMode: Boolean = false,
     /** 分页表磁盘缓存根（与平板同一共享 Store/参数键/失效语义；null = 禁用）。 */
     private val cacheRoot: File? = null,
     /** 磁盘分页表构建号（与平板 versionCode 同职责：发版递增 → 旧构建的表统一失效；
@@ -165,7 +168,7 @@ class DesktopReaderHost(
                     ),
                 )
             }
-            if (!controller.open(bookId, saved)) return@withContext null
+            if (!controller.open(bookId, saved, reviewMode = initialReviewMode)) return@withContext null
             // 后台 canonical/整书预排（与平板同一分发器划分；落位不等它）。
             // 书内字体不预装：整形前 `onBookFonts` 回调给字节（与平板同式，首绘即对）。
             // 注：open 后默认 prewarm 恒跳过落位章（open 同步塑形，一次为准），此处不再调用。
@@ -457,6 +460,30 @@ class DesktopReaderHost(
     override fun textBlockEndsOf(chapter: Int): IntArray? = controller.chapterTextBlockEnds(chapter)
 
     override fun reviewBreakOffsets(chapter: Int): IntArray = controller.reviewBreakMarkers(chapter)
+
+    // ---- 审阅视图（与平板同一份控制器实现） ----
+
+    override fun setReviewMode(on: Boolean): Boolean = controller.setReviewMode(on)
+
+    override fun isReviewMode(): Boolean = controller.reviewMode
+
+    override fun reviewMarks(chapter: Int): List<ReviewMark> =
+        controller.reviewMarks(chapter).mapNotNull { (range, deleted) ->
+            if (range.isEmpty()) null else ReviewMark(range.first, range.last + 1, deleted)
+        }
+
+    /**
+     * 切换审阅视图并按「同一处内容」重新落位（与平板 `TabletReaderHost` 同序）：
+     * 换算在翻模式之前做，落位按新空间「页首最接近」选页。大章先按锚点行起临时页，
+     * 随后后台排本章正典；短章整章排完落位。
+     *
+     * 模式没变（重复点按 / 本章没有修订可切）回 null，调用方只重绘痕迹、不落位。
+     */
+    suspend fun switchReviewMode(on: Boolean, chapter: Int, renderedCharStart: Int): ReaderPos? =
+        withContext(Dispatchers.IO) {
+            controller.switchReviewMode(on, chapter, renderedCharStart)
+                ?.let { ReaderPos(it.first, it.second, atCover = false) }
+        }
 
     override fun seamSpaceOffsets(chapter: Int): IntArray = controller.chapterTextSeamSpaces(chapter)
 

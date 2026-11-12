@@ -99,7 +99,7 @@ class TableEditDesktopTest {
         return file
     }
 
-    private fun openHost(bookFile: File, root: File): DesktopReaderHost = runBlocking {
+    private fun openHost(bookFile: File, root: File, reviewMode: Boolean = false): DesktopReaderHost = runBlocking {
         val store = DesktopShelfStore(root)
         store.load()
         val entry = store.addBook(bookFile.nameWithoutExtension, null, bookFile.absolutePath, null)
@@ -112,6 +112,7 @@ class TableEditDesktopTest {
             viewportW = viewportW,
             viewportH = viewportH,
             cacheRoot = File(root, "cache"),
+            initialReviewMode = reviewMode,
             fontLibrary = store.fontLibrary(),
         )
     }
@@ -337,15 +338,86 @@ class TableEditDesktopTest {
             assertTrue(commit(host, chapter, range, deleted, pos) is TextEditOutcome.Success)
             val normalText = body(host, chapter)
 
-            val controller = DesktopReaderHost::class.java.getDeclaredField("controller")
-                .apply { isAccessible = true }
-                .get(host) as orilumn.reader.engine.BookDocumentController
-            val landed = runBlocking { controller.switchReviewMode(true, chapter, 0) }
+            val landed = runBlocking { host.switchReviewMode(true, chapter, 0) }
             assertNotNull("应能切到审阅空间", landed)
-            assertTrue(controller.reviewMode)
+            assertTrue(host.isReviewMode())
             assertEquals("审阅空间与正常视图对整表修改应同尺", normalText, body(host, chapter))
-            assertTrue("整表修改不画红绿痕迹", controller.reviewMarks(chapter).isEmpty())
+            assertTrue("整表修改不画红绿痕迹", host.reviewMarks(chapter).isEmpty())
             assertFalse("审阅空间里也不该出现被删的行", body(host, chapter).contains("甲二"))
+        } finally {
+            host.close()
+        }
+    }
+
+    /** 开书即审阅（桌面默认走这里）：首屏就已经在审阅空间，不用先排正常视图再切。 */
+    @Test
+    fun opensDirectlyInReviewMode() {
+        val root = Files.createTempDirectory("orilumn-review-open").toFile()
+        val host = openHost(writeBook(root), root, reviewMode = true)
+        try {
+            val pos = runBlocking { host.open() }
+            assertNotNull("开书应落位", pos)
+            assertTrue("开书就是审阅视图", host.isReviewMode())
+        } finally {
+            host.close()
+        }
+    }
+
+    /** 普通改字在审阅空间里看得见红字与绿字，切回正常视图逐字复原。 */
+    @Test
+    fun reviewModeShowsTextMarksAndSwitchesBack() {
+        val root = Files.createTempDirectory("orilumn-review-text").toFile()
+        val host = openHost(writeBook(root), root)
+        try {
+            val pos = runBlocking { host.open() }!!
+            val chapter = pos.chapter
+            val before = body(host, chapter)
+            val start = before.indexOf("表格后面的段落")
+            assertTrue(start >= 0)
+            val old = "表格后面的段落"
+            val next = "别的文字"
+            val outcome = runBlocking {
+                host.commitTextEdit(
+                    chapter = chapter,
+                    start = start,
+                    endExclusive = start + old.length,
+                    text = next,
+                    styles = null,
+                    currentPage = pos,
+                    blocks = listOf(InlineMarkup.Segment(next, null)),
+                )
+            }
+            assertTrue("改字应成功：$outcome", outcome is TextEditOutcome.Success)
+            val normalText = body(host, chapter)
+            assertTrue(normalText.contains(next))
+            assertFalse(host.isReviewMode())
+
+            val landed = runBlocking { host.switchReviewMode(true, chapter, 0) }
+            assertNotNull("应能切到审阅空间", landed)
+            assertTrue(host.isReviewMode())
+            val reviewText = body(host, chapter)
+            assertTrue("原文的字还留在审阅空间", reviewText.contains("段落"))
+            assertTrue("新写的字也在审阅空间", reviewText.contains("别") && reviewText.contains("文"))
+            assertTrue("审阅空间比正常视图长（原文一字不删）", reviewText.length > normalText.length)
+            val marks = host.reviewMarks(chapter)
+            assertTrue("应同时有红色删除与绿色新增", marks.any { it.deleted } && marks.any { !it.deleted })
+            assertTrue("痕迹区间有效", marks.all { it.endExclusive > it.start })
+
+            val back = runBlocking { host.switchReviewMode(false, chapter, 0) }
+            assertNotNull("应能切回正常视图", back)
+            assertFalse(host.isReviewMode())
+            host.pageLines(back!!)   // 落位后按宿主真实读取路径触发本章重新准备
+            // 文本投影按设计在后台回填（选区/复制用），刚切完可能还没就绪：像真实界面那样等它一拍。
+            var restored = body(host, chapter)
+            var waited = 0
+            while (restored.isEmpty() && waited < 2_000) {
+                Thread.sleep(20)
+                waited += 20
+                host.pageLines(back)
+                restored = body(host, chapter)
+            }
+            assertEquals("切回后正文复原", normalText, restored)
+            assertTrue("正常视图没有审阅痕迹", host.reviewMarks(chapter).isEmpty())
         } finally {
             host.close()
         }

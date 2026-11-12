@@ -136,15 +136,16 @@ class LeafTextEditorTest {
 
     @Test
     fun wholeRewriteFallsBackToStartElement() {
-        // 没有任何公共字：新字全部落在中段起点那个元素（<em>），后面的元素留空但保留。
+        // 没有任何公共字：新字全部落在中段起点那个元素（<em>），后面的元素被删空 ⇒ 整个走掉，
+        // 不留空壳（规格 §4.3；`code` 这类带内边距的元素留空会渲染成一小块）。
         val p = el("p", el("em", txt("甲")), el("strong", txt("乙")))
         val r = rebuild(p, LeafTextEditor.Edit(0, 2, "XY"))
 
         assertFalse(r.degraded)
         assertEquals("XY", r.text)
+        assertEquals(1, r.leaf.children.size)
+        assertEquals("em", child(r.leaf, 0).tag)
         assertEquals("XY", textOf(child(r.leaf, 0)))
-        assertEquals("", textOf(child(r.leaf, 1)))
-        assertEquals("strong", child(r.leaf, 1).tag)
     }
 
     @Test

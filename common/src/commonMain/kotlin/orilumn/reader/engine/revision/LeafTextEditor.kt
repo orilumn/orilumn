@@ -16,9 +16,10 @@ import orilumn.reader.engine.laying.StyledSegments
  * - 被改到的节点只改文字，`class` / `style` / 其他属性一个都不动；
  * - 中段与旧中段做字符级对齐（[CharDiff]）：没变的字留在原节点，新字挂到**前一个字**所在节点，
  *   删掉的字从原节点移除；`\n` 落成 `<br>`（插在同一文本节点的字符之间时会把该节点切开）；
- * - 元素本身永不剪枝：文字被删光时元素留空，伪元素 / 边框照旧。**两个例外**是 `br` 与行内 `img`：
- *   它们的占位字（`\n` / `U+FFFC`）被删掉、新文字里也没留住，节点就跟着走
- *   （读者删掉图那一格就是要删这张图，不能「字没了、图还在」）。
+ * - 剪枝：字被删光的元素整个走掉，不留空壳（规格 §4.3）。`br` / 行内 `img` 同理：占位字
+ *   （`\n` / `U+FFFC`）被删掉、新文字里也没留住，节点就跟着走（读者删掉图那一格就是要删这张图，
+ *   不能「字没了、图还在」）。**书里本来就写成空的元素（没有子节点）不碰**，那是原样；
+ *   排版叶自己（`p` / `li` / 标题）永不剪枝。
  *
  * 输入坐标是**叶内原书偏移**（不含修订；与 `StyledSegments.text` 同一串文字）。
  * [rebuildSegments] 用于重建后再取一次段做校验：若结果与「原文本按区间替换」不等
@@ -365,6 +366,10 @@ object LeafTextEditor {
                 insertAfter[c]?.let { children.addAll(it) }
             }
             if (node === leaf) insertAfter[node]?.let { children.addAll(it) }
+            // 字被删光的行内元素整个走掉，不留空壳（规格 §4.3「元素整个消失」）。整段换字时新字
+            // 落在别处，旧元素只剩空壳；`code` 这类带内边距的元素留空会渲染成一小块灰底。
+            // 只剪「原来有内容、现在空了」的：书里本来就写成空的元素（没有子节点）不碰，那是原样。
+            if (node !== leaf && node.children.isNotEmpty() && children.isEmpty()) return emptyList()
             return listOf(MarkupElement(node.tag, node.attrs, children))
         }
 

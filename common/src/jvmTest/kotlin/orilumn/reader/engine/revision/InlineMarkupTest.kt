@@ -35,6 +35,30 @@ class InlineMarkupTest {
     }
 
     @Test
+    fun linkAroundCodeKeepsTheLinkSyntaxInTheCard() {
+        // 书里常见 `<a href="..."><code>println()</code></a>`：两个区间起止完全相同，
+        // 以前解析把它们排成内层在前，回验判「结构变了」，整段退化成标签形式。
+        val spans = listOf(
+            span(0, 9, "a", "href" to "https://a.b"),
+            span(0, 9, "code"),
+        )
+        val markup = show("println()", *spans.toTypedArray())
+        assertEquals("[`println()`](https://a.b)", markup)
+
+        val parsed = InlineMarkup.parse(markup)
+        assertTrue(parsed.errors.toString(), parsed.ok)
+        // 起止相同的嵌套按外层在前排（与 InlineSpans.ofLeaf 的约定一致）。
+        assertEquals(listOf("a", "code"), parsed.spans.map { it.sig.tag })
+        assertEquals(spans.map { it.sig }, InlineMarkup.restore(spans, parsed.spans).map { it.sig })
+    }
+
+    @Test
+    fun emphasisAroundLinkAlsoKeepsSugar() {
+        val spans = listOf(span(0, 2, "em"), span(0, 2, "a", "href" to "https://a.b"))
+        assertEquals("*[文字](https://a.b)*", show("文字", *spans.toTypedArray()))
+    }
+
+    @Test
     fun sugarDoesNotShowAttributesButRestoreBringsThemBack() {
         val original = listOf(span(0, 5, "code", "class" to "test", "id" to "c1"))
         val markup = InlineMarkup.show("hello", original)
@@ -452,5 +476,35 @@ class InlineMarkupTest {
         assertTrue(parsed.ok)
         assertEquals("ruby", parsed.spans.first().sig.tag)
         assertEquals("r", parsed.spans.first().sig.attrs["class"])
+    }
+
+    /**
+     * 普通段落（块形态 [BlockKind.Paragraph]）里的行内结构也要写成语法糖。
+     *
+     * 回归：`Paragraph` 的块标记是空串，写出来什么都没有，解析回来只能记成 `null`；回验一度按
+     * `!=` 逐字比块形态，于是**任何普通段落**里的行内结构都被判成「结构变了」，整段退化成标签形式
+     * （真书实测：`<a href><code>println()</code></a>` 在修改卡里显示成一串 `<a href=…>`）。
+     */
+    @Test
+    fun paragraphBlockKeepsSugar() {
+        val text = "判断出 println() 的类型为 Int。"
+        val spans = listOf(
+            span(4, 13, "a", "href" to "https://a.b", "id" to "l1"),
+            span(4, 13, "code", "class" to "code"),
+            span(19, 22, "em"),
+        )
+        val segments = listOf(InlineMarkup.Segment(text, BlockKind.Paragraph))
+        assertEquals("判断出 [`println()`](https://a.b) 的类型为 *Int*。", InlineMarkup.show(segments, spans))
+
+        // 确定时的反向：解析回同样的文字与结构，属性从原结构补回。
+        val markup = InlineMarkup.show(segments, spans)
+        val parsed = InlineMarkup.parse(markup)
+        assertTrue(parsed.errors.toString(), parsed.ok)
+        assertEquals(text, parsed.text)
+        assertEquals(
+            spans.map { it.start to it.endExclusive to it.sig.shapeKey },
+            parsed.spans.map { it.start to it.endExclusive to it.sig.shapeKey },
+        )
+        assertEquals(spans.map { it.sig }, InlineMarkup.restore(spans, parsed.spans).map { it.sig })
     }
 }

@@ -73,6 +73,23 @@ class EditCardTest {
         assertTrue(parsed.spans.isEmpty())
     }
 
+    @Test
+    fun linkAroundCodeShowsAsMarkdownInTheCard() {
+        // 文档里常见的 `<a href="…"><code>println()</code></a>`：链接里套着代码，两者区间重合。
+        // 以前解析把它们排成内层在前，卡片只好整段退回标签形式；现在照旧写成 `[文字](地址)`。
+        val link = RevisionStyle("a", mapOf("href" to "https://a.b"))
+        val spans = listOf(
+            RevisionStyleSpan(2, 11, link),
+            RevisionStyleSpan(2, 11, code),
+        )
+        val card = editCardOf("见 println() 用法", emptyList(), spans)
+        assertEquals("见 [`println()`](https://a.b) 用法", card.text)
+        val parsed = InlineMarkup.parse(card.text)
+        assertTrue(parsed.ok)
+        assertEquals("见 println() 用法", parsed.text)
+        assertEquals(listOf("a", "code"), parsed.spans.map { it.sig.tag })
+    }
+
     // ------------------------------------------------- 同段模板的取法
 
     @Test

@@ -461,7 +461,36 @@ object InlineMarkup {
 
         val invalid = validate(spans)
         errors.addAll(invalid)
-        return Parsed(sb.toString(), stripIds(nest(normalize(spans))), errors.distinct())
+        return Parsed(sb.toString(), stripIds(nest(outerFirst(normalize(spans)))), errors.distinct())
+    }
+
+    /**
+     * 同一段文字上「区间起止完全相同」的严格嵌套，按**外层在前**排。
+     *
+     * 解析是先收内层再收外层（`[`代码`](网址)` 的 `code` 先于 `a` 落地），而
+     * [InlineSpans.ofLeaf] 与写回时都约定外层在前：不翻这一步，`show` 的回验会判成
+     * 「结构变了」，链接里包着行内元素的行就白白退化成标签形式（`<a><code>…</code></a>`），
+     * 读者在卡片里也看不到 `[文字](地址)` 这种写法。
+     *
+     * 只翻转起止完全相同的那几段：区间不同时先后由位置决定（[normalize] 已排好）。
+     */
+    private fun outerFirst(spans: List<StyleSpan>): List<StyleSpan> {
+        if (spans.size < 2) return spans
+        val out = ArrayList<StyleSpan>(spans.size)
+        var i = 0
+        while (i < spans.size) {
+            var j = i + 1
+            while (
+                j < spans.size &&
+                spans[j].start == spans[i].start &&
+                spans[j].endExclusive == spans[i].endExclusive
+            ) {
+                j++
+            }
+            for (k in (i until j).reversed()) out.add(spans[k])
+            i = j
+        }
+        return out
     }
 
     /**
@@ -864,11 +893,24 @@ object InlineMarkup {
         if (parsed.text != joinSegments(segments)) return false
         if (parsed.segments.size != segments.size) return false
         for (i in segments.indices) {
-            if (parsed.segments[i].block != segments[i].block) return false
+            if (!sameBlock(parsed.segments[i].block, segments[i].block)) return false
         }
         val got = parsed.spans.map { (it.start to it.endExclusive) to it.sig.shapeKey }
         return got == expected
     }
+
+    /**
+     * 回验时块形态的等价口径：**普通段落**与「没有块标记」是同一件事。
+     *
+     * [BlockKind.Paragraph] 的标记就是空串（见 `BlockKind.marker`），写出来什么都没有；
+     * [parse] 见到空标记自然只能记成 `null`。早先这里按 `!=` 逐字比，于是**任何普通段落**里的
+     * 行内结构（代码、斜体、链接）都会判成「结构变了」，整段退化成 HTML 标签形式
+     * （真书实测：`<a href><code>println()</code></a>` 在修改卡里显示成一串 `<a href=…>`）。
+     */
+    private fun sameBlock(parsed: BlockKind?, wanted: BlockKind?): Boolean =
+        parsed == wanted ||
+            (parsed == null && wanted == BlockKind.Paragraph) ||
+            (parsed == BlockKind.Paragraph && wanted == null)
 
     private class Marker(val tag: String, val open: String, val close: String)
 

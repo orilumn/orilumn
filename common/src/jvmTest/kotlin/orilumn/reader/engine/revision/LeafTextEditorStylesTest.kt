@@ -152,4 +152,45 @@ class LeafTextEditorStylesTest {
         val leafText = r.leaf.children.filter { it.isText }.joinToString("") { it.text }
         assertTrue("新字钻进了旁边的元素", leafText.contains("啊"))
     }
+
+    @Test
+    fun emptiedInlineElementsArePruned() {
+        // 真书场景：链接里套着代码，整段换字后旧元素只剩空壳。空 `code` 带内边距会渲染成一小块，
+        // 所以剪掉（规格 §4.3「元素整个消失，不留空元素」）。
+        val p = el(
+            "p",
+            txt("见 "),
+            el(
+                "a",
+                el("code", txt("println()"), attrs = mapOf("class" to "code")),
+                attrs = mapOf("href" to "https://a.b"),
+            ),
+            txt(" 的用法。"),
+        )
+        val text = "见 println() 的用法。"
+        val r = rebuild(
+            p,
+            LeafTextEditor.Edit(0, text.length, "见 print() 的用法。", listOf(span(2, 7, "code"))),
+        )
+
+        assertFalse(r.degraded)
+        assertEquals("见 print() 的用法。", r.text)
+        assertTrue("空壳 <a> 还在", r.leaf.children.none { it.tag == "a" })
+        // 留下的 code 是读者新写的那个（区间重建出来的），不是旧元素的空壳。
+        assertEquals(1, r.leaf.children.count { it.tag == "code" })
+        assertEquals("print", textOf(r.leaf.children.first { it.tag == "code" }))
+        assertEquals("见 print() 的用法。", textOf(r.leaf))
+    }
+
+    @Test
+    fun elementsThatWereEmptyInTheBookStay() {
+        // 书里本来就写成空的元素（没有子节点）是原样，不剪。
+        val p = el("p", txt("a"), el("span", attrs = mapOf("class" to "gap")), txt("b"))
+        val r = rebuild(p, LeafTextEditor.Edit(0, 1, "A"))
+
+        assertFalse(r.degraded)
+        assertEquals("Ab", r.text)
+        val span = r.leaf.children.first { it.tag == "span" }
+        assertEquals("gap", span.attrs["class"])
+    }
 }

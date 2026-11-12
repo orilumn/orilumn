@@ -1597,29 +1597,18 @@ fun ReaderScreen(
         val rawBlockEnds = currentHost.textBlockEndsOf(ch)
         val blockEnds = brk.plainBlockEnds(rawBlockEnds)
         // 表格行整行呈现：格偏移是按**整行文字**算的，选区只碰到半行时，片段文字与格界对不上
-        // （管道行会错位）。所以卡片与提交区间一起扩到整行 —— 这也让读者看得见格界。
+        // （管道行会错位）。所以卡片与提交区间只扩到**碰到的那几行**的整行 —— 读者选两行就只
+        // 列两行，不把整张表都塞进卡片。要改整张表的结构（删行 / 加行 / 删表 / 增删列），
+        // 得把整张表都选上（表首到表尾），提交侧按「选区正好等于整表区间」认整表结构修订。
         // 整块图片只有一个占位字符，不存在半块选中，不扩。
         var from = s
         var to = e
         var blockInfo = currentHost.textEditBlocks(ch, from, to)?.takeIf { it.isNotEmpty() }
-        // 表格行：扩到**整张表**——格界要看得见，也才能删整行 / 加整行 / 删整表。
-        // 表行在叶表里连续，扩到表首 / 表尾后重取块信息，块与选区才会一一对齐。
         while (blockInfo != null) {
-            var grew = false
-            for (b in blockInfo) {
-                if (b.table == null) continue
-                val head = b.tableRange?.first ?: b.start
-                val tail = b.tableRange?.let { it.last + 1 } ?: b.endExclusive
-                if (head < from) {
-                    from = head
-                    grew = true
-                }
-                if (tail > to) {
-                    to = tail
-                    grew = true
-                }
-            }
-            if (!grew) break
+            val grown = expandTableRowsForEdit(blockInfo, from, to)
+            if (grown.first == from && grown.last + 1 == to) break
+            from = grown.first
+            to = grown.last + 1
             blockInfo = currentHost.textEditBlocks(ch, from, to)?.takeIf { it.isNotEmpty() }
         }
         textEditChapter = ch

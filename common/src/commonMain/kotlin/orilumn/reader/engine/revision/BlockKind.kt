@@ -161,15 +161,15 @@ data class TextEditBlock(
     val image: Boolean = false,
     /**
      * 叶在章字符流里的区间。表格行要整行呈现（格界得看得见），卡片会把选区扩到
-     * 这个区间；图片整块只有一个占位字符，不需要扩。
+     * **碰到的那几行**的整行（[start] / [endExclusive]）；图片整块只有一个占位字符，不需要扩。
      */
     val start: Int = 0,
     val endExclusive: Int = 0,
     /**
      * 这一块是表格行时，它所属**整张表**在章字符流里的区间（渲染空间）。
      *
-     * 卡片按它把选区扩到整张表：整表修改（删行 / 加行 / 删表 / 每行增删列）需要看到所有行，
-     * 提交时也按这个区间判断「这次改的是不是一整张表」。
+     * 提交侧按它判断「这次改的是不是一整张表」：选区正好等于这个区间时，行数 / 列数可以改；
+     * 只选中其中几行时只能改格里的字（见 [orilumn.reader.engine.revision.TextEditPlanner]）。
      */
     val tableRange: IntRange? = null,
 )

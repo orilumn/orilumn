@@ -1,5 +1,7 @@
 package orilumn.reader.ui.reader
 
+import orilumn.reader.engine.revision.TableRowInfo
+import orilumn.reader.engine.revision.TextEditBlock
 import orilumn.reader.engine.skia.DrawLine
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -273,6 +275,29 @@ class ReaderLogicTest {
         assertEquals(0, cellEdgeOffset(listOf(first, second), second, -10f))
         // 独占一行的普通段落：右缘外是页边距，不贴边（保持行尾空区不命中）。
         assertEquals(null, cellEdgeOffset(listOf(first), first, 180f))
+    }
+
+    @Test
+    fun expandTableRowsForEdit_growsOnlyTouchedRowsNotTheWholeTable() {
+        // 表格两行 + 尾段：表格区间 100..119，行 100..109 / 110..119，尾段 120..129。
+        val row1 = TextEditBlock(
+            kind = null,
+            startsAtBlockStart = true,
+            table = TableRowInfo(emptyList()),
+            start = 100,
+            endExclusive = 110,
+            tableRange = 100..119,
+        )
+        val row2 = row1.copy(start = 110, endExclusive = 120)
+        val para = TextEditBlock(kind = null, startsAtBlockStart = true, start = 120, endExclusive = 130)
+        val blocks = listOf(row1, row2, para)
+
+        // 只选中两行里的半截：扩到这两行的整行，不扩到整张表（…119 之外不再长）。
+        assertEquals(100 until 120, expandTableRowsForEdit(blocks, 105, 115))
+        // 整张表都选上时区间原样（提交侧据此认整表结构修订）。
+        assertEquals(100 until 120, expandTableRowsForEdit(blocks, 100, 120))
+        // 没碰到表格行：原样返回。
+        assertEquals(121 until 125, expandTableRowsForEdit(blocks, 121, 125))
     }
 
     @Test

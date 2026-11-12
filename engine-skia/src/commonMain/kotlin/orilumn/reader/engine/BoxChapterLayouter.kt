@@ -825,12 +825,14 @@ class BoxChapterLayouter(
     /**
      * 选区涉及的各块（渲染空间）：正文修改卡按它决定每行显示哪个块标记（`# ` / `> ` / `- `…）。
      *
-     * 顺序与 `chapterTextBlockEnds()` 切出的块一一对应（第一项是选区起点所在块）。
+     * 顺序与卡片切段（`selectionPiecesForEdit` 按 `chapterTextBlockEnds()` 切出的块）一一对应，
+     * 第一项是选区起点所在块。没有字的叶不出行、也不算一块（块尾会和前一块重复），这里跳过。
      * 块形态只看**当前排版树**：重放之后的叶就是改后的形态，卡片回显的自然是书里现在的样子。
      * 属于排版层（上）。
      */
     internal fun blockKindsOfRange(
         structure: ChapterStructureCache,
+        blockEnds: IntArray?,
         from: Int,
         to: Int,
     ): List<orilumn.reader.engine.revision.TextEditBlock> {
@@ -842,6 +844,13 @@ class BoxChapterLayouter(
             val leafStart = starts.getOrElse(i) { 0L }.toInt()
             val leafEnd = if (i + 1 < leaves.size) starts[i + 1].toInt() else Int.MAX_VALUE
             if (leafEnd <= from || leafStart >= to) continue
+            // 与卡片切段（`selectionPiecesForEdit`）**同口径**：块尾重复说明前一个叶没有字，
+            // 那种叶不出行、也不算一块；不跳过的话第二行起每行都会拿到下一块的形态。
+            if (blockEnds != null) {
+                val end = blockEnds.getOrNull(i) ?: Int.MAX_VALUE
+                val prev = if (i > 0) blockEnds.getOrNull(i - 1) else null
+                if (prev != null && end <= prev) continue
+            }
             out.add(
                 orilumn.reader.engine.revision.TextEditBlock(
                     kind = orilumn.reader.engine.revision.BlockKind.ofElement(leaves[i]),

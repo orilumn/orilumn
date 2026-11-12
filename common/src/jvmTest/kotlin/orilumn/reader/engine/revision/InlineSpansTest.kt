@@ -88,6 +88,78 @@ class InlineSpansTest {
         assertEquals(listOf("em"), spans.map { it.sig.tag })
     }
 
+    // ---------------------------------------------------------------- 只包着图的元素
+
+    /**
+     * 只用来包一张图的 `<span>` / `<a>` 不该摊成标记：卡片里除了那个占位字没有可改的内容，
+     * 写一串标签只会让读者以为要删点什么（删了反而把图的外层样式弄丢）。
+     */
+    @Test
+    fun imageOnlyWrapperIsNotShownAsMarkup() {
+        val p = el(
+            "p",
+            txt("前"),
+            el("span", el("img", attrs = mapOf("src" to "a.png")), attrs = mapOf("class" to "pic")),
+            txt("后"),
+        )
+        assertTrue("只包一张图的 span 不该摊成标记：${spansOf(p)}", spansOf(p).isEmpty())
+        // 链接包着图同理（整段只有一张图、作者用 <a> 包了一层）。
+        val linked = el("p", el("a", el("img", attrs = mapOf("src" to "b.png")), attrs = mapOf("href" to "x")))
+        assertTrue(spansOf(linked).isEmpty())
+    }
+
+    @Test
+    fun nestedImageWrappersAreAllHiddenEvenWithSurroundingBlanks() {
+        // 真实书里的写法：外层给间距、内层是媒体对象，图和两侧各一个空格都在这两层里面。
+        // 包几层都只是「给这张图挂样式」，一层都不该露到卡片里。
+        val p = el(
+            "p",
+            txt("会出现箭头图标"),
+            el(
+                "span",
+                txt(" "),
+                el("span", el("img", attrs = mapOf("src" to "a.png")), attrs = mapOf("class" to "inlinemediaobject")),
+                txt(" "),
+                attrs = mapOf("class" to "guiicon"),
+            ),
+            txt("、"),
+            el(
+                "span",
+                txt(" "),
+                el("span", el("img", attrs = mapOf("src" to "b.png")), attrs = mapOf("class" to "inlinemediaobject")),
+                txt(" "),
+                attrs = mapOf("class" to "guiicon"),
+            ),
+        )
+        assertTrue("里外两层都得藏：${spansOf(p)}", spansOf(p).isEmpty())
+    }
+
+    @Test
+    fun wrapperThatAlsoHasTextIsStillShown() {
+        // 同一层里既有字又有图：这层标签是读者看得见的结构，照旧摊成标记。
+        val p = el(
+            "p",
+            el("span", txt("说明"), el("img", attrs = mapOf("src" to "a.png")), attrs = mapOf("class" to "pic")),
+        )
+        assertEquals(listOf("span"), spansOf(p).map { it.sig.tag })
+    }
+
+    @Test
+    fun imageOnlyWrapperRoundTripsAsPlainPlaceholder() {
+        val p = el(
+            "p",
+            txt("前"),
+            el("span", el("img", attrs = mapOf("src" to "a.png")), attrs = mapOf("class" to "pic")),
+            txt("后"),
+        )
+        val leaf = withParents(p)
+        val segments = segmentsOf(leaf)
+        val spans = InlineSpans.ofLeaf(leaf, segments, { WhiteSpace.NORMAL })
+        // 卡片里就是「前 + 一个占位字 + 后」，没有标签。
+        assertEquals("前\uFFFC后", segments.text)
+        assertEquals(segments.text, InlineMarkup.show(segments.text, spans).let { InlineMarkup.parse(it).text })
+    }
+
     @Test
     fun markupRoundTripsThroughParse() {
         val p = el(

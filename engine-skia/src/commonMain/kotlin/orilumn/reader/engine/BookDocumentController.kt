@@ -692,7 +692,9 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
     fun textEditBlocks(chapter: Int, start: Int, endExclusive: Int): List<TextEditBlock>? {
         val unit = unitAt(chapter) ?: return null
         val bc = layouter as? BoxChapterLayouter ?: return null
-        return runCatching { bc.blockKindsOfRange(unit.structureCache, start, endExclusive) }
+        return runCatching {
+            bc.blockKindsOfRange(unit.structureCache, unit.chapterTextBlockEnds(), start, endExclusive)
+        }
             .onFailure {
                 Logger.w(logTag, "textEditBlocks failed ch=$chapter [$start,$endExclusive): ${it::class.simpleName}")
             }

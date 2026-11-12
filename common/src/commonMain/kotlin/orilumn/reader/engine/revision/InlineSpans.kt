@@ -58,11 +58,42 @@ object InlineSpans {
             }
         }
         return ranges.entries
+            // **只包着图的行内元素不摊成标记**（`<span class="guiicon"> <span><img></span> </span>`
+            // 这类，中间的空白也算）：它对读者没有可改的内容，只是给那张图挂样式，包几层就藏几层。
+            // 卡片里再写一串标签，读者既看不懂，删掉标签还会把图的外层样式弄丢。它跟着占位字符
+            // 一起看：占位留着，元素原样保留；占位删掉，图没了，元素自己也会因为变空而被剪掉
+            // （见 `LeafTextEditor` §4.3）。
+            .filterNot { onlyImageSlots(owners, segments.text, it.value) }
             .map { (el, r) ->
                 InlineMarkup.StyleSpan(r[0] - from, r[1] + 1 - from, sigOf(el))
             }
             .filter { it.endExclusive > it.start }
             .sortedWith(compareBy({ it.start }, { -it.endExclusive }))
+    }
+
+    /**
+     * 这个元素盖住的那几个字是不是**只有行内图占位**（`U+FFFC`）和空白。
+     *
+     * 空白要算进来：书里常写成 `<span class="guiicon"> <img> </span>`，两侧各留一个空格当间距。
+     * 光是图不算「有内容」，光有空白更不算；两样凑在一起仍然只是「给这张图挂样式」。
+     * `<br>` 不算空白（它是行内盒子，属于读者看得见的结构）。
+     */
+    private fun onlyImageSlots(
+        owners: List<LeafTextEditor.Owner>,
+        text: String,
+        range: IntArray,
+    ): Boolean {
+        var images = 0
+        for (i in range[0]..range[1]) {
+            val owner = owners[i]
+            if (owner is LeafTextEditor.Owner.Marker && owner.node.tag == "img") {
+                images++
+                continue
+            }
+            if (owner is LeafTextEditor.Owner.Text && text[i].isWhitespace()) continue
+            return false
+        }
+        return images > 0
     }
 
     /**

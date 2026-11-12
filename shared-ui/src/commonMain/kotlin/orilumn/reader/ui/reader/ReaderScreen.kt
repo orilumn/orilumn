@@ -3482,6 +3482,10 @@ internal fun spansToEditText(
         for (end in ends) {
             if (end <= start) continue
             if (end >= endExclusive) break
+            // **块尾可能指到同一个位置**（相邻两个叶，前一个是空的）：切段的
+            // `selectionPiecesForEdit` 遇到重复只算一段，这里也必须一样，否则后面每一段
+            // 都会整体往后挪一格（读者复报的「`Tab` 的 `T` 跑到标签外面」就是这条）。
+            if (insertAt.isNotEmpty() && end == insertAt.last()) continue
             insertAt.add(end)
         }
     }

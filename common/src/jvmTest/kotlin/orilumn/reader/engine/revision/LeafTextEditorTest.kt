@@ -237,6 +237,26 @@ class LeafTextEditorTest {
     }
 
     @Test
+    fun wrapperThatOnlyHoldsTheImageSurvivesWithoutAStyleForIt() {
+        // 卡片里不显示「只包一张图的 span」（见 InlineSpans），修订的样式表里自然没有它。
+        // 只要占位还在，图、图的外层元素和它的属性都得原样留着。
+        val p = el(
+            "p",
+            txt("前"),
+            el("span", img(mapOf("src" to "a.png")), attrs = mapOf("class" to "pic")),
+            txt("后"),
+        )
+        val r = rebuild(p, LeafTextEditor.Edit(0, 1, "先"))
+
+        assertFalse(r.degraded)
+        assertEquals("先\uFFFC后", r.text)
+        val span = r.leaf.children.firstOrNull { it.tag == "span" }
+        assertNotNull("图还在，包着它的 span 不能丢", span)
+        assertEquals(mapOf("class" to "pic"), span!!.attrs)
+        assertEquals("a.png", span.children.firstOrNull { it.tag == "img" }?.attrs?.get("src"))
+    }
+
+    @Test
     fun imageOutsideTheEditStaysPut() {
         val p = el("p", txt("前"), img(mapOf("src" to "a.png", "class" to "fig")), txt("后"))
         val r = rebuild(p, LeafTextEditor.Edit(0, 1, "先"))

@@ -112,6 +112,22 @@ class EditCardTest {
     // ------------------------------------------------- 跨段时行内结构在卡里的坐标
 
     @Test
+    fun repeatedBlockEndDoesNotShiftSpansInTheCard() {
+        // 相邻两个叶在同一处结束（中间那个叶没有字，图 / 空叶常见）：切段只切一刀，
+        // 偏移换算也只能加一个换行，否则后面每一段整体挪一格
+        //（真机复报：「Tab」的「T」跑到 <span> 外面、「键」跑进标签里）。
+        val text = "箭头三个字Tab键来隐藏"
+        val ends = intArrayOf(5, 8, 8, text.length)
+        val spans = listOf(InlineMarkup.StyleSpan(5, 8, InlineMarkup.StyleSig("span", mapOf("class" to "keycap"))))
+        val pieces = selectionPiecesForEdit(text, ends, 0, text.length)
+        // 空叶不出行：3 行（不是 4 行），行内文字正好是「箭头三个字」「Tab」「键来隐藏」。
+        assertEquals(listOf("箭头三个字", "Tab", "键来隐藏"), pieces)
+        val mapped = spansToEditText(spans, ends, start = 0, endExclusive = text.length)
+        val cardText = pieces.joinToString("\n")
+        assertEquals(listOf("Tab"), mapped.map { cardText.substring(it.start, it.endExclusive) })
+    }
+
+    @Test
     fun crossParagraphSpansLandOnTheRightCharactersInTheCard() {
         // 两段「他走」「他笑」，选区 1..3（跨段）。卡里文字 = "走\n他"，段界处多了一个 \n。
         val ends = intArrayOf(2, 4)

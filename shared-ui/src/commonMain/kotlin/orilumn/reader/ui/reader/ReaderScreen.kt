@@ -3104,11 +3104,10 @@ fun ReaderScreen(
                     if (currentNoteBarOpen) return@onKeyEvent false
                     if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
                     val action = ReaderMath.keyAction(event.key)
-                    // TODO: 状态栏打开时左右键在栏按键之间切换焦点（未实现）。
-                    // 在此之前状态栏打开即禁用左右翻页，不消费（冒泡给系统/后续焦点逻辑）。
-                    if (currentBarsVisible &&
-                        (action == ReaderMath.ReaderKeyAction.Prev || action == ReaderMath.ReaderKeyAction.Next)
-                    ) return@onKeyEvent false
+                    // 上下栏露着也照翻：早先「状态栏一打开就禁用左右键」是给「在栏按键之间切焦点」
+                    // 占的位，可那条路一直没做，实际只剩副作用——点屏幕中部（这也是退出选区的那个
+                    // 手势）把栏点出来之后，左右键**静默失效**，读者只会觉得「翻页卡死了」。
+                    // 栏里真要键盘导航，将来另走焦点遍历；面板打开时 keysEnabled=false 已经隔离。
                     when (action) {
                         ReaderMath.ReaderKeyAction.Prev -> { currentFlipWithAnimation(-1); true }
                         ReaderMath.ReaderKeyAction.Next -> { currentFlipWithAnimation(1); true }

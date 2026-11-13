@@ -23,3 +23,24 @@ internal fun expandTableRowsForEdit(blocks: List<TextEditBlock>, from: Int, to: 
     }
     return start until end
 }
+
+/**
+ * 一块在卡片里到底切哪一段：**卡片里装着的字必须与卡片区间逐字对齐**，否则确定时会把
+ * 区间外多带进来的那几个字当成新写的字再插一遍（正文多出一截）。
+ *
+ * - 表格行按整行切（格界得看得见，格偏移也按整行文字算），卡片区间跟着扩到整行；
+ * - 普通块只切**落在 [from, to) 里的那一段**：块首 / 块尾在选区之外，不多带。
+ *
+ * @return 要切进卡片的区间；null = 这一块完全在选区外。
+ */
+internal fun clipBlockForCard(block: TextEditBlock, from: Int, to: Int): IntRange? {
+    if (block.endExclusive <= block.start) return null
+    if (block.table == null) {
+        val start = maxOf(block.start, from)
+        val end = minOf(block.endExclusive, to)
+        return if (end > start) start until end else null
+    }
+    if (block.endExclusive <= from || block.start >= to) return null
+    return block.start until block.endExclusive
+}
+

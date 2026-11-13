@@ -1705,13 +1705,16 @@ fun ReaderScreen(
     ): Boolean {
         val text = currentHost.textOf(ch, 0, Int.MAX_VALUE) ?: return false
         val brk = currentHost.reviewBreakText(ch)
-        // 选区与卡片目标必须同尺：卡片覆盖的是「旧修订整段 + 别的内容」，选区也一起扩过去。
-        if (!selection.selectRange(ch, text, from, to)) selection.clear()
         val segments = ArrayList<InlineMarkup.Segment>(touched.size + 2)
         val spans = ArrayList<InlineMarkup.StyleSpan>(touched.size * 2)
         var firstStartsAtBlock = true
         var pos = from
         var at = 0
+        // 卡片里真正装着的字覆盖的范围：普通块只到读者选中的那一段（不把块首 / 块尾多带进来），
+        // 表格行整行进卡、范围跟着扩到整行。**卡片里的字必须与这个区间逐字对齐**，
+        // 否则确定时会把多带进来的那几个字当作新文字再插一遍（正文就多出一截）。
+        var cardFrom = from
+        var cardTo = to
         // 选中的那张表（整表修订）在当前显示空间的区间 + 读者拖到的那几行；
         // 两个都记下来，提交时表格那段按行范围走、文字那段按普通区间走（见 `TextEditPart`）。
         var tableRange: IntRange? = null
@@ -1746,11 +1749,22 @@ fun ReaderScreen(
                     firstStartsAtBlock = false
                 }
                 for (b in blocks) {
+                    // 表格行整行进卡（格偏移按整行文字算），卡片范围跟着扩到整行；
+                    // 普通块只切**选中的那一段**：块首 / 块尾多带进来的字，区间里没有，
+                    // 确定时会被当成新写的字再插一遍。
+                    val range = clipBlockForCard(b, start, endExclusive) ?: continue
+                    val bStart = range.first
+                    val bEnd = range.last + 1
+                    if (b.table != null) {
+                        if (bStart < cardFrom) cardFrom = bStart
+                        if (bEnd > cardTo) cardTo = bEnd
+                    }
+                    if (segments.isEmpty() && bStart > b.start) firstStartsAtBlock = false
                     appendPiece(
-                        brk.slice(text, b.start, b.endExclusive),
-                        if (b.startsAtBlockStart == false) null else b.kind,
-                        currentHost.textEditSpans(ch, b.start, b.endExclusive).orEmpty(),
-                        b.start,
+                        brk.slice(text, bStart, bEnd),
+                        if (bStart > b.start || b.startsAtBlockStart == false) null else b.kind,
+                        currentHost.textEditSpans(ch, bStart, bEnd).orEmpty(),
+                        bStart,
                     )
                 }
             }
@@ -1837,9 +1851,12 @@ fun ReaderScreen(
             segments.map { if (it.table != null) it else InlineMarkup.Segment(it.text, null) }
         }
         val card = InlineMarkup.show(shown, visible)
+        // 选区与卡片目标必须同尺：卡片覆盖的是「旧修订整段 + 别的内容」，选区也一起扩过去。
+        // 放在这里而不是开头：卡片范围要等块 / 表格行扩完才定下来（见 `cardFrom` / `cardTo`）。
+        if (!selection.selectRange(ch, text, cardFrom, cardTo)) selection.clear()
         textEditChapter = ch
-        textEditStart = from
-        textEditEnd = to
+        textEditStart = cardFrom
+        textEditEnd = cardTo
         textEditText = card
         textEditBaseText = plain
         textEditBaseCard = card

@@ -1326,14 +1326,23 @@ fun ReaderScreen(
      */
     fun tryOpenReviewEditAt(xPx: Float, yPx: Float): Boolean {
         val p = openPos ?: return false
-        if (chapterRevisions.isEmpty()) return false
-        val offset = charOffsetAt(p, xPx, yPx) ?: return false
+        if (chapterRevisions.isEmpty()) {
+            Logger.d("Orilumn.TAP", "review tap skip: revisions not loaded yet ch=${p.chapter}")
+            return false
+        }
+        val offset = charOffsetAt(p, xPx, yPx) ?: run {
+            Logger.d("Orilumn.TAP", "review tap skip: no char under tap (margin / line gap)")
+            return false
+        }
         // 判「在不在审阅空间」看宿主**实际**换没换空间，不看 UI 开关：两者不是同一拍
         // （切视图要重排），按开关取会在切换中途拿错尺。痕迹与修订区间都跟着宿主的空间走。
         val reviewSpace = currentHost.isReviewMode()
         // 审阅视图里本章有修订、但正文没套上审阅空间时一个痕迹都不画，这时按审阅空间的区间命中
         // 会框错字，宁可不开。普通视图没有这个问题：修订区间本来就是渲染空间的。
-        if (reviewSpace && reviewMarksFor(p.chapter).isEmpty()) return false
+        if (reviewSpace && reviewMarksFor(p.chapter).isEmpty()) {
+            Logger.d("Orilumn.TAP", "review tap skip: no marks in review space ch=${p.chapter}")
+            return false
+        }
         // 命中口径是**整条修订**（原文 + 新文字），不是只认画出来的那几个红绿字：段里保留下来的
         // 那些字也属于这条修订，点它同样进整体编辑（红绿只是标出真正改动的位置）。
         val revision = chapterRevisions.firstOrNull { r ->
@@ -1346,34 +1355,34 @@ fun ReaderScreen(
             )
             return false
         }
-        // 表格上压着整表修订（首码大写 `T`）时，点按只认**改过的那一行**：
-        // 点它 = 再改这处，卡片带出改后的内容——审阅视图里按点到的那一行开行卡片
-        // （不框整张表，也不把选区扩成整张表）；点到删掉的行 / 拿不到行对照时退回整表卡片。
-        // 点在表格**其他区域**（一行都没改过的格子、行间空白）什么都不做：不框整表、不开卡、
-        // 不翻页切栏。判「改过」用画出来的红绿痕迹（见 `reviewMarks`）：改一格常常只改一两个字，
-        // 读者点格子里的其他字也该进编辑；整行都没改过才不响应。
-        // 见 docs/正文修改-块级标记.md §8 / 验收 30 / 36。
+        // 表格上压着整表修订（首码大写 `T`）时走单独一套判据（见 reviewTableTapOf）：
+        // 审阅视图里点改过的那一行 = 进编辑、开行卡片；点一行都没改过的区域什么都不做；
+        // 普通视图里点表上改动过的字 = 开整表卡片。见 docs/正文修改-块级标记.md §8 / 验收 30 / 36 / 37。
         if (revision.editedBlocks.firstOrNull()?.startsWith("T") == true) {
-            // 普通阅读视图里没有红绿字可认（改后的表就是正文），点表上任何改动过的字都算
-            // 「点这处」⇒ 打开整表卡片（带出改后的整张表），不必先切审阅。没有改动过的表
-            // 压不出整表修订，走不到这里，所以这里不会误伤「没改过的表格」。
-            val changed = !reviewSpace || run {
-                val row = currentHost.textEditBlocks(p.chapter, offset, offset + 1)?.firstOrNull()
-                row == null || reviewMarksFor(p.chapter).any { m ->
-                    m.start < row.endExclusive && row.start < m.endExclusive
+            return when (
+                val tap = reviewTableTapOf(
+                    reviewSpace = reviewSpace,
+                    rowOf = {
+                        currentHost.textEditBlocks(p.chapter, offset, offset + 1)
+                            ?.firstOrNull()
+                            ?.let { it.start until it.endExclusive }
+                    },
+                    marksOf = { reviewMarksFor(p.chapter) },
+                    scopeOf = { currentHost.tableRowScope(p.chapter, revision.id, offset, offset + 1) },
+                )
+            ) {
+                ReviewTableTap.Ignore -> {
+                    Logger.d("Orilumn.TAP", "tap offset=$offset in revised table (unchanged row) → ignored")
+                    true
                 }
-            }
-            if (!changed) {
-                Logger.d("Orilumn.TAP", "tap offset=$offset in revised table (unchanged row) → ignored")
-                return true
-            }
-            val rows = currentHost.tableRowScope(p.chapter, revision.id, offset, offset + 1)
-            return if (rows != null) {
-                Logger.d("Orilumn.TAP", "tap offset=$offset in revised table → row ${rows.firstRow} card")
-                openRevisionEdit(revision, select = false, rows = rows)
-            } else {
-                Logger.d("Orilumn.TAP", "tap offset=$offset in revised table → whole-table card")
-                openRevisionEdit(revision, select = false)
+                ReviewTableTap.WholeTable -> {
+                    Logger.d("Orilumn.TAP", "tap offset=$offset in revised table → whole-table card")
+                    openRevisionEdit(revision, select = false)
+                }
+                is ReviewTableTap.Row -> {
+                    Logger.d("Orilumn.TAP", "tap offset=$offset in revised table → row ${tap.scope.firstRow} card")
+                    openRevisionEdit(revision, select = false, rows = tap.scope)
+                }
             }
         }
         return openRevisionEdit(revision)

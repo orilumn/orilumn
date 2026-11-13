@@ -670,6 +670,32 @@ class TableEditDesktopTest {
         }
     }
 
+    @Test
+    fun reviewModeOneRowSelectionMapsToThatRowOnly() {
+        val root = Files.createTempDirectory("orilumn-table-review-one-row").toFile()
+        val host = openHost(writeBook(root), root)
+        try {
+            val pos = runBlocking { host.open() }!!
+            val chapter = pos.chapter
+            val before = body(host, chapter)
+            val (range, blocks) = tableBlocks(host, chapter, before)
+            val card = cardText(before, blocks)
+            val deleted = lines(card).filterNot { it.contains("乙二") }.joinToString("\n")
+            assertTrue(commit(host, chapter, range, deleted, pos) is TextEditOutcome.Success)
+
+            val landedReview = runBlocking { host.switchReviewMode(true, chapter, 0) }!!
+            val reviewText = body(host, chapter)
+            val hit = reviewText.indexOf("甲三")
+            assertTrue("审阅空间应仍有甲三：$reviewText", hit >= 0)
+            val one = host.textEditBlocks(chapter, hit, hit + 1)
+            assertNotNull("审阅空间里点一行应拿得到块", one)
+            assertEquals("审阅空间里点一行只应拿到那一行", 1, one!!.size)
+            assertTrue("拿到的应是表格行", one.single().table != null)
+        } finally {
+            host.close()
+        }
+    }
+
     /** 普通改字在审阅空间里看得见红字与绿字，切回正常视图逐字复原。 */
     @Test
     fun reviewModeShowsTextMarksAndSwitchesBack() {

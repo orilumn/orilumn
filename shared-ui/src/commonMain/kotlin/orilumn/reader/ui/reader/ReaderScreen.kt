@@ -1749,7 +1749,12 @@ fun ReaderScreen(
             val touched = chapterRevisions.filter { r -> s < r.charEnd && e > r.charStart }
             if (touched.isNotEmpty()) {
                 if (touched.size == 1 && s >= touched[0].charStart && e <= touched[0].charEnd) {
-                    if (openRevisionEdit(touched[0])) return true
+                    val r = touched[0]
+                    // 整表修订的结构改法只有「整张表」一种，但读者只拖选其中几行时，选区就停
+                    // 在他拖的那几行上，不扩到整张表（拖了哪行就框住哪行）；卡片照样按整表打开。
+                    val wholeTable = r.editedBlocks.firstOrNull()?.startsWith("T") == true
+                    val keepSelection = wholeTable && (s > r.charStart || e < r.charEnd)
+                    if (openRevisionEdit(r, select = !keepSelection)) return true
                 }
                 val from = minOf(s, touched.minOf { it.charStart })
                 val to = maxOf(e, touched.maxOf { it.charEnd })
@@ -3499,6 +3504,9 @@ fun ReaderScreen(
                 val s = selection.start
                 val e = selection.endExclusive
                 if (s == textEditStart && e == textEditEnd) return@LaunchedEffect
+                // 整表修订的卡片目标永远是整张表：读者拖选其中一行（松手后选区只停在那一行）
+                // 或拖手柄时，只动选区，不把卡片目标缩成那一行——否则确定时会把整张表写进一行。
+                if (textEditFromRevision && textEditWholeTable) return@LaunchedEffect
                 if (textEditDirty) {
                     textEditStart = s
                     textEditEnd = e

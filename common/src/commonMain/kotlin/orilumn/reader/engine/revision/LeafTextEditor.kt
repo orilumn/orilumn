@@ -209,6 +209,11 @@ object LeafTextEditor {
         val markerAnchors = HashMap<MarkupElement, MarkupElement?>()
         val prependNodes = ArrayList<MarkupElement>()
         val insertAfter = HashMap<MarkupElement, MutableList<MarkupElement>>()
+        // 新字落在某个元素中部、又**不属于**这个元素时要在这个字的位置把元素切开：
+        // key = 要切开的祖先，value = 切在那里的节点（命中即切，按元素身份比）。
+        // 不切只能把新字整体挪到元素之后，正文的字序就变了（`<code>getPriceInEuros()</code>`
+        // 里只把 Price 加粗 ⇒「getInEuros()Price」）。
+        val splitAt = HashMap<MarkupElement, MutableList<MarkupElement>>()
         // 新字符落点：前面紧挨着一个保留的替换元素（行内图 / `<br>`）时，在**它后面**新开一个
         // 文本节点。否则新字会跨过它落进更靠后的文本节点里，图片就从两个字之间跳到了前面。
         val afterMarkerText = HashMap<MarkupElement, MarkupElement>()
@@ -283,7 +288,15 @@ object LeafTextEditor {
                 // 链已完全对上：接在锚点字之后（同一个文本节点里按字符位置切开）。
                 p >= chainEls.size -> nodeItems.getOrPut(prevText) { ArrayList() }
                     .add(NodeItem.Elements(nodes))
-                // 只能复用前 p 层：挂到第 p 层的元素之后。
+                // 只能复用前 p 层：就地插在锚点字之后，重建时把这几层祖先切开（见 [splitAt]）。
+                // 早先挂到第 p 层的元素之后，等于把新字挪到了整个元素外面，正文的字序跟着变。
+                prevText != null -> {
+                    nodeItems.getOrPut(prevText) { ArrayList() }.add(NodeItem.Elements(nodes))
+                    for (k in p until chainEls.size) {
+                        splitAt.getOrPut(chainEls[k]) { ArrayList() }.addAll(nodes)
+                    }
+                }
+                // 叶首（前面没有任何保留字）：新字本来就在这些元素前面，直接前置。
                 else -> insertAfter.getOrPut(chainEls[p]) { ArrayList() }.addAll(nodes)
             }
         }
@@ -366,6 +379,27 @@ object LeafTextEditor {
                 insertAfter[c]?.let { children.addAll(it) }
             }
             if (node === leaf) insertAfter[node]?.let { children.addAll(it) }
+            // 新字要落在这个元素之外、又插在它中间：在那一处把元素切开，前后各留一份
+            // （`<code>getPriceInEuros()</code>` 里只把 Price 加粗 ⇒ `get` / 加粗的 Price /
+            // `InEuros()` 三段，字序不变）。不切就只能把新字整体挪到元素之后。
+            splitAt[node]?.let { cuts ->
+                val cutHere = children.any { c -> cuts.any { it === c } }
+                if (cutHere) {
+                    val out = ArrayList<MarkupElement>(2)
+                    var acc = ArrayList<MarkupElement>()
+                    for (c in children) {
+                        if (cuts.any { it === c }) {
+                            if (acc.isNotEmpty()) out.add(MarkupElement(node.tag, node.attrs, acc))
+                            acc = ArrayList()
+                            out.add(c)
+                        } else {
+                            acc.add(c)
+                        }
+                    }
+                    if (acc.isNotEmpty()) out.add(MarkupElement(node.tag, node.attrs, acc))
+                    return out
+                }
+            }
             // 字被删光的行内元素整个走掉，不留空壳（规格 §4.3「元素整个消失」）。整段换字时新字
             // 落在别处，旧元素只剩空壳；`code` 这类带内边距的元素留空会渲染成一小块灰底。
             // 只剪「原来有内容、现在空了」的：书里本来就写成空的元素（没有子节点）不碰，那是原样。

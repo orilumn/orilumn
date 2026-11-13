@@ -183,6 +183,77 @@ class LeafTextEditorStylesTest {
     }
 
     @Test
+    fun newCharsInsideAnElementStayInPlaceInsteadOfJumpingAfterIt() {
+        // 审阅视图的格式痕迹（绿 `**`）：这一段在 `<code>` 里，痕迹自己不带 code 样式。
+        // 早先这类「新字不在锚点字那个元素里」一律挂到整个元素之后，审阅正文就成了
+        // 「getPriceInEuros()****」——字序被改掉，读者看不懂（用户复报）。
+        val p = el("p", txt("调用"), el("code", txt("getPriceInEuros()")), txt("取得价格。"))
+        val r = rebuild(
+            p,
+            LeafTextEditor.Edit(
+                5, 10, "**Price**",
+                listOf(span(2, 7, "code"), span(2, 7, "strong")),
+            ),
+        )
+
+        assertFalse(r.degraded)
+        assertEquals("调用get**Price**InEuros()取得价格。", r.text)
+    }
+
+    @Test
+    fun droppingTheElementInTheMiddleOfItKeepsTextOrder() {
+        // 读者把中间那段字从 `<code>` 里拿出来、只留粗体：元素在这一点切开，
+        // 字仍在原来的位置（早先整段挪到 `</code>` 之后，变成「getInEuros()Price」）。
+        val p = el("p", txt("调用"), el("code", txt("getPriceInEuros()")), txt("取得价格。"))
+        val r = rebuild(p, LeafTextEditor.Edit(5, 10, "Price", listOf(span(0, 5, "strong"))))
+
+        assertFalse(r.degraded)
+        assertEquals("调用getPriceInEuros()取得价格。", r.text)
+        assertEquals("get", textOf(r.leaf.children[1]))
+        assertEquals("Price", textOf(r.leaf.children[2]))
+        assertEquals("InEuros()", textOf(r.leaf.children[3]))
+    }
+
+    @Test
+    fun newCharsAtTheStartOfAnElementLandBeforeItsText() {
+        // 元素开头那一段被换掉：新字排在元素剩下的字**前面**，不能挂到元素后面。
+        val p = el("p", txt("调用"), el("code", txt("getPrice")), txt("好"))
+        val r = rebuild(p, LeafTextEditor.Edit(2, 5, "get", listOf(span(0, 3, "strong"))))
+
+        assertFalse(r.degraded)
+        assertEquals("调用getPrice好", r.text)
+        assertEquals("get", textOf(r.leaf.children[1]))
+        assertEquals("Price", textOf(r.leaf.children[2]))
+    }
+
+    @Test
+    fun newCharsAtTheStartOfAnElementLandBeforeItsKeptChars() {
+        // 叶子一上来就是元素、被换掉的又是它开头那一截：新字仍落在元素剩下的字**前面**。
+        // 这一条钉住「新字就地落进元素」的锚点，别让它跑到后面保留字之后（字序会变成
+        // `InEuros()Price`）。
+        val p = el("p", el("code", txt("PriceInEuros()")))
+        val r = rebuild(
+            p,
+            LeafTextEditor.Edit(0, 5, "Price", listOf(span(0, 5, "code"), span(0, 5, "strong"))),
+        )
+
+        assertFalse(r.degraded)
+        assertEquals("PriceInEuros()", r.text)
+    }
+
+    @Test
+    fun elementAtTheStartIsSplitAroundNewCharsThatLeaveIt() {
+        // 同上，但读者把开头那截从元素里拿出来了：元素在开头切开，剩下的字仍排在后面。
+        val p = el("p", el("code", txt("getPrice")))
+        val r = rebuild(p, LeafTextEditor.Edit(0, 3, "get", listOf(span(0, 3, "strong"))))
+
+        assertFalse(r.degraded)
+        assertEquals("getPrice", r.text)
+        assertEquals("get", textOf(r.leaf.children[0]))
+        assertEquals("Price", textOf(r.leaf.children[1]))
+    }
+
+    @Test
     fun elementsThatWereEmptyInTheBookStay() {
         // 书里本来就写成空的元素（没有子节点）是原样，不剪。
         val p = el("p", txt("a"), el("span", attrs = mapOf("class" to "gap")), txt("b"))

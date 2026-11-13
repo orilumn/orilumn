@@ -281,6 +281,15 @@ object ReviewOverlay {
                 marks[at] = false
                 pushInserted("${ChapterRevisionMap.BREAK_MARK_CHAR}", 3)
             }
+            if (deletedChar && old[o] == '\n') {
+                // 叶内换行（`<br>`）被删掉了：断行本身没有字形，标成红字也看不见。
+                // 与删段界同一个口径，在断行处补一个红 ¶（占一格、可点按、取文字时跳过）；
+                // 任何块都一样——正文、标题、引用、代码块里都这么画。
+                // 那个换行本身仍留在原处：审阅空间「原文一字不删」，删掉的字都原地留着标红，
+                // 所以照旧把它推出去（它就是这个红 ¶ 右边那道断行）。
+                marks[at] = false
+                pushInserted("${ChapterRevisionMap.BREAK_MARK_CHAR}", 3)
+            }
             push(old[o], if (deletedChar) 1 else 0)
             o++
         }

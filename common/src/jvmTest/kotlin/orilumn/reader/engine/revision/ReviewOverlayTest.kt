@@ -133,6 +133,20 @@ class ReviewOverlayTest {
     }
 
     @Test
+    fun deletedLineBreakLeavesRedMark() {
+        // 原文里本来就有的叶内换行（`<br>`）被删掉：断行本身没有字形，标红也看不见，
+        // 所以在断行处补一个红 ¶（与删段界同一个口径）。换行照旧留在原处——审阅空间
+        // 「原文一字不删」，删掉的字都原地留着标红，这个换行也一起标红。
+        val plan = ReviewOverlay.plan("风起云\n涌", "风起云涌", IntArray(0))!!
+        assertEquals("风起云${mark}\n涌", plan.text)
+        assertEquals(6, plan.length)
+        assertEquals(mapOf(3 to false), plan.marks)
+        assertEquals(listOf(3 until 5), pairs(plan.deleted))
+        assertTrue(plan.inserted.isEmpty())
+        assertFalse(plan.needsBlocks)
+    }
+
+    @Test
     fun insertedParagraphBreakSplitsBlock() {
         // 段内新敲一个回车：绿 ¶ 落在断行处上一行末尾，段界本身把块拆开（不占字符）。
         val plan = ReviewOverlay.plan("", sep, IntArray(0))!!

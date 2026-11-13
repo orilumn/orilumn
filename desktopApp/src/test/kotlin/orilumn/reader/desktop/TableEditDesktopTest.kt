@@ -385,6 +385,47 @@ class TableEditDesktopTest {
         }
     }
 
+    /**
+     * 删掉书里本来就有的 `<br>`（叶内换行）：审阅视图在断行处留一个红 ¶，两行并成一行。
+     * 标题里也一样——这条按字符走，不看块是段落还是标题。
+     */
+    @Test
+    fun deletingBrLeavesRedMarkAndJoinsLines() {
+        for (review in listOf(false, true)) {
+            val root = Files.createTempDirectory("orilumn-del-br").toFile()
+            val host = openHost(
+                writeBook(root, "<h1><span style=\"display:block\">第1章</span>风<br/>起云涌</h1><p>正文。</p>"),
+                root,
+                reviewMode = review,
+            )
+            try {
+                val pos = runBlocking { host.open() }!!
+                val chapter = pos.chapter
+                val before = body(host, chapter)
+                assertEquals("前置：br 已是真换行", "第1章风\n起云涌正文。", before)
+                // 卡片里把那一行并回去＝删掉这个叶内换行（卡里的行尾 `\\` 就是它）。
+                // 选区是**零散文字那一块** [3,8)：标题的序号是另一块，卡片不会带上它。
+                val outcome = commit(host, chapter, 3 until 8, "风起云涌", pos)
+                assertTrue("删掉换行应成功：$outcome", outcome is TextEditOutcome.Success)
+                if (review) {
+                    // 断行处补一个红 ¶；换行本身仍在原处（审阅空间「原文一字不删」），一起标红。
+                    assertEquals("原断行处留红 ¶", "第1章风¶\n起云涌正文。", body(host, chapter))
+                    assertEquals(
+                        "红 ¶ 与它右边那个换行都算在这条修订里",
+                        listOf(4 to 6),
+                        host.reviewMarks(chapter).map { it.start to it.endExclusive },
+                    )
+                    assertEquals("痕迹位要给得出来（点按 / 取文字都靠它）", listOf(4), host.reviewBreakOffsets(chapter).toList())
+                } else {
+                    assertEquals("普通视图直接并成一行", "第1章风起云涌正文。", body(host, chapter))
+                    assertTrue("普通视图不留痕迹", host.reviewBreakOffsets(chapter).isEmpty())
+                }
+            } finally {
+                host.close()
+            }
+        }
+    }
+
     /** 直接挂在 `<body>` 下的文字不能整段消失（它得先看得见，才谈得上选中、修改）。 */
     @Test
     fun bodyLevelStrayTextIsKept() {
@@ -1465,3 +1506,4 @@ class TableEditDesktopTest {
         }
     }
 }
+

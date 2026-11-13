@@ -707,11 +707,11 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
      *
      * 返回 null 的几种情形都退回「整表卡片」（老行为）：
      * - 不是审阅视图 / 不是整表修订 / 拿不到行级对照（且折不过去）；
-     * - 选中的既有删掉的行又有留下的行；
      * - 拖到的正好是整张表（那就是整表卡片本身）。
      *
      * 拖到的是**被删掉的行**（红字）时给一个插入位置（[TableRowScope.isInsertion]）：
      * 卡片空白——上次编辑的结果就是这一行不存在；读者要补行就在空白里写。
+     * 选中的行里混着删掉的行时，删掉的那几行不占位置，卡片只列留下来的行。
      *
      * 行级对照建不出来（本章的修订还没套上审阅空间 / 表格结构对不上）时不再直接退整表：
      * 按**当前显示空间**里拖到的那几行换算（见 [tableRowScopeOfDisplayedRows]）。
@@ -749,16 +749,17 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         }
         if (first < 0 || last < first) return null
         val newIndices = (first..last).map { plan.rows[it].newIndex }
-        if (newIndices.all { it < 0 }) {
+        // 选中的行里可能有读者删掉的行（红字）：它们不占位置，卡片只列留下来的那几行。
+        val kept = newIndices.filter { it >= 0 }
+        if (kept.isEmpty()) {
             // 选中的整段都是红字（读者删掉的行）：编辑区空白，位置 = 这段前面还剩几行新表。
             val at = plan.rows.take(first).count { it.newIndex >= 0 }
             if (at > rows.size) return null
             return TableRowScope(revisionId, at, at - 1)
         }
-        if (newIndices.any { it < 0 }) return null
-        if (newIndices.zipWithNext().any { (a, b) -> b != a + 1 }) return null
-        val firstRow = newIndices.first()
-        val lastRow = newIndices.last()
+        if (kept.zipWithNext().any { (a, b) -> b != a + 1 }) return null
+        val firstRow = kept.first()
+        val lastRow = kept.last()
         if (firstRow < 0 || lastRow >= rows.size) return null
         // 整张表：照旧走整表卡片（行数 / 列数都能改）。
         if (firstRow == 0 && lastRow == rows.size - 1) return null

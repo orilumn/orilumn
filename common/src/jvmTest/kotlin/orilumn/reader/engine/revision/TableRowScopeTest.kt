@@ -69,9 +69,24 @@ class TableRowScopeTest {
     }
 
     @Test
-    fun `deleted and kept rows together fall back to the whole-table card`() {
+    fun `rows around a deleted row keep only the surviving rows`() {
+        // 原书第 1 行被删掉：选 0..1（含被删的 1）⇒ 卡片只列新表第 0 行。
         val r = revision(listOf(0, 2, 3))
-        assertNull(tableRowScopeOfDisplayedRows(r, 3, 0..1, displayedIsNewTable = false))
+        val scope = tableRowScopeOfDisplayedRows(r, 3, 0..1, displayedIsNewTable = false)
+        assertEquals(TableRowScope(7, 0, 0), scope)
+    }
+
+    @Test
+    fun `range covering a deleted row maps to the surviving run`() {
+        // 原书 1..3（1 被删）⇒ 新表第 1、2 行，仍是一段。
+        val r = revision(listOf(0, 2, 3))
+        val scope = tableRowScopeOfDisplayedRows(r, 3, 1..3, displayedIsNewTable = false)
+        assertEquals(TableRowScope(7, 1, 2), scope)
+    }
+
+    @Test
+    fun `whole old table still goes to the whole-table card`() {
+        assertNull(tableRowScopeOfDisplayedRows(revision(listOf(0, 2, 3)), 3, 0..3, displayedIsNewTable = false))
     }
 
     @Test

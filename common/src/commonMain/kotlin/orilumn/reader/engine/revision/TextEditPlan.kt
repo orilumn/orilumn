@@ -212,6 +212,12 @@ object TextEditPlanner {
         }
         val firstLeaf = leafOf(ends, editStart)
         val lastLeaf = leafOf(ends, editEnd - 1)
+        /**
+         * 这一叶是不是**段落之外的零散文字**（容器里那截匿名 run）：它没有块可拆，
+         * 读者敲的换行只能是叶内 `<br>`，不能按「拆成两个块」处理（见下面的单叶分支与跨段分支）。
+         */
+        fun looseLeaf(i: Int): Boolean =
+            !mergeableLeaf(i) && !imageLeaf(i) && tableOfLeaf(i) == null
         // 整张表一次改：卡片把选区扩到整张表时，行数 / 每行列数都可以变 —— 只要网格自洽就放行
         // （删整行、加整行、删整表、每行增删列、改合并方式都走这一条）。
         val wholeTable = wholeTableRange(tableRangeOf, firstLeaf, lastLeaf, editStart, editEnd)
@@ -275,7 +281,10 @@ object TextEditPlanner {
                 bookId, chapter, chapterText, map, groupId, now, wsOfLeaf, toOriginal, renderedInterval,
                 listOf(
                     Segment(
-                        editStart, editEnd, solo, !legacySolo, firstLeaf,
+                        editStart, editEnd, solo,
+                        // 段落之外的零散文字没有块可拆：老调用方那串文字里的换行只能是叶内 `<br>`。
+                        !legacySolo || looseLeaf(firstLeaf),
+                        firstLeaf,
                         if (firstLeaf == 0) 0 else ends[firstLeaf - 1],
                         ends[firstLeaf],
                         perLine?.first(),
@@ -286,11 +295,45 @@ object TextEditPlanner {
         }
         // 跨段：结果段数由输入区分成了几块决定（方案 D-34 修订版）。
         val leafCount = lastLeaf - firstLeaf + 1
+        // 段落之外的零散文字（容器里那截匿名 run）本来就只有一段、也**没有块可拆**：读者在它
+        // 中间敲换行，要的是这段里的 `<br>`，不是拆成两个块。按一段字交上去，别拿「不能合并或
+        // 拆段」把一处正常的换行拒掉（这句话原来还误写成「选区跨到整块图片或表格」）。
+        if (
+            leafCount == 1 && pieces.size > 1 && pieces.none { it.table != null } && looseLeaf(firstLeaf)
+        ) {
+            val leafStart = if (firstLeaf == 0) 0 else ends[firstLeaf - 1]
+            val merged = InlineMarkup.joinSegments(pieces)
+            val mergedStyles = perLine?.let { per ->
+                val out = ArrayList<InlineMarkup.StyleSpan>()
+                var cursor = 0
+                for ((j, line) in lines.withIndex()) {
+                    for (sp in per.getOrNull(j).orEmpty()) {
+                        if (sp.endExclusive > sp.start) {
+                            out.add(InlineMarkup.StyleSpan(cursor + sp.start, cursor + sp.endExclusive, sp.sig))
+                        }
+                    }
+                    cursor += line.length + 1
+                }
+                out.ifEmpty { null }
+            }
+            return planSegments(
+                bookId, chapter, chapterText, map, groupId, now, wsOfLeaf, toOriginal, renderedInterval,
+                listOf(
+                    Segment(
+                        editStart, editEnd, merged, null, null, true,
+                        firstLeaf, leafStart, ends[firstLeaf], mergedStyles,
+                    ),
+                ),
+                currentKindOf,
+            )
+        }
         if (pieces.size != leafCount) {
             // 图片叶、表格行叶、匿名文本叶没有可合并的块结构：只有**真的要合并 / 拆段**时才拒绝。
             // 段数不变（一叶一段）时它们照常逐叶编辑：图片可以整张删掉，表格可以改格里的字。
             if ((firstLeaf..lastLeaf).any { !mergeableLeaf(it) }) {
-                return TextEditPlan.Rejected("选区跨到整块图片或表格，不能合并或拆段")
+                return TextEditPlan.Rejected(
+                    unmergeableReason(firstLeaf, lastLeaf, imageLeaf, tableOfLeaf, mergeableLeaf),
+                )
             }
             return planMerge(
                 bookId, chapter, chapterText, map, groupId, now, wsOfLeaf, toOriginal, renderedInterval,
@@ -318,6 +361,33 @@ object TextEditPlanner {
             bookId, chapter, chapterText, map, groupId, now, wsOfLeaf, toOriginal, renderedInterval, segments,
             currentKindOf,
         )
+    }
+
+    /**
+     * 合并 / 拆段被拒时按**实际挡路的那一叶**发话。
+     *
+     * 以前一律说「选区跨到整块图片或表格，不能合并或拆段」，可这条路上最常见的挡路者其实是
+     * **段落之外的零散文字**（匿名 run，如标题里序号后面那截）：读者只看到一句莫名其妙的
+     * 「含图、块」，还以为自己选到了图片。
+     */
+    private fun unmergeableReason(
+        firstLeaf: Int,
+        lastLeaf: Int,
+        imageLeaf: (Int) -> Boolean,
+        tableOfLeaf: (Int) -> TableRowInfo?,
+        mergeableLeaf: (Int) -> Boolean,
+    ): String {
+        val range = firstLeaf..lastLeaf
+        return when {
+            range.any { imageLeaf(it) } ->
+                "选区里有整块图片：图片只能整张删除，不能和旁边的段落合并或拆段"
+            range.any { tableOfLeaf(it) != null } ->
+                "选区里有表格行：表格不能和旁边的段落合并或拆段，要改行列请只选中表格的整行"
+            range.any { !mergeableLeaf(it) } ->
+                "选区里有段落之外的零散文字（例如标题里序号后面那截），" +
+                    "它不能和旁边的段落合并或拆段"
+            else -> "这一处的段落不能合并或拆段"
+        }
     }
 
     /**
@@ -367,6 +437,8 @@ object TextEditPlanner {
         wsOfLeaf: (Int) -> WhiteSpace = { WhiteSpace.NORMAL },
         blocks: List<InlineMarkup.Segment>? = null,
         currentKindOf: ((leafIndex: Int) -> BlockKind?)? = null,
+        /** 该叶能不能参与跨段合并（整块图片 / 表格行 / 匿名 run 不能；匿名 run 的换行是叶内 `<br>`）。 */
+        mergeableLeaf: (Int) -> Boolean = { true },
     ): TextEditPlan {
         if (at < 0 || at > chapterText.length) return TextEditPlan.Rejected("选区超出本章范围")
         val ends = blockEnds?.takeIf { it.isNotEmpty() && it.last() == chapterText.length }
@@ -385,7 +457,8 @@ object TextEditPlanner {
             { it }, { r -> r.charStart until r.charEnd },
             listOf(
                 Segment(
-                    at, at, solo, pieces.size == 1, leaf, leafStart, leafEnd,
+                    // 段落之外的零散文字没有块可拆：插入的换行落成叶内 `<br>`。
+                    at, at, solo, pieces.size == 1 || !mergeableLeaf(leaf), leaf, leafStart, leafEnd,
                     // 纯插入只带一段样式：多行（并段 / 拆段）留给整段重放去按叶切，这里不猜。
                     if (pieces.size == 1) {
                         lineSpans(replacementStyles, listOf(solo.text))?.firstOrNull()

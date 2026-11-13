@@ -4,6 +4,7 @@ import orilumn.reader.engine.css.ComputedStyle
 import orilumn.reader.engine.css.LightCssParser
 import orilumn.reader.engine.css.StyleComputer
 import orilumn.reader.engine.css.TextAlign
+import orilumn.reader.engine.css.WhiteSpace
 import orilumn.reader.engine.html.MarkupElement
 import kotlin.math.roundToInt
 import org.junit.Assert.assertEquals
@@ -176,5 +177,59 @@ class WhiteSpaceLeafTest {
         val anon = boxes.first { it.el?.tag == "#text" }
         assertEquals("a b", NormalFlowLayout.leafText(anon.el, styleMap, cl, hd))
         assertEquals(anon.textLength.toLong(), NormalFlowLayout.styledCharAdvance(anon.el!!, { e -> styleMap[e] ?: styleMap[div]!! }, cl, hd))
+    }
+
+    @Test
+    fun `匿名 run 里的 br 是真换行_源码换行照旧折掉_两路同式`() {
+        // 源码换行和 `<br>` 在合成原文里必须分得开：前者按 white-space 折成空格，后者是真换行。
+        // 以前两者都写成 `\n`，整段归一把 `<br>` 一起折成空格 —— 版面不换行，改字还会错位。
+        val div = node(
+            "div",
+            children = listOf(
+                text("风 \n 起"), node("br"), text(" 云\n涌 "),
+                node("p", children = listOf(text("c"))),
+            ),
+        )
+        val root = node("body", children = listOf(div))
+        val styleMap = styles(root)
+        val cl = classify(styleMap)
+        val hd = hidden(styleMap)
+        val boxes = BoxLayouter(10f, FakeBreaker()).layoutBoxes(root, 300, styleMap, cl).let {
+            val out = ArrayList<LayoutBox>()
+            fun walk(bs: List<LayoutBox>) { for (b in bs) if (b.isContainer) walk(b.childBoxes) else out.add(b) }
+            walk(it.boxes)
+            out
+        }
+        val anon = boxes.first { it.el?.tag == "#text" }
+        assertEquals(
+            "源码空白折成空格、`<br>` 两侧的空白照样式段规则剥掉",
+            "风 起\n云 涌",
+            NormalFlowLayout.leafText(anon.el, styleMap, cl, hd),
+        )
+        assertEquals(
+            "轻路径计数与重路径同一串文字",
+            anon.textLength.toLong(),
+            NormalFlowLayout.styledCharAdvance(anon.el!!, { e -> styleMap[e] ?: styleMap[div]!! }, cl, hd),
+        )
+    }
+
+    @Test
+    fun `只有 br 的匿名 run 仍算空格子（不因占位符失去判空）`() {
+        // `<br>` 的占位符必须是空白字符：否则「只剩一个 br」的 run 会从「判空丢弃」变成
+        // 「有内容」，凭空多出一个空块。这里同时确认它不是源码里会出现的字。
+        val div = node("div", children = listOf(node("br"), node("p", children = listOf(text("c")))))
+        val root = node("body", children = listOf(div))
+        val styleMap = styles(root)
+        val cl = classify(styleMap)
+        val hd = hidden(styleMap)
+        val boxes = BoxLayouter(10f, FakeBreaker()).layoutBoxes(root, 300, styleMap, cl).let {
+            val out = ArrayList<LayoutBox>()
+            fun walk(bs: List<LayoutBox>) { for (b in bs) if (b.isContainer) walk(b.childBoxes) else out.add(b) }
+            walk(it.boxes)
+            out
+        }
+        assertTrue("只有 br 的 run 不产块", boxes.none { it.el?.tag == "#text" })
+        assertEquals("风\n起", normalizeAnonymousRun("风${ANON_RUN_BR}起", WhiteSpace.NORMAL))
+        assertTrue("占位符本身是空白字符", ANON_RUN_BR.isWhitespace())
     }
 }

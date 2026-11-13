@@ -1075,16 +1075,17 @@ class BoxChapterLayouter(
         )
         // rebuild 内部量长度时包装还没有父节点；接回属主后按真实级联再量一次。
         r.leaf.parent = owner
-        val after = styling.segmentsOf(r.leaf).text
-        if (after != orilumn.reader.engine.revision.LeafTextEditor.applyEdits(oldText, edits)) return null
         // 拼原文只看 run 的孩子们（包装 tag 本身可能是 `*{display:block}` 之类规则的靶子，
         // 不能把它当行内子树根再走一遍判定）。
         val raw = buildString {
             for (c in r.leaf.children) append(NormalFlowLayout.inlineRunText(c, styling.classify, styling.hidden))
         }
-        // 合成叶落回结构后走的是 run 整段归一（[normalizeAnonymousRun]），长度以它为准。
-        val length = normalizeAnonymousRun(raw, ws).length
-        if (length != after.length) return null
+        // 合成叶落回结构后走的是 run 整段归一（[normalizeAnonymousRun]），长度与文字都以它为准：
+        // 逐节点样式段的空白收尾（叶首/叶尾、`<br>` 两侧）与 run 归一是同一套规则，但**谁收的尾**
+        // 不同（前者按节点、后者按整段），所以终验必须在 run 空间比，不能拿逐节点文字去卡。
+        val rebuilt = normalizeAnonymousRun(raw, ws)
+        if (rebuilt != orilumn.reader.engine.revision.LeafTextEditor.applyEdits(oldText, edits)) return null
+        val length = rebuilt.length
         return orilumn.reader.engine.revision.ChapterRevisionReplay.AnonymousRun(
             owner = owner,
             start = span.start,

@@ -2,9 +2,11 @@ package orilumn.reader.engine
 
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.engine.css.CssBundle
+import orilumn.reader.engine.css.WhiteSpace
 import orilumn.reader.engine.html.HtmlTreeConverter
 import orilumn.reader.engine.html.MarkupElement
 import orilumn.reader.engine.html.MarkupPaths
+import orilumn.reader.engine.laying.normalizeAnonymousRun
 import orilumn.reader.engine.revision.ChapterRevisionReplay
 import orilumn.reader.engine.revision.LeafTextEditor
 import orilumn.reader.engine.text.TypographicProfile
@@ -65,6 +67,10 @@ class AnonymousRunRevisionTest {
         assertTrue("前置：标题后半段应是合成匿名叶", i >= 0)
         return i
     }
+
+    /** 叶的排版文本（匿名 run 走整段归一，与塑形/字符投影同一串）。 */
+    private fun runText(f: Fixture, leaf: Int): String =
+        normalizeAnonymousRun(f.structure.leaves[leaf].text, WhiteSpace.NORMAL)
 
     @Test
     fun `deletes a character in the heading stray run`() {
@@ -156,20 +162,61 @@ class AnonymousRunRevisionTest {
     }
 
     @Test
-    fun `unmatched run falls back instead of mangling text`() {
-        // 行内 `<br>` 在匿名 run 里被排版整段归一成空格，逐节点段文本却是换行：两种口径对不上，
-        // 重建必须放弃（needsRecompute），原文一个字都不许动。
+    fun `run with a br is editable`() {
+        // 匿名 run 里的 `<br>` 与源码换行在合成原文里曾经分不开（都写成 `\n`），整段归一
+        // 把 `<br>` 也折成空格 ⇒ 逐节点段文本与排版文本对不上 ⇒ 重建放弃（needsRecompute），
+        // 提交显示成功、正文一个字都没变。现在 `<br>` 走自己的占位符，两种口径逐字相同。
         val f = prepare(
-            "<html><body><h2><span class=\"num\">第三章</span>风<br/>起</h2>" +
+            "<html><body><h2><span class=\"num\">第三章</span>风<br/>起云涌</h2>" +
+                "<p>正文。</p></body></html>",
+            ".num{display:block}",
+        )
+        val anon = anonymousLeaf(f)
+        assertEquals("风\n起云涌", runText(f, anon))
+        val res = replay(f) { i, _ ->
+            if (i == anon) listOf(LeafTextEditor.Edit(2, 3, "")) else emptyList()
+        }
+
+        assertFalse("含 <br> 的匿名 run 也要能改", res.needsRecompute)
+        val rebuilt = res.leaves.firstOrNull { it.tag == "#text" } ?: error("run 还在")
+        assertEquals("风\n云涌", normalizeAnonymousRun(rebuilt.text, WhiteSpace.NORMAL))
+        assertEquals("换行还在（br 没被吃掉）", 1, res.root.children[0].children.count { it.tag == "br" })
+        assertFalse(treeTexts(res.root).contains("风起云涌"))
+    }
+
+    @Test
+    fun `deleting the newline in a run removes its br`() {
+        val f = prepare(
+            "<html><body><h2><span class=\"num\">第三章</span>风<br/>起云涌</h2>" +
                 "<p>正文。</p></body></html>",
             ".num{display:block}",
         )
         val anon = anonymousLeaf(f)
         val res = replay(f) { i, _ ->
-            if (i == anon) listOf(LeafTextEditor.Edit(0, 1, "")) else emptyList()
+            if (i == anon) listOf(LeafTextEditor.Edit(1, 2, "")) else emptyList()
         }
 
-        assertTrue(res.needsRecompute)
-        assertEquals(listOf("风", "起"), treeTexts(res.root).filter { it == "风" || it == "起" })
+        assertFalse(res.needsRecompute)
+        val rebuilt = res.leaves.firstOrNull { it.tag == "#text" } ?: error("run 还在")
+        assertEquals("风起云涌", normalizeAnonymousRun(rebuilt.text, WhiteSpace.NORMAL))
+        assertEquals("换行没了，br 跟着走", 0, res.root.children[0].children.count { it.tag == "br" })
+    }
+
+    @Test
+    fun `typing a newline into a run inserts a br`() {
+        val f = prepare(
+            "<html><body><h2><span class=\"num\">第三章</span>风起云涌</h2>" +
+                "<p>正文。</p></body></html>",
+            ".num{display:block}",
+        )
+        val anon = anonymousLeaf(f)
+        val res = replay(f) { i, _ ->
+            if (i == anon) listOf(LeafTextEditor.Edit(1, 1, "\n")) else emptyList()
+        }
+
+        assertFalse(res.needsRecompute)
+        val rebuilt = res.leaves.firstOrNull { it.tag == "#text" } ?: error("run 还在")
+        assertEquals("风\n起云涌", normalizeAnonymousRun(rebuilt.text, WhiteSpace.NORMAL))
+        assertEquals("新敲的换行落成真 <br>", 1, res.root.children[0].children.count { it.tag == "br" })
     }
 }

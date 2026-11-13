@@ -961,8 +961,8 @@ object NormalFlowLayout {
     }
 
     /**
-     * Appends [el]'s inline/text subtree text to [sb] (non-block only; `<br>` becomes a newline,
-     * `<img>` becomes U+FFFC).
+     * Appends [el]'s inline/text subtree text to [sb] (non-block only; `<br>` becomes
+     * [ANON_RUN_BR], `<img>` becomes U+FFFC).
      *
      * `br`/`img` 两条必须与 [styledSegments] 的 `walk` **逐条同形**（同序同字面）：本函数的产物
      * 只被用作「**这一段 run 有没有内容**」的判据（`flowChildren`/`cellFlowItems` 的
@@ -976,14 +976,14 @@ object NormalFlowLayout {
         when {
             hidden.isHidden(el) -> Unit // display:none inline run contributes no text
             el.isText -> sb.append(el.text)
-            el.tag == "br" -> sb.append('\n')
+            el.tag == "br" -> sb.append(ANON_RUN_BR)
             el.tag == "img" -> sb.append('￼')
             classify.isBlock(el) -> Unit
             else -> for (c in el.children) appendInlineText(c, classify, sb, hidden)
         }
     }
 
-    /** 行内子树的原文（[flowChildren] 的 run 拼法：`<br>`→'\n'、`<img>`→U+FFFC，块/隐藏子树跳过）。 */
+    /** 行内子树的原文（[flowChildren] 的 run 拼法：`<br>`→[ANON_RUN_BR]、`<img>`→U+FFFC，块/隐藏子树跳过）。 */
     fun inlineRunText(
         el: MarkupElement,
         classify: BlockClassify,
@@ -1074,7 +1074,7 @@ object NormalFlowLayout {
             when {
                 hidden.isHidden(x) -> Unit
                 x.isText -> sb.append(x.text)
-                x.tag == "br" -> sb.append('\n')
+                x.tag == "br" -> sb.append(ANON_RUN_BR)
                 x.tag == "img" -> sb.append('￼')
                 classify.isBlock(x) -> { flush(); out.add(x) }
                 else -> for (c in x.children) walk(c)

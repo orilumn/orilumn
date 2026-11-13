@@ -78,7 +78,10 @@ class HtmlTreeConverter {
             // 无属性即与旧 tree 逐字一致）。`style` 仍不保留，与 toMarkup 的 body/html 分支同口径，
             // 避免体级内联样式突然参与级联改变既有渲染。
             attribs(body, "class", "id", "bgcolor", "background"),
-            children = body.children().mapNotNull { toMarkup(it) },
+            // 直接挂在 body 下的文字（`<body>零散文字<p>…</p></body>`）也要进来：只取 `children()`
+            // 等于把这几截文字整段丢掉——书里看得见的位置突然什么都不剩，更谈不上选中、修改。
+            // `childNodesInOrder` 与块级分支同一口径（文本按文档序、`<style>` 之类照旧跳过）。
+            children = childNodesInOrder(body),
         )
     }
 

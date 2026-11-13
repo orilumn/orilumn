@@ -367,9 +367,58 @@ fun finishSegments(segs: List<StyledSegment>, leafWs: WhiteSpace): StyledSegment
 }
 
 /**
- * 匿名 inline-run 整段归一（容器 stray 文本合成 `#text` 叶）：整段按容器 `white-space`
- * 一次归一＋收尾。重路径塑形与轻路径计数共用，恒一致（段内多节点混合 white-space
- * 按容器近似，两路同近似）。
+ * 匿名 run 里 `<br>` 的占位符。
+ *
+ * 合成 `#text` 的原文是「源码文字 + 各标签的替身」拼出来的，`<br>` 和源码换行都写成 `\n`
+ * 就再也分不开 —— 整段归一必然把 `<br>` 也折成空格，段内敲换行也就永远落不出真换行。
+ * 所以 `<br>` 走这个**空白字符**（[Char.isWhitespace] 为真 ⇒ 「只有 br」的 run 仍旧算空、
+ * 判空门不变），而归一化只按它切行、不折它（[WhiteSpaceNormalize.normalizeNode] 只折
+ * `空格 / \t / \n / \r / \f`，不碰它）。
  */
-fun normalizeAnonymousRun(raw: String, ws: WhiteSpace): String =
-    WhiteSpaceNormalize.finishLeaf(WhiteSpaceNormalize.normalizeNode(raw, ws), ws)
+const val ANON_RUN_BR: Char = '\u000B'
+
+/**
+ * 匿名 inline-run 整段归一（容器 stray 文本合成 `#text` 叶）：按容器 `white-space` 归一＋收尾。
+ *
+ * 与逐节点样式段（`styledSegments`）**同一串文字**是编辑能重放的前提，所以这里不只是「整段
+ * 归一」：`<br>`（[ANON_RUN_BR]）两侧的空格也要照 [mergeBoundarySpaces] 第 2 条剥掉，
+ * 源码换行照旧按 `white-space` 折掉。重路径塑形与轻路径计数共用，恒一致
+ * （段内多节点混合 white-space 按容器近似，两路同近似）。
+ */
+fun normalizeAnonymousRun(raw: String, ws: WhiteSpace): String {
+    if (raw.indexOf(ANON_RUN_BR) < 0) {
+        return WhiteSpaceNormalize.finishLeaf(WhiteSpaceNormalize.normalizeNode(raw, ws), ws)
+    }
+    // 每行独立归一：源码空白（含源码换行）按容器的 white-space 处理，`<br>` 才是真换行。
+    val parts = raw.split(ANON_RUN_BR)
+    val sb = StringBuilder(raw.length)
+    for ((i, part) in parts.withIndex()) {
+        if (i > 0) sb.append('\n')
+        sb.append(WhiteSpaceNormalize.normalizeNode(part, ws))
+    }
+    val joined = if (ws == WhiteSpace.NORMAL || ws == WhiteSpace.NOWRAP) {
+        sb.toString().brTrimmed()
+    } else {
+        sb.toString()
+    }
+    return WhiteSpaceNormalize.finishLeaf(joined, ws)
+}
+
+/** 剥掉换行两侧的空格（与 [mergeBoundarySpaces] 的 br 邻位口径相同）。 */
+private fun String.brTrimmed(): String {
+    if (' ' !in this) return this
+    val out = StringBuilder(length)
+    var i = 0
+    while (i < length) {
+        if (this[i] == '\n') {
+            while (out.isNotEmpty() && out[out.length - 1] == ' ') out.setLength(out.length - 1)
+            out.append('\n')
+            i++
+            while (i < length && this[i] == ' ') i++
+            continue
+        }
+        out.append(this[i])
+        i++
+    }
+    return out.toString()
+}

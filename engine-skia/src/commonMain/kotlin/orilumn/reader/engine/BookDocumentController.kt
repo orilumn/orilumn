@@ -1103,6 +1103,8 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                 now = now,
                 replacementStyles = replacementStyles,
                 wsOfLeaf = wsOfLeaf,
+                // 匿名 run（段落之外的零散文字）里插入的换行落成叶内 `<br>`，不拆块。
+                mergeableLeaf = mergeableLeaf,
             )
         } else {
             TextEditPlanner.plan(

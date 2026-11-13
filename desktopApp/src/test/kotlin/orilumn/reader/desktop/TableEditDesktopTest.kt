@@ -246,6 +246,125 @@ class TableEditDesktopTest {
         ImageIO.write(img, "png", file)
     }
 
+    /**
+     * 段落之外的零散文字（`<h1><span style="display:block">…</span>风起云涌</h1>` 里那一截）：
+     * 在卡片里敲换行要真的换行。
+     *
+     * 这条曾经两头都不对：`<br>` 与源码换行在合成原文里分不开，整段归一把它们一起折成空格
+     * （敲了换行也不换行，字间距多一个空格），规划层又把它当成「拆成两个块」，
+     * 于是被「选区跨到整块图片或表格，不能合并或拆段」拒掉——读者听到的是「含图、块，不让改」。
+     */
+    @Test
+    fun anonRunNewlineThroughCardBreaksLine() {
+        for (review in listOf(false, true)) {
+            val root = Files.createTempDirectory("orilumn-anon-nl").toFile()
+            val host = openHost(
+                writeBook(root, "<h1><span style=\"display:block\">第1章</span>风起云涌</h1><p>正文。</p>"),
+                root,
+                reviewMode = review,
+            )
+            try {
+                val pos = runBlocking { host.open() }!!
+                val chapter = pos.chapter
+                val before = body(host, chapter)
+                assertTrue("前置：零散文字应在正文里：$before", before.contains("风起云涌"))
+                val linesBefore = host.pageLines(pos)?.size ?: 0
+                val at = before.indexOf("云涌")
+                assertNotNull("零散文字也应给得出块信息", host.textEditBlocks(chapter, at, at + 2))
+                // 卡片只列选区这一段（宿主按块切，选区在块中间就切半截）。
+                val range = at until at + 2
+                val outcome = commit(host, chapter, range, "云\n涌", pos)
+                assertTrue("敲换行不该被拒：$outcome", outcome is TextEditOutcome.Success)
+                val after = body(host, chapter)
+                assertEquals("换行真的落成换行（不是空格）", "第1章风起云\n涌正文。", after)
+                val success = outcome as TextEditOutcome.Success
+                val linesAfter = success.pos?.let { host.pageLines(it)?.size } ?: 0
+                assertEquals("版面多出一行", linesBefore + 1, linesAfter)
+                val marks = host.reviewMarks(chapter).map { it.start to it.endExclusive }
+                if (review) {
+                    // 审阅空间里标的是**新敲的那个换行**本身（以前标到它后面那个字上）。
+                    assertEquals(listOf(6 to 7), marks)
+                } else {
+                    assertTrue("普通视图不留痕迹：$marks", marks.isEmpty())
+                }
+            } finally {
+                host.close()
+            }
+        }
+    }
+
+    /** 零散文字里本来就有 `<br>` 时也要能改（改完换行还在）。 */
+    @Test
+    fun anonRunWithBrStaysEditable() {
+        for (review in listOf(false, true)) {
+            val root = Files.createTempDirectory("orilumn-anon-br").toFile()
+            val host = openHost(
+                writeBook(root, "<h1><span style=\"display:block\">第1章</span>风<br/>起云涌</h1><p>正文。</p>"),
+                root,
+                reviewMode = review,
+            )
+            try {
+                val pos = runBlocking { host.open() }!!
+                val chapter = pos.chapter
+                val before = body(host, chapter)
+                assertEquals("前置：br 已是真换行", "第1章风\n起云涌正文。", before)
+                val at = before.indexOf("云涌")
+                assertNotNull("零散文字也应给得出块信息", host.textEditBlocks(chapter, at, at + 2))
+                val outcome = commit(host, chapter, at until at + 2, "云海", pos)
+                assertTrue("含 br 的零散文字应能改：$outcome", outcome is TextEditOutcome.Success)
+                // 审阅空间里原文与新增文字并排（改字 = 划掉旧字、添上新字），普通视图是直接换掉。
+                val expected = if (review) "第1章风\n起云涌海正文。" else "第1章风\n起云海正文。"
+                assertEquals("改后换行仍在", expected, body(host, chapter))
+            } finally {
+                host.close()
+            }
+        }
+    }
+
+    /** 直接挂在 `<body>` 下的文字不能整段消失（它得先看得见，才谈得上选中、修改）。 */
+    @Test
+    fun bodyLevelStrayTextIsKept() {
+        val root = Files.createTempDirectory("orilumn-body-text").toFile()
+        val host = openHost(writeBook(root, "卷首零散文字。<p>正文段落。</p>卷尾零散文字。"), root)
+        try {
+            val pos = runBlocking { host.open() }!!
+            val text = body(host, pos.chapter)
+            assertTrue("body 直接子级的文字要进正文：$text", text.contains("卷首零散文字。"))
+            assertTrue("body 直接子级的文字要进正文：$text", text.contains("卷尾零散文字。"))
+            assertTrue("正文段落照旧", text.contains("正文段落。"))
+        } finally {
+            host.close()
+        }
+    }
+
+    /** 真要合并 / 拆段被拒时，提示语说的是**实际挡路的那一叶**，不能一律推给图片、表格。 */
+    @Test
+    fun mergeRejectionNamesTheRealCulprit() {
+        val root = Files.createTempDirectory("orilumn-merge-msg").toFile()
+        val host = openHost(
+            writeBook(root, "<h1><span style=\"display:block\">第1章</span>风起云涌</h1><p>正文。</p>"),
+            root,
+        )
+        try {
+            val pos = runBlocking { host.open() }!!
+            val chapter = pos.chapter
+            val at = body(host, chapter).indexOf("章风起")
+            // 把块叶尾部与零散文字开头拼成一段：真要合并，拒绝并说清楚是「零散文字」挡的路。
+            val outcome = runBlocking {
+                host.commitTextEdit(
+                    chapter = chapter, start = at, endExclusive = at + 3,
+                    text = "章风起", styles = null, currentPage = pos,
+                )
+            }
+            assertTrue("应被拒：$outcome", outcome is TextEditOutcome.Rejected)
+            val reason = (outcome as TextEditOutcome.Rejected).reason
+            assertTrue("提示要指向零散文字，而不是图片、表格：$reason", reason.contains("零散文字"))
+            assertFalse("不该再误报图片、表格：$reason", reason.contains("图片") || reason.contains("表格"))
+        } finally {
+            host.close()
+        }
+    }
+
     @Test
     fun wholeTableEditsThroughCard() {
         val root = Files.createTempDirectory("orilumn-table").toFile()

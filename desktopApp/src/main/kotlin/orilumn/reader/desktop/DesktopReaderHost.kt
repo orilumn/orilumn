@@ -10,6 +10,7 @@ import orilumn.reader.data.settings.BookSettings
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.engine.BookDocumentController
 import orilumn.reader.engine.revision.InlineMarkup
+import orilumn.reader.engine.revision.ReviewOverlay
 import orilumn.reader.engine.revision.TableRowScope
 import orilumn.reader.engine.revision.TextEditBlock
 import orilumn.reader.engine.revision.TextEditPart
@@ -252,6 +253,16 @@ class DesktopReaderHost(
     /** 选区上的行内结构（渲染空间，相对选区起点）：卡片回显标记文字用。 */
     override fun textEditSpans(chapter: Int, start: Int, endExclusive: Int): List<InlineMarkup.StyleSpan>? =
         controller.textEditSpans(chapter, start, endExclusive)
+
+    /** 修订**原来**盖着的行内结构（卡片判「新写的标记」用，与审阅痕迹同源）。 */
+    override fun textRevisionOriginalSpans(chapter: Int, revisionId: Long): List<InlineMarkup.StyleSpan>? =
+        controller.textRevisionOriginalSpans(chapter, revisionId)
+
+    /** 一条修订在审阅空间里的样子（编辑清单行摘要，与审阅视图同一份数据）。 */
+    override fun textRevisionReviewExcerpt(
+        chapter: Int,
+        revisionId: Long,
+    ): ReviewOverlay.Excerpt? = controller.reviewExcerptOf(chapter, revisionId)
 
     /** 选区涉及的各块（卡片每行的块标记用）。 */
     override fun textEditBlocks(chapter: Int, start: Int, endExclusive: Int): List<TextEditBlock>? =

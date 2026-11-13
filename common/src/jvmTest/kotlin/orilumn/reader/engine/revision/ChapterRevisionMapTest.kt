@@ -395,6 +395,73 @@ class ChapterRevisionMapTest {
     }
 
     @Test
+    fun reviewExcerptShowsTheGreenMarkersOfAFormatOnlyRevision() {
+        // 用户的原例：`<code>getPriceInEuros()</code>` 里只选中「Price」加粗，字一个没改。
+        // 快照两端一模一样，按字符差异一条颜色都出不来；审阅视图里那对 `**` 是绿字，
+        // 清单行必须画成同一串。
+        val r = TextRevision(
+            id = 1,
+            bookId = 1,
+            chapter = 1,
+            charStart = 7,
+            charEnd = 12,
+            text = "Price",
+            originalText = "Price",
+            editedText = "Price",
+            styles = listOf(RevisionStyleSpan(0, 5, RevisionStyle("strong"))),
+        )
+        val map = ChapterRevisionMap(
+            listOf(r),
+            originalTexts = mapOf(r to "Price"),
+            originalSpans = mapOf(r to emptyList()),
+        )
+        val excerpt = map.reviewExcerpt(r)!!
+        assertEquals("**Price**", excerpt.text)
+        assertEquals(listOf(0 until 2, 7 until 9), pairs(excerpt.inserted))
+        assertTrue(pairs(excerpt.deleted).isEmpty())
+    }
+
+    @Test
+    fun reviewExcerptKeepsTheKeptTextAroundTheChange() {
+        // 选中「他慢慢地走」只换中间两个字：行摘要仍是整段（两端没改的字照排），
+        // 里头的红 / 绿与审阅视图一致。
+        val r = TextRevision(
+            id = 1,
+            bookId = 1,
+            chapter = 1,
+            charStart = 1,
+            charEnd = 3,
+            text = "快快",
+            originalText = "他慢慢地走",
+            editedText = "他快快地走",
+        )
+        val map = ChapterRevisionMap(
+            listOf(r),
+            originalTexts = mapOf(r to "慢慢"),
+        )
+        val excerpt = map.reviewExcerpt(r)!!
+        assertEquals("他慢慢快快地走", excerpt.text)
+        assertEquals(listOf(1 until 3), pairs(excerpt.deleted))
+        assertEquals(listOf(3 until 5), pairs(excerpt.inserted))
+    }
+
+    @Test
+    fun reviewExcerptNeedsTheOriginalProjection() {
+        // 本章结构没载入 / 老数据没有原文投影：拿不到审阅空间那一段，清单退回快照对齐。
+        val r = TextRevision(
+            id = 1,
+            bookId = 1,
+            chapter = 1,
+            charStart = 0,
+            charEnd = 5,
+            text = "Price",
+            originalText = "Price",
+            editedText = "Price",
+        )
+        assertEquals(null, ChapterRevisionMap(listOf(r)).reviewExcerpt(r))
+    }
+
+    @Test
     fun formatOnlyItalicRemovalShowsRedStars() {
         val text = "函数是执行特定任务的一组指令。"
         val r = TextRevision(

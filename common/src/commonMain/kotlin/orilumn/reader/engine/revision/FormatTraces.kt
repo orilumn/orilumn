@@ -54,7 +54,39 @@ object FormatTraces {
         newSpans: List<InlineMarkup.StyleSpan>?,
     ): List<ReviewOverlay.Trace> {
         if (newSpans == null) return emptyList()
-        if (oldSpans.isEmpty() && newSpans.isEmpty()) return emptyList()
+        val (removed, fresh) = diff(text, oldSpans, newSpans)
+        if (removed.isEmpty() && fresh.isEmpty()) return emptyList()
+        val out = ArrayList<ReviewOverlay.Trace>(removed.size + fresh.size + 2)
+        append(out, text, removed, isNew = false)
+        append(out, text, fresh, isNew = true)
+        return out
+    }
+
+    /**
+     * 修订**新写**的行内元素（与 [inline] 同一份比较：`newSpans - oldSpans`，属性级差异抵消）。
+     *
+     * 修改卡按它决定「哪些标记必须摊开」：读者新写、又正好盖住整张卡的标记（选中一段字、
+     * 整段加粗）在卡片里必须看得见——那张卡就是这次改动的全部内容，藏起来读者只会看到
+     * 一段没改过的普通文字，与审阅视图里那对绿色 `**` 对不上。
+     * 书本来就有的整段覆盖仍然是隐形的（见 `splitAmbientSpans`）：那不是读者这一次写的。
+     *
+     * [text] 是修订文字（与 [newSpans] 同尺）；[oldSpans] 是同一段文字在书里原来的结构。
+     */
+    fun freshSpans(
+        text: String,
+        oldSpans: List<InlineMarkup.StyleSpan>,
+        newSpans: List<InlineMarkup.StyleSpan>?,
+    ): List<InlineMarkup.StyleSpan> {
+        if (newSpans == null) return emptyList()
+        return diff(text, oldSpans, newSpans).second
+    }
+
+    /** 原文有、修订里没了（[first]）／修订里新写的（[second]），属性级差异两边都算没变。 */
+    private fun diff(
+        text: String,
+        oldSpans: List<InlineMarkup.StyleSpan>,
+        newSpans: List<InlineMarkup.StyleSpan>,
+    ): Pair<List<InlineMarkup.StyleSpan>, List<InlineMarkup.StyleSpan>> {
         val old = oldSpans.filter { it.inRange(text) }
         val added = newSpans.filter { it.inRange(text) }
         val oldKeys = old.map { it.key }.toHashSet()
@@ -73,10 +105,7 @@ object FormatTraces {
             removed.remove(a)
             it2.remove()
         }
-        val out = ArrayList<ReviewOverlay.Trace>(removed.size + fresh.size + 2)
-        append(out, text, removed, isNew = false)
-        append(out, text, fresh, isNew = true)
-        return out
+        return removed to fresh
     }
 
     /**

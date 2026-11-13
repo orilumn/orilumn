@@ -1,6 +1,7 @@
 package orilumn.reader.ui.reader
 
 import orilumn.reader.data.revision.TextRevision
+import orilumn.reader.engine.revision.ReviewOverlay
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -131,6 +132,66 @@ class RevisionPanelRowsTest {
         assertEquals("（原文未记录）", concat(spans))
         assertEquals(listOf(ReviewSpanKind.Deleted), kinds(spans))
     }
+
+    @Test
+    fun formatOnlyRevisionUsesTheReviewSpaceExcerpt() {
+        // 用户的原例：只给「Price」加粗，字一个没改 —— 快照两端相同，按字符差异一片空白，
+        // 行里只剩普通文字；宿主给得出审阅空间那一段时按它排，绿 `**` 与审阅视图一致。
+        val spans = revisionReviewSpans(
+            rev(start = 7, end = 12, text = "Price", originalText = "Price", editedText = "Price"),
+            excerpt("**Price**", inserted = listOf(0 until 2, 7 until 9)),
+        )
+        assertEquals("**Price**", concat(spans))
+        assertEquals(
+            listOf(ReviewSpanKind.Inserted, ReviewSpanKind.Kept, ReviewSpanKind.Inserted),
+            kinds(spans),
+        )
+    }
+
+    @Test
+    fun reviewSpaceExcerptKeepsRedAndGreenTheSameWay() {
+        // 改了字的修订走同一份数据：红字（删掉 / 换掉的）与绿字（新写的）位置直接照抄。
+        val spans = revisionReviewSpans(
+            rev(start = 1, end = 3, text = "快快", originalText = "他慢慢地走", editedText = "他快快地走"),
+            excerpt("他慢慢快快地走", deleted = listOf(1 until 3), inserted = listOf(3 until 5)),
+        )
+        assertEquals("他慢慢快快地走", concat(spans))
+        assertEquals(
+            listOf(ReviewSpanKind.Kept, ReviewSpanKind.Deleted, ReviewSpanKind.Inserted, ReviewSpanKind.Kept),
+            kinds(spans),
+        )
+    }
+
+    @Test
+    fun reviewSpaceExcerptFoldsParagraphMarksAndWhitespace() {
+        // 段界不占字符、换行折成空格（清单是一条流式文字），颜色跟着字走，¶ 照排。
+        val spans = revisionReviewSpans(
+            rev(start = 0, end = 2, text = "甲\uE000乙", originalText = "甲乙", editedText = "甲\n乙"),
+            excerpt("甲\uE000乙\n¶丙"),
+        )
+        assertEquals("甲 乙 ¶丙", concat(spans))
+        assertEquals(listOf(ReviewSpanKind.Kept), kinds(spans))
+    }
+
+    @Test
+    fun emptyReviewSpaceExcerptFallsBackToTheSnapshot() {
+        // 宿主给了个空段（对不上 / 全是空白）：仍按快照对齐，不把行留空。
+        val spans = revisionReviewSpans(
+            rev(start = 2, end = 5, text = "", originalText = "删掉的三个字", editedText = ""),
+            excerpt(""),
+        )
+        assertEquals("删掉的三个字", concat(spans))
+    }
+
+    private fun excerpt(
+        text: String,
+        deleted: List<IntRange> = emptyList(),
+        inserted: List<IntRange> = emptyList(),
+    ): ReviewOverlay.Excerpt = ReviewOverlay.Excerpt(
+        text = text,
+        deleted = deleted.flatMap { listOf(it.first, it.last + 1) }.toIntArray(),
+        inserted = inserted.flatMap { listOf(it.first, it.last + 1) }.toIntArray(),
+    )
 
     @Test
     fun longRevisionIsTruncated() {

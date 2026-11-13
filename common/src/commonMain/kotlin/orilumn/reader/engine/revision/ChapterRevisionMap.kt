@@ -545,6 +545,44 @@ class ChapterRevisionMap(
     }
 
     /**
+     * 这条修订在审阅空间里**整段**的样子（编辑清单的行摘要用，与正文审阅视图**同一份**数据）。
+     *
+     * 整段 = 提交时那段选区里两端没改的公共字 + 这条修订的审阅空间形态（见 [overlay]）。
+     * 公共字按 [segmentSides] 从两行快照反推；反推不出来时只有「一裁没裁」（快照就是最小原文）
+     * 才当作没有公共字，其余一律返回 null —— 清单宁可退回快照差异，也不把行截短。
+     *
+     * 之所以从 [ReviewOverlay.Plan] 摊而不是另算一套：只改了标记（字一个没改）的修订在快照里
+     * 两端文字相同，按字符差异一条颜色都出不来，清单会显示成普通文字，与审阅视图里的绿 `**`
+     * 对不上。红 / 绿、¶、`## ` 都只在审阅空间里有，只能从这一份取。
+     *
+     * @return null = 取不到原书投影（本章结构未载入 / 老数据）/ 快照对不上，调用方另算。
+     */
+    fun reviewExcerpt(r: TextRevision): ReviewOverlay.Excerpt? {
+        val plan = overlay(r) ?: return null
+        val minimalOld = originalTexts[r] ?: return null
+        val old = r.originalText
+        val sides = when {
+            old == minimalOld -> 0 to 0
+            else -> segmentSides(r) ?: return null
+        }
+        val (prefixLen, suffixLen) = sides
+        if (prefixLen < 0 || prefixLen + minimalOld.length + suffixLen != old.length) return null
+        val prefix = old.substring(0, prefixLen)
+        val suffix = old.substring(prefixLen + minimalOld.length)
+        return ReviewOverlay.Excerpt(
+            text = prefix + plan.text + suffix,
+            deleted = shiftSpans(plan.deleted, prefix.length),
+            inserted = shiftSpans(plan.inserted, prefix.length),
+        )
+    }
+
+    /** 区间对整体平移（整段前面接了一截没改的公共字）。 */
+    private fun shiftSpans(spans: IntArray, by: Int): IntArray {
+        if (by == 0 || spans.isEmpty()) return spans
+        return IntArray(spans.size) { spans[it] + by }
+    }
+
+    /**
      * 这条修订两端被裁掉的公共字各有多少（原书空间字符数），反推不出来时 null。
      *
      * 依据：`originalText` = 前缀 + 最小原文 + 后缀，`editedText` = 前缀 + [TextRevision.text] + 后缀。

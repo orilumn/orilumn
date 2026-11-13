@@ -61,6 +61,7 @@ import orilumn.reader.data.revision.TextRevision
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.engine.paging.BookPageNumber
 import orilumn.reader.engine.revision.BlockKind
+import orilumn.reader.engine.revision.FormatTraces
 import orilumn.reader.engine.revision.InlineMarkup
 import orilumn.reader.engine.revision.RevisionBlocks
 import orilumn.reader.engine.revision.TableGrid
@@ -1267,7 +1268,9 @@ fun ReaderScreen(
         val rc = if (rowCard != null) {
             RevisionCard(editCardOf(rowCard.text, rowCard.blocks, rowCard.styles), rowCard.text)
         } else {
-            revisionCardOf(revision)
+            // 书里这一段**原来**的行内结构：只改标记的修订靠它区分「读者新写的」与「本来就有的」，
+            // 与审阅视图的痕迹同一份来源（见 `FormatTraces`）。取不到就按纯文本开卡，不猜。
+            revisionCardOf(revision, currentHost.textRevisionOriginalSpans(p.chapter, revision.id))
         }
         textEditText = rc.card.text
         textEditOriginalSpans = rc.card.originalSpans
@@ -3942,11 +3945,17 @@ internal fun spansToEditText(
  * 卡片里摆一串 `` ` `` 或 `*` 只会让他以为结构是自己写的，提交时按整段套回更稳。
  * 只有边界切在选区内（元素露出半截）的元素才摊成标记。
  *
+ * [alwaysVisible] 是**必须摊开**的那几条：读者这一次新写的标记（[FormatTraces.freshSpans]）。
+ * 它们即使正好盖住整张卡也照实显示——那张卡就是这次改动的全部内容，藏起来读者看到的
+ * 是一段没改过的普通文字，与审阅视图里那对绿 `**` 对不上（用户复报）。书本来就有的
+ * 整段覆盖不在表里，仍旧隐形。
+ *
  * 隐形不能越级：外层是局部的，内层即使整段覆盖也要显示——否则补回时会落到外层之外。
  */
 internal fun splitAmbientSpans(
     spans: List<InlineMarkup.StyleSpan>,
     length: Int,
+    alwaysVisible: List<InlineMarkup.StyleSpan> = emptyList(),
 ): Pair<List<InlineMarkup.StyleSpan>, List<InlineMarkup.StyleSpan>> {
     val ambient = ArrayList<InlineMarkup.StyleSpan>()
     val visible = ArrayList<InlineMarkup.StyleSpan>()
@@ -3958,7 +3967,7 @@ internal fun splitAmbientSpans(
         while (open.isNotEmpty() && open.last().endExclusive <= sp.start) open.removeAt(open.size - 1)
         val parentAmbient = open.isEmpty() || ambient.contains(open.last())
         val coversAll = sp.start <= 0 && sp.endExclusive >= length
-        if (coversAll && parentAmbient) ambient.add(sp) else visible.add(sp)
+        if (coversAll && parentAmbient && sp !in alwaysVisible) ambient.add(sp) else visible.add(sp)
         open.add(sp)
     }
     return ambient to visible
@@ -4045,7 +4054,10 @@ internal class RevisionCard(val card: EditCard, val plain: String)
  * 表格修订（`editedBlocks` 里有 `t…` / 首行 `T…`）仍用 `editedText` / `editedBlocks`：
  * 整表修订的 `editedText` 本来就是整张表（未选中的行也拼回去了）。
  */
-internal fun revisionCardOf(revision: TextRevision): RevisionCard {
+internal fun revisionCardOf(
+    revision: TextRevision,
+    oldSpans: List<InlineMarkup.StyleSpan>? = null,
+): RevisionCard {
     val tableLike = revision.editedBlocks.any { it.startsWith("t") || it.startsWith("T") }
     if (tableLike) {
         val plain = revision.editedText
@@ -4068,7 +4080,10 @@ internal fun revisionCardOf(revision: TextRevision): RevisionCard {
     // 改后文字完全一致的情况下才能拿 `editedStyles` 顶上（否则偏移对不上，宁可不套）。
     val stored = revision.styles
         ?: revision.editedStyles?.takeIf { revision.editedText == plain }
-    return RevisionCard(editCardOf(plain, blocks, stored), plain)
+    // 原书结构只在宿主给得出时用（它已经按「文字逐字没变」筛过）：单段才回比，
+    // 多段时卡片里多了 `\n`，偏移对不上。给了就按审阅视图同一套判据摊开新标记。
+    val old = oldSpans?.takeIf { segments.size == 1 }
+    return RevisionCard(editCardOf(plain, blocks, stored, old), plain)
 }
 
 /**
@@ -4088,11 +4103,19 @@ internal fun editCardOf(
     editedText: String,
     blocks: List<String>,
     stored: List<orilumn.reader.data.revision.RevisionStyleSpan>?,
+    oldSpans: List<InlineMarkup.StyleSpan>? = null,
 ): EditCard {
     val spans = stored?.let(InlineMarkup::fromStored)
     val segments = orilumn.reader.engine.revision.RevisionBlocks.cardSegments(editedText, blocks)
         ?: listOf(InlineMarkup.Segment(editedText))
-    val (ambient, visible) = splitAmbientSpans(spans.orEmpty(), editedText.length)
+    // 读者这次新写的标记必须看得见（与审阅视图的痕迹同一个判据）：书本来就有的整段覆盖
+    // 仍然隐形，读者新加的整段覆盖照实摊开。
+    val fresh = if (oldSpans != null && spans != null) {
+        FormatTraces.freshSpans(editedText, oldSpans, spans)
+    } else {
+        emptyList()
+    }
+    val (ambient, visible) = splitAmbientSpans(spans.orEmpty(), editedText.length, fresh)
     return EditCard(
         text = InlineMarkup.show(segments, visible),
         originalSpans = spans,

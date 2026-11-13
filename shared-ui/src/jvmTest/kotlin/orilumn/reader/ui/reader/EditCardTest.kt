@@ -54,6 +54,84 @@ class EditCardTest {
     }
 
     @Test
+    fun markupTheReaderJustAddedIsShownEvenIfItCoversTheWholeCard() {
+        // 选中一段字整段加粗：字一个没改，只有标记是新的。早先「整段覆盖 = 隐形」把新写的
+        // `**` 也藏了，卡片里只剩一段普通文字，与审阅视图那对绿 `**` 对不上（用户复报）。
+        val strong = RevisionStyle("strong", emptyMap())
+        val stored = listOf(RevisionStyleSpan(0, 2, strong))
+        val card = editCardOf("本节", emptyList(), stored, oldSpans = emptyList())
+        assertEquals("**本节**", card.text)
+        assertTrue(card.ambientSpans.isEmpty())
+        // 回显 → 解析 → 补回：原样确定仍是同一条结构。
+        val parsed = InlineMarkup.parse(card.text)
+        assertTrue(parsed.ok)
+        assertEquals("本节", parsed.text)
+        assertEquals(
+            InlineMarkup.fromStored(stored),
+            InlineMarkup.restore(emptyList(), parsed.spans),
+        )
+    }
+
+    @Test
+    fun markupThatWasAlreadyInTheBookStaysHidden() {
+        // 同一段字本来就整段在 `<code>` 里（只改了一个字）：那是书自己的元素，不是读者这次写的，
+        // 仍旧隐形套回——与审阅视图里「没有痕迹」一致。
+        val original = listOf(InlineMarkup.StyleSpan(0, 2, InlineMarkup.StyleSig("code", code.attrs)))
+        val card = editCardOf(
+            "本节", emptyList(), listOf(RevisionStyleSpan(0, 2, code)), oldSpans = original,
+        )
+        assertEquals("本节", card.text)
+        assertEquals(1, card.ambientSpans.size)
+    }
+
+    @Test
+    fun onlyTheMarkersTheReaderAddedAreShown() {
+        // 原来的 `<code>` 留着，读者又给整段加了粗：只有粗体是新的（摊开显示），代码层隐形。
+        val original = listOf(InlineMarkup.StyleSpan(0, 2, InlineMarkup.StyleSig("code", code.attrs)))
+        val strong = RevisionStyle("strong", emptyMap())
+        val card = editCardOf(
+            "本节", emptyList(),
+            listOf(RevisionStyleSpan(0, 2, code), RevisionStyleSpan(0, 2, strong)),
+            oldSpans = original,
+        )
+        assertEquals("**本节**", card.text)
+        assertEquals(1, card.ambientSpans.size)
+        assertEquals(InlineMarkup.StyleSig("code", code.attrs), card.ambientSpans.single().sig)
+    }
+
+    @Test
+    fun revisionOnlyCardUsesTheBookSpansToKeepUnchangedMarkupHidden() {
+        // 重开一条「只加了粗」的修订：卡片带出 `**`，与审阅视图的绿 `**` 是同一件事。
+        val strong = RevisionStyle("strong", emptyMap())
+        val revision = TextRevision(
+            id = 7, bookId = 1, chapter = 1, charStart = 100, charEnd = 102, text = "本节",
+            styles = listOf(RevisionStyleSpan(0, 2, strong)),
+            originalText = "本节", editedText = "本节",
+        )
+        assertEquals("**本节**", revisionCardOf(revision, emptyList()).card.text)
+        // 取不到原书结构（老宿主 / 结构未就绪）时不猜，按老口径开卡。
+        assertEquals("本节", revisionCardOf(revision, null).card.text)
+        // 书里本来就整段在 `<code>` 里、这次也没动它：隐形。
+        val original = listOf(InlineMarkup.StyleSpan(0, 2, InlineMarkup.StyleSig("code", code.attrs)))
+        val unchanged = revision.copy(styles = listOf(RevisionStyleSpan(0, 2, code)))
+        assertEquals("本节", revisionCardOf(unchanged, original).card.text)
+    }
+
+    @Test
+    fun reviewModeRevisionCopyStillShowsTheMarkersTheReaderWrote() {
+        // 审阅视图里宿主把区间换成「原文 + 痕迹 + 新字」，比替换文本长；卡片文字仍是替换文本。
+        // 原书结构由宿主按落库那条筛过（等长才给），卡片这边不能再按区间长度二次筛，
+        // 否则审阅视图里又只剩一段普通文字——那正是用户复报的地方。
+        val strong = RevisionStyle("strong", emptyMap())
+        val reviewCopy = TextRevision(
+            id = 8, bookId = 1, chapter = 1, charStart = 4, charEnd = 10, text = "表格",
+            styles = listOf(RevisionStyleSpan(0, 2, strong)),
+            originalText = "表格", editedText = "表格",
+        )
+        assertEquals("**表格**", revisionCardOf(reviewCopy, emptyList()).card.text)
+    }
+
+    @Test
     fun oldRevisionWithoutEditedStylesOpensAsPlainText() {
         // 老数据没存过输入区结构：结构按纯文本开卡，一个标记都不凭空加（文字仍按原文转义）。
         val card = editCardOf("用 val 声明", emptyList(), null)

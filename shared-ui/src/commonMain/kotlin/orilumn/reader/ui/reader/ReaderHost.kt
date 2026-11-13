@@ -8,6 +8,7 @@ import orilumn.reader.engine.LinkTarget
 import orilumn.reader.engine.paging.BookPageNumber
 import orilumn.reader.engine.paging.PageSlice
 import orilumn.reader.engine.revision.InlineMarkup
+import orilumn.reader.engine.revision.ReviewOverlay
 import orilumn.reader.engine.revision.TableRowScope
 import orilumn.reader.engine.revision.TextEditBlock
 import orilumn.reader.engine.revision.TextEditPart
@@ -448,6 +449,29 @@ interface ReaderHost {
      * 提交时同一份结构用于补回元素属性（`class` / `id` 之类读者没写的部分）。
      */
     fun textEditSpans(chapter: Int, start: Int, endExclusive: Int): List<InlineMarkup.StyleSpan>? = null
+
+    /**
+     * 一条修订**原来**盖着的行内结构（原书空间，**相对 [revisionId] 那条修订的区间起点**）。
+     *
+     * 正文修改卡重开旧修订时用它区分「读者这一次新写的标记」与「书本来就有的元素」：
+     * 新写的整段覆盖要摊开显示、本来就有的整段覆盖保持隐形（见 `splitAmbientSpans`），
+     * 与审阅视图的格式痕迹同一份来源（`ChapterRevisionMap.originalSpans`），两处不会各说各话。
+     *
+     * 默认 null = 宿主没实现 / 这一条取不到原书投影：卡片按纯文本开卡，不猜。
+     */
+    fun textRevisionOriginalSpans(chapter: Int, revisionId: Long): List<InlineMarkup.StyleSpan>? = null
+
+    /**
+     * 一条修订在**审阅空间**里的样子（编辑清单的行摘要用）：文字 + 红 / 绿区间（局部偏移）。
+     *
+     * 清单的一行要画得与正文审阅视图**完全一致**（绿 `**`、划掉的红 `## `、¶ 都在），所以两边
+     * 取同一份数据（`ChapterRevisionMap.reviewExcerpt`），清单不另算一套差异：只改了标记的修订
+     * 两端文字相同，按快照做字符差异一条颜色都出不来，行里就只剩普通文字。
+     *
+     * 默认 null = 宿主没实现 / 这一条取不到（本章结构未载入、老数据没有原文投影、快照对不上）：
+     * 清单退回「原文 / 改文」快照做字符级对齐，行为与引入这一口之前一致。
+     */
+    fun textRevisionReviewExcerpt(chapter: Int, revisionId: Long): ReviewOverlay.Excerpt? = null
 
     /**
      * 选区涉及的各**块**（渲染空间 [start, endExclusive)）：正文修改卡按它给每一行加块标记

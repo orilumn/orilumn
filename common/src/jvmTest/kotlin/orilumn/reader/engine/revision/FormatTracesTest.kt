@@ -108,6 +108,24 @@ class FormatTracesTest {
     }
 
     @Test
+    fun freshSpansAreExactlyTheOnesTheGreenTracesAreDrawnFrom() {
+        // 修改卡「哪些标记要摊开」与审阅视图「哪些标记要画绿」必须同源：读者新写的那几个。
+        val text = "你好世界"
+        val old = listOf(InlineMarkup.StyleSpan(0, 2, InlineMarkup.StyleSig("code")))
+        val added = InlineMarkup.StyleSpan(0, 4, InlineMarkup.StyleSig("strong"))
+        val fresh = FormatTraces.freshSpans(text, old, listOf(old.single()) + added)
+        assertEquals(listOf(added), fresh)
+        // 书里本来就有的（同区间同标签）不算新写。
+        assertTrue(FormatTraces.freshSpans(text, old, old).isEmpty())
+        // 只换属性不算新写（与红绿痕迹同一口径）。
+        val a = InlineMarkup.StyleSpan(0, 4, InlineMarkup.StyleSig("span", mapOf("class" to "a")))
+        val b = InlineMarkup.StyleSpan(0, 4, InlineMarkup.StyleSig("span", mapOf("class" to "b")))
+        assertTrue(FormatTraces.freshSpans(text, listOf(a), listOf(b)).isEmpty())
+        // 老修订没存过结构：不知道读者改了什么，不猜。
+        assertTrue(FormatTraces.freshSpans(text, old, null).isEmpty())
+    }
+
+    @Test
     fun removedBoldShowsRedDoubleStars() {
         val traces = FormatTraces.inline(
             "你好世界",

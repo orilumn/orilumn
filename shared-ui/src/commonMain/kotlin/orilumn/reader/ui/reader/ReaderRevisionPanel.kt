@@ -42,6 +42,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import orilumn.reader.data.revision.TextRevision
 import orilumn.reader.engine.revision.CharDiff
+import orilumn.reader.engine.revision.ReviewOverlay
+import orilumn.reader.engine.revision.RevisionBlocks
 
 /**
  * 编辑清单的列表体（用户层，v3.2 的清单形态）：由 [ReaderSidePanel] 的抽屉壳承载，
@@ -71,6 +73,14 @@ fun ReaderRevisionPanel(
     initial: List<TextRevision>? = null,
     /** 「全部恢复原文」：成功返回 true。null = 宿主不支持，按钮不出现。 */
     onRestoreAll: (suspend () -> Boolean)? = null,
+    /**
+     * 一条修订在**审阅空间**里的样子（宿主口，与正文审阅视图同一份数据）。
+     *
+     * 给了就按它排行摘要——清单画出来的就是这条修订在审阅视图里长的那一段（绿 `**`、划掉的
+     * 红 `## `、¶ 都在）；null / 返回 null（本章结构未载入、老数据没有原文投影）时退回
+     * 「原文 / 改文」快照做字符级对齐。
+     */
+    excerptOf: ((TextRevision) -> ReviewOverlay.Excerpt?)? = null,
 ) {
     val p = paletteFor(scheme)
     var loaded by remember { mutableStateOf(initial) }
@@ -264,6 +274,7 @@ fun ReaderRevisionPanel(
                         val revision = all[i]
                         RevisionListRow(
                             revision = revision,
+                            excerpt = excerptOf?.let { of -> remember(revision) { of(revision) } },
                             active = nav.activeIdx == i,
                             palette = p,
                             nav = nav,
@@ -359,7 +370,18 @@ internal data class ReviewSpan(val text: String, val kind: ReviewSpanKind)
  * 退回当时的替换文字（[TextRevision.text]）：区间非空的行补一句「（原文未记录）」占位，
  * 补不回选区的纯插入只显示新文字。
  */
-internal fun revisionReviewSpans(revision: TextRevision): List<ReviewSpan> {
+internal fun revisionReviewSpans(
+    revision: TextRevision,
+    /** 宿主给的审阅空间那一段（与正文审阅视图同一份数据）；null = 取不到。 */
+    excerpt: ReviewOverlay.Excerpt? = null,
+): List<ReviewSpan> {
+    // 有审阅空间那一段就以它为准：清单一行画出来的就是审阅视图里那一段，红 / 绿、¶、
+    // 标记痕迹全在里面。只改了标记的修订（字一个没改）按快照做差异本来就是一片空白，
+    // 只有这份数据画得出那对绿 `**`。
+    if (excerpt != null) {
+        val reviewed = reviewExcerptSpans(excerpt)
+        if (reviewed.isNotEmpty()) return reviewed
+    }
     // 只有两列都为空才是「加快照之前写的老修订」；新修订的改文为空就是纯删除。
     val legacy = revision.originalText.isEmpty() && revision.editedText.isEmpty()
     // 两端各自先截到摘要长度再对齐：被截掉的尾巴注定排不出来，不必让对齐算法为它多跑。
@@ -400,6 +422,73 @@ internal fun revisionReviewSpans(revision: TextRevision): List<ReviewSpan> {
     return truncateSpans(out)
 }
 
+/**
+ * 审阅空间里的一段（[ReviewOverlay.Excerpt]）→ 清单行摘要：与正文审阅视图同一套颜色。
+ *
+ * 段界（[RevisionBlocks.SEPARATOR]）不占字符、不显示；换行与连续空白折成一个空格（清单是一条
+ * 流式文字）；其余照抄——红字带删除线、绿字是读者新写的、¶ 与标记痕迹照排。多出来的截掉，
+ * 与快照那条路同一个上限（两行排不下）。
+ */
+internal fun reviewExcerptSpans(excerpt: ReviewOverlay.Excerpt): List<ReviewSpan> {
+    val text = excerpt.text
+    if (text.isEmpty()) return emptyList()
+    // 每个字的身份：0 = 原文照排，1 = 红字（删掉 / 换掉），2 = 绿字（新写 / 标记痕迹）。
+    val kinds = ByteArray(text.length)
+    fun paint(spans: IntArray, kind: Byte) {
+        for (k in spans.indices step 2) {
+            val s = spans[k].coerceIn(0, text.length)
+            val e = spans[k + 1].coerceIn(s, text.length)
+            for (i in s until e) kinds[i] = kind
+        }
+    }
+    paint(excerpt.deleted, 1)
+    paint(excerpt.inserted, 2)
+
+    val chars = StringBuilder(text.length)
+    val kindsOfChars = ArrayList<Int>(text.length)
+    var prevSpace = false
+    for (i in text.indices) {
+        val c = text[i]
+        // 段界（不占字符）与换行、连续空白一样折成一个空格：清单是一条流式文字。
+        if (c == RevisionBlocks.SEPARATOR || c.isWhitespace() || c == '\u00A0') {
+            if (prevSpace) continue
+            chars.append(' ')
+            kindsOfChars += kinds[i].toInt()
+            prevSpace = true
+        } else {
+            chars.append(c)
+            kindsOfChars += kinds[i].toInt()
+            prevSpace = false
+        }
+    }
+    var from = 0
+    var to = chars.length
+    while (from < to && chars[from] == ' ') from++
+    while (to > from && chars[to - 1] == ' ') to--
+
+    val out = ArrayList<ReviewSpan>(4)
+    var i = from
+    while (i < to) {
+        var j = i
+        while (j < to && kindsOfChars[j] == kindsOfChars[i]) j++
+        val kind = when (kindsOfChars[i]) {
+            1 -> ReviewSpanKind.Deleted
+            2 -> ReviewSpanKind.Inserted
+            else -> ReviewSpanKind.Kept
+        }
+        val piece = chars.substring(i, j)
+        val last = out.lastOrNull()
+        // 相邻同身份的字并成一段（折空白后同一侧的字仍挨在一起）。
+        if (last != null && last.kind == kind) {
+            out[out.lastIndex] = last.copy(text = last.text + piece)
+        } else {
+            out += ReviewSpan(piece, kind)
+        }
+        i = j
+    }
+    return truncateSpans(out)
+}
+
 /** 只留前 [ExcerptMaxChars] 个字：两行排不下，多出来的注定被省略号吞掉。 */
 private fun truncateSpans(spans: List<ReviewSpan>): List<ReviewSpan> {
     var left = ExcerptMaxChars
@@ -425,6 +514,8 @@ private fun truncateSpans(spans: List<ReviewSpan>): List<ReviewSpan> {
 @Composable
 private fun RevisionListRow(
     revision: TextRevision,
+    /** 这条修订在审阅空间里的样子（与审阅视图同一份数据）；null = 取不到，按快照对齐。 */
+    excerpt: ReviewOverlay.Excerpt?,
     active: Boolean,
     palette: Palette,
     nav: PanelNav,
@@ -436,7 +527,7 @@ private fun RevisionListRow(
     onDelete: () -> Unit,
 ) {
     val clickSrc = remember { MutableInteractionSource() }
-    val spans = remember(revision) { revisionReviewSpans(revision) }
+    val spans = remember(revision, excerpt) { revisionReviewSpans(revision, excerpt) }
     val line = remember(spans) {
         buildAnnotatedString {
             for (span in spans) {

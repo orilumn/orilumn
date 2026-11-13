@@ -8,10 +8,13 @@ package orilumn.reader.data.revision
  * （方案 D-32）。
  *
  * - [charStart] == [charEnd] 表示纯插入；[text] 为空串表示删除；
- * - [originalText] / [editedText] 是**审阅清单那一行摘要的两端**：前者 = 提交时选区的原文，
+ * - [originalText] / [editedText] 是**清单那一行摘要的两端**：前者 = 提交时选区的原文，
  *   后者 = 读者输入的新文字（都是渲染空间、按段各存一份）。它们只用于显示，
  *   与 [charStart]/[charEnd]/[text] 这套「最小修订」互不影响——裁剪掉的公共前后缀
  *   仍会出现在这两行里，读者才能看出「改之前是什么、改之后是什么」；
+ *   宿主给得出审阅空间那一段时（`ChapterRevisionMap.reviewExcerpt`，与正文审阅视图
+ *   同一份数据）清单优先用它，这两行只是退路——只改了标记的修订两端一模一样，
+ *   按它俩做差异一条颜色都出不来；
  * - [text] 里可能含段界字符 `U+E000`（`RevisionBlocks.SEPARATOR`）：一条跨叶修订按它切块，
  *   结果段数 = 段界数 + 1，段界本身不占字符；`\n` 仍只表示叶内 `<br>`（方案 D-34 修订版）；
  * - [delta] 是提交时实测的「渲染后长度 − 原区间长度」，用于不载入章树也能换算坐标；

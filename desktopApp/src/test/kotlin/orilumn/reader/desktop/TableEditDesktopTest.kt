@@ -53,6 +53,18 @@ private const val MERGED_BODY = """
 <p>合并表格后面的段落。</p>
 """
 
+private const val INLINE_BODY = """
+<h1>行内标记</h1>
+<p>段落前面有<code>代码</code>，还有<strong>粗体</strong>。</p>
+<p>段落后面一段。</p>
+"""
+
+private const val CODE_BODY = """
+<h1>行内代码</h1>
+<p>调用<code>getPriceInEuros()</code>取得价格。</p>
+<p>后面一段。</p>
+"""
+
 private const val MARKUP_BODY = """
 <h1>表格标记</h1>
 <p>表格前面的段落。</p>
@@ -708,11 +720,163 @@ class TableEditDesktopTest {
     }
 
     /**
-     * 审阅视图里「表格 + 表格外的文字」一起选（用户复报：卡片只剩整张表、选中的其他文字没了）。
+     * 字一个没改、只给一段字整段加粗（用户复报：卡片里只剩普通文字，与审阅视图对不上）。
      *
-     * 一张卡里两套改法装不下，卡片按段切开提交：表格那一段按行范围走（拼回整张表），
-     * 表格外的文字那一段按普通区间走——一次落库、两处都生效。
+     * 修改卡重开旧修订时，靠「书里这一段原来有没有这个元素」认出读者这次新写的标记
+     * （`FormatTraces.freshSpans` → `splitAmbientSpans`）。这里验宿主这一环能把它取回来：
+     * 原来没有行内元素 ⇒ 空表（新写的 `**` 因此必须摊开），而不是 null（取不到，卡片不敢显示）。
      */
+    @Test
+    fun markupOnlyRevisionExposesTheOriginalSpansToTheCard() {
+        val root = Files.createTempDirectory("orilumn-markup-card").toFile()
+        val host = openHost(writeBook(root), root)
+        try {
+            val pos = runBlocking { host.open() }!!
+            val chapter = pos.chapter
+            val before = body(host, chapter)
+            val at = before.indexOf("表格前面的段落。")
+            assertTrue("章节里应找到目标段落", at >= 0)
+            val parsed = InlineMarkup.parse("**表格**")
+            assertTrue("卡片文字应能解析：${parsed.errors}", parsed.ok)
+            val outcome = runBlocking {
+                host.commitTextEdit(
+                    chapter = chapter, start = at, endExclusive = at + 2,
+                    text = parsed.text, styles = parsed.spans, currentPage = pos,
+                    blocks = parsed.segments,
+                )
+            }
+            assertTrue("只加标记的提交应成功：$outcome", outcome is TextEditOutcome.Success)
+            val revision = runBlocking { host.textRevisionsForChapter(chapter) }.single()
+            assertEquals("表格", revision.text)
+            assertEquals("strong", revision.styles?.single()?.style?.tag)
+            val old = host.textRevisionOriginalSpans(chapter, revision.id)
+            assertEquals("书里那一段原来没有行内元素", emptyList<InlineMarkup.StyleSpan>(), old)
+            // 文字一个没变（只有粗体是新的），重开卡片用的仍是这条修订。
+            assertEquals(before, body(host, chapter))
+            // 审阅视图（用户复报就在那里）：原书结构同样取得到，且修订区间与修订文字等长——
+            // `revisionCardOf` 只有在这两个长度一致时才拿原书结构回比。
+            runBlocking { host.switchReviewMode(true, chapter, 0) }!!
+            val reviewRevision = runBlocking { host.textRevisionsForChapter(chapter) }.single()
+            assertEquals(
+                "审阅视图里这条修订也应取到空的原书结构（不是 null）",
+                emptyList<InlineMarkup.StyleSpan>(),
+                host.textRevisionOriginalSpans(chapter, reviewRevision.id),
+            )
+        } finally {
+            host.close()
+        }
+    }
+
+    /**
+     * `<code>getPriceInEuros()</code>` 里只把 `Price` 加粗（用户复报）。
+     *
+     * 提交走与 `ReaderScreen.commitTextEdit` 同一条口径：正好盖住整张卡的行内元素是「隐形元素」，
+     * 卡里不显示标记、提交时原样套回，读者只写了 `**`。审阅视图里那对绿 `**` 必须排在原位
+     * （`get**Price**InEuros()`），不能整段挪到代码后面——早先呈 `getPriceInEuros()****`，
+     * 正文的字序也跟着被改掉。
+     */
+    @Test
+    fun boldInsideInlineCodeKeepsTextOrderInReviewSpace() {
+        val root = Files.createTempDirectory("orilumn-inline-order").toFile()
+        val host = openHost(writeBook(root, CODE_BODY), root)
+        try {
+            val pos = runBlocking { host.open() }!!
+            val chapter = pos.chapter
+            val before = body(host, chapter)
+            val at = before.indexOf("Price")
+            assertTrue("章节里应找到目标词：$before", at >= 0)
+            val spans = host.textEditSpans(chapter, at, at + 5)
+            assertNotNull("选区内应取到 <code> 结构", spans)
+            val parsed = InlineMarkup.parse("**Price**")
+            assertTrue("卡片文字应能解析：${parsed.errors}", parsed.ok)
+            // 隐形元素（整段覆盖、卡片里看不见）原样套回 + 属性补回，与阅读面同一条算法。
+            val ambient = spans!!.filter {
+                it.start <= 0 && it.endExclusive >= parsed.text.length
+            }
+            val restored = InlineMarkup.restore(
+                spans.filterNot { it in ambient }, parsed.spans, spans,
+            )
+            val styles = ambient.map {
+                InlineMarkup.StyleSpan(0, parsed.text.length, it.sig)
+            } + restored
+            val outcome = runBlocking {
+                host.commitTextEdit(
+                    chapter = chapter, start = at, endExclusive = at + 5,
+                    text = parsed.text, styles = styles, currentPage = pos,
+                    blocks = parsed.segments,
+                )
+            }
+            assertTrue("只加粗的提交应成功：$outcome", outcome is TextEditOutcome.Success)
+            assertEquals("正文的字一个都不许挪", before, body(host, chapter))
+            // 编辑清单的一行取的是同一份审阅空间数据：只改了标记的修订（两端文字一模一样）
+            // 按快照做字符差异一条颜色都出不来，清单会显示成普通文字，与审阅视图对不上。
+            // 清单是在**普通视图**里打开的，所以不开审阅也要取得到。
+            val revision = runBlocking { host.textRevisionsForBook() }.orEmpty()
+                .firstOrNull { it.chapter == chapter }
+            assertNotNull("提交后应有一条修订", revision)
+            val excerpt = host.textRevisionReviewExcerpt(chapter, revision!!.id)
+            assertNotNull("清单行应取到审阅空间那一段", excerpt)
+            assertEquals("**Price**", excerpt!!.text)
+            val green = excerpt.inserted.toList().chunked(2).map { it[0] until it[1] }
+            assertEquals(listOf(0 until 2, 7 until 9), green)
+            assertNotNull(
+                "应能切到审阅空间",
+                runBlocking { host.switchReviewMode(true, chapter, 0) },
+            )
+            val review = body(host, chapter)
+            assertTrue(
+                "审阅空间的绿标记要排在原词两侧，不能跑到段尾：$review",
+                review.contains("调用get**Price**InEuros()取得价格。"),
+            )
+            // 绿标记的区间也要跟着字走：正好圈住两对 `**`，不能落在别处。
+            val origin = review.indexOf("get**Price**InEuros()")
+            assertTrue("审阅文字里应找得到原位：$review", origin >= 0)
+            val fresh = host.reviewMarks(chapter).filter { !it.deleted }
+            for (r in listOf(origin + 3 until origin + 5, origin + 10 until origin + 12)) {
+                assertTrue(
+                    "绿标记应正好圈住 \"**\"（$r）：$fresh",
+                    fresh.any { it.start <= r.first && it.endExclusive >= r.last + 1 },
+                )
+            }
+        } finally {
+            host.close()
+        }
+    }
+
+    /**
+     * 反过来：这一段**本来就**在 `<code>` 里（读者只在里面改字 / 甚至原样确认）。
+     *
+     * 原书结构里就该看见这个 `code`——修改卡据此把它当「隐形」（整段覆盖、又不是新写的）。
+     * 与上面那条合起来是同一个判据的两个方向（见 `FormatTraces.freshSpans`）。
+     */
+    @Test
+    fun bookMarkupInsideTheSelectionIsExposedToTheCard() {
+        val root = Files.createTempDirectory("orilumn-markup-original").toFile()
+        val host = openHost(writeBook(root, INLINE_BODY), root)
+        try {
+            val pos = runBlocking { host.open() }!!
+            val chapter = pos.chapter
+            val before = body(host, chapter)
+            val at = before.indexOf("代码")
+            assertTrue("章节里应找到目标文字", at >= 0)
+            val spans = host.textEditSpans(chapter, at, at + 2)
+            assertNotNull("选区内应取到 <code> 结构", spans)
+            val outcome = runBlocking {
+                host.commitTextEdit(
+                    chapter = chapter, start = at, endExclusive = at + 2,
+                    text = "代码", styles = spans, currentPage = pos,
+                )
+            }
+            assertTrue("原地确认应成功：$outcome", outcome is TextEditOutcome.Success)
+            val revision = runBlocking { host.textRevisionsForChapter(chapter) }.single()
+            val old = host.textRevisionOriginalSpans(chapter, revision.id)
+            assertNotNull("原书结构应取得到", old)
+            assertEquals("书里本来就有 <code>", listOf("code"), old!!.map { it.sig.tag })
+        } finally {
+            host.close()
+        }
+    }
+
     @Test
     fun mixedTextAndTablePartsCommitTogether() {
         val root = Files.createTempDirectory("orilumn-mixed-edit").toFile()

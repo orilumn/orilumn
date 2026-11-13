@@ -631,6 +631,10 @@ fun ReaderView(
                             pushLanding(target)
                         }
                     },
+                    // 行摘要与正文审阅视图取同一份审阅空间数据（绿 `**` / 红 `## ` / ¶ 都在）。
+                    excerptOf = { revision ->
+                        desktopHost?.textRevisionReviewExcerpt(revision.chapter, revision.id)
+                    },
                     onDismiss = { panelPage = null },
                 )
             },

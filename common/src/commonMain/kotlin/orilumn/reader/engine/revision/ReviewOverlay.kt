@@ -144,6 +144,24 @@ object ReviewOverlay {
     }
 
     /**
+     * 一条修订在**审阅空间**里的样子（编辑清单的行摘要用）：文字 + 红 / 绿区间（局部偏移）。
+     *
+     * 与正文审阅视图**同一份**数据（[ChapterRevisionMap.reviewExcerpt] 从 [Plan] 摊出来）：
+     * 清单一行画出来的就是它在审阅视图里长的那一段——绿 `**`、划掉的红 `## `、¶ 全在，
+     * 清单不另算一套差异。取文字时[deleted] / [inserted] 之外的字符都是原文（照常上色）。
+     *
+     * 属于排版层（上）：纯数据，不碰颜色与画法（那是用户层的事）。
+     */
+    class Excerpt(
+        /** 这一段在审阅空间的文字：含 ¶ 痕迹与段界 [RevisionBlocks.SEPARATOR]（不占字符）。 */
+        val text: String,
+        /** 红字区间：`[start0, end0, start1, end1, …]`，升序、互不相交。 */
+        val deleted: IntArray,
+        /** 绿字区间：同上（含新写的标记痕迹与 ¶）。 */
+        val inserted: IntArray,
+    )
+
+    /**
      * 对齐一段修订。
      *
      * @param old 这条修订盖住的**原书**文字（不含段界；跨叶时各叶顺序相连）。

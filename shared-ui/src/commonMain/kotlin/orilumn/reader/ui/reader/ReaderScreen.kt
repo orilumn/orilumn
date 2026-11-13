@@ -1510,9 +1510,11 @@ fun ReaderScreen(
     LaunchedEffect(openPos, barsVisible, keysEnabled) {
         if (keysEnabled) focusRequester.requestFocus()
     }
-    // 批注输入条关掉后把焦点还给正文：输入框卸载时焦点随之消失，不还回来就得先点一下正文，
-    // 方向键才会恢复翻页（桌面手上习惯键盘的人会以为「卡住了」）。
-    LaunchedEffect(selectionMenuVisible, editingAnnotation) {
+    // 卡片（批注输入条 / 正文修改卡）关掉后把焦点还给正文：输入框卸载时焦点随之消失，
+    // 不还回来就得先点一下正文，方向键才会恢复翻页（桌面习惯键盘的人会以为「卡死了」）。
+    // 键取「有没有卡片开着」整体，而不是逐个开关：正文修改卡关掉时 selectionMenuVisible /
+    // editingAnnotation 都不变，早先正好漏在这一条上——点屏幕中部退出选区，左右键就再也不响应。
+    LaunchedEffect(currentNoteBarOpen, keysEnabled) {
         if (!currentNoteBarOpen && keysEnabled) focusRequester.requestFocus()
     }
 

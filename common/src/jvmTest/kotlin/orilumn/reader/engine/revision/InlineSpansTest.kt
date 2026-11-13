@@ -196,10 +196,9 @@ class InlineSpansTest {
         assertEquals(0 to 3, spans.single().start to spans.single().endExclusive)
 
         val markup = InlineMarkup.show(segments.text, spans)
-        // 标记**不跨行**（规格 §2.3 / §4.5）：跨着 `<br>` 的元素语法糖写不回去，改用标签形式。
-        // 两种写法解析结果相同，所以这里只认「往返等价」，不再固定成 `*a\nb*`。
-        // 段内换行写成硬断行（行尾 `\`），所以块里仍然是一行（块边界与 `<br>` 分得开）。
-        assertEquals("<em>a\\\nb</em>", markup)
+        // 段内换行写成 `<br>`（读者写什么就回显什么，块边界与 `<br>` 分得开），
+        // 语法糖照样跨得过：`*a<br>b*` 解析回来仍是一条斜体、文字是 `a\nb`。
+        assertEquals("*a<br>b*", markup)
         val parsed = InlineMarkup.parse(markup)
         assertEquals("a\nb", parsed.text)
         assertEquals(0 to 3, parsed.spans.single().start to parsed.spans.single().endExclusive)

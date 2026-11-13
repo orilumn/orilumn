@@ -176,7 +176,7 @@ class BlockMarkupTest {
     fun brInsideBlockIsHardBreakAndInlineMarkupStillWorks() {
         val segs = listOf(InlineMarkup.Segment("上句\n下句", BlockKind.Quote))
         val markup = InlineMarkup.show(segs, listOf(span(1, 2, "em")))
-        assertEquals("> 上*句*\\\n下句", markup)
+        assertEquals("> 上*句*<br>下句", markup)
         val parsed = InlineMarkup.parse(markup)
         assertEquals(segs, parsed.segments)
         assertEquals(1 to 2, parsed.spans.single().start to parsed.spans.single().endExclusive)

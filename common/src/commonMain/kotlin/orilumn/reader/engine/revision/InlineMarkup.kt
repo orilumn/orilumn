@@ -159,8 +159,8 @@ object InlineMarkup {
         show(listOf(Segment(text)), spans)
 
     /**
-     * 多块版本：每块按自己的形态写块标记，块内的换行落成硬断行（`\` + 换行），
-     * 代码块落成围栏。块的顺序与 [Segment] 一一对应。
+     * 多块版本：每块按自己的形态写块标记，块内的换行写成 `<br>`，代码块落成围栏。
+     * 块的顺序与 [Segment] 一一对应。
      */
     fun show(segments: List<Segment>, spans: List<StyleSpan>): String {
         val joined = joinSegments(segments)
@@ -1021,9 +1021,12 @@ object InlineMarkup {
                 out.append(renderTableRow(table, seg.text, local, escapeMarkerChars, forceTags))
                 continue
             }
-            // 段内换行（`<br>`）写成硬断行：行尾一个 `\`，解析时并回同一块。
+            // 段内换行（书里的 `<br>`、代码块之外的叶内换行）**原样写成 `<br>`**：
+            // 读者在卡里写的就是这个（「输入什么就显示什么」），回显也照它还回去。
+            // 行尾 `\` + 回车是同一个意思的另一种写法，解析侧照旧认（见 [BlockMarkup]），
+            // 但回显只写 `<br>`，不再凭空冒出读者没敲过的反斜杠。
             val body = renderText(seg.text, local, escapeMarkerChars, forceTags)
-                .replace("\n", "\\\n")
+                .replace("\n", "<br>")
             val marker = seg.block?.marker
             out.append(
                 when {

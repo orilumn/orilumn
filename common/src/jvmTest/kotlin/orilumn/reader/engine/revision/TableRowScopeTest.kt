@@ -6,10 +6,12 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
- * 没有行级对照时，「拖到哪几行就改哪几行」的换算（纯逻辑）。
+ * 表格行卡片的行号换算（纯逻辑）。
  *
- * 场景是审阅空间还没套上修订（本章结构尚未落盘，`reviewMarks` 一个都没有）：
- * 读者拖的是原书那张表的一行，卡片仍应只列改完那张表里对应的那一行，不能又变成整张表。
+ * 两条口径：
+ * 1. 拖到的是改完那张表里还有的行 ⇒ 卡片只列这几行；
+ * 2. 拖到的是读者删掉的行（审阅视图里的红字）⇒ 卡片**空白**（上次编辑的结果就是这行不存在），
+ *    位置留给读者补行。
  */
 class TableRowScopeTest {
 
@@ -44,16 +46,32 @@ class TableRowScopeTest {
 
     @Test
     fun `old table row folds back through row sources`() {
-        // 原书第 0 行被删掉：新行来自旧表的 1、2、3、4 行。
-        val r = revision(listOf(1, 2, 3, 4))
-        val scope = tableRowScopeOfDisplayedRows(r, 4, 3..3, displayedIsNewTable = false)
-        assertEquals(TableRowScope(7, 2, 2), scope)
+        // 原书第 1 行被删掉：改完的表三行分别来自原书的 0、2、3 行。
+        val r = revision(listOf(0, 2, 3))
+        val scope = tableRowScopeOfDisplayedRows(r, 3, 2..2, displayedIsNewTable = false)
+        assertEquals(TableRowScope(7, 1, 1), scope)
     }
 
     @Test
-    fun `deleted row cannot be folded to the new table`() {
-        val r = revision(listOf(1, 2, 3, 4))
-        assertNull(tableRowScopeOfDisplayedRows(r, 4, 0..0, displayedIsNewTable = false))
+    fun `deleted row gives an empty card at its place`() {
+        // 原书第 1 行被删掉：点它 → 空白卡片，补行位置在改完那张表的第一行之后。
+        val r = revision(listOf(0, 2, 3))
+        val scope = tableRowScopeOfDisplayedRows(r, 3, 1..1, displayedIsNewTable = false)
+        assertEquals(TableRowScope(7, 1, 0), scope)
+        assertEquals(true, scope?.isInsertion)
+    }
+
+    @Test
+    fun `deleted first row inserts at the top`() {
+        val r = revision(listOf(1, 2, 3))
+        val scope = tableRowScopeOfDisplayedRows(r, 3, 0..0, displayedIsNewTable = false)
+        assertEquals(TableRowScope(7, 0, -1), scope)
+    }
+
+    @Test
+    fun `deleted and kept rows together fall back to the whole-table card`() {
+        val r = revision(listOf(0, 2, 3))
+        assertNull(tableRowScopeOfDisplayedRows(r, 3, 0..1, displayedIsNewTable = false))
     }
 
     @Test

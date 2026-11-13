@@ -9,10 +9,17 @@ import orilumn.reader.data.revision.TextRevision
  * 读者在审阅视图里拖选改过的表格中的一行时，卡片只列那一行：拖了哪一行就改哪一行。
  * 行号是**上一次改完的那张表**（`editedBlocks` 顺序）里的下标，含两端。
  *
+ * 选中的是**被删掉的行**（审阅视图里的红字）时，[lastRow] = [firstRow] - 1：
+ * 这一行在改完的那张表里已经没有了，编辑区是空的（上次编辑的结果就是「这里没有行」），
+ * 读者想补一行就在这里写。[firstRow] 就是补进去的位置。
+ *
  * 提交仍按**整张表**校验（行列要能铺成矩形网格、行数删到零就是删整张表），
  * 所以这里只记「哪几行」，未选中的行由提交侧从旧修订里原样拼回。
  */
-data class TableRowScope(val revisionId: Long, val firstRow: Int, val lastRow: Int)
+data class TableRowScope(val revisionId: Long, val firstRow: Int, val lastRow: Int) {
+    /** 插入位置（不替换任何已有行）：[lastRow] = [firstRow] - 1。 */
+    val isInsertion: Boolean get() = lastRow == firstRow - 1
+}
 
 /**
  * 「读者选中的是改完那张表的哪几行」——按**当前显示空间**的行序换算（纯逻辑，可脱离排版单测）。
@@ -24,11 +31,14 @@ data class TableRowScope(val revisionId: Long, val firstRow: Int, val lastRow: I
  * - [displayedIsNewTable] = true：显示的就是改完的那张表（普通阅读视图，
  *   或审阅空间已套上修订但没有对照），行号原样对得上；
  * - false：显示的是原书那张表（审阅空间还没套上修订），按 [TextRevision.rowSources]
- *   把旧行折回新表——新表里没有对应行（这一行被删了）就折不过去。
+ *   把旧行折回新表。
+ *
+ * 选中的行在新表里整段都没有（全是被删掉的行）⇒ 给一个**插入位置**（[TableRowScope.isInsertion]）：
+ * 编辑区是空的，读者在这里写的行补回那个位置。
  *
  * @param displayed 读者选中的行在显示空间里的下标（从表格第一行数起，含两端）
  * @param rowCount 改完那张表的行数（[tableRowsOfRevision] 的行数）
- * @return null = 折不过去（有删掉的行 / 行号不连续 / 选中的就是整张表）
+ * @return null = 折不过去（选中的行里有删掉的有留下的 / 行号不连续 / 选中的就是整张表）
  */
 fun tableRowScopeOfDisplayedRows(
     revision: TextRevision,
@@ -37,11 +47,19 @@ fun tableRowScopeOfDisplayedRows(
     displayedIsNewTable: Boolean,
 ): TableRowScope? {
     if (rowCount <= 0 || displayed.first < 0 || displayed.last < displayed.first) return null
-    val indices = if (displayedIsNewTable) {
-        displayed.toList()
-    } else {
-        val sources = revision.rowSources ?: return null
-        displayed.map { i -> sources.indexOf(i) }
+    if (displayedIsNewTable) {
+        if (displayed.last >= rowCount) return null
+        // 整张表：照旧走整表卡片（行数 / 列数都能改）。
+        if (displayed.first == 0 && displayed.last == rowCount - 1) return null
+        return TableRowScope(revision.id, displayed.first, displayed.last)
+    }
+    val sources = revision.rowSources ?: return null
+    val indices = displayed.map { i -> sources.indexOf(i) }
+    if (indices.all { it < 0 }) {
+        // 这一整段在原书里有、改完的表里没有（读者删掉了）：编辑区空白，位置按「前面还剩几行」算。
+        val at = sources.count { it < displayed.first }
+        if (at < 0 || at > rowCount) return null
+        return TableRowScope(revision.id, at, at - 1)
     }
     if (indices.any { it < 0 || it >= rowCount }) return null
     if (indices.zipWithNext().any { (a, b) -> b != a + 1 }) return null

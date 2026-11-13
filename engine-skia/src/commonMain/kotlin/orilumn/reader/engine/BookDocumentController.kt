@@ -706,9 +706,12 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
      * （[TableReviewPlan]）把拖到的行折回新表行号。
      *
      * 返回 null 的几种情形都退回「整表卡片」（老行为）：
-     * - 不是审阅视图 / 不是整表修订 / 拿不到行级对照；
-     * - 拖到的行里有**删掉的行**（新表里没有对应行，没法只改它）；
+     * - 不是审阅视图 / 不是整表修订 / 拿不到行级对照（且折不过去）；
+     * - 选中的既有删掉的行又有留下的行；
      * - 拖到的正好是整张表（那就是整表卡片本身）。
+     *
+     * 拖到的是**被删掉的行**（红字）时给一个插入位置（[TableRowScope.isInsertion]）：
+     * 卡片空白——上次编辑的结果就是这一行不存在；读者要补行就在空白里写。
      *
      * 行级对照建不出来（本章的修订还没套上审阅空间 / 表格结构对不上）时不再直接退整表：
      * 按**当前显示空间**里拖到的那几行换算（见 [tableRowScopeOfDisplayedRows]）。
@@ -746,6 +749,12 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         }
         if (first < 0 || last < first) return null
         val newIndices = (first..last).map { plan.rows[it].newIndex }
+        if (newIndices.all { it < 0 }) {
+            // 选中的整段都是红字（读者删掉的行）：编辑区空白，位置 = 这段前面还剩几行新表。
+            val at = plan.rows.take(first).count { it.newIndex >= 0 }
+            if (at > rows.size) return null
+            return TableRowScope(revisionId, at, at - 1)
+        }
         if (newIndices.any { it < 0 }) return null
         if (newIndices.zipWithNext().any { (a, b) -> b != a + 1 }) return null
         val firstRow = newIndices.first()
@@ -850,7 +859,9 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         blocks: List<InlineMarkup.Segment>?,
     ): RowExpansion? {
         val rows = tableRowsOfRevision(r) ?: return null
-        if (scope.firstRow < 0 || scope.lastRow < scope.firstRow || scope.lastRow >= rows.size) return null
+        // `lastRow = firstRow - 1` 是**插入**（读者点的是删掉的行，编辑区从空白开始）：不顶替任何行。
+        if (scope.firstRow < 0 || scope.firstRow > rows.size) return null
+        if (scope.lastRow < scope.firstRow - 1 || scope.lastRow >= rows.size) return null
         // 卡片一行一个块；老调用方只给整串文字时按 `\n` 切（与卡片同一口径）。
         val card = blocks?.takeIf { it.isNotEmpty() }
             ?: text.split('\n').map { InlineMarkup.Segment(it) }

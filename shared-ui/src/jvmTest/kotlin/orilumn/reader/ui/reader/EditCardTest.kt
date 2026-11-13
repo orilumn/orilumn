@@ -2,6 +2,7 @@ package orilumn.reader.ui.reader
 
 import orilumn.reader.data.revision.RevisionStyle
 import orilumn.reader.data.revision.RevisionStyleSpan
+import orilumn.reader.data.revision.TextRevision
 import orilumn.reader.engine.revision.BlockKind
 import orilumn.reader.engine.revision.InlineMarkup
 import orilumn.reader.engine.revision.TableCellInfo
@@ -216,6 +217,63 @@ class EditCardTest {
         // 只转义行首那一个 `#` 就够（`\##` 不是标记），读者确认后落进书里的还是原文。
         assertEquals("\\## 书里本来就有的井号", card.text)
         assertEquals("## 书里本来就有的井号", InlineMarkup.parse(card.text).text)
+    }
+
+    // ------------------------------------------------ 重开修订 = 改后整段，不是上次选区
+
+    @Test
+    fun revisionCardShowsFullCurrentResultNotJustTheLastSelection() {
+        // 原书「abcdef」先改成「abXYef」，再只把「X」改成「Z」：最小修订 [2,4) → 「ZY」，
+        // 但 `editedText` 只记了最后一次选中的「Z」。重开卡片必须带出整段「ZY」。
+        val rev = TextRevision(
+            bookId = 1,
+            chapter = 0,
+            charStart = 2,
+            charEnd = 4,
+            text = "ZY",
+            originalText = "cd",
+            editedText = "Z",
+            blockKinds = listOf("p"),
+            editedBlocks = listOf("p"),
+        )
+        val rc = revisionCardOf(rev)
+        assertEquals("ZY", rc.plain)
+        assertEquals("ZY", rc.card.text)
+    }
+
+    @Test
+    fun revisionCardKeepsBlockKindsAndInlineStylesOnTheFullResult() {
+        val text = "标题\uE000正文"
+        val rev = TextRevision(
+            bookId = 1,
+            chapter = 0,
+            charStart = 0,
+            charEnd = 5,
+            text = text,
+            blockKinds = listOf("h1", "p"),
+            styles = listOf(RevisionStyleSpan(3, 5, code)),
+        )
+        val rc = revisionCardOf(rev)
+        assertEquals("标题\n正文", rc.plain)
+        assertEquals("# 标题\n`正文`", rc.card.text)
+    }
+
+    @Test
+    fun revisionCardKeepsTableRows() {
+        val row = table(2, 2)
+        val rev = TextRevision(
+            bookId = 1,
+            chapter = 0,
+            charStart = 0,
+            charEnd = 8,
+            text = "甲一乙一甲二乙二",
+            editedText = "甲一乙一\n甲二乙二",
+            editedBlocks = listOf(row.wire(wholeTable = true), row.wire()),
+            rowSources = listOf(0, 1),
+        )
+        val rc = revisionCardOf(rev)
+        assertEquals("甲一乙一\n甲二乙二", rc.plain)
+        assertTrue(rc.card.text, rc.card.text.startsWith("| 甲一 | 乙一 |"))
     }
 
     // ------------------------------------------------ 特殊叶的形状校验（图片 / 表格）

@@ -313,6 +313,8 @@ fun ReaderScreen(
     // 动过之后一律以输入区为准，选区只当落笔范围，不再回写输入框（免得吞掉改写）。
     // 打开旧修改（审阅视图点红字 / 绿字）时输入区带的是已经改过的字，一律按「动过」算。
     var textEditDirty by remember { mutableStateOf(false) }
+    // 这次开卡是不是「重开一条已有修订」：是的话输入区带的是改后整段，拖手柄不能把它换成新选区原文。
+    var textEditFromRevision by remember { mutableStateOf(false) }
     // 块级标记（`# ` / `> ` / `- ` / 围栏）：这次开卡拿不拿得到每块的形态。
     // 拿不到（老宿主 / 非盒式排版）就整套按纯文本提交，绝不按「没写标记 = 普通段落」去改结构。
     var textEditBlocksKnown by remember { mutableStateOf(false) }
@@ -1222,6 +1224,66 @@ fun ReaderScreen(
     }
 
     /**
+     * 打开一条已有修订的修改卡：输入区带出**这条修订改完的整段内容**（不是审阅视图里的
+     * 「原文 + 新文字」对照），选区同步框住整段。点按红绿字与长按选中改过的字都走这里。
+     *
+     * 目标区间始终是这条修订在当前显示空间里的整段（`chapterRevisions` 已换算好），
+     * 提交时再换回原书空间——读者改的仍是原书那一段，不是把改后的字当成新底稿。
+     */
+    fun openRevisionEdit(revision: TextRevision, select: Boolean = true): Boolean {
+        val p = openPos ?: return false
+        if (select) {
+            val text = currentHost.textOf(p.chapter, 0, Int.MAX_VALUE) ?: return false
+            if (!selection.selectRange(p.chapter, text, revision.charStart, revision.charEnd)) {
+                selection.clear()
+            }
+        }
+        closeAnnotationEdit()
+        magnifierFinger = null
+        noteText = ""
+        textEditChapter = p.chapter
+        textEditStart = revision.charStart
+        textEditEnd = revision.charEnd
+        val rc = revisionCardOf(revision)
+        textEditText = rc.card.text
+        textEditOriginalSpans = rc.card.originalSpans
+        textEditAmbientSpans = rc.card.ambientSpans
+        textEditBaseText = rc.plain
+        textEditBaseCard = rc.card.text
+        val tableLike = revision.editedBlocks.any { it.startsWith("t") || it.startsWith("T") }
+        // 打开旧修改时按落库的每行短码还原表格 / 图片形状（提交时仍按它校验结构没被改掉）。
+        val shapeSegments = if (tableLike) {
+            RevisionBlocks.cardSegments(revision.editedText, revision.editedBlocks)
+        } else {
+            null
+        }
+        textEditTables = shapeSegments?.map { it.table } ?: emptyList()
+        // 整表结构修订（首行短码大写 `T`）：这张卡覆盖的就是整张表，行 / 列都可以改。
+        textEditWholeTable = revision.editedBlocks.firstOrNull()?.startsWith("T") == true
+        // 老修订的 `editedText` 分不出「整块图片」与「整段只有一个行内图的段落」，别靠猜：
+        // 图片限制只在当次打开卡片、宿主明确给了叶类型时生效。
+        textEditImages = emptyList()
+        // 旧修订的每行形态来自它自己落库的那份：第一行能不能写标记，看它的首行是不是块首
+        // （落库时按块首对齐过，所以只要第一行有形态就说明它是块首）。
+        textEditBlocksKnown = if (tableLike) {
+            revision.editedBlocks.isNotEmpty()
+        } else {
+            revision.blockKinds.isNotEmpty()
+        }
+        // 落库的第一行没带形态（`""`）= 当时那一行改不了块形态（半截文字 / 不归 markdown 管）。
+        textEditFirstLineNoKind = !tableLike && revision.blockKinds.firstOrNull()?.isEmpty() == true
+        // 输入区带出来的是**已经改过的字**，按「已动过」算：之后拖手柄只挪落笔范围，
+        // 不会把读者上次的改写换成新选区的原文（那等于悄悄丢掉上一次修改）。
+        textEditDirty = true
+        textEditFromRevision = true
+        textEditError = null
+        textEditOpen = true
+        textEditBusy = false
+        selectionMenuVisible = false
+        return true
+    }
+
+    /**
      * 点按改动过的文字（审阅视图里是红字 / 绿字，普通阅读视图里就是改后的正文）：
      * 打开正文修改卡、弹出键盘（不用先长按再点「编辑」）。
      *
@@ -1255,45 +1317,7 @@ fun ReaderScreen(
             )
             return false
         }
-        val text = currentHost.textOf(p.chapter, 0, Int.MAX_VALUE) ?: return false
-        closeAnnotationEdit()
-        magnifierFinger = null
-        if (!selection.selectRange(p.chapter, text, revision.charStart, revision.charEnd)) selection.clear()
-        noteText = ""
-        textEditChapter = p.chapter
-        textEditStart = revision.charStart
-        textEditEnd = revision.charEnd
-        // 打开旧修改时按**落库的输入区结构**回显标记、补回属性（`editedStyles`）。落库的最小修订
-        // 两头被公共前后缀裁过，那截结构只剩输入区这一份；老修订没存过 ⇒ 退回纯文本开卡。
-        val card = editCardOf(revision.editedText, revision.editedBlocks, revision.editedStyles)
-        textEditText = card.text
-        textEditOriginalSpans = card.originalSpans
-        textEditAmbientSpans = card.ambientSpans
-        textEditBaseText = revision.editedText
-        textEditBaseCard = card.text
-        // 打开旧修改时按落库的每行短码还原表格 / 图片形状（提交时仍按它校验结构没被改掉）。
-        val shapeSegments = orilumn.reader.engine.revision.RevisionBlocks
-            .cardSegments(revision.editedText, revision.editedBlocks)
-        textEditTables = shapeSegments?.map { it.table } ?: emptyList()
-        // 整表结构修订（首行短码大写 `T`）：这张卡覆盖的就是整张表，行 / 列都可以改。
-        textEditWholeTable = revision.editedBlocks.firstOrNull()?.startsWith("T") == true
-        // 老修订的 `editedText` 分不出「整块图片」与「整段只有一个行内图的段落」，别靠猜：
-        // 图片限制只在当次打开卡片、宿主明确给了叶类型时生效。
-        textEditImages = emptyList()
-        // 旧修订的每行形态来自它自己落库的那份：第一行能不能写标记，看它的首行是不是块首
-        // （落库时按块首对齐过，所以只要第一行有形态就说明它是块首）。
-        textEditBlocksKnown = revision.editedBlocks.isNotEmpty()
-        // 落库的第一行没带形态（`""`）= 当时那一行改不了块形态（半截文字 / 不归 markdown 管）。
-        textEditFirstLineNoKind = !revision.editedBlocks.isEmpty() &&
-            revision.editedBlocks.first().isEmpty()
-        // 输入区带出来的是**已经改过的字**，按「已动过」算：之后拖手柄只挪落笔范围，
-        // 不会把读者上次的改写换成新选区的原文（那等于悄悄丢掉上一次修改）。
-        textEditDirty = true
-        textEditError = null
-        textEditOpen = true
-        textEditBusy = false
-        selectionMenuVisible = false
-        return true
+        return openRevisionEdit(revision)
     }
 
     fun onTap(xPx: Float, yPx: Float, widthPx: Float, allowFlip: Boolean = true) {
@@ -1583,12 +1607,155 @@ fun ReaderScreen(
     }
 
     /**
+     * 审阅视图里选中了「改过的字 + 别的内容」：卡片按**当前结果**拼出整段，而不是审阅视图的
+     * 「原文 + 新文字」对照。每条修订取它改完的整段（普通文字取 `text`、表格取 `editedText`），
+     * 修订之间的原文照抄；提交时仍按原书区间重算，旧修订被新记录吸收（层叠后只剩最终结果）。
+     *
+     * @return true = 已把卡片目标设成 [from]..[to]（当前空间）
+     */
+    fun setReviewCurrentTarget(
+        ch: Int,
+        from: Int,
+        to: Int,
+        touched: List<TextRevision>,
+    ): Boolean {
+        // 表格和别的内容一起选：结构改法不唯一，退回整表那条修订（卡片带出改后的整张表）。
+        val tableRevision = touched.firstOrNull { r ->
+            r.editedBlocks.any { it.startsWith("t") || it.startsWith("T") }
+        }
+        if (tableRevision != null) return openRevisionEdit(tableRevision)
+
+        val text = currentHost.textOf(ch, 0, Int.MAX_VALUE) ?: return false
+        val brk = currentHost.reviewBreakText(ch)
+        // 选区与卡片目标必须同尺：卡片覆盖的是「旧修订整段 + 别的内容」，选区也一起扩过去。
+        if (!selection.selectRange(ch, text, from, to)) selection.clear()
+        val segments = ArrayList<InlineMarkup.Segment>(touched.size + 2)
+        val spans = ArrayList<InlineMarkup.StyleSpan>(touched.size * 2)
+        var firstStartsAtBlock = true
+        var pos = from
+        var at = 0
+        fun appendPiece(
+            piece: String,
+            block: BlockKind?,
+            rawSpans: List<InlineMarkup.StyleSpan>,
+            reviewStart: Int,
+        ) {
+            val base = brk.plain(reviewStart)
+            for (sp in rawSpans) {
+                val s = brk.plain(reviewStart + sp.start) - base
+                val e = brk.plain(reviewStart + sp.endExclusive) - base
+                if (e > s) spans += InlineMarkup.StyleSpan(at + s, at + e, sp.sig)
+            }
+            segments += InlineMarkup.Segment(piece, block)
+            at += piece.length + 1
+        }
+        fun appendGap(start: Int, endExclusive: Int) {
+            val blocks = currentHost.textEditBlocks(ch, start, endExclusive).orEmpty()
+            if (blocks.isEmpty()) {
+                appendPiece(
+                    brk.slice(text, start, endExclusive),
+                    null,
+                    currentHost.textEditSpans(ch, start, endExclusive).orEmpty(),
+                    start,
+                )
+            } else {
+                if (segments.isEmpty() && blocks.first().startsAtBlockStart == false) {
+                    firstStartsAtBlock = false
+                }
+                for (b in blocks) {
+                    appendPiece(
+                        brk.slice(text, b.start, b.endExclusive),
+                        if (b.startsAtBlockStart == false) null else b.kind,
+                        currentHost.textEditSpans(ch, b.start, b.endExclusive).orEmpty(),
+                        b.start,
+                    )
+                }
+            }
+        }
+        for (r in touched.sortedBy { it.charStart }) {
+            val rs = maxOf(from, r.charStart)
+            val re = minOf(to, r.charEnd)
+            if (rs > pos) appendGap(pos, rs)
+            // 这条修订改完的整段：普通文字按段界切开，表格行已在上面单独退回。
+            val parts = RevisionBlocks.split(r.text)
+            val kinds = r.blockKinds
+            val revAt = at
+            val stored = r.styles ?: r.editedStyles?.takeIf {
+                r.editedText == parts.joinToString("\n")
+            }
+            stored?.let { list ->
+                for (sp in InlineMarkup.fromStored(list)) {
+                    val s = revAt + sp.start
+                    val e = revAt + sp.endExclusive
+                    if (e > s) spans += InlineMarkup.StyleSpan(s, e, sp.sig)
+                }
+            }
+            for (i in parts.indices) {
+                appendPiece(
+                    parts[i],
+                    if (kinds.size == parts.size) BlockKind.fromWire(kinds[i]) else null,
+                    emptyList(),
+                    r.charStart,
+                )
+            }
+            pos = maxOf(pos, re)
+        }
+        if (pos < to) appendGap(pos, to)
+        if (segments.isEmpty()) return false
+        val plain = segments.joinToString("\n") { it.text }
+        val (ambient, visible) = splitAmbientSpans(spans, plain.length)
+        // 只要有一块拿不到形态，就整套按纯文本开卡（不写任何块标记）：否则卡片里别的块的
+        // `## ` 会让提交时误以为「这次要改形态」，而这一块又承载不了。
+        val allKnown = segments.all { it.block != null }
+        val shown = if (allKnown) {
+            segments
+        } else {
+            segments.map { InlineMarkup.Segment(it.text, null, it.table) }
+        }
+        val card = InlineMarkup.show(shown, visible)
+        textEditChapter = ch
+        textEditStart = from
+        textEditEnd = to
+        textEditText = card
+        textEditBaseText = plain
+        textEditBaseCard = card
+        textEditOriginalSpans = spans
+        textEditAmbientSpans = ambient
+        textEditTables = emptyList()
+        textEditImages = emptyList()
+        textEditWholeTable = false
+        textEditBlocksKnown = allKnown
+        textEditFirstLineNoKind = allKnown && !firstStartsAtBlock
+        textEditParagraphRange = null
+        textEditDirty = false
+        textEditFromRevision = false
+        textEditError = null
+        textEditOpen = true
+        textEditBusy = false
+        selectionMenuVisible = false
+        return true
+    }
+
+    /**
      * 把正文修改的目标区间与输入区**一起**换成某一章的一段文字（[s, e) 是当前文字空间的偏移）。
      *
      * 打开卡片时用一次；之后读者还没动过输入区时，拖手柄改选区也走这里（用户定口）——
      * 输入区与目标区间必须同进同退，否则确定时会把旧文字写进新范围。
      */
     fun setTextEditTarget(ch: Int, s: Int, e: Int): Boolean {
+        // 审阅视图里选中改过的字：卡片带出**改后整段**（与点按红绿字同一口径），
+        // 不能把「原文 + 新文字」的对照当输入区——那会把旧文字一起写回去。
+        if (reviewActive) {
+            val touched = chapterRevisions.filter { r -> s < r.charEnd && e > r.charStart }
+            if (touched.isNotEmpty()) {
+                if (touched.size == 1 && s >= touched[0].charStart && e <= touched[0].charEnd) {
+                    if (openRevisionEdit(touched[0])) return true
+                }
+                val from = minOf(s, touched.minOf { it.charStart })
+                val to = maxOf(e, touched.maxOf { it.charEnd })
+                if (setReviewCurrentTarget(ch, from, to, touched)) return true
+            }
+        }
         val text = currentHost.textOf(ch, 0, Int.MAX_VALUE) ?: return false
         // 卡片里给人看的是书里的字：审阅视图的「段界痕迹」¶ 一并摘掉（偏移自己回缩到同一口径），
         // 否则确认时会把 ¶ 当成字写进正文。分页 / 选区 / 修订换算仍走原样文字。
@@ -1678,6 +1845,7 @@ fun ReaderScreen(
         // 确认时 [InlineMarkup.parse] 把反斜杠去掉，落进书里的仍是原来那几个字。
         textEditText = InlineMarkup.show(segments, visible)
         textEditBaseCard = textEditText
+        textEditFromRevision = false
         return true
     }
 
@@ -1699,7 +1867,8 @@ fun ReaderScreen(
         }
         closeAnnotationEdit()
         noteText = ""
-        textEditDirty = false
+        // 重开已有修订时输入区是改后整段，按「已动过」算；新选区才允许拖手柄把原文换进输入区。
+        textEditDirty = textEditFromRevision
         textEditError = null
         textEditOpen = true
         textEditBusy = false
@@ -3660,6 +3829,45 @@ internal class EditCard(
     val originalSpans: List<InlineMarkup.StyleSpan>?,
     val ambientSpans: List<InlineMarkup.StyleSpan>,
 )
+
+/** [revisionCardOf] 的结果：卡片显示文字 + 提交时的纯文本。 */
+internal class RevisionCard(val card: EditCard, val plain: String)
+
+/**
+ * 一条修订在修改卡里的**当前结果**（不是审阅视图里的「原文 + 新文字」对照）。
+ *
+ * 普通文字修订的 `editedText` 只记了**读者当时选中的那一段**；如果这条修订后来吸收了
+ * 前后的公共字（在改过的段里再改一处），`editedText` 就不再等于整段改后的内容。重开卡片
+ * 必须用 [TextRevision.text]（整段替换文字）重建，否则确认时会把没显示出来的前后文丢掉。
+ *
+ * 表格修订（`editedBlocks` 里有 `t…` / 首行 `T…`）仍用 `editedText` / `editedBlocks`：
+ * 整表修订的 `editedText` 本来就是整张表（未选中的行也拼回去了）。
+ */
+internal fun revisionCardOf(revision: TextRevision): RevisionCard {
+    val tableLike = revision.editedBlocks.any { it.startsWith("t") || it.startsWith("T") }
+    if (tableLike) {
+        val plain = revision.editedText
+        return RevisionCard(editCardOf(plain, revision.editedBlocks, revision.editedStyles), plain)
+    }
+    // 段界字符 U+E000 与卡片里的 `\n` 都是一位：按段切开再用 `\n` 拼回去，长度与偏移都不变。
+    val segments = RevisionBlocks.split(revision.text)
+    val kinds = revision.blockKinds
+    val hasKinds = kinds.size == segments.size
+    val lines = ArrayList<String>(segments.size)
+    val blocks = ArrayList<String>(segments.size)
+    for ((i, seg) in segments.withIndex()) {
+        lines += seg
+        blocks += if (hasKinds) kinds[i] else ""
+        // 段内的 `\n`（`<br>` / 代码块换行）是续行：重开时并回上一块。
+        repeat(seg.count { it == '\n' }) { blocks += RevisionBlocks.CONTINUATION }
+    }
+    val plain = lines.joinToString("\n")
+    // `styles` 是最小修订上的结构（含前后文）；老修订没存过它时，只有在输入区全文与整段
+    // 改后文字完全一致的情况下才能拿 `editedStyles` 顶上（否则偏移对不上，宁可不套）。
+    val stored = revision.styles
+        ?: revision.editedStyles?.takeIf { revision.editedText == plain }
+    return RevisionCard(editCardOf(plain, blocks, stored), plain)
+}
 
 /**
  * 按落库的**输入区全文结构**重建修改卡内容（打开旧修改 / 点审阅痕迹）。

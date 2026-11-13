@@ -182,6 +182,20 @@ class TextEditPlannerTest {
     }
 
     @Test
+    fun selectionCoveringRevisionAndOtherContentAbsorbsIntoOneRecord() {
+        // 旧修订 [2,4)「cd」→「XY」；这次选中渲染里的「XYef」改成「ZZ」：选区还带着别的内容，
+        // 保留新记录并把旧记录吸收进去，最终只有一条 [2,6) → 「ZZ」。
+        val p = ready(plan("abXYef", intArrayOf(6), 2, 6, "ZZ", listOf(rev(2, 4, "XY", id = 7))))
+        assertEquals(listOf(7L), p.deletedIds)
+        val r = p.inserted.single()
+        assertEquals(2, r.charStart)
+        assertEquals(6, r.charEnd)
+        assertEquals("ZZ", r.text)
+        assertEquals("XYef", r.originalText)
+        assertEquals("ZZ", r.editedText)
+    }
+
+    @Test
     fun replacementNextToExistingRevisionStaysIndependent() {
         // 旧修订 [2,4)→「XY」；选中它后面的「ef」改成「ZZ」：旧修订不被吸收。
         val p = ready(plan("abXYef", intArrayOf(6), 4, 6, "ZZ", listOf(rev(2, 4, "XY", id = 7))))

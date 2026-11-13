@@ -136,6 +136,14 @@ object TextEditPlanner {
         tableOfLeaf: (leafIndex: Int) -> TableRowInfo? = { null },
         /** 表格行叶 → 它所属**整张表**在章字符流里的区间（渲染空间；null = 不是表格行）。 */
         tableRangeOf: (leafIndex: Int) -> IntRange? = { null },
+        /**
+         * 这张表上压着的**整表修订**（审阅视图提交时由宿主单独给）。
+         *
+         * 审阅视图的规划在**原书空间**算，`map` 里放不下它（放进去会按渲染区间错位）；
+         * 但行来源必须沿用它，否则重开卡片再改一次时，第一次改过的行会被当成新行，
+         * 原有的行 / 格样式就丢了。null = 没有（普通视图 / 首次改这张表）。
+         */
+        previousTable: TextRevision? = null,
     ): TextEditPlan {
         if (start < 0 || endExclusive > chapterText.length || start > endExclusive) {
             return TextEditPlan.Rejected("选区超出本章范围")
@@ -190,7 +198,7 @@ object TextEditPlanner {
             return planTable(
                 bookId, chapter, chapterText, map, groupId, now, toOriginal, renderedInterval,
                 editStart, editEnd, pieces, replacementStyles,
-                firstLeaf, lastLeaf, tableOfLeaf, wholeTable, tableRangeOf,
+                firstLeaf, lastLeaf, tableOfLeaf, wholeTable, tableRangeOf, previousTable,
             )
         }
         // 选区**整段落在同一张表里**（不要求覆盖整张表）：只选中其中几行也能删行 / 加行 / 改格数。
@@ -219,11 +227,11 @@ object TextEditPlanner {
                     rr.first < table.last + 1 && rr.last + 1 > table.first
                 }
             }
-            if (shapeChanged || pipeHeader || hasWholeTableRevision) {
+            if (shapeChanged || pipeHeader || hasWholeTableRevision || previousTable != null) {
                 return planTable(
                     bookId, chapter, chapterText, map, groupId, now, toOriginal, renderedInterval,
                     editStart, editEnd, pieces, replacementStyles,
-                    firstLeaf, lastLeaf, tableOfLeaf, table, tableRangeOf,
+                    firstLeaf, lastLeaf, tableOfLeaf, table, tableRangeOf, previousTable,
                 )
             }
         }
@@ -515,6 +523,7 @@ object TextEditPlanner {
         tableOfLeaf: (Int) -> TableRowInfo?,
         tableRange: IntRange,
         tableRangeOf: (Int) -> IntRange?,
+        previousTable: TextRevision? = null,
     ): TextEditPlan {
         // 整张表被删空：输入区一个表格行都不剩（读者把行全删了）。留着空 `<tr>` 标签不算删表。
         val deleting = pieces.all { it.text.isEmpty() } && pieces.none { it.table != null }
@@ -541,7 +550,42 @@ object TextEditPlanner {
         // 新行 → 选中旧行的真实来源：删了一行时不能按位置配，否则删行后面的行全被当成改字。
         val selectedTexts = rowSegments(chapterText, start, selectedOriginal).map { it.text }
         val newTexts = if (deleting) emptyList() else pieces.map { it.text }
-        val newSources = alignTableRows(selectedTexts, selectedOriginal, newTexts, rows)
+        // 表内已有修订整段吸收：整表重写之后，按行落字的旧修订不再有意义。
+        val absorbed = map.revisions.filter { r ->
+            val rr = renderedInterval(r)
+            if (r.isInsertion) {
+                rr.first > tableRange.first && rr.first < tableRange.last + 1
+            } else {
+                rr.first < tableRange.last + 1 && rr.last + 1 > tableRange.first
+            }
+        }
+        // 这张表上已经压着一条整表修订：本次卡片里的行是**上一次改完的结果**，不是原书行。
+        // 先按行内容对齐到上一次的新表，再顺着它的行来源折回原书行；否则第一次改过字的行
+        // 对不上原书文字，会被当成新加的行，行 / 格样式全丢。
+        val prevWhole = previousTable ?: absorbed.firstOrNull(::isWholeTableRevision)
+        val prevRows = prevWhole?.let(::tableRowsOfRevision)
+        // 老修订没存过行来源时按内容对齐反推一次（改过字的行由 LCS 空档按位置配对），
+        // 否则重开卡片时它们会被当成新行，原来的行 / 格样式就丢了。
+        val prevSources: List<Int>? = prevWhole?.rowSources ?: prevRows?.let { pr ->
+            val oldTexts = rowSegments(chapterText, tableRange.first, originalRows).map { it.text }
+            alignTableRows(oldTexts, originalRows, pr.map { it.text }, pr.map { it.table!! }).toList()
+        }
+        val newSources = if (previousTable != null && prevRows != null && prevSources != null &&
+            prevRows.size == prevSources.size
+        ) {
+            val toPrev = alignTableRows(
+                prevRows.map { it.text },
+                prevRows.map { it.table!! },
+                newTexts,
+                rows,
+            )
+            IntArray(toPrev.size) { i ->
+                val p = toPrev[i]
+                if (p in prevSources.indices) prevSources[p] else -1
+            }
+        } else {
+            alignTableRows(selectedTexts, selectedOriginal, newTexts, rows)
+        }
         // 管道行写不出「哪一格是 `<th>`」：按**来源行**把原表的表头补回（读者改过的
         // `<th>` / `<td>` 形式自己带着，不动）。
         val restoredRows = rows.mapIndexed { i, row ->
@@ -580,15 +624,6 @@ object TextEditPlanner {
         val allSegments = beforeSegments + newSegments + afterSegments
         val oldText = chapterText.substring(tableRange.first, tableRange.last + 1)
         val newText = allSegments.joinToString("") { it.text }
-        // 表内已有修订整段吸收：整表重写之后，按行落字的旧修订不再有意义。
-        val absorbed = map.revisions.filter { r ->
-            val rr = renderedInterval(r)
-            if (r.isInsertion) {
-                rr.first > tableRange.first && rr.first < tableRange.last + 1
-            } else {
-                rr.first < tableRange.last + 1 && rr.last + 1 > tableRange.first
-            }
-        }
         // 每行来自旧表哪一行（`-1` = 读者新加）：重放按它原样留下没选中的行，
         // 删行后同一位置也不会错拿前一行的样式。
         // 序号是**当前渲染表**的行号；若这张表上还压着一条整表修订（本次要吸收它），
@@ -600,9 +635,9 @@ object TextEditPlanner {
             renderedSources += if (src >= 0) selFirst + src else -1
         }
         afterSegments.indices.forEach { i -> renderedSources += selLast + 1 + i }
-        val prevWhole = absorbed.firstOrNull(::isWholeTableRevision)
-        val prevSources = prevWhole?.rowSources
         val rowSources: List<Int>? = when {
+            // 审阅视图的规划已经在原书空间：`newSources` 已顺着上一条整表修订折回原书行。
+            previousTable != null -> renderedSources
             prevWhole == null -> renderedSources
             prevSources == null -> null
             prevSources.size != originalRows.size -> null
@@ -719,6 +754,14 @@ object TextEditPlanner {
             at = end
         }
         return out
+    }
+
+    /** 一条整表修订的「上一次改完的表格行」；不是整表修订 / 数据对不上时 null。 */
+    private fun tableRowsOfRevision(r: TextRevision): List<InlineMarkup.Segment>? {
+        if (!isWholeTableRevision(r)) return null
+        val segments = RevisionBlocks.cardSegments(r.editedText, r.editedBlocks) ?: return null
+        if (segments.isEmpty() || segments.any { it.table == null }) return null
+        return segments
     }
 
     /**

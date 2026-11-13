@@ -474,14 +474,15 @@ class TableEditDesktopTest {
     }
 
     /**
-     * 审阅视图里整表结构修订只作对照：点表上任何一行都不能把整张表改没。
+     * 审阅视图里重开整表结构修订：卡片带出**改完的那张表**，再改一次仍按原书那张表提交。
      *
      * 真机复报：先删过一行（表上压着一条整表结构修订），进审阅视图再清空一行，
-     * 整张表连同其余行都没了。现在审阅空间里同一张表同时有旧行与新行，直接编辑分不清
-     * 改的是哪一份，所以这类表在审阅视图里明确拒绝，并提示切回普通视图。
+     * 整张表连同其余行都没了。根因是审阅分支把选区扩到整条修订的原书区间（整张原始表），
+     * 卡片里却只有一行——规划层把「一行清空」当成了「整表删空」。现在重开卡片走的是
+     * 改后的整张表，清空一行就是删那一行，其余行原样留下。
      */
     @Test
-    fun reviewModeRejectsEditingStructurallyChangedTable() {
+    fun reviewModeReeditingStructurallyChangedTableKeepsOtherRows() {
         val root = Files.createTempDirectory("orilumn-table-review-row").toFile()
         val host = openHost(writeBook(root), root)
         try {
@@ -499,23 +500,25 @@ class TableEditDesktopTest {
             val reviewText = body(host, chapter)
             assertTrue("其余行还在", reviewText.contains("甲三") && reviewText.contains("甲四"))
 
-            // 审阅视图里只选中一行（甲三行），清空卡片。
-            val hit = reviewText.indexOf("甲三")
-            assertTrue(hit >= 0)
-            val row = host.textEditBlocks(chapter, hit, hit + 1)?.firstOrNull { it.table != null }
-            assertNotNull("选区应命中表格行", row)
-            val rowRange = row!!.start until row.endExclusive
-            val outcome = commit(host, chapter, rowRange, "", landedReview)
-            assertTrue("审阅视图里这类表应明确拒绝：$outcome", outcome is TextEditOutcome.Rejected)
-            assertTrue(
-                "拒绝原因要告诉读者切回普通视图",
-                (outcome as TextEditOutcome.Rejected).reason.contains("普通视图"),
-            )
+            // 点按表上改动痕迹 = 重开这条整表修订：卡片带出改后的整张表（乙二已不在）。
+            val revision = runBlocking { host.textRevisionsForChapter(chapter) }
+                .first { it.editedBlocks.firstOrNull()?.startsWith("T") == true }
+            val segments = orilumn.reader.engine.revision.RevisionBlocks
+                .cardSegments(revision.editedText, revision.editedBlocks)
+            assertNotNull("整表修订应能还原成表格行", segments)
+            val reopened = InlineMarkup.show(segments!!, emptyList())
+            assertTrue("重开卡片应显示改后的表：$reopened", reopened.contains("甲一"))
+            assertTrue(reopened.contains("甲三") && reopened.contains("甲四"))
+            assertFalse("被删的旧行不应出现在改后表里", reopened.contains("乙二"))
+
+            // 再清空一行（甲三）：只删这一行，其余行（甲一 / 甲四）必须还在。
+            val cleared = lines(reopened).filterNot { it.contains("甲三") }.joinToString("\n")
+            val outcome = commit(host, chapter, revision.charStart until revision.charEnd, cleared, landedReview)
+            assertTrue("审阅视图里重改整表应成功：$outcome", outcome is TextEditOutcome.Success)
 
             val after = body(host, chapter)
             assertTrue("整张表不能消失", after.contains("甲一"))
-            assertTrue("被删的旧行仍作对照", after.contains("乙二"))
-            assertTrue("其他行仍在", after.contains("甲三") && after.contains("甲四"))
+            assertTrue("其他行仍在", after.contains("甲四"))
             assertTrue("表外段落不受影响", after.contains("表格前面的段落"))
             val back = runBlocking { host.switchReviewMode(false, chapter, 0) }
             assertNotNull("应能切回正常视图", back)
@@ -529,8 +532,126 @@ class TableEditDesktopTest {
                 host.pageLines(back)
                 normalText = body(host, chapter)
             }
-            assertTrue("正常视图里表也在", normalText.contains("甲一") && normalText.contains("甲四"))
-            assertFalse("正常视图里被删的行仍不在", normalText.contains("乙二"))
+            assertTrue("正常视图里表还在", normalText.contains("甲一") && normalText.contains("甲四"))
+            assertFalse("两次删掉的行都不在", normalText.contains("乙二") || normalText.contains("甲三"))
+        } finally {
+            host.close()
+        }
+    }
+
+    /**
+     * 审阅视图里再改一次整表：留下的行仍指向原书那一行（行 / 格样式、格内行内元素都不丢）。
+     *
+     * 真机复报的另一半：第一次改过的行对不上原书文字，第二次重开时会被当成「读者新加的行」，
+     * 重放按新行处理，`<code>` / `<em>` 这些格内元素就没了。`rowSources` 必须顺着上一条整表修订
+     * 折回原书行号。
+     */
+    @Test
+    fun reviewModeReeditingTableKeepsRemainingRowSources() {
+        val root = Files.createTempDirectory("orilumn-table-review-source").toFile()
+        val host = openHost(writeBook(root, MARKUP_BODY), root)
+        try {
+            val pos = runBlocking { host.open() }!!
+            val chapter = pos.chapter
+            val before = body(host, chapter)
+            val (range, blocks) = tableBlocks(host, chapter, before, expectedRows = 3, probe = "run")
+            val card = cardText(before, blocks)
+            // 第一次：删掉表头行，留下 let / run 两行。
+            val first = lines(card).filterNot { it.contains("功能") }.joinToString("\n")
+            assertTrue(commit(host, chapter, range, first, pos) is TextEditOutcome.Success)
+
+            val reviewPos = runBlocking { host.switchReviewMode(true, chapter, 0) }
+            assertNotNull("应能切到审阅空间", reviewPos)
+            val revision = runBlocking { host.textRevisionsForChapter(chapter) }
+                .first { it.editedBlocks.firstOrNull()?.startsWith("T") == true }
+            val segments = orilumn.reader.engine.revision.RevisionBlocks
+                .cardSegments(revision.editedText, revision.editedBlocks)!!
+            val reopened = InlineMarkup.show(segments, emptyList())
+            // 第二次：再删掉 run 行，只留 let 行（原书第 2 行，0 起下标 1）。
+            val second = lines(reopened).filterNot { it.contains("run") }.joinToString("\n")
+            val outcome = commit(host, chapter, revision.charStart until revision.charEnd, second, reviewPos)
+            assertTrue("重改整表应成功：$outcome", outcome is TextEditOutcome.Success)
+
+            val fresh = runBlocking { host.textRevisionsForChapter(chapter) }
+                .first { it.editedBlocks.firstOrNull()?.startsWith("T") == true }
+            assertEquals("留下的 let 行应仍来自原书第 2 行", listOf(1), fresh.rowSources)
+
+            val back = runBlocking { host.switchReviewMode(false, chapter, 0) }!!
+            host.pageLines(back)
+            var normalText = body(host, chapter)
+            var waited = 0
+            while (normalText.isEmpty() && waited < 2_000) {
+                Thread.sleep(20)
+                waited += 20
+                host.pageLines(back)
+                normalText = body(host, chapter)
+            }
+            assertTrue("let 行还在", normalText.contains("let"))
+            assertFalse("run 行已删", normalText.contains("run"))
+            // 格内行内元素仍在：`let` 应仍带 `<code>` 结构（否则重放把它当新行重建了）。
+            val hit = normalText.indexOf("let")
+            val spans = host.textEditSpans(chapter, hit, hit + 3).orEmpty()
+            assertTrue("let 的 code 结构应保留：$spans", spans.any { it.sig.tag == "code" })
+        } finally {
+            host.close()
+        }
+    }
+
+    /**
+     * 审阅视图里重开一条普通文字修订：卡片带出改后的整段，再改一次是**改同一条记录**
+     * （旧记录被吸收，最终只剩一条），不是把改后的字当成新底稿再叠一层。
+     */
+    @Test
+    fun reviewModeReeditingTextReplacesTheSameRecord() {
+        val root = Files.createTempDirectory("orilumn-review-text-reedit").toFile()
+        val host = openHost(writeBook(root), root)
+        try {
+            val pos = runBlocking { host.open() }!!
+            val chapter = pos.chapter
+            val before = body(host, chapter)
+            val old = "表格后面的段落"
+            val start = before.indexOf(old)
+            assertTrue(start >= 0)
+            val first = "别的文字"
+            val outcome = runBlocking {
+                host.commitTextEdit(
+                    chapter = chapter,
+                    start = start,
+                    endExclusive = start + old.length,
+                    text = first,
+                    styles = null,
+                    currentPage = pos,
+                    blocks = listOf(InlineMarkup.Segment(first, null)),
+                )
+            }
+            assertTrue("第一次改字应成功：$outcome", outcome is TextEditOutcome.Success)
+
+            val reviewPos = runBlocking { host.switchReviewMode(true, chapter, 0) }
+            assertNotNull("应能切到审阅空间", reviewPos)
+            val revision = runBlocking { host.textRevisionsForChapter(chapter) }
+                .first { r -> r.editedText.contains(first) }
+            assertTrue("重开卡片应带出改后的整段：${revision.editedText}", revision.editedText.contains(first))
+
+            val second = "第三次"
+            val again = commit(host, chapter, revision.charStart until revision.charEnd, second, reviewPos)
+            assertTrue("再改同一条应成功：$again", again is TextEditOutcome.Success)
+
+            val fresh = runBlocking { host.textRevisionsForChapter(chapter) }
+            assertEquals("同一处修改只应留一条记录", 1, fresh.size)
+            assertEquals(second, fresh.single().editedText)
+
+            val back = runBlocking { host.switchReviewMode(false, chapter, 0) }!!
+            host.pageLines(back)
+            var normalText = body(host, chapter)
+            var waited = 0
+            while (normalText.isEmpty() && waited < 2_000) {
+                Thread.sleep(20)
+                waited += 20
+                host.pageLines(back)
+                normalText = body(host, chapter)
+            }
+            assertTrue("最终正文应是最后一次改的字", normalText.contains(second))
+            assertFalse("上一次改的字不应残留", normalText.contains(first))
         } finally {
             host.close()
         }

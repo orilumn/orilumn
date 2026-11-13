@@ -809,19 +809,15 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
             },
         )
         if (!reviewMode) return planInCurrentSpace()
-        // 审阅视图里的表格：表上压着整表结构修订（`editedBlocks` 首码大写 `T`）时，审阅空间是
-        // **旧表 + 新表的对照**（删掉的行 / 字仍在原处，见 `TableReviewPlan`）——同一张表里既有
-        // 旧行又有新行，直接在表上编辑分不清改的是哪一份。这类表在审阅视图里只作对照，
-        // 要改请切回普通视图（卡片会把这个提示带给读者）。
-        // 判据只看原书空间：选区换算回原书后整段落在某条整表修订的区间里，就说明点的是这张表。
+        // 审阅视图里的表格：表上压着整表结构修订（`editedBlocks` 首码大写 `T`）时，卡片打开的
+        // 是**改完的那张表**（见宿主 `textRevisionEditRange` / `tryOpenReviewEditAt`），这里按
+        // 原书区间重算。行来源要沿用旧修订的（`previousTable`），否则第一次改过的行会被当成新行。
+        // 判据只看原书空间：选区换算回原书后落在某条整表修订的区间里，就说明点的是这张表。
         val originalStart = map.toOriginalFromReview(start)
         val originalEnd = map.toOriginalFromReview(endExclusive)
-        val structuralTable = map.revisions.any { r ->
+        val previousTable = map.revisions.firstOrNull { r ->
             r.editedBlocks.firstOrNull()?.startsWith("T") == true &&
                 originalStart >= r.charStart && originalEnd <= r.charEnd
-        }
-        if (structuralTable) {
-            return TextEditPlan.Rejected("这张表在审阅视图里只作对照，请切回普通视图再改")
         }
         // 审阅空间里改字：页面文字是「原文 + 新文字」的展示版，但落库的修订必须按**原书空间**算
         // ——新文字替换的是原区间，不是「原文 + 新文字」那一串。所以先把章文本 / 块尾剪回原书空间
@@ -908,6 +904,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                         bc.tableRangeOf(structure, originalEnds, i, starts = originalStarts)
                     }
                 },
+                previousTable = previousTable,
             )
         }
         if (base !is TextEditPlan.Ready) return base

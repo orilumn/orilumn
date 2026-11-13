@@ -9,6 +9,7 @@ import orilumn.reader.engine.BookDocumentController
 import orilumn.reader.engine.revision.InlineMarkup
 import orilumn.reader.engine.revision.TableRowScope
 import orilumn.reader.engine.revision.TextEditBlock
+import orilumn.reader.engine.revision.TextEditPart
 import orilumn.reader.engine.revision.TextEditPlan
 import orilumn.reader.engine.paging.BookPageNumber
 import orilumn.reader.engine.paging.PageSlice
@@ -230,12 +231,43 @@ class TabletReaderHost(
         blocks: List<InlineMarkup.Segment>?,
         rowScope: TableRowScope?,
     ): TextEditOutcome = withContext(Dispatchers.IO) {
-        val plan = controller.planTextEdit(chapter, start, endExclusive, text, styles, blocks, rowScope)
+        applyTextPlan(
+            chapter = chapter,
+            plan = controller.planTextEdit(chapter, start, endExclusive, text, styles, blocks, rowScope),
+            changeOldStart = start,
+            changeOldEndExclusive = endExclusive,
+            currentPage = currentPage,
+        )
+    }
+
+    /** 审阅视图里表格和别的文字一起选：逐段规划，一次落库、一次重排（见 `TextEditPart`）。 */
+    override suspend fun commitTextEdits(
+        chapter: Int,
+        parts: List<TextEditPart>,
+        currentPage: ReaderPos?,
+    ): TextEditOutcome = withContext(Dispatchers.IO) {
+        applyTextPlan(
+            chapter = chapter,
+            plan = controller.planTextEditParts(chapter, parts),
+            changeOldStart = parts.minOfOrNull { it.start } ?: 0,
+            changeOldEndExclusive = parts.maxOfOrNull { it.endExclusive } ?: 0,
+            currentPage = currentPage,
+        )
+    }
+
+    /** 计划 → 一个事务落库 → 重读修订 → 只作废本章 → 重新载入重放并落位。 */
+    private suspend fun applyTextPlan(
+        chapter: Int,
+        plan: TextEditPlan,
+        changeOldStart: Int,
+        changeOldEndExclusive: Int,
+        currentPage: ReaderPos?,
+    ): TextEditOutcome {
         when (plan) {
-            is TextEditPlan.Rejected -> return@withContext TextEditOutcome.Rejected(plan.reason)
+            is TextEditPlan.Rejected -> return TextEditOutcome.Rejected(plan.reason)
             is TextEditPlan.Ready -> {
                 if (plan.noop) {
-                    return@withContext TextEditOutcome.Success(
+                    return TextEditOutcome.Success(
                         pos = null,
                         selStart = plan.renderedStart,
                         selEnd = plan.renderedEndExclusive,
@@ -247,7 +279,7 @@ class TabletReaderHost(
                     repository.replaceTextRevisions(plan.deletedIds, plan.inserted)
                 }.getOrNull()
                 if (saved == null || (plan.inserted.isNotEmpty() && saved.size != plan.inserted.size)) {
-                    return@withContext TextEditOutcome.Failed("保存失败")
+                    return TextEditOutcome.Failed("保存失败")
                 }
                 controller.reloadTextRevisions()
                 revisionsSnapshot = null
@@ -256,8 +288,8 @@ class TabletReaderHost(
                         chapter = chapter,
                         prevPageCharStart = anchor.first,
                         prevPageOriginalStart = anchor.second,
-                        changeOldStart = start,
-                        changeOldEndExclusive = endExclusive,
+                        changeOldStart = changeOldStart,
+                        changeOldEndExclusive = changeOldEndExclusive,
                         // 换了块形态（段落 ⇄ 标题 / 引用 / 列表 / 代码块）或改了整张表的行 / 列：
                         // 同样的文字会排成不同的行数，「页界没变」快路径按形态猜不准，一律正式重排。
                         structureChanged = plan.inserted.any { r ->
@@ -265,16 +297,16 @@ class TabletReaderHost(
                                 r.editedBlocks.firstOrNull()?.startsWith("T") == true
                         },
                     ) ?: reflowFallback(chapter, anchor.second)
-                    ?: return@withContext TextEditOutcome.Failed("重排失败")
+                    ?: return TextEditOutcome.Failed("重排失败")
                 } else {
                     // 拿不到改前页首（不在这一章 / 还没落位）：退回旧口径，按改动起点落位。
                     controller.invalidateChapterContent(chapter)
                     runCatching { controller.openAtChar(chapter, plan.renderedStart) }.getOrNull()
-                        ?: return@withContext TextEditOutcome.Failed("重排失败")
+                        ?: return TextEditOutcome.Failed("重排失败")
                 }
                 // 本章页数变了：页脚页码 / 目录页码跟着刷新（页码清单已在本章作废）。
                 pageNumberTick++
-                TextEditOutcome.Success(
+                return TextEditOutcome.Success(
                     pos = ReaderPos(pos.first, pos.second, atCover = false),
                     selStart = plan.renderedStart,
                     selEnd = plan.renderedEndExclusive,

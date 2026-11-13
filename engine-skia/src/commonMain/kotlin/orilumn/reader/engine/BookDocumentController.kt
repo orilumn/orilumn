@@ -35,6 +35,7 @@ import orilumn.reader.engine.revision.TableRowScope
 import orilumn.reader.engine.revision.tableRowsOfRevision
 import orilumn.reader.engine.revision.tableRowScopeOfDisplayedRows
 import orilumn.reader.engine.revision.TextEditPlan
+import orilumn.reader.engine.revision.TextEditPart
 import orilumn.reader.engine.revision.TextEditPlanner
 import orilumn.reader.engine.html.ParsedChapter
 import orilumn.reader.engine.paging.BookLayout
@@ -1205,6 +1206,50 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
             renderedStart = sel.first,
             renderedEndExclusive = maxOf(sel.first, sel.last + 1),
             noop = base.noop && absorbedIds.isEmpty(),
+        )
+    }
+
+    /**
+     * 一次提交里有多段（审阅视图里表格和别的文字一起选）：**逐段规划，合成一份计划**。
+     *
+     * 每段各自按当前显示空间算（与 [planTextEdit] 同一套规则），区间互不重叠；合起来仍是一份
+     * [TextEditPlan.Ready]——一次事务删旧修订、插新修订，宿主只重排一次（见 [TextEditPart]）。
+     * 任何一段被拒就整单拒（卡片不关、正文不动），不留半截修改。
+     */
+    fun planTextEditParts(chapter: Int, parts: List<TextEditPart>): TextEditPlan {
+        if (parts.isEmpty()) return TextEditPlan.Rejected("请先选择要修改的文字")
+        val deleted = LinkedHashSet<Long>()
+        val inserted = ArrayList<TextRevision>()
+        var start = Int.MAX_VALUE
+        var end = -1
+        for (part in parts) {
+            val plan = planTextEdit(
+                chapter,
+                part.start,
+                part.endExclusive,
+                part.text,
+                part.styles,
+                part.blocks,
+                part.rowScope,
+            )
+            when (plan) {
+                is TextEditPlan.Rejected -> return plan
+                is TextEditPlan.Ready -> {
+                    deleted += plan.deletedIds
+                    inserted += plan.inserted
+                    start = minOf(start, plan.renderedStart)
+                    end = maxOf(end, plan.renderedEndExclusive)
+                }
+            }
+        }
+        if (end < start) return TextEditPlan.Rejected("请先选择要修改的文字")
+        return TextEditPlan.Ready(
+            chapter = chapter,
+            deletedIds = deleted.toList(),
+            inserted = inserted,
+            renderedStart = start,
+            renderedEndExclusive = end,
+            noop = inserted.isEmpty() && deleted.isEmpty(),
         )
     }
 

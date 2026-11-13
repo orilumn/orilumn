@@ -67,6 +67,7 @@ import orilumn.reader.engine.revision.TableGrid
 import orilumn.reader.engine.revision.TableRowInfo
 import orilumn.reader.engine.revision.TableRowScope
 import orilumn.reader.engine.revision.tableRowCardOf
+import orilumn.reader.engine.revision.tableRowsOfRevision
 import orilumn.reader.engine.skia.LineWindowDrawer
 import orilumn.reader.engine.text.TypographicProfile
 import orilumn.reader.io.Logger
@@ -309,6 +310,10 @@ fun ReaderScreen(
     // 这次改的是整表修订里的**某几行**（审阅视图里拖选改过的表格中的一行）：卡片只列这几行，
     // 提交时再拼回整张表（结构校验仍按整张表）。null = 普通卡片 / 整表卡片。
     var textEditRowScope by remember { mutableStateOf<TableRowScope?>(null) }
+    // 审阅视图里「改过的表格 + 表格外的文字」一起选：卡片把两样都列出来，提交时按段切开——
+    // 表格那段走行范围 / 整表，文字那段走普通区间（见 `TextEditPart`）。
+    // 值 = 那条整表修订在当前显示空间里的区间；null = 普通卡片。
+    var textEditTableRange by remember { mutableStateOf<IntRange?>(null) }
     // 整段都包着选区的行内元素（选区完全落在元素内部）：卡片里**不显示标记**——读者看不出
     // 边界在哪，写了标记反而会把它挪位置；提交时按「整段仍然属于这个元素」原样套回。
     var textEditAmbientSpans by remember {
@@ -1281,6 +1286,7 @@ fun ReaderScreen(
         // 行范围卡片也按整表算（结构改了仍按整张表校验网格）。
         textEditWholeTable = revision.editedBlocks.firstOrNull()?.startsWith("T") == true
         textEditRowScope = if (rowCard != null) rows else null
+        textEditTableRange = null
         // 老修订的 `editedText` 分不出「整块图片」与「整段只有一个行内图的段落」，别靠猜：
         // 图片限制只在当次打开卡片、宿主明确给了叶类型时生效。
         textEditImages = emptyList()
@@ -1683,6 +1689,10 @@ fun ReaderScreen(
      * 「原文 + 新文字」对照。每条修订取它改完的整段（普通文字取 `text`、表格取 `editedText`），
      * 修订之间的原文照抄；提交时仍按原书区间重算，旧修订被新记录吸收（层叠后只剩最终结果）。
      *
+     * 表格和表格外的文字一起选时，卡片把两样都列出来：表格只列读者拖到的那几行（[selectedStart],
+     * [selectedEnd] 是读者真正拖到的区间，卡片扩到整条修订后仍按它挑行），其余文字照抄。提交时
+     * 按段切开（[textEditTableRange] 那一段走行范围 / 整表，别的走普通区间），一次落库。
+     *
      * @return true = 已把卡片目标设成 [from]..[to]（当前空间）
      */
     fun setReviewCurrentTarget(
@@ -1690,13 +1700,9 @@ fun ReaderScreen(
         from: Int,
         to: Int,
         touched: List<TextRevision>,
+        selectedStart: Int = from,
+        selectedEnd: Int = to,
     ): Boolean {
-        // 表格和别的内容一起选：结构改法不唯一，退回整表那条修订（卡片带出改后的整张表）。
-        val tableRevision = touched.firstOrNull { r ->
-            r.editedBlocks.any { it.startsWith("t") || it.startsWith("T") }
-        }
-        if (tableRevision != null) return openRevisionEdit(tableRevision)
-
         val text = currentHost.textOf(ch, 0, Int.MAX_VALUE) ?: return false
         val brk = currentHost.reviewBreakText(ch)
         // 选区与卡片目标必须同尺：卡片覆盖的是「旧修订整段 + 别的内容」，选区也一起扩过去。
@@ -1706,11 +1712,16 @@ fun ReaderScreen(
         var firstStartsAtBlock = true
         var pos = from
         var at = 0
+        // 选中的那张表（整表修订）在当前显示空间的区间 + 读者拖到的那几行；
+        // 两个都记下来，提交时表格那段按行范围走、文字那段按普通区间走（见 `TextEditPart`）。
+        var tableRange: IntRange? = null
+        var tableScope: TableRowScope? = null
         fun appendPiece(
             piece: String,
             block: BlockKind?,
             rawSpans: List<InlineMarkup.StyleSpan>,
             reviewStart: Int,
+            table: TableRowInfo? = null,
         ) {
             val base = brk.plain(reviewStart)
             for (sp in rawSpans) {
@@ -1718,7 +1729,7 @@ fun ReaderScreen(
                 val e = brk.plain(reviewStart + sp.endExclusive) - base
                 if (e > s) spans += InlineMarkup.StyleSpan(at + s, at + e, sp.sig)
             }
-            segments += InlineMarkup.Segment(piece, block)
+            segments += InlineMarkup.Segment(piece, block, table)
             at += piece.length + 1
         }
         fun appendGap(start: Int, endExclusive: Int) {
@@ -1748,27 +1759,67 @@ fun ReaderScreen(
             val rs = maxOf(from, r.charStart)
             val re = minOf(to, r.charEnd)
             if (rs > pos) appendGap(pos, rs)
-            // 这条修订改完的整段：普通文字按段界切开，表格行已在上面单独退回。
-            val parts = RevisionBlocks.split(r.text)
-            val kinds = r.blockKinds
-            val revAt = at
-            val stored = r.styles ?: r.editedStyles?.takeIf {
-                r.editedText == parts.joinToString("\n")
-            }
-            stored?.let { list ->
-                for (sp in InlineMarkup.fromStored(list)) {
-                    val s = revAt + sp.start
-                    val e = revAt + sp.endExclusive
-                    if (e > s) spans += InlineMarkup.StyleSpan(s, e, sp.sig)
+            if (r.editedBlocks.firstOrNull()?.startsWith("T") == true) {
+                // 整表修订：卡片只列读者拖到的那几行（上次改完那张表里的行），表里其余行原样不动。
+                // 拖到的行全被删掉了（插入位置）就一行都不列，卡片里只剩表格外那些文字。
+                val scope = if (selectedStart < selectedEnd) {
+                    currentHost.tableRowScope(
+                        ch,
+                        r.id,
+                        maxOf(selectedStart, r.charStart),
+                        minOf(selectedEnd, r.charEnd),
+                    )
+                } else {
+                    null
                 }
-            }
-            for (i in parts.indices) {
-                appendPiece(
-                    parts[i],
-                    if (kinds.size == parts.size) BlockKind.fromWire(kinds[i]) else null,
-                    emptyList(),
-                    r.charStart,
-                )
+                val rows = tableRowsOfRevision(r)
+                    ?: RevisionBlocks.cardSegments(r.editedText, r.editedBlocks).orEmpty()
+                val lo = (scope?.firstRow ?: 0).coerceIn(0, rows.size)
+                val hi = ((scope?.lastRow ?: (rows.size - 1)) + 1).coerceIn(lo, rows.size)
+                if (hi > lo) {
+                    tableRange = r.charStart until r.charEnd
+                    tableScope = scope
+                    val revAt = at
+                    // 整表卡片带出整张表的结构；行范围卡片只带那几行，行内结构按整卡平移过来。
+                    val stored = if (scope != null) {
+                        tableRowCardOf(r, scope)?.styles
+                    } else {
+                        r.editedStyles
+                    }
+                    stored?.let { list ->
+                        for (sp in InlineMarkup.fromStored(list)) {
+                            val s = revAt + sp.start
+                            val e = revAt + sp.endExclusive
+                            if (e > s) spans += InlineMarkup.StyleSpan(s, e, sp.sig)
+                        }
+                    }
+                    for (i in lo until hi) {
+                        appendPiece(rows[i].text, null, emptyList(), r.charStart, rows[i].table)
+                    }
+                }
+            } else {
+                // 这条修订改完的整段：普通文字按段界切开。
+                val parts = RevisionBlocks.split(r.text)
+                val kinds = r.blockKinds
+                val revAt = at
+                val stored = r.styles ?: r.editedStyles?.takeIf {
+                    r.editedText == parts.joinToString("\n")
+                }
+                stored?.let { list ->
+                    for (sp in InlineMarkup.fromStored(list)) {
+                        val s = revAt + sp.start
+                        val e = revAt + sp.endExclusive
+                        if (e > s) spans += InlineMarkup.StyleSpan(s, e, sp.sig)
+                    }
+                }
+                for (i in parts.indices) {
+                    appendPiece(
+                        parts[i],
+                        if (kinds.size == parts.size) BlockKind.fromWire(kinds[i]) else null,
+                        emptyList(),
+                        r.charStart,
+                    )
+                }
             }
             pos = maxOf(pos, re)
         }
@@ -1777,12 +1828,13 @@ fun ReaderScreen(
         val plain = segments.joinToString("\n") { it.text }
         val (ambient, visible) = splitAmbientSpans(spans, plain.length)
         // 只要有一块拿不到形态，就整套按纯文本开卡（不写任何块标记）：否则卡片里别的块的
-        // `## ` 会让提交时误以为「这次要改形态」，而这一块又承载不了。
-        val allKnown = segments.all { it.block != null }
+        // `## ` 会让提交时误以为「这次要改形态」，而这一块又承载不了。表格行本来就没有块形态，
+        // 不参与这条判定（它的形态由格结构给）。
+        val allKnown = segments.all { it.block != null || it.table != null }
         val shown = if (allKnown) {
             segments
         } else {
-            segments.map { InlineMarkup.Segment(it.text, null, it.table) }
+            segments.map { if (it.table != null) it else InlineMarkup.Segment(it.text, null) }
         }
         val card = InlineMarkup.show(shown, visible)
         textEditChapter = ch
@@ -1796,7 +1848,8 @@ fun ReaderScreen(
         textEditTables = emptyList()
         textEditImages = emptyList()
         textEditWholeTable = false
-        textEditRowScope = null
+        textEditRowScope = tableScope
+        textEditTableRange = tableRange
         textEditBlocksKnown = allKnown
         textEditFirstLineNoKind = allKnown && !firstStartsAtBlock
         textEditParagraphRange = null
@@ -1836,7 +1889,7 @@ fun ReaderScreen(
                 }
                 val from = minOf(s, touched.minOf { it.charStart })
                 val to = maxOf(e, touched.maxOf { it.charEnd })
-                if (setReviewCurrentTarget(ch, from, to, touched)) return true
+                if (setReviewCurrentTarget(ch, from, to, touched, s, e)) return true
             }
         }
         val text = currentHost.textOf(ch, 0, Int.MAX_VALUE) ?: return false
@@ -1921,6 +1974,7 @@ fun ReaderScreen(
             blockInfo.all { it.table != null && it.tableRange?.first == from && it.tableRange?.last == to - 1 }
         // 新选区：不是「重开整表修订里的某几行」，行范围清掉。
         textEditRowScope = null
+        textEditTableRange = null
         // 原件仍记**完整**结构：no-op 比较和属性补回都要拿它当模板。
         textEditOriginalSpans = spans
         textEditAmbientSpans = ambient
@@ -1980,6 +2034,7 @@ fun ReaderScreen(
         textEditImages = emptyList()
         textEditWholeTable = false
         textEditRowScope = null
+        textEditTableRange = null
         textEditBusy = false
         if (selection.hasSelection) selection.clear()
     }
@@ -2018,9 +2073,13 @@ fun ReaderScreen(
         }
         // 图片 / 表格的形状校验：图片只能整张删（空串）或原样留着（占位），不能换成文字；
         // 表格在「正好选中一整张表」时只校验网格自洽（可以增删行 / 列），其余情形仍只许改格里的字。
-        textEditShapeError(parsed.segments, textEditTables, textEditImages, textEditWholeTable)?.let {
-            textEditError = it
-            return
+        // 混合物卡片（表格 + 表格外的文字）不在这里逐行比形状：表格那一段交给规划层按整张表校验
+        // （`TextEditPart`），文字那一段本来就不带表格行。
+        if (textEditTableRange == null) {
+            textEditShapeError(parsed.segments, textEditTables, textEditImages, textEditWholeTable)?.let {
+                textEditError = it
+                return
+            }
         }
         val pieces: List<InlineMarkup.Segment>? = if (!textEditBlocksKnown && !textEditFirstLineNoKind) {
             null
@@ -2069,6 +2128,24 @@ fun ReaderScreen(
             // 原文没变时与原区间逐字段相等，no-op 短路照样成立。
             ambient.map { InlineMarkup.StyleSpan(0, body.length, it.sig) } + restored
         }
+        // 混合物卡片（审阅视图里表格 + 表格外的文字）：按「表格那一段」切开，一次提交。
+        // 切不了就就地提示、正文不动（不在猜不准的时候动书）。
+        val tableRange = textEditTableRange
+        val mixedParts = tableRange?.let { range ->
+            MixedEditCard.parts(
+                segments = pieces ?: parsed.segments,
+                styles = styles,
+                body = body,
+                cardStart = s,
+                cardEnd = e,
+                tableRange = range,
+                rowScope = textEditRowScope,
+            )
+        }
+        if (tableRange != null && mixedParts == null) {
+            textEditError = "表格那几行和卡片里的位置对不上：请重新选中要改的表格行"
+            return
+        }
         // 一个字没改、结构也没变：直接收卡，不白落一条修订（少了这一句，开卡直接确定也会写库）。
         val original = originalSpans.orEmpty()
         if (body == textEditBaseText && textEditText == textEditBaseCard && styles.orEmpty() == original) {
@@ -2082,6 +2159,7 @@ fun ReaderScreen(
             textEditImages = emptyList()
             textEditWholeTable = false
             textEditRowScope = null
+            textEditTableRange = null
             selection.clear()
             selectionMenuVisible = false
             return
@@ -2091,9 +2169,13 @@ fun ReaderScreen(
         scope.launch {
             var outcome: TextEditOutcome? = null
             anchorFunnel.push("text-edit", ::markPositionChanged) {
-                val o = currentHost.commitTextEdit(
-                    ch, s, e, body, styles, openPos, pieces, textEditRowScope,
-                )
+                val o = if (mixedParts != null) {
+                    currentHost.commitTextEdits(ch, mixedParts, openPos)
+                } else {
+                    currentHost.commitTextEdit(
+                        ch, s, e, body, styles, openPos, pieces, textEditRowScope,
+                    )
+                }
                 outcome = o
                 (o as? TextEditOutcome.Success)?.pos
             }
@@ -2110,6 +2192,7 @@ fun ReaderScreen(
                     textEditImages = emptyList()
                     textEditWholeTable = false
                     textEditRowScope = null
+                    textEditTableRange = null
                     textEditRevision++
                     // 确认即收选区：改后的字已经落库，再留一圈蓝底只会挡住刚改过的正文。
                     selection.clear()

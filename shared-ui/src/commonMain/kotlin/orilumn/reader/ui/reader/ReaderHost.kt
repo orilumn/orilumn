@@ -10,6 +10,7 @@ import orilumn.reader.engine.paging.PageSlice
 import orilumn.reader.engine.revision.InlineMarkup
 import orilumn.reader.engine.revision.TableRowScope
 import orilumn.reader.engine.revision.TextEditBlock
+import orilumn.reader.engine.revision.TextEditPart
 import orilumn.reader.engine.skia.DecodedImage
 import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.engine.skia.PageBackground
@@ -402,6 +403,34 @@ interface ReaderHost {
         blocks: List<InlineMarkup.Segment>? = null,
         rowScope: TableRowScope? = null,
     ): TextEditOutcome = TextEditOutcome.Failed("当前版本不支持正文修改")
+
+    /**
+     * 一次提交里有多段（审阅视图里表格和别的文字一起选中）：逐段规划、**一次落库、一次重排**。
+     *
+     * 各段区间互不重叠，坐标同为当前显示空间（见 [TextEditPart]）；任何一段被拒就整单拒。
+     * 默认实现逐段调 [commitTextEdit]（老宿主 / 测试桩），真宿主覆盖成单事务。
+     */
+    suspend fun commitTextEdits(
+        chapter: Int,
+        parts: List<TextEditPart>,
+        currentPage: ReaderPos? = null,
+    ): TextEditOutcome {
+        var last: TextEditOutcome = TextEditOutcome.Failed("请先选择要修改的文字")
+        for (part in parts) {
+            last = commitTextEdit(
+                chapter,
+                part.start,
+                part.endExclusive,
+                part.text,
+                part.styles,
+                currentPage,
+                part.blocks,
+                part.rowScope,
+            )
+            if (last !is TextEditOutcome.Success) return last
+        }
+        return last
+    }
 
     /**
      * 审阅视图里「读者拖选的是整表修订中的哪几行」：卡片据此只列那几行

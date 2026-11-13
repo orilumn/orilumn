@@ -45,6 +45,27 @@ sealed interface TextEditPlan {
 }
 
 /**
+ * 一次提交里的一段选区（属于排版层·上：纯数据，不碰 DOM / 排版）。
+ *
+ * 审阅视图里表格和别的文字一起选中时，一张卡里既有表格那几行、又有表格外的文字。
+ * 表格的结构改法与文字改法是两套（前者按整张表校验行列，后者按原书区间算最小修订），
+ * 一条修订装不下，所以卡片按段切开、逐段规划，最后合成**一份** [TextEditPlan]：
+ * 一次事务落库、一次重排，读者看到的还是一次修改。
+ *
+ * 各段区间都是**当前显示空间**（与 `textOf` / 选区同尺），互不重叠。
+ *
+ * @property rowScope 非空 = 这一段是整表修订里的某几行（卡片只列那几行，见 [TableRowScope]）
+ */
+data class TextEditPart(
+    val start: Int,
+    val endExclusive: Int,
+    val text: String,
+    val styles: List<InlineMarkup.StyleSpan>? = null,
+    val blocks: List<InlineMarkup.Segment>? = null,
+    val rowScope: TableRowScope? = null,
+)
+
+/**
  * 修订提交的纯算法（方案 §8.4）。
  *
  * 1. **按叶拆段**：选区跨几个排版叶就拆几段；输入行数等于叶数时每叶一条修订（段数不变），

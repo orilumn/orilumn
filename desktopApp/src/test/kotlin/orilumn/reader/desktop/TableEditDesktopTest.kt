@@ -3,6 +3,7 @@ package orilumn.reader.desktop
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.engine.revision.InlineMarkup
 import orilumn.reader.engine.revision.TextEditBlock
+import orilumn.reader.engine.revision.TextEditPart
 import orilumn.reader.engine.revision.tableRowCardOf
 import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.ui.reader.TextEditOutcome
@@ -701,6 +702,105 @@ class TableEditDesktopTest {
             val hit = normalText.indexOf("let")
             val spans = host.textEditSpans(chapter, hit, hit + 3).orEmpty()
             assertTrue("let 的 code 结构应保留：$spans", spans.any { it.sig.tag == "code" })
+        } finally {
+            host.close()
+        }
+    }
+
+    /**
+     * 审阅视图里「表格 + 表格外的文字」一起选（用户复报：卡片只剩整张表、选中的其他文字没了）。
+     *
+     * 一张卡里两套改法装不下，卡片按段切开提交：表格那一段按行范围走（拼回整张表），
+     * 表格外的文字那一段按普通区间走——一次落库、两处都生效。
+     */
+    @Test
+    fun mixedTextAndTablePartsCommitTogether() {
+        val root = Files.createTempDirectory("orilumn-mixed-edit").toFile()
+        val host = openHost(writeBook(root), root)
+        try {
+            val pos = runBlocking { host.open() }!!
+            val chapter = pos.chapter
+            val before = body(host, chapter)
+            val (range, blocks) = tableBlocks(host, chapter, before)
+            val card = cardText(before, blocks)
+            // 先删掉一行，表上压一条整表结构修订（用户走的就是这条路）。
+            val deleted = lines(card).filterNot { it.contains("乙二") }.joinToString("\n")
+            assertTrue(commit(host, chapter, range, deleted, pos) is TextEditOutcome.Success)
+
+            // 审阅视图里卡片的区间都是**当前显示空间**：表格修订的区间、表外段落的区间同尺。
+            val reviewPos = runBlocking { host.switchReviewMode(true, chapter, 0) }!!
+            val reviewText = body(host, chapter)
+            val revision = runBlocking { host.textRevisionsForChapter(chapter) }
+                .first { it.editedBlocks.firstOrNull()?.startsWith("T") == true }
+            val tableRange = revision.charStart until revision.charEnd
+            val paraBefore = "表格前面的段落。"
+            val paraAfter = "表格后面的段落。"
+            val beforeAt = reviewText.indexOf(paraBefore)
+            val afterAt = reviewText.indexOf(paraAfter)
+            assertTrue("章节里应找到表前段落", beforeAt >= 0)
+            assertTrue("章节里应找到表后段落", afterAt >= 0)
+            assertEquals("表前段落正好接着表格", tableRange.first, beforeAt + paraBefore.length)
+            assertEquals("表格后面正好接着表后段落", tableRange.last + 1, afterAt)
+
+            // 表格里拖到的那一行（甲三，没改过的那行）：卡片只列这一行。
+            val rowAt = reviewText.indexOf("甲三")
+            val scope = host.tableRowScope(chapter, revision.id, rowAt, rowAt + 1)
+            assertNotNull("表格里那几行应能开出范围", scope)
+            val rowSegments = orilumn.reader.engine.revision.RevisionBlocks
+                .cardSegments(revision.editedText, revision.editedBlocks)!!
+                .subList(scope!!.firstRow, scope.lastRow + 1)
+            val rowCard = InlineMarkup.show(rowSegments, emptyList())
+            val parsedRows = InlineMarkup.parse(rowCard)
+            assertTrue("行卡片应能解析：${parsedRows.errors}", parsedRows.ok)
+
+            val changedBefore = "表格前面的段落改。"
+            val changedAfter = "表格后面的段落改。"
+            val parts = listOf(
+                TextEditPart(
+                    start = beforeAt,
+                    endExclusive = tableRange.first,
+                    text = changedBefore,
+                    blocks = listOf(InlineMarkup.Segment(changedBefore, null)),
+                ),
+                TextEditPart(
+                    start = tableRange.first,
+                    endExclusive = tableRange.last + 1,
+                    text = parsedRows.text,
+                    blocks = parsedRows.segments,
+                    rowScope = scope,
+                ),
+                TextEditPart(
+                    start = tableRange.last + 1,
+                    endExclusive = afterAt + paraAfter.length,
+                    text = changedAfter,
+                    blocks = listOf(InlineMarkup.Segment(changedAfter, null)),
+                ),
+            )
+            val outcome = runBlocking { host.commitTextEdits(chapter, parts, reviewPos) }
+            assertTrue("混合物提交应成功：$outcome", outcome is TextEditOutcome.Success)
+
+            val after = body(host, chapter)
+            assertTrue("表格外的前一段要落进正文：$after", after.contains(changedBefore))
+            assertTrue("表格外的后一段要落进正文：$after", after.contains(changedAfter))
+            assertTrue("表格其余行还在", after.contains("甲一") && after.contains("甲四"))
+            assertTrue("拖到的那一行还在", after.contains("甲三"))
+            // 审阅空间里原文照排在位（乙二还是红字），「删掉的行有没有回来」要在正常视图里看。
+
+            // 换回正常视图：两处修改都真的在书里（不只是审阅空间的投影）。
+            val back = runBlocking { host.switchReviewMode(false, chapter, 0) }!!
+            host.pageLines(back)
+            var normalText = body(host, chapter)
+            var waited = 0
+            while (normalText.isEmpty() && waited < 2_000) {
+                Thread.sleep(20)
+                waited += 20
+                host.pageLines(back)
+                normalText = body(host, chapter)
+            }
+            assertTrue("正常视图里表前段落是改后的字", normalText.contains(changedBefore))
+            assertTrue("正常视图里表后段落是改后的字", normalText.contains(changedAfter))
+            assertTrue("正常视图里表格还在", normalText.contains("甲一") && normalText.contains("甲三"))
+            assertFalse("删掉的表格行不应回来", normalText.contains("乙二"))
         } finally {
             host.close()
         }

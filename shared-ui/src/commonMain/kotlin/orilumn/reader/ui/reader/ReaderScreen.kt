@@ -1317,7 +1317,10 @@ fun ReaderScreen(
      * 命中后选区恢复成这条修订的**整段**（当前空间），输入区带出改后的文字——
      * 点红字或点绿字落到的是同一条修订，改的就是它（与 D-36「改过 = 改后的内容」同口径）。
      *
-     * @return true = 已经打开修改卡（本次点按不再翻页 / 开链接 / 切栏）
+     * **表格例外**：整表修订（首码大写 `T`）上点按什么都不做（返回 true 吞掉这次点按）——
+     * 整张表不是「点」出来的，要改哪几行就拖选那几行，改结构就拖选整张表。
+     *
+     * @return true = 已经打开修改卡（本次点按不再翻页 / 开链接 / 切栏），或点按落在了改过的表格里
      */
     fun tryOpenReviewEditAt(xPx: Float, yPx: Float): Boolean {
         val p = openPos ?: return false
@@ -1337,6 +1340,14 @@ fun ReaderScreen(
                     chapterRevisions.joinToString(",") { "${it.charStart}-${it.charEnd}" },
             )
             return false
+        }
+        // 表格上压着整表修订（首码大写 `T`）时，点按**什么都不做**：不框整张表、不开整表卡片、
+        // 也不翻页切栏。整张表不是「点」出来的——读者在表上落一下手指并不是想改整张表；
+        // 要改哪几行就拖选那几行（卡片只列那几行），只改字仍可长按起选。
+        // 见 docs/正文修改-块级标记.md §8 / 验收 30 / 36。
+        if (revision.editedBlocks.firstOrNull()?.startsWith("T") == true) {
+            Logger.d("Orilumn.TAP", "review tap offset=$offset in revised table → ignored")
+            return true
         }
         return openRevisionEdit(revision)
     }

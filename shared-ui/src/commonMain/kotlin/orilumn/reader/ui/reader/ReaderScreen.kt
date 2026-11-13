@@ -1319,12 +1319,13 @@ fun ReaderScreen(
      *
      * **表格例外**：整表修订（首码大写 `T`）上只认**真正改动过的字**（红字 / 绿字）——点它照常
      * 进编辑状态，审阅视图里按点到的行开行卡片（不框整张表）；点在表格其他区域（没改过的格、
-     * 行间空白）什么都不做，吞掉这次点按（不翻页 / 切栏）。普通阅读视图里正文就是改后的表、
-     * 没有红绿字可认，点表上改动过的字一律打开整表卡片（同样不框整张表）。
+     * 行间空白）不开编辑，两侧吞掉这次点按（不翻页 / 切栏），**屏幕中部照旧交给上下栏的显隐**。
+     * 普通阅读视图里正文就是改后的表、没有红绿字可认，点表上改动过的字一律打开整表卡片
+     * （同样不框整张表）。
      *
      * @return true = 已经打开修改卡（本次点按不再翻页 / 开链接 / 切栏），或点按落在了改过的表格里
      */
-    fun tryOpenReviewEditAt(xPx: Float, yPx: Float): Boolean {
+    fun tryOpenReviewEditAt(xPx: Float, yPx: Float, widthPx: Float): Boolean {
         val p = openPos ?: return false
         if (chapterRevisions.isEmpty()) {
             Logger.d("Orilumn.TAP", "review tap skip: revisions not loaded yet ch=${p.chapter}")
@@ -1356,25 +1357,27 @@ fun ReaderScreen(
             return false
         }
         // 表格上压着整表修订（首码大写 `T`）时走单独一套判据（见 reviewTableTapOf）：
-        // 审阅视图里点改过的那一行 = 进编辑、开行卡片；点一行都没改过的区域什么都不做；
-        // 普通视图里点表上改动过的字 = 开整表卡片。见 docs/正文修改-块级标记.md §8 / 验收 30 / 36 / 37。
+        // 审阅视图里点改过的那一行 = 进编辑、开行卡片；点一行都没改过的区域不开编辑
+        // （两侧吞掉不翻页，中部让给上下栏）；普通视图里点表上改动过的字 = 开整表卡片。
+        // 见 docs/正文修改-块级标记.md §8 / 验收 30 / 36 / 37。
         if (revision.editedBlocks.firstOrNull()?.startsWith("T") == true) {
-            return when (
-                val tap = reviewTableTapOf(
-                    reviewSpace = reviewSpace,
-                    rowOf = {
-                        currentHost.textEditBlocks(p.chapter, offset, offset + 1)
-                            ?.firstOrNull()
-                            ?.let { it.start until it.endExclusive }
-                    },
-                    marksOf = { reviewMarksFor(p.chapter) },
-                    scopeOf = { currentHost.tableRowScope(p.chapter, revision.id, offset, offset + 1) },
+            val tap = reviewTableTapOf(
+                reviewSpace = reviewSpace,
+                rowOf = {
+                    currentHost.textEditBlocks(p.chapter, offset, offset + 1)
+                        ?.firstOrNull()
+                        ?.let { it.start until it.endExclusive }
+                },
+                marksOf = { reviewMarksFor(p.chapter) },
+                scopeOf = { currentHost.tableRowScope(p.chapter, revision.id, offset, offset + 1) },
+            )
+            val middle = ReaderMath.tapZone(xPx, widthPx) == 0
+            when (tap) {
+                ReviewTableTap.Ignore -> Logger.d(
+                    "Orilumn.TAP",
+                    "tap offset=$offset in revised table (unchanged row) → " +
+                        if (middle) "pass through (bars)" else "ignored",
                 )
-            ) {
-                ReviewTableTap.Ignore -> {
-                    Logger.d("Orilumn.TAP", "tap offset=$offset in revised table (unchanged row) → ignored")
-                    true
-                }
                 ReviewTableTap.WholeTable -> {
                     Logger.d("Orilumn.TAP", "tap offset=$offset in revised table → whole-table card")
                     openRevisionEdit(revision, select = false)
@@ -1384,6 +1387,7 @@ fun ReaderScreen(
                     openRevisionEdit(revision, select = false, rows = tap.scope)
                 }
             }
+            return reviewTableTapConsumed(tap, middle)
         }
         return openRevisionEdit(revision)
     }
@@ -1444,7 +1448,7 @@ fun ReaderScreen(
         }
         // 点按**改过的文字**直接开卡改它（审阅视图的红绿字、普通视图里改后的正文都算）。
         // 放在标注之后：同一段字上既有标注又有修订时先按老规矩开标注卡；要改这段字可长按起选再点「编辑」。
-        if (tryOpenReviewEditAt(xPx, yPx)) {
+        if (tryOpenReviewEditAt(xPx, yPx, widthPx)) {
             Logger.d("Orilumn.TAP", "tap x=${xPx.roundToInt()} y=${yPx.roundToInt()} → revision edit card")
             return
         }

@@ -2,6 +2,7 @@ package orilumn.reader.ui.reader
 
 import orilumn.reader.engine.revision.TableRowScope
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -74,5 +75,21 @@ class ReviewTableTapTest {
         // 「点了没反应」才是 bug。
         assertEquals(ReviewTableTap.Row(row), tap(offset = 190, reviewSpace = true))
         assertEquals(ReviewTableTap.WholeTable, tap(offset = 190, reviewSpace = true, scope = null))
+    }
+
+    @Test
+    fun `unchanged row lets the middle zone through to the bars`() {
+        // 屏幕中部点按 = 呼出 / 收起上下栏，表格里没改过的行不该抢这个手势。
+        val tap = tap(offset = 160, reviewSpace = true)
+        assertEquals(ReviewTableTap.Ignore, tap)
+        assertFalse(reviewTableTapConsumed(tap, middleZone = true))
+        // 两侧照旧吞掉：点表格里没改过的行不该翻页。
+        assertTrue(reviewTableTapConsumed(tap, middleZone = false))
+    }
+
+    @Test
+    fun `changed rows consume the tap in every zone`() {
+        assertTrue(reviewTableTapConsumed(tap(offset = 132, reviewSpace = true), middleZone = true))
+        assertTrue(reviewTableTapConsumed(tap(offset = 120, reviewSpace = false), middleZone = true))
     }
 }

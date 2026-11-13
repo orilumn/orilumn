@@ -31,6 +31,7 @@ internal sealed interface ReviewTableTap {
  *   修订，调用方根本不会进来，所以这里不会误伤没改过的表格。
  * - **审阅视图**：只认**改过的那一行**。判据是画出来的红绿痕迹 [marksOf] 与该行是否有交集
  *   —— 改一格常常只改一两个字，读者点这一行里其他字也该进编辑；整行都没改过才不响应。
+ *   点到没改过的行只在**两侧**吃掉点按（不翻页）；屏幕中部让给「呼出 / 收起上下栏」。
  *   点到删掉的行时打开**空白**行卡（上次编辑的结果就是这行不存在），位置留在原处；
  *   拿不到行对照（[scopeOf] 返回 null）时才退回整表卡片。
  *
@@ -55,3 +56,14 @@ internal fun reviewTableTapOf(
     val scope = scopeOf()
     return if (scope != null) ReviewTableTap.Row(scope) else ReviewTableTap.WholeTable
 }
+
+/**
+ * 这次点按**要不要就地吃掉**（true = 到此为止，不再翻页 / 不切栏）。
+ *
+ * 点改过的表格区域总是吃掉（开卡就是结果）；点**没改过的那一行**只在两侧吃掉——
+ * 屏幕中部本来就是把上下栏叫出来 / 收起来（点按三区的中区），表格不该抢这个手势。
+ *
+ * @param middleZone 这次点按落在屏幕中区（`ReaderMath.tapZone` 的 0 区）。
+ */
+internal fun reviewTableTapConsumed(tap: ReviewTableTap, middleZone: Boolean): Boolean =
+    tap !is ReviewTableTap.Ignore || !middleZone

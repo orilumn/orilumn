@@ -297,6 +297,13 @@ object ReviewOverlay {
                 is CharDiff.Op.Insert -> for (c in op.text) {
                     flushSeps()
                     flushTraces()
+                    if (c == '\n') {
+                        // 读者新插的**叶内换行**（`<br>`）：换行本身没有字形，红绿都看不见。
+                        // 在断行处上一行末尾补一个绿 ¶，与段界那套同一个口径（¶ 占一格、可点按，
+                        // 取文字时会被跳过）。位置记在 `marks` 里，上色与点按都靠它。
+                        marks[at] = true
+                        pushInserted("${ChapterRevisionMap.BREAK_MARK_CHAR}", 4)
+                    }
                     if (n < newToReview.size) newToReview[n] = at
                     pushInserted(c.toString(), 2)
                     if (n < newToOut.size) newToOut[n] = out.length - 1

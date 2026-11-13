@@ -1235,11 +1235,120 @@ fun ReaderScreen(
     }
 
     /**
+     * 按**当前显示文字**开一次普通修改卡：[s, e) 是当前文字空间的选区。
+     *
+     * 输入区与目标区间同进同退（`textEditStart/End` = 卡里那段文字的范围）：卡里放的一律是
+     * 「书里现在这几段长什么样」，不走审阅视图的「原文 + 新文字」对照。
+     *
+     * 从 `setTextEditTarget` 抽出来，是为了让**重开旧修订**那条路也能用它：只加了换行的修订
+     * 在最小修订里只剩那个换行本身，得扩到所在整块再按这一段开卡（见 `openRevisionEdit`）。
+     */
+    fun openTextEditAt(ch: Int, s: Int, e: Int): Boolean {
+        val text = currentHost.textOf(ch, 0, Int.MAX_VALUE) ?: return false
+        // 卡片里给人看的是书里的字：审阅视图的「段界痕迹」¶ 一并摘掉（偏移自己回缩到同一口径），
+        // 否则确认时会把 ¶ 当成字写进正文。分页 / 选区 / 修订换算仍走原样文字。
+        val brk = currentHost.reviewBreakText(ch)
+        val body = brk.plainChapterText(text)
+        val rawBlockEnds = currentHost.textBlockEndsOf(ch)
+        val blockEnds = brk.plainBlockEnds(rawBlockEnds)
+        // 表格行整行呈现：格偏移是按**整行文字**算的，选区只碰到半行时，片段文字与格界对不上
+        // （管道行会错位）。所以卡片与提交区间只扩到**碰到的那几行**的整行 —— 读者选两行就只
+        // 列两行，不把整张表都塞进卡片。删行 / 加行 / 删表 / 增删列都放行：提交侧把未选中的
+        // 行一起拼回**整张表**，按网格自洽校验后再落一条整表修订。
+        // 整块图片只有一个占位字符，不存在半块选中，不扩。
+        var from = s
+        var to = e
+        var blockInfo = currentHost.textEditBlocks(ch, from, to)?.takeIf { it.isNotEmpty() }
+        while (blockInfo != null) {
+            val grown = expandTableRowsForEdit(blockInfo, from, to)
+            if (grown.first == from && grown.last + 1 == to) break
+            from = grown.first
+            to = grown.last + 1
+            blockInfo = currentHost.textEditBlocks(ch, from, to)?.takeIf { it.isNotEmpty() }
+        }
+        textEditChapter = ch
+        textEditStart = from
+        textEditEnd = to
+        // 逐块取文字（块内 `<br>` / 代码块换行原样留在块里，不当段界）。
+        val pieces = selectionPiecesForEdit(body, blockEnds, brk.plain(from), brk.plain(to))
+        val plain = pieces.joinToString("\n")
+        // 选区所在的**段**（渲染空间）：提交时按它取同段的行内结构当模板。
+        // 取整段而不是只取选区：读者新写 `*新*` 要长得像同段别的斜体，那些斜体常常在选区之外。
+        textEditParagraphRange = paragraphRangeOf(rawBlockEnds, text.length, from, to)
+        // 选区上的行内元素摊成标记文字（`*斜体*`、`[文字](地址)`）：看得见、也改得动。
+        // 宿主给不出结构（尚未就绪 / 非盒式排版）就按纯文本，行为与引入标记之前一致。
+        // 宿主给的是**相对选区起点**的区间，先换成章文本绝对偏移；审阅视图另有 ¶ 痕迹，
+        // 一并按同一把尺剥掉，输入区才与正文逐字对得上。
+        val rawSpans = currentHost.textEditSpans(ch, from, to)
+        val spans = rawSpans?.let { list ->
+            spansToEditText(
+                spans = list.map {
+                    InlineMarkup.StyleSpan(
+                        brk.plain(from + it.start),
+                        brk.plain(from + it.endExclusive),
+                        it.sig,
+                    )
+                },
+                blockEnds = blockEnds,
+                start = brk.plain(from),
+                endExclusive = brk.plain(to),
+            )
+        }
+        // 整段都包着选区的元素不算「读者要改的结构」：选区完全在元素内部时，标记只是噪音
+        // （读者看不见边界，写了反而会把元素挪位或截断）。这类元素单独记下，提交时原样套回
+        // 整段；只有**边界切在选区里**的元素才摊成标记给读者看。
+        // 例外：外层元素是局部的，内层就不能隐形——否则补回时会落到外层之外。
+        val (ambient, visible) = splitAmbientSpans(spans.orEmpty(), plain.length)
+        // 块级形态：宿主按排版叶给出每块是哪一种（标题 / 引用 / 列表 / 代码块 / 段落），
+        // 卡片把它写成行首标记；拿不到就整套按纯文本（不改任何块的形态）。
+        textEditBlocksKnown = blockInfo != null
+        textEditFirstLineNoKind = blockInfo != null && (
+            blockInfo.firstOrNull()?.startsAtBlockStart == false ||
+                blockInfo.firstOrNull()?.kind == null
+            )
+        val segments = pieces.mapIndexed { i, piece ->
+            val info = blockInfo?.getOrNull(i)
+            // 第一行从段中间开始时**不写标记**：那里的「没有标记」不代表普通段落，是「改不了」。
+            InlineMarkup.Segment(
+                text = piece,
+                block = if (info?.startsAtBlockStart == false) null else info?.kind,
+                // 表格行按格结构排成管道行 / 基本 HTML 行；盖不住这份文字就按纯文本（不猜格界）。
+                table = info?.table?.takeIf { it.covers(piece) },
+            )
+        }
+        textEditBaseText = plain
+        textEditTables = blockInfo?.map { it.table } ?: emptyList()
+        textEditImages = blockInfo?.map { it.image } ?: emptyList()
+        // 这次选中的正好是一整张表（每一块都是它的行，表首 / 表尾就是选区两头）：
+        // 行数、每行列数都允许改，提交前按网格自洽校验。
+        textEditWholeTable = blockInfo != null && pieces.isNotEmpty() &&
+            blockInfo.size == pieces.size &&
+            blockInfo.all { it.table != null && it.tableRange?.first == from && it.tableRange?.last == to - 1 }
+        // 新选区：不是「重开整表修订里的某几行」，行范围清掉。
+        textEditRowScope = null
+        textEditTableRange = null
+        // 原件仍记**完整**结构：no-op 比较和属性补回都要拿它当模板。
+        textEditOriginalSpans = spans
+        textEditAmbientSpans = ambient
+        // 书是 EPUB，不是 markdown：原文里的 `*` `~` `[` `<` `&` 都是**普通文字**。输入区是
+        // markdown 编辑区，所以**永远**走一遍序列化把标记字符转义（`*` → `\*`），不然读者一确认
+        // 就会被解析成粗体 / 斜体、标签或实体，原文被悄悄改掉。没有行内结构时也一样。
+        // 确认时 [InlineMarkup.parse] 把反斜杠去掉，落进书里的仍是原来那几个字。
+        textEditText = InlineMarkup.show(segments, visible)
+        textEditBaseCard = textEditText
+        textEditFromRevision = false
+        return true
+    }
+
+    /**
      * 打开一条已有修订的修改卡：输入区带出**这条修订改完的整段内容**（不是审阅视图里的
      * 「原文 + 新文字」对照），选区同步框住整段。点按红绿字与长按选中改过的字都走这里。
      *
      * 目标区间始终是这条修订在当前显示空间里的整段（`chapterRevisions` 已换算好），
      * 提交时再换回原书空间——读者改的仍是原书那一段，不是把改后的字当成新底稿。
+     *
+     * 例外：这条修订只加了换行（最小修订里只剩那个换行本身，见 [revisionNeedsBlockContext]）时，
+     * 卡片改按**所在整块**开——只按那个换行开，输入区里一个能看见的字都没有。
      *
      * @param select 是否把选区改成这条修订的整段。`false` = 只开卡片、不动选区（审阅视图里
      *   读者拖选改过的表格中的某几行：拖了哪一行就框住哪一行）。
@@ -1251,15 +1360,42 @@ fun ReaderScreen(
         rows: TableRowScope? = null,
     ): Boolean {
         val p = openPos ?: return false
+        // 只加了换行的修订：最小修订里只剩那个换行本身，按它开卡输入区里一个能看见的字都没有
+        // （只剩行尾一个 `\`），读者看不出换行落在哪两个词之间。这类修订扩到所在**整块**，
+        // 卡片文字与目标区间用同一段当前文字（直接确定就是恒等，两种视图都验过）。
+        val blockRange = if (rows == null && revisionNeedsBlockContext(revision)) {
+            currentHost.textOf(p.chapter, 0, Int.MAX_VALUE)?.let { text ->
+                paragraphRangeOf(
+                    currentHost.textBlockEndsOf(p.chapter),
+                    text.length,
+                    revision.charStart,
+                    revision.charEnd,
+                )
+            }
+        } else {
+            null
+        }
         if (select) {
             val text = currentHost.textOf(p.chapter, 0, Int.MAX_VALUE) ?: return false
-            if (!selection.selectRange(p.chapter, text, revision.charStart, revision.charEnd)) {
+            val s = blockRange?.first ?: revision.charStart
+            val e = blockRange?.last?.plus(1) ?: revision.charEnd
+            if (!selection.selectRange(p.chapter, text, s, e)) {
                 selection.clear()
             }
         }
         closeAnnotationEdit()
         magnifierFinger = null
         noteText = ""
+        if (blockRange != null && openTextEditAt(p.chapter, blockRange.first, blockRange.last + 1)) {
+            // 卡里已是「改完的整段」：落笔前不许用手柄把它换回原文，提交时也按重开旧修订算。
+            textEditDirty = true
+            textEditFromRevision = true
+            textEditOpen = true
+            textEditBusy = false
+            textEditError = null
+            selectionMenuVisible = false
+            return true
+        }
         textEditChapter = p.chapter
         textEditStart = revision.charStart
         textEditEnd = revision.charEnd
@@ -1914,100 +2050,7 @@ fun ReaderScreen(
                 if (setReviewCurrentTarget(ch, from, to, touched, s, e)) return true
             }
         }
-        val text = currentHost.textOf(ch, 0, Int.MAX_VALUE) ?: return false
-        // 卡片里给人看的是书里的字：审阅视图的「段界痕迹」¶ 一并摘掉（偏移自己回缩到同一口径），
-        // 否则确认时会把 ¶ 当成字写进正文。分页 / 选区 / 修订换算仍走原样文字。
-        val brk = currentHost.reviewBreakText(ch)
-        val body = brk.plainChapterText(text)
-        val rawBlockEnds = currentHost.textBlockEndsOf(ch)
-        val blockEnds = brk.plainBlockEnds(rawBlockEnds)
-        // 表格行整行呈现：格偏移是按**整行文字**算的，选区只碰到半行时，片段文字与格界对不上
-        // （管道行会错位）。所以卡片与提交区间只扩到**碰到的那几行**的整行 —— 读者选两行就只
-        // 列两行，不把整张表都塞进卡片。删行 / 加行 / 删表 / 增删列都放行：提交侧把未选中的
-        // 行一起拼回**整张表**，按网格自洽校验后再落一条整表修订。
-        // 整块图片只有一个占位字符，不存在半块选中，不扩。
-        var from = s
-        var to = e
-        var blockInfo = currentHost.textEditBlocks(ch, from, to)?.takeIf { it.isNotEmpty() }
-        while (blockInfo != null) {
-            val grown = expandTableRowsForEdit(blockInfo, from, to)
-            if (grown.first == from && grown.last + 1 == to) break
-            from = grown.first
-            to = grown.last + 1
-            blockInfo = currentHost.textEditBlocks(ch, from, to)?.takeIf { it.isNotEmpty() }
-        }
-        textEditChapter = ch
-        textEditStart = from
-        textEditEnd = to
-        // 逐块取文字（块内 `<br>` / 代码块换行原样留在块里，不当段界）。
-        val pieces = selectionPiecesForEdit(body, blockEnds, brk.plain(from), brk.plain(to))
-        val plain = pieces.joinToString("\n")
-        // 选区所在的**段**（渲染空间）：提交时按它取同段的行内结构当模板。
-        // 取整段而不是只取选区：读者新写 `*新*` 要长得像同段别的斜体，那些斜体常常在选区之外。
-        textEditParagraphRange = paragraphRangeOf(rawBlockEnds, text.length, from, to)
-        // 选区上的行内元素摊成标记文字（`*斜体*`、`[文字](地址)`）：看得见、也改得动。
-        // 宿主给不出结构（尚未就绪 / 非盒式排版）就按纯文本，行为与引入标记之前一致。
-        // 宿主给的是**相对选区起点**的区间，先换成章文本绝对偏移；审阅视图另有 ¶ 痕迹，
-        // 一并按同一把尺剥掉，输入区才与正文逐字对得上。
-        val rawSpans = currentHost.textEditSpans(ch, from, to)
-        val spans = rawSpans?.let { list ->
-            spansToEditText(
-                spans = list.map {
-                    InlineMarkup.StyleSpan(
-                        brk.plain(from + it.start),
-                        brk.plain(from + it.endExclusive),
-                        it.sig,
-                    )
-                },
-                blockEnds = blockEnds,
-                start = brk.plain(from),
-                endExclusive = brk.plain(to),
-            )
-        }
-        // 整段都包着选区的元素不算「读者要改的结构」：选区完全在元素内部时，标记只是噪音
-        // （读者看不见边界，写了反而会把元素挪位或截断）。这类元素单独记下，提交时原样套回
-        // 整段；只有**边界切在选区里**的元素才摊成标记给读者看。
-        // 例外：外层元素是局部的，内层就不能隐形——否则补回时会落到外层之外。
-        val (ambient, visible) = splitAmbientSpans(spans.orEmpty(), plain.length)
-        // 块级形态：宿主按排版叶给出每块是哪一种（标题 / 引用 / 列表 / 代码块 / 段落），
-        // 卡片把它写成行首标记；拿不到就整套按纯文本（不改任何块的形态）。
-        textEditBlocksKnown = blockInfo != null
-        textEditFirstLineNoKind = blockInfo != null && (
-            blockInfo.firstOrNull()?.startsAtBlockStart == false ||
-                blockInfo.firstOrNull()?.kind == null
-            )
-        val segments = pieces.mapIndexed { i, piece ->
-            val info = blockInfo?.getOrNull(i)
-            // 第一行从段中间开始时**不写标记**：那里的「没有标记」不代表普通段落，是「改不了」。
-            InlineMarkup.Segment(
-                text = piece,
-                block = if (info?.startsAtBlockStart == false) null else info?.kind,
-                // 表格行按格结构排成管道行 / 基本 HTML 行；盖不住这份文字就按纯文本（不猜格界）。
-                table = info?.table?.takeIf { it.covers(piece) },
-            )
-        }
-        textEditBaseText = plain
-        textEditTables = blockInfo?.map { it.table } ?: emptyList()
-        textEditImages = blockInfo?.map { it.image } ?: emptyList()
-        // 这次选中的正好是一整张表（每一块都是它的行，表首 / 表尾就是选区两头）：
-        // 行数、每行列数都允许改，提交前按网格自洽校验。
-        textEditWholeTable = blockInfo != null && pieces.isNotEmpty() &&
-            blockInfo.size == pieces.size &&
-            blockInfo.all { it.table != null && it.tableRange?.first == from && it.tableRange?.last == to - 1 }
-        // 新选区：不是「重开整表修订里的某几行」，行范围清掉。
-        textEditRowScope = null
-        textEditTableRange = null
-        // 原件仍记**完整**结构：no-op 比较和属性补回都要拿它当模板。
-        textEditOriginalSpans = spans
-        textEditAmbientSpans = ambient
-        // 书是 EPUB，不是 markdown：原文里的 `*` `~` `[` `<` `&` 都是**普通文字**。输入区是
-        // markdown 编辑区，所以**永远**走一遍序列化把标记字符转义（`*` → `\*`），不然读者一确认
-        // 就会被解析成粗体 / 斜体、标签或实体，原文被悄悄改掉。没有行内结构时也一样。
-        // 确认时 [InlineMarkup.parse] 把反斜杠去掉，落进书里的仍是原来那几个字。
-        textEditText = InlineMarkup.show(segments, visible)
-        textEditBaseCard = textEditText
-        textEditFromRevision = false
-        return true
+        return openTextEditAt(ch, s, e)
     }
 
     /**
@@ -4146,6 +4189,24 @@ internal fun paragraphRangeOf(
         from = end
     }
     return null
+}
+
+/**
+ * 重开这条修订时，输入区里**一个能看见的字都没有**（读者只加了一个换行 / 空白，且没删掉任何字）。
+ *
+ * 落库的是**最小修订**：只加一个 `<br>` 或段界时，替换文本就那一个换行，卡片按它开出来只剩
+ * 行尾一个 `\`，读者既看不出换行落在哪两个词之间，也认不出改的是哪一段。这种要扩到所在整块再开卡。
+ *
+ * 只认「纯插入、插入的内容全是空白」：
+ * - 删字 / 换字的修订卡片里本来就有字，不需要上下文；
+ * - 审阅视图里扩块要拿**显示文字**当卡片文字，而那里还排着被删掉的原文——只有纯插入（没删字）
+ *   才保证显示文字就是改后结果，扩块直接确定才恒等。
+ */
+internal fun revisionNeedsBlockContext(revision: TextRevision): Boolean {
+    val inserted = RevisionBlocks.renderedLength(revision.text)
+    // 原区间长度 = 替换文本长度 − delta；不为 0 说明删过原文，不是纯插入。
+    if (inserted - revision.delta != 0) return false
+    return inserted > 0 && RevisionBlocks.textOf(revision.text).isBlank()
 }
 
 internal fun selectionTextForEdit(

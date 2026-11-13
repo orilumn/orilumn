@@ -113,6 +113,26 @@ class ReviewOverlayTest {
     }
 
     @Test
+    fun insertedLineBreakLeavesGreenMark() {
+        // 零散文字里敲一个真换行（`<br>`）：换行本身没有字形，红绿看不见。
+        // 在断行处上一行末尾补一个绿 ¶，与段界那套同一个口径；换行照旧断行。
+        val plan = ReviewOverlay.plan("风起云涌", "风起云\n涌", IntArray(0))!!
+        assertEquals("风起云${mark}\n涌", plan.text)
+        assertEquals(6, plan.length)
+        assertEquals(mapOf(3 to true), plan.marks)
+        // ¶ 与那个换行拼在同一处插入（都是读者新写的）。
+        assertEquals(listOf(3), plan.insertions.map { it.at })
+        assertEquals("${mark}\n", plan.insertions.single().text)
+        // 上色区间含 ¶ 与换行；「涌」是原文保留，不标色。
+        assertEquals(listOf(3 until 5), pairs(plan.inserted))
+        assertTrue(plan.deleted.isEmpty())
+        assertFalse(plan.needsBlocks)
+        // 取文字时 ¶ 会被跳过（见 `reviewMarkOffsets`），正文与卡片里都不会多这个符号。
+        assertEquals(3, plan.oldAt(3))
+        assertEquals(3, plan.oldAt(5))
+    }
+
+    @Test
     fun insertedParagraphBreakSplitsBlock() {
         // 段内新敲一个回车：绿 ¶ 落在断行处上一行末尾，段界本身把块拆开（不占字符）。
         val plan = ReviewOverlay.plan("", sep, IntArray(0))!!

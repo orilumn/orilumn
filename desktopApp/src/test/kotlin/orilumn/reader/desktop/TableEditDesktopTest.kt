@@ -276,17 +276,81 @@ class TableEditDesktopTest {
                 val outcome = commit(host, chapter, range, "云\n涌", pos)
                 assertTrue("敲换行不该被拒：$outcome", outcome is TextEditOutcome.Success)
                 val after = body(host, chapter)
-                assertEquals("换行真的落成换行（不是空格）", "第1章风起云\n涌正文。", after)
+                if (review) {
+                    // 审阅空间里新插的换行没有字形，断行处上一行末尾补一个绿 ¶（与段界那套同口径）。
+                    assertEquals("第1章风起云¶\n涌正文。", after)
+                } else {
+                    assertEquals("换行真的落成换行（不是空格）", "第1章风起云\n涌正文。", after)
+                }
                 val success = outcome as TextEditOutcome.Success
                 val linesAfter = success.pos?.let { host.pageLines(it)?.size } ?: 0
                 assertEquals("版面多出一行", linesBefore + 1, linesAfter)
                 val marks = host.reviewMarks(chapter).map { it.start to it.endExclusive }
                 if (review) {
-                    // 审阅空间里标的是**新敲的那个换行**本身（以前标到它后面那个字上）。
-                    assertEquals(listOf(6 to 7), marks)
+                    // 审阅空间里标的是**新敲的那个换行**本身，以及它前面那个绿 ¶。
+                    assertEquals(listOf(6 to 8), marks)
                 } else {
                     assertTrue("普通视图不留痕迹：$marks", marks.isEmpty())
                 }
+            } finally {
+                host.close()
+            }
+        }
+    }
+
+    /**
+     * 重开「只加了一个换行」的修订：卡片按**所在整块**开（带出上下文），直接确定不改正文。
+     *
+     * 回归：以前按最小修订开卡——原区间为空、替换文本就是那个换行，输入区里只剩行尾一个 `\`，
+     * 读者看不出换行落在哪两个词之间。这里验证阅读面选用的「整块 + 当前文字」在两种视图下都恒等。
+     */
+    @Test
+    fun breakOnlyRevisionReopensWithWholeBlock() {
+        for (review in listOf(false, true)) {
+            val root = Files.createTempDirectory("orilumn-break-reopen").toFile()
+            val host = openHost(
+                writeBook(root, "<h1><span style=\"display:block\">第1章</span>风起云涌</h1><p>正文。</p>"),
+                root,
+                reviewMode = review,
+            )
+            try {
+                val pos = runBlocking { host.open() }!!
+                val chapter = pos.chapter
+                val at = body(host, chapter).indexOf("云涌")
+                val edited = commit(host, chapter, at until at + 2, "云\n涌", pos)
+                assertTrue("敲换行应成功：$edited", edited is TextEditOutcome.Success)
+                val after = body(host, chapter)
+                if (review) {
+                    // 审阅空间里新插的换行多一个绿 ¶ 痕迹。
+                    assertEquals("第1章风起云¶\n涌正文。", after)
+                } else {
+                    assertEquals("第1章风起云\n涌正文。", after)
+                }
+                val revision = runBlocking { host.textRevisionsForChapter(chapter) }.single()
+                // 最小修订就是那个换行：没删掉任何字，扩块开卡不会把旧文字带回来。
+                assertEquals("\n", revision.text)
+                val ends = host.textBlockEndsOf(chapter)
+                assertNotNull("应给得出块界", ends)
+                var blockStart = 0
+                var from = 0
+                var blockEnd = 0
+                for (end in ends!!) {
+                    if (revision.charStart < end) {
+                        blockStart = from
+                        blockEnd = end
+                        break
+                    }
+                    from = end
+                }
+                // 卡片文字 = 这一块**去掉痕迹后**的当前文字（读者看到的字）；目标区间仍按显示空间。
+                val dropped = host.reviewBreakOffsets(chapter).toHashSet()
+                fun plainOf(offset: Int) = offset - dropped.count { it < offset }
+                val plainBody = buildString { for (i in after.indices) if (i !in dropped) append(after[i]) }
+                val blockText = plainBody.substring(plainOf(blockStart), plainOf(blockEnd))
+                assertEquals("卡片要带出的整块当前文字", "风起云\n涌", blockText)
+                val again = commit(host, chapter, blockStart until blockEnd, blockText, pos)
+                assertTrue("整块上重开卡片直接确定应成功：$again", again is TextEditOutcome.Success)
+                assertEquals("整块上直接确定不该动正文", after, body(host, chapter))
             } finally {
                 host.close()
             }

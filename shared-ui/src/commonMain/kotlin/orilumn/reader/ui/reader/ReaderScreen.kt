@@ -3540,7 +3540,15 @@ fun ReaderScreen(
                 if (s == textEditStart && e == textEditEnd) return@LaunchedEffect
                 // 整表修订的卡片目标永远是整张表：读者拖选其中一行（松手后选区只停在那一行）
                 // 或拖手柄时，只动选区，不把卡片目标缩成那一行——否则确定时会把整张表写进一行。
-                if (textEditFromRevision && textEditWholeTable) return@LaunchedEffect
+                //
+                // 但选区**离开了那条修订**（读者另选了别处的文字）就不该再挂着这张表：目标、
+                // 输入区和「删除」都跟着新选区走。否则删除按钮仍按表上那条修订点亮，按下去删的是
+                // 手上根本没选的那张表。读者先前没确定的字随之作废（他把选区挪走了）。
+                if (textEditFromRevision && textEditWholeTable) {
+                    if (s < textEditEnd && textEditStart < e) return@LaunchedEffect
+                    setTextEditTarget(ch, s, e)
+                    return@LaunchedEffect
+                }
                 if (textEditDirty) {
                     textEditStart = s
                     textEditEnd = e

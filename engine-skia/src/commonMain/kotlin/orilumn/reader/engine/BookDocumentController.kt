@@ -33,6 +33,7 @@ import orilumn.reader.engine.revision.TableReviewPlan
 import orilumn.reader.engine.revision.TableRowInfo
 import orilumn.reader.engine.revision.TableRowScope
 import orilumn.reader.engine.revision.tableRowsOfRevision
+import orilumn.reader.engine.revision.tableRowScopeOfDisplayedRows
 import orilumn.reader.engine.revision.TextEditPlan
 import orilumn.reader.engine.revision.TextEditPlanner
 import orilumn.reader.engine.html.ParsedChapter
@@ -708,13 +709,26 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
      * - 不是审阅视图 / 不是整表修订 / 拿不到行级对照；
      * - 拖到的行里有**删掉的行**（新表里没有对应行，没法只改它）；
      * - 拖到的正好是整张表（那就是整表卡片本身）。
+     *
+     * 行级对照建不出来（本章的修订还没套上审阅空间 / 表格结构对不上）时不再直接退整表：
+     * 按**当前显示空间**里拖到的那几行换算（见 [tableRowScopeOfDisplayedRows]）。
      */
     fun tableRowScope(chapter: Int, revisionId: Long, start: Int, endExclusive: Int): TableRowScope? {
         if (!reviewMode) return null
         val map = revisionMaps[chapter] ?: return null
         val r = map.revisions.firstOrNull { it.id == revisionId } ?: return null
         if (r.editedBlocks.firstOrNull()?.startsWith("T") != true) return null
-        val plan = reviewTablePlans[chapter]?.get(revisionId) ?: return null
+        val rows = tableRowsOfRevision(r) ?: return null
+        val plan = reviewTablePlans[chapter]?.get(revisionId)
+        if (plan == null) {
+            val scope = rowScopeOfDisplayedRows(chapter, r, rows.size, start, endExclusive)
+            Logger.d(
+                logTag,
+                "tableRowScope no plan ch=$chapter rev=$revisionId [$start,$endExclusive) → " +
+                    (scope?.let { "rows ${it.firstRow}..${it.lastRow}" } ?: "null (whole table)"),
+            )
+            return scope
+        }
         val tableStart = map.reviewInterval(r).first
         val s = start - tableStart
         val e = endExclusive - tableStart
@@ -734,13 +748,89 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         val newIndices = (first..last).map { plan.rows[it].newIndex }
         if (newIndices.any { it < 0 }) return null
         if (newIndices.zipWithNext().any { (a, b) -> b != a + 1 }) return null
-        val rows = tableRowsOfRevision(r) ?: return null
         val firstRow = newIndices.first()
         val lastRow = newIndices.last()
         if (firstRow < 0 || lastRow >= rows.size) return null
         // 整张表：照旧走整表卡片（行数 / 列数都能改）。
         if (firstRow == 0 && lastRow == rows.size - 1) return null
         return TableRowScope(revisionId, firstRow, lastRow)
+    }
+
+    /**
+     * 没有行级对照时的退路：按**当前显示空间**里拖到的表格行换算成改完那张表的行号。
+     *
+     * 显示空间是改完的那张表（修订已套上）就按行号原样对；显示的是原书那张表
+     * （本章的修订还没套上审阅空间）就按修订落库的行来源折回。
+     */
+    private fun rowScopeOfDisplayedRows(
+        chapter: Int,
+        r: TextRevision,
+        rowCount: Int,
+        start: Int,
+        endExclusive: Int,
+    ): TableRowScope? {
+        // 修订已套上 ⇒ 显示的就是改完的那张表；没套上 ⇒ 显示的是原书那张表。
+        val applied = unitAt(chapter)?.hasTextRevisions == true
+        if (applied) {
+            val scope = rowScopeOfTableBlocks(chapter, r, rowCount, start, endExclusive)
+            if (scope != null) return scope
+        }
+        // 没有排版块可问（本章结构还没落盘）时，按整章文本投影的块尾找行边界：
+        // 表格一行就是一个叶，块尾落在整表区间里的那几个就是行。
+        if (applied) return null
+        val unit = unitAt(chapter) ?: return null
+        unit.chapterText() ?: return null
+        val ends = unit.chapterTextBlockEnds() ?: return null
+        if (ends.isEmpty()) return null
+        val bounds = ArrayList<IntRange>(8)
+        var from = r.charStart
+        for (end in ends) {
+            if (end <= from) continue
+            if (from >= r.charEnd) break
+            val e = minOf(end, r.charEnd)
+            if (e > from) bounds += from until e
+            from = e
+        }
+        if (from != r.charEnd || bounds.isEmpty()) return null
+        val to = minOf(endExclusive, r.charEnd)
+        var first = -1
+        var last = -1
+        for ((i, b) in bounds.withIndex()) {
+            if (b.last + 1 <= start) continue
+            if (b.first >= to) break
+            if (first < 0) first = i
+            last = i
+        }
+        if (first < 0 || last < first) return null
+        return tableRowScopeOfDisplayedRows(r, rowCount, first..last, displayedIsNewTable = false)
+    }
+
+    /** 有排版块时按块找行（块自带整表区间，行号就是它在表里的位置）。 */
+    private fun rowScopeOfTableBlocks(
+        chapter: Int,
+        r: TextRevision,
+        rowCount: Int,
+        start: Int,
+        endExclusive: Int,
+    ): TableRowScope? {
+        val touched = textEditBlocks(chapter, start, endExclusive)
+            ?.filter { it.table != null && it.tableRange != null }
+            ?.takeIf { it.isNotEmpty() }
+            ?: return null
+        val tableRange = touched.first().tableRange ?: return null
+        val all = textEditBlocks(chapter, tableRange.first, tableRange.last + 1)
+            ?.filter { it.table != null }
+            ?.takeIf { it.isNotEmpty() }
+            ?: return null
+        val picked = ArrayList<Int>(touched.size)
+        for (b in touched) {
+            val i = all.indexOfFirst { it.start == b.start && it.endExclusive == b.endExclusive }
+            if (i < 0) return null
+            if (picked.lastOrNull() != i) picked += i
+        }
+        if (picked.isEmpty()) return null
+        if (picked.zipWithNext().any { (a, b) -> b != a + 1 }) return null
+        return tableRowScopeOfDisplayedRows(r, rowCount, picked.first()..picked.last(), displayedIsNewTable = true)
     }
 
     /**

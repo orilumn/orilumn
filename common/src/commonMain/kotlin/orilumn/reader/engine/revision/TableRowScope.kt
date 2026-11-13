@@ -15,6 +15,44 @@ import orilumn.reader.data.revision.TextRevision
 data class TableRowScope(val revisionId: Long, val firstRow: Int, val lastRow: Int)
 
 /**
+ * 「读者选中的是改完那张表的哪几行」——按**当前显示空间**的行序换算（纯逻辑，可脱离排版单测）。
+ *
+ * 主路是审阅视图的行级对照（`TableReviewPlan`）：它按「旧行 + 新行」逐行折回。
+ * 对照拿不到时（本章的修订还没套上审阅空间，或对照建不出来）走这里——
+ * 读者拖了哪一行就还是那一行，不会又变成整张表：
+ *
+ * - [displayedIsNewTable] = true：显示的就是改完的那张表（普通阅读视图，
+ *   或审阅空间已套上修订但没有对照），行号原样对得上；
+ * - false：显示的是原书那张表（审阅空间还没套上修订），按 [TextRevision.rowSources]
+ *   把旧行折回新表——新表里没有对应行（这一行被删了）就折不过去。
+ *
+ * @param displayed 读者选中的行在显示空间里的下标（从表格第一行数起，含两端）
+ * @param rowCount 改完那张表的行数（[tableRowsOfRevision] 的行数）
+ * @return null = 折不过去（有删掉的行 / 行号不连续 / 选中的就是整张表）
+ */
+fun tableRowScopeOfDisplayedRows(
+    revision: TextRevision,
+    rowCount: Int,
+    displayed: IntRange,
+    displayedIsNewTable: Boolean,
+): TableRowScope? {
+    if (rowCount <= 0 || displayed.first < 0 || displayed.last < displayed.first) return null
+    val indices = if (displayedIsNewTable) {
+        displayed.toList()
+    } else {
+        val sources = revision.rowSources ?: return null
+        displayed.map { i -> sources.indexOf(i) }
+    }
+    if (indices.any { it < 0 || it >= rowCount }) return null
+    if (indices.zipWithNext().any { (a, b) -> b != a + 1 }) return null
+    val first = indices.first()
+    val last = indices.last()
+    // 整张表：照旧走整表卡片（行数 / 列数都能改）。
+    if (first == 0 && last == rowCount - 1) return null
+    return TableRowScope(revision.id, first, last)
+}
+
+/**
  * 这几行在修改卡里的样子：文字（行之间用 `\n` 分隔）、每行短码、行内结构、每行格结构。
  *
  * 与整表卡片同源（[RevisionBlocks.cardSegments] + [TableRowInfo.wire]），只是切出其中几行，

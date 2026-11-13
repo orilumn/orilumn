@@ -3,6 +3,7 @@ package orilumn.reader.desktop
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.engine.revision.InlineMarkup
 import orilumn.reader.engine.revision.TextEditBlock
+import orilumn.reader.engine.revision.tableRowCardOf
 import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.ui.reader.TextEditOutcome
 import java.awt.image.BufferedImage
@@ -695,6 +696,159 @@ class TableEditDesktopTest {
             host.close()
         }
     }
+
+    /**
+     * 审阅视图里拖选改过的表格中的**一行**：卡片只列那一行，确认后只改这一行，
+     * 其余行（连同上一次改过的行）原样保留，仍是一条整表记录。
+     */
+    @Test
+    fun reviewModeRowCardEditsOnlyThatRow() {
+        val root = Files.createTempDirectory("orilumn-table-review-row-card").toFile()
+        val host = openHost(writeBook(root), root)
+        try {
+            val pos = runBlocking { host.open() }!!
+            val chapter = pos.chapter
+            val before = body(host, chapter)
+            val (range, blocks) = tableBlocks(host, chapter, before)
+            val card = cardText(before, blocks)
+            val firstEdit = card.replace("乙二", "乙二改")
+            assertTrue(commit(host, chapter, range, firstEdit, pos) is TextEditOutcome.Success)
+
+            val reviewPos = runBlocking { host.switchReviewMode(true, chapter, 0) }!!
+            assertNotNull("应能切到审阅空间", reviewPos)
+            val reviewText = body(host, chapter)
+            val revision = runBlocking { host.textRevisionsForChapter(chapter) }
+                .first { it.editedBlocks.firstOrNull()?.startsWith("T") == true }
+            val hit = reviewText.indexOf("丙四")
+            assertTrue("审阅空间应仍有丙四：$reviewText", hit >= 0)
+            val row = host.textEditBlocks(chapter, hit, hit + 1)!!.single()
+            val scope = host.tableRowScope(chapter, revision.id, row.start, row.endExclusive)
+            assertNotNull("拖选改过的表格里的一行应得到行范围", scope)
+            assertEquals("应是改完那张表的最后一行", 3, scope!!.firstRow)
+            assertEquals("只应有一行", 3, scope.lastRow)
+
+            val rowCard = tableRowCardOf(revision, scope)!!
+            val shown = rowCardText(rowCard)
+            assertEquals("卡片只应列出拖到的那一行", "| 甲四 | 乙四 | 丙四 |", shown)
+
+            // 只给这一行加一格：整张表铺不成矩形 ⇒ 拒绝（校验仍按整张表）。
+            val wide = InlineMarkup.parse(shown.replace("丙四", "丙四 | 多一"))
+            val rejected = runBlocking {
+                host.commitTextEdit(
+                    chapter = chapter,
+                    start = revision.charStart,
+                    endExclusive = revision.charEnd,
+                    text = wide.text,
+                    styles = null,
+                    currentPage = reviewPos,
+                    blocks = wide.segments,
+                    rowScope = scope,
+                )
+            }
+            assertTrue("整表铺不成矩形应拒绝：$rejected", rejected is TextEditOutcome.Rejected)
+            assertEquals("拒绝后审阅空间不变", reviewText, body(host, chapter))
+
+            val parsed = InlineMarkup.parse(shown.replace("乙四", "乙四改"))
+            assertTrue("卡片文字应能解析：${parsed.errors}", parsed.ok)
+            val outcome = runBlocking {
+                host.commitTextEdit(
+                    chapter = chapter,
+                    start = revision.charStart,
+                    endExclusive = revision.charEnd,
+                    text = parsed.text,
+                    styles = null,
+                    currentPage = reviewPos,
+                    blocks = parsed.segments,
+                    rowScope = scope,
+                )
+            }
+            assertTrue("只改一行应成功：$outcome", outcome is TextEditOutcome.Success)
+
+            val fresh = runBlocking { host.textRevisionsForChapter(chapter) }
+                .first { it.editedBlocks.firstOrNull()?.startsWith("T") == true }
+            assertTrue("上一次改的字应保留：${fresh.editedText}", fresh.editedText.contains("乙二改"))
+            assertTrue("这次改的字应落库：${fresh.editedText}", fresh.editedText.contains("乙四改"))
+            assertTrue(
+                "其余行应原样：${fresh.editedText}",
+                fresh.editedText.contains("甲三") && fresh.editedText.contains("丙一"),
+            )
+            assertEquals("仍应是四行", 4, fresh.editedBlocks.size)
+            assertEquals("行来源应仍是原书四行", listOf(0, 1, 2, 3), fresh.rowSources)
+
+            val back = runBlocking { host.switchReviewMode(false, chapter, 0) }!!
+            host.pageLines(back)
+            var normalText = body(host, chapter)
+            var waited = 0
+            while (normalText.isEmpty() && waited < 2_000) {
+                Thread.sleep(20)
+                waited += 20
+                host.pageLines(back)
+                normalText = body(host, chapter)
+            }
+            assertTrue("两次改动都应在正文里", normalText.contains("乙二改") && normalText.contains("乙四改"))
+            assertTrue(
+                "四行都在",
+                normalText.contains("甲二") && normalText.contains("甲三") && normalText.contains("甲四"),
+            )
+        } finally {
+            host.close()
+        }
+    }
+
+    /** 审阅视图里把行范围卡片删空 = 删掉这一行，不是删掉整张表。 */
+    @Test
+    fun reviewModeRowCardClearingDeletesOnlyThatRow() {
+        val root = Files.createTempDirectory("orilumn-table-review-row-clear").toFile()
+        val host = openHost(writeBook(root), root)
+        try {
+            val pos = runBlocking { host.open() }!!
+            val chapter = pos.chapter
+            val before = body(host, chapter)
+            val (range, blocks) = tableBlocks(host, chapter, before)
+            val card = cardText(before, blocks).replace("乙二", "乙二改")
+            assertTrue(commit(host, chapter, range, card, pos) is TextEditOutcome.Success)
+
+            val reviewPos = runBlocking { host.switchReviewMode(true, chapter, 0) }!!
+            val reviewText = body(host, chapter)
+            val revision = runBlocking { host.textRevisionsForChapter(chapter) }
+                .first { it.editedBlocks.firstOrNull()?.startsWith("T") == true }
+            val hit = reviewText.indexOf("丙三")
+            val row = host.textEditBlocks(chapter, hit, hit + 1)!!.single()
+            val scope = host.tableRowScope(chapter, revision.id, row.start, row.endExclusive)!!
+
+            val outcome = runBlocking {
+                host.commitTextEdit(
+                    chapter = chapter,
+                    start = revision.charStart,
+                    endExclusive = revision.charEnd,
+                    text = "",
+                    styles = null,
+                    currentPage = reviewPos,
+                    blocks = listOf(InlineMarkup.Segment("", null)),
+                    rowScope = scope,
+                )
+            }
+            assertTrue("把这一行删空应成功：$outcome", outcome is TextEditOutcome.Success)
+            val fresh = runBlocking { host.textRevisionsForChapter(chapter) }
+                .first { it.editedBlocks.firstOrNull()?.startsWith("T") == true }
+            assertFalse("被删的那一行应消失：${fresh.editedText}", fresh.editedText.contains("甲三"))
+            assertEquals("表还在（少一行）", 3, fresh.editedBlocks.size)
+            assertTrue(
+                "其余行应原样：${fresh.editedText}",
+                fresh.editedText.contains("甲一") && fresh.editedText.contains("甲二") &&
+                    fresh.editedText.contains("甲四"),
+            )
+        } finally {
+            host.close()
+        }
+    }
+
+    /** 行范围卡片在 UI 里的显示文字（与 `editCardOf` 同一条换算）。 */
+    private fun rowCardText(card: orilumn.reader.engine.revision.TableRowCard): String =
+        InlineMarkup.show(
+            orilumn.reader.engine.revision.RevisionBlocks.cardSegments(card.text, card.blocks)!!,
+            InlineMarkup.fromStored(card.styles.orEmpty()),
+        )
 
     /** 普通改字在审阅空间里看得见红字与绿字，切回正常视图逐字复原。 */
     @Test

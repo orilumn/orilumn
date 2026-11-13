@@ -94,7 +94,13 @@ object TableReview {
             val new = newRows[ni]
             if (old.text == new.text && sameShape(old.cells, new.cells)) {
                 val p = ReviewOverlay.plan(old.text, old.text, IntArray(0)) ?: return null
-                parts += TableReviewPlan.Row(TableReviewPlan.Kind.KEEP, oldIndex = src, textLength = p.length)
+                // 没改的行新表里也是这一行（同一行号）：行范围卡片靠它把「拖到的行」折回新表。
+                parts += TableReviewPlan.Row(
+                    TableReviewPlan.Kind.KEEP,
+                    oldIndex = src,
+                    newIndex = ni,
+                    textLength = p.length,
+                )
                 plans += p
             } else if (sameShape(old.cells, new.cells)) {
                 // 形状没变：逐格做「原文照排 + 新字就地插入」，被删的字留在格子里。

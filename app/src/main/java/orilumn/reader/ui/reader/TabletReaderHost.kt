@@ -7,6 +7,7 @@ import orilumn.reader.data.epub.TocItem
 import orilumn.reader.data.revision.TextRevision
 import orilumn.reader.engine.BookDocumentController
 import orilumn.reader.engine.revision.InlineMarkup
+import orilumn.reader.engine.revision.TableRowScope
 import orilumn.reader.engine.revision.TextEditBlock
 import orilumn.reader.engine.revision.TextEditPlan
 import orilumn.reader.engine.paging.BookPageNumber
@@ -211,6 +212,10 @@ class TabletReaderHost(
     override fun textEditBlocks(chapter: Int, start: Int, endExclusive: Int): List<TextEditBlock>? =
         controller.textEditBlocks(chapter, start, endExclusive)
 
+    /** 审阅视图里拖选改过的表格中的某几行：卡片只列这几行（见 [TableRowScope]）。 */
+    override fun tableRowScope(chapter: Int, revisionId: Long, start: Int, endExclusive: Int): TableRowScope? =
+        controller.tableRowScope(chapter, revisionId, start, endExclusive)
+
     /**
      * 提交一次正文修改（方案 §8.8）：纯计算计划 → 一个事务落库 → 重读修订 → 只作废本章 →
      * 重新载入重放并落位到修改起点。
@@ -223,8 +228,9 @@ class TabletReaderHost(
         styles: List<InlineMarkup.StyleSpan>?,
         currentPage: ReaderPos?,
         blocks: List<InlineMarkup.Segment>?,
+        rowScope: TableRowScope?,
     ): TextEditOutcome = withContext(Dispatchers.IO) {
-        val plan = controller.planTextEdit(chapter, start, endExclusive, text, styles, blocks)
+        val plan = controller.planTextEdit(chapter, start, endExclusive, text, styles, blocks, rowScope)
         when (plan) {
             is TextEditPlan.Rejected -> return@withContext TextEditOutcome.Rejected(plan.reason)
             is TextEditPlan.Ready -> {

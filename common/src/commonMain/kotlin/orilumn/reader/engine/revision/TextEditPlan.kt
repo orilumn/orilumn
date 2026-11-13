@@ -756,14 +756,6 @@ object TextEditPlanner {
         return out
     }
 
-    /** 一条整表修订的「上一次改完的表格行」；不是整表修订 / 数据对不上时 null。 */
-    private fun tableRowsOfRevision(r: TextRevision): List<InlineMarkup.Segment>? {
-        if (!isWholeTableRevision(r)) return null
-        val segments = RevisionBlocks.cardSegments(r.editedText, r.editedBlocks) ?: return null
-        if (segments.isEmpty() || segments.any { it.table == null }) return null
-        return segments
-    }
-
     /**
      * 卡片输入区每**行**的块形态（重开卡片时按它把行拼回块）。
      *

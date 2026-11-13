@@ -31,6 +31,8 @@ import orilumn.reader.engine.revision.RevisionBlocks
 import orilumn.reader.engine.revision.TableReview
 import orilumn.reader.engine.revision.TableReviewPlan
 import orilumn.reader.engine.revision.TableRowInfo
+import orilumn.reader.engine.revision.TableRowScope
+import orilumn.reader.engine.revision.tableRowsOfRevision
 import orilumn.reader.engine.revision.TextEditPlan
 import orilumn.reader.engine.revision.TextEditPlanner
 import orilumn.reader.engine.html.ParsedChapter
@@ -166,6 +168,15 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
 
     /** 章号 → 本章修订表（含 `contentRev`）；空 = 全书无修订。 */
     private var revisionMaps: Map<Int, ChapterRevisionMap> = emptyMap()
+
+    /**
+     * 章号 → 整表结构修订 id → 审阅视图的行级对照（见 [TableReviewPlan]）。
+     *
+     * 只给「拖选改过的表格中的某几行」用：审阅空间的文字是「旧行 + 新行」的对照片，
+     * 要知道读者拖到的是**改完的那张表**第几行，只能查这份计划。重排时重建（同一份
+     * 计划既用于重放、也用于这里，见 `applyTextRevisions`）。
+     */
+    private var reviewTablePlans: Map<Int, Map<Long, TableReviewPlan>> = emptyMap()
 
     /**
      * 审阅视图开关（2026-11-08 用户定口：删除的字变红并划红色删除线，新增的字变绿）。
@@ -687,6 +698,107 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
     }
 
     /**
+     * 审阅视图里「读者拖选的是整表修订中的哪几行」（只给卡片用；其余情形返回 null）。
+     *
+     * 审阅空间的表格是「旧行 + 新行」的对照片：删掉的行（红字）还在原处、新加的行（绿字）
+     * 插在中间。卡片要显示的是**改完的那张表**里的行，所以这里顺着行级对照
+     * （[TableReviewPlan]）把拖到的行折回新表行号。
+     *
+     * 返回 null 的几种情形都退回「整表卡片」（老行为）：
+     * - 不是审阅视图 / 不是整表修订 / 拿不到行级对照；
+     * - 拖到的行里有**删掉的行**（新表里没有对应行，没法只改它）；
+     * - 拖到的正好是整张表（那就是整表卡片本身）。
+     */
+    fun tableRowScope(chapter: Int, revisionId: Long, start: Int, endExclusive: Int): TableRowScope? {
+        if (!reviewMode) return null
+        val map = revisionMaps[chapter] ?: return null
+        val r = map.revisions.firstOrNull { it.id == revisionId } ?: return null
+        if (r.editedBlocks.firstOrNull()?.startsWith("T") != true) return null
+        val plan = reviewTablePlans[chapter]?.get(revisionId) ?: return null
+        val tableStart = map.reviewInterval(r).first
+        val s = start - tableStart
+        val e = endExclusive - tableStart
+        if (s < 0 || s >= e || e > plan.overlay.length) return null
+        var at = 0
+        var first = -1
+        var last = -1
+        for ((i, row) in plan.rows.withIndex()) {
+            val rowStart = at
+            at += row.textLength
+            if (at <= s) continue
+            if (rowStart >= e) break
+            if (first < 0) first = i
+            last = i
+        }
+        if (first < 0 || last < first) return null
+        val newIndices = (first..last).map { plan.rows[it].newIndex }
+        if (newIndices.any { it < 0 }) return null
+        if (newIndices.zipWithNext().any { (a, b) -> b != a + 1 }) return null
+        val rows = tableRowsOfRevision(r) ?: return null
+        val firstRow = newIndices.first()
+        val lastRow = newIndices.last()
+        if (firstRow < 0 || lastRow >= rows.size) return null
+        // 整张表：照旧走整表卡片（行数 / 列数都能改）。
+        if (firstRow == 0 && lastRow == rows.size - 1) return null
+        return TableRowScope(revisionId, firstRow, lastRow)
+    }
+
+    /**
+     * 行范围卡片（只改整表修订中的某几行）→ 整张表的卡片分段。
+     *
+     * 卡片里的行按位置顶替旧修订里的那几行，其余行原样带过来——提交侧于是又回到
+     * 「整张表」那条路：网格校验、行来源折算、样式补回都不用另开一套。
+     * 卡片里整行删空（空文字且没有格结构）= 删掉这一行；一行都不剩 = 删掉整张表。
+     *
+     * @return null = 行号越界 / 旧修订的行数据对不上（调用方就地提示）。
+     */
+    private fun expandTableRowScope(
+        r: TextRevision,
+        scope: TableRowScope,
+        text: String,
+        styles: List<InlineMarkup.StyleSpan>?,
+        blocks: List<InlineMarkup.Segment>?,
+    ): RowExpansion? {
+        val rows = tableRowsOfRevision(r) ?: return null
+        if (scope.firstRow < 0 || scope.lastRow < scope.firstRow || scope.lastRow >= rows.size) return null
+        // 卡片一行一个块；老调用方只给整串文字时按 `\n` 切（与卡片同一口径）。
+        val card = blocks?.takeIf { it.isNotEmpty() }
+            ?: text.split('\n').map { InlineMarkup.Segment(it) }
+        val replacement = ArrayList<InlineMarkup.Segment>(card.size)
+        for (p in card) {
+            when {
+                p.table != null -> replacement += p
+                // 整行删空：这一行从表里拿掉。
+                p.text.isEmpty() -> continue
+                // 混进了非表格行：交给规划层按标准提示拒（不在这里猜）。
+                else -> replacement += p
+            }
+        }
+        val merged = ArrayList<InlineMarkup.Segment>(rows.size + replacement.size)
+        merged += rows.subList(0, scope.firstRow)
+        merged += replacement
+        merged += rows.subList(scope.lastRow + 1, rows.size)
+        // 卡片文字行与行之间隔一个 `\n`：前面那几行整体后移，行内结构才能落回正确的位置。
+        val shift = rows.subList(0, scope.firstRow).sumOf { it.text.length } + scope.firstRow
+        val moved = styles?.mapNotNull { sp ->
+            val start = sp.start + shift
+            val end = sp.endExclusive + shift
+            if (end > start) InlineMarkup.StyleSpan(start, end, sp.sig) else null
+        }
+        return RowExpansion(
+            // 一行不剩 = 删掉整张表：给一个空行，规划层才认得出「整表删空」。
+            segments = if (merged.isEmpty()) listOf(InlineMarkup.Segment("")) else merged,
+            styles = moved,
+        )
+    }
+
+    /** 行范围卡片拼回整张表的结果（卡片分段 + 平移后的行内结构）。 */
+    private class RowExpansion(
+        val segments: List<InlineMarkup.Segment>,
+        val styles: List<InlineMarkup.StyleSpan>?,
+    )
+
+    /**
      * 选区涉及的各块（渲染空间）：正文修改卡按它回显每行的块标记。
      *
      * 审阅视图照给：块形态是**元素**的属性（`p` / `h1` / `li` / `pre`），与文字是哪把尺无关；
@@ -720,6 +832,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
      * 入参 [start] / [endExclusive] 是**渲染空间**（与 `chapterText` / 选区 / `PageSlice` 同尺），
      * [text] 是输入区文字（跨段时用 `\n` 分隔，结果段数 = 换行符数 + 1）。
      * [blocks] 是卡片**按块切好**的分段（一块形态 + 一块文字）；null = 老调用方。不落库、不改内存。
+     * [rowScope] 非空 = 审阅视图里只改整表修订中的某几行（卡片只列那几行），提交仍按整张表算。
      */
     fun planTextEdit(
         chapter: Int,
@@ -728,6 +841,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         text: String,
         styles: List<InlineMarkup.StyleSpan>? = null,
         blocks: List<InlineMarkup.Segment>? = null,
+        rowScope: TableRowScope? = null,
     ): TextEditPlan {
         if (bookId < 0) return TextEditPlan.Rejected("书还没打开")
         val unit = unitAt(chapter) ?: return TextEditPlan.Rejected("本章尚未载入")
@@ -809,15 +923,41 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
             },
         )
         if (!reviewMode) return planInCurrentSpace()
+        // 审阅视图里只改整表修订中的某几行：卡片只列那几行，提交仍按**整张表**算。
+        // 先把卡片里的行拼回整张表（其余行从旧修订里原样带过来），再走下面整表那条路，
+        // 网格校验、行来源折算、样式补回全都照旧。
+        val scopeRevision = rowScope?.let { sc -> map.revisions.firstOrNull { it.id == sc.revisionId } }
+        if (rowScope != null && scopeRevision == null) {
+            return TextEditPlan.Rejected("这张表上的修改已经不在了，请重新选中再改")
+        }
+        val expansion = if (rowScope != null && scopeRevision != null) {
+            expandTableRowScope(scopeRevision, rowScope, text, styles, blocks)
+                ?: return TextEditPlan.Rejected("这张表上的修改记录不完整，请先撤掉它再改")
+        } else {
+            null
+        }
         // 审阅视图里的表格：表上压着整表结构修订（`editedBlocks` 首码大写 `T`）时，卡片打开的
         // 是**改完的那张表**（见宿主 `textRevisionEditRange` / `tryOpenReviewEditAt`），这里按
         // 原书区间重算。行来源要沿用旧修订的（`previousTable`），否则第一次改过的行会被当成新行。
         // 判据只看原书空间：选区换算回原书后落在某条整表修订的区间里，就说明点的是这张表。
-        val originalStart = map.toOriginalFromReview(start)
-        val originalEnd = map.toOriginalFromReview(endExclusive)
-        val previousTable = map.revisions.firstOrNull { r ->
-            r.editedBlocks.firstOrNull()?.startsWith("T") == true &&
-                originalStart >= r.charStart && originalEnd <= r.charEnd
+        // 行范围卡片（[expansion] 非空）认的就是那一条修订，区间 / 行来源都直接取它。
+        val originalStart = if (scopeRevision != null && expansion != null) {
+            scopeRevision.charStart
+        } else {
+            map.toOriginalFromReview(start)
+        }
+        val originalEnd = if (scopeRevision != null && expansion != null) {
+            scopeRevision.charEnd
+        } else {
+            map.toOriginalFromReview(endExclusive)
+        }
+        val previousTable = if (scopeRevision != null && expansion != null) {
+            scopeRevision
+        } else {
+            map.revisions.firstOrNull { r ->
+                r.editedBlocks.firstOrNull()?.startsWith("T") == true &&
+                    originalStart >= r.charStart && originalEnd <= r.charEnd
+            }
         }
         // 审阅空间里改字：页面文字是「原文 + 新文字」的展示版，但落库的修订必须按**原书空间**算
         // ——新文字替换的是原区间，不是「原文 + 新文字」那一串。所以先把章文本 / 块尾剪回原书空间
@@ -825,8 +965,19 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         // 被碰到的旧修订整条删掉（新文字替换了它们覆盖的原区间）。
         val originalText = map.originalTextFromReview(chapterText)
         val originalEnds = blockEnds?.let { ends -> IntArray(ends.size) { map.toOriginalFromReview(ends[it]) } }
-        val originalSel = map.originalEditRangeFromReview(start, endExclusive)
-        val absorbed = map.revisionsTouchingReview(start, endExclusive)
+        val originalSel = if (expansion != null) {
+            originalStart until originalEnd
+        } else {
+            map.originalEditRangeFromReview(start, endExclusive)
+        }
+        // 行范围卡片改了整张表：这一条修订整段作废（与「整表卡片」同一口径），
+        // 否则表里其他改过的行会被当成新行、原有的行 / 格样式就丢了。
+        val absorbed = if (expansion != null && previousTable != null) {
+            val rr = map.reviewInterval(previousTable)
+            map.revisionsTouchingReview(rr.first, rr.last + 1)
+        } else {
+            map.revisionsTouchingReview(start, endExclusive)
+        }
         // 只选中「新添的文字」、而那条修订本来就是纯插入时，原书那一处一个字都没有（原区间是空的）：
         // 换算是等价的，按替换提交会被当成「没选字」拒掉。这一处改的是「插入什么」，
         // 按纯插入提交（撤掉旧插入、在原位置落一条新插入，方案 v3.1）。
@@ -864,14 +1015,15 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                 groupId = now,
                 now = now,
                 // 读者写出的行内标记同样要跟着落库：这一条修订的文字就是卡里的文字，
-                // 区间本来就以它为尺，审阅视图也不例外。
-                replacementStyles = replacementStyles,
+                // 区间本来就以它为尺，审阅视图也不例外。行范围卡片（[expansion]）的文字是
+                // 拼回整张表之后的，样式也一起平移过。
+                replacementStyles = expansion?.styles ?: replacementStyles,
                 wsOfLeaf = wsOfLeaf,
                 mergeableLeaf = mergeableLeaf,
                 // 块级形态在这一支同样要落：读者就在审阅视图里改字，形态不跟着走等于白改。
                 // 这里给的是「原书空间」的区间与块尾，但块的下标与排版叶一一对应（审阅只是把叶的
                 // 文字换成「原文 + 新字」），所以叶下标仍按同一份结构取形态。
-                blocks = blocks,
+                blocks = expansion?.segments ?: blocks,
                 currentKindOf = { i -> leaves.getOrNull(i)?.let { BlockKind.ofElement(it) } },
                 imageLeaf = { i -> leaves.getOrNull(i)?.tag == "img" },
                 tableOfLeaf = { i ->
@@ -1898,8 +2050,14 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
      * 失败（修订表非法、重放抛错）一律退回原树：宁可显示原文，也不能排出半套修订。
      */
     private fun applyTextRevisions(unit: ChapterUnit, tree: MarkupElement): MarkupElement {
-        val map = revisionMaps[unit.chapterIndex] ?: return tree
-        if (map.isEmpty) return tree
+        val map = revisionMaps[unit.chapterIndex] ?: run {
+            reviewTablePlans = reviewTablePlans - unit.chapterIndex
+            return tree
+        }
+        if (map.isEmpty) {
+            reviewTablePlans = reviewTablePlans - unit.chapterIndex
+            return tree
+        }
         val bc = layouter as? BoxChapterLayouter ?: return tree
         val cache = unit.structureCache
         val contentW = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
@@ -2004,6 +2162,13 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                         structuralPlans = structuralOverlays,
                     )
                 }
+            }
+
+            // 行范围卡片要用同一份计划（读者拖选的那一行 → 改完的那张表第几行），在这里存下来。
+            reviewTablePlans = if (reviewMode) {
+                reviewTablePlans + (unit.chapterIndex to tableReviewPlans)
+            } else {
+                reviewTablePlans - unit.chapterIndex
             }
 
             // 段界要动（并段 / 拆段）的那几条走整叶重塑。重塑只认得**本组**那几条修订，

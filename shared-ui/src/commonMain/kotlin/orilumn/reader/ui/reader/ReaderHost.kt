@@ -8,6 +8,7 @@ import orilumn.reader.engine.LinkTarget
 import orilumn.reader.engine.paging.BookPageNumber
 import orilumn.reader.engine.paging.PageSlice
 import orilumn.reader.engine.revision.InlineMarkup
+import orilumn.reader.engine.revision.TableRowScope
 import orilumn.reader.engine.revision.TextEditBlock
 import orilumn.reader.engine.skia.DecodedImage
 import orilumn.reader.engine.skia.DrawLine
@@ -399,7 +400,16 @@ interface ReaderHost {
         styles: List<InlineMarkup.StyleSpan>? = null,
         currentPage: ReaderPos? = null,
         blocks: List<InlineMarkup.Segment>? = null,
+        rowScope: TableRowScope? = null,
     ): TextEditOutcome = TextEditOutcome.Failed("当前版本不支持正文修改")
+
+    /**
+     * 审阅视图里「读者拖选的是整表修订中的哪几行」：卡片据此只列那几行
+     * （见 [TableRowScope]）；null = 不是这种选法，调用方按整表卡片打开。
+     *
+     * 默认 null = 宿主没实现（老宿主 / 非盒式排版）。
+     */
+    fun tableRowScope(chapter: Int, revisionId: Long, start: Int, endExclusive: Int): TableRowScope? = null
 
     /**
      * 选区上的行内结构（渲染空间，**相对选区起点**）：正文修改卡用它回显标记文字

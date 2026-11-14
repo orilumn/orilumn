@@ -125,7 +125,7 @@ fun ReaderSidePanel(
                             }
                             Text("|", color = p.muted2, fontSize = 13.sp,
                                 modifier = Modifier.padding(horizontal = 6.dp))
-                            PageTab("编辑", page == ReaderPanelPage.Revisions, p) {
+                            PageTab("修订", page == ReaderPanelPage.Revisions, p) {
                                 onPageChange(ReaderPanelPage.Revisions)
                             }
                         }

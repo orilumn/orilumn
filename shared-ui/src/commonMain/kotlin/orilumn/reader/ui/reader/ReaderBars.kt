@@ -95,7 +95,7 @@ fun ReaderBars(
     onToc: () -> Unit,
     onBookmark: () -> Unit,
     onNote: () -> Unit,
-    /** 底栏「编辑」：直接打开正文修改清单（编辑面板）。默认不出现该按钮。 */
+    /** 底栏「修订」：直接打开正文修改清单（编辑面板）。默认不出现该按钮。 */
     onRevision: (() -> Unit)? = null,
     /** 底栏「审阅」：切换审阅视图（删掉的字变红划红线、新添的字变绿）。默认不出现该按钮。 */
     onReview: (() -> Unit)? = null,
@@ -213,11 +213,11 @@ fun ReaderBars(
                     horizontalArrangement = Arrangement.SpaceAround,
                 ) {
                     BarTool(BarIcon.Menu, "目录", onToc)
-                    // 书签 / 笔记 / 编辑 / 审阅 / 夜间：读者可在设置 → 工具栏里逐个收起。
+                    // 书签 / 笔记 / 修订 / 审阅 / 夜间：读者可在设置 → 工具栏里逐个收起。
                     if (showBookmark) BarTool(BarIcon.Star, "书签", onBookmark)
                     if (showNote) BarTool(BarIcon.Pencil, "笔记", onNote)
-                    // 编辑紧挨笔记（两者同属「记录」），审阅再往右：点开才有改动痕迹。
-                    if (showRevision) onRevision?.let { BarTool(BarIcon.Edit, "编辑", it) }
+                    // 修订紧挨笔记（两者同属「记录」），审阅再往右：点开才有改动痕迹。
+                    if (showRevision) onRevision?.let { BarTool(BarIcon.Edit, "修订", it) }
                     if (showReview) onReview?.let { BarTool(BarIcon.Review, "审阅", it, active = reviewActive) }
                     if (showNight) BarTool(BarIcon.Moon, "夜间", onNight, active = nightActive)
                     BarTool(BarIcon.Gear, "设置", onSettings)

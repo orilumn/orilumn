@@ -73,13 +73,13 @@ internal fun AnnotationActionBar(
     onCopy: () -> Unit,
     onDelete: () -> Unit,
     onDone: () -> Unit,
-    /** 选区菜单的「编辑」：有选区时可点（正文修改 v3）。 */
+    /** 选区菜单的「修订」：有选区时可点（正文修改 v3）。 */
     onEdit: (() -> Unit)? = null,
     editEnabled: Boolean = false,
     /**
      * 正文修改模式（方案 §8.8 / D-36）：**和高亮、划线共用同一根操作栏**，不另起一套。
      *
-     * - 「编辑」标为当前项（垫底、不再响应点按）；
+     * - 「修订」标为当前项（垫底、不再响应点按）；
      * - 左边的「高亮 / 划线」**照样可点**：点它就是切回该类别的批注（[onKindChange] 由调用方解释）；
      * - 色槽与线型虚掉（点按被吞掉）；
      * - 「删除」与批注同义，删的是**覆盖这段字的修订**（[canDelete] 由调用方按有没有修订给）；
@@ -105,7 +105,7 @@ internal fun AnnotationActionBar(
         modifier = Modifier.fillMaxWidth().padding(start = 6.dp, end = 6.dp, top = 2.dp, bottom = 2.dp),
         lead = {
             // 正文修改模式下这两个**照样可点**：点它就是切回该类别的批注（用户定口）。
-            // 只是「当前项」是右边的「编辑」，所以两者都不垫底。
+            // 只是「当前项」是右边的「修订」，所以两者都不垫底。
             MenuAction(
                 label = "高亮",
                 textColor = palette.text,
@@ -126,7 +126,7 @@ internal fun AnnotationActionBar(
             // 正文修改（v3）：有选区才可点；点了把选区文字放进同一张底部卡片。
             // 进了修改模式后这一项就是**当前项**：垫底、不再响应点按（不会自己再点自己一次）。
             MenuAction(
-                label = "编辑",
+                label = "修订",
                 textColor = if (editMode || editEnabled) palette.text else palette.muted,
                 palette = palette,
                 active = editMode,

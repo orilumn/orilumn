@@ -120,8 +120,8 @@ internal fun withSelectionAction(settings: ReaderSettings, action: SelectionActi
 /**
  * 上次新建 / 改色用的标注类别（`ReaderSettings.annotationLastKind` 的解析）。
  *
- * 浮动菜单据此**一步到位**停在该类别的色槽行上；上次用的是「编辑」或未知值时按高亮处理
- * （真正按「编辑」默认要问 [selectionActionOf]）。
+ * 浮动菜单据此**一步到位**停在该类别的色槽行上；上次用的是「修订」或未知值时按高亮处理
+ * （真正按「修订」默认要问 [selectionActionOf]）。
  */
 internal fun annotationLastKindOf(settings: ReaderSettings): AnnotationKind =
     if (selectionActionOf(settings) == SelectionAction.Underline) {

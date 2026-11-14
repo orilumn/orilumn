@@ -137,7 +137,7 @@ internal fun AnnotationSheet(
     onDelete: () -> Unit,
     /** 操作栏的 `确定`：显式落笔（新建时即便没写字也按当前类别 / 线型 / 默认色落一条）。 */
     onDone: () -> Unit,
-    /** 选区菜单的「编辑」：有选区时可点（正文修改 v3）。 */
+    /** 选区菜单的「修订」：有选区时可点（正文修改 v3）。 */
     onEdit: (() -> Unit)? = null,
     editEnabled: Boolean = false,
     /** 点卡片外 / 返回键 / Esc：**取消**（什么都不写，原记录不动；落笔只认 `确定`）。 */
@@ -192,7 +192,7 @@ internal fun AnnotationSheet(
         }
         value = TextFieldValue(text, sel)
     }
-    // 进入正文修改状态（卡片新开、或从批注切到「编辑」）默认全选输入框里的文字：
+    // 进入正文修改状态（卡片新开、或从批注切到「修订」）默认全选输入框里的文字：
     // 读者直接打字就是整段替换，不用先手动全选（用户定口）。键只取 visible / mode，
     // 打字时两者不变，所以不会每敲一个字就重新全选。
     LaunchedEffect(visible, mode) {

@@ -1152,7 +1152,7 @@ private fun ToolbarPage(
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
         item { SetSwitch("书签", s.showToolbarBookmark, { commitPlain(s.copy(showToolbarBookmark = it)) }, p, nav = nav, index = 0) }
         item { SetSwitch("笔记", s.showToolbarNote, { commitPlain(s.copy(showToolbarNote = it)) }, p, nav = nav, index = 1) }
-        item { SetSwitch("编辑", s.showToolbarRevision, { commitPlain(s.copy(showToolbarRevision = it)) }, p, nav = nav, index = 2) }
+        item { SetSwitch("修订", s.showToolbarRevision, { commitPlain(s.copy(showToolbarRevision = it)) }, p, nav = nav, index = 2) }
         item { SetSwitch("审阅", s.showToolbarReview, { commitPlain(s.copy(showToolbarReview = it)) }, p, nav = nav, index = 3) }
         item { SetSwitch("夜间模式", s.showToolbarNight, { commitPlain(s.copy(showToolbarNight = it)) }, p, nav = nav, index = 4) }
         item { Spacer(modifier = Modifier.height(24.dp)) }

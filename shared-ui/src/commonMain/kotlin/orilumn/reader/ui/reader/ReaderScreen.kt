@@ -142,7 +142,7 @@ fun ReaderScreen(
     onToc: () -> Unit = {},
     onBookmark: (() -> Unit)? = null,
     onNote: (() -> Unit)? = null,
-    /** 底栏「编辑」：打开正文修改清单（编辑面板）。null = 宿主尚未支持，点了给提示。 */
+    /** 底栏「修订」：打开正文修改清单（编辑面板）。null = 宿主尚未支持，点了给提示。 */
     onRevision: (() -> Unit)? = null,
     /** 底栏「审阅」：切换审阅视图（删掉的字变红划红线、新添的字变绿）。null = 宿主尚未支持。 */
     onReview: (() -> Unit)? = null,
@@ -1479,7 +1479,7 @@ fun ReaderScreen(
 
     /**
      * 点按改动过的文字（审阅视图里是红字 / 绿字，普通阅读视图里就是改后的正文）：
-     * 打开正文修改卡、弹出键盘（不用先长按再点「编辑」）。
+     * 打开正文修改卡、弹出键盘（不用先长按再点「修订」）。
      *
      * 命中口径与长按标注同一套：只看本章内存修订表（`chapterRevisions` 已是**当前显示空间**），
      * 按字符区间判，不做几何反查；页边距上按不到行，自然也不会误开。
@@ -1620,7 +1620,7 @@ fun ReaderScreen(
             return
         }
         // 点按**改过的文字**直接开卡改它（审阅视图的红绿字、普通视图里改后的正文都算）。
-        // 放在标注之后：同一段字上既有标注又有修订时先按老规矩开标注卡；要改这段字可长按起选再点「编辑」。
+        // 放在标注之后：同一段字上既有标注又有修订时先按老规矩开标注卡；要改这段字可长按起选再点「修订」。
         if (tryOpenReviewEditAt(xPx, yPx, widthPx)) {
             Logger.d("Orilumn.TAP", "tap x=${xPx.roundToInt()} y=${yPx.roundToInt()} → revision edit card")
             return
@@ -2105,7 +2105,7 @@ fun ReaderScreen(
     }
 
     /**
-     * 选区菜单的「编辑」：把选区文字放进同一张底部卡片（正文修改 v3，方案 §8.8）。
+     * 选区菜单的「修订」：把选区文字放进同一张底部卡片（正文修改 v3，方案 §8.8）。
      *
      * 跨段时用 `\n` 分隔各段：**结果段数 = 输入里的换行符数 + 1**（删光中间的字就把几段并成一段）；
      * 单叶选区里的 `\n` 仍是叶内 `<br>`。
@@ -3001,8 +3001,8 @@ fun ReaderScreen(
                                 // 编辑卡片还开着时不要另开浮动菜单：这张卡就是操作栏。
                                 if (editingAnnotation == null && selection.hasSelection) {
                                     selectionMenuVisible = true
-                                    // 上次选字用的是「编辑」：新选区直接进正文修改卡（与点操作栏的
-                                    // 「编辑」同一条路）。正在改的修改卡不再重开，否则会冲掉刚输入的字。
+                                    // 上次选字用的是「修订」：新选区直接进正文修改卡（与点操作栏的
+                                    // 「修订」同一条路）。正在改的修改卡不再重开，否则会冲掉刚输入的字。
                                     if (!textEditOpen && selectionActionOf(light) == SelectionAction.Edit) {
                                         beginTextEdit()
                                     }

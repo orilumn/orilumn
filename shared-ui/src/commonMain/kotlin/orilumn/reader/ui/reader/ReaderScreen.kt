@@ -265,8 +265,12 @@ fun ReaderScreen(
     // controller 需要 flipAwait / markPositionChanged（声明在下方），Kotlin 局部函数
     // 不可前向引用，故用可空占位 + 下方回填；回填发生在首次组合内、任何手势之前。
     var flipCtl by remember { mutableStateOf<FlipController?>(null) }
-    // L1 只在「动画总闸开 + 模式为 slide」时生效；curl 暂落 L0（P3 接 3D）。
-    val slideEnabled = light.pageAnim && light.pageAnimationMode == "slide"
+    // L1 只在「动画总闸开 + 没有可用的卷曲后端」时生效。
+    //  - 模式 = slide：走 L1；
+    //  - 模式 = curl 且平台支持：等 P3 的 L3 接线（今天仍落 L0）；
+    //  - 模式 = curl 但平台不支持（Android < 13）：按滑动处理，不能「选了动画却没动画」。
+    val slideEnabled = light.pageAnim &&
+        (light.pageAnimationMode == "slide" || !curlFlipSupported)
 
     val scope = rememberCoroutineScope()
     // 锚页事件串行漏斗：显示状态的唯一写入通道（见 AnchorFunnel）。所有改锚页位置的动作

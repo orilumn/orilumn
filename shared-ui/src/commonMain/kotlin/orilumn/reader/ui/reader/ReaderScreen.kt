@@ -320,6 +320,9 @@ fun ReaderScreen(
     var textEditAmbientSpans by remember {
         mutableStateOf<List<InlineMarkup.StyleSpan>>(emptyList())
     }
+    // 卡片每行「自己就是书里那个行内元素」（`display:block` 的 `span` 之类）的标签名，与输入区
+    // 的行一一对应；null = 这次开卡没有这种行（老宿主 / 拿不到结构 / 老修订）。只用于显示与校验。
+    var textEditOwnTags by remember { mutableStateOf<List<String?>?>(null) }
     // 读者动过输入区里的字没有：没动过时，拖正文手柄改选区要把输入区一起换过去（用户定口）；
     // 动过之后一律以输入区为准，选区只当落笔范围，不再回写输入框（免得吞掉改写）。
     // 打开旧修改（审阅视图点红字 / 绿字）时输入区带的是已经改过的字，一律按「动过」算。
@@ -1299,6 +1302,10 @@ fun ReaderScreen(
         // 整段；只有**边界切在选区里**的元素才摊成标记给读者看。
         // 例外：外层元素是局部的，内层就不能隐形——否则补回时会落到外层之外。
         val (ambient, visible) = splitAmbientSpans(spans.orEmpty(), plain.length)
+        // 这一行本身就是书里那个行内元素（`display:block` 的 `span` 之类）：整行包一层标签。
+        // 它永远显示（不走「整段覆盖就隐形」那条：它天生就覆盖整行），也只活在卡片里。
+        val ownTags = blockInfo?.map { it.ownTag }
+        val own = ownTagSpans(pieces, ownTags)
         // 块级形态：宿主按排版叶给出每块是哪一种（标题 / 引用 / 列表 / 代码块 / 段落），
         // 卡片把它写成行首标记；拿不到就整套按纯文本（不改任何块的形态）。
         textEditBlocksKnown = blockInfo != null
@@ -1330,11 +1337,13 @@ fun ReaderScreen(
         // 原件仍记**完整**结构：no-op 比较和属性补回都要拿它当模板。
         textEditOriginalSpans = spans
         textEditAmbientSpans = ambient
+        // 行内元素本人那层包装不算结构（与块标记同待遇）：提交时摘掉，不参与 no-op 比较。
+        textEditOwnTags = ownTags?.takeIf { own.isNotEmpty() }
         // 书是 EPUB，不是 markdown：原文里的 `*` `~` `[` `<` `&` 都是**普通文字**。输入区是
         // markdown 编辑区，所以**永远**走一遍序列化把标记字符转义（`*` → `\*`），不然读者一确认
         // 就会被解析成粗体 / 斜体、标签或实体，原文被悄悄改掉。没有行内结构时也一样。
         // 确认时 [InlineMarkup.parse] 把反斜杠去掉，落进书里的仍是原来那几个字。
-        textEditText = InlineMarkup.show(segments, visible)
+        textEditText = InlineMarkup.show(segments, visible + own)
         textEditBaseCard = textEditText
         textEditFromRevision = false
         return true
@@ -1401,16 +1410,35 @@ fun ReaderScreen(
         textEditEnd = revision.charEnd
         // 行范围卡片：只列读者拖到的那几行（改完的那张表里的对应行），提交时再拼回整张表。
         val rowCard = rows?.let { tableRowCardOf(revision, it) }
+        // 重开旧修订：这一行如果本身就是书里那个行内元素（`display:block` 的 `span` 之类），
+        // 标签也要带出来——第一次开卡看得见，重开时不能凭空消失。只在区间正好盖住整叶、行数也
+        // 对得上时才用：半截文字的「整行包装」会把元素画到错的地方（那种卡片照旧不带标签）。
+        val ownTags = if (rowCard == null && revision.editedBlocks.none { it.startsWith("t") || it.startsWith("T") }) {
+            val lines = RevisionBlocks.split(revision.text).size
+            val blocks = currentHost.textEditBlocks(p.chapter, revision.charStart, revision.charEnd)
+            blocks?.takeIf {
+                it.size == lines &&
+                    it.first().start == revision.charStart &&
+                    it.last().endExclusive == revision.charEnd
+            }?.map { b -> b.ownTag }
+        } else {
+            null
+        }
         val rc = if (rowCard != null) {
             RevisionCard(editCardOf(rowCard.text, rowCard.blocks, rowCard.styles), rowCard.text)
         } else {
             // 书里这一段**原来**的行内结构：只改标记的修订靠它区分「读者新写的」与「本来就有的」，
             // 与审阅视图的痕迹同一份来源（见 `FormatTraces`）。取不到就按纯文本开卡，不猜。
-            revisionCardOf(revision, currentHost.textRevisionOriginalSpans(p.chapter, revision.id))
+            revisionCardOf(
+                revision,
+                currentHost.textRevisionOriginalSpans(p.chapter, revision.id),
+                ownTags,
+            )
         }
         textEditText = rc.card.text
         textEditOriginalSpans = rc.card.originalSpans
         textEditAmbientSpans = rc.card.ambientSpans
+        textEditOwnTags = ownTags?.takeIf { list -> list.any { it != null } }
         textEditBaseText = rc.plain
         textEditBaseCard = rc.card.text
         val tableLike = revision.editedBlocks.any { it.startsWith("t") || it.startsWith("T") }
@@ -1848,6 +1876,9 @@ fun ReaderScreen(
         val brk = currentHost.reviewBreakText(ch)
         val segments = ArrayList<InlineMarkup.Segment>(touched.size + 2)
         val spans = ArrayList<InlineMarkup.StyleSpan>(touched.size * 2)
+        // 逐行「这一行本身就是书里那个行内元素」的标签（与 [segments] 等长）与它的整行包装。
+        val ownTags = ArrayList<String?>(touched.size + 2)
+        val ownSpans = ArrayList<InlineMarkup.StyleSpan>(2)
         var firstStartsAtBlock = true
         var pos = from
         var at = 0
@@ -1866,6 +1897,7 @@ fun ReaderScreen(
             rawSpans: List<InlineMarkup.StyleSpan>,
             reviewStart: Int,
             table: TableRowInfo? = null,
+            ownTag: String? = null,
         ) {
             val base = brk.plain(reviewStart)
             for (sp in rawSpans) {
@@ -1874,6 +1906,14 @@ fun ReaderScreen(
                 if (e > s) spans += InlineMarkup.StyleSpan(at + s, at + e, sp.sig)
             }
             segments += InlineMarkup.Segment(piece, block, table)
+            // 这一行本身就是书里那个行内元素（`display:block` 的 `span` 之类）：整行包一层标签，
+            // 与普通卡片同一口径（见 `ownTagSpans`）。它只给显示，提交时摘掉。
+            if (ownTag != null && piece.isNotEmpty()) {
+                ownTags += ownTag
+                ownSpans += InlineMarkup.StyleSpan(at, at + piece.length, InlineMarkup.StyleSig(ownTag))
+            } else {
+                ownTags += null
+            }
             at += piece.length + 1
         }
         fun appendGap(start: Int, endExclusive: Int) {
@@ -1906,6 +1946,7 @@ fun ReaderScreen(
                         if (bStart > b.start || b.startsAtBlockStart == false) null else b.kind,
                         currentHost.textEditSpans(ch, bStart, bEnd).orEmpty(),
                         bStart,
+                        ownTag = b.ownTag,
                     )
                 }
             }
@@ -1956,6 +1997,13 @@ fun ReaderScreen(
                 // 这条修订改完的整段：普通文字按段界切开。
                 val parts = RevisionBlocks.split(r.text)
                 val kinds = r.blockKinds
+                // 这一段里有没有「整行就是书里那个行内元素」的叶（`display:block` 的 span 之类）：
+                // 行数与叶数、两头都对得上才用，半截文字不猜（与重开旧修订同一口径）。
+                val ownOfParts = currentHost.textEditBlocks(ch, r.charStart, r.charEnd)?.takeIf {
+                    it.size == parts.size &&
+                        it.first().start == r.charStart &&
+                        it.last().endExclusive == r.charEnd
+                }?.map { b -> b.ownTag }
                 val revAt = at
                 val stored = r.styles ?: r.editedStyles?.takeIf {
                     r.editedText == parts.joinToString("\n")
@@ -1973,6 +2021,7 @@ fun ReaderScreen(
                         if (kinds.size == parts.size) BlockKind.fromWire(kinds[i]) else null,
                         emptyList(),
                         r.charStart,
+                        ownTag = ownOfParts?.getOrNull(i),
                     )
                 }
             }
@@ -1991,7 +2040,7 @@ fun ReaderScreen(
         } else {
             segments.map { if (it.table != null) it else InlineMarkup.Segment(it.text, null) }
         }
-        val card = InlineMarkup.show(shown, visible)
+        val card = InlineMarkup.show(shown, visible + ownSpans)
         // 选区与卡片目标必须同尺：卡片覆盖的是「旧修订整段 + 别的内容」，选区也一起扩过去。
         // 放在这里而不是开头：卡片范围要等块 / 表格行扩完才定下来（见 `cardFrom` / `cardTo`）。
         if (!selection.selectRange(ch, text, cardFrom, cardTo)) selection.clear()
@@ -2003,6 +2052,8 @@ fun ReaderScreen(
         textEditBaseCard = card
         textEditOriginalSpans = spans
         textEditAmbientSpans = ambient
+        // 行内元素本人那层包装不算结构（与块标记同待遇）：提交时摘掉，不参与 no-op 比较。
+        textEditOwnTags = ownTags.takeIf { list -> list.any { it != null } }
         textEditTables = emptyList()
         textEditImages = emptyList()
         textEditWholeTable = false
@@ -2095,6 +2146,7 @@ fun ReaderScreen(
         textEditError = null
         textEditOriginalSpans = null
         textEditAmbientSpans = emptyList()
+        textEditOwnTags = null
         textEditTables = emptyList()
         textEditImages = emptyList()
         textEditWholeTable = false
@@ -2146,6 +2198,18 @@ fun ReaderScreen(
                 return
             }
         }
+        // 行内元素本人那层标签（书里 `display:block` 的 span 之类）：卡片里看得见，提交时按
+        // 「叶自己」摘掉——它不是修订里的结构（叶元素本来就留着）。读者删掉 / 换掉这层标签要拒绝：
+        // 把块级元素摘掉等于把这一行并回上一行，那是结构改写，卡片这一版不做。
+        val (inlineSpans, ownTagError) = withoutOwnTags(
+            parsed.segments,
+            parsed.spans,
+            textEditOwnTags,
+        )
+        if (ownTagError != null) {
+            textEditError = ownTagError
+            return
+        }
         val pieces: List<InlineMarkup.Segment>? = if (!textEditBlocksKnown && !textEditFirstLineNoKind) {
             null
         } else {
@@ -2182,9 +2246,9 @@ fun ReaderScreen(
         // 同名标记是**新元素**，不能把外围那层的 class / id 借过来，否则同一层会套两遍。
         val template = originalSpans?.filterNot { it in ambient }
         val restored = if (template != null) {
-            InlineMarkup.restore(template, parsed.spans, paragraphSpans.orEmpty())
+            InlineMarkup.restore(template, inlineSpans, paragraphSpans.orEmpty())
         } else {
-            InlineMarkup.inheritTemplateAttrs(parsed.spans, paragraphSpans.orEmpty())
+            InlineMarkup.inheritTemplateAttrs(inlineSpans, paragraphSpans.orEmpty())
         }
         val styles: List<InlineMarkup.StyleSpan>? = if (ambient.isEmpty()) {
             // 原结构拿得到 ⇒ 补回后的结果就是全部结构（空表＝读者把标记删光了，要真删）。
@@ -2220,6 +2284,7 @@ fun ReaderScreen(
             textEditDirty = false
             textEditOriginalSpans = null
             textEditAmbientSpans = emptyList()
+            textEditOwnTags = null
             textEditTables = emptyList()
             textEditImages = emptyList()
             textEditWholeTable = false
@@ -2253,6 +2318,7 @@ fun ReaderScreen(
                     textEditError = null
                     textEditOriginalSpans = null
                     textEditAmbientSpans = emptyList()
+                    textEditOwnTags = null
                     textEditTables = emptyList()
                     textEditImages = emptyList()
                     textEditWholeTable = false
@@ -4017,6 +4083,80 @@ internal fun splitAmbientSpans(
 }
 
 /**
+ * 卡片里「这一行**就是**书里那个行内元素本身」的包装区间（输入区文字的偏移）。
+ *
+ * 书里用 `display:block` 把 `<span>` / `<a>` 这类行内元素做成独立一行时，排版层把它切成单独
+ * 一叶（见 [orilumn.reader.engine.revision.InlineSpans.ownTagOf]），卡片只摆那一行的字，
+ * 标签就「消失」了。这里按 [lines] 与 [ownTags] 一一对应，给这类行补一层整行包装。
+ *
+ * 它的地位与块标记相同：**只活在卡片里**。提交时 [withoutOwnTags] 把它摘掉（叶元素本来就
+ * 还在，进修订的只能是叶里的字与结构），所以它不进 `textEditOriginalSpans`、不参与 no-op 比较。
+ */
+internal fun ownTagSpans(
+    lines: List<String>,
+    ownTags: List<String?>?,
+): List<InlineMarkup.StyleSpan> {
+    if (ownTags.isNullOrEmpty()) return emptyList()
+    val out = ArrayList<InlineMarkup.StyleSpan>(ownTags.size)
+    var at = 0
+    for ((i, line) in lines.withIndex()) {
+        val tag = ownTags.getOrNull(i)
+        if (tag != null && line.isNotEmpty()) {
+            out.add(
+                InlineMarkup.StyleSpan(at, at + line.length, InlineMarkup.StyleSig(tag)),
+            )
+        }
+        at += line.length + 1
+    }
+    return out
+}
+
+/**
+ * 提交前把「整行就是书里那个行内元素」的包装摘掉（它不属于修订里的结构：叶元素本来就留着）。
+ *
+ * 同时校验它还**在**：读者把标签删了 / 换成别的标签时，卡片里那一行就不再是那个块级元素了，
+ * 而「把块级元素摘掉、让这一行并回上一行」是结构改写，卡片这一版做不到——直接拒绝并说清楚，
+ * 别让读者以为自己改成了（标记悄悄失效比报错更糟）。
+ *
+ * 空行（读者把这一行的字删光了）不校验：那是在删这一行的内容，不是在删元素。
+ *
+ * @return (剩下的结构, 错误提示)；提示为 null = 一切照旧。
+ */
+internal fun withoutOwnTags(
+    segments: List<InlineMarkup.Segment>,
+    spans: List<InlineMarkup.StyleSpan>,
+    ownTags: List<String?>?,
+): Pair<List<InlineMarkup.StyleSpan>, String?> {
+    // 结构为空也要查：读者把整行标签删光时 `spans` 正好是空表，那恰恰是最该拒绝的一种。
+    if (ownTags.isNullOrEmpty()) return spans to null
+    val drop = HashSet<Int>(2)
+    var at = 0
+    for ((i, seg) in segments.withIndex()) {
+        val tag = ownTags.getOrNull(i)
+        val end = at + seg.text.length
+        if (tag != null && end > at) {
+            // 外层在前：同标签多层时摘最外那层（那就是叶自己）。
+            val hit = spans.indices
+                .filter { it !in drop && spans[it].sig.tag == tag }
+                .filter { spans[it].start <= at && spans[it].endExclusive >= end }
+                .minWithOrNull(
+                    compareBy({ spans[it].start }, { -spans[it].endExclusive }),
+                )
+            if (hit == null) {
+                return spans to (
+                    "这一行是书里单独成行的 <$tag>，删掉或换掉标签会把它并回上一行；" +
+                        "这一版还改不了，请把 <$tag>…</$tag> 留着"
+                    )
+            }
+            drop.add(hit)
+        }
+        at = end + 1
+    }
+    if (drop.isEmpty()) return spans to null
+    return spans.filterIndexed { i, _ -> i !in drop } to null
+}
+
+/**
  * 提交前的形状校验：整块图片与表格行的**结构不能借这张卡改掉**。
  *
  * - 图片块：输入后只能是原样的 `U+FFFC` 占位（保留）或空串（整张删除）；换成文字会悄悄
@@ -4100,6 +4240,7 @@ internal class RevisionCard(val card: EditCard, val plain: String)
 internal fun revisionCardOf(
     revision: TextRevision,
     oldSpans: List<InlineMarkup.StyleSpan>? = null,
+    ownTags: List<String?>? = null,
 ): RevisionCard {
     val tableLike = revision.editedBlocks.any { it.startsWith("t") || it.startsWith("T") }
     if (tableLike) {
@@ -4126,7 +4267,7 @@ internal fun revisionCardOf(
     // 原书结构只在宿主给得出时用（它已经按「文字逐字没变」筛过）：单段才回比，
     // 多段时卡片里多了 `\n`，偏移对不上。给了就按审阅视图同一套判据摊开新标记。
     val old = oldSpans?.takeIf { segments.size == 1 }
-    return RevisionCard(editCardOf(plain, blocks, stored, old), plain)
+    return RevisionCard(editCardOf(plain, blocks, stored, old, ownTags), plain)
 }
 
 /**
@@ -4147,6 +4288,7 @@ internal fun editCardOf(
     blocks: List<String>,
     stored: List<orilumn.reader.data.revision.RevisionStyleSpan>?,
     oldSpans: List<InlineMarkup.StyleSpan>? = null,
+    ownTags: List<String?>? = null,
 ): EditCard {
     val spans = stored?.let(InlineMarkup::fromStored)
     val segments = orilumn.reader.engine.revision.RevisionBlocks.cardSegments(editedText, blocks)
@@ -4159,8 +4301,11 @@ internal fun editCardOf(
         emptyList()
     }
     val (ambient, visible) = splitAmbientSpans(spans.orEmpty(), editedText.length, fresh)
+    // 「这一行本身就是书里那个行内元素」的包装：只给显示（它天生盖住整行，不走隐形那条），
+    // 不进 [EditCard.originalSpans]——提交时由 `withoutOwnTags` 摘掉，不算修订里的结构。
+    val own = ownTagSpans(segments.map { it.text }, ownTags)
     return EditCard(
-        text = InlineMarkup.show(segments, visible),
+        text = InlineMarkup.show(segments, visible + own),
         originalSpans = spans,
         ambientSpans = ambient,
     )

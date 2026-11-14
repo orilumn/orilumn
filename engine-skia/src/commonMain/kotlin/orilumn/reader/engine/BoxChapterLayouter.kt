@@ -1197,6 +1197,7 @@ class BoxChapterLayouter(
                     startsAtBlockStart = from <= leafStart,
                     table = if (leaf.tag == "tr") tableRowInfoOf(leaf, styling) else null,
                     image = leaf.tag == "img",
+                    ownTag = orilumn.reader.engine.revision.InlineSpans.ownTagOf(leaf),
                     start = leafStart,
                     endExclusive = leafTextEnd,
                     tableRange = if (leaf.tag == "tr") {

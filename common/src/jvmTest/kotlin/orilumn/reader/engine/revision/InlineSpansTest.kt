@@ -4,6 +4,7 @@ import orilumn.reader.engine.css.WhiteSpace
 import orilumn.reader.engine.html.MarkupElement
 import orilumn.reader.engine.laying.styledSegments
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -228,5 +229,36 @@ class InlineSpansTest {
             selectionStart = 105,
         )
         assertEquals(2 to 4, first.single().start to first.single().endExclusive)
+    }
+
+    @Test
+    fun ownTagOnlyForInlineElementsThatBecameWholeLeaves() {
+        // 书里 `span { display:block }`：排版把它切成单独一叶，卡片要照实写出 <span>。
+        assertEquals(
+            "span",
+            InlineSpans.ownTagOf(el("span", txt("第四十八章"), attrs = mapOf("class" to "sec_num"))),
+        )
+        assertEquals("a", InlineSpans.ownTagOf(el("a", txt("链接"))))
+        // 块形态归 BlockKind 管（卡片写 `## ` 那套，不写标签）。
+        assertNull(InlineSpans.ownTagOf(el("p", txt("段落"))))
+        assertNull(InlineSpans.ownTagOf(el("h2", txt("标题"))))
+        assertNull(InlineSpans.ownTagOf(el("li", txt("项"))))
+        assertNull(InlineSpans.ownTagOf(el("pre", txt("码"))))
+        // 空元素没有内容，写成 `<br>…</br>` 也不合法。
+        assertNull(InlineSpans.ownTagOf(MarkupElement("br")))
+        assertNull(InlineSpans.ownTagOf(MarkupElement("wbr")))
+        // 零散文字（树里的合成叶）与表格行另有口径。
+        assertNull(InlineSpans.ownTagOf(txt("零散")))
+        assertNull(InlineSpans.ownTagOf(el("tr", el("td", txt("格")))))
+        // 图片整块删除那套，不写成标签。
+        assertNull(InlineSpans.ownTagOf(el("img", attrs = mapOf("src" to "a.png"))))
+    }
+
+    @Test
+    fun ownTagIsNotPartOfTheLeafInnerStructure() {
+        // 叶自己的元素不进 `ofLeaf`：修订里的结构只是叶**里面**那些行内元素（叶元素本来就留着）。
+        val leaf = withParents(el("span", txt("第四十八章"), attrs = mapOf("class" to "sec_num")))
+        val segments = segmentsOf(leaf)
+        assertTrue(InlineSpans.ofLeaf(leaf, segments, { WhiteSpace.NORMAL }).isEmpty())
     }
 }

@@ -149,6 +149,9 @@ enum class BlockKind(val wire: String) {
  *   卡片里不写块标记，也不许改它的块级形态。
  * @property startsAtBlockStart 选区起点是否正好落在这块的开头：只有块首那一行能写块标记
  *   （第一行从段中间开始时，读者看到的半截文字承载不了「这一块该长成什么样」）。
+ * @property ownTag 这一叶**自己**就是一个行内元素（书里 `display:block` 的 `span` / `a`）时的
+ *   标签名：卡片按「整行包一层 `<tag>`」显示它（见 [orilumn.reader.engine.revision.InlineSpans.ownTagOf]）。
+ *   只用于显示——提交时那层包装由卡片摘掉，不算修订里的结构。
  * @property start 这块（叶）在章字符流里的起点。
  * @property endExclusive 这块（叶）在章字符流里的终点（不含）。
  */
@@ -165,6 +168,10 @@ data class TextEditBlock(
      */
     val start: Int = 0,
     val endExclusive: Int = 0,
+
+    /** 见类注释 `@property ownTag`。 */
+    val ownTag: String? = null,
+
     /**
      * 这一块是表格行时，它所属**整张表**在章字符流里的区间（渲染空间）。
      *

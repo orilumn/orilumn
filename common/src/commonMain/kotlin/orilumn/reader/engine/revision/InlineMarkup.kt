@@ -32,7 +32,7 @@ object InlineMarkup {
      * `</br>` / `</wbr>` 因此是无效写法：浏览器容错地当 `<br>` 处理，作者却以为自己
      * 「闭合了某个东西」。卡片里一律拒绝并提示，别让读者打的那几个字悄悄消失。
      */
-    private val VOID_TAGS: Set<String> = setOf("br", "wbr")
+    internal val VOID_TAGS: Set<String> = setOf("br", "wbr")
 
     /** 允许保留的属性名（规格 §5.2）。`id` 只在原位保留时使用。 */
     val ALLOWED_ATTRS: Set<String> = setOf(

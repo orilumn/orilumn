@@ -72,6 +72,26 @@ object InlineSpans {
     }
 
     /**
+     * 这一叶**自己**就是一张卡片写得出标签的行内元素（书里用 `display:block` 把 `span` / `a`
+     * 这类元素做成独立一行）时，返回它的标签名；否则 null。
+     *
+     * 这类叶在正文里是**一块**（排版层按 CSS 的 `display` 切叶），但在书里它仍是一个行内元素：
+     * 卡片只把它那一行的字摆出来、不带标签，读者会以为书里的 `<span>` 凭空没了
+     * （读者复报「标题开头的 `<span>` 不显示」）。所以卡片按「整行包一层 `<tag>`」显示它。
+     *
+     * **只用于显示**：提交时这层包装由卡片侧摘掉（它不是修订里的结构——叶元素本来就留着），
+     * 见 `ReaderScreen.withoutOwnTags`。因此它也不进 [ofLeaf] 的返回值：`ofLeaf` 是「修订里
+     * 的行内结构」，叶自己不属于结构（`while (node !== leaf)`）。
+     *
+     * `p` / `h1..h6` / `li` / `pre` 归块形态管（[BlockKind]），空元素（`br` / `wbr`）没有内容，
+     * 表格行（`tr`）与格子（`td` / `th`）另有形状，都不在这里。
+     */
+    fun ownTagOf(leaf: MarkupElement): String? =
+        leaf.tag.takeIf {
+            !leaf.isText && it in InlineMarkup.ALLOWED_TAGS && it !in InlineMarkup.VOID_TAGS
+        }
+
+    /**
      * 这个元素盖住的那几个字是不是**只有行内图占位**（`U+FFFC`）和空白。
      *
      * 空白要算进来：书里常写成 `<span class="guiicon"> <img> </span>`，两侧各留一个空格当间距。

@@ -36,10 +36,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -256,7 +252,7 @@ fun ShelfScreen(
                 Row(modifier = Modifier.fillMaxWidth().height(56.dp)) {
                     if (editMode) {
                         ToolItem(
-                            icon = if (selected.size == books.size) Icons.Default.Check else Icons.Default.Menu,
+                            icon = ShelfIcons.SelectAll,
                             label = "全选",
                             onClick = {
                                 if (selected.size != books.size) {
@@ -265,14 +261,14 @@ fun ShelfScreen(
                             },
                         )
                         ToolItem(
-                            icon = Icons.Default.Refresh,
+                            icon = ShelfIcons.Invert,
                             label = "反选",
                             onClick = { books.forEach { b -> selected = if (b.id in selected) selected - b.id else selected + b.id } },
                         )
-                        ToolItem(icon = Icons.Default.Menu, label = "分组", onClick = {
+                        ToolItem(icon = ShelfIcons.Group, label = "分组", onClick = {
                             scope.launch { snackbarHostState.showSnackbar("分组（占位）") }
                         })
-                        ToolItem(icon = Icons.Default.Delete, label = "删除", onClick = {
+                        ToolItem(icon = ShelfIcons.Delete, label = "删除", onClick = {
                             val toDelete = books.filter { it.id in selected }
                             scope.launch { toDelete.forEach { repository.delete(it.id) } }
                             selected = emptySet()

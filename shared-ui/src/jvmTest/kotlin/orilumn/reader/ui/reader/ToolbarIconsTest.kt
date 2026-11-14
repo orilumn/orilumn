@@ -21,6 +21,10 @@ class ToolbarIconsTest {
         "list" to ShelfIcons.ListView,
         "add" to ShelfIcons.Import,
         "layers" to ShelfIcons.EditMode,
+        "select-all" to ShelfIcons.SelectAll,
+        "toggle-on" to ShelfIcons.Invert,
+        "ad-group" to ShelfIcons.Group,
+        "delete" to ShelfIcons.Delete,
     )
 
     @Test

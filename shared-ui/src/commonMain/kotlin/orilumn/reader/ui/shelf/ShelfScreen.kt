@@ -36,11 +36,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
@@ -66,9 +63,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.graphics.vector.addPathNodes
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
@@ -86,18 +81,6 @@ import kotlinx.coroutines.launch
 /** 书架顶部/底部栏配色：白底 + 深黑前景（与阅读面工具栏的深灰拉开，保持书架清爽）。 */
 private val BarGray = Color.White
 private val BarGrayFg = Color(0xFF1F1F1F)
-
-/** 「网格」切换图标：对齐原 app res/drawable/ic_grid.xml（24dp 四宫格，深色填充）。 */
-private val GridIcon: ImageVector by lazy {
-    val nodes = addPathNodes("M3,3h8v8h-8z M13,3h8v8h-8z M3,13h8v8h-8z M13,13h8v8h-8z")
-    ImageVector.Builder(
-        name = "Grid",
-        defaultWidth = 24.dp,
-        defaultHeight = 24.dp,
-        viewportWidth = 24f,
-        viewportHeight = 24f,
-    ).addPath(nodes, fill = SolidColor(Color(0xFF000000))).build()
-}
 
 /** 「重复图书」弹窗数据：聚合的重复项 + 此前已完成的成功/失败计数。 */
 private data class DupPromptState(
@@ -297,7 +280,7 @@ fun ShelfScreen(
                         })
                     } else {
                         ToolItem(
-                            icon = if (view == ShelfView.Grid) GridIcon else Icons.Default.List,
+                            icon = if (view == ShelfView.Grid) ShelfIcons.GridView else ShelfIcons.ListView,
                             label = if (view == ShelfView.Grid) "网格" else "列表",
                             onClick = {
                                 val next = if (view == ShelfView.Grid) ShelfView.CoverList else ShelfView.Grid
@@ -305,8 +288,8 @@ fun ShelfScreen(
                                 onPersistView(next)
                             },
                         )
-                        ToolItem(icon = Icons.Default.Add, label = "导入", onClick = { picker.launch() })
-                        ToolItem(icon = Icons.Default.Edit, label = "编辑", onClick = {
+                        ToolItem(icon = ShelfIcons.Import, label = "导入", onClick = { picker.launch() })
+                        ToolItem(icon = ShelfIcons.EditMode, label = "编辑", onClick = {
                             editMode = !editMode
                             if (!editMode) selected = emptySet()
                         })

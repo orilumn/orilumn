@@ -1,50 +1,45 @@
 package orilumn.reader.ui.reader
 
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.graphics.vector.addPathNodes
-import androidx.compose.ui.unit.dp
+import orilumn.reader.ui.icons.pathIcon
 
 /**
  * 底栏七个图标：Material Icons（Outlined）的官方路径，按 24 单位网格原样搬进来。
  *
  * 为什么不直接用 `Icons.Outlined.*`：项目只依赖 `material-icons-core`（49 个图标），
  * 书签/眼睛/月牙/正文页都不在里面；而 `material-icons-extended` 桌面端 36 MB，为七个图标不值。
- * 于是把官方路径（Apache-2.0）当字符串放进代码，用 [addPathNodes] 解析成 [ImageVector]：
- * 零新增依赖，且和库里的图标出自同一套网格，摆一排时墨量、视觉中心自然对齐。
+ * 于是把官方路径（Apache-2.0）当字符串放进代码（[pathIcon] 负责解析）：零新增依赖，
+ * 且和库里的图标出自同一套网格，摆一排时墨量、视觉中心自然对齐。
  *
- * 着色交给 `Icon(tint = ...)` 的 ColorFilter，所以路径本身填黑色即可。
  * 图标路径按 88 列折行，折点处的空格补在上一段末尾 —— 拼回去必须与官方 `d` 逐字符一致。
  */
 internal object BarIcons {
 
     /** Material Icons `menu`（Outlined 风格）。 */
-    val Menu = barIcon(
+    val Menu = pathIcon(
         "M3 18h18v-2H3zm0-5h18v-2H3zm0-7v2h18V6z"
     )
 
     /** Material Icons `bookmark_border`（Outlined 风格）。 */
-    val Bookmark = barIcon(
+    val Bookmark = pathIcon(
         "M17 3H7c-1.1 0-1.99.9-1.99 2L5 21l7-3l7 3V5c0-1.1-.9-2-2-2m0 15l-5-2.18L7 18V5h10z"
     )
 
     /** Material Icons `text_snippet`（Outlined 风格）。 */
-    val Note = barIcon(
+    val Note = pathIcon(
         "M14.17 5L19 9.83V19H5V5zm0-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 " +
             "2-2V9.83c0-.53-.21-1.04-.59-1.41l-4.83-4.83c-.37-.38-.88-.59-1.41-.59M7 " +
             "15h10v2H7zm0-4h10v2H7zm0-4h7v2H7z"
     )
 
     /** Material Icons `edit`（Outlined 风格）。 */
-    val Edit = barIcon(
+    val Edit = pathIcon(
         "m14.06 9.02l.92.92L5.92 19H5v-.92zM17.66 3c-.25 0-.51.1-.7.29l-1.83 1.83l3.75 " +
             "3.75l1.83-1.83a.996.996 0 0 0 0-1.41l-2.34-2.34c-.2-.2-.45-.29-.71-.29m-3.6 3.19L3 " +
             "17.25V21h3.75L17.81 9.94z"
     )
 
     /** Material Icons `visibility`（Outlined 风格）。 */
-    val Review = barIcon(
+    val Review = pathIcon(
         "M12 6a9.77 9.77 0 0 1 8.82 5.5C19.17 14.87 15.79 17 12 17s-7.17-2.13-8.82-5.5A9.77 9.77 " +
             "0 0 1 12 6m0-2C7 4 2.73 7.11 1 11.5C2.73 15.89 7 19 12 19s9.27-3.11 11-7.5C21.27 7.11 17 " +
             "4 12 4m0 5a2.5 2.5 0 0 1 0 5a2.5 2.5 0 0 1 0-5m0-2c-2.48 0-4.5 2.02-4.5 4.5S9.52 16 12 " +
@@ -52,7 +47,7 @@ internal object BarIcons {
     )
 
     /** Material Icons `dark_mode`（Outlined 风格）。 */
-    val Moon = barIcon(
+    val Moon = pathIcon(
         "M9.37 5.51A7.4 7.4 0 0 0 9.1 7.5c0 4.08 3.32 7.4 7.4 7.4c.68 0 1.35-.09 1.99-.27A7.01 " +
             "7.01 0 0 1 12 19c-3.86 0-7-3.14-7-7c0-2.93 1.81-5.45 4.37-6.49M12 3a9 9 0 1 0 9 " +
             "9c0-.46-.04-.92-.1-1.36a5.39 5.39 0 0 1-4.4 2.26a5.403 5.403 0 0 " +
@@ -60,7 +55,7 @@ internal object BarIcons {
     )
 
     /** Material Icons `settings`（Outlined 风格）。 */
-    val Gear = barIcon(
+    val Gear = pathIcon(
         "M19.43 " +
             "12.98c.04-.32.07-.64.07-.98s-.03-.66-.07-.98l2.11-1.65c.19-.15.24-.42.12-.64l-2-3.46a.5.5 " +
             "0 0 0-.61-.22l-2.49 1c-.52-.4-1.08-.73-1.69-.98l-.38-2.65A.49.49 0 0 0 14 2h-4c-.25 " +
@@ -79,13 +74,3 @@ internal object BarIcons {
     )
 }
 
-private fun barIcon(vararg pathData: String): ImageVector = ImageVector.Builder(
-    name = "BarIcon",
-    defaultWidth = 24.dp,
-    defaultHeight = 24.dp,
-    viewportWidth = 24f,
-    viewportHeight = 24f,
-).apply {
-    // 一个图标可能由多段路径组成（比如眼睛 = 轮廓 + 瞳孔），逐段加进去。
-    pathData.forEach { addPath(pathData = addPathNodes(it), fill = SolidColor(Color.Black)) }
-}.build()

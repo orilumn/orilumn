@@ -8,6 +8,8 @@ import orilumn.reader.data.annotation.AnnotationLineStyle
 import orilumn.reader.data.annotation.AnnotationStore
 import orilumn.reader.data.book.Book
 import orilumn.reader.data.book.BookReadingState
+import orilumn.reader.data.bookmark.Bookmark
+import orilumn.reader.data.bookmark.BookmarkStore
 import orilumn.reader.data.font.FontFace
 import orilumn.reader.data.font.SystemFontFace
 import orilumn.reader.data.revision.RevisionStyles
@@ -31,13 +33,14 @@ enum class BookSort { Added, Read, Name }
  * - 查询走 IO 线程；书目流经 `asFlow().mapToList()` 随库变化推送（替代 Room `observe*`）；
  * - 驱动由各壳提供（Android `AndroidSqliteDriver` / 桌面 `JdbcSqliteDriver`），本类无平台绑定。
  */
-class LibraryDb(private val db: OrilumnDb) : AnnotationStore, TextRevisionStore {
+class LibraryDb(private val db: OrilumnDb) : AnnotationStore, TextRevisionStore, BookmarkStore {
     private val books = db.booksQueries
     private val progress = db.readingStatesQueries
     private val fonts = db.fontFacesQueries
     private val fontScan = db.fontScanStateQueries
     private val annotations = db.annotationsQueries
     private val revisions = db.textRevisionsQueries
+    private val bookmarks = db.bookmarksQueries
 
     fun observeBooks(sort: BookSort = BookSort.Added): Flow<List<Book>> {
         val flow = when (sort) {
@@ -98,13 +101,14 @@ class LibraryDb(private val db: OrilumnDb) : AnnotationStore, TextRevisionStore 
     }
 
     /**
-     * 删书并在**同一事务**里清掉阅读进度、标注与正文修订（没有外键级联，必须一起删）。
+     * 删书并在**同一事务**里清掉阅读进度、标注、正文修订与书签（没有外键级联，必须一起删）。
      * 两个平台都走这一条，避免「删了书、留了孤儿」。
      */
     suspend fun removeBookAndData(id: Long) = withContext(Dispatchers.IO) {
         db.transaction {
             revisions.deleteTextRevisionsForBook(id)
             annotations.deleteAnnotationsForBook(id)
+            bookmarks.deleteBookmarksForBook(id)
             progress.clearReadingState(id)
             books.deleteBook(id)
         }
@@ -262,6 +266,58 @@ class LibraryDb(private val db: OrilumnDb) : AnnotationStore, TextRevisionStore 
 
     override suspend fun deleteTextRevisionsForBook(bookId: Long) = withContext(Dispatchers.IO) {
         revisions.deleteTextRevisionsForBook(bookId)
+        Unit
+    }
+
+    // ---- 书签（schema v15 起；锚点为原书章内页首字符，见 Bookmarks.sq） ----
+
+    override suspend fun bookmarksForBook(bookId: Long): List<Bookmark> = withContext(Dispatchers.IO) {
+        bookmarks.bookmarksForBook(bookId).executeAsList().map { it.toBookmark() }
+    }
+
+    override suspend fun bookmarkAtPage(bookId: Long, chapter: Int, charStart: Int): Bookmark? =
+        withContext(Dispatchers.IO) {
+            bookmarks.bookmarkAtPage(bookId, chapter.toLong(), charStart.toLong())
+                .executeAsOneOrNull()
+                ?.toBookmark()
+        }
+
+    override suspend fun addBookmark(bookmark: Bookmark): Bookmark = withContext(Dispatchers.IO) {
+        // 同一页已有书签就返回那条：连点「添加当前页」不长出重复行。
+        bookmarks.bookmarkAtPage(
+            bookmark.bookId,
+            bookmark.chapter.toLong(),
+            bookmark.charStart.toLong(),
+        ).executeAsOneOrNull()?.let { return@withContext it.toBookmark() }
+        // 换过版面后页首会挪位：旧书签落在新页覆盖的原书区间里也算「这一页已加过」。
+        if (bookmark.charEnd > bookmark.charStart) {
+            bookmarks.bookmarkWithinPage(
+                bookmark.bookId,
+                bookmark.chapter.toLong(),
+                bookmark.charStart.toLong(),
+                bookmark.charEnd.toLong(),
+            ).executeAsOneOrNull()?.let { return@withContext it.toBookmark() }
+        }
+        bookmarks.insertBookmark(
+            bookId = bookmark.bookId,
+            chapter = bookmark.chapter.toLong(),
+            charStart = bookmark.charStart.toLong(),
+            charEnd = bookmark.charEnd.toLong(),
+            quote = bookmark.quote,
+            createdAt = bookmark.createdAt,
+        )
+        val id = bookmarks.lastInsertBookmarkId().executeAsOneOrNull()?.max
+            ?: error("insertBookmark 未返回新行 id")
+        bookmark.copy(id = id)
+    }
+
+    override suspend fun deleteBookmark(id: Long) = withContext(Dispatchers.IO) {
+        bookmarks.deleteBookmark(id)
+        Unit
+    }
+
+    override suspend fun deleteBookmarksForBook(bookId: Long) = withContext(Dispatchers.IO) {
+        bookmarks.deleteBookmarksForBook(bookId)
         Unit
     }
 
@@ -482,6 +538,16 @@ class LibraryDb(private val db: OrilumnDb) : AnnotationStore, TextRevisionStore 
         groupId = groupId,
         createdAt = createdAt,
         updatedAt = updatedAt,
+    )
+
+    private fun orilumn.reader.db.Bookmarks.toBookmark(): Bookmark = Bookmark(
+        id = id,
+        bookId = bookId,
+        chapter = chapter.toInt(),
+        charStart = charStart.toInt(),
+        charEnd = charEnd.toInt(),
+        quote = quote,
+        createdAt = createdAt,
     )
 
     private fun orilumn.reader.db.Font_faces.toFace(): FontFace = FontFace(

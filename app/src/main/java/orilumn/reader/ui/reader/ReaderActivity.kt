@@ -37,6 +37,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import orilumn.reader.data.book.BookRepository
 import orilumn.reader.data.annotation.Annotation
+import orilumn.reader.data.bookmark.Bookmark
 import orilumn.reader.host.AndroidDb
 import orilumn.reader.host.AndroidFontScan
 import orilumn.reader.data.font.FontRepository
@@ -398,6 +399,7 @@ class ReaderActivity : ComponentActivity() {
                     },
                     onSettings = { openSettingsPanel() },
                     onToc = { openPanel(ReaderPanelPage.Toc) },
+                    onBookmark = { openPanel(ReaderPanelPage.Bookmarks) },
                     onNote = { openPanel(ReaderPanelPage.Annotations) },
                     onRevision = { openPanel(ReaderPanelPage.Revisions) },
                     onReview = { toggleReviewMode() },
@@ -441,6 +443,19 @@ class ReaderActivity : ComponentActivity() {
                         // 目录页码：只给「算得出来」的章；磁盘表逐章补齐时代际变化，目录跟着刷新。
                         chapterStartPages = { tabletHost?.chapterStartPages() ?: IntArray(0) },
                         pageNumberRevision = { tabletHost?.pageNumberRevision() ?: 0 },
+                    )
+                },
+                bookmarksContent = {
+                    ReaderBookmarkPanel(
+                        scheme = effective.scheme,
+                        load = { tabletHost?.bookmarksForBook() },
+                        // 书签记的是「正在读的这一页」：添加动作只看当前定位，读者不必先去目录找位置。
+                        onAddCurrent = { currentPos?.let { tabletHost?.addBookmarkAt(it) } },
+                        onDelete = { bookmark -> tabletHost?.deleteBookmark(bookmark.id) ?: false },
+                        onJump = { bookmark -> bookmarkJump(bookmark) },
+                        chapterTitles = tocTitles,
+                        currentChapter = currentPos?.chapter ?: 0,
+                        onDismiss = { closePanel() },
                     )
                 },
                 annotationsContent = {
@@ -796,6 +811,24 @@ class ReaderActivity : ComponentActivity() {
             withContext(Dispatchers.Main) {
                 if (target != null) {
                     // 清单跳转是导航：改参锚点作废，下一次改参按新的当前页首取。
+                    relayoutAnchor.release()
+                    currentPos = target
+                    externalPos = target
+                }
+            }
+        }
+    }
+
+    /** 书签跳转：落到该书签页首（与标注 / 修订清单同一跳转口径，原书→渲染由宿主换算）。 */
+    private fun bookmarkJump(bookmark: Bookmark) {
+        panelPage = null
+        applySystemBars()
+        val host = tabletHost ?: return
+        lifecycleScope.launch(Dispatchers.IO) {
+            val target = host.jumpToChar(bookmark.chapter, bookmark.charStart)
+            withContext(Dispatchers.Main) {
+                if (target != null) {
+                    // 书签跳转是导航：改参锚点作废，下一次改参按新的当前页首取。
                     relayoutAnchor.release()
                     currentPos = target
                     externalPos = target

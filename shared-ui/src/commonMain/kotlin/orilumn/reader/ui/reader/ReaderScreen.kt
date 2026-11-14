@@ -110,8 +110,7 @@ internal const val PAGE_IMAGE_WARM_TIMEOUT_MS = 800L
  *
  * 状态机：打开后 `openPos` 为空 → 仅背页；翻页/跳转走宿主 suspend 后落位，且防抖保存
  * （[onSaveProgress]，500ms，复刻 Android `scheduleSave`）。设置面板/目录抽屉是独立组件
- * （[ReaderSettingsPanel]/[ReaderSidePanel]，S29）；书签仍是占位（onBookmark 为 null），
- * 笔记按钮已接标注清单（onNote）
+ * （[ReaderSettingsPanel]/[ReaderSidePanel]，S29）；书签 / 笔记 / 修订按钮打开同一抽屉的对应页
  * 时经 CMP Snackbar（[rememberReaderSnackbar]，替代 Android Toast）提示。
  */
 @Composable
@@ -3290,7 +3289,7 @@ fun ReaderScreen(
                 // 退场）。清单里点一条就是跳转；跳转一律从「工具栏已退出」的状态发起，
                 // 落位后读者看到的是干净的一页。
                 onBookmark = currentOnBookmark?.let { cb -> { hideBarsThen { cb() } } }
-                    ?: { snackbar.show("书签（规划中）") },
+                    ?: { snackbar.show("当前版本不支持书签") },
                 onNote = currentOnNote?.let { cb -> { hideBarsThen { cb() } } }
                     ?: { snackbar.show("笔记（规划中）") },
                 // 修订：收栏与开清单同一帧发起（栏在抽屉之下退场，不会盖在晾着的工具栏上）。
@@ -3973,7 +3972,7 @@ fun ReaderScreen(
                 // 退场）。清单里点一条就是跳转；跳转一律从「工具栏已退出」的状态发起，
                 // 落位后读者看到的是干净的一页。
                 onBookmark = currentOnBookmark?.let { cb -> { hideBarsThen { cb() } } }
-                    ?: { snackbar.show("书签（规划中）") },
+                    ?: { snackbar.show("当前版本不支持书签") },
                 onNote = currentOnNote?.let { cb -> { hideBarsThen { cb() } } }
                     ?: { snackbar.show("笔记（规划中）") },
                 // 修订：收栏与开清单同一帧发起（栏在抽屉之下退场，不会盖在晾着的工具栏上）。

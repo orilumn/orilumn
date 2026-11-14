@@ -1,9 +1,11 @@
 package orilumn.reader.desktop
 
 import orilumn.reader.data.font.FontEntry
+import orilumn.reader.data.bookmark.Bookmark
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.ui.reader.FontScanProgress
 import orilumn.reader.ui.reader.ReaderAnnotationPanel
+import orilumn.reader.ui.reader.ReaderBookmarkPanel
 import orilumn.reader.ui.reader.ReaderHost
 import orilumn.reader.ui.reader.ReaderPanelPage
 import orilumn.reader.ui.reader.ReaderPos
@@ -16,6 +18,7 @@ import orilumn.reader.ui.reader.SnapshotReaderHost
 import orilumn.reader.ui.reader.TextRevisionDeleteOutcome
 import orilumn.reader.ui.reader.ThemePreset
 import orilumn.reader.ui.reader.chapterTitlesOf
+import orilumn.reader.ui.reader.addBookmarkAt
 import orilumn.reader.ui.shelf.ShelfBook
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.runtime.Composable
@@ -450,6 +453,7 @@ fun ReaderView(
             },
             onSettings = { settingsOpen = true },
             onToc = { panelPage = ReaderPanelPage.Toc; panelLastPage = ReaderPanelPage.Toc },
+            onBookmark = { panelPage = ReaderPanelPage.Bookmarks; panelLastPage = ReaderPanelPage.Bookmarks },
             onNote = { panelPage = ReaderPanelPage.Annotations; panelLastPage = ReaderPanelPage.Annotations },
             // 工具栏「修订」按钮：修订清单与平板同一抽屉页（此前桌面只能从目录/标注抽屉切过去）。
             onRevision = { panelPage = ReaderPanelPage.Revisions; panelLastPage = ReaderPanelPage.Revisions },
@@ -571,6 +575,27 @@ fun ReaderView(
                     // 目录页码（用户层）：与平板同一份数据，能算的才显示。
                     chapterStartPages = { desktopHost?.chapterStartPages() ?: IntArray(0) },
                     pageNumberRevision = { desktopHost?.pageNumberRevision() ?: 0 },
+                )
+            },
+            bookmarksContent = {
+                ReaderBookmarkPanel(
+                    scheme = settings.scheme,
+                    load = { desktopHost?.bookmarksForBook() },
+                    // 书签记的是「正在读的这一页」：添加动作只看当前定位。
+                    onAddCurrent = { currentPos?.let { desktopHost?.addBookmarkAt(it) } },
+                    onDelete = { bookmark -> desktopHost?.deleteBookmark(bookmark.id) ?: false },
+                    onJump = { bookmark ->
+                        panelPage = null
+                        relayoutAnchor.release()
+                        scope.launch {
+                            val target = desktopHost?.jumpToChar(bookmark.chapter, bookmark.charStart)
+                                ?: return@launch
+                            pushLanding(target)
+                        }
+                    },
+                    chapterTitles = panelChapterTitles,
+                    currentChapter = currentPos?.chapter ?: 0,
+                    onDismiss = { panelPage = null },
                 )
             },
             annotationsContent = {

@@ -1,0 +1,15 @@
+-- 书签（14→15）：页级书签表。锚点是章号 + 章内原书页首字符，与标注同口径；
+-- 摘录是创建当时那一页的文字快照。见 Bookmarks.sq。
+CREATE TABLE bookmarks(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bookId INTEGER NOT NULL,
+  chapter INTEGER NOT NULL,
+  charStart INTEGER NOT NULL,
+  charEnd INTEGER NOT NULL,
+  quote TEXT,
+  createdAt INTEGER NOT NULL,
+  CHECK (charStart >= 0),
+  CHECK (charEnd >= charStart)
+);
+
+CREATE INDEX bookmarks_by_book_chapter ON bookmarks(bookId, chapter, charStart);

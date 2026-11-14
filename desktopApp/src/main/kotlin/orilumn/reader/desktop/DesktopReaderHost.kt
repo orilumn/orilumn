@@ -2,6 +2,7 @@ package orilumn.reader.desktop
 
 import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.data.book.BookReadingState
+import orilumn.reader.data.bookmark.Bookmark
 import orilumn.reader.data.epub.EpubResourceReader
 import orilumn.reader.data.epub.TocItem
 import orilumn.reader.data.epub.ZipEpubResourceReader
@@ -646,6 +647,42 @@ class DesktopReaderHost(
         throw c
     } catch (t: Throwable) {
         Logger.w(TAG, "deleteAnnotation failed: ${t.message}")
+        false
+    }
+
+    // ---- 书签：与标注同一分层（锚点原书空间，换版面不漂） ----
+
+    override suspend fun bookmarksForBook(): List<Bookmark>? = try {
+        store.bookmarksForBook(bookId)
+    } catch (c: CancellationException) {
+        throw c
+    } catch (t: Throwable) {
+        Logger.w(TAG, "bookmarksForBook failed: ${t.message}")
+        null
+    }
+
+    override suspend fun addBookmark(bookmark: Bookmark): Bookmark? = try {
+        val now = System.currentTimeMillis()
+        store.addBookmark(
+            bookmark.copy(
+                bookId = bookId,
+                createdAt = if (bookmark.createdAt == 0L) now else bookmark.createdAt,
+            ),
+        )
+    } catch (c: CancellationException) {
+        throw c
+    } catch (t: Throwable) {
+        Logger.w(TAG, "addBookmark failed: ${t.message}")
+        null
+    }
+
+    override suspend fun deleteBookmark(id: Long): Boolean = try {
+        store.deleteBookmark(id)
+        true
+    } catch (c: CancellationException) {
+        throw c
+    } catch (t: Throwable) {
+        Logger.w(TAG, "deleteBookmark failed: ${t.message}")
         false
     }
 

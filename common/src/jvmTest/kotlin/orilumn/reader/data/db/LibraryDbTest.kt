@@ -7,6 +7,7 @@ import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.data.annotation.AnnotationKind
 import orilumn.reader.data.annotation.AnnotationLineStyle
+import orilumn.reader.data.bookmark.Bookmark
 import orilumn.reader.data.revision.TextRevision
 import orilumn.reader.db.OrilumnDb
 import kotlinx.coroutines.Dispatchers
@@ -304,6 +305,47 @@ class LibraryDbTest {
     }
 
     @Test
+    fun bookmarksCrudRoundTripAndDedup() = runBlocking {
+        val db = freshDb()
+        val book = db.addBook("T", null, "/b.epub", addedAt = 1L)
+        assertTrue(db.bookmarksForBook(book).isEmpty())
+
+        val c2 = db.addBookmark(
+            Bookmark(bookId = book, chapter = 2, charStart = 30, charEnd = 60, quote = "第二页", createdAt = 5L),
+        )
+        val c0 = db.addBookmark(
+            Bookmark(bookId = book, chapter = 0, charStart = 10, charEnd = 10, quote = null, createdAt = 6L),
+        )
+        val c2a = db.addBookmark(
+            Bookmark(bookId = book, chapter = 2, charStart = 5, charEnd = 20, quote = "第一页", createdAt = 7L),
+        )
+        assertTrue(c2.id > 0)
+        // 清单按章序 + 章内页首排（故意乱序插入）。
+        assertEquals(listOf(c0.id, c2a.id, c2.id), db.bookmarksForBook(book).map { it.id })
+        assertTrue(db.bookmarksForBook(book + 1).isEmpty())
+
+        // 同一页再点一次「添加当前页」：返回已有那条，不长出重复行。
+        val again = db.addBookmark(
+            Bookmark(bookId = book, chapter = 2, charStart = 5, charEnd = 99, quote = "又一次", createdAt = 8L),
+        )
+        assertEquals(c2a, again)
+        assertEquals(3, db.bookmarksForBook(book).size)
+        // 换过版面后页首挪位：旧书签落在新页覆盖的区间里也算同一页，不再长出第二条。
+        val shifted = db.addBookmark(
+            Bookmark(bookId = book, chapter = 2, charStart = 4, charEnd = 25, quote = "换版面后", createdAt = 9L),
+        )
+        assertEquals(c2a, shifted)
+        assertEquals(3, db.bookmarksForBook(book).size)
+        // 页首落在图片上（空区间）也能存。
+        assertEquals(10, db.bookmarkAtPage(book, 0, 10)?.charStart)
+
+        db.deleteBookmark(c0.id)
+        assertEquals(listOf(c2a.id, c2.id), db.bookmarksForBook(book).map { it.id })
+        db.deleteBookmarksForBook(book)
+        assertTrue(db.bookmarksForBook(book).isEmpty())
+    }
+
+    @Test
     fun removeBookAndDataClearsProgressAndAnnotations() = runBlocking {
         val db = freshDb()
         val kept = db.addBook("Keep", null, "/keep.epub", addedAt = 1L)
@@ -331,6 +373,9 @@ class LibraryDbTest {
                     updatedAt = 3L,
                 ),
             )
+            db.addBookmark(
+                Bookmark(bookId = book, chapter = 1, charStart = 0, charEnd = 3, quote = "首页", createdAt = 3L),
+            )
         }
 
         db.removeBookAndData(removed)
@@ -339,11 +384,13 @@ class LibraryDbTest {
         assertNull(db.readingState(removed))
         assertTrue(db.annotationsForChapter(removed, 1).isEmpty())
         assertTrue(db.annotationsForBook(removed).isEmpty())
+        assertTrue(db.bookmarksForBook(removed).isEmpty())
 
         // 另一本书的数据不受影响。
         assertTrue(db.getBook(kept) != null)
         assertTrue(db.readingState(kept) != null)
         assertEquals(1, db.annotationsForChapter(kept, 1).size)
+        assertEquals(1, db.bookmarksForBook(kept).size)
     }
 
     @Test
@@ -354,6 +401,7 @@ class LibraryDbTest {
         OrilumnDb.Schema.create(driver)
         driver.execute(null, "DROP TABLE annotations;", 0)
         driver.execute(null, "DROP TABLE text_revisions;", 0)
+        driver.execute(null, "DROP TABLE bookmarks;", 0)
         driver.execute(null, "PRAGMA user_version = 6;", 0)
 
         OrilumnDb.Schema.migrate(driver, 6, OrilumnDb.Schema.version)
@@ -387,6 +435,7 @@ class LibraryDbTest {
         driver.execute(null, "ALTER TABLE annotations DROP COLUMN lineStyle;", 0)
         driver.execute(null, "ALTER TABLE annotations DROP COLUMN quote;", 0)
         driver.execute(null, "DROP TABLE text_revisions;", 0)
+        driver.execute(null, "DROP TABLE bookmarks;", 0)
         driver.execute(null, "PRAGMA user_version = 7;", 0)
 
         OrilumnDb.Schema.migrate(driver, 7, OrilumnDb.Schema.version)
@@ -430,6 +479,7 @@ class LibraryDbTest {
         OrilumnDb.Schema.create(driver)
         driver.execute(null, "ALTER TABLE annotations DROP COLUMN quote;", 0)
         driver.execute(null, "DROP TABLE text_revisions;", 0)
+        driver.execute(null, "DROP TABLE bookmarks;", 0)
         driver.execute(null, "PRAGMA user_version = 8;", 0)
 
         OrilumnDb.Schema.migrate(driver, 8, OrilumnDb.Schema.version)
@@ -692,6 +742,7 @@ class LibraryDbTest {
         val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
         OrilumnDb.Schema.create(driver)
         driver.execute(null, "DROP TABLE text_revisions;", 0)
+        driver.execute(null, "DROP TABLE bookmarks;", 0)
         driver.execute(null, "PRAGMA user_version = 10;", 0)
 
         OrilumnDb.Schema.migrate(driver, 10, OrilumnDb.Schema.version)
@@ -748,6 +799,7 @@ class LibraryDbTest {
         )
         driver.execute(null, "DROP TABLE text_revisions;", 0)
         driver.execute(null, "ALTER TABLE text_revisions_old RENAME TO text_revisions;", 0)
+        driver.execute(null, "DROP TABLE bookmarks;", 0)
         driver.execute(null, "PRAGMA user_version = 12;", 0)
 
         OrilumnDb.Schema.migrate(driver, 12, OrilumnDb.Schema.version)
@@ -948,5 +1000,26 @@ class LibraryDbTest {
             listOf("SysB"),
             db.allFonts().filter { it.source == orilumn.reader.data.font.FontFace.SOURCE_SYSTEM }.map { it.familyName },
         )
+    }
+
+    @Test
+    fun migrate14to15AddsBookmarksTable() {
+        // 用最新 schema 建库后删掉书签表、把版本退回 14，模拟真实的 14→15 升级。
+        val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        OrilumnDb.Schema.create(driver)
+        driver.execute(null, "DROP TABLE bookmarks;", 0)
+        driver.execute(null, "PRAGMA user_version = 14;", 0)
+
+        OrilumnDb.Schema.migrate(driver, 14, OrilumnDb.Schema.version)
+
+        val db = LibraryDb(OrilumnDb(driver))
+        runBlocking {
+            val book = db.addBook("T", null, "/b.epub", addedAt = 1L)
+            val saved = db.addBookmark(
+                Bookmark(bookId = book, chapter = 3, charStart = 12, charEnd = 40, quote = "迁移后", createdAt = 9L),
+            )
+            assertTrue(saved.id > 0)
+            assertEquals(listOf(saved), db.bookmarksForBook(book))
+        }
     }
 }

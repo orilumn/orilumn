@@ -1,6 +1,7 @@
 package orilumn.reader.data.book
 
 import orilumn.reader.data.annotation.Annotation
+import orilumn.reader.data.bookmark.Bookmark
 import orilumn.reader.data.db.BookSort
 import orilumn.reader.data.db.LibraryDb
 import orilumn.reader.data.revision.TextRevision
@@ -93,4 +94,12 @@ class BookRepository(
     override suspend fun deleteTextRevision(id: Long) = db.deleteTextRevision(id)
 
     override suspend fun deleteTextRevisionsForBook(bookId: Long) = db.deleteTextRevisionsForBook(bookId)
+
+    // ---- 书签（schema v15；锚点为原书章内页首字符） ----
+
+    suspend fun bookmarksForBook(bookId: Long): List<Bookmark> = db.bookmarksForBook(bookId)
+
+    suspend fun addBookmark(bookmark: Bookmark): Bookmark = db.addBookmark(bookmark)
+
+    suspend fun deleteBookmark(id: Long) = db.deleteBookmark(id)
 }

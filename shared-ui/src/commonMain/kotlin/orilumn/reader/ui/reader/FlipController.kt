@@ -75,6 +75,16 @@ class FlipController(
     val progress: MutableFloatState = mutableFloatStateOf(0f)
     val direction: MutableIntState = mutableIntStateOf(0)
 
+    /**
+     * 卷曲手感：手指位移的上下分量（-1..1），决定折痕的倾斜。
+     *
+     * 与旧 `CurlView.frozenTilt()` 同口径（`tilt = dy / hypot(dx, dy)`）：纯水平拖动 ⇒ 0（竖折痕），
+     * 斜着往下拖 ⇒ 正，折痕上端左移、下端右移，纸的下缘先翻起来。
+     *
+     * 只在拖动中由 [updateCurlTilt] 写；松手后**保持**（结算期间折痕形状不该跳变）。
+     */
+    val curlTilt: MutableFloatState = mutableFloatStateOf(0f)
+
     /** 起手那一页（正被拖走的那张）。落位在起手就发生，故 openPos 已是目标页。 */
     val fromPos: MutableState<ReaderPos?> = mutableStateOf(null)
 
@@ -284,6 +294,7 @@ class FlipController(
         targetIsCover.value = enterCover
         this.direction.value = direction
         progress.value = 0f
+        curlTilt.value = 0f
         if (enterCover) {
             // 后退回封面：目标（封面）早已解码、立即就绪，**无需落位**——跟手由
             // updateDrag 驱动（targetReady()=true），松手 endDrag 结算。绝不 flipAwait：
@@ -335,6 +346,17 @@ class FlipController(
      */
     private fun logLat(dir: Int, phase: String, ms: Long) {
         log("FLIPLAT $phase dir=$dir ms=$ms")
+    }
+
+    /**
+     * 卷曲手感输入：手指位移的上下分量（见 [curlTilt]）。
+     *
+     * 单独一条入口（不并进 [updateDrag]）：滑动层完全不看倾斜，只有卷曲层读它；
+     * 混在一起会让「翻页进度」和「折痕形状」两个无关的事实共用一次调用，将来谁改一个都会动到另一个。
+     */
+    fun updateCurlTilt(dx: Float, dy: Float) {
+        val len = kotlin.math.hypot(dx, dy)
+        curlTilt.value = if (len < 1e-3f) 0f else (dy / len).coerceIn(-1f, 1f)
     }
 
     /**
@@ -526,6 +548,7 @@ class FlipController(
         this.targetIsCover.value = false
         this.direction.value = direction
         progress.value = 0f
+        curlTilt.value = 0f
         prefetchJob?.cancel()
         prefetchJob = scope.launch {
             val landed = flipAwait(direction)

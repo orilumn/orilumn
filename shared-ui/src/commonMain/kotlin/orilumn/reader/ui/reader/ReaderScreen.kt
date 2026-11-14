@@ -75,6 +75,7 @@ import orilumn.reader.engine.revision.tableRowsOfRevision
 import orilumn.reader.engine.skia.LineWindowDrawer
 import orilumn.reader.engine.text.TypographicProfile
 import orilumn.reader.io.Logger
+import orilumn.reader.ui.reader.curl.FlipCurlLayer
 import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.hypot
@@ -265,12 +266,11 @@ fun ReaderScreen(
     // controller 需要 flipAwait / markPositionChanged（声明在下方），Kotlin 局部函数
     // 不可前向引用，故用可空占位 + 下方回填；回填发生在首次组合内、任何手势之前。
     var flipCtl by remember { mutableStateOf<FlipController?>(null) }
-    // L1 只在「动画总闸开 + 没有可用的卷曲后端」时生效。
-    //  - 模式 = slide：走 L1；
-    //  - 模式 = curl 且平台支持：等 P3 的 L3 接线（今天仍落 L0）；
-    //  - 模式 = curl 但平台不支持（Android < 13）：按滑动处理，不能「选了动画却没动画」。
-    val slideEnabled = light.pageAnim &&
-        (light.pageAnimationMode == "slide" || !curlFlipSupported)
+    // 动画总闸：任何模式都走同一套翻页状态机（手势 / 结算 / 落位）。
+    // 具体画哪一档（滑动 / 3D 卷曲）由渲染层二选一，状态机不区分。
+    val slideEnabled = light.pageAnim
+    // 3D 卷曲档：模式 = curl 且平台支持（Android 13+）。不支持的平台面板里也没有这个档（见 curlFlipSupported）。
+    val curlEnabled = light.pageAnim && light.pageAnimationMode == "curl" && curlFlipSupported
 
     val scope = rememberCoroutineScope()
     // 锚页事件串行漏斗：显示状态的唯一写入通道（见 AnchorFunnel）。所有改锚页位置的动作
@@ -898,6 +898,11 @@ fun ReaderScreen(
 
     /** 拖动中：喂位移。目标页未就绪时只喂状态机、不写回渲染（避免拉出空白页）。 */
     fun updateSlide(dx: Float, pageW: Float) = ctl.updateDrag(dx, pageW, slideEnabled)
+
+    /** 拖动中：喂卷曲手感（折痕倾斜）。滑动层不看它，所以与 [updateSlide] 分开一条入口。 */
+    fun updateCurlTilt(dx: Float, dy: Float) {
+        if (slideEnabled) ctl.updateCurlTilt(dx, dy)
+    }
 
     /** 松手：裁决 → 结算。 */
     fun endSlide(velocityX: Float = 0f, pageW: Float = 0f) =
@@ -1758,6 +1763,7 @@ fun ReaderScreen(
     val currentSlideEnabled by rememberUpdatedState(slideEnabled)
     val currentBeginSlide by rememberUpdatedState<(Int) -> Unit> { beginSlide(it) }
     val currentUpdateSlide by rememberUpdatedState<(Float, Float) -> Unit> { dx, w -> updateSlide(dx, w) }
+    val currentUpdateCurlTilt by rememberUpdatedState<(Float, Float) -> Unit> { dx, dy -> updateCurlTilt(dx, dy) }
     val currentEndSlide by rememberUpdatedState<(Float, Float) -> Unit> { vx, w -> endSlide(vx, w) }
     // 点按/方向键翻页同样走动画，必须经引用读：否则设置里刚打开「翻页动画」，
     // 键盘那侧还按旧的瞬切走（与 pointerInput 的坑同源，见上方注释）。
@@ -3258,6 +3264,8 @@ fun ReaderScreen(
                                         currentBeginSlide(dragDir)
                                     }
                                     currentUpdateSlide(dx, size.width.toFloat())
+                                    // 卷曲手感：折痕的倾斜只认「位移方向的角度」，与滑动进度无关。
+                                    currentUpdateCurlTilt(dx, dy)
                                     if (tMove == 0L) tMove = System.nanoTime()
                                 }
                             }
@@ -3852,38 +3860,63 @@ fun ReaderScreen(
                     }
                     .background(Color(profile.bgColor)),
             ) {
-            FlipSlideLayer(
-                direction = ctl.direction.value,
-                // **不要在这里读 ctl.progress.value**：一旦在组合里读，动画每帧都会让整个
-                // 阅读面重组、两个画布每帧重走 drawLines（见 FlipSlideLayer KDoc）。
-                // 传闭包，让 progress 只在 graphicsLayer 的 draw 相位被读。
-                progress = { if (ctl.slideActive(slideEnabled)) ctl.progress.value else 0f },
-                pageWidthPx = pxWidth,
-                modifier = Modifier.fillMaxSize(),
-                target = when {
-                    slideToCover && coverComposable != null -> coverComposable
-                    targetContent != null -> {
-                        {
-                            PageCanvasFun(targetContent)
-                            // 旁注和目标页同一个槽 ⇒ 同一个平移量，跟着一起滑进来。
-                            NoteBubblesFun(targetNoteBubbles)
-                            // 页码也跟页走：目标页的号随页滑进来，落地即接上。
-                            PageNumberFun(targetPageNumber)
-                        }
-                    }
-                    else -> null
-                },
-                current = if (slideFromCover && coverComposable != null) {
-                    coverComposable
-                } else {
+            // 两页槽（页画布 + 旁注 + 页码）：滑动与卷曲共用同一批内容，只是搬运方式不同——
+            // 滑动整槽平移（槽里的东西天然一起动）；卷曲把槽整页截成纹理再按曲面弯（见 FlipCurlLayer）。
+            val currentSlot: @Composable () -> Unit = if (slideFromCover && coverComposable != null) {
+                coverComposable
+            } else {
+                {
+                    PageCanvasFun(pageContent)
+                    // 旁注和当前页同一个槽 ⇒ 一起滑出去，不会先「原地消失」再动画。
+                    NoteBubblesFun(noteBubbles)
+                    PageNumberFun(fromPageNumber)
+                }
+            }
+            val targetSlot: (@Composable () -> Unit)? = when {
+                slideToCover && coverComposable != null -> coverComposable
+                targetContent != null -> {
                     {
-                        PageCanvasFun(pageContent)
-                        // 旁注和当前页同一个槽 ⇒ 一起滑出去，不会先「原地消失」再动画。
-                        NoteBubblesFun(noteBubbles)
-                        PageNumberFun(fromPageNumber)
+                        PageCanvasFun(targetContent)
+                        // 旁注和目标页同一个槽 ⇒ 同一个平移量，跟着一起滑进来。
+                        NoteBubblesFun(targetNoteBubbles)
+                        // 页码也跟页走：目标页的号随页滑进来，落地即接上。
+                        PageNumberFun(targetPageNumber)
                     }
-                },
-            )
+                }
+                else -> null
+            }
+            // 封面往返不走卷曲（封面是整页图 + 淡入淡出），只在正文页之间生效。
+            val curlNow = curlEnabled && !coverVisible && !slideFromCover && !slideToCover
+            if (curlNow) {
+                FlipCurlLayer(
+                    // 方向/进度/倾斜/是否在翻，全部传闭包：只在 draw 相位读 ⇒ 动画期间不重组阅读面。
+                    direction = { ctl.direction.value },
+                    progress = { if (ctl.slideActive(slideEnabled)) ctl.progress.value else 0f },
+                    tilt = { ctl.curlTilt.value },
+                    pageWidthPx = pxWidth,
+                    pageHeightPx = pxHeight,
+                    active = { ctl.slideActive(slideEnabled) },
+                    paperArgb = profile.bgColor,
+                    // 快照失效键：页内容 / 旁注 / 页码任一变化都要重截。
+                    currentKey = listOf(pageContent, noteBubbles, fromPageNumber),
+                    targetKey = if (targetContent == null) null else listOf(targetContent, targetNoteBubbles, targetPageNumber),
+                    current = currentSlot,
+                    target = targetSlot,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else {
+                FlipSlideLayer(
+                    direction = ctl.direction.value,
+                    // **不要在这里读 ctl.progress.value**：一旦在组合里读，动画每帧都会让整个
+                    // 阅读面重组、两个画布每帧重走 drawLines（见 FlipSlideLayer KDoc）。
+                    // 传闭包，让 progress 只在 graphicsLayer 的 draw 相位被读。
+                    progress = { if (ctl.slideActive(slideEnabled)) ctl.progress.value else 0f },
+                    pageWidthPx = pxWidth,
+                    modifier = Modifier.fillMaxSize(),
+                    target = targetSlot,
+                    current = currentSlot,
+                )
+            }
             // 选区覆盖层：轻量即时画，不参与页栅格；翻页动画期间隐藏，避免盖在滑动中的两页上。
             if (selection.hasSelection && pageContent != null && !coverVisible &&
                 !ctl.isBusy() && selection.chapter == fromPos.chapter

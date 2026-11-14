@@ -484,6 +484,7 @@ class LibraryDbTest {
                     charEnd = 5,
                     text = "val",
                     editedText = "用 val 声明",
+                    editRange = 0 until 9,
                     styles = listOf(orilumn.reader.data.revision.RevisionStyleSpan(2, 5, code)),
                     editedStyles = listOf(orilumn.reader.data.revision.RevisionStyleSpan(2, 5, code)),
                     delta = 1,
@@ -506,10 +507,13 @@ class LibraryDbTest {
         val withStructure = rows.first { it.charStart == 2 }
         assertEquals(listOf(orilumn.reader.data.revision.RevisionStyleSpan(2, 5, code)), withStructure.styles)
         assertEquals(listOf(orilumn.reader.data.revision.RevisionStyleSpan(2, 5, code)), withStructure.editedStyles)
+        // 读者拖出的整段区间照原样回来（半开区间 [0,9) → IntRange 0..8）。
+        assertEquals(0 until 9, withStructure.editRange)
         // 没有样式信息的老路径：两份都是 null。
         val plain = rows.first { it.charStart == 20 }
         assertNull(plain.styles)
         assertNull(plain.editedStyles)
+        assertNull(plain.editRange)
     }
 
     @Test

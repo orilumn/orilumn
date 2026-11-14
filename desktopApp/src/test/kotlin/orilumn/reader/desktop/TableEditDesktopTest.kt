@@ -327,15 +327,14 @@ class TableEditDesktopTest {
                     assertEquals("第1章风起云\n涌正文。", after)
                 }
                 val revision = runBlocking { host.textRevisionsForChapter(chapter) }.single()
-                // 正常视图里最小修订就是那个换行；审阅视图里区间被撑到整段（这里反推到「云｜涌」
-                // 两侧没改的公共字），文字随之换成整段的当前结果——区间与文字必须同尺，否则
-                // 卡片少字、提交还会把这一段删掉（见 reviewRevisionCarriesWholeSegmentText）。
-                // 两种口径下都没删掉任何字，扩块开卡不会把旧文字带回来。
-                if (review) {
-                    assertEquals("云\n涌", revision.text)
-                } else {
-                    assertEquals("\n", revision.text)
-                }
+                // 阅读面拿到的这条修订是**提交时拖出的整段**（两种视图同尺）：只加一个换行时
+                // 最小修订只剩那个换行，按它开卡输入区里一个能看见的字都没有，所以宿主把区间
+                // 与文字一起撑到整段。落库的仍是最小修订，见 common 的规划层测试。
+                // 审阅空间里新插的那个段界还多排一格绿 ¶（痕迹不进卡片文字，区间仍算它），
+                // 整段因此再长一格。
+                assertEquals("整段文字（区间与文字必须同尺）", "云\n涌", revision.text)
+                assertEquals("整段起点", at, revision.charStart)
+                assertEquals("整段终点（含新敲的那个换行）", at + if (review) 4 else 3, revision.charEnd)
                 val ends = host.textBlockEndsOf(chapter)
                 assertNotNull("应给得出块界", ends)
                 var blockStart = 0
@@ -877,6 +876,54 @@ class TableEditDesktopTest {
             assertFalse(
                 "一行都没改过 ⇒ 不算修改区域：${plainRow.start}-${plainRow.endExclusive} $marks",
                 marks.any { it.start < plainRow.endExclusive && plainRow.start < it.endExclusive },
+            )
+        } finally {
+            host.close()
+        }
+    }
+
+    /**
+     * 审阅视图里点「删掉的那一行」：卡片是空白插入位置，正文必须框住那一排红字。
+     *
+     * 用户定口：卡片空白可以（这一行在上次修改里已经不存在了），但正文不能也跟着空着——
+     * 点按命中的那一行块就是选区（`tryOpenReviewEditAt` 用它 `selectRange`），
+     * 读者一眼看得出自己正在改哪儿。
+     */
+    @Test
+    fun reviewTapOnDeletedTableRowFramesTheRedRow() {
+        val root = Files.createTempDirectory("orilumn-table-review-deleted").toFile()
+        val host = openHost(writeBook(root), root)
+        try {
+            val pos = runBlocking { host.open() }!!
+            val chapter = pos.chapter
+            val before = body(host, chapter)
+            val (range, blocks) = tableBlocks(host, chapter, before)
+            val card = cardText(before, blocks)
+            val deleted = lines(card).filterNot { it.contains("乙二") }.joinToString("\n")
+            assertTrue(commit(host, chapter, range, deleted, pos) is TextEditOutcome.Success)
+
+            assertNotNull(runBlocking { host.switchReviewMode(true, chapter, 0) })
+            val reviewText = body(host, chapter)
+            val revision = runBlocking { host.textRevisionsForChapter(chapter) }
+                .single { it.editedBlocks.firstOrNull()?.startsWith("T") == true }
+            val at = reviewText.indexOf("乙二")
+            assertTrue("审阅空间里删掉的行仍在（红字）：$reviewText", at >= 0)
+            assertTrue("点它应命中修订：$at in [${revision.charStart},${revision.charEnd})", at in revision.charStart until revision.charEnd)
+
+            val row = host.textEditBlocks(chapter, at, at + 1)!!.first()
+            assertTrue("删掉的行应是一块正文（选框框得住）：$row", row.endExclusive > row.start)
+            assertTrue(
+                "选框里的字就是那一排红字：${reviewText.substring(row.start, row.endExclusive)}",
+                reviewText.substring(row.start, row.endExclusive).contains("乙二"),
+            )
+
+            val scope = host.tableRowScope(chapter, revision.id, at, at + 1)
+            assertNotNull("删掉的行应能开行卡片", scope)
+            assertTrue("点的是删掉的行 ⇒ 卡片是插入位置", scope!!.isInsertion)
+            assertEquals(
+                "行卡片空白（这一行在改完的表里已经不存在）",
+                "",
+                tableRowCardOf(revision, scope)!!.text,
             )
         } finally {
             host.close()

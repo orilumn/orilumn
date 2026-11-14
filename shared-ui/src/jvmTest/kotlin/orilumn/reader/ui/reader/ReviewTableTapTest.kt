@@ -11,7 +11,7 @@ import org.junit.Test
  *
  * 真机复报：点表格里改动过的地方没反应。这里把 `tryOpenReviewEditAt` 用的那条判据直接打一遍，
  * 三件事必须成立：
- * 1. 普通阅读视图（没有红绿字可认）——点表上改动过的字 ⇒ 开整表卡；
+ * 1. 普通阅读视图（没有红绿字可认）——点表格 ⇒ 不进修订卡，按普通正文处理（翻页 / 切栏）；
  * 2. 审阅视图——点到改过的那一行（含同一行里没改的格）⇒ 开行卡，卡片只列这一行；
  * 3. 审阅视图——点一行都没改过的表格区域 ⇒ 吞掉点按，不进修订卡。
  */
@@ -38,11 +38,14 @@ class ReviewTableTapTest {
     )
 
     @Test
-    fun `normal view opens the whole table card`() {
-        // 普通视图里正文就是改后的表：点表上任何改动过的字都算「点这处」。
-        assertEquals(ReviewTableTap.WholeTable, tap(offset = 120, reviewSpace = false))
-        // 不因「拿不到行对照」而变成没反应。
-        assertEquals(ReviewTableTap.WholeTable, tap(offset = 120, reviewSpace = false, scope = null))
+    fun `normal view does not enter revision mode on a table`() {
+        // 普通视图里正文就是改后的表：点它不该开卡（卡片带出整张表，正文却框不出选区）。
+        assertEquals(ReviewTableTap.PassThrough, tap(offset = 120, reviewSpace = false))
+        // 拿不到行对照也一样：按普通正文处理。
+        assertEquals(ReviewTableTap.PassThrough, tap(offset = 120, reviewSpace = false, scope = null))
+        // 什么都不吃：翻页 / 切栏照常（两侧翻页，中部上下栏）。
+        assertFalse(reviewTableTapConsumed(ReviewTableTap.PassThrough, middleZone = true))
+        assertFalse(reviewTableTapConsumed(ReviewTableTap.PassThrough, middleZone = false))
     }
 
     @Test
@@ -90,6 +93,6 @@ class ReviewTableTapTest {
     @Test
     fun `changed rows consume the tap in every zone`() {
         assertTrue(reviewTableTapConsumed(tap(offset = 132, reviewSpace = true), middleZone = true))
-        assertTrue(reviewTableTapConsumed(tap(offset = 120, reviewSpace = false), middleZone = true))
+        assertTrue(reviewTableTapConsumed(tap(offset = 132, reviewSpace = true), middleZone = false))
     }
 }

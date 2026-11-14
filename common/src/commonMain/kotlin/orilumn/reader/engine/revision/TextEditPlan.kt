@@ -572,6 +572,7 @@ object TextEditPlanner {
                     // 清单「原文」行按段断行显示（正文投影里段间没有分隔符）。
                     originalText = selectionLines(chapterText, ends, start, endExclusive),
                     editedText = InlineMarkup.joinSegments(pieces),
+                    editRange = uStart until uEnd,
                     editedBlocks = editedBlocksOf(pieces),
                     blockKinds = pieces.map { it.block?.wire ?: "" },
                     styles = mergedStyles?.let(InlineMarkup::toStored),
@@ -816,6 +817,7 @@ object TextEditPlanner {
                     text = newText,
                     originalText = oldText,
                     editedText = InlineMarkup.joinSegments(allSegments),
+                    editRange = uStart until uEnd,
                     editedBlocks = blocks,
                     // 表格结构走自己的通道（`editedBlocks` 的大写 `T`），不混 markdown 块形态。
                     blockKinds = emptyList(),
@@ -1080,6 +1082,16 @@ object TextEditPlanner {
         // 与上面的「最小修订」无关：公共前后缀照裁不误，但清单里仍按整段比对，
         // 读者才看得出「改之前是什么、改之后是什么」（纯插入也显示被选中的那段原文）。
         val selected = chapterText.substring(segStart, segEnd)
+        // 提交时读者拖出的整段（原书空间）。选区两端被旧修订撑开时（拖到一条旧修订的中间），
+        // 卡片里的字只盖得住选区、盖不住撑开那截，整段与文字不同尺——这种情形不记，
+        // 重开时仍退回反推，免得拿半截文字配整段区间。其余情形整段就是读者拖的那一段。
+        val wholeRange = if (
+            uStart == origStart && uEnd == origEnd && (uStart != finalStart || uEnd != finalEnd)
+        ) {
+            uStart until uEnd
+        } else {
+            null
+        }
         return Built(
             absorbedIds = absorbed.map { it.id },
             revision = TextRevision(
@@ -1090,6 +1102,7 @@ object TextEditPlanner {
                 text = finalText,
                 originalText = selected,
                 editedText = seg.text,
+                editRange = wholeRange,
                 // 卡片那一行（含块内换行的续行）的形态：重开卡片时按它把行拼回块。
                 editedBlocks = if (seg.block != null || seg.table != null) {
                     editedBlocksOf(listOf(InlineMarkup.Segment(seg.text, seg.block, seg.table)))

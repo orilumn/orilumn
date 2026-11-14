@@ -245,6 +245,77 @@ class ChapterRevisionMapTest {
     }
 
     @Test
+    fun renderedSegmentIntervalUsesTheRecordedWholeRange() {
+        // 原书「甲乙丙丁戊」：最小修订只换 [1,3)，但读者拖的是整段 [0,5)。
+        val r = TextRevision(
+            id = 1,
+            bookId = 1,
+            chapter = 1,
+            charStart = 1,
+            charEnd = 3,
+            text = "X",
+            originalText = "甲乙丙丁戊",
+            editedText = "甲X丁戊",
+            editRange = 0 until 5,
+            delta = 1 - 2,
+        )
+        val map = ChapterRevisionMap(listOf(r))
+        // 最小修订（旧口径）只有一格；整段是读者拖出来的那五个字的结果（「甲X丁戊」）。
+        assertEquals(1 until 2, map.renderedInterval(r))
+        assertEquals(0 until 4, map.renderedSegmentInterval(r))
+    }
+
+    @Test
+    fun reviewSegmentIntervalUsesTheRecordedWholeRange() {
+        // 同一段放到审阅视图：原文一字不删，新字就地插进去，整段 = 原文 + 新字。
+        val r = TextRevision(
+            id = 1,
+            bookId = 1,
+            chapter = 1,
+            charStart = 1,
+            charEnd = 3,
+            text = "X",
+            originalText = "甲乙丙丁戊",
+            editedText = "甲X丁戊",
+            editRange = 0 until 5,
+            delta = 1 - 2,
+        )
+        val map = ChapterRevisionMap(
+            listOf(r),
+            originalTexts = mapOf(r to "乙丙"),
+        )
+        assertEquals(1 until 4, map.reviewInterval(r))
+        assertEquals(0 until 6, map.reviewSegmentInterval(r))
+    }
+
+    @Test
+    fun recordedWholeRangeFallsBackWhenALaterEditSitsInsideIt() {
+        // 整段 [0,5) 记下之后，读者又在它里面（[3,4)）改了一处：那条改动不在这条的整段结果里，
+        // 按整段重开会把它一起写掉，所以退回最小修订（老口径）。
+        val a = TextRevision(
+            id = 1,
+            bookId = 1,
+            chapter = 1,
+            charStart = 1,
+            charEnd = 3,
+            text = "X",
+            editRange = 0 until 5,
+            delta = -1,
+        )
+        val b = TextRevision(
+            id = 2,
+            bookId = 1,
+            chapter = 1,
+            charStart = 3,
+            charEnd = 4,
+            text = "",
+            delta = -1,
+        )
+        val map = ChapterRevisionMap(listOf(a, b))
+        assertEquals(1 until 2, map.renderedSegmentInterval(a))
+    }
+
+    @Test
     fun formatOnlyRevisionShowsDeletedMarker() {
         // 用户的原例：`## 你好世界` 删掉 `## ` 变回正文——字一个没改，只改了块标记。
         // 审阅空间 = 红 `## ` + 原文照排：读者看得见被删掉的标记，正文一个字都不红。

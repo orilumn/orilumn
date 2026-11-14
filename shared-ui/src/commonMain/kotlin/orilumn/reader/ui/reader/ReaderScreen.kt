@@ -1490,13 +1490,15 @@ fun ReaderScreen(
      * 命中后选区恢复成这条修订的**整段**（当前空间），输入区带出改后的文字——
      * 点红字或点绿字落到的是同一条修订，改的就是它（与 D-36「改过 = 改后的内容」同口径）。
      *
-     * **表格例外**：整表修订（首码大写 `T`）上只认**真正改动过的字**（红字 / 绿字）——点它照常
-     * 进修订状态，审阅视图里按点到的行开行卡片（不框整张表）；点在表格其他区域（没改过的格、
-     * 行间空白）不开修订卡，两侧吞掉这次点按（不翻页 / 切栏），**屏幕中部照旧交给上下栏的显隐**。
-     * 普通阅读视图里正文就是改后的表、没有红绿字可认，点表上改动过的字一律打开整表卡片
-     * （同样不框整张表）。
+     * **表格例外**：整表修订（首码大写 `T`）只在**审阅视图**里点得开——只认**真正改动过的字**
+     * （红字 / 绿字）：按点到的行开行卡片，选区框住点的那一行（点的是删掉的行就框住那排红字）；
+     * 点在表格其他区域（没改过的格、行间空白）不开修订卡，两侧吞掉这次点按（不翻页 / 切栏），
+     * **屏幕中部照旧交给上下栏的显隐**。普通阅读视图里正文就是改后的表、没有红绿字可认，点它
+     * 一律不进修订卡——卡片会带出整张表，正文却框不出任何一段，读者不知道自己改的是哪儿；
+     * 要改这张表就走长按起选再点「修订」，那一路选区与卡片同进同退。
      *
      * @return true = 已经打开修改卡（本次点按不再翻页 / 开链接 / 切栏），或点按落在了改过的表格里
+     *   （普通阅读视图除外：那里不进卡，返回 false，按普通正文处理）
      */
     fun tryOpenReviewEditAt(xPx: Float, yPx: Float, widthPx: Float): Boolean {
         val p = openPos ?: return false
@@ -1530,22 +1532,26 @@ fun ReaderScreen(
             return false
         }
         // 表格上压着整表修订（首码大写 `T`）时走单独一套判据（见 reviewTableTapOf）：
-        // 审阅视图里点改过的那一行 = 开修订卡、开行卡片；点一行都没改过的区域不开修订卡
-        // （两侧吞掉不翻页，中部让给上下栏）；普通视图里点表上改动过的字 = 开整表卡片。
+        // 审阅视图里点改过的那一行 = 开修订卡、开行卡片，选区框住那一行；点一行都没改过的区域
+        // 不开修订卡（两侧吞掉不翻页，中部让给上下栏）；普通视图里点表格不进修订卡（按普通正文）。
         // 见 docs/正文修改-块级标记.md §8 / 验收 30 / 36 / 37。
         if (revision.editedBlocks.firstOrNull()?.startsWith("T") == true) {
+            // 点到的行块（当前显示空间）：行卡片的选框就是它，行间空白 / 表外拿不到。
+            val row = currentHost.textEditBlocks(p.chapter, offset, offset + 1)
+                ?.firstOrNull()
+                ?.let { it.start until it.endExclusive }
             val tap = reviewTableTapOf(
                 reviewSpace = reviewSpace,
-                rowOf = {
-                    currentHost.textEditBlocks(p.chapter, offset, offset + 1)
-                        ?.firstOrNull()
-                        ?.let { it.start until it.endExclusive }
-                },
+                rowOf = { row },
                 marksOf = { reviewMarksFor(p.chapter) },
                 scopeOf = { currentHost.tableRowScope(p.chapter, revision.id, offset, offset + 1) },
             )
             val middle = ReaderMath.tapZone(xPx, widthPx) == 0
             when (tap) {
+                ReviewTableTap.PassThrough -> Logger.d(
+                    "Orilumn.TAP",
+                    "tap offset=$offset in revised table (normal view) → no revision card",
+                )
                 ReviewTableTap.Ignore -> Logger.d(
                     "Orilumn.TAP",
                     "tap offset=$offset in revised table (unchanged row) → " +
@@ -1553,11 +1559,25 @@ fun ReaderScreen(
                 )
                 ReviewTableTap.WholeTable -> {
                     Logger.d("Orilumn.TAP", "tap offset=$offset in revised table → whole-table card")
-                    openRevisionEdit(revision, select = false)
+                    // 整表卡片：选区就是这条修订的整段（卡片带走的就是它），开不出来就别留选区。
+                    if (!openRevisionEdit(revision)) selection.clear()
                 }
                 is ReviewTableTap.Row -> {
                     Logger.d("Orilumn.TAP", "tap offset=$offset in revised table → row ${tap.scope.firstRow} card")
-                    openRevisionEdit(revision, select = false, rows = tap.scope)
+                    // 正文里框住读者点的那一行：卡片可能空白（点的是删掉的行——这一行在改完的表里
+                    // 已经没有了），正文不能也跟着空着，否则读者看不出自己正在改哪儿。
+                    if (row != null) {
+                        val text = currentHost.textOf(p.chapter, 0, Int.MAX_VALUE)
+                        if (text == null ||
+                            !selection.selectRange(p.chapter, text, row.first, row.last + 1)
+                        ) {
+                            selection.clear()
+                        }
+                    } else {
+                        // 拿不到行块（行间空白 / 表外）：没有能框的整行，别留上一段旧选区。
+                        selection.clear()
+                    }
+                    if (!openRevisionEdit(revision, select = false, rows = tap.scope)) selection.clear()
                 }
             }
             return reviewTableTapConsumed(tap, middle)
@@ -2080,7 +2100,10 @@ fun ReaderScreen(
     fun setTextEditTarget(ch: Int, s: Int, e: Int): Boolean {
         // 审阅视图里选中改过的字：卡片带出**改后整段**（与点按红绿字同一口径），
         // 不能把「原文 + 新文字」的对照当输入区——那会把旧文字一起写回去。
-        if (reviewActive) {
+        //
+        // 只在**第一次开卡**时这样扩：卡片已经开着时读者拖手柄，选区必须停在读者拖到的地方，
+        // 不能再被弹回修订整段（用户定口：「用户拖到哪里，下次还是显示哪里」）。
+        if (reviewActive && !textEditOpen) {
             val touched = chapterRevisions.filter { r -> s < r.charEnd && e > r.charStart }
             if (touched.isNotEmpty()) {
                 if (touched.size == 1 && s >= touched[0].charStart && e <= touched[0].charEnd) {

@@ -1274,7 +1274,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
     fun textRevisionEditRange(chapter: Int, revision: orilumn.reader.data.revision.TextRevision): IntRange {
         val map = revisionMaps[chapter] ?: return revision.charStart until revision.charEnd
         if (reviewMode) return map.reviewSegmentInterval(revision)
-        return map.renderedInterval(revision)
+        return map.renderedSegmentInterval(revision)
     }
 
     /**
@@ -1288,8 +1288,13 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
      * 反推成功才撑段），所以只在撑段时取它。
      */
     fun textRevisionReviewText(chapter: Int, revision: orilumn.reader.data.revision.TextRevision): String {
-        if (!reviewMode) return revision.text
         val map = revisionMaps[chapter] ?: return revision.text
+        if (!reviewMode) {
+            // 正常视图：整段比最小修订宽时，卡片要的是整段的当前结果（最小替换文字配整段区间，
+            // 卡里会少掉两端没改的字）。整段就是最小修订时仍是 `text`，与修复前一致。
+            if (map.renderedSegmentInterval(revision) == map.renderedInterval(revision)) return revision.text
+            return revision.editedText.ifEmpty { revision.text }
+        }
         if (map.reviewSegmentInterval(revision) == map.reviewInterval(revision)) return revision.text
         return revision.editedText.ifEmpty { revision.text }
     }
@@ -1312,6 +1317,9 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         val map = revisionMaps[chapter] ?: return null
         val r = map.revisions.firstOrNull { it.id == revisionId } ?: return null
         if (r.originalLength == 0 || r.text.length != r.originalLength) return null
+        // 整段比最小修订宽时，卡片带出的是整段文字，这份结构只按最小修订记的，偏移对不上。
+        val whole = r.editRange
+        if (whole != null && (whole.first != r.charStart || whole.last + 1 != r.charEnd)) return null
         return map.originalSpans[r]
     }
 

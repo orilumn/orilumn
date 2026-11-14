@@ -12,10 +12,13 @@ internal sealed interface ReviewTableTap {
     /** 吃了这次点按但不进修订卡（不翻页 / 不切栏）：点在了一行都没改过的表格区域。 */
     data object Ignore : ReviewTableTap
 
-    /** 打开整表卡：普通阅读视图（没有红绿字可认），或审阅视图里拿不到行对照。 */
+    /** 不进修订卡，也不吃这次点按：普通阅读视图里表格就是普通正文（翻页 / 切栏照常）。 */
+    data object PassThrough : ReviewTableTap
+
+    /** 打开整表卡：审阅视图里拿不到行对照。 */
     data object WholeTable : ReviewTableTap
 
-    /** 打开行卡：审阅视图里点到了改过的那一行（卡片只列这一行，不框整张表）。
+    /** 打开行卡：审阅视图里点到了改过的那一行（卡片只列这一行，选区框住这一行、不框整张表）。
      *
      * 点的是**被删掉的行**（红字）时 [scope] 是插入位置：卡片空白（上次编辑的结果就是
      * 这行不存在），读者想补一行就在这里写。
@@ -26,9 +29,10 @@ internal sealed interface ReviewTableTap {
 /**
  * 整表修订上的点按判定。
  *
- * - **普通阅读视图**（[reviewSpace] = false）：正文就是改后的表，没有红绿字可认 ⇒ 点表上
- *   改动过的字一律打开整表卡片，带出改后的整张表（不框整张表）。没有修订的表压不出整表
- *   修订，调用方根本不会进来，所以这里不会误伤没改过的表格。
+ * - **普通阅读视图**（[reviewSpace] = false）：正文就是改后的表，没有红绿字可认。这时点表格
+ *   不该进修订卡——卡片会带出整张表，正文却框不出任何一段，读者不知道自己改的是哪儿。
+ *   给 [ReviewTableTap.PassThrough]：按普通正文处理（翻页 / 切栏照常）。要改这张表就走
+ *   长按起选再点「修订」，那一路选区与卡片同进同退。
  * - **审阅视图**：只认**改过的那一行**。判据是画出来的红绿痕迹 [marksOf] 与该行是否有交集
  *   —— 改一格常常只改一两个字，读者点这一行里其他字也该开修订卡；整行都没改过才不响应。
  *   点到没改过的行只在**两侧**吃掉点按（不翻页）；屏幕中部让给「呼出 / 收起上下栏」。
@@ -47,7 +51,7 @@ internal fun reviewTableTapOf(
     marksOf: () -> List<ReviewMark>,
     scopeOf: () -> TableRowScope?,
 ): ReviewTableTap {
-    if (!reviewSpace) return ReviewTableTap.WholeTable
+    if (!reviewSpace) return ReviewTableTap.PassThrough
     val row = rowOf()
     val changed = row == null || marksOf().any { m ->
         m.start < row.last + 1 && row.first < m.endExclusive
@@ -62,8 +66,13 @@ internal fun reviewTableTapOf(
  *
  * 点改过的表格区域总是吃掉（开卡就是结果）；点**没改过的那一行**只在两侧吃掉——
  * 屏幕中部本来就是把上下栏叫出来 / 收起来（点按三区的中区），表格不该抢这个手势。
+ * 普通阅读视图（[ReviewTableTap.PassThrough]）什么都不吃：表格就是普通正文。
  *
  * @param middleZone 这次点按落在屏幕中区（`ReaderMath.tapZone` 的 0 区）。
  */
 internal fun reviewTableTapConsumed(tap: ReviewTableTap, middleZone: Boolean): Boolean =
-    tap !is ReviewTableTap.Ignore || !middleZone
+    when (tap) {
+        ReviewTableTap.PassThrough -> false
+        ReviewTableTap.Ignore -> !middleZone
+        else -> true
+    }

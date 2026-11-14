@@ -62,8 +62,14 @@ object RevisionStyles {
         blocks: List<String>? = null,
         editedBlocks: List<String>? = null,
         rowSources: List<Int>? = null,
+        editRange: IntRange? = null,
     ): String {
-        if (spans == null && edited == null && blocks == null && editedBlocks == null && rowSources == null) return ""
+        if (
+            spans == null && edited == null && blocks == null && editedBlocks == null &&
+            rowSources == null && editRange == null
+        ) {
+            return ""
+        }
         return buildJsonObject {
             put("v", JsonPrimitive(VERSION))
             spans?.let { put("s", toArray(it)) }
@@ -73,6 +79,10 @@ object RevisionStyles {
             editedBlocks?.takeIf { it.isNotEmpty() }?.let { put("eb", toStrings(it)) }
             // 整表修订的行来源（与 `eb` 的表格行对齐）：可选键，老数据没有就按内容对齐。
             rowSources?.let { put("rs", JsonArray(it.map { n -> JsonPrimitive(n) })) }
+            // 提交时读者拖出的整段区间（原书空间）：可选键，老数据没有就按快照反推。
+            editRange?.let { r ->
+                put("r", JsonArray(listOf(JsonPrimitive(r.first), JsonPrimitive(r.last + 1))))
+            }
         }.toString()
     }
 
@@ -122,6 +132,26 @@ object RevisionStyles {
             val array = root["rs"]?.jsonArray ?: return null
             val out = array.map { it.jsonPrimitive.intOrNull ?: return null }
             out.takeIf { it.isNotEmpty() && it.all { n -> n >= -1 } }
+        }.getOrNull()
+    }
+
+    /**
+     * 解析提交时读者拖出的**整段区间**（原书空间）；老修订 / 坏数据返回 null。
+     *
+     * null 时调用方退回「按原文 / 新文字两行反推」，行为与引入这个键之前一致。
+     */
+    fun decodeEditRange(raw: String): IntRange? {
+        if (raw.isBlank()) return null
+        return runCatching {
+            val root = json.parseToJsonElement(raw).jsonObject
+            val version = root["v"]?.jsonPrimitive?.intOrNull ?: 0
+            if (version > VERSION) return null
+            val a = root["r"]?.jsonArray ?: return null
+            if (a.size != 2) return null
+            val start = a[0].jsonPrimitive.intOrNull ?: return null
+            val end = a[1].jsonPrimitive.intOrNull ?: return null
+            if (start < 0 || end <= start) return null
+            start until end
         }.getOrNull()
     }
 

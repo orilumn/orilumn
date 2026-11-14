@@ -577,6 +577,10 @@ class TabletReaderHost(
                     charStart = rr.first,
                     charEnd = maxOf(rr.first, rr.last + 1),
                     text = controller.textRevisionReviewText(chapter, r),
+                    // 卡片文字换成整段结果了，结构也得换成**整段**那一份（最小修订那份偏移对不上）。
+                    styles = r.editedStyles,
+                    // 这份是给阅读面的显示坐标，整段（原书空间）已经换算掉了，别再带出去。
+                    editRange = null,
                 )
             }
         }

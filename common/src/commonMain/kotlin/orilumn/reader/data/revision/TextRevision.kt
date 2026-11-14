@@ -35,6 +35,17 @@ data class TextRevision(
     /** 审阅清单「新文字」行：提交时这段输入的文字（渲染空间）。 */
     val editedText: String = "",
     /**
+     * 提交时读者**拖出的整段区间**（原书空间，半开）：两端没改的公共字也算在里面。
+     *
+     * [charStart]/[charEnd] 是最小修订（公共前后缀被裁掉），重开修改卡时却要按**整段**定位：
+     * 只给最小修订，读者看到的就是「拖好的选区下次变小 / 偏了」。整段以前靠
+     * `originalText` / `editedText` 两行反推，跨段（原文按段插 `\n`、修订文字用段界字符）、
+     * 空白归一、吸收过旧修订时都对不上，一退回最小修订就漂——所以提交时直接记下来。
+     *
+     * `null` = 老数据（仍按反推兜底），或整段本来就等于最小修订（没有裁掉公共字）。
+     */
+    val editRange: IntRange? = null,
+    /**
      * 显式行内样式区间（作用于 [text]，含段界字符）：`null` = 老修订 / 没有样式信息，
      * 重放沿用「新字挂左邻」的旧规则；非 null（可以是空表）= 读者明确声明过这段文字的行内结构。
      */
@@ -81,6 +92,12 @@ data class TextRevision(
     init {
         require(charStart >= 0) { "charStart 不能为负：$charStart" }
         require(charEnd >= charStart) { "charEnd 不能小于 charStart：[$charStart, $charEnd)" }
+        editRange?.let { r ->
+            require(r.first >= 0) { "editRange 不能为负：$r" }
+            require(r.first <= charStart && r.last + 1 >= charEnd) {
+                "editRange 必须包含最小修订 [$charStart, $charEnd)：$r"
+            }
+        }
     }
 
     /** 纯插入（区间为空）。 */

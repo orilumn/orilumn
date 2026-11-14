@@ -161,6 +161,34 @@ class ChapterRevisionMap(
         return (r.charStart + shift) until (r.charStart + shift + r.originalLength + r.delta)
     }
 
+    /**
+     * 这条修订在**渲染空间**里**整段**占的区间：提交时读者拖出的那段选区（两端没改的公共字也带上）
+     * 经平移后的结果。
+     *
+     * 与 [renderedInterval] 只差在被裁掉的公共前后缀：落库的是最小修订（改一个字只动一个字），
+     * 但读者要的是「我拖的那一段」。没记整段（老数据 / 整段就是最小修订）时与 [renderedInterval] 相同。
+     */
+    fun renderedSegmentInterval(r: TextRevision): IntRange {
+        val range = recordedWholeRange(r) ?: return renderedInterval(r)
+        val start = toRendered(range.first, crossInsertions = true)
+        val end = toRendered(range.last + 1, crossInsertions = false)
+        return start until maxOf(start, end)
+    }
+
+    /**
+     * 提交时记下的整段能不能直接拿来用。
+     *
+     * 记下之后这里**又在整段内部改过别处**时不能：新那条改动（互不重叠，所以不会被这条吸收）
+     * 不在这一条的「整段结果」里，按整段重开会把它一起写掉。这种情形退回最小修订（与修复前一致）。
+     */
+    private fun recordedWholeRange(r: TextRevision): IntRange? {
+        val range = r.editRange ?: return null
+        val start = range.first
+        val end = range.last + 1
+        val blocked = revisions.any { o -> o != r && o.charStart < end && o.charEnd > start }
+        return if (blocked) null else range
+    }
+
     /** 排在 [r] 前面的所有修订的 delta 之和。 */
     fun shiftBefore(r: TextRevision): Int = shiftBeforeStart(r.charStart, r.id)
 
@@ -504,7 +532,7 @@ class ChapterRevisionMap(
      * `editedText`（整段改后的文字），点按也该认整段——否则「关」→「关系」之后再点「关」
      * 命不中，在卡里删掉「关」时那段字又落在冻结区间之外，提交自然是空操作。
      *
-     * 整段范围由修订自己存的两行快照反推：`originalText` / `editedText` 是整段，
+     * 整段范围优先用提交时记下的那段选区（`editRange`）；老数据没有，才由修订自己存的两行快照反推：
      * [originalTexts] 给的最小原文与 [TextRevision.text] 是最小修订，两侧之差就是被裁掉的
      * 公共前后缀。对不上（老数据没有快照、跨叶不裁剪、空白归一后长度不符）时返回最小修订，
      * 行为与修复前一致；候选整段会碰到别的修订时同样退回最小修订（那条快照的选区里还有
@@ -512,6 +540,19 @@ class ChapterRevisionMap(
      */
     fun reviewSegmentInterval(r: TextRevision): IntRange {
         val minimal = reviewInterval(r)
+        // 提交时记下的整段（原书空间）是准的，直接换算；只有老数据才需要反推。
+        val explicit = recordedWholeRange(r)
+        if (explicit != null) {
+            val origStart = explicit.first
+            val origEnd = explicit.last + 1
+            val start = toReview(origStart, crossInsertions = false)
+            var end = toReview(origEnd, crossInsertions = true)
+            // 整段终点正好贴着下一条修订：越过它起点的插入属于下一条，不能算进这一段
+            // （`toReview(…, true)` 会把那个点的插入算进来）。
+            val next = revisions.firstOrNull { it.charStart == origEnd }
+            if (next != null) end = minOf(end, reviewStart(next))
+            return if (end > start) start until end else minimal
+        }
         val sides = segmentSides(r) ?: return minimal
         val (prefixLen, suffixLen) = sides
         if (prefixLen == 0 && suffixLen == 0) return minimal
@@ -561,7 +602,10 @@ class ChapterRevisionMap(
         val plan = overlay(r) ?: return null
         val minimalOld = originalTexts[r] ?: return null
         val old = r.originalText
+        // 提交时记下的整段：两端有多少公共字是定数，不必再对位反推。
+        val whole = recordedWholeRange(r)
         val sides = when {
+            whole != null -> (r.charStart - whole.first) to (whole.last + 1 - r.charEnd)
             old == minimalOld -> 0 to 0
             else -> segmentSides(r) ?: return null
         }

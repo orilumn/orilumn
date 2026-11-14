@@ -101,6 +101,21 @@ class TextEditPlannerTest {
     }
 
     @Test
+    fun recordsTheWholeSelectionWhenTrimming() {
+        // 整段「bcde」→「bXde」，最小修订只剩「X」；重开卡片的选区要回到读者拖的整段，
+        // 所以提交时把整段（原书空间）一并记下，不能靠两行快照去反推。
+        val p = ready(plan("abcdef", intArrayOf(6), 1, 5, "bXde"))
+        assertEquals(1 until 5, p.inserted.single().editRange)
+    }
+
+    @Test
+    fun noWholeRangeWhenNothingIsTrimmed() {
+        // 两端都被改到，整段就是最小修订：不用重复记。
+        val p = ready(plan("abcdef", intArrayOf(6), 2, 3, "Y"))
+        assertEquals(null, p.inserted.single().editRange)
+    }
+
+    @Test
     fun identicalReplacementIsNoop() {
         val p = ready(plan("abcdef", intArrayOf(6), 1, 5, "bcde"))
         assertTrue(p.noop)

@@ -327,8 +327,15 @@ class TableEditDesktopTest {
                     assertEquals("第1章风起云\n涌正文。", after)
                 }
                 val revision = runBlocking { host.textRevisionsForChapter(chapter) }.single()
-                // 最小修订就是那个换行：没删掉任何字，扩块开卡不会把旧文字带回来。
-                assertEquals("\n", revision.text)
+                // 正常视图里最小修订就是那个换行；审阅视图里区间被撑到整段（这里反推到「云｜涌」
+                // 两侧没改的公共字），文字随之换成整段的当前结果——区间与文字必须同尺，否则
+                // 卡片少字、提交还会把这一段删掉（见 reviewRevisionCarriesWholeSegmentText）。
+                // 两种口径下都没删掉任何字，扩块开卡不会把旧文字带回来。
+                if (review) {
+                    assertEquals("云\n涌", revision.text)
+                } else {
+                    assertEquals("\n", revision.text)
+                }
                 val ends = host.textBlockEndsOf(chapter)
                 assertNotNull("应给得出块界", ends)
                 var blockStart = 0
@@ -420,6 +427,63 @@ class TableEditDesktopTest {
                     assertEquals("普通视图直接并成一行", "第1章风起云涌正文。", body(host, chapter))
                     assertTrue("普通视图不留痕迹", host.reviewBreakOffsets(chapter).isEmpty())
                 }
+            } finally {
+                host.close()
+            }
+        }
+    }
+
+    /**
+     * 审阅视图里改过一段，整段重选时卡片不能少字（真书实测：
+     * `<h2><span class="sec_num">第十五章</span> 一个不愿意透露姓名的靓仔</h2>`）。
+     *
+     * 读者在标题后面那段**匿名块**（`display:block` 的章节号之后）里敲一个 `<br>`，审阅视图里
+     * 这条修订的区间被撑到整段（两端裁掉的公共字也带上，点哪儿都能开卡），替换文字却只有那个
+     * 换行本身。重选整个标题时卡片只剩「第十五章 / `<br>` / …」：匿名块的字一个都不在，读者手里
+     * 的卡片和落笔区间对不上，直接确定还会把那一整段字删掉。现在整段的当前文字随区间一起给。
+     */
+    @Test
+    fun reviewRevisionCarriesWholeSegmentText() {
+        val html = """
+<style>span.sec_num { display: block; font-size: 0.45em; }</style>
+<h2><span class="sec_num">第十五章</span> 一个不愿意透露姓名的靓仔</h2>
+<p class="calibre2">“咳！咳咳！”</p>
+"""
+        val cases = listOf(
+            "一个不愿意<br>透露姓名的靓仔" to "一个不愿意\n透露姓名的靓仔",
+            "一个不愿意透露姓名的帅哥" to "一个不愿意透露姓名的帅哥",
+        )
+        for ((card, expected) in cases) {
+            val root = Files.createTempDirectory("orilumn-segment").toFile()
+            val host = openHost(writeBook(root, html), root, reviewMode = true)
+            try {
+                val pos = runBlocking { host.open() }!!
+                val ch = pos.chapter
+                val before = body(host, ch)
+                val anonAt = before.indexOf("一个不愿意")
+                assertTrue("章节里应有标题后面的匿名块：$before", anonAt > 0)
+                val anonEnd = anonAt + "一个不愿意透露姓名的靓仔".length
+                val out = commit(host, ch, anonAt until anonEnd, card, pos)
+                assertTrue("改标题后的匿名块应落库：$out", out is TextEditOutcome.Success)
+                val text = body(host, ch)
+                val revs = runBlocking { host.textRevisionsForChapter(ch) }
+                assertEquals("应只落一条修订", 1, revs.size)
+                val r = revs.single()
+                // 区间 = 整段（含两端没改的字），文字也必须是这一整段的当前结果。
+                assertEquals("卡片区间应从匿名块开头起", anonAt, r.charStart)
+                // 审阅空间里区间还带着新写的字 / 痕迹，只会比整段长。
+                assertTrue("卡片区间应盖住整个匿名块：${r.charStart}..${r.charEnd}", r.charEnd >= anonEnd)
+                assertEquals("卡片文字 = 这一整段的当前结果", expected, r.text)
+                // 段内换行在卡片里是 `<br>`（**上一行里的一串字**，不是另起一行）。
+                assertEquals(
+                    "段内换行写回卡片是 <br>，块不分家",
+                    expected.replace("\n", "<br>"),
+                    InlineMarkup.show(listOf(InlineMarkup.Segment(r.text)), emptyList()),
+                )
+                // 重开这条修订、一个字不改直接确定：正文必须原样（之前的实现会删掉整段、还漏进一个 ¶）。
+                val again = runBlocking { host.commitTextEdit(ch, r.charStart, r.charEnd, r.text, null, pos, null, null) }
+                assertTrue("重开旧修订直接确定应成功：$again", again is TextEditOutcome.Success)
+                assertEquals("重开旧修订直接确定必须恒等", text, body(host, ch))
             } finally {
                 host.close()
             }

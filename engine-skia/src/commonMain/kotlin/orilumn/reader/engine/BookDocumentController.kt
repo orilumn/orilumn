@@ -1278,6 +1278,23 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
     }
 
     /**
+     * 一条修订在**当前文字空间**里「这一段的当前结果」：与 [textRevisionEditRange] 给的那段区间
+     * 逐字对齐的那串字（修改卡初值、提交回填都用它）。
+     *
+     * 正常视图与「区间就是最小修订」时就是 `text` 本身。审阅视图里区间常被撑到**整段**
+     * （两端被裁掉的公共字也带上，见 [ChapterRevisionMap.reviewSegmentInterval]），那时
+     * `text` 只是最小替换文字——拿它当整段的内容，卡里会凭空少掉这一整段没改的字，提交时
+     * 那几个字就真被删掉了。整段与最小一致时 `editedText` 才与 `text` 等价（`segmentSides`
+     * 反推成功才撑段），所以只在撑段时取它。
+     */
+    fun textRevisionReviewText(chapter: Int, revision: orilumn.reader.data.revision.TextRevision): String {
+        if (!reviewMode) return revision.text
+        val map = revisionMaps[chapter] ?: return revision.text
+        if (map.reviewSegmentInterval(revision) == map.reviewInterval(revision)) return revision.text
+        return revision.editedText.ifEmpty { revision.text }
+    }
+
+    /**
      * 一条修订**原来**盖着的行内结构（坐标相对它的 `charStart`）。
      *
      * 与审阅视图的格式痕迹同一份来源（[ChapterRevisionMap.originalSpans]）：修改卡重开旧修订时

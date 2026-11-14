@@ -562,9 +562,18 @@ class DesktopReaderHost(
     override suspend fun textRevisionsForChapter(chapter: Int): List<TextRevision> = try {
         store.textRevisionsForChapter(bookId, chapter).map { r ->
             // 审阅视图里点按 / 开卡认「整段」（原文 + 新文字），与修改卡带出的改后文字同尺。
+            // 区间撑到整段时，`text` 也得换成整段的当前结果：最小替换文字配整段区间，
+            // 卡里会少掉这一段没改的字（读者看到「输入区不显示那一段」，提交还会把那几个字删掉）。
             val rr = controller.textRevisionEditRange(chapter, r)
-            if (rr.first == r.charStart && rr.last + 1 == r.charEnd) r
-            else r.copy(charStart = rr.first, charEnd = maxOf(rr.first, rr.last + 1))
+            if (rr.first == r.charStart && rr.last + 1 == r.charEnd) {
+                r
+            } else {
+                r.copy(
+                    charStart = rr.first,
+                    charEnd = maxOf(rr.first, rr.last + 1),
+                    text = controller.textRevisionReviewText(chapter, r),
+                )
+            }
         }
     } catch (c: CancellationException) {
         throw c

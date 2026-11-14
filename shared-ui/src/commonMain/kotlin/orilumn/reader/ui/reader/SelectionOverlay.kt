@@ -198,7 +198,7 @@ internal fun pageAnnotationLineRects(
         lines = lines,
         chapter = chapter,
         range = annotation.charStart..(annotation.charEnd - 1),
-        kind = annotationDecorKind(annotation.kind, annotation.lineStyle),
+        kind = annotationDecorKind(annotation.kind),
         stroke = annotationDecorStroke(annotation.lineStyle),
     ).map {
         Rect(

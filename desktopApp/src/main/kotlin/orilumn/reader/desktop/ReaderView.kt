@@ -7,11 +7,13 @@ import orilumn.reader.ui.reader.ReaderAnnotationPanel
 import orilumn.reader.ui.reader.ReaderHost
 import orilumn.reader.ui.reader.ReaderPanelPage
 import orilumn.reader.ui.reader.ReaderPos
+import orilumn.reader.ui.reader.ReaderRevisionPanel
 import orilumn.reader.ui.reader.ReaderScreen
 import orilumn.reader.ui.reader.ReaderSettingsPanel
 import orilumn.reader.ui.reader.ReaderSidePanel
 import orilumn.reader.ui.reader.ReaderTocBody
 import orilumn.reader.ui.reader.SnapshotReaderHost
+import orilumn.reader.ui.reader.TextRevisionDeleteOutcome
 import orilumn.reader.ui.reader.ThemePreset
 import orilumn.reader.ui.reader.chapterTitlesOf
 import orilumn.reader.ui.shelf.ShelfBook
@@ -156,6 +158,14 @@ fun ReaderView(
     var layoutSnapshot by remember(book) { mutableStateOf(settings) }
     var externalPos by remember(book) { mutableStateOf<ReaderPos?>(null) }
     var contentRevision by remember(book) { mutableStateOf(0) }
+    /**
+     * 审阅视图开关（与平板同默认：开书就在审阅视图）。
+     *
+     * 它不是 `ReaderSettings` 字段——和底栏「审阅」、设置里「显示审阅模式」共用这一个壳状态；
+     * 真正的排版空间由宿主（共享控制器）持有，这里只记 UI 侧的期望值，切换后以
+     * `host.isReviewMode()` 回灌为准（重复点按 / 本章没修订可切时不动）。
+     */
+    var reviewActive by remember(book) { mutableStateOf(true) }
 
     BoxWithConstraints(modifier = modifier) {
         val density = LocalDensity.current.density
@@ -197,6 +207,7 @@ fun ReaderView(
                 viewportW = settledViewport.first,
                 viewportH = settledViewport.second,
                 initialAnchor = anchorOverride,
+                initialReviewMode = reviewActive,
                 // C1-3：桌面分页表写穿 `cache/`（与平板同一共享 Store/参数键/失效语义）。
                 cacheRoot = DesktopPaths.cacheDir,
                 fontLibrary = fontLibrary,
@@ -410,9 +421,29 @@ fun ReaderView(
             if (landed2 != null) pushLanding(landed2)
         }
 
+        // 审阅视图切换（与平板 `toggleReviewMode` 同序）：先按旧空间页首换算 → 翻模式 → 落位。
+        // 切不过去（本章无修订 / 重复点按）就不动版面，只让按钮状态回灌。
+        fun toggleReview() {
+            val host = desktopHost ?: return
+            val from = currentPos ?: return
+            val next = !reviewActive
+            scope.launch {
+                val landed = host.switchReviewMode(next, from.chapter, from.slice.charStart)
+                val nowOn = host.isReviewMode()
+                if (nowOn == reviewActive) return@launch
+                reviewActive = nowOn
+                // 标注装饰与行文本的坐标空间都换了（原书/渲染 ↔ 审阅）：重读当前章标注，
+                // 版式号 +1 强制行 / 图 / 背景重取。
+                annotationsEpoch++
+                relayoutAnchor.release()
+                if (landed != null) pushLanding(landed) else contentRevision++
+            }
+        }
+
         ReaderScreen(
             host = snapshot,
             settings = settings,
+            nightActive = settings.scheme == "night",
             onBack = onBack,
             onNight = {
                 commit(settings.copy(scheme = if (settings.scheme == "night") "day" else "night"))
@@ -420,6 +451,11 @@ fun ReaderView(
             onSettings = { settingsOpen = true },
             onToc = { panelPage = ReaderPanelPage.Toc; panelLastPage = ReaderPanelPage.Toc },
             onNote = { panelPage = ReaderPanelPage.Annotations; panelLastPage = ReaderPanelPage.Annotations },
+            // 工具栏「修订」按钮：修订清单与平板同一抽屉页（此前桌面只能从目录/标注抽屉切过去）。
+            onRevision = { panelPage = ReaderPanelPage.Revisions; panelLastPage = ReaderPanelPage.Revisions },
+            // 工具栏「审阅」按钮：与设置页「显示审阅模式」共用同一个壳状态与切换入口。
+            onReview = { toggleReview() },
+            reviewActive = reviewActive,
             onLightChange = { onSettingsChange(it) },
             onLightCommit = { commit(it) },
             // 桌面不提供亮度调节（没有背光控制通路）：手势整组禁用，设置面板也不出现亮度页。
@@ -496,12 +532,16 @@ fun ReaderView(
             onPreview = { panelSettings = it; onSettingsChange(it) },
             onCommitTypography = { panelSettings = it; commit(it) },
             onCommitLight = { panelSettings = it; commit(it) },
+            // 笔记页「显示审阅模式」：与底栏「审阅」同一状态、同一切换入口（平板同调）。
+            reviewActive = reviewActive,
+            onToggleReview = { toggleReview() },
             customThemes = customs,
             onSaveTheme = onSaveTheme,
             onDeleteTheme = onDeleteTheme,
         )
 
         val panelToc = desktopHost?.toc ?: emptyList()
+        val panelChapterTitles = remember(panelToc) { chapterTitlesOf(panelToc) }
         ReaderSidePanel(
             visible = panelPage != null,
             page = panelPage ?: panelLastPage,
@@ -552,8 +592,49 @@ fun ReaderView(
                             pushLanding(target)
                         }
                     },
-                    chapterTitles = remember(panelToc) { chapterTitlesOf(panelToc) },
+                    chapterTitles = panelChapterTitles,
                     currentChapter = currentPos?.chapter ?: 0,
+                    onDismiss = { panelPage = null },
+                )
+            },
+            revisionsContent = {
+                ReaderRevisionPanel(
+                    scheme = settings.scheme,
+                    load = { desktopHost?.textRevisionsForBook() },
+                    onRestoreAll = {
+                        when (val outcome = desktopHost?.restoreAllTextRevisions(currentPos)) {
+                            is TextRevisionDeleteOutcome.Success -> {
+                                outcome.pos?.let { pushLanding(it) } ?: run { contentRevision++ }
+                                true
+                            }
+                            else -> false
+                        }
+                    },
+                    onDelete = { revision ->
+                        when (val outcome = desktopHost?.deleteTextRevision(revision, currentPos)) {
+                            is TextRevisionDeleteOutcome.Success -> {
+                                // 删的是当前章：落到宿主给的新页（pushLanding 已 +1 版式号）；
+                                // 别的章只让当前页重取（页码/目录跟着刷新）。
+                                outcome.pos?.let { pushLanding(it) } ?: run { contentRevision++ }
+                                true
+                            }
+                            else -> false
+                        }
+                    },
+                    currentChapter = currentPos?.chapter ?: 0,
+                    onJump = { revision ->
+                        panelPage = null
+                        relayoutAnchor.release()
+                        scope.launch {
+                            val target = desktopHost?.jumpToChar(revision.chapter, revision.charStart)
+                                ?: return@launch
+                            pushLanding(target)
+                        }
+                    },
+                    // 行摘要与正文审阅视图取同一份审阅空间数据（绿 `**` / 红 `## ` / ¶ 都在）。
+                    excerptOf = { revision ->
+                        desktopHost?.textRevisionReviewExcerpt(revision.chapter, revision.id)
+                    },
                     onDismiss = { panelPage = null },
                 )
             },

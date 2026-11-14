@@ -327,7 +327,9 @@ class AnnotationState(private val host: ReaderHost) {
         val missing = annotations.filter { it.quote.isNullOrBlank() }
         if (missing.isEmpty()) return
         for (old in missing) {
-            val quote = host.textOf(chapter, old.charStart, old.charEnd)?.take(200)
+            // 摘录是给人看的：审阅视图的「段界痕迹」¶ 不能进库（它不在正文里）。
+            val quote = host.textOf(chapter, 0, Int.MAX_VALUE)
+                ?.let { host.plainTextOf(chapter).slice(it, old.charStart, old.charEnd).take(200) }
             if (quote.isNullOrBlank()) continue
             val filled = old.copy(quote = quote)
             val ok = try {

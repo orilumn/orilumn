@@ -9,9 +9,9 @@ import kotlin.math.roundToInt
  *
  * The block-flow layouter ([orilumn.reader.engine.laying.NormalFlowLayout]) only depends on this interface to turn a styled run
  * of text into line break offsets. The production real implementation is engine-skia's
- * [orilumn.reader.engine.skia.SkiaParagraphBreaker] (the app-side `StaticLayoutBreaker` retired in Q1);
+ * [orilumn.reader.engine.skia.InhouseParagraphBreaker];
  * tests may substitute a deterministic fake to exercise flow/box logic on
- * the JVM without a font stack. This is the seam that lets a future in-house breaker replace Skia later
+ * the JVM without a font stack. This seam is what let the in-house breaker replace Skia
  * with zero impact on surrounding code.
  *
  * [alignment] must be applied by the shaper exactly as the drawing layer applies it, so the measured
@@ -25,7 +25,7 @@ interface ParagraphBreaker {
      *
      * The height is the authority the box flow uses to lay lines out, so the drawing shaper and the
      *  geometry must agree on it:
-     *  - the production SkiaParagraphBreaker returns the CSS line box `round(fontSizePx x
+     *  - the production InhouseParagraphBreaker returns the CSS line box `round(fontSizePx x
      *    lineHeightRatio)` for EVERY line (first/interior/last), exactly matching what the
      *    drawing layer paints;
      *  - a deterministic fake (JVM tests) returns `round(fontSizePx x lineHeightRatio)`.
@@ -59,7 +59,7 @@ interface ParagraphBreaker {
      * 按它定首行 `x0`。
      *
      * Default implementation delegates to the indent-agnostic overload (test fakes keep working
-     * untouched); production [orilumn.reader.engine.skia.SkiaParagraphBreaker] overrides with real
+     * untouched); production [orilumn.reader.engine.skia.InhouseParagraphBreaker] overrides with real
      * `TextIndent` shaping. Callers that care about indent MUST call this overload.
      */
     fun breakLines(text: CharSequence, fontSizePx: Float, lineHeightRatio: Float, widthPx: Int, alignment: TextAlign, tag: String?, families: List<String>, weight: Int, italic: Boolean, monospace: Boolean, firstLineIndentPx: Float): List<BrokenLine> =
@@ -140,8 +140,8 @@ interface ParagraphBreaker {
      * `min ≤ max` 恒成立，且重/轻两路恒同（同断行器、同输入即同值）。
      *
      * 默认实现（测试 fake / 无字体栈）每段退化为 `段长 x fontSizePx`，仍确定性；
-     * 生产 [orilumn.reader.engine.skia.SkiaParagraphBreaker] 的 [preferredWidth] 是真字形宽，
-     * 故本方法在 Skia 下即真度量（Chrome 实测对齐，见 [minContentSegments]）。
+     * 生产 [orilumn.reader.engine.skia.InhouseParagraphBreaker] 的 [preferredWidth] 是真字形宽，
+     * 故本方法在生产侧即真度量（Chrome 实测对齐，见 [minContentSegments]）。
      */
     fun minContentWidth(
         text: CharSequence,

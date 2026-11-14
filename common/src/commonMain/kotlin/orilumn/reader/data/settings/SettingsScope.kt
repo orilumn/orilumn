@@ -32,6 +32,9 @@ object SettingsScope {
         "brightnessGestureLeft", "brightnessGestureRight", "brightnessGestureTwo",
         // 开关：启动时继续阅读、显示页码（页码尚无渲染实现，只改归属）。
         "autoContinue", "pageNum",
+        // 底栏按钮显隐（设置 → 工具栏）：读者偏好，与书无关。
+        "showToolbarBookmark", "showToolbarNote", "showToolbarRevision",
+        "showToolbarReview", "showToolbarNight",
         // 字体管理列表的隐藏/显示过滤（与书无关，换书不复位）。
         "showHiddenFonts",
         // 笔记族：色槽、新建默认格、浮动菜单上次类别/线型、批注字体/字重与字号。
@@ -128,6 +131,11 @@ fun ReaderSettings.withGlobalFrom(next: ReaderSettings): ReaderSettings = copy(
     brightnessGestureTwo = next.brightnessGestureTwo,
     autoContinue = next.autoContinue,
     pageNum = next.pageNum,
+    showToolbarBookmark = next.showToolbarBookmark,
+    showToolbarNote = next.showToolbarNote,
+    showToolbarRevision = next.showToolbarRevision,
+    showToolbarReview = next.showToolbarReview,
+    showToolbarNight = next.showToolbarNight,
     showHiddenFonts = next.showHiddenFonts,
     highlightColorSlots = next.highlightColorSlots,
     underlineColorSlots = next.underlineColorSlots,

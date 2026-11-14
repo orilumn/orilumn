@@ -15,7 +15,7 @@ import orilumn.reader.engine.paging.BookLayout
  * exposes — rendering/pagination consume the same interface, so nothing here touches drawing yet.
  *
  * @param rootFontPx the base/UA body font size (root for `rem` and default size).
- * @param breaker the text shaper (production: the engine-skia `SkiaParagraphBreaker`; tests: a deterministic fake).
+ * @param breaker the text shaper (production: the engine-skia `InhouseParagraphBreaker`; tests: a deterministic fake).
  */
 class BoxLayouter(
     private val rootFontPx: Float,

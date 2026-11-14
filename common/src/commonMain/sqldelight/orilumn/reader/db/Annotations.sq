@@ -14,7 +14,7 @@ CREATE TABLE annotations(
   charEnd INTEGER NOT NULL,        -- 不含
   kind TEXT NOT NULL,              -- highlight / underline（AnnotationKind.wire；批注是 note 列）
   color INTEGER,                   -- ARGB（含 alpha）
-  lineStyle TEXT,                  -- 划线线型 straight / wavy / dashed / strike（空 = straight）
+  lineStyle TEXT,                  -- 划线线型 straight / wavy / dashed（空 = straight；旧版 strike 按实线读）
   note TEXT,                       -- 批注文本（v2）
   createdAt INTEGER NOT NULL,
   updatedAt INTEGER NOT NULL,

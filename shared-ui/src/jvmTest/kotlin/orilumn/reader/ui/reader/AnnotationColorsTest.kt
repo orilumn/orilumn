@@ -35,7 +35,6 @@ class AnnotationColorsTest {
         listOf(
             AnnotationLineStyle.Wavy,
             AnnotationLineStyle.Dashed,
-            AnnotationLineStyle.Strike,
         ).forEach { style ->
             assertEquals(
                 style,
@@ -46,6 +45,11 @@ class AnnotationColorsTest {
         assertEquals(
             AnnotationLineStyle.Straight,
             annotationLastLineStyleOf(ReaderSettings.DEFAULT.copy(annotationLastLineStyle = "dotted")),
+        )
+        // 已移除的删除线（老存档里可能还留着 "strike"）同样落回实线。
+        assertEquals(
+            AnnotationLineStyle.Straight,
+            annotationLastLineStyleOf(ReaderSettings.DEFAULT.copy(annotationLastLineStyle = "strike")),
         )
     }
 
@@ -69,6 +73,40 @@ class AnnotationColorsTest {
         val next = withAnnotationLastKind(s, AnnotationKind.Highlight)
         assertEquals(AnnotationKind.Highlight, annotationLastKindOf(next))
         // 只记类别：两套色槽与默认格、线型偏好一概不动。
+        assertEquals(s.highlightColorSlots, next.highlightColorSlots)
+        assertEquals(s.underlineColorSlots, next.underlineColorSlots)
+        assertEquals(s.highlightDefaultSlot, next.highlightDefaultSlot)
+        assertEquals(s.underlineDefaultSlot, next.underlineDefaultSlot)
+        assertEquals(s.annotationLastLineStyle, next.annotationLastLineStyle)
+    }
+
+    @Test
+    fun `selection action remembers edit as a third choice`() {
+        // 默认高亮；划线 / 修订各自解析回来；未知值按高亮。
+        assertEquals(SelectionAction.Highlight, selectionActionOf(ReaderSettings.DEFAULT))
+        assertEquals(
+            SelectionAction.Underline,
+            selectionActionOf(ReaderSettings.DEFAULT.copy(annotationLastKind = "underline")),
+        )
+        assertEquals(
+            SelectionAction.Edit,
+            selectionActionOf(ReaderSettings.DEFAULT.copy(annotationLastKind = "edit")),
+        )
+        assertEquals(
+            SelectionAction.Highlight,
+            selectionActionOf(ReaderSettings.DEFAULT.copy(annotationLastKind = "note")),
+        )
+    }
+
+    @Test
+    fun `remembering edit writes the third action and nothing else`() {
+        val s = ReaderSettings.DEFAULT.copy(annotationLastKind = "underline", underlineDefaultSlot = 3)
+        val next = withSelectionAction(s, SelectionAction.Edit)
+        assertEquals("edit", next.annotationLastKind)
+        assertEquals(SelectionAction.Edit, selectionActionOf(next))
+        // 修订不是标注类别：批注卡仍按高亮兜底，不会停在没有色槽的类别上。
+        assertEquals(AnnotationKind.Highlight, annotationLastKindOf(next))
+        // 只记操作：色槽 / 线型一概不动。
         assertEquals(s.highlightColorSlots, next.highlightColorSlots)
         assertEquals(s.underlineColorSlots, next.underlineColorSlots)
         assertEquals(s.highlightDefaultSlot, next.highlightDefaultSlot)

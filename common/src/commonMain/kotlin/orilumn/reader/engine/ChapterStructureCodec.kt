@@ -44,8 +44,9 @@ object ChapterStructureCodec {
      * sheet rule touching a structure-consumed property (display/white-space/background/
      * break-inside/visibility/float). Same manual discipline as `PaginationCacheCodec.LAYOUT_VERSION`.
      * 3: `ChapterPreprocessor`（`orilumn-fullwidth-image` 打类）退役，持久化的树少一个 class attr。
+     * 4: 匿名 run 的 `<br>` 与源码换行分开，字符数随之为准（`<br>` 不再被折成空格）。
      */
-    const val STRUCTURE_VERSION = 3
+    const val STRUCTURE_VERSION = 4
 
     /** Filename convention: `<chapterIndex>.bin` (keys live inside the content, not the name). */
     fun filename(chapterIndex: Int): String = "$chapterIndex.bin"
@@ -58,8 +59,9 @@ object ChapterStructureCodec {
      * (node shape/attrs/text) or the
      * post-process contract the relink paths assume. Same manual discipline as [STRUCTURE_VERSION].
      * 2: `ChapterPreprocessor` 退役 —— 持久化的树不再带 `orilumn-fullwidth-image` 类。
+     * 3: `body` 直接子级的文字也进树（不再只取元素子节点）。
      */
-    const val TREE_VERSION = 2
+    const val TREE_VERSION = 3
 
     /** Stable hash over a chapter's flattened CSS texts (`CssBundle.cssTexts`, post-`@import`
      *  resolution — the exact list sheets are parsed from and structures are keyed on). */

@@ -34,18 +34,10 @@ import org.junit.runners.Parameterized
  * 3. **真栅格化**：隐藏字符零墨而**右缘不动**（占位保留）；隐藏字符的装饰线同隐；
  *    `visibility: hidden` 的行内盒底色不落墨而推进照旧。还原被修代码（不填表 / 不跳过 / 不减装饰）任一处即变红。
  */
-@RunWith(Parameterized::class)
-class VisibilityHiddenTest(private val variant: String) {
+class VisibilityHiddenTest {
 
-    companion object {
-        @JvmStatic
-        @Parameterized.Parameters(name = "breaker={0}")
-        fun variants() = breakerVariantParams()
-    }
 
-    @Before fun applyVariant() = applyBreakerVariant(variant)
 
-    @After fun resetVariant() = resetBreakerVariant()
 
     private val contentLeft = 20f
     private val contentWidth = 320
@@ -59,7 +51,7 @@ class VisibilityHiddenTest(private val variant: String) {
         val engine = StyleComputer(16f, LightCssParser().parse(ua), emptyList())
         val styleMap = engine.compute(root)
         val classify = NormalFlowLayout.heavyClassify(styleMap, engine.hasDisplayDeclaration())
-        val result = BoxLayouter(16f, variantBreaker()).layoutBoxes(root, 600, styleMap, classify)
+        val result = BoxLayouter(16f, bodyParagraphBreaker()).layoutBoxes(root, 600, styleMap, classify)
         return DrawLineBuilder.build(result, styleMap, classify, HIDDEN_NONE, 0f)
     }
 
@@ -103,7 +95,7 @@ class VisibilityHiddenTest(private val variant: String) {
         val engine = StyleComputer(16f, LightCssParser().parse(""), emptyList())
         val styleMap = engine.compute(root)
         val classify = NormalFlowLayout.heavyClassify(styleMap, engine.hasDisplayDeclaration())
-        val result = BoxLayouter(16f, variantBreaker()).layoutBoxes(root, 600, styleMap, classify)
+        val result = BoxLayouter(16f, bodyParagraphBreaker()).layoutBoxes(root, 600, styleMap, classify)
         assertTrue(
             "隐藏容器的底色盒必须整块不落墨",
             DrawLineBuilder.pageBackgrounds(result, 0, result.lines.size).none { it.argb == markerArgb },
@@ -114,7 +106,7 @@ class VisibilityHiddenTest(private val variant: String) {
         )!!
         val shownMap = engine.compute(shownRoot)
         val shownClassify = NormalFlowLayout.heavyClassify(shownMap, engine.hasDisplayDeclaration())
-        val shown = BoxLayouter(16f, variantBreaker()).layoutBoxes(shownRoot, 600, shownMap, shownClassify)
+        val shown = BoxLayouter(16f, bodyParagraphBreaker()).layoutBoxes(shownRoot, 600, shownMap, shownClassify)
         assertTrue(
             "对照（未隐藏）必须画出该底色盒",
             DrawLineBuilder.pageBackgrounds(shown, 0, shown.lines.size).any { it.argb == markerArgb },

@@ -1,0 +1,78 @@
+package orilumn.reader.ui.reader
+
+import orilumn.reader.engine.revision.TableRowScope
+
+/**
+ * 点按落在「压着整表修订的表格」上时的去处（用户层点按判定，见 `ReaderScreen.tryOpenReviewEditAt`）。
+ *
+ * 抽出来是为了能脱离 Compose 直接验：真机复报「点表格里的修改区域没反应」，这条判定正是
+ * 决定「有没有反应 / 反应成哪张卡」的那一步。
+ */
+internal sealed interface ReviewTableTap {
+    /** 吃了这次点按但不进修订卡（不翻页 / 不切栏）：点在了一行都没改过的表格区域。 */
+    data object Ignore : ReviewTableTap
+
+    /** 不进修订卡，也不吃这次点按：普通阅读视图里表格就是普通正文（翻页 / 切栏照常）。 */
+    data object PassThrough : ReviewTableTap
+
+    /** 打开整表卡：审阅视图里拿不到行对照。 */
+    data object WholeTable : ReviewTableTap
+
+    /** 打开行卡：审阅视图里点到了改过的那一行（卡片只列这一行，选区框住这一行、不框整张表）。
+     *
+     * 点的是**被删掉的行**（红字）时 [scope] 是插入位置：卡片空白（上次编辑的结果就是
+     * 这行不存在），读者想补一行就在这里写。
+     */
+    data class Row(val scope: TableRowScope) : ReviewTableTap
+}
+
+/**
+ * 整表修订上的点按判定。
+ *
+ * - **普通阅读视图**（[reviewSpace] = false）：正文就是改后的表，没有红绿字可认。这时点表格
+ *   不该进修订卡——卡片会带出整张表，正文却框不出任何一段，读者不知道自己改的是哪儿。
+ *   给 [ReviewTableTap.PassThrough]：按普通正文处理（翻页 / 切栏照常）。要改这张表就走
+ *   长按起选再点「修订」，那一路选区与卡片同进同退。
+ * - **审阅视图**：只认**改过的那一行**。判据是画出来的红绿痕迹 [marksOf] 与该行是否有交集
+ *   —— 改一格常常只改一两个字，读者点这一行里其他字也该开修订卡；整行都没改过才不响应。
+ *   点到没改过的行只在**两侧**吃掉点按（不翻页）；屏幕中部让给「呼出 / 收起上下栏」。
+ *   点到删掉的行时打开**空白**行卡（上次编辑的结果就是这行不存在），位置留在原处；
+ *   拿不到行对照（[scopeOf] 返回 null）时才退回整表卡片。
+ *
+ * 三个入参都是「按需取」：普通视图里一次都不必去排版层要行块 / 痕迹，点按路径上不白算。
+ *
+ * @param rowOf 点按偏移所在的行块区间（章内偏移，与 [reviewSpace] 同一把尺）；null = 拿不到。
+ * @param marksOf 本章的审阅痕迹（同一把尺）。
+ * @param scopeOf 这条修订在点按处对应的行范围；null = 拿不到（老记录 / 对不上行）。
+ */
+internal fun reviewTableTapOf(
+    reviewSpace: Boolean,
+    rowOf: () -> IntRange?,
+    marksOf: () -> List<ReviewMark>,
+    scopeOf: () -> TableRowScope?,
+): ReviewTableTap {
+    if (!reviewSpace) return ReviewTableTap.PassThrough
+    val row = rowOf()
+    val changed = row == null || marksOf().any { m ->
+        m.start < row.last + 1 && row.first < m.endExclusive
+    }
+    if (!changed) return ReviewTableTap.Ignore
+    val scope = scopeOf()
+    return if (scope != null) ReviewTableTap.Row(scope) else ReviewTableTap.WholeTable
+}
+
+/**
+ * 这次点按**要不要就地吃掉**（true = 到此为止，不再翻页 / 不切栏）。
+ *
+ * 点改过的表格区域总是吃掉（开卡就是结果）；点**没改过的那一行**只在两侧吃掉——
+ * 屏幕中部本来就是把上下栏叫出来 / 收起来（点按三区的中区），表格不该抢这个手势。
+ * 普通阅读视图（[ReviewTableTap.PassThrough]）什么都不吃：表格就是普通正文。
+ *
+ * @param middleZone 这次点按落在屏幕中区（`ReaderMath.tapZone` 的 0 区）。
+ */
+internal fun reviewTableTapConsumed(tap: ReviewTableTap, middleZone: Boolean): Boolean =
+    when (tap) {
+        ReviewTableTap.PassThrough -> false
+        ReviewTableTap.Ignore -> !middleZone
+        else -> true
+    }

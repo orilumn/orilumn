@@ -6,7 +6,7 @@ import org.jetbrains.skia.paragraph.FontCollection
 /**
  * 用户字库的进程共用 Skia 字体集合（G 阶段铁律的落实点）。
  *
- * 断行（[SkiaParagraphBreaker]）与绘制（[LineWindowDrawer]）的默认集合都取自这里，
+ * 断行（[InhouseParagraphBreaker]）与绘制（[LineWindowDrawer]）的默认集合都取自这里，
  * 保证量与画永远是**同一实例**：用户导入字体只改变字形度量（换行位置会动），两边用不同
  * 集合即错位。空字库时退化为 [SkParagraphFactory.defaultCollection]，行为与此前一致。
  *

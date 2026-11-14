@@ -45,8 +45,6 @@ androidx-compose-ui-graphics = { group = "androidx.compose.ui", name = "ui-graph
 androidx-compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
 androidx-compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
 androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
-# Material 矢量图标核心集（书架底部工具栏用，替代依赖设备字体的 Unicode 字符）
-androidx-compose-material-icons-core = { group = "androidx.compose.material", name = "material-icons-core" }
 
 # WebView（本地资源经 https 虚拟域服务 ES Module）
 androidx-webkit = { group = "androidx.webkit", name = "webkit", version.ref = "webkit" }
@@ -78,7 +76,6 @@ skiko-android-runtime-x64 = { group = "org.jetbrains.skiko", name = "skiko-andro
 compose-runtime = { group = "org.jetbrains.compose.runtime", name = "runtime", version.ref = "composeMultiplatform" }
 compose-foundation = { group = "org.jetbrains.compose.foundation", name = "foundation", version.ref = "composeMultiplatform" }
 compose-material3 = { group = "org.jetbrains.compose.material3", name = "material3", version.ref = "composeMultiplatform" }
-compose-material = { group = "org.jetbrains.compose.material", name = "material", version.ref = "composeMultiplatform" }
 compose-ui = { group = "org.jetbrains.compose.ui", name = "ui", version.ref = "composeMultiplatform" }
 # 返回键（CMP 跨平台 BackHandler）：批注输入框打开时用返回键关闭，Android / 桌面同一份代码
 compose-backhandler = { group = "org.jetbrains.compose.ui", name = "ui-backhandler", version.ref = "composeMultiplatform" }
@@ -87,7 +84,6 @@ compose-components-resources = { group = "org.jetbrains.compose.components", nam
 compose-ui-tooling-preview = { group = "org.jetbrains.compose.ui", name = "ui-tooling-preview", version.ref = "composeMultiplatform" }
 # Material 矢量图标核心集（CMP 版本）：JetBrains 自 1.7.3 后不再单独发 icons-core，
 # 故 pin 在最后可用版（纯矢量资源，与 CMP 1.12 运行时兼容）；书架底部工具栏图标用
-compose-material-icons-core = { group = "org.jetbrains.compose.material", name = "material-icons-core", version = "1.7.3" }
 # kotlinx.coroutines：shared-ui 书架数据流（Flow/StateFlow）与导入编排（S27）
 kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "coroutines" }
 # kotlinx-coroutines-test：P6 JumpGate 探针的虚拟时钟调度（test-only，不随 app 打包）

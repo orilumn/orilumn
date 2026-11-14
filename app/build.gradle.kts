@@ -167,7 +167,6 @@ dependencies {
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
-    implementation(libs.androidx.compose.material.icons.core)
     debugImplementation(libs.androidx.compose.ui.tooling)
 
     // SQLDelight Android 驱动（阶段 J 数据层；schema/查询在 :common；S34b 起 Room 已整体移除）

@@ -1,7 +1,6 @@
 package orilumn.reader.engine.skia
 
 import orilumn.reader.data.settings.ReaderSettings
-import orilumn.reader.engine.AbSwitch
 import orilumn.reader.engine.css.FontRun
 import orilumn.reader.engine.css.TextAlign
 import orilumn.reader.engine.text.TypographicProfile
@@ -407,8 +406,7 @@ class CjkLatinSpacingWiringTest {
      * [TypographicProfile] 交给排版层的那个 em 必须严格是 0，且默认档 25 必须映射成 0.25em。
      *
      * 为什么放在这里而不是 `TypographicProfileTest`：本类验的是「**排版层真正收到的那个数**」，
-     * 也就是滑块 → 版面这条链的源头；`cjkLatinSpacingEmApplied` 的闸门本身
-     * （`AbSwitch.inhouseBreak()` 关着时恒 0）在 [断行器只按 inhouse 开关加间隙] 那条锁里。
+     * 也就是滑块 → 版面这条链的源头。
      */
     @Test
     fun `滑块值到 em 的映射 0 严格为 0 且 25 是 0_25em`() {
@@ -522,35 +520,6 @@ class CjkLatinSpacingWiringTest {
             val sub = text.substring(line.range.first, line.range.last + 1)
             val wLine = naturalWidth(sub, fs, GAP)
             assertTrue("行 ${line.range} 宽 $wLine 越版心 $w", wLine <= w)
-        }
-    }
-
-    /**
-     * 开关关闭时（回退阀）：间隙在**量宽**侧也必须为 0，否则断行按有间隙算、画却无间隙。
-     *
-     * 方向不能反：「画了但没预留」正是右溢被裁的成因（见上一条的类 KDoc）。
-     * 所以闸门必须落在**键与 profile** 那一侧（[TypographicProfile.cjkLatinSpacingEmApplied]），
-     * 让断行与绘制**一致地**退干净。
-     *
-     * ⚠ 「退干净」现在只意味着**两侧拿到同一个数**（0），不再意味着「什么都不做」：
-     *   0 是零间隙档、仍会吃分隔空格（产品口径 2026-10-03）。两侧同为 0 ⇒ 两侧吃同一批空格、
-     *   都注入 0 宽间隙 ⇒ 仍然「画 == 量」。本锁守的就是这个「同值」，不是「零动作」。
-     */
-    @Test
-    fun `开关关闭时两侧拿到同一个 0`() {
-        try {
-            AbSwitch.resetForTest()
-            AbSwitch.apply("inhouseBreak=1")
-            val on = TypographicProfile.build(ReaderSettings.DEFAULT).cjkLatinSpacingEmApplied
-            assertEquals("开关开时必须真的施加间隙（否则本锁是空断言）", GAP, on, 1e-6f)
-            AbSwitch.apply("inhouseBreak=0")
-            val off = TypographicProfile.build(ReaderSettings.DEFAULT).cjkLatinSpacingEmApplied
-            assertEquals(
-                "开关关时必须整条关掉（0），而不是「画了但没预留」—— 量与画必须一致地退干净",
-                0f, off,
-            )
-        } finally {
-            AbSwitch.resetForTest()
         }
     }
 
@@ -939,6 +908,53 @@ class CjkLatinSpacingWiringTest {
     }
 
     /**
+     * 接缝上的空白槽必须被**画成零宽**，宽度只留给注入的间隙（产品口径 2026-11-10：
+     * 「中间的所有空白字符（不包括换行符）均删除，由混排字距统一来做隔离」）。
+     *
+     * 这条是**画 == 量**那一族的最短证据链：探测器说「吃掉这几个槽」，而真正把槽变零的是
+     * [SkiaRunMeasurer.advances] 出口的唯一施加点。少一处接线（例如 `spaceCount` 没被
+     * 逐槽置零）⇒ 绘制侧比断行侧多出一个**与滑块无关**的空格宽，正是用户报的
+     * 「英文与中文之间距离不受滑块控制」。
+     *
+     * 断行侧与绘制侧走的是同一个 `advances`，故这里一锁两用。
+     */
+    @Test
+    fun `接缝上的空白槽 adv 归零且只留一条间隙`() {
+        // 全角空格 / 细空格 / 窄不断行空格：三种「旧口径下既不吃、也不成边界」的空白，
+        // 现在必须与半角空格**完全同构**（否则同一本书在两种空白写法下版面不同）。
+        for (ws in listOf(" ", "\u3000", "\u2009", "\u202F", "\u00A0")) {
+            val text = "中${ws}A"
+            val code = ws[0].code
+            val gaps = CjkLatinSpacing.gaps(text, GAP)
+            assertEquals(
+                "U+%04X 必须成边界且吃掉自己".format(code),
+                listOf(CjkLatinGap(0, GAP, spaceCount = 1)),
+                gaps,
+            )
+            val withGap = advances(text, fs = 40f, gapEm = GAP)
+            val bare = noGaps(text)
+            assertEquals("U+%04X 的空白槽必须画成零宽".format(code), 0f, withGap[1], 1e-3f)
+            assertTrue(
+                "反证：不带间隙时该槽有实宽（否则上面那条是空断言）".format(code),
+                bare[1] > 0f,
+            )
+            assertEquals(
+                "U+%04X 上空白的宽度必须整份换成间隙".format(code),
+                GAP * 40f,
+                withGap[0] - bare[0],
+                1e-3f,
+            )
+        }
+        // 连续空白（种类混着也照吃）：2 个槽全零，间隙仍只有一条。
+        val mixed = "中 \u3000A"
+        assertEquals(listOf(CjkLatinGap(0, GAP, spaceCount = 2)), CjkLatinSpacing.gaps(mixed, GAP))
+        val adv = advances(mixed, fs = 40f, gapEm = GAP)
+        assertEquals("第一个空白槽零宽", 0f, adv[1], 1e-3f)
+        assertEquals("第二个空白槽零宽", 0f, adv[2], 1e-3f)
+        assertEquals("间隙只有一条", GAP * 40f, adv[0] - noGaps(mixed)[0], 1e-3f)
+    }
+
+    /**
      * 标点与符号两侧**不得**插间隙（端到端一层：探测器、量宽、簇位轨三处都要一致）。
      *
      * 真机报的两例都落在这里：`Kotlin：` 的冒号旁、`Rust±2` 的加号旁。
@@ -956,7 +972,9 @@ class CjkLatinSpacingWiringTest {
             "中文°C",          // 度符号 U+00B0
             "中文©",          // 版权符号 U+00A9
             "A，B",            // 全角逗号夹在两个西文之间
-            "中　A",           // 表意空格 U+3000
+            // ⚠ `中　A`（U+3000 表意空格）2026-11-10 起**移出**本列表：它是**空白**，
+            //   接缝处一律吃掉并发一条 `spaceCount = 1` 的间隙 ⇒ 不再是「不参与」。
+            //   见下面 `接缝上的空白槽 adv 归零且只留一条间隙`。
             "AＢ",             // 全角拉丁 Ｂ U+FF22
         )) {
             assertEquals(

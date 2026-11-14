@@ -95,16 +95,29 @@ fun rememberPageContent(
     // 摆动而变（Compose 允许条件 composable，但两个调用点共用本页时极易记错槽）。
     // 这里让 pos 可空贯穿始终，返回值末尾再判 null。
 
-    val rawLines = remember(pos, contentRevision, hostRevision) {
-        pos?.let { currentHost.pageLines(it) }
+    // 行与审阅痕迹**必须同一次读取、同一组键**：两者分属不同坐标空间，错一拍就会画出
+    // 「有 ¶ 却没上色」的中间帧——进出审阅模式时先看到黑 ¶、下一帧才变红绿或消失，
+    // 就是引擎已换空间、而 UI 的痕迹表还停在旧一拍。快照缓存住这一对，等 pos / 版式号
+    // 一起变时再整体刷新，任何中间重组都只会拿到一套自洽的「文字 + 痕迹」。
+    val pageSnapshot = remember(pos, contentRevision, hostRevision) {
+        pos?.let { p ->
+            // 先取行：痕迹是否可用取决于本章是否真的套上了审阅空间，而那是版式建好后才成立的。
+            currentHost.pageLines(p) to currentHost.reviewMarks(p.chapter)
+        }
     }
+    val rawLines = pageSnapshot?.first
+    val reviewMarks = pageSnapshot?.second.orEmpty()
     // 标注投影（D-19 / §5.1）：先按章过滤，再把章内区间合进每一行；`DrawLine` 值变即
     // 触发栅格指纹失效，不需要额外动 contentRevision。投影在引擎里做（LineAligner 是 internal），
     // 这里只负责取内存态并调用纯函数。
     val activeAnnotations =
         if (pos != null && pos.chapter == annotationChapter) annotations else emptyList()
-    val decorRanges = remember(activeAnnotations, decorRevision) {
-        annotationDecorRanges(activeAnnotations)
+    val decorRanges = remember(activeAnnotations, decorRevision, reviewMarks) {
+        if (reviewMarks.isEmpty()) {
+            annotationDecorRanges(activeAnnotations)
+        } else {
+            annotationDecorRanges(activeAnnotations) + reviewDecorRanges(reviewMarks)
+        }
     }
     val lines = remember(rawLines, decorRanges, pos?.chapter) {
         rawLines?.let { projectDecor(it, pos?.chapter ?: 0, decorRanges) }

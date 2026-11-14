@@ -230,6 +230,32 @@ class JustifySlackPriorityTest {
         assertEquals("级 1 只吃自己的 0.25em", 0.25f * fs, off.per[l1], 1e-3f)
     }
 
+    /**
+     * **被收进固定间隙的分隔空格不是可拉伸槽**（`-1`）。
+     *
+     * 那个字位的宽已被 [SkiaRunMeasurer.applyCjkLatinGaps] 置 0，它代表的距离整份记在
+     * 左邻槽（级 2）上。若这里仍按「左字符是文档空白 ⇒ 级 0」处理，同一个空格就**记了两次**：
+     * 额度翻倍不说，两端对齐还会把这个**零宽字位**重新撑开 —— 读者看到的就是
+     * 「中西之间那道被删掉的空格又回来了」（真机报告：`判断出 <code>customers</code> 的类型`
+     * 两边的空格都在）。
+     *
+     * 账：`"中 a"` 只有槽 0（间隙，级 2）可拉，满额 `0.5em × 40 = 20`，`slack = 100`
+     * 放不下 ⇒ 留缺口。修复前槽 1（空格）也是级 0 ⇒ `placed` 会是 40（额度翻倍）。
+     */
+    @Test
+    fun `被吃掉的分隔空格不是可拉伸槽`() {
+        val text = "中 a"
+        val gaps = listOf(CjkLatinGap(leftIndex = 0, gapEm = 0.25f, spaceCount = 1))
+        val plan = JustifySlack.plan(text, 0, 2, gaps, fs, 100f)
+        assertEquals("间隙槽仍是级 2", l2, plan.levels[0])
+        assertEquals("被吃掉的分隔空格 = −1", -1, plan.levels[1])
+        assertEquals("级 2 封顶 0.5em", 0.5f * fs, plan.per[l2], 1e-3f)
+        assertEquals("额度只记一份", 20f, plan.placed, 1e-3f)
+        // 反向：**没有**间隙列表时它就是普通词间空格（不是「凡是空格都不可拉」）。
+        val plain = JustifySlack.plan(text, 0, 2, emptyList(), fs, 100f)
+        assertEquals("无间隙列表 ⇒ 空格照旧是级 0", l0, plain.levels[1])
+    }
+
     // ================================================================
     // 二、量画同源锁（真字体，从 xs 反解）
     // ================================================================
@@ -375,6 +401,29 @@ class JustifySlackPriorityTest {
         assertEquals("级 3 槽 2（a|b）分余量", 5f, inc[2], 1e-2f)
         assertEquals("级 3 槽 3（b|c）分余量", 5f, inc[3], 1e-2f)
         assertEquals("全额铺满", nat + 60f, p.visibleRight, 0.05f)
+    }
+
+    /**
+     * **两端对齐不得把被吃掉的分隔空格重新撑开**（真字体复核）。
+     *
+     * `"判断出 customers 的类型"`：槽 2 与槽 12 是注入间隙（级 2），槽 3 与槽 13 是
+     * 被吃掉的分隔空格（宽 0）。`slack = 30`、`C_finite = 4×0.25em + 2×0.5em = 80`
+     * （四个 CJK 字间槽 + 两个间隙槽）⇒ `r = 0.375` ⇒ 级 2 各 7.5，正好铺满。
+     *
+     * 修复前槽 3/13 也是级 0（各 7.5）⇒ 中西之间凭空多出 7.5px 的**空格**，
+     * 而间隙槽只拿到自己那一份 —— 行宽照样铺满，所以只有逐槽反解才抓得到。
+     */
+    @Test
+    fun `两端对齐不得把被吃掉的分隔空格重新撑开`() {
+        val text = "判断出 customers 的类型"
+        val nat = natural(text, cjkEm = 0.25f)
+        val p = alignOne(text, nat + 30f, TextAlign.JUSTIFY, cjkEm = 0.25f)
+        val inc = increments(p)
+        assertEquals("被吃掉的分隔空格（出|␣）一分不拿", 0f, inc[3], 1e-3f)
+        assertEquals("被吃掉的分隔空格（s|␣）一分不拿", 0f, inc[13], 1e-3f)
+        assertEquals("间隙槽（出|␣ 的注入点）拿 0.5em×0.375", 7.5f, inc[2], 1e-2f)
+        assertEquals("间隙槽（s|␣ 的注入点）同理", 7.5f, inc[12], 1e-2f)
+        assertEquals("全额铺满", nat + 30f, p.visibleRight, 0.05f)
     }
 
     /**

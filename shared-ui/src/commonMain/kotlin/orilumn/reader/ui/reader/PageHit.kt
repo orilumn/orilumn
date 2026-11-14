@@ -45,6 +45,23 @@ internal fun readerCharOffsetAt(
 ): Int? {
     val (line, xInParagraph, yInLine) =
         ReaderMath.tapLineAt(lines, shift, xPx - contentLeft, yPx) ?: return null
-    val offset = LineHitTest.hit(line, xInParagraph, yInLine) ?: return null
+    val offset = LineHitTest.hit(line, xInParagraph, yInLine)
+        ?: cellEdgeOffset(lines, line, xInParagraph)
+        ?: return null
     return line.charBase + offset
+}
+
+/**
+ * 表格一行的各格并排（同 y、不同 x）：格内落在文字左侧 / 右侧的空白上时贴到行首 / 行末字。
+ *
+ * 普通段落行不参与：右缘以外是页边距，点在那里不该选中行末字（保持 `LineHitTest` 的行尾空区
+ * 不命中口径）。判据是同一 y 带里还有另一条并排的行 —— 只有表格（以及同类并排盒）会这样。
+ */
+internal fun cellEdgeOffset(lines: List<DrawLine>, line: DrawLine, xInParagraph: Float): Int? {
+    if (line.range.isEmpty()) return null
+    val shared = lines.any { other ->
+        other !== line && other.yTop < line.yBottom && line.yTop < other.yBottom
+    }
+    if (!shared) return null
+    return if (xInParagraph < 0f) line.range.first else line.range.last
 }

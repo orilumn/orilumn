@@ -22,7 +22,7 @@ class LineHitTestTest {
         val engine = StyleComputer(16f, LightCssParser().parse(""), emptyList())
         val styleMap = engine.compute(root)
         val classify = NormalFlowLayout.heavyClassify(styleMap, engine.hasDisplayDeclaration())
-        val result = BoxLayouter(16f, SkiaParagraphBreaker(0f)).layoutBoxes(root, 600, styleMap, classify)
+        val result = BoxLayouter(16f, bodyParagraphBreaker(0f)).layoutBoxes(root, 600, styleMap, classify)
         return DrawLineBuilder.build(result, styleMap, classify, HIDDEN_NONE, 0f)
     }
 
@@ -61,6 +61,56 @@ class LineHitTestTest {
         assertTrue("need mid-line hits for monotonicity", hits.size >= 3)
         assertEquals(hits.sorted(), hits)
         assertTrue("all hits stay inside the line range", hits.all { it in line.range })
+    }
+
+    /**
+     * 接缝上被吃成零宽的分隔空白**不可选**（真机 2026-11-10：「拖动选区手柄可以选到单独的空白字符」）。
+     *
+     * 触发形态是真书里最常见的那一个：`判断出 <code>customers</code>`。行内盒的左内边距记在
+     * 「空格 → `c`」之间，于是两者的 x 之间多出一段 6px 没有墨的区间；旧实现在那里二分成空格，
+     * 选区就出现一段纯空白的高亮（手柄也能停在上面）。
+     */
+    @Test
+    fun `eaten seam space is never a hit target`() {
+        val root = HtmlTreeConverter().convert("<html><body><p>判断出 <code>customers</code> 的类型为</p></body></html>")!!
+        val engine = StyleComputer(
+            16f,
+            LightCssParser().parse("code { padding: 0 6px; background: #f5f5f5 }"),
+            emptyList(),
+        )
+        val styleMap = engine.compute(root)
+        val classify = NormalFlowLayout.heavyClassify(styleMap, engine.hasDisplayDeclaration())
+        val result = BoxLayouter(16f, bodyParagraphBreaker(0f, 0.25f))
+            .layoutBoxes(root, 600, styleMap, classify)
+        val line = DrawLineBuilder.build(result, styleMap, classify, HIDDEN_NONE, 0f).values.first()
+        val text = line.text
+        val space = text.indexOf(' ')
+        assertTrue("fixture must have the seam space: <$text>", space > 0)
+        val yMid = (line.yTop + line.yBottom) / 2f - line.yTop
+        // 逐 0.5px 扫过整行，记录每个 x 命中哪个字。
+        val byX = ArrayList<Pair<Float, Int>>()
+        var x = 0f
+        while (x <= 900f) {
+            LineHitTest.hit(line, x, yMid)?.let { byX += x to it }
+            x += 0.5f
+        }
+        assertTrue("need hits around the seam", byX.size > 20)
+        assertTrue(
+            "接缝空白不可选，实际命中：${byX.filter { it.second == space }.take(5)}",
+            byX.none { it.second == space },
+        )
+        // 空白两侧确实隔开了一段没有墨的 x 区间（框内边距）——否则这条用例根本没覆盖到症状：
+        // 内边距记在「空格 → `c`」之间 ⇒ `c` 的命中跨度 = 字宽 + 6px（无框时只有字宽）。
+        val firstAfter = byX.first { it.second == space + 1 }.first
+        val nextAfter = byX.firstOrNull { it.second == space + 2 }?.first
+        assertTrue("fixture must have the box padding", line.inlineBoxRuns.any { it.padding.left > 0f })
+        assertTrue("需要 c 之后的命中点", nextAfter != null)
+        assertTrue(
+            "c 的命中跨度 ${nextAfter!! - firstAfter} 太窄，用例没覆盖到框内边距那一段",
+            nextAfter - firstAfter > 10f,
+        )
+        // 触点落在这一段里 = 指着盒子里的字（旧实现返回那个空白）。
+        assertEquals(space + 1, LineHitTest.hit(line, firstAfter + 2f, yMid))
     }
 
     @Test

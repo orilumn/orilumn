@@ -79,14 +79,55 @@ internal fun annotationFallbackColor(kind: AnnotationKind): Int = when (kind) {
 }
 
 /**
- * 上次新建 / 改色用的类别（`ReaderSettings.annotationLastKind` 的解析）。
+ * 选区操作栏「上次用了谁」：高亮 / 划线 / 修订（正文修改 v3）。
  *
- * 浮动菜单据此**一步到位**停在该类别的色槽行上；未知值（老存档缺键、手改配置）按高亮处理。
+ * 修订不是标注类别（所以不塞进 [AnnotationKind]），但它和高亮、划线共用同一根操作栏：
+ * 读者上次点了哪一项，下次选字就默认停在哪一项。
+ */
+internal enum class SelectionAction {
+    Highlight,
+    Underline,
+    Edit,
+}
+
+/**
+ * 上次选字后用的操作（`ReaderSettings.annotationLastKind` 的解析）。
+ *
+ * 未知值（老存档缺键、手改配置）按高亮处理。
+ */
+internal fun selectionActionOf(settings: ReaderSettings): SelectionAction =
+    when (settings.annotationLastKind.trim().lowercase()) {
+        AnnotationKind.Underline.name.lowercase() -> SelectionAction.Underline
+        "edit" -> SelectionAction.Edit
+        else -> SelectionAction.Highlight
+    }
+
+/**
+ * 记住「上次选字后用的操作」。
+ *
+ * 只影响下次选字打开操作栏时停在哪一项，不参与排版指纹。**只在新用一次时写**：
+ * 打开旧标注 / 旧修改去看一眼或改样式不算，免得把默认项带跑（用户定口）。
+ */
+internal fun withSelectionAction(settings: ReaderSettings, action: SelectionAction): ReaderSettings =
+    settings.copy(
+        annotationLastKind = when (action) {
+            SelectionAction.Highlight -> AnnotationKind.Highlight.name.lowercase()
+            SelectionAction.Underline -> AnnotationKind.Underline.name.lowercase()
+            SelectionAction.Edit -> "edit"
+        },
+    )
+
+/**
+ * 上次新建 / 改色用的标注类别（`ReaderSettings.annotationLastKind` 的解析）。
+ *
+ * 浮动菜单据此**一步到位**停在该类别的色槽行上；上次用的是「修订」或未知值时按高亮处理
+ * （真正按「修订」默认要问 [selectionActionOf]）。
  */
 internal fun annotationLastKindOf(settings: ReaderSettings): AnnotationKind =
-    when (settings.annotationLastKind.trim().lowercase()) {
-        AnnotationKind.Underline.name.lowercase() -> AnnotationKind.Underline
-        else -> AnnotationKind.Highlight
+    if (selectionActionOf(settings) == SelectionAction.Underline) {
+        AnnotationKind.Underline
+    } else {
+        AnnotationKind.Highlight
     }
 
 /**
@@ -203,14 +244,21 @@ internal fun annotationAfterEdit(
 }
 
 /**
- * 记住「上次用的类别」（新建 / 改色 / 改型都算一次明确选择）。
+ * 记住「上次新建用的标注类别」。
  *
- * 只影响下次打开卡片停在哪个类别，不参与排版指纹；未知值由 [annotationLastKindOf] 兜回高亮。
+ * 只影响下次选字时操作栏停在哪个类别，不参与排版指纹。
  * **两个方向都要记得**：曾经只在点色槽 / 点线型时写，读者切到「高亮」后直接落笔
  * （不点色）就一直改不回高亮——默认状态卡在划线。
+ * 编辑旧标注 / 正文修改走 [withSelectionAction]（修订不是标注类别）。
  */
 internal fun withAnnotationLastKind(settings: ReaderSettings, kind: AnnotationKind): ReaderSettings =
-    settings.copy(annotationLastKind = kind.name.lowercase())
+    withSelectionAction(
+        settings,
+        when (kind) {
+            AnnotationKind.Highlight -> SelectionAction.Highlight
+            AnnotationKind.Underline -> SelectionAction.Underline
+        },
+    )
 
 /**
  * 记住「上次用的线型」，同时把**上次用的类别**定为划线。

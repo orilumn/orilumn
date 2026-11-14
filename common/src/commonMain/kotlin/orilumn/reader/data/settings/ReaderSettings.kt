@@ -97,8 +97,10 @@ data class ReaderSettings(
      *
      * 0 是**合法档位**，且**不是特例档**（产品口径 2026-10-03 改）：0 = 注入的间隙宽正好 0，
      * 中西之间**只**由 [letterSpacing]（字间距）分隔 —— 字面意义上的「距离 0」。
-     * 边界照检、作者为了让中英分开而手打的那串半角空格**照吃**（画成零宽，
-     * CLREQ 4.1「删除多余半角空格，注入固定间隙」的删除动作与间隙宽无关）。
+     * 边界照检、作者为了让中英分开而手打的那串空白**照吃**（画成零宽，含半角空格 / 制表 /
+     * 不换行空格 / 细空格 / 全角空格，换行除外；2026-11-10 起扩到「一切空白」，
+     * 见 [orilumn.reader.engine.text.preprocess.CjkLatinSpacing] 的 `isSeparatingSpace`）。
+     * CLREQ 4.1「删除多余半角空格，注入固定间隙」的删除动作与间隙宽无关。
      * 于是 `Rust 的所有权` 在 0 档排成 `Rust的所有权`；档位之间只有间隙宽这一个数在变。
      * 详细口径见 [orilumn.reader.engine.text.preprocess.CjkLatinSpacing] 类 KDoc。
      */
@@ -123,6 +125,17 @@ data class ReaderSettings(
     val autoContinue: Boolean = true,
     /** Show page numbers. */
     val pageNum: Boolean = false,
+    /**
+     * 底栏按钮显隐（设置 → 工具栏）：true = 显示对应按钮，false = 收进设置里不占位置。
+     *
+     * 纯读者偏好、与某本书无关（纯全局，换书沿用）；只改工具栏怎么画，不进版式比较，
+     * 面板走无重排提交。「目录」「设置」始终显示，不在这里。
+     */
+    val showToolbarBookmark: Boolean = true,
+    val showToolbarNote: Boolean = true,
+    val showToolbarRevision: Boolean = true,
+    val showToolbarReview: Boolean = true,
+    val showToolbarNight: Boolean = true,
     /** Body first-screen cover stretch switch: on = stretch to fill the whole screen (may distort); off = keep aspect ratio (no distortion, reading bg shown around). */
     val coverStretch: Boolean = true,
     /** [Style system] Font size relative to default: 0..100 slider, 50 = default 1.0 (see COMPANION mapping). */
@@ -177,14 +190,15 @@ data class ReaderSettings(
     val highlightDefaultSlot: Int = 0,
     val underlineDefaultSlot: Int = 0,
     /**
-     * 上次用于新建 / 改色标注的类别（`highlight` / `underline`，见 `annotationLastKind()`）。
+     * 上次选字后用的操作（`highlight` / `underline` / `edit`，见 `selectionActionOf()`）。
      *
-     * 浮动菜单因此**一步到位**：打开就停在这个类别的色槽行上，不必先点一次「高亮 / 划线」。
+     * 选区操作栏因此**一步到位**：上次用的是高亮 / 划线就停在对应色槽行，上次用的是「修订」
+     * 就直接进正文修改卡。只是打开旧标注 / 旧修改去看一眼或改样式**不算**，不会把默认项带跑。
      * 纯读者偏好（纯 UI，不进版式比较、不影响分页）；未知值按高亮处理。
      */
     val annotationLastKind: String = "highlight",
     /**
-     * 上次用于新建 / 改线型的划线线型（`straight` / `wavy` / `dashed` / `strike`，
+     * 上次用于新建 / 改线型的划线线型（`straight` / `wavy` / `dashed`，
      * 见 `annotationLastLineStyle()`）。纯读者偏好（不影响分页）；未知值按实线处理。
      */
     val annotationLastLineStyle: String = "straight",
@@ -363,6 +377,12 @@ data class ReaderSettings(
         pageAnimationMode = "",
         autoContinue = false,
         pageNum = false,
+        // 底栏按钮显隐：只改工具栏画什么，不进版式（面板走 onCommitLight）。
+        showToolbarBookmark = false,
+        showToolbarNote = false,
+        showToolbarRevision = false,
+        showToolbarReview = false,
+        showToolbarNight = false,
         coverStretch = false,
         showHiddenFonts = false,
         // 标注色槽族：只改像素，不影响分页；清空后比较相等（面板走 onCommitLight）。
@@ -553,6 +573,11 @@ data class ReaderSettings(
                     pageAnimationMode = SettingsJson.optString(o, "pageAnimationMode", d.pageAnimationMode),
                     autoContinue = SettingsJson.optBoolean(o, "autoContinue", d.autoContinue),
                     pageNum = SettingsJson.optBoolean(o, "pageNum", d.pageNum),
+                    showToolbarBookmark = SettingsJson.optBoolean(o, "showToolbarBookmark", d.showToolbarBookmark),
+                    showToolbarNote = SettingsJson.optBoolean(o, "showToolbarNote", d.showToolbarNote),
+                    showToolbarRevision = SettingsJson.optBoolean(o, "showToolbarRevision", d.showToolbarRevision),
+                    showToolbarReview = SettingsJson.optBoolean(o, "showToolbarReview", d.showToolbarReview),
+                    showToolbarNight = SettingsJson.optBoolean(o, "showToolbarNight", d.showToolbarNight),
                     // Old-key migration: coverProportional(false=stretch) → coverStretch(true=stretch), inverted.
                     coverStretch = if (o.containsKey("coverStretch")) {
                         SettingsJson.optBoolean(o, "coverStretch", d.coverStretch)

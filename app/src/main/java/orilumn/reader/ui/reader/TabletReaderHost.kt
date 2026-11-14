@@ -4,8 +4,16 @@ import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.data.book.BookReadingState
 import orilumn.reader.data.book.BookRepository
 import orilumn.reader.data.epub.TocItem
+import orilumn.reader.data.revision.TextRevision
 import orilumn.reader.engine.BookDocumentController
+import orilumn.reader.engine.revision.InlineMarkup
+import orilumn.reader.engine.revision.ReviewOverlay
+import orilumn.reader.engine.revision.TableRowScope
+import orilumn.reader.engine.revision.TextEditBlock
+import orilumn.reader.engine.revision.TextEditPart
+import orilumn.reader.engine.revision.TextEditPlan
 import orilumn.reader.engine.paging.BookPageNumber
+import orilumn.reader.engine.paging.PageSlice
 import orilumn.reader.engine.skia.DecodedImage
 import orilumn.reader.engine.skia.DrawLine
 import orilumn.reader.engine.skia.ImageCodec
@@ -42,6 +50,8 @@ class TabletReaderHost(
     private val controller: BookDocumentController,
     private val bookId: Long,
     private val repository: BookRepository,
+    /** 开书即进审阅视图（底栏「审阅」与笔记面板「显示审阅模式」同一状态，默认打开）。 */
+    private val initialReviewMode: Boolean = false,
 ) : ReaderHost {
 
     private val scopeJob = SupervisorJob()
@@ -53,6 +63,22 @@ class TabletReaderHost(
     private var openedAtCover = true
 
     /**
+     * 清单快照（修订 / 笔记）：面板**第一帧**就要有数据。
+     *
+     * 以前清单是「抽屉先滑出半屏空白 → 下一帧数据读完才填列表」，读者看到的是分两段打开，
+     * 而且中间那一帧还压在抽屉动画上。开书后在 IO 线程预读一次存这里，增删改后作废；
+     * 面板首帧直接用快照，随后再静默对齐一次库里的最新结果。
+     */
+    private var revisionsSnapshot: List<TextRevision>? = null
+    private var annotationsSnapshot: List<Annotation>? = null
+
+    /** 修订清单的同步快照（null = 还没预读到，面板退回异步加载）。 */
+    fun cachedTextRevisions(): List<TextRevision>? = revisionsSnapshot
+
+    /** 笔记清单的同步快照（同上）。 */
+    fun cachedAnnotations(): List<Annotation>? = annotationsSnapshot
+
+    /**
      * 全书页码数据的代际（Compose 快照状态）：引擎在后台补齐各章页数、或某章正典表刚落时回调，
      * 这里 +1 —— 阅读面在组合期读 [pageNumberRevision]，静置不翻页也能让页码自己出现。
      */
@@ -60,6 +86,8 @@ class TabletReaderHost(
 
     init {
         controller.onPageCountsChanged = { pageNumberTick++ }
+        // 正文修订（与桌面同一共享表）：开书整本读一次，章树载入与缓存失效都以它为准。
+        controller.textRevisionStore = repository
     }
 
     // ---- ReaderHost ----
@@ -110,13 +138,18 @@ class TabletReaderHost(
     override suspend fun open(): ReaderPos? = withContext(Dispatchers.IO) {
         if (!opened) {
             val state = repository.readingState(bookId)
-            if (!controller.open(bookId, state)) return@withContext null
+            if (!controller.open(bookId, state, reviewMode = initialReviewMode)) return@withContext null
             // 注：open 后默认 prewarm 恒跳过落位章（open 同步塑形，一次为准），此处不再调用。
             // R7: open-book B2 dispatch (epoch-deduped; defer-gated inside) — far chapters get laid
             // without waiting for a settings change. Host-owned orchestration; prewarm stays single-chapter.
             openedAtCover = (state == null) || orilumn.reader.data.read.ReadingLocatorCodec.decodeAtCover(state.locator)
             controller.requestWholeBookRelayout()
             opened = true
+            // 清单快照预读：开书后台做，读者点「修订 / 笔记」时抽屉里已经有内容。
+            ioScope.launch {
+                runCatching { textRevisionsForBook() }
+                runCatching { annotationsForBook() }
+            }
         }
         controller.locateStart()?.let { ReaderPos(it.first, it.second, atCover = openedAtCover) }
     }
@@ -161,8 +194,280 @@ class TabletReaderHost(
     suspend fun jumpToChar(chapter: Int, charOffset: Int): ReaderPos? = withContext(Dispatchers.IO) {
         val from = controller.locateStart()?.first ?: chapter
         controller.finalizeOnLeave(from)
-        controller.openAtChar(chapter, charOffset)?.let { ReaderPos(it.first, it.second, atCover = false) }
+        // 标注清单的锚点是原书空间；落位要的是渲染空间。
+        val rendered = controller.renderedOffset(chapter, charOffset)
+        controller.openAtChar(chapter, rendered)?.let { ReaderPos(it.first, it.second, atCover = false) }
     }
+
+    /** 渲染区间 ↔ 原书区间（方案 §8.8；宿主是唯一换算层）。 */
+    override fun originalRangeOf(chapter: Int, start: Int, endExclusive: Int): IntRange =
+        controller.originalRange(chapter, start, endExclusive)
+
+    override fun renderedRangeOf(chapter: Int, start: Int, endExclusive: Int): IntRange =
+        controller.renderedRange(chapter, start, endExclusive)
+
+    /** 选区上的行内结构（渲染空间，相对选区起点）：卡片回显标记文字用。 */
+    override fun textEditSpans(chapter: Int, start: Int, endExclusive: Int): List<InlineMarkup.StyleSpan>? =
+        controller.textEditSpans(chapter, start, endExclusive)
+
+    /** 修订**原来**盖着的行内结构（卡片判「新写的标记」用，与审阅痕迹同源）。 */
+    override fun textRevisionOriginalSpans(chapter: Int, revisionId: Long): List<InlineMarkup.StyleSpan>? =
+        controller.textRevisionOriginalSpans(chapter, revisionId)
+
+    /** 一条修订在审阅空间里的样子（修订清单行摘要，与审阅视图同一份数据）。 */
+    override fun textRevisionReviewExcerpt(
+        chapter: Int,
+        revisionId: Long,
+    ): ReviewOverlay.Excerpt? = controller.reviewExcerptOf(chapter, revisionId)
+
+    /** 选区涉及的各块（卡片每行的块标记用）。 */
+    override fun textEditBlocks(chapter: Int, start: Int, endExclusive: Int): List<TextEditBlock>? =
+        controller.textEditBlocks(chapter, start, endExclusive)
+
+    /** 审阅视图里拖选改过的表格中的某几行：卡片只列这几行（见 [TableRowScope]）。 */
+    override fun tableRowScope(chapter: Int, revisionId: Long, start: Int, endExclusive: Int): TableRowScope? =
+        controller.tableRowScope(chapter, revisionId, start, endExclusive)
+
+    /**
+     * 提交一次正文修改（方案 §8.8）：纯计算计划 → 一个事务落库 → 重读修订 → 只作废本章 →
+     * 重新载入重放并落位到修改起点。
+     */
+    override suspend fun commitTextEdit(
+        chapter: Int,
+        start: Int,
+        endExclusive: Int,
+        text: String,
+        styles: List<InlineMarkup.StyleSpan>?,
+        currentPage: ReaderPos?,
+        blocks: List<InlineMarkup.Segment>?,
+        rowScope: TableRowScope?,
+    ): TextEditOutcome = withContext(Dispatchers.IO) {
+        applyTextPlan(
+            chapter = chapter,
+            plan = controller.planTextEdit(chapter, start, endExclusive, text, styles, blocks, rowScope),
+            changeOldStart = start,
+            changeOldEndExclusive = endExclusive,
+            currentPage = currentPage,
+        )
+    }
+
+    /** 审阅视图里表格和别的文字一起选：逐段规划，一次落库、一次重排（见 `TextEditPart`）。 */
+    override suspend fun commitTextEdits(
+        chapter: Int,
+        parts: List<TextEditPart>,
+        currentPage: ReaderPos?,
+    ): TextEditOutcome = withContext(Dispatchers.IO) {
+        applyTextPlan(
+            chapter = chapter,
+            plan = controller.planTextEditParts(chapter, parts),
+            changeOldStart = parts.minOfOrNull { it.start } ?: 0,
+            changeOldEndExclusive = parts.maxOfOrNull { it.endExclusive } ?: 0,
+            currentPage = currentPage,
+        )
+    }
+
+    /** 计划 → 一个事务落库 → 重读修订 → 只作废本章 → 重新载入重放并落位。 */
+    private suspend fun applyTextPlan(
+        chapter: Int,
+        plan: TextEditPlan,
+        changeOldStart: Int,
+        changeOldEndExclusive: Int,
+        currentPage: ReaderPos?,
+    ): TextEditOutcome {
+        when (plan) {
+            is TextEditPlan.Rejected -> return TextEditOutcome.Rejected(plan.reason)
+            is TextEditPlan.Ready -> {
+                if (plan.noop) {
+                    return TextEditOutcome.Success(
+                        pos = null,
+                        selStart = plan.renderedStart,
+                        selEnd = plan.renderedEndExclusive,
+                    )
+                }
+                // 改前页首（坐标用**旧**修订表算）：改完按同一处内容落位，不按「改到哪儿」落位。
+                val anchor = currentPageAnchor(chapter, currentPage)
+                val saved = runCatching {
+                    repository.replaceTextRevisions(plan.deletedIds, plan.inserted)
+                }.getOrNull()
+                if (saved == null || (plan.inserted.isNotEmpty() && saved.size != plan.inserted.size)) {
+                    return TextEditOutcome.Failed("保存失败")
+                }
+                controller.reloadTextRevisions()
+                revisionsSnapshot = null
+                val pos = if (anchor != null) {
+                    controller.reflowAfterContentChange(
+                        chapter = chapter,
+                        prevPageCharStart = anchor.first,
+                        prevPageOriginalStart = anchor.second,
+                        changeOldStart = changeOldStart,
+                        changeOldEndExclusive = changeOldEndExclusive,
+                        // 换了块形态（段落 ⇄ 标题 / 引用 / 列表 / 代码块）或改了整张表的行 / 列：
+                        // 同样的文字会排成不同的行数，「页界没变」快路径按形态猜不准，一律正式重排。
+                        structureChanged = plan.inserted.any { r ->
+                            r.blockKinds.any { it.isNotEmpty() } ||
+                                r.editedBlocks.firstOrNull()?.startsWith("T") == true
+                        },
+                    ) ?: reflowFallback(chapter, anchor.second)
+                    ?: return TextEditOutcome.Failed("重排失败")
+                } else {
+                    // 拿不到改前页首（不在这一章 / 还没落位）：退回旧口径，按改动起点落位。
+                    controller.invalidateChapterContent(chapter)
+                    runCatching { controller.openAtChar(chapter, plan.renderedStart) }.getOrNull()
+                        ?: return TextEditOutcome.Failed("重排失败")
+                }
+                // 本章页数变了：页脚页码 / 目录页码跟着刷新（页码清单已在本章作废）。
+                pageNumberTick++
+                return TextEditOutcome.Success(
+                    pos = ReaderPos(pos.first, pos.second, atCover = false),
+                    selStart = plan.renderedStart,
+                    selEnd = plan.renderedEndExclusive,
+                )
+            }
+        }
+    }
+
+    /**
+     * 删除一条正文修订（修订清单行左滑删除）：落库 → 重读修订 → 只作废该章。
+     * 删的是当前阅读章时按**删除前的当前页首**重新落位（删除可能让前面的文字回退），
+     * 并把新落位交给阅读面；别的章只作废缓存，不动当前页。
+     */
+    override suspend fun deleteTextRevision(
+        revision: TextRevision,
+        currentPage: ReaderPos?,
+    ): TextRevisionDeleteOutcome =
+        withContext(Dispatchers.IO) {
+            // 先记当前页首（**原书**空间）：删除后按同一处内容重新落位，不把读者拽到清单行处。
+            // 页首 slice 是渲染坐标，先换回原书坐标，删除后再换算成新的渲染坐标。
+            val anchor = currentPageAnchor(revision.chapter, currentPage)
+            // 被删的那条修订在**旧**渲染空间占的区间（判「改掉的是不是只在当前页之内」）。
+            val changeRange = controller.textRevisionRange(revision.chapter, revision)
+            val removed = runCatching { repository.deleteTextRevision(revision.id) }.isSuccess
+            if (!removed) return@withContext TextRevisionDeleteOutcome.Failed
+            controller.reloadTextRevisions()
+            revisionsSnapshot = null
+            // 本章页数可能变了：页脚 / 目录页码跟着刷新。
+            pageNumberTick++
+            val pos = if (anchor != null) {
+                val landed = controller.reflowAfterContentChange(
+                    chapter = revision.chapter,
+                    prevPageCharStart = anchor.first,
+                    prevPageOriginalStart = anchor.second,
+                    changeOldStart = changeRange.first,
+                    changeOldEndExclusive = changeRange.last + 1,
+                ) ?: reflowFallback(revision.chapter, anchor.second)
+                landed?.let { ReaderPos(it.first, it.second, atCover = false) }
+            } else {
+                // 删的是别的章：只作废它的缓存，眼前这一页不动。
+                controller.invalidateChapterContent(revision.chapter)
+                null
+            }
+            TextRevisionDeleteOutcome.Success(pos)
+        }
+
+    /**
+     * 修订清单的「全部恢复原文」：一次删光全书修订。
+     *
+     * 与单条删除同一口径：先记当前页首，删完整本重读修订表，**把有修订的每一章都作废**
+     * （只作废当前章会让别章的旧版式继续带着已删掉的修订内容），当前章再按改前页首重新落位。
+     */
+    override suspend fun restoreAllTextRevisions(currentPage: ReaderPos?): TextRevisionDeleteOutcome =
+        withContext(Dispatchers.IO) {
+            val all = runCatching { repository.textRevisionsForBook(bookId) }.getOrNull()
+                ?: return@withContext TextRevisionDeleteOutcome.Failed
+            if (all.isEmpty()) return@withContext TextRevisionDeleteOutcome.Success(null)
+            val ch = currentPage?.chapter
+            val anchor = ch?.let { currentPageAnchor(it, currentPage) }
+            // 当前章的改动总范围（旧渲染空间）：判「改掉的是不是只在当前页之内」要用它。
+            val ranges = if (ch != null) {
+                all.filter { it.chapter == ch }.map { controller.textRevisionRange(ch, it) }
+            } else {
+                emptyList()
+            }
+            val deleted = runCatching { repository.deleteTextRevisionsForBook(bookId) }.isSuccess
+            if (!deleted) return@withContext TextRevisionDeleteOutcome.Failed
+            controller.reloadTextRevisions()
+            revisionsSnapshot = null
+            pageNumberTick++
+            for (chapter in all.map { it.chapter }.distinct()) {
+                if (chapter != ch) controller.invalidateChapterContent(chapter)
+            }
+            val pos = if (ch != null && anchor != null) {
+                val landed = controller.reflowAfterContentChange(
+                    chapter = ch,
+                    prevPageCharStart = anchor.first,
+                    prevPageOriginalStart = anchor.second,
+                    changeOldStart = ranges.minOfOrNull { it.first } ?: 0,
+                    changeOldEndExclusive = ranges.maxOfOrNull { it.last + 1 } ?: 0,
+                ) ?: reflowFallback(ch, anchor.second)
+                landed?.let { ReaderPos(it.first, it.second, atCover = false) }
+            } else {
+                null
+            }
+            TextRevisionDeleteOutcome.Success(pos)
+        }
+
+    /**
+     * 正式重排失败（解析/排版没起来）时兜底：按改前页首对应的**原书偏移**重新落位。
+     *
+     * 内容缓存已在 [BookDocumentController.reflowAfterContentChange] 里清掉，若就此返回 null，
+     * 阅读面会继续拿着旧页去画一个没有版式的章——整页空白且不会自愈。这里必须再走一次落位
+     * （内部会重新解析并排版），实在不行才把 null 交回去。
+     */
+    private suspend fun reflowFallback(chapter: Int, originalOffset: Int): Pair<Int, PageSlice>? =
+        runCatching {
+            controller.openAtChar(chapter, controller.renderedOffset(chapter, originalOffset))
+        }.getOrNull()
+
+    /**
+     * 改前当前页的落位锚点：([旧渲染空间页首], [同一处的原书坐标])。
+     *
+     * **当前页由调用方传入**（阅读面手里的 `openPos` / `currentPos`）。不能拿
+     * [BookDocumentController.locateStart] 顶替：那是开书锚点，读者翻走以后仍停在开书那一章，
+     * 会把当前章的锚点误判成「不在这一章」（null）——宿主随后只作废不重排，眼前整页空白。
+     * 旧调用方不传时仍退回开书锚点，保持兼容。
+     */
+    private suspend fun currentPageAnchor(chapter: Int, currentPage: ReaderPos?): Pair<Int, Int>? {
+        val slice = if (currentPage != null) {
+            if (currentPage.chapter != chapter) return null
+            currentPage.slice
+        } else {
+            val (ch, page) = runCatching { controller.locateStart() }.getOrNull() ?: return null
+            if (ch != chapter) return null
+            page
+        }
+        return slice.charStart to controller.originalOffset(chapter, slice.charStart)
+    }
+
+    /**
+     * 审阅视图开关（排版前的另一份预处理）：有修订的章按「原文全保留 + 新文字插在后面」重排，
+     * 没修订的章不动。分页表 / 页数 / 页快照照常按新内容版本读写（页码照常算）。
+     *
+     * 重读/重排是同步的状态清理（清解析态 + 版式），调用方在 IO 线程调；**切换 + 落位**请走
+     * [switchReviewMode]，那一条把两个空间的换算顺序也一起管住了。
+     */
+    override fun setReviewMode(on: Boolean): Boolean = controller.setReviewMode(on)
+
+    override fun isReviewMode(): Boolean = controller.reviewMode
+
+    override fun reviewMarks(chapter: Int): List<ReviewMark> =
+        controller.reviewMarks(chapter).mapNotNull { (range, deleted) ->
+            if (range.isEmpty()) null else ReviewMark(range.first, range.last + 1, deleted)
+        }
+
+    /**
+     * 切换到审阅视图（或切回）并按「同一处内容」重新落位，一步完成。
+     *
+     * [renderedCharStart] 是**切换前**当前页的页首（旧空间）；先换回原书坐标、再翻模式、再按新空间
+     * 换算落位——顺序在控制器里管住。大章切换先按锚点行起一张临时页（页首不动），随后后台排本章
+     * 正典；短章仍整章排完落位。没修订的章两种视图逐字相同，不动位置。
+     *
+     * 模式没变（重复点按）或本章没有修订可切时回 null，调用方据此跳过落位、只重绘痕迹。
+     */
+    suspend fun switchReviewMode(on: Boolean, chapter: Int, renderedCharStart: Int): ReaderPos? =
+        withContext(Dispatchers.IO) {
+            controller.switchReviewMode(on, chapter, renderedCharStart)
+                ?.let { ReaderPos(it.first, it.second, atCover = false) }
+        }
 
     /** P4-c2u: 点按命中的链接查表（控制器轻路径样式化区间，同步廉价）。 */
     override fun linkTargetAt(chapter: Int, charOffset: Int): orilumn.reader.engine.LinkTarget? =
@@ -212,10 +517,31 @@ class TabletReaderHost(
 
     override fun textBlockEndsOf(chapter: Int): IntArray? = controller.chapterTextBlockEnds(chapter)
 
+    override fun reviewBreakOffsets(chapter: Int): IntArray = controller.reviewBreakMarkers(chapter)
+
+    override fun seamSpaceOffsets(chapter: Int): IntArray = controller.chapterTextSeamSpaces(chapter)
+
     // ---- 文本标注：转手给共享 BookRepository/LibraryDb（平台侧只做壳） ----
+    //
+    // 坐标口径（方案 §8.8）：标注落库一律是**原书空间**；阅读面（选区 / 装饰 / 命中）
+    // 是**渲染空间**。两个空间的换算只在宿主这一层做，shared-ui 不感知修订。
+
+    private fun toRenderedRange(annotation: Annotation): Annotation {
+        val r = controller.renderedRange(annotation.chapter, annotation.charStart, annotation.charEnd)
+        val end = if (r.isEmpty()) r.first else r.last + 1
+        return if (r.first == annotation.charStart && end == annotation.charEnd) annotation
+        else annotation.copy(charStart = r.first, charEnd = end)
+    }
+
+    private fun toOriginalRange(annotation: Annotation): Annotation {
+        val r = controller.originalRange(annotation.chapter, annotation.charStart, annotation.charEnd)
+        val end = if (r.isEmpty()) r.first else r.last + 1
+        return if (r.first == annotation.charStart && end == annotation.charEnd) annotation
+        else annotation.copy(charStart = r.first, charEnd = end)
+    }
 
     override suspend fun annotationsForChapter(chapter: Int): List<Annotation> = try {
-        repository.annotationsForChapter(bookId, chapter)
+        repository.annotationsForChapter(bookId, chapter).map(::toRenderedRange)
     } catch (c: CancellationException) {
         throw c
     } catch (_: Throwable) {
@@ -223,22 +549,71 @@ class TabletReaderHost(
     }
 
     override suspend fun annotationsForBook(): List<Annotation> = try {
-        repository.annotationsForBook(bookId)
+        // 清单只显示原文摘录，不画装饰；坐标保持原书空间，跳转时再换算。
+        repository.annotationsForBook(bookId).also { annotationsSnapshot = it }
     } catch (c: CancellationException) {
         throw c
     } catch (_: Throwable) {
         emptyList()
     }
 
+    /**
+     * 阅读面判「这段字改过没有」用：本章修订换成**当前文字空间**的坐标（与选区同尺）。
+     *
+     * 正常视图 = 渲染空间（替换后的区间）；审阅视图 = 原区间 + 紧随其后的新文字
+     * （两半都算同一条修订，选到删掉的原文或新添的文字都判得到）。换算走控制器的修订表（纯算术，
+     * 不需要排版就绪）；读取失败按空表处理——卡片上的「删除」会虚掉，但不会误删。
+     */
+    override suspend fun textRevisionsForChapter(chapter: Int): List<TextRevision> = try {
+        repository.textRevisionsForChapter(bookId, chapter).map { r ->
+            // 审阅视图里点按 / 开卡认「整段」（原文 + 新文字），与修改卡带出的改后文字同尺。
+            // 区间撑到整段时，`text` 也得换成整段的当前结果：最小替换文字配整段区间，
+            // 卡里会少掉这一段没改的字（读者看到「输入区不显示那一段」，提交还会把那几个字删掉）。
+            val rr = controller.textRevisionEditRange(chapter, r)
+            if (rr.first == r.charStart && rr.last + 1 == r.charEnd) {
+                r
+            } else {
+                r.copy(
+                    charStart = rr.first,
+                    charEnd = maxOf(rr.first, rr.last + 1),
+                    text = controller.textRevisionReviewText(chapter, r),
+                    // 卡片文字换成整段结果了，结构也得换成**整段**那一份（最小修订那份偏移对不上）。
+                    styles = r.editedStyles,
+                    // 这份是给阅读面的显示坐标，整段（原书空间）已经换算掉了，别再带出去。
+                    editRange = null,
+                )
+            }
+        }
+    } catch (c: CancellationException) {
+        throw c
+    } catch (_: Throwable) {
+        emptyList()
+    }
+
+    /** 修订清单：全书正文修订（原书坐标），跳转时再由 [jumpToChar] 换算。 */
+    override suspend fun textRevisionsForBook(): List<TextRevision>? = try {
+        // 快照两列上线前写下的老行：区间还在原书空间，先按持久化章树把原文补回库再读清单。
+        controller.backfillLegacyRevisionTexts()
+        repository.textRevisionsForBook(bookId).also { revisionsSnapshot = it }
+    } catch (c: CancellationException) {
+        throw c
+    } catch (_: Throwable) {
+        // 读失败**不能**报成空表：修订清单要显示「读取失败，点此重试」而不是「还没有修改过正文」。
+        null
+    }
+
     override suspend fun addAnnotation(annotation: Annotation): Annotation? = try {
         val now = System.currentTimeMillis()
-        repository.addAnnotation(
-            annotation.copy(
+        val saved = repository.addAnnotation(
+            toOriginalRange(annotation).copy(
                 bookId = bookId,
                 createdAt = if (annotation.createdAt == 0L) now else annotation.createdAt,
                 updatedAt = now,
             ),
         )
+        // 返回给阅读面的是渲染空间（内存列表与装饰都按它画）。
+        annotationsSnapshot = null
+        saved?.let(::toRenderedRange)
     } catch (c: CancellationException) {
         throw c
     } catch (_: Throwable) {
@@ -246,7 +621,10 @@ class TabletReaderHost(
     }
 
     override suspend fun updateAnnotation(annotation: Annotation): Boolean = try {
-        repository.updateAnnotation(annotation.copy(updatedAt = System.currentTimeMillis()))
+        repository.updateAnnotation(
+            toOriginalRange(annotation).copy(updatedAt = System.currentTimeMillis()),
+        )
+        annotationsSnapshot = null
         true
     } catch (c: CancellationException) {
         throw c
@@ -256,6 +634,7 @@ class TabletReaderHost(
 
     override suspend fun deleteAnnotation(id: Long): Boolean = try {
         repository.deleteAnnotation(id)
+        annotationsSnapshot = null
         true
     } catch (c: CancellationException) {
         throw c
@@ -300,9 +679,10 @@ class TabletReaderHost(
         ioScope.launch {
             if (bookId < 0) return@launch
             val progress = controller.pageProgress(pos.chapter, pos.slice)
+            // 存档的锚点是**原书空间**：渲染空间的位置不能直接写进 locator。
             val locator = orilumn.reader.data.read.ReadingLocatorCodec.encode(
                 pos.chapter,
-                pos.slice.charStart,
+                controller.originalOffset(pos.chapter, pos.slice.charStart),
                 pos.atCover,
             )
             repository.saveReadingState(

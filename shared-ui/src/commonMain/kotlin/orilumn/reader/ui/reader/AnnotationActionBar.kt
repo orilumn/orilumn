@@ -47,7 +47,7 @@ import orilumn.reader.engine.skia.decorWaveGeometry
  * 取代原来贴着选区浮动的 [AnnotationMenu]：**没有锚点、没有翻边、没有左右收边**，
  * 它就是键盘上沿卡片的第一段，卡片自己不乱跑，所以选区在页面哪儿都不用管。
  *
- * 单行时从左到右：`高亮` `划线` `编辑`(占位) → 当前类别的 5 个色槽 → 4 个线型（仅划线）
+ * 单行时从左到右：`高亮` `划线` `修订`(占位) → 当前类别的 5 个色槽 → 3 个线型（仅划线）
  * → 贴右的 `复制` `删除` `确定`。装不下就换两行：第一行只放类别与右侧三键，第二行放色槽与线型；
  * 再装不下（窄手机）就三行：类别一行、色槽一行、线型一行。判定全部来自**实测宽度**，
  * 不看屏幕 dp 阈值。
@@ -73,6 +73,19 @@ internal fun AnnotationActionBar(
     onCopy: () -> Unit,
     onDelete: () -> Unit,
     onDone: () -> Unit,
+    /** 选区菜单的「修订」：有选区时可点（正文修改 v3）。 */
+    onEdit: (() -> Unit)? = null,
+    editEnabled: Boolean = false,
+    /**
+     * 正文修改模式（方案 §8.8 / D-36）：**和高亮、划线共用同一根操作栏**，不另起一套。
+     *
+     * - 「修订」标为当前项（垫底、不再响应点按）；
+     * - 左边的「高亮 / 划线」**照样可点**：点它就是切回该类别的批注（[onKindChange] 由调用方解释）；
+     * - 色槽与线型虚掉（点按被吞掉）；
+     * - 「删除」与批注同义，删的是**覆盖这段字的修订**（[canDelete] 由调用方按有没有修订给）；
+     * - 「复制」「确定」照旧；取消仍是点卡片外 / 返回键 / Esc（落笔只认 `确定`）。
+     */
+    editMode: Boolean = false,
 ) {
     val colors = if (kind == AnnotationKind.Underline) underlineColors else highlightColors
     val defaultSlot = (if (kind == AnnotationKind.Underline) underlineDefaultSlot else highlightDefaultSlot)
@@ -91,11 +104,13 @@ internal fun AnnotationActionBar(
     BarLayout(
         modifier = Modifier.fillMaxWidth().padding(start = 6.dp, end = 6.dp, top = 2.dp, bottom = 2.dp),
         lead = {
+            // 正文修改模式下这两个**照样可点**：点它就是切回该类别的批注（用户定口）。
+            // 只是「当前项」是右边的「修订」，所以两者都不垫底。
             MenuAction(
                 label = "高亮",
                 textColor = palette.text,
                 palette = palette,
-                active = kind == AnnotationKind.Highlight,
+                active = !editMode && kind == AnnotationKind.Highlight,
                 swatch = swatchOf(AnnotationKind.Highlight),
                 onClick = { onKindChange(AnnotationKind.Highlight) },
             )
@@ -103,30 +118,36 @@ internal fun AnnotationActionBar(
                 label = "划线",
                 textColor = palette.text,
                 palette = palette,
-                active = kind == AnnotationKind.Underline,
+                active = !editMode && kind == AnnotationKind.Underline,
                 underlineArgb = underlineSwatch,
                 underlineStyle = lineStyle,
                 onClick = { onKindChange(AnnotationKind.Underline) },
             )
-            // 占位：v3 的内容修改还没做，虚掉且点了没反应（吞掉点按，不漏到正文）。
+            // 正文修改（v3）：有选区才可点；点了把选区文字放进同一张底部卡片。
+            // 进了修改模式后这一项就是**当前项**：垫底、不再响应点按（不会自己再点自己一次）。
             MenuAction(
-                label = "编辑",
-                textColor = palette.muted,
+                label = "修订",
+                textColor = if (editMode || editEnabled) palette.text else palette.muted,
                 palette = palette,
-                active = false,
-                enabled = false,
-                onClick = {},
+                active = editMode,
+                enabled = !editMode && editEnabled && onEdit != null,
+                onClick = { onEdit?.invoke() },
             )
         },
-        colors = {
-            ColorSlots(
-                colors = colors,
-                defaultSlot = defaultSlot,
-                currentArgb = currentColor,
-                onPick = { index -> onPickColor(kind, index) },
-            )
+        // 正文修改模式不显示色槽（用户定口）：这一段直接不出现，操作栏少一截、也不留空位。
+        colors = if (editMode) {
+            null
+        } else {
+            {
+                ColorSlots(
+                    colors = colors,
+                    defaultSlot = defaultSlot,
+                    currentArgb = currentColor,
+                    onPick = { index -> onPickColor(kind, index) },
+                )
+            }
         },
-        styles = if (kind == AnnotationKind.Underline) {
+        styles = if (!editMode && kind == AnnotationKind.Underline) {
             {
                 LineStyleRow(
                     current = lineStyle,
@@ -140,6 +161,7 @@ internal fun AnnotationActionBar(
         },
         trail = {
             MenuAction("复制", palette.text, palette, active = false, onClick = onCopy)
+            // 删除两种模式共用：批注模式删这条标注，正文修改模式删这条修改（恢复原文）。
             MenuAction(
                 label = "删除",
                 textColor = if (canDelete) palette.text else palette.muted,
@@ -183,7 +205,8 @@ private val BAR_ROW_GAP = 2.dp
 private fun BarLayout(
     modifier: Modifier = Modifier,
     lead: @Composable () -> Unit,
-    colors: @Composable () -> Unit,
+    /** null = 这一段整段不出现（正文修改模式没有色槽）。 */
+    colors: (@Composable () -> Unit)?,
     styles: (@Composable () -> Unit)?,
     trail: @Composable () -> Unit,
 ) {
@@ -193,8 +216,10 @@ private fun BarLayout(
             Row(Modifier.layoutId(PART_LEAD), verticalAlignment = Alignment.CenterVertically) {
                 lead()
             }
-            Row(Modifier.layoutId(PART_COLORS), verticalAlignment = Alignment.CenterVertically) {
-                colors()
+            if (colors != null) {
+                Row(Modifier.layoutId(PART_COLORS), verticalAlignment = Alignment.CenterVertically) {
+                    colors()
+                }
             }
             if (styles != null) {
                 Row(Modifier.layoutId(PART_STYLES), verticalAlignment = Alignment.CenterVertically) {
@@ -351,7 +376,7 @@ private val OUTER_RING_WIDTH = 1.25.dp
 private val SlotOuterRing = Color(0xFF9A9A9A).copy(alpha = 0.45f)
 
 /**
- * 划线线型行：只画线、不写字（实线 / 波浪 / 虚线 / 删除线），线色 = 当前划线色。
+ * 划线线型行：只画线、不写字（实线 / 波浪 / 虚线），线色 = 当前划线色。
  * 选中的那条垫一层 [Palette.rowActive]：点它只是**选中**，落笔还要点色槽或 `确定`（D-28）。
  */
 @Composable
@@ -383,12 +408,12 @@ private fun LineStyleRow(
 /** 菜单按钮文字字号：线样张的粗细也按它算，样张才与真迹同比例。 */
 private val MENU_LABEL_FONT = 14.sp
 
-/** 线型样张：与正文里落墨的位置对齐（下划线靠下、删除线过中）。 */
+/** 线型样张：与正文里落墨的位置对齐（线画在字的下沿）。 */
 private fun DrawScope.drawLineStyleGlyph(
     style: AnnotationLineStyle,
     color: Color,
     /**
-     * 线所在高度；`null` = 按样张行的默认（删除线过字中 0.5、其余贴下沿 0.68）。
+     * 线所在高度；`null` = 按样张行的默认（贴字的下沿 0.68）。
      *
      * 类别名「划线」的样张要把线画在**字的下沿**，故显式传入。
      */
@@ -402,9 +427,8 @@ private fun DrawScope.drawLineStyleGlyph(
     strokeWidth: Float = MENU_LABEL_FONT.toPx() * ANNOTATION_UNDERLINE_THICKNESS_EM,
 ) {
     val stroke = strokeWidth
-    // 一条线画在哪里：样张行里删除线过字中、其余贴下沿；调用方也可显式指定（类别名样张用）。
-    val y = lineY
-        ?: if (style == AnnotationLineStyle.Strike) size.height * 0.5f else size.height * 0.68f
+    // 一条线画在哪里：样张行里贴下沿；调用方也可显式指定（类别名样张用）。
+    val y = lineY ?: size.height * 0.68f
     when (style) {
         AnnotationLineStyle.Straight -> drawLine(
             color = color,
@@ -443,18 +467,11 @@ private fun DrawScope.drawLineStyleGlyph(
                 0f,
             ),
         )
-        AnnotationLineStyle.Strike -> drawLine(
-            color = color,
-            start = Offset(from, y),
-            end = Offset(to, y),
-            strokeWidth = stroke,
-        )
     }
 }
 
-/** 类别名样张那条线的线心：下划线贴字底并给波浪留出振幅，删除线过字中。 */
+/** 类别名样张那条线的线心：贴字底并给波浪留出振幅。 */
 private fun DrawScope.sampleLineY(style: AnnotationLineStyle, strokeWidth: Float): Float {
-    if (style == AnnotationLineStyle.Strike) return size.height * 0.5f
     val half = if (style == AnnotationLineStyle.Wavy) {
         decorWaveGeometry(strokeWidth).halfHeight
     } else {
@@ -474,7 +491,7 @@ private fun MenuAction(
     swatch: Int? = null,
     /** 非空：在文字下沿画一条该颜色的线（划线的样子）。 */
     underlineArgb: Int? = null,
-    /** 那条线**长什么样**：跟当前选定的线型走（实线/波浪/虚线/删除线），默认实线。 */
+    /** 那条线**长什么样**：跟当前选定的线型走（实线 / 波浪 / 虚线），默认实线。 */
     underlineStyle: AnnotationLineStyle = AnnotationLineStyle.Straight,
     /** 字重：普通项用 Medium，最右的落笔键加粗。 */
     fontWeight: FontWeight = FontWeight.Medium,

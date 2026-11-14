@@ -15,6 +15,7 @@ class SelectionAutoFlipTest {
         yTop: Int,
         yBottom: Int = yTop + 40,
         charBase: Int,
+        xLeft: Int = 0,
     ): DrawLine = DrawLine(
         text = text,
         range = range,
@@ -31,6 +32,7 @@ class SelectionAutoFlipTest {
         letterSpacingEm = 0f,
         lineWidthPx = 300,
         charBase = charBase,
+        xLeft = xLeft,
     )
 
     @Test
@@ -108,6 +110,19 @@ class SelectionAutoFlipTest {
         // shift 是章节绝对 Y → 屏幕 Y 的平移，必须参与最近行判定。
         assertEquals(10, selectionSideOffset(lines, shift = 100, yPx = 50f, direction = -1))
         assertEquals(24, selectionSideOffset(lines, shift = 100, yPx = 150f, direction = 1))
+    }
+
+    @Test
+    fun `side offset picks the outermost cell when a table row shares one y`() {
+        // 表格一行三格并排：同一 y 上三条 DrawLine，右接续取最右一格、左接续取最左一格。
+        // 只按 y 取第一条会永远退回第一格，跨页后选区反而向左缩。
+        val cells = listOf(
+            line("甲", 0..0, yTop = 100, charBase = 10, xLeft = 0),
+            line("乙", 0..0, yTop = 100, charBase = 11, xLeft = 200),
+            line("丙", 0..0, yTop = 100, charBase = 12, xLeft = 400),
+        )
+        assertEquals(10, selectionSideOffset(cells, shift = 0, yPx = 120f, direction = -1))
+        assertEquals(12, selectionSideOffset(cells, shift = 0, yPx = 120f, direction = 1))
     }
 
     @Test

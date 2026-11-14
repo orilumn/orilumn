@@ -17,8 +17,8 @@ import org.junit.Test
  * [breakLeafLines] 按 [orilumn.reader.engine.css.WhiteSpaceNormalize.wraps] 分两条路：
  *  - **不折行**（`pre`/`nowrap`）：本函数自己逐 `\n` 切段，**一直**为连续换行之间的空段产零宽行
  *    （`:44` 的 `else if (i < n)` 分支）—— 这份实现是对的；
- *  - **折行**（`normal`/`pre-wrap`/`pre-line`）：整段交给断行器，而断行器**两侧都把空行丢了**
- *    （自建 `greedy` 行首 `'\n'` 直接 `s++; continue`；Skia 侧归一化后的 `if (e > s)`）。
+ *  - **折行**（`normal`/`pre-wrap`/`pre-line`）：整段交给断行器，而断行器曾经把空行丢了
+ *    （自建 `greedy` 行首 `'\n'` 直接 `s++; continue`）。
  *
  * 而 `pre` 元素恰好**总是**走第二条路 —— [orilumn.reader.engine.css.StyleComputer.resolveWhiteSpace]
  * 把 `pre` 子树里不可折行的值降级成 `PRE_WRAP`（分页阅读器无横向滚动，见 Q13），
@@ -38,10 +38,9 @@ class WhiteSpaceBlankLineParityTest {
     private fun lines(breaker: ParagraphBreaker, text: String, ws: WhiteSpace, tag: String? = "pre", w: Int = 1000) =
         breakLeafLines(breaker, text, style(ws), w, tag, emptyList(), 0f)
 
-    /** 三个断行器口：`pre` 走的那条（PRE_WRAP→断行器）与真·不折行那条（PRE→本函数自切）。 */
+    /** 断行器口：`pre` 走的那条（PRE_WRAP→断行器）与真·不折行那条（PRE→本函数自切）。 */
     private fun breakers(): List<Pair<String, ParagraphBreaker>> = listOf(
         "inhouse" to InhouseParagraphBreaker(0f),
-        "skia" to SkiaParagraphBreaker(0f),
     )
 
     /**

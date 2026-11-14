@@ -67,6 +67,21 @@ class ChapterTextTest {
     }
 
     @Test
+    fun `seam spaces are reported in chapter offsets while the text keeps them`() {
+        // 中西接缝上的空白**不删**：原文一个字不动，下标/标注/进度全按含空白的原文算，
+        // 只是排版把它画成零宽。复制、摘录按这张表摘字（用户层 plainTextOf）。
+        val (unit, _) = unitFor(
+            "<html><body><p>判断出 <code>customers</code> 的类型为<a href=\"#\"><code>Int</code></a>。 Kotlin</p></body></html>",
+        )
+        assertEquals("判断出 customers 的类型为Int。 Kotlin", unit.chapterText())
+        assertEquals(
+            "接缝空白必须按整章偏移报出来（叶坐标 + 叶起点）",
+            listOf(3, 13, 22),
+            unit.chapterTextSeamSpaces()!!.toList(),
+        )
+    }
+
+    @Test
     fun `chapter text concatenates leaf text in document order`() {
         val (unit, prepare) = unitFor("<html><body><p>Hello <b>world</b></p><p>second</p></body></html>")
 

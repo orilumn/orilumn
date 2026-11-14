@@ -1,6 +1,5 @@
 package orilumn.reader.engine.skia
 
-import orilumn.reader.engine.AbSwitch
 import orilumn.reader.engine.css.BorderColorEdges
 import orilumn.reader.engine.css.BorderStyle
 import orilumn.reader.engine.css.BorderStyleEdges
@@ -30,10 +29,9 @@ import kotlin.math.abs
  * - **1a**：`background-color` 真的落墨（对照：无盒时无色）；且横向为 0 的盒
  *   （`<mark>` / `border-bottom` 那一类）**不移动任何文字**（零回归）。
  * - **1b**：盒的横向 `padding`/`border` 把**盒内及其后**文字右移，盒前文字不动
- *   （对照：无盒 / 关闸两版的墨迹右缘都回到原位）。
+ *   （对照：无盒那一版的墨迹右缘回到原位）。
  * - **E20**：盒的**纵向**尺寸 = 盒首字命中面的 `ascent+descent`（不是固定 `'H'` 的拉丁面）
  *   再加上下 `padding`/`border`——中文盒不得矮成 1.0em（Chromium 同栈实测 1.4em）。
- * - **回退纪律**：闸门关掉时**只画不推**（底色仍在、右缘不动），两侧一致 ⇒ 不会画比量宽。
  */
 class InlineBoxPaintTest {
 
@@ -41,7 +39,11 @@ class InlineBoxPaintTest {
     private val contentWidth = 320
     private val markerArgb = 0xFFFFF176.toInt() // ua.css 的 mark 高亮底色
 
-    private fun line(text: String, boxes: List<InlineBoxRun> = emptyList()): DrawLine {
+    private fun line(
+        text: String,
+        boxes: List<InlineBoxRun> = emptyList(),
+        cjkLatinSpacing: Float = 0f,
+    ): DrawLine {
         val fontSizePx = 16f
         return DrawLine(
             text = text,
@@ -59,6 +61,7 @@ class InlineBoxPaintTest {
             letterSpacingEm = 0f,
             lineWidthPx = contentWidth,
             inlineBoxRuns = boxes,
+            cjkLatinSpacingEm = cjkLatinSpacing,
         )
     }
 
@@ -255,25 +258,6 @@ class InlineBoxPaintTest {
         assertEquals("盒前文字不得移动（左缘）", minInkX(control), minInkX(withBox))
     }
 
-    // ---- 回退纪律：关闸只画不推 ----
-
-    @Test
-    fun `关闸时行内盒只画不推`() {
-        val text = "a".repeat(20)
-        val box = InlineBoxRun(0, 3, bgHex = "#fff176", padding = Edges(right = 24f))
-
-        val control = render(listOf(line(text)))
-        try {
-            AbSwitch.apply("inhouseBreak=0")
-            val gated = render(listOf(line(text, listOf(box))))
-
-            assertTrue("关闸也必须画底色（1a 行为）", hasExactColor(gated, markerArgb))
-            assertEquals("关闸不得移动右缘（否则画比量宽）", maxInkX(control), maxInkX(gated))
-        } finally {
-            AbSwitch.resetForTest()
-        }
-    }
-
     // ---- 缺陷③：盒的右缘不得把推进量算两遍 ----
 
     /**
@@ -299,6 +283,100 @@ class InlineBoxPaintTest {
             grown <= pad.toInt() + 4,
         )
         assertTrue("盒仍须真的伸出一份内边距，实测 $grown", grown >= pad.toInt() - 2)
+    }
+
+    // ---- 行内水平外边距：推进但不画 ----
+
+    /** `margin` 与 `padding` 同一条推进规则（CSS 2.1 §8.6），但**不绘制**：底色/边框到 border-box 为止。 */
+    @Test
+    fun `盒的右侧外边距把其后文字右移`() {
+        val text = "a".repeat(20)
+        val m = 24f
+        val box = InlineBoxRun(0, 3, bgHex = "#fff176", margin = Edges(right = m))
+
+        val withBox = render(listOf(line(text, listOf(box))))
+        val control = render(listOf(line(text)))
+
+        val shifted = maxInkX(withBox) - maxInkX(control)
+        assertTrue("其后文字应右移约 $m px，实测 $shifted", abs(shifted - m) <= 2f)
+    }
+
+    /**
+     * 末片段右缘 = 末字 advance 末端**减去** `margin.right`：margin 在 border-box 之外，谁也不画它。
+     * 少扣这一下，底色会连 margin 一起圈进来（画比量宽，读者看到盒比实际宽一截、后文贴着盒边）。
+     */
+    @Test
+    fun `末片段右缘把外边距让出来（margin 不画）`() {
+        val text = "a".repeat(8)
+        val m = 24f
+        val box = InlineBoxRun(4, 8, bgHex = "#fff176", margin = Edges(right = m))
+
+        val withBox = render(listOf(line(text, listOf(box))))
+        val control = render(listOf(line(text)))
+
+        val grown = maxInkX(withBox) - maxInkX(control)
+        assertTrue("底色只到末字墨迹（margin 不画），实测多出 $grown（双算会≈${m.toInt()}）", grown <= 4)
+    }
+
+    // ---- 混排字距 × 行内盒：右缘那道间隙不得被盒底色吞掉 ----
+    /**
+     * 用户报「`使用 <code>val</code> 的…` 里 `val` 左侧有空格、右侧没有」。
+     *
+     * 成因：混排间隙加在边界字的 advance 上，而行内盒的**右内边距也记在同一字位**
+     * （`inlineBoxEdges`：右边记在 `endExclusive - 1`）⇒ 盒的 border-box 右缘把间隙一起
+     * 圈进底色，读者看到的是「盒变宽、后文紧贴盒边」；左侧那道间隙落在盒外，照常可见。
+     *
+     * 判据：盒底色的右缘**与间隙档位无关**（间隙画在盒外）；同时前提成立 ——
+     * 该处确实是一道相邻的中西边界，且间隙照旧进 advance（画 ≤ 量，断行/落位不变）。
+     */
+    @Test
+    fun `盒右缘的混排间隙画在盒外（底色不吞间隙）`() {
+        val text = "中abc文"
+        val pad = 12f
+        val box = InlineBoxRun(1, 4, bgHex = "#fff176", padding = Edges(right = pad))
+
+        // 前提：'c'(3) | '文'(4) 是一道相邻的中西边界，间隙照旧进 advance。
+        val aligner = LineAligner()
+        fun placed(em: Float) = aligner.align(
+            text = text,
+            range = 0 until text.length,
+            fontSizePx = 16f,
+            lineWidthPx = contentWidth.toFloat(),
+            letterSpacingEm = 0f,
+            tag = "p",
+            families = emptyList(),
+            weight = 400,
+            italic = false,
+            monospace = false,
+            cjkLatinSpacingEm = em,
+            inlineBoxRuns = listOf(box),
+        )
+        val offPlace = placed(0f)
+        val onPlace = placed(0.25f)
+        assertTrue(
+            "前提：'c'|'文' 必须是本行的一道相邻混排边界",
+            onPlace.cjkGaps.any { it.leftIndex == 3 && it.spaceCount == 0 },
+        )
+        assertEquals(
+            "前提：间隙照旧进 advance（画 ≤ 量）",
+            offPlace.advs[3] + 4f,
+            onPlace.advs[3],
+            0.01f,
+        )
+
+        // 判据：盒底色的**宽度**不随档位变（间隙画在盒外）。
+        // 比宽度而不是绝对位置：盒前那道间隙（'中'|'a'）本来就会把整个盒右移，那是版面的事。
+        fun boxWidth(bmp: Bitmap): Int {
+            val (min, max) = topRowSpan(bmp, markerArgb)
+            return max - min + 1
+        }
+        val off = render(listOf(line(text, listOf(box), cjkLatinSpacing = 0f)))
+        val on = render(listOf(line(text, listOf(box), cjkLatinSpacing = 0.25f)))
+        assertEquals(
+            "间隙不得把盒的底色撑宽（否则读者看到「右侧没有空格」）",
+            boxWidth(off),
+            boxWidth(on),
+        )
     }
 
     // ---- 附录 E 第 8 步：已定位行内盒压在在流文字之上 ----
@@ -412,6 +490,23 @@ class InlineBoxPaintTest {
             for (x in 0 until bmp.width) {
                 if (px.getColor(x, y) == argb) return x to y
             }
+        }
+        error("画布上没有该颜色")
+    }
+
+    /** 首个含 [argb] 的行里、该色的横向跨度（最小 x 到最大 x）。 */
+    private fun topRowSpan(bmp: Bitmap, argb: Int): Pair<Int, Int> {
+        val px = requireNotNull(bmp.peekPixels())
+        for (y in 0 until bmp.height) {
+            var min = Int.MAX_VALUE
+            var max = -1
+            for (x in 0 until bmp.width) {
+                if (px.getColor(x, y) == argb) {
+                    if (x < min) min = x
+                    max = x
+                }
+            }
+            if (max >= 0) return min to max
         }
         error("画布上没有该颜色")
     }

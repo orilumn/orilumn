@@ -69,7 +69,7 @@ class FerrisTableEndToEndTest {
         )
         val styles = engine.compute(root)
         val classify = NormalFlowLayout.heavyClassify(styles, engine.hasDisplayDeclaration())
-        val breaker = SkiaParagraphBreaker(0f)
+        val breaker = bodyParagraphBreaker(0f)
         val loader = orilumn.reader.engine.ImageBoundsReader { _, _ -> 1259 to 847 }
         val result = BoxLayouter(profile.bodyPx, breaker)
             .layoutBoxes(root, contentW, styles, classify, imageLoader = loader, chapterHref = "OEBPS/Text/00_3.xhtml")

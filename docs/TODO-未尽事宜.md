@@ -1043,9 +1043,9 @@
   > - **两处钉扎本身就是缺陷的温床**：`tableBreaker` 只被**轻路径**消费，重路径压根不经过它 ⇒
   >   只走重路径的回归锁改 `tableBreaker` **照样绿**（MUT-I 两轮 BUILD SUCCESSFUL）。
   >   这就是「假绿锁形态⑤：锁压根没碰那条路径」。
-  > - **`breakerFor` 缓存键漏了变体**：只按 `profile` 缓存，而实例的**类**由
-  >   `AbSwitch.inhouseBreak()` 决定，`BoxChapterLayouter` 寿命是整本书 ⇒ 拨开关后仍发旧变体，
-  >   **回退阀在缓存命中时静默失效**。已改成 `(profile, 变体)` 双分量。
+  > - **`breakerFor` 缓存键漏了变体**：只按 `profile` 缓存，而实例的**类**当时由运行期开关决定，
+  >   `BoxChapterLayouter` 寿命是整本书 ⇒ 拨开关后仍发旧变体，**回退阀在缓存命中时静默失效**。
+  >   已改成 `(profile, 变体)` 双分量；**2026-11-10 变体已整体删除**（只留一套断行器），键回到 `(profile, 字距)`。
   >
   > **锁**：`TableColumnWidthRealMeasureTest`（**正向**，取代前身 `TableBreakerStaysSkiaTest`
   > 那把守卫型锁——它的 KDoc 本就写明「一旦有人补上真测量，本锁故意失败，那时改写成两侧都跑的正向锁」）
@@ -1116,6 +1116,11 @@
     **1110 个单测全绿 + 回退侧逐值一致的锁 + 两侧表格列宽一致的锁**，不是闸门数据。
     真机一旦量到闸门不达标，先 `am start ... --es ab "inhouseBreak=0"` 退回。
   - **回退命令**：`adb shell am start -n orilumn.reader/.MainActivity --es ab "inhouseBreak=0"`
+  - **【2026-11-10 已作废】回退阀整体删除**：`ab="inhouseBreak=0"` 这条命令不再存在，`AbSwitch`
+    （三态表 / `warmupBlocks` / `regexHoist` / 控制量）与旧 Skia 断行实现一并删除。理由是回退侧已经
+    不能完整回退（混排字距恒 0、行内盒不推进、标点不挤压），只剩「排崩时应急」，代价却是每处新逻辑
+    都要照顾两条路、回退侧无端到端覆盖。上面「金标准 `908642712`」等历史数字仅作沿革记录。
+    见 `docs/PROJECT_STATUS.md` 2026-11-10 一节。
 
 - ~~开书被调两次~~ **误判，非 bug（2026-09-29 记 → 2026-09-30 查清）**：原以为 `open ok chapters=0`
   后 140ms–900ms 又一次 `open: chapters=N` 是 `openBookEngine` 并发重入。**查清：每次开书只调一次**，
@@ -1211,7 +1216,8 @@
   改 Rust 重写时**，同逻辑搬进引擎侧（原规划），JVM 端实现保持。切换前以 name 表直读 +
   CoreText 维持双链。
 
-- 批注/修订模块，以及修订后的 epub 导出、批注导出
+- **修订后的 epub 导出与批注导出**：批注 / 修订模块本身已落地（正文修订、审阅视图、修订清单、
+  表格与图片修改），尚缺导出——把改过的正文落成正文另存 epub，以及批注、修订清单的导出。
 
 - **书内脚注的「点击弹窗」呈现（2026-10-10 登记，未动手）**：
   书里脚注标记形如 `<a class="note-d" href="xnotes.xhtml#n.0001.1.r"><sup>[1]</sup></a>`

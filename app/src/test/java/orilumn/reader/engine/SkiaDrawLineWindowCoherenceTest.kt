@@ -25,8 +25,8 @@ import org.robolectric.annotation.Config
  * 每个 `<li>` 首个载体叶的首行恰一个 bullet。
  *
  * 文本渲染层（LineWindowDrawer 像素桥）不在此断言像素：页面上层的投影与测度同为 engine-skia
- * 单源，绘层只搬像素、绝不重排，因此窗口 = 屏上几何即闭环。Q1-c 后断行器恒定
- * SkiaParagraphBreaker，无旧管线回退。
+ * 单源，绘层只搬像素、绝不重排，因此窗口 = 屏上几何即闭环。断行器恒定单一生产实现（自建），
+ * 无旧管线回退。
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])

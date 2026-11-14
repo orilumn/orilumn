@@ -1,6 +1,7 @@
 package orilumn.reader.engine.skia
 
 import kotlin.math.abs
+import orilumn.reader.engine.text.preprocess.CjkLatinSpacing
 
 /**
  * P4-c2 UI: 行内点按 → 字形命中（**与绘制同一份几何**，pure Kotlin、可单测）。
@@ -97,7 +98,24 @@ object LineHitTest {
             val mid = (lo + hi + 1) / 2
             if (xs[mid] <= xInParagraph) lo = mid else hi = mid - 1
         }
-        return if (lo in 0 until endExcl - start) start + lo else null
+        var slot = start + lo
+        // 接缝上被吃成零宽的分隔空白**不可选**（真机 2026-11-10：「拖动选区手柄可以选到单独的空白字符」）。
+        // 它的推进量本来是 0，x 与后一个字相同 ⇒ 触点本该永远落到后一个字；但行内盒推进量记在
+        // 「空格 → 后一个字」之间（`判断出 <code>customers</code>` 的 17px 框内边距就记在空格字位上），
+        // 两者之间于是多出一段**没有墨的 x 区间**，触点落在里面就二分成那个空白 ⇒ 选区里出现一段
+        // 纯空白的高亮。字间距 / JUSTIFY 余量同理。这里跳过整串空白：往后取第一个可选的位
+        // （触点在这一带时读者指的是「盒子里的字」）；整串悬挂在本行尾时退回前一个字。
+        if (CjkLatinSpacing.isEatenSpaceSlot(line.text, slot)) {
+            var s = slot
+            while (s < endExcl && CjkLatinSpacing.isEatenSpaceSlot(line.text, s)) s++
+            if (s >= endExcl) {
+                s = slot - 1
+                while (s >= start && CjkLatinSpacing.isEatenSpaceSlot(line.text, s)) s--
+                if (s < start) return null
+            }
+            slot = s
+        }
+        return if (slot in start until endExcl) slot else null
     }
 
     /** 供自检：命中位置与该字可见中心的偏差（锁「点哪就是哪」用）。 */

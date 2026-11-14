@@ -68,23 +68,22 @@ class AnnotationDecorTest {
     }
 
     @Test
-    fun `underline line styles map to stroke and strike kind`() {
+    fun `underline line styles map to stroke`() {
         val ranges = annotationDecorRanges(
             listOf(
                 annotation(AnnotationKind.Underline, 0xFF112233.toInt()),
                 annotation(AnnotationKind.Underline, 0xFF112233.toInt(), lineStyle = AnnotationLineStyle.Wavy),
                 annotation(AnnotationKind.Underline, 0xFF112233.toInt(), lineStyle = AnnotationLineStyle.Dashed),
-                annotation(AnnotationKind.Underline, 0xFF112233.toInt(), lineStyle = AnnotationLineStyle.Strike),
             ),
         )
-        assertEquals(4, ranges.size)
+        assertEquals(3, ranges.size)
+        // 所有线型都还是下划线，只换线样，不换落墨位置（删除线已整体移除）。
         assertEquals(DecorKind.UNDERLINE, ranges[0].kind)
         assertEquals(DecorStroke.Solid, ranges[0].stroke)
+        assertEquals(DecorKind.UNDERLINE, ranges[1].kind)
         assertEquals(DecorStroke.Wavy, ranges[1].stroke)
+        assertEquals(DecorKind.UNDERLINE, ranges[2].kind)
         assertEquals(DecorStroke.Dashed, ranges[2].stroke)
-        // 删除线换的是落墨位置（字身中部），不是再加一条下划线。
-        assertEquals(DecorKind.STRIKETHROUGH, ranges[3].kind)
-        assertEquals(DecorStroke.Solid, ranges[3].stroke)
     }
 
     @Test

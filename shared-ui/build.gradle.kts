@@ -34,14 +34,12 @@ kotlin {
             implementation(compose.runtime)
             implementation(compose.foundation)
             implementation(compose.material3)
-            implementation(compose.material)
             implementation(compose.ui)
             // CMP 跨平台返回键（androidx.compose.ui.backhandler.BackHandler）：
             // 批注输入框打开时，Android 返回键 / 桌面返回键都走同一条「取消」路径。
             implementation(libs.compose.backhandler)
             implementation(compose.components.resources)
             implementation(compose.components.uiToolingPreview)
-            implementation(libs.compose.material.icons.core)
             // kotlinx.coroutines：书架数据流（Flow/StateFlow）与导入编排（S27）
             implementation(libs.kotlinx.coroutines.core)
             // 排版/绘制底座：shared-ui 依赖 engine-skia（SkParagraph 断行、行窗口绘制、字体集合）

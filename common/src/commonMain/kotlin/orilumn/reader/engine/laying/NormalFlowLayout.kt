@@ -46,7 +46,7 @@ object NormalFlowLayout {
      *
      * @param root the body tree.
      * @param styles per-node computed styles from the cascade.
-     * @param breaker the text shaper (the engine-skia `SkiaParagraphBreaker` in production, a fake in tests).
+     * @param breaker the text shaper (the engine-skia `InhouseParagraphBreaker` in production, a fake in tests).
      * @param widthPx content width (px) available to the root.
      * @param imageLoader optional EPUB image loader so block `<img>` replaceables can resolve real
      *   intrinsic aspect ratios instead of falling back to [DEFAULT_IMG_RATIO].
@@ -961,8 +961,8 @@ object NormalFlowLayout {
     }
 
     /**
-     * Appends [el]'s inline/text subtree text to [sb] (non-block only; `<br>` becomes a newline,
-     * `<img>` becomes U+FFFC).
+     * Appends [el]'s inline/text subtree text to [sb] (non-block only; `<br>` becomes
+     * [ANON_RUN_BR], `<img>` becomes U+FFFC).
      *
      * `br`/`img` 两条必须与 [styledSegments] 的 `walk` **逐条同形**（同序同字面）：本函数的产物
      * 只被用作「**这一段 run 有没有内容**」的判据（`flowChildren`/`cellFlowItems` 的
@@ -976,12 +976,62 @@ object NormalFlowLayout {
         when {
             hidden.isHidden(el) -> Unit // display:none inline run contributes no text
             el.isText -> sb.append(el.text)
-            el.tag == "br" -> sb.append('\n')
+            el.tag == "br" -> sb.append(ANON_RUN_BR)
             el.tag == "img" -> sb.append('￼')
             classify.isBlock(el) -> Unit
             else -> for (c in el.children) appendInlineText(c, classify, sb, hidden)
         }
     }
+
+    /** 行内子树的原文（[flowChildren] 的 run 拼法：`<br>`→[ANON_RUN_BR]、`<img>`→U+FFFC，块/隐藏子树跳过）。 */
+    fun inlineRunText(
+        el: MarkupElement,
+        classify: BlockClassify,
+        hidden: HiddenCheck = HIDDEN_NONE,
+    ): String {
+        val sb = StringBuilder()
+        appendInlineText(el, classify, sb, hidden)
+        return sb.toString()
+    }
+
+    /**
+     * [el] 自己的行内内容在 `children` 里形成的匿名 run：下标区间 + 原文。
+     *
+     * 与 [flowChildren] **同一套切分**（块 / 替换叶 / 行内子树埋块处断开，其余吸收），
+     * 供正文修订重放定位「这一段 stray 文字来自哪几个真实子节点」。行内子树埋块时 run 的
+     * 母节点是行内包装而不是 [el]，不会出现在这里（那些叶的属主是包装节点）。
+     */
+    fun anonymousRunSpans(
+        el: MarkupElement,
+        classify: BlockClassify,
+        hidden: HiddenCheck = HIDDEN_NONE,
+    ): List<AnonymousRunSpan> {
+        val out = ArrayList<AnonymousRunSpan>()
+        val sb = StringBuilder()
+        var start = -1
+        fun flush(endExclusive: Int) {
+            if (start >= 0 && sb.isNotBlank()) out.add(AnonymousRunSpan(start, endExclusive, sb.toString()))
+            sb.setLength(0)
+            start = -1
+        }
+        for ((i, c) in el.children.withIndex()) {
+            if (hidden.isHidden(c)) continue
+            when {
+                classify.isBlock(c) -> flush(i)
+                isReplaceable(c) -> flush(i)
+                hasInlineWrappedBlock(c, classify, hidden) -> flush(i)
+                else -> {
+                    if (start < 0) start = i
+                    appendInlineText(c, classify, sb, hidden)
+                }
+            }
+        }
+        flush(el.children.size)
+        return out
+    }
+
+    /** [anonymousRunSpans] 的一项：`el.children[start, endExclusive)` 拼出的匿名 run。 */
+    class AnonymousRunSpan(val start: Int, val endExclusive: Int, val raw: String)
 
     /**
      * E19（CSS 2.1 §9.2.1 block-in-inline）：[el] 的**行内子树**里是否埋着块级后代（经任意深度的
@@ -1024,7 +1074,7 @@ object NormalFlowLayout {
             when {
                 hidden.isHidden(x) -> Unit
                 x.isText -> sb.append(x.text)
-                x.tag == "br" -> sb.append('\n')
+                x.tag == "br" -> sb.append(ANON_RUN_BR)
                 x.tag == "img" -> sb.append('￼')
                 classify.isBlock(x) -> { flush(); out.add(x) }
                 else -> for (c in x.children) walk(c)
@@ -1153,12 +1203,18 @@ object NormalFlowLayout {
         hidden: HiddenCheck = HIDDEN_NONE,
         genOf: GenOf = EmptyGen,
         firstLetterOf: FirstLetterOf? = null,
+        /**
+         * 轻路径按需级联：[styles] 只覆盖叶自身的内联子树时，用它现解格内（含格自身）的样式。
+         * null = [styles] 覆盖整章（重路径）。
+         */
+        resolveStyle: ((MarkupElement) -> ComputedStyle)? = null,
     ): List<TableCellBlock> {
-        val cellStyle = styles.getValue(cellEl)
+        val table = if (resolveStyle == null) styles else stylesUnder(cellEl, resolveStyle)
+        val cellStyle = table.getValue(cellEl)
         val out = ArrayList<TableCellBlock>(2)
         // 格自身的 border/padding **不**进块堆叠（行高预算与 `emitCell` 的 insetTop 单算）⇒
         // `selfEdges = false`，起点 gap/inset 皆 0。
-        walkCellBlocks(cellEl, cellStyle, styles, classify, hidden, genOf, firstLetterOf, out, 0, 0, 0f, selfEdges = false)
+        walkCellBlocks(cellEl, cellStyle, table, classify, hidden, genOf, firstLetterOf, out, 0, 0, 0f, selfEdges = false)
         return out
     }
 
@@ -1207,8 +1263,9 @@ object NormalFlowLayout {
                 out.add(
                     TableCellBlock(
                         el = container, style = cs,
-                        text = rd.first, runs = rd.second, inlineBoxRuns = rd.third,
+                        text = rd.text, runs = rd.runs, inlineBoxRuns = rd.boxes,
                         imageRoot = container, outsideSiblings = after,
+                        segments = rd.segments, sourceSpan = item.span,
                         gapBefore = g, edgeH = insetIn, edgeV = 0,
                     ),
                 )
@@ -1227,14 +1284,20 @@ object NormalFlowLayout {
                     // 否则重路径字符少 1（整章 char 基址漂移），且塑形 `shapeGeometry` 的
                     // replaceable 形无槽可配、绘制侧 `emitCell` 整块跳过（Rust 简介 Ferris 表即此）。
                     val rd = if (isReplaceable(blk)) {
-                        Triple("\uFFFC", emptyList<FontRun>(), emptyList<InlineBoxRun>())
+                        // 独图块：一个 U+FFFC 槽，段表里给一个 marker 段，修订侧才能把占位与图配对。
+                        CellRun(
+                            segments = StyledSegments(listOf(StyledSegment(blk, "\uFFFC"))),
+                            runs = emptyList(),
+                            boxes = emptyList(),
+                        )
                     } else {
                         absorbCellBlock(blk, styles, emptySet(), { false }, chs, hidden, genOf, firstLetterOf)
                     }
                     out.add(
                         TableCellBlock(
                             el = blk, style = chs,
-                            text = rd.first, runs = rd.second, inlineBoxRuns = rd.third, imageRoot = blk,
+                            text = rd.text, runs = rd.runs, inlineBoxRuns = rd.boxes, imageRoot = blk,
+                            segments = rd.segments,
                             gapBefore = g, edgeH = insetIn + ownH, edgeV = ownV,
                         ),
                     )
@@ -1293,6 +1356,15 @@ object NormalFlowLayout {
      * @param isBlockOf 真实块级判据；与 [after] **或**起来才算跳过。命名叶传 `{ false }`
      *   （叶状判定已保证无块级子节点，多余地跳会截断文本）。
      */
+    /** 一个块的三件产物：段表（含文本）、行内 face 段、行内盒区间。 */
+    private class CellRun(
+        val segments: StyledSegments,
+        val runs: List<FontRun>,
+        val boxes: List<InlineBoxRun>,
+    ) {
+        val text: String get() = segments.text
+    }
+
     private fun absorbCellBlock(
         root: MarkupElement,
         styles: Map<MarkupElement, ComputedStyle>,
@@ -1302,8 +1374,10 @@ object NormalFlowLayout {
         hidden: HiddenCheck,
         genOf: GenOf,
         firstLetterOf: FirstLetterOf? = null,
-    ): Triple<String, List<FontRun>, List<InlineBoxRun>> {
-        if (root.tag == "table" || root.tag == "img") return Triple("", emptyList(), emptyList())
+    ): CellRun {
+        if (root.tag == "table" || root.tag == "img") {
+            return CellRun(StyledSegments(emptyList()), emptyList(), emptyList())
+        }
         val isExcluded: (MarkupElement) -> Boolean = { hidden.isHidden(it) || it in after }
         val isBlock: (MarkupElement) -> Boolean = { it in after || isBlockOf(it) }
         val wsOf: (MarkupElement) -> WhiteSpace = { wsOfNode(it, styles, root) }
@@ -1317,7 +1391,7 @@ object NormalFlowLayout {
         // 「段表坐标 = 块文本坐标」由构造保证，无容器坐标偏移风险。传 `leafWs` 与 styledSegments
         // 的根参同值（precomputed 非空时内部不再用它分段）。
         val boxes = collectInlineBoxRuns(root, styles, isExcluded, isBlock, leafWs, genOf, precomputed = segs)
-        return Triple(StyledSegments(segs).text, runs, boxes)
+        return CellRun(StyledSegments(segs), runs, boxes)
     }
 
     /**
@@ -1651,6 +1725,74 @@ object NormalFlowLayout {
         }
         return sb.toString()
     }
+
+    /** 表格行里的一格（正文修改卡按它切 `td` / `th`，偏移由调用方累加）。 */
+    class TableRowCell(
+        val el: MarkupElement,
+        val textLength: Int,
+        val header: Boolean,
+        val rowspan: Int,
+        val colspan: Int,
+    )
+
+    /**
+     * 表格行叶的**格表**：每格归一文本长度与合并属性。
+     *
+     * 口径与 [leafStreamText] 的 `tr` 分支逐字相同（同一份 [cellBlocks]），调用方据此把
+     * 行文字切成格——切错了正文修改卡里的格界就会和正文漂移。
+     */
+    fun tableRowCells(
+        row: MarkupElement,
+        classify: BlockClassify,
+        hidden: HiddenCheck = HIDDEN_NONE,
+        genOf: GenOf = EmptyGen,
+        resolveStyle: ((MarkupElement) -> ComputedStyle)? = null,
+    ): List<TableRowCell> {
+        val out = ArrayList<TableRowCell>(4)
+        for (cell in row.children) {
+            if (cell.tag != "td" && cell.tag != "th") continue
+            val blocks = cellBlocks(
+                cell, emptyMap(), classify, hidden, genOf, resolveStyle = resolveStyle,
+            )
+            out.add(
+                TableRowCell(
+                    el = cell,
+                    textLength = blocks.sumOf { it.text.length },
+                    header = cell.tag == "th",
+                    rowspan = cell.attrInt("rowspan"),
+                    colspan = cell.attrInt("colspan"),
+                ),
+            )
+        }
+        return out
+    }
+
+    /**
+     * 表格行叶的段表（各格的块段按序拼接）。
+     *
+     * 与 [tableRowCells] 同一份 [cellBlocks]：字符流是「格内块文本按序拼接」（[leafStreamText]），
+     * 这里的段表必须逐字相同，否则正文修改卡里的行内标记会整体错位。
+     */
+    fun tableRowSegments(
+        row: MarkupElement,
+        classify: BlockClassify,
+        hidden: HiddenCheck = HIDDEN_NONE,
+        genOf: GenOf = EmptyGen,
+        resolveStyle: ((MarkupElement) -> ComputedStyle)? = null,
+    ): StyledSegments {
+        val segs = ArrayList<StyledSegment>(4)
+        for (cell in row.children) {
+            if (cell.tag != "td" && cell.tag != "th") continue
+            val blocks = cellBlocks(
+                cell, emptyMap(), classify, hidden, genOf, resolveStyle = resolveStyle,
+            )
+            for (b in blocks) segs.addAll(b.segments.segments)
+        }
+        return StyledSegments(segs)
+    }
+
+    private fun MarkupElement.attrInt(name: String): Int =
+        attrs[name]?.trim()?.toIntOrNull()?.coerceAtLeast(1) ?: 1
 
     /** [root] 及其整棵子树的计算样式快照（轻路径按需级联；重路径直接用整章表）。 */
     private fun stylesUnder(

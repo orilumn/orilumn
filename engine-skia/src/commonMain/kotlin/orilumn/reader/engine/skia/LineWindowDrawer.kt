@@ -15,7 +15,6 @@ import orilumn.reader.engine.laying.SOFT_HYPHEN
 import orilumn.reader.engine.laying.TextDecorationRun
 import orilumn.reader.engine.laying.borderEdgeRects
 import orilumn.reader.engine.laying.extraHeightPx
-import orilumn.reader.engine.laying.inlineBoxAdvanceEnabled
 import orilumn.reader.engine.laying.isDocumentSpace
 import org.jetbrains.skia.Canvas
 import org.jetbrains.skia.Font
@@ -38,7 +37,7 @@ import kotlin.math.roundToInt
 /**
  * 单行文本绘制指令。
  *
- * 由测度引擎（[SkiaParagraphBreaker]）产出的每一 `range` 对应一张绘制指令，
+ * 由测度引擎（[InhouseParagraphBreaker]）产出的每一 `range` 对应一张绘制指令，
  * [yTop]..[yBottom] 为该框在所属页/滚动容器内的**绝对 Y**几何（统一行高，
  * `lineHeightPx = round(fontSizePx × lineHeightRatio)`），
  * [lineWidthPx] 为该行的整形宽（所在内容区宽度）。分页与连续滚动对绘制层
@@ -46,7 +45,7 @@ import kotlin.math.roundToInt
  *
  * @property text 所属整段文本；[range] 指向其中可见子区间（不含换行符）。
  * @property families 级联结果里该行的整条 CSS `font-family` 栈（作者顺序；空 = 默认族），
- *   与测度（[SkiaParagraphBreaker]）交给 [SkParagraphFactory] 的栈完全一致，绘制即量得。
+ *   与测度（[InhouseParagraphBreaker]）交给 [SkParagraphFactory] 的栈完全一致，绘制即量得。
  * @property xLeft 文本相对内容区的水平起点（px）；表叶 = `contentLeft + border.left + padding.left`，
  *   普通带头叶 = 0（对齐 [orilumn.reader.engine.layout] 各 BoxPageRenderer 的 xOff，P 系列 B 行）。
  * @property listMarker 行首列表 marker（OUTSIDE 悬垂沟槽 / INSIDE 行首内嵌）；null = 无 marker。
@@ -57,7 +56,7 @@ import kotlin.math.roundToInt
  * @property fontRuns 行内 face 段（[orilumn.reader.engine.css.FontRun]，[text] 全文本坐标系，空 = 全行
  *   用 [families]/[weight]/[italic]/[monospace] 基底）——浏览器 inline-run 语义：有段的字按段的
  *   face 画（正文里的 `<code>`/`<kbd>` 等宽、`<strong>`/`<em>` 加粗/斜体），无段仍走基底；与测度
- *   （[SkiaParagraphBreaker]）同样源的 runs，量画一致。
+ *   （[InhouseParagraphBreaker]）同样源的 runs，量画一致。
  * @property firstLineIndentPx 本行是段首行时的 CSS `text-indent` 偏移（px；非首行恒 0）：
  *   断行侧已把首行按减宽排过，绘制侧把本行整体右移该值（与旧 LeadingMarginSpan 同位）。
  * @property nowrap 本行来自 `white-space: pre/nowrap` 不换行段：整形不限宽（单行溢出绘制），
@@ -192,8 +191,7 @@ data class DrawLine(
     @Serializable(with = IntRangeListSerializer::class)
     val visibilityHiddenRuns: List<IntRange> = emptyList(),
     /**
-     * 混排字距（em，0 = 关，[orilumn.reader.engine.text.TypographicProfile.cjkLatinSpacingEmApplied]
-     * 的值）：行内 CJK↔西文边界的注入间隙。
+     * 混排字距（em，0 = 关）：行内 CJK↔西文边界的注入间隙。
      *
      * 断行侧已为它**预留了版心**（[InhouseParagraphBreaker] 经 [SkiaRunMeasurer.advances] 计入
      * 判定宽），本字段只管**落墨侧的 x 位**（[LineAligner.align] + [KerningClusterTable.clusterXs]
@@ -1354,12 +1352,27 @@ class LineWindowDrawer(
             val bottom = baseY + descent + pad.bottom + bd.bottom + r.relDy
             val left = paintX + lx - pad.left - bd.left + r.relDx
             // 右缘：**末片段**的 `rx` 已经含 `padding.right + border.right`（[inlineBoxEdges] 把右边记在
-            // 末字符位上，断行/落位/簇位轨同吃，见 `inlineBoxAdvanceEnabled`）。再补一遍就是
-            // 「画比量宽」：盒边（以及它带的底色）往右压出 5px 盖住后文 —— 验收样书 V1 样例1.2
-            // 「方框与后文的『后』部分重叠」即此（Chromium 实测：盒右缘 = 后文行首，其后 1px 空档）。
-            // 闸关时 advance 里不含这段（回退纪律），照旧补上。
-            val right = paintX + rx +
-                (if (lastFrag && !inlineBoxAdvanceEnabled()) pad.right + bd.right else 0f) + r.relDx
+            // 末字符位上，断行/落位/簇位轨同吃）。再补一遍就是「画比量宽」：盒边（以及它带的底色）
+            // 往右压出 5px 盖住后文 —— 验收样书 V1 样例1.2「方框与后文的『后』部分重叠」即此
+            // （Chromium 实测：盒右缘 = 后文行首，其后 1px 空档）。
+            //
+            // 混排间隙同理**只挪画的边界**：间隙与右内边距记在同一个字位（`adv[末字符]`），
+            // `rx` 把两者一起圈进 border-box ⇒ 底色吞掉间隙，读者看到的是「盒变宽、后文紧贴
+            // 盒边」，而不是「中西之间有空隙」（用户报「`val` 左侧有空格、右侧没有」）。
+            // 作者手打的那格空格本来在盒**外**（`</code>` 之后），被吃成零宽后注入的间隙要
+            // 回到盒外。这里只挪画的边界，不动 advance。
+            //
+            // 边界侧的内边距/外边距已在收集处被「间隙吃掉」（无背景色的那一侧，见
+            // `orilumn.reader.engine.laying.eatMixedBoundarySides`）—— 吃过的盒 `pad` 本来就是 0，
+            // 这里不必再判断；有背景色的 padding 不吃，所以必须继续按上面的方式把间隙让到框外，
+            // 两侧才对称。
+            //
+            // 右边距（`margin.right`）**在这里扣掉、也不画**：margin 在 border-box 之外，浏览器
+            // 不画它；而 `inlineBoxEdges` 把它记进了末字符的 advance（横向推进后续文字），
+            // 所以 `rx` 含它、border-box 右缘必须把它让出来。只有**末片段**才有这段（slice 语义）。
+            val marginRight = if (lastFrag) r.margin.right else 0f
+            val right = paintX + rx - marginRight - trailingCjkGapPx(line, placement, start, s - start, e - start) +
+                r.relDx
             // E17：圆角按**本片段** border-box 尺寸解（`%` ⇒ `min(w,h)` 基准，与块盒
             // [CornerRadius.resolved] 同式钳制）。slice：切开端不是元素真角 ⇒ 只在真角保留半径
             // （首片段保左两角、末片段保右两角；整盒单片段即原样）。
@@ -1434,6 +1447,55 @@ class LineWindowDrawer(
                 }
             }
         }
+    }
+
+    /**
+     * 落在行内盒**右内边距里**的混排间隙宽度（px；无则 0），从盒的 border-box 右缘扣掉。
+     *
+     * ## 为什么要扣（用户可见症状）
+     *
+     * 间隙加在边界字的 advance 上（[SkiaRunMeasurer.applyCjkLatinGaps]），而行内盒的右内边距
+     * **也记在同一个字位**（[orilumn.reader.engine.laying.inlineBoxEdges]）⇒
+     * [LineAligner.visibleSpan] 给出的 `rx` 把间隙一起圈进盒的 border-box，底色盖住它。
+     * `使用 <code>val</code> 的…` 这本书里，作者手打的那格空格在盒**外**；它被吃成零宽后
+     * 注入的间隙若画进盒里，视觉上就是「盒变宽 15px、后文紧贴盒边 1px」——读者报
+     * 「`val` 左侧有空格、右侧没有」（左侧的间隙落在盒外，照常可见）。
+     *
+     * ## 判据只有一条：间隙的**右伴字**在盒外
+     *
+     * `leftIndex + 1 + spaceCount ≥ 盒内局部末端` ⇒ 那一侧的邻字不属于这个盒，间隙该画在盒外。
+     * 伴字仍在盒内的间隙是**盒自身内容**里的中西分隔，盒底色照盖（盒是一个整体）。
+     *
+     * 边界侧的 `padding` 若**没有底色**，早就在收集处被间隙吃掉了（`eatMixedBoundarySides`）——
+     * 那种盒这里扣不到东西（`pad` 已是 0，`rx` 里只有间隙），扣的是间隙本身，正好回到框外。
+     * 有底色的 padding 不吃，那一段必须让给间隙（否则底色盖住它，两侧不对称）。
+     *
+     * ## 只挪「画」的边界
+     *
+     * 这里一个 advance 都不动（吃 margin/padding 的事发生在收集处、两侧同源）⇒
+     * 版心预留、断行、逐字落位全不变（画 ≤ 量，永不会右溢）。
+     * 字号取法与 [SkiaRunMeasurer.applyCjkLatinGaps] 同源（边界字所在 run 的 `fontPxOr`）。
+     */
+    private fun trailingCjkGapPx(
+        line: DrawLine,
+        placement: LineAligner.Placement,
+        start: Int,
+        localFrom: Int,
+        localEndExcl: Int,
+    ): Float {
+        val gaps = placement.cjkGaps
+        if (gaps.isEmpty()) return 0f
+        var px = 0f
+        for (g in gaps) {
+            val left = g.leftIndex
+            if (left < localFrom || left >= localEndExcl) continue
+            if (left + 1 + g.spaceCount < localEndExcl) continue
+            val abs = start + left
+            val size = line.fontRuns.firstOrNull { it.start <= abs && abs < it.endExclusive }
+                ?.fontPxOr(line.fontSizePx) ?: line.fontSizePx
+            px += g.gapEm * size
+        }
+        return px
     }
 
     /**

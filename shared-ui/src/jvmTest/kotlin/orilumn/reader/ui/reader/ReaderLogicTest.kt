@@ -1,5 +1,7 @@
 package orilumn.reader.ui.reader
 
+import orilumn.reader.engine.revision.TableRowInfo
+import orilumn.reader.engine.revision.TextEditBlock
 import orilumn.reader.engine.skia.DrawLine
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -243,6 +245,59 @@ class ReaderLogicTest {
         assertEquals(10f, hit?.third ?: Float.NaN, 1e-6f)
         // y=20 是次行起点（含首不含尾）。
         assertEquals(l2, ReaderMath.tapLineAt(lines, shift = 100, tapX = 30f, tapY = 20f)?.first)
+    }
+
+    @Test
+    fun tapLineAt_picksSideBySideCellByX() {
+        // 表格一行：同一 y 上三格并排，每格都是独立的 DrawLine（xLeft / 宽度各不同）。
+        // 只按 y 取第一条会永远命中第一格，后面几格点不到（真机「选不到最后一个单元格」）。
+        val first = line(0, 20).copy(text = "甲", range = 0..0, xLeft = 0, lineWidthPx = 200)
+        val second = line(0, 20).copy(text = "乙", range = 0..0, xLeft = 200, lineWidthPx = 200)
+        val third = line(0, 20).copy(text = "丙", range = 0..0, xLeft = 400, lineWidthPx = 200)
+        val lines = listOf(first, second, third)
+
+        assertEquals(third, ReaderMath.tapLineAt(lines, 0, 450f, 10f)?.first)
+        assertEquals(second, ReaderMath.tapLineAt(lines, 0, 250f, 10f)?.first)
+        // 落在格内文字右侧的空白上：仍归这一格（命中侧会把触点贴到行末字）。
+        assertEquals(third, ReaderMath.tapLineAt(lines, 0, 580f, 10f)?.first)
+        // 落在整行右外侧：取横向最近的最右格。
+        assertEquals(third, ReaderMath.tapLineAt(lines, 0, 700f, 10f)?.first)
+        // 落在首格左侧：取最近的首格。
+        assertEquals(first, ReaderMath.tapLineAt(lines, 0, -30f, 10f)?.first)
+    }
+
+    @Test
+    fun cellEdgeOffset_clampsOnlyInsideSideBySideRows() {
+        // 表格一行并排三格：触点落在格内文字右侧的空白上，贴到该格的行末字。
+        val first = line(0, 20).copy(text = "甲", range = 0..0, xLeft = 0, lineWidthPx = 200)
+        val second = line(0, 20).copy(text = "乙", range = 0..0, xLeft = 200, lineWidthPx = 200)
+        assertEquals(0, cellEdgeOffset(listOf(first, second), first, 180f))
+        assertEquals(0, cellEdgeOffset(listOf(first, second), second, -10f))
+        // 独占一行的普通段落：右缘外是页边距，不贴边（保持行尾空区不命中）。
+        assertEquals(null, cellEdgeOffset(listOf(first), first, 180f))
+    }
+
+    @Test
+    fun expandTableRowsForEdit_growsOnlyTouchedRowsNotTheWholeTable() {
+        // 表格两行 + 尾段：表格区间 100..119，行 100..109 / 110..119，尾段 120..129。
+        val row1 = TextEditBlock(
+            kind = null,
+            startsAtBlockStart = true,
+            table = TableRowInfo(emptyList()),
+            start = 100,
+            endExclusive = 110,
+            tableRange = 100..119,
+        )
+        val row2 = row1.copy(start = 110, endExclusive = 120)
+        val para = TextEditBlock(kind = null, startsAtBlockStart = true, start = 120, endExclusive = 130)
+        val blocks = listOf(row1, row2, para)
+
+        // 只选中两行里的半截：扩到这两行的整行，不扩到整张表（…119 之外不再长）。
+        assertEquals(100 until 120, expandTableRowsForEdit(blocks, 105, 115))
+        // 整张表都选上时区间原样（提交侧据此认整表结构修订）。
+        assertEquals(100 until 120, expandTableRowsForEdit(blocks, 100, 120))
+        // 没碰到表格行：原样返回。
+        assertEquals(121 until 125, expandTableRowsForEdit(blocks, 121, 125))
     }
 
     @Test

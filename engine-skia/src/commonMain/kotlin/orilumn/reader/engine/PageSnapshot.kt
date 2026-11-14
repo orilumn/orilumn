@@ -53,6 +53,13 @@ data class PageSnapshot(
     /** 本章作者 CSS 的哈希（书没换、样式没换才可能命中）。 */
     val cssHash: Long = 0L,
     /**
+     * 本章正文修订的内容版本（`ChapterRevisionMap.contentRev`；0 = 无修订）。
+     *
+     * 修订改变的是**文字本身**：同一页首字、同一参数下，改过前一章的文字不会动这一页，
+     * 但改过**本章**（哪怕在页首之前）就会让这一页的内容整体换掉——首字相同也不代表画得对。
+     */
+    val contentRev: Long = 0L,
+    /**
      * 产生这一页时**字库池的环境签名**（[orilumn.reader.engine.skia.FontPoolSync] 的 `sig`：
      * 本章需求命中的每个面的 `id:文件长度` + 书内字体 `族:字节数`）。
      *
@@ -111,6 +118,7 @@ data class PageSnapshot(
         contentWidth: Int,
         contentHeight: Int,
         cssHash: Long,
+        contentRev: Long = 0L,
         fontSig: String = "",
     ): Boolean =
         schema == SCHEMA &&
@@ -123,6 +131,7 @@ data class PageSnapshot(
             this.contentWidth == contentWidth &&
             this.contentHeight == contentHeight &&
             this.cssHash == cssHash &&
+            this.contentRev == contentRev &&
             // 任一侧没提供签名（未接线/测试）就不做这项校验，绝不因缺签名而放过已知变化。
             (fontSig.isEmpty() || this.fontSig == fontSig) &&
             firstLine >= 0 &&
@@ -131,7 +140,7 @@ data class PageSnapshot(
 
     companion object {
         /** 字节布局版本：字段形状变化时递增（与 [PaginationCacheCodec.LAYOUT_VERSION] 各管一头）。 */
-        const val SCHEMA = 2 // 2: 键里加了字库环境签名（fontSig）
+        const val SCHEMA = 3 // 3: 键里加了正文修订内容版本（contentRev）
     }
 }
 
@@ -157,6 +166,7 @@ fun buildPageSnapshot(
     contentWidth: Int,
     contentHeight: Int,
     cssHash: Long,
+    contentRev: Long = 0L,
     fontSig: String = "",
 ): PageSnapshot? {
     if (slice.firstLine < 0 || slice.lastLineExclusive <= slice.firstLine) return null
@@ -203,6 +213,7 @@ fun buildPageSnapshot(
         contentWidth = contentWidth,
         contentHeight = contentHeight,
         cssHash = cssHash,
+        contentRev = contentRev,
         fontSig = fontSig,
         charStart = slice.charStart,
         charEnd = slice.charEnd,

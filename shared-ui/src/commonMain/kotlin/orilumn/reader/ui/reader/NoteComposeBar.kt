@@ -16,8 +16,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.selection.LocalTextSelectionColors
+import androidx.compose.foundation.text.selection.TextSelectionColors
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -42,7 +45,13 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.input.OffsetMapping
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.TextFieldValue
@@ -52,6 +61,7 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import orilumn.reader.data.annotation.AnnotationKind
 import orilumn.reader.data.annotation.AnnotationLineStyle
+import orilumn.reader.engine.revision.InlineMarkup
 import kotlin.math.roundToInt
 
 /**
@@ -69,10 +79,18 @@ internal data class NoteBarTarget(
 )
 
 /**
+ * 底部输入卡当前是哪种模式（方案 §8.8）：批注 / 正文修改。
+ *
+ * 两种模式共用同一张卡、同一根操作栏、同一套键盘逐帧高度与升起度、同一个返回键取消机制；
+ * 正文修改只是把输入区换成多行、把 `确定` 的含义换成提交修订（D-36）。
+ */
+internal enum class NoteSheetMode { Annotation, TextEdit }
+
+/**
  * 标注卡片（用户层，D-28 第 1 部分）：**贴着键盘上沿的一张卡片**，桌面没有键盘就贴窗口下边框。
  *
  * 自上而下两段：
- * 1. [AnnotationActionBar]：`高亮` `划线` `编辑`(占位) + 色槽 + 线型 + `复制` `删除` `确定`；
+ * 1. [AnnotationActionBar]：`高亮` `划线` `修订`(占位) + 色槽 + 线型 + `复制` `删除` `确定`；
  *    装不下自己换两行 / 三行（实测宽度决定）。
  * 2. 输入行：只有输入框，**原来的「完成」按钮已经去掉**，提交统一走操作栏最右的 `确定`。
  *
@@ -119,20 +137,96 @@ internal fun AnnotationSheet(
     onDelete: () -> Unit,
     /** 操作栏的 `确定`：显式落笔（新建时即便没写字也按当前类别 / 线型 / 默认色落一条）。 */
     onDone: () -> Unit,
+    /** 选区菜单的「修订」：有选区时可点（正文修改 v3）。 */
+    onEdit: (() -> Unit)? = null,
+    editEnabled: Boolean = false,
     /** 点卡片外 / 返回键 / Esc：**取消**（什么都不写，原记录不动；落笔只认 `确定`）。 */
     onCancel: () -> Unit,
     /** 汇报卡片自身高度（像素）：页面让位要用实测值，不能靠估。 */
     onHeightChange: (Int) -> Unit = {},
     /** 放卡片的位置（外层 Box 的底边对齐）；默认铺满宽度、按 Box 的默认对齐。 */
     modifier: Modifier = Modifier,
+    /**
+     * 批注 / 正文修改（方案 §8.8 / D-36）：两者**共用同一根操作栏**，只有输入区与落笔含义不同。
+     * 正文修改时输入框换成多行、`确定` 提交修订；取消仍是点卡片外 / 返回键。
+     */
+    mode: NoteSheetMode = NoteSheetMode.Annotation,
+    /**
+     * 正文修改：把输入区里的标记字符（`*`、`` ` ``、`<em>`、链接括号）**淡化显示**。
+     *
+     * 只改显示、不改内容：变换后文字长度不变（`OffsetMapping.Identity`），光标 / 选区 / 手柄
+     * 都还是原来那套位置，控件持有的仍是纯文本。
+     */
+    dimMarkup: Boolean = false,
+    /**
+     * 输入区里的标记错在哪（规格 §5）：非空就**写在卡片里**、输入框上方，卡片不关、正文不动。
+     * 底部提示离输入框太远，而且只显示得下第一条，读者不知道该改哪儿。
+     */
+    errorText: String? = null,
+    /**
+     * 卡片最多能有多高（像素，= 窗口高 − 键盘高）。正文修改的输入框据此长高：
+     * 一直长到卡片上沿贴近屏幕顶，**上方留 [SHEET_CANCEL_RESERVE_LINES] 行**给读者点卡外取消
+     * （这张卡没有「取消」按钮）。0 = 不知道可用高度，按 [TEXT_EDIT_MAX_LINES] 行封顶。
+     */
+    maxCardHeightPx: Float = 0f,
 ) {
     val p = palette
     // 输入框内部要光标与选区，所以持 TextFieldValue；外面只认纯文本（点色槽时要读它）。
     var value by remember { mutableStateOf(TextFieldValue(text, TextRange(text.length))) }
     LaunchedEffect(text) {
-        if (text != value.text) value = TextFieldValue(text, TextRange(text.length))
+        if (text == value.text) return@LaunchedEffect
+        // 换文字不等于丢选区（用户定口）：调正文选区时输入区里已经选好的那一段要留着，
+        // 否则读者刚全选（开卡默认）或手选了一段，一拖正文手柄就退回一个光标。
+        val old = value
+        val sel = when {
+            // 新开卡时原来还是空的：光标落在末尾（随后由下面的 TextEdit 规则整段全选）。
+            old.text.isEmpty() -> TextRange(text.length)
+            // 之前是整段全选（开卡默认，或上一次跟着正文选区换过来的）⇒ 新文字照样整段全选。
+            old.selection.start == 0 && old.selection.end == old.text.length ->
+                TextRange(0, text.length)
+            // 手选的某一段：偏移照旧，只把越界的那头收进新文字里。
+            else -> TextRange(
+                old.selection.start.coerceIn(0, text.length),
+                old.selection.end.coerceIn(0, text.length),
+            )
+        }
+        value = TextFieldValue(text, sel)
+    }
+    // 进入正文修改状态（卡片新开、或从批注切到「修订」）默认全选输入框里的文字：
+    // 读者直接打字就是整段替换，不用先手动全选（用户定口）。键只取 visible / mode，
+    // 打字时两者不变，所以不会每敲一个字就重新全选。
+    LaunchedEffect(visible, mode) {
+        if (visible && mode == NoteSheetMode.TextEdit) {
+            value = TextFieldValue(text, TextRange(0, text.length))
+        }
     }
     val focus = remember { FocusRequester() }
+
+    // 标记字符淡化：只是给它们换一种墨色，文字长度不变（所以光标 / 选区不用换算）。
+    // 两档颜色**必须分得开**（规格 §3.6）：成对的标记（真的会生效）淡化；
+    // 没配上对的标记（解析时按字面落进正文）用强调色——读者一眼看出「这个写了不生效」。
+    val markupDim = p.muted2
+    val markupWarn = PanelGold
+    val visual = remember(dimMarkup, markupDim, markupWarn) {
+        if (!dimMarkup) {
+            VisualTransformation.None
+        } else {
+            VisualTransformation { text ->
+                val paired = InlineMarkup.markerRanges(text.text)
+                val unpaired = InlineMarkup.unpairedMarkerRanges(text.text)
+                if (paired.isEmpty() && unpaired.isEmpty()) {
+                    TransformedText(text, OffsetMapping.Identity)
+                } else {
+                    val dimmed = buildAnnotatedString {
+                        append(text)
+                        for (r in paired) addStyle(SpanStyle(color = markupDim), r.first, r.last + 1)
+                        for (r in unpaired) addStyle(SpanStyle(color = markupWarn), r.first, r.last + 1)
+                    }
+                    TransformedText(dimmed, OffsetMapping.Identity)
+                }
+            }
+        }
+    }
 
     // 光标自己画（桌面复报：系统光标太浅，像没有光标）：
     //  - 系统光标在桌面只有 1dp（`DefaultCursorThickness` 的 desktop actual），细线抗锯齿后发虚；
@@ -191,23 +285,33 @@ internal fun AnnotationSheet(
                 }
             },
     ) {
-        AnnotationActionBar(
-            palette = p,
-            kind = kind,
-            lineStyle = lineStyle,
-            highlightColors = highlightColors,
-            highlightDefaultSlot = highlightDefaultSlot,
-            underlineColors = underlineColors,
-            underlineDefaultSlot = underlineDefaultSlot,
-            currentColor = currentColor,
-            canDelete = canDelete,
-            onKindChange = onKindChange,
-            onPickColor = onPickColor,
-            onPickLineStyle = onPickLineStyle,
-            onCopy = onCopy,
-            onDelete = onDelete,
-            onDone = onDone,
-        )
+        // 正文修改**不另起一套**：与高亮、划线共用同一根操作栏（D-36）。
+        // 修改模式下批注专属项虚掉、`修订` 标为当前项，`复制` / `删除` / `确定` 照旧；
+        // 取消仍是点卡片外 / 返回键 / Esc（落笔只认 `确定`）。
+        // 操作栏实测高度是给输入框算「还能长几行」用的（换行排布时它自己会变高）。
+        var barHeightPx by remember { mutableStateOf(0) }
+        Box(Modifier.fillMaxWidth().onSizeChanged { barHeightPx = it.height }) {
+            AnnotationActionBar(
+                palette = p,
+                kind = kind,
+                lineStyle = lineStyle,
+                highlightColors = highlightColors,
+                highlightDefaultSlot = highlightDefaultSlot,
+                underlineColors = underlineColors,
+                underlineDefaultSlot = underlineDefaultSlot,
+                currentColor = currentColor,
+                canDelete = canDelete,
+                onKindChange = onKindChange,
+                onPickColor = onPickColor,
+                onPickLineStyle = onPickLineStyle,
+                onCopy = onCopy,
+                onDelete = onDelete,
+                onDone = onDone,
+                onEdit = onEdit,
+                editEnabled = editEnabled,
+                editMode = mode == NoteSheetMode.TextEdit,
+            )
+        }
         // 与输入行之间的分隔：两段同属一张卡片，但操作与打字是两件事。
         Box(
             Modifier
@@ -215,15 +319,43 @@ internal fun AnnotationSheet(
                 .heightIn(min = 1.dp)
                 .background(p.cardBorder),
         )
+        // 输入框能长到几行：卡片可用高 − 操作栏 − 内边距 − 上方留给「点卡外取消」的三行。
+        val density = LocalDensity.current
+        val lineHeightPx = with(density) { NoteTextLineHeight.toPx() }
+        val chromePx = with(density) { NoteFieldChrome.toPx() }
+        val fieldMaxLines = remember(mode, maxCardHeightPx, barHeightPx, lineHeightPx, chromePx, errorText) {
+            if (mode != NoteSheetMode.TextEdit) {
+                NOTE_MAX_LINES
+            } else if (maxCardHeightPx <= 0f || barHeightPx <= 0) {
+                TEXT_EDIT_MAX_LINES
+            } else {
+                // 提示行也占高（有错时输入框让出一行，卡片上沿才不会顶出屏幕）。
+                val errorPx = if (errorText != null) lineHeightPx + with(density) { 4.dp.toPx() } else 0f
+                val room = maxCardHeightPx - barHeightPx - chromePx - errorPx -
+                    lineHeightPx * SHEET_CANCEL_RESERVE_LINES
+                (room / lineHeightPx).toInt().coerceIn(NOTE_MAX_LINES, TEXT_EDIT_MAX_LINES)
+            }
+        }
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.Bottom,
         ) {
             Column(modifier = Modifier.weight(1f)) {
+                // 就地提示（规格 §5）：解析错误 / 提交被拒写成一行红字，贴在输入框正上方。
+                errorText?.let {
+                    Text(
+                        text = it,
+                        style = NoteTextStyle,
+                        color = Color(REVIEW_DELETED_ARGB),
+                        modifier = Modifier.padding(start = 2.dp, bottom = 4.dp),
+                    )
+                }
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(min = 34.dp)
+                        // 与批注输入框同高：默认**一行**；正文修改有多行内容时才跟着长高
+                        // （最多 TEXT_EDIT_MAX_LINES 行，超出字段内部滚动）。
+                        .heightIn(min = NOTE_FIELD_MIN_HEIGHT)
                         .background(p.selBg, RoundedCornerShape(8.dp))
                         .padding(horizontal = 10.dp, vertical = 7.dp),
                 ) {
@@ -232,48 +364,85 @@ internal fun AnnotationSheet(
                         // 只写 fontSize 会继承 bodyLarge 的 24sp 行高，空框比有字时高 4dp
                         // （用户复报：一输入框子就变矮），卡片高度跟着跳、页面也跟着让位一次。
                         Text(
-                            text = "写点批注（可不填）",
+                            text = if (mode == NoteSheetMode.TextEdit) {
+                                "修改正文（跨段用换行分隔）"
+                            } else {
+                                "写点批注（可不填）"
+                            },
                             style = NoteTextStyle,
                             color = p.muted2,
                         )
                     }
-                    BasicTextField(
-                        value = value,
-                        onValueChange = {
-                            value = it
-                            onTextChange(it.text)
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .focusRequester(focus)
-                            .onFocusChanged { focused = it.isFocused }
-                            .onSizeChanged { fieldHeightPx = it.height },
-                        textStyle = NoteTextStyle.copy(color = p.text),
-                        // 光标用正文墨色，不用批注色：高亮色槽是 45% 透明度的荧光笔底色（`0x73…`），
-                        // 拿它画光标压在卡片的浅底上几乎看不见。
-                        cursorBrush = if (selfCaret) SolidColor(Color.Transparent) else SolidColor(p.text),
-                        onTextLayout = { textLayout = it },
-                        maxLines = NOTE_MAX_LINES,
-                    )
-                    // 自绘光标：只有「光标处在这一版里」时才画（选择一段文字时系统本来也不画光标）。
-                    if (selfCaret && focused && value.selection.collapsed) {
+                    // 选区手柄也自绘（与正文同一套圆点）：系统那对水滴形手柄由字段自己的弹出层画，
+                    // 没有公开 API 换样式，只能把它的墨色设成透明，再按同一份文本布局画我们的圆点。
+                    // 命中仍由那个隐形手柄接管，拖动照旧改选区，只是看不见系统外观。
+                    // 字段内部滚动时拿不到行位置（与自绘光标同一限制），手柄退回系统那套。
+                    val baseSelection = LocalTextSelectionColors.current
+                    CompositionLocalProvider(
+                        LocalTextSelectionColors provides TextSelectionColors(
+                            handleColor = if (selfCaret) Color.Transparent else baseSelection.handleColor,
+                            // 选中底色与正文同一块蓝（同常量，不做第二套配色）。
+                            backgroundColor = Color(SELECTION_FILL_ARGB),
+                        ),
+                    ) {
+                        BasicTextField(
+                            value = value,
+                            onValueChange = {
+                                value = it
+                                onTextChange(it.text)
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .focusRequester(focus)
+                                .onFocusChanged { focused = it.isFocused }
+                                .onSizeChanged { fieldHeightPx = it.height },
+                            textStyle = NoteTextStyle.copy(color = p.text),
+                            visualTransformation = visual,
+                            // 光标用正文墨色，不用批注色：高亮色槽是 45% 透明度的荧光笔底色（`0x73…`），
+                            // 拿它画光标压在卡片的浅底上几乎看不见。
+                            cursorBrush = if (selfCaret) SolidColor(Color.Transparent) else SolidColor(p.text),
+                            onTextLayout = { textLayout = it },
+                            maxLines = if (mode == NoteSheetMode.TextEdit) fieldMaxLines else NOTE_MAX_LINES,
+                        )
+                    }
+                    // 自绘光标 / 选区手柄：只有「位置处在这一版里」时才画。
+                    // 光标（选区收拢）走正文墨色；选中一段时改画两端圆点，位置与正文里的手柄同口径
+                    // （贴着行下缘、白边蓝芯），读者在输入区与正文看到的是同一套东西。
+                    if (selfCaret && focused) {
                         Canvas(Modifier.matchParentSize()) {
                             val l = textLayout ?: return@Canvas
-                            if (!caretOn) return@Canvas
-                            val rect = l.getCursorRect(
-                                value.selection.start.coerceIn(0, l.layoutInput.text.length),
-                            )
-                            // 光标已经落到底边之外（滚动态检测晚一帧）：这一帧宁可不画，
-                            // 也不要画在框外的错误位置。
-                            if (rect.top >= size.height) return@Canvas
-                            val w = CaretWidth.toPx()
-                            val h = rect.height.takeIf { it > 0f } ?: l.size.height.toFloat()
-                            drawRoundRect(
-                                color = p.text,
-                                topLeft = Offset(rect.left - w / 2f, rect.top),
-                                size = Size(w, h),
-                                cornerRadius = CornerRadius(w / 2f),
-                            )
+                            val sel = value.selection
+                            val len = l.layoutInput.text.length
+                            if (sel.collapsed) {
+                                if (!caretOn) return@Canvas
+                                val rect = l.getCursorRect(sel.start.coerceIn(0, len))
+                                // 光标已经落到底边之外（滚动态检测晚一帧）：这一帧宁可不画，
+                                // 也不要画在框外的错误位置。
+                                if (rect.top >= size.height) return@Canvas
+                                val w = CaretWidth.toPx()
+                                val h = rect.height.takeIf { it > 0f } ?: l.size.height.toFloat()
+                                drawRoundRect(
+                                    color = p.text,
+                                    topLeft = Offset(rect.left - w / 2f, rect.top),
+                                    size = Size(w, h),
+                                    cornerRadius = CornerRadius(w / 2f),
+                                )
+                            } else {
+                                val r = SELECTION_HANDLE_RADIUS_DP.dp.toPx()
+                                val white = Color.White
+                                val ink = Color(SELECTION_HANDLE_ARGB)
+                                for (rect in listOf(
+                                    l.getCursorRect(sel.start.coerceIn(0, len)),
+                                    l.getCursorRect(sel.end.coerceIn(0, len)),
+                                )) {
+                                    val c = Offset(
+                                        x = rect.left.coerceIn(r, (size.width - r).coerceAtLeast(r)),
+                                        y = rect.bottom.coerceIn(r, (size.height - r).coerceAtLeast(r)),
+                                    )
+                                    drawCircle(color = white, radius = r + 2f, center = c)
+                                    drawCircle(color = ink, radius = r, center = c)
+                                }
+                            }
                         }
                     }
                 }
@@ -292,11 +461,24 @@ internal fun AnnotationSheet(
  */
 internal const val SHEET_SLIDE_MS = 200
 
+/** 输入框的最小高度（一行）：批注与正文修改同高，内容多行时才一起长高。 */
+private val NOTE_FIELD_MIN_HEIGHT = 34.dp
+
 /** 批注输入框最多显示几行（超出后字段内部滚动）。 */
 private const val NOTE_MAX_LINES = 4
 
+/** 正文修改输入框最多显示几行：**只是兜底上界**，实际按可用高度算（见 [AnnotationSheet]）。 */
+private const val TEXT_EDIT_MAX_LINES = 60
+
+/** 卡片上方留给「点卡外取消」的行数：这张卡没有取消按钮，那一块必须点得到正文。 */
+private const val SHEET_CANCEL_RESERVE_LINES = 3
+
+/** 输入行与输入框自身的固定占高（上下内边距 + 分隔线 + 卡片底部留白）。 */
+private val NoteFieldChrome = 16.dp + 14.dp + 1.dp + 4.dp
+
 /** 输入框正文与提示字共用的字面（两者行高必须一致，否则空框和有字时高度不同）。 */
-private val NoteTextStyle = TextStyle(fontSize = 14.sp, lineHeight = 20.sp)
+private val NoteTextLineHeight = 23.sp
+private val NoteTextStyle = TextStyle(fontSize = 16.sp, lineHeight = NoteTextLineHeight)
 
 /** 自绘光标的宽度与闪烁周期（毫秒）：硬开关，不做系统光标那种透明度渐变。 */
 private val CaretWidth = 2.dp
@@ -344,4 +526,6 @@ internal fun rememberSheetReveal(visible: Boolean, imePx: Float, gateOnIme: Bool
         label = "annotationSheetReveal",
     ).value
 }
+
+
 

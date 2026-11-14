@@ -52,18 +52,10 @@ import org.junit.runners.Parameterized
  * `Paginator.resolveAvoidCut` / `tornByAtomic` 的「oversized blocks are allowed to tear」一致
  * ——本测试只锁「必须有字符前进」，不锁可见像素。
  */
-@RunWith(Parameterized::class)
-class OversizedReplacedPageProgressTest(private val variant: String) {
+class OversizedReplacedPageProgressTest {
 
-    companion object {
-        @JvmStatic
-        @Parameterized.Parameters(name = "breaker={0}")
-        fun variants() = breakerVariantParams()
-    }
 
-    @Before fun applyVariant() = applyBreakerVariant(variant)
 
-    @After fun resetVariant() = resetBreakerVariant()
 
     /** 全屏横向版心（设备 px）：min-height 3000 > 版心高 2560。 */
     private val contentW = 4920

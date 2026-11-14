@@ -42,6 +42,7 @@ import orilumn.reader.engine.laying.paddingBox
 import orilumn.reader.engine.laying.FlowedLine
 import orilumn.reader.engine.laying.LayoutBox
 import orilumn.reader.engine.laying.NormalFlowLayout
+import orilumn.reader.engine.laying.normalizeAnonymousRun
 import orilumn.reader.engine.laying.TableGridModel
 import orilumn.reader.engine.paging.BookLayout
 import orilumn.reader.engine.paging.BreakAwareBookLayout
@@ -54,6 +55,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
+
+/**
+ * 匿名 run 重建时的临时包装 tag：不是真实 HTML 标签，作者 CSS 命中不了它，
+ * 级联只从 `parent`（属主）继承，拆回 children 后不留痕迹。
+ */
+private const val ANON_RUN_WRAPPER_TAG = "#anonrun"
 
 /**
  * How a chapter's pages are cut, and — critically — **which pagination table the result feeds**.
@@ -177,30 +184,26 @@ class BoxChapterLayouter(
      * ## 为什么必须是**同一个对象**而不是两处各调一次工厂（2026-10-02，Q6 消解）
      *
      * 接线期是两个独立入口：重路径 `BoxLayouter(fs, heavyPathBreaker(...))`，
-     * 轻路径 `tableBreaker = SkiaParagraphBreaker(...)`。两处要维持一致就得长期维护两处接线 ——
-     * 而**两处接线正是当初重轻分叉的真正来源**（正文一接线，重路径的表格列宽跟着变体走，
-     * 轻路径却还钉在 Skia）。
+     * 轻路径 `tableBreaker = ...`。两处要维持一致就得长期维护两处接线 ——
+     * 而**两处接线正是当初重轻分叉的真正来源**（正文一接线，重路径的表格列宽跟着变，
+     * 轻路径却还钉在另一套实现）。
      *
      * 更要紧的是**它让锁打不出牙齿**：只走重路径的回归锁改轻路径的 `tableBreaker` **照样绿**
      * （轻路径的 breaker 只被 `LightPrepare` 消费，重路径压根不经过它 —— 这正是变异 MUT-I
      * 打不死锁的原因）。合实例之后，任何对断行器来源的改动都**同时**打到两条路。
      *
-     * ## 缓存键为什么是 `(profile, 变体)` 两个分量
+     * ## 缓存键为什么是 `(profile, 字距)` 两个分量
      *
      * `prepare()` 与 `prepareLight()` 是两个函数，各自拿到 [TypographicProfile] 形参，
-     * 而 [TypographicProfile.letterSpacingEm] 参与断行器构造 ⇒ **profile 变了必须重建**。
-     * 但**只按 profile 缓存是不够的**：断行器实例的**类**由 [orilumn.reader.engine.AbSwitch.inhouseBreak]
-     * 决定，而 layouter 的寿命是**整本书**、跨多次排版参数变更。拨一次 `ab="inhouseBreak=0/1"`
-     * 之后若还按 profile 命中缓存，就会继续发**旧变体**的实例 —— 于是「回退阀」在缓存命中时
-     * 静默失效，且 `paramHash` 变了会重排、重排却拿到同一套断行器。
-     * （这个缺陷是锁 7「轻路径也响应变体」当场抓出来的：两侧列宽完全相同。）
+     * 而 [TypographicProfile.letterSpacingEm] 参与断行器构造 ⇒ **profile 变了必须重建**；
+     * 本章实际生效的字距可能来自书（读者没配时）⇒ 单独进键，免得跨章串用。
      *
      * 判据同 `docs/自建断行引擎-测试计划.md` 教训 ⑩：键的每个分量都要能回答
      * 「它变了，那步昂贵操作真的需要重做吗」。`TypographicProfile` 是值对象，`equals` 可用。
      *
-     * ## 敢用变体量列宽的前提
+     * ## 敢用自建断行器量列宽的前提
      *
-     * 此前表格测宽恒为 Skia，理由是自建侧 `preferredWidth` 是接口默认桩
+     * 此前表格测宽恒为另一套实现，理由是自建侧 `preferredWidth` 是接口默认桩
      * `text.length * fontSizePx`（fs=44.4 下 Latin/URL 高估 2.0~2.6 倍）。该前提已由
      * [orilumn.reader.engine.skia.InhouseParagraphBreaker.preferredWidth] 接
      * `SkiaRunMeasurer.naturalWidth` 解除 —— 实测 CJK/URL/code/混排 **0.0000%**、
@@ -208,10 +211,9 @@ class BoxChapterLayouter(
      */
     private var cachedBreaker: Pair<BreakerKey, orilumn.reader.engine.laying.ParagraphBreaker>? = null
 
-    /** 断行器缓存键：profile + 变体 + **本章实际生效的字距**（读者没配时它来自书）。 */
+    /** 断行器缓存键：profile + **本章实际生效的字距**（读者没配时它来自书）。 */
     private class BreakerKey(
         val profile: TypographicProfile,
-        val inhouse: Boolean,
         val letterSpacingEm: Float,
     )
 
@@ -219,10 +221,9 @@ class BoxChapterLayouter(
         profile: TypographicProfile,
         letterSpacingEm: Float,
     ): orilumn.reader.engine.laying.ParagraphBreaker {
-        val inhouse = orilumn.reader.engine.AbSwitch.inhouseBreak()
-        val key = BreakerKey(profile, inhouse, letterSpacingEm)
+        val key = BreakerKey(profile, letterSpacingEm)
         cachedBreaker?.let { if (it.first == key) return it.second }
-        val made = orilumn.reader.engine.skia.bodyParagraphBreaker(letterSpacingEm, profile.cjkLatinSpacingEmApplied)
+        val made = orilumn.reader.engine.skia.bodyParagraphBreaker(letterSpacingEm, profile.cjkLatinSpacingEm)
         cachedBreaker = key to made
         return made
     }
@@ -653,6 +654,814 @@ class BoxChapterLayouter(
         return StyleComputer(profile.bodyPx, ua, sheets, theme, custom, ui, paragraphEm = profile.paragraphSpacingEm, gapScale = profile.paragraphGapScale, pxScale = profile.density)
     }
 
+    /**
+     * 载入重放（正文修改 v3）：用**与排版同一套级联**取每叶的样式化文本，把修订套到章树上，
+     * 并修正后续叶的字符起点（方案 §8.5）。只在内存里做，返回新树与修正后的叶表/起点；
+     * 调用方负责把结果写回 `unit.markup` 与结构缓存，**绝不落盘**。
+     *
+     * 之所以放在排版层：修订的叶内偏移必须与 `styledSegments` 的字符流同尺（空白归一、
+     * 边界空格合并、生成内容、`<br>` 槽位），自己另写一套必然与排版漂移。
+     *
+     * 只对**被改到的叶**做级联与重建；没改到的叶零成本（不解析样式）。
+     */
+    internal fun replayRevisions(
+        markup: MarkupElement,
+        cssBundle: CssBundle?,
+        profile: TypographicProfile,
+        contentW: Int,
+        contentH: Int,
+        structure: ChapterStructureCache,
+        leafPaths: List<IntArray?>,
+        editsForLeaf: (leafIndex: Int, leafStart: Int) -> List<orilumn.reader.engine.revision.LeafTextEditor.Edit>,
+        merges: List<orilumn.reader.engine.revision.ChapterRevisionReplay.Merge> = emptyList(),
+        blockOfLeaf: (leafIndex: Int) -> orilumn.reader.engine.revision.BlockKind? = { null },
+        /** 表格行叶 → 卡片提交时落库的目标格结构（见 [orilumn.reader.engine.revision.TableRowInfo]）。 */
+        tableOfRow: (MarkupElement) -> orilumn.reader.engine.revision.TableRowInfo? = { null },
+        /** 整表结构修订（删行 / 加行 / 删表 / 每行增删列）。 */
+        tableEdits: List<orilumn.reader.engine.revision.ChapterRevisionReplay.TableEdit> = emptyList(),
+    ): orilumn.reader.engine.revision.ChapterRevisionReplay.Result {
+        val styling = leafStyling(cssBundle, profile, contentW, contentH, structure)
+        return orilumn.reader.engine.revision.ChapterRevisionReplay.replay(
+            root = markup,
+            leaves = structure.leaves,
+            leafPaths = leafPaths,
+            charStarts = structure.globalCharStarts,
+            editsForLeaf = editsForLeaf,
+            segmentsOf = styling.segmentsOf,
+            wsOf = styling.wsOf,
+            styleOf = styling.styleOf,
+            merges = merges,
+            tableEdits = tableEdits,
+            anonymousEdit = anonymousRunEditor(styling),
+            rowEdit = tableRowEditor(styling),
+            tableOfRow = tableOfRow,
+            blockOfLeaf = blockOfLeaf,
+        )
+    }
+
+    /**
+     * 表格行叶的叶内重建（[orilumn.reader.engine.revision.ChapterRevisionReplay.replay] 的 `rowEdit`）：
+     * 新字必须落进**它原来所在的那一格**，不能写到 `td` 外面。
+     *
+     * 表格行的字符流是「各格文字按序拼接」（[orilumn.reader.engine.laying.NormalFlowLayout.tableRowSegments]），
+     * 通用的叶内重建只认整行文字：格界只是普通文本边界，紧贴格界的插入会落进前一格，
+     * 跨格的改动更是无处安放。这里按同一份 `cellBlocks` 口径把行文字切成格、再切成块，
+     * 逐块重建后原地拼回，格数 / 合并属性一个都不动。
+     *
+     * 卡片提交时落库了**目标格结构**（[orilumn.reader.engine.revision.TableRowInfo]，见
+     * `TextRevision.editedBlocks`）：新文字按目标格界分回各格，边界插入因此不会跑错格子。
+     * 拿不到目标结构（审阅视图 / 老修订）时按旧格界推断：纯插入落在格界上归**后一格**
+     * （读者在下一格开头落笔）。
+     *
+     * 只处理「格内块是格的直接子节点」或「格自己的直接内联内容」；遇到嵌套容器、修订跨块
+     * 这类对不上边界的情形返回 null（保留原叶、不猜），由调用方按原样处理。
+     */
+    private fun tableRowEditor(
+        styling: LeafStyling,
+    ): (MarkupElement, List<orilumn.reader.engine.revision.LeafTextEditor.Edit>, orilumn.reader.engine.revision.TableRowInfo?) ->
+    orilumn.reader.engine.revision.ChapterRevisionReplay.RowEdit? {
+        return { row, edits, target ->
+            runCatching { rebuildTableRow(row, edits, target, styling) }
+                .onFailure {
+                    Logger.w(
+                        "Orilumn.Revision",
+                        "table row edit failed: ${it::class.simpleName} ${it.message}",
+                    )
+                }
+                .getOrNull()
+        }
+    }
+
+    /** [rebuildTableRow] 里的一个块：行文里的区间、重建目标与匿名块的原始子节点区间。 */
+    private class RowBlock(
+        val el: MarkupElement,
+        val text: String,
+        val segments: orilumn.reader.engine.laying.StyledSegments,
+        val start: Int,
+        val endExclusive: Int,
+        /** 匿名块在格 `children` 里的原始区间；命名块为 null。 */
+        val sourceSpan: IntRange?,
+    )
+
+    private fun rebuildTableRow(
+        row: MarkupElement,
+        edits: List<orilumn.reader.engine.revision.LeafTextEditor.Edit>,
+        target: orilumn.reader.engine.revision.TableRowInfo?,
+        styling: LeafStyling,
+    ): orilumn.reader.engine.revision.ChapterRevisionReplay.RowEdit? {
+        val oldText = styling.segmentsOf(row).text
+        val cells = row.children.filter { it.tag == "td" || it.tag == "th" }
+        if (cells.isEmpty()) return null
+        // 逐格拆块（与 `tableRowCells` / `leafStreamText` 同一份 `cellBlocks`）。
+        val cellBlocks = ArrayList<List<orilumn.reader.engine.laying.TableCellBlock>>(cells.size)
+        val cellStart = IntArray(cells.size)
+        val cellEnd = IntArray(cells.size)
+        var at = 0
+        for ((i, cell) in cells.withIndex()) {
+            val blocks = orilumn.reader.engine.laying.NormalFlowLayout.cellBlocks(
+                cellEl = cell,
+                styles = emptyMap(),
+                classify = styling.classify,
+                hidden = styling.hidden,
+                genOf = styling.genOf,
+                resolveStyle = styling.styleOf,
+            )
+            cellStart[i] = at
+            at += blocks.sumOf { it.text.length }
+            cellEnd[i] = at
+            cellBlocks.add(blocks)
+        }
+        if (at != oldText.length) return null
+
+        val sorted = edits.sortedBy { it.start }
+        val newText = orilumn.reader.engine.revision.LeafTextEditor.applyEdits(oldText, sorted)
+        // 目标格结构只有在它正好盖住新行文字时才能用（长度对不上 = 不是这一行的）。
+        val wanted = target?.takeIf { it.cells.size == cells.size && it.covers(newText) }
+
+        // 每格要落成什么文字：有目标结构就按目标格界切，没有就按旧格界把修订分下去。
+        val newCellText = Array(cells.size) { "" }
+        // 旧格界分不下去的修订（跨格 / 边界对不上）：只影响多块格，单块格走整段最小替换。
+        val perCell = Array(cells.size) { ArrayList<orilumn.reader.engine.revision.LeafTextEditor.Edit>(1) }
+        if (wanted != null) {
+            for (i in cells.indices) {
+                val c = wanted.cells[i]
+                newCellText[i] = newText.substring(c.start, c.endExclusive)
+            }
+        } else {
+            for (e in sorted) {
+                val ci = locateRange(cellStart, cellEnd, e.start, e.endExclusive) ?: return null
+                perCell[ci].add(
+                    orilumn.reader.engine.revision.LeafTextEditor.Edit(
+                        start = e.start - cellStart[ci],
+                        endExclusive = e.endExclusive - cellStart[ci],
+                        text = e.text,
+                        styles = e.styles,
+                    ),
+                )
+            }
+            for (i in cells.indices) {
+                val base = oldText.substring(cellStart[i], cellEnd[i])
+                newCellText[i] = orilumn.reader.engine.revision.LeafTextEditor.applyEdits(base, perCell[i])
+            }
+        }
+
+        var degraded = false
+        val cellOf = HashMap<MarkupElement, MarkupElement>(cells.size)
+        for ((ci, cell) in cells.withIndex()) {
+            val blocks = cellBlocks[ci]
+            val rowBlocks = ArrayList<RowBlock>(blocks.size)
+            var bt = 0
+            for (b in blocks) {
+                val end = bt + b.text.length
+                rowBlocks.add(RowBlock(b.el, b.text, b.segments, bt, end, b.sourceSpan))
+                bt = end
+            }
+            val oldCellText = oldText.substring(cellStart[ci], cellEnd[ci])
+            val nextCellText = newCellText[ci]
+            if (nextCellText == oldCellText) {
+                cellOf[cell] = cell
+                continue
+            }
+            // 每块各自的修订：单块格按整格的「最小替换」重建（字符级对齐保住原节点与行内样式），
+            // 多块格只能按格界内的实际修订逐块落，分不清就返回 null。
+            val perBlock = Array(rowBlocks.size) {
+                ArrayList<orilumn.reader.engine.revision.LeafTextEditor.Edit>(1)
+            }
+            if (rowBlocks.size == 1) {
+                val p = commonPrefix(oldCellText, nextCellText)
+                val maxSuffix = minOf(oldCellText.length, nextCellText.length) - p
+                val suffix = commonSuffix(oldCellText, nextCellText, maxSuffix)
+                perBlock[0].add(
+                    orilumn.reader.engine.revision.LeafTextEditor.Edit(
+                        start = p,
+                        endExclusive = oldCellText.length - suffix,
+                        text = nextCellText.substring(p, nextCellText.length - suffix),
+                    ),
+                )
+            } else {
+                val cellEdits = if (wanted != null) {
+                    // 目标结构下要重新按旧格界分：跨格的那几条分不进任何一格。
+                    cellEditsWithin(sorted, cellStart[ci], cellEnd[ci]) ?: return null
+                } else {
+                    perCell[ci]
+                }
+                for (e in cellEdits) {
+                    val bi = locateRange(
+                        starts = IntArray(rowBlocks.size) { rowBlocks[it].start },
+                        ends = IntArray(rowBlocks.size) { rowBlocks[it].endExclusive },
+                        start = e.start,
+                        endExclusive = e.endExclusive,
+                        insertToNext = true,
+                    ) ?: return null
+                    perBlock[bi].add(
+                        orilumn.reader.engine.revision.LeafTextEditor.Edit(
+                            start = e.start - rowBlocks[bi].start,
+                            endExclusive = e.endExclusive - rowBlocks[bi].start,
+                            text = e.text,
+                            styles = e.styles,
+                        ),
+                    )
+                }
+                // 多块格：删掉的文字若把两块并成一块，这里不猜结构。
+                val afterBlocks = perBlock.mapIndexed { i, list ->
+                    orilumn.reader.engine.revision.LeafTextEditor.applyEdits(rowBlocks[i].text, list)
+                }
+                if (afterBlocks.sumOf { it.length } != nextCellText.length) return null
+                if (afterBlocks.joinToString("") != nextCellText) {
+                    // 文字对得上但分块对不上（读取时块界与目标格界不一致）：按单块整段重建，
+                    // 不能把新字硬塞进错误的块里。
+                    if (rowBlocks.size != 1) return null
+                }
+            }
+            // 未改到的块一个节点都不动；改到的块逐块重建，再按原始下标倒序拼回。
+            val splices = ArrayList<Pair<IntRange, List<MarkupElement>>>(perBlock.count { it.isNotEmpty() })
+            for ((bi, block) in rowBlocks.withIndex()) {
+                val blockEdits = perBlock[bi]
+                if (blockEdits.isEmpty()) continue
+                val span = block.sourceSpan
+                if (span == null) {
+                    if (block.el.parent !== cell) return null
+                    val index = cell.children.indexOfFirst { it === block.el }
+                    if (index < 0) return null
+                    val segments = styling.segmentsOf(block.el)
+                    if (segments.text != block.text) return null
+                    val r = orilumn.reader.engine.revision.LeafTextEditor.rebuild(
+                        leaf = block.el,
+                        segments = segments,
+                        edits = blockEdits,
+                        wsOf = styling.wsOf,
+                        styleOf = styling.styleOf,
+                        rebuildSegments = styling.segmentsOf,
+                    )
+                    if (r.degraded) degraded = true
+                    splices.add((index until index + 1) to listOf(r.leaf))
+                } else {
+                    // 匿名块：把源区间包成临时包装，借用叶级重建，再把新节点拆回格子。
+                    if (span.first < 0 || span.last >= cell.children.size) return null
+                    val wrapper = MarkupElement(
+                        tag = ANON_RUN_WRAPPER_TAG,
+                        children = cell.children.subList(span.first, span.last + 1).toList(),
+                    )
+                    wrapper.parent = cell
+                    // 逐节点归一必须与块整段归一同一串字，否则按块重建的偏移会漂。
+                    if (styling.segmentsOf(wrapper).text != block.text) return null
+                    val r = orilumn.reader.engine.revision.LeafTextEditor.rebuild(
+                        leaf = wrapper,
+                        segments = block.segments,
+                        edits = blockEdits,
+                        wsOf = styling.wsOf,
+                        styleOf = styling.styleOf,
+                        rebuildSegments = styling.segmentsOf,
+                    )
+                    // rebuild 内部量长度时包装还没有父节点；接回格子后按真实级联再量一次。
+                    r.leaf.parent = cell
+                    if (styling.segmentsOf(r.leaf).text !=
+                        orilumn.reader.engine.revision.LeafTextEditor.applyEdits(block.text, blockEdits)
+                    ) {
+                        degraded = true
+                    }
+                    splices.add((span.first..span.last) to r.leaf.children)
+                }
+            }
+            if (splices.isEmpty()) {
+                cellOf[cell] = cell
+                continue
+            }
+            val kids = cell.children.toMutableList()
+            for ((range, nodes) in splices.sortedByDescending { it.first.first }) {
+                if (range.first < 0 || range.last >= kids.size) return null
+                kids.subList(range.first, range.last + 1).clear()
+                kids.addAll(range.first, nodes)
+            }
+            cellOf[cell] = MarkupElement(cell.tag, cell.attrs, kids)
+        }
+
+        val newRow = MarkupElement(
+            tag = row.tag,
+            attrs = row.attrs,
+            children = row.children.map { cellOf[it] ?: it },
+        )
+        // 量长度要按真实父链级联（格继承表 / 行的字体与 white-space）。
+        newRow.parent = row.parent
+        relinkParents(newRow)
+        val measured = styling.segmentsOf(newRow).text
+        return orilumn.reader.engine.revision.ChapterRevisionReplay.RowEdit(
+            leaf = newRow,
+            textLength = measured.length,
+            degraded = degraded || measured != newText,
+        )
+    }
+
+    /** 把一条修订按 [from, to) 格界裁出来；跨格的那条返回 null（不猜它该落哪一格）。 */
+    private fun cellEditsWithin(
+        edits: List<orilumn.reader.engine.revision.LeafTextEditor.Edit>,
+        from: Int,
+        to: Int,
+    ): List<orilumn.reader.engine.revision.LeafTextEditor.Edit>? {
+        val out = ArrayList<orilumn.reader.engine.revision.LeafTextEditor.Edit>(1)
+        for (e in edits) {
+            if (e.start >= from && e.endExclusive <= to) {
+                out.add(
+                    orilumn.reader.engine.revision.LeafTextEditor.Edit(
+                        start = e.start - from,
+                        endExclusive = e.endExclusive - from,
+                        text = e.text,
+                        styles = e.styles,
+                    ),
+                )
+            } else if (e.start < to && e.endExclusive > from) {
+                return null
+            }
+        }
+        return out
+    }
+
+    /**
+     * 按区间落在哪一项。
+     *
+     * @param insertToNext 纯插入正好落在界上时归**后一项**（读者在下一格 / 下一段开头落笔）；
+     *   false = 归前一项（叶内「新字跟左邻走」）。
+     */
+    private fun locateRange(
+        starts: IntArray,
+        ends: IntArray,
+        start: Int,
+        endExclusive: Int,
+        insertToNext: Boolean = false,
+    ): Int? {
+        for (i in starts.indices) {
+            if (start < starts[i] || endExclusive > ends[i]) continue
+            if (start == endExclusive && start == ends[i] && insertToNext && i + 1 < starts.size && starts[i + 1] == start) {
+                continue
+            }
+            return i
+        }
+        // 行尾 / 格尾的纯插入：归最后一项。
+        if (start == endExclusive && starts.isNotEmpty() && start == ends.last()) return starts.lastIndex
+        return null
+    }
+
+    private fun commonPrefix(a: String, b: String): Int {
+        val n = minOf(a.length, b.length)
+        var i = 0
+        while (i < n && a[i] == b[i]) i++
+        return i
+    }
+
+    private fun commonSuffix(a: String, b: String, max: Int): Int {
+        var i = 0
+        while (i < max && a[a.length - 1 - i] == b[b.length - 1 - i]) i++
+        return i
+    }
+
+    private fun relinkParents(node: MarkupElement) {
+        for (c in node.children) {
+            c.parent = node
+            relinkParents(c)
+        }
+    }
+
+    /**
+     * 匿名 run 叶的叶内重建：把该 run 的来源子节点 span 包成临时包装元素，交给
+     * [orilumn.reader.engine.revision.LeafTextEditor.rebuild] 逐段保留行内样式重建，再拆回属主
+     * 的 children。文本口径与排版严格同源（[normalizeAnonymousRun] / `styledSegments`）：
+     * 切点落在行内包装内部、run 含 `<br>` 等对不上原文本时返回 null，调用方保持原样、不猜。
+     */
+    private fun anonymousRunEditor(styling: LeafStyling): orilumn.reader.engine.revision.ChapterRevisionReplay.AnonymousRunEditor {
+        return { leaf, ordinal, edits ->
+            runCatching { rebuildAnonymousRun(leaf, ordinal, edits, styling) }
+                .onFailure {
+                    Logger.w(
+                        "Orilumn.Revision",
+                        "anon run edit failed: ${it::class.simpleName} ${it.message}",
+                    )
+                }
+                .getOrNull()
+        }
+    }
+
+    private fun rebuildAnonymousRun(
+        leaf: MarkupElement,
+        ordinal: Int,
+        edits: List<orilumn.reader.engine.revision.LeafTextEditor.Edit>,
+        styling: LeafStyling,
+    ): orilumn.reader.engine.revision.ChapterRevisionReplay.AnonymousRun? {
+        // 匿名叶是结构里合成的 #text，不在树里；属主是它的 parent（容器或行内包装）。
+        val owner = leaf.parent ?: return null
+        val oldText = styling.segmentsOf(leaf).text
+        val ws = styling.wsOf(leaf)
+        val spans = NormalFlowLayout.anonymousRunSpans(owner, styling.classify, styling.hidden)
+        val span = spans.getOrNull(ordinal) ?: return null
+        if (normalizeAnonymousRun(span.raw, ws) != oldText) return null
+        if (span.start < 0 || span.start >= span.endExclusive || span.endExclusive > owner.children.size) {
+            return null
+        }
+        val wrapper = MarkupElement(
+            tag = ANON_RUN_WRAPPER_TAG,
+            children = owner.children.subList(span.start, span.endExclusive).toList(),
+        )
+        // 包装不进树，只借 parent 链做级联（继承属主的字号 / white-space / 颜色等）。
+        wrapper.parent = owner
+        val before = styling.segmentsOf(wrapper)
+        // 逐节点归一必须与 run 整段归一同一串文字，否则下面按段重建的偏移会漂。
+        if (before.text != oldText) return null
+        val r = orilumn.reader.engine.revision.LeafTextEditor.rebuild(
+            leaf = wrapper,
+            segments = before,
+            edits = edits,
+            wsOf = styling.wsOf,
+            styleOf = styling.styleOf,
+            rebuildSegments = styling.segmentsOf,
+        )
+        // rebuild 内部量长度时包装还没有父节点；接回属主后按真实级联再量一次。
+        r.leaf.parent = owner
+        // 拼原文只看 run 的孩子们（包装 tag 本身可能是 `*{display:block}` 之类规则的靶子，
+        // 不能把它当行内子树根再走一遍判定）。
+        val raw = buildString {
+            for (c in r.leaf.children) append(NormalFlowLayout.inlineRunText(c, styling.classify, styling.hidden))
+        }
+        // 合成叶落回结构后走的是 run 整段归一（[normalizeAnonymousRun]），长度与文字都以它为准：
+        // 逐节点样式段的空白收尾（叶首/叶尾、`<br>` 两侧）与 run 归一是同一套规则，但**谁收的尾**
+        // 不同（前者按节点、后者按整段），所以终验必须在 run 空间比，不能拿逐节点文字去卡。
+        val rebuilt = normalizeAnonymousRun(raw, ws)
+        if (rebuilt != orilumn.reader.engine.revision.LeafTextEditor.applyEdits(oldText, edits)) return null
+        val length = rebuilt.length
+        return orilumn.reader.engine.revision.ChapterRevisionReplay.AnonymousRun(
+            owner = owner,
+            start = span.start,
+            endExclusive = span.endExclusive,
+            nodes = r.leaf.children,
+            rawText = raw,
+            textLength = length,
+            oldTextLength = oldText.length,
+        )
+    }
+
+    /**
+     * 选区上的行内结构（渲染空间）：返回**相对选区起点**的样式区间（规格 §3.1「取结构」）。
+     *
+     * 与重放、排版同一套级联（`leafStyling`），逐字归属跟着 `StyledSegments` 走；
+     * 选区跨叶时各叶的区间按叶起点平移，自然拼成一条。正文修改卡把它序列化成标记文字，
+     * 提交时再拿它当「原选区结构」做属性补回。属于排版层（上）。
+     */
+    internal fun inlineSpansOfRange(
+        cssBundle: CssBundle?,
+        profile: TypographicProfile,
+        contentW: Int,
+        contentH: Int,
+        structure: ChapterStructureCache,
+        from: Int,
+        to: Int,
+    ): List<orilumn.reader.engine.revision.InlineMarkup.StyleSpan> {
+        if (to <= from) return emptyList()
+        val styling = leafStyling(cssBundle, profile, contentW, contentH, structure)
+        val leaves = structure.leaves
+        val starts = structure.globalCharStarts
+        val out = ArrayList<orilumn.reader.engine.revision.InlineMarkup.StyleSpan>()
+        for (i in leaves.indices) {
+            val leafStart = starts.getOrElse(i) { 0L }.toInt()
+            val leafEnd = if (i + 1 < leaves.size) starts[i + 1].toInt() else Int.MAX_VALUE
+            if (leafEnd <= from || leafStart >= to) continue
+            val leaf = leaves[i]
+            val segments = styling.segmentsOf(leaf)
+            val localFrom = (from - leafStart).coerceIn(0, segments.text.length)
+            val localTo = (to - leafStart).coerceIn(0, segments.text.length)
+            if (localTo <= localFrom) continue
+            for (sp in orilumn.reader.engine.revision.InlineSpans.ofLeaf(
+                leaf = leaf,
+                segments = segments,
+                wsOf = styling.wsOf,
+                styleOf = styling.styleOf,
+                from = localFrom,
+                to = localTo,
+            )) {
+                // `InlineSpans.ofLeaf` 的区间相对**传进去的 localFrom**，卡片要的是「相对选区起点」。
+                // 两段口径不同：第一叶 localFrom = from - leafStart（位移为 0），第 2 叶起 localFrom
+                // 被夹到 0（位移 leafStart - from）。换算收在 [InlineSpans.toSelectionSpace] 一处，
+                // 免得「只补 leafStart - from」把第一叶的区间往前挪（读者复报的错位）。
+                out.addAll(
+                    orilumn.reader.engine.revision.InlineSpans.toSelectionSpace(
+                        spans = listOf(sp),
+                        leafStart = leafStart,
+                        localFrom = localFrom,
+                        selectionStart = from,
+                    ),
+                )
+            }
+        }
+        return out
+    }
+
+    /**
+     * 选区涉及的各块（渲染空间）：正文修改卡按它决定每行显示哪个块标记（`# ` / `> ` / `- `…）。
+     *
+     * 顺序与卡片切段（`selectionPiecesForEdit` 按 `chapterTextBlockEnds()` 切出的块）一一对应，
+     * 第一项是选区起点所在块。没有字的叶不出行、也不算一块（块尾会和前一块重复），这里跳过。
+     * 块形态只看**当前排版树**：重放之后的叶就是改后的形态，卡片回显的自然是书里现在的样子。
+     * 属于排版层（上）。
+     */
+    internal fun blockKindsOfRange(
+        cssBundle: CssBundle?,
+        profile: TypographicProfile,
+        contentW: Int,
+        contentH: Int,
+        structure: ChapterStructureCache,
+        blockEnds: IntArray?,
+        from: Int,
+        to: Int,
+    ): List<orilumn.reader.engine.revision.TextEditBlock> {
+        if (to <= from) return emptyList()
+        val leaves = structure.leaves
+        val starts = structure.globalCharStarts
+        val styling = leafStyling(cssBundle, profile, contentW, contentH, structure)
+        val out = ArrayList<orilumn.reader.engine.revision.TextEditBlock>()
+        for (i in leaves.indices) {
+            val leafStart = starts.getOrElse(i) { 0L }.toInt()
+            val leafEnd = if (i + 1 < leaves.size) starts[i + 1].toInt() else Int.MAX_VALUE
+            if (leafEnd <= from || leafStart >= to) continue
+            // 与卡片切段（`selectionPiecesForEdit`）**同口径**：块尾重复说明前一个叶没有字，
+            // 那种叶不出行、也不算一块；不跳过的话第二行起每行都会拿到下一块的形态。
+            if (blockEnds != null) {
+                val end = blockEnds.getOrNull(i) ?: Int.MAX_VALUE
+                val prev = if (i > 0) blockEnds.getOrNull(i - 1) else null
+                if (prev != null && end <= prev) continue
+            }
+            val leaf = leaves[i]
+            // 叶的章空间终点：块尾表里同下标的那个值就是（与 `blockEnds` 同尺）。
+            val leafTextEnd = blockEnds?.getOrNull(i)?.takeIf { it >= leafStart }
+                ?: if (i + 1 < leaves.size) starts[i + 1].toInt() else leafStart
+            out.add(
+                orilumn.reader.engine.revision.TextEditBlock(
+                    kind = orilumn.reader.engine.revision.BlockKind.ofElement(leaf),
+                    // 选区起点在这块开头（第一块）或之前（后面各块，按叶界切出来就是从块首起）。
+                    startsAtBlockStart = from <= leafStart,
+                    table = if (leaf.tag == "tr") tableRowInfoOf(leaf, styling) else null,
+                    image = leaf.tag == "img",
+                    ownTag = orilumn.reader.engine.revision.InlineSpans.ownTagOf(leaf),
+                    start = leafStart,
+                    endExclusive = leafTextEnd,
+                    tableRange = if (leaf.tag == "tr") {
+                        tableRangeOf(structure, blockEnds, i)
+                    } else {
+                        null
+                    },
+                ),
+            )
+        }
+        return out
+    }
+
+    /**
+     * 表格行叶 → 它所属**整张表**在章字符流里的区间（渲染空间；null = 不是表格行 / 拿不到块尾）。
+     *
+     * 行叶在叶表里连续（`NormalFlowLayout` 按文档序出叶），所以只要向前后扩到「同一张 `table`
+     * 祖先的行」为止。整表修改卡按它把选区扩到整张表（见 `TextEditBlock.tableRange`）。
+     */
+    internal fun tableRangeOf(
+        structure: ChapterStructureCache,
+        blockEnds: IntArray?,
+        leafIndex: Int,
+        starts: LongArray = structure.globalCharStarts,
+    ): IntRange? {
+        val row = structure.leaves.getOrNull(leafIndex) ?: return null
+        if (row.tag != "tr") return null
+        val table = generateSequence(row.parent) { it.parent }.firstOrNull { it.tag == "table" } ?: return null
+        fun isRowOfTable(el: MarkupElement): Boolean =
+            el.tag == "tr" && generateSequence(el.parent) { it.parent }.any { it === table }
+        var first = leafIndex
+        while (first > 0 && isRowOfTable(structure.leaves[first - 1])) first--
+        var last = leafIndex
+        while (last + 1 < structure.leaves.size && isRowOfTable(structure.leaves[last + 1])) last++
+        val start = starts.getOrNull(first)?.toInt() ?: return null
+        val end = when {
+            blockEnds != null && last < blockEnds.size -> blockEnds[last]
+            last + 1 < structure.leaves.size -> starts.getOrNull(last + 1)?.toInt() ?: return null
+            else -> return null
+        }
+        if (end <= start) return null
+        return start until end
+    }
+
+    /** 表格行叶 → 卡片里的格结构（提交校验与 `blockKindsOfRange` 共用同一份级联）。 */
+    internal fun tableRowInfoOf(
+        cssBundle: CssBundle?,
+        profile: TypographicProfile,
+        contentW: Int,
+        contentH: Int,
+        structure: ChapterStructureCache,
+        row: MarkupElement,
+    ): orilumn.reader.engine.revision.TableRowInfo? =
+        tableRowInfoOf(row, leafStyling(cssBundle, profile, contentW, contentH, structure))
+
+    /** 表格行叶 → 卡片里的格结构（格偏移按 [NormalFlowLayout.tableRowCells] 的文本长度累加）。 */
+    private fun tableRowInfoOf(
+        row: MarkupElement,
+        styling: LeafStyling,
+    ): orilumn.reader.engine.revision.TableRowInfo? {
+        val cells = orilumn.reader.engine.laying.NormalFlowLayout.tableRowCells(
+            row = row,
+            classify = styling.classify,
+            hidden = styling.hidden,
+            genOf = styling.genOf,
+            resolveStyle = styling.styleOf,
+        )
+        if (cells.isEmpty()) return null
+        var at = 0
+        val infos = cells.map { c ->
+            val end = at + c.textLength
+            orilumn.reader.engine.revision.TableCellInfo(
+                start = at,
+                endExclusive = end,
+                header = c.header,
+                rowspan = c.rowspan,
+                colspan = c.colspan,
+            ).also { at = end }
+        }
+        // 有合并格，或任何一格里有硬换行（`<br>`）：管道行装不下，退回基本 HTML 行。
+        val text = styling.segmentsOf(row).text
+        val html = cells.any { it.rowspan > 1 || it.colspan > 1 } ||
+            infos.any {
+                it.endExclusive <= text.length &&
+                    text.substring(it.start, it.endExclusive).indexOf('\n') >= 0
+            }
+        return orilumn.reader.engine.revision.TableRowInfo(infos, html)
+    }
+
+    /**
+     * 只投影指定叶的文本（原书空间、与排版同尺），不重放、不排版。
+     *
+     * 老修订补录「原文」用：修订区间落在原书空间，按叶起点定位后直接从这条叶文本里切片。
+     * 与 `chapterText` 走同一套级联（空白归一、生成内容、隐藏元素），不会因另写一套而错位。
+     */
+    internal fun originalLeafTexts(
+        cssBundle: CssBundle?,
+        profile: TypographicProfile,
+        contentW: Int,
+        contentH: Int,
+        structure: ChapterStructureCache,
+        leafIndices: Collection<Int>,
+    ): Map<Int, String> {
+        if (leafIndices.isEmpty()) return emptyMap()
+        val styling = leafStyling(cssBundle, profile, contentW, contentH, structure)
+        val out = HashMap<Int, String>(leafIndices.size)
+        for (i in leafIndices) {
+            val leaf = structure.leaves.getOrNull(i) ?: continue
+            out[i] = styling.segmentsOf(leaf).text
+        }
+        return out
+    }
+
+    /** 一片叶的**原书投影**：文字 + 行内结构（都是原书空间、与排版同尺）。 */
+    internal class LeafProjection(
+        val text: String,
+        val spans: List<orilumn.reader.engine.revision.InlineMarkup.StyleSpan>,
+    )
+
+    /**
+     * 只投影指定叶的文本**与行内结构**，不重放、不排版。
+     *
+     * 审阅视图的格式痕迹要用：字一个没改、只删掉 / 加上 `**`、`` ` ``、链接这类标记的修订，
+     * 得先知道这一段原来盖着哪些行内元素（见 `FormatTraces`）。与 [originalLeafTexts]
+     * 同一套级联、同一份 `LeafTextEditor.ownersOf` 归属，所以屏幕上的字和这里的区间一一对应。
+     */
+    internal fun originalLeafProjections(
+        cssBundle: CssBundle?,
+        profile: TypographicProfile,
+        contentW: Int,
+        contentH: Int,
+        structure: ChapterStructureCache,
+        leafIndices: Collection<Int>,
+    ): Map<Int, LeafProjection> {
+        if (leafIndices.isEmpty()) return emptyMap()
+        val styling = leafStyling(cssBundle, profile, contentW, contentH, structure)
+        val out = HashMap<Int, LeafProjection>(leafIndices.size)
+        for (i in leafIndices) {
+            val leaf = structure.leaves.getOrNull(i) ?: continue
+            val segments = styling.segmentsOf(leaf)
+            out[i] = LeafProjection(
+                text = segments.text,
+                spans = orilumn.reader.engine.revision.InlineSpans.ofLeaf(
+                    leaf = leaf,
+                    segments = segments,
+                    wsOf = styling.wsOf,
+                    styleOf = styling.styleOf,
+                ),
+            )
+        }
+        return out
+    }
+
+    /**
+     * 重放与「只读原文」共用的叶级级联：叶文本、`white-space` 与完整样式一次建好，
+     * 调用方只消费，不各自再写一套（两处规则一旦漂移，补录的原文就会与排版错位）。
+     */
+    private class LeafStyling(
+        val segmentsOf: (MarkupElement) -> orilumn.reader.engine.laying.StyledSegments,
+        val wsOf: (MarkupElement) -> orilumn.reader.engine.css.WhiteSpace,
+        val styleOf: (MarkupElement) -> orilumn.reader.engine.css.ComputedStyle,
+        val classify: orilumn.reader.engine.laying.BlockClassify,
+        val hidden: orilumn.reader.engine.laying.HiddenCheck,
+        val genOf: orilumn.reader.engine.laying.GenOf,
+    )
+
+    private fun leafStyling(
+        cssBundle: CssBundle?,
+        profile: TypographicProfile,
+        contentW: Int,
+        contentH: Int,
+        structure: ChapterStructureCache,
+    ): LeafStyling {
+        val viewport = orilumn.reader.engine.css.CssViewport(contentW.coerceAtLeast(1), contentH.coerceAtLeast(1))
+        val sheets = structure.parsedAuthorSheets ?: parseAuthorSheets(cssBundle, viewport).also {
+            structure.parsedAuthorSheets = it
+        }
+        val engine = styleComputerFor(cssBundle, profile, sheets)
+        val classify = if (engine.hasDisplayDeclaration()) {
+            val displayCache = identityMap<MarkupElement, Boolean>()
+            BlockClassify { el ->
+                orilumn.reader.engine.laying.NormalFlowLayout.defaultBlock(el) ||
+                    engine.resolveDisplayOnly(el, displayCache)
+            }
+        } else {
+            orilumn.reader.engine.laying.NormalFlowLayout.DEFAULT_CLASSIFY
+        }
+        val hidden = hiddenCheckFor(engine)
+        val styleCache = HashMap<MarkupElement, orilumn.reader.engine.css.ComputedStyle>()
+        val styleOf: (MarkupElement) -> orilumn.reader.engine.css.ComputedStyle = { el ->
+            engine.resolve(el, styleCache)
+        }
+        val wsOf: (MarkupElement) -> orilumn.reader.engine.css.WhiteSpace = { el ->
+            engine.resolve(el, styleCache).whiteSpace
+        }
+        val genOf: orilumn.reader.engine.laying.GenOf = if (structure.genStrings.isEmpty()) {
+            orilumn.reader.engine.laying.EmptyGen
+        } else {
+            val pseudoCache = HashMap<Pair<MarkupElement, String>, orilumn.reader.engine.css.ComputedStyle?>()
+            orilumn.reader.engine.laying.GeneratedContent.genOf(structure.genStrings) { el, p ->
+                pseudoCache.getOrPut(el to p) {
+                    engine.pseudoStyle(
+                        el,
+                        orilumn.reader.engine.laying.ancestorsOf(el),
+                        engine.resolve(el, styleCache),
+                        p,
+                    )
+                }
+            }
+        }
+        // ::first-letter 只切段、不改文字长度；重放不需要它（少一次伪元素级联）。
+        val segmentsOf: (MarkupElement) -> orilumn.reader.engine.laying.StyledSegments = { leaf ->
+            when {
+                // 整块图片在字符流里只占一个 U+FFFC（与行内图同槽位），叶文本口径必须跟上，
+                // 否则重放侧删图时对不上长度。
+                leaf.tag == "img" ->
+                    orilumn.reader.engine.laying.StyledSegments(
+                        listOf(orilumn.reader.engine.laying.StyledSegment(leaf, "\uFFFC")),
+                    )
+                // 表格行叶的文本是各格块文本按序拼接（`NormalFlowLayout.leafStreamText` 同源）：
+                // 正文修改卡要按它取行内标记、格子边界。
+                leaf.tag == "tr" -> orilumn.reader.engine.laying.NormalFlowLayout.tableRowSegments(
+                    row = leaf,
+                    classify = classify,
+                    hidden = hidden,
+                    genOf = genOf,
+                    resolveStyle = styleOf,
+                )
+                else -> orilumn.reader.engine.laying.styledSegments(
+                    root = leaf,
+                    wsOf = wsOf,
+                    isExcluded = hidden::isHidden,
+                    isBlock = classify::isBlock,
+                    leafWs = wsOf(leaf),
+                    genOf = genOf,
+                    styleOf = styleOf,
+                )
+            }
+        }
+        return LeafStyling(segmentsOf, wsOf, styleOf, classify, hidden, genOf)
+    }
+
+    /**
+     * 正文修改提交前的空白归一需要每叶的 `white-space`：与载入重放同一套级联，按需解析。
+     *
+     * 返回的 lambda 内部带样式缓存，一次提交里多次取叶不会重复级联；`parsedAuthorSheets` 与
+     * 重放共用（同一份 CSS 只 tokenize 一次）。属于排版层（上）。
+     */
+    internal fun whiteSpaceResolver(
+        cssBundle: CssBundle?,
+        profile: TypographicProfile,
+        contentW: Int,
+        contentH: Int,
+        structure: ChapterStructureCache,
+    ): (MarkupElement) -> orilumn.reader.engine.css.WhiteSpace {
+        val viewport = orilumn.reader.engine.css.CssViewport(contentW.coerceAtLeast(1), contentH.coerceAtLeast(1))
+        val sheets = structure.parsedAuthorSheets ?: parseAuthorSheets(cssBundle, viewport).also {
+            structure.parsedAuthorSheets = it
+        }
+        val engine = styleComputerFor(cssBundle, profile, sheets)
+        val styleCache = HashMap<MarkupElement, orilumn.reader.engine.css.ComputedStyle>()
+        return { el -> engine.resolve(el, styleCache).whiteSpace }
+    }
+
     /** Assembles a [ChapterPrepareResult] from a cascade + box tree, computing global char starts. */
     private fun buildPrepareResult(
         markup: MarkupElement,
@@ -737,7 +1546,7 @@ class BoxChapterLayouter(
             prepare.classify,
             prepare.hidden,
             prepare.letterSpacingEm,
-            profile.cjkLatinSpacingEmApplied,
+            profile.cjkLatinSpacingEm,
             profile.fgColor,
             prepare.genOf,
             prepare.firstLetterOf,
@@ -768,7 +1577,7 @@ class BoxChapterLayouter(
             }
             val tableWin = orilumn.reader.engine.skia.TableCellLines.expandTable(
                 frames, { prepare.styleMap[it] }, prepare.letterSpacingEm, profile.fgColor,
-                imageLoader, chapterHref, profile.cjkLatinSpacingEmApplied, profile.density,
+                imageLoader, chapterHref, profile.cjkLatinSpacingEm, profile.density,
             )
             BoxDrawableLayout(
                 BoxLayoutResult(lines, prepare.structure.boxes), shapes,
@@ -1070,8 +1879,6 @@ class BoxChapterLayouter(
         pagesToShape: Int = 4,
         cache: MutableMap<Int, ParagraphShapeRef>? = null,
         prefillL2: Map<Int, ParagraphShapeRef>? = null,
-        /** R20：锚页前先塑章首这么多块做暖机（0 = 关）。开书路径显式传，别的调用点不动。 */
-        warmupBlocks: Int = 0,
     ): ChapterLayouter.ChapterLayoutProduct {
         val totalPages = table.pages.size
         val startIdx = targetPage.coerceAtLeast(0)
@@ -1123,34 +1930,8 @@ class BoxChapterLayouter(
         // R3: l2hits counts published-neighbor hits (diagnostic for prefill effectiveness).
         var l2hits = 0
 
-        // R20 预热：开书锚页是冷进程里的**第一次** shape，先在章首塑 [0, warmupBlocks) 一小块，
-        // 两笔分别计时，锚页净变快才算赚。warmupBlocks=0 即完全关闭（默认），由调用方显式开。
-        //
-        // 【未证实，勿当定论】原注释写"付掉 class-load / JIT / 字体段落初始化这些固定项"——已被数据否证：
-        // 同一进程内相隔 0.7s 的两次开书，warmup 代码路径与块数完全相同，耗时却是
-        // ch4 warm(3 块)=346~419ms 对 ch0 warm(3 块)=30~37ms，差 11 倍。
-        // 固定成本模型（warm=F+3p、anchor=F+np）解出 p<0，自身就不成立。
-        // 也就是说这 350ms 是 ch4 自身前 3 块（章标题 h1 + 首段）的真实排版开销，
-        // 不是"暖机"。它是否换来锚页变快尚未做过 warmB=0 的冷开书 A/B，
-        // 在那之前这段预热只能算对锚页有利的一种猜测，见 docs/待分析-GIMP开书慢-结论清单.md。
-        var tWarm0 = 0L
-        var tWarm1 = 0L
-        var warmBlocks = 0
-        if (warmupBlocks > 0) {
-            val warmHi = warmupBlocks.coerceAtMost(prepare.totalBlocks)
-            if (warmHi > 0) {
-                tWarm0 = orilumn.reader.time.platformNowMs()
-                for (i in 0 until warmHi) tempShape(cache, prepare, i, profile, prefillL2)
-                tWarm1 = orilumn.reader.time.platformNowMs()
-                warmBlocks = warmHi
-            }
-        }
-
         val probe = ShapeProbe()
         val outerProbe = shapeProbe
-        // 注意置位点在暖机**之后**：probe 只统计锚页自己那几块（sBlocks 等于 blocks 数），
-        // 暖机的 3 块不计入，故 warm 的 CSS/Skia 成分目前无数据。
-        // 要拆 warm 需把这两行上移到暖机之前并分成两个 probe，届时 sBlocks 会出现 3+n。
         shapeProbe = probe
         // R26：block(i) 物化在 tempShape 里、在 shapeBlock 之外，原先两笔都盖不到它。
         // 实测它就是那 ~500ms 未归因的大头嫌疑（textLength 的 styledCharAdvance 是子集）。
@@ -1230,7 +2011,7 @@ class BoxChapterLayouter(
         val tBox1 = orilumn.reader.time.platformNowMs()
         val clipOf: (MarkupElement) -> ClipRect? = { boxes.clip[it] }
         val tSkia0 = orilumn.reader.time.platformNowMs()
-        val skiaLines = buildPartialSkiaWindow(prepare, leavesForDraw, localFirst, localShapes, localLines, prepare.letterSpacingEm, profile.cjkLatinSpacingEmApplied, profile.fgColor, clipOf, deviceScale = profile.density)
+        val skiaLines = buildPartialSkiaWindow(prepare, leavesForDraw, localFirst, localShapes, localLines, prepare.letterSpacingEm, profile.cjkLatinSpacingEm, profile.fgColor, clipOf, deviceScale = profile.density)
         val tSkia1 = orilumn.reader.time.platformNowMs()
         // 表格行展开进窗口（与 canonical/临时页同源 helper；行顶/行首取本窗 FlowedLine，char 章内；
         // 相邻同表行成组，rowspan 格边框跨行）。
@@ -1257,7 +2038,7 @@ class BoxChapterLayouter(
         val tTbl0 = orilumn.reader.time.platformNowMs()
         val incrWin = orilumn.reader.engine.skia.TableCellLines.expandTable(
             incrFrames, prepare::resolveStyle, prepare.letterSpacingEm, profile.fgColor,
-            imageLoader, chapterHref, profile.cjkLatinSpacingEmApplied, profile.density,
+            imageLoader, chapterHref, profile.cjkLatinSpacingEm, profile.density,
         )
         val tTbl1 = orilumn.reader.time.platformNowMs()
         val frameLeadTop = windowLeadTop(prepare, blockLo, localShapes)
@@ -1350,8 +2131,8 @@ class BoxChapterLayouter(
         )
         val tPg1 = orilumn.reader.time.platformNowMs()
         // R19: assembly segment breakdown (permanent diagnostic) — shape/lines/skia/tbl/box/pg.
-        // R20 附加：sStyles/sSkia 把 shape 段拆成 CSS 级联与 Skia 断行，sDepth 记被塑块最大嵌套深度，
-        // warm 记锚页前那笔暖机。**不要**往这里加堆/CPU 采样——已实测两者探针自身比被测对象贵
+        // R20 附加：sStyles/sSkia 把 shape 段拆成 CSS 级联与 Skia 断行，sDepth 记被塑块最大嵌套深度。
+        // **不要**往这里加堆/CPU 采样——已实测两者探针自身比被测对象贵
         // （见 [backfillBlockRanges] 里 R21 诊断注释），会把这一行自己变成瓶颈。
         Logger.w("Orilumn.Engine", "asm ch=${table.chapterIndex} page=$targetPage " +
             "shape=${tShape1 - tShape0}ms lines=${tLines1 - tLines0}ms skia=${tSkia1 - tSkia0}ms " +
@@ -1367,7 +2148,6 @@ class BoxChapterLayouter(
             "eBox=${probe.eBoxMs}ms eWid=${probe.eWidthMs}ms eCol=${probe.eColorMs}ms " +
             "eSty=${probe.eStyleMs}ms eRad=${probe.eRadiusMs}ms eBrd=${probe.eAnyBorder} " +
             "sBlocks=${probe.blocks} sEls=${probe.elements} sDepth=${probe.maxDepth} " +
-            "warm=${tWarm1 - tWarm0}ms warmB=$warmBlocks " +
             "linesN=${localLines.size} pagesN=${table.pages.size} " +
             "l2hits=$l2hits/${blockHi - blockLo}")
 
@@ -2833,7 +3613,7 @@ class BoxChapterLayouter(
         val clipOf: (MarkupElement) -> ClipRect? = { boxes.clip[it] }
         // Q1-b：临时页同样投影 skia 窗口（页内局部行序，行 y 已归一化到页首行 = 0）——
         // ReaderScreen 合流绘制，不再回落旧 StaticLayout 画法。
-        val skiaLines = buildPartialSkiaWindow(prepare, leavesForDraw, localFirst, shapes, lines, prepare.letterSpacingEm, prepare.profile.cjkLatinSpacingEmApplied, prepare.profile.fgColor, clipOf, deviceScale = prepare.profile.density)
+        val skiaLines = buildPartialSkiaWindow(prepare, leavesForDraw, localFirst, shapes, lines, prepare.letterSpacingEm, prepare.profile.cjkLatinSpacingEm, prepare.profile.fgColor, clipOf, deviceScale = prepare.profile.density)
         // 表格行展开进窗口（与 canonical 同源 helper；行顶/行首取本窗 FlowedLine，char 章内；
         // 相邻同表行成组，rowspan 格边框跨行）。
         val tempFrames = ArrayList<orilumn.reader.engine.skia.TableCellLines.RowFrame>()
@@ -2857,7 +3637,7 @@ class BoxChapterLayouter(
         }
         val tempWin = orilumn.reader.engine.skia.TableCellLines.expandTable(
             tempFrames, prepare::resolveStyle, prepare.letterSpacingEm, prepare.profile.fgColor,
-            imageLoader, chapterHref, prepare.profile.cjkLatinSpacingEmApplied, prepare.profile.density,
+            imageLoader, chapterHref, prepare.profile.cjkLatinSpacingEm, prepare.profile.density,
         )
         val tempEdgeGaps = windowLeadTop(prepare, blockStart, shapes)
         val layout = PartialDrawableLayout(
@@ -4054,8 +4834,8 @@ class LightPrepare(
             }
         }
         if (!anyFloat) return FloatEager(List(n) { null }, List(n) { null }, List(n) { 0 }, List(n) { true })
-        // S3：与重路径同一单源（浮动 lead 的宽度决定其宿主块宽，必须与正文同变体）。
-        val breaker = orilumn.reader.engine.skia.bodyParagraphBreaker(letterSpacingEm, profile.cjkLatinSpacingEmApplied)
+        // 与重路径同一单源（浮动 lead 的宽度决定其宿主块宽，必须与正文同一套度量）。
+        val breaker = orilumn.reader.engine.skia.bodyParagraphBreaker(letterSpacingEm, profile.cjkLatinSpacingEm)
         val pending = NormalFlowLayout.FloatPending()
         val out = ArrayList<orilumn.reader.engine.laying.FloatLead?>(n)
         val widths = ArrayList<Int?>(n)

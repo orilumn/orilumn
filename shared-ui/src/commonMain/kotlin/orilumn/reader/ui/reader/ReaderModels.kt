@@ -234,15 +234,30 @@ object ReaderMath {
      * 现在命中与落墨吃同一个 [DrawLine.firstLineIndentPx]，缩进原样交给 `LineHitTest`。
      */
     fun tapLineAt(lines: List<DrawLine>, shift: Int, tapX: Float, tapY: Float): Triple<DrawLine, Float, Float>? {
+        // 同一个 y 上可能并排着多个盒（表格一行的各格：每格都是独立 DrawLine，yTop/yBottom 相同）。
+        // 只按 y 取第一条会永远命中第一格 —— 读者点 / 拖到第二格以后都落在第一格上，
+        // 整表选不到最后一格（真机复报）。这里先按 y 筛，再按 x 落在谁的盒里挑谁；
+        // x 落在所有盒之外（格间缝隙 / 页边）时取横向最近的一条。
+        var nearest: DrawLine? = null
+        var nearestDistance = Float.MAX_VALUE
         for (line in lines) {
             val top = (line.yTop - shift).toFloat()
             val bottom = (line.yBottom - shift).toFloat()
-            if (tapY >= top && tapY < bottom) {
-                val xInParagraph = tapX - line.xLeft
-                return Triple(line, xInParagraph, tapY - top)
+            if (tapY < top || tapY >= bottom) continue
+            val left = line.xLeft.toFloat()
+            val right = left + line.lineWidthPx.coerceAtLeast(1)
+            if (tapX >= left && tapX < right) {
+                return Triple(line, tapX - line.xLeft, tapY - top)
+            }
+            val distance = if (tapX < left) left - tapX else tapX - right
+            if (distance < nearestDistance) {
+                nearestDistance = distance
+                nearest = line
             }
         }
-        return null
+        val line = nearest ?: return null
+        val top = (line.yTop - shift).toFloat()
+        return Triple(line, tapX - line.xLeft, tapY - top)
     }
 }
 

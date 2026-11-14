@@ -22,7 +22,7 @@ import org.jetbrains.skia.paragraph.TypefaceFontProvider
 /**
  * Single source for engine-skia's SkParagraph shaping configuration.
  *
- * G 阶段铁律（`docs/KMP+CMP迁移方案.md` §5 阶段1）：**度量（[SkiaParagraphBreaker]）与绘制
+ * G 阶段铁律（`docs/KMP+CMP迁移方案.md` §5 阶段1）：**度量（[InhouseParagraphBreaker]）与绘制
  * （S25 [LineWindowDrawer]）必须使用完全相同的 FontCollection / 字体 Family / OpenType 配置**，否则
  * 断行几何与绘制字形错位。本对象是这套配置的唯一出处：断行与绘制都从这里构造 [ParagraphStyle]。
  *
@@ -167,7 +167,7 @@ object SkParagraphFactory {
      * 条目类型收敛到 [SkiaFontPool.EmbeddedFont]（本方法只做“二进制→集合”装配， refresh/复用语义归池）。
      * resolve/fallback 全走 [resolveFamilies] 语义 —— 整条 CSS 栈交给 FontCollection 按字形逐族回退，
      * 具名族命中系统或内嵌注册即保留、未装即跳过。断行与绘制必须复用**同一实例**（G 阶段铁律），
-     * 宿主把它同时喂给 [SkiaParagraphBreaker] 与 [LineWindowDrawer]。
+     * 宿主把它同时喂给 [InhouseParagraphBreaker] 与 [LineWindowDrawer]。
      */
     fun embeddedFontCollection(fonts: List<SkiaFontPool.EmbeddedFont>): FontCollection {
         val collection = defaultCollection()
@@ -292,7 +292,7 @@ object SkParagraphFactory {
     /**
      * Builds the [TextStyle] of a single inline [orilumn.reader.engine.css.FontRun] segment — same config
      * as [paragraphStyle] but under the run's own face (families/tag/weight/italic/mono, plus an
-     * optional ink override for the draw-side color merge). Metric-only ([SkiaParagraphBreaker]) and
+     * optional ink override for the draw-side color merge). Metric-only ([InhouseParagraphBreaker]) and
      * draw ([LineWindowDrawer]) both shape the same runs from this single source, so measure and paint
      * can never drift on inline faces.
      *

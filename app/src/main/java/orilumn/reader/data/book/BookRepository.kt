@@ -3,6 +3,8 @@ package orilumn.reader.data.book
 import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.data.db.BookSort
 import orilumn.reader.data.db.LibraryDb
+import orilumn.reader.data.revision.TextRevision
+import orilumn.reader.data.revision.TextRevisionStore
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -15,7 +17,7 @@ import kotlinx.coroutines.flow.Flow
  */
 class BookRepository(
     private val db: LibraryDb,
-) {
+) : TextRevisionStore {
 
     /** Shelf sort enum: added time / read time / title. */
     enum class Sort {
@@ -71,4 +73,24 @@ class BookRepository(
     suspend fun updateAnnotation(annotation: Annotation) = db.updateAnnotation(annotation)
 
     suspend fun deleteAnnotation(id: Long) = db.deleteAnnotation(id)
+
+    // ---- 正文修订（schema v11；锚点为原书章内字符区间） ----
+
+    override suspend fun textRevisionsForChapter(bookId: Long, chapter: Int): List<TextRevision> =
+        db.textRevisionsForChapter(bookId, chapter)
+
+    override suspend fun textRevisionsForBook(bookId: Long): List<TextRevision> = db.textRevisionsForBook(bookId)
+
+    /** 同一次提交：删被吸收的旧修订 + 插新修订（同一事务）。 */
+    override suspend fun replaceTextRevisions(
+        deletedIds: List<Long>,
+        inserted: List<TextRevision>,
+    ): List<TextRevision> = db.replaceTextRevisions(deletedIds, inserted)
+
+    override suspend fun fillLegacyRevisionSnapshot(id: Long, originalText: String, editedText: String) =
+        db.fillLegacyRevisionSnapshot(id, originalText, editedText)
+
+    override suspend fun deleteTextRevision(id: Long) = db.deleteTextRevision(id)
+
+    override suspend fun deleteTextRevisionsForBook(bookId: Long) = db.deleteTextRevisionsForBook(bookId)
 }

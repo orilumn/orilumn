@@ -213,6 +213,19 @@ internal object JustifySlack {
             // `!isSoftHyphen(...)` 挡掉；分类收进 [Plan.levels] 后那处判据只剩这一次）。
             if (isSoftHyphen(text[start + k])) continue
             while (g < gapsForRange.size && gapsForRange[g].leftIndex < k) g++
+            // **被收进固定间隙的分隔空格：也不是可拉伸槽**（`levels[k]` 留 `-1`）。
+            //
+            // 那个字位的宽已被 [SkiaRunMeasurer.applyCjkLatinGaps] 置 0，它代表的距离
+            // **整份记在左邻槽**（`injected`，级 2）上 —— 一个空格记两次，额度就翻倍，
+            // 而且后果不是「缝宽了一点点」：两端对齐会把这个**零宽字位**重新撑开，
+            // 读者看到的就是「中西之间那道被删掉的空格又回来了」。
+            // 实测（`判断出 <code>customers</code> 的类型`，fs=44.5 两端对齐）：
+            // 间隙槽与空格槽各多 `1.04px`，随 `slack` 放大到 `0.5em` 量级，
+            // 与「两边的空格都在」这条真机报告逐像素吻合。
+            //
+            // ⚠ 判据只认 [CjkLatinGap.spaceCount]（**与施加侧同一份数**）：`spaceCount` 个
+            //   字位被置 0 就 `spaceCount` 个字位不可拉伸，不另立一套「哪些空格算被吃掉」。
+            if (g > 0 && k <= gapsForRange[g - 1].leftIndex + gapsForRange[g - 1].spaceCount) continue
             val injected = g < gapsForRange.size && gapsForRange[g].leftIndex == k
             val lv = levelOf(text, start + k, injected)
             levels[k] = lv

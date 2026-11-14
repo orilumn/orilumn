@@ -44,18 +44,10 @@ import org.junit.runners.Parameterized
  * 3. **真栅格化**：裁剪区外的墨被画布裁掉（还原逐行 `clipRect` 即变红）；
  * 4. **重轻两路同几何**：正典盒树算出的裁剪与临时页（窗口聚合）算出的裁剪 X 与高度逐值相同。
  */
-@RunWith(Parameterized::class)
-class OverflowClipTest(private val variant: String) {
+class OverflowClipTest {
 
-    companion object {
-        @JvmStatic
-        @Parameterized.Parameters(name = "breaker={0}")
-        fun variants() = breakerVariantParams()
-    }
 
-    @Before fun applyVariant() = applyBreakerVariant(variant)
 
-    @After fun resetVariant() = resetBreakerVariant()
 
     private val contentLeft = 20f
     private val contentWidth = 320
@@ -70,7 +62,7 @@ class OverflowClipTest(private val variant: String) {
         val engine = StyleComputer(16f, LightCssParser().parse(ua), emptyList())
         val styleMap = engine.compute(root)
         val classify = NormalFlowLayout.heavyClassify(styleMap, engine.hasDisplayDeclaration())
-        val result = BoxLayouter(16f, variantBreaker()).layoutBoxes(root, 600, styleMap, classify)
+        val result = BoxLayouter(16f, bodyParagraphBreaker()).layoutBoxes(root, 600, styleMap, classify)
         return Run(result, styleMap, classify)
     }
 

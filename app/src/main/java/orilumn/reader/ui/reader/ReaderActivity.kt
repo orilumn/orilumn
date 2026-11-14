@@ -43,10 +43,10 @@ import orilumn.reader.data.font.FontRepository
 import orilumn.reader.data.font.FontEntry
 import orilumn.reader.data.epub.TocItem
 import orilumn.reader.data.epub.ZipEpubResourceReader
+import orilumn.reader.data.revision.TextRevision
 import orilumn.reader.data.settings.BookSettingsStore
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.data.settings.ReaderSettingsStore
-import orilumn.reader.engine.AbSwitch
 import orilumn.reader.engine.BookDocumentController
 import orilumn.reader.engine.BookFileResolver
 import orilumn.reader.engine.text.SystemCjkSerif
@@ -131,6 +131,14 @@ class ReaderActivity : ComponentActivity() {
      */
     private var layoutRevision by mutableStateOf(0)
 
+    /**
+     * 审阅视图是否开着（底栏「审阅」按钮高亮 + 笔记面板「显示审阅模式」开关 + 阅读面投影改动痕迹）。
+     *
+     * 三个入口共用这一个状态；**默认打开**（2026-11-08 用户定口）：开书直接落在审阅空间，
+     * 省掉「先排正常视图再切」的那一次白排。没有修订的章两套空间逐字相同，不受影响。
+     */
+    private var reviewActive by mutableStateOf(true)
+
     private var settingsOpen by mutableStateOf(false)
     private var panelSettings by mutableStateOf(ReaderSettings.DEFAULT)
 
@@ -185,9 +193,6 @@ class ReaderActivity : ComponentActivity() {
         AppRoot.init(filesDir.absolutePath.toPath(), FileSystem.SYSTEM)
         // 崩溃落盘（幂等；直启阅读页同样需要，否则该路径的崩溃无堆栈）。
         orilumn.reader.engine.CrashLog.install(filesDir)
-        // R28：平台差异留在平台层——引擎侧只认 AbSwitch 的取值，不认识 intent。
-        // 必须在开书之前写；此处早于任何 layout 触发。格式见 AbSwitch.apply 的 KDoc。
-        AbSwitch.apply(intent?.getStringExtra(EXTRA_AB_SPEC))
         bookPath = intent?.getStringExtra(EXTRA_BOOK_PATH)
         bookId = intent?.getLongExtra(EXTRA_BOOK_ID, -1L) ?: -1L
         repository = AndroidDb.repository(this)
@@ -303,7 +308,7 @@ class ReaderActivity : ComponentActivity() {
                 // P2-b: 书内字体回调：整形前把本章 @font-face 字节并入池（首绘即对）。
                 c.onBookFonts = { fonts -> syncBookFonts(fonts) }
                 // Q1 遗留接线补齐：宿主在此装配（此前从未构造，ReaderScreen 恒取空快照 → 白屏）。
-                tabletHost = TabletReaderHost(c, bookId, repository)
+                tabletHost = TabletReaderHost(c, bookId, repository, initialReviewMode = reviewActive)
                 c
             }.getOrNull()
         }
@@ -394,6 +399,10 @@ class ReaderActivity : ComponentActivity() {
                     onSettings = { openSettingsPanel() },
                     onToc = { openPanel(ReaderPanelPage.Toc) },
                     onNote = { openPanel(ReaderPanelPage.Annotations) },
+                    onRevision = { openPanel(ReaderPanelPage.Revisions) },
+                    onReview = { toggleReviewMode() },
+                    reviewActive = reviewActive,
+                    nightActive = effective.scheme == "night",
                     onLightChange = { applyPhysicalBrightness(it) },
                     onLightCommit = { commitBrightness(it) },
                     onBarsVisibleChanged = { barsVisible = it; applySystemBars() },
@@ -438,6 +447,8 @@ class ReaderActivity : ComponentActivity() {
                     ReaderAnnotationPanel(
                         scheme = effective.scheme,
                         load = { tabletHost?.annotationsForBook() ?: emptyList() },
+                        // 开书后台预读的快照：抽屉第一帧就有清单，不再「先空白后填充」。
+                        initial = tabletHost?.cachedAnnotations(),
                         onDelete = { annotation ->
                             val ok = tabletHost?.deleteAnnotation(annotation.id) ?: false
                             // 删当前章的标注后，屏幕上的装饰也要同时消失（epoch 由阅读面单独重读）。
@@ -447,6 +458,50 @@ class ReaderActivity : ComponentActivity() {
                         onJump = { annotation -> annotationJump(annotation) },
                         chapterTitles = tocTitles,
                         currentChapter = currentPos?.chapter ?: 0,
+                        onDismiss = { closePanel() },
+                    )
+                },
+                revisionsContent = {
+                    ReaderRevisionPanel(
+                        scheme = effective.scheme,
+                        load = { tabletHost?.textRevisionsForBook() },
+                        // 开书后台预读的快照：抽屉第一帧就有清单，不再「先空白后填充」。
+                        initial = tabletHost?.cachedTextRevisions(),
+                        onRestoreAll = {
+                            when (val outcome = tabletHost?.restoreAllTextRevisions(currentPos)) {
+                                is TextRevisionDeleteOutcome.Success -> {
+                                    relayoutAnchor.release()
+                                    layoutRevision++
+                                    outcome.pos?.let { target ->
+                                        currentPos = target
+                                        externalPos = target
+                                    }
+                                    true
+                                }
+                                else -> false
+                            }
+                        },
+                        onDelete = { revision ->
+                            when (val outcome = tabletHost?.deleteTextRevision(revision, currentPos)) {
+                                is TextRevisionDeleteOutcome.Success -> {
+                                    // 正文变了：版式号 +1 强制当前页重取；删的是当前章时按宿主给的新落位走。
+                                    relayoutAnchor.release()
+                                    layoutRevision++
+                                    outcome.pos?.let { target ->
+                                        currentPos = target
+                                        externalPos = target
+                                    }
+                                    true
+                                }
+                                else -> false
+                            }
+                        },
+                        currentChapter = currentPos?.chapter ?: 0,
+                        onJump = { revision -> revisionJump(revision) },
+                        // 行摘要与正文审阅视图取同一份审阅空间数据（绿 `**` / 红 `## ` / ¶ 都在）。
+                        excerptOf = { revision ->
+                            tabletHost?.textRevisionReviewExcerpt(revision.chapter, revision.id)
+                        },
                         onDismiss = { closePanel() },
                     )
                 },
@@ -465,6 +520,9 @@ class ReaderActivity : ComponentActivity() {
                 onCommitLight = { commitSettings(it, typographyChanged = false) },
                 // 颜色滑条拖动中只应用不落盘：色槽与正文墨迹随手实时变，松手才写设置。
                 onPreviewLight = { liveApply(it) },
+                // 笔记面板「显示审阅模式」：与底栏「审阅」同一状态、同一个入口。
+                reviewActive = reviewActive,
+                onToggleReview = { toggleReviewMode() },
                 customThemes = customThemes,
                 onSaveTheme = { preset ->
                     val next = ReaderThemeMath.saveTheme(customThemes, preset.bg, preset.fg)
@@ -671,6 +729,45 @@ class ReaderActivity : ComponentActivity() {
         applySystemBars()
     }
 
+    /**
+     * 切换审阅视图（底栏「审阅」）：删除的字变红并划红色删除线，新增的字变绿。
+     *
+     * 排版层按「原文一字不删 + 新文字插在原区间之后」重排本章，所以改动的痕迹真的在版面上。
+     * 它只是排版前的一步预处理：分页表 / 页数 / 页快照照常读写（内容版本按空间分开），
+     * 页码照常算；只有**有修订的章**需要重排，没修订的章两种视图逐字相同、不动。
+     * 切换后按当前页同一处内容重新落位（两个方向共用一条换算），不把读者弹回章首——
+     * 大章先按当前页首那一行起一张临时页（页首不动），短章整章排完再落位。
+     */
+    private fun toggleReviewMode() {
+        val host = tabletHost ?: return
+        val from = currentPos ?: return
+        val fromChar = from.slice?.charStart ?: 0
+        val next = !reviewActive
+        lifecycleScope.launch {
+            // 切换与落位一步做完：换算在翻模式之前做，落位按新空间「页首最接近」选页。
+            val landed = withContext(Dispatchers.IO) {
+                host.switchReviewMode(next, from.chapter, fromChar)
+            }
+            val nowOn = host.isReviewMode()
+            // 模式没真的变（重复点按 / 没有修订可切）：不动版面，免得白刷一次。
+            if (nowOn == reviewActive) return@launch
+            reviewActive = nowOn
+            // 标注装饰与行文本的坐标空间都换了（原书/渲染 ↔ 审阅）：重读当前章标注，
+            // 版式号 +1 强制行/图/背景重取。
+            annotationsEpoch++
+            relayoutAnchor.release()
+            layoutRevision++
+            if (landed != null) {
+                currentPos = landed
+                externalPos = landed
+            }
+            Logger.w(
+                TAG,
+                "review mode -> $nowOn landed=${landed?.chapter}/${landed?.slice?.charStart}",
+            )
+        }
+    }
+
     /** 标注清单跳转：落到包含该标注起点的页（与目录跳转同口径），落位后保存进度并关面板。 */
     private fun annotationJump(annotation: Annotation) {
         panelPage = null
@@ -681,6 +778,24 @@ class ReaderActivity : ComponentActivity() {
             withContext(Dispatchers.Main) {
                 if (target != null) {
                     // 标注跳转是导航：改参锚点作废，下一次改参按新的当前页首取。
+                    relayoutAnchor.release()
+                    currentPos = target
+                    externalPos = target
+                }
+            }
+        }
+    }
+
+    /** 修订清单跳转：落到包含该修订起点的页（与标注清单同一跳转口径，原书→渲染由宿主换算）。 */
+    private fun revisionJump(revision: TextRevision) {
+        panelPage = null
+        applySystemBars()
+        val host = tabletHost ?: return
+        lifecycleScope.launch(Dispatchers.IO) {
+            val target = host.jumpToChar(revision.chapter, revision.charStart)
+            withContext(Dispatchers.Main) {
+                if (target != null) {
+                    // 清单跳转是导航：改参锚点作废，下一次改参按新的当前页首取。
                     relayoutAnchor.release()
                     currentPos = target
                     externalPos = target
@@ -1063,10 +1178,5 @@ class ReaderActivity : ComponentActivity() {
 /** Absolute path of the book file passed in when launching the reader from the bookshelf. */
 const val EXTRA_BOOK_PATH = "book_file_path"
 
-/**
- * R28：A/B 变体规格（`warm=3` 形式，逗号分隔多个），只被 [AbSwitch.apply] 消费。
- * 仅测量用；不传即生产默认。
- */
-const val EXTRA_AB_SPEC = "ab"
 /** Primary key of the book passed when launching the reader from the bookshelf (progress is stored/loaded only when >=0). */
 const val EXTRA_BOOK_ID = "book_id"

@@ -1,5 +1,6 @@
 package orilumn.reader.engine.text.preprocess
 
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -61,11 +62,80 @@ class CjkLatinSpacingTest {
             "中文°C",      // °U+00B0
             "中文©",      // ©U+00A9
             "中文«»",      // «»U+00AB/BB
-            "中　A",       // U+3000 表意空格（旧口径在 index 1 发间隙，插在空格**后面**）
+            // ⚠ `中　A`（U+3000 表意空格）2026-11-10 起**移出**本列表：它不再是「不参与」，
+            //   而是作为**空白**被吃掉并发出一条 `spaceCount = 1` 的间隙
+            //   （产品口径「接缝上一切空白一律删除」）。见下面 `all whitespace ... eaten`。
             "AＢ",         // ＢU+FF22 全角拉丁（旧口径判 CJK 侧）
         )) {
             assertEquals("'$s' 里没有任何一个标点/符号该参与混排", emptyList<CjkLatinGap>(), gapsOf(s))
         }
+    }
+
+    @Test
+    fun `closing bracket glued to latin counts as the western side`() {
+        // 真机 2026-11-10：同页两个 `main()` 长成两种宽度——`main()函数` 只剩盒内边距，
+        // `main() 函数` 多出一整格作者手打的空格（`)` 判 NONE ⇒ 接缝断在这里，空格吃不掉）。
+        // 2026-11-11 起判据换成「看括号内侧装什么」（见下一个用例），下面这些形状的 `)`
+        // 内侧是 `(` 或西文，结论不变，留作回归。
+        assertEquals(listOf(CjkLatinGap(5, 0.25f)), gapsOf("main()函数"))
+        assertEquals(listOf(CjkLatinGap(5, 0.25f, spaceCount = 1)), gapsOf("main() 函数"))
+        assertEquals(listOf(CjkLatinGap(2, 0.25f)), gapsOf("x()中"))
+        assertEquals(listOf(CjkLatinGap(8, 0.25f, spaceCount = 1)), gapsOf("println()\u00A0和"))
+        // 方括号 / 花括号 / 右尖括号同理。
+        assertEquals(listOf(CjkLatinGap(5, 0.25f)), gapsOf("arr[0]中"))
+        assertEquals(listOf(CjkLatinGap(4, 0.25f)), gapsOf("map{}中"))
+        assertEquals(listOf(CjkLatinGap(6, 0.25f)), gapsOf("List<T>中"))
+    }
+
+    @Test
+    fun `half-width brackets join the western side on both sides`() {
+        // 2026-11-11 产品裁决：半角括号本身就是西文字符，与汉字相邻时**里外都要**混排字距。
+        // 真机（交换「内」与 `{}`）：`大括号{}内` 两侧都没有混排字距，只剩 code 盒的内边距 ——
+        // 括号的字身里没有留白，「标点天然隔断」这条对它不成立。
+        assertEquals(
+            listOf(CjkLatinGap(2, 0.25f), CjkLatinGap(4, 0.25f)),
+            gapsOf("大括号{}内"),
+        )
+        assertEquals(listOf(CjkLatinGap(1, 0.25f)), gapsOf("函数()"))
+        assertEquals(listOf(CjkLatinGap(1, 0.25f)), gapsOf("名称(FQN)"))
+        assertEquals(
+            listOf(CjkLatinGap(1, 0.25f), CjkLatinGap(10, 0.25f)),
+            gapsOf("中文(English)后"),
+        )
+        // 作者手打的分隔空格照旧被吃掉、换成同一道间隙（与 `main() 函数` 同一条口径）。
+        assertEquals(
+            listOf(CjkLatinGap(2, 0.25f, spaceCount = 1), CjkLatinGap(5, 0.25f)),
+            gapsOf("大括号 {}内"),
+        )
+        // 内侧带空白的括号对装的是同一个东西（`( a )` 与 `(a)` 同判）。
+        assertEquals(listOf(CjkLatinGap(1, 0.25f)), gapsOf("函数( )"))
+        // 括号前作者手打的空格同样被吃掉、换成同一道间隙（左开括号那一侧）。
+        assertEquals(listOf(CjkLatinGap(1, 0.25f, spaceCount = 1)), gapsOf("中文 (English)"))
+    }
+
+    @Test
+    fun `brackets wrapping cjk content get gaps on their inner side too`() {
+        // 装汉字的括号同样按西文字符算：里侧（括号与汉字之间）照样要有间隙 ——
+        // 判据不按「里面装什么」分两套（用户 2026-11-11 纠正 `(中文)English`）。
+        assertEquals(
+            listOf(CjkLatinGap(4, 0.25f), CjkLatinGap(6, 0.25f)),
+            gapsOf("main(参数)"),
+        )
+        assertEquals(
+            listOf(CjkLatinGap(1, 0.25f), CjkLatinGap(2, 0.25f), CjkLatinGap(4, 0.25f)),
+            gapsOf("中文(中文)"),
+        )
+        assertEquals(
+            listOf(CjkLatinGap(0, 0.25f), CjkLatinGap(2, 0.25f)),
+            gapsOf("(中文)English"),
+        )
+        // 句读仍按「作者已给出间隔」隔断（2026-10-03 口径不变）。
+        assertTrue(gapsOf("中文,English").isEmpty())
+        assertTrue(gapsOf("中文 。").isEmpty())
+        // 尖括号不按括号处理：正文里它们同时是数学比较符号，作者手打的两侧空格要留住。
+        assertTrue(gapsOf("中文<目标名称>").isEmpty())
+        assertTrue(gapsOf("值 < 3").isEmpty())
+        assertTrue(gapsOf("3 > 值").isEmpty())
     }
 
     @Test
@@ -130,10 +200,154 @@ class CjkLatinSpacingTest {
         assertEquals(listOf(CjkLatinGap(0, 0.25f, spaceCount = 5)), gapsOf("A     中"))
     }
 
+    // ---- 中文标点接缝：吃空白、不发间隙（产品口径 2026-11-10）----
+
+    @Test
+    fun `punctuation seam eats the space but injects no gap`() {
+        // 用户原话：「中文标点与英文字符之间不要有额外的混排字距」。
+        // 全角标点的字身里本就带着半个字身的留白，再叠一道 0.25em 就成了一个空格宽的空档
+        // （真机 `Int。 Kotlin` 的实测缺陷）。所以：空白照吃（spaceCount），间隙宽 0。
+        assertEquals(listOf(CjkLatinGap(3, 0f, spaceCount = 1)), gapsOf("Int。 Kotlin"))
+        assertEquals(listOf(CjkLatinGap(2, 0f, spaceCount = 1)), gapsOf("中文， English"))
+        assertEquals(listOf(CjkLatinGap(0, 0f, spaceCount = 1)), gapsOf("。 Rust"))
+        // 相邻（没有空白可吃）= 无事可做，一条都不发（标点旁不插缝）。
+        assertTrue(gapsOf("Int。Kotlin").isEmpty())
+        assertTrue(gapsOf("中文，English").isEmpty())
+    }
+
+    @Test
+    fun `dash and ellipsis are not punctuation seams`() {
+        // 刻意不收 `—`/`―`/`…`：两侧留不留空白是作者的排版选择（`Rust — 中文` 很常见）。
+        assertTrue(gapsOf("Rust — 中文").isEmpty())
+        assertTrue(gapsOf("Rust…中文").isEmpty())
+    }
+
+    @Test
+    fun `eaten space slots are exactly the spaces gaps swallow`() {
+        // 复制 / 摘录按这张表摘字（原文与下标一个不动，只在「带走文字」时处理）。
+        assertArrayEquals(intArrayOf(2, 7), CjkLatinSpacing.eatenSpaceSlots("中文 Rust 的"))
+        assertArrayEquals(intArrayOf(4), CjkLatinSpacing.eatenSpaceSlots("Int。 Kotlin"))
+        assertArrayEquals(intArrayOf(1), CjkLatinSpacing.eatenSpaceSlots("中  A").copyOf(1))
+        assertArrayEquals(IntArray(0), CjkLatinSpacing.eatenSpaceSlots("中文English"))
+    }
+
+    @Test
+    fun `isEatenSpaceSlot agrees with the eaten slot table on every position`() {
+        // 命中侧（`LineHitTest`）用「只判一位」的 O(空白串长) 形式跳过不可选的接缝空白，
+        // 复制/摘录用整张表。两条实现必须逐位一致 —— 改判据漏改一处，症状是「复制干净了、
+        // 但拖手柄又能选中那段空白」这种只在真机上看得见的半修。
+        val corpus = listOf(
+            "中文 Rust 的",
+            "Int。 Kotlin",
+            "中  A",
+            "中 \u00A0A",
+            "中文English",
+            "中\tA",
+            "中\u3000A",
+            "中 A中文",
+            "中文 ",
+            " 中文A",
+            "A 中文",
+            "中文 — A",
+            "中文, A",
+            "中，A",
+            "Rust 的所有权",
+            "main() 函数",
+            "main()函数",
+            "中文(English)",
+            "中文 (English)",
+            "函数()",
+            "大括号 {}内",
+            "(中文)English",
+            "中文(中文)",
+            "(中文)后",
+            "main(参数)",
+            "\uD840\uDC00 A",
+            "中 A\uD840\uDC00",
+            "",
+        )
+        for (text in corpus) {
+            val eaten = CjkLatinSpacing.eatenSpaceSlots(text).toHashSet()
+            for (i in text.indices) {
+                assertEquals(
+                    "text=<$text> index=$i",
+                    i in eaten,
+                    CjkLatinSpacing.isEatenSpaceSlot(text, i),
+                )
+            }
+            // 越界位置一律 false（命中侧会拿 endExcl 之类问一句）。
+            assertTrue(!CjkLatinSpacing.isEatenSpaceSlot(text, -1))
+            assertTrue(!CjkLatinSpacing.isEatenSpaceSlot(text, text.length))
+        }
+    }
+
     @Test
     fun `half-width space and nbsp are one and the same run`() {
         // 两种分隔空格不分类，连续计数（否则 `中 \u00A0A` 会在 NBSP 处断链、少算一个）。
         assertEquals(listOf(CjkLatinGap(0, 0.25f, spaceCount = 2)), gapsOf("中 \u00A0A"))
+    }
+
+    // ---- 「接缝上的一切空白（换行除外）一律删除」（产品口径 2026-11-10）----
+    //
+    // 用户原话：「中英文边界（包括夹着一个html标签的情况），中间的所有空白字符
+    // （不包括换行符）均删除，由混排字距统一来做隔离」。
+    // 旧判据只认半角空格与 NBSP ⇒ 细空格/窄不断行空格/全角空格**既不被吃、也不成边界**
+    // （它们本身不是 CJK 也不是西文），接缝处于是留下一个**与滑块无关**的固定宽度 —— 滑块失灵。
+
+    @Test
+    fun `all whitespace kinds are eaten at the seam`() {
+        // 逐码点写死的那张表（见 [CjkLatinSpacing] 的 isSeparatingSpace KDoc）逐个验一遍。
+        val kinds = mapOf(
+            0x0009 to "TAB",
+            0x0020 to "SPACE",
+            0x00A0 to "NBSP",
+            0x1680 to "OGHAM SPACE MARK",
+            0x2002 to "EN SPACE",
+            0x2003 to "EM SPACE",
+            0x2007 to "FIGURE SPACE",
+            0x2009 to "THIN SPACE",
+            0x200A to "HAIR SPACE",
+            0x202F to "NARROW NBSP",
+            0x205F to "MEDIUM MATH SPACE",
+            0x3000 to "IDEOGRAPHIC SPACE 全角空格",
+        )
+        for ((cp, name) in kinds) {
+            val sp = cp.toChar()
+            assertEquals(
+                "$name(U+%04X) 该被吃成零宽并只留一条间隙".format(cp),
+                listOf(CjkLatinGap(0, 0.25f, spaceCount = 1)),
+                gapsOf("中${sp}A"),
+            )
+            // 反向也一样（西文在前，空白在中间）
+            assertEquals(
+                "$name(U+%04X) 反向".format(cp),
+                listOf(CjkLatinGap(0, 0.25f, spaceCount = 1)),
+                gapsOf("A${sp}中"),
+            )
+        }
+    }
+
+    @Test
+    fun `mixed whitespace kinds count as one run`() {
+        // 种类不分类，连续计数：半角空格 + 全角空格 + 细空格 = 3 个零宽槽。
+        assertEquals(listOf(CjkLatinGap(0, 0.25f, spaceCount = 3)), gapsOf("中 \u3000\u2009A"))
+        assertEquals(listOf(CjkLatinGap(0, 0.25f, spaceCount = 2)), gapsOf("中\u202F\u00A0A"))
+    }
+
+    @Test
+    fun `line breaks are never eaten`() {
+        // 「不包括换行符」：换行是硬断行（`<br>` / `<pre>` 的 `\n`），两侧的字不在同一行，
+        // 既不成边界、也不进 spaceCount。
+        for (nl in listOf('\n', '\r', '\u000B', '\u000C', '\u0085', '\u2028', '\u2029')) {
+            val code = nl.code
+            assertTrue("U+%04X 是换行，不得被吃".format(code), gapsOf("中${nl}A").isEmpty())
+            // 换行**夹在**空白串中间时，空白串在换行处断链 ⇒ 那一串空白成了行尾悬挂空白，
+            // 两端不在同一行，**一条间隙都不发**（吃了它反而会让下一行凭空缩进）。
+            assertTrue(
+                "U+%04X 把空白串断成两半后不该再成边界".format(code),
+                gapsOf("中 ${nl}A").isEmpty(),
+            )
+        }
     }
 
     @Test

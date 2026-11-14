@@ -8,6 +8,7 @@ import orilumn.reader.engine.laying.isDocumentSpace
 import orilumn.reader.engine.laying.isSoftHyphen
 import orilumn.reader.engine.laying.lineHeightPx
 import orilumn.reader.engine.laying.sliceInlineBoxEdges
+import orilumn.reader.engine.text.preprocess.CjkLatinGap
 import orilumn.reader.engine.text.preprocess.CjkLatinSpacing
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -96,6 +97,16 @@ internal class LineAligner(
          * 所以这里只**汇报结果**，判定仍在 plan 里，测试只读这个布尔。
          */
         val justifyCapped: Boolean = false,
+        /**
+         * 本行**实际施加**的混排间隙（行内局部下标，[CjkLatinSpacing.gapsForRange] 的产物）。
+         *
+         * 绘制侧只用它做一件事：**行内盒的底色不得吞掉右缘那道间隙**。
+         * 间隙加在边界字的 advance 上（[SkiaRunMeasurer.applyCjkLatinGaps]），而行内盒的
+         * 右内边距**也记在同一个字位**（[orilumn.reader.engine.laying.inlineBoxEdges]）⇒
+         * 盒的 border-box 右缘把间隙一起圈进底色，读者看到的是「盒变宽、后文紧贴盒边」，
+         * 而不是「中西之间有空隙」。见 [LineWindowDrawer.paintInlineBoxes]。
+         */
+        val cjkGaps: List<CjkLatinGap> = emptyList(),
     )
 
     /** 连字符左缘（= [Placement.trailStartX] − [Placement.hyphenWidth]）；无连字符时 −1。 */
@@ -134,12 +145,12 @@ internal class LineAligner(
         hyphenAtEnd: Boolean = false,
         cjkLatinSpacingEm: Float = 0f,
         /**
-         * 标点挤压上限（em，0 = 关）。默认读 [PunctuationSqueeze.appliedMaxEm] ——
+         * 标点挤压上限（em，0 = 关）。单源常量 [PunctuationSqueeze.DEFAULT_MAX_EM] ——
          * **与断行侧同一个来源**，所以两侧不可能一个挤一个不挤（量画同源，教训 ⑩）。
          *
          * 显式传参只给「要单独量一侧」的测试用；生产一律走默认值。
          */
-        punctuationSqueezeMaxEm: Float = PunctuationSqueeze.appliedMaxEm(),
+        punctuationSqueezeMaxEm: Float = PunctuationSqueeze.DEFAULT_MAX_EM,
         /**
          * 本行**实际施加的标点挤压比例**（`[0,1]`，0 = 不挤），来自
          * [orilumn.reader.engine.laying.BrokenLine.squeezeRatio]。
@@ -501,7 +512,11 @@ internal class LineAligner(
         //   否则 `capped` 会把「二次挤压已经补上的那道缺口」也算进去，于是明明补满了却报封顶
         //   （[LineAlignerTest] 的 `JUSTIFY 纯汉字行封顶后留缺口而不是撑字缝` 会当场红）。
         val capped = plan1 != null && (lineWidthPx - natural) - plan1.placed > 1e-3f
-        return Placement(xs, adv.copyOf(n), trailStartX, trailStartX, hyphenW, capped)
+        return Placement(
+            xs, adv.copyOf(n), trailStartX, trailStartX, hyphenW, capped,
+            // 间隙集合原样带出去：绘制侧要靠它把「落在盒右内边距里」的那段画到盒外。
+            cjkGaps = cjkGaps,
+        )
     }
 
     // 末字 run 字号取自**顶层** [lastRunSizePx]（与 [graftKerningOnto] 共用同一份定义 ——

@@ -33,6 +33,18 @@ class TextSelectionTest {
     }
 
     @Test
+    fun `unit never starts or ends on an eaten seam space`() {
+        // 中西接缝上被画成零宽的那个空格不进选区单位：留着它会让选区边缘多出一段纯空白
+        // （行内盒推进量记在「空格 → 后一个字」之间，`判断出 <code>customers</code>` 那 6px）。
+        // 这一整句本来会从 `。` 后面那个空格起手。
+        assertEquals("Kotlin 推断类型。", range("中。 Kotlin 推断类型。后面", 12))
+        // 句内的接缝空格照旧在区间里（那是句子的内容，选区按原文算）。
+        assertEquals("判断出 customers 的类型为", range("判断出 customers 的类型为", 0))
+        // 拉丁词不含两侧的分隔空白（与引入本条之前一致）。
+        assertEquals("customers", range("判断出 customers 的类型为", 6))
+    }
+
+    @Test
     fun `cjk selects the whole sentence and keeps closing quote`() {
         assertEquals("他说：“你好。”", range("他说：“你好。”下一句。", 4))
         assertEquals("他说：“你好。”", range("他说：“你好。”下一句。", 7))

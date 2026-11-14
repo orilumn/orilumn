@@ -1,0 +1,158 @@
+package orilumn.reader.engine.revision
+
+import orilumn.reader.engine.css.ComputedStyle
+import orilumn.reader.engine.css.WhiteSpace
+import orilumn.reader.engine.html.MarkupElement
+import orilumn.reader.engine.laying.StyledSegments
+
+/**
+ * 从排版叶取「行内结构」：把选区文字上覆盖的行内元素变成 [InlineMarkup.StyleSpan]
+ * （规格 §3.1「取结构」）。
+ *
+ * 与排版、字符投影**同源**：逐字归属直接复用 [LeafTextEditor.ownersOf]（同一份
+ * `StyledSegments` + 同一组 `wsOf` / `styleOf`），因此屏幕上的字和这里的字一一对应，
+ * 不会出现「选区七十字、标记只覆盖六十九个」的错位。
+ *
+ * 输出按 (起点升序、外层在前) 排好，可直接交给 [InlineMarkup.show]；也可以原样当「原选区结构」
+ * 传给 [InlineMarkup.restore] 做属性补回。
+ *
+ * 属于排版层（上）：纯逻辑，可 JVM 单测。
+ */
+object InlineSpans {
+
+    /**
+     * @param from / [to] 选区在叶文本里的区间（默认整叶）；返回的区间相对 [from]。
+     * @return 覆盖选区的行内元素区间；未知标签（不在 [InlineMarkup.ALLOWED_TAGS] 里）跳过
+     *   （写不回去的标记不显示，免得读者改完反而丢结构）。
+     */
+    fun ofLeaf(
+        leaf: MarkupElement,
+        segments: StyledSegments,
+        wsOf: (MarkupElement) -> WhiteSpace,
+        styleOf: ((MarkupElement) -> ComputedStyle?)? = null,
+        from: Int = 0,
+        to: Int = segments.text.length,
+    ): List<InlineMarkup.StyleSpan> {
+        if (to <= from || from < 0 || to > segments.text.length) return emptyList()
+        val owners = LeafTextEditor.ownersOf(segments, leaf, wsOf, styleOf)
+        val ranges = LinkedHashMap<MarkupElement, IntArray>()
+        for (i in from until to) {
+            val owner = owners[i]
+            var node: MarkupElement? = when (owner) {
+                // 文本节点本身不是元素：样式来自它的祖先；br / img 也不是行内装饰。
+                is LeafTextEditor.Owner.Text -> owner.node.parent
+                is LeafTextEditor.Owner.Marker -> owner.node.parent
+                // 生成内容（::before/::after、q 引号）由属主元素自己产生，属主算在内。
+                is LeafTextEditor.Owner.Generated -> owner.node
+            }
+            // 先由内向外收集，再反向记账：同一段区间上「外层先、内层后」，与标注顺序一致。
+            val chain = ArrayList<MarkupElement>(4)
+            while (node != null && node !== leaf) {
+                if (node.tag in InlineMarkup.ALLOWED_TAGS) chain.add(node)
+                node = node.parent
+            }
+            for (el in chain.asReversed()) {
+                val r = ranges.getOrPut(el) { intArrayOf(i, i) }
+                if (i < r[0]) r[0] = i
+                if (i > r[1]) r[1] = i
+            }
+        }
+        return ranges.entries
+            // **只包着图的行内元素不摊成标记**（`<span class="guiicon"> <span><img></span> </span>`
+            // 这类，中间的空白也算）：它对读者没有可改的内容，只是给那张图挂样式，包几层就藏几层。
+            // 卡片里再写一串标签，读者既看不懂，删掉标签还会把图的外层样式弄丢。它跟着占位字符
+            // 一起看：占位留着，元素原样保留；占位删掉，图没了，元素自己也会因为变空而被剪掉
+            // （见 `LeafTextEditor` §4.3）。
+            .filterNot { onlyImageSlots(owners, segments.text, it.value) }
+            .map { (el, r) ->
+                InlineMarkup.StyleSpan(r[0] - from, r[1] + 1 - from, sigOf(el))
+            }
+            .filter { it.endExclusive > it.start }
+            .sortedWith(compareBy({ it.start }, { -it.endExclusive }))
+    }
+
+    /**
+     * 这一叶**自己**就是一张卡片写得出标签的行内元素（书里用 `display:block` 把 `span` / `a`
+     * 这类元素做成独立一行）时，返回它的标签名；否则 null。
+     *
+     * 这类叶在正文里是**一块**（排版层按 CSS 的 `display` 切叶），但在书里它仍是一个行内元素：
+     * 卡片只把它那一行的字摆出来、不带标签，读者会以为书里的 `<span>` 凭空没了
+     * （读者复报「标题开头的 `<span>` 不显示」）。所以卡片按「整行包一层 `<tag>`」显示它。
+     *
+     * **只用于显示**：提交时这层包装由卡片侧摘掉（它不是修订里的结构——叶元素本来就留着），
+     * 见 `ReaderScreen.withoutOwnTags`。因此它也不进 [ofLeaf] 的返回值：`ofLeaf` 是「修订里
+     * 的行内结构」，叶自己不属于结构（`while (node !== leaf)`）。
+     *
+     * `p` / `h1..h6` / `li` / `pre` 归块形态管（[BlockKind]），空元素（`br` / `wbr`）没有内容，
+     * 表格行（`tr`）与格子（`td` / `th`）另有形状，都不在这里。
+     */
+    fun ownTagOf(leaf: MarkupElement): String? =
+        leaf.tag.takeIf {
+            !leaf.isText && it in InlineMarkup.ALLOWED_TAGS && it !in InlineMarkup.VOID_TAGS
+        }
+
+    /**
+     * 这个元素盖住的那几个字是不是**只有行内图占位**（`U+FFFC`）和空白。
+     *
+     * 空白要算进来：书里常写成 `<span class="guiicon"> <img> </span>`，两侧各留一个空格当间距。
+     * 光是图不算「有内容」，光有空白更不算；两样凑在一起仍然只是「给这张图挂样式」。
+     * `<br>` 不算空白（它是行内盒子，属于读者看得见的结构）。
+     */
+    private fun onlyImageSlots(
+        owners: List<LeafTextEditor.Owner>,
+        text: String,
+        range: IntArray,
+    ): Boolean {
+        var images = 0
+        for (i in range[0]..range[1]) {
+            val owner = owners[i]
+            if (owner is LeafTextEditor.Owner.Marker && owner.node.tag == "img") {
+                images++
+                continue
+            }
+            if (owner is LeafTextEditor.Owner.Text && text[i].isWhitespace()) continue
+            return false
+        }
+        return images > 0
+    }
+
+    /**
+     * 把「本叶内、相对 [localFrom]」的区间搬到**选区起点**坐标系（正文修改卡要的那把尺）。
+     *
+     * [ofLeaf] 返回的区间是相对传进去的 `from`（= 本叶的 [localFrom]）算的：
+     * 叶内绝对位置 `p` 变成 `p - localFrom`。卡片要的是相对**选区起点** `selectionStart`，
+     * 也就是 `leafStart + localFrom + p'`（`p'` 是 ofLeaf 给的值）再减去 `selectionStart`。
+     *
+     * 两段抵消关系不同，**不能只看叶首**：
+     * - 第一叶：选区就在这一叶里（或从这里起），`localFrom = selectionStart - leafStart`，位移为 0；
+     * - 第二叶起：选区从上一叶开始，`localFrom` 被夹到 0，位移是 `leafStart - selectionStart`。
+     * 早先按 `leafStart - selectionStart` 一刀切，第一叶只要不是从叶首起选就会把区间**往前挪**
+     * （读者复报的「第二段的标记挪到第一段上」就是这条）。
+     */
+    fun toSelectionSpace(
+        spans: List<InlineMarkup.StyleSpan>,
+        leafStart: Int,
+        localFrom: Int,
+        selectionStart: Int,
+    ): List<InlineMarkup.StyleSpan> {
+        val shift = leafStart + localFrom - selectionStart
+        if (shift == 0) return spans
+        return spans.map {
+            it.copy(start = it.start + shift, endExclusive = it.endExclusive + shift)
+        }
+    }
+
+    internal fun sigOf(el: MarkupElement): InlineMarkup.StyleSig {
+        val attrs = LinkedHashMap<String, String>()
+        for ((k, v) in el.attrs) {
+            if (k !in InlineMarkup.ALLOWED_ATTRS) continue
+            if (k == "style") {
+                val kept = InlineMarkup.filterStyle(v)
+                if (kept.isNotEmpty()) attrs[k] = kept
+            } else {
+                attrs[k] = v
+            }
+        }
+        return InlineMarkup.StyleSig(el.tag, attrs)
+    }
+}

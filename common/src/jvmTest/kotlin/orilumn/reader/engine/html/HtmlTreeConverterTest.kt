@@ -306,4 +306,28 @@ class HtmlTreeConverterTest {
         val values = ol.children.filter { it.tag == "li" }.map { it.attrs["value"] }
         assertEquals(listOf(null, "5", null), values)
     }
+
+    @Test
+    fun `body 直接子级的文字保留在文档序里`() {
+        // 只取 `children()` 会把直接挂在 body 下的文字整段丢掉：书里那一截既看不见，
+        // 也谈不上选中、修改。
+        val root = converter.convert(
+            "<html><body>卷首零散文字。<p>正文段落。</p><span>行内</span>卷尾零散文字。</body></html>",
+        )!!
+        val parts = root.children.filterNot { it.isText && it.text.isBlank() }
+            .map { if (it.isText) "#text" else it.tag }
+        assertEquals(listOf("#text", "p", "span", "#text"), parts)
+        assertEquals("卷首零散文字。", root.children.first().text)
+        assertEquals("卷尾零散文字。", root.children.last().text)
+    }
+
+    @Test
+    fun `body 里的纯排版空白不产文本节点`() {
+        // 常见书源会换行缩进 body 内容：这些空白不能变成正文里的空 run。
+        val root = converter.convert("<html><body>\n  <p>正文</p>\n  <p>第二段</p>\n</body></html>")!!
+        val visible = root.children.filterNot { it.isText && it.text.isBlank() }
+        assertTrue("只剩两块段落：${visible.map { it.tag }}", visible.all { it.tag == "p" })
+        // 空白文本节点留着与块级元素同一口径（排版侧把纯空白 run 丢成空），不能变成空块。
+        assertTrue("空白节点本身不含字", root.children.filter { it.isText }.all { it.text.isBlank() })
+    }
 }

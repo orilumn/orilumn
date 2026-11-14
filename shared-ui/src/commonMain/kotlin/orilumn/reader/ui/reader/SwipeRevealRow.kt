@@ -7,10 +7,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -99,8 +97,10 @@ internal fun SwipeRevealRow(
     val dragDir = remember { mutableFloatStateOf(0f) }
     val dragAccum = remember { mutableFloatStateOf(0f) }
     // latch 到共享 openKey：本行不再是展开行即弹簧收回（展开只由手指驱动）。
+    // 本来就收着（偏移为 0）时直接跳过：清单打开时每行都会跑一次这个 effect，
+    // 无谓的 0→0 弹簧会把整张清单多排几帧（实测每行约 8–10ms）。
     LaunchedEffect(openKey) {
-        if (openKey != rowKey) {
+        if (openKey != rowKey && (offsetX.value != 0f || overBest.value != 0f)) {
             offsetX.animateTo(0f, spring(stiffness = Spring.StiffnessMedium, dampingRatio = 0.7f))
             overBest.animateTo(0f, spring())
         }
@@ -108,7 +108,6 @@ internal fun SwipeRevealRow(
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .height(IntrinsicSize.Min)
             .clipToBounds(),
     ) {
         Box(

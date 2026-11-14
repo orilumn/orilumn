@@ -1,6 +1,7 @@
 package orilumn.reader.ui.reader
 
 import orilumn.reader.engine.skia.DrawLine
+import orilumn.reader.engine.text.preprocess.CjkLatinSpacing
 import kotlin.math.exp
 
 /**
@@ -161,17 +162,40 @@ internal fun selectionSideOffset(
     yPx: Float,
     direction: Int,
 ): Int? {
-    val line = lines.asSequence()
-        .filter { !it.range.isEmpty() }
-        .minByOrNull { line ->
+    val candidates = lines.filter { !it.range.isEmpty() }
+    val minDistance = candidates.minOfOrNull { line ->
+        val top = (line.yTop - shift).toFloat()
+        val bottom = (line.yBottom - shift).toFloat()
+        when {
+            yPx < top -> top - yPx
+            yPx >= bottom -> yPx - bottom
+            else -> 0f
+        }
+    } ?: return null
+    // 同一 y 上可能并排多行（表格一行的各格）：向右接续取最右一格，向左接续取最左一格。
+    // 只按 y 取第一条会永远落在第一格上 —— 跨页后选区反而退回每行的第一格。
+    val line = candidates
+        .filter { line ->
             val top = (line.yTop - shift).toFloat()
             val bottom = (line.yBottom - shift).toFloat()
-            when {
+            val distance = when {
                 yPx < top -> top - yPx
                 yPx >= bottom -> yPx - bottom
                 else -> 0f
             }
+            distance <= minDistance + 0.01f
+        }
+        .let { tied ->
+            if (direction < 0) tied.minByOrNull { it.xLeft } else tied.maxByOrNull { it.xLeft }
         } ?: return null
-    val index = if (direction < 0) line.range.first else line.range.last
+    // 靠边字可能正好是接缝上被画成零宽的分隔空白（`Int。 Kotlin` 那个空格挂在行首/行尾时）：
+    // 落上去等于给选区接一段纯空白，往内挪到第一个有墨的字（与 `LineHitTest` / 长按入口同判据）。
+    var index = if (direction < 0) line.range.first else line.range.last
+    if (direction < 0) {
+        while (index <= line.range.last && CjkLatinSpacing.isEatenSpaceSlot(line.text, index)) index++
+    } else {
+        while (index >= line.range.first && CjkLatinSpacing.isEatenSpaceSlot(line.text, index)) index--
+    }
+    if (index !in line.range) return null
     return line.charBase + index
 }

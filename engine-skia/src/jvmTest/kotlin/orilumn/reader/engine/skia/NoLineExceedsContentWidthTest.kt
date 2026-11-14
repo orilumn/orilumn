@@ -2,7 +2,6 @@ package orilumn.reader.engine.skia
 
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import orilumn.reader.engine.AbSwitch
 import orilumn.reader.engine.css.LightCssParser
 import orilumn.reader.engine.css.StyleComputer
 import orilumn.reader.engine.css.TextAlign
@@ -168,27 +167,13 @@ class NoLineExceedsContentWidthTest {
     }
 
     /**
-     * **自建侧**硬断言不溢出；**Skia 侧只记录不要求**（见下）。
+     * 硬断言：生产断行器的每一行都不得超出版心。
      *
-     * ## 为什么 Skia 臂只记录
-     *
-     * Skia 侧实测在窄版心下会溢出：超长单词 @80 溢出 **32.5px**、首行缩进 @120 溢出 **65.1px**
-     * —— `SkiaParagraphBreaker` 在段末**不做贪心填充**，把剩余整段作为最后一行。
-     * 那是**回退阀 + T1 逐值等价基线**的既有行为（[DefaultSideIsUnchangedTest] 守它逐值一致，
-     * 正是防漂移的那把锁），自建断行完成后会被删除。此处若对它硬断言，等于要求现在去改一个
-     * 即将删除的过渡实现 —— 所以只打印实测值留档，职责单一化为「自建侧不得溢出」。
-     *
-     * ## 为什么不能共用 `forEachBreakerVariant`
-     *
-     * 那个 fixture 遇错即止：`skia` 臂排在前，它一抛异常**自建臂根本没跑到**。第一版就因此
-     * 出现过「自建侧数据是从 skia 臂的现象反推出来」的错判。⇒ 这里手写循环，按臂分流。
+     * 只有一套断行实现 ⇒ 不再分臂、不再有「另一侧只记录不要求」的例外。
+     * 溢出在分页阅读器里就是**内容丢失**（无横向滚动条），故判据是硬断言而非打印留档。
      */
-    private fun assertNoOverflow(lines: List<Pair<Int, DrawLine>>, label: String, where: String) {
+    private fun assertNoOverflow(lines: List<Pair<Int, DrawLine>>, where: String) {
         val over = worstOverflow(lines)
-        if (label == "skia") {
-            println("  [回退阀/skia·仅记录] $where 实测溢出=$over px")
-            return
-        }
         assertTrue(
             "$where 自建侧有行超出版心 $over px。" +
                 "分页阅读器页宽固定，溢出部分被页面裁掉 = **内容丢失**" +
@@ -197,31 +182,19 @@ class NoLineExceedsContentWidthTest {
         )
     }
 
-    /** 两臂都跑完（不因回退臂失败而中止），逐臂分流断言。 */
+    /** 只有一套断行实现，跑一遍即可。 */
     private fun forEachArm(block: (ParagraphBreaker, String) -> Unit) {
-        for ((label, _) in breakerVariants()) {
-            try {
-                applyBreakerVariant(label)
-                block(bodyParagraphBreaker(letterSpacingEm = 0f), label)
-            } finally {
-                AbSwitch.resetForTest()
-            }
-        }
+        block(bodyParagraphBreaker(letterSpacingEm = 0f), "inhouse")
     }
 
     /** 真书正文：多档版心都不得溢出（含 JUSTIFY —— 拉伸后也必须正好铺满、不得右溢）。 */
     @Test
     fun `真书正文不得有行超出版心`() {
         forEachArm { breaker, label ->
-            applyBreakerVariant(label)
-            try {
-                for (w in intArrayOf(320, 700, 900, 1200, 1600)) {
-                    val lines = drawLines("<html><body>$realPara</body></html>", w, breaker, 44.4f)
-                    assertTrue("宽度 $w 下应有多行", lines.size >= 2)
-                    assertNoOverflow(lines, label, "宽度 $w")
-                }
-            } finally {
-                AbSwitch.resetForTest()
+            for (w in intArrayOf(320, 700, 900, 1200, 1600)) {
+                val lines = drawLines("<html><body>$realPara</body></html>", w, breaker, 44.4f)
+                assertTrue("宽度 $w 下应有多行", lines.size >= 2)
+                assertNoOverflow(lines, "宽度 $w")
             }
         }
     }
@@ -230,15 +203,10 @@ class NoLineExceedsContentWidthTest {
     @Test
     fun `不可断长串不得溢出`() {
         forEachArm { breaker, label ->
-            applyBreakerVariant(label)
-            try {
-                for (w in intArrayOf(120, 200, 500)) {
-                    val lines = drawLines("<html><body><p>$longUrl</p></body></html>", w, breaker, 44.4f)
-                    assertTrue("宽度 $w 下 URL 应被拆成多行", lines.size >= 2)
-                    assertNoOverflow(lines, label, "URL 宽度 $w")
-                }
-            } finally {
-                AbSwitch.resetForTest()
+            for (w in intArrayOf(120, 200, 500)) {
+                val lines = drawLines("<html><body><p>$longUrl</p></body></html>", w, breaker, 44.4f)
+                assertTrue("宽度 $w 下 URL 应被拆成多行", lines.size >= 2)
+                assertNoOverflow(lines, "URL 宽度 $w")
             }
         }
     }
@@ -247,15 +215,10 @@ class NoLineExceedsContentWidthTest {
     @Test
     fun `超长单词不得溢出`() {
         forEachArm { breaker, label ->
-            applyBreakerVariant(label)
-            try {
-                for (w in intArrayOf(80, 150, 400)) {
-                    val lines = drawLines("<html><body><p>$longWord</p></body></html>", w, breaker, 44.4f)
-                    assertTrue("宽度 $w 下长词应被拆成多行", lines.size >= 2)
-                    assertNoOverflow(lines, label, "长词宽度 $w")
-                }
-            } finally {
-                AbSwitch.resetForTest()
+            for (w in intArrayOf(80, 150, 400)) {
+                val lines = drawLines("<html><body><p>$longWord</p></body></html>", w, breaker, 44.4f)
+                assertTrue("宽度 $w 下长词应被拆成多行", lines.size >= 2)
+                assertNoOverflow(lines, "长词宽度 $w")
             }
         }
     }
@@ -296,25 +259,20 @@ class NoLineExceedsContentWidthTest {
     @Test
     fun `右对齐与居中加首行缩进不得右溢`() {
         forEachArm { breaker, label ->
-            applyBreakerVariant(label)
-            try {
-                for (w in intArrayOf(200, 400, 900, 1600)) {
-                    for (cls in listOf("r", "c")) {
-                        val html = "<html><body><ul class=\"$cls\"><li>Bec Rumbul，Rust 基金会执行董事" +
-                            "，本段带 2em 首行缩进。</li><li>$longWord 与 $longUrl 混排</li>" +
-                            "<li>第二项也要带缩进参与对齐探针，看看右缘是否越界。</li></ul></body></html>"
-                        val lines = drawLines(html, w, breaker, 44.4f)
-                        assertTrue("对齐=$cls 宽度 $w 下应有多行", lines.isNotEmpty())
-                        // 守卫：语料必须真的产生 RIGHT/CENTER 行，否则这把锁是假锁
-                        assertTrue(
-                            "对齐=$cls 宽度 $w 下必须真有非 JUSTIFY 行（实测 ${lines.map { it.second.alignment }.distinct()}）",
-                            lines.any { it.second.alignment != orilumn.reader.engine.css.TextAlign.JUSTIFY },
-                        )
-                        assertNoOverflow(lines, label, "对齐=$cls 缩进宽度 $w")
-                    }
+            for (w in intArrayOf(200, 400, 900, 1600)) {
+                for (cls in listOf("r", "c")) {
+                    val html = "<html><body><ul class=\"$cls\"><li>Bec Rumbul，Rust 基金会执行董事" +
+                        "，本段带 2em 首行缩进。</li><li>$longWord 与 $longUrl 混排</li>" +
+                        "<li>第二项也要带缩进参与对齐探针，看看右缘是否越界。</li></ul></body></html>"
+                    val lines = drawLines(html, w, breaker, 44.4f)
+                    assertTrue("对齐=$cls 宽度 $w 下应有多行", lines.isNotEmpty())
+                    // 守卫：语料必须真的产生 RIGHT/CENTER 行，否则这把锁是假锁
+                    assertTrue(
+                        "对齐=$cls 宽度 $w 下必须真有非 JUSTIFY 行（实测 ${lines.map { it.second.alignment }.distinct()}）",
+                        lines.any { it.second.alignment != orilumn.reader.engine.css.TextAlign.JUSTIFY },
+                    )
+                    assertNoOverflow(lines, "对齐=$cls 缩进宽度 $w")
                 }
-            } finally {
-                AbSwitch.resetForTest()
             }
         }
     }
@@ -326,15 +284,10 @@ class NoLineExceedsContentWidthTest {
     @Test
     fun `首行缩进吃掉版心时不得溢出`() {
         forEachArm { breaker, label ->
-            applyBreakerVariant(label)
-            try {
-                for (w in intArrayOf(120, 300, 900)) {
-                    val html = "<html><body><p class=\"ind\">$longWord 与 $longUrl 混排</p></body></html>"
-                    val lines = drawLines(html, w, breaker, 44.4f)
-                    assertNoOverflow(lines, label, "缩进宽度 $w")
-                }
-            } finally {
-                AbSwitch.resetForTest()
+            for (w in intArrayOf(120, 300, 900)) {
+                val html = "<html><body><p class=\"ind\">$longWord 与 $longUrl 混排</p></body></html>"
+                val lines = drawLines(html, w, breaker, 44.4f)
+                assertNoOverflow(lines, "缩进宽度 $w")
             }
         }
     }

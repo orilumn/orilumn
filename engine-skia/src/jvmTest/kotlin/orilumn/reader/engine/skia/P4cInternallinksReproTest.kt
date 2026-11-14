@@ -57,7 +57,7 @@ class P4cInternallinksReproTest {
         val engine = StyleComputer(16f, LightCssParser().parse(""), listOf(LightCssParser().parse(css)))
         val styleMap = engine.compute(root)
         val classify = NormalFlowLayout.heavyClassify(styleMap, engine.hasDisplayDeclaration())
-        val result = BoxLayouter(16f, SkiaParagraphBreaker(0f)).layoutBoxes(root, 600, styleMap, classify)
+        val result = BoxLayouter(16f, bodyParagraphBreaker(0f)).layoutBoxes(root, 600, styleMap, classify)
         val hidden = { el: orilumn.reader.engine.html.MarkupElement -> styleMap[el]?.displayNone == true }
         return Setup(root, styleMap, classify, DrawLineBuilder.build(result, styleMap, classify, hidden, 0f))
     }
@@ -152,7 +152,7 @@ class P4cInternallinksReproTest {
         val styleMap = engine.compute(root)
         val classify = NormalFlowLayout.heavyClassify(styleMap, engine.hasDisplayDeclaration())
         val hidden = { el: orilumn.reader.engine.html.MarkupElement -> styleMap[el]?.displayNone == true }
-        val result = BoxLayouter(16f, SkiaParagraphBreaker(0f)).layoutBoxes(root, 600, styleMap, classify)
+        val result = BoxLayouter(16f, bodyParagraphBreaker(0f)).layoutBoxes(root, 600, styleMap, classify)
         val lines = DrawLineBuilder.build(result, styleMap, classify, hidden, 0f)
         // 链接区间：sup 内 [1] 仍归属 a。
         val leaf = run {

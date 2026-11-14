@@ -7,7 +7,7 @@ import org.junit.Test
 
 /**
  * min-content 真度量（Skia 字形）与分段接线的回归护栏：
- * 断言的是**同源不变量**（min = 各断片 [SkiaParagraphBreaker.preferredWidth] 的最大者、
+ * 断言的是**同源不变量**（min = 各断片 [InhouseParagraphBreaker.preferredWidth] 的最大者、
  * min ≤ max、行内 face 段参与度量），而非硬编码宽度数字——字体由测试资源提供，
  * Chrome 实测标定见 `orilumn.reader.engine.laying.minContentSegments` 的文档与
  * `MinContentSegmentsTest`。
@@ -17,10 +17,10 @@ class MinContentWidthSkiaTest {
     private fun woff2(): ByteArray =
         javaClass.getResourceAsStream("/fonts/roboto-latin.woff2")!!.readBytes()
 
-    private fun withBreaker(block: (SkiaParagraphBreaker) -> Unit) {
+    private fun withBreaker(block: (InhouseParagraphBreaker) -> Unit) {
         try {
             assertTrue(SkiaFontPool.setEmbedded(listOf(SkiaFontPool.EmbeddedFont("Roboto", woff2()))))
-            block(SkiaParagraphBreaker(letterSpacingEm = 0f))
+            block(InhouseParagraphBreaker(letterSpacingEm = 0f))
         } finally {
             SkiaFontPool.setEmbedded(emptyList())
         }
@@ -28,9 +28,9 @@ class MinContentWidthSkiaTest {
 
     private val families = listOf("Roboto")
 
-    private fun SkiaParagraphBreaker.max(s: String) = preferredWidth(s, 20f, families, 400, false, false, emptyList())
+    private fun InhouseParagraphBreaker.max(s: String) = preferredWidth(s, 20f, families, 400, false, false, emptyList())
 
-    private fun SkiaParagraphBreaker.min(s: String, runs: List<FontRun> = emptyList()) =
+    private fun InhouseParagraphBreaker.min(s: String, runs: List<FontRun> = emptyList()) =
         minContentWidth(s, 20f, families, 400, false, false, runs)
 
     @Test

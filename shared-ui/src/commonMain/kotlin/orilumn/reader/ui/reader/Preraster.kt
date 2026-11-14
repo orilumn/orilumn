@@ -189,14 +189,23 @@ internal suspend fun prerasterPage(
     annotationChapter: Int = -1,
 ): Boolean {
     val rawLines: List<DrawLine> = runCatching { host.pageLines(pos) }.getOrNull().orEmpty()
+    // 审阅痕迹与行同一次读取（先取行）：两样必须属于同一空间，否则预栅进池的位图
+    // 是「有 ¶ 没颜色」的中间态（进出审阅时先黑后红/消失，见 rememberPageContent）。
+    val reviewMarks: List<ReviewMark> =
+        runCatching { host.reviewMarks(pos.chapter) }.getOrDefault(emptyList())
     // 与 rememberPageContent 同一条标注投影路径。调用方按 pos 所属章传（相邻章由预读提供）；
     // 章不匹配就**不投影**（宁缺勿串）——区间是章内偏移，拿别章的去投会画到错字上。
     val activeAnnotations =
         if (pos.chapter == annotationChapter) annotations else emptyList()
+    val decorRanges = if (reviewMarks.isEmpty()) {
+        annotationDecorRanges(activeAnnotations)
+    } else {
+        annotationDecorRanges(activeAnnotations) + reviewDecorRanges(reviewMarks)
+    }
     val lines: List<DrawLine> = projectDecor(
         rawLines,
         pos.chapter,
-        annotationDecorRanges(activeAnnotations),
+        decorRanges,
     )
     val pageImages: List<PageImage> = runCatching { host.pageImages(pos) }.getOrNull().orEmpty()
     val pageBackgrounds: List<PageBackground> = runCatching { host.pageBackgrounds(pos) }.getOrNull().orEmpty()

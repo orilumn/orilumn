@@ -41,6 +41,14 @@ class ChapterUnit(
      * [markup]; null until the body is parsed. */
     var cssBundle: CssBundle? = null
 
+    /**
+     * 本章是否有正文修订（载入重放已套到 [markup] 的**内存副本**上）。
+     *
+     * 有修订的章**禁止**回写结构缓存：磁盘上的树是原书，结构缓存若按改后的树重算并落盘，
+     * 下次开书会把修订套到已改的树上（双重修改，方案 §8.10 第二风险）。
+     */
+    var hasTextRevisions: Boolean = false
+
     /** Chapter name (taken from the first paragraph/title text, for log locating); empty when
      * markup isn't loaded. */
     var title: String = ""
@@ -78,6 +86,11 @@ class ChapterUnit(
     @Volatile
     internal var textProjectionInFlight: Boolean = false
 
+    /** 在算的那一笔对应的 [layoutEpoch]。版式换过代后旧结果注定被丢弃，此时必须允许按新代号
+     *  另起一笔，否则这一章会永远停在「没有整章文本」——长按选区静默失效。 */
+    @Volatile
+    internal var textProjectionEpoch: Long = -1L
+
     /**
      * 整章文本的**块尾偏移**（每个排版叶一段，cumulative endExclusive，长度 = 块数）。
      *
@@ -86,6 +99,15 @@ class ChapterUnit(
      */
     @Volatile
     internal var chapterTextBlockEndsCache: IntArray? = null
+
+    /**
+     * 整章文本里**中西接缝上被画成零宽的空白字位**（升序；整章偏移）。
+     *
+     * 文本本体一个字都没删（下标、标注、进度照常按含空白的原文算），这些位只是画成 0 宽。
+     * 复制 / 摘录按它摘掉，读者才不会在汉字与字母之间看到、带走一个空格。
+     */
+    @Volatile
+    internal var chapterTextSeamSpacesCache: IntArray? = null
 
     /** Disk-backed pagination table. Null when the table hasn't been computed yet (first open, or
      *  after a param change). Read by callers to determine which blocks to shape for a target page. */
@@ -213,6 +235,7 @@ class ChapterUnit(
         this.prepareResult = prepare
         this.chapterTextCache = null
         this.chapterTextBlockEndsCache = null
+        this.chapterTextSeamSpacesCache = null
         this.paramHash = hash
     }
 
@@ -230,6 +253,7 @@ class ChapterUnit(
         prepareResult = null
         chapterTextCache = null
         chapterTextBlockEndsCache = null
+        chapterTextSeamSpacesCache = null
         paginationTable = null
         inProgress = null
         tempRenderLayout = null
@@ -270,6 +294,7 @@ class ChapterUnit(
         prepareResult = null
         chapterTextCache = null
         chapterTextBlockEndsCache = null
+        chapterTextSeamSpacesCache = null
         markup = null
         blockShapeCache = null
         pageCache.clear()
@@ -278,6 +303,7 @@ class ChapterUnit(
         shapedPageFrom = -1
         shapedPageTo = -1
         laidOut = false
+        hasTextRevisions = false
         structureCache.reset()
     }
 }
@@ -437,6 +463,11 @@ class InProgressPagination(
     /** Structured (lazy) prepare result — leaf order/char starts + on-demand block style materialization —
      *  reused for all on-demand shaping in this phase. */
     val prepare: LightPrepare,
+    /**
+     * 会话出生时本章的内容版本（正文修订指纹）。正文改动后版本一换，这个会话在途算出来的
+     * 整章结果就是**上一份文字**的分页，绝不许再落表（`finishCanonicalBackground` 据此丢弃）。
+     */
+    val contentRev: Long = 0L,
 ) {
     /**
      * C2-P2b-4: temp-stream identity for prefill dispatch dedup (was `System.identityHashCode`,

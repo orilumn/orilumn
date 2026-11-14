@@ -1,7 +1,5 @@
 package orilumn.reader.engine.css
 
-import orilumn.reader.engine.AbSwitch
-
 import orilumn.reader.engine.html.MarkupElement
 
 /**
@@ -56,40 +54,25 @@ class StyleComputer(
         val LENGTH_TOKEN = Regex("(-?\\d+(?:\\.\\d+)?(?:px|em|rem|%))|auto")
 
         /**
-         * R29：`splitWs` 的**预编译**空白切分正则（仅在 `regexHoist` 开关打开时用）。
+         * `splitWs` 的**预编译**空白切分正则。
          *
          * 原实现是 13 处 `split(Regex("\\s+"))`——每次调用**现场 new 一个 Regex**，
-         * 走 `Pattern.compile`。这看起来是明摆着的浪费（同一模式编译上千次），
-         * 故 R29 拿它当靶子。
-         *
-         * **实测否证（R29，见 `docs/待分析-GIMP开书慢-结论清单.md` §3b.7）**：
-         * 同装机交叉 8+8 跑、锚点一致（12@21972），手工扫描替代版比预编译 `Pattern.split`
-         * **慢 8ms**（cEdge 中位 35.5ms vs 28ms，8/8 全分离）。手工扫描已删。
-         * 那批数据里两臂**都已**预编译，所以"现场 `Pattern.compile` 到底多贵"**仍未测**——
-         * 那是 `regexHoist` 这一刀要量的，别再拿手工扫描去代理它。
+         * 走 `Pattern.compile`。R29 曾想用它当性能靶子，但手工扫描替代版实测更慢
+         * （见 `docs/待分析-GIMP开书慢-结论清单.md` §3b.7），故只保留预编译这一件事。
          */
         private val WS_SPLIT = Regex("\\s+")
 
-        /** `border-radius` 的 `/` 或空白切分（同样只在 `regexHoist` 臂用）。 */
+        /** `border-radius` 的 `/` 或空白切分。 */
         private val RADIUS_SPLIT = Regex("\\s*\\/\\s*|\\s+")
 
-        /**
-         * CSS 空白切分。默认 = **R29 之前的原样行为**（现场 `Regex` 构造）。
-         *
-         * `regexHoist=1` 时改用 companion 里预编译的同一个模式——**语义完全相同**
-         * （同一个 pattern、同一份 `split` 调用），唯一差别是不再每次重新构造 `Regex`。
-         * 这是本轮唯一保留的改动面：可摘除、可回退、无行为风险。
-         */
-        fun splitWs(v: String): List<String> =
-            if (AbSwitch.regexHoist()) v.split(WS_SPLIT) else v.split(Regex("\\s+"))
+        /** CSS 空白切分（预编译模式，`split` 语义与现场构造完全相同）。 */
+        fun splitWs(v: String): List<String> = v.split(WS_SPLIT)
 
         /** `splitWs` 的 `limit = 4` 变体（[parseEdges] 只需前 4 槽）。 */
-        fun splitWsLimit4(v: String): List<String> =
-            if (AbSwitch.regexHoist()) v.split(WS_SPLIT, limit = 4) else v.split(Regex("\\s+"), limit = 4)
+        fun splitWsLimit4(v: String): List<String> = v.split(WS_SPLIT, limit = 4)
 
         /** `border-radius` 专用切分（模式是并集 `\s*\/\s*|\s+`，不能与空白切分共用）。 */
-        fun splitRadius(v: String): List<String> =
-            if (AbSwitch.regexHoist()) v.split(RADIUS_SPLIT) else v.split(Regex("\\s*\\/\\s*|\\s+"))
+        fun splitRadius(v: String): List<String> = v.split(RADIUS_SPLIT)
 
         /**
          * R29：`parseBorderColors` / `parseBorderStyles` 里的 4 侧 key 提为常量。

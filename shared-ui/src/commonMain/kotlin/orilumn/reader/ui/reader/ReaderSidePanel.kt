@@ -40,16 +40,16 @@ import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
 /**
- * 左停靠抽屉的两页（D-23）：目录与笔记共用一个壳，`☰` 落目录页、`✎` 落笔记页，
+ * 左停靠抽屉的三页（D-23）：目录、笔记与修订清单共用一个壳，`☰` 落目录页、`✎` 落笔记页，
  * 页内切换不关面板；当前页由平台壳记忆（会话内）。
  */
-enum class ReaderPanelPage { Toc, Annotations }
+enum class ReaderPanelPage { Toc, Annotations, Revisions }
 
 /**
- * 阅读侧边抽屉的共用壳（用户层）：遮罩 + 滑入动画 + 顶部两页控件 + ✕。
+ * 阅读侧边抽屉的共用壳（用户层）：遮罩 + 滑入动画 + 顶部三页控件 + ✕。
  *
  * 外观常量沿用原目录抽屉（顶条 52dp、宽度 <600dp 时 85% 否则 360dp、滑入 280ms、
- * 遮罩 40% 黑），**不因抽壳改手感**；两页的列表体各自处理键盘与焦点。
+ * 遮罩 40% 黑），**不因抽壳改手感**；各页的列表体各自处理键盘与焦点。
  */
 @Composable
 fun ReaderSidePanel(
@@ -60,6 +60,7 @@ fun ReaderSidePanel(
     onDismiss: () -> Unit,
     tocContent: @Composable () -> Unit,
     annotationsContent: @Composable () -> Unit,
+    revisionsContent: @Composable () -> Unit = {},
 ) {
     val p = paletteFor(scheme)
     val slide = remember { Animatable(1f) }
@@ -122,6 +123,11 @@ fun ReaderSidePanel(
                             PageTab("笔记", page == ReaderPanelPage.Annotations, p) {
                                 onPageChange(ReaderPanelPage.Annotations)
                             }
+                            Text("|", color = p.muted2, fontSize = 13.sp,
+                                modifier = Modifier.padding(horizontal = 6.dp))
+                            PageTab("修订", page == ReaderPanelPage.Revisions, p) {
+                                onPageChange(ReaderPanelPage.Revisions)
+                            }
                         }
                         Text("✕", color = p.text, fontSize = 18.sp, modifier = Modifier
                             .padding(10.dp)
@@ -132,6 +138,7 @@ fun ReaderSidePanel(
                         when (page) {
                             ReaderPanelPage.Toc -> tocContent()
                             ReaderPanelPage.Annotations -> annotationsContent()
+                            ReaderPanelPage.Revisions -> revisionsContent()
                         }
                     }
                 }

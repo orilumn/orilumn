@@ -3,6 +3,7 @@ package orilumn.reader.ui.reader
 import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.data.book.BookReadingState
 import orilumn.reader.data.book.BookRepository
+import orilumn.reader.data.bookmark.Bookmark
 import orilumn.reader.data.epub.TocItem
 import orilumn.reader.data.revision.TextRevision
 import orilumn.reader.engine.BookDocumentController
@@ -635,6 +636,40 @@ class TabletReaderHost(
     override suspend fun deleteAnnotation(id: Long): Boolean = try {
         repository.deleteAnnotation(id)
         annotationsSnapshot = null
+        true
+    } catch (c: CancellationException) {
+        throw c
+    } catch (_: Throwable) {
+        false
+    }
+
+    // ---- 书签：与标注同一分层（锚点原书空间，换版面不漂） ----
+
+    override suspend fun bookmarksForBook(): List<Bookmark>? = try {
+        repository.bookmarksForBook(bookId)
+    } catch (c: CancellationException) {
+        throw c
+    } catch (_: Throwable) {
+        // 读失败不能报成空表：书签清单要显示「读取失败，点此重试」而不是「还没有书签」。
+        null
+    }
+
+    override suspend fun addBookmark(bookmark: Bookmark): Bookmark? = try {
+        val now = System.currentTimeMillis()
+        repository.addBookmark(
+            bookmark.copy(
+                bookId = bookId,
+                createdAt = if (bookmark.createdAt == 0L) now else bookmark.createdAt,
+            ),
+        )
+    } catch (c: CancellationException) {
+        throw c
+    } catch (_: Throwable) {
+        null
+    }
+
+    override suspend fun deleteBookmark(id: Long): Boolean = try {
+        repository.deleteBookmark(id)
         true
     } catch (c: CancellationException) {
         throw c

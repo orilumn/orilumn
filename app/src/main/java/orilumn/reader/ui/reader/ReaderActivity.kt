@@ -37,6 +37,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import orilumn.reader.data.book.BookRepository
 import orilumn.reader.data.annotation.Annotation
+import orilumn.reader.data.bookmark.Bookmark
 import orilumn.reader.host.AndroidDb
 import orilumn.reader.host.AndroidFontScan
 import orilumn.reader.data.font.FontRepository
@@ -122,8 +123,23 @@ class ReaderActivity : ComponentActivity() {
     /** 标注外部变更号：清单里删掉一条后 +1，阅读面据此重读当前章、屏幕装饰同步消失。 */
     private var annotationsEpoch by mutableIntStateOf(0)
 
+    /** 书签外部变更号：清单里添加 / 删除后 +1，阅读面据此重读当前页图案。 */
+    private var bookmarksEpoch by mutableIntStateOf(0)
+
     /** 外部推送落位：版式重排绑定 / 目录跳转落地后置位，[ReaderScreen] 键变化即认领。 */
     private var externalPos by mutableStateOf<ReaderPos?>(null)
+
+    /**
+     * 外部推送序号：同一个目标反复推送（例如翻走后再点同一条书签）时，
+     * [ReaderScreen] 不能只靠 `externalPos` 的值变化来认领，否则值相等就静默吞掉。
+     */
+    private var externalEpoch by mutableIntStateOf(0)
+
+    /** 推送一次外部落位：位置与序号一起走，阅读面按二者认领。 */
+    private fun pushExternalPos(pos: ReaderPos) {
+        externalPos = pos
+        externalEpoch++
+    }
 
     /**
      * 版式版本号：每次重排绑定（整章/锚点临时）+1。字体等“只换字形不断行”的变更分页不变、
@@ -398,6 +414,7 @@ class ReaderActivity : ComponentActivity() {
                     },
                     onSettings = { openSettingsPanel() },
                     onToc = { openPanel(ReaderPanelPage.Toc) },
+                    onBookmark = { openPanel(ReaderPanelPage.Bookmarks) },
                     onNote = { openPanel(ReaderPanelPage.Annotations) },
                     onRevision = { openPanel(ReaderPanelPage.Revisions) },
                     onReview = { toggleReviewMode() },
@@ -407,9 +424,11 @@ class ReaderActivity : ComponentActivity() {
                     onLightCommit = { commitBrightness(it) },
                     onBarsVisibleChanged = { barsVisible = it; applySystemBars() },
                     externalPos = externalPos,
+                    externalEpoch = externalEpoch,
                     fallbackPos = currentPos,
                     contentRevision = layoutRevision,
                     annotationsEpoch = annotationsEpoch,
+                    bookmarksEpoch = bookmarksEpoch,
                     fontEntries = fontEntries,
                 )
             } else {
@@ -443,6 +462,25 @@ class ReaderActivity : ComponentActivity() {
                         pageNumberRevision = { tabletHost?.pageNumberRevision() ?: 0 },
                     )
                 },
+                bookmarksContent = {
+                    ReaderBookmarkPanel(
+                        scheme = effective.scheme,
+                        load = { tabletHost?.bookmarksForBook() },
+                        // 书签记的是「正在读的这一页」：添加动作只看当前定位，读者不必先去目录找位置。
+                        onAddCurrent = {
+                            currentPos?.let { tabletHost?.addBookmarkAt(it) }?.also { bookmarksEpoch++ }
+                        },
+                        onDelete = { bookmark ->
+                            val ok = tabletHost?.deleteBookmark(bookmark.id) ?: false
+                            if (ok) bookmarksEpoch++
+                            ok
+                        },
+                        onJump = { bookmark -> bookmarkJump(bookmark) },
+                        chapterTitles = tocTitles,
+                        currentChapter = currentPos?.chapter ?: 0,
+                        onDismiss = { closePanel() },
+                    )
+                },
                 annotationsContent = {
                     ReaderAnnotationPanel(
                         scheme = effective.scheme,
@@ -474,7 +512,7 @@ class ReaderActivity : ComponentActivity() {
                                     layoutRevision++
                                     outcome.pos?.let { target ->
                                         currentPos = target
-                                        externalPos = target
+                                        pushExternalPos(target)
                                     }
                                     true
                                 }
@@ -489,7 +527,7 @@ class ReaderActivity : ComponentActivity() {
                                     layoutRevision++
                                     outcome.pos?.let { target ->
                                         currentPos = target
-                                        externalPos = target
+                                        pushExternalPos(target)
                                     }
                                     true
                                 }
@@ -759,7 +797,7 @@ class ReaderActivity : ComponentActivity() {
             layoutRevision++
             if (landed != null) {
                 currentPos = landed
-                externalPos = landed
+                pushExternalPos(landed)
             }
             Logger.w(
                 TAG,
@@ -780,7 +818,7 @@ class ReaderActivity : ComponentActivity() {
                     // 标注跳转是导航：改参锚点作废，下一次改参按新的当前页首取。
                     relayoutAnchor.release()
                     currentPos = target
-                    externalPos = target
+                    pushExternalPos(target)
                 }
             }
         }
@@ -798,7 +836,30 @@ class ReaderActivity : ComponentActivity() {
                     // 清单跳转是导航：改参锚点作废，下一次改参按新的当前页首取。
                     relayoutAnchor.release()
                     currentPos = target
-                    externalPos = target
+                    pushExternalPos(target)
+                }
+            }
+        }
+    }
+
+    /** 书签跳转：落到该书签页首（与标注 / 修订清单同一跳转口径，原书→渲染由宿主换算）。 */
+    private fun bookmarkJump(bookmark: Bookmark) {
+        panelPage = null
+        applySystemBars()
+        val host = tabletHost ?: return
+        lifecycleScope.launch(Dispatchers.IO) {
+            val target = host.jumpToChar(bookmark.chapter, bookmark.charStart)
+            Logger.d(
+                TAG,
+                "bookmark jump id=${bookmark.id} ch=${bookmark.chapter} char=${bookmark.charStart} " +
+                    "-> ${target?.chapter}/${target?.slice?.charStart}",
+            )
+            withContext(Dispatchers.Main) {
+                if (target != null) {
+                    // 书签跳转是导航：改参锚点作废，下一次改参按新的当前页首取。
+                    relayoutAnchor.release()
+                    currentPos = target
+                    pushExternalPos(target)
                 }
             }
         }
@@ -816,7 +877,7 @@ class ReaderActivity : ComponentActivity() {
                     // 目录跳转是导航：改参锚点作废，下一次改参按新的当前页首取。
                     relayoutAnchor.release()
                     currentPos = target
-                    externalPos = target
+                    pushExternalPos(target)
                 }
             }
         }
@@ -935,7 +996,7 @@ class ReaderActivity : ComponentActivity() {
         // 先 bump 版式号：行/图/背景缓存键随之失效（pos 相等时也强制重取）。
         layoutRevision++
         currentPos = ReaderPos(r.chapter, r.page, atCover = currentPos?.atCover == true)
-        externalPos = ReaderPos(r.chapter, r.page, atCover = currentPos?.atCover == true)
+        pushExternalPos(ReaderPos(r.chapter, r.page, atCover = currentPos?.atCover == true))
     }
 
     // ---- Brightness (physical backlight; overlay drawn by ReaderScreen's ReaderLightMask) ----

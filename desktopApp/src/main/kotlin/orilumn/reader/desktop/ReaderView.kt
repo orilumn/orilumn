@@ -1,9 +1,11 @@
 package orilumn.reader.desktop
 
 import orilumn.reader.data.font.FontEntry
+import orilumn.reader.data.bookmark.Bookmark
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.ui.reader.FontScanProgress
 import orilumn.reader.ui.reader.ReaderAnnotationPanel
+import orilumn.reader.ui.reader.ReaderBookmarkPanel
 import orilumn.reader.ui.reader.ReaderHost
 import orilumn.reader.ui.reader.ReaderPanelPage
 import orilumn.reader.ui.reader.ReaderPos
@@ -16,6 +18,7 @@ import orilumn.reader.ui.reader.SnapshotReaderHost
 import orilumn.reader.ui.reader.TextRevisionDeleteOutcome
 import orilumn.reader.ui.reader.ThemePreset
 import orilumn.reader.ui.reader.chapterTitlesOf
+import orilumn.reader.ui.reader.addBookmarkAt
 import orilumn.reader.ui.shelf.ShelfBook
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.runtime.Composable
@@ -99,6 +102,8 @@ fun ReaderView(
     var panelLastPage by remember(book) { mutableStateOf(ReaderPanelPage.Toc) }
     /** 标注外部变更号：清单删除后 +1，阅读面重读当前章、屏幕装饰同步消失。 */
     var annotationsEpoch by remember(book) { mutableStateOf(0) }
+    /** 书签外部变更号：清单里添加 / 删除后 +1，阅读面据此重读当前页图案。 */
+    var bookmarksEpoch by remember(book) { mutableStateOf(0) }
     val scope = rememberCoroutineScope()
     fun commit(next: ReaderSettings) = onSettingsChange(next)
 
@@ -450,6 +455,7 @@ fun ReaderView(
             },
             onSettings = { settingsOpen = true },
             onToc = { panelPage = ReaderPanelPage.Toc; panelLastPage = ReaderPanelPage.Toc },
+            onBookmark = { panelPage = ReaderPanelPage.Bookmarks; panelLastPage = ReaderPanelPage.Bookmarks },
             onNote = { panelPage = ReaderPanelPage.Annotations; panelLastPage = ReaderPanelPage.Annotations },
             // 工具栏「修订」按钮：修订清单与平板同一抽屉页（此前桌面只能从目录/标注抽屉切过去）。
             onRevision = { panelPage = ReaderPanelPage.Revisions; panelLastPage = ReaderPanelPage.Revisions },
@@ -465,6 +471,7 @@ fun ReaderView(
             // 面板打开时按键留给面板，阅读面不翻页；面板关闭回阅读面即重夺焦点。
             keysEnabled = !settingsOpen && panelPage == null,
             annotationsEpoch = annotationsEpoch,
+            bookmarksEpoch = bookmarksEpoch,
             fontEntries = fontEntries,
         )
 
@@ -571,6 +578,33 @@ fun ReaderView(
                     // 目录页码（用户层）：与平板同一份数据，能算的才显示。
                     chapterStartPages = { desktopHost?.chapterStartPages() ?: IntArray(0) },
                     pageNumberRevision = { desktopHost?.pageNumberRevision() ?: 0 },
+                )
+            },
+            bookmarksContent = {
+                ReaderBookmarkPanel(
+                    scheme = settings.scheme,
+                    load = { desktopHost?.bookmarksForBook() },
+                    // 书签记的是「正在读的这一页」：添加动作只看当前定位。
+                    onAddCurrent = {
+                        currentPos?.let { desktopHost?.addBookmarkAt(it) }?.also { bookmarksEpoch++ }
+                    },
+                    onDelete = { bookmark ->
+                        val ok = desktopHost?.deleteBookmark(bookmark.id) ?: false
+                        if (ok) bookmarksEpoch++
+                        ok
+                    },
+                    onJump = { bookmark ->
+                        panelPage = null
+                        relayoutAnchor.release()
+                        scope.launch {
+                            val target = desktopHost?.jumpToChar(bookmark.chapter, bookmark.charStart)
+                                ?: return@launch
+                            pushLanding(target)
+                        }
+                    },
+                    chapterTitles = panelChapterTitles,
+                    currentChapter = currentPos?.chapter ?: 0,
+                    onDismiss = { panelPage = null },
                 )
             },
             annotationsContent = {

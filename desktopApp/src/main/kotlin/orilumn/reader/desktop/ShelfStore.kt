@@ -383,6 +383,16 @@ class DesktopShelfStore(root: File) : ShelfRepository, orilumn.reader.data.revis
     override suspend fun deleteTextRevisionsForBook(bookId: Long) =
         requireDb().deleteTextRevisionsForBook(bookId)
 
+    // ---- 书签（schema v15；桌面宿主只做转发，CRUD 语义在 LibraryDb） ----
+
+    suspend fun bookmarksForBook(bookId: Long): List<orilumn.reader.data.bookmark.Bookmark> =
+        requireDb().bookmarksForBook(bookId)
+
+    suspend fun addBookmark(bookmark: orilumn.reader.data.bookmark.Bookmark) =
+        requireDb().addBookmark(bookmark)
+
+    suspend fun deleteBookmark(id: Long) = requireDb().deleteBookmark(id)
+
     /** S32 `progress/{id}.json` 一次性导入，随后逐个删除旧文件。 */
     private suspend fun importLegacyProgressIfNeeded(library: LibraryDb) {
         if (!progressDir.isDirectory) return

@@ -1,0 +1,55 @@
+-- 书签（schema v15；迁移见 14.sqm）。
+--
+-- 锚点 = 章号 + 章内页首字符，与标注 / 阅读进度同源：书签记的是「哪一处内容」，
+-- 不是页号，换字号 / 边距 / 旋转后仍落在同一段文字上。
+-- quote 是创建当时那一页的原文摘录（清单行显示）；跳转只认 charStart。
+-- 没有外键级联：删书由 LibraryDb.removeBookAndData 在同一事务里清理本表。
+
+CREATE TABLE bookmarks(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bookId INTEGER NOT NULL,
+  chapter INTEGER NOT NULL,
+  charStart INTEGER NOT NULL,      -- 页首字符（含，原书空间）
+  charEnd INTEGER NOT NULL,        -- 页尾后一个字（不含；可为 charStart，页首落在图片上时）
+  quote TEXT,                      -- 创建当时的本页摘录
+  createdAt INTEGER NOT NULL,
+  CHECK (charStart >= 0),
+  CHECK (charEnd >= charStart)
+);
+
+CREATE INDEX bookmarks_by_book_chapter ON bookmarks(bookId, chapter, charStart);
+
+insertBookmark:
+INSERT INTO bookmarks(bookId, chapter, charStart, charEnd, quote, createdAt)
+VALUES (?, ?, ?, ?, ?, ?);
+
+-- 新增行的 id：与 books.lastInsertId 同因（Jdbc 驱动按语句取连接，last_insert_rowid 不可靠）。
+lastInsertBookmarkId:
+SELECT max(id) FROM bookmarks;
+
+-- 清单用：全书书签按章序、章内页首排序。
+bookmarksForBook:
+SELECT * FROM bookmarks
+WHERE bookId = ?
+ORDER BY chapter ASC, charStart ASC, id ASC;
+
+-- 同一页不重复加：按书 + 章 + 页首判。
+bookmarkAtPage:
+SELECT * FROM bookmarks
+WHERE bookId = ? AND chapter = ? AND charStart = ?
+ORDER BY id DESC
+LIMIT 1;
+
+-- 换过版面（字号 / 边距 / 旋转）后页界会变：同一处内容的页首未必还是原来那个字。
+-- 新页覆盖到的旧书签也算「这一页已加过」，不再长出挨着的第二条。
+bookmarkWithinPage:
+SELECT * FROM bookmarks
+WHERE bookId = ? AND chapter = ? AND charStart >= ? AND charStart < ?
+ORDER BY charStart ASC, id ASC
+LIMIT 1;
+
+deleteBookmark:
+DELETE FROM bookmarks WHERE id = ?;
+
+deleteBookmarksForBook:
+DELETE FROM bookmarks WHERE bookId = ?;

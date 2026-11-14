@@ -17,7 +17,7 @@ import kotlinx.coroutines.launch
  * ```
  * val snackbar = rememberReaderSnackbar()
  * SnackbarHost(hostState = snackbar.hostState, modifier = ...)
- * snackbar.show("书签（规划中）")
+ * snackbar.show("当前版本不支持书签")
  * ```
  * [show] 每次调用都会叠加新消息（material3 默认队列 + 自动消失），无需手动计时。
  */

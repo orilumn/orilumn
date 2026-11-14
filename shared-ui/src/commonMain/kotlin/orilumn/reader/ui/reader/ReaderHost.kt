@@ -2,6 +2,7 @@ package orilumn.reader.ui.reader
 
 import androidx.compose.ui.graphics.ImageBitmap
 import orilumn.reader.data.annotation.Annotation
+import orilumn.reader.data.bookmark.Bookmark
 import orilumn.reader.data.epub.TocItem
 import orilumn.reader.data.revision.TextRevision
 import orilumn.reader.engine.LinkTarget
@@ -244,6 +245,27 @@ interface ReaderHost {
      * 失败与「真没有修改」必须分开：修订清单要按这个区分显示「读取失败，点此重试」还是空态。
      */
     suspend fun textRevisionsForBook(): List<TextRevision>? = null
+
+    // ---- 书签 ----
+
+    /**
+     * 全书书签（书签清单用）：按章序、章内页首升序。**读取失败返回 null**（不是空表）。
+     *
+     * 只读库，不要求任何章就绪——摘录已随记录存快照。锚点是**原书空间**的页首字符，
+     * 跳转时由宿主换算成渲染空间（与标注清单同一口径）。
+     */
+    suspend fun bookmarksForBook(): List<Bookmark>? = null
+
+    /**
+     * 新增一条书签（[bookmark] 的 bookId 由实现方补，锚点已是原书空间）。
+     *
+     * 同一页已有书签时返回已有那条，不重复插入。失败返回 null。
+     * 从当前页取锚点请用 [addBookmarkAt]。
+     */
+    suspend fun addBookmark(bookmark: Bookmark): Bookmark? = null
+
+    /** 按 id 删除书签；失败返回 false。 */
+    suspend fun deleteBookmark(id: Long): Boolean = false
 
     /**
      * 本章正文修订，**渲染坐标**（与选区 / `textOf` / `PageSlice` 同尺）：按起点升序。

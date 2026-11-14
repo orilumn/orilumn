@@ -188,7 +188,7 @@ fun ReaderScreen(
     annotationsEpoch: Int = 0,
     /**
      * 书签外部变更号：书签清单里添加 / 删除后 +1，阅读面重读当前页的书签状态，
-     * 左上角图案随即出现 / 消失。只影响当前页图案，不重排、不重读正文。
+     * 右上角图案随即出现 / 消失。只影响当前页图案，不重排、不重读正文。
      */
     bookmarksEpoch: Int = 0,
     /**
@@ -233,7 +233,7 @@ fun ReaderScreen(
     var hostRevision by remember { mutableIntStateOf(0) }
     var barsVisible by remember { mutableStateOf(false) }
     // 下拉切换书签：页面让开的偏移（px，最多 1/4 页）与当前页是否已有书签（null = 还在读/读取失败）。
-    // 偏移用 Animatable 承载：拖动时直接 snapTo，松手走弹簧；读它的只有页层平移与左上角图案。
+    // 偏移用 Animatable 承载：拖动时直接 snapTo，松手走弹簧；读它的只有页层平移与右上角图案。
     val bookmarkPull = remember { Animatable(0f) }
     var bookmarkOnPage by remember { mutableStateOf<Boolean?>(null) }
     // 上下栏实测高度（px）：栏区落点的手势归栏，不进翻页层（点栏按钮漂移误翻页的门控）。
@@ -268,14 +268,14 @@ fun ReaderScreen(
     // （翻页/跳转/开书/外部落位/开链接）走它串行，后到按落定后的最新位置重取源，不再各算各的。
     val anchorFunnel = remember { AnchorFunnel() }
     val currentHost by rememberUpdatedState(host)
-    // 左上角书签图案的落点：固定在屏幕上沿，不随标题栏/状态栏显隐上下移动；
+    // 右上角书签图案的落点：固定在屏幕上沿，不随标题栏/状态栏显隐上下移动；
     // 页首越过图案下沿即算「拉过图案」。
     val bookmarkMarkTop = BookmarkMarkTop
     val bookmarkMarkBottomPx = with(LocalDensity.current) {
-        (bookmarkMarkTop + BookmarkMarkSize).toPx()
+        (bookmarkMarkTop + BookmarkMarkHeight).toPx()
     }
     val currentMarkBottomPx by rememberUpdatedState(bookmarkMarkBottomPx)
-    // 翻到新页、或书签清单外部增删后就重读这一页有没有书签：决定左上角图案是否常驻红色。
+    // 翻到新页、或书签清单外部增删后就重读这一页有没有书签：决定右上角图案是否常驻红色。
     LaunchedEffect(openPos, bookmarksEpoch) {
         val pos = openPos
         bookmarkOnPage = if (pos == null) {
@@ -3272,7 +3272,7 @@ fun ReaderScreen(
                                             val pageChapter = p?.chapter
                                             val pageStart = p?.slice?.charStart
                                             pullQueryJob?.cancel()
-                                            // 起手就查本页有没有书签：左上角图案据此决定红/灰。
+                                            // 起手就查本页有没有书签：右上角图案据此决定红/灰。
                                             pullQueryJob = scope.launch {
                                                 val hit = p?.let { currentHost.lookupBookmarkOnPage(it) }
                                                 if (pullActive && hit != null && openPos?.chapter == pageChapter &&
@@ -3912,7 +3912,7 @@ fun ReaderScreen(
                 )
             }
             } // 结束「卡片让位」的整层平移
-            // 左上角书签图案：有书签时常驻红色；下拉时页面从图案下面让开，页首越过图案下沿才改色。
+            // 右上角书签图案：有书签时常驻红色；下拉时页面从图案下面让开，页首越过图案下沿才改色。
             BookmarkPullIndicator(
                 pullPx = { bookmarkPull.value },
                 maxPullPx = bookmarkPullMaxPx,
@@ -3920,8 +3920,8 @@ fun ReaderScreen(
                 bookmarked = bookmarkOnPage,
                 visible = !coverVisible && !ctl.isBusy(),
                 modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(start = BookmarkMarkStart, top = bookmarkMarkTop),
+                    .align(Alignment.TopEnd)
+                    .padding(end = BookmarkMarkEnd, top = bookmarkMarkTop),
             )
             // 标注卡片（D-28）：操作栏 + 输入行合成一张卡，贴键盘上沿。它不再跟选区锚点走，
             // 所以选区在页面任何位置都不用担心「菜单跑出屏幕」；被遮住时整页上顶（第 2 部分）。

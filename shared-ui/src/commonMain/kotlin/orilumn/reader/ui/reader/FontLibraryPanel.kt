@@ -27,8 +27,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -61,6 +59,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import orilumn.reader.data.font.FontEntry
 import orilumn.reader.data.font.SubfamilyMetric
+import orilumn.reader.ui.icons.AppIcons
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlin.math.exp
@@ -637,7 +636,7 @@ private fun FontImportPair(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            if (showLocal) FontImportAction(Icons.Default.Add, "本地导入", p, onClick = onLocal, focused = focusedKey == "local")
+            if (showLocal) FontImportAction(AppIcons.Add, "本地导入", p, onClick = onLocal, focused = focusedKey == "local")
             if (showWifi) FontImportAction(WifiIcon, "WIFI 导入", p, onClick = onWifi, focused = focusedKey == "wifi")
             FontImportAction(EyeIcon, if (hiddenShown) "显示" else "隐藏", p, onClick = onToggleHidden, focused = focusedKey == "toggle")
         }

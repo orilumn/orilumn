@@ -1,5 +1,6 @@
 package orilumn.reader.ui.shelf
 
+import orilumn.reader.ui.icons.AppIcons
 import orilumn.reader.ui.icons.pathIcon
 
 /**
@@ -19,8 +20,8 @@ internal object ShelfIcons {
     /** 列表视图：`list`。 */
     val ListView = pathIcon("M3 13h2v-2H3zm0 4h2v-2H3zm0-8h2V7H3zm4 4h14v-2H7zm0 4h14v-2H7zM7 7v2h14V7z")
 
-    /** 导入：`add`。 */
-    val Import = pathIcon("M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z")
+    /** 导入：`add`（与字体面板的「本地导入」共用同一份路径）。 */
+    val Import = AppIcons.Add
 
     /** 编辑（多选整理）：`layers`。 */
     val EditMode = pathIcon(

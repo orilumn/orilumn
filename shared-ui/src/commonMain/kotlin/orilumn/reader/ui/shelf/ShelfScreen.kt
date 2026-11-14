@@ -34,8 +34,6 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -73,6 +71,7 @@ import io.github.vinceglb.filekit.dialogs.FileKitMode
 import io.github.vinceglb.filekit.dialogs.FileKitType
 import io.github.vinceglb.filekit.dialogs.compose.rememberFilePickerLauncher
 import kotlinx.coroutines.launch
+import orilumn.reader.ui.icons.AppIcons
 
 /** 书架顶部/底部栏配色：白底 + 深黑前景（与阅读面工具栏的深灰拉开，保持书架清爽）。 */
 private val BarGray = Color.White
@@ -187,7 +186,7 @@ fun ShelfScreen(
                     if (editMode) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(
-                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                imageVector = AppIcons.ArrowBack,
                                 contentDescription = "返回",
                                 tint = BarGrayFg,
                                 modifier = Modifier

@@ -165,6 +165,11 @@ fun ReaderScreen(
     /** Q1-b：外部推送的落位（版式重排绑定 / 目录跳转落地后同步）。非空即采用为当前定位并防抖
      *  保存；null 不动作（重排以同一目标字符合位，字符仍在新分页表里即可连续阅读）。 */
     externalPos: ReaderPos? = null,
+    /**
+     * 外部推送序号：同一个目标反复推送（翻走后再点同一条书签）时，单靠 [externalPos]
+     * 的值相等不会触发 effect，页面就停在原处；序号每次推送都变，保证重新认领。
+     */
+    externalEpoch: Int = 0,
     /** openPos 丢失时的回退定位（activity 侧 currentPos，每次落位更新）。
      *  Screen 重进 composition 会清空 remember，而 host 稳定时 LaunchedEffect 不重跑 open()，
      *  openPos 将永久为 null——此前 flip/jump/seek 静默吞动作（"点了没反应"）。
@@ -717,27 +722,35 @@ fun ReaderScreen(
     // 重栅格一次（用户看到的「当前页自己重排了一下，页界还是旧的」），落位 commit 后
     // 再按新页界重栅格一次 ⇒ 调一次参数刷新两次。章首页两次的差别只是页尾一两行，
     // 肉眼看着还是一次，所以旧行为「章首只刷一次、第二页刷两次」。
-    // 闸规则：`externalPos` 与上次**已结算**的推送不等 ⇒ 在途 ⇒ 显示侧继续用推送前那一个
-    // 版本号（旧页位图原样命中、画面不动）；漏斗 push 一结束（commit 或 BUSY-DROP 丢弃）
+    // 闸规则：`externalPos` / 序号与上次**已结算**的推送不等 ⇒ 在途 ⇒ 显示侧继续用推送前那一个
+    // 版本号（旧页位图原样命中、画面不动）；漏斗 push 一结束（commit 或其它推送的 BUSY-DROP）
     // 立即开闸，位置与新版本号同帧下发，只发生一次重栅格。
     var settledExternalPos by remember { mutableStateOf<ReaderPos?>(null) }
+    var settledExternalEpoch by remember { mutableIntStateOf(externalEpoch) }
     var heldRevision by remember { mutableIntStateOf(effectiveRevision) }
-    val externalInFlight = externalPos != null && externalPos != settledExternalPos
+    val externalInFlight = externalPos != null &&
+        (externalPos != settledExternalPos || externalEpoch != settledExternalEpoch)
     // 不在途时随手跟上最新（同值不触发重组，且不在途分支不读它 ⇒ 无额外重组）；在途时不动。
     SideEffect { if (!externalInFlight) heldRevision = effectiveRevision }
     val displayRevision = if (externalInFlight) heldRevision else effectiveRevision
 
-    // Q1-b：外部推送落位（键 = externalPos，值变化即认领；重排绑定/TOC 落地后 activity 推送）。
-    // 经锚页漏斗：与在途导航互斥，值在锁内重取（取落定后的最新推送）。
-    LaunchedEffect(externalPos) {
+    // Q1-b：外部推送落位（键 = externalPos + 序号；同值重复推送也要重新认领）。
+    // 经锚页漏斗：与在途导航互斥。外部落位是用户明确的目的地，**不丢**——漏斗被翻页/开书
+    // 占着时排队等它结束再提交（新推送到来时本 effect 被取消，由最新值接管）。
+    LaunchedEffect(externalPos, externalEpoch) {
+        val pos = externalPos
+        val epoch = externalEpoch
         try {
-            anchorFunnel.push("external", ::markPositionChanged) {
-                openFailed = false
-                externalPos
+            if (pos != null) {
+                anchorFunnel.push("external", ::markPositionChanged, wait = true) {
+                    openFailed = false
+                    pos
+                }
             }
         } finally {
-            // 结算（含 BUSY-DROP 丢弃）即开闸：位置与版本号同帧下发，显示只重栅格一次。
-            settledExternalPos = externalPos
+            // 结算即开闸：位置与版本号同帧下发，显示只重栅格一次。
+            settledExternalPos = pos
+            settledExternalEpoch = epoch
         }
     }
 

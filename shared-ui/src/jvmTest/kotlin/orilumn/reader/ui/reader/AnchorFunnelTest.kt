@@ -100,6 +100,28 @@ class AnchorFunnelTest {
     }
 
     @Test
+    fun `waiting push queues until the in-flight event finishes`() = runBlocking {
+        val gate = CompletableDeferred<Unit>()
+        var cur = pos(0)
+        val first = async {
+            funnel.push("ext1", { cur = it }) {
+                gate.await()
+                pos(9)
+            }
+        }
+        repeat(20) { kotlinx.coroutines.delay(5) }
+        val second = async {
+            funnel.push("ext2", { cur = it }, wait = true) { pos(7) }
+        }
+        // 第一件还占着锁：等待的推送不能提前提交。
+        assertEquals(0, cur.slice.charStart)
+        gate.complete(Unit)
+        assertEquals(9, first.await()?.slice?.charStart)
+        assertEquals(7, second.await()?.slice?.charStart)
+        assertEquals(7, cur.slice.charStart)
+    }
+
+    @Test
     fun `null source drops without running`() = runBlocking {
         var ran = false
         val r = funnel.navigate("t", { null }, { error("must not commit") }) {

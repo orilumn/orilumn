@@ -130,6 +130,18 @@ class ReaderActivity : ComponentActivity() {
     private var externalPos by mutableStateOf<ReaderPos?>(null)
 
     /**
+     * 外部推送序号：同一个目标反复推送（例如翻走后再点同一条书签）时，
+     * [ReaderScreen] 不能只靠 `externalPos` 的值变化来认领，否则值相等就静默吞掉。
+     */
+    private var externalEpoch by mutableIntStateOf(0)
+
+    /** 推送一次外部落位：位置与序号一起走，阅读面按二者认领。 */
+    private fun pushExternalPos(pos: ReaderPos) {
+        externalPos = pos
+        externalEpoch++
+    }
+
+    /**
      * 版式版本号：每次重排绑定（整章/锚点临时）+1。字体等“只换字形不断行”的变更分页不变、
      * 新旧 pos 相等，[ReaderScreen] 的 `remember(pos)` 行缓存不会重取，必须用本号强制刷新。
      */
@@ -412,6 +424,7 @@ class ReaderActivity : ComponentActivity() {
                     onLightCommit = { commitBrightness(it) },
                     onBarsVisibleChanged = { barsVisible = it; applySystemBars() },
                     externalPos = externalPos,
+                    externalEpoch = externalEpoch,
                     fallbackPos = currentPos,
                     contentRevision = layoutRevision,
                     annotationsEpoch = annotationsEpoch,
@@ -499,7 +512,7 @@ class ReaderActivity : ComponentActivity() {
                                     layoutRevision++
                                     outcome.pos?.let { target ->
                                         currentPos = target
-                                        externalPos = target
+                                        pushExternalPos(target)
                                     }
                                     true
                                 }
@@ -514,7 +527,7 @@ class ReaderActivity : ComponentActivity() {
                                     layoutRevision++
                                     outcome.pos?.let { target ->
                                         currentPos = target
-                                        externalPos = target
+                                        pushExternalPos(target)
                                     }
                                     true
                                 }
@@ -784,7 +797,7 @@ class ReaderActivity : ComponentActivity() {
             layoutRevision++
             if (landed != null) {
                 currentPos = landed
-                externalPos = landed
+                pushExternalPos(landed)
             }
             Logger.w(
                 TAG,
@@ -805,7 +818,7 @@ class ReaderActivity : ComponentActivity() {
                     // 标注跳转是导航：改参锚点作废，下一次改参按新的当前页首取。
                     relayoutAnchor.release()
                     currentPos = target
-                    externalPos = target
+                    pushExternalPos(target)
                 }
             }
         }
@@ -823,7 +836,7 @@ class ReaderActivity : ComponentActivity() {
                     // 清单跳转是导航：改参锚点作废，下一次改参按新的当前页首取。
                     relayoutAnchor.release()
                     currentPos = target
-                    externalPos = target
+                    pushExternalPos(target)
                 }
             }
         }
@@ -836,12 +849,17 @@ class ReaderActivity : ComponentActivity() {
         val host = tabletHost ?: return
         lifecycleScope.launch(Dispatchers.IO) {
             val target = host.jumpToChar(bookmark.chapter, bookmark.charStart)
+            Logger.d(
+                TAG,
+                "bookmark jump id=${bookmark.id} ch=${bookmark.chapter} char=${bookmark.charStart} " +
+                    "-> ${target?.chapter}/${target?.slice?.charStart}",
+            )
             withContext(Dispatchers.Main) {
                 if (target != null) {
                     // 书签跳转是导航：改参锚点作废，下一次改参按新的当前页首取。
                     relayoutAnchor.release()
                     currentPos = target
-                    externalPos = target
+                    pushExternalPos(target)
                 }
             }
         }
@@ -859,7 +877,7 @@ class ReaderActivity : ComponentActivity() {
                     // 目录跳转是导航：改参锚点作废，下一次改参按新的当前页首取。
                     relayoutAnchor.release()
                     currentPos = target
-                    externalPos = target
+                    pushExternalPos(target)
                 }
             }
         }
@@ -978,7 +996,7 @@ class ReaderActivity : ComponentActivity() {
         // 先 bump 版式号：行/图/背景缓存键随之失效（pos 相等时也强制重取）。
         layoutRevision++
         currentPos = ReaderPos(r.chapter, r.page, atCover = currentPos?.atCover == true)
-        externalPos = ReaderPos(r.chapter, r.page, atCover = currentPos?.atCover == true)
+        pushExternalPos(ReaderPos(r.chapter, r.page, atCover = currentPos?.atCover == true))
     }
 
     // ---- Brightness (physical backlight; overlay drawn by ReaderScreen's ReaderLightMask) ----

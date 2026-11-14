@@ -73,15 +73,21 @@ class AnchorFunnel(private val logTag: String = "Orilumn.TAP") {
     }
 
     /**
-     * 无源推送（开书/外部落位）：同样 try-lock，看到锁就放弃。各事件的提交语义差异
+     * 无源推送（开书/外部落位）：默认 try-lock，看到锁就放弃。各事件的提交语义差异
      * （存档防抖/代际推进）由调用方的 [commit] 保留，漏斗只管互斥。
+     *
+     * [wait] = true 时排队等锁：外部落位（书签/目录/标注跳转）是用户明确的目的地，
+     * 不能被进行中的翻页/开书事件静默丢掉。等待可被协程取消，最新推送会接管。
      */
     suspend fun push(
         action: String,
         commit: (ReaderPos) -> Unit,
+        wait: Boolean = false,
         run: suspend () -> ReaderPos?,
     ): ReaderPos? {
-        if (!mutex.tryLock()) {
+        if (wait) {
+            mutex.lock()
+        } else if (!mutex.tryLock()) {
             Logger.d(logTag, "$action BUSY-DROP (another anchor event in flight)")
             return null
         }

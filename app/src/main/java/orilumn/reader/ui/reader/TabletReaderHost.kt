@@ -63,7 +63,7 @@ class TabletReaderHost(
     private var openedAtCover = true
 
     /**
-     * 清单快照（编辑 / 笔记）：面板**第一帧**就要有数据。
+     * 清单快照（修订 / 笔记）：面板**第一帧**就要有数据。
      *
      * 以前清单是「抽屉先滑出半屏空白 → 下一帧数据读完才填列表」，读者看到的是分两段打开，
      * 而且中间那一帧还压在抽屉动画上。开书后在 IO 线程预读一次存这里，增删改后作废；
@@ -72,7 +72,7 @@ class TabletReaderHost(
     private var revisionsSnapshot: List<TextRevision>? = null
     private var annotationsSnapshot: List<Annotation>? = null
 
-    /** 编辑清单的同步快照（null = 还没预读到，面板退回异步加载）。 */
+    /** 修订清单的同步快照（null = 还没预读到，面板退回异步加载）。 */
     fun cachedTextRevisions(): List<TextRevision>? = revisionsSnapshot
 
     /** 笔记清单的同步快照（同上）。 */
@@ -145,7 +145,7 @@ class TabletReaderHost(
             openedAtCover = (state == null) || orilumn.reader.data.read.ReadingLocatorCodec.decodeAtCover(state.locator)
             controller.requestWholeBookRelayout()
             opened = true
-            // 清单快照预读：开书后台做，读者点「编辑 / 笔记」时抽屉里已经有内容。
+            // 清单快照预读：开书后台做，读者点「修订 / 笔记」时抽屉里已经有内容。
             ioScope.launch {
                 runCatching { textRevisionsForBook() }
                 runCatching { annotationsForBook() }
@@ -214,7 +214,7 @@ class TabletReaderHost(
     override fun textRevisionOriginalSpans(chapter: Int, revisionId: Long): List<InlineMarkup.StyleSpan>? =
         controller.textRevisionOriginalSpans(chapter, revisionId)
 
-    /** 一条修订在审阅空间里的样子（编辑清单行摘要，与审阅视图同一份数据）。 */
+    /** 一条修订在审阅空间里的样子（修订清单行摘要，与审阅视图同一份数据）。 */
     override fun textRevisionReviewExcerpt(
         chapter: Int,
         revisionId: Long,
@@ -327,7 +327,7 @@ class TabletReaderHost(
     }
 
     /**
-     * 删除一条正文修订（编辑清单行左滑删除）：落库 → 重读修订 → 只作废该章。
+     * 删除一条正文修订（修订清单行左滑删除）：落库 → 重读修订 → 只作废该章。
      * 删的是当前阅读章时按**删除前的当前页首**重新落位（删除可能让前面的文字回退），
      * 并把新落位交给阅读面；别的章只作废缓存，不动当前页。
      */
@@ -365,7 +365,7 @@ class TabletReaderHost(
         }
 
     /**
-     * 编辑清单的「全部恢复原文」：一次删光全书修订。
+     * 修订清单的「全部恢复原文」：一次删光全书修订。
      *
      * 与单条删除同一口径：先记当前页首，删完整本重读修订表，**把有修订的每一章都作废**
      * （只作废当前章会让别章的旧版式继续带着已删掉的修订内容），当前章再按改前页首重新落位。
@@ -586,7 +586,7 @@ class TabletReaderHost(
         emptyList()
     }
 
-    /** 编辑清单：全书正文修订（原书坐标），跳转时再由 [jumpToChar] 换算。 */
+    /** 修订清单：全书正文修订（原书坐标），跳转时再由 [jumpToChar] 换算。 */
     override suspend fun textRevisionsForBook(): List<TextRevision>? = try {
         // 快照两列上线前写下的老行：区间还在原书空间，先按持久化章树把原文补回库再读清单。
         controller.backfillLegacyRevisionTexts()
@@ -594,7 +594,7 @@ class TabletReaderHost(
     } catch (c: CancellationException) {
         throw c
     } catch (_: Throwable) {
-        // 读失败**不能**报成空表：编辑清单要显示「读取失败，点此重试」而不是「还没有修改过正文」。
+        // 读失败**不能**报成空表：修订清单要显示「读取失败，点此重试」而不是「还没有修改过正文」。
         null
     }
 

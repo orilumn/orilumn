@@ -236,12 +236,12 @@ interface ReaderHost {
     suspend fun deleteAnnotation(id: Long): Boolean = false
 
     /**
-     * 全书正文修订（编辑清单用）：按章序、章内起点升序。**读取失败返回 null**（不是空表）。
+     * 全书正文修订（修订清单用）：按章序、章内起点升序。**读取失败返回 null**（不是空表）。
      *
      * 和 [annotationsForBook] 一样只读库，不要求任何章就绪。坐标是原书空间，
      * 跳转时由宿主换算成渲染空间再落位（与标注清单同一口径）。
      *
-     * 失败与「真没有修改」必须分开：编辑清单要按这个区分显示「读取失败，点此重试」还是空态。
+     * 失败与「真没有修改」必须分开：修订清单要按这个区分显示「读取失败，点此重试」还是空态。
      */
     suspend fun textRevisionsForBook(): List<TextRevision>? = null
 
@@ -254,7 +254,7 @@ interface ReaderHost {
     suspend fun textRevisionsForChapter(chapter: Int): List<TextRevision> = emptyList()
 
     /**
-     * 删除一条正文修订（编辑清单行左滑删除）：宿主落库 + 重读修订 + 只作废该章。
+     * 删除一条正文修订（修订清单行左滑删除）：宿主落库 + 重读修订 + 只作废该章。
      *
      * [currentPage] 是阅读面**正在显示的那一页**（调用方传自己手里的 `openPos` / `currentPos`）。
      * 宿主只能用它判断「删的是不是当前章」并取改前页首——不能拿开书锚点（`locateStart`）顶替：
@@ -271,7 +271,7 @@ interface ReaderHost {
     ): TextRevisionDeleteOutcome = TextRevisionDeleteOutcome.Failed
 
     /**
-     * 编辑清单的「全部恢复原文」：把全书修订一次删光，返回结果（口径同 [deleteTextRevision]）。
+     * 修订清单的「全部恢复原文」：把全书修订一次删光，返回结果（口径同 [deleteTextRevision]）。
      *
      * 删的是当前阅读章时，[TextRevisionDeleteOutcome.Success.pos] 给出按「删除前页首」重新落位的
      * 新位置；别的章只作废版式，当前页不动（那时 pos 为 null）。
@@ -462,7 +462,7 @@ interface ReaderHost {
     fun textRevisionOriginalSpans(chapter: Int, revisionId: Long): List<InlineMarkup.StyleSpan>? = null
 
     /**
-     * 一条修订在**审阅空间**里的样子（编辑清单的行摘要用）：文字 + 红 / 绿区间（局部偏移）。
+     * 一条修订在**审阅空间**里的样子（修订清单的行摘要用）：文字 + 红 / 绿区间（局部偏移）。
      *
      * 清单的一行要画得与正文审阅视图**完全一致**（绿 `**`、划掉的红 `## `、¶ 都在），所以两边
      * 取同一份数据（`ChapterRevisionMap.reviewExcerpt`），清单不另算一套差异：只改了标记的修订
@@ -516,7 +516,7 @@ sealed interface TextEditOutcome {
 }
 
 /**
- * 删除一条正文修订的结果（编辑清单行左滑删除）。
+ * 删除一条正文修订的结果（修订清单行左滑删除）。
  *
  * [Success.pos] 非空 = 删的是当前阅读章，阅读面落到这个新位置；null = 删的是别的章，当前页不动。
  */

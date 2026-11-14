@@ -29,7 +29,7 @@ interface TextRevisionStore {
      */
     suspend fun fillLegacyRevisionSnapshot(id: Long, originalText: String, editedText: String)
 
-    /** 删除一条修订（编辑清单里逐行删除）。删除后该区间恢复原书文字。 */
+    /** 删除一条修订（修订清单里逐行删除）。删除后该区间恢复原书文字。 */
     suspend fun deleteTextRevision(id: Long)
 
     suspend fun deleteTextRevisionsForBook(bookId: Long)

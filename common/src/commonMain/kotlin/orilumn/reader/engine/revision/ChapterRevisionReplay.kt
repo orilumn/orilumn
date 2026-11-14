@@ -242,7 +242,7 @@ object ChapterRevisionReplay {
         val wantBlocks = LinkedHashMap<MarkupElement, BlockKind>()
         // 还没落到 wantBlocks 的目标形态：叶可能在主循环里被换掉 / 被合并组撤掉，按节点跟过去。
         // 只在主循环里现算是不行的——审阅视图里「只改块形态、文字一字未动」的修订不产生任何
-        // 文字编辑，主循环整片叶直接跳过（`edits.isEmpty()`），现算就漏了。
+        // 文字修订，主循环整片叶直接跳过（`edits.isEmpty()`），现算就漏了。
         val pendingKinds = LinkedHashMap<MarkupElement, BlockKind>()
         for (index in leaves.indices) {
             val leaf = leaves[index]

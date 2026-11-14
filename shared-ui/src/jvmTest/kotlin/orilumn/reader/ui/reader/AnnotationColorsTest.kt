@@ -82,7 +82,7 @@ class AnnotationColorsTest {
 
     @Test
     fun `selection action remembers edit as a third choice`() {
-        // 默认高亮；划线 / 编辑各自解析回来；未知值按高亮。
+        // 默认高亮；划线 / 修订各自解析回来；未知值按高亮。
         assertEquals(SelectionAction.Highlight, selectionActionOf(ReaderSettings.DEFAULT))
         assertEquals(
             SelectionAction.Underline,
@@ -104,7 +104,7 @@ class AnnotationColorsTest {
         val next = withSelectionAction(s, SelectionAction.Edit)
         assertEquals("edit", next.annotationLastKind)
         assertEquals(SelectionAction.Edit, selectionActionOf(next))
-        // 编辑不是标注类别：批注卡仍按高亮兜底，不会停在没有色槽的类别上。
+        // 修订不是标注类别：批注卡仍按高亮兜底，不会停在没有色槽的类别上。
         assertEquals(AnnotationKind.Highlight, annotationLastKindOf(next))
         // 只记操作：色槽 / 线型一概不动。
         assertEquals(s.highlightColorSlots, next.highlightColorSlots)

@@ -258,7 +258,7 @@ class DesktopReaderHost(
     override fun textRevisionOriginalSpans(chapter: Int, revisionId: Long): List<InlineMarkup.StyleSpan>? =
         controller.textRevisionOriginalSpans(chapter, revisionId)
 
-    /** 一条修订在审阅空间里的样子（编辑清单行摘要，与审阅视图同一份数据）。 */
+    /** 一条修订在审阅空间里的样子（修订清单行摘要，与审阅视图同一份数据）。 */
     override fun textRevisionReviewExcerpt(
         chapter: Int,
         revisionId: Long,
@@ -361,7 +361,7 @@ class DesktopReaderHost(
     }
 
     /**
-     * 删除一条正文修订（编辑清单行左滑删除）：落库 → 重读修订 → 只作废该章。
+     * 删除一条正文修订（修订清单行左滑删除）：落库 → 重读修订 → 只作废该章。
      * 删的是当前阅读章时按**删除前的当前页首**重新落位，并把新落位交给阅读面；别的章不动当前页。
      */
     override suspend fun deleteTextRevision(
@@ -396,7 +396,7 @@ class DesktopReaderHost(
         }
 
     /**
-     * 编辑清单的「全部恢复原文」：一次删光全书修订。
+     * 修订清单的「全部恢复原文」：一次删光全书修订。
      *
      * 与单条删除同一口径：先记当前页首，删完整本重读修订表，**把有修订的每一章都作废**，
      * 当前章再按改前页首重新落位。
@@ -581,7 +581,7 @@ class DesktopReaderHost(
         emptyList()
     }
 
-    /** 编辑清单：全书正文修订（原书坐标），跳转时再由 [jumpToChar] 换算。 */
+    /** 修订清单：全书正文修订（原书坐标），跳转时再由 [jumpToChar] 换算。 */
     override suspend fun textRevisionsForBook(): List<TextRevision>? = try {
         // 快照两列上线前写下的老行：区间还在原书空间，先按持久化章树把原文补回库再读清单。
         controller.backfillLegacyRevisionTexts()
@@ -589,7 +589,7 @@ class DesktopReaderHost(
     } catch (c: CancellationException) {
         throw c
     } catch (_: Throwable) {
-        // 读失败**不能**报成空表：编辑清单要显示「读取失败，点此重试」而不是「还没有修改过正文」。
+        // 读失败**不能**报成空表：修订清单要显示「读取失败，点此重试」而不是「还没有修改过正文」。
         null
     }
 

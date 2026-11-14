@@ -181,7 +181,7 @@ class ChapterRevisionReplayTest {
      *
      * 真机回归（ch=173 并段后选区整体错位）：`shift` 当时累加的是每个新块的长度，
      * 于是并段之后所有叶的字符起点都多算了整整一段（53 字），排版偏移与正文投影错位，
-     * 长按/点按取到的是后面几十个字——编辑卡里的文字自然与屏幕上选中的不是一处。
+     * 长按/点按取到的是后面几十个字——修订卡里的文字自然与屏幕上选中的不是一处。
      */
     @Test
     fun mergeShiftsFollowingLeavesByDeltaOnly() {

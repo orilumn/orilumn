@@ -451,7 +451,7 @@ fun ReaderView(
             onSettings = { settingsOpen = true },
             onToc = { panelPage = ReaderPanelPage.Toc; panelLastPage = ReaderPanelPage.Toc },
             onNote = { panelPage = ReaderPanelPage.Annotations; panelLastPage = ReaderPanelPage.Annotations },
-            // 工具栏「修订」按钮：编辑清单与平板同一抽屉页（此前桌面只能从目录/标注抽屉切过去）。
+            // 工具栏「修订」按钮：修订清单与平板同一抽屉页（此前桌面只能从目录/标注抽屉切过去）。
             onRevision = { panelPage = ReaderPanelPage.Revisions; panelLastPage = ReaderPanelPage.Revisions },
             // 工具栏「审阅」按钮：与设置页「显示审阅模式」共用同一个壳状态与切换入口。
             onReview = { toggleReview() },

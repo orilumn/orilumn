@@ -79,9 +79,9 @@ internal fun annotationFallbackColor(kind: AnnotationKind): Int = when (kind) {
 }
 
 /**
- * 选区操作栏「上次用了谁」：高亮 / 划线 / 编辑（正文修改 v3）。
+ * 选区操作栏「上次用了谁」：高亮 / 划线 / 修订（正文修改 v3）。
  *
- * 编辑不是标注类别（所以不塞进 [AnnotationKind]），但它和高亮、划线共用同一根操作栏：
+ * 修订不是标注类别（所以不塞进 [AnnotationKind]），但它和高亮、划线共用同一根操作栏：
  * 读者上次点了哪一项，下次选字就默认停在哪一项。
  */
 internal enum class SelectionAction {
@@ -249,7 +249,7 @@ internal fun annotationAfterEdit(
  * 只影响下次选字时操作栏停在哪个类别，不参与排版指纹。
  * **两个方向都要记得**：曾经只在点色槽 / 点线型时写，读者切到「高亮」后直接落笔
  * （不点色）就一直改不回高亮——默认状态卡在划线。
- * 编辑旧标注 / 正文修改走 [withSelectionAction]（编辑不是标注类别）。
+ * 编辑旧标注 / 正文修改走 [withSelectionAction]（修订不是标注类别）。
  */
 internal fun withAnnotationLastKind(settings: ReaderSettings, kind: AnnotationKind): ReaderSettings =
     withSelectionAction(

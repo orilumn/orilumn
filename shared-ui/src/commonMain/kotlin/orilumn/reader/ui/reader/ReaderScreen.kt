@@ -142,7 +142,7 @@ fun ReaderScreen(
     onToc: () -> Unit = {},
     onBookmark: (() -> Unit)? = null,
     onNote: (() -> Unit)? = null,
-    /** 底栏「修订」：打开正文修改清单（编辑面板）。null = 宿主尚未支持，点了给提示。 */
+    /** 底栏「修订」：打开正文修改清单（修订面板）。null = 宿主尚未支持，点了给提示。 */
     onRevision: (() -> Unit)? = null,
     /** 底栏「审阅」：切换审阅视图（删掉的字变红划红线、新添的字变绿）。null = 宿主尚未支持。 */
     onReview: (() -> Unit)? = null,
@@ -305,7 +305,7 @@ fun ReaderScreen(
     // 提交时按它校验：表格只能改格里的字，图片只能整张删除，结构不能借这张卡改掉。
     var textEditTables by remember { mutableStateOf<List<TableRowInfo?>>(emptyList()) }
     var textEditImages by remember { mutableStateOf<List<Boolean>>(emptyList()) }
-    // 这次编辑的选区**正好是一整张表**（卡片已扩到表首 / 表尾）：行数、每行列数都可以改，
+    // 这次修订的选区**正好是一整张表**（卡片已扩到表首 / 表尾）：行数、每行列数都可以改，
     // 提交时按网格自洽校验（见 `TableGrid`），不按逐行形状校验。
     var textEditWholeTable by remember { mutableStateOf(false) }
     // 这次改的是整表修订里的**某几行**（审阅视图里拖选改过的表格中的一行）：卡片只列这几行，
@@ -1491,8 +1491,8 @@ fun ReaderScreen(
      * 点红字或点绿字落到的是同一条修订，改的就是它（与 D-36「改过 = 改后的内容」同口径）。
      *
      * **表格例外**：整表修订（首码大写 `T`）上只认**真正改动过的字**（红字 / 绿字）——点它照常
-     * 进编辑状态，审阅视图里按点到的行开行卡片（不框整张表）；点在表格其他区域（没改过的格、
-     * 行间空白）不开编辑，两侧吞掉这次点按（不翻页 / 切栏），**屏幕中部照旧交给上下栏的显隐**。
+     * 进修订状态，审阅视图里按点到的行开行卡片（不框整张表）；点在表格其他区域（没改过的格、
+     * 行间空白）不开修订卡，两侧吞掉这次点按（不翻页 / 切栏），**屏幕中部照旧交给上下栏的显隐**。
      * 普通阅读视图里正文就是改后的表、没有红绿字可认，点表上改动过的字一律打开整表卡片
      * （同样不框整张表）。
      *
@@ -1518,7 +1518,7 @@ fun ReaderScreen(
             return false
         }
         // 命中口径是**整条修订**（原文 + 新文字），不是只认画出来的那几个红绿字：段里保留下来的
-        // 那些字也属于这条修订，点它同样进整体编辑（红绿只是标出真正改动的位置）。
+        // 那些字也属于这条修订，点它同样开这条修订的卡（红绿只是标出真正改动的位置）。
         val revision = chapterRevisions.firstOrNull { r ->
             offset >= r.charStart && offset < r.charEnd
         } ?: run {
@@ -1530,7 +1530,7 @@ fun ReaderScreen(
             return false
         }
         // 表格上压着整表修订（首码大写 `T`）时走单独一套判据（见 reviewTableTapOf）：
-        // 审阅视图里点改过的那一行 = 进编辑、开行卡片；点一行都没改过的区域不开编辑
+        // 审阅视图里点改过的那一行 = 开修订卡、开行卡片；点一行都没改过的区域不开修订卡
         // （两侧吞掉不翻页，中部让给上下栏）；普通视图里点表上改动过的字 = 开整表卡片。
         // 见 docs/正文修改-块级标记.md §8 / 验收 30 / 36 / 37。
         if (revision.editedBlocks.firstOrNull()?.startsWith("T") == true) {
@@ -1651,7 +1651,7 @@ fun ReaderScreen(
     }
 
     /**
-     * 进目录/笔记/编辑/设置面板：点下就开面板，工具栏同时在面板遮罩后退场。
+     * 进目录/笔记/修订/设置面板：点下就开面板，工具栏同时在面板遮罩后退场。
      *
      * 以前是「先收栏、等 BarsAnim 走完再开面板」，读者会先看到约 240ms 的「点了没反应」，
      * 抽屉才开始滑入；现在两步同一帧发起，面板不会盖在晾着的工具栏上（抽屉在栏之上），
@@ -2128,8 +2128,8 @@ fun ReaderScreen(
         textEditOpen = true
         textEditBusy = false
         selectionMenuVisible = false
-        // 这次是「新用一次编辑」：下次选字直接停到编辑。打开旧修改走 tryOpenReviewEditAt，
-        // 不经过这里，所以「只是修改原有编辑」不会把默认项带跑（用户定口）。
+        // 这次是「新用一次修订」：下次选字直接停到修订。打开旧修改走 tryOpenReviewEditAt，
+        // 不经过这里，所以「只是修改原有修订」不会把默认项带跑（用户定口）。
         val remembered = withSelectionAction(light, SelectionAction.Edit)
         if (remembered != light) {
             light = remembered
@@ -3263,14 +3263,14 @@ fun ReaderScreen(
                 onNight = currentOnNight,
                 onSettings = { hideBarsThen { currentOnSettings() } },
                 onToc = { hideBarsThen { currentOnToc() } },
-                // 书签 / 笔记：与设置 / 目录 / 编辑同一拍——收栏与开清单同时发起（栏在抽屉之下
+                // 书签 / 笔记：与设置 / 目录 / 修订同一拍——收栏与开清单同时发起（栏在抽屉之下
                 // 退场）。清单里点一条就是跳转；跳转一律从「工具栏已退出」的状态发起，
                 // 落位后读者看到的是干净的一页。
                 onBookmark = currentOnBookmark?.let { cb -> { hideBarsThen { cb() } } }
                     ?: { snackbar.show("书签（规划中）") },
                 onNote = currentOnNote?.let { cb -> { hideBarsThen { cb() } } }
                     ?: { snackbar.show("笔记（规划中）") },
-                // 编辑：收栏与开清单同一帧发起（栏在抽屉之下退场，不会盖在晾着的工具栏上）。
+                // 修订：收栏与开清单同一帧发起（栏在抽屉之下退场，不会盖在晾着的工具栏上）。
                 onRevision = currentOnRevision?.let { cb -> { hideBarsThen { cb() } } },
                 // 审阅：切换后栏要留着（按钮高亮本身就是「现在看的是改动痕迹」的指示）。
                 onReview = currentOnReview,
@@ -3946,14 +3946,14 @@ fun ReaderScreen(
                 onNight = currentOnNight,
                 onSettings = { hideBarsThen { currentOnSettings() } },
                 onToc = { hideBarsThen { currentOnToc() } },
-                // 书签 / 笔记：与设置 / 目录 / 编辑同一拍——收栏与开清单同时发起（栏在抽屉之下
+                // 书签 / 笔记：与设置 / 目录 / 修订同一拍——收栏与开清单同时发起（栏在抽屉之下
                 // 退场）。清单里点一条就是跳转；跳转一律从「工具栏已退出」的状态发起，
                 // 落位后读者看到的是干净的一页。
                 onBookmark = currentOnBookmark?.let { cb -> { hideBarsThen { cb() } } }
                     ?: { snackbar.show("书签（规划中）") },
                 onNote = currentOnNote?.let { cb -> { hideBarsThen { cb() } } }
                     ?: { snackbar.show("笔记（规划中）") },
-                // 编辑：收栏与开清单同一帧发起（栏在抽屉之下退场，不会盖在晾着的工具栏上）。
+                // 修订：收栏与开清单同一帧发起（栏在抽屉之下退场，不会盖在晾着的工具栏上）。
                 onRevision = currentOnRevision?.let { cb -> { hideBarsThen { cb() } } },
                 // 审阅：切换后栏要留着（按钮高亮本身就是「现在看的是改动痕迹」的指示）。
                 onReview = currentOnReview,

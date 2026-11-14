@@ -7,13 +7,13 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 点按「压着整表修订的表格」的去处（用户定口：点修改区域就进编辑、带出上次改的内容）。
+ * 点按「压着整表修订的表格」的去处（用户定口：点修改区域就开修订卡、带出上次改的内容）。
  *
  * 真机复报：点表格里改动过的地方没反应。这里把 `tryOpenReviewEditAt` 用的那条判据直接打一遍，
  * 三件事必须成立：
  * 1. 普通阅读视图（没有红绿字可认）——点表上改动过的字 ⇒ 开整表卡；
  * 2. 审阅视图——点到改过的那一行（含同一行里没改的格）⇒ 开行卡，卡片只列这一行；
- * 3. 审阅视图——点一行都没改过的表格区域 ⇒ 吞掉点按，不进编辑。
+ * 3. 审阅视图——点一行都没改过的表格区域 ⇒ 吞掉点按，不进修订卡。
  */
 class ReviewTableTapTest {
 
@@ -54,7 +54,7 @@ class ReviewTableTapTest {
 
     @Test
     fun `review view on another cell of the same row still opens the row card`() {
-        // 改一格常常只改一两个字：痕迹在这行里，点这行别的字也该进编辑。
+        // 改一格常常只改一两个字：痕迹在这行里，点这行别的字也该开修订卡。
         assertEquals(ReviewTableTap.Row(row), tap(offset = 110, reviewSpace = true))
     }
 

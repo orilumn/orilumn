@@ -46,7 +46,7 @@ import orilumn.reader.engine.revision.ReviewOverlay
 import orilumn.reader.engine.revision.RevisionBlocks
 
 /**
- * 编辑清单的列表体（用户层，v3.2 的清单形态）：由 [ReaderSidePanel] 的抽屉壳承载，
+ * 修订清单的列表体（用户层，v3.2 的清单形态）：由 [ReaderSidePanel] 的抽屉壳承载，
  * 与目录 / 笔记同一个抽屉的第三页「修订」。
  *
  * 按书内章序、章内起点升序平铺（不画章标题）：一条修订**一行**，就是它在正文审阅视图里

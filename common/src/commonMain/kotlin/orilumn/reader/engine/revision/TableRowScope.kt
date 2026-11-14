@@ -10,7 +10,7 @@ import orilumn.reader.data.revision.TextRevision
  * 行号是**上一次改完的那张表**（`editedBlocks` 顺序）里的下标，含两端。
  *
  * 选中的是**被删掉的行**（审阅视图里的红字）时，[lastRow] = [firstRow] - 1：
- * 这一行在改完的那张表里已经没有了，编辑区是空的（上次编辑的结果就是「这里没有行」），
+ * 这一行在改完的那张表里已经没有了，输入区是空的（上次编辑的结果就是「这里没有行」），
  * 读者想补一行就在这里写。[firstRow] 就是补进去的位置。
  *
  * 提交仍按**整张表**校验（行列要能铺成矩形网格、行数删到零就是删整张表），
@@ -34,7 +34,7 @@ data class TableRowScope(val revisionId: Long, val firstRow: Int, val lastRow: I
  *   把旧行折回新表。
  *
  * 选中的行里混着删掉的行也照算：删掉的行不占位置，卡片只列**留下来的**那几行；
- * 整段都被删掉时给一个**插入位置**（[TableRowScope.isInsertion]），编辑区空白。
+ * 整段都被删掉时给一个**插入位置**（[TableRowScope.isInsertion]），输入区空白。
  *
  * @param displayed 读者选中的行在显示空间里的下标（从表格第一行数起，含两端）
  * @param rowCount 改完那张表的行数（[tableRowsOfRevision] 的行数）
@@ -59,7 +59,7 @@ fun tableRowScopeOfDisplayedRows(
     // 删掉的不占位置（上次编辑的结果就是它们不存在）。
     val kept = indices.filter { it >= 0 }
     if (kept.isEmpty()) {
-        // 这一整段在原书里有、改完的表里没有（读者删掉了）：编辑区空白，位置按「前面还剩几行」算。
+        // 这一整段在原书里有、改完的表里没有（读者删掉了）：输入区空白，位置按「前面还剩几行」算。
         val at = sources.count { it < displayed.first }
         if (at < 0 || at > rowCount) return null
         return TableRowScope(revision.id, at, at - 1)

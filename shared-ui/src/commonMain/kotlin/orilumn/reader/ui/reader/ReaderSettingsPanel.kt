@@ -340,7 +340,7 @@ fun ReaderSettingsPanel(
                 ItemKey(onEnter = { onCommitLight(s.copy(coverStretch = !s.coverStretch)) }),
                 ItemKey(onEnter = { onCommitLight(s.copy(autoContinue = !s.autoContinue)) }),
                 ItemKey(onEnter = { onCommitLight(s.copy(pageNum = !s.pageNum)) }),
-                // 工具栏按钮显隐（书签 / 笔记 / 编辑 / 审阅 / 夜间）：纯 UI 开关，同样无重排。
+                // 工具栏按钮显隐（书签 / 笔记 / 修订 / 审阅 / 夜间）：纯 UI 开关，同样无重排。
                 ItemKey(onEnter = { stack.add(Sub.Toolbar) }),
             )
             Sub.Text -> {

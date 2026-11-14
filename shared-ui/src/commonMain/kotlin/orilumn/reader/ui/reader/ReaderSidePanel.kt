@@ -40,7 +40,7 @@ import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
 /**
- * 左停靠抽屉的三页（D-23）：目录、笔记与编辑清单共用一个壳，`☰` 落目录页、`✎` 落笔记页，
+ * 左停靠抽屉的三页（D-23）：目录、笔记与修订清单共用一个壳，`☰` 落目录页、`✎` 落笔记页，
  * 页内切换不关面板；当前页由平台壳记忆（会话内）。
  */
 enum class ReaderPanelPage { Toc, Annotations, Revisions }

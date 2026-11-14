@@ -95,7 +95,7 @@ fun ReaderBars(
     onToc: () -> Unit,
     onBookmark: () -> Unit,
     onNote: () -> Unit,
-    /** 底栏「修订」：直接打开正文修改清单（编辑面板）。默认不出现该按钮。 */
+    /** 底栏「修订」：直接打开正文修改清单（修订面板）。默认不出现该按钮。 */
     onRevision: (() -> Unit)? = null,
     /** 底栏「审阅」：切换审阅视图（删掉的字变红划红线、新添的字变绿）。默认不出现该按钮。 */
     onReview: (() -> Unit)? = null,
@@ -326,7 +326,7 @@ private val BarToolIconSize = 20.dp
 private fun HandDrawnBarIcon(kind: BarIcon, color: Color, modifier: Modifier) {
     Canvas(modifier) {
         val k = size.minDimension / 24f
-        // 编辑：一截斜放的笔 + 笔下那条基线（「在正文上动笔」）。与「笔记」的现成铅笔区分开：
+        // 修订：一截斜放的笔 + 笔下那条基线（「在正文上动笔」）。与「笔记」的现成铅笔区分开：
         // 那支是纯铅笔，这支带正文行，读作「改字」。
         if (kind == BarIcon.Edit) {
             val w = 1.9f * k

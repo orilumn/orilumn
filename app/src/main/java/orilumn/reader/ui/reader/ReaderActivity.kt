@@ -786,7 +786,7 @@ class ReaderActivity : ComponentActivity() {
         }
     }
 
-    /** 编辑清单跳转：落到包含该修订起点的页（与标注清单同一跳转口径，原书→渲染由宿主换算）。 */
+    /** 修订清单跳转：落到包含该修订起点的页（与标注清单同一跳转口径，原书→渲染由宿主换算）。 */
     private fun revisionJump(revision: TextRevision) {
         panelPage = null
         applySystemBars()

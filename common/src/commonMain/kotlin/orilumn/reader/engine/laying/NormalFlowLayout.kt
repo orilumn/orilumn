@@ -1284,7 +1284,7 @@ object NormalFlowLayout {
                     // 否则重路径字符少 1（整章 char 基址漂移），且塑形 `shapeGeometry` 的
                     // replaceable 形无槽可配、绘制侧 `emitCell` 整块跳过（Rust 简介 Ferris 表即此）。
                     val rd = if (isReplaceable(blk)) {
-                        // 独图块：一个 U+FFFC 槽，段表里给一个 marker 段，编辑侧才能把占位与图配对。
+                        // 独图块：一个 U+FFFC 槽，段表里给一个 marker 段，修订侧才能把占位与图配对。
                         CellRun(
                             segments = StyledSegments(listOf(StyledSegment(blk, "\uFFFC"))),
                             runs = emptyList(),

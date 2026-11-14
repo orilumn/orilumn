@@ -753,7 +753,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         // 选中的行里可能有读者删掉的行（红字）：它们不占位置，卡片只列留下来的那几行。
         val kept = newIndices.filter { it >= 0 }
         if (kept.isEmpty()) {
-            // 选中的整段都是红字（读者删掉的行）：编辑区空白，位置 = 这段前面还剩几行新表。
+            // 选中的整段都是红字（读者删掉的行）：输入区空白，位置 = 这段前面还剩几行新表。
             val at = plan.rows.take(first).count { it.newIndex >= 0 }
             if (at > rows.size) return null
             return TableRowScope(revisionId, at, at - 1)
@@ -861,7 +861,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         blocks: List<InlineMarkup.Segment>?,
     ): RowExpansion? {
         val rows = tableRowsOfRevision(r) ?: return null
-        // `lastRow = firstRow - 1` 是**插入**（读者点的是删掉的行，编辑区从空白开始）：不顶替任何行。
+        // `lastRow = firstRow - 1` 是**插入**（读者点的是删掉的行，输入区从空白开始）：不顶替任何行。
         if (scope.firstRow < 0 || scope.firstRow > rows.size) return null
         if (scope.lastRow < scope.firstRow - 1 || scope.lastRow >= rows.size) return null
         // 卡片一行一个块；老调用方只给整串文字时按 `\n` 切（与卡片同一口径）。
@@ -1316,7 +1316,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
     }
 
     /**
-     * 一条修订在**审阅空间**里的样子（编辑清单的行摘要用）：与正文审阅视图**同一份**数据。
+     * 一条修订在**审阅空间**里的样子（修订清单的行摘要用）：与正文审阅视图**同一份**数据。
      *
      * 清单一行要画得与审阅视图完全一致（绿 `**`、划掉的红 `## `、¶），所以两边都从
      * [ChapterRevisionMap.reviewExcerpt] 取：只改了标记的修订按快照做字符差异本来就是一片空白，
@@ -2304,7 +2304,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         // 与审阅痕迹同一份来源。只给文字逐字没变的修订算，数量通常很少，代价可以忽略。
         var normalSpans: Map<orilumn.reader.data.revision.TextRevision, List<InlineMarkup.StyleSpan>> =
             emptyMap()
-        // 同一批修订盖住的原文（同一份叶投影）：编辑清单的行摘要要按它摊出审阅空间那一段
+        // 同一批修订盖住的原文（同一份叶投影）：修订清单的行摘要要按它摊出审阅空间那一段
         // （`ChapterRevisionMap.reviewExcerpt`）。审阅视图自己会建这一份，正常视图只有这里补。
         var normalTexts: Map<orilumn.reader.data.revision.TextRevision, String> = emptyMap()
         // 整表结构修订 → 审阅视图的行级对照（删掉的行留在原处标红、新加的行标绿）。

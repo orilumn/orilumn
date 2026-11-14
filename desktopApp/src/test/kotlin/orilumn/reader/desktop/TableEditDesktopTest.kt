@@ -779,7 +779,7 @@ class TableEditDesktopTest {
      * 审阅视图里「点按只认改过的那一行」的前提：改动痕迹只落在真正改到的行里，
      * 一行都没改过的行不在任何痕迹的范围内。
      *
-     * 点按命中用它分「修改区域」与「表格其他区域」：前者进编辑状态，后者不响应。
+     * 点按命中用它分「修改区域」与「表格其他区域」：前者进修订状态，后者不响应。
      */
     @Test
     fun reviewMarksCoverOnlyChangedTableRow() {
@@ -808,7 +808,7 @@ class TableEditDesktopTest {
 
             // 行级判据（UI 点按命中同一条）：改过的那一行与痕迹相交，别行不相交。
             // 同一行里没改过的格（甲二 / 丙二）也算修改区域——改一格常常只改一两个字，
-            // 读者点这一行里其他字同样要进编辑；没改过的**整行**才不响应。
+            // 读者点这一行里其他字同样要开修订卡；没改过的**整行**才不响应。
             fun rowAt(at: Int) = host.textEditBlocks(chapter, at, at + 1)!!.first()
             for (text in listOf("甲一", "丙一", "乙二改", "甲二", "丙二", "甲三", "丙四")) {
                 val at = reviewText.indexOf(text)
@@ -827,12 +827,12 @@ class TableEditDesktopTest {
     }
 
     /**
-     * 点按「表格里的修改区域」要进编辑状态、带出之前的改动（真机复报：点了没反应）。
+     * 点按「表格里的修改区域」要进修订状态、带出之前的改动（真机复报：点了没反应）。
      *
      * 这里把 UI 点按决策的三步照原样走一遍（`tryOpenReviewEditAt` 用的就是它们）：
      * 1. 点到的字落在本章某条修订的整段里 ⇒ 命中这条修订；
      * 2. 审阅视图里按点到的行开行卡片（`tableRowScope`），卡片文字是**改完的那一行**；
-     * 3. 一行都没改过的格：痕迹碰不到它 ⇒ 不进编辑（连同不翻页由 UI 吞掉这次点按）。
+     * 3. 一行都没改过的格：痕迹碰不到它 ⇒ 不进修订卡（连同不翻页由 UI 吞掉这次点按）。
      */
     @Test
     fun reviewTapOnChangedTableRowOpensRowCard() {
@@ -871,7 +871,7 @@ class TableEditDesktopTest {
             assertTrue("卡片带出之前的改动：${rowCard!!.text}", rowCard.text.contains("乙二改"))
             assertFalse("行卡片不是整张表：${rowCard.text}", rowCard.text.contains("甲三"))
 
-            // 没改过的行：也在整条修订的整段里（整张表是一条修订），但痕迹碰不到它 ⇒ 不进编辑。
+            // 没改过的行：也在整条修订的整段里（整张表是一条修订），但痕迹碰不到它 ⇒ 不进修订卡。
             val (plainAt, plainRow) = rowOf("甲三")
             assertTrue("整张表都是同一条修订：$plainAt in [${revision.charStart},${revision.charEnd})", hit(plainAt))
             assertFalse(
@@ -1096,7 +1096,7 @@ class TableEditDesktopTest {
             }
             assertTrue("只加粗的提交应成功：$outcome", outcome is TextEditOutcome.Success)
             assertEquals("正文的字一个都不许挪", before, body(host, chapter))
-            // 编辑清单的一行取的是同一份审阅空间数据：只改了标记的修订（两端文字一模一样）
+            // 修订清单的一行取的是同一份审阅空间数据：只改了标记的修订（两端文字一模一样）
             // 按快照做字符差异一条颜色都出不来，清单会显示成普通文字，与审阅视图对不上。
             // 清单是在**普通视图**里打开的，所以不开审阅也要取得到。
             val revision = runBlocking { host.textRevisionsForBook() }.orEmpty()

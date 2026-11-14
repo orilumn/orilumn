@@ -6,7 +6,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** 编辑清单的纯逻辑（摘录折叠、单行审阅摘要取法）：不依赖 Compose 与数据库。 */
+/** 修订清单的纯逻辑（摘录折叠、单行审阅摘要取法）：不依赖 Compose 与数据库。 */
 class RevisionPanelRowsTest {
 
     private fun rev(

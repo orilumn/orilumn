@@ -21,7 +21,7 @@ package orilumn.reader.engine.css
 object WhiteSpaceNormalize {
 
     /**
-     * 归一化结果 + 每个输出字符的原文区间（编辑正文时把归一化偏移映射回原始文本节点用）。
+     * 归一化结果 + 每个输出字符的原文区间（修订正文时把归一化偏移映射回原始文本节点用）。
      *
      * [rawStart]/[rawEnd] 与 [text] 等长：一个字符可能来自原文的一段（折叠空白时整段空白映射成
      * 一个空格，[rawStart] 是空白段起点、[rawEnd] 是空白段终点），普通字符恒为 `[i, i+1)`。
@@ -52,7 +52,7 @@ object WhiteSpaceNormalize {
     /**
      * 与 [normalizeNode] 同规则，额外给出每个输出字符对应的原文区间（[NormalizedText]）。
      *
-     * 只给编辑正文用（把归一化偏移映射回原始文本节点）；**渲染路径仍走 [normalizeNode]**，
+     * 只给修订正文用（把归一化偏移映射回原始文本节点）；**渲染路径仍走 [normalizeNode]**，
      * 两条规则必须逐字一致，单测 `WhiteSpaceNormalizeMapTest` 交叉校验。
      */
     fun normalizeNodeWithMap(text: String, ws: WhiteSpace): NormalizedText {
@@ -140,7 +140,7 @@ object WhiteSpaceNormalize {
         return sb.toString()
     }
 
-    // ---- 归一化 + 原文位置映射（编辑正文用；与上面的渲染函数同规则） ----
+    // ---- 归一化 + 原文位置映射（修订正文用；与上面的渲染函数同规则） ----
 
     private fun isWsChar(c: Char): Boolean =
         c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\u000C'

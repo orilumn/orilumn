@@ -123,6 +123,9 @@ class ReaderActivity : ComponentActivity() {
     /** 标注外部变更号：清单里删掉一条后 +1，阅读面据此重读当前章、屏幕装饰同步消失。 */
     private var annotationsEpoch by mutableIntStateOf(0)
 
+    /** 书签外部变更号：清单里添加 / 删除后 +1，阅读面据此重读当前页图案。 */
+    private var bookmarksEpoch by mutableIntStateOf(0)
+
     /** 外部推送落位：版式重排绑定 / 目录跳转落地后置位，[ReaderScreen] 键变化即认领。 */
     private var externalPos by mutableStateOf<ReaderPos?>(null)
 
@@ -412,6 +415,7 @@ class ReaderActivity : ComponentActivity() {
                     fallbackPos = currentPos,
                     contentRevision = layoutRevision,
                     annotationsEpoch = annotationsEpoch,
+                    bookmarksEpoch = bookmarksEpoch,
                     fontEntries = fontEntries,
                 )
             } else {
@@ -450,8 +454,14 @@ class ReaderActivity : ComponentActivity() {
                         scheme = effective.scheme,
                         load = { tabletHost?.bookmarksForBook() },
                         // 书签记的是「正在读的这一页」：添加动作只看当前定位，读者不必先去目录找位置。
-                        onAddCurrent = { currentPos?.let { tabletHost?.addBookmarkAt(it) } },
-                        onDelete = { bookmark -> tabletHost?.deleteBookmark(bookmark.id) ?: false },
+                        onAddCurrent = {
+                            currentPos?.let { tabletHost?.addBookmarkAt(it) }?.also { bookmarksEpoch++ }
+                        },
+                        onDelete = { bookmark ->
+                            val ok = tabletHost?.deleteBookmark(bookmark.id) ?: false
+                            if (ok) bookmarksEpoch++
+                            ok
+                        },
                         onJump = { bookmark -> bookmarkJump(bookmark) },
                         chapterTitles = tocTitles,
                         currentChapter = currentPos?.chapter ?: 0,

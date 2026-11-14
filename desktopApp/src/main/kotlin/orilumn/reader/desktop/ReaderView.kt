@@ -102,6 +102,8 @@ fun ReaderView(
     var panelLastPage by remember(book) { mutableStateOf(ReaderPanelPage.Toc) }
     /** 标注外部变更号：清单删除后 +1，阅读面重读当前章、屏幕装饰同步消失。 */
     var annotationsEpoch by remember(book) { mutableStateOf(0) }
+    /** 书签外部变更号：清单里添加 / 删除后 +1，阅读面据此重读当前页图案。 */
+    var bookmarksEpoch by remember(book) { mutableStateOf(0) }
     val scope = rememberCoroutineScope()
     fun commit(next: ReaderSettings) = onSettingsChange(next)
 
@@ -469,6 +471,7 @@ fun ReaderView(
             // 面板打开时按键留给面板，阅读面不翻页；面板关闭回阅读面即重夺焦点。
             keysEnabled = !settingsOpen && panelPage == null,
             annotationsEpoch = annotationsEpoch,
+            bookmarksEpoch = bookmarksEpoch,
             fontEntries = fontEntries,
         )
 
@@ -582,8 +585,14 @@ fun ReaderView(
                     scheme = settings.scheme,
                     load = { desktopHost?.bookmarksForBook() },
                     // 书签记的是「正在读的这一页」：添加动作只看当前定位。
-                    onAddCurrent = { currentPos?.let { desktopHost?.addBookmarkAt(it) } },
-                    onDelete = { bookmark -> desktopHost?.deleteBookmark(bookmark.id) ?: false },
+                    onAddCurrent = {
+                        currentPos?.let { desktopHost?.addBookmarkAt(it) }?.also { bookmarksEpoch++ }
+                    },
+                    onDelete = { bookmark ->
+                        val ok = desktopHost?.deleteBookmark(bookmark.id) ?: false
+                        if (ok) bookmarksEpoch++
+                        ok
+                    },
                     onJump = { bookmark ->
                         panelPage = null
                         relayoutAnchor.release()

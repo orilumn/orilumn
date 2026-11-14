@@ -1,5 +1,8 @@
 package orilumn.reader.ui.reader
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -73,6 +76,7 @@ import orilumn.reader.engine.skia.LineWindowDrawer
 import orilumn.reader.engine.text.TypographicProfile
 import orilumn.reader.io.Logger
 import kotlin.math.abs
+import kotlin.math.exp
 import kotlin.math.hypot
 import kotlin.math.roundToInt
 import kotlin.time.TimeSource
@@ -183,6 +187,11 @@ fun ReaderScreen(
      */
     annotationsEpoch: Int = 0,
     /**
+     * 书签外部变更号：书签清单里添加 / 删除后 +1，阅读面重读当前页的书签状态，
+     * 左上角图案随即出现 / 消失。只影响当前页图案，不重排、不重读正文。
+     */
+    bookmarksEpoch: Int = 0,
+    /**
      * 统一字体列表（系统 + 导入）：只用来把「批注字体」的字族名解析成可绘制的字形。
      *
      * 批注是盖在页面上的覆盖层，与正文分页无关；缺省空表 = 批注用界面默认字体。
@@ -223,6 +232,10 @@ fun ReaderScreen(
     // 换字体不断行时不滞留旧字、不白屏（open 落定前行数据恒有旧值可显）。
     var hostRevision by remember { mutableIntStateOf(0) }
     var barsVisible by remember { mutableStateOf(false) }
+    // 下拉切换书签：页面让开的偏移（px，最多 1/4 页）与当前页是否已有书签（null = 还在读/读取失败）。
+    // 偏移用 Animatable 承载：拖动时直接 snapTo，松手走弹簧；读它的只有页层平移与左上角图案。
+    val bookmarkPull = remember { Animatable(0f) }
+    var bookmarkOnPage by remember { mutableStateOf<Boolean?>(null) }
     // 上下栏实测高度（px）：栏区落点的手势归栏，不进翻页层（点栏按钮漂移误翻页的门控）。
     var topBarH by remember { mutableStateOf(0) }
     var botBarH by remember { mutableStateOf(0) }
@@ -255,6 +268,26 @@ fun ReaderScreen(
     // （翻页/跳转/开书/外部落位/开链接）走它串行，后到按落定后的最新位置重取源，不再各算各的。
     val anchorFunnel = remember { AnchorFunnel() }
     val currentHost by rememberUpdatedState(host)
+    // 左上角书签图案的落点：固定在屏幕上沿，不随标题栏/状态栏显隐上下移动；
+    // 页首越过图案下沿即算「拉过图案」。
+    val bookmarkMarkTop = BookmarkMarkTop
+    val bookmarkMarkBottomPx = with(LocalDensity.current) {
+        (bookmarkMarkTop + BookmarkMarkSize).toPx()
+    }
+    val currentMarkBottomPx by rememberUpdatedState(bookmarkMarkBottomPx)
+    // 翻到新页、或书签清单外部增删后就重读这一页有没有书签：决定左上角图案是否常驻红色。
+    LaunchedEffect(openPos, bookmarksEpoch) {
+        val pos = openPos
+        bookmarkOnPage = if (pos == null) {
+            null
+        } else {
+            when (currentHost.lookupBookmarkOnPage(pos)) {
+                is BookmarkLookup.Found -> true
+                BookmarkLookup.None -> false
+                BookmarkLookup.Failed -> null
+            }
+        }
+    }
     // 跨页位图缓存（随宿主换代重建：换书即新池；同书内翻页/改参常驻，回访页首帧即有图）。
     // 键是稳定身份（与几何无关），容量按字节 LRU（大截图多的书自动腾退）。
     // P0a：正文插图与背景图同为 skia `DecodedImage`（插图已下沉进页位图，不再是 Compose 位图）。
@@ -2901,6 +2934,11 @@ fun ReaderScreen(
                     var slideEnded = false
                     var brightnessActive = false
                     var brightnessBase = ReaderMath.MAX_BRIGHTNESS
+                    // 下拉切换书签：本次手势是否正在拉页、以及起手时查「本页有没有书签」的读取。
+                    // 页面偏移写在 bookmarkPull 里（组合外状态），这里只记手势归属与一次性查询。
+                    var pullActive = false
+                    var pullOffsetNow = 0f
+                    var pullQueryJob: Job? = null
                     // 双指上下滑调亮度（brightnessGestureTwo）：第二根手指落下就接管本手势，
                     // 按两指平均纵向位移算（两指各自动也不算「一起滑」）；期间不翻页、不选字。
                     var twoFingerBrightness = false
@@ -3105,6 +3143,34 @@ fun ReaderScreen(
                             val upX = change.position.x
                             val upDx = upX - downX
                             val upDy = change.position.y - downY
+                            if (pullActive) {
+                                val maxPull = size.height * BookmarkPullMaxFraction
+                                val armed = pullOffsetNow >= currentMarkBottomPx
+                                pullActive = false
+                                pullOffsetNow = 0f
+                                pullQueryJob?.cancel()
+                                // 松手即弹回：与左滑露按钮同一个弹簧口径（中低刚度 + 明显回弹）。
+                                scope.launch {
+                                    bookmarkPull.animateTo(
+                                        0f,
+                                        spring(stiffness = Spring.StiffnessMediumLow, dampingRatio = 0.5f),
+                                    )
+                                }
+                                if (armed) {
+                                    val pos = openPos
+                                    if (pos != null) {
+                                        scope.launch {
+                                            when (val result = currentHost.toggleBookmarkAt(pos)) {
+                                                is BookmarkToggleResult.Added -> bookmarkOnPage = true
+                                                is BookmarkToggleResult.Removed -> bookmarkOnPage = false
+                                                BookmarkToggleResult.Failed -> snackbar.show("书签操作失败")
+                                            }
+                                        }
+                                    }
+                                }
+                                change.consume()
+                                break
+                            }
                             if (brightnessActive) settleBrightness()
                             else if (slideActive) {
                                 currentEndSlide(vx, size.width.toFloat())
@@ -3178,18 +3244,60 @@ fun ReaderScreen(
                                     if (tMove == 0L) tMove = System.nanoTime()
                                 }
                             }
-                            ReaderMath.Axis.VERTICAL -> if (!brightnessActive && brightnessAdjustable) {
-                                val s = light
-                                if (!s.brightnessFollowSystem &&
-                                    ReaderMath.verticalBrightnessAllowed(
-                                        ReaderMath.tapZone(downX, size.width.toFloat()),
-                                        s.brightnessGestureLeft,
-                                        s.brightnessGestureRight,
-                                    )
+                            ReaderMath.Axis.VERTICAL -> {
+                                if (!brightnessActive && brightnessAdjustable) {
+                                    val s = light
+                                    if (!s.brightnessFollowSystem &&
+                                        ReaderMath.verticalBrightnessAllowed(
+                                            ReaderMath.tapZone(downX, size.width.toFloat()),
+                                            s.brightnessGestureLeft,
+                                            s.brightnessGestureRight,
+                                        )
+                                    ) {
+                                        // 单指垂直亮度只在左/右 1/3 且对应开关打开；激活锁定向下报告累计竖向偏移。
+                                        brightnessActive = true
+                                        brightnessBase = s.brightness
+                                    }
+                                }
+                                // 下拉切换书签：亮度手势没接管、也没在选字、标题栏收着时才认。
+                                // 左右 1/3 若开着亮度手势，那一段仍归亮度——书签下拉只吃屏幕其余部分。
+                                val maxPull = size.height * BookmarkPullMaxFraction
+                                if (!brightnessActive && !mouse && maxPull > 0f && !coverVisible &&
+                                    !currentBarsVisible && !selection.hasSelection && !ctl.isBusy()
                                 ) {
-                                    // 单指垂直亮度只在左/右 1/3 且对应开关打开；激活锁定向下报告累计竖向偏移。
-                                    brightnessActive = true
-                                    brightnessBase = s.brightness
+                                    if (dy > 0f) {
+                                        if (!pullActive) {
+                                            pullActive = true
+                                            val p = openPos
+                                            val pageChapter = p?.chapter
+                                            val pageStart = p?.slice?.charStart
+                                            pullQueryJob?.cancel()
+                                            // 起手就查本页有没有书签：左上角图案据此决定红/灰。
+                                            pullQueryJob = scope.launch {
+                                                val hit = p?.let { currentHost.lookupBookmarkOnPage(it) }
+                                                if (pullActive && hit != null && openPos?.chapter == pageChapter &&
+                                                    openPos?.slice?.charStart == pageStart
+                                                ) {
+                                                    bookmarkOnPage = when (hit) {
+                                                        is BookmarkLookup.Found -> true
+                                                        BookmarkLookup.None -> false
+                                                        BookmarkLookup.Failed -> null
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        // 指数阻尼（同左滑露按钮的橡皮筋）：越拉越费力，渐近但不超过 1/4 页。
+                                        val raw = (dy - touchSlop).coerceAtLeast(0f)
+                                        val pulled = maxPull * (1f - exp(-raw / maxPull))
+                                        pullOffsetNow = pulled
+                                        scope.launch { bookmarkPull.snapTo(pulled) }
+                                    } else if (pullActive) {
+                                        // 拉回起手点以上：本次下拉作废，页面归位，不切换书签。
+                                        pullActive = false
+                                        pullOffsetNow = 0f
+                                        pullQueryJob?.cancel()
+                                        scope.launch { bookmarkPull.snapTo(0f) }
+                                    }
                                 }
                             }
                             ReaderMath.Axis.NONE -> Unit
@@ -3200,6 +3308,19 @@ fun ReaderScreen(
                         }
                     }
                     } finally {
+                        // 下拉手势以任何方式结束（抬手之外：指针丢失 / 手势被取消 / 组合离场）：
+                        // 页面必须弹回去，不能停在半拉的位置。
+                        if (pullActive) {
+                            pullActive = false
+                            pullOffsetNow = 0f
+                            pullQueryJob?.cancel()
+                            scope.launch {
+                                bookmarkPull.animateTo(
+                                    0f,
+                                    spring(stiffness = Spring.StiffnessMediumLow, dampingRatio = 0.5f),
+                                )
+                            }
+                        }
                         // 手势以任何方式结束都必须把这次滑动结算掉：抬起事件被上层消费、
                         // 指针 change 丢失、组合离场、循环里抛异常——这些路径原先直接 break/抛出，
                         // `endSlide` 不再被调用，会话就永远停在 Dragging。后果是批注层被
@@ -3224,6 +3345,7 @@ fun ReaderScreen(
     ) {
         val pxWidth = with(LocalDensity.current) { maxWidth.toPx() }
         val pxHeight = with(LocalDensity.current) { maxHeight.toPx() }
+        val bookmarkPullMaxPx = pxHeight * BookmarkPullMaxFraction
         val contentLeft = profile.marginLeft.toFloat()
         val contentTop = profile.marginTop.toFloat()
         val contentRight = (pxWidth - profile.marginRight).coerceAtLeast(contentLeft)
@@ -3704,7 +3826,15 @@ fun ReaderScreen(
             }
             // 卡片让位：整层（页画布 + 选区 + 旁注 + 放大镜）一起上推，顶部超出屏幕的部分直接截断。
             // 放在同一个 `graphicsLayer` 里 ⇒ 子层之间的相对位置不变，不可能出现「页动了字没动」。
-            Box(modifier = Modifier.fillMaxSize().graphicsLayer { translationY = -shiftNow }) {
+            // 下拉书签的让位量也并进这一层：整页（含旁注/页码/选区）一起下移，松手弹簧归位。
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        translationY = -shiftNow + bookmarkPull.value
+                    }
+                    .background(Color(profile.bgColor)),
+            ) {
             FlipSlideLayer(
                 direction = ctl.direction.value,
                 // **不要在这里读 ctl.progress.value**：一旦在组合里读，动画每帧都会让整个
@@ -3782,6 +3912,17 @@ fun ReaderScreen(
                 )
             }
             } // 结束「卡片让位」的整层平移
+            // 左上角书签图案：有书签时常驻红色；下拉时页面从图案下面让开，页首越过图案下沿才改色。
+            BookmarkPullIndicator(
+                pullPx = { bookmarkPull.value },
+                maxPullPx = bookmarkPullMaxPx,
+                armPx = bookmarkMarkBottomPx,
+                bookmarked = bookmarkOnPage,
+                visible = !coverVisible && !ctl.isBusy(),
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(start = BookmarkMarkStart, top = bookmarkMarkTop),
+            )
             // 标注卡片（D-28）：操作栏 + 输入行合成一张卡，贴键盘上沿。它不再跟选区锚点走，
             // 所以选区在页面任何位置都不用担心「菜单跑出屏幕」；被遮住时整页上顶（第 2 部分）。
             // 输入框与操作栏跟着「这一次写哪条」重置：编辑带出它的文字 / 类别 / 线型，新选区从空白开始。

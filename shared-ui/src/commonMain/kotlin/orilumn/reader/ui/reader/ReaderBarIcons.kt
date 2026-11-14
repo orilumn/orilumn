@@ -24,6 +24,13 @@ internal object BarIcons {
         "M17 3H7c-1.1 0-1.99.9-1.99 2L5 21l7-3l7 3V5c0-1.1-.9-2-2-2m0 15l-5-2.18L7 18V5h10z"
     )
 
+    /** 读者提供的带星形镂空书签图案（项目根目录 `bookmark_star.svg`）。 */
+    val BookmarkStar = pathIcon(
+        "M9.73,14L12,12.63L14.28,14l-0.6-2.6l2-1.72L13.05,9.45L12,7L10.95,9.45L8.33," +
+            "9.67l2,1.72L9.73,14ZM5,21V5Q5,4.17 5.59,3.59T7,3H17q0.82,0 1.41,0.59T19,5V21" +
+            "l-7-3L5,21Zm2-3.05l5-2.15l5,2.15V5H7V17.95ZM7,5H17H12H7Z"
+    )
+
     /** Material Icons `text_snippet`（Outlined 风格）。 */
     val Note = pathIcon(
         "M14.17 5L19 9.83V19H5V5zm0-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 " +

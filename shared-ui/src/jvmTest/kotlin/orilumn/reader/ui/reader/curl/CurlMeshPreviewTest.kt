@@ -61,6 +61,48 @@ class CurlMeshPreviewTest {
         println("wrote ${out.absolutePath} fold=${shape.topX} radius=${r}")
     }
 
+    /** 平板上的一帧：页 1840x2800，页栅格是版心 1585x2400，放在 (128,200)。 */
+    @Test
+    fun dumpDeviceFrame() {
+        val w = 1840
+        val h = 2800
+        val tw = 1585
+        val th = 2400
+        val tx = (w - tw) / 2f
+        val ty = (h - th) / 2f
+        val front = CurlPageImages().apply { page = fakePageSized(tw, th, 0xFF2A2A2A.toInt()) }
+        val back = CurlPageImages().apply { page = fakePageSized(tw, th, 0xFF2A2A2A.toInt()) }
+        for (p in listOf(0.20f, 0.35f, 0.60f)) {
+            val shape = curlShape(w.toFloat(), h.toFloat(), p, 1, 0f, false)
+            val img = ImageBitmap(w, h, ImageBitmapConfig.Argb8888, hasAlpha = true)
+            CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(img), Size(w.toFloat(), h.toFloat())) {
+                drawRect(Color(0xFFEFECE3.toInt()))
+                drawCurl3DFrame(shape, front, back, 0xFFF1EEE6.toInt(), tx, ty)
+            }
+            val out = File("build/dev-p${(p * 100).toInt()}.png")
+            val data = Image.makeFromBitmap(img.asSkiaBitmap()).encodeToData(EncodedImageFormat.PNG)!!
+            out.writeBytes(data.bytes)
+            println("wrote ${out.absolutePath} fold=${shape.topX}")
+        }
+    }
+
+    private fun fakePageSized(w: Int, h: Int, ink: Int): ImageBitmap {
+        val img = ImageBitmap(w, h, ImageBitmapConfig.Argb8888, hasAlpha = true)
+        CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(img), Size(w.toFloat(), h.toFloat())) {
+            drawRect(Color(0xFFFFFFFF.toInt()))
+            val inkColor = Color(ink)
+            var y = h * 0.05f
+            var line = 0
+            while (y < h * 0.95f) {
+                val len = w * (0.86f - ((line * 37) % 17) / 100f)
+                drawRect(inkColor, topLeft = Offset(w * 0.07f, y), size = Size(len, h * 0.008f))
+                y += h * 0.022f
+                line++
+            }
+        }
+        return img
+    }
+
     @Test
     fun dumpFrames() {
         for (e in listOf(1.2f, 2.2f, 3.5f)) {

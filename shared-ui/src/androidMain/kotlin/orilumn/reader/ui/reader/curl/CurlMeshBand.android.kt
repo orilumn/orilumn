@@ -84,10 +84,16 @@ internal actual fun DrawScope.drawCurlMeshBand(
     }
     drawContext.canvas.nativeCanvas.drawVertices(
         android.graphics.Canvas.VertexMode.TRIANGLES,
+        mesh.vertexCount,
         mesh.positions,
-        null,
+        0,
         mesh.texCoords,
+        0,
+        null,
+        0,
         idx,
+        0,
+        idx.size,
         paint,
     )
     return true

@@ -130,7 +130,7 @@ private class AndroidReaderPageRenderer(
         contentRevision: Int,
         rasterKey: PageRasterKey?,
         onMiss: (() -> Unit)?,
-    ) {
+    ): ImageBitmap? {
         // 无 key（封面等无页身份的调用）⇒ store 不入池，但照样栅格并画出来。
         val r = store.obtain(
             key = rasterKey,
@@ -153,7 +153,7 @@ private class AndroidReaderPageRenderer(
         if (r == null) {
             // 像素桥失败（OOM 等）：显示路径不该崩阅读，与 skiaImageToImageBitmap 同口径回退。
             Logger.w("Orilumn.SkiaBridge", "pixel bridge FAILED n=${lines.size} imgs=${images.size}")
-            return
+            return null
         }
         val (pages, bytes) = store.stats()
         Logger.w(
@@ -165,6 +165,7 @@ private class AndroidReaderPageRenderer(
                 " rev=${rasterKey?.contentRevision}",
         )
         drawPageBitmap(canvas, r.value, contentRectLeft, contentRectTop, contentRectRight, contentRectBottom)
+        return r.value.asImageBitmap()
     }
 
     /**

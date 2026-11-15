@@ -38,7 +38,16 @@ private fun skiaImageOf(bitmap: ImageBitmap): Image? = curlImages.getOrPut(bitma
     runCatching { Image.makeFromBitmap(bitmap.asSkiaBitmap()) }.getOrNull() ?: return null
 }
 
-actual fun DrawScope.drawCurlFrame(frame: CurlFrame, front: ImageBitmap, back: ImageBitmap): Boolean {
+actual fun DrawScope.drawCurlFrame(
+    frame: CurlFrame,
+    front: ImageBitmap,
+    back: ImageBitmap,
+    overlay: Boolean,
+    texX: Float,
+    texY: Float,
+    texW: Float,
+    texH: Float,
+): Boolean {
     val effect = curlEffect ?: return false
     val imgFront = skiaImageOf(front) ?: return false
     val imgBack = skiaImageOf(back) ?: return false
@@ -46,14 +55,13 @@ actual fun DrawScope.drawCurlFrame(frame: CurlFrame, front: ImageBitmap, back: I
     val h = frame.pageH
     if (w < 1f || h < 1f) return false
 
-    // 归一化采样：子着色器与片元共用 uv ∈ [0,1]，与 Android 的 BitmapShader 约定一致。
-    val uv = Matrix33.makeScale(1f / w, 1f / h)
+    // 纹理 1:1（不挂 local matrix）：片元按「页坐标 − 纹理原点」采样，见 [CURL_SKSL] 文件头。
     val selector = {
-        val s = imgFront.makeShader(FilterTileMode.CLAMP, FilterTileMode.CLAMP, SamplingMode.LINEAR, uv)
-        val t = imgBack.makeShader(FilterTileMode.CLAMP, FilterTileMode.CLAMP, SamplingMode.LINEAR, uv)
+        val s = imgFront.makeShader(FilterTileMode.CLAMP, FilterTileMode.CLAMP, SamplingMode.LINEAR, null)
+        val t = imgBack.makeShader(FilterTileMode.CLAMP, FilterTileMode.CLAMP, SamplingMode.LINEAR, null)
         arrayOf<org.jetbrains.skia.Shader?>(s, t)
     }
-    val uniforms = Data.makeFromBytes(frame.uniforms().toBytesLe())
+    val uniforms = Data.makeFromBytes(frame.uniforms(overlay, texX, texY, texW, texH).toBytesLe())
     val shader = runCatching {
         effect.makeShader(uniforms, selector(), Matrix33.makeTranslate(0f, 0f))
     }.onFailure { Logger.w("Orilumn.Curl", "makeShader 失败: ${it.message}") }.getOrNull() ?: return false

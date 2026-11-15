@@ -45,15 +45,15 @@ class CurlShaderTest {
 
     private fun render(w: Int, h: Int, frame: CurlFrame): org.jetbrains.skia.Pixmap {
         val effect = RuntimeEffect.makeForShader(CURL_SKSL)
-        val uv = Matrix33.makeScale(1f / w, 1f / h)
+        // 纹理 1:1（不挂 local matrix）：与两端后端同一约定，见 [CURL_SKSL] 文件头。
         val shader: Shader = effect.makeShader(
-            Data.makeFromBytes(bytes(frame.uniforms())),
+            Data.makeFromBytes(bytes(frame.uniforms(false, 0f, 0f, w.toFloat(), h.toFloat()))),
             arrayOf<Shader?>(
                 solid(w, h, 0xFFCC2222.toInt()).makeShader(
-                    FilterTileMode.CLAMP, FilterTileMode.CLAMP, SamplingMode.LINEAR, uv,
+                    FilterTileMode.CLAMP, FilterTileMode.CLAMP, SamplingMode.LINEAR, null,
                 ),
                 solid(w, h, 0xFF2222CC.toInt()).makeShader(
-                    FilterTileMode.CLAMP, FilterTileMode.CLAMP, SamplingMode.LINEAR, uv,
+                    FilterTileMode.CLAMP, FilterTileMode.CLAMP, SamplingMode.LINEAR, null,
                 ),
             ),
             Matrix33.makeTranslate(0f, 0f),

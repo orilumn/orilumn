@@ -4,6 +4,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.key
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.text.TextMeasurer
 import kotlin.math.roundToInt
 /**
  * S28 阅读画布：「画布」平移——把 [ReaderHost.pageLines] 给出的行窗口经 [ReaderPageRenderer]
@@ -22,7 +24,7 @@ import kotlin.math.roundToInt
  * 收成一个不可变值对象后，内容未变即整体跳过（`==` 短路到同一实例），翻页帧不再重走 drawLines。
  */
 @Composable
-fun ReaderPageCanvas(
+internal fun ReaderPageCanvas(
     /** 一页的全部绘制输入（行窗口 + 插图几何/位图 + 盒背景 + 背景图 + 页身份键）。null = 空页。 */
     content: PageContent?,
     contentLeft: Float,
@@ -57,6 +59,27 @@ fun ReaderPageCanvas(
      * remember 后两页共用一池，才能真正挡住「翻回去又画一遍」。
      */
     renderer: ReaderPageRenderer? = null,
+    /**
+     * 页**覆盖层**（旁注 + 页码，用户层数据）：与页栅格分两张图，理由见 `PageOverlay.kt`。
+     * null / 空 ⇒ 不画覆盖层。
+     */
+    overlay: PageOverlayContent? = null,
+    /** 覆盖层栅格缓存（每个页槽一份，见 [rememberPageOverlayLayer]）。 */
+    overlayLayer: PageOverlayLayer? = null,
+    /**
+     * 覆盖层栅格的尺寸（px）：**整页**，不是版心——旁注落在左右留白、页码落在下边距，
+     * 都在版心之外（见 `PageOverlay.kt`）。0 = 退回版心大小（只画版心内的覆盖层）。
+     */
+    overlayWidthPx: Int = 0,
+    overlayHeightPx: Int = 0,
+    /** 覆盖层文字量/画同源用的尺子（`rememberTextMeasurer` 那一台）。 */
+    overlayTextMeasurer: TextMeasurer? = null,
+    /**
+     * 本次真正画出来的两张图（页栅格 + 覆盖层，**同一帧、同一绘制相位**）：
+     * 翻页卷曲层直接把它们当纹理，不再另截图（见 `curl/FlipCurlLayer.kt`）。
+     * 是普通回调（不是 Compose 状态）：写在 draw 相位，读它的也在 draw 相位，不触重组。
+     */
+    onImages: ((ImageBitmap?, ImageBitmap?) -> Unit)? = null,
 ) {
     val localRenderer = rememberReaderPageRenderer()
     val renderer = renderer ?: localRenderer
@@ -67,7 +90,8 @@ fun ReaderPageCanvas(
         val list = content?.lines
         val imgs = content?.pageImages?.takeIf { it.isNotEmpty() }
         val rawBgs = content?.pageBackgrounds?.takeIf { it.isNotEmpty() }
-        if ((list.isNullOrEmpty()) && imgs == null && rawBgs == null) return@Canvas
+        // 页面侧三类皆空 = 没有页栅格可画；但覆盖层（旁注/页码）可能还在，别一起丢掉。
+        val noPage = list.isNullOrEmpty() && imgs == null && rawBgs == null
         // 章节绝对 Y → 页面坐标系：锚点取本页**行内容**（文本行、插图）最小者，再上抬页首缺口。
         // 替换块（img）不产出 DrawLine：纯图页、或插图单独占行（它比其后首个文本行更靠上）时，
         // 只取行最小值会让首图 dstTop 为负而跑到屏外，故行与图取最小。
@@ -77,14 +101,17 @@ fun ReaderPageCanvas(
         // 那是装饰，页外部分由栅格（恰为 contentH）裁掉；若让它参与锚点，整页被重复下推。
         val lineMin = list?.takeIf { it.isNotEmpty() }?.minOf { it.yTop }
         val imgMin = imgs?.minOf { it.yTop }
-        val anchorY = ReaderMath.pageAnchorY(
-            lineMin = lineMin,
-            imgMin = imgMin,
-            bgMin = rawBgs?.minOf { it.yTop },
-            frameLead = content?.pageFrameLead ?: 0,
-        ) ?: return@Canvas
-        val shift = anchorY - contentTop.roundToInt()
-        // 盒背景/边框与文本同一 shift（章节绝对 Y → 页坐标），渲染器画在文字之下。
+        val anchorY = if (noPage) {
+            null
+        } else {
+            ReaderMath.pageAnchorY(
+                lineMin = lineMin,
+                imgMin = imgMin,
+                bgMin = rawBgs?.minOf { it.yTop },
+                frameLead = content?.pageFrameLead ?: 0,
+            )
+        }
+        val shift = (anchorY ?: contentTop.roundToInt()) - contentTop.roundToInt()
         // 盒背景/边框与文本同一 shift（章节绝对 Y → 页坐标），渲染器画在文字之下；
         // E11：裁剪区随背景/图同步平移（`shiftedBy` 单源）。
         val bgs = rawBgs?.map { it.shiftedBy(-shift) }.orEmpty()
@@ -102,22 +129,46 @@ fun ReaderPageCanvas(
         } else {
             frame
         }
-        renderer.drawLines(
-            canvas = drawContext.canvas,
-            contentLeft = contentLeft,
-            lines = inked,
-            contentRectLeft = contentRectLeft,
-            contentRectTop = contentRectTop,
-            contentRectRight = contentRectRight,
-            contentRectBottom = contentRectBottom,
-            pageBg = pageBg,
-            backgrounds = bgs,
-            bgImages = content?.bgImages ?: emptyMap(),
-            images = slots,
-            contentRevision = contentRevision,
-            rasterKey = content?.rasterKey,
-            onMiss = onMiss,
-        )
+        val pageImage = if (anchorY == null) {
+            null
+        } else {
+            renderer.drawLines(
+                canvas = drawContext.canvas,
+                contentLeft = contentLeft,
+                lines = inked,
+                contentRectLeft = contentRectLeft,
+                contentRectTop = contentRectTop,
+                contentRectRight = contentRectRight,
+                contentRectBottom = contentRectBottom,
+                pageBg = pageBg,
+                backgrounds = bgs,
+                bgImages = content?.bgImages ?: emptyMap(),
+                images = slots,
+                contentRevision = contentRevision,
+                rasterKey = content?.rasterKey,
+                onMiss = onMiss,
+            )
+        }
+        // 覆盖层：透明底整页图，画在页栅格之上。键含内容 + 尺寸 + 密度（改任一项都要重画）。
+        val overlayImage = if (overlay != null && overlayLayer != null &&
+            overlayTextMeasurer != null && !overlay.isEmpty
+        ) {
+            val ow = if (overlayWidthPx > 0) overlayWidthPx else (contentRectRight - contentRectLeft).toInt()
+            val oh = if (overlayHeightPx > 0) overlayHeightPx else (contentRectBottom - contentRectTop).toInt()
+            overlayLayer.obtain(
+                key = listOf(overlay, ow, oh, density),
+                widthPx = ow,
+                heightPx = oh,
+                density = this,
+                layoutDirection = layoutDirection,
+            ) {
+                drawPageOverlay(overlay, overlayTextMeasurer)
+            }
+        } else {
+            null
+        }
+        if (overlayImage != null) drawImage(overlayImage)
+        onImages?.invoke(pageImage, overlayImage)
     }
     }
 }

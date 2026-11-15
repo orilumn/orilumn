@@ -49,13 +49,23 @@ data class CurlFrame(
     val paperArgb: Int,
 ) {
     /**
-     * 着色器 uniform：四个 `float4`（顺序与 `CurlShader` 的声明严格一致）。
+     * 着色器 uniform：五个 `float4`（顺序与 `CurlShader` 的声明严格一致）。
      *
      * 全部用 float4 是为了绕开 uniform 对齐规则（float2/float 混排时要自己补 padding，
      * 补错不会编译失败，只会把阴影强度当成坐标——这类错极难查）。多传几个零的代价可忽略。
+     *
+     * @param overlay true = 覆盖层那一遍（旁注 + 页码）：纸背与纸卷返回透明。
+     * @param texX/texY/texW/texH 纹理在页坐标里的位置与尺寸（页栅格是版心、覆盖层是整页）。
      */
-    fun uniforms(): FloatArray = floatArrayOf(
-        pageW, pageH, 0f, 0f,
+    fun uniforms(
+        overlay: Boolean = false,
+        texX: Float = 0f,
+        texY: Float = 0f,
+        texW: Float = pageW,
+        texH: Float = pageH,
+    ): FloatArray = floatArrayOf(
+        pageW, pageH, if (overlay) 1f else 0f, 0f,
+        texX, texY, texW, texH,
         topX, topY, dirX, dirY,
         normalX, normalY, shadow, 0f,
         ((paperArgb shr 16) and 0xFF) / 255f,

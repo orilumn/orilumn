@@ -8,10 +8,15 @@ package orilumn.reader.ui.reader.curl
  *
  * ## 与平台无关的约定
  *
- * - 子着色器一律用**归一化 uv**（0..1）采样：桌面 `Image.makeShader` 挂 `scale(1/w, 1/h)`
- *   的 localMatrix，Android `BitmapShader` 挂同一个矩阵。两端因此共用 `eval(uv)`，
- *   不存在「一边像素坐标一边归一化」的分支。
- * - uniform 只有四个 `float4`，顺序 = [CurlFrame.uniforms] 的打包顺序（见那边的注释）。
+ * - 子着色器按**纹理像素坐标**采样（1:1，两端都不挂 local matrix）：`eval(q - u_rect.xy)`，
+ *   于是「桌面 skia 的 localMatrix 方向」与「Android BitmapShader 的 localMatrix 方向」
+ *   这对天生相反的约定根本不用碰——挂错矩阵不会编译失败，只会把整页采成左上角一个像素。
+ * - uniform 全是 `float4`，顺序 = [CurlFrame.uniforms] 的打包顺序（见那边的注释）。
+ * - 纹理不一定铺满整页：`u_rect` 给出它在页坐标里的位置与尺寸，片元自己换算 uv。
+ *   页栅格是**版心**大小（外边距是屏幕底色），覆盖层栅格是整页大小——同一份着色器
+ *   靠这一个矩形同时伺候两种纹理，不用为「铺满/不铺满」写两条管线。
+ * - `u_page.z = 1` 表示这是**覆盖层那一遍**（旁注 + 页码）：只画纸面上看得见的那两块
+ *   （正面页 / 露出页），纸背与纸卷里一律返回透明，让底下的页栅格透出来。
  *
  * ## 几何（与 [CurlFrame] 同一套）
  *
@@ -34,15 +39,28 @@ package orilumn.reader.ui.reader.curl
  * 外侧平铺段沿用 φ = π/2 的同一条法向——明暗在接缝处连续，不需要额外的阴影多边形。
  */
 internal const val CURL_SKSL: String = """
-uniform float4 u_page;    // xy = 页宽/页高(px)
+uniform float4 u_page;    // xy = 页宽/页高(px), z = 1 表示覆盖层那一遍（纸背/纸卷透明）
+uniform float4 u_rect;    // xy = 纹理左上角在页坐标里的位置, zw = 纹理尺寸(px)
 uniform float4 u_geom1;   // xy = 折痕上端点, zw = 折痕方向单位向量
 uniform float4 u_geom2;   // xy = 法向单位向量(指向露出页), z = 阴影强度
 uniform float4 u_paper;   // rgb = 纸背底色
 uniform shader u_front;   // 被翻的那一页（正面纹理）
 uniform shader u_back;    // 露出的那一页
 
+// 页坐标 → 纹理像素坐标（纹理 1:1 落位，不挂 local matrix，见文件头）。
+float2 texOf(float2 q) {
+    return q - u_rect.xy;
+}
+
+// 落在纹理外：版心外是屏幕边距，屏幕底色 = 纸色，用纸色兜住（否则 CLAMP 会把
+// 版心边缘那一列像素拉成一条竖带）。
+bool outsideTex(float2 q) {
+    return q.x < 0.0 || q.y < 0.0 || q.x > u_rect.z || q.y > u_rect.w;
+}
+
 half4 main(float2 p) {
     float2 page = u_page.xy;
+    bool overlay = u_page.z > 0.5;
     if (p.x < 0.0 || p.y < 0.0 || p.x > page.x || p.y > page.y) {
         return half4(0.0);
     }
@@ -64,12 +82,12 @@ half4 main(float2 p) {
     if (nrm.y < -0.0001) { D = min(D, -c.y / nrm.y); }
     D = clamp(D, 1.0, page.x * 2.0);
 
-    float2 uv = p / page;
+    float2 uv = texOf(p);
     half4 col;
 
     if (s >= 0.0) {
         // 露出页 + 折缝投影（高斯带，σ = 5% 页宽，继承旧版 SHADOW_BAND）。
-        half4 bg = u_back.eval(uv);
+        half4 bg = outsideTex(uv) ? half4(u_paper.rgb, 1.0) : u_back.eval(uv);
         float sigma = 0.05 * page.x;
         float sh = shadow * exp(-(s * s) / (sigma * sigma));
         col = half4(bg.rgb * (1.0 - 0.55 * sh), bg.a);
@@ -77,12 +95,16 @@ half4 main(float2 p) {
         float t = -s;
         if (t >= D) {
             // 平铺的正面页 + 纸卷压在页面上的接触阴影。
-            half4 fg = u_front.eval(uv);
+            half4 fg = outsideTex(uv) ? half4(u_paper.rgb, 1.0) : u_front.eval(uv);
             float sigma2 = 0.03 * page.x;
             float dd = t - D;
             float sh2 = shadow * exp(-(dd * dd) / (sigma2 * sigma2));
             col = half4(fg.rgb * (1.0 - 0.35 * sh2), fg.a);
         } else {
+            // 纸卷：旁注/页码印在纸的**正面**，纸背上看不到 ⇒ 覆盖层那一遍这里透明。
+            if (overlay) {
+                return half4(0.0);
+            }
             // 纸卷：靠折痕一段是四分之一圆弧（弦长 B），φ = asin(t/B)；外侧平铺。
             // 纸不可拉伸：圆弧吃掉的材料比它的屏幕弦长多（弧长 πB/2 > B），
             // 所以外侧平铺段要按剩余材料均摊（k ≤ 1），否则采样会被顶出页面、整片发白。
@@ -91,7 +113,8 @@ half4 main(float2 p) {
             float arc = B * 1.5707963;
             float dm = (t < B) ? B * phi : arc + (t - B) * (D - arc) / max(D - B, 1.0);
             float2 pBack = p + nrm * (t + dm);
-            half4 content = u_front.eval(pBack / page);
+            float2 uvBack = texOf(pBack);
+            half4 content = outsideTex(uvBack) ? half4(u_paper.rgb, 1.0) : u_front.eval(uvBack);
 
             // 纸背 = 纸色打底 + 镜像内容低透明度（旧版 100/255 ≈ 0.39）。
             half3 paper = u_paper.rgb;

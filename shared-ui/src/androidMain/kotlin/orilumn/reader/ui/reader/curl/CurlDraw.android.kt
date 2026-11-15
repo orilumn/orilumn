@@ -1,7 +1,6 @@
 package orilumn.reader.ui.reader.curl
 
 import android.graphics.BitmapShader
-import android.graphics.Matrix
 import android.graphics.RuntimeShader
 import android.graphics.Shader
 import android.os.Build
@@ -35,7 +34,16 @@ private val curlPaint: android.graphics.Paint by lazy {
     android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
 }
 
-actual fun DrawScope.drawCurlFrame(frame: CurlFrame, front: ImageBitmap, back: ImageBitmap): Boolean {
+actual fun DrawScope.drawCurlFrame(
+    frame: CurlFrame,
+    front: ImageBitmap,
+    back: ImageBitmap,
+    overlay: Boolean,
+    texX: Float,
+    texY: Float,
+    texW: Float,
+    texH: Float,
+): Boolean {
     if (Build.VERSION.SDK_INT < 33) return false
     val shader = curlShader ?: return false
     val frontBmp = runCatching { front.asAndroidBitmap() }.getOrNull() ?: return false
@@ -44,20 +52,16 @@ actual fun DrawScope.drawCurlFrame(frame: CurlFrame, front: ImageBitmap, back: I
     val h = frame.pageH
     if (w < 1f || h < 1f) return false
 
-    val u = frame.uniforms()
+    val u = frame.uniforms(overlay, texX, texY, texW, texH)
     shader.setFloatUniform("u_page", u[0], u[1], u[2], u[3])
-    shader.setFloatUniform("u_geom1", u[4], u[5], u[6], u[7])
-    shader.setFloatUniform("u_geom2", u[8], u[9], u[10], u[11])
-    shader.setFloatUniform("u_paper", u[12], u[13], u[14], u[15])
+    shader.setFloatUniform("u_rect", u[4], u[5], u[6], u[7])
+    shader.setFloatUniform("u_geom1", u[8], u[9], u[10], u[11])
+    shader.setFloatUniform("u_geom2", u[12], u[13], u[14], u[15])
+    shader.setFloatUniform("u_paper", u[16], u[17], u[18], u[19])
 
-    // 归一化采样：local matrix 把 uv ∈ [0,1] 映到纹理像素。
-    val uv = Matrix().apply { setScale(1f / w, 1f / h) }
-    val frontShader = BitmapShader(frontBmp, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
-        .apply { setLocalMatrix(uv) }
-    val backShader = BitmapShader(backBmp, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
-        .apply { setLocalMatrix(uv) }
-    shader.setInputBuffer("u_front", frontShader)
-    shader.setInputBuffer("u_back", backShader)
+    // 纹理 1:1（不挂 local matrix）：片元按「页坐标 − 纹理原点」采样，见 [CURL_SKSL] 文件头。
+    shader.setInputBuffer("u_front", BitmapShader(frontBmp, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
+    shader.setInputBuffer("u_back", BitmapShader(backBmp, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
 
     curlPaint.shader = shader
     drawContext.canvas.nativeCanvas.drawRect(0f, 0f, w, h, curlPaint)

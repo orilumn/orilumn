@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -53,6 +54,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -75,6 +77,7 @@ import orilumn.reader.engine.revision.tableRowsOfRevision
 import orilumn.reader.engine.skia.LineWindowDrawer
 import orilumn.reader.engine.text.TypographicProfile
 import orilumn.reader.io.Logger
+import orilumn.reader.ui.reader.curl.CurlPageImages
 import orilumn.reader.ui.reader.curl.FlipCurlLayer
 import kotlin.math.abs
 import kotlin.math.exp
@@ -3679,29 +3682,6 @@ fun ReaderScreen(
                 maxShiftPxState = maxShiftPx
             }
 
-            // 画布本体（当前页 / 目标页同形，只是位移不同）。
-            val PageCanvasFun: @Composable (PageContent?) -> Unit = { content ->
-                ReaderPageCanvas(
-                    content = content,
-                    contentLeft = contentLeft,
-                    contentTop = contentTop,
-                    contentRectLeft = contentLeft,
-                    contentRectTop = contentTop,
-                    contentRectRight = contentRight,
-                    contentRectBottom = contentBottom,
-                    pageBg = profile.bgColor,
-                    inkColor = profile.fgColor,
-                    modifier = Modifier.fillMaxSize(),
-                    // 字重这类纯字形变更行数据完全相等，靠修订号强制重画（见 ReaderPageCanvas）。
-                    // 显示闸后的版本号：外部落位在途时冻结，避免「新参数 × 旧落位」多画一帧。
-                    contentRevision = displayRevision,
-                    // 第 1 档「渲染」半边的抢占钩子：未命中真正栅格化时，让后台预排让路
-                    // （总则第 1 条 + 线程调度原则 §5「唯一钩子」；翻页那半边早已接上）。
-                    onMiss = onRasterMiss,
-                    // 双页共用一个渲染器 ⇒ 共用一个多页位图池（见 ReaderPageCanvas.renderer）。
-                    renderer = pageRenderer,
-                )
-            }
             // P1 L1：滑动层**始终在场**，且**只有一个调用点**——早先按 targetContent 有无
             // 分成两个 `FlipSlideLayer` 调用点，起手/落位/收尾之间来回切，等于每轮都把
             // `ReaderPageCanvas` 里 remember 的渲染器（多页位图缓存宿主）连池丢弃重建，
@@ -3799,31 +3779,6 @@ fun ReaderScreen(
                 decorRevision = annotationState.revision,
                 notesReady = annotationState.isReady(targetPosNow?.chapter ?: fromPos.chapter),
             )
-            val NoteBubblesFun: @Composable (List<NoteBubble>) -> Unit = { bubbles ->
-                if (bubbles.isNotEmpty()) {
-                    NoteBubbles(
-                        bubbles = bubbles,
-                        fgColor = Color(profile.fgColor),
-                        pageBgColor = profile.bgColor,
-                        onOpen = { id ->
-                            // 点旁注 = 打开这条标注的操作栏与输入框（有文字就带出来，可改可删）。
-                            // 翻页动画进行中不响应（旁注现在跟着页走，滑动的页面上点一下不该弹编辑态）。
-                            // 选区恢复成这条标注的范围：编辑时两端手柄仍在，可以直接改范围。
-                            val target = annotationState.annotationsFor(fromPos.chapter)
-                                ?.firstOrNull { it.id == id }
-                            if (target != null && !ctl.isBusy()) {
-                                openAnnotationEdit(target)
-                            }
-                        },
-                        modifier = Modifier.fillMaxSize(),
-                        fontFamily = noteFontFamily,
-                        fontWeight = noteFontWeight,
-                        showBorder = settings.noteBorder,
-                        showBackground = settings.noteBackground,
-                        textSameColor = settings.noteTextSameColor,
-                    )
-                }
-            }
             // 全书页码（用户层「显示页码」）：引擎在章分页未就绪时给 null → 页脚留白。
             // 代际 `pageNumberRevision()` 是宿主里的 Compose 快照状态：后台把各章页数补齐、
             // 或本章正典表刚落时它一变，读者静置不翻页也能让页码自己出现（不读就订阅不到）。
@@ -3838,17 +3793,105 @@ fun ReaderScreen(
                     null
                 }
             }
-            val PageNumberFun: @Composable (BookPageNumber?) -> Unit = { number ->
-                PageNumberLabel(
-                    number = number,
-                    contentBottomPx = contentBottom,
-                    pageHeightPx = pxHeight,
-                    bodyFontPx = profile.bodyPx,
-                    inkColor = Color(profile.fgColor),
-                    // 右下角：右沿对齐正文右沿（页宽 - 版心右沿），不贴屏幕边。
-                    endInsetPx = (pxWidth - contentRight).coerceAtLeast(0f),
+            // ---- 覆盖层（旁注 + 页码）：与页栅格分两张图，见 `PageOverlay.kt` ----
+            // 页码几何：与旧 `PageNumberLabel` 同一套规格（只是产出数据、不产出 Composable）。
+            // 右下角：右沿对齐正文右沿（页宽 - 版心右沿），不贴屏幕边。
+            val pageNumEndInset = (pxWidth - contentRight).coerceAtLeast(0f)
+            val fromPageNumberSpec = pageNumberLayoutOf(
+                index = fromPageNumber?.index,
+                pageHeightPx = pxHeight,
+                contentBottomPx = contentBottom,
+                bodyFontPx = profile.bodyPx,
+                inkArgb = profile.fgColor,
+                endInsetPx = pageNumEndInset,
+            )
+            val targetPageNumberSpec = pageNumberLayoutOf(
+                index = targetPageNumber?.index,
+                pageHeightPx = pxHeight,
+                contentBottomPx = contentBottom,
+                bodyFontPx = profile.bodyPx,
+                inkArgb = profile.fgColor,
+                endInsetPx = pageNumEndInset,
+            )
+            // 覆盖层样式：墨色/底色/字体/三个开关。基础样式取 `LocalTextStyle`——布点用的是
+            // 同一份基础样式量出来的尺子，画字必须同源，否则折行/省略号会漂。
+            val overlayBaseStyle = LocalTextStyle.current
+            val overlayStyle = PageOverlayStyle(
+                fgArgb = profile.fgColor,
+                pageBgArgb = profile.bgColor,
+                baseStyle = overlayBaseStyle,
+                fontFamily = noteFontFamily,
+                fontWeight = noteFontWeight,
+                showBorder = settings.noteBorder,
+                showBackground = settings.noteBackground,
+                textSameColor = settings.noteTextSameColor,
+            )
+            val fromOverlay = PageOverlayContent(
+                notes = noteBubbles,
+                style = overlayStyle,
+                pageNumber = fromPageNumberSpec,
+            )
+            val targetOverlay = PageOverlayContent(
+                notes = targetNoteBubbles,
+                style = overlayStyle,
+                pageNumber = targetPageNumberSpec,
+            )
+            // 覆盖层栅格缓存 + 页槽纹理：两个槽各一份（见 `PageOverlayLayer` / `CurlPageImages`）。
+            val fromOverlayLayer = rememberPageOverlayLayer()
+            val targetOverlayLayer = rememberPageOverlayLayer()
+            val currentImages = remember { CurlPageImages() }
+            val targetImages = remember { CurlPageImages() }
+            val overlayMeasurer = rememberTextMeasurer()
+            // 画布本体（当前页 / 目标页同形，只是位移不同）：页栅格 + 覆盖层一次画完，
+            // 顺手把两张图发布给卷曲层当纹理（屏幕上的像素与卷曲纹理是同一份）。
+            val PageCanvasFun: @Composable (
+                PageContent?,
+                PageOverlayContent,
+                PageOverlayLayer,
+                CurlPageImages,
+            ) -> Unit = { content, overlayContent, overlayLayer, images ->
+                ReaderPageCanvas(
+                    content = content,
+                    contentLeft = contentLeft,
+                    contentTop = contentTop,
+                    contentRectLeft = contentLeft,
+                    contentRectTop = contentTop,
+                    contentRectRight = contentRight,
+                    contentRectBottom = contentBottom,
+                    pageBg = profile.bgColor,
+                    inkColor = profile.fgColor,
+                    modifier = Modifier.fillMaxSize(),
+                    // 字重这类纯字形变更行数据完全相等，靠修订号强制重画（见 ReaderPageCanvas）。
+                    // 显示闸后的版本号：外部落位在途时冻结，避免「新参数 × 旧落位」多画一帧。
+                    contentRevision = displayRevision,
+                    // 第 1 档「渲染」半边的抢占钩子：未命中真正栅格化时，让后台预排让路
+                    // （总则第 1 条 + 线程调度原则 §5「唯一钩子」；翻页那半边早已接上）。
+                    onMiss = onRasterMiss,
+                    // 双页共用一个渲染器 ⇒ 共用一个多页位图池（见 ReaderPageCanvas.renderer）。
+                    renderer = pageRenderer,
+                    overlay = overlayContent,
+                    overlayLayer = overlayLayer,
+                    // 旁注在左右留白、页码在下边距：都在版心外，覆盖层必须是整页大小。
+                    overlayWidthPx = pxWidth.toInt(),
+                    overlayHeightPx = pxHeight.toInt(),
+                    overlayTextMeasurer = overlayMeasurer,
+                    onImages = { pageImage, overlayImage ->
+                        images.page = pageImage
+                        images.overlay = overlayImage
+                    },
                 )
             }
+            // 点旁注 = 打开这条标注的操作栏与输入框（有文字就带出来，可改可删）。
+            // 翻页动画进行中不响应（旁注跟着页走，滑动/卷曲的页面上点一下不该弹编辑态）。
+            // 选区恢复成这条标注的范围：编辑时两端手柄仍在，可以直接改范围。
+            val openNote: (Long) -> Unit = { id ->
+                val target = annotationState.annotationsFor(fromPos.chapter)
+                    ?.firstOrNull { it.id == id }
+                if (target != null && !ctl.isBusy()) {
+                    openAnnotationEdit(target)
+                }
+            }
+
             // 卡片让位：整层（页画布 + 选区 + 旁注 + 放大镜）一起上推，顶部超出屏幕的部分直接截断。
             // 放在同一个 `graphicsLayer` 里 ⇒ 子层之间的相对位置不变，不可能出现「页动了字没动」。
             // 下拉书签的让位量也并进这一层：整页（含旁注/页码/选区）一起下移，松手弹簧归位。
@@ -3860,27 +3903,33 @@ fun ReaderScreen(
                     }
                     .background(Color(profile.bgColor)),
             ) {
-            // 两页槽（页画布 + 旁注 + 页码）：滑动与卷曲共用同一批内容，只是搬运方式不同——
-            // 滑动整槽平移（槽里的东西天然一起动）；卷曲把槽整页截成纹理再按曲面弯（见 FlipCurlLayer）。
+            // 两页槽（页栅格 + 覆盖层）：滑动与卷曲共用同一批内容，只是搬运方式不同——
+            // 滑动整槽平移（槽里的东西天然一起动）；卷曲把槽画出来的两张图当纹理按曲面弯
+            // （见 FlipCurlLayer）。旁注与页码的**像素**在覆盖层栅格里，槽里只剩它们的透明热区。
             val currentSlot: @Composable () -> Unit = if (slideFromCover && coverComposable != null) {
                 coverComposable
             } else {
                 {
-                    PageCanvasFun(pageContent)
+                    PageCanvasFun(pageContent, fromOverlay, fromOverlayLayer, currentImages)
                     // 旁注和当前页同一个槽 ⇒ 一起滑出去，不会先「原地消失」再动画。
-                    NoteBubblesFun(noteBubbles)
-                    PageNumberFun(fromPageNumber)
+                    NoteBubbleHitAreas(
+                        bubbles = noteBubbles,
+                        onOpen = openNote,
+                        modifier = Modifier.fillMaxSize(),
+                    )
                 }
             }
             val targetSlot: (@Composable () -> Unit)? = when {
                 slideToCover && coverComposable != null -> coverComposable
                 targetContent != null -> {
                     {
-                        PageCanvasFun(targetContent)
+                        PageCanvasFun(targetContent, targetOverlay, targetOverlayLayer, targetImages)
                         // 旁注和目标页同一个槽 ⇒ 同一个平移量，跟着一起滑进来。
-                        NoteBubblesFun(targetNoteBubbles)
-                        // 页码也跟页走：目标页的号随页滑进来，落地即接上。
-                        PageNumberFun(targetPageNumber)
+                        NoteBubbleHitAreas(
+                            bubbles = targetNoteBubbles,
+                            onOpen = openNote,
+                            modifier = Modifier.fillMaxSize(),
+                        )
                     }
                 }
                 else -> null
@@ -3897,11 +3946,16 @@ fun ReaderScreen(
                     pageHeightPx = pxHeight,
                     active = { ctl.slideActive(slideEnabled) },
                     paperArgb = profile.bgColor,
-                    // 快照失效键：页内容 / 旁注 / 页码任一变化都要重截。
-                    currentKey = listOf(pageContent, noteBubbles, fromPageNumber),
-                    targetKey = if (targetContent == null) null else listOf(targetContent, targetNoteBubbles, targetPageNumber),
-                    current = currentSlot,
-                    target = targetSlot,
+                    // 页栅格在页坐标里的位置与尺寸（版心）；覆盖层恒为整页（见 FlipCurlLayer）。
+                    texX = contentLeft,
+                    texY = contentTop,
+                    texW = (contentRight - contentLeft).coerceAtLeast(1f),
+                    texH = (contentBottom - contentTop).coerceAtLeast(1f),
+                    // 两张纹理由页槽自己发布（页栅格 + 覆盖层），缺图时页面保持不动。
+                    current = currentImages,
+                    target = if (targetSlot == null) null else targetImages,
+                    currentSlot = currentSlot,
+                    targetSlot = targetSlot,
                     modifier = Modifier.fillMaxSize(),
                 )
             } else {

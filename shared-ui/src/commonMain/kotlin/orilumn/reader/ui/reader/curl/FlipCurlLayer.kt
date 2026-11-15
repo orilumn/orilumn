@@ -13,6 +13,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
 import orilumn.reader.io.Logger
 
+/** 3D 卷曲总开关：移植 moon+ 的网格之前保持关闭（见下方调用处的说明）。 */
+private const val USE_CURL3D: Boolean = false
+
 /**
  * 一个页槽当前可用的两张纹理（**页栅格 + 覆盖层**，都由页槽自己画出来时顺手发布）。
  *
@@ -134,16 +137,20 @@ fun FlipCurlLayer(
                         "overlay=${front.overlay != null}/${back.overlay != null}",
                 )
             }
-            // 3D 卷曲优先；网格铺不出来（退化几何）才退回折页。
-            val done = drawCurl3DFrame(
-                shape = shape,
-                front = front,
-                back = back,
-                paperArgb = paperArgb,
-                texLeft = texX,
-                texTop = texY,
-            )
-            if (done) return@Canvas
+            // 3D 卷曲先关掉：现在的网格是自己推的圆柱模型，读者看不出「哪张是纸、哪面是反面」。
+            // 下一步按 moon+ 的 `NewCurl3D` 逐行移植（网格、明暗、画序都照抄），
+            // 移植到位、桌面预览对得上之后再打开这个开关。
+            if (USE_CURL3D) {
+                val done = drawCurl3DFrame(
+                    shape = shape,
+                    front = front,
+                    back = back,
+                    paperArgb = paperArgb,
+                    texLeft = texX,
+                    texTop = texY,
+                )
+                if (done) return@Canvas
+            }
             drawCurlFrame(
                 shape = shape,
                 front = front,

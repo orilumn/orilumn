@@ -32,71 +32,67 @@ class CurlPageImages {
     var overlay: ImageBitmap? by mutableStateOf(null)
 }
 
-/** 覆盖层那一遍缺一张纹理时的占位：1×1 全透明（采样恒为透明，不改变画面）。 */
-private val blankTexture: ImageBitmap by lazy {
-    ImageBitmap(1, 1)
-}
-
 /**
- * L3 3D 卷曲层（用户层）：两个页槽常驻组合，卷曲时把槽画出来的两张纹理交给着色器。
+ * 折页层（用户层）：两个页槽常驻组合，翻页时按折痕把两张页图摆成「正面 / 纸背 / 露出页」。
  *
- * ## 纹理从哪来
+ * ## 画法
  *
- * 页槽里的 `ReaderPageCanvas` 每帧把「页栅格 + 覆盖层栅格」画出来，同时经 `onImages`
- * 发布到 [CurlPageImages]。所以卷曲用的纹理与屏幕上的像素**同一份**：页码、旁注、
- * 高亮、下划线全在里面（前三者随覆盖层/页栅格，后两者本来就在页栅格里）。
+ * 逐行对位旧版 `orilum.bak` 的 `CurlView.drawBody`（见 [drawCurlFrame]）：
+ * 一张**刚性**纸绕折痕翻过去，屏幕上只有三块——正面页（还没掀起来的）、纸背（露出来的
+ * 背面，就是正面的镜像）、露出页（折痕另一侧的新页）。阴影是沿纸背外缘和折痕各一道
+ * 线性渐变。没有曲面、没有着色器：折页不会自己卷成筒。
  *
- * 一帧画两遍：页栅格一遍、覆盖层一遍（覆盖层那一遍纸背/纸卷返回透明），
- * 于是旁注和页码跟着纸一起弯，而不是浮在上面不动。
+ * 两端的像素与静止时**同一份**：页槽里的 `ReaderPageCanvas` 每帧把「页栅格 + 覆盖层」
+ * 画出来，同时经 `onImages` 发布到 [CurlPageImages]，本层拿它们当纹理用。
+ * 所以页码、旁注、高亮、下划线都跟着纸一起走，不需要第三条截图通道。
  *
  * ## 时序（宁可等图，不换一种翻法）
  *
- * 两张页图都在才画卷曲；缺图时**页面保持不动**（槽照常显示当前页）——不切滑动、不冻帧。
- * 覆盖层缺一张时用 1×1 透明图占位（那页本来就没有旁注/页码）。
+ * 两张页图都在才画折页；缺图时**页面保持不动**（槽照常显示当前页）——不切滑动、不冻帧。
  *
  * ## 绘制顺序
  *
- * 目标页槽在下、当前页槽在上（与 `FlipSlideLayer` 同序）。卷曲层整页不透明地盖在最上面，
- * 两个槽只是「纹理的来源」，不再直接可见。
+ * 目标页槽在下、当前页槽在上（与 `FlipSlideLayer` 同序）。折页整页不透明地盖在最上面，
+ * 两个槽只是「图从哪来」，不再直接可见。
  *
- * @param active 本次翻页会话是否在进行（闭包：只在 draw 相位读，否则每帧重组整个阅读面）
- * @param progress 归一化进度闭包：同上，只在 draw 相位读
- * @param tilt 折痕倾斜闭包（手指位移的上下分量，见 `FlipController.curlTilt`）：同上
- * @param texX/texY/texW/texH 页栅格在页坐标里的位置与尺寸（版心）；覆盖层恒为整页
+ * @param direction 翻页方向（+1 下一页 / -1 上一页）
+ * @param progress 归一化进度（0..1）
+ * @param tilt 折痕倾斜（手指位移的上下分量，见 `FlipController.curlTilt`）
+ * @param settling 是否在结算动画里：只有结算才做末段扶正（见 [CurlShape]），
+ *   手指还按着的时候形状必须听手指的
+ * @param texX/texY 页栅格在页坐标里的左上角（版心）；覆盖层恒为整页、贴 (0,0)
+ *
+ * 三个动画量都是闭包：只在 draw 相位读，动画期间不重组整个阅读面。
  */
 @Composable
 fun FlipCurlLayer(
     direction: () -> Int,
     progress: () -> Float,
     tilt: () -> Float,
+    settling: () -> Boolean,
     pageWidthPx: Float,
     pageHeightPx: Float,
     active: () -> Boolean,
     paperArgb: Int,
     texX: Float,
     texY: Float,
-    texW: Float,
-    texH: Float,
     current: CurlPageImages,
     target: CurlPageImages?,
     currentSlot: @Composable () -> Unit,
     targetSlot: (@Composable () -> Unit)?,
     modifier: Modifier = Modifier,
 ) {
-    // 只在第一次画不出来时留一条日志：着色器编译失败会每帧都失败，刷屏没有意义。
-    val warned = remember { booleanArrayOf(false) }
     // 本轮翻页是否已经留过「等图」/「开画」的日志（各一条，便于真机对账；开画那条带几何）。
     val sessionLogged = remember { booleanArrayOf(false) }
     val drawLogged = remember { booleanArrayOf(false) }
 
     Box(modifier) {
-        // 目标槽先画（在下），当前槽后画（在上）：与滑动层同序，卷曲没画出来时看到的就是这一对。
+        // 目标槽先画（在下），当前槽后画（在上）：与滑动层同序，折页没画出来时看到的就是这一对。
         if (targetSlot != null) {
             Box(Modifier.fillMaxSize()) { targetSlot() }
         }
         Box(Modifier.fillMaxSize()) { currentSlot() }
 
-        // 卷曲：整屏一张不透明图，覆盖上面两个槽。读闭包 = draw 相位，动画期间不重组。
         Canvas(Modifier.fillMaxSize()) {
             if (!active()) {
                 sessionLogged[0] = false
@@ -104,82 +100,48 @@ fun FlipCurlLayer(
                 return@Canvas
             }
             val dir = direction()
+            // 正面 = 被翻的那一张，露出页 = 折痕另一侧的新页。
+            // 向后翻：正面是当前页、露出下一页；向前翻：正面是上一页、露出当前页。
             val front = if (dir >= 0) current else target
             val back = if (dir >= 0) target else current
-            if (front == null || back == null) {
-                if (!sessionLogged[0]) {
-                    sessionLogged[0] = true
-                    Logger.d("Orilumn.Curl", "wait slot dir=$dir front=${front != null} back=${back != null}")
-                }
-                return@Canvas
-            }
-            val frontPage = front.page
-            val backPage = back.page
-            if (frontPage == null || backPage == null) {
+            if (front == null || back == null || front.page == null || back.page == null) {
                 if (!sessionLogged[0]) {
                     sessionLogged[0] = true
                     Logger.d(
                         "Orilumn.Curl",
-                        "wait page dir=$dir front=${frontPage != null} back=${backPage != null} " +
-                            "overlay=${front.overlay != null}/${back.overlay != null}",
+                        "wait dir=$dir front=${front?.page != null} back=${back?.page != null}",
                     )
                 }
                 return@Canvas
             }
-            val frame = curlFrame(
+            val shape = curlShape(
                 pageW = pageWidthPx,
                 pageH = pageHeightPx,
                 progress = progress(),
                 direction = dir,
                 tilt = tilt(),
-                paperArgb = paperArgb,
+                settling = settling(),
             )
             if (!drawLogged[0]) {
                 drawLogged[0] = true
                 // 几何一起记：平板实测对不上形状时，直接拿这几个数离线复现同一帧。
                 Logger.d(
                     "Orilumn.Curl",
-                    "draw dir=$dir p=${frame.progress} " +
-                        "fold=(${frame.topX},${frame.topY})-(${frame.bottomX},${frame.bottomY}) " +
-                        "n=(${frame.normalX},${frame.normalY}) shadow=${frame.shadow} " +
-                        "tex=${frontPage.width}x${frontPage.height} " +
+                    "draw dir=$dir p=${shape.progress} " +
+                        "fold=(${shape.topX},0)-(${shape.bottomX},${pageHeightPx}) " +
+                        "lean=${shape.lean} fade=${shape.shadowFade} " +
+                        "tex=${front.page?.width}x${front.page?.height} " +
                         "overlay=${front.overlay != null}/${back.overlay != null}",
                 )
             }
-            val ok = drawCurlFrame(
-                frame = frame,
-                front = frontPage,
-                back = backPage,
-                overlay = false,
-                texX = texX,
-                texY = texY,
-                texW = texW,
-                texH = texH,
+            drawCurlFrame(
+                shape = shape,
+                front = front,
+                back = back,
+                paperArgb = paperArgb,
+                texLeft = texX,
+                texTop = texY,
             )
-            if (!ok) {
-                if (!warned[0]) {
-                    warned[0] = true
-                    // 平台画不出来（低版本 / 着色器编译失败 / 像素桥失败）：留一条，便于真机定位。
-                    Logger.w("Orilumn.Curl", "drawCurlFrame returned false (dir=$dir)")
-                }
-                return@Canvas
-            }
-            // 覆盖层那一遍：旁注 + 页码跟着纸一起弯（纸背与纸卷里透明）。
-            // 整页纹理 ⇒ 纹理原点恒为 (0,0)、尺寸恒为整页。
-            val frontOverlay = front.overlay
-            val backOverlay = back.overlay
-            if (frontOverlay != null || backOverlay != null) {
-                drawCurlFrame(
-                    frame = frame,
-                    front = frontOverlay ?: blankTexture,
-                    back = backOverlay ?: blankTexture,
-                    overlay = true,
-                    texX = 0f,
-                    texY = 0f,
-                    texW = pageWidthPx,
-                    texH = pageHeightPx,
-                )
-            }
         }
     }
 }

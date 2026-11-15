@@ -1123,11 +1123,7 @@ private fun HomePage(
             item { SetRow("亮度", if (s.brightnessFollowSystem) "跟随系统" else "自定义", keys[5].onEnter, p, nav = nav, index = 5) }
         }
         item { SetSwitch("翻页动画", s.pageAnim, { commitPlain(s.copy(pageAnim = it)) }, p, nav = nav, index = 6) }
-        // 卷曲需要 AGSL（Android 13+）。不支持的平台只剩「滑动」一种动画，
-        // 这一行没有可选项就不显示（2026-11-14 用户定口：老安卓直接取消这个开关）。
-        if (curlFlipSupported) {
-            item { SetRow("翻页动画模式", ReaderThemeMath.pageAnimationModeLabel(s.pageAnimationMode), keys[7].onEnter, p, nav = nav, index = 7) }
-        }
+        item { SetRow("翻页动画模式", ReaderThemeMath.pageAnimationModeLabel(s.pageAnimationMode), keys[7].onEnter, p, nav = nav, index = 7) }
         item { SetSwitch("封面拉伸全屏", s.coverStretch, { commitPlain(s.copy(coverStretch = it)) }, p, nav = nav, index = 8) }
         item { SetSwitch("启动时继续阅读", s.autoContinue, { commitPlain(s.copy(autoContinue = it)) }, p, nav = nav, index = 9) }
         item { SetSwitch("显示页码", s.pageNum, { commitPlain(s.copy(pageNum = it)) }, p, nav = nav, index = 10) }
@@ -1653,13 +1649,12 @@ private fun AnimModePage(
     commit: (ReaderSettings) -> Unit,
     p: Palette,
 ) {
-    val curl = s.pageAnimationMode == "curl" && curlFlipSupported
+    val curl = s.pageAnimationMode == "curl"
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
         item { ThemeOpt("滑动", !curl, keys[0].onEnter, p, nav = nav, index = 0) }
-        // 不支持的平台没有卷曲后端：这一项不给（否则选了等于关掉动画）。
-        if (curlFlipSupported) {
-            item { ThemeOpt("卷曲", curl, keys[1].onEnter, p, nav = nav, index = 1) }
-        }
+        // 折页是纯 Compose 画布，全平台可用（不再依赖 Android 13+ 的着色器），
+        // 所以这一项在所有端都提供。
+        item { ThemeOpt("卷曲", curl, keys[1].onEnter, p, nav = nav, index = 1) }
         item { Spacer(modifier = Modifier.height(24.dp)) }
     }
 }

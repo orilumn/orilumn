@@ -270,10 +270,11 @@ fun ReaderScreen(
     // 不可前向引用，故用可空占位 + 下方回填；回填发生在首次组合内、任何手势之前。
     var flipCtl by remember { mutableStateOf<FlipController?>(null) }
     // 动画总闸：任何模式都走同一套翻页状态机（手势 / 结算 / 落位）。
-    // 具体画哪一档（滑动 / 3D 卷曲）由渲染层二选一，状态机不区分。
+    // 具体画哪一档（滑动 / 折页）由渲染层二选一，状态机不区分。
     val slideEnabled = light.pageAnim
-    // 3D 卷曲档：模式 = curl 且平台支持（Android 13+）。不支持的平台面板里也没有这个档（见 curlFlipSupported）。
-    val curlEnabled = light.pageAnim && light.pageAnimationMode == "curl" && curlFlipSupported
+    // 折页档：模式 = curl。折页是纯 Compose 画布（多边形裁切 + 渐变），不再依赖 GPU 着色器，
+    // 因此**全平台可用**，不需要平台能力判定。
+    val curlEnabled = light.pageAnim && light.pageAnimationMode == "curl"
 
     val scope = rememberCoroutineScope()
     // 锚页事件串行漏斗：显示状态的唯一写入通道（见 AnchorFunnel）。所有改锚页位置的动作
@@ -3934,23 +3935,23 @@ fun ReaderScreen(
                 }
                 else -> null
             }
-            // 封面往返不走卷曲（封面是整页图 + 淡入淡出），只在正文页之间生效。
+            // 封面往返不走折页（封面是整页图 + 淡入淡出），只在正文页之间生效。
             val curlNow = curlEnabled && !coverVisible && !slideFromCover && !slideToCover
             if (curlNow) {
                 FlipCurlLayer(
-                    // 方向/进度/倾斜/是否在翻，全部传闭包：只在 draw 相位读 ⇒ 动画期间不重组阅读面。
+                    // 方向/进度/倾斜/是否在结算，全部传闭包：只在 draw 相位读 ⇒ 动画期间不重组阅读面。
                     direction = { ctl.direction.value },
                     progress = { if (ctl.slideActive(slideEnabled)) ctl.progress.value else 0f },
                     tilt = { ctl.curlTilt.value },
+                    // 只有结算动画才做末段扶正（手指跟手时形状听手指的，见 curl/CurlGeometry.kt）。
+                    settling = { ctl.session.phase == FlipSession.Phase.Settling },
                     pageWidthPx = pxWidth,
                     pageHeightPx = pxHeight,
                     active = { ctl.slideActive(slideEnabled) },
                     paperArgb = profile.bgColor,
-                    // 页栅格在页坐标里的位置与尺寸（版心）；覆盖层恒为整页（见 FlipCurlLayer）。
+                    // 页栅格在页坐标里的左上角（版心）；覆盖层恒为整页、贴 (0,0)。
                     texX = contentLeft,
                     texY = contentTop,
-                    texW = (contentRight - contentLeft).coerceAtLeast(1f),
-                    texH = (contentBottom - contentTop).coerceAtLeast(1f),
                     // 两张纹理由页槽自己发布（页栅格 + 覆盖层），缺图时页面保持不动。
                     current = currentImages,
                     target = if (targetSlot == null) null else targetImages,

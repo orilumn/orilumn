@@ -64,6 +64,14 @@ internal const val CURL_TAIL_FADE_SPAN: Float = 0.1f
 internal const val CURL_START_EPSILON: Float = 0.011f
 
 /**
+ * 进度大于 `1 − 它` 就算「已经翻完」：整帧只剩目标页。
+ *
+ * 收尾时纸卷半径收敛到 0，网格本来就会自己消失；留这一段是为了「撤层那一帧不闪」：
+ * 最后一帧与静止时的目标页逐像素一致，动画结束撤掉翻页层时画面不跳。
+ */
+internal const val CURL_END_EPSILON: Float = 0.002f
+
+/**
  * 由进度算一帧折痕几何。
  *
  * @param direction +1 向后翻 / -1 向前翻（来自 [orilumn.reader.ui.reader.FlipSession.direction]）
@@ -179,10 +187,10 @@ internal fun lineCross(p1: Offset, p2: Offset, p3: Offset, p4: Offset): Offset? 
 }
 
 /**
- * 露出区多边形的四个角（折痕右侧那一块）。
+ * 露出区多边形的四个角（折痕**没掀起**那一侧的那一块：向后翻在右、向前翻在左）。
  *
- * 依次是：折痕上端 → 页右上角 → 页右下角 → 折痕下端。
- * 某端已经滑到右缘之外（收尾时整块滑出去）时，改用「折痕与右缘的交点」两次，
+ * 依次是：折痕上端 → 露出侧上角 → 露出侧下角 → 折痕下端。
+ * 某端已经滑到页边之外（收尾时整块滑出去）时，改用「折痕与页边的交点」两次，
  * 多边形退化成零面积——照旧画一遍不会出错，只是什么也画不出来。
  */
 internal fun revealCorners(shape: CurlShape): List<Offset> {
@@ -190,25 +198,49 @@ internal fun revealCorners(shape: CurlShape): List<Offset> {
     val h = shape.pageH
     val topC = Offset(shape.topX, 0f)
     val botC = Offset(shape.bottomX, h)
+    // 露出页永远在折痕「还没掀起来」的那一侧。
+    val onLeft = shape.direction < 0
+    val edgeX = if (onLeft) 0f else w
+    fun inside(x: Float): Boolean = if (onLeft) x > 0f else x < w
     val pts = ArrayList<Offset>(4)
     fun endSide() {
-        val p = lineCross(topC, botC, Offset(w, 0f), Offset(w, h))
+        val p = lineCross(topC, botC, Offset(edgeX, 0f), Offset(edgeX, h))
         if (p != null) {
             pts.add(p)
             pts.add(p)
         }
     }
-    if (topC.x < w) {
+    if (inside(topC.x)) {
         pts.add(topC)
-        pts.add(Offset(w, 0f))
+        pts.add(Offset(edgeX, 0f))
     } else {
         endSide()
     }
-    if (botC.x < w) {
-        pts.add(Offset(w, h))
+    if (inside(botC.x)) {
+        pts.add(Offset(edgeX, h))
         pts.add(botC)
     } else {
         endSide()
     }
     return pts
+}
+
+/**
+ * 卷曲半径：**折痕到「还没掀起来那一侧页边」的距离**，封顶 [CURL3D_RADIUS_RATIO]（≈ 0.1 页宽）。
+ *
+ * 这是参考实现 `NewCurl3D.updateCurlPos` 单页分支的原式
+ * （`dMax = clamp(pointer.x − pageRect.left, 0, pageWidth × 1.5 / 3 × (1 − pressure))`，
+ * 手指就是折痕）：纸卷有多粗由**剩下的那部分纸有多宽**决定，而不是由翻了多少决定；
+ * 上限里那项 `(1 − pressure)` 见 [CURL3D_RADIUS_RATIO]，少了它就是「筒径等于整页」。
+ *
+ * 两种口径的差别是决定性的：
+ * - 按进度算（旧口径）：进度 0.2 时半径只有 0.2 页，而掀起部分的长度也是 0.2 页，
+ *   纸一离开折痕就绕满 1 弧度，于是「翻了两成」看起来几乎没动；
+ * - 按剩下的纸算（本式）：前半程半径恒定（细筒往前滚，新页跟着手的节奏露出来），
+ *   到最后剩下的纸比上限还窄时，半径跟着收细、纸卷自然消失。
+ */
+internal fun curlRadius(shape: CurlShape, radiusRatio: Float = CURL3D_RADIUS_RATIO): Float {
+    val w = shape.pageW.coerceAtLeast(1f)
+    val unturned = if (shape.direction >= 0) shape.foldX else w - shape.foldX
+    return unturned.coerceIn(w * CURL3D_MIN_RADIUS_RATIO, w * radiusRatio.coerceIn(0.002f, 1.5f))
 }

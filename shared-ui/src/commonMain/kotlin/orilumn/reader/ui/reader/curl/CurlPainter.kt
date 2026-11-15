@@ -25,10 +25,11 @@ import kotlin.math.hypot
  *    「自由边」= 纸的轮廓，所以影跟着纸的形状走，而不是顺着折痕拖一条灰带。
  * 5. **折痕旁的影**：折痕朝露出页那一侧的一道渐变，结算头尾随 [CurlShape.shadowFade] 淡出。
  *
- * 为什么用多边形裁切而不是逐像素卷曲：折页在物理上就是一张**刚性**纸绕折痕翻过去，
+ * 这是**折页**（2D）的绘制，只在 3D 卷曲交不出网格时兜底（[drawCurl3DFrame] 返回 `false`）。
+ *
+ * 为什么折页用多边形裁切而不是逐像素卷曲：折页在物理上就是一张**刚性**纸绕折痕翻过去，
  * 屏幕上看到的三块（正面页 / 纸背 / 露出页）都能由折痕一条直线切出来，不需要曲面。
- * 逐像素着色器只在「纸卷」这种圆柱投影上才有优势，而那个姿态在折页里根本不存在
- * （纸不会自己卷成筒），画出来的筒会从折角的上下两侧漏到正面页上——已废弃。
+ * 纸真的卷成筒的姿态由 3D 卷曲负责（见 `Curl3D.kt`），不在这一层。
  */
 internal fun DrawScope.drawCurlFrame(
     shape: CurlShape,
@@ -44,9 +45,13 @@ internal fun DrawScope.drawCurlFrame(
     val pageSize = Size(w, h)
 
     // 还没开始翻（手指刚动的一点点）：只画读者正在看的那一页。
-    // 向前翻时「正在看」的是露出页那一张（两张图在 [FlipCurlLayer] 里按方向换过位）。
     if (shape.progress <= CURL_START_EPSILON) {
-        drawWholePage(if (shape.direction >= 0) front else back, paper, texLeft, texTop, pageSize)
+        drawWholePage(front, paper, texLeft, texTop, pageSize)
+        return
+    }
+    // 已经翻完：只剩目标页（最后一帧与静止时逐像素一致，动画结束撤层不跳）。
+    if (shape.progress >= 1f - CURL_END_EPSILON) {
+        drawWholePage(back, paper, texLeft, texTop, pageSize)
         return
     }
 

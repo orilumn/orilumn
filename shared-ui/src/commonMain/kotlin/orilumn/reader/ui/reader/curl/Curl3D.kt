@@ -15,12 +15,13 @@ import androidx.compose.ui.graphics.Vertices
 import androidx.compose.ui.graphics.VertexMode
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.hypot
-import kotlin.math.pow
 import kotlin.math.sin
+import kotlin.math.sqrt
 
 /**
  * 3D 卷曲一帧（**用户层**的绘制入口，全部走 Compose 公共绘制 API）。
@@ -39,17 +40,31 @@ import kotlin.math.sin
  *    满屏随机彩色 —— 安卓这条路的顶点色不可靠。已整体删除。
  * 3. **`BitmapShader` 直接吃页栅格**：页栅格是 GPU 后端的位图，框架不保证可作纹理。
  *
- * 所以现在：**纹理**走 `ImageShader` + `Vertices`；**明暗与纸背压淡**走路径 +
- * `Brush`（明暗本来就是「沿折痕方向的一维函数」，一条多段渐变就能精确表达）。
- * 一条纹理、一条渐变，全是文档里写清楚的公共 API，没有平台分叉，没有版本门槛。
+ * ## 压淡与明暗：一律照着**网格自己的轮廓**画
+ *
+ * 纸背压淡与纸卷明暗都是「沿折痕法向的一维函数」，但它们只能落在**纸真正占的那块形状**上。
+ * 上一版把它们画成「沿折痕的一条平行四边形」，折痕一斜、纸一少，这条带子就横穿整个折痕，
+ * 读者看到的是几道半透明条。现在两样都取 [CurlMesh.bandOutline] 的外轮廓当裁剪形状：
+ * 形状就是纸，纸有多少它就有多少，**不可能漏**。
+ *
+ * 明暗的取值照抄参考实现的顶点色公式
+ * `√(sinθ + 1.5)·0.9 + 0.1`（θ 从 0 到 π，中间最亮）。参考实现是**乘**（过曝到白），
+ * Compose 的渐变是 8 位色、表达不了大于 1 的乘数，所以这里按等价的「往白里压」实现：
+ * 近白的纸直接到白，墨色只被压一点点，读起来就是「纸面在反光」。
+ *
+ * ## 纸卷在哪一侧、平铺段在哪一侧
+ *
+ * 卷起来的那一半朝**掀起侧**鼓出去（露出页就在这一侧），绕满半圈后的平铺段落回**没掀起**
+ * 的那一侧（盖在还没翻走的纸上）。纸卷因此压在新页靠近折痕的那一条上，落影从纸卷轮廓
+ * 再往外铺；平铺段是纸背，压淡之后能透出底下的字。
+ *
+ * 两侧接反（纸卷鼓向没掀起的那半页、平铺段盖住新页）就是上一版的两个症状：
+ * 同一段文字在旧页上叠两遍（「三段文字」），翻到九成平铺段又把新页盖回去（「几乎没翻动」）。
  *
  * ## 画序（与 z 从小到大一致）
  *
- * 1. 正面页整页 → 2. 露出页（多边形裁切）→ 3. 落影 →
- * 4. 各段网格纹理（按 z 顺序）→ 5. 纸背压淡 → 6. 纸卷明暗。
- *
- * 压淡**必须排在明暗之前**：压淡是「这是纸的背面，内容只透出 39%」，明暗是
- * 「这张纸现在怎么弯、光怎么落」。反过来会把光影一起压掉，纸卷就成一块没有起伏的浅色板。
+ * 1. 正面页整页 → 2. 露出页（多边形裁切）→ 3. 落影（裁到页面内）→
+ * 4. 各段网格：纹理 → 纸背压淡 → 纸卷明暗（按 z 顺序逐段完成，段与段之间不打架）。
  *
  * @return `false` 表示这一帧没有网格可画，调用方退回折页。
  */
@@ -61,66 +76,60 @@ internal fun DrawScope.drawCurl3DFrame(
     texLeft: Float,
     texTop: Float,
     radiusRatio: Float = CURL3D_RADIUS_RATIO,
-    eyeRatio: Float = CURL3D_EYE_RATIO,
 ): Boolean {
     val w = shape.pageW
     val h = shape.pageH
     val pageSize = Size(w, h)
     val paper = Color(paperArgb)
 
+    // 还没开始翻：只画读者正在看的那一页（`front` 永远是被翻走的那一张）。
     if (shape.progress <= CURL_START_EPSILON) {
-        drawPage(if (shape.direction >= 0) front else back, paper, texLeft, texTop, pageSize)
+        drawPage(front, paper, texLeft, texTop, pageSize)
+        return true
+    }
+    // 已经翻完：只剩目标页。收尾时纸卷半径趋近 0，但残留的一道细边会在撤层那一帧闪一下，
+    // 所以最后这一段直接整页换成目标页（与折页那条 [drawCurlFrame] 同口径）。
+    if (shape.progress >= 1f - CURL_END_EPSILON) {
+        drawPage(back, paper, texLeft, texTop, pageSize)
         return true
     }
 
-    // ① 正面页 + ② 露出页
+    // ① 正面页（被翻走的那一页，整页铺在底下）② 露出页（折痕另一侧的新页）
     drawPage(front, paper, texLeft, texTop, pageSize)
     val corners = revealCorners(shape)
     if (corners.size < 3) return true
-    val reveal = Path().apply {
-        moveTo(corners[0].x, corners[0].y)
-        for (i in 1 until corners.size) lineTo(corners[i].x, corners[i].y)
-        close()
-    }
-    clipPath(reveal) { drawPage(back, paper, texLeft, texTop, pageSize) }
+    clipPath(polygonPath(corners)) { drawPage(back, paper, texLeft, texTop, pageSize) }
 
     // ③ 网格几何
-    //
-    // 折痕要**往回收一个半径**：读者拖的是纸的**自由边**（屏幕上那条轮廓），折痕在它后面
-    // 一个半径处 —— 真实翻页就是这样。不回收的话，露出区会被纸卷整整吃掉 R 宽度
-    // （低进度时几乎一点新页都看不到），手指和画面对不上。
-    val radius = w * radiusRatio
+    val radius = curlRadius(shape, radiusRatio)
+    val mesh = buildCurlMesh(shape, radius = radius, splits = CURL3D_SPLITS)
+    if (mesh.indexCount == 0) return false
+
+    // 折痕坐标系（与 [buildCurlMesh] 同一套）：t 沿折痕向下，nR 是法向（指向 +x 一侧），
+    // up 是「从折痕指向掀起侧」的方向——纸卷在这一侧鼓出去，平铺段落在另一侧；
+    // 明暗与落影都沿它取值，两端（翻页方向）通用。
     val t0 = Offset(shape.topX, 0f)
     val t1 = Offset(shape.bottomX, h)
     val foldLen = hypot(t1.x - t0.x, h).coerceAtLeast(1e-3f)
-    val ux = (t1.x - t0.x) / foldLen
-    val uy = h / foldLen
-    val nx = uy
-    val ny = -ux
-    // 沿 n 平移直线会同时改变两个端点的 y；换算成「仍过 y=0 与 y=h 的平行线」的 x 偏移。
-    val shift = -radius * (nx - ny * (t1.x - t0.x) / h)
-    val meshShape = shape.copy(topX = shape.topX + shift, bottomX = shape.bottomX + shift)
-    val mesh = buildCurlMesh(meshShape, radius = radius, splits = CURL3D_SPLITS, eyeZ = h * eyeRatio)
-    if (mesh.indexCount == 0) return false
-    val m0 = Offset(meshShape.topX, 0f)
-    val m1 = Offset(meshShape.bottomX, h)
-    val n = Offset(nx, ny)
+    val nR = Offset(h / foldLen, -(t1.x - t0.x) / foldLen)
+    val side = if (shape.direction >= 0) 1f else -1f
+    val up = Offset(nR.x * side, nR.y * side)
 
-    // ④ 落影：纸卷压在露出页上。影从纸卷的**轮廓**向外铺，长度跟着卷起来的高度走
-    //    （抬得越高影越远），这样影和纸是同一个几何算出来的，不会各走各的。
-    val sMax = listOf(0f to 0f, w to 0f, w to h, 0f to h)
-        .maxOf { (px, py) -> (px - m0.x) * nx + (py - m0.y) * ny }
-    val lift = radius * (1f - cos(minOf(sMax / radius, PI.toFloat())))
-    val silhouette = mesh.maxOffsetAlong(nx, ny, m0)
-    drawFanShadow(m0, m1, n, from = silhouette, width = lift * 1.2f, alpha = SHADOW_ALPHA * 1.35f)
-    // ⑤ 纸背自由边压在正面页上的一道影 + 折痕接触处的暗角
-    val backEdge = mesh.minOffsetAlong(nx, ny, m0)
-    if (backEdge < -1f) {
-        drawFanShadow(m0, m1, n, from = backEdge, width = -lift * 0.75f, alpha = SHADOW_ALPHA)
-        drawFanShadow(m0, m1, n, from = 0f, width = -radius * 1.1f, alpha = SHADOW_ALPHA * 0.95f)
+    // ④ 落影：纸卷压在露出页上。参考实现里落影顶点的偏移是 `z/2`、浓度按 `z/(2R)` 插值
+    //    （`SHADOW_INNER_COLOR` 黑 0.5 → 透明），所以影的宽度与浓度都只跟「纸抬多高」有关：
+    //    纸刚离页时几乎没有影，卷得越高影越远越深。
+    val lift = radius * (1f - cos(minOf(mesh.maxArc() / radius, PI.toFloat())))
+    val silhouette = mesh.maxOffsetAlong(up.x, up.y, t0)
+    clipRect(0f, 0f, w, h) {
+        drawFanShadow(
+            t0, t1, up,
+            from = silhouette,
+            width = lift * 0.5f,
+            alpha = DROP_SHADOW_ALPHA * (lift / (2f * radius)).coerceIn(0f, 1f) * shape.shadowFade,
+        )
     }
 
-    // ⑥ 各段网格纹理（按 z 顺序），然后是纸背压淡、纸卷明暗
+    // ⑤ 各段网格（按 z 顺序）：纹理 → 纸背压淡 → 纸卷明暗
     val canvas = drawContext.canvas
     val nv = mesh.vertexCount
     val posList = List(nv) { Offset(mesh.positions[it * 2], mesh.positions[it * 2 + 1]) }
@@ -130,75 +139,105 @@ internal fun DrawScope.drawCurl3DFrame(
         Offset(mesh.texCoords[it * 2] - texLeft, mesh.texCoords[it * 2 + 1] - texTop)
     }
     val overlayTex = List(nv) { Offset(mesh.texCoords[it * 2], mesh.texCoords[it * 2 + 1]) }
-    for (band in mesh.bands) {
-        if (band.indexCount <= 0) continue
-        val idx = List(band.indexCount) { mesh.indices[band.indexStart + it].toInt() }
-        drawMeshBand(canvas, posList, idx, pageTex, front.page!!)
-        front.overlay?.let { drawMeshBand(canvas, posList, idx, overlayTex, it) }
-    }
+    // 纸卷绕过半圈之后，纸背（Verso）盖在正面（Recto）上，但两段的屏幕范围是「整条 ÷ 最左一截」：
+    // 明暗沿法向只跟 q 有关，所以叠在**整条**（Recto）上算一次就够，只有没有 Recto 时才用 Verso。
+    // 明暗只画在**看得见**的那一面：纸卷隆起后外层是纸背（Verso，z ≥ R，压在正面那半圈之上），
+    // 没绕到九十度时只有正面（Recto）露在外面。给被压住的那一段画明暗等于白画。
+    val hasVerso = mesh.bands.any { it.surface == CurlMesh.Surface.Verso }
+    // 纸边被卷起来时可以略微探出页面（斜折痕 + 抬起的纸），画布裁到页面内即可。
+    clipRect(0f, 0f, w, h) {
+        for (band in mesh.bands) {
+            if (band.indexCount <= 0) continue
+            val idx = List(band.indexCount) { mesh.indices[band.indexStart + it].toInt() }
+            front.page?.let { drawMeshBand(canvas, posList, idx, pageTex, it) }
+            front.overlay?.let { drawMeshBand(canvas, posList, idx, overlayTex, it) }
 
-    // ⑦ 纸背压淡：纸色 61% 盖上去 ⇒ 内容只剩 39%（与折页同一个口径）。
-    val versoMin = mesh.minOffsetOf(CurlMesh.Surface.Verso, nx, ny, m0)
-    val paperColor = Color(paperArgb.toLong())
-    if (backEdge < -1f) drawBandQuad(m0, m1, n, backEdge, 0f, paperColor, WASH_ALPHA)
-    if (versoMin != null && silhouette > versoMin) {
-        drawBandQuad(m0, m1, n, versoMin, silhouette, paperColor, WASH_ALPHA)
-    }
-
-    // ⑧ 纸卷明暗：沿折痕法向的一维渐变（管状曲线：中间最亮、两侧收暗）。
-    val shadeFrom = if (versoMin != null) versoMin.coerceAtLeast(0f) else 0f
-    if (silhouette > shadeFrom + 1f) {
-        val span = silhouette - shadeFrom
-        val stops = Array(ROLL_SHADE_STOPS + 1) { k ->
-            val t = k.toFloat() / ROLL_SHADE_STOPS
-            val u = shadeFrom + span * t
-            // 看到的是纸背那半圈 ⇒ 管状曲线；还没绕过去 ⇒ 平的正面，只略微压暗。
-            val shade = if (versoMin != null && u >= versoMin - 0.01f) {
-                val tt = (u / radius).coerceIn(0f, 1f)
-                (0.52f + 0.48f * sin((PI * tt).toFloat()).pow(0.6f)).coerceIn(0f, 1f)
-            } else {
-                1f - 0.12f * t
+            val ring = mesh.bandOutline(band)
+            if (ring.size < 3) continue
+            val outline = polygonPath(ring)
+            // 纸背：纸色盖上去 10% ⇒ 内容剩 90%（参考实现 `BACKFACE_ALPHA = 0.9`），
+            // 正面页的内容从下面透出一点，正好是「隔着纸看见反面的字」。
+            if (band.surface != CurlMesh.Surface.Recto) {
+                drawPath(outline, paper, alpha = CURL_BACK_WASH_ALPHA)
             }
-            t to Color(0f, 0f, 0f, 1f - shade)
+            val topmost = when (band.surface) {
+                // 正面那半圈被外层（纸背）压住时不用画；只露正面时才是它。
+                CurlMesh.Surface.Recto -> !hasVerso
+                else -> true
+            }
+            if (CURL3D_SHADING && topmost) drawBandShade(outline, mesh, band, radius, t0, up)
         }
-        drawBandQuadBrush(
-            m0, m1, n, shadeFrom, silhouette,
-            Brush.linearGradient(
-                colorStops = stops,
-                start = m0 + n * shadeFrom,
-                end = m0 + n * silhouette,
-            ),
-        )
     }
     return true
 }
 
-/** 某一段可见面沿法向 `n` 的最小偏移（没有这一段就是 `null`）。 */
-private fun CurlMesh.minOffsetOf(
-    surface: CurlMesh.Surface,
-    nx: Float,
-    ny: Float,
+/** 某一段的明暗：沿 `up` 方向的一条渐变，取值照参考实现的顶点色公式。 */
+private fun DrawScope.drawBandShade(
+    outline: Path,
+    mesh: CurlMesh,
+    band: CurlMesh.Band,
+    radius: Float,
     origin: Offset,
-): Float? {
-    var min = Float.MAX_VALUE
-    var found = false
-    for (b in bands) {
-        if (b.surface != surface) continue
-        found = true
-        for (k in b.indexStart until b.indexStart + b.indexCount) {
-            val v = indices[k].toInt()
-            val u = (positions[v * 2] - origin.x) * nx + (positions[v * 2 + 1] - origin.y) * ny
-            if (u < min) min = u
+    up: Offset,
+) {
+    var u0 = Float.MAX_VALUE
+    var u1 = -Float.MAX_VALUE
+    for (row in band.firstRow..band.lastRow) {
+        for (k in 0..1) {
+            val v = row * 2 + k
+            val q = (mesh.positions[v * 2] - origin.x) * up.x +
+                (mesh.positions[v * 2 + 1] - origin.y) * up.y
+            if (q < u0) u0 = q
+            if (q > u1) u1 = q
         }
     }
-    return if (found) min else null
+    if (u1 - u0 < 1f) return
+    val stops = Array(ROLL_SHADE_STOPS + 1) { k ->
+        val t = k.toFloat() / ROLL_SHADE_STOPS
+        t to Color(1f, 1f, 1f, shadeAlpha(u0 + (u1 - u0) * t, radius))
+    }
+    drawPath(
+        outline,
+        Brush.linearGradient(
+            colorStops = stops,
+            start = origin + up * u0,
+            end = origin + up * u1,
+        ),
+    )
 }
 
-/** 明暗渐变的分段数（一维函数的采样密度，够到看不出折线）。 */
-private const val ROLL_SHADE_STOPS: Int = 24
+/**
+ * 「反光」强度：`q` 是该点沿 [up] 离折痕的屏幕偏移。
+ *
+ * 纸卷在 `0..R` 这一段（朝掀起侧鼓出去），绕满半圈后的平铺段在 `q < −πR`（落到另一侧）。
+ *
+ * 参考实现：`θ` 处的顶点色 = `√(sinθ + 1.5)·0.9 + 0.1`，`sinθ = clamp(x'/R)`，且只对
+ * 卷起来的那一段生效（θ 从 0 到 π，中间 θ = π/2 时 `sinθ = 1` 最亮）。这里把它归一化成
+ * 叠白的不透明度：最暗处（θ = 0 或 π）为 0，最亮处为 [ROLL_SHADE_MAX_ALPHA]。
+ */
+private fun shadeAlpha(q: Float, radius: Float): Float {
+    val sinTheta = (q / radius).coerceIn(0f, 1f)
+    val bright = sqrt(sinTheta + 1.5f) * 0.9f + 0.1f
+    return ROLL_SHADE_MAX_ALPHA *
+        ((bright - REFERENCE_MIN_BRIGHT) / REFERENCE_BRIGHT_SPAN).coerceIn(0f, 1f)
+}
 
-/** 纸背压淡的 alpha：纸色盖上去 ⇒ 内容剩 0.39（与折页同一个口径）。 */
-private const val WASH_ALPHA: Float = 0.61f
+/** 参考实现最暗 / 最亮的顶点色：`√(sinθ+1.5)·0.9+0.1` 在 sinθ = 0 与 1 处的取值。 */
+private val REFERENCE_MIN_BRIGHT: Float = sqrt(1.5f) * 0.9f + 0.1f // ≈ 1.202
+private val REFERENCE_MAX_BRIGHT: Float = sqrt(2.5f) * 0.9f + 0.1f // ≈ 1.523
+private val REFERENCE_BRIGHT_SPAN: Float = REFERENCE_MAX_BRIGHT - REFERENCE_MIN_BRIGHT
+
+/** 明暗总开关（排查用）：关掉纸卷反光，只留纹理与纸背压淡。 */
+private const val CURL3D_SHADING: Boolean = true
+
+/** 明暗最深处的叠白不透明度。 */
+private const val ROLL_SHADE_MAX_ALPHA: Float = 0.30f
+
+/** 落影最深处的不透明度（参考实现 `SHADOW_INNER_COLOR` 的 alpha = 0.5）。 */
+private const val DROP_SHADOW_ALPHA: Float = 0.32f
+
+/** 明暗渐变的分段数（一维函数的采样密度，够到看不出折线）。 */
+private const val ROLL_SHADE_STOPS: Int = 16
 
 /** 用一段网格画一张纹理（**Compose 公共 API**：`Vertices` + `ImageShader`）。 */
 private fun DrawScope.drawMeshBand(
@@ -226,73 +265,10 @@ private fun DrawScope.drawMeshBand(
     drawIntoCanvas { it.drawVertices(vertices, BlendMode.SrcOver, paint) }
 }
 
-/** 沿折痕方向的一条平行四边形色块（`from`/`to` 是沿法向 `n` 的偏移）。 */
-private fun DrawScope.drawBandQuad(
-    t0: Offset,
-    t1: Offset,
-    n: Offset,
-    from: Float,
-    to: Float,
-    color: Color,
-    alpha: Float,
-) {
-    if (to - from <= 0.5f) return
-    drawPath(bandQuadPath(t0, t1, n, from, to), color, alpha = alpha)
-}
-
-/** 同上，但用一把画笔（渐变）。 */
-private fun DrawScope.drawBandQuadBrush(
-    t0: Offset,
-    t1: Offset,
-    n: Offset,
-    from: Float,
-    to: Float,
-    brush: Brush,
-) {
-    if (to - from <= 0.5f) return
-    drawPath(bandQuadPath(t0, t1, n, from, to), brush)
-}
-
-private fun bandQuadPath(t0: Offset, t1: Offset, n: Offset, from: Float, to: Float): Path {
-    val a = t0 + n * from
-    val b = t0 + n * to
-    val c = t1 + n * to
-    val d = t1 + n * from
-    return Path().apply {
-        moveTo(a.x, a.y)
-        lineTo(b.x, b.y)
-        lineTo(c.x, c.y)
-        lineTo(d.x, d.y)
-        close()
-    }
-}
-
-/**
- * 卷曲半径相对页宽。
- *
- * moon+ 的卷曲区宽度是 `屏幕宽 × 1.5 / 3`（`NewCurl3D.java:1122` 的 `dWidth`），
- * 也就是半页。半径给到 0.085 时，纸卷在屏幕上只有 8% 页宽 —— 一条亮线，读不出「纸立起来了」。
- * 0.18 让纸卷占 18% 页宽：低进度时纸是一张弯着的片，高进度时才绕成筒，
- * 中间那段「正在卷」的状态才是读者认得出的翻页。
- */
-internal const val CURL3D_RADIUS_RATIO: Float = 0.12f
-
-/**
- * 观察者高度相对页高。
- *
- * moon+ 是 `fov 45°` 且相机放在 `1/tan(fov/2)` 处（`NewCurl3D.java:1122`），换算过来约
- * 1.2 页高；那个量在平板近处会把页边顶出画面，所以收到 2.2 —— 近处略大、远处略小，
- * 读得出「纸立起来了」，又不至于鱼眼。
- */
-internal const val CURL3D_EYE_RATIO: Float = 2.2f
-
-/** 圆柱横截面分段数。 */
-internal const val CURL3D_SPLITS: Int = 40
-
 /**
  * 沿折痕方向的一条渐变影带：从折痕坐标系里的 `from` 偏移处开始，向 `width` 方向铺开，
  * 起点 `alpha`、终点透明。影的形状只跟折痕和卷高有关，沿折痕方向是均匀的，
- * 所以用一条平行四边形 + GPU 渐变画笔就够。
+ * 所以用一条平行四边形 + GPU 渐变画笔就够（调用方负责裁到页面内）。
  */
 private fun DrawScope.drawFanShadow(
     t0: Offset,
@@ -302,20 +278,13 @@ private fun DrawScope.drawFanShadow(
     width: Float,
     alpha: Float,
 ) {
-    if (width == 0f) return
+    if (width <= 0.5f || alpha <= 0f) return
     val a = t0 + n * from
     val b = t0 + n * (from + width)
     val c = t1 + n * (from + width)
     val d = t1 + n * from
-    val path = Path().apply {
-        moveTo(a.x, a.y)
-        lineTo(b.x, b.y)
-        lineTo(c.x, c.y)
-        lineTo(d.x, d.y)
-        close()
-    }
     drawPath(
-        path,
+        polygonPath(listOf(a, b, c, d)),
         Brush.linearGradient(
             colorStops = arrayOf(0f to Color(0f, 0f, 0f, alpha), 1f to Color(0f, 0f, 0f, 0f)),
             start = a,
@@ -324,25 +293,20 @@ private fun DrawScope.drawFanShadow(
     )
 }
 
-/** 网格里沿法向最远的偏移（纸卷轮廓）。 */
-private fun CurlMesh.maxOffsetAlong(nx: Float, ny: Float, t0: Offset): Float {
-    var m = 0f
-    var i = 0
-    while (i < positions.size) {
-        val v = (positions[i] - t0.x) * nx + (positions[i + 1] - t0.y) * ny
-        if (v > m) m = v
-        i += 2
-    }
-    return m
+/** 页面里的一个多边形（路径）。 */
+private fun polygonPath(pts: List<Offset>): Path = Path().apply {
+    moveTo(pts[0].x, pts[0].y)
+    for (i in 1 until pts.size) lineTo(pts[i].x, pts[i].y)
+    close()
 }
 
-/** 网格里沿法向最近的偏移（纸背自由边）。 */
-private fun CurlMesh.minOffsetAlong(nx: Float, ny: Float, t0: Offset): Float {
+/** 网格里沿折痕法向最远的偏移（纸卷轮廓），从折痕上端量起。 */
+private fun CurlMesh.maxOffsetAlong(nx: Float, ny: Float, origin: Offset): Float {
     var m = 0f
     var i = 0
     while (i < positions.size) {
-        val v = (positions[i] - t0.x) * nx + (positions[i + 1] - t0.y) * ny
-        if (v < m) m = v
+        val v = (positions[i] - origin.x) * nx + (positions[i + 1] - origin.y) * ny
+        if (v > m) m = v
         i += 2
     }
     return m
@@ -361,3 +325,29 @@ private fun DrawScope.drawPage(
     images.page?.let { drawImage(it, topLeft = Offset(texLeft, texTop), alpha = alpha) }
     images.overlay?.let { drawImage(it, topLeft = Offset.Zero, alpha = alpha) }
 }
+
+/**
+ * 卷曲半径的上限（相对页宽），**含参考实现的手指压力项**。
+ *
+ * `NewCurl3D.updateCurlPos`：`dWidth = 页宽 × 1.5 / 3 × max(1 − pressure, 0)`（竖屏拖动）。
+ * 参考实现自己在点按翻页时把压力置为 `0.7843`（200/255，见 `pageScroll`），这里沿用同一个
+ * 基准值：半径 ≈ 0.108 页宽，纸卷直径约两成页宽，是 iBooks 那种细筒。
+ *
+ * 不乘压力项（直接取半个页宽）就是「筒径几乎等于整页」：半径 = 折痕到页边的距离，
+ * 前半程一直是上限，纸卷又宽又扁，露出页被它压掉大半 —— 看起来像没翻动。
+ */
+internal const val CURL3D_REFERENCE_PRESSURE: Float = 0.7843f
+
+/** 卷曲半径上限（相对页宽）：`页宽 × 1.5 / 3 × (1 − pressure)`。 */
+internal const val CURL3D_RADIUS_RATIO: Float = 0.5f * (1f - CURL3D_REFERENCE_PRESSURE)
+
+/**
+ * 卷曲半径的下限（相对页宽）。
+ *
+ * 只防止除零 / 扫线全部重合，不是「收尾也要留个筒」：翻到最后半径本来就该收敛到 0
+ * （剩下的纸没有了，纸卷跟着消失），留一个百分之一的筒反而会在末帧留一道边。
+ */
+internal const val CURL3D_MIN_RADIUS_RATIO: Float = 0.0005f
+
+/** 圆柱横截面分段数。 */
+internal const val CURL3D_SPLITS: Int = 40

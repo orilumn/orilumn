@@ -2,6 +2,7 @@ package orilumn.reader.ui.reader.curl
 
 import androidx.compose.ui.geometry.Offset
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.sin
@@ -9,43 +10,60 @@ import kotlin.math.sin
 /**
  * 卷曲的**几何**（用户层纯函数，页坐标系，单位 px）。
  *
- * ## 与折页的关系
+ * ## 模型：旋转坐标系 + 按页面矩形裁剪的扫线（照搬 `NewCurl3D.Mesh3D.curl`）
  *
- * 折页是「曲率 0」的特例：纸绕折痕刚性翻过去，屏幕上只有三块多边形。卷曲是同一张纸
- * 绕过折痕的**圆柱**，屏幕上的点由「纸面到折痕的弧长 s」唯一决定：
+ * 上一版是「半平面对折」：折痕一侧整个半平面被掀起来，网格边界永远平行于折痕。
+ * 那个模型下页面角点不参与几何，于是角永远是斜切的；斜折痕时掀起区退化成三角形，
+ * 上半截没有纸。这里换成参考实现的坐标系：
+ *
+ * 1. **折痕坐标系**：原点 = 折痕与页面水平中线的交点；`t` 沿折痕向下，`n` 是折痕法向
+ *    （指向 +x 一侧）。页面四角只在原点平移 + 旋转，所以直角天然存在。
+ * 2. **扫线**：`x' = 0`、`x' = −πR·i/(splits−1)`，再加上**页面四角各自的 x'**——
+ *    角点扫线让页面轮廓的折点精确落在网格上（角没被削掉）。
+ * 3. 每条扫线与**页面矩形**求交（参数化裁剪），得到该线在页面内的 `λ` 区间。
+ *    这就是「按页面矩形裁剪」，上一版缺的就是这一步。
+ * 4. 端点按 `x'` 变换（R = 卷曲半径）：
  *
  * ```
- *   0 ≤ s ≤ πR :  x = 折痕 − R·sinθ      （先越过折痕压到正面页那一侧）
- *                 z = R·(1 − cosθ)        （离纸面的高度，0 → 2R）；θ = s / R
- *   s > πR     :  x = 折痕 − (s − πR)     （绕满半圈后平铺回来，z = 2R）
+ *   x' ≥ 0        : 不卷，原地（纸平铺在页面上）
+ *   −πR ≤ x' < 0  : θ = x'/R，屏幕偏移 = R·sinθ，高度 z = R(1−cosθ)   （圆柱）
+ *   x' < −πR      : 屏幕偏移 = −(πR + x')，z = 2R                    （绕满半圈后平铺回来）
  * ```
  *
- * 屏幕位置只由 s 决定 ⇒ 每条等 s 的扫描线在屏幕上仍是直线（沿折痕方向平移），
- * 三角形网格是一张「行 × 2」的规则网格：行 = 扫描线，两个顶点 = 该扫描线与页矩形的交点。
+ * 5. 相邻两条扫线的端点连成四边形（两个三角）。扫线按 `x'` 从大到小排列，
+ *    所以四边形总是「同一张纸上相邻两段」。
+ *
+ * ## 掀的是哪一半、卷在哪一侧
+ *
+ * `x' < 0` 是「已经掀起来、离开页面的那一半」，它在折痕的哪一侧由**翻页方向**决定：
+ * 向后翻掀右半边（露出页在右），向前翻掀左半边（露出页在左）。这一侧统一用
+ * [CurlShape.direction] 算出的 `side` 表示，几何本身只有一套式子。
+ *
+ * 卷起来的那一半**朝掀起侧鼓出去**、绕满半圈后的平铺段**落回没掀起的那一侧**
+ * （参考实现 `Mesh3D.curl`：局部 +x 是拖动方向，`x = R·sin(x'/R)` 把掀起侧的材料
+ * 卷到拖动方向的另一侧）。两条都别接反：接反时纸卷压在没掀起的那半页上（同一段文字
+ * 叠两遍），平铺段又会盖住露出页（翻到九成还像没翻动）。
  *
  * ## 三段可见面（画序即 z 序）
  *
- * | 段 | s 范围 | 看得见的那一面 | 内容 |
- * | --- | --- | --- | --- |
- * | [Surface.Recto] | 0..πR/2 | 纸正面 | 页栅格原样 |
- * | [Surface.Verso] | πR/2..πR | 纸背面（鼓出来的那一半） | 同一张图，压淡 |
- * | [Surface.Back] | πR..sMax | 绕回来平铺在正面页上方 | 同一张图，压淡 |
+ * | 段 | 位置 | 看得见的那一面 |
+ * | --- | --- | --- |
+ * | [Surface.Recto] | `z < R`（`x' ≥ −πR/2`） | 纸正面 |
+ * | [Surface.Verso] | `z ≥ R`（`−πR ≤ x' < −πR/2`） | 纸背面（卷筒外圈） |
+ * | [Surface.Back] | `x' < −πR`（平铺段） | 绕满半圈后翻回来的那一面 |
  *
- * 分界不是美术选择：纸往上卷，正面（原本朝上）成了卷的**内**侧，背面成了外侧；
- * 观察者在正上方，法线朝观察者的一面才可见，而法线 z 分量在 θ = π/2 变号。
+ * ## 纹理坐标 = 材料坐标
  *
- * ## 纸背内容取「材料自己的位置」
- *
- * 纸背在屏幕 x 处显示的是**材料**在弧长 s 处的正面内容（同一张纸的背面透过来），
- * 镜像由几何自然产生（屏幕 x 随 s 反向）。折页那边要显式镜射，是因为折页的纸背是
- * 「露出区的镜像」而不是材料本身；卷曲一旦有了法线朝向，就不需要第二套变换。
+ * `texCoords` 给的是**未卷曲时**该点所在的页面坐标（参考实现里页矩形角点自带 tex 坐标、
+ * 求交时线性插值，等价）。着色器按它采样，纸背的镜像由几何自然产生；**字不会被镜像**，
+ * 因为纹理坐标是材料坐标，跟屏幕位置无关。
  */
 internal class CurlMesh(
     /** 每顶点 (x, y)，页坐标。 */
     val positions: FloatArray,
     /** 每顶点 (u, v)，**材料坐标**（页坐标，未折叠）：着色器按它采样纹理。 */
     val texCoords: FloatArray,
-    /** 每顶点「到折痕的弧长 s」（px）：着色器按它算圆柱法线。 */
+    /** 每顶点「到折痕的弧长」（px）：平铺侧为 0，掀起侧 = `R·|θ|`。 */
     val arc: FloatArray,
     /** 索引（各段按 [bands] 顺序排列）。 */
     val indices: ShortArray,
@@ -59,16 +77,23 @@ internal class CurlMesh(
         val indexCount: Int,
         /** 入纸深度（0..1）：平铺段一定程度压在正面页上方，用于决定它排在哪一段之后。 */
         val depth: Float,
+        /**
+         * 本段覆盖的扫线行区间（闭区间）。每行贡献两个顶点（`2r` 与 `2r+1`），
+         * 所以 `firstRow..lastRow` 也唯一确定了这一段的外轮廓（见 [bandOutline]）。
+         * 压淡 / 明暗要贴着这个轮廓走——另画一条矩形带会漏成横贯折痕的半透明条。
+         */
+        val firstRow: Int,
+        val lastRow: Int,
     )
 
     internal enum class Surface {
-        /** 正面（θ < π/2）：页栅格原样。 */
+        /** 正面（z < R）：页栅格原样。 */
         Recto,
 
-        /** 背面（π/2 ≤ θ ≤ π）：鼓出来的那一半，压淡。 */
+        /** 背面（z ≥ R）：鼓出来的那半圈，压淡。 */
         Verso,
 
-        /** 绕满半圈后平铺回来的那一段，压淡。 */
+        /** 绕满半圈后平铺回来的那一段（落在**没掀起**的那一侧，盖在正面页上），压淡。 */
         Back,
     }
 
@@ -78,172 +103,184 @@ internal class CurlMesh(
 /** 弧段行数上限（Short 索引的安全上限内）。 */
 private const val MAX_SPLITS = 96
 
-/** 纸背内容压到的透明度（与折页同一口径，旧版 `alpha = 100/255`）。 */
-internal const val CURL_BACK_ALPHA: Float = 0.39f
+/** 两条扫线的最小间距（px）：比它更近的扫线合并（角点扫线可能和等分线重合）。 */
+private const val ROW_EPSILON = 0.5f
+
+/** 纸背内容压到的透明度（参考实现 `BACKFACE_ALPHA = 0.9`，即纸色盖上去 10%）。 */
+internal const val CURL_BACK_WASH_ALPHA: Float = 0.10f
 
 /**
  * 由一帧折痕几何 + 卷曲半径生成网格。
  *
- * @param radius 卷曲半径（px）。`πR` 是「绕满半圈」所需弧长：半径越大卷得越缓、
- *   纸背平铺段越晚出现。调用方按页宽给（[CURL3D_RADIUS_RATIO]）。
- * @param splits 弧段行数（越大越圆；三角形数 ≈ 行数 × 2）。
+ * @param radius 卷曲半径（px）。**是「折痕到还没掀起来那一侧页边的距离」**，不是进度本身
+ *   （见 [curlRadius] / `NewCurl3D.updateCurlPos` 的 `dMax`：手指离页边多远就卷多粗）。
+ * @param splits 圆柱段的扫线数（越大越圆；三角形数 ≈ 扫线数 × 2）。
  */
 internal fun buildCurlMesh(
     shape: CurlShape,
     radius: Float,
-    splits: Int = 40,
-    eyeZ: Float = 0f,
+    splits: Int = CURL3D_SPLITS,
 ): CurlMesh {
     val w = shape.pageW
     val h = shape.pageH
-    val r = radius.coerceAtLeast(1f)
+    val r = radius.coerceAtLeast(1e-3f)
+    val halfTurn = PI.toFloat() * r
 
-    // 折痕：过 (topX,0) 与 (bottomX,h) 的直线；u 沿折痕向下，n 指向被掀起的一侧（右）。
-    val t0 = Offset(shape.topX, 0f)
-    val t1 = Offset(shape.bottomX, h)
-    val foldLen = hypot(t1.x - t0.x, t1.y - t0.y).coerceAtLeast(1e-3f)
-    val ux = (t1.x - t0.x) / foldLen
-    val uy = (t1.y - t0.y) / foldLen
-    val nx = uy
-    val ny = -ux
+    // 折痕坐标系：原点 = 折痕与页面水平中线的交点；t = 沿折痕向下，n = 法向（指向 +x 一侧）。
+    val top = Offset(shape.topX, 0f)
+    val bottom = Offset(shape.bottomX, h)
+    val foldLen = hypot(bottom.x - top.x, h).coerceAtLeast(1e-3f)
+    val tx = (bottom.x - top.x) / foldLen
+    val ty = h / foldLen
+    val nx = ty
+    val ny = -tx
+    val ox = (top.x + bottom.x) * 0.5f
+    val oy = h * 0.5f
 
-    fun arcOf(p: Offset): Float = (p.x - t0.x) * nx + (p.y - t0.y) * ny
+    // 掀起来的是哪一半：向后翻掀 +n 侧，向前翻掀 −n 侧。
+    val side = if (shape.direction >= 0) 1f else -1f
 
-    var sMax = 0f
-    for (c in arrayOf(Offset(0f, 0f), Offset(w, 0f), Offset(w, h), Offset(0f, h))) {
-        val s = arcOf(c)
-        if (s > sMax) sMax = s
-    }
-    if (sMax <= 0.5f) return emptyMesh()
+    /** 该点沿折痕法向的坐标（材料坐标）。 */
+    fun normalOf(x: Float, y: Float): Float = (x - ox) * nx + (y - oy) * ny
 
-    val halfTurn = (PI.toFloat() * r).coerceAtLeast(1e-3f)
-    val quarter = halfTurn / 2f
-    val arcEnd = minOf(sMax, halfTurn)
+    /** 该点对应的扫线参数：0 = 折痕，负 = 沿纸面离折痕 `|x'|` 那么远。 */
+    fun scanX(x: Float, y: Float): Float = -side * normalOf(x, y)
 
-    // 行：0 → arcEnd 均分；必须精确落在 πR/2（可见面换边）与 πR（开始平铺）上。
-    val rows = ArrayList<Float>(splits + 10)
+    // 页面四角在折痕坐标系里的 x'：最负的那个是「掀起的纸最远端」。
+    val cx = floatArrayOf(0f, w, w, 0f)
+    val cy = floatArrayOf(0f, 0f, h, h)
+    val cornerX = FloatArray(4) { scanX(cx[it], cy[it]) }
+    var xMin = cornerX[0]
+    for (i in 1 until 4) if (cornerX[i] < xMin) xMin = cornerX[i]
+    // 折痕落在页面外、这一侧没有可掀起的材料：这一帧不该由网格画。
+    if (xMin > -1f) return emptyMesh()
+
+    // 扫线：0 → −πR 等分，外加四条角点扫线（角点精确落在网格上）。
+    // **只保留掀起侧的材料（x' ≤ 0）**：没掀起的那半页由调用方整页画（[drawPage]），
+    // 再让网格盖一遍就是同一张纸画两遍（文字重影、明暗与压淡铺到没掀的纸上）。
+    // 卷起来之后网格在**屏幕**上会压到露出页上——那是纸自己盖住新页，不是重复绘制。
     val n = splits.coerceIn(2, MAX_SPLITS)
-    fun addArc(from: Float, to: Float, count: Int) {
-        if (to - from < 1e-3f) return
-        for (i in (if (rows.isEmpty() || from > rows.last() + 1e-3f) 0 else 1)..count) {
-            rows.add(from + (to - from) * i / count)
-        }
+    val raw = ArrayList<Float>(n + 6)
+    raw.add(0f)
+    for (i in 1 until n) raw.add(-halfTurn * i / (n - 1))
+    for (i in 0 until 4) raw.add(cornerX[i])
+    raw.sortDescending()
+    val rows = ArrayList<Float>(raw.size)
+    for (x in raw) {
+        if (x > ROW_EPSILON) continue
+        if (x < xMin - ROW_EPSILON) continue
+        if (rows.isNotEmpty() && rows.last() - x < ROW_EPSILON) continue
+        rows.add(x)
     }
-    // 按 sMax（纸边最远弧长）决定铺到哪一段，不能用 arcEnd —— arcEnd 已被
-    // min(sMax, πR) 截断，拿它判断就永远走不到平铺段（曾经漏掉整块纸背）。
-    if (sMax <= quarter) {
-        addArc(0f, sMax, n)
-    } else if (sMax <= halfTurn) {
-        addArc(0f, quarter, (n / 2).coerceAtLeast(2))
-        addArc(quarter, sMax, (n / 2).coerceAtLeast(2))
-    } else {
-        addArc(0f, quarter, (n / 3).coerceAtLeast(2))
-        addArc(quarter, halfTurn, (n / 3).coerceAtLeast(2))
-        // 平铺段是直线，行间距只影响顶点数，不影响形状。
-        addArc(halfTurn, sMax, 8)
+
+    /** 扫线 `x'` 与页面矩形的交（局部沿折痕的 `λ` 区间，按「下端点、上端点」输出）。 */
+    fun spanAt(x: Float): FloatArray? {
+        // 页坐标里的直线：P(λ) = 原点 + n·(材料偏移) + t·λ，λ 就是沿折痕的坐标。
+        val a = -side * x
+        val px = ox + nx * a
+        val py = oy + ny * a
+        var lo = -1e7f
+        var hi = 1e7f
+        if (abs(tx) < 1e-6f) {
+            if (px < -0.01f || px > w + 0.01f) return null
+        } else {
+            val a1 = -px / tx
+            val b1 = (w - px) / tx
+            lo = maxOf(lo, minOf(a1, b1))
+            hi = minOf(hi, maxOf(a1, b1))
+        }
+        if (abs(ty) < 1e-6f) {
+            if (py < -0.01f || py > h + 0.01f) return null
+        } else {
+            val a1 = -py / ty
+            val b1 = (h - py) / ty
+            lo = maxOf(lo, minOf(a1, b1))
+            hi = minOf(hi, maxOf(a1, b1))
+        }
+        if (hi - lo <= 0.01f) return null
+        return floatArrayOf(hi, lo)
+    }
+
+    fun curled(x: Float): Float = when {
+        x >= 0f -> x
+        x >= -halfTurn -> r * sin(x / r)
+        else -> -(halfTurn + x)
+    }
+
+    fun curlZ(x: Float): Float = when {
+        x >= 0f -> 0f
+        x >= -halfTurn -> r * (1f - cos(x / r))
+        else -> 2f * r
     }
 
     val pos = ArrayList<Float>(rows.size * 4)
     val uv = ArrayList<Float>(rows.size * 4)
     val arc = ArrayList<Float>(rows.size * 2)
-    val rowS = ArrayList<Float>(rows.size)
-    var vCount = 0
-
-    /** 直线 P(λ) = 折痕点 + n·s + u·λ 与页矩形四条边的交点，返回 λ 的 min/max。 */
-    fun edgeSpan(s: Float): FloatArray? {
-        val px = t0.x + nx * s
-        val py = t0.y + ny * s
-        var lo = Float.MAX_VALUE
-        var hi = -Float.MAX_VALUE
-        var hits = 0
-        if (ux <= -1e-4f || ux >= 1e-4f) {
-            for (ex in floatArrayOf(0f, w)) {
-                val lambda = (ex - px) / ux
-                val y = py + uy * lambda
-                if (y >= -0.01f && y <= h + 0.01f) {
-                    if (lambda < lo) lo = lambda
-                    if (lambda > hi) hi = lambda
-                    hits++
-                }
-            }
-        }
-        if (uy <= -1e-4f || uy >= 1e-4f) {
-            for (ey in floatArrayOf(0f, h)) {
-                val lambda = (ey - py) / uy
-                val x = px + ux * lambda
-                if (x >= -0.01f && x <= w + 0.01f) {
-                    if (lambda < lo) lo = lambda
-                    if (lambda > hi) hi = lambda
-                    hits++
-                }
-            }
-        }
-        return if (hits >= 2 && hi - lo > 0.5f) floatArrayOf(lo, hi) else null
-    }
-
-    val cx = w / 2f
-    val cy = h / 2f
-    val emitted = ArrayList<Float>(rows.size)
-    for (s in rows) {
-        val span = edgeSpan(s) ?: continue
-        // 屏幕位置：沿折痕方向不变，法向按圆柱/平铺映射。
-        // 纸卷必须落在**掀起那一侧**（法向 n 方向），纸背落回另一侧 —— 这正是
-        // moon+ / duokan 的做法（`CurlMesh.java:341` 的 `R*sin(θ)` 与
-        // `-（x+πR)` 分处折痕两侧）。两侧都放在同一侧时，平铺段（z=2R）会盖住
-        // 纸卷（z≤2R），卷永远看不见 —— 之前就是这么错的。
-        val offset = if (s <= halfTurn) r * sin(s / r) else -(s - halfTurn)
-        val z = if (s <= halfTurn) r * (1f - cos(s / r)) else 2f * r
-        // 透视：观察者在纸面正上方 eyeZ 处。z 越大离观察者越近、投影越大——
-        // 正交投影下卷起来那一段只会「横向压缩」，读不出立体感，这是唯一补得回来的地方。
-        val k = if (eyeZ > 1f) eyeZ / (eyeZ - z).coerceAtLeast(1f) else 1f
-        val bx = t0.x + nx * offset
-        val by = t0.y + ny * offset
-        // 平铺段的纹理坐标按「镜射回折痕另一侧」取（与折页同一口径）：屏幕 x 处显示的是
-        // 折痕另一侧同样距离那条材料 —— 直接用材料自身的弧长会取到页右边缘的空白页边，
-        // 整条纸背看起来就是一片空纸。
-        val uvArc = if (s <= halfTurn) s else (s - halfTurn)
+    val rowX = ArrayList<Float>(rows.size)
+    for (x in rows) {
+        val span = spanAt(x) ?: continue
+        // 屏幕上沿法向的偏移：卷曲朝**掀起的那一侧**鼓出去（参考实现里局部 +x 是拖动方向，
+        // 卷曲量取正），绕满半圈后的平铺段落回**没掀起**的那一侧。所以屏幕偏移取负号：
+        // 向后翻纸卷在折痕右边、平铺段在左边，向前翻整体镜像——同一个式子，靠 `side` 定侧。
+        val sOff = -side * curled(x)
+        val sx = ox + nx * sOff
+        val sy = oy + ny * sOff
+        // 材料位置：沿法向离折痕 side×|x'| 那么远。
+        val a = -side * x
+        val mx = ox + nx * a
+        val my = oy + ny * a
+        val arcLen = -x
         for (lambda in span) {
-            pos.add(cx + (bx + ux * lambda - cx) * k)
-            pos.add(cy + (by + uy * lambda - cy) * k)
-            uv.add(t0.x + nx * uvArc + ux * lambda)
-            uv.add(t0.y + ny * uvArc + uy * lambda)
-            arc.add(s)
-            vCount++
+            pos.add(sx + tx * lambda)
+            pos.add(sy + ty * lambda)
+            uv.add(mx + tx * lambda)
+            uv.add(my + ty * lambda)
+            arc.add(arcLen)
         }
-        rowS.add(s)
+        rowX.add(x)
     }
-    if (rowS.size < 2) return emptyMesh()
+    if (rowX.size < 2) return emptyMesh()
 
-    // 三角形：相邻两行连成两个三角；按行所属可见面分段，画序 = Recto → Verso → Back。
-    data class Tri(val surface: CurlMesh.Surface, val a: Short, val b: Short, val c: Short)
-
-    val tris = ArrayList<Tri>((rowS.size - 1) * 2)
-    for (row in 0 until rowS.size - 1) {
-        val mid = (rowS[row] + rowS[row + 1]) / 2f
+    // 三角形：相邻两条扫线连成两个三角；按行所属可见面分段，画序 = Recto → Verso → Back。
+    val tris = ArrayList<Short>(rowX.size * 6)
+    val segSurface = arrayOfNulls<CurlMesh.Surface>(rowX.size - 1)
+    for (row in 0 until rowX.size - 1) {
+        val mid = (rowX[row] + rowX[row + 1]) * 0.5f
         val surface = when {
-            mid < quarter -> CurlMesh.Surface.Recto
-            mid <= halfTurn -> CurlMesh.Surface.Verso
+            mid >= -halfTurn -> if (curlZ(mid) >= r) CurlMesh.Surface.Verso else CurlMesh.Surface.Recto
             else -> CurlMesh.Surface.Back
         }
+        segSurface[row] = surface
         val a0 = (row * 2).toShort()
         val a1 = (row * 2 + 1).toShort()
         val b0 = ((row + 1) * 2).toShort()
         val b1 = ((row + 1) * 2 + 1).toShort()
-        tris.add(Tri(surface, a0, a1, b0))
-        tris.add(Tri(surface, a1, b1, b0))
+        tris.add(a0); tris.add(a1); tris.add(b0)
+        tris.add(a1); tris.add(b1); tris.add(b0)
     }
 
     val order = listOf(CurlMesh.Surface.Recto, CurlMesh.Surface.Verso, CurlMesh.Surface.Back)
-    val idx = ShortArray(tris.size * 3)
+    val idx = ShortArray(tris.size)
     val bands = ArrayList<CurlMesh.Band>(3)
     var iCount = 0
     for (s in order) {
         val start = iCount
-        for (t in tris) {
-            if (t.surface != s) continue
-            idx[iCount++] = t.a
-            idx[iCount++] = t.b
-            idx[iCount++] = t.c
+        var firstRow = Int.MAX_VALUE
+        var lastRow = -1
+        for (row in 0 until rowX.size - 1) {
+            if (segSurface[row] != s) continue
+            if (row < firstRow) firstRow = row
+            if (row + 1 > lastRow) lastRow = row + 1
+            val a0 = (row * 2).toShort()
+            val a1 = (row * 2 + 1).toShort()
+            val b0 = ((row + 1) * 2).toShort()
+            val b1 = ((row + 1) * 2 + 1).toShort()
+            idx[iCount++] = a0
+            idx[iCount++] = a1
+            idx[iCount++] = b0
+            idx[iCount++] = a1
+            idx[iCount++] = b1
+            idx[iCount++] = b0
         }
         if (iCount > start) {
             bands.add(
@@ -256,6 +293,8 @@ internal fun buildCurlMesh(
                         CurlMesh.Surface.Verso -> 0.5f
                         CurlMesh.Surface.Back -> 1f
                     },
+                    firstRow = firstRow,
+                    lastRow = lastRow,
                 ),
             )
         }
@@ -270,6 +309,24 @@ internal fun buildCurlMesh(
         bands = bands,
     )
 }
+
+/**
+ * 一段可见面的外轮廓（页坐标多边形）。
+ *
+ * 每一行的两个端点在屏幕上是「沿折痕方向的一段直线」，相邻行只沿法向平移，所以整段四边形条带
+ * 的外轮廓就是：一侧长边 → 末行线段 → 另一侧长边 → 首行线段。压淡与明暗都照着这个轮廓铺，
+ * 形状跟着纸走，不会画到纸外面去。
+ */
+internal fun CurlMesh.bandOutline(band: CurlMesh.Band): List<Offset> {
+    val pts = ArrayList<Offset>((band.lastRow - band.firstRow + 1) * 2)
+    fun p(v: Int) = Offset(positions[v * 2], positions[v * 2 + 1])
+    for (row in band.firstRow..band.lastRow) pts.add(p(row * 2))
+    for (row in band.lastRow downTo band.firstRow) pts.add(p(row * 2 + 1))
+    return pts
+}
+
+/** 掀起侧的最远弧长（= `−x'` 最小值），供调用方算卷起来的高度。 */
+internal fun CurlMesh.maxArc(): Float = arc.maxOrNull() ?: 0f
 
 private fun emptyMesh() = CurlMesh(
     positions = FloatArray(0),

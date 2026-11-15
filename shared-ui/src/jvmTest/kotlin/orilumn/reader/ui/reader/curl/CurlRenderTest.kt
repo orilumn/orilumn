@@ -19,7 +19,8 @@ import org.junit.Test
  *
  * 1) 三块分区没接反——折痕左边是纸背、右边是露出页；
  * 2) 纸背是 **1:1 刚性镜像**（放大了就是纸被拉伸，压缩了就是纸背凭空变宽）；
- * 3) 结算两端（进度 0 / 1）的整帧等于目标页：末帧不许留折痕影、纸背或露出区的边；
+ * 3) 结算两端（进度 0 / 1）的整帧**等于它落回的那一页**（0 = 当前页，1 = 目标页）：
+ *    末帧不许留折痕影、纸背或露出区的边；
  * 4) 整幅不留透明像素（算出 NaN / 忘了铺底时会露出黑洞）。
  *
  * 观感（阴影浓淡、纸色深浅）不在这里锁，那要真机跟手看。
@@ -116,43 +117,48 @@ class CurlRenderTest {
     }
 
     /**
-     * 下一页面翻完（进度 1）与上一页面起手（进度 0）时折痕都贴着书脊收尾：
-     * 整帧必须**等于目标页**，不许留折痕影、纸背或露出区的边——动画结束撤掉这一层时
+     * 结算两端：进度 0 停在读者正在看的那一页（`front`），进度 1 落到目标页（`back`）。
+     * 整帧必须**逐像素等于那一页**，不许留折痕影、纸背或露出区的边——动画结束撤掉这一层时
      * 画面才不会跳一下。
      */
     @Test
-    fun settleEndFramesEqualTargetPage() {
+    fun settleEndFramesEqualThePageTheyLandOn() {
         val w = 400
         val h = 600
-        val cases = listOf(1f to 1, 0f to -1)
-        for ((p, dir) in cases) {
-            val shape = curlShape(w.toFloat(), h.toFloat(), p, dir, tilt = 0.55f, settling = true)
-            val px = render(shape, images(solid(w, h, red)), images(solid(w, h, blue))).toPixelMap()
+        for (dir in listOf(1, -1)) {
+            val start = render(
+                curlShape(w.toFloat(), h.toFloat(), 0f, dir, tilt = 0.55f, settling = true),
+                images(solid(w, h, red)),
+                images(solid(w, h, blue)),
+            ).toPixelMap()
+            val end = render(
+                curlShape(w.toFloat(), h.toFloat(), 1f, dir, tilt = 0.55f, settling = true),
+                images(solid(w, h, red)),
+                images(solid(w, h, blue)),
+            ).toPixelMap()
             for (x in 0 until w step 7) {
                 for (y in 0 until h step 13) {
-                    assertEquals(
-                        "p=$p dir=$dir ($x,$y) 收尾那一帧应当只剩目标页",
-                        blue,
-                        px[x, y].toArgb(),
-                    )
+                    assertEquals("dir=$dir 起手那一帧应当只剩当前页（front）", red, start[x, y].toArgb())
+                    assertEquals("dir=$dir 收尾那一帧应当只剩目标页（back）", blue, end[x, y].toArgb())
                 }
             }
         }
     }
 
-    /** 还没开始翻（进度 0 且不在结算里）：整帧就是读者正在看的那一页。 */
+    /** 还没开始翻（进度 0 且不在结算里）：整帧就是读者正在看的那一页（`front`）。 */
     @Test
     fun untouchedFrameIsThePageBeingRead() {
         val w = 400
         val h = 600
-        // 向后翻：当前页 = 正面（红）
-        val next = render(curlShape(w.toFloat(), h.toFloat(), 0f, 1), images(solid(w, h, red)), images(solid(w, h, blue)))
-            .toPixelMap()
-        assertEquals(red, next[200, 300].toArgb())
-        // 向前翻：当前页 = 露出页那一张（蓝），正面那张是上一页
-        val prevShape = curlShape(w.toFloat(), h.toFloat(), 0f, -1)
-        val prev = render(prevShape, images(solid(w, h, red)), images(solid(w, h, blue))).toPixelMap()
-        assertEquals("向前翻起手时画面上是当前页，不是上一页", blue, prev[200, 300].toArgb())
+        // 两个方向都是「front = 正在看的那一页」：翻页层不再按方向换位，图像不换位。
+        for (dir in listOf(1, -1)) {
+            val px = render(
+                curlShape(w.toFloat(), h.toFloat(), 0f, dir),
+                images(solid(w, h, red)),
+                images(solid(w, h, blue)),
+            ).toPixelMap()
+            assertEquals("dir=$dir 起手时画面上是当前页，不是目标页", red, px[200, 300].toArgb())
+        }
     }
 
     /** 覆盖层（旁注 / 页码）跟着纸一起走：正面页上有、纸背上没有。 */

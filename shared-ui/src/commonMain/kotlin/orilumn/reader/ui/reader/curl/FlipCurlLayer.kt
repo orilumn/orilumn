@@ -13,8 +13,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
 import orilumn.reader.io.Logger
 
-/** 3D 卷曲总开关：移植 moon+ 的网格之前保持关闭（见下方调用处的说明）。 */
-private const val USE_CURL3D: Boolean = false
+/** 3D 卷曲总开关：关掉只用于排查（退回 2D 折页）。 */
+private const val USE_CURL3D: Boolean = true
 
 /**
  * 一个页槽当前可用的两张纹理（**页栅格 + 覆盖层**，都由页槽自己画出来时顺手发布）。
@@ -36,14 +36,15 @@ class CurlPageImages {
 }
 
 /**
- * 折页层（用户层）：两个页槽常驻组合，翻页时按折痕把两张页图摆成「正面 / 纸背 / 露出页」。
+ * 卷曲层（用户层）：两个页槽常驻组合，翻页时把两张页图交给 3D 卷曲网格；网格交不出来时
+ * 退回 2D 折页（[drawCurlFrame]）。
  *
  * ## 画法
  *
- * 逐行对位旧版 `orilum.bak` 的 `CurlView.drawBody`（见 [drawCurlFrame]）：
- * 一张**刚性**纸绕折痕翻过去，屏幕上只有三块——正面页（还没掀起来的）、纸背（露出来的
- * 背面，就是正面的镜像）、露出页（折痕另一侧的新页）。阴影是沿纸背外缘和折痕各一道
- * 线性渐变。没有曲面、没有着色器：折页不会自己卷成筒。
+ * 主路径是 [drawCurl3DFrame]：照搬 moon+ `NewCurl3D` 的扫描线网格，纸真的卷成一个筒
+ * （纹理走 `Canvas.drawVertices`，明暗 / 压淡 / 落影走渐变画笔）。兜底路径逐行对位旧版
+ * `orilum.bak` 的 `CurlView.drawBody`：一张刚性纸绕折痕翻过去，屏幕上只有三块——
+ * 正面页 / 纸背（正面的镜像）/ 露出页（折痕另一侧的新页）。
  *
  * 两端的像素与静止时**同一份**：页槽里的 `ReaderPageCanvas` 每帧把「页栅格 + 覆盖层」
  * 画出来，同时经 `onImages` 发布到 [CurlPageImages]，本层拿它们当纹理用。
@@ -51,11 +52,11 @@ class CurlPageImages {
  *
  * ## 时序（宁可等图，不换一种翻法）
  *
- * 两张页图都在才画折页；缺图时**页面保持不动**（槽照常显示当前页）——不切滑动、不冻帧。
+ * 两张页图都在才画；缺图时**页面保持不动**（槽照常显示当前页）——不切滑动、不冻帧。
  *
  * ## 绘制顺序
  *
- * 目标页槽在下、当前页槽在上（与 `FlipSlideLayer` 同序）。折页整页不透明地盖在最上面，
+ * 目标页槽在下、当前页槽在上（与 `FlipSlideLayer` 同序）。卷曲层整页不透明地盖在最上面，
  * 两个槽只是「图从哪来」，不再直接可见。
  *
  * @param direction 翻页方向（+1 下一页 / -1 上一页）
@@ -103,10 +104,11 @@ fun FlipCurlLayer(
                 return@Canvas
             }
             val dir = direction()
-            // 正面 = 被翻的那一张，露出页 = 折痕另一侧的新页。
-            // 向后翻：正面是当前页、露出下一页；向前翻：正面是上一页、露出当前页。
-            val front = if (dir >= 0) current else target
-            val back = if (dir >= 0) target else current
+            // 正面 = 被翻走的那一张（永远是读者当前正在看的那一页），露出页 = 折痕另一侧的新页。
+            // 向前翻也照这个口径：纸从左边掀起来、露出页在左边，与向后翻只是左右镜像
+            // （几何一侧的 `side` 因子），图像不换位。
+            val front = current
+            val back = target
             if (front == null || back == null || front.page == null || back.page == null) {
                 if (!sessionLogged[0]) {
                     sessionLogged[0] = true
@@ -137,9 +139,7 @@ fun FlipCurlLayer(
                         "overlay=${front.overlay != null}/${back.overlay != null}",
                 )
             }
-            // 3D 卷曲先关掉：现在的网格是自己推的圆柱模型，读者看不出「哪张是纸、哪面是反面」。
-            // 下一步按 moon+ 的 `NewCurl3D` 逐行移植（网格、明暗、画序都照抄），
-            // 移植到位、桌面预览对得上之后再打开这个开关。
+            // 3D 卷曲是主路径：网格交不出来（这一帧没有可掀起的材料）时才退回折页。
             if (USE_CURL3D) {
                 val done = drawCurl3DFrame(
                     shape = shape,

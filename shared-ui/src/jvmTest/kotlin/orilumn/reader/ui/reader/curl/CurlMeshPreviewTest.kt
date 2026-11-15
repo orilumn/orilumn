@@ -44,7 +44,7 @@ class CurlMeshPreviewTest {
         return img
     }
 
-    private fun dump(name: String, progress: Float, tilt: Float = 0f, radiusRatio: Float = CURL3D_RADIUS_RATIO, eyeRatio: Float = CURL3D_EYE_RATIO) {
+    private fun dump(name: String, progress: Float, tilt: Float = 0f, radiusRatio: Float = CURL3D_RADIUS_RATIO) {
         val shape = curlShape(pageW.toFloat(), pageH.toFloat(), progress, 1, tilt, false)
         val front = CurlPageImages().apply { page = fakePage(0xFF2A2A2A.toInt(), 1f) }
         val back = CurlPageImages().apply { page = fakePage(0xFF2A2A2A.toInt(), 0.45f) }
@@ -52,7 +52,7 @@ class CurlMeshPreviewTest {
         val r = pageW * radiusRatio
         CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(img), Size(pageW.toFloat(), pageH.toFloat())) {
             drawRect(Color(0xFFEFECE3.toInt()))
-            drawCurl3DFrame(shape, front, back, 0xFFF1EEE6.toInt(), 0f, 0f, radiusRatio, eyeRatio)
+            drawCurl3DFrame(shape, front, back, 0xFFF1EEE6.toInt(), 0f, 0f, radiusRatio)
         }
         val out = File("build/curlm-$name.png")
         out.parentFile?.mkdirs()
@@ -71,18 +71,33 @@ class CurlMeshPreviewTest {
         val tx = (w - tw) / 2f
         val ty = (h - th) / 2f
         val front = CurlPageImages().apply { page = fakePageSized(tw, th, 0xFF2A2A2A.toInt()) }
-        val back = CurlPageImages().apply { page = fakePageSized(tw, th, 0xFF2A2A2A.toInt()) }
-        for (p in listOf(0.20f, 0.35f, 0.60f)) {
-            val shape = curlShape(w.toFloat(), h.toFloat(), p, 1, 0f, false)
+        val back = CurlPageImages().apply { page = fakePageSized(tw, th, 0xFF7A3A2E.toInt()) }
+        for (dir in listOf(1, -1)) {
+            for (p in listOf(0.20f, 0.45f, 0.70f, 0.90f)) {
+                val shape = curlShape(w.toFloat(), h.toFloat(), p, dir, 0f, false)
+                val img = ImageBitmap(w, h, ImageBitmapConfig.Argb8888, hasAlpha = true)
+                CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(img), Size(w.toFloat(), h.toFloat())) {
+                    drawRect(Color(0xFFEFECE3.toInt()))
+                    drawCurl3DFrame(shape, front, back, 0xFFF1EEE6.toInt(), tx, ty)
+                }
+                val name = "build/dev-${if (dir > 0) "fwd" else "bwd"}-p${(p * 100).toInt()}.png"
+                val out = File(name)
+                val data = Image.makeFromBitmap(img.asSkiaBitmap()).encodeToData(EncodedImageFormat.PNG)!!
+                out.writeBytes(data.bytes)
+                println("wrote ${out.absolutePath} fold=${shape.topX} r=${curlRadius(shape)}")
+            }
+        }
+        for ((p, tilt) in listOf(0.2f to 0.35f, 0.45f to -0.35f, 0.7f to 0.35f)) {
+            val shape = curlShape(w.toFloat(), h.toFloat(), p, 1, tilt, false)
             val img = ImageBitmap(w, h, ImageBitmapConfig.Argb8888, hasAlpha = true)
             CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(img), Size(w.toFloat(), h.toFloat())) {
                 drawRect(Color(0xFFEFECE3.toInt()))
                 drawCurl3DFrame(shape, front, back, 0xFFF1EEE6.toInt(), tx, ty)
             }
-            val out = File("build/dev-p${(p * 100).toInt()}.png")
+            val out = File("build/dev-tilt-p${(p * 100).toInt()}-t${(tilt * 100).toInt()}.png")
             val data = Image.makeFromBitmap(img.asSkiaBitmap()).encodeToData(EncodedImageFormat.PNG)!!
             out.writeBytes(data.bytes)
-            println("wrote ${out.absolutePath} fold=${shape.topX}")
+            println("wrote ${out.absolutePath} fold=(${shape.topX},${shape.bottomX}) r=${curlRadius(shape)}")
         }
     }
 
@@ -99,6 +114,9 @@ class CurlMeshPreviewTest {
                 y += h * 0.022f
                 line++
             }
+            // 方向标记：左缘红条、页顶蓝条——卷曲后一眼看出是哪一段被压扁 / 镜像。
+            drawRect(Color(0xFFC0392B.toInt()), topLeft = Offset(0f, 0f), size = Size(w * 0.02f, h.toFloat()))
+            drawRect(Color(0xFF2E86C1.toInt()), topLeft = Offset(0f, 0f), size = Size(w.toFloat(), h * 0.012f))
         }
         return img
     }
@@ -130,10 +148,8 @@ class CurlMeshPreviewTest {
 
     @Test
     fun dumpFrames() {
-        for (e in listOf(1.2f, 2.2f, 3.5f)) {
-            for (p in listOf(0.12f, 0.30f, 0.50f, 0.70f, 0.88f)) {
-                dump("E${(e * 10).toInt()}-p${(p * 100).toInt()}", p, radiusRatio = 0.10f, eyeRatio = e)
-            }
+        for (p in listOf(0.12f, 0.30f, 0.50f, 0.70f, 0.88f)) {
+            dump("p${(p * 100).toInt()}", p)
         }
         dump("p50-tilt", 0.50f, tilt = -0.35f)
         dump("p50-tilt2", 0.50f, tilt = 0.35f)

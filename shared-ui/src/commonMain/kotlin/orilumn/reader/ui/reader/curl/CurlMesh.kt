@@ -75,9 +75,6 @@ internal class CurlMesh(
     val vertexCount: Int get() = arc.size
 }
 
-/** 卷曲半径相对页宽的比例：πR 决定「绕满半圈」要多少纸。 */
-internal const val CURL_RADIUS_RATIO: Float = 0.62f
-
 /** 弧段行数上限（Short 索引的安全上限内）。 */
 private const val MAX_SPLITS = 96
 
@@ -88,7 +85,7 @@ internal const val CURL_BACK_ALPHA: Float = 0.39f
  * 由一帧折痕几何 + 卷曲半径生成网格。
  *
  * @param radius 卷曲半径（px）。`πR` 是「绕满半圈」所需弧长：半径越大卷得越缓、
- *   纸背平铺段越晚出现。调用方按页宽给（[CURL_RADIUS_RATIO]）。
+ *   纸背平铺段越晚出现。调用方按页宽给（[CURL3D_RADIUS_RATIO]）。
  * @param splits 弧段行数（越大越圆；三角形数 ≈ 行数 × 2）。
  */
 internal fun buildCurlMesh(
@@ -190,7 +187,11 @@ internal fun buildCurlMesh(
     for (s in rows) {
         val span = edgeSpan(s) ?: continue
         // 屏幕位置：沿折痕方向不变，法向按圆柱/平铺映射。
-        val offset = if (s <= halfTurn) -r * sin(s / r) else -(s - halfTurn)
+        // 纸卷必须落在**掀起那一侧**（法向 n 方向），纸背落回另一侧 —— 这正是
+        // moon+ / duokan 的做法（`CurlMesh.java:341` 的 `R*sin(θ)` 与
+        // `-（x+πR)` 分处折痕两侧）。两侧都放在同一侧时，平铺段（z=2R）会盖住
+        // 纸卷（z≤2R），卷永远看不见 —— 之前就是这么错的。
+        val offset = if (s <= halfTurn) r * sin(s / r) else -(s - halfTurn)
         val z = if (s <= halfTurn) r * (1f - cos(s / r)) else 2f * r
         // 透视：观察者在纸面正上方 eyeZ 处。z 越大离观察者越近、投影越大——
         // 正交投影下卷起来那一段只会「横向压缩」，读不出立体感，这是唯一补得回来的地方。

@@ -66,12 +66,12 @@ class CurlDebugTest {
             paperArgb = 0xFFF1EEE6.toInt(),
         )
         println("=== $name p=$progress dir=$direction top=${frame.topX}/${frame.bottomX} n=(${frame.normalX},${frame.normalY})")
-        val uv = Matrix33.makeScale(1f / w, 1f / h)
+        // 纹理 1:1（不挂 local matrix）：与两端后端同一约定，见 [CURL_SKSL] 文件头。
         val shader: Shader = effect.makeShader(
-            Data.makeFromBytes(bytes(frame.uniforms())),
+            Data.makeFromBytes(bytes(frame.uniforms(false, 0f, 0f, w.toFloat(), h.toFloat()))),
             arrayOf<Shader?>(
-                front.makeShader(FilterTileMode.CLAMP, FilterTileMode.CLAMP, SamplingMode.LINEAR, uv),
-                back.makeShader(FilterTileMode.CLAMP, FilterTileMode.CLAMP, SamplingMode.LINEAR, uv),
+                front.makeShader(FilterTileMode.CLAMP, FilterTileMode.CLAMP, SamplingMode.LINEAR, null),
+                back.makeShader(FilterTileMode.CLAMP, FilterTileMode.CLAMP, SamplingMode.LINEAR, null),
             ),
             Matrix33.makeTranslate(0f, 0f),
         )

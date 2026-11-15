@@ -15,19 +15,31 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 卷曲片元的冒烟锁（**不是像素基准，只锁三件会静默坏掉的事**）：
+ * 卷曲片元的冒烟锁（**不是像素基准，只锁几件会静默坏掉的事**）：
  * 1) SkSL 能编译（语法/类型写错时桌面上是黑屏，不是崩溃）；
- * 2) 逆映射的左右分区没接反——向后翻时「折痕左边是正面页（被翻走的那一页）、
- *    折痕右边是露出的目标页」，且中间那条纸卷不是纯正页也不是纯目标页；
- * 3) 整幅不留透明像素（着色器算飞了会出 NaN，表现出来是黑洞/透明）。
+ * 2) 逆映射的左右分区没接反——向后翻时「折痕左边是正面页、折痕右边是露出页」，
+ *    折痕两侧紧邻的两条带分别是纸背平铺段与纸卷；
+ * 3) 纸背平铺段是 **1:1 刚性镜像**（旧版把纸料压进屏幕带宽，放大了约 1.45 倍）；
+ * 4) 整幅不留透明像素（着色器算飞了会出 NaN，表现出来是黑洞/透明）。
  *
- * 观感（阴影浓淡、曲率）不在这里锁，那要真机跟手看。
+ * 观感（阴影浓淡、卷边粗细）不在这里锁，那要真机跟手看。
  */
 class CurlShaderTest {
 
     private fun solid(w: Int, h: Int, argb: Int): Image {
         val surface = Surface.makeRasterN32Premul(w, h)
         surface.canvas.clear(argb)
+        return surface.makeImageSnapshot()
+    }
+
+    /** 白底 + 指定列上的黑色竖条（用来量纸背的采样比例）。 */
+    private fun striped(w: Int, h: Int, stripeX: Int, stripeW: Int): Image {
+        val surface = Surface.makeRasterN32Premul(w, h)
+        surface.canvas.clear(0xFFFFFFFF.toInt())
+        surface.canvas.drawRect(
+            Rect.makeXYWH(stripeX.toFloat(), 0f, stripeW.toFloat(), h.toFloat()),
+            Paint().apply { color = 0xFF000000.toInt() },
+        )
         return surface.makeImageSnapshot()
     }
 
@@ -43,13 +55,13 @@ class CurlShaderTest {
         return out
     }
 
-    private fun render(w: Int, h: Int, frame: CurlFrame): org.jetbrains.skia.Pixmap {
+    private fun render(w: Int, h: Int, frame: CurlFrame, front: Image? = null): org.jetbrains.skia.Pixmap {
         val effect = RuntimeEffect.makeForShader(CURL_SKSL)
         // 纹理 1:1（不挂 local matrix）：与两端后端同一约定，见 [CURL_SKSL] 文件头。
         val shader: Shader = effect.makeShader(
             Data.makeFromBytes(bytes(frame.uniforms(false, 0f, 0f, w.toFloat(), h.toFloat()))),
             arrayOf<Shader?>(
-                solid(w, h, 0xFFCC2222.toInt()).makeShader(
+                (front ?: solid(w, h, 0xFFCC2222.toInt())).makeShader(
                     FilterTileMode.CLAMP, FilterTileMode.CLAMP, SamplingMode.LINEAR, null,
                 ),
                 solid(w, h, 0xFF2222CC.toInt()).makeShader(
@@ -63,20 +75,26 @@ class CurlShaderTest {
         return surface.makeImageSnapshot().peekPixels() ?: error("peekPixels failed")
     }
 
+    /**
+     * p = 0.5、页宽 400：折痕 x = 200、D = 200、R = min(40, 60) = 40、arc ≈ 125.7。
+     * ⇒ 正面页 [0, 125.7] / 纸背平铺 [125.7, 200] / 纸卷 [200, 240] / 露出页 [240, 400]。
+     */
     @Test
     fun nextPageKeepsFrontLeftAndRevealRight() {
         val w = 400
         val h = 600
-        // p = 0.25 → 折痕在 x = 300，纸卷占 [200, 300]，两边都留出干净的样本点。
-        val px = render(w, h, curlFrame(pageW = w.toFloat(), pageH = h.toFloat(), progress = 0.25f, direction = 1))
+        val px = render(w, h, curlFrame(pageW = w.toFloat(), pageH = h.toFloat(), progress = 0.5f, direction = 1))
         val left = px.getColor(4, h / 2)
         val right = px.getColor(w - 5, h / 2)
         assertTrue("left should stay front page, got ${left.toString(16)}", (left shr 16 and 0xFF) > 0xA0)
         assertTrue("right should be reveal page, got ${right.toString(16)}", (right and 0xFF) > 0xA0)
-        // 纸卷区：纸色打底 + 正面页镜像，红蓝都不该压满
-        val strip = px.getColor(250, h / 2)
-        assertTrue("strip should be paper-tinted, got ${strip.toString(16)}", (strip and 0xFF) in 0x60..0xF8)
-        assertTrue("strip should keep some front content, got ${strip.toString(16)}", (strip shr 16 and 0xFF) in 0x60..0xF8)
+        // 纸卷（折痕右侧紧邻一条）：纸色打底 + 正面页镜像，红蓝都不该压满。
+        val roll = px.getColor(215, h / 2)
+        assertTrue("roll should be paper-tinted, got ${roll.toString(16)}", (roll and 0xFF) in 0x60..0xF8)
+        assertTrue("roll should keep some front content, got ${roll.toString(16)}", (roll shr 16 and 0xFF) in 0x60..0xF8)
+        // 纸背平铺段（折痕左侧紧邻一条）：同样是纸色 + 镜像内容。
+        val flat = px.getColor(190, h / 2)
+        assertTrue("flat back should be paper-tinted, got ${flat.toString(16)}", (flat and 0xFF) in 0x60..0xF8)
     }
 
     @Test
@@ -85,12 +103,33 @@ class CurlShaderTest {
         val h = 600
         // 向前翻：折痕从左缘往右扫，露出区仍**在折痕右侧**（旧版同布局），只是那里的图换成了
         // 调用方给的 back（当前页），折痕左侧是已被翻过去的纸背 + 落定的 front（上一页）。
-        // p = 0.75 → 折痕在 x = 300，纸卷只占 [200, 300]，左边是干净的 front。
+        // p = 0.75 → 折痕在 x = 300，D = 100，纸卷 [300, 330]，左边是干净的正面页。
         val px = render(w, h, curlFrame(pageW = w.toFloat(), pageH = h.toFloat(), progress = 0.75f, direction = -1))
         val left = px.getColor(4, h / 2)
         val right = px.getColor(w - 5, h / 2)
         assertTrue("left should be front page, got ${left.toString(16)}", (left shr 16 and 0xFF) > 0xA0)
         assertTrue("right should be reveal page, got ${right.toString(16)}", (right and 0xFF) > 0xA0)
+    }
+
+    /**
+     * 纸背平铺段必须 1:1：材质 x = 350 的竖条（页面右缘往里 50px）镜像回来，
+     * 屏幕位置必须满足「屏幕位移 = 材质位移 - 弧长」——即 x = 200 - (150 - 125.66) ≈ 175.7。
+     * 旧版按 (D-arc)/(D-B) 压缩，同一条竖条会跑到 x ≈ 72（放大 1.45 倍）。
+     */
+    @Test
+    fun backFlatPartKeepsMaterialScale() {
+        val w = 400
+        val h = 600
+        val frame = curlFrame(pageW = w.toFloat(), pageH = h.toFloat(), progress = 0.5f, direction = 1)
+        val px = render(w, h, frame, striped(w, h, stripeX = 348, stripeW = 4))
+        var darkestX = -1
+        var darkest = 0xFF
+        for (x in 126..199) {
+            val v = px.getColor(x, h / 2) shr 16 and 0xFF
+            if (v < darkest) { darkest = v; darkestX = x }
+        }
+        assertTrue("纸背平铺段应把材质 1:1 镜像过来（竖条应落在 ~176，实测 $darkestX）", kotlin.math.abs(darkestX - 176) <= 3)
+        assertTrue("竖条应当清晰可辨（纸色混 39% 黑），got $darkest", darkest < 0xB0)
     }
 
     @Test

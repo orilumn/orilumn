@@ -32,12 +32,16 @@ W 01:51:36.270 [Orilumn.Curl] shot GIVE-UP tries=30 current=null target=null
 4. **纹理交接**：`ReaderPageRenderer.drawLines` 返回刚画出的页栅格 `ImageBitmap`，
    `ReaderPageCanvas` 同一帧把「页栅格 + 覆盖层」经 `onImages` 发布到 `CurlPageImages`
    （Compose 状态，图晚到会自己重画一帧）。卷曲层排在两个槽之后读它 ⇒ 天然是刚画好的那张。
-5. **着色器两遍**：`u_page.z = 1` 是覆盖层那一遍，纸背与纸卷区返回透明（旁注印在纸正面，
+5. **着色器两遍**：`u_page.z = 1` 是覆盖层那一遍，纸背区返回透明（旁注印在纸正面，
    纸背上不该有），于是旁注/页码跟着纸一起弯。
-6. **纹理坐标 1:1**：`u_rect` 给纹理在页坐标里的位置与尺寸（页栅格是版心、覆盖层是整页），
+6. **截面照 duokan 里的 harism page curl**（`samples/duokan/sources/fi/harism/curl/`）：
+   纸是刚性的，折痕处一个半径 R 的半圆柱纸卷，越过卷顶再平铺。纸卷在**纸料那一侧**
+   （露出页侧），平铺段在另一侧；平铺段 1:1 刚性镜像，纸背明暗 `0.5+0.5·|nz|`。
+   阴影两道：纸卷投在露出页上的落影、平铺段压在正面页上的接触影（纸背上不画）。
+7. **纹理坐标 1:1**：`u_rect` 给纹理在页坐标里的位置与尺寸（页栅格是版心、覆盖层是整页），
    片元自己减原点；两端**都不挂 local matrix**——桌面 skia 与安卓 `BitmapShader` 的
    local matrix 方向天生相反，挂错不报错只画错。
-7. 缺图时**页面保持不动**（不切滑动、不冻帧）；`Orilumn.Curl` 每次翻页留一条
+8. 缺图时**页面保持不动**（不切滑动、不冻帧）；`Orilumn.Curl` 每次翻页留一条
    `draw dir=… tex=… overlay=…` 或 `wait page …`，上机对账用。
 
 ## 离线自查（不用装平板）
@@ -67,6 +71,7 @@ adb -s <addr> shell "run-as orilumn.reader cat files/logs/日志_YYYYMMDD.txt" |
   端口会变，先 `dns-sd -L "adb-400D91019H00000-rg2R7j" _adb-tls-connect._tcp local`，
   再 `adb connect 172.16.0.203:<端口>`；启动 `monkey -p orilumn.reader -c android.intent.category.LAUNCHER 1`。
 - 手感权威：旧版 `orilum.bak/app/src/main/java/com/orilum/ui/reader/curl/CurlView.kt`
-  （折痕 `w*(1-p)` / `w*p`、倾斜 0.9 页宽、阴影带 5% 页宽、纸背 100/255）。
+  （折痕 `w*(1-p)` / `w*p`、倾斜 0.9 页宽、纸背 100/255）；截面与阴影参考
+  `samples/duokan/sources/fi/harism/curl/`（`CurlMesh.curl` 的圆柱映射与两道阴影）。
 - 页位图池 100MB（版心一张约 15MB）：卷曲跨帧持有当前页与目标页两张，池紧张时有被
   淘汰回收的风险（回收后 `asAndroidBitmap` 抛错 ⇒ 当帧画不出卷曲，页面不动）。

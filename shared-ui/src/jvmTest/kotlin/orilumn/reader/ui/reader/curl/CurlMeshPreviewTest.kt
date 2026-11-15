@@ -103,6 +103,31 @@ class CurlMeshPreviewTest {
         return img
     }
 
+    /** 真机实拍的那一帧：p=0.026、折痕 (2873,0)-(710,2800)（= tilt 拉到极限）。 */
+    @Test
+    fun dumpDeviceTilt() {
+        val w = 1840
+        val h = 2800
+        val tw = 1585
+        val th = 2400
+        val tx = (w - tw) / 2f
+        val ty = (h - th) / 2f
+        val front = CurlPageImages().apply { page = fakePageSized(tw, th, 0xFF2A2A2A.toInt()) }
+        val back = CurlPageImages().apply { page = fakePageSized(tw, th, 0xFF2A2A2A.toInt()) }
+        for ((p, tilt) in listOf(0.026f to 0.653f, 0.026f to 0f, 0.4f to 0.653f, 0.4f to 0f)) {
+            val shape = curlShape(w.toFloat(), h.toFloat(), p, 1, tilt, false)
+            println("shape p=$p tilt=$tilt top=${shape.topX} bot=${shape.bottomX} lean=${shape.lean}")
+            val img = ImageBitmap(w, h, ImageBitmapConfig.Argb8888, hasAlpha = true)
+            CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(img), Size(w.toFloat(), h.toFloat())) {
+                drawRect(Color(0xFFEFECE3.toInt()))
+                drawCurl3DFrame(shape, front, back, 0xFFF1EEE6.toInt(), tx, ty)
+            }
+            val out = File("build/devt-p${(p * 100).toInt()}-t${(tilt * 100).toInt()}.png")
+            val data = Image.makeFromBitmap(img.asSkiaBitmap()).encodeToData(EncodedImageFormat.PNG)!!
+            out.writeBytes(data.bytes)
+        }
+    }
+
     @Test
     fun dumpFrames() {
         for (e in listOf(1.2f, 2.2f, 3.5f)) {

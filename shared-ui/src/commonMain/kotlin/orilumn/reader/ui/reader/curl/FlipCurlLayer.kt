@@ -134,18 +134,16 @@ fun FlipCurlLayer(
                         "overlay=${front.overlay != null}/${back.overlay != null}",
                 )
             }
-            // 3D 卷曲优先；本端画不了（安卓 < 33）才退回折页。
-            if (curlMeshSupported()) {
-                val done = drawCurl3DFrame(
-                    shape = shape,
-                    front = front,
-                    back = back,
-                    paperArgb = paperArgb,
-                    texLeft = texX,
-                    texTop = texY,
-                )
-                if (done) return@Canvas
-            }
+            // 3D 卷曲优先；网格铺不出来（退化几何）才退回折页。
+            val done = drawCurl3DFrame(
+                shape = shape,
+                front = front,
+                back = back,
+                paperArgb = paperArgb,
+                texLeft = texX,
+                texTop = texY,
+            )
+            if (done) return@Canvas
             drawCurlFrame(
                 shape = shape,
                 front = front,

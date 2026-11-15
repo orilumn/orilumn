@@ -85,8 +85,9 @@ fun FlipCurlLayer(
 ) {
     // 只在第一次画不出来时留一条日志：着色器编译失败会每帧都失败，刷屏没有意义。
     val warned = remember { booleanArrayOf(false) }
-    // 本轮翻页是否已经留过一条「开画 / 等图」的日志（每次会话一条，便于真机对账）。
+    // 本轮翻页是否已经留过「等图」/「开画」的日志（各一条，便于真机对账；开画那条带几何）。
     val sessionLogged = remember { booleanArrayOf(false) }
+    val drawLogged = remember { booleanArrayOf(false) }
 
     Box(modifier) {
         // 目标槽先画（在下），当前槽后画（在上）：与滑动层同序，卷曲没画出来时看到的就是这一对。
@@ -99,6 +100,7 @@ fun FlipCurlLayer(
         Canvas(Modifier.fillMaxSize()) {
             if (!active()) {
                 sessionLogged[0] = false
+                drawLogged[0] = false
                 return@Canvas
             }
             val dir = direction()
@@ -132,11 +134,15 @@ fun FlipCurlLayer(
                 tilt = tilt(),
                 paperArgb = paperArgb,
             )
-            if (!sessionLogged[0]) {
-                sessionLogged[0] = true
+            if (!drawLogged[0]) {
+                drawLogged[0] = true
+                // 几何一起记：平板实测对不上形状时，直接拿这几个数离线复现同一帧。
                 Logger.d(
                     "Orilumn.Curl",
-                    "draw dir=$dir p=${frame.progress} tex=${frontPage.width}x${frontPage.height} " +
+                    "draw dir=$dir p=${frame.progress} " +
+                        "fold=(${frame.topX},${frame.topY})-(${frame.bottomX},${frame.bottomY}) " +
+                        "n=(${frame.normalX},${frame.normalY}) shadow=${frame.shadow} " +
+                        "tex=${frontPage.width}x${frontPage.height} " +
                         "overlay=${front.overlay != null}/${back.overlay != null}",
                 )
             }

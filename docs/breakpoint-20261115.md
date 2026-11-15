@@ -46,7 +46,14 @@ W 01:51:36.270 [Orilumn.Curl] shot GIVE-UP tries=30 current=null target=null
    片元自己减原点；两端**都不挂 local matrix**——桌面 skia 与安卓 `BitmapShader` 的
    local matrix 方向天生相反，挂错不报错只画错。
 8. 缺图时**页面保持不动**（不切滑动、不冻帧）；`Orilumn.Curl` 每次翻页留一条
-   `draw dir=… tex=… overlay=…` 或 `wait page …`，上机对账用。
+   `draw dir=… p=… fold=(x,y)-(x,y) n=(x,y) shadow=… tex=… overlay=…` 或 `wait page …`，
+   上机对账、离线复现同一帧都用它（`CurlDebugTest` 里已有几个按实测几何写死的用例）。
+9. **卷筒只在「折痕还在纸上」的那一段存在**：折痕是这一页的折痕，折痕本身那一圈纸料
+   （材质 u = arc）出了页边就说明纸到头了，纸卷与它投的落影都在那里截止——也就是折页
+   页角的两条直角边处。判据 `paperAt(foot + n·arc)` 与纸背贴着折痕那一侧的轮廓用同一圈
+   纸料，所以截断点和纸背的纸边接在一起。倾角大时折痕端点会落在页宽之外（旧 2D 版也放到
+   2×页宽），少了这一条，卷筒会顺着那根页面外的轴一路画到页面的上下边，从折角的直角边
+   旁边支出去一个尖。
 
 ## 离线自查（不用装平板）
 

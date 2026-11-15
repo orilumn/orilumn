@@ -54,12 +54,21 @@ class CurlDebugTest {
         return surface.makeImageSnapshot()
     }
 
-    private fun render(progress: Float, direction: Int, tilt: Float = 0f, name: String) {
-        val w = 420
-        val h = 600
+    private fun render(
+        progress: Float,
+        direction: Int,
+        tilt: Float = 0f,
+        name: String,
+        big: Boolean = false,
+        flat: Boolean = false,
+    ) {
+        val w = if (big) 840 else 420
+        val h = if (big) 1200 else 600
         val effect = RuntimeEffect.makeForShader(CURL_SKSL)
-        val front = fakePage(w, h, 0xFFFAF6EC.toInt(), 0xFF2A2A2A.toInt(), 1f)
-        val back = fakePage(w, h, 0xFFFAF6EC.toInt(), 0xFF2A2A2A.toInt(), 0.45f)
+        val front = if (flat) fakePage(w, h, 0xFFCC2222.toInt(), 0xFFCC2222.toInt(), 1f)
+        else fakePage(w, h, 0xFFFAF6EC.toInt(), 0xFF2A2A2A.toInt(), 1f)
+        val back = if (flat) fakePage(w, h, 0xFF2222CC.toInt(), 0xFF2222CC.toInt(), 0.45f)
+        else fakePage(w, h, 0xFFFAF6EC.toInt(), 0xFF2A2A2A.toInt(), 0.45f)
         val frame = curlFrame(
             pageW = w.toFloat(), pageH = h.toFloat(),
             progress = progress, direction = direction, tilt = tilt,
@@ -89,5 +98,9 @@ class CurlDebugTest {
         render(0.75f, 1, name = "next-075")
         render(0.35f, 1, tilt = 0.5f, name = "next-035-tilt")
         render(0.50f, -1, name = "prev-050")
+        render(0.35f, 1, tilt = 0.5f, name = "next-035-tilt-big", big = true)
+        render(0.45f, 1, tilt = 0.2f, name = "next-045-tilt02-big", big = true)
+        render(0.45f, 1, tilt = 0.2f, name = "regions-tilt02", big = true, flat = true)
+        render(0.35f, 1, tilt = 0.5f, name = "regions-tilt05", big = true, flat = true)
     }
 }

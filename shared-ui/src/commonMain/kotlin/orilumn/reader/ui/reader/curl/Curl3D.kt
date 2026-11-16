@@ -10,6 +10,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.ImageShader
 import androidx.compose.ui.graphics.Paint
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathFillType
 import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.Vertices
 import androidx.compose.ui.graphics.VertexMode
@@ -498,11 +499,11 @@ private fun DrawScope.drawMeshBand(
 }
 
 /**
- * 纸卷压在露出页上的落影：形状由 [rollShadowStrip] 给出（筒外沿那条扫线往外挤出来的一条带），
+ * 纸卷压在露出页上的落影：形状由 [rollShadowStrip] 给出（贴着纸卷轮廓的一条带），
  * 浓度沿折痕法向线性衰减 —— [start] 就是筒的轮廓（最深），往外 [width] 散尽。
  *
- * 两头必须**顶到屏幕上下边**（「顶天立地」）：影是筒压在露出页上压出来的，筒立到哪儿影就到
- * 哪儿，中间不能空一块。别拿纸的整圈轮廓去挤——切边是圆弧，影两头会跟着收窄到断掉。
+ * 影的内侧边界必须**就是纸卷的边**（不能是与折痕平行的直线：纸边在两端是弯的，
+ * 直线与弯边之间会裂出一条没影的窄带）。
  */
 private fun DrawScope.drawRollShadow(
     mesh: CurlMesh,
@@ -512,8 +513,7 @@ private fun DrawScope.drawRollShadow(
     alpha: Float,
 ) {
     if (width <= 0.5f || alpha <= 0f) return
-    // 沿折痕方向拉长到页面外（比页面对角线还长，画布裁掉），见 [rollShadowStrip]。
-    val strip = mesh.rollShadowStrip(width, up, pad = size.width + size.height) ?: return
+    val strip = mesh.rollShadowStrip(width, up) ?: return
     // 渐变照折痕坐标系取：`start` 就是筒的轮廓（最深），往外 `width` 散尽。
     // 轮廓平移后的近侧落在纸底下，由后画的纸盖住，不参与可见区。
     drawPath(
@@ -527,38 +527,47 @@ private fun DrawScope.drawRollShadow(
 }
 
 /**
- * 落影的形状：**筒外沿那条扫线**沿折痕方向拉到页面外，再沿 [up] 挤出 [width]
+ * 落影的形状：**贴着纸卷外轮廓的一条带** —— 把纸卷的轮廓逐段沿 [up] 挤出 [width]
  * （参考实现是「网格顶点统一偏移 `z/2`」）。
  *
- * 「筒外沿那条扫线」就是纸卷轮廓上 `q` 最大的那一条（[CurlMesh.Band.lastRow]），它在屏幕上
- * 与折痕平行、正好贴着纸的外边。取它而不是取纸的**整圈轮廓**，是因为纸的切边在屏幕上是个
- * 圆弧：拿整圈轮廓去挤，影的两头会跟着切边越收越窄，到屏幕上下边时已经收成一条线 ——
- * 读者看到的就是「折痕右侧那条影没有顶天立地，上面（或下面）空了一块」。
- * 沿折痕方向拉到页面外（由画布裁掉）之后，影的两头**顶到屏幕上下边、宽度不变**，
- * 像是在筒外侧压出来的一条带子。
+ * 为什么必须贴着轮廓走：影是筒压在露出页上压出来的，**离筒边越远越淡**，所以影的内侧边界
+ * 就是纸卷的边。取「与折痕平行的直线」当内侧边界时，纸的切边在两端是弯的（圆弧），
+ * 直线与弯边之间就裂出一条**没影的窄带**——读者原话「中间出现奇怪的无阴影区，这时候已经
+ * 没有折痕了，应该沿着卷起的页边继续画阴影」。
+ *
+ * 轮廓在折痕那一侧的半圈落在纸底下，由后画的纸盖掉，不参与可见区；露出页这一侧才是读者
+ * 看见的那条影。影到纸边即止（不顺着折痕拖到纸外面），到屏幕边也照样铺满（纸被页边切断
+ * 的地方，影跟着被切断）。
  *
  * 为什么取 [CurlMesh.Surface.Recto]：它是「折痕 → 筒口」那半圈，外沿就是筒的轮廓（`q` 最大处），
  * 纸背（Verso）与折痕另一侧的外圈都在它里面或背后。没有筒（还没到九十度）时它也一定在；
  * 真连它都没有，这一帧就不该有影（那时纸背那半圈的**首行**才是轮廓）。
- *
- * @param pad 沿折痕方向往两头各拉长多少（px）：由调用方给「一定超出页面」的长度。
  */
-internal fun CurlMesh.rollShadowStrip(width: Float, up: Offset, pad: Float): Path? {
+internal fun CurlMesh.rollShadowStrip(width: Float, up: Offset): Path? {
     val band = bands.firstOrNull { it.surface == CurlMesh.Surface.Recto }
-    val row = band?.lastRow
-        ?: bands.firstOrNull { it.surface == CurlMesh.Surface.Verso }?.firstRow
+        ?: bands.firstOrNull { it.surface == CurlMesh.Surface.Verso }
         ?: return null
     if (width <= 0.5f) return null
-    val a = Offset(positions[row * 4], positions[row * 4 + 1])
-    val b = Offset(positions[row * 4 + 2], positions[row * 4 + 3])
-    val along = b - a
-    val len = along.getDistance()
-    if (len < 0.5f) return null
-    val dir = along / len
+    val ring = bandOutline(band)
+    if (ring.size < 3) return null
     val shift = up * width
-    val head = a - dir * pad
-    val tail = b + dir * pad
-    return polygonPath(listOf(head, tail, tail + shift, head + shift))
+    // 逐段挤成小四边形，一次填满：绕向统一成「相对 [shift] 同号」，否则 nonZero 会拿反向的
+    // 相邻块去减，接缝上会出现一条没影的细缝。
+    val path = Path().apply { fillType = PathFillType.NonZero }
+    var prev = ring.last()
+    for (cur in ring) {
+        val dx = cur.x - prev.x
+        val dy = cur.y - prev.y
+        val cross = dx * shift.y - dy * shift.x
+        val (a, b) = if (cross >= 0f) prev to cur else cur to prev
+        path.moveTo(a.x, a.y)
+        path.lineTo(b.x, b.y)
+        path.lineTo(b.x + shift.x, b.y + shift.y)
+        path.lineTo(a.x + shift.x, a.y + shift.y)
+        path.close()
+        prev = cur
+    }
+    return path
 }
 
 /** 页面里的一个多边形（路径）。 */

@@ -677,14 +677,15 @@ class Curl3DRenderTest {
     }
 
     /**
-     * 卷筒落影必须**顶天立地**：折痕与屏幕上边、下边都相交时，影要从屏幕上边一直铺到下边。
+     * 卷筒落影必须**贴着纸卷的轮廓**铺，不能跟折痕平行着走。
      *
      * 只管「影的形状」（[CurlMesh.rollShadowStrip] 的轮廓），不看浓度 —— 浓度是另一码事。
-     * 曾经取纸的**整圈轮廓**沿法向挤出，纸的切边是圆弧，影的两头跟着越收越窄，到屏幕上下边时
-     * 已经收没了：读者看到「折痕右侧那条影没有顶天立地，上面（或下面）空了一块」。
+     * 影的内侧边界取成与折痕平行的直线时，纸的切边在两端是弯的，直线与弯边之间会裂出一条
+     * 没影的窄带（读者截图里圈出来的「中间奇怪的无阴影区」）。
+     * 这条锁两件事：影沿轮廓每一段都贴着纸边（内侧不留缝），且纸被页边切断处影跟着到边。
      */
     @Test
-    fun rollShadowSpansTheScreenTopToBottom() {
+    fun rollShadowHugsTheRollOutlineAndReachesCutEdges() {
         val w = 920f
         val h = 1400f
         for ((p, tilt) in listOf(
@@ -700,7 +701,7 @@ class Curl3DRenderTest {
                 val foldLen = hypot(shape.bottomX - shape.topX, h).coerceAtLeast(1e-3f)
                 val up = Offset(h / foldLen, -(shape.bottomX - shape.topX) / foldLen) *
                     (if (dir >= 0) 1f else -1f)
-                val strip = mesh.rollShadowStrip(radius * 0.5f, up, pad = w + h)
+                val strip = mesh.rollShadowStrip(radius * 0.5f, up)
                 assertTrue("dir=$dir p=$p tilt=$tilt 没有落影", strip != null)
 
                 val pw = w.toInt()
@@ -710,18 +711,36 @@ class Curl3DRenderTest {
                     drawPath(strip!!, Color.Black)
                 }
                 val px = img.toPixelMap()
-                fun darkAt(y: Int): List<Int> =
-                    (0 until pw).filter { px[it, y].alpha > 0.5f }
-                val top = darkAt(0)
-                val bottom = darkAt(ph - 1)
-                assertTrue("dir=$dir p=$p tilt=$tilt 影没顶到屏幕上边（y=0 只有 ${top.size} px）", top.isNotEmpty())
-                assertTrue(
-                    "dir=$dir p=$p tilt=$tilt 影没铺到屏幕下边（y=${ph - 1} 只有 ${bottom.size} px）",
-                    bottom.isNotEmpty(),
-                )
-                // 一整条不能中间断开。
-                for (y in 0 until ph) {
-                    assertTrue("dir=$dir p=$p tilt=$tilt 影在 y=$y 处断开了", darkAt(y).isNotEmpty())
+                fun dark(x: Int, y: Int): Boolean = px[x, y].alpha > 0.5f
+                // 纸的轮廓（纸卷在屏幕上的那块）：影必须从它边上起，不能留缝。
+                val ring = mesh.bandOutline(mesh.bands.first { it.surface == CurlMesh.Surface.Recto })
+                var hugged = 0
+                for (k in ring.indices) {
+                    val p = ring[k]
+                    if (p.x < 1f || p.y < 1f || p.x > w - 2f || p.y > h - 2f) continue
+                    // 轮廓上这点沿法向挪 2px（朝外的那侧由「描出来的影」自己判）
+                    var near = false
+                    for (d in listOf(-2f, 2f)) {
+                        val x = (p.x + up.x * d).toInt()
+                        val y = (p.y + up.y * d).toInt()
+                        if (x in 0 until pw && y in 0 until ph && dark(x, y)) near = true
+                    }
+                    assertTrue("dir=$dir p=$p tilt=$tilt 纸边 (${p.x}, ${p.y}) 旁边没有影", near)
+                    hugged++
+                }
+                assertTrue("dir=$dir p=$p tilt=$tilt 没量到纸边", hugged > 8)
+                // 纸被上下页边切断时，影跟着到边。
+                if (shape.topX > 1f && shape.topX < w - 1f) {
+                    assertTrue(
+                        "dir=$dir p=$p tilt=$tilt 影没顶到屏幕上边（折痕上端在页内）",
+                        (0 until pw).any { dark(it, 0) },
+                    )
+                }
+                if (shape.bottomX > 1f && shape.bottomX < w - 1f) {
+                    assertTrue(
+                        "dir=$dir p=$p tilt=$tilt 影没顶到屏幕下边（折痕下端在页内）",
+                        (0 until pw).any { dark(it, ph - 1) },
+                    )
                 }
             }
         }

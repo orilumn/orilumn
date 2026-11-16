@@ -139,12 +139,15 @@ internal fun DrawScope.drawCurl3DFrame(
     //    纸刚离页时几乎没有影，卷得越高影越远越深。
     val lift = radius * (1f - cos(minOf(mesh.maxArc() / radius, PI.toFloat())))
     val silhouette = mesh.maxOffsetAlong(up.x, up.y, t0)
+    val shadowWidth = lift * 0.5f
+    val shadowAlpha = DROP_SHADOW_ALPHA * (lift / (2f * radius)).coerceIn(0f, 1f) * shape.shadowFade
     clipRect(0f, 0f, w, h) {
-        drawFanShadow(
-            t0, t1, up,
-            from = silhouette,
-            width = lift * 0.5f,
-            alpha = DROP_SHADOW_ALPHA * (lift / (2f * radius)).coerceIn(0f, 1f) * shape.shadowFade,
+        drawRollShadow(
+            mesh = mesh,
+            start = t0 + up * silhouette,
+            up = up,
+            width = shadowWidth,
+            alpha = shadowAlpha,
         )
         // 纸背的纸边要落影：平铺段是一整页纸盖在旧页上，跟旧页同纸同色，
         // 不落影时读者只看见旧页的字被切断、切断处空无一物 —— 看起来就是「纸背没画」。
@@ -458,6 +461,15 @@ private const val CURL3D_SHADING: Boolean = true
 /** 明暗最深处的叠白不透明度。 */
 private const val ROLL_SHADE_MAX_ALPHA: Float = 0.30f
 
+/**
+ * 落影只取卷筒轮廓**外沿那一段**扫线（`0.45` = 外面四成五）。
+ *
+ * 影是纸卷最外沿压出来的：那一段扫线的两个端点就在纸的切边上，影的两头跟着切边收圆。
+ * 整圈都取进来的时候，靠折痕那一侧的扫线（压在纸底下、沿折痕铺满整页）会把影一路铺到
+ * 屏幕边，读者看到的正是「圆弧外面多出来的一段直线」。
+ */
+private const val ROLL_SHADOW_OUTER_SHARE: Float = 0.45f
+
 /** 落影最深处的不透明度（参考实现 `SHADOW_INNER_COLOR` 的 alpha = 0.5）。 */
 private const val DROP_SHADOW_ALPHA: Float = 0.32f
 
@@ -495,44 +507,60 @@ private fun DrawScope.drawMeshBand(
 }
 
 /**
- * 沿折痕方向的一条渐变影带：从折痕坐标系里的 `from` 偏移处开始，向 `width` 方向铺开，
- * 起点 `alpha`、终点透明。影的形状只跟折痕和卷高有关，沿折痕方向是均匀的，
- * 所以用一条平行四边形 + GPU 渐变画笔就够（调用方负责裁到页面内）。
+ * 纸卷压在露出页上的落影：形状由 [rollShadowStrip] 给出（纸卷自己的轮廓，不是折痕），
+ * 浓度沿折痕法向线性衰减 —— [start] 就是筒的轮廓（最深），往外 [width] 散尽。
+ *
+ * 形状为什么不按折痕铺：折痕铺满整页，纸却不是 —— 纸的切边在屏幕上是卷起来那一圈扫出来的
+ * 椭圆弧。平行四边形沿折痕铺到屏幕边时纸早就没有了，影还在，读者看到的就是
+ * 「圆弧外面多出来的一段直线」，判「卷筒到纸边也截止、不能在没纸的地方还卷」。
  */
-
-/** 沿折痕方向的一条带：从折痕坐标系里的 `from` 偏移处起，向 `n` 方向铺开 `width` 宽。 */
-private fun fanBand(t0: Offset, t1: Offset, n: Offset, from: Float, width: Float): Path {
-    val a = t0 + n * from
-    val b = t0 + n * (from + width)
-    val c = t1 + n * (from + width)
-    val d = t1 + n * from
-    return polygonPath(listOf(a, b, c, d))
-}
-
-/**
- * 沿折痕方向的一条渐变影带：从折痕坐标系里的 `from` 偏移处开始，向 `width` 方向铺开，
- * 起点 `alpha`、终点透明。影的形状只跟折痕和卷高有关，沿折痕方向是均匀的，
- * 所以用一条平行四边形 + GPU 渐变画笔就够（调用方负责裁到页面内）。
- */
-private fun DrawScope.drawFanShadow(
-    t0: Offset,
-    t1: Offset,
-    n: Offset,
-    from: Float,
+private fun DrawScope.drawRollShadow(
+    mesh: CurlMesh,
+    start: Offset,
+    up: Offset,
     width: Float,
     alpha: Float,
 ) {
     if (width <= 0.5f || alpha <= 0f) return
-    val a = t0 + n * from
-    val b = t0 + n * (from + width)
+    val strip = mesh.rollShadowStrip(width, up) ?: return
+    // 渐变照折痕坐标系取：`start` 就是筒的轮廓（最深），往外 `width` 散尽。
+    // 轮廓平移后的近侧落在纸底下，由后画的纸盖住，不参与可见区。
     drawPath(
-        fanBand(t0, t1, n, from, width),
+        strip,
         Brush.linearGradient(
             colorStops = arrayOf(0f to Color(0f, 0f, 0f, alpha), 1f to Color(0f, 0f, 0f, 0f)),
-            start = a,
-            end = b,
+            start = start,
+            end = start + up * width,
         ),
     )
+}
+
+/**
+ * 落影的形状：卷筒轮廓**外沿那一段**沿 [up] 挤出 [width]（参考实现是「网格顶点统一偏移 `z/2`」）。
+ *
+ * 两侧长边就是纸的轮廓；末端那两条边是外沿扫线的端点沿 [up] 拉出来的短线 —— 那两点本来就在
+ * 纸的切边上，所以影到纸边即止，不会顺着折痕拖到屏幕尽头。
+ *
+ * 为什么取 [CurlMesh.Surface.Recto]：它是「折痕 → 筒口」那半圈，外沿就是筒的轮廓（`q` 最大处），
+ * 纸背（Verso）与折痕另一侧的外圈都在它里面或背后。没有筒（还没到九十度）时它也一定在；
+ * 真连它都没有，这一帧就不该有影。
+ */
+private fun CurlMesh.rollShadowStrip(width: Float, up: Offset): Path? {
+    val band = bands.firstOrNull { it.surface == CurlMesh.Surface.Recto }
+        ?: bands.firstOrNull { it.surface == CurlMesh.Surface.Verso }
+        ?: return null
+    if (width <= 0.5f) return null
+    // 只取外沿那一段扫线（`q` 最大的那些）：影是**纸卷最外沿**压出来的，那一条扫线的
+    // 两个端点就是纸的切边，影的两头因此跟着切边收成圆弧、到纸边即止。
+    // 筒往里收的扫线（靠折痕那一侧）本来就压在纸底下，取进来只会把影往屏幕边上铺。
+    val span = band.lastRow - band.firstRow
+    val outer = bandOutline(
+        band.firstRow + (span * ROLL_SHADOW_OUTER_SHARE).toInt(),
+        band.lastRow,
+    )
+    if (outer.size < 3) return null
+    val shift = up * width
+    return polygonPath(outer + outer.reversed().map { it + shift })
 }
 
 /** 页面里的一个多边形（路径）。 */

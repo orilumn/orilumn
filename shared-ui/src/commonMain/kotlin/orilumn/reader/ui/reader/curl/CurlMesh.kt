@@ -106,7 +106,15 @@ private const val MAX_SPLITS = 96
 /** 两条扫线的最小间距（px）：比它更近的扫线合并（角点扫线可能和等分线重合）。 */
 private const val ROW_EPSILON = 0.5f
 
-/** 纸背内容压到的透明度（参考实现 `BACKFACE_ALPHA = 0.9`，即纸色盖上去 10%）。 */
+/**
+ * 纸背内容压淡：盖上去的**纸色不透明度**。
+ *
+ * 参考实现是 0.1（`BACKFACE_ALPHA = 0.9`，只压一成）：纸背是**一比一的镜像文字**，
+ * 内容留九成，读者才认得出「这是同一页纸翻过来的反面」。压到 0.8 以上只剩一成透印时，
+ * 它退化成一张空白条，读者反而判「纸背没画」。
+ *
+ * 纸背跟旧页同纸同色，光靠内容还不够：外沿轮廓与纸面明暗由 [drawCurl3DFrame] 另画。
+ */
 internal const val CURL_BACK_WASH_ALPHA: Float = 0.10f
 
 /**
@@ -155,14 +163,23 @@ internal fun buildCurlMesh(
     // 折痕落在页面外、这一侧没有可掀起的材料：这一帧不该由网格画。
     if (xMin > -1f) return emptyMesh()
 
-    // 扫线：0 → −πR 等分，外加四条角点扫线（角点精确落在网格上）。
+    // 扫线：0 → −πR 等分（卷起来的筒），−πR → xMin 等分（翻过去后平铺的纸背），
+    // 外加四条角点扫线（角点精确落在网格上）。
     // **只保留掀起侧的材料（x' ≤ 0）**：没掀起的那半页由调用方整页画（[drawPage]），
     // 再让网格盖一遍就是同一张纸画两遍（文字重影、明暗与压淡铺到没掀的纸上）。
     // 卷起来之后网格在**屏幕**上会压到露出页上——那是纸自己盖住新页，不是重复绘制。
+    //
+    // 平铺段那一段扫线**不能省**：只放筒的扫线时，「平铺段」整段只剩「筒末一条 → 页角一条」
+    // 那一个大四边形（折痕竖直时正好一条四边形，折痕一斜连这条四边形都没有），
+    // 纸背要么被拉成一片空白、要么根本不存在 —— 读者那句「页面反面从来没画过」就是它。
     val n = splits.coerceIn(2, MAX_SPLITS)
-    val raw = ArrayList<Float>(n + 6)
+    val raw = ArrayList<Float>(n * 2 + 6)
     raw.add(0f)
     for (i in 1 until n) raw.add(-halfTurn * i / (n - 1))
+    val flap = (-halfTurn - xMin).coerceAtLeast(0f)
+    if (flap > ROW_EPSILON) {
+        for (i in 1..n) raw.add(-halfTurn - flap * i / n)
+    }
     for (i in 0 until 4) raw.add(cornerX[i])
     raw.sortDescending()
     val rows = ArrayList<Float>(raw.size)
@@ -197,7 +214,9 @@ internal fun buildCurlMesh(
             lo = maxOf(lo, minOf(a1, b1))
             hi = minOf(hi, maxOf(a1, b1))
         }
-        if (hi - lo <= 0.01f) return null
+        // 退化成一个点也要留：角点扫线与页面只在角上相切，正是它把纸带的收尖钉在页角上。
+        // 直接丢掉的话平铺段永远到不了页角，纸带末端是一条凭空截断的直边。
+        if (hi - lo < -0.01f) return null
         return floatArrayOf(hi, lo)
     }
 
@@ -317,16 +336,102 @@ internal fun buildCurlMesh(
  * 的外轮廓就是：一侧长边 → 末行线段 → 另一侧长边 → 首行线段。压淡与明暗都照着这个轮廓铺，
  * 形状跟着纸走，不会画到纸外面去。
  */
-internal fun CurlMesh.bandOutline(band: CurlMesh.Band): List<Offset> {
-    val pts = ArrayList<Offset>((band.lastRow - band.firstRow + 1) * 2)
+internal fun CurlMesh.bandOutline(band: CurlMesh.Band): List<Offset> =
+    bandOutline(band.firstRow, band.lastRow)
+
+/**
+ * 扫线区间 `firstRow..lastRow` 的外轮廓（页坐标多边形）。
+ *
+ * 相邻两段（如「正面那半圈 + 纸背那半圈」）合成一张纸的轮廓时用这个重载：两段扫线是连续的，
+ * 合起来的轮廓就是纸卷在屏幕上的全部面积（给纸卷垫纸色用）。
+ */
+internal fun CurlMesh.bandOutline(firstRow: Int, lastRow: Int): List<Offset> {
+    val pts = ArrayList<Offset>((lastRow - firstRow + 1) * 2)
     fun p(v: Int) = Offset(positions[v * 2], positions[v * 2 + 1])
-    for (row in band.firstRow..band.lastRow) pts.add(p(row * 2))
-    for (row in band.lastRow downTo band.firstRow) pts.add(p(row * 2 + 1))
+    for (row in firstRow..lastRow) pts.add(p(row * 2))
+    for (row in lastRow downTo firstRow) pts.add(p(row * 2 + 1))
     return pts
 }
 
 /** 掀起侧的最远弧长（= `−x'` 最小值），供调用方算卷起来的高度。 */
 internal fun CurlMesh.maxArc(): Float = arc.maxOrNull() ?: 0f
+
+/**
+ * 一段扫线落在**页栅格材料范围**里的那块形状（页坐标多边形）；整段都在范围外时返回 `null`。
+ *
+ * 页栅格只有版心那么大（平板 1585×2400 放在 1840×2800 里），页边距里没有像素。纹理若越界
+ * 采样，`TileMode.Clamp` 会把版心的**最边一列/一行**拉成条纹——纸背那一段扫线落在页边距里时，
+ * 读者看到的就是「纸背页边距上好几条短横线」。所以纹理只画在这个形状里，形状之外由调用方垫纸色。
+ *
+ * 形状为什么还是个四边形条带：**材料坐标沿一条扫线是线性的**（`u` 和 `v` 都随扫线参数线性变化），
+ * 所以「落在版心矩形里」就只是把这一行的参数区间裁掉两头，端点线性插值出来即可。
+ *
+ * 两条边都要裁：折痕一斜，同一条扫线上的**材料 x 也在变**（平板上一行能横跨大半个页宽），
+ * 只按行首的 `u` 挑行，就会把越界的另一半也画进来 —— 那正是 Clamp 抹出来的横线。
+ *
+ * @param texLeft/texTop 页栅格在页坐标里的左上角；`texWidth/texHeight` 是页栅格自己的像素尺寸。
+ */
+internal fun CurlMesh.textureBandOutline(
+    band: CurlMesh.Band,
+    texLeft: Float,
+    texTop: Float,
+    texWidth: Float,
+    texHeight: Float,
+): List<Offset>? {
+    val right = texLeft + texWidth
+    val bottom = texTop + texHeight
+
+    /** 一行（两顶点）里，材料值沿扫线线性变化，落在 `lo..hi` 内的一段参数区间。 */
+    fun span(va: Float, vb: Float, lo: Float, hi: Float): FloatArray? {
+        if (abs(vb - va) < 1e-4f) {
+            return if (va < lo || va > hi) null else floatArrayOf(0f, 1f)
+        }
+        val ta = (lo - va) / (vb - va)
+        val tb = (hi - va) / (vb - va)
+        val s = maxOf(0f, minOf(ta, tb))
+        val e = minOf(1f, maxOf(ta, tb))
+        return if (e - s <= 1e-4f) null else floatArrayOf(s, e)
+    }
+
+    /** 这一行真正落在版心矩形里的参数区间：`u`、`v` 两条边同时满足。 */
+    fun rowSpan(row: Int): FloatArray? {
+        val a = row * 2
+        val b = row * 2 + 1
+        val su = span(texCoords[a * 2], texCoords[b * 2], texLeft, right) ?: return null
+        val sv = span(texCoords[a * 2 + 1], texCoords[b * 2 + 1], texTop, bottom) ?: return null
+        val t0 = maxOf(su[0], sv[0])
+        val t1 = minOf(su[1], sv[1])
+        return if (t1 - t0 <= 1e-4f) null else floatArrayOf(t0, t1)
+    }
+
+    // 扫线按材料坐标排序，同一段里平移方向是单调的：能落在版心里的行只会是一段连续区间，
+    // 两端之外不会回来。
+    var first = -1
+    var last = -1
+    for (row in band.firstRow..band.lastRow) {
+        if (rowSpan(row) != null) {
+            if (first < 0) first = row
+            last = row
+        }
+    }
+    if (first < 0 || last <= first) return null
+
+    fun p(v: Int) = Offset(positions[v * 2], positions[v * 2 + 1])
+    val bottomSide = ArrayList<Offset>(last - first + 1)
+    val topSide = ArrayList<Offset>(last - first + 1)
+    for (row in first..last) {
+        // 每行两个端点：`row*2` 是「下端点」（λ 大）、`row*2+1` 是「上端点」（与 [bandOutline] 同序）。
+        val a = row * 2
+        val b = row * 2 + 1
+        val ts = rowSpan(row) ?: continue
+        val pa = p(a)
+        val pb = p(b)
+        bottomSide.add(pa + (pb - pa) * ts[0])
+        topSide.add(pa + (pb - pa) * ts[1])
+    }
+    if (bottomSide.size < 2) return null
+    return bottomSide + topSide.asReversed()
+}
 
 private fun emptyMesh() = CurlMesh(
     positions = FloatArray(0),

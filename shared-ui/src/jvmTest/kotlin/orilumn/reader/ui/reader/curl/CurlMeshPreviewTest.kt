@@ -110,8 +110,10 @@ class CurlMeshPreviewTest {
             val inkColor = Color(ink)
             var y = h * 0.05f
             var line = 0
+            // 行末**顶到版心右缘**（中文正文两端对齐就是这样）：版心最右一列因此带墨，
+            // 越界采样一旦抹开，纸背的页边距上就会出现几条短横线。
             while (y < h * 0.95f) {
-                val len = w * (0.86f - ((line * 37) % 17) / 100f)
+                val len = w * (0.93f - ((line * 37) % 17) / 100f)
                 drawRect(inkColor, topLeft = Offset(w * 0.07f, y), size = Size(len, h * 0.008f))
                 y += h * 0.022f
                 line++

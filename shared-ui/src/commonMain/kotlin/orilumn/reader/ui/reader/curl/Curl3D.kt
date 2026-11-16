@@ -461,15 +461,6 @@ private const val CURL3D_SHADING: Boolean = true
 /** 明暗最深处的叠白不透明度。 */
 private const val ROLL_SHADE_MAX_ALPHA: Float = 0.30f
 
-/**
- * 落影只取卷筒轮廓**外沿那一段**扫线（`0.45` = 外面四成五）。
- *
- * 影是纸卷最外沿压出来的：那一段扫线的两个端点就在纸的切边上，影的两头跟着切边收圆。
- * 整圈都取进来的时候，靠折痕那一侧的扫线（压在纸底下、沿折痕铺满整页）会把影一路铺到
- * 屏幕边，读者看到的正是「圆弧外面多出来的一段直线」。
- */
-private const val ROLL_SHADOW_OUTER_SHARE: Float = 0.45f
-
 /** 落影最深处的不透明度（参考实现 `SHADOW_INNER_COLOR` 的 alpha = 0.5）。 */
 private const val DROP_SHADOW_ALPHA: Float = 0.32f
 
@@ -536,10 +527,12 @@ private fun DrawScope.drawRollShadow(
 }
 
 /**
- * 落影的形状：卷筒轮廓**外沿那一段**沿 [up] 挤出 [width]（参考实现是「网格顶点统一偏移 `z/2`」）。
+ * 落影的形状：卷筒轮廓沿 [up] 挤出 [width]（参考实现是「网格顶点统一偏移 `z/2`」）。
  *
- * 两侧长边就是纸的轮廓；末端那两条边是外沿扫线的端点沿 [up] 拉出来的短线 —— 那两点本来就在
- * 纸的切边上，所以影到纸边即止，不会顺着折痕拖到屏幕尽头。
+ * 轮廓的每一条扫线都自带它的两端（纸在哪儿有、切边长什么样），挤出之后：靠折痕那几条扫线
+ * 的两端贴着屏幕边 ⇒ 影也到屏幕边；越往外的扫线越短 ⇒ 影往外收成圆弧。两条边都不落空：
+ * **别只取外沿一段**，那样影会在离屏幕上下边还差一截的地方就截断，留一个没影的小区域；
+ * 也**别铺成沿折痕的平行四边形**，那样影会顺着折痕拖到纸外面去。
  *
  * 为什么取 [CurlMesh.Surface.Recto]：它是「折痕 → 筒口」那半圈，外沿就是筒的轮廓（`q` 最大处），
  * 纸背（Verso）与折痕另一侧的外圈都在它里面或背后。没有筒（还没到九十度）时它也一定在；
@@ -550,17 +543,13 @@ private fun CurlMesh.rollShadowStrip(width: Float, up: Offset): Path? {
         ?: bands.firstOrNull { it.surface == CurlMesh.Surface.Verso }
         ?: return null
     if (width <= 0.5f) return null
-    // 只取外沿那一段扫线（`q` 最大的那些）：影是**纸卷最外沿**压出来的，那一条扫线的
-    // 两个端点就是纸的切边，影的两头因此跟着切边收成圆弧、到纸边即止。
-    // 筒往里收的扫线（靠折痕那一侧）本来就压在纸底下，取进来只会把影往屏幕边上铺。
-    val span = band.lastRow - band.firstRow
-    val outer = bandOutline(
-        band.firstRow + (span * ROLL_SHADOW_OUTER_SHARE).toInt(),
-        band.lastRow,
-    )
-    if (outer.size < 3) return null
+    // 整圈轮廓一起挤：靠折痕那几条扫线的两端就在屏幕边上（纸在那儿还有），影必须跟着到边；
+    // 越往外扫线的两端收得越短（纸的切边），影因此往外收成圆弧 —— 两头既到得了屏幕边，
+    // 也不会在折痕延长线上拖出一条直线。
+    val ring = bandOutline(band)
+    if (ring.size < 3) return null
     val shift = up * width
-    return polygonPath(outer + outer.reversed().map { it + shift })
+    return polygonPath(ring + ring.reversed().map { it + shift })
 }
 
 /** 页面里的一个多边形（路径）。 */

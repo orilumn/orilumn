@@ -676,5 +676,56 @@ class Curl3DRenderTest {
         }
     }
 
+    /**
+     * 卷筒落影必须**顶天立地**：折痕与屏幕上边、下边都相交时，影要从屏幕上边一直铺到下边。
+     *
+     * 只管「影的形状」（[CurlMesh.rollShadowStrip] 的轮廓），不看浓度 —— 浓度是另一码事。
+     * 曾经取纸的**整圈轮廓**沿法向挤出，纸的切边是圆弧，影的两头跟着越收越窄，到屏幕上下边时
+     * 已经收没了：读者看到「折痕右侧那条影没有顶天立地，上面（或下面）空了一块」。
+     */
+    @Test
+    fun rollShadowSpansTheScreenTopToBottom() {
+        val w = 920f
+        val h = 1400f
+        for ((p, tilt) in listOf(
+            0.5f to 0.3f,
+            0.5f to -0.3f,
+            0.7f to -0.36f,
+            0.7f to 0.36f,
+        )) {
+            for (dir in listOf(1, -1)) {
+                val shape = curlShape(w, h, p, dir, tilt)
+                val radius = curlRadius(shape)
+                val mesh = buildCurlMesh(shape, radius = radius, splits = CURL3D_SPLITS)
+                val foldLen = hypot(shape.bottomX - shape.topX, h).coerceAtLeast(1e-3f)
+                val up = Offset(h / foldLen, -(shape.bottomX - shape.topX) / foldLen) *
+                    (if (dir >= 0) 1f else -1f)
+                val strip = mesh.rollShadowStrip(radius * 0.5f, up, pad = w + h)
+                assertTrue("dir=$dir p=$p tilt=$tilt 没有落影", strip != null)
+
+                val pw = w.toInt()
+                val ph = h.toInt()
+                val img = ImageBitmap(pw, ph, ImageBitmapConfig.Argb8888, hasAlpha = true)
+                CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(img), Size(w, h)) {
+                    drawPath(strip!!, Color.Black)
+                }
+                val px = img.toPixelMap()
+                fun darkAt(y: Int): List<Int> =
+                    (0 until pw).filter { px[it, y].alpha > 0.5f }
+                val top = darkAt(0)
+                val bottom = darkAt(ph - 1)
+                assertTrue("dir=$dir p=$p tilt=$tilt 影没顶到屏幕上边（y=0 只有 ${top.size} px）", top.isNotEmpty())
+                assertTrue(
+                    "dir=$dir p=$p tilt=$tilt 影没铺到屏幕下边（y=${ph - 1} 只有 ${bottom.size} px）",
+                    bottom.isNotEmpty(),
+                )
+                // 一整条不能中间断开。
+                for (y in 0 until ph) {
+                    assertTrue("dir=$dir p=$p tilt=$tilt 影在 y=$y 处断开了", darkAt(y).isNotEmpty())
+                }
+            }
+        }
+    }
+
     private fun luma(c: Color): Float = (c.red + c.green + c.blue) / 3f
 }

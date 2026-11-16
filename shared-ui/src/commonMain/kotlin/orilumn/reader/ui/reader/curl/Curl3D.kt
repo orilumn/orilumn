@@ -498,12 +498,11 @@ private fun DrawScope.drawMeshBand(
 }
 
 /**
- * 纸卷压在露出页上的落影：形状由 [rollShadowStrip] 给出（纸卷自己的轮廓，不是折痕），
+ * 纸卷压在露出页上的落影：形状由 [rollShadowStrip] 给出（筒外沿那条扫线往外挤出来的一条带），
  * 浓度沿折痕法向线性衰减 —— [start] 就是筒的轮廓（最深），往外 [width] 散尽。
  *
- * 形状为什么不按折痕铺：折痕铺满整页，纸却不是 —— 纸的切边在屏幕上是卷起来那一圈扫出来的
- * 椭圆弧。平行四边形沿折痕铺到屏幕边时纸早就没有了，影还在，读者看到的就是
- * 「圆弧外面多出来的一段直线」，判「卷筒到纸边也截止、不能在没纸的地方还卷」。
+ * 两头必须**顶到屏幕上下边**（「顶天立地」）：影是筒压在露出页上压出来的，筒立到哪儿影就到
+ * 哪儿，中间不能空一块。别拿纸的整圈轮廓去挤——切边是圆弧，影两头会跟着收窄到断掉。
  */
 private fun DrawScope.drawRollShadow(
     mesh: CurlMesh,
@@ -513,7 +512,8 @@ private fun DrawScope.drawRollShadow(
     alpha: Float,
 ) {
     if (width <= 0.5f || alpha <= 0f) return
-    val strip = mesh.rollShadowStrip(width, up) ?: return
+    // 沿折痕方向拉长到页面外（比页面对角线还长，画布裁掉），见 [rollShadowStrip]。
+    val strip = mesh.rollShadowStrip(width, up, pad = size.width + size.height) ?: return
     // 渐变照折痕坐标系取：`start` 就是筒的轮廓（最深），往外 `width` 散尽。
     // 轮廓平移后的近侧落在纸底下，由后画的纸盖住，不参与可见区。
     drawPath(
@@ -527,29 +527,38 @@ private fun DrawScope.drawRollShadow(
 }
 
 /**
- * 落影的形状：卷筒轮廓沿 [up] 挤出 [width]（参考实现是「网格顶点统一偏移 `z/2`」）。
+ * 落影的形状：**筒外沿那条扫线**沿折痕方向拉到页面外，再沿 [up] 挤出 [width]
+ * （参考实现是「网格顶点统一偏移 `z/2`」）。
  *
- * 轮廓的每一条扫线都自带它的两端（纸在哪儿有、切边长什么样），挤出之后：靠折痕那几条扫线
- * 的两端贴着屏幕边 ⇒ 影也到屏幕边；越往外的扫线越短 ⇒ 影往外收成圆弧。两条边都不落空：
- * **别只取外沿一段**，那样影会在离屏幕上下边还差一截的地方就截断，留一个没影的小区域；
- * 也**别铺成沿折痕的平行四边形**，那样影会顺着折痕拖到纸外面去。
+ * 「筒外沿那条扫线」就是纸卷轮廓上 `q` 最大的那一条（[CurlMesh.Band.lastRow]），它在屏幕上
+ * 与折痕平行、正好贴着纸的外边。取它而不是取纸的**整圈轮廓**，是因为纸的切边在屏幕上是个
+ * 圆弧：拿整圈轮廓去挤，影的两头会跟着切边越收越窄，到屏幕上下边时已经收成一条线 ——
+ * 读者看到的就是「折痕右侧那条影没有顶天立地，上面（或下面）空了一块」。
+ * 沿折痕方向拉到页面外（由画布裁掉）之后，影的两头**顶到屏幕上下边、宽度不变**，
+ * 像是在筒外侧压出来的一条带子。
  *
  * 为什么取 [CurlMesh.Surface.Recto]：它是「折痕 → 筒口」那半圈，外沿就是筒的轮廓（`q` 最大处），
  * 纸背（Verso）与折痕另一侧的外圈都在它里面或背后。没有筒（还没到九十度）时它也一定在；
- * 真连它都没有，这一帧就不该有影。
+ * 真连它都没有，这一帧就不该有影（那时纸背那半圈的**首行**才是轮廓）。
+ *
+ * @param pad 沿折痕方向往两头各拉长多少（px）：由调用方给「一定超出页面」的长度。
  */
-private fun CurlMesh.rollShadowStrip(width: Float, up: Offset): Path? {
+internal fun CurlMesh.rollShadowStrip(width: Float, up: Offset, pad: Float): Path? {
     val band = bands.firstOrNull { it.surface == CurlMesh.Surface.Recto }
-        ?: bands.firstOrNull { it.surface == CurlMesh.Surface.Verso }
+    val row = band?.lastRow
+        ?: bands.firstOrNull { it.surface == CurlMesh.Surface.Verso }?.firstRow
         ?: return null
     if (width <= 0.5f) return null
-    // 整圈轮廓一起挤：靠折痕那几条扫线的两端就在屏幕边上（纸在那儿还有），影必须跟着到边；
-    // 越往外扫线的两端收得越短（纸的切边），影因此往外收成圆弧 —— 两头既到得了屏幕边，
-    // 也不会在折痕延长线上拖出一条直线。
-    val ring = bandOutline(band)
-    if (ring.size < 3) return null
+    val a = Offset(positions[row * 4], positions[row * 4 + 1])
+    val b = Offset(positions[row * 4 + 2], positions[row * 4 + 3])
+    val along = b - a
+    val len = along.getDistance()
+    if (len < 0.5f) return null
+    val dir = along / len
     val shift = up * width
-    return polygonPath(ring + ring.reversed().map { it + shift })
+    val head = a - dir * pad
+    val tail = b + dir * pad
+    return polygonPath(listOf(head, tail, tail + shift, head + shift))
 }
 
 /** 页面里的一个多边形（路径）。 */

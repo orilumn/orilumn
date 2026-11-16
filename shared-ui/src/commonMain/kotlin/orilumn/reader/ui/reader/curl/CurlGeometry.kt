@@ -1,7 +1,6 @@
 package orilumn.reader.ui.reader.curl
 
 import androidx.compose.ui.geometry.Offset
-import kotlin.math.PI
 import kotlin.math.hypot
 
 /**
@@ -227,35 +226,23 @@ internal fun revealCorners(shape: CurlShape): List<Offset> {
 }
 
 /**
- * 卷曲半径：**折痕到「还没掀起来那一侧页边」的距离**，封顶 [CURL3D_RADIUS_RATIO]（10% 页宽），
- * 并且**不许粗到把掀起的那部分纸全吃进筒里**（见 [CURL3D_BACK_SHARE]）。
+ * 卷曲半径：**整段翻页固定一个筒径**（[CURL3D_RADIUS_RATIO]，定稿 0.10 页宽）。
  *
- * 式子的形状取自参考实现 `NewCurl3D.updateCurlPos` 单页分支
- * （`dMax = clamp(pointer.x − pageRect.left, 0, dWidth)`，手指就是折痕）：纸卷有多粗由**剩下的
- * 那部分纸有多宽**决定，而不是由翻了多少决定；上限取 10% 页宽的理由见 [CURL3D_RADIUS_RATIO]。
+ * 筒径不再由进度或剩下的纸算：早先按「剩下的纸多宽、筒就多粗」算，起手那头半径只有十几像素、
+ * 翻到一半才长到一成页宽（差十倍），读者判「卷筒有时候直径会变化，有时候被压扁」。
+ * 筒是**同一根筒在滚**，粗细则在整段翻页里不变；只有最后剩下的纸比筒还窄时（折痕离
+ * 还没掀起那一侧页边不足一个半径）才跟着收细，收尾那一帧才不留一道边。
  *
- * 两种口径的差别是决定性的：
- * - 按进度算（旧口径）：进度 0.2 时半径只有 0.2 页，而掀起部分的长度也是 0.2 页，
- *   纸一离开折痕就绕满 1 弧度，于是「翻了两成」看起来几乎没动；
- * - 按剩下的纸算（本式）：前半程半径恒定（筒往前滚，新页跟着手的节奏露出来），
- *   到最后剩下的纸比上限还窄时，半径跟着收细、纸卷自然消失。
+ * ## 代价：起手那一段没有平铺的纸背
  *
- * ## 第三条上限：筒不能吃掉全部掀起材料
- *
- * 纸卷绕半圈要用掉 `πR` 那么长的纸。半径只要超过 `掀起长度 / π`，掀起的那部分纸就
- * **整段都在筒上**、一段平铺的纸背都没有——读者看到的是一页字被硬生生切断、切断处什么也
- * 没有（原话「滚筒左侧的页面反面呢？为什么不画？」）。
- *
- * 所以再加一条上限 [CURL3D_BACK_SHARE]：`R ≤ 掀起长度 × 0.7 / π` ⇒ 平铺的纸背至少占
- * 掀起材料的三成。起手时纸卷和纸背一起变宽，往后由 10% 页宽的上限接管。
- * 参考实现没有这条（它的筒径恒等于半页，本来就不留平铺段），属于本项目**有意为之的偏差**。
+ * 纸卷绕半圈要用掉 `πR` 那么长的纸。筒径固定之后，掀起长度不足 `πR` 时掀起的那部分纸
+ * **整段都在筒上**、一段平铺的纸背都没有（读者看到的是一页字被切断、切断处什么也没有）。
+ * 这是「筒径不许变」换来的，**有意为之**：早先为保住纸背而按 `πR ≤ 掀起长度 × 0.7` 收细筒径，
+ * 正是筒径十倍变化的来源。真要纸背更早出现，只能把筒径调小 —— 那是另一个方向的取舍。
  */
 internal fun curlRadius(shape: CurlShape, radiusRatio: Float = CURL3D_RADIUS_RATIO): Float {
     val w = shape.pageW.coerceAtLeast(1f)
     val unturned = if (shape.direction >= 0) shape.foldX else w - shape.foldX
-    val lifted = (w - unturned).coerceAtLeast(0f)
     val cap = w * radiusRatio.coerceIn(0.002f, 1.5f)
-    // 绕半圈要用 πR 的纸：留给纸背的至少是掀起材料的一半 ⇒ πR ≤ 掀起长度 × BACK_SHARE。
-    val byBack = lifted * CURL3D_BACK_SHARE / PI.toFloat()
-    return minOf(unturned, cap, byBack).coerceAtLeast(w * CURL3D_MIN_RADIUS_RATIO)
+    return minOf(cap, unturned.coerceAtLeast(0f)).coerceAtLeast(w * CURL3D_MIN_RADIUS_RATIO)
 }

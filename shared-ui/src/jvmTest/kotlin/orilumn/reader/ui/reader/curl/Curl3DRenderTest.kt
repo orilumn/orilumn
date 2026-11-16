@@ -501,18 +501,35 @@ class Curl3DRenderTest {
             )
             assertTrue("dir=$dir 筒口一侧不够暗：$mouthLuma", mouthLuma < 0.96f)
             assertTrue("dir=$dir 折痕一侧被压暗了：$foldLuma（那里应当还朝着光）", foldLuma > 0.95f)
-            // ② 外圈（筒的外侧）与平铺的纸背都不吃这层影：白页上必须还是白的。
+            // ② 外圈（筒的外侧，也就是纸背那半圈）不吃这层影：白页上必须还是白的。
             val midFold = (t0 + t1) * 0.5f
             val onOuter = midFold + up * (radius * 0.30f)
-            val onFlap = midFold - up * (radius * 0.60f)
             assertTrue(
                 "dir=$dir 筒的外圈被这层影压暗了：${lumaAt(onOuter)}",
                 lumaAt(onOuter) > 0.98f,
             )
-            assertTrue(
-                "dir=$dir 平铺的纸背被这层影压暗了：${lumaAt(onFlap)}",
-                lumaAt(onFlap) > 0.98f,
-            )
+            // ③ 平铺的纸背同样不吃这层影。筒径固定后，纸卷绕满半圈要吃掉 πR 的纸，
+            //    p=0.3 这一帧根本还没有平铺段（折痕往没掀起那侧退到 -0.6R 处还是**露出页**，
+            //    那里本来就该有落影），所以这条另取一帧「纸背已经出来」的画面，采样点按轮廓取。
+            val flatP = 0.7f
+            val flatShape = curlShape(w.toFloat(), h.toFloat(), flatP, dir, tilt = 0.25f)
+            val flatRadius = curlRadius(flatShape)
+            val flatMesh = buildCurlMesh(flatShape, flatRadius)
+            val flapRing = flatMesh.bands
+                .firstOrNull { it.surface == CurlMesh.Surface.Back }
+                ?.let { flatMesh.bandOutline(it) }
+            assertTrue("dir=$dir p=$flatP 应该已经有平铺的纸背（掀起长度 > πR）", flapRing != null)
+            val ft0 = Offset(flatShape.topX, 0f)
+            val ft1 = Offset(flatShape.bottomX, h.toFloat())
+            val flatFoldLen = hypot(ft1.x - ft0.x, h.toFloat()).coerceAtLeast(1e-3f)
+            val flatUp = Offset(h / flatFoldLen * side, -(ft1.x - ft0.x) / flatFoldLen * side)
+            val onFlap = (ft0 + ft1) * 0.5f - flatUp * (flatRadius * 1.5f)
+            assertTrue("dir=$dir 纸背采样点没落在纸背上，测试没测到东西", wellInside(flapRing!!, onFlap))
+            val flatPx = render(flatShape, solid(w, h, white), solid(w, h, white)).toPixelMap()
+            val flatLuma = ((flatPx[onFlap.x.toInt(), onFlap.y.toInt()].red +
+                flatPx[onFlap.x.toInt(), onFlap.y.toInt()].green +
+                flatPx[onFlap.x.toInt(), onFlap.y.toInt()].blue) / 3f)
+            assertTrue("dir=$dir 平铺的纸背被这层影压暗了：$flatLuma", flatLuma > 0.98f)
         }
     }
 

@@ -52,43 +52,43 @@ class CurlMeshGeometryTest {
     }
 
     @Test
-    fun radiusFollowsTheUnturnedPaper() {
-        // 参考实现 `updateCurlPos`：半径 = 折痕到「还没掀起来那一侧页边」的距离，封顶 [CURL3D_RADIUS_RATIO]。
-        // 半径一旦到顶就是恒定粗细的筒往前滚（筒径不跟进度走，见 CURL3D_RADIUS_RATIO 的注释）。
-        val backCap = w * CURL3D_BACK_SHARE / PI.toFloat()
-        assertEquals("起手时纸背至少占三成 ⇒ 半径按掀起长度算", backCap * 0.1f, curlRadius(curlShape(w, h, 0.1f, 1)), 1f)
-        // 两条上限的交点：掀起长度 × 份额 / π = 10% 页宽 ⇒ 大约四成半进度之后才由页宽封顶。
-        assertEquals("过了四成半由 10% 页宽封顶", cap, curlRadius(curlShape(w, h, 0.5f, 1)), 1f)
-        assertEquals(cap, curlRadius(curlShape(w, h, 0.9f, 1)), 1f)
-        // 收尾：剩下的纸比上限还窄 ⇒ 半径跟着剩下的纸收细（纸卷自然消失）。
+    fun radiusStaysPutUntilThePaperRunsOut() {
+        // 读者判「卷筒有时候直径会变化，有时候被压扁」：筒径**不跟进度走**，整段翻页只有一根筒。
+        for (dir in listOf(1, -1)) {
+            for (p in listOf(0.03f, 0.1f, 0.2f, 0.35f, 0.5f, 0.75f, 0.85f, 0.9f)) {
+                assertEquals("dir=$dir p=$p 筒径变了", cap, curlRadius(curlShape(w, h, p, dir)), 0.5f)
+            }
+        }
+        // 收尾：剩下的纸比筒还窄 ⇒ 半径跟着剩下的纸收细（纸卷自然消失，末帧不留一道边）。
         assertEquals(w * 0.03f, curlRadius(curlShape(w, h, 0.97f, 1)), 1f)
         assertEquals(w * 0.01f, curlRadius(curlShape(w, h, 0.99f, 1)), 1f)
-        // 向前翻是镜像口径：剩下的纸在右边。
-        assertEquals(cap, curlRadius(curlShape(w, h, 0.7f, -1)), 1f)
         assertEquals(w * 0.03f, curlRadius(curlShape(w, h, 0.97f, -1)), 1f)
     }
 
     /**
-     * 翻起来的纸里**至少保留三成平铺的纸背**（不是全卷在筒上）。
+     * 起手那一段：掀起长度不足 `πR` 时，翻起来的纸整段贴在筒上、还没有平铺的纸背。
      *
-     * 读者报过「滚筒左侧的页面反面为什么不画」：纸卷绕半圈要吃掉 `πR` 的纸，半径一旦超过
-     * `掀起长度/π`，翻起来那部分纸就整段贴在筒上，纸背一段都不剩。这条锁住 [CURL3D_BACK_SHARE]
-     * —— 现在要求平铺段至少占掀起材料的三成，纸背从第一下拖动起就在。
+     * 这是「筒径整段不变」的**已知代价**（早先靠收细筒径保住纸背，筒径因此十倍变化）。
+     * 这条只是把现状锁住：过了 `πR` 之后平铺段必须自己出来，别让它一直不出现。
      */
     @Test
-    fun turnedBackAlwaysKeepsSomeFlatPaper() {
+    fun flatBackAppearsOnceThePaperIsLongEnough() {
+        val radius = curlRadius(curlShape(w, h, 0.5f, 1))
+        val enough = PI.toFloat() * radius / w
         for (dir in listOf(1, -1)) {
-            for (p in listOf(0.02f, 0.05f, 0.1f, 0.2f, 0.35f, 0.5f, 0.75f, 0.95f)) {
-                val shape = curlShape(w, h, p, dir)
-                val radius = curlRadius(shape)
-                val lifted = w * p
-                assertTrue(
-                    "dir=$dir p=$p 纸背只剩 ${lifted - PI.toFloat() * radius}：纸卷吃掉了全部掀起材料",
-                    lifted - PI.toFloat() * radius >= lifted * (1f - CURL3D_BACK_SHARE) - 1f,
-                )
+            for (p in listOf(0.5f, 0.75f, 0.9f)) {
                 val mesh = meshAt(p, direction = dir)
-                assertTrue("dir=$dir p=$p 必须有平铺段", mesh.bands.any { it.surface == CurlMesh.Surface.Back })
+                assertTrue(
+                    "dir=$dir p=$p（掀起 ${w * p} ≥ πR=${PI.toFloat() * radius}）必须有平铺段",
+                    mesh.bands.any { it.surface == CurlMesh.Surface.Back },
+                )
             }
+            for (p in listOf(0.05f, 0.1f, 0.2f)) {
+                if (w * p > PI.toFloat() * radius) continue
+                val shape = curlShape(w, h, p, dir)
+                assertEquals("dir=$dir p=$p 筒径不该为纸背让路", cap, curlRadius(shape), 0.5f)
+            }
+            assertTrue("掀起长度门槛算错了：enough=$enough", enough in 0.2f..0.4f)
         }
     }
 
@@ -323,13 +323,32 @@ class CurlMeshGeometryTest {
 
     @Test
     fun threeSurfacesAppearInOrder() {
-        // 三段在一开始就都在：半径按「纸背至少占三成」收细之后，掀起的那点纸也够绕半圈
-        // （掀起长度 × 0.7 / π = R，剩下三成平铺），所以起手时「正面 + 纸背 + 平铺段」同时存在
-        // ——读者的纸背从第一下就有。画序就是 z 序：正面 → 纸背 → 平铺段。
-        assertTrue("起手就要有纸背（Verso）", meshAt(0.02f).bands.any { it.surface == CurlMesh.Surface.Verso })
-        assertTrue("起手就要有平铺的纸背（Back）", meshAt(0.02f).bands.any { it.surface == CurlMesh.Surface.Back })
-        assertTrue("过半圈后出现纸背", meshAt(0.3f).bands.any { it.surface == CurlMesh.Surface.Verso })
-        assertTrue("绕满半圈出现平铺段", meshAt(0.5f).bands.any { it.surface == CurlMesh.Surface.Back })
+        // 筒径固定（0.10 页宽）之后，纸卷绕半圈要吃掉 πR 的纸：掀起长度不到 πR/2 时连纸背
+        // 都还没绕出来，不到 πR 时没有平铺段。这是「筒径整段不变」的**已知代价**（起手那
+        // 几下翻起来只是一根细筒），过了门槛三段就齐了；画序就是 z 序：正面 → 纸背 → 平铺段。
+        val radius = cap
+        val versoFrom = PI.toFloat() * radius / 2f / w
+        val backFrom = PI.toFloat() * radius / w
+        assertTrue(
+            "门槛算错了：versoFrom=$versoFrom backFrom=$backFrom",
+            versoFrom in 0.1f..0.2f && backFrom in 0.25f..0.35f,
+        )
+        assertTrue(
+            "掀起不足半圈不该有纸背",
+            meshAt(versoFrom - 0.05f).bands.none { it.surface == CurlMesh.Surface.Verso },
+        )
+        assertTrue(
+            "掀起过 πR/2 就该露出纸背",
+            meshAt(versoFrom + 0.05f).bands.any { it.surface == CurlMesh.Surface.Verso },
+        )
+        assertTrue(
+            "纸卷还没绕满半圈不该有平铺段",
+            meshAt(backFrom - 0.05f).bands.none { it.surface == CurlMesh.Surface.Back },
+        )
+        assertTrue(
+            "掀起过 πR 就该有平铺段",
+            meshAt(backFrom + 0.05f).bands.any { it.surface == CurlMesh.Surface.Back },
+        )
         for (p in listOf(0.5f, 0.7f, 0.9f)) {
             val order = meshAt(p).bands.map { it.surface }
             assertEquals("画序必须是正面 → 纸背 → 平铺段", order.sortedBy { it.ordinal }, order)

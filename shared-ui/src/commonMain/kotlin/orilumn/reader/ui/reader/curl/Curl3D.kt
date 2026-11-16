@@ -327,19 +327,27 @@ private fun DrawScope.drawPage(
 }
 
 /**
- * 卷曲半径的上限（相对页宽），**含参考实现的手指压力项**。
+ * 卷曲半径的上限（相对页宽）。
  *
- * `NewCurl3D.updateCurlPos`：`dWidth = 页宽 × 1.5 / 3 × max(1 − pressure, 0)`（竖屏拖动）。
- * 参考实现自己在点按翻页时把压力置为 `0.7843`（200/255，见 `pageScroll`），这里沿用同一个
- * 基准值：半径 ≈ 0.108 页宽，纸卷直径约两成页宽，是 iBooks 那种细筒。
+ * **纸卷一定压在露出页靠近折痕的那一条上**：纸在折痕处抬离页面、朝掀起侧鼓成圆柱、绕满半圈
+ * 再落到另一边，所以「被纸卷盖住的宽度」就等于半径。半径取多大，直接决定露出页被咬掉多宽。
  *
- * 不乘压力项（直接取半个页宽）就是「筒径几乎等于整页」：半径 = 折痕到页边的距离，
- * 前半程一直是上限，纸卷又宽又扁，露出页被它压掉大半 —— 看起来像没翻动。
+ * 参考实现的 `dWidth`（`NewCurl3D.updateCurlPos`：`页宽 × 1.5/3 × (1−压力)`，点按翻页用的压力
+ * 是 0.7843）算出 ≈ 0.108 页宽，平板上是 200px。真机上读者看到的是：翻到半页之前，露出页只露
+ * 每行的行尾、被压在一个大卷筒底下，像「纸一直往卷筒上卷」；翻到一半以后才看得出是新页，
+ * 而且每行左边都缺一截。
+ *
+ * 取 0.05 页宽（平板上 92px）：**露出宽度 = 进度 × 页宽 − 半径**，翻到一半新页露出将近一半，
+ * 纸卷加落影合计 0.15 页宽，压不出「一条灰色宽边」。见 [CURL3D_REFERENCE_RADIUS_RATIO]。
  */
+internal const val CURL3D_RADIUS_RATIO: Float = 0.05f
+
+/** 参考实现的压力值（`pageScroll` 点按翻页用 200/255）。 */
 internal const val CURL3D_REFERENCE_PRESSURE: Float = 0.7843f
 
-/** 卷曲半径上限（相对页宽）：`页宽 × 1.5 / 3 × (1 − pressure)`。 */
-internal const val CURL3D_RADIUS_RATIO: Float = 0.5f * (1f - CURL3D_REFERENCE_PRESSURE)
+/** 参考实现在这个压力下的半径上限（≈ 0.108 页宽）：只作对照，本仓不取这个值。 */
+internal const val CURL3D_REFERENCE_RADIUS_RATIO: Float =
+    0.5f * (1f - CURL3D_REFERENCE_PRESSURE)
 
 /**
  * 卷曲半径的下限（相对页宽）。

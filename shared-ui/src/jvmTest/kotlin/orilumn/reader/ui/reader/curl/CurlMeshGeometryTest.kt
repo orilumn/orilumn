@@ -17,7 +17,7 @@ import org.junit.Test
  * 3. 网格**只盖掀起的那一半材料**：没掀的半页由调用方整页画，盖两遍会重影；
  * 4. 纸卷**朝掀起侧鼓出去**、绕满半圈的平铺段落回**没掀起**的那一侧（接反就是
  *    「三段文字」＋「翻到九成还像没翻动」）；
- * 5. 纸卷是个细筒（半径上限 ≈ 0.1 页宽），不是「筒径等于整页」。
+ * 5. 纸卷是个细筒（半径上限 5% 页宽），不是「筒径等于整页」，也不宽到咬住新页的正文。
  */
 class CurlMeshGeometryTest {
 
@@ -58,32 +58,47 @@ class CurlMeshGeometryTest {
         assertEquals(cap, curlRadius(curlShape(w, h, 0.05f, 1)), 1f)
         assertEquals("超过上限就封顶", cap, curlRadius(curlShape(w, h, 0.3f, 1)), 1f)
         assertEquals(cap, curlRadius(curlShape(w, h, 0.7f, 1)), 1f)
+        assertEquals(cap, curlRadius(curlShape(w, h, 0.9f, 1)), 1f)
         // 收尾：剩下的纸比上限还窄 ⇒ 半径跟着剩下的纸收细（纸卷自然消失）。
-        assertEquals(w * 0.1f, curlRadius(curlShape(w, h, 0.9f, 1)), 1f)
-        assertEquals(w * 0.02f, curlRadius(curlShape(w, h, 0.98f, 1)), 1f)
+        assertEquals(w * 0.03f, curlRadius(curlShape(w, h, 0.97f, 1)), 1f)
+        assertEquals(w * 0.01f, curlRadius(curlShape(w, h, 0.99f, 1)), 1f)
         // 向前翻是镜像口径：剩下的纸在右边。
         assertEquals(cap, curlRadius(curlShape(w, h, 0.3f, -1)), 1f)
-        assertEquals(w * 0.1f, curlRadius(curlShape(w, h, 0.9f, -1)), 1f)
+        assertEquals(w * 0.03f, curlRadius(curlShape(w, h, 0.97f, -1)), 1f)
     }
 
     @Test
     fun rollDiameterIsATubeNotTheWholePage() {
-        // 读者报过「筒径几乎等于整页」：半径上限必须是细筒（一成多页宽），不是半页宽。
-        assertTrue("半径上限应当只占一成多页宽：$cap / $w", cap < w * 0.15f)
+        // 读者报过「筒径几乎等于整页」：半径上限必须是细筒，不是半页宽。
+        assertTrue("半径上限应当只占 5% 页宽：$cap / $w", cap <= w * 0.05f + 0.01f)
         for (p in listOf(0.2f, 0.35f, 0.5f, 0.65f, 0.8f)) {
             assertTrue("p=$p 纸卷宽度不该接近整页：${rollWidth(p)}", rollWidth(p) <= cap + 1f)
         }
     }
 
     @Test
+    fun rollHidesNoMoreThanTheTargetMargin() {
+        // 纸卷压在露出页靠折痕的那一条上，被盖住的宽度就是半径；半径大过左边距就会啃新页的正文。
+        // 平板：页宽 1840、版心左边距 128px（≈7%）⇒ 半径必须落在边距里。
+        // 参考实现的 ≈0.108 页宽 = 200px 比边距还宽，读者看到的就是「新页每行左边缺一截」。
+        val margin = 128f / 1840f
+        assertTrue("半径应落进新页左边距：${cap / w} vs $margin", cap / w <= margin)
+        // 露出页的宽度要跟翻过的比例基本一致，不能整段被纸卷吃掉。
+        for (p in listOf(0.2f, 0.35f, 0.5f, 0.7f)) {
+            val exposed = p * w - rollWidth(p)
+            assertTrue("p=$p 新页露出 ${exposed / w}，应当接近进度", exposed >= (p - 0.06f) * w)
+        }
+    }
+
+    @Test
     fun rollKeepsItsThicknessThenTapers() {
         // 前半程：半径不随进度变 ⇒ 纸卷是一个恒定粗细的筒往前滚。
-        for (p in listOf(0.3f, 0.5f, 0.7f, 0.8f)) {
+        for (p in listOf(0.3f, 0.5f, 0.7f, 0.9f)) {
             assertEquals("p=$p 纸卷应保持恒定粗细", cap, rollWidth(p), 2f)
         }
         // 剩下的纸比上限还窄之后才收细，翻完时纸卷应当基本收掉。
-        assertTrue("p=0.95 开始收卷：${rollWidth(0.95f)}", rollWidth(0.95f) < cap * 0.6f)
-        assertTrue("p=0.99 收卷：${rollWidth(0.99f)}", rollWidth(0.99f) < w * 0.03f)
+        assertTrue("p=0.97 开始收卷：${rollWidth(0.97f)}", rollWidth(0.97f) < cap * 0.8f)
+        assertTrue("p=0.99 收卷：${rollWidth(0.99f)}", rollWidth(0.99f) < w * 0.02f)
     }
 
     @Test

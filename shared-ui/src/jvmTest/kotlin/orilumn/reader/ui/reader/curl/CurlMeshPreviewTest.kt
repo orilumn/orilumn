@@ -73,7 +73,7 @@ class CurlMeshPreviewTest {
         val front = CurlPageImages().apply { page = fakePageSized(tw, th, 0xFF2A2A2A.toInt()) }
         val back = CurlPageImages().apply { page = fakePageSized(tw, th, 0xFF7A3A2E.toInt()) }
         for (dir in listOf(1, -1)) {
-            for (p in listOf(0.20f, 0.45f, 0.70f, 0.90f)) {
+            for (p in listOf(0.20f, 0.35f, 0.45f, 0.70f, 0.90f)) {
                 val shape = curlShape(w.toFloat(), h.toFloat(), p, dir, 0f, false)
                 val img = ImageBitmap(w, h, ImageBitmapConfig.Argb8888, hasAlpha = true)
                 CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(img), Size(w.toFloat(), h.toFloat())) {
@@ -84,7 +84,9 @@ class CurlMeshPreviewTest {
                 val out = File(name)
                 val data = Image.makeFromBitmap(img.asSkiaBitmap()).encodeToData(EncodedImageFormat.PNG)!!
                 out.writeBytes(data.bytes)
-                println("wrote ${out.absolutePath} fold=${shape.topX} r=${curlRadius(shape)}")
+                val r = curlRadius(shape)
+                val exposed = if (dir > 0) shape.pageW - shape.foldX - r else shape.foldX - r
+                println("wrote ${out.absolutePath} fold=${shape.topX} r=$r 新页露出=${exposed / shape.pageW}")
             }
         }
         for ((p, tilt) in listOf(0.2f to 0.35f, 0.45f to -0.35f, 0.7f to 0.35f)) {

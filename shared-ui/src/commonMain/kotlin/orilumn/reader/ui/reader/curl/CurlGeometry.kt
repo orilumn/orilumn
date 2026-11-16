@@ -226,12 +226,12 @@ internal fun revealCorners(shape: CurlShape): List<Offset> {
 }
 
 /**
- * 卷曲半径：**折痕到「还没掀起来那一侧页边」的距离**，封顶 [CURL3D_RADIUS_RATIO]（≈ 0.1 页宽）。
+ * 卷曲半径：**折痕到「还没掀起来那一侧页边」的距离**，封顶 [CURL3D_RADIUS_RATIO]（5% 页宽）。
  *
- * 这是参考实现 `NewCurl3D.updateCurlPos` 单页分支的原式
- * （`dMax = clamp(pointer.x − pageRect.left, 0, pageWidth × 1.5 / 3 × (1 − pressure))`，
- * 手指就是折痕）：纸卷有多粗由**剩下的那部分纸有多宽**决定，而不是由翻了多少决定；
- * 上限里那项 `(1 − pressure)` 见 [CURL3D_RADIUS_RATIO]，少了它就是「筒径等于整页」。
+ * 式子的形状取自参考实现 `NewCurl3D.updateCurlPos` 单页分支
+ * （`dMax = clamp(pointer.x − pageRect.left, 0, dWidth)`，手指就是折痕）：纸卷有多粗由**剩下的
+ * 那部分纸有多宽**决定，而不是由翻了多少决定；上限为什么取 5% 而不是参考实现的 ≈0.108 页宽，
+ * 见 [CURL3D_RADIUS_RATIO]。
  *
  * 两种口径的差别是决定性的：
  * - 按进度算（旧口径）：进度 0.2 时半径只有 0.2 页，而掀起部分的长度也是 0.2 页，

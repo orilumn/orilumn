@@ -10,6 +10,7 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.LayoutDirection
+import kotlin.math.PI
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -126,6 +127,41 @@ class Curl3DRenderTest {
             assertTrue(
                 "dir=$dir p=0.9 时目标页只占 ${target * 100 / w}% —— 纸卷/平铺段接反了",
                 target >= w * 65 / 100,
+            )
+        }
+    }
+
+    /**
+     * 纸背外沿必须往旧页上落影。
+     *
+     * 平铺段是翻过去那半页纸的反面，跟底下的旧页**同纸同色**：不落影时读者只看见旧页的字被
+     * 切断、切断处什么也没有 —— 读者的原话是「滚筒左侧的页面反面呢？为什么不画？」。
+     * 这里量的是「纸背外沿外面那一小条比同页空白处暗多少」。
+     */
+    @Test
+    fun turnedBackCastsAShadowOnThePageBelow() {
+        val w = 400
+        val h = 600
+        val mid = h / 2
+        for (dir in listOf(1, -1)) {
+            val p = 0.45f
+            val shape = curlShape(w.toFloat(), h.toFloat(), p, dir)
+            val radius = curlRadius(shape)
+            val px = render(shape, solid(w, h, red), solid(w, h, blue)).toPixelMap()
+            // 纸背外沿 = 折痕往「没掀起」那一侧退（掀起长度 − πR）。
+            val back = w * p - PI.toFloat() * radius
+            assertTrue("dir=$dir 这个进度下应当有平铺的纸背", back > radius)
+            val outward = if (dir >= 0) -1f else 1f
+            val edge = shape.foldX + outward * back
+            fun luma(x: Int): Float {
+                val c = px[x, mid]
+                return (c.red + c.green + c.blue) / 3f
+            }
+            val inShadow = luma((edge + outward * radius * 0.25f).toInt())
+            val plainPaper = luma((edge + outward * radius * 2f).toInt())
+            assertTrue(
+                "dir=$dir 纸背外沿没有落影：外沿旁 $inShadow / 空白处 $plainPaper（同色 = 纸背看不出是纸）",
+                inShadow < plainPaper - 0.03f,
             )
         }
     }

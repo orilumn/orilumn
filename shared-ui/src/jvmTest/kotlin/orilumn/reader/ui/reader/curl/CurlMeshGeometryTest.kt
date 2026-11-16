@@ -54,17 +54,40 @@ class CurlMeshGeometryTest {
     @Test
     fun radiusFollowsTheUnturnedPaper() {
         // 参考实现 `updateCurlPos`：半径 = 折痕到「还没掀起来那一侧页边」的距离，封顶 [CURL3D_RADIUS_RATIO]。
-        // 前半程整页都还没掀 ⇒ 半径一直是上限（恒定粗细的筒往前滚）。
-        assertEquals(cap, curlRadius(curlShape(w, h, 0.05f, 1)), 1f)
-        assertEquals("超过上限就封顶", cap, curlRadius(curlShape(w, h, 0.3f, 1)), 1f)
-        assertEquals(cap, curlRadius(curlShape(w, h, 0.7f, 1)), 1f)
+        // 半径一旦到顶就是恒定粗细的筒往前滚（筒径不跟进度走，见 CURL3D_RADIUS_RATIO 的注释）。
+        val backCap = w * CURL3D_BACK_SHARE / PI.toFloat()
+        assertEquals("起手时纸背至少占一半 ⇒ 半径按掀起长度算", backCap * 0.1f, curlRadius(curlShape(w, h, 0.1f, 1)), 1f)
+        assertEquals("过了三成由 5% 页宽封顶", cap, curlRadius(curlShape(w, h, 0.35f, 1)), 1f)
         assertEquals(cap, curlRadius(curlShape(w, h, 0.9f, 1)), 1f)
         // 收尾：剩下的纸比上限还窄 ⇒ 半径跟着剩下的纸收细（纸卷自然消失）。
         assertEquals(w * 0.03f, curlRadius(curlShape(w, h, 0.97f, 1)), 1f)
         assertEquals(w * 0.01f, curlRadius(curlShape(w, h, 0.99f, 1)), 1f)
         // 向前翻是镜像口径：剩下的纸在右边。
-        assertEquals(cap, curlRadius(curlShape(w, h, 0.3f, -1)), 1f)
+        assertEquals(cap, curlRadius(curlShape(w, h, 0.7f, -1)), 1f)
         assertEquals(w * 0.03f, curlRadius(curlShape(w, h, 0.97f, -1)), 1f)
+    }
+
+    /**
+     * 翻起来的纸里**至少一半是平铺的纸背**（不是全卷在筒上）。
+     *
+     * 读者报过「滚筒左侧的页面反面为什么不画」：纸卷绕半圈要吃掉 `πR` 的纸，半径一旦超过
+     * `掀起长度/π`，翻起来那部分纸就整段贴在筒上，纸背一段都不剩。这条锁住 [CURL3D_BACK_SHARE]。
+     */
+    @Test
+    fun turnedBackIsAlwaysAtLeastHalfOfTheLiftedPaper() {
+        for (dir in listOf(1, -1)) {
+            for (p in listOf(0.02f, 0.05f, 0.1f, 0.2f, 0.35f, 0.5f, 0.75f, 0.95f)) {
+                val shape = curlShape(w, h, p, dir)
+                val radius = curlRadius(shape)
+                val lifted = w * p
+                assertTrue(
+                    "dir=$dir p=$p 纸背只剩 ${lifted - PI.toFloat() * radius}：纸卷吃掉了全部掀起材料",
+                    lifted - PI.toFloat() * radius >= lifted * CURL3D_BACK_SHARE - 1f,
+                )
+                val mesh = meshAt(p, direction = dir)
+                assertTrue("dir=$dir p=$p 必须有平铺段", mesh.bands.any { it.surface == CurlMesh.Surface.Back })
+            }
+        }
     }
 
     @Test
@@ -92,8 +115,9 @@ class CurlMeshGeometryTest {
 
     @Test
     fun rollKeepsItsThicknessThenTapers() {
-        // 前半程：半径不随进度变 ⇒ 纸卷是一个恒定粗细的筒往前滚。
-        for (p in listOf(0.3f, 0.5f, 0.7f, 0.9f)) {
+        // 主程：半径不随进度变 ⇒ 纸卷是一个恒定粗细的筒往前滚。
+        // （起手那一段由「纸背至少占一半」的上限接管，见 turnedBackIsAlwaysAtLeastHalfOfTheLiftedPaper。）
+        for (p in listOf(0.35f, 0.5f, 0.7f, 0.9f)) {
             assertEquals("p=$p 纸卷应保持恒定粗细", cap, rollWidth(p), 2f)
         }
         // 剩下的纸比上限还窄之后才收细，翻完时纸卷应当基本收掉。
@@ -298,9 +322,11 @@ class CurlMeshGeometryTest {
 
     @Test
     fun threeSurfacesAppearInOrder() {
-        // 小角度时只露正面；绕到九十度之后外层换成纸背；绕满半圈之后才有平铺回来的那一段。
+        // 三段在一开始就都在：半径按「纸背至少占一半」收细之后，掀起的那点纸也够绕一个半圈
+        // （掀起长度 = 2πR），所以起手时「正面 + 纸背 + 平铺段」同时存在——读者的纸背从第一下就有。
         // 画序就是 z 序：正面 → 纸背 → 平铺段。
-        assertTrue("刚起手只有正面", meshAt(0.05f).bands.none { it.surface != CurlMesh.Surface.Recto })
+        assertTrue("起手就要有纸背（Verso）", meshAt(0.02f).bands.any { it.surface == CurlMesh.Surface.Verso })
+        assertTrue("起手就要有平铺的纸背（Back）", meshAt(0.02f).bands.any { it.surface == CurlMesh.Surface.Back })
         assertTrue("过半圈后出现纸背", meshAt(0.3f).bands.any { it.surface == CurlMesh.Surface.Verso })
         assertTrue("绕满半圈出现平铺段", meshAt(0.5f).bands.any { it.surface == CurlMesh.Surface.Back })
         for (p in listOf(0.5f, 0.7f, 0.9f)) {

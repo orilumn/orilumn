@@ -73,7 +73,7 @@ class CurlMeshPreviewTest {
         val front = CurlPageImages().apply { page = fakePageSized(tw, th, 0xFF2A2A2A.toInt()) }
         val back = CurlPageImages().apply { page = fakePageSized(tw, th, 0xFF7A3A2E.toInt()) }
         for (dir in listOf(1, -1)) {
-            for (p in listOf(0.20f, 0.35f, 0.45f, 0.70f, 0.90f)) {
+            for (p in listOf(0.10f, 0.20f, 0.35f, 0.45f, 0.70f, 0.90f)) {
                 val shape = curlShape(w.toFloat(), h.toFloat(), p, dir, 0f, false)
                 val img = ImageBitmap(w, h, ImageBitmapConfig.Argb8888, hasAlpha = true)
                 CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(img), Size(w.toFloat(), h.toFloat())) {

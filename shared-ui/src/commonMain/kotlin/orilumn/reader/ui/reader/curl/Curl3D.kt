@@ -63,8 +63,15 @@ import kotlin.math.sqrt
  *
  * ## 画序（与 z 从小到大一致）
  *
- * 1. 正面页整页 → 2. 露出页（多边形裁切）→ 3. 落影（裁到页面内）→
- * 4. 各段网格：纹理 → 纸背压淡 → 纸卷明暗（按 z 顺序逐段完成，段与段之间不打架）。
+ * 1. 正面页整页 → 2. 露出页（多边形裁切）→ 3. 落影（纸卷压在露出页上、纸背外沿压在旧页上）
+ * → 4. 各段网格：纹理 → 纸背压淡 → 纸卷明暗（按 z 顺序逐段完成，段与段之间不打架）。
+ *
+ * ## 纸背要让人看见
+ *
+ * 平铺段是「翻过去的那半页纸的反面」，它跟底下的旧页**同纸同色**：不落影时读者只看见旧页的
+ * 一行字被切断、切断处是同样的纸色，读起来就是「纸背根本没画」。所以纸背外沿要往外落一道影
+ * （见 [CURL3D_BACK_SHADOW_WIDTH]），影落在旧页上 ⇒ 读者一眼看出那里压着一张纸。
+ * 半径那边还有一条配套的上限（[CURL3D_BACK_SHARE]）：翻起来的那部分纸至少一半是平铺的。
  *
  * @return `false` 表示这一帧没有网格可画，调用方退回折页。
  */
@@ -127,6 +134,19 @@ internal fun DrawScope.drawCurl3DFrame(
             width = lift * 0.5f,
             alpha = DROP_SHADOW_ALPHA * (lift / (2f * radius)).coerceIn(0f, 1f) * shape.shadowFade,
         )
+        // 纸背自己的外沿也要落影：平铺段是一整页纸盖在旧页上，跟旧页同纸同色，
+        // 不落影的话读者只看见旧页的字被切断、切断处空无一物 —— 看起来就是「纸背没画」。
+        // 影从纸背外沿往外铺（朝 −up，也就是旧页那一侧），压在旧页上、被纸背自己盖住的部分为零。
+        val backEdge = mesh.minOffsetAlong(up.x, up.y, t0)
+        if (backEdge < -1f) {
+            // `drawFanShadow` 的宽度是「沿 n 的正向」，所以这里取 −up、用正的宽度往旧页那边铺。
+            drawFanShadow(
+                t0, t1, Offset(-up.x, -up.y),
+                from = -backEdge,
+                width = radius * CURL3D_BACK_SHADOW_WIDTH,
+                alpha = DROP_SHADOW_ALPHA * CURL3D_BACK_SHADOW_ALPHA * shape.shadowFade,
+            )
+        }
     }
 
     // ⑤ 各段网格（按 z 顺序）：纹理 → 纸背压淡 → 纸卷明暗
@@ -312,6 +332,18 @@ private fun CurlMesh.maxOffsetAlong(nx: Float, ny: Float, origin: Offset): Float
     return m
 }
 
+/** 网格里沿折痕法向最负的偏移（平铺纸背的外沿；没有平铺段时是纸卷内侧，接近 0）。 */
+private fun CurlMesh.minOffsetAlong(nx: Float, ny: Float, origin: Offset): Float {
+    var m = 0f
+    var i = 0
+    while (i < positions.size) {
+        val v = (positions[i] - origin.x) * nx + (positions[i + 1] - origin.y) * ny
+        if (v < m) m = v
+        i += 2
+    }
+    return m
+}
+
 /** 画一整页：纸色打底 + 页栅格（版心）+ 覆盖层（整页）。 */
 private fun DrawScope.drawPage(
     images: CurlPageImages,
@@ -341,6 +373,19 @@ private fun DrawScope.drawPage(
  * 纸卷加落影合计 0.15 页宽，压不出「一条灰色宽边」。见 [CURL3D_REFERENCE_RADIUS_RATIO]。
  */
 internal const val CURL3D_RADIUS_RATIO: Float = 0.05f
+
+/**
+ * 平铺的纸背（掀起材料里没卷在筒上的那一半）**至少**占掀起材料的这个比例。
+ *
+ * 纸卷绕半圈吃掉 `πR` 的纸，所以 `R ≤ 掀起长度 × 0.5 / π` 时，翻过去的纸里至少一半是平铺的、
+ * 看得见纸背。没有这条上限，半径按 5% 页宽算时「翻到 16% 页宽之前纸背根本不存在」，
+ * 读者看到的是一页字被硬生生切断、切断处空无一物。见 [curlRadius]。
+ */
+internal const val CURL3D_BACK_SHARE: Float = 0.5f
+
+/** 纸背外沿落影的宽度（相对卷曲半径）与浓度（相对 [DROP_SHADOW_ALPHA]）。 */
+internal const val CURL3D_BACK_SHADOW_WIDTH: Float = 0.8f
+internal const val CURL3D_BACK_SHADOW_ALPHA: Float = 0.65f
 
 /** 参考实现的压力值（`pageScroll` 点按翻页用 200/255）。 */
 internal const val CURL3D_REFERENCE_PRESSURE: Float = 0.7843f

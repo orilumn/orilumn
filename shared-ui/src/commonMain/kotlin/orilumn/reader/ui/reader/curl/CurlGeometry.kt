@@ -290,6 +290,62 @@ internal fun revealCorners(shape: CurlShape): List<Offset> {
 }
 
 /**
+ * 凸多边形与轴对齐矩形求交（Sutherland–Hodgman，按矩形四条边逐条切）。
+ *
+ * 用来把「露出页」那块梯形裁到页栅格的材料矩形里：页栅格只有版心那么大，
+ * 直接拿 shader 填整个梯形会让页边距里的采样把版心最边一列拉成横线（`Clamp` 的锅）；
+ * 裁到材料矩形之后 shader 只画到版心边上，页边距留纸色（见 `drawRevealPage`）。
+ *
+ * @return 交点多边形（可能为空：整块都在矩形外）。顶点顺序保持输入的方向。
+ */
+internal fun clipPolygonToRect(
+    pts: List<Offset>,
+    left: Float,
+    top: Float,
+    right: Float,
+    bottom: Float,
+): List<Offset> {
+    if (pts.size < 3) return emptyList()
+    var poly = pts
+    // 四条边，每条是「法向 + 门槛 c」：nx·x + ny·y ≥ c 的一侧保留。
+    val nxArr = floatArrayOf(1f, -1f, 0f, 0f)
+    val nyArr = floatArrayOf(0f, 0f, 1f, -1f)
+    val cs = floatArrayOf(left, -right, top, -bottom)
+    for (e in 0 until 4) {
+        if (poly.isEmpty()) return emptyList()
+        val nx = nxArr[e]
+        val ny = nyArr[e]
+        val c = cs[e]
+        fun inside(p: Offset) = nx * p.x + ny * p.y - c >= -1e-3f
+        val out = ArrayList<Offset>(poly.size + 2)
+        for (i in poly.indices) {
+            val cur = poly[i]
+            val prev = poly[(i + poly.size - 1) % poly.size]
+            val curIn = inside(cur)
+            val prevIn = inside(prev)
+            if (curIn) {
+                if (!prevIn) out.add(crossAt(prev, cur, nx, ny, c))
+                out.add(cur)
+            } else if (prevIn) {
+                out.add(crossAt(prev, cur, nx, ny, c))
+            }
+        }
+        poly = out
+    }
+    return poly
+}
+
+/** 线段 `a→b` 与直线 `nx·x + ny·y = c` 的交点；退化时返回 `a`。 */
+private fun crossAt(a: Offset, b: Offset, nx: Float, ny: Float, c: Float): Offset {
+    val da = nx * a.x + ny * a.y - c
+    val db = nx * b.x + ny * b.y - c
+    val d = da - db
+    if (kotlin.math.abs(d) < 1e-6f) return a
+    val t = (da / d).coerceIn(0f, 1f)
+    return Offset(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)
+}
+
+/**
  * 卷曲半径：**整段翻页固定一个筒径**（[CURL3D_RADIUS_RATIO]，定稿 0.10 页宽）。
  *
  * 筒径不再由进度或剩下的纸算：早先按「剩下的纸多宽、筒就多粗」算，起手那头半径只有十几像素、

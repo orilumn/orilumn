@@ -382,27 +382,36 @@ internal fun CurlMesh.pageEdges(): List<List<Offset>>? {
 }
 
 /**
- * 一段扫线落在**页栅格材料范围**里的那块形状（页坐标多边形）；整段都在范围外时返回 `null`。
+ * 一段扫线落在**页栅格材料范围**里的那截三角带（`drawVertices` 直接吃）。
  *
- * 页栅格只有版心那么大（平板 1585×2400 放在 1840×2800 里），页边距里没有像素。纹理若越界
- * 采样，`TileMode.Clamp` 会把版心的**最边一列/一行**拉成条纹——纸背那一段扫线落在页边距里时，
- * 读者看到的就是「纸背页边距上好几条短横线」。所以纹理只画在这个形状里，形状之外由调用方垫纸色。
+ * 页栅格只有版心那么大（平板 1585×2400 放在 1840×2800 里），页边距里根本没有像素。
+ * 早先用 `clipPath` 把纹理裁在材料形状里，越界采样就不会画出来；但折痕一斜，那条裁剪路径
+ * 就不是矩形，抗锯齿裁切会让 Skia 为它开一张全页大小的图层（见 `drawRevealPage` 的 KDoc）。
  *
- * 形状为什么还是个四边形条带：**材料坐标沿一条扫线是线性的**（`u` 和 `v` 都随扫线参数线性变化），
- * 所以「落在版心矩形里」就只是把这一行的参数区间裁掉两头，端点线性插值出来即可。
+ * 现在**在几何里裁**：材料坐标沿一条扫线是线性的，所以「落在版心矩形里」只是把这一行的
+ * 参数区间裁掉两头、端点线性插值出来 —— 纹理本来就画到版心边为止，画布不用裁。
  *
- * 两条边都要裁：折痕一斜，同一条扫线上的**材料 x 也在变**（平板上一行能横跨大半个页宽），
- * 只按行首的 `u` 挑行，就会把越界的另一半也画进来 —— 那正是 Clamp 抹出来的横线。
+ * 行按材料坐标单调推移，能落在版心内的行是一段连续区间（两端跨出去的行丢掉），
+ * 所以剩下的是一个仍然连续的三角带。
  *
  * @param texLeft/texTop 页栅格在页坐标里的左上角；`texWidth/texHeight` 是页栅格自己的像素尺寸。
  */
-internal fun CurlMesh.textureBandOutline(
+internal class CurlTextureStrip(
+    /** 每顶点 (x, y)，页坐标。 */
+    val positions: FloatArray,
+    /** 每顶点 (u, v)，**页栅格自己的像素坐标**（`ImageShader` 的坐标）。 */
+    val texCoords: FloatArray,
+    val vertexCount: Int,
+)
+
+/** 见 [CurlTextureStrip]。整段都不在版心里时返回 `null`。 */
+internal fun CurlMesh.textureStrip(
     band: CurlMesh.Band,
     texLeft: Float,
     texTop: Float,
     texWidth: Float,
     texHeight: Float,
-): List<Offset>? {
+): CurlTextureStrip? {
     val right = texLeft + texWidth
     val bottom = texTop + texHeight
 
@@ -429,33 +438,38 @@ internal fun CurlMesh.textureBandOutline(
         return if (t1 - t0 <= 1e-4f) null else floatArrayOf(t0, t1)
     }
 
-    // 扫线按材料坐标排序，同一段里平移方向是单调的：能落在版心里的行只会是一段连续区间，
-    // 两端之外不会回来。
+    // 先找出连续的行区间（首行之后一旦断掉就收尾：材料矩形是凸的，行按材料坐标单调走，
+    // 断掉之后不会又回来）。
     var first = -1
     var last = -1
     for (row in band.firstRow..band.lastRow) {
-        if (rowSpan(row) != null) {
-            if (first < 0) first = row
-            last = row
+        if (rowSpan(row) == null) {
+            if (first >= 0) break
+            continue
         }
+        if (first < 0) first = row
+        last = row
     }
     if (first < 0 || last <= first) return null
 
-    fun p(v: Int) = Offset(positions[v * 2], positions[v * 2 + 1])
-    val bottomSide = ArrayList<Offset>(last - first + 1)
-    val topSide = ArrayList<Offset>(last - first + 1)
+    val rows = last - first + 1
+    val pos = FloatArray(rows * 4)
+    val uv = FloatArray(rows * 4)
+    var w = 0
     for (row in first..last) {
-        // 每行两个端点：`row*2` 是「下端点」（λ 大）、`row*2+1` 是「上端点」（与 [bandOutline] 同序）。
+        val ts = rowSpan(row) ?: return null
         val a = row * 2
         val b = row * 2 + 1
-        val ts = rowSpan(row) ?: continue
-        val pa = p(a)
-        val pb = p(b)
-        bottomSide.add(pa + (pb - pa) * ts[0])
-        topSide.add(pa + (pb - pa) * ts[1])
+        for (k in 0..1) {
+            val t = ts[k]
+            pos[w] = positions[a * 2] + (positions[b * 2] - positions[a * 2]) * t
+            pos[w + 1] = positions[a * 2 + 1] + (positions[b * 2 + 1] - positions[a * 2 + 1]) * t
+            uv[w] = texCoords[a * 2] + (texCoords[b * 2] - texCoords[a * 2]) * t - texLeft
+            uv[w + 1] = texCoords[a * 2 + 1] + (texCoords[b * 2 + 1] - texCoords[a * 2 + 1]) * t - texTop
+            w += 2
+        }
     }
-    if (bottomSide.size < 2) return null
-    return bottomSide + topSide.asReversed()
+    return CurlTextureStrip(positions = pos, texCoords = uv, vertexCount = rows * 2)
 }
 
 private fun emptyMesh() = CurlMesh(

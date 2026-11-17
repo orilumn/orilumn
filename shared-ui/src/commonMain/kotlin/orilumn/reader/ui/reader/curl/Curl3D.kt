@@ -8,26 +8,20 @@ import androidx.compose.ui.graphics.Canvas
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.ImageBitmapConfig
 import androidx.compose.ui.graphics.ImageShader
 import androidx.compose.ui.graphics.Paint
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathFillType
-import androidx.compose.ui.graphics.Shader
 import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.Vertices
 import androidx.compose.ui.graphics.VertexMode
-import androidx.compose.ui.graphics.drawscope.CanvasDrawScope
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.drawscope.withTransform
-import androidx.compose.ui.unit.Density
-import androidx.compose.ui.unit.LayoutDirection
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.atan2
-import kotlin.math.ceil
 import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.pow
@@ -326,9 +320,9 @@ internal fun CurlMesh.backCorners(): List<Offset>? {
  * 收窄**全程匀速**（`w = maxWidth · t`，t 是到所在那条折痕端的归一化弧长距离），
  * 不分段落：任何一处突然变宽变窄都会被看成纸上有折痕。
  *
- * 软边**一条三角带画完**，浓度沿宽度方向的剖线烘在一张一维纹理里（见 [ShadowRamp]）：
- * 影宽沿页边在变，一个线性渐变的等值线没法跟着弯，外沿会留一道能看见的硬边；
- * 而逐层叠色（16 层）每层都是一次按包围盒算的路径填充，斜折痕下代价是纸面面积的好几倍。
+ * 软边用**分层叠**：第 k 层铺到 `maxWidth·k/K`，每层一个很低的常数浓度；越靠页边被叠中的
+ * 层数越多、越淡的层数越少，于是叠出一条线性渐隐。为什么不用渐变刷子：影宽沿页边在变，
+ * 一个线性渐变的等值线没法跟着弯，外沿会留一道能看见的硬边。
  *
  * @param edges 两条页边（都是 `折痕端 → 最远的纸角`）。
  * @param backRows 平铺纸背那一段的扫线行（`Back` 段）。**定朝外只在这里投票**：平铺段是
@@ -348,10 +342,10 @@ internal fun DrawScope.drawBackEdgeShadow(
     if (first.size != second.size) return
     val edge1 = sampleShadowEdge(first, second, backRows) ?: return
     val edge2 = sampleShadowEdge(second, first, backRows) ?: return
-    drawShadowStrip(edge1, maxWidth, alpha)
-    drawShadowStrip(edge2, maxWidth, alpha)
-    // 纸角那一楔仍然是逐层填：面积只有纸角那么大，省不了几个毫秒，没必要为它再搭一条三角带。
-    val path = Path().apply { fillType = PathFillType.NonZero }
+    // 一条图层路径在整个影里复用（每层 reset 后重填）：一帧一个 `Path`，不再一帧几十个。
+    val path = Path()
+    drawShadowStrip(edge1, maxWidth, alpha, path)
+    drawShadowStrip(edge2, maxWidth, alpha, path)
     // 两条页边的末点重合 = 折痕正好切掉一个页角：角外那一楔两段带子都够不着，补扇形。
     // 末点隔开一段时（自由边 = 与纸卷相切的切线，纸压着纸）没有纸角，不补。
     val corner = first[first.size - 1]
@@ -360,11 +354,11 @@ internal fun DrawScope.drawBackEdgeShadow(
 }
 
 /**
- * 一条页边**抽稀后**的影采样：点、归一化弧长、朝外法向。
+ * 一条页边的影采样：点（**网格的每一行都留**）、归一化弧长、朝外法向。
  *
- * 抽稀是这一帧最省的一步：影是软的，页边在屏幕上几百上千像素长，而网格是几十行——
- * 十六层 × 每层上百个点 = 每帧上万次路径段只是把同一条曲线描得很细。取 [SHADOW_EDGE_POINTS]
- * 个点，肉眼分不出，路径段数直接砍掉四分之三。
+ * 早先为了省路径段数抽稀到二十几个点。影带的内沿就是纸边本身，抽稀后的折线会在两个
+ * 采样点之间切进纸里（弦高两三个像素），影带就从纸边上啃出一排三角缺口 —— 页边看着
+ * 就是「一段段」。影是软的，但内沿不能糊：这里把每一行都留着。
  */
 private class ShadowEdge(
     val pts: List<Offset>,
@@ -373,10 +367,9 @@ private class ShadowEdge(
 )
 
 /**
- * 把一条页边（连同同一扫线行上的另一条）抽稀成 [ShadowEdge]；算不出来时返回 `null`。
+ * 把一条页边（连同同一扫线行上的另一条）采成 [ShadowEdge]；算不出来时返回 `null`。
  *
- * 两条边必须用**同一套下标**抽稀：[outwardNormals] 是按行比较两条边的，错开元就错位了。
- * 定朝外用的种子行也跟着换成抽稀后的下标区间。
+ * 两条边**同一行同一行地对**：[outwardNormals] 是按行比较两条边的，两边必须一样长。
  */
 private fun sampleShadowEdge(
     edge: List<Offset>,
@@ -385,203 +378,50 @@ private fun sampleShadowEdge(
 ): ShadowEdge? {
     val n = edge.size
     if (n < 2) return null
-    val idx = if (n <= SHADOW_EDGE_POINTS) {
-        IntArray(n) { it }
-    } else {
-        val stride = (n - 1 + SHADOW_EDGE_POINTS - 2) / (SHADOW_EDGE_POINTS - 1)
-        val out = ArrayList<Int>(SHADOW_EDGE_POINTS + 1)
-        var i = 0
-        while (i < n - 1) {
-            out.add(i)
-            i += stride
-        }
-        out.add(n - 1)
-        out.toIntArray()
-    }
-    val pts = List(idx.size) { edge[idx[it]] }
-    val oth = List(idx.size) { other[idx[it]] }
-    var lo = -1
-    var hi = -1
-    for (k in idx.indices) {
-        if (idx[k] < backRows.first || idx[k] > backRows.last) continue
-        if (lo < 0) lo = k
-        hi = k
-    }
-    if (lo < 0) {
-        // 抽稀后没有任何点落在平铺纸背那一段里（纸背只剩一两行时可能）：取最近的一行投票，
-        // 不能因此把整条影丢掉 —— 那会变成「翻到某个角度影忽然消失」。
-        var best = 0
-        var bestDist = Int.MAX_VALUE
-        for (k in idx.indices) {
-            val dist = when {
-                idx[k] < backRows.first -> backRows.first - idx[k]
-                idx[k] > backRows.last -> idx[k] - backRows.last
-                else -> 0
-            }
-            if (dist < bestDist) {
-                bestDist = dist
-                best = k
-            }
-        }
-        lo = best
-        hi = best
-    }
-    val tAt = FloatArray(pts.size)
+    val tAt = FloatArray(n)
     var cum = 0f
-    for (i in 1 until pts.size) {
-        cum += (pts[i] - pts[i - 1]).getDistance()
+    for (i in 1 until n) {
+        cum += (edge[i] - edge[i - 1]).getDistance()
         tAt[i] = cum
     }
     if (cum < 1f) return null
-    for (i in tAt.indices) tAt[i] /= cum
-    val outward = outwardNormals(pts, oth, lo..hi) ?: return null
-    return ShadowEdge(pts, tAt, outward)
+    for (i in 0 until n) tAt[i] /= cum
+    val outward = outwardNormals(edge, other, backRows) ?: return null
+    return ShadowEdge(edge, tAt, outward)
 }
 
 /**
  * 单条页边的软带：从折痕端（宽度 0）到最远的纸角（满宽）均匀加宽，**只铺朝外那一侧**。
  *
- * 整条带子**一条三角带画完**，浓度沿宽度方向由 [ShadowRamp] 那张一维剖线纹理给：
- * 顶点纹理坐标的 `v` 就是「离页边的归一化距离」，中间各档浓度交给采样器插值。
- *
- * 为什么不再逐层填路径（16 层浅色叠出渐隐）：填充量按**包围盒**算，而影带又长又细、
- * 斜着横过页面，整条的包围盒能撑到大半页 —— 平板上一帧白烧四十来毫秒（20fps），
- * 手指横划时帧率当场掉到一半。切开分段只收回一部分（每段仍是路径填充，还是按包围盒），
- * 三角带只填它自己的面积，而且**一条带子一次 draw call**（此前是 16 层 × 每层数段）。
- *
- * 顶点色保持全白（安卓上可变顶点色不可靠，见文件头的坑），浓度全靠纹理。
- *
- * 最内侧多压进纸里 [SHADOW_INNER_APRON] 个像素、浓度取一半：三角带没有抗锯齿边，
- * 这半像素与外侧满浓的那半像素叠起来，才凑出一条抗锯齿边（见 [ShadowRampCoords]）。
+ * @param path 复用的图层路径（每层 `reset` 后重填）。
  */
 private fun DrawScope.drawShadowStrip(
     edge: ShadowEdge,
     maxWidth: Float,
     alpha: Float,
+    path: Path,
 ) {
     val pts = edge.pts
     val n = pts.size
     if (n < 2) return
-    val paint = ShadowRamp.paint(alpha) ?: return
     val outward = edge.outward
     val tAt = edge.tAt
-    // 三角带**不能用**：三行一条带子时，行与行之间的四边形总有一半接不上（带子只能蛇形着走，
-    // 每次换列都会浪费一个退化三角形）。这里直接摊成三角形列表，一条边一次 draw call。
-    val bands = SHADOW_STRIP_ROWS - 1
-    val count = (n - 1) * bands * 6
-    val positions = FloatArray(count * 2)
-    val rowsOf = IntArray(count)
-    var at = 0
-    fun put(col: Int, row: Int) {
-        val offset = when (row) {
-            0 -> -SHADOW_INNER_APRON
-            1 -> 0f
-            else -> maxWidth * tAt[col]
+    // 每层常数浓度反解出来，叠满 K 层正好等于 alpha。
+    val layerAlpha = (1.0 - (1.0 - alpha.toDouble()).pow(1.0 / SHADOW_TAPER_LAYERS)).toFloat()
+    val color = Color(0f, 0f, 0f, layerAlpha)
+    for (layer in 1..SHADOW_TAPER_LAYERS) {
+        val scale = layer.toFloat() / SHADOW_TAPER_LAYERS
+        path.reset()
+        path.fillType = PathFillType.NonZero
+        for (i in 0 until n) {
+            if (i == 0) path.moveTo(pts[i].x, pts[i].y) else path.lineTo(pts[i].x, pts[i].y)
         }
-        positions[at * 2] = pts[col].x + outward[col].x * offset
-        positions[at * 2 + 1] = pts[col].y + outward[col].y * offset
-        rowsOf[at] = row
-        at++
-    }
-    for (col in 0 until n - 1) {
-        for (row in 0 until bands) {
-            put(col, row)
-            put(col + 1, row)
-            put(col + 1, row + 1)
-            put(col, row)
-            put(col + 1, row + 1)
-            put(col, row + 1)
+        for (i in n - 1 downTo 0) {
+            val w = maxWidth * scale * tAt[i]
+            path.lineTo(pts[i].x + outward[i].x * w, pts[i].y + outward[i].y * w)
         }
-    }
-    val vertices = Vertices(
-        vertexMode = VertexMode.Triangles,
-        positions = FloatPairList(positions, 0, count),
-        textureCoordinates = ShadowRampCoords(rowsOf),
-        colors = WhiteColorList(count),
-        indices = emptyList(),
-    )
-    drawIntoCanvas { it.drawVertices(vertices, BlendMode.SrcOver, paint) }
-}
-
-/**
- * 影带顶点的纹理坐标：`u` 固定取剖线那一列，`v` 取所在行（0 = 贴着纸边，满浓）。
- *
- * 与 [FloatPairList] 同一个用意：逐帧不造 `Offset`。
- */
-private class ShadowRampCoords(
-    private val rows: IntArray,
-) : AbstractList<Offset>() {
-    override val size: Int get() = rows.size
-
-    override fun get(index: Int): Offset {
-        val v = when (rows[index]) {
-            // 压进纸里那半像素取**半浓**：它盖住的是纸边那一像素的里侧，外侧由满浓的纸边行盖住，
-            // 两半叠起来正好是一条抗锯齿边。取满浓会在纸边上留一道比旁边深一倍的细线。
-            0 -> (SHADOW_RAMP_ROWS - 1) * 0.5f
-            1 -> 0f
-            else -> (SHADOW_RAMP_ROWS - 1).toFloat()
-        }
-        return Offset(SHADOW_RAMP_U, v)
-    }
-}
-
-/**
- * 页边影的浓度剖线：一张 `1×[SHADOW_RAMP_ROWS]` 的渐变图，纵向 = 离页边的归一化距离。
- *
- * 数值就是原来「16 层逐层叠色」的解析解 —— 距离 `x` 处被
- * `K − ⌈K·x⌉ + 1` 层盖住，剩下的浓度是 `1 − (1 − layerAlpha)^层数` —— 只是不再真的叠 16 次，
- * 而是把这条曲线烘进纹理（一次搭好，之后每帧只换画笔浓度）。
- *
- * 图按参考浓度建，逐帧浓度由 `Paint.alpha` 乘：这条曲线对总浓度只是近似线性（浓度差一倍，
- * 各档相差不到 5%），肉眼分辨不出，却省掉每帧重建纹理。
- */
-private object ShadowRamp {
-    private var ramp: Shader? = null
-    private var paint: Paint? = null
-    private var built = false
-
-    fun paint(alpha: Float): Paint? {
-        if (!built) {
-            built = true
-            ramp = runCatching { buildShader() }.getOrNull()
-            paint = ramp?.let { s ->
-                Paint().apply {
-                    shader = s
-                    // 剖线是一维的，纵向要插值才不出台阶；横向只有一列，`Clamp` 兜底。
-                    filterQuality = FilterQuality.Low
-                    blendMode = BlendMode.SrcOver
-                }
-            }
-        }
-        val p = paint ?: return null
-        p.alpha = alpha.coerceIn(0f, 1f)
-        return p
-    }
-
-    private fun buildShader(): Shader {
-        val rows = SHADOW_RAMP_ROWS
-        val img = ImageBitmap(1, rows, ImageBitmapConfig.Argb8888, hasAlpha = true)
-        val reference = DROP_SHADOW_ALPHA * CURL3D_BACK_SHADOW_ALPHA
-        val layerAlpha = 1.0 - (1.0 - reference.toDouble()).pow(1.0 / SHADOW_TAPER_LAYERS)
-        val total = 1.0 - (1.0 - layerAlpha).pow(SHADOW_TAPER_LAYERS.toDouble())
-        CanvasDrawScope().draw(
-            density = Density(1f),
-            layoutDirection = LayoutDirection.Ltr,
-            canvas = Canvas(img),
-            size = Size(1f, rows.toFloat()),
-        ) {
-            for (row in 0 until rows) {
-                val x = row.toFloat() / (rows - 1)
-                val layers = SHADOW_TAPER_LAYERS - ceil(SHADOW_TAPER_LAYERS * x).toInt() + 1
-                val a = (1.0 - (1.0 - layerAlpha).pow(layers.toDouble())) / total
-                drawRect(
-                    Color(0f, 0f, 0f, a.toFloat().coerceIn(0f, 1f)),
-                    topLeft = Offset(0f, row.toFloat()),
-                    size = Size(1f, 1f),
-                )
-            }
-        }
-        return ImageShader(img, TileMode.Clamp, TileMode.Clamp)
+        path.close()
+        drawPath(path, color)
     }
 }
 
@@ -1107,33 +947,6 @@ private const val SHADOW_TAPER_LAYERS: Int = 16
 
 /** 纸角那块扇形影的弧段数（沿用旧版转角影的段数）。 */
 private const val SHADOW_FAN_STEPS: Int = 12
-
-/**
- * 一条页边的影最多采多少个点：影是软的，几十行的页边细节在屏幕上根本看不出来，
- * 点数直接决定每帧要画多少个顶点。
- */
-private const val SHADOW_EDGE_POINTS: Int = 24
-
-/**
- * 影的浓度剖线纹理有多少行（纵向 = 离页边的归一化距离）。
- *
- * 影带在屏幕上一般两三百像素宽，256 行已经是一行不到两个像素，肉眼分不出台阶。
- */
-private const val SHADOW_RAMP_ROWS: Int = 256
-
-/** 影带的三角带行数：压进纸里那半像素、纸边、最外沿。 */
-private const val SHADOW_STRIP_ROWS: Int = 3
-
-/** 剖线纹理只有一列，`u` 取列中心。 */
-private const val SHADOW_RAMP_U: Float = 0.5f
-
-/**
- * 影带最内侧压进纸里多少像素。
- *
- * 三角带没有抗锯齿边，纸边与影之间会让出半个像素的缝；往里压这半像素、浓度取半，
- * 叠出来的过渡才与路径填充抗锯齿的结果一致。
- */
-private const val SHADOW_INNER_APRON: Float = 0.5f
 
 /** 参考实现的压力值（`pageScroll` 点按翻页用 200/255）。 */
 internal const val CURL3D_REFERENCE_PRESSURE: Float = 0.7843f

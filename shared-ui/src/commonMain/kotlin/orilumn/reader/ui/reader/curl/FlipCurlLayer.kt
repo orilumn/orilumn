@@ -46,6 +46,9 @@ class CurlPageImages {
  * `orilum.bak` 的 `CurlView.drawBody`：一张刚性纸绕折痕翻过去，屏幕上只有三块——
  * 正面页 / 纸背（正面的镜像）/ 露出页（折痕另一侧的新页）。
  *
+ * **书脊恒在左**：两种翻页方向都用同一侧卷曲几何（[curlFrame]），上一页只是同一套几何
+ * 倒着走并把被翻的那张纸换成目标页。不会因为要翻上一页就让右缘变成书脊。
+ *
  * 两端的像素与静止时**同一份**：页槽里的 `ReaderPageCanvas` 每帧把「页栅格 + 覆盖层」
  * 画出来，同时经 `onImages` 发布到 [CurlPageImages]，本层拿它们当纹理用。
  * 所以页码、旁注、高亮、下划线都跟着纸一起走，不需要第三条截图通道。
@@ -104,11 +107,20 @@ fun FlipCurlLayer(
                 return@Canvas
             }
             val dir = direction()
-            // 正面 = 被翻走的那一张（永远是读者当前正在看的那一页），露出页 = 折痕另一侧的新页。
-            // 向前翻也照这个口径：纸从左边掀起来、露出页在左边，与向后翻只是左右镜像
-            // （几何一侧的 `side` 因子），图像不换位。
-            val front = current
-            val back = target
+            // 书脊恒在左：几何永远朝同一侧卷（见 [curlFrame]），上一页只是同一套几何倒着走，
+            // 并把被翻的那张纸换成目标页——否则纸会挂在右缘，看起来右边成了书脊。
+            val frame = curlFrame(
+                pageW = pageWidthPx,
+                pageH = pageHeightPx,
+                progress = progress(),
+                direction = dir,
+                tilt = tilt(),
+                settling = settling(),
+            )
+            // 正面 = 被翻的那一张；露出页 = 折痕另一侧的那一张。
+            // 下一页翻当前页、露出目标页；上一页翻目标页（上一页）、露出当前页。
+            val front = if (frame.turningIsTarget) target else current
+            val back = if (frame.turningIsTarget) current else target
             if (front == null || back == null || front.page == null || back.page == null) {
                 if (!sessionLogged[0]) {
                     sessionLogged[0] = true
@@ -119,20 +131,14 @@ fun FlipCurlLayer(
                 }
                 return@Canvas
             }
-            val shape = curlShape(
-                pageW = pageWidthPx,
-                pageH = pageHeightPx,
-                progress = progress(),
-                direction = dir,
-                tilt = tilt(),
-                settling = settling(),
-            )
+            val shape = frame.shape
             if (!drawLogged[0]) {
                 drawLogged[0] = true
                 // 几何一起记：平板实测对不上形状时，直接拿这几个数离线复现同一帧。
                 Logger.d(
                     "Orilumn.Curl",
-                    "draw dir=$dir p=${shape.progress} " +
+                    "draw dir=$dir p=${shape.progress} gesture=${progress()} " +
+                        "sheet=${if (frame.turningIsTarget) "target" else "current"} " +
                         "fold=(${shape.topX},0)-(${shape.bottomX},${pageHeightPx}) " +
                         "lean=${shape.lean} fade=${shape.shadowFade} " +
                         "tex=${front.page?.width}x${front.page?.height} " +

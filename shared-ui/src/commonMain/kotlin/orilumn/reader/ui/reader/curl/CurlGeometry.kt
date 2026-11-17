@@ -47,7 +47,12 @@ internal data class CurlShape(
     val shadowFade: Float,
     /** 归一化进度（0 = 没翻，1 = 翻完；拖动时可略越界）。 */
     val progress: Float,
-    /** +1 = 向后翻（下一页），-1 = 向前翻（上一页）。 */
+    /**
+     * 几何朝哪一侧卷：+1 = 卷右半（没掀起的那半在左，书脊在左），-1 = 左右镜像。
+     *
+     * 翻页层**不按翻页方向取 -1**：上一页也走 +1 的几何（见 [curlFrame]），-1 只留给
+     * 低层几何函数自身与镜像相关的测试。
+     */
     val direction: Int,
 )
 
@@ -120,6 +125,48 @@ internal fun curlShape(
     )
 }
 
+/**
+ * 一帧翻页在屏幕上的**最终翻法**：书脊恒在左边。
+ *
+ * [CurlShape.direction] 只描述几何朝哪一侧卷，不描述翻页方向。左装书无论翻下一页还是
+ * 上一页，纸都挂在左边的书脊上：没掀起的那一半永远在左、纸卷朝右鼓、露出页在右。
+ *
+ * - **下一页**：当前页是卷起来的那张，目标页在右边露出来；
+ * - **上一页**：上一页（目标页）是卷回来的那张，当前页留在右边被它盖住。
+ *
+ * 上一页不是把下一页的几何左右镜像（那样书脊会跑到右边），而是**同一套几何倒着走**：
+ * 进度取 `1-p`，折痕因此仍在 `w·p`；倾斜取反抵消 `direction` 的镜像，折痕斜率与
+ * 原来的上一页手势一致。再由 [turningIsTarget] 把正面/露出页两张图换位。
+ */
+internal data class CurlFrame(
+    val shape: CurlShape,
+    /** 被翻的那张纸是不是目标页（上一页）。 */
+    val turningIsTarget: Boolean,
+)
+
+/** 由手势进度算一帧「书脊恒在左」的翻页几何，见 [CurlFrame]。 */
+internal fun curlFrame(
+    pageW: Float,
+    pageH: Float,
+    progress: Float,
+    direction: Int,
+    tilt: Float = 0f,
+    settling: Boolean = false,
+): CurlFrame {
+    val back = direction < 0
+    return CurlFrame(
+        shape = curlShape(
+            pageW = pageW,
+            pageH = pageH,
+            progress = if (back) 1f - progress else progress,
+            direction = 1,
+            tilt = if (back) -tilt else tilt,
+            settling = settling,
+        ),
+        turningIsTarget = back,
+    )
+}
+
 /** 结算动画头尾的淡出系数：中间恒 1，两端线性到 0。 */
 internal fun tailFade(progress: Float): Float = when {
     progress > 1f - CURL_TAIL_FADE_SPAN -> ((1f - progress) / CURL_TAIL_FADE_SPAN).coerceIn(0f, 1f)
@@ -188,6 +235,9 @@ internal fun lineCross(p1: Offset, p2: Offset, p3: Offset, p4: Offset): Offset? 
 
 /**
  * 露出区多边形的四个角（折痕**没掀起**那一侧的那一块：向后翻在右、向前翻在左）。
+ *
+ * 翻页层把上一页映射成 `direction = +1` 的同一套几何（[curlFrame]），所以实际翻上一页时
+ * 露出区也在右——露出的是当前页，纸从左边盖回来。
  *
  * 依次是：折痕上端 → 露出侧上角 → 露出侧下角 → 折痕下端。
  * 某端已经滑到页边之外（收尾时整块滑出去）时，改用「折痕与页边的交点」两次，

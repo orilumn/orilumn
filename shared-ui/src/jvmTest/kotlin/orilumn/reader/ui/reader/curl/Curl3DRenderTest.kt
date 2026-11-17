@@ -16,6 +16,7 @@ import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.roundToInt
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -68,7 +69,9 @@ class Curl3DRenderTest {
     fun untouchedFrameIsTheCurrentPage() {
         val w = 400
         val h = 600
-        // 两个方向都是「front = 正在看的那一页」：翻页层不再按方向换位，图像不换位。
+        // 这里直接量低层几何：两个方向都传 front = 当前页，起手帧都画 front。
+        // 翻页层实际翻上一页时会把「被翻的那张」换成目标页（见 [previousPageTurnsTheTargetSheet]），
+        // 低层镜像几何只用来对照，不再直接上屏。
         for (dir in listOf(1, -1)) {
             val px = render(curlShape(w.toFloat(), h.toFloat(), 0f, dir), solid(w, h, red), solid(w, h, blue))
                 .toPixelMap()
@@ -89,6 +92,86 @@ class Curl3DRenderTest {
                 }
             }
         }
+    }
+
+    /**
+     * 翻上一页时**书脊仍在左**：上一页不是下一页的左右镜像，而是同一套「左边平铺、卷筒朝右」
+     * 的几何倒着走。镜像几何会让纸挂到右缘、看起来右边成了书脊（读者：「左边是书脊，不会因为
+     * 要翻到上一页，右边就变成书脊了」）。
+     *
+     * 折痕位置与斜率必须和上一页原来的手势一致：进度取 `1-p` 后折痕仍在 `w·p`，倾斜取反
+     * 抵消几何侧的镜像。只有「被翻的那张纸」和「露出页」换位。
+     */
+    @Test
+    fun previousPageKeepsTheSpineOnTheLeft() {
+        val w = 400f
+        val h = 600f
+        val tilt = 0.35f
+        for (p in listOf(0.1f, 0.45f, 0.9f)) {
+            val next = curlFrame(w, h, p, direction = 1, tilt = tilt)
+            assertFalse("下一页翻的是当前页", next.turningIsTarget)
+            assertEquals("下一页的几何", 1, next.shape.direction)
+            assertEquals(p, next.shape.progress, 1e-6f)
+
+            val prev = curlFrame(w, h, p, direction = -1, tilt = tilt)
+            assertTrue("上一页翻的是上一页那张纸", prev.turningIsTarget)
+            assertEquals("上一页的卷曲几何也必须朝左书脊那一侧", 1, prev.shape.direction)
+            assertEquals("上一页是同一套几何倒着走", 1f - p, prev.shape.progress, 1e-6f)
+            assertEquals("折痕仍按手势扫到 w·p", w * p, prev.shape.foldX, 1e-3f)
+
+            // 折痕与倾斜和原来的上一页几何逐点一致：只换卷曲侧，不镜像手势。
+            val old = curlShape(w, h, p, direction = -1, tilt = tilt)
+            assertEquals(old.topX, prev.shape.topX, 1e-3f)
+            assertEquals(old.bottomX, prev.shape.bottomX, 1e-3f)
+            assertEquals(old.lean, prev.shape.lean, 1e-6f)
+            // 末段扶正对称：1-p 后的淡出系数与 p 相同。
+            assertEquals(
+                tailFade(p),
+                curlFrame(w, h, p, direction = -1, tilt = tilt, settling = true).shape.shadowFade,
+                1e-6f,
+            )
+        }
+    }
+
+    /**
+     * 上一页的纸卷属于**上一页**那张纸（目标页），不是当前页。
+     *
+     * 旧实现把当前页当被翻的纸、只把露出的上一页画在左边，纸的平铺部分留在右缘——
+     * 读者看到的就是「右侧成了书脊」。现在卷筒鼓在折痕右侧（掀起侧），筒面纹理来自上一页，
+     * 左边平铺的是上一页，右边露出的才是当前页。
+     */
+    @Test
+    fun previousPageTurnsTheTargetSheet() {
+        val w = 400
+        val h = 600
+        val mid = h / 2
+        val frame = curlFrame(w.toFloat(), h.toFloat(), 0.45f, direction = -1)
+        val radius = curlRadius(frame.shape)
+        val px = render(frame.shape, solid(w, h, blue), solid(w, h, red)).toPixelMap()
+
+        // 卷筒在折痕右侧（掀起侧），筒面是上一页的镜像纹理（蓝），不是当前页（红）。
+        val rollX = (frame.shape.foldX + radius * 0.5f).toInt()
+        val roll = px[rollX, mid]
+        assertTrue(
+            "上一页的卷筒应当由上一页（蓝）卷成，实测 r=${roll.red} b=${roll.blue}",
+            roll.blue > roll.red,
+        )
+        assertEquals("左边平铺的是上一页", blue, px[5, mid].toArgb())
+        assertEquals("右边露出的才是当前页", red, px[w - 5, mid].toArgb())
+
+        // 起手帧仍是当前页、翻完帧是上一页：撤层与交接不会闪。
+        val start = render(
+            curlFrame(w.toFloat(), h.toFloat(), 0f, direction = -1).shape,
+            solid(w, h, blue),
+            solid(w, h, red),
+        ).toPixelMap()
+        assertEquals("上一页起手时还是当前页", red, start[200, mid].toArgb())
+        val end = render(
+            curlFrame(w.toFloat(), h.toFloat(), 1f, direction = -1).shape,
+            solid(w, h, blue),
+            solid(w, h, red),
+        ).toPixelMap()
+        assertEquals("上一页翻完只剩上一页", blue, end[200, mid].toArgb())
     }
 
     /**

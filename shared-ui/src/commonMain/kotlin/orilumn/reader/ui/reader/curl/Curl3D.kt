@@ -200,14 +200,6 @@ internal fun DrawScope.drawCurl3DFrame(
 
     // ⑥ 各段网格：纹理 → 纸背压淡 → 纸卷明暗
     val canvas = drawContext.canvas
-    val nv = mesh.vertexCount
-    val posList = List(nv) { Offset(mesh.positions[it * 2], mesh.positions[it * 2 + 1]) }
-    // 纹理坐标要减去页栅格在页面里的落点（版心偏移）：`ImageShader` 没有局部矩阵，
-    // 只能把偏移提前算进纹理坐标里。覆盖层是整页图，偏移恒为 0。
-    val pageTex = List(nv) {
-        Offset(mesh.texCoords[it * 2] - texLeft, mesh.texCoords[it * 2 + 1] - texTop)
-    }
-    val overlayTex = List(nv) { Offset(mesh.texCoords[it * 2], mesh.texCoords[it * 2 + 1]) }
     // 纸卷绕过半圈之后，纸背（Verso）盖在正面（Recto）上，但两段的屏幕范围是「整条 ÷ 最左一截」：
     // 明暗沿法向只跟 q 有关，所以叠在**整条**（Recto）上算一次就够，只有没有 Recto 时才用 Verso。
     // 明暗只画在**看得见**的那一面：纸卷隆起后外层是纸背（Verso，z ≥ R，压在正面那半圈之上），
@@ -217,7 +209,6 @@ internal fun DrawScope.drawCurl3DFrame(
     clipRect(0f, 0f, w, h) {
         fun drawBand(band: CurlMesh.Band) {
             if (band.indexCount <= 0) return
-            val idx = List(band.indexCount) { mesh.indices[band.indexStart + it].toInt() }
             val ring = mesh.bandOutline(band)
             if (ring.size < 3) return
             val outline = polygonPath(ring)
@@ -237,11 +228,29 @@ internal fun DrawScope.drawCurl3DFrame(
             }
             if (pageImage != null && texRing != null && texRing.size >= 3) {
                 clipPath(polygonPath(texRing)) {
-                    drawMeshBand(canvas, posList, idx, pageTex, pageImage)
+                    drawMeshBand(
+                        canvas = canvas,
+                        mesh = mesh,
+                        band = band,
+                        image = pageImage,
+                        texDx = -texLeft,
+                        texDy = -texTop,
+                        paint = front.textures.pagePaint(pageImage),
+                    )
                 }
             }
             // 覆盖层是整页图（旁注 + 页码），材料坐标本来就在页内，不需要裁。
-            front.overlay?.let { drawMeshBand(canvas, posList, idx, overlayTex, it) }
+            front.overlay?.let { overlay ->
+                drawMeshBand(
+                    canvas = canvas,
+                    mesh = mesh,
+                    band = band,
+                    image = overlay,
+                    texDx = 0f,
+                    texDy = 0f,
+                    paint = front.textures.overlayPaint(overlay),
+                )
+            }
 
             // 纸背：纸色只盖一成 ⇒ 内容仍留九成（参考实现 `BACKFACE_ALPHA = 0.9`）。
             if (band.surface != CurlMesh.Surface.Recto) {
@@ -263,13 +272,13 @@ internal fun DrawScope.drawCurl3DFrame(
         // 影只铺页边**朝外**那一侧（背离纸背），所以落在纸背上的那半条根本不存在；
         // 画在所有纸段之后，卷起来那一段的影才不会被卷筒盖掉（读者判「阴影被卷筒截断」）。
         for (band in mesh.bands) drawBand(band)
-        val backRows = mesh.bands.firstOrNull { it.surface == CurlMesh.Surface.Back }?.let {
+            val backRows = mesh.bands.firstOrNull { it.surface == CurlMesh.Surface.Back }?.let {
             it.firstRow..it.lastRow
         }
         if (edges != null && backRows != null) {
             drawBackEdgeShadow(edges, backRows, backShadowWidth, backShadowAlpha)
         }
-    }
+        }
     return true
 }
 
@@ -328,43 +337,131 @@ internal fun DrawScope.drawBackEdgeShadow(
     val second = edges[1]
     if (first.size < 2 || second.size < 2) return
     if (first.size != second.size) return
-    val end1 = drawEdgeStrip(first, second, backRows, maxWidth, alpha)
-    val end2 = drawEdgeStrip(second, first, backRows, maxWidth, alpha)
+    val edge1 = sampleShadowEdge(first, second, backRows) ?: return
+    val edge2 = sampleShadowEdge(second, first, backRows) ?: return
+    // 一条图层路径在整个影里复用（每层 reset 后重填）：一帧一个 `Path`，不再一帧几十个。
+    val path = Path()
+    drawShadowStrip(edge1, maxWidth, alpha, path)
+    drawShadowStrip(edge2, maxWidth, alpha, path)
     // 两条页边的末点重合 = 折痕正好切掉一个页角：角外那一楔两段带子都够不着，补扇形。
     // 末点隔开一段时（自由边 = 与纸卷相切的切线，纸压着纸）没有纸角，不补。
-    if (end1 == null || end2 == null) return
     val corner = first[first.size - 1]
     if ((corner - second[second.size - 1]).getDistance() > 0.5f) return
-    drawCornerFan(corner, end1, end2, maxWidth, alpha)
+    drawCornerFan(corner, edge1.outward.last(), edge2.outward.last(), maxWidth, alpha, path)
 }
 
 /**
- * 单条页边：从折痕端（宽度 0）到最远的纸角（满宽）均匀加宽，**只铺朝外那一侧**。
+ * 一条页边**抽稀后**的影采样：点、归一化弧长、朝外法向。
  *
- * @param edge 这一条页边。
- * @param other 同一扫线行上的另一条页边（用来定朝外是哪一侧）。
- * @param backRows 平铺纸背那一段的扫线行（定朝外只在这一段投票）。
- * @return 这条边在纸角那一端的**朝外法向**（给 [drawCornerFan] 对缝）；算不出来时返回 `null`。
+ * 抽稀是这一帧最省的一步：影是软的，页边在屏幕上几百上千像素长，而网格是几十行——
+ * 十六层 × 每层上百个点 = 每帧上万次路径段只是把同一条曲线描得很细。取 [SHADOW_EDGE_POINTS]
+ * 个点，肉眼分不出，路径段数直接砍掉四分之三。
  */
-private fun DrawScope.drawEdgeStrip(
+private class ShadowEdge(
+    val pts: List<Offset>,
+    val tAt: FloatArray,
+    val outward: Array<Offset>,
+)
+
+/**
+ * 把一条页边（连同同一扫线行上的另一条）抽稀成 [ShadowEdge]；算不出来时返回 `null`。
+ *
+ * 两条边必须用**同一套下标**抽稀：[outwardNormals] 是按行比较两条边的，错开元就错位了。
+ * 定朝外用的种子行也跟着换成抽稀后的下标区间。
+ */
+private fun sampleShadowEdge(
     edge: List<Offset>,
     other: List<Offset>,
     backRows: IntRange,
-    maxWidth: Float,
-    alpha: Float,
-): Offset? {
+): ShadowEdge? {
     val n = edge.size
-    val tAt = FloatArray(n)
+    if (n < 2) return null
+    val idx = if (n <= SHADOW_EDGE_POINTS) {
+        IntArray(n) { it }
+    } else {
+        val stride = (n - 1 + SHADOW_EDGE_POINTS - 2) / (SHADOW_EDGE_POINTS - 1)
+        val out = ArrayList<Int>(SHADOW_EDGE_POINTS + 1)
+        var i = 0
+        while (i < n - 1) {
+            out.add(i)
+            i += stride
+        }
+        out.add(n - 1)
+        out.toIntArray()
+    }
+    val pts = List(idx.size) { edge[idx[it]] }
+    val oth = List(idx.size) { other[idx[it]] }
+    var lo = -1
+    var hi = -1
+    for (k in idx.indices) {
+        if (idx[k] < backRows.first || idx[k] > backRows.last) continue
+        if (lo < 0) lo = k
+        hi = k
+    }
+    if (lo < 0) {
+        // 抽稀后没有任何点落在平铺纸背那一段里（纸背只剩一两行时可能）：取最近的一行投票，
+        // 不能因此把整条影丢掉 —— 那会变成「翻到某个角度影忽然消失」。
+        var best = 0
+        var bestDist = Int.MAX_VALUE
+        for (k in idx.indices) {
+            val dist = when {
+                idx[k] < backRows.first -> backRows.first - idx[k]
+                idx[k] > backRows.last -> idx[k] - backRows.last
+                else -> 0
+            }
+            if (dist < bestDist) {
+                bestDist = dist
+                best = k
+            }
+        }
+        lo = best
+        hi = best
+    }
+    val tAt = FloatArray(pts.size)
     var cum = 0f
-    for (i in 1 until n) {
-        cum += (edge[i] - edge[i - 1]).getDistance()
+    for (i in 1 until pts.size) {
+        cum += (pts[i] - pts[i - 1]).getDistance()
         tAt[i] = cum
     }
     if (cum < 1f) return null
-    for (i in 0 until n) tAt[i] /= cum
-    val outward = outwardNormals(edge, other, backRows) ?: return null
-    drawShadowStrip(edge, tAt, outward, maxWidth, alpha)
-    return outward[n - 1]
+    for (i in tAt.indices) tAt[i] /= cum
+    val outward = outwardNormals(pts, oth, lo..hi) ?: return null
+    return ShadowEdge(pts, tAt, outward)
+}
+
+/**
+ * 单条页边的软带：从折痕端（宽度 0）到最远的纸角（满宽）均匀加宽，**只铺朝外那一侧**。
+ *
+ * @param path 复用的图层路径（每层 `reset` 后重填）。
+ */
+private fun DrawScope.drawShadowStrip(
+    edge: ShadowEdge,
+    maxWidth: Float,
+    alpha: Float,
+    path: Path,
+) {
+    val pts = edge.pts
+    val n = pts.size
+    if (n < 2) return
+    val outward = edge.outward
+    val tAt = edge.tAt
+    // 每层常数浓度反解出来，叠满 K 层正好等于 alpha。
+    val layerAlpha = (1.0 - (1.0 - alpha.toDouble()).pow(1.0 / SHADOW_TAPER_LAYERS)).toFloat()
+    val color = Color(0f, 0f, 0f, layerAlpha)
+    for (layer in 1..SHADOW_TAPER_LAYERS) {
+        val scale = layer.toFloat() / SHADOW_TAPER_LAYERS
+        path.reset()
+        path.fillType = PathFillType.NonZero
+        for (i in 0 until n) {
+            if (i == 0) path.moveTo(pts[i].x, pts[i].y) else path.lineTo(pts[i].x, pts[i].y)
+        }
+        for (i in n - 1 downTo 0) {
+            val w = maxWidth * scale * tAt[i]
+            path.lineTo(pts[i].x + outward[i].x * w, pts[i].y + outward[i].y * w)
+        }
+        path.close()
+        drawPath(path, color)
+    }
 }
 
 /**
@@ -452,39 +549,6 @@ internal fun outwardNormals(
 }
 
 /**
- * 沿一条折线铺软带：**只铺朝外那一侧**到 `maxWidth · t`，分 [SHADOW_TAPER_LAYERS] 层叠出渐隐。
- *
- * @param pts 折线（屏幕坐标）。
- * @param tAt 每点的归一化宽度（0 = 无影，1 = 满宽）。
- * @param outward 每点的朝外单位法向（见 [outwardNormals]）。
- */
-private fun DrawScope.drawShadowStrip(
-    pts: List<Offset>,
-    tAt: FloatArray,
-    outward: Array<Offset>,
-    maxWidth: Float,
-    alpha: Float,
-) {
-    val n = pts.size
-    if (n < 2) return
-    // 每层常数浓度反解出来，叠满 K 层正好等于 alpha。
-    val layerAlpha = (1.0 - (1.0 - alpha.toDouble()).pow(1.0 / SHADOW_TAPER_LAYERS)).toFloat()
-    for (layer in 1..SHADOW_TAPER_LAYERS) {
-        val scale = layer.toFloat() / SHADOW_TAPER_LAYERS
-        val path = Path().apply { fillType = PathFillType.NonZero }
-        for (i in 0 until n) {
-            if (i == 0) path.moveTo(pts[i].x, pts[i].y) else path.lineTo(pts[i].x, pts[i].y)
-        }
-        for (i in n - 1 downTo 0) {
-            val w = maxWidth * scale * tAt[i]
-            path.lineTo(pts[i].x + outward[i].x * w, pts[i].y + outward[i].y * w)
-        }
-        path.close()
-        drawPath(path, Color(0f, 0f, 0f, layerAlpha))
-    }
-}
-
-/**
  * 纸角那 90° 的接触影：以纸角为心、影宽为半径的一块扇形，浓度从角上的满值径向淡到 0。
  *
  * 只铺两条页边时，每条影带都在「过纸角的垂线」处停住，两条带子之间就空出一个直角缺口 ——
@@ -505,6 +569,7 @@ private fun DrawScope.drawCornerFan(
     n2: Offset,
     maxWidth: Float,
     alpha: Float,
+    path: Path,
 ) {
     if (maxWidth <= 0.5f || alpha <= 0f) return
     val a1 = atan2(n1.y, n1.x)
@@ -516,16 +581,17 @@ private fun DrawScope.drawCornerFan(
     while (sweep < -PI.toFloat()) sweep += twoPi
     if (abs(sweep) < 1e-3f) return
     val layerAlpha = (1.0 - (1.0 - alpha.toDouble()).pow(1.0 / SHADOW_TAPER_LAYERS)).toFloat()
+    val color = Color(0f, 0f, 0f, layerAlpha)
     for (layer in 1..SHADOW_TAPER_LAYERS) {
         val r = maxWidth * layer.toFloat() / SHADOW_TAPER_LAYERS
-        val path = Path()
+        path.reset()
         path.moveTo(corner.x, corner.y)
         for (k in 0..SHADOW_FAN_STEPS) {
             val ang = a1 + sweep * k / SHADOW_FAN_STEPS
             path.lineTo(corner.x + cos(ang) * r, corner.y + sin(ang) * r)
         }
         path.close()
-        drawPath(path, Color(0f, 0f, 0f, layerAlpha))
+        drawPath(path, color)
     }
 }
 
@@ -598,33 +664,108 @@ private const val DROP_SHADOW_ALPHA: Float = 0.32f
 /** 明暗渐变的分段数（一维函数的采样密度，够到看不出折线）。 */
 private const val ROLL_SHADE_STOPS: Int = 16
 
-/** 用一段网格画一张纹理（**Compose 公共 API**：`Vertices` + `ImageShader`）。 */
+/** 页面纹理的画笔缓存：一页栅格只建一次 `ImageShader`（见 [CurlTextureCache]）。 */
+internal class CurlTextureCache {
+    private var pageImage: ImageBitmap? = null
+    private var pagePaint: Paint? = null
+    private var overlayImage: ImageBitmap? = null
+    private var overlayPaint: Paint? = null
+
+    /** 正文页栅格的画笔（`ImageShader` 绑在这张图上）。图换了才重建。 */
+    fun pagePaint(image: ImageBitmap): Paint = paintFor(image, overlay = false)
+
+    /** 覆盖层（旁注 + 页码）的画笔。 */
+    fun overlayPaint(image: ImageBitmap): Paint = paintFor(image, overlay = true)
+
+    private fun paintFor(image: ImageBitmap, overlay: Boolean): Paint {
+        val cached = if (overlay) overlayImage else pageImage
+        val paint = if (overlay) overlayPaint else pagePaint
+        if (paint != null && cached === image) return paint
+        val fresh = newMeshPaint(image)
+        if (overlay) {
+            overlayImage = image
+            overlayPaint = fresh
+        } else {
+            pageImage = image
+            pagePaint = fresh
+        }
+        return fresh
+    }
+}
+
+/** 网格纹理画笔：`ImageShader` 只跟图有关，跟几何无关。 */
+private fun newMeshPaint(image: ImageBitmap): Paint = Paint().apply {
+    // 纹理**只在版心材料范围内**绘制（见 [drawCurl3DFrame] 里的 `textureBandOutline`）：
+    // 页栅格只有版心那么大，越界采样会把版心的最边一列/一行拉成条纹——读者看到的
+    // 「反面页边距上的几条短横线」就是 `Clamp` 抹出来的。形状已经裁好，
+    // 这里保留 `Clamp` 只是兜底（越界像素不参与绘制）。
+    shader = ImageShader(image, TileMode.Clamp, TileMode.Clamp)
+    // 纸卷把材料压进不到一个半径的屏幕宽度，最邻近采样会把文字抽成锯齿斜条。
+    filterQuality = FilterQuality.Low
+    blendMode = BlendMode.SrcOver
+}
+
+/**
+ * 把两个 `FloatArray` 里的一段 `(x, y)` 对看成 `List<Offset>`（**逐帧零装箱**）。
+ *
+ * `Vertices` 要的是 `List<Offset>`，而网格本来就存在 `FloatArray` 里。用 `List(n) { Offset(...) }`
+ * 转换时每帧要造上千个 `Offset` 对象（一帧六次纹理绘制就是几千个），全都在绘制热路径上。
+ * 这个视图只在 `Vertices` 复制顶点时按索引取值，取到的 `Offset` 是临时值，不留存。
+ *
+ * @param fromVertex/toVertex 顶点下标区间（`data` 每顶点两个 float）。
+ * @param offsetX/offsetY 纹理坐标要减掉的版心落点（`ImageShader` 没有局部矩阵）。
+ */
+private class FloatPairList(
+    private val data: FloatArray,
+    private val fromVertex: Int,
+    private val toVertex: Int,
+    private val offsetX: Float = 0f,
+    private val offsetY: Float = 0f,
+) : AbstractList<Offset>() {
+    override val size: Int get() = toVertex - fromVertex
+
+    override fun get(index: Int): Offset {
+        val v = (fromVertex + index) * 2
+        return Offset(data[v] + offsetX, data[v + 1] + offsetY)
+    }
+}
+
+/** 全白顶点色（Compose 要求颜色数与顶点数等长；同色不装箱）。 */
+private class WhiteColorList(override val size: Int) : AbstractList<Color>() {
+    override fun get(index: Int): Color = Color.White
+}
+
+/**
+ * 用一段网格画一张纹理（**Compose 公共 API**：`Vertices` + `ImageShader`）。
+ *
+ * 网格本来就是「每行两个顶点、相邻两行连成四边形」的形状，正好是一条
+ * [VertexMode.TriangleStrip]；段内顶点在数组里连续（`firstRow*2 .. lastRow*2+1`），
+ * 所以**不需要索引数组**。早先每帧都把索引摊成 `List<Int>`（两千多个装箱整数）再传进来，
+ * 跟手时正是绘制热路径上的大头。
+ *
+ * 顶点坐标与纹理坐标直接按段的下标区间做视图（[FloatPairList]），不再逐帧摊 `List<Offset>`。
+ */
 private fun DrawScope.drawMeshBand(
     canvas: androidx.compose.ui.graphics.Canvas,
-    positions: List<Offset>,
-    indices: List<Int>,
-    texCoords: List<Offset>,
+    mesh: CurlMesh,
+    band: CurlMesh.Band,
     image: ImageBitmap,
+    texDx: Float,
+    texDy: Float,
+    paint: Paint,
 ) {
+    val from = band.firstRow * 2
+    val to = (band.lastRow + 1) * 2
     val vertices = Vertices(
-        vertexMode = VertexMode.Triangles,
-        positions = positions,
-        textureCoordinates = texCoords,
+        vertexMode = VertexMode.TriangleStrip,
+        positions = FloatPairList(mesh.positions, from, to),
+        textureCoordinates = FloatPairList(mesh.texCoords, from, to, texDx, texDy),
         // Compose 要求顶点色与顶点数**等长**（空列表会抛「lengths must match」）。
         // 全部给白色 + SrcOver ⇒ 只取纹理本身，不做顶点级着色。
-        colors = List(positions.size) { Color.White },
-        indices = indices,
+        colors = WhiteColorList(to - from),
+        // 空索引 = 按顺序画这条三角带；段内顶点在网格数组里本来就是连续的。
+        indices = emptyList(),
     )
-    val paint = Paint().apply {
-        // 纹理**只在版心材料范围内**绘制（见 [drawCurl3DFrame] 里的 `textureBandOutline`）：
-        // 页栅格只有版心那么大，越界采样会把版心的最边一列/一行拉成条纹——读者看到的
-        // 「反面页边距上的几条短横线」就是 `Clamp` 抹出来的。形状已经裁好，
-        // 这里保留 `Clamp` 只是兜底（越界像素不参与绘制）。
-        shader = ImageShader(image, TileMode.Clamp, TileMode.Clamp)
-        // 纸卷把材料压进不到一个半径的屏幕宽度，最邻近采样会把文字抽成锯齿斜条。
-        filterQuality = FilterQuality.Low
-        blendMode = BlendMode.SrcOver
-    }
     drawIntoCanvas { it.drawVertices(vertices, BlendMode.SrcOver, paint) }
 }
 
@@ -771,6 +912,12 @@ private const val SHADOW_TAPER_LAYERS: Int = 16
 
 /** 纸角那块扇形影的弧段数（沿用旧版转角影的段数）。 */
 private const val SHADOW_FAN_STEPS: Int = 12
+
+/**
+ * 一条页边的影最多采多少个点：影是软的，几十行的页边细节在屏幕上根本看不出来，
+ * 点数直接决定每帧要描多少段路径（`SHADOW_TAPER_LAYERS` 层 × 每条边）。
+ */
+private const val SHADOW_EDGE_POINTS: Int = 24
 
 /** 参考实现的压力值（`pageScroll` 点按翻页用 200/255）。 */
 internal const val CURL3D_REFERENCE_PRESSURE: Float = 0.7843f

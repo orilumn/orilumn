@@ -33,6 +33,9 @@ class CurlPageImages {
 
     /** 旁注 + 页码（整页大小、透明底）。没有旁注也没有页码时为 null。 */
     var overlay: ImageBitmap? by mutableStateOf(null)
+
+    /** 纹理画笔缓存（`ImageShader` 只跟图有关，见 [CurlTextureCache]）。 */
+    internal val textures: CurlTextureCache = CurlTextureCache()
 }
 
 /**

@@ -17,6 +17,8 @@ import orilumn.reader.io.Logger
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import orilumn.reader.ui.reader.curl.CURL_TILT_MIN_DISPLACEMENT
+import orilumn.reader.ui.reader.curl.CURL_TILT_SMOOTHING
 
 /**
  * 滑动翻页会话的**唯一宿主**（用户层·与 [FlipSession] 配套）。
@@ -84,6 +86,9 @@ class FlipController(
      * 只在拖动中由 [updateCurlTilt] 写；松手后**保持**（结算期间折痕形状不该跳变）。
      */
     val curlTilt: MutableFloatState = mutableFloatStateOf(0f)
+
+    /** 折痕倾斜的平滑值（-1..1），见 [updateCurlTilt]；拖动开始时随 [curlTilt] 一起归零。 */
+    private var tiltSmoothed = 0f
 
     /** 起手那一页（正被拖走的那张）。落位在起手就发生，故 openPos 已是目标页。 */
     val fromPos: MutableState<ReaderPos?> = mutableStateOf(null)
@@ -295,6 +300,7 @@ class FlipController(
         this.direction.value = direction
         progress.value = 0f
         curlTilt.value = 0f
+        tiltSmoothed = 0f
         if (enterCover) {
             // 后退回封面：目标（封面）早已解码、立即就绪，**无需落位**——跟手由
             // updateDrag 驱动（targetReady()=true），松手 endDrag 结算。绝不 flipAwait：
@@ -353,10 +359,24 @@ class FlipController(
      *
      * 单独一条入口（不并进 [updateDrag]）：滑动层完全不看倾斜，只有卷曲层读它；
      * 混在一起会让「翻页进度」和「折痕形状」两个无关的事实共用一次调用，将来谁改一个都会动到另一个。
+     *
+     * ## 为什么要平滑
+     *
+     * 倾斜乘的是 `0.9 × 页宽` 的外扩幅度（平板上一个单位倾斜 = 一千多像素的折痕端点位移），
+     * 而 `dy / hypot(dx, dy)` 对 `dy` 极敏感：横划时手指上下抖几像素，折痕就来回摆几十像素，
+     * 卷起来的页边跟着抖（读者：「手指滑动时，卷起的页边有点抖动」）。
+     * 「拖动方向」是慢变量、手指抖动是快变量，取指数滑动平均即可：每来一个指针事件走
+     * [CURL_TILT_SMOOTHING] 步（60–120Hz 采样下时间常数约 30–60ms），跟手仍即时。
+     *
+     * 位移还不到 [CURL_TILT_MIN_DISPLACEMENT] 时**不动**：这时 `dx` 接近 0，方向角度是噪声，
+     * 一点抖动就能把倾斜推到 ±1（折痕几乎躺平）。
      */
     fun updateCurlTilt(dx: Float, dy: Float) {
         val len = kotlin.math.hypot(dx, dy)
-        curlTilt.value = if (len < 1e-3f) 0f else (dy / len).coerceIn(-1f, 1f)
+        if (len < CURL_TILT_MIN_DISPLACEMENT) return
+        val target = (dy / len).coerceIn(-1f, 1f)
+        tiltSmoothed += (target - tiltSmoothed) * CURL_TILT_SMOOTHING
+        curlTilt.value = tiltSmoothed
     }
 
     /**
@@ -549,6 +569,7 @@ class FlipController(
         this.direction.value = direction
         progress.value = 0f
         curlTilt.value = 0f
+        tiltSmoothed = 0f
         prefetchJob?.cancel()
         prefetchJob = scope.launch {
             val landed = flipAwait(direction)

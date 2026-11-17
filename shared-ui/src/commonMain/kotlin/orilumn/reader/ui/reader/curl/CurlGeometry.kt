@@ -59,6 +59,20 @@ internal data class CurlShape(
 /** 倾斜外扩的固定幅度（0.9 页宽），与旧版 `tiltW = w * 0.9f` 同一个数。 */
 internal const val CURL_TILT_WIDTH: Float = 0.9f
 
+/**
+ * 折痕倾斜的平滑系数：每个指针事件朝目标值走这么多（见 `FlipController.updateCurlTilt`）。
+ *
+ * 倾斜一个单位 = `0.9 × 页宽` 的折痕端点位移，手指抖动必须压下去；但也不能压太狠，
+ * 否则倾斜跟不上手。0.22 在 60–120Hz 的采样下是 30–60ms 的时间常数。
+ */
+internal const val CURL_TILT_SMOOTHING: Float = 0.22f
+
+/**
+ * 判方向的**最小位移**（px）：`dy / hypot(dx, dy)` 在位移接近 0 时会被噪声定死，
+ * 起手前几十像素内不更新倾斜（保持 0，折痕竖直），走出这段再跟手指。
+ */
+internal const val CURL_TILT_MIN_DISPLACEMENT: Float = 24f
+
 /** 阴影带宽（5% 页宽），与旧版 `SHADOW_BAND` 同一个数。 */
 internal const val CURL_SHADOW_BAND: Float = 0.05f
 

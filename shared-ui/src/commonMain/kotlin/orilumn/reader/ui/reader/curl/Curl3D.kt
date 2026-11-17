@@ -8,17 +8,22 @@ import androidx.compose.ui.graphics.Canvas
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.ImageBitmapConfig
 import androidx.compose.ui.graphics.ImageShader
 import androidx.compose.ui.graphics.Paint
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathFillType
+import androidx.compose.ui.graphics.Shader
 import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.Vertices
 import androidx.compose.ui.graphics.VertexMode
+import androidx.compose.ui.graphics.drawscope.CanvasDrawScope
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.drawscope.withTransform
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.LayoutDirection
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.atan2
@@ -191,11 +196,13 @@ internal fun DrawScope.drawCurl3DFrame(
     //    **只铺纸外（朝外）那一侧**：纸背上那半条（读者圈的「纸背右边那条灰带」）不再画；
     //    影带因此可以画在所有纸段之后，卷起来那截也不会被纸盖掉（读者判「被卷筒截断」）。
     val edges = mesh.pageEdges()
-    // 影宽随「平铺段长度」渐入：纸背刚露出来（平铺段长度 = 0）时宽度是 0，
-    // 随着翻页、平铺段长出来逐渐加到满宽。早先按 `progress` 给一个 0.4R 的起始宽度，
-    // 纸背一出现就是一整条影，读者判「阴影突然出现」。
-    val flatSpan = (mesh.maxArc() - PI.toFloat() * radius).coerceAtLeast(0f)
-    val ramp = (flatSpan / (PI.toFloat() * radius)).coerceIn(0f, 1f)
+    // 起点 = **纸背刚露头的那一刻**：页角处的纸在筒顶从「正面朝上」翻成「背面朝上」
+    // （弧长 πR/2，网格里第一段 `Verso` 出现）。
+    // 渐入规律照旧（同一个斜率），只把零点挪到这里：到平铺段出现（弧长 πR）是半宽，
+    // 再走一个 πR 到满宽 —— 与原来同一把尺子，起点提前半个 πR。
+    // 早先零点在 πR（纸背平铺段出现），影要等纸角跨过卷筒左边缘才看得见，读者判「太晚了」。
+    val flatTurn = PI.toFloat() * radius
+    val ramp = ((mesh.maxArc() - flatTurn * 0.5f) / flatTurn).coerceIn(0f, 1f)
     val backShadowWidth = radius * CURL3D_BACK_SHADOW_WIDTH * ramp
     val backShadowAlpha = DROP_SHADOW_ALPHA * CURL3D_BACK_SHADOW_ALPHA * shape.shadowFade
 
@@ -275,11 +282,13 @@ internal fun DrawScope.drawCurl3DFrame(
         // 影只铺页边**朝外**那一侧（背离纸背），所以落在纸背上的那半条根本不存在；
         // 画在所有纸段之后，卷起来那一段的影才不会被卷筒盖掉（读者判「阴影被卷筒截断」）。
         for (band in mesh.bands) drawBand(band)
-            val backRows = mesh.bands.firstOrNull { it.surface == CurlMesh.Surface.Back }?.let {
-            it.firstRow..it.lastRow
-        }
-        if (edges != null && backRows != null) {
-            drawBackEdgeShadow(edges, backRows, backShadowWidth, backShadowAlpha)
+        // 起点 = **纸背刚露头**：网格里已经有了 `Verso`（纸卷外圈那半段，纸背朝上）就画，
+        // 不必等平铺段。定朝外仍然优先用平铺段的扫线行，还没有平铺段时退回用 `Verso` 那半段。
+        val seedRows = (mesh.bands.firstOrNull { it.surface == CurlMesh.Surface.Back }
+            ?: mesh.bands.firstOrNull { it.surface == CurlMesh.Surface.Verso })
+            ?.let { it.firstRow..it.lastRow }
+        if (edges != null && seedRows != null) {
+            drawBackEdgeShadow(edges, seedRows, backShadowWidth, backShadowAlpha)
         }
         }
     return true
@@ -325,9 +334,9 @@ internal fun CurlMesh.backCorners(): List<Offset>? {
  * 一个线性渐变的等值线没法跟着弯，外沿会留一道能看见的硬边。
  *
  * @param edges 两条页边（都是 `折痕端 → 最远的纸角`）。
- * @param backRows 平铺纸背那一段的扫线行（`Back` 段）。**定朝外只在这里投票**：平铺段是
- *   一张平铺的纸，同一扫线上两个端点之间的连线一定穿过纸面；卷起来那截两端隔着筒壁，
- *   投影后还可能是反的。
+ * @param backRows 投票「朝外」用的扫线行：平铺纸背那一段（`Back` 段）最可信——那里同一扫线
+ *   上两个端点都在一张平铺的纸上，连线一定穿过纸面；还没有平铺段的帧（纸背刚露头、没绕满半圈）
+ *   退回用纸卷外圈那半段（`Verso`）。
  */
 internal fun DrawScope.drawBackEdgeShadow(
     edges: List<List<Offset>>,
@@ -342,10 +351,14 @@ internal fun DrawScope.drawBackEdgeShadow(
     if (first.size != second.size) return
     val edge1 = sampleShadowEdge(first, second, backRows) ?: return
     val edge2 = sampleShadowEdge(second, first, backRows) ?: return
+    val n = edge1.pts.size
     // 一条图层路径在整个影里复用（每层 reset 后重填）：一帧一个 `Path`，不再一帧几十个。
     val path = Path()
-    drawShadowStrip(edge1, maxWidth, alpha, path)
-    drawShadowStrip(edge2, maxWidth, alpha, path)
+    // 三角带的顶点缓冲：两条边共用一段，逐层覆写（最宽那一层 2n 个顶点）。
+    val corners = FloatArray(n * 4)
+    val paint = Paint().apply { blendMode = BlendMode.SrcOver }
+    drawShadowStrip(edge1, maxWidth, alpha, path, corners, paint)
+    drawShadowStrip(edge2, maxWidth, alpha, path, corners, paint)
     // 两条页边的末点重合 = 折痕正好切掉一个页角：角外那一楔两段带子都够不着，补扇形。
     // 末点隔开一段时（自由边 = 与纸卷相切的切线，纸压着纸）没有纸角，不补。
     val corner = first[first.size - 1]
@@ -393,35 +406,80 @@ private fun sampleShadowEdge(
 /**
  * 单条页边的软带：从折痕端（宽度 0）到最远的纸角（满宽）均匀加宽，**只铺朝外那一侧**。
  *
- * @param path 复用的图层路径（每层 `reset` 后重填）。
+ * 十六层照旧叠色、浓度照旧（每层常数浓度反解出来，叠满 K 层正好等于 [alpha]），
+ * 但**每层不再各填一条路径**：路径填充在 Skia 里走「按包围盒出覆盖率掩码」的抗锯齿
+ * 栅格化，而这条带子又长又细、斜着横过页面，包围盒撑到大半页 —— 一帧三十几次这种填充
+ * 是斜划掉帧的大头（见 `docs/卷曲3D实施计划.md` 第三节）。
+ *
+ * 现在的画法：
+ * - **最内侧那一档**（`0 … maxWidth/K`，影最深的一段）仍用**路径**填：整条影只有它的
+ *   内边压着纸边，必须是真的抗锯齿（三角带没有 AA，硬边会让影看起来「画在页边上」）。
+ *   它与外侧只差一层浓度（≈ 0.02），交界处少一层抗锯齿也看不出来，而且只有一条路径。
+ * - **其余各层**换成同样形状的三角带（`Vertices` + `TriangleStrip`）：顶点位置与路径
+ *   一模一样，只是走普通三角形光栅化，不再出掩码。
+ * - 浓度仍靠 `Paint.color`（顶点色一律全白）：真机上**可变顶点色不可靠**（见文件头），
+ *   白顶点色 + 画笔色已经由纸面纹理那条路验证过。
+ *
+ * @param path 复用的图层路径（最内侧那一档）。
+ * @param corners 复用的顶点缓冲（每层 `2n` 个顶点，逐层覆写）。
+ * @param paint 复用的画笔（逐层只改浓度）。
  */
 private fun DrawScope.drawShadowStrip(
     edge: ShadowEdge,
     maxWidth: Float,
     alpha: Float,
     path: Path,
+    corners: FloatArray,
+    paint: Paint,
 ) {
     val pts = edge.pts
     val n = pts.size
     if (n < 2) return
     val outward = edge.outward
     val tAt = edge.tAt
-    // 每层常数浓度反解出来，叠满 K 层正好等于 alpha。
     val layerAlpha = (1.0 - (1.0 - alpha.toDouble()).pow(1.0 / SHADOW_TAPER_LAYERS)).toFloat()
-    val color = Color(0f, 0f, 0f, layerAlpha)
-    for (layer in 1..SHADOW_TAPER_LAYERS) {
+    // 最内侧一档的宽度（第一层的宽度）：这一整段被 K 层盖住，浓度就是 alpha。
+    val core = maxWidth / SHADOW_TAPER_LAYERS
+    path.reset()
+    path.fillType = PathFillType.NonZero
+    for (i in 0 until n) {
+        if (i == 0) path.moveTo(pts[i].x, pts[i].y) else path.lineTo(pts[i].x, pts[i].y)
+    }
+    for (i in n - 1 downTo 0) {
+        val w = core * tAt[i]
+        path.lineTo(pts[i].x + outward[i].x * w, pts[i].y + outward[i].y * w)
+    }
+    path.close()
+    drawPath(path, Color(0f, 0f, 0f, alpha))
+
+    // 第 2 层到第 K 层：形状与逐层填路径完全一致，只是改走三角带。
+    //
+    // 浓度**不能**指望画笔色：没有着色器时真机只认顶点色（白 = 直接画成白的，整条影消失），
+    // 桌面却拿画笔色 —— 两端不一致的坑。这里给画笔一张**纯色着色器**（黑色，常数），
+    // 每层只改画笔 alpha，顶点色仍是全白，与纸面纹理那条路同一个组合。
+    paint.shader = ShadowSolid.shader()
+    paint.alpha = layerAlpha
+    for (layer in 2..SHADOW_TAPER_LAYERS) {
         val scale = layer.toFloat() / SHADOW_TAPER_LAYERS
-        path.reset()
-        path.fillType = PathFillType.NonZero
         for (i in 0 until n) {
-            if (i == 0) path.moveTo(pts[i].x, pts[i].y) else path.lineTo(pts[i].x, pts[i].y)
+            val inner = core * tAt[i]
+            val outer = maxWidth * scale * tAt[i]
+            val at = i * 4
+            corners[at] = pts[i].x + outward[i].x * inner
+            corners[at + 1] = pts[i].y + outward[i].y * inner
+            corners[at + 2] = pts[i].x + outward[i].x * outer
+            corners[at + 3] = pts[i].y + outward[i].y * outer
         }
-        for (i in n - 1 downTo 0) {
-            val w = maxWidth * scale * tAt[i]
-            path.lineTo(pts[i].x + outward[i].x * w, pts[i].y + outward[i].y * w)
-        }
-        path.close()
-        drawPath(path, color)
+        val vertices = Vertices(
+            vertexMode = VertexMode.TriangleStrip,
+            positions = FloatPairList(corners, 0, n * 2),
+            // 没有着色器时纹理坐标不参与取样，但 Compose 要求长度与位置一致。
+            textureCoordinates = ZeroCoords(n * 2),
+            // 顶点色一律白色（真机上可变顶点色不可靠），浓度由画笔色给。
+            colors = WhiteColorList(n * 2),
+            indices = emptyList(),
+        )
+        drawIntoCanvas { it.drawVertices(vertices, BlendMode.SrcOver, paint) }
     }
 }
 
@@ -429,10 +487,11 @@ private fun DrawScope.drawShadowStrip(
  * 页边每一点的**朝外法向**（背离纸背）：先把折线每点的法向取出来，再让「朝外」沿着折线
  * 连续地传下去。
  *
- * **在哪一行定朝外**只能取平铺纸背那一段（[seedRows]）：那里同一扫线上的两个端点都在
- * 一张平铺的纸上，连线一定穿过纸面，「另一端在哪一侧」才可信。卷起来那截不行 —— 两端隔着
- * 筒壁，投影后甚至可能是反的；折痕端那一行更不行，它的「两端」是整条折痕（纸对角），
- * 据此定出来的朝外一旦沿着页边传到平铺段就会落在纸背上。
+ * **在哪一行定朝外**最好取平铺纸背那一段（[seedRows]）：那里同一扫线上的两个端点都在
+ * 一张平铺的纸上，连线一定穿过纸面，「另一端在哪一侧」才可信。还没有平铺段（纸背刚露头、
+ * 没绕满半圈）的帧退一步用纸卷外圈那半段（`Verso`）—— 那一截两端隔着筒壁，投影后偶尔是反的，
+ * 但整段投票是多数对；折痕端那一行是唯一的例外，它的「两端」是整条折痕（纸对角），
+ * 所以只让它算一票，靠多数压掉。
  *
  * 投票取整段的多数，不只看一行：某一行恰好退化（纸角附近扫线几乎与页边平行）时，
  * 单行会被一个几乎零投影的噪声定死。票数只看「另一端在法向的哪一侧」，与扫线有多斜无关。
@@ -441,7 +500,7 @@ private fun DrawScope.drawShadowStrip(
  * 上一点取同号。卷起来那截页边在屏幕上会掉头（圆柱投影不是单射），切线翻向，法向公式也跟着
  * 翻，正好靠这条连续性保持朝外不变。
  *
- * @param seedRows 平铺纸背那一段的扫线行。
+ * @param seedRows 投票用的扫线行：优先平铺纸背那一段，没有就退回纸卷外圈那半段。
  */
 internal fun outwardNormals(
     edge: List<Offset>,
@@ -697,6 +756,45 @@ private class WhiteColorList(override val size: Int) : AbstractList<Color>() {
 }
 
 /**
+ * 全零纹理坐标（Compose 要求纹理坐标与顶点数等长）。
+ *
+ * 没有着色器时纹理坐标不参与取样（页边影只要纯色三角带），但长度必须对得上。
+ */
+private class ZeroCoords(override val size: Int) : AbstractList<Offset>() {
+    override fun get(index: Int): Offset = Offset.Zero
+}
+
+/**
+ * 页边影三角带用的**纯色着色器**（黑，不透明）。
+ *
+ * 顶点色只能是白色（真机上可变顶点色不可靠），而画笔色在 `drawVertices` 上没有着色器时
+ * 两端行为不一致：桌面按画笔色画、真机只认顶点色（白）。给它一张常数着色器就回到
+ * 「着色器 × 顶点色」这个两端都认的语义，浓度靠 `Paint.alpha` 逐层乘。
+ *
+ * 着色器只跟颜色有关，建一次全局复用；渐变两端同色，任意取样点都是纯黑。
+ */
+private object ShadowSolid {
+    private var cached: Shader? = null
+
+    fun shader(): Shader {
+        val hit = cached
+        if (hit != null) return hit
+        val img = ImageBitmap(1, 1, ImageBitmapConfig.Argb8888, hasAlpha = true)
+        CanvasDrawScope().draw(
+            density = Density(1f),
+            layoutDirection = LayoutDirection.Ltr,
+            canvas = Canvas(img),
+            size = Size(1f, 1f),
+        ) {
+            drawRect(Color.Black)
+        }
+        val fresh = ImageShader(img, TileMode.Clamp, TileMode.Clamp)
+        cached = fresh
+        return fresh
+    }
+}
+
+/**
  * 用一段网格画一张纹理（**Compose 公共 API**：`Vertices` + `ImageShader`）。
  *
  * 网格本来就是「每行两个顶点、相邻两行连成四边形」的形状，正好是一条
@@ -934,8 +1032,9 @@ internal const val CURL3D_RADIUS_RATIO: Float = 0.10f
  * 平铺段上读起来就是「页面中间莫名其妙一道灰带」）。
  *
  * 这个宽度是**最远的纸角**处的宽度：沿页边往折痕端走按弧长匀速收到 0（见 [drawBackEdgeShadow]）。
- * 另外纸背刚出现时宽度从 0 渐入（按平铺段长度占半圈弧长 πR 的比例），不按进度给起始宽度
- * ——否则纸背一露头就是一整条影，读者判「阴影突然出现」。
+ * 整体的宽度从 **纸背刚露头那一刻**（页角处的纸在筒顶翻成背面朝上，弧长 πR/2）开始渐入，
+ * 到平铺段出现（弧长 πR）半宽、再走一个 πR 满宽；早先零点在 πR，影要等纸角跨过卷筒左边缘
+ * 才看得见（读者判「太晚了」）。
  */
 internal const val CURL3D_BACK_SHADOW_WIDTH: Float = 1.00f
 

@@ -633,8 +633,8 @@ class Curl3DRenderTest {
                 val edges = mesh.pageEdges() ?: continue
                 val back = mesh.bands.firstOrNull { it.surface == CurlMesh.Surface.Back } ?: continue
                 if (back.lastRow - back.firstRow < 2) continue
-                val flatSpan = (mesh.maxArc() - PI.toFloat() * radius).coerceAtLeast(0f)
-                val ramp = (flatSpan / (PI.toFloat() * radius)).coerceIn(0f, 1f)
+                val flatTurn = PI.toFloat() * radius
+                val ramp = ((mesh.maxArc() - flatTurn * 0.5f) / flatTurn).coerceIn(0f, 1f)
                 val maxWidth = radius * CURL3D_BACK_SHADOW_WIDTH * ramp
                 if (maxWidth < 6f) continue
                 val on = render(shape, solid(w, h, paper), solid(w, h, paper)).toPixelMap()

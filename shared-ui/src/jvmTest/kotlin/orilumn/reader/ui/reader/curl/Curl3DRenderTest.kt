@@ -14,6 +14,7 @@ import androidx.compose.ui.unit.LayoutDirection
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.hypot
+import kotlin.math.roundToInt
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -271,36 +272,38 @@ class Curl3DRenderTest {
             val shape = curlShape(w.toFloat(), h.toFloat(), 0.45f, dir, tilt = 0.35f)
             val radius = curlRadius(shape)
             val mesh = buildCurlMesh(shape, radius)
-            val corners = mesh.backCorners()
-            assertTrue("dir=$dir 斜折痕下应当有纸背", corners != null)
-            val (near0, far0, far1, near1) = corners!!
-            val center = corners.reduce { acc, p -> acc + p } / corners.size.toFloat()
+            val back = mesh.bands.firstOrNull { it.surface == CurlMesh.Surface.Back }
+            assertTrue("dir=$dir 斜折痕下应当有纸背", back != null)
+            val edges = mesh.pageEdges()!!
             val px = render(shape, solid(w, h, paper), solid(w, h, paper)).toPixelMap()
             val width = radius * CURL3D_BACK_SHADOW_WIDTH
             fun lumaAt(pt: Offset): Float {
                 val c = px[pt.x.toInt().coerceIn(0, w - 1), pt.y.toInt().coerceIn(0, h - 1)]
                 return (c.red + c.green + c.blue) / 3f
             }
+            // 纸在哪一侧按同一扫线行的另一条页边判（不按重心：纸卷起来时重心会落到纸外）。
             var checked = 0
-            for ((a, b) in listOf(far0 to near0, far1 to near1)) {
-                val mid = (a + b) * 0.5f
-                val ex = b.x - a.x
-                val ey = b.y - a.y
-                val len = hypot(ex, ey)
-                assertTrue("dir=$dir 直角边长度为 0", len > 10f)
-                var outward = Offset(ey / len, -ex / len)
-                if ((mid.x - center.x) * outward.x + (mid.y - center.y) * outward.y < 0f) {
-                    outward = Offset(-outward.x, -outward.y)
+            val rows = listOf(
+                (back!!.firstRow + back.lastRow) / 2,
+                back.firstRow + (back.lastRow - back.firstRow) * 3 / 4,
+            )
+            for (k in 0..1) {
+                for (row in rows) {
+                    val p = edges[k][row]
+                    val inward = edges[1 - k][row] - p
+                    val len = hypot(inward.x, inward.y)
+                    if (len < 10f) continue
+                    val outward = Offset(-inward.x / len, -inward.y / len)
+                    val near = p + outward * (width * 0.5f)
+                    val far = p + outward * (width * 3f)
+                    if (near.x < 6f || near.x > w - 6f || near.y < 6f || near.y > h - 6f) continue
+                    if (far.x < 2f || far.x > w - 2f || far.y < 2f || far.y > h - 2f) continue
+                    checked++
+                    assertTrue(
+                        "dir=$dir row=$row 折角的一条直角边没有落影：边旁 ${lumaAt(near)} / 更外侧 ${lumaAt(far)}",
+                        lumaAt(near) < lumaAt(far) - 0.02f,
+                    )
                 }
-                val near = mid + outward * (width * 0.5f)
-                val far = mid + outward * (width * 3f)
-                if (near.x < 6f || near.x > w - 6f || near.y < 6f || near.y > h - 6f) continue
-                if (far.x < 2f || far.x > w - 2f || far.y < 2f || far.y > h - 2f) continue
-                checked++
-                assertTrue(
-                    "dir=$dir 折角的一条直角边没有落影：边旁 ${lumaAt(near)} / 更外侧 ${lumaAt(far)}",
-                    lumaAt(near) < lumaAt(far) - 0.02f,
-                )
             }
             assertTrue("dir=$dir 两条直角边都没能采样，测试没测到东西", checked > 0)
         }
@@ -395,8 +398,7 @@ class Curl3DRenderTest {
      *
      * 早先这里铺过一层「筒底贴页处最深的淡暗」，边界就钉在切线上：一边是平铺的纸背、
      * 一边是同色的卷面，中间一道硬边，读者看到的是「筒的左侧平白多出一条折痕」。
-     * 现在筒内侧那层影只画在纸卷内壁上、并且被外圈压住（见 `drawCreaseShade`）：
-     * 沿折痕中段量，相邻像素不许跳。
+     * 现在筒身只有「反光」那一层明暗、筒内侧那层暗已退役：沿折痕中段量，相邻像素不许跳。
      */
     @Test
     fun rollBaseHasNoCreaseLine() {
@@ -429,110 +431,6 @@ class Curl3DRenderTest {
         }
     }
 
-    /**
-     * 卷筒**内侧**那层影：只落在筒的内壁，而且只落在它**探出折角三角形以外的两头**。
-     *
-     * 卷起来的纸分三段：正面那四分之一圈（筒的内壁）、纸背那半圈（筒的外侧）、绕满半圈后
-     * 平铺回去的纸背（读者看到的折角三角形）。中段的内壁被外圈盖着，露出来的只有两头 ——
-     * 那两头才是「筒里」，该暗。纸背是纸的正面、外圈是纸的外侧，都不许吃这层影：早先按整条
-     * 折痕铺一条矩形式渐变，影越过卷筒落到纸背与外圈上，读者判「透到外侧」「没纸的地方也画」。
-     *
-     * 纯白页量：纸、压淡、反光都是往白里压，只有影会压暗。
-     */
-    @Test
-    fun rollInnerShadeOnlyOnTheExposedInnerWall() {
-        val w = 400
-        val h = 600
-        val white = 0xFFFFFFFF.toInt()
-        for (dir in listOf(1, -1)) {
-            val shape = curlShape(w.toFloat(), h.toFloat(), 0.3f, dir, tilt = 0.25f)
-            val radius = curlRadius(shape)
-            val mesh = buildCurlMesh(shape, radius)
-            val t0 = Offset(shape.topX, 0f)
-            val t1 = Offset(shape.bottomX, h.toFloat())
-            val foldLen = hypot(t1.x - t0.x, h.toFloat()).coerceAtLeast(1e-3f)
-            val side = if (dir >= 0) 1f else -1f
-            val up = Offset(h / foldLen * side, -(t1.x - t0.x) / foldLen * side)
-            fun ring(surface: CurlMesh.Surface): List<Offset>? =
-                mesh.bands.firstOrNull { it.surface == surface }?.let { mesh.bandOutline(it) }
-            val inner = ring(CurlMesh.Surface.Recto)
-            val outer = ring(CurlMesh.Surface.Verso)
-            val flap = ring(CurlMesh.Surface.Back)
-            assertTrue("dir=$dir 这个几何下三段纸都应当有", inner != null && outer != null && flap != null)
-            val px = render(shape, solid(w, h, white), solid(w, h, white)).toPixelMap()
-            fun lumaAt(pt: Offset): Float {
-                val c = px[pt.x.toInt().coerceIn(0, w - 1), pt.y.toInt().coerceIn(0, h - 1)]
-                return (c.red + c.green + c.blue) / 3f
-            }
-            // 采样点离每条轮廓至少 3px，避开抗锯齿边。
-            val near = listOf(Offset.Zero, Offset(3f, 0f), Offset(-3f, 0f), Offset(0f, 3f), Offset(0f, -3f))
-            fun wellInside(r: List<Offset>, p: Offset) = near.all { inside(r, p + it) }
-            fun clearOf(r: List<Offset>, p: Offset) = near.all { !inside(r, p + it) }
-            // ① 露出来的内壁：暗的一头在**筒口**（背离折痕的外沿），折痕那一侧必须是亮的
-            //    —— 早先深浅接反，读者判「圆筒内部的阴影方向画反了，应该右侧深、左侧浅」。
-            var foldLuma = 0f
-            var foldCount = 0
-            var mouthLuma = 0f
-            var mouthCount = 0
-            for (y in 4 until h - 4 step 4) {
-                for (x in 4 until w - 4 step 4) {
-                    val p = Offset(x.toFloat(), y.toFloat())
-                    if (!wellInside(inner!!, p)) continue
-                    if (!clearOf(outer!!, p) || !clearOf(flap!!, p)) continue
-                    val q = (p.x - t0.x) * up.x + (p.y - t0.y) * up.y
-                    when {
-                        q in (radius * 0.05f)..(radius * 0.2f) -> {
-                            foldLuma += lumaAt(p)
-                            foldCount++
-                        }
-                        q in (radius * 0.6f)..(radius * 0.95f) -> {
-                            mouthLuma += lumaAt(p)
-                            mouthCount++
-                        }
-                    }
-                }
-            }
-            assertTrue("dir=$dir 没扫到露出来的内壁，测试没测到东西", foldCount >= 2 && mouthCount >= 2)
-            foldLuma /= foldCount
-            mouthLuma /= mouthCount
-            assertTrue(
-                "dir=$dir 筒口这一侧没有压暗：筒口 $mouthLuma / 折痕侧 $foldLuma",
-                mouthLuma < foldLuma - 0.08f,
-            )
-            assertTrue("dir=$dir 筒口一侧不够暗：$mouthLuma", mouthLuma < 0.96f)
-            assertTrue("dir=$dir 折痕一侧被压暗了：$foldLuma（那里应当还朝着光）", foldLuma > 0.95f)
-            // ② 外圈（筒的外侧，也就是纸背那半圈）不吃这层影：白页上必须还是白的。
-            val midFold = (t0 + t1) * 0.5f
-            val onOuter = midFold + up * (radius * 0.30f)
-            assertTrue(
-                "dir=$dir 筒的外圈被这层影压暗了：${lumaAt(onOuter)}",
-                lumaAt(onOuter) > 0.98f,
-            )
-            // ③ 平铺的纸背同样不吃这层影。筒径固定后，纸卷绕满半圈要吃掉 πR 的纸，
-            //    p=0.3 这一帧根本还没有平铺段（折痕往没掀起那侧退到 -0.6R 处还是**露出页**，
-            //    那里本来就该有落影），所以这条另取一帧「纸背已经出来」的画面，采样点按轮廓取。
-            val flatP = 0.7f
-            val flatShape = curlShape(w.toFloat(), h.toFloat(), flatP, dir, tilt = 0.25f)
-            val flatRadius = curlRadius(flatShape)
-            val flatMesh = buildCurlMesh(flatShape, flatRadius)
-            val flapRing = flatMesh.bands
-                .firstOrNull { it.surface == CurlMesh.Surface.Back }
-                ?.let { flatMesh.bandOutline(it) }
-            assertTrue("dir=$dir p=$flatP 应该已经有平铺的纸背（掀起长度 > πR）", flapRing != null)
-            val ft0 = Offset(flatShape.topX, 0f)
-            val ft1 = Offset(flatShape.bottomX, h.toFloat())
-            val flatFoldLen = hypot(ft1.x - ft0.x, h.toFloat()).coerceAtLeast(1e-3f)
-            val flatUp = Offset(h / flatFoldLen * side, -(ft1.x - ft0.x) / flatFoldLen * side)
-            val onFlap = (ft0 + ft1) * 0.5f - flatUp * (flatRadius * 1.5f)
-            assertTrue("dir=$dir 纸背采样点没落在纸背上，测试没测到东西", wellInside(flapRing!!, onFlap))
-            val flatPx = render(flatShape, solid(w, h, white), solid(w, h, white)).toPixelMap()
-            val flatLuma = ((flatPx[onFlap.x.toInt(), onFlap.y.toInt()].red +
-                flatPx[onFlap.x.toInt(), onFlap.y.toInt()].green +
-                flatPx[onFlap.x.toInt(), onFlap.y.toInt()].blue) / 3f)
-            assertTrue("dir=$dir 平铺的纸背被这层影压暗了：$flatLuma", flatLuma > 0.98f)
-        }
-    }
-
     /** 点在多边形内（射线法）：纸卷各段的轮廓都是简单多边形，够用。 */
     private fun inside(ring: List<Offset>, p: Offset): Boolean {
         var hit = false
@@ -548,6 +446,165 @@ class Curl3DRenderTest {
             j = i
         }
         return hit
+    }
+
+    /**
+     * 纸背上**不许有影**：沿页边那道影只落在旧页上，不许铺到纸面（读者圈的「纸背右边那条灰带」）。
+     *
+     * 影带**只铺页边朝外那一侧**，纸背那一侧压根不画；早先两侧都铺、想靠「纸画在影之后」把
+     * 内侧那半条盖掉，但影一旦挪到纸段之后（否则卷起段会被卷筒盖住），盖不掉的那半条就成了
+     * 纸背右边那条灰带。
+     *
+     * 只量**平铺段**（Back）那几行：折痕端接着纸卷，纸卷自己的落影与两段纸的接缝都在那里，
+     * 与「影带铺到纸背上」不是一回事。纸背还没长出来（`Back` 段为空）的进度不量。
+     * 取点沿**页边的法向**往里量：页边与扫线并不垂直，顺着扫线量会贴着页边滑出去。
+     */
+    @Test
+    fun pageBackCarriesNoEdgeShadow() {
+        val w = 400
+        val h = 600
+        val plain = luma(Color(paper))
+        for ((p, tilt) in listOf(0.3f to 0.25f, 0.45f to 0.35f, 0.6f to 0f)) {
+            for (dir in listOf(1, -1)) {
+                val shape = curlShape(w.toFloat(), h.toFloat(), p, dir, tilt)
+                val mesh = buildCurlMesh(shape, curlRadius(shape))
+                val edges = mesh.pageEdges() ?: continue
+                val back = mesh.bands.firstOrNull { it.surface == CurlMesh.Surface.Back } ?: continue
+                if (back.lastRow - back.firstRow < 2) continue
+                val px = render(shape, solid(w, h, paper), solid(w, h, paper)).toPixelMap()
+                fun lumaAt(x: Int, y: Int): Float {
+                    val c = px[x, y]
+                    return (c.red + c.green + c.blue) / 3f
+                }
+                var checked = 0
+                for (k in 0..1) {
+                    val edge = edges[k]
+                    val other = edges[1 - k]
+                    // 两头各留 3 行：折痕端接着纸卷，纸角端距纸的自由边不到 1px，
+                    // 沿法向量的 3px 会落到纸外（那是旧页上的影，本来就该有）。
+                    var i = back.firstRow + 3
+                    while (i <= back.lastRow - 3) {
+                        val at = edge[i]
+                        val across = other[i] - at
+                        // 页边切线取前后两点的差，法向再与之垂直；纸在 `other` 那一侧。
+                        val before = edge[maxOf(i - 1, 0)]
+                        val after = edge[minOf(i + 1, edge.size - 1)]
+                        val tx = after.x - before.x
+                        val ty = after.y - before.y
+                        val tl = hypot(tx, ty)
+                        if (tl < 1e-3f) {
+                            i += 5
+                            continue
+                        }
+                        var nx = -ty / tl
+                        var ny = tx / tl
+                        val len = hypot(across.x, across.y)
+                        // 纸角附近纸太窄（扫线几乎与页边平行），法向判不准，量不到「纸面里侧」。
+                        if (len < 60f || abs(nx * across.x + ny * across.y) / len < 0.3f) {
+                            i += 5
+                            continue
+                        }
+                        if (nx * across.x + ny * across.y < 0f) {
+                            nx = -nx
+                            ny = -ny
+                        }
+                        for (d in listOf(3f, 6f, 12f)) {
+                            val x = (at.x + nx * d).roundToInt()
+                            val y = (at.y + ny * d).roundToInt()
+                            if (x < 2 || x > w - 3 || y < 2 || y > h - 3) continue
+                            checked++
+                            assertTrue(
+                                "p=$p dir=$dir 页边内侧 ${d}px ($x,$y) 比纸面暗了 " +
+                                    "${plain - lumaAt(x, y)} —— 影铺到纸背上了",
+                                lumaAt(x, y) >= plain - 0.02f,
+                            )
+                        }
+                        i += 5
+                    }
+                }
+                assertTrue("p=$p dir=$dir 没量到纸背，测试没测到东西", checked > 0)
+            }
+        }
+    }
+
+    /**
+     * 卷起来那一段页边的影**不许被卷筒截断**：它必须落在所有纸段之后（画在纸上），
+     * 不能被圆柱远侧的纸盖掉。
+     *
+     * 判法用**同几何关掉影**（`shadowFade = 0`）出图对照：卷起段页边朝外一点点必须比
+     * 「关掉影」暗（影在）。这样不受筒身明暗、落影与 AA 边的绝对值影响。
+     *
+     * 只量**卷起段**（`Back` 段之前的行，且影带已经足够宽的行）：折痕端那几行宽度收成 0，
+     * 量不到东西。纸背那一侧不许有影由 [pageBackCarriesNoEdgeShadow] 负责；卷起段的筒内
+     * 自遮（影落在同一张纸的卷面上）不在这条的管辖里。
+     */
+    @Test
+    fun rolledEdgeShadowIsNotClippedByTheRoll() {
+        val w = 400
+        val h = 600
+        for ((p, tilt) in listOf(0.3f to 0.25f, 0.45f to 0.35f)) {
+            for (dir in listOf(1, -1)) {
+                val shape = curlShape(w.toFloat(), h.toFloat(), p, dir, tilt)
+                val radius = curlRadius(shape)
+                val mesh = buildCurlMesh(shape, radius)
+                val edges = mesh.pageEdges() ?: continue
+                val back = mesh.bands.firstOrNull { it.surface == CurlMesh.Surface.Back } ?: continue
+                if (back.lastRow - back.firstRow < 2) continue
+                val flatSpan = (mesh.maxArc() - PI.toFloat() * radius).coerceAtLeast(0f)
+                val ramp = (flatSpan / (PI.toFloat() * radius)).coerceIn(0f, 1f)
+                val maxWidth = radius * CURL3D_BACK_SHADOW_WIDTH * ramp
+                if (maxWidth < 6f) continue
+                val on = render(shape, solid(w, h, paper), solid(w, h, paper)).toPixelMap()
+                val off = render(shape.copy(shadowFade = 0f), solid(w, h, paper), solid(w, h, paper)).toPixelMap()
+                fun lumaAt(x: Int, y: Int): Float {
+                    val c = on[x, y]
+                    return (c.red + c.green + c.blue) / 3f
+                }
+                fun lumaOff(x: Int, y: Int): Float {
+                    val c = off[x, y]
+                    return (c.red + c.green + c.blue) / 3f
+                }
+                var checked = 0
+                for (k in 0..1) {
+                    val edge = edges[k]
+                    val other = edges[1 - k]
+                    val outward = outwardNormals(edge, other, back.firstRow..back.lastRow) ?: continue
+                    // 归一化弧长：只有影宽够的地方才可能在 3px 处量到影。
+                    var cum = 0f
+                    val tAt = FloatArray(edge.size)
+                    for (i in 1 until edge.size) {
+                        cum += (edge[i] - edge[i - 1]).getDistance()
+                        tAt[i] = cum
+                    }
+                    if (cum < 1f) continue
+                    for (i in 1 until edge.size) tAt[i] /= cum
+                    var i = 3
+                    while (i <= back.firstRow - 2) {
+                        val width = maxWidth * tAt[i]
+                        if (width < 6f) {
+                            i += 2
+                            continue
+                        }
+                        val at = edge[i]
+                        val o = outward[i]
+                        val ox = (at.x + o.x * 3f).roundToInt()
+                        val oy = (at.y + o.y * 3f).roundToInt()
+                        if (ox < 2 || ox > w - 3 || oy < 2 || oy > h - 3) {
+                            i += 3
+                            continue
+                        }
+                        checked++
+                        assertTrue(
+                            "p=$p dir=$dir 卷起段页边 (${at.x.toInt()},${at.y.toInt()}) 朝外 3px 没有影" +
+                                "（被卷筒截断了）：开影 ${lumaAt(ox, oy)} / 关影 ${lumaOff(ox, oy)}",
+                            lumaAt(ox, oy) < lumaOff(ox, oy) - 0.01f,
+                        )
+                        i += 3
+                    }
+                }
+                assertTrue("p=$p dir=$dir 没量到卷起段，测试没测到东西", checked > 0)
+            }
+        }
     }
 
     /**

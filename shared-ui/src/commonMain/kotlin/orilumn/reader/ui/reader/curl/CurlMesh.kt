@@ -357,6 +357,31 @@ internal fun CurlMesh.bandOutline(firstRow: Int, lastRow: Int): List<Offset> {
 internal fun CurlMesh.maxArc(): Float = arc.maxOrNull() ?: 0f
 
 /**
+ * 整张纸的**两条页边**（`折痕端 → 直角顶点` 折线，页坐标）。
+ *
+ * 每行的两个端点就是纸的两条页边：`row*2` 是沿折痕 `λ` 较大的那条，`row*2+1` 是另一条。
+ * 顺序按扫线走（`x'` 从 0 递减），所以：
+ *
+ * - **首点**在折痕上，就是页边与屏幕边缘的交点（折痕斜时在上下页边、竖直时在左右页边）；
+ * - **末点**是最远的页角，也就是纸背那个直角顶点。
+ *
+ * 折线**跨全部扫线行**（正面段、纸背段都算），所以它天然分成两截：贴着折痕那截是卷起来的
+ * 花瓣弧（曲线），平铺段那截是直线。沿边铺影时「页边是直线就画直线、是弧就画曲线」全靠它，
+ * 宽度从末点（直角顶点）均匀线性收到首点（0）也就正好落在屏幕边缘上。
+ */
+internal fun CurlMesh.pageEdges(): List<List<Offset>>? {
+    val rows = arc.size / 2
+    if (rows < 2) return null
+    val bottom = ArrayList<Offset>(rows)
+    val top = ArrayList<Offset>(rows)
+    for (row in 0 until rows) {
+        bottom.add(Offset(positions[row * 4], positions[row * 4 + 1]))
+        top.add(Offset(positions[row * 4 + 2], positions[row * 4 + 3]))
+    }
+    return listOf(bottom, top)
+}
+
+/**
  * 一段扫线落在**页栅格材料范围**里的那块形状（页坐标多边形）；整段都在范围外时返回 `null`。
  *
  * 页栅格只有版心那么大（平板 1585×2400 放在 1840×2800 里），页边距里没有像素。纹理若越界

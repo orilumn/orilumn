@@ -182,11 +182,20 @@ internal fun buildCurlMesh(
     }
     for (i in 0 until 4) raw.add(cornerX[i])
     raw.sortDescending()
+    // 页角那几条扫线**不许被合并掉**：它们与等分扫线只差零点几像素时照样保留。
+    // 合并掉就会让两条页边停在离页角几个像素的地方（角附近两条页边夹角很小，差半像素的
+    // 扫线能拉出好几像素长的弦）：纸带末端是一条凭空截断的斜边，纸角那块扇形影更因为
+    // 「两条页边没在角上碰头」整个不画 —— 读者报「页角正好位于卷筒左侧边时扇形影会消失」。
+    val cornerRows = HashSet<Float>(4)
+    for (c in cornerX) if (c <= ROW_EPSILON && c >= xMin - ROW_EPSILON) cornerRows.add(c)
     val rows = ArrayList<Float>(raw.size)
     for (x in raw) {
         if (x > ROW_EPSILON) continue
         if (x < xMin - ROW_EPSILON) continue
-        if (rows.isNotEmpty() && rows.last() - x < ROW_EPSILON) continue
+        if (rows.isNotEmpty() && rows.last() - x < ROW_EPSILON) {
+            // 完全重合的照样只留一条；只是「贴得近」的页角扫线要留下。
+            if (x !in cornerRows || rows.last() == x) continue
+        }
         rows.add(x)
     }
 

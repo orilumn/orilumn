@@ -393,6 +393,45 @@ class Curl3DRenderTest {
     }
 
     /**
+     * 扫线必须**落到页角上**：末行两个端点的材料坐标就是页面四角之一。
+     *
+     * 扫线按「与上一条差不足半像素就合并」收行，页角那条扫线常常正好落在半像素以内被并掉。
+     * 角附近两条页边夹角很小，差半像素的扫线能拉出好几像素长的弦，于是两条页边停在离页角
+     * 几个像素的地方：纸带末端是一条凭空截断的斜边，纸角那块扇形影更因为「两条页边没在角上
+     * 碰头」整个不画 —— 读者报「页角正好位于卷筒左侧边时阴影扇形会消失」。
+     */
+    @Test
+    fun pageEdgesReachThePageCorner() {
+        val w = 400f
+        val h = 600f
+        var checked = 0
+        for (p in listOf(0.19f, 0.27f, 0.3f, 0.45f, 0.7f)) {
+            for (tilt in listOf(0.05f, 0.15f, 0.35f)) {
+                for (dir in listOf(1, -1)) {
+                    val shape = curlShape(w, h, p, dir, tilt = tilt)
+                    val mesh = buildCurlMesh(shape, curlRadius(shape))
+                    val rows = mesh.arc.size / 2
+                    if (rows < 2) continue
+                    for (k in 0..1) {
+                        val at = (((rows - 1) * 2) + k) * 2
+                        val u = mesh.texCoords[at]
+                        val v = mesh.texCoords[at + 1]
+                        val onX = abs(u) < 0.6f || abs(u - w) < 0.6f
+                        val onY = abs(v) < 0.6f || abs(v - h) < 0.6f
+                        assertTrue(
+                            "p=$p tilt=$tilt dir=$dir 末行第 ${k + 1} 个端点 ($u,$v) 不在页角上：" +
+                                "扫线没走到页角，纸边和纸角的扇形影都会在角前截断",
+                            onX && onY,
+                        )
+                    }
+                    checked++
+                }
+            }
+        }
+        assertTrue("一帧都没量到，测试没测到东西", checked > 0)
+    }
+
+    /**
      * 纸角的**转角影**要连成一片：两条直角边共用一个纸角时（自由边退化成一点），
      * 角外的等分线方向也必须比远处暗 —— 早先两条影带各停一条垂线，角上正好空一个楔形缺口，
      * 读者看到的是「直角处两条阴影带没有融合在一起」。
@@ -401,15 +440,17 @@ class Curl3DRenderTest {
     fun foldedCornerShadowsMeetAtTheSharedCorner() {
         val w = 400
         val h = 600
-        for (dir in listOf(1, -1)) {
-            val shape = curlShape(w.toFloat(), h.toFloat(), 0.3f, dir, tilt = 0.25f)
+        // 后面的 `0.27f to 0.05f` 是读者报的那一帧：页角正好落在卷筒左侧边（平铺段长度≈0）时，
+        // 页角扫线曾被「差不足半像素就合并」并掉，两条页边停在离角 1.8px 处，扇形整个不画。
+        for ((p, tilt) in listOf(0.3f to 0.25f, 0.27f to 0.05f)) for (dir in listOf(1, -1)) {
+            val shape = curlShape(w.toFloat(), h.toFloat(), p, dir, tilt = tilt)
             val radius = curlRadius(shape)
             val mesh = buildCurlMesh(shape, radius)
             val corners = mesh.backCorners()
-            assertTrue("dir=$dir 斜折痕下应当有纸背", corners != null)
+            assertTrue("p=$p tilt=$tilt dir=$dir 斜折痕下应当有纸背", corners != null)
             val (near0, far0, far1, near1) = corners!!
             // 这个几何下自由边退化成一点，两条直角边共用 far0。
-            assertTrue("dir=$dir 自由边没有退化，测不到转角", (far0 - far1).getDistance() < 0.5f)
+            assertTrue("p=$p tilt=$tilt dir=$dir 自由边没有退化，测不到转角", (far0 - far1).getDistance() < 0.5f)
             val center = corners.reduce { acc, p -> acc + p } / corners.size.toFloat()
             fun outward(to: Offset): Offset {
                 val dx = to.x - far0.x
@@ -423,7 +464,7 @@ class Curl3DRenderTest {
             }
             val bisector = outward(near0) + outward(near1)
             val bisLen = hypot(bisector.x, bisector.y)
-            assertTrue("dir=$dir 两条直角边不在纸角上相交", bisLen > 0.5f)
+            assertTrue("p=$p tilt=$tilt dir=$dir 两条直角边不在纸角上相交", bisLen > 0.5f)
             val unit = Offset(bisector.x / bisLen, bisector.y / bisLen)
             val width = radius * CURL3D_BACK_SHADOW_WIDTH
             val px = render(shape, solid(w, h, paper), solid(w, h, paper)).toPixelMap()
@@ -438,7 +479,7 @@ class Curl3DRenderTest {
             if (near.x < 6f || near.x > w - 6f || near.y < 6f || near.y > h - 6f) continue
             if (far.x < 2f || far.x > w - 2f || far.y < 2f || far.y > h - 2f) continue
             assertTrue(
-                "dir=$dir 纸角转角处没有影（两条影带中间空着）：角外 ${lumaAt(near)} / 更远处 ${lumaAt(far)}",
+                "p=$p tilt=$tilt dir=$dir 纸角转角处没有影（两条影带中间空着）：角外 ${lumaAt(near)} / 更远处 ${lumaAt(far)}",
                 lumaAt(near) < lumaAt(far) - 0.02f,
             )
         }

@@ -295,7 +295,16 @@ internal fun DrawScope.drawCurl3DFrame(
         // 就翻到页边另一侧。退回 `Verso` 那半段的票反而稳。
         val seedRows = mesh.shadowSeedRows()
         if (edges != null && seedRows != null && taperFrom != null) {
-            drawBackEdgeShadow(edges, seedRows, taperFrom, backShadowWidth, backShadowAlpha)
+            // 影宽的斜坡铺向**最远的纸角**那一头；折痕几乎竖直时，扫线从哪个页角出界会随
+            // 倾斜的正负换一头（屏幕上下两端的宽度整段对调）。所以斜坡的陡度按倾斜渐变。
+            drawBackEdgeShadow(
+                edges,
+                seedRows,
+                taperFrom,
+                backShadowWidth,
+                backShadowAlpha,
+                shadowTaperBias(shape.lean, shape.shadowFade),
+            )
         }
         }
     return true
@@ -365,6 +374,7 @@ internal fun DrawScope.drawBackEdgeShadow(
     taperFrom: Int,
     maxWidth: Float,
     alpha: Float,
+    taperBias: Float = 1f,
 ) {
     if (maxWidth <= 0.5f || alpha <= 0f) return
     val first = edges[0]
@@ -379,8 +389,8 @@ internal fun DrawScope.drawBackEdgeShadow(
     // 三角带的顶点缓冲：两条边共用一段，逐层覆写（最宽那一层 2n 个顶点）。
     val corners = FloatArray(n * 4)
     val paint = Paint().apply { blendMode = BlendMode.SrcOver }
-    drawShadowStrip(edge1, maxWidth, alpha, path, corners, paint)
-    drawShadowStrip(edge2, maxWidth, alpha, path, corners, paint)
+    drawShadowStrip(edge1, maxWidth, taperBias, alpha, path, corners, paint)
+    drawShadowStrip(edge2, maxWidth, taperBias, alpha, path, corners, paint)
     // 两条页边的末点重合 = 折痕正好切掉一个页角：角外那一楔两段带子都够不着，补扇形。
     // 末点隔开一段时（自由边 = 与纸卷相切的切线，纸压着纸）没有纸角，不补。
     val corner = first[first.size - 1]
@@ -455,11 +465,13 @@ private fun sampleShadowEdge(
 private fun DrawScope.drawShadowStrip(
     edge: ShadowEdge,
     maxWidth: Float,
+    taperBias: Float,
     alpha: Float,
     path: Path,
     corners: FloatArray,
     paint: Paint,
 ) {
+    fun profile(t: Float) = shadowWidthProfile(t, taperBias)
     val pts = edge.pts
     val n = pts.size
     if (n < 2) return
@@ -474,7 +486,7 @@ private fun DrawScope.drawShadowStrip(
         if (i == 0) path.moveTo(pts[i].x, pts[i].y) else path.lineTo(pts[i].x, pts[i].y)
     }
     for (i in n - 1 downTo 0) {
-        val w = core * tAt[i]
+        val w = core * profile(tAt[i])
         path.lineTo(pts[i].x + outward[i].x * w, pts[i].y + outward[i].y * w)
     }
     path.close()
@@ -490,8 +502,8 @@ private fun DrawScope.drawShadowStrip(
     for (layer in 2..SHADOW_TAPER_LAYERS) {
         val scale = layer.toFloat() / SHADOW_TAPER_LAYERS
         for (i in 0 until n) {
-            val inner = core * tAt[i]
-            val outer = maxWidth * scale * tAt[i]
+            val inner = core * profile(tAt[i])
+            val outer = maxWidth * scale * profile(tAt[i])
             val at = i * 4
             corners[at] = pts[i].x + outward[i].x * inner
             corners[at + 1] = pts[i].y + outward[i].y * inner
@@ -510,6 +522,27 @@ private fun DrawScope.drawShadowStrip(
         drawIntoCanvas { it.drawVertices(vertices, BlendMode.SrcOver, paint) }
     }
 }
+
+/**
+ * 影宽斜坡的陡度：0 = 两端一样宽（折痕基本竖直），1 = 纸角那头满宽、收尾那头收成 0。
+ *
+ * 折痕转到竖直时，扫线从哪个页角出界会随倾斜的正负换一头 —— 屏幕上端的宽度整段搬到下端。
+ * 按倾斜插值就能把这次对调摊成一段渐变（见 [SHADOW_TAPER_TILT]）。
+ *
+ * @param lean 折痕倾斜量（已按方向镜像）。
+ * @param fade 末段扶正系数：`lean` 已经被它乘过一次，除回去才是读者真正摆出的倾斜。
+ */
+internal fun shadowTaperBias(lean: Float, fade: Float): Float {
+    val tilt = if (fade > 1e-3f) lean / fade else 0f
+    return (abs(tilt) / SHADOW_TAPER_TILT).coerceIn(0f, 1f)
+}
+
+/**
+ * 页边某一点相对满宽的宽度比例。
+ *
+ * @param t 到收尾那一行（卷筒俯视图投影线）的归一化弧长：0 = 收尾处，1 = 最远的纸角。
+ */
+internal fun shadowWidthProfile(t: Float, taperBias: Float): Float = 1f - taperBias * (1f - t)
 
 /**
  * 页边每一点的**朝外法向**（背离纸背）：先把折线每点的法向取出来，再让「朝外」沿着折线
@@ -1127,6 +1160,17 @@ private const val SHADOW_SEED_MIN_ROWS: Int = 3
  * 与亚像素位置定死。单位化之后它们的票和最可信的行一样重，三五行噪声就能压过几百行真信号。
  */
 private const val SHADOW_VOTE_MIN_CHORD: Float = 8f
+
+/**
+ * 影宽那把斜坡「按倾斜渐变」的倾斜范围（0 = 竖直，1 = 斜到极限）。
+ *
+ * 影宽是**从最远的纸角往卷筒那头匀速收到 0**的。可折痕一转到竖直，扫线从哪个页角出界
+ * 就换了一头：屏幕上端的宽度整段搬到下端、下端搬到上端，来回摇摆时看着就是「两头的宽度
+ * 突然切换」。所以斜坡的陡度按倾斜插值：竖直（以及这个范围以内）两头一样宽，斜出去才慢慢
+ * 收成一头满宽、一头为 0。范围取这么小是因为它只该盖住「基本竖直」那一小段 —— 这段之外的
+ * 斜坡本来就是对的。
+ */
+private const val SHADOW_TAPER_TILT: Float = 0.06f
 
 /** 参考实现的压力值（`pageScroll` 点按翻页用 200/255）。 */
 internal const val CURL3D_REFERENCE_PRESSURE: Float = 0.7843f

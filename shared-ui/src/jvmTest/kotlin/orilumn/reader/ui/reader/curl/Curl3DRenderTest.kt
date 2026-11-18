@@ -1019,5 +1019,91 @@ class Curl3DRenderTest {
         assertTrue("一帧都没量到，测试没测到东西", total > 100)
     }
 
+    /**
+     * 折痕在竖直附近**来回摇摆**时，影宽在屏幕上下两端要渐变，不许整段对调。
+     *
+     * 读者的原话：「现在在页边接近垂直的位置来回摇摆时，两头的阴影宽度是突然切换，很不自然，
+     * 请改成根据倾斜角度逐渐转换」。根由是扫线从哪个页角出界：倾斜一换正负，出界的角就换到
+     * 另一头，斜坡满宽的那一端从上端搬到下端，一帧之间整段对调。
+     *
+     * 锁法：沿倾斜扫过去，同一张影带在屏幕最上、最下那一点的宽度，相邻两帧（倾斜差 0.001）
+     * 不许跳。折痕竖直时两端一样宽，斜出去才慢慢收成一头满宽、一头为 0。
+     */
+    @Test
+    fun nearVerticalFoldTurnsTheShadowWidthGradually() {
+        val w = 400
+        val h = 600
+        for (dir in listOf(1, -1)) {
+            for (p in listOf(0.3f, 0.45f)) {
+                // 两条影带的「屏幕最上/最下那一点」的宽度：一条满宽在上、一条满宽在下。
+                val prevTop = floatArrayOf(Float.NaN, Float.NaN)
+                val prevBottom = floatArrayOf(Float.NaN, Float.NaN)
+                var minWidth = Float.MAX_VALUE
+                var maxWidthSeen = 0f
+                var checked = 0
+                var tilt = -0.07f
+                while (tilt <= 0.0701f) {
+                    val shape = curlShape(w.toFloat(), h.toFloat(), p, dir, tilt = tilt)
+                    val radius = curlRadius(shape)
+                    val mesh = buildCurlMesh(shape, radius)
+                    val edges = mesh.pageEdges()
+                    val taperFrom = mesh.firstRowAtArc(PI.toFloat() * radius * 0.5f)
+                    val flatTurn = PI.toFloat() * radius
+                    val ramp = ((mesh.maxArc() - flatTurn * 0.5f) / flatTurn).coerceIn(0f, 1f)
+                    val fullWidth = radius * CURL3D_BACK_SHADOW_WIDTH * ramp
+                    if (edges != null && taperFrom != null && fullWidth >= 6f) {
+                        val bias = shadowTaperBias(shape.lean, shape.shadowFade)
+                        // 每条影带都在屏幕最上、最下那一点量宽度（影宽 = 满宽 × 斜坡）。
+                        for (k in 0..1) {
+                            val edge = edges[k]
+                            val n = edge.size - taperFrom
+                            if (n < 2) continue
+                            val tAt = FloatArray(n)
+                            var cum = 0f
+                            for (i in 1 until n) {
+                                cum += (edge[taperFrom + i] - edge[taperFrom + i - 1]).getDistance()
+                                tAt[i] = cum
+                            }
+                            if (cum < 1f) continue
+                            for (i in 0 until n) tAt[i] /= cum
+                            var topI = 0
+                            var botI = 0
+                            for (i in 0 until n) {
+                                if (edge[taperFrom + i].y < edge[taperFrom + topI].y) topI = i
+                                if (edge[taperFrom + i].y > edge[taperFrom + botI].y) botI = i
+                            }
+                            val top = fullWidth * shadowWidthProfile(tAt[topI], bias)
+                            val bottom = fullWidth * shadowWidthProfile(tAt[botI], bias)
+                            if (!prevTop[k].isNaN()) {
+                                assertTrue(
+                                    "dir=$dir p=$p tilt=${(tilt * 1000).toInt()} 边$k 屏幕上端的影宽从 " +
+                                        "${prevTop[k]} 跳到 $top —— 读者看到的就是「两头的宽度突然切换」",
+                                    abs(top - prevTop[k]) <= 6f,
+                                )
+                                assertTrue(
+                                    "dir=$dir p=$p tilt=${(tilt * 1000).toInt()} 边$k 屏幕下端的影宽从 " +
+                                        "${prevBottom[k]} 跳到 $bottom —— 读者看到的就是「两头的宽度突然切换」",
+                                    abs(bottom - prevBottom[k]) <= 6f,
+                                )
+                            }
+                            prevTop[k] = top
+                            prevBottom[k] = bottom
+                            minWidth = minOf(minWidth, minOf(top, bottom))
+                            maxWidthSeen = maxOf(maxWidthSeen, maxOf(top, bottom))
+                            checked++
+                        }
+                    }
+                    tilt += 0.001f
+                }
+                assertTrue("dir=$dir p=$p 一帧都没量到，测试没测到东西", checked > 20)
+                // 真的从「两端一样宽」转到了「一头满宽、一头为 0」，不是整段都没动。
+                assertTrue(
+                    "dir=$dir p=$p 影宽整段没有随倾斜变化（$minWidth..$maxWidthSeen），测了个寂寞",
+                    maxWidthSeen > 6f && minWidth < maxWidthSeen * 0.25f,
+                )
+            }
+        }
+    }
+
     private fun luma(c: Color): Float = (c.red + c.green + c.blue) / 3f
 }

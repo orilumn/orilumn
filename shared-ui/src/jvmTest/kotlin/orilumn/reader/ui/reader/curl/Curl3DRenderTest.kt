@@ -95,6 +95,42 @@ class Curl3DRenderTest {
     }
 
     /**
+     * 手指滑出去再滑回起手点（越过按下点）时，画面**不许整块变样**。
+     *
+     * 真机日志（页 1840×2800，按下点 x=1619）：手指回到 1621 时归一进度 −0.0009、跟手折痕
+     * 仍在 1221（折角 619px），下一帧 1617 进度 +0.0008 却照常出折角 —— 两帧只差 2px，
+     * 画面却在「一大块折角」与「整页平铺」之间来回跳。根因是渲染层拿累计进度当「翻到哪了」
+     * 的总闸（曾经的 `progress <= 0` 只画当前页），而跟手时折痕由手指反解（见 [noLiftYet]）。
+     *
+     * 锁法：同一根手指、同一帧几何，只让累计进度从正变负，两张成图必须逐像素一致；
+     * 且这一帧的折痕右侧仍得露出目标页（还是「翻到一半」，不是整页平铺的当前页）。
+     */
+    @Test
+    fun returningPastTheStartPointKeepsTheFoldedSheet() {
+        val w = 400
+        val h = 600
+        val mid = h / 2
+        val pull = CurlPull(from = Offset(w.toFloat(), mid.toFloat()), to = Offset(260f, mid.toFloat()))
+        val ahead = curlShape(w.toFloat(), h.toFloat(), 0.02f, 1, 0f, pull)
+        val crossed = curlShape(w.toFloat(), h.toFloat(), -0.02f, 1, 0f, pull)
+        assertEquals("折痕只听手指，不听累计进度", ahead.foldX, crossed.foldX, 1e-3f)
+        assertTrue(
+            "这一帧折角还在（折痕 ${crossed.foldX} / 页宽 $w），不该退化成整页平铺",
+            crossed.foldX < w * 0.75f,
+        )
+
+        val a = render(ahead, solid(w, h, red), solid(w, h, blue)).toPixelMap()
+        val b = render(crossed, solid(w, h, red), solid(w, h, blue)).toPixelMap()
+        var diff = 0
+        for (y in 0 until h step 5) {
+            for (x in 0 until w step 5) if (a[x, y] != b[x, y]) diff++
+        }
+        assertEquals("越过起手点的那一帧整页变了样（$diff 个采样点不同）", 0, diff)
+        assertEquals("折痕右侧应当露出目标页", blue, b[w - 5, mid].toArgb())
+        assertEquals("折痕左侧仍是当前页", red, b[5, mid].toArgb())
+    }
+
+    /**
      * 翻上一页时**书脊仍在左**：上一页不是下一页的左右镜像，而是同一套「左边平铺、卷筒朝右」
      * 的几何倒着走。镜像几何会让纸挂到右缘、看起来右边成了书脊（读者：「左边是书脊，不会因为
      * 要翻到上一页，右边就变成书脊了」）。

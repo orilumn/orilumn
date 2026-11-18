@@ -2,6 +2,7 @@ package orilumn.reader.ui.reader.curl
 
 import androidx.compose.ui.geometry.Offset
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -462,6 +463,43 @@ class CurlGeometryTest {
                 dx += 1f
             }
         }
+    }
+
+    /**
+     * 跟手时「一页都没掀 / 已经翻完」这两个收尾判据**不许看进度**（见 [noLiftYet]）。
+     *
+     * 折痕由手指反解，进度只是「手指相对起手点的累计位移」：读者向左滑出去、再向右滑回
+     * 起手点，进度会先掉到 0 以下，折角却还在。按进度收尾就是整块折角一帧消失
+     * （读者：「接近之前的 x 坐标时，阴影逐渐消失，然后整个折起的页面瞬间消失，动画结束」）。
+     */
+    @Test
+    fun anchoredFramesDoNotTakeTheProgressEnds() {
+        val w = 1840f
+        val h = 2800f
+        val mid = h / 2f
+        val pull = CurlPull(from = Offset(w, mid), to = Offset(1600f, mid))
+        // 手指越过按下点之后，累计进度是负的；折痕位置与进度无关（同一根手指）。
+        val crossed = curlShape(w, h, progress = -0.02f, direction = 1, tilt = 0f, pull = pull)
+        assertTrue("跟手帧必须标成 anchored", crossed.anchored)
+        assertFalse("跟手时进度负了也不许收成整页平铺", crossed.noLiftYet())
+        assertFalse("跟手时进度负了也不许收成整页平铺", crossed.fullyTurned())
+        assertEquals(
+            "越过起手点的那一帧折痕仍在页内（还折着六百多像素）",
+            curlShape(w, h, 0.02f, 1, 0f, pull).foldX,
+            crossed.foldX,
+            1e-3f,
+        )
+
+        // 手指退回自由边：折角自己收到零，这时候才轮到渲染层只画当前页。
+        val atEdge = curlShape(w, h, -0.02f, 1, 0f, CurlPull(from = Offset(w, mid), to = Offset(w, mid)))
+        assertEquals("手指回到页边，折痕贴边", w, atEdge.foldX, 0.01f)
+
+        // 没有手指的路径（结算 / 点按 / 上一页）照旧按进度收两端。
+        val settled = curlShape(w, h, 0f, 1)
+        assertFalse("没有手指就不是 anchored", settled.anchored)
+        assertTrue("进度 0 收成整页平铺", settled.noLiftYet())
+        assertTrue("进度 1 收成目标页", curlShape(w, h, 1f, 1).fullyTurned())
+        assertFalse("中段本来就不该收", curlShape(w, h, 0.5f, 1).noLiftYet())
     }
 
     /**

@@ -139,12 +139,15 @@ internal fun DrawScope.drawCurl3DFrame(
     // 曾经的 1.1% / 0.2% 死区（旧版同口径）在斜折痕下会把一整块折角**一帧掐掉**：
     // 倾斜 0.8、进度 3% 时折角已经很大，而 1.1% 以下整块不画 ⇒ 手指退到起手点附近
     // 折角忽然消失，像那里有一条屏幕边线。
-    if (shape.progress <= 0f) {
+    //
+    // **跟手时这条总闸不许看进度**：折痕由手指反解（[CurlShape.anchored]），进度只是累计
+    // 位移，手指滑回起手点会先把它压到 0 以下，而折角还有半个页宽（见 [noLiftYet]）。
+    if (shape.noLiftYet()) {
         drawPage(front, paper, texLeft, texTop, pageSize)
         return true
     }
     // 已经翻完：只剩目标页。
-    if (shape.progress >= 1f) {
+    if (shape.fullyTurned()) {
         drawPage(back, paper, texLeft, texTop, pageSize)
         return true
     }

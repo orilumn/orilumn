@@ -46,12 +46,13 @@ internal fun DrawScope.drawCurlFrame(
 
     // 两端只在进度真正走到 0 / 1 时才整页换成单张页：0 与 1 的几何本身退化（折痕竖直贴边、
     // 卷曲区面积为零），照常画出来与静止页逐像素一致，不需要死区（见 [drawCurl3DFrame]）。
-    if (shape.progress <= 0f) {
+    // **跟手时这条总闸不许看进度**（见 [noLiftYet]）：折痕由手指反解，进度只是累计位移。
+    if (shape.noLiftYet()) {
         drawWholePage(front, paper, texLeft, texTop, pageSize)
         return
     }
     // 已经翻完：只剩目标页（最后一帧与静止时逐像素一致，动画结束撤层不跳）。
-    if (shape.progress >= 1f) {
+    if (shape.fullyTurned()) {
         drawWholePage(back, paper, texLeft, texTop, pageSize)
         return
     }

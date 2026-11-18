@@ -47,8 +47,12 @@ import kotlin.math.sqrt
  *
  * 所以进度**头尾各 10%** 里把倾斜量线性淡到 0（`tilt fade`，旧版注释原文「否则覆盖层
  * 撤掉时停一下再跳」）：折痕被扶成竖直、正好贴边，折角面积连续收到零；折痕旁的影按同一
- * 系数淡出。**跟手与结算同口径**——只压倾斜，不压读者自己给的进度。早先只在结算里做，
+ * 系数淡出。**只压倾斜与影，不压读者自己给的进度**。早先只在结算里做，
  * 于是手指退回起手点（`dx` 归零）时折角会在一帧里整块消失，读者：「像那儿有一条屏幕边线」。
+ *
+ * 跟手阶段**不扶正、也不淡影**：那时折角的大小不听进度（折痕由手指反解），扶正会把形状
+ * 掰歪、淡影会在折角还很大时先把影淡没。倾斜改由「横向行程上限」约束（见上），
+ * 两端收尾改由几何自己达（见 [CurlShape.noLiftYet]）。
  *
  * 与旧版的唯一差别：旧版对「收在右缘」的那两端是把进度**冲过 1**（`1 + 0.9·|tilt|`）
  * 让整块滑出屏幕；我们的进度归一在 `[0, 1]`（与滑动层共用），右缘那一端改用扶正来收干净
@@ -71,7 +75,12 @@ internal data class CurlShape(
     val foldX: Float,
     /** 折痕倾斜量（已按方向镜像、已做头尾扶正或跟手时的横向行程收小）。 */
     val lean: Float,
-    /** 阴影随进度的淡出系数 0..1（见文件头「头尾扶正」）。 */
+    /**
+     * 阴影随进度的淡出系数 0..1（见文件头「头尾扶正」）。
+     *
+     * 跟手帧（[anchored]）恒为 1：那时折角的大小不听进度，影的浓淡交给几何（纸抬多高、
+     * 影多宽），按进度淡会在折角还很大时把影先淡没（见 [noLiftYet]）。
+     */
     val shadowFade: Float,
     /** 归一化进度（0 = 没翻，1 = 翻完；拖动时可略越界）。 */
     val progress: Float,
@@ -82,6 +91,15 @@ internal data class CurlShape(
      * 低层几何函数自身与镜像相关的测试。
      */
     val direction: Int,
+    /**
+     * 折痕位置是不是**跟手反解**出来的（[anchoredFoldX]，拖动中的下一页），而不是由
+     * [progress] 推出来的。
+     *
+     * 这两件事必须分开：进度是「手指相对起手点的累计位移」，跟手时折痕位置是「手指离自由边
+     * 多远」反解出来的。手指一路滑出去再滑回来、越过起手点的那一帧，进度会先掉到 0 以下，
+     * 折角却还有半个页宽 —— 此时若按进度收尾，整块折角会在一帧里消失（[noLiftYet] 的 KDoc）。
+     */
+    val anchored: Boolean = false,
 )
 
 /** 倾斜外扩的固定幅度（0.9 页宽），与旧版 `tiltW = w * 0.9f` 同一个数。 */
@@ -233,9 +251,16 @@ internal fun curlShape(
     // 折痕在开头几帧歪回竖直（斜拖时纸边跟着偏）；末段那一次扶正由松手结算接手。
     // 但跟手时倾斜另受**横向行程**约束（见 [travelLeanCap]）：手指退回起手点时折痕
     // 一路扶正、折角面积连续收到零，不会整块消失。
-    val fade = tailFade(p)
-    var lean = if (pull != null && forward) {
-        val cap = travelLeanCap(pull, tiltW)
+    //
+    // 跟手时**阴影也不淡**：扶正的口径是「进度 0 = 一页都没掀」，而跟手时进度根本不是
+    // 折角的量尺（折痕听手指）。手指滑出去再滑回来，进度会先归零，折角却还有半个页宽——
+    // 照进度淡影就是「阴影先消失、折角还在」，读者原话那半句「阴影逐渐消失」正是它。
+    // 跟手时影的浓淡交给几何（纸抬多高、影有多宽），结算/点按照旧听进度。
+    val finger = if (forward) pull else null
+    val anchored = finger != null
+    val fade = if (finger != null) 1f else tailFade(p)
+    var lean = if (finger != null) {
+        val cap = travelLeanCap(finger, tiltW)
         lean0.coerceIn(-cap, cap)
     } else {
         lean0 * fade
@@ -247,8 +272,8 @@ internal fun curlShape(
     val exit = w * CURL3D_RADIUS_RATIO
     // 折痕位置：向后翻从右缘扫到左缘，向前翻从左缘扫到右缘（旧版同款）。
     // 跟手时折痕不再听进度，改由「掀起的纸边贴在手指上」反解（见 [anchoredFoldX]）。
-    var foldX = if (pull != null && forward) {
-        anchoredFoldX(pull, w, h, lean, tiltW).coerceIn(-exit, w)
+    var foldX = if (finger != null) {
+        anchoredFoldX(finger, w, h, lean, tiltW).coerceIn(-exit, w)
     } else {
         val base = if (forward) w * (1f - p) else w * p
         if (forward) {
@@ -265,18 +290,18 @@ internal fun curlShape(
     // 所以不能只夹倾斜，要二分找「折痕端点正好贴在书脊上、纸边仍压在手指上」的那个解。
     val room = spineRoom(foldX, w, forward)
     if (kotlin.math.abs(lean) * tiltW > room) {
-        if (pull != null && forward) {
+        if (finger != null) {
             val sign = if (lean < 0f) -1f else 1f
             var lo = 0f
             var hi = kotlin.math.abs(lean)
             repeat(SPINE_SOLVE_STEPS) {
                 val mid = (lo + hi) * 0.5f
-                val fx = anchoredFoldX(pull, w, h, sign * mid, tiltW).coerceIn(-exit, w)
+                val fx = anchoredFoldX(finger, w, h, sign * mid, tiltW).coerceIn(-exit, w)
                 if (mid * tiltW <= spineRoom(fx, w, forward)) lo = mid else hi = mid
             }
             // 取可行那一侧（lo）：收紧到「端点刚好贴页边」，不越过。
             lean = sign * lo
-            foldX = anchoredFoldX(pull, w, h, lean, tiltW).coerceIn(-exit, w)
+            foldX = anchoredFoldX(finger, w, h, lean, tiltW).coerceIn(-exit, w)
         } else {
             lean = lean.coerceIn(-room / tiltW, room / tiltW)
         }
@@ -298,8 +323,30 @@ internal fun curlShape(
         shadowFade = fade,
         progress = p,
         direction = direction,
+        anchored = anchored,
     )
 }
+
+/**
+ * 这一帧是否「一页都还没掀」：渲染层只画正面那张页（不做卷曲）。
+ *
+ * ## 为什么跟手时不能按进度判（读者报的「整块折角瞬间消失」）
+ *
+ * 结算、点按、翻上一页都由进度驱动几何（折痕位置 = 进度的函数），两端本来就退化 ⇒
+ * 按进度收尾既精确又便宜。**跟手时不是**（[CurlShape.anchored]）：折痕位置由「纸边压在
+ * 手指上」反解，进度只是手指相对起手点的累计位移。读者向左滑出去、再向右滑回起手点时，
+ * 进度会先掉到 0 以下，而折角还有半个页宽（真机日志：进度 −0.001 那一帧折痕仍在 1263px，
+ * 折角 577px）—— 照进度收尾就是**整块折角一帧消失**，读者看到的正是「接近起手点时整个
+ * 折起的页面瞬间消失，动画结束」。
+ *
+ * 跟手时两端的收尾因此交给几何自己：手指退回自由边，`foldX` 回到页宽、折角连续收到零；
+ * 翻到底则由纸卷退场把筒滚出书脊。与这半句配套的另一半是倾斜与阴影：跟手时它们也只听
+ * 手指（见 [curlShape]）。上一版（`93603ce1`）只收了倾斜没管这条总闸，所以症状仍在。
+ */
+internal fun CurlShape.noLiftYet(): Boolean = !anchored && progress <= 0f
+
+/** 这一帧是否「整页已经翻完」：渲染层只画露出（目标）那张页。判据同 [noLiftYet]。 */
+internal fun CurlShape.fullyTurned(): Boolean = !anchored && progress >= 1f
 
 /**
  * 一帧翻页在屏幕上的**最终翻法**：书脊恒在左边。

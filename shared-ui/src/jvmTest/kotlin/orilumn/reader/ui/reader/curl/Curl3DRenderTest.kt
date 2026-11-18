@@ -611,18 +611,14 @@ class Curl3DRenderTest {
     }
 
     /**
-     * 卷起来那一段页边的影**不许被卷筒截断**：它必须落在所有纸段之后（画在纸上），
-     * 不能被圆柱远侧的纸盖掉。
+     * 页边那道影**只铺到卷筒俯视图投影线为止**（纸从正面翻成反面的那条最外沿，弧长 πR/2），
+     * 越过它再往折痕那侧的钩子不画。
      *
-     * 判法用**同几何关掉影**（`shadowFade = 0`）出图对照：卷起段页边朝外一点点必须比
-     * 「关掉影」暗（影在）。这样不受筒身明暗、落影与 AA 边的绝对值影响。
-     *
-     * 只量**卷起段**（`Back` 段之前的行，且影带已经足够宽的行）：折痕端那几行宽度收成 0，
-     * 量不到东西。纸背那一侧不许有影由 [pageBackCarriesNoEdgeShadow] 负责；卷起段的筒内
-     * 自遮（影落在同一张纸的卷面上）不在这条的管辖里。
+     * 判法两条：几何上，收尾那一行的页边离折痕正好一个筒径；成图上，收尾之前朝外与
+     * 「关掉影」的出图一致（没有影），收尾之后（卷筒曲线段与平铺段）才有影。
      */
     @Test
-    fun rolledEdgeShadowIsNotClippedByTheRoll() {
+    fun edgeShadowStopsAtTheRollOutline() {
         val w = 400
         val h = 600
         for ((p, tilt) in listOf(0.3f to 0.25f, 0.45f to 0.35f)) {
@@ -633,59 +629,77 @@ class Curl3DRenderTest {
                 val edges = mesh.pageEdges() ?: continue
                 val back = mesh.bands.firstOrNull { it.surface == CurlMesh.Surface.Back } ?: continue
                 if (back.lastRow - back.firstRow < 2) continue
-                val flatTurn = PI.toFloat() * radius
-                val ramp = ((mesh.maxArc() - flatTurn * 0.5f) / flatTurn).coerceIn(0f, 1f)
-                val maxWidth = radius * CURL3D_BACK_SHADOW_WIDTH * ramp
-                if (maxWidth < 6f) continue
+                val taperFrom = mesh.firstRowAtArc(PI.toFloat() * radius * 0.5f)
+                assertTrue("p=$p dir=$dir 纸背已经露出来了，却找不到收尾那一行", taperFrom != null)
+                val top = Offset(shape.topX, 0f)
+                val foldLen = hypot(shape.bottomX - shape.topX, h.toFloat())
+                val ux = (shape.bottomX - shape.topX) / foldLen
+                val uy = h.toFloat() / foldLen
+                for (k in 0..1) {
+                    val pt = edges[k][taperFrom!!]
+                    val d = abs((pt.x - top.x) * uy - (pt.y - top.y) * ux)
+                    assertTrue("p=$p dir=$dir 收尾处离折痕 ${d}px，筒径 $radius", abs(d - radius) < 2.5f)
+                }
                 val on = render(shape, solid(w, h, paper), solid(w, h, paper)).toPixelMap()
                 val off = render(shape.copy(shadowFade = 0f), solid(w, h, paper), solid(w, h, paper)).toPixelMap()
-                fun lumaAt(x: Int, y: Int): Float {
-                    val c = on[x, y]
+                fun luma(map: androidx.compose.ui.graphics.PixelMap, x: Int, y: Int): Float {
+                    val c = map[x, y]
                     return (c.red + c.green + c.blue) / 3f
                 }
-                fun lumaOff(x: Int, y: Int): Float {
-                    val c = off[x, y]
-                    return (c.red + c.green + c.blue) / 3f
-                }
-                var checked = 0
+                var hookChecked = 0
+                var keptChecked = 0
                 for (k in 0..1) {
                     val edge = edges[k]
-                    val other = edges[1 - k]
-                    val outward = outwardNormals(edge, other, back.firstRow..back.lastRow) ?: continue
-                    // 归一化弧长：只有影宽够的地方才可能在 3px 处量到影。
-                    var cum = 0f
-                    val tAt = FloatArray(edge.size)
-                    for (i in 1 until edge.size) {
-                        cum += (edge[i] - edge[i - 1]).getDistance()
-                        tAt[i] = cum
-                    }
-                    if (cum < 1f) continue
-                    for (i in 1 until edge.size) tAt[i] /= cum
-                    var i = 3
-                    while (i <= back.firstRow - 2) {
-                        val width = maxWidth * tAt[i]
-                        if (width < 6f) {
-                            i += 2
-                            continue
-                        }
+                    val outward = outwardNormals(edge, edges[1 - k], back.firstRow..back.lastRow) ?: continue
+                    // 收尾之前（绕筒退回折痕的钩子）：不许有影。
+                    var i = 4
+                    while (i <= taperFrom!! - 3) {
                         val at = edge[i]
                         val o = outward[i]
-                        val ox = (at.x + o.x * 3f).roundToInt()
-                        val oy = (at.y + o.y * 3f).roundToInt()
-                        if (ox < 2 || ox > w - 3 || oy < 2 || oy > h - 3) {
-                            i += 3
+                        val x = (at.x + o.x * 6f).roundToInt()
+                        val y = (at.y + o.y * 6f).roundToInt()
+                        if (x < 2 || x > w - 3 || y < 2 || y > h - 3 || luma(off, x, y) < 0.9f) {
+                            i += 4
                             continue
                         }
-                        checked++
+                        hookChecked++
                         assertTrue(
-                            "p=$p dir=$dir 卷起段页边 (${at.x.toInt()},${at.y.toInt()}) 朝外 3px 没有影" +
-                                "（被卷筒截断了）：开影 ${lumaAt(ox, oy)} / 关影 ${lumaOff(ox, oy)}",
-                            lumaAt(ox, oy) < lumaOff(ox, oy) - 0.01f,
+                            "p=$p dir=$dir 收尾之前的钩子 (${at.x.toInt()},${at.y.toInt()}) 还在铺影",
+                            abs(luma(on, x, y) - luma(off, x, y)) < 0.01f,
                         )
-                        i += 3
+                        i += 4
+                    }
+                    // 收尾之后（卷筒曲线段 + 平铺段）：影要在，宽度按收尾起算的归一化弧长。
+                    var cumT = 0f
+                    val tAt = FloatArray(edge.size)
+                    for (i in taperFrom + 1 until edge.size) {
+                        cumT += (edge[i] - edge[i - 1]).getDistance()
+                        tAt[i] = cumT
+                    }
+                    if (cumT < 1f) continue
+                    for (i in taperFrom + 1 until edge.size) tAt[i] /= cumT
+                    var j = taperFrom + 4
+                    while (j <= edge.size - 4) {
+                        val at = edge[j]
+                        val o = outward[j]
+                        val x = (at.x + o.x * 3f).roundToInt()
+                        val y = (at.y + o.y * 3f).roundToInt()
+                        if (x < 2 || x > w - 3 || y < 2 || y > h - 3 ||
+                            radius * CURL3D_BACK_SHADOW_WIDTH * tAt[j] < 10f
+                        ) {
+                            j += 4
+                            continue
+                        }
+                        keptChecked++
+                        assertTrue(
+                            "p=$p dir=$dir 收尾之后的页边 (${at.x.toInt()},${at.y.toInt()}) 没有影",
+                            luma(on, x, y) < luma(off, x, y) - 0.008f,
+                        )
+                        j += 4
                     }
                 }
-                assertTrue("p=$p dir=$dir 没量到卷起段，测试没测到东西", checked > 0)
+                assertTrue("p=$p dir=$dir 没量到钩子，测试没测到东西", hookChecked > 0)
+                assertTrue("p=$p dir=$dir 没量到收尾之后的影，测试没测到东西", keptChecked > 0)
             }
         }
     }

@@ -205,6 +205,11 @@ internal fun DrawScope.drawCurl3DFrame(
     val ramp = ((mesh.maxArc() - flatTurn * 0.5f) / flatTurn).coerceIn(0f, 1f)
     val backShadowWidth = radius * CURL3D_BACK_SHADOW_WIDTH * ramp
     val backShadowAlpha = DROP_SHADOW_ALPHA * CURL3D_BACK_SHADOW_ALPHA * shape.shadowFade
+    // 影**收到哪儿为止**：卷筒的俯视图投影线（纸在筒顶从正面翻成反面的那条最外沿，弧长 πR/2）。
+    // 宽度从纸角满宽、沿页边走一路收到这条线上正好 0；越过它再往折痕那侧的
+    // 一小截（页边绕筒退回折痕的钩子）不画 —— 读者圈出来的「多余的一段」就是它。
+    // 这只是影**结束**的地方，跟影什么时候开始画（下面的 `ramp`）无关，`ramp` 一字未改。
+    val taperFrom = mesh.firstRowAtArc(flatTurn * 0.5f)
 
     // ⑥ 各段网格：纹理 → 纸背压淡 → 纸卷明暗
     val canvas = drawContext.canvas
@@ -287,8 +292,8 @@ internal fun DrawScope.drawCurl3DFrame(
         val seedRows = (mesh.bands.firstOrNull { it.surface == CurlMesh.Surface.Back }
             ?: mesh.bands.firstOrNull { it.surface == CurlMesh.Surface.Verso })
             ?.let { it.firstRow..it.lastRow }
-        if (edges != null && seedRows != null) {
-            drawBackEdgeShadow(edges, seedRows, backShadowWidth, backShadowAlpha)
+        if (edges != null && seedRows != null && taperFrom != null) {
+            drawBackEdgeShadow(edges, seedRows, taperFrom, backShadowWidth, backShadowAlpha)
         }
         }
     return true
@@ -341,6 +346,7 @@ internal fun CurlMesh.backCorners(): List<Offset>? {
 internal fun DrawScope.drawBackEdgeShadow(
     edges: List<List<Offset>>,
     backRows: IntRange,
+    taperFrom: Int,
     maxWidth: Float,
     alpha: Float,
 ) {
@@ -349,8 +355,8 @@ internal fun DrawScope.drawBackEdgeShadow(
     val second = edges[1]
     if (first.size < 2 || second.size < 2) return
     if (first.size != second.size) return
-    val edge1 = sampleShadowEdge(first, second, backRows) ?: return
-    val edge2 = sampleShadowEdge(second, first, backRows) ?: return
+    val edge1 = sampleShadowEdge(first, second, backRows, taperFrom) ?: return
+    val edge2 = sampleShadowEdge(second, first, backRows, taperFrom) ?: return
     val n = edge1.pts.size
     // 一条图层路径在整个影里复用（每层 reset 后重填）：一帧一个 `Path`，不再一帧几十个。
     val path = Path()
@@ -388,19 +394,25 @@ private fun sampleShadowEdge(
     edge: List<Offset>,
     other: List<Offset>,
     backRows: IntRange,
+    fromRow: Int,
 ): ShadowEdge? {
-    val n = edge.size
+    // 只留「收到哪儿为止」那一行及其之后：之前是绕筒退回折痕的钩子，不铺影。
+    val from = fromRow.coerceIn(0, edge.size - 1)
+    val n = edge.size - from
     if (n < 2) return null
+    val pts = ArrayList<Offset>(n)
+    for (i in from until edge.size) pts.add(edge[i])
     val tAt = FloatArray(n)
     var cum = 0f
     for (i in 1 until n) {
-        cum += (edge[i] - edge[i - 1]).getDistance()
+        cum += (pts[i] - pts[i - 1]).getDistance()
         tAt[i] = cum
     }
     if (cum < 1f) return null
     for (i in 0 until n) tAt[i] /= cum
-    val outward = outwardNormals(edge, other, backRows) ?: return null
-    return ShadowEdge(edge, tAt, outward)
+    // 朝外仍按整条页边投票：投票问的是「纸在哪一侧」，与影收到哪儿无关。
+    val outwardAll = outwardNormals(edge, other, backRows) ?: return null
+    return ShadowEdge(pts, tAt, Array(n) { outwardAll[from + it] })
 }
 
 /**

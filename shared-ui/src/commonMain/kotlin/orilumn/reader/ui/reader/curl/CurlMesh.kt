@@ -367,7 +367,7 @@ internal fun CurlMesh.maxArc(): Float = arc.maxOrNull() ?: 0f
  *
  * 折线**跨全部扫线行**（正面段、纸背段都算），所以它天然分成两截：贴着折痕那截是卷起来的
  * 花瓣弧（曲线），平铺段那截是直线。沿边铺影时「页边是直线就画直线、是弧就画曲线」全靠它，
- * 宽度从末点（直角顶点）均匀线性收到首点（0）也就正好落在屏幕边缘上。
+ * 宽度从末点（直角顶点）均匀线性收到**卷筒俯视图投影线那一行**（弧长 πR/2，见 [firstRowAtArc]）。
  */
 internal fun CurlMesh.pageEdges(): List<List<Offset>>? {
     val rows = arc.size / 2
@@ -379,6 +379,21 @@ internal fun CurlMesh.pageEdges(): List<List<Offset>>? {
         top.add(Offset(positions[row * 4 + 2], positions[row * 4 + 3]))
     }
     return listOf(bottom, top)
+}
+
+/**
+ * 弧长 ≥ [arcLen] 的**第一行**（行按弧长升序），没有就返回 `null`。
+ *
+ * 纸边的接触影「收到哪儿为止」由调用方给弧长：卷筒的俯视图投影线（纸从正面翻成反面的
+ * 最外沿）是 `πR/2`，平铺纸背与卷筒的交界是 `πR`。行与行之间最近只差 [ROW_EPSILON]，
+ * 所以带同量容差；角点扫线恰好挤掉那一行时也不会跳过去。
+ */
+internal fun CurlMesh.firstRowAtArc(arcLen: Float): Int? {
+    val rows = arc.size / 2
+    for (row in 0 until rows) {
+        if (arc[row * 2] >= arcLen - ROW_EPSILON) return row
+    }
+    return null
 }
 
 /**

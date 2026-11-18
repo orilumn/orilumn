@@ -10,6 +10,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.ImageBitmap
 import orilumn.reader.io.Logger
 
@@ -67,7 +68,11 @@ class CurlPageImages {
  *
  * @param direction 翻页方向（+1 下一页 / -1 上一页）
  * @param progress 归一化进度（0..1）
- * @param tilt 折痕倾斜（手指位移的上下分量，见 `FlipController.curlTilt`）
+ * @param lean 折痕倾斜量（0 = 竖直折痕，见 `FlipController.curlLean`）：拖动中是
+ *   拖动方向换算出来的**斜率**（`curl/leanOf`），斜拖时折痕垂直于手指轨迹；结算期间保持
+ *   松手那一刻的值
+ * @param pull 本次拖动的起点与此刻手指（页坐标）；非 null 时折痕跟着手指反解，让手上
+ *   那张纸的边压在手指上（见 `curl/anchoredFoldX`）。上一页忽略它。
  * @param texX/texY 页栅格在页坐标里的左上角（版心）；覆盖层恒为整页、贴 (0,0)
  *
  * 三个动画量都是闭包：只在 draw 相位读，动画期间不重组整个阅读面。
@@ -76,7 +81,8 @@ class CurlPageImages {
 fun FlipCurlLayer(
     direction: () -> Int,
     progress: () -> Float,
-    tilt: () -> Float,
+    lean: () -> Float,
+    pull: () -> CurlPull?,
     pageWidthPx: Float,
     pageHeightPx: Float,
     active: () -> Boolean,
@@ -107,6 +113,8 @@ fun FlipCurlLayer(
                 return@Canvas
             }
             val dir = direction()
+            // 拖动只读一次：日志与几何必须取自同一次读取，否则对账时对不上。
+            val pullNow = pull()
             // 书脊恒在左：几何永远朝同一侧卷（见 [curlFrame]），上一页只是同一套几何倒着走，
             // 并把被翻的那张纸换成目标页——否则纸会挂在右缘，看起来右边成了书脊。
             val frame = curlFrame(
@@ -114,7 +122,8 @@ fun FlipCurlLayer(
                 pageH = pageHeightPx,
                 progress = progress(),
                 direction = dir,
-                tilt = tilt(),
+                tilt = lean(),
+                pull = pullNow,
             )
             // 正面 = 被翻的那一张；露出页 = 折痕另一侧的那一张。
             // 下一页翻当前页、露出目标页；上一页翻目标页（上一页）、露出当前页。
@@ -140,6 +149,8 @@ fun FlipCurlLayer(
                         "sheet=${if (frame.turningIsTarget) "target" else "current"} " +
                         "fold=(${shape.topX},0)-(${shape.bottomX},${pageHeightPx}) " +
                         "lean=${shape.lean} fade=${shape.shadowFade} " +
+                        "pull=${pullNow?.let { "(${it.from.x},${it.from.y})→(${it.to.x},${it.to.y})" } ?: "none"} " +
+                        "page=${pageWidthPx}x${pageHeightPx} " +
                         "tex=${front.page?.width}x${front.page?.height} " +
                         "overlay=${front.overlay != null}/${back.overlay != null}",
                 )

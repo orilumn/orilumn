@@ -903,9 +903,22 @@ fun ReaderScreen(
     /** 拖动中：喂位移。目标页未就绪时只喂状态机、不写回渲染（避免拉出空白页）。 */
     fun updateSlide(dx: Float, pageW: Float) = ctl.updateDrag(dx, pageW, slideEnabled)
 
-    /** 拖动中：喂卷曲手感（折痕倾斜）。滑动层不看它，所以与 [updateSlide] 分开一条入口。 */
-    fun updateCurlTilt(dx: Float, dy: Float) {
-        if (slideEnabled) ctl.updateCurlTilt(dx, dy)
+    /**
+     * 拖动中：喂卷曲手感的**起点与终点**（手指此刻的绝对页坐标）。
+     *
+     * 只给一条入口：折痕角度与折痕位置是同一个事实的两面——都从「手指相对起手页边
+     * 的位移」反解（角度 = 拖动方向的垂线，位置 = 纸边压在手指上，见 `curl/CurlPull` /
+     * `curl/leanOf` / `curl/anchoredFoldX`）。滑动层不看它。
+     */
+    fun updateCurlPull(
+        downX: Float,
+        downY: Float,
+        x: Float,
+        y: Float,
+        pageW: Float,
+        pageH: Float,
+    ) {
+        if (slideEnabled) ctl.updateCurlPull(downX, downY, x, y, pageW, pageH)
     }
 
     /** 松手：裁决 → 结算。 */
@@ -1767,7 +1780,10 @@ fun ReaderScreen(
     val currentSlideEnabled by rememberUpdatedState(slideEnabled)
     val currentBeginSlide by rememberUpdatedState<(Int) -> Unit> { beginSlide(it) }
     val currentUpdateSlide by rememberUpdatedState<(Float, Float) -> Unit> { dx, w -> updateSlide(dx, w) }
-    val currentUpdateCurlTilt by rememberUpdatedState<(Float, Float) -> Unit> { dx, dy -> updateCurlTilt(dx, dy) }
+    val currentUpdateCurlPull by rememberUpdatedState<(Float, Float, Float, Float, Float, Float) -> Unit> {
+            downX, downY, x, y, w, h ->
+        updateCurlPull(downX, downY, x, y, w, h)
+    }
     val currentEndSlide by rememberUpdatedState<(Float, Float) -> Unit> { vx, w -> endSlide(vx, w) }
     // 点按/方向键翻页同样走动画，必须经引用读：否则设置里刚打开「翻页动画」，
     // 键盘那侧还按旧的瞬切走（与 pointerInput 的坑同源，见上方注释）。
@@ -3268,8 +3284,17 @@ fun ReaderScreen(
                                         currentBeginSlide(dragDir)
                                     }
                                     currentUpdateSlide(dx, size.width.toFloat())
-                                    // 卷曲手感：折痕的倾斜只认「位移方向的角度」，与滑动进度无关。
-                                    currentUpdateCurlTilt(dx, dy)
+                                    // 卷曲手感：起手页边 + 手指的**绝对页坐标**。折痕角度取拖动
+                                    // 方向的垂线，折痕位置由「纸边压在手指上」反解（见
+                                    // curl/CurlPull、curl/leanOf、curl/anchoredFoldX）。
+                                    currentUpdateCurlPull(
+                                        downX,
+                                        downY,
+                                        downX + dx,
+                                        downY + dy,
+                                        size.width.toFloat(),
+                                        size.height.toFloat(),
+                                    )
                                     if (tMove == 0L) tMove = System.nanoTime()
                                 }
                             }
@@ -3942,7 +3967,10 @@ fun ReaderScreen(
                     // 方向/进度/倾斜/是否在结算，全部传闭包：只在 draw 相位读 ⇒ 动画期间不重组阅读面。
                     direction = { ctl.direction.value },
                     progress = { if (ctl.slideActive(slideEnabled)) ctl.progress.value else 0f },
-                    tilt = { ctl.curlTilt.value },
+                    lean = { ctl.curlLean.value },
+                    // 跟手拖动（起手页边点 → 手指页坐标）：非 null 时折痕改由「纸边压在手指上」
+                    // 反解，只对下一页生效、松手即清（见 FlipController.curlPull）。
+                    pull = { ctl.curlPull.value },
                     // 只有结算动画才做末段扶正（手指跟手时形状听手指的，见 curl/CurlGeometry.kt）。
                     pageWidthPx = pxWidth,
                     pageHeightPx = pxHeight,

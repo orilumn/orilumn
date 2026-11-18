@@ -12,13 +12,15 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.geometry.Offset
 import kotlinx.coroutines.CoroutineScope
 import orilumn.reader.io.Logger
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import orilumn.reader.ui.reader.curl.CURL_TILT_MIN_DISPLACEMENT
-import orilumn.reader.ui.reader.curl.CURL_TILT_SMOOTHING
+import orilumn.reader.ui.reader.curl.CurlPull
+import orilumn.reader.ui.reader.curl.anchoredProgress
+import orilumn.reader.ui.reader.curl.leanOf
 
 /**
  * 滑动翻页会话的**唯一宿主**（用户层·与 [FlipSession] 配套）。
@@ -78,17 +80,40 @@ class FlipController(
     val direction: MutableIntState = mutableIntStateOf(0)
 
     /**
-     * 卷曲手感：手指位移的上下分量（-1..1），决定折痕的倾斜。
+     * 卷曲手感：本次拖动的起止点（见 `curl/CurlPull`）。
      *
-     * 与旧 `CurlView.frozenTilt()` 同口径（`tilt = dy / hypot(dx, dy)`）：纯水平拖动 ⇒ 0（竖折痕），
-     * 斜着往下拖 ⇒ 正，折痕上端左移、下端右移，纸的下缘先翻起来。
+     * 参考实现 Moon+ 的折痕**恒垂直于拖动方向**，而拖动方向是「手指相对起手页边的位移」。
+     * 只记手指位置不够：同一点上，横着拖和斜着拖的折痕角度不同。上一页也记
+     * （起手边换成左缘），它的折痕同样该垂直于手指轨迹。
      *
-     * 只在拖动中由 [updateCurlTilt] 写；松手后**保持**（结算期间折痕形状不该跳变）。
+     * 只在拖动中由 [updateCurlPull] 写；松手即清（结算期间折痕听进度）。
      */
-    val curlTilt: MutableFloatState = mutableFloatStateOf(0f)
+    val curlPull: MutableState<CurlPull?> = mutableStateOf(null)
 
-    /** 折痕倾斜的平滑值（-1..1），见 [updateCurlTilt]；拖动开始时随 [curlTilt] 一起归零。 */
-    private var tiltSmoothed = 0f
+    /**
+     * 折痕倾斜量（[orilumn.reader.ui.reader.curl.CurlShape.lean] 的输入，0 = 竖直折痕）。
+     *
+     * 拖动中由 [updateCurlPull] 跟着拖动方向实时算（见 `curl/leanOf`）——**是斜率**，
+     * 不是旧版 `dy/|d|` 的正弦：斜拖时只有斜率才让折痕真的垂直于手指轨迹。松手后保持，
+     * 结算从同一个角度接着走，折痕不会跳一下。
+     */
+    val curlLean: MutableFloatState = mutableFloatStateOf(0f)
+
+    /**
+     * 跟手锚点：手指此刻在页坐标里的位置（null = 不跟手）。
+     *
+     * 卷曲层拿它反解折痕位置，让**翻起来那张纸的边线正好穿过手指**（见
+     * `curl/anchoredFoldX`）。只在卷曲模式下有意义，滑动层完全不看它。
+     *
+     * 三个时机清空：起手（[beginSlide] / [beginProgrammaticPage]）、松手（[endDrag] 结算前
+     * 先把它换成结算起点）、清场（[clear]）。结算期间折痕必须听进度——否则手指走了折痕
+     * 还钉在松手那一点，动画会「卡住」。
+     */
+    val curlAnchor: MutableState<Offset?> = mutableStateOf(null)
+
+    /** 锚点记录时的那一页尺寸（反解要用页高算折痕斜率），随 [curlAnchor] 一起写。 */
+    private var anchorPageW = 0f
+    private var anchorPageH = 0f
 
     /** 起手那一页（正被拖走的那张）。落位在起手就发生，故 openPos 已是目标页。 */
     val fromPos: MutableState<ReaderPos?> = mutableStateOf(null)
@@ -185,6 +210,8 @@ class FlipController(
         targetIsCover.value = false
         progress.value = 0f
         direction.value = 0
+        curlPull.value = null
+        curlAnchor.value = null
     }
 
     /**
@@ -299,8 +326,9 @@ class FlipController(
         targetIsCover.value = enterCover
         this.direction.value = direction
         progress.value = 0f
-        curlTilt.value = 0f
-        tiltSmoothed = 0f
+        curlPull.value = null
+        curlLean.value = 0f
+        curlAnchor.value = null
         if (enterCover) {
             // 后退回封面：目标（封面）早已解码、立即就绪，**无需落位**——跟手由
             // updateDrag 驱动（targetReady()=true），松手 endDrag 结算。绝不 flipAwait：
@@ -355,28 +383,56 @@ class FlipController(
     }
 
     /**
-     * 卷曲手感输入：手指位移的上下分量（见 [curlTilt]）。
+     * 卷曲手感输入：拖动的起止点（`from` = 起手时贴到页边的点，`to` = 此刻手指）。
      *
-     * 单独一条入口（不并进 [updateDrag]）：滑动层完全不看倾斜，只有卷曲层读它；
+     * 单独一条入口（不并进 [updateDrag]）：滑动层完全不看折痕角度，只有卷曲层读它；
      * 混在一起会让「翻页进度」和「折痕形状」两个无关的事实共用一次调用，将来谁改一个都会动到另一个。
      *
-     * ## 为什么要平滑
+     * ## 折痕角度为什么不平滑
      *
-     * 倾斜乘的是 `0.9 × 页宽` 的外扩幅度（平板上一个单位倾斜 = 一千多像素的折痕端点位移），
-     * 而 `dy / hypot(dx, dy)` 对 `dy` 极敏感：横划时手指上下抖几像素，折痕就来回摆几十像素，
-     * 卷起来的页边跟着抖（读者：「手指滑动时，卷起的页边有点抖动」）。
-     * 「拖动方向」是慢变量、手指抖动是快变量，取指数滑动平均即可：每来一个指针事件走
-     * [CURL_TILT_SMOOTHING] 步（60–120Hz 采样下时间常数约 30–60ms），跟手仍即时。
+     * 旧版在这里对 `dy / hypot(dx, dy)` 做指数滑动平均，理由是「手指上下抖几像素，折痕就
+     * 来回摆几十像素」。但那笔平滑是**建在错误的自变量上**的：参考实现（Moon+
+     * `updateCurlPos`）用的不是相邻两个事件的位移，而是**手指相对起手页边的位移**——
+     * 它是积分量，天然平滑，`dy` 抖两下不会让整条轨迹转几十度。换成积分量之后平滑只剩
+     * 滞后（斜拖时折痕角度永远追不上手指），所以这里不再平滑。
      *
-     * 位移还不到 [CURL_TILT_MIN_DISPLACEMENT] 时**不动**：这时 `dx` 接近 0，方向角度是噪声，
-     * 一点抖动就能把倾斜推到 ±1（折痕几乎躺平）。
+     * @param downX/downY 按下点（页坐标）：起手边取 `downY`，与参考实现的 `mDragStartPos` 同口径
+     * @param x/y 此刻手指的页坐标
+     * @param pageW/pageH 当前页尺寸（px）：折痕斜率按页宽页高换算
      */
-    fun updateCurlTilt(dx: Float, dy: Float) {
-        val len = kotlin.math.hypot(dx, dy)
-        if (len < CURL_TILT_MIN_DISPLACEMENT) return
-        val target = (dy / len).coerceIn(-1f, 1f)
-        tiltSmoothed += (target - tiltSmoothed) * CURL_TILT_SMOOTHING
-        curlTilt.value = tiltSmoothed
+    fun updateCurlPull(
+        downX: Float,
+        downY: Float,
+        x: Float,
+        y: Float,
+        pageW: Float,
+        pageH: Float,
+    ) {
+        if (pageW <= 0f || pageH <= 0f) return
+        anchorPageW = pageW
+        anchorPageH = pageH
+        // 起手边：向后翻从右缘起手，向前翻从左缘起手（参考实现 `pageRect.right/left`）。
+        val edgeX = if (direction.value >= 0) pageW else 0f
+        val pull = CurlPull(
+            from = Offset(edgeX, downY.coerceIn(0f, pageH)),
+            to = Offset(x, y),
+        )
+        curlPull.value = pull
+        curlLean.value = leanOf(pull, pageW, pageH)
+        curlAnchor.value = Offset(x, y)
+    }
+
+    /** 当前跟手位置对应的**屏幕可见进度**；不跟手（无拖动 / 上一页 / 无尺寸）时返回 null。 */
+    private fun anchoredProgressNow(): Float? {
+        val p = curlPull.value ?: return null
+        if (direction.value < 0 || anchorPageW <= 0f || anchorPageH <= 0f) return null
+        return anchoredProgress(
+            pull = p,
+            pageW = anchorPageW,
+            pageH = anchorPageH,
+            tilt = curlLean.value,
+            progress = session.progress,
+        )
     }
 
     /**
@@ -413,8 +469,15 @@ class FlipController(
     fun endDrag(velocityX: Float, pageW: Float, enabled: Boolean) {
         if (!enabled || session.phase != FlipSession.Phase.Dragging) return
         val decision = session.decide(velocityX, pageW)
+        // 跟手时屏幕上折痕的真实位置（可能领先/落后于按位移算的进度）：结算必须从这里起步，
+        // 否则动画第一帧折痕会跳回「进度位置」再走。旧版 `startCommitAnim` 的 `start` 同款。
+        // 目标页没进渲染层的那条路不走跟手（画面本来就停在当前页），故不取。
+        val visibleFrom = if (targetReady()) anchoredProgressNow() else null
+        curlAnchor.value = null
+        // 起止点清掉，但 [curlLean] 保留：结算从松手那一刻的折痕角度接着走，形状不跳变。
+        curlPull.value = null
         if (targetReady()) {
-            settle(decision, velocityX, pageW)
+            settle(decision, velocityX, pageW, fromProgress = visibleFrom)
             return
         }
         if (decision == FlipSession.Decision.ROLLBACK) {
@@ -568,8 +631,9 @@ class FlipController(
         this.targetIsCover.value = false
         this.direction.value = direction
         progress.value = 0f
-        curlTilt.value = 0f
-        tiltSmoothed = 0f
+        curlPull.value = null
+        curlLean.value = 0f
+        curlAnchor.value = null
         prefetchJob?.cancel()
         prefetchJob = scope.launch {
             val landed = flipAwait(direction)
@@ -608,12 +672,15 @@ class FlipController(
      *
      * 起点必须取自 [FlipSession.beginSettle] **之前**的 progress：状态机进入结算后
      * 不再改写 progress（它只记目标），所以调用方手上这份就是「屏幕上真实的位置」。
+     * 跟手松手时那个真实位置由 [fromProgress] 传入（折痕可能不在进度位置上，见
+     * `curl/anchoredFoldX`）；其余路径（点按/兜底）传 null，退回按进度算。
      * 时长按甩动速度折算（快甩短促收尾），[pageW] 用于把进度换算回像素距离。
      */
     fun settle(
         decision: FlipSession.Decision,
         velocityX: Float,
         pageW: Float,
+        fromProgress: Float? = null,
     ) {
         if (!allowAnimation) {
             // 测试路径：只推进状态机到端点，不启动 Animatable。
@@ -623,7 +690,10 @@ class FlipController(
             clear()
             return
         }
-        val from = session.progress
+        val from = fromProgress ?: session.progress
+        // 渲染进度先钉到起点：跟手松手时折痕离「按进度算」的位置可能有两三百像素
+        // （纸边在手指上、折痕更快），清锚点与结算第一帧之间只要差一帧就是一次可见的跳变。
+        progress.value = from
         session.beginSettle(decision)
         val duration = session.settleDurationMs(decision, from, velocityX, pageW)
         // 离手速度衔接：起手斜率取手指速度，页面不在松手那一下刹停（详见

@@ -445,6 +445,76 @@ class Curl3DRenderTest {
     }
 
     /**
+     * 短页边（上下页边，长度 = 页宽）那道影的**满宽是长页边（左右页边，长度 = 页高）的一半**。
+     *
+     * 同样的绝对宽度铺在更短的边上会显得更粗，读者判「右侧长页边和上下短页边一样宽」。
+     * 判法：纸角那一端是满宽，所以在贴角的那一行沿朝外法向量「影铺出去多远」，
+     * 两条边的比值应当是 [CURL3D_SHORT_EDGE_SHADOW_SHARE]。
+     */
+    @Test
+    fun shortPageEdgeShadowIsHalfAsWideAsTheLongOne() {
+        val w = 400
+        val h = 600
+        var measured = 0
+        for ((p, tilt, dir) in listOf(
+            Triple(0.2f, 0.2f, 1),
+            Triple(0.2f, 0.2f, -1),
+            Triple(0.3f, 0.3f, 1),
+            Triple(0.3f, 0.3f, -1),
+        )) {
+            val shape = curlShape(w.toFloat(), h.toFloat(), p, dir, tilt = tilt)
+            val radius = curlRadius(shape)
+            val mesh = buildCurlMesh(shape, radius)
+            val edges = mesh.pageEdges() ?: continue
+            val back = mesh.bands.firstOrNull { it.surface == CurlMesh.Surface.Back } ?: continue
+            val taperFrom = mesh.firstRowAtArc(PI.toFloat() * radius * 0.5f) ?: continue
+            val on = render(shape, solid(w, h, paper), solid(w, h, paper)).toPixelMap()
+            val off = render(shape.copy(shadowFade = 0f), solid(w, h, paper), solid(w, h, paper)).toPixelMap()
+            fun luma(map: androidx.compose.ui.graphics.PixelMap, x: Int, y: Int): Float {
+                val c = map[x, y]
+                return (c.red + c.green + c.blue) / 3f
+            }
+            // 每条页边：贴纸角那一行（九成位置，避开纸角本身）往外量影铺到多远。
+            val reach = FloatArray(2) { -1f }
+            for (k in 0..1) {
+                val edge = edges[k]
+                val outward = outwardNormals(edge, edges[1 - k], back.firstRow..back.lastRow) ?: continue
+                val row = taperFrom + (edge.size - 1 - taperFrom) * 9 / 10
+                val at = edge[row]
+                val o = outward[row]
+                var r = 0f
+                var d = 1f
+                while (d <= radius * CURL3D_BACK_SHADOW_WIDTH * 2f) {
+                    val x = (at.x + o.x * d).roundToInt()
+                    val y = (at.y + o.y * d).roundToInt()
+                    if (x in 2 until w - 2 && y in 2 until h - 2 &&
+                        luma(off, x, y) > 0.9f && luma(on, x, y) < luma(off, x, y) - 0.004f
+                    ) {
+                        r = d
+                    }
+                    d += 1f
+                }
+                reach[k] = r
+            }
+            val longEdge = edges.indices.firstOrNull { mesh.pageEdgeIsLong(it, taperFrom) && reach[it] > 5f }
+            assertTrue("p=$p tilt=$tilt dir=$dir 两条页边都没量到影（$reach）", longEdge != null)
+            val shortEdge = 1 - longEdge!!
+            assertTrue(
+                "p=$p tilt=$tilt dir=$dir 短页边没量到影（$reach）",
+                reach[shortEdge] > 5f,
+            )
+            val ratio = reach[shortEdge] / reach[longEdge]
+            assertTrue(
+                "p=$p tilt=$tilt dir=$dir 短页边的影宽是长页边的 ${ratio}（应为 " +
+                    "$CURL3D_SHORT_EDGE_SHADOW_SHARE）：长 ${reach[longEdge]} / 短 ${reach[shortEdge]}",
+                abs(ratio - CURL3D_SHORT_EDGE_SHADOW_SHARE) < 0.12f,
+            )
+            measured++
+        }
+        assertTrue("一帧都没量到，测试没测到东西", measured > 0)
+    }
+
+    /**
      * 反面**不许整体比正面暗**：它就是同一张纸的另一面。
      *
      * 早先给纸背铺满一层 0.14 的黑，读者一眼就问「反面为什么整体比正面暗」。现在只在外沿

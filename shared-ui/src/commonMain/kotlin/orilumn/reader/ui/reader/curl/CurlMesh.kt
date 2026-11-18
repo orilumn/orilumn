@@ -397,6 +397,36 @@ internal fun CurlMesh.firstRowAtArc(arcLen: Float): Int? {
 }
 
 /**
+ * 这条页边（`0` / `1`，即 [pageEdges] 的两条）是不是**长页边**（左右页边，长度 = 页高）。
+ *
+ * 判法只看材料坐标在**靠纸角那一段**的变化方向：沿上下页边走的那条，材料 y 几乎不变、x 在变；
+ * 沿左右页边走的反过来。材料坐标跟折痕斜不斜无关，也不用知道页宽页高，所以斜折痕下同样成立。
+ *
+ * @param edge `0` = [pageEdges] 的第一条，`1` = 第二条。
+ * @param fromRow 影的起点行（[firstRowAtArc]）：只量影真正铺出去的那一段。
+ */
+internal fun CurlMesh.pageEdgeIsLong(edge: Int, fromRow: Int): Boolean {
+    val rows = arc.size / 2
+    if (rows < 2) return true
+    val side = edge.coerceIn(0, 1)
+    val from = (fromRow + (rows - fromRow) / 3).coerceIn(0, rows - 1)
+    var minU = Float.MAX_VALUE
+    var maxU = -Float.MAX_VALUE
+    var minV = Float.MAX_VALUE
+    var maxV = -Float.MAX_VALUE
+    for (row in from until rows) {
+        val at = (row * 2 + side) * 2
+        val u = texCoords[at]
+        val v = texCoords[at + 1]
+        if (u < minU) minU = u
+        if (u > maxU) maxU = u
+        if (v < minV) minV = v
+        if (v > maxV) maxV = v
+    }
+    return (maxV - minV) > (maxU - minU)
+}
+
+/**
  * 一段扫线落在**页栅格材料范围**里的那截三角带（`drawVertices` 直接吃）。
  *
  * 页栅格只有版心那么大（平板 1585×2400 放在 1840×2800 里），页边距里根本没有像素。

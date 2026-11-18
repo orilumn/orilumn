@@ -401,6 +401,94 @@ class CurlGeometryTest {
     }
 
     /**
+     * 手指退回起手点：折角面积**连续**收到零，不许「斜出一大块，再一帧整块消失」。
+     *
+     * 折痕方向取自「页边抓点 → 手指」这条整段位移，倾斜量正比于 `u_y / u_x`。横向分量
+     * 重新趋零时这个比率必然爆掉，光靠斜率夹取只会把折痕顶到最大倾斜：折痕中点还贴着
+     * 手指，折痕本身却从页角斜切走大半个页——读者原话「接近之前的 x 坐标时，阴影逐渐
+     * 消失，然后整个折起的页面瞬间消失」。所以逐像素扫过起手点锁三件事：
+     *
+     * 1. 指尖正好回到起手点：折痕竖直贴边，一页空纸都没掀起来；
+     * 2. 相邻一像素之间折痕端点不许跳（读者看到的是「整块消失」，不是角度变化）；
+     * 3. 起手点附近掀起的纸只许跟着横向行程收小（不允许斜切出一大块三角）。
+     */
+    @Test
+    fun returningToTheStartCollapsesTheFlapWithoutAJump() {
+        val w = 1840f
+        val h = 2800f
+        val grabY = 1200f
+        // 纵向抖动就是「手指没那么直」的那几像素——比率爆掉靠它，所以三种都扫。
+        for (dy in listOf(-40f, 10f, 40f)) {
+            var prev: CurlShape? = null
+            var dx = -80f
+            while (dx <= 40f) {
+                val pull = CurlPull(from = Offset(w, grabY), to = Offset(w + dx, grabY + dy))
+                val s = curlShape(
+                    w, h,
+                    progress = (-dx / w).coerceIn(-0.9f, 1.9f),
+                    direction = 1,
+                    tilt = leanOf(pull, w, h),
+                    pull = pull,
+                )
+                if (dx == 0f) {
+                    assertEquals("指尖回到起手点：折痕贴边 dy=$dy", w, s.foldX, 0.01f)
+                    assertEquals("指尖回到起手点：端点也贴边 dy=$dy", w, s.topX, 0.01f)
+                    assertEquals("指尖回到起手点：端点也贴边 dy=$dy", w, s.bottomX, 0.01f)
+                }
+                if (kotlin.math.abs(dx) <= 60f) {
+                    // 掀起来的纸离自由边最远多远：折痕两端与折痕中点都算。
+                    val reach = w - minOf(s.topX, s.bottomX, s.foldX)
+                    assertTrue(
+                        "dx=$dx dy=$dy 起手点附近掀起的纸只许跟横向行程成正比，实际 $reach",
+                        reach <= 7f * kotlin.math.abs(dx) + 60f,
+                    )
+                }
+                if (prev != null) {
+                    val p = prev!!
+                    assertTrue(
+                        "dx=$dx dy=$dy 折痕上端跳了：${p.topX} → ${s.topX}",
+                        kotlin.math.abs(s.topX - p.topX) <= 80f,
+                    )
+                    assertTrue(
+                        "dx=$dx dy=$dy 折痕下端跳了：${p.bottomX} → ${s.bottomX}",
+                        kotlin.math.abs(s.bottomX - p.bottomX) <= 80f,
+                    )
+                    assertTrue(
+                        "dx=$dx dy=$dy 折痕中点跳了：${p.foldX} → ${s.foldX}",
+                        kotlin.math.abs(s.foldX - p.foldX) <= 80f,
+                    )
+                }
+                prev = s
+                dx += 1f
+            }
+        }
+    }
+
+    /**
+     * 倾斜只许跟着**横向行程**长大（见 `travelLeanCap`）：纵向抖得再狠，横向没走两步，
+     * 折痕也得是直的；横向行程够长时斜率照旧说了算（斜拖的垂直承诺不能打折）。
+     */
+    @Test
+    fun leanIsCappedByTheHorizontalTravelNearTheStart() {
+        val w = 1840f
+        val h = 2800f
+        // 几乎竖直的拖动：斜率早被夹到上限（2w/h），只靠行程上限才压得住倾斜。
+        // 上限按 3·|dx|/tiltW 算（tiltW = 0.9 页宽）：2 / 10 / 30 / 120 px ⇒ 0.4% / 1.8% / 5.4% / 21.7%。
+        var last = 0f
+        for ((dx, ceil) in listOf(2f to 0.006f, 10f to 0.025f, 30f to 0.07f, 120f to 0.25f)) {
+            val pull = CurlPull(from = Offset(w, 1200f), to = Offset(w - dx, 1240f))
+            val lean = kotlin.math.abs(leanOf(pull, w, h))
+            assertTrue("横向行程 $dx：倾斜 $lean 该被行程上限压到 $ceil 以内", lean <= ceil)
+            assertTrue("横向行程越长，倾斜应当越大：$last → $lean", lean > last)
+            last = lean
+        }
+        // 真正的斜拖（横向 400px）远没到上限：折痕仍严格垂直于手指轨迹。
+        val diagonal = CurlPull(from = Offset(w, 1400f), to = Offset(w - 400f, 1100f))
+        val want = 0.75f * h / (2f * w * CURL_TILT_WIDTH)
+        assertEquals("斜拖的倾斜不该被行程上限削弱", -want, leanOf(diagonal, w, h), 1e-3f)
+    }
+
+    /**
      * 纸自由边（材料坐标 x = 页宽）上、材料纵坐标 = [texY] 那一点落在屏幕的哪。
      *
      * 网格顶点只落在页角与扫线交点上，抓点一般在两点之间，按材料坐标线性插值取。

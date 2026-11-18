@@ -225,47 +225,93 @@ class Curl3DRenderTest {
     }
 
     /**
-     * 纸背的自由边（与折痕平行、挨着纸卷的那条）**既不落影也不描边**。
+     * 自由边上那道影**一直在、也不忽有忽无**，而且只铺在纸外那一侧（纸背上不许有灰带）。
      *
-     * 那条边是纸自己压在自己身上：一边是平铺的纸背、一边是卷起来的同一张纸，中间是平滑切线。
-     * 早先在这条边外面铺一道影、再描一条实线，读者看到的就是「卷筒左侧平白多出一条痕迹 +
-     * 一道影」。纸背的可辨识度只靠镜像内容与折角两条直角边的接触影（见
-     * [foldedCornerSideEdgesCastShadows]）。
+     * 这里原先锁的是「自由边外面根本没有影」。那条断言只在折痕**正好竖直**那一帧成立：
+     * 竖直时最远那条扫线是整条纸边，两条影带各自只走到自己那一端，搭在自由边上的那一段恰巧
+     * 没被画出来。折痕只要斜一点点，两条带子就都要连到「斜向另一边」的那个纸角，那一段就
+     * 铺在自由边上了 —— 读者看到的影一直是这样，不是后来改的。所以这条改成锁**影本身**：
+     *
+     * 1. 竖直那一帧也要有（读者的判断：「完全竖直的时候，根本没画阴影」）；
+     * 2. 竖直、略往两边斜，浓淡一致 —— 一帧有、一帧没有就是闪；
+     * 3. 影只在纸外那一侧，纸背（平铺的那张纸）身上依然干干净净。
      */
     @Test
-    fun freeEdgeOfTheTurnedBackIsNeitherShadowedNorOutlined() {
+    fun freeEdgeOfTheTurnedBackIsShadowedOutsideOnlyAndDoesNotBlink() {
         val w = 400
         val h = 600
         val mid = h / 2
         for (dir in listOf(1, -1)) {
             val p = 0.45f
-            val shape = curlShape(w.toFloat(), h.toFloat(), p, dir)
-            val radius = curlRadius(shape)
-            val px = render(shape, solid(w, h, red), solid(w, h, blue)).toPixelMap()
+            val base = curlShape(w.toFloat(), h.toFloat(), p, dir)
+            val radius = curlRadius(base)
             // 纸背自由边 = 折痕往「没掀起」那一侧退（掀起长度 − πR）。
             val back = w * p - PI.toFloat() * radius
             assertTrue("dir=$dir 这个进度下应当有平铺的纸背", back > radius)
             val outward = if (dir >= 0) -1f else 1f
-            val edge = shape.foldX + outward * back
-            fun luma(x: Int): Float {
-                val c = px[x, mid]
-                return (c.red + c.green + c.blue) / 3f
-            }
+            val edge = base.foldX + outward * back
             val shadowWidth = radius * CURL3D_BACK_SHADOW_WIDTH
-            val besideEdge = luma((edge + outward * shadowWidth * 0.35f).toInt())
-            val plainPaper = luma((edge + outward * shadowWidth * 3f).toInt())
-            assertTrue(
-                "dir=$dir 自由边外面又铺了影：边旁 $besideEdge / 空白处 $plainPaper（那里是纸压纸，没有影）",
-                abs(besideEdge - plainPaper) < 0.01f,
-            )
-            // 也不许有一条实线：边上那一两个像素不能比纸背内侧、外侧都暗。
-            val line = ((edge - 2).toInt()..(edge + 2).toInt()).minOf { luma(it) }
-            val inside = luma((edge - outward * 6f).toInt())
-            val outside = luma((edge + outward * 6f).toInt())
-            assertTrue(
-                "dir=$dir 自由边被描了边：边上 $line / 纸背内侧 $inside / 外侧 $outside",
-                line >= minOf(inside, outside) - 0.01f,
-            )
+            var seen = Float.NaN
+            for (tilt in listOf(0f, 0.002f, -0.002f)) {
+                val shape = curlShape(w.toFloat(), h.toFloat(), p, dir, tilt = tilt)
+                val px = render(shape, solid(w, h, red), solid(w, h, blue)).toPixelMap()
+                fun luma(x: Int): Float {
+                    val c = px[x, mid]
+                    return (c.red + c.green + c.blue) / 3f
+                }
+                fun at(along: Float) = luma((edge + outward * along).toInt())
+                val besideEdge = at(shadowWidth * 0.35f)
+                val plainPaper = at(shadowWidth * 3f)
+                assertTrue(
+                    "dir=$dir tilt=$tilt 自由边外没有影：边旁 $besideEdge / 空白处 $plainPaper",
+                    plainPaper - besideEdge > 0.03f,
+                )
+                if (!seen.isNaN()) {
+                    assertTrue(
+                        "dir=$dir tilt=$tilt 自由边外的影忽浓忽淡：$besideEdge / 竖直那一帧 $seen",
+                        abs(besideEdge - seen) < 0.01f,
+                    )
+                }
+                seen = besideEdge
+                // 纸背（影的内侧）不许有灰带：挨着边与往里一段一样亮。
+                assertTrue(
+                    "dir=$dir tilt=$tilt 影漏到纸背上了：边内 ${at(-shadowWidth * 0.35f)} / 再往里 ${at(-shadowWidth)}",
+                    abs(at(-shadowWidth * 0.35f) - at(-shadowWidth)) < 0.01f,
+                )
+            }
+        }
+    }
+
+    /**
+     * 折痕在竖直附近来回摆时，影**不许一帧有一帧没有**。
+     *
+     * 竖直那一刻最远的扫线是整条纸边（不是一个纸角），影带会少掉自由边上的那一整段 ——
+     * 读者判「在竖直状态摇摆时会闪烁」。锁法：竖直、略往两边斜这三帧，影的覆盖面积要一样。
+     */
+    @Test
+    fun nearVerticalFoldKeepsTheShadowSteady() {
+        val w = 400
+        val h = 600
+        for (p in listOf(0.3f, 0.45f)) {
+            var minCover = Int.MAX_VALUE
+            var maxCover = 0
+            for (tilt in listOf(-0.002f, 0f, 0.002f)) {
+                val shape = curlShape(w.toFloat(), h.toFloat(), p, 1, tilt = tilt)
+                val on = render(shape, solid(w, h, red), solid(w, h, blue)).toPixelMap()
+                val off = render(shape.copy(shadowFade = 0f), solid(w, h, red), solid(w, h, blue)).toPixelMap()
+                var cover = 0
+                for (y in 0 until h) {
+                    for (x in 0 until w) {
+                        val a = off[x, y]
+                        val b = on[x, y]
+                        val d = ((a.red - b.red) + (a.green - b.green) + (a.blue - b.blue)) / 3f
+                        if (d > 3f / 255f) cover++
+                    }
+                }
+                minCover = minOf(minCover, cover)
+                maxCover = maxOf(maxCover, cover)
+            }
+            assertTrue("p=$p 影的覆盖量在竖直附近跳了：$minCover..$maxCover", maxCover - minCover < maxCover / 50)
         }
     }
 
@@ -274,8 +320,8 @@ class Curl3DRenderTest {
      *
      * 自由边跟着折痕一起斜、两条直角边垂直于折痕：斜折痕时它们会在页面中间相交成直角，
      * 正是读者说的「折起的页角直角两条边」。两条直角边必须落影，少了任何一条，纸背就像
-     * 一张剪贴上去的白纸（原话「直角两条边为什么没画阴影」）；自由边挨着纸卷，纸压着纸，
-     * 反而**不许**落影（见 [freeEdgeOfTheTurnedBackIsNeitherShadowedNorOutlined]）。
+     * 一张剪贴上去的白纸（原话「直角两条边为什么没画阴影」）；自由边那道影只在纸外一侧、
+     * 而且竖直时不兴忽有忽无（见 [freeEdgeOfTheTurnedBackIsShadowedOutsideOnlyAndDoesNotBlink]）。
      */
     @Test
     fun backHasThreePaperEdgesToShade() {

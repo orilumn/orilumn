@@ -225,7 +225,16 @@ internal fun buildCurlMesh(
         }
         // 退化成一个点也要留：角点扫线与页面只在角上相切，正是它把纸带的收尖钉在页角上。
         // 直接丢掉的话平铺段永远到不了页角，纸带末端是一条凭空截断的直边。
-        if (hi - lo < -0.01f) return null
+        // 容差按 λ 的量级给：扫线接近竖直或水平时 |tx| / |ty| 很小，上面那几个除法把
+        // 几像素的浮点误差放大成零点几的 λ 误差 —— 正切在页角上的那条扫线会被判成
+        // 「与页面不相交」整行丢掉，而它正是把两条页边的端点钉在纸角上的那一行：
+        // 丢与不丢只差一点点浮点抖动，影带就一帧有一帧没有，看着是闪。
+        val tol = 2e-3f * maxOf(1f, abs(lo), abs(hi))
+        if (hi - lo < -tol) return null
+        if (hi < lo) {
+            val mid = (hi + lo) * 0.5f
+            return floatArrayOf(mid, mid)
+        }
         return floatArrayOf(hi, lo)
     }
 
@@ -387,6 +396,11 @@ internal fun CurlMesh.pageEdges(): List<List<Offset>>? {
         bottom.add(Offset(positions[row * 4], positions[row * 4 + 1]))
         top.add(Offset(positions[row * 4 + 2], positions[row * 4 + 3]))
     }
+    // 折痕正好竖直（或水平）时，最远那条扫线不是纸角而是**整条纸边**：两条纸边各自在自己那一端
+    // 收尾，而斜一点点的时候两条带子都是从这一端走到「斜向另一边」的那个纸角 —— 竖直这一帧少走
+    // 了那一段，影带就比前后几帧短一整截（一帧有、一帧没有，看着是闪）。把上边那条带子的末点
+    // 挪到那个纸角上，跟斜一点点的那一帧画成一样。
+    if ((bottom[rows - 1] - top[rows - 1]).getDistance() > ROW_EPSILON) top[rows - 1] = bottom[rows - 1]
     return listOf(bottom, top)
 }
 

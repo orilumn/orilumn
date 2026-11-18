@@ -119,11 +119,22 @@ class Curl3DRenderTest {
             assertEquals("上一页是同一套几何倒着走", 1f - p, prev.shape.progress, 1e-6f)
             assertEquals("折痕仍按手势扫到 w·p", w * p, prev.shape.foldX, 1e-3f)
 
-            // 折痕与倾斜和原来的上一页几何逐点一致：只换卷曲侧，不镜像手势。
+            // 折痕位置与倾斜本该和「同一手势的低层镜像几何」逐点一致（只换卷曲侧，不镜像
+            // 手势）。但**书脊约束是单侧的**：装订边在屏幕左侧，折痕贴着书脊那一端会按
+            // 屏幕侧的约束收直，镜像几何（装订边在右）没有这条约束。所以只在约束没触发
+            // 的中段逐点对比，两端改为验证屏幕几何确实被挡在左书脊这一侧。
             val old = curlShape(w, h, p, direction = -1, tilt = tilt)
-            assertEquals(old.topX, prev.shape.topX, 1e-3f)
-            assertEquals(old.bottomX, prev.shape.bottomX, 1e-3f)
-            assertEquals(old.lean, prev.shape.lean, 1e-6f)
+            val bothFree = kotlin.math.abs(tilt) * (w * CURL_TILT_WIDTH) <=
+                kotlin.math.min(old.foldX, w - old.foldX)
+            if (bothFree) {
+                assertEquals(old.topX, prev.shape.topX, 1e-3f)
+                assertEquals(old.bottomX, prev.shape.bottomX, 1e-3f)
+                assertEquals(old.lean, prev.shape.lean, 1e-6f)
+            }
+            assertTrue(
+                "上一页几何的折痕也不许越过左书脊：${prev.shape.topX} / ${prev.shape.bottomX}",
+                prev.shape.topX >= 0f && prev.shape.bottomX >= 0f,
+            )
             // 末段扶正对称：1-p 后的淡出系数与 p 相同。
             assertEquals(
                 tailFade(p),

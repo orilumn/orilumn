@@ -19,8 +19,14 @@ import kotlin.math.sqrt
  *   botC  = (foldX + lean·tiltW, 页高)            （折痕与页下边的交点）
  * ```
  *
- * 两个端点都夹在 `[−R, 2·页宽]`（R = 卷曲半径，见 [CURL3D_RADIUS_RATIO]）：折痕可以整体
- * 滑到右缘之外，也可以越过书脊一个半径——后者是纸卷的**退场余量**，见下。
+ * **装订边那一侧**（左装书的左缘；低层镜像几何则是右缘）折痕端点只能贴到页边：折痕越靠近
+ * 书脊，允许的倾斜越小，到书脊时正好竖直。折痕**不许**从书脊穿出去——那样整条上边（或下边）
+ * 都被掀起、书脊中段却还连着，版面上就是把这页从书脊上撕下来（见 [curlShape] 的约束）。
+ * 另一侧是自由边，折痕可以整根滑到页宽之外。
+ *
+ * 两端另夹在 `[−R, 2·页宽]`（R = 卷曲半径，见 [CURL3D_RADIUS_RATIO]）：书脊那端可以越过一个
+ * 半径——那是纸卷的**退场余量**，且只在折痕自己已经越过书脊之后才用得上；自由边那端可以滑出
+ * 右缘。
  *
  * ## 纸卷退场（修「纸张滚到书脊就卷不成筒」）
  *
@@ -82,6 +88,22 @@ internal const val CURL_SHADOW_BAND: Float = 0.05f
 internal const val CURL_TAIL_FADE_SPAN: Float = 0.1f
 
 /**
+ * 跟手时求「折痕端点正好贴住书脊」那个倾斜的二分步数。
+ *
+ * 10 步把倾斜区间分到 1/1024：平板上倾斜差 1 时端点相差约 0.9 页宽，剩下的误差不到 2px，
+ * 画面上看不出来；再多只是白算。
+ */
+private const val SPINE_SOLVE_STEPS: Int = 10
+
+/**
+ * 折痕中点到**装订边**的水平距离（px）：左装书是左缘，镜像几何（`forward = false`）是右缘。
+ *
+ * 折痕最多只能倾斜到端点落在这段距离之内（见 [curlShape]）：再斜，折痕就从书脊穿出去了。
+ */
+private fun spineRoom(foldX: Float, pageW: Float, forward: Boolean): Float =
+    (if (forward) foldX else pageW - foldX).coerceAtLeast(0f)
+
+/**
  * 一次拖动：`from` = 起手时**贴在页边上**的那个点，`to` = 当前手指位置（都是页坐标）。
  *
  * 参考实现 Moon+ `NewCurl3D.simulateOnTouchLock` 在 DOWN 时把起手点贴到页边
@@ -141,7 +163,8 @@ internal fun leanOf(pull: CurlPull, pageW: Float, pageH: Float): Float {
  * @param direction +1 向后翻 / -1 向前翻（来自 [orilumn.reader.ui.reader.FlipSession.direction]）
  * @param tilt 折痕倾斜量（0 = 竖直折痕）。拖动中由 [leanOf] 从拖动方向算出——**是斜率**，
  *   不是 `dy/|d|` 的正弦，所以斜拖时折痕才真的垂直于手指的轨迹；结算期间保持松手那一刻的值。
- *   量级上限 `1 / (2·0.9) ≈ 0.56` 以内不被端点夹取影响，再陡由 [leanOf] 的斜率夹取兜住。
+ *   这是**想要的**倾斜，实际值还要受「折痕端点不许越过书脊」约束（见 [curlShape]）：
+ *   折痕越靠近书脊，能用的倾斜越小，到书脊就是竖直。
  * @param pull 本次拖动（起手页边点 + 此刻手指），非 null 时折痕位置改由它反解（见
  *   [anchoredFoldX]）——读者手上那张纸的边就压在手指上。**只认下一页**：上一页在
  *   [curlFrame] 里就传 null，与旧版「上一页不跟手」同一口径。
@@ -166,7 +189,7 @@ internal fun curlShape(
     // **跟手时不淡倾斜**：起手时折痕就由手指反解、可能已经掀了一大块，再扶正只会让
     // 折痕在开头几帧歪回竖直（斜拖时纸边跟着偏）；末段那一次扶正由松手结算接手。
     val fade = tailFade(p)
-    val lean = if (pull != null && forward) lean0 else lean0 * fade
+    var lean = if (pull != null && forward) lean0 else lean0 * fade
 
     // 纸卷退场（见文件头）：折痕贴到「纸少的那一侧」页边后，再用一个半径的行程把筒滚出页边。
     // 这一段只有 R/w 那么长，所以折痕在这里走得比手指快一倍；不这么做，筒要么被压扁
@@ -175,7 +198,7 @@ internal fun curlShape(
     val tiltW = w * CURL_TILT_WIDTH
     // 折痕位置：向后翻从右缘扫到左缘，向前翻从左缘扫到右缘（旧版同款）。
     // 跟手时折痕不再听进度，改由「掀起的纸边贴在手指上」反解（见 [anchoredFoldX]）。
-    val foldX = if (pull != null && forward) {
+    var foldX = if (pull != null && forward) {
         anchoredFoldX(pull, w, h, lean, tiltW).coerceIn(-exit, w)
     } else {
         val base = if (forward) w * (1f - p) else w * p
@@ -186,11 +209,35 @@ internal fun curlShape(
         }
     }
 
-    // 端点比折痕多留一个半径的余量：退场时折痕整根移出页边，端点要跟着出去；夹回 0 会把
-    // 折痕的角度掰回来，纸卷跟着变形。
-    fun clampX(x: Float) = x.coerceIn(-w * 2f, w * 3f)
-    val topX = clampX(foldX - lean * tiltW)
-    val bottomX = clampX(foldX + lean * tiltW)
+    // 折痕端点不许越过装订边（见文件头）：越靠近书脊，允许的倾斜越小；到书脊正好竖直，
+    // 与「纸卷退场」接上。自由边那一侧不限制。
+    //
+    // 跟手时倾斜与折痕位置互相牵制——倾斜一收小，纸边贴手反解出来的折痕就往外挪——
+    // 所以不能只夹倾斜，要二分找「折痕端点正好贴在书脊上、纸边仍压在手指上」的那个解。
+    val room = spineRoom(foldX, w, forward)
+    if (kotlin.math.abs(lean) * tiltW > room) {
+        if (pull != null && forward) {
+            val sign = if (lean < 0f) -1f else 1f
+            var lo = 0f
+            var hi = kotlin.math.abs(lean)
+            repeat(SPINE_SOLVE_STEPS) {
+                val mid = (lo + hi) * 0.5f
+                val fx = anchoredFoldX(pull, w, h, sign * mid, tiltW).coerceIn(-exit, w)
+                if (mid * tiltW <= spineRoom(fx, w, forward)) lo = mid else hi = mid
+            }
+            // 取可行那一侧（lo）：收紧到「端点刚好贴页边」，不越过。
+            lean = sign * lo
+            foldX = anchoredFoldX(pull, w, h, lean, tiltW).coerceIn(-exit, w)
+        } else {
+            lean = lean.coerceIn(-room / tiltW, room / tiltW)
+        }
+    }
+
+    // 自由边那一侧可以滑出页边；装订边那一侧只剩纸卷退场的一个半径余量（见文件头）。
+    val clampLo = if (forward) -exit else -w * 2f
+    val clampHi = if (forward) w * 2f else w + exit
+    val topX = (foldX - lean * tiltW).coerceIn(clampLo, clampHi)
+    val bottomX = (foldX + lean * tiltW).coerceIn(clampLo, clampHi)
 
     return CurlShape(
         pageW = w,

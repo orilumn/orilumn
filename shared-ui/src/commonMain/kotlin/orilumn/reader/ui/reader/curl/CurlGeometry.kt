@@ -16,8 +16,19 @@ import kotlin.math.hypot
  *   botC  = (foldX + lean·tiltW, 页高)            （折痕与页下边的交点）
  * ```
  *
- * 两个端点都夹在 `[0, 2·页宽]`：折痕可以整体滑到右缘之外（翻页收尾时卷曲区滑出去），
- * 但左缘（书脊）不越过 0。
+ * 两个端点都夹在 `[−R, 2·页宽]`（R = 卷曲半径，见 [CURL3D_RADIUS_RATIO]）：折痕可以整体
+ * 滑到右缘之外，也可以越过书脊一个半径——后者是纸卷的**退场余量**，见下。
+ *
+ * ## 纸卷退场（修「纸张滚到书脊就卷不成筒」）
+ *
+ * 折痕贴到**纸少的那一侧**页边时（下一页收尾、上一页起手，都是 `折痕 → 书脊`），筒身还有
+ * 整整一个半径宽，纸也还有一整页那么多；此时把半径按「折痕到页边的距离」收细，等于宣布
+ * 「纸张滚到书脊就没地方卷了」，卷筒在最后一成进度里被生生压扁。
+ *
+ * 纸卷不该被压扁，它该**滚出页边**：最后 `R/页宽` 的行程里折痕多走一个半径、越过书脊，
+ * 纸卷整根从左边出去（上一页起手则是整根从左边进来），末帧正好一根筒都不剩。
+ * 这一段的折痕因此走得比手指快一倍——「纸卷滚出去」本来就是把最后一小段纸卷完，
+ * 与末段扶正（[CURL_TAIL_FADE_SPAN]）取同一个窗口，收尾时折痕已扶成竖直、直着出页。
  *
  * ## 末段扶正（修「松手后临近结束忽然跳变」）
  *
@@ -29,8 +40,8 @@ import kotlin.math.hypot
  * 同一个系数淡出。手指还按在屏幕上时**不淡**——那是读者自己在控制形状。
  *
  * 与旧版的唯一差别：旧版对「收在右缘」的那两端是把进度**冲过 1**（`1 + 0.9·|tilt|`）
- * 让整块滑出屏幕；我们的进度归一在 `[0, 1]`（与滑动层共用），所以两端都改用扶正来
- * 收干净——末帧折痕竖直贴边、卷曲区面积为零，画面恰好等于目标页。
+ * 让整块滑出屏幕；我们的进度归一在 `[0, 1]`（与滑动层共用），右缘那一端改用扶正来收干净
+ * ——末帧折痕竖直贴边、卷曲区面积为零；书脊那一端另有纸卷退场（见上），末帧连筒一起出页。
  */
 internal data class CurlShape(
     val pageW: Float,
@@ -85,8 +96,9 @@ internal const val CURL_START_EPSILON: Float = 0.011f
 /**
  * 进度大于 `1 − 它` 就算「已经翻完」：整帧只剩目标页。
  *
- * 收尾时纸卷半径收敛到 0，网格本来就会自己消失；留这一段是为了「撤层那一帧不闪」：
- * 最后一帧与静止时的目标页逐像素一致，动画结束撤掉翻页层时画面不跳。
+ * 收尾时纸卷已经退场到页外（见 [CurlShape] 的「纸卷退场」），留在页内的本来只剩一条边；
+ * 留这一段是为了「撤层那一帧不闪」：最后一帧与静止时的目标页逐像素一致，
+ * 动画结束撤掉翻页层时画面不跳。
  */
 internal const val CURL_END_EPSILON: Float = 0.002f
 
@@ -112,7 +124,17 @@ internal fun curlShape(
     val p = progress.coerceIn(-0.9f, 1.9f)
 
     // 折痕位置：向后翻从右缘扫到左缘，向前翻从左缘扫到右缘（旧版同款）。
-    val foldX = if (forward) w * (1f - p) else w * p
+    val base = if (forward) w * (1f - p) else w * p
+
+    // 纸卷退场（见文件头）：折痕贴到「纸少的那一侧」页边后，再用一个半径的行程把筒滚出页边。
+    // 这一段只有 R/w 那么长，所以折痕在这里走得比手指快一倍；不这么做，筒要么被压扁
+    // （按剩余纸宽收细），要么在末帧整根消失（撤层时跳一下）。
+    val exit = w * CURL3D_RADIUS_RATIO
+    val foldX = if (forward) {
+        if (base < exit) 2f * base - exit else base
+    } else {
+        if (w - base < exit) 2f * base - (w - exit) else base
+    }
 
     // 倾斜方向与手势方向垂直：向后翻正倾斜 ⇒ 上端左移、下端右移；向前翻取反。
     val lean0 = (if (forward) tilt else -tilt).coerceIn(-1f, 1f)
@@ -122,7 +144,9 @@ internal fun curlShape(
     val lean = lean0 * fade
 
     val tiltW = w * CURL_TILT_WIDTH
-    fun clampX(x: Float) = x.coerceIn(0f, w * 2f)
+    // 端点比折痕多留一个半径的余量：退场时折痕整根移出页边，端点要跟着出去；夹回 0 会把
+    // 折痕的角度掰回来，纸卷跟着变形。
+    fun clampX(x: Float) = x.coerceIn(-exit, w * 2f)
     val topX = clampX(foldX - lean * tiltW)
     val bottomX = clampX(foldX + lean * tiltW)
 
@@ -348,10 +372,15 @@ private fun crossAt(a: Offset, b: Offset, nx: Float, ny: Float, c: Float): Offse
 /**
  * 卷曲半径：**整段翻页固定一个筒径**（[CURL3D_RADIUS_RATIO]，定稿 0.10 页宽）。
  *
- * 筒径不再由进度或剩下的纸算：早先按「剩下的纸多宽、筒就多粗」算，起手那头半径只有十几像素、
- * 翻到一半才长到一成页宽（差十倍），读者判「卷筒有时候直径会变化，有时候被压扁」。
- * 筒是**同一根筒在滚**，粗细则在整段翻页里不变；只有最后剩下的纸比筒还窄时（折痕离
- * 还没掀起那一侧页边不足一个半径）才跟着收细，收尾那一帧才不留一道边。
+ * 半径与进度无关，也与折痕到页边的距离无关——筒是同一根筒在滚，粗细则在整段翻页里不变。
+ *
+ * ## 为什么不再按「剩下的纸」收细
+ *
+ * 早先的式子取自参考实现的 `dMax = clamp(pointer.x − pageLeft, 0, dWidth)`：半径不超过
+ * 折痕到「还没掀起那一侧」页边的距离。折痕贴到书脊时这个距离是 0，卷筒被压成一条线 ——
+ * 读者原话「纸张滚动到书脊处，无法画卷筒了」。可那时纸还整整有一页，缺的不是纸，
+ * 是「让筒滚出页边」的那段行程：退场交给 [curlShape] 的折痕余量（折痕越过书脊一个半径、
+ * 纸卷整根出页），半径只管筒本身多粗。
  *
  * ## 代价：起手那一段没有平铺的纸背
  *
@@ -362,7 +391,5 @@ private fun crossAt(a: Offset, b: Offset, nx: Float, ny: Float, c: Float): Offse
  */
 internal fun curlRadius(shape: CurlShape, radiusRatio: Float = CURL3D_RADIUS_RATIO): Float {
     val w = shape.pageW.coerceAtLeast(1f)
-    val unturned = if (shape.direction >= 0) shape.foldX else w - shape.foldX
-    val cap = w * radiusRatio.coerceIn(0.002f, 1.5f)
-    return minOf(cap, unturned.coerceAtLeast(0f)).coerceAtLeast(w * CURL3D_MIN_RADIUS_RATIO)
+    return w * radiusRatio.coerceIn(0.002f, 1.5f)
 }

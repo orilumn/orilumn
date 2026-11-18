@@ -17,16 +17,46 @@ class CurlGeometryTest {
     @Test
     fun foldSweepsFromRightToLeftForNextPage() {
         val w = 400f
+        val exit = w * CURL3D_RADIUS_RATIO
         assertEquals("起手：折痕贴右缘", w, curlShape(w, 600f, 0f, 1).foldX, 0.01f)
-        assertEquals("翻完：折痕贴左缘（书脊）", 0f, curlShape(w, 600f, 1f, 1).foldX, 0.01f)
         assertEquals(200f, curlShape(w, 600f, 0.5f, 1).foldX, 0.01f)
+        assertEquals("退场窗口起点仍按进度走", exit, curlShape(w, 600f, 1f - CURL3D_RADIUS_RATIO, 1).foldX, 0.01f)
+        assertEquals("翻完：折痕越过书脊一个筒径，纸卷整根出页", -exit, curlShape(w, 600f, 1f, 1).foldX, 0.01f)
     }
 
     @Test
     fun foldSweepsFromLeftToRightForPrevPage() {
         val w = 400f
+        val exit = w * CURL3D_RADIUS_RATIO
         assertEquals("起手：折痕贴左缘", 0f, curlShape(w, 600f, 0f, -1).foldX, 0.01f)
-        assertEquals("翻完：折痕贴右缘", w, curlShape(w, 600f, 1f, -1).foldX, 0.01f)
+        assertEquals(200f, curlShape(w, 600f, 0.5f, -1).foldX, 0.01f)
+        assertEquals("翻完：折痕越过右缘一个筒径，纸卷整根出页", w + exit, curlShape(w, 600f, 1f, -1).foldX, 0.01f)
+    }
+
+    /**
+     * 纸卷退场：折痕贴到「纸少的那一侧」页边后再走一个筒径，纸卷整根滚出页边。
+     *
+     * 两个方向都要有（上一页起手 = 纸卷滚进来，下一页收尾 = 纸卷滚出去），且必须与
+     * 线性段**接得上**：在 `折痕 = R` 那里跳一格，读者看到的就是筒忽然挪一下。
+     */
+    @Test
+    fun rollExitsPastTheSpineContinuously() {
+        val w = 400f
+        val exit = w * CURL3D_RADIUS_RATIO
+        val start = 1f - CURL3D_RADIUS_RATIO
+        for (dir in listOf(1, -1)) {
+            val sign = if (dir > 0) -1f else 1f
+            assertEquals("dir=$dir 窗口起点接得上线性段", if (dir > 0) exit else w - exit, curlShape(w, 600f, start, dir).foldX, 0.01f)
+            assertEquals("dir=$dir 半程正好骑在页边", if (dir > 0) 0f else w, curlShape(w, 600f, start + (1f - start) / 2f, dir).foldX, 0.01f)
+            var prev = curlShape(w, 600f, start, dir).foldX
+            for (i in 1..10) {
+                val x = curlShape(w, 600f, start + (1f - start) * i / 10f, dir).foldX
+                assertTrue("dir=$dir 退场方向反了", (x - prev) * sign > 0f)
+                assertTrue("dir=$dir 退场不许跳格：$prev → $x", kotlin.math.abs(x - prev) < w * 0.03f)
+                prev = x
+            }
+            assertEquals("dir=$dir 末帧整根出页", if (dir > 0) -exit else w + exit, prev, 0.01f)
+        }
     }
 
     @Test
@@ -41,13 +71,17 @@ class CurlGeometryTest {
         assertTrue("向前翻镜像：下端左移", prev.bottomX < prev.foldX)
     }
 
-    /** 折痕两端都夹在 `[0, 2·页宽]`：右缘之外可以滑出去，书脊一侧不越过 0。 */
+    /** 折痕两端都夹在 `[−R, 2·页宽]`：右缘之外可以滑出去，书脊一侧最多越过一个筒径（纸卷退场）。 */
     @Test
     fun creaseEndsStayWithinSaneRange() {
         val w = 400f
+        val exit = w * CURL3D_RADIUS_RATIO
         val s = curlShape(w, 600f, 0.02f, 1, tilt = -0.9f)
-        assertTrue("上端不该越过书脊（x<0）", s.topX >= 0f)
+        assertTrue("上端最多越过书脊一个筒径：${s.topX}", s.topX >= -exit)
         assertTrue("两端不该滑出右缘两倍页宽之外", s.bottomX <= w * 2f)
+        // 退场末帧：折痕整根在页外，端点要跟着出去——夹回 0 会把折痕的角度掰回来。
+        val gone = curlShape(w, 600f, 1f, 1)
+        assertTrue("退场末帧折痕应当整根在页外：${gone.topX}", gone.topX < 0f && gone.bottomX < 0f)
     }
 
     /**

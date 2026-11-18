@@ -1179,13 +1179,5 @@ internal const val CURL3D_REFERENCE_PRESSURE: Float = 0.7843f
 internal const val CURL3D_REFERENCE_RADIUS_RATIO: Float =
     0.5f * (1f - CURL3D_REFERENCE_PRESSURE)
 
-/**
- * 卷曲半径的下限（相对页宽）。
- *
- * 只防止除零 / 扫线全部重合，不是「收尾也要留个筒」：翻到最后半径本来就该收敛到 0
- * （剩下的纸没有了，纸卷跟着消失），留一个百分之一的筒反而会在末帧留一道边。
- */
-internal const val CURL3D_MIN_RADIUS_RATIO: Float = 0.0005f
-
 /** 圆柱横截面分段数。 */
 internal const val CURL3D_SPLITS: Int = 40

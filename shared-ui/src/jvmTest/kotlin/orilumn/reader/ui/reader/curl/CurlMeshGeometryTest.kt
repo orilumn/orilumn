@@ -52,17 +52,34 @@ class CurlMeshGeometryTest {
     }
 
     @Test
-    fun radiusStaysPutUntilThePaperRunsOut() {
+    fun radiusNeverFollowsTheProgress() {
         // 读者判「卷筒有时候直径会变化，有时候被压扁」：筒径**不跟进度走**，整段翻页只有一根筒。
+        // 收尾也不收细——纸卷靠「滚出页边」消失，不靠把筒压扁（见 rollRollsOutOfThePageInsteadOfBeingSquashed）。
         for (dir in listOf(1, -1)) {
-            for (p in listOf(0.03f, 0.1f, 0.2f, 0.35f, 0.5f, 0.75f, 0.85f, 0.9f)) {
+            for (p in listOf(0.03f, 0.1f, 0.2f, 0.35f, 0.5f, 0.75f, 0.85f, 0.9f, 0.95f, 0.97f, 0.99f, 1f)) {
                 assertEquals("dir=$dir p=$p 筒径变了", cap, curlRadius(curlShape(w, h, p, dir)), 0.5f)
             }
         }
-        // 收尾：剩下的纸比筒还窄 ⇒ 半径跟着剩下的纸收细（纸卷自然消失，末帧不留一道边）。
-        assertEquals(w * 0.03f, curlRadius(curlShape(w, h, 0.97f, 1)), 1f)
-        assertEquals(w * 0.01f, curlRadius(curlShape(w, h, 0.99f, 1)), 1f)
-        assertEquals(w * 0.03f, curlRadius(curlShape(w, h, 0.97f, -1)), 1f)
+    }
+
+    /**
+     * 收尾：纸卷**滚出页边**，不是被页边压扁。
+     *
+     * 读者原话「纸张滚动到书脊处，无法画卷筒了」：折痕贴到书脊时纸还有整整一页，筒也还有
+     * 整整一个半径宽；早先按「折痕到页边的距离」把半径收细，卷筒在最后一段被生生压平。
+     * 现在筒身粗细不动，只是整根往页外滚——页内能看见的部分越来越窄，末帧正好一根不剩。
+     */
+    @Test
+    fun rollRollsOutOfThePageInsteadOfBeingSquashed() {
+        fun visible(p: Float) = (curlShape(w, h, p, 1).foldX + cap).coerceIn(0f, cap)
+        assertEquals("窗口起点：整根筒都在页内", cap, visible(1f - CURL3D_RADIUS_RATIO), 1f)
+        assertEquals("筒刚骑到页边：整根还在页内", cap, visible(1f - CURL3D_RADIUS_RATIO / 2f), 1f)
+        assertEquals("退场半程：筒滚出去一半", cap / 2f, visible(1f - CURL3D_RADIUS_RATIO * 0.25f), 1f)
+        assertEquals("末帧：整根筒出页", 0f, visible(1f), 0.5f)
+        // 筒本身从没被压扁过：整段（含退场窗口）都是同一个粗细。
+        for (p in listOf(0.3f, 0.6f, 0.9f, 0.95f, 0.99f)) {
+            assertEquals("p=$p 筒身不该收细", cap, rollWidth(p), 2f)
+        }
     }
 
     /**
@@ -115,15 +132,12 @@ class CurlMeshGeometryTest {
     }
 
     @Test
-    fun rollKeepsItsThicknessThenTapers() {
+    fun rollKeepsItsThicknessAllTheWayThrough() {
         // 主程：半径不随进度变 ⇒ 纸卷是一个恒定粗细的筒往前滚。
         // （起手那一段由「纸背至少占三成」的上限接管，见 turnedBackAlwaysKeepsSomeFlatPaper。）
-        for (p in listOf(0.5f, 0.7f, 0.9f)) {
+        for (p in listOf(0.5f, 0.7f, 0.9f, 0.95f, 0.99f)) {
             assertEquals("p=$p 纸卷应保持恒定粗细", cap, rollWidth(p), 2f)
         }
-        // 剩下的纸比上限还窄之后才收细，翻完时纸卷应当基本收掉。
-        assertTrue("p=0.99 开始收卷：${rollWidth(0.99f)}", rollWidth(0.99f) < cap * 0.8f)
-        assertTrue("p=0.995 收卷：${rollWidth(0.995f)}", rollWidth(0.995f) < w * 0.01f)
     }
 
     @Test

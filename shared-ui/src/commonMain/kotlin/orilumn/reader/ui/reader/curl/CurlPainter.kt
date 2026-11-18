@@ -44,13 +44,14 @@ internal fun DrawScope.drawCurlFrame(
     val paper = Color(paperArgb)
     val pageSize = Size(w, h)
 
-    // 还没开始翻（手指刚动的一点点）：只画读者正在看的那一页。
-    if (shape.progress <= CURL_START_EPSILON) {
+    // 两端只在进度真正走到 0 / 1 时才整页换成单张页：0 与 1 的几何本身退化（折痕竖直贴边、
+    // 卷曲区面积为零），照常画出来与静止页逐像素一致，不需要死区（见 [drawCurl3DFrame]）。
+    if (shape.progress <= 0f) {
         drawWholePage(front, paper, texLeft, texTop, pageSize)
         return
     }
     // 已经翻完：只剩目标页（最后一帧与静止时逐像素一致，动画结束撤层不跳）。
-    if (shape.progress >= 1f - CURL_END_EPSILON) {
+    if (shape.progress >= 1f) {
         drawWholePage(back, paper, texLeft, texTop, pageSize)
         return
     }

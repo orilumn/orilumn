@@ -68,8 +68,6 @@ class CurlPageImages {
  * @param direction 翻页方向（+1 下一页 / -1 上一页）
  * @param progress 归一化进度（0..1）
  * @param tilt 折痕倾斜（手指位移的上下分量，见 `FlipController.curlTilt`）
- * @param settling 是否在结算动画里：只有结算才做末段扶正（见 [CurlShape]），
- *   手指还按着的时候形状必须听手指的
  * @param texX/texY 页栅格在页坐标里的左上角（版心）；覆盖层恒为整页、贴 (0,0)
  *
  * 三个动画量都是闭包：只在 draw 相位读，动画期间不重组整个阅读面。
@@ -79,7 +77,6 @@ fun FlipCurlLayer(
     direction: () -> Int,
     progress: () -> Float,
     tilt: () -> Float,
-    settling: () -> Boolean,
     pageWidthPx: Float,
     pageHeightPx: Float,
     active: () -> Boolean,
@@ -118,7 +115,6 @@ fun FlipCurlLayer(
                 progress = progress(),
                 direction = dir,
                 tilt = tilt(),
-                settling = settling(),
             )
             // 正面 = 被翻的那一张；露出页 = 折痕另一侧的那一张。
             // 下一页翻当前页、露出目标页；上一页翻目标页（上一页）、露出当前页。

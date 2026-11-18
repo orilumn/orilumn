@@ -84,7 +84,7 @@ class Curl3DRenderTest {
         val w = 400
         val h = 600
         for (dir in listOf(1, -1)) {
-            val shape = curlShape(w.toFloat(), h.toFloat(), 1f, dir, tilt = 0.55f, settling = true)
+            val shape = curlShape(w.toFloat(), h.toFloat(), 1f, dir, tilt = 0.55f)
             val px = render(shape, solid(w, h, red), solid(w, h, blue)).toPixelMap()
             for (x in 0 until w step 7) {
                 for (y in 0 until h step 13) {
@@ -127,7 +127,7 @@ class Curl3DRenderTest {
             // 末段扶正对称：1-p 后的淡出系数与 p 相同。
             assertEquals(
                 tailFade(p),
-                curlFrame(w, h, p, direction = -1, tilt = tilt, settling = true).shape.shadowFade,
+                curlFrame(w, h, p, direction = -1, tilt = tilt).shape.shadowFade,
                 1e-6f,
             )
         }
@@ -872,7 +872,7 @@ class Curl3DRenderTest {
             0.40f to 0.653f,
         )) {
             for (dir in listOf(1, -1)) {
-                val shape = curlShape(w.toFloat(), h.toFloat(), p, dir, tilt, false)
+                val shape = curlShape(w.toFloat(), h.toFloat(), p, dir, tilt)
                 val px = render(shape, body, body, texLeft = margin.toFloat(), texTop = margin.toFloat())
                     .toPixelMap()
                 var longest = 0

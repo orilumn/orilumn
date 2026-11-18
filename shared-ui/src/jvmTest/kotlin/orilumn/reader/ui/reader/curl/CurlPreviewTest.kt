@@ -46,8 +46,8 @@ class CurlPreviewTest {
 
     private fun images(page: ImageBitmap) = CurlPageImages().apply { this.page = page }
 
-    private fun dump(name: String, progress: Float, direction: Int, tilt: Float = 0f, settling: Boolean = false) {
-        val shape = curlShape(pageW.toFloat(), pageH.toFloat(), progress, direction, tilt, settling)
+    private fun dump(name: String, progress: Float, direction: Int, tilt: Float = 0f) {
+        val shape = curlShape(pageW.toFloat(), pageH.toFloat(), progress, direction, tilt)
         val img = ImageBitmap(pageW, pageH, ImageBitmapConfig.Argb8888, hasAlpha = true)
         CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(img), Size(pageW.toFloat(), pageH.toFloat())) {
             drawCurlFrame(
@@ -79,9 +79,9 @@ class CurlPreviewTest {
         dump("prev-050-tilt", 0.50f, -1, tilt = 0.5f)
         // 收尾那几帧（结算里扶正 + 阴影淡出）：相邻两帧之间不该有跳变，p = 1 等于目标页。
         for (p in listOf(0.85f, 0.92f, 0.96f, 0.99f, 1f)) {
-            dump("tail-" + (p * 100).toInt(), p, 1, tilt = 0.55f, settling = true)
+            dump("tail-" + (p * 100).toInt(), p, 1, tilt = 0.55f)
         }
         // 上一页面起手（p → 0，折痕同样贴在书脊）。
-        dump("head-prev", 0.02f, -1, tilt = 0.5f, settling = true)
+        dump("head-prev", 0.02f, -1, tilt = 0.5f)
     }
 }

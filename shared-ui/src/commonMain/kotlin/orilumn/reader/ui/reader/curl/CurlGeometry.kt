@@ -30,14 +30,16 @@ import kotlin.math.hypot
  * 这一段的折痕因此走得比手指快一倍——「纸卷滚出去」本来就是把最后一小段纸卷完，
  * 与末段扶正（[CURL_TAIL_FADE_SPAN]）取同一个窗口，收尾时折痕已扶成竖直、直着出页。
  *
- * ## 末段扶正（修「松手后临近结束忽然跳变」）
+ * ## 头尾扶正（修「进度两端折角一帧消失」与「松手后临近结束忽然跳变」）
  *
- * 斜折痕贴着屏幕边缘收尾时，屏幕上会留下一块「还没翻过去的三角」和折痕旁的一道影；
- * 动画一结束、卷曲层一撤，这两样在一帧内消失 ⇒ 观感就是「快完成了忽然跳一下」。
+ * 斜折痕贴在页边时，屏幕上会有一块「已经掀过去的大三角」和折痕旁的一道影。进度两端这两块
+ * 都没有理由继续存在：进度 0 是「一页都没掀」，进度 1 是「整页都翻完」。但几何本身并不在
+ * 两端自然收成零——折痕一斜，贴着页边也能圈出一大块折角。
  *
- * 旧版的做法（注释原文「否则覆盖层撤掉时停一下再跳」）是在**结算动画的头尾 10%**里
- * 把倾斜量线性淡到 0（`tilt fade`），折痕因此扶成竖直、正好贴边。折痕旁的影同时按
- * 同一个系数淡出。手指还按在屏幕上时**不淡**——那是读者自己在控制形状。
+ * 所以进度**头尾各 10%** 里把倾斜量线性淡到 0（`tilt fade`，旧版注释原文「否则覆盖层
+ * 撤掉时停一下再跳」）：折痕被扶成竖直、正好贴边，折角面积连续收到零；折痕旁的影按同一
+ * 系数淡出。**跟手与结算同口径**——只压倾斜，不压读者自己给的进度。早先只在结算里做，
+ * 于是手指退回起手点（`dx` 归零）时折角会在一帧里整块消失，读者：「像那儿有一条屏幕边线」。
  *
  * 与旧版的唯一差别：旧版对「收在右缘」的那两端是把进度**冲过 1**（`1 + 0.9·|tilt|`）
  * 让整块滑出屏幕；我们的进度归一在 `[0, 1]`（与滑动层共用），右缘那一端改用扶正来收干净
@@ -52,9 +54,9 @@ internal data class CurlShape(
     val bottomX: Float,
     /** 折痕位置（两端点中点的 x，仅日志/测试用）。 */
     val foldX: Float,
-    /** 折痕倾斜量（已按方向镜像、已做末段扶正）。 */
+    /** 折痕倾斜量（已按方向镜像、已做头尾扶正）。 */
     val lean: Float,
-    /** 阴影随进度的淡出系数 0..1（见文件头「末段扶正」）。 */
+    /** 阴影随进度的淡出系数 0..1（见文件头「头尾扶正」）。 */
     val shadowFade: Float,
     /** 归一化进度（0 = 没翻，1 = 翻完；拖动时可略越界）。 */
     val progress: Float,
@@ -87,28 +89,14 @@ internal const val CURL_TILT_MIN_DISPLACEMENT: Float = 24f
 /** 阴影带宽（5% 页宽），与旧版 `SHADOW_BAND` 同一个数。 */
 internal const val CURL_SHADOW_BAND: Float = 0.05f
 
-/** 结算动画头尾这一段（占整段的比例）里扶正折痕、淡出阴影，见文件头。 */
+/** 进度头尾这一段（占整段的比例）里扶正折痕、淡出阴影，见文件头。 */
 internal const val CURL_TAIL_FADE_SPAN: Float = 0.1f
-
-/** 进度小于它就算「还没翻」：只画读者正在看的那一页（旧版同口径 0.011）。 */
-internal const val CURL_START_EPSILON: Float = 0.011f
-
-/**
- * 进度大于 `1 − 它` 就算「已经翻完」：整帧只剩目标页。
- *
- * 收尾时纸卷已经退场到页外（见 [CurlShape] 的「纸卷退场」），留在页内的本来只剩一条边；
- * 留这一段是为了「撤层那一帧不闪」：最后一帧与静止时的目标页逐像素一致，
- * 动画结束撤掉翻页层时画面不跳。
- */
-internal const val CURL_END_EPSILON: Float = 0.002f
 
 /**
  * 由进度算一帧折痕几何。
  *
  * @param direction +1 向后翻 / -1 向前翻（来自 [orilumn.reader.ui.reader.FlipSession.direction]）
  * @param tilt 手指位移归一化后的上下分量（-1..1），0 = 竖折痕；旧版 `CurlView.frozenTilt`
- * @param settling 是否在结算动画里（不是手指跟手阶段）。只有结算才做末段扶正：
- *   手指还按着的时候形状必须听手指的，不能自己扶正。
  */
 internal fun curlShape(
     pageW: Float,
@@ -116,7 +104,6 @@ internal fun curlShape(
     progress: Float,
     direction: Int,
     tilt: Float = 0f,
-    settling: Boolean = false,
 ): CurlShape {
     val w = pageW.coerceAtLeast(1f)
     val h = pageH.coerceAtLeast(1f)
@@ -139,8 +126,8 @@ internal fun curlShape(
     // 倾斜方向与手势方向垂直：向后翻正倾斜 ⇒ 上端左移、下端右移；向前翻取反。
     val lean0 = (if (forward) tilt else -tilt).coerceIn(-1f, 1f)
 
-    // 结算动画头尾 10%：倾斜与阴影一起淡出（见文件头「末段扶正」）。
-    val fade = if (settling) tailFade(p) else 1f
+    // 进度头尾 10%：倾斜与阴影一起淡出（见文件头「头尾扶正」）。
+    val fade = tailFade(p)
     val lean = lean0 * fade
 
     val tiltW = w * CURL_TILT_WIDTH
@@ -189,7 +176,6 @@ internal fun curlFrame(
     progress: Float,
     direction: Int,
     tilt: Float = 0f,
-    settling: Boolean = false,
 ): CurlFrame {
     val back = direction < 0
     return CurlFrame(
@@ -199,13 +185,12 @@ internal fun curlFrame(
             progress = if (back) 1f - progress else progress,
             direction = 1,
             tilt = if (back) -tilt else tilt,
-            settling = settling,
         ),
         turningIsTarget = back,
     )
 }
 
-/** 结算动画头尾的淡出系数：中间恒 1，两端线性到 0。 */
+/** 进度头尾的淡出系数：中间恒 1，两端线性到 0。 */
 internal fun tailFade(progress: Float): Float = when {
     progress > 1f - CURL_TAIL_FADE_SPAN -> ((1f - progress) / CURL_TAIL_FADE_SPAN).coerceIn(0f, 1f)
     progress < CURL_TAIL_FADE_SPAN -> (progress / CURL_TAIL_FADE_SPAN).coerceIn(0f, 1f)

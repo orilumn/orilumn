@@ -26,7 +26,7 @@ class CurlMeshGeometryTest {
     private val cap = w * CURL3D_RADIUS_RATIO
 
     private fun meshAt(progress: Float, tilt: Float = 0f, direction: Int = 1): CurlMesh {
-        val shape = curlShape(w, h, progress, direction, tilt, false)
+        val shape = curlShape(w, h, progress, direction, tilt)
         return buildCurlMesh(shape, radius = curlRadius(shape), splits = CURL3D_SPLITS)
     }
 
@@ -35,7 +35,7 @@ class CurlMeshGeometryTest {
 
     /** 纸卷在屏幕上占的宽度：掀起侧最远端离折痕的距离。 */
     private fun rollWidth(progress: Float, direction: Int = 1): Float {
-        val shape = curlShape(w, h, progress, direction, 0f, false)
+        val shape = curlShape(w, h, progress, direction, 0f)
         val mesh = meshAt(progress, direction = direction)
         var far = shape.foldX
         for (band in mesh.bands) {
@@ -145,7 +145,7 @@ class CurlMeshGeometryTest {
         // 掀起的材料在折痕右侧 ⇒ 纸卷必须鼓在**右边**（露出页那一侧），
         // 绕满半圈后的平铺段落回左边（盖在还没翻走的纸上）。两侧接反就是「三段文字」。
         for (p in listOf(0.2f, 0.5f, 0.9f)) {
-            val shape = curlShape(w, h, p, 1, 0f, false)
+            val shape = curlShape(w, h, p, 1, 0f)
             val mesh = meshAt(p)
             for (band in mesh.bands) {
                 val pts = mesh.bandOutline(band)
@@ -162,7 +162,7 @@ class CurlMeshGeometryTest {
                 }
             }
             // 向前翻整体镜像：纸卷在左边、平铺段在右边。
-            val backShape = curlShape(w, h, p, -1, 0f, false)
+            val backShape = curlShape(w, h, p, -1, 0f)
             val backMesh = meshAt(p, direction = -1)
             for (band in backMesh.bands) {
                 val pts = backMesh.bandOutline(band)
@@ -187,7 +187,7 @@ class CurlMeshGeometryTest {
         // 连没掀的半页一起铺，就是同一张纸画两遍（文字重影），明暗与压淡也会铺到没掀的纸上。
         for (p in listOf(0.2f, 0.5f, 0.9f)) {
             for (dir in listOf(1, -1)) {
-                val shape = curlShape(w, h, p, dir, 0f, false)
+                val shape = curlShape(w, h, p, dir, 0f)
                 val mesh = meshAt(p, direction = dir)
                 for (v in 0 until mesh.vertexCount) {
                     val u = mesh.texCoords[v * 2]
@@ -280,7 +280,7 @@ class CurlMeshGeometryTest {
     @Test
     fun verticesStayInsideThePage() {
         for (p in listOf(0.2f, 0.4f, 0.7f, 0.9f)) {
-            val shape = curlShape(w, h, p, 1, 0f, false)
+            val shape = curlShape(w, h, p, 1, 0f)
             val mesh = meshAt(p)
             assertEquals("顶点数组必须一一对应", mesh.vertexCount, mesh.positions.size / 2)
             assertEquals("弧长数组必须与顶点一一对应", mesh.vertexCount, mesh.arc.size)
@@ -392,7 +392,7 @@ class CurlMeshGeometryTest {
         assertEquals(0, buildCurlMesh(outside, curlRadius(outside), 16).indexCount)
 
         // 零半径不能除零炸掉（网格退化，但结构自洽）。
-        val mid = curlShape(w, h, 0.5f, 1, 0f, false)
+        val mid = curlShape(w, h, 0.5f, 1, 0f)
         val zero = buildCurlMesh(mid, 0f, 16)
         assertEquals(0, zero.indexCount % 3)
         assertEquals(zero.vertexCount, zero.positions.size / 2)
@@ -406,7 +406,7 @@ class CurlMeshGeometryTest {
         assertEquals("每对端点成组出现", 0, mesh.vertexCount % 2)
         // 斜折痕下 y 不再覆盖全高；纸边被卷起来后允许探出页面最多一个半径（纸卷本来就能压到页边
         // 之外，画布那头已经裁到页面内），但不该成片跑出去——越过一个半径就说明扫线裁剪算错了。
-        val radius = curlRadius(curlShape(w, h, 0.4f, 1, 0.6f, false))
+        val radius = curlRadius(curlShape(w, h, 0.4f, 1, 0.6f))
         for (v in 0 until mesh.vertexCount) {
             val x = mesh.positions[v * 2]
             val y = mesh.positions[v * 2 + 1]

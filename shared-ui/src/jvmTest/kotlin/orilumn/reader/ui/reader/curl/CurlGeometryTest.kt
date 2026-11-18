@@ -85,18 +85,24 @@ class CurlGeometryTest {
     }
 
     /**
-     * 末段扶正只在**结算动画**里做（旧版 `CurlView` 的 tilt fade）：
-     * 手指还按着的时候，折痕形状必须听手指的，不能自己扶正。
+     * 头尾扶正（旧版 `CurlView` 的 tilt fade）对**跟手与结算同口径**：
+     * 进度两端各 10% 里把倾斜量线性淡到 0，折角面积因此连续收到零。
+     * 早先只在结算里淡，手指退回起手点时折角会在一帧里整块消失。
      */
     @Test
-    fun tiltFadesOnlyWhileSettling() {
+    fun tiltFadesAtBothEnds() {
         val w = 400f
         val h = 600f
-        assertEquals("跟手中（进度 95%）倾斜量原样保留", 0.5f, curlShape(w, h, 0.95f, 1, 0.5f, settling = false).lean, 1e-4f)
-        assertEquals("结算中（进度 95%）倾斜量淡到一半", 0.25f, curlShape(w, h, 0.95f, 1, 0.5f, settling = true).lean, 1e-4f)
-        assertEquals("结算中（进度 50%）不受影响", 0.5f, curlShape(w, h, 0.5f, 1, 0.5f, settling = true).lean, 1e-4f)
-        assertEquals("结算收尾（进度 100%）折痕扶正", 0f, curlShape(w, h, 1f, 1, 0.5f, settling = true).lean, 1e-4f)
-        assertEquals("结算起手（进度 0%）折痕扶正", 0f, curlShape(w, h, 0f, -1, 0.5f, settling = true).lean, 1e-4f)
+        assertEquals("进度 95% 倾斜量淡到一半", 0.25f, curlShape(w, h, 0.95f, 1, 0.5f).lean, 1e-4f)
+        assertEquals("进度 5% 倾斜量也淡到一半", 0.25f, curlShape(w, h, 0.05f, 1, 0.5f).lean, 1e-4f)
+        assertEquals("中段（进度 50%）不受影响", 0.5f, curlShape(w, h, 0.5f, 1, 0.5f).lean, 1e-4f)
+        assertEquals("收尾（进度 100%）折痕扶正", 0f, curlShape(w, h, 1f, 1, 0.5f).lean, 1e-4f)
+        assertEquals("起手（进度 0%）折痕扶正", 0f, curlShape(w, h, 0f, -1, 0.5f).lean, 1e-4f)
+        // 两端折角面积必须连续收到零：进度 0 / 1 的折痕竖直贴边，掀起的纸宽度为 0。
+        val head = curlShape(w, h, 0f, 1, 0.9f)
+        assertEquals("进度 0 折痕竖直", head.topX, head.bottomX, 1e-4f)
+        val tail = curlShape(w, h, 1f, 1, 0.9f)
+        assertEquals("进度 1 折痕竖直", tail.topX, tail.bottomX, 1e-4f)
     }
 
     @Test

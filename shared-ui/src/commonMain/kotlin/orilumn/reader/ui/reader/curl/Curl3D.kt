@@ -133,14 +133,18 @@ internal fun DrawScope.drawCurl3DFrame(
     val pageSize = Size(w, h)
     val paper = Color(paperArgb)
 
-    // 还没开始翻：只画读者正在看的那一页（`front` 永远是被翻走的那一张）。
-    if (shape.progress <= CURL_START_EPSILON) {
+    // 进度到 0 及以下才回到「只画当前页」：0 与 1 这两端几何本身就是退化的（折痕竖直贴边、
+    // 卷曲区面积为零），照常画出来与静止页逐像素一致，不需要额外的死区。
+    //
+    // 曾经的 1.1% / 0.2% 死区（旧版同口径）在斜折痕下会把一整块折角**一帧掐掉**：
+    // 倾斜 0.8、进度 3% 时折角已经很大，而 1.1% 以下整块不画 ⇒ 手指退到起手点附近
+    // 折角忽然消失，像那里有一条屏幕边线。
+    if (shape.progress <= 0f) {
         drawPage(front, paper, texLeft, texTop, pageSize)
         return true
     }
-    // 已经翻完：只剩目标页。收尾时纸卷半径趋近 0，但残留的一道细边会在撤层那一帧闪一下，
-    // 所以最后这一段直接整页换成目标页（与折页那条 [drawCurlFrame] 同口径）。
-    if (shape.progress >= 1f - CURL_END_EPSILON) {
+    // 已经翻完：只剩目标页。
+    if (shape.progress >= 1f) {
         drawPage(back, paper, texLeft, texTop, pageSize)
         return true
     }

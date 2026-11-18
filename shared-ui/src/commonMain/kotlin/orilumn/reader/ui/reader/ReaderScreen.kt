@@ -3944,7 +3944,6 @@ fun ReaderScreen(
                     progress = { if (ctl.slideActive(slideEnabled)) ctl.progress.value else 0f },
                     tilt = { ctl.curlTilt.value },
                     // 只有结算动画才做末段扶正（手指跟手时形状听手指的，见 curl/CurlGeometry.kt）。
-                    settling = { ctl.session.phase == FlipSession.Phase.Settling },
                     pageWidthPx = pxWidth,
                     pageHeightPx = pxHeight,
                     active = { ctl.slideActive(slideEnabled) },

@@ -45,7 +45,7 @@ class CurlMeshPreviewTest {
     }
 
     private fun dump(name: String, progress: Float, tilt: Float = 0f, radiusRatio: Float = CURL3D_RADIUS_RATIO) {
-        val shape = curlShape(pageW.toFloat(), pageH.toFloat(), progress, 1, tilt, false)
+        val shape = curlShape(pageW.toFloat(), pageH.toFloat(), progress, 1, tilt)
         val front = CurlPageImages().apply { page = fakePage(0xFF2A2A2A.toInt(), 1f) }
         val back = CurlPageImages().apply { page = fakePage(0xFF2A2A2A.toInt(), 0.45f) }
         val img = ImageBitmap(pageW, pageH, ImageBitmapConfig.Argb8888, hasAlpha = true)
@@ -74,7 +74,7 @@ class CurlMeshPreviewTest {
         val back = CurlPageImages().apply { page = fakePageSized(tw, th, 0xFF7A3A2E.toInt()) }
         for (dir in listOf(1, -1)) {
             for (p in listOf(0.10f, 0.20f, 0.35f, 0.45f, 0.70f, 0.90f)) {
-                val shape = curlShape(w.toFloat(), h.toFloat(), p, dir, 0f, false)
+                val shape = curlShape(w.toFloat(), h.toFloat(), p, dir, 0f)
                 val img = ImageBitmap(w, h, ImageBitmapConfig.Argb8888, hasAlpha = true)
                 CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(img), Size(w.toFloat(), h.toFloat())) {
                     drawRect(Color(0xFFEFECE3.toInt()))
@@ -90,7 +90,7 @@ class CurlMeshPreviewTest {
             }
         }
         for ((p, tilt) in listOf(0.2f to 0.35f, 0.45f to -0.35f, 0.7f to 0.35f)) {
-            val shape = curlShape(w.toFloat(), h.toFloat(), p, 1, tilt, false)
+            val shape = curlShape(w.toFloat(), h.toFloat(), p, 1, tilt)
             val img = ImageBitmap(w, h, ImageBitmapConfig.Argb8888, hasAlpha = true)
             CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(img), Size(w.toFloat(), h.toFloat())) {
                 drawRect(Color(0xFFEFECE3.toInt()))
@@ -137,7 +137,7 @@ class CurlMeshPreviewTest {
         val front = CurlPageImages().apply { page = fakePageSized(tw, th, 0xFF2A2A2A.toInt()) }
         val back = CurlPageImages().apply { page = fakePageSized(tw, th, 0xFF2A2A2A.toInt()) }
         for ((p, tilt) in listOf(0.026f to 0.653f, 0.026f to 0f, 0.4f to 0.653f, 0.4f to 0f)) {
-            val shape = curlShape(w.toFloat(), h.toFloat(), p, 1, tilt, false)
+            val shape = curlShape(w.toFloat(), h.toFloat(), p, 1, tilt)
             println("shape p=$p tilt=$tilt top=${shape.topX} bot=${shape.bottomX} lean=${shape.lean}")
             val img = ImageBitmap(w, h, ImageBitmapConfig.Argb8888, hasAlpha = true)
             CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(img), Size(w.toFloat(), h.toFloat())) {

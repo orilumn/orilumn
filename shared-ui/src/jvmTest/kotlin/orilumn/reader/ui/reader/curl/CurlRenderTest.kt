@@ -127,12 +127,12 @@ class CurlRenderTest {
         val h = 600
         for (dir in listOf(1, -1)) {
             val start = render(
-                curlShape(w.toFloat(), h.toFloat(), 0f, dir, tilt = 0.55f, settling = true),
+                curlShape(w.toFloat(), h.toFloat(), 0f, dir, tilt = 0.55f),
                 images(solid(w, h, red)),
                 images(solid(w, h, blue)),
             ).toPixelMap()
             val end = render(
-                curlShape(w.toFloat(), h.toFloat(), 1f, dir, tilt = 0.55f, settling = true),
+                curlShape(w.toFloat(), h.toFloat(), 1f, dir, tilt = 0.55f),
                 images(solid(w, h, red)),
                 images(solid(w, h, blue)),
             ).toPixelMap()

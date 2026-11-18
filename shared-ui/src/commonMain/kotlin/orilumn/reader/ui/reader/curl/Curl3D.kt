@@ -624,13 +624,8 @@ internal fun outwardNormals(
  * @param n1 第一条页边在纸角处的朝外法向。
  * @param w1 第一条页边在纸角处的满宽。
  * @param n2 第二条页边在纸角处的朝外法向。
- * @param w2 第二条页边在纸角处的满宽：与 [w1] 不同时，外沿在两者之间过渡，
+ * @param w2 第二条页边在纸角处的满宽：与 [w1] 不同时，扇形半径沿弧线在两者之间线性过渡，
  *   两条直边正好接住两条带子的外沿，角上不会多出一步台阶。
- *
- * 外沿**偏直**（[CURL3D_CORNER_FAN_BULGE]）：早先是绕纸角的一段圆弧，宽度差一倍时（长页边
- * 满宽、短页边半宽）那段弧在中途比两头连线鼓出好几像素，读者看的是「与短边衔接处反而向外
- * 拱起」。现在外沿取两条带子端头连线，只留一点点拱度。浓度也按 [CURL3D_CORNER_FAN_ALPHA]
- * 略微压淡 —— 读者判「角上那块略深」。
  */
 private fun DrawScope.drawCornerFan(
     corner: Offset,
@@ -650,38 +645,21 @@ private fun DrawScope.drawCornerFan(
     while (sweep > PI.toFloat()) sweep -= twoPi
     while (sweep < -PI.toFloat()) sweep += twoPi
     if (abs(sweep) < 1e-3f) return
-    val fanAlpha = alpha * CURL3D_CORNER_FAN_ALPHA
-    val layerAlpha = (1.0 - (1.0 - fanAlpha.toDouble()).pow(1.0 / SHADOW_TAPER_LAYERS)).toFloat()
+    val layerAlpha = (1.0 - (1.0 - alpha.toDouble()).pow(1.0 / SHADOW_TAPER_LAYERS)).toFloat()
     val color = Color(0f, 0f, 0f, layerAlpha)
-    // 两条页边的满宽可以不一样（短页边减半）：外沿按「两条带子端头的连线」走，只按
-    // [CURL3D_CORNER_FAN_BULGE] 留一点拱度。半径随角度线性过渡时（早先那样）宽度差一倍就
-    // 会在中途鼓出好几像素，读者看的是「与短边衔接处向外拱起」。
-    val end1 = Offset(cos(a1), sin(a1))
-    val end2 = Offset(cos(a1 + sweep), sin(a1 + sweep))
+    // 两条页边的满宽可以不一样（短页边减半），所以弧上的半径按角度在两者之间线性过渡，
+    // 扇形的两条直边正好接住两条带子的外沿，纸角上不会多出一步台阶。
     for (layer in 1..SHADOW_TAPER_LAYERS) {
-        // 每层都以纸角为心等比缩：外沿形状不变，径向的浓淡过渡才和两条带子对得上。
         val scale = layer.toFloat() / SHADOW_TAPER_LAYERS
-        val x1 = corner.x + end1.x * w1 * scale
-        val y1 = corner.y + end1.y * w1 * scale
-        val x2 = corner.x + end2.x * w2 * scale
-        val y2 = corner.y + end2.y * w2 * scale
+        val r1 = w1 * scale
+        val r2 = w2 * scale
         path.reset()
         path.moveTo(corner.x, corner.y)
         for (k in 0..SHADOW_FAN_STEPS) {
             val f = k.toFloat() / SHADOW_FAN_STEPS
-            // 端头连线上的点。
-            val cx = x1 + (x2 - x1) * f
-            val cy = y1 + (y2 - y1) * f
-            if (CURL3D_CORNER_FAN_BULGE <= 0f) {
-                path.lineTo(cx, cy)
-            } else {
-                // 圆弧上的点，按拱度插值：0 = 直线，1 = 原来的圆弧。
-                val ang = a1 + sweep * f
-                val r = (w1 + (w2 - w1) * f) * scale
-                val ax = corner.x + cos(ang) * r
-                val ay = corner.y + sin(ang) * r
-                path.lineTo(cx + (ax - cx) * CURL3D_CORNER_FAN_BULGE, cy + (ay - cy) * CURL3D_CORNER_FAN_BULGE)
-            }
+            val ang = a1 + sweep * f
+            val r = r1 + (r2 - r1) * f
+            path.lineTo(corner.x + cos(ang) * r, corner.y + sin(ang) * r)
         }
         path.close()
         drawPath(path, color)
@@ -1118,22 +1096,6 @@ internal const val CURL3D_BACK_SHADOW_WIDTH: Float = 1.00f
  * 一样宽」。短边取半宽；纸角那一端仍是最宽处，折痕那一端照样收到 0。
  */
 internal const val CURL3D_SHORT_EDGE_SHADOW_SHARE: Float = 0.5f
-
-/**
- * 纸角那块扇形影的浓度，相对两条页边的影带（读者判「角上那块颜色略深」）。
- *
- * 卡在角上的那一楔只有径向渐变、没有带子那种「沿边越走越窄」的稀释，同样浓度看着更实，
- * 所以单独压淡一点。
- */
-private const val CURL3D_CORNER_FAN_ALPHA: Float = 0.75f
-
-/**
- * 纸角扇形外沿的**拱起程度**：`0` = 两条影带端头的直线连线，`1` = 绕纸角的圆弧。
- *
- * 两条边的满宽不一样（长页边满宽、短页边半宽）时，圆弧在中途会鼓出好几像素，读者看的是
- * 「与短边阴影衔接处反而向外拱起」。取小值，让它基本是一条直的收口。
- */
-private const val CURL3D_CORNER_FAN_BULGE: Float = 0.35f
 
 /** 纸背落影的浓度（相对 [DROP_SHADOW_ALPHA]）。 */
 internal const val CURL3D_BACK_SHADOW_ALPHA: Float = 0.62f

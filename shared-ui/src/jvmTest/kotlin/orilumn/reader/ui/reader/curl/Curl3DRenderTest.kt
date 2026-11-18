@@ -958,5 +958,66 @@ class Curl3DRenderTest {
         }
     }
 
+    /**
+     * 折痕**基本竖直**时，影带与纸角扇形不许随倾斜微动在页边两侧来回切。
+     *
+     * 读者原话：「在页面折起基本平行于屏幕左右边框时，有时会在竖直的页边右侧多出一条阴影带，
+     * 闪烁明显；不是多出，是把该画在左侧的阴影带画在了右侧，但稍稍移动又回到左侧，就是会来回切换」。
+     *
+     * 纸角上那几条扫线在屏幕上差不到一像素、折线还在这儿拐直角：逐点比点乘会把 90° 拐弯
+     * 当成掉头，`|0|` 的噪声就定了符号 —— 倾斜千分之一就翻一次。这里沿倾斜扫过去，只要影真画
+     * 得出来（宽度 ≥ 6px，影的渐入起点见 `ramp`，宽度不到那个数的几帧本来就要收到零），
+     * 两条页边末端的**朝外法向方向**（= 纸角扇形的两条边）必须始终在同一侧。
+     *
+     * 不锁具体角度：折痕从竖直微微倾斜时，扇形本来就会跟着歪一点，锁的只是不翻边。
+     */
+    @Test
+    fun nearVerticalFoldKeepsTheShadowOnOneSide() {
+        val w = 400
+        val h = 600
+        var total = 0
+        for (dir in listOf(1, -1)) {
+            for (p in listOf(0.15f, 0.18f, 0.2f, 0.25f, 0.3f, 0.31f, 0.35f, 0.45f, 0.55f, 0.65f, 0.75f, 0.85f)) {
+                var prev: Int? = null
+                var prevTilt = 0f
+                var tilt = 0f
+                while (tilt <= 0.0201f) {
+                    val shape = curlShape(w.toFloat(), h.toFloat(), p, dir, tilt = tilt)
+                    val radius = curlRadius(shape)
+                    val mesh = buildCurlMesh(shape, radius)
+                    val edges = mesh.pageEdges() ?: break
+                    val seed = mesh.shadowSeedRows()
+                    val flatTurn = PI.toFloat() * radius
+                    val ramp = ((mesh.maxArc() - flatTurn * 0.5f) / flatTurn).coerceIn(0f, 1f)
+                    val width = radius * CURL3D_BACK_SHADOW_WIDTH * ramp
+                    val last = edges[0].size - 1
+                    // 只量「两条页边在纸角上相交」的帧：那是扇形在场、也是翻边最刺眼的形状。
+                    val corner = seed != null && (edges[0][last] - edges[1][last]).getDistance() < 0.5f
+                    if (corner && width >= 6f) {
+                        val n0 = outwardNormals(edges[0], edges[1], seed!!)
+                        val n1 = outwardNormals(edges[1], edges[0], seed)
+                        if (n0 != null && n1 != null) {
+                            // 扇形两条边的叉积符号 = 铺向折角外的那一楔在纸边的哪一侧。
+                            val cross = n0[last].x * n1[last].y - n0[last].y * n1[last].x
+                            val side = if (cross >= 0f) 1 else -1
+                            if (prev != null) {
+                                assertTrue(
+                                    "dir=$dir p=$p tilt=$prevTilt→$tilt 影带翻到了页边另一侧" +
+                                        "（影宽 ${width.toInt()}px）：读者看到的就是「阴影带左右来回切换」",
+                                    side == prev,
+                                )
+                            }
+                            prev = side
+                            prevTilt = tilt
+                            total++
+                        }
+                    }
+                    tilt += 0.0005f
+                }
+            }
+        }
+        assertTrue("一帧都没量到，测试没测到东西", total > 100)
+    }
+
     private fun luma(c: Color): Float = (c.red + c.green + c.blue) / 3f
 }

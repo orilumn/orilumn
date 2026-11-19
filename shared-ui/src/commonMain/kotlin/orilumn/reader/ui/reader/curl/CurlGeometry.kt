@@ -73,7 +73,12 @@ internal data class CurlShape(
     val bottomX: Float,
     /** 折痕位置（两端点中点的 x，仅日志/测试用）。 */
     val foldX: Float,
-    /** 折痕倾斜量（已按方向镜像、已做头尾扶正或跟手时的横向行程收小）。 */
+    /**
+     * 折痕倾斜量（正 = 上端 `foldX − lean·tiltW`、下端 `foldX + lean·tiltW`）。
+     *
+     * 符号只跟竖向动作走（见 [leanOf]：手指向上、纸角就向上转，与起手在哪一侧无关），
+     * 也已做头尾扶正 / 跟手时的横向行程收小。
+     */
     val lean: Float,
     /**
      * 阴影随进度的淡出系数 0..1（见文件头「头尾扶正」）。
@@ -191,36 +196,49 @@ data class CurlPull(
 /**
  * 拖动方向 ⇒ 折痕倾斜量（[CurlShape.lean] 的输入）。
  *
- * 折痕与拖动方向垂直：掀起侧的**单位法向** `n = −ǘ`（`ǘ` = 手指相对页边的拖动方向），
- * 而 [curlShape] 里折痕两端是 `(ox − lean·tiltW, 0)`、`(ox + lean·tiltW, h)`，其法向
- * 正比于 `(h, −2·lean·tiltW)`。两者相等即
+ * ## 符号只跟竖向动作走（横向分量只决定大小）
+ *
+ * 读者口径是**手指向上、纸角就向上转**，四种起手（左右半边 × 两个翻页方向）一个口径，
+ * 手指滑到起手点哪一侧都一样。所以倾斜的符号只能取自 `u_y`：
  *
  * ```
- *   lean = −(u_y / u_x) · h / (2·tiltW)
+ *   lean = (u_y / |u_x|) · h / (2·tiltW)      （正负完全由 u_y 决定）
  * ```
  *
- * 斜率夹取：折痕两端不许被端点夹取掰弯，等价于**整个页高最多横移两个页宽**
- * （`|u_y / u_x| ≤ 2w / h`，参考实现在更陡的角度上才夹到页角）。指尖从小幅上下抖动
- * 会让比率爆掉，不夹就是折痕一顿一顿地躺平。
+ * 早先用的是 `−u_y/u_x`。手指一直待在起手点同一侧时它没问题，可折痕锚点的起点就是按下点：
+ * 手指滑出去再滑回来、**越过按下点**之后 `u_x` 换号，斜率跟着换号，整根折痕当场镜像——
+ * 读者原话：「屏幕左侧左滑，手指滑回到右侧，这时上下移动，手势还是反向的」。页边锚点碰不到
+ * 这件事（起点是页右缘，手指永远在它左边），所以它只在折痕锚点跨过按下点时出现。把大小与
+ * 符号拆开（分母取 `|u_x|`）之后，跨过去再多来回也只有一个口径，也**不需要再按翻页方向 /
+ * 锚点做任何取反**——那类特判本身就会让某一侧反向。
  *
- * 拖回页边之外（`u_x` 换向）时比率仍可算，交给 [curlShape] 的端点夹取兜住；
- * 纯上下拖（`u_x ≈ 0`）方向退化，折痕保持竖直。
+ * ## 大小
  *
- * 再叠一道**横向行程**上限（[travelLeanCap]）：`u_y/u_x` 在手指退回起手点时必然爆掉
- * （横向位移趋零、纵向抖动还在），光靠斜率夹取只会把折痕顶到最大倾斜，折痕中点贴着
- * 右缘、折痕却斜切走大半个页——见 [travelLeanCap] 的 KDoc。
+ * 斜率绝对值仍按 `|u_y/u_x|` 夹取（`≤ 2w/h`）：折痕两端不许被端点夹取掰弯，等价于整个
+ * 页高最多横移两个页宽（参考实现在更陡的角度上才夹到页角）。纯上下拖（`u_x ≈ 0`）方向
+ * 退化，折痕保持竖直。
+ *
+ * 再叠一道**横向行程**上限（[travelLeanCap]）：`u_y/|u_x|` 在手指越过按下点时必然爆掉
+ * （横向位移趋零、纵向抖动还在），光靠斜率夹取会把折痕顶到最大倾斜，折痕中点贴着右缘、
+ * 折痕却斜切走大半个页。行程上限让它在按下点两侧一路收到 0，跨过去是连续的。
+ *
+ * 代价：越过按下点之后，折痕不再严格垂直于此刻的拖动方向（它垂直于横向镜像后的那一条）。
+ * 读者要的是「竖向动作的方向」，不是「折痕与这一帧的拖动向量垂直」；越界那一段以竖向
+ * 口径为准。
  */
 internal fun leanOf(pull: CurlPull, pageW: Float, pageH: Float): Float {
     val u = pull.unit() ?: return 0f
     val w = pageW.coerceAtLeast(1f)
     val h = pageH.coerceAtLeast(1f)
     val tiltW = w * CURL_TILT_WIDTH
-    if (kotlin.math.abs(u.x) < 1e-4f) return 0f
+    val ax = kotlin.math.abs(u.x)
+    if (ax < 1e-4f) return 0f
     // 折痕横移上限 = 两个页宽（参考实现在角度再陡时才夹到页角，见 KDoc）。
     val maxSlope = 2f * w / h
-    val slope = (u.y / u.x).coerceIn(-maxSlope, maxSlope)
+    // 分母取 |u_x|，符号只由 u_y 决定（见 KDoc：u_x 越过 0 时不许镜像）。
+    val slope = (u.y / ax).coerceIn(-maxSlope, maxSlope)
     val cap = travelLeanCap(pull, tiltW)
-    return (-slope * h / (2f * tiltW)).coerceIn(-cap, cap)
+    return (slope * h / (2f * tiltW)).coerceIn(-cap, cap)
 }
 
 /**
@@ -249,7 +267,8 @@ internal fun travelLeanCap(pull: CurlPull, tiltW: Float): Float =
  *
  * @param direction +1 向后翻 / -1 向前翻（来自 [orilumn.reader.ui.reader.FlipSession.direction]）
  * @param tilt 折痕倾斜量（0 = 竖直折痕）。拖动中由 [leanOf] 从拖动方向算出——**是斜率**，
- *   不是 `dy/|d|` 的正弦，所以斜拖时折痕才真的垂直于手指的轨迹；结算期间保持松手那一刻的值。
+ *   不是 `dy/|d|` 的正弦，所以斜拖时折痕才真的垂直于手指的轨迹；**符号只跟竖向动作走**
+ *   （见 [leanOf] 的 KDoc），结算期间保持松手那一刻的值。
  *   这是**想要的**倾斜，实际值还要受两道约束（见 [curlShape]）：折痕端点不许越过书脊
  *   （越靠近书脊能用的倾斜越小，到书脊正好竖直），跟手时也不许超过手指横向行程的
  *   [CURL_LEAN_PER_TRAVEL] 倍（见 [travelLeanCap]）。
@@ -271,7 +290,8 @@ internal fun curlShape(
     val forward = direction >= 0
     val p = progress.coerceIn(-0.9f, 1.9f)
 
-    // 倾斜方向与手势方向垂直：向后翻正倾斜 ⇒ 上端左移、下端右移；向前翻取反。
+    // `direction = -1` 只给**镜像几何**用（低层几何 / 与镜像相关的测试；翻页层恒传 +1，
+    // 见 [curlFrame]），所以这里按方向把倾斜一起镜像，`+1` 那条路上倾斜原样进。
     val lean0 = (if (forward) tilt else -tilt).coerceIn(-1f, 1f)
     val tiltW = w * CURL_TILT_WIDTH
 
@@ -406,9 +426,8 @@ internal fun CurlShape.fullyTurned(): Boolean = !anchored && progress >= 1f
  * - **上一页**：上一页（目标页）是卷回来的那张，当前页留在右边被它盖住。
  *
  * 上一页不是把下一页的几何左右镜像（那样书脊会跑到右边），而是**同一套几何倒着走**：
- * 进度取 `1-p`，折痕因此仍在 `w·p`；倾斜**原样带过去，不取反**——折痕垂直于手指轨迹
- * 这件事与翻的是哪张纸无关，同一根手指、同一个折痕位置本来就该是同一根线（取反会让两个
- * 方向的纸边朝相反方向转，读者报的「同样在右侧翻上页翻下页，页边旋转方向相反」）。
+ * 进度取 `1-p`，折痕因此仍在 `w·p`；倾斜**原样带过去，不在这里取反**——倾斜的符号由
+ * [leanOf] 统一按竖向动作定（手指向上、纸角就向上转），到这里已经是两个方向同一口径的量。
  * 再由 [turningIsTarget] 把正面/露出页两张图换位。
  */
 internal data class CurlFrame(

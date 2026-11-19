@@ -653,6 +653,100 @@ class CurlGeometryTest {
     }
 
     /**
+     * 四种起手（左右半边 × 两个翻页方向）里，同一个竖向手指动作都必须让纸角朝同一侧转
+     * （读者口径：**手指向上，纸角就向上转**，与起手在哪半边、翻哪个方向都无关）。
+     *
+     * 判据用屏幕上的量：掀起的那一头跟着手指走——手指向上 ⇒ 折痕上端落在下端右边
+     * （`topX > bottomX`），手指向下反之，竖向不动则竖直折痕。
+     *
+     * 倾斜的符号只由**竖向分量**决定，横向分量只决定大小（见 `leanOf`）。早先按
+     * `u_y/u_x` 取符号，折痕锚点的起点是按下点，手指一跨回按下点另一侧 `u_x` 就换号，
+     * 折痕整根镜像——见下一条 [crossingBackOverThePressPointDoesNotMirrorTheTilt]。
+     */
+    @Test
+    fun theSameVerticalDragTurnsThePageCornerTheSameWayFromEveryStart() {
+        val w = 1840f
+        val h = 2800f
+        val mid = h / 2f
+        fun shape(direction: Int, crease: Boolean, dy: Float): CurlShape {
+            val press = if (crease) 800f else w * 0.8f
+            val pull = CurlPull(
+                // 生产口径：页边锚点的 from 是页右缘，折痕锚点的 from 是按下点。
+                from = if (crease) Offset(press, mid) else Offset(w, mid),
+                to = Offset(press + if (direction > 0) -200f else 200f, mid + dy),
+                anchor = if (crease) CurlAnchor.Crease else CurlAnchor.Edge,
+            )
+            return curlFrame(w, h, 0.45f, direction, tilt = leanOf(pull, w, h), pull = pull).shape
+        }
+        for (crease in listOf(false, true)) {
+            for (direction in listOf(1, -1)) {
+                val where = (if (crease) "左半边（折痕锚点）" else "右半边（页边锚点）") +
+                    (if (direction > 0) "\u00b7下一页" else "\u00b7上一页")
+                for (dy in listOf(-80f, -300f)) {
+                    val s = shape(direction, crease, dy)
+                    assertTrue(
+                        "$where\u00b7手指向上：折痕上端应当落在下端右边（lean=${s.lean}）",
+                        s.topX > s.bottomX,
+                    )
+                }
+                for (dy in listOf(80f, 300f)) {
+                    val s = shape(direction, crease, dy)
+                    assertTrue(
+                        "$where\u00b7手指向下：折痕上端应当落在下端左边（lean=${s.lean}）",
+                        s.topX < s.bottomX,
+                    )
+                }
+                val flat = shape(direction, crease, 0f)
+                assertEquals("$where\u00b7竖向不动 ⇒ 竖直折痕", flat.topX, flat.bottomX, 1e-3f)
+            }
+        }
+    }
+
+    /**
+     * 手指滑过按下点、回到另一侧之后再上下移动，折痕**不许镜像**。
+     *
+     * 读者原话：「屏幕左侧左滑，手指滑回到右侧，这时上下移动，手势还是反向的」。起手在左半边
+     * ⇒ 折痕锚点，方向向量的起点就是按下点；手指从左边扫回右边时横向分量换号，早先
+     * `u_y/u_x` 也跟着换号，整根折痕当场镜像。现在符号只取 `u_y`，横向分量只作大小的分母，
+     * 所以按下点两侧一路扫过去，同一个竖向动作只有一个转向；按下点正上方横向行程为 0，
+     * 折痕竖直、不掉头。
+     */
+    @Test
+    fun crossingBackOverThePressPointDoesNotMirrorTheTilt() {
+        val w = 1840f
+        val h = 2800f
+        val mid = h / 2f
+        val press = 800f
+        // 从左到右扫过按下点：负 = 还在左边，正 = 已经滑回右边（读者报的那一段）。
+        for (direction in listOf(1, -1)) {
+            for (dx in listOf(-400f, -200f, -40f, -10f, 10f, 40f, 200f, 400f)) {
+                val up = CurlPull(
+                    from = Offset(press, mid),
+                    to = Offset(press + dx, mid - 240f),
+                    anchor = CurlAnchor.Crease,
+                )
+                val down = up.copy(to = Offset(press + dx, mid + 240f))
+                val sUp = curlFrame(w, h, 0.35f, direction, leanOf(up, w, h), up).shape
+                val sDown = curlFrame(w, h, 0.35f, direction, leanOf(down, w, h), down).shape
+                assertTrue(
+                    "dir=$direction dx=$dx 手指向上：纸角必须向上（lean=${sUp.lean}）",
+                    sUp.topX > sUp.bottomX,
+                )
+                assertTrue(
+                    "dir=$direction dx=$dx 手指向下：纸角必须向下（lean=${sDown.lean}）",
+                    sDown.topX < sDown.bottomX,
+                )
+            }
+        }
+        val at = CurlPull(
+            from = Offset(press, mid),
+            to = Offset(press, mid - 240f),
+            anchor = CurlAnchor.Crease,
+        )
+        assertEquals("按下点正上方 ⇒ 竖直折痕", 0f, leanOf(at, w, h), 1e-3f)
+    }
+
+    /**
      * 纸自由边（材料坐标 x = 页宽）上、材料纵坐标 = [texY] 那一点落在屏幕的哪。
      *
      * 网格顶点只落在页角与扫线交点上，抓点一般在两点之间，按材料坐标线性插值取。

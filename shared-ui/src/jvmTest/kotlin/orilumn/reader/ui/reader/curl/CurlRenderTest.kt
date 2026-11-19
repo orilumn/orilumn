@@ -1,5 +1,6 @@
 package orilumn.reader.ui.reader.curl
 
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Canvas
 import androidx.compose.ui.graphics.Color
@@ -58,12 +59,18 @@ class CurlRenderTest {
         this.overlay = overlay
     }
 
-    private fun render(shape: CurlShape, front: CurlPageImages, back: CurlPageImages, texLeft: Float = 0f, texTop: Float = 0f): ImageBitmap {
+    private fun render(
+        shape: CurlShape,
+        front: CurlPageImages,
+        back: CurlPageImages,
+        frontTex: Offset = Offset.Zero,
+        backTex: Offset = Offset.Zero,
+    ): ImageBitmap {
         val w = shape.pageW.toInt()
         val h = shape.pageH.toInt()
         val img = ImageBitmap(w, h, ImageBitmapConfig.Argb8888, hasAlpha = true)
         CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(img), Size(w.toFloat(), h.toFloat())) {
-            drawCurlFrame(shape, front, back, paper, texLeft, texTop)
+            drawCurlFrame(shape, front, back, paper, frontTex, backTex)
         }
         return img
     }
@@ -205,8 +212,8 @@ class CurlRenderTest {
             shape,
             images(solid(340, 560, red)),
             images(solid(340, 560, blue)),
-            texLeft = texLeft.toFloat(),
-            texTop = texTop.toFloat(),
+            frontTex = Offset(texLeft.toFloat(), texTop.toFloat()),
+            backTex = Offset(texLeft.toFloat(), texTop.toFloat()),
         ).toPixelMap()
         assertEquals("版心外的页边距应当是纸色", paper, px[4, 4].toArgb())
         assertEquals("版心里的正面页是红的", red, px[40, 300].toArgb())

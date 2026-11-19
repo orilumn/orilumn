@@ -52,14 +52,14 @@ class Curl3DRenderTest {
         shape: CurlShape,
         front: ImageBitmap,
         back: ImageBitmap,
-        texLeft: Float = 0f,
-        texTop: Float = 0f,
+        frontTex: Offset = Offset.Zero,
+        backTex: Offset = Offset.Zero,
     ): ImageBitmap {
         val w = shape.pageW.toInt()
         val h = shape.pageH.toInt()
         val img = ImageBitmap(w, h, ImageBitmapConfig.Argb8888, hasAlpha = true)
         CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(img), Size(w.toFloat(), h.toFloat())) {
-            val drawn = drawCurl3DFrame(shape, images(front), images(back), paper, texLeft, texTop)
+            val drawn = drawCurl3DFrame(shape, images(front), images(back), paper, frontTex, backTex)
             assertTrue("这一帧必须由网格画出来", drawn)
         }
         return img
@@ -71,13 +71,19 @@ class Curl3DRenderTest {
      * 起手那一帧（折痕还在静止位置）3D 没有可掀起的材料，走的就是这条退路——判据要看
      * 「读者实际看到的那一帧」，不能只锁 3D 分支。
      */
-    private fun renderLikeLayer(shape: CurlShape, front: ImageBitmap, back: ImageBitmap): ImageBitmap {
+    private fun renderLikeLayer(
+        shape: CurlShape,
+        front: ImageBitmap,
+        back: ImageBitmap,
+        frontTex: Offset = Offset.Zero,
+        backTex: Offset = Offset.Zero,
+    ): ImageBitmap {
         val w = shape.pageW.toInt()
         val h = shape.pageH.toInt()
         val img = ImageBitmap(w, h, ImageBitmapConfig.Argb8888, hasAlpha = true)
         CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(img), Size(w.toFloat(), h.toFloat())) {
-            if (!drawCurl3DFrame(shape, images(front), images(back), paper, 0f, 0f)) {
-                drawCurlFrame(shape, images(front), images(back), paper, 0f, 0f)
+            if (!drawCurl3DFrame(shape, images(front), images(back), paper, frontTex, backTex)) {
+                drawCurlFrame(shape, images(front), images(back), paper, frontTex, backTex)
             }
         }
         return img
@@ -95,6 +101,41 @@ class Curl3DRenderTest {
                 .toPixelMap()
             assertEquals("dir=$dir 起手时画面上是当前页", red, px[200, 300].toArgb())
         }
+    }
+
+    /**
+     * 两张纸的纹理**各按自己的偏移**落位：正文页栅格只在版心（偏移 = 页边距），封面是整页
+     * 烤图（偏移 0,0）。共用一个偏移会让其中一张整体错位 —— 封面被缩进版心、或多出一圈纸边。
+     */
+    @Test
+    fun eachSheetKeepsItsOwnTextureOffset() {
+        val w = 400
+        val h = 600
+        val margin = 30
+        // 正文页栅格只有版心那么大；封面烤图是整页。
+        val body = solid(w - margin * 2, h - margin * 2, red)
+        val cover = solid(w, h, blue)
+        val bodyTex = Offset(margin.toFloat(), margin.toFloat())
+        // 起手帧只画正面那张（被翻走的那张 = 正文）。
+        val startPx = render(
+            curlShape(w.toFloat(), h.toFloat(), 0f, 1),
+            body,
+            cover,
+            frontTex = bodyTex,
+            backTex = Offset.Zero,
+        ).toPixelMap()
+        assertEquals("正文页栅格贴在版心", red, startPx[margin + 4, h / 2].toArgb())
+        assertEquals("版心外应当是纸色", paper, startPx[4, 4].toArgb())
+        // 翻完那一帧只画背面那张（目标页 = 封面）：整页图贴页角，不缩进版心。
+        val endPx = render(
+            curlShape(w.toFloat(), h.toFloat(), 1f, 1),
+            body,
+            cover,
+            frontTex = bodyTex,
+            backTex = Offset.Zero,
+        ).toPixelMap()
+        assertEquals("封面烤图贴页左上角", blue, endPx[4, 4].toArgb())
+        assertEquals("封面烤图铺到页右下角", blue, endPx[w - 4, h - 4].toArgb())
     }
 
     @Test
@@ -945,7 +986,13 @@ class Curl3DRenderTest {
             val p = 0.45f
             val shape = curlShape(w.toFloat(), h.toFloat(), p, dir)
             val radius = curlRadius(shape)
-            val px = render(shape, body, body, texLeft = margin.toFloat(), texTop = margin.toFloat()).toPixelMap()
+            val px = render(
+                shape,
+                body,
+                body,
+                frontTex = Offset(margin.toFloat(), margin.toFloat()),
+                backTex = Offset(margin.toFloat(), margin.toFloat()),
+            ).toPixelMap()
             val inward = if (dir >= 0) -1f else 1f
             val flap = w * p - PI.toFloat() * radius
             // 纸背 = 折痕往「没掀起」一侧退（掀起长度 − πR）；页边距那一段在它外沿往里 margin。
@@ -999,8 +1046,13 @@ class Curl3DRenderTest {
         )) {
             for (dir in listOf(1, -1)) {
                 val shape = curlShape(w.toFloat(), h.toFloat(), p, dir, tilt)
-                val px = render(shape, body, body, texLeft = margin.toFloat(), texTop = margin.toFloat())
-                    .toPixelMap()
+                val px = render(
+                    shape,
+                    body,
+                    body,
+                    frontTex = Offset(margin.toFloat(), margin.toFloat()),
+                    backTex = Offset(margin.toFloat(), margin.toFloat()),
+                ).toPixelMap()
                 var longest = 0
                 var where = ""
                 for (y in 0 until h) {
@@ -1043,7 +1095,8 @@ class Curl3DRenderTest {
         for (dir in listOf(1, -1)) {
             val shape = curlShape(w.toFloat(), h.toFloat(), 0.45f, dir)
             val radius = curlRadius(shape)
-            val px = render(shape, redBody, blueBody, texLeft = 100f, texTop = 150f).toPixelMap()
+            val px = render(shape, redBody, blueBody, frontTex = Offset(100f, 150f), backTex = Offset(100f, 150f))
+                .toPixelMap()
             val inward = if (dir >= 0) 1f else -1f
             var checked = 0
             for (k in 1..3) {

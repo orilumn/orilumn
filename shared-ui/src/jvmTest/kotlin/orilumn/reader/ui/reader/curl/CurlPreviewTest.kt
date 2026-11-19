@@ -55,8 +55,8 @@ class CurlPreviewTest {
                 front = images(fakePage(0xFF2A2A2A.toInt(), 1f)),
                 back = images(fakePage(0xFF2A2A2A.toInt(), 0.45f)),
                 paperArgb = 0xFFF1EEE6.toInt(),
-                texLeft = 0f,
-                texTop = 0f,
+                frontTex = Offset.Zero,
+                backTex = Offset.Zero,
             )
         }
         val out = File("build/curl2d-$name.png")

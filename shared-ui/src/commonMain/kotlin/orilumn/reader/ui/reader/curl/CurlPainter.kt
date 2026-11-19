@@ -36,8 +36,8 @@ internal fun DrawScope.drawCurlFrame(
     front: CurlPageImages,
     back: CurlPageImages,
     paperArgb: Int,
-    texLeft: Float,
-    texTop: Float,
+    frontTex: Offset,
+    backTex: Offset,
 ) {
     val w = shape.pageW
     val h = shape.pageH
@@ -48,17 +48,17 @@ internal fun DrawScope.drawCurlFrame(
     // 卷曲区面积为零），照常画出来与静止页逐像素一致，不需要死区（见 [drawCurl3DFrame]）。
     // **跟手时这条总闸不许看进度**（见 [noLiftYet]）：折痕由手指反解，进度只是累计位移。
     if (shape.noLiftYet()) {
-        drawWholePage(front, paper, texLeft, texTop, pageSize)
+        drawWholePage(front, paper, frontTex.x, frontTex.y, pageSize)
         return
     }
     // 已经翻完：只剩目标页（最后一帧与静止时逐像素一致，动画结束撤层不跳）。
     if (shape.fullyTurned()) {
-        drawWholePage(back, paper, texLeft, texTop, pageSize)
+        drawWholePage(back, paper, backTex.x, backTex.y, pageSize)
         return
     }
 
     // ① 整页正面
-    drawWholePage(front, paper, texLeft, texTop, pageSize)
+    drawWholePage(front, paper, frontTex.x, frontTex.y, pageSize)
 
     // ② 露出区
     val corners = revealCorners(shape)
@@ -69,7 +69,7 @@ internal fun DrawScope.drawCurlFrame(
         close()
     }
     clipPath(reveal) {
-        drawWholePage(back, paper, texLeft, texTop, pageSize)
+        drawWholePage(back, paper, backTex.x, backTex.y, pageSize)
     }
 
     // ③ 纸背：露出区沿折痕镜像回来的那一条
@@ -98,7 +98,7 @@ internal fun DrawScope.drawCurlFrame(
             // 纸背的内容是正面的镜像，压到 39% 才是「纸的背面」而不是「另一张正面」。
             // 覆盖层（旁注 / 页码）**不进纸背**：那是读者层的浮层，不是印在纸上的东西。
             front.page?.let {
-                drawImage(it, topLeft = Offset(texLeft, texTop), alpha = BACK_CONTENT_ALPHA)
+                drawImage(it, topLeft = Offset(frontTex.x, frontTex.y), alpha = BACK_CONTENT_ALPHA)
             }
         }
     }

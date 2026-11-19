@@ -84,11 +84,13 @@ import kotlin.math.exp
 import kotlin.math.hypot
 import kotlin.math.roundToInt
 import kotlin.time.TimeSource
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -3407,6 +3409,27 @@ fun ReaderScreen(
         val contentRight = (pxWidth - profile.marginRight).coerceAtLeast(contentLeft)
         val contentBottom = (pxHeight - profile.marginBottom).coerceAtLeast(contentTop)
 
+        // 封面也算「一页纸」：卷曲层要的是页大小的纹理，而封面是纯组合件（没有页栅格），
+        // 所以按封面页同一套画法烤一张整页位图交给它（见 [bakeCoverPageBitmap]）。
+        // 只在可能翻到封面的位置烤（停在书首 / 封面正显示），离开书首就放掉，不常驻一张整页图。
+        val coverImages = remember { CurlPageImages() }
+        // 正文页栅格在页坐标里的左上角（版心）；覆盖层恒为整页、贴 (0,0)。
+        val bodyTex = Offset(contentLeft, contentTop)
+        val coverTexNeeded = coverBmp != null && (coverVisible || isBookStart(openPos))
+        LaunchedEffect(coverTexNeeded, coverBmp, pxWidth, pxHeight, light.coverStretch, profile.bgColor) {
+            val src = coverBmp
+            if (!coverTexNeeded || src == null) {
+                coverImages.page = null
+                return@LaunchedEffect
+            }
+            val w = pxWidth.roundToInt()
+            val h = pxHeight.roundToInt()
+            // 烤图不占主线程（一张整页位图的内存搬运没必要卡动画起手那一帧）。
+            coverImages.page = withContext(Dispatchers.Default) {
+                bakeCoverPageBitmap(src, w, h, proportional = !light.coverStretch, bgArgb = profile.bgColor)
+            }
+        }
+
         // 键盘入口（内层盒载焦点）：左右箭头翻页，Esc 等效中部点按。
         Box(
             modifier = Modifier
@@ -3962,8 +3985,11 @@ fun ReaderScreen(
                 }
                 else -> null
             }
-            // 封面往返不走折页（封面是整页图 + 淡入淡出），只在正文页之间生效。
-            val curlNow = curlEnabled && !coverVisible && !slideFromCover && !slideToCover
+            // 封面也算一页纸：离开/进入封面时，卷曲层的那一槽换成封面烤图（纹理贴页角）。
+            // 封面纹理还没就绪就退回滑动（宁可换一种翻法，不闪一帧空页）。
+            val coverSession = slideFromCover || slideToCover
+            val curlNow = curlEnabled && (coverSession || !coverVisible) &&
+                (!coverSession || coverImages.page != null)
             if (curlNow) {
                 FlipCurlLayer(
                     // 方向/进度/倾斜/是否在结算，全部传闭包：只在 draw 相位读 ⇒ 动画期间不重组阅读面。
@@ -3978,12 +4004,17 @@ fun ReaderScreen(
                     pageHeightPx = pxHeight,
                     active = { ctl.slideActive(slideEnabled) },
                     paperArgb = profile.bgColor,
-                    // 页栅格在页坐标里的左上角（版心）；覆盖层恒为整页、贴 (0,0)。
-                    texX = contentLeft,
-                    texY = contentTop,
-                    // 两张纹理由页槽自己发布（页栅格 + 覆盖层），缺图时页面保持不动。
-                    current = currentImages,
-                    target = if (targetSlot == null) null else targetImages,
+                    // 纹理位置跟着页槽走：正文的页栅格在版心、覆盖层贴页角；封面烤图是整页，贴 (0,0)。
+                    currentTex = if (slideFromCover) Offset.Zero else bodyTex,
+                    targetTex = if (slideToCover) Offset.Zero else bodyTex,
+                    // 两张纹理由页槽自己发布（页栅格 + 覆盖层），缺图时页面保持不动；
+                    // 封面槽没有页栅格，用烤好的整页图顶上。
+                    current = if (slideFromCover) coverImages else currentImages,
+                    target = when {
+                        targetSlot == null -> null
+                        slideToCover -> coverImages
+                        else -> targetImages
+                    },
                     currentSlot = currentSlot,
                     targetSlot = targetSlot,
                     modifier = Modifier.fillMaxSize(),

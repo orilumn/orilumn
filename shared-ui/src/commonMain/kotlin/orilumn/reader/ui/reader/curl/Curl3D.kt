@@ -117,6 +117,15 @@ import kotlin.math.sqrt
  * 在交界处压一层暗（哪怕只有一成、哪怕铺成缓坡）都会在筒的左侧留下一道硬边 —— 读者一眼就判
  * 「这里平白画了一条折痕」。筒身只靠明暗（往白里压的反光）与落影站立，暗面一概不画。
  *
+ * ## 两张纸的纹理各归各的
+ *
+ * 页栅格只有版心那么大、要放在版心位置；封面是烤好的**整页**图、贴页左上角。所以
+ * 「纹理在页坐标里放哪儿」是**每张纸自己的事**（[frontTex] / [backTex]），不是整层共用一个数：
+ * 共用只会让其中一张错位（正文的字整体横移一个页边距，或者封面被缩进版心）。
+ * 覆盖层不受它影响：旁注与页码恒为整页大小、贴 (0,0)。
+ *
+ * @param frontTex 正面（被翻走那张）页栅格在页坐标里的左上角
+ * @param backTex 露出页（折痕另一侧那张）页栅格在页坐标里的左上角
  * @return `false` 表示这一帧没有网格可画，调用方退回折页。
  */
 internal fun DrawScope.drawCurl3DFrame(
@@ -124,8 +133,8 @@ internal fun DrawScope.drawCurl3DFrame(
     front: CurlPageImages,
     back: CurlPageImages,
     paperArgb: Int,
-    texLeft: Float,
-    texTop: Float,
+    frontTex: Offset,
+    backTex: Offset,
     radiusRatio: Float = CURL3D_RADIUS_RATIO,
 ): Boolean {
     val w = shape.pageW
@@ -143,20 +152,20 @@ internal fun DrawScope.drawCurl3DFrame(
     // **跟手时这条总闸不许看进度**：折痕由手指反解（[CurlShape.anchored]），进度只是累计
     // 位移，手指滑回起手点会先把它压到 0 以下，而折角还有半个页宽（见 [noLiftYet]）。
     if (shape.noLiftYet()) {
-        drawPage(front, paper, texLeft, texTop, pageSize)
+        drawPage(front, paper, frontTex.x, frontTex.y, pageSize)
         return true
     }
     // 已经翻完：只剩目标页。
     if (shape.fullyTurned()) {
-        drawPage(back, paper, texLeft, texTop, pageSize)
+        drawPage(back, paper, backTex.x, backTex.y, pageSize)
         return true
     }
 
     // ① 正面页（被翻走的那一页，整页铺在底下）② 露出页（折痕另一侧的新页）
-    drawPage(front, paper, texLeft, texTop, pageSize)
+    drawPage(front, paper, frontTex.x, frontTex.y, pageSize)
     val corners = revealCorners(shape)
     if (corners.size < 3) return true
-    drawRevealPage(corners, back, paper, texLeft, texTop)
+    drawRevealPage(corners, back, paper, backTex.x, backTex.y)
 
     // ③ 网格几何
     val radius = curlRadius(shape, radiusRatio)
@@ -237,7 +246,7 @@ internal fun DrawScope.drawCurl3DFrame(
             //（纸背跟旧页同纸同色，所以纸背的页边距看起来仍是纸，不是空白条）。
             drawPath(outline, paper)
             // 纹理**只能画在版心材料范围内**：页栅格只有版心那么大（平板 1585×2400 放在
-            // 1840×2800 里），页边距里根本没有像素。靠 `ImageShader` 的 `Decal` 平铺模式
+            // 1840×2800 里），页边距里根本没有像素（封面是整页烤图，它的材料范围就是整页）。靠 `ImageShader` 的 `Decal` 平铺模式
             // 让版心之外的采样直接**透明**（见 [newMeshPaint]）：卷进页边距的一截只露纸色。
             // **不再用 `clipPath` 按材料形状裁**：折痕一斜，那条裁剪路径就不是矩形，
             // 抗锯齿裁切会让 Skia 为它开一张全页大小的图层，平板上实测一帧多三十来毫秒
@@ -248,8 +257,8 @@ internal fun DrawScope.drawCurl3DFrame(
                 // 不是矩形，抗锯齿裁切会给每帧开一张全页大小的图层（见 [drawRevealPage]）。
                 val strip = mesh.textureStrip(
                     band = band,
-                    texLeft = texLeft,
-                    texTop = texTop,
+                    texLeft = frontTex.x,
+                    texTop = frontTex.y,
                     texWidth = pageImage.width.toFloat(),
                     texHeight = pageImage.height.toFloat(),
                 )

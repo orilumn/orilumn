@@ -29,7 +29,7 @@ private const val USE_CURL3D: Boolean = true
  */
 @Stable
 class CurlPageImages {
-    /** 正文/插图/盒背景（版心大小的页栅格）。 */
+    /** 正文/插图/盒背景的页栅格（版心大小）；封面槽放的是烤好的**整页**图（偏移见 `FlipCurlLayer`）。 */
     var page: ImageBitmap? by mutableStateOf(null)
 
     /** 旁注 + 页码（整页大小、透明底）。没有旁注也没有页码时为 null。 */
@@ -73,7 +73,8 @@ class CurlPageImages {
  *   松手那一刻的值
  * @param pull 本次拖动的起点与此刻手指（页坐标）；非 null 时折痕跟着手指反解，让手上
  *   那张纸的边压在手指上（见 `curl/anchoredFoldX`）。上一页忽略它。
- * @param texX/texY 页栅格在页坐标里的左上角（版心）；覆盖层恒为整页、贴 (0,0)
+ * @param currentTex/targetTex 页栅格在页坐标里的左上角（页槽自己的事：正文是版心、
+ *   封面这种整页烤图是 0,0）；覆盖层恒为整页、贴 (0,0)
  *
  * 三个动画量都是闭包：只在 draw 相位读，动画期间不重组整个阅读面。
  */
@@ -87,8 +88,8 @@ fun FlipCurlLayer(
     pageHeightPx: Float,
     active: () -> Boolean,
     paperArgb: Int,
-    texX: Float,
-    texY: Float,
+    currentTex: Offset,
+    targetTex: Offset,
     current: CurlPageImages,
     target: CurlPageImages?,
     currentSlot: @Composable () -> Unit,
@@ -129,6 +130,9 @@ fun FlipCurlLayer(
             // 下一页翻当前页、露出目标页；上一页翻目标页（上一页）、露出当前页。
             val front = if (frame.turningIsTarget) target else current
             val back = if (frame.turningIsTarget) current else target
+            // 纹理位置跟着**页槽**走，不跟着「正/背」走：正面是哪一槽由翻页方向决定。
+            val frontTex = if (frame.turningIsTarget) targetTex else currentTex
+            val backTex = if (frame.turningIsTarget) currentTex else targetTex
             if (front == null || back == null || front.page == null || back.page == null) {
                 if (!sessionLogged[0]) {
                     sessionLogged[0] = true
@@ -163,8 +167,8 @@ fun FlipCurlLayer(
                     front = front,
                     back = back,
                     paperArgb = paperArgb,
-                    texLeft = texX,
-                    texTop = texY,
+                    frontTex = frontTex,
+                    backTex = backTex,
                 )
                 if (done) return@Canvas
             }
@@ -173,8 +177,8 @@ fun FlipCurlLayer(
                 front = front,
                 back = back,
                 paperArgb = paperArgb,
-                texLeft = texX,
-                texTop = texY,
+                frontTex = frontTex,
+                backTex = backTex,
             )
         }
     }

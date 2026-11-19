@@ -52,7 +52,7 @@ class CurlMeshPreviewTest {
         val r = pageW * radiusRatio
         CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(img), Size(pageW.toFloat(), pageH.toFloat())) {
             drawRect(Color(0xFFEFECE3.toInt()))
-            drawCurl3DFrame(shape, front, back, 0xFFF1EEE6.toInt(), 0f, 0f, radiusRatio)
+            drawCurl3DFrame(shape, front, back, 0xFFF1EEE6.toInt(), Offset.Zero, Offset.Zero, radiusRatio)
         }
         val out = File("build/curlm-$name.png")
         out.parentFile?.mkdirs()
@@ -78,7 +78,7 @@ class CurlMeshPreviewTest {
                 val img = ImageBitmap(w, h, ImageBitmapConfig.Argb8888, hasAlpha = true)
                 CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(img), Size(w.toFloat(), h.toFloat())) {
                     drawRect(Color(0xFFEFECE3.toInt()))
-                    drawCurl3DFrame(shape, front, back, 0xFFF1EEE6.toInt(), tx, ty)
+                    drawCurl3DFrame(shape, front, back, 0xFFF1EEE6.toInt(), Offset(tx, ty), Offset(tx, ty))
                 }
                 val name = "build/dev-${if (dir > 0) "fwd" else "bwd"}-p${(p * 100).toInt()}.png"
                 val out = File(name)
@@ -94,7 +94,7 @@ class CurlMeshPreviewTest {
             val img = ImageBitmap(w, h, ImageBitmapConfig.Argb8888, hasAlpha = true)
             CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(img), Size(w.toFloat(), h.toFloat())) {
                 drawRect(Color(0xFFEFECE3.toInt()))
-                drawCurl3DFrame(shape, front, back, 0xFFF1EEE6.toInt(), tx, ty)
+                drawCurl3DFrame(shape, front, back, 0xFFF1EEE6.toInt(), Offset(tx, ty), Offset(tx, ty))
             }
             val out = File("build/dev-tilt-p${(p * 100).toInt()}-t${(tilt * 100).toInt()}.png")
             val data = Image.makeFromBitmap(img.asSkiaBitmap()).encodeToData(EncodedImageFormat.PNG)!!
@@ -142,7 +142,7 @@ class CurlMeshPreviewTest {
             val img = ImageBitmap(w, h, ImageBitmapConfig.Argb8888, hasAlpha = true)
             CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(img), Size(w.toFloat(), h.toFloat())) {
                 drawRect(Color(0xFFEFECE3.toInt()))
-                drawCurl3DFrame(shape, front, back, 0xFFF1EEE6.toInt(), tx, ty)
+                drawCurl3DFrame(shape, front, back, 0xFFF1EEE6.toInt(), Offset(tx, ty), Offset(tx, ty))
             }
             val out = File("build/devt-p${(p * 100).toInt()}-t${(tilt * 100).toInt()}.png")
             val data = Image.makeFromBitmap(img.asSkiaBitmap()).encodeToData(EncodedImageFormat.PNG)!!

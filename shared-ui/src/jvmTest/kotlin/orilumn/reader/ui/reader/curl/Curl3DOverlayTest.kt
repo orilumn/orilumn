@@ -114,4 +114,47 @@ class Curl3DOverlayTest {
         )
         assertTrue("新版覆盖层应当已经贴上", bluePixels(second) > 500)
     }
+
+    /**
+     * 覆盖层**透明底**不许把卷起来的纸刷白（读者原话「反面没有文字，只有批注」）。
+     *
+     * 曾经覆盖层是网格上的第二遍 `drawVertices`：桌面端会把透明纹素抬成顶点色（白），
+     * 于是整张卷起来的纸变成纯白，只剩旁注还看得见。现在覆盖层与页栅格先合成一张整页图。
+     */
+    @Test
+    fun `透明覆盖层不许把纸刷白——纸背仍有镜像正文`() {
+        val front = CurlPageImages().apply { page = RasterTexture(bitmap(0xFFCC2222.toInt())) }
+        val back = CurlPageImages().apply { page = RasterTexture(bitmap(0xFF2222CC.toInt())) }
+        // 透明底 + 右留白里一小块旁注（纸背会把它镜像到左边）。
+        val overlay = ImageBitmap(pageW, pageH, ImageBitmapConfig.Argb8888, hasAlpha = true)
+        CanvasDrawScope().draw(
+            density = Density(1f),
+            layoutDirection = LayoutDirection.Ltr,
+            canvas = Canvas(overlay),
+            size = Size(pageW.toFloat(), pageH.toFloat()),
+        ) {
+            drawRect(Color(0xFF1E88E5.toInt()), topLeft = Offset(pageW - 40f, 100f), size = Size(30f, 80f))
+        }
+        front.overlay = RasterTexture(overlay)
+
+        val px = render(front, back).toPixelMap()
+        var white = 0
+        var redOnBack = 0
+        var noteOnBack = 0
+        for (y in 0 until pageH step 2) {
+            for (x in 0 until pageW step 2) {
+                val argb = px[x, y].toArgb()
+                val r = (argb shr 16) and 0xFF
+                val g = (argb shr 8) and 0xFF
+                val b = argb and 0xFF
+                if (r > 250 && g > 250 && b > 250) white++
+                // 纸背在折痕左边：正文是压了一成纸色的红（约 d0..），旁注是那块蓝。
+                if (x < pageW / 2 && r > 150 && g < 120 && b < 120) redOnBack++
+                if (x < pageW / 2 && b > 180 && r < 120) noteOnBack++
+            }
+        }
+        assertEquals("覆盖层的透明像素把纸刷成了白色", 0, white)
+        assertTrue("纸背上应当看得到镜像正文，实测 $redOnBack 个像素", redOnBack > 200)
+        assertTrue("纸背上应当看得到镜像旁注，实测 $noteOnBack 个像素", noteOnBack > 5)
+    }
 }

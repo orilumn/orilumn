@@ -242,6 +242,17 @@ internal fun DrawScope.drawCurl3DFrame(
     // 明暗只画在**看得见**的那一面：纸卷隆起后外层是纸背（Verso，z ≥ R，压在正面那半圈之上），
     // 没绕到九十度时只有正面（Recto）露在外面。给被压住的那一段画明暗等于白画。
     val hasVerso = mesh.bands.any { it.surface == CurlMesh.Surface.Verso }
+    // 整张纸只贴**一张不透明贴图**：有覆盖层（旁注 + 页码）时先把页栅格与覆盖层合成一张
+    // 整页图（见 [CurlPageBake]）。分两遍画不行：覆盖层是透明底的，网格那条路径会把它的
+    // 透明像素抬成白色，卷起来的纸整个刷白、只剩旁注 —— 读者报的「反面没有文字，只有批注」。
+    val sheet = front.bake.textureOf(
+        images = front,
+        pageW = w,
+        pageH = h,
+        paperArgb = paperArgb,
+        texLeft = frontTex.x,
+        texTop = frontTex.y,
+    )
     // 纸边被卷起来时可以略微探出页面（斜折痕 + 抬起的纸），画布裁到页面内即可。
     clipRect(0f, 0f, w, h) {
         fun drawBand(band: CurlMesh.Band) {
@@ -249,13 +260,15 @@ internal fun DrawScope.drawCurl3DFrame(
             val ring = mesh.bandOutline(band)
             if (ring.size < 3) return
             val outline = polygonPath(ring)
-            val pageTexture = front.page
+            val pageTexture = sheet?.texture
             val pageImage = pageTexture?.image
+            // 烤图是整页，页栅格是版心：贴图偏移与材料范围都跟着 [sheet] 走。
+            val texLeft = sheet?.texLeft ?: 0f
+            val texTop = sheet?.texTop ?: 0f
             val texWidth = pageImage?.width?.toFloat() ?: 0f
             val texHeight = pageImage?.height?.toFloat() ?: 0f
             // 纹理**只能画在版心材料范围内**：页栅格只有版心那么大（平板 1585×2400 放在
-            // 1840×2800 里），页边距里根本没有像素（封面是整页烤图，它的材料范围就是整页）。靠 `ImageShader` 的 `Decal` 平铺模式
-            // 让版心之外的采样直接**透明**（见 [newMeshPaint]）：卷进页边距的一截只露纸色。
+            // 1840×2800 里），页边距里根本没有像素（封面与覆盖层烤图是整页，材料范围就是整页）。
             // **不再用 `clipPath` 按材料形状裁**：折痕一斜，那条裁剪路径就不是矩形，
             // 抗锯齿裁切会让 Skia 为它开一张全页大小的图层，平板上实测一帧多三十来毫秒
             //（手指横划时倾斜不为零，帧率当场掉到 20fps；直线滑动倾斜恒 0 反而 60fps）。
@@ -265,8 +278,8 @@ internal fun DrawScope.drawCurl3DFrame(
             } else {
                 mesh.textureStrip(
                     band = band,
-                    texLeft = frontTex.x,
-                    texTop = frontTex.y,
+                    texLeft = texLeft,
+                    texTop = texTop,
                     texWidth = texWidth,
                     texHeight = texHeight,
                 )
@@ -279,7 +292,7 @@ internal fun DrawScope.drawCurl3DFrame(
             if (pageImage == null) {
                 drawPath(outline, paper)
             } else {
-                for (margin in mesh.marginStrips(band, frontTex.x, frontTex.y, texWidth, texHeight)) {
+                for (margin in mesh.marginStrips(band, texLeft, texTop, texWidth, texHeight)) {
                     drawPath(polygonPath(margin.outlinePath()), paper)
                 }
             }
@@ -288,18 +301,6 @@ internal fun DrawScope.drawCurl3DFrame(
                     canvas = canvas,
                     strip = strip,
                     paint = front.textures.pagePaint(pageTexture!!),
-                )
-            }
-            // 覆盖层是整页图（旁注 + 页码），材料坐标本来就在页内，不需要裁。
-            front.overlay?.let { overlay ->
-                drawMeshBand(
-                    canvas = canvas,
-                    mesh = mesh,
-                    band = band,
-                    image = overlay.image,
-                    texDx = 0f,
-                    texDy = 0f,
-                    paint = front.textures.overlayPaint(overlay),
                 )
             }
 
@@ -916,40 +917,6 @@ private object ShadowSolid {
         cached = fresh
         return fresh
     }
-}
-
-/**
- * 用一段网格画一张纹理（**Compose 公共 API**：`Vertices` + `ImageShader`）。
- *
- * 网格本来就是「每行两个顶点、相邻两行连成四边形」的形状，正好是一条
- * [VertexMode.TriangleStrip]；段内顶点在数组里连续（`firstRow*2 .. lastRow*2+1`），
- * 所以**不需要索引数组**。早先每帧都把索引摊成 `List<Int>`（两千多个装箱整数）再传进来，
- * 跟手时正是绘制热路径上的大头。
- *
- * 顶点坐标与纹理坐标直接按段的下标区间做视图（[FloatPairList]），不再逐帧摊 `List<Offset>`。
- */
-private fun DrawScope.drawMeshBand(
-    canvas: androidx.compose.ui.graphics.Canvas,
-    mesh: CurlMesh,
-    band: CurlMesh.Band,
-    image: ImageBitmap,
-    texDx: Float,
-    texDy: Float,
-    paint: Paint,
-) {
-    val from = band.firstRow * 2
-    val to = (band.lastRow + 1) * 2
-    val vertices = Vertices(
-        vertexMode = VertexMode.TriangleStrip,
-        positions = FloatPairList(mesh.positions, from, to),
-        textureCoordinates = FloatPairList(mesh.texCoords, from, to, texDx, texDy),
-        // Compose 要求顶点色与顶点数**等长**（空列表会抛「lengths must match」）。
-        // 全部给白色 + SrcOver ⇒ 只取纹理本身，不做顶点级着色。
-        colors = WhiteColorList(to - from),
-        // 空索引 = 按顺序画这条三角带；段内顶点在网格数组里本来就是连续的。
-        indices = emptyList(),
-    )
-    drawIntoCanvas { it.drawVertices(vertices, BlendMode.SrcOver, paint) }
 }
 
 /**

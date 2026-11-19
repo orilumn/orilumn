@@ -39,8 +39,14 @@ class CurlPageImages {
     /**
      * 旁注 + 页码（整页大小、透明底）。没有旁注也没有页码时为 null。
      * 带上内容代数：覆盖层位图会在原地重画（见 `PageOverlayLayer`），代数变了才是「这一版」。
+     *
+     * 卷曲网格**不单独画它**：透明底经 `drawVertices` 会把卷起来的纸刷白，
+     * 所以与页栅格先合成一张整页图（见 [CurlPageBake]）。
      */
     var overlay: RasterTexture? by mutableStateOf(null)
+
+    /** 网格路径的整页烤图（页栅格 + 覆盖层），只在有覆盖层时用。 */
+    internal val bake: CurlPageBake = CurlPageBake()
 
     /** 纹理画笔缓存（`ImageShader` 只跟图的**这一版像素**有关，见 [CurlTextureCache]）。 */
     internal val textures: CurlTextureCache = CurlTextureCache()
@@ -124,6 +130,9 @@ fun FlipCurlLayer(
             if (!active()) {
                 sessionLogged[0] = false
                 drawLogged[0] = false
+                // 整页烤图（平板口径约 20MB）只服务这一次翻页，翻完就丢。
+                current.bake.clear()
+                target?.bake?.clear()
                 return@Canvas
             }
             val dir = direction()

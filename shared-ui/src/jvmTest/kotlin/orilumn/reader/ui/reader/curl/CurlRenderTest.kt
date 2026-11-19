@@ -169,9 +169,12 @@ class CurlRenderTest {
         }
     }
 
-    /** 覆盖层（旁注 / 页码）跟着纸一起走：正面页上有、纸背上没有。 */
+    /**
+     * 覆盖层（旁注 / 页码）跟着纸一起走：正面页上是原样，纸背上是**同一份的镜像**
+     * （＝同一张纸的背面朝着读者，读者写的字透过来）。
+     */
     @Test
-    fun overlayRidesTheFrontPageOnly() {
+    fun overlayRidesTheWholeSheet() {
         val w = 400
         val h = 600
         val shape = curlShape(w.toFloat(), h.toFloat(), 0.25f, direction = 1)
@@ -180,10 +183,22 @@ class CurlRenderTest {
         CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(overlay), Size(w.toFloat(), h.toFloat())) {
             drawRect(Color(0xFF00AA00.toInt()), topLeft = androidx.compose.ui.geometry.Offset(0f, 250f), size = Size(w.toFloat(), 100f))
         }
-        val px = render(shape, images(solid(w, h, red), overlay), images(solid(w, h, blue))).toPixelMap()
-        assertEquals("正面页上的旁注要画出来", 0xFF00AA00.toInt(), px[50, 300].toArgb())
-        // 纸背（x ∈ [200, 300]）不该再压一遍覆盖层：那里是纸色 + 39% 红底。
-        assertTrue("纸背上不该画覆盖层", px[250, 300].toArgb() != 0xFF00AA00.toInt())
+        val withOverlay = render(shape, images(solid(w, h, red), overlay), images(solid(w, h, blue))).toPixelMap()
+        val plain = render(shape, images(solid(w, h, red)), images(solid(w, h, blue))).toPixelMap()
+        assertEquals("正面页上的旁注要画出来", 0xFF00AA00.toInt(), withOverlay[50, 300].toArgb())
+        // 纸背（折痕左侧那一半）与「没有覆盖层」的那一帧相比要有变化，而且不许被刷成白色。
+        var backDiff = 0
+        for (y in 0 until h step 3) {
+            for (x in 0 until w / 2 step 3) {
+                val argb = withOverlay[x, y].toArgb()
+                if (argb != plain[x, y].toArgb()) backDiff++
+                assertTrue(
+                    "纸背上的透明覆盖层被抬成了白色（x=$x y=$y）",
+                    !((argb shr 16) and 0xFF > 250 && (argb shr 8) and 0xFF > 250 && (argb and 0xFF) > 250),
+                )
+            }
+        }
+        assertTrue("纸背是同一张纸的反面：旁注要透过来（实测 $backDiff 个像素不同）", backDiff > 20)
     }
 
     @Test

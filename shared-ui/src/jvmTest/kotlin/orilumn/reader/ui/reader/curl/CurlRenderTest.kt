@@ -11,6 +11,7 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.LayoutDirection
+import orilumn.reader.ui.reader.RasterTexture
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -55,8 +56,8 @@ class CurlRenderTest {
     }
 
     private fun images(page: ImageBitmap, overlay: ImageBitmap? = null) = CurlPageImages().apply {
-        this.page = page
-        this.overlay = overlay
+        this.page = RasterTexture(page)
+        this.overlay = overlay?.let { RasterTexture(it) }
     }
 
     private fun render(

@@ -6,7 +6,6 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.text.TextMeasurer
 import kotlin.math.roundToInt
 /**
@@ -81,10 +80,10 @@ internal fun ReaderPageCanvas(
      * 翻页卷曲层直接把它们当纹理，不再另截图（见 `curl/FlipCurlLayer.kt`）。
      * 是普通回调（不是 Compose 状态）：写在 draw 相位，读它的也在 draw 相位，不触重组。
      *
-     * 后两个是**内容代数**：覆盖层那张位图会被原地重画（见 `PageOverlayLayer`），
-     * 光看实例判不出「像素换了」，下游贴图缓存必须按代数判废。页栅格是一次性快照，恒 0。
+     * 交出去的是 [RasterTexture]（图 + 内容代数）：覆盖层那张位图会被原地重画
+     * （见 `PageOverlayLayer`），光看实例判不出「像素换了」，下游贴图缓存必须按代数判废。
      */
-    onImages: ((page: ImageBitmap?, overlay: ImageBitmap?, overlayGeneration: Int) -> Unit)? = null,
+    onImages: ((page: RasterTexture?, overlay: RasterTexture?) -> Unit)? = null,
 ) {
     val localRenderer = rememberReaderPageRenderer()
     val renderer = renderer ?: localRenderer
@@ -158,7 +157,7 @@ internal fun ReaderPageCanvas(
             )
         }
         // 覆盖层：透明底整页图，画在页栅格之上。键含内容 + 尺寸 + 密度（改任一项都要重画）。
-        val overlayImage = if (overlay != null && overlayLayer != null &&
+        val overlayTexture = if (overlay != null && overlayLayer != null &&
             overlayTextMeasurer != null && !overlay.isEmpty
         ) {
             val ow = if (overlayWidthPx > 0) overlayWidthPx else (contentRectRight - contentRectLeft).toInt()
@@ -175,10 +174,10 @@ internal fun ReaderPageCanvas(
         } else {
             null
         }
-        if (overlayImage != null) {
-            drawRasterCached(overlayRaster, overlayImage, Offset.Zero, generation = overlayLayer?.revision ?: 0)
+        if (overlayTexture != null) {
+            drawRasterCached(overlayRaster, overlayTexture, Offset.Zero)
         }
-        onImages?.invoke(pageImage, overlayImage, overlayLayer?.revision ?: 0)
+        onImages?.invoke(pageImage?.let { RasterTexture(it) }, overlayTexture)
     }
     }
 }

@@ -16,6 +16,7 @@ import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
+import orilumn.reader.ui.reader.RasterTexture
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -47,7 +48,7 @@ class Curl3DRenderTest {
         return img
     }
 
-    private fun images(page: ImageBitmap) = CurlPageImages().apply { this.page = page }
+    private fun images(page: ImageBitmap) = CurlPageImages().apply { this.page = RasterTexture(page) }
 
     private fun render(
         shape: CurlShape,

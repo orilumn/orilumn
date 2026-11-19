@@ -1,10 +1,9 @@
 package orilumn.reader.ui.reader
 
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.asSkiaBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.asSkiaBitmap
 import org.jetbrains.skia.Image
 import org.jetbrains.skia.Paint
 import org.jetbrains.skia.Rect
@@ -12,7 +11,8 @@ import org.jetbrains.skia.SamplingMode
 import kotlin.math.roundToInt
 
 /**
- * 桌面 actual：按位图实例缓存 skia [Image]，再经 `nativeCanvas` 直画。
+ * 桌面 actual：按 [RasterTexture]（位图实例 + 内容代数）缓存 skia [Image]，
+ * 再经 `nativeCanvas` 直画。
  *
  * Compose 桌面的 `DrawScope.drawImage(ImageBitmap)` 内部每次都 `Image.makeFromBitmap`，
  * 一整页的像素因此每帧重新交给 Skia 一次（等于每帧重传纹理）。翻页动画一秒 60 帧、
@@ -23,16 +23,15 @@ import kotlin.math.roundToInt
  */
 internal actual fun DrawScope.drawRasterCached(
     cache: RasterDrawCache,
-    image: ImageBitmap,
+    texture: RasterTexture,
     topLeft: Offset,
     alpha: Float,
-    generation: Int,
 ) {
     val skia = (cache.handle as? Image)
-        ?.takeIf { cache.source === image && cache.generation == generation }
-        ?: Image.makeFromBitmap(image.asSkiaBitmap()).also {
-            cache.source = image
-            cache.generation = generation
+        ?.takeIf { cache.source === texture.image && cache.generation == texture.generation }
+        ?: Image.makeFromBitmap(texture.image.asSkiaBitmap()).also {
+            cache.source = texture.image
+            cache.generation = texture.generation
             cache.handle = it
         }
     val w = skia.width.toFloat()

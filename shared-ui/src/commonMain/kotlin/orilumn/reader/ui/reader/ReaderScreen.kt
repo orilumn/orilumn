@@ -3435,7 +3435,9 @@ fun ReaderScreen(
             val h = pxHeight.roundToInt()
             // 烤图不占主线程（一张整页位图的内存搬运没必要卡动画起手那一帧）。
             coverImages.page = withContext(Dispatchers.Default) {
-                bakeCoverPageBitmap(src, w, h, proportional = !light.coverStretch, bgArgb = profile.bgColor)
+                RasterTexture(
+                    bakeCoverPageBitmap(src, w, h, proportional = !light.coverStretch, bgArgb = profile.bgColor),
+                )
             }
         }
 
@@ -3935,10 +3937,9 @@ fun ReaderScreen(
                     overlayWidthPx = pxWidth.toInt(),
                     overlayHeightPx = pxHeight.toInt(),
                     overlayTextMeasurer = overlayMeasurer,
-                    onImages = { pageImage, overlayImage, overlayGen ->
-                        images.page = pageImage
-                        images.overlay = overlayImage
-                        images.overlayGeneration = overlayGen
+                    onImages = { pageTexture, overlayTexture ->
+                        images.page = pageTexture
+                        images.overlay = overlayTexture
                     },
                 )
             }

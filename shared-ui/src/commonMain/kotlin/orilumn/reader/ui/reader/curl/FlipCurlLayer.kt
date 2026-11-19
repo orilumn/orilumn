@@ -11,9 +11,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.ImageBitmap
 import orilumn.reader.io.Logger
 import orilumn.reader.ui.reader.RasterDrawCache
+import orilumn.reader.ui.reader.RasterTexture
 
 /** 3D 卷曲总开关：关掉只用于排查（退回 2D 折页）。 */
 private const val USE_CURL3D: Boolean = true
@@ -30,21 +30,19 @@ private const val USE_CURL3D: Boolean = true
  */
 @Stable
 class CurlPageImages {
-    /** 正文/插图/盒背景的页栅格（版心大小）；封面槽放的是烤好的**整页**图（偏移见 `FlipCurlLayer`）。 */
-    var page: ImageBitmap? by mutableStateOf(null)
-
-    /** 旁注 + 页码（整页大小、透明底）。没有旁注也没有页码时为 null。 */
-    var overlay: ImageBitmap? by mutableStateOf(null)
+    /**
+     * 正文/插图/盒背景的页栅格（版心大小）；封面槽放的是烤好的**整页**图（偏移见 `FlipCurlLayer`）。
+     * 带上内容代数（[RasterTexture]）：页栅格是每次新分配的快照，代数恒 0。
+     */
+    var page: RasterTexture? by mutableStateOf(null)
 
     /**
-     * [overlay] 的**内容代数**（`PageOverlayLayer.revision`）。
-     *
-     * 覆盖层位图会原地重画（尺寸不变时复用同一实例），实例相等不代表像素相等；
-     * 贴图缓存据此判废，否则动画里一直贴第一版旁注。
+     * 旁注 + 页码（整页大小、透明底）。没有旁注也没有页码时为 null。
+     * 带上内容代数：覆盖层位图会在原地重画（见 `PageOverlayLayer`），代数变了才是「这一版」。
      */
-    var overlayGeneration: Int = 0
+    var overlay: RasterTexture? by mutableStateOf(null)
 
-    /** 纹理画笔缓存（`ImageShader` 只跟图有关，见 [CurlTextureCache]）。 */
+    /** 纹理画笔缓存（`ImageShader` 只跟图的**这一版像素**有关，见 [CurlTextureCache]）。 */
     internal val textures: CurlTextureCache = CurlTextureCache()
 
     /** 整页贴图缓存（桌面每帧重建纹理的代价见 [RasterDrawCache]）。 */
@@ -171,7 +169,7 @@ fun FlipCurlLayer(
                         "pull=${pullNow?.let { "(${it.from.x},${it.from.y})→(${it.to.x},${it.to.y})" } ?: "none"} " +
                         "anchor=${pullNow?.anchor ?: "-"} blend=${pullNow?.blend ?: "-"} " +
                         "page=${pageWidthPx}x${pageHeightPx} " +
-                        "tex=${front.page?.width}x${front.page?.height} " +
+                        "tex=${front.page?.image?.width}x${front.page?.image?.height} " +
                         "overlay=${front.overlay != null}/${back.overlay != null}",
                 )
             }

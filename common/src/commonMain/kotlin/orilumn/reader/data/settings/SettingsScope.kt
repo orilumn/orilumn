@@ -67,8 +67,8 @@ object SettingsScope {
         "fontWeightAnchors", "fontWeightAnchorsBySlot",
         // 用户自定义样式表开关（当前无消费者，保留字段）。
         "useUserScripts",
-        // 翻页动画与封面拉伸。
-        "pageAnim", "pageAnimationMode", "coverStretch",
+        // 翻页模式与封面拉伸。
+        "pageAnimationMode", "coverStretch",
     )
 
     /** 只存在于本次会话的读数（不落盘、不是设置项）：面板打开时量出的原书缩进/行高/段距/字距。 */
@@ -102,7 +102,6 @@ fun ReaderSettings.onlyGlobal(): ReaderSettings {
         fontTitle = d.fontTitle,
         fontCode = d.fontCode,
         useUserScripts = d.useUserScripts,
-        pageAnim = d.pageAnim,
         pageAnimationMode = d.pageAnimationMode,
         coverStretch = d.coverStretch,
         layoutTheme = d.layoutTheme,
@@ -181,7 +180,6 @@ fun BookSettings.normalized(): BookSettings {
         fontTitle = fontTitle.takeIf { it != d.fontTitle },
         fontCode = fontCode.takeIf { it != d.fontCode },
         useUserScripts = useUserScripts.takeIf { it != d.useUserScripts },
-        pageAnim = pageAnim.takeIf { it != d.pageAnim },
         pageAnimationMode = pageAnimationMode.takeIf { it != d.pageAnimationMode },
         coverStretch = coverStretch.takeIf { it != d.coverStretch },
         fontWeightAnchors = fontWeightAnchors.takeIf { it != d.fontWeightAnchors },

@@ -34,7 +34,7 @@ class ReaderSettingsTest {
             fontCode = "Monaco",
             layoutTheme = "traditional",
             useUserScripts = true,
-            pageAnim = false,
+            pageAnimationMode = "none",
             autoContinue = false,
             pageNum = true,
             coverStretch = true,
@@ -247,7 +247,7 @@ class ReaderSettingsTest {
             "theme", "fontSize", "lineSpacing",
             "marginTop", "marginBottom", "marginLeft", "marginRight",
             "fontBody", "fontTitle", "fontCode",
-            "useUserScripts", "pageAnim", "autoContinue", "pageNum", "coverStretch",
+            "useUserScripts", "pageAnimationMode", "autoContinue", "pageNum", "coverStretch",
             "fontScale", "scheme", "bgOverride", "fgOverride", "layoutTheme",
             "highlightColorSlots", "underlineColorSlots",
             "highlightDefaultSlot", "underlineDefaultSlot",
@@ -256,6 +256,26 @@ class ReaderSettingsTest {
             "noteCollapseAll", "noteBorder", "noteBackground", "noteTextSameColor",
         ).forEach { assertTrue("missing key $it", obj.containsKey(it)) }
         assertNotNull(obj.keys)
+    }
+
+    @Test
+    fun `legacy page animation switch migrates into the flip mode`() {
+        // 旧档的「翻页动画」总开关只有开/关：关掉 ⇒ 无动画（哪怕当时选的是卷曲）。
+        assertEquals("none", ReaderSettings.fromJson("""{"pageAnim":false}""").pageAnimationMode)
+        assertEquals("none", ReaderSettings.fromJson("""{"pageAnim":false,"pageAnimationMode":"curl"}""").pageAnimationMode)
+        // 开着 ⇒ 照它存的模式；没存过模式就是默认的滑动。
+        assertEquals("slide", ReaderSettings.fromJson("""{"pageAnim":true}""").pageAnimationMode)
+        assertEquals("curl", ReaderSettings.fromJson("""{"pageAnim":true,"pageAnimationMode":"curl"}""").pageAnimationMode)
+        // 新档三个模式原样往返。
+        for (mode in listOf("none", "slide", "curl")) {
+            val s = ReaderSettings.DEFAULT.copy(pageAnimationMode = mode)
+            assertEquals(mode, ReaderSettings.fromJson(s.fullJson()).pageAnimationMode)
+        }
+        // 本书私有层同理（`null` = 跟全局）。
+        assertEquals("none", BookSettings.fromJson("""{"pageAnim":false}""").pageAnimationMode)
+        assertEquals("slide", BookSettings.fromJson("""{"pageAnim":true}""").pageAnimationMode)
+        assertEquals("curl", BookSettings.fromJson("""{"pageAnimationMode":"curl"}""").pageAnimationMode)
+        assertEquals(null, BookSettings.fromJson("""{"fontSize":20}""").pageAnimationMode)
     }
 
     @Test

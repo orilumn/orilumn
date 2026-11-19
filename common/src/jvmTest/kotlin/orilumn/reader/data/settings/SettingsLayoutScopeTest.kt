@@ -32,7 +32,7 @@ class SettingsLayoutScopeTest {
     private val nonLayoutFields = listOf(
         "brightness", "brightnessFollowSystem", "brightnessOffset", "eyeProtectionLevel",
         "brightnessGestureLeft", "brightnessGestureRight", "brightnessGestureTwo",
-        "pageAnim", "pageAnimationMode", "autoContinue", "pageNum", "coverStretch",
+        "pageAnimationMode", "autoContinue", "pageNum", "coverStretch",
         "showHiddenFonts",
         // 底栏按钮显隐：只改工具栏画什么，不进版式。
         "showToolbarBookmark", "showToolbarNote", "showToolbarRevision",
@@ -82,7 +82,6 @@ class SettingsLayoutScopeTest {
         "brightnessGestureLeft" -> s.copy(brightnessGestureLeft = !s.brightnessGestureLeft)
         "brightnessGestureRight" -> s.copy(brightnessGestureRight = !s.brightnessGestureRight)
         "brightnessGestureTwo" -> s.copy(brightnessGestureTwo = !s.brightnessGestureTwo)
-        "pageAnim" -> s.copy(pageAnim = !s.pageAnim)
         "pageAnimationMode" -> s.copy(pageAnimationMode = if (s.pageAnimationMode == "slide") "curl" else "slide")
         "autoContinue" -> s.copy(autoContinue = !s.autoContinue)
         "pageNum" -> s.copy(pageNum = !s.pageNum)

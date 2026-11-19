@@ -221,7 +221,6 @@ class SettingsPersistenceScopeTest {
         "fontTitle" -> s.copy(fontTitle = "ProbeTitle")
         "fontCode" -> s.copy(fontCode = "ProbeCode")
         "useUserScripts" -> s.copy(useUserScripts = !s.useUserScripts)
-        "pageAnim" -> s.copy(pageAnim = !s.pageAnim)
         "pageAnimationMode" -> s.copy(pageAnimationMode = if (s.pageAnimationMode == "slide") "curl" else "slide")
         "coverStretch" -> s.copy(coverStretch = !s.coverStretch)
         "fontWeightAnchors" -> s.copy(fontWeightAnchors = mapOf("Probe" to 700))

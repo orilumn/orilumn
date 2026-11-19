@@ -270,11 +270,12 @@ fun ReaderScreen(
     // 不可前向引用，故用可空占位 + 下方回填；回填发生在首次组合内、任何手势之前。
     var flipCtl by remember { mutableStateOf<FlipController?>(null) }
     // 动画总闸：任何模式都走同一套翻页状态机（手势 / 结算 / 落位）。
-    // 具体画哪一档（滑动 / 折页）由渲染层二选一，状态机不区分。
-    val slideEnabled = light.pageAnim
+    // 具体画哪一档（滑动 / 卷曲）由渲染层二选一，状态机不区分；「无动画」= 不走动画，
+    // 点按与手势直接落到目标页。
+    val slideEnabled = light.pageAnimationMode != "none"
     // 折页档：模式 = curl。折页是纯 Compose 画布（多边形裁切 + 渐变），不再依赖 GPU 着色器，
     // 因此**全平台可用**，不需要平台能力判定。
-    val curlEnabled = light.pageAnim && light.pageAnimationMode == "curl"
+    val curlEnabled = light.pageAnimationMode == "curl"
 
     val scope = rememberCoroutineScope()
     // 锚页事件串行漏斗：显示状态的唯一写入通道（见 AnchorFunnel）。所有改锚页位置的动作

@@ -96,7 +96,7 @@ import kotlin.time.Duration.Companion.milliseconds
  *  - Android 返回键（BackHandler）不在此承载——Android 壳（S31）负责路由到 [onDismiss]。
  *
  * 语义条约：排版类改动走 [onCommitTypography]（触发重排）；不影响排版的设置
- * （亮度/护眼/纯 UI 开关——翻页动画、封面拉伸、启动续读、页码、隐藏字体，
+ * （亮度/护眼/纯 UI 开关——翻页模式、封面拉伸、启动续读、页码、隐藏字体，
  * 以及标注色槽等只改像素的项）走 [onCommitLight]（不重排，只持久化 + 重组）。
  * 新增开关先判「是否影响版式指纹」：
  * 不影响就必须走 [onCommitLight]——排版提交会触发重排绑定并推落位，与开书封面解析
@@ -331,11 +331,10 @@ fun ReaderSettingsPanel(
                 // 行不渲染、键盘遍历自动跳过，其后各项索引不挪位。
                 if (brightnessSupported) ItemKey(onEnter = { stack.add(Sub.Brightness) })
                 else ItemKey(enabled = false),
-                // 以下四个开关不影响排版（翻页动画/封面拉伸/启动续读/页码）：
+                // 以下几个开关不影响排版（翻页模式/封面拉伸/启动续读/页码）：
                 // 走无重排提交（纯 UI 设置，与 showHiddenFonts 同口径）——
                 // 走排版提交会触发重排绑定并推落位，与开书封面解析竞态
                 // （误记 dismissed 致封面不弹），且纯开关本无需重排。
-                ItemKey(onEnter = { onCommitLight(s.copy(pageAnim = !s.pageAnim)) }),
                 ItemKey(onEnter = { stack.add(Sub.AnimMode) }),
                 ItemKey(onEnter = { onCommitLight(s.copy(coverStretch = !s.coverStretch)) }),
                 ItemKey(onEnter = { onCommitLight(s.copy(autoContinue = !s.autoContinue)) }),
@@ -638,6 +637,7 @@ fun ReaderSettingsPanel(
                 )
             }
             Sub.AnimMode -> listOf(
+                ItemKey(onEnter = { onCommitLight(s.copy(pageAnimationMode = "none")) }),
                 ItemKey(onEnter = { onCommitLight(s.copy(pageAnimationMode = "slide")) }),
                 ItemKey(onEnter = { onCommitLight(s.copy(pageAnimationMode = "curl")) }),
             )
@@ -1055,7 +1055,7 @@ private fun WifiImportPage(
 private enum class Sub(val title: String) {
     Home("设置"), Text("文字"), TextFont("字体管理"), WeightPicker("字重"), WifiImport("WIFI 导入"), Spacing("间距"),
     Theme("排版主题"), ReadingTheme("阅读主题"), ThemePresetMgr("预设管理"),
-    Brightness("亮度"), AnimMode("翻页动画模式"), AnnotationColors("笔记"), Toolbar("工具栏"),
+    Brightness("亮度"), AnimMode("翻页模式"), AnnotationColors("笔记"), Toolbar("工具栏"),
 }
 
 /** 键盘项：click 与键盘共用同一回调；网格格的左右由调用方配成步进，滑块的左右配成调值。 */
@@ -1122,13 +1122,12 @@ private fun HomePage(
         if (showBrightness) {
             item { SetRow("亮度", if (s.brightnessFollowSystem) "跟随系统" else "自定义", keys[5].onEnter, p, nav = nav, index = 5) }
         }
-        item { SetSwitch("翻页动画", s.pageAnim, { commitPlain(s.copy(pageAnim = it)) }, p, nav = nav, index = 6) }
-        item { SetRow("翻页动画模式", ReaderThemeMath.pageAnimationModeLabel(s.pageAnimationMode), keys[7].onEnter, p, nav = nav, index = 7) }
-        item { SetSwitch("封面拉伸全屏", s.coverStretch, { commitPlain(s.copy(coverStretch = it)) }, p, nav = nav, index = 8) }
-        item { SetSwitch("启动时继续阅读", s.autoContinue, { commitPlain(s.copy(autoContinue = it)) }, p, nav = nav, index = 9) }
-        item { SetSwitch("显示页码", s.pageNum, { commitPlain(s.copy(pageNum = it)) }, p, nav = nav, index = 10) }
+        item { SetRow("翻页模式", ReaderThemeMath.pageAnimationModeLabel(s.pageAnimationMode), keys[6].onEnter, p, nav = nav, index = 6) }
+        item { SetSwitch("封面拉伸全屏", s.coverStretch, { commitPlain(s.copy(coverStretch = it)) }, p, nav = nav, index = 7) }
+        item { SetSwitch("启动时继续阅读", s.autoContinue, { commitPlain(s.copy(autoContinue = it)) }, p, nav = nav, index = 8) }
+        item { SetSwitch("显示页码", s.pageNum, { commitPlain(s.copy(pageNum = it)) }, p, nav = nav, index = 9) }
         // 工具栏显隐：哪些按钮出现在底栏，读者自己定。
-        item { SetRow("工具栏", onTap = keys[11].onEnter, p = p, nav = nav, index = 11) }
+        item { SetRow("工具栏", onTap = keys[10].onEnter, p = p, nav = nav, index = 10) }
         item { Spacer(modifier = Modifier.height(24.dp)) }
     }
 }
@@ -1649,12 +1648,15 @@ private fun AnimModePage(
     commit: (ReaderSettings) -> Unit,
     p: Palette,
 ) {
-    val curl = s.pageAnimationMode == "curl"
+    val mode = s.pageAnimationMode
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
-        item { ThemeOpt("滑动", !curl, keys[0].onEnter, p, nav = nav, index = 0) }
+        // 「无动画」放开头：读者想彻底关掉翻页动画时，这里就是它的总闸（旧版的
+        // 「翻页动画」开关已并入本页，见 CHANGELOG）。
+        item { ThemeOpt("无动画", mode == "none", keys[0].onEnter, p, nav = nav, index = 0) }
+        item { ThemeOpt("滑动", mode == "slide", keys[1].onEnter, p, nav = nav, index = 1) }
         // 折页是纯 Compose 画布，全平台可用（不再依赖 Android 13+ 的着色器），
         // 所以这一项在所有端都提供。
-        item { ThemeOpt("卷曲", curl, keys[1].onEnter, p, nav = nav, index = 1) }
+        item { ThemeOpt("卷曲", mode == "curl", keys[2].onEnter, p, nav = nav, index = 2) }
         item { Spacer(modifier = Modifier.height(24.dp)) }
     }
 }

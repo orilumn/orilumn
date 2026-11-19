@@ -36,6 +36,14 @@ class CurlPageImages {
     /** 旁注 + 页码（整页大小、透明底）。没有旁注也没有页码时为 null。 */
     var overlay: ImageBitmap? by mutableStateOf(null)
 
+    /**
+     * [overlay] 的**内容代数**（`PageOverlayLayer.revision`）。
+     *
+     * 覆盖层位图会原地重画（尺寸不变时复用同一实例），实例相等不代表像素相等；
+     * 贴图缓存据此判废，否则动画里一直贴第一版旁注。
+     */
+    var overlayGeneration: Int = 0
+
     /** 纹理画笔缓存（`ImageShader` 只跟图有关，见 [CurlTextureCache]）。 */
     internal val textures: CurlTextureCache = CurlTextureCache()
 

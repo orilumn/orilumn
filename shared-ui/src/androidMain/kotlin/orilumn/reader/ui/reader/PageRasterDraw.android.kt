@@ -15,6 +15,7 @@ internal actual fun DrawScope.drawRasterCached(
     image: ImageBitmap,
     topLeft: Offset,
     alpha: Float,
+    generation: Int,
 ) {
     drawImage(image, topLeft = topLeft, alpha = alpha)
 }

@@ -3935,9 +3935,10 @@ fun ReaderScreen(
                     overlayWidthPx = pxWidth.toInt(),
                     overlayHeightPx = pxHeight.toInt(),
                     overlayTextMeasurer = overlayMeasurer,
-                    onImages = { pageImage, overlayImage ->
+                    onImages = { pageImage, overlayImage, overlayGen ->
                         images.page = pageImage
                         images.overlay = overlayImage
+                        images.overlayGeneration = overlayGen
                     },
                 )
             }

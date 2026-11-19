@@ -80,8 +80,11 @@ internal fun ReaderPageCanvas(
      * 本次真正画出来的两张图（页栅格 + 覆盖层，**同一帧、同一绘制相位**）：
      * 翻页卷曲层直接把它们当纹理，不再另截图（见 `curl/FlipCurlLayer.kt`）。
      * 是普通回调（不是 Compose 状态）：写在 draw 相位，读它的也在 draw 相位，不触重组。
+     *
+     * 后两个是**内容代数**：覆盖层那张位图会被原地重画（见 `PageOverlayLayer`），
+     * 光看实例判不出「像素换了」，下游贴图缓存必须按代数判废。页栅格是一次性快照，恒 0。
      */
-    onImages: ((ImageBitmap?, ImageBitmap?) -> Unit)? = null,
+    onImages: ((page: ImageBitmap?, overlay: ImageBitmap?, overlayGeneration: Int) -> Unit)? = null,
 ) {
     val localRenderer = rememberReaderPageRenderer()
     val renderer = renderer ?: localRenderer
@@ -172,8 +175,10 @@ internal fun ReaderPageCanvas(
         } else {
             null
         }
-        if (overlayImage != null) drawRasterCached(overlayRaster, overlayImage, Offset.Zero)
-        onImages?.invoke(pageImage, overlayImage)
+        if (overlayImage != null) {
+            drawRasterCached(overlayRaster, overlayImage, Offset.Zero, generation = overlayLayer?.revision ?: 0)
+        }
+        onImages?.invoke(pageImage, overlayImage, overlayLayer?.revision ?: 0)
     }
     }
 }

@@ -126,7 +126,9 @@ private fun DrawScope.drawWholePage(
 ) {
     drawRect(paper, size = pageSize, alpha = alpha)
     images.page?.let { drawRasterCached(images.pageRaster, it, Offset(texLeft, texTop), alpha) }
-    images.overlay?.let { drawRasterCached(images.overlayRaster, it, Offset.Zero, alpha) }
+    images.overlay?.let {
+        drawRasterCached(images.overlayRaster, it, Offset.Zero, alpha, images.overlayGeneration)
+    }
 }
 
 /**

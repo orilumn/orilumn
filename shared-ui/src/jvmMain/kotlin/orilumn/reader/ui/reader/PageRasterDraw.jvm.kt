@@ -26,10 +26,13 @@ internal actual fun DrawScope.drawRasterCached(
     image: ImageBitmap,
     topLeft: Offset,
     alpha: Float,
+    generation: Int,
 ) {
-    val skia = (cache.handle as? Image)?.takeIf { cache.source === image }
+    val skia = (cache.handle as? Image)
+        ?.takeIf { cache.source === image && cache.generation == generation }
         ?: Image.makeFromBitmap(image.asSkiaBitmap()).also {
             cache.source = image
+            cache.generation = generation
             cache.handle = it
         }
     val w = skia.width.toFloat()

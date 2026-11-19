@@ -15,6 +15,7 @@ import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -1114,6 +1115,71 @@ class Curl3DRenderTest {
     }
 
     /**
+     * 卷筒与纸正面交界处**不能有一条纸色接缝线**。
+     *
+     * 两层各自抗锯齿叠在同一条边上时，交界那一列像素拿到「半列纸色 + 半列纹理」，比两侧都亮 ——
+     * 读者看到的就是折痕上一条虚线似的亮缝（原话「卷筒与纸正面交界处有一条多余的接缝线；
+     * 背面也有」）。这条按「折痕那一列不许比左右两列的均值亮」来锁。
+     *
+     * ## 只判折痕落在**正文**里的那几行
+     *
+     * 折痕扫过页边距时，那一列本来就是**纸**（页边距是白纸），纸边压在折痕上是内容而不是接缝；
+     * 把那些行也算进来，判据只会变成「页边距不许出现在折痕上」。所以一列里只要折痕自己或
+     * 左右任一邻列已经是纸色，这一行就跳过 —— 剩下的才是「折痕切开正文」、必须干净的行。
+     *
+     * 正文用**深墨**而不是中灰：纸色叠在深墨上差 0.17（中灰只有 0.09），缝一出现就看得见。
+     */
+    @Test
+    fun foldHasNoPaperSeamLine() {
+        val w = 900
+        val h = 1300
+        // 正文页栅格 = 版心：平板实测 1590×2400 放在 1840×2800 里，这里按同一比例缩。
+        val body = solid(778, 1114, 0xFF202020.toInt())
+        val bodyTex = Offset(61f, 93f)
+        for (p in listOf(0.25f, 0.40f, 0.55f)) {
+            for (dir in listOf(1, -1)) {
+                for (tilt in listOf(0f, 0.2f, 0.35f)) {
+                    val shape = curlShape(w.toFloat(), h.toFloat(), p, dir, tilt)
+                    val pm = render(shape, body, body, frontTex = bodyTex, backTex = bodyTex)
+                        .toPixelMap()
+                    fun lum(xx: Int, yy: Int): Float {
+                        val c = pm[xx, yy]
+                        return (c.red + c.green + c.blue) / 3f
+                    }
+                    var worst = 0f
+                    var where = ""
+                    var judged = 0
+                    for (y in 200 until h - 200 step 2) {
+                        val x = (shape.topX + (shape.bottomX - shape.topX) * y.toFloat() / h).roundToInt()
+                        if (x < 2 || x > w - 3) continue
+                        val l = lum(x - 1, y)
+                        val m = lum(x, y)
+                        val r = lum(x + 1, y)
+                        // 折痕自己或任一侧已经是纸色：这一行是页边距压着折痕，跳过。
+                        // 两侧明暗差得远（一侧纸、一侧正文）说明这一行是**内容边界**，缝判不出来。
+                        if (m >= 0.9f || l >= 0.9f || r >= 0.9f) continue
+                        if (abs(l - r) > 0.2f) continue
+                        judged++
+                        val gap = m - (l + r) / 2f
+                        if (gap > worst) {
+                            worst = gap
+                            where = "($x,$y) 折痕=${"%.3f".format(m)} 左=${"%.3f".format(l)} " +
+                                "右=${"%.3f".format(r)}"
+                        }
+                    }
+                    if (tilt != 0f) {
+                        assertTrue("p=$p dir=$dir tilt=$tilt 折痕没有一行落在正文里，判据是空的", judged > 0)
+                    }
+                    assertTrue(
+                        "p=$p dir=$dir tilt=$tilt 折痕上有一条比两侧都亮的接缝线：$where",
+                        worst <= 0.08f,
+                    )
+                }
+            }
+        }
+    }
+
+    /**
      * 卷筒落影必须**贴着纸卷的轮廓**铺，不能跟折痕平行着走。
      *
      * 只管「影的形状」（[CurlMesh.rollShadowStrip] 的轮廓），不看浓度 —— 浓度是另一码事。
@@ -1328,6 +1394,75 @@ class Curl3DRenderTest {
                 )
             }
         }
+    }
+
+    /**
+     * 露出页**不许把颜色渗到折痕那一列**（读者报的「纸正面与卷筒左侧的接缝」的正面对应那条）。
+     *
+     * 露出页是垫在纸底下的一张纸，可它的边也从折痕起笔：抗锯齿的**半列**压在折痕上，把新页的
+     * 颜色混进正面内容。露出页在折痕附近是纸色时最明显 —— 新页栅格还没就绪的那一帧整块都是纸，
+     * 折痕扫过页边距时也是纸：深色正面页上看是一条白缝、浅色页面上看是一条灰缝，与折痕平行、
+     * 一直在。
+     *
+     * 这里摆最不利的配色：正面整页深灰（封面口径，整页烤图）+ 露出页整页纸色，折痕一列只要
+     * 混进半列纸色就比两侧亮一截。判据取「本列相对左右两列平均值的偏离」：平滑的明暗渐变在
+     * 中间列上≈0，只有一像素线才判得出来。
+     */
+    @Test
+    fun revealPageDoesNotBleedOntoTheFold() {
+        val w = 900
+        val h = 1300
+        val cover = solid(w, h, 0xFF808080.toInt())
+        // 露出页整页纸色：新页栅格没就绪的那一帧（以及折痕压在页边距上的那几行）就是这样。
+        val paperPage = solid(w, h, paper)
+        for (p in listOf(0.10f, 0.25f, 0.40f)) {
+            for (dir in listOf(1, -1)) {
+                for (tilt in listOf(0.25f, -0.25f)) {
+                    val shape = curlShape(w.toFloat(), h.toFloat(), p, dir, tilt)
+                    val pm = render(shape, cover, paperPage).toPixelMap()
+                    // 沿折痕法向取剖面、按行平均：逐行的内容噪声被抹平，只剩「折痕那一列」的线。
+                    val slope = (shape.bottomX - shape.topX) / h
+                    val norm = sqrt(1f + slope * slope)
+                    val sums = DoubleArray(FOLD_PROFILE_PX)
+                    val counts = IntArray(FOLD_PROFILE_PX)
+                    for (y in 260 until h - 260) {
+                        val x0 = shape.topX + slope * y
+                        for (off in -FOLD_PROFILE_HALF..FOLD_PROFILE_HALF) {
+                            val xx = (x0 + off / norm).roundToInt()
+                            val yy = (y - off * slope / norm).roundToInt()
+                            if (xx in 0 until w && yy in 0 until h) {
+                                sums[off + FOLD_PROFILE_HALF] += luma(pm[xx, yy])
+                                counts[off + FOLD_PROFILE_HALF]++
+                            }
+                        }
+                    }
+                    val v = DoubleArray(FOLD_PROFILE_PX) {
+                        if (counts[it] == 0) 0.0 else sums[it] / counts[it]
+                    }
+                    var worst = 0.0
+                    var where = ""
+                    for (off in -1..1) {
+                        val i = off + FOLD_PROFILE_HALF
+                        val d = abs(v[i] - (v[i - 1] + v[i + 1]) / 2.0)
+                        if (d > worst) {
+                            worst = d
+                            where = "偏移 $off（0 = 折痕列）剖面 " +
+                                v.joinToString(" ") { "%.3f".format(it) }
+                        }
+                    }
+                    assertTrue(
+                        "p=$p dir=$dir tilt=$tilt 折痕上有一条接缝线：偏离 ${"%.3f".format(worst)} $where",
+                        worst <= 0.03,
+                    )
+                }
+            }
+        }
+    }
+
+    private companion object {
+        /** 折痕剖面的半宽与总点数：±6 像素足够看出「一条一像素线」。 */
+        const val FOLD_PROFILE_HALF = 6
+        const val FOLD_PROFILE_PX = FOLD_PROFILE_HALF * 2 + 1
     }
 
     private fun luma(c: Color): Float = (c.red + c.green + c.blue) / 3f

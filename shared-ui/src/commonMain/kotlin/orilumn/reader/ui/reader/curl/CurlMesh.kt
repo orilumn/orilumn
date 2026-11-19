@@ -442,60 +442,57 @@ internal class CurlTextureStrip(
     val vertexCount: Int,
 )
 
-/** 见 [CurlTextureStrip]。整段都不在版心里时返回 `null`。 */
-internal fun CurlMesh.textureStrip(
-    band: CurlMesh.Band,
+/** 一行（两顶点）里，材料值沿扫线线性变化，落在 `lo..hi` 内的一段参数区间。 */
+private fun paramSpan(va: Float, vb: Float, lo: Float, hi: Float): FloatArray? {
+    if (abs(vb - va) < 1e-4f) {
+        return if (va < lo || va > hi) null else floatArrayOf(0f, 1f)
+    }
+    val ta = (lo - va) / (vb - va)
+    val tb = (hi - va) / (vb - va)
+    val s = maxOf(0f, minOf(ta, tb))
+    val e = minOf(1f, maxOf(ta, tb))
+    return if (e - s <= 1e-4f) null else floatArrayOf(s, e)
+}
+
+/**
+ * 某一行扫线落在页栅格材料矩形里的参数区间（`0..1` 里的 `[t0, t1]`）；整行都在外面时为 `null`。
+ * `u`、`v` 两条边要同时满足。
+ */
+private fun CurlMesh.rowSpan(
+    row: Int,
     texLeft: Float,
     texTop: Float,
-    texWidth: Float,
-    texHeight: Float,
+    right: Float,
+    bottom: Float,
+): FloatArray? {
+    val a = row * 2
+    val b = row * 2 + 1
+    val su = paramSpan(texCoords[a * 2], texCoords[b * 2], texLeft, right) ?: return null
+    val sv = paramSpan(texCoords[a * 2 + 1], texCoords[b * 2 + 1], texTop, bottom) ?: return null
+    val t0 = maxOf(su[0], sv[0])
+    val t1 = minOf(su[1], sv[1])
+    return if (t1 - t0 <= 1e-4f) null else floatArrayOf(t0, t1)
+}
+
+/**
+ * 把 `first..last` 这些行各取参数区间 `[t0, t1]` 那一小段，缝成一条三角带。
+ *
+ * @param spanAt 行 → 参数区间；区间里**任何一行**给不出区间，整条就作废（返回 `null`）。
+ */
+private fun CurlMesh.stripOf(
+    first: Int,
+    last: Int,
+    spanAt: (Int) -> FloatArray?,
+    texLeft: Float,
+    texTop: Float,
 ): CurlTextureStrip? {
-    val right = texLeft + texWidth
-    val bottom = texTop + texHeight
-
-    /** 一行（两顶点）里，材料值沿扫线线性变化，落在 `lo..hi` 内的一段参数区间。 */
-    fun span(va: Float, vb: Float, lo: Float, hi: Float): FloatArray? {
-        if (abs(vb - va) < 1e-4f) {
-            return if (va < lo || va > hi) null else floatArrayOf(0f, 1f)
-        }
-        val ta = (lo - va) / (vb - va)
-        val tb = (hi - va) / (vb - va)
-        val s = maxOf(0f, minOf(ta, tb))
-        val e = minOf(1f, maxOf(ta, tb))
-        return if (e - s <= 1e-4f) null else floatArrayOf(s, e)
-    }
-
-    /** 这一行真正落在版心矩形里的参数区间：`u`、`v` 两条边同时满足。 */
-    fun rowSpan(row: Int): FloatArray? {
-        val a = row * 2
-        val b = row * 2 + 1
-        val su = span(texCoords[a * 2], texCoords[b * 2], texLeft, right) ?: return null
-        val sv = span(texCoords[a * 2 + 1], texCoords[b * 2 + 1], texTop, bottom) ?: return null
-        val t0 = maxOf(su[0], sv[0])
-        val t1 = minOf(su[1], sv[1])
-        return if (t1 - t0 <= 1e-4f) null else floatArrayOf(t0, t1)
-    }
-
-    // 先找出连续的行区间（首行之后一旦断掉就收尾：材料矩形是凸的，行按材料坐标单调走，
-    // 断掉之后不会又回来）。
-    var first = -1
-    var last = -1
-    for (row in band.firstRow..band.lastRow) {
-        if (rowSpan(row) == null) {
-            if (first >= 0) break
-            continue
-        }
-        if (first < 0) first = row
-        last = row
-    }
-    if (first < 0 || last <= first) return null
-
+    if (last <= first) return null
     val rows = last - first + 1
     val pos = FloatArray(rows * 4)
     val uv = FloatArray(rows * 4)
     var w = 0
     for (row in first..last) {
-        val ts = rowSpan(row) ?: return null
+        val ts = spanAt(row) ?: return null
         val a = row * 2
         val b = row * 2 + 1
         for (k in 0..1) {
@@ -508,6 +505,95 @@ internal fun CurlMesh.textureStrip(
         }
     }
     return CurlTextureStrip(positions = pos, texCoords = uv, vertexCount = rows * 2)
+}
+
+/** 见 [CurlTextureStrip]。整段都不在版心里时返回 `null`。 */
+internal fun CurlMesh.textureStrip(
+    band: CurlMesh.Band,
+    texLeft: Float,
+    texTop: Float,
+    texWidth: Float,
+    texHeight: Float,
+): CurlTextureStrip? {
+    val right = texLeft + texWidth
+    val bottom = texTop + texHeight
+    fun spanAt(row: Int) = rowSpan(row, texLeft, texTop, right, bottom)
+    // 材料矩形是凸的、行按材料坐标单调推移：能落在版心内的行是一段连续区间，
+    // 断掉之后不会又回来，所以找到首行之后一断就收尾。
+    var first = -1
+    var last = -1
+    for (row in band.firstRow..band.lastRow) {
+        if (spanAt(row) == null) {
+            if (first >= 0) break
+            continue
+        }
+        if (first < 0) first = row
+        last = row
+    }
+    if (first < 0) return null
+    return stripOf(first, last, ::spanAt, texLeft, texTop)
+}
+
+/**
+ * **页边距**那部分三角带（材料落在页栅格之外），0～2 条：版心一侧一条、另一侧一条。
+ *
+ * 纸的每一段都要垫一层纸色，好让「版心里没有像素的那一截」（页边距）露出纸色，
+ * 而不是透出底下的另一页。但纸色**只能垫在版心之外**：页边距本来就是纸，版心那一块由纹理
+ * 自己铺满；两处都铺的话，纹理的抗锯齿边就压在纸色上 —— 交界那一列像素拿到「半列纸色 +
+ * 半列纹理」，比两边都亮。读者报的「卷筒与纸正面交界处有一条多余的接缝线」正是它，
+ * 反面同一条（段与段共用的那行扫线也一样）。
+ *
+ * 行按材料坐标单调推移，所以两截各自都是连续的一段：版心之前的那一截一定在段首，
+ * 版心之后的那一截一定在段尾，两截都可能不存在（整段都在版心里 ⇒ 纸色一条都不用垫）。
+ */
+internal fun CurlMesh.marginStrips(
+    band: CurlMesh.Band,
+    texLeft: Float,
+    texTop: Float,
+    texWidth: Float,
+    texHeight: Float,
+): List<CurlTextureStrip> {
+    val right = texLeft + texWidth
+    val bottom = texTop + texHeight
+    fun inside(row: Int) = rowSpan(row, texLeft, texTop, right, bottom)
+    /** 版心之前那一截：`[0, t0]`（整行都在版心外就是整行）；整行都在版心里时为空。 */
+    fun head(row: Int): FloatArray? {
+        val s = inside(row) ?: return floatArrayOf(0f, 1f)
+        return if (s[0] > 1e-4f) floatArrayOf(0f, s[0]) else null
+    }
+    /**
+     * 版心之后那一截：`[t1, 1]`。整行都在版心里时退化成零宽（`[1, 1]`，画不出三角形）；
+     * 整行都在版心外时也退化 —— 那一整行由 [head] 全包，这里再来一条就画两遍。
+     */
+    fun tail(row: Int): FloatArray? {
+        val s = inside(row) ?: return floatArrayOf(1f, 1f)
+        return floatArrayOf(s[1], 1f)
+    }
+    var headEnd = -1
+    var tailStart = -1
+    for (row in band.firstRow..band.lastRow) {
+        if (head(row) != null) headEnd = row
+        val s = inside(row)
+        if (tailStart < 0 && s != null && s[1] < 1f - 1e-4f) tailStart = row
+    }
+    val out = ArrayList<CurlTextureStrip>(2)
+    if (headEnd >= band.firstRow) {
+        // `head` 在这里必然连续（整行落在版心里的行之后不会再出现版心之前那一截）。
+        stripOf(band.firstRow, headEnd, ::head, texLeft, texTop)?.let { out.add(it) }
+    }
+    if (tailStart >= 0) {
+        stripOf(tailStart, band.lastRow, ::tail, texLeft, texTop)?.let { out.add(it) }
+    }
+    return out
+}
+
+/** 三角带的**外轮廓**（页坐标多边形）：先沿一侧页边走到底，再沿另一侧走回来。纸色打底用。 */
+internal fun CurlTextureStrip.outlinePath(): List<Offset> {
+    val rows = vertexCount / 2
+    val pts = ArrayList<Offset>(rows * 2)
+    for (i in 0 until rows) pts.add(Offset(positions[i * 4], positions[i * 4 + 1]))
+    for (i in rows - 1 downTo 0) pts.add(Offset(positions[i * 4 + 2], positions[i * 4 + 3]))
+    return pts
 }
 
 private fun emptyMesh() = CurlMesh(

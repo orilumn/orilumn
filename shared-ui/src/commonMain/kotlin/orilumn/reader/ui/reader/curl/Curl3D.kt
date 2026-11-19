@@ -165,7 +165,13 @@ internal fun DrawScope.drawCurl3DFrame(
     drawPage(front, paper, frontTex.x, frontTex.y, pageSize)
     val corners = revealCorners(shape)
     if (corners.size < 3) return true
-    drawRevealPage(corners, back, paper, backTex.x, backTex.y)
+    drawRevealPage(
+        corners = insetFoldEdge(corners, shape, REVEAL_FOLD_INSET),
+        images = back,
+        paper = paper,
+        texLeft = backTex.x,
+        texTop = backTex.y,
+    )
 
     // ③ 网格几何
     val radius = curlRadius(shape, radiusRatio)
@@ -241,34 +247,45 @@ internal fun DrawScope.drawCurl3DFrame(
             val ring = mesh.bandOutline(band)
             if (ring.size < 3) return
             val outline = polygonPath(ring)
-            // 纸的每一段都是**不透明的一张纸**：先照这一段自己的轮廓铺一层纸色。
-            // 纹理只在下面那块「版心形状」里画，版心之外的页边距就露出这一层纸
-            //（纸背跟旧页同纸同色，所以纸背的页边距看起来仍是纸，不是空白条）。
-            drawPath(outline, paper)
+            val pageImage = front.page
+            val texWidth = pageImage?.width?.toFloat() ?: 0f
+            val texHeight = pageImage?.height?.toFloat() ?: 0f
             // 纹理**只能画在版心材料范围内**：页栅格只有版心那么大（平板 1585×2400 放在
             // 1840×2800 里），页边距里根本没有像素（封面是整页烤图，它的材料范围就是整页）。靠 `ImageShader` 的 `Decal` 平铺模式
             // 让版心之外的采样直接**透明**（见 [newMeshPaint]）：卷进页边距的一截只露纸色。
             // **不再用 `clipPath` 按材料形状裁**：折痕一斜，那条裁剪路径就不是矩形，
             // 抗锯齿裁切会让 Skia 为它开一张全页大小的图层，平板上实测一帧多三十来毫秒
             //（手指横划时倾斜不为零，帧率当场掉到 20fps；直线滑动倾斜恒 0 反而 60fps）。
-            val pageImage = front.page
-            if (pageImage != null) {
-                // 纹理裁在**几何**里（见 [textureStrip]），不画布裁切：斜折痕下那条裁剪路径
-                // 不是矩形，抗锯齿裁切会给每帧开一张全页大小的图层（见 [drawRevealPage]）。
-                val strip = mesh.textureStrip(
+            // 纹理裁在**几何**里（见 [textureStrip]），不画布裁切。
+            val strip = if (pageImage == null) {
+                null
+            } else {
+                mesh.textureStrip(
                     band = band,
                     texLeft = frontTex.x,
                     texTop = frontTex.y,
-                    texWidth = pageImage.width.toFloat(),
-                    texHeight = pageImage.height.toFloat(),
+                    texWidth = texWidth,
+                    texHeight = texHeight,
                 )
-                if (strip != null) {
-                    drawTextureStrip(
-                        canvas = canvas,
-                        strip = strip,
-                        paint = front.textures.pagePaint(pageImage),
-                    )
+            }
+            // 纸的每一段都是**不透明的一张纸**：先给这一段垫纸色 —— 但**只垫在版心之外**
+            //（页边距里没有像素，那一段必须露出纸色），版心那一块由纹理自己铺满。
+            // 两处都垫的话，纹理的抗锯齿边压在纸色上，交界那一列像素拿到「半列纸色 +
+            // 半列纹理」，比两边都亮 —— 读者报的「卷筒与纸正面交界处一条多余的接缝线」
+            //（反面同一条）就是它；段与段共用的那行扫线同理。
+            if (pageImage == null) {
+                drawPath(outline, paper)
+            } else {
+                for (margin in mesh.marginStrips(band, frontTex.x, frontTex.y, texWidth, texHeight)) {
+                    drawPath(polygonPath(margin.outlinePath()), paper)
                 }
+            }
+            if (strip != null) {
+                drawTextureStrip(
+                    canvas = canvas,
+                    strip = strip,
+                    paint = front.textures.pagePaint(pageImage!!),
+                )
             }
             // 覆盖层是整页图（旁注 + 页码），材料坐标本来就在页内，不需要裁。
             front.overlay?.let { overlay ->
@@ -284,8 +301,14 @@ internal fun DrawScope.drawCurl3DFrame(
             }
 
             // 纸背：纸色只盖一成 ⇒ 内容仍留九成（参考实现 `BACKFACE_ALPHA = 0.9`）。
+            // 只压在**版心那一块**上：页边距本来就是纸色，再压一层只会让这层纸色的抗锯齿边
+            // 压在纹理上（与纸底同一个道理），交界处多一条比两边都亮的细线。
             if (band.surface != CurlMesh.Surface.Recto) {
-                drawPath(outline, paper, alpha = CURL_BACK_WASH_ALPHA)
+                if (strip == null) {
+                    drawPath(outline, paper, alpha = CURL_BACK_WASH_ALPHA)
+                } else {
+                    drawPath(polygonPath(strip.outlinePath()), paper, alpha = CURL_BACK_WASH_ALPHA)
+                }
             }
             // 纸背**不描边、不压暗**：它的边是纸自己的边，画成实线就成了读者说的
             // 「卷筒左侧那条与折痕平行的痕迹」。纸背只留自己的镜像内容 + 一层纸色压淡。
@@ -1051,6 +1074,57 @@ private fun DrawScope.drawPage(
 }
 
 /**
+ * 露出页贴折痕那条边往里收多少像素（见 [insetFoldEdge]）。
+ *
+ * 1px 就够：抗锯齿的半覆盖只跨一列。收多了会在折痕内侧留一条正面页的颜色（网格没盖到时
+ * 看得出来）。
+ */
+private const val REVEAL_FOLD_INSET: Float = 1f
+
+/**
+ * 露出页贴着折痕的那条边**往露出侧收** [REVEAL_FOLD_INSET] 像素。
+ *
+ * 露出页是**垫在纸底下**的一张纸：折痕这一列本来就归翻走的那一页（`drawPage(front)` 已经
+ * 整页铺过一遍，网格第一行再盖一次）。露出页却也从折痕起笔，它自己的抗锯齿边于是有半列
+ * 压在折痕上，把「新页那半列颜色」混进正面内容里 —— 深色页面上看是一条白缝、浅色页面上
+ * 看是一条灰缝，与折痕平行、一直在（读者原话「纸正面与卷筒左侧的接缝」）。纸色、页图、
+ * 覆盖层三层都有这条边，所以收边要收**整个多边形**，不能只收纸色那一层。
+ *
+ * 收进来的那半像素交给正面纸自己填；网格第一行盖在上面，两处内容本来就同源，看不出接缝。
+ */
+private fun insetFoldEdge(corners: List<Offset>, shape: CurlShape, inset: Float): List<Offset> {
+    if (corners.size < 3 || inset <= 0f) return corners
+    val top = Offset(shape.topX, 0f)
+    val bottom = Offset(shape.bottomX, shape.pageH)
+    val dx = bottom.x - top.x
+    val dy = bottom.y - top.y
+    val len = hypot(dx, dy)
+    if (len < 1e-3f) return corners
+    // 折痕单位法向，取指向露出页那一侧（多边形重心在那一侧）的那一支。
+    var nx = dy / len
+    var ny = -dx / len
+    var cx = 0f
+    var cy = 0f
+    for (p in corners) {
+        cx += p.x
+        cy += p.y
+    }
+    cx /= corners.size
+    cy /= corners.size
+    if (nx * (cx - top.x) + ny * (cy - top.y) < 0f) {
+        nx = -nx
+        ny = -ny
+    }
+    // 落在折痕上的顶点才挪（端点可能被页边截出来一个重复点，两个一起挪）。
+    val tol = inset * 2f
+    return List(corners.size) { i ->
+        val p = corners[i]
+        val d = (p.x - top.x) * nx + (p.y - top.y) * ny
+        if (d > -tol && d < tol) Offset(p.x + nx * inset, p.y + ny * inset) else p
+    }
+}
+
+/**
  * 露出页：按折痕那一侧的四边形**填纸色 + 页图 shader**，不走画布裁切。
  *
  * 与 [drawPage] 的唯一区别是「形状」：这里只填折痕外侧那一块，不是整页。
@@ -1064,6 +1138,19 @@ private fun DrawScope.drawPage(
  * 脚本的直线滑动倾斜恒 0，所以一直是 60fps——「手拖才卡、脚本不卡」的真身就在这里。
  *
  * 换成「形状当路径、页图当 shader」后填的还是同一块面积，但只有一次路径填充、没有图层。
+ *
+ * ## 纸色打底只补版心之外，折痕那条边再往里收一像素
+ *
+ * 这块四边形的**最后一条边就是折痕**（`revealCorners` 的末点接首点）。整块先铺一层纸色时，
+ * 纸色自己的抗锯齿边正好压在折痕上，叠上网格第一行（也是半覆盖）就多出一条比两侧都亮的
+ * 接缝线（读者原话「卷筒与纸正面交界处有一条多余的接缝线」的正面对应那条）。
+ * 所以纸色只铺在页栅格之外的四条边（各裁一个轴对齐矩形），版心那一块由页图自己铺满。
+ * 这里能用轴对齐裁切，是因为露出页是**平的**、屏幕坐标就是材料坐标；网格那几段在屏幕上
+ * 卷了起来，同样的裁法在那里不成立（见 `drawBand`）。
+ *
+ * 但只收纸色不够：页图 shader 与覆盖层也是从折痕起笔，它们自己的抗锯齿边同样有半列压在
+ * 折痕上（露出页在折痕附近是纸色时最明显 —— 半列纸色混进正面内容，深色页面上是白缝、
+ * 浅色页面上是灰缝）。所以**整个多边形**都往里收（见 [insetFoldEdge]）。
  */
 private fun DrawScope.drawRevealPage(
     corners: List<Offset>,
@@ -1073,9 +1160,22 @@ private fun DrawScope.drawRevealPage(
     texTop: Float,
 ) {
     val path = polygonPath(corners)
-    // 纸色打底：版心之外是纸 —— 底下那张正面页的字不能从新页的页边距里透出来。
-    drawPath(path, paper)
     val pageImage = images.page
+    if (pageImage == null) {
+        drawPath(path, paper)
+    } else {
+        // 纸色打底：版心之外是纸 —— 底下那张正面页的字不能从新页的页边距里透出来。
+        // 但纸色**只垫在页栅格之外**（理由见上面的 KDoc）：版心那一块页图自己会铺满。
+        // 四条边分开裁，裁的都是轴对齐矩形，Skia 走裁剪矩形快路，不开图层。
+        val texRight = texLeft + pageImage.width
+        val texBottom = texTop + pageImage.height
+        val pageW = size.width
+        val pageH = size.height
+        if (texTop > 0f) clipRect(0f, 0f, pageW, texTop) { drawPath(path, paper) }
+        if (texBottom < pageH) clipRect(0f, texBottom, pageW, pageH) { drawPath(path, paper) }
+        if (texLeft > 0f) clipRect(0f, texTop, texLeft, texBottom) { drawPath(path, paper) }
+        if (texRight < pageW) clipRect(texRight, texTop, pageW, texBottom) { drawPath(path, paper) }
+    }
     if (pageImage != null) {
         // 页栅格只有版心那么大：把梯形裁到材料矩形再填 shader，页边距里就不会出现
         // 「版心最边一列被拉成一条横线」（`Clamp` 越界采样）。

@@ -225,47 +225,36 @@ class Curl3DRenderTest {
      * 的几何倒着走。镜像几何会让纸挂到右缘、看起来右边成了书脊（读者：「左边是书脊，不会因为
      * 要翻到上一页，右边就变成书脊了」）。
      *
-     * 折痕位置与斜率必须和上一页原来的手势一致：进度取 `1-p` 后折痕仍在 `w·p`，倾斜取反
-     * 抵消几何侧的镜像。只有「被翻的那张纸」和「露出页」换位。
+     * 折痕本身**与翻页方向无关**：同一个手指轨迹、同一个折痕位置，两个方向的折痕是同一根线
+     * （都垂直于手指轨迹）。只有「被翻的那张纸」和「露出页」换位。早先这里对上一页取反倾斜，
+     * 读者实测「同样在右侧翻下页和翻上页，页边旋转方向相反，翻上页不顺手」——那正是取反的锅。
      */
     @Test
     fun previousPageKeepsTheSpineOnTheLeft() {
         val w = 400f
         val h = 600f
         val tilt = 0.35f
-        for (p in listOf(0.1f, 0.45f, 0.9f)) {
+        for (p in listOf(0.1f, 0.2f, 0.45f, 0.9f)) {
             val next = curlFrame(w, h, p, direction = 1, tilt = tilt)
             assertFalse("下一页翻的是当前页", next.turningIsTarget)
             assertEquals("下一页的几何", 1, next.shape.direction)
             assertEquals(p, next.shape.progress, 1e-6f)
 
-            val prev = curlFrame(w, h, p, direction = -1, tilt = tilt)
+            // 同一个折痕位置对应的上一页手势进度是 `1-p`（折痕在 `w·(1-p)`，两方向相同）。
+            val prev = curlFrame(w, h, 1f - p, direction = -1, tilt = tilt)
             assertTrue("上一页翻的是上一页那张纸", prev.turningIsTarget)
             assertEquals("上一页的卷曲几何也必须朝左书脊那一侧", 1, prev.shape.direction)
-            assertEquals("上一页是同一套几何倒着走", 1f - p, prev.shape.progress, 1e-6f)
-            assertEquals("折痕仍按手势扫到 w·p", w * p, prev.shape.foldX, 1e-3f)
+            assertEquals("上一页是同一套几何倒着走", p, prev.shape.progress, 1e-6f)
 
-            // 折痕位置与倾斜本该和「同一手势的低层镜像几何」逐点一致（只换卷曲侧，不镜像
-            // 手势）。但**书脊约束是单侧的**：装订边在屏幕左侧，折痕贴着书脊那一端会按
-            // 屏幕侧的约束收直，镜像几何（装订边在右）没有这条约束。所以只在约束没触发
-            // 的中段逐点对比，两端改为验证屏幕几何确实被挡在左书脊这一侧。
-            val old = curlShape(w, h, p, direction = -1, tilt = tilt)
-            val bothFree = kotlin.math.abs(tilt) * (w * CURL_TILT_WIDTH) <=
-                kotlin.math.min(old.foldX, w - old.foldX)
-            if (bothFree) {
-                assertEquals(old.topX, prev.shape.topX, 1e-3f)
-                assertEquals(old.bottomX, prev.shape.bottomX, 1e-3f)
-                assertEquals(old.lean, prev.shape.lean, 1e-6f)
-            }
+            // 折痕这条线两个方向逐点相同：位置、斜率、两端横坐标、影的浓淡都不许跟方向走。
+            assertEquals("折痕位置", next.shape.foldX, prev.shape.foldX, 1e-3f)
+            assertEquals("折痕斜率", next.shape.lean, prev.shape.lean, 1e-6f)
+            assertEquals("折痕上端", next.shape.topX, prev.shape.topX, 1e-3f)
+            assertEquals("折痕下端", next.shape.bottomX, prev.shape.bottomX, 1e-3f)
+            assertEquals("影的浓淡", next.shape.shadowFade, prev.shape.shadowFade, 1e-6f)
             assertTrue(
                 "上一页几何的折痕也不许越过左书脊：${prev.shape.topX} / ${prev.shape.bottomX}",
                 prev.shape.topX >= 0f && prev.shape.bottomX >= 0f,
-            )
-            // 末段扶正对称：1-p 后的淡出系数与 p 相同。
-            assertEquals(
-                tailFade(p),
-                curlFrame(w, h, p, direction = -1, tilt = tilt).shape.shadowFade,
-                1e-6f,
             )
         }
     }

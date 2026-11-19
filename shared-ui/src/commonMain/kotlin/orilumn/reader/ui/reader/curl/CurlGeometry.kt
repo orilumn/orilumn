@@ -406,8 +406,10 @@ internal fun CurlShape.fullyTurned(): Boolean = !anchored && progress >= 1f
  * - **上一页**：上一页（目标页）是卷回来的那张，当前页留在右边被它盖住。
  *
  * 上一页不是把下一页的几何左右镜像（那样书脊会跑到右边），而是**同一套几何倒着走**：
- * 进度取 `1-p`，折痕因此仍在 `w·p`；倾斜取反抵消 `direction` 的镜像，折痕斜率与
- * 原来的上一页手势一致。再由 [turningIsTarget] 把正面/露出页两张图换位。
+ * 进度取 `1-p`，折痕因此仍在 `w·p`；倾斜**原样带过去，不取反**——折痕垂直于手指轨迹
+ * 这件事与翻的是哪张纸无关，同一根手指、同一个折痕位置本来就该是同一根线（取反会让两个
+ * 方向的纸边朝相反方向转，读者报的「同样在右侧翻上页翻下页，页边旋转方向相反」）。
+ * 再由 [turningIsTarget] 把正面/露出页两张图换位。
  */
 internal data class CurlFrame(
     val shape: CurlShape,
@@ -432,7 +434,8 @@ internal fun curlFrame(
             pageH = pageH,
             progress = if (back) 1f - progress else progress,
             direction = 1,
-            tilt = if (back) -tilt else tilt,
+            // 倾斜原样带过去：两个方向共用同一根折痕（见 [CurlFrame]）。
+            tilt = tilt,
             // 两个方向都跟手：锚点由**起手位置**定（右半边 = 纸边、左半边 = 折痕，
             // 见 [CurlAnchor]），与翻页方向无关，拖动中也不重判。
             pull = pull,

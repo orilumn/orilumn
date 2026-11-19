@@ -24,6 +24,7 @@ import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.LayoutDirection
+import orilumn.reader.ui.reader.drawRasterCached
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.atan2
@@ -1069,8 +1070,8 @@ private fun DrawScope.drawPage(
     alpha: Float = 1f,
 ) {
     drawRect(paper, size = pageSize, alpha = alpha)
-    images.page?.let { drawImage(it, topLeft = Offset(texLeft, texTop), alpha = alpha) }
-    images.overlay?.let { drawImage(it, topLeft = Offset.Zero, alpha = alpha) }
+    images.page?.let { drawRasterCached(images.pageRaster, it, Offset(texLeft, texTop), alpha) }
+    images.overlay?.let { drawRasterCached(images.overlayRaster, it, Offset.Zero, alpha) }
 }
 
 /**

@@ -3,7 +3,9 @@ package orilumn.reader.ui.reader
 import androidx.compose.foundation.Canvas
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.key
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.text.TextMeasurer
 import kotlin.math.roundToInt
@@ -83,6 +85,9 @@ internal fun ReaderPageCanvas(
 ) {
     val localRenderer = rememberReaderPageRenderer()
     val renderer = renderer ?: localRenderer
+    // 覆盖层贴图的画柄缓存：翻页动画一帧重画一次，桌面每帧重建纹理的代价见 [RasterDrawCache]。
+    // 放在 key(contentRevision) 之外，图换了由缓存自己按实例判废。
+    val overlayRaster = remember { RasterDrawCache() }
     // 修订号版本化：只包画布发射器（渲染器实例保留在 key 之外，Android 离屏
     // surface 不重建、其页缓存另经 contentRevision 显式失效，见各 actual）。
     key(contentRevision) {
@@ -167,7 +172,7 @@ internal fun ReaderPageCanvas(
         } else {
             null
         }
-        if (overlayImage != null) drawImage(overlayImage)
+        if (overlayImage != null) drawRasterCached(overlayRaster, overlayImage, Offset.Zero)
         onImages?.invoke(pageImage, overlayImage)
     }
     }

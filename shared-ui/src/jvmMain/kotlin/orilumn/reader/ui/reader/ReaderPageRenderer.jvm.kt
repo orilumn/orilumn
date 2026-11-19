@@ -34,10 +34,31 @@ import org.jetbrains.skia.Image as SkiaImage
 @Composable
 actual fun rememberReaderPageRenderer(): ReaderPageRenderer = remember { JvmReaderPageRenderer() }
 
+/**
+ * 同一张 skia Image 的 Compose 包装只建一次（最近 8 张，够覆盖翻页两页 + 预栅格的邻页）。
+ *
+ * `toComposeImageBitmap()` 每次都新建一个 `SkiaBackedImage` **包装**（像素同一份，实例不同）。
+ * 而翻页动画层判「图换没换」是按**实例**来的（贴图缓存、纹理画笔都以实例为准），包装每帧
+ * 新建就等于「每帧换了一张图」：贴图缓存每帧失效、整页纹理每帧重建 —— 这正是桌面卷曲
+ * 卡在 20～40fps 的那个坑。这里把包装与 skia Image 绑定，实例就稳定了。
+ *
+ * 只持最近 8 张：页图被池淘汰时 `close()` 已经释放像素，这里的包装不会把像素留住。
+ */
+private val wrapperRing = arrayOfNulls<Pair<SkiaImage, ImageBitmap>>(8)
+private var wrapperRingNext = 0
+
 /** skia Image → Compose [ImageBitmap]（Desktop actual，零拷贝 backing）。 */
 actual fun skiaImageToImageBitmap(image: SkiaImage): ImageBitmap? = runCatching {
     if (image.width <= 0 || image.height <= 0) return@runCatching null
-    image.toComposeImageBitmap()
+    synchronized(wrapperRing) {
+        for (w in wrapperRing) {
+            if (w != null && w.first === image) return@synchronized w.second
+        }
+        val fresh = image.toComposeImageBitmap()
+        wrapperRing[wrapperRingNext] = image to fresh
+        wrapperRingNext = (wrapperRingNext + 1) % wrapperRing.size
+        fresh
+    }
 }.getOrNull()
 
 /** 页位图缓存预算（字节）：约 8 页（桌面窗口更大，单页动辄 8MB+）。 */
@@ -93,12 +114,15 @@ private class JvmReaderPageRenderer : ReaderPageRenderer {
             Logger.w("Orilumn.Desktop", "page-raster FAILED n=${lines.size} imgs=${images.size}")
             return null
         }
-        val (pages, bytes) = store.stats()
-        Logger.w(
-            "Orilumn.Desktop",
-            "page-raster n=${lines.size} imgs=${images.size} ${r.value.width}x${r.value.height} " +
-                "${r.rasterMs}ms hit=${r.cacheHit} pool=$pages/${bytes / 1024 / 1024}MB",
-        )
+        // 只在真的栅格化时记一条：命中是每帧都发生的显示路径，逐帧写盘本身就是帧时间的一部分。
+        if (!r.cacheHit) {
+            val (pages, bytes) = store.stats()
+            Logger.w(
+                "Orilumn.Desktop",
+                "page-raster n=${lines.size} imgs=${images.size} ${r.value.width}x${r.value.height} " +
+                    "${r.rasterMs}ms hit=false pool=$pages/${bytes / 1024 / 1024}MB",
+            )
+        }
         // 贴回内容区。栅格缩放 = 1 时是 1:1（坐标取整避免亚像素抖动，保持与旧路径逐像素一致）；
         // 小于 1（代理位图）时按内容区放大，LINEAR 采样避免锯齿。
         val img = r.value

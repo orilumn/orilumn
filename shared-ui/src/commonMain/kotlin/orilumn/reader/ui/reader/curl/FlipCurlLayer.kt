@@ -13,6 +13,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.ImageBitmap
 import orilumn.reader.io.Logger
+import orilumn.reader.ui.reader.RasterDrawCache
 
 /** 3D 卷曲总开关：关掉只用于排查（退回 2D 折页）。 */
 private const val USE_CURL3D: Boolean = true
@@ -37,6 +38,12 @@ class CurlPageImages {
 
     /** 纹理画笔缓存（`ImageShader` 只跟图有关，见 [CurlTextureCache]）。 */
     internal val textures: CurlTextureCache = CurlTextureCache()
+
+    /** 整页贴图缓存（桌面每帧重建纹理的代价见 [RasterDrawCache]）。 */
+    internal val pageRaster: RasterDrawCache = RasterDrawCache()
+
+    /** 覆盖层（旁注 + 页码）贴图缓存，同上。 */
+    internal val overlayRaster: RasterDrawCache = RasterDrawCache()
 }
 
 /**

@@ -8,6 +8,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.withTransform
+import orilumn.reader.ui.reader.drawRasterCached
 import kotlin.math.PI
 import kotlin.math.atan2
 import kotlin.math.hypot
@@ -98,7 +99,7 @@ internal fun DrawScope.drawCurlFrame(
             // 纸背的内容是正面的镜像，压到 39% 才是「纸的背面」而不是「另一张正面」。
             // 覆盖层（旁注 / 页码）**不进纸背**：那是读者层的浮层，不是印在纸上的东西。
             front.page?.let {
-                drawImage(it, topLeft = Offset(frontTex.x, frontTex.y), alpha = BACK_CONTENT_ALPHA)
+                drawRasterCached(front.pageRaster, it, Offset(frontTex.x, frontTex.y), BACK_CONTENT_ALPHA)
             }
         }
     }
@@ -124,8 +125,8 @@ private fun DrawScope.drawWholePage(
     alpha: Float = 1f,
 ) {
     drawRect(paper, size = pageSize, alpha = alpha)
-    images.page?.let { drawImage(it, topLeft = Offset(texLeft, texTop), alpha = alpha) }
-    images.overlay?.let { drawImage(it, topLeft = Offset.Zero, alpha = alpha) }
+    images.page?.let { drawRasterCached(images.pageRaster, it, Offset(texLeft, texTop), alpha) }
+    images.overlay?.let { drawRasterCached(images.overlayRaster, it, Offset.Zero, alpha) }
 }
 
 /**

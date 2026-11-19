@@ -56,9 +56,7 @@ data class BookSettings(
     val fontCode: String? = null,
     /** L2 用户自定义样式表开关（本书私有，影响本书的样式层叠；当前无消费者）。 */
     val useUserScripts: Boolean? = null,
-    /** Page-turn animation (smooth swipe). */
-    val pageAnim: Boolean? = null,
-    /** Page-turn animation mode: "slide" | "curl" */
+    /** 翻页模式：`"none"` | `"slide"` | `"curl"`（`null` = 跟全局）。 */
     val pageAnimationMode: String? = null,
     /** Body first-screen cover stretch: true=stretch to fill the whole screen; false=keep aspect ratio with margins, no stretch. */
     val coverStretch: Boolean? = null,
@@ -142,8 +140,14 @@ data class BookSettings(
                     fontTitle = if (o.containsKey("fontTitle")) SettingsJson.optString(o, "fontTitle", "") else null,
                     fontCode = if (o.containsKey("fontCode")) SettingsJson.optString(o, "fontCode", "") else null,
                     useUserScripts = if (o.containsKey("useUserScripts")) SettingsJson.optBoolean(o, "useUserScripts", false) else null,
-                    pageAnim = if (o.containsKey("pageAnim")) SettingsJson.optBoolean(o, "pageAnim", false) else null,
-                    pageAnimationMode = if (o.containsKey("pageAnimationMode")) SettingsJson.optString(o, "pageAnimationMode", "") else null,
+                    // 旧档的「翻页动画」开关（本书私有）迁进模式：关掉 ⇒ 本书「无动画」；
+                    // 打开但没存过模式 ⇒ 本书「滑动」（当年开关只会把动画开回来）。
+                    pageAnimationMode = when {
+                        o.containsKey("pageAnim") && !SettingsJson.optBoolean(o, "pageAnim", true) -> "none"
+                        o.containsKey("pageAnimationMode") -> SettingsJson.optString(o, "pageAnimationMode", "")
+                        o.containsKey("pageAnim") -> "slide"
+                        else -> null
+                    },
                     coverStretch = if (o.containsKey("coverStretch")) SettingsJson.optBoolean(o, "coverStretch", false)
                     else if (o.containsKey("coverProportional")) !SettingsJson.optBoolean(o, "coverProportional", false) else null,
                     fontWeightAnchors = if (o.containsKey("fontWeightAnchors")) SettingsJson.optWeightAnchors(o, "fontWeightAnchors") else null,
@@ -181,7 +185,6 @@ data class BookSettings(
             fontTitle = rs.fontTitle,
             fontCode = rs.fontCode,
             useUserScripts = rs.useUserScripts,
-            pageAnim = rs.pageAnim,
             pageAnimationMode = rs.pageAnimationMode,
             coverStretch = rs.coverStretch,
             fontWeightAnchors = rs.fontWeightAnchors,

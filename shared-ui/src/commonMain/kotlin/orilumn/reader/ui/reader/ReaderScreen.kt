@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -53,6 +54,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -75,16 +77,20 @@ import orilumn.reader.engine.revision.tableRowsOfRevision
 import orilumn.reader.engine.skia.LineWindowDrawer
 import orilumn.reader.engine.text.TypographicProfile
 import orilumn.reader.io.Logger
+import orilumn.reader.ui.reader.curl.CurlPageImages
+import orilumn.reader.ui.reader.curl.FlipCurlLayer
 import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.hypot
 import kotlin.math.roundToInt
 import kotlin.time.TimeSource
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -265,8 +271,13 @@ fun ReaderScreen(
     // controller 需要 flipAwait / markPositionChanged（声明在下方），Kotlin 局部函数
     // 不可前向引用，故用可空占位 + 下方回填；回填发生在首次组合内、任何手势之前。
     var flipCtl by remember { mutableStateOf<FlipController?>(null) }
-    // L1 只在「动画总闸开 + 模式为 slide」时生效；curl 暂落 L0（P3 接 3D）。
-    val slideEnabled = light.pageAnim && light.pageAnimationMode == "slide"
+    // 动画总闸：任何模式都走同一套翻页状态机（手势 / 结算 / 落位）。
+    // 具体画哪一档（滑动 / 卷曲）由渲染层二选一，状态机不区分；「无动画」= 不走动画，
+    // 点按与手势直接落到目标页。
+    val slideEnabled = light.pageAnimationMode != "none"
+    // 折页档：模式 = curl。折页是纯 Compose 画布（多边形裁切 + 渐变），不再依赖 GPU 着色器，
+    // 因此**全平台可用**，不需要平台能力判定。
+    val curlEnabled = light.pageAnimationMode == "curl"
 
     val scope = rememberCoroutineScope()
     // 锚页事件串行漏斗：显示状态的唯一写入通道（见 AnchorFunnel）。所有改锚页位置的动作
@@ -894,6 +905,25 @@ fun ReaderScreen(
 
     /** 拖动中：喂位移。目标页未就绪时只喂状态机、不写回渲染（避免拉出空白页）。 */
     fun updateSlide(dx: Float, pageW: Float) = ctl.updateDrag(dx, pageW, slideEnabled)
+
+    /**
+     * 拖动中：喂卷曲手感的**起点与终点**（手指此刻的绝对页坐标）。
+     *
+     * 只给一条入口：折痕角度与折痕位置是同一个事实的两面——都从「手指相对起手点的位移」
+     * 反解（角度 = 拖动方向的垂线；位置看**起手在屏幕哪半边**：右半边纸边压手指、左半边
+     * 折痕穿手指，见 `curl/CurlPull` / `curl/leanOf` / `curl/anchoredFoldX` / `curl/creaseFoldX`）。
+     * 滑动层不看它。
+     */
+    fun updateCurlPull(
+        downX: Float,
+        downY: Float,
+        x: Float,
+        y: Float,
+        pageW: Float,
+        pageH: Float,
+    ) {
+        if (slideEnabled) ctl.updateCurlPull(downX, downY, x, y, pageW, pageH)
+    }
 
     /** 松手：裁决 → 结算。 */
     fun endSlide(velocityX: Float = 0f, pageW: Float = 0f) =
@@ -1754,6 +1784,10 @@ fun ReaderScreen(
     val currentSlideEnabled by rememberUpdatedState(slideEnabled)
     val currentBeginSlide by rememberUpdatedState<(Int) -> Unit> { beginSlide(it) }
     val currentUpdateSlide by rememberUpdatedState<(Float, Float) -> Unit> { dx, w -> updateSlide(dx, w) }
+    val currentUpdateCurlPull by rememberUpdatedState<(Float, Float, Float, Float, Float, Float) -> Unit> {
+            downX, downY, x, y, w, h ->
+        updateCurlPull(downX, downY, x, y, w, h)
+    }
     val currentEndSlide by rememberUpdatedState<(Float, Float) -> Unit> { vx, w -> endSlide(vx, w) }
     // 点按/方向键翻页同样走动画，必须经引用读：否则设置里刚打开「翻页动画」，
     // 键盘那侧还按旧的瞬切走（与 pointerInput 的坑同源，见上方注释）。
@@ -3254,6 +3288,17 @@ fun ReaderScreen(
                                         currentBeginSlide(dragDir)
                                     }
                                     currentUpdateSlide(dx, size.width.toFloat())
+                                    // 卷曲手感：起手点 + 手指的**绝对页坐标**。折痕角度取拖动
+                                    // 方向的垂线，折痕位置由起手所在半边的锚点反解（右半边
+                                    // 纸边压手指、左半边折痕穿手指，见 curl/CurlPull）。
+                                    currentUpdateCurlPull(
+                                        downX,
+                                        downY,
+                                        downX + dx,
+                                        downY + dy,
+                                        size.width.toFloat(),
+                                        size.height.toFloat(),
+                                    )
                                     if (tMove == 0L) tMove = System.nanoTime()
                                 }
                             }
@@ -3363,6 +3408,27 @@ fun ReaderScreen(
         val contentTop = profile.marginTop.toFloat()
         val contentRight = (pxWidth - profile.marginRight).coerceAtLeast(contentLeft)
         val contentBottom = (pxHeight - profile.marginBottom).coerceAtLeast(contentTop)
+
+        // 封面也算「一页纸」：卷曲层要的是页大小的纹理，而封面是纯组合件（没有页栅格），
+        // 所以按封面页同一套画法烤一张整页位图交给它（见 [bakeCoverPageBitmap]）。
+        // 只在可能翻到封面的位置烤（停在书首 / 封面正显示），离开书首就放掉，不常驻一张整页图。
+        val coverImages = remember { CurlPageImages() }
+        // 正文页栅格在页坐标里的左上角（版心）；覆盖层恒为整页、贴 (0,0)。
+        val bodyTex = Offset(contentLeft, contentTop)
+        val coverTexNeeded = coverBmp != null && (coverVisible || isBookStart(openPos))
+        LaunchedEffect(coverTexNeeded, coverBmp, pxWidth, pxHeight, light.coverStretch, profile.bgColor) {
+            val src = coverBmp
+            if (!coverTexNeeded || src == null) {
+                coverImages.page = null
+                return@LaunchedEffect
+            }
+            val w = pxWidth.roundToInt()
+            val h = pxHeight.roundToInt()
+            // 烤图不占主线程（一张整页位图的内存搬运没必要卡动画起手那一帧）。
+            coverImages.page = withContext(Dispatchers.Default) {
+                bakeCoverPageBitmap(src, w, h, proportional = !light.coverStretch, bgArgb = profile.bgColor)
+            }
+        }
 
         // 键盘入口（内层盒载焦点）：左右箭头翻页，Esc 等效中部点按。
         Box(
@@ -3667,29 +3733,6 @@ fun ReaderScreen(
                 maxShiftPxState = maxShiftPx
             }
 
-            // 画布本体（当前页 / 目标页同形，只是位移不同）。
-            val PageCanvasFun: @Composable (PageContent?) -> Unit = { content ->
-                ReaderPageCanvas(
-                    content = content,
-                    contentLeft = contentLeft,
-                    contentTop = contentTop,
-                    contentRectLeft = contentLeft,
-                    contentRectTop = contentTop,
-                    contentRectRight = contentRight,
-                    contentRectBottom = contentBottom,
-                    pageBg = profile.bgColor,
-                    inkColor = profile.fgColor,
-                    modifier = Modifier.fillMaxSize(),
-                    // 字重这类纯字形变更行数据完全相等，靠修订号强制重画（见 ReaderPageCanvas）。
-                    // 显示闸后的版本号：外部落位在途时冻结，避免「新参数 × 旧落位」多画一帧。
-                    contentRevision = displayRevision,
-                    // 第 1 档「渲染」半边的抢占钩子：未命中真正栅格化时，让后台预排让路
-                    // （总则第 1 条 + 线程调度原则 §5「唯一钩子」；翻页那半边早已接上）。
-                    onMiss = onRasterMiss,
-                    // 双页共用一个渲染器 ⇒ 共用一个多页位图池（见 ReaderPageCanvas.renderer）。
-                    renderer = pageRenderer,
-                )
-            }
             // P1 L1：滑动层**始终在场**，且**只有一个调用点**——早先按 targetContent 有无
             // 分成两个 `FlipSlideLayer` 调用点，起手/落位/收尾之间来回切，等于每轮都把
             // `ReaderPageCanvas` 里 remember 的渲染器（多页位图缓存宿主）连池丢弃重建，
@@ -3787,31 +3830,6 @@ fun ReaderScreen(
                 decorRevision = annotationState.revision,
                 notesReady = annotationState.isReady(targetPosNow?.chapter ?: fromPos.chapter),
             )
-            val NoteBubblesFun: @Composable (List<NoteBubble>) -> Unit = { bubbles ->
-                if (bubbles.isNotEmpty()) {
-                    NoteBubbles(
-                        bubbles = bubbles,
-                        fgColor = Color(profile.fgColor),
-                        pageBgColor = profile.bgColor,
-                        onOpen = { id ->
-                            // 点旁注 = 打开这条标注的操作栏与输入框（有文字就带出来，可改可删）。
-                            // 翻页动画进行中不响应（旁注现在跟着页走，滑动的页面上点一下不该弹编辑态）。
-                            // 选区恢复成这条标注的范围：编辑时两端手柄仍在，可以直接改范围。
-                            val target = annotationState.annotationsFor(fromPos.chapter)
-                                ?.firstOrNull { it.id == id }
-                            if (target != null && !ctl.isBusy()) {
-                                openAnnotationEdit(target)
-                            }
-                        },
-                        modifier = Modifier.fillMaxSize(),
-                        fontFamily = noteFontFamily,
-                        fontWeight = noteFontWeight,
-                        showBorder = settings.noteBorder,
-                        showBackground = settings.noteBackground,
-                        textSameColor = settings.noteTextSameColor,
-                    )
-                }
-            }
             // 全书页码（用户层「显示页码」）：引擎在章分页未就绪时给 null → 页脚留白。
             // 代际 `pageNumberRevision()` 是宿主里的 Compose 快照状态：后台把各章页数补齐、
             // 或本章正典表刚落时它一变，读者静置不翻页也能让页码自己出现（不读就订阅不到）。
@@ -3826,17 +3844,105 @@ fun ReaderScreen(
                     null
                 }
             }
-            val PageNumberFun: @Composable (BookPageNumber?) -> Unit = { number ->
-                PageNumberLabel(
-                    number = number,
-                    contentBottomPx = contentBottom,
-                    pageHeightPx = pxHeight,
-                    bodyFontPx = profile.bodyPx,
-                    inkColor = Color(profile.fgColor),
-                    // 右下角：右沿对齐正文右沿（页宽 - 版心右沿），不贴屏幕边。
-                    endInsetPx = (pxWidth - contentRight).coerceAtLeast(0f),
+            // ---- 覆盖层（旁注 + 页码）：与页栅格分两张图，见 `PageOverlay.kt` ----
+            // 页码几何：与旧 `PageNumberLabel` 同一套规格（只是产出数据、不产出 Composable）。
+            // 右下角：右沿对齐正文右沿（页宽 - 版心右沿），不贴屏幕边。
+            val pageNumEndInset = (pxWidth - contentRight).coerceAtLeast(0f)
+            val fromPageNumberSpec = pageNumberLayoutOf(
+                index = fromPageNumber?.index,
+                pageHeightPx = pxHeight,
+                contentBottomPx = contentBottom,
+                bodyFontPx = profile.bodyPx,
+                inkArgb = profile.fgColor,
+                endInsetPx = pageNumEndInset,
+            )
+            val targetPageNumberSpec = pageNumberLayoutOf(
+                index = targetPageNumber?.index,
+                pageHeightPx = pxHeight,
+                contentBottomPx = contentBottom,
+                bodyFontPx = profile.bodyPx,
+                inkArgb = profile.fgColor,
+                endInsetPx = pageNumEndInset,
+            )
+            // 覆盖层样式：墨色/底色/字体/三个开关。基础样式取 `LocalTextStyle`——布点用的是
+            // 同一份基础样式量出来的尺子，画字必须同源，否则折行/省略号会漂。
+            val overlayBaseStyle = LocalTextStyle.current
+            val overlayStyle = PageOverlayStyle(
+                fgArgb = profile.fgColor,
+                pageBgArgb = profile.bgColor,
+                baseStyle = overlayBaseStyle,
+                fontFamily = noteFontFamily,
+                fontWeight = noteFontWeight,
+                showBorder = settings.noteBorder,
+                showBackground = settings.noteBackground,
+                textSameColor = settings.noteTextSameColor,
+            )
+            val fromOverlay = PageOverlayContent(
+                notes = noteBubbles,
+                style = overlayStyle,
+                pageNumber = fromPageNumberSpec,
+            )
+            val targetOverlay = PageOverlayContent(
+                notes = targetNoteBubbles,
+                style = overlayStyle,
+                pageNumber = targetPageNumberSpec,
+            )
+            // 覆盖层栅格缓存 + 页槽纹理：两个槽各一份（见 `PageOverlayLayer` / `CurlPageImages`）。
+            val fromOverlayLayer = rememberPageOverlayLayer()
+            val targetOverlayLayer = rememberPageOverlayLayer()
+            val currentImages = remember { CurlPageImages() }
+            val targetImages = remember { CurlPageImages() }
+            val overlayMeasurer = rememberTextMeasurer()
+            // 画布本体（当前页 / 目标页同形，只是位移不同）：页栅格 + 覆盖层一次画完，
+            // 顺手把两张图发布给卷曲层当纹理（屏幕上的像素与卷曲纹理是同一份）。
+            val PageCanvasFun: @Composable (
+                PageContent?,
+                PageOverlayContent,
+                PageOverlayLayer,
+                CurlPageImages,
+            ) -> Unit = { content, overlayContent, overlayLayer, images ->
+                ReaderPageCanvas(
+                    content = content,
+                    contentLeft = contentLeft,
+                    contentTop = contentTop,
+                    contentRectLeft = contentLeft,
+                    contentRectTop = contentTop,
+                    contentRectRight = contentRight,
+                    contentRectBottom = contentBottom,
+                    pageBg = profile.bgColor,
+                    inkColor = profile.fgColor,
+                    modifier = Modifier.fillMaxSize(),
+                    // 字重这类纯字形变更行数据完全相等，靠修订号强制重画（见 ReaderPageCanvas）。
+                    // 显示闸后的版本号：外部落位在途时冻结，避免「新参数 × 旧落位」多画一帧。
+                    contentRevision = displayRevision,
+                    // 第 1 档「渲染」半边的抢占钩子：未命中真正栅格化时，让后台预排让路
+                    // （总则第 1 条 + 线程调度原则 §5「唯一钩子」；翻页那半边早已接上）。
+                    onMiss = onRasterMiss,
+                    // 双页共用一个渲染器 ⇒ 共用一个多页位图池（见 ReaderPageCanvas.renderer）。
+                    renderer = pageRenderer,
+                    overlay = overlayContent,
+                    overlayLayer = overlayLayer,
+                    // 旁注在左右留白、页码在下边距：都在版心外，覆盖层必须是整页大小。
+                    overlayWidthPx = pxWidth.toInt(),
+                    overlayHeightPx = pxHeight.toInt(),
+                    overlayTextMeasurer = overlayMeasurer,
+                    onImages = { pageImage, overlayImage ->
+                        images.page = pageImage
+                        images.overlay = overlayImage
+                    },
                 )
             }
+            // 点旁注 = 打开这条标注的操作栏与输入框（有文字就带出来，可改可删）。
+            // 翻页动画进行中不响应（旁注跟着页走，滑动/卷曲的页面上点一下不该弹编辑态）。
+            // 选区恢复成这条标注的范围：编辑时两端手柄仍在，可以直接改范围。
+            val openNote: (Long) -> Unit = { id ->
+                val target = annotationState.annotationsFor(fromPos.chapter)
+                    ?.firstOrNull { it.id == id }
+                if (target != null && !ctl.isBusy()) {
+                    openAnnotationEdit(target)
+                }
+            }
+
             // 卡片让位：整层（页画布 + 选区 + 旁注 + 放大镜）一起上推，顶部超出屏幕的部分直接截断。
             // 放在同一个 `graphicsLayer` 里 ⇒ 子层之间的相对位置不变，不可能出现「页动了字没动」。
             // 下拉书签的让位量也并进这一层：整页（含旁注/页码/选区）一起下移，松手弹簧归位。
@@ -3848,38 +3954,84 @@ fun ReaderScreen(
                     }
                     .background(Color(profile.bgColor)),
             ) {
-            FlipSlideLayer(
-                direction = ctl.direction.value,
-                // **不要在这里读 ctl.progress.value**：一旦在组合里读，动画每帧都会让整个
-                // 阅读面重组、两个画布每帧重走 drawLines（见 FlipSlideLayer KDoc）。
-                // 传闭包，让 progress 只在 graphicsLayer 的 draw 相位被读。
-                progress = { if (ctl.slideActive(slideEnabled)) ctl.progress.value else 0f },
-                pageWidthPx = pxWidth,
-                modifier = Modifier.fillMaxSize(),
-                target = when {
-                    slideToCover && coverComposable != null -> coverComposable
-                    targetContent != null -> {
-                        {
-                            PageCanvasFun(targetContent)
-                            // 旁注和目标页同一个槽 ⇒ 同一个平移量，跟着一起滑进来。
-                            NoteBubblesFun(targetNoteBubbles)
-                            // 页码也跟页走：目标页的号随页滑进来，落地即接上。
-                            PageNumberFun(targetPageNumber)
-                        }
-                    }
-                    else -> null
-                },
-                current = if (slideFromCover && coverComposable != null) {
-                    coverComposable
-                } else {
+            // 两页槽（页栅格 + 覆盖层）：滑动与卷曲共用同一批内容，只是搬运方式不同——
+            // 滑动整槽平移（槽里的东西天然一起动）；卷曲把槽画出来的两张图当纹理按曲面弯
+            // （见 FlipCurlLayer）。旁注与页码的**像素**在覆盖层栅格里，槽里只剩它们的透明热区。
+            val currentSlot: @Composable () -> Unit = if (slideFromCover && coverComposable != null) {
+                coverComposable
+            } else {
+                {
+                    PageCanvasFun(pageContent, fromOverlay, fromOverlayLayer, currentImages)
+                    // 旁注和当前页同一个槽 ⇒ 一起滑出去，不会先「原地消失」再动画。
+                    NoteBubbleHitAreas(
+                        bubbles = noteBubbles,
+                        onOpen = openNote,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+            }
+            val targetSlot: (@Composable () -> Unit)? = when {
+                slideToCover && coverComposable != null -> coverComposable
+                targetContent != null -> {
                     {
-                        PageCanvasFun(pageContent)
-                        // 旁注和当前页同一个槽 ⇒ 一起滑出去，不会先「原地消失」再动画。
-                        NoteBubblesFun(noteBubbles)
-                        PageNumberFun(fromPageNumber)
+                        PageCanvasFun(targetContent, targetOverlay, targetOverlayLayer, targetImages)
+                        // 旁注和目标页同一个槽 ⇒ 同一个平移量，跟着一起滑进来。
+                        NoteBubbleHitAreas(
+                            bubbles = targetNoteBubbles,
+                            onOpen = openNote,
+                            modifier = Modifier.fillMaxSize(),
+                        )
                     }
-                },
-            )
+                }
+                else -> null
+            }
+            // 封面也算一页纸：离开/进入封面时，卷曲层的那一槽换成封面烤图（纹理贴页角）。
+            // 封面纹理还没就绪就退回滑动（宁可换一种翻法，不闪一帧空页）。
+            val coverSession = slideFromCover || slideToCover
+            val curlNow = curlEnabled && (coverSession || !coverVisible) &&
+                (!coverSession || coverImages.page != null)
+            if (curlNow) {
+                FlipCurlLayer(
+                    // 方向/进度/倾斜/是否在结算，全部传闭包：只在 draw 相位读 ⇒ 动画期间不重组阅读面。
+                    direction = { ctl.direction.value },
+                    progress = { if (ctl.slideActive(slideEnabled)) ctl.progress.value else 0f },
+                    lean = { ctl.curlLean.value },
+                    // 跟手拖动（起手页边点 → 手指页坐标）：非 null 时折痕改由「纸边压在手指上」
+                    // 反解，只对下一页生效、松手即清（见 FlipController.curlPull）。
+                    pull = { ctl.curlPull.value },
+                    // 只有结算动画才做末段扶正（手指跟手时形状听手指的，见 curl/CurlGeometry.kt）。
+                    pageWidthPx = pxWidth,
+                    pageHeightPx = pxHeight,
+                    active = { ctl.slideActive(slideEnabled) },
+                    paperArgb = profile.bgColor,
+                    // 纹理位置跟着页槽走：正文的页栅格在版心、覆盖层贴页角；封面烤图是整页，贴 (0,0)。
+                    currentTex = if (slideFromCover) Offset.Zero else bodyTex,
+                    targetTex = if (slideToCover) Offset.Zero else bodyTex,
+                    // 两张纹理由页槽自己发布（页栅格 + 覆盖层），缺图时页面保持不动；
+                    // 封面槽没有页栅格，用烤好的整页图顶上。
+                    current = if (slideFromCover) coverImages else currentImages,
+                    target = when {
+                        targetSlot == null -> null
+                        slideToCover -> coverImages
+                        else -> targetImages
+                    },
+                    currentSlot = currentSlot,
+                    targetSlot = targetSlot,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else {
+                FlipSlideLayer(
+                    direction = ctl.direction.value,
+                    // **不要在这里读 ctl.progress.value**：一旦在组合里读，动画每帧都会让整个
+                    // 阅读面重组、两个画布每帧重走 drawLines（见 FlipSlideLayer KDoc）。
+                    // 传闭包，让 progress 只在 graphicsLayer 的 draw 相位被读。
+                    progress = { if (ctl.slideActive(slideEnabled)) ctl.progress.value else 0f },
+                    pageWidthPx = pxWidth,
+                    modifier = Modifier.fillMaxSize(),
+                    target = targetSlot,
+                    current = currentSlot,
+                )
+            }
             // 选区覆盖层：轻量即时画，不参与页栅格；翻页动画期间隐藏，避免盖在滑动中的两页上。
             if (selection.hasSelection && pageContent != null && !coverVisible &&
                 !ctl.isBusy() && selection.chapter == fromPos.chapter

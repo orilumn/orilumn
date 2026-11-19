@@ -7417,161 +7417,48 @@ private fun TextStyle.withNoteFont(fontFamily: FontFamily?, fontWeight: FontWeig
 }
 
 /**
- * 批注文字覆盖层：箭头先画（框下），再把 [noteBubblePlacements] 的结果画在页面之上。
+ * 旁注的**命中层**（不含像素）：批注的视觉已经画进页覆盖层栅格（见 `PageOverlay.kt`），
+ * 这里只留「点得着」。
  *
- * 点文字块 = 打开这条标注的批注输入条（[onOpen]）。它盖在正文之上、亮度遮罩之下，
- * 翻页动画期间由调用方隐藏（与选区覆盖层同口径）。
+ * 为什么还要这一层：点旁注要打开批注编辑（选区恢复成那条标注的范围），热区必须与视觉
+ * 严丝合缝。让栅格出像素、让 Compose 出热区，两边共用同一份 [NoteBubble] 几何 ⇒
+ * 不可能「看得见点不着」。
+ *
+ * 小图标的视觉很小，热区照样放大（与旧覆盖层同一口径，见 [NOTE_ICON_HIT_RATIO]）。
  */
 @Composable
-internal fun NoteBubbles(
+internal fun NoteBubbleHitAreas(
     bubbles: List<NoteBubble>,
-    fgColor: Color,
-    /** 纸面底色（旁注文字最终压着的颜色）：同色字体按它的明暗决定往哪边调。 */
-    pageBgColor: Int,
     onOpen: (Long) -> Unit,
     modifier: Modifier = Modifier,
-    /** 批注字体（`null` = 跟随界面默认）：与实测尺子同一个族，见 [rememberNoteTextSizer]。 */
-    fontFamily: FontFamily? = null,
-    /** 批注字重（`null` = 不写字重，跟随字体族默认）：桌面系统族靠它选字形面，必须与尺子一致。 */
-    fontWeight: FontWeight? = null,
-    /** 批注框描边（笔记面板「显示批注边框」）。关掉后只剩文字 / 省略号，不再圈一圈。 */
-    showBorder: Boolean = true,
-    /** 批注框底色（笔记面板「显示批注背景色」）。关掉后文字直接压在正文上，不铺标注色。 */
-    showBackground: Boolean = true,
-    /** 批注文字用标注自身的颜色（笔记面板「使用标注同色字体」）；默认跟随正文墨色。 */
-    textSameColor: Boolean = false,
 ) {
     if (bubbles.isEmpty()) return
     val d = LocalDensity.current
-    // 图标三点的对比色要跟正文墨色比明暗，用整数色（见 [noteIconDotArgb]）。
-    val fgArgb = fgColor.toArgb()
     Box(modifier = modifier) {
-        // 箭头画在旁注框之下（同一覆盖层里先画线后画框，D-28）。
-        if (bubbles.any { it.arrow != null }) {
-            Canvas(modifier = Modifier.fillMaxSize()) {
-                bubbles.forEach { b ->
-                    val arrow = b.arrow ?: return@forEach
-                    drawNoteArrow(arrow, Color(b.argb).copy(alpha = 0.9f))
-                }
-            }
-        }
         bubbles.forEach { b ->
-            val tint = Color(b.argb)
             if (b.compact) {
-                // 小椭圆（§1.6）：贴着划线右端的一个固定大小记号，点它同样打开批注。
-                // 视觉很小，热区单独放大：椭圆居中，透明边距一起接手势；这种形态没有箭头。
                 val h = if (b.heightPx > 0f) b.heightPx else b.widthPx * 0.64f
-                // 底色必须是**实色**（见 [noteIconFillArgb]）：高亮色自带 45% 透明度，
-                // 照原样铺在记号上，底下的划线 / 正文会透上来，看着像「高亮压在图标上面」。
-                val fillArgb = noteIconFillArgb(pageBgColor, b.argb)
                 // 热区至少按图标自身放大 1.6 倍，读者把批注字号调到最小时手指也够得着。
                 val hit = max(b.fontPx * NOTE_ICON_HIT_RATIO, max(b.widthPx, h) * 1.6f)
-                val padLeft = (hit - b.widthPx) / 2f
-                val padTop = (hit - h) / 2f
                 Box(
                     modifier = Modifier
                         .offset {
                             IntOffset(
-                                (b.leftPx - padLeft).roundToInt(),
-                                (b.topPx - padTop).roundToInt(),
+                                (b.leftPx - (hit - b.widthPx) / 2f).roundToInt(),
+                                (b.topPx - (hit - h) / 2f).roundToInt(),
                             )
                         }
                         .size(with(d) { hit.toDp() })
                         .clickable { onOpen(b.annotationId) },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .width(with(d) { b.widthPx.toDp() })
-                            .height(with(d) { h.toDp() })
-                            .clip(RoundedCornerShape(50))
-                            // 底色是标注色的**不透明版**（见上 [fillArgb]）：记号压在正文/划线之上时
-                            // 不透出底下的字，也不用再套一圈描边。它不跟「显示批注边框 /
-                            // 显示批注背景色」两个开关走 —— 那是文字框的画法，图标是记号。
-                            .background(Color(fillArgb)),
-                    ) {
-                        Canvas(modifier = Modifier.fillMaxSize()) {
-                            // 实底色上三点得自己找对比色（浅底配正文墨色，深底配纸面底色），
-                            // 判明暗用的是合成后的底色，见 [noteIconDotArgb]。
-                            val dotColor = Color(noteIconDotArgb(fillArgb, fgArgb, pageBgColor))
-                            val dot = size.height * 0.11f
-                            val step = size.width * 0.22f
-                            for (k in -1..1) {
-                                drawCircle(
-                                    color = dotColor,
-                                    radius = dot,
-                                    center = Offset(size.width / 2f + k * step, size.height / 2f),
-                                )
-                            }
-                        }
-                    }
-                }
-                return@forEach
-            }
-            val shape = RoundedCornerShape(3.dp)
-            Box(
-                modifier = Modifier
-                    // 布局位移（不是动画）：位置只跟页面几何走，翻页时整层一起让位。
-                    .offset { IntOffset(b.leftPx.roundToInt(), b.topPx.roundToInt()) }
-                    .width(with(d) { b.widthPx.toDp() })
-                    // 高度不另设上限：`maxLines` 已经把行数封顶，而这个上限是按**名义**行高
-                    // （字号 × 1.38 = 55.15px）算的，排版却把每行高度向上取整到整像素（56px）——
-                    // 2 行要 112px、上限只给 110，于是最后一行连同省略号一起被吃掉，
-                    // 明明有空地也显示成「折了但没折完」（2026-10-29 真机定位）。
-                    .clickable { onOpen(b.annotationId) },
-            ) {
-                // 底色 / 描边单独一层，圆角裁剪只裁这一层，不裁文字：
-                // 行高（字号 × 1.38）是给排版的**名义**行距，比字体自身字高（手札体 hhea 1.4em）
-                // 还紧一点，最后一行字形的下伸部分（p / y 的尾巴、逗号）会落到行框外一两个像素。
-                // 以前底色、文字共用同一个 `clip`，这点下伸就被齐根切掉，看着像「底部被截掉一条」
-                // （2026-11-03 真机：手札体批注）。裁剪是给圆角服务的，与字无关，所以只留在这里。
-                if (showBackground || showBorder) {
-                    Box(
-                        modifier = Modifier
-                            .matchParentSize()
-                            .clip(shape)
-                            .then(
-                                if (showBackground) {
-                                    Modifier.background(tint.copy(alpha = NOTE_BUBBLE_BG_ALPHA))
-                                } else {
-                                    Modifier
-                                },
-                            )
-                            .then(
-                                if (showBorder) {
-                                    Modifier.border(1.dp, tint.copy(alpha = 0.5f), shape)
-                                } else {
-                                    Modifier
-                                },
-                            ),
-                    )
-                }
-                Text(
-                    text = b.text,
-                    color = if (textSameColor) {
-                        // 开了背景色时字压在「纸面 + 16% 标底色」上，对比度按混色后的底算才准。
-                        val backdrop = if (showBackground) {
-                            blendOver(pageBgColor, b.argb or 0xFF000000.toInt(), NOTE_BUBBLE_BG_ALPHA)
-                        } else {
-                            pageBgColor
-                        }
-                        Color(noteInkColor(b.argb, backdrop))
-                    } else {
-                        fgColor
-                    },
-                    fontFamily = fontFamily,
-                    fontWeight = fontWeight,
-                    fontSize = with(d) { b.fontPx.toSp() },
-                    lineHeight = with(d) { (b.fontPx * NOTE_BUBBLE_LINE_RATIO).toSp() },
-                    maxLines = b.maxLines,
-                    overflow = TextOverflow.Ellipsis,
-                    // 左右内缩与落位时的「整句宽度」估算同源（[NOTE_BUBBLE_PAD_RATIO]）：
-                    // 估宽留的余量就是这里真占的内缩，否则 Text 会多折一行、被省略号截掉。
-                    // 右侧单独给 [NoteBubble.padRightPx]：句末标点时借标点自带的右侧空白收窄。
-                    modifier = Modifier.padding(
-                        start = with(d) { (b.fontPx * NOTE_BUBBLE_PAD_RATIO).toDp() },
-                        end = with(d) { b.padRightPx.toDp() },
-                    ),
+                )
+            } else {
+                val h = if (b.heightPx > 0f) b.heightPx else b.maxLines * b.fontPx * NOTE_BUBBLE_LINE_RATIO
+                Box(
+                    modifier = Modifier
+                        .offset { IntOffset(b.leftPx.roundToInt(), b.topPx.roundToInt()) }
+                        .width(with(d) { b.widthPx.toDp() })
+                        .height(with(d) { h.toDp() })
+                        .clickable { onOpen(b.annotationId) },
                 )
             }
         }
@@ -7598,7 +7485,7 @@ internal fun noteArrowHead(end: Offset, tail: Offset, headPx: Float, halfPx: Flo
 }
 
 /** 箭头绘制：细线 + 小箭头，颜色取所属标注的墨色。 */
-private fun DrawScope.drawNoteArrow(arrow: NoteArrow, color: Color) {
+internal fun DrawScope.drawNoteArrow(arrow: NoteArrow, color: Color) {
     val stroke = 1.dp.toPx()
     val path = Path()
     // 箭头尖的方向：折线 / 直线取最后一段。

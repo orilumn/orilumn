@@ -117,9 +117,12 @@ data class ReaderSettings(
     val fontCode: String = "",
     /** L2 user-imported stylesheet switch (M2). */
     val useUserScripts: Boolean = false,
-    /** Page-turn animation (smooth swipe). */
-    val pageAnim: Boolean = true,
-    /** Page-turn animation mode: "slide" (smooth swipe) / "curl" (page curl). 默认「滑动」。 */
+    /**
+     * 翻页模式（设置 → 翻页模式）：`"none"` 无动画 / `"slide"` 滑动 / `"curl"` 卷曲。
+     * 默认「滑动」。
+     *
+     * 旧档只有「翻页动画」开关 + 模式两个字段，开关关掉的那份迁成 `"none"`（见 [fromJson]）。
+     */
     val pageAnimationMode: String = "slide",
     /** Auto-continue reading on open (resume at last position). */
     val autoContinue: Boolean = true,
@@ -319,7 +322,6 @@ data class ReaderSettings(
         fontTitle = overlay.fontTitle ?: fontTitle,
         fontCode = overlay.fontCode ?: fontCode,
         useUserScripts = overlay.useUserScripts ?: useUserScripts,
-        pageAnim = overlay.pageAnim ?: pageAnim,
         pageAnimationMode = overlay.pageAnimationMode ?: pageAnimationMode,
         coverStretch = overlay.coverStretch ?: coverStretch,
         fontWeightAnchors = overlay.fontWeightAnchors ?: fontWeightAnchors,
@@ -373,7 +375,6 @@ data class ReaderSettings(
         brightnessGestureRight = false,
         brightnessGestureTwo = false,
         // 纯 UI 开关族（f2571fa 起面板已走 onCommitLight，此处补桌面壳的判定侧）
-        pageAnim = false,
         pageAnimationMode = "",
         autoContinue = false,
         pageNum = false,
@@ -569,8 +570,14 @@ data class ReaderSettings(
                     fontTitle = SettingsJson.optString(o, "fontTitle", d.fontTitle),
                     fontCode = SettingsJson.optString(o, "fontCode", d.fontCode),
                     useUserScripts = SettingsJson.optBoolean(o, "useUserScripts", d.useUserScripts),
-                    pageAnim = SettingsJson.optBoolean(o, "pageAnim", d.pageAnim),
-                    pageAnimationMode = SettingsJson.optString(o, "pageAnimationMode", d.pageAnimationMode),
+                    // 旧档的「翻页动画」总开关只有开/关两态：关掉的那份迁成「无动画」，
+                    // 开着的（或从没写过这个键的）照它存的模式读。旧面板允许「关掉动画」与
+                    // 「卷曲模式」并存，那种存档按读者当时的实际观感（没有动画）迁。
+                    pageAnimationMode = if (o.containsKey("pageAnim") && !SettingsJson.optBoolean(o, "pageAnim", true)) {
+                        "none"
+                    } else {
+                        SettingsJson.optString(o, "pageAnimationMode", d.pageAnimationMode)
+                    },
                     autoContinue = SettingsJson.optBoolean(o, "autoContinue", d.autoContinue),
                     pageNum = SettingsJson.optBoolean(o, "pageNum", d.pageNum),
                     showToolbarBookmark = SettingsJson.optBoolean(o, "showToolbarBookmark", d.showToolbarBookmark),

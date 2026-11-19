@@ -69,7 +69,7 @@ private class JvmReaderPageRenderer : ReaderPageRenderer {
         contentRevision: Int,
         rasterKey: PageRasterKey?,
         onMiss: (() -> Unit)?,
-    ) {
+    ): ImageBitmap? {
         val r = store.obtain(
             key = rasterKey,
             onMiss = onMiss,
@@ -91,7 +91,7 @@ private class JvmReaderPageRenderer : ReaderPageRenderer {
         if (r == null) {
             // 栅格化是显示路径，坏了不该崩阅读（对齐 skiaImageToImageBitmap 的回退口径）。
             Logger.w("Orilumn.Desktop", "page-raster FAILED n=${lines.size} imgs=${images.size}")
-            return
+            return null
         }
         val (pages, bytes) = store.stats()
         Logger.w(
@@ -118,6 +118,7 @@ private class JvmReaderPageRenderer : ReaderPageRenderer {
                 false,
             )
         }
+        return skiaImageToImageBitmap(img)
     }
 
     /** 预栅格：与 [drawLines] 共用同一个 store，故同样限 UI 线程（见接口 KDoc）。 */

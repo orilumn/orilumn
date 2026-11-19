@@ -93,6 +93,9 @@ class ReaderThemeMathTest {
         assertEquals("原书设置", ReaderThemeMath.layoutThemeLabel("original"))
         assertEquals("卷曲", ReaderThemeMath.pageAnimationModeLabel("curl"))
         assertEquals("滑动", ReaderThemeMath.pageAnimationModeLabel("slide"))
+        assertEquals("无动画", ReaderThemeMath.pageAnimationModeLabel("none"))
+        // 老存档里残留的空串 / 未知值按默认那档显示，不能出现空白行。
+        assertEquals("滑动", ReaderThemeMath.pageAnimationModeLabel(""))
     }
 
     @Test

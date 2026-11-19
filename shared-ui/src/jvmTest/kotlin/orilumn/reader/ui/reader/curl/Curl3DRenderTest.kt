@@ -65,6 +65,24 @@ class Curl3DRenderTest {
         return img
     }
 
+    /**
+     * 生产路径的**完整**画法：3D 交不出网格时退回 2D 折页（与 `FlipCurlLayer` 同序）。
+     *
+     * 起手那一帧（折痕还在静止位置）3D 没有可掀起的材料，走的就是这条退路——判据要看
+     * 「读者实际看到的那一帧」，不能只锁 3D 分支。
+     */
+    private fun renderLikeLayer(shape: CurlShape, front: ImageBitmap, back: ImageBitmap): ImageBitmap {
+        val w = shape.pageW.toInt()
+        val h = shape.pageH.toInt()
+        val img = ImageBitmap(w, h, ImageBitmapConfig.Argb8888, hasAlpha = true)
+        CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(img), Size(w.toFloat(), h.toFloat())) {
+            if (!drawCurl3DFrame(shape, images(front), images(back), paper, 0f, 0f)) {
+                drawCurlFrame(shape, images(front), images(back), paper, 0f, 0f)
+            }
+        }
+        return img
+    }
+
     @Test
     fun untouchedFrameIsTheCurrentPage() {
         val w = 400
@@ -91,6 +109,45 @@ class Curl3DRenderTest {
                     assertEquals("dir=$dir ($x,$y) 翻完那一帧应当只剩目标页", blue, px[x, y].toArgb())
                 }
             }
+        }
+    }
+
+    /**
+     * 起手那一帧先停在**静止页**上（整页平铺的当前页），不许一上来就按锚点展开一大块。
+     *
+     * 读者报的两种起手：屏幕右侧往右滑翻上一页（页边锚点）、屏幕左侧往左滑翻下一页
+     * （折痕锚点）——锚点位置离静止位置差着大半个页宽，一帧到位就是「目标页突然展开大半」。
+     * 现在拖动开头先在 [PULL_INTRO_MS] 里把折痕滑过去（[CurlPull.blend]），这一帧 blend = 0。
+     */
+    @Test
+    fun pullIntroFrameIsStillTheRestingPage() {
+        val w = 400
+        val h = 600
+        val mid = h / 2
+        // 屏幕右侧往右滑翻上一页：页边锚点，静止位置是「纸卷整根在书脊外」。
+        val prevPull = CurlPull(
+            from = Offset(w.toFloat(), mid.toFloat()),
+            to = Offset(w - 60f, mid.toFloat()),
+            blend = 0f,
+        )
+        val prev = curlFrame(w.toFloat(), h.toFloat(), 0.1f, -1, 0f, prevPull)
+        val prevPx = renderLikeLayer(prev.shape, solid(w, h, red), solid(w, h, blue)).toPixelMap()
+        // 贴书脊那几十像素是纸卷的落影（纸卷整根在页外，影还压进来一点），不算「露出上一页」。
+        for (x in 40 until w - 40 step 20) {
+            assertEquals("上一页起手帧在 x=$x 应当还是当前页", blue, prevPx[x, mid].toArgb())
+        }
+
+        // 屏幕左侧往左滑翻下一页：折痕锚点，静止位置是「折痕在自由边」。
+        val nextPull = CurlPull(
+            from = Offset(120f, mid.toFloat()),
+            to = Offset(100f, mid.toFloat()),
+            anchor = CurlAnchor.Crease,
+            blend = 0f,
+        )
+        val next = curlFrame(w.toFloat(), h.toFloat(), 0.05f, 1, 0f, nextPull)
+        val nextPx = renderLikeLayer(next.shape, solid(w, h, red), solid(w, h, blue)).toPixelMap()
+        for (x in 40 until w - 40 step 20) {
+            assertEquals("下一页起手帧在 x=$x 应当还是当前页", red, nextPx[x, mid].toArgb())
         }
     }
 

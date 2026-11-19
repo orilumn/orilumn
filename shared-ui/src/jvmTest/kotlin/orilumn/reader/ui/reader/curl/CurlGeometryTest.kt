@@ -370,6 +370,65 @@ class CurlGeometryTest {
         assertTrue("这一帧仍是跟手帧", back.anchored)
     }
 
+    /**
+     * 起手接手：`blend = 0` 那一帧就是静止位置（下一页折痕在自由边、上一页在书脊外一个筒径），
+     * `blend = 1` 才完全按锚点。中间单调过渡——起手不再一帧跳到锚点。
+     *
+     * 读者报的就是这两种起手：屏幕右侧往右滑翻上一页（页边锚点，折痕一上来就在页中偏右）、
+     * 屏幕左侧往左滑翻下一页（折痕锚点，折痕一上来就贴着手指），目标页当场展开大半。
+     */
+    @Test
+    fun pullEngageStartsAtRestAndEndsAnchored() {
+        val w = 400f
+        val h = 600f
+        val exit = w * CURL3D_RADIUS_RATIO
+        // 屏幕右侧往右滑翻上一页：页边锚点，离静止位置最远的那一种。
+        val prevPull = CurlPull(from = Offset(w, 300f), to = Offset(340f, 300f))
+        val prevRest = curlFrame(w, h, 0.1f, -1, 0f, prevPull.copy(blend = 0f)).shape.foldX
+        val prevDone = curlFrame(w, h, 0.1f, -1, 0f, prevPull.copy(blend = 1f)).shape.foldX
+        assertEquals("上一页静止位置：纸卷整根在书脊外", -exit, prevRest, 0.01f)
+        assertTrue("接到手指后上一页已经掀进来一大块（$prevDone）", prevDone > w * 0.5f)
+        var last = prevRest
+        for (i in 1..10) {
+            val f = curlFrame(w, h, 0.1f, -1, 0f, prevPull.copy(blend = i / 10f)).shape.foldX
+            assertTrue("blend=${i / 10f} 折痕应当单调外移（$last → $f）", f >= last - 0.01f)
+            last = f
+        }
+        assertEquals("blend=1 正好落在锚点上", prevDone, last, 0.01f)
+
+        // 屏幕左侧往左滑翻下一页：折痕锚点，静止位置在自由边。
+        val nextPull = CurlPull(
+            from = Offset(120f, 300f),
+            to = Offset(100f, 300f),
+            anchor = CurlAnchor.Crease,
+        )
+        assertEquals(
+            "下一页静止位置：折痕在自由边",
+            w,
+            curlFrame(w, h, 0.01f, 1, 0f, nextPull.copy(blend = 0f)).shape.foldX,
+            0.01f,
+        )
+        val nextDone = curlFrame(w, h, 0.01f, 1, 0f, nextPull.copy(blend = 1f)).shape.foldX
+        assertEquals("下一页接到手指后折痕穿手指", 100f, nextDone, 0.01f)
+    }
+
+    /** 起手缓动：两端精确、单调、两端都收速度（缓入缓出，半程正好走到一半）。 */
+    @Test
+    fun pullEngageRampsSmoothly() {
+        assertEquals("t=0 还没接到手指", 0f, pullEngage(0f), 1e-4f)
+        assertEquals("t=1 完全接到手指", 1f, pullEngage(1f), 1e-4f)
+        assertEquals("越界按端点算", 1f, pullEngage(3f), 1e-4f)
+        var prev = -1f
+        for (i in 0..20) {
+            val v = pullEngage(i / 20f)
+            assertTrue("缓动应当单调（i=$i）", v >= prev)
+            prev = v
+        }
+        assertEquals("缓入缓出：半程正好走到一半", 0.5f, pullEngage(0.5f), 1e-4f)
+        assertTrue("起步要缓（不许一上来就冲）", pullEngage(0.15f) < 0.1f)
+        assertTrue("收尾要缓（交还给手指时不带速度）", 1f - pullEngage(0.85f) < 0.1f)
+    }
+
     /** 上一页松手交接：可见折痕换算出来的进度，在不跟手的几何里必须落回同一个折痕。 */
     @Test
     fun prevPageAnchoredProgressHandsOverToSameFold() {

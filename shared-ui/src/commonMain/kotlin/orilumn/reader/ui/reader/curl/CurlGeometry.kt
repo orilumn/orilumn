@@ -168,6 +168,15 @@ data class CurlPull(
     val to: Offset,
     /** 起手那一刻定的锚点，见 [CurlAnchor]。 */
     val anchor: CurlAnchor = CurlAnchor.Edge,
+    /**
+     * 起手接手的程度（0 = 折痕还在静止位置，1 = 完全听手指）。
+     *
+     * 起手一按就按锚点摆位置会**跳过一大块行程**：屏幕右侧往右滑翻上一页（页边锚点，折痕
+     * 一上来就在页中偏右）、屏幕左侧往左滑翻下一页（折痕锚点，折痕一上来就在手指处），
+     * 目标页当场展开大半。所以拖动开头先播一小段「折痕从静止位置滑到锚点」的动画
+     * （[pullEngage]，见 `FlipController.updateCurlPull`），到位之后 [blend] = 1，完全交给手。
+     */
+    val blend: Float = 1f,
 ) {
     /** 拖动单位方向；位移太小（方向是噪声）时返回 null。 */
     fun unit(): Offset? {
@@ -255,6 +264,7 @@ internal fun curlShape(
     direction: Int,
     tilt: Float = 0f,
     pull: CurlPull? = null,
+    restFold: Float = Float.NaN,
 ): CurlShape {
     val w = pageW.coerceAtLeast(1f)
     val h = pageH.coerceAtLeast(1f)
@@ -335,6 +345,15 @@ internal fun curlShape(
         }
     }
 
+    // 起手接手：折痕先停在「静止位置」（`restFold`，由 [curlFrame] 按翻页方向给），
+    // 再用 [CurlPull.blend] 在起手那一小段（[PULL_INTRO_MS]）里滑到锚点位置，然后完全交给手。
+    // 少了这一段，起手那一帧就按锚点摆好了——屏幕右侧往右滑翻上一页、屏幕左侧往左滑翻
+    // 下一页这两种起手，目标页一上来就展开大半，读者说「跳跃性太强」。
+    if (finger != null && !restFold.isNaN() && finger.blend < 1f) {
+        val k = finger.blend.coerceIn(0f, 1f)
+        foldX = restFold + (foldX - restFold) * k
+    }
+
     // 自由边那一侧可以滑出页边；装订边那一侧只剩纸卷退场的一个半径余量（见文件头）。
     val clampLo = if (forward) -exit else -w * 2f
     val clampHi = if (forward) w * 2f else w + exit
@@ -406,6 +425,7 @@ internal fun curlFrame(
     pull: CurlPull? = null,
 ): CurlFrame {
     val back = direction < 0
+    val w = pageW.coerceAtLeast(1f)
     return CurlFrame(
         shape = curlShape(
             pageW = pageW,
@@ -416,6 +436,9 @@ internal fun curlFrame(
             // 两个方向都跟手：锚点由**起手位置**定（右半边 = 纸边、左半边 = 折痕，
             // 见 [CurlAnchor]），与翻页方向无关，拖动中也不重判。
             pull = pull,
+            // 静止位置（起手接手的起点，见 [pullEngage]）：下一页折痕停在自由边（页宽），
+            // 上一页停在书脊外一个筒径——那一帧就是「一页都没掀」，与静止页一致。
+            restFold = if (back) -w * CURL3D_RADIUS_RATIO else w,
         ),
         turningIsTarget = back,
     )
@@ -427,6 +450,25 @@ internal fun tailFade(progress: Float): Float = when {
     progress < CURL_TAIL_FADE_SPAN -> (progress / CURL_TAIL_FADE_SPAN).coerceIn(0f, 1f)
     else -> 1f
 }
+
+/**
+ * 起手「接到手指上」的缓动：`t ∈ [0,1]` 映射到接手程度 `[0,1]`（缓入缓出，smoothstep）。
+ *
+ * 起手那一下不能直接按锚点摆折痕（见 [CurlPull.blend]）：屏幕右侧往右滑翻上一页、
+ * 屏幕左侧往左滑翻下一页，锚点位置离静止位置差着大半个页宽，一帧到位就是「目标页
+ * 突然展开大半」。所以先在 [PULL_INTRO_MS] 里把折痕从静止位置滑到锚点位置，到位之后
+ * 完全交给跟手——后续滚动由手指逐帧决定，动画不再插手。
+ *
+ * 两端都收速度（缓入缓出）而不是一起步就冲：那种「一上来就走掉七成」的缓出，读者报的
+ * 仍是「太快」，看着还是一记跳。读者实测后把这个时长从 150ms 放宽到 360ms。
+ */
+internal fun pullEngage(t: Float): Float {
+    val k = t.coerceIn(0f, 1f)
+    return k * k * (3f - 2f * k)
+}
+
+/** 起手接手的时长（ms），见 [pullEngage]。 */
+internal const val PULL_INTRO_MS = 360f
 
 /**
  * 折痕锚点 ⇒ 折痕在页高中线处的横坐标：**折痕直接穿过手指坐标**。

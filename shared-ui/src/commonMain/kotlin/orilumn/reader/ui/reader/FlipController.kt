@@ -20,8 +20,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import orilumn.reader.ui.reader.curl.CurlAnchor
 import orilumn.reader.ui.reader.curl.CurlPull
+import orilumn.reader.ui.reader.curl.PULL_INTRO_MS
 import orilumn.reader.ui.reader.curl.anchoredProgress
 import orilumn.reader.ui.reader.curl.leanOf
+import orilumn.reader.ui.reader.curl.pullEngage
 
 /**
  * 滑动翻页会话的**唯一宿主**（用户层·与 [FlipSession] 配套）。
@@ -111,6 +113,13 @@ class FlipController(
      * 还钉在松手那一点，动画会「卡住」。
      */
     val curlAnchor: MutableState<Offset?> = mutableStateOf(null)
+
+    /**
+     * 起手接手的起点时刻（纳秒，`System.nanoTime()`）：第一次喂拖动点时记一次
+     * （[updateCurlPull] 里 `curlPull` 为 null 那一帧），之后 [PULL_INTRO_MS] 之内折痕
+     * 从静止位置滑到锚点位置（见 [pullEngage]），到位后完全交给手指。
+     */
+    private var pullIntroNanos = 0L
 
     /** 锚点记录时的那一页尺寸（反解要用页高算折痕斜率），随 [curlAnchor] 一起写。 */
     private var anchorPageW = 0f
@@ -413,6 +422,11 @@ class FlipController(
         if (pageW <= 0f || pageH <= 0f) return
         anchorPageW = pageW
         anchorPageH = pageH
+        // 起手接手（[pullEngage]）：第一次喂拖动点的时刻记一次，之后 [PULL_INTRO_MS] 内折痕从静止
+        // 位置滑到锚点位置，然后完全听手指。只在**起手那一次**定，途中不重算起点。
+        if (curlPull.value == null) pullIntroNanos = System.nanoTime()
+        val introMs = (System.nanoTime() - pullIntroNanos) / 1_000_000f
+        val blend = pullEngage(introMs / PULL_INTRO_MS)
         // 锚点由**起手位置**定，且只定这一次：右半边抓页边（纸的自由边压在手指上），
         // 左半边抓折痕（折痕穿过手指）。`downX` 整个手势不变 ⇒ 模式固定，拖动中手指
         // 跨过屏幕中线也不改判（读者口径）。与翻页方向无关。
@@ -423,6 +437,7 @@ class FlipController(
             from = Offset(if (crease) downX else pageW, downY.coerceIn(0f, pageH)),
             to = Offset(x, y),
             anchor = if (crease) CurlAnchor.Crease else CurlAnchor.Edge,
+            blend = blend,
         )
         curlPull.value = pull
         curlLean.value = leanOf(pull, pageW, pageH)

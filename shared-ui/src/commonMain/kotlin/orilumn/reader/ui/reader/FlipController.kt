@@ -71,6 +71,13 @@ class FlipController(
      * `Animatable.animateTo` 会直接抛异常，故测试传 false 只走状态机。
      */
     private val allowAnimation: Boolean = true,
+    /**
+     * 平台结算时长倍率（见 [FlipSession.settleDurationMs] 的 `scale`）：桌面传 2。
+     *
+     * 桌面没有「手指先拖半页」那一段垫底，一按就从 0 走满整页，300ms 在宽屏上就是瞬切；
+     * 平板有跟手段，同一口径手感正好，故只有桌面放大。
+     */
+    private val settleScale: Float = 1f,
 ) {
     /**
      * 渲染用的位移进度（0..1）+ 方向（+1 下一页 / -1 上一页）。
@@ -718,7 +725,7 @@ class FlipController(
         // （纸边在手指上、折痕更快），清锚点与结算第一帧之间只要差一帧就是一次可见的跳变。
         progress.value = from
         session.beginSettle(decision)
-        val duration = session.settleDurationMs(decision, from, velocityX, pageW)
+        val duration = session.settleDurationMs(decision, from, velocityX, pageW, settleScale)
         // 离手速度衔接：起手斜率取手指速度，页面不在松手那一下刹停（详见
         // FlipSession.settleInitialSlope 的 KDoc）。slope==0（点按/慢拖/拿不到速度）
         // 时保持既有缓动，点按翻页的手感零变化。
@@ -822,6 +829,8 @@ fun rememberFlipController(
     onCoverCommit: ((leavingCover: Boolean) -> Unit)? = null,
     scope: CoroutineScope,
     log: (String) -> Unit = {},
+    /** 平台结算时长倍率（桌面 2，见 [FlipController] 构造参数）。常量，不随组合变化。 */
+    settleScale: Float = 1f,
 ): FlipController {
     val flipAwaitRef = rememberUpdatedState(flipAwait)
     val forceRef = rememberUpdatedState(forceOpenPos)
@@ -833,6 +842,7 @@ fun rememberFlipController(
             forceOpenPos = { p -> forceRef.value(p) },
             scope = scope,
             log = { m -> logRef.value(m) },
+            settleScale = settleScale,
         ).also { c ->
             // 经 State 中转，controller 记住的恒是最新闭包（封面显隐状态在其内部）。
             c.onCoverCommit = { leaving -> coverCommitRef.value?.invoke(leaving) }

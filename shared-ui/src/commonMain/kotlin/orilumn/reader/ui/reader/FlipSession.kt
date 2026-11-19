@@ -1,6 +1,7 @@
 package orilumn.reader.ui.reader
 
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /**
  * P1 翻页会话（用户层·纯状态机，commonMain）：把「一次翻页手势」从 UI 事件里剥出来。
@@ -214,15 +215,28 @@ class FlipSession {
      * [fromProgress] 是 settle 起点的归一 progress（屏上真实位置），[velocityX] 是松手瞬间
      * 横向速度（px/s，符号与位移同向，参见 [decide]）。速度取不到（程序化翻页传 0）时
      * 走默认时长，手势手感的基准不变。
+     *
+     * [scale] 是平台时长倍率，**桌面传 2**（见 `ReaderScreen.flipSettleScale`）：平板上
+     * 页面先跟手走了半页，松手后这 300ms 只补剩下那半页；桌面是滚轮/方向键/触控板，
+     * 一按就从 0 走满整页，同样 300ms 在宽屏上观感就是「瞬切」。倍率只放大时长，
+     * 速度折算与下限同比例跟着放大，快甩依旧短促。
      */
-    fun settleDurationMs(decision: Decision, fromProgress: Float = 0f, velocityX: Float = 0f, pageW: Float = 0f): Int {
-        val base = if (decision == Decision.COMMIT) COMMIT_MS else ROLLBACK_MS
+    fun settleDurationMs(
+        decision: Decision,
+        fromProgress: Float = 0f,
+        velocityX: Float = 0f,
+        pageW: Float = 0f,
+        scale: Float = 1f,
+    ): Int {
+        val k = scale.coerceIn(0.5f, 4f)
+        val base = (if (decision == Decision.COMMIT) COMMIT_MS else ROLLBACK_MS) * k
         val speed = abs(velocityX)
-        if (speed < FLING_VELOCITY) return base
-        if (pageW <= 0f) return base
+        if (speed < FLING_VELOCITY || pageW <= 0f) return base.roundToInt()
         val remaining = if (decision == Decision.COMMIT) (1f - fromProgress).coerceIn(0f, 1f) else fromProgress.coerceIn(0f, 1f)
-        // 剩余进度按页宽换成像素距离，除以速度得秒数再放大成 ms；夹在 [MIN_ANIM_MS, base]。
-        return (remaining * pageW / speed * 1000f).toInt().coerceIn(MIN_ANIM_MS, base)
+        // 剩余进度按页宽换成像素距离，除以速度得秒数再放大成 ms；夹在 [MIN_ANIM_MS, base]（下限同样乘倍率）。
+        return (remaining * pageW / speed * 1000f * k)
+            .roundToInt()
+            .coerceIn((MIN_ANIM_MS * k).roundToInt(), base.roundToInt())
     }
 
     /**

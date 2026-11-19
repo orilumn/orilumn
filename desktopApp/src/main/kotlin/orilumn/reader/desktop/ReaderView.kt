@@ -470,6 +470,7 @@ fun ReaderView(
             contentRevision = contentRevision,
             // 面板打开时按键留给面板，阅读面不翻页；面板关闭回阅读面即重夺焦点。
             keysEnabled = !settingsOpen && panelPage == null,
+            flipSettleScale = FlipSettleScale,
             annotationsEpoch = annotationsEpoch,
             bookmarksEpoch = bookmarksEpoch,
             fontEntries = fontEntries,
@@ -684,3 +685,13 @@ private const val ViewportQuietFallbackMs = 500L
 
 /** 按着不放的兜底上限：超过这么久仍是「按下」就按中途停顿收口一次，别把收口弄丢。 */
 private const val ViewportHoldCapMs = 3_000L
+
+/**
+ * 结算动画时长倍率（见 `ReaderScreen.flipSettleScale` / `FlipSession.settleDurationMs`）。
+ *
+ * 平板是手指拖拽：松手前页面已经跟手走了半页，剩下的半页 300ms 足够；桌面是滚轮 /
+ * 方向键 / 触控板，一按就从 0 走满整页，没有跟手段垫底，同样的 300ms 在宽屏上就是
+ * 「瞬切」（读者实测反馈「太快」）。乘 2 = commit 600ms / rollback 500ms，回到旧版
+ * CurlView 的基准。只改时长，帧率与几何不动。
+ */
+private const val FlipSettleScale = 2f

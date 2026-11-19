@@ -192,6 +192,14 @@ fun ReaderScreen(
      */
     keysEnabled: Boolean = true,
     /**
+     * 结算动画时长倍率：桌面壳传 2，平板/其它默认 1。
+     *
+     * 平板是手指拖拽，松手前页面已经跟手走了半页，剩下那半页 300ms 够用；桌面是
+     * 滚轮/方向键/触控板，一按就从 0 走满整页，没有跟手段垫底，同一时长在宽屏上
+     * 就是「瞬切」。只放大时长，不动帧率与几何（见 [FlipSession.settleDurationMs]）。
+     */
+    flipSettleScale: Float = 1f,
+    /**
      * 标注数据外部变更号（标注清单删除后 ++）：单独一条 effect 重读当前章标注，
      * 让屏幕上那条装饰同步消失。**不能**并进「进章」effect——同章 `load(ch)` 会早退，
      * 不会重读；它也不是版式修订号，不驱动重新分页。
@@ -858,6 +866,7 @@ fun ReaderScreen(
         },
         scope = scope,
         log = { m -> Logger.d("Orilumn.TAP", m) },
+        settleScale = flipSettleScale,
     )
     SideEffect { flipCtl = controller }
     // 手势/渲染层一律经它取会话；理论上组合内已完成赋值（SideEffect 在 apply 变更前跑）。

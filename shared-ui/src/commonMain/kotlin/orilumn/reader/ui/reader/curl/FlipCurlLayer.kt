@@ -150,6 +150,7 @@ fun FlipCurlLayer(
                         "fold=(${shape.topX},0)-(${shape.bottomX},${pageHeightPx}) " +
                         "lean=${shape.lean} fade=${shape.shadowFade} " +
                         "pull=${pullNow?.let { "(${it.from.x},${it.from.y})→(${it.to.x},${it.to.y})" } ?: "none"} " +
+                        "anchor=${pullNow?.anchor ?: "-"} " +
                         "page=${pageWidthPx}x${pageHeightPx} " +
                         "tex=${front.page?.width}x${front.page?.height} " +
                         "overlay=${front.overlay != null}/${back.overlay != null}",

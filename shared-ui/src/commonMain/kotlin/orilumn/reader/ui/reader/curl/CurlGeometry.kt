@@ -92,7 +92,7 @@ internal data class CurlShape(
      */
     val direction: Int,
     /**
-     * 折痕位置是不是**跟手反解**出来的（[anchoredFoldX]，拖动中的下一页），而不是由
+     * 折痕位置是不是**跟手反解**出来的（拖动中，两种锚点见 [CurlAnchor]），而不是由
      * [progress] 推出来的。
      *
      * 这两件事必须分开：进度是「手指相对起手点的累计位移」，跟手时折痕位置是「手指离自由边
@@ -149,7 +149,26 @@ private fun spineRoom(foldX: Float, pageW: Float, forward: Boolean): Float =
  * 旧版按每个事件算 `dy/|d|` 再取指数平均，等于在跟手链路上串了一个低通，斜拖时折痕
  * 角度永远追不上手指——这正是「斜着拖时纸边差得远」的来源。
  */
-data class CurlPull(val from: Offset, val to: Offset) {
+/**
+ * 跟手时**手指抓的是什么**（起手那一刻定一次，拖动中不再改判）。
+ *
+ * 读者定的口径：起手在屏幕**右半边** ⇒ 抓的是页边，掀起那张纸的自由边压在手背上过；
+ * 起手在**左半边** ⇒ 抓的是折痕本身，折痕直接穿过手指坐标。
+ */
+enum class CurlAnchor {
+    /** 页边锚点：纸的自由边压在手指上（见 [anchoredFoldX]）。 */
+    Edge,
+
+    /** 折痕锚点：折痕穿手指（见 [creaseFoldX]）。 */
+    Crease,
+}
+
+data class CurlPull(
+    val from: Offset,
+    val to: Offset,
+    /** 起手那一刻定的锚点，见 [CurlAnchor]。 */
+    val anchor: CurlAnchor = CurlAnchor.Edge,
+) {
     /** 拖动单位方向；位移太小（方向是噪声）时返回 null。 */
     fun unit(): Offset? {
         val dx = to.x - from.x
@@ -225,9 +244,9 @@ internal fun travelLeanCap(pull: CurlPull, tiltW: Float): Float =
  *   这是**想要的**倾斜，实际值还要受两道约束（见 [curlShape]）：折痕端点不许越过书脊
  *   （越靠近书脊能用的倾斜越小，到书脊正好竖直），跟手时也不许超过手指横向行程的
  *   [CURL_LEAN_PER_TRAVEL] 倍（见 [travelLeanCap]）。
- * @param pull 本次拖动（起手页边点 + 此刻手指），非 null 时折痕位置改由它反解（见
- *   [anchoredFoldX]）——读者手上那张纸的边就压在手指上。**只认下一页**：上一页在
- *   [curlFrame] 里就传 null，与旧版「上一页不跟手」同一口径。
+ * @param pull 本次拖动（起手点 + 此刻手指 + 起手那一刻定的锚点），非 null 时折痕位置改由它
+ *   反解，两种锚点都跟手（见 [CurlAnchor]）：右半边起手 ⇒ 纸边压手指（[anchoredFoldX]），
+ *   左半边起手 ⇒ 折痕穿手指（[creaseFoldX]）。**与翻页方向无关**，两个方向同一套。
  */
 internal fun curlShape(
     pageW: Float,
@@ -256,7 +275,7 @@ internal fun curlShape(
     // 折角的量尺（折痕听手指）。手指滑出去再滑回来，进度会先归零，折角却还有半个页宽——
     // 照进度淡影就是「阴影先消失、折角还在」，读者原话那半句「阴影逐渐消失」正是它。
     // 跟手时影的浓淡交给几何（纸抬多高、影有多宽），结算/点按照旧听进度。
-    val finger = if (forward) pull else null
+    val finger = pull
     val anchored = finger != null
     val fade = if (finger != null) 1f else tailFade(p)
     var lean = if (finger != null) {
@@ -270,26 +289,35 @@ internal fun curlShape(
     // 这一段只有 R/w 那么长，所以折痕在这里走得比手指快一倍；不这么做，筒要么被压扁
     // （按剩余纸宽收细），要么在末帧整根消失（撤层时跳一下）。
     val exit = w * CURL3D_RADIUS_RATIO
-    // 折痕位置：向后翻从右缘扫到左缘，向前翻从左缘扫到右缘（旧版同款）。
-    // 跟手时折痕不再听进度，改由「掀起的纸边贴在手指上」反解（见 [anchoredFoldX]）。
-    var foldX = if (finger != null) {
-        anchoredFoldX(finger, w, h, lean, tiltW).coerceIn(-exit, w)
-    } else {
-        val base = if (forward) w * (1f - p) else w * p
-        if (forward) {
-            if (base < exit) 2f * base - exit else base
-        } else {
-            if (w - base < exit) 2f * base - (w - exit) else base
+    // 折痕位置：不跟手时按进度从右缘扫到左缘（旧版同款）；跟手时改听手指，
+    // 锚点是**起手那一刻**定的那一种（见 [CurlAnchor]）：
+    // 右半边起手 = 纸边压在手指上（[anchoredFoldX]），左半边起手 = 折痕穿过手指（[creaseFoldX]）。
+    var foldX = when {
+        finger == null -> {
+            val base = if (forward) w * (1f - p) else w * p
+            if (forward) {
+                if (base < exit) 2f * base - exit else base
+            } else {
+                if (w - base < exit) 2f * base - (w - exit) else base
+            }
         }
+        finger.anchor == CurlAnchor.Crease ->
+            creaseFoldX(finger, h, lean, tiltW).coerceIn(-exit, w)
+        else ->
+            anchoredFoldX(finger, w, h, lean, tiltW).coerceIn(-exit, w)
     }
 
     // 折痕端点不许越过装订边（见文件头）：越靠近书脊，允许的倾斜越小；到书脊正好竖直，
     // 与「纸卷退场」接上。自由边那一侧不限制。
     //
-    // 跟手时倾斜与折痕位置互相牵制——倾斜一收小，纸边贴手反解出来的折痕就往外挪——
-    // 所以不能只夹倾斜，要二分找「折痕端点正好贴在书脊上、纸边仍压在手指上」的那个解。
+    // 折痕锚点只收倾斜、不挪折痕：折痕必须一直穿过手指，能收的只有斜率（[creaseLeanUnderSpine]）。
+    // 纸边锚点做不到这一点——倾斜一收小，纸边贴手反解出来的折痕就往外挪——所以要二分找
+    // 「折痕端点正好贴在书脊上、纸边仍压在手指上」的那个解。
     val room = spineRoom(foldX, w, forward)
-    if (kotlin.math.abs(lean) * tiltW > room) {
+    if (finger != null && finger.anchor == CurlAnchor.Crease) {
+        lean = creaseLeanUnderSpine(finger, h, lean, tiltW)
+        foldX = creaseFoldX(finger, h, lean, tiltW).coerceIn(-exit, w)
+    } else if (kotlin.math.abs(lean) * tiltW > room) {
         if (finger != null) {
             val sign = if (lean < 0f) -1f else 1f
             var lo = 0f
@@ -332,14 +360,15 @@ internal fun curlShape(
  *
  * ## 为什么跟手时不能按进度判（读者报的「整块折角瞬间消失」）
  *
- * 结算、点按、翻上一页都由进度驱动几何（折痕位置 = 进度的函数），两端本来就退化 ⇒
- * 按进度收尾既精确又便宜。**跟手时不是**（[CurlShape.anchored]）：折痕位置由「纸边压在
- * 手指上」反解，进度只是手指相对起手点的累计位移。读者向左滑出去、再向右滑回起手点时，
+ * 结算、点按都由进度驱动几何（折痕位置 = 进度的函数），两端本来就退化 ⇒
+ * 按进度收尾既精确又便宜。**跟手时不是**（[CurlShape.anchored]）：折痕位置由手指反解
+ * （纸边压在手指上 / 折痕穿过手指，见 [CurlAnchor]），进度只是手指相对起手点的累计位移。
+ * 读者向左滑出去、再向右滑回起手点时，
  * 进度会先掉到 0 以下，而折角还有半个页宽（真机日志：进度 −0.001 那一帧折痕仍在 1263px，
  * 折角 577px）—— 照进度收尾就是**整块折角一帧消失**，读者看到的正是「接近起手点时整个
  * 折起的页面瞬间消失，动画结束」。
  *
- * 跟手时两端的收尾因此交给几何自己：手指退回自由边，`foldX` 回到页宽、折角连续收到零；
+ * 跟手时两端的收尾因此交给几何自己：手指退回起手点，折痕跟着手指退回、折角连续收到零；
  * 翻到底则由纸卷退场把筒滚出书脊。与这半句配套的另一半是倾斜与阴影：跟手时它们也只听
  * 手指（见 [curlShape]）。上一版（`93603ce1`）只收了倾斜没管这条总闸，所以症状仍在。
  */
@@ -384,8 +413,9 @@ internal fun curlFrame(
             progress = if (back) 1f - progress else progress,
             direction = 1,
             tilt = if (back) -tilt else tilt,
-            // 上一页不跟手（旧版同款）：它的纸是从左边进来的，手指抓的不是它的边。
-            pull = if (back) null else pull,
+            // 两个方向都跟手：锚点由**起手位置**定（右半边 = 纸边、左半边 = 折痕，
+            // 见 [CurlAnchor]），与翻页方向无关，拖动中也不重判。
+            pull = pull,
         ),
         turningIsTarget = back,
     )
@@ -396,6 +426,46 @@ internal fun tailFade(progress: Float): Float = when {
     progress > 1f - CURL_TAIL_FADE_SPAN -> ((1f - progress) / CURL_TAIL_FADE_SPAN).coerceIn(0f, 1f)
     progress < CURL_TAIL_FADE_SPAN -> (progress / CURL_TAIL_FADE_SPAN).coerceIn(0f, 1f)
     else -> 1f
+}
+
+/**
+ * 折痕锚点 ⇒ 折痕在页高中线处的横坐标：**折痕直接穿过手指坐标**。
+ *
+ * 折痕在高度 `y` 处的横坐标是 `foldX + lean·tiltW·(2y/h − 1)`（两端 `topX`/`bottomX`
+ * 夹出来的那条直线）。要求它过手指，解出
+ *
+ * ```
+ *   foldX = 手指x + lean·tiltW·(1 − 2·手指y/h)
+ * ```
+ *
+ * 竖直折痕（`lean = 0`）时它就等于手指 x。
+ *
+ * ## 为什么上一页是这一种、下一页是纸边那一种
+ *
+ * 下一页掀的是**当前页**：手指抓的是它朝右的那条自由边，纸边翻过去落在手指上，折痕在
+ * 纸边与书脊之间（[anchoredFoldX]）。翻上一页掀的是**上一页**，它的自由边就是它翻回来
+ * 时的那条前缘——也就是折痕本身，所以手指抓的就是折痕，折痕直接跟着手指走。
+ * 两种锚点都由起手位置定（右半边 = 纸边、左半边 = 折痕，见 [CurlAnchor]），与翻页方向无关。
+ */
+internal fun creaseFoldX(pull: CurlPull, pageH: Float, lean: Float, tiltW: Float): Float {
+    val h = pageH.coerceAtLeast(1f)
+    val fy = pull.to.y.coerceIn(0f, h)
+    return pull.to.x + lean * tiltW * (1f - 2f * fy / h)
+}
+
+/**
+ * 折痕锚点下的倾斜上限：折痕端点不许越过装订边，**收的只能是斜率，不能把折痕挪离手指**。
+ *
+ * 上端点 `topX = foldX − lean·tiltW = 手指x − lean·tiltW·(2·手指y/h)`，要求 ≥ 0 ⇒
+ * `lean·tiltW ≤ 手指x·h/(2·手指y)`。手指贴在页顶时上端点就在手指处，恒成立。
+ */
+internal fun creaseLeanUnderSpine(pull: CurlPull, pageH: Float, lean: Float, tiltW: Float): Float {
+    val h = pageH.coerceAtLeast(1f)
+    val c = 2f * pull.to.y.coerceIn(0f, h) / h
+    if (c <= 1e-4f) return lean
+    val limit = pull.to.x / c
+    val l = lean * tiltW
+    return if (l > limit) limit / tiltW.coerceAtLeast(1e-3f) else lean
 }
 
 /**
@@ -487,17 +557,27 @@ internal fun anchoredFoldX(pull: CurlPull, w: Float, h: Float, lean: Float, tilt
  * 松手结算要从这个值起步，否则动画会先跳回「按位移算出来的进度」再走——旧版
  * `startCommitAnim` 的 `start` 就是同一件事（`(w − fx) / w`）。
  */
-internal fun anchoredProgress(pull: CurlPull, pageW: Float, pageH: Float, tilt: Float, progress: Float): Float {
+internal fun anchoredProgress(
+    pull: CurlPull,
+    pageW: Float,
+    pageH: Float,
+    tilt: Float,
+    progress: Float,
+    direction: Int = 1,
+): Float {
     val w = pageW.coerceAtLeast(1f)
-    val shape = curlShape(
+    val frame = curlFrame(
         pageW = w,
         pageH = pageH.coerceAtLeast(1f),
         progress = progress,
-        direction = 1,
+        direction = direction,
         tilt = tilt,
         pull = pull,
     )
-    return (1f - shape.foldX / w).coerceIn(0f, 1f)
+    val fold = frame.shape.foldX
+    // 折痕 ⇒ 进度按**不跟手**那条关系反解（见 [curlFrame]）：下一页 `fold = w·(1−p)`，
+    // 上一页 `fold = w·p`。
+    return if (direction >= 0) (1f - fold / w).coerceIn(0f, 1f) else (fold / w).coerceIn(0f, 1f)
 }
 
 /**

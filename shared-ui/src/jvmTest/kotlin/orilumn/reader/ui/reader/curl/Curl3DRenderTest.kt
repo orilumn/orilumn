@@ -131,6 +131,39 @@ class Curl3DRenderTest {
     }
 
     /**
+     * 上一页同样「同一根手指 ⇒ 同一帧」：手指退回起手点，折角照样留在那儿。
+     *
+     * 旧实现对上一页传 `pull = null`，折痕 = 页宽 × 累计位移——手指一回到起手点，折痕必然
+     * 退回书脊、整块折角收成零，读者报的「翻上页有同样的问题」就是它。现在起手在左半边
+     * 抓的是**折痕**（[CurlAnchor.Crease]）：折痕穿过手指，与累计进度无关。
+     */
+    @Test
+    fun previousPageFoldAlsoStaysUnderTheFinger() {
+        val w = 400
+        val h = 600
+        val mid = h / 2
+        val pull = CurlPull(
+            from = Offset(90f, mid.toFloat()),
+            to = Offset(300f, mid.toFloat()),
+            anchor = CurlAnchor.Crease,
+        )
+        val ahead = curlFrame(w.toFloat(), h.toFloat(), 0.55f, -1, 0f, pull).shape
+        val crossed = curlFrame(w.toFloat(), h.toFloat(), -0.02f, -1, 0f, pull).shape
+        assertEquals("折痕只听手指，不听累计进度", ahead.foldX, crossed.foldX, 1e-3f)
+        assertEquals("折痕就在手指处", 300f, crossed.foldX, 0.01f)
+
+        val a = render(ahead, solid(w, h, red), solid(w, h, blue)).toPixelMap()
+        val b = render(crossed, solid(w, h, red), solid(w, h, blue)).toPixelMap()
+        var diff = 0
+        for (y in 0 until h step 5) {
+            for (x in 0 until w step 5) if (a[x, y] != b[x, y]) diff++
+        }
+        assertEquals("上一页越过起手点的那一帧整页变了样（$diff 个采样点不同）", 0, diff)
+        assertEquals("折痕左侧是翻回来的上一页", red, b[5, mid].toArgb())
+        assertEquals("折痕右侧仍是当前页", blue, b[w - 5, mid].toArgb())
+    }
+
+    /**
      * 翻上一页时**书脊仍在左**：上一页不是下一页的左右镜像，而是同一套「左边平铺、卷筒朝右」
      * 的几何倒着走。镜像几何会让纸挂到右缘、看起来右边成了书脊（读者：「左边是书脊，不会因为
      * 要翻到上一页，右边就变成书脊了」）。

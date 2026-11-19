@@ -906,9 +906,10 @@ fun ReaderScreen(
     /**
      * 拖动中：喂卷曲手感的**起点与终点**（手指此刻的绝对页坐标）。
      *
-     * 只给一条入口：折痕角度与折痕位置是同一个事实的两面——都从「手指相对起手页边
-     * 的位移」反解（角度 = 拖动方向的垂线，位置 = 纸边压在手指上，见 `curl/CurlPull` /
-     * `curl/leanOf` / `curl/anchoredFoldX`）。滑动层不看它。
+     * 只给一条入口：折痕角度与折痕位置是同一个事实的两面——都从「手指相对起手点的位移」
+     * 反解（角度 = 拖动方向的垂线；位置看**起手在屏幕哪半边**：右半边纸边压手指、左半边
+     * 折痕穿手指，见 `curl/CurlPull` / `curl/leanOf` / `curl/anchoredFoldX` / `curl/creaseFoldX`）。
+     * 滑动层不看它。
      */
     fun updateCurlPull(
         downX: Float,
@@ -3284,9 +3285,9 @@ fun ReaderScreen(
                                         currentBeginSlide(dragDir)
                                     }
                                     currentUpdateSlide(dx, size.width.toFloat())
-                                    // 卷曲手感：起手页边 + 手指的**绝对页坐标**。折痕角度取拖动
-                                    // 方向的垂线，折痕位置由「纸边压在手指上」反解（见
-                                    // curl/CurlPull、curl/leanOf、curl/anchoredFoldX）。
+                                    // 卷曲手感：起手点 + 手指的**绝对页坐标**。折痕角度取拖动
+                                    // 方向的垂线，折痕位置由起手所在半边的锚点反解（右半边
+                                    // 纸边压手指、左半边折痕穿手指，见 curl/CurlPull）。
                                     currentUpdateCurlPull(
                                         downX,
                                         downY,

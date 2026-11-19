@@ -324,15 +324,64 @@ class CurlGeometryTest {
         }
     }
 
-    /** 上一页不跟手（旧版同款）：锚点对 `curlFrame(-1)` 的折痕毫无影响。 */
+    // ---- 锚点模式：起手位置定一次，与翻页方向无关 ----
+
+    /** 折痕锚点：折痕真的穿过手指（在手指所在高度），不是「拿手指 x 当折痕 x」的近似。 */
     @Test
-    fun prevPageIgnoresAnchor() {
+    fun creaseAnchorPassesThroughTheFinger() {
         val w = 400f
         val h = 600f
-        val p = 0.4f
-        val plain = curlFrame(w, h, p, -1).shape.foldX
-        val anchored = curlFrame(w, h, p, -1, pull = dragTo(w - 80f, h / 2f)).shape.foldX
-        assertEquals(plain, anchored, 0.01f)
+        for ((fx, fy) in listOf(60f to 80f, 150f to 300f, 300f to 520f, 380f to 20f)) {
+            val pull = CurlPull(from = Offset(60f, 300f), to = Offset(fx, fy), anchor = CurlAnchor.Crease)
+            val s = curlShape(w, h, 0.3f, 1, tilt = 0f, pull = pull)
+            val atFinger = s.topX + (s.bottomX - s.topX) * (fy / h)
+            assertEquals("折痕应当穿过手指 ($fx, $fy)", fx, atFinger, 0.01f)
+        }
+    }
+
+    /** 折痕锚点下倾斜再大，折痕也不许从手指上挪开：能收的只有斜率（贴书脊时不越界）。 */
+    @Test
+    fun creaseAnchorKeepsFingerWhileStayingOffTheSpine() {
+        val w = 400f
+        val h = 600f
+        val pull = CurlPull(from = Offset(300f, 560f), to = Offset(30f, 560f), anchor = CurlAnchor.Crease)
+        val s = curlShape(w, h, 0.02f, 1, tilt = 0.9f, pull = pull)
+        assertTrue("折痕端点跑出书脊：topX=${s.topX}", s.topX >= -0.01f)
+        val atFinger = s.topX + (s.bottomX - s.topX) * (560f / h)
+        assertEquals("折痕仍应穿过手指", 30f, atFinger, 0.5f)
+    }
+
+    /**
+     * 上一页也跟手：同一根手指、进度从正变负（越过起手点），折痕不许动。
+     *
+     * 读者报的就是这一条。旧实现对 `direction < 0` 传 `pull = null`，折痕 = 页宽 × 累计位移，
+     * 手指一退回起手点折痕必然回到书脊、整块折角收成零。
+     */
+    @Test
+    fun prevPageFoldFollowsTheFingerNotTheProgress() {
+        val w = 400f
+        val h = 600f
+        val finger = Offset(300f, 300f)
+        val pull = CurlPull(from = Offset(120f, 300f), to = finger, anchor = CurlAnchor.Crease)
+        val ahead = curlFrame(w, h, 0.45f, -1, tilt = 0f, pull = pull).shape
+        val back = curlFrame(w, h, -0.02f, -1, tilt = 0f, pull = pull).shape
+        assertEquals("折痕应当只认手指", finger.x, ahead.foldX, 0.01f)
+        assertEquals("进度退回起手点折痕不许跳", ahead.foldX, back.foldX, 0.01f)
+        assertTrue("这一帧仍是跟手帧", back.anchored)
+    }
+
+    /** 上一页松手交接：可见折痕换算出来的进度，在不跟手的几何里必须落回同一个折痕。 */
+    @Test
+    fun prevPageAnchoredProgressHandsOverToSameFold() {
+        val w = 400f
+        val h = 600f
+        for (fx in listOf(60f, 140f, 220f, 300f, 360f)) {
+            val pull = CurlPull(from = Offset(40f, 300f), to = Offset(fx, 300f), anchor = CurlAnchor.Crease)
+            val visible = anchoredProgress(pull, w, h, tilt = 0f, progress = 0.5f, direction = -1)
+            val anchoredFold = curlFrame(w, h, 0.5f, -1, pull = pull).shape.foldX
+            val handedFold = curlFrame(w, h, visible, -1).shape.foldX
+            assertEquals("fx=$fx 交接点应当重合", anchoredFold, handedFold, 0.5f)
+        }
     }
 
     /** 越界与极端倾斜：不许出 NaN、不许把折痕摆到页边之外（会被画成一块凭空出现的纸）。 */
@@ -347,6 +396,24 @@ class CurlGeometryTest {
                 assertTrue("tilt=$tilt fx=$fx foldX 非法", s.foldX.isFinite())
                 assertTrue("tilt=$tilt fx=$fx 端点非法", s.topX.isFinite() && s.bottomX.isFinite())
                 assertTrue("tilt=$tilt fx=$fx 折痕越界 ${s.foldX}", s.foldX in -exit - 0.01f..w + 0.01f)
+            }
+        }
+    }
+
+    /** 折痕锚点同样不许出 NaN / 不许把折痕摆到页外（下边界由纸卷退场的余量兜住）。 */
+    @Test
+    fun creaseAnchorIsClampedAndFinite() {
+        val w = 400f
+        val h = 600f
+        val exit = w * CURL3D_RADIUS_RATIO
+        for (tilt in listOf(-1f, -0.5f, 0f, 0.5f, 1f)) {
+            for (fx in listOf(0f, 10f, 120f, 300f, 399f, 400f)) {
+                val pull = CurlPull(from = Offset(0f, 20f), to = Offset(fx, 590f), anchor = CurlAnchor.Crease)
+                val s = curlShape(w, h, 0.3f, 1, tilt = tilt, pull = pull)
+                assertTrue("tilt=$tilt fx=$fx foldX 非法", s.foldX.isFinite())
+                assertTrue("tilt=$tilt fx=$fx 端点非法", s.topX.isFinite() && s.bottomX.isFinite())
+                assertTrue("tilt=$tilt fx=$fx 折痕越界 ${s.foldX}", s.foldX in -exit - 0.01f..w + 0.01f)
+                assertTrue("tilt=$tilt fx=$fx 折痕越过书脊 ${s.topX}", s.topX >= -0.01f)
             }
         }
     }

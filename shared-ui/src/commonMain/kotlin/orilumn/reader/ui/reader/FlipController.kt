@@ -18,6 +18,7 @@ import orilumn.reader.io.Logger
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import orilumn.reader.ui.reader.curl.CurlAnchor
 import orilumn.reader.ui.reader.curl.CurlPull
 import orilumn.reader.ui.reader.curl.anchoredProgress
 import orilumn.reader.ui.reader.curl.leanOf
@@ -396,7 +397,8 @@ class FlipController(
      * 它是积分量，天然平滑，`dy` 抖两下不会让整条轨迹转几十度。换成积分量之后平滑只剩
      * 滞后（斜拖时折痕角度永远追不上手指），所以这里不再平滑。
      *
-     * @param downX/downY 按下点（页坐标）：起手边取 `downY`，与参考实现的 `mDragStartPos` 同口径
+     * @param downX/downY 按下点（页坐标）：`downY` 是抓点的行（与参考实现 `mDragStartPos` 同口径），
+     *   `downX` 决定锚点模式——右半边 `Edge`、左半边 `Crease`（见 [CurlAnchor]），整个手势只判这一次
      * @param x/y 此刻手指的页坐标
      * @param pageW/pageH 当前页尺寸（px）：折痕斜率按页宽页高换算
      */
@@ -411,27 +413,33 @@ class FlipController(
         if (pageW <= 0f || pageH <= 0f) return
         anchorPageW = pageW
         anchorPageH = pageH
-        // 起手边：向后翻从右缘起手，向前翻从左缘起手（参考实现 `pageRect.right/left`）。
-        val edgeX = if (direction.value >= 0) pageW else 0f
+        // 锚点由**起手位置**定，且只定这一次：右半边抓页边（纸的自由边压在手指上），
+        // 左半边抓折痕（折痕穿过手指）。`downX` 整个手势不变 ⇒ 模式固定，拖动中手指
+        // 跨过屏幕中线也不改判（读者口径）。与翻页方向无关。
+        val crease = downX < pageW * 0.5f
         val pull = CurlPull(
-            from = Offset(edgeX, downY.coerceIn(0f, pageH)),
+            // 折痕锚点拿按下点当 `from`：拖动方向 = 按下点 → 手指，倾斜与横向行程都照它算；
+            // 页边锚点用页右缘（参考实现 `pageRect.right`）。
+            from = Offset(if (crease) downX else pageW, downY.coerceIn(0f, pageH)),
             to = Offset(x, y),
+            anchor = if (crease) CurlAnchor.Crease else CurlAnchor.Edge,
         )
         curlPull.value = pull
         curlLean.value = leanOf(pull, pageW, pageH)
         curlAnchor.value = Offset(x, y)
     }
 
-    /** 当前跟手位置对应的**屏幕可见进度**；不跟手（无拖动 / 上一页 / 无尺寸）时返回 null。 */
+    /** 当前跟手位置对应的**屏幕可见进度**；无拖动 / 无尺寸时返回 null。 */
     private fun anchoredProgressNow(): Float? {
         val p = curlPull.value ?: return null
-        if (direction.value < 0 || anchorPageW <= 0f || anchorPageH <= 0f) return null
+        if (anchorPageW <= 0f || anchorPageH <= 0f) return null
         return anchoredProgress(
             pull = p,
             pageW = anchorPageW,
             pageH = anchorPageH,
             tilt = curlLean.value,
             progress = session.progress,
+            direction = direction.value,
         )
     }
 

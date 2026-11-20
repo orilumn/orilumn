@@ -48,6 +48,7 @@ import orilumn.reader.data.revision.TextRevision
 import orilumn.reader.data.settings.BookSettingsStore
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.data.settings.ReaderSettingsStore
+import orilumn.reader.data.settings.withStyleProbesFrom
 import orilumn.reader.engine.BookDocumentController
 import orilumn.reader.engine.BookFileResolver
 import orilumn.reader.engine.text.SystemCjkSerif
@@ -635,11 +636,9 @@ class ReaderActivity : ComponentActivity() {
             val dn = profile.density
             lifecycleScope.launch {
                 val measured = withContext(Dispatchers.Default) { c.bookStyleReadings(ch, px, base, dn) }
-                // 只合并读数两项：读者已经拖过的值不能被一次迟到的读数覆盖。
-                if (settingsOpen) panelSettings = panelSettings.copy(
-                    probeIndent = measured.probeIndent,
-                    probeLineSpacing = measured.probeLineSpacing,
-                )
+                // 四项读数一起合（段距 / 字距同样是「没配就显示书的值」，漏了就退回 0）。
+                // 读者已经拖过的值不能被一次迟到的读数覆盖。
+                if (settingsOpen) panelSettings = panelSettings.withStyleProbesFrom(measured)
             }
         }
         // 面板开抑制 + 关门控走共享收口（PanelRelayoutGate，桌面同调）；关闭时若排版真实

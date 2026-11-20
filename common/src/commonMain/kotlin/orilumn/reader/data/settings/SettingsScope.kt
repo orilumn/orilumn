@@ -76,6 +76,22 @@ object SettingsScope {
 }
 
 /**
+ * 把一次**原书读数**（`BookDocumentController.bookStyleReadings` 的结果）合进面板状态。
+ *
+ * 四个读数必须**一起**合：段间距与字间距的 `null` 语义是「听书」，面板靠读数显示书的真实值；
+ * 漏掉任何一个，该滑块就退回 0（读者看到的「书里有段距、滑块却是 0」，一拖到 0 反而把段距
+ * 真的压成 0）。此前两个宿主各自手写 `copy(...)` 只合了前两项，故收口到这里，别再逐项抄。
+ *
+ * 只覆盖 [SESSION_ONLY] 这四个字段，读者已经拖过的显式值一概不动。
+ */
+fun ReaderSettings.withStyleProbesFrom(measured: ReaderSettings): ReaderSettings = copy(
+    probeIndent = measured.probeIndent,
+    probeLineSpacing = measured.probeLineSpacing,
+    probeParagraphSpacing = measured.probeParagraphSpacing,
+    probeLetterSpacing = measured.probeLetterSpacing,
+)
+
+/**
  * 把一份**生效值**收敛成「全局项保留、私有项回预设」——`ReaderSettingsStore` 读写都走它，
  * 全局文件里从此不会出现私有键（旧档残留读进来即被抹掉）。
  */

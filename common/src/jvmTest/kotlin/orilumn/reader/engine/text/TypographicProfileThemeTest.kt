@@ -9,8 +9,8 @@ import org.junit.Test
 
 /**
  * 排版主题 (layoutTheme) 的新语义（`docs/设置模型整改计划.md` §3.5）：
- * 切主题只写该主题确实要让读者层跟随的那几项（段间距 / 正文字体族），
- * 基线（缩进 / 字体 / 对齐）交给主题层样式表（tier 42）；
+ * 切主题只写该主题确实要让读者层跟随的那几项（段间距），
+ * 基线（缩进 / 正文字体 / 标题字体 / 对齐）交给主题层样式表（tier 42）；
  * 「原书设置」= 清空本书的排版覆盖（字体槽 / 行距 / 字距 / 段距 / 疏密 / 首行缩进），
  * 不动字号与页边距。build() 对存储值原样透传，用户拖滑块永远最高优先级。
  */
@@ -25,7 +25,9 @@ class TypographicProfileThemeTest {
         assertEquals(d.firstLineIndent, s.firstLineIndent)
         assertEquals(0.0, s.paragraphSpacing!!, 1e-9)
         assertEquals(100.0, s.paragraphGap, 1e-9)
-        assertEquals("serif", s.fontBody)
+        // 字族一律不写：正文字体由 traditional.css 的 body/h1..h6 提供，读者层不钉显式值。
+        assertEquals("", s.fontBody)
+        assertEquals("", s.fontTitle)
     }
 
     @Test
@@ -36,7 +38,8 @@ class TypographicProfileThemeTest {
         assertEquals(d.firstLineIndent, s.firstLineIndent)
         assertEquals(d.paragraphSpacing, s.paragraphSpacing)
         assertEquals(100.0, s.paragraphGap, 1e-9)
-        assertEquals("sans-serif", s.fontBody)
+        assertEquals("", s.fontBody)
+        assertEquals("", s.fontTitle)
     }
 
     @Test
@@ -81,6 +84,9 @@ class TypographicProfileThemeTest {
             noteFont = "NoteFace", noteFontScale = 1.4f, pageNum = true, autoContinue = false,
             highlightColorSlots = listOf(0xFF102030.toInt()), annotationLastKind = "underline",
             showHiddenFonts = true,
+            // 代码槽 + 通用族替换（衬线/无衬线）与它们的字重也是全局项：切主题一律不碰。
+            fontCode = "Mono", fontSerif = "ReaderSerif", fontSans = "ReaderSans",
+            fontWeightAnchorsGlobal = mapOf("fontSerif|ReaderSerif" to 300),
         )
         for (theme in listOf("original", "modern", "traditional")) {
             val s = TypographicProfile.withLayoutTheme(dirty, theme)
@@ -89,10 +95,22 @@ class TypographicProfileThemeTest {
     }
 
     @Test
-    fun `theme font family matches the theme preset`() {
-        assertEquals("serif", TypographicProfile.layoutThemeFontFamily("traditional"))
-        assertEquals("sans-serif", TypographicProfile.layoutThemeFontFamily("modern"))
-        assertEquals(null, TypographicProfile.layoutThemeFontFamily("original"))
+    fun `theme switch drops generic family residue left by older builds`() {
+        // 旧版本切主题会把通用族写进槽（面板永远选不到通用族 ⇒ 必是主题写的残留）。
+        // 残留值在 UI 层（tier 44）压住主题层（tier 42）⇒ 切主题字体不变；切主题时清掉。
+        val dirty = ReaderSettings.DEFAULT.copy(
+            layoutTheme = "original", fontBody = "serif", fontTitle = "sans-serif",
+        )
+        for (theme in listOf("modern", "traditional")) {
+            val s = TypographicProfile.withLayoutTheme(dirty, theme)
+            assertEquals("[$theme] 通用族残留必须清掉", "", s.fontBody)
+            assertEquals("[$theme] 通用族残留必须清掉", "", s.fontTitle)
+        }
+        // 读者自己选的具名字族原样保留（主题不越权改读者的显式选择）。
+        val named = dirty.copy(fontBody = "屏显臻宋", fontTitle = "霞鹜文楷")
+        val s = TypographicProfile.withLayoutTheme(named, "traditional")
+        assertEquals("屏显臻宋", s.fontBody)
+        assertEquals("霞鹜文楷", s.fontTitle)
     }
 
     @Test
@@ -115,7 +133,8 @@ class TypographicProfileThemeTest {
         assertEquals("original", s.layoutTheme)
         assertEquals("", s.fontBody)
         assertEquals("", s.fontTitle)
-        assertEquals("", s.fontCode)
+        // 代码字体已是纯全局项：切「原书设置」只清本书覆盖，不碰全局偏好。
+        assertEquals("mono", s.fontCode)
         // 字号与页边距是读者舒适度，不跟着「原书设置」重置。
         assertEquals(22, s.fontSize)
         assertEquals(40.0, s.fontScale, 1e-9)

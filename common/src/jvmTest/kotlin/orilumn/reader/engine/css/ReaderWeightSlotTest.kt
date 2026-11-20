@@ -93,10 +93,15 @@ class ReaderWeightSlotTest {
         error("no <$tag> #$nth")
     }
 
-    /** UI 层规则里带 `font-weight` 的那条（按选择器首名匹配）。 */
+    /**
+     * UI 层规则里带 `font-weight` 的那条（按选择器首名匹配）。
+     *
+     * 正文槽的选择器带 `:not(:has(h1..h6))` 守卫（切断「容器 → 标题」的继承串扰），
+     * 所以这里按「基名 + 可选伪类后缀」匹配，不要求字面完全相等。
+     */
     private fun fontDecl(p: TypographicProfile, firstSelector: String): Map<String, String> =
         ReaderUiSheet.build(p).rules
-            .filter { it.selectors.firstOrNull() == firstSelector }
+            .filter { r -> r.selectors.any { it == firstSelector || it.startsWith("$firstSelector:") } }
             .flatMap { it.declarations }
             .associate { it.property to it.value }
 
@@ -170,6 +175,27 @@ class ReaderWeightSlotTest {
         assertEquals(900, m.byTag("h2").fontWeight)
         assertEquals(500, m.byTag("p").fontWeight)
         assertEquals(700, m.byTag("code").fontWeight)
+    }
+
+    /** 代码槽已是全局项：旧书文件里残留的按书锚点不得压过全局表（正文/标题则相反）。 */
+    @Test
+    fun `code slot reads the global anchor table even with a stale per-book anchor`() {
+        val codeFam = "Fira Code"
+        val p = profile(
+            body = "PingFang SC",
+            code = codeFam,
+            bySlot = mapOf(
+                "fontBody|PingFang SC" to 500,
+                "fontCode|$codeFam" to 700,
+            ),
+        ).copy(
+            fontWeightAnchorsGlobal = mapOf(
+                "fontBody|PingFang SC" to 400,
+                "fontCode|$codeFam" to 300,
+            ),
+        )
+        assertEquals("正文/标题读按书表", "500", fontDecl(p, "p")["font-weight"])
+        assertEquals("代码读全局表", "300", fontDecl(p, "pre")["font-weight"])
     }
 
     /** 非法锚点值（不在 100..900）当作"没选"，不写声明。 */

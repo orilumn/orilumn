@@ -69,6 +69,19 @@ class LayoutParamKeyTest {
     }
 
     @Test
+    fun `generic family slots and global weights change the param hash`() {
+        // 衬线/无衬线替换改的是族栈（取面与度量都变），代码槽字重改的是字重 ⇒ 都必须换键。
+        val base = hash(ReaderSettings.DEFAULT)
+        assertNotEquals(base, hash(ReaderSettings.DEFAULT.copy(fontSerif = "ReaderSerif")))
+        assertNotEquals(base, hash(ReaderSettings.DEFAULT.copy(fontSans = "ReaderSans")))
+        assertNotEquals(base, hash(ReaderSettings.DEFAULT.copy(fontCode = "ReaderMono")))
+        assertNotEquals(
+            base,
+            hash(ReaderSettings.DEFAULT.copy(fontWeightAnchorsGlobal = mapOf("fontCode|ReaderMono" to 700))),
+        )
+    }
+
+    @Test
     fun `portable crc32 is byte-identical to java util zip crc32`() {
         val base = LayoutParamKey(
             bodyPx = 18.5f, lineSpacing = 1.5f, firstLineIndentEm = 2f, letterSpacingEm = 0f,
@@ -131,8 +144,8 @@ class LayoutParamKeyTest {
         // 2026-10-06：`2078022158` → **`1533737463**。`paragraphSpacingPx` 退役（段间距即疏密），
         // 喂入流少 4 字节；老磁盘表对不上新键，一次性重建（与 2026-10-03 混排字距改口径同理）。
         assertEquals(
-            "cjkLatinSpacingEm = 0 的喂入流（四个 0x00 追加在末尾 + 主题名）必须逐字节等于金标准 781119536",
-            781119536L,
+            "cjkLatinSpacingEm = 0 的喂入流（四个 0x00 + 主题名 + 通用族两槽）必须逐字节等于金标准 3738849792",
+            3738849792L,
             base.hash() and 0xFFFFFFFFL,
         )
         assertEquals(
@@ -150,9 +163,9 @@ class LayoutParamKeyTest {
         // 「条件喂但喂在中间」同样满足「非 0 换键」，却会让后续字段整体左移 4 字节、
         // 与另一种键取值撞流（歧义）。钉死字节流就同时钉死了值与位置。
         assertEquals(
-            "非 0 侧的喂入流（末尾追加 4 字节）必须逐字节等于金标准 2165861485；" +
+            "非 0 侧的喂入流（末尾追加 4 字节）必须逐字节等于金标准 31020358；" +
                 "条件喂与非 0 无条件喂对非 0 键必须产出同一条流",
-            2165861485L,
+            31020358L,
             gap.hash() and 0xFFFFFFFFL,
         )
         // 位置敏感：与别的字段**同值**也必须换键（否则两个版面共用一份表）。
@@ -198,8 +211,8 @@ class LayoutParamKeyTest {
             useOriginalStyle = false, contentW = 1080, contentH = 1920, userCssHash = 123456789,
         )
         assertEquals(
-            "paramHash 必须等于当前喂入序的金标准（308717619）",
-            308717619L,
+            "paramHash 必须等于当前喂入序的金标准（3735633499）",
+            3735633499L,
             base.hash() and 0xFFFFFFFFL,
         )
         assertEquals(
@@ -242,6 +255,7 @@ class LayoutParamKeyTest {
         k.paragraphGapScale.feed4()
         k.fontBody.feed(); k.fontTitle.feed(); k.fontCode.feed()
         k.fontWeightAnchors.toSortedMap().forEach { (fam, w) -> fam.feed(); w.feed4() }
+        k.fontWeightAnchorsBySlot.toSortedMap().forEach { (slot, w) -> slot.feed(); w.feed4() }
         (if (k.useOriginalStyle) 1L else 0L).let { v ->
             j.update(((v shr 24) and 0xFF).toInt())
             j.update(((v shr 16) and 0xFF).toInt())
@@ -255,6 +269,9 @@ class LayoutParamKeyTest {
         k.cjkLatinSpacingEm.feed4()
         // 排版主题：无条件喂字符串（主题层换样式表 ⇒ 换版面，必须换键）。
         k.layoutTheme.feed()
+        // 通用族替换（衬线/无衬线 → 读者族）与全局槽字重：改族栈/字重 ⇒ 改取面与度量。
+        k.fontSerif.feed(); k.fontSans.feed()
+        k.fontWeightAnchorsGlobal.toSortedMap().forEach { (slot, w) -> slot.feed(); w.feed4() }
         return j.value
     }
 }

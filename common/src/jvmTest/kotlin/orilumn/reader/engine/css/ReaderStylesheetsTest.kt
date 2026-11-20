@@ -34,6 +34,8 @@ class ReaderStylesheetsTest {
     fun `theme resolves known themes and null for original`() {
         val traditional = ReaderStylesheets.theme("traditional")
         assertTrue(traditional!!, traditional.contains("body { font-family: serif; }"))
+        // 标题单独一条：书常给 h1..h6 写字体，只靠 body 继承够不着（用户报「切主题标题不跟着变」）。
+        assertTrue(traditional, traditional.contains("h1, h2, h3, h4, h5, h6 { font-family: serif; }"))
         // P3a：全宽拉伸规则已退役 —— 主题层不得再给独图注入 width。断言跑在**剥注释**后的文本上
         // （编者注里会引用被删的类名与 UA 兜底规则 `img { max-width: 100% }`，不剥会误伤）；
         // `(?<![-\w])width` 排除 max-/min- 前缀。
@@ -43,6 +45,7 @@ class ReaderStylesheetsTest {
 
         val modern = ReaderStylesheets.theme("modern")
         assertTrue(modern!!, modern.contains("body { font-family: sans-serif; }"))
+        assertTrue(modern, modern.contains("h1, h2, h3, h4, h5, h6 { font-family: sans-serif; }"))
         assertTrue(modern.contains("p { text-indent: 0; }"))
         val modernBody = stripComments(modern)
         assertFalse(modern, modernBody.contains("orilumn-fullwidth-image"))

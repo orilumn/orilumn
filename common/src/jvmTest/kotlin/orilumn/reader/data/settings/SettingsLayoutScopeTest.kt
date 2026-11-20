@@ -54,9 +54,9 @@ class SettingsLayoutScopeTest {
         "lineSpacing", "firstLineIndent", "paragraphSpacing", "paragraphGap",
         "letterSpacing", "cjkLatinSpacing",
         "marginTop", "marginBottom", "marginLeft", "marginRight",
-        "fontBody", "fontTitle", "fontCode", "useUserScripts",
+        "fontBody", "fontTitle", "fontCode", "fontSerif", "fontSans", "useUserScripts",
         "fontScale", "layoutTheme", "fontSize",
-        "fontWeightAnchors", "fontWeightAnchorsBySlot",
+        "fontWeightAnchors", "fontWeightAnchorsBySlot", "fontWeightAnchorsGlobal",
     )
 
     /**
@@ -123,12 +123,15 @@ class SettingsLayoutScopeTest {
         "fontBody" -> s.copy(fontBody = if (s.fontBody.isEmpty()) "ZZProbe" else "")
         "fontTitle" -> s.copy(fontTitle = if (s.fontTitle.isEmpty()) "ZZProbe" else "")
         "fontCode" -> s.copy(fontCode = if (s.fontCode.isEmpty()) "ZZProbe" else "")
+        "fontSerif" -> s.copy(fontSerif = if (s.fontSerif.isEmpty()) "ZZProbe" else "")
+        "fontSans" -> s.copy(fontSans = if (s.fontSans.isEmpty()) "ZZProbe" else "")
         "useUserScripts" -> s.copy(useUserScripts = !s.useUserScripts)
         "fontScale" -> s.copy(fontScale = s.fontScale + 3.0)
         "fontSize" -> s.copy(fontSize = s.fontSize + 3)
         "layoutTheme" -> s.copy(layoutTheme = if (s.layoutTheme == "original") "modern" else "original")
         "fontWeightAnchors" -> s.copy(fontWeightAnchors = s.fontWeightAnchors + ("p" to 700))
         "fontWeightAnchorsBySlot" -> s.copy(fontWeightAnchorsBySlot = s.fontWeightAnchorsBySlot + ("body" to 700))
+        "fontWeightAnchorsGlobal" -> s.copy(fontWeightAnchorsGlobal = s.fontWeightAnchorsGlobal + ("fontCode|x" to 700))
 
         "theme" -> s.copy(theme = if (s.theme == "sepia") "light" else "sepia")
         "scheme" -> s.copy(scheme = if (s.scheme == "day") "night" else "day")

@@ -348,13 +348,15 @@ fun ReaderSettingsPanel(
                     ItemKey(onEnter = { pickSlot = "fontBody"; stack.add(Sub.TextFont) }),
                     ItemKey(onEnter = { pickSlot = "fontTitle"; stack.add(Sub.TextFont) }),
                     ItemKey(onEnter = { pickSlot = "fontCode"; stack.add(Sub.TextFont) }),
+                    ItemKey(onEnter = { pickSlot = "fontSerif"; stack.add(Sub.TextFont) }),
+                    ItemKey(onEnter = { pickSlot = "fontSans"; stack.add(Sub.TextFont) }),
                     sliderKey(px, 9.0, 36.0, 0.1,
                         apply = { v -> val ns = ReaderThemeMath.pxToScale(v); onPreview(s.copy(fontScale = ns)); onCommitTypography(s.copy(fontScale = ns)) },
                         fmt = { String.format("%.1f", it) }),
                     sliderKey(s.letterSpacingSlot(), -100.0, 100.0, 1.0,
                         apply = { v -> onPreview(s.copy(letterSpacing = v)); onCommitTypography(s.copy(letterSpacing = v)) },
                         fmt = { it.roundToInt().toString() }),
-                    // 第 6 个滑块 = 混排字距（正文页渲染在 index 5，见同函数下方的行构造）。
+                    // 第 8 个键 = 混排字距（正文页渲染在 index 7，见同函数下方的行构造）。
                     // ⚠ 漏了这一项**不崩**（下游一律 `getOrNull`），但键盘/手柄**够不到那一行** ——
                     //   症状是「鼠标能拖、键盘翻不到」，极难归因。故键表必须与行序逐项对齐。
                     sliderKey(s.cjkLatinSpacing, 0.0, 100.0, 1.0,
@@ -372,8 +374,7 @@ fun ReaderSettingsPanel(
                             if (slotKey == "noteFont") {
                                 commitSlot(setField(s, slotKey, "").copy(noteFontWeight = 0))
                             } else {
-                                val clearedSlotAnchors = s.fontWeightAnchorsBySlot.filterKeys { !it.startsWith("$slotKey|") }
-                                commitSlot(setField(s, slotKey, "").copy(fontWeightAnchorsBySlot = clearedSlotAnchors))
+                                commitSlot(withSlotAnchorsCleared(setField(s, slotKey, ""), slotKey))
                             }
                         })
                     is FontPanelRow.Import ->
@@ -924,9 +925,10 @@ fun ReaderSettingsPanel(
                                 onMouseMove = onMove,
                                 listState = listState,
                                 scanProgress = fontScanProgress,
-                                // 批注字体槽位的「跟随」是跟界面默认字体（旁注不套书里的正文族）。
-                                followLabel = if (slotKey == "noteFont") "跟随界面" else "跟随原书",
-                                followSubtitle = if (slotKey == "noteFont") "使用界面默认字体" else "使用原书字体",
+                                // 批注字体槽位的「跟随」是跟界面默认字体（旁注不套书里的正文族）；
+                                // 衬线/无衬线两槽跟的是系统候选链，其余槽跟原书。
+                                followLabel = followLabelOf(slotKey),
+                                followSubtitle = followSubtitleOf(slotKey),
                             )
                             Sub.WeightPicker -> {
                                 val fam = weightPickFamily
@@ -1175,22 +1177,22 @@ private fun TextPage(
 ) {
     val labelW = sliderLabelWidth(listOf("字号", "字间距", "混排字距"), p)
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
-        // Three font-replacement tiers (body/heading/code); each row drills down into the font panel.
+        // 五个字体槽（正文/标题按书私有；代码/衬线/无衬线全局）；每行下钻字体面板。
         FONT_FIELDS.forEachIndexed { i, (label, key) ->
-            item { SetRow(label, fieldOf(s, key).let { if (it.isEmpty()) "跟随原书" else fontDisplayByFamily[it] ?: genericFamilyLabel(it) }, keys[i].onEnter, p, nav = nav, index = i) }
+            item { SetRow(label, fieldOf(s, key).let { if (it.isEmpty()) followLabelOf(key) else fontDisplayByFamily[it] ?: genericFamilyLabel(it) }, keys[i].onEnter, p, nav = nav, index = i) }
         }
         // "Font size" slider: placed below the font rows.
         item { UiSliderRow("字号", 9.0, 36.0, 0.1, s.fontSize * ReaderSettings.fontScaleToRatio(s.fontScale),
             { String.format("%.1f", it) },
             { px -> preview(s.copy(fontScale = ReaderThemeMath.pxToScale(px))) },
             { px -> commit(s.copy(fontScale = ReaderThemeMath.pxToScale(px))) }, p, labelWidth = labelW,
-            nav = nav, index = 3) }
+            nav = nav, index = 5) }
         // Letter spacing: UI value range -100..100 (step 1), internally mapped to -0.2em..0.2em.
         // 字间距：**em 语义**（-100..100 档 = -0.2em..0.2em）。读者没配（null）时滑条显示
         // 原书正文实测字距（引擎就是按它排的，见 `BoxChapterLayouter.chapterLetterSpacingEm`）。
         item { UiSliderRow("字间距", -100.0, 100.0, 1.0, s.letterSpacingSlot(), { it.roundToInt().toString() },
             { preview(s.copy(letterSpacing = it)) }, { commit(s.copy(letterSpacing = it)) }, p, labelWidth = labelW,
-            nav = nav, index = 4) }
+            nav = nav, index = 6) }
         // 混排字距（用户可见名 2026-10-03 由「中西字距」改名；内部标识符与 JSON 键仍是
         // `cjkLatinSpacing`，改名会改掉持久化键、作废刚写好的 schemaVersion 迁移）：
         // 0..100 映射到 0..1.0em，**默认 25**（= 0.25em，CLREQ 值）；0 是合法档位 = 关掉间隙，
@@ -1198,7 +1200,7 @@ private fun TextPage(
         item { UiSliderRow("混排字距", 0.0, 100.0, 1.0, s.cjkLatinSpacing,
             { it.roundToInt().toString() },
             { preview(s.copy(cjkLatinSpacing = it)) }, { commit(s.copy(cjkLatinSpacing = it)) }, p, labelWidth = labelW,
-            nav = nav, index = 5) }
+            nav = nav, index = 7) }
         item { Spacer(modifier = Modifier.height(24.dp)) }
     }
 }
@@ -1288,11 +1290,39 @@ private fun ThemePage(
     }
 }
 
-private val FONT_FIELDS = listOf("正文" to "fontBody", "标题" to "fontTitle", "代码" to "fontCode")
+// 文字页的字体行（自上而下与 `Sub.Text` 的键表逐项对齐）：正文/标题是**本书私有**，
+// 代码/衬线/无衬线是**全局**（换书沿用）。衬线/无衬线两行不是「给正文加一条覆盖声明」，
+// 而是 CSS 通用族 `serif`/`sans-serif` 的替换：书或主题写通用名时用读者选的族渲染，
+// 书的具名字体照旧不动（见 `ReaderSettings.fontSerif`）。
+private val FONT_FIELDS = listOf(
+    "正文" to "fontBody",
+    "标题" to "fontTitle",
+    "代码（全局）" to "fontCode",
+    "衬线字体（全局）" to "fontSerif",
+    "无衬线字体（全局）" to "fontSans",
+)
+
+/** 全局字体槽（代码/衬线/无衬线）：字体族与字重都存全局表，换书沿用。 */
+private fun isGlobalFontSlot(key: String): Boolean =
+    key == "fontCode" || key == "fontSerif" || key == "fontSans"
+
+/** 槽位空值文案：通用族槽「跟随系统」（平台 serif/sans 候选链），其余「跟随原书」。 */
+private fun followLabelOf(key: String): String = when (key) {
+    "fontSerif", "fontSans" -> "跟随系统"
+    "noteFont" -> "跟随界面"
+    else -> "跟随原书"
+}
+
+/** 「跟随…」副标题（字体页首行）。 */
+private fun followSubtitleOf(key: String): String = when (key) {
+    "fontSerif", "fontSans" -> "使用系统衬线/无衬线候选字体"
+    "noteFont" -> "使用界面默认字体"
+    else -> "使用原书字体"
+}
 
 /**
- * 字体槽位读写：正文 / 标题 / 代码三槽之外，笔记页的「批注字体」也复用同一套字体下钻页
- * （[FontLibraryPanel]），槽位键 `noteFont`。它的提交走无重排路径（见 `commitSlot`）。
+ * 字体槽位读写：正文 / 标题 / 代码三槽 + 衬线 / 无衬线两槽，笔记页的「批注字体」也复用
+ * 同一套字体下钻页（[FontLibraryPanel]），槽位键 `noteFont`。它的提交走无重排路径（见 `commitSlot`）。
  *
  * 批注换族时一并清掉旧字重：字重没按族记账（独立字段），留着上一个族的粗档会让新族
  * 莫名其妙地变粗。字重页写入时是「先 setField 再填字重」，清掉不碍事。
@@ -1300,37 +1330,52 @@ private val FONT_FIELDS = listOf("正文" to "fontBody", "标题" to "fontTitle"
 private fun fieldOf(s: ReaderSettings, key: String) = when (key) {
     "fontTitle" -> s.fontTitle
     "fontCode" -> s.fontCode
+    "fontSerif" -> s.fontSerif
+    "fontSans" -> s.fontSans
     "noteFont" -> s.noteFont
     else -> s.fontBody
 }
 private fun setField(s: ReaderSettings, key: String, v: String) = when (key) {
     "fontTitle" -> s.copy(fontTitle = v)
     "fontCode" -> s.copy(fontCode = v)
+    "fontSerif" -> s.copy(fontSerif = v)
+    "fontSans" -> s.copy(fontSans = v)
     "noteFont" -> s.copy(noteFont = v, noteFontWeight = 0)
     else -> s.copy(fontBody = v)
 }
 
 /**
- * 槽位当前字重：正文三槽读按槽锚点（旧全局表兜底），批注字体读自己的独立字段。
+ * 槽位当前字重：正文/标题读按书私有的按槽锚点（旧全局表兜底），代码/衬线/无衬线读全局按槽锚点，
+ * 批注字体读自己的独立字段。
  *
  * 批注不是书本排版的一部分，不能把锚点塞进 `fontWeightAnchorsBySlot`：那张表按书私有
  * 且进 [orilumn.reader.engine.text.LayoutParamKey]，会让旁注换字重误作废分页表。
  */
 private fun slotWeightOf(s: ReaderSettings, key: String, family: String): Int? =
-    if (key == "noteFont") {
-        s.noteFontWeight.takeIf { it in 100..900 }
-    } else {
-        s.fontWeightAnchorsBySlot["$key|$family"] ?: s.fontWeightAnchors[family]
+    when {
+        key == "noteFont" -> s.noteFontWeight.takeIf { it in 100..900 }
+        isGlobalFontSlot(key) -> s.fontWeightAnchorsGlobal["$key|$family"]
+        else -> s.fontWeightAnchorsBySlot["$key|$family"] ?: s.fontWeightAnchors[family]
     }
 
 /** 写入某个族的字重（与 [slotWeightOf] 对称），返回可交给 `commitSlot` 的新设置。 */
 private fun withSlotWeight(s: ReaderSettings, key: String, family: String, weight: Int): ReaderSettings =
-    if (key == "noteFont") {
-        setField(s, key, family).copy(noteFontWeight = weight)
-    } else {
-        setField(s, key, family).copy(
+    when {
+        key == "noteFont" -> setField(s, key, family).copy(noteFontWeight = weight)
+        isGlobalFontSlot(key) -> setField(s, key, family).copy(
+            fontWeightAnchorsGlobal = s.fontWeightAnchorsGlobal + ("$key|$family" to weight),
+        )
+        else -> setField(s, key, family).copy(
             fontWeightAnchorsBySlot = s.fontWeightAnchorsBySlot + ("$key|$family" to weight),
         )
+    }
+
+/** 清掉某槽的全部字重锚点（跟随原书 / 跟随系统时用），只动该槽自己那张表。 */
+private fun withSlotAnchorsCleared(s: ReaderSettings, key: String): ReaderSettings =
+    if (isGlobalFontSlot(key)) {
+        s.copy(fontWeightAnchorsGlobal = s.fontWeightAnchorsGlobal.filterKeys { !it.startsWith("$key|") })
+    } else {
+        s.copy(fontWeightAnchorsBySlot = s.fontWeightAnchorsBySlot.filterKeys { !it.startsWith("$key|") })
     }
 
 /**

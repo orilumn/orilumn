@@ -139,11 +139,15 @@ fun ReaderView(
     }
     /** 隐藏/删除的族若正被槽位引用 → 回退跟随原书（系统/导入同查，与平板同口径）。 */
     fun fallBackFontSlots(family: String, s: ReaderSettings) {
-        if (family != s.fontBody && family != s.fontTitle && family != s.fontCode) return
+        if (family != s.fontBody && family != s.fontTitle && family != s.fontCode &&
+            family != s.fontSerif && family != s.fontSans
+        ) return
         commit(s.copy(
             fontBody = s.fontBody.takeUnless { it == family } ?: "",
             fontTitle = s.fontTitle.takeUnless { it == family } ?: "",
             fontCode = s.fontCode.takeUnless { it == family } ?: "",
+            fontSerif = s.fontSerif.takeUnless { it == family } ?: "",
+            fontSans = s.fontSans.takeUnless { it == family } ?: "",
         ))
     }
     fun familyOfFontIds(ids: List<Long>): String? =
@@ -504,7 +508,7 @@ fun ReaderView(
                     // 隐藏正被槽位引用 → 回退跟随原书（沿删除口径），回退经设置提交走原位重排追装。
                     if (family != null) {
                         val s = settings
-                        if (family in setOf(s.fontBody, s.fontTitle, s.fontCode)) {
+                        if (family in setOf(s.fontBody, s.fontTitle, s.fontCode, s.fontSerif, s.fontSans)) {
                             fallBackFontSlots(family, s)
                         }
                     }

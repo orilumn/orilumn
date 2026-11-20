@@ -427,8 +427,12 @@ internal fun rowSubtitle(members: List<FontEntry>): String? {
 }
 
 /**
- * 预览成员：同行多字重时优先 Regular（名行字形稳定，不随排序飘到 Bold/Italic），
+ * 预览成员：同行多字重时优先 **Regular 那一档面**（名行字形稳定，不随排序飘到 Bold/Italic），
  * 无 Regular 用第一个。纯函数（行模型同一文件可测）。
+ *
+ * 判据用 [SubfamilyMetric]（字重 400 且非斜体）而不是名字匹配 `Regular`/`常规`：字体档名
+ * 五花八门（`Book` / `Roman` / `Normal` / 厂商私有名），死匹配会把真正的常规面漏掉，
+ * 于是预览落到排序靠前的 Bold 面上——列表里每一行都像粗体。
  */
 internal fun List<FontEntry>.previewMember(): FontEntry =
     firstOrNull {
@@ -436,7 +440,7 @@ internal fun List<FontEntry>.previewMember(): FontEntry =
             is FontEntry.Imported -> it.face.subfamily
             is FontEntry.System -> it.subfamily
         }.trim()
-        sub.equals("Regular", ignoreCase = true) || sub == "常规"
+        SubfamilyMetric.weight(sub) == 400 && !SubfamilyMetric.italic(sub)
     } ?: first()
 
 /**

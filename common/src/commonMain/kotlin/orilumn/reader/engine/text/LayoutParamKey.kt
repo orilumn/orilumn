@@ -46,6 +46,11 @@ data class LayoutParamKey(
      * 顺带改字体槽/段距把键带变，现在主题只切样式表，裸切主题必须自己换键。
      */
     val layoutTheme: String = "original",
+    /** 通用族替换（`serif`/`sans-serif` → 读者选的族）：改变族栈 ⇒ 改变取面与度量 ⇒ 进键。 */
+    val fontSerif: String = "",
+    val fontSans: String = "",
+    /** 全局字体槽（代码/衬线/无衬线）的按槽字重：与 [fontWeightAnchorsBySlot] 一样改 `font-weight`。 */
+    val fontWeightAnchorsGlobal: Map<String, Int> = emptyMap(),
 ) {
     /** Deterministic 64-bit hash over all layout-affecting fields. */
     fun hash(): Long {
@@ -92,6 +97,13 @@ data class LayoutParamKey(
         crc = Crc32.update4(crc, cjkLatinSpacingEm.bits())
         // 排版主题（新字段一律追加在末尾，见上）。
         crc = Crc32.updateString(crc, layoutTheme)
+        // 通用族替换与全局槽字重（`serif`/`sans-serif` 的族栈与字重都会改取面/度量）。
+        crc = Crc32.updateString(crc, fontSerif)
+        crc = Crc32.updateString(crc, fontSans)
+        for ((k, w) in fontWeightAnchorsGlobal.toSortedMap()) {
+            crc = Crc32.updateString(crc, k)
+            crc = Crc32.update4(crc, w.bits())
+        }
         return Crc32.finish(crc)
     }
 
@@ -118,6 +130,9 @@ data class LayoutParamKey(
             fontWeightAnchorsBySlot = profile.fontWeightAnchorsBySlot,
             useOriginalStyle = profile.useOriginalStyle,
             layoutTheme = profile.layoutTheme,
+            fontSerif = profile.fontSerif,
+            fontSans = profile.fontSans,
+            fontWeightAnchorsGlobal = profile.fontWeightAnchorsGlobal,
             contentW = contentW,
             contentH = contentH,
             userCssHash = userCssHash,

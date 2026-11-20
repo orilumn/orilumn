@@ -3,6 +3,7 @@ package orilumn.reader.data.settings
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
+import orilumn.reader.data.font.isGenericFontFamily
 
 /**
  * A book's **private settings layer**（稀疏覆盖层）：只记「和本项目预设不同」的私有项。
@@ -50,10 +51,10 @@ data class BookSettings(
     val marginBottom: Int? = null,
     val marginLeft: Int? = null,
     val marginRight: Int? = null,
-    /** Font replacement by element type, three tiers (alias, empty string = that type not replaced, keep the original book): body / heading / code. */
+    /** Font replacement by element type, two tiers (alias, empty string = that type not replaced, keep the original book):
+     *  body / heading. 「代码」字体是全局项（换书沿用），不在本书私有层里。 */
     val fontBody: String? = null,
     val fontTitle: String? = null,
-    val fontCode: String? = null,
     /** L2 用户自定义样式表开关（本书私有，影响本书的样式层叠；当前无消费者）。 */
     val useUserScripts: Boolean? = null,
     /** 翻页模式：`"none"` | `"slide"` | `"curl"`（`null` = 跟全局）。 */
@@ -86,6 +87,18 @@ data class BookSettings(
         /** Empty overlay (all fields = null, fully follows the project preset / the book's own CSS). */
         val EMPTY = BookSettings()
 
+        /**
+         * 读一个字体槽；**通用族值按「没配」读**（返回 `null`）。
+         *
+         * 旧版本切排版主题会把 `serif` / `sans-serif` 写进正文/标题槽。字体面板永远选不到通用族，
+         * 所以槽里出现通用关键字只可能来自主题（或早期迁移）。留在槽里会在 UI 层（tier 44）压住
+         * 主题层（tier 42）的声明，形成「切了主题字体不变」的死值——读档时丢弃，让主题层重新说话。
+         */
+        private fun bookFontSlot(o: JsonObject, key: String): String? {
+            if (!o.containsKey(key)) return null
+            val v = SettingsJson.optString(o, key, "")
+            return if (isGenericFontFamily(v)) null else v
+        }
         /**
          * Parse from JSON; missing or invalid fields fall back to null (treated as not overridden).
          * 旧档里的全局键（亮度、主题色、页码、笔记族…）本类没有对应字段，读时自然丢弃。
@@ -136,9 +149,8 @@ data class BookSettings(
                     marginBottom = if (o.containsKey("marginBottom")) SettingsJson.optInt(o, "marginBottom", 0) else null,
                     marginLeft = if (o.containsKey("marginLeft")) SettingsJson.optInt(o, "marginLeft", 0) else null,
                     marginRight = if (o.containsKey("marginRight")) SettingsJson.optInt(o, "marginRight", 0) else null,
-                    fontBody = if (o.containsKey("fontBody")) SettingsJson.optString(o, "fontBody", "") else null,
-                    fontTitle = if (o.containsKey("fontTitle")) SettingsJson.optString(o, "fontTitle", "") else null,
-                    fontCode = if (o.containsKey("fontCode")) SettingsJson.optString(o, "fontCode", "") else null,
+                    fontBody = bookFontSlot(o, "fontBody"),
+                    fontTitle = bookFontSlot(o, "fontTitle"),
                     useUserScripts = if (o.containsKey("useUserScripts")) SettingsJson.optBoolean(o, "useUserScripts", false) else null,
                     // 旧档的「翻页动画」开关（本书私有）迁进模式：关掉 ⇒ 本书「无动画」；
                     // 打开但没存过模式 ⇒ 本书「滑动」（当年开关只会把动画开回来）。
@@ -183,7 +195,6 @@ data class BookSettings(
             marginRight = rs.marginRight,
             fontBody = rs.fontBody,
             fontTitle = rs.fontTitle,
-            fontCode = rs.fontCode,
             useUserScripts = rs.useUserScripts,
             pageAnimationMode = rs.pageAnimationMode,
             coverStretch = rs.coverStretch,

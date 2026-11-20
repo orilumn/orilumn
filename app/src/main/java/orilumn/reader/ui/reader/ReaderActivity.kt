@@ -722,12 +722,16 @@ class ReaderActivity : ComponentActivity() {
     /** 隐藏/删除的族若正被槽位引用 → 回退跟随原书（沿旧 FontManagerPanel 口径）。 */
     private fun fallBackFontSlots(family: String) {
         val s = panelSettings
-        if (family != s.fontBody && family != s.fontTitle && family != s.fontCode) return
+        if (family != s.fontBody && family != s.fontTitle && family != s.fontCode &&
+            family != s.fontSerif && family != s.fontSans
+        ) return
         commitSettings(
             s.copy(
                 fontBody = s.fontBody.takeUnless { it == family } ?: "",
                 fontTitle = s.fontTitle.takeUnless { it == family } ?: "",
                 fontCode = s.fontCode.takeUnless { it == family } ?: "",
+                fontSerif = s.fontSerif.takeUnless { it == family } ?: "",
+                fontSans = s.fontSans.takeUnless { it == family } ?: "",
             ),
             typographyChanged = true,
         )

@@ -651,7 +651,15 @@ class BoxChapterLayouter(
             else -> themeSheetFromProfile(profile)
         }
         val custom = customStyleSheet
-        return StyleComputer(profile.bodyPx, ua, sheets, theme, custom, ui, paragraphEm = profile.paragraphSpacingEm, gapScale = profile.paragraphGapScale, pxScale = profile.density)
+        return StyleComputer(
+            profile.bodyPx, ua, sheets, theme, custom, ui,
+            paragraphEm = profile.paragraphSpacingEm,
+            gapScale = profile.paragraphGapScale,
+            pxScale = profile.density,
+            // 通用族替换（衬线/无衬线）：读者只改 `serif`/`sans-serif` 的含义，书的具名字体不动。
+            fontFamilyAliases = profile.genericFontAliases,
+            genericFontWeights = profile.genericFontWeights,
+        )
     }
 
     /**

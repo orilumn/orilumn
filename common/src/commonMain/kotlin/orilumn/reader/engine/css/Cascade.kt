@@ -436,8 +436,9 @@ class Cascade(
     /**
      * 作者层（sheets + 内联，tiers 见 [READER_TIER_MIN] 以下）胜出的 `font-family` 原始值；
      *
-     * 给“读者层裸通用名兜底合并”用：主题预设写 `serif`/`sans-serif` 时，不能替换书栈，
-     * 只能缀在后面做最终回退——否则书里点名的导入字体（池中有）在传统模式下永远够不着。
+     * 给「等宽意图合并」用：主题层写 `serif`/`sans-serif` 时，只有书把同一元素声明成
+     * `monospace`（这段是代码）才需要把它并回栈首；书的**具名字族不再前置**——主题（读者的
+     * 全局字体）接管字族，否则「现代模式除等宽外全无衬线」做不到。
      * 只走含 font-family 声明的作者规则（构造时预过滤），元素级开销可忽略。
      */
     fun authorFontFamily(el: MarkupElement, ancestors: List<MarkupElement>, inlineDecls: List<Declaration>): String? {

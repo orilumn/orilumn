@@ -46,8 +46,21 @@ class ReaderStylesheetsTest {
         assertFalse(traditional, NO_IMG_WIDTH.containsMatchIn(traditionalBody))
 
         val modern = ReaderStylesheets.theme("modern")
-        assertTrue(modern!!, modern.contains("body { font-family: sans-serif; }"))
-        assertTrue(modern, modern.contains("h1, h2, h3, h4, h5, h6 { font-family: sans-serif; }"))
+        // 现代主题：**除等宽（pre/code/kbd/samp/tt）之外的全部文字块**一律无衬线。
+        // 按标签逐个断言，防止日后有人把某类标签从选择器表里删掉（书给那个标签点了字体时
+        // 就会漏出正文体）。等宽标签一律不在此表内。
+        val modernFam = fontFamilyBySelector(modern!!)
+        for (tag in listOf(
+            "body", "p", "div", "li", "ul", "ol", "dl", "dt", "dd", "blockquote",
+            "table", "td", "th", "caption", "figure", "figcaption", "address",
+            "section", "article", "aside", "header", "footer", "nav", "main",
+            "h1", "h2", "h3", "h4", "h5", "h6",
+        )) {
+            assertEquals("现代主题必须把 <$tag> 声明成无衬线", "sans-serif", modernFam[tag])
+        }
+        for (codeTag in listOf("pre", "code", "kbd", "samp", "tt")) {
+            assertNull("现代主题不碰等宽域 <$codeTag>", modernFam[codeTag])
+        }
         assertTrue(modern.contains("p { text-indent: 0; }"))
         val modernBody = stripComments(modern)
         assertFalse(modern, modernBody.contains("orilumn-fullwidth-image"))
@@ -83,6 +96,19 @@ class ReaderStylesheetsTest {
     }
 
     private companion object {
+        /** 主题 CSS 里 selector → 该规则声明的 `font-family` 原始值（仅收声明了字族的规则）。 */
+        fun fontFamilyBySelector(css: String): Map<String, String> {
+            val sheet = LightCssParser().parse(css)
+            val out = HashMap<String, String>()
+            for (rule in sheet.rules) {
+                val fam = rule.declarations
+                    .firstOrNull { it.property.equals("font-family", ignoreCase = true) }?.value
+                    ?: continue
+                for (sel in rule.selectors) out[sel.trim()] = fam.substringBefore(',').trim().lowercase()
+            }
+            return out
+        }
+
         /** The rule P3a retired: an `img` selector declaring a plain `width` (not max-/min-). */
         val NO_IMG_WIDTH = Regex("""img[^{}]*\{[^}]*(?<![-\w])width\s*:""")
 

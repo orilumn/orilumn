@@ -33,8 +33,8 @@ import orilumn.reader.engine.html.MarkupElement
  *   2x/3x 屏上所有 `px` 盒子/边框/外边距都只有 1/2、1/3 大小（正文却按 dp 放大），
  *   观感与浏览器差异明显。只缩放 `px`（含无单位数值），`em/rem/%` 不动。
  * @param fontFamilyAliases **通用族替换**（`serif`→读者选的衬线族、`sans-serif`→无衬线族、
- *   `monospace`→全局代码字体）：在级联与「裸通用名 + 书具名字体」兜底合并都算完之后，对最终族栈
- *   展开（见 [applyFontFamilyAliases]）。空表 = 完全维持原行为。
+ *   `monospace`→全局代码字体）：在级联与「等宽意图合并」都算完之后，对最终族栈展开
+ *   （见 [applyFontFamilyAliases]）。空表 = 完全维持原行为。
  * @param genericFontWeights 通用族替换后的基线字重（key = 通用关键字 `serif`/`sans-serif`/`monospace`）：
  *   普通正文（元素**没有自己的 `font-weight` 声明**）父级必须是常规 400 才补上；标题另有两条
  *   通路——元素自己的字族来自**读者层的标题规则**（标题槽「采用主题设置」，主题的裸通用名被
@@ -275,15 +275,16 @@ class StyleComputer(
      * 通用族替换：把**已算好的族栈**里的 `serif` / `sans-serif` / `monospace` 展开成
      * 「读者选的族 + 原关键字」。
      *
-     * 语义 = 浏览器的「默认字体」设置：只改通用关键字的含义，不动书的具名字体。
-     * 例：`p{font-family:"Times New Roman",serif}` → `Times New Roman,读者衬线族,serif`
-     * ——具名字体仍排第一，读者选的族只在书走到 `serif` 这一档时生效，原关键字留栈尾
-     * 供缺字形时逐字形兜底。`monospace` 走同一个通道，只是读者那一侧读的是全局代码字体
+     * 语义 = 浏览器的「默认字体」设置：只改通用关键字的含义，不动族栈里已有的具名字体。
+     * 例（原书设置）：`p{font-family:"Times New Roman",serif}` →
+     * `Times New Roman,读者衬线族,serif` ——具名字体仍排第一，原关键字留栈尾供缺字形时
+     * 逐字形兜底。主题模式下书栈已被主题层接管（见 [computeOne] 的等宽意图合并），
+     * 这里通常只有「读者的族 + 原关键字」两项。`monospace` 走同一个通道，只是读者那一侧读的是全局代码字体
      * （`pre/code` 标签另有 UI 层的按槽声明，两条路互不依赖；见 `ReaderUiSheet`）。
      *
-     * **必须在 [computeOne] 的「裸通用名 + 书具名字体」兜底合并之后做**：那条合并靠
-     * 「族栈只有一个通用名」来判断「这条声明是主题/读者的裸预设」。若先展开成两项，
-     * 合并就不再触发，书的具名字体会被主题的通用名顶掉（与「书的具名字体不动」相反）。
+     * **必须在 [computeOne] 的等宽意图合并之后做**：那条合并靠「族栈只有一个通用名」来判断
+     * 「这条声明是主题/读者的裸预设」。若先展开成两项，合并就不再触发，书在 div/span 上
+     * 写的 `monospace`（这段是代码）会被主题的字族一起抹掉。
      * 继承来的族栈不重复展开：父级裸 `serif` 已在父级换成读者的族，子级直接继承那份
      * 已展开的栈（再展开一次会逐层重复缀同一个族名，见 [computeOne] 的引用判断）。
      */
@@ -361,10 +362,9 @@ class StyleComputer(
             isPreformatted(el, ancestors), uaBaselineWeight, readerHeadingFont,
         )
         if (probe != null) buildMs = orilumn.reader.time.platformNowMs() - tB
-        // 读者层裸通用名兜底合并：主题预设（serif/sans-serif）只能缀在书栈后面做最终回退，
-        // 不能替换——否则书里点名的导入字体（池中有）在主题模式下永远够不着（传统变黑体）。
-        // 具名槽（用户显式选择）照旧全覆盖；书未声明时作者值为空，无事发生。合并后重算一次，
-        // fontFamily/monospace 等派生字段与栈一致（token 无逗号，join 再解析无损）。
+        // 主题的裸通用名（serif / sans-serif）胜出时的**等宽意图**合并：主题字族说了算，只有
+        // 书把同一元素声明成 `monospace`（代码）时才把那一段并到栈首。书未声明时作者值为空，
+        // 无事发生。合并只改 fontFamily/fontFamilies/monospace 三连（token 无逗号，join 再解析无损）。
         var result = style
         val fams = style.fontFamilies
         if (fams.size == 1 && isGenericFontFamily(fams[0])) {
@@ -372,24 +372,19 @@ class StyleComputer(
             val authorList = authorRaw
                 ?.let { parseFontFamilyList(it) }.orEmpty()
                 .filter { it.isNotBlank() && !it.equals(fams[0], ignoreCase = true) }
-            // 只有当作者声明里有**要保住**的字族时才做兜底合并（把它前置，reader 的通用名留作
-            // fallback）。两类要保住：
-            //  1) 具名字族 —— 否则书里点名的导入字体在主题模式下永远够不着（传统变黑体）；
-            //  2) `monospace` 的**等宽意图** —— 等宽与衬线/无衬线是两根轴：主题决定「默认正文长
-            //     什么样」，而书把某个 p/div 声明成等宽是在说「这段是代码」。若按通用名一视同仁
-            //     地丢掉，主题模式下 `div.code{font-family:monospace}` 会被排成正文体，读者挑的
-            //     代码字体也就永远轮不到它（书里的等宽声明并不只出现在 pre/code 标签上）。
-            // 作者写 serif/sans-serif 时仍不前置：那是与主题同一根轴上的偏好，主题（读者全局
-            // 选择）说了算。
-            val hasKeepableAuthorFont =
-                authorList.any { !isGenericFontFamily(it) || it.equals("monospace", ignoreCase = true) }
-            if (hasKeepableAuthorFont && authorList.isNotEmpty()) {
+            // 主题（读者全局字体）**接管字族**：现代主题除等宽之外一律无衬线、传统主题正文衬线 /
+            // 标题无衬线，书的具名字体不再前置（`p{font-family:STSong,serif}` 这类声明也让位，
+            // 否则现代模式下正文仍是书的宋体，「所有字体无衬线」根本做不到）。
+            // 唯一保留的是 `monospace` 的**等宽意图**：等宽与衬线/无衬线是两根轴，主题决定
+            // 「默认正文长什么样」，而书把某个 p/div/span 声明成等宽是在说「这段是代码」。
+            // 若一并丢掉，主题模式下 `div.code{font-family:monospace}` 会被排成正文体，读者挑的
+            // 代码字体也就永远轮不到它（书里的等宽声明并不只出现在 pre/code 标签上）。
+            // 作者写 serif/sans-serif 时同样不前置：那是与主题同一根轴上的偏好，主题说了算。
+            if (authorList.any { it.equals("monospace", ignoreCase = true) }) {
                 val tS = if (probe != null) orilumn.reader.time.platformNowMs() else 0L
-                // **只换字族三连，不重算整条样式**：兜底合并只是给字形回退补上书的具名字体，
-                // 不影响任何别的属性。重算会让通用族字重判定翻脸——合并后的栈以书的具名字体
-                // 开头，`genericWeightFor` 认作「主字体是书的」而返回 null，标题于是被打回书的
-                // 粗体（用户报「标题采用主题设置时调无衬线字重完全没影响」：书里给 h2 写了
-                // `font-family:STHeiti`，合并后再算就把读者挑的 regular 丢了）。
+                // **只换字族三连，不重算整条样式**：合并只影响字形回退，不影响任何别的属性。
+                // 重算会让通用族字重判定翻脸——重算时栈首已是新并进来的族，`genericWeightFor`
+                // 可能认作「主字体不是读者那族」而返回 null，读者挑的字重白丢。
                 val mergedRaw = (authorList + fams[0]).joinToString(",")
                 result = style.copy(
                     fontFamily = parseFontFamily(mergedRaw),
@@ -400,8 +395,8 @@ class StyleComputer(
             }
         }
         if (probe != null) CascadeProbe.hit(0L, parseMs, buildMs, secondPassMs)
-        // 通用族替换放在兜底合并**之后**：合并靠「族栈只有一项通用名」识别裸预设，
-        // 先展开会让它失效（书的具名字体被主题通用名顶掉）。
+        // 通用族替换放在等宽意图合并**之后**：合并靠「族栈只有一项通用名」识别裸预设，
+        // 先展开会让它失效（书的等宽声明被主题字族抹掉）。
         // 继承来的族栈不再展开一次：父级已经展开过（`serif` 前面已缀上读者族），
         // 每层再展开会逐层重复缀同一个族名。
         return if (result.fontFamilies === parent.fontFamilies) result else applyFontFamilyAliases(result)
@@ -503,7 +498,7 @@ class StyleComputer(
         val tF = if (split != null) orilumn.reader.time.platformNowMs() else 0L
         // font-family 三连：同一字符串被 parseFontFamily / parseFontFamilyList /
         // isMonospaceFamily 各解析一次。先取出来，供下面三处共用。
-        // 通用族替换**不在这里做**：要先让 computeOne 的「裸通用名 + 书具名字体」兜底合并
+        // 通用族替换**不在这里做**：要先让 computeOne 的等宽意图合并
         // 看到原始族栈（只有一项通用名），再在返回前展开（见 [applyFontFamilyAliases]）。
         val famRaw = w["font-family"]
         val famList = famRaw?.let { parseFontFamilyList(it) }

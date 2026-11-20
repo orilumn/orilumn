@@ -1295,8 +1295,9 @@ private fun ThemePage(
 
 // 文字页的字体行（自上而下与 `Sub.Text` 的键表逐项对齐）：衬线/无衬线/等宽是**全局**
 // （换书沿用），标题/正文是**本书私有**。衬线/无衬线两行不是「给正文加一条覆盖声明」，
-// 而是 CSS 通用族 `serif`/`sans-serif` 的替换：书或主题写通用名时用读者选的族渲染，
-// 书的具名字体照旧不动（见 `ReaderSettings.fontSerif`）。等宽同理，替换的是 `monospace`。
+// 而是 CSS 通用族 `serif`/`sans-serif` 的替换：书或主题写通用名时用读者选的族渲染
+// （原书设置下书的具名字体照旧生效，现代 / 传统主题下主题层接管字族，见
+// `ReaderSettings.fontSerif`）。等宽同理，替换的是 `monospace`。
 // 行序：三个通用族替换在上（全局项，改一处全书都变），书私有的标题/正文在下——
 // 通用的先定基调、再到本书这两槽的个性化。键表 [Sub.Text] 必须同序（逐项对齐）。
 private val FONT_FIELDS = listOf(

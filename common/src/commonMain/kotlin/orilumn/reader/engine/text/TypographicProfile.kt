@@ -55,7 +55,8 @@ data class TypographicProfile(
     /**
      * 读者对 CSS 通用族 `serif` / `sans-serif` 的替换族（空 = 平台默认候选链）。
      * 由 `StyleComputer` 在展开 `font-family` 值时把通用关键字前置替换（原关键字留栈尾兜底），
-     * 即浏览器「默认字体」的语义：只改通用名的含义，不动书的具名字体。
+     * 即浏览器「默认字体」的语义：只改通用名的含义；原书设置下书的具名字体照旧生效，
+     * 现代 / 传统主题下则由主题层接管字族（见 `modern.css` / `traditional.css`）。
      */
     val fontSerif: String = "",
     val fontSans: String = "",
@@ -109,8 +110,9 @@ data class TypographicProfile(
      * 通用族替换表（`serif`→[fontSerif]、`sans-serif`→[fontSans]、`monospace`→[fontCode]），
      * 只含读者真配了的项。
      *
-     * 三个槽是**同一条通道**：读者只改 CSS 通用关键字的含义，具体族由全局设置决定，
-     * 书的具名字体一概不动。等宽走 [fontCode]——「代码用什么字体」和「衬线/无衬线是哪一族」
+     * 三个槽是**同一条通道**：读者只改 CSS 通用关键字的含义，具体族由全局设置决定；
+     * 原书设置下书的具名字体一概不动，主题模式下由主题层接管字族。等宽走 [fontCode]
+     * ——「代码用什么字体」和「衬线/无衬线是哪一族」
      * 是同一个问题（通用名 → 读者全局选择的族），只是槽不同；因此书里任何地方写
      * `font-family: monospace`（不只 `pre/code` 标签）都落在这个槽上。
      *

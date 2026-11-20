@@ -10,7 +10,8 @@ import org.junit.Test
 
 /**
  * 通用族替换（读者选的「衬线字体 / 无衬线字体 / 代码字体」）：
- * - 只改 CSS 通用关键字 `serif` / `sans-serif` / `monospace` 的含义，书的具名字体一概不动；
+ * - 只改 CSS 通用关键字 `serif` / `sans-serif` / `monospace` 的含义（原书设置下书的具名字体
+ *   一概不动；现代 / 传统主题下主题层接管字族，只有书标的等宽意图例外）；
  * - 原关键字留在栈尾，读者选的族缺字形时仍能逐字形回落到平台候选链；
  * - 没配（空槽）⇒ 完全维持原行为。
  *
@@ -101,18 +102,44 @@ class GenericFontAliasTest {
     }
 
     @Test
-    fun `book named font still wins over the theme generic after expansion`() {
-        // 主题层（tier 42）写裸 `sans-serif`，书（tier 20）给 p 点了具名字体：既有语义是
-        // 书的具名字体优先、主题通用名只做最终回退。配了无衬线替换后这条必须原样成立
-        // ——不能因为裸通用名先被展开成两项就丢掉「书具名字体前置」的兜底合并。
+    fun `theme generic family takes over the book's named font`() {
+        // 主题层（tier 42）写裸 `sans-serif`，书（tier 20）给 p 点了具名字体：**主题接管**。
+        // 读者选现代主题就是要全无衬线，书里点名的族（`p{font-family:STSong,serif}` 这类）
+        // 不再排在栈首——否则「现代模式除等宽外全无衬线」永远做不到。
         val st = compute(
             profile(sans = "思源黑体"),
             "<html><body><p>x</p></body></html>",
             "p{font-family:\"BookFace\"}",
             themeCss = "p{font-family:sans-serif}",
         ).byTag("p")
-        assertEquals(listOf("BookFace", "思源黑体", "sans-serif"), st.fontFamilies)
-        assertEquals("BookFace", st.fontFamily)
+        assertEquals(listOf("思源黑体", "sans-serif"), st.fontFamilies)
+        assertEquals("思源黑体", st.fontFamily)
+    }
+
+    @Test
+    fun `modern theme overrides a book-declared serif body`() {
+        // 真书样式（《天才俱乐部》）：`p{font-family:STSong,serif}`。现代主题下正文必须是无衬线。
+        val st = compute(
+            profile(sans = "思源黑体"),
+            "<html><body><p>x</p></body></html>",
+            "p{font-family:STSong,serif}",
+            themeCss = ReaderStylesheets.theme("modern"),
+        ).byTag("p")
+        assertEquals(listOf("思源黑体", "sans-serif"), st.fontFamilies)
+    }
+
+    @Test
+    fun `traditional theme gives headings sans and body serif even when the book names fonts`() {
+        // 传统主题口径：标题无衬线、正文衬线；书的具名字族同样让位。
+        val p = profile(serif = "思源宋体", sans = "思源黑体")
+        val m = compute(
+            p,
+            "<html><body><h2>标题</h2><p>正文</p></body></html>",
+            "h2{font-family:\"STHeiti\",san-serif;font-weight:bold}p{font-family:STSong,serif}",
+            themeCss = ReaderStylesheets.theme("traditional"),
+        )
+        assertEquals(listOf("思源黑体", "sans-serif"), m.byTag("h2").fontFamilies)
+        assertEquals(listOf("思源宋体", "serif"), m.byTag("p").fontFamilies)
     }
 
     @Test
@@ -317,8 +344,8 @@ class GenericFontAliasTest {
     @Test
     fun `themed heading keeps the reader weight when the book names its own heading font`() {
         // 书给标题同时写了具名字族与粗体（现实 EPUB 极常见：`h2{font-family:STHeiti;font-weight:bold}`）。
-        // 主题的裸通用名压过书的字族后，引擎会把书的具名字族并到栈首做字形回退——这一步不能
-        // 顺手把读者挑的字重丢掉（用户报「标题采用主题设置时调无衬线字重完全没影响」）。
+        // 主题的裸通用名压过书的字族（主题接管字族），书的粗体则让位给读者挑的那一档
+        // （用户报「标题采用主题设置时调无衬线字重完全没影响」）。
         val p = profile(sans = "思源黑体", weights = mapOf("fontSans|思源黑体" to 400))
         val st = compute(
             p,
@@ -327,11 +354,7 @@ class GenericFontAliasTest {
             themeCss = ReaderStylesheets.theme("modern"),
         ).byTag("h2")
         assertEquals("读者挑的 regular 不被书的具名标题字族顶掉", 400, st.fontWeight)
-        assertEquals(
-            "书的具名字族仍留在栈首做字形回退，读者的无衬线族紧随其后",
-            listOf("BookFont", "思源黑体", "sans-serif"),
-            st.fontFamilies,
-        )
+        assertEquals("标题字族由主题（读者的无衬线族）接管", listOf("思源黑体", "sans-serif"), st.fontFamilies)
     }
 
     @Test

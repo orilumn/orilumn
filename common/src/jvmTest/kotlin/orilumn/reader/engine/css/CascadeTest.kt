@@ -165,8 +165,9 @@ class CascadeTest {
     }
 
     @Test
-    fun `读者层裸通用名缀在书栈后而非替换`() {
-        // 传统模式：UI serif 不能替换书栈（书里点名的导入字体池中有），只能垫底做最终回退。
+    fun `读者层裸通用名接管书的具名字族`() {
+        // 传统/现代模式下读者层的裸通用名是「这套主题的字」，书的具名字族不再前置：
+        // 读者选现代主题就该看到全无衬线，不能因为书里给 body 点了霞鹜文楷就还是文楷。
         val p = node("p")
         val root = node("body", children = listOf(p))
         val engine = StyleComputer(
@@ -175,8 +176,8 @@ class CascadeTest {
             null, null, sheet("body{font-family:serif}"),
         )
         val out = engine.compute(root)
-        assertEquals(listOf("霞鹜文楷", "serif"), out[root]?.fontFamilies)
-        assertEquals(listOf("霞鹜文楷", "serif"), out[p]?.fontFamilies)
+        assertEquals(listOf("serif"), out[root]?.fontFamilies)
+        assertEquals(listOf("serif"), out[p]?.fontFamilies)
     }
 
     @Test

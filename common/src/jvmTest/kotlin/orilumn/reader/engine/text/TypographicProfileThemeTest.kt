@@ -9,8 +9,8 @@ import org.junit.Test
 
 /**
  * 排版主题 (layoutTheme) 的新语义（`docs/设置模型整改计划.md` §3.5）：
- * 切主题只写该主题确实要让读者层跟随的那几项（段间距），
- * 基线（缩进 / 正文字体 / 标题字体 / 对齐）交给主题层样式表（tier 42）；
+ * 切主题写该主题确实要让读者层跟随的那几项（行距、段间距）——可调的基线必须落在设置里、
+ * 由 UI 层发声明；基线（缩进 / 正文字体 / 标题字体 / 对齐）交给主题层样式表（tier 42）；
  * 「原书设置」= 清空本书的排版覆盖（字体槽 / 行距 / 字距 / 段距 / 疏密 / 首行缩进），
  * 不动字号与页边距。build() 对存储值原样透传，用户拖滑块永远最高优先级。
  */
@@ -23,6 +23,8 @@ class TypographicProfileThemeTest {
         assertEquals("traditional", s.layoutTheme)
         // 2em 缩进由 traditional.css（tier 42）提供，读者层不再钉一个显式值。
         assertEquals(d.firstLineIndent, s.firstLineIndent)
+        // 行距是滑块项 ⇒ 主题预设写成本书显式值（传统 1.5），由 UI 层发行高声明。
+        assertEquals(TypographicProfile.TRADITIONAL_LINE_SPACING, s.lineSpacing!!, 1e-9)
         assertEquals(0.0, s.paragraphSpacing!!, 1e-9)
         assertEquals(100.0, s.paragraphGap, 1e-9)
         // 字族一律不写：正文字体由 traditional.css 的 body/h1..h6 提供，读者层不钉显式值。
@@ -36,6 +38,8 @@ class TypographicProfileThemeTest {
         val s = TypographicProfile.withLayoutTheme(d, "modern")
         assertEquals("modern", s.layoutTheme)
         assertEquals(d.firstLineIndent, s.firstLineIndent)
+        // 现代主题默认行距 1.4。
+        assertEquals(TypographicProfile.MODERN_LINE_SPACING, s.lineSpacing!!, 1e-9)
         assertEquals(d.paragraphSpacing, s.paragraphSpacing)
         assertEquals(100.0, s.paragraphGap, 1e-9)
         assertEquals("", s.fontBody)
@@ -54,13 +58,32 @@ class TypographicProfileThemeTest {
     }
 
     @Test
-    fun `theme switch touches only theme indent spacing and font`() {
+    fun `theme switch writes the theme line spacing and keeps reader font size and tracking`() {
         val base = ReaderSettings.DEFAULT.copy(fontSize = 22, lineSpacing = 1.8, letterSpacing = 3.0)
         val s = TypographicProfile.withLayoutTheme(base, "traditional")
         assertEquals(22, s.fontSize)
-        assertEquals(1.8, s.lineSpacing ?: Double.NaN, 1e-9)
+        // 行距是主题预设的一部分（传统 1.5）：切到主题就以预设为准，读者再拖滑块即覆盖。
+        assertEquals(TypographicProfile.TRADITIONAL_LINE_SPACING, s.lineSpacing!!, 1e-9)
         assertEquals(3.0, s.letterSpacing!!, 1e-9)
         assertEquals("traditional", s.layoutTheme)
+    }
+
+    @Test
+    fun `theme defaults reach the profile as explicit line spacing`() {
+        val modern = TypographicProfile.build(
+            TypographicProfile.withLayoutTheme(ReaderSettings.DEFAULT, "modern"),
+        )
+        assertEquals(1.4f, modern.lineSpacing!!, 1e-9f)
+        val traditional = TypographicProfile.build(
+            TypographicProfile.withLayoutTheme(ReaderSettings.DEFAULT, "traditional"),
+        )
+        assertEquals(1.5f, traditional.lineSpacing!!, 1e-9f)
+        // 原书设置回到「不声明」，书自己的行高生效。
+        assertTrue(
+            TypographicProfile.build(
+                TypographicProfile.withLayoutTheme(ReaderSettings.DEFAULT, "original"),
+            ).lineSpacing == null,
+        )
     }
 
     @Test

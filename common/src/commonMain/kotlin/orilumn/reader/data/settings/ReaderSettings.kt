@@ -39,6 +39,7 @@ data class ReaderSettings(
      * 行距（倍数，0.5..2.5）。**本书私有、可空**：`null` = 读者没配过 ⇒ UI 层不发行距声明，
      * 书自己的 `line-height` 生效（书没写时由引擎初值 1.5 兜底）；任何实数都照原样发（0 就是 0，
      * 不拿 0 当「没配」哨兵）。面板未配时显示原书实测行高（[probeLineSpacing]），没写显示 1.5。
+     * 切到现代 / 传统排版主题时由主题预设写入显式值（1.4 / 1.5），读者拖滑块即覆盖。
      */
     val lineSpacing: Double? = null,
     /** [Style system] First-line indent (em, 0..10): `text-indent` on body paragraphs (p/li), applied by the UI layer so it overrides the book.

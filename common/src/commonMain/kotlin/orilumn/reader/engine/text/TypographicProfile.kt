@@ -155,6 +155,18 @@ data class TypographicProfile(
 
     companion object {
         /**
+         * 现代主题的默认行距。
+         *
+         * 行距有滑块（读者可调）⇒ 按层叠纪律，它的生效值只能有一处来源：存进 [ReaderSettings]、
+         * 由 UI 层（tier 44）发 `line-height` 声明（主题层 asset 不写行距）。切主题时写成本书的
+         * 显式值，面板读数即该值；读者拖滑块即覆盖，再按一次主题回到本预设。
+         */
+        const val MODERN_LINE_SPACING = 1.4
+
+        /** 传统主题的默认行距（口径同 [MODERN_LINE_SPACING]）。 */
+        const val TRADITIONAL_LINE_SPACING = 1.5
+
+        /**
          * Computes layout constants from the effective settings (pure projection).
          *
          * Unit convention: font sizes/margins/gaps in the settings are stored in **dp** (aligned
@@ -165,7 +177,7 @@ data class TypographicProfile(
          */
         fun build(s: ReaderSettings, density: Float = 1f): TypographicProfile {
             // 排版主题预设（传统/现代）由 withLayoutTheme 在提交时只写「读者层要跟随的那几项」
-            // （段间距）；字形基线（正文字体、标题字体、缩进）交给主题层
+            // （行距、段间距、疏密）；字形基线（正文字体、标题字体、缩进）交给主题层
             // `traditional.css` / `modern.css`。
             // 此处一律原样透传存储值：滑块值即生效值，用户拖滑块永远是最高优先级。
             // 原书设置 = `layoutTheme == "original"` ⇒ 主题层整张不加载，书自己的 CSS 说了算。
@@ -209,10 +221,14 @@ data class TypographicProfile(
         }
 
         /**
-         * 切排版主题：把主题的基线交给**主题层**（tier 42 的 `modern.css` / `traditional.css`），
-         * 这里只写该主题确实要让读者层跟随的那几项（见 `docs/设置模型整改计划.md` §3.5）。
+         * 切排版主题：主题预设的**可调项**（行距、段间距、疏密）写成本书的显式值，由 UI 层
+         * （tier 44）发声明；基线（缩进、字体族、对齐）由主题层（tier 42 的
+         * `modern.css` / `traditional.css`）声明，读者动滑条时再以本书显式值覆盖。
+         * 详见 `docs/设置模型整改计划.md` §3.5。
          *
-         * - 传统 / 现代：只写 `layoutTheme` + 段间距；**字体族一律不写**——正文字体、标题字体
+         * - 传统 / 现代：写 `layoutTheme` + 行距（传统 [TRADITIONAL_LINE_SPACING]，现代
+         *   [MODERN_LINE_SPACING]）+ 段间距、疏密；行距有滑块，值必须落在 [ReaderSettings] 里由
+         *   UI 层发声明（主题层 asset 只放不可调的基线）。**字体族一律不写**——正文字体、标题字体
          *   都由主题层样式表声明（`body` 与 `h1..h6`），标题因此和正文一起跟随主题。
          *   以前这里往「正文」槽写 `serif`/`sans-serif`，那条声明在 UI 层（tier 44）压住主题层，
          *   而且只覆盖正文、不覆盖标题，于是「切了主题标题不跟着变」。现在顺手把旧版本遗留在
@@ -227,6 +243,8 @@ data class TypographicProfile(
             return when (theme) {
                 "traditional" -> s.copy(
                     layoutTheme = theme,
+                    // 传统主题默认行距 1.5（读者拖滑块即覆盖；再按一次主题恢复预设）。
+                    lineSpacing = TRADITIONAL_LINE_SPACING,
                     // 传统节奏靠主题层 1em 边距、缩进区分段落 ⇒ 段间距绝对 0em（p/li 边距清零）；
                     // 标题等结构块照常走疏密（预设 100），用户上调段间距即有间距。
                     paragraphSpacing = 0.0,
@@ -236,6 +254,8 @@ data class TypographicProfile(
                 )
                 "modern" -> s.copy(
                     layoutTheme = theme,
+                    // 现代主题默认行距 1.4。
+                    lineSpacing = MODERN_LINE_SPACING,
                     // 现代节奏用主题层自己的 `p,li{margin:1em 0}` ⇒ 段间距不声明（null = 听书/主题），
                     // 面板显示实测 1em；读者拖了滑块才以绝对 em 覆盖。
                     paragraphSpacing = base.paragraphSpacing,

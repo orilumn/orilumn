@@ -43,6 +43,28 @@ Orilumn 阅读器就是为了解决以上种种问题而开发的。之前，为
 - 后台线程管理引擎，统一按预定优先级调度、管理后台任务。
 - 根据排版结果，自动生成页码和进度条，或在全书排版未完成时，自动塌缩为以章为单位的百分比进度。
 
+## 演示
+
+| 3D 卷曲翻页 | 卷曲翻页细节 |
+|:---:|:---:|
+| <img src="docs/assets/readme/01-page-curl.gif" width="220" alt="3D 卷曲翻页"> | <img src="docs/assets/readme/02-page-curl-detail.gif" width="220" alt="卷曲翻页细节"> |
+
+| 批注字号调整 | 批注折叠开关 |
+|:---:|:---:|
+| <img src="docs/assets/readme/03-annotation-panel.gif" width="220" alt="批注字号调整"> | <img src="docs/assets/readme/04-annotation-effect.gif" width="220" alt="批注折叠开关"> |
+
+| 修改批注样式 | 添加和删除书签 |
+|:---:|:---:|
+| <img src="docs/assets/readme/05-annotation-options.gif" width="220" alt="修改批注样式"> | <img src="docs/assets/readme/06-bookmark.gif" width="220" alt="添加和删除书签"> |
+
+| 修改 EPUB 内容 | 修订和选区调整 |
+|:---:|:---:|
+| <img src="docs/assets/readme/07-revision.gif" width="220" alt="修改 EPUB 内容"> | <img src="docs/assets/readme/08-selection-toolbar.gif" width="220" alt="修订和选区调整"> |
+
+| 字体列表动画 | 笔记列表动画 |
+|:---:|:---:|
+| <img src="docs/assets/readme/09-font-manager.gif" width="220" alt="字体列表动画"> | <img src="docs/assets/readme/10-notes-list.gif" width="220" alt="笔记列表动画"> |
+
 ## 支持的平台和构建产物
 
 官方产物在 [Releases](https://github.com/orilumn/orilumn/releases) 里，由 `vX.Y.Z` tag 触发 GitHub Actions 构建。由于时间和设备有限，不会每次构建都一一测试，所以不保证每个平台工作都正常，但平板是我主要的测试和使用平台，应该相对稳定。

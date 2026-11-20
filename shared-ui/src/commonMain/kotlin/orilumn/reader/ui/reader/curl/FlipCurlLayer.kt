@@ -209,6 +209,8 @@ fun FlipCurlLayer(
                     paperArgb = paperArgb,
                     frontTex = frontTex,
                     backTex = backTex,
+                    // 上一页回翻：折痕扫向自由边是**收尾**，落影要跟着收（见 freeEdgeShadowFadeIfArriving）。
+                    arriving = frame.turningIsTarget,
                 )
                 if (done) {
                     recordFrame()

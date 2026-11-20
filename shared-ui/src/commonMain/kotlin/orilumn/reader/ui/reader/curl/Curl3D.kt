@@ -128,6 +128,9 @@ import kotlin.math.sqrt
  *
  * @param frontTex 正面（被翻走那张）页栅格在页坐标里的左上角
  * @param backTex 露出页（折痕另一侧那张）页栅格在页坐标里的左上角
+ * @param arriving 被翻的那张是不是**上一页正在落位**（应为回翻那一张）。只有这种收尾才把落影在
+ *   自由边附近收掉（见 [freeEdgeShadowFade]）；翻下一页时折痕同样贴在自由边，但那是起手，
+ *   影正该在那里。
  * @return `false` 表示这一帧没有网格可画，调用方退回折页。
  */
 internal fun DrawScope.drawCurl3DFrame(
@@ -138,6 +141,7 @@ internal fun DrawScope.drawCurl3DFrame(
     frontTex: Offset,
     backTex: Offset,
     radiusRatio: Float = CURL3D_RADIUS_RATIO,
+    arriving: Boolean = false,
 ): Boolean {
     val w = shape.pageW
     val h = shape.pageH
@@ -197,7 +201,7 @@ internal fun DrawScope.drawCurl3DFrame(
     val silhouette = mesh.maxOffsetAlong(up.x, up.y, t0)
     val shadowWidth = lift * 0.5f
     val shadowAlpha = DROP_SHADOW_ALPHA * (lift / (2f * radius)).coerceIn(0f, 1f) *
-        shape.shadowFade * freeEdgeShadowFade(shape, radius)
+        shape.shadowFade * freeEdgeShadowFadeIfArriving(shape, radius, arriving)
     clipRect(0f, 0f, w, h) {
         drawRollShadow(
             mesh = mesh,
@@ -361,10 +365,14 @@ internal fun DrawScope.drawCurl3DFrame(
  *
  * 折痕扫到自由边附近时，筒已经没剩多少纸可卷，几何上却仍是满径的筒：落影照旧按满宽铺出去，
  * 落在露出页仅剩的那条**留白**上。折痕一路扫到页边、影跟着扫过去再突然消失，读者看到的就是
- * 一条灰竖带闪一下。桌面结算 600ms（平板 300ms）才看得清，所以用户只报桌面。
+ * 一条灰竖带闪一下。桌面结算 600ms（平板 300ms，且平板上手指多半已经带着走了大半页）、
+ * 又总是从进度 0 整页扫一遍，所以只有桌面报得出来；平板偶尔也闪，只是短到来不及辨认。
  *
  * 与 [CurlShape.shadowFade] 分工：那个按**进度**淡（头尾 10%），管起手与收尾的倾斜扶正；
  * 这个按**折痕位置**淡，管「纸已经卷到页边、没有纸可卷了」。两者相乘。
+ *
+ * **它不是通用口径**：调用方只许经 [freeEdgeShadowFadeIfArriving] 用它，落在「自动播放的
+ * 翻上一页收尾」上；翻下一页起手时折痕同样贴在自由边，那时影必须照画（见那个函数的 KDoc）。
  *
  * 中段（折痕离自由边还有 [CURL3D_FREE_EDGE_SHADOW_FADE] 个半径以上）恒为 1，落影深浅一分不动；
  * 只有最后这一段收掉 —— 正好是影会压进留白的那一段。收的时候按**平方**走（而不是直线）：
@@ -384,6 +392,24 @@ internal fun freeEdgeShadowFade(shape: CurlShape, radius: Float): Float {
     val k = (freeGap / span).coerceIn(0f, 1f)
     return k * k
 }
+
+/**
+ * 上面那条系数**只准用在一种情形**：自动播放的「翻上一页」收尾（[arriving] 且非跟手）。
+ *
+ * ## 为什么必须限定，而不是「折痕贴边就淡」
+ *
+ * 折痕离自由边很近这件事，在两种翻法里都会发生，但含义正相反：
+ * - **翻上一页收尾**：纸几乎盖平，筒没纸可卷，影却压在露出页仅剩的留白上，一路扫到页边再突然
+ *   消失 —— 读者看到的是「闪过一条灰竖带」，影在这里确实是多余的；
+ * - **翻下一页起手**：折痕本来就从自由边起步，筒刚离页，影正落在纸卷脚下的露出页上 ——
+ *   那是整幅画面里唯一交代「纸抬起来了」的暗部，收掉就成了「折痕右侧没有阴影」。
+ *
+ * 只按位置淡分不开这两件事（同一组 `(pageW, foldX)` 两边完全一样），所以判据只能加在
+ * **翻页方向 + 是否在跟手**上：跟手时影的浓淡一律交给几何（`curlShape` 的「跟手时阴影也不淡」），
+ * 起手里的那段同样不许淡。
+ */
+internal fun freeEdgeShadowFadeIfArriving(shape: CurlShape, radius: Float, arriving: Boolean): Float =
+    if (arriving && !shape.anchored) freeEdgeShadowFade(shape, radius) else 1f
 
 /**
  * 纸背的四个角（屏幕坐标），顺序 `[近-侧0, 远-侧0, 远-侧1, 近-侧1]`。

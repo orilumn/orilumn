@@ -56,12 +56,15 @@ class Curl3DRenderTest {
         back: ImageBitmap,
         frontTex: Offset = Offset.Zero,
         backTex: Offset = Offset.Zero,
+        arriving: Boolean = false,
     ): ImageBitmap {
         val w = shape.pageW.toInt()
         val h = shape.pageH.toInt()
         val img = ImageBitmap(w, h, ImageBitmapConfig.Argb8888, hasAlpha = true)
         CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(img), Size(w.toFloat(), h.toFloat())) {
-            val drawn = drawCurl3DFrame(shape, images(front), images(back), paper, frontTex, backTex)
+            val drawn = drawCurl3DFrame(
+                shape, images(front), images(back), paper, frontTex, backTex, arriving = arriving,
+            )
             assertTrue("这一帧必须由网格画出来", drawn)
         }
         return img
@@ -1278,6 +1281,72 @@ class Curl3DRenderTest {
             prev = fade
         }
         assertEquals("过了 2.5R 应当已经全浓", 1f, prev, 1e-6f)
+    }
+
+    /**
+     * 那条淡出**只管自动播放的「翻上一页」收尾**，不许碰到下一页起手，也不许碰到跟手。
+     *
+     * 读者报「折痕右侧现在没有阴影」：折痕贴近自由边在两种翻法里都会发生 —— 上一页是**收尾**
+     * （纸几乎盖平，影压在仅剩的留白上，该收），下一页是**起手**（筒刚离页，影正该在纸卷脚下）。
+     * 同一组 `(pageW, foldX)` 两边完全一样，所以只能按「是不是上一页落位 + 是否跟手」判。
+     */
+    @Test
+    fun freeEdgeFadeOnlyAppliesToTheArrivingPreviousPage() {
+        val w = 900f
+        val h = 1300f
+        val r = w * CURL3D_RADIUS_RATIO
+        // 折痕贴在自由边的同一帧。
+        val atFreeEdge = curlShape(w, h, 0.1f, 1)
+        assertEquals(
+            "下一页起手不许淡影",
+            1f,
+            freeEdgeShadowFadeIfArriving(atFreeEdge, r, arriving = false),
+            1e-6f,
+        )
+        assertTrue(
+            "上一页收尾要靠它把影收掉",
+            freeEdgeShadowFadeIfArriving(atFreeEdge, r, arriving = true) < 0.3f,
+        )
+        // 跟手那一帧哪怕正被当成上一页落位也不淡：浓淡交给几何（见 curlShape）。
+        assertEquals(
+            "跟手时不许淡影",
+            1f,
+            freeEdgeShadowFadeIfArriving(atFreeEdge.copy(anchored = true), r, arriving = true),
+            1e-6f,
+        )
+        // 中段两边都没有区别。
+        assertEquals(
+            "中段不该动影",
+            1f,
+            freeEdgeShadowFadeIfArriving(curlShape(w, h, 0.5f, 1), r, arriving = true),
+            1e-6f,
+        )
+    }
+
+    /** 起手那一帧的落影，真的随那个参数出现/消失（锁住绘制层的接线，不只是纯函数）。 */
+    @Test
+    fun nextPageStartKeepsTheRollShadowOnScreen() {
+        val w = 600
+        val h = 900
+        val shape = curlShape(w.toFloat(), h.toFloat(), 0.06f, 1, tilt = 0.4f)
+        fun cover(arriving: Boolean): Int {
+            val on = render(shape, solid(w, h, red), solid(w, h, blue), arriving = arriving).toPixelMap()
+            val off = render(shape.copy(shadowFade = 0f), solid(w, h, red), solid(w, h, blue)).toPixelMap()
+            var n = 0
+            for (y in 0 until h) {
+                for (x in 0 until w) {
+                    val a = off[x, y]
+                    val b = on[x, y]
+                    val d = ((a.red - b.red) + (a.green - b.green) + (a.blue - b.blue)) / 3f
+                    if (d > 3f / 255f) n++
+                }
+            }
+            return n
+        }
+        val start = cover(arriving = false)
+        val arriving = cover(arriving = true)
+        assertTrue("下一页起手的落影必须画出来（覆盖 $start 像素）", start > 400)
+        assertTrue("上一页收尾的落影应当收掉（$arriving vs $start）", arriving * 4 < start)
     }
 
     /**

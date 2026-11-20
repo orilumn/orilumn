@@ -1251,6 +1251,36 @@ class Curl3DRenderTest {
     }
 
     /**
+     * 落影在折痕贴近**自由边**时收掉：中段全浓，贴边归零。
+     *
+     * 读者报的是「卷曲动画翻上一页收尾，右侧留白闪过一条灰竖带」：折痕扫到自由边附近时筒已经
+     * 没纸可卷，影却照旧铺在露出页仅剩的留白上。修法是在影的浓度上再乘一道按折痕位置的系数
+     * （见 `freeEdgeShadowFade`），这里只锁这条系数的三点行为——中段不动、贴边归零、越靠边越淡。
+     *
+     * 不锁具体像素：影的深浅本来就要真机跟手看（见文件头）。
+     */
+    @Test
+    fun rollShadowFadesNearTheFreeEdge() {
+        val w = 920f
+        val h = 1400f
+        val r = w * CURL3D_RADIUS_RATIO
+        // 中段（折痕离自由边远超 2.5R）：影全浓。
+        assertEquals("中段不该动影", 1f, freeEdgeShadowFade(curlShape(w, h, 0.5f, 1), r), 1e-6f)
+        // 折痕贴在自由边：影归零（进度 0 时折痕就在右缘）。
+        assertEquals("贴自由边时影要归零", 0f, freeEdgeShadowFade(curlShape(w, h, 0f, 1), r), 1e-6f)
+        // 镜像几何的自由边在左缘，同样贴边归零。
+        assertEquals("镜像几何贴自由边时影要归零", 0f, freeEdgeShadowFade(curlShape(w, h, 0f, -1), r), 1e-6f)
+        // 越靠近自由边越淡，且连续。
+        var prev = -1f
+        for (p in listOf(0f, 0.02f, 0.05f, 0.1f, 0.15f, 0.2f, 0.25f, 0.3f)) {
+            val fade = freeEdgeShadowFade(curlShape(w, h, p, 1), r)
+            assertTrue("p=$p 影的淡出系数不该倒退", fade >= prev)
+            prev = fade
+        }
+        assertEquals("过了 2.5R 应当已经全浓", 1f, prev, 1e-6f)
+    }
+
+    /**
      * 折痕**基本竖直**时，影带与纸角扇形不许随倾斜微动在页边两侧来回切。
      *
      * 读者原话：「在页面折起基本平行于屏幕左右边框时，有时会在竖直的页边右侧多出一条阴影带，

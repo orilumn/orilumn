@@ -153,6 +153,28 @@ class CurlRenderTest {
         }
     }
 
+    /**
+     * 收尾最后一帧（3D 网格退化成空、退回折页）不许在自由边留一条灰竖带。
+     *
+     * 上一页收尾时折痕扫到右缘，纸背只剩一条几像素的窄条，它的外缘影却按满宽铺在右侧留白上；
+     * 这一帧恰好是 3D 网格交不出网格、退回折页的那一帧，读者看到的就是「动画结束时右侧闪一下」。
+     */
+    @Test
+    fun fallbackTailFrameDoesNotLeaveAShadowBandOnTheFreeEdge() {
+        val w = 400
+        val h = 600
+        val shape = curlFrame(w.toFloat(), h.toFloat(), 0.999f, direction = -1).shape
+        val white = solid(w, h, 0xFFFFFFFF.toInt())
+        val px = render(shape, images(white), images(white)).toPixelMap()
+        for (x in w - 40 until w - 4) {
+            for (y in h / 5 until h * 4 / 5 step 5) {
+                val c = px[x, y]
+                val v = ((c.red * 255).toInt() + (c.green * 255).toInt() + (c.blue * 255).toInt()) / 3
+                assertTrue("收尾最后一帧右侧留白被影压暗了（x=$x y=$y v=$v）", v >= 245)
+            }
+        }
+    }
+
     /** 还没开始翻（进度 0 且不在结算里）：整帧就是读者正在看的那一页（`front`）。 */
     @Test
     fun untouchedFrameIsThePageBeingRead() {

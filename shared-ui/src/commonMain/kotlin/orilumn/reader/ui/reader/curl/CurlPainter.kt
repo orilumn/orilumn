@@ -104,7 +104,7 @@ internal fun DrawScope.drawCurlFrame(
         }
     }
 
-    // ④ 纸背外缘的影 ⑤ 折痕旁的影
+    // ④ 纸背外缘的影 ⑤ 折痕旁的影（两道都随进度头尾淡出，见 [drawStripShadow]）
     drawStripShadow(shape, stripPts)
     drawCreaseShadow(shape)
 }
@@ -144,6 +144,11 @@ private fun DrawScope.drawStripShadow(shape: CurlShape, pts: List<Offset>) {
     val w = shape.pageW
     val edgeW = w * CURL_SHADOW_BAND
     if (edgeW <= 0f) return
+    // 与 [drawCreaseShadow] 同一口径：头尾 10% 随进度淡出。
+    // **3D 网格在收尾最后一帧会退化成空、退回这条 2D 路径**（见 [drawCurlFrame] 的调用方），
+    // 少了这道系数，影就会以满浓度铺在仅剩的右侧留白上，闪一条灰竖带。
+    val alpha = SHADOW_ALPHA * shape.shadowFade
+    if (alpha <= 0.002f) return
 
     var cx = 0f
     var cy = 0f
@@ -176,7 +181,7 @@ private fun DrawScope.drawStripShadow(shape: CurlShape, pts: List<Offset>) {
     }
 
     fun bandBrush(from: Offset, to: Offset) = Brush.linearGradient(
-        colorStops = arrayOf(0f to Color(0f, 0f, 0f, SHADOW_ALPHA), 1f to Color(0f, 0f, 0f, 0f)),
+        colorStops = arrayOf(0f to Color(0f, 0f, 0f, alpha), 1f to Color(0f, 0f, 0f, 0f)),
         start = from,
         end = to,
     )

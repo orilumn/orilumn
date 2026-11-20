@@ -196,7 +196,8 @@ internal fun DrawScope.drawCurl3DFrame(
     val lift = radius * (1f - cos(minOf(mesh.maxArc() / radius, PI.toFloat())))
     val silhouette = mesh.maxOffsetAlong(up.x, up.y, t0)
     val shadowWidth = lift * 0.5f
-    val shadowAlpha = DROP_SHADOW_ALPHA * (lift / (2f * radius)).coerceIn(0f, 1f) * shape.shadowFade
+    val shadowAlpha = DROP_SHADOW_ALPHA * (lift / (2f * radius)).coerceIn(0f, 1f) *
+        shape.shadowFade * freeEdgeShadowFade(shape, radius)
     clipRect(0f, 0f, w, h) {
         drawRollShadow(
             mesh = mesh,
@@ -351,6 +352,37 @@ internal fun DrawScope.drawCurl3DFrame(
         }
         }
     return true
+}
+
+/**
+ * 纸卷贴近**自由边**时，落影再淡一次：折痕离自由边越近，影越淡，贴边时归零。
+ *
+ * ## 修的是「翻上一页收尾，右侧留白整条竖带闪一下」
+ *
+ * 折痕扫到自由边附近时，筒已经没剩多少纸可卷，几何上却仍是满径的筒：落影照旧按满宽铺出去，
+ * 落在露出页仅剩的那条**留白**上。折痕一路扫到页边、影跟着扫过去再突然消失，读者看到的就是
+ * 一条灰竖带闪一下。桌面结算 600ms（平板 300ms）才看得清，所以用户只报桌面。
+ *
+ * 与 [CurlShape.shadowFade] 分工：那个按**进度**淡（头尾 10%），管起手与收尾的倾斜扶正；
+ * 这个按**折痕位置**淡，管「纸已经卷到页边、没有纸可卷了」。两者相乘。
+ *
+ * 中段（折痕离自由边还有 [CURL3D_FREE_EDGE_SHADOW_FADE] 个半径以上）恒为 1，落影深浅一分不动；
+ * 只有最后这一段收掉 —— 正好是影会压进留白的那一段。收的时候按**平方**走（而不是直线）：
+ * 影带本身只有几十像素宽，线性淡到一半时它还整条压在留白里，看着仍是一条灰带；平方让它
+ * 在**刚进留白**的时候就已经很淡，贴边时正好归零。
+ *
+ * 距离的取法跟着几何走：`direction = -1` 是左右镜像几何，自由边在左缘，所以量的是 `foldX`；
+ * 其余情况自由边在右缘，量的是 `pageW - foldX`。
+ */
+internal fun freeEdgeShadowFade(shape: CurlShape, radius: Float): Float {
+    val freeGap = if (shape.direction >= 0) {
+        shape.pageW - shape.foldX
+    } else {
+        shape.foldX
+    }
+    val span = (radius * CURL3D_FREE_EDGE_SHADOW_FADE).coerceAtLeast(1f)
+    val k = (freeGap / span).coerceIn(0f, 1f)
+    return k * k
 }
 
 /**
@@ -801,6 +833,14 @@ private const val ROLL_SHADE_MAX_ALPHA: Float = 0.30f
 
 /** 落影最深处的不透明度（参考实现 `SHADOW_INNER_COLOR` 的 alpha = 0.5）。 */
 private const val DROP_SHADOW_ALPHA: Float = 0.32f
+
+/**
+ * 折痕贴近自由边时落影的淡出距离（相对卷曲半径）。
+ *
+ * 2.5R 是「影宽 + 留白」的量级：折痕离自由边还剩 2.5 个半径时影全浓，贴边时归零（见
+ * [freeEdgeShadowFade]）。取小了影带仍会压进留白，取大了中段落影就没了。
+ */
+private const val CURL3D_FREE_EDGE_SHADOW_FADE: Float = 2.5f
 
 /** 明暗渐变的分段数（一维函数的采样密度，够到看不出折线）。 */
 private const val ROLL_SHADE_STOPS: Int = 16

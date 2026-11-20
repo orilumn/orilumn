@@ -130,10 +130,11 @@ data class TypographicProfile(
      * 通用族替换后的基线字重（key = 通用关键字 `serif` / `sans-serif` / `monospace`），
      * 只含读者真配了的项。
      *
-     * 消费方是 `StyleComputer`：元素没有自己的 `font-weight` 声明、且父级是常规 400 时补上，
-     * 让「衬线 / 无衬线 / 代码」槽里选的字重落到对应文字上；显式 bold（`strong`/`h1..h6`）与
-     * 作者字重不动。代码槽的字重只对**书里写成通用等宽**的元素生效（`pre/code` 标签另有
-     * UI 层的按槽声明，见 `ReaderUiSheet`）。
+     * 消费方是 `StyleComputer`：普通正文在元素没有自己的 `font-weight` 声明、且父级是常规 400 时
+     * 补上，让「衬线 / 无衬线 / 代码」槽里选的字重落到对应文字上；正文里 `strong` 与作者字重不动。
+     * 标题是例外：标题槽「采用主题设置」时标题的字族来自读者层（主题的 `h1..h6` 裸通用名），
+     * 读者挑的那一档属于同一张字体脸，书 / UA 写的标题字重也让位。代码槽的字重只对**书里写成
+     * 通用等宽**的元素生效（`pre/code` 标签另有 UI 层的按槽声明，见 `ReaderUiSheet`）。
      * 没配 alias（或该槽没选字重）⇒ 空表 ⇒ 完全维持原行为。
      */
     val genericFontWeights: Map<String, Int>

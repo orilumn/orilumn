@@ -271,16 +271,80 @@ class GenericFontAliasTest {
     }
 
     @Test
-    fun `author weight on a themed heading still wins`() {
-        // 书显式给标题写字重 ⇒ 书的声明（tier 20）压过 UA 基线，通用族字重不再插手。
-        val p = profile(sans = "思源黑体", weights = mapOf("fontSans|思源黑体" to 300))
+    fun `themed heading follows the reader weight even when the book wrote one`() {
+        // 标题槽「采用主题设置」⇒ 标题的字族来自读者层（主题的 h1..h6 裸通用名），读者给这一族
+        // 挑的字重属于同一张读者层字体脸，书的标题字重也要让位；否则「标题采用主题设置 + 无衬线
+        // 挑 regular」在写了标题粗体的书里完全看不出来（用户报「这个字重不起作用」）。
+        val p = profile(sans = "思源黑体", weights = mapOf("fontSans|思源黑体" to 400))
         val st = compute(
             p,
             "<html><body><h2>标题</h2></body></html>",
-            "h2{font-weight:600}",
+            "h2{font-weight:bold}",
             themeCss = ReaderStylesheets.theme("modern"),
         ).byTag("h2")
+        assertEquals(400, st.fontWeight)
+    }
+
+    @Test
+    fun `themed heading parent already carrying the reader weight does not block it`() {
+        // 现代主题把无衬线字重也补在 body 上（父级 300）；标题不能因为「父级不是 400」就被
+        // 打回 UA bold——标题自己的字族仍来自主题，读者的那一档照样生效。
+        val p = profile(sans = "思源黑体", weights = mapOf("fontSans|思源黑体" to 300))
+        val m = compute(
+            p,
+            "<html><body><h2>标题</h2><p>正文</p></body></html>",
+            "",
+            themeCss = ReaderStylesheets.theme("modern"),
+        )
+        assertEquals("父级已是 300，标题仍跟读者挑的那一档", 300, m.byTag("h2").fontWeight)
+        assertEquals(300, m.byTag("p").fontWeight)
+    }
+
+    @Test
+    fun `book weight on a themed paragraph still wins`() {
+        // 主题也给 p/div 写了裸通用名，但那只是「默认正文长什么样」：书在段落上显式写的
+        // 加粗/字重仍是书说了算（只有标题标签跟着读者那一档走）。
+        val p = profile(sans = "思源黑体", weights = mapOf("fontSans|思源黑体" to 400))
+        val st = compute(
+            p,
+            "<html><body><p class=\"b\">正文</p></body></html>",
+            "p.b{font-weight:600}",
+            themeCss = ReaderStylesheets.theme("modern"),
+        ).byTag("p")
         assertEquals(600, st.fontWeight)
+    }
+
+    @Test
+    fun `themed heading keeps the reader weight when the book names its own heading font`() {
+        // 书给标题同时写了具名字族与粗体（现实 EPUB 极常见：`h2{font-family:STHeiti;font-weight:bold}`）。
+        // 主题的裸通用名压过书的字族后，引擎会把书的具名字族并到栈首做字形回退——这一步不能
+        // 顺手把读者挑的字重丢掉（用户报「标题采用主题设置时调无衬线字重完全没影响」）。
+        val p = profile(sans = "思源黑体", weights = mapOf("fontSans|思源黑体" to 400))
+        val st = compute(
+            p,
+            "<html><body><h2>标题</h2></body></html>",
+            "h2{font-family:BookFont;font-weight:bold}",
+            themeCss = ReaderStylesheets.theme("modern"),
+        ).byTag("h2")
+        assertEquals("读者挑的 regular 不被书的具名标题字族顶掉", 400, st.fontWeight)
+        assertEquals(
+            "书的具名字族仍留在栈首做字形回退，读者的无衬线族紧随其后",
+            listOf("BookFont", "思源黑体", "sans-serif"),
+            st.fontFamilies,
+        )
+    }
+
+    @Test
+    fun `book heading weight wins when the theme is off`() {
+        // 原书设置：主题整张不加载，标题「采用主题设置」= 随书 ⇒ 书的标题字重原样生效。
+        val p = profile(sans = "思源黑体", weights = mapOf("fontSans|思源黑体" to 400))
+        val st = compute(
+            p,
+            "<html><body><h2>标题</h2></body></html>",
+            "h2{font-family:sans-serif;font-weight:bold}",
+            themeCss = null,
+        ).byTag("h2")
+        assertEquals(700, st.fontWeight)
     }
 
     @Test

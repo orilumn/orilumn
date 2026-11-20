@@ -222,7 +222,7 @@ fun ReaderScreen(
     // 于是「卡片先滑走、键盘再落」——正是要消掉的两段式。失焦后键盘与卡片同一段时间里各自归位。
     val focusManager = LocalFocusManager.current
     val profile = remember(settings, density) { TypographicProfile.build(settings, density) }
-    // 批注字体（渲染层解析）：字族名 + 字重 → Compose 字体。没单独挑 = 跟随正文字体
+    // 批注字体（渲染层解析）：字族名 + 字重 → Compose 字体。没单独挑 = 采用正文字体
     // （正文槽 → 主题层 / 通用族替换；原书设置下退回平台默认），字体已删 = 平台默认。
     // 只影响旁注覆盖层，不进版式（`noteFont` 在 withoutNonLayout 里，面板走无重排提交）。
     // 字重**不烤进字体族**：桌面端单面族没有第二档，Compose 仍按族名去系统字库取面、烤好的字重被丢，

@@ -926,7 +926,7 @@ fun ReaderSettingsPanel(
                                 onMouseMove = onMove,
                                 listState = listState,
                                 scanProgress = fontScanProgress,
-                                // 批注字体槽位的「跟随」是跟正文字体（旁注不在书的级联里，由
+                                // 批注字体槽位的「跟随」是采用正文字体（旁注不在书的级联里，由
                                 // 渲染层按正文槽 / 主题层解析；原书设置下退回系统默认）；
                                 // 等宽/衬线/无衬线三个全局槽跟的是系统候选链；
                                 // 正文 / 标题槽跟的是排版主题（现代 / 传统由主题层声明字体，原书设置听书）。
@@ -1312,12 +1312,12 @@ private fun isGlobalFontSlot(key: String): Boolean =
     key == "fontCode" || key == "fontSerif" || key == "fontSans"
 
 /**
- * 槽位空值文案：三个全局槽（等宽/衬线/无衬线）都是「系统默认」，批注槽跟正文字体，
+ * 槽位空值文案：三个全局槽（等宽/衬线/无衬线）都是「系统默认」，批注槽采用正文字体，
  * 正文 / 标题槽跟排版主题（现代 / 传统由主题层声明字体，原书设置则听书）。
  */
 private fun followLabelOf(key: String): String = when (key) {
     "fontSerif", "fontSans", "fontCode" -> "系统默认"
-    "noteFont" -> "跟正文字体"
+    "noteFont" -> "采用正文字体"
     else -> "采用主题设置"
 }
 
@@ -1326,7 +1326,7 @@ private fun followSubtitleOf(key: String): String = when (key) {
     "fontSerif" -> "使用系统衬线候选字体"
     "fontSans" -> "使用系统无衬线候选字体"
     "fontCode" -> "使用系统等宽候选字体"
-    "noteFont" -> "跟随正文当前字体（原书设置时用系统默认）"
+    "noteFont" -> "采用正文当前字体（原书设置时用系统默认）"
     else -> "跟随当前阅读主题（原书设置时随书）"
 }
 
@@ -1380,7 +1380,7 @@ private fun withSlotWeight(s: ReaderSettings, key: String, family: String, weigh
         )
     }
 
-/** 清掉某槽的全部字重锚点（空槽 = 系统默认 / 采用主题设置 / 跟正文字体时用），只动该槽自己那张表。 */
+/** 清掉某槽的全部字重锚点（空槽 = 系统默认 / 采用主题设置 / 采用正文字体时用），只动该槽自己那张表。 */
 private fun withSlotAnchorsCleared(s: ReaderSettings, key: String): ReaderSettings =
     if (isGlobalFontSlot(key)) {
         s.copy(fontWeightAnchorsGlobal = s.fontWeightAnchorsGlobal.filterKeys { !it.startsWith("$key|") })
@@ -1736,7 +1736,7 @@ private fun AnimModePage(
  * 「恢复默认颜色池」之后还有两项**旁注自己的样式**（2026-10-28 用户定口）：
  * - **批注字体**：与正文 / 标题 / 代码同一套字体下钻页，可挑任意系统或导入字体；
  *   多字重的族同样进字重页（选完族与字重一起生效，换族回到该族默认字重）；
- *   空槽 = 跟随正文字体（正文槽 / 排版主题解析出来的那一族与字重；原书设置下正文听书，
+ *   空槽 = 采用正文字体（正文槽 / 排版主题解析出来的那一族与字重；原书设置下正文听书，
  *   覆盖层退回系统默认字体）。
  * - **批注字号**：滑条编辑倍率，右侧显示换算后的实际字号；旁注始终跟正文字号等比。
  * 两项都只作用于覆盖层，与色槽同口径走无重排提交。
@@ -1756,7 +1756,7 @@ private fun AnnotationColorPage(
     onSelectSlot: (AnnotationKind, Int) -> Unit,
     /** 「恢复默认颜色池」的按下反馈：true 时按钮文字换成「已恢复」并金色高亮。 */
     resetFlash: Boolean,
-    /** 「批注字体」行右侧的展示名（空槽 = 跟正文字体；导入 / 系统族取本地化展示名）。 */
+    /** 「批注字体」行右侧的展示名（空槽 = 采用正文字体；导入 / 系统族取本地化展示名）。 */
     noteFontLabel: String,
     /** 「显示审阅模式」的勾选态；null 回调 = 本宿主没有审阅视图，这一行不画。 */
     reviewActive: Boolean,

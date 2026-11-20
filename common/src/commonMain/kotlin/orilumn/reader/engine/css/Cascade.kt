@@ -93,6 +93,23 @@ class Cascade(
     }
 
     /**
+     * **读者层**（theme / UI / custom，tier ≥ [READER_TIER_MIN]）给标题标签（`h1..h6`）声明
+     * `font-family` 的规则（[readerHeadingFontMatches] 专用，构造后惰性过滤）。
+     *
+     * 现状只有主题层那一条 `h1..h6{font-family:sans-serif}`（`modern.css` / `traditional.css`），
+     * 表永远很小。读者把标题槽设成「采用主题设置」时，标题的字族就是这条规则说了算——前面
+     * 那条通用族字重因此属于**读者层的字体脸**，可以压过书的标题字重（见
+     * `StyleComputer.computeOne` 的 `readerHeadingFont`）。
+     */
+    private val readerHeadingFontMatchers: List<Matcher> by lazy {
+        matchers.filter { m ->
+            m.tierNormal >= READER_TIER_MIN &&
+                m.declarations.any { d -> d.property == "font-family" } &&
+                m.matchers.any { sel -> sel.rightmostTag?.let { it in HEADING_TAGS } == true }
+        }
+    }
+
+    /**
      * 该元素 `font-weight` 的胜出者是否就是 **UA 基线**（tier 10，即 `ua.css` 自己的
      * `h1..h6{bold}` / `strong,b{bold}`）；作者 / 主题 / UI / 自定义 / 内联都没写字重时为 true。
      *
@@ -133,6 +150,26 @@ class Cascade(
             inlineOrder++
         }
         return best?.tier == 10
+    }
+
+    /**
+     * 该元素的**标题字族**是否由读者层（主题 / UI / 自定义样式）直接声明——即读者把标题槽
+     * 设成「采用主题设置」，标题的 `font-family` 来自主题那条 `h1..h6{font-family:…}`。
+     *
+     * 只认右端选择器就是 `h1..h6` 的读者层规则：主题给正文容器（`body` / `p` / `div`）写的
+     * 字族不算——那是「默认正文长什么样」，不能让读者的通用族字重去压书在这些块上的加粗语义。
+     *
+     * 只有元素自己是标题、且确实命中了这样一条规则时才返回 true；调用点先判标签与
+     * `winners["font-family"]`，其余元素零成本。
+     */
+    fun readerHeadingFontMatches(el: MarkupElement, ancestors: List<MarkupElement>): Boolean {
+        if (el.tag !in HEADING_TAGS) return false
+        for (m in readerHeadingFontMatchers) {
+            for (sel in m.matchers) {
+                if (sel.rightmostTag?.let { it in HEADING_TAGS } == true && sel.matches(el, ancestors)) return true
+            }
+        }
+        return false
     }
 
     init {
@@ -231,6 +268,9 @@ class Cascade(
     companion object {
         /** 读者层起始 tier（theme 42 / UI 44 / 自定义样式 45；作者侧最高 inline important 41）。 */
         const val READER_TIER_MIN = 42
+
+        /** 语义标题标签（主题的标题字族规则就落在这组上）。 */
+        private val HEADING_TAGS = setOf("h1", "h2", "h3", "h4", "h5", "h6")
 
         /** Tags whose HTML width/height attrs participate in the cascade as a low-tier origin. */
         private val HTML_SIZE_TAGS = setOf("img", "table", "td", "th", "col", "iframe", "embed", "object")

@@ -210,7 +210,7 @@ fun FontLibraryPanel(
     scanProgress: FontScanProgress? = null,
     /**
      * 「跟随…」首行文案与副标题：正文 / 标题槽是「采用主题设置」（主题层声明字体，原书设置时听书），
-     * 等宽 / 衬线 / 无衬线槽是「系统默认」，批注字体是「跟正文字体」（没单独挑 = 与正文同字体）。
+     * 等宽 / 衬线 / 无衬线槽是「系统默认」，批注字体是「采用正文字体」（没单独挑 = 与正文同字体）。
      */
     followLabel: String = "采用主题设置",
     followSubtitle: String = "跟随当前阅读主题（原书设置时随书）",

@@ -36,10 +36,11 @@ import orilumn.reader.engine.html.MarkupElement
  *   `monospace`→全局代码字体）：在级联与「裸通用名 + 书具名字体」兜底合并都算完之后，对最终族栈
  *   展开（见 [applyFontFamilyAliases]）。空表 = 完全维持原行为。
  * @param genericFontWeights 通用族替换后的基线字重（key = 通用关键字 `serif`/`sans-serif`/`monospace`）：
- *   父级必须是常规 400，且满足其一才补上——元素**没有自己的 `font-weight` 声明**，或元素
- *   自己写了字族（主题的裸通用名，读者已替换成自己那族）而 `font-weight` 的胜出者只是
- *   UA 基线（`h1..h6` 的 bold）。读者挑的字重是**那套字体脸**的一部分，所以标题也跟着它；
- *   书 / 主题 / UI 显式写的字重与 `<strong>`（没有自己的字族）一律不动。
+ *   普通正文（元素**没有自己的 `font-weight` 声明**）父级必须是常规 400 才补上；标题另有两条
+ *   通路——元素自己的字族来自**读者层的标题规则**（标题槽「采用主题设置」，主题的裸通用名被
+ *   换成读者那族，`font-weight` 是书 / UA 写的也算），或字重胜出者只是 UA 基线（`h1..h6` 的
+ *   bold）——这时读者挑的字重是**那套字体脸**的一部分，压过书 / UA 的标题字重。正文里书的
+ *   字重、主题 / UI 显式写的字重与 `<strong>`（没有自己的字族）一律不动。
  */
 class StyleComputer(
     private val rootFontPx: Float,
@@ -348,10 +349,16 @@ class StyleComputer(
         val uaBaselineWeight = genericFontWeights.isNotEmpty() &&
             winners["font-weight"] != null && winners["font-family"] != null &&
             cascade.fontWeightIsUaBaseline(el, ancestors, inline)
+        // 标题槽「采用主题设置」：标题的字族来自读者层（主题的 `h1..h6` 裸通用名），读者给
+        // 那一族挑的字重属于同一张读者层字体脸，应当压过书的标题字重（不只是 UA 基线）。
+        // 只问标题标签，正文容器上的主题字族不在此列（书的段落加粗语义照旧）。
+        val readerHeadingFont = genericFontWeights.isNotEmpty() &&
+            winners["font-family"] != null &&
+            cascade.readerHeadingFontMatches(el, ancestors)
         val tB = if (probe != null) orilumn.reader.time.platformNowMs() else 0L
         val style = computeStyle(
             winners, parent, el.tag, normalizeLang(el.attrs["lang"]),
-            isPreformatted(el, ancestors), uaBaselineWeight,
+            isPreformatted(el, ancestors), uaBaselineWeight, readerHeadingFont,
         )
         if (probe != null) buildMs = orilumn.reader.time.platformNowMs() - tB
         // 读者层裸通用名兜底合并：主题预设（serif/sans-serif）只能缀在书栈后面做最终回退，
@@ -378,13 +385,16 @@ class StyleComputer(
                 authorList.any { !isGenericFontFamily(it) || it.equals("monospace", ignoreCase = true) }
             if (hasKeepableAuthorFont && authorList.isNotEmpty()) {
                 val tS = if (probe != null) orilumn.reader.time.platformNowMs() else 0L
-                result = computeStyle(
-                    winners + ("font-family" to (authorList + fams[0]).joinToString(",")),
-                    parent,
-                    el.tag,
-                    normalizeLang(el.attrs["lang"]),
-                    isPreformatted(el, ancestors),
-                    uaBaselineWeight,
+                // **只换字族三连，不重算整条样式**：兜底合并只是给字形回退补上书的具名字体，
+                // 不影响任何别的属性。重算会让通用族字重判定翻脸——合并后的栈以书的具名字体
+                // 开头，`genericWeightFor` 认作「主字体是书的」而返回 null，标题于是被打回书的
+                // 粗体（用户报「标题采用主题设置时调无衬线字重完全没影响」：书里给 h2 写了
+                // `font-family:STHeiti`，合并后再算就把读者挑的 regular 丢了）。
+                val mergedRaw = (authorList + fams[0]).joinToString(",")
+                result = style.copy(
+                    fontFamily = parseFontFamily(mergedRaw),
+                    fontFamilies = parseFontFamilyList(mergedRaw),
+                    monospace = isMonospaceFamily(mergedRaw),
                 )
                 if (probe != null) secondPassMs = orilumn.reader.time.platformNowMs() - tS
             }
@@ -406,6 +416,8 @@ class StyleComputer(
      * @param fontWeightFromUaBaseline 本元素 `font-weight` 的胜出者就是 UA 基线（`h1..h6` 的
      *   bold）：读者在通用族槽里挑的字重属于那套字体脸，可以压过这条引擎自带基线。同样由调用点
      *   算好传进来，保持本函数的纯函数性质。
+     * @param fontWeightFromReaderHeading 本元素的字族来自**读者层的标题规则**（标题槽「采用主题
+     *   设置」）：读者挑的字重属于同一张字体脸，书 / UA 写的标题字重也让位。同样由调用点算好传入。
      */
     private fun computeStyle(
         w: Map<String, String>,
@@ -414,6 +426,7 @@ class StyleComputer(
         lang: String?,
         inPreformatted: Boolean,
         fontWeightFromUaBaseline: Boolean = false,
+        fontWeightFromReaderHeading: Boolean = false,
     ): ComputedStyle {
         // 1) font-size first (em/% boxes resolve against this final value)
         val fontSize = resolveFontSize(w["font-size"], parent.fontSizePx)
@@ -494,16 +507,21 @@ class StyleComputer(
         // 看到原始族栈（只有一项通用名），再在返回前展开（见 [applyFontFamilyAliases]）。
         val famRaw = w["font-family"]
         val famList = famRaw?.let { parseFontFamilyList(it) }
-        // 通用族的基线字重（父级必须是常规 400，继承来的粗体照旧跟着走）：
-        //  1) 本元素没有自己的 font-weight ⇒ 正文类元素补上读者挑的那一档；
-        //  2) 本元素自己写了字族（主题的裸通用名，读者已把它替换成自己那族），而 font-weight
-        //     的胜出者只是 UA 基线（`h1..h6` 的 bold）⇒ 读者挑的字重是**那套字体脸**的一部分，
-        //     该压过引擎自带的 bold。作者 / 主题 / UI 显式写死的字重不会走到这支（见
-        //     `Cascade.fontWeightIsUaBaseline`），`<strong>` 因没有自己的字族也不受影响。
+        // 通用族的字重（读者给那套字体脸挑的那一档）：
+        //  1) 本元素没有自己的 font-weight ⇒ 正文类元素补上；父级必须是常规 400，继承来的
+        //     粗体照旧跟着走；
+        //  2) 本元素是标题、且字族来自读者层的标题规则（标题槽「采用主题设置」）⇒ 书 / UA
+        //     写的标题字重也让位（见 `Cascade.readerHeadingFontMatches`）；
+        //  3) 本元素自己写了字族（主题的裸通用名，读者已替换成自己那族），而 font-weight 的
+        //     胜出者只是 UA 基线（`h1..h6` 的 bold）⇒ 读者挑的字重压过引擎自带的 bold
+        //     （见 `Cascade.fontWeightIsUaBaseline`）。
+        // 正文里书的字重、主题 / UI 显式写死的字重与 `<strong>`（没有自己的字族）不受影响。
         val genericWeight = when {
-            parent.fontWeight != 400 -> null
-            w["font-weight"] == null -> genericWeightFor(famRaw)
-            fontWeightFromUaBaseline -> genericWeightFor(famRaw)
+            // 普通正文：父级必须是常规 400，避免把书继承下来的粗体洗掉。
+            w["font-weight"] == null ->
+                if (parent.fontWeight == 400) genericWeightFor(famRaw) else null
+            // 读者的标题字体脸：书 / UA 的标题字重也让位（父级不必再看——父级带的就是同一档）。
+            fontWeightFromReaderHeading || fontWeightFromUaBaseline -> genericWeightFor(famRaw)
             else -> null
         }
         if (split != null) fontMs = orilumn.reader.time.platformNowMs() - tF

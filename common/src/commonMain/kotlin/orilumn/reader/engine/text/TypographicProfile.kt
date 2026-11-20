@@ -106,29 +106,39 @@ data class TypographicProfile(
         }
 
     /**
-     * 通用族替换表（`serif`→[fontSerif]、`sans-serif`→[fontSans]），只含读者真配了的项。
+     * 通用族替换表（`serif`→[fontSerif]、`sans-serif`→[fontSans]、`monospace`→[fontCode]），
+     * 只含读者真配了的项。
+     *
+     * 三个槽是**同一条通道**：读者只改 CSS 通用关键字的含义，具体族由全局设置决定，
+     * 书的具名字体一概不动。等宽走 [fontCode]——「代码用什么字体」和「衬线/无衬线是哪一族」
+     * 是同一个问题（通用名 → 读者全局选择的族），只是槽不同；因此书里任何地方写
+     * `font-family: monospace`（不只 `pre/code` 标签）都落在这个槽上。
      *
      * 消费方是 `StyleComputer`：解析 `font-family` 时把通用关键字替换成读者选的族并**保留原关键字
-     * 在栈尾**兜底。没配 ⇒ 空表 ⇒ 完全维持原行为（平台的 serif/sans-serif 候选链）。
+     * 在栈尾**兜底。没配 ⇒ 空表 ⇒ 完全维持原行为（平台的 serif/sans-serif/monospace 候选链）。
      */
     val genericFontAliases: Map<String, String>
         get() {
-            val out = LinkedHashMap<String, String>(2)
+            val out = LinkedHashMap<String, String>(3)
             if (fontSerif.isNotBlank()) out["serif"] = fontSerif.trim()
             if (fontSans.isNotBlank()) out["sans-serif"] = fontSans.trim()
+            if (fontCode.isNotBlank()) out["monospace"] = fontCode.trim()
             return out
         }
 
     /**
-     * 通用族替换后的基线字重（key = 通用关键字 `serif` / `sans-serif`），只含读者真配了的项。
+     * 通用族替换后的基线字重（key = 通用关键字 `serif` / `sans-serif` / `monospace`），
+     * 只含读者真配了的项。
      *
      * 消费方是 `StyleComputer`：元素没有自己的 `font-weight` 声明、且父级是常规 400 时补上，
-     * 让「衬线/无衬线字体」槽里选的字重落到正文上；显式 bold（`strong`/`h1..h6`）与作者字重不动。
+     * 让「衬线 / 无衬线 / 代码」槽里选的字重落到对应文字上；显式 bold（`strong`/`h1..h6`）与
+     * 作者字重不动。代码槽的字重只对**书里写成通用等宽**的元素生效（`pre/code` 标签另有
+     * UI 层的按槽声明，见 `ReaderUiSheet`）。
      * 没配 alias（或该槽没选字重）⇒ 空表 ⇒ 完全维持原行为。
      */
     val genericFontWeights: Map<String, Int>
         get() {
-            val out = LinkedHashMap<String, Int>(2)
+            val out = LinkedHashMap<String, Int>(3)
             fun put(generic: String, slot: String, family: String) {
                 if (family.isBlank()) return
                 val w = fontWeightAnchorsGlobal["$slot|${family.trim()}"] ?: return
@@ -136,6 +146,7 @@ data class TypographicProfile(
             }
             put("serif", "fontSerif", fontSerif)
             put("sans-serif", "fontSans", fontSans)
+            put("monospace", "fontCode", fontCode)
             return out
         }
 

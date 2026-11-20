@@ -276,7 +276,7 @@ fun ReaderSettingsPanel(
             else emptyList()
         }
         /**
-         * 字体槽位提交：正文 / 标题 / 代码换字体要重新断行（排版提交）；
+         * 字体槽位提交：正文 / 标题 / 等宽换字体要重新断行（排版提交）；
          * 批注字体只改旁注覆盖层的字形（无重排提交，与色槽同口径）。
          */
         fun commitSlot(next: ReaderSettings) {
@@ -345,11 +345,12 @@ fun ReaderSettingsPanel(
             Sub.Text -> {
                 val px = s.fontSize * ReaderSettings.fontScaleToRatio(s.fontScale)
                 listOf(
-                    ItemKey(onEnter = { pickSlot = "fontBody"; stack.add(Sub.TextFont) }),
-                    ItemKey(onEnter = { pickSlot = "fontTitle"; stack.add(Sub.TextFont) }),
+                    // 字体行与 [FONT_FIELDS] 逐项同序：三个全局槽在上，标题/正文在下。
                     ItemKey(onEnter = { pickSlot = "fontSerif"; stack.add(Sub.TextFont) }),
                     ItemKey(onEnter = { pickSlot = "fontSans"; stack.add(Sub.TextFont) }),
                     ItemKey(onEnter = { pickSlot = "fontCode"; stack.add(Sub.TextFont) }),
+                    ItemKey(onEnter = { pickSlot = "fontTitle"; stack.add(Sub.TextFont) }),
+                    ItemKey(onEnter = { pickSlot = "fontBody"; stack.add(Sub.TextFont) }),
                     sliderKey(px, 9.0, 36.0, 0.1,
                         apply = { v -> val ns = ReaderThemeMath.pxToScale(v); onPreview(s.copy(fontScale = ns)); onCommitTypography(s.copy(fontScale = ns)) },
                         fmt = { String.format("%.1f", it) }),
@@ -925,8 +926,10 @@ fun ReaderSettingsPanel(
                                 onMouseMove = onMove,
                                 listState = listState,
                                 scanProgress = fontScanProgress,
-                                // 批注字体槽位的「跟随」是跟界面默认字体（旁注不套书里的正文族）；
-                                // 衬线/无衬线两槽跟的是系统候选链，其余槽跟原书。
+                                // 批注字体槽位的「跟随」是跟正文字体（旁注不在书的级联里，由
+                                // 渲染层按正文槽 / 主题层解析；原书设置下退回系统默认）；
+                                // 等宽/衬线/无衬线三个全局槽跟的是系统候选链；
+                                // 正文 / 标题槽跟的是排版主题（现代 / 传统由主题层声明字体，原书设置听书）。
                                 followLabel = followLabelOf(slotKey),
                                 followSubtitle = followSubtitleOf(slotKey),
                             )
@@ -983,7 +986,7 @@ fun ReaderSettingsPanel(
                                 /** 刚才按过「恢复默认颜色池」：按钮短暂换成「已恢复」并金色高亮。 */
                                 resetFlash = colorPoolResetFlash,
                                 noteFontLabel = fieldOf(s, "noteFont").let {
-                                    if (it.isEmpty()) "跟随界面" else fontDisplayByFamily[it] ?: genericFamilyLabel(it)
+                                    if (it.isEmpty()) followLabelOf("noteFont") else fontDisplayByFamily[it] ?: genericFamilyLabel(it)
                                 },
                                 reviewActive = reviewActive,
                                 onToggleReview = onToggleReview,
@@ -1177,7 +1180,7 @@ private fun TextPage(
 ) {
     val labelW = sliderLabelWidth(listOf("字号", "字间距", "混排字距"), p)
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
-        // 五个字体槽（正文/标题按书私有；代码/衬线/无衬线全局）；每行下钻字体面板。
+        // 五个字体槽（衬线/无衬线/等宽全局；标题/正文按书私有）；每行下钻字体面板。
         FONT_FIELDS.forEachIndexed { i, (label, key) ->
             item { SetRow(label, fieldOf(s, key).let { if (it.isEmpty()) followLabelOf(key) else fontDisplayByFamily[it] ?: genericFamilyLabel(it) }, keys[i].onEnter, p, nav = nav, index = i) }
         }
@@ -1290,36 +1293,41 @@ private fun ThemePage(
     }
 }
 
-// 文字页的字体行（自上而下与 `Sub.Text` 的键表逐项对齐）：正文/标题是**本书私有**，
-// 代码/衬线/无衬线是**全局**（换书沿用）。衬线/无衬线两行不是「给正文加一条覆盖声明」，
+// 文字页的字体行（自上而下与 `Sub.Text` 的键表逐项对齐）：衬线/无衬线/等宽是**全局**
+// （换书沿用），标题/正文是**本书私有**。衬线/无衬线两行不是「给正文加一条覆盖声明」，
 // 而是 CSS 通用族 `serif`/`sans-serif` 的替换：书或主题写通用名时用读者选的族渲染，
-// 书的具名字体照旧不动（见 `ReaderSettings.fontSerif`）。
-// 行序：先两槽按书私有的（正文/标题），再两个通用族替换，最后代码——代码是全局项里
-// 最少用的一个，放末尾不挤占上面几行的视觉重点。键表 [Sub.Text] 必须同序（逐项对齐）。
+// 书的具名字体照旧不动（见 `ReaderSettings.fontSerif`）。等宽同理，替换的是 `monospace`。
+// 行序：三个通用族替换在上（全局项，改一处全书都变），书私有的标题/正文在下——
+// 通用的先定基调、再到本书这两槽的个性化。键表 [Sub.Text] 必须同序（逐项对齐）。
 private val FONT_FIELDS = listOf(
-    "正文" to "fontBody",
-    "标题" to "fontTitle",
     "衬线字体（全局）" to "fontSerif",
     "无衬线字体（全局）" to "fontSans",
-    "代码（全局）" to "fontCode",
+    "等宽字体（全局）" to "fontCode",
+    "标题" to "fontTitle",
+    "正文" to "fontBody",
 )
 
-/** 全局字体槽（代码/衬线/无衬线）：字体族与字重都存全局表，换书沿用。 */
+/** 全局字体槽（等宽/衬线/无衬线）：字体族与字重都存全局表，换书沿用。 */
 private fun isGlobalFontSlot(key: String): Boolean =
     key == "fontCode" || key == "fontSerif" || key == "fontSans"
 
-/** 槽位空值文案：通用族槽「跟随系统」（平台 serif/sans 候选链），其余「跟随原书」。 */
+/**
+ * 槽位空值文案：三个全局槽（等宽/衬线/无衬线）都是「系统默认」，批注槽跟正文字体，
+ * 正文 / 标题槽跟排版主题（现代 / 传统由主题层声明字体，原书设置则听书）。
+ */
 private fun followLabelOf(key: String): String = when (key) {
-    "fontSerif", "fontSans" -> "跟随系统"
-    "noteFont" -> "跟随界面"
-    else -> "跟随原书"
+    "fontSerif", "fontSans", "fontCode" -> "系统默认"
+    "noteFont" -> "跟正文字体"
+    else -> "采用主题设置"
 }
 
 /** 「跟随…」副标题（字体页首行）。 */
 private fun followSubtitleOf(key: String): String = when (key) {
-    "fontSerif", "fontSans" -> "使用系统衬线/无衬线候选字体"
-    "noteFont" -> "使用界面默认字体"
-    else -> "使用原书字体"
+    "fontSerif" -> "使用系统衬线候选字体"
+    "fontSans" -> "使用系统无衬线候选字体"
+    "fontCode" -> "使用系统等宽候选字体"
+    "noteFont" -> "跟随正文当前字体（原书设置时用系统默认）"
+    else -> "跟随当前阅读主题（原书设置时随书）"
 }
 
 /**
@@ -1372,7 +1380,7 @@ private fun withSlotWeight(s: ReaderSettings, key: String, family: String, weigh
         )
     }
 
-/** 清掉某槽的全部字重锚点（跟随原书 / 跟随系统时用），只动该槽自己那张表。 */
+/** 清掉某槽的全部字重锚点（空槽 = 系统默认 / 采用主题设置 / 跟正文字体时用），只动该槽自己那张表。 */
 private fun withSlotAnchorsCleared(s: ReaderSettings, key: String): ReaderSettings =
     if (isGlobalFontSlot(key)) {
         s.copy(fontWeightAnchorsGlobal = s.fontWeightAnchorsGlobal.filterKeys { !it.startsWith("$key|") })
@@ -1728,7 +1736,8 @@ private fun AnimModePage(
  * 「恢复默认颜色池」之后还有两项**旁注自己的样式**（2026-10-28 用户定口）：
  * - **批注字体**：与正文 / 标题 / 代码同一套字体下钻页，可挑任意系统或导入字体；
  *   多字重的族同样进字重页（选完族与字重一起生效，换族回到该族默认字重）；
- *   空槽 = 跟随界面默认（不是跟随原书——旁注不套书里的正文族）。
+ *   空槽 = 跟随正文字体（正文槽 / 排版主题解析出来的那一族与字重；原书设置下正文听书，
+ *   覆盖层退回系统默认字体）。
  * - **批注字号**：滑条编辑倍率，右侧显示换算后的实际字号；旁注始终跟正文字号等比。
  * 两项都只作用于覆盖层，与色槽同口径走无重排提交。
  */
@@ -1747,7 +1756,7 @@ private fun AnnotationColorPage(
     onSelectSlot: (AnnotationKind, Int) -> Unit,
     /** 「恢复默认颜色池」的按下反馈：true 时按钮文字换成「已恢复」并金色高亮。 */
     resetFlash: Boolean,
-    /** 「批注字体」行右侧的展示名（空槽 = 跟随界面；导入 / 系统族取本地化展示名）。 */
+    /** 「批注字体」行右侧的展示名（空槽 = 跟正文字体；导入 / 系统族取本地化展示名）。 */
     noteFontLabel: String,
     /** 「显示审阅模式」的勾选态；null 回调 = 本宿主没有审阅视图，这一行不画。 */
     reviewActive: Boolean,

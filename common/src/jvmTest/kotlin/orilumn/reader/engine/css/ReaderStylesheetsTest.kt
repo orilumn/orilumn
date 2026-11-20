@@ -57,6 +57,26 @@ class ReaderStylesheetsTest {
         assertNull(ReaderStylesheets.theme("unknown"))
     }
 
+    /**
+     * 覆盖层用的「主题正文字族」镜像必须等于主题 CSS 自己声明的那个词。
+     *
+     * 旁注不进书的级联，跟随正文只能问主题表；镜像一旦与 CSS 漂了，批注就会悄悄换字体，
+     * 所以这里直接拿解析器读 CSS 对账，而不是相信两处手抄。
+     */
+    @Test
+    fun `theme body family mirror matches theme css`() {
+        for (theme in listOf("traditional", "modern")) {
+            val sheet = LightCssParser().parse(ReaderStylesheets.theme(theme)!!)
+            val bodyRule = sheet.rules.first { rule -> rule.selectors.any { it.trim() == "body" } }
+            val declared = bodyRule.declarations
+                .first { it.property.equals("font-family", ignoreCase = true) }
+                .value.substringBefore(',').trim().lowercase()
+            assertEquals("$theme 的正文字族镜像与 CSS 不一致", declared, ReaderStylesheets.themeBodyFamily(theme))
+        }
+        assertNull(ReaderStylesheets.themeBodyFamily("original"))
+        assertNull(ReaderStylesheets.themeBodyFamily("unknown"))
+    }
+
     @Test
     fun `missing resource throws instead of inline fallback`() {
         assertNull(readReaderCss("no-such-file.css"))

@@ -5,27 +5,31 @@ import orilumn.reader.engine.html.HtmlTreeConverter
 import orilumn.reader.engine.html.MarkupElement
 import orilumn.reader.engine.text.TypographicProfile
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 通用族替换（读者选的「衬线字体 / 无衬线字体」）：
- * - 只改 CSS 通用关键字 `serif` / `sans-serif` 的含义，书的具名字体一概不动；
+ * 通用族替换（读者选的「衬线字体 / 无衬线字体 / 代码字体」）：
+ * - 只改 CSS 通用关键字 `serif` / `sans-serif` / `monospace` 的含义，书的具名字体一概不动；
  * - 原关键字留在栈尾，读者选的族缺字形时仍能逐字形回落到平台候选链；
  * - 没配（空槽）⇒ 完全维持原行为。
  *
- * 以及它带出的**基线字重**：读者在通用族槽里选过字重时，只补在「元素自己没写
- * font-weight、父级是常规 400」的正文上；显式 bold（`strong` / `h1..h6`）与作者字重不动。
+ * 以及它带出的**基线字重**：读者在通用族槽里选过字重时，补在「父级是常规 400、且元素自己
+ * 没写 font-weight」的正文上；元素自己写了字族（主题的裸通用名）而字重只来自 UA 基线时，
+ * 标题也跟读者挑的那一档。书 / 主题 / UI 显式写的字重与 `<strong>`（没有自己的字族）不动。
  */
 class GenericFontAliasTest {
 
     private fun profile(
         serif: String = "",
         sans: String = "",
+        code: String = "",
         weights: Map<String, Int> = emptyMap(),
     ) = TypographicProfile.build(
         ReaderSettings.DEFAULT.copy(
             fontSerif = serif,
             fontSans = sans,
+            fontCode = code,
             fontWeightAnchorsGlobal = weights,
         ),
     )
@@ -139,6 +143,97 @@ class GenericFontAliasTest {
     }
 
     @Test
+    fun `monospace keyword resolves to the reader code family and keeps the keyword as fallback`() {
+        // UA 的 `code,kbd,samp,tt,pre{font-family:monospace}` 与书里手写的通用名走同一条通道。
+        val st = compute(
+            profile(code = "Fira Code"),
+            "<html><body><pre><code>x</code></pre></body></html>",
+            "",
+        ).byTag("pre")
+        assertEquals(listOf("Fira Code", "monospace"), st.fontFamilies)
+        assertTrue(st.monospace)
+        assertEquals("Fira Code", st.fontFamily)
+    }
+
+    @Test
+    fun `monospace outside code tags also follows the code slot`() {
+        // 书的等宽声明不只在 pre/code 标签上：也有用 div/span 标代码的写法。
+        val st = compute(
+            profile(code = "Fira Code"),
+            "<html><body><p><span class=\"k\">x</span></p></body></html>",
+            "span.k{font-family:monospace}",
+        ).byTag("span")
+        assertEquals(listOf("Fira Code", "monospace"), st.fontFamilies)
+        assertTrue(st.monospace)
+    }
+
+    @Test
+    fun `theme body font does not wipe the book's monospace intent`() {
+        // 主题层（tier 42）给 div 写了裸 `sans-serif`，书（tier 20）把同一元素声明成等宽：
+        // 两根轴——主题决定「默认正文长什么样」，书说的是「这段是代码」。合并后等宽在前、
+        // 主题通用名留栈尾，读者的代码字体因此仍然落到这段上。
+        val st = compute(
+            profile(code = "Fira Code"),
+            "<html><body><div class=\"code\">x</div></body></html>",
+            "div.code{font-family:monospace}",
+            themeCss = "body{font-family:sans-serif}div{font-family:sans-serif}",
+        ).byTag("div")
+        assertEquals(listOf("Fira Code", "monospace", "sans-serif"), st.fontFamilies)
+        assertTrue(st.monospace)
+    }
+
+    @Test
+    fun `theme still wins over the book's serif-sans preference`() {
+        // 与上一条对照：作者写的也是衬线/无衬线通用名时，仍以主题（读者全局选择）为先。
+        val st = compute(
+            profile(sans = "思源黑体"),
+            "<html><body><p>x</p></body></html>",
+            "p{font-family:serif}",
+            themeCss = "body{font-family:sans-serif}p{font-family:sans-serif}",
+        ).byTag("p")
+        assertEquals(listOf("思源黑体", "sans-serif"), st.fontFamilies)
+    }
+
+    @Test
+    fun `named book code families are untouched`() {
+        // 书点名了具体等宽族：不替换（与「书的具名字体不动」同一条纪律），等宽语义照旧。
+        val st = compute(
+            profile(code = "Fira Code"),
+            "<html><body><pre>x</pre></body></html>",
+            "pre{font-family:Consolas}",
+        ).byTag("pre")
+        assertEquals(listOf("Consolas"), st.fontFamilies)
+        assertTrue(st.monospace)
+    }
+
+    @Test
+    fun `empty code slot leaves monospace alone`() {
+        val st = compute(
+            profile(),
+            "<html><body><pre>x</pre></body></html>",
+            "pre{font-family:monospace}",
+        ).byTag("pre")
+        assertEquals(listOf("monospace"), st.fontFamilies)
+    }
+
+    @Test
+    fun `code slot weight lands on generic monospace elements`() {
+        val p = profile(code = "Fira Code", weights = mapOf("fontCode|Fira Code" to 700))
+        val plain = compute(
+            p,
+            "<html><body><p class=\"c\">x</p></body></html>",
+            "p.c{font-family:monospace}",
+        ).byTag("p")
+        assertEquals("读者在代码槽选的字重落到纯通用等宽上", 700, plain.fontWeight)
+        val authored = compute(
+            p,
+            "<html><body><p class=\"c\">x</p></body></html>",
+            "p.c{font-family:monospace;font-weight:500}",
+        ).byTag("p")
+        assertEquals("作者字重照旧优先", 500, authored.fontWeight)
+    }
+
+    @Test
     fun `generic slot weight lands on body text but never overrides explicit weights`() {
         val p = profile(serif = "思源宋体", weights = mapOf("fontSerif|思源宋体" to 300))
         val m = compute(
@@ -149,6 +244,43 @@ class GenericFontAliasTest {
         assertEquals("读者在衬线槽选的字重落到正文", 300, m.byTag("p").fontWeight)
         assertEquals("strong 自己的 UA bold 恒胜", 700, m.byTag("strong").fontWeight)
         assertEquals("标题的 UA bold 不受正文基线影响", 700, m.byTag("h2").fontWeight)
+    }
+
+    @Test
+    fun `theme heading takes the reader's generic slot weight`() {
+        // 标题「采用主题设置」时，字族来自主题写的裸 `sans-serif`、被读者替换成自己那族；
+        // 读者给这族挑的字重是**这套字体脸**的一部分，必须压过 UA 自带的 `h1..h6{bold}`，
+        // 否则正文是细体、标题凭空变粗（用户报「无衬线字体的字重不对」）。
+        val p = profile(sans = "思源黑体", weights = mapOf("fontSans|思源黑体" to 300))
+        val m = compute(
+            p,
+            "<html><body><h2>标题</h2><p>正文</p></body></html>",
+            "",
+            themeCss = ReaderStylesheets.theme("traditional"),
+        )
+        assertEquals("标题跟着读者挑的无衬线字重", 300, m.byTag("h2").fontWeight)
+        assertEquals("正文走衬线槽，不串无衬线的字重", 400, m.byTag("p").fontWeight)
+        // 同一份设置下 `strong` 没有自己的字族（继承父级），语义加粗照旧。
+        val strong = compute(
+            p,
+            "<html><body><p>加<strong>粗</strong></p></body></html>",
+            "",
+            themeCss = ReaderStylesheets.theme("modern"),
+        ).byTag("strong")
+        assertEquals("strong 的 UA bold 不受通用族字重影响", 700, strong.fontWeight)
+    }
+
+    @Test
+    fun `author weight on a themed heading still wins`() {
+        // 书显式给标题写字重 ⇒ 书的声明（tier 20）压过 UA 基线，通用族字重不再插手。
+        val p = profile(sans = "思源黑体", weights = mapOf("fontSans|思源黑体" to 300))
+        val st = compute(
+            p,
+            "<html><body><h2>标题</h2></body></html>",
+            "h2{font-weight:600}",
+            themeCss = ReaderStylesheets.theme("modern"),
+        ).byTag("h2")
+        assertEquals(600, st.fontWeight)
     }
 
     @Test

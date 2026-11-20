@@ -95,6 +95,8 @@ object ReaderUiSheet {
      *
      * 衬线/无衬线两槽不走这里：它们是 CSS 通用族的替换（`serif`→读者族），没有自己的选择器表，
      * 字重由 `StyleComputer` 的通用族基线字重（`TypographicProfile.genericFontWeights`）补。
+     * 等宽同理：书里写 `font-family:monospace` 的任何元素都走同一条替换（落到 `fontCode`）；
+     * 本表这一条只管**标签**（`pre/code/kbd/samp`），兜住书里点名了具体代码字体的情况。
      */
     private fun weightFor(profile: TypographicProfile, slot: String, family: String): Int? {
         if (family.isBlank()) return null

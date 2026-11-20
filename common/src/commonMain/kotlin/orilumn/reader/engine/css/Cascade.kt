@@ -87,6 +87,54 @@ class Cascade(
         }
     }
 
+    /** 含 font-weight 声明的规则（[fontWeightIsUaBaseline] 专用，构造后惰性过滤；表很小）。 */
+    private val fontWeightMatchers: List<Matcher> by lazy {
+        matchers.filter { m -> m.declarations.any { d -> d.property == "font-weight" } }
+    }
+
+    /**
+     * 该元素 `font-weight` 的胜出者是否就是 **UA 基线**（tier 10，即 `ua.css` 自己的
+     * `h1..h6{bold}` / `strong,b{bold}`）；作者 / 主题 / UI / 自定义 / 内联都没写字重时为 true。
+     *
+     * 给「通用族基线字重」用（见 `StyleComputer.genericWeightFor`）：读者在
+     * 「衬线 / 无衬线 / 等宽」槽里挑的**字重**是那套字体脸的一部分，而标题的字族正是主题
+     * 写裸通用名、读者替换过的那一族——这时读者挑的脸该压过 UA 自带的 bold。
+     * 书 / 主题 / UI 显式写的 `font-weight` 仍是它们赢（返回 false，调用方不动）。
+     *
+     * 只在该元素**自己**声明了字族、且确实会用到通用族字重时才调用，元素级开销可忽略。
+     */
+    fun fontWeightIsUaBaseline(
+        el: MarkupElement,
+        ancestors: List<MarkupElement>,
+        inlineDecls: List<Declaration>,
+    ): Boolean {
+        var best: Winner? = null
+        for (m in fontWeightMatchers) {
+            if (!m.anyTag && el.tag !in m.rightTags) continue
+            var matched: Selector? = null
+            for (sel in m.matchers) {
+                if (sel.matches(el, ancestors)) { matched = sel; break }
+            }
+            if (matched == null) continue
+            for (d in m.declarations) {
+                if (d.property != "font-weight") continue
+                val tier = if (d.important) m.tierImportant else m.tierNormal
+                val cand = Winner(d.value, d.important, tier, matched, m.order)
+                if (cand.beats(best)) best = cand
+            }
+        }
+        var inlineOrder = 10
+        for (d in inlineDecls) {
+            if (d.property == "font-weight") {
+                val tier = if (d.important) 41 else 30
+                val cand = Winner(d.value, d.important, tier, null, inlineOrder)
+                if (cand.beats(best)) best = cand
+            }
+            inlineOrder++
+        }
+        return best?.tier == 10
+    }
+
     init {
         val list = ArrayList<Matcher>()
         var order = 0

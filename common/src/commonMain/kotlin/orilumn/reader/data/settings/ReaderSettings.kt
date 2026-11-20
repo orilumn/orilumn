@@ -123,11 +123,12 @@ data class ReaderSettings(
     val fontCode: String = "",
     /**
      * 通用族替换（纯全局，空串 = 平台默认候选链）：书或主题的 CSS 写 `font-family: serif` /
-     * `sans-serif` 时，改用读者在这一族里挑的字族来渲染。
+     * `sans-serif` 时，改用读者在这一族里挑的字族来渲染。CSS 的 `monospace` 同理走 [fontCode]
+     * ——「等宽用哪一族」和「衬线/无衬线用哪一族」是同一个问题，只是槽不同。
      *
      * **只替换通用关键字**，不动书的具名字体；解析点在级联把 `font-family` 值展开成族栈时
      * （`StyleComputer` 的 alias 展开），仍把原关键字留在栈尾作逐字形兜底 —— 读者选的族缺字形
-     * 时照旧落到平台 serif/sans-serif 候选链。这是浏览器「默认字体」设置的同款语义，
+     * 时照旧落到平台 serif/sans-serif/monospace 候选链。这是浏览器「默认字体」设置的同款语义，
      * 不是「给正文加一条覆盖声明」。
      */
     val fontSerif: String = "",
@@ -232,8 +233,9 @@ data class ReaderSettings(
     val annotationLastLineStyle: String = "straight",
 
     /**
-     * 批注（旁注）字体：空串 = 跟随界面默认（现状）；否则是字族名，与正文 / 标题 / 代码槽同源
-     * （系统字体或已导入字体都能选）。
+     * 批注（旁注）字体：空串 = **跟随正文字体**（正文槽挑过的族，或排版主题给正文的
+     * 通用族 / 读者的通用族替换；「原书设置」下正文由书的 CSS 决定，覆盖层退回系统默认）；
+     * 否则是字族名，与正文 / 标题 / 代码槽同源（系统字体或已导入字体都能选）。
      *
      * 只作用于旁注覆盖层的文字，**不碰正文排版**，所以不进版式比较（面板走无重排提交）。
      * **纯全局**（[SettingsScope.GLOBAL]）：批注是读者自己的印记，与某本书无关，换书沿用

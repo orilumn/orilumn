@@ -31,12 +31,18 @@ class ReaderLogicTest {
 
     @Test
     fun tapZone_adoptsOldThreeZones() {
+        // 左 / 中 / 右三等分：分界就是 w/3 与 2w/3（与平台无关，只看宽度）。
         assertEquals(-1, ReaderMath.tapZone(0f, 900f))
         assertEquals(-1, ReaderMath.tapZone(299f, 900f))
         assertEquals(0, ReaderMath.tapZone(300f, 900f))
         assertEquals(0, ReaderMath.tapZone(600f, 900f))
         assertEquals(1, ReaderMath.tapZone(601f, 900f))
         assertEquals(1, ReaderMath.tapZone(899f, 900f))
+        // 换宽度同样是三等分（不按像素写死）。
+        assertEquals(-1, ReaderMath.tapZone(333f, 1000f))
+        assertEquals(0, ReaderMath.tapZone(334f, 1000f))
+        assertEquals(0, ReaderMath.tapZone(666f, 1000f))
+        assertEquals(1, ReaderMath.tapZone(667f, 1000f))
     }
 
     @Test

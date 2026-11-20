@@ -1686,7 +1686,7 @@ fun ReaderScreen(
         return openRevisionEdit(revision)
     }
 
-    fun onTap(xPx: Float, yPx: Float, widthPx: Float, allowFlip: Boolean = true) {
+    fun onTap(xPx: Float, yPx: Float, widthPx: Float) {
         // 动画播放期间不响应点按：会话在飞时画面正被动画独占（`slideFromPos`/
         // `slideTargetPos` 锁着两页），此时翻页/切栏/跳链接会让像素与数据错位。
         // 早先只有 `flipWithAnimation` 自己挡（beginProgrammatic 返回 false 即丢弃），
@@ -1701,7 +1701,7 @@ fun ReaderScreen(
         // 中部切栏，后退区无操作（封面已是第一页；退出走顶栏返回键）。
         if (coverVisible) {
             when (ReaderMath.tapZone(xPx, widthPx)) {
-                1 -> if (allowFlip) flipWithAnimation(1)
+                1 -> flipWithAnimation(1)
                 else -> barsVisible = !barsVisible
             }
             return
@@ -1763,10 +1763,10 @@ fun ReaderScreen(
         Logger.d("Orilumn.TAP", "tap x=${xPx.roundToInt()} y=${yPx.roundToInt()} w=${widthPx.roundToInt()} zone=$zone bars=${currentBarsVisible}")
         when (zone) {
             // 点按翻页与拖动松手走同一条动画路径（见 flipWithAnimation）。
-            // 桌面鼠标单击不翻页（2026-11-04 用户定口）：翻页只走滚轮 / 触控板双指，
-            // 左右 1/3 单击因此什么都不做，中部照旧切上下栏。
-            -1 -> if (allowFlip) flipWithAnimation(-1)
-            1 -> if (allowFlip) flipWithAnimation(1)
+            // 左 / 中 / 右三等分（ReaderMath.tapZone）：左右 1/3 翻页，中部切上下栏。
+            // 桌面鼠标单击与触摸同一套语义（2026-11-20 恢复桌面点击翻页）。
+            -1 -> flipWithAnimation(-1)
+            1 -> flipWithAnimation(1)
             else -> barsVisible = !barsVisible
         }
     }
@@ -3170,10 +3170,10 @@ fun ReaderScreen(
                             change.consume()
                             continue
                         }
-                        // 指针类型分流：鼠标拖拽才进入选区；单击只做与翻页无关的动作
-                        //（见上面 `onTap` 的 allowFlip = false：标注卡片 → 清选区 → 链接 → 中部切栏），
-                        // 桌面翻页交给滚轮 / 触控板双指（见上面的滚动通道）；
-                        // 触摸仍走下面的三区点按/滑动/亮度，两套语义不抢同一个手势。
+                        // 指针类型分流：鼠标拖拽进入选区；单击与触摸同一套语义
+                        //（标注卡片 → 清选区 → 链接 → 三区点按：左右翻页 / 中部切栏）。
+                        // 滚轮 / 触控板双指仍走上面的滚动通道；
+                        // 触摸走下面的三区点按/滑动/亮度，两套语义不抢同一个手势。
                         if (mouse) {
                             if (mouseSelectingPending && moved) {
                                 mouseSelectingPending = false
@@ -3198,12 +3198,11 @@ fun ReaderScreen(
                                 }
                             }
                             if (!change.pressed) {
-                                // 鼠标单击：桌面不翻页（2026-11-04 用户定口），只保留
-                                // 「点中标注 / 链接 / 中部切栏」这些与翻页无关的动作；
-                                // 左右 1/3 因此什么都不做（allowFlip = false）。
+                                // 鼠标单击：与触摸同一套三区语义（左右 1/3 翻页、
+                                // 中部切栏，2026-11-20 恢复桌面点击翻页）。
                                 // 按下点已被上层消费（栏/遮罩）就不落到阅读面。
                                 if (!moved && !down.isConsumed) {
-                                    onTap(downX, downY, size.width.toFloat(), allowFlip = false)
+                                    onTap(downX, downY, size.width.toFloat())
                                 }
                                 change.consume()
                                 break

@@ -347,9 +347,9 @@ fun ReaderSettingsPanel(
                 listOf(
                     ItemKey(onEnter = { pickSlot = "fontBody"; stack.add(Sub.TextFont) }),
                     ItemKey(onEnter = { pickSlot = "fontTitle"; stack.add(Sub.TextFont) }),
-                    ItemKey(onEnter = { pickSlot = "fontCode"; stack.add(Sub.TextFont) }),
                     ItemKey(onEnter = { pickSlot = "fontSerif"; stack.add(Sub.TextFont) }),
                     ItemKey(onEnter = { pickSlot = "fontSans"; stack.add(Sub.TextFont) }),
+                    ItemKey(onEnter = { pickSlot = "fontCode"; stack.add(Sub.TextFont) }),
                     sliderKey(px, 9.0, 36.0, 0.1,
                         apply = { v -> val ns = ReaderThemeMath.pxToScale(v); onPreview(s.copy(fontScale = ns)); onCommitTypography(s.copy(fontScale = ns)) },
                         fmt = { String.format("%.1f", it) }),
@@ -1294,12 +1294,14 @@ private fun ThemePage(
 // 代码/衬线/无衬线是**全局**（换书沿用）。衬线/无衬线两行不是「给正文加一条覆盖声明」，
 // 而是 CSS 通用族 `serif`/`sans-serif` 的替换：书或主题写通用名时用读者选的族渲染，
 // 书的具名字体照旧不动（见 `ReaderSettings.fontSerif`）。
+// 行序：先两槽按书私有的（正文/标题），再两个通用族替换，最后代码——代码是全局项里
+// 最少用的一个，放末尾不挤占上面几行的视觉重点。键表 [Sub.Text] 必须同序（逐项对齐）。
 private val FONT_FIELDS = listOf(
     "正文" to "fontBody",
     "标题" to "fontTitle",
-    "代码（全局）" to "fontCode",
     "衬线字体（全局）" to "fontSerif",
     "无衬线字体（全局）" to "fontSans",
+    "代码（全局）" to "fontCode",
 )
 
 /** 全局字体槽（代码/衬线/无衬线）：字体族与字重都存全局表，换书沿用。 */

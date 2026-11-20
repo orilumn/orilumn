@@ -158,10 +158,14 @@ fun PrerasterOnPrefill(
                         return
                     }
                     val anchor = posNow() ?: return
-                    // 只处理当前章：跨章预排由第 2/3 档的整章兜底另行处理。
+                    // 章边界照补：`peekAdjacent` 在章末/章首会回答**邻章边缘那一页**（引擎只读查询，
+                    // 版式由 §3.3 的邻章边缘页预排提前装配）。信号里的 `chapter` 只是"哪个章排完了"
+                    // 的提示，真正要栅的目标页一律以 peek 为准——所以这里不再按章筛掉。
                     if (anchor.chapter != chapter) {
-                        Logger.d("Orilumn.TAP", "preraster window skip: anchor ch=${anchor.chapter} != $chapter")
-                        return
+                        Logger.d(
+                            "Orilumn.TAP",
+                            "preraster window: signal ch=$chapter ≠ anchor ch=${anchor.chapter}（章边界）",
+                        )
                     }
                     // 方向 0 = 无记录（开书/跳转/调参），此时前向更可能被用，语义等同向前（§3.2）。
                     val effDir = if (dirNow() == 0) 1 else dirNow()

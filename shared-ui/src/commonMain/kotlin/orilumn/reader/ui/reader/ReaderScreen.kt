@@ -560,8 +560,17 @@ fun ReaderScreen(
     SideEffect {
         anchorFunnel.beforeCommit = { pos ->
             // 先等图（缺图必等，灰占位不可入场），再等整页位图（翻页动画/首帧直接复用这张）。
+            // 两段各自计时：落位时延的主要来源就是这两笔（见 FLIPLAT 分段日志）。
+            val t0 = System.nanoTime()
             warmByRef.value(pos)
+            val tWarm = System.nanoTime()
             rasterByRef.value(pos)
+            val tEnd = System.nanoTime()
+            Logger.d(
+                "Orilumn.TAP",
+                "FLIPLAT pre-commit ch=${pos.chapter} char=${pos.slice.charStart} " +
+                    "img=${(tWarm - t0) / 1_000_000}ms raster=${(tEnd - tWarm) / 1_000_000}ms",
+            )
         }
     }
     // 跨页位图缓存（随宿主换代重建：换书即新池；同书内翻页/改参常驻，回访页首帧即有图）。
@@ -828,7 +837,15 @@ fun ReaderScreen(
             commit = ::markPositionChanged,
         ) { p ->
             Logger.d("Orilumn.TAP", "$action dispatch dir=$direction from ch=${p.chapter} char=${p.slice.charStart}")
+            val tNav = System.nanoTime()
             val landed = currentHost.adjacent(p, direction)
+            // 落位本身（引擎：章内换页/跨章开章+整形）与 beforeCommit（等图+整页栅格）分开记，
+            // 二者相加即 FLIPLAT target-ready 的主体（见 FlipController.logLat）。
+            Logger.d(
+                "Orilumn.TAP",
+                "FLIPLAT nav dir=$direction ms=${(System.nanoTime() - tNav) / 1_000_000} " +
+                    "to=${landed?.let { "ch=${it.chapter} char=${it.slice.charStart}" } ?: "NULL"}",
+            )
             // 引擎侧无声吞翻页时（返回 null），这里是唯一目击者——与 Orilumn.FLIP 对账。
             Logger.d("Orilumn.TAP", "$action result dir=$direction " + (landed?.let { "landed ch=${it.chapter} char=${it.slice.charStart}" } ?: "NULL (engine returned null)"))
             // 等图由 [AnchorFunnel.beforeCommit] 在**本函数内部、commit 之前**完成（漏斗锁内，
@@ -905,11 +922,11 @@ fun ReaderScreen(
      * 必须传起手时的 `openPos`：它是「当前页」身份，落位完成后 openPos 就变成
      * 目标页了，不另存一份渲染层会拿目标页当当前页画（真机症状：目标页空白）。
      */
-    fun beginSlide(direction: Int) {
+    fun beginSlide(direction: Int, downNanos: Long = 0L) {
         val src = openPos ?: return
         // 后退回封面：目标就绪即画（封面已解码），无需落位；前进离开封面仍需落位书首。
         val enterCover = !coverVisible && direction < 0 && isBookStart(src)
-        ctl.beginDrag(src, direction, slideEnabled, coverVisible, enterCover)
+        ctl.beginDrag(src, direction, slideEnabled, coverVisible, enterCover, downNanos)
     }
 
     /** 拖动中：喂位移。目标页未就绪时只喂状态机、不写回渲染（避免拉出空白页）。 */
@@ -1791,7 +1808,7 @@ fun ReaderScreen(
 
     // L1 滑动的引用包装（必须在上面几个局部函数声明之后——Kotlin 局部函数不可前向引用）。
     val currentSlideEnabled by rememberUpdatedState(slideEnabled)
-    val currentBeginSlide by rememberUpdatedState<(Int) -> Unit> { beginSlide(it) }
+    val currentBeginSlide by rememberUpdatedState<(Int, Long) -> Unit> { d, down -> beginSlide(d, down) }
     val currentUpdateSlide by rememberUpdatedState<(Float, Float) -> Unit> { dx, w -> updateSlide(dx, w) }
     val currentUpdateCurlPull by rememberUpdatedState<(Float, Float, Float, Float, Float, Float) -> Unit> {
             downX, downY, x, y, w, h ->
@@ -3294,7 +3311,7 @@ fun ReaderScreen(
                                         // 先立旗再起手：起手这一步若抛异常，finally 仍能把会话收掉
                                         // （否则会话停在 Dragging，批注层被 isBusy 藏起、手势全被吞）。
                                         slideActive = true
-                                        currentBeginSlide(dragDir)
+                                        currentBeginSlide(dragDir, tDown)
                                     }
                                     currentUpdateSlide(dx, size.width.toFloat())
                                     // 卷曲手感：起手点 + 手指的**绝对页坐标**。折痕角度取拖动
@@ -3644,8 +3661,11 @@ fun ReaderScreen(
             PrerasterOnPrefill(
                 host = currentHost,
                 onPrefillReady = onPrefillReady,
-                directionProvider = { ctl.session.direction },
+                // 会话在飞时用本次方向；落定后状态机把 direction 归零，退回「最近一次翻页方向」
+                // （否则往回读时永远只热身正方向）。两者都无 → 0，预栅格按向前处理。
+                directionProvider = { ctl.session.direction.takeIf { it != 0 } ?: ctl.lastTurn.value },
                 currentPos = { openPos },
+
                 renderer = pageRenderer,
                 contentLeft = contentLeft,
                 contentTop = contentTop,
@@ -3658,6 +3678,10 @@ fun ReaderScreen(
                 imgCache = imgCache,
                 bgCache = bgCache,
                 annotationsFor = annotationState::annotationsFor,
+                // 会话在飞时让位：此刻落位自己正在栅同一张（见 PrerasterOnPrefill.sessionBusy）。
+                sessionBusy = { ctl.isBusy() },
+                // 落定代际：翻完立刻补方向侧像素，下一次起手就不用现场栅 200–390ms。
+                settleTick = ctl.settleTick.value,
             )
             // 上面 `beforeCommit` 的「整页位图备齐」实现：与 PrerasterOnPrefill 同口径
             //（同一渲染器、同一缓存、同一条取数路径），只是针对**本次落位目标页**。

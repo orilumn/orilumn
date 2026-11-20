@@ -3,7 +3,6 @@ package orilumn.reader.ui.reader
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshots.SnapshotStateMap
 import orilumn.reader.data.annotation.Annotation
@@ -15,6 +14,10 @@ import orilumn.reader.engine.skia.projectDecor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import orilumn.reader.io.Logger
@@ -78,6 +81,25 @@ fun PrerasterOnPrefill(
      * 而预栅格的指纹又必须与首帧绘制逐字相等，两边只能走同一条「按页所属章取标注」的口径。
      */
     annotationsFor: (chapter: Int) -> List<Annotation>? = { null },
+    /**
+     * 翻页会话是否在飞（`FlipController.isBusy()`）。
+     *
+     * **在飞时一律不补**：此刻落位自己正在栅同一张（`AnchorFunnel.beforeCommit` 的
+     * `prerasterPage`），两笔并发只是把同一页画两遍——真机日志里 300ms 的栅格被同时
+     * 做两次（`preraster … 289ms hit=false` 与 `pre-commit raster=311ms` 同一 key），
+     * 还互相抢 store 锁。落定后由 [settleTick] 补，方向与页都对。
+     */
+    sessionBusy: () -> Boolean = { false },
+    /**
+     * 翻页会话落定的代际（每 `FlipController.clear()` +1）：**翻完立刻补方向侧像素**。
+     *
+     * 为什么不能只等引擎的预排信号：信号在**落位之前**抛（引擎装配 ±1 页 product 时
+     * 抛 `notifyPrefillReady`），那一刻 `openPos` 还是起手页 ⇒ 补的是「本次要翻到的
+     * 那一页」——正是落位自己在栅的那张（白做）；落定之后又不再抛信号（±1 页已装配完），
+     * 于是**下一页永远没人补**，下一次翻页只能现场栅（真机：每次 220–390ms，
+     * `FLIPLAT first-move` 因此 300–650ms）。落定代际把这一拍补上。
+     */
+    settleTick: Int = 0,
 ) {
     val hostRef = rememberUpdatedState(host)
     val onPrefillRef = rememberUpdatedState<suspend (Int, Int) -> Unit>(onPrefillReady)
@@ -87,8 +109,16 @@ fun PrerasterOnPrefill(
     val imgCacheRef = rememberUpdatedState(imgCache)
     val bgCacheRef = rememberUpdatedState(bgCache)
     val annotationsRef = rememberUpdatedState(annotationsFor)
-    // 闸 2：同一时刻只允许一张预栅格在跑，不排队（排队＝把成本推给用户）。
-    val prerasterBusy = remember { mutableStateOf(false) }
+    val sessionBusyRef = rememberUpdatedState(sessionBusy)
+    // 闸 2：同一时刻只允许一轮预栅格在跑（信号触发的撞上就丢——这是去重，不是优先级判断；
+    // 落定触发的那一轮改成**等**它收尾，因为落定这一拍必须补上，丢了就没人补了）。
+    val prerasterLock = remember { Mutex() }
+    // 落定信号：`settleTick` 每变一次代表一次翻页会话结束（见参数）。CONFLATED 合并同一拍
+    // 的多条——落定补的是「此刻的下一张」，补两遍没有意义。
+    val settleSignals = remember { Channel<Unit>(Channel.CONFLATED) }
+    LaunchedEffect(settleTick) {
+        if (settleTick > 0) settleSignals.trySend(Unit)
+    }
 
     // 几何/颜色随设置与视口变化，重建即重挂信号订阅。
     LaunchedEffect(contentLeft, contentTop, contentRight, contentBottom, pageBg, inkColor, contentRevision, hostRevision) {
@@ -110,55 +140,80 @@ fun PrerasterOnPrefill(
         //
         // 具名 suspend fun 而非 lambda：`return@...` 在 lambda 里不合法，而这段全是
         // 「条件不满足就地退出」的守卫。
-        suspend fun rasterWindow(chapter: Int) {
-            // 同一时刻只允许窗口内一轮预栅在跑（两个信号同时到达时不排队——这是去重不是优先级判断）。
-            if (prerasterBusy.value) {
+        //
+        // [afterSettle] = 落定触发（见参数 [settleTick]）：此刻翻页会话已收场，方向与锚页都是
+        // 最新的；引擎那一拍的 ±1 页装配可能还差一点，允许再等两拍（用户正在读当前页，白送的）。
+        suspend fun rasterWindow(chapter: Int, afterSettle: Boolean) {
+            if (afterSettle) prerasterLock.lock()
+            else if (!prerasterLock.tryLock()) {
                 Logger.d("Orilumn.TAP", "preraster window skip: busy ch=$chapter")
                 return
             }
-            val anchor = posNow() ?: return
-            // 只处理当前章：跨章预排由第 2/3 档的整章兜底另行处理。
-            if (anchor.chapter != chapter) {
-                Logger.d("Orilumn.TAP", "preraster window skip: anchor ch=${anchor.chapter} != $chapter")
-                return
-            }
-            // 方向 0 = 无记录（开书/跳转/调参），此时前向更可能被用，语义等同向前（§3.2）。
-            val effDir = if (dirNow() == 0) 1 else dirNow()
-            prerasterBusy.value = true
             try {
-                // **必须用只读的 peekAdjacent**：`adjacent` 是有副作用的真导航（引擎 tempNav
-                // 推进指针），预栅格调它会在无手势时把指针多推一格 ⇒ 真机症状
-                // 「翻页完成后又跳了一页」（19:56:25日志）。
-                val target = runCatching { hostNow.peekAdjacent(anchor, effDir) }.getOrNull()
-                if (target == null) {
-                    Logger.d("Orilumn.TAP", "preraster window: peek d=$effDir ch=$chapter → null")
-                } else {
-                    prerasterPage(
-                        host = hostNow,
-                        pos = target,
-                        renderer = rendererNow,
-                        contentLeft = contentLeft,
-                        contentTop = contentTop,
-                        contentRight = contentRight,
-                        contentBottom = contentBottom,
-                        pageBg = pageBg,
-                        inkColor = inkColor,
-                        contentRevision = contentRevision,
-                        imgCache = imgCacheNow,
-                        bgCache = bgCacheNow,
-                        // 按**目标页所属章**取标注：跨章目标（邻居章）也要投影出它自己那一章的装饰，
-                        // 否则预栅出来的位图与首帧绘制不等，白栅一次。
-                        annotations = annotationsRef.value(target.chapter).orEmpty(),
-                        annotationChapter = target.chapter,
-                    )
+                var attempt = 0
+                while (true) {
+                    // 会话在飞 ⇒ 落位自己正在栅这一张（见参数 sessionBusy）：让给它，别抢 store 锁。
+                    if (sessionBusyRef.value()) {
+                        Logger.d("Orilumn.TAP", "preraster window skip: flip in flight ch=$chapter")
+                        return
+                    }
+                    val anchor = posNow() ?: return
+                    // 只处理当前章：跨章预排由第 2/3 档的整章兜底另行处理。
+                    if (anchor.chapter != chapter) {
+                        Logger.d("Orilumn.TAP", "preraster window skip: anchor ch=${anchor.chapter} != $chapter")
+                        return
+                    }
+                    // 方向 0 = 无记录（开书/跳转/调参），此时前向更可能被用，语义等同向前（§3.2）。
+                    val effDir = if (dirNow() == 0) 1 else dirNow()
+                    // **必须用只读的 peekAdjacent**：`adjacent` 是有副作用的真导航（引擎 tempNav
+                    // 推进指针），预栅格调它会在无手势时把指针多推一格 ⇒ 真机症状
+                    // 「翻页完成后又跳了一页」（19:56:25日志）。
+                    val target = runCatching { hostNow.peekAdjacent(anchor, effDir) }.getOrNull()
+                    if (target != null) {
+                        prerasterPage(
+                            host = hostNow,
+                            pos = target,
+                            renderer = rendererNow,
+                            contentLeft = contentLeft,
+                            contentTop = contentTop,
+                            contentRight = contentRight,
+                            contentBottom = contentBottom,
+                            pageBg = pageBg,
+                            inkColor = inkColor,
+                            contentRevision = contentRevision,
+                            imgCache = imgCacheNow,
+                            bgCache = bgCacheNow,
+                            // 按**目标页所属章**取标注：跨章目标（邻居章）也要投影出它自己那一章的装饰，
+                            // 否则预栅出来的位图与首帧绘制不等，白栅一次。
+                            annotations = annotationsRef.value(target.chapter).orEmpty(),
+                            annotationChapter = target.chapter,
+                        )
+                        return
+                    }
+                    // 版式还没装配出来（引擎的 ±1 页 product 落后一拍）：落定触发的这一轮再等两拍，
+                    // 信号触发的直接放弃（下一次落定/信号还会来）。
+                    if (!afterSettle || attempt >= PRERASTER_SETTLE_RETRIES) {
+                        Logger.d("Orilumn.TAP", "preraster window: peek d=$effDir ch=$chapter → null")
+                        return
+                    }
+                    attempt++
+                    delay(PRERASTER_SETTLE_RETRY_MS)
                 }
             } finally {
-                prerasterBusy.value = false
+                prerasterLock.unlock()
             }
         }
         // 引擎抛信号 → 执行栅格。取数在本协程（前台），整页重画由 `prerasterPage` 切到
         // Default；store 的 surface 已加锁，命中路径不碰锁（见 `PageRasterStore` 线程段）。
-        hostNow.observePrefillReady { chapter, _ -> rasterWindow(chapter) }
+        hostNow.observePrefillReady { chapter, _ -> rasterWindow(chapter, afterSettle = false) }
+        // 落定信号 → 立刻补方向侧那一张（下一章/下一页）。引擎的预排信号在落位**之前**抛，
+        // 补不到这一张（见参数 [settleTick]），这里是它唯一的补法。
+        launch {
+            for (ignored in settleSignals) {
+                val chapter = posNow()?.chapter ?: continue
+                rasterWindow(chapter, afterSettle = true)
+            }
+        }
     }
 }
 
@@ -347,3 +402,13 @@ private suspend fun warmImagesForPreraster(
         missBgs.any { bgCache.get(bgKeyOf(it.first, it.second)) == null }
     return !stillMissing
 }
+
+/**
+ * 落定补栅格：版式还没装配出来时最多再等几拍（见 [PrerasterOnPrefill] 的 `settleTick`）。
+ *
+ * 引擎装配 ±1 页版式是异步的，落定那一拍常常还差一点；用户正在读当前页，等这几拍
+ * 是白送的（不像起手后现场栅那样计进用户时延）。超过这个窗口就不再等：宁可这一次
+ * 现场栅，也不要在用户已经起手时还占着预栅格锁。
+ */
+internal const val PRERASTER_SETTLE_RETRY_MS = 120L
+internal const val PRERASTER_SETTLE_RETRIES = 4

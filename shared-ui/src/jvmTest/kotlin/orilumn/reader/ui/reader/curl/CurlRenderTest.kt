@@ -11,6 +11,7 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.LayoutDirection
+import orilumn.reader.ui.reader.RasterTexture
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -55,8 +56,8 @@ class CurlRenderTest {
     }
 
     private fun images(page: ImageBitmap, overlay: ImageBitmap? = null) = CurlPageImages().apply {
-        this.page = page
-        this.overlay = overlay
+        this.page = RasterTexture(page)
+        this.overlay = overlay?.let { RasterTexture(it) }
     }
 
     private fun render(
@@ -152,6 +153,28 @@ class CurlRenderTest {
         }
     }
 
+    /**
+     * 收尾最后一帧（3D 网格退化成空、退回折页）不许在自由边留一条灰竖带。
+     *
+     * 上一页收尾时折痕扫到右缘，纸背只剩一条几像素的窄条，它的外缘影却按满宽铺在右侧留白上；
+     * 这一帧恰好是 3D 网格交不出网格、退回折页的那一帧，读者看到的就是「动画结束时右侧闪一下」。
+     */
+    @Test
+    fun fallbackTailFrameDoesNotLeaveAShadowBandOnTheFreeEdge() {
+        val w = 400
+        val h = 600
+        val shape = curlFrame(w.toFloat(), h.toFloat(), 0.999f, direction = -1).shape
+        val white = solid(w, h, 0xFFFFFFFF.toInt())
+        val px = render(shape, images(white), images(white)).toPixelMap()
+        for (x in w - 40 until w - 4) {
+            for (y in h / 5 until h * 4 / 5 step 5) {
+                val c = px[x, y]
+                val v = ((c.red * 255).toInt() + (c.green * 255).toInt() + (c.blue * 255).toInt()) / 3
+                assertTrue("收尾最后一帧右侧留白被影压暗了（x=$x y=$y v=$v）", v >= 245)
+            }
+        }
+    }
+
     /** 还没开始翻（进度 0 且不在结算里）：整帧就是读者正在看的那一页（`front`）。 */
     @Test
     fun untouchedFrameIsThePageBeingRead() {
@@ -168,9 +191,12 @@ class CurlRenderTest {
         }
     }
 
-    /** 覆盖层（旁注 / 页码）跟着纸一起走：正面页上有、纸背上没有。 */
+    /**
+     * 覆盖层（旁注 / 页码）跟着纸一起走：正面页上是原样，纸背上是**同一份的镜像**
+     * （＝同一张纸的背面朝着读者，读者写的字透过来）。
+     */
     @Test
-    fun overlayRidesTheFrontPageOnly() {
+    fun overlayRidesTheWholeSheet() {
         val w = 400
         val h = 600
         val shape = curlShape(w.toFloat(), h.toFloat(), 0.25f, direction = 1)
@@ -179,10 +205,22 @@ class CurlRenderTest {
         CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(overlay), Size(w.toFloat(), h.toFloat())) {
             drawRect(Color(0xFF00AA00.toInt()), topLeft = androidx.compose.ui.geometry.Offset(0f, 250f), size = Size(w.toFloat(), 100f))
         }
-        val px = render(shape, images(solid(w, h, red), overlay), images(solid(w, h, blue))).toPixelMap()
-        assertEquals("正面页上的旁注要画出来", 0xFF00AA00.toInt(), px[50, 300].toArgb())
-        // 纸背（x ∈ [200, 300]）不该再压一遍覆盖层：那里是纸色 + 39% 红底。
-        assertTrue("纸背上不该画覆盖层", px[250, 300].toArgb() != 0xFF00AA00.toInt())
+        val withOverlay = render(shape, images(solid(w, h, red), overlay), images(solid(w, h, blue))).toPixelMap()
+        val plain = render(shape, images(solid(w, h, red)), images(solid(w, h, blue))).toPixelMap()
+        assertEquals("正面页上的旁注要画出来", 0xFF00AA00.toInt(), withOverlay[50, 300].toArgb())
+        // 纸背（折痕左侧那一半）与「没有覆盖层」的那一帧相比要有变化，而且不许被刷成白色。
+        var backDiff = 0
+        for (y in 0 until h step 3) {
+            for (x in 0 until w / 2 step 3) {
+                val argb = withOverlay[x, y].toArgb()
+                if (argb != plain[x, y].toArgb()) backDiff++
+                assertTrue(
+                    "纸背上的透明覆盖层被抬成了白色（x=$x y=$y）",
+                    !((argb shr 16) and 0xFF > 250 && (argb shr 8) and 0xFF > 250 && (argb and 0xFF) > 250),
+                )
+            }
+        }
+        assertTrue("纸背是同一张纸的反面：旁注要透过来（实测 $backDiff 个像素不同）", backDiff > 20)
     }
 
     @Test

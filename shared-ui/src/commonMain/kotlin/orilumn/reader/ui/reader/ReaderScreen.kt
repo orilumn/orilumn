@@ -192,6 +192,14 @@ fun ReaderScreen(
      */
     keysEnabled: Boolean = true,
     /**
+     * 结算动画时长倍率：桌面壳传 2，平板/其它默认 1。
+     *
+     * 平板是手指拖拽，松手前页面已经跟手走了半页，剩下那半页 300ms 够用；桌面是
+     * 滚轮/方向键/触控板，一按就从 0 走满整页，没有跟手段垫底，同一时长在宽屏上
+     * 就是「瞬切」。只放大时长，不动帧率与几何（见 [FlipSession.settleDurationMs]）。
+     */
+    flipSettleScale: Float = 1f,
+    /**
      * 标注数据外部变更号（标注清单删除后 ++）：单独一条 effect 重读当前章标注，
      * 让屏幕上那条装饰同步消失。**不能**并进「进章」effect——同章 `load(ch)` 会早退，
      * 不会重读；它也不是版式修订号，不驱动重新分页。
@@ -552,8 +560,17 @@ fun ReaderScreen(
     SideEffect {
         anchorFunnel.beforeCommit = { pos ->
             // 先等图（缺图必等，灰占位不可入场），再等整页位图（翻页动画/首帧直接复用这张）。
+            // 两段各自计时：落位时延的主要来源就是这两笔（见 FLIPLAT 分段日志）。
+            val t0 = System.nanoTime()
             warmByRef.value(pos)
+            val tWarm = System.nanoTime()
             rasterByRef.value(pos)
+            val tEnd = System.nanoTime()
+            Logger.d(
+                "Orilumn.TAP",
+                "FLIPLAT pre-commit ch=${pos.chapter} char=${pos.slice.charStart} " +
+                    "img=${(tWarm - t0) / 1_000_000}ms raster=${(tEnd - tWarm) / 1_000_000}ms",
+            )
         }
     }
     // 跨页位图缓存（随宿主换代重建：换书即新池；同书内翻页/改参常驻，回访页首帧即有图）。
@@ -820,7 +837,15 @@ fun ReaderScreen(
             commit = ::markPositionChanged,
         ) { p ->
             Logger.d("Orilumn.TAP", "$action dispatch dir=$direction from ch=${p.chapter} char=${p.slice.charStart}")
+            val tNav = System.nanoTime()
             val landed = currentHost.adjacent(p, direction)
+            // 落位本身（引擎：章内换页/跨章开章+整形）与 beforeCommit（等图+整页栅格）分开记，
+            // 二者相加即 FLIPLAT target-ready 的主体（见 FlipController.logLat）。
+            Logger.d(
+                "Orilumn.TAP",
+                "FLIPLAT nav dir=$direction ms=${(System.nanoTime() - tNav) / 1_000_000} " +
+                    "to=${landed?.let { "ch=${it.chapter} char=${it.slice.charStart}" } ?: "NULL"}",
+            )
             // 引擎侧无声吞翻页时（返回 null），这里是唯一目击者——与 Orilumn.FLIP 对账。
             Logger.d("Orilumn.TAP", "$action result dir=$direction " + (landed?.let { "landed ch=${it.chapter} char=${it.slice.charStart}" } ?: "NULL (engine returned null)"))
             // 等图由 [AnchorFunnel.beforeCommit] 在**本函数内部、commit 之前**完成（漏斗锁内，
@@ -858,6 +883,7 @@ fun ReaderScreen(
         },
         scope = scope,
         log = { m -> Logger.d("Orilumn.TAP", m) },
+        settleScale = flipSettleScale,
     )
     SideEffect { flipCtl = controller }
     // 手势/渲染层一律经它取会话；理论上组合内已完成赋值（SideEffect 在 apply 变更前跑）。
@@ -896,11 +922,11 @@ fun ReaderScreen(
      * 必须传起手时的 `openPos`：它是「当前页」身份，落位完成后 openPos 就变成
      * 目标页了，不另存一份渲染层会拿目标页当当前页画（真机症状：目标页空白）。
      */
-    fun beginSlide(direction: Int) {
+    fun beginSlide(direction: Int, downNanos: Long = 0L) {
         val src = openPos ?: return
         // 后退回封面：目标就绪即画（封面已解码），无需落位；前进离开封面仍需落位书首。
         val enterCover = !coverVisible && direction < 0 && isBookStart(src)
-        ctl.beginDrag(src, direction, slideEnabled, coverVisible, enterCover)
+        ctl.beginDrag(src, direction, slideEnabled, coverVisible, enterCover, downNanos)
     }
 
     /** 拖动中：喂位移。目标页未就绪时只喂状态机、不写回渲染（避免拉出空白页）。 */
@@ -1660,7 +1686,7 @@ fun ReaderScreen(
         return openRevisionEdit(revision)
     }
 
-    fun onTap(xPx: Float, yPx: Float, widthPx: Float, allowFlip: Boolean = true) {
+    fun onTap(xPx: Float, yPx: Float, widthPx: Float) {
         // 动画播放期间不响应点按：会话在飞时画面正被动画独占（`slideFromPos`/
         // `slideTargetPos` 锁着两页），此时翻页/切栏/跳链接会让像素与数据错位。
         // 早先只有 `flipWithAnimation` 自己挡（beginProgrammatic 返回 false 即丢弃），
@@ -1675,7 +1701,7 @@ fun ReaderScreen(
         // 中部切栏，后退区无操作（封面已是第一页；退出走顶栏返回键）。
         if (coverVisible) {
             when (ReaderMath.tapZone(xPx, widthPx)) {
-                1 -> if (allowFlip) flipWithAnimation(1)
+                1 -> flipWithAnimation(1)
                 else -> barsVisible = !barsVisible
             }
             return
@@ -1737,10 +1763,10 @@ fun ReaderScreen(
         Logger.d("Orilumn.TAP", "tap x=${xPx.roundToInt()} y=${yPx.roundToInt()} w=${widthPx.roundToInt()} zone=$zone bars=${currentBarsVisible}")
         when (zone) {
             // 点按翻页与拖动松手走同一条动画路径（见 flipWithAnimation）。
-            // 桌面鼠标单击不翻页（2026-11-04 用户定口）：翻页只走滚轮 / 触控板双指，
-            // 左右 1/3 单击因此什么都不做，中部照旧切上下栏。
-            -1 -> if (allowFlip) flipWithAnimation(-1)
-            1 -> if (allowFlip) flipWithAnimation(1)
+            // 左 / 中 / 右三等分（ReaderMath.tapZone）：左右 1/3 翻页，中部切上下栏。
+            // 桌面鼠标单击与触摸同一套语义（2026-11-20 恢复桌面点击翻页）。
+            -1 -> flipWithAnimation(-1)
+            1 -> flipWithAnimation(1)
             else -> barsVisible = !barsVisible
         }
     }
@@ -1782,7 +1808,7 @@ fun ReaderScreen(
 
     // L1 滑动的引用包装（必须在上面几个局部函数声明之后——Kotlin 局部函数不可前向引用）。
     val currentSlideEnabled by rememberUpdatedState(slideEnabled)
-    val currentBeginSlide by rememberUpdatedState<(Int) -> Unit> { beginSlide(it) }
+    val currentBeginSlide by rememberUpdatedState<(Int, Long) -> Unit> { d, down -> beginSlide(d, down) }
     val currentUpdateSlide by rememberUpdatedState<(Float, Float) -> Unit> { dx, w -> updateSlide(dx, w) }
     val currentUpdateCurlPull by rememberUpdatedState<(Float, Float, Float, Float, Float, Float) -> Unit> {
             downX, downY, x, y, w, h ->
@@ -3144,10 +3170,10 @@ fun ReaderScreen(
                             change.consume()
                             continue
                         }
-                        // 指针类型分流：鼠标拖拽才进入选区；单击只做与翻页无关的动作
-                        //（见上面 `onTap` 的 allowFlip = false：标注卡片 → 清选区 → 链接 → 中部切栏），
-                        // 桌面翻页交给滚轮 / 触控板双指（见上面的滚动通道）；
-                        // 触摸仍走下面的三区点按/滑动/亮度，两套语义不抢同一个手势。
+                        // 指针类型分流：鼠标拖拽进入选区；单击与触摸同一套语义
+                        //（标注卡片 → 清选区 → 链接 → 三区点按：左右翻页 / 中部切栏）。
+                        // 滚轮 / 触控板双指仍走上面的滚动通道；
+                        // 触摸走下面的三区点按/滑动/亮度，两套语义不抢同一个手势。
                         if (mouse) {
                             if (mouseSelectingPending && moved) {
                                 mouseSelectingPending = false
@@ -3172,12 +3198,11 @@ fun ReaderScreen(
                                 }
                             }
                             if (!change.pressed) {
-                                // 鼠标单击：桌面不翻页（2026-11-04 用户定口），只保留
-                                // 「点中标注 / 链接 / 中部切栏」这些与翻页无关的动作；
-                                // 左右 1/3 因此什么都不做（allowFlip = false）。
+                                // 鼠标单击：与触摸同一套三区语义（左右 1/3 翻页、
+                                // 中部切栏，2026-11-20 恢复桌面点击翻页）。
                                 // 按下点已被上层消费（栏/遮罩）就不落到阅读面。
                                 if (!moved && !down.isConsumed) {
-                                    onTap(downX, downY, size.width.toFloat(), allowFlip = false)
+                                    onTap(downX, downY, size.width.toFloat())
                                 }
                                 change.consume()
                                 break
@@ -3285,7 +3310,7 @@ fun ReaderScreen(
                                         // 先立旗再起手：起手这一步若抛异常，finally 仍能把会话收掉
                                         // （否则会话停在 Dragging，批注层被 isBusy 藏起、手势全被吞）。
                                         slideActive = true
-                                        currentBeginSlide(dragDir)
+                                        currentBeginSlide(dragDir, tDown)
                                     }
                                     currentUpdateSlide(dx, size.width.toFloat())
                                     // 卷曲手感：起手点 + 手指的**绝对页坐标**。折痕角度取拖动
@@ -3426,7 +3451,9 @@ fun ReaderScreen(
             val h = pxHeight.roundToInt()
             // 烤图不占主线程（一张整页位图的内存搬运没必要卡动画起手那一帧）。
             coverImages.page = withContext(Dispatchers.Default) {
-                bakeCoverPageBitmap(src, w, h, proportional = !light.coverStretch, bgArgb = profile.bgColor)
+                RasterTexture(
+                    bakeCoverPageBitmap(src, w, h, proportional = !light.coverStretch, bgArgb = profile.bgColor),
+                )
             }
         }
 
@@ -3633,8 +3660,11 @@ fun ReaderScreen(
             PrerasterOnPrefill(
                 host = currentHost,
                 onPrefillReady = onPrefillReady,
-                directionProvider = { ctl.session.direction },
+                // 会话在飞时用本次方向；落定后状态机把 direction 归零，退回「最近一次翻页方向」
+                // （否则往回读时永远只热身正方向）。两者都无 → 0，预栅格按向前处理。
+                directionProvider = { ctl.session.direction.takeIf { it != 0 } ?: ctl.lastTurn.value },
                 currentPos = { openPos },
+
                 renderer = pageRenderer,
                 contentLeft = contentLeft,
                 contentTop = contentTop,
@@ -3647,6 +3677,10 @@ fun ReaderScreen(
                 imgCache = imgCache,
                 bgCache = bgCache,
                 annotationsFor = annotationState::annotationsFor,
+                // 会话在飞时让位：此刻落位自己正在栅同一张（见 PrerasterOnPrefill.sessionBusy）。
+                sessionBusy = { ctl.isBusy() },
+                // 落定代际：翻完立刻补方向侧像素，下一次起手就不用现场栅 200–390ms。
+                settleTick = ctl.settleTick.value,
             )
             // 上面 `beforeCommit` 的「整页位图备齐」实现：与 PrerasterOnPrefill 同口径
             //（同一渲染器、同一缓存、同一条取数路径），只是针对**本次落位目标页**。
@@ -3926,9 +3960,9 @@ fun ReaderScreen(
                     overlayWidthPx = pxWidth.toInt(),
                     overlayHeightPx = pxHeight.toInt(),
                     overlayTextMeasurer = overlayMeasurer,
-                    onImages = { pageImage, overlayImage ->
-                        images.page = pageImage
-                        images.overlay = overlayImage
+                    onImages = { pageTexture, overlayTexture ->
+                        images.page = pageTexture
+                        images.overlay = overlayTexture
                     },
                 )
             }

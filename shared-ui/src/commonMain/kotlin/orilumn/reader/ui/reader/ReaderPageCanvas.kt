@@ -3,8 +3,9 @@ package orilumn.reader.ui.reader
 import androidx.compose.foundation.Canvas
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.key
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.text.TextMeasurer
 import kotlin.math.roundToInt
 /**
@@ -78,11 +79,17 @@ internal fun ReaderPageCanvas(
      * 本次真正画出来的两张图（页栅格 + 覆盖层，**同一帧、同一绘制相位**）：
      * 翻页卷曲层直接把它们当纹理，不再另截图（见 `curl/FlipCurlLayer.kt`）。
      * 是普通回调（不是 Compose 状态）：写在 draw 相位，读它的也在 draw 相位，不触重组。
+     *
+     * 交出去的是 [RasterTexture]（图 + 内容代数）：覆盖层那张位图会被原地重画
+     * （见 `PageOverlayLayer`），光看实例判不出「像素换了」，下游贴图缓存必须按代数判废。
      */
-    onImages: ((ImageBitmap?, ImageBitmap?) -> Unit)? = null,
+    onImages: ((page: RasterTexture?, overlay: RasterTexture?) -> Unit)? = null,
 ) {
     val localRenderer = rememberReaderPageRenderer()
     val renderer = renderer ?: localRenderer
+    // 覆盖层贴图的画柄缓存：翻页动画一帧重画一次，桌面每帧重建纹理的代价见 [RasterDrawCache]。
+    // 放在 key(contentRevision) 之外，图换了由缓存自己按实例判废。
+    val overlayRaster = remember { RasterDrawCache() }
     // 修订号版本化：只包画布发射器（渲染器实例保留在 key 之外，Android 离屏
     // surface 不重建、其页缓存另经 contentRevision 显式失效，见各 actual）。
     key(contentRevision) {
@@ -150,7 +157,7 @@ internal fun ReaderPageCanvas(
             )
         }
         // 覆盖层：透明底整页图，画在页栅格之上。键含内容 + 尺寸 + 密度（改任一项都要重画）。
-        val overlayImage = if (overlay != null && overlayLayer != null &&
+        val overlayTexture = if (overlay != null && overlayLayer != null &&
             overlayTextMeasurer != null && !overlay.isEmpty
         ) {
             val ow = if (overlayWidthPx > 0) overlayWidthPx else (contentRectRight - contentRectLeft).toInt()
@@ -167,8 +174,10 @@ internal fun ReaderPageCanvas(
         } else {
             null
         }
-        if (overlayImage != null) drawImage(overlayImage)
-        onImages?.invoke(pageImage, overlayImage)
+        if (overlayTexture != null) {
+            drawRasterCached(overlayRaster, overlayTexture, Offset.Zero)
+        }
+        onImages?.invoke(pageImage?.let { RasterTexture(it) }, overlayTexture)
     }
     }
 }

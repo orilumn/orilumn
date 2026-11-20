@@ -24,6 +24,8 @@ import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.LayoutDirection
+import orilumn.reader.ui.reader.RasterTexture
+import orilumn.reader.ui.reader.drawRasterCached
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.atan2
@@ -194,7 +196,8 @@ internal fun DrawScope.drawCurl3DFrame(
     val lift = radius * (1f - cos(minOf(mesh.maxArc() / radius, PI.toFloat())))
     val silhouette = mesh.maxOffsetAlong(up.x, up.y, t0)
     val shadowWidth = lift * 0.5f
-    val shadowAlpha = DROP_SHADOW_ALPHA * (lift / (2f * radius)).coerceIn(0f, 1f) * shape.shadowFade
+    val shadowAlpha = DROP_SHADOW_ALPHA * (lift / (2f * radius)).coerceIn(0f, 1f) *
+        shape.shadowFade * freeEdgeShadowFade(shape, radius)
     clipRect(0f, 0f, w, h) {
         drawRollShadow(
             mesh = mesh,
@@ -240,6 +243,17 @@ internal fun DrawScope.drawCurl3DFrame(
     // 明暗只画在**看得见**的那一面：纸卷隆起后外层是纸背（Verso，z ≥ R，压在正面那半圈之上），
     // 没绕到九十度时只有正面（Recto）露在外面。给被压住的那一段画明暗等于白画。
     val hasVerso = mesh.bands.any { it.surface == CurlMesh.Surface.Verso }
+    // 整张纸只贴**一张不透明贴图**：有覆盖层（旁注 + 页码）时先把页栅格与覆盖层合成一张
+    // 整页图（见 [CurlPageBake]）。分两遍画不行：覆盖层是透明底的，网格那条路径会把它的
+    // 透明像素抬成白色，卷起来的纸整个刷白、只剩旁注 —— 读者报的「反面没有文字，只有批注」。
+    val sheet = front.bake.textureOf(
+        images = front,
+        pageW = w,
+        pageH = h,
+        paperArgb = paperArgb,
+        texLeft = frontTex.x,
+        texTop = frontTex.y,
+    )
     // 纸边被卷起来时可以略微探出页面（斜折痕 + 抬起的纸），画布裁到页面内即可。
     clipRect(0f, 0f, w, h) {
         fun drawBand(band: CurlMesh.Band) {
@@ -247,12 +261,15 @@ internal fun DrawScope.drawCurl3DFrame(
             val ring = mesh.bandOutline(band)
             if (ring.size < 3) return
             val outline = polygonPath(ring)
-            val pageImage = front.page
+            val pageTexture = sheet?.texture
+            val pageImage = pageTexture?.image
+            // 烤图是整页，页栅格是版心：贴图偏移与材料范围都跟着 [sheet] 走。
+            val texLeft = sheet?.texLeft ?: 0f
+            val texTop = sheet?.texTop ?: 0f
             val texWidth = pageImage?.width?.toFloat() ?: 0f
             val texHeight = pageImage?.height?.toFloat() ?: 0f
             // 纹理**只能画在版心材料范围内**：页栅格只有版心那么大（平板 1585×2400 放在
-            // 1840×2800 里），页边距里根本没有像素（封面是整页烤图，它的材料范围就是整页）。靠 `ImageShader` 的 `Decal` 平铺模式
-            // 让版心之外的采样直接**透明**（见 [newMeshPaint]）：卷进页边距的一截只露纸色。
+            // 1840×2800 里），页边距里根本没有像素（封面与覆盖层烤图是整页，材料范围就是整页）。
             // **不再用 `clipPath` 按材料形状裁**：折痕一斜，那条裁剪路径就不是矩形，
             // 抗锯齿裁切会让 Skia 为它开一张全页大小的图层，平板上实测一帧多三十来毫秒
             //（手指横划时倾斜不为零，帧率当场掉到 20fps；直线滑动倾斜恒 0 反而 60fps）。
@@ -262,8 +279,8 @@ internal fun DrawScope.drawCurl3DFrame(
             } else {
                 mesh.textureStrip(
                     band = band,
-                    texLeft = frontTex.x,
-                    texTop = frontTex.y,
+                    texLeft = texLeft,
+                    texTop = texTop,
                     texWidth = texWidth,
                     texHeight = texHeight,
                 )
@@ -276,7 +293,7 @@ internal fun DrawScope.drawCurl3DFrame(
             if (pageImage == null) {
                 drawPath(outline, paper)
             } else {
-                for (margin in mesh.marginStrips(band, frontTex.x, frontTex.y, texWidth, texHeight)) {
+                for (margin in mesh.marginStrips(band, texLeft, texTop, texWidth, texHeight)) {
                     drawPath(polygonPath(margin.outlinePath()), paper)
                 }
             }
@@ -284,19 +301,7 @@ internal fun DrawScope.drawCurl3DFrame(
                 drawTextureStrip(
                     canvas = canvas,
                     strip = strip,
-                    paint = front.textures.pagePaint(pageImage!!),
-                )
-            }
-            // 覆盖层是整页图（旁注 + 页码），材料坐标本来就在页内，不需要裁。
-            front.overlay?.let { overlay ->
-                drawMeshBand(
-                    canvas = canvas,
-                    mesh = mesh,
-                    band = band,
-                    image = overlay,
-                    texDx = 0f,
-                    texDy = 0f,
-                    paint = front.textures.overlayPaint(overlay),
+                    paint = front.textures.pagePaint(pageTexture!!),
                 )
             }
 
@@ -347,6 +352,37 @@ internal fun DrawScope.drawCurl3DFrame(
         }
         }
     return true
+}
+
+/**
+ * 纸卷贴近**自由边**时，落影再淡一次：折痕离自由边越近，影越淡，贴边时归零。
+ *
+ * ## 修的是「翻上一页收尾，右侧留白整条竖带闪一下」
+ *
+ * 折痕扫到自由边附近时，筒已经没剩多少纸可卷，几何上却仍是满径的筒：落影照旧按满宽铺出去，
+ * 落在露出页仅剩的那条**留白**上。折痕一路扫到页边、影跟着扫过去再突然消失，读者看到的就是
+ * 一条灰竖带闪一下。桌面结算 600ms（平板 300ms）才看得清，所以用户只报桌面。
+ *
+ * 与 [CurlShape.shadowFade] 分工：那个按**进度**淡（头尾 10%），管起手与收尾的倾斜扶正；
+ * 这个按**折痕位置**淡，管「纸已经卷到页边、没有纸可卷了」。两者相乘。
+ *
+ * 中段（折痕离自由边还有 [CURL3D_FREE_EDGE_SHADOW_FADE] 个半径以上）恒为 1，落影深浅一分不动；
+ * 只有最后这一段收掉 —— 正好是影会压进留白的那一段。收的时候按**平方**走（而不是直线）：
+ * 影带本身只有几十像素宽，线性淡到一半时它还整条压在留白里，看着仍是一条灰带；平方让它
+ * 在**刚进留白**的时候就已经很淡，贴边时正好归零。
+ *
+ * 距离的取法跟着几何走：`direction = -1` 是左右镜像几何，自由边在左缘，所以量的是 `foldX`；
+ * 其余情况自由边在右缘，量的是 `pageW - foldX`。
+ */
+internal fun freeEdgeShadowFade(shape: CurlShape, radius: Float): Float {
+    val freeGap = if (shape.direction >= 0) {
+        shape.pageW - shape.foldX
+    } else {
+        shape.foldX
+    }
+    val span = (radius * CURL3D_FREE_EDGE_SHADOW_FADE).coerceAtLeast(1f)
+    val k = (freeGap / span).coerceIn(0f, 1f)
+    return k * k
 }
 
 /**
@@ -798,39 +834,56 @@ private const val ROLL_SHADE_MAX_ALPHA: Float = 0.30f
 /** 落影最深处的不透明度（参考实现 `SHADOW_INNER_COLOR` 的 alpha = 0.5）。 */
 private const val DROP_SHADOW_ALPHA: Float = 0.32f
 
+/**
+ * 折痕贴近自由边时落影的淡出距离（相对卷曲半径）。
+ *
+ * 2.5R 是「影宽 + 留白」的量级：折痕离自由边还剩 2.5 个半径时影全浓，贴边时归零（见
+ * [freeEdgeShadowFade]）。取小了影带仍会压进留白，取大了中段落影就没了。
+ */
+private const val CURL3D_FREE_EDGE_SHADOW_FADE: Float = 2.5f
+
 /** 明暗渐变的分段数（一维函数的采样密度，够到看不出折线）。 */
 private const val ROLL_SHADE_STOPS: Int = 16
 
-/** 页面纹理的画笔缓存：一页栅格只建一次 `ImageShader`（见 [CurlTextureCache]）。 */
+/** 页面纹理的画笔缓存：一张图的**这一版像素**只建一次 `ImageShader`（见 [CurlTextureCache]）。 */
 internal class CurlTextureCache {
-    private var pageImage: ImageBitmap? = null
+    private var pageTexture: RasterTexture? = null
     private var pagePaint: Paint? = null
-    private var overlayImage: ImageBitmap? = null
+    private var overlayTexture: RasterTexture? = null
     private var overlayPaint: Paint? = null
 
-    /** 正文页栅格的画笔（`ImageShader` 绑在这张图上）。图换了才重建。 */
-    fun pagePaint(image: ImageBitmap): Paint = paintFor(image, overlay = false)
+    /** 累计真正重建过几次 `ImageShader`（诊断用，见 [CurlPerf]）。 */
+    internal var rebuilds: Int = 0
+        private set
+
+    /** 正文页栅格的画笔（`ImageShader` 绑在这张图的这一版上）。图/代数换了才重建。 */
+    fun pagePaint(texture: RasterTexture): Paint = paintFor(texture, overlay = false)
 
     /** 覆盖层（旁注 + 页码）的画笔。 */
-    fun overlayPaint(image: ImageBitmap): Paint = paintFor(image, overlay = true)
+    fun overlayPaint(texture: RasterTexture): Paint = paintFor(texture, overlay = true)
 
-    private fun paintFor(image: ImageBitmap, overlay: Boolean): Paint {
-        val cached = if (overlay) overlayImage else pageImage
+    private fun paintFor(texture: RasterTexture, overlay: Boolean): Paint {
+        val cached = if (overlay) overlayTexture else pageTexture
         val paint = if (overlay) overlayPaint else pagePaint
-        if (paint != null && cached === image) return paint
-        val fresh = newMeshPaint(image)
+        if (paint != null && cached != null &&
+            cached.image === texture.image && cached.generation == texture.generation
+        ) {
+            return paint
+        }
+        val fresh = newMeshPaint(texture.image)
+        rebuilds++
         if (overlay) {
-            overlayImage = image
+            overlayTexture = texture
             overlayPaint = fresh
         } else {
-            pageImage = image
+            pageTexture = texture
             pagePaint = fresh
         }
         return fresh
     }
 }
 
-/** 网格纹理画笔：`ImageShader` 只跟图有关，跟几何无关。 */
+/** 网格纹理画笔：`ImageShader` 建的时候就把像素拷成快照，所以画笔只跟**图的这一版**有关，跟几何无关。 */
 private fun newMeshPaint(image: ImageBitmap): Paint = Paint().apply {
     // 纹理**只在版心材料范围内**绘制，越界像素靠 `Clamp` 兜底不会跨页抹开：
     // 几何已经裁到版心边上（见 [CurlMesh.textureStrip]），采样走不到页边距里。
@@ -909,40 +962,6 @@ private object ShadowSolid {
         cached = fresh
         return fresh
     }
-}
-
-/**
- * 用一段网格画一张纹理（**Compose 公共 API**：`Vertices` + `ImageShader`）。
- *
- * 网格本来就是「每行两个顶点、相邻两行连成四边形」的形状，正好是一条
- * [VertexMode.TriangleStrip]；段内顶点在数组里连续（`firstRow*2 .. lastRow*2+1`），
- * 所以**不需要索引数组**。早先每帧都把索引摊成 `List<Int>`（两千多个装箱整数）再传进来，
- * 跟手时正是绘制热路径上的大头。
- *
- * 顶点坐标与纹理坐标直接按段的下标区间做视图（[FloatPairList]），不再逐帧摊 `List<Offset>`。
- */
-private fun DrawScope.drawMeshBand(
-    canvas: androidx.compose.ui.graphics.Canvas,
-    mesh: CurlMesh,
-    band: CurlMesh.Band,
-    image: ImageBitmap,
-    texDx: Float,
-    texDy: Float,
-    paint: Paint,
-) {
-    val from = band.firstRow * 2
-    val to = (band.lastRow + 1) * 2
-    val vertices = Vertices(
-        vertexMode = VertexMode.TriangleStrip,
-        positions = FloatPairList(mesh.positions, from, to),
-        textureCoordinates = FloatPairList(mesh.texCoords, from, to, texDx, texDy),
-        // Compose 要求顶点色与顶点数**等长**（空列表会抛「lengths must match」）。
-        // 全部给白色 + SrcOver ⇒ 只取纹理本身，不做顶点级着色。
-        colors = WhiteColorList(to - from),
-        // 空索引 = 按顺序画这条三角带；段内顶点在网格数组里本来就是连续的。
-        indices = emptyList(),
-    )
-    drawIntoCanvas { it.drawVertices(vertices, BlendMode.SrcOver, paint) }
 }
 
 /**
@@ -1069,8 +1088,10 @@ private fun DrawScope.drawPage(
     alpha: Float = 1f,
 ) {
     drawRect(paper, size = pageSize, alpha = alpha)
-    images.page?.let { drawImage(it, topLeft = Offset(texLeft, texTop), alpha = alpha) }
-    images.overlay?.let { drawImage(it, topLeft = Offset.Zero, alpha = alpha) }
+    images.page?.let { drawRasterCached(images.pageRaster, it, Offset(texLeft, texTop), alpha) }
+    images.overlay?.let {
+        drawRasterCached(images.overlayRaster, it, Offset.Zero, alpha)
+    }
 }
 
 /**
@@ -1160,7 +1181,8 @@ private fun DrawScope.drawRevealPage(
     texTop: Float,
 ) {
     val path = polygonPath(corners)
-    val pageImage = images.page
+    val pageTexture = images.page
+    val pageImage = pageTexture?.image
     if (pageImage == null) {
         drawPath(path, paper)
     } else {
@@ -1191,7 +1213,7 @@ private fun DrawScope.drawRevealPage(
             // shader 的原点才对得上图 (0,0)。
             val local = List(texPts.size) { Offset(texPts[it].x - texLeft, texPts[it].y - texTop) }
             withTransform({ translate(texLeft, texTop) }) {
-                drawIntoCanvas { it.drawPath(polygonPath(local), images.textures.pagePaint(pageImage)) }
+                drawIntoCanvas { it.drawPath(polygonPath(local), images.textures.pagePaint(pageTexture!!)) }
             }
         }
     }

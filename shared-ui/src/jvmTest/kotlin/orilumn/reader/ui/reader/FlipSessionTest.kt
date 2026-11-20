@@ -312,6 +312,21 @@ class FlipSessionTest {
     }
 
     @Test
+    fun `桌面倍率——默认时长与速度折算同步放大——快甩仍短促`() {
+        val s = session()
+        // 桌面壳传 2：commit/rollback 回到 CurlView 基准 600/500（桌面没有跟手段垫底）。
+        assertEquals(600, s.settleDurationMs(FlipSession.Decision.COMMIT, scale = 2f))
+        assertEquals(500, s.settleDurationMs(FlipSession.Decision.ROLLBACK, scale = 2f))
+        // 速度折算同比例：250ms → 500ms，而不是被默认时长夹回 600。
+        assertEquals(500, s.settleDurationMs(FlipSession.Decision.COMMIT, 0.5f, 2000f, 1000f, 2f))
+        // 下限同样放大：90 → 180。
+        assertEquals(
+            FlipSession.MIN_ANIM_MS * 2,
+            s.settleDurationMs(FlipSession.Decision.COMMIT, 0.5f, 10000f, 1000f, 2f),
+        )
+    }
+
+    @Test
     fun `少量慢速滑动不再误判为点击——点按判据是「没动过」`() {
         // 手势层早先以 dragDir==0 代理「没动过」，而 dragDir 只在定轴 HORIZONTAL
         // 后才赋值 ⇒ 未过 slop 的少量滑动会带着 dragDir==0 落进点按分支。

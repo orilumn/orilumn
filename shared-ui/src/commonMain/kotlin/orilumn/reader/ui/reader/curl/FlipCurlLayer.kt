@@ -11,8 +11,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.ImageBitmap
 import orilumn.reader.io.Logger
+import orilumn.reader.ui.reader.RasterDrawCache
+import orilumn.reader.ui.reader.RasterTexture
 
 /** 3D 卷曲总开关：关掉只用于排查（退回 2D 折页）。 */
 private const val USE_CURL3D: Boolean = true
@@ -29,14 +30,32 @@ private const val USE_CURL3D: Boolean = true
  */
 @Stable
 class CurlPageImages {
-    /** 正文/插图/盒背景的页栅格（版心大小）；封面槽放的是烤好的**整页**图（偏移见 `FlipCurlLayer`）。 */
-    var page: ImageBitmap? by mutableStateOf(null)
+    /**
+     * 正文/插图/盒背景的页栅格（版心大小）；封面槽放的是烤好的**整页**图（偏移见 `FlipCurlLayer`）。
+     * 带上内容代数（[RasterTexture]）：页栅格是每次新分配的快照，代数恒 0。
+     */
+    var page: RasterTexture? by mutableStateOf(null)
 
-    /** 旁注 + 页码（整页大小、透明底）。没有旁注也没有页码时为 null。 */
-    var overlay: ImageBitmap? by mutableStateOf(null)
+    /**
+     * 旁注 + 页码（整页大小、透明底）。没有旁注也没有页码时为 null。
+     * 带上内容代数：覆盖层位图会在原地重画（见 `PageOverlayLayer`），代数变了才是「这一版」。
+     *
+     * 卷曲网格**不单独画它**：透明底经 `drawVertices` 会把卷起来的纸刷白，
+     * 所以与页栅格先合成一张整页图（见 [CurlPageBake]）。
+     */
+    var overlay: RasterTexture? by mutableStateOf(null)
 
-    /** 纹理画笔缓存（`ImageShader` 只跟图有关，见 [CurlTextureCache]）。 */
+    /** 网格路径的整页烤图（页栅格 + 覆盖层），只在有覆盖层时用。 */
+    internal val bake: CurlPageBake = CurlPageBake()
+
+    /** 纹理画笔缓存（`ImageShader` 只跟图的**这一版像素**有关，见 [CurlTextureCache]）。 */
     internal val textures: CurlTextureCache = CurlTextureCache()
+
+    /** 整页贴图缓存（桌面每帧重建纹理的代价见 [RasterDrawCache]）。 */
+    internal val pageRaster: RasterDrawCache = RasterDrawCache()
+
+    /** 覆盖层（旁注 + 页码）贴图缓存，同上。 */
+    internal val overlayRaster: RasterDrawCache = RasterDrawCache()
 }
 
 /**
@@ -99,6 +118,8 @@ fun FlipCurlLayer(
     // 本轮翻页是否已经留过「等图」/「开画」的日志（各一条，便于真机对账；开画那条带几何）。
     val sessionLogged = remember { booleanArrayOf(false) }
     val drawLogged = remember { booleanArrayOf(false) }
+    // 本会话的绘制开销统计（翻完落一行，见 [CurlPerf]）。
+    val perf = remember { CurlPerf() }
 
     Box(modifier) {
         // 目标槽先画（在下），当前槽后画（在上）：与滑动层同序，折页没画出来时看到的就是这一对。
@@ -111,7 +132,26 @@ fun FlipCurlLayer(
             if (!active()) {
                 sessionLogged[0] = false
                 drawLogged[0] = false
+                perf.flush()
+                // 整页烤图（平板口径约 20MB）只服务这一次翻页，翻完就丢。
+                current.bake.clear()
+                target?.bake?.clear()
                 return@Canvas
+            }
+            val frameStart = kotlin.time.TimeSource.Monotonic.markNow()
+            val bakeCountBefore = current.bake.bakedCount + (target?.bake?.bakedCount ?: 0)
+            val bakeNanosBefore = current.bake.bakedNanosTotal + (target?.bake?.bakedNanosTotal ?: 0L)
+            val paintBefore = current.textures.rebuilds + (target?.textures?.rebuilds ?: 0)
+            // 一帧真正画完时汇总一次（缺图那几帧没有绘制，不算进帧耗时里）。
+            fun recordFrame() {
+                perf.record(
+                    drawNanos = frameStart.elapsedNow().inWholeNanoseconds,
+                    bakeFrames = current.bake.bakedCount + (target?.bake?.bakedCount ?: 0) - bakeCountBefore,
+                    bakeNanos = current.bake.bakedNanosTotal +
+                        (target?.bake?.bakedNanosTotal ?: 0L) - bakeNanosBefore,
+                    paintRebuilds = current.textures.rebuilds +
+                        (target?.textures?.rebuilds ?: 0) - paintBefore,
+                )
             }
             val dir = direction()
             // 拖动只读一次：日志与几何必须取自同一次读取，否则对账时对不上。
@@ -156,7 +196,7 @@ fun FlipCurlLayer(
                         "pull=${pullNow?.let { "(${it.from.x},${it.from.y})→(${it.to.x},${it.to.y})" } ?: "none"} " +
                         "anchor=${pullNow?.anchor ?: "-"} blend=${pullNow?.blend ?: "-"} " +
                         "page=${pageWidthPx}x${pageHeightPx} " +
-                        "tex=${front.page?.width}x${front.page?.height} " +
+                        "tex=${front.page?.image?.width}x${front.page?.image?.height} " +
                         "overlay=${front.overlay != null}/${back.overlay != null}",
                 )
             }
@@ -170,7 +210,10 @@ fun FlipCurlLayer(
                     frontTex = frontTex,
                     backTex = backTex,
                 )
-                if (done) return@Canvas
+                if (done) {
+                    recordFrame()
+                    return@Canvas
+                }
             }
             drawCurlFrame(
                 shape = shape,
@@ -180,6 +223,7 @@ fun FlipCurlLayer(
                 frontTex = frontTex,
                 backTex = backTex,
             )
+            recordFrame()
         }
     }
 }

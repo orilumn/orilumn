@@ -97,7 +97,22 @@ internal class PageOverlayLayer {
     private var image: ImageBitmap? = null
 
     /**
-     * @return 透明底整页图；[key] 为 null 或分配/绘制失败时返回 null（调用方按「没有覆盖层」处理）。
+     * 内容代数：**每次真正重画 +1**，重画前后值必不同。
+     *
+     * 为什么需要它：尺寸不变时本类**复用同一张 [ImageBitmap] 原地重画**（拖动批注字号时不
+     * 每步新分配 20MB 整页图）。位图实例因此不再等价于「同一份像素」，任何按实例判废的
+     * 下游缓存都必须改看这个代数，否则永远拿着第一版的快照——症状就是「静态页没有批注、
+     * 动画里永远是同一页的批注」。
+     *
+     * 本类的出口 [obtain] 返回 [RasterTexture]（图 + 代数），不交出裸位图：消费方想只拿图、
+     * 忘掉版本也做不到。
+     */
+    var revision: Int = 0
+        private set
+
+    /**
+     * @return 透明底整页图 + 它的内容代数（见 [RasterTexture]）；[key] 为 null 或
+     * 分配/绘制失败时返回 null（调用方按「没有覆盖层」处理）。
      */
     fun obtain(
         key: Any?,
@@ -106,9 +121,9 @@ internal class PageOverlayLayer {
         density: Density,
         layoutDirection: LayoutDirection,
         draw: DrawScope.() -> Unit,
-    ): ImageBitmap? {
+    ): RasterTexture? {
         if (key == null || widthPx <= 0 || heightPx <= 0) return null
-        if (key == this.key) return image
+        if (key == this.key) return image?.let { RasterTexture(it, revision) }
         val w = widthPx
         val h = heightPx
         // 尺寸没变就**复用同一张**再画一遍：拖批注字号时键每一步都变，每步新分配一张
@@ -131,11 +146,13 @@ internal class PageOverlayLayer {
         }.isSuccess
         this.key = key
         this.image = if (ok) img else null
+        // 代数只增不减：这张位图（可能是复用的同一实例）此刻的像素已经换了。
+        if (ok) revision++
         if (!ok) {
             // 覆盖层是装饰：画坏了就当这页没有旁注/页码，别把阅读面拖崩。
             Logger.w("Orilumn.Curl", "overlay layer draw FAILED ${w}x$h")
         }
-        return this.image
+        return this.image?.let { RasterTexture(it, revision) }
     }
 }
 

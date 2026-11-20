@@ -12,6 +12,7 @@ import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.LayoutDirection
 import org.jetbrains.skia.EncodedImageFormat
 import org.jetbrains.skia.Image
+import orilumn.reader.ui.reader.RasterTexture
 import org.junit.Test
 import java.io.File
 
@@ -44,7 +45,7 @@ class CurlPreviewTest {
         return img
     }
 
-    private fun images(page: ImageBitmap) = CurlPageImages().apply { this.page = page }
+    private fun images(page: ImageBitmap) = CurlPageImages().apply { this.page = RasterTexture(page) }
 
     private fun dump(name: String, progress: Float, direction: Int, tilt: Float = 0f) {
         val shape = curlShape(pageW.toFloat(), pageH.toFloat(), progress, direction, tilt)

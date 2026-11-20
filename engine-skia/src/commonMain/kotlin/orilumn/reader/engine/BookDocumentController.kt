@@ -3477,6 +3477,26 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                         scheduleChapterTextProjection(unit, profile, contentWidth, contentHeight)
                         return@runCatching
                     }
+                    // 预排过的**页产物**（跨章边缘页 / 本章邻页装配）→ 零塑形、零 cascade 直接绑定。
+                    // 与 [ensurePageRangeShaped] 的 R17 `pagecache-hit` 同源，只是发生在"本章刚绑表、
+                    // 还没绑版式"这一刻（跨章落位必走这里）。判据除参数哈希外还比页首字：同一个 hash
+                    // 下换过表（内容版本变化）时，页首字对不上就不认（宁可重塑，不许错页）。
+                    val prefilled = unit.pageCache[startPage]?.takeIf { p ->
+                        p.paramHash == cached.paramHash &&
+                            p.slices.getOrNull(startPage)?.charStart == cached.pages[startPage].charStart &&
+                            p.slices.getOrNull(startPage)?.firstLine?.let { it >= 0 } == true
+                    }
+                    if (prefilled != null) {
+                        unit.bind(prefilled.layout, prefilled.slices)
+                        unit.shapedPageFrom = startPage
+                        unit.shapedPageTo = (startPage + 1).coerceAtMost(cached.pages.size)
+                        Logger.w(
+                            logTag,
+                            "layout ${ctx(unit)} PAGE-PREFILL-HIT page=$startPage t=${platformNowMs() - t0}ms",
+                        )
+                        scheduleChapterTextProjection(unit, profile, contentWidth, contentHeight)
+                        return@runCatching
+                    }
                     // Light prepare only (box tree, no shaping) — the table tells us which blocks to shape.
                     // 审阅切换（短章）已经量过章大小（probe），直接复用，不重复建盒树。
                     val prep = probe ?: boxLayouter.prepareLight(markup, unit.cssBundle, profile, contentWidth, unit.structureCache, contentHeight, onStructureComputed = { h, cw, chh -> saveUnitStructure(unit, h, cw, chh) })
@@ -4696,8 +4716,9 @@ sealed class NeighborItem {
     /** 章内第 [index] 页（[tier] = 10/20/30，见 [TaskScheduler.PRIO_PAGE_*]）。 */
     data class Page(val index: Int, val tier: Int) : NeighborItem()
 
-    /** d=1 越出本章 → 加急整章排邻章（[chapter] = 邻章号，[tier] 同上）。§3.3。 */
-    data class EdgeChapter(val chapter: Int, val tier: Int) : NeighborItem()
+    /** d=1 越出本章 → 加急整章排邻章（[chapter] = 邻章号，[direction] = +1 顺方向侧 / −1 反方向侧，
+     *  [tier] 同上）。§3.3。 */
+    data class EdgeChapter(val chapter: Int, val tier: Int, val direction: Int) : NeighborItem()
 }
 
 /** 原则 §3.1 的**邻页序列**：从目标页出发，按距离 d = 1, 2, 3, … 逐层展开，每层先方向侧、
@@ -4738,11 +4759,16 @@ fun neighborSequence(
             } else if (d == 1) {
                 val beyond = if (page >= totalPages) chapterIdx + 1 else chapterIdx - 1
                 if (beyond in 0..lastChapter) {
-                    out.add(NeighborItem.EdgeChapter(beyond, if (isDirSide) {
-                        TaskScheduler.PRIO_EDGE_FORWARD
-                    } else {
-                        TaskScheduler.PRIO_EDGE_BACKWARD
-                    }))
+                    out.add(NeighborItem.EdgeChapter(
+                        chapter = beyond,
+                        tier = if (isDirSide) {
+                            TaskScheduler.PRIO_EDGE_FORWARD
+                        } else {
+                            TaskScheduler.PRIO_EDGE_BACKWARD
+                        },
+                        // 越到章后 ⇒ 邻章首页；越到章前 ⇒ 邻章末页。
+                        direction = if (page >= totalPages) 1 else -1,
+                    ))
                 }
             }
             // d >= 2 越界：丢弃（§3.3）
@@ -4955,7 +4981,13 @@ private fun scheduleWindowPrefill(unit: ChapterUnit, targetPage: Int, dir: Int) 
                 steps.add(RollingStep(
                     key = edgeKey(item.chapter),
                     priority = item.tier,
-                    body = { b2ChapterTask(item.chapter, bc, contentW, contentH, hash) },
+                    // 整章兜底之后补**边缘那一页**（读者下一步就要画的那张）：§3.3 的兜底是
+                    // "排邻章"，而读者真正需要的第一份产物就是这一页；表已在的章整章活是空转，
+                    // 这一页却是翻页时现场要塑的（真机跨章落位 1654ms 的大头）。
+                    body = {
+                        b2ChapterTask(item.chapter, bc, contentW, contentH, hash)
+                        prefillEdgePage(item.chapter, item.direction, hash)
+                    },
                 ))
             }
         }
@@ -4996,18 +5028,22 @@ private fun scheduleTempEdgePrefill(unit: ChapterUnit, ip: InProgressPagination)
         Triple(cur.blockStart, cur.blockEndExclusive, ip.shapedForwardTo >= totalBlocks)
     }
     if (curBlockStart < 0) return
-    fun submitEdge(beyond: Int, prio: Int) {
+    fun submitEdge(beyond: Int, prio: Int, direction: Int) {
         if (beyond !in 0..lastChapter) return
         if (unitAt(beyond) == null) return
         scheduler.submit(TaskScheduler.Task(
             key = edgeKey(beyond),
             priority = prio,
-            block = { b2ChapterTask(beyond, bc, contentW, contentH, hash) },
+            // 同磁盘表侧：整章兜底之后补邻章边缘页（见 [prefillEdgePage]）。
+            block = {
+                b2ChapterTask(beyond, bc, contentW, contentH, hash)
+                prefillEdgePage(beyond, direction, hash)
+            },
         ))
     }
-    if (curBlockStart == 0) submitEdge(chapterIdx - 1, TaskScheduler.PRIO_EDGE_BACKWARD)
+    if (curBlockStart == 0) submitEdge(chapterIdx - 1, TaskScheduler.PRIO_EDGE_BACKWARD, -1)
     if (atTail && curBlockEnd >= totalBlocks) {
-        submitEdge(chapterIdx + 1, TaskScheduler.PRIO_EDGE_FORWARD)
+        submitEdge(chapterIdx + 1, TaskScheduler.PRIO_EDGE_FORWARD, 1)
     }
 }
 
@@ -5028,7 +5064,23 @@ private data class WindowPrepKey(
 @Volatile
 private var windowPrepCache: Pair<WindowPrepKey, LightPrepare>? = null
 
-private suspend fun prefillPageTask(chapterIdx: Int, page: Int, anchor: Int, assemble: Boolean) {
+/**
+ * P2.1: 装配一个邻页（磁盘表路径）：预热该页的块、把塑形结果发布进 L2，方向侧还要组装成
+ * 页产物进 `pageCache`（落位/预栅格都读它）。活会话章 / 无表 / 越界一律跳过（派发到执行之间
+ * 状态会变，判据就地取）。
+ *
+ * @param isolated 邻章边缘页装配（[prefillEdgePage]）传 true：**不碰共享的落位侧缓存**。
+ *  `windowPrepCache` 与 `windowPrefillL2` 都是单槽、按章判新鲜，邻章一写就把当前章的槽踢掉，
+ *  当前章后续的 `pg:` 任务于是要重跑整章 light cascade——那是翻页热路径上的活，
+ *  投机件不能挤它。孤立模式自建 prepare，塑形结果只喂本页组装（代价：多一次 cascade，几十毫秒）。
+ */
+private suspend fun prefillPageTask(
+    chapterIdx: Int,
+    page: Int,
+    anchor: Int,
+    assemble: Boolean,
+    isolated: Boolean = false,
+) {
     val u0 = unitAt(chapterIdx) ?: return
     bindChapterFor(u0)
     val table = u0.paginationTable ?: return
@@ -5055,9 +5107,13 @@ private suspend fun prefillPageTask(chapterIdx: Int, page: Int, anchor: Int, ass
     // 同一落位的任务共享 light prepare（见 windowPrepCache）：各跑一次 cascade 是纯浪费。
     // 组装用的第二次 prepareLight 与此处同参，一并复用（原代码重复计算）。
     val prepKey = WindowPrepKey(chapterIdx, hash, chapterContentRev(chapterIdx), profileSnap)
-    val lp = windowPrepCache?.takeIf { it.first == prepKey }?.second
-        ?: bc.prepareLight(markup, css, profileSnap, cw, u0.structureCache, chh, onStructureComputed = { h, cw, chh -> saveUnitStructure(u0, h, cw, chh) })
-            .also { windowPrepCache = prepKey to it }
+    val lp = if (isolated) {
+        bc.prepareLight(markup, css, profileSnap, cw, u0.structureCache, chh, onStructureComputed = { h, cw, chh -> saveUnitStructure(u0, h, cw, chh) })
+    } else {
+        windowPrepCache?.takeIf { it.first == prepKey }?.second
+            ?: bc.prepareLight(markup, css, profileSnap, cw, u0.structureCache, chh, onStructureComputed = { h, cw, chh -> saveUnitStructure(u0, h, cw, chh) })
+                .also { windowPrepCache = prepKey to it }
+    }
     val local = HashMap<Int, ParagraphShapeRef>()
     for (b in lo until rec.blockEndExclusive) {
         ctx.ensureActive()
@@ -5065,7 +5121,7 @@ private suspend fun prefillPageTask(chapterIdx: Int, page: Int, anchor: Int, ass
         if (!local.containsKey(b)) local[b] = bc.tempShape(local, lp, b, profileSnap)
     }
     if (local.isEmpty()) return
-    publishPrefillShapes(chapterIdx, hash, chapterContentRev(chapterIdx), local)
+    if (!isolated) publishPrefillShapes(chapterIdx, hash, chapterContentRev(chapterIdx), local)
     // Non-priority side stays L2-warmed (shaping covered); assembly is priority-side only —
     // doubling it per landing cost more (device-measured) than the backward-hit rate covers.
     if (!assemble) return
@@ -5107,12 +5163,39 @@ private suspend fun prefillPageTask(chapterIdx: Int, page: Int, anchor: Int, ass
         }
     }
     if (stored) {
-        Logger.w(logTag, "win-prefill ch=$chapterIdx page=$page cached")
+        Logger.w(logTag, "${if (isolated) "edge-prefill" else "win-prefill"} ch=$chapterIdx page=$page cached")
         // ±1 页分页（装配）完成 → 抛信号让用户层立即补栅。两侧都经此路径（assemble 为真）：
         // 用户层只补方向侧那一张像素，反侧的版式供落位/回翻命中 `pageCache` 快路径。
         // 本函数跑在调度器线程，`onPrefillReadyListener` 会把执行切回 UI 线程（见 TabletReaderHost）。
         notifyPrefillReady(chapterIdx)
     }
+}
+
+/**
+ * d=1 章外兜底（原则 §3.3）的**第二步**：把邻章**边缘那一页**装配成页产物。
+ *
+ * 为什么兜底不能只有"整章全量"：整章表的产物用完即弃（B2 只算表、不驻留），而读者下一次
+ * 翻页要画的正是邻章边缘那一页——落位时得现场塑一页（真机跨章 `DISK-HIT shape` 80–160ms，
+ * 冷章更久），再过一遍栅格（50–150ms），都计在「手指动了到动画开始」里。整章活几秒才完，
+ * 读者早翻过去了；这一页几十到两百毫秒就能备好，且与整章活**同一档位**（第 2/3 档）。
+ *
+ * 产物落进 `pageCache`，两条消费者：
+ *  - [peekAdjacentPage] 的跨章分支**只读**它（预栅格据此提前栅好邻章首页的像素）；
+ *  - 落位 [buildLayout] 的 `PAGE-PREFILL-HIT` 快路径直接绑定它，跨章翻页几乎零塑形。
+ *
+ * 幂等：同一张表下这一页已有产物就返回（重复装配只是白烧 CPU）；表不新鲜 / 活会话章 /
+ * 边缘页块区间非法都不动手。装配走 `isolated`（不碰当前章共用的单槽缓存，见 [prefillPageTask]）。
+ */
+private suspend fun prefillEdgePage(chapterIdx: Int, direction: Int, hash: Long) {
+    val u = unitAt(chapterIdx) ?: return
+    if (u.inProgress != null) return
+    val table = u.paginationTable?.takeIf { it.paramHash == hash } ?: return
+    if (table.pages.isEmpty()) return
+    val page = if (direction > 0) 0 else table.pages.size - 1
+    if (layoutMutex.withLock { u.pageCache[page]?.paramHash == hash }) return
+    // 边缘页要塑形，先要解析态；解析是幂等 memo，后台几十毫秒（B2 扫过的章通常已在）。
+    if (u.markup == null) ensureMarkup(chapterIdx)
+    prefillPageTask(chapterIdx, page, page, assemble = true, isolated = true)
 }
 
 /** P2.1: merge warmed blocks into the published L2 snapshot (copy-on-write replace). */
@@ -7625,6 +7708,14 @@ private fun finishCanonicalBackground(
      *
      * 只读路径：从当前窗口直接读相邻页，不做任何推进。读不到（窗口未成形）返回 null，
      * 调用方跳过即可——预栅格失败只影响手感（退化为实时栅格），不影响正确性。
+     *
+     * **章边界同样只读**（§3.3 的读者视角）：本章内没有 ±1 页（章末/章首）时，按与
+     * [crossChapterLanding] 同口径跳过空章，回答**邻章边缘那一页**（前向 = 邻章首页、
+     * 后向 = 邻章末页）。判据只看「已装配」：邻章分页表在、且这一页有绘制源
+     * （已绑窗口或 `pageCache` 里的页产物），才回答；否则 null。绝不
+     * `ensureChapterLayout`/`ensurePageRangeShaped`——那会解析、塑形、绑版式，是落位干的活。
+     *
+     * 邻章边缘页会被 [prefillEdgePage]（d=1 章外兜底的第二步）提前装配，故稳态下这里能命中。
      */
     suspend fun peekAdjacentPage(chapter: Int, slice: PageSlice, direction: Int): Pair<Int, PageSlice>? {
         val unit = unitAt(chapter) ?: return null
@@ -7648,7 +7739,12 @@ private fun finishCanonicalBackground(
                         b.getOrNull(ip.curIndex + 1)
                     }
                 }
-            } ?: return null
+            }
+            if (neighbour == null) {
+                // 章边界：临时窗口已无 ±1 页 ⇒ 问邻章（只读）。
+                Logger.d(logTag, "peek: temp 章边界 ch=$chapter dir=$direction → 查邻章")
+                return peekEdgeChapter(chapter, direction)
+            }
             peekedReadback = PeekedReadback(
                 chapter, neighbour.slice.charStart, neighbour.layout, neighbour.slice, ip, ip.paramHash,
             )
@@ -7661,7 +7757,11 @@ private fun finishCanonicalBackground(
         val idx = pages.indexOfFirst { it.charStart == slice.charStart }
         if (idx < 0) return null
         val nIdx = idx + direction
-        val neighbour = pages.getOrNull(nIdx) ?: return null
+        val neighbour = pages.getOrNull(nIdx)
+        if (neighbour == null) {
+            // 章边界：±1 页落在本章之外 ⇒ 问邻章（只读，不推进指针）。
+            return peekEdgeChapter(chapter, direction)
+        }
         val resolved: Pair<BookLayout, PageSlice> = if (neighbour.firstLine >= 0) {
             (unit.layout ?: return null) to neighbour
         } else {
@@ -7675,6 +7775,76 @@ private fun finishCanonicalBackground(
             chapter, neighbour.charStart, resolved.first, resolved.second, null, unit.paramHash,
         )
         return chapter to neighbour
+    }
+
+    /**
+     * 跨章只读邻页：本章内没有 ±1 页时，回答**邻章边缘那一页**——前向取邻章首页、后向取邻章末页。
+     *
+     * 只查「已经装配好的东西」，三处都不碰：不推进任何游标/指针、不 `ensureMarkup` 解析、
+     * 不塑形/绑版式、不发 `notifyFlip()`。判据逐条对齐落位链（[crossChapterLanding] 与
+     * [buildLayout]），这样预栅格备好的像素与真实翻页画的是同一页：
+     *  - 空章跳过与 `crossChapterLanding` 同口径（[hasSignificantText]），但**只在解析态已在时**判
+     *    ——为了判空章去解析一章，是投机活不该付的代价；解析态未知就按有内容试，落位自会跳过；
+     *  - 分页表必须与**当前版式参数**新鲜（`paramHash` + `contentRev`，与 [buildLayout] 同源）；
+     *  - 这一页必须有绘制源：已绑窗口覆盖它，或 `pageCache` 里有装配产物。两者皆无 ⇒ null
+     *    （版式没塑出来就画不了，预栅格只能放弃）。
+     *
+     * 活会话章（`inProgress != null`）直接放弃：它的页来自临时表，与磁盘表页界无关，落位会
+     * 走 tempNav 那条路，不在本方法的职责内。
+     */
+    private suspend fun peekEdgeChapter(fromChapter: Int, direction: Int): Pair<Int, PageSlice>? {
+        val hash = currentParamHash()
+        var index = fromChapter + direction
+        var hops = 0
+        while (index in 0 until chapters.size && hops < PEEK_EDGE_MAX_HOPS) {
+            val u = unitAt(index) ?: return null
+            if (u.inProgress != null) return null
+            if (u.markup?.hasSignificantText() == false) {
+                index += direction
+                hops++
+                continue
+            }
+            val table = u.paginationTable?.takeIf {
+                it.paramHash == hash && it.contentRev == chapterContentRev(index)
+            }
+            if (table == null || table.pages.isEmpty()) {
+                Logger.d(logTag, "peek: 邻章 ch=$index 无新鲜分页表（未装配）dir=$direction")
+                return null
+            }
+            val pageIdx = if (direction > 0) 0 else table.pages.size - 1
+            val rec = table.pages.getOrNull(pageIdx) ?: return null
+            val resolved = layoutMutex.withLock {
+                val s = u.pageSlices.getOrNull(pageIdx)?.takeIf {
+                    pageIdx >= u.shapedPageFrom && pageIdx < u.shapedPageTo &&
+                        it.firstLine >= 0 && it.lastLineExclusive > it.firstLine &&
+                        it.charStart == rec.charStart
+                }
+                val boundLayout = u.layout
+                if (s != null && boundLayout != null) {
+                    boundLayout to s
+                } else {
+                    val cached = u.pageCache[pageIdx]?.takeIf { it.paramHash == hash } ?: return@withLock null
+                    val cs = cached.slices.getOrNull(pageIdx)?.takeIf {
+                        it.firstLine >= 0 && it.lastLineExclusive > it.firstLine &&
+                            it.charStart == rec.charStart
+                    } ?: return@withLock null
+                    cached.layout to cs
+                }
+            }
+            if (resolved == null) {
+                Logger.d(
+                    logTag,
+                    "peek: 邻章 ch=$index page=$pageIdx 表在但版式未装配（无页产物）dir=$direction",
+                )
+                return null
+            }
+            peekedReadback = PeekedReadback(
+                index, rec.charStart, resolved.first, resolved.second, null, hash,
+            )
+            Logger.d(logTag, "peek: 跨章 ch=$fromChapter→$index page=$pageIdx char=${rec.charStart} dir=$direction")
+            return index to resolved.second
+        }
+        return null
     }
 
     /**
@@ -8147,5 +8317,9 @@ private data class DbgLastPage(val chapter: Int, val charStart: Int, val charEnd
 /** A seam delta at or below this many chars is treated as an adjacent flip (gap/overlap); a larger
  *  jump is a page seek/locate and is not flagged as dropped content. */
 private const val SEAM_ADJACENT_MAX = 300
+
+/** 跨章只读邻页（[BookDocumentController.peekAdjacentPage]）最多跳过几章空章：
+ *  防御坏书（整本空章）时线性扫全书；读者侧只需要"下一步那一章"。 */
+private const val PEEK_EDGE_MAX_HOPS = 4
 
 private var dbgLastPage: DbgLastPage = DbgLastPage(-1, -1, -1)

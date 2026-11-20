@@ -8,6 +8,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.withTransform
+import orilumn.reader.ui.reader.drawRasterCached
 import kotlin.math.PI
 import kotlin.math.atan2
 import kotlin.math.hypot
@@ -98,12 +99,12 @@ internal fun DrawScope.drawCurlFrame(
             // 纸背的内容是正面的镜像，压到 39% 才是「纸的背面」而不是「另一张正面」。
             // 覆盖层（旁注 / 页码）**不进纸背**：那是读者层的浮层，不是印在纸上的东西。
             front.page?.let {
-                drawImage(it, topLeft = Offset(frontTex.x, frontTex.y), alpha = BACK_CONTENT_ALPHA)
+                drawRasterCached(front.pageRaster, it, Offset(frontTex.x, frontTex.y), BACK_CONTENT_ALPHA)
             }
         }
     }
 
-    // ④ 纸背外缘的影 ⑤ 折痕旁的影
+    // ④ 纸背外缘的影 ⑤ 折痕旁的影（两道都随进度头尾淡出，见 [drawStripShadow]）
     drawStripShadow(shape, stripPts)
     drawCreaseShadow(shape)
 }
@@ -124,8 +125,10 @@ private fun DrawScope.drawWholePage(
     alpha: Float = 1f,
 ) {
     drawRect(paper, size = pageSize, alpha = alpha)
-    images.page?.let { drawImage(it, topLeft = Offset(texLeft, texTop), alpha = alpha) }
-    images.overlay?.let { drawImage(it, topLeft = Offset.Zero, alpha = alpha) }
+    images.page?.let { drawRasterCached(images.pageRaster, it, Offset(texLeft, texTop), alpha) }
+    images.overlay?.let {
+        drawRasterCached(images.overlayRaster, it, Offset.Zero, alpha)
+    }
 }
 
 /**
@@ -141,6 +144,11 @@ private fun DrawScope.drawStripShadow(shape: CurlShape, pts: List<Offset>) {
     val w = shape.pageW
     val edgeW = w * CURL_SHADOW_BAND
     if (edgeW <= 0f) return
+    // 与 [drawCreaseShadow] 同一口径：头尾 10% 随进度淡出。
+    // **3D 网格在收尾最后一帧会退化成空、退回这条 2D 路径**（见 [drawCurlFrame] 的调用方），
+    // 少了这道系数，影就会以满浓度铺在仅剩的右侧留白上，闪一条灰竖带。
+    val alpha = SHADOW_ALPHA * shape.shadowFade
+    if (alpha <= 0.002f) return
 
     var cx = 0f
     var cy = 0f
@@ -173,7 +181,7 @@ private fun DrawScope.drawStripShadow(shape: CurlShape, pts: List<Offset>) {
     }
 
     fun bandBrush(from: Offset, to: Offset) = Brush.linearGradient(
-        colorStops = arrayOf(0f to Color(0f, 0f, 0f, SHADOW_ALPHA), 1f to Color(0f, 0f, 0f, 0f)),
+        colorStops = arrayOf(0f to Color(0f, 0f, 0f, alpha), 1f to Color(0f, 0f, 0f, 0f)),
         start = from,
         end = to,
     )

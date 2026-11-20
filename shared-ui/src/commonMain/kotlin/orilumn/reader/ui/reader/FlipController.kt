@@ -71,6 +71,13 @@ class FlipController(
      * `Animatable.animateTo` 会直接抛异常，故测试传 false 只走状态机。
      */
     private val allowAnimation: Boolean = true,
+    /**
+     * 平台结算时长倍率（见 [FlipSession.settleDurationMs] 的 `scale`）：桌面传 2。
+     *
+     * 桌面没有「手指先拖半页」那一段垫底，一按就从 0 走满整页，300ms 在宽屏上就是瞬切；
+     * 平板有跟手段，同一口径手感正好，故只有桌面放大。
+     */
+    private val settleScale: Float = 1f,
 ) {
     /**
      * 渲染用的位移进度（0..1）+ 方向（+1 下一页 / -1 上一页）。
@@ -155,6 +162,18 @@ class FlipController(
     private var settleJob: Job? = null
 
     /**
+     * 本次拖动的「手指按下」单调时刻（纳秒，`System.nanoTime()`；0 = 未记录）。
+     *
+     * 只服务一条诊断：**第一次真的把位移写回渲染**时落 `FLIPLAT first-move`（见 [updateDrag]）。
+     * 手势层那条 `FLIPLAT drag … lat=` 记的是「按下 → 定轴」，而定轴之后目标页可能还要
+     * 等落位/栅格，页面并不会动——把两个数当成同一个「起手时延」会误判。
+     */
+    private var downNanos = 0L
+
+    /** 本次会话是否已落过 `first-move`（一次拖动只记一条）。 */
+    private var firstMoveLogged = false
+
+    /**
      * 回滚落位协程（`rollback()` 里的 `flipAwait(-dir)`）。
      *
      * 与 [prefetchJob] 一样**不可取消**：`adjacent`/`findAdjacentPage` 会推进引擎指针，
@@ -200,6 +219,26 @@ class FlipController(
     /** 目标页是否已进渲染层：未就绪时**不许**平移当前页（否则露出底色空白）。 */
     fun targetReady(): Boolean = targetPos.value != null || targetIsCover.value
 
+    /**
+     * 落定代际：每 [clear] +1。
+     *
+     * 唯一用途是给预栅格一个「这一拍刚翻完」的时机（见 `PrerasterOnPrefill` 的
+     * `settleTick`）：引擎的预排信号在**落位之前**抛，补到的是本次要翻的那张（落位
+     * 自己正在栅）；落定之后又不再抛信号，于是下一张永远没人提前栅，下次起手现场
+     * 栅 200–390ms。代际变化那一刻 `openPos` 与方向都已是最新，补的正是下一张。
+     */
+    val settleTick: MutableIntState = mutableIntStateOf(0)
+
+    /**
+     * 最近一次翻页方向（+1 下 / -1 上，0 = 还没翻过）。
+     *
+     * [FlipSession] 在结算收尾时把 direction 归零（那是状态机的口径），但预栅格需要
+     * 的是「读者正在往哪边读」——归零后就只剩「默认向前」，往回翻时会把上一刻刚读过
+     * 的那一页再栅一遍、真正要去的反侧仍没热身。故这里单独记一份，供
+     * `PrerasterOnPrefill` 的 directionProvider 兜底。
+     */
+    val lastTurn: MutableIntState = mutableIntStateOf(0)
+
     // ---- 会话生命周期 ----
 
     /**
@@ -222,6 +261,8 @@ class FlipController(
         direction.value = 0
         curlPull.value = null
         curlAnchor.value = null
+        // 会话收场：通知预栅格此刻可补方向侧那一张（见 [settleTick]）。
+        settleTick.value++
     }
 
     /**
@@ -314,6 +355,8 @@ class FlipController(
         enabled: Boolean,
         coverVisible: Boolean,
         enterCover: Boolean = false,
+        /** 手指按下的单调时刻（纳秒），仅用于 `FLIPLAT first-move` 诊断；0 = 未知。 */
+        downNanos: Long = 0L,
     ) {
         if (!enabled) return
         // 封面是第一页：后退无操作；前进才离开封面（封面进 from 槽，见 [fromIsCover]）。
@@ -322,6 +365,8 @@ class FlipController(
             log("slide-begin DROPPED busy (${if (prefetchInFlight()) "landing" else "rollback-nav"} in flight)")
             return
         }
+        this.downNanos = downNanos
+        firstMoveLogged = false
         // 残留结算动画（含「最后一帧 → clear()」那个微窗口，见 slideActive KDoc）：
         // 取消它，避免旧动画继续写 progress/direction 并在此后 clear() 掐掉本次落位。
         settleJob?.cancel()
@@ -335,6 +380,7 @@ class FlipController(
         targetPos.value = null
         targetIsCover.value = enterCover
         this.direction.value = direction
+        lastTurn.value = direction
         progress.value = 0f
         curlPull.value = null
         curlLean.value = 0f
@@ -380,13 +426,14 @@ class FlipController(
     /**
      * 分段时延日志（tag `Orilumn.FLIPLAT`，W 级常驻）。
      *
-     * 与手势层那条 `FLIPLAT drag … lat=` 的关系：
-     *  - 手势层 `lat` = 手指按下 → 第一帧页面位移（**用户真正感知的起手延迟**）；
-     *  - 本函数 `ms` = 目标页落位就绪耗时（含 beforeCommit 等图，最长 800ms）。
+     * 三条线的关系（按 dir 与时间先后对齐即可读出端到端时延）：
+     *  - 手势层 `FLIPLAT drag … lat=` = 手指按下 → **定轴**（判成横向滑动），不代表页面已动；
+     *  - `FLIPLAT target-ready ms=` = 起手 → 目标页进渲染层（含漏斗抢锁 + 落位 + 等图/栅格，
+     *    最长 800ms）；
+     *  - `FLIPLAT first-move ms=` = 手指按下 → **第一帧位移真的写回渲染**（用户看到页面开始动）。
      *
-     * 端到端 ≈ `lat`（若 `target-ready` 早于首次位移，则完全由 `lat` 决定）。
-     * 若 `target-ready` 晚于首次位移，那段差额就是「页面本该动却没动」的空窗，
-     * 两条日志按 dir 与时间先后对齐即可读出来。
+     * 端到端以 `first-move` 为准；它必然 ≥ `lat`，且 ≥ `target-ready`（目标页未就绪时
+     * `updateDrag` 不写回渲染）。
      */
     private fun logLat(dir: Int, phase: String, ms: Long) {
         log("FLIPLAT $phase dir=$dir ms=$ms")
@@ -476,6 +523,18 @@ class FlipController(
             if (!session.onDrag(dx, pageW)) return
             progress.value = session.progress
             direction.value = session.direction
+            // 「手指按下 → 页面真的动起来」：第一次把位移写回渲染时落一条（一次拖动一条）。
+            // 与手势层 `FLIPLAT drag … lat=`（按下→定轴）不是一回事，见 [downNanos]。
+            if (!firstMoveLogged && session.progress > 0f) {
+                firstMoveLogged = true
+                if (downNanos != 0L) {
+                    logLat(
+                        dir = direction.value,
+                        phase = "first-move",
+                        ms = (System.nanoTime() - downNanos) / 1_000_000,
+                    )
+                }
+            }
         } else {
             // 只喂位移不写回渲染：状态机照常累积（供 decide 用），画面停在当前页。
             session.onDrag(dx, pageW)
@@ -653,6 +712,7 @@ class FlipController(
         targetPos.value = null
         this.targetIsCover.value = false
         this.direction.value = direction
+        lastTurn.value = direction
         progress.value = 0f
         curlPull.value = null
         curlLean.value = 0f
@@ -685,6 +745,7 @@ class FlipController(
         targetPos.value = null
         targetIsCover.value = true
         this.direction.value = direction
+        lastTurn.value = direction
         progress.value = 0f
         settle(FlipSession.Decision.COMMIT, velocityX = 0f, pageW = 0f)
     }
@@ -718,7 +779,7 @@ class FlipController(
         // （纸边在手指上、折痕更快），清锚点与结算第一帧之间只要差一帧就是一次可见的跳变。
         progress.value = from
         session.beginSettle(decision)
-        val duration = session.settleDurationMs(decision, from, velocityX, pageW)
+        val duration = session.settleDurationMs(decision, from, velocityX, pageW, settleScale)
         // 离手速度衔接：起手斜率取手指速度，页面不在松手那一下刹停（详见
         // FlipSession.settleInitialSlope 的 KDoc）。slope==0（点按/慢拖/拿不到速度）
         // 时保持既有缓动，点按翻页的手感零变化。
@@ -822,6 +883,8 @@ fun rememberFlipController(
     onCoverCommit: ((leavingCover: Boolean) -> Unit)? = null,
     scope: CoroutineScope,
     log: (String) -> Unit = {},
+    /** 平台结算时长倍率（桌面 2，见 [FlipController] 构造参数）。常量，不随组合变化。 */
+    settleScale: Float = 1f,
 ): FlipController {
     val flipAwaitRef = rememberUpdatedState(flipAwait)
     val forceRef = rememberUpdatedState(forceOpenPos)
@@ -833,6 +896,7 @@ fun rememberFlipController(
             forceOpenPos = { p -> forceRef.value(p) },
             scope = scope,
             log = { m -> logRef.value(m) },
+            settleScale = settleScale,
         ).also { c ->
             // 经 State 中转，controller 记住的恒是最新闭包（封面显隐状态在其内部）。
             c.onCoverCommit = { leaving -> coverCommitRef.value?.invoke(leaving) }

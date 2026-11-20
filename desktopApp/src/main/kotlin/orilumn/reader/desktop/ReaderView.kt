@@ -3,6 +3,7 @@ package orilumn.reader.desktop
 import orilumn.reader.data.font.FontEntry
 import orilumn.reader.data.bookmark.Bookmark
 import orilumn.reader.data.settings.ReaderSettings
+import orilumn.reader.data.settings.withStyleProbesFrom
 import orilumn.reader.ui.reader.FontScanProgress
 import orilumn.reader.ui.reader.ReaderAnnotationPanel
 import orilumn.reader.ui.reader.ReaderBookmarkPanel
@@ -381,10 +382,7 @@ fun ReaderView(
             val pos = currentPos ?: return@LaunchedEffect
             val host = desktopHost ?: return@LaunchedEffect
             val measured = host.bookStyleReadings(panelSettings ?: settings, pos.chapter)
-            panelSettings = (panelSettings ?: settings).copy(
-                probeIndent = measured.probeIndent,
-                probeLineSpacing = measured.probeLineSpacing,
-            )
+            panelSettings = (panelSettings ?: settings).withStyleProbesFrom(measured)
         }
         // 扫描器是**进程级单例**：离开本视图（回书架/换书重建）时卸下回调，别让它持有已销毁的组合作用域。
         DisposableEffect(book) {

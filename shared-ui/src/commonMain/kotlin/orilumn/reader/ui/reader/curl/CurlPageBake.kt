@@ -51,6 +51,14 @@ internal class CurlPageBake {
     private var texLeft: Float = 0f
     private var texTop: Float = 0f
 
+    /** 累计真正烤过几张（诊断用，见 [CurlPerf]）；只增不减，会话结束时由调用方取差值。 */
+    internal var bakedCount: Int = 0
+        private set
+
+    /** 累计烤图耗时（纳秒，诊断用）。 */
+    internal var bakedNanosTotal: Long = 0L
+        private set
+
     /**
      * 网格要贴的那张图：没有覆盖层就是页栅格本身（偏移照旧），有覆盖层就烤一张整页图。
      *
@@ -78,6 +86,7 @@ internal class CurlPageBake {
             }
         }
         // 不透明白底：整页图一旦有透明像素，网格那条路径就会把它画成白色。
+        val mark = kotlin.time.TimeSource.Monotonic.markNow()
         val out = ImageBitmap(w, h, ImageBitmapConfig.Argb8888, hasAlpha = false)
         CanvasDrawScope().draw(
             density = Density(1f),
@@ -98,6 +107,9 @@ internal class CurlPageBake {
         this.pageH = h
         this.texLeft = texLeft
         this.texTop = texTop
+        bakedCount++
+        val took = mark.elapsedNow().inWholeNanoseconds
+        bakedNanosTotal += took
         return fresh
     }
 

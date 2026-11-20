@@ -118,6 +118,8 @@ fun FlipCurlLayer(
     // 本轮翻页是否已经留过「等图」/「开画」的日志（各一条，便于真机对账；开画那条带几何）。
     val sessionLogged = remember { booleanArrayOf(false) }
     val drawLogged = remember { booleanArrayOf(false) }
+    // 本会话的绘制开销统计（翻完落一行，见 [CurlPerf]）。
+    val perf = remember { CurlPerf() }
 
     Box(modifier) {
         // 目标槽先画（在下），当前槽后画（在上）：与滑动层同序，折页没画出来时看到的就是这一对。
@@ -130,10 +132,26 @@ fun FlipCurlLayer(
             if (!active()) {
                 sessionLogged[0] = false
                 drawLogged[0] = false
+                perf.flush()
                 // 整页烤图（平板口径约 20MB）只服务这一次翻页，翻完就丢。
                 current.bake.clear()
                 target?.bake?.clear()
                 return@Canvas
+            }
+            val frameStart = kotlin.time.TimeSource.Monotonic.markNow()
+            val bakeCountBefore = current.bake.bakedCount + (target?.bake?.bakedCount ?: 0)
+            val bakeNanosBefore = current.bake.bakedNanosTotal + (target?.bake?.bakedNanosTotal ?: 0L)
+            val paintBefore = current.textures.rebuilds + (target?.textures?.rebuilds ?: 0)
+            // 一帧真正画完时汇总一次（缺图那几帧没有绘制，不算进帧耗时里）。
+            fun recordFrame() {
+                perf.record(
+                    drawNanos = frameStart.elapsedNow().inWholeNanoseconds,
+                    bakeFrames = current.bake.bakedCount + (target?.bake?.bakedCount ?: 0) - bakeCountBefore,
+                    bakeNanos = current.bake.bakedNanosTotal +
+                        (target?.bake?.bakedNanosTotal ?: 0L) - bakeNanosBefore,
+                    paintRebuilds = current.textures.rebuilds +
+                        (target?.textures?.rebuilds ?: 0) - paintBefore,
+                )
             }
             val dir = direction()
             // 拖动只读一次：日志与几何必须取自同一次读取，否则对账时对不上。
@@ -192,7 +210,10 @@ fun FlipCurlLayer(
                     frontTex = frontTex,
                     backTex = backTex,
                 )
-                if (done) return@Canvas
+                if (done) {
+                    recordFrame()
+                    return@Canvas
+                }
             }
             drawCurlFrame(
                 shape = shape,
@@ -202,6 +223,7 @@ fun FlipCurlLayer(
                 frontTex = frontTex,
                 backTex = backTex,
             )
+            recordFrame()
         }
     }
 }

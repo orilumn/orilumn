@@ -812,6 +812,10 @@ internal class CurlTextureCache {
     private var overlayTexture: RasterTexture? = null
     private var overlayPaint: Paint? = null
 
+    /** 累计真正重建过几次 `ImageShader`（诊断用，见 [CurlPerf]）。 */
+    internal var rebuilds: Int = 0
+        private set
+
     /** 正文页栅格的画笔（`ImageShader` 绑在这张图的这一版上）。图/代数换了才重建。 */
     fun pagePaint(texture: RasterTexture): Paint = paintFor(texture, overlay = false)
 
@@ -827,6 +831,7 @@ internal class CurlTextureCache {
             return paint
         }
         val fresh = newMeshPaint(texture.image)
+        rebuilds++
         if (overlay) {
             overlayTexture = texture
             overlayPaint = fresh

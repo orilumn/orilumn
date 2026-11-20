@@ -75,6 +75,22 @@ private fun readCacheBytesDebug(context: android.content.Context): Long? = runCa
 }.getOrNull()
 
 /**
+ * 同一张平台位图的 Compose 包装**只建一次**（`android.graphics.Bitmap` → [ImageBitmap]）。
+ *
+ * `Bitmap.asImageBitmap()` 每次调用都新建一个 `AndroidImageBitmap`，而下游两条绘制缓存
+ * （卷曲纹理 `CurlTextureCache`、整页烤图 `CurlPageBake`）都按 `image === image` 判
+ * 「是不是这一版像素」。`drawLines` 是**逐帧**调用的，每帧一个新包装 ⇒ 两处缓存逐帧判废：
+ * 真机实测每帧重烤一张整页图（≈20ms，1840×2800）＋ 每帧重建纹理画笔，拖动就是「抖」。
+ *
+ * 键是位图本身、用**弱键**：`PageRasterStore` 淘汰并 recycle 之后条目自行消失，不会把
+ * 用过的页图留在内存里。只在 UI 线程（[AndroidReaderPageRenderer.drawLines] 的既定线程）访问。
+ */
+private val imageBitmapWrappers = java.util.WeakHashMap<android.graphics.Bitmap, ImageBitmap>()
+
+private fun android.graphics.Bitmap.composeImageBitmap(): ImageBitmap =
+    imageBitmapWrappers[this] ?: asImageBitmap().also { imageBitmapWrappers[this] = it }
+
+/**
  * skia Image → Compose [ImageBitmap]（Android actual，零编码像素搬运）。
  * 失败返回 null 由调用方回退（栅格化是显示路径，坏了不该崩阅读）。
  */
@@ -165,7 +181,7 @@ private class AndroidReaderPageRenderer(
                 " rev=${rasterKey?.contentRevision}",
         )
         drawPageBitmap(canvas, r.value, contentRectLeft, contentRectTop, contentRectRight, contentRectBottom)
-        return r.value.asImageBitmap()
+        return r.value.composeImageBitmap()
     }
 
     /**

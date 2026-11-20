@@ -35,7 +35,9 @@ class ReaderStylesheetsTest {
         val traditional = ReaderStylesheets.theme("traditional")
         assertTrue(traditional!!, traditional.contains("body { font-family: serif; }"))
         // 标题单独一条：书常给 h1..h6 写字体，只靠 body 继承够不着（用户报「切主题标题不跟着变」）。
-        assertTrue(traditional, traditional.contains("h1, h2, h3, h4, h5, h6 { font-family: serif; }"))
+        // 传统主题的标题是**无衬线**（正文宋体 + 标题黑体的纸书惯例），且写通用关键字：
+        // 读者配了「无衬线字体（全局）」时，标题跟着那个族走。
+        assertTrue(traditional, traditional.contains("h1, h2, h3, h4, h5, h6 { font-family: sans-serif; }"))
         // P3a：全宽拉伸规则已退役 —— 主题层不得再给独图注入 width。断言跑在**剥注释**后的文本上
         // （编者注里会引用被删的类名与 UA 兜底规则 `img { max-width: 100% }`，不剥会误伤）；
         // `(?<![-\w])width` 排除 max-/min- 前缀。

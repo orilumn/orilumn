@@ -112,6 +112,20 @@ class GenericFontAliasTest {
     }
 
     @Test
+    fun `traditional theme heading resolves through the reader sans slot`() {
+        // 传统主题：正文衬线、标题无衬线（纸书惯例）。标题那条写的是通用关键字，所以读者在
+        // 「无衬线字体（全局）」里选了什么，标题就用什么；正文那条 serif 同理走衬线槽。
+        val st = compute(
+            profile(serif = "思源宋体", sans = "思源黑体"),
+            "<html><body><h2>标题</h2><p>正文</p></body></html>",
+            "",
+            themeCss = ReaderStylesheets.theme("traditional"),
+        )
+        assertEquals(listOf("思源黑体", "sans-serif"), st.byTag("h2").fontFamilies)
+        assertEquals(listOf("思源宋体", "serif"), st.byTag("p").fontFamilies)
+    }
+
+    @Test
     fun `alias expansion is not repeated along inheritance`() {
         // 父级展开一次后，子级继承的是已展开的栈；若每层再展开，读者族会被重复缀入。
         val m = compute(

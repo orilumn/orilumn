@@ -657,8 +657,8 @@ class BoxChapterLayouter(
             gapScale = profile.paragraphGapScale,
             pxScale = profile.density,
             // 通用族替换（衬线/无衬线）：读者只改 `serif`/`sans-serif` 的含义，书的具名字体不动。
+            // 字重不在这里注入：全局字体槽只挑字族，字重由排版主题 / 书按角色决定。
             fontFamilyAliases = profile.genericFontAliases,
-            genericFontWeights = profile.genericFontWeights,
         )
     }
 

@@ -54,18 +54,22 @@ internal fun noteFontFamilyOf(
     val generic = ReaderStylesheets.themeBodyFamily(profile.layoutTheme) ?: return null
     // 通用族替换（读者在「衬线 / 无衬线（全局）」里挑的族）；解析不到就退回平台通用族，
     // 与正文的表现一致（正文那条声明也把原关键字留在栈尾兜底）。
+    // 三个全局字体槽只挑字族，字重由主题的角色基线决定（正文常规 400）。
     val alias = profile.genericFontAliases[generic]
     if (alias != null) {
-        familyOf(alias, profile.genericFontWeights[generic], entries)?.let { return it }
+        familyOf(alias, THEME_BODY_WEIGHT, entries)?.let { return it }
     }
     return genericFamilyOf(generic)
 }
+
+/** 主题给正文声明的角色字重（正文常规）：三个全局字体槽只挑字族，字重由排版主题决定。 */
+private const val THEME_BODY_WEIGHT = 400
 
 /**
  * 设置里的批注字重 → 交给 Compose 文字样式的字重（`null` = 不写字重，跟随字体自身默认）。
  *
  * **批注单独挑过字体时为读者选的那一档；没挑（跟随正文）时与正文同档**——正文槽的字重锚点，
- * 或主题通用族替换后的基线字重。否则会出现「正文是粗体、旁边批注是常规」的错位。
+ * 或主题给正文的角色字重（常规 400）。否则会出现「正文是粗体、旁边批注是常规」的错位。
  *
  * 为什么要单独交给 `TextStyle`：字重烤进字体族这条路在桌面端不成立——单面族没有第二档可选，
  * Compose 桌面仍按族名去系统字库取面，烤好的字重被丢掉（400 / 700 量出来宽度一模一样）。
@@ -81,15 +85,14 @@ internal fun noteFontWeightOf(settings: ReaderSettings, profile: TypographicProf
     return weight?.let { FontWeight(it) }
 }
 
-/** 正文当前的读者字重（跟随正文时批注照搬）：正文槽锚点，或主题通用族替换后的基线字重。 */
+/** 正文当前的读者字重（跟随正文时批注照搬）：正文槽锚点，或主题给正文的角色字重。 */
 private fun bodyWeightOf(profile: TypographicProfile): Int? {
     if (profile.fontBody.isBlank()) {
-        val generic = ReaderStylesheets.themeBodyFamily(profile.layoutTheme) ?: return null
-        return profile.genericFontWeights[generic]
+        ReaderStylesheets.themeBodyFamily(profile.layoutTheme) ?: return null
+        return THEME_BODY_WEIGHT
     }
     return FontSlots.weightOf(
         profile.fontWeightAnchorsBySlot,
-        profile.fontWeightAnchorsGlobal,
         profile.fontWeightAnchors,
         "fontBody",
         profile.fontBody,

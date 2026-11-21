@@ -196,7 +196,8 @@ fun FontLibraryPanel(
     showWifiButton: Boolean = true,
     /** 无线导入（平板 WiFi 上传；默认空即与本地同一入口语义，调用方按需覆盖）。 */
     onImportWifi: () -> Unit = onImport,
-    /** 多字重行点按：下钻字重页（调用方压栈）；单字重行走 onSelect。 */
+    /** 多字重行点按：交由调用方决定（正文 / 标题 / 批注进字重页；三个全局字体槽只挑字族）；
+     *  单字重行走 onSelect。 */
     onPickWeight: (String) -> Unit = {},
     /** 首行开关态：true 即隐藏字体已列出（按钮显"隐藏"），false 即未列出（按钮显"显示"）。 */
     showHidden: Boolean = false,

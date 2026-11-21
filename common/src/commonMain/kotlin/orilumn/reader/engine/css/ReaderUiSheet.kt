@@ -58,11 +58,15 @@ object ReaderUiSheet {
     /**
      * 字体槽规则：非空槽才出规则（空槽跟随原书）。族名恒加引号（CJK/空格族安全），
      * 逗号/引号剔除（族名含逗号本就不合法；防注入破坏后继规则）。
-     * **字重与 font-family 同规则同选择器表**（`hWeight`/`bodyWeight`/`codeWeight`）——
-     * 用户字重经 UI 层（tier 44）进级联，与行距/段间距/首行缩进同一条路，**不在渲染层事后改写**
-     * （`Cascade` 决策 6 明令「upper layers … without any post-hoc mutation」）。
-     * 只有用户在该槽显式选过字重才写 `font-weight`；没选就不写，书自己的 `font-weight`
-     * （UA `h1{bold}`、作者 `.fm-head{bold}`）原样生效。
+     * **正文 / 标题的字重与 font-family 同规则同选择器表**——用户字重经 UI 层（tier 44）进级联，
+     * 与行距/段间距/首行缩进同一条路，**不在渲染层事后改写**（`Cascade` 决策 6 明令
+     * 「upper layers … without any post-hoc mutation」）。只有读者在该槽显式选过字重才写
+     * `font-weight`；没选就不写，书自己的 `font-weight`（UA `h1{bold}`、作者 `.fm-head{bold}`）
+     * 原样生效。
+     *
+     * **三个全局字体槽（衬线 / 无衬线 / 等宽）只挑字族，不发任何 `font-weight`**：字重属于
+     * 角色而非字族，由排版主题决定（正文常规、标题粗体；原书设置下随书），读者不再能给它们
+     * 单独挑字重。等宽槽因此只写 `pre/code/kbd/samp` 的族，字重返回到书的声明 / UA 基线。
      *
      * 槽位与 `fontSlotFor` 同一路由分域覆盖（正文槽=非标题非代码块，标题槽=h1..h6，代码槽=pre/code/kbd/samp）；
      * UI tier 高于一切作者声明（含 `!important`）。写 `body` 而非只靠继承：继承会被书的直接规则盖掉。
@@ -76,35 +80,24 @@ object ReaderUiSheet {
         val sb = StringBuilder()
         val bodyW = weightFor(profile, "fontBody", profile.fontBody)
         val titleW = weightFor(profile, "fontTitle", profile.fontTitle)
-        val codeW = weightFor(profile, "fontCode", profile.fontCode)
         if (profile.fontBody.isNotBlank()) sb.append("$bodyFontSelectors{font-family:${fam(profile.fontBody)}${wDecl(bodyW)}}\n")
         if (profile.fontTitle.isNotBlank()) sb.append("h1,h2,h3,h4,h5,h6{font-family:${fam(profile.fontTitle)}${wDecl(titleW)}}\n")
-        if (profile.fontCode.isNotBlank()) sb.append("pre,code,kbd,samp{font-family:${fam(profile.fontCode)}${wDecl(codeW)}}\n")
+        if (profile.fontCode.isNotBlank()) sb.append("pre,code,kbd,samp{font-family:${fam(profile.fontCode)}}\n")
         return sb.toString()
     }
 
     /**
-     * 该 (槽位, 族) 的用户字重；**按槽位归属选表**——正文/标题读本书私有的 bySlot，
-     * 代码读全局表（代码槽已是全局项），legacy 表兜底（旧设置没有槽位键），
-     * 非法值（不在 100..900）丢弃 ⇒ 视为"没选"，不写 `font-weight`。
-     * 键的族名口径与 UI 层写锚点处一致（去空白原样）。
+     * 正文 / 标题槽的用户字重：只读按书私有的按槽表（旧按族表兜底），非法值（不在 100..900）
+     * 丢弃 ⇒ 视为"没选"，不写 `font-weight`。键的族名口径与 UI 层写锚点处一致（去空白原样）。
      *
-     * 为什么不能一律 bySlot 优先：旧版本代码槽按书私有，书文件里可能留着
-     * `fontCode|族` 的旧锚点；代码槽改全局后，它若压过全局表，读者在新书里选的代码字重
-     * 就会被某本书的旧值顶掉（换书不沿用）。
-     *
-     * 衬线/无衬线两槽不走这里：它们是 CSS 通用族的替换（`serif`→读者族），没有自己的选择器表，
-     * 字重由 `StyleComputer` 的通用族基线字重（`TypographicProfile.genericFontWeights`）补。
-     * 等宽同理：书里写 `font-family:monospace` 的任何元素都走同一条替换（落到 `fontCode`）；
-     * 本表这一条只管**标签**（`pre/code/kbd/samp`），兜住书里点名了具体代码字体的情况。
+     * 三个全局字体槽（代码 / 衬线 / 无衬线）不提供字重选择，字重由排版主题按角色决定；
+     * 衬线 / 无衬线两槽本来就是 CSS 通用族的替换，没有自己的选择器表。
      */
     private fun weightFor(profile: TypographicProfile, slot: String, family: String): Int? {
         if (family.isBlank()) return null
         val famTrim = family.trim()
-        val bySlot = profile.fontWeightAnchorsBySlot["$slot|$famTrim"]?.takeIf { it in 100..900 }
-        val global = profile.fontWeightAnchorsGlobal["$slot|$famTrim"]?.takeIf { it in 100..900 }
-        val scoped = if (slot == "fontCode") global ?: bySlot else bySlot ?: global
-        return scoped ?: profile.fontWeightAnchors[famTrim]?.takeIf { it in 100..900 }
+        return profile.fontWeightAnchorsBySlot["$slot|$famTrim"]?.takeIf { it in 100..900 }
+            ?: profile.fontWeightAnchors[famTrim]?.takeIf { it in 100..900 }
     }
 
     /** `;font-weight:W` 或空串。 */

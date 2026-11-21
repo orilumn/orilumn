@@ -42,8 +42,8 @@ class LayoutParamKeyTest {
 
     @Test
     fun `layout theme changes the param hash`() {
-        // 主题层换样式表（字体/缩进/段距/对齐） ⇒ 换版面。以前靠 withLayoutTheme 顺带改字体槽
-        // 把键带变，现在主题只切样式表，必须自己进键，否则切主题会命中旧主题的磁盘表。
+        // 主题层换样式表（字体/缩进/段距/对齐） ⇒ 换版面。切主题还会重置本书排版参数，
+        // 但键不能依赖这些副作用，必须自己进键，否则切主题会命中旧主题的磁盘表。
         val modern = hash(ReaderSettings.DEFAULT.copy(layoutTheme = "modern"))
         val traditional = hash(ReaderSettings.DEFAULT.copy(layoutTheme = "traditional"))
         val original = hash(ReaderSettings.DEFAULT)
@@ -69,16 +69,12 @@ class LayoutParamKeyTest {
     }
 
     @Test
-    fun `generic family slots and global weights change the param hash`() {
-        // 衬线/无衬线替换改的是族栈（取面与度量都变），代码槽字重改的是字重 ⇒ 都必须换键。
+    fun `generic family slots change the param hash`() {
+        // 衬线/无衬线替换改的是族栈（取面与度量都变）；代码槽的族同样改族栈 ⇒ 都必须换键。
         val base = hash(ReaderSettings.DEFAULT)
         assertNotEquals(base, hash(ReaderSettings.DEFAULT.copy(fontSerif = "ReaderSerif")))
         assertNotEquals(base, hash(ReaderSettings.DEFAULT.copy(fontSans = "ReaderSans")))
         assertNotEquals(base, hash(ReaderSettings.DEFAULT.copy(fontCode = "ReaderMono")))
-        assertNotEquals(
-            base,
-            hash(ReaderSettings.DEFAULT.copy(fontWeightAnchorsGlobal = mapOf("fontCode|ReaderMono" to 700))),
-        )
     }
 
     @Test
@@ -269,9 +265,8 @@ class LayoutParamKeyTest {
         k.cjkLatinSpacingEm.feed4()
         // 排版主题：无条件喂字符串（主题层换样式表 ⇒ 换版面，必须换键）。
         k.layoutTheme.feed()
-        // 通用族替换（衬线/无衬线 → 读者族）与全局槽字重：改族栈/字重 ⇒ 改取面与度量。
+        // 通用族替换（衬线/无衬线 → 读者族）：改族栈 ⇒ 改取面与度量。
         k.fontSerif.feed(); k.fontSans.feed()
-        k.fontWeightAnchorsGlobal.toSortedMap().forEach { (slot, w) -> slot.feed(); w.feed4() }
         return j.value
     }
 }

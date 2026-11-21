@@ -1,6 +1,5 @@
 package orilumn.reader.engine.text
 
-import orilumn.reader.data.font.isGenericFontFamily
 import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.io.Logger
 import kotlin.math.roundToInt
@@ -63,11 +62,9 @@ data class TypographicProfile(
     /** 用户在该族选的字重（族名 → CSS 字重）：UI 层发 `font-weight` 声明（`ReaderUiSheet.fontRules`）。
      *  `FontPoolSync` 用它决定预装哪几档面。 */
     val fontWeightAnchors: Map<String, Int> = emptyMap(),
-    /** 同上但**按槽位隔离**：key = "fontTitle|族名"。优先于 [fontWeightAnchors]。 */
+    /** 同上但**按槽位隔离**：key = "fontTitle|族名"。
+     *  只服务正文 / 标题两个按书私有的槽；三个全局字体槽只挑字族，字重由排版主题决定。 */
     val fontWeightAnchorsBySlot: Map<String, Int> = emptyMap(),
-    /** 全局字体槽（代码/衬线/无衬线）的按槽字重，key 口径同 [fontWeightAnchorsBySlot]；
-     *  与它**不混用**（前者按书私有，本表纯全局）。 */
-    val fontWeightAnchorsGlobal: Map<String, Int> = emptyMap(),
     /** Master switch to follow the original book styles. */
     val useOriginalStyle: Boolean,
     /** 排版主题 key ("original" | "modern" | "traditional"); drives the theme layer stylesheet
@@ -128,38 +125,14 @@ data class TypographicProfile(
             return out
         }
 
-    /**
-     * 通用族替换后的基线字重（key = 通用关键字 `serif` / `sans-serif` / `monospace`），
-     * 只含读者真配了的项。
-     *
-     * 消费方是 `StyleComputer`：普通正文在元素没有自己的 `font-weight` 声明、且父级是常规 400 时
-     * 补上，让「衬线 / 无衬线 / 代码」槽里选的字重落到对应文字上；正文里 `strong` 与作者字重不动。
-     * 标题是例外：标题槽「采用主题设置」时标题的字族来自读者层（主题的 `h1..h6` 裸通用名），
-     * 读者挑的那一档属于同一张字体脸，书 / UA 写的标题字重也让位。代码槽的字重只对**书里写成
-     * 通用等宽**的元素生效（`pre/code` 标签另有 UI 层的按槽声明，见 `ReaderUiSheet`）。
-     * 没配 alias（或该槽没选字重）⇒ 空表 ⇒ 完全维持原行为。
-     */
-    val genericFontWeights: Map<String, Int>
-        get() {
-            val out = LinkedHashMap<String, Int>(3)
-            fun put(generic: String, slot: String, family: String) {
-                if (family.isBlank()) return
-                val w = fontWeightAnchorsGlobal["$slot|${family.trim()}"] ?: return
-                if (w in 100..900) out[generic] = w
-            }
-            put("serif", "fontSerif", fontSerif)
-            put("sans-serif", "fontSans", fontSans)
-            put("monospace", "fontCode", fontCode)
-            return out
-        }
-
     companion object {
         /**
          * 现代主题的默认行距。
          *
          * 行距有滑块（读者可调）⇒ 按层叠纪律，它的生效值只能有一处来源：存进 [ReaderSettings]、
          * 由 UI 层（tier 44）发 `line-height` 声明（主题层 asset 不写行距）。切主题时写成本书的
-         * 显式值，面板读数即该值；读者拖滑块即覆盖，再按一次主题回到本预设。
+         * 显式值，面板读数即该值；读者拖滑块即覆盖。再次点击当前主题不重置，只有切到别的模式
+         * 再切回来时才回到本预设。
          */
         const val MODERN_LINE_SPACING = 1.4
 
@@ -176,9 +149,9 @@ data class TypographicProfile(
          * (View.getWidth); the whole lower engine works in physical pixels — both conventions match.
          */
         fun build(s: ReaderSettings, density: Float = 1f): TypographicProfile {
-            // 排版主题预设（传统/现代）由 withLayoutTheme 在提交时只写「读者层要跟随的那几项」
-            // （行距、段间距、疏密）；字形基线（正文字体、标题字体、缩进）交给主题层
-            // `traditional.css` / `modern.css`。
+            // 切排版主题时，withLayoutTheme 按目标模式重置本书全部私有排版项（字号、正文字体 /
+            // 标题字体及其字重、行距、段间距、疏密、缩进、页边距、字距）；全局项不动。
+            // 不可调的基线（字体族、首行缩进、对齐）仍由主题层 `traditional.css` / `modern.css` 声明。
             // 此处一律原样透传存储值：滑块值即生效值，用户拖滑块永远是最高优先级。
             // 原书设置 = `layoutTheme == "original"` ⇒ 主题层整张不加载，书自己的 CSS 说了算。
             val original = s.layoutTheme == "original"
@@ -202,12 +175,11 @@ data class TypographicProfile(
                 fontBody = s.fontBody,
                 fontTitle = s.fontTitle,
                 fontCode = s.fontCode,
-                // 通用族替换（衬线/无衬线）与全局槽字重：纯全局项，换书沿用。
+                // 通用族替换（衬线/无衬线）：纯全局项，换书沿用（只挑字族，字重由主题 / 书按角色决定）。
                 fontSerif = s.fontSerif,
                 fontSans = s.fontSans,
                 fontWeightAnchors = s.fontWeightAnchors,
                 fontWeightAnchorsBySlot = s.fontWeightAnchorsBySlot,
-                fontWeightAnchorsGlobal = s.fontWeightAnchorsGlobal,
                 useOriginalStyle = original,
                 layoutTheme = s.layoutTheme,
                 coverStretch = s.coverStretch,
@@ -221,72 +193,61 @@ data class TypographicProfile(
         }
 
         /**
-         * 切排版主题：主题预设的**可调项**（行距、段间距、疏密）写成本书的显式值，由 UI 层
-         * （tier 44）发声明；基线（缩进、字体族、对齐）由主题层（tier 42 的
-         * `modern.css` / `traditional.css`）声明，读者动滑条时再以本书显式值覆盖。
+         * 切排版主题：**按目标模式重置整本书的排版参数**，只保留全局设置。
          * 详见 `docs/设置模型整改计划.md` §3.5。
          *
-         * - 传统 / 现代：写 `layoutTheme` + 行距（传统 [TRADITIONAL_LINE_SPACING]，现代
-         *   [MODERN_LINE_SPACING]）+ 段间距、疏密；行距有滑块，值必须落在 [ReaderSettings] 里由
-         *   UI 层发声明（主题层 asset 只放不可调的基线）。**字体族一律不写**——正文字体、标题字体
-         *   都由主题层样式表声明（`body` 与 `h1..h6`），标题因此和正文一起跟随主题。
-         *   以前这里往「正文」槽写 `serif`/`sans-serif`，那条声明在 UI 层（tier 44）压住主题层，
-         *   而且只覆盖正文、不覆盖标题，于是「切了主题标题不跟着变」。现在顺手把旧版本遗留在
-         *   槽里的通用族值清掉（面板永远选不到通用族 ⇒ 必然是主题写的），否则残留值继续压主题。
-         * - 原书设置：等于「清空本书的排版覆盖」——正文/标题字体槽、行距、字距、段距、疏密、
-         *   首行缩进全部回预设（`null` = 不声明），本书重新完全听书；**不动字号与页边距**
-         *   （读者舒适度）。全局项（代码/衬线/无衬线字体与它们的字重）不在此清空范围。
+         * 重置范围（全部是本书私有项）：
+         * - 字体：正文 / 标题字族与它们的按槽字重（全局的衬线 / 无衬线 / 等宽三槽不动）；
+         * - 字号：`fontSize` / `fontScale`；
+         * - 间距页：首行缩进、行距、段间距、疏密、四向页边距；
+         * - 文字页：字间距、混排字距。
+         *
+         * 各模式自己的预设：
+         * - 传统：行距 [TRADITIONAL_LINE_SPACING]，段间距 0（p/li 边距清零，靠主题层缩进分
+         *   段落），疏密 100；缩进 / 字族仍由主题层 `traditional.css` 声明，读者层不钉显式值。
+         * - 现代：行距 [MODERN_LINE_SPACING]，段间距不声明（听主题层的 `p,li{margin:1em 0}`），
+         *   疏密 100；缩进 / 字族由 `modern.css` 声明。
+         * - 原书设置：所有排版项回到「不声明」，书的 CSS 重新说了算。
+         *
+         * **全局项一律不碰**：`fontSerif` / `fontSans` / `fontCode`、亮度、阅读主题、笔记族、
+         * 开关族都不在此范围。三个全局槽只挑字族，字重由排版主题决定。
+         *
+         * 重新点击当前模式直接返回原设置（不重置、不提交），见调用方同一判断。
          */
         @JvmStatic
         fun withLayoutTheme(s: ReaderSettings, theme: String): ReaderSettings {
+            // 相同模式不产生任何副作用：把它当成一个「无操作」按钮。
+            if (s.layoutTheme == theme) return s
             val base = ReaderSettings.DEFAULT
-            return when (theme) {
-                "traditional" -> s.copy(
-                    layoutTheme = theme,
-                    // 传统主题默认行距 1.5（读者拖滑块即覆盖；再按一次主题恢复预设）。
-                    lineSpacing = TRADITIONAL_LINE_SPACING,
-                    // 传统节奏靠主题层 1em 边距、缩进区分段落 ⇒ 段间距绝对 0em（p/li 边距清零）；
-                    // 标题等结构块照常走疏密（预设 100），用户上调段间距即有间距。
-                    paragraphSpacing = 0.0,
-                    paragraphGap = 100.0,
-                    fontBody = dropThemeWrittenGeneric(s.fontBody),
-                    fontTitle = dropThemeWrittenGeneric(s.fontTitle),
-                )
-                "modern" -> s.copy(
-                    layoutTheme = theme,
-                    // 现代主题默认行距 1.4。
-                    lineSpacing = MODERN_LINE_SPACING,
-                    // 现代节奏用主题层自己的 `p,li{margin:1em 0}` ⇒ 段间距不声明（null = 听书/主题），
-                    // 面板显示实测 1em；读者拖了滑块才以绝对 em 覆盖。
-                    paragraphSpacing = base.paragraphSpacing,
-                    paragraphGap = 100.0,
-                    fontBody = dropThemeWrittenGeneric(s.fontBody),
-                    fontTitle = dropThemeWrittenGeneric(s.fontTitle),
-                )
-                else -> s.copy(
-                    // 原书设置：清空本书排版覆盖（正文/标题字体槽 / 行距 / 字距 / 段距 / 疏密 / 首行缩进）。
-                    // 全部回到预设的「不声明」状态，书的 CSS 重新说了算；字号与页边距不动。
-                    layoutTheme = theme,
-                    fontBody = "",
-                    fontTitle = "",
-                    lineSpacing = base.lineSpacing,
-                    cjkLatinSpacing = base.cjkLatinSpacing,
-                    firstLineIndent = base.firstLineIndent,
-                    paragraphSpacing = base.paragraphSpacing,
-                    paragraphGap = base.paragraphGap,
-                    letterSpacing = base.letterSpacing,
-                )
+            val (lineSpacing, paragraphSpacing) = when (theme) {
+                "traditional" -> TRADITIONAL_LINE_SPACING to 0.0
+                "modern" -> MODERN_LINE_SPACING to base.paragraphSpacing
+                else -> base.lineSpacing to base.paragraphSpacing
             }
+            return s.copy(
+                layoutTheme = theme,
+                // 字体：正文 / 标题回到该模式自己的字族来源（主题层或书），按槽字重一并清掉。
+                fontBody = "",
+                fontTitle = "",
+                fontWeightAnchors = base.fontWeightAnchors,
+                fontWeightAnchorsBySlot = base.fontWeightAnchorsBySlot,
+                // 字号。
+                fontSize = base.fontSize,
+                fontScale = base.fontScale,
+                // 间距页。
+                firstLineIndent = base.firstLineIndent,
+                lineSpacing = lineSpacing,
+                paragraphSpacing = paragraphSpacing,
+                paragraphGap = base.paragraphGap,
+                marginTop = base.marginTop,
+                marginBottom = base.marginBottom,
+                marginLeft = base.marginLeft,
+                marginRight = base.marginRight,
+                // 文字页。
+                letterSpacing = base.letterSpacing,
+                cjkLatinSpacing = base.cjkLatinSpacing,
+            )
         }
-
-        /**
-         * 旧版本切主题时会把 `serif` / `sans-serif` 写进正文字体槽。面板永远选不到通用族
-         * （字体列表里只有具体家族），所以槽里出现通用关键字只能是主题写的残留——
-         * 它在 UI 层（tier 44）压住主题层（tier 42）的声明，正是「切主题字体不变」的成因之一。
-         * 切主题时清掉，让主题层重新说话；读者自己选的具名字族原样保留。
-         */
-        private fun dropThemeWrittenGeneric(family: String): String =
-            if (isGenericFontFamily(family)) "" else family
 
         /** dp -> physical pixels (Int): the whole engine unifies this conversion
          * `px = dp x density` here, avoiding scattered reimplementation. */

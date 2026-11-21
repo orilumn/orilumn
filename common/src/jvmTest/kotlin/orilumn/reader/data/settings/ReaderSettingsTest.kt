@@ -247,7 +247,7 @@ class ReaderSettingsTest {
             "theme", "fontSize", "lineSpacing",
             "marginTop", "marginBottom", "marginLeft", "marginRight",
             "fontBody", "fontTitle", "fontCode", "fontSerif", "fontSans",
-            "fontWeightAnchors", "fontWeightAnchorsBySlot", "fontWeightAnchorsGlobal",
+            "fontWeightAnchors", "fontWeightAnchorsBySlot",
             "useUserScripts", "pageAnimationMode", "autoContinue", "pageNum", "coverStretch",
             "fontScale", "scheme", "bgOverride", "fgOverride", "layoutTheme",
             "highlightColorSlots", "underlineColorSlots",

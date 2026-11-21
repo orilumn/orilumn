@@ -34,13 +34,8 @@ import orilumn.reader.engine.html.MarkupElement
  *   观感与浏览器差异明显。只缩放 `px`（含无单位数值），`em/rem/%` 不动。
  * @param fontFamilyAliases **通用族替换**（`serif`→读者选的衬线族、`sans-serif`→无衬线族、
  *   `monospace`→全局代码字体）：在级联与「等宽意图合并」都算完之后，对最终族栈展开
- *   （见 [applyFontFamilyAliases]）。空表 = 完全维持原行为。
- * @param genericFontWeights 通用族替换后的基线字重（key = 通用关键字 `serif`/`sans-serif`/`monospace`）：
- *   普通正文（元素**没有自己的 `font-weight` 声明**）父级必须是常规 400 才补上；标题另有两条
- *   通路——元素自己的字族来自**读者层的标题规则**（标题槽「采用主题设置」，主题的裸通用名被
- *   换成读者那族，`font-weight` 是书 / UA 写的也算），或字重胜出者只是 UA 基线（`h1..h6` 的
- *   bold）——这时读者挑的字重是**那套字体脸**的一部分，压过书 / UA 的标题字重。正文里书的
- *   字重、主题 / UI 显式写的字重与 `<strong>`（没有自己的字族）一律不动。
+ *   （见 [applyFontFamilyAliases]）。空表 = 完全维持原行为。三个全局槽只换族不换字重：
+ *   字重由排版主题 / 书按角色决定。
  */
 class StyleComputer(
     private val rootFontPx: Float,
@@ -53,7 +48,6 @@ class StyleComputer(
     private val gapScale: Float = 1f,
     private val pxScale: Float = 1f,
     private val fontFamilyAliases: Map<String, String> = emptyMap(),
-    private val genericFontWeights: Map<String, Int> = emptyMap(),
 ) {
     private val cascade = Cascade(ua, authorSheets, theme, custom, ui)
 
@@ -311,27 +305,6 @@ class StyleComputer(
         )
     }
 
-    /**
-     * 该元素命中的通用族基线字重（只在**没有自己的 `font-weight` 声明**时使用）。
-     *
-     * **只看「纯通用族栈」**：栈里一旦有具名字体，实际渲染用的就是那个具名字体，
-     * 读者的通用族字重不得漏到书上（`font-family:"Book",serif` 的正文仍是 Book 的 400，
-     * 不是读者给 `serif` 挑的 300）。书走到通用关键字兜底时同理——整段字重属于主字体，
-     * 不能按回退档拆开。
-     *
-     * 返回 null 的条件：没配 [genericFontWeights]、族栈里有具名字体、没有读者替换过的
-     * 通用关键字、或锚点值非法（不在 100..900）。见 [genericFontWeights] 的 KDoc。
-     */
-    private fun genericWeightFor(raw: String?): Int? {
-        if (raw == null || genericFontWeights.isEmpty()) return null
-        val fams = parseFontFamilyList(raw)
-        if (fams.any { !isGenericFontFamily(it) }) return null
-        for (fam in fams) {
-            genericFontWeights[fam.lowercase()]?.let { if (it in 100..900) return it }
-        }
-        return null
-    }
-
     private fun computeOne(el: MarkupElement, ancestors: List<MarkupElement>, parent: ComputedStyle): ComputedStyle {
         // R26 诊断：见 CascadeProbe。probe 非 null 时把本函数拆成
         // 「内联属性解析 / 首次级联+建样式 / 通用字体兜底的第二次级联」三笔。
@@ -344,22 +317,10 @@ class StyleComputer(
         val inline = cascade.parseInline(el.attrs["style"])
         if (probe != null) parseMs = orilumn.reader.time.platformNowMs() - tP
         val winners = cascade.winningDeclarations(el, ancestors, inline)
-        // 读者在通用族槽里挑的字重能不能压过 UA 自带的 bold（`h1..h6`）：只有元素**自己**
-        // 声明了字族（主题的裸通用名）且读者配了通用族字重时才需要问胜出层的来源；
-        // 其余情况一问都不问，成本为零。
-        val uaBaselineWeight = genericFontWeights.isNotEmpty() &&
-            winners["font-weight"] != null && winners["font-family"] != null &&
-            cascade.fontWeightIsUaBaseline(el, ancestors, inline)
-        // 标题槽「采用主题设置」：标题的字族来自读者层（主题的 `h1..h6` 裸通用名），读者给
-        // 那一族挑的字重属于同一张读者层字体脸，应当压过书的标题字重（不只是 UA 基线）。
-        // 只问标题标签，正文容器上的主题字族不在此列（书的段落加粗语义照旧）。
-        val readerHeadingFont = genericFontWeights.isNotEmpty() &&
-            winners["font-family"] != null &&
-            cascade.readerHeadingFontMatches(el, ancestors)
         val tB = if (probe != null) orilumn.reader.time.platformNowMs() else 0L
         val style = computeStyle(
             winners, parent, el.tag, normalizeLang(el.attrs["lang"]),
-            isPreformatted(el, ancestors), uaBaselineWeight, readerHeadingFont,
+            isPreformatted(el, ancestors),
         )
         if (probe != null) buildMs = orilumn.reader.time.platformNowMs() - tB
         // 主题的裸通用名（serif / sans-serif）胜出时的**等宽意图**合并：主题字族说了算，只有
@@ -383,8 +344,7 @@ class StyleComputer(
             if (authorList.any { it.equals("monospace", ignoreCase = true) }) {
                 val tS = if (probe != null) orilumn.reader.time.platformNowMs() else 0L
                 // **只换字族三连，不重算整条样式**：合并只影响字形回退，不影响任何别的属性。
-                // 重算会让通用族字重判定翻脸——重算时栈首已是新并进来的族，`genericWeightFor`
-                // 可能认作「主字体不是读者那族」而返回 null，读者挑的字重白丢。
+                // （读者字重不再由通用族注入，重算只会白跑级联。）
                 val mergedRaw = (authorList + fams[0]).joinToString(",")
                 result = style.copy(
                     fontFamily = parseFontFamily(mergedRaw),
@@ -408,11 +368,6 @@ class StyleComputer(
      *   而 `lang` 是 HTML **属性**（不是 CSS 声明）本来就不在 `w` 里。三个调用点各自解析一次。
      * @param inPreformatted 本元素是否处于预格式化语境（`pre` 自身或其子树），由调用点从
      *   [el]/[ancestors] 判定好传进来，同样是为了不把节点访问塞进本函数。见 [resolveWhiteSpace]。
-     * @param fontWeightFromUaBaseline 本元素 `font-weight` 的胜出者就是 UA 基线（`h1..h6` 的
-     *   bold）：读者在通用族槽里挑的字重属于那套字体脸，可以压过这条引擎自带基线。同样由调用点
-     *   算好传进来，保持本函数的纯函数性质。
-     * @param fontWeightFromReaderHeading 本元素的字族来自**读者层的标题规则**（标题槽「采用主题
-     *   设置」）：读者挑的字重属于同一张字体脸，书 / UA 写的标题字重也让位。同样由调用点算好传入。
      */
     private fun computeStyle(
         w: Map<String, String>,
@@ -420,8 +375,6 @@ class StyleComputer(
         tag: String,
         lang: String?,
         inPreformatted: Boolean,
-        fontWeightFromUaBaseline: Boolean = false,
-        fontWeightFromReaderHeading: Boolean = false,
     ): ComputedStyle {
         // 1) font-size first (em/% boxes resolve against this final value)
         val fontSize = resolveFontSize(w["font-size"], parent.fontSizePx)
@@ -502,23 +455,8 @@ class StyleComputer(
         // 看到原始族栈（只有一项通用名），再在返回前展开（见 [applyFontFamilyAliases]）。
         val famRaw = w["font-family"]
         val famList = famRaw?.let { parseFontFamilyList(it) }
-        // 通用族的字重（读者给那套字体脸挑的那一档）：
-        //  1) 本元素没有自己的 font-weight ⇒ 正文类元素补上；父级必须是常规 400，继承来的
-        //     粗体照旧跟着走；
-        //  2) 本元素是标题、且字族来自读者层的标题规则（标题槽「采用主题设置」）⇒ 书 / UA
-        //     写的标题字重也让位（见 `Cascade.readerHeadingFontMatches`）；
-        //  3) 本元素自己写了字族（主题的裸通用名，读者已替换成自己那族），而 font-weight 的
-        //     胜出者只是 UA 基线（`h1..h6` 的 bold）⇒ 读者挑的字重压过引擎自带的 bold
-        //     （见 `Cascade.fontWeightIsUaBaseline`）。
-        // 正文里书的字重、主题 / UI 显式写死的字重与 `<strong>`（没有自己的字族）不受影响。
-        val genericWeight = when {
-            // 普通正文：父级必须是常规 400，避免把书继承下来的粗体洗掉。
-            w["font-weight"] == null ->
-                if (parent.fontWeight == 400) genericWeightFor(famRaw) else null
-            // 读者的标题字体脸：书 / UA 的标题字重也让位（父级不必再看——父级带的就是同一档）。
-            fontWeightFromReaderHeading || fontWeightFromUaBaseline -> genericWeightFor(famRaw)
-            else -> null
-        }
+        // 通用族的字重**不再由读者全局字体槽注入**：三个全局槽只挑字族，字重属于角色，
+        // 由排版主题（原书设置下由书）决定。这里只读级联结果，不做任何事后改写。
         if (split != null) fontMs = orilumn.reader.time.platformNowMs() - tF
         if (split != null) CascadeProbe.hitSplit(edgeMs, fontMs)
 
@@ -526,9 +464,8 @@ class StyleComputer(
             fontSizePx = fontSize,
             lineHeightRatio = w["line-height"]?.let { parseLineHeight(it, fontSize, pxScale) } ?: parent.lineHeightRatio,
             colorHex = w["color"]?.let { parseCssColor(it) } ?: parent.colorHex,
-            // 与 [fontWeight] 同源：通用族基线字重生效时（含压过 UA 基线 bold 的那一支），
-            // 这条派生的粗体旗标跟着最终字重走，不留下「weight=300 但 bold=true」的分裂状态。
-            bold = genericWeight?.let { it >= 600 } ?: w["font-weight"]?.let { parseFontWeightBold(it) } ?: parent.bold,
+            // 与 [fontWeight] 同源（此处只是级联值本身，无读者基线字重注入）。
+            bold = w["font-weight"]?.let { parseFontWeightBold(it) } ?: parent.bold,
             italic = w["font-style"]?.let { parseFontStyleItalic(it) } ?: parent.italic,
             decoration = parseTextDecoration(w, fontSize, parent.fontSizePx),
             textIndentPx = w["text-indent"]?.let { v -> parseLength(v)?.devPx(fontSize, parent.fontSizePx) } ?: 0f,
@@ -565,8 +502,8 @@ class StyleComputer(
             // 同一个 key、同一个字符串，parseFontFamilyList 提前算一次供 fontFamilies 用。
             fontFamily = famRaw?.let { parseFontFamily(it) } ?: parent.fontFamily,
             fontFamilies = famList ?: parent.fontFamilies,
-            // 通用族字重若已定（上面两支），它就是本元素的字重——包括压过 UA 基线 bold 的那一支。
-            fontWeight = genericWeight ?: w["font-weight"]?.let { parseFontWeight(it) } ?: parent.fontWeight,
+            // 字重只读级联结果：读者全局字体槽不再注入基线字重。
+            fontWeight = w["font-weight"]?.let { parseFontWeight(it) } ?: parent.fontWeight,
             monospace = famRaw?.let { isMonospaceFamily(it) } ?: parent.monospace,
             // List markers: non-inherited, read directly off the `ul/ol` element's own declaration;
             // the `list-style` shorthand splits into type/position when single props are absent.

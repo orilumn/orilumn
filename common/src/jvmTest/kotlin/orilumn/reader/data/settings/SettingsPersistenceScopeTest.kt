@@ -265,7 +265,6 @@ class SettingsPersistenceScopeTest {
         "fontCode" -> s.copy(fontCode = "ProbeCode")
         "fontSerif" -> s.copy(fontSerif = "ProbeSerif")
         "fontSans" -> s.copy(fontSans = "ProbeSans")
-        "fontWeightAnchorsGlobal" -> s.copy(fontWeightAnchorsGlobal = mapOf("fontCode|Probe" to 700))
         else -> error("全局集合新增了字段 [$field]，但本测试还没有它的探针")
     }
 

@@ -196,17 +196,13 @@ data class ReaderSettings(
     val fontWeightAnchors: Map<String, Int> = emptyMap(),
     /**
      * 按 (槽位,族) 的用户字重：key = `"fontTitle|族名"`。**槽位隔离**——
-     * 同名字族在标题/正文/代码三个槽各选各的字重，互不串（`FontSlots.slotNameOf` 出这个前缀）。
+     * 同名字族在标题/正文两个槽各选各的字重，互不串（`FontSlots.slotNameOf` 出这个前缀）。
      *
-     * 本表**按书私有**，只服务 [fontBody] / [fontTitle] 这两个按书私有的槽；
-     * 全局槽（[fontCode] / [fontSerif] / [fontSans]）的字重在 [fontWeightAnchorsGlobal]。
+     * 本表**按书私有**，只服务 [fontBody] / [fontTitle] 这两个按书私有的槽。
+     * 三个全局槽（[fontCode] / [fontSerif] / [fontSans]）**不提供字重选择**：它们只挑字族，
+     * 字重由排版主题（原书设置下由书）按角色决定。
      */
     val fontWeightAnchorsBySlot: Map<String, Int> = emptyMap(),
-    /**
-     * 全局字体槽（代码 / 衬线 / 无衬线）的字重：key 口径与 [fontWeightAnchorsBySlot] 相同
-     * （`"fontCode|族名"`），两者**不混用**：本表纯全局、换书沿用，与它服务的三槽归属一致。
-     */
-    val fontWeightAnchorsGlobal: Map<String, Int> = emptyMap(),
 
     /**
      * 标注色槽（ARGB，含透明度）：高亮 / 划线各一组，全局共享（D-13）。
@@ -641,7 +637,6 @@ data class ReaderSettings(
                     showHiddenFonts = SettingsJson.optBoolean(o, "showHiddenFonts", d.showHiddenFonts),
                     fontWeightAnchors = SettingsJson.optWeightAnchors(o, "fontWeightAnchors"),
                     fontWeightAnchorsBySlot = SettingsJson.optWeightAnchorsMap(o, "fontWeightAnchorsBySlot", d.fontWeightAnchorsBySlot),
-                    fontWeightAnchorsGlobal = SettingsJson.optWeightAnchorsMap(o, "fontWeightAnchorsGlobal", d.fontWeightAnchorsGlobal),
                     highlightColorSlots = SettingsJson.optIntList(o, "highlightColorSlots", d.highlightColorSlots),
                     underlineColorSlots = SettingsJson.optIntList(o, "underlineColorSlots", d.underlineColorSlots),
                     highlightDefaultSlot = SettingsJson.optInt(o, "highlightDefaultSlot", d.highlightDefaultSlot)

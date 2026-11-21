@@ -33,16 +33,15 @@ object FontSlots {
     }
 
     /**
-     * 槽位字重解析（单源）：某槽在其字体族上的读者字重；`null` = 没选 / 非法（调用方不写 `font-weight`）。
+     * 槽位字重解析（单源）：正文 / 标题槽在其字体族上的读者字重；`null` = 没选 / 非法
+     * （调用方不写 `font-weight`）。
      *
-     * 优先级按槽归属选表：正文 / 标题的字重按书私有（[bySlot]），等宽槽已是全局项（[global]）；
-     * 旧版本按族记账的表（[legacy]）只作兜底。等宽槽必须 [global] 优先——旧版本它按书私有，
-     * 书文件里可能留着 `fontCode|族` 的旧锚点，若压过全局表，读者在新书里选的代码字重就会被
-     * 某本书的旧值顶掉（换书不沿用）。三张表各自先滤掉非法值（不在 100..900 当没选），再比优先级。
+     * 只服务正文 / 标题两个按书私有的槽（[bySlot]）；旧版本按族记账的表（[legacy]）只作兜底。
+     * 三个全局字体槽（代码 / 衬线 / 无衬线）**不提供字重选择**，字重由排版主题按角色决定，
+     * 不在这条解析路径上。两张表各自先滤掉非法值（不在 100..900 当没选），再比优先级。
      */
     fun weightOf(
         bySlot: Map<String, Int>,
-        global: Map<String, Int>,
         legacy: Map<String, Int>,
         slot: String,
         family: String,
@@ -50,9 +49,7 @@ object FontSlots {
         if (family.isBlank()) return null
         val trimmed = family.trim()
         val key = "$slot|$trimmed"
-        val by = bySlot[key]?.takeIf { it in 100..900 }
-        val gl = global[key]?.takeIf { it in 100..900 }
-        val scoped = if (slot == "fontCode") gl ?: by else by ?: gl
-        return scoped ?: legacy[trimmed]?.takeIf { it in 100..900 }
+        return bySlot[key]?.takeIf { it in 100..900 }
+            ?: legacy[trimmed]?.takeIf { it in 100..900 }
     }
 }

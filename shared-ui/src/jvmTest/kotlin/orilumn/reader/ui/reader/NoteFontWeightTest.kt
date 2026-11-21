@@ -75,13 +75,12 @@ class NoteFontWeightTest {
     }
 
     @Test
-    fun blankNoteFontFollowsThemeGenericWeight() {
+    fun blankNoteFontFollowsThemeBodyWeight() {
         val settings = ReaderSettings(
             layoutTheme = "traditional",
             fontSerif = "SerifFace",
-            fontWeightAnchorsGlobal = mapOf("fontSerif|SerifFace" to 300),
         )
-        assertEquals(FontWeight(300), noteFontWeightOf(settings, TypographicProfile.build(settings)))
+        assertEquals(FontWeight(400), noteFontWeightOf(settings, TypographicProfile.build(settings)))
     }
 
     /** 批注自己挑过字体时以它为准，不被「跟随正文」压掉。 */

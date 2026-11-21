@@ -283,12 +283,23 @@ fun ReaderSettingsPanel(
             if (slotKey == "noteFont") onCommitLight(next) else onCommitTypography(next)
         }
         /**
+         * 切排版主题：按目标模式重置本书排版参数；**再次点击当前模式直接忽略**，
+         * 不重置、不提交、不触发重排（键盘与鼠标共用这一入口）。
+         */
+        fun switchLayoutTheme(target: String) {
+            if (s.layoutTheme == target) return
+            onCommitTypography(TypographicProfile.withLayoutTheme(s, target))
+        }
+        /**
          * 字体行进入：多字重档下钻字重页，单一下钻直接写入槽位（渲染点按与键盘共用）。
          *
-         * 批注字体与正文三槽**同一套下钻口径**：该族有多档字重就进字重页，选完族 + 字重一起落盘。
+         * 批注字体与正文 / 标题两槽走同一套下钻口径：该族有多档字重就进字重页，选完族 + 字重
+         * 一起落盘。**三个全局字体槽（衬线 / 无衬线 / 等宽）只挑字族**：不论该族有几档面都直接
+         * 写入槽位，字重交给排版主题（原书设置下随书）。
          */
         fun enterFontRow(family: String) {
-            val multi = fontEntries.filter { it.family == family }.weightChoices().size > 1
+            val multi = !isGlobalFontSlot(slotKey) &&
+                fontEntries.filter { it.family == family }.weightChoices().size > 1
             if (multi) {
                 weightPickFamily = family
                 stack.add(Sub.WeightPicker)
@@ -372,10 +383,12 @@ fun ReaderSettingsPanel(
                         ItemKey(onEnter = { onCommitLight(s.copy(showHiddenFonts = !s.showHiddenFonts)) })
                     is FontPanelRow.FollowOriginal ->
                         ItemKey(onEnter = {
-                            if (slotKey == "noteFont") {
-                                commitSlot(setField(s, slotKey, "").copy(noteFontWeight = 0))
-                            } else {
-                                commitSlot(withSlotAnchorsCleared(setField(s, slotKey, ""), slotKey))
+                            when {
+                                slotKey == "noteFont" ->
+                                    commitSlot(setField(s, slotKey, "").copy(noteFontWeight = 0))
+                                // 全局槽没有字重锚点：只清字族。
+                                isGlobalFontSlot(slotKey) -> commitSlot(setField(s, slotKey, ""))
+                                else -> commitSlot(withSlotAnchorsCleared(setField(s, slotKey, ""), slotKey))
                             }
                         })
                     is FontPanelRow.Import ->
@@ -554,9 +567,9 @@ fun ReaderSettingsPanel(
                 ItemKey(onEnter = { onCommitLight(s.copy(showToolbarNight = !s.showToolbarNight)) }),
             )
             Sub.Theme -> listOf(
-                ItemKey(onEnter = { onCommitTypography(TypographicProfile.withLayoutTheme(s, "original")) }),
-                ItemKey(onEnter = { onCommitTypography(TypographicProfile.withLayoutTheme(s, "modern")) }),
-                ItemKey(onEnter = { onCommitTypography(TypographicProfile.withLayoutTheme(s, "traditional")) }),
+                ItemKey(onEnter = { switchLayoutTheme("original") }),
+                ItemKey(onEnter = { switchLayoutTheme("modern") }),
+                ItemKey(onEnter = { switchLayoutTheme("traditional") }),
             )
             Sub.ReadingTheme -> buildList {
                 val n = allThemes.size
@@ -911,10 +924,14 @@ fun ReaderSettingsPanel(
                                 // 无线走面板内下钻（返回‹/Esc 即回字体列表），不经壳弹框。
                                 onImportWifi = { stack.add(Sub.WifiImport) },
                                 // 多字重行点按下钻字重页（与键盘共用 enterFontRow 口径）；
-                                // 批注字体同样进字重页，选完族 + 字重一起落盘。
+                                // 批注字体与正文 / 标题进字重页，三个全局字体槽只挑字族、直接写入。
                                 onPickWeight = { family ->
-                                    weightPickFamily = family
-                                    stack.add(Sub.WeightPicker)
+                                    if (isGlobalFontSlot(slotKey)) {
+                                        commitSlot(setField(s, slotKey, family))
+                                    } else {
+                                        weightPickFamily = family
+                                        stack.add(Sub.WeightPicker)
+                                    }
                                 },
                                 showLocalButton = canFontImport,
                                 showWifiButton = wifiReady,
@@ -1225,10 +1242,11 @@ private fun SpacingPage(
     commit: (ReaderSettings) -> Unit,
 ) {
     val labelW = sliderLabelWidth(listOf("首行缩进", "行距", "段间距", "疏密", "上边距", "下边距", "左边距", "右边距"), p)
-    // 排版量滑块永远可调 (用户最高优先级); 原书设置 只是把值重置为中性默认.
+    // 排版量滑块永远可调 (用户最高优先级); 三个模式各自按预设重置（原书设置 = 中性默认）.
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
         // 首行缩进 (em): 读者设过就按读者值发声明（0 = 明确不缩进，压掉书的缩进）；
-        // 没设过（null）时滑条显示原书的实测读数，渲染仍由书自己的 CSS 生效。
+        // 没设过（null）时滑条显示原书的实测读数；现代 / 传统主题的实际缩进由主题层决定
+        // （modern.css 为 0、traditional.css 为 2em），读者一拖才写成本书显式值。
         item { UiSliderRow("首行缩进", 0.0, 10.0, 1.0, s.firstLineIndent ?: s.probeIndent ?: 0.0,
             { "${it.roundToInt()}" },
             { preview(s.copy(firstLineIndent = it)) }, { commit(s.copy(firstLineIndent = it)) }, p, labelWidth = labelW,
@@ -1239,8 +1257,9 @@ private fun SpacingPage(
             { String.format("%.1f", it) },
             { preview(s.copy(lineSpacing = it)) }, { commit(s.copy(lineSpacing = it)) }, p, labelWidth = labelW,
             nav = nav, index = 1) }
-        // 段间距：**绝对值 em**（0..2）。读者没配（null）时滑条显示原书实测段距（含 UA 基线 1em），
-        // 渲染仍按书自己的 margin；拖动即写本书显式值，p/li 的上下外边距从此固定为该 em。
+        // 段间距：**绝对值 em**（0..2）。读者没配（null）时滑条显示原书实测段距（含 UA 基线 1em）；
+        // 现代主题的实际段距由主题层 p,li{margin:1em 0} 决定，传统主题切主题时显式写 0。
+        // 拖动即写本书显式值，p/li 的上下外边距从此固定为该 em。
         // 2026-10-29 由百分比乘算改回绝对值：百分比会让同一条滑块在不同书上代表不同物理间距。
         item { UiSliderRow("段间距", 0.0, 2.0, 0.1, s.paragraphSpacing ?: s.probeParagraphSpacing ?: 0.0,
             { String.format("%.1f", it) },
@@ -1282,10 +1301,8 @@ private fun ThemePage(
     p: Palette,
 ) {
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize().clearKbHoldOnMove(onMouseMove)) {
-        // 三个按钮都只切 `layoutTheme` 这个开关：基线交给主题层（`modern.css` / `traditional.css`），
-        // 读者层不再把主题值钉进本书（写了反而盖掉主题层口径）。
-        // 「原书设置」= 清空本书的排版覆盖（字体槽/行距/字距/段距/疏密/缩进回预设），本书重新完全听书；
-        // 不动字号与页边距。见 `docs/设置模型整改计划.md` §3.5。
+        // 三个按钮都按目标模式重置本书排版参数（字号、字体、行距、字距、段距、缩进、页边距），
+        // 全局项不动；再次点击当前模式不予理睬（不重置、不提交）。见 `docs/设置模型整改计划.md` §3.5。
         item { ThemeOpt("原书设置", s.layoutTheme == "original", keys[0].onEnter, p, nav = nav, index = 0) }
         item { ThemeOpt("现代模式", s.layoutTheme == "modern", keys[1].onEnter, p, nav = nav, index = 1) }
         item { ThemeOpt("传统模式", s.layoutTheme == "traditional", keys[2].onEnter, p, nav = nav, index = 2) }
@@ -1308,7 +1325,7 @@ private val FONT_FIELDS = listOf(
     "正文" to "fontBody",
 )
 
-/** 全局字体槽（等宽/衬线/无衬线）：字体族与字重都存全局表，换书沿用。 */
+/** 全局字体槽（等宽/衬线/无衬线）：只挑字族，换书沿用。 */
 private fun isGlobalFontSlot(key: String): Boolean =
     key == "fontCode" || key == "fontSerif" || key == "fontSans"
 
@@ -1356,8 +1373,8 @@ private fun setField(s: ReaderSettings, key: String, v: String) = when (key) {
 }
 
 /**
- * 槽位当前字重：正文/标题读按书私有的按槽锚点（旧全局表兜底），代码/衬线/无衬线读全局按槽锚点，
- * 批注字体读自己的独立字段。
+ * 槽位当前字重：正文 / 标题读按书私有的按槽锚点（旧按族表兜底），批注字体读自己的独立字段。
+ * 三个全局字体槽不提供字重选择，恒为 `null`。
  *
  * 批注不是书本排版的一部分，不能把锚点塞进 `fontWeightAnchorsBySlot`：那张表按书私有
  * 且进 [orilumn.reader.engine.text.LayoutParamKey]，会让旁注换字重误作废分页表。
@@ -1365,7 +1382,7 @@ private fun setField(s: ReaderSettings, key: String, v: String) = when (key) {
 private fun slotWeightOf(s: ReaderSettings, key: String, family: String): Int? =
     when {
         key == "noteFont" -> s.noteFontWeight.takeIf { it in 100..900 }
-        isGlobalFontSlot(key) -> s.fontWeightAnchorsGlobal["$key|$family"]
+        isGlobalFontSlot(key) -> null
         else -> s.fontWeightAnchorsBySlot["$key|$family"] ?: s.fontWeightAnchors[family]
     }
 
@@ -1373,18 +1390,17 @@ private fun slotWeightOf(s: ReaderSettings, key: String, family: String): Int? =
 private fun withSlotWeight(s: ReaderSettings, key: String, family: String, weight: Int): ReaderSettings =
     when {
         key == "noteFont" -> setField(s, key, family).copy(noteFontWeight = weight)
-        isGlobalFontSlot(key) -> setField(s, key, family).copy(
-            fontWeightAnchorsGlobal = s.fontWeightAnchorsGlobal + ("$key|$family" to weight),
-        )
+        // 全局槽只挑字族：权重页不应到达这里；万一到达也只写族，不落任何字重。
+        isGlobalFontSlot(key) -> setField(s, key, family)
         else -> setField(s, key, family).copy(
             fontWeightAnchorsBySlot = s.fontWeightAnchorsBySlot + ("$key|$family" to weight),
         )
     }
 
-/** 清掉某槽的全部字重锚点（空槽 = 系统默认 / 采用主题设置 / 采用正文字体时用），只动该槽自己那张表。 */
+/** 清掉某槽的全部字重锚点（空槽 = 系统默认 / 采用主题设置 / 采用正文字体时用）。 */
 private fun withSlotAnchorsCleared(s: ReaderSettings, key: String): ReaderSettings =
     if (isGlobalFontSlot(key)) {
-        s.copy(fontWeightAnchorsGlobal = s.fontWeightAnchorsGlobal.filterKeys { !it.startsWith("$key|") })
+        s
     } else {
         s.copy(fontWeightAnchorsBySlot = s.fontWeightAnchorsBySlot.filterKeys { !it.startsWith("$key|") })
     }

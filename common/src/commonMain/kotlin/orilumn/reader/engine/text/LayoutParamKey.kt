@@ -34,7 +34,7 @@ data class LayoutParamKey(
     val fontCode: String,
     /** 用户在该族选的字重（UI 层声明进级联 ⇒ 改变 `font-weight` ⇒ 影响取面与度量，必须进缓存键）。 */
     val fontWeightAnchors: Map<String, Int> = emptyMap(),
-    /** 同上但**按槽位隔离**（key = "slot|family"）。 */
+    /** 同上但**按槽位隔离**（key = "slot|family"），只服务正文 / 标题两个按书私有的槽。 */
     val fontWeightAnchorsBySlot: Map<String, Int> = emptyMap(),
     val useOriginalStyle: Boolean,
     val contentW: Int,
@@ -42,15 +42,13 @@ data class LayoutParamKey(
     val userCssHash: Int,
     /**
      * 排版主题 key（`original` / `modern` / `traditional`）：主题层（tier 42）按它决定加载哪张
-     * 样式表，字体族/缩进/段距/对齐都可能不同 ⇒ **必须进键**。以前靠 `withLayoutTheme`
-     * 顺带改字体槽/段距把键带变，现在主题只切样式表，裸切主题必须自己换键。
+     * 样式表，字体族/缩进/段距/对齐都可能不同 ⇒ **必须进键**。切主题还会重置本书的排版参数
+     * （字体槽、行距、段距等），但键不能依赖这些副作用，必须自己带上主题。
      */
     val layoutTheme: String = "original",
     /** 通用族替换（`serif`/`sans-serif` → 读者选的族）：改变族栈 ⇒ 改变取面与度量 ⇒ 进键。 */
     val fontSerif: String = "",
     val fontSans: String = "",
-    /** 全局字体槽（代码/衬线/无衬线）的按槽字重：与 [fontWeightAnchorsBySlot] 一样改 `font-weight`。 */
-    val fontWeightAnchorsGlobal: Map<String, Int> = emptyMap(),
 ) {
     /** Deterministic 64-bit hash over all layout-affecting fields. */
     fun hash(): Long {
@@ -97,13 +95,9 @@ data class LayoutParamKey(
         crc = Crc32.update4(crc, cjkLatinSpacingEm.bits())
         // 排版主题（新字段一律追加在末尾，见上）。
         crc = Crc32.updateString(crc, layoutTheme)
-        // 通用族替换与全局槽字重（`serif`/`sans-serif` 的族栈与字重都会改取面/度量）。
+        // 通用族替换（`serif`/`sans-serif` 的族栈会改取面/度量）。
         crc = Crc32.updateString(crc, fontSerif)
         crc = Crc32.updateString(crc, fontSans)
-        for ((k, w) in fontWeightAnchorsGlobal.toSortedMap()) {
-            crc = Crc32.updateString(crc, k)
-            crc = Crc32.update4(crc, w.bits())
-        }
         return Crc32.finish(crc)
     }
 
@@ -132,7 +126,6 @@ data class LayoutParamKey(
             layoutTheme = profile.layoutTheme,
             fontSerif = profile.fontSerif,
             fontSans = profile.fontSans,
-            fontWeightAnchorsGlobal = profile.fontWeightAnchorsGlobal,
             contentW = contentW,
             contentH = contentH,
             userCssHash = userCssHash,

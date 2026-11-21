@@ -43,9 +43,9 @@ object SettingsScope {
         "highlightDefaultSlot", "underlineDefaultSlot",
         "annotationLastKind", "annotationLastLineStyle",
         "noteFont", "noteFontWeight", "noteFontScale",
-        // 字体：代码槽 + 通用族（衬线 / 无衬线）替换与它们的字重（2026-11 起全局）。
-        // 正文 / 标题两槽仍按书私有，见 [PRIVATE]。
-        "fontCode", "fontSerif", "fontSans", "fontWeightAnchorsGlobal",
+        // 字体：代码槽 + 通用族（衬线 / 无衬线）替换（2026-11 起全局）。
+        // 三个全局槽只挑字族，字重由排版主题按角色决定；正文 / 标题两槽仍按书私有，见 [PRIVATE]。
+        "fontCode", "fontSerif", "fontSans",
         // 旁注画法（折叠 / 描边 / 底色 / 文字用色）：只改覆盖层怎么画，不碰正文排版。
         "noteCollapseAll", "noteBorder", "noteBackground", "noteTextSameColor",
         // 持久化元数据（只增不改，见 ReaderSettings.schemaVersion KDoc）。
@@ -66,7 +66,7 @@ object SettingsScope {
         "paragraphSpacing", "paragraphGap", "letterSpacing", "cjkLatinSpacing",
         // 页边距四向。
         "marginTop", "marginBottom", "marginLeft", "marginRight",
-        // 字体族两槽与按槽字重锚点（正文 / 标题按书私有；代码与通用族见 GLOBAL）。
+        // 字体族两槽与正文 / 标题的按槽字重锚点（按书私有；三个全局字体槽见 GLOBAL，只挑字族）。
         "fontBody", "fontTitle",
         "fontWeightAnchors", "fontWeightAnchorsBySlot",
         // 用户自定义样式表开关（当前无消费者，保留字段）。
@@ -169,7 +169,6 @@ fun ReaderSettings.withGlobalFrom(next: ReaderSettings): ReaderSettings = copy(
     fontCode = next.fontCode,
     fontSerif = next.fontSerif,
     fontSans = next.fontSans,
-    fontWeightAnchorsGlobal = next.fontWeightAnchorsGlobal,
     noteCollapseAll = next.noteCollapseAll,
     noteBorder = next.noteBorder,
     noteBackground = next.noteBackground,

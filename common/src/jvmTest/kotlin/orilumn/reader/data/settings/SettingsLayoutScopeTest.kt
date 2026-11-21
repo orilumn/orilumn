@@ -56,7 +56,7 @@ class SettingsLayoutScopeTest {
         "marginTop", "marginBottom", "marginLeft", "marginRight",
         "fontBody", "fontTitle", "fontCode", "fontSerif", "fontSans", "useUserScripts",
         "fontScale", "layoutTheme", "fontSize",
-        "fontWeightAnchors", "fontWeightAnchorsBySlot", "fontWeightAnchorsGlobal",
+        "fontWeightAnchors", "fontWeightAnchorsBySlot",
     )
 
     /**
@@ -131,7 +131,6 @@ class SettingsLayoutScopeTest {
         "layoutTheme" -> s.copy(layoutTheme = if (s.layoutTheme == "original") "modern" else "original")
         "fontWeightAnchors" -> s.copy(fontWeightAnchors = s.fontWeightAnchors + ("p" to 700))
         "fontWeightAnchorsBySlot" -> s.copy(fontWeightAnchorsBySlot = s.fontWeightAnchorsBySlot + ("body" to 700))
-        "fontWeightAnchorsGlobal" -> s.copy(fontWeightAnchorsGlobal = s.fontWeightAnchorsGlobal + ("fontCode|x" to 700))
 
         "theme" -> s.copy(theme = if (s.theme == "sepia") "light" else "sepia")
         "scheme" -> s.copy(scheme = if (s.scheme == "day") "night" else "day")

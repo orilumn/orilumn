@@ -43,6 +43,7 @@ object FontPoolSync {
          * **只用于把该档面预装进池**——用户在 UI 选的字重经 `ReaderUiSheet` 以 tier-44 声明进级联，
          * 渲染层直接拿到那个值；渲染层无权改写（见 `SkParagraphFactory.runFontStyle`）。
          * 池里必须有这一档面，否则级联选中的字重在设备上无处可取（回落成默认面 ⇒ 用户看着"没反应"）。
+         * 只含正文 / 标题两个按书私有的槽：三个全局字体槽只挑字族、不挑字重。
          */
         anchorsBySlot: Map<String, Int> = emptyMap(),
         anchors: Map<String, Int> = emptyMap(),
@@ -51,9 +52,6 @@ object FontPoolSync {
             for (fam in slotFamilies) {
                 anchorsBySlot["fontBody|$fam"]?.let { add(it) }
                 anchorsBySlot["fontTitle|$fam"]?.let { add(it) }
-                anchorsBySlot["fontCode|$fam"]?.let { add(it) }
-                anchorsBySlot["fontSerif|$fam"]?.let { add(it) }
-                anchorsBySlot["fontSans|$fam"]?.let { add(it) }
                 anchors[fam]?.let { add(it) }
             }
             // 恒保 400/700：UA `h1..h6{bold}` 与正文默认 400 在任何书里都会出现，
@@ -141,8 +139,8 @@ object FontPoolSync {
             .map { it.trim() }.filter { it.isNotEmpty() }.toSet()
         val sel = select(
             faces, slotFams, demand, bookEntries, fileSize,
-            // 两表不混用：按槽键各自查各自的表，这里合并只为一次查表（键空间不重叠）。
-            anchorsBySlot = profile.fontWeightAnchorsBySlot + profile.fontWeightAnchorsGlobal,
+            // 只有正文 / 标题两个按书私有的槽有用户字重；全局字体槽只挑字族。
+            anchorsBySlot = profile.fontWeightAnchorsBySlot,
             anchors = profile.fontWeightAnchors,
         )
         if (sel.sig == lastSig) return PoolSyncResult(false, lastSig)

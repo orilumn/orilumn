@@ -4,13 +4,18 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
@@ -29,13 +34,19 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.layoutId
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import orilumn.reader.data.annotation.AnnotationKind
 import orilumn.reader.data.annotation.AnnotationLineStyle
+import orilumn.reader.data.correction.CorrectionCandidate
+import orilumn.reader.data.correction.CorrectionRules
 import orilumn.reader.engine.skia.ANNOTATION_DASH_OFF_RATIO
 import orilumn.reader.engine.skia.ANNOTATION_DASH_ON_RATIO
 import orilumn.reader.engine.skia.ANNOTATION_UNDERLINE_THICKNESS_EM
@@ -51,6 +62,9 @@ import orilumn.reader.engine.skia.decorWaveGeometry
  * → 贴右的 `复制` `删除` `确定`。装不下就换两行：第一行只放类别与右侧三键，第二行放色槽与线型；
  * 再装不下（窄手机）就三行：类别一行、色槽一行、线型一行。判定全部来自**实测宽度**，
  * 不看屏幕 dp 阈值。
+ *
+ * 正文修改模式下色槽整排隐藏，`修订` 右边那片空白用来放**纠错候选词**（见 [CorrectionRules]）：
+ * 绿色文字、点一下即提交，不用再点 `确定`。
  *
  * 类别名本身就是样张：「高亮」二字垫当前高亮色，「划线」二字按当前**线型与线色**画一笔。
  * 线型行只画线不写字。点色槽 = 落笔（新建或改色）；点线型 = **只选中**，落笔交给色槽或 `确定`。
@@ -76,6 +90,15 @@ internal fun AnnotationActionBar(
     /** 选区菜单的「修订」：有选区时可点（正文修改 v3）。 */
     onEdit: (() -> Unit)? = null,
     editEnabled: Boolean = false,
+    /**
+     * 纠错候选（修订模式，见 [CorrectionRules]）：词典命中**当前选区整段**时非空。
+     *
+     * 摆在「高亮 / 划线 / 修订」右边那片空白里（修订模式下色槽整排隐藏，那里本来就空着），
+     * 绿色文字，**点一下就提交修订**，不用再点「确定」。长内容只显示首尾引号（`“…”`），
+     * 提交的仍是完整文字（见 [CorrectionCandidate]）。
+     */
+    corrections: List<CorrectionCandidate> = emptyList(),
+    onPickCorrection: (String) -> Unit = {},
     /**
      * 正文修改模式（方案 §8.8 / D-36）：**和高亮、划线共用同一根操作栏**，不另起一套。
      *
@@ -159,6 +182,12 @@ internal fun AnnotationActionBar(
         } else {
             null
         },
+        // 纠错候选只在正文修改模式出现：那里没有色槽，`修订` 右边本来就是空的。
+        corrections = if (editMode && corrections.isNotEmpty()) {
+            { CorrectionRow(words = corrections, onPick = onPickCorrection) }
+        } else {
+            null
+        },
         trail = {
             MenuAction("复制", palette.text, palette, active = false, onClick = onCopy)
             // 删除两种模式共用：批注模式删这条标注，正文修改模式删这条修改（恢复原文）。
@@ -187,6 +216,7 @@ internal fun AnnotationActionBar(
 private const val PART_LEAD = "lead"
 private const val PART_COLORS = "colors"
 private const val PART_STYLES = "styles"
+private const val PART_CORRECTIONS = "corrections"
 private const val PART_TRAIL = "trail"
 
 /** 组与组之间的横向间距。 */
@@ -200,6 +230,10 @@ private val BAR_ROW_GAP = 2.dp
  *
  * 判定用**实测子项宽度**（`layoutId` 分组），所以同一个组件在平板、手机、桌面窄窗里都能
  * 自己找到合适的排法，不需要外部传屏幕宽度或 dp 阈值。
+ *
+ * 纠错候选（[PART_CORRECTIONS]）**紧跟 `修订` 右边、整段靠左**：它只出现在正文修改模式，
+ * 那一行本来没有色槽，正好落在 `修订` 右边那片空白里。一行装不下时它让到下一行
+ * （与色槽同一套让位规则），再窄就自己单独一行，仍然靠左。
  */
 @Composable
 private fun BarLayout(
@@ -208,6 +242,8 @@ private fun BarLayout(
     /** null = 这一段整段不出现（正文修改模式没有色槽）。 */
     colors: (@Composable () -> Unit)?,
     styles: (@Composable () -> Unit)?,
+    /** null = 没有纠错候选（非修订模式，或选区不是词典里的词）。 */
+    corrections: (@Composable () -> Unit)?,
     trail: @Composable () -> Unit,
 ) {
     Layout(
@@ -226,28 +262,41 @@ private fun BarLayout(
                     styles()
                 }
             }
+            if (corrections != null) {
+                Row(
+                    Modifier.layoutId(PART_CORRECTIONS),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    corrections()
+                }
+            }
             Row(Modifier.layoutId(PART_TRAIL), verticalAlignment = Alignment.CenterVertically) {
                 trail()
             }
         },
     ) { measurables, constraints ->
-        fun part(id: String) = measurables.firstOrNull { it.layoutId == id }?.measure(Constraints())
+        // 候选词按可用宽度测量：三条候选（成对符号规则）在窄屏上换行，不会有一条被挤到屏幕外。
+        fun part(id: String, maxWidth: Int = Constraints.Infinity) =
+            measurables.firstOrNull { it.layoutId == id }?.measure(Constraints(maxWidth = maxWidth))
+        val maxW = constraints.maxWidth
         val leadP = part(PART_LEAD)
         val colorsP = part(PART_COLORS)
         val stylesP = part(PART_STYLES)
+        val corrP = part(PART_CORRECTIONS, maxWidth = maxW)
         val trailP = part(PART_TRAIL)
         val gap = BAR_GAP.roundToPx()
         val rowGap = BAR_ROW_GAP.roundToPx()
-        val maxW = constraints.maxWidth
 
         fun w(p: androidx.compose.ui.layout.Placeable?) = p?.width ?: 0
         fun h(p: androidx.compose.ui.layout.Placeable?) = p?.height ?: 0
 
         val paletteW = w(colorsP) + if (stylesP != null) gap + w(stylesP) else 0
-        val singleW = w(leadP) + gap + paletteW + gap + w(trailP)
+        // 候选与前面的色槽 / 类别之间也要留一格间距（有候选时才算这一格）。
+        val corrW = if (corrP != null) gap + w(corrP) else 0
+        val singleW = w(leadP) + gap + paletteW + corrW + gap + w(trailP)
 
         if (singleW <= maxW) {
-            val rowH = maxOf(h(leadP), h(colorsP), h(stylesP), h(trailP))
+            val rowH = maxOf(h(leadP), h(colorsP), h(stylesP), h(corrP), h(trailP))
             layout(maxW, rowH) {
                 leadP?.placeRelative(0, (rowH - h(leadP)) / 2)
                 var x = w(leadP) + gap
@@ -256,34 +305,59 @@ private fun BarLayout(
                 if (stylesP != null) {
                     x += gap
                     stylesP.placeRelative(x, (rowH - h(stylesP)) / 2)
+                    x += w(stylesP)
+                }
+                // 候选紧跟 `修订`（从左往右排），不贴右：读者先看到「换成什么」，再看右侧三键。
+                if (corrP != null) {
+                    x += gap
+                    corrP.placeRelative(x, (rowH - h(corrP)) / 2)
                 }
                 trailP?.placeRelative(maxW - w(trailP), (rowH - h(trailP)) / 2)
             }
-        } else if (paletteW <= maxW) {
-            val topH = maxOf(h(leadP), h(trailP))
-            val bottomH = maxOf(h(colorsP), h(stylesP))
-            layout(maxW, topH + rowGap + bottomH) {
-                leadP?.placeRelative(0, (topH - h(leadP)) / 2)
-                trailP?.placeRelative(maxW - w(trailP), (topH - h(trailP)) / 2)
-                colorsP?.placeRelative(0, topH + rowGap + (bottomH - h(colorsP)) / 2)
-                if (stylesP != null) {
-                    stylesP.placeRelative(
-                        w(colorsP) + gap,
-                        topH + rowGap + (bottomH - h(stylesP)) / 2,
-                    )
-                }
-            }
         } else {
-            // 窄手机：色槽与线型各占一行（线型不存在时就只有色槽）。
-            val topH = maxOf(h(leadP), h(trailP))
-            val colorsH = h(colorsP)
-            val stylesH = h(stylesP)
-            layout(maxW, topH + rowGap + colorsH + (if (stylesP != null) rowGap + stylesH else 0)) {
-                leadP?.placeRelative(0, (topH - h(leadP)) / 2)
-                trailP?.placeRelative(maxW - w(trailP), (topH - h(trailP)) / 2)
-                colorsP?.placeRelative(0, topH + rowGap)
-                if (stylesP != null) {
-                    stylesP.placeRelative(0, topH + rowGap + colorsH + rowGap)
+            // 第二行放色槽 + 线型；候选跟着靠左，放得下就一起，放不下再单独一行。
+            val corrOnSecond = corrP != null && paletteW + gap + w(corrP) <= maxW
+            val secondH = maxOf(h(colorsP), h(stylesP), if (corrOnSecond) h(corrP) else 0)
+            if (paletteW <= maxW) {
+                val topH = maxOf(h(leadP), h(trailP))
+                val corrRowH = if (corrP != null && !corrOnSecond) rowGap + h(corrP) else 0
+                layout(maxW, topH + rowGap + secondH + corrRowH) {
+                    leadP?.placeRelative(0, (topH - h(leadP)) / 2)
+                    trailP?.placeRelative(maxW - w(trailP), (topH - h(trailP)) / 2)
+                    colorsP?.placeRelative(0, topH + rowGap + (secondH - h(colorsP)) / 2)
+                    if (stylesP != null) {
+                        stylesP.placeRelative(
+                            w(colorsP) + gap,
+                            topH + rowGap + (secondH - h(stylesP)) / 2,
+                        )
+                    }
+                    if (corrOnSecond) {
+                        // 有色槽时接在色槽后面；修订模式没有色槽，就贴最左。
+                        corrP?.placeRelative(
+                            if (paletteW > 0) paletteW + gap else 0,
+                            topH + rowGap + (secondH - h(corrP)) / 2,
+                        )
+                    } else if (corrP != null) {
+                        corrP.placeRelative(0, topH + rowGap + secondH + rowGap)
+                    }
+                }
+            } else {
+                // 窄手机：色槽与线型各占一行（线型不存在时就只有色槽），候选再占一行。
+                val topH = maxOf(h(leadP), h(trailP))
+                val colorsH = h(colorsP)
+                val stylesH = h(stylesP)
+                val rowsH = topH + rowGap + colorsH +
+                    (if (stylesP != null) rowGap + stylesH else 0)
+                layout(maxW, rowsH + (if (corrP != null) rowGap + h(corrP) else 0)) {
+                    leadP?.placeRelative(0, (topH - h(leadP)) / 2)
+                    trailP?.placeRelative(maxW - w(trailP), (topH - h(trailP)) / 2)
+                    colorsP?.placeRelative(0, topH + rowGap)
+                    if (stylesP != null) {
+                        stylesP.placeRelative(0, topH + rowGap + colorsH + rowGap)
+                    }
+                    if (corrP != null) {
+                        corrP.placeRelative(0, rowsH + rowGap)
+                    }
                 }
             }
         }
@@ -407,6 +481,63 @@ private fun LineStyleRow(
 
 /** 菜单按钮文字字号：线样张的粗细也按它算，样张才与真迹同比例。 */
 private val MENU_LABEL_FONT = 14.sp
+
+/**
+ * 纠错候选词（见 [CorrectionRules]）：绿色文字，**点一下就提交修订**（不用再点 `确定`）。
+ *
+ * 只出现在正文修改模式，紧跟在 `修订` 右边、整段靠左；绿色与审阅视图里「新写进去的字」
+ * 同一支绿，读者一眼看出这是「改后」的样子。
+ *
+ * **一行放得下就显示完整候选；放不下才把中间内容收成中文省略号 `……`**（`“………”` / `‘……’` /
+ * `……`）——提交的仍是完整文字。判定用实测文字宽度，不看字数：窄屏早收、宽屏晚收。
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun CorrectionRow(words: List<CorrectionCandidate>, onPick: (String) -> Unit) {
+    val measurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    val textStyle = remember { TextStyle(fontSize = MENU_LABEL_FONT, fontWeight = FontWeight.Medium) }
+    BoxWithConstraints {
+        // 完整候选 + 各自左右留白 + 格间距，超过一行可用宽度才收省略号。
+        val collapsed = remember(words, constraints.maxWidth, density) {
+            val gapPx = with(density) { CORRECTION_GAP.toPx() }
+            val padPx = with(density) { CORRECTION_LABEL_PADDING.toPx() * 2 }
+            var total = gapPx * (words.size - 1).coerceAtLeast(0)
+            for (word in words) {
+                total += measurer.measure(word.label, textStyle, maxLines = 1).size.width + padPx
+            }
+            total > constraints.maxWidth.toFloat()
+        }
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(CORRECTION_GAP),
+            verticalArrangement = Arrangement.spacedBy(CORRECTION_GAP),
+        ) {
+            words.forEach { word ->
+                Text(
+                    text = if (collapsed) word.collapsedLabel else word.label,
+                    color = Color(REVIEW_INSERTED_ARGB),
+                    fontSize = MENU_LABEL_FONT,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .widthIn(max = CORRECTION_LABEL_MAX_WIDTH)
+                        .clickable { onPick(word.value) }
+                        .padding(horizontal = CORRECTION_LABEL_PADDING, vertical = 7.dp),
+                )
+            }
+        }
+    }
+}
+
+/** 单条候选词的显示宽度上限（超长候选只影响显示，提交的仍是完整文字）。 */
+private val CORRECTION_LABEL_MAX_WIDTH = 220.dp
+
+/** 候选之间的间距（换行后纵向同值）。 */
+private val CORRECTION_GAP = 2.dp
+
+/** 候选左右留白（点击区域比字宽一圈）。 */
+private val CORRECTION_LABEL_PADDING = 9.dp
 
 /** 线型样张：与正文里落墨的位置对齐（线画在字的下沿）。 */
 private fun DrawScope.drawLineStyleGlyph(

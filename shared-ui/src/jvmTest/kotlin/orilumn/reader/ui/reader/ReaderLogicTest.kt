@@ -130,6 +130,24 @@ class ReaderLogicTest {
     }
 
     @Test
+    fun brightnessEdgeZone_fixedEdgeWidthNotOneThird() {
+        // 屏宽 2000px、边缘 400px：左/右各 400px 归亮度，中间 1200px 是点按中区。
+        assertEquals(-1, ReaderMath.brightnessEdgeZone(0f, 2000f, 400f))
+        assertEquals(-1, ReaderMath.brightnessEdgeZone(399f, 2000f, 400f))
+        assertEquals(0, ReaderMath.brightnessEdgeZone(400f, 2000f, 400f))
+        assertEquals(0, ReaderMath.brightnessEdgeZone(1600f, 2000f, 400f))
+        assertEquals(1, ReaderMath.brightnessEdgeZone(1601f, 2000f, 400f))
+        assertEquals(1, ReaderMath.brightnessEdgeZone(1999f, 2000f, 400f))
+        // 窄窗口：边缘夹到 1/3 屏宽，中区不会被吃光（900px 宽、边缘 800px → 各 300px）。
+        assertEquals(-1, ReaderMath.brightnessEdgeZone(299f, 900f, 800f))
+        assertEquals(0, ReaderMath.brightnessEdgeZone(300f, 900f, 800f))
+        assertEquals(0, ReaderMath.brightnessEdgeZone(600f, 900f, 800f))
+        assertEquals(1, ReaderMath.brightnessEdgeZone(601f, 900f, 800f))
+        // 宽度未测到：一律中区，不误判亮度。
+        assertEquals(0, ReaderMath.brightnessEdgeZone(0f, 0f, 400f))
+    }
+
+    @Test
     fun twoFingerBrightnessAllowed_needsSwitchAndNoSystemFollow() {
         assertEquals(true, ReaderMath.twoFingerBrightnessAllowed(twoEnabled = true, followSystem = false))
         // 开关没开：双指不接管（单指左右两侧的老规矩照旧）。

@@ -236,6 +236,8 @@ fun ReaderScreen(
     }
     val selectionHandleRadiusPx = SELECTION_HANDLE_RADIUS_DP * density
     val selectionHandleHitPx = SELECTION_HANDLE_HIT_RADIUS_DP * density
+    // 单指垂直亮度手势的左右边缘宽度（px）：固定 150dp，不再按 1/3 屏宽算。
+    val brightnessEdgePx = ReaderMath.BRIGHTNESS_EDGE_DP * density
 
     var openPos by remember { mutableStateOf<ReaderPos?>(null) }
     var openFailed by remember { mutableStateOf(false) }
@@ -3336,20 +3338,26 @@ fun ReaderScreen(
                                     val s = light
                                     if (!s.brightnessFollowSystem &&
                                         ReaderMath.verticalBrightnessAllowed(
-                                            ReaderMath.tapZone(downX, size.width.toFloat()),
+                                            ReaderMath.brightnessEdgeZone(
+                                                downX,
+                                                size.width.toFloat(),
+                                                brightnessEdgePx,
+                                            ),
                                             s.brightnessGestureLeft,
                                             s.brightnessGestureRight,
                                         )
                                     ) {
-                                        // 单指垂直亮度只在左/右 1/3 且对应开关打开；激活锁定向下报告累计竖向偏移。
+                                        // 单指垂直亮度只在左右边缘（150dp）且对应开关打开；激活锁定向下报告累计竖向偏移。
                                         brightnessActive = true
                                         brightnessBase = s.brightness
                                     }
                                 }
                                 // 下拉切换书签：亮度手势没接管、也没在选字、标题栏收着时才认。
-                                // 左右 1/3 若开着亮度手势，那一段仍归亮度——书签下拉只吃屏幕其余部分。
+                                // 且**只认屏幕中间 1/3 起手**：左右两侧不参与下拉（边缘归亮度、
+                                // 其余靠近两侧的位置也留给翻页手感），避免误触把页面拉下去。
                                 val maxPull = size.height * BookmarkPullMaxFraction
-                                if (!brightnessActive && !mouse && maxPull > 0f && !coverVisible &&
+                                val pullZoneOk = ReaderMath.tapZone(downX, size.width.toFloat()) == 0
+                                if (pullZoneOk && !brightnessActive && !mouse && maxPull > 0f && !coverVisible &&
                                     !currentBarsVisible && !selection.hasSelection && !ctl.isBusy()
                                 ) {
                                     if (dy > 0f) {

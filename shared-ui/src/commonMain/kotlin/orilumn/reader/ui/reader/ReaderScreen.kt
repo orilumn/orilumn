@@ -236,6 +236,8 @@ fun ReaderScreen(
     }
     val selectionHandleRadiusPx = SELECTION_HANDLE_RADIUS_DP * density
     val selectionHandleHitPx = SELECTION_HANDLE_HIT_RADIUS_DP * density
+    // 单指垂直亮度手势的左右边缘宽度（px）：固定 150dp，不再按 1/3 屏宽算。
+    val brightnessEdgePx = ReaderMath.BRIGHTNESS_EDGE_DP * density
 
     var openPos by remember { mutableStateOf<ReaderPos?>(null) }
     var openFailed by remember { mutableStateOf(false) }
@@ -3336,20 +3338,26 @@ fun ReaderScreen(
                                     val s = light
                                     if (!s.brightnessFollowSystem &&
                                         ReaderMath.verticalBrightnessAllowed(
-                                            ReaderMath.tapZone(downX, size.width.toFloat()),
+                                            ReaderMath.brightnessEdgeZone(
+                                                downX,
+                                                size.width.toFloat(),
+                                                brightnessEdgePx,
+                                            ),
                                             s.brightnessGestureLeft,
                                             s.brightnessGestureRight,
                                         )
                                     ) {
-                                        // 单指垂直亮度只在左/右 1/3 且对应开关打开；激活锁定向下报告累计竖向偏移。
+                                        // 单指垂直亮度只在左右边缘（150dp）且对应开关打开；激活锁定向下报告累计竖向偏移。
                                         brightnessActive = true
                                         brightnessBase = s.brightness
                                     }
                                 }
                                 // 下拉切换书签：亮度手势没接管、也没在选字、标题栏收着时才认。
-                                // 左右 1/3 若开着亮度手势，那一段仍归亮度——书签下拉只吃屏幕其余部分。
+                                // 且**只认屏幕中间 1/3 起手**：左右两侧不参与下拉（边缘归亮度、
+                                // 其余靠近两侧的位置也留给翻页手感），避免误触把页面拉下去。
                                 val maxPull = size.height * BookmarkPullMaxFraction
-                                if (!brightnessActive && !mouse && maxPull > 0f && !coverVisible &&
+                                val pullZoneOk = ReaderMath.tapZone(downX, size.width.toFloat()) == 0
+                                if (pullZoneOk && !brightnessActive && !mouse && maxPull > 0f && !coverVisible &&
                                     !currentBarsVisible && !selection.hasSelection && !ctl.isBusy()
                                 ) {
                                     if (dy > 0f) {
@@ -4037,7 +4045,14 @@ fun ReaderScreen(
                     // 跟手拖动（起手页边点 → 手指页坐标）：非 null 时折痕改由「纸边压在手指上」
                     // 反解，只对下一页生效、松手即清（见 FlipController.curlPull）。
                     pull = { ctl.curlPull.value },
-                    // 只有结算动画才做末段扶正（手指跟手时形状听手指的，见 curl/CurlGeometry.kt）。
+                    // 结算期间的阴影淡出系数：跟手那一帧起 1，末段才淡到 0；NaN = 点按/程序翻页，
+                    // 由几何按进度两头淡（见 FlipController.curlFade）。
+                    fade = { ctl.curlFade.value },
+                    // 结算期间的倾斜扶正系数：跟手那一帧起 1；翻页在起手那一小段行程里就淡到 0，
+                    // 回弹按剩余行程匀速退回，页角都不先向上冲（见 FlipController.curlLeanFade）。
+                    // 折痕已在自由边之外的回弹还会被钉住，只让倾斜塌平（见 curl/settleFoldProgress）。
+                    leanFade = { ctl.curlLeanFade.value },
+                    // 只有结算动画才做扶正（手指跟手时形状听手指的，见 curl/CurlGeometry.kt）。
                     pageWidthPx = pxWidth,
                     pageHeightPx = pxHeight,
                     active = { ctl.slideActive(slideEnabled) },

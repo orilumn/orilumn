@@ -139,7 +139,29 @@ object ReaderMath {
         return false
     }
 
-    /** 垂直亮度手势是否允许：仅屏幕左/右 1/3 且对应开关打开（单指），与旧逻辑一致。 */
+    /**
+     * 单指垂直亮度手势的左右边缘宽度（dp）：从屏幕侧边往内固定这么宽一条，
+     * 不再是「左右各 1/3」。三区点按（[tapZone]）仍是 1/3，两件事互不影响。
+     */
+    const val BRIGHTNESS_EDGE_DP = 150f
+
+    /**
+     * 亮度手势落点分区（-1 左边缘 / 0 中部 / 1 右边缘），[edgePx] 为边缘宽度（px，由 dp 换算）。
+     *
+     * 边缘最宽只到 1/3 屏宽：窄窗口 / 分屏下 150dp×2 可能超过屏宽，
+     * 那样全屏都成了亮度区、中部点按呼不出上下栏，故夹到 `width/3` 保住中区。
+     */
+    fun brightnessEdgeZone(x: Float, width: Float, edgePx: Float): Int {
+        if (width <= 0f) return 0
+        val edge = edgePx.coerceIn(0f, width / 3f)
+        return when {
+            x < edge -> -1
+            x > width - edge -> 1
+            else -> 0
+        }
+    }
+
+    /** 垂直亮度手势是否允许：仅屏幕左/右边缘且对应开关打开（单指）。 */
     fun verticalBrightnessAllowed(zone: Int, leftEnabled: Boolean, rightEnabled: Boolean): Boolean =
         (zone == -1 && leftEnabled) || (zone == 1 && rightEnabled)
 

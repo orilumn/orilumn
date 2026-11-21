@@ -90,9 +90,8 @@ class CurlGeometryTest {
      * 进度两端各 10% 里把倾斜量线性淡到 0，折角面积因此连续收到零。
      * 早先只在结算里淡，手指退回起手点时折角会在一帧里整块消失。
      *
-     * 末段另有更强的约束：折痕贴到书脊（进度 90% 之后就在退场窗口里）时，倾斜必须收到
-     * 竖直，否则折痕端点会从书脊穿出去（见 `creaseNeverCrossesTheSpine`），所以 95% 的
-     * 倾斜是 0 而不是淡出值。
+     * 进度两端各 10% 之外的倾斜原样保留：书脊不再收倾斜（端点可以卷过书脊一个筒径），
+     * 所以 85% 处仍是手指给的 0.5。
      */
     @Test
     fun tiltFadesAtBothEnds() {
@@ -100,7 +99,7 @@ class CurlGeometryTest {
         val h = 600f
         assertEquals("进度 5% 倾斜量淡到一半", 0.25f, curlShape(w, h, 0.05f, 1, 0.5f).lean, 1e-4f)
         assertEquals("中段（进度 50%）不受影响", 0.5f, curlShape(w, h, 0.5f, 1, 0.5f).lean, 1e-4f)
-        assertEquals("进度 85% 折痕已靠近书脊，倾斜随位置收小", 60f / 360f, curlShape(w, h, 0.85f, 1, 0.5f).lean, 1e-4f)
+        assertEquals("进度 85% 倾斜原样保留（书脊不再收倾斜）", 0.5f, curlShape(w, h, 0.85f, 1, 0.5f).lean, 1e-4f)
         assertEquals("收尾（进度 100%）折痕扶正", 0f, curlShape(w, h, 1f, 1, 0.5f).lean, 1e-4f)
         assertEquals("起手（进度 0%）折痕扶正", 0f, curlShape(w, h, 0f, -1, 0.5f).lean, 1e-4f)
         // 两端折角面积必须连续收到零：进度 0 / 1 的折痕竖直贴边，掀起的纸宽度为 0。
@@ -111,14 +110,13 @@ class CurlGeometryTest {
     }
 
     /**
-     * 折痕端点**永远不越过装订边**：左装书的折痕只能收在左缘（或贴着左缘退场一个筒径），
-     * 没掀起的那半页始终连在书脊上。
+     * 折痕端点可以卷过书脊（读者 2026-11-21：「上下书脊应该是相同的！你见过哪本书是
+     * 翻不到书脊的？」）：两个方向、两端一视同仁，唯一边界是纸卷退场的一个筒径。
      *
-     * 越过书脊时，整条上边（或下边）都被掀起、书脊中段却还连着，版面上就是把这页从书脊上
-     * 撕下来。倾斜越大越容易越界，所以斜拖 + 折痕靠近书脊的所有组合都要扫一遍。
+     * 这里扫「多个进度 × 多个倾斜」：任何组合都不许越过一个筒径，也不许把端点甩到页宽之外。
      */
     @Test
-    fun creaseNeverCrossesTheSpine() {
+    fun creaseEndsMayCrossTheSpineByOneRadius() {
         val w = 400f
         val h = 600f
         val exit = w * CURL3D_RADIUS_RATIO
@@ -126,21 +124,13 @@ class CurlGeometryTest {
             for (tilt in listOf(-1f, -0.9f, -0.5f, 0f, 0.5f, 0.9f, 1f)) {
                 val s = curlShape(w, h, p, 1, tilt)
                 assertTrue(
-                    "p=$p tilt=$tilt 折痕上端越过书脊：${s.topX}（折痕 ${s.foldX}，倾斜 ${s.lean}）",
-                    s.topX >= -exit,
+                    "p=$p tilt=$tilt 折痕上端越过书脊太多：${s.topX}（折痕 ${s.foldX}，倾斜 ${s.lean}）",
+                    s.topX >= -exit - 1e-3f,
                 )
                 assertTrue(
-                    "p=$p tilt=$tilt 折痕下端越过书脊：${s.bottomX}",
-                    s.bottomX >= -exit,
+                    "p=$p tilt=$tilt 折痕下端越过书脊太多：${s.bottomX}",
+                    s.bottomX >= -exit - 1e-3f,
                 )
-            }
-        }
-        // 折痕还在页内时，端点必须真的落在页内（退场窗口的 −R 余量不算）。
-        for (p in listOf(0.2f, 0.5f, 0.8f)) {
-            for (tilt in listOf(-1f, -0.5f, 0.5f, 1f)) {
-                val s = curlShape(w, h, p, 1, tilt)
-                assertTrue("p=$p tilt=$tilt 折痕上端出页：${s.topX}", s.topX >= -1e-3f)
-                assertTrue("p=$p tilt=$tilt 折痕下端出页：${s.bottomX}", s.bottomX >= -1e-3f)
             }
         }
     }
@@ -339,16 +329,302 @@ class CurlGeometryTest {
         }
     }
 
-    /** 折痕锚点下倾斜再大，折痕也不许从手指上挪开：能收的只有斜率（贴书脊时不越界）。 */
+    /**
+     * 读者口径（2026-11-21）：跟手帧里**左下角一律可以卷到纸卷右侧**，左右半边起手一样。
+     *
+     * 手指从下半屏往左上拖，纸角向上转（`lean < 0`），折痕下端因此越过左下角——它落在纸卷
+     * （筒）的右侧，屏幕上就是左下角被卷进去了。上限仍是卷筒退场的一个半径。
+     */
     @Test
-    fun creaseAnchorKeepsFingerWhileStayingOffTheSpine() {
+    fun followMayCurlTheBottomLeftCornerFromEitherHalf() {
+        val w = 1840f
+        val h = 2800f
+        val exit = w * CURL3D_RADIUS_RATIO
+        // 大行程：折痕被手指推到书脊附近，下端才有机会越过左下角（两半屏都要能过去）。
+        val fromLeft = CurlPull(from = Offset(600f, 2400f), to = Offset(200f, 600f), anchor = CurlAnchor.Crease)
+        val fromRight = CurlPull(from = Offset(w, 2400f), to = Offset(400f, 600f), anchor = CurlAnchor.Edge)
+        for ((where, pull) in listOf("左半屏" to fromLeft, "右半屏" to fromRight)) {
+            val s = curlFrame(w, h, 0.35f, 1, leanOf(pull, w, h), pull).shape
+            assertTrue(
+                "$where：折痕上端越界（最多让出一个筒径）：topX=${s.topX}",
+                s.topX >= -exit - 0.01f,
+            )
+            assertTrue(
+                "$where：左下角应当卷到纸卷右侧（折痕下端越过左下角）：bottomX=${s.bottomX}",
+                s.bottomX < -1f,
+            )
+            assertTrue(
+                "$where：越过量不超过卷筒退场的一个半径：bottomX=${s.bottomX}",
+                s.bottomX >= -exit - 0.01f,
+            )
+        }
+    }
+
+    /**
+     * 松手交接：跟手帧已经越过的左下角，结算第一帧不许被弹回去。
+     *
+     * 结算没有手指，几何由进度反解；若那边仍按「两端都夹」，越过的那一个筒径会在松手那一帧
+     * 被拽回页角——屏幕上就是「左下角刚卷过去又弹回来」。
+     */
+    @Test
+    fun releaseKeepsTheSweptBottomCorner() {
+        val w = 1840f
+        val h = 2800f
+        val pull = CurlPull(from = Offset(w, 2400f), to = Offset(400f, 600f), anchor = CurlAnchor.Edge)
+        val tilt = leanOf(pull, w, h)
+        val follow = curlFrame(w, h, 0.35f, 1, tilt, pull).shape
+        assertTrue("这一帧本来就没越过左下角，判据空了：bottomX=${follow.bottomX}", follow.bottomX < -1f)
+        val settle = curlFrame(w, h, anchoredProgress(pull, w, h, tilt, 0.35f), 1, tilt, null).shape
+        assertEquals("松手后下端弹回去了", follow.bottomX, settle.bottomX, 2f)
+        assertEquals("松手后上端对不上了", follow.topX, settle.topX, 2f)
+    }
+
+    /**
+     * 读者 2026-11-21 报的两条，必须在同一条判据上同时成立：
+     *
+     * 1. 松手后**不许先把折角扶平、再让折痕横扫**（读者原话「先是回平再播放，非常不协调」）：
+     *    倾斜在起手那一小段里就归零时，被掀起的那块面积会先缩一下再长回来——屏幕上就是折角
+     *    先原地落平，然后折痕才开始走。
+     * 2. 倾斜也不许留到末段才一口气掰平（更早那一条「页角先向上冲一下再退回」）。
+     *
+     * 判据取**被掀起的面积**（页矩形在被折的那一侧的面积占比）：翻页途中它只许增不许减，
+     * 相邻两帧之间不许出现可见的回缩。倾斜口径换成 [settleLeanFade] 的「整段行程平滑退回」。
+     */
+    @Test
+    fun releasedFlapKeepsGrowingInsteadOfFlatteningFirst() {
+        val w = 1840f
+        val h = 2800f
+        // 读者那一手：横向 200px / 竖向 120px 的松手交接，可见进度约 -0.072、倾斜约 -0.507。
+        val lean = -0.507f
+        val from = -0.072f
+
+        /** 折痕把页面切成两半，被掀起那一半（+法向侧）占整页的面积比例。 */
+        fun foldedArea(s: CurlShape): Float {
+            val ox = (s.topX + s.bottomX) * 0.5f
+            val oy = s.pageH * 0.5f
+            val dx = s.bottomX - s.topX
+            val dy = s.pageH
+            val len = kotlin.math.hypot(dx, dy).coerceAtLeast(1e-3f)
+            val nx = dy / len
+            val ny = -dx / len
+            // 页矩形按半平面裁剪（Sutherland–Hodgman），再取多边形面积。
+            val rect = listOf(
+                Offset(0f, 0f), Offset(s.pageW, 0f), Offset(s.pageW, s.pageH), Offset(0f, s.pageH),
+            )
+            fun side(p: Offset): Float = (p.x - ox) * nx + (p.y - oy) * ny
+            val out = ArrayList<Offset>(8)
+            for (i in rect.indices) {
+                val a = rect[i]
+                val b = rect[(i + 1) % rect.size]
+                val sa = side(a)
+                val sb = side(b)
+                if (sa >= 0f) out.add(a)
+                if ((sa > 0f && sb < 0f) || (sa < 0f && sb > 0f)) {
+                    val t = sa / (sa - sb)
+                    out.add(Offset(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t))
+                }
+            }
+            var twice = 0f
+            for (i in out.indices) {
+                val p = out[i]
+                val q = out[(i + 1) % out.size]
+                twice += p.x * q.y - q.x * p.y
+            }
+            return kotlin.math.abs(twice) * 0.5f / (s.pageW * s.pageH)
+        }
+
+        fun trace(leanFade: (Float) -> Float): List<Float> = (0..200).map { i ->
+            val v = from + (1f - from) * i / 200f
+            foldedArea(curlFrame(w, h, v, 1, lean, leanFade = leanFade(v)).shape)
+        }
+
+        // 旧口径（起手 15% 行程就扶平）确实会「先缩一下再长回来」——判据不能空。
+        val oldSpan = (1f - from) * 0.15f
+        val old = trace { v -> (1f - (v - from) / oldSpan).coerceIn(0f, 1f) }
+        // 「回缩」按**峰值回落**算：折角先缩一下再长回来，单帧差很小但累计回撤看得见。
+        var peak = old[0]
+        var worstOld = 0f
+        for (a in old) {
+            peak = maxOf(peak, a)
+            worstOld = maxOf(worstOld, peak - a)
+        }
+        assertTrue("旧口径应当复现『折角先缩一下』：峰值回撤 ${worstOld * 100}%", worstOld > 0.02f)
+
+        val fixed = trace { v -> settleLeanFade(from, 1f, v) }
+        assertEquals("松手第一帧必须与跟手帧同形", old.first(), fixed.first(), 1e-4f)
+        var fixedPeak = fixed[0]
+        for (i in fixed.indices) {
+            assertTrue(
+                "被掀起的面积回缩了（折角先扶平再走）：峰值 ${fixedPeak * 100}% → ${fixed[i] * 100}%（第 $i 帧）",
+                fixed[i] >= fixedPeak - 1e-4f,
+            )
+            fixedPeak = maxOf(fixedPeak, fixed[i])
+        }
+        assertEquals("翻完应当整页都在被折的那一侧", 1f, fixed.last(), 1e-3f)
+        // 末段倾斜已经很小：不许拖到最后才掰平（那就是「页角先上冲再退回」）。
+        assertTrue("末段倾斜还不收：${settleLeanFade(from, 1f, from + (1f - from) * 0.9f)}", settleLeanFade(from, 1f, from + (1f - from) * 0.9f) < 0.05f)
+    }
+
+    /**
+     * 倾斜扶正系数：松手那一帧 1，起手先**保持住**手指摆出的角度，再随行程平滑退回 0。
+     *
+     * 两端斜率都是 0（`1 − smoothstep`）：起手不出速度台阶，收尾也不忽然掰一下。与「按行程
+     * 线性淡」相比，前半段退得更慢（先保持、接着松手前的方向走），后半段退得更快（收得干净）。
+     */
+    @Test
+    fun settleLeanFadeHoldsTheReleasedTiltThenFlattensOverTheWholeTravel() {
+        val from = -0.2f
+        val to = 1f
+        assertEquals("松手那一帧必须从跟手形状接手", 1f, settleLeanFade(from, to, from), 1e-6f)
+        assertEquals("走完全程必须竖直", 0f, settleLeanFade(from, to, to), 1e-6f)
+        assertEquals("行程一半退回一半", 0.5f, settleLeanFade(from, to, from + (to - from) * 0.5f), 1e-5f)
+        // 起手 15% 行程里几乎原样保持（旧口径在这里已经归零——正是「先回平再播放」）。
+        assertTrue(
+            "起手就明显转过了：15% 行程处 ${settleLeanFade(from, to, from + (to - from) * 0.15f)}",
+            settleLeanFade(from, to, from + (to - from) * 0.15f) > 0.9f,
+        )
+        var prev = 1f
+        for (i in 0..100) {
+            val s = i / 100f
+            val f = settleLeanFade(from, to, from + (to - from) * s)
+            assertTrue("扶正系数不许回头：$prev → $f", f <= prev + 1e-6f)
+            if (s < 0.5f) {
+                assertTrue("前半段应当比线性退回更慢（先保持住）：s=$s f=$f", f >= 1f - s - 1e-6f)
+            } else if (s < 1f) {
+                assertTrue("后半段应当比线性退回更快（收干净）：s=$s f=$f", f <= 1f - s + 1e-6f)
+            }
+            prev = f
+        }
+    }
+
+    /** 回弹的倾斜系数：松手那一帧 1，之后跟着「还剩多少行程」线性退到 0。 */
+    @Test
+    fun settleLeanRewindKeepsTheTiltInStepWithTheRemainingTravel() {
+        val from = -0.6257217f
+        val to = 0f
+        assertEquals("松手那一帧必须从跟手形状接手", 1f, settleLeanRewind(from, to, from), 1e-6f)
+        assertEquals("落回起手页时折痕必须竖直", 0f, settleLeanRewind(from, to, to), 1e-6f)
+        assertEquals("走了一半行程就该退掉一半", 0.5f, settleLeanRewind(from, to, from / 2f), 1e-6f)
+        var prev = 1f
+        for (i in 0..100) {
+            val f = settleLeanRewind(from, to, from + (to - from) * i / 100f)
+            assertTrue("扶正系数不许回头：$prev → $f", f <= prev + 1e-6f)
+            prev = f
+        }
+    }
+
+    /**
+     * 读者 2026-11-21 真机复现的那一手：左滑起手、手指向上带一点、松手**弹回**（不是翻页）。
+     *
+     * 真机落盘：`from = −0.626`、`lean = −2.5`（竖向行程顶到上限）、`commit = false`。
+     * 折痕中点被推到自由边之外，屏幕上那块折角全靠倾斜撑着。旧口径「折痕一边往回扫、倾斜
+     * 一边把纸角放大着抬上去」实测露出页面积先涨 5 帧再跌 9 帧——读者原话「折角/纸边在颤」。
+     *
+     * 生产口径（[settleFoldProgress] + [settleLeanRewind]）：折痕中点钉在松手位置不动，倾斜
+     * 匀速塌回平面。判据：中点全程不变，折痕两端各自只朝中点走（整根线单调转回竖直，折角
+     * 那块楔形单调收窄），末帧回到渲染层的「一页都没掀」闸口。
+     */
+    @Test
+    fun rollbackCornerDoesNotRushUpBeforeItLands() {
+        val w = 1840f
+        val h = 2800f
+        val lean = -2.5f
+        val from = -0.6257217f
+        val target = 0f
+        // 生产口径：屏幕折痕走 settleFoldProgress，倾斜走 settleLeanRewind（与 FlipController.settle 一致）。
+        val frames = (0..200).map { i ->
+            val v = from + (target - from) * i / 200f
+            val fold = settleFoldProgress(from, target, v)
+            val leanFade = settleLeanRewind(from, target, v)
+            curlFrame(w, h, fold, 1, tilt = lean, leanFade = leanFade).shape
+        }
+
+        // 松手第一帧必须与跟手帧同形（钉住进度 + 倾斜系数 1 = 原样接手）。
+        val follow = curlFrame(w, h, from, 1, tilt = lean, fade = 1f, leanFade = 1f).shape
+        assertEquals("松手第一帧折痕不许动", follow.foldX, frames.first().foldX, 1e-3f)
+        assertEquals("松手第一帧上端不许动", follow.topX, frames.first().topX, 1e-3f)
+        assertEquals("松手第一帧下端不许动", follow.bottomX, frames.first().bottomX, 1e-3f)
+        // 折痕中点钉住 + 两端单调转回竖直 ⇒ 折角楔形只收不放（旧口径「扶正 + 回扫」在这里来回摆）。
+        for (i in 1 until frames.size) {
+            val prev = frames[i - 1]
+            val cur = frames[i]
+            assertEquals("第 $i 帧折痕中点动了（钉住口径失效）", frames.first().foldX, cur.foldX, 1e-3f)
+            assertTrue(
+                "折痕上端回头了（折角又外翻）：${prev.topX} → ${cur.topX}（第 $i 帧）",
+                cur.topX <= prev.topX + 1e-2f,
+            )
+            assertTrue(
+                "折痕下端回头了（折角又外翻）：${prev.bottomX} → ${cur.bottomX}（第 $i 帧）",
+                cur.bottomX >= prev.bottomX - 1e-2f,
+            )
+        }
+        // 末帧倾斜归零、折痕在自由边之外 ⇒ 渲染层判「一页都没掀」（收尾把进度拨回 0 才看不见）。
+        val last = frames.last()
+        assertEquals("落回起手页时倾斜必须归零", 0f, last.lean, 1e-4f)
+        assertTrue("折痕应当留在自由边之外：foldX=${last.foldX}", last.foldX > w)
+        assertTrue("末帧应当已是平页（noLiftYet）", last.noLiftYet())
+    }
+
+    /**
+     * 钉住折痕的口径：只有「回弹 + 折痕已在自由边之外」钉住，其余照旧跟着动画走。
+     *
+     * 翻页、以及「翻了一小半又反悔」（`from >= 0`）时折角是一块真的页角，必须跟着折痕扫回来；
+     * 钉住只服务于「折痕中点被推到页外、折角全靠倾斜撑着」那一段。
+     */
+    @Test
+    fun settleFoldProgressOnlyPinsTheFoldWhenItIsAlreadyOutsideTheFreeEdge() {
+        // 读者那一手：回弹、折痕在页外 ⇒ 整段钉在松手位置。
+        for (i in 0..100) {
+            val v = -0.6257217f * (1f - i / 100f)
+            assertEquals("回弹时折痕不许动（第 $i 帧）", -0.6257217f, settleFoldProgress(-0.6257217f, 0f, v), 1e-6f)
+        }
+        // 松手第一帧：无论哪条路径都必须等于起点（形状从跟手帧原样接手）。
+        assertEquals(-0.2f, settleFoldProgress(-0.2f, 1f, -0.2f), 1e-6f)
+        assertEquals(0.3f, settleFoldProgress(0.3f, 0f, 0.3f), 1e-6f)
+        // 折痕还在页内的回弹：跟着动画扫回。
+        for (i in 0..100) {
+            val v = 0.3f * (1f - i / 100f)
+            assertEquals("页内折痕必须跟着回扫（第 $i 帧）", v, settleFoldProgress(0.3f, 0f, v), 1e-6f)
+        }
+        // 翻页（target > from）：照旧跟着动画走。
+        for (i in 0..100) {
+            val v = -0.2f + 1.2f * i / 100f
+            assertEquals("翻页不该钉住（第 $i 帧）", v, settleFoldProgress(-0.2f, 1f, v), 1e-6f)
+        }
+    }
+
+    /**
+     * 自由边那两个角（右上 / 右下）没有书脊规则：折痕端点可以滑出右缘，把角卷过纸卷。
+     *
+     * 右缘这一侧是纸的自由边，唯一边界是 [CURL_ENDPOINT_BOUND] 的 NaN 兜底；装订边那一侧
+     * 最多越过书脊一个筒径（纸卷退场余量）。
+     */
+    @Test
+    fun freeEdgeCornersMaySlidePastTheRightEdge() {
+        val w = 1840f
+        val h = 2800f
+        val exit = w * CURL3D_RADIUS_RATIO
+        // 折痕仍在页中、倾斜不大：自由边上端滑出右缘，书脊那一端还留在页内。
+        val upFromRight = CurlPull(from = Offset(w, 1200f), to = Offset(w - 410f, 960f), anchor = CurlAnchor.Edge)
+        val s = curlFrame(w, h, 0.35f, 1, leanOf(upFromRight, w, h), upFromRight).shape
+        assertTrue("右上角应当能被卷过去（折痕上端滑出右缘）：topX=${s.topX}", s.topX > w)
+        assertTrue("自由边也不许无限滑出去：topX=${s.topX}", s.topX <= w * CURL_ENDPOINT_BOUND)
+        assertTrue("书脊那一端最多让出一个筒径：bottomX=${s.bottomX}", s.bottomX >= -exit - 1e-3f)
+    }
+
+    /**
+     * 向下拖：**左上角同样可以卷过纸卷**（读者 2026-11-21「上下书脊应该是相同的」），
+     * 与左下角同一条边界——最多让出一个筒径。
+     */
+    @Test
+    fun followMayCurlTheTopLeftCorner() {
         val w = 400f
         val h = 600f
-        val pull = CurlPull(from = Offset(300f, 560f), to = Offset(30f, 560f), anchor = CurlAnchor.Crease)
-        val s = curlShape(w, h, 0.02f, 1, tilt = 0.9f, pull = pull)
-        assertTrue("折痕端点跑出书脊：topX=${s.topX}", s.topX >= -0.01f)
-        val atFinger = s.topX + (s.bottomX - s.topX) * (560f / h)
-        assertEquals("折痕仍应穿过手指", 30f, atFinger, 0.5f)
+        val exit = w * CURL3D_RADIUS_RATIO
+        val pull = CurlPull(from = Offset(300f, 150f), to = Offset(100f, 500f), anchor = CurlAnchor.Crease)
+        val s = curlFrame(w, h, 0.35f, 1, leanOf(pull, w, h), pull).shape
+        assertTrue("左上角应当能卷过纸卷：topX=${s.topX}", s.topX < -1f)
+        assertTrue("越过量不超过退场的一个筒径：topX=${s.topX}", s.topX >= -exit - 0.01f)
     }
 
     /**
@@ -443,36 +719,41 @@ class CurlGeometryTest {
         }
     }
 
-    /** 越界与极端倾斜：不许出 NaN、不许把折痕摆到页边之外（会被画成一块凭空出现的纸）。 */
+    /** 越界与极端倾斜：不许出 NaN、折痕中点只受 [CURL_FOLD_BOUND] 兜底、端点最多越过书脊一个筒径。 */
     @Test
     fun anchorIsClampedAndFinite() {
         val w = 400f
         val h = 600f
+        val foldBound = w * CURL_FOLD_BOUND
         val exit = w * CURL3D_RADIUS_RATIO
         for (tilt in listOf(-1f, -0.5f, 0f, 0.5f, 1f)) {
             for (fx in listOf(-300f, -10f, 0f, 120f, 399f, 400f, 460f)) {
                 val s = curlShape(w, h, 0.3f, 1, tilt = tilt, pull = dragTo(fx, 300f))
                 assertTrue("tilt=$tilt fx=$fx foldX 非法", s.foldX.isFinite())
                 assertTrue("tilt=$tilt fx=$fx 端点非法", s.topX.isFinite() && s.bottomX.isFinite())
-                assertTrue("tilt=$tilt fx=$fx 折痕越界 ${s.foldX}", s.foldX in -exit - 0.01f..w + 0.01f)
+                assertTrue("tilt=$tilt fx=$fx 折痕越界 ${s.foldX}", s.foldX in -foldBound - 0.01f..foldBound + 0.01f)
+                assertTrue("tilt=$tilt fx=$fx 折痕上端越过书脊太多 ${s.topX}", s.topX >= -exit - 0.01f)
+                assertTrue("tilt=$tilt fx=$fx 折痕下端越过书脊太多 ${s.bottomX}", s.bottomX >= -exit - 0.01f)
             }
         }
     }
 
-    /** 折痕锚点同样不许出 NaN / 不许把折痕摆到页外（下边界由纸卷退场的余量兜住）。 */
+    /** 折痕锚点同样不许出 NaN / 端点只受 NaN 兜底（书脊不夹）。 */
     @Test
     fun creaseAnchorIsClampedAndFinite() {
         val w = 400f
         val h = 600f
-        val exit = w * CURL3D_RADIUS_RATIO
+        val foldBound = w * CURL_FOLD_BOUND
+        val endpointBound = w * CURL_ENDPOINT_BOUND
         for (tilt in listOf(-1f, -0.5f, 0f, 0.5f, 1f)) {
             for (fx in listOf(0f, 10f, 120f, 300f, 399f, 400f)) {
                 val pull = CurlPull(from = Offset(0f, 20f), to = Offset(fx, 590f), anchor = CurlAnchor.Crease)
                 val s = curlShape(w, h, 0.3f, 1, tilt = tilt, pull = pull)
                 assertTrue("tilt=$tilt fx=$fx foldX 非法", s.foldX.isFinite())
                 assertTrue("tilt=$tilt fx=$fx 端点非法", s.topX.isFinite() && s.bottomX.isFinite())
-                assertTrue("tilt=$tilt fx=$fx 折痕越界 ${s.foldX}", s.foldX in -exit - 0.01f..w + 0.01f)
-                assertTrue("tilt=$tilt fx=$fx 折痕越过书脊 ${s.topX}", s.topX >= -0.01f)
+                assertTrue("tilt=$tilt fx=$fx 折痕越界 ${s.foldX}", s.foldX in -foldBound - 0.01f..foldBound + 0.01f)
+                assertTrue("tilt=$tilt fx=$fx 端点越界 ${s.topX}", s.topX in -endpointBound..endpointBound)
+                assertTrue("tilt=$tilt fx=$fx 端点越界 ${s.bottomX}", s.bottomX in -endpointBound..endpointBound)
             }
         }
     }
@@ -488,7 +769,7 @@ class CurlGeometryTest {
         val w = 400f
         val h = 600f
         // 只用**折痕端点没被书脊挡住**的拖法：再斜的拖法会把折痕顶到书脊上，
-        // 纸边就必然离开手指（物理上限，见 `anchorPinsCreaseToSpineWhenDragWouldTearPage`）。
+        // 纸边就必然离开手指（物理上限，见 `steepDragMayTakeTheCreasePastTheSpine`）。
         for ((downY, fx, fy) in listOf(
             Triple(300f, 150f, 300f),   // 水平
             Triple(300f, 150f, 220f),   // 左上斜拖
@@ -506,25 +787,20 @@ class CurlGeometryTest {
     }
 
     /**
-     * 再斜的拖法：折痕本该越过书脊时，端点停在页角，折痕自己收直一点。
-     *
-     * 读者手上那张纸是**连在书脊上**的，折痕不可能从书脊穿出去——这是「纸边严格跟手」
-     * 的物理上限：越靠近书脊，允许的倾斜越小，到书脊正好竖直。代价是这一步里纸边不再
-     * 严丝合缝压在手指上（拖得越狠差得越多），换来的是不会把书页「从书脊上撕下来」
-     * （折痕从书脊中段穿出、整条上边被掀起）。
+     * 再斜的拖法也一样：折痕可以卷过书脊（读者 2026-11-21「上下书脊应该是相同的」），
+     * 倾斜按手指给的走，不再为了「不撕开书脊」收小；唯一边界是退场的一个筒径。
      */
     @Test
-    fun anchorPinsCreaseToSpineWhenDragWouldTearPage() {
+    fun steepDragMayTakeTheCreasePastTheSpine() {
         val w = 400f
         val h = 600f
-        // 同样的水平位移，向下斜拖会把上端推到页外（未约束时 topX < 0）。
+        val exit = w * CURL3D_RADIUS_RATIO
         val pull = CurlPull(from = Offset(w, 150f), to = Offset(150f, 380f))
-        val shape = curlShape(w, h, 1f - 150f / w, 1, tilt = leanOf(pull, w, h), pull = pull)
-        assertTrue("折痕上端应当被书脊挡住：${shape.topX}", shape.topX >= -1e-3f)
-        assertTrue("约束生效时折痕上端应当就停在页角：${shape.topX}", shape.topX <= w * 0.02f)
-        assertTrue("折痕下端仍该在页内：${shape.bottomX}", shape.bottomX >= 0f)
-        assertTrue("折痕位置仍在页内：${shape.foldX}", shape.foldX in 0f..w)
-        assertTrue("被约束后倾斜量应当比手势要求的更小", kotlin.math.abs(shape.lean) < kotlin.math.abs(leanOf(pull, w, h)))
+        val wanted = leanOf(pull, w, h)
+        val shape = curlShape(w, h, 1f - 150f / w, 1, tilt = wanted, pull = pull)
+        assertEquals("倾斜应当原样跟手（不再为书脊收小）", wanted, shape.lean, 1e-6f)
+        assertTrue("折痕上端越界：${shape.topX}", shape.topX >= -exit - 1e-3f)
+        assertTrue("折痕下端越界：${shape.bottomX}", shape.bottomX >= -exit - 1e-3f)
     }
 
     /**
@@ -537,13 +813,22 @@ class CurlGeometryTest {
      *
      * 1. 指尖正好回到起手点：折痕竖直贴边，一页空纸都没掀起来；
      * 2. 相邻一像素之间折痕端点不许跳（读者看到的是「整块消失」，不是角度变化）；
-     * 3. 起手点附近掀起的纸只许跟着横向行程收小（不允许斜切出一大块三角）。
+     * 3. 起手点附近掀起的纸只许跟着**拖动行程**收小（不允许斜切出一大块三角）。
+     *
+     * 注意「回到起手点」是**两个方向都归零**：竖直还差着几十像素时手指并不在起手点上，
+     * 折痕本来就该让开那几十像素（倾斜上限按竖向行程算，见 [verticalLeanCap]）。
      */
     @Test
     fun returningToTheStartCollapsesTheFlapWithoutAJump() {
         val w = 1840f
         val h = 2800f
         val grabY = 1200f
+        // 指尖正好落回起手点：折痕竖直贴边，一页空纸都没掀起来。
+        val back = CurlPull(from = Offset(w, grabY), to = Offset(w, grabY))
+        val backShape = curlShape(w, h, 0f, 1, tilt = leanOf(back, w, h), pull = back)
+        assertEquals("指尖回到起手点：折痕贴边", w, backShape.foldX, 0.01f)
+        assertEquals("指尖回到起手点：端点也贴边", w, backShape.topX, 0.01f)
+        assertEquals("指尖回到起手点：端点也贴边", w, backShape.bottomX, 0.01f)
         // 纵向抖动就是「手指没那么直」的那几像素——比率爆掉靠它，所以三种都扫。
         for (dy in listOf(-40f, 10f, 40f)) {
             var prev: CurlShape? = null
@@ -557,7 +842,7 @@ class CurlGeometryTest {
                     tilt = leanOf(pull, w, h),
                     pull = pull,
                 )
-                if (dx == 0f) {
+                if (dx == 0f && dy == 0f) {
                     assertEquals("指尖回到起手点：折痕贴边 dy=$dy", w, s.foldX, 0.01f)
                     assertEquals("指尖回到起手点：端点也贴边 dy=$dy", w, s.topX, 0.01f)
                     assertEquals("指尖回到起手点：端点也贴边 dy=$dy", w, s.bottomX, 0.01f)
@@ -566,8 +851,8 @@ class CurlGeometryTest {
                     // 掀起来的纸离自由边最远多远：折痕两端与折痕中点都算。
                     val reach = w - minOf(s.topX, s.bottomX, s.foldX)
                     assertTrue(
-                        "dx=$dx dy=$dy 起手点附近掀起的纸只许跟横向行程成正比，实际 $reach",
-                        reach <= 7f * kotlin.math.abs(dx) + 60f,
+                        "dx=$dx dy=$dy 起手点附近掀起的纸只许跟拖动行程成正比，实际 $reach",
+                        reach <= 7f * kotlin.math.hypot(dx, dy) + 60f,
                     )
                 }
                 if (prev != null) {
@@ -629,27 +914,102 @@ class CurlGeometryTest {
     }
 
     /**
-     * 倾斜只许跟着**横向行程**长大（见 `travelLeanCap`）：纵向抖得再狠，横向没走两步，
-     * 折痕也得是直的；横向行程够长时斜率照旧说了算（斜拖的垂直承诺不能打折）。
+     * 倾斜只许跟着**竖向行程**长大（见 [verticalLeanCap]）：手指几乎没离开起手点时折痕得是
+     * 直的，竖向行程越大倾斜才越大；斜率照旧说了算（斜拖的垂直承诺不能打折）。
+     *
+     * 上限按竖向行程算、不按横向分量：起手点在页角上时，斜着拖出去那一段的横向分量本来就
+     * 很小，按横向算会把折痕压成竖直——折痕与自由边的交点于是扫过整个页高，折角看着就是
+     * 「忽然向上跳一下」（读者 2026-11-21）。
      */
     @Test
-    fun leanIsCappedByTheHorizontalTravelNearTheStart() {
+    fun leanIsCappedByTheDragDistanceNearTheStart() {
         val w = 1840f
         val h = 2800f
-        // 几乎竖直的拖动：斜率早被夹到上限（2w/h），只靠行程上限才压得住倾斜。
-        // 上限按 3·|dx|/tiltW 算（tiltW = 0.9 页宽）：2 / 10 / 30 / 120 px ⇒ 0.4% / 1.8% / 5.4% / 21.7%。
+        // 几乎竖直的拖动（横向只 2px）：斜率早被夹到上限，只靠竖向行程上限才压得住倾斜。
+        // 上限 = 2.5·(竖向行程/(0.115·tiltW))²（tiltW = 0.9 页宽）：4 / 40 / 400 px
+        // ⇒ 0.11% / 11% / 硬顶 2.5。
         var last = 0f
-        for ((dx, ceil) in listOf(2f to 0.006f, 10f to 0.025f, 30f to 0.07f, 120f to 0.25f)) {
-            val pull = CurlPull(from = Offset(w, 1200f), to = Offset(w - dx, 1240f))
+        for ((dy, ceil) in listOf(4f to 0.01f, 40f to 0.12f, 400f to CURL_LEAN_MAX)) {
+            val pull = CurlPull(from = Offset(w, 1200f), to = Offset(w - 2f, 1200f - dy))
             val lean = kotlin.math.abs(leanOf(pull, w, h))
-            assertTrue("横向行程 $dx：倾斜 $lean 该被行程上限压到 $ceil 以内", lean <= ceil)
-            assertTrue("横向行程越长，倾斜应当越大：$last → $lean", lean > last)
+            assertTrue("行程 $dy：倾斜 $lean 该被竖向行程上限压到 $ceil 以内", lean <= ceil)
+            assertTrue("行程越长，倾斜应当越大：$last → $lean", lean > last)
             last = lean
         }
+        // 手指没离开起手点：方向退化，折痕竖直。
+        val still = CurlPull(from = Offset(w, 1200f), to = Offset(w, 1200f))
+        assertEquals("手指没离开起手点，折痕必须竖直", 0f, leanOf(still, w, h), 0f)
+        // 从页角斜拖出去：横向只有几十像素，倾斜也必须留着（不许被横向分量压成竖直）。
+        val corner = CurlPull(from = Offset(w, h - 10f), to = Offset(w - 80f, h - 430f))
+        assertTrue(
+            "从页角斜拖出去：倾斜 ${leanOf(corner, w, h)} 不许被压成竖直",
+            kotlin.math.abs(leanOf(corner, w, h)) > 0.5f,
+        )
         // 真正的斜拖（横向 400px）远没到上限：折痕仍严格垂直于手指轨迹。
         val diagonal = CurlPull(from = Offset(w, 1400f), to = Offset(w - 400f, 1100f))
         val want = 0.75f * h / (2f * w * CURL_TILT_WIDTH)
-        assertEquals("斜拖的倾斜不该被行程上限削弱", -want, leanOf(diagonal, w, h), 1e-3f)
+        assertEquals("斜拖的倾斜不该被竖向行程上限削弱", -want, leanOf(diagonal, w, h), 1e-3f)
+    }
+
+    /**
+     * 读者 2026-11-21 报的那一条：从右下角起手、斜着拖出一小块折角之后，手指左右移动，
+     * 页角**忽然向上跳一下**。
+     *
+     * 判据取屏幕上看得见的那条边界：折痕与自由边（`x = 页宽`）的交点 `apex`。竖直行程
+     * 已有两三百像素时，横向再扫过几十像素，这条交点只许跟着手指微动、停在页角附近
+     * （页底那一段），不许扫过整个页高（早先它从半页高处一路爬到页顶，折角随即整块消失）。
+     */
+    @Test
+    fun cornerFlapDoesNotClimbWhenTheFingerSlidesSideways() {
+        val w = 1840f
+        val h = 2800f
+        val tiltW = w * CURL_TILT_WIDTH
+        fun apex(s: CurlShape): Float {
+            val d = s.lean * tiltW
+            assertTrue("跟手时折痕不许塌成竖直（lean=${s.lean}）", kotlin.math.abs(d) > 1f)
+            return h / 2f * (1f + (w - s.foldX) / d)
+        }
+        val from = Offset(w, h - 10f)
+        for (dy in listOf(-190f, -420f)) {
+            var prev: CurlShape? = null
+            var prevApex = 0f
+            var x = w - 200f
+            while (x <= w + 10f) {
+                val pull = CurlPull(from = from, to = Offset(x, h - 10f + dy))
+                val s = curlFrame(w, h, 0.35f, 1, leanOf(pull, w, h), pull).shape
+                val a = apex(s)
+                assertTrue(
+                    "dy=$dy x=$x：折角上沿跑到 y=$a（只许停在页角附近）",
+                    a >= h * 0.70f && a <= h * 0.95f,
+                )
+                val p = prev
+                if (p != null) {
+                    assertTrue(
+                        "dy=$dy x=$x：折角上沿跳了 $prevApex → $a",
+                        kotlin.math.abs(a - prevApex) <= 60f,
+                    )
+                    // 端点只在**页内可见**时才谈「跳没跳」：页角折起来时折痕上端远在页外
+                    // （页内只看到它裁进页面的那一段），那条可见边界由 apex 与下端管着。
+                    if (p.topX in 0f..w && s.topX in 0f..w) {
+                        assertTrue(
+                            "dy=$dy x=$x：折痕上端跳了 ${p.topX} → ${s.topX}",
+                            kotlin.math.abs(s.topX - p.topX) <= 60f,
+                        )
+                    }
+                    if (p.bottomX in 0f..w && s.bottomX in 0f..w) {
+                        assertTrue(
+                            "dy=$dy x=$x：折痕下端跳了 ${p.bottomX} → ${s.bottomX}",
+                            // 折痕越来越斜时下端会沿着页底快速滑出去（页角在「滚」），
+                            // 只要连续、没有一帧整块翻面即可；可见的跳动由 apex 管着。
+                            kotlin.math.abs(s.bottomX - p.bottomX) <= 100f,
+                        )
+                    }
+                }
+                prev = s
+                prevApex = a
+                x += 5f
+            }
+        }
     }
 
     /**
@@ -708,8 +1068,9 @@ class CurlGeometryTest {
      * 读者原话：「屏幕左侧左滑，手指滑回到右侧，这时上下移动，手势还是反向的」。起手在左半边
      * ⇒ 折痕锚点，方向向量的起点就是按下点；手指从左边扫回右边时横向分量换号，早先
      * `u_y/u_x` 也跟着换号，整根折痕当场镜像。现在符号只取 `u_y`，横向分量只作大小的分母，
-     * 所以按下点两侧一路扫过去，同一个竖向动作只有一个转向；按下点正上方横向行程为 0，
-     * 折痕竖直、不掉头。
+     * 所以按下点两侧一路扫过去，同一个竖向动作只有一个转向；按下点正上方横向分量虽然为 0，
+     * 竖直行程还在，折痕照旧朝手指动的方向转，且与两侧连续（不许塌回竖直再弹出去）——
+     * 倾斜上限按竖向行程算（见 [verticalLeanCap]）。
      */
     @Test
     fun crossingBackOverThePressPointDoesNotMirrorTheTilt() {
@@ -743,7 +1104,15 @@ class CurlGeometryTest {
             to = Offset(press, mid - 240f),
             anchor = CurlAnchor.Crease,
         )
-        assertEquals("按下点正上方 ⇒ 竖直折痕", 0f, leanOf(at, w, h), 1e-3f)
+        // 正上方：横向分量为 0，竖直行程 240px 还在 ⇒ 纸角仍朝上，且与两侧连续。
+        assertTrue("按下点正上方：纸角仍向上（lean=${leanOf(at, w, h)}）", leanOf(at, w, h) < -0.1f)
+        for (dx in listOf(-10f, 10f)) {
+            val side = leanOf(at.copy(to = Offset(press + dx, mid - 240f)), w, h)
+            assertEquals("跨过按下点倾斜不许跳（dx=$dx）", side, leanOf(at, w, h), 1e-2f)
+        }
+        // 竖向不动（横向 240px）才是竖直折痕。
+        val sideways = at.copy(to = Offset(press - 240f, mid))
+        assertEquals("横向拖动 ⇒ 竖直折痕", 0f, leanOf(sideways, w, h), 1e-3f)
     }
 
     /**

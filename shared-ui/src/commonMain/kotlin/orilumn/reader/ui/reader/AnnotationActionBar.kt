@@ -4,7 +4,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -38,6 +41,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import orilumn.reader.data.annotation.AnnotationKind
 import orilumn.reader.data.annotation.AnnotationLineStyle
+import orilumn.reader.data.correction.CorrectionCandidate
 import orilumn.reader.data.correction.CorrectionRules
 import orilumn.reader.engine.skia.ANNOTATION_DASH_OFF_RATIO
 import orilumn.reader.engine.skia.ANNOTATION_DASH_ON_RATIO
@@ -86,9 +90,10 @@ internal fun AnnotationActionBar(
      * 纠错候选（修订模式，见 [CorrectionRules]）：词典命中**当前选区整段**时非空。
      *
      * 摆在「高亮 / 划线 / 修订」右边那片空白里（修订模式下色槽整排隐藏，那里本来就空着），
-     * 绿色文字，**点一下就提交修订**，不用再点「确定」。
+     * 绿色文字，**点一下就提交修订**，不用再点「确定」。长内容只显示首尾引号（`“…”`），
+     * 提交的仍是完整文字（见 [CorrectionCandidate]）。
      */
-    corrections: List<String> = emptyList(),
+    corrections: List<CorrectionCandidate> = emptyList(),
     onPickCorrection: (String) -> Unit = {},
     /**
      * 正文修改模式（方案 §8.8 / D-36）：**和高亮、划线共用同一根操作栏**，不另起一套。
@@ -266,15 +271,17 @@ private fun BarLayout(
             }
         },
     ) { measurables, constraints ->
-        fun part(id: String) = measurables.firstOrNull { it.layoutId == id }?.measure(Constraints())
+        // 候选词按可用宽度测量：三条候选（成对符号规则）在窄屏上换行，不会有一条被挤到屏幕外。
+        fun part(id: String, maxWidth: Int = Constraints.Infinity) =
+            measurables.firstOrNull { it.layoutId == id }?.measure(Constraints(maxWidth = maxWidth))
+        val maxW = constraints.maxWidth
         val leadP = part(PART_LEAD)
         val colorsP = part(PART_COLORS)
         val stylesP = part(PART_STYLES)
-        val corrP = part(PART_CORRECTIONS)
+        val corrP = part(PART_CORRECTIONS, maxWidth = maxW)
         val trailP = part(PART_TRAIL)
         val gap = BAR_GAP.roundToPx()
         val rowGap = BAR_ROW_GAP.roundToPx()
-        val maxW = constraints.maxWidth
 
         fun w(p: androidx.compose.ui.layout.Placeable?) = p?.width ?: 0
         fun h(p: androidx.compose.ui.layout.Placeable?) = p?.height ?: 0
@@ -473,15 +480,19 @@ private val MENU_LABEL_FONT = 14.sp
  * 同一支绿，读者一眼看出这是「改后」的样子。
  *
  * 候选可能是一整段带引号的文字（成对符号规则），所以给一个宽度上限、超出用省略号收住：
- * 点下去提交的仍是完整候选，显示只取前一段，免得把整根操作栏撑出去。
+ * 点下去提交的仍是完整候选，显示只取前一段，免得把整根操作栏撑出去。三条候选（`“…”` / `‘…’` /
+ * 去掉两边）在窄屏上放不进一行时**换行**，不会有一条被挤到屏幕外点不到。
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun CorrectionRow(words: List<String>, onPick: (String) -> Unit) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        words.forEachIndexed { index, word ->
-            if (index > 0) Spacer(Modifier.width(2.dp))
+private fun CorrectionRow(words: List<CorrectionCandidate>, onPick: (String) -> Unit) {
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        words.forEach { word ->
             Text(
-                text = word,
+                text = word.label,
                 color = Color(REVIEW_INSERTED_ARGB),
                 fontSize = MENU_LABEL_FONT,
                 fontWeight = FontWeight.Medium,
@@ -489,7 +500,7 @@ private fun CorrectionRow(words: List<String>, onPick: (String) -> Unit) {
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier
                     .widthIn(max = CORRECTION_LABEL_MAX_WIDTH)
-                    .clickable { onPick(word) }
+                    .clickable { onPick(word.value) }
                     .padding(horizontal = 9.dp, vertical = 7.dp),
             )
         }

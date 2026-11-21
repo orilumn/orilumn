@@ -10,44 +10,77 @@ import org.junit.Test
  */
 class CorrectionRulesTest {
 
+    /** 候选的提交文字（点下去写进正文的那份）。 */
+    private fun values(selection: String, extraRules: List<String> = emptyList()): List<String> =
+        CorrectionRules.candidatesFor(selection, extraRules).map { it.value }
+
+    /** 候选的显示形态（操作栏里看到的那份）。 */
+    private fun labels(selection: String, extraRules: List<String> = emptyList()): List<String> =
+        CorrectionRules.candidatesFor(selection, extraRules).map { it.label }
+
     @Test
     fun `bundled dictionary loads from resources`() {
         // 词表是随包资源（不在代码里硬编码）：加载不到时这里会是空表。
-        assertEquals(listOf("地", "得"), CorrectionRules.candidatesFor("的"))
-        assertEquals(listOf("再"), CorrectionRules.candidatesFor("在"))
-        assertEquals(listOf("其他"), CorrectionRules.candidatesFor("其它"))
+        assertEquals(listOf("地", "得"), values("的"))
+        assertEquals(listOf("再"), values("在"))
+        assertEquals(listOf("其他"), values("其它"))
     }
 
     @Test
     fun `group is symmetric but directional rule is not`() {
-        assertEquals(listOf("的", "得"), CorrectionRules.candidatesFor("地"))
+        assertEquals(listOf("的", "得"), values("地"))
         // 定向规则只认错写那一侧：正确写法不该反过来推荐错写。
-        assertTrue(CorrectionRules.candidatesFor("其他").isEmpty())
-        assertTrue(CorrectionRules.candidatesFor("按捺").isEmpty())
-        assertEquals(listOf("按捺"), CorrectionRules.candidatesFor("按耐"))
+        assertTrue(values("其他").isEmpty())
+        assertTrue(values("按捺").isEmpty())
+        assertEquals(listOf("按捺"), values("按耐"))
     }
 
     @Test
-    fun `quote rules rewrite both sides at once`() {
-        assertEquals(listOf("“你好”"), CorrectionRules.candidatesFor("「你好」"))
-        assertEquals(listOf("‘你好’"), CorrectionRules.candidatesFor("『你好』"))
-        assertEquals(listOf("“你好”"), CorrectionRules.candidatesFor("\"你好\""))
+    fun `bracket gives quote variants and bare text`() {
+        val expected = listOf("“你好”", "‘你好’", "你好")
+        assertEquals(expected, values("「你好」"))
+        assertEquals(expected, values("『你好』"))
+        assertEquals(expected, values("【你好】"))
+        assertEquals(expected, values("\"你好\""))
+        // 短内容原样显示：三条候选一眼能看出换成了哪种引号。
+        assertEquals(expected, labels("「你好」"))
+    }
+
+    @Test
+    fun `bracket collapses long inner content in label only`() {
+        val selection = "「这是一段很长的内容」"
+        val candidates = CorrectionRules.candidatesFor(selection)
+        assertEquals(listOf("“这是一段很长的内容”", "‘这是一段很长的内容’", "这是一段很长的内容"), candidates.map { it.value })
+        // 显示只留首尾引号，中间收成省略号；提交的仍是完整文字。
+        assertEquals(listOf("“…”", "‘…’", "…"), candidates.map { it.label })
+    }
+
+    @Test
+    fun `bracket handles regex metacharacters`() {
+        assertEquals(
+            listOf("“甲”", "‘甲’", "甲"),
+            values("[甲]", listOf("bracket [ ]")),
+        )
+        assertEquals(
+            listOf("“甲”", "‘甲’", "甲"),
+            values("(甲)", listOf("bracket ( )")),
+        )
     }
 
     @Test
     fun `whole selection only`() {
-        assertTrue(CorrectionRules.candidatesFor("").isEmpty())
-        assertTrue(CorrectionRules.candidatesFor("「你好」。").isEmpty())
-        assertTrue(CorrectionRules.candidatesFor("你好").isEmpty())
-        assertTrue(CorrectionRules.candidatesFor("的的").isEmpty())
-        assertTrue(CorrectionRules.candidatesFor("地 得").isEmpty())
+        assertTrue(values("").isEmpty())
+        assertTrue(values("「你好」。").isEmpty())
+        assertTrue(values("你好").isEmpty())
+        assertTrue(values("的的").isEmpty())
+        assertTrue(values("地 得").isEmpty())
     }
 
     @Test
     fun `extra rules are appended after bundled ones`() {
         val extra = listOf("word 的 => 底", "regex (.)(.) => \$2\$1")
-        assertEquals(listOf("地", "得", "底"), CorrectionRules.candidatesFor("的", extra))
-        assertEquals(listOf("乙甲"), CorrectionRules.candidatesFor("甲乙", extra))
+        assertEquals(listOf("地", "得", "底"), values("的", extra))
+        assertEquals(listOf("乙甲"), values("甲乙", extra))
     }
 
     @Test
@@ -63,7 +96,7 @@ class CorrectionRulesTest {
             ),
         )
         assertEquals(1, rules.size)
-        assertEquals("乙", rules[0].apply("甲"))
+        assertEquals("乙", rules[0].apply("甲")?.value)
     }
 
     @Test

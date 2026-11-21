@@ -61,6 +61,7 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import orilumn.reader.data.annotation.AnnotationKind
 import orilumn.reader.data.annotation.AnnotationLineStyle
+import orilumn.reader.data.correction.CorrectionCandidate
 import orilumn.reader.data.correction.CorrectionRules
 import orilumn.reader.engine.revision.InlineMarkup
 import kotlin.math.roundToInt
@@ -145,8 +146,9 @@ internal fun AnnotationSheet(
      * 纠错候选（修订模式，见 [CorrectionRules]）：词典命中**当前选区整段**时非空。
      *
      * 摆在操作栏 `修订` 右边那片空白里，绿色文字；点一下就提交修订（见 [onPickCorrection]）。
+     * 长内容只显示首尾引号（`“…”`），提交的仍是完整文字（见 [CorrectionCandidate]）。
      */
-    corrections: List<String> = emptyList(),
+    corrections: List<CorrectionCandidate> = emptyList(),
     onPickCorrection: (String) -> Unit = {},
     /** 点卡片外 / 返回键 / Esc：**取消**（什么都不写，原记录不动；落笔只认 `确定`）。 */
     onCancel: () -> Unit,

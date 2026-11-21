@@ -61,6 +61,7 @@ import androidx.compose.ui.unit.sp
 import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.data.annotation.AnnotationKind
 import orilumn.reader.data.annotation.AnnotationLineStyle
+import orilumn.reader.data.correction.CorrectionCandidate
 import orilumn.reader.data.correction.CorrectionRules
 import orilumn.reader.data.font.FontEntry
 import orilumn.reader.data.revision.TextRevision
@@ -2297,7 +2298,7 @@ fun ReaderScreen(
      * 只认**整段命中**：选区多一个字、少一个字、带标点都不算——猜错上下文会把对的字改坏。
      * 选区一变（拖手柄、重选）这里就重算，候选词行跟着换。
      */
-    fun selectionCorrections(): List<String> {
+    fun selectionCorrections(): List<CorrectionCandidate> {
         if (!textEditOpen || !selection.hasSelection) return emptyList()
         val ch = selection.chapter
         if (ch < 0 || ch != textEditChapter) return emptyList()
@@ -2508,7 +2509,7 @@ fun ReaderScreen(
     fun commitCorrection(word: String) {
         if (textEditBusy || !textEditOpen) return
         // 再核一次：候选行是上一帧算出来的，这期间选区可能已经变了（拖手柄 / 重选）。
-        if (word !in selectionCorrections()) return
+        if (selectionCorrections().none { it.value == word }) return
         commitTextEdit(cardOverride = word)
     }
 

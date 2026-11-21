@@ -232,7 +232,9 @@ class FlipSession {
         val base = (if (decision == Decision.COMMIT) COMMIT_MS else ROLLBACK_MS) * k
         val speed = abs(velocityX)
         if (speed < FLING_VELOCITY || pageW <= 0f) return base.roundToInt()
-        val remaining = if (decision == Decision.COMMIT) (1f - fromProgress).coerceIn(0f, 1f) else fromProgress.coerceIn(0f, 1f)
+        // 起点可能为负（页角折起来时折痕中点在自由边之外，见 `curl/anchoredProgress`）：
+        // 回弹的行程是 |起点|，取绝对值，别把负起点当成「已经走完」而给个最短时长。
+        val remaining = if (decision == Decision.COMMIT) (1f - fromProgress).coerceIn(0f, 1f) else abs(fromProgress).coerceIn(0f, 1f)
         // 剩余进度按页宽换成像素距离，除以速度得秒数再放大成 ms；夹在 [MIN_ANIM_MS, base]（下限同样乘倍率）。
         return (remaining * pageW / speed * 1000f * k)
             .roundToInt()

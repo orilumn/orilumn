@@ -21,9 +21,9 @@ import kotlin.math.sqrt
  *
  * **折痕与书脊：两端一视同仁，都可以卷过书脊**（读者 2026-11-21 口径：「上下书脊应该是
  * 相同的！你见过哪本书是翻不到书脊的？」）。纸角卷过书脊就是翻页本来的样子，所以书脊这一侧
- * **不再压倾斜**：折痕端点按手指给的倾斜走，只受末尾 `[−R, 2·页宽]` 的夹取——那是纸卷
- * **退场**的一个筒径余量，不是书脊约束。左半边、右半边、两个翻页方向、跟手与结算同一套；
- * 两种锚点只在「抓的是什么」上不同（纸边压在手指 / 折痕穿过手指）。
+ * **不压倾斜**：折痕端点按手指给的倾斜走，装订边那一侧只留纸卷**退场**的一个筒径（`R`），
+ * 自由边那一侧只受 [CURL_ENDPOINT_BOUND] 的 NaN 兜底。左半边、右半边、两个翻页方向、
+ * 跟手与结算同一套；两种锚点只在「抓的是什么」上不同（纸边压在手指 / 折痕穿过手指）。
  *
  * ## 纸卷退场（修「纸张滚到书脊就卷不成筒」）
  *
@@ -48,18 +48,23 @@ import kotlin.math.sqrt
  * 于是手指退回起手点（`dx` 归零）时折角会在一帧里整块消失，读者：「像那儿有一条屏幕边线」。
  *
  * 跟手阶段**不扶正、也不淡影**：那时折角的大小不听进度（折痕由手指反解），扶正会把形状
- * 掰歪、淡影会在折角还很大时先把影淡没。倾斜改由「横向行程上限」约束（见上），
+ * 掰歪、淡影会在折角还很大时先把影淡没。倾斜改由「竖向行程上限」约束（见下），
  * 两端收尾改由几何自己达（见 [CurlShape.noLiftYet]）。
  *
  * 与旧版的唯一差别：旧版对「收在右缘」的那两端是把进度**冲过 1**（`1 + 0.9·|tilt|`）
  * 让整块滑出屏幕；我们的进度归一在 `[0, 1]`（与滑动层共用），右缘那一端改用扶正来收干净
  * ——末帧折痕竖直贴边、卷曲区面积为零；书脊那一端另有纸卷退场（见上），末帧连筒一起出页。
  *
- * ## 跟手时的横向行程上限（修「退回起手点整页折角一帧消失」）
+ * ## 跟手时的竖向行程上限（修「退回起手点整页折角一帧消失」与「页角横向晃一下就爬向页顶」）
  *
- * 跟手阶段不淡倾斜（形状必须听手指），但倾斜还受**手指横向行程**约束（见 [travelLeanCap]）：
- * 横向行程趋零时拖动方向退化，倾斜不许跟着 `u_y/u_x` 炸到最大——否则手指退回起手点的
- * 那几帧里，折痕斜切着一大块三角，指尖一到就整块消失。斜拖要走满三分之一页宽才吃满倾斜。
+ * 跟手阶段不淡倾斜（形状必须听手指），但倾斜还受**手指竖向行程**约束（见 [verticalLeanCap]）：
+ * 竖向行程趋零时拖动方向退化，倾斜不许跟着 `u_y/u_x` 炸到最大——否则手指退回起手点的
+ * 那几帧里，折痕斜切着一大块三角，指尖一到就整块消失。
+ *
+ * 上限只跟**竖向**行程走，不跟横向：起手点就在页角上时横向分量天然很小，按横向算会把倾斜
+ * 压到近 0，折痕与自由边的交点随之扫过整个页高（读者 2026-11-21：「页角忽然向上跳一下」）。
+ * 竖向行程正是读者口径「手指向上、纸角就向上转」的那个量；短行程保守、长行程放开，
+ * 页角折起来之后横向晃手指，折痕角度只跟着微动。
  */
 internal data class CurlShape(
     val pageW: Float,
@@ -108,13 +113,44 @@ internal data class CurlShape(
 internal const val CURL_TILT_WIDTH: Float = 0.9f
 
 /**
- * 跟手时倾斜量的「横向行程」上限倍数：折痕端点的横向偏移最多是手指横向行程的这么多倍
- * （见 [travelLeanCap]）。
+ * 跟手时倾斜**放开到满**所需的竖向行程（以 `0.9 页宽` 为 1）。
  *
- * 取 3：斜拖要走满 1/3 页宽才吃满最大倾斜，读者真正会斜拖的那一段完全不受影响；手指退回
- * 起手点的那几十像素里倾斜随行程一起收到 0。
+ * 上限按 `CURL_LEAN_MAX · (竖向行程 / 这个比例)²` 算（见 [verticalLeanCap]）：竖向行程
+ * 40px（0.024）时只允许 0.11，到 0.115（约 0.10 页宽）就放开到满 [CURL_LEAN_MAX]。
+ *
+ * 取平方而不是线性：短行程压得比线性更紧（不重演「一按就掀两三成页宽」），中等行程
+ * 很快就放开（页角折起来之后折痕要真的垂直于手指轨迹，纸边才咬得住手指）。线性版本
+ * 要么短行程太松（一按就斜），要么长行程太紧（纸边咬不住手指），两头不可兼得。
  */
-internal const val CURL_LEAN_PER_TRAVEL: Float = 3f
+internal const val CURL_LEAN_FULL_TRAVEL: Float = 0.115f
+
+/**
+ * 跟手时倾斜上限的**硬顶**：折痕最多斜到约 68°（`atan(2.5·0.9) ≈ 66°`）。
+ *
+ * 再斜折痕就成横的：它不再从纸角斜切出去，而是横跨整页——整条页底被掀起、页角不再是
+ * 页角（读者 2026-11-21 口径里的「页角折起成一个小三角形」就不成立了）。实测 1840×2800
+ * 的页、从右下角往上拖 420px：倾斜 2.5 时折痕下端还在页内（页角三角形），3.0 就已经
+ * 越到书脊外、整条页底跟着掀。
+ */
+internal const val CURL_LEAN_MAX: Float = 2.5f
+
+/**
+ * 折痕中点离页面的兜底范围（页宽的倍数）。
+ *
+ * 跟手反解与结算交接都可能把折痕推到页外：页角折起来时折痕的**页高中点**常常在自由边
+ * 之外（页内只看得到它裁进页面的那一小段）。这不是越界，是几何本来的样子，所以**两端
+ * 一视同仁**，这里只防 NaN / 无限滑出去。
+ */
+internal const val CURL_FOLD_BOUND: Float = 8f
+
+/**
+ * 折痕端点离页面的兜底范围（页宽的倍数）：中点 ± `CURL_LEAN_MAX · 0.9` 页宽，再留余量。
+ *
+ * **自由边那一侧**的夹取只许是 NaN 兜底：它一旦真的夹住，折痕就被掰弯、纸边立刻离开手指
+ * ——这正是页角跟手时「纸边完全脱离手指锚点」的来源之一。装订边那一侧另有纸卷退场的
+ * 一个筒径（见 [curlShape]）。
+ */
+internal const val CURL_ENDPOINT_BOUND: Float = 12f
 
 /** 阴影带宽（5% 页宽），与旧版 `SHADOW_BAND` 同一个数。 */
 internal const val CURL_SHADOW_BAND: Float = 0.05f
@@ -195,35 +231,37 @@ data class CurlPull(
  *
  * ## 大小
  *
- * 斜率绝对值仍按 `|u_y/u_x|` 夹取（`≤ 2w/h`）：折痕两端不许被端点夹取掰弯，等价于整个
- * 页高最多横移两个页宽（参考实现在更陡的角度上才夹到页角）。纯上下拖（`u_x ≈ 0`）方向
- * 退化，折痕保持竖直。
+ * 斜率按 `u_y/|u_x|` 算（`u_x ≈ 0` 时不提前返回 0，见下），再乘 `h/(2·tiltW)` 换成倾斜量。
+ * 纯上下拖方向退化时斜率爆掉，由 [verticalLeanCap] 兜住；纯横向拖 `u_y = 0`，折痕竖直。
  *
- * 再叠一道**横向行程**上限（[travelLeanCap]）：`u_y/|u_x|` 在手指越过按下点时必然爆掉
- * （横向位移趋零、纵向抖动还在），光靠斜率夹取会把折痕顶到最大倾斜，折痕中点贴着右缘、
- * 折痕却斜切走大半个页。行程上限让它在按下点两侧一路收到 0，跨过去是连续的。
+ * ## 为什么上限按竖向行程，不按横向
  *
- * 代价：越过按下点之后，折痕不再严格垂直于此刻的拖动方向（它垂直于横向镜像后的那一条）。
- * 读者要的是「竖向动作的方向」，不是「折痕与这一帧的拖动向量垂直」；越界那一段以竖向
- * 口径为准。
+ * `u_y/|u_x|` 在手指越过按下点、或从页角往上拖时必然爆掉（横向位移趋零、纵向还在）。
+ * 旧版按横向行程收倾斜：横向越小折痕越直。可起手点就在页角上，斜拖出去的横向分量天然
+ * 很小——倾斜被压到近 0，折痕退成贴着自由边的竖直线，而折痕位置还由纸边反解、离自由边
+ * 有一整段纸卷。两者相乘让「折痕与自由边的交点」在几十像素的横向手指移动里扫过整个页高，
+ * 读者看到的就是「页角忽然向上跳一下」（§16.10）。
+ *
+ * 竖向行程才是读者口径「手指向上、纸角就向上转」的那个量。上限随竖向行程长大：短行程
+ * 保守（一按就掀一大块三角的旧账），长行程放开到真的垂直于手指轨迹（纸边咬住手指）。
+ * 横向分量仍决定**方向与想要的大小**（`u_y/|u_x|`），只是不再当上限的分母。
+ *
+ * 代价：竖向几乎不动、横向很长的拖动倾斜很小——那本来就是竖直折痕，横折痕不在
+ * [CurlShape]（两端落在页上下边）的表达范围内。
  */
 internal fun leanOf(pull: CurlPull, pageW: Float, pageH: Float): Float {
     val u = pull.unit() ?: return 0f
     val w = pageW.coerceAtLeast(1f)
     val h = pageH.coerceAtLeast(1f)
     val tiltW = w * CURL_TILT_WIDTH
-    val ax = kotlin.math.abs(u.x)
-    if (ax < 1e-4f) return 0f
-    // 折痕横移上限 = 两个页宽（参考实现在角度再陡时才夹到页角，见 KDoc）。
-    val maxSlope = 2f * w / h
-    // 分母取 |u_x|，符号只由 u_y 决定（见 KDoc：u_x 越过 0 时不许镜像）。
-    val slope = (u.y / ax).coerceIn(-maxSlope, maxSlope)
-    val cap = travelLeanCap(pull, tiltW)
-    return (slope * h / (2f * tiltW)).coerceIn(-cap, cap)
+    val ax = kotlin.math.abs(u.x).coerceAtLeast(1e-4f)
+    val wanted = u.y / ax * h / (2f * tiltW)
+    val cap = verticalLeanCap(pull, tiltW)
+    return wanted.coerceIn(-cap, cap)
 }
 
 /**
- * 跟手时倾斜量的**横向行程**上限：`|lean| ≤ [CURL_LEAN_PER_TRAVEL] · |手指横向行程| / tiltW`。
+ * 跟手时倾斜量的**竖向行程**上限：`|lean| ≤ [CURL_LEAN_MAX] · (|竖向行程|/tiltW / [CURL_LEAN_FULL_TRAVEL])²`。
  *
  * ## 它修的是「手指退回起手点时整页折角瞬间消失」
  *
@@ -234,14 +272,18 @@ internal fun leanOf(pull: CurlPull, pageW: Float, pageH: Float): Float {
  * 倾斜一步归零，那一大块折角在一帧里整块消失。读者原话：「接近之前的 x 坐标时，阴影逐渐
  * 消失，然后整个折起的页面瞬间消失，动画结束。」
  *
- * 倾斜只许跟着**横向行程**长大：横向行程越小折痕越直，回到起手点正好竖直贴边，折角面积
- * 连续收到零；反向拖出起手点也一样（横向行程重新长大才算数）。纵向几乎不动的拖动（横向
- * 行程趋零）保持竖直折痕——横折痕本来就不在 [CurlShape] 的表达范围内。
+ * 上限随竖向行程连续长大（平方，两端都不冲）：行程越小折痕越直，回到起手点正好竖直
+ * 贴边，折角面积连续收到零。短行程时上限压得比线性更紧，是为了不重演「一按就掀两三成
+ * 页宽」；中等行程放开得更快，是为了页角折起来之后折痕仍垂直于手指轨迹。
  *
- * 限额只在跟手时用（结算期间没有手指，倾斜听进度与 [tailFade]，见文件头「头尾扶正」）。
+ * 限额只在跟手时用（结算期间没有手指，倾斜听 [CurlShape.shadowFade] 的淡出系数，见
+ * 文件头「头尾扶正」）。
  */
-internal fun travelLeanCap(pull: CurlPull, tiltW: Float): Float =
-    CURL_LEAN_PER_TRAVEL * kotlin.math.abs(pull.to.x - pull.from.x) / tiltW.coerceAtLeast(1e-3f)
+internal fun verticalLeanCap(pull: CurlPull, tiltW: Float): Float {
+    val dy = kotlin.math.abs(pull.to.y - pull.from.y)
+    val r = dy / tiltW.coerceAtLeast(1e-3f) / CURL_LEAN_FULL_TRAVEL
+    return (CURL_LEAN_MAX * r * r).coerceAtMost(CURL_LEAN_MAX)
+}
 
 /**
  * 由进度算一帧折痕几何。
@@ -250,11 +292,15 @@ internal fun travelLeanCap(pull: CurlPull, tiltW: Float): Float =
  * @param tilt 折痕倾斜量（0 = 竖直折痕）。拖动中由 [leanOf] 从拖动方向算出——**是斜率**，
  *   不是 `dy/|d|` 的正弦，所以斜拖时折痕才真的垂直于手指的轨迹；**符号只跟竖向动作走**
  *   （见 [leanOf] 的 KDoc），结算期间保持松手那一刻的值。
- *   这是**想要的**倾斜，实际值只受手指横向行程的 [CURL_LEAN_PER_TRAVEL] 倍约束
- *   （跟手时，见 [travelLeanCap]）；书脊不再压倾斜（折痕端点可以卷过书脊一个筒径）。
+ *   这是**想要的**倾斜，跟手时 [leanOf] 已按竖向行程（[verticalLeanCap]）夹过；书脊这一侧
+ *   不再压倾斜——折痕端点可以卷过书脊一个筒径（见文件头）。
  * @param pull 本次拖动（起手点 + 此刻手指 + 起手那一刻定的锚点），非 null 时折痕位置改由它
  *   反解，两种锚点都跟手（见 [CurlAnchor]）：右半边起手 ⇒ 纸边压手指（[anchoredFoldX]），
  *   左半边起手 ⇒ 折痕穿手指（[creaseFoldX]）。**与翻页方向无关**，两个方向同一套。
+ * @param fade 头尾扶正系数（0..1）。NaN = 按 [tailFade] 从进度算（点按 / 无手指）。
+ *   结算从**跟手那一帧**接手时由 `FlipController` 逐帧给：拖到页角折起来时屏幕可见进度
+ *   常常是负的（折痕中点在自由边之外），照 [tailFade] 算会在松手那一帧把倾斜直接归零、
+ *   折角整块消失（见 [CurlShape.shadowFade]）。
  */
 internal fun curlShape(
     pageW: Float,
@@ -264,21 +310,25 @@ internal fun curlShape(
     tilt: Float = 0f,
     pull: CurlPull? = null,
     restFold: Float = Float.NaN,
+    fade: Float = Float.NaN,
 ): CurlShape {
     val w = pageW.coerceAtLeast(1f)
     val h = pageH.coerceAtLeast(1f)
     val forward = direction >= 0
-    val p = progress.coerceIn(-0.9f, 1.9f)
+    // 进度只在**结算**里可以越界：跟手交接要把折痕中点在自由边之外的位置带过来（页角折起来
+    // 时它就是负的），所以下界放到 [CURL_FOLD_BOUND]。上界多留 1 是给上一页的镜像
+    // （`curlFrame` 传 `1-p`）留同样的空间。
+    val p = progress.coerceIn(-CURL_FOLD_BOUND, CURL_FOLD_BOUND + 1f)
 
     // `direction = -1` 只给**镜像几何**用（低层几何 / 与镜像相关的测试；翻页层恒传 +1，
     // 见 [curlFrame]），所以这里按方向把倾斜一起镜像，`+1` 那条路上倾斜原样进。
-    val lean0 = (if (forward) tilt else -tilt).coerceIn(-1f, 1f)
+    val lean0 = (if (forward) tilt else -tilt).coerceIn(-CURL_LEAN_MAX, CURL_LEAN_MAX)
     val tiltW = w * CURL_TILT_WIDTH
 
     // 进度头尾 10%：倾斜与阴影一起淡出（见文件头「头尾扶正」）。
     // **跟手时不淡倾斜**：起手时折痕就由手指反解、可能已经掀了一大块，再扶正只会让
     // 折痕在开头几帧歪回竖直（斜拖时纸边跟着偏）；末段那一次扶正由松手结算接手。
-    // 但跟手时倾斜另受**横向行程**约束（见 [travelLeanCap]）：手指退回起手点时折痕
+    // 但跟手时倾斜另受**竖向行程**约束（见 [verticalLeanCap]）：手指退回起手点时折痕
     // 一路扶正、折角面积连续收到零，不会整块消失。
     //
     // 跟手时**阴影也不淡**：扶正的口径是「进度 0 = 一页都没掀」，而跟手时进度根本不是
@@ -287,55 +337,70 @@ internal fun curlShape(
     // 跟手时影的浓淡交给几何（纸抬多高、影有多宽），结算/点按照旧听进度。
     val finger = pull
     val anchored = finger != null
-    val fade = if (finger != null) 1f else tailFade(p)
-    var lean = if (finger != null) {
-        val cap = travelLeanCap(finger, tiltW)
-        lean0.coerceIn(-cap, cap)
+    // 头尾扶正系数：跟手帧恒 1（形状听手指）；结算帧由调用方逐帧给（从跟手那一帧接手，
+    // 见 [CurlShape.shadowFade]），没给就按进度算。
+    val fadeK = when {
+        finger != null -> 1f
+        !fade.isNaN() -> fade.coerceIn(0f, 1f)
+        else -> tailFade(p)
+    }
+    val lean = if (finger != null) {
+        lean0
     } else {
-        lean0 * fade
+        lean0 * fadeK
     }
 
     // 纸卷退场（见文件头）：折痕贴到「纸少的那一侧」页边后，再用一个半径的行程把筒滚出页边。
     // 这一段只有 R/w 那么长，所以折痕在这里走得比手指快一倍；不这么做，筒要么被压扁
     // （按剩余纸宽收细），要么在末帧整根消失（撤层时跳一下）。
     val exit = w * CURL3D_RADIUS_RATIO
+    val foldBound = w * CURL_FOLD_BOUND
+
     // 折痕位置：不跟手时按进度从右缘扫到左缘（旧版同款）；跟手时改听手指，
     // 锚点是**起手那一刻**定的那一种（见 [CurlAnchor]）：
     // 右半边起手 = 纸边压在手指上（[anchoredFoldX]），左半边起手 = 折痕穿过手指（[creaseFoldX]）。
-    var foldX = when {
-        finger == null -> {
-            val base = if (forward) w * (1f - p) else w * p
-            if (forward) {
-                if (base < exit) 2f * base - exit else base
-            } else {
-                if (w - base < exit) 2f * base - (w - exit) else base
-            }
-        }
-        finger.anchor == CurlAnchor.Crease ->
-            creaseFoldX(finger, h, lean, tiltW).coerceIn(-exit, w)
-        else ->
-            anchoredFoldX(finger, w, h, lean, tiltW).coerceIn(-exit, w)
-    }
-
-    // 折痕与书脊：**两端一视同仁**（读者 2026-11-21 口径「你见过哪本书是翻不到书脊的？」）。
     //
-    // 书脊这一侧不再压倾斜：纸角卷过书脊是翻页本来的样子。折痕端点按手指给的倾斜走，
-    // 只受末尾 `[−R, 2·页宽]` 的夹取——那是纸卷**退场**的一个筒径，不是书脊约束。
-    // 左半边、右半边、两个翻页方向、跟手与结算用同一套；两种锚点只在「抓的是什么」上不同
-    // （纸边压在手指 / 折痕穿过手指），这里不再有第三种分支。
-
-    // 起手接手：折痕先停在「静止位置」（`restFold`，由 [curlFrame] 按翻页方向给），
+    // 起手接手也在这里：折痕先停在「静止位置」（`restFold`，由 [curlFrame] 按翻页方向给），
     // 再用 [CurlPull.blend] 在起手那一小段（[PULL_INTRO_MS]）里滑到锚点位置，然后完全交给手。
     // 少了这一段，起手那一帧就按锚点摆好了——屏幕右侧往右滑翻上一页、屏幕左侧往左滑翻
     // 下一页这两种起手，目标页一上来就展开大半，读者说「跳跃性太强」。
-    if (finger != null && !restFold.isNaN() && finger.blend < 1f) {
-        val k = finger.blend.coerceIn(0f, 1f)
-        foldX = restFold + (foldX - restFold) * k
+    //
+    // 写成「倾斜 → 折痕」的函数，是因为折痕位置要按同一份倾斜反解（两种锚点都吃 `lean`），
+    // 这样倾斜一旦调整，折痕位置跟着一致地重算。
+    fun foldFor(l: Float): Float {
+        val raw = when {
+            finger == null -> {
+                val base = if (forward) w * (1f - p) else w * p
+                if (forward) {
+                    if (base < exit) 2f * base - exit else base
+                } else {
+                    if (w - base < exit) 2f * base - (w - exit) else base
+                }
+            }
+            finger.anchor == CurlAnchor.Crease ->
+                creaseFoldX(finger, h, l, tiltW).coerceIn(-foldBound, foldBound)
+            else ->
+                anchoredFoldX(finger, w, h, l, tiltW).coerceIn(-foldBound, foldBound)
+        }
+        return if (finger != null && !restFold.isNaN() && finger.blend < 1f) {
+            val k = finger.blend.coerceIn(0f, 1f)
+            restFold + (raw - restFold) * k
+        } else {
+            raw
+        }
     }
 
-    // 自由边那一侧可以滑出页边；装订边那一侧只剩纸卷退场的一个半径余量（见文件头）。
-    val clampLo = if (forward) -exit else -w * 2f
-    val clampHi = if (forward) w * 2f else w + exit
+    val foldX = foldFor(lean)
+
+    // 折痕与书脊：**两端一视同仁**（读者 2026-11-21 口径「你见过哪本书是翻不到书脊的？」）。
+    //
+    // 书脊这一侧不压倾斜：纸角卷过书脊是翻页本来的样子。折痕端点按手指给的倾斜走，
+    // 装订边那一侧只留纸卷**退场**的一个筒径（`−R`），自由边那一侧只受 NaN 兜底
+    // （见 [CURL_ENDPOINT_BOUND]）。左半边、右半边、两个翻页方向、跟手与结算用同一套；
+    // 两种锚点只在「抓的是什么」上不同（纸边压在手指 / 折痕穿过手指），这里不再有第三种分支。
+    val endpointBound = w * CURL_ENDPOINT_BOUND
+    val clampLo = if (forward) -exit else -endpointBound
+    val clampHi = if (forward) endpointBound else w + exit
     val topX = (foldX - lean * tiltW).coerceIn(clampLo, clampHi)
     val bottomX = (foldX + lean * tiltW).coerceIn(clampLo, clampHi)
 
@@ -346,7 +411,7 @@ internal fun curlShape(
         bottomX = bottomX,
         foldX = foldX,
         lean = lean,
-        shadowFade = fade,
+        shadowFade = fadeK,
         progress = p,
         direction = direction,
         anchored = anchored,
@@ -370,7 +435,8 @@ internal fun curlShape(
  * 翻到底则由纸卷退场把筒滚出书脊。与这半句配套的另一半是倾斜与阴影：跟手时它们也只听
  * 手指（见 [curlShape]）。上一版（`93603ce1`）只收了倾斜没管这条总闸，所以症状仍在。
  */
-internal fun CurlShape.noLiftYet(): Boolean = !anchored && progress <= 0f
+internal fun CurlShape.noLiftYet(): Boolean =
+    !anchored && progress <= 0f && lean == 0f
 
 /** 这一帧是否「整页已经翻完」：渲染层只画露出（目标）那张页。判据同 [noLiftYet]。 */
 internal fun CurlShape.fullyTurned(): Boolean = !anchored && progress >= 1f
@@ -403,6 +469,7 @@ internal fun curlFrame(
     direction: Int,
     tilt: Float = 0f,
     pull: CurlPull? = null,
+    fade: Float = Float.NaN,
 ): CurlFrame {
     val back = direction < 0
     val w = pageW.coerceAtLeast(1f)
@@ -420,6 +487,7 @@ internal fun curlFrame(
             // 静止位置（起手接手的起点，见 [pullEngage]）：下一页折痕停在自由边（页宽），
             // 上一页停在书脊外一个筒径——那一帧就是「一页都没掀」，与静止页一致。
             restFold = if (back) -w * CURL3D_RADIUS_RATIO else w,
+            fade = fade,
         ),
         turningIsTarget = back,
     )
@@ -528,7 +596,7 @@ internal fun creaseFoldX(pull: CurlPull, pageH: Float, lean: Float, tiltW: Float
  * 也是它），纸边与手指 1:1，折痕只能跑得更快。反过来，任何「折痕 1:1 跟手」的写法都会
  * 让纸边钉在页边不动（`off(s) ≈ s`，`s` 小时的位移是二阶的），那才是「还不如不改」。
  *
- * @return 折痕中点横坐标（未夹取；调用方 [curlShape] 负责夹进 `[−R, 页宽]`）。
+ * @return 折痕中点横坐标（未夹取；调用方 [curlShape] 负责按 [CURL_FOLD_BOUND] 兜底）。
  */
 internal fun anchoredFoldX(pull: CurlPull, w: Float, h: Float, lean: Float, tiltW: Float): Float {
     val r = (w * CURL3D_RADIUS_RATIO).coerceAtLeast(1e-3f)
@@ -585,7 +653,10 @@ internal fun anchoredProgress(
     val fold = frame.shape.foldX
     // 折痕 ⇒ 进度按**不跟手**那条关系反解（见 [curlFrame]）：下一页 `fold = w·(1−p)`，
     // 上一页 `fold = w·p`。
-    return if (direction >= 0) (1f - fold / w).coerceIn(0f, 1f) else (fold / w).coerceIn(0f, 1f)
+    //
+    // **不夹到 [0,1]**：页角折起来时折痕中点在自由边之外（`fold > w`），屏幕可见进度是负的。
+    // 夹回 0 会让结算第一帧把折角整块收掉（见 [curlShape] 的 `fade` 参数）。
+    return if (direction >= 0) 1f - fold / w else fold / w
 }
 
 /**

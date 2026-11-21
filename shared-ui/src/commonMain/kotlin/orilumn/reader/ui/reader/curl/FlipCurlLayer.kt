@@ -93,6 +93,9 @@ class CurlPageImages {
  * @param pull 本次拖动的起点与此刻手指（页坐标）；非 null 时折痕跟着手指反解，抓什么由
  *   起手那一刻定的锚点决定（右半边 = 纸边压手指，左半边 = 折痕穿手指，见 `CurlAnchor`）。
  *   **上一页同样跟手**，两个方向共用这一套。
+ * @param fade 结算期间的头尾扶正系数（0..1，见 `FlipController.curlFade`）：跟手帧恒 1，
+ *   松手后从跟手那一帧的倾斜逐帧淡到 0。`NaN` = 没有跟手交接（点按 / 程序翻页），
+ *   按进度用 `tailFade` 两头淡。
  * @param currentTex/targetTex 页栅格在页坐标里的左上角（页槽自己的事：正文是版心、
  *   封面这种整页烤图是 0,0）；覆盖层恒为整页、贴 (0,0)
  *
@@ -104,6 +107,7 @@ fun FlipCurlLayer(
     progress: () -> Float,
     lean: () -> Float,
     pull: () -> CurlPull?,
+    fade: () -> Float,
     pageWidthPx: Float,
     pageHeightPx: Float,
     active: () -> Boolean,
@@ -166,6 +170,7 @@ fun FlipCurlLayer(
                 direction = dir,
                 tilt = lean(),
                 pull = pullNow,
+                fade = fade(),
             )
             // 正面 = 被翻的那一张；露出页 = 折痕另一侧的那一张。
             // 下一页翻当前页、露出目标页；上一页翻目标页（上一页）、露出当前页。

@@ -4037,6 +4037,9 @@ fun ReaderScreen(
                     // 跟手拖动（起手页边点 → 手指页坐标）：非 null 时折痕改由「纸边压在手指上」
                     // 反解，只对下一页生效、松手即清（见 FlipController.curlPull）。
                     pull = { ctl.curlPull.value },
+                    // 结算期间的头尾扶正系数：从跟手那一帧的倾斜逐帧淡到 0；NaN = 点按/程序翻页，
+                    // 由几何按进度两头淡（见 FlipController.curlFade）。
+                    fade = { ctl.curlFade.value },
                     // 只有结算动画才做末段扶正（手指跟手时形状听手指的，见 curl/CurlGeometry.kt）。
                     pageWidthPx = pxWidth,
                     pageHeightPx = pxHeight,

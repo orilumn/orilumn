@@ -194,6 +194,9 @@ internal fun AnnotationSheet(
             // 之前是整段全选（开卡默认，或上一次跟着正文选区换过来的）⇒ 新文字照样整段全选。
             old.selection.start == 0 && old.selection.end == old.text.length ->
                 TextRange(0, text.length)
+            // 读者在输入区里点了一下、把选区收成一个光标（取消全选）：下次正文选区换文字时
+            // **重新整段全选**，跟没取消过一样（用户定口）。只有「手选了中间某一段」才保留偏移。
+            old.selection.collapsed -> TextRange(0, text.length)
             // 手选的某一段：偏移照旧，只把越界的那头收进新文字里。
             else -> TextRange(
                 old.selection.start.coerceIn(0, text.length),

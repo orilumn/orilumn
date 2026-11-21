@@ -4320,10 +4320,15 @@ fun ReaderScreen(
                     canDelete = if (textEditOn) revisionTarget != null else deleteTarget != null,
                     onTextChange = {
                         if (textEditOn) {
-                            textEditText = it
-                            textEditDirty = true
-                            // 读者一改字，上一条解析错误的提示就过期了。
-                            textEditError = null
+                            // 只有**真的改了字**才算「动过输入区」。在输入框里点一下把选区收成光标、
+                            // 或拖一下输入框里的选区，文字没变，不能算动过——否则之后拖正文手柄，
+                            // 输入区就不再跟着换文字了（用户复报）。
+                            if (it != textEditText) {
+                                textEditText = it
+                                textEditDirty = true
+                                // 读者一改字，上一条解析错误的提示就过期了。
+                                textEditError = null
+                            }
                         } else {
                             noteText = it
                         }

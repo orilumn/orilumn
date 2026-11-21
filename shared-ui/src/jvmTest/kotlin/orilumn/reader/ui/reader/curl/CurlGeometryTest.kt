@@ -380,6 +380,71 @@ class CurlGeometryTest {
     }
 
     /**
+     * 读者 2026-11-21 报的那一条：左滑起手、手指向上带一点再松手，**页角先向上冲一下再退回来**。
+     *
+     * 根因是倾斜留到末段才扶正：折痕带着倾斜横扫向书脊，被掀起的纸角（页面角关于折痕的镜像）
+     * 被放大着一路抬过页顶，最后 10% 再被扶正收回来。改法见 [settleLeanFade]：翻页时倾斜在
+     * **起手那一小段行程**里就淡到 0，页角只剩「跟着折痕退回」这一条不回头的轨迹。
+     *
+     * 判据取屏幕上看得见的那个纸角（`(页宽, 0)` 关于折痕的镜像点）：松手后它的 y 只许单调
+     * 减小（向页顶退回），且不许越过页顶再回来。旧口径（末段扶正）在这条上立刻红。
+     */
+    @Test
+    fun releasedCornerDoesNotRushUpBeforeThePageTurnsOver() {
+        val w = 1840f
+        val h = 2800f
+        // 读者那一手：横向 200px / 竖向 120px 的松手交接，可见进度约 -0.072、倾斜约 -0.507。
+        val lean = -0.507f
+        val from = -0.072f
+        val corner = Offset(w, 0f)
+        // 纸角关于折痕的镜像点 y（折痕过 (foldX, h/2)、方向 (2·lean·0.9w, h)，与 curlShape 同一套）。
+        fun foldedCornerY(s: CurlShape): Float {
+            val dx = 2f * s.lean * (w * CURL_TILT_WIDTH)
+            val vx = corner.x - s.foldX
+            val vy = corner.y - h / 2f
+            val t = (vx * dx + vy * h) / (dx * dx + h * h)
+            return 2f * (h / 2f + t * h) - corner.y
+        }
+        fun trace(leanFade: (Float) -> Float): List<Float> = (0..200).map { i ->
+            val v = from + (1f - from) * i / 200f
+            foldedCornerY(curlFrame(w, h, v, 1, tilt = lean, leanFade = leanFade(v)).shape)
+        }
+
+        // 旧口径（倾斜留到末段扶正）确实把纸角抬过页顶再退回来——判据不能空。
+        val tailSpan = minOf(CURL_TAIL_FADE_SPAN, kotlin.math.abs(from - 1f)).coerceAtLeast(1e-4f)
+        val tail = trace { v -> (kotlin.math.abs(v - 1f) / tailSpan).coerceIn(0f, 1f) }
+        assertTrue("旧口径应当复现『先冲上页顶』：min=${tail.min()}", tail.min() < -300f)
+
+        val fixed = trace { v -> settleLeanFade(from, 1f, v) }
+        assertEquals("松手第一帧必须与跟手帧同形", tail.first(), fixed.first(), 1f)
+        for (i in 1 until fixed.size) {
+            assertTrue(
+                "松手后页角又向上冲了：${fixed[i - 1]} → ${fixed[i]}（第 $i 帧）",
+                fixed[i] <= fixed[i - 1] + 10f,
+            )
+            assertTrue("页角冲出页顶：${fixed[i]}（第 $i 帧）", fixed[i] >= -10f)
+        }
+        assertEquals("翻完页角应当回到页顶", 0f, fixed.last(), 1f)
+    }
+
+    /** 倾斜扶正系数：松手那一帧 1，前 15% 行程内线性到 0，余下整段恒 0。 */
+    @Test
+    fun settleLeanFadeStraightensWithinTheFirstSliceOfTravel() {
+        val from = -0.2f
+        val to = 1f
+        assertEquals("松手那一帧必须从跟手形状接手", 1f, settleLeanFade(from, to, from), 1e-6f)
+        val span = (to - from) * CURL_LEAN_STRAIGHTEN_SPAN
+        assertEquals(0f, settleLeanFade(from, to, from + span), 1e-6f)
+        assertTrue("窗口之后必须保持竖直", settleLeanFade(from, to, from + span + 0.2f) == 0f)
+        var prev = 1f
+        for (i in 0..100) {
+            val f = settleLeanFade(from, to, from + (to - from) * i / 100f)
+            assertTrue("扶正系数不许回头：$prev → $f", f <= prev + 1e-6f)
+            prev = f
+        }
+    }
+
+    /**
      * 自由边那两个角（右上 / 右下）没有书脊规则：折痕端点可以滑出右缘，把角卷过纸卷。
      *
      * 右缘这一侧是纸的自由边，唯一边界是 [CURL_ENDPOINT_BOUND] 的 NaN 兜底；装订边那一侧

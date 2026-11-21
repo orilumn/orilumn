@@ -34,7 +34,8 @@ import kotlin.math.sqrt
  * 纸卷不该被压扁，它该**滚出页边**：最后 `R/页宽` 的行程里折痕多走一个半径、越过书脊，
  * 纸卷整根从左边出去（上一页起手则是整根从左边进来），末帧正好一根筒都不剩。
  * 这一段的折痕因此走得比手指快一倍——「纸卷滚出去」本来就是把最后一小段纸卷完，
- * 与末段扶正（[CURL_TAIL_FADE_SPAN]）取同一个窗口，收尾时折痕已扶成竖直、直着出页。
+ * 与末段淡出（[CURL_TAIL_FADE_SPAN]）取同一个窗口，收尾时折痕已扶成竖直（跟手交接的翻页
+ * 更早，在起手就扶正，见下）、直着出页。
  *
  * ## 头尾扶正（修「进度两端折角一帧消失」与「松手后临近结束忽然跳变」）
  *
@@ -42,10 +43,14 @@ import kotlin.math.sqrt
  * 都没有理由继续存在：进度 0 是「一页都没掀」，进度 1 是「整页都翻完」。但几何本身并不在
  * 两端自然收成零——折痕一斜，贴着页边也能圈出一大块折角。
  *
- * 所以进度**头尾各 10%** 里把倾斜量线性淡到 0（`tilt fade`，旧版注释原文「否则覆盖层
- * 撤掉时停一下再跳」）：折痕被扶成竖直、正好贴边，折角面积连续收到零；折痕旁的影按同一
- * 系数淡出。**只压倾斜与影，不压读者自己给的进度**。早先只在结算里做，
+ * 所以进度**头尾各 10%** 里把阴影线性淡到 0（`tail fade`，旧版注释原文「否则覆盖层
+ * 撤掉时停一下再跳」）。**只压阴影，不压读者自己给的进度**。早先只在结算里做，
  * 于是手指退回起手点（`dx` 归零）时折角会在一帧里整块消失，读者：「像那儿有一条屏幕边线」。
+ *
+ * 倾斜的扶正分两段：进度两端照旧淡（点按 / 程序翻页，[tailFade]）；**松手交接**的结算则在
+ * 起手那 15% 行程里就扶正（[settleLeanFade]，见 [CURL_LEAN_STRAIGHTEN_SPAN]），否则斜折痕
+ * 横扫向书脊时会把纸角放大着抬到页顶，再在末段扶正里退回来（读者：「松手后页角先向上冲
+ * 一下」）。倾斜与阴影因此是两个系数，各自淡各自的。
  *
  * 跟手阶段**不扶正、也不淡影**：那时折角的大小不听进度（折痕由手指反解），扶正会把形状
  * 掰歪、淡影会在折角还很大时先把影淡没。倾斜改由「竖向行程上限」约束（见下），
@@ -79,12 +84,14 @@ internal data class CurlShape(
      * 折痕倾斜量（正 = 上端 `foldX − lean·tiltW`、下端 `foldX + lean·tiltW`）。
      *
      * 符号只跟竖向动作走（见 [leanOf]：手指向上、纸角就向上转，与起手在哪一侧无关），
-     * 也已做头尾扶正 / 跟手时的横向行程收小。
+     * 也已做扶正（结算跟手交接用起手扶正 [settleLeanFade]，点按用 [tailFade]）/ 跟手时的
+     * 竖向行程收小。
      */
     val lean: Float,
     /**
      * 阴影随进度的淡出系数 0..1（见文件头「头尾扶正」）。
      *
+     * **只管阴影**：倾斜另有 [lean] 自己的扶正系数（[settleLeanFade]），两者不再共用一个数。
      * 跟手帧（[anchored]）恒为 1：那时折角的大小不听进度，影的浓淡交给几何（纸抬多高、
      * 影多宽），按进度淡会在折角还很大时把影先淡没（见 [noLiftYet]）。
      */
@@ -155,8 +162,25 @@ internal const val CURL_ENDPOINT_BOUND: Float = 12f
 /** 阴影带宽（5% 页宽），与旧版 `SHADOW_BAND` 同一个数。 */
 internal const val CURL_SHADOW_BAND: Float = 0.05f
 
-/** 进度头尾这一段（占整段的比例）里扶正折痕、淡出阴影，见文件头。 */
+/** 进度头尾这一段（占整段的比例）里淡出阴影，见文件头。 */
 internal const val CURL_TAIL_FADE_SPAN: Float = 0.1f
+
+/**
+ * 松手结算时，倾斜在**起手这一段行程**（占剩余行程的比例）里扶正到 0。
+ *
+ * 跟手时折痕可以很斜（手指带着竖向行程），松手后折痕听进度、斜着横扫向书脊。倾斜量乘的是
+ * 折痕两端相对中点的横向偏移，折痕横扫时它会把被掀起的纸角（页面角关于折痕的镜像）放大着
+ * 抬到页顶——读者看到的是「松手后页角先向上冲一下，再退回来」。
+ *
+ * 所以在结算的**前 15% 行程**里就把倾斜淡掉（[settleLeanFade]），余下整段折痕竖直、页角只
+ * 沿一条不回头的轨迹退回。取 15% 而不是更短：倾斜淡得太快，折痕会在松手后几十毫秒里明显
+ * 转一下；15% 刚好让页角轨迹单调、又不越出页顶（1840×2800、横向 200px / 竖向 120px 实测：
+ * 镜像角 y 从 858 一路降到 0，旧版末段扶正是 858 → −840 → 0）。
+ *
+ * 与阴影分开：阴影仍按 [CURL_TAIL_FADE_SPAN] 在末段淡出（[CurlShape.shadowFade]）。倾斜扶正
+ * 只决定折痕角度，不该把落影一起提前淡没。
+ */
+internal const val CURL_LEAN_STRAIGHTEN_SPAN: Float = 0.15f
 
 /**
  * 一次拖动：`from` = 起手时**贴在页边上**的那个点，`to` = 当前手指位置（都是页坐标）。
@@ -276,8 +300,7 @@ internal fun leanOf(pull: CurlPull, pageW: Float, pageH: Float): Float {
  * 贴边，折角面积连续收到零。短行程时上限压得比线性更紧，是为了不重演「一按就掀两三成
  * 页宽」；中等行程放开得更快，是为了页角折起来之后折痕仍垂直于手指轨迹。
  *
- * 限额只在跟手时用（结算期间没有手指，倾斜听 [CurlShape.shadowFade] 的淡出系数，见
- * 文件头「头尾扶正」）。
+ * 限额只在跟手时用（结算期间没有手指，倾斜听 [settleLeanFade] 的扶正系数，见文件头「头尾扶正」）。
  */
 internal fun verticalLeanCap(pull: CurlPull, tiltW: Float): Float {
     val dy = kotlin.math.abs(pull.to.y - pull.from.y)
@@ -297,10 +320,13 @@ internal fun verticalLeanCap(pull: CurlPull, tiltW: Float): Float {
  * @param pull 本次拖动（起手点 + 此刻手指 + 起手那一刻定的锚点），非 null 时折痕位置改由它
  *   反解，两种锚点都跟手（见 [CurlAnchor]）：右半边起手 ⇒ 纸边压手指（[anchoredFoldX]），
  *   左半边起手 ⇒ 折痕穿手指（[creaseFoldX]）。**与翻页方向无关**，两个方向同一套。
- * @param fade 头尾扶正系数（0..1）。NaN = 按 [tailFade] 从进度算（点按 / 无手指）。
+ * @param fade 阴影淡出系数（0..1）。NaN = 按 [tailFade] 从进度算（点按 / 无手指）。
  *   结算从**跟手那一帧**接手时由 `FlipController` 逐帧给：拖到页角折起来时屏幕可见进度
- *   常常是负的（折痕中点在自由边之外），照 [tailFade] 算会在松手那一帧把倾斜直接归零、
+ *   常常是负的（折痕中点在自由边之外），照 [tailFade] 算会在松手那一帧把阴影直接归零、
  *   折角整块消失（见 [CurlShape.shadowFade]）。
+ * @param leanFade 倾斜扶正系数（0..1）。NaN = 跟 [fade] 同一个系数（旧口径）。跟手交接的
+ *   结算里由 `FlipController` 用 [settleLeanFade] 逐帧给：起手就扶正，页角不先上冲
+ *   （见 [CURL_LEAN_STRAIGHTEN_SPAN]）。
  */
 internal fun curlShape(
     pageW: Float,
@@ -311,6 +337,7 @@ internal fun curlShape(
     pull: CurlPull? = null,
     restFold: Float = Float.NaN,
     fade: Float = Float.NaN,
+    leanFade: Float = Float.NaN,
 ): CurlShape {
     val w = pageW.coerceAtLeast(1f)
     val h = pageH.coerceAtLeast(1f)
@@ -325,7 +352,7 @@ internal fun curlShape(
     val lean0 = (if (forward) tilt else -tilt).coerceIn(-CURL_LEAN_MAX, CURL_LEAN_MAX)
     val tiltW = w * CURL_TILT_WIDTH
 
-    // 进度头尾 10%：倾斜与阴影一起淡出（见文件头「头尾扶正」）。
+    // 进度头尾 10%：阴影淡出；倾斜另有扶正系数（跟手交接的翻页在起手就扶正，见下）。
     // **跟手时不淡倾斜**：起手时折痕就由手指反解、可能已经掀了一大块，再扶正只会让
     // 折痕在开头几帧歪回竖直（斜拖时纸边跟着偏）；末段那一次扶正由松手结算接手。
     // 但跟手时倾斜另受**竖向行程**约束（见 [verticalLeanCap]）：手指退回起手点时折痕
@@ -337,17 +364,24 @@ internal fun curlShape(
     // 跟手时影的浓淡交给几何（纸抬多高、影有多宽），结算/点按照旧听进度。
     val finger = pull
     val anchored = finger != null
-    // 头尾扶正系数：跟手帧恒 1（形状听手指）；结算帧由调用方逐帧给（从跟手那一帧接手，
-    // 见 [CurlShape.shadowFade]），没给就按进度算。
+    // 阴影的淡出系数：跟手帧恒 1（形状听手指）；结算帧由调用方逐帧给（从跟手那一帧接手，
+    // 见 [CurlShape.shadowFade]），没给就按进度算。倾斜另用下面的 leanFadeK。
     val fadeK = when {
         finger != null -> 1f
         !fade.isNaN() -> fade.coerceIn(0f, 1f)
         else -> tailFade(p)
     }
+    // 倾斜的扶正系数与阴影分开：松手后倾斜在起手段就扶正（[settleLeanFade]），阴影仍在
+    // 末段淡出（见 [CURL_LEAN_STRAIGHTEN_SPAN]）。没单独给倾斜系数时沿用旧口径。
+    val leanFadeK = when {
+        finger != null -> 1f
+        !leanFade.isNaN() -> leanFade.coerceIn(0f, 1f)
+        else -> fadeK
+    }
     val lean = if (finger != null) {
         lean0
     } else {
-        lean0 * fadeK
+        lean0 * leanFadeK
     }
 
     // 纸卷退场（见文件头）：折痕贴到「纸少的那一侧」页边后，再用一个半径的行程把筒滚出页边。
@@ -470,6 +504,7 @@ internal fun curlFrame(
     tilt: Float = 0f,
     pull: CurlPull? = null,
     fade: Float = Float.NaN,
+    leanFade: Float = Float.NaN,
 ): CurlFrame {
     val back = direction < 0
     val w = pageW.coerceAtLeast(1f)
@@ -488,6 +523,7 @@ internal fun curlFrame(
             // 上一页停在书脊外一个筒径——那一帧就是「一页都没掀」，与静止页一致。
             restFold = if (back) -w * CURL3D_RADIUS_RATIO else w,
             fade = fade,
+            leanFade = leanFade,
         ),
         turningIsTarget = back,
     )
@@ -498,6 +534,23 @@ internal fun tailFade(progress: Float): Float = when {
     progress > 1f - CURL_TAIL_FADE_SPAN -> ((1f - progress) / CURL_TAIL_FADE_SPAN).coerceIn(0f, 1f)
     progress < CURL_TAIL_FADE_SPAN -> (progress / CURL_TAIL_FADE_SPAN).coerceIn(0f, 1f)
     else -> 1f
+}
+
+/**
+ * 松手结算的倾斜扶正系数（0..1）：松手那一帧恒 1（形状从跟手帧原样接手），
+ * 之后在**前 [CURL_LEAN_STRAIGHTEN_SPAN] 段行程**里线性淡到 0，余下整段折痕竖直。
+ *
+ * `from` 是结算起点（跟手那一帧的可见进度，可为负），`target` 是终点（commit = 1，
+ * rollback = 0），`v` 是当前进度。按**行程比例**而不是进度绝对值取窗口：起点离终点近时
+ * 窗口跟着收窄，不会出现「还没扶正就到了」。
+ *
+ * 与 [tailFade] 的分工：那个是**末段**扶正，倾斜要跟着折痕一路横扫到最后才归零，被放大的
+ * 纸角会先冲上页顶再退回来（见 [CURL_LEAN_STRAIGHTEN_SPAN]）；这个是**起手**扶正，倾斜在
+ * 开头就退场，页角只剩「跟着折痕退回」这一条轨迹。
+ */
+internal fun settleLeanFade(from: Float, target: Float, v: Float): Float {
+    val span = (kotlin.math.abs(target - from) * CURL_LEAN_STRAIGHTEN_SPAN).coerceAtLeast(1e-4f)
+    return (1f - kotlin.math.abs(v - from) / span).coerceIn(0f, 1f)
 }
 
 /**

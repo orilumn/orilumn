@@ -25,6 +25,7 @@ import orilumn.reader.ui.reader.curl.PULL_INTRO_MS
 import orilumn.reader.ui.reader.curl.anchoredProgress
 import orilumn.reader.ui.reader.curl.leanOf
 import orilumn.reader.ui.reader.curl.pullEngage
+import orilumn.reader.ui.reader.curl.settleLeanFade
 
 /**
  * 滑动翻页会话的**唯一宿主**（用户层·与 [FlipSession] 配套）。
@@ -111,18 +112,33 @@ class FlipController(
     val curlLean: MutableFloatState = mutableFloatStateOf(0f)
 
     /**
-     * 结算期间的**头尾扶正系数**（0..1，见 `curl/CurlShape.shadowFade`）。
+     * 结算期间的**阴影淡出系数**（0..1，见 `curl/CurlShape.shadowFade`）。
      *
      * 跟手时恒 1（形状听手指）；松手结算从**跟手那一帧**接手，逐帧淡到 0。不能照进度
      * 重新算（`tailFade`）：页角折起来时屏幕可见进度常常是负的，`tailFade(0)` 会在松手
-     * 那一帧把倾斜直接归零、折角整块消失。窗口按「起点到目标的距离」收窄（最多 10%），
-     * 起点离目标近时也不会来不及淡完。
+     * 那一帧把阴影直接归零、折角整块消失。窗口按「起点到目标的距离」收窄（最多 10%），
+     * 起点离目标近时也不会来不及淡完。**只管阴影**：倾斜另有 [curlLeanFade]。
      *
-     * `NaN` = 没有跟手交接（点按 / 程序翻页 / 目标页没进渲染层）：此时形状照旧按进度算
-     * `tailFade`，头尾两端都扶正。只有 [endDrag] 那条跟手交接才给真值，否则点按翻页会
+     * `NaN` = 没有跟手交接（点按 / 程序翻页 / 目标页没进渲染层）：此时阴影照旧按进度算
+     * `tailFade`，头尾两端都淡。只有 [endDrag] 那条跟手交接才给真值，否则点按翻页会
      * 丢掉起手那一端的淡入。
      */
     val curlFade: MutableFloatState = mutableFloatStateOf(Float.NaN)
+
+    /**
+     * 结算期间的**倾斜扶正系数**（0..1，见 `curl/CurlShape.lean` / `curl/settleLeanFade`）。
+     *
+     * 跟手时恒 1；**翻页（commit）**松手后在**起手那一小段行程里**就淡到 0
+     * （[orilumn.reader.ui.reader.curl.CURL_LEAN_STRAIGHTEN_SPAN]）。倾斜量乘的是折痕两端相对
+     * 中点的横向偏移，折痕横扫向书脊时会把纸角放大着抬到页顶；若像阴影那样留到末段才扶正，
+     * 读者看到的就是「松手后页角先向上冲一下，再退回来」。
+     *
+     * **回弹（rollback）不扶正**（NaN = 与 [curlFade] 同口径、末段淡）：回弹是把手势倒着播一遍，
+     * 倾斜跟着进度退回，页角沿原路回到起手位置；提前扶正反而会让它越过页顶再回来。
+     *
+     * `NaN` = 没有跟手交接（点按 / 程序翻页），倾斜照旧按进度 `tailFade` 两头淡。
+     */
+    val curlLeanFade: MutableFloatState = mutableFloatStateOf(Float.NaN)
 
     /**
      * 跟手锚点：手指此刻在页坐标里的位置（null = 不跟手）。
@@ -277,6 +293,7 @@ class FlipController(
         curlPull.value = null
         curlAnchor.value = null
         curlFade.value = Float.NaN
+        curlLeanFade.value = Float.NaN
         // 会话收场：通知预栅格此刻可补方向侧那一张（见 [settleTick]）。
         settleTick.value++
     }
@@ -402,6 +419,7 @@ class FlipController(
         curlLean.value = 0f
         curlAnchor.value = null
         curlFade.value = Float.NaN
+        curlLeanFade.value = Float.NaN
         if (enterCover) {
             // 后退回封面：目标（封面）早已解码、立即就绪，**无需落位**——跟手由
             // updateDrag 驱动（targetReady()=true），松手 endDrag 结算。绝不 flipAwait：
@@ -735,6 +753,7 @@ class FlipController(
         curlLean.value = 0f
         curlAnchor.value = null
         curlFade.value = Float.NaN
+        curlLeanFade.value = Float.NaN
         prefetchJob?.cancel()
         prefetchJob = scope.launch {
             val landed = flipAwait(direction)
@@ -811,14 +830,19 @@ class FlipController(
             androidx.compose.animation.core.tween<Float>(duration)
         }
         val target = if (decision == FlipSession.Decision.COMMIT) 1f else 0f
-        // 扶正窗口：从起点到目标这一段里把倾斜淡到 0。窗口不超过常规 10%，起点离目标
-        // 更近时按起点距离收窄（否则还没淡完就到了）。起点即 1 时（见 `curl/anchoredProgress`），
-        // 松手第一帧与跟手那一帧同形，不会整块消失。
+        // 阴影的淡出窗口：从起点到目标这一段里、靠末段把阴影淡到 0。窗口不超过常规 10%，
+        // 起点离目标更近时按起点距离收窄（否则还没淡完就到了）。起点即 1 时（见
+        // `curl/anchoredProgress`），松手第一帧与跟手那一帧同形，不会整块消失。
         val fadeSpan = minOf(CURL_TAIL_FADE_SPAN, kotlin.math.abs(from - target)).coerceAtLeast(1e-4f)
         // 只有**跟手交接**才走自定义扶正；点按 / 程序翻页（fromProgress == null）留给
-        // `tailFade`，起手与收尾两端照旧淡（NaN = 按进度算，见 [curlFade]）。
+        // `tailFade`，起手与收尾两端照旧淡（NaN = 按进度算，见 [curlFade] / [curlLeanFade]）。
         val handoff = fromProgress != null
+        val commit = decision == FlipSession.Decision.COMMIT
         curlFade.value = if (handoff) 1f else Float.NaN
+        // 倾斜与阴影分开：翻页时倾斜在**起手**这一小段行程里就扶正（见 [curlLeanFade]），
+        // 否则斜折痕横扫向书脊时会把纸角放大着抬到页顶、再在末段退回来。回弹不扶正：
+        // 它是把手势倒着播，倾斜跟着进度退回，页角沿原路回去。
+        curlLeanFade.value = if (handoff && commit) 1f else Float.NaN
         settleJob?.cancel()
         settleJob = scope.launch {
             val anim = androidx.compose.animation.core.Animatable(from)
@@ -832,6 +856,7 @@ class FlipController(
                 progress.value = v
                 if (handoff) {
                     curlFade.value = (kotlin.math.abs(v - target) / fadeSpan).coerceIn(0f, 1f)
+                    if (commit) curlLeanFade.value = settleLeanFade(from, target, v)
                 }
             }
             if (decision == FlipSession.Decision.COMMIT) {

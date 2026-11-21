@@ -368,7 +368,8 @@ internal fun DrawScope.drawCurl3DFrame(
  * 一条灰竖带闪一下。桌面结算 600ms（平板 300ms，且平板上手指多半已经带着走了大半页）、
  * 又总是从进度 0 整页扫一遍，所以只有桌面报得出来；平板偶尔也闪，只是短到来不及辨认。
  *
- * 与 [CurlShape.shadowFade] 分工：那个按**进度**淡（头尾 10%），管起手与收尾的倾斜扶正；
+ * 与 [CurlShape.shadowFade] 分工：那个按**进度**淡（头尾 10%），管起手与收尾的阴影淡出
+ * （倾斜另走 `settleLeanFade`，不共用这个系数）；
  * 这个按**折痕位置**淡，管「纸已经卷到页边、没有纸可卷了」。两者相乘。
  *
  * **它不是通用口径**：调用方只许经 [freeEdgeShadowFadeIfArriving] 用它，落在「自动播放的
@@ -631,7 +632,9 @@ private fun DrawScope.drawShadowStrip(
  * 按倾斜插值就能把这次对调摊成一段渐变（见 [SHADOW_TAPER_TILT]）。
  *
  * @param lean 折痕倾斜量（已按方向镜像）。
- * @param fade 末段扶正系数：`lean` 已经被它乘过一次，除回去才是读者真正摆出的倾斜。
+ * @param fade 阴影淡出系数（[CurlShape.shadowFade]）。倾斜也可能被**另一个**起手扶正系数收小
+ *   （跟手交接的翻页，见 `settleLeanFade`），所以 `lean / fade` 只在两者同口径（点按 / 程序
+ *   翻页）时正好还原读者摆出的倾斜；跟手交接时它跟随实际折痕角度，折痕扶直、斜坡自然摊平。
  */
 internal fun shadowTaperBias(lean: Float, fade: Float): Float {
     val tilt = if (fade > 1e-3f) lean / fade else 0f

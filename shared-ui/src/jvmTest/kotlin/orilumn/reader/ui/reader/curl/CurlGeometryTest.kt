@@ -380,66 +380,119 @@ class CurlGeometryTest {
     }
 
     /**
-     * 读者 2026-11-21 报的那一条：左滑起手、手指向上带一点再松手，**页角先向上冲一下再退回来**。
+     * 读者 2026-11-21 报的两条，必须在同一条判据上同时成立：
      *
-     * 根因是倾斜留到末段才扶正：折痕带着倾斜横扫向书脊，被掀起的纸角（页面角关于折痕的镜像）
-     * 被放大着一路抬过页顶，最后 10% 再被扶正收回来。改法见 [settleLeanFade]：翻页时倾斜在
-     * **起手那一小段行程**里就淡到 0，页角只剩「跟着折痕退回」这一条不回头的轨迹。
+     * 1. 松手后**不许先把折角扶平、再让折痕横扫**（读者原话「先是回平再播放，非常不协调」）：
+     *    倾斜在起手那一小段里就归零时，被掀起的那块面积会先缩一下再长回来——屏幕上就是折角
+     *    先原地落平，然后折痕才开始走。
+     * 2. 倾斜也不许留到末段才一口气掰平（更早那一条「页角先向上冲一下再退回」）。
      *
-     * 判据取屏幕上看得见的那个纸角（`(页宽, 0)` 关于折痕的镜像点）：松手后它的 y 只许单调
-     * 减小（向页顶退回），且不许越过页顶再回来。旧口径（末段扶正）在这条上立刻红。
+     * 判据取**被掀起的面积**（页矩形在被折的那一侧的面积占比）：翻页途中它只许增不许减，
+     * 相邻两帧之间不许出现可见的回缩。倾斜口径换成 [settleLeanFade] 的「整段行程平滑退回」。
      */
     @Test
-    fun releasedCornerDoesNotRushUpBeforeThePageTurnsOver() {
+    fun releasedFlapKeepsGrowingInsteadOfFlatteningFirst() {
         val w = 1840f
         val h = 2800f
         // 读者那一手：横向 200px / 竖向 120px 的松手交接，可见进度约 -0.072、倾斜约 -0.507。
         val lean = -0.507f
         val from = -0.072f
-        val corner = Offset(w, 0f)
-        // 纸角关于折痕的镜像点 y（折痕过 (foldX, h/2)、方向 (2·lean·0.9w, h)，与 curlShape 同一套）。
-        fun foldedCornerY(s: CurlShape): Float {
-            val dx = 2f * s.lean * (w * CURL_TILT_WIDTH)
-            val vx = corner.x - s.foldX
-            val vy = corner.y - h / 2f
-            val t = (vx * dx + vy * h) / (dx * dx + h * h)
-            return 2f * (h / 2f + t * h) - corner.y
+
+        /** 折痕把页面切成两半，被掀起那一半（+法向侧）占整页的面积比例。 */
+        fun foldedArea(s: CurlShape): Float {
+            val ox = (s.topX + s.bottomX) * 0.5f
+            val oy = s.pageH * 0.5f
+            val dx = s.bottomX - s.topX
+            val dy = s.pageH
+            val len = kotlin.math.hypot(dx, dy).coerceAtLeast(1e-3f)
+            val nx = dy / len
+            val ny = -dx / len
+            // 页矩形按半平面裁剪（Sutherland–Hodgman），再取多边形面积。
+            val rect = listOf(
+                Offset(0f, 0f), Offset(s.pageW, 0f), Offset(s.pageW, s.pageH), Offset(0f, s.pageH),
+            )
+            fun side(p: Offset): Float = (p.x - ox) * nx + (p.y - oy) * ny
+            val out = ArrayList<Offset>(8)
+            for (i in rect.indices) {
+                val a = rect[i]
+                val b = rect[(i + 1) % rect.size]
+                val sa = side(a)
+                val sb = side(b)
+                if (sa >= 0f) out.add(a)
+                if ((sa > 0f && sb < 0f) || (sa < 0f && sb > 0f)) {
+                    val t = sa / (sa - sb)
+                    out.add(Offset(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t))
+                }
+            }
+            var twice = 0f
+            for (i in out.indices) {
+                val p = out[i]
+                val q = out[(i + 1) % out.size]
+                twice += p.x * q.y - q.x * p.y
+            }
+            return kotlin.math.abs(twice) * 0.5f / (s.pageW * s.pageH)
         }
+
         fun trace(leanFade: (Float) -> Float): List<Float> = (0..200).map { i ->
             val v = from + (1f - from) * i / 200f
-            foldedCornerY(curlFrame(w, h, v, 1, tilt = lean, leanFade = leanFade(v)).shape)
+            foldedArea(curlFrame(w, h, v, 1, lean, leanFade = leanFade(v)).shape)
         }
 
-        // 旧口径（倾斜留到末段扶正）确实把纸角抬过页顶再退回来——判据不能空。
-        val tailSpan = minOf(CURL_TAIL_FADE_SPAN, kotlin.math.abs(from - 1f)).coerceAtLeast(1e-4f)
-        val tail = trace { v -> (kotlin.math.abs(v - 1f) / tailSpan).coerceIn(0f, 1f) }
-        assertTrue("旧口径应当复现『先冲上页顶』：min=${tail.min()}", tail.min() < -300f)
+        // 旧口径（起手 15% 行程就扶平）确实会「先缩一下再长回来」——判据不能空。
+        val oldSpan = (1f - from) * 0.15f
+        val old = trace { v -> (1f - (v - from) / oldSpan).coerceIn(0f, 1f) }
+        // 「回缩」按**峰值回落**算：折角先缩一下再长回来，单帧差很小但累计回撤看得见。
+        var peak = old[0]
+        var worstOld = 0f
+        for (a in old) {
+            peak = maxOf(peak, a)
+            worstOld = maxOf(worstOld, peak - a)
+        }
+        assertTrue("旧口径应当复现『折角先缩一下』：峰值回撤 ${worstOld * 100}%", worstOld > 0.02f)
 
         val fixed = trace { v -> settleLeanFade(from, 1f, v) }
-        assertEquals("松手第一帧必须与跟手帧同形", tail.first(), fixed.first(), 1f)
-        for (i in 1 until fixed.size) {
+        assertEquals("松手第一帧必须与跟手帧同形", old.first(), fixed.first(), 1e-4f)
+        var fixedPeak = fixed[0]
+        for (i in fixed.indices) {
             assertTrue(
-                "松手后页角又向上冲了：${fixed[i - 1]} → ${fixed[i]}（第 $i 帧）",
-                fixed[i] <= fixed[i - 1] + 10f,
+                "被掀起的面积回缩了（折角先扶平再走）：峰值 ${fixedPeak * 100}% → ${fixed[i] * 100}%（第 $i 帧）",
+                fixed[i] >= fixedPeak - 1e-4f,
             )
-            assertTrue("页角冲出页顶：${fixed[i]}（第 $i 帧）", fixed[i] >= -10f)
+            fixedPeak = maxOf(fixedPeak, fixed[i])
         }
-        assertEquals("翻完页角应当回到页顶", 0f, fixed.last(), 1f)
+        assertEquals("翻完应当整页都在被折的那一侧", 1f, fixed.last(), 1e-3f)
+        // 末段倾斜已经很小：不许拖到最后才掰平（那就是「页角先上冲再退回」）。
+        assertTrue("末段倾斜还不收：${settleLeanFade(from, 1f, from + (1f - from) * 0.9f)}", settleLeanFade(from, 1f, from + (1f - from) * 0.9f) < 0.05f)
     }
 
-    /** 倾斜扶正系数：松手那一帧 1，前 15% 行程内线性到 0，余下整段恒 0。 */
+    /**
+     * 倾斜扶正系数：松手那一帧 1，起手先**保持住**手指摆出的角度，再随行程平滑退回 0。
+     *
+     * 两端斜率都是 0（`1 − smoothstep`）：起手不出速度台阶，收尾也不忽然掰一下。与「按行程
+     * 线性淡」相比，前半段退得更慢（先保持、接着松手前的方向走），后半段退得更快（收得干净）。
+     */
     @Test
-    fun settleLeanFadeStraightensWithinTheFirstSliceOfTravel() {
+    fun settleLeanFadeHoldsTheReleasedTiltThenFlattensOverTheWholeTravel() {
         val from = -0.2f
         val to = 1f
         assertEquals("松手那一帧必须从跟手形状接手", 1f, settleLeanFade(from, to, from), 1e-6f)
-        val span = (to - from) * CURL_LEAN_STRAIGHTEN_SPAN
-        assertEquals(0f, settleLeanFade(from, to, from + span), 1e-6f)
-        assertTrue("窗口之后必须保持竖直", settleLeanFade(from, to, from + span + 0.2f) == 0f)
+        assertEquals("走完全程必须竖直", 0f, settleLeanFade(from, to, to), 1e-6f)
+        assertEquals("行程一半退回一半", 0.5f, settleLeanFade(from, to, from + (to - from) * 0.5f), 1e-5f)
+        // 起手 15% 行程里几乎原样保持（旧口径在这里已经归零——正是「先回平再播放」）。
+        assertTrue(
+            "起手就明显转过了：15% 行程处 ${settleLeanFade(from, to, from + (to - from) * 0.15f)}",
+            settleLeanFade(from, to, from + (to - from) * 0.15f) > 0.9f,
+        )
         var prev = 1f
         for (i in 0..100) {
-            val f = settleLeanFade(from, to, from + (to - from) * i / 100f)
+            val s = i / 100f
+            val f = settleLeanFade(from, to, from + (to - from) * s)
             assertTrue("扶正系数不许回头：$prev → $f", f <= prev + 1e-6f)
+            if (s < 0.5f) {
+                assertTrue("前半段应当比线性退回更慢（先保持住）：s=$s f=$f", f >= 1f - s - 1e-6f)
+            } else if (s < 1f) {
+                assertTrue("后半段应当比线性退回更快（收干净）：s=$s f=$f", f <= 1f - s + 1e-6f)
+            }
             prev = f
         }
     }

@@ -131,14 +131,13 @@ class FlipController(
      * 结算期间的**倾斜扶正系数**（0..1，见 `curl/CurlShape.lean`）。
      *
      * 跟手时恒 1；松手后分两种口径：
-     * - **翻页（commit）**：在**起手那一小段行程里**就淡到 0
-     *   （[orilumn.reader.ui.reader.curl.settleLeanFade] /
-     *   [orilumn.reader.ui.reader.curl.CURL_LEAN_STRAIGHTEN_SPAN]）。倾斜量乘的是折痕两端相对
-     *   中点的横向偏移，折痕横扫向书脊时会把纸角放大着抬到页顶；若像阴影那样留到末段才扶正，
-     *   读者看到的就是「松手后页角先向上冲一下，再退回来」。
+     * - **翻页（commit）**：手松那一刻的折痕角度**原样保持住**，再跟整段行程一起平滑退回
+     *   （[orilumn.reader.ui.reader.curl.settleLeanFade]：`1 − smoothstep`，两端斜率都是 0）。
+     *   倾斜量乘的是折痕两端相对中点的横向偏移，它决定「纸角朝哪个方向掀着」；一松手就扶平、
+     *   再让折痕竖直横扫，屏幕上就是两截断开的动作（读者口径「先是回平再播放，非常不协调」）。
      * - **回弹（rollback）**：按「还剩多少行程」匀速退回
      *   （[orilumn.reader.ui.reader.curl.settleLeanRewind]），末帧正好竖直贴边。回弹是把手势
-     *   倒着播，末段才扶正同样会让纸角先上冲再退回；起手就扶正又会让折角在开头整块塌掉。
+     *   倒着播，末段才扶正会让纸角先上冲再退回；起手就扶正又会让折角在开头整块塌掉。
      *   折痕已被推到自由边之外时还会**钉住折痕**（[orilumn.reader.ui.reader.curl.settleFoldProgress]），
      *   这段行程里倾斜是唯一的形变：塌平 = 折角原地收拢，不跟折痕回扫抢方向。
      *
@@ -849,8 +848,8 @@ class FlipController(
         val commit = decision == FlipSession.Decision.COMMIT
         curlFade.value = if (handoff) 1f else Float.NaN
         // 倾斜与阴影分开，且两个方向各有各的扶正口径（见 [curlLeanFade]）：
-        //  - 翻页：起手这一小段行程里就扶正，否则斜折痕横扫向书脊时会把纸角放大着抬到页顶、
-        //    再在末段退回来；
+        //  - 翻页：松手那一刻的折痕角度先保持住，再跟整段行程一起平滑退回（[settleLeanFade]），
+        //    接着手指的方向走；一松手就扶平、再竖直横扫就是两截断开的动作；
         //  - 回弹：倾斜跟着「还剩多少行程」一起退（[settleLeanRewind]），末帧正好竖直贴边。
         //    末段才扶正会让纸角先向上冲一下再退回；起手就扶正又会让折角整块塌掉。
         // 回弹还有第三件事：折痕已经在自由边之外时**钉住折痕**，只让倾斜塌回平面

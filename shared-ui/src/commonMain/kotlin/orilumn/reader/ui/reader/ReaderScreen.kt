@@ -61,6 +61,7 @@ import androidx.compose.ui.unit.sp
 import orilumn.reader.data.annotation.Annotation
 import orilumn.reader.data.annotation.AnnotationKind
 import orilumn.reader.data.annotation.AnnotationLineStyle
+import orilumn.reader.data.correction.CorrectionRules
 import orilumn.reader.data.font.FontEntry
 import orilumn.reader.data.revision.TextRevision
 import orilumn.reader.data.settings.ReaderSettings
@@ -2291,9 +2292,9 @@ fun ReaderScreen(
     }
 
     /**
-     * 当前选区在纠错词典里的正确候选词（修订模式专用，见 [CorrectionDictionary]）。
+     * 当前选区在纠错词典里的正确候选词（修订模式专用，见 [CorrectionRules]）。
      *
-     * 只认**整词命中**：选区多一个字、少一个字、带标点都不算——猜错上下文会把对的字改坏。
+     * 只认**整段命中**：选区多一个字、少一个字、带标点都不算——猜错上下文会把对的字改坏。
      * 选区一变（拖手柄、重选）这里就重算，候选词行跟着换。
      */
     fun selectionCorrections(): List<String> {
@@ -2306,7 +2307,7 @@ fun ReaderScreen(
         val text = currentHost.textOf(ch, 0, Int.MAX_VALUE) ?: return emptyList()
         // 与修改卡同一把尺：审阅痕迹不算字（接缝空白在卡里是原文的一部分，这里不动）。
         val word = currentHost.reviewBreakText(ch).slice(text, selection.start, selection.endExclusive)
-        return CorrectionDictionary.candidatesFor(word)
+        return CorrectionRules.candidatesFor(word)
     }
 
     /**

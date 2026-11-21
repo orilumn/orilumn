@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
@@ -30,12 +31,14 @@ import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.layoutId
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import orilumn.reader.data.annotation.AnnotationKind
 import orilumn.reader.data.annotation.AnnotationLineStyle
+import orilumn.reader.data.correction.CorrectionRules
 import orilumn.reader.engine.skia.ANNOTATION_DASH_OFF_RATIO
 import orilumn.reader.engine.skia.ANNOTATION_DASH_ON_RATIO
 import orilumn.reader.engine.skia.ANNOTATION_UNDERLINE_THICKNESS_EM
@@ -52,7 +55,7 @@ import orilumn.reader.engine.skia.decorWaveGeometry
  * 再装不下（窄手机）就三行：类别一行、色槽一行、线型一行。判定全部来自**实测宽度**，
  * 不看屏幕 dp 阈值。
  *
- * 正文修改模式下色槽整排隐藏，`修订` 右边那片空白用来放**纠错候选词**（见 [CorrectionDictionary]）：
+ * 正文修改模式下色槽整排隐藏，`修订` 右边那片空白用来放**纠错候选词**（见 [CorrectionRules]）：
  * 绿色文字、点一下即提交，不用再点 `确定`。
  *
  * 类别名本身就是样张：「高亮」二字垫当前高亮色，「划线」二字按当前**线型与线色**画一笔。
@@ -80,7 +83,7 @@ internal fun AnnotationActionBar(
     onEdit: (() -> Unit)? = null,
     editEnabled: Boolean = false,
     /**
-     * 纠错候选（修订模式，见 [CorrectionDictionary]）：词典命中**当前选区整词**时非空。
+     * 纠错候选（修订模式，见 [CorrectionRules]）：词典命中**当前选区整段**时非空。
      *
      * 摆在「高亮 / 划线 / 修订」右边那片空白里（修订模式下色槽整排隐藏，那里本来就空着），
      * 绿色文字，**点一下就提交修订**，不用再点「确定」。
@@ -464,10 +467,13 @@ private fun LineStyleRow(
 private val MENU_LABEL_FONT = 14.sp
 
 /**
- * 纠错候选词（见 [CorrectionDictionary]）：绿色文字，**点一下就提交修订**（不用再点 `确定`）。
+ * 纠错候选词（见 [CorrectionRules]）：绿色文字，**点一下就提交修订**（不用再点 `确定`）。
  *
  * 只出现在正文修改模式，落在 `修订` 右边那片空白里；绿色与审阅视图里「新写进去的字」
  * 同一支绿，读者一眼看出这是「改后」的样子。
+ *
+ * 候选可能是一整段带引号的文字（成对符号规则），所以给一个宽度上限、超出用省略号收住：
+ * 点下去提交的仍是完整候选，显示只取前一段，免得把整根操作栏撑出去。
  */
 @Composable
 private fun CorrectionRow(words: List<String>, onPick: (String) -> Unit) {
@@ -480,13 +486,18 @@ private fun CorrectionRow(words: List<String>, onPick: (String) -> Unit) {
                 fontSize = MENU_LABEL_FONT,
                 fontWeight = FontWeight.Medium,
                 maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
                 modifier = Modifier
+                    .widthIn(max = CORRECTION_LABEL_MAX_WIDTH)
                     .clickable { onPick(word) }
                     .padding(horizontal = 9.dp, vertical = 7.dp),
             )
         }
     }
 }
+
+/** 单条候选词的显示宽度上限（超长候选只影响显示，提交的仍是完整文字）。 */
+private val CORRECTION_LABEL_MAX_WIDTH = 220.dp
 
 /** 线型样张：与正文里落墨的位置对齐（线画在字的下沿）。 */
 private fun DrawScope.drawLineStyleGlyph(

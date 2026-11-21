@@ -19,14 +19,11 @@ import kotlin.math.sqrt
  *   botC  = (foldX + lean·tiltW, 页高)            （折痕与页下边的交点）
  * ```
  *
- * **装订边那一侧**（左装书的左缘；低层镜像几何则是右缘）折痕端点只能贴到页边：折痕越靠近
- * 书脊，允许的倾斜越小，到书脊时正好竖直。折痕**不许**从书脊穿出去——那样整条上边（或下边）
- * 都被掀起、书脊中段却还连着，版面上就是把这页从书脊上撕下来（见 [curlShape] 的约束）。
- * 另一侧是自由边，折痕可以整根滑到页宽之外。
- *
- * 两端另夹在 `[−R, 2·页宽]`（R = 卷曲半径，见 [CURL3D_RADIUS_RATIO]）：书脊那端可以越过一个
- * 半径——那是纸卷的**退场余量**，且只在折痕自己已经越过书脊之后才用得上；自由边那端可以滑出
- * 右缘。
+ * **折痕与书脊：两端一视同仁，都可以卷过书脊**（读者 2026-11-21 口径：「上下书脊应该是
+ * 相同的！你见过哪本书是翻不到书脊的？」）。纸角卷过书脊就是翻页本来的样子，所以书脊这一侧
+ * **不再压倾斜**：折痕端点按手指给的倾斜走，只受末尾 `[−R, 2·页宽]` 的夹取——那是纸卷
+ * **退场**的一个筒径余量，不是书脊约束。左半边、右半边、两个翻页方向、跟手与结算同一套；
+ * 两种锚点只在「抓的是什么」上不同（纸边压在手指 / 折痕穿过手指）。
  *
  * ## 纸卷退场（修「纸张滚到书脊就卷不成筒」）
  *
@@ -124,22 +121,6 @@ internal const val CURL_SHADOW_BAND: Float = 0.05f
 
 /** 进度头尾这一段（占整段的比例）里扶正折痕、淡出阴影，见文件头。 */
 internal const val CURL_TAIL_FADE_SPAN: Float = 0.1f
-
-/**
- * 跟手时求「折痕端点正好贴住书脊」那个倾斜的二分步数。
- *
- * 10 步把倾斜区间分到 1/1024：平板上倾斜差 1 时端点相差约 0.9 页宽，剩下的误差不到 2px，
- * 画面上看不出来；再多只是白算。
- */
-private const val SPINE_SOLVE_STEPS: Int = 10
-
-/**
- * 折痕中点到**装订边**的水平距离（px）：左装书是左缘，镜像几何（`forward = false`）是右缘。
- *
- * 折痕最多只能倾斜到端点落在这段距离之内（见 [curlShape]）：再斜，折痕就从书脊穿出去了。
- */
-private fun spineRoom(foldX: Float, pageW: Float, forward: Boolean): Float =
-    (if (forward) foldX else pageW - foldX).coerceAtLeast(0f)
 
 /**
  * 一次拖动：`from` = 起手时**贴在页边上**的那个点，`to` = 当前手指位置（都是页坐标）。
@@ -269,9 +250,8 @@ internal fun travelLeanCap(pull: CurlPull, tiltW: Float): Float =
  * @param tilt 折痕倾斜量（0 = 竖直折痕）。拖动中由 [leanOf] 从拖动方向算出——**是斜率**，
  *   不是 `dy/|d|` 的正弦，所以斜拖时折痕才真的垂直于手指的轨迹；**符号只跟竖向动作走**
  *   （见 [leanOf] 的 KDoc），结算期间保持松手那一刻的值。
- *   这是**想要的**倾斜，实际值还要受两道约束（见 [curlShape]）：折痕端点不许越过书脊
- *   （越靠近书脊能用的倾斜越小，到书脊正好竖直），跟手时也不许超过手指横向行程的
- *   [CURL_LEAN_PER_TRAVEL] 倍（见 [travelLeanCap]）。
+ *   这是**想要的**倾斜，实际值只受手指横向行程的 [CURL_LEAN_PER_TRAVEL] 倍约束
+ *   （跟手时，见 [travelLeanCap]）；书脊不再压倾斜（折痕端点可以卷过书脊一个筒径）。
  * @param pull 本次拖动（起手点 + 此刻手指 + 起手那一刻定的锚点），非 null 时折痕位置改由它
  *   反解，两种锚点都跟手（见 [CurlAnchor]）：右半边起手 ⇒ 纸边压手指（[anchoredFoldX]），
  *   左半边起手 ⇒ 折痕穿手指（[creaseFoldX]）。**与翻页方向无关**，两个方向同一套。
@@ -337,33 +317,12 @@ internal fun curlShape(
             anchoredFoldX(finger, w, h, lean, tiltW).coerceIn(-exit, w)
     }
 
-    // 折痕端点不许越过装订边（见文件头）：越靠近书脊，允许的倾斜越小；到书脊正好竖直，
-    // 与「纸卷退场」接上。自由边那一侧不限制。
+    // 折痕与书脊：**两端一视同仁**（读者 2026-11-21 口径「你见过哪本书是翻不到书脊的？」）。
     //
-    // 折痕锚点只收倾斜、不挪折痕：折痕必须一直穿过手指，能收的只有斜率（[creaseLeanUnderSpine]）。
-    // 纸边锚点做不到这一点——倾斜一收小，纸边贴手反解出来的折痕就往外挪——所以要二分找
-    // 「折痕端点正好贴在书脊上、纸边仍压在手指上」的那个解。
-    val room = spineRoom(foldX, w, forward)
-    if (finger != null && finger.anchor == CurlAnchor.Crease) {
-        lean = creaseLeanUnderSpine(finger, h, lean, tiltW)
-        foldX = creaseFoldX(finger, h, lean, tiltW).coerceIn(-exit, w)
-    } else if (kotlin.math.abs(lean) * tiltW > room) {
-        if (finger != null) {
-            val sign = if (lean < 0f) -1f else 1f
-            var lo = 0f
-            var hi = kotlin.math.abs(lean)
-            repeat(SPINE_SOLVE_STEPS) {
-                val mid = (lo + hi) * 0.5f
-                val fx = anchoredFoldX(finger, w, h, sign * mid, tiltW).coerceIn(-exit, w)
-                if (mid * tiltW <= spineRoom(fx, w, forward)) lo = mid else hi = mid
-            }
-            // 取可行那一侧（lo）：收紧到「端点刚好贴页边」，不越过。
-            lean = sign * lo
-            foldX = anchoredFoldX(finger, w, h, lean, tiltW).coerceIn(-exit, w)
-        } else {
-            lean = lean.coerceIn(-room / tiltW, room / tiltW)
-        }
-    }
+    // 书脊这一侧不再压倾斜：纸角卷过书脊是翻页本来的样子。折痕端点按手指给的倾斜走，
+    // 只受末尾 `[−R, 2·页宽]` 的夹取——那是纸卷**退场**的一个筒径，不是书脊约束。
+    // 左半边、右半边、两个翻页方向、跟手与结算用同一套；两种锚点只在「抓的是什么」上不同
+    // （纸边压在手指 / 折痕穿过手指），这里不再有第三种分支。
 
     // 起手接手：折痕先停在「静止位置」（`restFold`，由 [curlFrame] 按翻页方向给），
     // 再用 [CurlPull.blend] 在起手那一小段（[PULL_INTRO_MS]）里滑到锚点位置，然后完全交给手。
@@ -515,21 +474,6 @@ internal fun creaseFoldX(pull: CurlPull, pageH: Float, lean: Float, tiltW: Float
     val h = pageH.coerceAtLeast(1f)
     val fy = pull.to.y.coerceIn(0f, h)
     return pull.to.x + lean * tiltW * (1f - 2f * fy / h)
-}
-
-/**
- * 折痕锚点下的倾斜上限：折痕端点不许越过装订边，**收的只能是斜率，不能把折痕挪离手指**。
- *
- * 上端点 `topX = foldX − lean·tiltW = 手指x − lean·tiltW·(2·手指y/h)`，要求 ≥ 0 ⇒
- * `lean·tiltW ≤ 手指x·h/(2·手指y)`。手指贴在页顶时上端点就在手指处，恒成立。
- */
-internal fun creaseLeanUnderSpine(pull: CurlPull, pageH: Float, lean: Float, tiltW: Float): Float {
-    val h = pageH.coerceAtLeast(1f)
-    val c = 2f * pull.to.y.coerceIn(0f, h) / h
-    if (c <= 1e-4f) return lean
-    val limit = pull.to.x / c
-    val l = lean * tiltW
-    return if (l > limit) limit / tiltW.coerceAtLeast(1e-3f) else lean
 }
 
 /**

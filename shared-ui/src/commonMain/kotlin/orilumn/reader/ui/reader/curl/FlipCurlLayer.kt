@@ -90,8 +90,9 @@ class CurlPageImages {
  * @param lean 折痕倾斜量（0 = 竖直折痕，见 `FlipController.curlLean`）：拖动中是
  *   拖动方向换算出来的**斜率**（`curl/leanOf`），斜拖时折痕垂直于手指轨迹；结算期间保持
  *   松手那一刻的值
- * @param pull 本次拖动的起点与此刻手指（页坐标）；非 null 时折痕跟着手指反解，让手上
- *   那张纸的边压在手指上（见 `curl/anchoredFoldX`）。上一页忽略它。
+ * @param pull 本次拖动的起点与此刻手指（页坐标）；非 null 时折痕跟着手指反解，抓什么由
+ *   起手那一刻定的锚点决定（右半边 = 纸边压手指，左半边 = 折痕穿手指，见 `CurlAnchor`）。
+ *   **上一页同样跟手**，两个方向共用这一套。
  * @param currentTex/targetTex 页栅格在页坐标里的左上角（页槽自己的事：正文是版心、
  *   封面这种整页烤图是 0,0）；覆盖层恒为整页、贴 (0,0)
  *

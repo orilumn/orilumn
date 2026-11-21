@@ -298,9 +298,11 @@ class Curl3DRenderTest {
             assertEquals("折痕上端", next.shape.topX, prev.shape.topX, 1e-3f)
             assertEquals("折痕下端", next.shape.bottomX, prev.shape.bottomX, 1e-3f)
             assertEquals("影的浓淡", next.shape.shadowFade, prev.shape.shadowFade, 1e-6f)
+            // 书脊这一侧不再压折痕（读者 2026-11-21：上下书脊一视同仁），只留退场的一个筒径。
+            val exit = w * CURL3D_RADIUS_RATIO
             assertTrue(
-                "上一页几何的折痕也不许越过左书脊：${prev.shape.topX} / ${prev.shape.bottomX}",
-                prev.shape.topX >= 0f && prev.shape.bottomX >= 0f,
+                "上一页端点越过书脊超过一个筒径：${prev.shape.topX} / ${prev.shape.bottomX}",
+                prev.shape.topX >= -exit - 1e-3f && prev.shape.bottomX >= -exit - 1e-3f,
             )
         }
     }

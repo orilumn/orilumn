@@ -47,10 +47,11 @@ import kotlin.math.sqrt
  * 撤掉时停一下再跳」）。**只压阴影，不压读者自己给的进度**。早先只在结算里做，
  * 于是手指退回起手点（`dx` 归零）时折角会在一帧里整块消失，读者：「像那儿有一条屏幕边线」。
  *
- * 倾斜的扶正分两段：进度两端照旧淡（点按 / 程序翻页，[tailFade]）；**松手交接**的结算则在
- * 起手那 15% 行程里就扶正（[settleLeanFade]，见 [CURL_LEAN_STRAIGHTEN_SPAN]），否则斜折痕
- * 横扫向书脊时会把纸角放大着抬到页顶，再在末段扶正里退回来（读者：「松手后页角先向上冲
- * 一下」）。倾斜与阴影因此是两个系数，各自淡各自的。
+ * 倾斜的扶正分三种：进度两端照旧淡（点按 / 程序翻页，[tailFade]）；**松手交接的翻页**在起手
+ * 那 15% 行程里就扶正（[settleLeanFade]，见 [CURL_LEAN_STRAIGHTEN_SPAN]）；**松手交接的回弹**
+ * 按「还剩多少行程」匀速退回（[settleLeanRewind]）。后两者都是为了不让斜折痕在横扫/回扫时
+ * 把纸角放大着抬上去再退回来（读者：「松手后页角先向上冲一下」）。倾斜与阴影因此是两个
+ * 系数，各自淡各自的。
  *
  * 跟手阶段**不扶正、也不淡影**：那时折角的大小不听进度（折痕由手指反解），扶正会把形状
  * 掰歪、淡影会在折角还很大时先把影淡没。倾斜改由「竖向行程上限」约束（见下），
@@ -84,14 +85,15 @@ internal data class CurlShape(
      * 折痕倾斜量（正 = 上端 `foldX − lean·tiltW`、下端 `foldX + lean·tiltW`）。
      *
      * 符号只跟竖向动作走（见 [leanOf]：手指向上、纸角就向上转，与起手在哪一侧无关），
-     * 也已做扶正（结算跟手交接用起手扶正 [settleLeanFade]，点按用 [tailFade]）/ 跟手时的
-     * 竖向行程收小。
+     * 也已做扶正（结算跟手交接时翻页用 [settleLeanFade]、回弹用 [settleLeanRewind]，
+     * 点按用 [tailFade]）/ 跟手时的竖向行程收小。
      */
     val lean: Float,
     /**
      * 阴影随进度的淡出系数 0..1（见文件头「头尾扶正」）。
      *
-     * **只管阴影**：倾斜另有 [lean] 自己的扶正系数（[settleLeanFade]），两者不再共用一个数。
+     * **只管阴影**：倾斜另有 [lean] 自己的扶正系数（[settleLeanFade] / [settleLeanRewind]），
+     * 两者不再共用一个数。
      * 跟手帧（[anchored]）恒为 1：那时折角的大小不听进度，影的浓淡交给几何（纸抬多高、
      * 影多宽），按进度淡会在折角还很大时把影先淡没（见 [noLiftYet]）。
      */
@@ -300,7 +302,8 @@ internal fun leanOf(pull: CurlPull, pageW: Float, pageH: Float): Float {
  * 贴边，折角面积连续收到零。短行程时上限压得比线性更紧，是为了不重演「一按就掀两三成
  * 页宽」；中等行程放开得更快，是为了页角折起来之后折痕仍垂直于手指轨迹。
  *
- * 限额只在跟手时用（结算期间没有手指，倾斜听 [settleLeanFade] 的扶正系数，见文件头「头尾扶正」）。
+ * 限额只在跟手时用（结算期间没有手指，倾斜听 [settleLeanFade] / [settleLeanRewind] 的扶正
+ * 系数，见文件头「头尾扶正」）。
  */
 internal fun verticalLeanCap(pull: CurlPull, tiltW: Float): Float {
     val dy = kotlin.math.abs(pull.to.y - pull.from.y)
@@ -325,8 +328,8 @@ internal fun verticalLeanCap(pull: CurlPull, tiltW: Float): Float {
  *   常常是负的（折痕中点在自由边之外），照 [tailFade] 算会在松手那一帧把阴影直接归零、
  *   折角整块消失（见 [CurlShape.shadowFade]）。
  * @param leanFade 倾斜扶正系数（0..1）。NaN = 跟 [fade] 同一个系数（旧口径）。跟手交接的
- *   结算里由 `FlipController` 用 [settleLeanFade] 逐帧给：起手就扶正，页角不先上冲
- *   （见 [CURL_LEAN_STRAIGHTEN_SPAN]）。
+ *   结算里由 `FlipController` 逐帧给：翻页用 [settleLeanFade]（起手就扶正，页角不先上冲，
+ *   见 [CURL_LEAN_STRAIGHTEN_SPAN]），回弹用 [settleLeanRewind]（倾斜跟着剩余行程退回）。
  */
 internal fun curlShape(
     pageW: Float,
@@ -371,8 +374,9 @@ internal fun curlShape(
         !fade.isNaN() -> fade.coerceIn(0f, 1f)
         else -> tailFade(p)
     }
-    // 倾斜的扶正系数与阴影分开：松手后倾斜在起手段就扶正（[settleLeanFade]），阴影仍在
-    // 末段淡出（见 [CURL_LEAN_STRAIGHTEN_SPAN]）。没单独给倾斜系数时沿用旧口径。
+    // 倾斜的扶正系数与阴影分开：松手后倾斜在起手段就扶正（翻页 [settleLeanFade]）或跟着
+    // 剩余行程退回（回弹 [settleLeanRewind]），阴影仍在末段淡出（见 [CURL_LEAN_STRAIGHTEN_SPAN]）。
+    // 没单独给倾斜系数时沿用旧口径。
     val leanFadeK = when {
         finger != null -> 1f
         !leanFade.isNaN() -> leanFade.coerceIn(0f, 1f)
@@ -552,6 +556,49 @@ internal fun settleLeanFade(from: Float, target: Float, v: Float): Float {
     val span = (kotlin.math.abs(target - from) * CURL_LEAN_STRAIGHTEN_SPAN).coerceAtLeast(1e-4f)
     return (1f - kotlin.math.abs(v - from) / span).coerceIn(0f, 1f)
 }
+
+/**
+ * **回弹**结算的倾斜扶正系数（0..1）：倾斜跟着「还剩多少行程」一起退。
+ *
+ * 回弹是把手势倒着播：折痕退回起手位置，倾斜就该按同样的比例退回去，末帧正好竖直贴边、
+ * 折角面积连续收到零。松手那一帧恒 1（从跟手帧原样接手），之后线性降到 0。
+ *
+ * 为什么不能沿用 [settleLeanFade]（起手就扶正）或 [tailFade]（末段才扶正）：
+ * - 起手扶正：倾斜在开头几十毫秒里就没了，而折痕还在页外、折角还很大——纸角会**整块塌掉**
+ *   （真机那一手实测：折角在 12% 行程内消失）；
+ * - 末段扶正：倾斜留到最后，折痕一边往回扫、倾斜一边把纸角放大着抬上去，末段再一口气扶正，
+ *   读者看到的就是「页角先向上冲一下再退回」（读者 2026-11-21 报的那一条）。
+ *
+ * 判据见 `CurlGeometryTest.rollbackCornerDoesNotRushUpBeforeItLands`。
+ */
+internal fun settleLeanRewind(from: Float, target: Float, v: Float): Float {
+    val span = kotlin.math.abs(target - from).coerceAtLeast(1e-4f)
+    return (kotlin.math.abs(v - target) / span).coerceIn(0f, 1f)
+}
+
+/**
+ * 结算里**屏幕上折痕该摆在哪**的进度：只有「折痕已经在自由边之外的回弹」把它**钉住**，
+ * 其余（翻页、折痕还在页内的回弹）照旧跟着动画走。
+ *
+ * ## 为什么钉住（修「松手后折角/纸边乱颤」）
+ *
+ * 页角折起来时折痕中点在自由边之外（`from < 0`，真机那一手是 −0.626）。这一段里屏幕上那块
+ * 折角**全部由倾斜撑着**：折痕一竖直，它整块就没了。所以回弹时「一边把倾斜扶正、一边把
+ * 折痕扫回来」等于让折角同时受两个方向的拉扯——实测露出页面积先涨 5 帧（+0.0013/帧）再跌
+ * 9 帧，屏幕上就是纸边先往外翻一下、再收回去，读者口径「折角/纸边在乱颤」。
+ *
+ * 钉住折痕、只让倾斜塌回平面，折角就是**原地塌平**（实测单调、连成一条），折痕本身不动。
+ * 等倾斜归零，折痕扫回自由边那一小段已经**一点卷曲都没有**（竖直折痕在页外 = 平页），
+ * 所以收尾那一下把进度拨回 0 是看不见的（见 `FlipController.settle` 的回弹分支）。
+ *
+ * 折痕还在页内（`from >= 0`，比如翻了一小半又反悔）时不能钉：那时折角是一块真的页角，
+ * 必须跟着折痕一起扫回来，否则页面上会留下一块不动的折起。
+ *
+ * 判据是 `from < 0 && target <= 0`：回弹的终点是 0（起点在页外时 `target` 反而比 `from`
+ * 大），翻页的终点是 1，所以同一套条件把「翻页」与「页内回弹」都排除在外。
+ */
+internal fun settleFoldProgress(from: Float, target: Float, v: Float): Float =
+    if (from < 0f && target <= 0f) from else v
 
 /**
  * 起手「接到手指上」的缓动：`t ∈ [0,1]` 映射到接手程度 `[0,1]`（缓入缓出，smoothstep）。

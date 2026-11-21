@@ -4040,8 +4040,9 @@ fun ReaderScreen(
                     // 结算期间的阴影淡出系数：跟手那一帧起 1，末段才淡到 0；NaN = 点按/程序翻页，
                     // 由几何按进度两头淡（见 FlipController.curlFade）。
                     fade = { ctl.curlFade.value },
-                    // 结算期间的倾斜扶正系数：跟手那一帧起 1，松手后在起手那一小段行程里
-                    // 就淡到 0，页角不先向上冲（见 FlipController.curlLeanFade）。
+                    // 结算期间的倾斜扶正系数：跟手那一帧起 1；翻页在起手那一小段行程里就淡到 0，
+                    // 回弹按剩余行程匀速退回，页角都不先向上冲（见 FlipController.curlLeanFade）。
+                    // 折痕已在自由边之外的回弹还会被钉住，只让倾斜塌平（见 curl/settleFoldProgress）。
                     leanFade = { ctl.curlLeanFade.value },
                     // 只有结算动画才做扶正（手指跟手时形状听手指的，见 curl/CurlGeometry.kt）。
                     pageWidthPx = pxWidth,

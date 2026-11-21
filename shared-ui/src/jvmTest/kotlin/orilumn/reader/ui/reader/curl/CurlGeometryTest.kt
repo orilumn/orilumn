@@ -444,6 +444,102 @@ class CurlGeometryTest {
         }
     }
 
+    /** 回弹的倾斜系数：松手那一帧 1，之后跟着「还剩多少行程」线性退到 0。 */
+    @Test
+    fun settleLeanRewindKeepsTheTiltInStepWithTheRemainingTravel() {
+        val from = -0.6257217f
+        val to = 0f
+        assertEquals("松手那一帧必须从跟手形状接手", 1f, settleLeanRewind(from, to, from), 1e-6f)
+        assertEquals("落回起手页时折痕必须竖直", 0f, settleLeanRewind(from, to, to), 1e-6f)
+        assertEquals("走了一半行程就该退掉一半", 0.5f, settleLeanRewind(from, to, from / 2f), 1e-6f)
+        var prev = 1f
+        for (i in 0..100) {
+            val f = settleLeanRewind(from, to, from + (to - from) * i / 100f)
+            assertTrue("扶正系数不许回头：$prev → $f", f <= prev + 1e-6f)
+            prev = f
+        }
+    }
+
+    /**
+     * 读者 2026-11-21 真机复现的那一手：左滑起手、手指向上带一点、松手**弹回**（不是翻页）。
+     *
+     * 真机落盘：`from = −0.626`、`lean = −2.5`（竖向行程顶到上限）、`commit = false`。
+     * 折痕中点被推到自由边之外，屏幕上那块折角全靠倾斜撑着。旧口径「折痕一边往回扫、倾斜
+     * 一边把纸角放大着抬上去」实测露出页面积先涨 5 帧再跌 9 帧——读者原话「折角/纸边在颤」。
+     *
+     * 生产口径（[settleFoldProgress] + [settleLeanRewind]）：折痕中点钉在松手位置不动，倾斜
+     * 匀速塌回平面。判据：中点全程不变，折痕两端各自只朝中点走（整根线单调转回竖直，折角
+     * 那块楔形单调收窄），末帧回到渲染层的「一页都没掀」闸口。
+     */
+    @Test
+    fun rollbackCornerDoesNotRushUpBeforeItLands() {
+        val w = 1840f
+        val h = 2800f
+        val lean = -2.5f
+        val from = -0.6257217f
+        val target = 0f
+        // 生产口径：屏幕折痕走 settleFoldProgress，倾斜走 settleLeanRewind（与 FlipController.settle 一致）。
+        val frames = (0..200).map { i ->
+            val v = from + (target - from) * i / 200f
+            val fold = settleFoldProgress(from, target, v)
+            val leanFade = settleLeanRewind(from, target, v)
+            curlFrame(w, h, fold, 1, tilt = lean, leanFade = leanFade).shape
+        }
+
+        // 松手第一帧必须与跟手帧同形（钉住进度 + 倾斜系数 1 = 原样接手）。
+        val follow = curlFrame(w, h, from, 1, tilt = lean, fade = 1f, leanFade = 1f).shape
+        assertEquals("松手第一帧折痕不许动", follow.foldX, frames.first().foldX, 1e-3f)
+        assertEquals("松手第一帧上端不许动", follow.topX, frames.first().topX, 1e-3f)
+        assertEquals("松手第一帧下端不许动", follow.bottomX, frames.first().bottomX, 1e-3f)
+        // 折痕中点钉住 + 两端单调转回竖直 ⇒ 折角楔形只收不放（旧口径「扶正 + 回扫」在这里来回摆）。
+        for (i in 1 until frames.size) {
+            val prev = frames[i - 1]
+            val cur = frames[i]
+            assertEquals("第 $i 帧折痕中点动了（钉住口径失效）", frames.first().foldX, cur.foldX, 1e-3f)
+            assertTrue(
+                "折痕上端回头了（折角又外翻）：${prev.topX} → ${cur.topX}（第 $i 帧）",
+                cur.topX <= prev.topX + 1e-2f,
+            )
+            assertTrue(
+                "折痕下端回头了（折角又外翻）：${prev.bottomX} → ${cur.bottomX}（第 $i 帧）",
+                cur.bottomX >= prev.bottomX - 1e-2f,
+            )
+        }
+        // 末帧倾斜归零、折痕在自由边之外 ⇒ 渲染层判「一页都没掀」（收尾把进度拨回 0 才看不见）。
+        val last = frames.last()
+        assertEquals("落回起手页时倾斜必须归零", 0f, last.lean, 1e-4f)
+        assertTrue("折痕应当留在自由边之外：foldX=${last.foldX}", last.foldX > w)
+        assertTrue("末帧应当已是平页（noLiftYet）", last.noLiftYet())
+    }
+
+    /**
+     * 钉住折痕的口径：只有「回弹 + 折痕已在自由边之外」钉住，其余照旧跟着动画走。
+     *
+     * 翻页、以及「翻了一小半又反悔」（`from >= 0`）时折角是一块真的页角，必须跟着折痕扫回来；
+     * 钉住只服务于「折痕中点被推到页外、折角全靠倾斜撑着」那一段。
+     */
+    @Test
+    fun settleFoldProgressOnlyPinsTheFoldWhenItIsAlreadyOutsideTheFreeEdge() {
+        // 读者那一手：回弹、折痕在页外 ⇒ 整段钉在松手位置。
+        for (i in 0..100) {
+            val v = -0.6257217f * (1f - i / 100f)
+            assertEquals("回弹时折痕不许动（第 $i 帧）", -0.6257217f, settleFoldProgress(-0.6257217f, 0f, v), 1e-6f)
+        }
+        // 松手第一帧：无论哪条路径都必须等于起点（形状从跟手帧原样接手）。
+        assertEquals(-0.2f, settleFoldProgress(-0.2f, 1f, -0.2f), 1e-6f)
+        assertEquals(0.3f, settleFoldProgress(0.3f, 0f, 0.3f), 1e-6f)
+        // 折痕还在页内的回弹：跟着动画扫回。
+        for (i in 0..100) {
+            val v = 0.3f * (1f - i / 100f)
+            assertEquals("页内折痕必须跟着回扫（第 $i 帧）", v, settleFoldProgress(0.3f, 0f, v), 1e-6f)
+        }
+        // 翻页（target > from）：照旧跟着动画走。
+        for (i in 0..100) {
+            val v = -0.2f + 1.2f * i / 100f
+            assertEquals("翻页不该钉住（第 $i 帧）", v, settleFoldProgress(-0.2f, 1f, v), 1e-6f)
+        }
+    }
+
     /**
      * 自由边那两个角（右上 / 右下）没有书脊规则：折痕端点可以滑出右缘，把角卷过纸卷。
      *

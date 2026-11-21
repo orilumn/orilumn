@@ -25,7 +25,9 @@ import orilumn.reader.ui.reader.curl.PULL_INTRO_MS
 import orilumn.reader.ui.reader.curl.anchoredProgress
 import orilumn.reader.ui.reader.curl.leanOf
 import orilumn.reader.ui.reader.curl.pullEngage
+import orilumn.reader.ui.reader.curl.settleFoldProgress
 import orilumn.reader.ui.reader.curl.settleLeanFade
+import orilumn.reader.ui.reader.curl.settleLeanRewind
 
 /**
  * 滑动翻页会话的**唯一宿主**（用户层·与 [FlipSession] 配套）。
@@ -126,15 +128,19 @@ class FlipController(
     val curlFade: MutableFloatState = mutableFloatStateOf(Float.NaN)
 
     /**
-     * 结算期间的**倾斜扶正系数**（0..1，见 `curl/CurlShape.lean` / `curl/settleLeanFade`）。
+     * 结算期间的**倾斜扶正系数**（0..1，见 `curl/CurlShape.lean`）。
      *
-     * 跟手时恒 1；**翻页（commit）**松手后在**起手那一小段行程里**就淡到 0
-     * （[orilumn.reader.ui.reader.curl.CURL_LEAN_STRAIGHTEN_SPAN]）。倾斜量乘的是折痕两端相对
-     * 中点的横向偏移，折痕横扫向书脊时会把纸角放大着抬到页顶；若像阴影那样留到末段才扶正，
-     * 读者看到的就是「松手后页角先向上冲一下，再退回来」。
-     *
-     * **回弹（rollback）不扶正**（NaN = 与 [curlFade] 同口径、末段淡）：回弹是把手势倒着播一遍，
-     * 倾斜跟着进度退回，页角沿原路回到起手位置；提前扶正反而会让它越过页顶再回来。
+     * 跟手时恒 1；松手后分两种口径：
+     * - **翻页（commit）**：在**起手那一小段行程里**就淡到 0
+     *   （[orilumn.reader.ui.reader.curl.settleLeanFade] /
+     *   [orilumn.reader.ui.reader.curl.CURL_LEAN_STRAIGHTEN_SPAN]）。倾斜量乘的是折痕两端相对
+     *   中点的横向偏移，折痕横扫向书脊时会把纸角放大着抬到页顶；若像阴影那样留到末段才扶正，
+     *   读者看到的就是「松手后页角先向上冲一下，再退回来」。
+     * - **回弹（rollback）**：按「还剩多少行程」匀速退回
+     *   （[orilumn.reader.ui.reader.curl.settleLeanRewind]），末帧正好竖直贴边。回弹是把手势
+     *   倒着播，末段才扶正同样会让纸角先上冲再退回；起手就扶正又会让折角在开头整块塌掉。
+     *   折痕已被推到自由边之外时还会**钉住折痕**（[orilumn.reader.ui.reader.curl.settleFoldProgress]），
+     *   这段行程里倾斜是唯一的形变：塌平 = 折角原地收拢，不跟折痕回扫抢方向。
      *
      * `NaN` = 没有跟手交接（点按 / 程序翻页），倾斜照旧按进度 `tailFade` 两头淡。
      */
@@ -796,6 +802,9 @@ class FlipController(
      * 跟手松手时那个真实位置由 [fromProgress] 传入（折痕可能不在进度位置上，见
      * `curl/anchoredFoldX`）；其余路径（点按/兜底）传 null，退回按进度算。
      * 时长按甩动速度折算（快甩短促收尾），[pageW] 用于把进度换算回像素距离。
+     *
+     * 回弹时屏幕上折痕的进度另走 [settleFoldProgress]：折痕已被推到自由边之外就钉住不动、
+     * 只让倾斜塌回平面（否则扶正与回扫互相拉扯，纸边先外翻再收回）；收尾再把进度拨回 0。
      */
     fun settle(
         decision: FlipSession.Decision,
@@ -839,10 +848,14 @@ class FlipController(
         val handoff = fromProgress != null
         val commit = decision == FlipSession.Decision.COMMIT
         curlFade.value = if (handoff) 1f else Float.NaN
-        // 倾斜与阴影分开：翻页时倾斜在**起手**这一小段行程里就扶正（见 [curlLeanFade]），
-        // 否则斜折痕横扫向书脊时会把纸角放大着抬到页顶、再在末段退回来。回弹不扶正：
-        // 它是把手势倒着播，倾斜跟着进度退回，页角沿原路回去。
-        curlLeanFade.value = if (handoff && commit) 1f else Float.NaN
+        // 倾斜与阴影分开，且两个方向各有各的扶正口径（见 [curlLeanFade]）：
+        //  - 翻页：起手这一小段行程里就扶正，否则斜折痕横扫向书脊时会把纸角放大着抬到页顶、
+        //    再在末段退回来；
+        //  - 回弹：倾斜跟着「还剩多少行程」一起退（[settleLeanRewind]），末帧正好竖直贴边。
+        //    末段才扶正会让纸角先向上冲一下再退回；起手就扶正又会让折角整块塌掉。
+        // 回弹还有第三件事：折痕已经在自由边之外时**钉住折痕**，只让倾斜塌回平面
+        // （[settleFoldProgress]）——否则「扶正 + 扫折痕」两个方向互相拉扯，纸边会先外翻再收回。
+        curlLeanFade.value = if (handoff) 1f else Float.NaN
         settleJob?.cancel()
         settleJob = scope.launch {
             val anim = androidx.compose.animation.core.Animatable(from)
@@ -853,10 +866,17 @@ class FlipController(
                 // animateTo 的回调是无参的 Animatable.() -> Unit，当前值在 this.value 上。
                 val v = value
                 session.onSettleProgress(v)
-                progress.value = v
+                // 屏幕上折痕摆哪：翻页与「折痕还在页内」的回弹都跟着动画走；折痕已在自由边
+                // 之外的回弹把它钉在松手位置（见 [settleFoldProgress]），那块折角全靠倾斜撑着，
+                // 倾斜塌平它就地收拢，不会出现「先外翻再收回」的颤动。
+                progress.value = settleFoldProgress(from, target, v)
                 if (handoff) {
                     curlFade.value = (kotlin.math.abs(v - target) / fadeSpan).coerceIn(0f, 1f)
-                    if (commit) curlLeanFade.value = settleLeanFade(from, target, v)
+                    curlLeanFade.value = if (commit) {
+                        settleLeanFade(from, target, v)
+                    } else {
+                        settleLeanRewind(from, target, v)
+                    }
                 }
             }
             if (decision == FlipSession.Decision.COMMIT) {
@@ -867,6 +887,10 @@ class FlipController(
                 clear()
             } else {
                 // 回弹：动画回到 0，同时把引擎指针翻回原页。
+                // 折痕可能被钉在页外（见 [settleFoldProgress]），收尾这一帧倾斜已归零、
+                // 竖直折痕在页外 = 平页，所以把进度拨回 0 是**看不见**的；不拨的话，钉住的
+                // 负进度会留到落位完成才复位，期间渲染层仍按页外折痕画（视觉上虽平，状态却是错的）。
+                progress.value = 0f
                 rollback(navigateBack = true)
             }
         }

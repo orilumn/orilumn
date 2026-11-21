@@ -140,6 +140,13 @@ internal fun AnnotationSheet(
     /** 选区菜单的「修订」：有选区时可点（正文修改 v3）。 */
     onEdit: (() -> Unit)? = null,
     editEnabled: Boolean = false,
+    /**
+     * 纠错候选（修订模式，见 [CorrectionDictionary]）：词典命中**当前选区整词**时非空。
+     *
+     * 摆在操作栏 `修订` 右边那片空白里，绿色文字；点一下就提交修订（见 [onPickCorrection]）。
+     */
+    corrections: List<String> = emptyList(),
+    onPickCorrection: (String) -> Unit = {},
     /** 点卡片外 / 返回键 / Esc：**取消**（什么都不写，原记录不动；落笔只认 `确定`）。 */
     onCancel: () -> Unit,
     /** 汇报卡片自身高度（像素）：页面让位要用实测值，不能靠估。 */
@@ -309,6 +316,8 @@ internal fun AnnotationSheet(
                 onDone = onDone,
                 onEdit = onEdit,
                 editEnabled = editEnabled,
+                corrections = corrections,
+                onPickCorrection = onPickCorrection,
                 editMode = mode == NoteSheetMode.TextEdit,
             )
         }

@@ -2291,20 +2291,44 @@ fun ReaderScreen(
     }
 
     /**
+     * 当前选区在纠错词典里的正确候选词（修订模式专用，见 [CorrectionDictionary]）。
+     *
+     * 只认**整词命中**：选区多一个字、少一个字、带标点都不算——猜错上下文会把对的字改坏。
+     * 选区一变（拖手柄、重选）这里就重算，候选词行跟着换。
+     */
+    fun selectionCorrections(): List<String> {
+        if (!textEditOpen || !selection.hasSelection) return emptyList()
+        val ch = selection.chapter
+        if (ch < 0 || ch != textEditChapter) return emptyList()
+        // 落笔范围必须**就是选区本身**：整表 / 整段修订会把卡片目标扩到选区之外，
+        // 那时点候选会把整行 / 整段换成一个词（不是读者选的那个字），一律不给候选。
+        if (selection.start != textEditStart || selection.endExclusive != textEditEnd) return emptyList()
+        val text = currentHost.textOf(ch, 0, Int.MAX_VALUE) ?: return emptyList()
+        // 与修改卡同一把尺：审阅痕迹不算字（接缝空白在卡里是原文的一部分，这里不动）。
+        val word = currentHost.reviewBreakText(ch).slice(text, selection.start, selection.endExclusive)
+        return CorrectionDictionary.candidatesFor(word)
+    }
+
+    /**
      * 提交正文修改：纯计算 + 落库 + 单章重排都在宿主里完成；这里只管卡片、提示与选区收尾。
      *
      * 成功：关卡片、落位到修改起点、**收掉选区**（改已落库，蓝底与手柄不再留在正文上）。
      * 失败 / 校验拒绝：**卡片不关、正文不动**，就地提示。
+     *
+     * [cardOverride] 非空 = 这次提交的正文不是输入区里的字，而是调用方直接给的一段（点纠错候选词：
+     * 读者要的是「这个字换成那个字」，不必先把它写进输入区再确认）。输入区本身不动，
+     * 校验 / 落库 / 收卡全部照旧走同一条路。
      */
-    fun commitTextEdit() {
+    fun commitTextEdit(cardOverride: String? = null) {
         if (textEditBusy) return
         val ch = textEditChapter
         val s = textEditStart
         val e = textEditEnd
         if (ch < 0 || e <= s) return
+        val cardText = cardOverride ?: textEditText
         // 输入区里的标记**只活在卡片里**：先解析回「纯文本 + 样式区间」，写进正文的一律是纯文本。
         // 解析失败（非白名单标签、非法链接之类）就地提示，卡片不关、正文不动。
-        val parsed = InlineMarkup.parse(textEditText)
+        val parsed = InlineMarkup.parse(cardText)
         if (!parsed.ok) {
             // 卡片里就地列出**全部**问题（规格 §5）：只弹底部第一条，后面的错误全丢了，
             // 而且提示离输入框太远，读者不知道该改哪儿。
@@ -2411,7 +2435,7 @@ fun ReaderScreen(
         }
         // 一个字没改、结构也没变：直接收卡，不白落一条修订（少了这一句，开卡直接确定也会写库）。
         val original = originalSpans.orEmpty()
-        if (body == textEditBaseText && textEditText == textEditBaseCard && styles.orEmpty() == original) {
+        if (body == textEditBaseText && cardText == textEditBaseCard && styles.orEmpty() == original) {
             focusManager.clearFocus()
             textEditOpen = false
             textEditText = ""
@@ -2472,6 +2496,19 @@ fun ReaderScreen(
                 null -> snackbar.show("正在处理，请稍后再试")
             }
         }
+    }
+
+    /**
+     * 纠错候选词被点中：**立刻**把选区那几个字换成候选词，不用再点 `确定`（用户定口）。
+     *
+     * 只替换**选区本身**（= 卡片目标区间），不读输入区：读者点的是「这个字该写成那个字」，
+     * 不该把他还没提交的手工改写一起算进去。校验、落库、重排、收卡都复用 [commitTextEdit]。
+     */
+    fun commitCorrection(word: String) {
+        if (textEditBusy || !textEditOpen) return
+        // 再核一次：候选行是上一帧算出来的，这期间选区可能已经变了（拖手柄 / 重选）。
+        if (word !in selectionCorrections()) return
+        commitTextEdit(cardOverride = word)
     }
 
     /**
@@ -4201,6 +4238,22 @@ fun ReaderScreen(
                     setTextEditTarget(ch, s, e)
                 }
             }
+            // 纠错候选：只在修订模式、且选区正好是词典里的**整词**时出现。
+            // 键里带选区两端，所以拖手柄 / 重选时这一行跟着换词，不会停在上一次那个词上。
+            val correctionWords = remember(
+                textEditOn,
+                textEditChapter,
+                selection.hasSelection,
+                selection.start,
+                selection.endExclusive,
+                // 卡片目标区间跟着选区走（拖手柄时晚一帧）：落笔范围对上了才给候选。
+                textEditStart,
+                textEditEnd,
+                textEditRevision,
+                currentHost,
+            ) {
+                if (textEditOn) selectionCorrections() else emptyList()
+            }
             // 卡片**从屏幕下沿滑上来**、收起时再滑下去（D-30）。它自己已经按键盘高度上移（[AnnotationSheet]
             // 里的 imePx），所以滑入这一段里卡片的下半截正被升起的键盘挡着——看上去是「卡片 + 键盘」
             // 整整一块从底下推上来，而不是先弹一张卡片、再单独顶起键盘。
@@ -4304,6 +4357,8 @@ fun ReaderScreen(
                     onCancel = { if (textEditOn) cancelTextEdit() else cancelNote() },
                     onEdit = { beginTextEdit() },
                     editEnabled = selection.hasSelection,
+                    corrections = correctionWords,
+                    onPickCorrection = { commitCorrection(it) },
                     onHeightChange = { noteBarHeightPx = it },
                 )
             }

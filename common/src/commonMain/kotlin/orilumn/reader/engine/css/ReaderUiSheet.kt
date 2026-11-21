@@ -21,8 +21,15 @@ import kotlin.math.roundToInt
  *
  * 字体槽（用户显式选字体，空 = 该域跟随原书）：槽位按 `fontSlotFor` 同一路由分域——正文槽
  * 只覆盖非标题、非代码的文本块（h1..h6→标题槽，pre/code/kbd/samp→代码槽），标题/代码标签
- * 由各自的槽按标签覆盖；某槽清空即该域不写 font-family（书自己的字体直接生效，正文槽经继承
- * 兜底没有自己字体声明的标题/代码块），标题/代码一旦点选即压过书内字体。
+ * 由各自的槽按标签覆盖；某槽清空即该域不写 font-family（书自己的字体直接生效），标题/代码
+ * 一旦点选即压过书内字体。
+ *
+ * **正文槽刻意不碰标题（`:not(:has(h1..h6))` 守卫）**：`font-family` 是继承属性，正文槽若落在
+ * `<body>`/`<div>` 这类**容器**上，书里没有自己字体声明的标题会顺走正文的字（用户报「有时改正文
+ * 连带把标题改掉，得再点一次标题才分开」）。容器里只要含标题就整条规则不命中，标题于是继续
+ * 继承**书的**字体（原书设置）或主题层的 `h1..h6` 声明（现代/传统），正文的 `p`/`li` 等叶子
+ * 选择器照常命中——容器里的正文段落不受影响。守卫只是「别继承过去」，不是给标题发声明：
+ * 读者没点标题槽时 UI 层仍然一条标题族都不写。
  */
 object ReaderUiSheet {
 
@@ -51,16 +58,20 @@ object ReaderUiSheet {
     /**
      * 字体槽规则：非空槽才出规则（空槽跟随原书）。族名恒加引号（CJK/空格族安全），
      * 逗号/引号剔除（族名含逗号本就不合法；防注入破坏后继规则）。
-     * **字重与 font-family 同规则同选择器表**（`hWeight`/`bodyWeight`/`codeWeight`）——
-     * 用户字重经 UI 层（tier 44）进级联，与行距/段间距/首行缩进同一条路，**不在渲染层事后改写**
-     * （`Cascade` 决策 6 明令「upper layers … without any post-hoc mutation」）。
-     * 只有用户在该槽显式选过字重才写 `font-weight`；没选就不写，书自己的 `font-weight`
-     * （UA `h1{bold}`、作者 `.fm-head{bold}`）原样生效。
+     * **正文 / 标题的字重与 font-family 同规则同选择器表**——用户字重经 UI 层（tier 44）进级联，
+     * 与行距/段间距/首行缩进同一条路，**不在渲染层事后改写**（`Cascade` 决策 6 明令
+     * 「upper layers … without any post-hoc mutation」）。只有读者在该槽显式选过字重才写
+     * `font-weight`；没选就不写，书自己的 `font-weight`（UA `h1{bold}`、作者 `.fm-head{bold}`）
+     * 原样生效。
+     *
+     * **三个全局字体槽（衬线 / 无衬线 / 等宽）只挑字族，不发任何 `font-weight`**：字重属于
+     * 角色而非字族，由排版主题决定（正文常规、标题粗体；原书设置下随书），读者不再能给它们
+     * 单独挑字重。等宽槽因此只写 `pre/code/kbd/samp` 的族，字重返回到书的声明 / UA 基线。
      *
      * 槽位与 `fontSlotFor` 同一路由分域覆盖（正文槽=非标题非代码块，标题槽=h1..h6，代码槽=pre/code/kbd/samp）；
      * UI tier 高于一切作者声明（含 `!important`）。写 `body` 而非只靠继承：继承会被书的直接规则盖掉。
-     * 标题/代码标签不在正文槽作用域内——某槽清空即该域无规则，书自己的字体直接生效（没有自身字体
-     * 声明的标题/代码块仍经正文 `body` 继承兜底），避免"改正文连带标题/代码"的槽域串扰。
+     * 标题/代码标签不在正文槽作用域内——某槽清空即该域无规则，书自己的字体直接生效，避免
+     * "改正文连带标题/代码"的槽域串扰（容器层面的继承串扰由 [bodyFontSelectors] 的守卫切断）。
      * **选择器表刻意不含 `strong/b/em/i`**：`font-weight` 是继承属性，而 `strong` 自身有 UA 声明
      * （`ua.css:59 strong,b{font-weight:bold}`），本槽的 tier-44 声明作用在 `p` 上不影响 `strong`，
      * 加粗语义因此完整保留（反之若把 `strong` 收进 UI 选择器表就会把加粗压成正文档）。
@@ -69,17 +80,18 @@ object ReaderUiSheet {
         val sb = StringBuilder()
         val bodyW = weightFor(profile, "fontBody", profile.fontBody)
         val titleW = weightFor(profile, "fontTitle", profile.fontTitle)
-        val codeW = weightFor(profile, "fontCode", profile.fontCode)
         if (profile.fontBody.isNotBlank()) sb.append("$bodyFontSelectors{font-family:${fam(profile.fontBody)}${wDecl(bodyW)}}\n")
         if (profile.fontTitle.isNotBlank()) sb.append("h1,h2,h3,h4,h5,h6{font-family:${fam(profile.fontTitle)}${wDecl(titleW)}}\n")
-        if (profile.fontCode.isNotBlank()) sb.append("pre,code,kbd,samp{font-family:${fam(profile.fontCode)}${wDecl(codeW)}}\n")
+        if (profile.fontCode.isNotBlank()) sb.append("pre,code,kbd,samp{font-family:${fam(profile.fontCode)}}\n")
         return sb.toString()
     }
 
     /**
-     * 该 (槽位, 族) 的用户字重；bySlot 优先、legacy 表兜底（旧设置没有槽位键），
-     * 非法值（不在 100..900）丢弃 ⇒ 视为"没选"，不写 `font-weight`。
-     * 键的族名口径与 UI 层写锚点处一致（去空白原样）。
+     * 正文 / 标题槽的用户字重：只读按书私有的按槽表（旧按族表兜底），非法值（不在 100..900）
+     * 丢弃 ⇒ 视为"没选"，不写 `font-weight`。键的族名口径与 UI 层写锚点处一致（去空白原样）。
+     *
+     * 三个全局字体槽（代码 / 衬线 / 无衬线）不提供字重选择，字重由排版主题按角色决定；
+     * 衬线 / 无衬线两槽本来就是 CSS 通用族的替换，没有自己的选择器表。
      */
     private fun weightFor(profile: TypographicProfile, slot: String, family: String): Int? {
         if (family.isBlank()) return null
@@ -95,10 +107,23 @@ object ReaderUiSheet {
     private const val textBlockSelectors =
         "body,p,div,li,dd,dt,td,th,address,blockquote,pre,section,article,aside,header,footer,nav,figure,figcaption,h1,h2,h3,h4,h5,h6"
 
+    /** 标题标签（正文槽守卫清单，单源；顺序无关）。 */
+    private const val headingTags = "h1,h2,h3,h4,h5,h6"
+
     /** 正文槽覆盖的文本块选择器表：排除标题（h1..h6）与代码（pre/code/kbd/samp），各自交给专用槽。 */
-    private const val bodyFontSelectors =
+    private const val bodyFontSelectorBase =
         "body,p,div,li,dd,dt,td,th,address,blockquote,section,article,aside,header,footer,nav,figure,figcaption," +
         ".co-summary-head,.co-summary-bullet,.co-summary-bullet-last,.fm-list-bullet,.fm-list-bullet-last,.fm-list-bullet-last1,.fm-list-bullet1,.fm-list-bullet2,.list,.list-item,.bullet"
+
+    /**
+     * 正文槽的实际选择器表 = [bodyFontSelectorBase] 每条都带 `:not(:has(h1..h6))` 守卫。
+     *
+     * 见文件 KDoc：只切断「容器 → 没自己字体的标题」的继承串扰，不给标题发任何声明。
+     * 结构伪类由 `Selector` 支持（`:has` 的相对选择器 + `:not` 取反），带标题的容器整条不命中；
+     * 叶子（`p`/`li`/…）没有子元素，守卫恒真，成本可忽略。
+     */
+    private val bodyFontSelectors: String =
+        bodyFontSelectorBase.split(',').joinToString(",") { "$it:not(:has($headingTags))" }
 
     private fun fam(name: String): String =
         "\"" + name.trim().replace("\"", "").replace("'", "").replace(",", "") + "\""

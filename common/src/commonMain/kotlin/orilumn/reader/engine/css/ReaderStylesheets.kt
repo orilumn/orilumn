@@ -28,6 +28,26 @@ object ReaderStylesheets {
         else -> null
     }
 
+    /**
+     * 排版主题给**正文**声明的字族关键字（该主题 CSS 里 `body{font-family}` 那个词：
+     * `serif` / `sans-serif`）。
+     *
+     * 只给**覆盖层**用：旁注（批注）盖在页面上、不进书的级联，读者没单独给批注挑字时
+     * 要「采用正文字体」，就得知道主题表把正文声明成了什么。它**不参与任何层叠**，
+     * 真正的声明唯一出处仍是主题 CSS（[theme]）；这里是那份声明的只读镜像，
+     * `ReaderStylesheetsTest` 用解析器直接读 CSS 锁死两者一致 —— 改了 CSS 却忘了这里，测试会红。
+     *
+     * 读者在「衬线 / 无衬线（全局）」里挑过族时，关键字由 `TypographicProfile.genericFontAliases`
+     * 换族（与正文同一条通道），这里只回答关键字本身。
+     *
+     * `null` = 原书设置 / 未知主题：正文由书的 CSS 决定，覆盖层无从得知，退回平台默认字体。
+     */
+    fun themeBodyFamily(layoutTheme: String): String? = when (layoutTheme) {
+        "traditional" -> "serif"
+        "modern" -> "sans-serif"
+        else -> null
+    }
+
     private fun readRequired(name: String): String =
         readReaderCss(name) ?: error("阅读器样式单源缺失: css/$name，请检查 common/src/commonMain/resources/css/")
 }

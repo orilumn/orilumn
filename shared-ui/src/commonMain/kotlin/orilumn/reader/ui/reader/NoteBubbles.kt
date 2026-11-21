@@ -816,7 +816,7 @@ private fun wrapNoteText(
  * 不是写死的常量。样式变化只影响旁注自己，不碰正文排版。
  *
  * @property fontPx 旁注字号（像素）。默认 = 正文主字号 × [NOTE_BUBBLE_FONT_RATIO]。
- * @property fontFamily 旁注字体（`null` = 跟随界面默认）；批注样式落地后从这里进来。
+ * @property fontFamily 旁注字体（`null` = 不覆盖，沿用基础样式）；批注样式落地后从这里进来。
  * @property lineHeightRatio 行高 / 字号。
  * @property padEm 左侧内缩 / 字号（右侧默认相同，句末标点见 [NoteMetrics.rightPadFor]）。
  * @property marginXEm 与另一条旁注的横向最小距离 / 字号（障碍横向外扩固定 [NOTE_MIN_MARGIN_PX]）。
@@ -835,7 +835,7 @@ internal data class NoteStyle(
     val edgeEm: Float = NOTE_PAGE_EDGE_EM,
 ) {
     companion object {
-        /** 默认样式：字号比正文小一号，其余按推荐比例；字体跟随界面默认。 */
+        /** 默认样式：字号比正文小一号，其余按推荐比例；字体不覆盖（由调用方给跟随正文的那一族）。 */
         fun forBody(bodyPx: Float): NoteStyle =
             NoteStyle(fontPx = bodyPx.coerceAtLeast(1f) * NOTE_BUBBLE_FONT_RATIO)
     }
@@ -7387,7 +7387,7 @@ private class ComposeNoteTextSizer(
 /**
  * 一页取一次实测尺子：同一套字号 / 字体规则下测量结果稳定，不必每条批注重建。
  *
- * @param fontFamily 批注字体（`null` = 跟随界面默认）。**必须**与 [NoteBubbles]
+ * @param fontFamily 批注字体（`null` = 不覆盖，沿用基础样式）。**必须**与 [NoteBubbles]
  *   里那条 `Text` 用同一个族：量宽和画字一旦不是同一套字形，摆位判「整句放得下」而画出来多折一行。
  * @param fontWeight 批注字重（`null` = 不写字重，跟随字体族默认）；桌面系统族靠它选字形面，
  *   所以尺子也必须带上，否则量宽用常规面、画字用粗面，差半像素就会多折一行。

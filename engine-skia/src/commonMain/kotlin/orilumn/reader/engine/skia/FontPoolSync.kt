@@ -43,6 +43,7 @@ object FontPoolSync {
          * **只用于把该档面预装进池**——用户在 UI 选的字重经 `ReaderUiSheet` 以 tier-44 声明进级联，
          * 渲染层直接拿到那个值；渲染层无权改写（见 `SkParagraphFactory.runFontStyle`）。
          * 池里必须有这一档面，否则级联选中的字重在设备上无处可取（回落成默认面 ⇒ 用户看着"没反应"）。
+         * 只含正文 / 标题两个按书私有的槽：三个全局字体槽只挑字族、不挑字重。
          */
         anchorsBySlot: Map<String, Int> = emptyMap(),
         anchors: Map<String, Int> = emptyMap(),
@@ -51,7 +52,6 @@ object FontPoolSync {
             for (fam in slotFamilies) {
                 anchorsBySlot["fontBody|$fam"]?.let { add(it) }
                 anchorsBySlot["fontTitle|$fam"]?.let { add(it) }
-                anchorsBySlot["fontCode|$fam"]?.let { add(it) }
                 anchors[fam]?.let { add(it) }
             }
             // 恒保 400/700：UA `h1..h6{bold}` 与正文默认 400 在任何书里都会出现，
@@ -133,10 +133,13 @@ object FontPoolSync {
         // 渲染层私自改写就是 `Cascade` 决策 6 禁止的 post-hoc mutation。
         // 这里只用它决定"池里要装哪几档面"——不装的话级联选中的字重在设备上无处可取。
         val faces = loadFaces() ?: return PoolSyncResult(false, lastSig)
-        val slotFams = setOf(profile.fontBody, profile.fontTitle, profile.fontCode)
+        // 槽族：正文/标题（按书私有）+ 代码/衬线/无衬线（全局）。通用族替换的族必须进池，
+        // 否则读者选的「衬线/无衬线字体」在设备上找不到面，`serif` 只剩平台兜底。
+        val slotFams = setOf(profile.fontBody, profile.fontTitle, profile.fontCode, profile.fontSerif, profile.fontSans)
             .map { it.trim() }.filter { it.isNotEmpty() }.toSet()
         val sel = select(
             faces, slotFams, demand, bookEntries, fileSize,
+            // 只有正文 / 标题两个按书私有的槽有用户字重；全局字体槽只挑字族。
             anchorsBySlot = profile.fontWeightAnchorsBySlot,
             anchors = profile.fontWeightAnchors,
         )

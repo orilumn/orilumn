@@ -1,6 +1,7 @@
 package orilumn.reader.engine.css
 
 import kotlinx.serialization.Serializable
+import orilumn.reader.data.font.GENERIC_FONT_FAMILIES
 import kotlin.math.roundToInt
 
 /**
@@ -286,7 +287,7 @@ fun parseFontWeight(value: String): Int? = when (val v = value.trim().lowercase(
  *  both recognize the generic names. */
 fun parseFontFamily(value: String): String? {
     val families = parseFontFamilyList(value)
-    return families.firstOrNull { it.lowercase() !in GENERIC_FAMILIES } ?: families.firstOrNull()
+    return families.firstOrNull { it.lowercase() !in GENERIC_FONT_FAMILIES } ?: families.firstOrNull()
 }
 
 /**
@@ -297,13 +298,6 @@ fun parseFontFamily(value: String): String? {
  */
 fun parseFontFamilyList(value: String): List<String> =
     value.split(',').map { it.trim().trim('\'').trim('"') }.filter { it.isNotEmpty() }
-
-/** CSS generic family keywords (matched case-insensitively). */
-private val GENERIC_FAMILIES = setOf("serif", "sans-serif", "monospace", "cursive", "fantasy")
-
-/** True when [name] is a CSS generic family keyword (used to resolve stored font slots that hold a
- *  theme preset generic rather than an imported font alias, e.g. 现代→"sans-serif"). */
-fun isGenericFontFamily(name: String): Boolean = name.isNotBlank() && name.trim().lowercase() in GENERIC_FAMILIES
 
 /** Parses font-style; null when unrecognized. */
 fun parseFontStyleItalic(value: String): Boolean? = when (value.trim().lowercase()) {

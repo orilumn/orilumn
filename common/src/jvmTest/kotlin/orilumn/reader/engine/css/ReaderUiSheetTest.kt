@@ -190,9 +190,12 @@ class ReaderUiSheetTest {
         // 回归"无法修改字体"：三槽各自进对应域（与 fontSlotFor 同一路由）。
         val p = profile().copy(fontBody = "霞鹜文楷", fontTitle = "serif", fontCode = "Menlo")
         val sheet = ReaderUiSheet.build(p)
+        // 正文槽选择器带 `:not(:has(h1..h6))` 守卫（见 ReaderUiSheet KDoc），按基名匹配。
         fun decl(selector: String): Map<String, String> =
-            sheet.rules.filter { selector in it.selectors && it.declarations.any { d -> d.property == "font-family" } }
-                .last().declarations.associate { it.property to it.value }
+            sheet.rules.filter {
+                it.selectors.any { s -> s == selector || s.startsWith("$selector:") } &&
+                    it.declarations.any { d -> d.property == "font-family" }
+            }.last().declarations.associate { it.property to it.value }
         assertEquals("\"霞鹜文楷\"", decl("body")["font-family"])
         assertEquals("\"霞鹜文楷\"", decl("p")["font-family"])
         assertEquals("\"霞鹜文楷\"", decl("blockquote")["font-family"])
@@ -225,19 +228,26 @@ class ReaderUiSheetTest {
     }
 
     @Test
-    fun `heading without its own font inherits the body slot`() {
-        // 书没给 h1 声明字体 → 经 body 继承正文槽（空标题槽不写规则，但不切断继承）。
+    fun `heading without its own font does not inherit the body slot`() {
+        // 用户报「改正文连带改标题」：`font-family` 是继承属性，正文槽若落在 body 上会漏进
+        // 没有自己字体声明的标题。正文槽的容器选择器带 `:not(:has(h1..h6))` 守卫 ⇒ 标题继续
+        // 跟书的 `body` 字体（原书设置）或主题层的 h1..h6 声明，正文叶子照常走正文槽。
         val p = profile().copy(fontBody = "霞鹜文楷")
         val ui = ReaderUiSheet.build(p)
+        val author = LightCssParser().parse("body{font-family:\"书正文\"}")
         val root = orilumn.reader.engine.html.HtmlTreeConverter()
-            .convert("<html><body><h1>标题</h1></body></html>")!!
-        val engine = StyleComputer(16f, LightCssParser().parse(""), emptyList(), null, null, ui)
+            .convert("<html><body><h1>标题</h1><p>正文</p></body></html>")!!
+        val engine = StyleComputer(16f, LightCssParser().parse(""), listOf(author), null, null, ui)
         val styleMap = engine.compute(root)
-        fun find(node: orilumn.reader.engine.html.MarkupElement): orilumn.reader.engine.html.MarkupElement? {
-            if (node.tag == "h1") return node
-            return node.children.firstNotNullOfOrNull(::find)
+        fun find(tag: String): orilumn.reader.engine.html.MarkupElement {
+            fun walk(node: orilumn.reader.engine.html.MarkupElement): orilumn.reader.engine.html.MarkupElement? {
+                if (node.tag == tag) return node
+                return node.children.firstNotNullOfOrNull(::walk)
+            }
+            return walk(root) ?: error("no $tag")
         }
-        assertEquals(listOf("霞鹜文楷"), styleMap[find(root) ?: error("no h1")]?.fontFamilies)
+        assertEquals("标题继续跟书的字体", listOf("书正文"), styleMap[find("h1")]?.fontFamilies)
+        assertEquals("正文叶子仍走读者选的正文槽", listOf("霞鹜文楷"), styleMap[find("p")]?.fontFamilies)
     }
 
     @Test

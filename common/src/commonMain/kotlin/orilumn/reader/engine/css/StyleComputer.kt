@@ -1,5 +1,6 @@
 package orilumn.reader.engine.css
 
+import orilumn.reader.data.font.isGenericFontFamily
 import orilumn.reader.engine.html.MarkupElement
 
 /**
@@ -31,6 +32,10 @@ import orilumn.reader.engine.html.MarkupElement
  *   书里的 `px` 长度是参考像素（浏览器 1 CSS px = 1 dp），引擎坐标是物理像素；不乘密度，
  *   2x/3x 屏上所有 `px` 盒子/边框/外边距都只有 1/2、1/3 大小（正文却按 dp 放大），
  *   观感与浏览器差异明显。只缩放 `px`（含无单位数值），`em/rem/%` 不动。
+ * @param fontFamilyAliases **通用族替换**（`serif`→读者选的衬线族、`sans-serif`→无衬线族、
+ *   `monospace`→全局代码字体）：在级联与「等宽意图合并」都算完之后，对最终族栈展开
+ *   （见 [applyFontFamilyAliases]）。空表 = 完全维持原行为。三个全局槽只换族不换字重：
+ *   字重由排版主题 / 书按角色决定。
  */
 class StyleComputer(
     private val rootFontPx: Float,
@@ -42,6 +47,7 @@ class StyleComputer(
     private val paragraphEm: Float? = null,
     private val gapScale: Float = 1f,
     private val pxScale: Float = 1f,
+    private val fontFamilyAliases: Map<String, String> = emptyMap(),
 ) {
     private val cascade = Cascade(ua, authorSheets, theme, custom, ui)
 
@@ -259,6 +265,46 @@ class StyleComputer(
     private fun resolveWhiteSpace(declared: WhiteSpace, inPreformatted: Boolean): WhiteSpace =
         if (inPreformatted && !WhiteSpaceNormalize.wraps(declared)) WhiteSpace.PRE_WRAP else declared
 
+    /**
+     * 通用族替换：把**已算好的族栈**里的 `serif` / `sans-serif` / `monospace` 展开成
+     * 「读者选的族 + 原关键字」。
+     *
+     * 语义 = 浏览器的「默认字体」设置：只改通用关键字的含义，不动族栈里已有的具名字体。
+     * 例（原书设置）：`p{font-family:"Times New Roman",serif}` →
+     * `Times New Roman,读者衬线族,serif` ——具名字体仍排第一，原关键字留栈尾供缺字形时
+     * 逐字形兜底。主题模式下书栈已被主题层接管（见 [computeOne] 的等宽意图合并），
+     * 这里通常只有「读者的族 + 原关键字」两项。`monospace` 走同一个通道，只是读者那一侧读的是全局代码字体
+     * （`pre/code` 标签另有 UI 层的按槽声明，两条路互不依赖；见 `ReaderUiSheet`）。
+     *
+     * **必须在 [computeOne] 的等宽意图合并之后做**：那条合并靠「族栈只有一个通用名」来判断
+     * 「这条声明是主题/读者的裸预设」。若先展开成两项，合并就不再触发，书在 div/span 上
+     * 写的 `monospace`（这段是代码）会被主题的字族一起抹掉。
+     * 继承来的族栈不重复展开：父级裸 `serif` 已在父级换成读者的族，子级直接继承那份
+     * 已展开的栈（再展开一次会逐层重复缀同一个族名，见 [computeOne] 的引用判断）。
+     */
+    private fun applyFontFamilyAliases(style: ComputedStyle): ComputedStyle {
+        if (fontFamilyAliases.isEmpty()) return style
+        val fams = style.fontFamilies
+        if (fams.none { isGenericFontFamily(it) }) return style
+        var changed = false
+        val out = ArrayList<String>(fams.size + 2)
+        for (fam in fams) {
+            val target = fontFamilyAliases[fam.lowercase()]
+            if (target != null && isGenericFontFamily(fam) && !target.equals(fam, ignoreCase = true)) {
+                changed = true
+                out.add(target)
+            }
+            out.add(fam)
+        }
+        if (!changed) return style
+        val raw = out.joinToString(",")
+        return style.copy(
+            fontFamily = parseFontFamily(raw),
+            fontFamilies = out,
+            monospace = isMonospaceFamily(raw),
+        )
+    }
+
     private fun computeOne(el: MarkupElement, ancestors: List<MarkupElement>, parent: ComputedStyle): ComputedStyle {
         // R26 诊断：见 CascadeProbe。probe 非 null 时把本函数拆成
         // 「内联属性解析 / 首次级联+建样式 / 通用字体兜底的第二次级联」三笔。
@@ -272,39 +318,48 @@ class StyleComputer(
         if (probe != null) parseMs = orilumn.reader.time.platformNowMs() - tP
         val winners = cascade.winningDeclarations(el, ancestors, inline)
         val tB = if (probe != null) orilumn.reader.time.platformNowMs() else 0L
-        val style = computeStyle(winners, parent, el.tag, normalizeLang(el.attrs["lang"]), isPreformatted(el, ancestors))
+        val style = computeStyle(
+            winners, parent, el.tag, normalizeLang(el.attrs["lang"]),
+            isPreformatted(el, ancestors),
+        )
         if (probe != null) buildMs = orilumn.reader.time.platformNowMs() - tB
-        // 读者层裸通用名兜底合并：主题预设（serif/sans-serif）只能缀在书栈后面做最终回退，
-        // 不能替换——否则书里点名的导入字体（池中有）在主题模式下永远够不着（传统变黑体）。
-        // 具名槽（用户显式选择）照旧全覆盖；书未声明时作者值为空，无事发生。合并后重算一次，
-        // fontFamily/monospace 等派生字段与栈一致（token 无逗号，join 再解析无损）。
+        // 主题的裸通用名（serif / sans-serif）胜出时的**等宽意图**合并：主题字族说了算，只有
+        // 书把同一元素声明成 `monospace`（代码）时才把那一段并到栈首。书未声明时作者值为空，
+        // 无事发生。合并只改 fontFamily/fontFamilies/monospace 三连（token 无逗号，join 再解析无损）。
+        var result = style
         val fams = style.fontFamilies
         if (fams.size == 1 && isGenericFontFamily(fams[0])) {
             val authorRaw = cascade.authorFontFamily(el, ancestors, inline)
             val authorList = authorRaw
                 ?.let { parseFontFamilyList(it) }.orEmpty()
                 .filter { it.isNotBlank() && !it.equals(fams[0], ignoreCase = true) }
-            // 只有当作者声明中包含**非通用字体名**时才做兜底合并（把具名字体前置，reader的通用名作为fallback）。
-            // 如果作者声明本身也是通用字体（如 sans-serif），不要把它前置，否则会覆盖 reader 层（theme/UI）的通用字体意图。
-            val hasNamedAuthorFont = authorList.any { !isGenericFontFamily(it) }
-            if (hasNamedAuthorFont && authorList.isNotEmpty()) {
+            // 主题（读者全局字体）**接管字族**：现代主题除等宽之外一律无衬线、传统主题正文衬线 /
+            // 标题无衬线，书的具名字体不再前置（`p{font-family:STSong,serif}` 这类声明也让位，
+            // 否则现代模式下正文仍是书的宋体，「所有字体无衬线」根本做不到）。
+            // 唯一保留的是 `monospace` 的**等宽意图**：等宽与衬线/无衬线是两根轴，主题决定
+            // 「默认正文长什么样」，而书把某个 p/div/span 声明成等宽是在说「这段是代码」。
+            // 若一并丢掉，主题模式下 `div.code{font-family:monospace}` 会被排成正文体，读者挑的
+            // 代码字体也就永远轮不到它（书里的等宽声明并不只出现在 pre/code 标签上）。
+            // 作者写 serif/sans-serif 时同样不前置：那是与主题同一根轴上的偏好，主题说了算。
+            if (authorList.any { it.equals("monospace", ignoreCase = true) }) {
                 val tS = if (probe != null) orilumn.reader.time.platformNowMs() else 0L
-                val merged = computeStyle(
-                    winners + ("font-family" to (authorList + fams[0]).joinToString(",")),
-                    parent,
-                    el.tag,
-                    normalizeLang(el.attrs["lang"]),
-                    isPreformatted(el, ancestors),
+                // **只换字族三连，不重算整条样式**：合并只影响字形回退，不影响任何别的属性。
+                // （读者字重不再由通用族注入，重算只会白跑级联。）
+                val mergedRaw = (authorList + fams[0]).joinToString(",")
+                result = style.copy(
+                    fontFamily = parseFontFamily(mergedRaw),
+                    fontFamilies = parseFontFamilyList(mergedRaw),
+                    monospace = isMonospaceFamily(mergedRaw),
                 )
-                if (probe != null) {
-                    secondPassMs = orilumn.reader.time.platformNowMs() - tS
-                    CascadeProbe.hit(0L, parseMs, buildMs, secondPassMs)
-                }
-                return merged
+                if (probe != null) secondPassMs = orilumn.reader.time.platformNowMs() - tS
             }
         }
         if (probe != null) CascadeProbe.hit(0L, parseMs, buildMs, secondPassMs)
-        return style
+        // 通用族替换放在等宽意图合并**之后**：合并靠「族栈只有一项通用名」识别裸预设，
+        // 先展开会让它失效（书的等宽声明被主题字族抹掉）。
+        // 继承来的族栈不再展开一次：父级已经展开过（`serif` 前面已缀上读者族），
+        // 每层再展开会逐层重复缀同一个族名。
+        return if (result.fontFamilies === parent.fontFamilies) result else applyFontFamilyAliases(result)
     }
 
     /**
@@ -396,8 +451,12 @@ class StyleComputer(
         val tF = if (split != null) orilumn.reader.time.platformNowMs() else 0L
         // font-family 三连：同一字符串被 parseFontFamily / parseFontFamilyList /
         // isMonospaceFamily 各解析一次。先取出来，供下面三处共用。
+        // 通用族替换**不在这里做**：要先让 computeOne 的等宽意图合并
+        // 看到原始族栈（只有一项通用名），再在返回前展开（见 [applyFontFamilyAliases]）。
         val famRaw = w["font-family"]
         val famList = famRaw?.let { parseFontFamilyList(it) }
+        // 通用族的字重**不再由读者全局字体槽注入**：三个全局槽只挑字族，字重属于角色，
+        // 由排版主题（原书设置下由书）决定。这里只读级联结果，不做任何事后改写。
         if (split != null) fontMs = orilumn.reader.time.platformNowMs() - tF
         if (split != null) CascadeProbe.hitSplit(edgeMs, fontMs)
 
@@ -405,6 +464,7 @@ class StyleComputer(
             fontSizePx = fontSize,
             lineHeightRatio = w["line-height"]?.let { parseLineHeight(it, fontSize, pxScale) } ?: parent.lineHeightRatio,
             colorHex = w["color"]?.let { parseCssColor(it) } ?: parent.colorHex,
+            // 与 [fontWeight] 同源（此处只是级联值本身，无读者基线字重注入）。
             bold = w["font-weight"]?.let { parseFontWeightBold(it) } ?: parent.bold,
             italic = w["font-style"]?.let { parseFontStyleItalic(it) } ?: parent.italic,
             decoration = parseTextDecoration(w, fontSize, parent.fontSizePx),
@@ -442,6 +502,7 @@ class StyleComputer(
             // 同一个 key、同一个字符串，parseFontFamilyList 提前算一次供 fontFamilies 用。
             fontFamily = famRaw?.let { parseFontFamily(it) } ?: parent.fontFamily,
             fontFamilies = famList ?: parent.fontFamilies,
+            // 字重只读级联结果：读者全局字体槽不再注入基线字重。
             fontWeight = w["font-weight"]?.let { parseFontWeight(it) } ?: parent.fontWeight,
             monospace = famRaw?.let { isMonospaceFamily(it) } ?: parent.monospace,
             // List markers: non-inherited, read directly off the `ul/ol` element's own declaration;

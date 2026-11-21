@@ -311,6 +311,11 @@ class FontPanelRowsTest {
         assertEquals("常规", (cn.previewMember() as FontEntry.Imported).face.subfamily)
         val lower = listOf(system("H", "bold"), system("H", "regular"))
         assertEquals("regular", (lower.previewMember() as FontEntry.System).subfamily)
+        // 档名不叫 Regular 的常规面（Roman / Book / W3 …）同样要认出来，否则预览落到 Bold 上。
+        val roman = listOf(imported("I", subfamily = "Bold"), imported("I", subfamily = "Roman"))
+        assertEquals("Roman", (roman.previewMember() as FontEntry.Imported).face.subfamily)
+        val book = listOf(imported("J", subfamily = "Medium"), imported("J", subfamily = "Book"))
+        assertEquals("Book", (book.previewMember() as FontEntry.Imported).face.subfamily)
     }
 
     @Test

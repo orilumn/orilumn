@@ -93,10 +93,15 @@ class ReaderWeightSlotTest {
         error("no <$tag> #$nth")
     }
 
-    /** UI 层规则里带 `font-weight` 的那条（按选择器首名匹配）。 */
+    /**
+     * UI 层规则里带 `font-weight` 的那条（按选择器首名匹配）。
+     *
+     * 正文槽的选择器带 `:not(:has(h1..h6))` 守卫（切断「容器 → 标题」的继承串扰），
+     * 所以这里按「基名 + 可选伪类后缀」匹配，不要求字面完全相等。
+     */
     private fun fontDecl(p: TypographicProfile, firstSelector: String): Map<String, String> =
         ReaderUiSheet.build(p).rules
-            .filter { it.selectors.firstOrNull() == firstSelector }
+            .filter { r -> r.selectors.any { it == firstSelector || it.startsWith("$firstSelector:") } }
             .flatMap { it.declarations }
             .associate { it.property to it.value }
 
@@ -151,25 +156,34 @@ class ReaderWeightSlotTest {
         assertEquals(700, m.byTag("strong").fontWeight)
     }
 
-    /** 三槽各配各的：三条规则各自带自己的字重，互不串。 */
+    /** 正文 / 标题各配各的：两条规则各带各的字重，互不串。 */
     @Test
-    fun `three slots carry their own weights independently`() {
+    fun `body and title slots carry their own weights independently`() {
         val p = profile(
             body = "PingFang SC",
-            code = "Fira Code",
             bySlot = mapOf(
                 "fontBody|PingFang SC" to 500,
                 "fontTitle|$titleFam" to 900,
-                "fontCode|Fira Code" to 700,
             ),
         )
         assertEquals("500", fontDecl(p, "body")["font-weight"])
         assertEquals("900", fontDecl(p, "h1")["font-weight"])
-        assertEquals("700", fontDecl(p, "pre")["font-weight"])
         val m = compute(p)
         assertEquals(900, m.byTag("h2").fontWeight)
         assertEquals(500, m.byTag("p").fontWeight)
-        assertEquals(700, m.byTag("code").fontWeight)
+        // 代码标签没有读者字重：UA/书自己的字重原样生效。
+        assertEquals(400, m.byTag("code").fontWeight)
+    }
+
+    /** 旧书文件里残留的代码槽按书字重不得再生效：代码槽现在只挑字族。 */
+    @Test
+    fun `stale per-book code weight is ignored`() {
+        val p = profile(
+            code = "Fira Code",
+            bySlot = mapOf("fontCode|Fira Code" to 700),
+        )
+        assertFalse("UI 层不再给代码标签发 font-weight", fontDecl(p, "pre").containsKey("font-weight"))
+        assertEquals("UA / 书自己的字重原样生效", 400, compute(p).byTag("code").fontWeight)
     }
 
     /** 非法锚点值（不在 100..900）当作"没选"，不写声明。 */

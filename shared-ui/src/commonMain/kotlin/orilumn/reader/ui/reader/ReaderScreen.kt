@@ -213,7 +213,7 @@ fun ReaderScreen(
     /**
      * 统一字体列表（系统 + 导入）：只用来把「批注字体」的字族名解析成可绘制的字形。
      *
-     * 批注是盖在页面上的覆盖层，与正文分页无关；缺省空表 = 批注用界面默认字体。
+     * 批注是盖在页面上的覆盖层，与正文分页无关；缺省空表 = 导入族解析不到，退回系统默认字体。
      */
     fontEntries: List<FontEntry> = emptyList(),
 ) {
@@ -222,14 +222,18 @@ fun ReaderScreen(
     // 于是「卡片先滑走、键盘再落」——正是要消掉的两段式。失焦后键盘与卡片同一段时间里各自归位。
     val focusManager = LocalFocusManager.current
     val profile = remember(settings, density) { TypographicProfile.build(settings, density) }
-    // 批注字体（渲染层解析）：字族名 + 字重 → Compose 字体。空串 / 字体已删 = 界面默认。
+    // 批注字体（渲染层解析）：字族名 + 字重 → Compose 字体。没单独挑 = 采用正文字体
+    // （正文槽 → 主题层 / 通用族替换；原书设置下退回平台默认），字体已删 = 平台默认。
     // 只影响旁注覆盖层，不进版式（`noteFont` 在 withoutNonLayout 里，面板走无重排提交）。
     // 字重**不烤进字体族**：桌面端单面族没有第二档，Compose 仍按族名去系统字库取面、烤好的字重被丢，
     // 所以族和字重分开给（族 → `fontFamily`，字重 → `fontWeight`），量宽与绘制两处都要带上。
-    val noteFontFamily = remember(settings.noteFont, settings.noteFontWeight, fontEntries) {
-        noteFontFamilyOf(settings, fontEntries)
+    // 跟随正文时要跟着正文字形变：`profile` 里含正文槽 / 主题 / 通用族与字重锚点，一并做键。
+    val noteFontFamily = remember(profile, settings.noteFont, settings.noteFontWeight, fontEntries) {
+        noteFontFamilyOf(settings, profile, fontEntries)
     }
-    val noteFontWeight = remember(settings.noteFontWeight) { noteFontWeightOf(settings) }
+    val noteFontWeight = remember(profile, settings.noteFont, settings.noteFontWeight) {
+        noteFontWeightOf(settings, profile)
+    }
     val selectionHandleRadiusPx = SELECTION_HANDLE_RADIUS_DP * density
     val selectionHandleHitPx = SELECTION_HANDLE_HIT_RADIUS_DP * density
 

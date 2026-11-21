@@ -23,10 +23,11 @@ import kotlinx.serialization.json.jsonObject
  *  - **User set**: stored by [ReaderSettingsStore] at `filesDir/settings/reader.json`（只含全局项）；
  *  - **One-tap reset**: delete the user file → fall back to [Companion.DEFAULT].
  *
- * Font replacement is gated by "element type" into three tiers: `fontBody` body / `fontTitle` headings /
- * `fontCode` code. A slot stores a font alias — all text of the corresponding type uses the selected
- * local font; empty string = that type is not replaced and keeps the original book. **按书私有**
- * （同一本书挑宋体不传染到别的书）。All layout themes apply uniformly.
+ * Font replacement is gated by "element type": `fontBody` body / `fontTitle` headings are **per book**
+ * (正文/标题按书私有), while `fontCode` code plus the reader-wide generic aliases `fontSerif` /
+ * `fontSans` are **global**（换书沿用，与「读者偏好」同口径）. A slot stores a font alias — all text
+ * of the corresponding type uses the selected local font; empty string = that type is not replaced
+ * and keeps the original book. All layout themes apply uniformly.
  */
 @Serializable
 data class ReaderSettings(
@@ -38,6 +39,7 @@ data class ReaderSettings(
      * 行距（倍数，0.5..2.5）。**本书私有、可空**：`null` = 读者没配过 ⇒ UI 层不发行距声明，
      * 书自己的 `line-height` 生效（书没写时由引擎初值 1.5 兜底）；任何实数都照原样发（0 就是 0，
      * 不拿 0 当「没配」哨兵）。面板未配时显示原书实测行高（[probeLineSpacing]），没写显示 1.5。
+     * 切到现代 / 传统排版主题时由主题预设写入显式值（1.4 / 1.5），读者拖滑块即覆盖。
      */
     val lineSpacing: Double? = null,
     /** [Style system] First-line indent (em, 0..10): `text-indent` on body paragraphs (p/li), applied by the UI layer so it overrides the book.
@@ -111,10 +113,28 @@ data class ReaderSettings(
     val marginBottom: Int = 60,
     val marginLeft: Int = 50,
     val marginRight: Int = 50,
-    /** Font replacement by element type, three tiers (alias, empty string = that type not replaced, keep the original book): body / heading / code. */
+    /**
+     * 字体替换槽（族名，空串 = 该域不替换，跟随原书）：
+     * - [fontBody] 正文 / [fontTitle] 标题：**本书私有**（同一本书挑宋体不传染到别的书）；
+     * - [fontCode] 代码：**纯全局**（2026-11 起，与 [fontSerif]/[fontSans] 同口径：读者对「代码长什么样」
+     *   的偏好与某本书无关，换书沿用）。
+     */
     val fontBody: String = "",
     val fontTitle: String = "",
     val fontCode: String = "",
+    /**
+     * 通用族替换（纯全局，空串 = 平台默认候选链）：书或主题的 CSS 写 `font-family: serif` /
+     * `sans-serif` 时，改用读者在这一族里挑的字族来渲染。CSS 的 `monospace` 同理走 [fontCode]
+     * ——「等宽用哪一族」和「衬线/无衬线用哪一族」是同一个问题，只是槽不同。
+     *
+     * **只替换通用关键字**（原书设置下书的具名字体照旧生效，主题模式下主题层接管字族）；
+     * 解析点在级联把 `font-family` 值展开成族栈时
+     * （`StyleComputer` 的 alias 展开），仍把原关键字留在栈尾作逐字形兜底 —— 读者选的族缺字形
+     * 时照旧落到平台 serif/sans-serif/monospace 候选链。这是浏览器「默认字体」设置的同款语义，
+     * 不是「给正文加一条覆盖声明」。
+     */
+    val fontSerif: String = "",
+    val fontSans: String = "",
     /** L2 user-imported stylesheet switch (M2). */
     val useUserScripts: Boolean = false,
     /**
@@ -176,7 +196,11 @@ data class ReaderSettings(
     val fontWeightAnchors: Map<String, Int> = emptyMap(),
     /**
      * 按 (槽位,族) 的用户字重：key = `"fontTitle|族名"`。**槽位隔离**——
-     * 同名字族在标题/正文/代码三个槽各选各的字重，互不串（`FontSlots.slotNameOf` 出这个前缀）。
+     * 同名字族在标题/正文两个槽各选各的字重，互不串（`FontSlots.slotNameOf` 出这个前缀）。
+     *
+     * 本表**按书私有**，只服务 [fontBody] / [fontTitle] 这两个按书私有的槽。
+     * 三个全局槽（[fontCode] / [fontSerif] / [fontSans]）**不提供字重选择**：它们只挑字族，
+     * 字重由排版主题（原书设置下由书）按角色决定。
      */
     val fontWeightAnchorsBySlot: Map<String, Int> = emptyMap(),
 
@@ -207,8 +231,9 @@ data class ReaderSettings(
     val annotationLastLineStyle: String = "straight",
 
     /**
-     * 批注（旁注）字体：空串 = 跟随界面默认（现状）；否则是字族名，与正文 / 标题 / 代码槽同源
-     * （系统字体或已导入字体都能选）。
+     * 批注（旁注）字体：空串 = **采用正文字体**（正文槽挑过的族，或排版主题给正文的
+     * 通用族 / 读者的通用族替换；「原书设置」下正文由书的 CSS 决定，覆盖层退回系统默认）；
+     * 否则是字族名，与正文 / 标题 / 代码槽同源（系统字体或已导入字体都能选）。
      *
      * 只作用于旁注覆盖层的文字，**不碰正文排版**，所以不进版式比较（面板走无重排提交）。
      * **纯全局**（[SettingsScope.GLOBAL]）：批注是读者自己的印记，与某本书无关，换书沿用
@@ -320,7 +345,7 @@ data class ReaderSettings(
         marginRight = overlay.marginRight ?: marginRight,
         fontBody = overlay.fontBody ?: fontBody,
         fontTitle = overlay.fontTitle ?: fontTitle,
-        fontCode = overlay.fontCode ?: fontCode,
+        // fontCode 已改全局（不再按书覆盖）：本书文件里的旧键由 BookSettings 丢弃。
         useUserScripts = overlay.useUserScripts ?: useUserScripts,
         pageAnimationMode = overlay.pageAnimationMode ?: pageAnimationMode,
         coverStretch = overlay.coverStretch ?: coverStretch,
@@ -569,6 +594,8 @@ data class ReaderSettings(
                     fontBody = SettingsJson.optString(o, "fontBody", d.fontBody),
                     fontTitle = SettingsJson.optString(o, "fontTitle", d.fontTitle),
                     fontCode = SettingsJson.optString(o, "fontCode", d.fontCode),
+                    fontSerif = SettingsJson.optString(o, "fontSerif", d.fontSerif),
+                    fontSans = SettingsJson.optString(o, "fontSans", d.fontSans),
                     useUserScripts = SettingsJson.optBoolean(o, "useUserScripts", d.useUserScripts),
                     // 旧档的「翻页动画」总开关只有开/关两态：关掉的那份迁成「无动画」，
                     // 开着的（或从没写过这个键的）照它存的模式读。旧面板允许「关掉动画」与

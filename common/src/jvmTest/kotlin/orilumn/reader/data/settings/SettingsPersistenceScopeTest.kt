@@ -219,7 +219,6 @@ class SettingsPersistenceScopeTest {
         "marginRight" -> s.copy(marginRight = s.marginRight + 7)
         "fontBody" -> s.copy(fontBody = "ProbeBody")
         "fontTitle" -> s.copy(fontTitle = "ProbeTitle")
-        "fontCode" -> s.copy(fontCode = "ProbeCode")
         "useUserScripts" -> s.copy(useUserScripts = !s.useUserScripts)
         "pageAnimationMode" -> s.copy(pageAnimationMode = if (s.pageAnimationMode == "slide") "curl" else "slide")
         "coverStretch" -> s.copy(coverStretch = !s.coverStretch)
@@ -262,6 +261,10 @@ class SettingsPersistenceScopeTest {
         "noteBorder" -> s.copy(noteBorder = !s.noteBorder)
         "noteBackground" -> s.copy(noteBackground = !s.noteBackground)
         "noteTextSameColor" -> s.copy(noteTextSameColor = !s.noteTextSameColor)
+        // 字体：代码槽与衬线/无衬线通用族（2026-11 起纯全局）。
+        "fontCode" -> s.copy(fontCode = "ProbeCode")
+        "fontSerif" -> s.copy(fontSerif = "ProbeSerif")
+        "fontSans" -> s.copy(fontSans = "ProbeSans")
         else -> error("全局集合新增了字段 [$field]，但本测试还没有它的探针")
     }
 

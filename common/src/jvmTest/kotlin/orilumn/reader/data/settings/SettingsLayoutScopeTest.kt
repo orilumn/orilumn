@@ -54,7 +54,7 @@ class SettingsLayoutScopeTest {
         "lineSpacing", "firstLineIndent", "paragraphSpacing", "paragraphGap",
         "letterSpacing", "cjkLatinSpacing",
         "marginTop", "marginBottom", "marginLeft", "marginRight",
-        "fontBody", "fontTitle", "fontCode", "useUserScripts",
+        "fontBody", "fontTitle", "fontCode", "fontSerif", "fontSans", "useUserScripts",
         "fontScale", "layoutTheme", "fontSize",
         "fontWeightAnchors", "fontWeightAnchorsBySlot",
     )
@@ -123,6 +123,8 @@ class SettingsLayoutScopeTest {
         "fontBody" -> s.copy(fontBody = if (s.fontBody.isEmpty()) "ZZProbe" else "")
         "fontTitle" -> s.copy(fontTitle = if (s.fontTitle.isEmpty()) "ZZProbe" else "")
         "fontCode" -> s.copy(fontCode = if (s.fontCode.isEmpty()) "ZZProbe" else "")
+        "fontSerif" -> s.copy(fontSerif = if (s.fontSerif.isEmpty()) "ZZProbe" else "")
+        "fontSans" -> s.copy(fontSans = if (s.fontSans.isEmpty()) "ZZProbe" else "")
         "useUserScripts" -> s.copy(useUserScripts = !s.useUserScripts)
         "fontScale" -> s.copy(fontScale = s.fontScale + 3.0)
         "fontSize" -> s.copy(fontSize = s.fontSize + 3)

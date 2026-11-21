@@ -5,6 +5,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import orilumn.reader.data.font.isGenericFontFamily
 
 /** Phase A — numeric font-weight / font-family parsing for the browser-core pairing. */
 class FontWeightParseTest {

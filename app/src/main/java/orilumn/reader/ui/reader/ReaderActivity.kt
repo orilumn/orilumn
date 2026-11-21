@@ -223,7 +223,7 @@ class ReaderActivity : ComponentActivity() {
         bookSettingsStore = BookSettingsStore(File(filesDir, "settings").absolutePath)
         fontRepository = FontRepository(this, AndroidDb.library(this))
         // 开书就直读一次字库（与桌面开书 `LaunchedEffect(book)` 同式）：批注字体是**全局设置**，
-        // 解析成可绘制字形要拿完整字库表；只在面板打开时读，冷启动直接开书时批注会退回界面默认字体。
+        // 解析成可绘制字形要拿完整字库表；只在面板打开时读，冷启动直接开书时批注会退回系统默认字体。
         loadPanelFonts()
         // P1 字体发现·层次二（方案 §2.2）：启动一次性检测，只在**指纹变**时进共享池 45 档扫。
         // 进程级单例：书架/阅读面重复调用由 `detected` 门闩收敛为一次。
@@ -722,12 +722,16 @@ class ReaderActivity : ComponentActivity() {
     /** 隐藏/删除的族若正被槽位引用 → 回退跟随原书（沿旧 FontManagerPanel 口径）。 */
     private fun fallBackFontSlots(family: String) {
         val s = panelSettings
-        if (family != s.fontBody && family != s.fontTitle && family != s.fontCode) return
+        if (family != s.fontBody && family != s.fontTitle && family != s.fontCode &&
+            family != s.fontSerif && family != s.fontSans
+        ) return
         commitSettings(
             s.copy(
                 fontBody = s.fontBody.takeUnless { it == family } ?: "",
                 fontTitle = s.fontTitle.takeUnless { it == family } ?: "",
                 fontCode = s.fontCode.takeUnless { it == family } ?: "",
+                fontSerif = s.fontSerif.takeUnless { it == family } ?: "",
+                fontSans = s.fontSans.takeUnless { it == family } ?: "",
             ),
             typographyChanged = true,
         )

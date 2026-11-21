@@ -6,9 +6,10 @@ package orilumn.reader.data.settings
  * 两级模型（2026-10-29 定口，见 `docs/设置模型整改计划.md`）：
  * - **全局**（`settings/reader.json`，唯一全局区）：与某本书无关的阅读环境与读者印记
  *   —— 亮度族、阅读主题（`scheme`/`bgOverride`/`fgOverride`）、笔记族（色槽/默认格/
- *   上次类别线型/批注字体字号）、续读开关、页码开关、字体列表隐藏过滤、持久化元数据；
+ *   上次类别线型/批注字体字号）、续读开关、页码开关、字体列表隐藏过滤、
+ *   字体（代码槽 + 衬线/无衬线通用族及其字重）、持久化元数据；
  * - **私有**（`settings/books/{bookId}.json`，一本书一份）：读者能针对一本书配的一切
- *   —— 字号/行距/字距/段距/页边距/字体族与字重/排版主题/翻页开关/首行缩进。
+ *   —— 字号/行距/字距/段距/页边距/正文字体/标题字体及其字重/排版主题/翻页开关/首行缩进。
  *
  * 两条铁律：
  * 1. **私有项永不写全局**。全局文件里出现私有键 = 旧档残留，`load()` 时被 [onlyGlobal] 抹回预设；
@@ -42,6 +43,9 @@ object SettingsScope {
         "highlightDefaultSlot", "underlineDefaultSlot",
         "annotationLastKind", "annotationLastLineStyle",
         "noteFont", "noteFontWeight", "noteFontScale",
+        // 字体：代码槽 + 通用族（衬线 / 无衬线）替换（2026-11 起全局）。
+        // 三个全局槽只挑字族，字重由排版主题按角色决定；正文 / 标题两槽仍按书私有，见 [PRIVATE]。
+        "fontCode", "fontSerif", "fontSans",
         // 旁注画法（折叠 / 描边 / 底色 / 文字用色）：只改覆盖层怎么画，不碰正文排版。
         "noteCollapseAll", "noteBorder", "noteBackground", "noteTextSameColor",
         // 持久化元数据（只增不改，见 ReaderSettings.schemaVersion KDoc）。
@@ -62,8 +66,8 @@ object SettingsScope {
         "paragraphSpacing", "paragraphGap", "letterSpacing", "cjkLatinSpacing",
         // 页边距四向。
         "marginTop", "marginBottom", "marginLeft", "marginRight",
-        // 字体族三槽与按槽字重锚点。
-        "fontBody", "fontTitle", "fontCode",
+        // 字体族两槽与正文 / 标题的按槽字重锚点（按书私有；三个全局字体槽见 GLOBAL，只挑字族）。
+        "fontBody", "fontTitle",
         "fontWeightAnchors", "fontWeightAnchorsBySlot",
         // 用户自定义样式表开关（当前无消费者，保留字段）。
         "useUserScripts",
@@ -116,7 +120,7 @@ fun ReaderSettings.onlyGlobal(): ReaderSettings {
         marginRight = d.marginRight,
         fontBody = d.fontBody,
         fontTitle = d.fontTitle,
-        fontCode = d.fontCode,
+        // 代码槽与通用族（衬线/无衬线）已是全局项：只抹掉按书私有的正文/标题两槽。
         useUserScripts = d.useUserScripts,
         pageAnimationMode = d.pageAnimationMode,
         coverStretch = d.coverStretch,
@@ -161,6 +165,10 @@ fun ReaderSettings.withGlobalFrom(next: ReaderSettings): ReaderSettings = copy(
     noteFont = next.noteFont,
     noteFontWeight = next.noteFontWeight,
     noteFontScale = next.noteFontScale,
+    // 字体：代码槽 + 通用族替换（纯全局）。
+    fontCode = next.fontCode,
+    fontSerif = next.fontSerif,
+    fontSans = next.fontSans,
     noteCollapseAll = next.noteCollapseAll,
     noteBorder = next.noteBorder,
     noteBackground = next.noteBackground,
@@ -194,7 +202,6 @@ fun BookSettings.normalized(): BookSettings {
         marginRight = marginRight.takeIf { it != d.marginRight },
         fontBody = fontBody.takeIf { it != d.fontBody },
         fontTitle = fontTitle.takeIf { it != d.fontTitle },
-        fontCode = fontCode.takeIf { it != d.fontCode },
         useUserScripts = useUserScripts.takeIf { it != d.useUserScripts },
         pageAnimationMode = pageAnimationMode.takeIf { it != d.pageAnimationMode },
         coverStretch = coverStretch.takeIf { it != d.coverStretch },

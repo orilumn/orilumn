@@ -68,7 +68,7 @@ import kotlin.math.roundToInt
 /**
  * F4a 统一字体管理面板（shared-ui）：系统 + 导入同列展示（桌面仅系统区）。
  *
- * 行模型（[buildFontRows] 纯函数，单测覆盖）：跟随原书 → 导入区（一行双按钮：
+ * 行模型（[buildFontRows] 纯函数，单测覆盖）：跟随项（[FontPanelRow.FollowOriginal]，文案按槽位给）→ 导入区（一行双按钮：
  * 本地导入 + WIFI 导入，沿旧平板样式，平板独占）→ 已导入区（点选 + 左滑删除，
  * 平板独占，[showImported]）→ 系统字体区（点选 + 左滑隐藏）→ 已隐藏区（点选取消隐藏）。
  * 同家族多字重合并为一行（系统/导入同形，按族名分组；槽位存的本来就是族名），
@@ -78,7 +78,7 @@ import kotlin.math.roundToInt
  * 排序在面板内按 [familyNameComparator]（两端同一拼音序）。
  * 预览各行用自己的字形（[FontPreviewText]，平台 last-mile 不同、字形同真）。
  * 左滑物理（弹簧 + 橡皮筋 + 单行展开）沿旧 `FontSwipeRow` 原样搬运，触摸/鼠标拖拽通用。
- * 删除/隐藏正被槽位引用时由调用方回退"跟随原书"（沿旧平板口径）。
+ * 删除/隐藏正被槽位引用时由调用方回退到跟随项（沿旧平板口径）。
  */
 
 /** 扁平行（渲染与键盘键 1:1，全行可操作）。 */
@@ -98,7 +98,7 @@ sealed interface FontPanelRow {
  */
 data class FontScanProgress(val done: Int, val total: Int)
 
-/** 纯行模型：开关 + 导入区 + 跟随原书 + 单列字体（调用方只管喂全量表 + 当前槽位值）。 */
+/** 纯行模型：开关 + 导入区 + 跟随项 + 单列字体（调用方只管喂全量表 + 当前槽位值）。 */
 fun buildFontRows(
     entries: List<FontEntry>,
     selectedFamily: String,
@@ -196,7 +196,8 @@ fun FontLibraryPanel(
     showWifiButton: Boolean = true,
     /** 无线导入（平板 WiFi 上传；默认空即与本地同一入口语义，调用方按需覆盖）。 */
     onImportWifi: () -> Unit = onImport,
-    /** 多字重行点按：下钻字重页（调用方压栈）；单字重行走 onSelect。 */
+    /** 多字重行点按：交由调用方决定（正文 / 标题 / 批注进字重页；三个全局字体槽只挑字族）；
+     *  单字重行走 onSelect。 */
     onPickWeight: (String) -> Unit = {},
     /** 首行开关态：true 即隐藏字体已列出（按钮显"隐藏"），false 即未列出（按钮显"显示"）。 */
     showHidden: Boolean = false,
@@ -208,9 +209,12 @@ fun FontLibraryPanel(
     toggleFocused: Boolean = false,
     /** 系统字体扫描实时进度（方案 §2.4）：非 null 时在列表上方显示「已 N / 共 M 族」。 */
     scanProgress: FontScanProgress? = null,
-    /** 「跟随…」首行文案与副标题：正文 / 标题 / 代码槽是「跟随原书」，批注字体是「跟随界面」。 */
-    followLabel: String = "跟随原书",
-    followSubtitle: String = "使用原书字体",
+    /**
+     * 「跟随…」首行文案与副标题：正文 / 标题槽是「采用主题设置」（主题层声明字体，原书设置时听书），
+     * 等宽 / 衬线 / 无衬线槽是「系统默认」，批注字体是「采用正文字体」（没单独挑 = 与正文同字体）。
+     */
+    followLabel: String = "采用主题设置",
+    followSubtitle: String = "跟随当前阅读主题（原书设置时随书）",
 ) {
     // 同时只展开一行的滑动操作：新展开即收起旧行。
     var openKey by remember { mutableStateOf<String?>(null) }
@@ -272,7 +276,7 @@ fun FontLibraryPanel(
                         is FontPanelRow.Toggle -> Unit
                         is FontPanelRow.Import -> Unit
                         is FontPanelRow.FollowOriginal ->
-                            // 跟随原书（用户层）：当作一个字体行——与 Entry 同规格（名字行 + 副标题 +
+                            // 跟随项（用户层）：当作一个字体行——与 Entry 同规格（名字行 + 副标题 +
                             // 选中金点），稳坐导入区之下；不是字体，无左滑。
                             FontManageRow(followLabel, null, row.selected, null, null, nav, rowIndex, p,
                                 subtitle = followSubtitle, swipeEnabled = false, sourceLabel = null,
@@ -427,8 +431,12 @@ internal fun rowSubtitle(members: List<FontEntry>): String? {
 }
 
 /**
- * 预览成员：同行多字重时优先 Regular（名行字形稳定，不随排序飘到 Bold/Italic），
+ * 预览成员：同行多字重时优先 **Regular 那一档面**（名行字形稳定，不随排序飘到 Bold/Italic），
  * 无 Regular 用第一个。纯函数（行模型同一文件可测）。
+ *
+ * 判据用 [SubfamilyMetric]（字重 400 且非斜体）而不是名字匹配 `Regular`/`常规`：字体档名
+ * 五花八门（`Book` / `Roman` / `Normal` / 厂商私有名），死匹配会把真正的常规面漏掉，
+ * 于是预览落到排序靠前的 Bold 面上——列表里每一行都像粗体。
  */
 internal fun List<FontEntry>.previewMember(): FontEntry =
     firstOrNull {
@@ -436,7 +444,7 @@ internal fun List<FontEntry>.previewMember(): FontEntry =
             is FontEntry.Imported -> it.face.subfamily
             is FontEntry.System -> it.subfamily
         }.trim()
-        sub.equals("Regular", ignoreCase = true) || sub == "常规"
+        SubfamilyMetric.weight(sub) == 400 && !SubfamilyMetric.italic(sub)
     } ?: first()
 
 /**
@@ -533,7 +541,7 @@ private fun FontManageRow(
     onAction: (() -> Unit)? = null,
     openKey: String?,
     onOpenChange: (String?) -> Unit,
-    /** 跟随原书不是字体：false 即无左滑（点选保留）。 */
+    /** 跟随项不是字体：false 即无左滑（点选保留）。 */
     swipeEnabled: Boolean = true,
     /** 行首来源竖标（"系统"/"导入"，逐字竖排，占满名+副标题高度）；null 即无标。 */
     sourceLabel: String? = null,
@@ -595,7 +603,7 @@ private fun FontManageRow(
                 } else {
                     Text(family, color = if (selected) PanelGold else p.text, fontSize = 15.sp,
                         fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
-                    // 无字形条目（如跟随原书）同样走副标题行，与 Entry 行同规格；
+                    // 无字形条目（如跟随项）同样走副标题行，与 Entry 行同规格；
                     // 间隙取 2dp（与字形行 subtitleGapPx 下限一致）。
                     if (subtitle != null) {
                         Spacer(Modifier.height(2.dp))

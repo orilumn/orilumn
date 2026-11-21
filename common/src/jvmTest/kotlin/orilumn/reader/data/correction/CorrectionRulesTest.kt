@@ -47,12 +47,19 @@ class CorrectionRulesTest {
     }
 
     @Test
-    fun `bracket collapses long inner content in label only`() {
+    fun `bracket keeps full label and offers collapsed label`() {
         val selection = "「这是一段很长的内容」"
         val candidates = CorrectionRules.candidatesFor(selection)
-        assertEquals(listOf("“这是一段很长的内容”", "‘这是一段很长的内容’", "这是一段很长的内容"), candidates.map { it.value })
-        // 显示只留首尾引号，中间收成省略号；提交的仍是完整文字。
-        assertEquals(listOf("“…”", "‘…’", "…"), candidates.map { it.label })
+        assertEquals(
+            listOf("“这是一段很长的内容”", "‘这是一段很长的内容’", "这是一段很长的内容"),
+            candidates.map { it.value },
+        )
+        // 完整显示形态就是提交的文字；一行放不下时界面改用中间收成省略号的那份。
+        assertEquals(candidates.map { it.value }, candidates.map { it.label })
+        assertEquals(
+            listOf("\u201c\u2026\u2026\u201d", "\u2018\u2026\u2026\u2019", "\u2026\u2026"),
+            candidates.map { it.collapsedLabel },
+        )
     }
 
     @Test

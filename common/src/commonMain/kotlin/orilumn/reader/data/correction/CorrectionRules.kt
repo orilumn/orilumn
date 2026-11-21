@@ -43,8 +43,8 @@ object CorrectionRules {
     /**
      * 选区对应的候选词（按词表顺序，去重，且不含选区自己）。
      *
-     * 每条候选带 `value`（点下去提交的完整文字）与 `label`（栏里显示的形态）：
-     * 成对符号规则包着一整段内容时，`label` 会把中间收成省略号（见 [INNER_DISPLAY_LIMIT]）。
+     * 每条候选带 `value`（点下去提交的完整文字）、`label`（完整显示形态）与
+     * `collapsedLabel`（一行放不下时的显示形态：中间内容收成省略号 `……`）。
      *
      * @param extraRules 读者自定义 / 导入的词条（与随包词表同一格式，逐行）。为空时只查随包词表。
      */
@@ -63,18 +63,16 @@ object CorrectionRules {
     internal fun bundledRules(): List<CorrectionRule> = bundled
 }
 
-/**
- * 成对符号候选的**显示**门槛：内容超过这么多字就只显示首尾引号，中间收成省略号
- * （`“…”` / `‘…’` / `…`）。提交的仍是完整文字，这里只管读者看到的长度。
- */
-private const val INNER_DISPLAY_LIMIT = 4
-
 /** 一条纠错候选。
  *
- * [value] 是点下去真正写进正文的文字（完整、不做任何截断）；[label] 只是操作栏里的显示形态，
- * 长内容可以收成省略号——两者只有长度不同，语义一致。
+ * [value] 是点下去真正写进正文的文字（完整、不做任何截断）；[label] 是完整显示形态；
+ * [collapsedLabel] 是一行放不下时的显示形态——只把中间内容换成省略号 `……`，提交的仍是 [value]。
  */
-data class CorrectionCandidate(val value: String, val label: String) {
+data class CorrectionCandidate(
+    val value: String,
+    val label: String,
+    val collapsedLabel: String = label,
+) {
     constructor(value: String) : this(value, value)
 }
 
@@ -100,8 +98,9 @@ internal data class RegexRule(val regex: Regex, val replacement: String) : Corre
 /**
  * 成对符号规则：整段是「左符号 + 内容 + 右符号」时，换成 [open] + 内容 + [close]。
  *
- * 显示时内容超过 [INNER_DISPLAY_LIMIT] 字就收成省略号（`“…”` / `‘…’` / `…`）：
- * 三条候选的差别只在引号，内容原样重复三遍既占地方又没什么信息量。
+ * 三条候选的差别只在引号，内容原样重复三遍既占地方又没什么信息量，所以另给一份
+ * [CorrectionCandidate.collapsedLabel]：中间内容收成中文省略号（`“………”` / `‘……’` / `……`）。
+ * 什么时候收由界面按**一行放不放得下**决定，规则层不猜屏幕宽度。
  */
 internal data class BracketRule(val regex: Regex, val open: String, val close: String) : CorrectionRule {
     override fun apply(selection: String): CorrectionCandidate? {
@@ -109,14 +108,11 @@ internal data class BracketRule(val regex: Regex, val open: String, val close: S
         val content = match.groupValues.getOrNull(1) ?: return null
         return CorrectionCandidate(
             value = open + content + close,
-            label = open + collapseInner(content) + close,
+            label = open + content + close,
+            collapsedLabel = open + "……" + close,
         )
     }
 }
-
-/** 长内容在显示时收成省略号；短内容原样显示（`「你好」` → `“你好”`）。 */
-private fun collapseInner(content: String): String =
-    if (content.length > INNER_DISPLAY_LIMIT) "…" else content
 
 /**
  * 解析词表行。坏行只跳过并记一条 w，绝不因为一条写错就让整份词表失效。

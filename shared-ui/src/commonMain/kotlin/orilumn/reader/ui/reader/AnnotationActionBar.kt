@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
@@ -33,7 +34,10 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.layoutId
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
@@ -227,9 +231,9 @@ private val BAR_ROW_GAP = 2.dp
  * 判定用**实测子项宽度**（`layoutId` 分组），所以同一个组件在平板、手机、桌面窄窗里都能
  * 自己找到合适的排法，不需要外部传屏幕宽度或 dp 阈值。
  *
- * 纠错候选（[PART_CORRECTIONS]）**贴右**排在 `复制 / 删除 / 确定` 前面：它只出现在正文修改
- * 模式，那一行本来没有色槽，正好落在 `修订` 右边那片空白里。一行装不下时它让到下一行
- * （与色槽同一套让位规则），再窄就自己单独一行。
+ * 纠错候选（[PART_CORRECTIONS]）**紧跟 `修订` 右边、整段靠左**：它只出现在正文修改模式，
+ * 那一行本来没有色槽，正好落在 `修订` 右边那片空白里。一行装不下时它让到下一行
+ * （与色槽同一套让位规则），再窄就自己单独一行，仍然靠左。
  */
 @Composable
 private fun BarLayout(
@@ -301,13 +305,17 @@ private fun BarLayout(
                 if (stylesP != null) {
                     x += gap
                     stylesP.placeRelative(x, (rowH - h(stylesP)) / 2)
+                    x += w(stylesP)
                 }
-                // 候选贴右：紧挨着 `复制 / 删除 / 确定`，正好落在 `修订` 右边的空白里。
-                corrP?.placeRelative(maxW - w(trailP) - gap - w(corrP), (rowH - h(corrP)) / 2)
+                // 候选紧跟 `修订`（从左往右排），不贴右：读者先看到「换成什么」，再看右侧三键。
+                if (corrP != null) {
+                    x += gap
+                    corrP.placeRelative(x, (rowH - h(corrP)) / 2)
+                }
                 trailP?.placeRelative(maxW - w(trailP), (rowH - h(trailP)) / 2)
             }
         } else {
-            // 第二行放色槽 + 线型；候选放得下就一起贴右，放不下再单独一行。
+            // 第二行放色槽 + 线型；候选跟着靠左，放得下就一起，放不下再单独一行。
             val corrOnSecond = corrP != null && paletteW + gap + w(corrP) <= maxW
             val secondH = maxOf(h(colorsP), h(stylesP), if (corrOnSecond) h(corrP) else 0)
             if (paletteW <= maxW) {
@@ -324,8 +332,9 @@ private fun BarLayout(
                         )
                     }
                     if (corrOnSecond) {
+                        // 有色槽时接在色槽后面；修订模式没有色槽，就贴最左。
                         corrP?.placeRelative(
-                            maxW - w(corrP),
+                            if (paletteW > 0) paletteW + gap else 0,
                             topH + rowGap + (secondH - h(corrP)) / 2,
                         )
                     } else if (corrP != null) {
@@ -476,39 +485,59 @@ private val MENU_LABEL_FONT = 14.sp
 /**
  * 纠错候选词（见 [CorrectionRules]）：绿色文字，**点一下就提交修订**（不用再点 `确定`）。
  *
- * 只出现在正文修改模式，落在 `修订` 右边那片空白里；绿色与审阅视图里「新写进去的字」
+ * 只出现在正文修改模式，紧跟在 `修订` 右边、整段靠左；绿色与审阅视图里「新写进去的字」
  * 同一支绿，读者一眼看出这是「改后」的样子。
  *
- * 候选可能是一整段带引号的文字（成对符号规则），所以给一个宽度上限、超出用省略号收住：
- * 点下去提交的仍是完整候选，显示只取前一段，免得把整根操作栏撑出去。三条候选（`“…”` / `‘…’` /
- * 去掉两边）在窄屏上放不进一行时**换行**，不会有一条被挤到屏幕外点不到。
+ * **一行放得下就显示完整候选；放不下才把中间内容收成中文省略号 `……`**（`“………”` / `‘……’` /
+ * `……`）——提交的仍是完整文字。判定用实测文字宽度，不看字数：窄屏早收、宽屏晚收。
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun CorrectionRow(words: List<CorrectionCandidate>, onPick: (String) -> Unit) {
-    FlowRow(
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
-    ) {
-        words.forEach { word ->
-            Text(
-                text = word.label,
-                color = Color(REVIEW_INSERTED_ARGB),
-                fontSize = MENU_LABEL_FONT,
-                fontWeight = FontWeight.Medium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier
-                    .widthIn(max = CORRECTION_LABEL_MAX_WIDTH)
-                    .clickable { onPick(word.value) }
-                    .padding(horizontal = 9.dp, vertical = 7.dp),
-            )
+    val measurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    val textStyle = remember { TextStyle(fontSize = MENU_LABEL_FONT, fontWeight = FontWeight.Medium) }
+    BoxWithConstraints {
+        // 完整候选 + 各自左右留白 + 格间距，超过一行可用宽度才收省略号。
+        val collapsed = remember(words, constraints.maxWidth, density) {
+            val gapPx = with(density) { CORRECTION_GAP.toPx() }
+            val padPx = with(density) { CORRECTION_LABEL_PADDING.toPx() * 2 }
+            var total = gapPx * (words.size - 1).coerceAtLeast(0)
+            for (word in words) {
+                total += measurer.measure(word.label, textStyle, maxLines = 1).size.width + padPx
+            }
+            total > constraints.maxWidth.toFloat()
+        }
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(CORRECTION_GAP),
+            verticalArrangement = Arrangement.spacedBy(CORRECTION_GAP),
+        ) {
+            words.forEach { word ->
+                Text(
+                    text = if (collapsed) word.collapsedLabel else word.label,
+                    color = Color(REVIEW_INSERTED_ARGB),
+                    fontSize = MENU_LABEL_FONT,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .widthIn(max = CORRECTION_LABEL_MAX_WIDTH)
+                        .clickable { onPick(word.value) }
+                        .padding(horizontal = CORRECTION_LABEL_PADDING, vertical = 7.dp),
+                )
+            }
         }
     }
 }
 
 /** 单条候选词的显示宽度上限（超长候选只影响显示，提交的仍是完整文字）。 */
 private val CORRECTION_LABEL_MAX_WIDTH = 220.dp
+
+/** 候选之间的间距（换行后纵向同值）。 */
+private val CORRECTION_GAP = 2.dp
+
+/** 候选左右留白（点击区域比字宽一圈）。 */
+private val CORRECTION_LABEL_PADDING = 9.dp
 
 /** 线型样张：与正文里落墨的位置对齐（线画在字的下沿）。 */
 private fun DrawScope.drawLineStyleGlyph(

@@ -61,6 +61,8 @@ data class BookSettings(
     val pageAnimationMode: String? = null,
     /** Body first-screen cover stretch: true=stretch to fill the whole screen; false=keep aspect ratio with margins, no stretch. */
     val coverStretch: Boolean? = null,
+    /** 审阅视图是否开着（本书私有）：`null` = 没切换过 ⇒ 普通阅读视图；切换过一次就按书记住。 */
+    val reviewMode: Boolean? = null,
     /**
      * 用户在该族选的字重（族名 → CSS 字重 100..900）。**按书私有**（2026-10-29 定口）：
      * 同一本书挑宋体 + 粗一档不传染到别的书；空 = 未选 ⇒ 不发声明 ⇒ 书自己的字重生效。
@@ -162,6 +164,7 @@ data class BookSettings(
                     },
                     coverStretch = if (o.containsKey("coverStretch")) SettingsJson.optBoolean(o, "coverStretch", false)
                     else if (o.containsKey("coverProportional")) !SettingsJson.optBoolean(o, "coverProportional", false) else null,
+                    reviewMode = if (o.containsKey("reviewMode")) SettingsJson.optBoolean(o, "reviewMode", false) else null,
                     fontWeightAnchors = if (o.containsKey("fontWeightAnchors")) SettingsJson.optWeightAnchors(o, "fontWeightAnchors") else null,
                     fontWeightAnchorsBySlot = if (o.containsKey("fontWeightAnchorsBySlot")) {
                         SettingsJson.optWeightAnchorsMap(o, "fontWeightAnchorsBySlot", emptyMap())
@@ -198,6 +201,7 @@ data class BookSettings(
             useUserScripts = rs.useUserScripts,
             pageAnimationMode = rs.pageAnimationMode,
             coverStretch = rs.coverStretch,
+            reviewMode = rs.reviewMode,
             fontWeightAnchors = rs.fontWeightAnchors,
             fontWeightAnchorsBySlot = rs.fontWeightAnchorsBySlot,
         ).normalized()

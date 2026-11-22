@@ -33,6 +33,8 @@ class SettingsLayoutScopeTest {
         "brightness", "brightnessFollowSystem", "brightnessOffset", "eyeProtectionLevel",
         "brightnessGestureLeft", "brightnessGestureRight", "brightnessGestureTwo",
         "pageAnimationMode", "autoContinue", "pageNum", "coverStretch",
+        // 审阅视图开关：只换坐标空间与投影，不改任何排版参数。
+        "reviewMode",
         "showHiddenFonts",
         // 底栏按钮显隐：只改工具栏画什么，不进版式。
         "showToolbarBookmark", "showToolbarNote", "showToolbarRevision",
@@ -86,6 +88,7 @@ class SettingsLayoutScopeTest {
         "autoContinue" -> s.copy(autoContinue = !s.autoContinue)
         "pageNum" -> s.copy(pageNum = !s.pageNum)
         "coverStretch" -> s.copy(coverStretch = !s.coverStretch)
+        "reviewMode" -> s.copy(reviewMode = !s.reviewMode)
         "showHiddenFonts" -> s.copy(showHiddenFonts = !s.showHiddenFonts)
         "showToolbarBookmark" -> s.copy(showToolbarBookmark = !s.showToolbarBookmark)
         "showToolbarNote" -> s.copy(showToolbarNote = !s.showToolbarNote)

@@ -163,6 +163,26 @@ class RevisionPanelRowsTest {
     }
 
     @Test
+    fun deletedListMarkerShowsInTheRowEvenWhenTextChanged() {
+        // 用户复报的原样（平板 1096）：删掉列表符号、这一行改成普通段落，同时又改了字。
+        // 清单行按审阅空间那一段排，段首那个被删掉的 `- ` 必须是红字，
+        // 不能只剩一段看不出「这一行不再是列表项」的普通文字。
+        val spans = revisionReviewSpans(
+            rev(
+                start = 324,
+                end = 331,
+                text = "用 var 声明",
+                originalText = "使用 var 的可变变量",
+                editedText = "用 var 声明的可变变量",
+            ),
+            excerpt("- 使用 var 声明的可变变量", deleted = listOf(0 until 3), inserted = listOf(9 until 11)),
+        )
+        assertEquals("- 使用 var 声明的可变变量", concat(spans))
+        assertEquals(ReviewSpanKind.Deleted, spans.first().kind)
+        assertTrue(spans.first().text.startsWith("- "))
+    }
+
+    @Test
     fun reviewSpaceExcerptFoldsParagraphMarksAndWhitespace() {
         // 段界不占字符、换行折成空格（清单是一条流式文字），颜色跟着字走，¶ 照排。
         val spans = revisionReviewSpans(

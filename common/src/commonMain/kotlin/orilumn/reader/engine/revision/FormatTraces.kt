@@ -1,13 +1,16 @@
 package orilumn.reader.engine.revision
 
 /**
- * 「字一个没改、只改了标记」的修订：把被删掉 / 新写上的标记排进审阅空间。
+ * 把被删掉 / 新写上的标记排进审阅空间。
  *
  * 红 / 绿的字义是**标记**，不是正文（用户 2026-11-12 定口：这类修订不适合染字色）：
  * 删掉的 `## ` 排成红字 + 删除线，新写的排成绿字，与 ¶ 同一套「标记当普通字符」的口径。
- * 读者在卡片里删了什么，审阅视图里就看到什么。
+ * 读者在卡片里删了什么，审阅视图与修订清单里就看到什么。
  *
- * 只对**文字逐字未变**的修订生效：改了字的修订，红绿已经标在字上，不必再排标记。
+ * 块标记**不看文字改没改**：读者把列表项改成普通段落、同时又改了字，段首那个被删掉的
+ * `- ` 照样要排出来——文字差异解释不了「这一行不再是列表项」，只有标记痕迹说得清
+ * （用户 2026-11-22 复报：删掉列表符号的修订在清单里看不出来）。
+ * 行内标记仍只对**文字逐字未变**的修订生效：改了字时两头的样式区间不在同一把尺上。
  *
  * 属于排版层（上）：纯逻辑，不碰排版与渲染，可 JVM 单测。
  */
@@ -16,19 +19,14 @@ object FormatTraces {
     /**
      * 块标记痕迹：`## 你好世界` 删掉 `## ` 变回正文时，在段首留一个红 `## `。
      *
-     * @param oldText 这一段的原文（已去掉段界）。
-     * @param newText 这一段的修订文字（已去掉段界）。
      * @param oldKind 这一块**原来**的形态（从书里取）；null = 取不到，不画。
      * @param newKind 这一块**应该**长成的形态（修订里的块级形态）。
      * @return 一处或两处痕迹，都排在段首（[ReviewOverlay.Trace.at] = 0）；没变时为空。
      */
     fun block(
-        oldText: String,
-        newText: String,
         oldKind: BlockKind?,
         newKind: BlockKind?,
     ): List<ReviewOverlay.Trace> {
-        if (oldText != newText) return emptyList()
         if (oldKind == null || newKind == null || oldKind == newKind) return emptyList()
         val out = ArrayList<ReviewOverlay.Trace>(2)
         // 删掉的那个标记（红字 + 删除线）在前，新写上的（绿字）在后，与卡片里的书写顺序一致。
@@ -111,8 +109,11 @@ object FormatTraces {
     /**
      * 这一段的全部格式痕迹（块标记 + 行内标记），按原文位置排好。
      *
+     * 块标记与文字改没改无关（见类注释）；行内标记只在文字逐字未变时比——
+     * 改了字时 `oldSpans` 与 `newSpans` 的偏移各按各的尺量，比出来的「差集」是假的。
+     *
      * @param oldSpans 这一段**原来**的行内结构；null = 取不到（结构未就绪 / 老宿主），行内部分不画。
-     * @return 空表 = 没什么可画的（改了字 / 什么都没变 / 取不到原书结构）。
+     * @return 空表 = 没什么可画的（什么都没变 / 取不到原书形态）。
      */
     fun traces(
         oldText: String,
@@ -122,10 +123,9 @@ object FormatTraces {
         oldSpans: List<InlineMarkup.StyleSpan>?,
         newSpans: List<InlineMarkup.StyleSpan>?,
     ): List<ReviewOverlay.Trace> {
-        if (oldText != newText) return emptyList()
         val out = ArrayList<ReviewOverlay.Trace>(8)
-        out += block(oldText, newText, oldKind, newKind)
-        if (oldSpans != null) out += inline(oldText, oldSpans, newSpans)
+        out += block(oldKind, newKind)
+        if (oldText == newText && oldSpans != null) out += inline(oldText, oldSpans, newSpans)
         // 稳定排序：同一个位置上的痕迹保持「块标记 → 开标记（外层在前）→ 闭标记（内层在前）」。
         return out.sortedBy { it.at }
     }

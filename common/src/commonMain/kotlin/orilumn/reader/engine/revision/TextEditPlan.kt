@@ -992,9 +992,24 @@ object TextEditPlanner {
     ): Built {
         val segStart = seg.start
         val segEnd = seg.endExclusive
+        // 目标形态与现在相同 = 没改块形态（卡片每行都带形态，不筛掉的话每块都会白落一条修订）。
+        // 这一叶没有块形态（`div` / 表格行）时也不改：它不归 markdown 管。
+        val changedBlock = if (seg.block == null) {
+            null
+        } else if (currentKindOf == null) {
+            seg.block
+        } else {
+            val cur = currentKindOf(seg.leaf)
+            if (cur == null) null else seg.block.takeIf { it != cur }
+        }
         val absorbed = map.revisions.filter { r ->
             val rr = renderedInterval(r)
-            if (r.isInsertion) {
+            // 改块形态 = 整块重写：这一叶里原有的修订**不管在不在选区里**都要吸收，
+            // 否则同一块会叠出两条修订（一块一条），重放时块形态按谁算说不清
+            // （用户 2026-11-22：删掉列表符号时没有吸收块内的其他修订）。
+            if (changedBlock != null && seg.leafRenderEnd > seg.leafRenderStart) {
+                rr.first < seg.leafRenderEnd && rr.last + 1 > seg.leafRenderStart
+            } else if (r.isInsertion) {
                 if (segStart == segEnd) rr.first == segStart
                 else rr.first > segStart && rr.first < segEnd
             } else {
@@ -1040,16 +1055,6 @@ object TextEditPlanner {
         // 老调用方只有一整串文字，只能靠字符级对齐分开（方案 D-34 修订版）。
         val newText = if (seg.literalBreaks) normalized else promoteTypedBreaks(oldText, normalized)
 
-        // 目标形态与现在相同 = 没改块形态（卡片每行都带形态，不筛掉的话每块都会白落一条修订）。
-        // 这一叶没有块形态（`div` / 表格行）时也不改：它不归 markdown 管。
-        val changedBlock = if (seg.block == null) {
-            null
-        } else if (currentKindOf == null) {
-            seg.block
-        } else {
-            val cur = currentKindOf(seg.leaf)
-            if (cur == null) null else seg.block.takeIf { it != cur }
-        }
         if (newText == oldText && changedBlock == null && spansAlreadyThere(segSpans, seg, relStart, currentSpansOf)) {
             // 输入的文字与旧渲染文字逐字相同（或只差会被空白归一吃掉的空白）、块形态也没改、
             // 行内结构也和现在一样：不写库。结构要真比一遍——只凭「这次带了结构」就写，

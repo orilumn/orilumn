@@ -103,9 +103,38 @@ object BlockRestructure {
                 // 否则整块原样保留（它已经是一个「就位的容器」）。
                 if (node !in affected) return listOf(Unit(node, self, container = true))
                 if (node.tag == "li") {
-                    // `li` 不摊平：多段列表项里的兄弟段落属于这个列表项，拆开就丢了缩进。
+                    // `li` 不整体摊平：多段列表项里的兄弟段落属于这个列表项，拆开就丢了缩进。
                     // 里面是行内内容，不继承形态 —— 否则一段裸文字会被当成列表项包起来。
-                    return listOf(Unit(copyWith(node, rebuildSequence(node.children, null)), self, false))
+                    //
+                    // 例外：某一段的目标形态是**普通段落**，说明读者删掉了这一行的列表标记，
+                    // 要把这一行移出列表。只把这一段从 `li` 里摘出来（成为列表外的 `p`），
+                    // 其余兄弟段落仍留在原来的列表项里；`li` 被摘空时它连同空列表一起消失。
+                    // 标题 / 引用 / 代码块仍留在列表项内部（`li > h2` / `li > blockquote` 是
+                    // 合法的嵌套，不表示「移出列表」）。
+                    val lifted = ArrayList<Unit>(2)
+                    val kept = ArrayList<MarkupElement>(node.children.size)
+                    fun flushKept() {
+                        if (kept.isEmpty()) return
+                        lifted += Unit(copyWith(node, rebuildSequence(kept.toList(), null)), self, false)
+                        kept.clear()
+                    }
+                    for (child in node.children) {
+                        if (want[child] == BlockKind.Paragraph) {
+                            flushKept()
+                            lifted += Unit(
+                                applyTag(child, BlockKind.Paragraph),
+                                BlockKind.Paragraph,
+                                container = false,
+                            )
+                        } else {
+                            kept += child
+                        }
+                    }
+                    flushKept()
+                    if (lifted.size == 1 && lifted[0].kind == self) {
+                        return listOf(Unit(copyWith(node, rebuildSequence(node.children, null)), self, false))
+                    }
+                    return lifted
                 }
                 return node.children.flatMap { flatten(it, self) }
             }

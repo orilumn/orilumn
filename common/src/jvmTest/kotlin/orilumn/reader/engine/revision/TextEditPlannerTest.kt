@@ -696,6 +696,43 @@ class TextEditPlannerTest {
     }
 
     @Test
+    fun deletingTheListMarkerAbsorbsRevisionsInTheBlock() {
+        // 读者只删掉列表符号（文字一个字没改）：这一块原来那条修订要被吸收（一块一条），
+        // 新修订记下目标形态 = 普通段落，重放时才能把这一行移出列表。
+        // 吸收按**整块**算，不按选区：卡片只框住块首那一截时，块尾那条旧修订也不能留下叠层。
+        val old = TextRevision(
+            id = 7,
+            bookId = 1,
+            chapter = 1,
+            charStart = 3,
+            charEnd = 5,
+            text = "项二",
+            delta = 0,
+            groupId = 1,
+        )
+        val p = ready(
+            TextEditPlanner.plan(
+                bookId = 1,
+                chapter = 1,
+                chapterText = "项一 项二",
+                blockEnds = intArrayOf(5),
+                start = 0,
+                endExclusive = 2,
+                replacement = "项一",
+                map = ChapterRevisionMap(listOf(old)),
+                groupId = 99,
+                now = 1234,
+                blocks = listOf(InlineMarkup.Segment("项一", BlockKind.Paragraph)),
+                currentKindOf = { BlockKind.Bullet },
+            ),
+        )
+        assertEquals(listOf(7L), p.deletedIds)
+        val r = p.inserted.single()
+        assertEquals(listOf("p"), r.blockKinds)
+        assertEquals("项一 项二", r.text)
+    }
+
+    @Test
     fun mergeKeepsPerLineBlockKinds() {
         // 两段并成两段（文字变了、段数没变）：形态按行各带一份。
         val r = ready(

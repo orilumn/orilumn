@@ -13,19 +13,17 @@ import org.junit.Test
 class FormatTracesTest {
 
     private fun traces(
-        oldText: String,
-        newText: String,
         oldKind: BlockKind?,
         newKind: BlockKind?,
     ): List<Pair<String, Boolean>> =
-        FormatTraces.block(oldText, newText, oldKind, newKind).map { it.text to it.isNew }
+        FormatTraces.block(oldKind, newKind).map { it.text to it.isNew }
 
     @Test
     fun removedHeadingMarkerIsRed() {
         // 用户的原例：`## 你好世界` 删掉 `## ` 变回正文。
         assertEquals(
             listOf("## " to false),
-            traces("你好世界", "你好世界", BlockKind.Heading2, BlockKind.Paragraph),
+            traces(BlockKind.Heading2, BlockKind.Paragraph),
         )
     }
 
@@ -33,7 +31,7 @@ class FormatTracesTest {
     fun addedQuoteMarkerIsGreen() {
         assertEquals(
             listOf("> " to true),
-            traces("你好世界", "你好世界", BlockKind.Paragraph, BlockKind.Quote),
+            traces(BlockKind.Paragraph, BlockKind.Quote),
         )
     }
 
@@ -42,27 +40,53 @@ class FormatTracesTest {
         // 标题变引用：删掉的是 `## `（红），新写的是 `> `（绿），书写顺序与卡片一致。
         assertEquals(
             listOf("## " to false, "> " to true),
-            traces("你好世界", "你好世界", BlockKind.Heading2, BlockKind.Quote),
+            traces(BlockKind.Heading2, BlockKind.Quote),
         )
     }
 
     @Test
     fun unchangedKindLeavesNoTrace() {
-        assertTrue(traces("你好世界", "你好世界", BlockKind.Paragraph, BlockKind.Paragraph).isEmpty())
-        assertTrue(traces("你好世界", "你好世界", BlockKind.Heading2, BlockKind.Heading2).isEmpty())
+        assertTrue(traces(BlockKind.Paragraph, BlockKind.Paragraph).isEmpty())
+        assertTrue(traces(BlockKind.Heading2, BlockKind.Heading2).isEmpty())
     }
 
     @Test
-    fun changedTextLeavesNoMarkerTrace() {
-        // 改了字的修订不画标记痕迹：红绿已经标在字上了，再排标记只会更糊。
-        assertTrue(traces("你好世界", "你好明天", BlockKind.Heading2, BlockKind.Paragraph).isEmpty())
+    fun changedTextStillShowsTheMarkerTrace() {
+        // 读者把列表项改成普通段落、同时又改了字：段首那个被删掉的 `- ` 照样要排出来
+        // （用户 2026-11-22 复报：删掉列表符号的修订在清单里看不出来）。
+        assertEquals(
+            listOf("- " to false),
+            FormatTraces.traces(
+                oldText = "使用 var 的可变变量",
+                newText = "用 var 声明的可变变量",
+                oldKind = BlockKind.Bullet,
+                newKind = BlockKind.Paragraph,
+                oldSpans = emptyList(),
+                newSpans = emptyList(),
+            ).map { it.text to it.isNew },
+        )
+    }
+
+    @Test
+    fun changedTextSkipsInlineTraces() {
+        // 行内标记只在文字逐字未变时比：改了字时两头偏移各按各的尺量，比出来的差集是假的。
+        assertTrue(
+            FormatTraces.traces(
+                oldText = "你好世界",
+                newText = "你好明天",
+                oldKind = BlockKind.Paragraph,
+                newKind = BlockKind.Paragraph,
+                oldSpans = listOf(InlineMarkup.StyleSpan(0, 4, InlineMarkup.StyleSig("strong"))),
+                newSpans = emptyList(),
+            ).isEmpty(),
+        )
     }
 
     @Test
     fun unknownKindLeavesNoTrace() {
         // 取不到原书形态（老宿主 / 结构未就绪）：宁可不画，也不猜一个标记出来。
-        assertTrue(traces("你好世界", "你好世界", null, BlockKind.Paragraph).isEmpty())
-        assertTrue(traces("你好世界", "你好世界", BlockKind.Heading2, null).isEmpty())
+        assertTrue(traces(null, BlockKind.Paragraph).isEmpty())
+        assertTrue(traces(BlockKind.Heading2, null).isEmpty())
     }
 
     @Test
@@ -71,7 +95,7 @@ class FormatTracesTest {
             "你好世界",
             "你好世界",
             IntArray(0),
-            FormatTraces.block("你好世界", "你好世界", BlockKind.Heading2, BlockKind.Paragraph),
+            FormatTraces.block(BlockKind.Heading2, BlockKind.Paragraph),
         )!!
         assertEquals("## 你好世界", plan.text)
         assertEquals(7, plan.length)

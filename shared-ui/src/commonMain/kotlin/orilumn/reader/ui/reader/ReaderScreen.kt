@@ -1522,14 +1522,33 @@ fun ReaderScreen(
         // 重开旧修订：这一行如果本身就是书里那个行内元素（`display:block` 的 `span` 之类），
         // 标签也要带出来——第一次开卡看得见，重开时不能凭空消失。只在区间正好盖住整叶、行数也
         // 对得上时才用：半截文字的「整行包装」会把元素画到错的地方（那种卡片照旧不带标签）。
-        val ownTags = if (rowCard == null && revision.editedBlocks.none { it.startsWith("t") || it.startsWith("T") }) {
+        val tableLike = revision.editedBlocks.any { it.startsWith("t") || it.startsWith("T") }
+        val displayBlocks = if (tableLike) {
+            null
+        } else {
+            currentHost.textEditBlocks(p.chapter, revision.charStart, revision.charEnd)
+        }
+        val ownTags = if (rowCard == null && !tableLike) {
             val lines = RevisionBlocks.split(revision.text).size
-            val blocks = currentHost.textEditBlocks(p.chapter, revision.charStart, revision.charEnd)
-            blocks?.takeIf {
+            displayBlocks?.takeIf {
                 it.size == lines &&
                     it.first().start == revision.charStart &&
                     it.last().endExclusive == revision.charEnd
             }?.map { b -> b.ownTag }
+        } else {
+            null
+        }
+        // 落库的块形态是空表 = 上次只改了字、没改块形态：卡片按**当前显示空间**的块形态回显，
+        // 不然重开一条改过列表项 / 标题的修订，卡片里会凭空少掉 `- ` / `## `。
+        // 只在整段都是 markdown 管得着的块（形态都不为 null）时用：`div` / 行内元素本人那种
+        // 没有块标记的块，整套仍按纯文本开卡（提交时才不会把「没标记」当成普通段落）。
+        val displayKinds: List<String>? = if (!tableLike && revision.blockKinds.isEmpty()) {
+            val lines = RevisionBlocks.split(revision.text).size
+            displayBlocks?.takeIf { it.size == lines && it.all { b -> b.kind != null } }
+                ?.mapIndexed { i, b ->
+                    // 第一行从段中间开始时是半截文字，承载不了块形态：不给标记。
+                    if (i == 0 && !b.startsAtBlockStart) "" else b.kind!!.wire
+                }
         } else {
             null
         }
@@ -1542,6 +1561,7 @@ fun ReaderScreen(
                 revision,
                 currentHost.textRevisionOriginalSpans(p.chapter, revision.id),
                 ownTags,
+                displayKinds,
             )
         }
         textEditText = rc.card.text
@@ -1550,7 +1570,6 @@ fun ReaderScreen(
         textEditOwnTags = ownTags?.takeIf { list -> list.any { it != null } }
         textEditBaseText = rc.plain
         textEditBaseCard = rc.card.text
-        val tableLike = revision.editedBlocks.any { it.startsWith("t") || it.startsWith("T") }
         // 打开旧修改时按落库的每行短码还原表格 / 图片形状（提交时仍按它校验结构没被改掉）。
         val shapeSegments = if (tableLike) {
             RevisionBlocks.cardSegments(revision.editedText, revision.editedBlocks)
@@ -1571,10 +1590,16 @@ fun ReaderScreen(
         textEditBlocksKnown = if (tableLike) {
             revision.editedBlocks.isNotEmpty()
         } else {
-            revision.blockKinds.isNotEmpty()
+            revision.blockKinds.isNotEmpty() || displayKinds != null
         }
         // 落库的第一行没带形态（`""`）= 当时那一行改不了块形态（半截文字 / 不归 markdown 管）。
-        textEditFirstLineNoKind = !tableLike && revision.blockKinds.firstOrNull()?.isEmpty() == true
+        // 落库没存过形态、按当前显示空间回显时，看这一段的块首是不是正好落在修订起点。
+        textEditFirstLineNoKind = when {
+            tableLike -> false
+            revision.blockKinds.isNotEmpty() -> revision.blockKinds.firstOrNull()?.isEmpty() == true
+            displayKinds != null -> displayBlocks?.firstOrNull()?.startsAtBlockStart == false
+            else -> false
+        }
         // 输入区带出来的是**已经改过的字**，按「已动过」算：之后拖手柄只挪落笔范围，
         // 不会把读者上次的改写换成新选区的原文（那等于悄悄丢掉上一次修改）。
         textEditDirty = true
@@ -2014,7 +2039,12 @@ fun ReaderScreen(
         val ownSpans = ArrayList<InlineMarkup.StyleSpan>(2)
         var firstStartsAtBlock = true
         var pos = from
+        // 卡片文字已经写到的长度（不含下一段要补的段界）：同一块里的两截接成一行，不插段界。
         var at = 0
+        // 上一段所属的块（块的章字符流起点）；null = 这一段不参与合并（表格行 / 行内元素本人）。
+        var lastBlockKey: Int? = null
+        // 有没有哪一段拿不到可信的块信息：有就整套按纯文本开卡（与原来同一条退路）。
+        var blockInfoIncomplete = false
         // 卡片里真正装着的字覆盖的范围：普通块只到读者选中的那一段（不把块首 / 块尾多带进来），
         // 表格行整行进卡、范围跟着扩到整行。**卡片里的字必须与这个区间逐字对齐**，
         // 否则确定时会把多带进来的那几个字当作新文字再插一遍（正文就多出一截）。
@@ -2024,6 +2054,10 @@ fun ReaderScreen(
         // 两个都记下来，提交时表格那段按行范围走、文字那段按普通区间走（见 `TextEditPart`）。
         var tableRange: IntRange? = null
         var tableScope: TableRowScope? = null
+        // 卡片范围上的块表：修订段没改块形态时（`blockKinds` 空表）形态就取它——
+        // 空表的意思是「没改」，不是「不知道」。
+        val cardBlocks = currentHost.textEditBlocks(ch, from, to)?.takeIf { it.isNotEmpty() }
+        if (cardBlocks == null) blockInfoIncomplete = true
         fun appendPiece(
             piece: String,
             block: BlockKind?,
@@ -2031,27 +2065,48 @@ fun ReaderScreen(
             reviewStart: Int,
             table: TableRowInfo? = null,
             ownTag: String? = null,
+            blockKey: Int? = null,
+            cardSpans: List<InlineMarkup.StyleSpan> = emptyList(),
         ) {
+            // 同一块里的两截（一条修订 + 它后面没改的原文）接成一段：卡片里一行就是一块。
+            // 不并的话，第二截会被当成新的一段（`\n` = 段界），提交时把一块拆成两块。
+            val merge = blockKey != null && blockKey == lastBlockKey &&
+                table == null && ownTag == null && segments.isNotEmpty() &&
+                segments.last().table == null && ownTags.lastOrNull() == null
+            if (!merge && segments.isNotEmpty()) at += 1
             val base = brk.plain(reviewStart)
             for (sp in rawSpans) {
                 val s = brk.plain(reviewStart + sp.start) - base
                 val e = brk.plain(reviewStart + sp.endExclusive) - base
                 if (e > s) spans += InlineMarkup.StyleSpan(at + s, at + e, sp.sig)
             }
-            segments += InlineMarkup.Segment(piece, block, table)
-            // 这一行本身就是书里那个行内元素（`display:block` 的 `span` 之类）：整行包一层标签，
-            // 与普通卡片同一口径（见 `ownTagSpans`）。它只给显示，提交时摘掉。
-            if (ownTag != null && piece.isNotEmpty()) {
-                ownTags += ownTag
-                ownSpans += InlineMarkup.StyleSpan(at, at + piece.length, InlineMarkup.StyleSig(ownTag))
-            } else {
-                ownTags += null
+            // 卡片文字坐标里的行内结构（修订落库的那份）：已经按段切好，直接平移。
+            for (sp in cardSpans) {
+                if (sp.endExclusive > sp.start) {
+                    spans += InlineMarkup.StyleSpan(at + sp.start, at + sp.endExclusive, sp.sig)
+                }
             }
-            at += piece.length + 1
+            if (merge) {
+                val prev = segments.removeAt(segments.size - 1)
+                segments += InlineMarkup.Segment(prev.text + piece, prev.block, prev.table)
+            } else {
+                segments += InlineMarkup.Segment(piece, block, table)
+                // 这一行本身就是书里那个行内元素（`display:block` 的 `span` 之类）：整行包一层标签，
+                // 与普通卡片同一口径（见 `ownTagSpans`）。它只给显示，提交时摘掉。
+                if (ownTag != null && piece.isNotEmpty()) {
+                    ownTags += ownTag
+                    ownSpans += InlineMarkup.StyleSpan(at, at + piece.length, InlineMarkup.StyleSig(ownTag))
+                } else {
+                    ownTags += null
+                }
+            }
+            lastBlockKey = blockKey
+            at += piece.length
         }
         fun appendGap(start: Int, endExclusive: Int) {
             val blocks = currentHost.textEditBlocks(ch, start, endExclusive).orEmpty()
             if (blocks.isEmpty()) {
+                blockInfoIncomplete = true
                 appendPiece(
                     brk.slice(text, start, endExclusive),
                     null,
@@ -2080,6 +2135,8 @@ fun ReaderScreen(
                         currentHost.textEditSpans(ch, bStart, bEnd).orEmpty(),
                         bStart,
                         ownTag = b.ownTag,
+                        // 表格行 / 行内元素本人各自成段；普通块按块首合并。
+                        blockKey = if (b.table != null || b.ownTag != null) null else b.start,
                     )
                 }
             }
@@ -2108,7 +2165,8 @@ fun ReaderScreen(
                 if (hi > lo) {
                     tableRange = r.charStart until r.charEnd
                     tableScope = scope
-                    val revAt = at
+                    // 表格行各自成段（`appendPiece` 里会补段界），行内结构按整卡平移过来。
+                    val revAt = at + if (segments.isNotEmpty()) 1 else 0
                     // 整表卡片带出整张表的结构；行范围卡片只带那几行，行内结构按整卡平移过来。
                     val stored = if (scope != null) {
                         tableRowCardOf(r, scope)?.styles
@@ -2130,32 +2188,54 @@ fun ReaderScreen(
                 // 这条修订改完的整段：普通文字按段界切开。
                 val parts = RevisionBlocks.split(r.text)
                 val kinds = r.blockKinds
+                // 当前显示空间里这条修订盖住的块：修订没改块形态时（`blockKinds` 空表）
+                // 形态就取它们——空表的意思是「没改」，不是「不知道」。
+                val revBlocks = currentHost.textEditBlocks(ch, r.charStart, r.charEnd)
                 // 这一段里有没有「整行就是书里那个行内元素」的叶（`display:block` 的 span 之类）：
                 // 行数与叶数、两头都对得上才用，半截文字不猜（与重开旧修订同一口径）。
-                val ownOfParts = currentHost.textEditBlocks(ch, r.charStart, r.charEnd)?.takeIf {
+                val ownOfParts = revBlocks?.takeIf {
                     it.size == parts.size &&
                         it.first().start == r.charStart &&
                         it.last().endExclusive == r.charEnd
                 }?.map { b -> b.ownTag }
-                val revAt = at
+                if (segments.isEmpty() && revBlocks?.firstOrNull()?.startsAtBlockStart == false) {
+                    firstStartsAtBlock = false
+                }
+                // 段数与块数对不上就不知道每段各是什么块，整套退回纯文本（不在错的块上打标记）。
+                val aligned = revBlocks != null && revBlocks.size == parts.size
+                if (!aligned) blockInfoIncomplete = true
+                // 落库的那份行内结构（卡片文字坐标，段界占一格）：按段切开再进同一块。
                 val stored = r.styles ?: r.editedStyles?.takeIf {
                     r.editedText == parts.joinToString("\n")
                 }
-                stored?.let { list ->
-                    for (sp in InlineMarkup.fromStored(list)) {
-                        val s = revAt + sp.start
-                        val e = revAt + sp.endExclusive
-                        if (e > s) spans += InlineMarkup.StyleSpan(s, e, sp.sig)
-                    }
-                }
+                val storedSpans = stored?.let(InlineMarkup::fromStored).orEmpty()
+                var partStart = 0
                 for (i in parts.indices) {
+                    val partEnd = partStart + parts[i].length
+                    val partSpans = storedSpans.mapNotNull { sp ->
+                        val s = maxOf(sp.start, partStart) - partStart
+                        val e = minOf(sp.endExclusive, partEnd) - partStart
+                        if (e > s) InlineMarkup.StyleSpan(s, e, sp.sig) else null
+                    }
+                    val b = revBlocks?.getOrNull(i)
                     appendPiece(
                         parts[i],
-                        if (kinds.size == parts.size) BlockKind.fromWire(kinds[i]) else null,
+                        when {
+                            // 落库的形态优先（读者上次明确写的）；空串 = 那一行当时改不了形态，
+                            // 就回落到当前显示空间的块形态（空表 / 空串是「没改」，不是「不知道」）。
+                            kinds.size == parts.size && kinds[i].isNotEmpty() ->
+                                BlockKind.fromWire(kinds[i])
+                            b != null -> b.kind
+                            else -> null
+                        },
                         emptyList(),
                         r.charStart,
                         ownTag = ownOfParts?.getOrNull(i),
+                        // 普通块按块首合并（修订段与它前后的原文接成一行）；表格行 / 行内元素各自成段。
+                        blockKey = if (b == null || b.table != null || b.ownTag != null) null else b.start,
+                        cardSpans = partSpans,
                     )
+                    partStart = partEnd + 1
                 }
             }
             pos = maxOf(pos, re)
@@ -2166,8 +2246,11 @@ fun ReaderScreen(
         val (ambient, visible) = splitAmbientSpans(spans, plain.length)
         // 只要有一块拿不到形态，就整套按纯文本开卡（不写任何块标记）：否则卡片里别的块的
         // `## ` 会让提交时误以为「这次要改形态」，而这一块又承载不了。表格行本来就没有块形态，
-        // 不参与这条判定（它的形态由格结构给）。
-        val allKnown = segments.all { it.block != null || it.table != null }
+        // 不参与这条判定（它的形态由格结构给）；第一行从段中间开始时也没有形态，那是「半截文字」，
+        // 提交侧按 `textEditFirstLineNoKind` 原样保留它的形态。
+        val allKnown = !blockInfoIncomplete && segments.withIndex().all { (i, seg) ->
+            seg.block != null || seg.table != null || (i == 0 && !firstStartsAtBlock)
+        }
         val shown = if (allKnown) {
             segments
         } else {
@@ -4684,6 +4767,7 @@ internal fun revisionCardOf(
     revision: TextRevision,
     oldSpans: List<InlineMarkup.StyleSpan>? = null,
     ownTags: List<String?>? = null,
+    displayKinds: List<String>? = null,
 ): RevisionCard {
     val tableLike = revision.editedBlocks.any { it.startsWith("t") || it.startsWith("T") }
     if (tableLike) {
@@ -4692,7 +4776,9 @@ internal fun revisionCardOf(
     }
     // 段界字符 U+E000 与卡片里的 `\n` 都是一位：按段切开再用 `\n` 拼回去，长度与偏移都不变。
     val segments = RevisionBlocks.split(revision.text)
-    val kinds = revision.blockKinds
+    // 落库的块形态是空表 = 上次只改了字、没改块形态：按**当前显示空间**的块形态回显
+    // （`displayKinds`，调用方已按段对齐）。空表不是「不知道」，不能让卡片凭空少掉 `- ` / `## `。
+    val kinds = displayKinds?.takeIf { it.size == segments.size } ?: revision.blockKinds
     val hasKinds = kinds.size == segments.size
     val lines = ArrayList<String>(segments.size)
     val blocks = ArrayList<String>(segments.size)

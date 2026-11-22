@@ -1062,6 +1062,19 @@ object TextEditPlanner {
             return Built(emptyList(), null, RevisionBlocks.renderedLength(newText))
         }
 
+        // 读者把已有修订改回**原文**（文字、块形态、行内结构都与原书一致）：等效于删掉这条修订，
+        // 不能落一条「改后 == 原文」的空修订（2026-11-22 用户报：改回原样后清单里还留着一条，
+        // 正文看不出变化）。原书那一段从旧修订落库时的原文快照还原；拿不到快照（老数据 /
+        // 跨段快照长度对不上）就不判，照旧落一条修订——宁可多一条，不能误删读者真改过的内容。
+        if (
+            absorbed.isNotEmpty() &&
+            revertsStructure(absorbed, changedBlock, map) &&
+            spansAlreadyThere(segSpans, seg, relStart, currentSpansOf) &&
+            newText == originalTextOfRange(oldText, uRenderStart, absorbed, renderedInterval)
+        ) {
+            return Built(absorbed.map { it.id }, null, RevisionBlocks.renderedLength(newText))
+        }
+
         // 只能裁「没有被旧修订覆盖」的两端：那一段渲染文字与原文逐字相同，裁掉才不会丢旧替换。
         // 没有旧修订时整段都可裁（改一个字只落一个字，方案 §8.4）。
         val firstRevised = absorbed.minOfOrNull { renderedInterval(it).first } ?: uRenderEnd
@@ -1147,6 +1160,125 @@ object TextEditPlanner {
             ),
             renderedLength = RevisionBlocks.renderedLength(newText),
         )
+    }
+
+    /**
+     * 扩张区间在**原书空间**的文字（判「是不是改回原文」用）。
+     *
+     * 旧修订盖住的那几截按它们落库时的原文快照换回去；没被修订盖住的位置，渲染文字与原书逐字相同。
+     * 拿不到任何一条的原文快照时返回 null：调用方据此不判，照旧落一条修订。
+     */
+    private fun originalTextOfRange(
+        oldText: String,
+        uRenderStart: Int,
+        absorbed: List<TextRevision>,
+        renderedInterval: (TextRevision) -> IntRange,
+    ): String? {
+        if (absorbed.isEmpty()) return oldText
+        val sb = StringBuilder(oldText.length)
+        var cursor = 0
+        for (r in absorbed.sortedBy { renderedInterval(it).first }) {
+            val iv = renderedInterval(r)
+            val from = iv.first - uRenderStart
+            val to = iv.last + 1 - uRenderStart
+            if (from < cursor || to > oldText.length || from > to) return null
+            sb.append(oldText, cursor, from)
+            sb.append(originalSliceOf(r) ?: return null)
+            cursor = to
+        }
+        sb.append(oldText, cursor, oldText.length)
+        return sb.toString()
+    }
+
+    /**
+     * 一条修订在它**最小替换区间** `[charStart, charEnd)` 上盖住的原书文字。
+     *
+     * 落库快照 [TextRevision.originalText] 是读者拖出的**整段**（[TextRevision.editRange]），
+     * 比最小修订宽时按偏移裁出中间那截；`editRange` 没记（整段就是最小）时快照本身就是这一段。
+     * 对不上（老数据没有快照 / 跨段快照按 `\n` 分段、长度与区间不同）返回 null。
+     */
+    private fun originalSliceOf(r: TextRevision): String? {
+        val whole = r.editRange
+        if (whole == null) {
+            return if (r.originalText.length == r.originalLength) r.originalText else null
+        }
+        val wholeLen = whole.last + 1 - whole.first
+        if (r.originalText.length != wholeLen) return null
+        val from = r.charStart - whole.first
+        val to = r.charEnd - whole.first
+        if (from < 0 || to > wholeLen || from > to) return null
+        return r.originalText.substring(from, to)
+    }
+
+    /**
+     * 这一笔是不是把旧修订改回了原书的**形态**（块形态 + 行内结构）。
+     *
+     * 判「改回原文」时不能只看文字：粗体里的字改回去，卡片会把原文本来就有的粗体一起带回来；
+     * 把标题标记删掉，卡片也会把块形态改回段落。这些都是原文的形态，不是读者这一笔改的，
+     * 不该挡下删除；反过来，旧修订真改过形态、这一笔没改回来，就还得留着（清单里那条仍成立）。
+     */
+    private fun revertsStructure(
+        absorbed: List<TextRevision>,
+        changedBlock: BlockKind?,
+        map: ChapterRevisionMap,
+    ): Boolean = absorbed.all { r ->
+        val blockReverted = if (r.blockKinds.isEmpty()) {
+            // 旧修订没改过块形态：这一笔也不能改。
+            changedBlock == null
+        } else {
+            // 旧修订改过块形态：这一笔要正好改回原书那一种。
+            changedBlock != null && r.blockKinds.size == 1 &&
+                map.originalKinds[r]?.singleOrNull() == changedBlock
+        }
+        blockReverted && stylesAreAmbient(r, map)
+    }
+
+    /**
+     * 旧修订记着的行内结构是不是**原文本来就有**的（不是读者那一笔改的样式）。
+     *
+     * 与原文结构逐字比一遍：一样 ⇒ 这段结构只是从正文带回来的，删掉修订不会丢样式。
+     * 取不到原文结构（结构未载入 / 老数据没有投影）时返回 false，按「可能是读者改的」处理——
+     * 宁可多留一条空修订，也不能把读者改过的样式一起删掉。
+     */
+    private fun stylesAreAmbient(r: TextRevision, map: ChapterRevisionMap): Boolean {
+        val stored = r.styles ?: return true
+        if (stored.isEmpty()) return true
+        // 纯插入：原书这一段本来就没有字，结构只能是从左右邻字带过来的；
+        // 读者把新插的字删回去，样式自然一起消失，不算丢掉读者改的样式。
+        if (r.originalLength == 0) return true
+        val original = map.originalSpans[r] ?: return false
+        val mine = InlineMarkup.fromStored(stored)
+        val newLen = r.text.length
+        val origLen = r.originalLength
+        if (newLen == origLen) {
+            for (i in 0 until newLen) {
+                if (shapeKeysAt(mine, i) != shapeKeysAt(original, i)) return false
+            }
+            return true
+        }
+        // 替换文字与原区间不等长：位置没法逐个对，只有「两边整段都被同一组结构盖满」才算原文结构。
+        val a = uniformSigs(mine, newLen) ?: return false
+        val b = uniformSigs(original, origLen) ?: return false
+        return a == b
+    }
+
+    /** 某个字符位置上盖着哪些行内元素（只看标签，与卡片的结构比较同一口径）。 */
+    private fun shapeKeysAt(spans: List<InlineMarkup.StyleSpan>, at: Int): Set<String> {
+        var out: Set<String>? = null
+        for (sp in spans) {
+            if (sp.start <= at && at < sp.endExclusive) out = (out ?: emptySet()) + sp.sig.shapeKey
+        }
+        return out ?: emptySet()
+    }
+
+    /** 整段被同一组行内元素盖满时返回那组标签；有位置没盖住 / 盖得不一样就返回 null。 */
+    private fun uniformSigs(spans: List<InlineMarkup.StyleSpan>, length: Int): Set<String>? {
+        if (length <= 0) return emptySet()
+        if (spans.isEmpty()) return emptySet()
+        val first = shapeKeysAt(spans, 0)
+        if (first.isEmpty()) return null
+        for (i in 1 until length) if (shapeKeysAt(spans, i) != first) return null
+        return first
     }
 
     /**

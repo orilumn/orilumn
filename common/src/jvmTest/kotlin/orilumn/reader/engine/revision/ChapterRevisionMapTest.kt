@@ -289,6 +289,53 @@ class ChapterRevisionMapTest {
     }
 
     @Test
+    fun segmentIntervalCoversOwnInsertionAtTheRecordedEnd() {
+        // 用户复报（2026-11-22）：「fun 用」这一段后面补了个「于」，落库的是整段 [0,5) 上的一条
+        // 纯插入（插入点在整段末尾 5）。整段必须把「于」算进来，否则选区比卡片文字短一格：
+        // 绿字框不住，点它命不中，删它也是空操作。
+        val r = TextRevision(
+            id = 1,
+            bookId = 1,
+            chapter = 1,
+            charStart = 5,
+            charEnd = 5,
+            text = "于",
+            originalText = "fun 用",
+            editedText = "fun 用于",
+            editRange = 0 until 5,
+            delta = 1,
+        )
+        val map = ChapterRevisionMap(listOf(r), originalTexts = mapOf(r to ""))
+        // 最小修订只是插入的那一格；整段是「fun 用」+「于」。
+        assertEquals(5 until 6, map.renderedInterval(r))
+        assertEquals(0 until 6, map.renderedSegmentInterval(r))
+        assertEquals(5 until 6, map.reviewInterval(r))
+        assertEquals(0 until 6, map.reviewSegmentInterval(r))
+    }
+
+    @Test
+    fun segmentIntervalStopsBeforeAnotherInsertionAtTheRecordedEnd() {
+        // 整段末尾那一点上还压着**别的**修订的插入：那是邻条的字，不能吞进这一段。
+        // 退回最小修订（区间与卡片文字都短，但不会误删邻条）。
+        val a = TextRevision(
+            id = 1,
+            bookId = 1,
+            chapter = 1,
+            charStart = 5,
+            charEnd = 5,
+            text = "于",
+            originalText = "fun 用",
+            editedText = "fun 用于",
+            editRange = 0 until 5,
+            delta = 1,
+        )
+        val b = rev(5, 5, "吧", id = 2)
+        val map = ChapterRevisionMap(listOf(a, b), originalTexts = mapOf(a to "", b to ""))
+        assertEquals(map.renderedInterval(a), map.renderedSegmentInterval(a))
+        assertEquals(map.reviewInterval(a), map.reviewSegmentInterval(a))
+    }
+
+    @Test
     fun recordedWholeRangeFallsBackWhenALaterEditSitsInsideIt() {
         // 整段 [0,5) 记下之后，读者又在它里面（[3,4)）改了一处：那条改动不在这条的整段结果里，
         // 按整段重开会把它一起写掉，所以退回最小修订（老口径）。

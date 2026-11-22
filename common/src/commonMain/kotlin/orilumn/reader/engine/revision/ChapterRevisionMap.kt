@@ -171,8 +171,31 @@ class ChapterRevisionMap(
     fun renderedSegmentInterval(r: TextRevision): IntRange {
         val range = recordedWholeRange(r) ?: return renderedInterval(r)
         val start = toRendered(range.first, crossInsertions = true)
-        val end = toRendered(range.last + 1, crossInsertions = false)
+        val end = segmentEndExclusive(r, range.last + 1) { at, cross -> toRendered(at, cross) }
+            ?: return renderedInterval(r)
         return start until maxOf(start, end)
+    }
+
+    /**
+     * 整段终点（半开）该落在哪。
+     *
+     * 终点正好压着**这条修订自己**的纯插入时（读者在整段末尾补字，落库的就是一条插入），
+     * 那截新字属于这一段，必须越过去：不越的话整段区间比卡片带出的文字短一格，
+     * 选区框不住刚补的字，删它也等于没删（2026-11-22 用户报「绿字不在选区里 / 删了没反应」）。
+     *
+     * 插在**同一点**的别的修订属于邻条，不能一并吞进来：真撞上时返回 null，调用方退回最小修订
+     * （区间与文字都短，但至少对得上，不会误删邻条的字）。
+     */
+    private fun segmentEndExclusive(
+        r: TextRevision,
+        origEnd: Int,
+        convert: (original: Int, crossInsertions: Boolean) -> Int,
+    ): Int? {
+        val ownsEnd = r.isInsertion && r.charStart == origEnd
+        if (!ownsEnd) return convert(origEnd, false)
+        val crowded = revisions.any { it != r && it.isInsertion && it.charStart == origEnd }
+        if (crowded) return null
+        return convert(origEnd, true)
     }
 
     /**
@@ -546,10 +569,11 @@ class ChapterRevisionMap(
             val origStart = explicit.first
             val origEnd = explicit.last + 1
             val start = toReview(origStart, crossInsertions = false)
-            var end = toReview(origEnd, crossInsertions = true)
-            // 整段终点正好贴着下一条修订：越过它起点的插入属于下一条，不能算进这一段
+            // 终点压着这条修订自己的插入时要把那截新字算进来（见 [segmentEndExclusive]）。
+            var end = segmentEndExclusive(r, origEnd) { at, cross -> toReview(at, cross) } ?: return minimal
+            // 整段终点正好贴着**下一条**修订：越过它起点的插入属于下一条，不能算进这一段
             // （`toReview(…, true)` 会把那个点的插入算进来）。
-            val next = revisions.firstOrNull { it.charStart == origEnd }
+            val next = revisions.firstOrNull { it != r && it.charStart == origEnd }
             if (next != null) end = minOf(end, reviewStart(next))
             return if (end > start) start until end else minimal
         }

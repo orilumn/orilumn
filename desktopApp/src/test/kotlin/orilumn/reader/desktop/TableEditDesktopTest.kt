@@ -363,6 +363,158 @@ class TableEditDesktopTest {
         }
     }
 
+    /**
+     * 把修订内容改回**原文**：等效于删掉这条修订（2026-11-22 用户报「目前无反应」）。
+     *
+     * 普通阅读视图里重开一条改字修订、把字改回去，以前会落一条「改后 == 原文」的空修订：
+     * 正文看不出变化，清单里却还留着一条。现在规划层认出「结果与原书逐字相同」，
+     * 只删旧修订、不落新修订。
+     */
+    @Test
+    fun restoringOriginalTextDeletesTheRevision() {
+        val root = Files.createTempDirectory("orilumn-restore-original").toFile()
+        val host = openHost(writeBook(root, "<p>原文段落：略微一攥，然后继续。</p>"), root)
+        try {
+            val pos = runBlocking { host.open() }!!
+            val chapter = pos.chapter
+            val before = body(host, chapter)
+            val at = before.indexOf("攥")
+            assertTrue("章节里应有待改的字：$before", at >= 0)
+            val edited = commit(host, chapter, at until at + 1, "握", pos)
+            assertTrue("改字应成功：$edited", edited is TextEditOutcome.Success)
+            assertEquals("改后正文", before.replace("攥", "握"), body(host, chapter))
+            val revision = runBlocking { host.textRevisionsForChapter(chapter) }.single()
+            // 重开这条修订（同长替换，渲染区间 = 原书区间），把内容改回原文。
+            val restored = runBlocking {
+                host.commitTextEdit(
+                    chapter = chapter,
+                    start = revision.charStart,
+                    endExclusive = revision.charEnd,
+                    text = "攥",
+                    styles = null,
+                    currentPage = pos,
+                    blocks = null,
+                )
+            }
+            assertTrue("改回原文应成功：$restored", restored is TextEditOutcome.Success)
+            assertEquals("正文应恢复原文", before, body(host, chapter))
+            assertTrue(
+                "改回原文应等效于删除修订，清单里不该再留着",
+                runBlocking { host.textRevisionsForChapter(chapter) }.isEmpty(),
+            )
+        } finally {
+            host.close()
+        }
+    }
+
+    /**
+     * 粗体里的字改回原文：同样等效于删除修订。
+     *
+     * 卡片重开旧修订时会把选区上的行内结构一起带回来（粗体 / 斜体 / 行内代码），
+     * 提交时这些结构原样送回。它们只是原文就有的结构，不算读者这一笔改的样式；
+     * 判「改回原文」时不能被它们挡下，否则粗体里改字再改回去仍会留下一条空修订。
+     */
+    @Test
+    fun restoringOriginalTextInBoldDeletesTheRevision() {
+        val root = Files.createTempDirectory("orilumn-restore-bold").toFile()
+        val host = openHost(writeBook(root, "<p>前面<strong>攥紧</strong>后面。</p>"), root)
+        try {
+            val pos = runBlocking { host.open() }!!
+            val chapter = pos.chapter
+            val before = body(host, chapter)
+            val at = before.indexOf("攥")
+            assertTrue("章节里应有待改的字：$before", at >= 0)
+            // 卡片第一次改字时就把选区上的行内结构（粗体）一起交上来。
+            val boldAt = host.textEditSpans(chapter, at, at + 1)
+            assertTrue("前置：改字前选区上应有粗体结构", !boldAt.isNullOrEmpty())
+            val edited = runBlocking {
+                host.commitTextEdit(
+                    chapter = chapter,
+                    start = at,
+                    endExclusive = at + 1,
+                    text = "握",
+                    styles = boldAt,
+                    currentPage = pos,
+                    blocks = null,
+                )
+            }
+            assertTrue("改字应成功：$edited", edited is TextEditOutcome.Success)
+            assertEquals("改后正文", before.replace("攥", "握"), body(host, chapter))
+            val revision = runBlocking { host.textRevisionsForChapter(chapter) }.single()
+            assertTrue("前置：这条修订应记着粗体结构", !revision.styles.isNullOrEmpty())
+            // 卡片重开这条修订：行内结构照当前正文带回（粗体）。
+            val spans = host.textEditSpans(chapter, revision.charStart, revision.charEnd)
+            val restored = runBlocking {
+                host.commitTextEdit(
+                    chapter = chapter,
+                    start = revision.charStart,
+                    endExclusive = revision.charEnd,
+                    text = "攥",
+                    styles = spans,
+                    currentPage = pos,
+                    blocks = null,
+                )
+            }
+            assertTrue("改回原文应成功：$restored", restored is TextEditOutcome.Success)
+            assertEquals("正文应恢复原文", before, body(host, chapter))
+            assertTrue(
+                "粗体里改回原文同样该删掉修订",
+                runBlocking { host.textRevisionsForChapter(chapter) }.isEmpty(),
+            )
+        } finally {
+            host.close()
+        }
+    }
+
+    /**
+     * 在一条修订的**整段末尾**补字（用户复报 2026-11-22）：
+     *
+     * 「fun 用」这条修订后面补了个「于」，落库的是整段上的一条纯插入，插入点正好是整段终点。
+     * 以前整段区间停在插入点之前：重开卡片时绿「于」不在选区里（点它命不中），
+     * 删掉它也等于没删（卡片文字比选区多一格，提交是空操作）。现在整段把这条插入算进来。
+     */
+    @Test
+    fun appendingAtTheEndOfARevisionKeepsTheNewTextInItsSegment() {
+        for (review in listOf(false, true)) {
+            val root = Files.createTempDirectory("orilumn-append-tail").toFile()
+            val host = openHost(writeBook(root, "<p>调用 fun 用 一下。</p>"), root, reviewMode = review)
+            try {
+                val pos = runBlocking { host.open() }!!
+                val chapter = pos.chapter
+                val before = body(host, chapter)
+                val at = before.indexOf("fun 用")
+                assertTrue("章节里应找到目标文字：$before", at >= 0)
+                // 读者在整段末尾补一个「于」：卡片带出的就是整段改后的文字。
+                val appended = commit(host, chapter, at until at + 5, "fun 用于", pos)
+                assertTrue("补字应成功：$appended", appended is TextEditOutcome.Success)
+                assertEquals(
+                    "补上的字进了正文（审阅视图：$review）",
+                    before.replace("fun 用", "fun 用于"),
+                    body(host, chapter),
+                )
+                // 重开这条修订：整段（选区 + 卡片文字）必须含刚补的「于」。
+                val revision = runBlocking { host.textRevisionsForChapter(chapter) }.single()
+                assertEquals("整段文字含补上的字（审阅视图：$review）", "fun 用于", revision.text)
+                assertEquals(
+                    "整段区间与文字等长，绿字要框得进来（审阅视图：$review）",
+                    6,
+                    revision.charEnd - revision.charStart,
+                )
+                assertEquals("整段起点（审阅视图：$review）", at, revision.charStart)
+                // 读者把「于」删掉：等效于删除这条修订（恢复原文）。
+                val restored = commit(host, chapter, revision.charStart until revision.charEnd, "fun 用", pos)
+                assertTrue("删掉补上的字应成功：$restored", restored is TextEditOutcome.Success)
+                assertEquals("正文应恢复原文（审阅视图：$review）", before, body(host, chapter))
+                assertTrue(
+                    "删干净后不该再留着一条空修订（审阅视图：$review）",
+                    runBlocking { host.textRevisionsForChapter(chapter) }.isEmpty(),
+                )
+            } finally {
+                host.close()
+            }
+        }
+    }
+
     /** 零散文字里本来就有 `<br>` 时也要能改（改完换行还在）。 */
     @Test
     fun anonRunWithBrStaysEditable() {
@@ -1179,10 +1331,12 @@ class TableEditDesktopTest {
     }
 
     /**
-     * 反过来：这一段**本来就**在 `<code>` 里（读者只在里面改字 / 甚至原样确认）。
+     * 反过来：这一段**本来就**在 `<code>` 里（读者在里面改字）。
      *
      * 原书结构里就该看见这个 `code`——修改卡据此把它当「隐形」（整段覆盖、又不是新写的）。
      * 与上面那条合起来是同一个判据的两个方向（见 `FormatTraces.freshSpans`）。
+     *
+     * 注意这里必须真的改字：原样确认是空操作（不落修订），也就没有「这条修订的原书结构」可查。
      */
     @Test
     fun bookMarkupInsideTheSelectionIsExposedToTheCard() {
@@ -1199,10 +1353,10 @@ class TableEditDesktopTest {
             val outcome = runBlocking {
                 host.commitTextEdit(
                     chapter = chapter, start = at, endExclusive = at + 2,
-                    text = "代码", styles = spans, currentPage = pos,
+                    text = "符号", styles = spans, currentPage = pos,
                 )
             }
-            assertTrue("原地确认应成功：$outcome", outcome is TextEditOutcome.Success)
+            assertTrue("改字应成功：$outcome", outcome is TextEditOutcome.Success)
             val revision = runBlocking { host.textRevisionsForChapter(chapter) }.single()
             val old = host.textRevisionOriginalSpans(chapter, revision.id)
             assertNotNull("原书结构应取得到", old)

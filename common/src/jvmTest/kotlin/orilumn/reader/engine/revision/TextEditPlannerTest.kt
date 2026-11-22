@@ -1,5 +1,7 @@
 package orilumn.reader.engine.revision
 
+import orilumn.reader.data.revision.RevisionStyle
+import orilumn.reader.data.revision.RevisionStyleSpan
 import orilumn.reader.data.revision.TextRevision
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -121,6 +123,170 @@ class TextEditPlannerTest {
         assertTrue(p.noop)
         assertTrue(p.inserted.isEmpty())
         assertTrue(p.deletedIds.isEmpty())
+    }
+
+    @Test
+    fun restoringOriginalTextDropsTheRevisionInsteadOfRecordingIt() {
+        // 原书「abcdef」把 [2,3)「c」改成「X」→ 渲染「abXdef」。读者重开这条修订、
+        // 把内容改回「c」：结果与原文一样，等效于删掉这条修订，不落一条「改后 == 原文」的空修订。
+        val old = rev(2, 3, "X", id = 7).copy(originalText = "c", editedText = "X")
+        val p = ready(plan("abXdef", intArrayOf(6), 2, 3, "c", listOf(old)))
+        assertEquals(listOf(7L), p.deletedIds)
+        assertTrue("恢复原文不该再落一条修订", p.inserted.isEmpty())
+        assertTrue("删修订不是空操作，要走一次落库重排", !p.noop)
+    }
+
+    @Test
+    fun restoringOriginalOfTrimmedSegmentDropsTheRevision() {
+        // 原书「abcdef」把整段 [1,5)「bcde」改成「bXde」，最小修订只剩 [2,3)「X」，
+        // 整段记在 editRange 里。重开卡片把整段改回「bcde」：同样等效于删除。
+        val old = rev(2, 3, "X", id = 7).copy(
+            originalText = "bcde",
+            editedText = "bXde",
+            editRange = 1 until 5,
+        )
+        val p = ready(plan("abXdef", intArrayOf(6), 1, 5, "bcde", listOf(old)))
+        assertEquals(listOf(7L), p.deletedIds)
+        assertTrue("恢复原文不该再落一条修订", p.inserted.isEmpty())
+        assertTrue("删修订不是空操作，要走一次落库重排", !p.noop)
+    }
+
+    @Test
+    fun restoringTextButChangingBlockKindStillRecordsRevision() {
+        // 文字恢复原文、但块形态从标题改成普通段落：仍有修订，不能当成「恢复原文」删掉。
+        val old = rev(0, 2, "标题X", id = 7).copy(originalText = "标题", editedText = "标题X")
+        val p = TextEditPlanner.plan(
+            bookId = 1,
+            chapter = 1,
+            chapterText = "标题X",
+            blockEnds = intArrayOf(3),
+            start = 0,
+            endExclusive = 3,
+            replacement = "标题",
+            map = ChapterRevisionMap(listOf(old)),
+            groupId = 99,
+            now = 1234,
+            blocks = listOf(InlineMarkup.Segment("标题", BlockKind.Paragraph)),
+            currentKindOf = { BlockKind.Heading2 },
+        )
+        val r = ready(p).inserted.single()
+        assertEquals(listOf("p"), r.blockKinds)
+        assertEquals("标题", r.text)
+    }
+
+    @Test
+    fun restoringOriginalTextInBoldDropsTheRevision() {
+        // 原书「ab<b>c</b>def」把粗体里的「c」改成「X」：卡片把原文就有的粗体一起交上来，
+        // 落库的那条修订因此也记着粗体。把字改回「c」时，粗体只是从正文带回来的原文结构，
+        // 不算读者这一笔改的样式——同样等效于删除修订。
+        val bold = InlineMarkup.StyleSig("strong")
+        val old = rev(2, 3, "X", id = 7).copy(
+            originalText = "c",
+            editedText = "X",
+            styles = listOf(RevisionStyleSpan(0, 1, RevisionStyle(bold.tag))),
+        )
+        val map = ChapterRevisionMap(
+            listOf(old),
+            originalSpans = mapOf(old to listOf(InlineMarkup.StyleSpan(0, 1, bold))),
+        )
+        val p = TextEditPlanner.plan(
+            bookId = 1,
+            chapter = 1,
+            chapterText = "abXdef",
+            blockEnds = intArrayOf(6),
+            start = 2,
+            endExclusive = 3,
+            replacement = "c",
+            map = map,
+            groupId = 99,
+            now = 1234,
+            replacementStyles = listOf(InlineMarkup.StyleSpan(0, 1, bold)),
+            currentSpansOf = { from, to ->
+                listOf(InlineMarkup.StyleSpan(0, to - from, bold))
+            },
+        )
+        val ready = ready(p)
+        assertEquals(listOf(7L), ready.deletedIds)
+        assertTrue("粗体里改回原文不该再落一条修订", ready.inserted.isEmpty())
+    }
+
+    @Test
+    fun restoringTextButKeepingReaderStyleChangeKeepsTheRevision() {
+        // 原书这一段没有行内结构，读者当初把「c」改成斜体「X」：把字改回「c」时仍保留斜体，
+        // 说明这一笔样式还在，不能当成「恢复原文」删掉——留下的是一条只改样式的修订。
+        val italic = InlineMarkup.StyleSig("em")
+        val old = rev(2, 3, "X", id = 7).copy(
+            originalText = "c",
+            editedText = "X",
+            styles = listOf(RevisionStyleSpan(0, 1, RevisionStyle(italic.tag))),
+        )
+        val map = ChapterRevisionMap(
+            listOf(old),
+            originalSpans = mapOf(old to emptyList()),
+        )
+        val p = TextEditPlanner.plan(
+            bookId = 1,
+            chapter = 1,
+            chapterText = "abXdef",
+            blockEnds = intArrayOf(6),
+            start = 2,
+            endExclusive = 3,
+            replacement = "c",
+            map = map,
+            groupId = 99,
+            now = 1234,
+            replacementStyles = listOf(InlineMarkup.StyleSpan(0, 1, italic)),
+            currentSpansOf = { from, to ->
+                listOf(InlineMarkup.StyleSpan(0, to - from, italic))
+            },
+        )
+        val r = ready(p).inserted.single()
+        assertEquals("c", r.text)
+        assertEquals("只改样式的修订要留着", 1, r.styles?.size)
+    }
+
+    @Test
+    fun deletingInsertedTextDropsTheInsertionRevision() {
+        // 读者在「abdef」的 b 后面插了「XY」，再把它们删掉（连带左边那个字一起选中再改回来）：
+        // 结果与原书逐字相同，插字那条修订等效于删除。插入的原书区间是空的，谈不上「原文结构」，
+        // 记在它上面的样式只是从邻字带过来的，不该挡下删除。
+        val old = rev(2, 2, "XY", id = 7).copy(originalText = "", editedText = "XY")
+        val p = plan("abXYdef", intArrayOf(6), 1, 4, "b", listOf(old))
+        val ready = ready(p)
+        assertEquals(listOf(7L), ready.deletedIds)
+        assertTrue("把插进去的字删干净不该再落一条修订", ready.inserted.isEmpty())
+    }
+
+    @Test
+    fun restoringBlockKindMarkerDropsTheRevision() {
+        // 原书是普通段落，读者把这一段改成二级标题；再把 `## ` 删掉、字改回原文：
+        // 块形态也回到原书那一种，整条修订等效于删除。
+        val old = rev(0, 2, "标题", id = 7).copy(
+            originalText = "标题",
+            editedText = "## 标题",
+            blockKinds = listOf("h2"),
+        )
+        val map = ChapterRevisionMap(
+            listOf(old),
+            originalKinds = mapOf(old to listOf(BlockKind.Paragraph)),
+        )
+        val p = TextEditPlanner.plan(
+            bookId = 1,
+            chapter = 1,
+            chapterText = "标题",
+            blockEnds = intArrayOf(2),
+            start = 0,
+            endExclusive = 2,
+            replacement = "标题",
+            map = map,
+            groupId = 99,
+            now = 1234,
+            blocks = listOf(InlineMarkup.Segment("标题", BlockKind.Paragraph)),
+            currentKindOf = { BlockKind.Heading2 },
+        )
+        val ready = ready(p)
+        assertEquals(listOf(7L), ready.deletedIds)
+        assertTrue("块形态也改回原文时不该再落一条修订", ready.inserted.isEmpty())
     }
 
     @Test

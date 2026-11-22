@@ -337,6 +337,40 @@ class EditCardTest {
     }
 
     @Test
+    fun revisionCardFallsBackToDisplayKindsWhenStoredBlockKindsAreEmpty() {
+        // 只改了字、没改块形态的修订：落库的 blockKinds 是空表（语义是「没改」），不是「不知道」。
+        // 重开卡片要按当前显示空间的块形态回显，不能凭空少掉 `- `（审阅视图与普通视图同一口径）。
+        val rev = TextRevision(
+            bookId = 1,
+            chapter = 0,
+            charStart = 0,
+            charEnd = 5,
+            text = "用 val",
+            editedText = "用 val",
+            blockKinds = emptyList(),
+        )
+        val rc = revisionCardOf(rev, displayKinds = listOf("ul"))
+        assertEquals("用 val", rc.plain)
+        assertEquals("- 用 val", rc.card.text)
+    }
+
+    @Test
+    fun revisionCardDropsTheMarkerOnAMidBlockFirstLine() {
+        // 修订从段中间开始时是半截文字，承载不了块形态：显示空间给的空串照旧不写标记。
+        val rev = TextRevision(
+            bookId = 1,
+            chapter = 0,
+            charStart = 2,
+            charEnd = 5,
+            text = "半截",
+            editedText = "半截",
+            blockKinds = emptyList(),
+        )
+        val rc = revisionCardOf(rev, displayKinds = listOf(""))
+        assertEquals("半截", rc.card.text)
+    }
+
+    @Test
     fun revisionCardKeepsTableRows() {
         val row = table(2, 2)
         val rev = TextRevision(

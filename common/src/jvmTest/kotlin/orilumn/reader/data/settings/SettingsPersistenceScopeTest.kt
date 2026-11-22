@@ -166,6 +166,32 @@ class SettingsPersistenceScopeTest {
     }
 
     @Test
+    fun `审阅开关按书记住 别的书与全局都不受影响`() {
+        // 2026-11-22 定口：审阅是查看模式，按本书私有记住；没切换过 = 普通阅读视图。
+        val dir = Files.createTempDirectory("orilumn-review").toFile()
+        try {
+            val persist = PerBookSettings(
+                ReaderSettingsStore(dir.absolutePath),
+                BookSettingsStore(dir.absolutePath),
+            )
+            persist.persist(7L, persist.effectiveFor(7L).copy(reviewMode = true))
+            assertTrue("本书要记住审阅开着", persist.effectiveFor(7L).reviewMode)
+            assertFalse("别的书不受影响", persist.effectiveFor(8L).reviewMode)
+            assertEquals(
+                "审阅开关只落进本书覆盖层",
+                setOf("reviewMode"),
+                BookSettingsStore(dir.absolutePath).load(7L).toJsonObject().keys,
+            )
+            assertFalse("审阅开关是本书私有，不得写全局", File(dir, "reader.json").exists())
+            // 关回去 = 回到预设（普通阅读视图）：键消失，空层连文件一起删。
+            persist.persist(7L, persist.effectiveFor(7L).copy(reviewMode = false))
+            assertFalse(File(dir, "books/7.json").exists())
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
     fun `面板读数不落盘 重开面板重新量`() {
         val dir = Files.createTempDirectory("orilumn-session").toFile()
         try {
@@ -222,6 +248,7 @@ class SettingsPersistenceScopeTest {
         "useUserScripts" -> s.copy(useUserScripts = !s.useUserScripts)
         "pageAnimationMode" -> s.copy(pageAnimationMode = if (s.pageAnimationMode == "slide") "curl" else "slide")
         "coverStretch" -> s.copy(coverStretch = !s.coverStretch)
+        "reviewMode" -> s.copy(reviewMode = !s.reviewMode)
         "fontWeightAnchors" -> s.copy(fontWeightAnchors = mapOf("Probe" to 700))
         "fontWeightAnchorsBySlot" -> s.copy(fontWeightAnchorsBySlot = mapOf("fontBody|Probe" to 700))
         else -> error("私有集合新增了字段 [$field]，但本测试还没有它的探针")

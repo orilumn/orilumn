@@ -73,6 +73,8 @@ object SettingsScope {
         "useUserScripts",
         // 翻页模式与封面拉伸。
         "pageAnimationMode", "coverStretch",
+        // 审阅视图开着没有（本书私有）：审阅是查看模式，跟着这本书的修订看，换书不沿用。
+        "reviewMode",
     )
 
     /** 只存在于本次会话的读数（不落盘、不是设置项）：面板打开时量出的原书缩进/行高/段距/字距。 */
@@ -205,6 +207,7 @@ fun BookSettings.normalized(): BookSettings {
         useUserScripts = useUserScripts.takeIf { it != d.useUserScripts },
         pageAnimationMode = pageAnimationMode.takeIf { it != d.pageAnimationMode },
         coverStretch = coverStretch.takeIf { it != d.coverStretch },
+        reviewMode = reviewMode.takeIf { it != d.reviewMode },
         fontWeightAnchors = fontWeightAnchors.takeIf { it != d.fontWeightAnchors },
         fontWeightAnchorsBySlot = fontWeightAnchorsBySlot.takeIf { it != d.fontWeightAnchorsBySlot },
     )

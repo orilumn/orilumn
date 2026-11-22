@@ -696,6 +696,43 @@ class TextEditPlannerTest {
     }
 
     @Test
+    fun deletingTheListMarkerAbsorbsRevisionsInTheBlock() {
+        // 读者只删掉列表符号（文字一个字没改）：这一块原来那条修订要被吸收（一块一条），
+        // 新修订记下目标形态 = 普通段落，重放时才能把这一行移出列表。
+        // 吸收按**整块**算，不按选区：卡片只框住块首那一截时，块尾那条旧修订也不能留下叠层。
+        val old = TextRevision(
+            id = 7,
+            bookId = 1,
+            chapter = 1,
+            charStart = 3,
+            charEnd = 5,
+            text = "项二",
+            delta = 0,
+            groupId = 1,
+        )
+        val p = ready(
+            TextEditPlanner.plan(
+                bookId = 1,
+                chapter = 1,
+                chapterText = "项一 项二",
+                blockEnds = intArrayOf(5),
+                start = 0,
+                endExclusive = 2,
+                replacement = "项一",
+                map = ChapterRevisionMap(listOf(old)),
+                groupId = 99,
+                now = 1234,
+                blocks = listOf(InlineMarkup.Segment("项一", BlockKind.Paragraph)),
+                currentKindOf = { BlockKind.Bullet },
+            ),
+        )
+        assertEquals(listOf(7L), p.deletedIds)
+        val r = p.inserted.single()
+        assertEquals(listOf("p"), r.blockKinds)
+        assertEquals("项一 项二", r.text)
+    }
+
+    @Test
     fun mergeKeepsPerLineBlockKinds() {
         // 两段并成两段（文字变了、段数没变）：形态按行各带一份。
         val r = ready(
@@ -739,6 +776,129 @@ class TextEditPlannerTest {
             r.editedBlocks,
         )
         assertEquals("ab" + RevisionBlocks.SEPARATOR + "cd" + RevisionBlocks.SEPARATOR + "ef", r.text)
+    }
+
+    // ---------------------------------------------------------------- 行内结构（no-op 判定）
+
+    private fun planInline(
+        text: String,
+        start: Int,
+        endExclusive: Int,
+        blocks: List<InlineMarkup.Segment>,
+        styles: List<InlineMarkup.StyleSpan>?,
+        currentSpans: ((Int, Int) -> List<InlineMarkup.StyleSpan>?)?,
+        current: (Int) -> BlockKind? = { null },
+    ): TextEditPlan = TextEditPlanner.plan(
+        bookId = 1,
+        chapter = 1,
+        chapterText = text,
+        blockEnds = intArrayOf(text.length),
+        start = start,
+        endExclusive = endExclusive,
+        replacement = InlineMarkup.joinSegments(blocks),
+        map = ChapterRevisionMap.EMPTY,
+        groupId = 99,
+        now = 1234,
+        replacementStyles = styles,
+        blocks = blocks,
+        currentKindOf = current,
+        currentSpansOf = currentSpans,
+    )
+
+    @Test
+    fun unchangedTextWithTheSameInlineStructureWritesNothing() {
+        // 卡片跨块改字时每一块都带着自己的行内结构（行内代码之类）：文字一个字没改、
+        // 结构也和现在一样，就不该白落一条内容相同的修订（id 空转、清单里多一条空条目）。
+        val p = planInline(
+            text = "abc def",
+            start = 0,
+            endExclusive = 7,
+            blocks = listOf(InlineMarkup.Segment("abc def")),
+            styles = listOf(span(4, 7, "code")),
+            currentSpans = { _, _ -> listOf(span(4, 7, "code")) },
+        )
+        assertTrue("expected noop but was $p", (p as TextEditPlan.Ready).noop)
+    }
+
+    @Test
+    fun unchangedTextWithAdjacentSpansOfTheSameSignatureWritesNothing() {
+        // 区间怎么切不算结构差异：`[0,3) + [3,7)` 与 `[0,7)` 是同一批元素（渲染一模一样）。
+        val p = planInline(
+            text = "abc def",
+            start = 0,
+            endExclusive = 7,
+            blocks = listOf(InlineMarkup.Segment("abc def")),
+            styles = listOf(span(0, 3, "code"), span(3, 7, "code")),
+            currentSpans = { _, _ -> listOf(span(0, 7, "code")) },
+        )
+        assertTrue("expected noop but was $p", (p as TextEditPlan.Ready).noop)
+    }
+
+    @Test
+    fun unchangedTextWithADifferentInlineStructureStillWrites() {
+        // 读者把标记挪了位置（文字没改）：结构变了就要落一条，否则这次改动会悄悄丢掉。
+        val r = ready(
+            planInline(
+                text = "abc def",
+                start = 0,
+                endExclusive = 7,
+                blocks = listOf(InlineMarkup.Segment("abc def")),
+                styles = listOf(span(0, 3, "code")),
+                currentSpans = { _, _ -> listOf(span(4, 7, "code")) },
+            ),
+        ).inserted.single()
+        assertEquals("abc def", r.text)
+        assertEquals(listOf(span(0, 3, "code")), InlineMarkup.fromStored(r.styles.orEmpty()))
+    }
+
+    @Test
+    fun deletingAllInlineMarkersWithoutChangingTextWritesTheDeletion() {
+        // 空表 = 读者把标记删光了（不是「没有结构信息」）：文字一字没改也要落一条，
+        // 正文里现有的行内元素才会真删掉。
+        val r = ready(
+            planInline(
+                text = "abc def",
+                start = 0,
+                endExclusive = 7,
+                blocks = listOf(InlineMarkup.Segment("abc def")),
+                styles = emptyList(),
+                currentSpans = { _, _ -> listOf(span(4, 7, "code")) },
+            ),
+        ).inserted.single()
+        assertEquals("abc def", r.text)
+        assertTrue(InlineMarkup.fromStored(r.styles.orEmpty()).isEmpty())
+    }
+
+    @Test
+    fun unchangedTextWithoutCurrentStructureFallsBackToWriting() {
+        // 宿主给不出「现在的结构」（老宿主 / 审阅空间压着修订）：按老口径只比「这次带没带结构」，
+        // 带结构就写一条——宁可多写，也不能把读者删掉的结构当成没改。
+        val p = planInline(
+            text = "abc def",
+            start = 0,
+            endExclusive = 7,
+            blocks = listOf(InlineMarkup.Segment("abc def")),
+            styles = listOf(span(4, 7, "code")),
+            currentSpans = { _, _ -> null },
+        )
+        assertTrue("expected a revision but was $p", !(p as TextEditPlan.Ready).noop)
+    }
+
+    @Test
+    fun changedTextStillWritesEvenWhenTheStructureIsTheSame() {
+        // no-op 只看「文字 + 块形态 + 行内结构」三者都没变；文字变了照常写。
+        val r = ready(
+            planInline(
+                text = "abc def",
+                start = 0,
+                endExclusive = 7,
+                blocks = listOf(InlineMarkup.Segment("abc Xef")),
+                styles = listOf(span(4, 7, "code")),
+                currentSpans = { _, _ -> listOf(span(4, 7, "code")) },
+            ),
+        ).inserted.single()
+        assertEquals("X", r.text)
+        assertEquals(4, r.charStart)
     }
 
     // ------------------------------------------------ 整块图片 / 表格行（特殊叶）

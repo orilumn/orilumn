@@ -998,6 +998,9 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
             mergeableLeaf = mergeableLeaf,
             blocks = blocks,
             currentKindOf = { i -> leaves.getOrNull(i)?.let { BlockKind.ofElement(it) } },
+            // 「这一段现在的行内结构」：文字一字没改的块靠它判断结构也一模一样，
+            // 不判就会白落一条内容相同的修订（跨块改字时每块带行内标记的段落都会中招）。
+            currentSpansOf = { from, to -> textEditSpans(chapter, from, to) },
             imageLeaf = { i -> leaves.getOrNull(i)?.tag == "img" },
             tableOfLeaf = { i ->
                 val row = leaves.getOrNull(i)
@@ -1130,6 +1133,18 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                 // 文字换成「原文 + 新字」），所以叶下标仍按同一份结构取形态。
                 blocks = expansion?.segments ?: blocks,
                 currentKindOf = { i -> leaves.getOrNull(i)?.let { BlockKind.ofElement(it) } },
+                // 同上：审阅空间的「现在结构」要把原书区间换算过去。这一段里压着修订时两边
+                // 坐标对不上（新旧文字并列），给 null 退回老口径——多写一条，绝不误删结构。
+                currentSpansOf = { from, to ->
+                    val clear = map.revisions.none { r -> r.charStart < to && r.charEnd > from }
+                    if (!clear) {
+                        null
+                    } else {
+                        val rFrom = map.toReview(from, crossInsertions = true)
+                        val rTo = map.toReview(to, crossInsertions = false)
+                        if (rTo <= rFrom) null else textEditSpans(chapter, rFrom, rTo)
+                    }
+                },
                 imageLeaf = { i -> leaves.getOrNull(i)?.tag == "img" },
                 tableOfLeaf = { i ->
                     val row = leaves.getOrNull(i)
@@ -2315,6 +2330,10 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         // 同一批修订盖住的原文（同一份叶投影）：修订清单的行摘要要按它摊出审阅空间那一段
         // （`ChapterRevisionMap.reviewExcerpt`）。审阅视图自己会建这一份，正常视图只有这里补。
         var normalTexts: Map<orilumn.reader.data.revision.TextRevision, String> = emptyMap()
+        // 同一批修订盖住的那一块**原来**的形态：修订清单要把被删掉的 `- ` / `## ` 排出来
+        // （`FormatTraces`）。审阅视图自己会建，正常视图也得有——清单是在正常视图里打开的，
+        // 少了这份，删掉列表符号的修订在清单里就只剩一段看不出变化的文字（用户复报）。
+        var normalKinds: Map<orilumn.reader.data.revision.TextRevision, List<BlockKind>> = emptyMap()
         // 整表结构修订 → 审阅视图的行级对照（删掉的行留在原处标红、新加的行标绿）。
         // 重放与修订表必须用同一份计划，所以在这里一次算好，两边共用。
         val tableReviewPlans = HashMap<Long, TableReviewPlan>(2)
@@ -2381,16 +2400,22 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                     )
                 }
             } else {
-                // 正常视图不建审阅表，但**只改标记**（文字逐字没变）的修订同样需要「这一段原来
-                // 盖着哪些行内元素」：修改卡靠它区分「读者这次新写的标记」与「书本来就有的元素」
-                // （见 `FormatTraces.freshSpans` → `splitAmbientSpans`）。改了字的修订两头坐标
-                // 不同，用不上，跳过——真书里这类修订很少，投影的代价可以忽略。
-                val equal = map.revisions.filter { r ->
-                    r.originalLength > 0 && r.text.length == r.originalLength
+                // 正常视图不建审阅表，但两类修订同样需要这一份原书投影：
+                //  - **只改标记**（文字逐字没变）的：修改卡靠它区分「读者这次新写的标记」与
+                //    「书本来就有的元素」（见 `FormatTraces.freshSpans` → `splitAmbientSpans`），
+                //    清单靠它排行内标记痕迹；
+                //  - **改了块形态**的：清单要排出被删 / 新写的块标记（`- ` / `## ` …），
+                //    与文字改没改无关（`FormatTraces.block`）。少了这份，删掉列表符号的修订
+                //    在清单里就只剩一段看不出变化的文字（用户复报）。
+                // 其余改了字、又没动块形态的修订两头坐标不同，用不上，跳过——数量通常很少，
+                // 投影的代价可以忽略。
+                val projected = map.revisions.filter { r ->
+                    (r.originalLength > 0 && r.text.length == r.originalLength) ||
+                        r.blockKinds.isNotEmpty()
                 }
-                if (equal.isNotEmpty()) {
-                    val indices = HashSet<Int>(equal.size * 2)
-                    for (r in equal) {
+                if (projected.isNotEmpty()) {
+                    val indices = HashSet<Int>(projected.size * 2)
+                    for (r in projected) {
                         val a = leafOfOffset(r.charStart)
                         val b = leafOfOffset(r.charEnd - 1)
                         for (k in a..b) indices += k
@@ -2408,18 +2433,26 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                         val out = HashMap<
                             orilumn.reader.data.revision.TextRevision,
                             List<InlineMarkup.StyleSpan>,
-                            >(equal.size * 2)
+                            >(projected.size * 2)
                         val texts = HashMap<orilumn.reader.data.revision.TextRevision, String>(
-                            equal.size * 2,
+                            projected.size * 2,
                         )
-                        for (r in equal) {
+                        val kinds = HashMap<
+                            orilumn.reader.data.revision.TextRevision,
+                            List<BlockKind>,
+                            >(projected.size * 2)
+                        for (r in projected) {
                             val a = leafOfOffset(r.charStart)
                             val b = leafOfOffset(r.charEnd - 1)
                             originalRangeText(r, a, b, leafTexts, starts)?.let { texts[r] = it }
                             originalRangeSpans(r, a, b, projections, starts)?.let { out[r] = it }
+                            cache.leaves.getOrNull(a)?.let { leaf ->
+                                BlockKind.ofElement(leaf)?.let { kinds[r] = listOf(it) }
+                            }
                         }
                         normalSpans = out
                         normalTexts = texts
+                        normalKinds = kinds
                     }
                 }
             }
@@ -2783,22 +2816,30 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                     } else {
                         fixedRevisions.mapNotNull { r -> textsById[r.id]?.let { r to it } }.toMap()
                     }
+                    val kindsById = normalKinds.entries.associate { it.key.id to it.value }
+                    val kinds = if (kindsById.isEmpty()) {
+                        emptyMap()
+                    } else {
+                        fixedRevisions.mapNotNull { r -> kindsById[r.id]?.let { r to it } }.toMap()
+                    }
                     ChapterRevisionMap(
                         fixedRevisions,
                         originalBlockEnds = blockEndsBefore,
                         originalTexts = texts,
+                        originalKinds = kinds,
                         originalSpans = spans,
                     )
                 }
                 // 拿到「只改标记」的原书结构：连同上一次载入补出来的原文快照一起挂上。
-                normalSpans.isNotEmpty() || normalTexts.isNotEmpty() -> ChapterRevisionMap(
-                    map.revisions,
-                    originalBlockEnds = blockEndsBefore,
-                    originalTexts = normalTexts + map.originalTexts,
-                    originalKinds = map.originalKinds,
-                    originalSpans = normalSpans + map.originalSpans,
-                    structuralIds = map.structuralIds,
-                )
+                normalSpans.isNotEmpty() || normalTexts.isNotEmpty() || normalKinds.isNotEmpty() ->
+                    ChapterRevisionMap(
+                        map.revisions,
+                        originalBlockEnds = blockEndsBefore,
+                        originalTexts = normalTexts + map.originalTexts,
+                        originalKinds = normalKinds + map.originalKinds,
+                        originalSpans = normalSpans + map.originalSpans,
+                        structuralIds = map.structuralIds,
+                    )
                 else -> null
             }
         }

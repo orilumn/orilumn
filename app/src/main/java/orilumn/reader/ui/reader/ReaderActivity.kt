@@ -151,10 +151,11 @@ class ReaderActivity : ComponentActivity() {
     /**
      * 审阅视图是否开着（底栏「审阅」按钮高亮 + 笔记面板「显示审阅模式」开关 + 阅读面投影改动痕迹）。
      *
-     * 三个入口共用这一个状态；**默认打开**（2026-11-08 用户定口）：开书直接落在审阅空间，
-     * 省掉「先排正常视图再切」的那一次白排。没有修订的章两套空间逐字相同，不受影响。
+     * 三个入口共用这一个状态；**按书记住**（2026-11-22 定口）：开书取这本书上次的选择
+     * （本书私有设置 `reviewMode`），没切换过 = 普通阅读视图。读者切过一次就落进本书设置，
+     * 下次开这本书按它直接落位（开着时省掉「先排正常视图再切」的那一次白排）。
      */
-    private var reviewActive by mutableStateOf(true)
+    private var reviewActive by mutableStateOf(false)
 
     private var settingsOpen by mutableStateOf(false)
     private var panelSettings by mutableStateOf(ReaderSettings.DEFAULT)
@@ -245,6 +246,9 @@ class ReaderActivity : ComponentActivity() {
         // 归属与合成规则只在保存层一处，壳不再各写一份。
         effective = settingsPersist.effectiveFor(bookId)
         profile = TypographicProfile.build(effective, dpDensity)
+        // 审阅视图按**这本书**上次的选择落位（本书私有设置；没切换过 = 普通阅读视图）。
+        // 必须在建引擎之前取：`initialReviewMode` 决定开书直接落在哪套空间（省一次白排）。
+        reviewActive = effective.reviewMode
         Logger.w(TAG, "★ ReaderActivity onCreate path=${bookPath != null} bookId=$bookId")
 
         WindowCompat.setDecorFitsSystemWindows(window, false)
@@ -793,6 +797,13 @@ class ReaderActivity : ComponentActivity() {
             // 模式没真的变（重复点按 / 没有修订可切）：不动版面，免得白刷一次。
             if (nowOn == reviewActive) return@launch
             reviewActive = nowOn
+            // 记住这本书的选择（本书私有）：下次开这本书按它直接落位，不再每次都是同一个视图。
+            // 只改设置不动版面：审阅空间已经切好了，这里只是落盘。
+            if (effective.reviewMode != nowOn) {
+                val next = effective.copy(reviewMode = nowOn)
+                effective = next
+                persistSettings(next)
+            }
             // 标注装饰与行文本的坐标空间都换了（原书/渲染 ↔ 审阅）：重读当前章标注，
             // 版式号 +1 强制行/图/背景重取。
             annotationsEpoch++

@@ -135,6 +135,36 @@ class BlockRestructureTest {
         assertEquals("div[blockquote[p[a]]]", dump(result.root))
     }
 
+    @Test
+    fun paragraphInsideListItemLiftsOutOfTheList() {
+        // 真书结构 `ul > li > p`：读者删掉这一行的 `- ` 时，改的是 `p` 这一叶。
+        // 它必须离开 `li` / `ul` 成为普通段落，不能只在列表项内部换个标签（那样还是列表项）。
+        val (root, leaves) = tree(
+            el("div", el("ul", el("li", el("p", txt("a"))), el("li", el("p", txt("b"))))),
+        )
+        val first = leaves.first { it.tag == "p" }
+        val result = restructure(root, first to BlockKind.Paragraph)
+        assertEquals("div[p[a],ul[li[p[b]]]]", dump(result.root))
+    }
+
+    @Test
+    fun paragraphInsideTheOnlyListItemRemovesTheWholeList() {
+        val (root, leaves) = tree(el("div", el("ul", el("li", el("p", txt("a"))))))
+        val result = restructure(root, leaves.first { it.tag == "p" } to BlockKind.Paragraph)
+        assertEquals("div[p[a]]", dump(result.root))
+    }
+
+    @Test
+    fun paragraphInsideMultiParagraphListItemLeavesItsSiblingsInTheList() {
+        // 多段列表项里只把读者删掉标记的那一段移出列表，兄弟段落仍属于这个列表项。
+        val (root, leaves) = tree(
+            el("div", el("ul", el("li", el("p", txt("a")), el("p", txt("b"))))),
+        )
+        val first = leaves.first { it.tag == "p" }
+        val result = restructure(root, first to BlockKind.Paragraph)
+        assertEquals("div[p[a],ul[li[p[b]]]]", dump(result.root))
+    }
+
     // ---------------------------------------------------------------- 边界
 
     @Test

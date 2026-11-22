@@ -30,6 +30,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
@@ -169,13 +170,16 @@ fun ReaderView(
     var externalPos by remember(book) { mutableStateOf<ReaderPos?>(null) }
     var contentRevision by remember(book) { mutableStateOf(0) }
     /**
-     * 审阅视图开关（与平板同默认：开书就在审阅视图）。
+     * 审阅视图开关（与平板同规则：**按书记住**，没切换过 = 普通阅读视图）。
      *
-     * 它不是 `ReaderSettings` 字段——和底栏「审阅」、设置里「显示审阅模式」共用这一个壳状态；
-     * 真正的排版空间由宿主（共享控制器）持有，这里只记 UI 侧的期望值，切换后以
-     * `host.isReviewMode()` 回灌为准（重复点按 / 本章没修订可切时不动）。
+     * 它是本书私有设置 `ReaderSettings.reviewMode` 的壳内镜像：底栏「审阅」、设置里
+     * 「显示审阅模式」共用这一个状态；真正的排版空间由宿主（共享控制器）持有，这里只记
+     * UI 侧的期望值，切换后以 `host.isReviewMode()` 回灌为准（重复点按 / 本章没修订可切时不动）。
+     * 初值取本书生效设置（`Main.kt` 已保证建阅读面之前 overlay 到齐），开着时宿主直接落审阅空间。
      */
-    var reviewActive by remember(book) { mutableStateOf(true) }
+    var reviewActive by remember(book) { mutableStateOf(settings.reviewMode) }
+    /** 最新设置（切换审阅是挂起调用，回来落盘时用当前值，别用点按那一刻的快照）。 */
+    val latestSettings = rememberUpdatedState(settings)
 
     BoxWithConstraints(modifier = modifier) {
         val density = LocalDensity.current.density
@@ -434,11 +438,17 @@ fun ReaderView(
             val host = desktopHost ?: return
             val from = currentPos ?: return
             val next = !reviewActive
+            // 切换是挂起调用：落盘要基于**回来时**的最新设置，不能用点按那一刻的快照
+            // （否则期间读者改了别的项会被这份旧快照顶掉）。
             scope.launch {
                 val landed = host.switchReviewMode(next, from.chapter, from.slice.charStart)
                 val nowOn = host.isReviewMode()
                 if (nowOn == reviewActive) return@launch
                 reviewActive = nowOn
+                // 记住这本书的选择（本书私有，与平板同一字段）：只落盘，不重排——审阅空间
+                // 已经切好了；`withoutNonLayout()` 把 reviewMode 归零，这次设置变更不会触发版式管线。
+                val s = latestSettings.value
+                if (s.reviewMode != nowOn) commit(s.copy(reviewMode = nowOn))
                 // 标注装饰与行文本的坐标空间都换了（原书/渲染 ↔ 审阅）：重读当前章标注，
                 // 版式号 +1 强制行 / 图 / 背景重取。
                 annotationsEpoch++

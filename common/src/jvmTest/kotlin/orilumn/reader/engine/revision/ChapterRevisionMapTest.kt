@@ -392,8 +392,9 @@ class ChapterRevisionMapTest {
     }
 
     @Test
-    fun markerTraceSkippedWhenTextChanged() {
-        // 改了字的修订不画标记痕迹（红绿已经在字上）。
+    fun markerTraceShownEvenWhenTextChanged() {
+        // 块标记与文字改没改无关：读者同时改了字、又把标题改回段落，段首那个红 `## ` 也要排出来
+        // （文字差异解释不了「这一块不再是标题」）。行内标记仍只在文字逐字未变时比。
         val r = TextRevision(
             id = 1,
             bookId = 1,
@@ -408,9 +409,10 @@ class ChapterRevisionMapTest {
             originalTexts = mapOf(r to "甲乙"),
             originalKinds = mapOf(r to listOf(BlockKind.Heading2)),
         )
-        assertTrue(map.reviewMarkOffsets.isEmpty())
-        assertEquals(listOf(0 until 2), pairs(map.paintedDeleted[r]))
-        assertEquals(listOf(2 until 4), pairs(map.paintedInserted[r]))
+        assertEquals(listOf(0, 1, 2), map.reviewMarkOffsets.toList())
+        // 红 `## ` 与红「甲乙」连成一段（都在删除区间里），绿「丙丁」接在后面。
+        assertEquals(listOf(0 until 5), pairs(map.paintedDeleted[r]))
+        assertEquals(listOf(5 until 7), pairs(map.paintedInserted[r]))
     }
 
     @Test
@@ -514,6 +516,36 @@ class ChapterRevisionMapTest {
         assertEquals("他慢慢快快地走", excerpt.text)
         assertEquals(listOf(1 until 3), pairs(excerpt.deleted))
         assertEquals(listOf(3 until 5), pairs(excerpt.inserted))
+    }
+
+    @Test
+    fun reviewExcerptShowsTheDeletedListMarkerWhenTheTextChangedToo() {
+        // 用户复报的原始数据（平板 1096，`ul > li > p` 的一行）：读者把列表项改成普通段落，
+        // 同时又改了字（「使用 var 的…」→「用 var 声明的…」）。快照两端都是普通文字，
+        // 按字符差异看不出「这一行不再是列表项」；段首那个被删掉的 `- ` 只有块形态痕迹画得出来，
+        // 清单行必须带上它（用户 2026-11-22：删掉列表符号的修订在清单里看不出来）。
+        val r = TextRevision(
+            id = 1096,
+            bookId = 39,
+            chapter = 2,
+            charStart = 324,
+            charEnd = 331,
+            text = "用 var 声明",
+            originalText = "使用 var 的可变变量",
+            editedText = "用 var 声明的可变变量",
+            editRange = 324..335,
+            blockKinds = listOf("p"),
+        )
+        val map = ChapterRevisionMap(
+            listOf(r),
+            originalTexts = mapOf(r to "使用 var "),
+            originalKinds = mapOf(r to listOf(BlockKind.Bullet)),
+        )
+        val excerpt = map.reviewExcerpt(r)!!
+        assertEquals("- 使用 var 声明的可变变量", excerpt.text)
+        // 段首的红 `- ` 与被删掉的「使」连成一段，后面的红绿照常。
+        assertEquals(0 until 3, pairs(excerpt.deleted).first())
+        assertEquals(listOf(9 until 11), pairs(excerpt.inserted))
     }
 
     @Test

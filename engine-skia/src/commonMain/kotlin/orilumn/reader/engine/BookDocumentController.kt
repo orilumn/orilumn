@@ -998,6 +998,9 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
             mergeableLeaf = mergeableLeaf,
             blocks = blocks,
             currentKindOf = { i -> leaves.getOrNull(i)?.let { BlockKind.ofElement(it) } },
+            // 「这一段现在的行内结构」：文字一字没改的块靠它判断结构也一模一样，
+            // 不判就会白落一条内容相同的修订（跨块改字时每块带行内标记的段落都会中招）。
+            currentSpansOf = { from, to -> textEditSpans(chapter, from, to) },
             imageLeaf = { i -> leaves.getOrNull(i)?.tag == "img" },
             tableOfLeaf = { i ->
                 val row = leaves.getOrNull(i)
@@ -1130,6 +1133,18 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                 // 文字换成「原文 + 新字」），所以叶下标仍按同一份结构取形态。
                 blocks = expansion?.segments ?: blocks,
                 currentKindOf = { i -> leaves.getOrNull(i)?.let { BlockKind.ofElement(it) } },
+                // 同上：审阅空间的「现在结构」要把原书区间换算过去。这一段里压着修订时两边
+                // 坐标对不上（新旧文字并列），给 null 退回老口径——多写一条，绝不误删结构。
+                currentSpansOf = { from, to ->
+                    val clear = map.revisions.none { r -> r.charStart < to && r.charEnd > from }
+                    if (!clear) {
+                        null
+                    } else {
+                        val rFrom = map.toReview(from, crossInsertions = true)
+                        val rTo = map.toReview(to, crossInsertions = false)
+                        if (rTo <= rFrom) null else textEditSpans(chapter, rFrom, rTo)
+                    }
+                },
                 imageLeaf = { i -> leaves.getOrNull(i)?.tag == "img" },
                 tableOfLeaf = { i ->
                     val row = leaves.getOrNull(i)

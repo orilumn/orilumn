@@ -132,6 +132,9 @@ object TextEditPlanner {
      *   按老口径照写）。目标形态与它相同时不写进修订——否则每一块都会白落一条「什么也没改」的
      *   修订，修订清单里全是空条目；这一叶**没有**块形态（`div` / 表格行）时也不写：它不归
      *   markdown 管，卡片也就不该改它。
+     * @param currentSpansOf 某一段**现在**的行内结构（渲染空间，相对 `from`；null = 取不到）。
+     *   文字一个字没改时靠它判断「结构也一模一样」——不判就写，跨块改字时每一块带行内标记
+     *   （行内代码之类）的段落都会白落一条内容相同的修订，id 空转。
      */
     fun plan(
         bookId: Long,
@@ -151,6 +154,8 @@ object TextEditPlanner {
         renderedInterval: (TextRevision) -> IntRange = map::renderedInterval,
         blocks: List<InlineMarkup.Segment>? = null,
         currentKindOf: ((leafIndex: Int) -> BlockKind?)? = null,
+        /** 某一段**现在**的行内结构（相对 `from`；null = 取不到，按老口径只比「这次带没带结构」）。 */
+        currentSpansOf: ((from: Int, to: Int) -> List<InlineMarkup.StyleSpan>?)? = null,
         /** 该叶是**整块图片**（章字符流里只占一个 `U+FFFC` 占位）。 */
         imageLeaf: (leafIndex: Int) -> Boolean = { false },
         /** 该叶是表格行时的当前格结构（null = 不是表格行）。 */
@@ -208,6 +213,7 @@ object TextEditPlanner {
                     ),
                 ),
                 currentKindOf,
+                currentSpansOf,
             )
         }
         val firstLeaf = leafOf(ends, editStart)
@@ -291,6 +297,7 @@ object TextEditPlanner {
                     ),
                 ),
                 currentKindOf,
+                currentSpansOf,
             )
         }
         // 跨段：结果段数由输入区分成了几块决定（方案 D-34 修订版）。
@@ -325,6 +332,7 @@ object TextEditPlanner {
                     ),
                 ),
                 currentKindOf,
+                currentSpansOf,
             )
         }
         if (pieces.size != leafCount) {
@@ -360,6 +368,7 @@ object TextEditPlanner {
         return planSegments(
             bookId, chapter, chapterText, map, groupId, now, wsOfLeaf, toOriginal, renderedInterval, segments,
             currentKindOf,
+            currentSpansOf,
         )
     }
 
@@ -930,6 +939,7 @@ object TextEditPlanner {
         renderedInterval: (TextRevision) -> IntRange,
         segments: List<Segment>,
         currentKindOf: ((leafIndex: Int) -> BlockKind?)?,
+        currentSpansOf: ((from: Int, to: Int) -> List<InlineMarkup.StyleSpan>?)? = null,
     ): TextEditPlan {
         val deleted = LinkedHashSet<Long>()
         val inserted = ArrayList<TextRevision>(segments.size)
@@ -938,6 +948,7 @@ object TextEditPlanner {
             val built = planSegment(
                 bookId, chapter, chapterText, map, seg, groupId, now, wsOfLeaf, toOriginal, renderedInterval,
                 currentKindOf,
+                currentSpansOf,
             )
             renderedLen += built.renderedLength
             deleted.addAll(built.absorbedIds)
@@ -977,6 +988,7 @@ object TextEditPlanner {
         toOriginal: (Int) -> Int,
         renderedInterval: (TextRevision) -> IntRange,
         currentKindOf: ((leafIndex: Int) -> BlockKind?)?,
+        currentSpansOf: ((from: Int, to: Int) -> List<InlineMarkup.StyleSpan>?)?,
     ): Built {
         val segStart = seg.start
         val segEnd = seg.endExclusive
@@ -1038,8 +1050,10 @@ object TextEditPlanner {
             val cur = currentKindOf(seg.leaf)
             if (cur == null) null else seg.block.takeIf { it != cur }
         }
-        if (newText == oldText && segSpans.isNullOrEmpty() && changedBlock == null) {
-            // 输入的文字与旧渲染文字逐字相同（或只差会被空白归一吃掉的空白）、块形态也没改：不写库。
+        if (newText == oldText && changedBlock == null && spansAlreadyThere(segSpans, seg, relStart, currentSpansOf)) {
+            // 输入的文字与旧渲染文字逐字相同（或只差会被空白归一吃掉的空白）、块形态也没改、
+            // 行内结构也和现在一样：不写库。结构要真比一遍——只凭「这次带了结构」就写，
+            // 跨块改字时每一块带行内标记（行内代码之类）的段落都会白落一条修订。
             return Built(emptyList(), null, RevisionBlocks.renderedLength(newText))
         }
 
@@ -1128,6 +1142,63 @@ object TextEditPlanner {
             ),
             renderedLength = RevisionBlocks.renderedLength(newText),
         )
+    }
+
+    /**
+     * 这一段的行内结构是不是**已经就是**卡片要的那样（文字没改时才问）。
+     *
+     * 只比「这次带没带结构」不够：卡片跨块改字时每一块都带着自己的结构（行内代码之类），
+     * 一字没改的段落会因此白落一条内容相同的修订，id 空转、清单里多一条空条目。
+     *
+     * 两边的坐标系都先换到「这一段」：卡片那份相对**扩张区间**起点记（`relStart`），
+     * 宿主给的那份相对段首记。问不到现在的结构（老宿主 / 取不到）时退回老口径：
+     * 只有「这次也没写结构」才当没改——写一条空结构会把正文里现有的行内元素删掉。
+     */
+    private fun spansAlreadyThere(
+        segSpans: List<InlineMarkup.StyleSpan>?,
+        seg: Segment,
+        relStart: Int,
+        currentSpansOf: ((from: Int, to: Int) -> List<InlineMarkup.StyleSpan>?)?,
+    ): Boolean {
+        // 这次没带结构信息（老路径）：不碰结构，照旧当「没改」。
+        if (segSpans == null) return true
+        val current = currentSpansOf?.invoke(seg.start, seg.endExclusive)
+        if (current == null) return segSpans.isEmpty()
+        val want = segSpans.map {
+            InlineMarkup.StyleSpan(it.start - relStart, it.endExclusive - relStart, it.sig)
+        }
+        if (want == current) return true
+        val len = maxOf(
+            want.maxOfOrNull { it.endExclusive } ?: 0,
+            current.maxOfOrNull { it.endExclusive } ?: 0,
+        )
+        for (i in 0 until len) {
+            if (!sameSigsAt(want, current, i)) return false
+        }
+        return true
+    }
+
+    /** 第 [i] 个字符上两边的行内元素是不是同一批（区间怎么切、属性怎么排都不看，只看签名）。 */
+    private fun sameSigsAt(
+        a: List<InlineMarkup.StyleSpan>,
+        b: List<InlineMarkup.StyleSpan>,
+        i: Int,
+    ): Boolean {
+        val sa = sigsAt(a, i)
+        if (sa.isEmpty()) return sigsAt(b, i).isEmpty()
+        val sb = sigsAt(b, i)
+        if (sa.size != sb.size) return false
+        // 同名标签可以套两层（`<code><code>`），所以按出现次数比，不能只看「b 里有没有」。
+        return sa.groupingBy { it }.eachCount() == sb.groupingBy { it }.eachCount()
+    }
+
+    private fun sigsAt(
+        spans: List<InlineMarkup.StyleSpan>,
+        i: Int,
+    ): List<InlineMarkup.StyleSig> {
+        val out = ArrayList<InlineMarkup.StyleSig>(2)
+        for (sp in spans) if (i >= sp.start && i < sp.endExclusive) out.add(sp.sig)
+        return out
     }
 
     /**

@@ -12,8 +12,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.LocalTextStyle
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -27,16 +25,10 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.text.TextMeasurer
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.rememberTextMeasurer
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Constraints
-import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import orilumn.reader.engine.skia.NoteTextLayout
+import orilumn.reader.engine.skia.NoteTextSpec
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.max
@@ -67,7 +59,7 @@ import orilumn.reader.engine.skia.PageImage
  *   不跟批注框的描边 / 底色 / 同色字三个开关走。
  *
  * @property annotationId 这条批注属于哪条标注（点它 = 回去改这句话）。
- * @property text 批注正文（完整文本，超出可用行数由 Text 自己省略）。
+ * @property text 批注正文（完整文本，超出可用行数由引擎截断并补省略号）。
  * @property leftPx/topPx 页面坐标（屏幕像素）；小图标形态下是图标左上角。
  * @property widthPx 文字框宽度（像素；整句放得下时是整句宽 + 两侧内缩，否则是可用宽）；小图标形态下是椭圆直径。
  * @property maxLines 文字框实际要用几行（1 起，已按「整句优先」与空白高度取小）；小图标形态恒为 1。
@@ -384,7 +376,7 @@ internal data class NoteTextFit(
  * 旁注文字的尺寸来源：整句要多宽、给定宽高下能读几个字，都问它。
  *
  * 默认实现是粗估（[EstimatedNoteTextSizer]，纯函数，单测直接用）；UI 层换成
- * **与绘制同一套 Compose 文字测量**（[rememberNoteTextSizer]）。粗估哪怕只比真实排版
+ * **与绘制同一个自研断行引擎**（[rememberNoteTextSizer]）。粗估哪怕只比真实排版
  * 窄一点点，摆位时也会判成「整句放得下」、画出来却被省略号截掉——真机上就是
  * 「整页都是空白，批注却折成两个字」这种不该出现的折叠。
  */
@@ -417,12 +409,12 @@ internal object EstimatedNoteTextSizer : NoteTextSizer {
  * 文字测量缓存：同一句话、同一字号、同一宽度反复问，只真量第一次。
  *
  * 为什么必须有：布点会给一条批注枚举几十个候选位置，每个候选都问一遍「整句多宽」
- * 「这么宽能放几个字」。实测一页 10 条批注会问 3886 次，而 Compose 的 `TextMeasurer`
- * 默认只缓存 8 条，等于每次都真排版，一页就要 2～4 秒。
+ * 「这么宽能放几个字」。实测一页 10 条批注会问 3886 次，而 Compose 的文字测量默认只缓存
+ * 少数几条，等于每次都真排版，一页就要 2～4 秒。
  *
  * 缓存键只放**测量真正依赖的东西**：文字、字号位模式、宽度位模式、行数上限。
  * 键按浮点原样取，不按整数取整，避免两个相邻宽度被并成一个而改变折行结果；
- * `ComposeNoteTextSizer.fit` 本来就把宽度取整后再量，所以同一整数宽度的重复询问照样命中。
+ * `EngineNoteTextSizer.fit` 本来就把宽度取整后再量，所以同一整数宽度的重复询问照样命中。
  * 条目超上限就整体清空，不做 LRU——清空是 O(1)，
  * 而且纯函数重算一遍也还是同一个值。
  */
@@ -854,7 +846,7 @@ internal data class NoteMetrics(val style: NoteStyle) {
     /** 旁注行高：旁注自己排自己的，与正文行高无关。 */
     val lineH: Float get() = em * style.lineHeightRatio
 
-    /** 左侧内缩（[NoteBubbles] 里 Text 的左 padding）；右侧默认相同，句末标点见 [rightPadFor]。 */
+    /** 左侧内缩（绘制时文本块的左 padding）；右侧默认相同，句末标点见 [rightPadFor]。 */
     val padX: Float get() = em * style.padEm
 
     /** 默认两侧内缩合计；非对称内缩用 `padX + rightPadFor(text)`。 */
@@ -7324,33 +7316,19 @@ private fun onSegment(ax: Float, ay: Float, bx: Float, by: Float, px: Float, py:
         py >= min(ay, by) - 0.01f && py <= max(ay, by) + 0.01f
 
 /**
- * 旁注的实测尺子：与 [NoteBubbles] 里那条 `Text` 用同一套 Compose 文字测量。
+ * 旁注的实测尺子：**与绘制同一个自研断行引擎**（[NoteTextLayout]）。
  *
  * 为什么要实测：粗估（[EstimatedNoteTextSizer]）按「中文一个字宽、西文 0.55」累加，
- * 而真实排版还有字距、字形进位的取整。差个一两像素时，摆位按粗估判成「整句放得下」，
- * 画出来却正好差半个字，`Text` 就补一个省略号——读者看到的是「整页空白，批注却折成两个字」。
- * 这里量的是绘制真正用的字号 / 行高 / 基础样式，量出来的宽就是 `Text` 需要的宽。
+ * 而真实排版还有字距、混排间距、字形进位的取整。差个一两像素时，摆位按粗估判成
+ * 「整句放得下」，画出来却正好差半个字、被省略号截掉——读者看到的是「整页空白，
+ * 批注却折成两个字」。
+ *
+ * 量画的同源在这里是**同一个函数**而不只是「同一种算法」：布点问 [NoteTextLayout.breakText]，
+ * 覆盖层画 [NoteTextLayout.drawLines]，两者共用 [NoteTextSpec] 里的同一个断行器。
  */
-private class ComposeNoteTextSizer(
-    private val measurer: TextMeasurer,
-    private val density: Density,
-    private val baseStyle: TextStyle,
-) : NoteTextSizer {
-    override fun naturalWidth(text: String, fontPx: Float): Float {
-        if (text.isEmpty() || fontPx <= 0f) return 0f
-        // 多段按最长的一段量：`\n` 是强制换行，不是更宽。
-        // `size.width` 已是向上取整的整数宽，再留 1px 给绘制侧「框宽 / 内缩各自取整」的损耗。
-        return text.split('\n').maxOf { paragraph ->
-            if (paragraph.isEmpty()) 0f else measurer.measure(
-                text = paragraph,
-                style = styleFor(fontPx),
-                overflow = TextOverflow.Clip,
-                softWrap = false,
-                maxLines = 1,
-                constraints = Constraints(),
-            ).size.width.toFloat() + 1f
-        }
-    }
+private class EngineNoteTextSizer(private val spec: NoteTextSpec) : NoteTextSizer {
+    override fun naturalWidth(text: String, fontPx: Float): Float =
+        NoteTextLayout.naturalWidth(spec, text, fontPx)
 
     override fun fit(text: String, fontPx: Float, widthPx: Float, maxLines: Int): NoteTextFit {
         val total = text.count { it != '\n' }
@@ -7358,63 +7336,36 @@ private class ComposeNoteTextSizer(
         if (fontPx <= 0f || widthPx <= 0f || maxLines < 1) {
             return NoteTextFit(lines = Int.MAX_VALUE, shownChars = 0, totalChars = total)
         }
-        val layout = measurer.measure(
+        // 绘制侧拿到的行宽是整数像素，这里同样按整数宽排，抹掉「差半像素」的假放得下。
+        val broken = NoteTextLayout.breakText(
+            spec = spec,
             text = text,
-            style = styleFor(fontPx),
-            overflow = TextOverflow.Ellipsis,
-            softWrap = true,
+            fontPx = fontPx,
+            lineHeightRatio = NOTE_BUBBLE_LINE_RATIO,
+            widthPx = widthPx.roundToInt(),
             maxLines = maxLines,
-            // 绘制侧拿到的约束是整数像素，这里同样按整数宽度量，抹掉「差半像素」的假放得下。
-            constraints = Constraints(maxWidth = widthPx.toInt().coerceAtLeast(1)),
         )
-        val end = layout.getLineEnd(layout.lineCount - 1, visibleEnd = true)
-        val shown = if (end <= 0) {
-            0
-        } else {
-            text.take(end.coerceAtMost(text.length)).count { it != '\n' }
-        }
-        return NoteTextFit(lines = layout.lineCount, shownChars = shown, totalChars = total)
+        // `lines` 给**不限行数**的自然行数（不是被 maxLines 截过的）：调用方要拿它判
+        // 「整句放得下吗」，缓存也能跨行数上限复用同一结果。
+        return NoteTextFit(
+            lines = broken.naturalLineCount,
+            shownChars = broken.shownChars,
+            totalChars = total,
+        )
     }
-
-    private fun styleFor(fontPx: Float): TextStyle = baseStyle.merge(
-        TextStyle(
-            fontSize = with(density) { fontPx.toSp() },
-            lineHeight = with(density) { (fontPx * NOTE_BUBBLE_LINE_RATIO).toSp() },
-        ),
-    )
 }
 
 /**
  * 一页取一次实测尺子：同一套字号 / 字体规则下测量结果稳定，不必每条批注重建。
  *
- * @param fontFamily 批注字体（`null` = 不覆盖，沿用基础样式）。**必须**与 [NoteBubbles]
- *   里那条 `Text` 用同一个族：量宽和画字一旦不是同一套字形，摆位判「整句放得下」而画出来多折一行。
- * @param fontWeight 批注字重（`null` = 不写字重，跟随字体族默认）；桌面系统族靠它选字形面，
- *   所以尺子也必须带上，否则量宽用常规面、画字用粗面，差半像素就会多折一行。
+ * @param spec 批注的字族 / 字重 / 字间距 / 混排间距（**必须**与覆盖层绘制用同一个实例：
+ *   量宽和画字一旦不是同一套字形与字距，摆位判「整句放得下」而画出来多折一行）。
+ * @param poolEpoch 共用字体池代次（[NoteFontPool]）：池换代即重建，否则尺子还在用
+ *   回退字形的度量——族名没变，但设备上能解析到的字形面变了。
  */
 @Composable
-internal fun rememberNoteTextSizer(
-    fontFamily: FontFamily? = null,
-    fontWeight: FontWeight? = null,
-): NoteTextSizer {
-    val measurer = rememberTextMeasurer()
-    val density = LocalDensity.current
-    val localStyle = LocalTextStyle.current
-    val baseStyle = remember(localStyle, fontFamily, fontWeight) {
-        localStyle.withNoteFont(fontFamily, fontWeight)
-    }
-    return remember(measurer, density, baseStyle) {
-        CachingNoteTextSizer(ComposeNoteTextSizer(measurer, density, baseStyle))
-    }
-}
-
-/** 把批注字族 / 字重叠到基础样式上：读者没配的那一项不动（不发声明 = 跟随原样）。 */
-private fun TextStyle.withNoteFont(fontFamily: FontFamily?, fontWeight: FontWeight?): TextStyle {
-    var style = this
-    if (fontFamily != null) style = style.merge(TextStyle(fontFamily = fontFamily))
-    if (fontWeight != null) style = style.merge(TextStyle(fontWeight = fontWeight))
-    return style
-}
+internal fun rememberNoteTextSizer(spec: NoteTextSpec, poolEpoch: Long = 0L): NoteTextSizer =
+    remember(spec, poolEpoch) { CachingNoteTextSizer(EngineNoteTextSizer(spec)) }
 
 /**
  * 旁注的**命中层**（不含像素）：批注的视觉已经画进页覆盖层栅格（见 `PageOverlay.kt`），

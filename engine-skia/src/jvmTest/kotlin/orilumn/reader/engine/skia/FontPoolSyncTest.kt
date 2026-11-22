@@ -1,8 +1,12 @@
 package orilumn.reader.engine.skia
 
+import kotlinx.coroutines.runBlocking
 import orilumn.reader.data.font.FontFace
+import orilumn.reader.data.settings.ReaderSettings
 import orilumn.reader.engine.css.FontDemand
+import orilumn.reader.engine.text.TypographicProfile
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -103,6 +107,36 @@ class FontPoolSyncTest {
             listOf(system, imported), setOf("更纱终端书呆黑体-简"), FontDemand.EMPTY, emptyList(), sizes,
         )
         assertEquals(listOf(2L), sel.selected.map { it.id })
+    }
+
+    @Test
+    fun noteFontExtraFamilyEntersPoolEvenWhenNotInProfileSlots() = runBlocking {
+        // 旁注字体只作用于覆盖层，不在 profile 的五个槽里。若只按槽位族选面，读者挑的批注字体
+        // 永远进不了池 ⇒ 引擎解析不到、画出来是平台默认字体（平板实测的「批注字体不对」）。
+        val file = ttf ?: return@runBlocking
+        val face = importedFace(file)
+        val sizes: (String) -> Long? = { p -> File(p).takeIf { it.isFile }?.length() }
+        val profile = TypographicProfile.build(ReaderSettings())
+        suspend fun sync(extra: Map<String, Int>) = FontPoolSync.syncPool(
+            profile = profile,
+            demand = FontDemand.EMPTY,
+            bookEntries = emptyList(),
+            lastSig = null,
+            loadFaces = { listOf(face) },
+            fileSize = sizes,
+            fontBytes = { id -> if (id == face.id) file.readBytes() else null },
+            extraFamilies = extra,
+            logTag = "test",
+        )
+        SkiaFontPool.setEmbedded(emptyList())
+        try {
+            // 没有旁注需求：池里没有可装的面（空池也不变）。
+            assertFalse(sync(emptyMap()).changed)
+            // 带上旁注族：它必须被选中装池。
+            assertTrue(sync(mapOf("PoolSyncFam" to 500)).changed)
+        } finally {
+            SkiaFontPool.setEmbedded(emptyList())
+        }
     }
 
     @Test

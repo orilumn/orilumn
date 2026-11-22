@@ -127,6 +127,14 @@ object FontPoolSync {
         fileSize: (String) -> Long?,
         fontBytes: (Long) -> ByteArray?,
         systemSerif: SkiaFontPool.EmbeddedFont? = null,
+        /**
+         * **级联之外**仍要保证有面可取的族（族名 → 字重）。
+         *
+         * 旁注字体就属于这一类：它只作用于覆盖层（不进级联、不影响正文版式），但字形同样
+         * 只从共用池取——不进池，引擎解析不到那个族，画出来就是平台默认字体。
+         * 权重口径与槽位字重锚点相同：只决定「池里装哪几档面」，不改级联结论。
+         */
+        extraFamilies: Map<String, Int> = emptyMap(),
         logTag: String = "Orilumn.Font",
     ): PoolSyncResult {
         // 字重锚点**不再**下发给渲染层：级联（UI tier 44）已经决定了请求字重，
@@ -135,13 +143,13 @@ object FontPoolSync {
         val faces = loadFaces() ?: return PoolSyncResult(false, lastSig)
         // 槽族：正文/标题（按书私有）+ 代码/衬线/无衬线（全局）。通用族替换的族必须进池，
         // 否则读者选的「衬线/无衬线字体」在设备上找不到面，`serif` 只剩平台兜底。
-        val slotFams = setOf(profile.fontBody, profile.fontTitle, profile.fontCode, profile.fontSerif, profile.fontSans)
-            .map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+        val slotFams = (setOf(profile.fontBody, profile.fontTitle, profile.fontCode, profile.fontSerif, profile.fontSans)
+            .map { it.trim() }.filter { it.isNotEmpty() }.toSet() + extraFamilies.keys)
         val sel = select(
             faces, slotFams, demand, bookEntries, fileSize,
             // 只有正文 / 标题两个按书私有的槽有用户字重；全局字体槽只挑字族。
             anchorsBySlot = profile.fontWeightAnchorsBySlot,
-            anchors = profile.fontWeightAnchors,
+            anchors = profile.fontWeightAnchors + extraFamilies,
         )
         if (sel.sig == lastSig) return PoolSyncResult(false, lastSig)
         return poolWriteMutex.withLock {

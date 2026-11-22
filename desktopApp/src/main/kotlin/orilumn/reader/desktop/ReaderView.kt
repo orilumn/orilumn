@@ -408,6 +408,13 @@ fun ReaderView(
             // 桌面两条回调合流，只能在此比对。原先用 withoutLight()（只含亮度族）⇒ 切纯 UI
             // 开关会白跑一次本章全量重排 + 整书重排请求 + 两次落位推送。
             if (settings.withoutNonLayout() == layoutSnapshot.withoutNonLayout()) {
+                // 旁注字体（纯 UI 项）同样要从共用池取面：池不跟进就画成回退字形。
+                // 它不重排，所以只能在这里补一次装池（池真变时覆盖层按代次自己重画）。
+                if (settings.noteFont != appliedLayout.noteFont ||
+                    settings.noteFontWeight != appliedLayout.noteFontWeight
+                ) {
+                    desktopHost?.syncNoteFontPool(settings)
+                }
                 appliedLayout = settings
                 return@LaunchedEffect
             }
@@ -485,7 +492,6 @@ fun ReaderView(
             flipSettleScale = FlipSettleScale,
             annotationsEpoch = annotationsEpoch,
             bookmarksEpoch = bookmarksEpoch,
-            fontEntries = fontEntries,
         )
 
         // 面板常驻组合、经 visible 驱动：关闭走面板内部退场动画（滑出+遮罩淡出后卸载）；

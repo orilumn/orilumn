@@ -425,19 +425,26 @@ class DesktopShelfStore(root: File) : ShelfRepository, orilumn.reader.data.revis
 
     fun loadPref(key: String, default: String): String = runCatching {
         if (!prefsFile.isFile) return default
-        val props = java.util.Properties().also { p ->
-            prefsFile.inputStream().use { p.load(it) }
+        // 与 savePref 共用同一把锁：读到写了一半的文件会整份偏好丢失（Properties.load 直接抛）。
+        synchronized(prefsFile) {
+            val props = java.util.Properties().also { p ->
+                prefsFile.inputStream().use { p.load(it) }
+            }
+            props.getProperty(key)?.takeIf { it.isNotEmpty() } ?: default
         }
-        props.getProperty(key)?.takeIf { it.isNotEmpty() } ?: default
     }.getOrDefault(default)
 
     fun savePref(key: String, value: String) {
+        // 多个入口会写同一个 properties 文件（设置/主题在 IO 线程，窗口几何在防抖协程与关窗时），
+        // 读-改-写必须互斥，否则并发写会截断彼此的内容。
         runCatching {
-            val props = java.util.Properties()
-            if (prefsFile.isFile) prefsFile.inputStream().use { props.load(it) }
-            props.setProperty(key, value)
-            prefsFile.parentFile.mkdirs()
-            prefsFile.outputStream().use { props.store(it, null) }
+            synchronized(prefsFile) {
+                val props = java.util.Properties()
+                if (prefsFile.isFile) prefsFile.inputStream().use { props.load(it) }
+                props.setProperty(key, value)
+                prefsFile.parentFile.mkdirs()
+                prefsFile.outputStream().use { props.store(it, null) }
+            }
         }
     }
 
